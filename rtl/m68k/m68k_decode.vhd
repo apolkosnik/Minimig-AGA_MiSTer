@@ -59,6 +59,7 @@ entity M68K_Decode is
     nextpass        : in  bit1;
     micro_state     : in  micro_states;
     state           : in  word( 1 downto 0);
+    addrvalue       : in  bit1;
     decodeOPC       : in  bit1;
     setexecOPC      : in  bit1;
     Flags           : in  word( 7 downto 0); -- ...XNZVC
@@ -100,12 +101,14 @@ entity M68K_Decode is
     o_set_exec               : out r_Opc;
     o_setnextpass            : out bit1;
     o_setstate               : out word(1 downto 0);
+    o_setaddrvalue           : out bit1;
     o_getbrief               : out bit1;
     o_setstackaddr           : out bit1;
     o_set_Suppress_Base      : out bit1;
     o_set_PCbase             : out bit1;
     o_set_direct_data        : out bit1;
     o_datatype               : out word(1 downto 0);
+    o_set_datatype           : out word(1 downto 0);
     o_set_rot_cnt            : out word(5 downto 0);
     o_set_rot_bits           : out word(1 downto 0);
     o_set_stop               : out bit1;
@@ -284,7 +287,7 @@ begin
   end process;
 
   process (cpu, opcode, rot_cnt, decodeOPC, setexecOPC, SVmode,
-           nextpass, micro_state, c_out, OP1out, OP2out, exec, state, direct_data, movem_run, brief,
+           nextpass, micro_state, c_out, OP1out, OP2out, exec, state, addrvalue, direct_data, movem_run, brief,
            long_done, stop, Flags, trap_interrupt, trap_trace, Z_error, set_V_Flag, set_Cmp2_Flags, last_data_read, p(1), p(4) )
     constant i : integer := 1;
     constant o : integer := 2;
@@ -790,7 +793,7 @@ begin
                   p(o).set_exec.opcMOVESR <= '1';
                   p(o).datatype <= "01";
                   p(o).write_back <= '1'; -- 68000 also reads first
-                  if cpu(0) = '1' and state = "10" then
+                  if cpu(0) = '1' and state = "10" and addrvalue = '0' then
                     p(o).skipFetch <= '1';
                   end if;
                   if opcode(5 downto 4) = "00" then
@@ -831,7 +834,7 @@ begin
                 p(o).ea_build_now <= '1';
                 p(o).write_back <= '1';
                 p(o).set_exec.opcand <= '1';
-                if cpu(0) = '1' and state = "10" then
+                if cpu(0) = '1' and state = "10" and addrvalue = '0' then
                   p(o).skipFetch <= '1';
                 end if;
                 if setexecOPC = '1' then
@@ -846,7 +849,7 @@ begin
               if opcode(7 downto 6) = "11" then --move to CCR
                 p(o).datatype <= "01";
                 p(o).source_lowbits <= '1';
-                if (decodeOPC = '1' and opcode(5 downto 4) = "00") or state = "10" or direct_data = '1' then
+                if (decodeOPC = '1' and opcode(5 downto 4) = "00") or (state = "10" and addrvalue = '0') or direct_data = '1' then
                   p(o).set.to_CCR <= '1';
                 end if;
               else --neg
@@ -867,11 +870,11 @@ begin
                   p(o).ea_build_now <= '1';
                   p(o).datatype <= "01";
                   p(o).source_lowbits <= '1';
-                  if (decodeOPC = '1' and opcode(5 downto 4) = "00") or state = "10" or direct_data = '1' then
+                  if (decodeOPC = '1' and opcode(5 downto 4) = "00") or (state = "10" and addrvalue = '0') or direct_data = '1' then
                     p(o).set.to_SR <= '1';
                     p(o).set.to_CCR <= '1';
                   end if;
-                  if exec.to_SR = '1' or (decodeOPC = '1' and opcode(5 downto 4) = "00") or state = "10" or direct_data = '1' then
+                  if exec.to_SR = '1' or (decodeOPC = '1' and opcode(5 downto 4) = "00") or (state = "10" and addrvalue = '0') or direct_data = '1' then
                     p(o).setstate <= "01";
                   end if;
                 else
@@ -914,7 +917,7 @@ begin
                     p(o).movem_presub <= '1';
                     p(o).set.subidx <= '1';
                   end if;
-                  if state = "10" then
+                  if state = "10" and addrvalue = '0' then
                     p(o).set.Regwrena <= '1';
                     p(o).set.opcMOVE <= '1';
                   end if;
@@ -1305,7 +1308,7 @@ begin
             p(o).ea_build_now <= '1';
             p(o).write_back <= '1';
             p(o).set_exec.opcScc <= '1';
-            if cpu(0) = '1' and state = "10" then
+            if cpu(0) = '1' and state = "10" and addrvalue = '0' then
               p(o).skipFetch <= '1';
             end if;
             if opcode(5 downto 4) = "00" then
@@ -1433,6 +1436,9 @@ begin
                 p(o).setstate <= "10";
                 p(o).set.update_ld <= '1';
                 p(o).set.presub <= '1';
+                if opcode(2 downto 0) = "111" then
+                  p(o).set.use_SP <= '1';
+                end if;
                 p(o).next_micro_state <= pack1;
                 p(o).dest_areg <= '1'; --???
               end if;
@@ -1821,6 +1827,7 @@ begin
             p(o).setnextpass <= '1';
           else
             p(o).setstate <= "10";
+            p(o).setaddrvalue <='1';
             p(o).set.longaktion <= '1';
             p(o).next_micro_state <= ld_229_3;
           end if;
@@ -1829,6 +1836,7 @@ begin
       when ld_229_2 => -- (bd,An,Xn)=>, --(bd,PC,Xn)=>
         p(o).setdisp <= '1'; -- add Index
         p(o).setstate <= "10";
+        p(o).setaddrvalue <='1';
         p(o).set.longaktion <= '1';
         p(o).next_micro_state <= ld_229_3;
 
@@ -2431,6 +2439,7 @@ begin
   o_set_exec               <= p(4).set_exec;
   o_setnextpass            <= p(4).setnextpass;
   o_setstate               <= p(4).setstate;
+  o_setaddrvalue           <= p(4).setaddrvalue;
 
   o_getbrief               <= p(4).getbrief;
 

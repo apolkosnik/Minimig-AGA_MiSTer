@@ -342,7 +342,7 @@ begin
   ------------------------------------------------------------------------------
   --ALU
   ------------------------------------------------------------------------------
-  process (exe_opcode, OP1out, OP2out, pack_a, cpu, exec, add_result, bcd_pur, bcd_a, bcd_kor, halve_carry, c_in)
+  process (exe_opcode, OP1out, OP2out, cpu, exec, add_result, bcd_pur, bcd_a, bcd_kor, halve_carry, c_in)
   begin
     if exe_opcode(7 downto 6) = "01" then
       -- PACK
