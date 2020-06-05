@@ -108,7 +108,6 @@ entity M68K_Decode is
     o_set_PCbase             : out bit1;
     o_set_direct_data        : out bit1;
     o_datatype               : out word(1 downto 0);
-    o_set_datatype           : out word(1 downto 0);
     o_set_rot_cnt            : out word(5 downto 0);
     o_set_rot_bits           : out word(1 downto 0);
     o_set_stop               : out bit1;
@@ -229,6 +228,7 @@ begin
       p(o).setstate <= "10";
     end if;
 
+    --if p(e).setstate(1) = '1' and p(e).set_datatype(1) = '1' then -- was set_datatype -- this is how tg68k does this
     if p(e).setstate(1) = '1' and p(e).datatype(1) = '1' then -- was set_datatype
       p(o).set.longaktion <= '1';
     end if;
@@ -720,8 +720,8 @@ begin
         end if;
       -- 0100 ----------------------------------------------------------------------------
       when "0100" => --rts_group
-        if opcode(8) = '1' then --lea
-          if opcode(6) = '1' then --lea
+        if opcode(8) = '1' then --lea, extb.l, chk
+          if opcode(6) = '1' then --lea, extb.l
             if opcode(7) = '1' then
               p(o).source_lowbits <= '1';
               -- if opcode(5 downto 3) = "000" and opcode(10) = '0' then --ext

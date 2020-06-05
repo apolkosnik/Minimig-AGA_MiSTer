@@ -209,6 +209,7 @@ architecture logic of M68K_Core is
   signal byte                   : bit1;
   signal long_start             : bit1;
   signal long_start_alu         : bit1;
+  signal non_aligned            : bit1;
   signal long_done              : bit1;
   signal memmask                : word(5 downto 0);
   signal set_memmask            : word(5 downto 0);
@@ -327,9 +328,11 @@ begin
     exe_condition        => exe_condition,    --: in std_logic;
     exec_tas             => exec_tas,         --: in std_logic;
     long_start           => long_start_alu,   --: in bit;
+    non_aligned          => non_aligned,      --: in bit;
     movem_presub         => movem_presub,     --: in bit;
     set_stop             => set_stop,         --: in bit;
     Z_error              => Z_error,          --: in bit;
+
     rot_bits             => rot_bits,         --: in word(1 downto 0);
     exec                 => exec,             --: in bit_vector(lastOpcBit downto 0);
     OP1out               => OP1out,           --: in word(31 downto 0);
@@ -359,6 +362,15 @@ begin
   );
 
   long_start_alu <= (not memmaskmux(3));
+  --long_start_alu <= to_bit(NOT memmaskmux(3)); --from tg68k
+  --execOPC_ALU <= execOPC OR exec.alu_exec; --from tg68k
+  process (memmaskmux)
+  begin
+    non_aligned <= '0';
+    if (memmaskmux(5 downto 4) = "01") or (memmaskmux(5 downto 4) = "10") then
+      non_aligned <= '1';
+    end if;
+  end process;
 
   -----------------------------------------------------------------------------
   -- Bus control
@@ -589,27 +601,19 @@ begin
   begin
     if exec.movem_action = '1' then
       rf_dest_addr <= rf_source_addrd;
-    elsif set.briefext = '1' then
+    elsif set.briefext = '1' then -- same as dest_LDRHbits on tg68k
       rf_dest_addr <= brief(15 downto 12);
-    elsif set.brieflow = '1' then
-      rf_dest_addr <= brief( 3 downto  0);
+    elsif set.brieflow = '1' then -- same as dest_LDRLbits on tg68k
+      -- TODO: testing cas2
+      rf_dest_addr <= '0' & brief( 2 downto  0);
+      --rf_dest_addr <= brief( 3 downto  0);
     elsif set.get_bfoffset = '1' then
-
-      --rf_dest_addr <= sndOPC(9 downto 6);
-      -- untested from tg68k
-      if opcode(15 downto 12) = "1110" then
-        rf_dest_addr <= '0' & sndOPC(8 downto 6);
-        else
-        rf_dest_addr <= sndOPC(9 downto 6);
-      end if;
-
+      rf_dest_addr <= '0' & sndOPC(8 downto 6); -- from tg68k
     elsif dest_2ndHbits = '1' then
-      -- untested from tg68k
+      --rf_dest_addr <= dest_LDRareg & sndOPC(14 downto 12); -- from tg68k
       rf_dest_addr <= '0' & sndOPC(14 downto 12);
-
-    elsif set.write_reminder = '1' or dest_2ndLbits = '1'then
-      -- untested from tg68k
-      rf_dest_addr <= '0' & sndOPC(2 downto 0);
+    elsif set.write_reminder = '1' or dest_2ndLbits = '1' then
+      rf_dest_addr <= '0' & sndOPC(2 downto 0);       -- from tg68k
 
     elsif setstackaddr = '1' then
       rf_dest_addr <= "1111";
@@ -636,17 +640,14 @@ begin
         rf_source_addr <= movem_regaddr;
       end if;
     elsif source_2ndLbits = '1' then
-      -- untested from tg68k
-      rf_source_addr <= '0' & sndOPC( 2 downto 0);
-
-      elsif source_2ndMbits = '1' then
-      rf_source_addr <= sndOPC( 9 downto 6);
-
+      rf_source_addr <= '0' & sndOPC(2 downto 0);
     elsif source_2ndHbits = '1' then
-      -- untested from tg68k
       rf_source_addr <= '0' & sndOPC(14 downto 12);
+    elsif source_2ndMbits = '1' then
+      rf_source_addr <= '0' & sndOPC(8 downto 6);
     elsif source_briefMbits = '1' then
-      rf_source_addr <= brief( 9 downto 6);
+      --rf_source_addr <= brief( 9 downto 6);
+      rf_source_addr <= '0' & brief(8 downto 6);
     elsif source_lowbits = '1' then
       rf_source_addr <= source_areg & opcode(2 downto 0);
     elsif exec.linksp = '1' then
@@ -706,7 +707,7 @@ begin
         OP2out(3) <= '0';
       end if;
       OP2out(15 downto 4) <= (others => '0');
-    elsif exe_datatype = "10" then
+    elsif exe_datatype = "10" and exec.opcEXT = '0' then -- TODO: test
       OP2out(31 downto 16) <= reg_QB(31 downto 16);
     end if;
   end process;
@@ -1049,7 +1050,8 @@ begin
             end if;
           end if;
 
-          if (long_done='0' and state(1)='1') or movem_presub='0' THEN
+          --if (long_done='0' and state(1)='1') or movem_presub='0' THEN
+          if ((memread(0) = '1') and state(1) = '1') or movem_presub = '0' then -- fix for unaligned movem mikej
             memaddr <= addr;
           end if;
 

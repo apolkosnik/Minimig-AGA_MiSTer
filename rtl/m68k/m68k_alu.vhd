@@ -56,6 +56,7 @@ entity M68K_ALU is
     exe_condition     : in  bit1;
     exec_tas          : in  bit1;
     long_start        : in  bit1;
+    non_aligned       : in  bit1;
     movem_presub      : in  bit1;
     set_stop          : in  bit1;
     Z_error           : in  bit1;
@@ -224,19 +225,19 @@ begin
       OP1in(7 downto 0) <= bcd_a(7 downto 0);
     elsif exec.opcMULU= '1' then
       if exec.write_lowlong= '1' then
-      OP1in <= mulu_reg(31 downto 0);
+        OP1in <= mulu_reg(31 downto 0);
       else
-      OP1in <= mulu_reg(63 downto 32);
+        OP1in <= mulu_reg(63 downto 32);
       end if;
     elsif exec.opcDIVU= '1' then
       if exe_opcode(15) = '1' then
-      OP1in <= result_div(47 downto 32) & result_div(15 downto 0);
+        OP1in <= result_div(47 downto 32) & result_div(15 downto 0);
       else --64bit
-      if exec.write_reminder = '1' then
-        OP1in <= result_div(63 downto 32);
-      else
-        OP1in <= result_div(31 downto 0);
-      end if;
+        if exec.write_reminder = '1' then
+          OP1in <= result_div(63 downto 32);
+        else
+          OP1in <= result_div(31 downto 0);
+        end if;
       end if;
     elsif exec.opcOR= '1' then
       OP1in <= OP2out OR OP1out;
@@ -261,12 +262,12 @@ begin
       OP1in(15 downto 8) <= "00000000";
       OP1in( 7 downto 0) <= Flags;
     elsif exec.opcMOVESR= '1' then
-      OP1in(15 downto 8) <= FlagsSR;
-      OP1in( 7 downto 0) <= Flags;
-      -- possible byte move fix
-      --IF exe_datatype="00" THEN
-      --OP1in(15 downto 8) <= "00000000";
-
+      OP1in(7 downto 0) <= Flags;
+      if exe_opcode(9) = '1' then
+        OP1in(15 downto 8) <= "00000000";
+      else
+        OP1in(15 downto 8) <= FlagsSR;
+      end if;
     elsif exec.opcPACK= '1' then
       OP1in(15 downto 0) <= pack_out;
     end if;
@@ -275,8 +276,8 @@ begin
   -----------------------------------------------------------------------------
   -- addsub
   -----------------------------------------------------------------------------
-  process (OP1out, OP2out, execOPC, datatype, Flags, long_start, movem_presub, exe_datatype, exec, addsub_a, addsub_b, opaddsub,
-           notaddsub_b, add_result, c_in, sndOPC, micro_state)
+  process (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype, exec, addsub_a, addsub_b, opaddsub,
+           notaddsub_b, add_result, c_in, sndOPC, micro_state, non_aligned)
   variable cas2 : bit1;
   begin
     -- override bodge. This may be a better way of doing cmp2 as well
@@ -288,9 +289,9 @@ begin
     addsub_a <= OP1out;
     if exec.get_bfoffset= '1' then
       if sndOPC(11) = '1' then
-      addsub_a <= OP1out(31) & OP1out(31) & OP1out(31) & OP1out(31 downto 3);
+        addsub_a <= OP1out(31) & OP1out(31) & OP1out(31) & OP1out(31 downto 3);
       else
-      addsub_a <= "000000000000000000000000000000" & sndOPC(10 downto 9);
+        addsub_a <= "000000000000000000000000000000" & sndOPC(10 downto 9);
       end if;
     end if;
 
@@ -303,22 +304,39 @@ begin
     c_in(0) <= '0';
     addsub_b <= OP2out;
     if execOPC = '0' and exec.OP2out_one= '0' and exec.get_bfoffset= '0' and cas2 = '0' then
-      if long_start = '0' and datatype = "00" and exec.use_SP= '0' then
-      addsub_b <= "00000000000000000000000000000001";
+      if long_start = '0' and exe_datatype = "00" and exec.use_SP= '0' then
+        addsub_b <= "00000000000000000000000000000001";
       elsif long_start = '0' and exe_datatype = "10" and (exec.presub OR exec.postadd OR movem_presub) = '1' then
-      if exec.movem_action= '1' then -- used for initial offset / aligned case
-        addsub_b <= "00000000000000000000000000000110";
+        if exec.movem_action= '1' then -- used for initial offset / aligned case
+          addsub_b <= "00000000000000000000000000000110";
+        else
+          addsub_b <= "00000000000000000000000000000100";
+        end if;
       else
-        addsub_b <= "00000000000000000000000000000100";
-      end if;
-      else
-      addsub_b <= "00000000000000000000000000000010";
+        addsub_b <= "00000000000000000000000000000010";
       end if;
     else
       if (exec.use_XZFlag= '1' and Flags(4) = '1') OR exec.opcCHK= '1' then
-      c_in(0) <= '1';
+        c_in(0) <= '1';
       end if;
       opaddsub <= exec.addsub;
+    end if;
+
+    -- patch for un-aligned movem --mikej
+    if (exec.movem_action = '1') then
+      if (movem_presub = '0') then -- up
+        if (non_aligned = '1') and (long_start = '0') then -- hold
+          addsub_b <= (others => '0');
+        end if;
+      else
+        if (non_aligned = '1') and (long_start = '0') then
+          if (exe_datatype = "10") then
+            addsub_b <= "00000000000000000000000000001000";
+          else
+            addsub_b <= "00000000000000000000000000000100";
+          end if;
+        end if;
+      end if;
     end if;
 
     if opaddsub = '0' OR long_start = '1' then --ADD
@@ -392,29 +410,29 @@ begin
   begin
     if rising_edge(clk) then
       if clkena_lw = '1' then
-      bchg <= '0';
-      bset <= '0';
-      case opcode(7 downto 6) IS
-        when "01" => --bchg
-        bchg <= '1';
-        when "11" => --bset
-        bset <= '1';
-        when others => NULL;
-      end case;
+        bchg <= '0';
+        bset <= '0';
+        case opcode(7 downto 6) IS
+          when "01" => --bchg
+            bchg <= '1';
+          when "11" => --bset
+            bset <= '1';
+          when others => NULL;
+        end case;
       end if;
     end if;
 
     if exe_opcode(8) = '0' then
       if exe_opcode(5 downto 4) = "00" then
-      bit_number <= sndOPC(4 downto 0);
+        bit_number <= sndOPC(4 downto 0);
       else
-      bit_number <= "00" & sndOPC(2 downto 0);
+        bit_number <= "00" & sndOPC(2 downto 0);
       end if;
     else
       if exe_opcode(5 downto 4) = "00" then
-      bit_number <= reg_QB(4 downto 0);
+        bit_number <= reg_QB(4 downto 0);
       else
-      bit_number <= "00" & reg_QB(2 downto 0);
+        bit_number <= "00" & reg_QB(2 downto 0);
       end if;
     end if;
 
