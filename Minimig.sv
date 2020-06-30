@@ -48,7 +48,8 @@ module emu
 	// b[1]: user button
 	// b[0]: osd button
 	output  [1:0] BUTTONS,
-	
+
+	input         CLK_AUDIO, // 24.576 MHz
 	output [15:0] AUDIO_L,
 	output [15:0] AUDIO_R,
 	output        AUDIO_S, // 1 - signed audio samples, 0 - unsigned
@@ -291,7 +292,8 @@ wire        ram_uds;
 wire [15:0] ram_din;
 wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
-wire        zram_sel  = |ram_addr[28:27];
+wire        zram_sel  = |ram_addr[28:26];
+wire        ramshared;
 
 cpu_wrapper cpu_wrapper
 (
@@ -324,7 +326,8 @@ cpu_wrapper cpu_wrapper
 	.ramdout      (ram_dout        ),
 	.ramdin       (ram_din         ),
 	.ramready     (ram_ready       ),
- 
+	.ramshared    (ramshared       ),
+
 	//custom CPU signals
 	.cpustate     (cpu_state       ),
 	.cacr         (cpu_cacr        ),
@@ -401,6 +404,7 @@ ddram_ctrl ram2
 	.cpustate     (cpu_state       ),
 	.cpuCS        (zram_sel&ram_cs ),
 	.cpuRD        (ram_dout2       ),
+	.ramshared    (ramshared       ),
 	.ramready     (ram_ready2      )
 );
 
@@ -524,16 +528,19 @@ reg ce_out = 0;
 always @(posedge CLK_VIDEO) begin
 	reg [3:0] div;
 	reg [3:0] add;
+	reg [1:0] fs_res;
 	reg old_vs;
 	
 	div <= div + add;
+	fs_res <= fs_res | res;
 
 	old_vs <= vs;
 	if(old_vs & ~vs) begin
+		fs_res <= 0;
 		div <= 0;
 		add <= 1; // 7MHz
-		if(res[0]) add <= 2; // 14MHz
-		if(res[1] | ~scandoubler) add <= 4; // 28MHz
+		if(fs_res[0]) add <= 2; // 14MHz
+		if(fs_res[1] | ~scandoubler) add <= 4; // 28MHz
 	end
 
 	ce_out <= div[3] & !div[2:0];
