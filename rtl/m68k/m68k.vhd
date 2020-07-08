@@ -767,7 +767,7 @@ begin
 
         if state = "10" then
           ea_data <= data_read;
-        elsif exec.get_2ndOPC = '1' or set_PCbase='1' then --TH cmpi (d16,PC) fix
+        elsif exec.get_2ndOPC = '1' then -- or set_PCbase='1' then --TH cmpi (d16,PC) fix
           ea_data <= addr;
         elsif exec.store_ea_data = '1' or (direct_data = '1' and state = "00") then
           ea_data <= last_data_read;

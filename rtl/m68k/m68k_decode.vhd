@@ -606,7 +606,11 @@ begin
                 p(o).set_exec.opcEor <= '1'; v_opcEor := '1';
               end if;
               if opcode(11 downto 9) = "110" then --CMPI
-                p(o).set_exec.opcCMP <= '1';
+                if opcode(5 downto 3) /= "111" OR opcode(2) = '0' then
+                  p(o).set_exec.opcCMP <= '1';
+                else
+                  p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                end if;
               end if;
 
               if opcode(7) = '0' and opcode(5 downto 0) = "111100" and (v_opcor or v_opcEor or v_opcand) = '1' then --SR
@@ -629,6 +633,7 @@ begin
               else
                 if decodeOPC = '1' then
                   p(o).next_micro_state <= andi;
+                  p(o).set.get_2ndOPC <='1';
                   p(o).set.ea_build <= '1';
                   p(o).set_direct_data <= '1';
                   if datatype = "10" then
@@ -1273,35 +1278,32 @@ begin
         --
       -- 0101 ----------------------------------------------------------------------------
       when "0101" => --subq, addq, trapxcc
-        if cpu(1) = '1' and (opcode(7 downto 1) = "1111101" or opcode(7 downto 0) = "11111100") then -- TRAPcc
-          if decodeOPC = '1' then
-            p(o).next_micro_state <= nop;
-            if (opcode(2) = '1') then
-               p(o).setstate <= "01"; -- idle
-            else
-              p(o).setstate <= "10"; -- read
-              if (opcode(0) = '1') then -- long
-                p(o).datatype <= "10"; -- long word
-              else
-                p(o).datatype <= "01"; -- word
-              end if;
-            end if;
-          end if;
-        --when trapcc1 => --trapcc
-        --if exe_condition = '0' then
-            --Regwrena_now <= '1';
-            --if c_out(1) = '1' then
-              --p(o).skipFetch <= '1';
-              --p(o).next_micro_state <= nop;
-              --p(o).TG68_PC_brw <= '1';
-            --end if;
-
-        elsif opcode(7 downto 6) = "11" then --dbcc
+        if opcode(7 downto 6) = "11" then --dbcc
           if opcode(5 downto 3) = "001" then --dbcc
             if decodeOPC = '1' then
               p(o).next_micro_state <= dbcc1;
               p(o).set.OP2out_one <= '1';
               p(o).data_is_source <= '1';
+            end if;
+          elsif opcode(5 downto 3) = "111" and (opcode(2 downto 1) = "01" or opcode(2 downto 0) = "100") then	--trapcc
+            if cpu(1) = '1' then							-- only 68020+
+              if opcode(2 downto 1) = "01" then
+                if decodeOPC = '1' then
+                  if opcode(0) = '1' then			--long
+                    p(o).set.longaktion <= '1';
+                  end if;
+                  p(o).next_micro_state <= nop;
+                end if;
+              else
+                if decodeOPC = '1' then
+                  p(o).setstate <= "01";
+                end if;
+              end if;
+              if exe_condition = '1' and decodeOPC = '0' then
+                p(o).set.trap_trapv <= '1'; p(o).trap_make <= '1';
+              end if;
+            else
+              p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
             end if;
           else --Scc
             p(o).datatype <= "00"; --Byte
