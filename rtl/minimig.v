@@ -233,8 +233,8 @@ module minimig
 	output  [1:0] res,
 
 	//audio
-	output [14:0] ldata,       // left DAC data
-	output [14:0] rdata,       // right DAC data
+	output [8:0] ldata,       // left DAC data
+	output [8:0] rdata,       // right DAC data
 	output  [1:0] aud_mix,
 
 	//user i/o

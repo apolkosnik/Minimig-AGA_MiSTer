@@ -422,8 +422,8 @@ wire        _ram_bhe;      // sram upper byte select
 wire        _ram_ble;      // sram lower byte select
 wire        _ram_we;       // sram write enable
 wire        _ram_oe;       // sram output enable
-wire [14:0] ldata;         // left DAC data
-wire [14:0] rdata;         // right DAC data
+wire [8:0] ldata;         // left DAC data
+wire [8:0] rdata;         // right DAC data
 wire        vs;
 wire        hs;
 wire  [1:0] ar;

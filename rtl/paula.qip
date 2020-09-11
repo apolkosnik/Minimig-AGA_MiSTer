@@ -4,6 +4,6 @@ set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) paula_i
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) paula_floppy.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) paula_floppy_fifo.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) paula_audio.v ]
-set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) paula_audio_volume.v ]
+set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) audio_sigmadelta.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) paula_audio_mixer.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) paula_audio_channel.v ]

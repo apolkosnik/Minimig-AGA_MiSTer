@@ -103,6 +103,10 @@
 //            - some noise shaping (filtering) added to the error feedback    //
 //              signal                                                        //
 //                                                                            //
+// OKK:                                                                       //
+// 2020-09-07 - fixed the volume implementation, added pwm gated chn output   //
+//            - reduced output bits to 8 and mix to 9 bits                    //
+//                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
 
@@ -120,8 +124,8 @@ module paula_audio
   input  wire [  4-1:0] audpen,         // audio interrupt pending
   output reg  [  4-1:0] dmal,           // dma request
   output reg  [  4-1:0] dmas,           // dma special
-  output wire [ 15-1:0] ldata,          // left DAC data
-  output wire [ 15-1:0] rdata           // right DAC data
+  output wire [ 9-1:0] ldata,          // left DAC data
+  output wire [ 9-1:0] rdata           // right DAC data
 );
 
 
@@ -139,12 +143,9 @@ wire  [  8-1:0] sample0;  //channel 0 audio sample
 wire  [  8-1:0] sample1;  //channel 1 audio sample
 wire  [  8-1:0] sample2;  //channel 2 audio sample
 wire  [  8-1:0] sample3;  //channel 3 audio sample
-wire  [  7-1:0] vol0;     //channel 0 volume
-wire  [  7-1:0] vol1;     //channel 1 volume
-wire  [  7-1:0] vol2;     //channel 2 volume
-wire  [  7-1:0] vol3;     //channel 3 volume
-wire  [ 16-1:0] ldatasum;
-wire  [ 16-1:0] rdatasum;
+
+wire  [ 9-1:0] ldatasum;
+wire  [ 9-1:0] rdatasum;
 
 
 //address decoder
@@ -182,7 +183,6 @@ paula_audio_channel ach0
   .dmaena(dmaena[0]),
   .reg_address_in(reg_address_in[3:1]),
   .data(data_in),
-  .volume(vol0),
   .sample(sample0),
   .intreq(audint[0]),
   .intpen(audpen[0]),
@@ -202,7 +202,6 @@ paula_audio_channel ach1
   .dmaena(dmaena[1]),
   .reg_address_in(reg_address_in[3:1]),
   .data(data_in),
-  .volume(vol1),
   .sample(sample1),
   .intreq(audint[1]),
   .intpen(audpen[1]),
@@ -222,7 +221,6 @@ paula_audio_channel ach2
   .dmaena(dmaena[2]),
   .reg_address_in(reg_address_in[3:1]),
   .data(data_in),
-  .volume(vol2),
   .sample(sample2),
   .intreq(audint[2]),
   .intpen(audpen[2]),
@@ -242,7 +240,6 @@ paula_audio_channel ach3
   .dmaena(dmaena[3]),
   .reg_address_in(reg_address_in[3:1]),
   .data(data_in),
-  .volume(vol3),
   .sample(sample3),
   .intreq(audint[3]),
   .intpen(audpen[3]),
@@ -256,14 +253,11 @@ paula_audio_channel ach3
 paula_audio_mixer mix (
   .clk      (clk),
   .clk7_en (clk7_en),
+  .cck(cck),
   .sample0  (sample0),
   .sample1  (sample1),
   .sample2  (sample2),
   .sample3  (sample3),
-  .vol0     (vol0),
-  .vol1     (vol1),
-  .vol2     (vol2),
-  .vol3     (vol3),
   .ldatasum (ldata),
   .rdatasum (rdata)
 );

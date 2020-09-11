@@ -103,8 +103,8 @@ module paula
 	input  [15:0] IO_DIN,
 	output [15:0] IO_DOUT,
 	//audio outputs
-	output [14:0] ldata,			//left DAC data
-	output [14:0] rdata, 			//right DAC data
+	output [8:0] ldata,			//left DAC data
+	output [8:0] rdata, 			//right DAC data
 	// system configuration
 	input	  [1:0] floppy_drives,	//number of extra floppy drives
 	// emulated Hard Disk Drive signals
@@ -315,6 +315,16 @@ paula_audio ad1
 	.rdata(rdata)	
 );
 
+//instantiate sigma/delta modulator
+audio_sigmadelta dac
+(
+  .clk(clk),
+  .clk7_en (clk7_en),
+  .ldatasum(ldata),
+  .rdatasum(rdata),
+  .left(left),
+  .right(right)
+);
 
 endmodule
 
