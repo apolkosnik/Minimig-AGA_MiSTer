@@ -1490,6 +1490,10 @@ begin
             SVmode <= preSVmode;
           end if;
         end if;
+				if trap_berr = '1' or trap_illegal = '1' or trap_addr_error = '1' or trap_priv = '1' then
+					make_trace <= '0';
+					FlagsSR(7) <= '0';
+        end if;
         if set.changeMode = '1' then
           preSVmode <= not preSVmode;
           FlagsSR(5) <= not preSVmode;
