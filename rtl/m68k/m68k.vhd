@@ -1089,7 +1089,7 @@ begin
   IPL_nr <= not i_ipl_l;
 
   process (setstate,  addrvalue, state, exec_write_back, set_direct_data, next_micro_state, stop, make_trace, make_berr, IPL_nr, FlagsSR, set_rot_cnt, opcode, writePCbig, set_exec, exec,
-         PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, interrupt, tmp_TG68_PC, TG68_PC)
+         PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, interrupt, tmp_TG68_PC, TG68_PC, writePCnext)
   begin
     PC_dataa <= TG68_PC;
     if TG68_PC_brw = '1' then
@@ -1113,7 +1113,7 @@ begin
         PC_datab(2) <= '1';
       end if;
       -- check what this does trap wise
-      if writePCnext then
+      if writePCnext = '1' then
         PC_datab(1) <= '1';
       end if;
     elsif state = "00" then
@@ -1666,7 +1666,7 @@ begin
   -----------------------------------------------------------------------------
   -- MOVEC
   -----------------------------------------------------------------------------
-  process (i_clk, SFC, DFC, VBR, CACR, brief)
+  process (i_clk)
   begin
     -- all other hexa codes should give illegal isntruction exception
     if rising_edge(i_clk) then
@@ -1690,7 +1690,7 @@ begin
     end if;
   end process;
 
-  process (VBR, CACR, brief)
+  process (SFC, DFC, VBR, CACR, brief)
   begin
     movec_data <= (others => '0');
     case brief(11 downto 0) is

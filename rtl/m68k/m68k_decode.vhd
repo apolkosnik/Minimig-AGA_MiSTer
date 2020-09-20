@@ -170,7 +170,7 @@ architecture RTL of M68K_Decode is
 
   signal p : r_Decode_pipe_array(4 downto 1);
 begin
-  process(cpu, trapd, preSVmode, interrupt, trap_berr, micro_state, trap_trace, setexecOPC, FlagsSR, decodeOPC, exec, opcode, trap_interrupt, p(4))
+  process(cpu, trapd, preSVmode, interrupt, trap_berr, micro_state, trap_trace, Z_error, setexecOPC, FlagsSR, decodeOPC, exec, opcode, trap_interrupt, p(4))
     constant e : integer := 4;
     constant o : integer := 1;
   begin
