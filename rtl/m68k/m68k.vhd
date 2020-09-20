@@ -734,7 +734,6 @@ begin
         Z_error <= '0';
         writePCnext <= '0';
       elsif clkena_lw = '1' then
-        useStackframe2<='0';
         direct_data <= '0';
 
         if state = "11" then
@@ -793,13 +792,13 @@ begin
          elsif micro_state=trap00 then
           data_write_sel <= 2;
           data_write_tmp <= exe_pc;
-          writePCnext <= trap_trap or trap_trapv or exec.trap_chk OR Z_error;
+          writePCnext <= trap_trap or exec.trap_trapv or exec.trap_chk OR Z_error;
         elsif micro_state = trap0 then
           data_write_sel <= 3;
           -- this is only active for 010+ since in 000 writePC is
           -- true in state trap0
           data_write_tmp(15 downto 0) <= trap_vector_stackfmt & trap_vector(11 downto 0);
-          writePCnext <= trap_trap or trap_trapv or exec.trap_chk OR Z_error;
+          writePCnext <= trap_trap or exec.trap_trapv or exec.trap_chk OR Z_error;
         elsif exec.hold_dwr = '1' then
           data_write_sel <= 4;
           data_write_tmp <= data_write_tmp;
