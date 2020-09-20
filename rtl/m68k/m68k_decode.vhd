@@ -286,7 +286,7 @@ begin
     end if;
   end process;
 
-  process (cpu, opcode, rot_cnt, decodeOPC, setexecOPC, SVmode, sndOPC,
+  process (cpu, opcode, rot_cnt, decodeOPC, setexecOPC, SVmode, sndOPC, exe_condition,
            nextpass, micro_state, c_out, OP1out, OP2out, exec, state, addrvalue, direct_data, movem_run, brief,
            long_done, stop, Flags, trap_interrupt, trap_trace, Z_error, set_V_Flag, set_Cmp2_Flags, last_data_read, p(1), p(4) )
     constant i : integer := 1;
