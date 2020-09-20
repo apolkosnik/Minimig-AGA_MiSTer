@@ -177,9 +177,9 @@ begin
     -- STAGE 0
     p(o) <= z_Decode_pipe;
 
-    if p(e).trap_make = '1' and trapd = '0' then
+    if p(e).trapmake = '1' and trapd = '0' then
       -- trace is already handled below
-      if cpu(0) = '1' and (exec.trap_chk = '1' or p(e).set.trap_trapv='1') then -- or Z_error='1' then
+      if cpu(1) = '1' and (exec.trap_chk = '1' or Z_error = '1' or p(e).set.trap_trapv='1') then -- or Z_error='1' then
         p(o).next_micro_state <= trap00;
       else
         p(o).next_micro_state <= trap0;
@@ -202,7 +202,7 @@ begin
     end if;
 
     if micro_state = int1 or (interrupt = '1' and trap_trace = '1') then
-      if (cpu(0) = '1') and trap_trace='1' then
+      if (cpu(1) = '1') and trap_trace='1' then -- type 2 stackframe on 68020+
         p(o).next_micro_state <= trap00;
       else
         p(o).next_micro_state <= trap0;
@@ -379,11 +379,162 @@ begin
               p(o).ea_build_now <= '1';
             end if;
           --
-          elsif opcode(11 downto 8) = "1110" and opcode (7 downto 6) /= "11" then --MOVES not in 68000 ?? eh check for 010+?
-            if (cpu(0) = '1')  then
-              -- to do
+          -- elsif opcode(11 downto 8) = "1110" and opcode (7 downto 6) /= "11" then --MOVES not in 68000 ?? eh check for 010+?
+          --   if (cpu(0) = '1')  then
+          --     -- to do
+          --   else
+          --     p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
+          --   end if;
+          elsif opcode(11 downto 9) = "111" then		--MOVES not in 68000
+            if cpu(0)='1' and opcode(7 downto 6) /= "11" and opcode(5 downto 4) /= "00" and (opcode(5 downto 3) /= "111" or opcode(2 downto 1) = "00") then
+              if SVmode='1' then
+                --TODO: implement MOVES
+                -- Explanation:
+                -- MOVES.L D0,(A0) will move contents of DO to one of the address spaces defined by DFC
+                -- MOVES.L (A0),D0 will move the contents of memory pointed by A0 from the address space defined by SFC.
+
+                p(o).set.no_Flags <= '1'; -- no flags change
+                --p(o).datatype <= opcode(7 downto 6); -- populate the size
+                -----p(o).set.opcMOVE <= '1';
+                --IF state="10" AND addrvalue='0' THEN
+                --  set(Regwrena) <= '1';
+                --  set(opcMOVE) <= '1';
+                --END IF;
+                --IF decodeOPC='1' THEN
+                --  set(get_2ndOPC) <='1';
+                --  IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" THEN
+                --    next_micro_state <= movem1;
+                --  ELSE
+                --    next_micro_state <= nop;
+                --    set(ea_build) <= '1';
+                --  END IF;
+                --END IF;
+                -- similar to move, and add SFC + DFC
+                if sndOPC(11) = '0' then -- <EA> to Register Rn -- sndOPC(14 downto 12) = dest_2ndHbits
+                  p(o).source_lowbits <= '1'; -- set 
+                  p(o).dest_2ndHbits <= '1'; -- set dest addressing
+                  p(o).set_exec.Regwrena <= '1'; -- write to register
+                  --FC <- SFC
+                  --fc(2 downto 0) <= SFC;
+                --p(o).set.SFC_to_FC <= '1';
+                  case opcode(5 downto 3) is --source <EA>
+                    --when "000" | "001" => --Dn,An
+                    --  p(o).set_exec.Regwrena <= '1';
+                    when "010" | "011" | "100" => --source <EA> -(an)+
+                      if opcode(3) = '1' then --(An)+
+                        p(o).set.postadd <= '1';
+                        if opcode(2 downto 0) = "111" then
+                          p(o).set.use_SP <= '1';
+                        end if;
+                      end if;
+                      if opcode(5) = '1' then -- -(An)
+                        p(o).set.presub <= '1';
+                        if opcode(2 downto 0) = "111" then p(o).set.use_SP <= '1'; end if;
+                      end if;
+        
+                      p(o).setstate <= "11";
+                      p(o).next_micro_state <= nop;
+                      if nextpass = '0' then
+                        p(o).set.write_reg <= '1';
+                      end if;
+        
+                    when "101" => --(d16,An)
+                      p(o).next_micro_state <= ld_dAn1;
+        
+                    when "110" => --(d8,An,Xn)
+                      p(o).next_micro_state <= ld_AnXn1;
+                      p(o).getbrief <= '1';
+        
+                    when "111" =>
+                      case opcode(2 downto 0) is
+                        when "000" => --(xxxx).w
+                          p(o).next_micro_state <= ld_nn;
+                        when "001" => --(xxxx).l
+                          p(o).set.longaktion <= '1';
+                          p(o).next_micro_state <= ld_nn;
+                        when others => NULL;
+                      end case;
+        
+                    when others => NULL;
+                  end case;
+                else -- Rn to <EA>
+                  --p(o).dest_lowbits <= '1'; -- implied?!
+                  p(o).source_2ndHbits <= '1';
+                  --fc(2 downto 0) <= DFC;
+                --p(o).set.DFC_to_FC <= '1';
+                  case opcode(5 downto 3) is --destination <EA>
+                    --when "000" | "001" => --Dn,An
+                    --  p(o).set_exec.Regwrena <= '1';
+                    when "010" | "011" | "100" => --destination <EA> -(an)+
+                      if opcode(3) = '1' then --(An)+
+                        p(o).set.postadd <= '1';
+                        if opcode(2 downto 0) = "111" then
+                          p(o).set.use_SP <= '1';
+                        end if;
+                      end if;
+                      if opcode(5) = '1' then -- -(An)
+                        p(o).set.presub <= '1';
+                        if opcode(2 downto 0) = "111" then p(o).set.use_SP <= '1'; end if;
+                      end if;
+        
+                      p(o).setstate <= "11";
+                      p(o).next_micro_state <= nop;
+                      if nextpass = '0' then
+                        p(o).set.write_reg <= '1';
+                      end if;
+        
+                    when "101" => --(d16,An)
+                      p(o).next_micro_state <= st_dAn1;
+        
+                    when "110" => --(d8,An,Xn)
+                      p(o).next_micro_state <= st_AnXn1;
+                      p(o).getbrief <= '1';
+        
+                    when "111" =>
+                      case opcode(2 downto 0) is
+                        when "000" => --(xxxx).w
+                          p(o).next_micro_state <= st_nn;
+                        when "001" => --(xxxx).l
+                          p(o).set.longaktion <= '1';
+                          p(o).next_micro_state <= st_nn;
+                        when others => NULL;
+                      end case;
+        
+                    when others => NULL;
+                  end case;
+                end if;
+                if sndOPC(15) = '1' then
+                  p(o).dest_areg <= '1';
+                else
+                  p(o).dest_areg <= '0';
+                end if;
+                p(o).set_exec.opcMOVE <= '1';
+                p(o).ea_build_now <= '1';
+               
+                --if opcode(5 downto 4) = "00" then --Dn, An
+                --  if opcode(8 downto 7) = "00" then
+                --    p(o).set_exec.Regwrena <= '1';
+                --  end if;
+                --end if;
+        
+                case opcode(7 downto 6) is
+                  when "01"   => p(o).datatype <= "00"; --Byte
+                  when "10"   => p(o).datatype <= "10"; --Long
+                  when others => p(o).datatype <= "01"; --Word
+                end case;
+        
+                --p(o).source_lowbits <= '1'; -- Dn=> An=>
+                --if sndOPC(15) = '1' then p(o).source_areg <= '1'; end if; -- 
+        
+                if micro_state = idle and (nextpass = '1' or (opcode(5 downto 4) = "00" and decodeOPC = '1')) then
+
+                end if;
+                p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
+              else
+                p(o).trap_priv <= '1'; p(o).trapmake <= '1';
+              end if;
             else
-              p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+              p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
             end if;
           else
             -- catch 020 cmp2/chk2/cas2 -- we know 8=0
@@ -425,13 +576,13 @@ begin
                   p(o).set.trap_chk <= '1';
                   if sndOPC(11) = '1' then
                     if (set_Cmp2_Flags(0) = '1') then
-                      p(o).trap_make <= '1';
+                      p(o).trapmake <= '1';
                     end if;
                   end if;
                 end if;
 
               else
-                p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
               end if;
 
             elsif opcode(11) = '1' and opcode(7 downto 6) = "11" then -- cas/2
@@ -449,7 +600,7 @@ begin
                   -- CAS2
                   --
                   if opcode(10 downto 9) = "01" then -- no byte
-                    p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                    p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
                   else
                     if decodeOPC = '1' then
                       --assert false report "cas2" severity note;
@@ -538,7 +689,7 @@ begin
                   --
                   if opcode(5 downto 4) = "00" or opcode(5 downto 1) = "11101" or opcode(5 downto 1) = "11111" then
                     -- dn/an illegal, as are 111,01-, 111,11- modes
-                    p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                    p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
                   else
                     --assert false report "cas" severity note;
                     -- EA is compared to Dc
@@ -585,7 +736,7 @@ begin
 
                 end if;
               else
-                p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
               end if;
             else
               --andi, ...xxxi
@@ -609,13 +760,13 @@ begin
                 if opcode(5 downto 3) /= "111" OR opcode(2) = '0' then
                   p(o).set_exec.opcCMP <= '1';
                 else
-                  p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                  p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
                 end if;
               end if;
 
               if opcode(7) = '0' and opcode(5 downto 0) = "111100" and (v_opcor or v_opcEor or v_opcand) = '1' then --SR
                 if decodeOPC = '1' and SVmode = '0' and opcode(6) = '1' then --SR
-                  p(o).trap_priv <= '1'; p(o).trap_make <= '1';
+                  p(o).trap_priv <= '1'; p(o).trapmake <= '1';
                 else
                   p(o).set.no_Flags <= '1';
                   if decodeOPC = '1' then
@@ -756,24 +907,24 @@ begin
                 end if;
               end if;
             else
-              p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+              p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
             end if;
           else --chk
             if opcode(7) = '1' and opcode(5 downto 0) /= "111111" then
               p(o).datatype <= "01"; --Word
               p(o).set.trap_chk <= '1';
               if (c_out(1) = '0' or OP1out(15) = '1' or OP2out(15) = '1') and exec.opcCHK = '1' then
-                p(o).trap_make <= '1';
+                p(o).trapmake <= '1';
               end if;
             elsif cpu(1) = '1' then --chk long for 68020
               p(o).datatype <= "10"; --Long
               p(o).set.trap_chk <= '1';
               if (c_out(2) = '0' or OP1out(31) = '1' or OP2out(31) = '1') and exec.opcCHK = '1' then
-                p(o).trap_make <= '1';
+                p(o).trapmake <= '1';
               end if;
             else
               p(o).trap_illegal <= '1'; -- chk long for 68020
-              p(o).trap_make <= '1';
+              p(o).trapmake <= '1';
             end if;
 
             if opcode(7) = '1' or cpu(1) = '1' then
@@ -805,7 +956,7 @@ begin
                     p(o).set_exec.Regwrena <= '1';
                   end if;
                 else
-                  p(o).trap_priv <= '1'; p(o).trap_make <= '1';
+                  p(o).trap_priv <= '1'; p(o).trapmake <= '1';
                 end if;
               else --negx
                 p(o).ea_build_now <= '1';
@@ -833,7 +984,7 @@ begin
                     p(o).set_exec.Regwrena <= '1';
                   end if;
                 else
-                  p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                  p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
                 end if;
               else --clr
                 p(o).ea_build_now <= '1';
@@ -883,7 +1034,7 @@ begin
                     p(o).setstate <= "01";
                   end if;
                 else
-                  p(o).trap_priv <= '1'; p(o).trap_make <= '1';
+                  p(o).trap_priv <= '1'; p(o).trapmake <= '1';
                 end if;
               else --not
                 p(o).ea_build_now <= '1';
@@ -979,7 +1130,7 @@ begin
                     end if;
                     p(o).datatype <= "10";
                   else
-                    p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                    p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
                   end if;
 
                 else --pea, swap
@@ -989,7 +1140,7 @@ begin
                       p(o).set_exec.opcSWAP <= '1';
                       p(o).set_exec.Regwrena <= '1';
                     elsif opcode(5 downto 3) = "001" then --bkpt
-                      p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                      p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
                     else --pea
                       p(o).ea_only <= '1';
                       p(o).ea_build_now <= '1';
@@ -1041,7 +1192,7 @@ begin
               --
             when "101" => --tst, tas 4aFC - illegal
               if opcode(7 downto 2) = "111111" then --illegal
-                p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
               else
                 p(o).ea_build_now <= '1';
                 if setexecOPC = '1' then
@@ -1110,7 +1261,7 @@ begin
                 case opcode(6 downto 0) is
                   when "1000000" | "1000001" | "1000010" | "1000011" | "1000100" | "1000101" | "1000110" | "1000111" | --trap
                        "1001000" | "1001001" | "1001010" | "1001011" | "1001100" | "1001101" | "1001110" | "1001111" => --trap
-                    p(o).trap_trap <= '1'; p(o).trap_make <= '1';
+                    p(o).trap_trap <= '1'; p(o).trapmake <= '1';
                   when "1010000" | "1010001" | "1010010" | "1010011" | "1010100" | "1010101" | "1010110" | "1010111" => --link
                     p(o).datatype <= "10";
                     p(o).set_exec.opcADD <= '1'; --for displacement
@@ -1149,7 +1300,7 @@ begin
                       p(o).source_areg <= '1';
                       p(o).datatype <= "10";
                     else
-                      p(o).trap_priv <= '1'; p(o).trap_make <= '1';
+                      p(o).trap_priv <= '1'; p(o).trapmake <= '1';
                     end if;
                   when "1101000" | "1101001" | "1101010" | "1101011" | "1101100" | "1101101" | "1101110" | "1101111" => --move USP,An
                     if SVmode = '1' then
@@ -1158,12 +1309,12 @@ begin
                       p(o).datatype <= "10";
                       p(o).set_exec.Regwrena <= '1';
                     else
-                      p(o).trap_priv <= '1'; p(o).trap_make <= '1';
+                      p(o).trap_priv <= '1'; p(o).trapmake <= '1';
                     end if;
 
                   when "1110000" => --reset
                     if SVmode = '0' then
-                      p(o).trap_priv <= '1'; p(o).trap_make <= '1';
+                      p(o).trap_priv <= '1'; p(o).trapmake <= '1';
                     else
                       p(o).set.opcRESET <= '1';
                       if decodeOPC = '1' then
@@ -1176,7 +1327,7 @@ begin
 
                   when "1110010" => --stop
                     if SVmode = '0' then
-                      p(o).trap_priv <= '1'; p(o).trap_make <= '1';
+                      p(o).trap_priv <= '1'; p(o).trapmake <= '1';
                     else
                       if decodeOPC = '1' then
                         p(o).setnextpass <= '1';
@@ -1204,12 +1355,12 @@ begin
 
                       end if;
                     else
-                      p(o).trap_priv <= '1'; p(o).trap_make <= '1';
+                      p(o).trap_priv <= '1'; p(o).trapmake <= '1';
                     end if;
 
                   when "1110100" => --rtd
                     if (cpu(0) = '0') then
-                      p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                      p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
                     else
                       p(o).datatype <= "10";
                       p(o).set_exec.opcADD <= '1'; --for displacement
@@ -1241,14 +1392,14 @@ begin
                       p(o).setstate <= "01";
                     end if;
                     if Flags(1) = '1' and state = "01" then
-                      p(o).set.trap_trapv <= '1'; p(o).trap_make <= '1';
+                      p(o).set.trap_trapv <= '1'; p(o).trapmake <= '1';
                     end if;
 
                   when "1111010" | "1111011" => --movec
                     if (cpu(0) = '0') then
-                      p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                      p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
                     elsif SVmode = '0' then
-                      p(o).trap_priv <= '1'; p(o).trap_make <= '1';
+                      p(o).trap_priv <= '1'; p(o).trapmake <= '1';
                     else
                       p(o).datatype <= "10"; --Long
                       if last_data_read(11 downto 0) = X"800" then
@@ -1269,7 +1420,7 @@ begin
                     end if;
 
                   when others =>
-                    p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+                    p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
                 end case;
               end if;
             when others => NULL;
@@ -1300,10 +1451,10 @@ begin
                 end if;
               end if;
               if exe_condition = '1' and decodeOPC = '0' then
-                p(o).set.trap_trapv <= '1'; p(o).trap_make <= '1';
+                p(o).set.trap_trapv <= '1'; p(o).trapmake <= '1';
               end if;
             else
-              p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+              p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
             end if;
           else --Scc
             p(o).datatype <= "00"; --Byte
@@ -1375,7 +1526,7 @@ begin
           p(o).dest_hbits <= '1';
         end if;
         -- else
-        -- trap_illegal <= '1'; -- trap_make <= '1';
+        -- trap_illegal <= '1'; -- trapmake <= '1';
         -- end if;
         ---- 1000 ----------------------------------------------------------------------------
       when "1000" => --or
@@ -1446,7 +1597,7 @@ begin
               end if;
             end if;
           else
-            p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+            p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
           end if;
         else --or
           p(o).set_exec.opcor <= '1';
@@ -1478,7 +1629,7 @@ begin
           -- addx.b / subx.b -(An),-(An) are legal see 
           -- MC68020_32-Bit_Microprocessor_Users_Manual_1984.pdf
           --if opcode(7 downto 6) = "00" and opcode(5 downto 3) = "001" then -- illegal, word/long only
-          --  p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+          --  p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
           --end if;
           if opcode(8) = '1' and opcode(5 downto 4) = "00" then --addx, subx
             build_bcd <= '1';
@@ -1488,7 +1639,7 @@ begin
         end if;
         ---- 1010 ----------------------------------------------------------------------------
       when "1010" => --Trap 1010
-        p(o).trap_1010 <= '1'; p(o).trap_make <= '1';
+        p(o).trap_1010 <= '1'; p(o).trapmake <= '1';
         ---- 1011 ----------------------------------------------------------------------------
       when "1011" => --eor, cmp
         p(o).ea_build_now <= '1';
@@ -1586,7 +1737,7 @@ begin
             p(o).write_back <= '1';
           else --bitfield
             if cpu(1) = '0' then
-              p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+              p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
             else
               if decodeOPC = '1' then
                 p(o).next_micro_state <= nop;
@@ -1676,7 +1827,7 @@ begin
         end if;
         ---- ----------------------------------------------------------------------------
       when others =>
-        p(o).trap_1111 <= '1'; p(o).trap_make <= '1';
+        p(o).trap_1111 <= '1'; p(o).trapmake <= '1';
     end case;
 
   end process;
@@ -1734,7 +1885,7 @@ begin
     end if;
 
     if p(e).set_Z_error = '1' then -- divu by zero  set_Z_error be moved?
-      p(o).trap_make <= '1';
+      p(o).trapmake <= '1';
       if trapd = '0' then
         p(o).writePC <= '1';
       end if;
@@ -1744,11 +1895,11 @@ begin
     if (addr(0) = '1') then
       if (cpu(1) = '1') then -- 020
         if (state = "00") then
-          p(o).trap_addr_error <= '1'; p(o).trap_make <= '1';
+          p(o).trap_addr_error <= '1'; p(o).trapmake <= '1';
          end if;
       else
         if (state /= "01") then
-           p(o).trap_addr_error <= '1'; p(o).trap_make <= '1';
+           p(o).trap_addr_error <= '1'; p(o).trapmake <= '1';
         end if;
       end if;
     end if;
@@ -2226,7 +2377,7 @@ begin
           -- trap_addr_error <= '1';
           -- trapmake <= '1';
         else
-          p(o).trap_illegal <= '1'; p(o).trap_make <= '1';
+          p(o).trap_illegal <= '1'; p(o).trapmake <= '1';
         end if;
 
       when movep1 => -- MOVEP d(An)
@@ -2471,7 +2622,7 @@ begin
   o_dest_2ndLbits          <= p(4).dest_2ndLbits;
   o_dest_hbits             <= p(4).dest_hbits;
   o_set_exec_tas           <= p(4).set_exec_tas;
-  o_trapmake               <= p(4).trap_make;
+  o_trapmake               <= p(4).trapmake;
   o_trap_illegal           <= p(4).trap_illegal;
   o_trap_addr_error        <= p(4).trap_addr_error;
   o_trap_priv              <= p(4).trap_priv;

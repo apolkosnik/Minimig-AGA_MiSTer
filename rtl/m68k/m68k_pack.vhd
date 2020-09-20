@@ -107,6 +107,8 @@ Package M68K_Pack is
        movec_wr       : bit1;
        Regwrena       : bit1;
        update_FC      : bit1;
+       SFC_to_FC      : bit1;
+       DFC_to_FC      : bit1;
        linksp         : bit1;
        movepl         : bit1;
        update_ld      : bit1;
@@ -190,7 +192,7 @@ Package M68K_Pack is
       dest_2ndLbits          : bit1;
       dest_hbits             : bit1;
       set_exec_tas           : bit1;
-      trap_make              : bit1;
+      trapmake              : bit1;
       trap_illegal           : bit1;
       trap_addr_error        : bit1;
       trap_priv              : bit1;
@@ -349,6 +351,8 @@ package body M68K_Pack is
     r.movec_wr        := a.movec_wr       or b.movec_wr;
     r.Regwrena        := a.Regwrena       or b.Regwrena;
     r.update_FC       := a.update_FC      or b.update_FC;
+    r.SFC_to_FC       := a.SFC_to_FC      or b.SFC_to_FC;
+    r.DFC_to_FC       := a.DFC_to_FC      or b.DFC_to_FC;
     r.linksp          := a.linksp         or b.linksp;
     r.movepl          := a.movepl         or b.movepl;
     r.update_ld       := a.update_ld      or b.update_ld;

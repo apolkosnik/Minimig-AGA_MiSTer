@@ -74,6 +74,7 @@ entity M68K_Core is
     o_lds_l             : out bit1;
 
     o_busstate          : out word(1 downto 0); -- 00-> fetch code 10->read data 11->write data 01->no memaccess
+    o_longword          : out bit1;
     o_reset_l           : out bit1;
     o_fc                : out word(2 downto 0);
     --  for debug
@@ -235,6 +236,8 @@ architecture logic of M68K_Core is
   signal movec_data             : word(31 downto 0);
   signal VBR                    : word(31 downto 0);
   signal CACR                   : word(3 downto 0);
+  signal DFC                    : word(2 downto 0);
+  signal SFC                    : word(2 downto 0);
   signal exec                   : r_Opc;
 
   signal micro_state            : micro_states;
@@ -288,6 +291,7 @@ architecture logic of M68K_Core is
   signal writeSR                : bit1;
   signal set_vectoraddr         : bit1;
   signal set_writePCbig         : bit1;
+  signal writePCnext            : bit1;
   signal TG68_PC_brw            : bit1;
   signal setdispbyte            : bit1;
   signal setdisp                : bit1;
@@ -360,6 +364,10 @@ begin
     addsub_q_out         => addsub_q,
     ALUout               => ALUout
   );
+
+
+  -- AMR - let the parent module know this is a longword access.  (Easy way to enable burst writes.)
+  o_longword <= not memmaskmux(3);
 
   long_start_alu <= (not memmaskmux(3));
   --long_start_alu <= to_bit(NOT memmaskmux(3)); --from tg68k
@@ -724,8 +732,9 @@ begin
         direct_data <= '0';
         use_direct_data <= '0';
         Z_error <= '0';
-
+        writePCnext <= '0';
       elsif clkena_lw = '1' then
+        useStackframe2<='0';
         direct_data <= '0';
 
         if state = "11" then
@@ -749,6 +758,7 @@ begin
         if endOPC = '1' then
           store_in_tmp <= '0';
           Z_error <= '0';
+          writePCnext <= '0';
         else
           if set_Z_error = '1' then
             Z_error <= '1';
@@ -783,11 +793,13 @@ begin
          elsif micro_state=trap00 then
           data_write_sel <= 2;
           data_write_tmp <= exe_pc;
+          writePCnext <= trap_trap or trap_trapv or exec.trap_chk OR Z_error;
         elsif micro_state = trap0 then
           data_write_sel <= 3;
           -- this is only active for 010+ since in 000 writePC is
           -- true in state trap0
           data_write_tmp(15 downto 0) <= trap_vector_stackfmt & trap_vector(11 downto 0);
+          writePCnext <= trap_trap or trap_trapv or exec.trap_chk OR Z_error;
         elsif exec.hold_dwr = '1' then
           data_write_sel <= 4;
           data_write_tmp <= data_write_tmp;
@@ -1102,7 +1114,7 @@ begin
         PC_datab(2) <= '1';
       end if;
       -- check what this does trap wise
-      if trap_trap = '1' or exec.trap_trapv = '1' or exec.trap_chk = '1' or Z_error = '1' then
+      if writePCnext then
         PC_datab(1) <= '1';
       end if;
     elsif state = "00" then
@@ -1244,11 +1256,11 @@ begin
 
           byte <= '0';
           memread <= "1111";
-          fc(1) <= not setstate(1) or (PCbase and not setstate(0));
-          fc(0) <= setstate(1) and (not PCbase or setstate(0));
-          if interrupt = '1' then
-            fc(1 downto 0) <= "11";
-          end if;
+          --fc(1) <= not setstate(1) or (PCbase and not setstate(0));
+          --fc(0) <= setstate(1) and (not PCbase or setstate(0));
+          --if interrupt = '1' then
+          --  fc(1 downto 0) <= "11";
+          --end if;
 
           if (state = "10" and addrvalue='0' and write_back = '1' and setstate /= "10") or set_rot_cnt /= "000001" or (stop = '1' and interrupt = '0') or set_exec.opcCHK = '1' or set_exec.opcCHK2 = '1' then
             state <= "01";
@@ -1256,7 +1268,7 @@ begin
             addrvalue <= '0';
           elsif execOPC = '1' and exec_write_back = '1' then
             state <= "11";
-            fc(1 downto 0) <= "01";
+            --fc(1 downto 0) <= "01";
             memmask <= wbmemmask;
             addrvalue <= '0';
             if datatype = "00" then
@@ -1476,7 +1488,7 @@ begin
         FlagsSR(5) <= '1';
         FlagsSR(4) <= '0'; -- Clear M bit (020 only)
         FlagsSR(2 downto 0) <= "111";
-        fc(2) <= '1';
+        --fc(2) <= '1';
         SVmode <= '1';
         preSVmode <= '1';
         make_trace <= '0';
@@ -1490,14 +1502,14 @@ begin
             SVmode <= preSVmode;
           end if;
         end if;
-				if trap_berr = '1' or trap_illegal = '1' or trap_addr_error = '1' or trap_priv = '1' then
-					make_trace <= '0';
-					FlagsSR(7) <= '0';
+        if trap_berr = '1' or trap_illegal = '1' or trap_addr_error = '1' or trap_priv = '1' then
+          make_trace <= '0';
+          FlagsSR(7) <= '0';
         end if;
         if set.changeMode = '1' then
           preSVmode <= not preSVmode;
           FlagsSR(5) <= not preSVmode;
-          fc(2) <= not preSVmode;
+          --fc(2) <= not preSVmode;
         end if;
         if micro_state = trap3 then
           FlagsSR(7) <= '0';
@@ -1511,7 +1523,14 @@ begin
         if interrupt = '1' and trap_interrupt = '1' then
           FlagsSR(2 downto 0) <= rIPL_nr;
         end if;
-
+        -- used by MOVES
+        if exec.SFC_to_FC = '1' then
+          fc(2 downto 0) <= SFC;
+        end if;
+        --used by MOVES
+        if exec.DFC_to_FC = '1' then
+          fc(2 downto 0) <= DFC;
+        end if;
         if exec.to_SR = '1' then
           FlagsSR(7 downto 0) <= SRin and x"f7"; -- write back SR and mask out the unused bit
           fc(2) <= SRin(5);
@@ -1648,7 +1667,7 @@ begin
   -----------------------------------------------------------------------------
   -- MOVEC
   -----------------------------------------------------------------------------
-  process (i_clk)
+  process (i_clk, SFC, DFC, VBR, CACR, brief)
   begin
     -- all other hexa codes should give illegal isntruction exception
     if rising_edge(i_clk) then
@@ -1658,8 +1677,8 @@ begin
         CACR <= "0001"; -- default cache on at boot for A500 systems
       elsif clkena_lw = '1' and exec.movec_wr = '1' then
         case brief(11 downto 0) is
-          when X"000" => NULL; -- SFC -- 68010+
-          when X"001" => NULL; -- DFC -- 68010+
+          when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
+          when X"001" => DFC <= reg_QA(2 downto 0); -- DFC -- 68010+
           when X"002" => CACR <= reg_QA(3 downto 0); -- 68020+
           when X"800" => NULL; -- USP -- 68010+
           when X"801" => VBR <= reg_QA; -- 68010+
@@ -1676,6 +1695,8 @@ begin
   begin
     movec_data <= (others => '0');
     case brief(11 downto 0) is
+      when X"000" => movec_data <= "00000000000000000000000000000" & SFC; -- SFC -- 68010+
+      when X"001" => movec_data <= "00000000000000000000000000000" & DFC; -- DFC -- 68010+
       when X"002" => movec_data <= "0000000000000000000000000000" & (CACR AND "0011");
 
       when X"801" =>

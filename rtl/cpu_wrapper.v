@@ -194,7 +194,6 @@ M68K_Core cpu_inst_p
 	.o_uds_l(uds_p),
 	.o_lds_l(lds_p),
 	.o_busstate(cpustate_p), // 00-> fetch code 10->read data 11->write data 01->no memaccess
-
 	.o_cacr(cacr_p),
 	.o_vbr(vbr_p)
 );
