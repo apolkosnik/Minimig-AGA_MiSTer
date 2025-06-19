@@ -1,5 +1,5 @@
 //
-// hps_ext for Minimig
+// hps_ext for Minimig with Ethernet DMA Support
 //
 // Copyright (c) 2020 Alexey Melnikov
 //
@@ -58,7 +58,15 @@ module hps_ext
 
 	input             cdda_req,
 	output reg        cdda_wr,
-	output reg [15:0] cdda_dout
+	output reg [15:0] cdda_dout,
+
+	// Ethernet DMA interface
+	input      [15:0] eth_din,      // Data from ethernet controller
+	output reg [15:0] eth_dout,     // Data to ethernet controller
+	output reg  [7:0] eth_addr,     // Address for ethernet registers/buffers
+	output reg        eth_rd,       // Read enable for ethernet
+	output reg        eth_wr,       // Write enable for ethernet
+	input       [7:0] eth_status    // Status from ethernet controller
 );
 
 assign EXT_BUS[15:0] = io_fpga ? fpga_dout : io_dout;
@@ -87,12 +95,16 @@ always@(posedge clk_sys) begin
 	reg [15:0] cmd;
 	reg ide_cs = 0;
 	reg cdda_cs = 0;
+	reg eth_cs = 0;
 
 	sset <= 0;
 
 	{ide_rd, ide_wr} <= 0;
+	{eth_rd, eth_wr} <= 0;
 	cdda_wr <= 0;
+
 	if((ide_rd | ide_wr) & ~&ide_addr[3:0]) ide_addr <= ide_addr + 1'd1;
+	if((eth_rd | eth_wr) & ~&eth_addr[6:0]) eth_addr <= eth_addr + 1'd1;
 
 	if(~io_uio) begin
 		dout_en <= 0;
@@ -100,6 +112,7 @@ always@(posedge clk_sys) begin
 		byte_cnt <= 0;
 		ide_cs <= 0;
 		cdda_cs <= 0;
+		eth_cs <= 0;
 		if(cmd == 'h2D) sset <= 1;
 	end
 	else if(io_strobe) begin
@@ -109,21 +122,25 @@ always@(posedge clk_sys) begin
 
 		ide_dout <= io_din;
 		cdda_dout <= io_din;
+		eth_dout <= io_din;
+
 		if(byte_cnt == 1) begin
 			ide_addr <= {io_din[8],io_din[3:0]};
-			ide_cs   <= (io_din[15:9] == 7'b1111000);
-			cdda_cs  <= (io_din[15:9] == 7'b1111001);
+			eth_addr <= io_din[7:0];
+			ide_cs   <= (io_din[15:9] == 7'b1111000);  // 0xF000-0xF07F
+			cdda_cs  <= (io_din[15:9] == 7'b1111001);  // 0xF080-0xF0FF
+			eth_cs   <= (io_din[15:9] == 7'b1111010);  // 0xF100-0xF17F
 		end
 
 		if(byte_cnt == 0) begin
 			cmd <= io_din;
 			dout_en <= (io_din >= EXT_CMD_MIN && io_din <= EXT_CMD_MAX) || (io_din >= EXT_CMD_MIN2 && io_din <= EXT_CMD_MAX2);
 			if(io_din == 'h63) begin
-				io_dout <= {4'hE, 2'b00, 1'b0, cdda_req, 2'b00, ide_req};
+				io_dout <= {4'hE, 1'b0, eth_status[7], 1'b0, cdda_req, 2'b00, ide_req};
 			end
 		end else begin
 			case(cmd)
-			
+
 				UIO_MOUSE:
 					case(byte_cnt)
 						1: begin
@@ -135,7 +152,7 @@ always@(posedge clk_sys) begin
 								// second byte contains movement data
 								kbd_mouse_data <= io_din[7:0];
 								kbd_mouse_type <= 1;
-								kbd_mouse_level <= ~kbd_mouse_level; 
+								kbd_mouse_level <= ~kbd_mouse_level;
 							end
 						3: begin
 								// third byte contains the buttons
@@ -144,7 +161,7 @@ always@(posedge clk_sys) begin
 						4: begin
 								// wheel
 								kbd_mouse_data <= io_din[7:0];
-								kbd_mouse_level <= ~kbd_mouse_level; 
+								kbd_mouse_level <= ~kbd_mouse_level;
 							end
 					endcase
 
@@ -180,18 +197,25 @@ always@(posedge clk_sys) begin
 						3: svbl_t <= io_din[11:0];
 						4: svbl_b <= io_din[11:0];
 					endcase
-					
-				'h61: begin
+
+				'h61: begin  // UIO_DMA_WRITE
 					if(byte_cnt >= 3) begin
 						cdda_wr <= cdda_cs;
 						ide_wr  <= ide_cs;
+						eth_wr  <= eth_cs;
 					end
 				end
 
-				'h62: if(byte_cnt >= 3 && ide_cs) begin
-							io_dout <= ide_din;
-							ide_rd <= 1;
-						end
+				'h62: if(byte_cnt >= 3) begin  // UIO_DMA_READ
+					if(ide_cs) begin
+						io_dout <= ide_din;
+						ide_rd <= 1;
+					end
+					else if(eth_cs) begin
+						io_dout <= eth_din;
+						eth_rd <= 1;
+					end
+				end
 			endcase
 		end
 	end
