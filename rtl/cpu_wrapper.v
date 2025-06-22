@@ -47,7 +47,7 @@ module cpu_wrapper
 	output reg        chip_rw,
 	input             chip_dtack,
 	input       [2:0] chip_ipl,
-	
+
 	input      [15:0] fastchip_dout,
 	output reg        fastchip_sel,
 	output            fastchip_lds,
@@ -68,6 +68,10 @@ module cpu_wrapper
 
 	output            toccata_ena,
 	output reg  [7:0] toccata_base,
+
+	// Ethernet signals
+	output            ethernet_ena,
+	output reg  [7:0] ethernet_base,
 
 	output reg  [1:0] cpustate,
 	output reg  [3:0] cacr,
@@ -355,6 +359,7 @@ end
 ///////////////////// AUTOCONFIG ////////////////////////////
 
 reg       ac_toccata;
+reg       ac_ethernet;
 reg [2:0] ac_memcard;
 reg [3:0] autocfg_data;
 
@@ -394,6 +399,39 @@ always @(*) begin
 			default: ;
 		endcase
 	end 
+	// Ethernet card (Ariadne II  or X-Surf 100  ne2000 compatible)
+	else if(ac_ethernet) begin
+		case (chip_addr[6:1])
+			6'h0: autocfg_data = 4'b1100; // Zorro-II card, no link, no ROM
+			6'h1: autocfg_data = 4'b0001; // Next board not related, size 64k
+			// Product ID: 0xCA or 202 decimal (inverted)
+			// 6'h2: autocfg_data = 4'b0011; // 0xc - Product number high nibble (inverted) - 0xC
+			// 6'h3: autocfg_data = 4'b0101; // 0xa - Product number low nibble (inverted) - Product 0xA
+			// //6'h5: autocfg_data = 4'b1101; // logical size 64k
+			// // below Manufacturer ID: 0x0877 or 2167 decimal (inverted)
+			// 6'h8: autocfg_data = 4'b1111; // 0x0
+			// 6'h9: autocfg_data = 4'b0111; // 0x8
+			// 6'ha: autocfg_data = 4'b1000; // 0x7
+			// 6'hb: autocfg_data = 4'b1000; // 0x7
+
+			// X-Surf 100
+			6'h2: autocfg_data = 4'b1001; //  !6 Upper byte of 0x64
+			6'h3: autocfg_data = 4'b1011; // !4 Lower byte product number
+
+			// X-Surf or X-Surf 2 or X-Surf 3
+			// 6'h2: autocfg_data = 4'b1110; // 0x17
+			// 6'h3: autocfg_data = 4'b1000; // Lower byte product number
+			//6'h5: autocfg_data = 4'b1101; // logical size 64k -- commented out -> logical size == physical size. Issue with KS1.3?
+			6'h5: autocfg_data = 4'b1111; // No size extension
+			6'h8: autocfg_data = 4'b1110; // Manufacturer ID: 0x1212 or 4626
+			6'h9: autocfg_data = 4'b1101;
+			6'ha: autocfg_data = 4'b1110;
+			6'hb: autocfg_data = 4'b1101;
+			// Serial number
+			6'h13: autocfg_data = 4'b1110; // Serial=1
+			default: ;
+		endcase
+	end
 	// Zorro III RAM 128MB/256MB/384MB
 	else if(ac_memcard[2]) begin
 		case (chip_addr[6:1])
@@ -412,7 +450,8 @@ always @(*) begin
 	end
 end
 
-wire sel_autoconfig = (chip_addr[23:16] == 8'b11101000) && (ac_memcard || ac_toccata); //$E80000 - $E8FFFF
+//wire sel_autoconfig = (chip_addr[23:16] == 8'b11101000) && (ac_memcard || ac_toccata); //$E80000 - $E8FFFF
+wire sel_autoconfig = (chip_addr[23:16] == 8'b11101000) && (ac_memcard || ac_toccata || ac_ethernet); //$E80000 - $E8FFFF
 
 reg       z2ram_ena;
 reg [4:0] z3ram_base0;
@@ -426,6 +465,7 @@ always @(posedge clk) begin
 	if (~reset | ~reset_out) begin
 		ac_memcard  <= cpucfg[1] ? fastramcfg : fastramcfg[2] ? 3'd3 : {1'b0, fastramcfg[1:0]};
 		ac_toccata  <= 1;
+		ac_ethernet <= 1;  // enable ethernet autoconfig
 		z2ram_ena   <= 0;
 		z3ram_ena0  <= 0;
 		z3ram_ena1  <= 0;
@@ -443,7 +483,14 @@ always @(posedge clk) begin
 			if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, Toccata card in ZII io space ($E90000)
 				toccata_base <= cpu_dout[7:0];
 				ac_toccata<=0;
-			end		
+			end
+		end
+		// Ethernet TODO: Z3 support
+		else if(ac_ethernet) begin
+			if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, Ethernet card in ZII io space ($EA0000)
+				ethernet_base <= cpu_dout[7:0];
+				ac_ethernet <= 0;
+			end
 		end
 		else if(ac_memcard[2]) begin
 			if(chip_addr[6:1] == 6'b100010) begin // Register 0x44, assign base address to ZIII RAM.
@@ -463,5 +510,6 @@ always @(posedge clk) begin
 end
 
 assign toccata_ena = ~ac_toccata;
+assign ethernet_ena = ~ac_ethernet;
 
 endmodule
