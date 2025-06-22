@@ -216,6 +216,18 @@ wire [21:0] gamma_bus;
 
 wire  [7:0] uart_mode;
 
+// Add ethernet wires
+wire [15:0] eth_din;      // Data from ethernet controller to HPS
+wire [15:0] eth_dout;     // Data from HPS to ethernet controller
+wire  [7:0] eth_addr;     // Address for ethernet registers/buffers
+wire        eth_rd;       // Read enable for ethernet
+wire        eth_wr;       // Write enable for ethernet
+wire  [7:0] eth_status;   // Status from ethernet controller
+
+// These come from cpu_wrapper autoconfig
+wire        ethernet_ena;
+wire  [7:0] ethernet_base;
+
 hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 (
 	.clk_sys(clk_sys),
@@ -254,7 +266,19 @@ wire        ide_wr;
 wire  [5:0] ide_req;
 
 wire [35:0] EXT_BUS;
-hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata));
+hps_ext hps_ext(
+	.*,
+	.ide_req(ide_fast ? ide_f_req : ide_c_req),
+  	.ide_din(ide_fast ? ide_f_readdata : ide_c_readdata),
+
+    // Add ethernet DMA interface
+    .eth_din(eth_din),
+    .eth_dout(eth_dout),
+    .eth_addr(eth_addr),
+    .eth_rd(eth_rd),
+    .eth_wr(eth_wr),
+    .eth_status(eth_status)
+);
 
 assign LED_POWER[1] = 1;
 assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
@@ -467,7 +491,11 @@ cpu_wrapper cpu_wrapper
 
 	.toccata_ena  (toccata_ena     ),
 	.toccata_base (toccata_base    ),
-	
+
+	// Ethernet connections
+	.ethernet_ena (ethernet_ena    ),
+	.ethernet_base(ethernet_base   ),
+
 	.ramsel       (ram_sel         ),
 	.ramaddr      (ram_addr        ),
 	.ramlds       (ram_lds         ),
@@ -528,7 +556,7 @@ sdram_ctrl ram1
 wire [15:0] ram_dout2;
 wire        ram_ready2;
 wire  [7:0] DDRAM_BE_S;
-   
+
 ddram_ctrl ram2
 (
 	.sysclk       (clk_114         ),
@@ -737,6 +765,18 @@ minimig minimig
 	.IO_DIN       (io_din           ),
 	.IO_DOUT      (fpga_dout        ),
 
+    // Add ethernet HPS interface
+    .eth_dout(eth_dout),        // Data from HPS
+    .eth_din(eth_din),          // Data to HPS
+    .eth_addr(eth_addr),        // Address from HPS
+    .eth_rd(eth_rd),            // Read enable from HPS
+    .eth_wr(eth_wr),            // Write enable from HPS
+    .eth_status(eth_status),    // Status to HPS
+    
+    // Ethernet card configuration
+    .ethernet_ena(ethernet_ena),
+    .ethernet_base(ethernet_base),
+
 	//video
 	._hsync       (hs               ), // horizontal sync
 	._vsync       (vs               ), // vertical sync
@@ -804,7 +844,7 @@ always @(posedge CLK_VIDEO) begin
 	reg [3:0] add;
 	reg [1:0] fs_res;
 	reg old_vs;
-	
+
 	div <= div + add;
 	if(~hblank & ~vblank) fs_res <= fs_res | res;
 
