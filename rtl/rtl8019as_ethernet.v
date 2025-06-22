@@ -194,7 +194,8 @@ reg [15:0] tx_length;
 reg [15:0] rx_length;
 
 // Packet buffer for DMA operations
-reg [7:0] packet_buffer [0:2047]; // 2KB buffer
+//reg [7:0] packet_buffer [0:2047]; // 2KB buffer
+reg [7:0] packet_buffer [0:511]; // 512B buffer
 
 // ============================================================================
 // MAIN CONTROL LOGIC
