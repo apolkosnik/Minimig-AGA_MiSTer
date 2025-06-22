@@ -218,6 +218,17 @@ module minimig
 	input  [15:0] IO_DIN,
 	output [15:0] IO_DOUT,
 
+	// Ethernet HPS interface
+	input	   [15:0] eth_dout,     // Data from HPS
+	output	   [15:0] eth_din,     // Data to HPS  
+	input	   [7:0] eth_addr,     // Address from HPS
+	input	   eth_rd,     // Read enable from HPS
+	input	   eth_wr,     // Write enable from HPS
+	output	   [7:0] eth_status,     // Status to HPS
+	// Ethernet card
+	input	   ethernet_ena,
+	input	   [7:0] ethernet_base,
+
 	//video
 	output 	     _hsync,      // horizontal sync
 	output 	     _vsync,      // vertical sync
@@ -298,6 +309,11 @@ wire        cpu_lwr;				//cpu low byte write enable
 
 //register address bus
 wire  [8:1] reg_address; 		//main register address bus
+
+//Ethernet
+wire        sel_ethernet;
+wire [15:0] ethernet_data_out;
+wire        ethernet_irq;		// Ethernet interrupt
 
 //rest of local signals
 wire        cpu_custom;
@@ -488,8 +504,9 @@ paula PAULA1
 	.sof(sof),
 	.strhor(strhor_paula),
 	.vblint(vbl_int),
-	.int2(int2|(ide_fast ? ide_ext_irq : gayle_irq)),
+	.int2(int2|(ide_fast ? ide_ext_irq : gayle_irq) | ethernet_irq), // add  ethernet interrupt
 	.int3(int3),
+	//.int6(int6 | int6_toccata | ethernet_irq), // if we wanted to switch to int6
 	.int6(int6 | int6_toccata),
 	._ipl(_iplx),
 	.audio_dmal(audio_dmal),
@@ -784,6 +801,9 @@ gary GARY1
 	.hdc_ena(ide_ena & ~ide_fast), // Gayle decoding enable	
 	.toccata_ena(toccata_ena),
 	.toccata_base(toccata_base),
+	// Ethernet connections
+	.ethernet_ena(ethernet_ena),
+	.ethernet_base(ethernet_base),
 	.ram_rd(ram_rd),
 	.ram_hwr(ram_hwr),
 	.ram_lwr(ram_lwr),
@@ -802,6 +822,7 @@ gary GARY1
 	.sel_gayle(sel_gayle),
 	.sel_rtc(sel_rtc),
 	.sel_toccata(sel_toccata),
+	.sel_ethernet(sel_ethernet), // ethernet
 	.reset(reset),
 	.clk(clk),
 	.rom_readonly(rom_readonly),
@@ -891,15 +912,42 @@ toccata #(
 	.out_right(toccata_aud_right)
 );
 
+rtl8019as_ethernet ETHERNET1
+(
+	.clk(clk),
+	.reset(reset),
+
+	// CPU interface
+	.cpu_address(cpu_address),
+	.cpu_data_in(cpu_data_out),
+	.cpu_data_out(ethernet_data_out),
+	.cpu_rd(cpu_rd),
+	.cpu_wr(cpu_hwr | cpu_lwr),
+	.sel_ethernet(sel_ethernet),
+
+	// Interrupt output
+	.eth_irq(ethernet_irq),
+
+	// HPS DMA interface
+	.eth_dout(eth_dout),
+	.eth_din(eth_din),
+	.eth_addr(eth_addr),
+	.eth_rd(eth_rd),
+	.eth_wr(eth_wr),
+	.eth_status(eth_status)
+);
+
 //-------------------------------------------------------------------------------------
 
 //data multiplexer
 assign cpu_data_in[15:0]= gary_data_out[15:0]
-							 | cia_data_out[15:0]
-							 | gayle_data_out[15:0]
-							 | cart_data_out[15:0]
-							 | rtc_out
-							 | toccata_out;
+						 | cia_data_out[15:0]
+						 | gayle_data_out[15:0]
+						 | cart_data_out[15:0]
+						 | rtc_out
+						 | toccata_out
+						 | ethernet_data_out;
+
 
 assign custom_data_out[15:0] = agnus_data_out[15:0]
 							 | paula_data_out[15:0]
