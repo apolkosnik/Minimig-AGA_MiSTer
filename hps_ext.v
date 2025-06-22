@@ -86,6 +86,10 @@ localparam UIO_KEYBOARD  = 'h05;
 localparam UIO_KBD_OSD   = 'h06;
 localparam UIO_GET_VMODE = 'h2C;
 localparam UIO_SET_VPOS  = 'h2D;
+// borrowing ao486 direct memory access according to: Main_MiSTer/user_io.h
+localparam UIO_DMA_WRITE = 'h61;
+localparam UIO_DMA_READ	 =  'h62;
+localparam UIO_DMA_SDIO  = 'h63; // fascinating
 
 reg [15:0] io_dout;
 reg        dout_en;
@@ -127,17 +131,18 @@ always@(posedge clk_sys) begin
 		if(byte_cnt == 1) begin
 			ide_addr <= {io_din[8],io_din[3:0]};
 			eth_addr <= io_din[7:0];
-			ide_cs   <= (io_din[15:9] == 7'b1111000);  // 0xF000-0xF07F
-			cdda_cs  <= (io_din[15:9] == 7'b1111001);  // 0xF080-0xF0FF
-			eth_cs   <= (io_din[15:9] == 7'b1111010);  // 0xF100-0xF17F
+			ide_cs   <= (io_din[15:9] == 7'b1111000);  // 0xF000-0xF07F (IDE)
+			cdda_cs  <= (io_din[15:9] == 7'b1111001);  // 0xF080-0xF0FF (CDDA)
+			eth_cs   <= (io_din[15:9] == 7'b1111010);  // 0xF500-0xF57F (Ethernet)
 		end
 
 		if(byte_cnt == 0) begin
 			cmd <= io_din;
 			dout_en <= (io_din >= EXT_CMD_MIN && io_din <= EXT_CMD_MAX) || (io_din >= EXT_CMD_MIN2 && io_din <= EXT_CMD_MAX2);
-			if(io_din == 'h63) begin
-				io_dout <= {4'hE, 1'b0, eth_status[7], 1'b0, cdda_req, 2'b00, ide_req};
-			end
+			//if(io_din == UIO_DMA_SDIO) begin
+				// Status bits: [15:12]=type, [11]=eth_irq, [10]=eth_link, [9]=cdda_req, [8:6]=reserved, [5:0]=ide_req
+				io_dout <= {4'hE, 1'b0, eth_status[4], eth_status[0], cdda_req, 2'b00, ide_req};
+			//end
 		end else begin
 			case(cmd)
 
@@ -198,24 +203,55 @@ always@(posedge clk_sys) begin
 						4: svbl_b <= io_din[11:0];
 					endcase
 
-				'h61: begin  // UIO_DMA_WRITE
-					if(byte_cnt >= 3) begin
-						cdda_wr <= cdda_cs;
-						ide_wr  <= ide_cs;
-						eth_wr  <= eth_cs;
+				UIO_DMA_WRITE:
+					begin  // UIO_DMA_WRITE
+						if(byte_cnt >= 3) begin
+							cdda_wr <= cdda_cs;
+							ide_wr  <= ide_cs;
+							eth_wr  <= eth_cs;
+						end
 					end
-				end
 
-				'h62: if(byte_cnt >= 3) begin  // UIO_DMA_READ
-					if(ide_cs) begin
-						io_dout <= ide_din;
-						ide_rd <= 1;
+				// UIO_DMA_READ:
+				// 	if(byte_cnt >= 3) begin  // UIO_DMA_READ
+				// 		if(ide_cs) begin
+				// 			io_dout <= ide_din;
+				// 			ide_rd <= 1;
+				// 		end
+				// 		else if(eth_cs) begin
+				// 			io_dout <= eth_din;
+				// 			eth_rd <= 1;
+				// 		end
+				// 	end
+
+				UIO_DMA_READ:
+					if(byte_cnt >= 3) begin  // UIO_DMA_READ
+						if(ide_cs) begin
+							io_dout <= ide_din;
+							ide_rd <= 1;
+						end
+						else if(eth_cs) begin
+							io_dout <= eth_din;
+							eth_rd <= 1;
+						end
+						// else begin
+						// 	io_dout <= 16'h0000; // Wondering what this does
+						// end
 					end
-					else if(eth_cs) begin
-						io_dout <= eth_din;
-						eth_rd <= 1;
-					end
-				end
+
+				UIO_DMA_SDIO:
+					case(byte_cnt)
+						1: begin
+							// Extended status information
+							io_dout <= {8'h00, eth_status};
+						end
+						2: begin
+							// Additional ethernet status
+							io_dout <= {14'h0000, eth_status[4], eth_status[0]}; // link_up, tx_busy
+						end
+					endcase
+
+
 			endcase
 		end
 	end
