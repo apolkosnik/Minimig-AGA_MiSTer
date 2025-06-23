@@ -12,7 +12,8 @@ module rtl8019as_ethernet
     input wire [15:0] cpu_data_in,
     output reg [15:0] cpu_data_out,
     input wire        cpu_rd,
-    input wire        cpu_wr,
+    input wire        cpu_hwr,     // high word write enable
+    input wire        cpu_lwr,     // low word write enable
     input wire        sel_ethernet,
 
     // Interrupt output (connects to Paula INT2)
@@ -125,12 +126,19 @@ localparam REG_MAR7_P1  = 4'hF;  // Multicast Address Register 7 highest byte
 // ADDRESS DECODING
 // ============================================================================
 
+// CPU data strobe decoding
+wire word_access = cpu_hwr && cpu_lwr;
+wire access_upper_byte = cpu_hwr && !cpu_lwr;
+wire access_lower_byte = !cpu_hwr && cpu_lwr;
+wire any_access = cpu_hwr || cpu_lwr;
+    
 // RTL8019AS is typically at 0x300 base for x-surf 100
 wire at_ethernet_offset = (cpu_address[10:8] == 3'h3);
 wire sel_chip = sel_ethernet && at_ethernet_offset;
 wire [4:0] full_reg_addr = cpu_address[5:1];
 wire [3:0] reg_addr = cpu_address[4:1];
 wire [1:0] page = cr[7:6];
+
 
 // ============================================================================
 // REGISTER STORAGE
@@ -443,7 +451,7 @@ always @(posedge clk) begin
         if (sel_chip) begin
 
             // ***** CPU WRITE OPERATIONS *****
-            if (cpu_wr) begin
+            if (any_access) begin
 
                 case (full_reg_addr)
                     5'h10, 5'h11, 5'h12, 5'h13, 5'h14, 5'h15, 5'h16, 5'h17: begin // Data port - DMA write
