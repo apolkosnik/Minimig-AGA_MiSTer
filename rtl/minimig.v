@@ -922,7 +922,8 @@ rtl8019as_ethernet ETHERNET1
 	.cpu_data_in(cpu_data_out),
 	.cpu_data_out(ethernet_data_out),
 	.cpu_rd(cpu_rd),
-	.cpu_wr(cpu_hwr | cpu_lwr),
+	.cpu_hwr(cpu_hwr),
+	.cpu_lwr(cpu_lwr),
 	.sel_ethernet(sel_ethernet),
 
 	// Interrupt output
