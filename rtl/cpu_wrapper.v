@@ -47,7 +47,7 @@ module cpu_wrapper
 	output reg        chip_rw,
 	input             chip_dtack,
 	input       [2:0] chip_ipl,
-	
+
 	input      [15:0] fastchip_dout,
 	output reg        fastchip_sel,
 	output            fastchip_lds,
@@ -69,13 +69,19 @@ module cpu_wrapper
 	output            toccata_ena,
 	output reg  [7:0] toccata_base,
 
+	// Ethernet signals
+	input             sel_ethernet,    // From Gary module
+	output            ethernet_ena,
+	output reg  [7:0] ethernet_base,
+	output            eth_irq,
+
 	output reg  [1:0] cpustate,
 	output reg  [3:0] cacr,
 	output reg [31:0] nmi_addr
 );
 
-assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
-assign ramshared    = sel_dd;
+assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg | sel_ethernet_shm);
+assign ramshared    = sel_dd | sel_ethernet_shm;
 
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
@@ -86,6 +92,13 @@ wire sel_z2ram  = !cpu_addr[31:24] && (cpu_addr[23] ^ |cpu_addr[22:21]) && z2ram
 wire sel_zram   = sel_z3ram0 | sel_z3ram1 | sel_z2ram;
 wire sel_dd     = (cpu_addr[31:16] == 16'h00DD) && (cpu_addr[15:13] == 'b010);
 wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
+
+// Shared memory decoding (separate from I/O registers)
+// This is for bulk data transfer, not register access
+//wire sel_ethernet_shm_decoded = (cpu_addr[31:16] == 16'h28EA) && ethernet_ena;   // 0x28EA1000-0x28EAFFFF
+wire sel_ethernet_shm_decoded = (cpu_addr[31:16] == 16'h00EA) && (cpu_addr[15]) && ethernet_ena;
+wire sel_ethernet_shm = sel_ethernet_shm_decoded;
+
 
 // don't sel_kickram when writing
 wire sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx
@@ -355,6 +368,7 @@ end
 ///////////////////// AUTOCONFIG ////////////////////////////
 
 reg       ac_toccata;
+reg       ac_ethernet;
 reg [2:0] ac_memcard;
 reg [3:0] autocfg_data;
 
@@ -394,6 +408,40 @@ always @(*) begin
 			default: ;
 		endcase
 	end 
+	// Ethernet card (Ariadne II  or X-Surf 100  ne2000 compatible)
+	else if(ac_ethernet) begin
+		case (chip_addr[6:1])
+			6'h0: autocfg_data = 4'b1100; // Zorro-II card, no link, no ROM  
+			//6'h0: autocfg_data = 4'b1000;	// Zorro-III card, no mem, no ROM
+			6'h1: autocfg_data = 4'b0001; // Next board not related, size 64k
+			// Product ID: 0xCA or 202 decimal (inverted)
+			// 6'h2: autocfg_data = 4'b0011; // 0xc - Product number high nibble (inverted) - 0xC
+			// 6'h3: autocfg_data = 4'b0101; // 0xa - Product number low nibble (inverted) - Product 0xA
+			// //6'h5: autocfg_data = 4'b1101; // logical size 64k
+			// // below Manufacturer ID: 0x0877 or 2167 decimal (inverted)
+			// 6'h8: autocfg_data = 4'b1111; // 0x0
+			// 6'h9: autocfg_data = 4'b0111; // 0x8
+			// 6'ha: autocfg_data = 4'b1000; // 0x7
+			// 6'hb: autocfg_data = 4'b1000; // 0x7
+
+			// X-Surf 100
+			6'h2: autocfg_data = 4'b1001; //  !6 Upper byte of 0x64
+			6'h3: autocfg_data = 4'b1011; // !4 Lower byte product number
+
+			// X-Surf or X-Surf 2 or X-Surf 3
+			// 6'h2: autocfg_data = 4'b1110; // 0x17
+			// 6'h3: autocfg_data = 4'b1000; // Lower byte product number
+			//6'h5: autocfg_data = 4'b1101; // logical size 64k -- commented out -> logical size == physical size. Issue with KS1.3?
+			6'h5: autocfg_data = 4'b1111; // No size extension
+			6'h8: autocfg_data = 4'b1110; // Manufacturer ID: 0x1212 or 4626
+			6'h9: autocfg_data = 4'b1101;
+			6'ha: autocfg_data = 4'b1110;
+			6'hb: autocfg_data = 4'b1101;
+			// Serial number
+			6'h13: autocfg_data = 4'b1110; // Serial=1
+			default: ;
+		endcase
+	end
 	// Zorro III RAM 128MB/256MB/384MB
 	else if(ac_memcard[2]) begin
 		case (chip_addr[6:1])
@@ -412,7 +460,8 @@ always @(*) begin
 	end
 end
 
-wire sel_autoconfig = (chip_addr[23:16] == 8'b11101000) && (ac_memcard || ac_toccata); //$E80000 - $E8FFFF
+// Add ethernet card to autoconfig chain after Toccata - addresses for the ethernet are hardcoded to 0xEA0000 range for now
+wire sel_autoconfig = (chip_addr[23:16] == 8'b11101000) && (ac_memcard || ac_toccata || ac_ethernet); //$E80000 - $E8FFFF
 
 reg       z2ram_ena;
 reg [4:0] z3ram_base0;
@@ -426,6 +475,7 @@ always @(posedge clk) begin
 	if (~reset | ~reset_out) begin
 		ac_memcard  <= cpucfg[1] ? fastramcfg : fastramcfg[2] ? 3'd3 : {1'b0, fastramcfg[1:0]};
 		ac_toccata  <= 1;
+		ac_ethernet <= 1;  // enable ethernet autoconfig
 		z2ram_ena   <= 0;
 		z3ram_ena0  <= 0;
 		z3ram_ena1  <= 0;
@@ -443,7 +493,15 @@ always @(posedge clk) begin
 			if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, Toccata card in ZII io space ($E90000)
 				toccata_base <= cpu_dout[7:0];
 				ac_toccata<=0;
-			end		
+			end
+		end
+		// Ethernet with ZII support
+		else if(ac_ethernet) begin
+			//if(chip_addr[6:1] == 6'b100010) begin // Register 0x44, assign base address to ZIII.
+			if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, Ethernet card in ZII io space ($EA0000)
+				ethernet_base <= cpu_dout[7:0];
+				ac_ethernet <= 0;
+			end
 		end
 		else if(ac_memcard[2]) begin
 			if(chip_addr[6:1] == 6'b100010) begin // Register 0x44, assign base address to ZIII RAM.
@@ -463,5 +521,9 @@ always @(posedge clk) begin
 end
 
 assign toccata_ena = ~ac_toccata;
+assign ethernet_ena = ~ac_ethernet;
+
+// Ethernet interrupt is handled by the ethernet module in minimig.v
+assign eth_irq = 1'b0;
 
 endmodule

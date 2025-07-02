@@ -78,6 +78,10 @@ module gary
 
 	input         toccata_ena,
 	input   [7:0] toccata_base,
+	
+	// Ethernet support
+	input         ethernet_ena,
+	input   [7:0] ethernet_base,
 
 	output        ram_rd, //bus read
 	output        ram_hwr, //bus high write
@@ -97,6 +101,7 @@ module gary
 	output       sel_ide, //select $DAxxxx
 	output       sel_gayle, //select $DExxxx
 	output       sel_toccata, //select $E9xxxx (or whatever's specified by toccata_base)
+	output       sel_ethernet, //select ethernet card ZII or ZIII address space (autoconfig dependent)
 	output reg   rom_readonly = 0 //when zero allows to write to $fc-$ff, blocks effect of kick256kmirror.  
 );
 
@@ -171,6 +176,8 @@ assign sel_ide   = hdc_ena && cpu_address_in[23:16]==8'b1101_1010;        //IDE 
 assign sel_gayle = hdc_ena && cpu_address_in[23:12]==12'b1101_1110_0001;  //GAYLE registers at $DE1000 - $DE1FFF
 assign sel_rtc   = cpu_address_in[23:16]==8'b1101_1100;                   //RTC registers at $DC0000 - $DCFFFF
 assign sel_reg   = cpu_address_in[23:21]==3'b110 ? ~(|t_sel_slow | sel_rtc | sel_ide | sel_gayle) : 1'b0;	//chip registers at $DF0000 - $DFFFFF
+// probably not needed
+//assign sel_reg   = cpu_address_in[23:21]==3'b110 ? ~(|t_sel_slow | sel_rtc | sel_ide | sel_gayle | sel_ethernet) : 1'b0;	//chip registers at $DF0000 - $DFFFFF
 assign sel_cia   = cpu_address_in[23:16]==8'hBF; // $BFxxxx
 assign sel_cia_a = sel_cia & ~cpu_address_in[12];
 assign sel_cia_b = sel_cia & ~cpu_address_in[13];
@@ -178,9 +185,12 @@ assign sel_rtg   = cpu_address_in[23:16]==8'hB8; // $B8xxxxx
 assign sel_bank_1 = cpu_address_in[23:21]==3'b001;
 
 assign sel_toccata = toccata_ena && cpu_address_in[23:16]==toccata_base; // Nominally $e9xxxx
+assign sel_ethernet = ethernet_ena && cpu_address_in[23:16]==ethernet_base; // Zorro3 Ethernet address space
 
 //data bus slow down
 assign dbs = cpu_address_in[23:21]==3'b000 || cpu_address_in[23:20]==4'b1100 || cpu_address_in[23:19]==5'b1101_0 || cpu_address_in[23:16]==8'b1101_1111;
 assign xbs = ~(sel_cia | sel_gayle | sel_ide);
+// probably not needed
+//assign xbs = ~(sel_cia | sel_gayle | sel_ide | sel_ethernet);
 
 endmodule

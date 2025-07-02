@@ -42,8 +42,6 @@ module emu
 	input  [11:0] HDMI_WIDTH,
 	input  [11:0] HDMI_HEIGHT,
 	output        HDMI_FREEZE,
-	output        HDMI_BLACKOUT,
-	output        HDMI_BOB_DEINT,
 
 `ifdef MISTER_FB
 	// Use framebuffer in DDRAM
@@ -166,8 +164,6 @@ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign BUTTONS = 0;
 assign VGA_DISABLE = 0;
 assign HDMI_FREEZE = 0;
-assign HDMI_BLACKOUT = 0;
-assign HDMI_BOB_DEINT = 0;
 
 `include "build_id.v" 
 localparam CONF_STR = {
@@ -219,6 +215,12 @@ wire [15:0] fpga_dout;
 wire [21:0] gamma_bus;
 
 wire  [7:0] uart_mode;
+
+// Ethernet autoconfig signals (these come from cpu_wrapper)
+wire        ethernet_ena;   // Enabled after autoconfig completes  
+wire  [7:0] ethernet_base;  // Base address set during autoconfig
+//wire        eth_irq;   // Ethernet interrupt signal
+wire        sel_ethernet;   // Ethernet address space selection from Gary
 
 hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 (
@@ -471,7 +473,13 @@ cpu_wrapper cpu_wrapper
 
 	.toccata_ena  (toccata_ena     ),
 	.toccata_base (toccata_base    ),
-	
+
+	// Ethernet connections
+	.sel_ethernet (sel_ethernet    ),  // From Gary module via minimig
+	.ethernet_ena (ethernet_ena    ),
+	.ethernet_base(ethernet_base   ),
+	//.eth_irq (eth_irq    ),
+
 	.ramsel       (ram_sel         ),
 	.ramaddr      (ram_addr        ),
 	.ramlds       (ram_lds         ),
@@ -740,6 +748,11 @@ minimig minimig
 	.IO_WAIT      (io_wait          ),
 	.IO_DIN       (io_din           ),
 	.IO_DOUT      (fpga_dout        ),
+    
+    // Ethernet card configuration
+    .ethernet_ena(ethernet_ena),
+    .ethernet_base(ethernet_base),
+    .sel_ethernet(sel_ethernet),
 
 	//video
 	._hsync       (hs               ), // horizontal sync

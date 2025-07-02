@@ -218,6 +218,11 @@ module minimig
 	input  [15:0] IO_DIN,
 	output [15:0] IO_DOUT,
 
+	// Ethernet card
+	input	   ethernet_ena,
+	input	   [7:0] ethernet_base,
+	output	   sel_ethernet,
+
 	//video
 	output 	     _hsync,      // horizontal sync
 	output 	     _vsync,      // vertical sync
@@ -298,6 +303,10 @@ wire        cpu_lwr;				//cpu low byte write enable
 
 //register address bus
 wire  [8:1] reg_address; 		//main register address bus
+
+//Ethernet
+wire [15:0] ethernet_data_out;
+wire        eth_irq;		// Ethernet interrupt
 
 //rest of local signals
 wire        cpu_custom;
@@ -488,7 +497,7 @@ paula PAULA1
 	.sof(sof),
 	.strhor(strhor_paula),
 	.vblint(vbl_int),
-	.int2(int2|(ide_fast ? ide_ext_irq : gayle_irq)),
+	.int2(int2|(ide_fast ? ide_ext_irq : gayle_irq) | eth_irq), // add  ethernet interrupt
 	.int3(int3),
 	.int6(int6 | int6_toccata),
 	._ipl(_iplx),
@@ -784,6 +793,10 @@ gary GARY1
 	.hdc_ena(ide_ena & ~ide_fast), // Gayle decoding enable	
 	.toccata_ena(toccata_ena),
 	.toccata_base(toccata_base),
+	// Ethernet connections
+	.ethernet_ena(ethernet_ena),
+	.ethernet_base(ethernet_base),
+	.sel_ethernet(sel_ethernet), // ethernet
 	.ram_rd(ram_rd),
 	.ram_hwr(ram_hwr),
 	.ram_lwr(ram_lwr),
@@ -802,11 +815,15 @@ gary GARY1
 	.sel_gayle(sel_gayle),
 	.sel_rtc(sel_rtc),
 	.sel_toccata(sel_toccata),
+
 	.reset(reset),
 	.clk(clk),
 	.rom_readonly(rom_readonly),
 	.bootrom(bootrom)
 );
+
+
+
 
 gayle GAYLE1
 (
@@ -891,15 +908,40 @@ toccata #(
 	.out_right(toccata_aud_right)
 );
 
+// Instantiate ethernet interface for register I/O only
+ethernet_interface eth_if (
+    .clk(clk),
+    .reset(reset),
+    .cpu_addr(cpu_address_out[23:1]),    // Full 23-bit address bus
+    .cpu_data_in(cpu_data_out),          // CPU data output goes to ethernet input
+    .cpu_data_out(ethernet_data_out),    // Ethernet data output
+    .cpu_rd(cpu_rd),                     // CPU read signal
+    .cpu_lwr(cpu_lwr),                     // CPU lower byte write signal
+    .cpu_hwr(cpu_hwr),                     // CPU higher byte write signal
+    .cpu_uds(_cpu_uds),                  // Upper data strobe
+    .cpu_lds(_cpu_lds),                  // Lower data strobe
+    
+    // Chip select (renamed from cpu_cs to eth_cs)
+    .sel_ethernet(sel_ethernet),
+    
+    // Ethernet base address (Amiga address space)
+    .ethernet_base(ethernet_base),
+    
+    // Interrupt output to Amiga
+    .eth_irq(eth_irq)
+);
+
 //-------------------------------------------------------------------------------------
 
 //data multiplexer
 assign cpu_data_in[15:0]= gary_data_out[15:0]
-							 | cia_data_out[15:0]
-							 | gayle_data_out[15:0]
-							 | cart_data_out[15:0]
-							 | rtc_out
-							 | toccata_out;
+						 | cia_data_out[15:0]
+						 | gayle_data_out[15:0]
+						 | cart_data_out[15:0]
+						 | rtc_out
+						 | toccata_out
+						 | ethernet_data_out;
+
 
 assign custom_data_out[15:0] = agnus_data_out[15:0]
 							 | paula_data_out[15:0]
