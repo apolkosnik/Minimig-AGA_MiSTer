@@ -73,6 +73,7 @@ module cpu_wrapper
 	input             sel_ethernet,    // From Gary module
 	output            ethernet_ena,
 	output reg  [7:0] ethernet_base,
+	output            sel_ethernet_shm,  // Shared memory selection for ethernet module
 	output            eth_irq,
 
 	output reg  [1:0] cpustate,
@@ -93,11 +94,17 @@ wire sel_zram   = sel_z3ram0 | sel_z3ram1 | sel_z2ram;
 wire sel_dd     = (cpu_addr[31:16] == 16'h00DD) && (cpu_addr[15:13] == 'b010);
 wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
 
-// Shared memory decoding (separate from I/O registers)
-// This is for bulk data transfer, not register access
-//wire sel_ethernet_shm_decoded = (cpu_addr[31:16] == 16'h28EA) && ethernet_ena;   // 0x28EA1000-0x28EAFFFF
-wire sel_ethernet_shm_decoded = (cpu_addr[31:16] == 16'h00EA) && (cpu_addr[15]) && ethernet_ena;
-wire sel_ethernet_shm = sel_ethernet_shm_decoded;
+//   Address Decoding:
+
+//   - Register space (0xEA0000-0xEA0FFF): Only sel_ethernet triggers
+//   - Shared memory (0xEA1000-0xEAFFFF): Both sel_ethernet and sel_ethernet_shm trigger
+
+//   This aligns with the ethernet module's shared memory layout:
+//   - ETH_SHM_CTRL_FLAGS = 0x1000 (at 0xEA1000)
+//   - ETH_SHM_TX_BUFFER = 0x2000 (at 0xEA2000)
+//   - ETH_SHM_RX_BUFFER = 0x2600 (at 0xEA2600)
+//   - ETH_SHM_NE_MEMORY = 0x3000 (at 0xEA3000)
+assign sel_ethernet_shm = (cpu_addr[23:16] == ethernet_base) && (cpu_addr[15:12] >= 4'h1) && ethernet_ena;
 
 
 // don't sel_kickram when writing

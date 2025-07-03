@@ -222,6 +222,7 @@ module minimig
 	input	   ethernet_ena,
 	input	   [7:0] ethernet_base,
 	output	   sel_ethernet,
+	output	   sel_ethernet_shm,
 
 	//video
 	output 	     _hsync,      // horizontal sync
@@ -923,6 +924,9 @@ ethernet_interface eth_if (
     
     // Chip select (renamed from cpu_cs to eth_cs)
     .sel_ethernet(sel_ethernet),
+    
+    // Chip select for shared memory buffer access
+    .sel_ethernet_shm(sel_ethernet_shm),
     
     // Ethernet base address (Amiga address space)
     .ethernet_base(ethernet_base),
