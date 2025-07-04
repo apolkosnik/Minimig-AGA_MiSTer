@@ -32,6 +32,92 @@ module ethernet_interface
     output reg         eth_irq
 );
 
+//   Ethernet Controller Memory Map
+
+//   Base Address: 0xEA0000 (configurable via autoconfig)
+
+//   Register Space (0xEA0000 - 0xEA0FFF)
+
+//   Selected by: sel_ethernet only (mutually exclusive with sel_ethernet_shm)
+
+//   NE2000 Registers (0xEA0600 - 0xEA061F)
+
+//   - 0xEA0600-0xEA060F: Page 0 registers
+//     - 0x00: CR (Command Register)
+//     - 0x01: CLDA0/PSTART (Current Local DMA Address 0 / Page Start)
+//     - 0x02: CLDA1/PSTOP (Current Local DMA Address 1 / Page Stop)
+//     - 0x03: BNRY (Boundary Register)
+//     - 0x04: TSR/TPSR (Transmit Status / Transmit Page Start)
+//     - 0x05: NCR/TBCR0 (Number of Collisions / Transmit Byte Count 0)
+//     - 0x06: FIFO/TBCR1 (FIFO / Transmit Byte Count 1)
+//     - 0x07: ISR (Interrupt Status Register)
+//     - 0x08: CRDA0/RSAR0 (Current Remote DMA Address 0 / Remote Start Address 0)
+//     - 0x09: CRDA1/RSAR1 (Current Remote DMA Address 1 / Remote Start Address 1)
+//     - 0x0A: 8019ID0/RBCR0 (RTL8019 ID0 / Remote Byte Count 0)
+//     - 0x0B: 8019ID1/RBCR1 (RTL8019 ID1 / Remote Byte Count 1)
+//     - 0x0C: RSR (Receive Status Register)
+//     - 0x0D: CNTR0 (Tally Counter 0)
+//     - 0x0E: CNTR1 (Tally Counter 1)
+//     - 0x0F: CNTR2 (Tally Counter 2)
+//   - 0xEA0610: Data Port (Remote DMA port)
+//   - 0xEA0618-0xEA061F: Reset port (write triggers reset)
+
+//   Additional Register Windows
+
+//   - 0xEA0620: Alternate Data Port address
+//   - 0xEA0C40: Mirror Data Port address
+
+//   Shared Memory Space (0xEA1000 - 0xEAFFFF)
+
+//   Selected by: sel_ethernet_shm only (mutually exclusive with sel_ethernet)
+
+//   Control Structure (0xEA1000 - 0xEA1FFF)
+
+//   - 0xEA1000: ETH_SHM_CTRL_FLAGS (4 bytes) - Control flags
+//   - 0xEA1004: ETH_SHM_CTRL_REGS (72 bytes) - NE2000 registers (all pages + extra)
+//   - 0xEA104C: ETH_SHM_CTRL_MAC (6 bytes) - MAC address
+//   - 0xEA1052: ETH_SHM_CTRL_STATUS (2 bytes) - Status
+//   - 0xEA1054: ETH_SHM_CTRL_STATS (52 bytes) - Packet statistics
+//   - 0xEA1088: ETH_SHM_HPS_HEARTBEAT (4 bytes) - HPS heartbeat
+//   - 0xEA108C: ETH_SHM_HPS_SIGNATURE (4 bytes) - Signature (0xCAFEBABE)
+
+//   Packet Buffers (0xEA2000 - 0xEA2FFF)
+
+//   - 0xEA2000: ETH_SHM_TX_BUFFER (1500 bytes) - TX packet buffer
+//   - 0xEA2600: ETH_SHM_RX_BUFFER (1500 bytes) - RX packet buffer
+//   - 0xEA2C00: ETH_SHM_PACKET_INFO (512 bytes) - Packet metadata
+
+//   NE2000 Memory Space (0xEA3000 - 0xEA6FFF)
+
+//   - 0xEA3000: ETH_SHM_NE_MEMORY (16KB) - NE2000 packet memory
+//     - Used for packet storage in NE2000 ring buffer format
+//     - Accessed via Remote DMA operations
+
+//   Debug/Future Use (0xEA7000 - 0xEAFFFF)
+
+//   - 0xEA7000: ETH_SHM_DEBUG_INFO (8KB) - Debug information
+//   - 0xEA9000: ETH_SHM_FUTURE_USE (31KB) - Reserved for expansion
+
+//   Access Methods
+
+//   1. Register I/O (0xEA0000-0xEA0FFF):
+//     - Direct CPU read/write to NE2000 registers
+//     - Data port access for packet data via Remote DMA
+//   2. Shared Memory (0xEA1000-0xEAFFFF):
+//     - Direct memory-mapped access to buffers and control structures
+//     - Used by HPS for packet data transfer and status updates
+//     - CPU can also directly access for diagnostics
+
+//   Address Decoding Logic
+
+//   sel_ethernet = (cpu_addr[23:16] == ethernet_base) && (cpu_addr[15:12] < 4'h1)
+//   sel_ethernet_shm = (cpu_addr[23:16] == ethernet_base) && (cpu_addr[15:12] >= 4'h1)
+//   
+//   Note: Shared memory access types (is_*_access) include sel_ethernet_shm check internally
+
+//   This provides a complete 64KB address space with clear separation between register I/O and shared memory regions.
+
+
 // Use ethernet_base + ETH_SHM_* offsets for direct mapped shared memory access
 // This eliminates the huge 64KB internal memory array and saves FPGA resources
 // Memory access is done through direct address mapping instead of array storage
@@ -64,17 +150,17 @@ parameter [1:0] COMPLETE = 2'b10;
 reg [1:0] state;
 
 // Full RTL8019AS register set stored in shared memory
-// All 32 NE2000 registers are maintained in shared memory at ETH_CTRL_REGS offset
+// All NE2000 registers (72 bytes for all pages + extra space) are maintained in shared memory at ETH_CTRL_REGS offset
 // Only cache essential values locally for performance and identification
 
 // Shared memory layout offsets - reduced to 16 bits for optimization
 parameter [15:0] ETH_SHM_CTRL_FLAGS    = 16'h1000;  // 4 bytes - control flags
-parameter [15:0] ETH_SHM_CTRL_REGS     = 16'h1004;  // 32 bytes - NE2000 registers
-parameter [15:0] ETH_SHM_CTRL_MAC      = 16'h1024;  // 6 bytes - MAC address
-parameter [15:0] ETH_SHM_CTRL_STATUS   = 16'h102A;  // 2 bytes - status
-parameter [15:0] ETH_SHM_CTRL_STATS    = 16'h102C;  // 52 bytes - packet statistics
-parameter [15:0] ETH_SHM_HPS_HEARTBEAT = 16'h1060;  // 4 bytes - HPS heartbeat
-parameter [15:0] ETH_SHM_HPS_SIGNATURE = 16'h1064;  // 4 bytes - signature (0xCAFEBABE)
+parameter [15:0] ETH_SHM_CTRL_REGS     = 16'h1004;  // 72 bytes - NE2000 registers (all pages + extra)
+parameter [15:0] ETH_SHM_CTRL_MAC      = 16'h104C;  // 6 bytes - MAC address
+parameter [15:0] ETH_SHM_CTRL_STATUS   = 16'h1052;  // 2 bytes - status
+parameter [15:0] ETH_SHM_CTRL_STATS    = 16'h1054;  // 52 bytes - packet statistics
+parameter [15:0] ETH_SHM_HPS_HEARTBEAT = 16'h1088;  // 4 bytes - HPS heartbeat
+parameter [15:0] ETH_SHM_HPS_SIGNATURE = 16'h108C;  // 4 bytes - signature (0xCAFEBABE)
 parameter [15:0] ETH_SHM_TX_BUFFER     = 16'h2000;  // 1500 bytes - TX buffer
 parameter [15:0] ETH_SHM_RX_BUFFER     = 16'h2600;  // 1500 bytes - RX buffer
 parameter [15:0] ETH_SHM_PACKET_INFO   = 16'h2C00;  // 512 bytes - packet metadata
@@ -395,7 +481,7 @@ always @(posedge clk) begin
             end
         end
         // Handle NE2000 memory writes (direct memory access) - write directly to shared memory
-        else if (sel_ethernet_shm && cpu_wr && is_memory_access) begin
+        else if (cpu_wr && is_memory_access) begin
             if (~cpu_uds) begin  // Check upper data strobe for high byte access
                 // Calculate memory offset from 0x4000 base (cpu_addr 0x4000-0x7FFF maps to memory offset 0x0000-0x3FFF)
                 // Direct mapped NE2000 memory write
@@ -404,7 +490,7 @@ always @(posedge clk) begin
             end
         end
         // Handle NE2000 memory reads (direct memory access) - read from shared memory
-        else if (sel_ethernet_shm && cpu_rd && is_memory_access && !memory_read_pending) begin
+        else if (cpu_rd && is_memory_access && !memory_read_pending) begin
             // Calculate memory offset from 0x4000 base (cpu_addr 0x4000-0x7FFF maps to memory offset 0x0000-0x3FFF)
             // Direct mapped NE2000 memory read
             // Source address: calc_mem_addr(ETH_SHM_NE_MEMORY + {15'h0000, (cpu_addr[15:1] - 15'h2000), 1'b0})
@@ -413,7 +499,7 @@ always @(posedge clk) begin
             memory_read_pending <= 1'b1;
         end
         // Handle control writes (direct control access) - write directly to shared memory
-        else if (sel_ethernet_shm && cpu_wr && is_control_access) begin
+        else if (cpu_wr && is_control_access) begin
             if (~cpu_uds) begin  // Check upper data strobe for high byte access
                 // Direct access to control structure
                 // Direct mapped control memory write
@@ -421,7 +507,7 @@ always @(posedge clk) begin
             end
         end
         // Handle control reads (direct control access) - read from shared memory
-        else if (sel_ethernet_shm && cpu_rd && is_control_access && !control_read_pending) begin
+        else if (cpu_rd && is_control_access && !control_read_pending) begin
             // Direct access to control structure
             // Direct mapped control memory read
             // Source address: eth_shared_base + {15'h1000, cpu_addr[15:1], 1'b0}
@@ -430,7 +516,7 @@ always @(posedge clk) begin
             control_read_pending <= 1'b1;
         end
         // Handle buffer writes (direct TX/RX buffer access) - write directly to shared memory
-        else if (sel_ethernet_shm && cpu_wr && is_buffer_access) begin
+        else if (cpu_wr && is_buffer_access) begin
             if (~cpu_uds) begin  // Check upper data strobe for high byte access
                 // Map 0x1000-0x1FFF to both TX and RX buffers
                 if ((cpu_addr[15:1] - 15'h0800) < 16'h02EE) begin
@@ -444,7 +530,7 @@ always @(posedge clk) begin
             end
         end
         // Handle buffer reads (direct TX/RX buffer access) - read from shared memory
-        else if (sel_ethernet_shm && cpu_rd && is_buffer_access && !buffer_read_pending) begin
+        else if (cpu_rd && is_buffer_access && !buffer_read_pending) begin
             // Map 0x1000-0x1FFF to both TX and RX buffers
             if ((cpu_addr[15:1] - 15'h0800) < 16'h02EE) begin
                 // TX buffer range
@@ -1236,12 +1322,12 @@ assign is_data_port_access = (effective_addr == 16'h0310) || (effective_addr == 
 assign is_register_access = ((effective_addr >= 16'h0300) && (effective_addr <= 16'h030F)) ||
                            ((effective_addr >= 16'h0600) && (effective_addr <= 16'h061F));
 
-// Memory ranges using byte addresses
-assign is_memory_access = (byte_addr >= 16'h3000) && (byte_addr <= 16'h6FFF);
-assign is_control_access = (byte_addr >= 16'h1000) && (byte_addr <= 16'h1FFF);
-assign is_buffer_access = (byte_addr >= 16'h2000) && (byte_addr <= 16'h2FFF);
-assign is_tx_buffer_access = (byte_addr >= 16'h2000) && (byte_addr <= 16'h25FF);
-assign is_rx_buffer_access = (byte_addr >= 16'h2600) && (byte_addr <= 16'h2BFF);
+// Memory ranges using byte addresses - only active when sel_ethernet_shm is true
+assign is_memory_access = sel_ethernet_shm && (byte_addr >= 16'h3000) && (byte_addr <= 16'h6FFF);
+assign is_control_access = sel_ethernet_shm && (byte_addr >= 16'h1000) && (byte_addr <= 16'h1FFF);
+assign is_buffer_access = sel_ethernet_shm && (byte_addr >= 16'h2000) && (byte_addr <= 16'h2FFF);
+assign is_tx_buffer_access = sel_ethernet_shm && (byte_addr >= 16'h2000) && (byte_addr <= 16'h25FF);
+assign is_rx_buffer_access = sel_ethernet_shm && (byte_addr >= 16'h2600) && (byte_addr <= 16'h2BFF);
 
 // Create word_addr for backward compatibility
 wire [15:0] word_addr;
@@ -1426,7 +1512,7 @@ always @(*) begin
         end
     
     // Handle shared memory space access (0xEA1000-0xEAFFFF)
-    if (sel_ethernet_shm && cpu_rd) begin
+    if (cpu_rd && (is_memory_access || is_control_access || is_tx_buffer_access || is_rx_buffer_access)) begin
         if (is_memory_access) begin
             // NE2000 memory read - return data from shared memory
             cpu_data_out = memory_read_data;

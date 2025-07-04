@@ -97,14 +97,17 @@ wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
 //   Address Decoding:
 
 //   - Register space (0xEA0000-0xEA0FFF): Only sel_ethernet triggers
-//   - Shared memory (0xEA1000-0xEAFFFF): Both sel_ethernet and sel_ethernet_shm trigger
+//   - Shared memory (0xEA1000-0xEAFFFF): Only sel_ethernet_shm triggers
+//   
+//   Note: HPS sees shared memory at 0x28EA1000+, but Amiga side sees 0xEA1000+
 
 //   This aligns with the ethernet module's shared memory layout:
-//   - ETH_SHM_CTRL_FLAGS = 0x1000 (at 0xEA1000)
-//   - ETH_SHM_TX_BUFFER = 0x2000 (at 0xEA2000)
-//   - ETH_SHM_RX_BUFFER = 0x2600 (at 0xEA2600)
-//   - ETH_SHM_NE_MEMORY = 0x3000 (at 0xEA3000)
-assign sel_ethernet_shm = (cpu_addr[23:16] == ethernet_base) && (cpu_addr[15:12] >= 4'h1) && ethernet_ena;
+//   - ETH_SHM_CTRL_FLAGS = 0x1000 (at Amiga 0xEA1000, HPS 0x28EA1000)
+//   - ETH_SHM_TX_BUFFER = 0x2000 (at Amiga 0xEA2000, HPS 0x28EA2000)
+//   - ETH_SHM_RX_BUFFER = 0x2600 (at Amiga 0xEA2600, HPS 0x28EA2600)
+//   - ETH_SHM_NE_MEMORY = 0x3000 (at Amiga 0xEA3000, HPS 0x28EA3000)
+//assign sel_ethernet_shm = (cpu_addr[23:16] == ethernet_base) && (cpu_addr[15:12] >= 4'h1) && ethernet_ena;
+assign sel_ethernet_shm = (cpu_addr[31:16] == 16'h00EA) && (cpu_addr[15:12] >= 4'h1);
 
 
 // don't sel_kickram when writing
@@ -137,8 +140,8 @@ assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 // 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v 
 // All Zorro RAM goes to DDR3
 assign ramaddr[28]    = sel_zram & ~sel_z3ram0;
-assign ramaddr[27]    = sel_zram & (~sel_z3ram1 | cpu_addr[27]);
-assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}});
+assign ramaddr[27]    = (sel_zram | sel_ethernet_shm)  & (~sel_z3ram1 | cpu_addr[27]);
+assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1 | sel_ethernet_shm) ? cpu_addr[26:23] : (sel_rtg ? 4'b1110 : {4{sel_dd}});
 assign ramaddr[22:19] = {4{sel_dd}} | cpu_addr[22:19];
 assign ramaddr[18]    =    sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18];
 assign ramaddr[17:16] = {2{sel_dd}} | cpu_addr[17:16];

@@ -118,9 +118,9 @@ always@(posedge clk_sys) begin
 		if(byte_cnt == 0) begin
 			cmd <= io_din;
 			dout_en <= (io_din >= EXT_CMD_MIN && io_din <= EXT_CMD_MAX) || (io_din >= EXT_CMD_MIN2 && io_din <= EXT_CMD_MAX2);
-			if(io_din == 'h63) begin
+			//if(io_din == 'h63) begin
 				io_dout <= {4'hE, 2'b00, 1'b0, cdda_req, 2'b00, ide_req};
-			end
+			//end
 		end else begin
 			case(cmd)
 			

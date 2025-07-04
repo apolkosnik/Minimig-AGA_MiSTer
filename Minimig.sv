@@ -221,7 +221,7 @@ wire        ethernet_ena;   // Enabled after autoconfig completes
 wire  [7:0] ethernet_base;  // Base address set during autoconfig
 //wire        eth_irq;   // Ethernet interrupt signal
 wire        sel_ethernet;   // Ethernet address space selection from Gary
-wire        sel_ethernet_shm;   // Ethernet shared memory selection from cpu_wrapper
+wire        sel_ethernet_shm;   // Ethernet shared memory selection from Gary
 
 hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 (

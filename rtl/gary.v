@@ -185,7 +185,7 @@ assign sel_rtg   = cpu_address_in[23:16]==8'hB8; // $B8xxxxx
 assign sel_bank_1 = cpu_address_in[23:21]==3'b001;
 
 assign sel_toccata = toccata_ena && cpu_address_in[23:16]==toccata_base; // Nominally $e9xxxx
-assign sel_ethernet = ethernet_ena && cpu_address_in[23:16]==ethernet_base; // Zorro3 Ethernet address space
+assign sel_ethernet = ethernet_ena && cpu_address_in[23:16]==ethernet_base && (cpu_address_in[15:12] < 4'h1); // Ethernet register space only (excludes shared memory)
 
 //data bus slow down
 assign dbs = cpu_address_in[23:21]==3'b000 || cpu_address_in[23:20]==4'b1100 || cpu_address_in[23:19]==5'b1101_0 || cpu_address_in[23:16]==8'b1101_1111;
