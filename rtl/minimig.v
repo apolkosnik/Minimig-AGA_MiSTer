@@ -221,8 +221,8 @@ module minimig
 	// Ethernet card
 	input	   ethernet_ena,
 	input	   [7:0] ethernet_base,
+	input	   sel_ethernet_shm,
 	output	   sel_ethernet,
-	output	   sel_ethernet_shm,
 
 	//video
 	output 	     _hsync,      // horizontal sync
@@ -308,6 +308,8 @@ wire  [8:1] reg_address; 		//main register address bus
 //Ethernet
 wire [15:0] ethernet_data_out;
 wire        eth_irq;		// Ethernet interrupt
+wire [23:1] eth_translated_addr;	// Translated address for data port writes
+wire        addr_translate_enable;	// Address translation enable signal
 
 //rest of local signals
 wire        cpu_custom;
@@ -769,10 +771,14 @@ cart CART1
 //level 7 interrupt for CPU
 assign _cpu_ipl = int7 ? 3'b000 : _iplx;	//m68k interrupt request
 
-//instantiate gary
+//Address multiplexer for ethernet data port translation
+wire [23:1] gary_address_in;
+assign gary_address_in = addr_translate_enable ? eth_translated_addr : cpu_address_out;
+
+//instantiate gary with address translation for ethernet data port
 gary GARY1 
 (
-	.cpu_address_in(cpu_address_out),
+	.cpu_address_in(gary_address_in),
 	.dma_address_in(dma_address_out),
 	.ram_address_out(ram_address_out),
 	.cpu_data_out(cpu_data_out),
@@ -922,14 +928,15 @@ ethernet_interface eth_if (
     .cpu_uds(_cpu_uds),                  // Upper data strobe
     .cpu_lds(_cpu_lds),                  // Lower data strobe
     
-    // Chip select (renamed from cpu_cs to eth_cs)
-    .sel_ethernet(sel_ethernet),
-    
-    // Chip select for shared memory buffer access
+    // Chip select for entire ethernet address space (shared memory)
     .sel_ethernet_shm(sel_ethernet_shm),
     
     // Ethernet base address (Amiga address space)
     .ethernet_base(ethernet_base),
+    
+    // Address translation for data port writes
+    .translated_addr(eth_translated_addr),
+    .addr_translate_enable(addr_translate_enable),
     
     // Interrupt output to Amiga
     .eth_irq(eth_irq)

@@ -19,26 +19,26 @@ module ethernet_interface
     input  wire        cpu_uds,
     input  wire        cpu_lds,
 
-    // Chip select (when Amiga accesses ethernet address range)
-    input  wire        sel_ethernet,
-    
-    // Chip select for shared memory buffer access
+    // Chip select for entire ethernet address space (shared memory)
     input  wire        sel_ethernet_shm,
 
     // Ethernet base address (dynamic based on autoconfig)
     input  wire [7:0] ethernet_base,
+
+    // Address translation for data port writes
+    output reg [23:1]  translated_addr,
+    output reg         addr_translate_enable,
 
     // Interrupt output to Amiga
     output reg         eth_irq
 );
 
 //   Ethernet Controller Memory Map
+//   Selected by: sel_ethernet_shm (unified with shared memory)
 
 //   Base Address: 0xEA0000 (configurable via autoconfig)
 
-//   Register Space (0xEA0000 - 0xEA0FFF)
-
-//   Selected by: sel_ethernet only (mutually exclusive with sel_ethernet_shm)
+//   Register Space (0xEA0000 - 0xEA0FFF) - part of unified shared memory space
 
 //   NE2000 Registers (0xEA0600 - 0xEA061F)
 
@@ -69,7 +69,7 @@ module ethernet_interface
 
 //   Shared Memory Space (0xEA1000 - 0xEAFFFF)
 
-//   Selected by: sel_ethernet_shm only (mutually exclusive with sel_ethernet)
+//   Selected by: sel_ethernet_shm (unified with register space)
 
 //   Control Structure (0xEA1000 - 0xEA1FFF)
 
@@ -110,8 +110,7 @@ module ethernet_interface
 
 //   Address Decoding Logic
 
-//   sel_ethernet = (cpu_addr[23:16] == ethernet_base) && (cpu_addr[15:12] < 4'h1)
-//   sel_ethernet_shm = (cpu_addr[23:16] == ethernet_base) && (cpu_addr[15:12] >= 4'h1)
+//   sel_ethernet_shm = (cpu_addr[23:16] == ethernet_base) - covers entire 0xEA0000-0xEAFFFF
 //   
 //   Note: Shared memory access types (is_*_access) include sel_ethernet_shm check internally
 
@@ -181,7 +180,9 @@ reg [7:0] rbcr0_register;    // Remote Byte Count Register 0 (low byte)
 reg [7:0] rbcr1_register;    // Remote Byte Count Register 1 (high byte)
 
 // Derive cpu_wr signal for new ethernet module (active when either byte is being written)
-wire        cpu_wr = cpu_lwr | cpu_hwr;
+wire        cpu_wr;
+assign      cpu_wr = cpu_lwr | cpu_hwr;
+
 
 // Data port access state (using shared memory, no local buffer)
 wire       is_data_port_access; // True if accessing data port (0x10)
@@ -282,6 +283,17 @@ reg [31:0] status_flags;      // Status and control flags
 // NE2000 Interrupt handling - proper implementation
 reg [7:0]  isr_register;       // Interrupt Status Register (0x07)
 reg [7:0]  imr_register;       // Interrupt Mask Register (0x0F)
+reg [7:0]  dcr_register;       // Data Configuration Register (0x0E)
+
+// NE2000 DCR bit definitions
+// Bit 0: WTS (Word Transfer Select) - 0=byte DMA, 1=word DMA
+// Bit 1: BOS (Byte Order Select) - 0=MSB first, 1=LSB first (8086 mode)
+// Bit 2: LAS (Long Address Select) - 0=dual 16-bit DMA, 1=single 32-bit DMA
+// Bit 3: LS (Loopback Select) - 0=normal, 1=loopback
+// Bit 4: ARM (Auto-initialize Remote) - 0=manual, 1=auto-init remote DMA
+// Bit 5: FT0 (FIFO Threshold Select 0)
+// Bit 6: FT1 (FIFO Threshold Select 1)
+// Bit 7: Reserved
 
 // NE2000 ISR bit definitions
 parameter ISR_PRX = 8'h01;     // Bit 0: Packet Received
@@ -307,7 +319,7 @@ always @(posedge clk) begin
         cr_register <= 8'h21;      // CR: Stop state, page 0, no DMA
 
         // Initialize data port state
-        remote_dma_addr <= 16'h4000;      // Default DMA start address
+        remote_dma_addr <= 16'h0000;      // Default DMA start address
         remote_byte_count <= 16'h0000;
         data_port_read_pending <= 1'b0;
         data_port_read_data <= 16'h0000;
@@ -320,7 +332,7 @@ always @(posedge clk) begin
 
         // Initialize memory state machine
         mem_state <= MEM_IDLE;
-        eth_shared_base <= {ethernet_base, 8'h00};  // Store Amiga base address (e.g., 0xEA00)
+        eth_shared_base <= {ethernet_base, 16'h0000};  // Store Amiga base address (e.g., 0xEA0000)
         flags_write_pending <= 1'b0;
         
         // Initialize memory transactions
@@ -350,12 +362,17 @@ always @(posedge clk) begin
         // Initialize NE2000 interrupt registers
         isr_register <= 8'h00;           // Clear all interrupt status bits
         imr_register <= 8'h00;           // Mask all interrupts initially
+        dcr_register <= 8'h00;           // DCR: Byte DMA, Normal mode, 8-bit transfers
 
         // Initialize remote DMA registers  
         rsar0_register <= 8'h00;         // Remote start address low
         rsar1_register <= 8'h00;         // Remote start address high
         rbcr0_register <= 8'h00;         // Remote byte count low
         rbcr1_register <= 8'h00;         // Remote byte count high
+
+        // Initialize address translation
+        translated_addr <= 23'h000000;
+        addr_translate_enable <= 1'b0;
 
         // Initialize memory state machine and transaction control
         mem_state <= MEM_IDLE;
@@ -397,14 +414,14 @@ always @(posedge clk) begin
         // Simple state machine
         case (state)
             IDLE: begin
-                if (sel_ethernet && (cpu_rd || cpu_wr)) begin
+                if (sel_ethernet_shm && (cpu_rd || cpu_wr)) begin
                     state <= ACCESS;
                 end
             end
 
             ACCESS: begin
                 // Stay in ACCESS until the bus cycle ends (chip select goes away)
-                if (!sel_ethernet) begin
+                if (!sel_ethernet_shm) begin
                     state <= IDLE;
                 end
             end
@@ -418,28 +435,66 @@ always @(posedge clk) begin
             end
         endcase
 
-        // Handle data port writes (packet data) - write to NE2000 memory
-        if (sel_ethernet && cpu_wr && is_data_port_access) begin
-            if (~cpu_uds) begin  // Check upper data strobe for high byte access
-                // Write to NE2000 memory space using remote DMA address
-                // Target address: ethernet_base + ETH_SHM_NE_MEMORY + remote_dma_addr
-                // This maps to the NE2000 memory buffer in shared memory
+        // Handle data port writes (packet data) - translate address to buffer region
+        if (sel_ethernet_shm && cpu_wr && is_data_port_access) begin
+            if (~cpu_uds || ~cpu_lds) begin  // Check data strobes
+                // Translate data port address to buffer region
+                // Data port at 0xEA0610 -> buffer at 0xEA2000 + remote_dma_addr
+                // Convert byte address to word address: 0xEA2000 = 0x751000 in word addressing
+                translated_addr <= (23'h751000 + remote_dma_addr[15:1]);  // 0xEA2000 in word addressing + DMA offset
+                addr_translate_enable <= 1'b1;
                 
-                // Trigger memory write transaction
-                if (!mem_transaction_busy) begin
-                    mem_transaction_addr <= eth_shared_base + ETH_SHM_NE_MEMORY + remote_dma_addr;
-                    mem_transaction_data <= cpu_data_in;
-                    mem_transaction_wr <= 1'b1;
-                    mem_transaction_busy <= 1'b1;
-                    mem_transaction_timeout <= 16'h0000;  // Reset timeout counter
-                    
-                    $display("Data port write: 0x%04x to NE2000 memory at offset 0x%04x", 
-                            cpu_data_in, remote_dma_addr);
+                // Check WTS bit (bit 0 of DCR) for word/byte transfer mode
+                if (dcr_register[0]) begin
+                    // WTS=1: Word transfer mode (16-bit)
+                    // Update remote DMA address by 2 bytes
+                    remote_dma_addr <= remote_dma_addr + 16'h2;
+                    // Decrement byte counter by 2
+                    if (remote_byte_count > 16'h0001) begin
+                        remote_byte_count <= remote_byte_count - 16'h2;
+                    end else begin
+                        remote_byte_count <= 16'h0000;
+                        // Set RDC (Remote DMA Complete) interrupt
+                        isr_register <= isr_register | ISR_RDC;
+                    end
+                    $display("Data port word write: 0x%04x to 0x%06x", 
+                            cpu_data_in, {ethernet_base, 7'h10, remote_dma_addr[15:1]});
+                end else begin
+                    // WTS=0: Byte transfer mode (8-bit)
+                    // Update remote DMA address by 1 byte
+                    remote_dma_addr <= remote_dma_addr + 16'h1;
+                    // Decrement byte counter by 1
+                    if (remote_byte_count > 16'h0000) begin
+                        remote_byte_count <= remote_byte_count - 16'h1;
+                    end else begin
+                        remote_byte_count <= 16'h0000;
+                        // Set RDC (Remote DMA Complete) interrupt
+                        isr_register <= isr_register | ISR_RDC;
+                    end
+                    $display("Data port byte write: 0x%02x to 0x%06x", 
+                            cpu_data_in[7:0], {ethernet_base, 7'h10, remote_dma_addr[15:1]});
                 end
-                
-                // Update remote DMA address for next write
+            end
+        end
+        // Handle data port reads (packet data) - translate address to buffer region
+        else if (sel_ethernet_shm && cpu_rd && is_data_port_access) begin
+            // Translate data port address to buffer region for reads
+            // Data port at 0xEA0610 -> buffer at 0xEA2000 + remote_dma_addr
+            translated_addr <= (23'h751000 + remote_dma_addr[15:1]);  // 0xEA2000 in word addressing + DMA offset
+            addr_translate_enable <= 1'b1;
+            
+            // Trigger data port read operation
+            if (!data_port_read_pending) begin
+                data_port_read_pending <= 1'b1;
+                $display("Data port read initiated at DMA address 0x%04x", remote_dma_addr);
+            end
+            
+            // Check WTS bit (bit 0 of DCR) for word/byte transfer mode
+            if (dcr_register[0]) begin
+                // WTS=1: Word transfer mode (16-bit)
+                // Update remote DMA address by 2 bytes
                 remote_dma_addr <= remote_dma_addr + 16'h2;
-                // Decrement byte counter for DMA writes
+                // Decrement byte counter by 2
                 if (remote_byte_count > 16'h0001) begin
                     remote_byte_count <= remote_byte_count - 16'h2;
                 end else begin
@@ -447,42 +502,31 @@ always @(posedge clk) begin
                     // Set RDC (Remote DMA Complete) interrupt
                     isr_register <= isr_register | ISR_RDC;
                 end
-            end
-        end
-        // Handle data port reads (packet data) - read from NE2000 memory
-        else if (sel_ethernet && cpu_rd && is_data_port_access && !data_port_read_pending) begin
-            // Read from NE2000 memory space using remote DMA address
-            // Target address: ethernet_base + ETH_SHM_NE_MEMORY + remote_dma_addr
-            // This maps to the NE2000 memory buffer in shared memory
-            
-            // Set pending flag to prevent multiple reads
-            data_port_read_pending <= 1'b1;
-            
-            // Trigger memory read transaction
-            if (!mem_transaction_busy) begin
-                mem_transaction_addr <= eth_shared_base + ETH_SHM_NE_MEMORY + remote_dma_addr;
-                mem_transaction_rd <= 1'b1;
-                mem_transaction_busy <= 1'b1;
-                mem_transaction_timeout <= 16'h0000;  // Reset timeout counter
-                
-                $display("Data port read: requesting data from NE2000 memory at offset 0x%04x", 
-                        remote_dma_addr);
-            end
-
-            // Update remote DMA address for next read
-            remote_dma_addr <= remote_dma_addr + 16'd2;
-            // Decrement byte counter for DMA reads
-            if (remote_byte_count > 16'h0001) begin
-                remote_byte_count <= remote_byte_count - 16'h2;
+                $display("Data port word read from 0x%06x", 
+                        {ethernet_base, 7'h10, remote_dma_addr[15:1]});
             end else begin
-                remote_byte_count <= 16'h0000;
-                // Set RDC (Remote DMA Complete) interrupt
-                isr_register <= isr_register | ISR_RDC;
+                // WTS=0: Byte transfer mode (8-bit)
+                // Update remote DMA address by 1 byte
+                remote_dma_addr <= remote_dma_addr + 16'h1;
+                // Decrement byte counter by 1
+                if (remote_byte_count > 16'h0000) begin
+                    remote_byte_count <= remote_byte_count - 16'h1;
+                end else begin
+                    remote_byte_count <= 16'h0000;
+                    // Set RDC (Remote DMA Complete) interrupt
+                    isr_register <= isr_register | ISR_RDC;
+                end
+                $display("Data port byte read from 0x%06x", 
+                        {ethernet_base, 7'h10, remote_dma_addr[15:1]});
             end
+        end else begin
+            // Disable address translation when not doing data port access
+            addr_translate_enable <= 1'b0;
         end
+        
         // Handle NE2000 memory writes (direct memory access) - write directly to shared memory
-        else if (cpu_wr && is_memory_access) begin
-            if (~cpu_uds) begin  // Check upper data strobe for high byte access
+        if (cpu_wr && is_memory_access) begin
+            if (~cpu_uds || ~cpu_lds) begin  // Check data strobes for 16-bit write access
                 // Calculate memory offset from 0x4000 base (cpu_addr 0x4000-0x7FFF maps to memory offset 0x0000-0x3FFF)
                 // Direct mapped NE2000 memory write
                 // Target address: calc_mem_addr(ETH_SHM_NE_MEMORY + {15'h0000, (cpu_addr[15:1] - 15'h2000), 1'b0})
@@ -490,7 +534,7 @@ always @(posedge clk) begin
             end
         end
         // Handle NE2000 memory reads (direct memory access) - read from shared memory
-        else if (cpu_rd && is_memory_access && !memory_read_pending) begin
+        if (cpu_rd && is_memory_access && !memory_read_pending) begin
             // Calculate memory offset from 0x4000 base (cpu_addr 0x4000-0x7FFF maps to memory offset 0x0000-0x3FFF)
             // Direct mapped NE2000 memory read
             // Source address: calc_mem_addr(ETH_SHM_NE_MEMORY + {15'h0000, (cpu_addr[15:1] - 15'h2000), 1'b0})
@@ -499,15 +543,15 @@ always @(posedge clk) begin
             memory_read_pending <= 1'b1;
         end
         // Handle control writes (direct control access) - write directly to shared memory
-        else if (cpu_wr && is_control_access) begin
-            if (~cpu_uds) begin  // Check upper data strobe for high byte access
+        if (cpu_wr && is_control_access) begin
+            if (~cpu_uds || ~cpu_lds) begin  // Check data strobes for 16-bit write access
                 // Direct access to control structure
                 // Direct mapped control memory write
                 // Target address: eth_shared_base + {15'h0000, cpu_addr[15:1], 1'b0}
             end
         end
         // Handle control reads (direct control access) - read from shared memory
-        else if (cpu_rd && is_control_access && !control_read_pending) begin
+        if (cpu_rd && is_control_access && !control_read_pending) begin
             // Direct access to control structure
             // Direct mapped control memory read
             // Source address: eth_shared_base + {15'h1000, cpu_addr[15:1], 1'b0}
@@ -516,8 +560,8 @@ always @(posedge clk) begin
             control_read_pending <= 1'b1;
         end
         // Handle buffer writes (direct TX/RX buffer access) - write directly to shared memory
-        else if (cpu_wr && is_buffer_access) begin
-            if (~cpu_uds) begin  // Check upper data strobe for high byte access
+        if (cpu_wr && is_buffer_access) begin
+            if (~cpu_uds || ~cpu_lds) begin  // Check data strobes for 16-bit write access
                 // Map 0x1000-0x1FFF to both TX and RX buffers
                 if ((cpu_addr[15:1] - 15'h0800) < 16'h02EE) begin
                     // TX buffer range (0x1000-0x15DC)
@@ -530,7 +574,7 @@ always @(posedge clk) begin
             end
         end
         // Handle buffer reads (direct TX/RX buffer access) - read from shared memory
-        else if (cpu_rd && is_buffer_access && !buffer_read_pending) begin
+        if (cpu_rd && is_buffer_access && !buffer_read_pending) begin
             // Map 0x1000-0x1FFF to both TX and RX buffers
             if ((cpu_addr[15:1] - 15'h0800) < 16'h02EE) begin
                 // TX buffer range
@@ -547,7 +591,7 @@ always @(posedge clk) begin
             buffer_read_pending <= 1'b1;
         end
         // Handle register writes - write to shared memory with full RTL8019AS support
-        else if (sel_ethernet && cpu_wr && is_register_access) begin
+        if (sel_ethernet_shm && cpu_wr && is_register_access) begin
             if (~cpu_uds) begin  // Check upper data strobe for high byte access
                 // Update local cache for critical registers
                 case (register_select[4:0])
@@ -611,6 +655,15 @@ always @(posedge clk) begin
                     5'h0F: begin  // Interrupt Mask Register (IMR)
                         // IMR controls which interrupts are enabled
                         imr_register <= cpu_data_in[15:8];
+                    end
+                    5'h0E: begin  // Data Configuration Register (DCR) - Page 0 Write
+                        if (current_page == 2'b00) begin
+                            // DCR is writable only in page 0
+                            dcr_register <= cpu_data_in[15:8];
+                            $display("DCR write: 0x%02x (WTS=%b), page=%d", cpu_data_in[15:8], cpu_data_in[8], current_page);
+                        end else begin
+                            $display("DCR write attempted on wrong page: %d", current_page);
+                        end
                     end
                     default: begin
                         // All other registers go to shared memory only
@@ -759,7 +812,7 @@ always @(posedge clk) begin
                 if (flags_write_pending) begin
                     mem_state <= MEM_WRITE_FLAGS;
                 // Check if data port read is pending (second priority)
-                end else if (data_port_read_pending && sel_ethernet && cpu_rd && is_data_port_access) begin
+                end else if (data_port_read_pending && sel_ethernet_shm && cpu_rd && is_data_port_access) begin
                     mem_state <= MEM_DATA_PORT_READ;
                 end else begin
                     // Cycle between reading control flags, heartbeat, signature, and packet status
@@ -1286,7 +1339,7 @@ always @(posedge clk) begin
         endcase
 
         // Clear read pending flags when read cycle completes
-        if (!sel_ethernet || !cpu_rd) begin
+        if (!sel_ethernet_shm || !cpu_rd) begin
             data_port_read_pending <= 1'b0;
             memory_read_pending <= 1'b0;
             control_read_pending <= 1'b0;
@@ -1302,20 +1355,18 @@ always @(posedge clk) begin
 end
 
 // Address decode logic - use [23:1] word address format  
-// Workaround for Verilator bit slicing issues - use always block instead of wire
-reg [15:0] effective_addr;
-reg [15:0] byte_addr;
+// Address decode logic for ethernet interface
+wire [15:0] effective_addr;
+wire [15:0] byte_addr;
 
-always @(*) begin
-    // Workaround for Verilator [23:1] compatibility issues
-    // Use arithmetic operations instead of bit operations
-    effective_addr = cpu_addr % 65536;  // Get lower 16 bits using modulo
-    
-    // Calculate byte address by shifting word address
-    byte_addr = effective_addr << 1;
-end
+// Extract lower 16 bits of cpu_addr for effective address calculation
+// cpu_addr is [23:1] word addressing, use mask to get lower 16 bits
+assign effective_addr = cpu_addr & 23'h01FFFF;  // Mask lower 17 bits, take [16:1]
+assign byte_addr = effective_addr << 1;
+
 
 // Dataport detection: byte addresses 0x620 and 0xC40 -> word addresses 0x310 and 0x620
+// Note: Standard NE2000 data port is at +0x10 from register base (0x310 in word addressing)
 assign is_data_port_access = (effective_addr == 16'h0310) || (effective_addr == 16'h0620);
 
 // Register access detection: byte 0x600-0x61F and 0xC00-0xC3F -> word 0x300-0x30F and 0x600-0x61F
@@ -1358,12 +1409,20 @@ always @(*) begin
     // Default outputs
     cpu_data_out = 16'h0000;
 
-    // Handle register space access (0xEA0000-0xEA0FFF)
-    if (sel_ethernet && cpu_rd) begin
+    // Handle ethernet space access (0xEA0000-0xEAFFFF)
+    if (sel_ethernet_shm && cpu_rd) begin
         if (is_data_port_access) begin
-            // Data port read - return data from shared memory
-            cpu_data_out = data_port_read_data;
-        end else if (is_register_access) begin
+            // Data port reads - return data from shared memory
+            if (data_port_read_pending) begin
+                cpu_data_out = data_port_read_data;
+                $display("Data port read: returning 0x%04x", data_port_read_data);
+            end else begin
+                // Default data port read value while data is being fetched
+                cpu_data_out = 16'h0000;
+            end
+        end
+        else if (is_register_access && !addr_translate_enable) begin
+            // Register reads - only when not doing address translation
                 // Return register data - each register gets individual 4-byte space
                 // Register values in MSB (high byte) for Amiga bus compatibility
                 case (register_select[4:0])
@@ -1488,11 +1547,11 @@ always @(*) begin
                         endcase
                     end
 
-                    // Register 0x0E: CNTR1/MAR5 - Tally Counter 1 or Multicast Address Register 5 (Heartbeat low)
+                    // Register 0x0E: DCR/MAR5/CNTR1 - Data Config Register (page 0 write), MAR5 (page 1), or CNTR1 (page 0 read)
                     5'h0E: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {8'h00, 8'h00}; // CNTR1 (from memory)
-                            2'b01: cpu_data_out = {8'h00, 8'h00};                 // MAR5
+                            2'b00: cpu_data_out = {8'h00, 8'h00}; // CNTR1 (read-only in page 0)
+                            2'b01: cpu_data_out = {8'h00, 8'h00}; // MAR5
                             default: cpu_data_out = {8'h00, 8'h00};
                         endcase
                     end
@@ -1512,7 +1571,8 @@ always @(*) begin
         end
     
     // Handle shared memory space access (0xEA1000-0xEAFFFF)
-    if (cpu_rd && (is_memory_access || is_control_access || is_tx_buffer_access || is_rx_buffer_access)) begin
+    // Skip when address translation is active as data comes from shared memory system
+    if (cpu_rd && !addr_translate_enable && (is_memory_access || is_control_access || is_tx_buffer_access || is_rx_buffer_access)) begin
         if (is_memory_access) begin
             // NE2000 memory read - return data from shared memory
             cpu_data_out = memory_read_data;

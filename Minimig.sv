@@ -221,7 +221,7 @@ wire        ethernet_ena;   // Enabled after autoconfig completes
 wire  [7:0] ethernet_base;  // Base address set during autoconfig
 //wire        eth_irq;   // Ethernet interrupt signal
 wire        sel_ethernet;   // Ethernet address space selection from Gary
-wire        sel_ethernet_shm;   // Ethernet shared memory selection from Gary
+wire        sel_ethernet_shm;   // Ethernet shared memory selection from cpu_wrapper
 
 hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 (
@@ -479,7 +479,7 @@ cpu_wrapper cpu_wrapper
 	.sel_ethernet (sel_ethernet    ),  // From Gary module via minimig
 	.ethernet_ena (ethernet_ena    ),
 	.ethernet_base(ethernet_base   ),
-	.sel_ethernet_shm (sel_ethernet_shm),  // Shared memory selection output
+	.sel_ethernet_shm (sel_ethernet_shm),  // Shared memory selection input
 	//.eth_irq (eth_irq              ),
 
 	.ramsel       (ram_sel         ),

@@ -106,9 +106,7 @@ wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
 //   - ETH_SHM_TX_BUFFER = 0x2000 (at Amiga 0xEA2000, HPS 0x28EA2000)
 //   - ETH_SHM_RX_BUFFER = 0x2600 (at Amiga 0xEA2600, HPS 0x28EA2600)
 //   - ETH_SHM_NE_MEMORY = 0x3000 (at Amiga 0xEA3000, HPS 0x28EA3000)
-//assign sel_ethernet_shm = (cpu_addr[23:16] == ethernet_base) && (cpu_addr[15:12] >= 4'h1) && ethernet_ena;
-assign sel_ethernet_shm = (cpu_addr[31:16] == 16'h00EA) && (cpu_addr[15:12] >= 4'h1);
-
+assign sel_ethernet_shm = (cpu_addr[31:16] == {8'h00,ethernet_base}) && ethernet_ena;
 
 // don't sel_kickram when writing
 wire sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx
