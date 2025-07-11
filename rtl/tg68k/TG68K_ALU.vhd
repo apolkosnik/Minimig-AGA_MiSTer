@@ -78,6 +78,61 @@ generic(
 end TG68K_ALU;
 
 architecture logic of TG68K_ALU is
+
+-- Component declarations for accelerators
+component TG68K_Bitfield_Accelerator
+    port(
+        clk              : in  std_logic;
+        reset            : in  std_logic;
+        clkena_lw        : in  std_logic;
+        
+        -- Input data and parameters
+        data_in          : in  std_logic_vector(39 downto 0);  -- Extended for cross-boundary fields
+        bf_offset        : in  std_logic_vector(5 downto 0);   -- Bit offset (0-63)
+        bf_width         : in  std_logic_vector(5 downto 0);   -- Field width (1-32)
+        bf_operation     : in  std_logic_vector(2 downto 0);   -- BFEXT/BFINS/BFSET/etc
+        bf_insert_data   : in  std_logic_vector(31 downto 0);  -- Data to insert (BFINS)
+        bf_signed        : in  std_logic;                      -- Signed extraction (BFEXTS)
+        
+        -- Control signals
+        bf_start         : in  std_logic;
+        bf_done          : out std_logic;
+        
+        -- Output results
+        result_out       : out std_logic_vector(39 downto 0);  -- Modified data
+        extracted_field  : out std_logic_vector(31 downto 0);  -- Extracted field value
+        flag_n           : out std_logic;                      -- Negative flag
+        flag_z           : out std_logic;                      -- Zero flag
+        first_one_pos    : out std_logic_vector(5 downto 0)    -- BFFFO result
+    );
+end component;
+
+component TG68K_ALU_enhanced_div_radix8
+    generic(
+        DIV_Mode : integer := 2  -- 0=>16Bit, 1=>32Bit, 2=>switchable with CPU(1), 3=>no DIV
+    );
+    port(
+        clk           : in std_logic;
+        clkena_lw     : in std_logic;
+        reset         : in std_logic;
+        
+        -- Control signals
+        start_div     : in std_logic;
+        div_done      : out std_logic;
+        div_16bit     : in std_logic;
+        divs          : in std_logic;  -- 0=unsigned, 1=signed
+        
+        -- Input operands
+        dividend_in   : in std_logic_vector(63 downto 0);
+        divisor_in    : in std_logic_vector(31 downto 0);
+        
+        -- Output results
+        result_div_out : out std_logic_vector(63 downto 0);
+        overflow_out  : out std_logic;
+        done_out      : out std_logic
+    );
+end component;
+
 -----------------------------------------------------------------------------
 -----------------------------------------------------------------------------
 -- ALU and more
@@ -200,7 +255,27 @@ architecture logic of TG68K_ALU is
 	signal BSout				: std_logic_vector(31 downto 0);
 	signal bs_V					: std_logic;  
 	signal bs_C					: std_logic;  
-	signal bs_X					: std_logic;  
+	signal bs_X					: std_logic;
+	
+	-- Bitfield accelerator signals
+	signal bf_accel_start       : std_logic;
+	signal bf_accel_done        : std_logic;
+	signal bf_accel_data_in     : std_logic_vector(39 downto 0);
+	signal bf_accel_operation   : std_logic_vector(2 downto 0);
+	signal bf_accel_result      : std_logic_vector(39 downto 0);
+	signal bf_accel_extracted   : std_logic_vector(31 downto 0);
+	signal bf_accel_flag_n      : std_logic;
+	signal bf_accel_flag_z      : std_logic;
+	signal bf_accel_ffo_pos     : std_logic_vector(5 downto 0);
+	
+	-- Enhanced division signals
+	signal use_fast_div         : std_logic;
+	signal fast_div_start       : std_logic;
+	signal fast_div_done        : std_logic;
+	signal fast_div_16bit       : std_logic;
+	signal fast_div_result      : std_logic_vector(63 downto 0);
+	signal fast_div_overflow    : std_logic;
+	signal enhanced_div_active  : std_logic;
 
 
 BEGIN
@@ -214,9 +289,17 @@ PROCESS (OP2out, reg_QB, opcode, OP1out, OP1in, exe_datatype, addsub_q, execOPC,
 		ALUout <= OP1in;
 		ALUout(7) <= OP1in(7) OR exec_tas;
 		IF exec(opcBFwb)='1' THEN
-			ALUout <= result(31 downto 0);
-			IF bf_fffo='1' THEN
-				ALUout <= bf_ffo_offset - bf_firstbit;
+			-- Use accelerated bitfield results when available
+			IF bf_accel_done = '1' THEN
+				ALUout <= bf_accel_result(31 downto 0);
+				IF bf_fffo='1' THEN
+					ALUout <= bf_ffo_offset - ('0' & bf_accel_ffo_pos(4 downto 0));
+				END IF;
+			ELSE
+				ALUout <= result(31 downto 0);
+				IF bf_fffo='1' THEN
+					ALUout <= bf_ffo_offset - bf_firstbit;
+				END IF;
 			END IF;
 		END IF;
 		
@@ -239,14 +322,27 @@ PROCESS (OP2out, reg_QB, opcode, OP1out, OP1in, exe_datatype, addsub_q, execOPC,
 				END IF;
 			END IF;
 		ELSIF exec(opcDIVU)='1' AND DIV_Mode/=3 THEN
-			IF exe_opcode(15)='1' OR DIV_Mode=0 THEN
+			-- Use enhanced division results when available
+			IF enhanced_div_active = '1' AND fast_div_done = '1' THEN
+				IF exe_opcode(15)='1' OR DIV_Mode=0 THEN
+					OP1in <= fast_div_result(47 downto 32)&fast_div_result(15 downto 0);	--word 
+				ELSE		--64bit
+					IF exec(write_reminder)='1' THEN
+						OP1in <= fast_div_result(63 downto 32);
+					ELSE	
+						OP1in <= fast_div_result(31 downto 0);	
+					END IF;
+				END IF;
+			ELSE
+				IF exe_opcode(15)='1' OR DIV_Mode=0 THEN
 --			IF exe_opcode(15)='1' THEN
-				OP1in <= result_div(47 downto 32)&result_div(15 downto 0);	--word 
-			ELSE		--64bit
-				IF exec(write_reminder)='1' THEN
-					OP1in <= result_div(63 downto 32);
-				ELSE	
-					OP1in <= result_div(31 downto 0);	
+					OP1in <= result_div(47 downto 32)&result_div(15 downto 0);	--word 
+				ELSE		--64bit
+					IF exec(write_reminder)='1' THEN
+						OP1in <= result_div(63 downto 32);
+					ELSE	
+						OP1in <= result_div(31 downto 0);	
+					END IF;
 				END IF;
 			END IF;
 		ELSIF exec(opcOR)='1' THEN
@@ -1055,7 +1151,13 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 						Flags(1 downto 0) <= "00";
 						Flags(3 downto 2) <= set_flags(3 downto 2);
 						IF exec(opcBF)='1' THEN
-							Flags(3) <= bf_NFlag;
+							-- Use accelerated bitfield flags when available
+							IF bf_accel_done = '1' THEN
+								Flags(3) <= bf_accel_flag_n;
+								Flags(2) <= bf_accel_flag_z;
+							ELSE
+								Flags(3) <= bf_NFlag;
+							END IF;
 						END IF;	
 					ELSIF exec(opcROT)='1' THEN
 						Flags(3 downto 2) <= set_flags(3 downto 2);
@@ -1292,7 +1394,12 @@ PROCESS (clk)
 		IF rising_edge(clk) THEN
 			IF clkena_lw='1' THEN
 				IF micro_state/=div_end2 THEN
-					V_Flag <= set_V_Flag;
+					-- Use enhanced division overflow when active
+					IF enhanced_div_active = '1' AND fast_div_done = '1' THEN
+						V_Flag <= fast_div_overflow;
+					ELSE
+						V_Flag <= set_V_Flag;
+					END IF;
 				END IF;
 				signedOP <= divs;
 				IF micro_state=div1 THEN
@@ -1327,4 +1434,82 @@ PROCESS (clk)
 			END IF;
 		END IF;
 	END PROCESS;
+
+-----------------------------------------------------------------------------
+-- Accelerator Instantiations
+-----------------------------------------------------------------------------
+
+-- Bitfield Accelerator Instance
+bitfield_accel_inst: TG68K_Bitfield_Accelerator
+    port map(
+        clk              => clk,
+        reset            => Reset,
+        clkena_lw        => clkena_lw,
+        
+        -- Input data and parameters
+        data_in          => bf_accel_data_in,
+        bf_offset        => bf_shift,
+        bf_width         => bf_width,
+        bf_operation     => bf_accel_operation,
+        bf_insert_data   => reg_QB,
+        bf_signed        => bf_exts,
+        
+        -- Control signals
+        bf_start         => bf_accel_start,
+        bf_done          => bf_accel_done,
+        
+        -- Output results
+        result_out       => bf_accel_result,
+        extracted_field  => bf_accel_extracted,
+        flag_n           => bf_accel_flag_n,
+        flag_z           => bf_accel_flag_z,
+        first_one_pos    => bf_accel_ffo_pos
+    );
+
+-- Enhanced Division Engine Instance
+enhanced_div_inst: TG68K_ALU_enhanced_div_radix8
+    generic map(
+        DIV_Mode => DIV_Mode
+    )
+    port map(
+        clk           => clk,
+        clkena_lw     => clkena_lw,
+        reset         => Reset,
+        
+        -- Control signals
+        start_div     => fast_div_start,
+        div_done      => fast_div_done,
+        div_16bit     => fast_div_16bit,
+        divs          => divs,
+        
+        -- Input operands
+        dividend_in   => dividend,
+        divisor_in    => OP2out,
+        
+        -- Output results
+        result_div_out => fast_div_result,
+        overflow_out   => fast_div_overflow,
+        done_out       => open  -- Use fast_div_done instead
+    );
+
+-- Control logic for enhanced division
+use_fast_div <= '0' when DIV_Mode = 3 else '1' when DIV_Mode = 1 else '0';
+fast_div_16bit <= '1' when exe_opcode(15) = '1' OR DIV_Mode = 0 else '0';
+fast_div_start <= '1' when micro_state = div1 and use_fast_div = '1' and clkena_lw = '1' else '0';
+enhanced_div_active <= use_fast_div;
+
+-- Bitfield accelerator control logic
+bf_accel_data_in <= bf_ext_in & OP2out;
+bf_accel_start <= exec(opcBF) and decodeOPC;
+
+-- Map bitfield operation codes
+bf_accel_operation <= "000" when opcode(10 downto 8) = "000" else  -- BFTST
+                      "001" when opcode(10 downto 8) = "001" else  -- BFEXTU  
+                      "010" when opcode(10 downto 8) = "010" else  -- BFCHG
+                      "011" when opcode(10 downto 8) = "011" else  -- BFEXTS
+                      "100" when opcode(10 downto 8) = "100" else  -- BFCLR
+                      "101" when opcode(10 downto 8) = "101" else  -- BFFFO
+                      "110" when opcode(10 downto 8) = "110" else  -- BFSET
+                      "111";                                        -- BFINS
+
 END;
