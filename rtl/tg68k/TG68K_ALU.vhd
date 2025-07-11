@@ -1396,7 +1396,7 @@ PROCESS (clk)
 				IF micro_state/=div_end2 THEN
 					-- Use enhanced division overflow when active
 					IF enhanced_div_active = '1' AND fast_div_done = '1' THEN
-						V_Flag <= fast_div_overflow;
+						V_Flag <= to_bit(fast_div_overflow, '0');
 					ELSE
 						V_Flag <= set_V_Flag;
 					END IF;
@@ -1500,7 +1500,7 @@ enhanced_div_active <= use_fast_div;
 
 -- Bitfield accelerator control logic
 bf_accel_data_in <= bf_ext_in & OP2out;
-bf_accel_start <= exec(opcBF) and decodeOPC;
+bf_accel_start <= to_stdulogic(exec(opcBF)) and to_stdulogic(decodeOPC);
 
 -- Map bitfield operation codes
 bf_accel_operation <= "000" when opcode(10 downto 8) = "000" else  -- BFTST
