@@ -501,7 +501,7 @@ always @(posedge clk) begin
         endcase
 
         // Handle data port writes (packet data) - translate address to NE2000 memory region
-        if (sel_ethernet_shm && cpu_wr && is_data_port_access) begin
+        if (sel_ethernet && cpu_wr && is_data_port_access) begin
             if (~cpu_uds || ~cpu_lds) begin  // Check data strobes
                 // Set write pending flag for DTACK control
                 data_port_write_pending <= 1'b1;
@@ -545,7 +545,7 @@ always @(posedge clk) begin
             end
         end
         // Handle data port reads (packet data) - trigger memory state machine
-        else if (sel_ethernet_shm && cpu_rd && is_data_port_access && !data_port_read_pending) begin
+        else if (sel_ethernet && cpu_rd && is_data_port_access && !data_port_read_pending) begin
             // Don't start a new read if one is already pending
             if (mem_state == MEM_IDLE) begin
                 // Trigger the data port read state machine
@@ -798,7 +798,7 @@ always @(posedge clk) begin
                 if (flags_write_pending) begin
                     mem_state <= MEM_WRITE_FLAGS;
                 // Check if data port read is pending (second priority)
-                end else if (data_port_read_pending && sel_ethernet_shm && cpu_rd && is_data_port_access) begin
+                end else if (data_port_read_pending && sel_ethernet && cpu_rd && is_data_port_access) begin
                     mem_state <= MEM_DATA_PORT_READ;
                 end else begin
                     // Cycle between reading control flags, heartbeat, signature, and packet status
