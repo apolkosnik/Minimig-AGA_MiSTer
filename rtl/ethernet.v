@@ -323,7 +323,7 @@ reg reg_write_uds;
 // Simplified sequential logic - all HPS transactions replaced with direct memory access
 always @(posedge clk) begin
     // Capture register write signals at the beginning for high-priority processing at the end
-    reg_write_pending <= sel_ethernet_shm && cpu_wr && is_register_access;
+    reg_write_pending <= sel_ethernet && cpu_wr && is_register_access;
     reg_write_select <= register_select[4:0];
     reg_write_data <= cpu_data_in;
     reg_write_uds <= cpu_uds;
@@ -666,7 +666,7 @@ always @(posedge clk) begin
 
         // NOTE: Register writes handled via shared memory at 0xEA0000
         // This section handles shared memory writes - now ENABLED for shared memory register storage
-        if (sel_ethernet_shm && cpu_wr && is_register_access) begin
+        if (sel_ethernet && cpu_wr && is_register_access) begin
             if (~cpu_uds) begin  // Check upper data strobe for high byte access
 
                 // Always write to shared memory for full register set
@@ -838,7 +838,7 @@ always @(posedge clk) begin
                 // Handle control flags from memory
                 // Check for reset request (ETH_SHM_FLAG_RESET = 0x0001)
                 // Only reset if no register write is happening
-                if (status_flags[0] && !(sel_ethernet_shm && cpu_wr && is_register_access)) begin
+                if (status_flags[0] && !(sel_ethernet && cpu_wr && is_register_access)) begin
                     // Reset requested - trigger local reset
                     cr_register <= 8'h21;      // Reset to stop state
                     remote_dma_addr <= 16'h0000;
@@ -1150,7 +1150,7 @@ always @(posedge clk) begin
                 
                 // Reset all ethernet registers to default values
                 // Only reset if no register write is happening
-                if (!(sel_ethernet_shm && cpu_wr && is_register_access)) begin
+                if (!(sel_ethernet && cpu_wr && is_register_access)) begin
                     cr_register <= 8'h21;              // Reset to stop state
                     remote_dma_addr <= 16'h0000;
                     remote_byte_count <= 16'h0000;
@@ -1416,7 +1416,7 @@ always @(*) begin
     reg_index_0c00 = (reg_offset_0c00 >> 2) & 5'h1F;
     
     // Debug output for address calculation
-    if (sel_ethernet_shm && cpu_rd && is_register_access) begin
+    if (sel_ethernet && cpu_rd && is_register_access) begin
         $display("Addr calc: cpu_addr=0x%06x, byte_addr=0x%04x, offset=0x%04x, reg_idx=%d", 
                 {cpu_addr, 1'b0}, byte_addr, reg_offset_0c00, reg_index_0c00);
     end
@@ -1424,7 +1424,7 @@ always @(*) begin
     // Debug signal states for troubleshooting when registers read as 0x00
     if (cpu_rd && (byte_addr >= 16'h0C00) && (byte_addr <= 16'h0C3F)) begin
         $display("Register read debug: addr=0x%06x, sel_eth=%b, cpu_rd=%b, is_reg=%b, byte_addr=0x%04x", 
-                {cpu_addr, 1'b0}, sel_ethernet_shm, cpu_rd, is_register_access, byte_addr);
+                {cpu_addr, 1'b0}, sel_ethernet, cpu_rd, is_register_access, byte_addr);
     end
 end
 
@@ -1437,8 +1437,8 @@ always @(*) begin
     // Default outputs
     cpu_data_out = 16'h0000;
 
-    // Handle ethernet space access (0xEA1000-0xEAFFFF)
-    if (sel_ethernet_shm && cpu_rd) begin
+    // Handle ethernet register and data port access
+    if (sel_ethernet && cpu_rd) begin
         if (is_data_port_access) begin
             // Data port reads - return data from shared memory
             // Only return valid data after the second cycle when data has been captured
