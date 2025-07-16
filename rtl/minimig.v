@@ -308,8 +308,6 @@ wire  [8:1] reg_address; 		//main register address bus
 //Ethernet
 wire [15:0] ethernet_data_out;
 wire        eth_irq;		// Ethernet interrupt
-wire [23:1] eth_translated_addr;	// Translated address for data port writes
-wire        addr_translate_enable;	// Address translation enable signal
 wire        dtack_eth;		// Ethernet data acknowledge signal
 wire        _cpu_dtack_internal;	// Internal CPU DTACK from bridge
 
@@ -930,10 +928,6 @@ ethernet_interface eth_if (
 
     // Ethernet base address (Amiga address space)
     .ethernet_base(ethernet_base),
-
-    // Address translation for data port writes
-    .translated_addr(eth_translated_addr),
-    .addr_translate_enable(addr_translate_enable),
 
     // RAM data input for shared memory reads
     .ram_data_in(ram_data_in),

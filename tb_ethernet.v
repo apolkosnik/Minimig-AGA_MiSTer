@@ -24,8 +24,6 @@ reg sel_ethernet = 0;
 reg [7:0] ethernet_base = 8'hEA;
 
 // Outputs
-wire [23:1] translated_addr;
-wire addr_translate_enable;
 wire eth_irq;
 wire dtack_eth;
 
@@ -50,8 +48,6 @@ ethernet_interface dut (
     .sel_ethernet_shm(sel_ethernet_shm),
     .sel_ethernet(sel_ethernet),
     .ethernet_base(ethernet_base),
-    .translated_addr(translated_addr),
-    .addr_translate_enable(addr_translate_enable),
     .eth_irq(eth_irq),
     .dtack_eth(dtack_eth),
     .ram_data_in(ram_data_in)

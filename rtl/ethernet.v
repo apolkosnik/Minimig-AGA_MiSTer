@@ -28,10 +28,6 @@ module ethernet_interface
     // Ethernet base address (dynamic based on autoconfig)
     input  wire [7:0] ethernet_base,
 
-    // Address translation for data port writes
-    output reg [23:1]  translated_addr,
-    output reg         addr_translate_enable,
-
     // Interrupt output to Amiga
     output reg         eth_irq,
     
@@ -328,6 +324,41 @@ always @(posedge clk) begin
     reg_write_data <= cpu_data_in;
     reg_write_uds <= cpu_uds;
     
+    // Debug register write capture
+    if (sel_ethernet && cpu_wr && is_register_access) begin
+        $display("REGISTER WRITE CAPTURED: sel=%b, wr=%b, is_reg=%b, reg_sel=0x%02x, data=0x%04x, uds=%b", 
+                sel_ethernet, cpu_wr, is_register_access, register_select[4:0], cpu_data_in, cpu_uds);
+                
+        // High-priority register writes for critical registers (CR, RSAR) - immediate processing
+        if (cpu_uds == 1'b0) begin
+            $display("HIGH-PRIORITY REGISTER WRITE EXECUTING! reg_select=%d", register_select[4:0]);
+            case (register_select[4:0])
+                5'h00: begin  // Command Register (CR)
+                    cr_register <= cpu_data_in[15:8]; // Non-blocking assignment for register update
+                    $display("  CR WRITE: data=0x%04x, cr=0x%02x, page_bits=%b=%d", 
+                             cpu_data_in, cpu_data_in[15:8], cpu_data_in[15:14], cpu_data_in[15:14]);
+                end
+                5'h08: begin  // CRDA0/RSAR0 (Current/Remote DMA Address 0)
+                    // Use current page state (for currently set page) since this is separate from CR write
+                    if (current_page != 2'b00) begin  // Page 1+: RSAR0 write
+                        remote_dma_addr[7:0] <= cpu_data_in[15:8]; // Non-blocking assignment for register update
+                        $display("  HIGH-PRIORITY RSAR0 WRITE: 0x%02x -> remote_dma_addr[7:0], current_page=%d", cpu_data_in[15:8], current_page);
+                    end else begin
+                        $display("  RSAR0 WRITE IGNORED: current_page = %d (must be != 0)", current_page);
+                    end
+                end
+                5'h09: begin  // CRDA1/RSAR1 (Current/Remote DMA Address 1) 
+                    if (current_page != 2'b00) begin  // Page 1+: RSAR1 write
+                        remote_dma_addr[15:8] <= cpu_data_in[15:8]; // Non-blocking assignment for register update
+                        $display("  HIGH-PRIORITY RSAR1 WRITE: 0x%02x -> remote_dma_addr[15:8], current_page=%d", cpu_data_in[15:8], current_page);
+                    end else begin
+                        $display("  RSAR1 WRITE IGNORED: current_page = %d (must be != 0)", current_page);
+                    end
+                end
+            endcase
+        end
+    end
+    
     if (reset) begin
         state <= IDLE;
 
@@ -381,9 +412,6 @@ always @(posedge clk) begin
         // Note: Remote DMA registers now stored in shared memory at ETH_SHM_CTRL_REGS
         // No local register initialization needed
 
-        // Initialize address translation
-        translated_addr <= 23'h000000;
-        addr_translate_enable <= 1'b0;
         
         // Initialize DTACK signal (active low, so 1 = not ready, 0 = ready)
         dtack_eth <= 1'b1;
@@ -425,7 +453,6 @@ always @(posedge clk) begin
         // Heartbeat at: calc_mem_addr(ETH_SHM_HPS_HEARTBEAT) = 0x00000000
 
     end else begin
-        
         // Note: Registers 0x0A and 0x0B implement transparent writes on page 0
         // - Writes are accepted and stored in RBCR0/RBCR1 but reads still return fixed values 0x50/0x70
         
@@ -506,11 +533,6 @@ always @(posedge clk) begin
                 // Set write pending flag for DTACK control
                 data_port_write_pending <= 1'b1;
                 
-                // Translate data port address to NE2000 memory region
-                // Data port at 0xEA0C40 -> NE2000 memory at 0xEA3000 + remote_dma_addr
-                // Convert byte address to word address: 0xEA4000 = 0x752000 in word addressing
-                translated_addr <= (23'h752000 + remote_dma_addr[15:1]);  // 0xEA4000 in word addressing + DMA offset
-                addr_translate_enable <= 1'b1;
                 
                 // Check WTS bit (bit 0 of DCR) for word/byte transfer mode
                 if (dcr_register[0]) begin
@@ -576,9 +598,6 @@ always @(posedge clk) begin
                     end
                 end
             end
-        end else begin
-            // Disable address translation when not doing data port access
-            addr_translate_enable <= 1'b0;
         end
         
         // Handle NE2000 memory writes (direct memory access) - write directly to shared memory
@@ -688,9 +707,6 @@ always @(posedge clk) begin
                         end
                         // Update local cache for immediate page calculation
                         cr_register <= modified_cr;
-                        // Enable address translation to write to shared memory at 0xEA0000 + 0x00
-                        translated_addr <= 23'h750000;  // 0xEA0000 >> 1 (word address)
-                        addr_translate_enable <= 1'b1;
                         $display("CR write intercepted: 0x%02x -> 0x%02x, translating to 0xEA0000", original_cr, modified_cr);
                     end
                     
@@ -742,9 +758,6 @@ always @(posedge clk) begin
                     end
 
                     5'h0A: begin // RBCR0/8019ID0 - Remote Byte Count 0 or RTL8019AS ID0
-                        // Always store value in shared memory regardless of page (transparent write behavior)
-                        translated_addr <= 23'h750805;  // 0xEA100A >> 1 (word address for ETH_SHM_CTRL_REGS + 0x0A)
-                        addr_translate_enable <= 1'b1;
                         if (current_page == 2'b01) begin
                             // Page 1: Normal RBCR0 write
                             $display("RBCR0 write: 0x%02x translating to shared memory at 0xEA100A", cpu_data_in[15:8]);
@@ -754,9 +767,6 @@ always @(posedge clk) begin
                         end
                     end
                     5'h0B: begin // RBCR1/8019ID1 - intercept writes (read-only in Page 0)
-                        // Always store value in shared memory regardless of page (transparent write behavior)
-                        translated_addr <= 23'h750805 + 1;  // 0xEA100B >> 1 (word address for ETH_SHM_CTRL_REGS + 0x0B)
-                        addr_translate_enable <= 1'b1;
                         if (current_page == 2'b01) begin
                             // Page 1: Normal RBCR1 write
                             $display("RBCR1 write: 0x%02x translating to shared memory at 0xEA100B", cpu_data_in[15:8]);
@@ -769,9 +779,6 @@ always @(posedge clk) begin
                     default: begin
                         // General register write - translate to shared memory
                         // Calculate target address: ETH_SHM_CTRL_REGS + register_select
-                        // 0xEA1000 + register_select = 0xEA1000 + register_select
-                        translated_addr <= 23'h750800 + {18'h00000, register_select[4:0]};  // (0xEA1000 + reg_offset) >> 1
-                        addr_translate_enable <= 1'b1;
                         $display("Register 0x%02x write: 0x%02x translating to shared memory at 0xEA%04X", 
                                register_select[4:0], cpu_data_in[15:8], 16'h1000 + {11'h000, register_select[4:0]});
                     end
@@ -786,9 +793,6 @@ always @(posedge clk) begin
                 // Target address: eth_shared_base + ETH_SHM_CTRL_FLAGS (0xEA1000)  
                 // Data: status_flags with ETH_FLAG_REG_DIRTY bit set
             end
-        end else begin
-            // Clear address translation when not writing registers
-            addr_translate_enable <= 1'b0;
         end
 
         // Memory State Machine for packet handling (replaces HPS state machine)
@@ -1318,50 +1322,6 @@ always @(posedge clk) begin
         $display("  Derived: is_reg=%b, addr=0x%06x", is_register_access, cpu_addr);
         $display("  Direct inputs: cpu_wr=%b, sel_ethernet_shm=%b", cpu_wr, sel_ethernet_shm);
         
-        // High-priority register writes now disabled - using shared memory storage at 0xEA1000
-        if (1'b0 && reg_write_pending == 1'b1 && reg_write_uds == 1'b0) begin
-            $display("HIGH-PRIORITY REGISTER WRITE EXECUTING! reg_select=%d", reg_write_select);
-            case (reg_write_select[4:0])
-                5'h00: begin  // Command Register (CR)
-                    cr_register <= reg_write_data[15:8]; // NON-BLOCKING assignment (consistent with module)
-                    $display("  HIGH-PRIORITY CR WRITE: 0x%02x (non-blocking)", reg_write_data[15:8]);
-                end
-                5'h08: begin  // CRDA0/RSAR0 (Current/Remote DMA Address 0)
-                    if (current_page == 2'b00) begin
-                        remote_dma_addr[7:0] <= reg_write_data[15:8]; // NON-BLOCKING assignment
-                        $display("  HIGH-PRIORITY RSAR0 WRITE: 0x%02x (non-blocking)", reg_write_data[15:8]);
-                    end
-                end
-                5'h09: begin  // CRDA1/RSAR1 (Current/Remote DMA Address 1) 
-                    if (current_page == 2'b00) begin
-                        remote_dma_addr[15:8] <= reg_write_data[15:8]; // NON-BLOCKING assignment
-                        $display("  HIGH-PRIORITY RSAR1 WRITE: 0x%02x (non-blocking)", reg_write_data[15:8]);
-                    end
-                end
-                5'h0A: begin  // 8019ID0/RBCR0 - RTL8019AS ID0 (page 0, transparent write) or RBCR0 (page 1, normal write)
-                    $display("  HIGH-PRIORITY REG 0x0A WRITE ATTEMPT: cr=0x%02x, page=%d, value=0x%02x", cr_register, current_page, reg_write_data[15:8]);
-                    if (current_page == 2'b01) begin  // Page 1: RBCR0 (normal writable register)
-                        // RBCR0 value stored in shared memory at ETH_SHM_CTRL_REGS + 0x0A
-                        $display("  HIGH-PRIORITY RBCR0 WRITE: page=%d, value=0x%02x to shared memory", current_page, reg_write_data[15:8]);
-                    end else if (current_page == 2'b00) begin  // Page 0: Transparent write - accept value but appear read-only
-                        // RBCR0 value stored in shared memory at ETH_SHM_CTRL_REGS + 0x0A
-                        $display("  TRANSPARENT WRITE to 8019ID0: page=%d, value=0x%02x stored in shared memory, reads still return 0x50", current_page, reg_write_data[15:8]);
-                    end else begin
-                        $display("  UNEXPECTED PAGE %d for REG 0x0A write, value=0x%02x", current_page, reg_write_data[15:8]);
-                    end
-                end
-                5'h0B: begin  // 8019ID1/RBCR1 - RTL8019AS ID1 (page 0, transparent write) or RBCR1 (page 1, normal write)
-                    if (current_page == 2'b01) begin  // Page 1: RBCR1 (normal writable register)
-                        // RBCR1 value stored in shared memory at ETH_SHM_CTRL_REGS + 0x0B
-                        $display("  HIGH-PRIORITY RBCR1 WRITE: page=%d, value=0x%02x to shared memory", current_page, reg_write_data[15:8]);
-                    end else if (current_page == 2'b00) begin  // Page 0: Transparent write - accept value but appear read-only
-                        // RBCR1 value stored in shared memory at ETH_SHM_CTRL_REGS + 0x0B
-                        // Remote byte count calculated from shared memory when needed
-                        $display("  TRANSPARENT WRITE to 8019ID1: page=%d, value=0x%02x stored in RBCR1, reads still return 0x70", current_page, reg_write_data[15:8]);
-                    end
-                end
-            endcase
-        end
 
     end
 
@@ -1617,8 +1577,8 @@ always @(*) begin
         end
     
     // Handle shared memory space access (0xEA1000-0xEAFFFF and 0xEA3000-0xEA6FFF) - only when not register access
-    // Skip when address translation is active as data comes from shared memory system
-    else if (cpu_rd && !addr_translate_enable && (is_memory_access || is_control_access)) begin
+    // Handle memory and control access reads
+    else if (cpu_rd && (is_memory_access || is_control_access)) begin
         if (is_memory_access) begin
             // NE2000 memory read - return data from shared memory
             cpu_data_out = memory_read_data;
