@@ -8,6 +8,7 @@ set_global_assignment -name QIP_FILE rtl/paula.qip
 set_global_assignment -name QIP_FILE rtl/denise.qip
 set_global_assignment -name QIP_FILE rtl/fpga-toccata/toccata.qip
 set_global_assignment -name VERILOG_FILE rtl/gary.v
+set_global_assignment -name VERILOG_FILE rtl/ethernet.v
 set_global_assignment -name VERILOG_FILE rtl/rtg.v
 set_global_assignment -name VERILOG_FILE rtl/akiko.v
 set_global_assignment -name VERILOG_FILE rtl/fastchip.v

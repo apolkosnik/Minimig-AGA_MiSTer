@@ -68,6 +68,14 @@ wire [21:0] gamma_bus;
 
 wire  [7:0] uart_mode;
 
+// Ethernet autoconfig signals (these come from cpu_wrapper)
+wire        ethernet_ena;   // Enabled after autoconfig completes
+wire  [7:0] ethernet_base;  // Base address set during autoconfig
+//wire        eth_irq;   // Ethernet interrupt signal
+wire        sel_ethernet;   // Ethernet address space selection from Gary
+wire        sel_ethernet_shm;   // Ethernet shared memory selection from cpu_wrapper
+
+
 hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 (
 	.clk_sys(clk_sys),
@@ -319,7 +327,14 @@ cpu_wrapper cpu_wrapper
 
 	.toccata_ena  (toccata_ena     ),
 	.toccata_base (toccata_base    ),
-	
+
+	// Ethernet connections
+	.sel_ethernet (sel_ethernet    ),  // From Gary module via minimig
+	.ethernet_ena (ethernet_ena    ),
+	.ethernet_base(ethernet_base   ),
+	.sel_ethernet_shm (sel_ethernet_shm),  // Shared memory selection input
+	//.eth_irq (eth_irq              ),
+
 	.ramsel       (ram_sel         ),
 	.ramaddr      (ram_addr        ),
 	.ramlds       (ram_lds         ),
@@ -618,7 +633,12 @@ minimig minimig
 	.toccata_base (toccata_base),
 	.toccata_aud_left (toccata_aud_left),
 	.toccata_aud_right(toccata_aud_right),
-	
+
+	// Ethernet card configuration
+	.ethernet_ena(ethernet_ena),
+	.ethernet_base(ethernet_base),
+	.sel_ethernet(sel_ethernet),
+
 	//user i/o
 	.cpucfg       (cpucfg           ), // CPU config
 	.cachecfg     (cachecfg         ), // Cache config

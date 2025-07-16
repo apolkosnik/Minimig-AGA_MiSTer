@@ -218,6 +218,12 @@ module minimig
 	input  [15:0] IO_DIN,
 	output [15:0] IO_DOUT,
 
+	// Ethernet card
+	input	   ethernet_ena,
+	input	   [7:0] ethernet_base,
+	input	   sel_ethernet_shm,
+	output	   sel_ethernet,
+
 	//video
 	output 	     _hsync,      // horizontal sync
 	output 	     _vsync,      // vertical sync
@@ -298,6 +304,14 @@ wire        cpu_lwr;				//cpu low byte write enable
 
 //register address bus
 wire  [8:1] reg_address; 		//main register address bus
+
+//Ethernet
+wire [15:0] ethernet_data_out;
+wire        eth_irq;		// Ethernet interrupt
+wire [23:1] eth_translated_addr;	// Translated address for data port writes
+wire        addr_translate_enable;	// Address translation enable signal
+wire        dtack_eth;		// Ethernet data acknowledge signal
+wire        _cpu_dtack_internal;	// Internal CPU DTACK from bridge
 
 //rest of local signals
 wire        cpu_custom;
@@ -488,7 +502,7 @@ paula PAULA1
 	.sof(sof),
 	.strhor(strhor_paula),
 	.vblint(vbl_int),
-	.int2(int2|(ide_fast ? ide_ext_irq : gayle_irq)),
+	.int2(int2|(ide_fast ? ide_ext_irq : gayle_irq) | eth_irq), // add  ethernet interrupt
 	.int3(int3),
 	.int6(int6 | int6_toccata),
 	._ipl(_iplx),
@@ -670,7 +684,7 @@ minimig_m68k_bridge CPU1
 	._lds(_cpu_lds),
 	._uds(_cpu_uds),
 	.r_w(cpu_r_w),
-	._dtack(_cpu_dtack),
+	._dtack(_cpu_dtack_internal),
 	.rd(cpu_rd),
 	.rd_cyc(rd_cyc),
 	.hwr(cpu_hwr),
@@ -784,6 +798,10 @@ gary GARY1
 	.hdc_ena(ide_ena & ~ide_fast), // Gayle decoding enable	
 	.toccata_ena(toccata_ena),
 	.toccata_base(toccata_base),
+	// Ethernet connections
+	.ethernet_ena(ethernet_ena),
+	.ethernet_base(ethernet_base),
+	.sel_ethernet(sel_ethernet),
 	.ram_rd(ram_rd),
 	.ram_hwr(ram_hwr),
 	.ram_lwr(ram_lwr),
@@ -891,6 +909,46 @@ toccata #(
 	.out_right(toccata_aud_right)
 );
 
+// Instantiate ethernet interface
+ethernet_interface eth_if (
+    .clk(clk),
+    .reset(reset),
+    .cpu_addr(cpu_address_out[23:1]),    // Full 23-bit address bus
+    .cpu_data_in(cpu_data_out),          // CPU data output goes to ethernet input
+    .cpu_data_out(ethernet_data_out),    // Ethernet data output
+    .cpu_rd(cpu_rd),                     // CPU read signal
+    .cpu_lwr(cpu_lwr),                     // CPU lower byte write signal
+    .cpu_hwr(cpu_hwr),                     // CPU higher byte write signal
+    .cpu_uds(_cpu_uds),                  // Upper data strobe
+    .cpu_lds(_cpu_lds),                  // Lower data strobe
+
+    // Chip select for entire ethernet address space (shared memory)
+    .sel_ethernet_shm(sel_ethernet_shm),
+    
+    // Chip select for ethernet register space
+    .sel_ethernet(sel_ethernet),
+
+    // Ethernet base address (Amiga address space)
+    .ethernet_base(ethernet_base),
+
+    // Address translation for data port writes
+    .translated_addr(eth_translated_addr),
+    .addr_translate_enable(addr_translate_enable),
+
+    // RAM data input for shared memory reads
+    .ram_data_in(ram_data_in),
+
+    // Data acknowledge for bus cycle control
+    .dtack_eth(dtack_eth),
+
+    // Interrupt output to Amiga
+    .eth_irq(eth_irq)
+);
+
+// Multiplex DTACK signals - ethernet takes priority for register/data port access only
+// Direct shared memory access uses normal memory timing
+assign _cpu_dtack = sel_ethernet ? dtack_eth : _cpu_dtack_internal;
+
 //-------------------------------------------------------------------------------------
 
 //data multiplexer
@@ -899,7 +957,8 @@ assign cpu_data_in[15:0]= gary_data_out[15:0]
 							 | gayle_data_out[15:0]
 							 | cart_data_out[15:0]
 							 | rtc_out
-							 | toccata_out;
+							 | toccata_out
+							 | ethernet_data_out;
 
 assign custom_data_out[15:0] = agnus_data_out[15:0]
 							 | paula_data_out[15:0]
