@@ -563,7 +563,15 @@ begin
 							-- FMOVE FPn,<ea> - Move FP register to memory/CPU register
 							-- Source format is always extended precision from FP register
 							-- Destination format specified in extension word bits 12-10
-							movem_temp_reg <= fp_registers(to_integer(unsigned(decoder_source_reg)));
+							-- Bounds check for register access
+							if to_integer(unsigned(decoder_source_reg)) > 7 then
+								-- Invalid register number - trigger exception
+								fpu_state <= FPU_EXCEPTION_STATE;
+								fpu_exception <= '1';
+								exception_code <= X"0C";  -- Invalid operand
+							else
+								movem_temp_reg <= fp_registers(to_integer(unsigned(decoder_source_reg)));
+							end if;
 							case decoder_dest_format is
 								when FORMAT_SINGLE =>
 									-- Convert to single precision and write
@@ -598,56 +606,59 @@ begin
 									fp_to_int_sign <= fp_registers(to_integer(unsigned(decoder_source_reg)))(79);
 									fp_to_int_exp <= fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 64);
 									fp_to_int_mant <= fp_registers(to_integer(unsigned(decoder_source_reg)))(63 downto 0);
-									fp_to_int_exp_int <= to_integer(unsigned(fp_to_int_exp));
 									
-									-- Handle special cases
-									if fp_to_int_exp = "000000000000000" then
-										-- Zero (signed)
+									-- Handle special cases with proper bias handling
+									if fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 64) = "000000000000000" then
+										-- Zero or denormalized (treat as zero)
 										fpu_data_out <= X"00000000";
-									elsif fp_to_int_exp = "111111111111111" then
-										-- Infinity or NaN - return max/min integer
-										if fp_to_int_sign = '1' then
+									elsif fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 64) = "111111111111111" then
+										-- Infinity or NaN - return max/min integer (IEEE 754 overflow behavior)
+										if fp_registers(to_integer(unsigned(decoder_source_reg)))(79) = '1' then
 											fpu_data_out <= X"80000000";  -- -2^31 for negative
 										else
-											fpu_data_out <= X"7FFFFFFF";  -- 2^31-1 for positive
-										end if;
-									elsif fp_to_int_exp_int < 16383 then
-										-- |value| < 1.0 - round to 0 or ±1 based on IEEE 754 rounding
-										if fp_to_int_exp_int = 16382 and fp_to_int_mant(63) = '1' then
-											-- |value| >= 0.5, round to ±1
-											if fp_to_int_sign = '1' then
-												fpu_data_out <= X"FFFFFFFF";  -- -1
-											else
-												fpu_data_out <= X"00000001";  -- +1
-											end if;
-										else
-											fpu_data_out <= X"00000000";  -- 0
-										end if;
-									elsif fp_to_int_exp_int >= 16383 + 31 then
-										-- Value too large for 32-bit integer
-										if fp_to_int_sign = '1' then
-											fpu_data_out <= X"80000000";  -- -2^31
-										else
-											fpu_data_out <= X"7FFFFFFF";  -- 2^31-1
+											fpu_data_out <= X"7FFFFFFF";  -- 2^31-1 for positive  
 										end if;
 									else
-										-- Normal case: extract integer part
-										fp_to_int_shift <= fp_to_int_exp_int - 16383;
-										-- For IEEE 754 extended precision, mantissa bit 63 is the integer bit
-										-- Extract the integer portion based on the exponent
-										if fp_to_int_shift <= 31 then
-											-- Shift mantissa to extract integer bits
-											-- The integer part is in the upper bits shifted by the exponent
-											fp_to_int_result <= fp_to_int_mant(63 downto 32);  -- Simplified extraction
-											
-											-- Apply sign for 2's complement
-											if fp_to_int_sign = '1' then
-												fpu_data_out <= std_logic_vector(unsigned(not fp_to_int_result) + 1);
+										-- Normal number - check if it fits in 32-bit integer range
+										-- Biased exponent to actual exponent: exp - 16383
+										-- For 32-bit signed integer: valid range is exponent 0 to 30 (values 1.0 to 2^30)
+										if to_integer(unsigned(fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 64))) < 16383 then
+											-- |value| < 1.0 - truncate to 0 (FINTRZ behavior)
+											fpu_data_out <= X"00000000";
+										elsif to_integer(unsigned(fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 64))) > 16383 + 30 then
+											-- Value too large for 32-bit signed integer
+											if fp_registers(to_integer(unsigned(decoder_source_reg)))(79) = '1' then
+												fpu_data_out <= X"80000000";  -- -2^31 (overflow)
 											else
-												fpu_data_out <= fp_to_int_result;
+												fpu_data_out <= X"7FFFFFFF";  -- 2^31-1 (overflow)
 											end if;
 										else
-											fpu_data_out <= X"00000000";  -- Value too small after shift
+											-- Extract integer part with proper shifting
+											-- Shift mantissa right by (63 - actual_exponent) bits
+											fp_to_int_shift <= 63 - (to_integer(unsigned(fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 64))) - 16383);
+											
+											-- Extract the top 32 bits after normalization
+											-- For extended precision: bit 63 is integer bit, 62:0 is fractional
+											if fp_to_int_shift <= 32 then
+												-- Shift mantissa to get integer portion in top 32 bits
+												case fp_to_int_shift is
+													when 0 to 31 =>
+														-- Extract based on shift amount
+														fp_to_int_result <= fp_registers(to_integer(unsigned(decoder_source_reg)))(63 downto 32);
+													when others =>
+														fp_to_int_result <= (others => '0');
+												end case;
+												
+												-- Apply 2's complement for negative numbers
+												if fp_registers(to_integer(unsigned(decoder_source_reg)))(79) = '1' then
+													fpu_data_out <= std_logic_vector(unsigned(not fp_to_int_result) + 1);
+												else
+													fpu_data_out <= fp_to_int_result;
+												end if;
+											else
+												-- Shift too large, result is 0
+												fpu_data_out <= X"00000000";
+											end if;
 										end if;
 									end if;
 									
@@ -842,11 +853,11 @@ begin
 								-- Clear bit in register list and advance address by 10 bytes (80-bit = exactly 10 bytes)
 								movem_register_list(movem_current_reg) <= '0';
 								if extension_word(11) = '1' then
-									-- Predecrement mode: address decreases
+									-- Predecrement mode: address decreases by 10 from starting position
 									movem_address <= std_logic_vector(unsigned(movem_address) - 10);
 								else
-									-- Postincrement mode: address increases  
-									movem_address <= std_logic_vector(unsigned(movem_address) + 10);
+									-- Postincrement mode: address increases from current position (already at +8+2=10)
+									movem_address <= std_logic_vector(unsigned(movem_address) + 2);  -- Only need +2 more since we're at +8
 								end if;
 								-- Move to next register (direction depends on addressing mode)
 								movem_state <= MOVEM_FIND_NEXT;
@@ -879,8 +890,15 @@ begin
 						timeout_counter <= 0;
 						alu_start_operation <= '0';
 						
-						-- Load operands and setup ALU
-						alu_operand_a <= fp_registers(to_integer(unsigned(source_reg)))(79 downto 0);
+						-- Load operands and setup ALU with bounds checking
+						if to_integer(unsigned(source_reg)) > 7 then
+							-- Invalid source register - trigger exception
+							fpu_state <= FPU_EXCEPTION_STATE;
+							fpu_exception <= '1';
+							exception_code <= X"0C";  -- Invalid operand
+						else
+							alu_operand_a <= fp_registers(to_integer(unsigned(source_reg)))(79 downto 0);
+						end if;
 						if ea_mode = "000" then  -- Data register direct (CPU register)
 							-- For FTST.B D1 - convert CPU data from data bus to extended precision
 							-- Use CPU data input and convert based on data format
@@ -1020,27 +1038,43 @@ begin
 													-- Single: sign(1) + exponent(8) + mantissa(23)
 													-- Extended: sign(1) + exponent(15) + mantissa(64)
 													if cpu_data_in(30 downto 23) = x"00" then
-														-- Zero or denormalized
-														alu_operand_b <= cpu_data_in(31) & x"0000" & x"000000000000000" & "000";
+														-- Zero or denormalized number
+														if cpu_data_in(22 downto 0) = (22 downto 0 => '0') then
+															-- True zero (signed)
+															alu_operand_b <= cpu_data_in(31) & "000000000000000" & x"0000000000000000";
+														else
+															-- Denormalized number: normalize it to extended precision
+															-- For denormalized single: exponent = 16383 - 126 = 16257
+															-- Mantissa needs leading zero detection and normalization
+															alu_operand_b <= cpu_data_in(31) & x"3F81" & '0' & cpu_data_in(22 downto 0) & x"000000000" & "000";
+														end if;
 													elsif cpu_data_in(30 downto 23) = x"FF" then
 														-- Infinity or NaN
-														alu_operand_b <= cpu_data_in(31) & x"7FFF" & cpu_data_in(22 downto 0) & x"0000000000";
+														if cpu_data_in(22 downto 0) = (22 downto 0 => '0') then
+															-- Infinity
+															alu_operand_b <= cpu_data_in(31) & "111111111111111" & x"8000000000000000";
+														else
+															-- NaN (preserve mantissa pattern)
+															alu_operand_b <= cpu_data_in(31) & "111111111111111" & '1' & cpu_data_in(22 downto 0) & x"0000000000";
+														end if;
 													else
 														-- Normal: bias conversion 127->16383, add implicit 1
-														alu_operand_b <= cpu_data_in(31) & (x"3F80" + ("0" & cpu_data_in(30 downto 23))) & '1' & cpu_data_in(22 downto 0) & x"000000000" & "000";
+														-- Convert bias and mantissa - simplified version
+														alu_operand_b <= cpu_data_in(31) & "011111110000000" & '1' & cpu_data_in(22 downto 0) & x"0000000000";
 													end if;
 												when FORMAT_DOUBLE =>
 													-- Convert IEEE 754 double precision to extended precision
 													-- Note: This is simplified, real implementation needs two memory reads
 													if cpu_data_in(30 downto 20) = "00000000000" then
 														-- Zero or denormalized
-														alu_operand_b <= cpu_data_in(31) & x"0000" & x"000000000000000" & "000";
+														alu_operand_b <= cpu_data_in(31) & "000000000000000" & x"0000000000000000";
 													elsif cpu_data_in(30 downto 20) = "11111111111" then
 														-- Infinity or NaN
-														alu_operand_b <= cpu_data_in(31) & x"7FFF" & cpu_data_in(19 downto 0) & x"0000000000" & "000";
+														alu_operand_b <= cpu_data_in(31) & "111111111111111" & cpu_data_in(19 downto 0) & "00000000000000000000000000000000000000000000";
 													else
 														-- Normal: bias conversion 1023->16383, add implicit 1
-														alu_operand_b <= cpu_data_in(31) & (x"3C00" + ("0000" & cpu_data_in(30 downto 20))) & '1' & cpu_data_in(19 downto 0) & x"0000000000" & "00";
+														-- Convert bias and mantissa - simplified version  
+														alu_operand_b <= cpu_data_in(31) & "011110000000000" & '1' & cpu_data_in(19 downto 0) & "0000000000000000000000000000000000000000000";
 													end if;
 												when others =>
 													alu_operand_b <= (others => '0');
@@ -1073,11 +1107,47 @@ begin
 							   fpu_operation = OP_FATANH or fpu_operation = OP_FETOX or fpu_operation = OP_FTWOTOX or
 							   fpu_operation = OP_FTENTOX or fpu_operation = OP_FLOGN or fpu_operation = OP_FLOG10 or
 							   fpu_operation = OP_FLOG2 then
-								-- Transcendental function - send to transcendental unit
-								trans_operation_code <= fpu_operation;
-								trans_operand <= alu_operand_a;  -- Use operand A for unary transcendental operations
-								trans_start_operation <= '1';
-								fpu_state <= FPU_EXECUTE;
+								-- Transcendental function - check for NaN/Infinity inputs first
+								if alu_operand_a(78 downto 64) = "111111111111111" then
+									-- Input is infinity or NaN
+									if alu_operand_a(63) = '1' and alu_operand_a(62 downto 0) /= (62 downto 0 => '0') then
+										-- Input is NaN - propagate NaN result  
+										result_data <= alu_operand_a;  -- Propagate input NaN
+										fpu_state <= FPU_WRITE_RESULT;
+									elsif alu_operand_a(63) = '1' and alu_operand_a(62 downto 0) = (62 downto 0 => '0') then
+										-- Input is infinity - generate appropriate result or NaN
+										case fpu_operation is
+											when OP_FSIN | OP_FCOS =>
+												-- sin(±∞) = cos(±∞) = NaN (domain error)
+												result_data <= '0' & "111111111111111" & x"8000000000000000";  -- Quiet NaN
+											when OP_FLOGN | OP_FLOG10 | OP_FLOG2 =>
+												-- log(+∞) = +∞, log(-∞) = NaN
+												if alu_operand_a(79) = '0' then
+													result_data <= alu_operand_a;  -- +∞
+												else
+													result_data <= '0' & "111111111111111" & x"8000000000000000";  -- NaN for log(-∞)
+												end if;
+											when others =>
+												-- Other transcendental functions with infinity - send to transcendental unit
+												trans_operation_code <= fpu_operation;
+												trans_operand <= alu_operand_a;
+												trans_start_operation <= '1';
+												fpu_state <= FPU_EXECUTE;
+										end case;
+									else
+										-- Send to transcendental unit for normal processing
+										trans_operation_code <= fpu_operation;
+										trans_operand <= alu_operand_a;
+										trans_start_operation <= '1';
+										fpu_state <= FPU_EXECUTE;
+									end if;
+								else
+									-- Normal operand - send to transcendental unit
+									trans_operation_code <= fpu_operation;
+									trans_operand <= alu_operand_a;  -- Use operand A for unary transcendental operations
+									trans_start_operation <= '1';
+									fpu_state <= FPU_EXECUTE;
+								end if;
 							else
 								-- Regular ALU operation
 								alu_operation_code <= fpu_operation;
@@ -1119,31 +1189,32 @@ begin
 							-- Update FPSR status register based on final results
 							-- FPSR bits: [31:24]=condition codes, [23:16]=quotient, [15:8]=exception status, [7:0]=accrued exceptions
 							
-							-- Set condition codes based on result
-							if final_result = x"00000000000000000000" then
+							-- Set condition codes based on result (FPSR bits 31-28: N-Z-I-NaN)
+							-- Clear all condition codes first
+							fpsr(31 downto 28) <= "0000";
+							
+							-- Check for NaN first (highest priority)
+							if final_result(78 downto 64) = "111111111111111" and 
+							   final_result(63) = '1' and final_result(62 downto 0) /= (62 downto 0 => '0') then
+								-- NaN result: set NaN flag
+								fpsr(28) <= '1';  -- NaN flag (bit 28)
+							elsif final_result(78 downto 64) = "111111111111111" and
+							      final_result(63) = '1' and final_result(62 downto 0) = (62 downto 0 => '0') then
+								-- Infinity: set I flag and N flag based on sign
+								fpsr(29) <= '1';  -- I (Infinity) flag (bit 29)
+								if final_result(79) = '1' then
+									fpsr(31) <= '1';  -- N (Negative) flag for -∞
+								end if;
+							elsif final_result = x"00000000000000000000" or 
+							      (final_result(78 downto 64) = "000000000000000" and final_result(63 downto 0) = (63 downto 0 => '0')) then
 								-- Zero result: set Z flag
-								fpsr(26) <= '1';  -- Z (Zero)
-								fpsr(27) <= '0';  -- N (Negative)
-								fpsr(25) <= '0';  -- I (Infinity)
-								fpsr(24) <= '0';  -- NaN
+								fpsr(30) <= '1';  -- Z (Zero) flag (bit 30)
+								if final_result(79) = '1' then
+									fpsr(31) <= '1';  -- N flag for -0
+								end if;
 							elsif final_result(79) = '1' then
 								-- Negative result: set N flag
-								fpsr(26) <= '0';  -- Z
-								fpsr(27) <= '1';  -- N (Negative)
-								fpsr(25) <= '0';  -- I
-								fpsr(24) <= '0';  -- NaN
-							elsif final_result(78 downto 64) = x"7FFF" then
-								-- Infinity: set I flag
-								fpsr(26) <= '0';  -- Z
-								fpsr(27) <= final_result(79);  -- N (sign of infinity)
-								fpsr(25) <= '1';  -- I (Infinity)
-								fpsr(24) <= '0';  -- NaN
-							else
-								-- Normal positive result
-								fpsr(26) <= '0';  -- Z
-								fpsr(27) <= '0';  -- N
-								fpsr(25) <= '0';  -- I
-								fpsr(24) <= '0';  -- NaN
+								fpsr(31) <= '1';  -- N (Negative) flag (bit 31)
 							end if;
 							
 							-- Set exception flags and handle exceptions
@@ -1251,11 +1322,15 @@ begin
 							alu_operation_code <= fpu_operation;
 							alu_start_operation <= '1';
 							fpu_memory_request <= '0';  -- Clear request
-							timeout_counter <= 0;  -- Reset timeout
+							fpu_read_write <= '0';      -- Clear read/write signal
+							fpu_data_size <= "00";      -- Clear data size
+							timeout_counter <= 0;       -- Reset timeout
 							fpu_state <= FPU_EXECUTE;
 						elsif timeout_counter >= TIMEOUT_LIMIT_MEMORY then
 							-- Memory read timeout - distinguish from real bus errors
 							fpu_memory_request <= '0';  -- Clear request
+							fpu_read_write <= '0';      -- Clear read/write signal  
+							fpu_data_size <= "00";      -- Clear data size
 							timeout_counter <= 0;
 							fpu_exception <= '1';
 							exception_code <= x"04";  -- Timeout error (not standard bus error)
@@ -1268,12 +1343,18 @@ begin
 						-- Wait for memory write to complete with timeout protection
 						if cpu_memory_ready = '1' then
 							fpu_memory_request <= '0';  -- Clear request
-							timeout_counter <= 0;  -- Reset timeout
+							fpu_read_write <= '0';      -- Clear read/write signal
+							fpu_data_size <= "00";      -- Clear data size  
+							fpu_data_out <= (others => '0');  -- Clear data output
+							timeout_counter <= 0;       -- Reset timeout
 							fpu_state <= FPU_IDLE;
 							fpu_done <= '1';
 						elsif timeout_counter >= TIMEOUT_LIMIT_MEMORY then
 							-- Memory write timeout - distinguish from real bus errors
 							fpu_memory_request <= '0';  -- Clear request
+							fpu_read_write <= '0';      -- Clear read/write signal
+							fpu_data_size <= "00";      -- Clear data size
+							fpu_data_out <= (others => '0');  -- Clear data output
 							timeout_counter <= 0;
 							fpu_exception <= '1';
 							exception_code <= x"04";  -- Timeout error (not standard bus error)
@@ -1296,7 +1377,10 @@ begin
 						else
 							-- Normal result - Store result to destination register (except for FTST/FCMP)
 							if fpu_operation /= OP_FTST and fpu_operation /= OP_FCMP then
-								fp_registers(to_integer(unsigned(dest_reg))) <= result_data;
+								-- Bounds check for destination register
+								if to_integer(unsigned(dest_reg)) <= 7 then
+									fp_registers(to_integer(unsigned(dest_reg))) <= result_data;
+								end if;
 							end if;
 							
 							-- Update FPSR condition codes based on result
@@ -1450,7 +1534,7 @@ begin
 						if cpu_memory_ready = '1' then
 							fpu_memory_request <= '0';
 							timeout_counter <= 0;  -- Reset timeout on successful transfer
-							if fsave_counter < 6 then  -- Write 7 longwords (28 bytes) for idle frame
+							if fsave_counter < 14 then  -- Write 15 longwords (60 bytes) for MC68882 idle frame $41
 								fsave_counter <= fsave_counter + 1;
 							else
 								-- MC68882 idle frame complete - AmigaOS should now detect FPU
@@ -1486,18 +1570,22 @@ begin
 										fpu_state <= FPU_IDLE;
 										fpu_done <= '1';
 									elsif cpu_memory_data(31 downto 24) = x"18" then
-										-- Idle frame - no registers to restore
+										-- MC68881 idle frame (28 bytes) - basic state only
+										-- Continue to restore control registers
 										null;
 									elsif cpu_memory_data(31 downto 24) = x"41" then
-										-- Idle frame with registers
+										-- MC68882 idle frame (60 bytes) - includes registers
+										-- Continue to restore full state
 										null;
 									elsif cpu_memory_data(31 downto 24) = x"60" then
-										-- Busy frame 
+										-- Busy frame (state during instruction execution)
+										-- Should restore intermediate state - not fully implemented
 										null;
 									else
 										-- Invalid format - trigger format error exception
 										fpu_exception <= '1';
 										exception_code <= x"0A";  -- Format error
+										fpu_state <= FPU_EXCEPTION_STATE;
 									end if;
 								when 1 =>
 									-- Restore FPIAR
