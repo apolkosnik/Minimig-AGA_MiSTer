@@ -1226,7 +1226,11 @@ begin
 									guard_bit <= mult_result(63);  -- Guard bit from multiplication
 									round_bit <= mult_result(62);  -- Round bit
 									-- Sticky bit: OR of all remaining lower bits
-									sticky_bit <= '1' when mult_result(61 downto 0) /= (61 downto 0 => '0') else '0';
+									if mult_result(61 downto 0) /= (61 downto 0 => '0') then
+										sticky_bit <= '1';
+									else
+										sticky_bit <= '0';
+									end if;
 								when others =>
 									-- Default values for other operations
 									guard_bit <= '0';
