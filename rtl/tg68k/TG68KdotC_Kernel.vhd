@@ -1207,7 +1207,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				make_berr <= '0';
 				memmask <= "111111";
 				exec_write_back <= '0';
-				fpu_wait_counter <= 0;
 			ELSE
 --				IPL_nr <= NOT IPL;
 				IF clkena_in='1' THEN

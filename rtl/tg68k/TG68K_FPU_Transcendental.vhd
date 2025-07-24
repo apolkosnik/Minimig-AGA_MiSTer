@@ -433,13 +433,13 @@ begin
 										result_sign <= '0';
 										result_exp <= std_logic_vector(to_unsigned(16383, 15));  -- Reasonable magnitude
 										-- Scale result based on how far from 1.0
-										result_mant <= std_logic_vector(unsigned(input_exp) - to_unsigned(16383, 15)) & X"00000000000000";
+										result_mant <= std_logic_vector(resize(unsigned(input_exp) - to_unsigned(16383, 15), 64));
 									else
 										-- x < 1: negative logarithm
 										result_sign <= '1';
 										result_exp <= std_logic_vector(to_unsigned(16383, 15));
 										-- Scale result based on how close to 0
-										result_mant <= std_logic_vector(to_unsigned(16383, 15) - unsigned(input_exp)) & X"00000000000000";
+										result_mant <= std_logic_vector(resize(to_unsigned(16383, 15) - unsigned(input_exp), 64));
 									end if;
 									trans_inexact <= '1';
 									trans_state <= TRANS_NORMALIZE;
@@ -461,7 +461,7 @@ begin
 										-- Approximate: log₁₀(x) ≈ 0.301 * (exp - 16383)
 										result_sign <= '0';
 										result_exp <= std_logic_vector(to_unsigned(16383 - 2, 15));  -- Smaller magnitude
-										result_mant <= std_logic_vector(unsigned(input_exp) - to_unsigned(16383, 15)) & X"00000000000000";
+										result_mant <= std_logic_vector(resize(unsigned(input_exp) - to_unsigned(16383, 15), 64));
 									end if;
 									trans_inexact <= '1';
 									trans_state <= TRANS_NORMALIZE;
@@ -483,7 +483,7 @@ begin
 										-- Direct approximation from exponent
 										result_sign <= '0';
 										result_exp <= std_logic_vector(to_unsigned(16383, 15));
-										result_mant <= std_logic_vector(unsigned(input_exp) - to_unsigned(16383, 15)) & X"00000000000000";
+										result_mant <= std_logic_vector(resize(unsigned(input_exp) - to_unsigned(16383, 15), 64));
 									end if;
 									trans_inexact <= '1';
 									trans_state <= TRANS_NORMALIZE;

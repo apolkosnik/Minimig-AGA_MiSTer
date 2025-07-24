@@ -820,10 +820,10 @@ begin
 									elsif cpu_data_in(7) = '0' then
 										-- Positive integer: normalize mantissa to 1.xxxx format
 										-- For byte value, MSB should be in bit 63 of mantissa (explicit integer bit)
-										alu_operand_b <= '0' & x"4006" & cpu_data_in(7 downto 0) & x"00000000000000";
+										alu_operand_b <= '0' & "100000000000110" & cpu_data_in(7 downto 0) & x"00000000000000";
 									else
 										-- Negative integer: take 2's complement magnitude and set sign bit
-										alu_operand_b <= '1' & x"4006" & ((not cpu_data_in(7 downto 0)) + 1) & x"00000000000000";
+										alu_operand_b <= '1' & "100000000000110" & ((not cpu_data_in(7 downto 0)) + 1) & x"00000000000000";
 									end if;
 								when FORMAT_WORD =>
 									-- Convert 16-bit signed integer to 80-bit extended precision
@@ -832,10 +832,10 @@ begin
 										alu_operand_b <= (others => '0');
 									elsif cpu_data_in(15) = '0' then
 										-- Positive integer: normalize mantissa properly
-										alu_operand_b <= '0' & x"400E" & cpu_data_in(15 downto 0) & x"000000000000";
+										alu_operand_b <= '0' & "100000000001110" & cpu_data_in(15 downto 0) & x"000000000000";
 									else
 										-- Negative integer: take 2's complement magnitude and set sign bit
-										alu_operand_b <= '1' & x"400E" & ((not cpu_data_in(15 downto 0)) + 1) & x"000000000000";
+										alu_operand_b <= '1' & "100000000001110" & ((not cpu_data_in(15 downto 0)) + 1) & x"000000000000";
 									end if;
 								when FORMAT_LONG =>
 									-- Convert 32-bit signed integer to 80-bit extended precision  
@@ -844,10 +844,10 @@ begin
 										alu_operand_b <= (others => '0');
 									elsif cpu_data_in(31) = '0' then
 										-- Positive integer: normalize mantissa properly
-										alu_operand_b <= '0' & x"401E" & cpu_data_in & x"00000000";
+										alu_operand_b <= '0' & "100000000011110" & cpu_data_in & x"00000000";
 									else
 										-- Negative integer: take 2's complement magnitude and set sign bit
-										alu_operand_b <= '1' & x"401E" & ((not cpu_data_in) + 1) & x"00000000";
+										alu_operand_b <= '1' & "100000000011110" & ((not cpu_data_in) + 1) & x"00000000";
 									end if;
 								when others =>
 									-- Default to treating as long word
