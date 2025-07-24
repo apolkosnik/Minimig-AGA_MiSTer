@@ -28,7 +28,8 @@ use ieee.std_logic_unsigned.all;
 
 entity TG68K is
    generic(
-      CPU           : std_logic_vector(1 downto 0):="01"  -- 00->68000  01->68010  11->68020
+      CPU           : std_logic_vector(1 downto 0):="11"; -- 00->68000  01->68010  11->68020
+      FPU_Enable    : integer := 1                        -- 0=>no FPU,  1=>FPU enabled
    );
    port(        
       CLK           : in std_logic;
@@ -69,7 +70,8 @@ COMPONENT TG68KdotC_Kernel
       BitField : integer := 2;         --0=>no,       1=>yes,           2=>switchable with CPU(1) 
       
       BarrelShifter : integer := 2;    --0=>no,       1=>yes,           2=>switchable with CPU(1)  
-      MUL_Hardware : integer := 1      --0=>no,       1=>yes,  
+      MUL_Hardware : integer := 1;     --0=>no,       1=>yes,  
+      FPU_Enable : integer := 1        --0=>no FPU,   1=>FPU enabled
    );
    port(
       CPU            : in std_logic_vector(1 downto 0):="01";  -- 00->68000  01->68010  11->68020
@@ -148,7 +150,8 @@ cpu1: TG68KdotC_Kernel
       BitField => 2,             --0=>no,       1=>yes,           2=>switchable with CPU(1) 
 
       BarrelShifter => 0,        --0=>no,       1=>yes,           2=>switchable with CPU(1)  
-      MUL_Hardware => 1          --0=>no,       1=>yes,  
+      MUL_Hardware => 1,         --0=>no,       1=>yes,  
+      FPU_Enable => FPU_Enable   --0=>no FPU,   1=>FPU enabled
    )
    PORT MAP(
       CPU => CPU,                -- : in std_logic_vector(1 downto 0):="01";  -- 00->68000  01->68010  11->68020

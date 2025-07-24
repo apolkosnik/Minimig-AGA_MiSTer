@@ -1,0 +1,260 @@
+------------------------------------------------------------------------------
+------------------------------------------------------------------------------
+--                                                                          --
+-- TG68K MC68881/68882 FPU Instruction Decoder                             --
+-- Copyright (c) 2025                                                       --
+--                                                                          --
+-- This source file is free software: you can redistribute it and/or modify --
+-- it under the terms of the GNU Lesser General Public License as published --
+-- by the Free Software Foundation, either version 3 of the License, or     --
+-- (at your option) any later version.                                      --
+--                                                                          --
+-- This source file is distributed in the hope that it will be useful,      --
+-- but WITHOUT ANY WARRANTY; without even the implied warranty of           --
+-- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the            --
+-- GNU General Public License for more details.                             --
+--                                                                          --
+-- You should have received a copy of the GNU General Public License        --
+-- along with this program.  If not, see <http://www.gnu.org/licenses/>.    --
+--                                                                          --
+------------------------------------------------------------------------------
+------------------------------------------------------------------------------
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.std_logic_unsigned.all;
+use ieee.numeric_std.all;
+
+entity TG68K_FPU_Decoder is
+	port(
+		clk						: in std_logic;
+		nReset					: in std_logic;
+		
+		-- Input instruction words
+		opcode					: in std_logic_vector(15 downto 0);	-- First instruction word
+		extension_word			: in std_logic_vector(15 downto 0);	-- Extension word
+		
+		-- Decoder enable
+		decode_enable			: in std_logic;
+		
+		-- Decoded instruction fields
+		instruction_type		: buffer std_logic_vector(3 downto 0);	-- Type of FPU instruction
+		operation_code			: out std_logic_vector(6 downto 0);	-- 7-bit operation code
+		source_format			: out std_logic_vector(2 downto 0);	-- Source data format
+		dest_format				: out std_logic_vector(2 downto 0);	-- Destination data format
+		source_reg				: out std_logic_vector(2 downto 0);	-- Source FP register
+		dest_reg				: out std_logic_vector(2 downto 0);	-- Destination FP register
+		ea_mode					: out std_logic_vector(2 downto 0);	-- Effective address mode
+		ea_register				: out std_logic_vector(2 downto 0);	-- Effective address register
+		
+		-- Control signals
+		needs_extension_word	: out std_logic;						-- Instruction needs extension word
+		valid_instruction		: out std_logic;						-- Instruction is valid FPU instruction
+		privileged_instruction	: out std_logic;						-- Instruction requires supervisor mode
+		
+		-- Exception flags
+		illegal_instruction		: out std_logic;						-- Illegal instruction detected
+		unsupported_instruction	: out std_logic							-- Instruction not implemented
+	);
+end TG68K_FPU_Decoder;
+
+architecture rtl of TG68K_FPU_Decoder is
+
+	-- MC68881/68882 Instruction Types
+	constant INST_GENERAL		: std_logic_vector(3 downto 0) := "0000";	-- General instruction
+	constant INST_FMOVE_FP		: std_logic_vector(3 downto 0) := "0001";	-- FMOVE FPn,<ea>
+	constant INST_FMOVE_MEM		: std_logic_vector(3 downto 0) := "0010";	-- FMOVE <ea>,FPn
+	constant INST_FMOVEM		: std_logic_vector(3 downto 0) := "0011";	-- FMOVEM
+	constant INST_FMOVE_CR		: std_logic_vector(3 downto 0) := "0100";	-- FMOVE control register
+	constant INST_FBCC			: std_logic_vector(3 downto 0) := "0101";	-- FBcc (branch)
+	constant INST_FSAVE			: std_logic_vector(3 downto 0) := "0110";	-- FSAVE
+	constant INST_FRESTORE		: std_logic_vector(3 downto 0) := "0111";	-- FRESTORE
+	constant INST_FTRAP			: std_logic_vector(3 downto 0) := "1000";	-- FTRAPcc
+	
+	-- Data format constants
+	constant FORMAT_LONG		: std_logic_vector(2 downto 0) := "000";	-- 32-bit integer
+	constant FORMAT_SINGLE		: std_logic_vector(2 downto 0) := "001";	-- 32-bit IEEE single
+	constant FORMAT_EXTENDED	: std_logic_vector(2 downto 0) := "010";	-- 80-bit IEEE extended
+	constant FORMAT_PACKED		: std_logic_vector(2 downto 0) := "011";	-- 96-bit packed decimal
+	constant FORMAT_WORD		: std_logic_vector(2 downto 0) := "100";	-- 16-bit integer  
+	constant FORMAT_DOUBLE		: std_logic_vector(2 downto 0) := "101";	-- 64-bit IEEE double
+	constant FORMAT_BYTE		: std_logic_vector(2 downto 0) := "110";	-- 8-bit integer
+	
+	-- Internal decode signals
+	signal coprocessor_id		: std_logic_vector(2 downto 0);
+	signal inst_type_bits		: std_logic_vector(2 downto 0);
+	signal format_field			: std_logic_vector(2 downto 0);
+	signal opmode_field			: std_logic_vector(6 downto 0);
+	signal rm_field				: std_logic_vector(2 downto 0);
+	signal rn_field				: std_logic_vector(2 downto 0);
+	
+	-- Instruction validity checks
+	signal valid_f_line			: std_logic;
+	signal valid_coprocessor_id	: std_logic;
+	signal valid_format			: std_logic;
+	signal valid_opmode			: std_logic;
+
+begin
+
+	-- Extract fields from instruction words
+	extract_fields: process(opcode, extension_word)
+	begin
+		-- First instruction word (F-line): 1111 ccc ttt mmmmmm rrr
+		--   ccc = coprocessor ID (001 for FPU)
+		--   ttt = instruction type
+		--   mmm = effective address mode
+		--   rrr = effective address register
+		
+		coprocessor_id <= opcode(11 downto 9);
+		inst_type_bits <= opcode(8 downto 6);
+		ea_mode <= opcode(5 downto 3);
+		ea_register <= opcode(2 downto 0);
+		
+		-- Extension word formats vary by instruction type
+		-- For general instructions: 0 R/M 0 SF fff ooooooo 0 DF nnn
+		--   R/M = register/memory bit
+		--   SF = source format
+		--   fff = source specifier
+		--   ooooooo = opmode (operation)
+		--   DF = destination format  
+		--   nnn = destination register
+		
+		if inst_type_bits = "000" then  -- General instruction
+			format_field <= extension_word(12 downto 10);	-- Source format
+			opmode_field <= extension_word(9 downto 3);		-- Operation
+			rm_field <= extension_word(12 downto 10);		-- Source specifier (when R/M=0)
+			rn_field <= extension_word(2 downto 0);			-- Destination register
+		else
+			format_field <= "000";
+			opmode_field <= "0000000";
+			rm_field <= "000";
+			rn_field <= "000";
+		end if;
+	end process;
+	
+	-- Instruction type decode
+	instruction_decode: process(opcode, extension_word, inst_type_bits, coprocessor_id)
+	begin
+		-- Default values
+		instruction_type <= INST_GENERAL;
+		needs_extension_word <= '1';
+		privileged_instruction <= '0';
+		
+		if opcode(15 downto 12) = "1111" and coprocessor_id = "001" then
+			case inst_type_bits is
+				when "000" =>  -- General instructions (dyadic, monadic)
+					instruction_type <= INST_GENERAL;
+					needs_extension_word <= '1';
+					
+				when "001" =>  -- FDBcc, FTRAPcc, FScc
+					if opcode(5 downto 3) = "001" then      -- FDBcc
+						instruction_type <= INST_FBCC;
+					elsif opcode(5 downto 3) = "111" then   -- FTRAPcc or FScc
+						if opcode(2 downto 0) = "010" or opcode(2 downto 0) = "011" then
+							instruction_type <= INST_FTRAP;  -- FTRAPcc
+						else
+							instruction_type <= INST_FBCC;   -- FScc
+						end if;
+					else
+						instruction_type <= INST_FBCC;       -- Other conditional ops
+					end if;
+					needs_extension_word <= '1';
+					
+				when "010" =>  -- FBcc (word displacement)
+					instruction_type <= INST_FBCC;
+					needs_extension_word <= '1';
+					
+				when "011" =>  -- FBcc (long displacement)  
+					instruction_type <= INST_FBCC;
+					needs_extension_word <= '1';
+					
+				when "100" =>  -- FSAVE
+					instruction_type <= INST_FSAVE;
+					needs_extension_word <= '0';
+					privileged_instruction <= '1';
+					
+				when "101" =>  -- FRESTORE
+					instruction_type <= INST_FRESTORE;
+					needs_extension_word <= '0';
+					privileged_instruction <= '1';
+					
+				when "110" =>  -- FMOVE to memory or FMOVEM
+					if extension_word(15) = '0' then
+						instruction_type <= INST_FMOVE_FP;   -- FMOVE FPn,<ea>
+					else
+						instruction_type <= INST_FMOVEM;     -- FMOVEM
+					end if;
+					needs_extension_word <= '1';
+					
+				when "111" =>  -- FMOVE from memory or FMOVE control register
+					if extension_word(15 downto 13) = "100" then
+						instruction_type <= INST_FMOVE_CR;   -- FMOVE control register
+					else
+						instruction_type <= INST_FMOVE_MEM;  -- FMOVE <ea>,FPn
+					end if;
+					needs_extension_word <= '1';
+					
+				when others =>
+					instruction_type <= INST_GENERAL;
+					needs_extension_word <= '1';
+			end case;
+		else
+			instruction_type <= INST_GENERAL;
+			needs_extension_word <= '0';
+		end if;
+	end process;
+	
+	-- Validity checks
+	validity_check: process(decode_enable, opcode, coprocessor_id, format_field, opmode_field)
+	begin
+		-- Check F-line prefix
+		if opcode(15 downto 12) = "1111" then
+			valid_f_line <= '1';
+		else
+			valid_f_line <= '0';
+		end if;
+		
+		-- Check coprocessor ID (must be 001 for FPU)
+		if coprocessor_id = "001" then
+			valid_coprocessor_id <= '1';
+		else
+			valid_coprocessor_id <= '0';
+		end if;
+		
+		-- Check format field validity
+		case format_field is
+			when FORMAT_LONG | FORMAT_SINGLE | FORMAT_EXTENDED | 
+				 FORMAT_PACKED | FORMAT_WORD | FORMAT_DOUBLE | FORMAT_BYTE =>
+				valid_format <= '1';
+			when others =>
+				valid_format <= '0';
+		end case;
+		
+		-- Check opmode validity (simplified - could be expanded)
+		-- Most opcodes 0x00-0x7F are valid
+		if opmode_field(6) = '0' then
+			valid_opmode <= '1';
+		else
+			valid_opmode <= '0';
+		end if;
+		
+		-- Overall validity
+		valid_instruction <= decode_enable and valid_f_line and valid_coprocessor_id;
+		illegal_instruction <= decode_enable and not (valid_f_line and valid_coprocessor_id and valid_format);
+		
+		-- Mark unimplemented instructions
+		-- Transcendental functions are now supported
+		case opmode_field is
+			when others =>
+				unsupported_instruction <= '0';
+		end case;
+	end process;
+	
+	-- Output assignments
+	operation_code <= opmode_field;
+	source_format <= format_field when instruction_type = INST_GENERAL else FORMAT_EXTENDED;
+	dest_format <= FORMAT_EXTENDED;  -- Internal operations use extended precision
+	source_reg <= rm_field;
+	dest_reg <= rn_field;
+
+end rtl;

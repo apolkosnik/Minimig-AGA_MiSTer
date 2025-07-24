@@ -32,7 +32,8 @@ package TG68K_Pack is
 						  rte4, rte5, rtd1, rtd2, trap00, trap0, trap1, trap2, trap3, cas1, cas2, cas21, cas22, cas23, cas24,
 						  cas25, cas26, cas27, cas28, chk20, chk21, chk22, chk23, chk24,
 						  trap4, trap5, trap6, movec1, movep1, movep2, movep3, movep4, movep5, rota1, bf1, 
-						  mul1, mul2, mul_end1,  mul_end2, div1, div2, div3, div4, div_end1, div_end2);
+						  mul1, mul2, mul_end1,  mul_end2, div1, div2, div3, div4, div_end1, div_end2,
+						  fpu1, fpu2, fpu_wait, fpu_done);
 	
 	constant opcMOVE				: integer := 0; --
 	constant opcMOVEQ				: integer := 1; --
@@ -175,6 +176,179 @@ package TG68K_Pack is
 		c_out						: buffer std_logic_vector(2 downto 0);
 		addsub_q					: buffer std_logic_vector(31 downto 0);
 		ALUout					: out std_logic_vector(31 downto 0)
+	);
+	end component;
+
+	component TG68K_FPU
+	port(
+		clk						: in std_logic;
+		nReset					: in std_logic;
+		clkena					: in std_logic;
+		
+		-- CPU Interface
+		opcode					: in std_logic_vector(15 downto 0);
+		extension_word			: in std_logic_vector(15 downto 0);
+		fpu_enable				: in std_logic;
+		cpu_data_in				: in std_logic_vector(31 downto 0);
+		cpu_address_in			: in std_logic_vector(31 downto 0);
+		fpu_data_out			: out std_logic_vector(31 downto 0);
+		
+		-- Memory Interface (for effective address operands)
+		fpu_address_out			: out std_logic_vector(31 downto 0);
+		fpu_memory_request		: out std_logic;
+		fpu_read_write			: out std_logic;
+		fpu_data_size			: out std_logic_vector(1 downto 0);
+		cpu_memory_ready		: in std_logic;
+		cpu_memory_data			: in std_logic_vector(31 downto 0);
+		
+		-- Control Signals
+		fpu_busy				: out std_logic;
+		fpu_done				: out std_logic;
+		fpu_exception			: out std_logic;
+		exception_code			: out std_logic_vector(7 downto 0);
+		
+		-- Status and Control Registers
+		fpcr_out				: out std_logic_vector(31 downto 0);
+		fpsr_out				: out std_logic_vector(31 downto 0);  
+		fpiar_out				: out std_logic_vector(31 downto 0)
+	);
+	end component;
+
+	component TG68K_FPU_Decoder
+	port(
+		clk						: in std_logic;
+		nReset					: in std_logic;
+		
+		-- Input instruction words
+		opcode					: in std_logic_vector(15 downto 0);
+		extension_word			: in std_logic_vector(15 downto 0);
+		
+		-- Decoder enable
+		decode_enable			: in std_logic;
+		
+		-- Decoded instruction fields
+		instruction_type		: out std_logic_vector(3 downto 0);
+		operation_code			: out std_logic_vector(6 downto 0);
+		source_format			: out std_logic_vector(2 downto 0);
+		dest_format				: out std_logic_vector(2 downto 0);
+		source_reg				: out std_logic_vector(2 downto 0);
+		dest_reg				: out std_logic_vector(2 downto 0);
+		ea_mode					: out std_logic_vector(2 downto 0);
+		ea_register				: out std_logic_vector(2 downto 0);
+		
+		-- Control signals
+		needs_extension_word	: out std_logic;
+		valid_instruction		: out std_logic;
+		privileged_instruction	: out std_logic;
+		
+		-- Exception flags
+		illegal_instruction		: out std_logic;
+		unsupported_instruction	: out std_logic
+	);
+	end component;
+
+	component TG68K_FPU_ALU
+	port(
+		clk						: in std_logic;
+		nReset					: in std_logic;
+		clkena					: in std_logic;
+		
+		-- Operation control
+		start_operation			: in std_logic;
+		operation_code			: in std_logic_vector(6 downto 0);
+		rounding_mode			: in std_logic_vector(1 downto 0);
+		
+		-- Operands (IEEE 754 extended precision - 80 bits)
+		operand_a				: in std_logic_vector(79 downto 0);
+		operand_b				: in std_logic_vector(79 downto 0);
+		
+		-- Result
+		result					: out std_logic_vector(79 downto 0);
+		result_valid			: out std_logic;
+		
+		-- Status flags
+		overflow				: out std_logic;
+		underflow				: out std_logic;
+		inexact					: out std_logic;
+		invalid					: out std_logic;
+		divide_by_zero			: out std_logic;
+		
+		-- Control
+		operation_busy			: out std_logic;
+		operation_done			: out std_logic
+	);
+	end component;
+
+	component TG68K_FPU_Converter
+	port(
+		clk						: in std_logic;
+		nReset					: in std_logic;
+		clkena					: in std_logic;
+		
+		-- Control
+		start_conversion		: in std_logic;
+		conversion_done			: out std_logic;
+		conversion_valid		: out std_logic;
+		
+		-- Format specification
+		source_format			: in std_logic_vector(2 downto 0);
+		dest_format				: in std_logic_vector(2 downto 0);
+		
+		-- Input data
+		data_in					: in std_logic_vector(95 downto 0);
+		
+		-- Output data
+		data_out				: out std_logic_vector(79 downto 0);
+		
+		-- Exception flags
+		overflow				: out std_logic;
+		underflow				: out std_logic;
+		inexact					: out std_logic;
+		invalid					: out std_logic
+	);
+	end component;
+
+	component TG68K_FPU_Transcendental
+	port(
+		clk						: in std_logic;
+		nReset					: in std_logic;
+		clkena					: in std_logic;
+		
+		-- Operation control
+		start_operation			: in std_logic;
+		operation_code			: in std_logic_vector(6 downto 0);
+		
+		-- Operand (IEEE 754 extended precision - 80 bits)
+		operand					: in std_logic_vector(79 downto 0);
+		
+		-- Result
+		result					: out std_logic_vector(79 downto 0);
+		result_valid			: out std_logic;
+		
+		-- Status flags
+		overflow				: out std_logic;
+		underflow				: out std_logic;
+		inexact					: out std_logic;
+		invalid					: out std_logic;
+		
+		-- Control
+		operation_busy			: out std_logic;
+		operation_done			: out std_logic
+	);
+	end component;
+
+	component TG68K_FPU_ConstantROM
+	port(
+		clk						: in std_logic;
+		nReset					: in std_logic;
+		
+		-- ROM address (7-bit offset from FMOVECR instruction)
+		rom_offset				: in std_logic_vector(6 downto 0);
+		read_enable				: in std_logic;
+		
+		-- Output constant (IEEE 754 extended precision - 80 bits)
+		constant_out			: out std_logic_vector(79 downto 0);
+		constant_valid			: out std_logic
 	);
 	end component;
 
