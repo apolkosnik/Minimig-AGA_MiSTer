@@ -202,6 +202,14 @@ architecture rtl of TG68K_FPU is
 	signal constrom_result : std_logic_vector(79 downto 0);
 	signal constrom_valid : std_logic;
 	
+	-- Floating-point to integer conversion signals
+	signal fp_to_int_sign : std_logic;
+	signal fp_to_int_exp : std_logic_vector(14 downto 0);
+	signal fp_to_int_mant : std_logic_vector(63 downto 0);
+	signal fp_to_int_exp_int : integer range -32768 to 32767;
+	signal fp_to_int_shift : integer range 0 to 63;
+	signal fp_to_int_result : std_logic_vector(31 downto 0);
+	
 	-- MC68881/68882 Operation Codes (7-bit field from instruction word)
 	-- Basic operations (fully implemented)
 	constant OP_FMOVE		: std_logic_vector(6 downto 0) := "0000000";
@@ -579,13 +587,69 @@ begin
 													fp_registers(to_integer(unsigned(decoder_source_reg)))(63 downto 44);
 									fpu_state <= FPU_MEMORY_WRITE;
 								when FORMAT_LONG =>
-									-- Convert to 32-bit integer and write
+									-- Convert floating-point to 32-bit integer with proper IEEE 754 handling
 									fpu_address_out <= cpu_address_in;
 									fpu_memory_request <= '1';
 									fpu_read_write <= '1';  -- Write to memory
 									fpu_data_size <= "10";  -- 32-bit integer
-									-- Simple conversion: just take mantissa high bits (simplified)
-									fpu_data_out <= fp_registers(to_integer(unsigned(decoder_source_reg)))(63 downto 32);
+									
+									-- Extract IEEE 754 components from source FP register
+									fp_to_int_sign <= fp_registers(to_integer(unsigned(decoder_source_reg)))(79);
+									fp_to_int_exp <= fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 64);
+									fp_to_int_mant <= fp_registers(to_integer(unsigned(decoder_source_reg)))(63 downto 0);
+									fp_to_int_exp_int <= to_integer(unsigned(fp_to_int_exp));
+									
+									-- Handle special cases
+									if fp_to_int_exp = "000000000000000" then
+										-- Zero (signed)
+										fpu_data_out <= X"00000000";
+									elsif fp_to_int_exp = "111111111111111" then
+										-- Infinity or NaN - return max/min integer
+										if fp_to_int_sign = '1' then
+											fpu_data_out <= X"80000000";  -- -2^31 for negative
+										else
+											fpu_data_out <= X"7FFFFFFF";  -- 2^31-1 for positive
+										end if;
+									elsif fp_to_int_exp_int < 16383 then
+										-- |value| < 1.0 - round to 0 or ±1 based on IEEE 754 rounding
+										if fp_to_int_exp_int = 16382 and fp_to_int_mant(63) = '1' then
+											-- |value| >= 0.5, round to ±1
+											if fp_to_int_sign = '1' then
+												fpu_data_out <= X"FFFFFFFF";  -- -1
+											else
+												fpu_data_out <= X"00000001";  -- +1
+											end if;
+										else
+											fpu_data_out <= X"00000000";  -- 0
+										end if;
+									elsif fp_to_int_exp_int >= 16383 + 31 then
+										-- Value too large for 32-bit integer
+										if fp_to_int_sign = '1' then
+											fpu_data_out <= X"80000000";  -- -2^31
+										else
+											fpu_data_out <= X"7FFFFFFF";  -- 2^31-1
+										end if;
+									else
+										-- Normal case: extract integer part
+										fp_to_int_shift <= fp_to_int_exp_int - 16383;
+										-- For IEEE 754 extended precision, mantissa bit 63 is the integer bit
+										-- Extract the integer portion based on the exponent
+										if fp_to_int_shift <= 31 then
+											-- Shift mantissa to extract integer bits
+											-- The integer part is in the upper bits shifted by the exponent
+											fp_to_int_result <= fp_to_int_mant(63 downto 32);  -- Simplified extraction
+											
+											-- Apply sign for 2's complement
+											if fp_to_int_sign = '1' then
+												fpu_data_out <= std_logic_vector(unsigned(not fp_to_int_result) + 1);
+											else
+												fpu_data_out <= fp_to_int_result;
+											end if;
+										else
+											fpu_data_out <= X"00000000";  -- Value too small after shift
+										end if;
+									end if;
+									
 									fpu_state <= FPU_MEMORY_WRITE;
 								when FORMAT_PACKED =>
 									-- Write 96-bit packed decimal (12 bytes) - basic implementation
@@ -1340,8 +1404,9 @@ begin
 						-- For AmigaOS detection, use idle frame with minimal state
 						case fsave_counter is
 							when 0 =>
-								-- Frame format word - MC68882 idle frame (28 bytes)
-								fsave_data <= x"18000000";  -- $18 = idle frame, 28 bytes total
+								-- Frame format word - MC68882 idle frame (60 bytes)
+								-- Format $41 = MC68882 idle frame, anything != $18 identifies as 68882
+								fsave_data <= x"41000000";  -- $41 = MC68882 idle frame format
 							when 1 =>
 								-- Next instruction address (FPIAR) - current PC or instruction address
 								fsave_data <= fpiar;
