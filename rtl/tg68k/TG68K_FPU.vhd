@@ -52,7 +52,7 @@ entity TG68K_FPU is
 		fpu_busy				: out std_logic;						-- FPU is executing multi-cycle operation
 		fpu_done				: out std_logic;						-- Operation complete
 		fpu_exception			: out std_logic;						-- FPU exception occurred
-		exception_code			: out std_logic_vector(7 downto 0);	-- Exception type
+		exception_code			: buffer std_logic_vector(7 downto 0);	-- Exception type
 		
 		-- Status and Control Registers
 		fpcr_out				: out std_logic_vector(31 downto 0);	-- Floating-Point Control Register
