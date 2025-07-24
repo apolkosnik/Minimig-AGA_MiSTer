@@ -105,6 +105,7 @@ architecture rtl of TG68K_FPU is
 	signal movem_address : std_logic_vector(31 downto 0);
 	signal movem_current_reg : integer range 0 to 7;
 	signal movem_temp_reg : std_logic_vector(79 downto 0);  -- Temporary storage for 80-bit register
+	signal movem_scan_count : integer range 0 to 15 := 0;  -- Counter to prevent infinite scanning
 	
 	-- Timeout counter to prevent infinite wait states
 	signal timeout_counter : integer range 0 to 255 := 0;
@@ -739,14 +740,22 @@ begin
 									-- No registers to transfer
 									fpu_state <= FPU_IDLE;
 									fpu_done <= '1';
-										else
+								else
 									movem_state <= MOVEM_FIND_NEXT;
+									movem_scan_count <= 0;  -- Initialize scan counter
 								end if;
 							elsif movem_state = MOVEM_FIND_NEXT then
 								-- Find next register in list (scan from current position)
-								if movem_register_list(movem_current_reg) = '1' then
+								-- Check for timeout to prevent infinite loops
+								if movem_scan_count >= 8 then
+									-- Scanned all 8 registers, no more to transfer
+									movem_state <= MOVEM_IDLE;
+									fpu_state <= FPU_IDLE;
+									fpu_done <= '1';
+								elsif movem_register_list(movem_current_reg) = '1' then
 									-- Found register to transfer - start with high 32 bits (exponent + high mantissa)
 									movem_temp_reg <= fp_registers(movem_current_reg);
+									movem_scan_count <= 0;  -- Reset scan counter for next search
 									if movem_direction = '0' then
 										-- Store to memory - start with high 32 bits
 										fpu_address_out <= movem_address;
@@ -767,6 +776,7 @@ begin
 									end if;
 								else
 									-- Move to next register (scan direction depends on predecrement/postincrement)
+									movem_scan_count <= movem_scan_count + 1;  -- Increment scan counter
 									if extension_word(11) = '1' then
 										-- Predecrement mode: scan registers 7->0
 										if movem_current_reg > 0 then
@@ -776,7 +786,7 @@ begin
 											movem_state <= MOVEM_IDLE;
 											fpu_state <= FPU_IDLE;
 											fpu_done <= '1';
-														end if;
+										end if;
 									else
 										-- Postincrement mode: scan registers 0->7
 										if movem_current_reg < 7 then
@@ -786,7 +796,7 @@ begin
 											movem_state <= MOVEM_IDLE;
 											fpu_state <= FPU_IDLE;
 											fpu_done <= '1';
-														end if;
+										end if;
 									end if;
 								end if;
 							elsif movem_state = MOVEM_TRANSFER_HIGH then

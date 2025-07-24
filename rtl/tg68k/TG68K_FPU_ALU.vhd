@@ -116,6 +116,9 @@ architecture rtl of TG68K_FPU_ALU is
 	-- IEEE 754 Rounding control
 	signal guard_bit, round_bit, sticky_bit : std_logic;
 	signal result_before_round : std_logic_vector(79 downto 0);
+	-- Extended precision intermediate results for proper rounding
+	signal intermediate_result : std_logic_vector(66 downto 0);  -- 67-bit for extra precision
+	signal shift_amount : integer range 0 to 63;
 	
 	-- Multiplication signals
 	signal mult_result : std_logic_vector(127 downto 0);
@@ -683,9 +686,11 @@ begin
 									sign_result <= '0';
 									exp_result <= EXP_MAX;
 									mant_result <= (63 => '1', others => '0');  -- Quiet NaN
-								elsif is_zero_b = '1' and not is_zero_a = '1' then
-									-- Division by zero (x / 0 where x != 0)
+								elsif (is_zero_b = '1' or (is_denorm_b = '1' and mant_b(63 downto 60) = "0000")) and not is_zero_a = '1' then
+									-- Division by zero or extremely small denormalized number (x / ~0 where x != 0)
+									-- Check if denormalized number is too small (top 4 mantissa bits are zero)
 									flags_div_by_zero <= '1';
+									sign_result <= sign_a xor sign_b;  -- Result sign follows division rules
 									exp_result <= EXP_MAX;  -- Infinity
 									mant_result <= (others => '0');
 								elsif is_inf_a = '1' then
@@ -1200,10 +1205,34 @@ begin
 							-- Guard bit: first bit beyond precision (bit position depends on operation)
 							-- Round bit: second bit beyond precision  
 							-- Sticky bit: OR of all remaining bits beyond round bit
-							-- For simplicity, use lower bits of intermediate results
-							guard_bit <= '0';  -- Default guard bit (would need specific calculation per operation)
-							round_bit <= '0';  -- Default round bit
-							sticky_bit <= '0'; -- Default sticky bit
+							-- Calculate based on the mantissa sum from arithmetic operations
+							-- For addition/subtraction operations, use the lower bits of mant_sum
+							case operation_code is
+								when OP_FADD | OP_FSUB =>
+									-- Addition/subtraction: use lower bits of mant_sum for rounding
+									if mant_sum(64) = '1' then
+										-- Overflow case: bits shifted right by 1
+										guard_bit <= mant_sum(1);  -- First bit beyond 64-bit result
+										round_bit <= mant_sum(0);  -- Second bit beyond result
+										sticky_bit <= '0';  -- No additional bits in this case
+									else
+										-- Normal case: lower bits contain rounding information
+										guard_bit <= mant_sum(0);  -- Lowest bit of sum
+										round_bit <= '0';  -- No additional precision
+										sticky_bit <= '0';  -- No additional precision
+									end if;
+								when OP_FMUL =>
+									-- Multiplication: use lower bits of mult_result
+									guard_bit <= mult_result(63);  -- Guard bit from multiplication
+									round_bit <= mult_result(62);  -- Round bit
+									-- Sticky bit: OR of all remaining lower bits
+									sticky_bit <= '1' when mult_result(61 downto 0) /= (61 downto 0 => '0') else '0';
+								when others =>
+									-- Default values for other operations
+									guard_bit <= '0';
+									round_bit <= '0';
+									sticky_bit <= '0';
+							end case;
 							
 							-- IEEE 754 Rounding implementation
 							result_before_round <= sign_result & exp_result & mant_result;
