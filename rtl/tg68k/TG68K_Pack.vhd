@@ -193,13 +193,18 @@ package TG68K_Pack is
 		cpu_address_in			: in std_logic_vector(31 downto 0);
 		fpu_data_out			: out std_logic_vector(31 downto 0);
 		
-		-- Memory Interface (for effective address operands)
-		fpu_address_out			: out std_logic_vector(31 downto 0);
-		fpu_memory_request		: out std_logic;
-		fpu_read_write			: out std_logic;
-		fpu_data_size			: out std_logic_vector(1 downto 0);
-		cpu_memory_ready		: in std_logic;
-		cpu_memory_data			: in std_logic_vector(31 downto 0);
+		-- FSAVE/FRESTORE Data Interface (CPU manages all memory operations)
+		fsave_data_request		: in std_logic;
+		fsave_data_index		: in integer range 0 to 15;
+		frestore_data_write		: in std_logic;
+		frestore_data_in		: in std_logic_vector(31 downto 0);
+		
+		-- FMOVEM Data Interface (CPU manages all memory operations)
+		fmovem_data_request		: in std_logic;
+		fmovem_reg_index		: in integer range 0 to 7;
+		fmovem_data_write		: in std_logic;
+		fmovem_data_in			: in std_logic_vector(79 downto 0);
+		fmovem_data_out			: out std_logic_vector(79 downto 0);
 		
 		-- Control Signals
 		fpu_busy				: out std_logic;

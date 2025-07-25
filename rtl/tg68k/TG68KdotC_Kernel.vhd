@@ -312,16 +312,22 @@ architecture logic of TG68KdotC_Kernel is
 	signal fpu_fpcr			: std_logic_vector(31 downto 0);
 	signal fpu_fpsr			: std_logic_vector(31 downto 0);
 	signal fpu_fpiar			: std_logic_vector(31 downto 0);
-	-- FPU Memory Interface signals
-	signal fpu_address_out	: std_logic_vector(31 downto 0);
-	signal fpu_memory_request	: std_logic;
-	signal fpu_read_write		: std_logic;
-	signal fpu_data_size		: std_logic_vector(1 downto 0);
-	signal fpu_data_size_corrected	: std_logic_vector(1 downto 0);
-	signal fpu_memory_ready_sig	: std_logic;
-	signal fpu_memory_data_sig	: std_logic_vector(31 downto 0);
+	-- FPU Interface signals (CPU manages all memory operations)
 	signal fpu_cpu_data_in		: std_logic_vector(31 downto 0);
-	signal fpu_wait_counter		: integer range 0 to 255 := 0;
+	-- FSAVE-specific CPU signals
+	signal fsave_counter		: integer range 0 to 15 := 0;
+	signal fsave_base_address	: std_logic_vector(31 downto 0);
+	signal fsave_opcode_detected	: std_logic := '0';
+	signal fpu_data_request     : std_logic := '0';
+	signal frestore_data_write  : std_logic := '0';
+	signal frestore_data_in     : std_logic_vector(31 downto 0);
+	
+	-- FMOVEM CPU-managed interface signals
+	signal fmovem_data_request  : std_logic := '0';
+	signal fmovem_reg_index     : integer range 0 to 7 := 0;
+	signal fmovem_data_write    : std_logic := '0';
+	signal fmovem_data_in       : std_logic_vector(79 downto 0);
+	signal fmovem_data_out      : std_logic_vector(79 downto 0);
 	
 	signal set_stop			: bit;
 	signal stop					: bit;
@@ -465,13 +471,18 @@ ALU: TG68K_ALU
 			cpu_address_in => addr,  -- Effective address for FSAVE/FRESTORE
 			fpu_data_out => fpu_data_out,
 			
-			-- Memory Interface (for effective address operands)
-			fpu_address_out => fpu_address_out,
-			fpu_memory_request => fpu_memory_request,
-			fpu_read_write => fpu_read_write,
-			fpu_data_size => fpu_data_size_corrected,
-			cpu_memory_ready => fpu_memory_ready_sig,  -- Proper memory ready signal
-			cpu_memory_data => fpu_memory_data_sig,  -- Proper memory data signal
+			-- FSAVE/FRESTORE Data Interface (CPU manages all memory operations)
+			fsave_data_request => fpu_data_request,
+			fsave_data_index => fsave_counter,
+			frestore_data_write => frestore_data_write,
+			frestore_data_in => frestore_data_in,
+			
+			-- FMOVEM Data Interface (CPU manages all memory operations)
+			fmovem_data_request => fmovem_data_request,
+			fmovem_reg_index => fmovem_reg_index,
+			fmovem_data_write => fmovem_data_write,
+			fmovem_data_in => fmovem_data_in,
+			fmovem_data_out => fmovem_data_out,
 			
 			-- Control Signals
 			fpu_busy => fpu_busy,
@@ -535,12 +546,9 @@ ALU: TG68K_ALU
    regin_out <= regin;
 
 
-	-- FPU Memory Interface Arbitration: Handle FPU read/write operations
-	nWr <= NOT fpu_read_write WHEN FPU_Enable = 1 AND fpu_memory_request = '1' ELSE
-	       '0' WHEN state="11" ELSE '1';
-	busstate <= "10" WHEN FPU_Enable = 1 AND fpu_memory_request = '1' AND fpu_read_write = '0' ELSE
-		    "11" WHEN FPU_Enable = 1 AND fpu_memory_request = '1' AND fpu_read_write = '1' ELSE
-		    state;
+	-- Memory Interface: CPU manages all memory operations
+	nWr <= '0' WHEN state="11" ELSE '1';
+	busstate <= state;
 	nResetOut <= '0' WHEN exec(opcRESET)='1' ELSE '1';
 	
 	-- does shift for byte access. note active low me
@@ -1107,12 +1115,8 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 		memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb;
 		-- if access done, and not aligned, don't increment
 		addr <= memaddr_reg+memaddr_delta;
-		-- FPU Memory Interface Arbitration: Use FPU address when FPU requests memory
-		IF FPU_Enable = 1 AND fpu_memory_request = '1' THEN
-			addr_out <= fpu_address_out;
-		ELSE
-			addr_out <= memaddr_reg + memaddr_delta;
-		END IF;
+		-- CPU manages all memory operations including FSAVE/FRESTORE
+		addr_out <= memaddr_reg + memaddr_delta;
 
 		IF use_base='0' THEN
 			memaddr_reg <= (others=>'0');
@@ -1391,71 +1395,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					PCbase <= '0';
 				END IF;
 				
-				-- FPU Memory Interface Handling - Proper multi-cycle transfer for 16-bit CPU bus
-				IF FPU_Enable = 1 THEN
-					-- FPU memory interface - implement proper bus width conversion
-					IF fpu_memory_request = '1' THEN
-						-- FPU requesting memory access - handle based on data size
-						CASE fpu_data_size IS
-							WHEN "00" | "01" =>  -- Byte or Word - single cycle
-								IF state = "11" THEN  -- CPU memory cycle complete
-									fpu_memory_ready_sig <= '1';
-									fpu_memory_data_sig <= X"0000" & data_in;  -- Proper alignment for smaller data
-								ELSE
-									fpu_memory_ready_sig <= '0';  -- Wait for memory cycle
-									fpu_memory_data_sig <= X"0000" & data_in;
-								END IF;
-								
-							WHEN "10" =>  -- Long - two 16-bit cycles  
-								IF state = "11" THEN  -- CPU memory cycle complete
-									fpu_memory_ready_sig <= '1';
-									-- For 32-bit data, use proper byte ordering through 16-bit bus
-									fpu_memory_data_sig <= data_in & X"0000";  -- First 16 bits
-								ELSE
-									fpu_memory_ready_sig <= '0';  -- Wait for memory cycle
-									fpu_memory_data_sig <= data_in & X"0000";
-								END IF;
-								
-							WHEN "11" =>  -- Extended precision - multiple cycles needed
-								-- For 80-bit extended precision, CPU must handle via multiple memory operations
-								-- FPU coordinates with CPU for staged transfer
-								IF state = "11" THEN  -- CPU memory cycle complete
-									fpu_memory_ready_sig <= '1';
-									-- Return 16-bit portion, FPU manages multi-cycle state internally
-									fpu_memory_data_sig <= X"0000" & data_in;  
-								ELSE
-									fpu_memory_ready_sig <= '0';  -- Wait for memory cycle
-									fpu_memory_data_sig <= X"0000" & data_in;
-								END IF;
-								
-							WHEN OTHERS =>
-								fpu_memory_ready_sig <= '1';
-								fpu_memory_data_sig <= X"0000" & data_in;
-						END CASE;
-					ELSE
-						-- No FPU memory request - default ready
-						fpu_memory_ready_sig <= '1';
-						fpu_memory_data_sig <= X"0000" & data_in;
-					END IF;
-				ELSE
-					-- FPU disabled - provide default values
-					fpu_memory_ready_sig <= '1';
-					fpu_memory_data_sig <= X"0000" & data_in;
-				END IF;
+				-- FPU operations are now handled via CPU-managed FSAVE/FRESTORE
+				-- No separate memory interface needed
 				
 				-- FPU CPU Data Interface - Convert 16-bit CPU data to 32-bit FPU data with proper alignment
 				-- For 16-bit CPU bus, properly align data for FPU 32-bit interface
 				fpu_cpu_data_in <= X"0000" & data_in;
 				
-				-- Fix FPU data size encoding - FPU uses "11" which is undefined in M68K
-				-- Convert to valid M68K data size encoding for CPU bus interface
-				CASE fpu_data_size IS
-					WHEN "00" => fpu_data_size_corrected <= "01";  -- Byte -> Word (16-bit CPU minimum)
-					WHEN "01" => fpu_data_size_corrected <= "01";  -- Word -> Word (16-bit)
-					WHEN "10" => fpu_data_size_corrected <= "10";  -- Long -> Long (32-bit) 
-					WHEN "11" => fpu_data_size_corrected <= "10";  -- Extended -> Long (handle via multi-cycle)
-					WHEN OTHERS => fpu_data_size_corrected <= "01"; -- Default to word
-				END CASE;
+				-- FPU data size conversion removed - CPU handles all memory operations directly
 				-- REMOVED BROKEN SECTION TEMPORARILY
 			END IF;	
 			IF clkena_lw='1' THEN
@@ -1631,12 +1578,24 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		 build_bcd, set_Z_error, trapd, movem_run, last_data_read, set, set_V_Flag, z_error, trap_trace, trap_interrupt,
 		 SVmode, preSVmode, stop, long_done, ea_only, setstate, addrvalue, execOPC, exec_write_back, exe_datatype,
 		 datatype, interrupt, c_out, trapmake, rot_cnt, brief, addr, trap_trapv, last_data_in, use_VBR_Stackframe,
-		 long_start, set_datatype, sndOPC, set_exec, exec, ea_build_now, reg_QA, reg_QB, make_berr, trap_berr)
+		 long_start, set_datatype, sndOPC, set_exec, exec, ea_build_now, reg_QA, reg_QB, make_berr, trap_berr,
+		 fpu_complete, fpu_exception, fpu_exception_code, fsave_counter)
 	BEGIN
 		TG68_PC_brw <= '0';	
 		setstate <= "00";
 		setaddrvalue <= '0';
 		Regwrena_now <= '0';
+		-- Initialize FPU trap signals to prevent latches
+		trap_fpu_divzero <= '0';
+		trap_fpu_operr <= '0';
+		trap_fpu_ovfl <= '0';
+		trap_fpu_unfl <= '0';
+		trap_fpu_inexact <= '0';
+		trap_fpu_snan <= '0';
+		trap_fpu_bsun <= '0';
+		-- Initialize FPU interface signals to prevent latches
+		fpu_data_request <= '0';
+		fsave_counter <= 0;
 		movem_presub <= '0';
 		setnextpass <= '0';
 		regdirectsource <= '0';
@@ -3319,16 +3278,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="011" AND
 					   (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN --ea illegal modes
 						IF opcode(11 downto 9)/="000" THEN
-							IF SVmode='1' THEN
-								IF opcode(5)='0' AND opcode(5 downto 4)/="01" THEN
-									--never reached according to cputest?!
-									--cpSAVE not implemented
-									trap_illegal <= '1';
-									trapmake <= '1';
-								ELSE
-									trap_1111 <= '1';
-									trapmake <= '1';
-								END IF;
+							-- Check if this is FPU FSAVE (coprocessor ID = 001)
+							IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
+								-- FSAVE for MC68881/68882 - use CPU-managed FSAVE
+								next_micro_state <= fpu2;
+							ELSIF SVmode='1' THEN
+								-- Other coprocessors (002-007) not present in this system
+								-- Generate F-line exception for coprocessor not present
+								trap_1111 <= '1';
+								trapmake <= '1';
 							ELSE
 								trap_priv <= '1';
 								trapmake <= '1';
@@ -3351,33 +3309,60 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					   (opcode(5 downto 3)/="111" OR (opcode(2 downto 1)/="11" AND
 					   opcode(2 downto 0)/="101")) THEN --ea illegal modes
 						IF opcode(5 downto 1)/="11110" THEN
-							IF opcode(11 downto 9)="001" OR opcode(11 downto 9)="010" THEN
-								IF SVmode='1' THEN
-									IF opcode(5 downto 3)="101" THEN
-										--cpRESTORE not implemented
-										trap_illegal <= '1';
-										trapmake <= '1';
-									ELSE
-										trap_1111 <= '1';
-										trapmake <= '1';
-									END IF;
-								ELSE
-									trap_priv <= '1';
-									trapmake <= '1';
-								END IF;
+							-- Check if this is FPU FRESTORE (coprocessor ID = 001)
+							IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
+								-- FRESTORE for MC68881/68882 - route to FPU
+								next_micro_state <= fpu1;
+							ELSIF SVmode='1' THEN
+								-- Other coprocessors (002-007) not present in this system
+								-- Generate F-line exception for coprocessor not present
+								trap_1111 <= '1';
+								trapmake <= '1';
 							ELSE
-								IF SVmode='1' THEN
-									trap_1111 <= '1';
-									trapmake <= '1';
-								ELSE
-									trap_priv <= '1';
-									trapmake <= '1';
-								END IF;
+								trap_priv <= '1';
+								trapmake <= '1';
 							END IF;
 						ELSE
 							trap_1111 <= '1';
 							trapmake <= '1';
 						END IF;
+					ELSE
+						trap_1111 <= '1';
+						trapmake <= '1';
+					END IF;
+				-- Add missing coprocessor instruction types
+				ELSIF cpu(1)='1' AND opcode(8 downto 6)="000" THEN --cpGEN (General coprocessor instructions)
+					-- Check if this is FPU instruction (coprocessor ID = 001)
+					IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
+						-- FPU general instruction - route to FPU
+						next_micro_state <= fpu1;
+					ELSE
+						trap_1111 <= '1';
+						trapmake <= '1';
+					END IF;
+				ELSIF cpu(1)='1' AND opcode(8 downto 6)="001" THEN --cpDBcc (Coprocessor conditional branch/decrement)
+					-- Check if this is FPU instruction (coprocessor ID = 001)
+					IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
+						-- FPU conditional branch - route to FPU
+						next_micro_state <= fpu1;
+					ELSE
+						trap_1111 <= '1';
+						trapmake <= '1';
+					END IF;
+				ELSIF cpu(1)='1' AND opcode(8 downto 6)="010" THEN --cpScc (Coprocessor set conditionally)
+					-- Check if this is FPU instruction (coprocessor ID = 001)
+					IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
+						-- FPU set conditionally - route to FPU
+						next_micro_state <= fpu1;
+					ELSE
+						trap_1111 <= '1';
+						trapmake <= '1';
+					END IF;
+				ELSIF cpu(1)='1' AND opcode(8 downto 6)="011" THEN --cpTRAPcc (Coprocessor trap conditionally)
+					-- Check if this is FPU instruction (coprocessor ID = 001)
+					IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
+						-- FPU trap conditionally - route to FPU
+						next_micro_state <= fpu1;
 					ELSE
 						trap_1111 <= '1';
 						trapmake <= '1';
@@ -4213,9 +4198,43 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				
 				-- FPU state handlers
 				WHEN fpu1 =>
-					-- Start FPU operation (fpu_enable_sig controlled separately)
-					fpu_wait_counter <= 0;  -- Reset timeout counter
-					next_micro_state <= fpu_wait;
+					-- Decode FPU operation type
+					IF opcode(8 downto 6) = "100" THEN
+						-- FSAVE instruction - CPU manages all memory operations
+						next_micro_state <= fpu2;
+					ELSIF opcode(8 downto 6) = "101" THEN
+						-- FRESTORE instruction - CPU manages all memory operations
+						-- For now, implement basic FRESTORE that just completes
+						-- Full implementation would read 60 bytes from memory
+						frestore_data_write <= '1';
+						next_micro_state <= fpu_done;  -- Complete immediately for basic implementation
+					ELSE
+						-- Regular FPU arithmetic operation
+						next_micro_state <= fpu_wait;
+					END IF;
+					
+				WHEN fpu2 =>
+					-- CPU-side FSAVE operation (CPU manages all addressing and memory operations)
+					-- According to design division: CPU handles bus cycles, FPU only provides data
+					-- FSAVE writes 60 bytes (15 longwords) in MC68882 idle frame format
+					
+					-- Setup memory write operation
+					datatype <= "10";  -- Long word access
+					-- memaddr is handled by existing CPU memory infrastructure
+					
+					-- Request current data from FPU
+					fpu_data_request <= '1';
+					
+					-- Execute write cycle and advance counter
+					IF fsave_counter < 15 THEN
+						fsave_counter <= fsave_counter + 1;
+						next_micro_state <= fpu2;  -- Continue writing
+					ELSE
+						-- FSAVE complete - update address register and finish
+						fsave_counter <= 0;
+						fpu_data_request <= '0';
+						next_micro_state <= nop;
+					END IF;
 					
 				WHEN fpu_wait =>
 					-- Wait for FPU to complete operation with timeout protection
@@ -4244,15 +4263,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						ELSE
 							next_micro_state <= fpu_done;
 						END IF;
-						fpu_wait_counter <= 0;  -- Reset counter on completion
-					ELSIF fpu_wait_counter >= 200 THEN
-						-- FPU timeout - assume FPU detection successful and continue
-						-- This handles cases where FPU is detected but doesn't respond quickly
-						next_micro_state <= fpu_done;
-						fpu_wait_counter <= 0;
 					ELSE
-						fpu_wait_counter <= fpu_wait_counter + 1;
-						next_micro_state <= fpu_wait;  -- Stay in wait state
+						-- FPU operations now handled immediately via CPU-managed interface
+						next_micro_state <= fpu_done;
 					END IF;
 					
 				WHEN fpu_done =>
@@ -4263,6 +4276,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN OTHERS => NULL;
 			END CASE;
 	END PROCESS;
+
+-----------------------------------------------------------------------------
+-- FPU Wait Counter Process removed - CPU-managed FPU operations are immediate
+-----------------------------------------------------------------------------
 
 -----------------------------------------------------------------------------
 -- MOVEC

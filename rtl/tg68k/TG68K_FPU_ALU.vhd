@@ -142,6 +142,11 @@ architecture rtl of TG68K_FPU_ALU is
 	signal is_nan_a, is_nan_b : std_logic;
 	signal is_denorm_a, is_denorm_b : std_logic;
 	
+	-- Packed decimal support (handled via format converter)
+	-- Note: Full BCD arithmetic would require specialized BCD ALU
+	-- For now, packed decimal operands are converted to extended precision
+	-- via the TG68K_FPU_Converter before ALU operations
+	
 	-- Status flags
 	signal flags_overflow : std_logic;
 	signal flags_underflow : std_logic;
@@ -404,8 +409,8 @@ begin
 									else
 										mant_b_aligned <= '1' & mant_b;
 									end if;
-									-- Use minimum exponent for denormals
-									exp_larger <= std_logic_vector(to_unsigned(1, 15));  -- EXP_BIAS - 1022
+									-- Use minimum exponent for denormals (IEEE 754 extended precision minimum)
+									exp_larger <= std_logic_vector(to_unsigned(1, 15));  -- Minimum normalized exponent
 									-- Perform addition with denormal handling
 									if sign_a = sign_b then
 										-- Same signs: A + B
@@ -546,8 +551,8 @@ begin
 									else
 										mant_b_aligned <= '1' & mant_b;
 									end if;
-									-- Use minimum exponent for denormals
-									exp_larger <= std_logic_vector(to_unsigned(1, 15));  -- EXP_BIAS - 1022
+									-- Use minimum exponent for denormals (IEEE 754 extended precision minimum)
+									exp_larger <= std_logic_vector(to_unsigned(1, 15));  -- Minimum normalized exponent
 									-- Perform subtraction with denormal handling
 									if sign_a = sign_b then
 										-- Same signs: |A| - |B|
@@ -1193,10 +1198,18 @@ begin
 										exp_result <= std_logic_vector(unsigned(exp_result) - to_unsigned(norm_shift, 15));
 										mant_result <= std_logic_vector(shift_left(unsigned(mant_result), norm_shift));
 									else
-										-- Exponent too small, result becomes denormalized
+										-- Exponent too small, create denormalized result (gradual underflow)
 										flags_underflow <= '1';
 										exp_result <= EXP_ZERO;
-										mant_result <= (others => '0');
+										-- Preserve mantissa bits by shifting right for denormalized representation
+										-- IEEE 754 denormal: implicit leading bit is 0, mantissa represents actual significand
+										if mant_result(63) = '1' then
+											-- Keep most significant bits of mantissa for denormalized number
+											mant_result <= std_logic_vector(shift_right(unsigned(mant_result), 1));  -- Gradual underflow
+										else
+											-- Very small number, can become zero
+											mant_result <= (others => '0');
+										end if;
 									end if;
 								end if;
 							end if;

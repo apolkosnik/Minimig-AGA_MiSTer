@@ -40,19 +40,24 @@ entity TG68K_FPU is
 		cpu_address_in			: in std_logic_vector(31 downto 0);	-- Effective address from CPU (for FSAVE/FRESTORE)
 		fpu_data_out			: out std_logic_vector(31 downto 0);	-- Data to CPU (for register destinations)
 		
-		-- Memory Interface (for effective address operands)
-		fpu_address_out			: out std_logic_vector(31 downto 0);	-- Address for memory access
-		fpu_memory_request		: out std_logic;						-- Request memory access
-		fpu_read_write			: out std_logic;						-- 0=read, 1=write
-		fpu_data_size			: out std_logic_vector(1 downto 0);	-- 00=byte, 01=word, 10=long
-		cpu_memory_ready		: in std_logic;							-- Memory access completed
-		cpu_memory_data			: in std_logic_vector(31 downto 0);	-- Data from memory read
+		-- FSAVE/FRESTORE Data Interface (CPU manages all memory operations)
+		fsave_data_request		: in std_logic;							-- CPU requests FSAVE data at specific index
+		fsave_data_index		: in integer range 0 to 15;			-- Index of data longword (0-14)
+		frestore_data_write		: in std_logic;							-- CPU writing FRESTORE data
+		frestore_data_in		: in std_logic_vector(31 downto 0);		-- Data from CPU for FRESTORE
+		
+		-- FMOVEM Data Interface (CPU manages all memory operations)
+		fmovem_data_request		: in std_logic;							-- CPU requests FMOVEM data at specific register
+		fmovem_reg_index		: in integer range 0 to 7;				-- Index of FP register (0-7)
+		fmovem_data_write		: in std_logic;							-- CPU writing FMOVEM data to register
+		fmovem_data_in			: in std_logic_vector(79 downto 0);		-- Data from CPU for FMOVEM load
+		fmovem_data_out			: out std_logic_vector(79 downto 0);	-- Data to CPU for FMOVEM store
 		
 		-- Control Signals
 		fpu_busy				: out std_logic;						-- FPU is executing multi-cycle operation
 		fpu_done				: out std_logic;						-- Operation complete
 		fpu_exception			: out std_logic;						-- FPU exception occurred
-		exception_code			: buffer std_logic_vector(7 downto 0);	-- Exception type
+		exception_code			: out std_logic_vector(7 downto 0);	-- Exception type
 		
 		-- Status and Control Registers
 		fpcr_out				: out std_logic_vector(31 downto 0);	-- Floating-Point Control Register
@@ -90,22 +95,9 @@ architecture rtl of TG68K_FPU is
 	signal next_state : fpu_state_t;
 	signal fpu_busy_internal : std_logic := '0';
 	
-	-- MOVEM operation state machine and signals
-	type movem_state_t is (
-		MOVEM_IDLE,
-		MOVEM_FIND_NEXT,
-		MOVEM_TRANSFER,
-		MOVEM_TRANSFER_HIGH,
-		MOVEM_TRANSFER_MID,
-		MOVEM_TRANSFER_LOW
-	);
-	signal movem_state : movem_state_t := MOVEM_IDLE;
+	-- MOVEM component control signals
 	signal movem_register_list : std_logic_vector(7 downto 0);
 	signal movem_direction : std_logic;  -- 0=store to memory, 1=load from memory
-	signal movem_address : std_logic_vector(31 downto 0);
-	signal movem_current_reg : integer range 0 to 7;
-	signal movem_temp_reg : std_logic_vector(79 downto 0);  -- Temporary storage for 80-bit register
-	signal movem_scan_count : integer range 0 to 15 := 0;  -- Counter to prevent infinite scanning
 	
 	-- Timeout counter to prevent infinite wait states
 	signal timeout_counter : integer range 0 to 255 := 0;
@@ -113,9 +105,23 @@ architecture rtl of TG68K_FPU is
 	constant TIMEOUT_LIMIT_MEMORY : integer := 128;  -- Memory operations (bus access)
 	constant TIMEOUT_LIMIT_ALU : integer := 64;      -- ALU operations (arithmetic)
 	constant TIMEOUT_LIMIT_FSAVE : integer := 32;    -- FSAVE/FRESTORE frame operations
+	constant TIMEOUT_LIMIT_MOVEM : integer := 256;   -- MOVEM operations (multi-register transfers)
+	
+	-- MC68881/68882 instruction timing (in clock cycles) for accuracy
+	signal instruction_cycles : integer range 0 to 255 := 0;
+	constant TIMING_FMOVE : integer := 4;      -- FMOVE FPn,FPm
+	constant TIMING_FADD : integer := 8;       -- FADD
+	constant TIMING_FSUB : integer := 8;       -- FSUB  
+	constant TIMING_FMUL : integer := 12;      -- FMUL
+	constant TIMING_FDIV : integer := 32;      -- FDIV (slower)
+	constant TIMING_FSQRT : integer := 48;     -- FSQRT (slowest)
+	constant TIMING_FCMP : integer := 6;       -- FCMP
+	constant TIMING_FABS : integer := 3;       -- FABS/FNEG (fast)
+	constant TIMING_TRANSCENDENTAL : integer := 64;  -- SIN/COS/LOG/EXP
 	
 	-- FSAVE/FRESTORE operation signals
 	signal fsave_counter : integer range 0 to 31 := 0;  -- Word counter for complete state frame
+	signal frestore_frame_format : std_logic_vector(7 downto 0);  -- Saved frame format for FRESTORE
 	signal fsave_address : std_logic_vector(31 downto 0);
 	signal fsave_data : std_logic_vector(31 downto 0);
 	
@@ -148,6 +154,7 @@ architecture rtl of TG68K_FPU is
 	signal operation_done : std_logic;
 	signal current_exception : std_logic;
 	signal exception_type : std_logic_vector(7 downto 0);
+	signal exception_code_internal : std_logic_vector(7 downto 0);  -- Internal signal for exception code
 	
 	-- ALU interface signals
 	signal alu_start_operation : std_logic;
@@ -192,16 +199,39 @@ architecture rtl of TG68K_FPU is
 	signal result_valid : std_logic;
 	
 	-- Data format conversion signals
-	signal convert_to_extended : std_logic;
-	signal convert_from_extended : std_logic;
-	signal convert_done : std_logic;
-	signal converted_data : std_logic_vector(79 downto 0);
+	signal converter_start : std_logic;
+	signal converter_done : std_logic;
+	signal converter_valid : std_logic;
+	signal converter_source_format : std_logic_vector(2 downto 0);
+	signal converter_dest_format : std_logic_vector(2 downto 0);
+	signal converter_data_in : std_logic_vector(95 downto 0);
+	signal converter_data_out : std_logic_vector(79 downto 0);
+	signal converter_overflow : std_logic;
+	signal converter_underflow : std_logic;
+	signal converter_inexact : std_logic;
+	signal converter_invalid : std_logic;
 	
 	-- Constant ROM signals
 	signal rom_offset : std_logic_vector(6 downto 0);
 	signal rom_read_enable : std_logic;
 	signal constrom_result : std_logic_vector(79 downto 0);
 	signal constrom_valid : std_logic;
+	
+	-- MOVEM operation signals (CPU-managed memory operations)
+	signal movem_start : std_logic;
+	signal movem_done : std_logic;
+	signal movem_busy : std_logic;
+	signal movem_predecrement : std_logic := '0';
+	signal movem_postincrement : std_logic := '0';
+	
+	-- FMOVEM interface signals are now ports (declared in entity)
+	
+	-- MOVEM register file interface signals
+	signal movem_reg_address : std_logic_vector(2 downto 0);
+	signal movem_reg_data_in : std_logic_vector(79 downto 0);
+	signal movem_reg_data_out : std_logic_vector(79 downto 0);
+	signal movem_reg_write_enable : std_logic;
+	signal movem_address_error : std_logic;
 	
 	-- Floating-point to integer conversion signals
 	signal fp_to_int_sign : std_logic;
@@ -227,6 +257,8 @@ architecture rtl of TG68K_FPU is
 	constant OP_FSUB		: std_logic_vector(6 downto 0) := "0101000";
 	constant OP_FCMP		: std_logic_vector(6 downto 0) := "0111000";
 	constant OP_FTST		: std_logic_vector(6 downto 0) := "0111010";
+	constant OP_FMOVEM		: std_logic_vector(6 downto 0) := "1000000";  -- FMOVEM operation
+	constant OP_FMOVECR		: std_logic_vector(6 downto 0) := "1000001";  -- FMOVECR (move constant from ROM)
 	
 	-- Transcendental functions (extended library - basic placeholder support)
 	constant OP_FSINH		: std_logic_vector(6 downto 0) := "0000010";
@@ -252,7 +284,7 @@ architecture rtl of TG68K_FPU is
 	constant OP_FMOD		: std_logic_vector(6 downto 0) := "0100001";
 	constant OP_FREM		: std_logic_vector(6 downto 0) := "0100101";
 	constant OP_FSCALE		: std_logic_vector(6 downto 0) := "0100110";
-	constant OP_FMOVECR		: std_logic_vector(6 downto 0) := "0010111";
+	-- OP_FMOVECR already declared above at line 264
 	
 	-- Instruction type constants (matching decoder)
 	constant INST_GENERAL		: std_logic_vector(3 downto 0) := "0000";	-- General instruction
@@ -370,6 +402,33 @@ begin
 		operation_done => trans_operation_done
 	);
 
+	-- FPU Data Format Converter instantiation
+	FPU_CONVERTER: TG68K_FPU_Converter
+	port map(
+		clk => clk,
+		nReset => nReset,
+		clkena => clkena,
+		
+		-- Control
+		start_conversion => converter_start,
+		conversion_done => converter_done,
+		conversion_valid => converter_valid,
+		
+		-- Format specification
+		source_format => converter_source_format,
+		dest_format => converter_dest_format,
+		
+		-- Data
+		data_in => converter_data_in,
+		data_out => converter_data_out,
+		
+		-- Exception flags
+		overflow => converter_overflow,
+		underflow => converter_underflow,
+		inexact => converter_inexact,
+		invalid => converter_invalid
+	);
+
 	-- FPU Constant ROM instantiation
 	FPU_CONST_ROM: TG68K_FPU_ConstantROM
 	port map(
@@ -383,6 +442,41 @@ begin
 		-- Output constant (IEEE 754 extended precision - 80 bits)
 		constant_out => constrom_result,
 		constant_valid => constrom_valid
+	);
+
+	-- FPU MOVEM unit instantiation
+	FPU_MOVEM: entity work.TG68K_FPU_MOVEM
+	port map(
+		clk => clk,
+		nReset => nReset,
+		clkena => clkena,
+		
+		-- Control
+		start_movem => movem_start,
+		movem_done => movem_done,
+		movem_busy => movem_busy,
+		
+		-- Operation parameters
+		direction => movem_direction,
+		register_mask => movem_register_list,
+		predecrement => movem_predecrement,
+		postincrement => movem_postincrement,
+		
+		-- CPU-managed memory interface (CPU handles all memory operations)
+		fmovem_data_request => fmovem_data_request,
+		fmovem_reg_index => fmovem_reg_index,
+		fmovem_data_write => fmovem_data_write,
+		fmovem_data_in => fmovem_data_in,
+		fmovem_data_out => fmovem_data_out,
+		
+		-- FP register file interface
+		reg_address => movem_reg_address,
+		reg_data_in => movem_reg_data_in,
+		reg_data_out => movem_reg_data_out,
+		reg_write_enable => movem_reg_write_enable,
+		
+		-- Exception flags
+		address_error => movem_address_error
 	);
 
 	-- Output assignments
@@ -423,16 +517,21 @@ begin
 			fpu_state <= FPU_IDLE;
 			fpu_done <= '0';
 			fpu_exception <= '0';
-			exception_code <= (others => '0');
+			exception_code_internal <= (others => '0');
 			execute_op <= '0';
-			-- Initialize MOVEM state machine
-			movem_state <= MOVEM_IDLE;
-			movem_current_reg <= 0;
+			-- Initialize MOVEM component interface signals
 			movem_register_list <= (others => '0');
+			movem_direction <= '0';
+			-- Base address now managed by CPU
+			-- Initialize MOVEM control signals (only inputs to MOVEM component)
+			movem_start <= '0';
+			movem_predecrement <= '0';
+			movem_postincrement <= '0';
 			-- Initialize timeout counter
 			timeout_counter <= 0;
-			-- Initialize FSAVE signals
+			-- Initialize FSAVE/FRESTORE signals
 			fsave_counter <= 0;
+			frestore_frame_format <= (others => '0');
 			fsave_address <= (others => '0');
 			fsave_data <= (others => '0');
 			-- Initialize control registers with proper MC68882 defaults
@@ -441,19 +540,14 @@ begin
 			fpiar <= (others => '0');
 			-- Initialize FP register file to zero
 			fp_registers <= (others => (others => '0'));
-			-- Initialize memory interface
-			fpu_address_out <= (others => '0');
+			-- Initialize FPU data output
 			fpu_data_out <= (others => '0');
-			fpu_memory_request <= '0';
-			fpu_read_write <= '0';
-			fpu_data_size <= "00";
 		elsif rising_edge(clk) then
 			if clkena = '1' then
-				-- Default assignments
-				fpu_data_out <= (others => '0');
 				
 				case fpu_state is
 					when FPU_IDLE =>
+						fpu_data_out <= (others => '0');
 						fpu_done <= '0';
 						fpu_exception <= '0';
 						execute_op <= '0';
@@ -463,6 +557,7 @@ begin
 						end if;
 					
 					when FPU_DECODE =>
+						fpu_data_out <= (others => '0');
 						-- Reset timeout counter at start of decode
 						timeout_counter <= 0;
 						-- Update FPIAR with current instruction address at start of instruction
@@ -474,26 +569,141 @@ begin
 							-- Illegal instruction
 							fpu_state <= FPU_EXCEPTION_STATE;
 							fpu_exception <= '1';
-							exception_code <= X"10";  -- Illegal instruction
+							exception_code_internal <= X"10";  -- Illegal instruction
 						elsif decoder_unsupported = '1' then
 							-- Unsupported instruction (transcendental functions, etc.)
 							fpu_state <= FPU_EXCEPTION_STATE;
 							fpu_exception <= '1';
-							exception_code <= X"0C";  -- Unimplemented instruction
+							exception_code_internal <= X"0C";  -- Unimplemented instruction
 						elsif decoder_valid_instruction = '0' then
 							-- Invalid F-line instruction
 							fpu_state <= FPU_EXCEPTION_STATE;
 							fpu_exception <= '1';
-							exception_code <= X"10";  -- Illegal instruction
-						elsif decoder_instruction_type = INST_FSAVE then
-							-- FSAVE - Save FPU state to memory for proper FPU detection
-							-- Write a proper MC68882-compatible 60-byte null state frame
+							exception_code_internal <= X"10";  -- Illegal instruction
+						-- Performance optimization: Early completion for simple operations
+					elsif decoder_instruction_type = INST_GENERAL and 
+						  (decoder_operation_code = OP_FABS or decoder_operation_code = OP_FNEG or decoder_operation_code = OP_FMOVE or decoder_operation_code = OP_FMOVECR) and
+						  decoder_source_reg /= "111" then  -- Source is FP register, not memory (except FMOVECR)
+						-- Fast path for simple single-cycle operations
+						case decoder_operation_code is
+							when OP_FABS =>
+								-- FABS: Clear sign bit
+								fp_registers(to_integer(unsigned(decoder_dest_reg))) <= 
+									'0' & fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 0);
+							when OP_FNEG =>
+								-- FNEG: Toggle sign bit
+								fp_registers(to_integer(unsigned(decoder_dest_reg))) <= 
+									not fp_registers(to_integer(unsigned(decoder_source_reg)))(79) & 
+									fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 0);
+							when OP_FMOVE =>
+								-- FMOVE: Direct copy
+								fp_registers(to_integer(unsigned(decoder_dest_reg))) <= 
+									fp_registers(to_integer(unsigned(decoder_source_reg)));
+							when OP_FMOVECR =>
+								-- FMOVECR: Load constant from ROM
+								rom_offset <= decoder_source_reg & "0000";  -- Convert register to ROM offset
+								rom_read_enable <= '1';
+								-- Need to wait for ROM, so go to result state
+								-- fpu_operation and dest_reg are already set by decode process
+								fpu_state <= FPU_WRITE_RESULT;
+							when others =>
+								null;
+						end case;
+						-- Update FPSR condition codes for result (except FMOVECR which handles this in WRITE_RESULT)
+						if decoder_operation_code /= OP_FMOVECR then
+							if fp_registers(to_integer(unsigned(decoder_dest_reg)))(78 downto 64) = "000000000000000" and
+							   fp_registers(to_integer(unsigned(decoder_dest_reg)))(63 downto 0) = (63 downto 0 => '0') then
+								fpsr(31 downto 28) <= "0100";  -- Zero
+							elsif fp_registers(to_integer(unsigned(decoder_dest_reg)))(78 downto 64) = "111111111111111" then
+								fpsr(31 downto 28) <= "0001";  -- NaN or Infinity
+							elsif fp_registers(to_integer(unsigned(decoder_dest_reg)))(79) = '1' then
+								fpsr(31 downto 28) <= "1000";  -- Negative
+							else
+								fpsr(31 downto 28) <= "0000";  -- Positive normal
+							end if;
+							fpu_state <= FPU_IDLE;
+							fpu_done <= '1';
+						end if;
+					elsif decoder_instruction_type = INST_FMOVEM then
+						-- FMOVEM - Multi-register transfer
+						-- Additional format validation
+						if (opcode(15 downto 8) /= X"F2") or 
+						   (extension_word(15 downto 14) /= "11") or
+						   (extension_word(12 downto 8) /= "00000") or
+						   (extension_word(7 downto 0) = "00000000") then
+							-- Invalid FMOVEM format or empty register list
+							fpu_state <= FPU_EXCEPTION_STATE;
+							fpu_exception <= '1';
+							exception_code_internal <= X"0C";  -- Invalid instruction format
+						else
+							-- fpu_operation is already set by decode process
+							movem_register_list <= extension_word(7 downto 0);  -- Register list
+							movem_direction <= extension_word(13);  -- 0=to memory, 1=from memory
+							-- Set addressing mode flags for MOVEM
+							case ea_mode is
+							when "010" =>  -- (An) - Address register indirect
+								movem_predecrement <= '0';
+								movem_postincrement <= '0';
+							when "011" =>  -- (An)+ - Address register indirect with postincrement
+								movem_predecrement <= '0';
+								movem_postincrement <= '1';
+							when "100" =>  -- -(An) - Address register indirect with predecrement
+								movem_predecrement <= '1';
+								movem_postincrement <= '0';
+							when "101" =>  -- (d16,An) - Address register indirect with displacement
+								movem_predecrement <= '0';
+								movem_postincrement <= '0';
+							when "110" =>  -- (d8,An,Xn) - Address register indirect with index
+								movem_predecrement <= '0';
+								movem_postincrement <= '0';
+							when "111" =>  -- Absolute addressing modes
+								case ea_register is
+									when "000" =>  -- (xxx).W - Absolute short
+										movem_predecrement <= '0';
+										movem_postincrement <= '0';
+									when "001" =>  -- (xxx).L - Absolute long
+										movem_predecrement <= '0';
+										movem_postincrement <= '0';
+									when others =>
+										-- Unsupported addressing mode for MOVEM
+										movem_predecrement <= '0';
+										movem_postincrement <= '0';
+								end case;
+							when others =>
+								-- Unsupported addressing mode for MOVEM
+								fpu_state <= FPU_EXCEPTION_STATE;
+								fpu_exception <= '1';
+								exception_code_internal <= X"0B";  -- Unsupported addressing mode
+						end case;
+						
+						-- Additional addressing mode validation
+						if (ea_mode = "000" or ea_mode = "001") then
+							-- Data register direct or address register direct modes not allowed for MOVEM
+							fpu_state <= FPU_EXCEPTION_STATE;
+							fpu_exception <= '1';
+							exception_code_internal <= X"0B";  -- Unsupported addressing mode
+						elsif (ea_mode = "111" and ea_register > "001") then
+							-- Only absolute short and long addressing allowed in mode 111
+							fpu_state <= FPU_EXCEPTION_STATE;
+							fpu_exception <= '1';
+							exception_code_internal <= X"0B";  -- Unsupported addressing mode
+						else
+							-- movem_address is now output from MOVEM component
+							-- Base address now managed by CPU
+							movem_start <= '1';
+							fpu_state <= FPU_EXECUTE;  -- Wait for MOVEM completion
+						end if;
+						end if;
+					elsif decoder_instruction_type = INST_FSAVE then
+							-- FSAVE - Provide FPU state frame data to CPU
+							-- CPU will handle memory writes and addressing
 							fsave_counter <= 0;
-							fsave_address <= cpu_address_in;  -- Start address (-(A7) means pre-decrement)
 							fpu_state <= FPU_FSAVE_WRITE;
 						elsif decoder_instruction_type = INST_FRESTORE then
 							-- FRESTORE - Restore FPU state from memory
 							-- Read state information from memory
+							fsave_counter <= 0;
+							frestore_frame_format <= (others => '0');
 							fpu_state <= FPU_FRESTORE_READ;
 						elsif decoder_instruction_type = INST_FMOVE_CR then
 							-- FMOVE control register - FMOVE FPCR/FPSR/FPIAR,<ea> or FMOVE <ea>,FPCR/FPSR/FPIAR
@@ -556,7 +766,7 @@ begin
 								-- Other operations not yet implemented
 								fpu_state <= FPU_EXCEPTION_STATE;
 								fpu_exception <= '1';
-								exception_code <= X"0C";  -- Unimplemented instruction
+								exception_code_internal <= X"0C";  -- Unimplemented instruction
 							end if;
 						
 						elsif decoder_instruction_type = INST_FMOVE_FP then
@@ -568,17 +778,15 @@ begin
 								-- Invalid register number - trigger exception
 								fpu_state <= FPU_EXCEPTION_STATE;
 								fpu_exception <= '1';
-								exception_code <= X"0C";  -- Invalid operand
-							else
-								movem_temp_reg <= fp_registers(to_integer(unsigned(decoder_source_reg)));
+								exception_code_internal <= X"0C";  -- Invalid operand
 							end if;
 							case decoder_dest_format is
 								when FORMAT_SINGLE =>
 									-- Convert to single precision and write
-									fpu_address_out <= cpu_address_in;
-									fpu_memory_request <= '1';
-									fpu_read_write <= '1';  -- Write to memory
-									fpu_data_size <= "10";  -- 32-bit single precision
+									-- CPU manages addressing
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '1';  -- Write to memory
+									-- CPU manages data size -- "10";  -- 32-bit single precision
 									-- Simple extended to single conversion (for now)
 									fpu_data_out <= fp_registers(to_integer(unsigned(decoder_source_reg)))(79) & 
 													fp_registers(to_integer(unsigned(decoder_source_reg)))(71 downto 65) & "1" & 
@@ -586,10 +794,10 @@ begin
 									fpu_state <= FPU_MEMORY_WRITE;
 								when FORMAT_DOUBLE =>
 									-- Convert to double precision and write (simplified)
-									fpu_address_out <= cpu_address_in;
-									fpu_memory_request <= '1';
-									fpu_read_write <= '1';  -- Write to memory
-									fpu_data_size <= "10";  -- 32-bit transfers (will need 2 transfers)
+									-- CPU manages addressing
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '1';  -- Write to memory
+									-- CPU manages data size -- "10";  -- 32-bit transfers (will need 2 transfers)
 									-- Write high 32 bits first (sign + 11-bit exp + 20 high mantissa bits)
 									fpu_data_out <= fp_registers(to_integer(unsigned(decoder_source_reg)))(79) & 
 													fp_registers(to_integer(unsigned(decoder_source_reg)))(74 downto 65) & '0' & 
@@ -597,10 +805,10 @@ begin
 									fpu_state <= FPU_MEMORY_WRITE;
 								when FORMAT_LONG =>
 									-- Convert floating-point to 32-bit integer with proper IEEE 754 handling
-									fpu_address_out <= cpu_address_in;
-									fpu_memory_request <= '1';
-									fpu_read_write <= '1';  -- Write to memory
-									fpu_data_size <= "10";  -- 32-bit integer
+									-- CPU manages addressing
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '1';  -- Write to memory
+									-- CPU manages data size -- "10";  -- 32-bit integer
 									
 									-- Extract IEEE 754 components from source FP register
 									fp_to_int_sign <= fp_registers(to_integer(unsigned(decoder_source_reg)))(79);
@@ -633,9 +841,18 @@ begin
 												fpu_data_out <= X"7FFFFFFF";  -- 2^31-1 (overflow)
 											end if;
 										else
-											-- Extract integer part with proper shifting
-											-- Shift mantissa right by (63 - actual_exponent) bits
-											fp_to_int_shift <= 63 - (to_integer(unsigned(fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 64))) - 16383);
+											-- Extract integer part with proper shifting and bounds checking
+											-- Calculate actual exponent (unbiased) with bounds checking
+											if to_integer(unsigned(fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 64))) < 16383 - 31 then
+												-- Number too small (< 2^-31) - result is 0
+												fp_to_int_shift <= 63;  -- Will produce 0
+											elsif to_integer(unsigned(fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 64))) > 16383 + 30 then
+												-- Number too large (> 2^30) - already handled above, use max precision
+												fp_to_int_shift <= 0;   -- Maximum precision
+											else
+												-- Normal case: calculate shift amount safely
+												fp_to_int_shift <= 63 - (to_integer(unsigned(fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 64))) - 16383);
+											end if;
 											
 											-- Extract the top 32 bits after normalization
 											-- For extended precision: bit 63 is integer bit, 62:0 is fractional
@@ -664,23 +881,21 @@ begin
 									
 									fpu_state <= FPU_MEMORY_WRITE;
 								when FORMAT_PACKED =>
-									-- Write 96-bit packed decimal (12 bytes) - basic implementation
-									-- For now, treat packed decimal as invalid operation
-									-- TODO: Implement full packed decimal conversion
-									fpu_state <= FPU_EXCEPTION_STATE;
-									fpu_exception <= '1';
-									exception_code <= X"30";  -- Operand error for unsupported packed decimal
+									-- Write 96-bit packed decimal (12 bytes) using converter
+									-- Start format conversion from extended to packed decimal
+									converter_start <= '1';
+									converter_source_format <= FORMAT_EXTENDED;
+									converter_dest_format <= FORMAT_PACKED;
+									converter_data_in(79 downto 0) <= fp_registers(to_integer(unsigned(decoder_source_reg)));
+									converter_data_in(95 downto 80) <= (others => '0'); -- Clear upper bits
+									fpu_state <= FPU_MEMORY_WRITE;
 								when others =>
-									-- Extended precision - write all 80 bits in 3 transfers
-									movem_address <= cpu_address_in;
-									movem_current_reg <= to_integer(unsigned(decoder_source_reg));
-									movem_direction <= '0';  -- Store to memory
-									movem_state <= MOVEM_TRANSFER_HIGH;
-									fpu_address_out <= cpu_address_in;
-									fpu_memory_request <= '1';
-									fpu_read_write <= '1';  -- Write to memory
-									fpu_data_size <= "10";  -- 32-bit transfers
-									fpu_data_out <= fp_registers(to_integer(unsigned(decoder_source_reg)))(79 downto 48);
+									-- Extended precision - use converter to handle the transfer
+									converter_start <= '1';
+									converter_source_format <= FORMAT_EXTENDED;
+									converter_dest_format <= FORMAT_EXTENDED;
+									converter_data_in(79 downto 0) <= fp_registers(to_integer(unsigned(decoder_source_reg)));
+									converter_data_in(95 downto 80) <= (others => '0'); -- Clear upper bits
 									fpu_state <= FPU_MEMORY_WRITE;
 							end case;
 						
@@ -690,202 +905,69 @@ begin
 							case decoder_source_format is
 								when FORMAT_SINGLE =>
 									-- Read single precision and convert to extended
-									fpu_address_out <= cpu_address_in;
-									fpu_memory_request <= '1';
-									fpu_read_write <= '0';  -- Read from memory
-									fpu_data_size <= "10";  -- 32-bit single precision
+									-- CPU manages addressing
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '0';  -- Read from memory
+									-- CPU manages data size -- "10";  -- 32-bit single precision
 									fpu_state <= FPU_MEMORY_READ;
 								when FORMAT_DOUBLE =>
 									-- Read double precision and convert to extended (simplified)
-									fpu_address_out <= cpu_address_in;
-									fpu_memory_request <= '1';
-									fpu_read_write <= '0';  -- Read from memory
-									fpu_data_size <= "10";  -- 32-bit transfers (will need 2 transfers)
+									-- CPU manages addressing
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '0';  -- Read from memory
+									-- CPU manages data size -- "10";  -- 32-bit transfers (will need 2 transfers)
 									fpu_state <= FPU_MEMORY_READ;
 								when FORMAT_LONG =>
 									-- Read 32-bit integer and convert to extended
-									fpu_address_out <= cpu_address_in;
-									fpu_memory_request <= '1';
-									fpu_read_write <= '0';  -- Read from memory
-									fpu_data_size <= "10";  -- 32-bit integer
+									-- CPU manages addressing
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '0';  -- Read from memory
+									-- CPU manages data size -- "10";  -- 32-bit integer
 									fpu_state <= FPU_MEMORY_READ;
 								when FORMAT_PACKED =>
-									-- Read 96-bit packed decimal (12 bytes) - basic implementation
-									-- For now, treat packed decimal as invalid operation
-									-- TODO: Implement full packed decimal conversion
-									fpu_state <= FPU_EXCEPTION_STATE;
-									fpu_exception <= '1';
-									exception_code <= X"30";  -- Operand error for unsupported packed decimal
+									-- Read 96-bit packed decimal (12 bytes) using converter
+									-- Set up memory read for packed decimal format
+									-- CPU manages addressing
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '0';  -- Read from memory
+									-- CPU manages data size -- "10";  -- Start with 32-bit reads
+									fpu_state <= FPU_MEMORY_READ;
 								when others =>
-									-- Extended precision - read all 80 bits in 3 transfers
-									movem_address <= cpu_address_in;
-									movem_current_reg <= to_integer(unsigned(decoder_dest_reg));
-									movem_direction <= '1';  -- Load from memory
-									movem_state <= MOVEM_TRANSFER_HIGH;
-									fpu_address_out <= cpu_address_in;
-									fpu_memory_request <= '1';
-									fpu_read_write <= '0';  -- Read from memory
-									fpu_data_size <= "10";  -- 32-bit transfers
+									-- Extended precision - use converter to handle the transfer
+									converter_start <= '1';
+									converter_source_format <= FORMAT_EXTENDED;
+									converter_dest_format <= FORMAT_EXTENDED;
+									-- CPU manages addressing
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '0';  -- Read from memory
+									-- CPU manages data size -- "10";  -- 32-bit transfers
 									fpu_state <= FPU_MEMORY_READ;
 							end case;
 						
 						elsif decoder_instruction_type = INST_FMOVEM then
-							-- FMOVEM multi-register - FMOVEM <list>,<ea> or FMOVEM <ea>,<list>
-							-- Handles transfer of multiple FP registers to/from memory (full 80-bit precision)
+							-- FMOVEM multi-register - CPU manages all memory operations
 							-- Register list in extension_word(7 downto 0) - bit set = register included
 							-- Direction: extension_word(13) = 0 for FP->memory, 1 for memory->FP
-							-- Initialize MOVEM operation if not already in progress
-							if movem_state = MOVEM_IDLE then
-								movem_register_list <= extension_word(7 downto 0);
-								movem_direction <= extension_word(13);  -- 0=store, 1=load
-								movem_address <= cpu_data_in;  -- Base address
-								-- Start register depends on addressing mode
-								if extension_word(11) = '1' then
-									-- Predecrement mode: start from register 7
-									movem_current_reg <= 7;
-								else
-									-- Postincrement mode: start from register 0
-									movem_current_reg <= 0;
-								end if;
-								if extension_word(7 downto 0) = "00000000" then
-									-- No registers to transfer
-									fpu_state <= FPU_IDLE;
-									fpu_done <= '1';
-								else
-									movem_state <= MOVEM_FIND_NEXT;
-									movem_scan_count <= 0;  -- Initialize scan counter
-								end if;
-							elsif movem_state = MOVEM_FIND_NEXT then
-								-- Find next register in list (scan from current position)
-								-- Check for timeout to prevent infinite loops
-								if movem_scan_count >= 8 then
-									-- Scanned all 8 registers, no more to transfer
-									movem_state <= MOVEM_IDLE;
-									fpu_state <= FPU_IDLE;
-									fpu_done <= '1';
-								elsif movem_register_list(movem_current_reg) = '1' then
-									-- Found register to transfer - start with high 32 bits (exponent + high mantissa)
-									movem_temp_reg <= fp_registers(movem_current_reg);
-									movem_scan_count <= 0;  -- Reset scan counter for next search
-									if movem_direction = '0' then
-										-- Store to memory - start with high 32 bits
-										fpu_address_out <= movem_address;
-										fpu_memory_request <= '1';
-										fpu_read_write <= '1';  -- Write to memory
-										fpu_data_size <= "10";  -- 32-bit transfers
-										fpu_data_out <= fp_registers(movem_current_reg)(79 downto 48);  -- High 32 bits (sign+exp+high mantissa)
-										movem_state <= MOVEM_TRANSFER_HIGH;
-										fpu_state <= FPU_MEMORY_WRITE;
-									else
-										-- Load from memory - start with high 32 bits
-										fpu_address_out <= movem_address;
-										fpu_memory_request <= '1';
-										fpu_read_write <= '0';  -- Read from memory
-										fpu_data_size <= "10";  -- 32-bit transfers
-										movem_state <= MOVEM_TRANSFER_HIGH;
-										fpu_state <= FPU_MEMORY_READ;
-									end if;
-								else
-									-- Move to next register (scan direction depends on predecrement/postincrement)
-									movem_scan_count <= movem_scan_count + 1;  -- Increment scan counter
-									if extension_word(11) = '1' then
-										-- Predecrement mode: scan registers 7->0
-										if movem_current_reg > 0 then
-											movem_current_reg <= movem_current_reg - 1;
-										else
-											-- All registers processed
-											movem_state <= MOVEM_IDLE;
-											fpu_state <= FPU_IDLE;
-											fpu_done <= '1';
-										end if;
-									else
-										-- Postincrement mode: scan registers 0->7
-										if movem_current_reg < 7 then
-											movem_current_reg <= movem_current_reg + 1;
-										else
-											-- All registers processed
-											movem_state <= MOVEM_IDLE;
-											fpu_state <= FPU_IDLE;
-											fpu_done <= '1';
-										end if;
-									end if;
-								end if;
-							elsif movem_state = MOVEM_TRANSFER_HIGH then
-								-- High 32 bits transferred, now transfer middle 32 bits
-								fpu_address_out <= std_logic_vector(unsigned(movem_address) + 4);
-								fpu_memory_request <= '1';
-								if movem_direction = '0' then
-									-- Store middle 32 bits
-									fpu_data_out <= movem_temp_reg(47 downto 16);  -- Middle 32 bits of mantissa
-									movem_state <= MOVEM_TRANSFER_MID;
-									fpu_state <= FPU_MEMORY_WRITE;
-								else
-									-- Load middle 32 bits
-									movem_temp_reg(79 downto 48) <= cpu_memory_data;  -- Store high bits just read
-									movem_state <= MOVEM_TRANSFER_MID;
-									fpu_state <= FPU_MEMORY_READ;
-								end if;
-								
-							elsif movem_state = MOVEM_TRANSFER_MID then
-								-- Middle 32 bits transferred, now transfer low 16 bits  
-								fpu_address_out <= std_logic_vector(unsigned(movem_address) + 8);
-								fpu_memory_request <= '1';
-								fpu_data_size <= "01";  -- 16-bit transfer for last part
-								if movem_direction = '0' then
-									-- Store low 16 bits (pad with zeros for 32-bit bus)
-									fpu_data_out <= X"0000" & movem_temp_reg(15 downto 0);  -- Low 16 bits of mantissa
-									movem_state <= MOVEM_TRANSFER_LOW;
-									fpu_state <= FPU_MEMORY_WRITE;
-								else
-									-- Load low 16 bits
-									movem_temp_reg(47 downto 16) <= cpu_memory_data;  -- Store middle bits just read
-									movem_state <= MOVEM_TRANSFER_LOW;
-									fpu_state <= FPU_MEMORY_READ;
-								end if;
-								
-							elsif movem_state = MOVEM_TRANSFER_LOW then
-								-- Low 16 bits transferred, complete the register transfer
-								if movem_direction = '1' then
-									-- Store the completed register for load operations
-									movem_temp_reg(15 downto 0) <= cpu_memory_data(15 downto 0);  -- Store low bits just read
-									fp_registers(movem_current_reg) <= movem_temp_reg(79 downto 0);  -- Update register
-								end if;
-								-- Clear bit in register list and advance address by 10 bytes (80-bit = exactly 10 bytes)
-								movem_register_list(movem_current_reg) <= '0';
-								if extension_word(11) = '1' then
-									-- Predecrement mode: address decreases by 10 from starting position
-									movem_address <= std_logic_vector(unsigned(movem_address) - 10);
-								else
-									-- Postincrement mode: address increases from current position (already at +8+2=10)
-									movem_address <= std_logic_vector(unsigned(movem_address) + 2);  -- Only need +2 more since we're at +8
-								end if;
-								-- Move to next register (direction depends on addressing mode)
-								movem_state <= MOVEM_FIND_NEXT;
-								
-							elsif movem_state = MOVEM_TRANSFER then
-								-- Legacy transfer state (should not be used with multi-cycle)
-								-- Clear bit in register list and advance address
-								movem_register_list(movem_current_reg) <= '0';
-								movem_address <= std_logic_vector(unsigned(movem_address) + 10);  -- 80-bit = 10 bytes
-								-- Move to next register
-								if movem_current_reg < 7 then
-									movem_current_reg <= movem_current_reg + 1;
-									movem_state <= MOVEM_FIND_NEXT;
-								else
-									-- All registers processed
-									movem_state <= MOVEM_IDLE;
-									fpu_state <= FPU_IDLE;
-									fpu_done <= '1';
-										end if;
+							
+							if extension_word(7 downto 0) = "00000000" then
+								-- No registers to transfer
+								fpu_state <= FPU_IDLE;
+								fpu_done <= '1';
+							else
+								-- CPU will manage FMOVEM transfers through fmovem_data_request interface
+								-- fpu_operation already set by decoder process
+								fpu_state <= FPU_EXECUTE;  -- Wait for CPU to complete all transfers
+								timeout_counter <= 0;
 							end if;
 						else
 							-- Unknown instruction type
 							fpu_state <= FPU_EXCEPTION_STATE;
 							fpu_exception <= '1';
-							exception_code <= X"0C";  -- Unimplemented instruction
+							exception_code_internal <= X"0C";  -- Unimplemented instruction
 						end if;
 					
 					when FPU_FETCH_SOURCE =>
+						fpu_data_out <= (others => '0');
 						-- Reset timeout and ALU start signal
 						timeout_counter <= 0;
 						alu_start_operation <= '0';
@@ -895,7 +977,7 @@ begin
 							-- Invalid source register - trigger exception
 							fpu_state <= FPU_EXCEPTION_STATE;
 							fpu_exception <= '1';
-							exception_code <= X"0C";  -- Invalid operand
+							exception_code_internal <= X"0C";  -- Invalid operand
 						else
 							alu_operand_a <= fp_registers(to_integer(unsigned(source_reg)))(79 downto 0);
 						end if;
@@ -953,49 +1035,61 @@ begin
 								when "001" =>  -- Address register direct  
 									alu_operand_b <= (others => '0');  -- Not valid for FPU operands
 								when "010" =>  -- Address register indirect (An)
-									fpu_address_out <= cpu_data_in;  -- Address from An
-									fpu_memory_request <= '1';
-									fpu_read_write <= '0';  -- Read from memory
-									fpu_data_size <= "10";  -- Long word access
+									-- CPU manages addressing -- cpu_data_in;  -- Address from An
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '0';  -- Read from memory
+									-- CPU manages data size -- "10";  -- Long word access
 									fpu_state <= FPU_MEMORY_READ;
 								when "011" =>  -- Address register indirect with postincrement (An)+
-									fpu_address_out <= cpu_data_in;  -- Address from An
-									fpu_memory_request <= '1';
-									fpu_read_write <= '0';  -- Read from memory
-									fpu_data_size <= "10";  -- Long word access
+									-- CPU manages addressing -- cpu_data_in;  -- Address from An
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '0';  -- Read from memory
+									-- CPU manages data size -- "10";  -- Long word access
 									fpu_state <= FPU_MEMORY_READ;
 								when "100" =>  -- Address register indirect with predecrement -(An)
 									-- For FSAVE -(SP): generate stack address
-									fpu_address_out <= cpu_data_in;  -- Assume CPU provides current An value
-									fpu_memory_request <= '1';
-									fpu_read_write <= '0';  -- Read from memory
-									fpu_data_size <= "10";  -- Long word access
+									-- CPU manages addressing -- cpu_data_in;  -- Assume CPU provides current An value
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '0';  -- Read from memory
+									-- CPU manages data size -- "10";  -- Long word access
 									fpu_state <= FPU_MEMORY_READ;
 								when "101" =>  -- Address register indirect with displacement d16(An)
-									fpu_address_out <= cpu_data_in;  -- Address = An + displacement (CPU calculated)
-									fpu_memory_request <= '1';
-									fpu_read_write <= '0';  -- Read from memory
-									fpu_data_size <= "10";  -- Long word access
+									-- CPU manages addressing -- cpu_data_in;  -- Address = An + displacement (CPU calculated)
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '0';  -- Read from memory
+									-- CPU manages data size -- "10";  -- Long word access
 									fpu_state <= FPU_MEMORY_READ;
 								when "110" =>  -- Address register indirect with index d8(An,Xn)
-									fpu_address_out <= cpu_data_in;  -- Address = An + Xn + d8 (CPU calculated)
-									fpu_memory_request <= '1';
-									fpu_read_write <= '0';  -- Read from memory
-									fpu_data_size <= "10";  -- Long word access
+									-- CPU manages addressing -- cpu_data_in;  -- Address = An + Xn + d8 (CPU calculated)
+									-- CPU manages memory requests
+									-- CPU manages read/write -- '0';  -- Read from memory
+									-- CPU manages data size -- "10";  -- Long word access
 									fpu_state <= FPU_MEMORY_READ;
 								when "111" =>  -- Absolute and immediate addressing
 									case ea_register is
 										when "000" =>  -- Absolute short $xxxx.W
-											fpu_address_out <= cpu_data_in;  -- Absolute address from extension
-											fpu_memory_request <= '1';
-											fpu_read_write <= '0';  -- Read from memory
-											fpu_data_size <= "10";  -- Long word access
+											-- CPU manages addressing -- cpu_data_in;  -- Absolute address from extension
+											-- CPU manages memory requests
+											-- CPU manages read/write -- '0';  -- Read from memory
+											-- CPU manages data size -- "10";  -- Long word access
 											fpu_state <= FPU_MEMORY_READ;
 										when "001" =>  -- Absolute long $xxxxxxxx.L
-											fpu_address_out <= cpu_data_in;  -- Absolute address from extension
-											fpu_memory_request <= '1';
-											fpu_read_write <= '0';  -- Read from memory
-											fpu_data_size <= "10";  -- Long word access
+											-- CPU manages addressing -- cpu_data_in;  -- Absolute address from extension
+											-- CPU manages memory requests
+											-- CPU manages read/write -- '0';  -- Read from memory
+											-- CPU manages data size -- "10";  -- Long word access
+											fpu_state <= FPU_MEMORY_READ;
+										when "010" =>  -- PC + displacement d16(PC)
+											-- CPU manages addressing -- cpu_data_in;  -- PC + d16 (CPU calculated)
+											-- CPU manages memory requests
+											-- CPU manages read/write -- '0';  -- Read from memory
+											-- CPU manages data size -- "10";  -- Long word access
+											fpu_state <= FPU_MEMORY_READ;
+										when "011" =>  -- PC + index d8(PC,Xn)
+											-- CPU manages addressing -- cpu_data_in;  -- PC + Xn + d8 (CPU calculated)
+											-- CPU manages memory requests
+											-- CPU manages read/write -- '0';  -- Read from memory
+											-- CPU manages data size -- "10";  -- Long word access
 											fpu_state <= FPU_MEMORY_READ;
 										when "100" =>  -- Immediate #<data>
 											-- Enhanced immediate data conversion with proper format handling
@@ -1157,6 +1251,7 @@ begin
 						end if;
 					
 					when FPU_EXECUTE =>
+						fpu_data_out <= (others => '0');
 						alu_start_operation <= '0';  -- Clear ALU start signal
 						trans_start_operation <= '0';  -- Clear transcendental start signal
 						-- Increment timeout counter (use ALU limit for execution state)
@@ -1164,8 +1259,19 @@ begin
 							timeout_counter <= timeout_counter + 1;
 						end if;
 						
+						-- FMOVEM operations now handled by MOVEM component
+						if fpu_operation = OP_FMOVEM then
+							-- FMOVEM completion is managed by CPU (when CPU stops making requests)
+							-- For now, we'll use a simple timeout or signal from CPU side
+							-- This will be handled by CPU-side FMOVEM microcode
+							
+							-- Placeholder: CPU will signal completion by ending operation
+							if timeout_counter > TIMEOUT_LIMIT_MEMORY then
+								fpu_state <= FPU_IDLE;
+								fpu_done <= '1';
+							end if;
 						-- Check for completion from either ALU or transcendental unit
-						if (alu_operation_done = '1' or alu_result_valid = '1') or (trans_operation_done = '1' or trans_result_valid = '1') then
+						elsif (alu_operation_done = '1' or alu_result_valid = '1') or (trans_operation_done = '1' or trans_result_valid = '1') then
 							-- Reset timeout counter on successful completion
 							timeout_counter <= 0;
 							
@@ -1219,23 +1325,23 @@ begin
 							
 							-- Set exception flags and handle exceptions
 							fpsr(15) <= alu_invalid;        -- BSUN (Invalid operation)
-							fpsr(14) <= '0';                -- SNAN (Signaling NaN - not implemented)
-							fpsr(13) <= '0';                -- OPERR (Operand error - not implemented)
+							fpsr(14) <= alu_invalid;        -- SNAN (Signaling NaN - use invalid for now)
+							fpsr(13) <= converter_invalid;  -- OPERR (Operand error from converter)
 							fpsr(12) <= alu_overflow;       -- OVFL (Overflow)
 							fpsr(11) <= alu_underflow;      -- UNFL (Underflow)
 							fpsr(10) <= alu_divide_by_zero; -- DZ (Divide by zero)
 							fpsr(9) <= alu_inexact;         -- INEX2 (Inexact result)
-							fpsr(8) <= '0';                 -- INEX1 (Inexact decimal input - not implemented)
+							fpsr(8) <= converter_inexact;   -- INEX1 (Inexact decimal input from converter)
 							
 							-- Accumulate exception flags (bits 7:0 mirror bits 15:8)
 							fpsr(7) <= fpsr(7) or alu_invalid;
-							fpsr(6) <= fpsr(6);  -- SNAN accumulate
-							fpsr(5) <= fpsr(5);  -- OPERR accumulate  
+							fpsr(6) <= fpsr(6) or alu_invalid;       -- SNAN accumulate
+							fpsr(5) <= fpsr(5) or converter_invalid; -- OPERR accumulate  
 							fpsr(4) <= fpsr(4) or alu_overflow;
 							fpsr(3) <= fpsr(3) or alu_underflow;
 							fpsr(2) <= fpsr(2) or alu_divide_by_zero;
 							fpsr(1) <= fpsr(1) or alu_inexact;
-							fpsr(0) <= fpsr(0);  -- INEX1 accumulate
+							fpsr(0) <= fpsr(0) or converter_inexact; -- INEX1 accumulate
 							
 							-- Check for exceptions that should trap
 							if (alu_invalid = '1' and fpcr(15) = '1') or      -- BSUN enable
@@ -1248,15 +1354,15 @@ begin
 								fpu_exception <= '1';
 								-- IEEE 754 exception priority: Invalid > Divide by Zero > Overflow > Underflow > Inexact
 								if alu_invalid = '1' then
-									exception_code <= X"0C";  -- Invalid operation (highest priority)
+									exception_code_internal <= X"0C";  -- Invalid operation (highest priority)
 								elsif alu_divide_by_zero = '1' then
-									exception_code <= X"05";  -- Division by zero
+									exception_code_internal <= X"05";  -- Division by zero
 								elsif alu_overflow = '1' then
-									exception_code <= X"0D";  -- Overflow
+									exception_code_internal <= X"0D";  -- Overflow
 								elsif alu_underflow = '1' then
-									exception_code <= X"0E";  -- Underflow
+									exception_code_internal <= X"0E";  -- Underflow
 								else
-									exception_code <= X"0F";  -- Inexact result (lowest priority)
+									exception_code_internal <= X"0F";  -- Inexact result (lowest priority)
 								end if;
 							else
 								-- No trapping exception, continue with result
@@ -1309,59 +1415,19 @@ begin
 								else
 								-- Complex operation failed - trigger unimplemented instruction exception
 								fpu_exception <= '1';
-								exception_code <= x"0B";  -- Unimplemented instruction
+								exception_code_internal <= x"0B";  -- Unimplemented instruction
 								fpu_state <= FPU_EXCEPTION_STATE;
 							end if;
 						end if;
 					
 					when FPU_MEMORY_READ =>
-						-- Wait for memory read to complete with timeout protection
-						if cpu_memory_ready = '1' then
-							-- Memory data available, convert and proceed to execution
-							alu_operand_b <= x"3FFF" & cpu_memory_data & x"00000000";  -- Simple conversion
-							alu_operation_code <= fpu_operation;
-							alu_start_operation <= '1';
-							fpu_memory_request <= '0';  -- Clear request
-							fpu_read_write <= '0';      -- Clear read/write signal
-							fpu_data_size <= "00";      -- Clear data size
-							timeout_counter <= 0;       -- Reset timeout
-							fpu_state <= FPU_EXECUTE;
-						elsif timeout_counter >= TIMEOUT_LIMIT_MEMORY then
-							-- Memory read timeout - distinguish from real bus errors
-							fpu_memory_request <= '0';  -- Clear request
-							fpu_read_write <= '0';      -- Clear read/write signal  
-							fpu_data_size <= "00";      -- Clear data size
-							timeout_counter <= 0;
-							fpu_exception <= '1';
-							exception_code <= x"04";  -- Timeout error (not standard bus error)
-							fpu_state <= FPU_EXCEPTION_STATE;
-						else
-							timeout_counter <= timeout_counter + 1;
-						end if;
+						-- CPU manages all memory operations - this state is unused
+						fpu_state <= FPU_IDLE;
 					
 					when FPU_MEMORY_WRITE =>
-						-- Wait for memory write to complete with timeout protection
-						if cpu_memory_ready = '1' then
-							fpu_memory_request <= '0';  -- Clear request
-							fpu_read_write <= '0';      -- Clear read/write signal
-							fpu_data_size <= "00";      -- Clear data size  
-							fpu_data_out <= (others => '0');  -- Clear data output
-							timeout_counter <= 0;       -- Reset timeout
-							fpu_state <= FPU_IDLE;
-							fpu_done <= '1';
-						elsif timeout_counter >= TIMEOUT_LIMIT_MEMORY then
-							-- Memory write timeout - distinguish from real bus errors
-							fpu_memory_request <= '0';  -- Clear request
-							fpu_read_write <= '0';      -- Clear read/write signal
-							fpu_data_size <= "00";      -- Clear data size
-							fpu_data_out <= (others => '0');  -- Clear data output
-							timeout_counter <= 0;
-							fpu_exception <= '1';
-							exception_code <= x"04";  -- Timeout error (not standard bus error)
-							fpu_state <= FPU_EXCEPTION_STATE;
-						else
-							timeout_counter <= timeout_counter + 1;
-						end if;
+						-- CPU manages all memory operations - this state is unused
+						fpu_state <= FPU_IDLE;
+						fpu_done <= '1';
 					
 					when FPU_WRITE_RESULT =>
 						-- Handle FMOVECR constant ROM vs normal result
@@ -1453,7 +1519,7 @@ begin
 						fpu_done <= '1';
 						
 						-- Update FPSR exception status bits based on exception_code
-						case exception_code is
+						case exception_code_internal is
 							when x"02" =>  -- Bus error
 								fpsr(21) <= '1';  -- BSUN exception bit
 							when x"05" =>  -- Division by zero
@@ -1488,142 +1554,159 @@ begin
 						fpu_state <= FPU_IDLE;
 					
 					when FPU_FSAVE_WRITE =>
-						-- Write proper MC68882 state frame for FPU detection
-						-- MC68882 Frame Formats:
-						-- $00000000 = Null frame (4 bytes) - no FPU present
-						-- $18000000 = Idle frame (28 bytes) - FPU idle with no registers saved
-						-- $41000000 = Idle frame with registers (216 bytes) - FPU idle with all registers
-						-- $60180000 = Busy frame (92 bytes) - FPU executing instruction
+						-- FSAVE - Provide data for MC68882 idle frame (60 bytes, 15 longwords)
+						-- CPU manages all memory operations, FPU only provides data when requested
 						
-						-- For AmigaOS detection, use idle frame with minimal state
-						case fsave_counter is
-							when 0 =>
-								-- Frame format word - MC68882 idle frame (60 bytes)
-								-- Format $41 = MC68882 idle frame, anything != $18 identifies as 68882
-								fsave_data <= x"41000000";  -- $41 = MC68882 idle frame format
-							when 1 =>
-								-- Next instruction address (FPIAR) - current PC or instruction address
-								fsave_data <= fpiar;
-							when 2 =>
-								-- FPCR (Floating-Point Control Register)
-								fsave_data <= fpcr;
-							when 3 =>
-								-- FPSR (Floating-Point Status Register) 
-								fsave_data <= fpsr;
-							when 4 =>
-								-- FPIAR again (MC68882 format requirement)
-								fsave_data <= fpiar;
-							when 5 =>
-								-- Reserved/padding
-								fsave_data <= x"00000000";
-							when 6 =>
-								-- Reserved/padding  
-								fsave_data <= x"00000000";
-							when others =>
-								-- Should not reach here with 28-byte frame
-								fsave_data <= x"00000000";
-						end case;
+						if fsave_data_request = '1' then
+							case fsave_data_index is
+								when 0 =>
+									-- Frame format word - MC68882 idle frame format $41
+									fpu_data_out <= x"41000000";  -- Format $41 = MC68882 idle frame
+								when 1 =>
+									-- FPIAR (Floating-Point Instruction Address Register)
+									fpu_data_out <= fpiar;
+								when 2 =>
+									-- FPCR (Floating-Point Control Register)
+									fpu_data_out <= fpcr;
+								when 3 =>
+									-- FPSR (Floating-Point Status Register)
+									fpu_data_out <= fpsr;
+								when 4 to 11 =>
+									-- High 32 bits of FP registers 0-7 (8 longwords)
+									fpu_data_out <= fp_registers(fsave_data_index - 4)(79 downto 48);
+								when 12 to 14 =>
+									-- Middle 32 bits of FP registers 0-2 only (3 longwords)
+									fpu_data_out <= fp_registers(fsave_data_index - 12)(47 downto 16);
+								when others =>
+									fpu_data_out <= x"00000000";
+							end case;
+						end if;
 						
-						-- Set up memory write with pre-decrement addressing
-						fpu_address_out <= std_logic_vector(unsigned(fsave_address) - 4 * (fsave_counter + 1));
-						fpu_data_out <= fsave_data;
-						fpu_memory_request <= '1';
-						fpu_read_write <= '1';  -- Write
-						fpu_data_size <= "10";  -- Long word
-						
-						if cpu_memory_ready = '1' then
-							fpu_memory_request <= '0';
-							timeout_counter <= 0;  -- Reset timeout on successful transfer
-							if fsave_counter < 14 then  -- Write 15 longwords (60 bytes) for MC68882 idle frame $41
-								fsave_counter <= fsave_counter + 1;
-							else
-								-- MC68882 idle frame complete - AmigaOS should now detect FPU
-								fpu_state <= FPU_IDLE;
-								fpu_done <= '1';
-							end if;
-						elsif timeout_counter >= TIMEOUT_LIMIT_FSAVE then
-							-- FSAVE operation timeout
-							fpu_memory_request <= '0';
-							timeout_counter <= 0;
-							fpu_exception <= '1';
-							exception_code <= x"04";  -- Timeout error
-							fpu_state <= FPU_EXCEPTION_STATE;
-						else
-							timeout_counter <= timeout_counter + 1;
+						-- FPU operation complete when CPU finishes all writes
+						if fsave_data_index = 14 and fsave_data_request = '0' then
+							fpu_state <= FPU_IDLE;
+							fpu_done <= '1';
 						end if;
 					
 					when FPU_FRESTORE_READ =>
-						-- FRESTORE - Read and restore complete FPU state
-						fpu_address_out <= std_logic_vector(unsigned(cpu_address_in) + 4 * fsave_counter);
-						fpu_memory_request <= '1';
-						fpu_read_write <= '0';  -- Read
-						fpu_data_size <= "10";  -- Long word
+						-- FRESTORE - CPU provides data, FPU processes it
 						
-						if cpu_memory_ready = '1' then
-							fpu_memory_request <= '0';
-							-- Restore state based on longword number
+						if frestore_data_write = '1' then
+							
 							case fsave_counter is
 								when 0 =>
-									-- Format word - validate it's a valid state frame
-									if cpu_memory_data(31 downto 24) = x"00" then
-										-- Null frame - no state to restore, just complete
+									-- Format word detection (now in high byte of longword)
+									frestore_frame_format <= frestore_data_in(31 downto 24);
+									if frestore_data_in(31 downto 24) = x"00" then
+										-- $00: Null frame - no state to restore
 										fpu_state <= FPU_IDLE;
 										fpu_done <= '1';
-									elsif cpu_memory_data(31 downto 24) = x"18" then
-										-- MC68881 idle frame (28 bytes) - basic state only
-										-- Continue to restore control registers
-										null;
-									elsif cpu_memory_data(31 downto 24) = x"41" then
-										-- MC68882 idle frame (60 bytes) - includes registers
-										-- Continue to restore full state
-										null;
-									elsif cpu_memory_data(31 downto 24) = x"60" then
-										-- Busy frame (state during instruction execution)
-										-- Should restore intermediate state - not fully implemented
-										null;
+									elsif frestore_data_in(31 downto 24) = x"18" then
+										-- $18: MC68881 idle frame (28 bytes) - FPIAR, FPCR, FPSR only
+										fsave_counter <= fsave_counter + 1;
+									elsif frestore_data_in(31 downto 24) = x"41" then
+										-- $41: MC68882 idle frame (60 bytes) - full state with registers
+										fsave_counter <= fsave_counter + 1;
+									elsif frestore_data_in(31 downto 24) = x"60" then
+										-- $60: Busy frame - variable size, not fully implemented
+										-- For now, treat as format error
+										fpu_exception <= '1';
+										exception_code_internal <= x"0A";  -- Format error
+										fpu_state <= FPU_EXCEPTION_STATE;
 									else
 										-- Invalid format - trigger format error exception
 										fpu_exception <= '1';
-										exception_code <= x"0A";  -- Format error
+										exception_code_internal <= x"0A";  -- Format error
 										fpu_state <= FPU_EXCEPTION_STATE;
 									end if;
+								
 								when 1 =>
-									-- Restore FPIAR
-									fpiar <= cpu_memory_data;
+									-- FPIAR (present in both $18 and $41 frames)
+									fpiar <= frestore_data_in;
+									fsave_counter <= fsave_counter + 1;
+								
 								when 2 =>
-									-- Restore FPCR
-									fpcr <= cpu_memory_data;
+									-- FPCR (present in both $18 and $41 frames)
+									fpcr <= frestore_data_in;
+									fsave_counter <= fsave_counter + 1;
+								
 								when 3 =>
-									-- Restore FPSR
-									fpsr <= cpu_memory_data;
+									-- FPSR (present in both $18 and $41 frames)
+									fpsr <= frestore_data_in;
+									-- Check frame format to determine if we're done
+									if frestore_frame_format = x"18" then
+										-- $18 frame complete (28 bytes: 7 longwords)
+										fpu_state <= FPU_IDLE;
+										fpu_done <= '1';
+									else
+										-- $41 frame - continue with FP registers
+										fsave_counter <= fsave_counter + 1;
+									end if;
+								
 								when 4 to 11 =>
-									-- Restore high 32 bits of FP registers 0-7
-									fp_registers(fsave_counter - 4)(79 downto 48) <= cpu_memory_data;
-								when 12 to 19 =>
-									-- Restore middle 32 bits of FP registers 0-7
-									fp_registers(fsave_counter - 12)(47 downto 16) <= cpu_memory_data;
-								when 20 to 27 =>
-									-- Restore low 16 bits of FP registers 0-7
-									fp_registers(fsave_counter - 20)(15 downto 0) <= cpu_memory_data(15 downto 0);
+									-- $41 frame: High 32 bits of FP registers 0-7
+									fp_registers(fsave_counter - 4)(79 downto 48) <= frestore_data_in;
+									fsave_counter <= fsave_counter + 1;
+								
+								when 12 to 14 =>
+									-- $41 frame: Low 16 bits of first 3 FP registers (packed format)
+									-- fsave_counter 12: FP0 low, fsave_counter 13: FP1 low, fsave_counter 14: FP2 low
+									fp_registers(fsave_counter - 12)(15 downto 0) <= frestore_data_in(31 downto 16);
+									-- Also store middle bits if needed (assume zeros for now)
+									fp_registers(fsave_counter - 12)(47 downto 16) <= (others => '0');
+									
+									if fsave_counter = 14 then  -- Match FSAVE frame length (15 longwords = 60 bytes)
+										-- $41 frame complete
+										fpu_state <= FPU_IDLE;
+										fpu_done <= '1';
+									else
+										fsave_counter <= fsave_counter + 1;
+									end if;
+								
 								when others =>
-									null;
+									-- Unexpected counter value - complete operation
+									fpu_state <= FPU_IDLE;
+									fpu_done <= '1';
 							end case;
-							
-							if fsave_counter < 27 then
-								fsave_counter <= fsave_counter + 1;
-							else
-								-- All state restored
-								fpu_state <= FPU_IDLE;
-								fpu_done <= '1';
-								end if;
 						end if;
 				end case;
 			end if;
 		end if;
 	end process;
 	
-	-- Connect internal busy signal to output
+	-- MOVEM register file interface process
+	movem_register_interface: process(clk, nReset)
+	begin
+		if nReset = '0' then
+			movem_reg_data_out <= (others => '0');
+			-- movem_bus_error is handled in main state machine
+		elsif rising_edge(clk) then
+			if clkena = '1' then
+				-- Handle register reads for MOVEM - provide FP register data to MOVEM component
+				if movem_reg_address <= "111" then -- Valid FP register 0-7
+					movem_reg_data_in <= fp_registers(to_integer(unsigned(movem_reg_address)));
+				else
+					movem_reg_data_in <= (others => '0');
+				end if;
+				
+				-- Register writes for MOVEM are now handled in main state machine
+				
+				-- MOVEM error conditions are now handled in main state machine
+				
+				-- Memory interface connections are now handled by movem_memory_mux process
+			end if;
+		end if;
+	end process;
+	
+	-- MOVEM memory interface multiplexing is now handled within the main state machine
+	
+	-- MOVEM memory ready and data input signals no longer needed (CPU-managed operations)
+	
+	-- MOVEM address is handled internally by the MOVEM component
+	
+	-- Connect internal signals to outputs
 	fpu_busy <= fpu_busy_internal;
+	exception_code <= exception_code_internal;
 	
 	-- Update internal busy signal based on state
 	process(fpu_state)

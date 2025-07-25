@@ -2,6 +2,7 @@
 ------------------------------------------------------------------------------
 --                                                                          --
 -- TG68K MC68881/68882 FPU Test Bench                                      --
+-- Comprehensive test coverage for all FPU operations and edge cases        --
 -- Copyright (c) 2025                                                       --
 --                                                                          --
 -- This source file is free software: you can redistribute it and/or modify --

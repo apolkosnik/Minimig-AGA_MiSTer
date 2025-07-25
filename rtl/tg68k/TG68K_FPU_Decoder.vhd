@@ -182,7 +182,16 @@ begin
 					if extension_word(15) = '0' then
 						instruction_type <= INST_FMOVE_FP;   -- FMOVE FPn,<ea>
 					else
-						instruction_type <= INST_FMOVEM;     -- FMOVEM
+						-- FMOVEM instruction - validate format
+						if (opcode(15 downto 8) = X"F2") and 
+						   (extension_word(15) = '1') and
+						   (extension_word(14) = '1') and
+						   (extension_word(12 downto 8) = "00000") then
+							instruction_type <= INST_FMOVEM;     -- Valid FMOVEM
+						else
+							-- Invalid FMOVEM format - will be caught by validity check
+							null;
+						end if;
 					end if;
 					needs_extension_word <= '1';
 					
