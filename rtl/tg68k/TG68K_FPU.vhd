@@ -1649,11 +1649,9 @@ begin
 									fsave_counter <= fsave_counter + 1;
 								
 								when 12 to 14 =>
-									-- $41 frame: Low 16 bits of first 3 FP registers (packed format)
-									-- fsave_counter 12: FP0 low, fsave_counter 13: FP1 low, fsave_counter 14: FP2 low
-									fp_registers(fsave_counter - 12)(15 downto 0) <= frestore_data_in(31 downto 16);
-									-- Also store middle bits if needed (assume zeros for now)
-									fp_registers(fsave_counter - 12)(47 downto 16) <= (others => '0');
+									-- $41 frame: Middle 32 bits of first 3 FP registers (restore saved data)
+									-- fsave_counter 12: FP0 middle, fsave_counter 13: FP1 middle, fsave_counter 14: FP2 middle
+									fp_registers(fsave_counter - 12)(47 downto 16) <= frestore_data_in;
 									
 									if fsave_counter = 14 then  -- Match FSAVE frame length (15 longwords = 60 bytes)
 										-- $41 frame complete
