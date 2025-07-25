@@ -688,7 +688,7 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 -----------------------------------------------------------------------------
 -- Write Reg
 -----------------------------------------------------------------------------
-PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, movec_data)
+PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, movec_data, fpu_data_out, micro_state, opcode)
 	BEGIN
 		regin <= ALUout;
 		IF exec(save_memaddr)='1' THEN
@@ -699,6 +699,11 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 			regin <= USP;	
 		ELSIF exec(movec_rd)='1' THEN
 			regin <= movec_data;
+		ELSIF FPU_Enable = 1 AND micro_state = fpu_done AND 
+		      opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
+		      opcode(8 downto 6) = "111" AND opcode(5 downto 3) = "000" THEN
+			-- FMOVE FPcr,Dn - route FPU control register data to CPU data register
+			regin <= fpu_data_out;
 		END IF;
 		
 		IF Bwrena='1' THEN
@@ -4402,6 +4407,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN fpu_done =>
 					-- FPU operation completed successfully
 					-- Note: CCR update for FTST handled in sequential process
+					
+					-- Handle FMOVE control register to data register (FMOVE.L FPCR,Dn)
+					IF FPU_Enable = 1 AND opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
+					   opcode(8 downto 6) = "111" AND opcode(5 downto 3) = "000" THEN
+						-- This is FMOVE FPcr,Dn - set register write enable
+						set(Regwrena) <= '1';
+						datatype <= "10";  -- Long word (32-bit control register)
+					END IF;
+					
 					next_micro_state <= idle;
 	
 				WHEN OTHERS => NULL;
