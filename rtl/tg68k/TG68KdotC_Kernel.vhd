@@ -316,6 +316,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal fpu_cpu_data_in		: std_logic_vector(31 downto 0);
 	-- FSAVE-specific CPU signals
 	signal fsave_counter		: integer range 0 to 15 := 0;
+	signal fsave_60byte_decr	: bit := '0';  -- Special flag for FSAVE 60-byte decrement
 	signal fsave_base_address	: std_logic_vector(31 downto 0);
 	signal fsave_opcode_detected	: std_logic := '0';
 	signal fpu_data_request     : std_logic := '0';
@@ -426,6 +427,7 @@ ALU: TG68K_ALU
 		movem_presub => movem_presub,		--: in bit;
 		set_stop => set_stop,				--: in bit;
 		Z_error => Z_error,					--: in bit;
+		fsave_60byte_decr => fsave_60byte_decr,	--: in std_logic;
 
 		rot_bits => rot_bits,				--: in std_logic_vector(1 downto 0);
 		exec => exec,							--: in bit_vector(lastOpcBit downto 0);
@@ -940,7 +942,7 @@ PROCESS (clk)
 					data_write_tmp <= last_data_read;
 				ELSIF writeSR='1'THEN
 					data_write_tmp(15 downto 0) <= trap_SR(7 downto 0)& Flags(7 downto 0);
-				ELSIF FPU_Enable = 1 AND (micro_state = fpu_wait OR micro_state = fpu_done) THEN
+				ELSIF FPU_Enable = 1 AND (micro_state = fpu_wait OR micro_state = fpu_done OR micro_state = fpu2) THEN
 					-- FPU operation - use FPU output data
 					data_write_tmp <= fpu_data_out;
 				ELSE	
@@ -1061,7 +1063,10 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				memaddr_a <= last_data_read;
 			END IF;	 
 		ELSIF set(presub)='1' THEN
-			IF set(longaktion)='1' THEN	
+			IF fsave_60byte_decr = '1' THEN
+				-- Special case for FSAVE: decrement by 60 bytes
+				memaddr_a <= X"FFFFFFC4";  -- -60 in 32-bit two's complement
+			ELSIF set(longaktion)='1' THEN	
 				memaddr_a(4 downto 0) <= "11100";
 			ELSIF datatype="00" AND set(use_SP)='0' THEN
 				memaddr_a(4 downto 0) <= "11111";
@@ -1595,7 +1600,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		trap_fpu_bsun <= '0';
 		-- Initialize FPU interface signals to prevent latches
 		fpu_data_request <= '0';
-		fsave_counter <= 0;
 		movem_presub <= '0';
 		setnextpass <= '0';
 		regdirectsource <= '0';
@@ -3272,10 +3276,46 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
 					-- FPU coprocessor ID = 001 (0xF200-0xF3FF) for MC68881/68882 FPU
 					-- Coprocessor ID 000 is reserved for MC68851 PMMU
-					next_micro_state <= fpu1;
+					
+					-- Check if this is FSAVE/FRESTORE which have special handling
+					IF opcode(8 downto 6) = "100" OR opcode(8 downto 6) = "101" THEN
+						-- FSAVE/FRESTORE - handle with special decoder logic below
+						-- Fall through to cpSAVE/cpRESTORE handling
+					ELSE
+						-- Regular FPU instructions (FMOVE, FADD, etc.)
+						-- These need to go through normal instruction flow for EA processing
+						-- The key insight: don't jump directly to fpu1, let normal flow handle EA
+						-- Then the instruction will reach the end of normal processing and go to fpu1
+					END IF;
 					-- Don't trap - handle with FPU
 				ELSIF cpu(1)='1' AND opcode(8 downto 6)="100" THEN --cpSAVE
-					IF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="011" AND
+					-- Allow predecrement addressing mode for FSAVE
+					IF opcode(5 downto 3)="100" AND opcode(2 downto 0)="111" THEN
+						-- FSAVE -(A7) - valid addressing mode, continue processing
+						IF opcode(11 downto 9)/="000" THEN
+							-- Check if this is FPU FSAVE (coprocessor ID = 001)
+							IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
+								-- FSAVE for MC68881/68882 - use CPU-managed FSAVE
+								next_micro_state <= fpu2;
+							ELSIF SVmode='1' THEN
+								-- Other coprocessors (002-007) not present in this system
+								-- Generate F-line exception for coprocessor not present
+								trap_1111 <= '1';
+								trapmake <= '1';
+							ELSE
+								trap_priv <= '1';
+								trapmake <= '1';
+							END IF;
+						ELSE
+							IF SVmode='1' THEN
+								trap_1111 <= '1';
+								trapmake <= '1';
+							ELSE
+								trap_priv <= '1';
+								trapmake <= '1';
+							END IF;
+						END IF;
+					ELSIF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="011" AND
 					   (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN --ea illegal modes
 						IF opcode(11 downto 9)/="000" THEN
 							-- Check if this is FPU FSAVE (coprocessor ID = 001)
@@ -3305,7 +3345,28 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						trapmake <= '1';
 					END IF;
 				ELSIF cpu(1)='1' AND opcode(8 downto 6)="101" THEN --cpRESTORE
-					IF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="100" AND
+					-- Allow postincrement addressing mode for FRESTORE
+					IF opcode(5 downto 3)="011" AND opcode(2 downto 0)="111" THEN
+						-- FRESTORE (A7)+ - valid addressing mode, continue processing
+						IF opcode(5 downto 1)/="11110" THEN
+							-- Check if this is FPU FRESTORE (coprocessor ID = 001)
+							IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
+								-- FRESTORE for MC68881/68882 - route to FPU
+								next_micro_state <= fpu1;
+							ELSIF SVmode='1' THEN
+								-- Other coprocessors (002-007) not present in this system
+								-- Generate F-line exception for coprocessor not present
+								trap_1111 <= '1';
+								trapmake <= '1';
+							ELSE
+								trap_priv <= '1';
+								trapmake <= '1';
+							END IF;
+						ELSE
+							trap_1111 <= '1';
+							trapmake <= '1';
+						END IF;
+					ELSIF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="100" AND
 					   (opcode(5 downto 3)/="111" OR (opcode(2 downto 1)/="11" AND
 					   opcode(2 downto 0)/="101")) THEN --ea illegal modes
 						IF opcode(5 downto 1)/="11110" THEN
@@ -3430,19 +3491,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			IF trapd='0' THEN
 				writePC <= '1';
 			END IF;			
-		END IF;	
+		END IF;
 		
 -----------------------------------------------------------------------------
--- execute microcode
+-- microcode state machine
 -----------------------------------------------------------------------------
-		IF rising_edge(clk) THEN
-	        IF Reset='1' THEN
-				micro_state <= ld_nn;
-			ELSIF clkena_lw='1' THEN
-				trapd <= trapmake;
-				micro_state <= next_micro_state;
-			END IF;
-		END IF;
+
 
 			CASE micro_state IS
 				WHEN ld_nn =>		-- (nnnn).w/l=>
@@ -3918,7 +3972,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 --						set_datatype <= "10";
 						next_micro_state <= trap1;
 					ELSE
-						IF trap_interrupt='1' OR trap_trace='1' OR trap_berr='1' THEN
+						IF trap_interrupt='1' OR trap_trace='1' OR trap_berr='1' OR 
+						   trap_1111='1' OR trap_1010='1' OR trap_illegal='1' OR 
+						   trap_priv='1' OR trap_addr_error='1' THEN
 							writePC <= '1';
 						END IF;
 						datatype <= "10";
@@ -4198,44 +4254,116 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				
 				-- FPU state handlers
 				WHEN fpu1 =>
-					-- Decode FPU operation type
-					IF opcode(8 downto 6) = "100" THEN
-						-- FSAVE instruction - CPU manages all memory operations
-						next_micro_state <= fpu2;
-					ELSIF opcode(8 downto 6) = "101" THEN
-						-- FRESTORE instruction - CPU manages all memory operations
-						-- For now, implement basic FRESTORE that just completes
-						-- Full implementation would read 60 bytes from memory
-						frestore_data_write <= '1';
-						next_micro_state <= fpu_done;  -- Complete immediately for basic implementation
+					-- First, handle addressing modes for regular FPU instructions
+					-- This ensures predecrement/postincrement operations work correctly
+					
+					-- Check if this is a regular FPU instruction that needs addressing mode processing
+					IF opcode(8 downto 6) /= "100" AND opcode(8 downto 6) /= "101" THEN
+						-- Regular FPU instruction (FMOVE, FADD, FSUB, etc.)
+						-- Handle addressing modes based on EA field in bits 5:0
+						
+						-- For source operand addressing (typically bits 5:0 in FPU instructions)
+						-- Check for predecrement mode -(An)
+						IF opcode(5 downto 3) = "100" THEN
+							-- Predecrement addressing mode
+							set(presub) <= '1';
+							setstackaddr <= '1';
+							IF opcode(2 downto 0) = "111" THEN
+								set(use_SP) <= '1';  -- Use stack pointer
+							END IF;
+							-- Set appropriate datatype based on FPU operation size
+							-- Most FPU operations use longwords by default
+							datatype <= "10";  -- Longword
+						ELSIF opcode(5 downto 3) = "011" THEN
+							-- Postincrement addressing mode (An)+
+							set(postadd) <= '1';
+							setstackaddr <= '1';
+							IF opcode(2 downto 0) = "111" THEN
+								set(use_SP) <= '1';  -- Use stack pointer
+							END IF;
+							datatype <= "10";  -- Longword
+						END IF;
+					END IF;
+					
+					-- Now handle specific FPU instruction types
+					IF opcode(8 downto 6) = "101" THEN
+						-- FRESTORE instruction - read 60 bytes from memory
+						-- For (A7)+ addressing mode, read 15 longwords and increment A7
+						
+						IF opcode(5 downto 3) = "011" AND opcode(2 downto 0) = "111" THEN
+							-- FRESTORE (A7)+ addressing mode
+							datatype <= "10";               -- Longword access
+							setstate <= "10";               -- Memory read
+							
+							IF fsave_counter = 0 THEN
+								-- First read: use current A7
+								set(use_SP) <= '1';         -- Use stack pointer
+								-- No address modification on first read
+							ELSE
+								-- Subsequent reads: already incremented by previous read
+								set(use_SP) <= '1';         -- Continue using stack pointer
+							END IF;
+							
+							-- After read, check if more reads needed
+							IF fsave_counter < 14 THEN
+								set(postadd) <= '1';        -- Post-increment by 4
+								setstackaddr <= '1';        -- Update A7
+								next_micro_state <= fpu1;   -- Stay in fpu1 for next read
+							ELSE
+								-- All 15 longwords read, A7 already at correct position
+								set(postadd) <= '1';        -- Final increment
+								setstackaddr <= '1';        -- Update A7 to final position
+								-- frestore_data_write handled in clocked process
+								next_micro_state <= fpu_done;
+							END IF;
+						ELSE
+							-- Other addressing modes - not implemented yet
+							next_micro_state <= fpu_done;
+						END IF;
 					ELSE
 						-- Regular FPU arithmetic operation
 						next_micro_state <= fpu_wait;
 					END IF;
 					
 				WHEN fpu2 =>
-					-- CPU-side FSAVE operation (CPU manages all addressing and memory operations)
-					-- According to design division: CPU handles bus cycles, FPU only provides data
-					-- FSAVE writes 60 bytes (15 longwords) in MC68882 idle frame format
+					-- FSAVE - MC68882 compatible implementation
+					-- Write 15 longwords after decrementing A7 by 60
 					
-					-- Setup memory write operation with proper stack pointer management
-					datatype <= "10";  -- Long word access
-					set(presub) <= '1';          -- Enable stack pointer decrement
-					setstackaddr <= '1';         -- Target stack pointer register
-					set(mem_addsub) <= '1';      -- Enable memory address calculation
-					
-					-- Request current data from FPU
-					fpu_data_request <= '1';
-					-- fsave_counter is already connected to fsave_data_index in FPU interface
-					
-					-- Execute write cycle and advance counter
-					IF fsave_counter < 15 THEN
-						fsave_counter <= fsave_counter + 1;
-						next_micro_state <= fpu2;  -- Continue writing
+					IF opcode(5 downto 3) = "100" AND opcode(2 downto 0) = "111" THEN
+						-- FSAVE -(A7) addressing mode
+						
+						datatype <= "10";                   -- Longword access
+						
+						IF fsave_counter = 0 THEN
+							-- First operation: Decrement A7 by 60 bytes and update register
+							-- This follows the MOVEM -(An) pattern
+							set(use_SP) <= '1';             -- Use stack pointer
+							set(presub) <= '1';             -- Predecrement (60 bytes via fsave_60byte_decr)
+							setstackaddr <= '1';            -- Set dest address to A7
+							set_exec(save_memaddr) <= '1';  -- Save the decremented address for later use
+							set_exec(Regwrena) <= '1';      -- Update A7 with decremented value
+							
+							-- Write first longword at the decremented address
+							setstate <= "11";               -- Memory write
+							fpu_data_request <= '1';        -- Request data from FPU
+							next_micro_state <= fpu2;       -- Continue for more writes
+						ELSE
+							-- Subsequent writes: Use saved address with offset
+							-- The memory system will use memaddr (which was saved) + offset
+							set(mem_addsub) <= '1';         -- Use address calculation with offset
+							
+							-- Write longword at calculated address
+							setstate <= "11";               -- Memory write
+							fpu_data_request <= '1';        -- Request data from FPU
+							
+							IF fsave_counter < 14 THEN
+								next_micro_state <= fpu2;   -- More writes to do
+							ELSE
+								next_micro_state <= nop;    -- All done
+							END IF;
+						END IF;
 					ELSE
-						-- FSAVE complete - update address register and finish
-						fsave_counter <= 0;
-						fpu_data_request <= '0';
+						-- Other addressing modes not implemented
 						next_micro_state <= nop;
 					END IF;
 					
@@ -4278,7 +4406,57 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 	
 				WHEN OTHERS => NULL;
 			END CASE;
-	END PROCESS;
+	END PROCESS;  -- End of main decode process that started at line 1581
+
+-----------------------------------------------------------------------------
+-- FSAVE counter and state management
+-----------------------------------------------------------------------------
+PROCESS (clk, Reset)
+BEGIN
+	IF rising_edge(clk) THEN
+		IF Reset='1' THEN
+			micro_state <= ld_nn;
+			fsave_counter <= 0;
+			fsave_60byte_decr <= '0';
+		ELSIF clkena_lw='1' THEN
+			trapd <= trapmake;
+			micro_state <= next_micro_state;
+			
+			-- Handle FSAVE/FRESTORE counter and control signals
+			
+			-- FSAVE handling
+			IF next_micro_state = fpu2 AND opcode(15 downto 6) = "1111001001" AND 
+			   opcode(5 downto 3) = "100" AND opcode(2 downto 0) = "111" AND fsave_counter = 0 THEN
+				-- Entering FSAVE -(A7) for first time
+				fsave_60byte_decr <= '1';
+			ELSIF micro_state = fpu2 AND state = "11" AND setstate = "00" THEN
+				-- Memory write completed for FSAVE
+				IF fsave_counter < 14 THEN
+					fsave_counter <= fsave_counter + 1;
+				END IF;
+				-- Clear single-use signals after first write
+				fsave_60byte_decr <= '0';
+			END IF;
+			
+			-- FRESTORE handling
+			IF micro_state = fpu1 AND state = "10" AND setstate = "00" AND
+			   opcode(8 downto 6) = "101" THEN
+				-- Memory read completed for FRESTORE
+				IF fsave_counter < 14 THEN
+					fsave_counter <= fsave_counter + 1;
+					-- Send data to FPU
+					frestore_data_write <= '1';
+				END IF;
+			END IF;
+			
+			-- Reset counter when returning to idle
+			IF micro_state = idle THEN
+				fsave_counter <= 0;
+				fsave_60byte_decr <= '0';
+			END IF;
+		END IF;
+	END IF;
+END PROCESS;
 
 -----------------------------------------------------------------------------
 -- FPU Wait Counter Process removed - CPU-managed FPU operations are immediate

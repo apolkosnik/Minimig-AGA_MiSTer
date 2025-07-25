@@ -61,7 +61,7 @@ entity TG68K_FPU is
 		
 		-- Status and Control Registers
 		fpcr_out				: out std_logic_vector(31 downto 0);	-- Floating-Point Control Register
-		fpsr_out				: out std_logic_vector(31 downto 0);	-- Floating-Point Status Register  
+		fpsr_out				: out std_logic_vector(31 downto 0);	-- Floating-Point Status Register
 		fpiar_out				: out std_logic_vector(31 downto 0)	-- Floating-Point Instruction Address Register
 	);
 end TG68K_FPU;
@@ -88,7 +88,7 @@ architecture rtl of TG68K_FPU is
 		FPU_EXECUTE,
 		FPU_WRITE_RESULT,
 		FPU_EXCEPTION_STATE,
-		FPU_FSAVE_WRITE,
+		FPU_FSAVE_WRITE,      -- Added explicit state for FSAVE
 		FPU_FRESTORE_READ
 	);
 	signal fpu_state : fpu_state_t := FPU_IDLE;

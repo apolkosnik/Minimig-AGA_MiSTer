@@ -149,6 +149,7 @@ package TG68K_Pack is
 		movem_presub			: in bit;
 		set_stop					: in bit;
 		Z_error					: in bit;
+		fsave_60byte_decr		: in bit;
 		rot_bits					: in std_logic_vector(1 downto 0);
 		exec						: in bit_vector(lastOpcBit downto 0);
 		OP1out					: in std_logic_vector(31 downto 0);

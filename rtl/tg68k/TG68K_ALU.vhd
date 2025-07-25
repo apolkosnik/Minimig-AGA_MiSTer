@@ -48,6 +48,7 @@ generic(
 		movem_presub			: in bit;
 		set_stop					: in bit;
 		Z_error 					: in bit;
+		fsave_60byte_decr		: in bit;
 		rot_bits					: in std_logic_vector(1 downto 0);
 		exec						: in bit_vector(lastOpcBit downto 0);
 		OP1out					: in std_logic_vector(31 downto 0);
@@ -287,7 +288,7 @@ PROCESS (OP2out, reg_QB, opcode, OP1out, OP1in, exe_datatype, addsub_q, execOPC,
 -- addsub
 -----------------------------------------------------------------------------
 PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype, exec, addsub_a, addsub_b, opaddsub,
-	     notaddsub_b, add_result, c_in, sndOPC, non_aligned, check_aligned)
+	     notaddsub_b, add_result, c_in, sndOPC, non_aligned, check_aligned, fsave_60byte_decr)
 	BEGIN
 		addsub_a <= OP1out;
 		IF exec(get_bfoffset)='1' THEN	
@@ -314,6 +315,9 @@ PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype,
 			ELSIF long_start='0' AND exe_datatype="10" AND (exec(presub) OR exec(postadd) OR movem_presub)='1' THEN
 				IF exec(movem_action)='1' THEN
 					addsub_b <= "00000000000000000000000000000110";
+				ELSIF fsave_60byte_decr='1' AND exec(presub)='1' THEN
+					-- FSAVE needs to decrement by 60 bytes for MC68882 compatibility
+					addsub_b <= "00000000000000000000000000111100";  -- 60 decimal = 3C hex
 				ELSE
 					addsub_b <= "00000000000000000000000000000100";
 				END IF;
