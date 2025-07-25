@@ -4218,12 +4218,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- According to design division: CPU handles bus cycles, FPU only provides data
 					-- FSAVE writes 60 bytes (15 longwords) in MC68882 idle frame format
 					
-					-- Setup memory write operation
+					-- Setup memory write operation with proper stack pointer management
 					datatype <= "10";  -- Long word access
-					-- memaddr is handled by existing CPU memory infrastructure
+					set(presub) <= '1';          -- Enable stack pointer decrement
+					setstackaddr <= '1';         -- Target stack pointer register
+					set(mem_addsub) <= '1';      -- Enable memory address calculation
 					
 					-- Request current data from FPU
 					fpu_data_request <= '1';
+					-- fsave_counter is already connected to fsave_data_index in FPU interface
 					
 					-- Execute write cycle and advance counter
 					IF fsave_counter < 15 THEN
