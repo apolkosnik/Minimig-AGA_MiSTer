@@ -101,6 +101,7 @@
 
 library ieee;
 use ieee.std_logic_1164.all;
+use ieee.std_logic_arith.all;
 use ieee.std_logic_unsigned.all;
 use work.TG68K_Pack.all;
 
@@ -1085,6 +1086,11 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 			END IF;	
 		ELSIF interrupt='1' THEN
 			memaddr_a(4 downto 0) <= '1'&rIPL_nr&'0';	
+		ELSIF micro_state = fpu2 AND fsave_counter > 0 THEN
+			-- FSAVE subsequent writes: calculate offset from counter
+			-- offset = (fsave_counter * 4) for longword accesses
+			-- This provides offsets: 4, 8, 12, ..., 56 for counters 1-14
+			memaddr_a <= conv_std_logic_vector(fsave_counter * 4, 32);
 		END IF;	 
 		
 		IF rising_edge(clk) THEN
@@ -4389,9 +4395,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							fpu_data_request <= '1';        -- Request data from FPU
 							next_micro_state <= fpu2;       -- Continue for more writes
 						ELSE
-							-- Subsequent writes: Use saved address with offset
-							-- The memory system will use memaddr (which was saved) + offset
-							set(mem_addsub) <= '1';         -- Use address calculation with offset
+							-- Subsequent writes: A7 already decremented by 60, write at offsets
+							-- Calculate offset: (fsave_counter * 4) bytes from A7
+							set(use_SP) <= '1';             -- Use stack pointer
+							
+							-- For writes 2-15, we need positive offsets from A7
+							-- Write at A7 + (fsave_counter * 4)
+							-- This is handled by the ALU with postadd
+							IF fsave_counter > 0 THEN
+								set(postadd) <= '0';        -- Don't increment A7
+								set(mem_addsub) <= '1';     -- Use calculated address
+							END IF;
 							
 							-- Write longword at calculated address
 							setstate <= "11";               -- Memory write
@@ -4400,6 +4414,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							IF fsave_counter <= 14 THEN
 								next_micro_state <= fpu2;   -- More writes to do
 							ELSE
+								-- All 15 longwords written, A7 stays at (original - 60)
 								next_micro_state <= nop;    -- All done
 							END IF;
 						END IF;
