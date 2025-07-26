@@ -4322,7 +4322,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							END IF;
 							
 							-- After read, check if more reads needed
-							IF fsave_counter < 14 THEN
+							IF fsave_counter <= 14 THEN
 								set(postadd) <= '1';        -- Post-increment by 4
 								setstackaddr <= '1';        -- Update A7
 								next_micro_state <= fpu1;   -- Stay in fpu1 for next read
@@ -4397,7 +4397,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							setstate <= "11";               -- Memory write
 							fpu_data_request <= '1';        -- Request data from FPU
 							
-							IF fsave_counter < 14 THEN
+							IF fsave_counter <= 14 THEN
 								next_micro_state <= fpu2;   -- More writes to do
 							ELSE
 								next_micro_state <= nop;    -- All done
@@ -4607,7 +4607,7 @@ BEGIN
 			-- Handle FSAVE/FRESTORE counter and control signals
 			
 			-- FSAVE handling
-			IF next_micro_state = fpu2 AND opcode(15 downto 6) = "1111001100" AND 
+			IF micro_state = fpu2 AND opcode(15 downto 6) = "1111001100" AND 
 			   opcode(5 downto 3) = "100" AND opcode(2 downto 0) = "111" AND fsave_counter = 0 THEN
 				-- Entering FSAVE -(A7) for first time
 				fsave_60byte_decr <= '1';
