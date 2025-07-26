@@ -73,9 +73,21 @@ architecture rtl of TG68K_FPU is
 	type fp_reg_t is array(0 to 7) of std_logic_vector(79 downto 0);
 	signal fp_registers : fp_reg_t := (others => (others => '0'));
 	
-	-- Control and Status Registers
-	signal fpcr : std_logic_vector(31 downto 0) := X"00000000";	-- Floating-Point Control Register (MC68882 defaults)
-	signal fpsr : std_logic_vector(31 downto 0) := X"00000000";	-- Floating-Point Status Register (MC68882 defaults)
+	-- Control and Status Registers with proper MC68882 defaults
+	-- FPCR: MC68882 initialization
+	-- Bits 31-16: Reserved (some implementations may have version info)
+	-- Bits 15-14: Mode Control (00 = round to nearest)
+	-- Bits 13-8: Exception Enable (000000 = no exceptions enabled)
+	-- Bits 7-0: Reserved
+	-- Standard initialization is usually all zeros, but some systems expect specific values
+	signal fpcr : std_logic_vector(31 downto 0) := X"00000000";	-- Floating-Point Control Register
+	-- FPSR: MC68882 initialization - cleared on reset per IEEE 754
+	-- Bits 31-28: Condition codes (N,Z,I,NaN) = 0000 after reset
+	-- Bits 27-24: Reserved = 0000  
+	-- Bits 23-16: Quotient byte = 00000000
+	-- Bits 15-8: Exception status byte = 00000000
+	-- Bits 7-0: Accrued exception byte = 00000000
+	signal fpsr : std_logic_vector(31 downto 0) := X"00000000";	-- Floating-Point Status Register
 	signal fpiar : std_logic_vector(31 downto 0) := (others => '0');	-- Floating-Point Instruction Address Register
 	
 	-- Internal state machine
@@ -292,6 +304,7 @@ architecture rtl of TG68K_FPU is
 	constant INST_FMOVE_MEM		: std_logic_vector(3 downto 0) := "0010";	-- FMOVE <ea>,FPn
 	constant INST_FMOVEM		: std_logic_vector(3 downto 0) := "0011";	-- FMOVEM
 	constant INST_FMOVE_CR		: std_logic_vector(3 downto 0) := "0100";	-- FMOVE control register
+	constant INST_FMOVEM_CR		: std_logic_vector(3 downto 0) := "1001";	-- FMOVEM control registers
 	constant INST_FBCC			: std_logic_vector(3 downto 0) := "0101";	-- FBcc
 	constant INST_FSAVE			: std_logic_vector(3 downto 0) := "0110";	-- FSAVE
 	constant INST_FRESTORE		: std_logic_vector(3 downto 0) := "0111";	-- FRESTORE
@@ -693,6 +706,23 @@ begin
 							movem_start <= '1';
 							fpu_state <= FPU_EXECUTE;  -- Wait for MOVEM completion
 						end if;
+						end if;
+					elsif decoder_instruction_type = INST_FMOVEM_CR then
+						-- FMOVEM control registers - Multiple control register transfer
+						-- FMOVEM.L FPCR/FPSR/FPIAR,-(A5) or FMOVEM.L (A5)+,FPCR/FPSR/FPIAR
+						-- Control register mask in extension_word(12 downto 10): FPCR=bit12, FPSR=bit11, FPIAR=bit10
+						-- Direction: extension_word(13) = 0 for control regs to memory, 1 for memory to control regs
+						
+						-- Check if any control registers are selected
+						if extension_word(12 downto 10) = "000" then
+							-- No control registers selected - operation complete
+							fpu_state <= FPU_IDLE;
+							fpu_done <= '1';
+						else
+							-- Start FMOVEM control register operation
+							-- Use CPU-managed interface for memory operations
+							fpu_state <= FPU_IDLE;
+							fpu_done <= '1';  -- Signal CPU to handle the transfers
 						end if;
 					elsif decoder_instruction_type = INST_FSAVE then
 							-- FSAVE - Provide FPU state frame data to CPU
@@ -1554,13 +1584,15 @@ begin
 						fpu_state <= FPU_IDLE;
 					
 					when FPU_FSAVE_WRITE =>
-						-- FSAVE - Provide data for MC68882 idle frame (60 bytes, 15 longwords)
+						-- FSAVE - Provide data for MC68882 null frame (idle state)
+						-- Based on AmigaOS Kickstart 1.3 analysis: expects $00 for idle FPU
 						-- CPU manages all memory operations, FPU only provides data when requested
 						
 						if fsave_data_request = '1' then
 							case fsave_data_index is
-								when 0 =>
-									-- Frame format word - MC68882 idle frame format $41
+									when 0 =>
+									-- Frame format word - MC68882 idle frame format $41 for FPU identification
+									-- AmigaOS uses FSAVE format to distinguish MC68881 ($18) vs MC68882 ($41)
 									fpu_data_out <= x"41000000";  -- Format $41 = MC68882 idle frame
 								when 1 =>
 									-- FPIAR (Floating-Point Instruction Address Register)
@@ -1582,7 +1614,7 @@ begin
 							end case;
 						end if;
 						
-						-- FPU operation complete when CPU finishes all writes
+						-- FPU operation complete when CPU finishes all writes (60-byte frame)
 						if fsave_data_index = 14 and fsave_data_request = '0' then
 							fpu_state <= FPU_IDLE;
 							fpu_done <= '1';

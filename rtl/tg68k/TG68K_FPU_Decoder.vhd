@@ -66,6 +66,7 @@ architecture rtl of TG68K_FPU_Decoder is
 	constant INST_FMOVE_MEM		: std_logic_vector(3 downto 0) := "0010";	-- FMOVE <ea>,FPn
 	constant INST_FMOVEM		: std_logic_vector(3 downto 0) := "0011";	-- FMOVEM
 	constant INST_FMOVE_CR		: std_logic_vector(3 downto 0) := "0100";	-- FMOVE control register
+	constant INST_FMOVEM_CR		: std_logic_vector(3 downto 0) := "1001";	-- FMOVEM control registers
 	constant INST_FBCC			: std_logic_vector(3 downto 0) := "0101";	-- FBcc (branch)
 	constant INST_FSAVE			: std_logic_vector(3 downto 0) := "0110";	-- FSAVE
 	constant INST_FRESTORE		: std_logic_vector(3 downto 0) := "0111";	-- FRESTORE
@@ -182,12 +183,19 @@ begin
 					if extension_word(15) = '0' then
 						instruction_type <= INST_FMOVE_FP;   -- FMOVE FPn,<ea>
 					else
-						-- FMOVEM instruction - validate format
+						-- FMOVEM instruction - check for control register vs FP register
 						if (opcode(15 downto 8) = X"F2") and 
 						   (extension_word(15) = '1') and
-						   (extension_word(14) = '1') and
-						   (extension_word(12 downto 8) = "00000") then
-							instruction_type <= INST_FMOVEM;     -- Valid FMOVEM
+						   (extension_word(14) = '1') then
+							-- Check if this is control register FMOVEM
+							if extension_word(12 downto 10) /= "000" and extension_word(7 downto 0) = "00000000" then
+								instruction_type <= INST_FMOVEM_CR;  -- FMOVEM control registers
+							elsif extension_word(12 downto 8) = "00000" then
+								instruction_type <= INST_FMOVEM;     -- Valid FP register FMOVEM
+							else
+								-- Invalid FMOVEM format - will be caught by validity check
+								null;
+							end if;
 						else
 							-- Invalid FMOVEM format - will be caught by validity check
 							null;

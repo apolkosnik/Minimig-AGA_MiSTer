@@ -330,6 +330,12 @@ architecture logic of TG68KdotC_Kernel is
 	signal fmovem_data_in       : std_logic_vector(79 downto 0);
 	signal fmovem_data_out      : std_logic_vector(79 downto 0);
 	
+	-- FMOVEM state machine variables
+	signal fmovem_active        : std_logic := '0';
+	signal fmovem_reg_mask      : std_logic_vector(7 downto 0) := (others => '0');
+	signal fmovem_direction     : std_logic := '0';  -- 0=to memory, 1=from memory
+	signal fmovem_reg_count     : integer range 0 to 7 := 0;
+	
 	signal set_stop			: bit;
 	signal stop					: bit;
 	signal trap_vector		: std_logic_vector(31 downto 0);
@@ -1653,7 +1659,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		set_Z_error <= '0';
 		check_aligned <='0';
 
-		next_micro_state <= idle;
+		-- Default to idle, but route completed F-line FPU instructions to fpu1
+		IF FPU_Enable = 1 AND opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND
+		   micro_state /= idle AND setexecOPC = '1' THEN
+			-- Completed F-line FPU instruction - route to FPU processing
+			next_micro_state <= fpu1;
+		ELSE
+			next_micro_state <= idle;
+		END IF;
 		build_logical <= '0';
 		build_bcd <= '0';
 		skipFetch <= make_berr;
@@ -4325,6 +4338,30 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							-- Other addressing modes - not implemented yet
 							next_micro_state <= fpu_done;
 						END IF;
+					ELSIF opcode(8 downto 6) = "110" THEN
+						-- FMOVEM instruction - multiple register move
+						-- Check if this is control register FMOVEM or FP register FMOVEM
+						IF sndOPC(12 downto 10) /= "000" AND sndOPC(7 downto 0) = "00000000" THEN
+							-- FMOVEM control registers (FPCR/FPSR/FPIAR)
+							-- Start FMOVEM control register operation
+							fmovem_active <= '1';
+							fmovem_reg_mask <= sndOPC(12 downto 10) & "00000";  -- Control register mask in upper bits
+							fmovem_direction <= sndOPC(13);         -- 0=to memory, 1=from memory
+							fmovem_reg_count <= 0;                  -- Start processing
+							next_micro_state <= fpu_fmovem_cr;      -- Control register FMOVEM state
+						ELSIF sndOPC(7 downto 0) = "00000000" THEN
+							-- No registers selected - operation complete
+							next_micro_state <= fpu_done;
+						ELSE
+							-- FP register FMOVEM
+							-- Start FMOVEM operation
+							-- Initialize FMOVEM state variables
+							fmovem_active <= '1';
+							fmovem_reg_mask <= sndOPC(7 downto 0);  -- Register mask from extension word
+							fmovem_direction <= sndOPC(13);         -- 0=to memory, 1=from memory
+							fmovem_reg_count <= 0;                  -- Start with register 0
+							next_micro_state <= fpu_fmovem;         -- FP register FMOVEM state
+						END IF;
 					ELSE
 						-- Regular FPU arithmetic operation
 						next_micro_state <= fpu_wait;
@@ -4417,6 +4454,138 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					END IF;
 					
 					next_micro_state <= idle;
+					
+				WHEN fpu_fmovem =>
+					-- FMOVEM multi-register transfer state
+					-- Process each register bit in the mask sequentially
+					
+					-- Find next register to transfer
+					IF fmovem_reg_mask(fmovem_reg_count) = '1' THEN
+						-- This register needs to be transferred
+						fmovem_data_request <= '1';
+						fmovem_reg_index <= fmovem_reg_count;
+						
+						-- Check direction: 0=FP registers to memory, 1=memory to FP registers
+						IF fmovem_direction = '0' THEN
+							-- FMOVEM FP0-FP7,<ea> - store registers to memory
+							-- Set up memory write with FP register data
+							-- The FPU will provide data via fmovem_data_out
+							-- Set up addressing mode (predecrement/postincrement handled in EA processing)
+							IF opcode(5 downto 3) = "100" THEN
+								-- Predecrement mode -(An)
+								set(presub) <= '1';
+								setstackaddr <= '1';
+								IF opcode(2 downto 0) = "111" THEN
+									set(use_SP) <= '1';  -- Use stack pointer
+								END IF;
+							ELSIF opcode(5 downto 3) = "011" THEN
+								-- Postincrement mode (An)+
+								set(postadd) <= '1';
+								setstackaddr <= '1';
+								IF opcode(2 downto 0) = "111" THEN
+									set(use_SP) <= '1';  -- Use stack pointer
+								END IF;
+							END IF;
+							-- FP registers are 80-bit (10 bytes), but we transfer as 3 longwords (12 bytes)
+							datatype <= "10";  -- Longword transfers
+							set(write_reg) <= '1';
+							set(get_ea_now) <= '1';
+						ELSE
+							-- FMOVEM <ea>,FP0-FP7 - load registers from memory
+							-- Set up memory read to load FP register
+							fmovem_data_write <= '1';
+							-- Address calculation handled by EA processing
+							set(get_ea_now) <= '1';
+							datatype <= "10";  -- Longword transfers
+						END IF;
+						
+						-- Move to next register for next cycle
+						IF fmovem_reg_count < 7 THEN
+							fmovem_reg_count <= fmovem_reg_count + 1;
+							next_micro_state <= fpu_fmovem;  -- Continue processing
+						ELSE
+							-- All registers processed
+							fmovem_active <= '0';
+							fmovem_data_request <= '0';
+							fmovem_data_write <= '0';
+							next_micro_state <= fpu_done;
+						END IF;
+					ELSE
+						-- This register not selected in mask, skip to next
+						IF fmovem_reg_count < 7 THEN
+							fmovem_reg_count <= fmovem_reg_count + 1;
+							next_micro_state <= fpu_fmovem;  -- Continue processing
+						ELSE
+							-- All registers processed
+							fmovem_active <= '0';
+							fmovem_data_request <= '0';
+							fmovem_data_write <= '0';
+							next_micro_state <= fpu_done;
+						END IF;
+					END IF;
+					
+				WHEN fpu_fmovem_cr =>
+					-- FMOVEM control register transfer state  
+					-- Process FPCR, FPSR, FPIAR based on mask in extension word bits 12:10
+					-- Bit 12=FPCR, Bit 11=FPSR, Bit 10=FPIAR
+					
+					-- Determine which control register to process based on count
+					-- Control registers are processed in order: FPCR(0), FPSR(1), FPIAR(2)
+					IF (fmovem_reg_count = 0 AND fmovem_reg_mask(7) = '1') OR    -- FPCR (bit 12 mapped to bit 7)
+					   (fmovem_reg_count = 1 AND fmovem_reg_mask(6) = '1') OR    -- FPSR (bit 11 mapped to bit 6)
+					   (fmovem_reg_count = 2 AND fmovem_reg_mask(5) = '1') THEN  -- FPIAR (bit 10 mapped to bit 5)
+						
+						-- This control register needs to be transferred
+						-- Check direction: 0=control registers to memory, 1=memory to control registers
+						IF fmovem_direction = '0' THEN
+							-- FMOVEM FPCR/FPSR/FPIAR,<ea> - store control registers to memory
+							-- Set up for memory write operation
+							IF opcode(5 downto 3) = "100" THEN
+								-- Predecrement mode -(An)
+								set(presub) <= '1';
+								setstackaddr <= '1';
+								IF opcode(2 downto 0) = "111" THEN
+									set(use_SP) <= '1';  -- Use stack pointer
+								END IF;
+							ELSIF opcode(5 downto 3) = "011" THEN
+								-- Postincrement mode (An)+
+								set(postadd) <= '1';
+								setstackaddr <= '1';
+								IF opcode(2 downto 0) = "111" THEN
+									set(use_SP) <= '1';  -- Use stack pointer
+								END IF;
+							END IF;
+							-- Control registers are 32-bit (longword)
+							datatype <= "10";  -- Longword transfers
+							set(write_reg) <= '1';
+							set(get_ea_now) <= '1';
+						ELSE
+							-- FMOVEM <ea>,FPCR/FPSR/FPIAR - load control registers from memory
+							-- Set up for memory read operation
+							set(get_ea_now) <= '1';
+							datatype <= "10";  -- Longword transfers
+						END IF;
+						
+						-- Move to next control register for next cycle
+						IF fmovem_reg_count < 2 THEN  -- Only 3 control registers (0,1,2)
+							fmovem_reg_count <= fmovem_reg_count + 1;
+							next_micro_state <= fpu_fmovem_cr;  -- Continue processing
+						ELSE
+							-- All control registers processed
+							fmovem_active <= '0';
+							next_micro_state <= fpu_done;
+						END IF;
+					ELSE
+						-- This control register not selected in mask, skip to next
+						IF fmovem_reg_count < 2 THEN  -- Only 3 control registers (0,1,2)
+							fmovem_reg_count <= fmovem_reg_count + 1;
+							next_micro_state <= fpu_fmovem_cr;  -- Continue processing
+						ELSE
+							-- All control registers processed
+							fmovem_active <= '0';
+							next_micro_state <= fpu_done;
+						END IF;
+					END IF;
 	
 				WHEN OTHERS => NULL;
 			END CASE;
