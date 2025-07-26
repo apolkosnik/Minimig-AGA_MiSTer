@@ -513,8 +513,7 @@ ALU: TG68K_ALU
 				if clkena_lw = '1' then
 					-- Enable FPU during FPU microcode states OR when F-line instruction detected
 					if micro_state = fpu1 or micro_state = fpu_wait or micro_state = fpu_done or
-					   (opcode(15 downto 12) = "1111" AND 
-					    (opcode(11 downto 9) = "001" OR opcode(8 downto 6) = "000")) then
+					   (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001") then
 						fpu_enable_sig <= '1';
 					else
 						fpu_enable_sig <= '0';
@@ -1661,7 +1660,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
 		-- Default to idle, but route completed F-line FPU instructions to fpu1
 		IF FPU_Enable = 1 AND opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND
-		   micro_state /= idle AND setexecOPC = '1' THEN
+		   micro_state /= idle THEN
 			-- Completed F-line FPU instruction - route to FPU processing
 			next_micro_state <= fpu1;
 		ELSE
@@ -4608,7 +4607,7 @@ BEGIN
 			-- Handle FSAVE/FRESTORE counter and control signals
 			
 			-- FSAVE handling
-			IF next_micro_state = fpu2 AND opcode(15 downto 6) = "1111001001" AND 
+			IF next_micro_state = fpu2 AND opcode(15 downto 6) = "1111001100" AND 
 			   opcode(5 downto 3) = "100" AND opcode(2 downto 0) = "111" AND fsave_counter = 0 THEN
 				-- Entering FSAVE -(A7) for first time
 				fsave_60byte_decr <= '1';
