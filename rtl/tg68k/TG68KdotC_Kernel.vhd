@@ -4613,7 +4613,7 @@ BEGIN
 				fsave_60byte_decr <= '1';
 			ELSIF micro_state = fpu2 AND state = "11" AND setstate = "00" THEN
 				-- Memory write completed for FSAVE
-				IF fsave_counter < 14 THEN
+				IF fsave_counter <= 14 THEN
 					fsave_counter <= fsave_counter + 1;
 				END IF;
 				-- Clear single-use signals after first write
