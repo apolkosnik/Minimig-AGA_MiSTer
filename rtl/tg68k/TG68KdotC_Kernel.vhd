@@ -1665,9 +1665,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		check_aligned <='0';
 
 		-- Default to idle, but route completed F-line FPU instructions to fpu1
+		-- EXCEPT for FSAVE/FRESTORE which have special CPU-managed states (fpu2/fpu1)
 		IF FPU_Enable = 1 AND opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND
-		   micro_state /= idle THEN
+		   micro_state /= idle AND opcode(8 downto 6) /= "100" AND opcode(8 downto 6) /= "101" THEN
 			-- Completed F-line FPU instruction - route to FPU processing
+			-- Exclude FSAVE (100) and FRESTORE (101) which use special CPU states  
 			next_micro_state <= fpu1;
 		ELSE
 			next_micro_state <= idle;

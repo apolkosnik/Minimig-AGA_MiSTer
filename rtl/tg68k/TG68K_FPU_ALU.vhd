@@ -1289,6 +1289,9 @@ begin
 											mant_result <= mant_result + 1;
 										end if;
 									end if;
+								when others =>
+									-- Default case - no rounding
+									null;
 							end case;
 						end if;
 						alu_state <= ALU_DONE;
