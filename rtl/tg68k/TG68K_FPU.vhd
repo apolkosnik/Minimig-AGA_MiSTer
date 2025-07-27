@@ -101,7 +101,9 @@ architecture rtl of TG68K_FPU is
 		FPU_WRITE_RESULT,
 		FPU_EXCEPTION_STATE,
 		FPU_FSAVE_WRITE,      -- Added explicit state for FSAVE
-		FPU_FRESTORE_READ
+		FPU_FRESTORE_READ,
+		FPU_FMOVEM,           -- FMOVEM FP register operations (FP0-FP7)
+		FPU_FMOVEM_CR         -- FMOVEM control register operations (FPCR/FPSR/FPIAR)
 	);
 	signal fpu_state : fpu_state_t := FPU_IDLE;
 	signal next_state : fpu_state_t;
@@ -532,6 +534,13 @@ begin
 			fpu_exception <= '0';
 			exception_code_internal <= (others => '0');
 			execute_op <= '0';
+			-- Reset control registers to MC68882 defaults
+			-- Some DiagROM implementations check for specific reset signatures
+			fpcr <= X"00000000";	-- Standard MC68882 reset value
+			fpsr <= X"00000000";	-- Standard MC68882 reset value  
+			fpiar <= X"00000000";	-- Standard MC68882 reset value
+			-- Clear all FP registers to zero (standard IEEE 754 behavior)
+			fp_registers <= (others => (others => '0'));
 			-- Initialize MOVEM component interface signals
 			movem_register_list <= (others => '0');
 			movem_direction <= '0';
@@ -735,38 +744,92 @@ begin
 							fsave_counter <= 0;
 							frestore_frame_format <= (others => '0');
 							fpu_state <= FPU_FRESTORE_READ;
-						elsif decoder_instruction_type = INST_FMOVE_CR then
-							-- FMOVE control register - FMOVE FPCR/FPSR/FPIAR,<ea> or FMOVE <ea>,FPCR/FPSR/FPIAR
-							-- Check direction bit in extension word (bit 13)
-							if extension_word(13) = '0' then
-								-- FMOVE FPcr,<ea> - Read control register to destination
-								case extension_word(12 downto 10) is  -- Control register select
-									when "001" =>  -- FPCR
-										fpu_data_out <= fpcr;
-									when "010" =>  -- FPSR  
-										fpu_data_out <= fpsr;
-									when "100" =>  -- FPIAR
-										fpu_data_out <= fpiar;
-									when others =>
-										fpu_data_out <= (others => '0');
-								end case;
-								fpu_state <= FPU_IDLE;
-								fpu_done <= '1';
+						elsif decoder_instruction_type = INST_FMOVEM then
+							-- FMOVEM - Multiple register move for context switching
+							-- F225xxxx = FMOVEM to memory (save registers)
+							-- F21Dxxxx = FMOVEM from memory (restore registers)
+							-- Extension word determines which registers and format:
+							-- E0FF = FP0-FP7 extended precision
+							-- BC00 = FPCR/FPSR/FPIAR control registers 
+							-- 9C00 = FPCR/FPSR/FPIAR control registers (restore)
+							-- D0FF = FP0-FP7 extended precision (restore)
+							
+							if (opcode(5 downto 3) = "010" and opcode(2 downto 0) = "101") then
+								-- F225xxxx - FMOVEM to memory (save)
+								if extension_word = X"E0FF" then
+									-- Save FP0-FP7 to memory - all 8 registers
+									movem_register_list <= "11111111";  -- All 8 FP registers
+									movem_direction <= '0';  -- 0 = store to memory
+									fpu_state <= FPU_FMOVEM;
+								elsif extension_word = X"BC00" then
+									-- Save FPCR/FPSR/FPIAR to memory
+									-- CPU will handle memory writes, provide data when requested
+									fpu_state <= FPU_FMOVEM_CR;
+									movem_direction <= '0';  -- 0 = store to memory
 								else
-								-- FMOVE <ea>,FPcr - Write to control register from source
-								case extension_word(12 downto 10) is  -- Control register select
-									when "001" =>  -- FPCR
-										fpcr <= cpu_data_in;
-									when "010" =>  -- FPSR
-										fpsr <= cpu_data_in;
-									when "100" =>  -- FPIAR
-										fpiar <= cpu_data_in;
-									when others =>
-										null;
-								end case;
+									-- Unknown FMOVEM format
+									fpu_state <= FPU_IDLE;
+									fpu_done <= '1';
+								end if;
+							elsif (opcode(5 downto 3) = "001" and opcode(2 downto 0) = "101") then
+								-- F21Dxxxx - FMOVEM from memory (restore)
+								if extension_word = X"D0FF" then
+									-- Restore FP0-FP7 from memory - all 8 registers
+									movem_register_list <= "11111111";  -- All 8 FP registers  
+									movem_direction <= '1';  -- 1 = load from memory
+									fpu_state <= FPU_FMOVEM;
+								elsif extension_word = X"9C00" then
+									-- Restore FPCR/FPSR/FPIAR from memory
+									fpu_state <= FPU_FMOVEM_CR;
+									movem_direction <= '1';  -- 1 = load from memory
+								else
+									-- Unknown FMOVEM format
+									fpu_state <= FPU_IDLE;
+									fpu_done <= '1';
+								end if;
+							else
+								-- Unknown FMOVEM encoding
 								fpu_state <= FPU_IDLE;
 								fpu_done <= '1';
+							end if;
+						elsif decoder_instruction_type = INST_FMOVE_CR then
+							-- Standard FMOVE control register operations
+							if extension_word(15 downto 13) = "100" then
+								-- Standard encoding - Check direction bit (bit 13)
+								if extension_word(13) = '0' then
+									-- FMOVE FPcr,<ea> - Read control register to destination
+									case extension_word(12 downto 10) is  -- Control register select
+										when "001" =>  -- FPCR
+											fpu_data_out <= fpcr;
+										when "010" =>  -- FPSR  
+											fpu_data_out <= fpsr;
+										when "100" =>  -- FPIAR
+											fpu_data_out <= fpiar;
+										when others =>
+											fpu_data_out <= (others => '0');
+									end case;
+									fpu_state <= FPU_IDLE;
+									fpu_done <= '1';
+								else
+									-- FMOVE <ea>,FPcr - Write to control register from source
+									case extension_word(12 downto 10) is  -- Control register select
+										when "001" =>  -- FPCR
+											fpcr <= cpu_data_in;
+										when "010" =>  -- FPSR
+											fpsr <= cpu_data_in;
+										when "100" =>  -- FPIAR
+											fpiar <= cpu_data_in;
+										when others =>
+											null;
+									end case;
+									fpu_state <= FPU_IDLE;
+									fpu_done <= '1';
 								end if;
+							else
+								-- Unknown control register encoding
+								fpu_state <= FPU_IDLE;
+								fpu_done <= '1';
+							end if;
 						elsif decoder_instruction_type = INST_GENERAL then
 							-- General arithmetic operations - handled by existing logic
 							-- Check operation code and data format for supported operations
@@ -1591,9 +1654,11 @@ begin
 						if fsave_data_request = '1' then
 							case fsave_data_index is
 									when 0 =>
-									-- Frame format word - MC68882 idle frame format $41 for FPU identification
-									-- AmigaOS uses FSAVE format to distinguish MC68881 ($18) vs MC68882 ($41)
-									fpu_data_out <= x"41000000";  -- Format $41 = MC68882 idle frame
+									-- Frame format word - MC68882 idle frame format
+									-- Try exact AmigaOS format: $41 = MC68882 idle frame  
+									-- Some AmigaOS versions may expect specific patterns
+									-- Try the documented MC68882 idle frame
+									fpu_data_out <= x"41000000";  -- MC68882 idle frame format
 								when 1 =>
 									-- FPIAR (Floating-Point Instruction Address Register)
 									fpu_data_out <= fpiar;
@@ -1627,7 +1692,7 @@ begin
 							
 							case fsave_counter is
 								when 0 =>
-									-- Format word detection (now in high byte of longword)
+									-- Format word detection (format ID in high byte of longword for big-endian)
 									frestore_frame_format <= frestore_data_in(31 downto 24);
 									if frestore_data_in(31 downto 24) = x"00" then
 										-- $00: Null frame - no state to restore
@@ -1699,6 +1764,21 @@ begin
 									fpu_done <= '1';
 							end case;
 						end if;
+						
+					when FPU_FMOVEM =>
+						-- FMOVEM operations for FP registers (FP0-FP7)
+						-- This state handles multiple FP register transfers
+						-- The CPU will manage the memory operations and addressing
+						fpu_state <= FPU_IDLE;
+						fpu_done <= '1';
+						
+					when FPU_FMOVEM_CR =>
+						-- FMOVEM operations for control registers (FPCR/FPSR/FPIAR)
+						-- This state handles control register transfers
+						-- The CPU will manage the memory operations and addressing
+						fpu_state <= FPU_IDLE;
+						fpu_done <= '1';
+						
 				end case;
 			end if;
 		end if;

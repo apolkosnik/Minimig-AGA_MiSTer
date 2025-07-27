@@ -102,6 +102,12 @@ package TG68K_Pack is
 	constant hold_dwr				: integer := 64; --
 	constant to_USP				: integer := 65; --
 	constant from_USP				: integer := 66; --
+	constant to_SSP				: integer := 89; --
+	constant from_SSP				: integer := 90; --
+	constant to_MSP				: integer := 91; --
+	constant from_MSP				: integer := 92; --
+	constant to_ISP				: integer := 93; --
+	constant from_ISP				: integer := 94; --
 	constant write_lowlong		: integer := 67; --
 	constant write_reminder		: integer := 68; --
 	constant movem_action		: integer := 69; --
@@ -125,7 +131,7 @@ package TG68K_Pack is
 	constant opcCHK2				: integer := 87; --
 	constant opcEXTB				: integer := 88; --
 
-	constant lastOpcBit			: integer := 88;
+	constant lastOpcBit			: integer := 94;
 
 	component TG68K_ALU
 	generic(

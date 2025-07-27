@@ -342,6 +342,10 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_vector		: std_logic_vector(31 downto 0);
 	signal trap_vector_vbr	: std_logic_vector(31 downto 0);
 	signal USP					: std_logic_vector(31 downto 0);
+	signal SSP					: std_logic_vector(31 downto 0);
+	signal MSP					: std_logic_vector(31 downto 0);  -- Master Stack Pointer (68020+)
+	signal ISP					: std_logic_vector(31 downto 0);  -- Interrupt Stack Pointer (68020+)
+	signal interrupt_mode		: std_logic := '0';  -- 0=normal supervisor, 1=interrupt processing
 --	signal illegal_write_mode	: bit;
 --	signal illegal_read_mode	: bit;
 --	signal illegal_byteaddr		: bit;
@@ -513,7 +517,7 @@ ALU: TG68K_ALU
 			elsif rising_edge(clk) then
 				if clkena_lw = '1' then
 					-- Enable FPU during FPU microcode states OR when F-line instruction detected
-					if micro_state = fpu1 or micro_state = fpu_wait or micro_state = fpu_done or
+					if micro_state = fpu1 or micro_state = fpu2 or micro_state = fpu_wait or micro_state = fpu_done or
 					   (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001") then
 						fpu_enable_sig <= '1';
 					else
@@ -687,6 +691,10 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 				IF exec(to_USP)='1' THEN
 					USP <= reg_QA;
 				END IF;	
+				
+				IF exec(to_SSP)='1' THEN
+					SSP <= reg_QA;
+				END IF;	
 			END IF;
 		END IF;
 	END PROCESS;
@@ -694,7 +702,7 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 -----------------------------------------------------------------------------
 -- Write Reg
 -----------------------------------------------------------------------------
-PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, movec_data, fpu_data_out, micro_state, opcode)
+PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, SSP, MSP, ISP, movec_data, fpu_data_out, micro_state, opcode)
 	BEGIN
 		regin <= ALUout;
 		IF exec(save_memaddr)='1' THEN
@@ -703,6 +711,12 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 			regin <= memaddr_a;	
 		ELSIF exec(from_USP)='1' THEN
 			regin <= USP;	
+		ELSIF exec(from_SSP)='1' THEN
+			regin <= SSP;	
+		ELSIF exec(from_MSP)='1' THEN
+			regin <= MSP;	
+		ELSIF exec(from_ISP)='1' THEN
+			regin <= ISP;	
 		ELSIF exec(movec_rd)='1' THEN
 			regin <= movec_data;
 		ELSIF FPU_Enable = 1 AND micro_state = fpu_done AND 
@@ -1087,9 +1101,7 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 		ELSIF interrupt='1' THEN
 			memaddr_a(4 downto 0) <= '1'&rIPL_nr&'0';	
 		ELSIF micro_state = fpu2 AND fsave_counter > 0 THEN
-			-- FSAVE subsequent writes: calculate offset from counter
-			-- offset = (fsave_counter * 4) for longword accesses
-			-- This provides offsets: 4, 8, 12, ..., 56 for counters 1-14
+			-- FSAVE subsequent writes: displacement addressing
 			memaddr_a <= conv_std_logic_vector(fsave_counter * 4, 32);
 		END IF;	 
 		
@@ -1761,11 +1773,38 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			next_micro_state <= int1;
 			set(update_ld) <= '1';
 			setstate <= "10";
+			-- Set interrupt mode for proper ISP selection (68020+)
+			interrupt_mode <= '1';
 		END IF;
 			
 		IF set(changeMode)='1' THEN		
-			set(to_USP) <= '1';
-			set(from_USP) <= '1';
+			-- 68020 three-stack model: USP, MSP, ISP
+			-- Save current stack pointer and prepare for mode switch
+			IF preSVmode='0' THEN
+				-- Currently in user mode, switching to supervisor mode
+				-- Save current A7 (USP) to USP storage
+				set(to_USP) <= '1';
+				-- Load appropriate supervisor stack pointer into A7
+				IF interrupt_mode='1' THEN
+					-- Load ISP for interrupt processing
+					set(from_ISP) <= '1';
+				ELSE
+					-- Load MSP for normal supervisor mode
+					set(from_MSP) <= '1';
+				END IF;
+			ELSE
+				-- Currently in supervisor mode, switching to user mode  
+				-- Save current A7 to appropriate supervisor storage
+				IF interrupt_mode='1' THEN
+					-- Save ISP 
+					set(to_ISP) <= '1';
+				ELSE
+					-- Save MSP
+					set(to_MSP) <= '1';
+				END IF;
+				-- Load USP into A7
+				set(from_USP) <= '1';
+			END IF;
 			setstackaddr <='1';
 		END IF;
 			
@@ -4109,6 +4148,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					end if;
 				WHEN rte5 =>            -- RTE
 					next_micro_state <= nop;
+					-- Clear interrupt mode when returning from exception (68020+)
+					interrupt_mode <= '0';
 -------------------------------------
 
 				WHEN rtd1 =>		-- RTD
@@ -4398,16 +4439,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							next_micro_state <= fpu2;       -- Continue for more writes
 						ELSE
 							-- Subsequent writes: A7 already decremented by 60, write at offsets
-							-- Calculate offset: (fsave_counter * 4) bytes from A7
+							-- Write at current A7 + (fsave_counter * 4) bytes
 							set(use_SP) <= '1';             -- Use stack pointer
-							
-							-- For writes 2-15, we need positive offsets from A7
-							-- Write at A7 + (fsave_counter * 4)
-							-- This is handled by the ALU with postadd
-							IF fsave_counter > 0 THEN
-								set(postadd) <= '0';        -- Don't increment A7
-								set(mem_addsub) <= '1';     -- Use calculated address
-							END IF;
+							set(dispouter) <= '1';          -- Use displacement addressing: ea_data + memaddr_a
+							-- memaddr_a set in main addressing process above
 							
 							-- Write longword at calculated address
 							setstate <= "11";               -- Memory write
@@ -4664,13 +4699,16 @@ END PROCESS;
 -----------------------------------------------------------------------------
 -- MOVEC
 -----------------------------------------------------------------------------
-  process (clk, SFC, DFC, VBR, CACR, brief)
+  process (clk, SFC, DFC, VBR, CACR, MSP, ISP, brief)
   begin
 	-- all other hexa codes should give illegal isntruction exception
 	if rising_edge(clk) then
 	  if Reset = '1' then
 		VBR <= (others => '0');
 		CACR <= (others => '0');
+		-- Initialize 68020+ stack pointers to default values
+		MSP <= (others => '0');  -- Master Stack Pointer
+		ISP <= (others => '0');  -- Interrupt Stack Pointer
 	  elsif clkena_lw = '1' and exec(movec_wr) = '1' then
 		case brief(11 downto 0) is
 		  when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
@@ -4679,10 +4717,18 @@ END PROCESS;
 		  when X"800" => NULL; -- USP -- 68010+
 		  when X"801" => VBR <= reg_QA; -- 68010+
 		  when X"802" => NULL; -- CAAR -- 68020+
-		  when X"803" => NULL; -- MSP -- 68020+
-		  when X"804" => NULL; -- isP -- 68020+
+		  when X"803" => MSP <= reg_QA; -- MSP -- 68020+
+		  when X"804" => ISP <= reg_QA; -- ISP -- 68020+
 		  when others => NULL;
 		end case;
+	  elsif clkena_lw = '1' then
+		-- Handle stack pointer save operations during mode switches
+		if exec(to_MSP) = '1' then
+			MSP <= reg_QA;
+		end if;
+		if exec(to_ISP) = '1' then
+			ISP <= reg_QA;
+		end if;
 	  end if;
 	end if;
 
@@ -4694,7 +4740,10 @@ END PROCESS;
 
 	  when X"801" => 
 		movec_data <= VBR;
-		--end if;
+	  when X"803" => 
+		movec_data <= MSP;  -- MSP read support
+	  when X"804" => 
+		movec_data <= ISP;  -- ISP read support
 	  when others => NULL;
 	end case;
   end process;

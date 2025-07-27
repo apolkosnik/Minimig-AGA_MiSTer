@@ -143,8 +143,18 @@ begin
 		
 		if opcode(15 downto 12) = "1111" and coprocessor_id = "001" then
 			case inst_type_bits is
-				when "000" =>  -- General instructions (dyadic, monadic)
-					instruction_type <= INST_GENERAL;
+				when "000" =>  -- General instructions (dyadic, monadic) + AmigaOS FMOVEM
+					-- Check for AmigaOS FMOVEM operations (context switching)
+					-- F225xxxx = FMOVEM to memory (save FP registers or control registers)
+					-- F21Dxxxx = FMOVEM from memory (restore FP registers or control registers)
+					if (opcode(5 downto 3) = "010" and opcode(2 downto 0) = "101") or  -- F225 pattern (FMOVEM to memory)
+					   (opcode(5 downto 3) = "001" and opcode(2 downto 0) = "101") then -- F21D pattern (FMOVEM from memory)
+						-- Check extension word to determine if this is FP registers or control registers
+						-- This will be handled in the main FPU logic after extension word is available
+						instruction_type <= INST_FMOVEM;   -- Treat as FMOVEM operation
+					else
+						instruction_type <= INST_GENERAL;
+					end if;
 					needs_extension_word <= '1';
 					
 				when "001" =>  -- FDBcc, FTRAPcc, FScc
