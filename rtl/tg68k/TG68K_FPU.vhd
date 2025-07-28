@@ -109,6 +109,11 @@ architecture rtl of TG68K_FPU is
 	signal next_state : fpu_state_t;
 	signal fpu_busy_internal : std_logic := '0';
 	
+	-- FPU context state for dynamic FSAVE frame selection
+	signal fpu_has_context : std_logic := '0';  -- '1' if FPU has meaningful state to save
+	signal fpu_is_executing : std_logic := '0'; -- '1' if FPU is actively executing operation
+	signal fsave_frame_format : std_logic_vector(7 downto 0); -- Current frame format to return
+	
 	-- MOVEM component control signals
 	signal movem_register_list : std_logic_vector(7 downto 0);
 	signal movem_direction : std_logic;  -- 0=store to memory, 1=load from memory
@@ -500,6 +505,42 @@ begin
 	fpiar_out <= fpiar;
 	-- fpu_data_out is now handled within the state machine process
 	
+	-- Dynamic FSAVE frame format determination process
+	fsave_format_process: process(fpu_state, fpu_has_context, fpu_is_executing, fp_registers, fpcr, fpsr)
+		variable any_register_nonzero : std_logic;
+		variable any_control_nonzero : std_logic;
+	begin
+		-- Check if any FP registers contain non-zero values
+		any_register_nonzero := '0';
+		for i in 0 to 7 loop
+			if fp_registers(i) /= (79 downto 0 => '0') then
+				any_register_nonzero := '1';
+			end if;
+		end loop;
+		
+		-- Check if control registers have meaningful state
+		any_control_nonzero := '0';
+		if fpcr /= X"00000000" or fpsr /= X"00000000" then
+			any_control_nonzero := '1';
+		end if;
+		
+		-- Determine frame format based on FPU state
+		case fpu_state is
+			when FPU_EXECUTE | FPU_FETCH_SOURCE | FPU_MEMORY_READ | FPU_MEMORY_WRITE =>
+				-- FPU is actively executing - return BUSY frame if FSAVE called during execution
+				fsave_frame_format <= X"01";  -- Busy frame (4 bytes)
+				
+			when FPU_IDLE =>
+				-- FPU is enabled and idle - always return MC68882 IDLE frame
+				-- NULL frame (0x00) is only for disabled FPU, not idle state
+				fsave_frame_format <= X"60";  -- MC68882 IDLE frame (60 bytes)
+				
+			when others =>
+				-- For any other states, return IDLE frame (FPU is enabled)
+				fsave_frame_format <= X"60";  -- MC68882 IDLE frame (60 bytes)
+		end case;
+	end process;
+
 	-- Instruction decode process - now uses decoder outputs
 	decode_process: process(fpu_enable, opcode, decoder_operation_code, decoder_source_format, 
 							decoder_source_reg, decoder_dest_reg, decoder_ea_mode, decoder_ea_register)
@@ -564,6 +605,9 @@ begin
 			fp_registers <= (others => (others => '0'));
 			-- Initialize FPU data output
 			fpu_data_out <= (others => '0');
+			-- Initialize context tracking
+			fpu_has_context <= '0';
+			fpu_is_executing <= '0';
 		elsif rising_edge(clk) then
 			if clkena = '1' then
 				
@@ -573,6 +617,7 @@ begin
 						fpu_done <= '0';
 						fpu_exception <= '0';
 						execute_op <= '0';
+						fpu_is_executing <= '0';  -- Not executing when idle
 						
 						if fpu_enable = '1' then
 							fpu_state <= FPU_DECODE;
@@ -1347,6 +1392,7 @@ begin
 						fpu_data_out <= (others => '0');
 						alu_start_operation <= '0';  -- Clear ALU start signal
 						trans_start_operation <= '0';  -- Clear transcendental start signal
+						fpu_is_executing <= '1';  -- Mark FPU as actively executing
 						-- Increment timeout counter (use ALU limit for execution state)
 						if timeout_counter < TIMEOUT_LIMIT_ALU then
 							timeout_counter <= timeout_counter + 1;
@@ -1539,6 +1585,7 @@ begin
 								-- Bounds check for destination register
 								if to_integer(unsigned(dest_reg)) <= 7 then
 									fp_registers(to_integer(unsigned(dest_reg))) <= result_data;
+									fpu_has_context <= '1';  -- Mark that FPU now has meaningful context
 								end if;
 							end if;
 							
@@ -1605,6 +1652,7 @@ begin
 							end if;
 							fpu_state <= FPU_IDLE;
 							fpu_done <= '1';
+							fpu_is_executing <= '0';  -- No longer executing
 						end if;
 					
 					when FPU_EXCEPTION_STATE =>
@@ -1647,42 +1695,68 @@ begin
 						fpu_state <= FPU_IDLE;
 					
 					when FPU_FSAVE_WRITE =>
-						-- FSAVE - Provide data for MC68882 null frame (idle state)
-						-- Based on AmigaOS Kickstart 1.3 analysis: expects $00 for idle FPU
+						-- FSAVE - Dynamic frame format based on FPU state
 						-- CPU manages all memory operations, FPU only provides data when requested
 						
 						if fsave_data_request = '1' then
 							case fsave_data_index is
-									when 0 =>
-									-- Frame format word - MC68882 idle frame format
-									-- Try exact AmigaOS format: $41 = MC68882 idle frame  
-									-- Some AmigaOS versions may expect specific patterns
-									-- Try the documented MC68882 idle frame
-									fpu_data_out <= x"41000000";  -- MC68882 idle frame format
+								when 0 =>
+									-- Frame format word - dynamically determined based on FPU state
+									-- 0x00 = NULL (4 bytes), 0x01 = BUSY (4 bytes), 0x60 = MC68882 IDLE (60 bytes)
+									fpu_data_out <= fsave_frame_format & X"000000";
 								when 1 =>
-									-- FPIAR (Floating-Point Instruction Address Register)
-									fpu_data_out <= fpiar;
+									-- Data depends on frame format
+									if fsave_frame_format = X"00" or fsave_frame_format = X"01" then
+										-- NULL or BUSY frame - only 4 bytes total, no additional data
+										fpu_data_out <= x"00000000";
+									else
+										-- IDLE frame (60 bytes) - FPIAR
+										fpu_data_out <= fpiar;
+									end if;
 								when 2 =>
-									-- FPCR (Floating-Point Control Register)
-									fpu_data_out <= fpcr;
+									-- IDLE frame only - FPCR
+									if fsave_frame_format = X"60" then
+										fpu_data_out <= fpcr;
+									else
+										fpu_data_out <= x"00000000";
+									end if;
 								when 3 =>
-									-- FPSR (Floating-Point Status Register)
-									fpu_data_out <= fpsr;
+									-- IDLE frame only - FPSR
+									if fsave_frame_format = X"60" then
+										fpu_data_out <= fpsr;
+									else
+										fpu_data_out <= x"00000000";
+									end if;
 								when 4 to 11 =>
-									-- High 32 bits of FP registers 0-7 (8 longwords)
-									fpu_data_out <= fp_registers(fsave_data_index - 4)(79 downto 48);
+									-- IDLE frame only - High 32 bits of FP registers 0-7
+									if fsave_frame_format = X"60" then
+										fpu_data_out <= fp_registers(fsave_data_index - 4)(79 downto 48);
+									else
+										fpu_data_out <= x"00000000";
+									end if;
 								when 12 to 14 =>
-									-- Middle 32 bits of FP registers 0-2 only (3 longwords)
-									fpu_data_out <= fp_registers(fsave_data_index - 12)(47 downto 16);
+									-- IDLE frame only - Middle 32 bits of FP registers 0-2
+									if fsave_frame_format = X"60" then
+										fpu_data_out <= fp_registers(fsave_data_index - 12)(47 downto 16);
+									else
+										fpu_data_out <= x"00000000";
+									end if;
 								when others =>
 									fpu_data_out <= x"00000000";
 							end case;
 						end if;
 						
-						-- FPU operation complete when CPU finishes all writes (60-byte frame)
-						if fsave_data_index = 14 and fsave_data_request = '0' then
-							fpu_state <= FPU_IDLE;
-							fpu_done <= '1';
+						-- Frame completion depends on frame type
+						if fsave_data_request = '0' then
+							if (fsave_frame_format = X"00" or fsave_frame_format = X"01") and fsave_data_index = 0 then
+								-- NULL/BUSY frame complete after first longword (4 bytes)
+								fpu_state <= FPU_IDLE;
+								fpu_done <= '1';
+							elsif fsave_frame_format = X"60" and fsave_data_index = 14 then
+								-- IDLE frame complete after 15 longwords (60 bytes)
+								fpu_state <= FPU_IDLE;
+								fpu_done <= '1';
+							end if;
 						end if;
 					
 					when FPU_FRESTORE_READ =>
@@ -1694,68 +1768,115 @@ begin
 								when 0 =>
 									-- Format word detection (format ID in high byte of longword for big-endian)
 									frestore_frame_format <= frestore_data_in(31 downto 24);
-									if frestore_data_in(31 downto 24) = x"00" then
-										-- $00: Null frame - no state to restore
-										fpu_state <= FPU_IDLE;
-										fpu_done <= '1';
-									elsif frestore_data_in(31 downto 24) = x"18" then
-										-- $18: MC68881 idle frame (28 bytes) - FPIAR, FPCR, FPSR only
-										fsave_counter <= fsave_counter + 1;
-									elsif frestore_data_in(31 downto 24) = x"41" then
-										-- $41: MC68882 idle frame (60 bytes) - full state with registers
-										fsave_counter <= fsave_counter + 1;
-									elsif frestore_data_in(31 downto 24) = x"60" then
-										-- $60: Busy frame - variable size, not fully implemented
-										-- For now, treat as format error
-										fpu_exception <= '1';
-										exception_code_internal <= x"0A";  -- Format error
-										fpu_state <= FPU_EXCEPTION_STATE;
-									else
-										-- Invalid format - trigger format error exception
-										fpu_exception <= '1';
-										exception_code_internal <= x"0A";  -- Format error
-										fpu_state <= FPU_EXCEPTION_STATE;
-									end if;
+									case frestore_data_in(31 downto 24) is
+										when x"00" =>
+											-- $00: Null frame - no state to restore (4 bytes)
+											fpu_state <= FPU_IDLE;
+											fpu_done <= '1';
+											fpu_has_context <= '0';  -- Clear context flag
+											
+										when x"01" =>
+											-- $01: Busy frame - FPU was busy when FSAVE was called (4 bytes)
+											-- Restore to idle state since operation was interrupted
+											fpu_state <= FPU_IDLE;
+											fpu_done <= '1';
+											fpu_has_context <= '0';  -- Clear context flag
+											
+										when x"18" =>
+											-- $18: Short real frame (24 bytes) - partial context
+											fsave_counter <= fsave_counter + 1;
+											fpu_has_context <= '1';  -- Will have context after restore
+											
+										when x"41" =>
+											-- $41: MC68881 IDLE frame (60 bytes) - full state with registers
+											fsave_counter <= fsave_counter + 1;
+											fpu_has_context <= '1';  -- Will have context after restore
+											
+										when x"60" =>
+											-- $60: MC68882 IDLE frame (60 bytes) - full state with registers
+											fsave_counter <= fsave_counter + 1;
+											fpu_has_context <= '1';  -- Will have context after restore
+											
+										when x"38" =>
+											-- $38: Normal frame (96 bytes) - full context save
+											fsave_counter <= fsave_counter + 1;
+											fpu_has_context <= '1';  -- Will have context after restore
+											
+										when others =>
+											-- Invalid format - trigger format error exception
+											fpu_exception <= '1';
+											exception_code_internal <= x"0A";  -- Format error
+											fpu_state <= FPU_EXCEPTION_STATE;
+									end case;
 								
 								when 1 =>
-									-- FPIAR (present in both $18 and $41 frames)
+									-- FPIAR (present in all frames except NULL/BUSY)
 									fpiar <= frestore_data_in;
 									fsave_counter <= fsave_counter + 1;
 								
 								when 2 =>
-									-- FPCR (present in both $18 and $41 frames)
+									-- FPCR (present in all frames except NULL/BUSY)
 									fpcr <= frestore_data_in;
 									fsave_counter <= fsave_counter + 1;
 								
 								when 3 =>
-									-- FPSR (present in both $18 and $41 frames)
+									-- FPSR (present in all frames except NULL/BUSY)
 									fpsr <= frestore_data_in;
-									-- Check frame format to determine if we're done
-									if frestore_frame_format = x"18" then
-										-- $18 frame complete (28 bytes: 7 longwords)
-										fpu_state <= FPU_IDLE;
-										fpu_done <= '1';
-									else
-										-- $41 frame - continue with FP registers
-										fsave_counter <= fsave_counter + 1;
-									end if;
+									-- Check frame format to determine next action
+									case frestore_frame_format is
+										when x"18" =>
+											-- $18 frame complete (24 bytes: 6 longwords) - short real frame
+											fpu_state <= FPU_IDLE;
+											fpu_done <= '1';
+										when x"41" | x"60" =>
+											-- $41/$60 frame - continue with FP registers (60 bytes total)
+											fsave_counter <= fsave_counter + 1;
+										when x"38" =>
+											-- $38 frame - continue with extended context (96 bytes total)
+											fsave_counter <= fsave_counter + 1;
+										when others =>
+											-- Unknown frame format
+											fpu_state <= FPU_IDLE;
+											fpu_done <= '1';
+									end case;
 								
 								when 4 to 11 =>
-									-- $41 frame: High 32 bits of FP registers 0-7
-									fp_registers(fsave_counter - 4)(79 downto 48) <= frestore_data_in;
+									-- IDLE frames ($41/$60): High 32 bits of FP registers 0-7
+									-- Normal frame ($38): Also part of FP register restoration
+									if frestore_frame_format = x"41" or frestore_frame_format = x"60" or frestore_frame_format = x"38" then
+										fp_registers(fsave_counter - 4)(79 downto 48) <= frestore_data_in;
+									end if;
 									fsave_counter <= fsave_counter + 1;
 								
 								when 12 to 14 =>
-									-- $41 frame: Middle 32 bits of first 3 FP registers (restore saved data)
-									-- fsave_counter 12: FP0 middle, fsave_counter 13: FP1 middle, fsave_counter 14: FP2 middle
-									fp_registers(fsave_counter - 12)(47 downto 16) <= frestore_data_in;
-									
-									if fsave_counter = 14 then  -- Match FSAVE frame length (15 longwords = 60 bytes)
-										-- $41 frame complete
-										fpu_state <= FPU_IDLE;
-										fpu_done <= '1';
-									else
+									-- IDLE frames ($41/$60): Middle 32 bits of first 3 FP registers
+									if frestore_frame_format = x"41" or frestore_frame_format = x"60" then
+										fp_registers(fsave_counter - 12)(47 downto 16) <= frestore_data_in;
+										
+										if fsave_counter = 14 then
+											-- IDLE frame complete (60 bytes)
+											fpu_state <= FPU_IDLE;
+											fpu_done <= '1';
+										else
+											fsave_counter <= fsave_counter + 1;
+										end if;
+									elsif frestore_frame_format = x"38" then
+										-- Normal frame continues beyond this point
 										fsave_counter <= fsave_counter + 1;
+									end if;
+								
+								when 15 to 23 =>
+									-- Normal frame ($38): Additional context data (96 bytes total)
+									if frestore_frame_format = x"38" then
+										-- Handle additional context restoration here
+										-- For now, just advance counter
+										if fsave_counter = 23 then
+											-- Normal frame complete (96 bytes)
+											fpu_state <= FPU_IDLE;
+											fpu_done <= '1';
+										else
+											fsave_counter <= fsave_counter + 1;
+										end if;
 									end if;
 								
 								when others =>
@@ -1767,15 +1888,60 @@ begin
 						
 					when FPU_FMOVEM =>
 						-- FMOVEM operations for FP registers (FP0-FP7)
-						-- This state handles multiple FP register transfers
-						-- The CPU will manage the memory operations and addressing
+						-- AmigaOS uses 8 bytes per register in memory (64-bit compressed format)
+						-- CPU handles memory operations, format conversion, and incremental stack pointer adjustment
+						
+						-- FMOVEM data output is handled by the MOVEM component
+						-- Component provides FP register data when requested by CPU
+						
+						-- For FMOVEM writes (restore operations)
+						if fmovem_data_write = '1' then
+							-- AmigaOS FMOVEM.X loads full 80-bit extended precision format
+							-- Restore complete register content from memory
+							case fmovem_reg_index is
+								when 0 => fp_registers(0) <= fmovem_data_in;  -- FP0 (full 80-bit)
+								when 1 => fp_registers(1) <= fmovem_data_in;  -- FP1
+								when 2 => fp_registers(2) <= fmovem_data_in;  -- FP2
+								when 3 => fp_registers(3) <= fmovem_data_in;  -- FP3
+								when 4 => fp_registers(4) <= fmovem_data_in;  -- FP4
+								when 5 => fp_registers(5) <= fmovem_data_in;  -- FP5
+								when 6 => fp_registers(6) <= fmovem_data_in;  -- FP6
+								when 7 => fp_registers(7) <= fmovem_data_in;  -- FP7
+								when others => null;
+							end case;
+						end if;
+						
+						-- FMOVEM operations complete when CPU finishes all transfers
+						-- CPU manages register-by-register transfers and stack pointer increments
+						-- FPU stays ready to provide data for each register as requested
 						fpu_state <= FPU_IDLE;
 						fpu_done <= '1';
 						
 					when FPU_FMOVEM_CR =>
 						-- FMOVEM operations for control registers (FPCR/FPSR/FPIAR)
-						-- This state handles control register transfers
-						-- The CPU will manage the memory operations and addressing
+						-- AmigaOS FMOVEM control register operations
+						
+						-- For control register reads (save operations)
+						if fmovem_data_request = '1' then
+							case fmovem_reg_index is
+								when 0 => fpu_data_out <= fpcr;   -- FPCR
+								when 1 => fpu_data_out <= fpsr;   -- FPSR  
+								when 2 => fpu_data_out <= fpiar;  -- FPIAR
+								when others => fpu_data_out <= (others => '0');
+							end case;
+						end if;
+						
+						-- For control register writes (restore operations)
+						if fmovem_data_write = '1' then
+							case fmovem_reg_index is
+								when 0 => fpcr <= cpu_data_in;   -- FPCR
+								when 1 => fpsr <= cpu_data_in;   -- FPSR
+								when 2 => fpiar <= cpu_data_in;  -- FPIAR  
+								when others => null;
+							end case;
+						end if;
+						
+						-- Control register operations complete immediately
 						fpu_state <= FPU_IDLE;
 						fpu_done <= '1';
 						

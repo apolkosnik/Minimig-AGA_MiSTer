@@ -318,6 +318,9 @@ architecture logic of TG68KdotC_Kernel is
 	-- FSAVE-specific CPU signals
 	signal fsave_counter		: integer range 0 to 15 := 0;
 	signal fsave_60byte_decr	: bit := '0';  -- Special flag for FSAVE 60-byte decrement
+	signal fsave_frame_size		: integer range 4 to 60 := 60;  -- Frame size from FPU
+	signal fsave_frame_format	: std_logic_vector(7 downto 0) := X"60";  -- Frame format from FPU
+	signal fsave_size_determined	: std_logic := '0';  -- Flag indicating frame size has been read from FPU
 	signal fsave_base_address	: std_logic_vector(31 downto 0);
 	signal fsave_opcode_detected	: std_logic := '0';
 	signal fpu_data_request     : std_logic := '0';
@@ -1089,8 +1092,15 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 			END IF;	 
 		ELSIF set(presub)='1' THEN
 			IF fsave_60byte_decr = '1' THEN
-				-- Special case for FSAVE: decrement by 60 bytes
-				memaddr_a <= X"FFFFFFC4";  -- -60 in 32-bit two's complement
+				-- Special case for FSAVE: decrement by frame size determined from FPU
+				CASE fsave_frame_size IS
+					WHEN 4 =>
+						memaddr_a <= X"FFFFFFFC";  -- -4 in 32-bit two's complement
+					WHEN 60 =>
+						memaddr_a <= X"FFFFFFC4";  -- -60 in 32-bit two's complement
+					WHEN OTHERS =>
+						memaddr_a <= X"FFFFFFC4";  -- Default to -60 bytes
+				END CASE;
 			ELSIF set(longaktion)='1' THEN	
 				memaddr_a(4 downto 0) <= "11100";
 			ELSIF datatype="00" AND set(use_SP)='0' THEN
@@ -1627,7 +1637,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		trap_fpu_snan <= '0';
 		trap_fpu_bsun <= '0';
 		-- Initialize FPU interface signals to prevent latches
-		fpu_data_request <= '0';
+		-- fpu_data_request is assigned in clocked process only
 		movem_presub <= '0';
 		setnextpass <= '0';
 		regdirectsource <= '0';
@@ -3347,9 +3357,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- Fall through to cpSAVE/cpRESTORE handling
 					ELSE
 						-- Regular FPU instructions (FMOVE, FADD, etc.)
-						-- These need to go through normal instruction flow for EA processing
-						-- The key insight: don't jump directly to fpu1, let normal flow handle EA
-						-- Then the instruction will reach the end of normal processing and go to fpu1
+						-- Route directly to FPU for processing
+						next_micro_state <= fpu1;
 					END IF;
 					-- Don't trap - handle with FPU
 				ELSIF cpu(1)='1' AND opcode(8 downto 6)="100" THEN --cpSAVE
@@ -4435,7 +4444,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							
 							-- Write first longword at the decremented address
 							setstate <= "11";               -- Memory write
-							fpu_data_request <= '1';        -- Request data from FPU
+							-- fpu_data_request is handled in clocked process
 							next_micro_state <= fpu2;       -- Continue for more writes
 						ELSE
 							-- Subsequent writes: A7 already decremented by 60, write at offsets
@@ -4446,7 +4455,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							
 							-- Write longword at calculated address
 							setstate <= "11";               -- Memory write
-							fpu_data_request <= '1';        -- Request data from FPU
+							-- fpu_data_request is handled in clocked process
 							
 							IF fsave_counter <= 14 THEN
 								next_micro_state <= fpu2;   -- More writes to do
@@ -4652,6 +4661,10 @@ BEGIN
 			micro_state <= ld_nn;
 			fsave_counter <= 0;
 			fsave_60byte_decr <= '0';
+			fsave_size_determined <= '0';
+			fsave_frame_size <= 60;
+			fsave_frame_format <= X"60";
+			fpu_data_request <= '0';
 		ELSIF clkena_lw='1' THEN
 			trapd <= trapmake;
 			micro_state <= next_micro_state;
@@ -4662,7 +4675,32 @@ BEGIN
 			IF micro_state = fpu2 AND opcode(15 downto 6) = "1111001100" AND 
 			   opcode(5 downto 3) = "100" AND opcode(2 downto 0) = "111" AND fsave_counter = 0 THEN
 				-- Entering FSAVE -(A7) for first time
-				fsave_60byte_decr <= '1';
+				-- Request frame format from FPU to determine correct stack decrement
+				IF fsave_size_determined = '0' THEN
+					-- Request frame format (first longword) from FPU
+					fpu_data_request <= '1';
+				END IF;
+			ELSIF micro_state = fpu2 AND opcode(15 downto 6) = "1111001100" AND 
+			      opcode(5 downto 3) = "100" AND opcode(2 downto 0) = "111" AND 
+			      fsave_counter = 0 AND fpu_data_request = '1' THEN
+				-- FPU data should be available now, determine frame size
+				fsave_frame_format <= fpu_data_out(31 downto 24);  -- Frame format is in upper byte
+				CASE fpu_data_out(31 downto 24) IS
+					WHEN X"00" | X"01" =>
+						-- NULL or BUSY frame = 4 bytes
+						fsave_frame_size <= 4;
+						fsave_60byte_decr <= '0';  -- Use normal 4-byte decrement
+					WHEN X"60" =>
+						-- MC68882 IDLE frame = 60 bytes
+						fsave_frame_size <= 60;
+						fsave_60byte_decr <= '1';  -- Use 60-byte decrement
+					WHEN OTHERS =>
+						-- Default to MC68882 IDLE frame
+						fsave_frame_size <= 60;
+						fsave_60byte_decr <= '1';
+				END CASE;
+				fsave_size_determined <= '1';
+				fpu_data_request <= '0';  -- Clear request
 			ELSIF micro_state = fpu2 AND state = "11" AND setstate = "00" THEN
 				-- Memory write completed for FSAVE
 				IF fsave_counter <= 14 THEN
@@ -4670,6 +4708,7 @@ BEGIN
 				END IF;
 				-- Clear single-use signals after first write
 				fsave_60byte_decr <= '0';
+				fsave_size_determined <= '0';
 			END IF;
 			
 			-- FRESTORE handling
@@ -4687,6 +4726,7 @@ BEGIN
 			IF micro_state = idle THEN
 				fsave_counter <= 0;
 				fsave_60byte_decr <= '0';
+				fsave_size_determined <= '0';
 			END IF;
 		END IF;
 	END IF;
