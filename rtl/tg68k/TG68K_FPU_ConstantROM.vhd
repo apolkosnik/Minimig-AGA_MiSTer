@@ -86,6 +86,10 @@ architecture rtl of TG68K_FPU_ConstantROM is
 	constant CONST_1E64		: std_logic_vector(79 downto 0) := x"40D384F03E93FF9F4DAA";	-- 1E64
 	constant CONST_1E128	: std_logic_vector(79 downto 0) := x"41A893BA47C980E98CE0";	-- 1E128
 	constant CONST_1E256	: std_logic_vector(79 downto 0) := x"4351AA7EEBFB9DF9DE8E";	-- 1E256
+	constant CONST_1E512	: std_logic_vector(79 downto 0) := x"46A3C633415D4C1D238D";	-- 1E512
+	constant CONST_1E1024	: std_logic_vector(79 downto 0) := x"4D48C976758681750C17";	-- 1E1024
+	constant CONST_1E2048	: std_logic_vector(79 downto 0) := x"5A92917F547D73C80701";	-- 1E2048
+	constant CONST_1E4096	: std_logic_vector(79 downto 0) := x"7525C460127ABCC8F6AF";	-- 1E4096
 
 begin
 
@@ -153,6 +157,18 @@ begin
 						constant_valid <= '1';
 					when ROM_1E256 =>
 						constant_out <= CONST_1E256;
+						constant_valid <= '1';
+					when ROM_1E512 =>
+						constant_out <= CONST_1E512;
+						constant_valid <= '1';
+					when ROM_1E1024 =>
+						constant_out <= CONST_1E1024;
+						constant_valid <= '1';
+					when ROM_1E2048 =>
+						constant_out <= CONST_1E2048;
+						constant_valid <= '1';
+					when ROM_1E4096 =>
+						constant_out <= CONST_1E4096;
 						constant_valid <= '1';
 					when others =>
 						-- Return zero for undefined constants

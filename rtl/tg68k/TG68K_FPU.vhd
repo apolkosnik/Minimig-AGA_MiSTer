@@ -110,8 +110,6 @@ architecture rtl of TG68K_FPU is
 	signal fpu_busy_internal : std_logic := '0';
 	
 	-- FPU context state for dynamic FSAVE frame selection
-	signal fpu_has_context : std_logic := '0';  -- '1' if FPU has meaningful state to save
-	signal fpu_is_executing : std_logic := '0'; -- '1' if FPU is actively executing operation
 	signal fsave_frame_format : std_logic_vector(7 downto 0); -- Current frame format to return
 	
 	-- MOVEM component control signals
@@ -141,8 +139,6 @@ architecture rtl of TG68K_FPU is
 	-- FSAVE/FRESTORE operation signals
 	signal fsave_counter : integer range 0 to 31 := 0;  -- Word counter for complete state frame
 	signal frestore_frame_format : std_logic_vector(7 downto 0);  -- Saved frame format for FRESTORE
-	signal fsave_address : std_logic_vector(31 downto 0);
-	signal fsave_data : std_logic_vector(31 downto 0);
 	
 	-- Instruction decode signals from decoder
 	signal decoder_instruction_type	: std_logic_vector(3 downto 0);
@@ -153,14 +149,13 @@ architecture rtl of TG68K_FPU is
 	signal decoder_dest_reg				: std_logic_vector(2 downto 0);
 	signal decoder_ea_mode				: std_logic_vector(2 downto 0);
 	signal decoder_ea_register			: std_logic_vector(2 downto 0);
-	signal decoder_needs_extension		: std_logic;
+	signal decoder_needs_extension		: std_logic;	-- unused
 	signal decoder_valid_instruction	: std_logic;
-	signal decoder_privileged			: std_logic;
+	signal decoder_privileged			: std_logic;	-- unused
 	signal decoder_illegal				: std_logic;
 	signal decoder_unsupported			: std_logic;
 	
 	-- Internal decode signals
-	signal fpu_opcode : std_logic_vector(15 downto 0);
 	signal fpu_operation : std_logic_vector(6 downto 0);	-- 7-bit operation field
 	signal source_reg : std_logic_vector(2 downto 0);		-- Source FP register
 	signal dest_reg : std_logic_vector(2 downto 0);		-- Destination FP register
@@ -169,7 +164,6 @@ architecture rtl of TG68K_FPU is
 	signal ea_register : std_logic_vector(2 downto 0);		-- Effective address register
 	
 	-- Operation execution signals
-	signal execute_op : std_logic;
 	signal operation_done : std_logic;
 	signal current_exception : std_logic;
 	signal exception_type : std_logic_vector(7 downto 0);
@@ -506,7 +500,7 @@ begin
 	-- fpu_data_out is now handled within the state machine process
 	
 	-- Dynamic FSAVE frame format determination process
-	fsave_format_process: process(fpu_state, fpu_has_context, fpu_is_executing, fp_registers, fpcr, fpsr)
+	fsave_format_process: process(fpu_state, fp_registers, fpcr, fpsr)
 		variable any_register_nonzero : std_logic;
 		variable any_control_nonzero : std_logic;
 	begin
@@ -546,8 +540,6 @@ begin
 							decoder_source_reg, decoder_dest_reg, decoder_ea_mode, decoder_ea_register)
 	begin
 		if fpu_enable = '1' then
-			fpu_opcode <= opcode;
-			
 			-- Use decoded values from instruction decoder
 			fpu_operation <= decoder_operation_code;
 			data_format <= decoder_source_format;
@@ -556,7 +548,6 @@ begin
 			ea_mode <= decoder_ea_mode;
 			ea_register <= decoder_ea_register;
 		else
-			fpu_opcode <= (others => '0');
 			fpu_operation <= (others => '0');
 			data_format <= (others => '0');
 			ea_mode <= (others => '0');
@@ -574,7 +565,6 @@ begin
 			fpu_done <= '0';
 			fpu_exception <= '0';
 			exception_code_internal <= (others => '0');
-			execute_op <= '0';
 			-- Reset control registers to MC68882 defaults
 			-- Some DiagROM implementations check for specific reset signatures
 			fpcr <= X"00000000";	-- Standard MC68882 reset value
@@ -595,8 +585,6 @@ begin
 			-- Initialize FSAVE/FRESTORE signals
 			fsave_counter <= 0;
 			frestore_frame_format <= (others => '0');
-			fsave_address <= (others => '0');
-			fsave_data <= (others => '0');
 			-- Initialize control registers with proper MC68882 defaults
 			fpcr <= X"00000000";  -- MC68882 FPCR default: round-to-nearest, extended precision, no exceptions enabled
 			fpsr <= X"00000000";  -- MC68882 FPSR default: no exceptions, CCNAN=0
@@ -605,9 +593,6 @@ begin
 			fp_registers <= (others => (others => '0'));
 			-- Initialize FPU data output
 			fpu_data_out <= (others => '0');
-			-- Initialize context tracking
-			fpu_has_context <= '0';
-			fpu_is_executing <= '0';
 		elsif rising_edge(clk) then
 			if clkena = '1' then
 				
@@ -616,8 +601,6 @@ begin
 						fpu_data_out <= (others => '0');
 						fpu_done <= '0';
 						fpu_exception <= '0';
-						execute_op <= '0';
-						fpu_is_executing <= '0';  -- Not executing when idle
 						
 						if fpu_enable = '1' then
 							fpu_state <= FPU_DECODE;
@@ -1392,7 +1375,6 @@ begin
 						fpu_data_out <= (others => '0');
 						alu_start_operation <= '0';  -- Clear ALU start signal
 						trans_start_operation <= '0';  -- Clear transcendental start signal
-						fpu_is_executing <= '1';  -- Mark FPU as actively executing
 						-- Increment timeout counter (use ALU limit for execution state)
 						if timeout_counter < TIMEOUT_LIMIT_ALU then
 							timeout_counter <= timeout_counter + 1;
@@ -1585,7 +1567,6 @@ begin
 								-- Bounds check for destination register
 								if to_integer(unsigned(dest_reg)) <= 7 then
 									fp_registers(to_integer(unsigned(dest_reg))) <= result_data;
-									fpu_has_context <= '1';  -- Mark that FPU now has meaningful context
 								end if;
 							end if;
 							
@@ -1652,7 +1633,6 @@ begin
 							end if;
 							fpu_state <= FPU_IDLE;
 							fpu_done <= '1';
-							fpu_is_executing <= '0';  -- No longer executing
 						end if;
 					
 					when FPU_EXCEPTION_STATE =>
@@ -1703,6 +1683,7 @@ begin
 								when 0 =>
 									-- Frame format word - dynamically determined based on FPU state
 									-- 0x00 = NULL (4 bytes), 0x01 = BUSY (4 bytes), 0x60 = MC68882 IDLE (60 bytes)
+									-- MC68000 is big-endian: MSB (frame format) goes to lowest address
 									fpu_data_out <= fsave_frame_format & X"000000";
 								when 1 =>
 									-- Data depends on frame format
@@ -1773,34 +1754,28 @@ begin
 											-- $00: Null frame - no state to restore (4 bytes)
 											fpu_state <= FPU_IDLE;
 											fpu_done <= '1';
-											fpu_has_context <= '0';  -- Clear context flag
 											
 										when x"01" =>
 											-- $01: Busy frame - FPU was busy when FSAVE was called (4 bytes)
 											-- Restore to idle state since operation was interrupted
 											fpu_state <= FPU_IDLE;
 											fpu_done <= '1';
-											fpu_has_context <= '0';  -- Clear context flag
 											
 										when x"18" =>
 											-- $18: Short real frame (24 bytes) - partial context
 											fsave_counter <= fsave_counter + 1;
-											fpu_has_context <= '1';  -- Will have context after restore
 											
 										when x"41" =>
 											-- $41: MC68881 IDLE frame (60 bytes) - full state with registers
 											fsave_counter <= fsave_counter + 1;
-											fpu_has_context <= '1';  -- Will have context after restore
 											
 										when x"60" =>
 											-- $60: MC68882 IDLE frame (60 bytes) - full state with registers
 											fsave_counter <= fsave_counter + 1;
-											fpu_has_context <= '1';  -- Will have context after restore
 											
 										when x"38" =>
 											-- $38: Normal frame (96 bytes) - full context save
 											fsave_counter <= fsave_counter + 1;
-											fpu_has_context <= '1';  -- Will have context after restore
 											
 										when others =>
 											-- Invalid format - trigger format error exception

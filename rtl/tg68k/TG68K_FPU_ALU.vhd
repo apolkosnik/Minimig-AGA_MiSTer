@@ -755,10 +755,16 @@ begin
 									-- Z flag will be set by caller based on result
 								elsif operation_code = OP_FTST then
 									-- FTST: test single operand against zero
-									if sign_a = '1' and not is_zero_a = '1' then
-										-- Negative and not zero
+									if is_inf_a = '1' then
+										-- Infinity - set I flag (handled by FPU main module)
+										-- N flag also set if negative infinity
+										if sign_a = '1' then
+											sign_result <= '1';  -- N flag for negative infinity
+										end if;
+									elsif sign_a = '1' and not is_zero_a = '1' then
+										-- Negative and not zero (finite)
 										sign_result <= '1';  -- N flag
-									-- else positive or zero - no flags set
+									-- else positive, zero, or NaN - no additional flags set here
 									end if;
 								else -- OP_FCMP
 									-- FCMP: compare two operands A - B
