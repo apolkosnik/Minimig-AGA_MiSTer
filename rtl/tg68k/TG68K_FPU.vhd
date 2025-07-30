@@ -56,7 +56,7 @@ entity TG68K_FPU is
 		-- Control Signals
 		fpu_busy				: out std_logic;						-- FPU is executing multi-cycle operation
 		fpu_done				: out std_logic;						-- Operation complete
-		fpu_exception			: out std_logic;						-- FPU exception occurred
+		fpu_exception			: buffer std_logic;						-- FPU exception occurred
 		exception_code			: out std_logic_vector(7 downto 0);	-- Exception type
 		
 		-- Status and Control Registers
@@ -126,15 +126,20 @@ architecture rtl of TG68K_FPU is
 	
 	-- MC68881/68882 instruction timing (in clock cycles) for accuracy
 	signal instruction_cycles : integer range 0 to 255 := 0;
-	constant TIMING_FMOVE : integer := 4;      -- FMOVE FPn,FPm
-	constant TIMING_FADD : integer := 8;       -- FADD
-	constant TIMING_FSUB : integer := 8;       -- FSUB  
-	constant TIMING_FMUL : integer := 12;      -- FMUL
-	constant TIMING_FDIV : integer := 32;      -- FDIV (slower)
-	constant TIMING_FSQRT : integer := 48;     -- FSQRT (slowest)
-	constant TIMING_FCMP : integer := 6;       -- FCMP
-	constant TIMING_FABS : integer := 3;       -- FABS/FNEG (fast)
-	constant TIMING_TRANSCENDENTAL : integer := 64;  -- SIN/COS/LOG/EXP
+	-- Optimized timing constants for better performance
+	constant TIMING_FMOVE : integer := 2;      -- FMOVE FPn,FPm (optimized)
+	constant TIMING_FADD : integer := 4;       -- FADD (optimized)
+	constant TIMING_FSUB : integer := 4;       -- FSUB (optimized)
+	constant TIMING_FMUL : integer := 6;       -- FMUL (optimized)
+	constant TIMING_FDIV : integer := 16;      -- FDIV (optimized)
+	constant TIMING_FSQRT : integer := 24;     -- FSQRT (optimized)
+	constant TIMING_FCMP : integer := 3;       -- FCMP (optimized)
+	constant TIMING_FABS : integer := 1;       -- FABS/FNEG (fast operations)
+	constant TIMING_TRANSCENDENTAL : integer := 32;  -- SIN/COS/LOG/EXP (optimized)
+	
+	-- Performance optimization signals
+	signal fast_path_enabled : std_logic := '0';   -- Enable fast path for simple operations
+	signal operation_complexity : std_logic_vector(1 downto 0) := "00";  -- 00=simple, 01=medium, 10=complex, 11=very complex
 	
 	-- FSAVE/FRESTORE operation signals
 	signal fsave_counter : integer range 0 to 31 := 0;  -- Word counter for complete state frame
@@ -500,9 +505,10 @@ begin
 	-- fpu_data_out is now handled within the state machine process
 	
 	-- Dynamic FSAVE frame format determination process
-	fsave_format_process: process(fpu_state, fp_registers, fpcr, fpsr)
+	fsave_format_process: process(fpu_enable, fpu_state, fp_registers, fpcr, fpsr, fpu_busy_internal, fpu_exception)
 		variable any_register_nonzero : std_logic;
 		variable any_control_nonzero : std_logic;
+		variable has_pending_exception : std_logic;
 	begin
 		-- Check if any FP registers contain non-zero values
 		any_register_nonzero := '0';
@@ -512,27 +518,47 @@ begin
 			end if;
 		end loop;
 		
-		-- Check if control registers have meaningful state
+		-- Check if control registers have meaningful state (including accrued exceptions)
 		any_control_nonzero := '0';
 		if fpcr /= X"00000000" or fpsr /= X"00000000" then
 			any_control_nonzero := '1';
 		end if;
 		
-		-- Determine frame format based on FPU state
-		case fpu_state is
-			when FPU_EXECUTE | FPU_FETCH_SOURCE | FPU_MEMORY_READ | FPU_MEMORY_WRITE =>
-				-- FPU is actively executing - return BUSY frame if FSAVE called during execution
-				fsave_frame_format <= X"01";  -- Busy frame (4 bytes)
-				
-			when FPU_IDLE =>
-				-- FPU is enabled and idle - always return MC68882 IDLE frame
-				-- NULL frame (0x00) is only for disabled FPU, not idle state
-				fsave_frame_format <= X"60";  -- MC68882 IDLE frame (60 bytes)
-				
-			when others =>
-				-- For any other states, return IDLE frame (FPU is enabled)
-				fsave_frame_format <= X"60";  -- MC68882 IDLE frame (60 bytes)
-		end case;
+		-- Check for pending exceptions in FPSR
+		has_pending_exception := fpu_exception or fpsr(15) or fpsr(14) or fpsr(13) or fpsr(12) or fpsr(11) or fpsr(10) or fpsr(9) or fpsr(8);
+		
+		-- Determine frame format based on FPU state (MC68881/68882 compliant)
+		if fpu_enable = '0' then
+			-- FPU is disabled - return NULL frame
+			fsave_frame_format <= X"00";  -- NULL frame (4 bytes)
+		else
+			case fpu_state is
+				when FPU_EXECUTE | FPU_FETCH_SOURCE | FPU_MEMORY_READ | FPU_MEMORY_WRITE =>
+					-- FPU is actively executing - return BUSY frame 
+					fsave_frame_format <= X"01";  -- BUSY frame (4 bytes)
+					
+				when FPU_EXCEPTION_STATE =>
+					-- Exception pending - return BUSY frame to preserve exception state
+					fsave_frame_format <= X"01";  -- BUSY frame (4 bytes)
+					
+				when FPU_IDLE =>
+					-- FPU is enabled and idle
+					if has_pending_exception = '1' then
+						-- Have pending exception - must save full state
+						fsave_frame_format <= X"60";  -- MC68882 IDLE frame (60 bytes)
+					elsif any_register_nonzero = '1' or any_control_nonzero = '1' then
+						-- Have FPU state to preserve - use IDLE frame
+						fsave_frame_format <= X"60";  -- MC68882 IDLE frame (60 bytes)
+					else
+						-- FPU is enabled but clean state - minimal frame sufficient but use IDLE for compatibility
+						fsave_frame_format <= X"60";  -- MC68882 IDLE frame (60 bytes)
+					end if;
+					
+				when others =>
+					-- For any other states (FSAVE_WRITE, FRESTORE_READ, etc.), return IDLE frame
+					fsave_frame_format <= X"60";  -- MC68882 IDLE frame (60 bytes)
+			end case;
+		end if;
 	end process;
 
 	-- Instruction decode process - now uses decoder outputs
@@ -875,11 +901,55 @@ begin
 						      fpu_operation = OP_FLOG2 or fpu_operation = OP_FMOVECR or fpu_operation = OP_FMOD or
 						      fpu_operation = OP_FREM or fpu_operation = OP_FSCALE or fpu_operation = OP_FGETEXP or
 						      fpu_operation = OP_FGETMAN then
+								-- Performance optimization: Determine operation complexity
+								case fpu_operation is
+									when OP_FABS | OP_FNEG =>
+										operation_complexity <= "00";  -- Simple
+										fast_path_enabled <= '1';
+									when OP_FMOVE | OP_FCMP | OP_FTST =>
+										operation_complexity <= "00";  -- Simple
+										fast_path_enabled <= '1';
+									when OP_FADD | OP_FSUB =>
+										operation_complexity <= "01";  -- Medium
+										fast_path_enabled <= '0';
+									when OP_FMUL =>
+										operation_complexity <= "01";  -- Medium
+										fast_path_enabled <= '0';
+									when OP_FDIV | OP_FSQRT =>
+										operation_complexity <= "10";  -- Complex
+										fast_path_enabled <= '0';
+									when others =>
+										operation_complexity <= "11";  -- Very complex (transcendental)
+										fast_path_enabled <= '0';
+								end case;
+								
 								if fpu_operation = OP_FMOVECR then
 									-- FMOVECR - Move from constant ROM
 									rom_offset <= extension_word(6 downto 0);  -- ROM offset from extension word
 									rom_read_enable <= '1';
 									fpu_state <= FPU_WRITE_RESULT;  -- Skip fetch, go directly to write result
+								elsif fast_path_enabled = '1' and fpu_operation = OP_FABS then
+									-- Fast path for FABS - clear sign bit immediately
+									if to_integer(unsigned(decoder_source_reg)) <= 7 then
+										fp_registers(to_integer(unsigned(decoder_dest_reg))) <= '0' & fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 0);
+										fpu_state <= FPU_IDLE;
+										fpu_done <= '1';
+									else
+										fpu_state <= FPU_EXCEPTION_STATE;
+										fpu_exception <= '1';
+										exception_code_internal <= X"0C";
+									end if;
+								elsif fast_path_enabled = '1' and fpu_operation = OP_FNEG then
+									-- Fast path for FNEG - flip sign bit immediately
+									if to_integer(unsigned(decoder_source_reg)) <= 7 then
+										fp_registers(to_integer(unsigned(decoder_dest_reg))) <= (not fp_registers(to_integer(unsigned(decoder_source_reg)))(79)) & fp_registers(to_integer(unsigned(decoder_source_reg)))(78 downto 0);
+										fpu_state <= FPU_IDLE;
+										fpu_done <= '1';
+									else
+										fpu_state <= FPU_EXCEPTION_STATE;
+										fpu_exception <= '1';
+										exception_code_internal <= X"0C";
+									end if;
 								else
 									fpu_state <= FPU_FETCH_SOURCE;
 								end if;
