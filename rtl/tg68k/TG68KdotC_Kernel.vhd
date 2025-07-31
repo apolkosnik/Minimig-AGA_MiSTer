@@ -316,10 +316,11 @@ architecture logic of TG68KdotC_Kernel is
 	-- FPU Interface signals (CPU manages all memory operations)
 	signal fpu_cpu_data_in		: std_logic_vector(31 downto 0);
 	-- FSAVE-specific CPU signals
-	signal fsave_counter		: integer range 0 to 15 := 0;
-	signal fsave_60byte_decr	: bit := '0';  -- Special flag for FSAVE 60-byte decrement
-	signal fsave_frame_size		: integer range 4 to 60 := 60;  -- Dynamic frame size (4=NULL/BUSY, 60=IDLE)
+	signal fsave_counter		: integer range 0 to 54 := 0;  -- Increased for BUSY frames (216/4 = 54 longwords)
+	signal fsave_predecr_flag	: bit := '0';  -- Special flag for FSAVE predecrement by frame size
+	signal fsave_frame_size		: integer range 4 to 216 := 60;  -- Dynamic frame size (4=NULL, 60=IDLE, 216=BUSY)
 	signal fsave_frame_format	: std_logic_vector(7 downto 0) := X"60";  -- Frame format from FPU
+	signal fsave_frame_type		: std_logic_vector(1 downto 0) := "01";  -- 00=NULL, 01=IDLE, 10=BUSY
 	signal fsave_size_determined	: std_logic := '0';  -- Flag indicating frame size has been determined
 	signal fsave_base_address	: std_logic_vector(31 downto 0);
 	signal fsave_opcode_detected	: std_logic := '0';
@@ -519,7 +520,8 @@ ALU: TG68K_ALU
 			elsif rising_edge(clk) then
 				if clkena_lw = '1' then
 					-- Enable FPU during FPU microcode states OR when F-line instruction detected
-					if micro_state = fpu1 or micro_state = fpu_wait or micro_state = fpu_done or
+					if micro_state = fpu1 or micro_state = fpu2 or micro_state = fpu_wait or 
+					   micro_state = fpu_done or micro_state = fpu_fmovem or micro_state = fpu_fmovem_cr or
 					   (opcode(15 downto 12) = "1111" AND 
 					    (opcode(11 downto 9) = "001" OR opcode(8 downto 6) = "000")) then
 						fpu_enable_sig <= '1';
@@ -705,11 +707,14 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 -----------------------------------------------------------------------------
 -- Write Reg
 -----------------------------------------------------------------------------
-PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, movec_data, fpu_data_out, micro_state, opcode)
+PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, movec_data, fpu_data_out, micro_state, opcode, fsave_predecr_flag)
 	BEGIN
 		regin <= ALUout;
 		IF exec(save_memaddr)='1' THEN
 			regin <= memaddr;	
+		ELSIF exec(presub)='1' AND fsave_predecr_flag='1' THEN
+			-- FSAVE predecrement: write the frame-size decremented address back to register
+			regin <= memaddr_a;
 		ELSIF exec(get_ea_now)='1' AND ea_only='1' THEN
 			regin <= memaddr_a;	
 		ELSIF exec(from_USP)='1' THEN
@@ -1091,9 +1096,19 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				memaddr_a <= last_data_read;
 			END IF;	 
 		ELSIF set(presub)='1' THEN
-			IF fsave_60byte_decr = '1' THEN
-				-- Special case for FSAVE: decrement by 60 bytes
-				memaddr_a <= X"FFFFFFC4";  -- -60 in 32-bit two's complement
+			IF fsave_predecr_flag = '1' THEN
+				-- Special case for FSAVE: decrement current register value by frame size
+				-- Use ALU to calculate (reg_QA - frame_size) properly
+				CASE fsave_frame_size IS
+					WHEN 4 =>   -- NULL frame
+						memaddr_a <= reg_QA + X"FFFFFFFC";  -- Current register + (-4 in two's complement)
+					WHEN 60 =>  -- IDLE frame  
+						memaddr_a <= reg_QA + X"FFFFFFC4";  -- Current register + (-60 in two's complement)
+					WHEN 216 => -- BUSY frame
+						memaddr_a <= reg_QA + X"FFFFFF28";  -- Current register + (-216 in two's complement)
+					WHEN OTHERS =>
+						memaddr_a <= reg_QA + X"FFFFFFC4";  -- Default to IDLE frame size
+				END CASE;
 			ELSIF set(longaktion)='1' THEN	
 				memaddr_a(4 downto 0) <= "11100";
 			ELSIF datatype="00" AND set(use_SP)='0' THEN
@@ -1204,7 +1219,16 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 		setopcode <= '0';
 		setendOPC <= '0';
 		setinterrupt <= '0';
-		IF setstate="00" AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0'THEN
+		-- Special endOPC generation for FPU instruction completion
+		IF FPU_Enable = 1 AND micro_state = fpu_done AND next_micro_state = idle THEN
+			-- Force endOPC for FPU instruction completion to prevent hanging
+			setendOPC <= '1';
+			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1' THEN
+				setinterrupt <= '1';
+			ELSIF stop='0' THEN
+				setopcode <= '1';
+			END IF;
+		ELSIF setstate="00" AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0'THEN
 			setendOPC <= '1';
 			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1' THEN
 				setinterrupt <= '1';
@@ -1431,9 +1455,25 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				-- FPU operations are now handled via CPU-managed FSAVE/FRESTORE
 				-- No separate memory interface needed
 				
-				-- FPU CPU Data Interface - Convert 16-bit CPU data to 32-bit FPU data with proper alignment
-				-- For 16-bit CPU bus, properly align data for FPU 32-bit interface
-				fpu_cpu_data_in <= X"0000" & data_in;
+				-- FPU CPU Data Interface - Provide correct data source to FPU
+				-- For register direct operations (FTST.B D1, FMOVE.L D0,FP1), use register file
+				-- For memory operations, use data bus
+				IF (micro_state = fpu1 OR micro_state = fpu_wait) AND 
+				   opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND
+				   opcode(8 downto 6) = "000" AND opcode(5 downto 3) = "000" THEN
+					-- FPU instruction with data register direct source (Dn)
+					-- Use register file output instead of data bus
+					fpu_cpu_data_in <= reg_QA;  -- D0-D7 register value
+				ELSIF (micro_state = fpu1 OR micro_state = fpu_wait) AND
+				      opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND
+				      opcode(8 downto 6) = "000" AND opcode(5 downto 3) = "001" THEN
+					-- FPU instruction with address register direct source (An)
+					-- Use register file output instead of data bus  
+					fpu_cpu_data_in <= reg_QA;  -- A0-A7 register value
+				ELSE
+					-- Memory or other operations - use data bus
+					fpu_cpu_data_in <= X"0000" & data_in;
+				END IF;
 				
 				-- FRESTORE data path: Send memory read data to FPU only during FRESTORE operations
 				IF micro_state = fpu1 AND opcode(8 downto 6) = "101" THEN
@@ -1602,8 +1642,6 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 					FlagsSR(2) <= fpu_fpsr(26);  -- Z (zero)
 					FlagsSR(1) <= '0';           -- V (overflow - not used by FTST)
 					FlagsSR(0) <= '0';           -- C (carry - not used by FTST)
-				ELSE
-					FlagsSR(3) <= '0';
 				END IF;
 			END IF;
 		END IF;	
@@ -2258,7 +2296,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								trapmake <= '1';
 							END IF;
 							IF opcode(7)='1' OR cpu(1)='1' THEN
-								IF (nextpass='1' OR opcode(5 downto 4)="00") AND exec(opcCHK)='0' AND micro_state=idle THEN
+								IF (nextpass='1' OR opcode(5 downto 4)="00") AND exec(opcCHK)='0' AND micro_state=idle AND 
+								   NOT (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001") THEN
 									set_exec(opcCHK) <= '1';
 								END IF;
 								ea_build_now <= '1';
@@ -3372,8 +3411,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						IF opcode(11 downto 9)/="000" THEN
 							-- Check if this is FPU FSAVE (coprocessor ID = 001)
 							IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
-								-- FSAVE for MC68881/68882 - use CPU-managed FSAVE
-								next_micro_state <= fpu2;
+								-- FSAVE for MC68881/68882 - CPU manages memory, FPU provides data
+								IF decodeOPC='1' THEN
+									next_micro_state <= fpu2;
+								END IF;
 							ELSIF SVmode='1' THEN
 								-- Other coprocessors (002-007) not present in this system
 								-- Generate F-line exception for coprocessor not present
@@ -3397,8 +3438,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						IF opcode(11 downto 9)/="000" THEN
 							-- Check if this is FPU FSAVE (coprocessor ID = 001)
 							IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
-								-- FSAVE for MC68881/68882 - use CPU-managed FSAVE
-								next_micro_state <= fpu2;
+								-- FSAVE for MC68881/68882 - CPU manages memory, FPU provides data
+								IF decodeOPC='1' THEN
+									next_micro_state <= fpu2;
+								END IF;
 							ELSIF SVmode='1' THEN
 								-- Other coprocessors (002-007) not present in this system
 								-- Generate F-line exception for coprocessor not present
@@ -3426,7 +3469,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							-- Check if this is FPU FRESTORE (coprocessor ID = 001)
 							IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
 								-- FRESTORE for MC68881/68882 - route to FPU
-								next_micro_state <= fpu1;
+								IF decodeOPC='1' THEN
+									next_micro_state <= fpu1;
+								END IF;
 							ELSIF SVmode='1' THEN
 								-- Other coprocessors (002-007) not present in this system
 								-- Generate F-line exception for coprocessor not present
@@ -3446,7 +3491,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							-- Check if this is FPU FRESTORE (coprocessor ID = 001)
 							IF FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
 								-- FRESTORE for MC68881/68882 - route to FPU
-								next_micro_state <= fpu1;
+								IF decodeOPC='1' THEN
+									next_micro_state <= fpu1;
+								END IF;
 							ELSIF SVmode='1' THEN
 								-- Other coprocessors (002-007) not present in this system
 								-- Generate F-line exception for coprocessor not present
@@ -4359,9 +4406,21 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- Handle addressing modes based on EA field in bits 5:0
 						
 						-- For source operand addressing (typically bits 5:0 in FPU instructions)
-						-- Check for predecrement mode -(An)
-						IF opcode(5 downto 3) = "100" THEN
-							-- Predecrement addressing mode
+						-- Handle different addressing modes
+						IF opcode(5 downto 3) = "000" THEN
+							-- Data register direct mode (Dn) - FTST.B D1, FMOVE.L D0,FP1, etc.
+							-- Set up register file to read the specified data register
+							datatype <= "10";  -- Longword (even for FTST.B, read full longword)
+							-- rf_source_addr is handled in the main combinational process
+							-- Don't set memory access signals - this is register-to-register
+							-- FPU will extract the needed format (byte/word/long) from the longword
+						ELSIF opcode(5 downto 3) = "001" THEN
+							-- Address register direct mode (An) 
+							datatype <= "10";  -- Longword
+							-- rf_source_addr is handled in the main combinational process
+							-- Don't set memory access signals - this is register-to-register
+						ELSIF opcode(5 downto 3) = "100" THEN
+							-- Predecrement addressing mode -(An)
 							set(presub) <= '1';
 							setstackaddr <= '1';
 							IF opcode(2 downto 0) = "111" THEN
@@ -4395,6 +4454,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
 									next_micro_state <= fpu1;  -- Continue for more reads
 								ELSE
+									setstate <= "00";  -- Ensure proper endOPC condition
 									next_micro_state <= fpu_done;  -- All done
 								END IF;
 								
@@ -4409,6 +4469,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
 									next_micro_state <= fpu1;  -- Continue for more reads
 								ELSE
+									setstate <= "00";  -- Ensure proper endOPC condition
 									next_micro_state <= fpu_done;  -- All done
 								END IF;
 								
@@ -4422,6 +4483,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
 									next_micro_state <= fpu1;  -- Continue for more reads
 								ELSE
+									setstate <= "00";  -- Ensure proper endOPC condition
 									next_micro_state <= fpu_done;  -- All done
 								END IF;
 								
@@ -4436,6 +4498,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
 										next_micro_state <= fpu1;  -- Continue for more reads
 									ELSE
+										setstate <= "00";  -- Ensure proper endOPC condition
 										next_micro_state <= fpu_done;  -- All done
 									END IF;
 								END IF;
@@ -4452,6 +4515,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
 										next_micro_state <= fpu1;  -- Continue for more reads
 									ELSE
+										setstate <= "00";  -- Ensure proper endOPC condition
 										next_micro_state <= fpu_done;  -- All done
 									END IF;
 								END IF;
@@ -4469,6 +4533,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 											IF fsave_counter < 14 THEN
 												next_micro_state <= fpu1;  -- Continue for more reads
 											ELSE
+												setstate <= "00";  -- Ensure proper endOPC condition
 												next_micro_state <= fpu_done;  -- All done
 											END IF;
 										END IF;
@@ -4485,17 +4550,20 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 											IF fsave_counter < 14 THEN
 												next_micro_state <= fpu1;  -- Continue for more reads
 											ELSE
+												setstate <= "00";  -- Ensure proper endOPC condition
 												next_micro_state <= fpu_done;  -- All done
 											END IF;
 										END IF;
 										
 									WHEN OTHERS =>
 										-- Invalid addressing modes (PC-relative not allowed)
+										setstate <= "00";  -- Ensure proper endOPC condition
 										next_micro_state <= fpu_done;
 								END CASE;
 								
 							WHEN OTHERS =>
 								-- Invalid addressing modes (Dn, An not allowed for FRESTORE)
+								setstate <= "00";  -- Ensure proper endOPC condition
 								next_micro_state <= fpu_done;
 						END CASE;
 					ELSIF opcode(8 downto 6) = "110" THEN
@@ -4511,6 +4579,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							next_micro_state <= fpu_fmovem_cr;      -- Control register FMOVEM state
 						ELSIF sndOPC(7 downto 0) = "00000000" THEN
 							-- No registers selected - operation complete
+							setstate <= "00";  -- Ensure proper endOPC condition
 							next_micro_state <= fpu_done;
 						ELSE
 							-- FP register FMOVEM
@@ -4536,11 +4605,23 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					CASE opcode(5 downto 3) IS
 						WHEN "010" =>  -- (An) - Address Register Indirect
 							set(get_ea_now) <= '1';
-							setstate <= "11";  -- Memory write
 							fpu_data_request <= '1';  -- Request data from FPU
 							IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
+								setstate <= "11";  -- Memory write
 								next_micro_state <= fpu2;  -- Continue for more writes
+							ELSIF (fsave_counter + 1) * 4 = fsave_frame_size THEN
+								-- This is the last write
+								IF state = "00" THEN
+									-- Ready to initiate last write
+									setstate <= "11";           -- Final memory write
+									next_micro_state <= fpu2;   -- Stay in fpu2 to monitor completion
+								ELSE
+									-- Last write is in progress, wait for completion
+									next_micro_state <= fpu2;   -- Keep waiting
+								END IF;
 							ELSE
+								-- All writes complete, go to idle
+								setstate <= "00";  -- Ensure proper endOPC condition
 								next_micro_state <= idle;   -- All done
 							END IF;
 							
@@ -4550,24 +4631,37 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							IF opcode(2 downto 0) = "111" THEN
 								set(use_SP) <= '1';  -- Use A7 if (A7)+
 							END IF;
-							setstate <= "11";  -- Memory write
 							fpu_data_request <= '1';  -- Request data from FPU
 							IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
+								setstate <= "11";  -- Memory write
 								next_micro_state <= fpu2;  -- Continue for more writes
+							ELSIF (fsave_counter + 1) * 4 = fsave_frame_size THEN
+								-- This is the last write
+								IF state = "00" THEN
+									-- Ready to initiate last write
+									setstate <= "11";           -- Final memory write
+									next_micro_state <= fpu2;   -- Stay in fpu2 to monitor completion
+								ELSE
+									-- Last write is in progress, wait for completion
+									next_micro_state <= fpu2;   -- Keep waiting
+								END IF;
 							ELSE
+								-- All writes complete, go to idle
+								setstate <= "00";  -- Ensure proper endOPC condition
 								next_micro_state <= idle;   -- All done
 							END IF;
 							
 						WHEN "100" =>  -- -(An) - Address Register Indirect with Predecrement
 							IF fsave_counter = 0 THEN
-								-- First operation: Decrement An by 60 bytes and update register
-								set(presub) <= '1';             -- Predecrement (60 bytes via fsave_60byte_decr)
+								-- First operation: Decrement An by frame size and update register
+								set(presub) <= '1';             -- Predecrement (frame size via fsave_predecr_flag)
 								IF opcode(2 downto 0) = "111" THEN
 									set(use_SP) <= '1';         -- Use stack pointer if -(A7)
 									setstackaddr <= '1';        -- Set dest address to A7
 								END IF;
-								set_exec(save_memaddr) <= '1';  -- Save the decremented address for later use
-								set_exec(Regwrena) <= '1';      -- Update An with decremented value
+								-- Let ALU handle the predecrement calculation and register update
+								set(Regwrena) <= '1';          -- Update An with decremented value (immediate execution)
+								set(write_reg) <= '1';          -- Enable register write
 								
 								-- Write first longword at the decremented address
 								setstate <= "11";               -- Memory write
@@ -4578,12 +4672,24 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								set(mem_addsub) <= '1';         -- Use address calculation with offset
 								
 								-- Write longword at calculated address
-								setstate <= "11";               -- Memory write
 								fpu_data_request <= '1';        -- Request data from FPU
 								
 								IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
+									setstate <= "11";               -- Memory write
 									next_micro_state <= fpu2;   -- More writes to do
+								ELSIF (fsave_counter + 1) * 4 = fsave_frame_size THEN
+									-- This is the last write
+									IF state = "00" THEN
+										-- Ready to initiate last write
+										setstate <= "11";           -- Final memory write
+										next_micro_state <= fpu2;   -- Stay in fpu2 to monitor completion
+									ELSE
+										-- Last write is in progress, wait for completion
+										next_micro_state <= fpu2;   -- Keep waiting
+									END IF;
 								ELSE
+									-- All writes complete, go to idle
+									setstate <= "00";  -- Ensure proper endOPC condition
 									next_micro_state <= idle;    -- All done
 								END IF;
 							END IF;
@@ -4597,9 +4703,21 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								-- Subsequent writes: EA already calculated, use it directly
 								setstate <= "11";  -- Memory write
 								fpu_data_request <= '1';  -- Request data from FPU
-								IF fsave_counter < 14 THEN
+								IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
 									next_micro_state <= fpu2;  -- Continue for more writes
+								ELSIF (fsave_counter + 1) * 4 = fsave_frame_size THEN
+									-- This is the last write
+									IF state = "00" THEN
+										-- Ready to initiate last write
+										setstate <= "11";           -- Final memory write
+										next_micro_state <= fpu2;   -- Stay in fpu2 to monitor completion
+									ELSE
+										-- Last write is in progress, wait for completion
+										next_micro_state <= fpu2;   -- Keep waiting
+									END IF;
 								ELSE
+									-- All writes complete, go to idle
+									setstate <= "00";  -- Ensure proper endOPC condition
 									next_micro_state <= idle;   -- All done
 								END IF;
 							END IF;
@@ -4614,9 +4732,21 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								-- Subsequent writes: EA already calculated, use it directly
 								setstate <= "11";  -- Memory write
 								fpu_data_request <= '1';  -- Request data from FPU
-								IF fsave_counter < 14 THEN
+								IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
 									next_micro_state <= fpu2;  -- Continue for more writes
+								ELSIF (fsave_counter + 1) * 4 = fsave_frame_size THEN
+									-- This is the last write
+									IF state = "00" THEN
+										-- Ready to initiate last write
+										setstate <= "11";           -- Final memory write
+										next_micro_state <= fpu2;   -- Stay in fpu2 to monitor completion
+									ELSE
+										-- Last write is in progress, wait for completion
+										next_micro_state <= fpu2;   -- Keep waiting
+									END IF;
 								ELSE
+									-- All writes complete, go to idle
+									setstate <= "00";  -- Ensure proper endOPC condition
 									next_micro_state <= idle;   -- All done
 								END IF;
 							END IF;
@@ -4634,7 +4764,19 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 										fpu_data_request <= '1';  -- Request data from FPU
 										IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
 											next_micro_state <= fpu2;  -- Continue for more writes
+										ELSIF (fsave_counter + 1) * 4 = fsave_frame_size THEN
+											-- This is the last write
+											IF state = "00" THEN
+												-- Ready to initiate last write
+												setstate <= "11";           -- Final memory write
+												next_micro_state <= fpu2;   -- Stay in fpu2 to monitor completion
+											ELSE
+												-- Last write is in progress, wait for completion
+												next_micro_state <= fpu2;   -- Keep waiting
+											END IF;
 										ELSE
+											-- All writes complete, go to idle
+											setstate <= "00";  -- Ensure proper endOPC condition
 											next_micro_state <= idle;   -- All done
 										END IF;
 									END IF;
@@ -4651,13 +4793,26 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 										fpu_data_request <= '1';  -- Request data from FPU
 										IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
 											next_micro_state <= fpu2;  -- Continue for more writes
+										ELSIF (fsave_counter + 1) * 4 = fsave_frame_size THEN
+											-- This is the last write
+											IF state = "00" THEN
+												-- Ready to initiate last write
+												setstate <= "11";           -- Final memory write
+												next_micro_state <= fpu2;   -- Stay in fpu2 to monitor completion
+											ELSE
+												-- Last write is in progress, wait for completion
+												next_micro_state <= fpu2;   -- Keep waiting
+											END IF;
 										ELSE
+											-- All writes complete, go to idle
+											setstate <= "00";  -- Ensure proper endOPC condition
 											next_micro_state <= idle;   -- All done
 										END IF;
 									END IF;
 									
 								WHEN OTHERS =>
 									-- Invalid addressing modes (PC-relative not allowed)
+									-- Don't leave setstate in bad state
 									next_micro_state <= idle;
 							END CASE;
 							
@@ -4689,12 +4844,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									trap_fpu_operr <= '1';
 							END CASE;
 							trapmake <= '1';
+							setstate <= "00";  -- Ensure proper endOPC condition
 							next_micro_state <= idle;
 						ELSE
+							setstate <= "00";  -- Ensure proper endOPC condition for normal completion
 							next_micro_state <= fpu_done;
 						END IF;
 					ELSE
 						-- FPU operations now handled immediately via CPU-managed interface
+						setstate <= "00";  -- Ensure proper endOPC condition for immediate completion
 						next_micro_state <= fpu_done;
 					END IF;
 					
@@ -4706,11 +4864,23 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF opcode(15 downto 6) = "1111001001" AND exec(store_ea_data) = '1' THEN
 						-- FSAVE - continue with memory writes after EA calculation is complete
 						datatype <= "10";  -- Longword access
-						setstate <= "11";  -- Memory write
 						fpu_data_request <= '1';  -- Request data from FPU
 						IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
+							setstate <= "11";  -- Memory write
 							next_micro_state <= fpu_done;  -- Continue for more writes
+						ELSIF (fsave_counter + 1) * 4 = fsave_frame_size THEN
+							-- This is the last write
+							IF state = "00" THEN
+								-- Ready to initiate last write
+								setstate <= "11";           -- Final memory write
+								next_micro_state <= fpu_done;   -- Stay in fpu_done to monitor completion
+							ELSE
+								-- Last write is in progress, wait for completion
+								next_micro_state <= fpu_done;   -- Keep waiting
+							END IF;
 						ELSE
+							-- All writes complete, go to idle
+							setstate <= "00";  -- Ensure proper endOPC condition
 							next_micro_state <= idle;       -- All done
 						END IF;
 					-- Check if this is FRESTORE with complex addressing mode that needed EA calculation
@@ -4718,10 +4888,23 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					      opcode(8 downto 6) = "101" AND exec(store_ea_data) = '1' THEN
 						-- FRESTORE - continue with memory reads after EA calculation is complete
 						datatype <= "10";  -- Longword access
-						setstate <= "10";  -- Memory read
 						IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
+							setstate <= "10";  -- Memory read
 							next_micro_state <= fpu1;  -- Continue for more reads in fpu1 state
+						ELSIF (fsave_counter + 1) * 4 = fsave_frame_size THEN
+							-- This is the last read
+							IF state = "00" THEN
+								-- Ready to initiate last read
+								setstate <= "10";           -- Final memory read
+								next_micro_state <= fpu_done;   -- Stay in fpu_done to monitor completion
+							ELSE
+								-- Last read is in progress, wait for completion
+								next_micro_state <= fpu_done;   -- Keep waiting
+							END IF;
 						ELSE
+							-- All reads complete, go to idle
+							setstate <= "00";  -- Ensure proper endOPC condition
+							set_rot_cnt <= "000001";  -- CRITICAL: Reset rot_cnt for endOPC generation
 							next_micro_state <= idle;   -- All done
 						END IF;
 					-- Handle FMOVE control register to data register (FMOVE.L FPCR,Dn)
@@ -4730,9 +4913,22 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- This is FMOVE FPcr,Dn - set register write enable
 						set(Regwrena) <= '1';
 						datatype <= "10";  -- Long word (32-bit control register)
+						-- CRITICAL FIX: Clear all signals that could block endOPC generation
+						setnextpass <= '0';           -- Clear nextpass flag that blocks endOPC
+						setstate <= "00";  -- Ensure proper endOPC condition
+						set_rot_cnt <= "000001";  -- CRITICAL: Reset rot_cnt for endOPC generation
 						next_micro_state <= idle;
 					ELSE
-						next_micro_state <= idle;
+						-- Default case for simple FPU operations (FTST, FMOVE, arithmetic operations)
+						-- Reset FPU interface to prevent conflicts with subsequent CPU instructions
+						fpu_data_request <= '0';      -- Clear FPU data request
+						fmovem_data_request <= '0';   -- Clear FMOVEM request
+						fmovem_data_write <= '0';     -- Clear FMOVEM write
+						-- CRITICAL FIX: Clear all signals that could block endOPC generation
+						setnextpass <= '0';           -- Clear nextpass flag that blocks endOPC
+						setstate <= "00";             -- Ensure proper endOPC condition for all FPU operations
+						set_rot_cnt <= "000001";      -- CRITICAL: Reset rot_cnt for endOPC generation
+						next_micro_state <= idle;     -- Return to idle for next instruction
 					END IF;
 					
 				WHEN fpu_fmovem =>
@@ -4788,6 +4984,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							fmovem_active <= '0';
 							fmovem_data_request <= '0';
 							fmovem_data_write <= '0';
+							setstate <= "00";  -- Ensure proper endOPC condition
 							next_micro_state <= fpu_done;
 						END IF;
 					ELSE
@@ -4800,6 +4997,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							fmovem_active <= '0';
 							fmovem_data_request <= '0';
 							fmovem_data_write <= '0';
+							setstate <= "00";  -- Ensure proper endOPC condition
 							next_micro_state <= fpu_done;
 						END IF;
 					END IF;
@@ -4853,6 +5051,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						ELSE
 							-- All control registers processed
 							fmovem_active <= '0';
+							setstate <= "00";  -- Ensure proper endOPC condition
 							next_micro_state <= fpu_done;
 						END IF;
 					ELSE
@@ -4863,10 +5062,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						ELSE
 							-- All control registers processed
 							fmovem_active <= '0';
+							setstate <= "00";  -- Ensure proper endOPC condition
 							next_micro_state <= fpu_done;
 						END IF;
 					END IF;
 	
+				WHEN idle =>
+					-- Idle state - ready for next instruction
+					-- Default routing is handled by the logic at lines 1710-1717
+					-- This case ensures proper state machine handling when in idle
+					NULL;  -- Let default next_micro_state assignment handle instruction routing
+					
 				WHEN OTHERS => NULL;
 			END CASE;
 	END PROCESS;  -- End of main decode process that started at line 1581
@@ -4880,7 +5086,7 @@ BEGIN
 		IF Reset='1' THEN
 			micro_state <= ld_nn;
 			fsave_counter <= 0;
-			fsave_60byte_decr <= '0';
+			fsave_predecr_flag <= '0';
 			fsave_frame_size <= 60;
 			fsave_frame_format <= X"60";
 			fsave_size_determined <= '0';
@@ -4891,23 +5097,37 @@ BEGIN
 			-- Handle FSAVE/FRESTORE counter and control signals
 			
 			-- FSAVE handling - support all addressing modes
-			IF next_micro_state = fpu2 AND opcode(15 downto 6) = "1111001001" AND 
-			   fsave_counter = 0 THEN
-				-- Entering FSAVE for first time with any addressing mode
-				-- Only enable 60-byte decrement for predecrement modes
+			-- Set fsave_predecr_flag BEFORE transitioning to fpu2 to avoid race condition
+			IF micro_state = idle AND opcode(15 downto 9) = "1111001" AND opcode(8 downto 6) = "100" AND 
+			   next_micro_state = fpu2 AND fsave_counter = 0 THEN
+				-- About to enter FSAVE for first time with any addressing mode
+				-- Set 60-byte decrement flag for predecrement modes BEFORE state transition
 				IF opcode(5 downto 3) = "100" THEN
-					fsave_60byte_decr <= '1';
+					fsave_predecr_flag <= '1';
 				END IF;
-			ELSIF (micro_state = fpu2 OR micro_state = fpu_done) AND state = "11" AND setstate = "00" THEN
+			ELSIF (micro_state = fpu2 OR micro_state = fpu_done) AND state = "00" THEN
 				-- Memory write completed for FSAVE (in either fpu2 or fpu_done state)
 				
 				-- Frame size determination on first write
 				IF fsave_counter = 0 AND fsave_size_determined = '0' THEN
 					-- First write: get frame format from FPU and determine size
-					-- FPU should provide frame format in upper byte of first longword
-					-- For now, assume FPU provides IDLE frames (can be enhanced later)
-					fsave_frame_format <= X"60";  -- MC68882 IDLE frame
-					fsave_frame_size <= 60;       -- 60 bytes = 15 longwords
+					-- Query FPU for current state to determine appropriate frame type
+					IF fpu_busy = '1' THEN
+						-- FPU is busy executing an operation - save BUSY frame
+						fsave_frame_format <= X"D8";  -- MC68882 BUSY frame ($D8 = version 13, BUSY)
+						fsave_frame_size <= 216;      -- 216 bytes = 54 longwords  
+						fsave_frame_type <= "10";     -- BUSY frame type
+					ELSIF fpu_exception = '1' OR fpu_fpsr /= X"00000000" THEN
+						-- FPU has exceptions or non-zero state - save IDLE frame
+						fsave_frame_format <= X"60";  -- MC68882 IDLE frame ($60 = version 6, IDLE)
+						fsave_frame_size <= 60;       -- 60 bytes = 15 longwords
+						fsave_frame_type <= "01";     -- IDLE frame type
+					ELSE
+						-- FPU is in reset state - save NULL frame
+						fsave_frame_format <= X"18";  -- NULL frame ($18 = version 1, NULL)
+						fsave_frame_size <= 4;        -- 4 bytes = 1 longword
+						fsave_frame_type <= "00";     -- NULL frame type
+					END IF;
 					fsave_size_determined <= '1';
 				END IF;
 				
@@ -4920,8 +5140,12 @@ BEGIN
 					fsave_size_determined <= '0';
 				END IF;
 				
-				-- Clear single-use signals after first write
-				fsave_60byte_decr <= '0';
+				-- Clear single-use signals after register write completes for predecrement
+				-- Only clear fsave_predecr_flag after both memory write AND register write complete
+				IF opcode(5 downto 3) /= "100" OR fsave_counter > 0 THEN
+					-- Clear flag for non-predecrement modes immediately, or for predecrement after first cycle
+					fsave_predecr_flag <= '0';
+				END IF;
 			END IF;
 			
 			-- FRESTORE handling
@@ -4934,15 +5158,37 @@ BEGIN
 					-- First read: analyze frame format from data_read
 					fsave_frame_format <= data_read(31 downto 24);  -- Frame format in upper byte
 					CASE data_read(31 downto 24) IS
-						WHEN X"00" | X"01" =>
-							-- NULL or BUSY frame = 4 bytes (1 longword only)
+						WHEN X"18" =>
+							-- NULL frame = 4 bytes (1 longword only)
 							fsave_frame_size <= 4;
+							fsave_frame_type <= "00";     -- NULL frame type
 						WHEN X"60" =>
 							-- MC68882 IDLE frame = 60 bytes (15 longwords)
 							fsave_frame_size <= 60;
+							fsave_frame_type <= "01";     -- IDLE frame type
+						WHEN X"D8" =>
+							-- MC68882 BUSY frame = 216 bytes (54 longwords)
+							fsave_frame_size <= 216;
+							fsave_frame_type <= "10";     -- BUSY frame type
 						WHEN OTHERS =>
-							-- Default to MC68882 IDLE frame for unknown formats
-							fsave_frame_size <= 60;
+							-- Check frame type by format bits
+							IF data_read(27 downto 24) = X"8" THEN
+								-- Format $XX18 = NULL frame (check lower nibble = 8)
+								fsave_frame_size <= 4;
+								fsave_frame_type <= "00";
+							ELSIF data_read(31 downto 28) /= X"0" AND data_read(27 downto 24) = X"8" THEN
+								-- Format $XX18 where XX != 0 = IDLE frame  
+								fsave_frame_size <= 60;
+								fsave_frame_type <= "01";
+							ELSIF data_read(31 downto 28) /= X"0" AND data_read(27 downto 24) = X"4" THEN
+								-- Format $XXB4 = BUSY frame (lower nibble = 4, upper nibble = B)
+								fsave_frame_size <= 216;
+								fsave_frame_type <= "10";
+							ELSE
+								-- Default to IDLE frame for unknown formats
+								fsave_frame_size <= 60;
+								fsave_frame_type <= "01";
+							END IF;
 					END CASE;
 					fsave_size_determined <= '1';
 				END IF;
@@ -4964,7 +5210,7 @@ BEGIN
 			-- Reset counter when returning to idle
 			IF micro_state = idle THEN
 				fsave_counter <= 0;
-				fsave_60byte_decr <= '0';
+				fsave_predecr_flag <= '0';
 				fsave_size_determined <= '0';
 			END IF;
 		END IF;

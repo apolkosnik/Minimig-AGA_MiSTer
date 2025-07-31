@@ -625,15 +625,28 @@ begin
 				case fpu_state is
 					when FPU_IDLE =>
 						fpu_data_out <= (others => '0');
-						fpu_done <= '0';
+						-- Don't reset fpu_done here - let it hold until next operation starts
 						fpu_exception <= '0';
 						
-						if fpu_enable = '1' then
+						-- Check for direct CPU requests (bypassing decode)
+						if fsave_data_request = '1' then
+							-- CPU is requesting FSAVE data - enter FSAVE state directly
+							fpu_done <= '0';  -- Reset completion signal
+							fsave_counter <= 0;
+							fpu_state <= FPU_FSAVE_WRITE;
+						elsif frestore_data_write = '1' then
+							-- CPU is writing FRESTORE data - enter FRESTORE state directly
+							fpu_done <= '0';  -- Reset completion signal  
+							fsave_counter <= 0;
+							frestore_frame_format <= (others => '0');
+							fpu_state <= FPU_FRESTORE_READ;
+						elsif fpu_enable = '1' then
 							fpu_state <= FPU_DECODE;
 						end if;
 					
 					when FPU_DECODE =>
 						fpu_data_out <= (others => '0');
+						fpu_done <= '0';  -- Reset completion signal at start of new operation
 						-- Reset timeout counter at start of decode
 						timeout_counter <= 0;
 						-- Update FPIAR with current instruction address at start of instruction
@@ -1578,26 +1591,54 @@ begin
 								-- Clear previous condition codes first
 								fpsr(31 downto 28) <= "0000";
 								
-								-- Analyze the source operand (alu_operand_a)
-								if alu_operand_a(78 downto 64) = "111111111111111" then
-									-- Infinity or NaN
-									if alu_operand_a(63) = '1' and alu_operand_a(62 downto 0) = (62 downto 0 => '0') then
-										-- Infinity
-										fpsr(29) <= '1';  -- I (Infinity) bit
-										if alu_operand_a(79) = '1' then
-											fpsr(31) <= '1';  -- N (Negative) bit for -Infinity
+								-- Choose correct operand based on source addressing mode
+								-- For CPU registers (ea_mode="000"), use alu_operand_b
+								-- For FP registers, use alu_operand_a
+								if ea_mode = "000" then
+									-- Test CPU register data (alu_operand_b)
+									if alu_operand_b(78 downto 64) = "111111111111111" then
+										-- Infinity or NaN
+										if alu_operand_b(63) = '1' and alu_operand_b(62 downto 0) = (62 downto 0 => '0') then
+											-- Infinity
+											fpsr(29) <= '1';  -- I (Infinity) bit
+											if alu_operand_b(79) = '1' then
+												fpsr(31) <= '1';  -- N (Negative) bit for -Infinity
+											end if;
+										else
+											-- NaN
+											fpsr(28) <= '1';  -- NaN bit
 										end if;
+									elsif alu_operand_b(78 downto 64) = (14 downto 0 => '0') and alu_operand_b(63 downto 0) = (63 downto 0 => '0') then
+										-- Zero
+										fpsr(30) <= '1';  -- Z (Zero) bit
 									else
-										-- NaN
-										fpsr(28) <= '1';  -- NaN bit
+										-- Normal number - check sign
+										if alu_operand_b(79) = '1' then
+											fpsr(31) <= '1';  -- N (Negative) bit
+										end if;
 									end if;
-								elsif alu_operand_a(78 downto 64) = (14 downto 0 => '0') and alu_operand_a(63 downto 0) = (63 downto 0 => '0') then
-									-- Zero
-									fpsr(30) <= '1';  -- Z (Zero) bit
 								else
-									-- Normal number - check sign
-									if alu_operand_a(79) = '1' then
-										fpsr(31) <= '1';  -- N (Negative) bit
+									-- Test FP register data (alu_operand_a)
+									if alu_operand_a(78 downto 64) = "111111111111111" then
+										-- Infinity or NaN
+										if alu_operand_a(63) = '1' and alu_operand_a(62 downto 0) = (62 downto 0 => '0') then
+											-- Infinity
+											fpsr(29) <= '1';  -- I (Infinity) bit
+											if alu_operand_a(79) = '1' then
+												fpsr(31) <= '1';  -- N (Negative) bit for -Infinity
+											end if;
+										else
+											-- NaN
+											fpsr(28) <= '1';  -- NaN bit
+										end if;
+									elsif alu_operand_a(78 downto 64) = (14 downto 0 => '0') and alu_operand_a(63 downto 0) = (63 downto 0 => '0') then
+										-- Zero
+										fpsr(30) <= '1';  -- Z (Zero) bit
+									else
+										-- Normal number - check sign
+										if alu_operand_a(79) = '1' then
+											fpsr(31) <= '1';  -- N (Negative) bit
+										end if;
 									end if;
 								end if;
 								
