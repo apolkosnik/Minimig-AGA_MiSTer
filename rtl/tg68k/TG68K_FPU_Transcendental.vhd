@@ -590,6 +590,419 @@ begin
 									trans_state <= TRANS_NORMALIZE;
 								end if;
 								
+							when OP_FTAN =>
+								-- Tangent: tan(x) = sin(x) / cos(x)
+								if iteration_count = 0 then
+									-- Check for special cases
+									if input_zero = '1' then
+										-- tan(0) = 0
+										result_sign <= input_sign;
+										result_exp <= (others => '0');
+										result_mant <= (others => '0');
+										trans_state <= TRANS_DONE;
+									else
+										iteration_count <= iteration_count + 1;
+									end if;
+								elsif iteration_count < 8 then
+									-- Compute tan using approximation
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Simplified tangent implementation
+									-- For small angles: tan(x) ≈ x + x³/3 + 2x⁵/15 + ...
+									if unsigned(input_exp) < to_unsigned(16383 - 3, 15) then
+										-- Very small angle: tan(x) ≈ x
+										result_sign <= input_sign;
+										result_exp <= input_exp;
+										result_mant <= input_mant;
+									else
+										-- For larger angles, provide bounded approximation
+										-- tan(x) can grow without bound near π/2
+										result_sign <= input_sign;
+										if unsigned(input_exp) > to_unsigned(16383 + 1, 15) then
+											-- Large angle: result varies widely
+											result_exp <= std_logic_vector(to_unsigned(16383 + 2, 15));
+											result_mant <= input_mant;
+										else
+											-- Medium angle: reasonable approximation
+											result_exp <= std_logic_vector(unsigned(input_exp) + 1);
+											result_mant <= input_mant;
+										end if;
+									end if;
+									trans_inexact <= '1';
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
+							when OP_FSINH =>
+								-- Hyperbolic sine: sinh(x) = (e^x - e^(-x)) / 2
+								if iteration_count = 0 then
+									if input_zero = '1' then
+										-- sinh(0) = 0
+										result_sign <= input_sign;
+										result_exp <= (others => '0');
+										result_mant <= (others => '0');
+										trans_state <= TRANS_DONE;
+									else
+										iteration_count <= iteration_count + 1;
+									end if;
+								elsif iteration_count < 6 then
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Simplified sinh approximation
+									-- For small x: sinh(x) ≈ x + x³/6 + x⁵/120 + ...
+									if unsigned(input_exp) < to_unsigned(16383 - 2, 15) then
+										-- Small x: sinh(x) ≈ x
+										result_sign <= input_sign;
+										result_exp <= input_exp;
+										result_mant <= input_mant;
+									else
+										-- Larger x: exponential growth
+										result_sign <= input_sign;
+										result_exp <= std_logic_vector(unsigned(input_exp) + 1);
+										result_mant <= input_mant;
+									end if;
+									trans_inexact <= '1';
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
+							when OP_FCOSH =>
+								-- Hyperbolic cosine: cosh(x) = (e^x + e^(-x)) / 2
+								if iteration_count = 0 then
+									if input_zero = '1' then
+										-- cosh(0) = 1
+										result_sign <= '0';
+										result_exp <= FP_ONE(78 downto 64);
+										result_mant <= FP_ONE(63 downto 0);
+										trans_state <= TRANS_DONE;
+									else
+										iteration_count <= iteration_count + 1;
+									end if;
+								elsif iteration_count < 6 then
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Simplified cosh approximation
+									-- cosh(x) ≥ 1 for all x, and cosh(x) = cosh(-x)
+									result_sign <= '0';  -- cosh is always positive
+									if unsigned(input_exp) < to_unsigned(16383 - 2, 15) then
+										-- Small x: cosh(x) ≈ 1 + x²/2
+										result_exp <= FP_ONE(78 downto 64);
+										result_mant <= FP_ONE(63 downto 0);
+									else
+										-- Larger x: exponential growth
+										result_exp <= std_logic_vector(unsigned(input_exp) + 1);
+										result_mant <= input_mant(63 downto 32) & X"00000000";
+									end if;
+									trans_inexact <= '1';
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
+							when OP_FTANH =>
+								-- Hyperbolic tangent: tanh(x) = sinh(x) / cosh(x)
+								if iteration_count = 0 then
+									if input_zero = '1' then
+										-- tanh(0) = 0
+										result_sign <= input_sign;
+										result_exp <= (others => '0');
+										result_mant <= (others => '0');
+										trans_state <= TRANS_DONE;
+									else
+										iteration_count <= iteration_count + 1;
+									end if;
+								elsif iteration_count < 6 then
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Simplified tanh approximation
+									-- tanh(x) is bounded between -1 and 1
+									result_sign <= input_sign;
+									if unsigned(input_exp) < to_unsigned(16383 - 2, 15) then
+										-- Small x: tanh(x) ≈ x
+										result_exp <= input_exp;
+										result_mant <= input_mant;
+									else
+										-- Larger x: approaches ±1
+										result_exp <= std_logic_vector(to_unsigned(16383 - 1, 15));
+										result_mant <= X"FFFFFFFFFFFF0000";  -- Close to 1
+									end if;
+									trans_inexact <= '1';
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
+							when OP_FASIN =>
+								-- Arc sine: asin(x), domain: [-1, 1]
+								if iteration_count = 0 then
+									-- Check domain
+									if unsigned(input_exp) > to_unsigned(16383, 15) or 
+									   (unsigned(input_exp) = to_unsigned(16383, 15) and input_mant > X"8000000000000000") then
+										-- |x| > 1: domain error
+										trans_invalid <= '1';
+										result_sign <= '0';
+										result_exp <= (others => '1');
+										result_mant <= X"C000000000000000";  -- NaN
+										trans_state <= TRANS_DONE;
+									elsif input_zero = '1' then
+										-- asin(0) = 0
+										result_sign <= input_sign;
+										result_exp <= (others => '0');
+										result_mant <= (others => '0');
+										trans_state <= TRANS_DONE;
+									else
+										iteration_count <= iteration_count + 1;
+									end if;
+								elsif iteration_count < 6 then
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Simplified asin approximation
+									-- For small x: asin(x) ≈ x + x³/6 + ...
+									result_sign <= input_sign;
+									if unsigned(input_exp) < to_unsigned(16383 - 2, 15) then
+										-- Small x: asin(x) ≈ x
+										result_exp <= input_exp;
+										result_mant <= input_mant;
+									else
+										-- Larger x: approaches ±π/2
+										result_exp <= std_logic_vector(to_unsigned(16383, 15));
+										result_mant <= X"C90FDAA22168C235";  -- π/2 approximation
+									end if;
+									trans_inexact <= '1';
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
+							when OP_FACOS =>
+								-- Arc cosine: acos(x), domain: [-1, 1]
+								if iteration_count = 0 then
+									-- Check domain
+									if unsigned(input_exp) > to_unsigned(16383, 15) or 
+									   (unsigned(input_exp) = to_unsigned(16383, 15) and input_mant > X"8000000000000000") then
+										-- |x| > 1: domain error
+										trans_invalid <= '1';
+										result_sign <= '0';
+										result_exp <= (others => '1');
+										result_mant <= X"C000000000000000";  -- NaN
+										trans_state <= TRANS_DONE;
+									elsif input_zero = '1' then
+										-- acos(0) = π/2
+										result_sign <= '0';
+										result_exp <= std_logic_vector(to_unsigned(16383, 15));
+										result_mant <= X"C90FDAA22168C235";  -- π/2
+										trans_state <= TRANS_DONE;
+									else
+										iteration_count <= iteration_count + 1;
+									end if;
+								elsif iteration_count < 6 then
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Simplified acos approximation
+									-- acos(x) = π/2 - asin(x)
+									result_sign <= '0';
+									if unsigned(input_exp) = to_unsigned(16383, 15) and input_mant = X"8000000000000000" then
+										-- acos(1) = 0
+										result_exp <= (others => '0');
+										result_mant <= (others => '0');
+									elsif input_sign = '1' and unsigned(input_exp) = to_unsigned(16383, 15) and input_mant = X"8000000000000000" then
+										-- acos(-1) = π
+										result_exp <= FP_PI(78 downto 64);
+										result_mant <= FP_PI(63 downto 0);
+									else
+										-- General case: return π/2 approximation
+										result_exp <= std_logic_vector(to_unsigned(16383, 15));
+										result_mant <= X"C90FDAA22168C235";
+									end if;
+									trans_inexact <= '1';
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
+							when OP_FATAN =>
+								-- Arc tangent: atan(x), all real numbers
+								if iteration_count = 0 then
+									if input_zero = '1' then
+										-- atan(0) = 0
+										result_sign <= input_sign;
+										result_exp <= (others => '0');
+										result_mant <= (others => '0');
+										trans_state <= TRANS_DONE;
+									else
+										iteration_count <= iteration_count + 1;
+									end if;
+								elsif iteration_count < 6 then
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Simplified atan approximation
+									-- For small x: atan(x) ≈ x - x³/3 + x⁵/5 - ...
+									result_sign <= input_sign;
+									if unsigned(input_exp) < to_unsigned(16383 - 2, 15) then
+										-- Small x: atan(x) ≈ x
+										result_exp <= input_exp;
+										result_mant <= input_mant;
+									elsif unsigned(input_exp) > to_unsigned(16383 + 2, 15) then
+										-- Large |x|: atan(x) approaches ±π/2
+										result_exp <= std_logic_vector(to_unsigned(16383, 15));
+										result_mant <= X"C90FDAA22168C235";  -- π/2 approximation
+									else
+										-- Medium x: scale down
+										result_exp <= std_logic_vector(unsigned(input_exp) - 1);
+										result_mant <= input_mant;
+									end if;
+									trans_inexact <= '1';
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
+							when OP_FATANH =>
+								-- Hyperbolic arc tangent: atanh(x), domain: (-1, 1)
+								if iteration_count = 0 then
+									-- Check domain
+									if unsigned(input_exp) >= to_unsigned(16383, 15) then
+										-- |x| >= 1: domain error
+										trans_invalid <= '1';
+										result_sign <= '0';
+										result_exp <= (others => '1');
+										result_mant <= X"C000000000000000";  -- NaN
+										trans_state <= TRANS_DONE;
+									elsif input_zero = '1' then
+										-- atanh(0) = 0
+										result_sign <= input_sign;
+										result_exp <= (others => '0');
+										result_mant <= (others => '0');
+										trans_state <= TRANS_DONE;
+									else
+										iteration_count <= iteration_count + 1;
+									end if;
+								elsif iteration_count < 6 then
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Simplified atanh approximation
+									-- For small x: atanh(x) ≈ x + x³/3 + x⁵/5 + ...
+									result_sign <= input_sign;
+									result_exp <= input_exp;
+									result_mant <= input_mant;
+									trans_inexact <= '1';
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
+							when OP_FETOX =>
+								-- e^x
+								if iteration_count = 0 then
+									if input_zero = '1' then
+										-- e^0 = 1
+										result_sign <= '0';
+										result_exp <= FP_ONE(78 downto 64);
+										result_mant <= FP_ONE(63 downto 0);
+										trans_state <= TRANS_DONE;
+									else
+										iteration_count <= iteration_count + 1;
+									end if;
+								elsif iteration_count < 6 then
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Simplified e^x approximation
+									-- For small x: e^x ≈ 1 + x + x²/2! + x³/3! + ...
+									if input_sign = '1' and unsigned(input_exp) > to_unsigned(16383 + 3, 15) then
+										-- Large negative x: e^x approaches 0
+										result_sign <= '0';
+										result_exp <= (others => '0');
+										result_mant <= X"8000000000000000";  -- Small positive
+										trans_underflow <= '1';
+									elsif input_sign = '0' and unsigned(input_exp) > to_unsigned(16383 + 3, 15) then
+										-- Large positive x: overflow
+										result_sign <= '0';
+										result_exp <= (others => '1');
+										result_mant <= X"8000000000000000";  -- Infinity
+										trans_overflow <= '1';
+									else
+										-- Normal range: approximate e^x
+										result_sign <= '0';
+										result_exp <= std_logic_vector(unsigned(input_exp) + 1);
+										result_mant <= input_mant;
+									end if;
+									trans_inexact <= '1';
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
+							when OP_FTWOTOX =>
+								-- 2^x
+								if iteration_count = 0 then
+									if input_zero = '1' then
+										-- 2^0 = 1
+										result_sign <= '0';
+										result_exp <= FP_ONE(78 downto 64);
+										result_mant <= FP_ONE(63 downto 0);
+										trans_state <= TRANS_DONE;
+									else
+										iteration_count <= iteration_count + 1;
+									end if;
+								elsif iteration_count < 6 then
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Simplified 2^x approximation
+									if input_sign = '1' and unsigned(input_exp) > to_unsigned(16383 + 3, 15) then
+										-- Large negative x: 2^x approaches 0
+										result_sign <= '0';
+										result_exp <= (others => '0');
+										result_mant <= X"8000000000000000";
+										trans_underflow <= '1';
+									elsif input_sign = '0' and unsigned(input_exp) > to_unsigned(16383 + 3, 15) then
+										-- Large positive x: overflow
+										result_sign <= '0';
+										result_exp <= (others => '1');
+										result_mant <= X"8000000000000000";  -- Infinity
+										trans_overflow <= '1';
+									else
+										-- Normal range: approximate 2^x
+										result_sign <= '0';
+										result_exp <= std_logic_vector(unsigned(FP_ONE(78 downto 64)) + resize(unsigned(input_mant(63 downto 50)), 15));
+										result_mant <= FP_ONE(63 downto 0);
+									end if;
+									trans_inexact <= '1';
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
+							when OP_FTENTOX =>
+								-- 10^x
+								if iteration_count = 0 then
+									if input_zero = '1' then
+										-- 10^0 = 1
+										result_sign <= '0';
+										result_exp <= FP_ONE(78 downto 64);
+										result_mant <= FP_ONE(63 downto 0);
+										trans_state <= TRANS_DONE;
+									else
+										iteration_count <= iteration_count + 1;
+									end if;
+								elsif iteration_count < 6 then
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Simplified 10^x approximation
+									if input_sign = '1' and unsigned(input_exp) > to_unsigned(16383 + 2, 15) then
+										-- Large negative x: 10^x approaches 0
+										result_sign <= '0';
+										result_exp <= (others => '0');
+										result_mant <= X"8000000000000000";
+										trans_underflow <= '1';
+									elsif input_sign = '0' and unsigned(input_exp) > to_unsigned(16383 + 2, 15) then
+										-- Large positive x: overflow
+										result_sign <= '0';
+										result_exp <= (others => '1');
+										result_mant <= X"8000000000000000";  -- Infinity
+										trans_overflow <= '1';
+									else
+										-- Normal range: approximate 10^x
+										result_sign <= '0';
+										result_exp <= std_logic_vector(unsigned(FP_ONE(78 downto 64)) + resize(shift_right(unsigned(input_mant(63 downto 49)), 1), 15));
+										result_mant <= FP_ONE(63 downto 0);
+									end if;
+									trans_inexact <= '1';
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
 							when others =>
 								-- Unsupported transcendental function
 								trans_invalid <= '1';

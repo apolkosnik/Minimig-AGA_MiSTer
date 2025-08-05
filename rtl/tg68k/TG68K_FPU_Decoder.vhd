@@ -38,7 +38,7 @@ entity TG68K_FPU_Decoder is
 		decode_enable			: in std_logic;
 		
 		-- Decoded instruction fields
-		instruction_type		: buffer std_logic_vector(3 downto 0);	-- Type of FPU instruction
+		instruction_type		: out std_logic_vector(3 downto 0);	-- Type of FPU instruction
 		operation_code			: out std_logic_vector(6 downto 0);	-- 7-bit operation code
 		source_format			: out std_logic_vector(2 downto 0);	-- Source data format
 		dest_format				: out std_logic_vector(2 downto 0);	-- Destination data format
@@ -88,6 +88,7 @@ architecture rtl of TG68K_FPU_Decoder is
 	signal opmode_field			: std_logic_vector(6 downto 0);
 	signal rm_field				: std_logic_vector(2 downto 0);
 	signal rn_field				: std_logic_vector(2 downto 0);
+	signal instruction_type_int	: std_logic_vector(3 downto 0);
 	
 	-- Instruction validity checks
 	signal valid_f_line			: std_logic;
@@ -137,7 +138,7 @@ begin
 	instruction_decode: process(opcode, extension_word, inst_type_bits, coprocessor_id)
 	begin
 		-- Default values
-		instruction_type <= INST_GENERAL;
+		instruction_type_int <= INST_GENERAL;
 		needs_extension_word <= '1';
 		privileged_instruction <= '0';
 		
@@ -151,47 +152,47 @@ begin
 					   (opcode(5 downto 3) = "001" and opcode(2 downto 0) = "101") then -- F21D pattern (FMOVEM from memory)
 						-- Check extension word to determine if this is FP registers or control registers
 						-- This will be handled in the main FPU logic after extension word is available
-						instruction_type <= INST_FMOVEM;   -- Treat as FMOVEM operation
+						instruction_type_int <= INST_FMOVEM;   -- Treat as FMOVEM operation
 					else
-						instruction_type <= INST_GENERAL;
+						instruction_type_int <= INST_GENERAL;
 					end if;
 					needs_extension_word <= '1';
 					
 				when "001" =>  -- FDBcc, FTRAPcc, FScc
 					if opcode(5 downto 3) = "001" then      -- FDBcc
-						instruction_type <= INST_FBCC;
+						instruction_type_int <= INST_FBCC;
 					elsif opcode(5 downto 3) = "111" then   -- FTRAPcc or FScc
 						if opcode(2 downto 0) = "010" or opcode(2 downto 0) = "011" then
-							instruction_type <= INST_FTRAP;  -- FTRAPcc
+							instruction_type_int <= INST_FTRAP;  -- FTRAPcc
 						else
-							instruction_type <= INST_FBCC;   -- FScc
+							instruction_type_int <= INST_FBCC;   -- FScc
 						end if;
 					else
-						instruction_type <= INST_FBCC;       -- Other conditional ops
+						instruction_type_int <= INST_FBCC;       -- Other conditional ops
 					end if;
 					needs_extension_word <= '1';
 					
 				when "010" =>  -- FBcc (word displacement)
-					instruction_type <= INST_FBCC;
+					instruction_type_int <= INST_FBCC;
 					needs_extension_word <= '1';
 					
 				when "011" =>  -- FBcc (long displacement)  
-					instruction_type <= INST_FBCC;
+					instruction_type_int <= INST_FBCC;
 					needs_extension_word <= '1';
 					
 				when "100" =>  -- FSAVE
-					instruction_type <= INST_FSAVE;
+					instruction_type_int <= INST_FSAVE;
 					needs_extension_word <= '0';
 					privileged_instruction <= '1';
 					
 				when "101" =>  -- FRESTORE
-					instruction_type <= INST_FRESTORE;
+					instruction_type_int <= INST_FRESTORE;
 					needs_extension_word <= '0';
 					privileged_instruction <= '1';
 					
 				when "110" =>  -- FMOVE to memory or FMOVEM
 					if extension_word(15) = '0' then
-						instruction_type <= INST_FMOVE_FP;   -- FMOVE FPn,<ea>
+						instruction_type_int <= INST_FMOVE_FP;   -- FMOVE FPn,<ea>
 					else
 						-- FMOVEM instruction - check for control register vs FP register
 						if (opcode(15 downto 8) = X"F2") and 
@@ -199,9 +200,9 @@ begin
 						   (extension_word(14) = '1') then
 							-- Check if this is control register FMOVEM
 							if extension_word(12 downto 10) /= "000" and extension_word(7 downto 0) = "00000000" then
-								instruction_type <= INST_FMOVEM_CR;  -- FMOVEM control registers
+								instruction_type_int <= INST_FMOVEM_CR;  -- FMOVEM control registers
 							elsif extension_word(12 downto 8) = "00000" then
-								instruction_type <= INST_FMOVEM;     -- Valid FP register FMOVEM
+								instruction_type_int <= INST_FMOVEM;     -- Valid FP register FMOVEM
 							else
 								-- Invalid FMOVEM format - will be caught by validity check
 								null;
@@ -215,18 +216,18 @@ begin
 					
 				when "111" =>  -- FMOVE from memory or FMOVE control register
 					if extension_word(15 downto 13) = "100" then
-						instruction_type <= INST_FMOVE_CR;   -- FMOVE control register
+						instruction_type_int <= INST_FMOVE_CR;   -- FMOVE control register
 					else
-						instruction_type <= INST_FMOVE_MEM;  -- FMOVE <ea>,FPn
+						instruction_type_int <= INST_FMOVE_MEM;  -- FMOVE <ea>,FPn
 					end if;
 					needs_extension_word <= '1';
 					
 				when others =>
-					instruction_type <= INST_GENERAL;
+					instruction_type_int <= INST_GENERAL;
 					needs_extension_word <= '1';
 			end case;
 		else
-			instruction_type <= INST_GENERAL;
+			instruction_type_int <= INST_GENERAL;
 			needs_extension_word <= '0';
 		end if;
 	end process;
@@ -278,8 +279,9 @@ begin
 	end process;
 	
 	-- Output assignments
+	instruction_type <= instruction_type_int;
 	operation_code <= opmode_field;
-	source_format <= format_field when instruction_type = INST_GENERAL else FORMAT_EXTENDED;
+	source_format <= format_field when instruction_type_int = INST_GENERAL else FORMAT_EXTENDED;
 	dest_format <= FORMAT_EXTENDED;  -- Internal operations use extended precision
 	source_reg <= rm_field;
 	dest_reg <= rn_field;

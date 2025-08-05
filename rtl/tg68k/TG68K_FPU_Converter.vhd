@@ -76,6 +76,7 @@ architecture rtl of TG68K_FPU_Converter is
 		CONV_EXTRACT,
 		CONV_CONVERT,
 		CONV_NORMALIZE,
+		CONV_PACKED_OUT,
 		CONV_DONE
 	);
 	signal conv_state : conv_state_t := CONV_IDLE;
@@ -109,8 +110,48 @@ architecture rtl of TG68K_FPU_Converter is
 	signal conv_underflow		: std_logic;
 	signal conv_inexact			: std_logic;
 	signal conv_invalid			: std_logic;
+	
+	-- Packed decimal converter signals
+	signal packed_start			: std_logic;
+	signal packed_done			: std_logic;
+	signal packed_valid			: std_logic;
+	signal packed_to_ext		: std_logic;
+	signal packed_k_factor		: std_logic_vector(6 downto 0);
+	signal packed_ext_out		: std_logic_vector(79 downto 0);
+	signal packed_dec_out		: std_logic_vector(95 downto 0);
+	signal packed_overflow		: std_logic;
+	signal packed_inexact		: std_logic;
+	signal packed_invalid		: std_logic;
 
 begin
+
+	-- Instantiate packed decimal converter
+	PACKED_CONVERTER: entity work.TG68K_FPU_PackedDecimal
+	port map(
+		clk => clk,
+		nReset => nReset,
+		clkena => clkena,
+		
+		-- Control
+		start_conversion => packed_start,
+		conversion_done => packed_done,
+		conversion_valid => packed_valid,
+		
+		-- Direction and K-factor
+		packed_to_extended => packed_to_ext,
+		k_factor => packed_k_factor,
+		
+		-- Data
+		extended_in => dest_sign & dest_exp & dest_mant,
+		packed_in => data_in,
+		extended_out => packed_ext_out,
+		packed_out => packed_dec_out,
+		
+		-- Exceptions
+		overflow => packed_overflow,
+		inexact => packed_inexact,
+		invalid => packed_invalid
+	);
 
 	-- Main conversion process
 	conversion_process: process(clk, nReset)
@@ -182,30 +223,11 @@ begin
 								conv_state <= CONV_DONE;
 								
 							when FORMAT_PACKED =>
-								-- Packed decimal format conversion
-								-- MC68881/68882 packed decimal: 96 bits total
-								-- Format: SM{17}.{D1D2...Dn}  where S=sign, M=mantissa sign, D=BCD digits
-								-- Extract sign from bit 95, mantissa sign from bit 94
-								-- Extract exponent from upper bits, BCD digits from lower bits
-								dest_sign <= data_in(95);  -- Overall sign
-								-- Simplified packed decimal to extended conversion
-								-- For now, extract the significant BCD digits and convert to binary
-								-- Full implementation would require BCD to binary conversion
-								if data_in(95 downto 0) = (95 downto 0 => '0') then
-									-- Zero value
-									dest_sign <= '0';
-									dest_exp <= (others => '0');
-									dest_mant <= (others => '0');
-								else
-									-- Non-zero: simplified conversion
-									dest_sign <= data_in(95);  -- Sign bit
-									dest_exp <= std_logic_vector(to_unsigned(EXTENDED_EXP_BIAS, 15));  -- Start with bias
-									-- Extract BCD digits and convert to approximate binary mantissa
-									-- This is a simplified approach - full implementation needs proper BCD arithmetic
-									dest_mant <= data_in(63 downto 0);  -- Use lower bits as approximation
-									conv_inexact <= '1';  -- Mark as inexact due to approximation
-								end if;
-								conv_state <= CONV_DONE;
+								-- Use dedicated packed decimal converter
+								packed_to_ext <= '1';  -- Packed to extended conversion
+								packed_k_factor <= "0000000";  -- Default K-factor (could be parameterized)
+								packed_start <= '1';
+								conv_state <= CONV_CONVERT;
 								
 							when others =>
 								conv_invalid <= '1';
@@ -297,6 +319,20 @@ begin
 								end if;
 								conv_state <= CONV_DONE;
 								
+							when FORMAT_PACKED =>
+								-- Wait for packed decimal converter
+								packed_start <= '0';  -- Clear start signal
+								if packed_done = '1' then
+									-- Get result from packed decimal converter
+									dest_sign <= packed_ext_out(79);
+									dest_exp <= packed_ext_out(78 downto 64);
+									dest_mant <= packed_ext_out(63 downto 0);
+									conv_overflow <= packed_overflow;
+									conv_inexact <= packed_inexact;
+									conv_invalid <= packed_invalid;
+									conv_state <= CONV_DONE;
+								end if;
+								
 							when others =>
 								conv_invalid <= '1';
 								conv_state <= CONV_DONE;
@@ -333,26 +369,36 @@ begin
 							when FORMAT_EXTENDED =>
 								-- Already in extended format
 								data_out <= dest_sign & dest_exp & dest_mant;
+								conversion_done <= '1';
+								conversion_valid <= '1';
+								conv_state <= CONV_IDLE;
 							when FORMAT_PACKED =>
-								-- Convert extended to packed decimal format
-								-- MC68881/68882 packed decimal: 96 bits total
-								-- Format: SM{17}.{D1D2...Dn} where S=sign, M=mantissa sign, D=BCD digits
-								if dest_exp = (14 downto 0 => '0') and dest_mant = (63 downto 0 => '0') then
-									-- Zero value
-									data_out <= (79 downto 0 => '0');
-								else
-									-- Non-zero: simplified conversion from extended to packed decimal
-									-- This is a simplified approach - full implementation needs proper binary to BCD conversion
-									data_out <= dest_sign & '0' & (45 downto 0 => '0') & dest_mant(63 downto 32);  -- Approximation
-									conv_inexact <= '1';  -- Mark as inexact due to approximation
-								end if;
+								-- Start conversion to packed decimal
+								packed_to_ext <= '0';  -- Extended to packed conversion
+								packed_k_factor <= "0000000";  -- Default K-factor
+								packed_start <= '1';
+								conv_state <= CONV_PACKED_OUT;
 							when others =>
 								-- Default: output as extended precision
 								data_out <= dest_sign & dest_exp & dest_mant;
+								conversion_done <= '1';
+								conversion_valid <= '1';
+								conv_state <= CONV_IDLE;
 						end case;
-						conversion_done <= '1';
-						conversion_valid <= '1';
-						conv_state <= CONV_IDLE;
+					
+					when CONV_PACKED_OUT =>
+						-- Wait for packed decimal converter
+						packed_start <= '0';  -- Clear start signal
+						if packed_done = '1' then
+							-- Output packed decimal result (truncate to 80 bits for data_out)
+							data_out <= packed_dec_out(79 downto 0);
+							conv_overflow <= conv_overflow or packed_overflow;
+							conv_inexact <= conv_inexact or packed_inexact;
+							conv_invalid <= conv_invalid or packed_invalid;
+							conversion_done <= '1';
+							conversion_valid <= '1';
+							conv_state <= CONV_IDLE;
+						end if;
 				end case;
 			end if;
 		end if;

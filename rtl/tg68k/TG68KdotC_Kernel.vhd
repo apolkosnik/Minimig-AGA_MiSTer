@@ -198,6 +198,12 @@ architecture logic of TG68KdotC_Kernel is
 	signal memaddr_delta_regb	: std_logic_vector(31 downto 0);
 	signal use_base			: bit;
 	
+	-- MC68020 Coprocessor Interface Register selection
+	signal cir_register_select	: std_logic_vector(4 downto 0);
+	
+	-- FPU condition evaluation
+	signal fpu_condition_result	: std_logic;
+	
 	signal ea_data				: std_logic_vector(31 downto 0);
 	signal OP1out				: std_logic_vector(31 downto 0);
 	signal OP2out				: std_logic_vector(31 downto 0);
@@ -296,6 +302,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_fpu_operr		: bit;  -- FPU Operand Error (Vector 52)
 	signal trap_fpu_ovfl		: bit;  -- FPU Overflow (Vector 53)
 	signal trap_fpu_snan		: bit;  -- FPU Signaling NaN (Vector 54)
+	signal trap_fpu_trap		: bit;  -- FPU Conditional Trap (FTRAPcc)
 	signal trapmake			: bit;
 	signal trapd				: bit;
 	signal trap_SR				: std_logic_vector(7 downto 0);
@@ -315,18 +322,23 @@ architecture logic of TG68KdotC_Kernel is
 	signal fpu_fpiar			: std_logic_vector(31 downto 0);
 	-- FPU Interface signals (CPU manages all memory operations)
 	signal fpu_cpu_data_in		: std_logic_vector(31 downto 0);
-	-- FSAVE-specific CPU signals
+	-- MC68020 Coprocessor State Frame signals
 	signal fsave_counter		: integer range 0 to 54 := 0;  -- Increased for BUSY frames (216/4 = 54 longwords)
 	signal fsave_predecr_flag	: bit := '0';  -- Special flag for FSAVE predecrement by frame size
-	signal fsave_frame_size		: integer range 4 to 216 := 60;  -- Dynamic frame size (4=NULL, 60=IDLE, 216=BUSY)
-	signal fsave_frame_format	: std_logic_vector(7 downto 0) := X"60";  -- Frame format from FPU
-	signal fsave_frame_type		: std_logic_vector(1 downto 0) := "01";  -- 00=NULL, 01=IDLE, 10=BUSY
+	signal fsave_frame_size		: integer range 4 to 216 := 4;  -- Dynamic frame size (bytes)
+	signal coprocessor_format_word	: std_logic_vector(31 downto 0) := X"00000004";  -- MC68020 format word
 	signal fsave_size_determined	: std_logic := '0';  -- Flag indicating frame size has been determined
+	signal cpSAVE_state		: integer range 0 to 3 := 0;  -- 0=read save CIR, 1=process format, 2=save data, 3=done
+	signal cpRESTORE_state		: integer range 0 to 3 := 0;  -- 0=write format, 1=read restore CIR, 2=restore data, 3=done
 	signal fsave_base_address	: std_logic_vector(31 downto 0);
 	signal fsave_opcode_detected	: std_logic := '0';
 	signal fpu_data_request     : std_logic := '0';
 	signal frestore_data_write  : std_logic := '0';
 	signal frestore_data_in     : std_logic_vector(31 downto 0);
+	
+	-- FPU timeout counter to prevent hangs
+	signal timeout_counter		: integer range 0 to 255 := 0;  -- Timeout counter for FPU operations
+	constant TIMEOUT_LIMIT_CPU	: integer := 100;  -- Maximum cycles to wait for FPU completion
 	
 	-- FMOVEM CPU-managed interface signals
 	signal fmovem_data_request  : std_logic := '0';
@@ -707,7 +719,7 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 -----------------------------------------------------------------------------
 -- Write Reg
 -----------------------------------------------------------------------------
-PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, movec_data, fpu_data_out, micro_state, opcode, fsave_predecr_flag)
+PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, movec_data, fpu_data_out, micro_state, opcode, fsave_predecr_flag, fpu_condition_result)
 	BEGIN
 		regin <= ALUout;
 		IF exec(save_memaddr)='1' THEN
@@ -727,11 +739,20 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 			regin <= ISP;	
 		ELSIF exec(movec_rd)='1' THEN
 			regin <= movec_data;
-		ELSIF FPU_Enable = 1 AND micro_state = fpu_done AND 
-		      opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
-		      opcode(8 downto 6) = "111" AND opcode(5 downto 3) = "000" THEN
-			-- FMOVE FPcr,Dn - route FPU control register data to CPU data register
-			regin <= fpu_data_out;
+		ELSIF FPU_Enable = 1 AND micro_state = fpu_done THEN
+			IF opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" THEN
+				IF opcode(8 downto 6) = "111" AND opcode(5 downto 3) = "000" THEN
+					-- FMOVE FPcr,Dn - route FPU control register data to CPU data register
+					regin <= fpu_data_out;
+				ELSIF opcode(8 downto 6) = "010" AND opcode(5 downto 3) = "000" THEN
+					-- FScc Dn - set conditional byte in register
+					IF fpu_condition_result = '1' THEN
+						regin <= X"000000FF";
+					ELSE
+						regin <= X"00000000";
+					END IF;
+				END IF;
+			END IF;
 		END IF;
 		
 		IF Bwrena='1' THEN
@@ -977,7 +998,18 @@ PROCESS (clk)
 					data_write_tmp(15 downto 0) <= trap_SR(7 downto 0)& Flags(7 downto 0);
 				ELSIF FPU_Enable = 1 AND (micro_state = fpu_wait OR micro_state = fpu_done OR micro_state = fpu2) THEN
 					-- FPU operation - use FPU output data
-					data_write_tmp <= fpu_data_out;
+					-- For FScc, check if it's a conditional set operation
+					IF opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
+					   opcode(8 downto 6) = "010" THEN
+						-- FScc operation - set conditional byte
+						IF fpu_condition_result = '1' THEN
+							data_write_tmp <= X"000000FF";
+						ELSE
+							data_write_tmp <= X"00000000";
+						END IF;
+					ELSE
+						data_write_tmp <= fpu_data_out;
+					END IF;
 				ELSE	
 					data_write_tmp <= OP2out;
 				END IF;
@@ -1004,6 +1036,128 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 				WHEN "11" => briefdata <= OP1outbrief(12 downto 0)&OP1out(15 downto 0)&"000";
 				WHEN OTHERS => NULL;
 			END CASE;
+		END IF;
+	END PROCESS;
+
+-----------------------------------------------------------------------------
+-- MC68020 Coprocessor Interface Register Selection Logic
+-----------------------------------------------------------------------------
+PROCESS (micro_state, opcode, sndOPC, state)
+	BEGIN
+		-- Default: Response register for status reads
+		cir_register_select <= "00000";  -- Response Register (0x00)
+		
+		-- Dynamic CIR register selection based on operation type
+		IF (micro_state = fpu1 OR micro_state = fpu2 OR micro_state = fpu_wait) AND
+		   FPU_Enable = 1 AND opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" THEN
+			
+			-- Determine register based on FPU operation type and microstate
+			CASE opcode(8 downto 6) IS
+				WHEN "000" =>  -- cpGEN - General FPU operations (FADD, FMUL, etc.)
+					IF micro_state = fpu1 THEN
+						cir_register_select <= "00001";  -- Command Register (0x01) - write command word
+					ELSE
+						cir_register_select <= "00000";  -- Response Register (0x00) - read response primitives
+					END IF;
+					
+				WHEN "100" =>  -- cpSAVE - FSAVE operation  
+					-- MC68020 cpSAVE protocol: Read Save CIR, then write state frame
+					IF cpSAVE_state = 0 THEN
+						cir_register_select <= "00011";  -- Save CIR (0x03) - read format word
+					ELSE
+						cir_register_select <= "00000";  -- Not used during memory operations  
+					END IF;
+					
+				WHEN "101" =>  -- cpRESTORE - FRESTORE operation
+					-- MC68020 cpRESTORE protocol: Write format to Restore CIR, read response
+					IF cpRESTORE_state = 0 THEN
+						cir_register_select <= "00011";  -- Restore CIR (0x03) - write format word
+					ELSIF cpRESTORE_state = 1 THEN
+						cir_register_select <= "00011";  -- Restore CIR (0x03) - read response
+					ELSE
+						cir_register_select <= "00000";  -- Not used during memory operations
+					END IF;
+					
+				WHEN "001" | "010" | "011" =>  -- FDBcc, FScc, FTRAPcc - conditional operations
+					IF micro_state = fpu1 THEN
+						cir_register_select <= "00100";  -- Condition CIR (0x04) - write condition selector
+					ELSE
+						cir_register_select <= "00000";  -- Response Register (0x00) - read true/false result
+					END IF;
+					
+				WHEN OTHERS => -- Other coprocessor operations
+					cir_register_select <= "00000";  -- Response Register (0x00) - default
+			END CASE;
+		END IF;
+	END PROCESS;
+
+-----------------------------------------------------------------------------
+-- FPU Condition Evaluation Logic
+-----------------------------------------------------------------------------
+PROCESS (sndOPC, fpu_FPSR)
+	VARIABLE condition_code : std_logic_vector(4 downto 0);
+	BEGIN
+		-- Extract condition code from extension word (bits 4:0)
+		condition_code := sndOPC(4 downto 0);
+		
+		-- Evaluate FPU condition based on FPSR status bits
+		-- FPSR condition codes: N=bit 31, Z=bit 30, I=bit 29, NaN=bit 28
+		CASE condition_code IS
+			WHEN "00000" =>  -- F (False)
+				fpu_condition_result <= '0';
+			WHEN "00001" =>  -- EQ (Equal) - Z set
+				fpu_condition_result <= fpu_FPSR(30);
+			WHEN "00010" =>  -- OGT (Ordered Greater Than) - !(NaN | Z | N)
+				fpu_condition_result <= NOT (fpu_FPSR(28) OR fpu_FPSR(30) OR fpu_FPSR(31));
+			WHEN "00011" =>  -- OGE (Ordered Greater or Equal) - Z | !(NaN | N)
+				fpu_condition_result <= fpu_FPSR(30) OR NOT (fpu_FPSR(28) OR fpu_FPSR(31));
+			WHEN "00100" =>  -- OLT (Ordered Less Than) - N & !(NaN | Z)
+				fpu_condition_result <= fpu_FPSR(31) AND NOT (fpu_FPSR(28) OR fpu_FPSR(30));
+			WHEN "00101" =>  -- OLE (Ordered Less or Equal) - Z | (N & !NaN)
+				fpu_condition_result <= fpu_FPSR(30) OR (fpu_FPSR(31) AND NOT fpu_FPSR(28));
+			WHEN "00110" =>  -- OGL (Ordered Greater or Less) - !(NaN | Z)
+				fpu_condition_result <= NOT (fpu_FPSR(28) OR fpu_FPSR(30));
+			WHEN "00111" =>  -- OR (Ordered) - !NaN
+				fpu_condition_result <= NOT fpu_FPSR(28);
+			WHEN "01000" =>  -- UN (Unordered) - NaN
+				fpu_condition_result <= fpu_FPSR(28);
+			WHEN "01001" =>  -- UEQ (Unordered or Equal) - NaN | Z
+				fpu_condition_result <= fpu_FPSR(28) OR fpu_FPSR(30);
+			WHEN "01010" =>  -- UGT (Unordered or Greater Than) - NaN | !(N | Z)
+				fpu_condition_result <= fpu_FPSR(28) OR NOT (fpu_FPSR(31) OR fpu_FPSR(30));
+			WHEN "01011" =>  -- UGE (Unordered or Greater or Equal) - NaN | Z | !N
+				fpu_condition_result <= fpu_FPSR(28) OR fpu_FPSR(30) OR NOT fpu_FPSR(31);
+			WHEN "01100" =>  -- ULT (Unordered or Less Than) - NaN | (N & !Z)
+				fpu_condition_result <= fpu_FPSR(28) OR (fpu_FPSR(31) AND NOT fpu_FPSR(30));
+			WHEN "01101" =>  -- ULE (Unordered or Less or Equal) - NaN | Z | N
+				fpu_condition_result <= fpu_FPSR(28) OR fpu_FPSR(30) OR fpu_FPSR(31);
+			WHEN "01110" =>  -- NE (Not Equal) - !(Z & !NaN)
+				fpu_condition_result <= NOT (fpu_FPSR(30) AND NOT fpu_FPSR(28));
+			WHEN "01111" =>  -- T (True)
+				fpu_condition_result <= '1';
+			WHEN OTHERS =>  -- SF, SEQ, GT, GE, LT, LE, GL, GLE, NGLE, NGL, NLE, NLT, NGE, NGT, SNE, ST
+				-- Additional signaling conditions - simplified to always false
+				fpu_condition_result <= '0';
+		END CASE;
+	END PROCESS;
+
+-----------------------------------------------------------------------------
+-- MC68020 Coprocessor Format Word Generation
+-----------------------------------------------------------------------------
+PROCESS (fpu_busy, fpu_exception, fpu_fpsr)
+	BEGIN
+		-- Generate proper MC68020 coprocessor format words
+		-- Based on current FPU state and MC68020 specification Table 7-2
+		
+		IF fpu_busy = '1' THEN
+			-- FPU is busy - return "Not Ready, Come Again" format
+			coprocessor_format_word <= X"01" & X"00" & X"0000";  -- Format $01, length don't care
+		ELSIF fpu_exception = '1' OR fpu_fpsr /= X"00000000" THEN
+			-- FPU has state - return valid format with IDLE state
+			coprocessor_format_word <= X"60" & X"3C" & X"0000";  -- Format $60, length 60 bytes
+		ELSE
+			-- FPU in reset state - return empty/reset format
+			coprocessor_format_word <= X"00" & X"04" & X"0000";  -- Format $00, length 4 bytes  
 		END IF;
 	END PROCESS;
 
@@ -1071,6 +1225,9 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				END IF;	
 				IF trap_fpu_snan='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"D8";  -- Vector 54 (0xD8)
+				END IF;
+				IF trap_fpu_trap='1' THEN
+					trap_vector(9 downto 0) <= "00" & X"DC";  -- Vector 55 (0xDC) - FTRAPcc
 				END IF;	
 				IF trap_interrupt='1' or set_vectoraddr = '1' THEN
 					trap_vector(9 downto 0) <= IPL_vec & "00";      --TH
@@ -1164,7 +1321,25 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 		-- if access done, and not aligned, don't increment
 		addr <= memaddr_reg+memaddr_delta;
 		-- CPU manages all memory operations including FSAVE/FRESTORE
-		addr_out <= memaddr_reg + memaddr_delta;
+		-- MC68020 Coprocessor Interface: Generate proper CPU space addresses for FPU
+		IF (micro_state = fpu1 OR micro_state = fpu2 OR micro_state = fpu_wait) AND
+		   FPU_Enable = 1 AND opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" THEN
+			-- CPU Space Cycle for MC68882 FPU coprocessor interface
+			-- Format per MC68020 User's Manual Figure 7-3:
+			-- A31-A20 = 0 (always zero)
+			-- A19-A16 = 0010 (CPU space type $2 for coprocessor access)
+			-- A15-A13 = 001 (FPU coprocessor ID from opcode bits 11-9)
+			-- A12-A5 = 0 (always zero during coprocessor access)
+			-- A4-A0 = CIR register selector (00000-11111)
+			addr_out <= X"000" &       -- A31-A20: always zero (12 bits)
+			           "0010" &        -- A19-A16: CPU space type $2 (coprocessor access)
+			           "001" &         -- A15-A13: FPU coprocessor ID  
+			           "00000000" &    -- A12-A5: always zero (8 bits)
+			           cir_register_select;  -- A4-A0: Dynamic CIR register selection
+		ELSE
+			-- Normal memory operations
+			addr_out <= memaddr_reg + memaddr_delta;
+		END IF;
 
 		IF use_base='0' THEN
 			memaddr_reg <= (others=>'0');
@@ -1219,16 +1394,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 		setopcode <= '0';
 		setendOPC <= '0';
 		setinterrupt <= '0';
-		-- Special endOPC generation for FPU instruction completion
-		IF FPU_Enable = 1 AND micro_state = fpu_done AND next_micro_state = idle THEN
-			-- Force endOPC for FPU instruction completion to prevent hanging
-			setendOPC <= '1';
-			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1' THEN
-				setinterrupt <= '1';
-			ELSIF stop='0' THEN
-				setopcode <= '1';
-			END IF;
-		ELSIF setstate="00" AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0'THEN
+		IF setstate="00" AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0'THEN
 			setendOPC <= '1';
 			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1' THEN
 				setinterrupt <= '1';
@@ -1348,12 +1514,27 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					FC(0) <= setstate(1) AND (NOT PCbase OR setstate(0));
 					IF interrupt='1' THEN
 						FC(1 downto 0) <= "11";
+					END IF;
+					-- MC68020 Coprocessor Interface: CPU Space Cycles for FPU operations
+					IF (micro_state = fpu1 OR micro_state = fpu2 OR micro_state = fpu_wait) AND
+					   FPU_Enable = 1 AND opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" THEN
+						FC(1 downto 0) <= "11";  -- CPU space FC1-FC0 = 11
+						-- Generate proper coprocessor address format:
+						-- A19-A16 = 0010 (coprocessor access)
+						-- A15-A13 = 001 (FPU coprocessor ID)  
+						-- A12-A5 = operation type and register
+						-- A4-A1 = CIR register selector
 					END IF;	
 					
 					IF state="11" THEN
 						exec_write_back <= '0';
 					ELSIF setstate="10" AND setaddrvalue='0' AND write_back='1' THEN
 						exec_write_back <= '1';
+					-- CRITICAL FIX: Clear exec_write_back when FPU operations complete to allow endOPC generation
+					-- Clear exec_write_back when FPU operations complete
+					ELSIF FPU_Enable = 1 AND next_micro_state = idle AND 
+					      (micro_state = fpu_done OR micro_state = fpu_wait OR micro_state = fpu2) THEN
+						exec_write_back <= '0';
 					END IF;	
 					IF (state="10" AND addrvalue='0' AND write_back='1' AND setstate/="10") OR set_rot_cnt/="000001" OR (stop='1' AND interrupt='0') OR set_exec(opcCHK)='1' THEN
 						state <= "01";
@@ -1456,7 +1637,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				-- No separate memory interface needed
 				
 				-- FPU CPU Data Interface - Provide correct data source to FPU
-				-- For register direct operations (FTST.B D1, FMOVE.L D0,FP1), use register file
+				-- For register direct operations (FMOVE.L D0,FP1), use register file
 				-- For memory operations, use data bus
 				IF (micro_state = fpu1 OR micro_state = fpu_wait) AND 
 				   opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND
@@ -1488,12 +1669,26 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				exec(alu_move) <= set(opcMOVE) OR set(alu_move);
 				exec(alu_setFlags) <= set(opcADD) OR set(alu_setFlags);
 				exec_tas <= '0';
-				exec(subidx) <= set(presub) or set(subidx);
+				-- Original behavior: presub operations need ALU in subtract mode EXCEPT for FSAVE
+				IF set(presub) = '1' AND NOT (opcode(15 downto 6) = "1111001001" AND opcode(5 downto 3) = "100") THEN
+					-- Normal predecrement: needs ALU subtract for address calculation  
+					exec(subidx) <= '1';
+				ELSE
+					exec(subidx) <= set(subidx);
+				END IF;
+				exec(presub) <= set(presub);  -- CRITICAL FIX: Transfer presub signal for FSAVE predecrement
 				IF setexecOPC='1' THEN
 					exec <= set_exec OR set;
 					exec(alu_move) <= set_exec(opcMOVE) OR set(opcMOVE) OR set(alu_move);
 					exec(alu_setFlags) <= set_exec(opcADD) OR set(opcADD) OR set(alu_setFlags);
 					exec_tas <= set_exec_tas;
+					-- Handle presub -> subidx conversion in setexecOPC path too
+					IF (set_exec(presub) = '1' OR set(presub) = '1') AND NOT (opcode(15 downto 6) = "1111001001" AND opcode(5 downto 3) = "100") THEN
+						exec(subidx) <= '1';
+					ELSE
+						exec(subidx) <= set_exec(subidx) OR set(subidx);
+					END IF;
+					exec(presub) <= set_exec(presub) OR set(presub);  -- Maintain presub through setexecOPC
 				END IF;	
 				exec(get_2ndOPC) <= set(get_2ndOPC) OR setopcode;
 			END IF;	
@@ -1634,14 +1829,19 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 					FlagsSR(4) <= '0';
 					FlagsSR(6) <= '0';
 				END IF;
-				-- Update condition codes from FPU FPSR for FTST
-				IF FPU_Enable = 1 AND micro_state = fpu_done AND opcode(6 downto 0) = "0111010" THEN
-					-- Map FPU condition codes from FPSR to CPU CCR for FTST instruction
-					-- FPSR bits 27-24: N, Z, I, NAN
-					FlagsSR(3) <= fpu_fpsr(27);  -- N (negative)
-					FlagsSR(2) <= fpu_fpsr(26);  -- Z (zero)
-					FlagsSR(1) <= '0';           -- V (overflow - not used by FTST)
-					FlagsSR(0) <= '0';           -- C (carry - not used by FTST)
+				-- Update condition codes from FPU FPSR
+				IF FPU_Enable = 1 AND micro_state = fpu_done THEN
+					-- Map FPU condition codes from FPSR to CPU CCR
+					-- FPSR bits 31-28 contain condition codes
+					FlagsSR(3) <= fpu_fpsr(31);  -- N (negative)
+					FlagsSR(2) <= fpu_fpsr(30);  -- Z (zero)
+					FlagsSR(1) <= '0';           -- V (overflow)
+					FlagsSR(0) <= '0';           -- C (carry)
+					-- Special handling for FTST to ensure proper completion
+					IF opcode(6 downto 0) = "0111010" THEN
+						-- FTST operation - ensure clean transition to next instruction
+						NULL; -- Condition codes already updated above
+					END IF;
 				END IF;
 			END IF;
 		END IF;	
@@ -1655,7 +1855,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		 SVmode, preSVmode, stop, long_done, ea_only, setstate, addrvalue, execOPC, exec_write_back, exe_datatype,
 		 datatype, interrupt, c_out, trapmake, rot_cnt, brief, addr, trap_trapv, last_data_in, use_VBR_Stackframe,
 		 long_start, set_datatype, sndOPC, set_exec, exec, ea_build_now, reg_QA, reg_QB, make_berr, trap_berr,
-		 fpu_complete, fpu_exception, fpu_exception_code, fsave_counter)
+		 fpu_complete, fpu_exception, fpu_exception_code, fsave_counter, timeout_counter)
 	BEGIN
 		TG68_PC_brw <= '0';	
 		setstate <= "00";
@@ -1669,6 +1869,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		trap_fpu_inexact <= '0';
 		trap_fpu_snan <= '0';
 		trap_fpu_bsun <= '0';
+		trap_fpu_trap <= '0';
 		-- Initialize FPU interface signals to prevent latches
 		-- fpu_data_request is assigned in clocked process only
 		-- Initialize FMOVEM signals to prevent latches
@@ -1727,14 +1928,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		set_Z_error <= '0';
 		check_aligned <='0';
 
-		-- Default to idle, but route completed F-line FPU instructions to fpu1
-		IF FPU_Enable = 1 AND opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND
-		   micro_state /= idle AND setexecOPC = '1' THEN
-			-- Completed F-line FPU instruction - route to FPU processing
-			next_micro_state <= fpu1;
-		ELSE
-			next_micro_state <= idle;
-		END IF;
+		-- Default to idle - only route to FPU if current instruction is actually FPU
+		-- CRITICAL FIX: Only route to fpu1 if the CURRENT instruction is FPU, not just because we're in an FPU state
+		-- This prevents infinite looping where non-FPU instructions get routed to FPU
+		next_micro_state <= idle;
 		build_logical <= '0';
 		build_bcd <= '0';
 		skipFetch <= make_berr;
@@ -3309,7 +3506,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								set(ea_build) <= '1';
 							END IF;
 							set_exec(opcBF) <= '1';
---		000-bftst, 001-bfextu, 010-bfchg, 011-bfexts, 100-bfclr, 101-bfff0, 110-bfset, 111-bfins								
+--		000-bftst, 001-bfextu, 010-bfchg, 011-bfexts, 100-bfclr, 101-bfffo, 110-bfset, 111-bfins								
 							IF opcode(10)='1' OR opcode(8)='0' THEN
 								set_exec(opcBFwb) <= '1';			--'1' for tst,chg,clr,ffo,set,ins    --'0' for extu,exts
 							END IF;
@@ -3391,8 +3588,28 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- FPU coprocessor ID = 001 (0xF200-0xF3FF) for MC68881/68882 FPU
 					-- Coprocessor ID 000 is reserved for MC68851 PMMU
 					
-					-- Check if this is FSAVE/FRESTORE which have special handling
-					IF opcode(8 downto 6) = "100" OR opcode(8 downto 6) = "101" THEN
+					-- Check instruction type by bits 8:6
+					IF opcode(8 downto 6) = "001" THEN
+						-- FBcc - Floating-Point Branch Conditional (F280-F2BF)
+						-- Check if this is word or long displacement
+						IF decodeOPC='1' THEN
+							IF opcode(5 downto 0) = "000000" THEN
+								-- FBcc.W - Word displacement follows
+								set(get_2ndOPC) <= '1';
+								next_micro_state <= fpu1;  -- Will handle as cpGEN conditional
+							ELSE
+								-- FBcc.L - Long displacement follows
+								set(longaktion) <= '1';
+								next_micro_state <= fpu1;  -- Will handle as cpGEN conditional
+							END IF;
+						END IF;
+					ELSIF opcode(8 downto 6) = "010" OR opcode(8 downto 6) = "011" THEN
+						-- FScc/FTRAPcc - handle as cpGEN conditional instructions
+						IF decodeOPC='1' THEN
+							set(get_2ndOPC) <= '1';
+							next_micro_state <= fpu1;
+						END IF;
+					ELSIF opcode(8 downto 6) = "100" OR opcode(8 downto 6) = "101" THEN
 						-- FSAVE/FRESTORE - handle with special decoder logic below
 						-- Fall through to cpSAVE/cpRESTORE handling
 					ELSE
@@ -4397,28 +4614,105 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				
 				-- FPU state handlers
 				WHEN fpu1 =>
-					-- First, handle addressing modes for regular FPU instructions
-					-- This ensures predecrement/postincrement operations work correctly
+					-- MC68020 cpGEN Protocol Implementation
+					-- Step 1: Write instruction command word to Command CIR
+					-- Step 2: Read Response CIR for coprocessor status and response primitives
 					
-					-- Check if this is a regular FPU instruction that needs addressing mode processing
-					IF opcode(8 downto 6) /= "100" AND opcode(8 downto 6) /= "101" THEN
-						-- Regular FPU instruction (FMOVE, FADD, FSUB, etc.)
+					-- Check instruction type and follow appropriate MC68020 coprocessor protocol
+					IF opcode(8 downto 6) = "000" THEN
+						-- cpGEN instruction - follow MC68020 coprocessor protocol
+						IF state = "00" THEN
+							-- Phase 1: Write command word to Command CIR (register 0x01)
+							-- CPU space cycle with FC=111, A4-A0=00001 (Command register)
+							setstate <= "01";  -- Write cycle to coprocessor
+							next_micro_state <= fpu2;  -- Proceed to read Response CIR
+							skipFetch <= '1';
+						END IF;
+					ELSIF opcode(8 downto 6) = "001" OR opcode(8 downto 6) = "010" OR opcode(8 downto 6) = "011" THEN
+						-- Conditional instructions (FDBcc, FScc, FTRAPcc) - follow conditional protocol
+						IF state = "00" THEN
+							-- Phase 1: Write condition selector to Condition CIR (register 0x04)
+							-- CPU space cycle with FC=111, A4-A0=00100 (Condition register)
+							setstate <= "01";  -- Write cycle to coprocessor
+							next_micro_state <= fpu2;  -- Proceed to read Response CIR for true/false result
+							skipFetch <= '1';
+						END IF;
+					ELSIF opcode(8 downto 6) = "100" THEN
+						-- cpSAVE instruction - follow MC68020 coprocessor state frame protocol
+						IF state = "00" THEN
+							-- Phase 1: Read Save CIR (register 0x03) for format word
+							-- CPU space cycle with FC=111, A4-A0=00011 (Save CIR)
+							setstate <= "10";  -- Read cycle from coprocessor
+							next_micro_state <= fpu2;  -- Process format word and begin save
+							skipFetch <= '1';
+						END IF;
+					ELSIF opcode(8 downto 6) = "101" THEN
+						-- cpRESTORE instruction - follow MC68020 coprocessor state frame protocol
+						IF state = "00" THEN
+							-- Phase 1: Write format word to Restore CIR (register 0x03)
+							-- Format word read from memory at EA
+							-- CPU space cycle with FC=111, A4-A0=00011 (Restore CIR)
+							setstate <= "01";  -- Write cycle to coprocessor
+							next_micro_state <= fpu2;  -- Read Restore CIR for response
+							skipFetch <= '1';
+						END IF;
+					ELSE
+						-- Non-cpGEN instructions (FSAVE, FRESTORE) - handle addressing modes
+						-- This ensures predecrement/postincrement operations work correctly
+						
+						-- Check if this is a regular FPU instruction that needs addressing mode processing
+						IF opcode(8 downto 6) /= "100" AND opcode(8 downto 6) /= "101" THEN
+						-- Regular FPU instruction (FMOVE, FADD, FSUB, FTST, etc.)
 						-- Handle addressing modes based on EA field in bits 5:0
+						
+						-- CRITICAL: Prevent register writes for FPU instructions that don't write to CPU registers
+						-- Check the FPU operation code and instruction type
+						IF sndOPC(6 downto 0) = "0111010" OR    -- FTST (test operand)
+						   sndOPC(6 downto 0) = "0111000" OR    -- FCMP (compare operands)
+						   (sndOPC(6 downto 0) = "0000000" AND opcode(13 downto 10) = "0000") OR  -- FNOP (no operation)
+						   (opcode(8 downto 6) = "001" AND opcode(5 downto 3) = "111" AND 
+						    (opcode(2 downto 0) = "010" OR opcode(2 downto 0) = "011")) OR  -- FBcc.W/FBcc.L (branch)
+						   (opcode(8 downto 6) = "011" AND opcode(5 downto 3) = "111" AND 
+						    opcode(2 downto 0) = "100") THEN  -- FTRAPcc (trap conditionally)
+							-- These operations should never write to CPU data/address registers
+							skipFetch <= '1';  -- Prevent further instruction fetches
+							set_exec(Regwrena) <= '0';
+							set_exec(save_memaddr) <= '0';
+							set_exec(get_ea_now) <= '0';
+							set_exec(write_reg) <= '0';
+						END IF;
 						
 						-- For source operand addressing (typically bits 5:0 in FPU instructions)
 						-- Handle different addressing modes
 						IF opcode(5 downto 3) = "000" THEN
-							-- Data register direct mode (Dn) - FTST.B D1, FMOVE.L D0,FP1, etc.
+							-- Data register direct mode (Dn) - FMOVE.L D0,FP1, etc.
 							-- Set up register file to read the specified data register
-							datatype <= "10";  -- Longword (even for FTST.B, read full longword)
-							-- rf_source_addr is handled in the main combinational process
-							-- Don't set memory access signals - this is register-to-register
-							-- FPU will extract the needed format (byte/word/long) from the longword
+							datatype <= "10";  -- Longword
+							source_lowbits <= '1';  -- Select register from bits 2:0
+							source_areg <= '0';     -- Data register
+							-- Need to wait one cycle for register to be read
+							IF state = "00" THEN
+								setstate <= "01";  -- Wait state for register read
+								next_micro_state <= fpu1;
+							ELSE
+								-- Register has been read, proceed to FPU operation
+								next_micro_state <= fpu_wait;
+							END IF;
+							skipFetch <= '1';  -- Don't fetch while waiting
 						ELSIF opcode(5 downto 3) = "001" THEN
 							-- Address register direct mode (An) 
 							datatype <= "10";  -- Longword
-							-- rf_source_addr is handled in the main combinational process
-							-- Don't set memory access signals - this is register-to-register
+							source_lowbits <= '1';  -- Select register from bits 2:0
+							source_areg <= '1';     -- Address register
+							-- Need to wait one cycle for register to be read
+							IF state = "00" THEN
+								setstate <= "01";  -- Wait state for register read
+								next_micro_state <= fpu1;
+							ELSE
+								-- Register has been read, proceed to FPU operation
+								next_micro_state <= fpu_wait;
+							END IF;
+							skipFetch <= '1';  -- Don't fetch while waiting
 						ELSIF opcode(5 downto 3) = "100" THEN
 							-- Predecrement addressing mode -(An)
 							set(presub) <= '1';
@@ -4429,6 +4723,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							-- Set appropriate datatype based on FPU operation size
 							-- Most FPU operations use longwords by default
 							datatype <= "10";  -- Longword
+							source_lowbits <= '1';  -- Select register from bits 2:0
+							source_areg <= '1';     -- Address register
+							-- Need to wait one cycle for register to be read
+							IF state = "00" THEN
+								setstate <= "01";  -- Wait state for register read
+								next_micro_state <= fpu1;
+							ELSE
+								-- Register has been read, proceed to FPU operation
+								next_micro_state <= fpu_wait;
+							END IF;
+							skipFetch <= '1';  -- Don't fetch while waiting
 						ELSIF opcode(5 downto 3) = "011" THEN
 							-- Postincrement addressing mode (An)+
 							set(postadd) <= '1';
@@ -4437,6 +4742,20 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								set(use_SP) <= '1';  -- Use stack pointer
 							END IF;
 							datatype <= "10";  -- Longword
+							source_lowbits <= '1';  -- Select register from bits 2:0
+							source_areg <= '1';     -- Address register
+							-- Need to wait one cycle for register to be read
+							IF state = "00" THEN
+								setstate <= "01";  -- Wait state for register read
+								next_micro_state <= fpu1;
+							ELSE
+								-- Register has been read, proceed to FPU operation
+								next_micro_state <= fpu_wait;
+							END IF;
+							skipFetch <= '1';  -- Don't fetch while waiting
+						ELSE
+							-- Other addressing modes
+							next_micro_state <= fpu_wait;  -- Go to FPU wait for execution
 						END IF;
 					END IF;
 					
@@ -4474,17 +4793,25 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								END IF;
 								
 							WHEN "100" =>  -- -(An) - Address Register Indirect with Predecrement
-								setstate <= "10";  -- Memory read
-								set(presub) <= '1';  -- Predecrement by 4 bytes
-								IF opcode(2 downto 0) = "111" THEN
-									set(use_SP) <= '1';  -- Use A7 if -(A7)
-									setstackaddr <= '1';  -- Update stack pointer
-								END IF;
-								IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
-									next_micro_state <= fpu1;  -- Continue for more reads
+								-- CRITICAL FIX: Separate predecrement and memory operations for proper DSACK timing
+								IF state = "00" THEN
+									-- Phase 1: Calculate predecrement address and update register
+									set(presub) <= '1';  -- Predecrement by 4 bytes
+									IF opcode(2 downto 0) = "111" THEN
+										set(use_SP) <= '1';  -- Use A7 if -(A7)
+										setstackaddr <= '1';  -- Update stack pointer
+									END IF;
+									setstate <= "01";  -- Wait for register update to complete
+									next_micro_state <= fpu1;  -- Stay in fpu1 for next phase
 								ELSE
-									setstate <= "00";  -- Ensure proper endOPC condition
-									next_micro_state <= fpu_done;  -- All done
+									-- Phase 2: Start memory read after register update completed
+									setstate <= "10";  -- Memory read
+									IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
+										next_micro_state <= fpu1;  -- Continue for more reads
+									ELSE
+										setstate <= "00";  -- Ensure proper endOPC condition
+										next_micro_state <= fpu_done;  -- All done
+									END IF;
 								END IF;
 								
 							WHEN "101" =>  -- (d16,An) - Address Register Indirect with Displacement
@@ -4591,16 +4918,56 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							fmovem_reg_count <= 0;                  -- Start with register 0
 							next_micro_state <= fpu_fmovem;         -- FP register FMOVEM state
 						END IF;
-					ELSE
-						-- Regular FPU arithmetic operation
-						next_micro_state <= fpu_wait;
-					END IF;
+						ELSE
+							-- Regular FPU arithmetic operation
+							-- next_micro_state already set by addressing mode handling above
+							NULL;  -- Don't override the state set by addressing mode
+						END IF;
+					END IF;  -- End of cpGEN vs non-cpGEN check
 					
 				WHEN fpu2 =>
-					-- FSAVE - MC68882 compatible implementation with all addressing modes
-					-- Write 15 longwords (60 bytes) to memory
+					-- MC68020 Coprocessor Protocol - Phase 2: Read Response CIR
+					-- Handle both cpGEN and conditional instructions
+					IF opcode(8 downto 6) = "000" THEN
+						-- cpGEN instruction - read Response CIR for coprocessor status
+						IF state = "00" THEN
+							-- Phase 2: Read Response CIR (register 0x00) for response primitives
+							-- CPU space cycle with FC=111, A4-A0=00000 (Response register)
+							setstate <= "10";  -- Read cycle from coprocessor
+							next_micro_state <= fpu_wait;  -- Analyze response and continue
+							skipFetch <= '1';
+						END IF;
+					ELSIF opcode(8 downto 6) = "001" OR opcode(8 downto 6) = "010" OR opcode(8 downto 6) = "011" THEN
+						-- Conditional instruction - read Response CIR for true/false result
+						IF state = "00" THEN
+							-- Phase 2: Read Response CIR (register 0x00) for condition result
+							-- CPU space cycle with FC=111, A4-A0=00000 (Response register)
+							setstate <= "10";  -- Read cycle from coprocessor
+							next_micro_state <= fpu_wait;  -- Process condition result
+							skipFetch <= '1';
+						END IF;
+					ELSIF opcode(8 downto 6) = "100" THEN
+						-- cpSAVE instruction - process format word from Save CIR
+						-- data_read contains format word from coprocessor
+						-- Process format word and begin state frame save to memory
+						next_micro_state <= fpu_wait;  -- Continue with memory operations
+					ELSIF opcode(8 downto 6) = "101" THEN
+						-- cpRESTORE instruction - read Restore CIR for response
+						IF state = "00" THEN
+							-- Phase 2: Read Restore CIR (register 0x03) for response
+							-- CPU space cycle with FC=111, A4-A0=00011 (Restore CIR)
+							setstate <= "10";  -- Read cycle from coprocessor
+							next_micro_state <= fpu_wait;  -- Process response and continue
+							skipFetch <= '1';
+						END IF;
+					ELSE
+						-- FSAVE - MC68882 compatible implementation with all addressing modes
+						-- Write 15 longwords (60 bytes) to memory
 					
 					datatype <= "10";  -- Longword access
+					-- CRITICAL FIX: Force correct datatype for all FSAVE operations
+					-- This prevents byte mode from previous instructions corrupting registers
+					set_datatype <= "10";  -- Ensure exe_datatype gets updated
 					
 					CASE opcode(5 downto 3) IS
 						WHEN "010" =>  -- (An) - Address Register Indirect
@@ -4648,25 +5015,42 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							ELSE
 								-- All writes complete, go to idle
 								setstate <= "00";  -- Ensure proper endOPC condition
+								set_rot_cnt <= "000001";  -- Reset rotation counter
+								setnextpass <= '0';  -- Clear nextpass
+								-- CRITICAL: Clear all FSAVE-related flags to prevent interference
+								-- fsave_predecr_flag cleared in clocked process
+								set(presub) <= '0';
+								set(subidx) <= '0';
 								next_micro_state <= idle;   -- All done
 							END IF;
 							
 						WHEN "100" =>  -- -(An) - Address Register Indirect with Predecrement
 							IF fsave_counter = 0 THEN
-								-- First operation: Decrement An by frame size and update register
-								set(presub) <= '1';             -- Predecrement (frame size via fsave_predecr_flag)
-								IF opcode(2 downto 0) = "111" THEN
-									set(use_SP) <= '1';         -- Use stack pointer if -(A7)
-									setstackaddr <= '1';        -- Set dest address to A7
+								-- CRITICAL FIX: Separate predecrement and memory operations for proper DSACK timing
+								IF state = "00" THEN
+									-- Phase 1: Calculate predecrement address and update register
+									set(presub) <= '1';             -- Predecrement (frame size via fsave_predecr_flag)
+									IF opcode(2 downto 0) = "111" THEN
+										set(use_SP) <= '1';         -- Use stack pointer if -(A7)
+										setstackaddr <= '1';        -- Set dest address to A7
+									END IF;
+									set(Regwrena) <= '1';          -- Update An with decremented value
+									set(write_reg) <= '1';          -- Enable register write
+									-- CRITICAL FIX: Ensure correct register targeting for FSAVE
+									dest_areg <= '1';              -- Force address register (An) not data register (Dn)
+									dest_hbits <= '0';              -- Use low bits for register selection
+									data_is_source <= '0';         -- Prevent data_is_source corruption
+									-- ADDITIONAL FIX: Prevent any exec flags that could corrupt register selection
+									set_exec <= (others => '0');   -- Clear all exec flags
+									set_exec(Regwrena) <= '1';     -- Only enable register write
+									setstate <= "01";               -- Wait for register update to complete
+									next_micro_state <= fpu2;       -- Stay in fpu2 for next phase
+								ELSE
+									-- Phase 2: Start memory write after register update completed
+									setstate <= "11";               -- Memory write
+									fpu_data_request <= '1';        -- Request data from FPU
+									next_micro_state <= fpu2;       -- Continue for more writes
 								END IF;
-								-- Let ALU handle the predecrement calculation and register update
-								set(Regwrena) <= '1';          -- Update An with decremented value (immediate execution)
-								set(write_reg) <= '1';          -- Enable register write
-								
-								-- Write first longword at the decremented address
-								setstate <= "11";               -- Memory write
-								fpu_data_request <= '1';        -- Request data from FPU
-								next_micro_state <= fpu2;       -- Continue for more writes
 							ELSE
 								-- Subsequent writes: Use saved address with offset
 								set(mem_addsub) <= '1';         -- Use address calculation with offset
@@ -4820,10 +5204,134 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							-- Invalid addressing modes (Dn, An not allowed for FSAVE)
 							next_micro_state <= idle;
 					END CASE;
+					END IF;  -- End of cpGEN vs FSAVE check in fpu2
 					
 				WHEN fpu_wait =>
-					-- Wait for FPU to complete operation with timeout protection
-					IF fpu_complete = '1' THEN
+					-- MC68020 cpGEN Protocol - Phase 3: Handle Response Primitives
+					-- For cpGEN instructions, analyze response from Response CIR
+					-- For other instructions, wait for FPU completion
+					
+					IF opcode(8 downto 6) = "000" THEN
+						-- cpGEN instruction - handle response primitives from Response CIR
+						-- Response primitives include: $00=null, $01=ca, $02=na, etc.
+						-- For now, simplified: proceed directly to completion
+						-- Real implementation would decode response primitive from data_read
+						-- and handle requests for additional data, exceptions, etc.
+						next_micro_state <= fpu_done;  -- Complete the cpGEN instruction
+					ELSIF opcode(8 downto 6) = "001" OR opcode(8 downto 6) = "010" OR opcode(8 downto 6) = "011" THEN
+						-- Conditional instruction - process true/false result from Response CIR
+						-- data_read contains the condition result from coprocessor
+						-- CPU completes the instruction based on this result
+						
+						-- Use actual condition result from FPU condition evaluation
+						-- Complete the appropriate action based on condition result
+						
+						CASE opcode(8 downto 6) IS
+							WHEN "001" =>  -- FBcc or FDBcc
+								-- Check addressing mode to distinguish FBcc from FDBcc
+								IF opcode(5 downto 3) = "111" AND (opcode(2 downto 0) = "010" OR opcode(2 downto 0) = "011") THEN
+									-- FBcc - Branch conditionally (mode 111, reg 010=word or 011=long)
+									-- The condition has been evaluated, go to done state
+									next_micro_state <= fpu_done;
+								ELSE
+									-- FDBcc - Decrement and branch conditionally
+									-- Step 1: Decrement data register (Dn = opcode bits 2:0)
+									-- Step 2: If condition false OR Dn = -1, continue; else branch
+									IF fpu_condition_result = '0' THEN
+										-- Condition false - continue to next instruction
+										next_micro_state <= fpu_done;
+									ELSE
+										-- Condition true - implement decrement and branch logic
+										-- TODO: Implement register decrement
+										next_micro_state <= fpu_done;
+									END IF;
+								END IF;
+								
+							WHEN "010" =>  -- FScc - Set byte conditionally  
+								-- Set destination byte: $FF if condition true, $00 if false
+								-- Destination addressing mode in opcode bits 5:0
+								datatype <= "00";  -- Byte operation
+								-- FScc operation will be handled via set mechanism
+								-- Handle destination EA
+								CASE opcode(5 downto 3) IS
+									WHEN "000" =>  -- Dn
+										dest_hbits <= '1';
+										dest_areg <= '0';
+										set_exec(Regwrena) <= '1';
+										-- Don't use write_reg for FScc; handled via regin
+										next_micro_state <= fpu_done;
+									WHEN "010" =>  -- (An)
+										set(no_Flags) <= '1';
+										setstate <= "11";  -- Write cycle
+										next_micro_state <= fpu_done;
+									WHEN "011" =>  -- (An)+
+										set(no_Flags) <= '1';
+										set(postadd) <= '1';
+										set_exec(Regwrena) <= '1';
+										setstate <= "11";  -- Write cycle
+										next_micro_state <= fpu_done;
+									WHEN "100" =>  -- -(An)
+										set(no_Flags) <= '1';
+										set(presub) <= '1';
+										set_exec(Regwrena) <= '1';
+										setstate <= "11";  -- Write cycle
+										next_micro_state <= fpu_done;
+									WHEN "101" =>  -- d16(An)
+										-- Need to fetch displacement
+										set(get_ea_now) <= '1';
+										set(ea_build) <= '1';
+										next_micro_state <= fpu_done;
+									WHEN "110" =>  -- d8(An,Xn)
+										-- Need to fetch extension word
+										set(get_ea_now) <= '1';
+										set(ea_build) <= '1';
+										next_micro_state <= fpu_done;
+									WHEN "111" =>
+										CASE opcode(2 downto 0) IS
+											WHEN "000" =>  -- xxx.W
+												set(get_ea_now) <= '1';
+												set(ea_build) <= '1';
+												next_micro_state <= fpu_done;
+											WHEN "001" =>  -- xxx.L
+												set(get_ea_now) <= '1';
+												set(ea_build) <= '1';
+												set(longaktion) <= '1';
+												next_micro_state <= fpu_done;
+											WHEN OTHERS =>
+												-- Invalid EA for FScc
+												trap_illegal <= '1';
+												trapmake <= '1';
+												next_micro_state <= idle;
+										END CASE;
+									WHEN OTHERS =>
+										-- An direct not allowed
+										trap_illegal <= '1';
+										trapmake <= '1';
+										next_micro_state <= idle;
+								END CASE;
+								
+							WHEN "011" =>  -- FTRAPcc - Trap conditionally
+								-- Generate FTRAP exception if condition is true
+								IF fpu_condition_result = '1' THEN
+									-- Condition true - generate FTRAP exception
+									trap_fpu_trap <= '1';
+									trapmake <= '1';
+									next_micro_state <= fpu_done;
+								ELSE
+									-- Condition false - continue to next instruction
+									next_micro_state <= fpu_done;
+								END IF;
+								
+							WHEN OTHERS =>
+								next_micro_state <= fpu_done;
+						END CASE;
+					ELSE
+						-- Non-cpGEN instructions - wait for FPU to complete operation with timeout protection
+						-- Add timeout to prevent hanging on FPU operations
+						IF timeout_counter > TIMEOUT_LIMIT_CPU THEN
+							-- Timeout - force completion to prevent hang
+							next_micro_state <= fpu_done;
+						ELSIF fpu_complete = '1' THEN
 						IF fpu_exception = '1' THEN
 							-- FPU generated an exception - use proper MC68881/68882 exception vectors
 							-- Map exception codes to proper FPU exception vectors (48-54)
@@ -4850,15 +5358,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							setstate <= "00";  -- Ensure proper endOPC condition for normal completion
 							next_micro_state <= fpu_done;
 						END IF;
-					ELSE
-						-- FPU operations now handled immediately via CPU-managed interface
-						setstate <= "00";  -- Ensure proper endOPC condition for immediate completion
-						next_micro_state <= fpu_done;
-					END IF;
+					END IF;  -- End of fpu_complete check
+					END IF;  -- End of cpGEN vs non-cpGEN check in fpu_wait
 					
 				WHEN fpu_done =>
 					-- FPU operation completed successfully
-					-- Note: CCR update for FTST handled in sequential process
+					-- Note: CCR update for FPU operations handled in sequential process
 					
 					-- Check if this is FSAVE with complex addressing mode that needed EA calculation
 					IF opcode(15 downto 6) = "1111001001" AND exec(store_ea_data) = '1' THEN
@@ -4881,6 +5386,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						ELSE
 							-- All writes complete, go to idle
 							setstate <= "00";  -- Ensure proper endOPC condition
+							-- CRITICAL FIX: Clear ALU flags to prevent register corruption after FSAVE
+							-- BUT preserve FSAVE predecrement flag until register write completes  
+							set(subidx) <= '0';           -- Clear ALU subtraction mode
+							IF NOT (opcode(15 downto 6) = "1111001001" AND opcode(5 downto 3) = "100" AND fsave_predecr_flag = '1') THEN
+								set(presub) <= '0';       -- Clear predecrement flag (except during active FSAVE predecrement)
+							END IF;
 							next_micro_state <= idle;       -- All done
 						END IF;
 					-- Check if this is FRESTORE with complex addressing mode that needed EA calculation
@@ -4905,6 +5416,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							-- All reads complete, go to idle
 							setstate <= "00";  -- Ensure proper endOPC condition
 							set_rot_cnt <= "000001";  -- CRITICAL: Reset rot_cnt for endOPC generation
+							-- CRITICAL FIX: Clear ALU flags to prevent register corruption after FRESTORE
+							-- FRESTORE doesn't use predecrement, so always clear presub 
+							set(subidx) <= '0';           -- Clear ALU subtraction mode
+							set(presub) <= '0';           -- Clear predecrement flag
 							next_micro_state <= idle;   -- All done
 						END IF;
 					-- Handle FMOVE control register to data register (FMOVE.L FPCR,Dn)
@@ -4917,9 +5432,42 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						setnextpass <= '0';           -- Clear nextpass flag that blocks endOPC
 						setstate <= "00";  -- Ensure proper endOPC condition
 						set_rot_cnt <= "000001";  -- CRITICAL: Reset rot_cnt for endOPC generation
+						-- CRITICAL FIX: Clear ALU flags to prevent register corruption after FPU operations
+						-- FMOVE control register doesn't use predecrement, so always clear presub
+						set(subidx) <= '0';           -- Clear ALU subtraction mode
+						set(presub) <= '0';           -- Clear predecrement flag
+						-- FBcc implementation would go here
+						-- TODO: Implement FBcc branch handling properly without multiple drivers
+						next_micro_state <= idle;
+						setnextpass <= '0';
+						setstate <= "00";
+						set_rot_cnt <= "000001";
+						set(subidx) <= '0';
+						set(presub) <= '0';
+						next_micro_state <= idle;
+					ELSIF sndOPC(6 downto 0) = "0111010" OR    -- FTST
+					      sndOPC(6 downto 0) = "0111000" OR    -- FCMP
+					      (sndOPC(6 downto 0) = "0000000" AND opcode(13 downto 10) = "0000") OR  -- FNOP
+					      (opcode(8 downto 6) = "001" AND opcode(5 downto 3) = "111" AND 
+					       (opcode(2 downto 0) = "010" OR opcode(2 downto 0) = "011")) OR  -- FBcc
+					      (opcode(8 downto 6) = "011" AND opcode(5 downto 3) = "111" AND 
+					       opcode(2 downto 0) = "100") THEN  -- FTRAPcc
+						-- Operations that don't write to CPU registers
+						-- CRITICAL: Prevent any register write operations
+						set_exec(Regwrena) <= '0';
+						set_exec(save_memaddr) <= '0';
+						set_exec(get_ea_now) <= '0';
+						set_exec(write_reg) <= '0';
+						-- Clear all other signals
+						fpu_data_request <= '0';
+						setnextpass <= '0';
+						setstate <= "00";
+						set_rot_cnt <= "000001";
+						set(subidx) <= '0';
+						set(presub) <= '0';
 						next_micro_state <= idle;
 					ELSE
-						-- Default case for simple FPU operations (FTST, FMOVE, arithmetic operations)
+						-- Default case for simple FPU operations (FMOVE, arithmetic operations)
 						-- Reset FPU interface to prevent conflicts with subsequent CPU instructions
 						fpu_data_request <= '0';      -- Clear FPU data request
 						fmovem_data_request <= '0';   -- Clear FMOVEM request
@@ -4928,6 +5476,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						setnextpass <= '0';           -- Clear nextpass flag that blocks endOPC
 						setstate <= "00";             -- Ensure proper endOPC condition for all FPU operations
 						set_rot_cnt <= "000001";      -- CRITICAL: Reset rot_cnt for endOPC generation
+						-- CRITICAL FIX: Clear ALU flags to prevent register corruption after FPU operations
+						-- BUT preserve FSAVE predecrement flag until register write completes
+						set(subidx) <= '0';           -- Clear ALU subtraction mode
+						IF NOT (opcode(15 downto 6) = "1111001001" AND opcode(5 downto 3) = "100" AND fsave_predecr_flag = '1') THEN
+							set(presub) <= '0';       -- Clear predecrement flag (except during active FSAVE predecrement)
+						END IF;
 						next_micro_state <= idle;     -- Return to idle for next instruction
 					END IF;
 					
@@ -4944,28 +5498,28 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- Check direction: 0=FP registers to memory, 1=memory to FP registers
 						IF fmovem_direction = '0' THEN
 							-- FMOVEM FP0-FP7,<ea> - store registers to memory
-							-- Set up memory write with FP register data
-							-- The FPU will provide data via fmovem_data_out
-							-- Set up addressing mode (predecrement/postincrement handled in EA processing)
-							IF opcode(5 downto 3) = "100" THEN
-								-- Predecrement mode -(An)
-								set(presub) <= '1';
+							-- CRITICAL FIX: Separate address mode setup and memory operations for proper DSACK timing
+							IF (opcode(5 downto 3) = "100" OR opcode(5 downto 3) = "011") AND state = "00" THEN
+								-- Phase 1: Set up predecrement/postincrement address mode
+								IF opcode(5 downto 3) = "100" THEN
+									-- Predecrement mode -(An)
+									set(presub) <= '1';
+								ELSE
+									-- Postincrement mode (An)+
+									set(postadd) <= '1';
+								END IF;
 								setstackaddr <= '1';
 								IF opcode(2 downto 0) = "111" THEN
 									set(use_SP) <= '1';  -- Use stack pointer
 								END IF;
-							ELSIF opcode(5 downto 3) = "011" THEN
-								-- Postincrement mode (An)+
-								set(postadd) <= '1';
-								setstackaddr <= '1';
-								IF opcode(2 downto 0) = "111" THEN
-									set(use_SP) <= '1';  -- Use stack pointer
-								END IF;
+								setstate <= "01";  -- Wait for address calculation
+								next_micro_state <= fpu_fmovem;  -- Stay in fpu_fmovem for next phase
+							ELSE
+								-- Phase 2: Start memory operation after address setup completed (or direct addressing)
+								datatype <= "10";  -- Longword transfers
+								set(write_reg) <= '1';
+								set(get_ea_now) <= '1';
 							END IF;
-							-- FP registers are 80-bit (10 bytes), but we transfer as 3 longwords (12 bytes)
-							datatype <= "10";  -- Longword transfers
-							set(write_reg) <= '1';
-							set(get_ea_now) <= '1';
 						ELSE
 							-- FMOVEM <ea>,FP0-FP7 - load registers from memory
 							-- Set up memory read to load FP register
@@ -5087,12 +5641,26 @@ BEGIN
 			micro_state <= ld_nn;
 			fsave_counter <= 0;
 			fsave_predecr_flag <= '0';
-			fsave_frame_size <= 60;
-			fsave_frame_format <= X"60";
+			fsave_frame_size <= 4;
+			coprocessor_format_word <= X"00000004";  -- Empty/Reset format
 			fsave_size_determined <= '0';
+			cpSAVE_state <= 0;
+			cpRESTORE_state <= 0;
+			timeout_counter <= 0;
 		ELSIF clkena_lw='1' THEN
 			trapd <= trapmake;
 			micro_state <= next_micro_state;
+			
+			-- Manage FPU timeout counter
+			IF micro_state = fpu_wait THEN
+				-- Increment timeout counter while waiting for FPU
+				IF timeout_counter < 255 THEN
+					timeout_counter <= timeout_counter + 1;
+				END IF;
+			ELSE
+				-- Reset timeout counter when not in fpu_wait state
+				timeout_counter <= 0;
+			END IF;
 			
 			-- Handle FSAVE/FRESTORE counter and control signals
 			
@@ -5114,19 +5682,17 @@ BEGIN
 					-- Query FPU for current state to determine appropriate frame type
 					IF fpu_busy = '1' THEN
 						-- FPU is busy executing an operation - save BUSY frame
-						fsave_frame_format <= X"D8";  -- MC68882 BUSY frame ($D8 = version 13, BUSY)
-						fsave_frame_size <= 216;      -- 216 bytes = 54 longwords  
-						fsave_frame_type <= "10";     -- BUSY frame type
+						coprocessor_format_word <= X"D8" & X"D8" & X"0000";  -- MC68882 BUSY frame ($D8 = version 13, BUSY)
+						fsave_frame_size <= 216;      -- 216 bytes = 54 longwords
 					ELSIF fpu_exception = '1' OR fpu_fpsr /= X"00000000" THEN
 						-- FPU has exceptions or non-zero state - save IDLE frame
-						fsave_frame_format <= X"60";  -- MC68882 IDLE frame ($60 = version 6, IDLE)
+						coprocessor_format_word <= X"60" & X"3C" & X"0000";  -- MC68882 IDLE frame ($60 = version 6, IDLE)
 						fsave_frame_size <= 60;       -- 60 bytes = 15 longwords
-						fsave_frame_type <= "01";     -- IDLE frame type
 					ELSE
-						-- FPU is in reset state - save NULL frame
-						fsave_frame_format <= X"18";  -- NULL frame ($18 = version 1, NULL)
-						fsave_frame_size <= 4;        -- 4 bytes = 1 longword
-						fsave_frame_type <= "00";     -- NULL frame type
+						-- FPU is in reset state - save IDLE frame for compatibility
+						-- CRITICAL FIX: MC68882 always saves at least IDLE frame
+						coprocessor_format_word <= X"60" & X"3C" & X"0000";  -- MC68882 IDLE frame
+						fsave_frame_size <= 60;       -- 60 bytes = 15 longwords
 					END IF;
 					fsave_size_determined <= '1';
 				END IF;
@@ -5141,9 +5707,12 @@ BEGIN
 				END IF;
 				
 				-- Clear single-use signals after register write completes for predecrement
-				-- Only clear fsave_predecr_flag after both memory write AND register write complete
-				IF opcode(5 downto 3) /= "100" OR fsave_counter > 0 THEN
-					-- Clear flag for non-predecrement modes immediately, or for predecrement after first cycle
+				-- CRITICAL FIX: Keep fsave_predecr_flag active until register is actually written
+				IF opcode(5 downto 3) /= "100" THEN
+					-- Clear flag for non-predecrement modes immediately
+					fsave_predecr_flag <= '0';
+				ELSIF fsave_counter > 0 AND exec(presub) = '0' THEN
+					-- For predecrement: only clear after first write AND register update complete
 					fsave_predecr_flag <= '0';
 				END IF;
 			END IF;
@@ -5156,38 +5725,31 @@ BEGIN
 				-- Frame size determination on first read
 				IF fsave_counter = 0 AND fsave_size_determined = '0' THEN
 					-- First read: analyze frame format from data_read
-					fsave_frame_format <= data_read(31 downto 24);  -- Frame format in upper byte
+					coprocessor_format_word <= data_read;  -- Complete format word
 					CASE data_read(31 downto 24) IS
 						WHEN X"18" =>
 							-- NULL frame = 4 bytes (1 longword only)
 							fsave_frame_size <= 4;
-							fsave_frame_type <= "00";     -- NULL frame type
-						WHEN X"60" =>
+							WHEN X"60" =>
 							-- MC68882 IDLE frame = 60 bytes (15 longwords)
 							fsave_frame_size <= 60;
-							fsave_frame_type <= "01";     -- IDLE frame type
-						WHEN X"D8" =>
+							WHEN X"D8" =>
 							-- MC68882 BUSY frame = 216 bytes (54 longwords)
 							fsave_frame_size <= 216;
-							fsave_frame_type <= "10";     -- BUSY frame type
-						WHEN OTHERS =>
+							WHEN OTHERS =>
 							-- Check frame type by format bits
 							IF data_read(27 downto 24) = X"8" THEN
 								-- Format $XX18 = NULL frame (check lower nibble = 8)
 								fsave_frame_size <= 4;
-								fsave_frame_type <= "00";
 							ELSIF data_read(31 downto 28) /= X"0" AND data_read(27 downto 24) = X"8" THEN
 								-- Format $XX18 where XX != 0 = IDLE frame  
 								fsave_frame_size <= 60;
-								fsave_frame_type <= "01";
 							ELSIF data_read(31 downto 28) /= X"0" AND data_read(27 downto 24) = X"4" THEN
 								-- Format $XXB4 = BUSY frame (lower nibble = 4, upper nibble = B)
 								fsave_frame_size <= 216;
-								fsave_frame_type <= "10";
 							ELSE
 								-- Default to IDLE frame for unknown formats
 								fsave_frame_size <= 60;
-								fsave_frame_type <= "01";
 							END IF;
 					END CASE;
 					fsave_size_determined <= '1';

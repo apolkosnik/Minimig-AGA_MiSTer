@@ -42,7 +42,7 @@ entity TG68K_FPU is
 		
 		-- FSAVE/FRESTORE Data Interface (CPU manages all memory operations)
 		fsave_data_request		: in std_logic;							-- CPU requests FSAVE data at specific index
-		fsave_data_index		: in integer range 0 to 15;			-- Index of data longword (0-14)
+		fsave_data_index		: in integer range 0 to 15;
 		frestore_data_write		: in std_logic;							-- CPU writing FRESTORE data
 		frestore_data_in		: in std_logic_vector(31 downto 0);		-- Data from CPU for FRESTORE
 		
@@ -142,7 +142,7 @@ architecture rtl of TG68K_FPU is
 	signal operation_complexity : std_logic_vector(1 downto 0) := "00";  -- 00=simple, 01=medium, 10=complex, 11=very complex
 	
 	-- FSAVE/FRESTORE operation signals
-	signal fsave_counter : integer range 0 to 31 := 0;  -- Word counter for complete state frame
+	signal fsave_counter : integer range 0 to 54 := 0;  -- Word counter for all frame types
 	signal frestore_frame_format : std_logic_vector(7 downto 0);  -- Saved frame format for FRESTORE
 	
 	-- Instruction decode signals from decoder
@@ -258,6 +258,12 @@ architecture rtl of TG68K_FPU is
 	signal fp_to_int_exp_int : integer range -32768 to 32767;
 	signal fp_to_int_shift : integer range 0 to 63;
 	signal fp_to_int_result : std_logic_vector(31 downto 0);
+	
+	-- Exception handler signals
+	signal exception_fpsr_out : std_logic_vector(31 downto 0);
+	signal exception_pending_internal : std_logic;
+	signal exception_vector_internal : std_logic_vector(7 downto 0);
+	signal exception_corrected_result : std_logic_vector(79 downto 0);
 	
 	-- MC68881/68882 Operation Codes (7-bit field from instruction word)
 	-- Basic operations (fully implemented)
@@ -498,6 +504,39 @@ begin
 		address_error => movem_address_error
 	);
 
+	-- FPU Exception Handler instantiation
+	FPU_EXCEPTION_HANDLER: entity work.TG68K_FPU_Exception_Handler
+	port map(
+		clk => clk,
+		reset => not nReset,
+		
+		-- Input from FPU ALU/Transcendental
+		operation_result => final_result,
+		operation_valid => alu_result_valid or trans_result_valid,
+		operation_type => "0" & alu_operation_code,
+		
+		-- Operands for checking
+		operand_a => alu_operand_a,
+		operand_b => alu_operand_b,
+		
+		-- Exception flags from ALU/Transcendental
+		overflow_flag => final_overflow,
+		underflow_flag => final_underflow,
+		inexact_flag => final_inexact,
+		invalid_flag => final_invalid,
+		divide_by_zero_flag => alu_divide_by_zero,
+		
+		-- Control
+		fpcr => fpcr,
+		fpsr_in => fpsr,
+		
+		-- Outputs
+		fpsr_out => exception_fpsr_out,
+		exception_pending => exception_pending_internal,
+		exception_vector => exception_vector_internal,
+		corrected_result => exception_corrected_result
+	);
+
 	-- Output assignments
 	fpcr_out <= fpcr;
 	fpsr_out <= fpsr;  
@@ -611,12 +650,6 @@ begin
 			-- Initialize FSAVE/FRESTORE signals
 			fsave_counter <= 0;
 			frestore_frame_format <= (others => '0');
-			-- Initialize control registers with proper MC68882 defaults
-			fpcr <= X"00000000";  -- MC68882 FPCR default: round-to-nearest, extended precision, no exceptions enabled
-			fpsr <= X"00000000";  -- MC68882 FPSR default: no exceptions, CCNAN=0
-			fpiar <= (others => '0');
-			-- Initialize FP register file to zero
-			fp_registers <= (others => (others => '0'));
 			-- Initialize FPU data output
 			fpu_data_out <= (others => '0');
 		elsif rising_edge(clk) then
@@ -963,6 +996,9 @@ begin
 										fpu_exception <= '1';
 										exception_code_internal <= X"0C";
 									end if;
+								elsif fpu_operation = OP_FTST then
+									-- FTST needs source operand to test
+									fpu_state <= FPU_FETCH_SOURCE;
 								else
 									fpu_state <= FPU_FETCH_SOURCE;
 								end if;
@@ -1186,7 +1222,7 @@ begin
 							alu_operand_a <= fp_registers(to_integer(unsigned(source_reg)))(79 downto 0);
 						end if;
 						if ea_mode = "000" then  -- Data register direct (CPU register)
-							-- For FTST.B D1 - convert CPU data from data bus to extended precision
+							-- For CPU data from data bus - convert to extended precision
 							-- Use CPU data input and convert based on data format
 							case data_format is
 								when FORMAT_BYTE =>
@@ -1381,7 +1417,7 @@ begin
 											alu_start_operation <= '1';
 											fpu_state <= FPU_EXECUTE;
 										when others =>
-											-- Other modes (PC relative, etc.) not implemented
+											-- Other modes not implemented
 											alu_operand_b <= (others => '0');
 											alu_operation_code <= fpu_operation;
 											alu_start_operation <= '1';
@@ -1396,10 +1432,72 @@ begin
 							end case;
 						end if;
 						
+						-- Special handling for FTST with FP register source
+						if fpu_operation = OP_FTST and ea_mode = "111" and ea_register = "010" then
+							-- FTST with FP register source
+							-- Clear previous condition codes first
+							fpsr(31 downto 28) <= "0000";
+							
+							-- Test FP register data (alu_operand_a)
+							if alu_operand_a(78 downto 64) = "111111111111111" then
+								-- Infinity or NaN
+								if alu_operand_a(63) = '1' and alu_operand_a(62 downto 0) = (62 downto 0 => '0') then
+									-- Infinity
+									fpsr(29) <= '1';  -- I (Infinity) bit
+									if alu_operand_a(79) = '1' then
+										fpsr(31) <= '1';  -- N (Negative) bit for -Infinity
+									end if;
+								else
+									-- NaN
+									fpsr(28) <= '1';  -- NaN bit
+								end if;
+							elsif alu_operand_a(78 downto 64) = (14 downto 0 => '0') and alu_operand_a(63 downto 0) = (63 downto 0 => '0') then
+								-- Zero
+								fpsr(30) <= '1';  -- Z (Zero) bit
+							else
+								-- Normal number - check sign
+								if alu_operand_a(79) = '1' then
+									fpsr(31) <= '1';  -- N (Negative) bit
+								end if;
+							end if;
+							
+							fpu_state <= FPU_IDLE;
+							fpu_done <= '1';
 						-- For data register direct, continue to execution
-						if ea_mode = "000" then
+						elsif ea_mode = "000" then
+							-- Special handling for FTST - complete immediately
+							if fpu_operation = OP_FTST then
+								-- FTST - Analyze source operand and set condition codes
+								-- Clear previous condition codes first
+								fpsr(31 downto 28) <= "0000";
+								
+								-- Test CPU register data (alu_operand_b)
+								if alu_operand_b(78 downto 64) = "111111111111111" then
+									-- Infinity or NaN
+									if alu_operand_b(63) = '1' and alu_operand_b(62 downto 0) = (62 downto 0 => '0') then
+										-- Infinity
+										fpsr(29) <= '1';  -- I (Infinity) bit
+										if alu_operand_b(79) = '1' then
+											fpsr(31) <= '1';  -- N (Negative) bit for -Infinity
+										end if;
+									else
+										-- NaN
+										fpsr(28) <= '1';  -- NaN bit
+									end if;
+								elsif alu_operand_b(78 downto 64) = (14 downto 0 => '0') and alu_operand_b(63 downto 0) = (63 downto 0 => '0') then
+									-- Zero
+									fpsr(30) <= '1';  -- Z (Zero) bit
+								else
+									-- Normal number - check sign
+									if alu_operand_b(79) = '1' then
+										fpsr(31) <= '1';  -- N (Negative) bit
+									end if;
+								end if;
+								
+								fpu_state <= FPU_IDLE;
+								fpu_done <= '1';
 							-- Check if operation is transcendental function
-							if fpu_operation = OP_FSIN or fpu_operation = OP_FCOS or fpu_operation = OP_FTAN or
+							elsif fpu_operation = OP_FSIN or fpu_operation = OP_FCOS or fpu_operation = OP_FTAN or
 							   fpu_operation = OP_FASIN or fpu_operation = OP_FACOS or fpu_operation = OP_FATAN or
 							   fpu_operation = OP_FSINH or fpu_operation = OP_FCOSH or fpu_operation = OP_FTANH or
 							   fpu_operation = OP_FATANH or fpu_operation = OP_FETOX or fpu_operation = OP_FTWOTOX or
@@ -1496,78 +1594,17 @@ begin
 								final_invalid <= alu_invalid;
 							end if;
 							
-							-- Update FPSR status register based on final results
-							-- FPSR bits: [31:24]=condition codes, [23:16]=quotient, [15:8]=exception status, [7:0]=accrued exceptions
+							-- Update FPSR using exception handler (comprehensive exception handling)
+							fpsr <= exception_fpsr_out;
 							
-							-- Set condition codes based on result (FPSR bits 31-28: N-Z-I-NaN)
-							-- Clear all condition codes first
-							fpsr(31 downto 28) <= "0000";
-							
-							-- Check for NaN first (highest priority)
-							if final_result(78 downto 64) = "111111111111111" and 
-							   final_result(63) = '1' and final_result(62 downto 0) /= (62 downto 0 => '0') then
-								-- NaN result: set NaN flag
-								fpsr(28) <= '1';  -- NaN flag (bit 28)
-							elsif final_result(78 downto 64) = "111111111111111" and
-							      final_result(63) = '1' and final_result(62 downto 0) = (62 downto 0 => '0') then
-								-- Infinity: set I flag and N flag based on sign
-								fpsr(29) <= '1';  -- I (Infinity) flag (bit 29)
-								if final_result(79) = '1' then
-									fpsr(31) <= '1';  -- N (Negative) flag for -∞
-								end if;
-							elsif final_result = x"00000000000000000000" or 
-							      (final_result(78 downto 64) = "000000000000000" and final_result(63 downto 0) = (63 downto 0 => '0')) then
-								-- Zero result: set Z flag
-								fpsr(30) <= '1';  -- Z (Zero) flag (bit 30)
-								if final_result(79) = '1' then
-									fpsr(31) <= '1';  -- N flag for -0
-								end if;
-							elsif final_result(79) = '1' then
-								-- Negative result: set N flag
-								fpsr(31) <= '1';  -- N (Negative) flag (bit 31)
-							end if;
-							
-							-- Set exception flags and handle exceptions
-							fpsr(15) <= alu_invalid;        -- BSUN (Invalid operation)
-							fpsr(14) <= alu_invalid;        -- SNAN (Signaling NaN - use invalid for now)
-							fpsr(13) <= converter_invalid;  -- OPERR (Operand error from converter)
-							fpsr(12) <= alu_overflow;       -- OVFL (Overflow)
-							fpsr(11) <= alu_underflow;      -- UNFL (Underflow)
-							fpsr(10) <= alu_divide_by_zero; -- DZ (Divide by zero)
-							fpsr(9) <= alu_inexact;         -- INEX2 (Inexact result)
-							fpsr(8) <= converter_inexact;   -- INEX1 (Inexact decimal input from converter)
-							
-							-- Accumulate exception flags (bits 7:0 mirror bits 15:8)
-							fpsr(7) <= fpsr(7) or alu_invalid;
-							fpsr(6) <= fpsr(6) or alu_invalid;       -- SNAN accumulate
-							fpsr(5) <= fpsr(5) or converter_invalid; -- OPERR accumulate  
-							fpsr(4) <= fpsr(4) or alu_overflow;
-							fpsr(3) <= fpsr(3) or alu_underflow;
-							fpsr(2) <= fpsr(2) or alu_divide_by_zero;
-							fpsr(1) <= fpsr(1) or alu_inexact;
-							fpsr(0) <= fpsr(0) or converter_inexact; -- INEX1 accumulate
-							
-							-- Check for exceptions that should trap
-							if (alu_invalid = '1' and fpcr(15) = '1') or      -- BSUN enable
-							   (alu_overflow = '1' and fpcr(12) = '1') or     -- OVFL enable
-							   (alu_underflow = '1' and fpcr(11) = '1') or    -- UNFL enable
-							   (alu_divide_by_zero = '1' and fpcr(10) = '1') or -- DZ enable
-							   (alu_inexact = '1' and fpcr(9) = '1') then      -- INEX2 enable
-								-- Exception should generate trap - follow IEEE 754 priority order
+							-- Check for exceptions using exception handler
+							if exception_pending_internal = '1' then
+								-- Exception should generate trap
 								fpu_state <= FPU_EXCEPTION_STATE;
 								fpu_exception <= '1';
-								-- IEEE 754 exception priority: Invalid > Divide by Zero > Overflow > Underflow > Inexact
-								if alu_invalid = '1' then
-									exception_code_internal <= X"0C";  -- Invalid operation (highest priority)
-								elsif alu_divide_by_zero = '1' then
-									exception_code_internal <= X"05";  -- Division by zero
-								elsif alu_overflow = '1' then
-									exception_code_internal <= X"0D";  -- Overflow
-								elsif alu_underflow = '1' then
-									exception_code_internal <= X"0E";  -- Underflow
-								else
-									exception_code_internal <= X"0F";  -- Inexact result (lowest priority)
-								end if;
+								exception_code_internal <= exception_vector_internal;
+								-- Use corrected result from exception handler
+								result_data <= exception_corrected_result;
 							else
 								-- No trapping exception, continue with result
 								result_data <= final_result;
@@ -1826,8 +1863,8 @@ begin
 									else
 										fpu_data_out <= x"00000000";
 									end if;
-								when 12 to 14 =>
-									-- IDLE frame only - Middle 32 bits of FP registers 0-2
+								when 12 to 15 =>
+									-- IDLE frame only - Middle 32 bits of FP registers 0-3 (limited by synthesizer)
 									if fsave_frame_format = X"60" then
 										fpu_data_out <= fp_registers(fsave_data_index - 12)(47 downto 16);
 									else
@@ -1840,15 +1877,26 @@ begin
 						
 						-- Frame completion depends on frame type
 						if fsave_data_request = '0' then
-							if (fsave_frame_format = X"00" or fsave_frame_format = X"01") and fsave_data_index = 0 then
-								-- NULL/BUSY frame complete after first longword (4 bytes)
-								fpu_state <= FPU_IDLE;
-								fpu_done <= '1';
-							elsif fsave_frame_format = X"60" and fsave_data_index = 14 then
-								-- IDLE frame complete after 15 longwords (60 bytes)
-								fpu_state <= FPU_IDLE;
-								fpu_done <= '1';
-							end if;
+							case fsave_frame_format is
+								when X"00" | X"01" =>
+									-- NULL/BUSY frame complete after first longword (4 bytes)
+									if fsave_data_index = 0 then
+										fpu_state <= FPU_IDLE;
+										fpu_done <= '1';
+									end if;
+								when X"60" =>
+									-- IDLE frame complete after 15 longwords (60 bytes)
+									if fsave_data_index = 14 then  -- 0-14 = 15 longwords
+										fpu_state <= FPU_IDLE;
+										fpu_done <= '1';
+									end if;
+								when others =>
+									-- Extended frames - completion handled by CPU counter
+									if fsave_data_index >= 54 then
+										fpu_state <= FPU_IDLE;
+										fpu_done <= '1';
+									end if;
+							end case;
 						end if;
 					
 					when FPU_FRESTORE_READ =>
@@ -1934,36 +1982,51 @@ begin
 									end if;
 									fsave_counter <= fsave_counter + 1;
 								
-								when 12 to 14 =>
-									-- IDLE frames ($41/$60): Middle 32 bits of first 3 FP registers
+								when 12 to 19 =>
+									-- IDLE frames ($41/$60): Middle 32 bits of FP registers 0-7
 									if frestore_frame_format = x"41" or frestore_frame_format = x"60" then
 										fp_registers(fsave_counter - 12)(47 downto 16) <= frestore_data_in;
+									end if;
+									fsave_counter <= fsave_counter + 1;
+									
+								when 20 to 27 =>
+									-- IDLE frames ($41/$60): Low 16 bits of FP registers 0-7
+									if frestore_frame_format = x"41" or frestore_frame_format = x"60" then
+										fp_registers(fsave_counter - 20)(15 downto 0) <= frestore_data_in(15 downto 0);
 										
-										if fsave_counter = 14 then
-											-- IDLE frame complete (60 bytes)
+										if fsave_counter = 27 then
+											-- IDLE frame complete (60 bytes = 15 longwords)
 											fpu_state <= FPU_IDLE;
 											fpu_done <= '1';
 										else
 											fsave_counter <= fsave_counter + 1;
 										end if;
-									elsif frestore_frame_format = x"38" then
-										-- Normal frame continues beyond this point
+									else
+										-- Other frame types - let CPU handle
 										fsave_counter <= fsave_counter + 1;
 									end if;
 								
-								when 15 to 23 =>
-									-- Normal frame ($38): Additional context data (96 bytes total)
-									if frestore_frame_format = x"38" then
-										-- Handle additional context restoration here
-										-- For now, just advance counter
-										if fsave_counter = 23 then
-											-- Normal frame complete (96 bytes)
-											fpu_state <= FPU_IDLE;
-											fpu_done <= '1';
-										else
-											fsave_counter <= fsave_counter + 1;
-										end if;
-									end if;
+								when 28 to 54 =>
+									-- Extended frames for BUSY or other large frame types
+									-- These are mainly handled by CPU, FPU just tracks progress
+									case frestore_frame_format is
+										when x"38" =>
+											-- Normal frame (96 bytes = 24 longwords)
+											if fsave_counter = 23 then
+												fpu_state <= FPU_IDLE;
+												fpu_done <= '1';
+											else
+												fsave_counter <= fsave_counter + 1;
+											end if;
+										when others =>
+											-- BUSY or other frame types (up to 216 bytes = 54 longwords)
+											if fsave_counter = 54 then
+												fpu_state <= FPU_IDLE;
+												fpu_done <= '1';
+											else
+												fsave_counter <= fsave_counter + 1;
+											end if;
+									end case;
 								
 								when others =>
 									-- Unexpected counter value - complete operation
@@ -1977,10 +2040,9 @@ begin
 						-- AmigaOS uses 8 bytes per register in memory (64-bit compressed format)
 						-- CPU handles memory operations, format conversion, and incremental stack pointer adjustment
 						
-						-- FMOVEM data output is handled by the MOVEM component
-						-- Component provides FP register data when requested by CPU
+						-- FMOVEM data reads are handled by the MOVEM component
 						
-						-- For FMOVEM writes (restore operations)
+						-- Handle FMOVEM data writes (restore operations)
 						if fmovem_data_write = '1' then
 							-- AmigaOS FMOVEM.X loads full 80-bit extended precision format
 							-- Restore complete register content from memory
@@ -1997,11 +2059,13 @@ begin
 							end case;
 						end if;
 						
-						-- FMOVEM operations complete when CPU finishes all transfers
+						-- FMOVEM operations complete when CPU signals completion (by disabling fpu_enable)
 						-- CPU manages register-by-register transfers and stack pointer increments
-						-- FPU stays ready to provide data for each register as requested
-						fpu_state <= FPU_IDLE;
-						fpu_done <= '1';
+						-- Stay in FMOVEM state until CPU finishes operation
+						if fpu_enable = '0' or movem_done = '1' then
+							fpu_state <= FPU_IDLE;
+							fpu_done <= '1';
+						end if;
 						
 					when FPU_FMOVEM_CR =>
 						-- FMOVEM operations for control registers (FPCR/FPSR/FPIAR)
@@ -2027,9 +2091,11 @@ begin
 							end case;
 						end if;
 						
-						-- Control register operations complete immediately
-						fpu_state <= FPU_IDLE;
-						fpu_done <= '1';
+						-- Control register operations complete when CPU signals completion
+						if fpu_enable = '0' or movem_done = '1' then
+							fpu_state <= FPU_IDLE;
+							fpu_done <= '1';
+						end if;
 						
 				end case;
 			end if;
