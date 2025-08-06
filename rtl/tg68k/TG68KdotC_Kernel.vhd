@@ -296,7 +296,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_trapv			: bit;
 	signal trap_interrupt	: bit;
 	signal trap_fpu_bsun		: bit;  -- FPU Branch/Set on Unordered (Vector 48)
-	signal trap_fpu_inexact	: bit;  -- FPU Inexact (Vector 49)  
+	signal trap_fpu_inexact	: bit;  -- FPU Inexact (Vector 49)
+	signal fpu_cpgen_complete	: bit;  -- Flag to indicate FPU cpGEN instruction completing  
 	signal trap_fpu_divzero	: bit;  -- FPU Divide by Zero (Vector 50)
 	signal trap_fpu_unfl		: bit;  -- FPU Underflow (Vector 51)
 	signal trap_fpu_operr		: bit;  -- FPU Operand Error (Vector 52)
@@ -1352,7 +1353,7 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 -- PC Calc + fetch opcode
 -----------------------------------------------------------------------------
 PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data, next_micro_state, stop, make_trace, make_berr, IPL_nr, FlagsSR, set_rot_cnt, opcode, writePCbig, set_exec, exec,
-        PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, trap_trapv, interrupt, tmp_TG68_PC, TG68_PC, use_VBR_Stackframe, writePCnext)
+        PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, trap_trapv, interrupt, tmp_TG68_PC, TG68_PC, use_VBR_Stackframe, writePCnext, fpu_cpgen_complete, micro_state, sndOPC)
 	BEGIN
 	
 		PC_dataa <= TG68_PC;
@@ -1379,7 +1380,11 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				PC_datab(1) <= '1';
 			END IF;
 		ELSIF state="00" THEN
-			PC_datab(1) <= '1';
+			-- CRITICAL FIX: Don't increment PC when completing FPU cpGEN instructions
+			-- These instructions (like FTST) have already positioned PC correctly after fetching extension word
+			IF fpu_cpgen_complete = '0' THEN
+				PC_datab(1) <= '1';
+			END IF;
 		END IF;	
 		IF TG68_PC_brw = '1' THEN	
 			IF TG68_PC_word='1' THEN
@@ -1434,6 +1439,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				make_berr <= '0';
 				memmask <= "111111";
 				exec_write_back <= '0';
+				fpu_cpgen_complete <= '0';  -- Initialize FPU cpGEN complete flag
 			ELSE
 --				IPL_nr <= NOT IPL;
 				IF clkena_in='1' THEN
@@ -1455,6 +1461,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					decodeOPC <= setopcode;
 					endOPC <= setendOPC;
 					execOPC <= setexecOPC;
+					-- Clear FPU cpGEN complete flag when starting a new instruction
+					IF setopcode = '1' THEN
+						fpu_cpgen_complete <= '0';
+					END IF;
 --					IF setexecOPC='1' OR set(alu_exec)='1' THEN
 --						execOPC_ALU <= '1';
 --					ELSE
@@ -1535,6 +1545,18 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					ELSIF FPU_Enable = 1 AND next_micro_state = idle AND 
 					      (micro_state = fpu_done OR micro_state = fpu_wait OR micro_state = fpu2) THEN
 						exec_write_back <= '0';
+					END IF;
+					
+					-- CRITICAL FIX: Set flag when completing cpGEN FPU instructions
+					-- These instructions have already positioned PC correctly via get_2ndOPC
+					-- Set the flag when we're about to set state to "00" from FPU states
+					IF (micro_state = fpu_done OR micro_state = fpu_wait OR micro_state = fpu2) AND 
+					   (setstate = "00" OR next_micro_state = idle) THEN
+						-- Check if this is a cpGEN instruction or specific operations that fetched extension word
+						IF opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND
+						   opcode(8 downto 6) = "000" THEN  -- cpGEN instructions including FTST
+							fpu_cpgen_complete <= '1';
+						END IF;
 					END IF;	
 					IF (state="10" AND addrvalue='0' AND write_back='1' AND setstate/="10") OR set_rot_cnt/="000001" OR (stop='1' AND interrupt='0') OR set_exec(opcCHK)='1' THEN
 						state <= "01";
@@ -5500,8 +5522,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						set(subidx) <= '0';
 						set(presub) <= '0';
 						
-						-- CRITICAL FIX: Clear any pending FPU state to prevent instruction overlap
-						-- Note: skipFetch will be cleared by default assignment in combinatorial process
+						-- CRITICAL FIX: cpGEN instructions like FTST have already positioned PC correctly
+						-- The fpu_cpgen_complete flag will be set in the clocked process
 						
 						next_micro_state <= idle;
 					ELSE
@@ -5520,6 +5542,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						IF NOT (opcode(15 downto 6) = "1111001001" AND opcode(5 downto 3) = "100" AND fsave_predecr_flag = '1') THEN
 							set(presub) <= '0';       -- Clear predecrement flag (except during active FSAVE predecrement)
 						END IF;
+						
+						-- CRITICAL FIX: cpGEN FPU instructions have already positioned PC correctly
+						-- The fpu_cpgen_complete flag will be set in the clocked process
+						
 						next_micro_state <= idle;     -- Return to idle for next instruction
 					END IF;
 					
