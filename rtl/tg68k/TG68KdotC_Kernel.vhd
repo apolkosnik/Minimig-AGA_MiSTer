@@ -4667,8 +4667,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						
 						-- CRITICAL: Prevent register writes for FPU instructions that don't write to CPU registers
 						-- Check the FPU operation code and instruction type
-						IF sndOPC(6 downto 0) = "0111010" OR    -- FTST (test operand)
-						   sndOPC(6 downto 0) = "0111000" OR    -- FCMP (compare operands)
+						-- CRITICAL FIX: FTST is a cpGEN instruction (opcode bits 8:6 = 000), not here
+						-- Remove FTST from this check as it's handled through cpGEN protocol
+						IF sndOPC(6 downto 0) = "0111000" OR    -- FCMP (compare operands)
+						   sndOPC(6 downto 0) = "0111010" OR    -- FTST (test operand)
 						   (sndOPC(6 downto 0) = "0000000" AND opcode(13 downto 10) = "0000") OR  -- FNOP (no operation)
 						   (opcode(8 downto 6) = "001" AND opcode(5 downto 3) = "111" AND 
 						    (opcode(2 downto 0) = "010" OR opcode(2 downto 0) = "011")) OR  -- FBcc.W/FBcc.L (branch)
@@ -5217,6 +5219,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- For now, simplified: proceed directly to completion
 						-- Real implementation would decode response primitive from data_read
 						-- and handle requests for additional data, exceptions, etc.
+						
+						-- CRITICAL FIX: Ensure proper state for cpGEN completion
+						setstate <= "00";  -- Clear state to allow proper endOPC generation
+						setnextpass <= '0';  -- Clear nextpass to prevent instruction pipeline issues
+						set_rot_cnt <= "000001";  -- Reset rotation counter
+						-- CRITICAL FIX: Clear execution flags early to prevent overlap
+						set_exec <= (others => '0');
+						-- Clear any pending operations
+						set(presub) <= '0';
+						set(subidx) <= '0';
+						write_back <= '0';
+						
 						next_micro_state <= fpu_done;  -- Complete the cpGEN instruction
 					ELSIF opcode(8 downto 6) = "001" OR opcode(8 downto 6) = "010" OR opcode(8 downto 6) = "011" THEN
 						-- Conditional instruction - process true/false result from Response CIR
@@ -5365,8 +5379,28 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- FPU operation completed successfully
 					-- Note: CCR update for FPU operations handled in sequential process
 					
+					-- CRITICAL FIX: Handle cpGEN instructions (like FTST) first
+					IF opcode(8 downto 6) = "000" THEN
+						-- cpGEN instruction completed (including FTST)
+						-- Ensure clean transition to next instruction
+						set_exec(Regwrena) <= '0';
+						set_exec(save_memaddr) <= '0';
+						set_exec(get_ea_now) <= '0';
+						set_exec(write_reg) <= '0';
+						fpu_data_request <= '0';
+						setnextpass <= '0';
+						setstate <= "00";
+						set_rot_cnt <= "000001";
+						set(subidx) <= '0';
+						set(presub) <= '0';
+						-- CRITICAL FIX: Clear all execution flags to prevent instruction overlap
+						set_exec <= (others => '0');
+						-- CRITICAL FIX: Force write_back clear to ensure proper endOPC generation
+						-- This prevents the instruction pipeline from stalling
+						write_back <= '0';
+						next_micro_state <= idle;
 					-- Check if this is FSAVE with complex addressing mode that needed EA calculation
-					IF opcode(15 downto 6) = "1111001001" AND exec(store_ea_data) = '1' THEN
+					ELSIF opcode(15 downto 6) = "1111001001" AND exec(store_ea_data) = '1' THEN
 						-- FSAVE - continue with memory writes after EA calculation is complete
 						datatype <= "10";  -- Longword access
 						fpu_data_request <= '1';  -- Request data from FPU
@@ -5465,6 +5499,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						set_rot_cnt <= "000001";
 						set(subidx) <= '0';
 						set(presub) <= '0';
+						
+						-- CRITICAL FIX: Clear any pending FPU state to prevent instruction overlap
+						-- Note: skipFetch will be cleared by default assignment in combinatorial process
+						
 						next_micro_state <= idle;
 					ELSE
 						-- Default case for simple FPU operations (FMOVE, arithmetic operations)
