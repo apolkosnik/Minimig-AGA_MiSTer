@@ -1403,7 +1403,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			setendOPC <= '1';
 			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1' THEN
 				setinterrupt <= '1';
-			ELSIF stop='0' THEN
+			ELSIF stop='0' AND NOT (micro_state = fpu1 OR micro_state = fpu2 OR micro_state = fpu_wait) THEN
+				-- CRITICAL FIX: Don't set setopcode when in FPU states that haven't completed
 				setopcode <= '1';
 			END IF;
 		END IF;	
@@ -1547,16 +1548,13 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						exec_write_back <= '0';
 					END IF;
 					
-					-- CRITICAL FIX: Set flag when completing cpGEN FPU instructions
+					-- CRITICAL FIX: Set flag early for cpGEN FPU instructions to prevent PC over-increment
 					-- These instructions have already positioned PC correctly via get_2ndOPC
-					-- Set the flag when we're about to set state to "00" from FPU states
-					IF (micro_state = fpu_done OR micro_state = fpu_wait OR micro_state = fpu2) AND 
-					   (setstate = "00" OR next_micro_state = idle) THEN
-						-- Check if this is a cpGEN instruction or specific operations that fetched extension word
-						IF opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND
-						   opcode(8 downto 6) = "000" THEN  -- cpGEN instructions including FTST
-							fpu_cpgen_complete <= '1';
-						END IF;
+					-- Set the flag as soon as we detect this is a cpGEN instruction
+					IF opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND
+					   opcode(8 downto 6) = "000" AND (micro_state = fpu1 OR micro_state = fpu2 OR 
+					   micro_state = fpu_wait OR micro_state = fpu_done) THEN  -- cpGEN instructions including FTST
+						fpu_cpgen_complete <= '1';
 					END IF;	
 					IF (state="10" AND addrvalue='0' AND write_back='1' AND setstate/="10") OR set_rot_cnt/="000001" OR (stop='1' AND interrupt='0') OR set_exec(opcCHK)='1' THEN
 						state <= "01";
@@ -1877,7 +1875,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		 SVmode, preSVmode, stop, long_done, ea_only, setstate, addrvalue, execOPC, exec_write_back, exe_datatype,
 		 datatype, interrupt, c_out, trapmake, rot_cnt, brief, addr, trap_trapv, last_data_in, use_VBR_Stackframe,
 		 long_start, set_datatype, sndOPC, set_exec, exec, ea_build_now, reg_QA, reg_QB, make_berr, trap_berr,
-		 fpu_complete, fpu_exception, fpu_exception_code, fsave_counter, timeout_counter)
+		 fpu_complete, fpu_exception, fpu_exception_code, fsave_counter, timeout_counter, fsave_frame_size, fsave_predecr_flag,
+		 fmovem_reg_mask, fmovem_reg_count, fmovem_direction, fpu_condition_result)
 	BEGIN
 		TG68_PC_brw <= '0';	
 		setstate <= "00";
@@ -1893,7 +1892,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		trap_fpu_bsun <= '0';
 		trap_fpu_trap <= '0';
 		-- Initialize FPU interface signals to prevent latches
-		-- fpu_data_request is assigned in clocked process only
+		fpu_data_request <= '0';
 		-- Initialize FMOVEM signals to prevent latches
 		fmovem_reg_mask <= (others => '0');
 		fmovem_direction <= '0';
@@ -2726,7 +2725,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 											END IF;
 										END IF;
 										IF set(get_ea_now)='1' THEN
-											IF movem_run='1' THEN
+											-- CRITICAL FIX: Only set movem_action for actual MOVEM instructions
+											-- FPU instructions also use get_ea_now but should not trigger MOVEM logic
+											IF movem_run='1' AND opcode(15 downto 12) = "0100" AND opcode(7)='1' THEN
 												set(movem_action) <= '1';
 												IF opcode(10)='0' THEN
 													setstate <="11";
@@ -3628,18 +3629,35 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					ELSIF opcode(8 downto 6) = "010" OR opcode(8 downto 6) = "011" THEN
 						-- FScc/FTRAPcc - handle as cpGEN conditional instructions
 						IF decodeOPC='1' THEN
-							set(get_2ndOPC) <= '1';
-							next_micro_state <= fpu1;
+							-- FScc and FTRAPcc are single-word when EA mode is Dn
+							-- Check if EA mode is data register direct (bits 5:3 = 000)
+							IF opcode(5 downto 3) = "000" THEN
+								-- Single-word instruction - no extension word needed
+								next_micro_state <= fpu1;
+							ELSE
+								-- Two-word instruction - need extension word for memory EA
+								set(get_2ndOPC) <= '1';
+								next_micro_state <= fpu1;
+							END IF;
 						END IF;
 					ELSIF opcode(8 downto 6) = "100" OR opcode(8 downto 6) = "101" THEN
 						-- FSAVE/FRESTORE - handle with special decoder logic below
 						-- Fall through to cpSAVE/cpRESTORE handling
 					ELSE
 						-- Regular FPU instructions (FMOVE, FADD, etc.)
-						-- All FPU instructions are two-word instructions requiring extension word fetch
+						-- Check if this is a single-word FPU instruction (cpGEN with register source)
+						-- FTST with FPU register source (F201) is only one word
 						IF decodeOPC='1' THEN
-							set(get_2ndOPC) <= '1';
-							next_micro_state <= fpu1;
+							-- Check if source is FPU register (bits 5:3 = 000 means FPU register mode)
+							IF opcode(8 downto 6) = "000" AND opcode(5 downto 3) = "000" THEN
+								-- Single-word cpGEN instruction with FPU register source
+								-- No second word needed - go directly to FPU execution
+								next_micro_state <= fpu1;
+							ELSE
+								-- Two-word instruction - need extension word
+								set(get_2ndOPC) <= '1';
+								next_micro_state <= fpu1;
+							END IF;
 						END IF;
 					END IF;
 					-- Don't trap - handle with FPU
@@ -5049,56 +5067,49 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							END IF;
 							
 						WHEN "100" =>  -- -(An) - Address Register Indirect with Predecrement
+							-- FIXED: Two-phase predecrement for proper register update timing
+							-- Frame size is determined in clocked process based on fsave_predecr_flag
+							
 							IF fsave_counter = 0 THEN
-								-- CRITICAL FIX: Separate predecrement and memory operations for proper DSACK timing
+								-- First write requires two phases for proper timing
 								IF state = "00" THEN
 									-- Phase 1: Calculate predecrement address and update register
-									set(presub) <= '1';             -- Predecrement (frame size via fsave_predecr_flag)
+									set(get_ea_now) <= '1';           -- Calculate effective address
+									set(presub) <= '1';               -- Predecrement by frame size
+									
 									IF opcode(2 downto 0) = "111" THEN
-										set(use_SP) <= '1';         -- Use stack pointer if -(A7)
-										setstackaddr <= '1';        -- Set dest address to A7
+										set(use_SP) <= '1';           -- Use stack pointer if -(A7)
+										setstackaddr <= '1';          -- Ensure update goes to stack pointer
 									END IF;
-									set(Regwrena) <= '1';          -- Update An with decremented value
-									set(write_reg) <= '1';          -- Enable register write
-									-- CRITICAL FIX: Ensure correct register targeting for FSAVE
-									dest_areg <= '1';              -- Force address register (An) not data register (Dn)
-									dest_hbits <= '0';              -- Use low bits for register selection
-									data_is_source <= '0';         -- Prevent data_is_source corruption
-									-- ADDITIONAL FIX: Prevent any exec flags that could corrupt register selection
-									set_exec <= (others => '0');   -- Clear all exec flags
-									set_exec(Regwrena) <= '1';     -- Only enable register write
-									setstate <= "01";               -- Wait for register update to complete
-									next_micro_state <= fpu2;       -- Stay in fpu2 for next phase
+									
+									set(Regwrena) <= '1';             -- Update An with decremented value
+									setstate <= "01";                 -- Wait for register update to complete
+									next_micro_state <= fpu2;         -- Stay in fpu2 for next phase
 								ELSE
 									-- Phase 2: Start memory write after register update completed
-									setstate <= "11";               -- Memory write
-									fpu_data_request <= '1';        -- Request data from FPU
-									next_micro_state <= fpu2;       -- Continue for more writes
+									fpu_data_request <= '1';          -- Request data from FPU
+									setstate <= "11";                 -- Memory write
+									next_micro_state <= fpu2;         -- Continue for more writes
 								END IF;
-							ELSE
-								-- Subsequent writes: Use saved address with offset
-								set(mem_addsub) <= '1';         -- Use address calculation with offset
 								
-								-- Write longword at calculated address
-								fpu_data_request <= '1';        -- Request data from FPU
+							ELSE
+								-- Subsequent writes: Use saved base address + offset
+								-- The base address was calculated and saved during first write
+								set(mem_addsub) <= '1';               -- Use memory address with offset
+								
+								fpu_data_request <= '1';              -- Request data from FPU
 								
 								IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
-									setstate <= "11";               -- Memory write
-									next_micro_state <= fpu2;   -- More writes to do
+									setstate <= "11";                 -- Memory write
+									next_micro_state <= fpu2;         -- More writes to do
 								ELSIF (fsave_counter + 1) * 4 = fsave_frame_size THEN
 									-- This is the last write
-									IF state = "00" THEN
-										-- Ready to initiate last write
-										setstate <= "11";           -- Final memory write
-										next_micro_state <= fpu2;   -- Stay in fpu2 to monitor completion
-									ELSE
-										-- Last write is in progress, wait for completion
-										next_micro_state <= fpu2;   -- Keep waiting
-									END IF;
+									setstate <= "11";                 -- Final memory write
+									next_micro_state <= fpu2;         -- Stay to monitor completion
 								ELSE
 									-- All writes complete, go to idle
-									setstate <= "00";  -- Ensure proper endOPC condition
-									next_micro_state <= idle;    -- All done
+									setstate <= "00";                 -- Ensure proper endOPC condition
+									next_micro_state <= idle;         -- All done
 								END IF;
 							END IF;
 							
@@ -5937,7 +5948,7 @@ PROCESS (clk)
 				movem_actiond <= exec(movem_action); 
 				IF decodeOPC='1' THEN
 					sndOPC <= data_read(15 downto 0);
-				ELSIF exec(movem_action)='1' OR set(movem_action) ='1' THEN
+				ELSIF (exec(movem_action)='1' OR set(movem_action) ='1') AND movem_run='1' THEN
 					CASE movem_regaddr IS
 						WHEN "0000" => sndOPC(0)  <= '0';
 						WHEN "0001" => sndOPC(1)  <= '0';
