@@ -1405,6 +1405,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				setinterrupt <= '1';
 			ELSIF stop='0' AND NOT (micro_state = fpu1 OR micro_state = fpu2 OR micro_state = fpu_wait) THEN
 				-- CRITICAL FIX: Don't set setopcode when in FPU states that haven't completed
+				-- fpu_done is allowed to set setopcode as it's completing
 				setopcode <= '1';
 			END IF;
 		END IF;	
@@ -4710,7 +4711,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- CRITICAL FIX: FTST is a cpGEN instruction (opcode bits 8:6 = 000), not here
 						-- Remove FTST from this check as it's handled through cpGEN protocol
 						IF sndOPC(6 downto 0) = "0111000" OR    -- FCMP (compare operands)
-						   sndOPC(6 downto 0) = "0111010" OR    -- FTST (test operand)
+						   FALSE OR                              -- FTST removed - handled via cpGEN
 						   (sndOPC(6 downto 0) = "0000000" AND opcode(13 downto 10) = "0000") OR  -- FNOP (no operation)
 						   (opcode(8 downto 6) = "001" AND opcode(5 downto 3) = "111" AND 
 						    (opcode(2 downto 0) = "010" OR opcode(2 downto 0) = "011")) OR  -- FBcc.W/FBcc.L (branch)
@@ -4718,10 +4719,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						    opcode(2 downto 0) = "100") THEN  -- FTRAPcc (trap conditionally)
 							-- These operations should never write to CPU data/address registers
 							skipFetch <= '1';  -- Prevent further instruction fetches
-							set_exec(Regwrena) <= '0';
-							set_exec(save_memaddr) <= '0';
-							set_exec(get_ea_now) <= '0';
-							set_exec(write_reg) <= '0';
+							-- Note: set_exec flags default to '0' - no need to explicitly clear them
 						END IF;
 						
 						-- For source operand addressing (typically bits 5:0 in FPU instructions)
@@ -5031,6 +5029,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							ELSE
 								-- All writes complete, go to idle
 								setstate <= "00";  -- Ensure proper endOPC condition
+								skipFetch <= '0';   -- CRITICAL: Clear skipFetch to prevent instruction skipping
 								next_micro_state <= idle;   -- All done
 							END IF;
 							
@@ -5063,6 +5062,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								-- fsave_predecr_flag cleared in clocked process
 								set(presub) <= '0';
 								set(subidx) <= '0';
+								skipFetch <= '0';   -- CRITICAL: Clear skipFetch to prevent instruction skipping
 								next_micro_state <= idle;   -- All done
 							END IF;
 							
@@ -5073,20 +5073,29 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							IF fsave_counter = 0 THEN
 								-- First write requires two phases for proper timing
 								IF state = "00" THEN
-									-- Phase 1: Calculate predecrement address and update register
-									set(get_ea_now) <= '1';           -- Calculate effective address
+									-- Phase 1: Frame size is already determined, do predecrement and update register
+									-- CRITICAL: Force proper register read and predecrement calculation
 									set(presub) <= '1';               -- Predecrement by frame size
+									set(Regwrena) <= '1';             -- Enable register write
+									set_exec(Regwrena) <= '1';        -- Ensure exec(Regwrena) will be set
+									set_exec(presub) <= '1';          -- Ensure exec(presub) will be set
 									
+									-- Force register read for predecrement
 									IF opcode(2 downto 0) = "111" THEN
 										set(use_SP) <= '1';           -- Use stack pointer if -(A7)
 										setstackaddr <= '1';          -- Ensure update goes to stack pointer
+										source_areg <= '1';           -- Force address register read
+										source_lowbits <= '1';        -- Use bits 2:0 for register selection
+									ELSE
+										source_areg <= '1';           -- Address register
+										source_lowbits <= '1';        -- Use bits 2:0 for An selection
 									END IF;
 									
-									set(Regwrena) <= '1';             -- Update An with decremented value
 									setstate <= "01";                 -- Wait for register update to complete
 									next_micro_state <= fpu2;         -- Stay in fpu2 for next phase
 								ELSE
 									-- Phase 2: Start memory write after register update completed
+									set(get_ea_now) <= '1';          -- Now calculate EA with updated register
 									fpu_data_request <= '1';          -- Request data from FPU
 									setstate <= "11";                 -- Memory write
 									next_micro_state <= fpu2;         -- Continue for more writes
@@ -5109,6 +5118,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								ELSE
 									-- All writes complete, go to idle
 									setstate <= "00";                 -- Ensure proper endOPC condition
+									skipFetch <= '0';             -- CRITICAL: Clear skipFetch to prevent instruction skipping
 									next_micro_state <= idle;         -- All done
 								END IF;
 							END IF;
@@ -5137,6 +5147,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								ELSE
 									-- All writes complete, go to idle
 									setstate <= "00";  -- Ensure proper endOPC condition
+									skipFetch <= '0';   -- CRITICAL: Clear skipFetch to prevent instruction skipping
 									next_micro_state <= idle;   -- All done
 								END IF;
 							END IF;
@@ -5166,6 +5177,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								ELSE
 									-- All writes complete, go to idle
 									setstate <= "00";  -- Ensure proper endOPC condition
+									skipFetch <= '0';   -- CRITICAL: Clear skipFetch to prevent instruction skipping
 									next_micro_state <= idle;   -- All done
 								END IF;
 							END IF;
@@ -5196,6 +5208,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 										ELSE
 											-- All writes complete, go to idle
 											setstate <= "00";  -- Ensure proper endOPC condition
+											skipFetch <= '0';   -- CRITICAL: Clear skipFetch to prevent instruction skipping
 											next_micro_state <= idle;   -- All done
 										END IF;
 									END IF;
@@ -5225,6 +5238,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 										ELSE
 											-- All writes complete, go to idle
 											setstate <= "00";  -- Ensure proper endOPC condition
+											skipFetch <= '0';   -- CRITICAL: Clear skipFetch to prevent instruction skipping
 											next_micro_state <= idle;   -- All done
 										END IF;
 									END IF;
@@ -5257,12 +5271,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						setstate <= "00";  -- Clear state to allow proper endOPC generation
 						setnextpass <= '0';  -- Clear nextpass to prevent instruction pipeline issues
 						set_rot_cnt <= "000001";  -- Reset rotation counter
-						-- CRITICAL FIX: Clear execution flags early to prevent overlap
-						set_exec <= (others => '0');
 						-- Clear any pending operations
 						set(presub) <= '0';
 						set(subidx) <= '0';
 						write_back <= '0';
+						skipFetch <= '0';  -- CRITICAL: Clear skipFetch to allow next instruction
 						
 						next_micro_state <= fpu_done;  -- Complete the cpGEN instruction
 					ELSIF opcode(8 downto 6) = "001" OR opcode(8 downto 6) = "010" OR opcode(8 downto 6) = "011" THEN
@@ -5416,18 +5429,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF opcode(8 downto 6) = "000" THEN
 						-- cpGEN instruction completed (including FTST)
 						-- Ensure clean transition to next instruction
-						set_exec(Regwrena) <= '0';
-						set_exec(save_memaddr) <= '0';
-						set_exec(get_ea_now) <= '0';
-						set_exec(write_reg) <= '0';
+						-- Note: set_exec flags default to '0' - no need to explicitly clear them
 						fpu_data_request <= '0';
 						setnextpass <= '0';
 						setstate <= "00";
 						set_rot_cnt <= "000001";
+						skipFetch <= '0';   -- CRITICAL: Clear skipFetch to allow next instruction
 						set(subidx) <= '0';
 						set(presub) <= '0';
-						-- CRITICAL FIX: Clear all execution flags to prevent instruction overlap
-						set_exec <= (others => '0');
+						-- Note: set_exec flags default to '0' - no need to explicitly clear them
 						-- CRITICAL FIX: Force write_back clear to ensure proper endOPC generation
 						-- This prevents the instruction pipeline from stalling
 						write_back <= '0';
@@ -5459,6 +5469,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							IF NOT (opcode(15 downto 6) = "1111001001" AND opcode(5 downto 3) = "100" AND fsave_predecr_flag = '1') THEN
 								set(presub) <= '0';       -- Clear predecrement flag (except during active FSAVE predecrement)
 							END IF;
+							skipFetch <= '0';            -- CRITICAL: Clear skipFetch to prevent instruction skipping
 							next_micro_state <= idle;       -- All done
 						END IF;
 					-- Check if this is FRESTORE with complex addressing mode that needed EA calculation
@@ -5487,6 +5498,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							-- FRESTORE doesn't use predecrement, so always clear presub 
 							set(subidx) <= '0';           -- Clear ALU subtraction mode
 							set(presub) <= '0';           -- Clear predecrement flag
+							skipFetch <= '0';             -- CRITICAL: Clear skipFetch to prevent instruction skipping
 							next_micro_state <= idle;   -- All done
 						END IF;
 					-- Handle FMOVE control register to data register (FMOVE.L FPCR,Dn)
@@ -5512,7 +5524,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						set(subidx) <= '0';
 						set(presub) <= '0';
 						next_micro_state <= idle;
-					ELSIF sndOPC(6 downto 0) = "0111010" OR    -- FTST
+					ELSIF FALSE OR                               -- FTST removed - handled via cpGEN
 					      sndOPC(6 downto 0) = "0111000" OR    -- FCMP
 					      (sndOPC(6 downto 0) = "0000000" AND opcode(13 downto 10) = "0000") OR  -- FNOP
 					      (opcode(8 downto 6) = "001" AND opcode(5 downto 3) = "111" AND 
@@ -5520,11 +5532,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					      (opcode(8 downto 6) = "011" AND opcode(5 downto 3) = "111" AND 
 					       opcode(2 downto 0) = "100") THEN  -- FTRAPcc
 						-- Operations that don't write to CPU registers
-						-- CRITICAL: Prevent any register write operations
-						set_exec(Regwrena) <= '0';
-						set_exec(save_memaddr) <= '0';
-						set_exec(get_ea_now) <= '0';
-						set_exec(write_reg) <= '0';
+						-- Note: set_exec flags default to '0' - no need to explicitly clear them
 						-- Clear all other signals
 						fpu_data_request <= '0';
 						setnextpass <= '0';
@@ -5532,6 +5540,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						set_rot_cnt <= "000001";
 						set(subidx) <= '0';
 						set(presub) <= '0';
+						skipFetch <= '0';   -- CRITICAL: Clear skipFetch to allow next instruction
 						
 						-- CRITICAL FIX: cpGEN instructions like FTST have already positioned PC correctly
 						-- The fpu_cpgen_complete flag will be set in the clocked process
@@ -5700,6 +5709,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- Idle state - ready for next instruction
 					-- Default routing is handled by the logic at lines 1710-1717
 					-- This case ensures proper state machine handling when in idle
+					skipFetch <= '0';  -- CRITICAL: Ensure skipFetch is always cleared in idle state
 					NULL;  -- Let default next_micro_state assignment handle instruction routing
 					
 				WHEN OTHERS => NULL;
@@ -5748,29 +5758,26 @@ BEGIN
 				IF opcode(5 downto 3) = "100" THEN
 					fsave_predecr_flag <= '1';
 				END IF;
+				
+				-- CRITICAL: Determine frame size immediately for predecrement calculations
+				-- Query FPU for current state to determine appropriate frame type
+				IF fpu_busy = '1' THEN
+					-- FPU is busy executing an operation - save BUSY frame
+					coprocessor_format_word <= X"D8" & X"D8" & X"0000";  -- MC68882 BUSY frame ($D8 = version 13, BUSY)
+					fsave_frame_size <= 216;      -- 216 bytes = 54 longwords
+				ELSIF fpu_exception = '1' OR fpu_fpsr /= X"00000000" THEN
+					-- FPU has exceptions or non-zero state - save IDLE frame
+					coprocessor_format_word <= X"60" & X"3C" & X"0000";  -- MC68882 IDLE frame ($60 = version 6, IDLE)
+					fsave_frame_size <= 60;       -- 60 bytes = 15 longwords
+				ELSE
+					-- FPU is in reset state - save IDLE frame for compatibility
+					-- CRITICAL FIX: MC68882 always saves at least IDLE frame
+					coprocessor_format_word <= X"60" & X"3C" & X"0000";  -- MC68882 IDLE frame
+					fsave_frame_size <= 60;       -- 60 bytes = 15 longwords
+				END IF;
+				fsave_size_determined <= '1';
 			ELSIF (micro_state = fpu2 OR micro_state = fpu_done) AND state = "00" THEN
 				-- Memory write completed for FSAVE (in either fpu2 or fpu_done state)
-				
-				-- Frame size determination on first write
-				IF fsave_counter = 0 AND fsave_size_determined = '0' THEN
-					-- First write: get frame format from FPU and determine size
-					-- Query FPU for current state to determine appropriate frame type
-					IF fpu_busy = '1' THEN
-						-- FPU is busy executing an operation - save BUSY frame
-						coprocessor_format_word <= X"D8" & X"D8" & X"0000";  -- MC68882 BUSY frame ($D8 = version 13, BUSY)
-						fsave_frame_size <= 216;      -- 216 bytes = 54 longwords
-					ELSIF fpu_exception = '1' OR fpu_fpsr /= X"00000000" THEN
-						-- FPU has exceptions or non-zero state - save IDLE frame
-						coprocessor_format_word <= X"60" & X"3C" & X"0000";  -- MC68882 IDLE frame ($60 = version 6, IDLE)
-						fsave_frame_size <= 60;       -- 60 bytes = 15 longwords
-					ELSE
-						-- FPU is in reset state - save IDLE frame for compatibility
-						-- CRITICAL FIX: MC68882 always saves at least IDLE frame
-						coprocessor_format_word <= X"60" & X"3C" & X"0000";  -- MC68882 IDLE frame
-						fsave_frame_size <= 60;       -- 60 bytes = 15 longwords
-					END IF;
-					fsave_size_determined <= '1';
-				END IF;
 				
 				-- Increment counter based on frame size
 				IF (fsave_counter + 1) * 4 < fsave_frame_size THEN
