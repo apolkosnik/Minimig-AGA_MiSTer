@@ -184,6 +184,11 @@ architecture rtl of TG68K_FPU is
 	signal alu_overflow : std_logic;
 	signal alu_underflow : std_logic;
 	signal alu_inexact : std_logic;
+	
+	-- Temporary signals for exception handler connections
+	signal exception_reset : std_logic;
+	signal exception_op_valid : std_logic;
+	signal exception_op_type : std_logic_vector(7 downto 0);
 	signal alu_invalid : std_logic;
 	signal alu_divide_by_zero : std_logic;
 	signal alu_operation_busy : std_logic;
@@ -508,12 +513,12 @@ begin
 	FPU_EXCEPTION_HANDLER: entity work.TG68K_FPU_Exception_Handler
 	port map(
 		clk => clk,
-		reset => not nReset,
+		reset => exception_reset,
 		
 		-- Input from FPU ALU/Transcendental
 		operation_result => final_result,
-		operation_valid => alu_result_valid or trans_result_valid,
-		operation_type => "0" & alu_operation_code,
+		operation_valid => exception_op_valid,
+		operation_type => exception_op_type,
 		
 		-- Operands for checking
 		operand_a => alu_operand_a,
@@ -536,6 +541,11 @@ begin
 		exception_vector => exception_vector_internal,
 		corrected_result => exception_corrected_result
 	);
+
+	-- Assign temporary signals for exception handler
+	exception_reset <= not nReset;
+	exception_op_valid <= alu_result_valid or trans_result_valid;
+	exception_op_type <= "0" & alu_operation_code;
 
 	-- Output assignments
 	fpcr_out <= fpcr;

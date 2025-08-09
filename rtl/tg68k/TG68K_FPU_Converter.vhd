@@ -88,6 +88,7 @@ architecture rtl of TG68K_FPU_Converter is
 	signal dest_sign			: std_logic;
 	signal dest_exp				: std_logic_vector(14 downto 0);
 	signal dest_mant			: std_logic_vector(63 downto 0);
+	signal dest_extended		: std_logic_vector(79 downto 0);
 	
 	-- Integer conversion signals
 	signal int_value			: signed(31 downto 0);
@@ -142,7 +143,7 @@ begin
 		k_factor => packed_k_factor,
 		
 		-- Data
-		extended_in => dest_sign & dest_exp & dest_mant,
+		extended_in => dest_extended,
 		packed_in => data_in,
 		extended_out => packed_ext_out,
 		packed_out => packed_dec_out,
@@ -152,6 +153,9 @@ begin
 		inexact => packed_inexact,
 		invalid => packed_invalid
 	);
+
+	-- Assign concatenated signal
+	dest_extended <= dest_sign & dest_exp & dest_mant;
 
 	-- Main conversion process
 	conversion_process: process(clk, nReset)
