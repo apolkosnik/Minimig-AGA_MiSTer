@@ -297,7 +297,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_interrupt	: bit;
 	signal trap_fpu_bsun		: bit;  -- FPU Branch/Set on Unordered (Vector 48)
 	signal trap_fpu_inexact	: bit;  -- FPU Inexact (Vector 49)
-	signal fpu_cpgen_complete	: bit;  -- Flag to indicate FPU cpGEN instruction completing  
+	signal fpu_cpgen_complete	: bit;  -- Flag to indicate FPU cpGEN instruction completing
+  
 	signal trap_fpu_divzero	: bit;  -- FPU Divide by Zero (Vector 50)
 	signal trap_fpu_unfl		: bit;  -- FPU Underflow (Vector 51)
 	signal trap_fpu_operr		: bit;  -- FPU Operand Error (Vector 52)
@@ -1380,7 +1381,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				PC_datab(1) <= '1';
 			END IF;
 		ELSIF state="00" THEN
-			PC_datab(1) <= '1';
+			-- CRITICAL FIX: Don't increment PC when completing FPU cpGEN instructions
+			-- These instructions (like FTST) have already positioned PC correctly after fetching extension word
+			-- Check both current completion flag AND if we're transitioning from FPU states
+			IF fpu_cpgen_complete = '0' AND NOT (FPU_Enable = 1 AND 
+			    (micro_state = fpu_done OR micro_state = fpu_wait) AND 
+			    opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND opcode(8 downto 6) = "000") THEN
+				PC_datab(1) <= '1';
+			END IF;
 		END IF;	
 		IF TG68_PC_brw = '1' THEN	
 			IF TG68_PC_word='1' THEN
@@ -1399,10 +1407,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			setendOPC <= '1';
 			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1' THEN
 				setinterrupt <= '1';
-			ELSIF stop='0' AND NOT (micro_state = fpu1 OR micro_state = fpu2 OR micro_state = fpu_wait OR 
-			                               (micro_state = fpu_done AND next_micro_state /= idle)) THEN
-				-- CRITICAL FIX: Don't set setopcode when in FPU states that haven't completed
-				-- BUT allow it when transitioning from fpu_done to idle (FPU instruction complete)
+			ELSIF stop='0' THEN
 				setopcode <= '1';
 			END IF;
 		END IF;	
@@ -1496,7 +1501,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					END IF;	
 					IF micro_state=trap0 AND IPL_autovector='0' THEN 			
 						IPL_vec <= last_data_read(7 downto 0);    --	TH
-					END IF;	
+					END IF;
 					IF state="00" THEN				
 						last_opc_read <= data_read(15 downto 0);
 						last_opc_pc <= tg68_pc;--TH
@@ -1946,12 +1951,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		next_micro_state <= idle;
 		build_logical <= '0';
 		build_bcd <= '0';
-		-- CRITICAL FIX: Only set skipFetch from make_berr during actual bus errors, not for normal instructions
-		-- This prevents residual make_berr from FPU operations from corrupting normal instruction execution
-		IF berr = '1' OR state = "11" THEN
-			skipFetch <= make_berr;
+		-- CRITICAL FIX: Ensure skipFetch is cleared when FPU operations complete
+		-- This prevents the next instruction from being skipped after FTST
+		-- Only clear when actually transitioning out of FPU states, not during fpu_wait
+		IF FPU_Enable = 1 AND micro_state = fpu_done THEN
+			skipFetch <= '0';  -- Always clear skipFetch when FPU fully completes
 		ELSE
-			skipFetch <= '0';
+			skipFetch <= make_berr;
 		END IF;
 		set_writePCbig <= '0';
 --		set_recall_last <= '0';
@@ -3643,12 +3649,20 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								next_micro_state <= fpu1;
 							END IF;
 						END IF;
+					ELSIF opcode(8 downto 6) = "000" THEN
+						-- cpGEN instructions (FTST, FCMP, FMOVE, FADD, etc.) - all need extension word
+						-- CRITICAL FIX: cpGEN instructions like FTST.B D1 are two-word instructions
+						IF decodeOPC='1' THEN
+							-- Two-word instruction - need extension word
+							set(get_2ndOPC) <= '1';
+							next_micro_state <= fpu1;
+						END IF;
 					ELSIF opcode(8 downto 6) = "100" OR opcode(8 downto 6) = "101" THEN
 						-- FSAVE/FRESTORE - handle with special decoder logic below
 						-- Fall through to cpSAVE/cpRESTORE handling
 					ELSE
-						-- Regular FPU instructions (FMOVE, FADD, etc.)
-						-- All cpGEN instructions are two-word and need extension word
+						-- Other FPU instructions (FMOVE, FADD, etc.)
+						-- All remaining FPU instructions are two-word and need extension word
 						IF decodeOPC='1' THEN
 							-- Two-word instruction - need extension word
 							set(get_2ndOPC) <= '1';
@@ -5440,7 +5454,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						set_rot_cnt <= "000001";
 						set(subidx) <= '0';
 						set(presub) <= '0';
-						-- CRITICAL FIX: Explicitly clear skipFetch to ensure next instruction can fetch
+						-- CRITICAL FIX: Clear skipFetch immediately to ensure next instruction can fetch
 						-- This overrides the default assignment skipFetch <= make_berr
 						skipFetch <= '0';
 						-- CRITICAL FIX: Clear execution flags to prevent interference with next instruction
@@ -5565,7 +5579,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						setnextpass <= '0';           -- Clear nextpass flag that blocks endOPC
 						setstate <= "00";             -- Ensure proper endOPC condition for all FPU operations
 						set_rot_cnt <= "000001";      -- CRITICAL: Reset rot_cnt for endOPC generation
-						-- CRITICAL FIX: Explicitly clear skipFetch to ensure next instruction can fetch
+						-- CRITICAL FIX: Clear skipFetch to ensure next instruction can fetch
 						-- This overrides the default assignment skipFetch <= make_berr
 						skipFetch <= '0';
 						-- CRITICAL FIX: Clear ALU flags to prevent register corruption after FPU operations
@@ -5752,9 +5766,30 @@ BEGIN
 			cpSAVE_state <= 0;
 			cpRESTORE_state <= 0;
 			timeout_counter <= 0;
+			fpu_cpgen_complete <= '0';  -- Initialize to inactive
 		ELSIF clkena_lw='1' THEN
 			trapd <= trapmake;
 			micro_state <= next_micro_state;
+			
+			-- CRITICAL FIX: Set fpu_cpgen_complete for cpGEN instructions to prevent extra PC increment
+			-- This prevents instruction skip after FTST and other cpGEN instructions
+			-- Keep signal active through state transitions until next instruction decode
+			IF (micro_state = fpu_done OR micro_state = fpu_wait) AND opcode(15 downto 12) = "1111" AND 
+			   opcode(11 downto 9) = "001" AND opcode(8 downto 6) = "000" THEN
+				-- cpGEN instruction (like FTST) completing or waiting - maintain completion flag
+				fpu_cpgen_complete <= '1';
+			ELSIF next_micro_state = idle AND micro_state /= idle AND opcode(15 downto 12) = "1111" AND 
+			      opcode(11 downto 9) = "001" AND opcode(8 downto 6) = "000" THEN
+				-- Transitioning to idle from FPU state for cpGEN - keep flag active
+				fpu_cpgen_complete <= '1';  
+			ELSIF micro_state = idle AND state = "00" AND opcode(15 downto 12) = "1111" AND 
+			      opcode(11 downto 9) = "001" AND opcode(8 downto 6) = "000" AND setopcode = '0' THEN
+				-- Stay active during state="00" cycle for cpGEN to prevent PC increment
+				fpu_cpgen_complete <= '1';
+			ELSIF setopcode = '1' OR decodeOPC = '1' THEN
+				-- Clear flag when starting new instruction decode
+				fpu_cpgen_complete <= '0';
+			END IF;
 			
 			-- Manage FPU timeout counter
 			IF micro_state = fpu_wait THEN
@@ -5817,8 +5852,9 @@ BEGIN
 				IF opcode(5 downto 3) /= "100" THEN
 					-- Clear flag for non-predecrement modes immediately
 					fsave_predecr_flag <= '0';
-				ELSIF fsave_counter > 0 AND exec(presub) = '0' THEN
-					-- For predecrement: only clear after first write AND register update complete
+				ELSIF fsave_counter > 0 AND exec(presub) = '0' AND Wwrena = '0' AND Lwrena = '0' THEN
+					-- For predecrement: only clear after first write AND register update AND write enables inactive
+					-- CRITICAL FIX: Also check write enables to ensure register write truly completed
 					fsave_predecr_flag <= '0';
 				END IF;
 			END IF;

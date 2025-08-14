@@ -201,7 +201,7 @@ package TG68K_Pack is
 		
 		-- FSAVE/FRESTORE Data Interface (CPU manages all memory operations)
 		fsave_data_request		: in std_logic;
-		fsave_data_index		: in integer range 0 to 15;
+		fsave_data_index		: in integer range 0 to 54;
 		frestore_data_write		: in std_logic;
 		frestore_data_in		: in std_logic_vector(31 downto 0);
 		

@@ -42,7 +42,7 @@ entity TG68K_FPU is
 		
 		-- FSAVE/FRESTORE Data Interface (CPU manages all memory operations)
 		fsave_data_request		: in std_logic;							-- CPU requests FSAVE data at specific index
-		fsave_data_index		: in integer range 0 to 15;
+		fsave_data_index		: in integer range 0 to 54;
 		frestore_data_write		: in std_logic;							-- CPU writing FRESTORE data
 		frestore_data_in		: in std_logic_vector(31 downto 0);		-- Data from CPU for FRESTORE
 		
@@ -584,11 +584,11 @@ begin
 			case fpu_state is
 				when FPU_EXECUTE | FPU_FETCH_SOURCE | FPU_MEMORY_READ | FPU_MEMORY_WRITE =>
 					-- FPU is actively executing - return BUSY frame 
-					fsave_frame_format <= X"01";  -- BUSY frame (4 bytes)
+					fsave_frame_format <= X"D8";  -- MC68882 BUSY frame (216 bytes)
 					
 				when FPU_EXCEPTION_STATE =>
 					-- Exception pending - return BUSY frame to preserve exception state
-					fsave_frame_format <= X"01";  -- BUSY frame (4 bytes)
+					fsave_frame_format <= X"D8";  -- MC68882 BUSY frame (216 bytes)
 					
 				when FPU_IDLE =>
 					-- FPU is enabled and idle
@@ -1845,38 +1845,55 @@ begin
 									fpu_data_out <= fsave_frame_format & X"000000";
 								when 1 =>
 									-- Data depends on frame format
-									if fsave_frame_format = X"00" or fsave_frame_format = X"01" then
-										-- NULL or BUSY frame - only 4 bytes total, no additional data
+									if fsave_frame_format = X"00" then
+										-- NULL frame - only 4 bytes total, no additional data
 										fpu_data_out <= x"00000000";
 									else
-										-- IDLE frame (60 bytes) - FPIAR
+										-- IDLE frame (60 bytes) or BUSY frame (216 bytes) - FPIAR
 										fpu_data_out <= fpiar;
 									end if;
 								when 2 =>
-									-- IDLE frame only - FPCR
-									if fsave_frame_format = X"60" then
+									-- IDLE frame (60 bytes) or BUSY frame (216 bytes) - FPCR
+									if fsave_frame_format = X"60" or fsave_frame_format = X"D8" then
 										fpu_data_out <= fpcr;
 									else
 										fpu_data_out <= x"00000000";
 									end if;
 								when 3 =>
-									-- IDLE frame only - FPSR
-									if fsave_frame_format = X"60" then
+									-- IDLE frame (60 bytes) or BUSY frame (216 bytes) - FPSR
+									if fsave_frame_format = X"60" or fsave_frame_format = X"D8" then
 										fpu_data_out <= fpsr;
 									else
 										fpu_data_out <= x"00000000";
 									end if;
 								when 4 to 11 =>
-									-- IDLE frame only - High 32 bits of FP registers 0-7
-									if fsave_frame_format = X"60" then
+									-- IDLE frame or BUSY frame - High 32 bits of FP registers 0-7
+									if fsave_frame_format = X"60" or fsave_frame_format = X"D8" then
 										fpu_data_out <= fp_registers(fsave_data_index - 4)(79 downto 48);
 									else
 										fpu_data_out <= x"00000000";
 									end if;
-								when 12 to 15 =>
-									-- IDLE frame only - Middle 32 bits of FP registers 0-3 (limited by synthesizer)
-									if fsave_frame_format = X"60" then
+								when 12 to 19 =>
+									-- IDLE frame or BUSY frame - Middle 32 bits of FP registers 0-7
+									if fsave_frame_format = X"60" or fsave_frame_format = X"D8" then
 										fpu_data_out <= fp_registers(fsave_data_index - 12)(47 downto 16);
+									else
+										fpu_data_out <= x"00000000";
+									end if;
+								when 20 to 27 =>
+									-- IDLE frame or BUSY frame - Low 16 bits of FP registers 0-7
+									if fsave_frame_format = X"60" or fsave_frame_format = X"D8" then
+										fpu_data_out(31 downto 16) <= (others => '0');
+										fpu_data_out(15 downto 0) <= fp_registers(fsave_data_index - 20)(15 downto 0);
+									else
+										fpu_data_out <= x"00000000";
+									end if;
+								when 28 to 54 =>
+									-- BUSY frame only - Extended execution state data
+									if fsave_frame_format = X"D8" then
+										-- For now, output zeros for extended BUSY frame data
+										-- This includes intermediate execution state, exception info, etc.
+										fpu_data_out <= x"00000000";
 									else
 										fpu_data_out <= x"00000000";
 									end if;
@@ -1888,8 +1905,8 @@ begin
 						-- Frame completion depends on frame type
 						if fsave_data_request = '0' then
 							case fsave_frame_format is
-								when X"00" | X"01" =>
-									-- NULL/BUSY frame complete after first longword (4 bytes)
+								when X"00" =>
+									-- NULL frame complete after first longword (4 bytes)
 									if fsave_data_index = 0 then
 										fpu_state <= FPU_IDLE;
 										fpu_done <= '1';
@@ -1900,8 +1917,14 @@ begin
 										fpu_state <= FPU_IDLE;
 										fpu_done <= '1';
 									end if;
+								when X"D8" =>
+									-- BUSY frame complete after 54 longwords (216 bytes)
+									if fsave_data_index = 53 then  -- 0-53 = 54 longwords
+										fpu_state <= FPU_IDLE;
+										fpu_done <= '1';
+									end if;
 								when others =>
-									-- Extended frames - completion handled by CPU counter
+									-- Other extended frames - completion handled by CPU counter
 									if fsave_data_index >= 54 then
 										fpu_state <= FPU_IDLE;
 										fpu_done <= '1';
@@ -2018,7 +2041,6 @@ begin
 								
 								when 28 to 54 =>
 									-- Extended frames for BUSY or other large frame types
-									-- These are mainly handled by CPU, FPU just tracks progress
 									case frestore_frame_format is
 										when x"38" =>
 											-- Normal frame (96 bytes = 24 longwords)
@@ -2028,8 +2050,33 @@ begin
 											else
 												fsave_counter <= fsave_counter + 1;
 											end if;
+										when x"D8" =>
+											-- BUSY frame (216 bytes = 54 longwords) - restore FPU register state
+											-- Format for BUSY frame includes full FPU context at specific offsets
+											case fsave_counter is
+												when 28 to 35 =>
+													-- FP registers 0-7 high 32 bits (same as IDLE frame offset + 24)
+													fp_registers(fsave_counter - 28)(79 downto 48) <= frestore_data_in;
+													fsave_counter <= fsave_counter + 1;
+												when 36 to 43 =>
+													-- FP registers 0-7 middle 32 bits (same as IDLE frame offset + 24)
+													fp_registers(fsave_counter - 36)(47 downto 16) <= frestore_data_in;
+													fsave_counter <= fsave_counter + 1;
+												when 44 to 51 =>
+													-- FP registers 0-7 low 16 bits (same as IDLE frame offset + 24)
+													fp_registers(fsave_counter - 44)(15 downto 0) <= frestore_data_in(15 downto 0);
+													fsave_counter <= fsave_counter + 1;
+												when others =>
+													-- Other BUSY frame data (execution state, etc.) - CPU handles
+													if fsave_counter = 54 then
+														fpu_state <= FPU_IDLE;
+														fpu_done <= '1';
+													else
+														fsave_counter <= fsave_counter + 1;
+													end if;
+											end case;
 										when others =>
-											-- BUSY or other frame types (up to 216 bytes = 54 longwords)
+											-- Other frame types (up to 216 bytes = 54 longwords)
 											if fsave_counter = 54 then
 												fpu_state <= FPU_IDLE;
 												fpu_done <= '1';
