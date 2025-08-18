@@ -1,7 +1,8 @@
 // minimig version constants
+// 32-bit wide bus implementation with dual SDRAM support
 
 localparam [7:0] BETA_FLAG  = 8'd1;  // BETA / RELEASE flag
-localparam [7:0] MAJOR_VER  = 8'd1;  // major version number
-localparam [7:0] MINOR_VER  = 8'd2;  // minor version number
-localparam [7:0] MINION_VER = 8'd2;  // least version number
+localparam [7:0] MAJOR_VER  = 8'd2;  // major version number (32-bit update)
+localparam [7:0] MINOR_VER  = 8'd0;  // minor version number
+localparam [7:0] MINION_VER = 8'd0;  // least version number
 

@@ -1,4 +1,5 @@
 // This module interfaces Minimig's synchronous bus to the 68SEC000 CPU
+// Modified for 32-bit wide bus support with dual SDRAM
 //
 // cycle exact CIA interface:
 // ECLK low for 6 cycles and high for 4
@@ -53,10 +54,10 @@ module minimig_m68k_bridge
 	output        lwr,           // bus low write
 	input	 [23:1] address,       // external cpu address bus
 	output [23:1] address_out,   // internal cpu address bus output
-	output [15:0] data,          // external cpu data bus
-	input  [15:0] cpudatain,
-	output [15:0] data_out,      // internal data bus output
-	input  [15:0] data_in,       // internal data bus input
+	output [31:0] data,          // external cpu data bus
+	input  [31:0] cpudatain,
+	output [31:0] data_out,      // internal data bus output
+	input  [31:0] data_in,       // internal data bus input
 	output        rd_cyc,        // early rd signal can be used to delay DTACK
 
 	// UserIO interface
@@ -65,9 +66,9 @@ module minimig_m68k_bridge
 	input         host_cs,
 	input  [23:1] host_adr,
 	input         host_we,
-	input   [1:0] host_bs,
-	input  [15:0] host_wdat,
-	output [15:0] host_rdat,
+	input   [3:0] host_bs,
+	input  [31:0] host_wdat,
+	output [31:0] host_rdat,
 	output        host_ack
 );
 
@@ -135,10 +136,12 @@ always @ (posedge clk) begin
 	end
 end
 
-reg l_uds,l_lds;
+reg l_uds,l_lds,l_uws,l_lws;
 always @(posedge clk) begin
-  l_uds <= !halt ? _uds : !(host_bs[1]);
-  l_lds <= !halt ? _lds : !(host_bs[0]);
+  l_uds <= !halt ? _uds : !(host_bs[3]); // Upper data strobe (bits 31:24)
+  l_lds <= !halt ? _lds : !(host_bs[2]); // Lower data strobe (bits 23:16)  
+  l_uws <= !halt ? _uds : !(host_bs[1]); // Upper word strobe (bits 15:8)
+  l_lws <= !halt ? _lds : !(host_bs[0]); // Lower word strobe (bits 7:0)
 end
 
 wire _as_and_cs = !halt ? _as : !host_cs;
@@ -158,26 +161,26 @@ assign _dtack   = _ta_n;
 // synchronous control signals
 wire   enable = ~l_as & ~l_dtack & ~cck;
 assign rd = enable & lr_w;
-assign hwr = enable & ~lr_w & ~l_uds;
-assign lwr = enable & ~lr_w & ~l_lds;
+assign hwr = enable & ~lr_w & (~l_uds | ~l_uws);
+assign lwr = enable & ~lr_w & (~l_lds | ~l_lws);
 assign rd_cyc = ~l_as & lr_w;
 
 //blitter slow down signalling, asserted whenever CPU is missing bus access to chip ram, slow ram and custom registers 
 assign bls = dbs & ~l_as & l_dtack;
 
-reg [15:0] cpudatain_r;
+reg [31:0] cpudatain_r;
 always @(posedge clk) cpudatain_r <= cpudatain;
 
 // data_out multiplexer and latch   
 assign data_out = !halt ? cpudatain_r : host_wdat;
 
-reg [15:0] ldata_in;	// latched data_in
+reg [31:0] ldata_in;	// latched data_in
 always @(posedge clk) if (!c1 && c3 && enable) ldata_in <= data_in;
 
 // --------------------------------------------------------------------------------------
 
 // CPU data bus tristate buffers and output data multiplexer
-assign data[15:0] = ldata_in;
+assign data[31:0] = ldata_in;
 assign host_rdat  = ldata_in;
 
 reg [23:1] address_r;

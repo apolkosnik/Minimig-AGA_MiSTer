@@ -188,6 +188,10 @@ wire io_dig = mcp_en ? mcp_mode : SW[3];
 	wire   BTN_OSD   = 1'b1;
 	wire   BTN_USER  = 1'b1;
 	wire   BTN_DIS   = 1'b1;
+	// wire   BTN_RESET = SDRAM2_DQ[9];
+	// wire   BTN_OSD   = SDRAM2_DQ[13];
+	// wire   BTN_USER  = SDRAM2_DQ[11];
+	// wire   BTN_DIS   = SDRAM2_DQ[15];
 `endif
 
 reg BTN_EN = 0;

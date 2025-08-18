@@ -267,16 +267,16 @@ wire        chip_as;
 wire        chip_uds;
 wire        chip_lds;
 wire        chip_rw;
-wire [15:0] chip_dout;
-wire [15:0] chip_din;
+wire [31:0] chip_dout;
+wire [31:0] chip_din;
 wire [23:1] chip_addr;
 
 wire [28:1] ram_addr;
 wire        ram_sel;
 wire        ram_lds;
 wire        ram_uds;
-wire [15:0] ram_din;
-wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
+wire [31:0] ram_din;
+wire [31:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
 wire        zram_sel  = |ram_addr[28:26];
 wire        ramshared;
@@ -335,7 +335,7 @@ cpu_wrapper cpu_wrapper
 	.nmi_addr     (cpu_nmi_addr    )
 );
 
-wire [15:0] ram_dout1;
+wire [31:0] ram_dout1;
 wire        ram_ready1;
 
 sdram_ctrl ram1
@@ -377,7 +377,7 @@ sdram_ctrl ram1
 	.chip48       (chip48          )
 );
 
-wire [15:0] ram_dout2;
+wire [31:0] ram_dout2;
 wire        ram_ready2;
 wire  [7:0] DDRAM_BE_S;
    
@@ -411,7 +411,7 @@ ddram_ctrl ram2
 	.ramready     (ram_ready2      )
 );
 
-wire [15:0] fastchip_dout;
+wire [31:0] fastchip_dout;
 wire        fastchip_sel;
 wire        fastchip_lds;
 wire        fastchip_uds;
@@ -493,8 +493,8 @@ wire  [1:0] cpucfg;
 wire  [2:0] cachecfg;
 wire  [6:0] memcfg;
 wire        bootrom;   
-wire [15:0] ram_data;      // sram data bus
-wire [15:0] ramdata_in;    // sram data bus in
+wire [31:0] ram_data;      // sram data bus
+wire [31:0] ramdata_in;    // sram data bus in
 wire [47:0] chip48;        // big chip read
 wire [23:1] ram_address;   // sram address bus
 wire        _ram_bhe;      // sram upper byte select

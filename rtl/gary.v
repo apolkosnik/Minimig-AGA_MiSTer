@@ -51,12 +51,12 @@ module gary
 	input  [23:1] cpu_address_in, //cpu address bus input
 	input  [20:1] dma_address_in, //agnus dma memory address input
 	output [23:1] ram_address_out, //full ram address output to make memory mapping easier
-	input  [15:0] cpu_data_out,
-	output [15:0] cpu_data_in,
+	input  [31:0] cpu_data_out,
+	output [31:0] cpu_data_in,
 	input  [15:0] custom_data_out,
 	output [15:0] custom_data_in,
-	input  [15:0] ram_data_out,
-	output [15:0] ram_data_in,
+	input  [31:0] ram_data_out,
+	output [31:0] ram_data_in,
 	input         a1k,
 	input         bootrom, // do the A1000 bootrom magic 		 
 	input         clk,
@@ -107,9 +107,9 @@ wire	sel_bank_1; 				// $200000-$3FFFFF
 
 //--------------------------------------------------------------------------------------
 
-assign ram_data_in    = dbr ? custom_data_out : cpu_data_out;
-assign custom_data_in = dbr ? ram_data_out : cpu_rd ? 16'hFFFF : cpu_data_out;
-assign cpu_data_in    = dbr ? 16'h0000 : custom_data_out | ram_data_out | {16{sel_bank_1}};
+assign ram_data_in    = dbr ? {custom_data_out, custom_data_out} : cpu_data_out;
+assign custom_data_in = dbr ? ram_data_out[15:0] : cpu_rd ? 16'hFFFF : cpu_data_out[15:0];
+assign cpu_data_in    = dbr ? 32'h00000000 : {custom_data_out, custom_data_out} | ram_data_out | {32{sel_bank_1}};
 
 //read write control signals
 assign ram_rd  = dbr ? ~dbwe : cpu_rd;

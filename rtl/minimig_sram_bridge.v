@@ -1,5 +1,6 @@
 // This module interfaces the minimig's synchronous bus to the asynchronous sram
 // on the Minimig rev1.0 board
+// Modified for 32-bit wide bus support with dual SDRAM
 //
 // JB:
 // 2008-09-23	- generation of write strobes moved to clk28m clock domain
@@ -15,20 +16,22 @@ module minimig_sram_bridge
 	//chipset internal port
 	input	  [7:0] bank,			// memory bank select (512KB)
 	input	 [23:1] address_in,	// bus address
-	input	 [15:0] data_in,		// bus data in
-	output [15:0] data_out,		// bus data out
+	input	 [31:0] data_in,		// bus data in
+	output [31:0] data_out,		// bus data out
 	input         rd,			   // bus read
-	input         hwr,			// bus high byte write
-	input         lwr,			// bus low byte write
+	input         hwr,			// bus high word write
+	input         lwr,			// bus low word write
 
-	//RAM external signals
+	//RAM external signals  
 	output        _bhe,			// sram upper byte
 	output        _ble,   		// sram lower byte
+	output        _whe,			// sram upper word enable
+	output        _wle,   		// sram lower word enable
 	output        _we,			// sram write enable
 	output        _oe,			// sram output enable
 	output [22:1] address,		// sram address bus
-	output [15:0] data,	  		// sram data das
-	input  [15:0] ramdata_in	// sram data das in
+	output [31:0] data,	  		// sram data bus
+	input  [31:0] ramdata_in	// sram data bus in
 );	 
 
 /* basic timing diagram
@@ -66,6 +69,8 @@ assign _we   = (!hwr && !lwr) | !enable;
 assign _oe   = !rd  | !enable; 
 assign _bhe  = !hwr | !enable;
 assign _ble  = !lwr | !enable;
+assign _whe  = !hwr | !enable;
+assign _wle  = !lwr | !enable;
 
 assign address[17:1]  = address_in[17:1];
 assign address[22:18] = bank[6] ? 5'b111_11 : //access f8-fb and !ovl and !halt, map to fc-ff
@@ -73,7 +78,7 @@ assign address[22:18] = bank[6] ? 5'b111_11 : //access f8-fb and !ovl and !halt,
                        (bank[5] ? {2'b0, bank[3]|bank[2], bank[3]|bank[1],address_in[18]} :
                         address_in[22:18])); //chipram access
 
-assign data_out[15:0] = (enable && rd) ? ramdata_in[15:0] : 16'b0000000000000000;
-assign data[15:0]     = data_in[15:0];
+assign data_out[31:0] = (enable && rd) ? ramdata_in[31:0] : 32'h00000000;
+assign data[31:0]     = data_in[31:0];
 
 endmodule

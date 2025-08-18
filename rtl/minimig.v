@@ -146,12 +146,15 @@
 // SB:
 // 2012-03-23 - fixed sprite enable signal (coppermaster demo)
 
+// Include configuration options
+`include "minimig_config.vh"
+
 module minimig
 (
 	//m68k pins
 	input  [23:1] cpu_address, // m68k address bus
-	output [15:0] cpu_data,    // m68k data bus
-	input  [15:0] cpudata_in,  // m68k data in
+	output [31:0] cpu_data,    // m68k data bus
+	input  [31:0] cpudata_in,  // m68k data in
 	output  [2:0] _cpu_ipl,    // m68k interrupt request
 	input 	     _cpu_as,     // m68k address strobe
 	input 	     _cpu_uds,    // m68k upper data strobe
@@ -164,8 +167,8 @@ module minimig
 	output 	     ovr,         // NMI address decoding override
 
 	//sram pins
-	output [15:0] ram_data,    // sram data bus
-	input  [15:0] ramdata_in,  // sram data bus in
+	output [31:0] ram_data,    // sram data bus
+	input  [31:0] ramdata_in,  // sram data bus in
 	output [23:1] ram_address, // sram address bus
 	output 	     _ram_bhe,    // sram upper byte select
 	output 	     _ram_ble,    // sram lower byte select
@@ -266,21 +269,45 @@ module minimig
 );
 
 
-//local signals for data bus
+//local signals for data bus - strategically optimized
+`ifdef MINIMIG_32BIT_BUSES
+ `ifdef CORE_32BIT_ONLY
+    // Ultra-minimal: Only essential CPU-memory paths are 32-bit
+    wire [31:0] cpu_data_in;		//cpu data bus in (32-bit essential)
+    wire [31:0] cpu_data_out;	   //cpu data bus out (32-bit essential)
+    wire [31:0] ram_data_in;		//ram data bus in (32-bit essential)
+    wire [31:0] ram_data_out;	   //ram data bus out (32-bit essential)
+    wire [31:0] gary_data_out;	   //data out from memory bus multiplexer (32-bit essential)
+ `else
+    // Full 32-bit implementation
+    wire [31:0] cpu_data_in;		//cpu data bus in (32-bit for performance)
+    wire [31:0] cpu_data_out;	   //cpu data bus out (32-bit for performance)
+    wire [31:0] ram_data_in;		//ram data bus in (32-bit for bandwidth)
+    wire [31:0] ram_data_out;	   //ram data bus out (32-bit for bandwidth)
+    wire [31:0] gary_data_out;	   //data out from memory bus multiplexer (32-bit critical)
+ `endif
+`else
 wire [15:0] cpu_data_in;		//cpu data bus in
 wire [15:0] cpu_data_out;	   //cpu data bus out
 wire [15:0] ram_data_in;		//ram data bus in
 wire [15:0] ram_data_out;	   //ram data bus out
-wire [15:0] custom_data_in;	//custom chips data bus in
-wire [15:0] custom_data_out;	//custom chips data bus out
-wire [15:0] agnus_data_out;	//agnus data out
-wire [15:0] paula_data_out;	//paula data bus out
-wire [15:0] denise_data_out;	//denise data bus out
-wire [15:0] user_data_out;	   //user IO data out
 wire [15:0] gary_data_out;	   //data out from memory bus multiplexer
-wire [15:0] gayle_data_out;	//Gayle data out
-wire [15:0] cia_data_out;	   //cia A+B data bus out
-wire [15:0] ar3_data_out;	   //Action Replay data out
+`endif
+
+// Keep custom chips at native widths for resource optimization
+wire [15:0] custom_data_in;	//custom chips data bus in (16-bit sufficient)
+wire [15:0] custom_data_out;	//custom chips data bus out (16-bit sufficient)
+wire [15:0] agnus_data_out;	//agnus data out (16-bit native)
+wire [15:0] paula_data_out;	//paula data bus out (16-bit native)
+wire [15:0] denise_data_out;	//denise data bus out (16-bit native)
+wire [15:0] user_data_out;	   //user IO data out (16-bit sufficient)
+wire [15:0] gayle_data_out;	//Gayle data out (16-bit sufficient)
+wire [15:0] cia_data_out;	   //cia A+B data bus out (8-bit devices)
+wire [15:0] ar3_data_out;	   //Action Replay data out (16-bit sufficient)
+
+// Gary bus signals (32-bit for chip RAM)
+wire [31:0] gary_ram_data_in;	//Gary to RAM data (32-bit)
+wire [31:0] gary_cpu_data_in;	//Gary to CPU data (32-bit)
 
 //local signals for address bus
 wire [23:1] cpu_address_out;	//cpu address out
@@ -314,6 +341,7 @@ wire        sel_kick256kmirror;// mirror f8-fb to fc-ff in a1k mode
 wire        sel_cia;				//CIA address space
 wire        sel_reg;				//chip register select
 wire        sel_rtc;
+wire        sel_rtg;				//RTG select
 wire        sel_cia_a;			//cia A select
 wire        sel_cia_b;			//cia B select
 wire        sel_toccata;
@@ -376,7 +404,11 @@ wire        cpuhlt;
 wire        int7;					//int7 interrupt request from Action Replay
 wire  [2:0] _iplx;			   //interrupt request lines from Paula
 wire        sel_cart;			//Action Replay RAM select
+`ifdef DISABLE_CART_32BIT
 wire [15:0] cart_data_out;
+`else
+wire [31:0] cart_data_out;
+`endif
 
 wire        usrrst;				//user reset from osd interface
 wire        hires;				//hires signal from Denise for interpolation filter enable in Amber
@@ -398,8 +430,8 @@ wire        host_cs;
 wire [23:0] host_adr;
 wire        host_we;
 wire [ 1:0] host_bs;
-wire [15:0] host_wdat;
-wire [15:0] host_rdat;
+wire [31:0] host_wdat;
+wire [31:0] host_rdat;
 wire        host_ack;
 
 wire        sys_reset;    		//reset output from minimig_syscontrol.v
@@ -766,11 +798,11 @@ gary GARY1
 	.dma_address_in(dma_address_out),
 	.ram_address_out(ram_address_out),
 	.cpu_data_out(cpu_data_out),
-	.cpu_data_in(gary_data_out),
+	.cpu_data_in(gary_cpu_data_in),
 	.custom_data_out(custom_data_out),
 	.custom_data_in(custom_data_in),
 	.ram_data_out(ram_data_out),
-	.ram_data_in(ram_data_in),
+	.ram_data_in(gary_ram_data_in),
 	.cpu_rd(cpu_rd),
 	.cpu_hwr(cpu_hwr),
 	.cpu_lwr(cpu_lwr),
@@ -801,6 +833,7 @@ gary GARY1
 	.sel_ide(sel_ide),
 	.sel_gayle(sel_gayle),
 	.sel_rtc(sel_rtc),
+	.sel_rtg(sel_rtg),
 	.sel_toccata(sel_toccata),
 	.reset(reset),
 	.clk(clk),
@@ -808,12 +841,23 @@ gary GARY1
 	.bootrom(bootrom)
 );
 
+// Data width connection for chip RAM
+`ifdef MINIMIG_32BIT_BUSES
+// Direct 32-bit connection for chip RAM
+assign gary_data_out = gary_cpu_data_in;     // Direct 32-bit connection
+assign ram_data_in = gary_ram_data_in;       // Direct 32-bit connection
+`else
+// Direct connection for 16-bit mode
+assign gary_data_out = gary_cpu_data_in[15:0];
+assign ram_data_in = gary_ram_data_in[15:0];
+`endif
+
 gayle GAYLE1
 (
 	.clk(clk),
 	.reset(reset),
 	.addr(cpu_address_out),
-	.data_in(cpu_data_out),
+	.data_in(cpu_data_out[15:0]),
 	.data_out(gayle_data_out),
 	.rd(cpu_rd),
 	.wr(cpu_hwr),
@@ -850,7 +894,7 @@ end
 
 //-------------------------------------------------------------------------------------
 
-wire [15:0] rtc_out = (sel_rtc && cpu_rd) ? {12'h000, rtc_reg[{cpu_address_out[5:2], 2'b00} +:4]} : 16'h0000;
+wire [31:0] rtc_out = (sel_rtc && cpu_rd) ? {28'h0000000, rtc_reg[{cpu_address_out[5:2], 2'b00} +:4]} : 32'h00000000;
 
 reg [63:0] rtc_reg;
 always @(posedge clk) begin
@@ -879,7 +923,7 @@ toccata #(
 	.clk(clk),
 	.rst(reset),
 	.hsync(_hsync),
-	.data_in(cpu_data_out),
+	.data_in(cpu_data_out[15:0]),
 	.data_out(toccata_out),
 	.addr(cpu_address_out[15:1]),
 	.rd(cpu_rd),
@@ -893,18 +937,56 @@ toccata #(
 
 //-------------------------------------------------------------------------------------
 
-//data multiplexer
+// TG68K reverted to 16-bit interface - smart controllers removed
+
+//-------------------------------------------------------------------------------------
+
+// TG68K reverted to 16-bit - controller signals removed
+
+//data multiplexer - optimized for resource usage
+`ifdef MINIMIG_32BIT_BUSES
+ `ifdef CORE_32BIT_ONLY
+    // Ultra-minimal: Most peripherals stay 16-bit
+    assign cpu_data_in[31:0]= gary_data_out[31:0]
+    							 | {16'h0000, cia_data_out[15:0]}
+    							 | {16'h0000, gayle_data_out[15:0]}
+    `ifndef DISABLE_CART_32BIT
+    							 | cart_data_out[31:0]
+    `else
+    							 | {16'h0000, cart_data_out[15:0]}
+    `endif
+    							 | rtc_out
+    							 | {16'h0000, toccata_out[15:0]};
+ `else
+    // Full 32-bit implementation
+    assign cpu_data_in[31:0]= gary_data_out[31:0]
+    							 | {16'h0000, cia_data_out[15:0]}
+    							 | {16'h0000, gayle_data_out[15:0]}
+    `ifndef DISABLE_CART_32BIT
+    							 | cart_data_out[31:0]
+    `else
+    							 | {16'h0000, cart_data_out[15:0]}
+    `endif
+    							 | rtc_out
+    							 | {16'h0000, toccata_out[15:0]};
+ `endif
+`else
 assign cpu_data_in[15:0]= gary_data_out[15:0]
 							 | cia_data_out[15:0]
 							 | gayle_data_out[15:0]
 							 | cart_data_out[15:0]
-							 | rtc_out
-							 | toccata_out;
+							 | rtc_out[15:0]
+							 | toccata_out[15:0];
+`endif
 
 assign custom_data_out[15:0] = agnus_data_out[15:0]
 							 | paula_data_out[15:0]
 							 | denise_data_out[15:0]
 							 | user_data_out[15:0];
+
+// Data path assignments
+// CPU bridge handles the data flow between CPU and internal buses
+// Gary handles custom_data_in assignment through bus multiplexing
 
 //--------------------------------------------------------------------------------------
 

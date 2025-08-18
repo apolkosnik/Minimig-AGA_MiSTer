@@ -39,8 +39,8 @@ module cpu_wrapper
 	input             bootrom,
 
 	output reg [23:1] chip_addr,
-	input      [15:0] chip_dout,
-	output reg [15:0] chip_din,
+	input      [31:0] chip_dout,
+	output reg [31:0] chip_din,
 	output reg        chip_as,
 	output reg        chip_uds,
 	output reg        chip_lds,
@@ -48,7 +48,7 @@ module cpu_wrapper
 	input             chip_dtack,
 	input       [2:0] chip_ipl,
 	
-	input      [15:0] fastchip_dout,
+	input      [31:0] fastchip_dout,
 	output reg        fastchip_sel,
 	output            fastchip_lds,
 	output            fastchip_uds,
@@ -59,8 +59,8 @@ module cpu_wrapper
 
 	output            ramsel,
 	output     [28:1] ramaddr,
-	output     [15:0] ramdin,
-	input      [15:0] ramdout,
+	output     [31:0] ramdin,
+	input      [31:0] ramdout,
 	input             ramready,
 	output            ramlds,
 	output            ramuds,
@@ -96,12 +96,12 @@ wire sel_chipram   = !cpu_addr[31:21] && cchip; 		             //$000000 - $1FFF
 // decide what to do, would not be good style to replicate that here). 
 wire sel_nmi_vector = (cpu_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
 
-wire [15:0] ramdat;
+wire [31:0] ramdat;
 
 assign ramlds = sel_rtg ? uds_in : lds_in;
 assign ramuds = sel_rtg ? lds_in : uds_in;
-assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
-assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
+assign ramdin = sel_rtg ? {cpu_dout[23:16],cpu_dout[31:24],cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
+assign ramdat = sel_rtg ? {ramdout[23:16], ramdout[31:24], ramdout[7:0], ramdout[15:8]}  : ramdout;
 
 //       Main  DDx  RTG  8M  128M  256M
 //       ----  ---  ---  --  ----  ----
@@ -129,12 +129,13 @@ assign fastchip_uds = uds_in;
 assign fastchip_rnw = wr;
 
 reg  [31:0] cpu_addr;
-reg  [15:0] cpu_dout;
-wire [15:0] cpu_din = ramsel ? ramdat : fastchip_selack ? fastchip_dout : {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
+reg  [31:0] cpu_dout;
+wire [31:0] cpu_din = ramsel ? ramdat : fastchip_selack ? fastchip_dout : {sel_autoconfig ? {4{autocfg_data}} : chip_data[31:16], chip_data[15:0]};
+wire [15:0] cpu_din_16 = cpu_din[15:0];  // 16-bit data for TG68K
 reg         wr;
 reg         uds_in;
 reg         lds_in;
-reg  [15:0] chip_data;
+reg  [31:0] chip_data;
 reg  [31:0] vbr;
 
 always @* begin
@@ -180,7 +181,8 @@ always @* begin
 	end
 end
 
-wire [15:0] cpu_dout_p;
+wire [15:0] cpu_dout_p_16;
+wire [31:0] cpu_dout_p = {cpu_dout_p_16, cpu_dout_p_16};
 wire [31:0] cpu_addr_p;
 wire  [1:0] cpustate_p;
 wire  [3:0] cacr_p;
@@ -205,12 +207,12 @@ cpu_inst_p
   .clk(clk),
   .nreset(reset),
   .clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
-  .data_in(cpu_din),
+  .data_in(cpu_din_16),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
   .regin_out(),
   .addr_out(cpu_addr_p),
-  .data_write(cpu_dout_p),
+  .data_write(cpu_dout_p_16),
   .nwr(wr_p),
   .nuds(uds_p),
   .nlds(lds_p),
@@ -223,7 +225,7 @@ cpu_inst_p
   .vbr_out(vbr_p)
 );
 
-wire [15:0] cpu_dout_o;
+wire [31:0] cpu_dout_o;
 wire [23:1] cpu_addr_o;
 wire  [2:0] fc_o;
 wire        wr_o;
@@ -300,7 +302,7 @@ always @(posedge clk) begin
 end
 
 reg        chipready;
-reg [15:0] chipdout_i;
+reg [31:0] chipdout_i;
 reg  [2:0] ipl_i;
 reg        c_as,c_rw,c_uds,c_lds;
 always @(negedge clk, negedge reset) begin
