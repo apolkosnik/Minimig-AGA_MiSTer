@@ -71,7 +71,10 @@ architecture rtl of TG68K_FPU is
 	-- MC68881/68882 Floating Point Register File (8 x 80-bit registers)
 	-- Stored as 80-bit IEEE 754 extended precision values
 	type fp_reg_t is array(0 to 7) of std_logic_vector(79 downto 0);
-	signal fp_registers : fp_reg_t := (others => (others => '0'));
+	-- IEEE 754 compliant initialization: All registers should contain positive non-signaling NaN
+	-- Extended precision NaN: Sign=0, Exponent=7FFF, Mantissa=C000000000000000 (bit 62=1 for quiet NaN)
+	constant IEEE_NaN : std_logic_vector(79 downto 0) := X"7FFFC000000000000000";
+	signal fp_registers : fp_reg_t := (others => IEEE_NaN);
 	
 	-- Control and Status Registers with proper MC68882 defaults
 	-- FPCR: MC68882 initialization
@@ -274,6 +277,7 @@ architecture rtl of TG68K_FPU is
 	-- Basic operations (fully implemented)
 	constant OP_FMOVE		: std_logic_vector(6 downto 0) := "0000000";
 	constant OP_FINT		: std_logic_vector(6 downto 0) := "0000001";
+	constant OP_FNOP		: std_logic_vector(6 downto 0) := "0000010";
 	constant OP_FINTRZ		: std_logic_vector(6 downto 0) := "0000011";
 	constant OP_FSQRT		: std_logic_vector(6 downto 0) := "0000100";
 	constant OP_FABS		: std_logic_vector(6 downto 0) := "0011000";
@@ -984,6 +988,10 @@ begin
 									rom_offset <= extension_word(6 downto 0);  -- ROM offset from extension word
 									rom_read_enable <= '1';
 									fpu_state <= FPU_WRITE_RESULT;  -- Skip fetch, go directly to write result
+								elsif fpu_operation = OP_FNOP then
+									-- FNOP - No operation, just complete immediately
+									fpu_state <= FPU_IDLE;
+									fpu_done <= '1';
 								elsif fast_path_enabled = '1' and fpu_operation = OP_FABS then
 									-- Fast path for FABS - clear sign bit immediately
 									if to_integer(unsigned(decoder_source_reg)) <= 7 then
@@ -1781,6 +1789,14 @@ begin
 								fpsr(14) <= '1';  -- Accrued divide by zero
 							end if;
 							
+							-- Update quotient byte for FMOD and FREM operations (FPSR bits 23-16)
+							-- MC68882 stores 7 bits of quotient from modulo/remainder operations
+							if fpu_operation = OP_FMOD or fpu_operation = OP_FREM then
+								-- Extract 7 bits of quotient from ALU result
+								-- Assuming ALU provides quotient in upper bits of result
+								fpsr(23 downto 17) <= result_data(6 downto 0);  -- Store 7-bit quotient
+							end if;
+							
 							-- Set output data based on format
 							if data_format = FORMAT_SINGLE or data_format = FORMAT_LONG then
 								fpu_data_out <= result_data(31 downto 0);
@@ -1794,8 +1810,13 @@ begin
 						end if;
 					
 					when FPU_EXCEPTION_STATE =>
-						-- Proper exception handling with FPSR updates
+						-- Proper exception handling with FPSR updates and FPCR enable checking
 						fpu_done <= '1';
+						
+						-- Check if exception is enabled in FPCR before generating trap
+						-- FPCR exception enable bits: [15-8]
+						-- Bit 15: BSUN, Bit 14: SNAN, Bit 13: OPERR, Bit 12: OVFL
+						-- Bit 11: UNFL, Bit 10: DZ, Bit 9: INEX2, Bit 8: INEX1
 						
 						-- Update FPSR exception status bits based on exception_code
 						case exception_code_internal is
@@ -1825,6 +1846,49 @@ begin
 							when others =>
 								-- Unknown exception
 								fpsr(26) <= '1';  -- Mark as invalid operation
+						end case;
+						
+						-- Check FPCR enable bits and generate trap if enabled
+						case exception_code_internal is
+							when x"02" =>  -- BSUN exception
+								if fpcr(15) = '1' then  -- BSUN enable bit
+									fpu_exception <= '1';  -- Generate trap
+								else
+									fpu_exception <= '0';  -- No trap, just update FPSR
+								end if;
+							when x"05" =>  -- Division by zero
+								if fpcr(10) = '1' then  -- DZ enable bit
+									fpu_exception <= '1';  -- Generate trap
+								else
+									fpu_exception <= '0';  -- No trap, just update FPSR
+								end if;
+							when x"0C" =>  -- Invalid operation (OPERR)
+								if fpcr(13) = '1' then  -- OPERR enable bit  
+									fpu_exception <= '1';  -- Generate trap
+								else
+									fpu_exception <= '0';  -- No trap, just update FPSR
+								end if;
+							when x"0D" =>  -- Overflow
+								if fpcr(12) = '1' then  -- OVFL enable bit
+									fpu_exception <= '1';  -- Generate trap
+								else
+									fpu_exception <= '0';  -- No trap, just update FPSR
+								end if;
+							when x"0E" =>  -- Underflow
+								if fpcr(11) = '1' then  -- UNFL enable bit
+									fpu_exception <= '1';  -- Generate trap
+								else
+									fpu_exception <= '0';  -- No trap, just update FPSR
+								end if;
+							when x"0F" =>  -- Inexact result
+								if fpcr(9) = '1' then  -- INEX2 enable bit
+									fpu_exception <= '1';  -- Generate trap
+								else
+									fpu_exception <= '0';  -- No trap, just update FPSR
+								end if;
+							when others =>
+								-- For other exceptions, always generate trap
+								fpu_exception <= '1';
 						end case;
 						
 						-- Update FPIAR with exception instruction address if needed
