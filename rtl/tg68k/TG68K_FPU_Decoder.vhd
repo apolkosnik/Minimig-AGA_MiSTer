@@ -121,10 +121,12 @@ begin
 		--   DF = destination format  
 		--   nnn = destination register
 		
-		if inst_type_bits = "000" then  -- General instruction
-			format_field <= extension_word(12 downto 10);	-- Source format
-			opmode_field <= extension_word(9 downto 3);		-- Operation
-			rm_field <= extension_word(12 downto 10);		-- Source specifier (when R/M=0)
+		if inst_type_bits = "000" then  -- General instruction (always has extension)
+			-- FIXED: Always use extension_word for format/opcode fields
+			-- All general FPU instructions (including register-direct) need extension word
+			format_field <= extension_word(12 downto 10);	-- Source format from extension word
+			opmode_field <= extension_word(9 downto 3);		-- Operation from extension word
+			rm_field <= extension_word(12 downto 10);		-- Source specifier 
 			rn_field <= extension_word(2 downto 0);			-- Destination register
 		else
 			format_field <= "000";
@@ -153,10 +155,13 @@ begin
 						-- Check extension word to determine if this is FP registers or control registers
 						-- This will be handled in the main FPU logic after extension word is available
 						instruction_type_int <= INST_FMOVEM;   -- Treat as FMOVEM operation
+						needs_extension_word <= '1';
 					else
 						instruction_type_int <= INST_GENERAL;
+						-- FIXED: Always consume the extension word for F-line general ops
+						-- All general FPU instructions need extension word for opmode and format
+						needs_extension_word <= '1';
 					end if;
-					needs_extension_word <= '1';
 					
 				when "001" =>  -- FDBcc, FTRAPcc, FScc
 					if opcode(5 downto 3) = "001" then      -- FDBcc

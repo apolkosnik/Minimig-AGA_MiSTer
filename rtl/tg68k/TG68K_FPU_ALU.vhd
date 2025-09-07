@@ -51,6 +51,9 @@ entity TG68K_FPU_ALU is
 		invalid					: out std_logic;
 		divide_by_zero			: out std_logic;
 		
+		-- Quotient byte for FMOD/FREM operations
+		quotient_byte			: out std_logic_vector(7 downto 0);
+		
 		-- Control
 		operation_busy			: out std_logic;
 		operation_done			: out std_logic
@@ -131,6 +134,9 @@ architecture rtl of TG68K_FPU_ALU is
 	signal div_valid : std_logic;
 	signal div_by_zero_detected : std_logic;
 	
+	-- FMOD/FREM quotient calculation
+	signal fmod_quotient : std_logic_vector(7 downto 0) := (others => '0');
+	
 	-- Special values
 	constant EXP_ZERO : std_logic_vector(14 downto 0) := (others => '0');
 	constant EXP_MAX : std_logic_vector(14 downto 0) := (others => '1');
@@ -172,6 +178,8 @@ begin
 			end if;
 			is_inf_a <= '0';
 			is_nan_a <= '0';
+			is_snan_a <= '0';
+			is_qnan_a <= '0';
 		elsif operand_a(78 downto 64) = EXP_MAX then
 			is_zero_a <= '0';
 			is_denorm_a <= '0';
@@ -214,6 +222,8 @@ begin
 			end if;
 			is_inf_b <= '0';
 			is_nan_b <= '0';
+			is_snan_b <= '0';
+			is_qnan_b <= '0';
 		elsif operand_b(78 downto 64) = EXP_MAX then
 			is_zero_b <= '0';
 			is_denorm_b <= '0';
@@ -1086,22 +1096,33 @@ begin
 									mant_result <= (others => '0');
 								else
 									-- FMOD: x - trunc(x/y) * y (sign of dividend)
-									-- Simplified implementation using exponent comparison
+									-- Calculate quotient for FPSR quotient byte
 									if unsigned(exp_a) >= unsigned(exp_b) then
-										-- |x| >= |y|: compute remainder
+										-- |x| >= |y|: compute remainder and quotient
 										sign_result <= sign_a;  -- Result has sign of dividend
-										-- Approximate remainder by reducing exponent
-										if unsigned(exp_a) - unsigned(exp_b) < 64 then
-											exp_result <= exp_b;  -- Result magnitude ~ divisor
+										
+										-- Calculate integer quotient bits
+										if unsigned(exp_a) - unsigned(exp_b) < 7 then
+											-- Quotient fits in 7 bits
+											fmod_quotient <= "0" & std_logic_vector(to_unsigned(
+												to_integer(unsigned(exp_a) - unsigned(exp_b)), 7));
+											exp_result <= exp_b;
 											-- Simple modular approximation on mantissas
 											mant_result <= std_logic_vector(unsigned(mant_a) mod (unsigned(mant_b) + 1));
+										elsif unsigned(exp_a) - unsigned(exp_b) < 64 then
+											-- Large quotient - saturate at 7Fh
+											fmod_quotient <= "01111111";
+											exp_result <= exp_b;
+											mant_result <= std_logic_vector(unsigned(mant_a) mod (unsigned(mant_b) + 1));
 										else
-											-- Large difference: result ≈ divisor magnitude
+											-- Very large difference: quotient > 127
+											fmod_quotient <= "01111111";  -- Saturate
 											exp_result <= exp_b;
 											mant_result <= mant_b;
 										end if;
 									else
-										-- |x| < |y|: result is x (no division needed)
+										-- |x| < |y|: result is x, quotient is 0
+										fmod_quotient <= "00000000";
 										sign_result <= sign_a;
 										exp_result <= exp_a;
 										mant_result <= mant_a;
@@ -1127,24 +1148,33 @@ begin
 									-- FREM: IEEE remainder using round-to-nearest (different from FMOD)
 									-- x - round(x/y) * y, result can have either sign
 									if unsigned(exp_a) >= unsigned(exp_b) then
-										-- |x| >= |y|: compute IEEE remainder
-										-- IEEE remainder can be negative even if dividend is positive
-										if unsigned(exp_a) - unsigned(exp_b) < 32 then
-											-- Compute approximate quotient for rounding
-											-- If quotient is close to 0.5, result sign depends on rounding
-											exp_result <= exp_b;  -- Result magnitude ~ divisor
+										-- |x| >= |y|: compute IEEE remainder and quotient
+										-- Calculate quotient for FPSR quotient byte
+										if unsigned(exp_a) - unsigned(exp_b) < 7 then
+											-- Quotient fits in 7 bits - use round-to-nearest
+											fmod_quotient <= "0" & std_logic_vector(to_unsigned(
+												to_integer(unsigned(exp_a) - unsigned(exp_b)), 7));
+											exp_result <= exp_b;
 											-- IEEE remainder: magnitude is <= |y|/2
 											mant_result <= std_logic_vector(shift_right(unsigned(mant_b), 1));
 											-- Sign determination (simplified): alternate based on mantissa bits
 											sign_result <= mant_a(0) xor mant_b(0);
+										elsif unsigned(exp_a) - unsigned(exp_b) < 32 then
+											-- Large quotient - saturate
+											fmod_quotient <= "01111111";
+											exp_result <= exp_b;
+											mant_result <= std_logic_vector(shift_right(unsigned(mant_b), 1));
+											sign_result <= mant_a(0) xor mant_b(0);
 										else
-											-- Large difference: result ≈ ±divisor/2
+											-- Very large difference: quotient > 127
+											fmod_quotient <= "01111111";  -- Saturate
 											exp_result <= std_logic_vector(unsigned(exp_b) - 1);  -- /2
 											mant_result <= mant_b;
 											sign_result <= sign_a xor sign_b;  -- IEEE remainder sign rules
 										end if;
 									else
-										-- |x| < |y|: result is x (IEEE remainder when |x| < |y|)
+										-- |x| < |y|: result is x, quotient is 0
+										fmod_quotient <= "00000000";
 										sign_result <= sign_a;
 										exp_result <= exp_a;
 										mant_result <= mant_a;
@@ -1538,5 +1568,8 @@ begin
 	inexact <= flags_inexact;
 	invalid <= flags_invalid;
 	divide_by_zero <= flags_div_by_zero;
+	
+	-- Output quotient byte for FMOD/FREM operations
+	quotient_byte <= fmod_quotient;
 
 end rtl;

@@ -314,7 +314,8 @@ PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype,
 			ELSIF long_start='0' AND exe_datatype="10" AND (exec(presub) OR exec(postadd) OR movem_presub)='1' THEN
 				IF exec(movem_action)='1' THEN
 					addsub_b <= "00000000000000000000000000000110";
-				-- FSAVE now uses normal 4-byte predecrement, no special handling needed
+				-- Normal longword predecrement/postincrement (4 bytes)
+				-- Note: FSAVE uses dedicated predecrement logic, not this path
 				ELSE
 					addsub_b <= "00000000000000000000000000000100";
 				END IF;

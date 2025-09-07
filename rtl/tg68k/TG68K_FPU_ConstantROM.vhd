@@ -1,7 +1,7 @@
 ------------------------------------------------------------------------------
 ------------------------------------------------------------------------------
 --                                                                          --
--- TG68K MC68881/68882 FPU Constant ROM                                    --
+-- TG68K MC68882 FPU Constant ROM - Complete 22 Defined Constants          --
 -- Copyright (c) 2025                                                       --
 --                                                                          --
 -- This source file is free software: you can redistribute it and/or modify --
@@ -42,40 +42,43 @@ end TG68K_FPU_ConstantROM;
 
 architecture rtl of TG68K_FPU_ConstantROM is
 
-	-- MC68881/68882 Constant ROM addresses
-	constant ROM_PI			: std_logic_vector(6 downto 0) := "0000000";	-- π
-	constant ROM_LOG10_2	: std_logic_vector(6 downto 0) := "0110000";	-- Log₁₀(2)
-	constant ROM_E			: std_logic_vector(6 downto 0) := "0110001";	-- e
-	constant ROM_LOG2_E		: std_logic_vector(6 downto 0) := "0110010";	-- Log₂(e)
-	constant ROM_LOG10_E	: std_logic_vector(6 downto 0) := "0110011";	-- Log₁₀(e)
-	constant ROM_ZERO		: std_logic_vector(6 downto 0) := "0001111";	-- 0.0
-	constant ROM_LN_2		: std_logic_vector(6 downto 0) := "0110100";	-- ln(2)
-	constant ROM_LN_10		: std_logic_vector(6 downto 0) := "0110101";	-- ln(10)
-	constant ROM_1E0		: std_logic_vector(6 downto 0) := "0001000";	-- 10⁰
-	constant ROM_1E1		: std_logic_vector(6 downto 0) := "0001001";	-- 10¹
-	constant ROM_1E2		: std_logic_vector(6 downto 0) := "0001010";	-- 10²
-	constant ROM_1E4		: std_logic_vector(6 downto 0) := "0001011";	-- 10⁴
-	constant ROM_1E8		: std_logic_vector(6 downto 0) := "0110110";	-- 10⁸
-	constant ROM_1E16		: std_logic_vector(6 downto 0) := "0110111";	-- 10¹⁶
-	constant ROM_1E32		: std_logic_vector(6 downto 0) := "0111000";	-- 10³²
-	constant ROM_1E64		: std_logic_vector(6 downto 0) := "0111001";	-- 10⁶⁴
-	constant ROM_1E128		: std_logic_vector(6 downto 0) := "0111010";	-- 10¹²⁸
-	constant ROM_1E256		: std_logic_vector(6 downto 0) := "0111011";	-- 10²⁵⁶
-	constant ROM_1E512		: std_logic_vector(6 downto 0) := "0111100";	-- 10⁵¹²
-	constant ROM_1E1024		: std_logic_vector(6 downto 0) := "0111101";	-- 10¹⁰²⁴
-	constant ROM_1E2048		: std_logic_vector(6 downto 0) := "0111110";	-- 10²⁰⁴⁸
-	constant ROM_1E4096		: std_logic_vector(6 downto 0) := "0111111";	-- 10⁴⁰⁹⁶
+	-- MC68882 Constant ROM addresses (Corrected per MC68882 specification)
+	-- Standard mathematical constants
+	constant ROM_PI			: std_logic_vector(6 downto 0) := "0000000";	-- π (0x00)
+	constant ROM_LOG10_2	: std_logic_vector(6 downto 0) := "0001011";	-- Log₁₀(2) (0x0B)
+	constant ROM_E			: std_logic_vector(6 downto 0) := "0001100";	-- e (0x0C)
+	constant ROM_LOG2_E		: std_logic_vector(6 downto 0) := "0001101";	-- Log₂(e) (0x0D)
+	constant ROM_LOG10_E	: std_logic_vector(6 downto 0) := "0001110";	-- Log₁₀(e) (0x0E)
+	constant ROM_ZERO		: std_logic_vector(6 downto 0) := "0001111";	-- 0.0 (0x0F)
+	constant ROM_LN_2		: std_logic_vector(6 downto 0) := "0110000";	-- ln(2) (0x30)
+	constant ROM_LN_10		: std_logic_vector(6 downto 0) := "0110001";	-- ln(10) (0x31)
+	
+	-- Powers of 10 constants
+	constant ROM_1E0		: std_logic_vector(6 downto 0) := "0110010";	-- 10⁰ = 1 (0x32)
+	constant ROM_1E1		: std_logic_vector(6 downto 0) := "0110011";	-- 10¹ = 10 (0x33)
+	constant ROM_1E2		: std_logic_vector(6 downto 0) := "0110100";	-- 10² (0x34)
+	constant ROM_1E4		: std_logic_vector(6 downto 0) := "0110101";	-- 10⁴ (0x35)
+	constant ROM_1E8		: std_logic_vector(6 downto 0) := "0110110";	-- 10⁸ (0x36)
+	constant ROM_1E16		: std_logic_vector(6 downto 0) := "0110111";	-- 10¹⁶ (0x37)
+	constant ROM_1E32		: std_logic_vector(6 downto 0) := "0111000";	-- 10³² (0x38)
+	constant ROM_1E64		: std_logic_vector(6 downto 0) := "0111001";	-- 10⁶⁴ (0x39)
+	constant ROM_1E128		: std_logic_vector(6 downto 0) := "0111010";	-- 10¹²⁸ (0x3A)
+	constant ROM_1E256		: std_logic_vector(6 downto 0) := "0111011";	-- 10²⁵⁶ (0x3B)
+	constant ROM_1E512		: std_logic_vector(6 downto 0) := "0111100";	-- 10⁵¹² (0x3C)
+	constant ROM_1E1024		: std_logic_vector(6 downto 0) := "0111101";	-- 10¹⁰²⁴ (0x3D)
+	constant ROM_1E2048		: std_logic_vector(6 downto 0) := "0111110";	-- 10²⁰⁴⁸ (0x3E)
+	constant ROM_1E4096		: std_logic_vector(6 downto 0) := "0111111";	-- 10⁴⁰⁹⁶ (0x3F)
 
-	-- IEEE 754 Extended Precision Constants (80-bit)
-	-- Format: Sign(1) | Exponent(15) | Mantissa(64)
+	-- IEEE 754 Extended Precision Constants (80-bit) - MC68882 Compatible Values
+	-- Format: Sign(1) | Exponent(15) | Mantissa(64 bits - normalized with explicit MSB)
 	constant CONST_PI		: std_logic_vector(79 downto 0) := x"4000C90FDAA22168C235";	-- π
-	constant CONST_LOG10_2	: std_logic_vector(79 downto 0) := x"3FFD9A209A84FBCFF799";	-- Log₁₀(2)
-	constant CONST_E		: std_logic_vector(79 downto 0) := x"4000ADF85458A2BB4A9B";	-- e
+	constant CONST_LOG10_2	: std_logic_vector(79 downto 0) := x"3FFD9A209A84FBCFF798";	-- Log₁₀(2)
+	constant CONST_E		: std_logic_vector(79 downto 0) := x"4000ADF85458A2BB4A9A";	-- e  
 	constant CONST_LOG2_E	: std_logic_vector(79 downto 0) := x"3FFFB8AA3B295C17F0BC";	-- Log₂(e)
 	constant CONST_LOG10_E	: std_logic_vector(79 downto 0) := x"3FFDDE5BD8A937287195";	-- Log₁₀(e)
 	constant CONST_ZERO		: std_logic_vector(79 downto 0) := x"00000000000000000000";	-- 0.0
 	constant CONST_LN_2		: std_logic_vector(79 downto 0) := x"3FFEB17217F7D1CF79AC";	-- ln(2)
-	constant CONST_LN_10	: std_logic_vector(79 downto 0) := x"400093546D8F9BBD9ED8";	-- ln(10)
+	constant CONST_LN_10	: std_logic_vector(79 downto 0) := x"4000935D8DDDAAA8AC17";	-- ln(10)
 	constant CONST_ONE		: std_logic_vector(79 downto 0) := x"3FFF8000000000000000";	-- 1.0
 	constant CONST_TEN		: std_logic_vector(79 downto 0) := x"4002A000000000000000";	-- 10.0
 	constant CONST_1E2		: std_logic_vector(79 downto 0) := x"4005C800000000000000";	-- 100.0
@@ -93,7 +96,9 @@ architecture rtl of TG68K_FPU_ConstantROM is
 
 begin
 
-	-- ROM lookup process
+	-- ROM lookup process - MC68882 Complete Constant ROM Implementation
+	-- Implements all 22 defined constants per MC68882 specification
+	-- Undefined ROM locations (beyond the 22 defined constants) return zero
 	rom_process: process(clk, nReset)
 	begin
 		if nReset = '0' then
