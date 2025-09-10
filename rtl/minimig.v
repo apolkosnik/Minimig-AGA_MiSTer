@@ -849,7 +849,7 @@ assign ram_data_in = gary_ram_data_in;       // Direct 32-bit connection
 `else
 // Direct connection for 16-bit mode
 assign gary_data_out = gary_cpu_data_in[15:0];
-assign ram_data_in = gary_ram_data_in[15:0];
+assign ram_data_in = gary_ram_data_in;
 `endif
 
 gayle GAYLE1
@@ -857,7 +857,11 @@ gayle GAYLE1
 	.clk(clk),
 	.reset(reset),
 	.addr(cpu_address_out),
+`ifdef DISABLE_CART_32BIT
 	.data_in(cpu_data_out[15:0]),
+`else
+	.data_in(cpu_data_out),
+`endif
 	.data_out(gayle_data_out),
 	.rd(cpu_rd),
 	.wr(cpu_hwr),
@@ -923,7 +927,11 @@ toccata #(
 	.clk(clk),
 	.rst(reset),
 	.hsync(_hsync),
+`ifdef DISABLE_TOCCATA_32BIT
 	.data_in(cpu_data_out[15:0]),
+`else
+	.data_in(cpu_data_out),
+`endif
 	.data_out(toccata_out),
 	.addr(cpu_address_out[15:1]),
 	.rd(cpu_rd),

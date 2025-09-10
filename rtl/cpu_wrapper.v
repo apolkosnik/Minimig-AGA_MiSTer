@@ -130,13 +130,38 @@ assign fastchip_rnw = wr;
 
 reg  [31:0] cpu_addr;
 reg  [31:0] cpu_dout;
-wire [31:0] cpu_din = ramsel ? ramdat : fastchip_selack ? fastchip_dout : {sel_autoconfig ? {4{autocfg_data}} : chip_data[31:16], chip_data[15:0]};
-wire [15:0] cpu_din_16 = cpu_din[15:0];  // 16-bit data for TG68K
+// Proper autoconfig halfword selection with byte-lane discipline
+wire [31:0] autoconfig_data;
+assign autoconfig_data = sel_autoconfig ? 
+    (longword ? 
+        // Longword read: first half based on address, second half from stored read
+        (cpu_addr[1] ? {16'hFFFF, autocfg_data, 12'hFFF} : {autocfg_data, 12'hFFF, 16'hFFFF}) :
+        // Halfword reads
+        (uds_in ? {autocfg_data, 12'hFFF, 16'hFFFF} :  // Upper half addressed
+         lds_in ? {16'hFFFF, autocfg_data, 12'hFFF} :   // Lower half addressed  
+                  {autocfg_data, 12'hFFF, autocfg_data, 12'hFFF})) : // Fallback
+    32'hFFFFFFFF;
+
+// Clean multiplexer to prevent bit contamination - only one source active
+wire [31:0] cpu_din = ramsel ? ramdat : 
+                     fastchip_selack ? fastchip_dout : 
+                     sel_autoconfig ? autoconfig_data : 
+                     {chip_data[31:16], chip_data[15:0]};
+wire [15:0] cpu_din_16 = cpu_din[15:0];  // 16-bit data for TG68K - keep simple
 reg         wr;
 reg         uds_in;
 reg         lds_in;
 reg  [31:0] chip_data;
 reg  [31:0] vbr;
+reg         longword_autoconfig;
+reg   [1:0] autoconfig_addr_r;
+
+// Byte enable generation for consistent lane discipline
+wire  [3:0] byte_enables;
+assign byte_enables = longword ? 4'b1111 :
+                     uds_in ? (cpu_addr[1] ? 4'b1100 : 4'b0011) :
+                     lds_in ? (cpu_addr[1] ? 4'b1100 : 4'b0011) :
+                              4'b1111; // Default to all enabled
 
 always @* begin
 	if(cpucfg[1:0]) begin
@@ -156,7 +181,7 @@ always @* begin
 		chip_addr    = cpu_addr_p[23:1];
 		chip_din     = cpu_dout_p;
 		chip_data    = chipdout_i;
-		fastchip_sel = cpu_req & !cpu_addr_p[31:24];
+		fastchip_sel = cpu_req & (cpu_addr_p[31:24] >= 8'h02 && cpu_addr_p[31:24] <= 8'h9F); // FastRAM regions $02000000-$9FFFFFFF
 		fastchip_lw  = longword;
 	end
 	else begin
@@ -226,7 +251,7 @@ cpu_inst_p
 );
 
 wire [31:0] cpu_dout_o;
-wire [23:1] cpu_addr_o;
+wire [31:1] cpu_addr_o;
 wire  [2:0] fc_o;
 wire        wr_o;
 wire        as_o;
@@ -305,6 +330,7 @@ reg        chipready;
 reg [31:0] chipdout_i;
 reg  [2:0] ipl_i;
 reg        c_as,c_rw,c_uds,c_lds;
+
 always @(negedge clk, negedge reset) begin
 	reg [1:0] stage;
 	reg waitm;
@@ -433,6 +459,18 @@ always @(posedge clk) begin
 		z3ram_ena1  <= 0;
 		z3ram_base0 <= 1;
 		z3ram_base1 <= 1;
+		longword_autoconfig <= 0;
+		autoconfig_addr_r <= 0;
+	end
+	// Track longword operations for autoconfig (similar to gayle.v)
+	else if (sel_autoconfig && chip_rw) begin
+		if (cpucfg[1] && longword) begin
+			longword_autoconfig <= ~longword_autoconfig;
+			if (~longword_autoconfig) autoconfig_addr_r <= cpu_addr[1:0];
+		end
+		else begin
+			longword_autoconfig <= 0;
+		end
 	end
 	else if (sel_autoconfig && ~chip_rw && ~chip_uds && old_uds) begin
 		if(~ac_memcard[2] && ac_memcard[1:0]) begin

@@ -108,7 +108,11 @@ wire	sel_bank_1; 				// $200000-$3FFFFF
 //--------------------------------------------------------------------------------------
 
 assign ram_data_in    = dbr ? {custom_data_out, custom_data_out} : cpu_data_out;
+`ifdef MINIMIG_32BIT_BUSES
 assign custom_data_in = dbr ? ram_data_out[15:0] : cpu_rd ? 16'hFFFF : cpu_data_out[15:0];
+`else
+assign custom_data_in = dbr ? ram_data_out[15:0] : cpu_rd ? 16'hFFFF : cpu_data_out[15:0];
+`endif
 assign cpu_data_in    = dbr ? 32'h00000000 : {custom_data_out, custom_data_out} | ram_data_out | {32{sel_bank_1}};
 
 //read write control signals
