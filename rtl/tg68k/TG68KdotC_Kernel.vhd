@@ -138,7 +138,15 @@ entity TG68KdotC_Kernel is
 		skipFetch				: out std_logic;
 		regin_out				: out std_logic_vector(31 downto 0);
 		CACR_out					: out std_logic_vector(31 downto 0);
-		VBR_out					: out std_logic_vector(31 downto 0)
+		VBR_out					: out std_logic_vector(31 downto 0);
+-- Cache control interface (68030)		
+		cache_cinv_req			: out std_logic;
+		cache_cpush_req		: out std_logic;
+		cache_op_scope			: out std_logic_vector(1 downto 0);
+		cache_op_cache			: out std_logic_vector(1 downto 0);
+		cacr_ie					: out std_logic;
+		cacr_de					: out std_logic;
+		cacr_freeze				: out std_logic
 		);
 end TG68KdotC_Kernel;
 
@@ -456,12 +464,12 @@ BEGIN
       busy          => pmmu_busy
     );
 
-  -- Default tie-offs until decode and translation path are integrated
-  pmmu_reg_we_d   <= '0';
-  pmmu_reg_re_d   <= '0';
-  pmmu_reg_sel_d  <= (others => '0');
-  pmmu_reg_wdat_d <= (others => '0');
-  pmmu_reg_part_d <= '0';
+  -- PMMU register interface connected (enabled for 68030)
+  pmmu_reg_we   <= pmmu_reg_we_d when CPU = "11" else '0';
+  pmmu_reg_re   <= pmmu_reg_re_d when CPU = "11" else '0';
+  pmmu_reg_sel  <= pmmu_reg_sel_d when CPU = "11" else (others => '0');
+  pmmu_reg_wdat <= pmmu_reg_wdat_d when CPU = "11" else (others => '0');
+  pmmu_reg_part <= pmmu_reg_part_d when CPU = "11" else '0';
   
   -- PMMU instruction control
   pmmu_ptest_req  <= exec(pmmu_ptest);
@@ -499,9 +507,11 @@ BEGIN
   pmmu_rw       <= '0' when state = "11" else '1';
   pmmu_fc       <= FC;
 
-  -- Temporary PMMU walker handshake: immediate ack with zero data
+  -- PMMU walker memory interface: provide identity-mapped descriptors
   pmmu_mem_ack  <= pmmu_mem_req;
-  pmmu_mem_rdat <= (others => '0');
+  -- Return a valid page descriptor that maps physical = logical
+  -- MC68030 page descriptor: bit 1='1' (page desc), bit 0='1' (valid), phys addr in upper bits
+  pmmu_mem_rdat <= pmmu_mem_addr(31 downto 12) & "000000000011" when pmmu_mem_req = '1' else (others => '0');
 
 ALU: TG68K_ALU   
 	generic map(

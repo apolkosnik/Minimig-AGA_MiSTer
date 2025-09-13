@@ -87,13 +87,55 @@ COMPONENT TG68KdotC_Kernel
       nWr            : out std_logic;
       nUDS, nLDS     : out std_logic;
       nResetOut      : out std_logic;
-      skipFetch      : out std_logic
+      skipFetch      : out std_logic;
+-- Cache control interface (68030)		
+      cache_cinv_req  : out std_logic;
+      cache_cpush_req : out std_logic;
+      cache_op_scope  : out std_logic_vector(1 downto 0);
+      cache_op_cache  : out std_logic_vector(1 downto 0);
+      cacr_ie         : out std_logic;
+      cacr_de         : out std_logic;
+      cacr_freeze     : out std_logic
 --      longword       : out std_logic;
 --      clr_berr       : out std_logic;
    );
    END COMPONENT;
 
-
+COMPONENT TG68K_Cache_030
+   port(
+      clk            : in  std_logic;
+      nreset         : in  std_logic;
+      -- Cache Control (from CACR register)
+      cacr_ie        : in  std_logic;
+      cacr_de        : in  std_logic;
+      cacr_freeze    : in  std_logic;
+      -- Cache Control Instructions
+      cinv_req       : in  std_logic;
+      cpush_req      : in  std_logic;
+      cache_op_scope : in  std_logic_vector(1 downto 0);
+      cache_op_cache : in  std_logic_vector(1 downto 0);
+      -- Instruction Cache Interface
+      i_addr         : in  std_logic_vector(31 downto 0);
+      i_req          : in  std_logic;
+      i_data         : out std_logic_vector(31 downto 0);
+      i_hit          : out std_logic;
+      i_fill_req     : out std_logic;
+      i_fill_addr    : out std_logic_vector(31 downto 0);
+      i_fill_data    : in  std_logic_vector(127 downto 0);
+      i_fill_valid   : in  std_logic;
+      -- Data Cache Interface
+      d_addr         : in  std_logic_vector(31 downto 0);
+      d_req          : in  std_logic;
+      d_we           : in  std_logic;
+      d_data_in      : in  std_logic_vector(31 downto 0);
+      d_data_out     : out std_logic_vector(31 downto 0);
+      d_hit          : out std_logic;
+      d_fill_req     : out std_logic;
+      d_fill_addr    : out std_logic_vector(31 downto 0);
+      d_fill_data    : in  std_logic_vector(127 downto 0);
+      d_fill_valid   : in  std_logic
+   );
+   END COMPONENT;
 
    SIGNAL data_write  : std_logic_vector(15 downto 0);
    SIGNAL r_data      : std_logic_vector(15 downto 0);
@@ -123,6 +165,15 @@ COMPONENT TG68KdotC_Kernel
    SIGNAL autovector  : std_logic;
    SIGNAL cpu1reset   : std_logic;
 
+   -- Cache control signals
+   SIGNAL cache_enabled   : std_logic;
+   SIGNAL cache_cinv_req  : std_logic;
+   SIGNAL cache_cpush_req : std_logic;
+   SIGNAL cache_op_scope  : std_logic_vector(1 downto 0);
+   SIGNAL cache_op_cache  : std_logic_vector(1 downto 0);
+   SIGNAL cacr_ie         : std_logic;
+   SIGNAL cacr_de         : std_logic;
+   SIGNAL cacr_freeze     : std_logic;
 
    type sync_state_t is (sync0, sync1, sync2, sync3, sync4, sync5, sync6, sync7, sync8, sync9);
    signal sync_state : sync_state_t;
@@ -137,6 +188,13 @@ BEGIN
    RESET <= '0' WHEN nResetOut='0' ELSE 'Z';
    HALT <=  '0' WHEN nResetOut='0' ELSE 'Z';
    cpu1reset <= RESET OR HALT;
+   
+   -- Cache is only available on 68030 (CPU="11")
+   cache_enabled <= '1' WHEN CPU="11" ELSE '0';
+   
+   -- Cache control comes from CPU core CACR register
+   -- Fallback to basic enable if no cache control (for older CPU modes)
+   -- Note: cacr_ie, cacr_de, cacr_freeze now come from CPU core
 
 cpu1: TG68KdotC_Kernel 
    generic map(
@@ -167,7 +225,15 @@ cpu1: TG68KdotC_Kernel
       nUDS => uds_in,            -- : out std_logic;
       nLDS => lds_in,            -- : out std_logic;
       nResetOut => nResetOut,    -- : out std_logic;
-      skipFetch => skipFetch     -- : out std_logic
+      skipFetch => skipFetch,    -- : out std_logic
+      -- Cache control interface (68030)
+      cache_cinv_req => cache_cinv_req,   -- : out std_logic;
+      cache_cpush_req => cache_cpush_req, -- : out std_logic;
+      cache_op_scope => cache_op_scope,   -- : out std_logic_vector(1 downto 0);
+      cache_op_cache => cache_op_cache,   -- : out std_logic_vector(1 downto 0);
+      cacr_ie => cacr_ie,                 -- : out std_logic;
+      cacr_de => cacr_de,                 -- : out std_logic;
+      cacr_freeze => cacr_freeze          -- : out std_logic
    );
  
    PROCESS (CLK)

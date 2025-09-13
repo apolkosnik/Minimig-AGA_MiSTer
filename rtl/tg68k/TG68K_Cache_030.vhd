@@ -83,6 +83,10 @@ architecture rtl of TG68K_Cache_030 is
   signal d_line_idx    : integer range 0 to NUM_LINES-1;
   signal d_tag         : std_logic_vector(TAG_BITS-1 downto 0);
   signal d_offset      : integer range 0 to LINE_SIZE-1;
+  
+  -- Internal signals to track fill request state (VHDL-93 compatibility)
+  signal i_fill_req_int : std_logic := '0';
+  signal d_fill_req_int : std_logic := '0';
 
 begin
 
@@ -104,10 +108,16 @@ begin
       for i in 0 to NUM_LINES-1 loop
         i_valid_array(i) <= '0';
       end loop;
-      i_fill_req <= '0';
+      i_fill_req_int <= '0';
       i_fill_addr <= (others => '0');
     elsif rising_edge(clk) then
-      i_fill_req <= '0';  -- Default
+      -- Cache fill completion
+      if i_fill_valid = '1' then
+        i_data_array(i_line_idx) <= i_fill_data;
+        i_tag_array(i_line_idx) <= i_tag;
+        i_valid_array(i_line_idx) <= '1';
+        i_fill_req_int <= '0';  -- Clear fill request when data arrives
+      end if;
       
       -- Cache invalidation
       if cinv_req = '1' and (cache_op_cache = "10" or cache_op_cache = "00" or cache_op_cache = "11") then
@@ -127,16 +137,25 @@ begin
         end case;
       end if;
       
-      -- Cache fill on miss
-      if i_fill_valid = '1' then
-        i_data_array(i_line_idx) <= i_fill_data;
-        i_tag_array(i_line_idx) <= i_tag;
-        i_valid_array(i_line_idx) <= '1';
-      elsif i_req = '1' and cacr_ie = '1' and not cacr_freeze = '1' then
-        -- Check for cache miss and request fill
+      -- Cache miss detection and fill request
+      if i_req = '1' and cacr_ie = '1' then
+        -- Check for cache miss
         if i_valid_array(i_line_idx) = '0' or i_tag_array(i_line_idx) /= i_tag then
-          i_fill_req <= '1';
-          i_fill_addr <= i_addr(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
+          -- Only request fill if not frozen
+          if cacr_freeze = '0' then
+            i_fill_req_int <= '1';
+            i_fill_addr <= i_addr(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
+          end if;
+        end if;
+      end if;
+      
+      -- Keep fill request active until data arrives (independent of i_req)
+      -- But clear it if cache is frozen
+      if i_fill_req_int = '1' and i_fill_valid = '0' then
+        if cacr_freeze = '1' then
+          i_fill_req_int <= '0'; -- Cancel fill if frozen
+        else
+          i_fill_req_int <= '1';
         end if;
       end if;
     end if;
@@ -144,6 +163,7 @@ begin
 
   -- Instruction cache hit/miss detection and data output
   i_hit <= '1' when (cacr_ie = '1' and i_req = '1' and i_valid_array(i_line_idx) = '1' and i_tag_array(i_line_idx) = i_tag) else '0';
+  i_fill_req <= i_fill_req_int;
   
   -- Extract 32-bit word from 128-bit cache line based on offset
   with i_offset select
@@ -161,10 +181,16 @@ begin
       for i in 0 to NUM_LINES-1 loop
         d_valid_array(i) <= '0';
       end loop;
-      d_fill_req <= '0';
+      d_fill_req_int <= '0';
       d_fill_addr <= (others => '0');
     elsif rising_edge(clk) then
-      d_fill_req <= '0';  -- Default
+      -- Cache fill completion
+      if d_fill_valid = '1' then
+        d_data_array(d_line_idx) <= d_fill_data;
+        d_tag_array(d_line_idx) <= d_tag;
+        d_valid_array(d_line_idx) <= '1';
+        d_fill_req_int <= '0';  -- Clear fill request when data arrives
+      end if;
       
       -- Cache invalidation
       if cinv_req = '1' and (cache_op_cache = "01" or cache_op_cache = "00" or cache_op_cache = "11") then
@@ -184,12 +210,8 @@ begin
         end case;
       end if;
       
-      -- Cache fill on miss
-      if d_fill_valid = '1' then
-        d_data_array(d_line_idx) <= d_fill_data;
-        d_tag_array(d_line_idx) <= d_tag;
-        d_valid_array(d_line_idx) <= '1';
-      elsif d_req = '1' and cacr_de = '1' then
+      -- Cache access handling
+      if d_req = '1' and cacr_de = '1' then
         -- Handle write (write-through for now)
         if d_we = '1' and d_valid_array(d_line_idx) = '1' and d_tag_array(d_line_idx) = d_tag then
           -- Update cache line on write hit  
@@ -200,12 +222,25 @@ begin
             when 12 => d_data_array(d_line_idx)(127 downto 96) <= d_data_in;
             when others => null;
           end case;
-        elsif d_we = '0' and not cacr_freeze = '1' then
-          -- Check for read cache miss and request fill
+        elsif d_we = '0' then
+          -- Check for read cache miss
           if d_valid_array(d_line_idx) = '0' or d_tag_array(d_line_idx) /= d_tag then
-            d_fill_req <= '1';
-            d_fill_addr <= d_addr(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
+            -- Only request fill if not frozen
+            if cacr_freeze = '0' then
+              d_fill_req_int <= '1';
+              d_fill_addr <= d_addr(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
+            end if;
           end if;
+        end if;
+      end if;
+      
+      -- Keep fill request active until data arrives (independent of d_req)
+      -- But clear it if cache is frozen
+      if d_fill_req_int = '1' and d_fill_valid = '0' then
+        if cacr_freeze = '1' then
+          d_fill_req_int <= '0'; -- Cancel fill if frozen
+        else
+          d_fill_req_int <= '1';
         end if;
       end if;
     end if;
@@ -213,6 +248,7 @@ begin
 
   -- Data cache hit/miss detection and data output
   d_hit <= '1' when (cacr_de = '1' and d_req = '1' and d_valid_array(d_line_idx) = '1' and d_tag_array(d_line_idx) = d_tag) else '0';
+  d_fill_req <= d_fill_req_int;
   
   -- Extract 32-bit word from 128-bit cache line based on offset
   with d_offset select

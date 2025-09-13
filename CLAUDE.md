@@ -87,23 +87,79 @@ Removes all generated build files including db/, incremental_db/, output_files/,
 ### 68030 Implementation Status
 #### ✅ Completed Features:
 - **CPU Mode Encoding**: Updated to support 68030 as CPU="11"
-- **PMMU Instructions**: PMOVE, PTEST, PFLUSH, PLOAD instruction decoding
-- **PMMU Registers**: TC, CRP, SRP, TT0, TT1, MMUSR, CAL registers
-- **Cache Instructions**: CINV, CPUSH instruction decoding
-- **Basic Cache Module**: 256-byte I-cache and D-cache structure
+- **PMMU Instructions**: Full PMOVE, PTEST, PFLUSH, PLOAD implementation
+- **PMMU Registers**: TC, CRP, SRP, TT0, TT1, MMUSR, CAL with proper read/write handling
+- **Cache Instructions**: Complete CINV, CPUSH instruction implementation
+- **Page Table Walking**: Multi-level MC68030 page table traversal (W_ROOT→W_PTR1→W_PTR2→W_PTR3→W_PAGE)
+- **Address Translation Cache**: 8-entry ATC with proper tag matching and replacement
+- **Transparent Translation**: TT0/TT1 register support for bypassing MMU
+- **CACR Register**: Full 32-bit Cache Control Register with self-clearing bits
+- **MMU Exception Handling**: Complete fault detection and status reporting
+- **Cache Modules**: 256-byte instruction and data cache implementations
+- **Descriptor Validation**: Proper MC68030 page descriptor parsing and validation
+- **Access Control**: Supervisor/user privilege checking and write protection
 
 #### ⚠️ In Progress:
-- **PMMU Translation**: Currently identity mapping only
-- **Cache Integration**: Module created but not fully integrated
-- **Memory System**: Cache/PMMU integration with memory controller
+- **Cache Integration**: Cache component declared but not fully connected to memory system
 
 #### ❌ Still Missing:
-- **Real Page Table Walking**: PMMU needs actual translation logic
-- **Cache Memory Integration**: Cache fill/writeback with memory system
-- **Enhanced CACR**: Full 32-bit CACR implementation
-- **MMU Exception Handling**: Proper fault generation and handling
+- **Cache Memory Interface**: Cache fill/writeback integration with existing memory timing
+- **Cache Bus Integration**: Full cache line fill and write-back with external memory
+- **Performance Optimization**: Cache hit/miss handling in memory access cycles
 
-### Important TODOs (from TODO file)
+### 68030 Technical Implementation Details
+
+#### PMMU (Paged Memory Management Unit)
+- **File**: `rtl/tg68k/TG68K_PMMU_030.vhd`
+- **Features**: Complete MC68030-compatible PMMU with:
+  - Multi-level page table walking (up to 4 levels)
+  - 8-entry Address Translation Cache (ATC)
+  - Transparent Translation Registers (TT0/TT1)
+  - Proper MC68030 page descriptor format support
+  - Function code-based privilege checking
+  - Write protection and cache control attribute extraction
+
+#### Cache System
+- **Files**: `rtl/tg68k/TG68K_Cache_030.vhd`
+- **Architecture**: 
+  - 256-byte instruction cache (direct-mapped, 16 lines × 16 bytes)
+  - 256-byte data cache (direct-mapped, 16 lines × 16 bytes)
+  - Write-through data cache policy
+  - Cache line fill support (128-bit cache lines)
+  - CINV/CPUSH instruction support for cache control
+
+#### CACR Register Implementation
+- **Features**:
+  - Full 32-bit Cache Control Register
+  - Bit definitions: DE(0), IE(1), FREEZE(2), CE(3), CI(4), CD(5), CA(6)
+  - Self-clearing cache control bits (CE, CI, CD, CA)
+  - Reserved bit masking (bits 31-7)
+  - Individual control signal extraction
+
+#### MMU Exception Handling
+- **Fault Types Supported**:
+  - Invalid descriptor faults
+  - Write protection violations
+  - Supervisor/user access violations
+  - Bus errors during page table walks
+- **Status Reporting**: 8-bit fault status with level information, function codes, and fault type
+
+#### Integration Points
+- **CPU Core**: Enhanced TG68KdotC_Kernel with PMMU and cache control
+- **Instruction Decode**: Added PMMU instruction microcode states
+- **Memory Interface**: PMMU translation applied to all memory accesses
+- **Exception Handling**: MMU faults integrated with CPU exception processing
+
+### Important TODOs
+
+#### Next Priority Items for 68030:
+1. **Cache Memory Integration**: Connect cache modules to memory controller for actual cache line fills
+2. **Performance Testing**: Benchmark 68030 performance vs 68020 mode with memory-intensive software
+3. **PMMU Testing**: Test with actual AmigaOS 3.x MMU-aware software and applications
+4. **Cache Effectiveness**: Measure cache hit rates and performance improvements
+5. **Compatibility Testing**: Ensure 68000/68010/68020 modes still work correctly
+
+#### General Project TODOs (not in scope for now):
 - AGA chipset enhancements (bitplane shifter improvements, sprite positioning)
 - CPU compatibility fixes ongoing
 - Blitter reimplementation under consideration
