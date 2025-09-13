@@ -4383,6 +4383,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		  when X"804" => NULL; -- isP -- 68020+
 		  when others => NULL;
 		end case;
+  elsif clkena_lw = '1' then
+    -- Auto-clear self-clearing bits after they've been set
+    if CACR(3) = '1' or CACR(4) = '1' or CACR(5) = '1' or CACR(6) = '1' then
+      CACR(6 downto 3) <= (others => '0');  -- Clear CE, CI, CD, CA bits
+    end if;
 	  end if;
 	end if;
 
@@ -4400,21 +4405,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 	end case;
   end process;
 
-  -- CACR self-clearing bits process (CE, CI, CD, CA bits auto-clear after one cycle)
-  process (clk)
-  begin
-    if rising_edge(clk) then
-      if Reset = '1' then
-        -- Keep persistent bits (DE, IE, FREEZE) intact on reset
-        null;
-      elsif clkena_lw = '1' then
-        -- Auto-clear self-clearing bits after they've been set
-        if CACR(3) = '1' or CACR(4) = '1' or CACR(5) = '1' or CACR(6) = '1' then
-          CACR(6 downto 3) <= (others => '0');  -- Clear CE, CI, CD, CA bits
-        end if;
-      end if;
-    end if;
-  end process;
 
   CACR_out <= CACR;
   VBR_out <= VBR;
