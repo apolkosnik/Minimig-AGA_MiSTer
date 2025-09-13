@@ -31,8 +31,10 @@ package TG68K_Pack is
 						  andi, pack1, pack2, pack3, op_AxAy, cmpm, link1, link2, unlink1, unlink2, int1, int2, int3, int4, rte1, rte2, rte3, 
 						  rte4, rte5, rtd1, rtd2, trap00, trap0, trap1, trap2, trap3, cas1, cas2, cas21, cas22, cas23, cas24,
 						  cas25, cas26, cas27, cas28, chk20, chk21, chk22, chk23, chk24,
-						  trap4, trap5, trap6, movec1, movep1, movep2, movep3, movep4, movep5, rota1, bf1, 
-						  mul1, mul2, mul_end1,  mul_end2, div1, div2, div3, div4, div_end1, div_end2);
+                          trap4, trap5, trap6, movec1, movep1, movep2, movep3, movep4, movep5, rota1, bf1, 
+                          pmmu1, pmmu2, pmmu3, pmmu4, pmmu5, ptest1, ptest2, pflush1, pload1,
+                          cinv1, cpush1,
+                          mul1, mul2, mul_end1,  mul_end2, div1, div2, div3, div4, div_end1, div_end2);
 	
 	constant opcMOVE				: integer := 0; --
 	constant opcMOVEQ				: integer := 1; --
@@ -124,7 +126,15 @@ package TG68K_Pack is
 	constant opcCHK2				: integer := 87; --
 	constant opcEXTB				: integer := 88; --
 
-	constant lastOpcBit			: integer := 88;
+    constant pmmu_rd				: integer := 89; -- PMOVE <MMU>,Dn
+    constant pmmu_wr				: integer := 90; -- PMOVE Dn,<MMU>
+    constant pmmu_ptest			: integer := 91; -- PTEST
+    constant pmmu_pflush			: integer := 92; -- PFLUSH
+    constant pmmu_pload			: integer := 93; -- PLOAD
+    constant cache_cinv			: integer := 94; -- CINV (Cache Invalidate)
+    constant cache_cpush			: integer := 95; -- CPUSH (Cache Push)
+
+    constant lastOpcBit			: integer := 95;
 
 	component TG68K_ALU
 	generic(
@@ -136,7 +146,7 @@ package TG68K_Pack is
 	port(
 		clk						: in std_logic;
 		Reset						: in std_logic;
-		CPU						: in std_logic_vector(1 downto 0):="00";  -- 00->68000  01->68010  11->68020(only some parts - yet)
+		CPU						: in std_logic_vector(1 downto 0):="00";  -- 00->68000  01->68010  10->68020  11->68030
 		clkena_lw				: in std_logic:='1';
 		execOPC					: in bit;
 		decodeOPC				: in bit;
