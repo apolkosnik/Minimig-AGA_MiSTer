@@ -146,7 +146,13 @@ entity TG68KdotC_Kernel is
 		cache_op_cache			: out std_logic_vector(1 downto 0);
 		cacr_ie					: out std_logic;
 		cacr_de					: out std_logic;
-		cacr_freeze				: out std_logic
+		cacr_freeze				: out std_logic;
+-- PMMU register interface (68030)
+		pmmu_reg_we				: out std_logic;
+		pmmu_reg_re				: out std_logic;
+		pmmu_reg_sel			: out std_logic_vector(3 downto 0);
+		pmmu_reg_wdat			: out std_logic_vector(31 downto 0);
+		pmmu_reg_part			: out std_logic
 		);
 end TG68KdotC_Kernel;
 
@@ -368,10 +374,7 @@ architecture logic of TG68KdotC_Kernel is
 signal SFC					: std_logic_vector(2 downto 0);
 
 -- PMMU (68030) interface signals (Phase 1 scaffold)
-signal pmmu_reg_we      : std_logic;
-signal pmmu_reg_re      : std_logic;
-signal pmmu_reg_sel     : std_logic_vector(3 downto 0);
-	signal pmmu_reg_wdat    : std_logic_vector(31 downto 0);
+	-- PMMU register signals (now declared as output ports)
 signal pmmu_reg_rdat    : std_logic_vector(31 downto 0);
 signal pmmu_src_data    : std_logic_vector(31 downto 0);
 signal pmmu_reg_part_d  : std_logic;
@@ -398,16 +401,7 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
 	signal pmmu_cmd_fc      : std_logic_vector(2 downto 0);
 	signal pmmu_cmd_addr    : std_logic_vector(31 downto 0);
 	
-	-- Cache control signals
-	signal cache_cinv_req   : std_logic;
-	signal cache_cpush_req  : std_logic;
-	signal cache_op_scope   : std_logic_vector(1 downto 0);
-	signal cache_op_cache   : std_logic_vector(1 downto 0);
-	
-	-- Cache control signals extracted from CACR register
-	signal cacr_de          : std_logic;  -- Data Cache Enable
-	signal cacr_ie          : std_logic;  -- Instruction Cache Enable
-	signal cacr_freeze      : std_logic;  -- Cache Freeze
+	-- Cache control signals (declared as output ports, no need for internal signals)
 
 	-- PMMU walker memory interface
 	signal pmmu_mem_req   : std_logic;
@@ -416,6 +410,8 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
 	signal pmmu_mem_rdat  : std_logic_vector(31 downto 0);
 	signal pmmu_busy      : std_logic;
 
+	-- Internal FC signal (VHDL-93 compatibility)
+	signal fc_internal    : std_logic_vector(2 downto 0);
 
 	signal set					: bit_vector(lastOpcBit downto 0);
 	signal set_exec			: bit_vector(lastOpcBit downto 0);
@@ -425,6 +421,22 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
 	signal next_micro_state	: micro_states;
 	
 
+  -- Function to map brief(11:8) to PMMU register select
+  function pmmu_sel_from_brief(b : std_logic_vector(11 downto 0)) return std_logic_vector is
+    variable s : std_logic_vector(3 downto 0);
+  begin
+    case b(11 downto 8) is
+      when x"0" => s := x"0"; -- TC
+      when x"1" => s := x"1"; -- CRP (low 32 only for now)
+      when x"2" => s := x"2"; -- SRP (low 32 only for now)
+      when x"3" => s := x"3"; -- TT0
+      when x"4" => s := x"4"; -- TT1
+      when x"5" => s := x"5"; -- MMUSR
+      when x"6" => s := x"6"; -- CAL
+      when others => s := x"F"; -- invalid
+    end case;
+    return s;
+  end function;
 
 BEGIN  
 
@@ -434,10 +446,10 @@ BEGIN
       clk           => clk,
       nreset        => nReset,
 
-      reg_we        => pmmu_reg_we,
-      reg_re        => pmmu_reg_re,
-      reg_sel       => pmmu_reg_sel,
-      reg_wdat      => pmmu_reg_wdat,
+      reg_we        => pmmu_reg_we_d,
+      reg_re        => pmmu_reg_re_d,
+      reg_sel       => pmmu_reg_sel_d,
+      reg_wdat      => pmmu_reg_wdat_d,
       reg_rdat      => pmmu_reg_rdat,
       reg_part      => pmmu_reg_part_d,
       
@@ -472,15 +484,15 @@ BEGIN
   pmmu_reg_part <= pmmu_reg_part_d when CPU = "11" else '0';
   
   -- PMMU instruction control
-  pmmu_ptest_req  <= exec(pmmu_ptest);
-  pmmu_pflush_req <= exec(pmmu_pflush);
-  pmmu_pload_req  <= exec(pmmu_pload);
-  pmmu_cmd_fc     <= FC;  -- Use current function code
-  pmmu_cmd_addr   <= addr_out;  -- Use current effective address
+  pmmu_ptest_req  <= '1' when exec(pmmu_ptest) = '1' else '0';
+  pmmu_pflush_req <= '1' when exec(pmmu_pflush) = '1' else '0';
+  pmmu_pload_req  <= '1' when exec(pmmu_pload) = '1' else '0';
+  pmmu_cmd_fc     <= fc_internal;  -- Use internal FC signal
+  pmmu_cmd_addr   <= pmmu_addr_log;  -- Use logical address (before translation)
   
   -- Cache instruction control  
-  cache_cinv_req  <= exec(cache_cinv);
-  cache_cpush_req <= exec(cache_cpush);
+  cache_cinv_req  <= '1' when exec(cache_cinv) = '1' else '0';
+  cache_cpush_req <= '1' when exec(cache_cpush) = '1' else '0';
   cache_op_scope  <= brief(4 downto 3);  -- From extension word
   cache_op_cache  <= brief(1 downto 0);  -- From extension word
   
@@ -505,7 +517,7 @@ BEGIN
   pmmu_req      <= '1' when state /= "01" else '0'; -- active for fetch/read/write
   pmmu_is_insn  <= '1' when state = "00" else '0';
   pmmu_rw       <= '0' when state = "11" else '1';
-  pmmu_fc       <= FC;
+  pmmu_fc       <= fc_internal;
 
   -- PMMU walker memory interface: provide identity-mapped descriptors
   pmmu_mem_ack  <= pmmu_mem_req;
@@ -569,6 +581,10 @@ ALU: TG68K_ALU
 	
 	long_start_alu <= to_bit(NOT memmaskmux(3));
 	execOPC_ALU <= execOPC OR exec(alu_exec);
+	
+	-- Drive FC output from internal signal (VHDL-93 compatibility)
+	FC <= fc_internal;
+	
 	process (memmaskmux)
 	begin
 		non_aligned <= '0';
@@ -1303,10 +1319,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						alu_bf_ffo_offset <= bf_full_offset+bf_width+1;
 					END IF;
 					memread <= "1111";
-					FC(1) <= NOT setstate(1) OR (PCbase AND NOT setstate(0));
-					FC(0) <= setstate(1) AND (NOT PCbase OR setstate(0));
+					fc_internal(1) <= NOT setstate(1) OR (PCbase AND NOT setstate(0));
+					fc_internal(0) <= setstate(1) AND (NOT PCbase OR setstate(0));
 					IF interrupt='1' THEN
-						FC(1 downto 0) <= "11";
+						fc_internal(1 downto 0) <= "11";
 					END IF;	
 					
 					IF state="11" THEN
@@ -1320,7 +1336,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						addrvalue <= '0';
 					ELSIF execOPC='1' AND exec_write_back='1' THEN
 						state <= "11";
-						FC(1 downto 0) <= "01";
+						fc_internal(1 downto 0) <= "01";
 						memmask <= wbmemmask;
 						addrvalue <= '0';
 					ELSE	
@@ -1514,7 +1530,7 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 		
 		IF rising_edge(clk) THEN
 			IF Reset='1' THEN
-				FC(2) <= '1';
+				fc_internal(2) <= '1';
 				SVmode <= '1';
 				preSVmode <= '1';
 				FlagsSR <= "00100111";
@@ -1535,7 +1551,7 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF set(changeMode)='1' THEN
 					preSVmode <= NOT preSVmode;
 					FlagsSR(5) <= NOT preSVmode;
-					FC(2) <= NOT preSVmode;
+					fc_internal(2) <= NOT preSVmode;
 				END IF;
 				IF micro_state=trap3 THEN
 					FlagsSR(7) <= '0';
@@ -1551,12 +1567,12 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;	
 				IF exec(to_SR)='1' THEN
 					FlagsSR(7 downto 0) <= SRin;	--SR
-					FC(2) <= SRin(5);
+					fc_internal(2) <= SRin(5);
 				ELSIF exec(update_FC)='1' THEN
-					FC(2) <= FlagsSR(5);
+					fc_internal(2) <= FlagsSR(5);
 				END IF;
 				IF interrupt='1' THEN
-					FC(2) <= '1';
+					fc_internal(2) <= '1';
 				END IF;	
 				IF cpu(1)='0' THEN
 					FlagsSR(4) <= '0';
@@ -4042,7 +4058,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- Decode PMMU instruction type from extension word (brief register)
                     -- Extension word bits 15-13 determine instruction type
                     CASE brief(15 downto 13) IS
-                        WHEN "000"|"001"|"010"|"011" =>  -- PMOVE variants
+                        WHEN "000"|"001"|"010"|"011" =>  -- PMOVE and PMMU instruction variants
+                            -- First check if this is actually PFLUSH/PLOAD (001/010 with special bits)
+                            IF brief(15 downto 13) = "001" AND brief(12 downto 10) /= "000" THEN
+                                -- PFLUSH instruction
+                                set_exec(pmmu_pflush) <= '1';
+                                next_micro_state <= pflush1;
+                            ELSIF brief(15 downto 13) = "010" AND brief(12 downto 10) /= "000" THEN
+                                -- PLOAD instruction
+                                set_exec(pmmu_pload) <= '1';
+                                next_micro_state <= pload1;
+                            ELSE
+                                -- PMOVE instruction (including 001/010 with bits 12-10 = 000)
                             -- Dn direct EA
                             IF opcode(5 downto 3)="000" THEN
                                 -- Direction heuristic: opcode(7)=0 read from MMU to Dn, else write Dn to MMU
@@ -4070,32 +4097,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     next_micro_state <= pmmu2;
                                 END IF;
                             END IF;
+                            END IF; -- Close ELSE for PMOVE vs PFLUSH/PLOAD discrimination
                         
                         WHEN "100" =>  -- PTEST instruction
                             set_exec(pmmu_ptest) <= '1';
                             next_micro_state <= ptest1;
-                            
-                        WHEN "001" =>  -- PFLUSH instruction (when not PMOVE)
-                            IF brief(12 downto 10) = "000" THEN  -- PMOVE uses 001 too, distinguish by other bits
-                                -- This is actually PMOVE, handle above
-                                -- (This case should be caught by PMOVE handler above)
-                                trap_illegal <= '1';
-                                trapmake <= '1';
-                            ELSE
-                                set_exec(pmmu_pflush) <= '1';
-                                next_micro_state <= pflush1;
-                            END IF;
-                            
-                        WHEN "010" =>  -- PLOAD instruction (when not PMOVE)
-                            IF brief(12 downto 10) = "000" THEN  -- PMOVE uses 010 too, distinguish by other bits
-                                -- This is actually PMOVE, handle above  
-                                -- (This case should be caught by PMOVE handler above)
-                                trap_illegal <= '1';
-                                trapmake <= '1';
-                            ELSE
-                                set_exec(pmmu_pload) <= '1';
-                                next_micro_state <= pload1;
-                            END IF;
                             
                         WHEN OTHERS =>
                             trap_illegal <= '1';
@@ -4416,22 +4422,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 -----------------------------------------------------------------------------
 -- PMMU (68030) PMOVE register moves (Dn + memory read forms)
 -----------------------------------------------------------------------------
-  -- Map brief(11:8) to PMMU register select
-  function pmmu_sel_from_brief(b : std_logic_vector(11 downto 0)) return std_logic_vector is
-    variable s : std_logic_vector(3 downto 0);
-  begin
-    case b(11 downto 8) is
-      when x"0" => s := x"0"; -- TC
-      when x"1" => s := x"1"; -- CRP (low 32 only for now)
-      when x"2" => s := x"2"; -- SRP (low 32 only for now)
-      when x"3" => s := x"3"; -- TT0
-      when x"4" => s := x"4"; -- TT1
-      when x"5" => s := x"5"; -- MMUSR
-      when x"6" => s := x"6"; -- CAL
-      when others => s := x"F"; -- invalid
-    end case;
-    return s;
-  end function;
 
   -- Drive PMMU register interface during PMOVE execution
   process(clk)
