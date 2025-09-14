@@ -378,36 +378,8 @@ begin
                     end if;
                 end loop;
                 
-                -- Implement MC68882 exception priority handling
-                -- Priority order (highest to lowest): BSUN, SNAN, OPERR, OVFL, UNFL, DZ, INEX2, INEX1
-                if v_exception_status_byte(7) = '1' then  -- BSUN (bit 15 of FPSR)
-                    highest_priority_exception := 7;
-                    exception_vector <= X"0C";  -- BSUN vector
-                elsif v_exception_status_byte(6) = '1' then  -- SNAN (bit 14 of FPSR)
-                    highest_priority_exception := 6;
-                    exception_vector <= X"36";  -- FP exception vector
-                elsif v_exception_status_byte(5) = '1' then  -- OPERR (bit 13 of FPSR)
-                    highest_priority_exception := 5;
-                    exception_vector <= X"36";  -- FP exception vector
-                elsif v_exception_status_byte(4) = '1' then  -- OVFL (bit 12 of FPSR)
-                    highest_priority_exception := 4;
-                    exception_vector <= X"36";  -- FP exception vector
-                elsif v_exception_status_byte(3) = '1' then  -- UNFL (bit 11 of FPSR)
-                    highest_priority_exception := 3;
-                    exception_vector <= X"36";  -- FP exception vector
-                elsif v_exception_status_byte(2) = '1' then  -- DZ (bit 10 of FPSR)
-                    highest_priority_exception := 2;
-                    exception_vector <= X"36";  -- FP exception vector
-                elsif v_exception_status_byte(1) = '1' then  -- INEX2 (bit 9 of FPSR)
-                    highest_priority_exception := 1;
-                    exception_vector <= X"36";  -- FP exception vector
-                elsif v_exception_status_byte(0) = '1' then  -- INEX1 (bit 8 of FPSR)
-                    highest_priority_exception := 0;
-                    exception_vector <= X"36";  -- FP exception vector
-                else
-                    highest_priority_exception := -1;
-                    exception_vector <= (others => '0');
-                end if;
+                -- Exception vector assignment is already handled above in the priority loop
+                -- No need for duplicate logic that would override the correct F-line vectors
                 
                 -- Update FPSR
                 fpsr_work(31 downto 24) <= v_condition_codes;  -- Condition Code Byte

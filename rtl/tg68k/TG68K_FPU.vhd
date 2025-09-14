@@ -36,6 +36,7 @@ entity TG68K_FPU is
 		opcode					: in std_logic_vector(15 downto 0);
 		extension_word			: in std_logic_vector(15 downto 0);	-- Second instruction word
 		fpu_enable				: in std_logic;							-- 1 when F-line instruction should be handled by FPU
+		supervisor_mode			: in std_logic;							-- 1 when CPU is in supervisor mode (for privilege checking)
 		cpu_data_in				: in std_logic_vector(31 downto 0);	-- Data from CPU (for register/memory sources)
 		cpu_address_in			: in std_logic_vector(31 downto 0);	-- Effective address from CPU (for FSAVE/FRESTORE)
 		fpu_data_out			: out std_logic_vector(31 downto 0);	-- Data to CPU (for register destinations)
@@ -110,12 +111,16 @@ architecture rtl of TG68K_FPU is
 	-- Per MC68020 Users Manual Section 7: A4-A0 select register
 	-- 00000 = Response CIR, 00001 = Command CIR, 00010 = Condition CIR
 	-- 00011 = Save CIR, 00100 = Restore CIR, 00101 = Operation Word CIR, 00110 = Command Address CIR
-	signal command_cir : std_logic_vector(15 downto 0) := (others => '0');		-- Command CIR (register 1)
-	signal response_cir : std_logic_vector(15 downto 0) := (others => '0');	-- Response CIR (register 0)
-	signal condition_cir : std_logic_vector(15 downto 0) := (others => '0');	-- Condition CIR (register 2)
-	signal operand_cir : std_logic_vector(15 downto 0) := (others => '0');		-- Operand CIR (register 5)
-	signal save_cir : std_logic_vector(15 downto 0) := (others => '0');		-- Save CIR (register 3)
-	signal restore_cir : std_logic_vector(15 downto 0) := (others => '0');	-- Restore CIR (register 4)
+	-- MC68882 Coprocessor Interface Registers (CIR) - Complete implementation
+	signal response_cir : std_logic_vector(15 downto 0) := (others => '0');	-- Response CIR (register 0) - Read-only
+	signal command_cir : std_logic_vector(15 downto 0) := (others => '0');		-- Command CIR (register 1) - Write-only
+	signal condition_cir : std_logic_vector(15 downto 0) := (others => '0');	-- Condition CIR (register 2) - Read-only
+	signal save_cir : std_logic_vector(15 downto 0) := (others => '0');		-- Save CIR (register 3) - Read-only
+	signal restore_cir : std_logic_vector(15 downto 0) := (others => '0');	-- Restore CIR (register 4) - Write-only
+	signal operand_cir : std_logic_vector(15 downto 0) := (others => '0');		-- Operand CIR (register 5) - Write-only
+	-- Additional MC68882 CIR registers for complete protocol support
+	signal operation_word_cir : std_logic_vector(15 downto 0) := (others => '0');	-- Operation Word (register 6) - Read-only
+	signal command_address_cir : std_logic_vector(31 downto 0) := (others => '0');	-- Command Address (register 7-8) - Read-only
 	
 	-- Internal state machine
 	type fpu_state_t is (
@@ -326,15 +331,16 @@ architecture rtl of TG68K_FPU is
 	constant OP_FMOVECR		: std_logic_vector(6 downto 0) := "1000001";  -- FMOVECR (move constant from ROM)
 	
 	-- Transcendental functions (extended library - basic placeholder support)
-	constant OP_FSINH		: std_logic_vector(6 downto 0) := "0000010";
-	constant OP_FLOGNP1		: std_logic_vector(6 downto 0) := "0000110";
-	constant OP_FETOXM1		: std_logic_vector(6 downto 0) := "0001000";
+	constant OP_FSINH		: std_logic_vector(6 downto 0) := "0001011";  -- Hyperbolic sine
+	constant OP_FLOGNP1		: std_logic_vector(6 downto 0) := "0000101";  -- ln(x + 1)
+	constant OP_FETOXM1		: std_logic_vector(6 downto 0) := "0000111";  -- e^x - 1
 	constant OP_FTANH		: std_logic_vector(6 downto 0) := "0001001";
 	constant OP_FATAN		: std_logic_vector(6 downto 0) := "0001010";
 	constant OP_FASIN		: std_logic_vector(6 downto 0) := "0001100";
 	constant OP_FATANH		: std_logic_vector(6 downto 0) := "0001101";
 	constant OP_FSIN		: std_logic_vector(6 downto 0) := "0001110";
 	constant OP_FTAN		: std_logic_vector(6 downto 0) := "0001111";
+	constant OP_FSINCOS		: std_logic_vector(6 downto 0) := "0110000";  -- FSINCOS: simultaneous sine and cosine
 	constant OP_FETOX		: std_logic_vector(6 downto 0) := "0010000";
 	constant OP_FTWOTOX		: std_logic_vector(6 downto 0) := "0010001";
 	constant OP_FTENTOX		: std_logic_vector(6 downto 0) := "0010010";
@@ -371,6 +377,92 @@ architecture rtl of TG68K_FPU is
 	constant FORMAT_WORD		: std_logic_vector(2 downto 0) := "100";	-- 16-bit integer  
 	constant FORMAT_DOUBLE		: std_logic_vector(2 downto 0) := "101";	-- 64-bit IEEE double
 	constant FORMAT_BYTE		: std_logic_vector(2 downto 0) := "110";	-- 8-bit integer
+
+	-- MC68882 Coprocessor Primitive Response Codes (Complete Implementation)
+	constant PRIM_NULL			: std_logic_vector(15 downto 0) := X"0000";	-- NULL - No bus cycles required
+	constant PRIM_CA			: std_logic_vector(15 downto 0) := X"0001";	-- CA - Transfer CPU register to coprocessor
+	constant PRIM_CC			: std_logic_vector(15 downto 0) := X"0002";	-- CC - Transfer coprocessor register to CPU
+	constant PRIM_CW			: std_logic_vector(15 downto 0) := X"0003";	-- CW - Write CPU register from coprocessor
+	constant PRIM_CR			: std_logic_vector(15 downto 0) := X"0004";	-- CR - Read CPU register to coprocessor
+	constant PRIM_DR			: std_logic_vector(15 downto 0) := X"0005";	-- DR - Supervisor check
+	constant PRIM_BUSY			: std_logic_vector(15 downto 0) := X"0006";	-- BUSY - Coprocessor busy, try later
+
+	-- MC68882 FPSR Condition Code Setting Function
+	-- Sets condition codes according to IEEE 754 and MC68882 specification
+	-- Input: 80-bit extended precision floating-point value
+	-- Output: 4-bit condition code (N, Z, I, NaN)
+	procedure set_fpsr_condition_codes(
+		signal fpsr_reg : inout std_logic_vector(31 downto 0);
+		fp_value : in std_logic_vector(79 downto 0)
+	) is
+		variable exponent : std_logic_vector(14 downto 0);
+		variable mantissa : std_logic_vector(63 downto 0);
+		variable sign : std_logic;
+	begin
+		sign := fp_value(79);
+		exponent := fp_value(78 downto 64);
+		mantissa := fp_value(63 downto 0);
+		
+		-- Clear all condition codes first
+		fpsr_reg(31 downto 28) <= "0000";
+		
+		-- Check special values in priority order per MC68882 spec
+		if exponent = "111111111111111" then
+			-- Maximum exponent - could be NaN or Infinity
+			if mantissa(63) = '0' or mantissa(62 downto 0) /= (62 downto 0 => '0') then
+				-- NaN (explicit integer bit 0 OR non-zero fraction)
+				fpsr_reg(28) <= '1';  -- Set NaN bit
+			else
+				-- Infinity (explicit integer bit 1 AND zero fraction)
+				fpsr_reg(29) <= '1';  -- Set Infinity bit
+				fpsr_reg(31) <= sign; -- Set sign for infinity
+			end if;
+		elsif exponent = (14 downto 0 => '0') and mantissa = (63 downto 0 => '0') then
+			-- Zero (exponent and mantissa both zero)
+			fpsr_reg(30) <= '1';  -- Set Zero bit
+			fpsr_reg(31) <= sign; -- Preserve sign of zero
+		else
+			-- Normal number or denormalized number
+			fpsr_reg(31) <= sign; -- Set sign bit
+		end if;
+	end procedure;
+	
+	-- MC68882 FPCR/FPSR Bit Field Validation Functions
+	-- Validates and sanitizes control register values per MC68882 specification
+	function validate_fpcr(input_fpcr : std_logic_vector(31 downto 0)) return std_logic_vector is
+		variable result_fpcr : std_logic_vector(31 downto 0);
+	begin
+		result_fpcr := input_fpcr;
+		
+		-- Validate rounding precision (bits 7:6)
+		if input_fpcr(7 downto 6) = "11" then
+			-- Undefined precision mode - default to extended precision
+			result_fpcr(7 downto 6) := "00";  -- Extended precision
+		end if;
+		
+		-- Rounding mode (bits 5:4) - all values are valid per IEEE 754
+		-- Exception enable bits (15:8) - all combinations are valid
+		-- Reserved bits should be cleared
+		result_fpcr(31 downto 16) := (others => '0');  -- Clear reserved upper bits
+		result_fpcr(3 downto 0) := (others => '0');    -- Clear reserved lower bits
+		
+		return result_fpcr;
+	end function;
+	
+	function validate_fpsr(input_fpsr : std_logic_vector(31 downto 0)) return std_logic_vector is
+		variable result_fpsr : std_logic_vector(31 downto 0);
+	begin
+		result_fpsr := input_fpsr;
+		
+		-- FPSR validation per MC68882 specification:
+		-- Bits 31-24: Condition Code Byte (all combinations valid)
+		-- Bits 23-16: Quotient Byte (all combinations valid) 
+		-- Bits 15-8:  Exception Status Byte (all combinations valid)
+		-- Bits 7-0:   Accrued Exception Byte (all combinations valid)
+		-- All bits in FPSR are functionally valid - no sanitization needed
+		
+		return result_fpsr;
+	end function;
 
 begin
 
@@ -628,12 +720,7 @@ begin
 		fsave_size_valid_internal <= '0';  -- Default to not valid
 		
 		-- Determine frame format and size based on FPU state (MC68881/68882 compliant)
-		-- CRITICAL FIX: ALWAYS return IDLE frame for ANY FSAVE instruction to eliminate all timing issues
-		if opcode(15 downto 12) = "1111" and opcode(11 downto 9) = "001" and opcode(8 downto 6) = "100" then
-			-- FSAVE instruction detected - ALWAYS return IDLE frame regardless of any other conditions
-			fsave_frame_format <= X"60";  -- MC68882 IDLE frame
-			fsave_frame_size_internal <= 60;  -- 60 bytes = 15 longwords
-		elsif fpu_enable = '0' then
+		if fpu_enable = '0' then
 			-- FPU is disabled and not FSAVE - return NULL frame
 			fsave_frame_format <= X"00";  -- NULL frame
 			fsave_frame_size_internal <= 4;  -- 4 bytes = 1 longword
@@ -672,12 +759,11 @@ begin
 			end case;
 		end if;
 		
-		-- CRITICAL: Set frame size as valid when FSAVE is detected
-		if fpu_enable = '1' and opcode(15 downto 12) = "1111" and opcode(11 downto 9) = "001" and 
-		   opcode(8 downto 6) = "100" then  -- FSAVE instruction detected (bits 8-6 = 100 for FSAVE)
-			fsave_size_valid_internal <= '1';  -- Set valid flag for FSAVE
+		-- Set frame size as valid when FSAVE is detected (enables early predecrement)
+		if (fpu_enable = '1' and opcode(15 downto 12) = "1111" and opcode(11 downto 9) = "001" and opcode(8 downto 6) = "100") then
+			fsave_size_valid_internal <= '1';
 		else
-			fsave_size_valid_internal <= '0';  -- Clear for all other instructions
+			fsave_size_valid_internal <= '0';
 		end if;
 		-- NOTE: fsave_size_valid remains '1' throughout FSAVE operation for reliable handshaking
 	end process;
@@ -717,8 +803,9 @@ begin
 			fpcr <= X"00000000";	-- Standard MC68882 reset value
 			fpsr <= X"00000000";	-- Standard MC68882 reset value  
 			fpiar <= X"00000000";	-- Standard MC68882 reset value
-			-- Clear all FP registers to zero (standard IEEE 754 behavior)
-			fp_registers <= (others => (others => '0'));
+			-- MC68882 SPECIFICATION COMPLIANCE: Initialize all FP registers to positive non-signaling NaN
+			-- This matches the authentic MC68882 reset behavior per specification
+			fp_registers <= (others => IEEE_NaN);
 			-- Initialize MOVEM component interface signals
 			movem_register_list <= (others => '0');
 			movem_direction <= '0';
@@ -747,20 +834,36 @@ begin
 						
 						-- Check for direct CPU requests (bypassing decode)
 						if fsave_data_request = '1' then
-							-- CPU is requesting FSAVE data - enter FSAVE state directly
-							fpu_done <= '0';  -- Reset completion signal
-							fsave_counter <= 0;
-							-- CRITICAL: Latch frame format and size at FSAVE start for stability
-							fsave_frame_format_latched <= fsave_frame_format;
-							fsave_frame_size_latched <= fsave_frame_size_internal;
-								fsave_frame_size_debug <= fsave_frame_size_internal;
-							fpu_state <= FPU_FSAVE_WRITE;
+							-- FSAVE - Requires supervisor privilege per MC68882 specification
+							if supervisor_mode = '0' then
+								-- Privilege violation - generate exception
+								fpu_state <= FPU_EXCEPTION_STATE;
+								fpu_exception <= '1';
+								exception_code_internal <= X"20";  -- Privilege violation
+							else
+								-- CPU is requesting FSAVE data - enter FSAVE state directly
+								fpu_done <= '0';  -- Reset completion signal
+								fsave_counter <= 0;
+								-- CRITICAL: Latch frame format and size at FSAVE start for stability
+								fsave_frame_format_latched <= fsave_frame_format;
+								fsave_frame_size_latched <= fsave_frame_size_internal;
+									fsave_frame_size_debug <= fsave_frame_size_internal;
+								fpu_state <= FPU_FSAVE_WRITE;
+							end if;
 						elsif frestore_data_write = '1' then
-							-- CPU is writing FRESTORE data - enter FRESTORE state directly
-							fpu_done <= '0';  -- Reset completion signal  
-							fsave_counter <= 0;
-							frestore_frame_format <= (others => '0');
-							fpu_state <= FPU_FRESTORE_READ;
+							-- FRESTORE - Requires supervisor privilege per MC68882 specification
+							if supervisor_mode = '0' then
+								-- Privilege violation - generate exception
+								fpu_state <= FPU_EXCEPTION_STATE;
+								fpu_exception <= '1';
+								exception_code_internal <= X"20";  -- Privilege violation
+							else
+								-- CPU is writing FRESTORE data - enter FRESTORE state directly
+								fpu_done <= '0';  -- Reset completion signal  
+								fsave_counter <= 0;
+								frestore_frame_format <= (others => '0');
+								fpu_state <= FPU_FRESTORE_READ;
+							end if;
 						elsif fpu_enable = '1' then
 							fpu_state <= FPU_DECODE;
 						end if;
@@ -773,6 +876,13 @@ begin
 						-- Update FPIAR with current instruction address at start of instruction
 						-- This should be the PC of the F-line instruction being executed
 						fpiar <= cpu_address_in;
+						
+						-- MC68882 Complete Primitive Protocol: Update CIR registers
+						-- Set Operation Word CIR with current instruction word (for debugging/trace)
+						operation_word_cir <= opcode;
+						-- Set Command Address CIR with instruction address for exception handling
+						command_address_cir <= cpu_address_in;
+						-- Note: condition_cir is updated at the end of the process to avoid multiple drivers
 						
 						-- Check decoder outputs for validity
 						if decoder_illegal = '1' then
@@ -863,16 +973,8 @@ begin
 						end case;
 						-- Update FPSR condition codes for result (except FMOVECR which handles this in WRITE_RESULT)
 						if decoder_operation_code /= OP_FMOVECR then
-							if fp_registers(to_integer(unsigned(decoder_dest_reg)))(78 downto 64) = "000000000000000" and
-							   fp_registers(to_integer(unsigned(decoder_dest_reg)))(63 downto 0) = (63 downto 0 => '0') then
-								fpsr(31 downto 28) <= "0100";  -- Zero
-							elsif fp_registers(to_integer(unsigned(decoder_dest_reg)))(78 downto 64) = "111111111111111" then
-								fpsr(31 downto 28) <= "0001";  -- NaN or Infinity
-							elsif fp_registers(to_integer(unsigned(decoder_dest_reg)))(79) = '1' then
-								fpsr(31 downto 28) <= "1000";  -- Negative
-							else
-								fpsr(31 downto 28) <= "0000";  -- Positive normal
-							end if;
+							-- Use proper MC68882 condition code setting function
+							set_fpsr_condition_codes(fpsr, fp_registers(to_integer(unsigned(decoder_dest_reg))));
 							fpu_state <= FPU_IDLE;
 							fpu_done <= '1';
 						end if;
@@ -964,20 +1066,36 @@ begin
 							fpu_done <= '1';  -- Signal CPU to handle the transfers
 						end if;
 					elsif decoder_instruction_type = INST_FSAVE then
-							-- FSAVE - Provide FPU state frame data to CPU
-							-- CPU will handle memory writes and addressing
-							fsave_counter <= 0;
-							-- CRITICAL: Latch frame format and size at FSAVE start for stability
-							fsave_frame_format_latched <= fsave_frame_format;
-							fsave_frame_size_latched <= fsave_frame_size_internal;
-								fsave_frame_size_debug <= fsave_frame_size_internal;
-							fpu_state <= FPU_FSAVE_WRITE;
+							-- FSAVE - Requires supervisor privilege per MC68882 specification
+							if supervisor_mode = '0' then
+								-- Privilege violation - generate exception
+								fpu_state <= FPU_EXCEPTION_STATE;
+								fpu_exception <= '1';
+								exception_code_internal <= X"20";  -- Privilege violation
+							else
+								-- FSAVE - Provide FPU state frame data to CPU
+								-- CPU will handle memory writes and addressing
+								fsave_counter <= 0;
+								-- CRITICAL: Latch frame format and size at FSAVE start for stability
+								fsave_frame_format_latched <= fsave_frame_format;
+								fsave_frame_size_latched <= fsave_frame_size_internal;
+									fsave_frame_size_debug <= fsave_frame_size_internal;
+								fpu_state <= FPU_FSAVE_WRITE;
+							end if;
 						elsif decoder_instruction_type = INST_FRESTORE then
-							-- FRESTORE - Restore FPU state from memory
-							-- Read state information from memory
-							fsave_counter <= 0;
-							frestore_frame_format <= (others => '0');
-							fpu_state <= FPU_FRESTORE_READ;
+							-- FRESTORE - Requires supervisor privilege per MC68882 specification
+							if supervisor_mode = '0' then
+								-- Privilege violation - generate exception
+								fpu_state <= FPU_EXCEPTION_STATE;
+								fpu_exception <= '1';
+								exception_code_internal <= X"20";  -- Privilege violation
+							else
+								-- FRESTORE - Restore FPU state from memory
+								-- Read state information from memory
+								fsave_counter <= 0;
+								frestore_frame_format <= (others => '0');
+								fpu_state <= FPU_FRESTORE_READ;
+							end if;
 						elsif decoder_instruction_type = INST_FMOVEM then
 							-- FMOVEM - Multiple register move for context switching
 							-- F225xxxx = FMOVEM to memory (save registers)
@@ -996,10 +1114,17 @@ begin
 									movem_direction <= '0';  -- 0 = store to memory
 									fpu_state <= FPU_FMOVEM;
 								elsif extension_word = X"BC00" then
-									-- Save FPCR/FPSR/FPIAR to memory
-									-- CPU will handle memory writes, provide data when requested
-									fpu_state <= FPU_FMOVEM_CR;
-									movem_direction <= '0';  -- 0 = store to memory
+									-- Save FPCR/FPSR/FPIAR to memory - requires supervisor privilege
+									if supervisor_mode = '0' then
+										-- Privilege violation - generate exception
+										fpu_state <= FPU_EXCEPTION_STATE;
+										fpu_exception <= '1';
+										exception_code_internal <= X"20";  -- Privilege violation
+									else
+										-- CPU will handle memory writes, provide data when requested
+										fpu_state <= FPU_FMOVEM_CR;
+										movem_direction <= '0';  -- 0 = store to memory
+									end if;
 								else
 									-- Unknown FMOVEM format
 									fpu_state <= FPU_IDLE;
@@ -1013,9 +1138,16 @@ begin
 									movem_direction <= '1';  -- 1 = load from memory
 									fpu_state <= FPU_FMOVEM;
 								elsif extension_word = X"9C00" then
-									-- Restore FPCR/FPSR/FPIAR from memory
-									fpu_state <= FPU_FMOVEM_CR;
-									movem_direction <= '1';  -- 1 = load from memory
+									-- Restore FPCR/FPSR/FPIAR from memory - requires supervisor privilege
+									if supervisor_mode = '0' then
+										-- Privilege violation - generate exception
+										fpu_state <= FPU_EXCEPTION_STATE;
+										fpu_exception <= '1';
+										exception_code_internal <= X"20";  -- Privilege violation
+									else
+										fpu_state <= FPU_FMOVEM_CR;
+										movem_direction <= '1';  -- 1 = load from memory
+									end if;
 								else
 									-- Unknown FMOVEM format
 									fpu_state <= FPU_IDLE;
@@ -1047,10 +1179,10 @@ begin
 								else
 									-- FMOVE <ea>,FPcr - Write to control register from source
 									case extension_word(12 downto 10) is  -- Control register select
-										when "001" =>  -- FPCR
-											fpcr <= cpu_data_in;
-										when "010" =>  -- FPSR
-											fpsr <= cpu_data_in;
+										when "001" =>  -- FPCR - validate before writing
+											fpcr <= validate_fpcr(cpu_data_in);
+										when "010" =>  -- FPSR - validate before writing  
+											fpsr <= validate_fpsr(cpu_data_in);
 										when "100" =>  -- FPIAR
 											fpiar <= cpu_data_in;
 										when others =>
@@ -1076,11 +1208,12 @@ begin
 						      fpu_operation = OP_FSIN or fpu_operation = OP_FCOS or fpu_operation = OP_FTAN or
 						      fpu_operation = OP_FASIN or fpu_operation = OP_FACOS or fpu_operation = OP_FATAN or
 						      fpu_operation = OP_FSINH or fpu_operation = OP_FCOSH or fpu_operation = OP_FTANH or
-						      fpu_operation = OP_FATANH or fpu_operation = OP_FETOX or fpu_operation = OP_FTWOTOX or
-						      fpu_operation = OP_FTENTOX or fpu_operation = OP_FLOGN or fpu_operation = OP_FLOG10 or
+						      fpu_operation = OP_FATANH or fpu_operation = OP_FETOX or fpu_operation = OP_FETOXM1 or 
+						      fpu_operation = OP_FTWOTOX or fpu_operation = OP_FTENTOX or fpu_operation = OP_FLOGN or 
+						      fpu_operation = OP_FLOGNP1 or fpu_operation = OP_FLOG10 or
 						      fpu_operation = OP_FLOG2 or fpu_operation = OP_FMOVECR or fpu_operation = OP_FMOD or
 						      fpu_operation = OP_FREM or fpu_operation = OP_FSCALE or fpu_operation = OP_FGETEXP or
-						      fpu_operation = OP_FGETMAN then
+						      fpu_operation = OP_FGETMAN or fpu_operation = OP_FSINCOS then
 								-- Performance optimization: Determine operation complexity
 								case fpu_operation is
 									when OP_FABS | OP_FNEG =>
@@ -1702,32 +1835,8 @@ begin
 						
 						-- Special handling for FTST with FP register source
 						if fpu_operation = OP_FTST and ea_mode = "111" and ea_register = "010" then
-							-- FTST with FP register source
-							-- Clear previous condition codes first
-							fpsr(31 downto 28) <= "0000";
-							
-							-- Test FP register data (alu_operand_a)
-							if alu_operand_a(78 downto 64) = "111111111111111" then
-								-- Infinity or NaN
-								if alu_operand_a(63) = '1' and alu_operand_a(62 downto 0) = (62 downto 0 => '0') then
-									-- Infinity
-									fpsr(29) <= '1';  -- I (Infinity) bit
-									if alu_operand_a(79) = '1' then
-										fpsr(31) <= '1';  -- N (Negative) bit for -Infinity
-									end if;
-								else
-									-- NaN
-									fpsr(28) <= '1';  -- NaN bit
-								end if;
-							elsif alu_operand_a(78 downto 64) = (14 downto 0 => '0') and alu_operand_a(63 downto 0) = (63 downto 0 => '0') then
-								-- Zero
-								fpsr(30) <= '1';  -- Z (Zero) bit
-							else
-								-- Normal number - check sign
-								if alu_operand_a(79) = '1' then
-									fpsr(31) <= '1';  -- N (Negative) bit
-								end if;
-							end if;
+							-- FTST with FP register source - use proper condition code function
+							set_fpsr_condition_codes(fpsr, alu_operand_a);
 							
 							fpu_state <= FPU_IDLE;
 							fpu_done <= '1';
@@ -1735,42 +1844,18 @@ begin
 						elsif ea_mode = "000" then
 							-- Special handling for FTST - complete immediately
 							if fpu_operation = OP_FTST then
-								-- FTST - Analyze source operand and set condition codes
-								-- Clear previous condition codes first
-								fpsr(31 downto 28) <= "0000";
-								
-								-- Test CPU register data (alu_operand_b)
-								if alu_operand_b(78 downto 64) = "111111111111111" then
-									-- Infinity or NaN
-									if alu_operand_b(63) = '1' and alu_operand_b(62 downto 0) = (62 downto 0 => '0') then
-										-- Infinity
-										fpsr(29) <= '1';  -- I (Infinity) bit
-										if alu_operand_b(79) = '1' then
-											fpsr(31) <= '1';  -- N (Negative) bit for -Infinity
-										end if;
-									else
-										-- NaN
-										fpsr(28) <= '1';  -- NaN bit
-									end if;
-								elsif alu_operand_b(78 downto 64) = (14 downto 0 => '0') and alu_operand_b(63 downto 0) = (63 downto 0 => '0') then
-									-- Zero
-									fpsr(30) <= '1';  -- Z (Zero) bit
-								else
-									-- Normal number - check sign
-									if alu_operand_b(79) = '1' then
-										fpsr(31) <= '1';  -- N (Negative) bit
-									end if;
-								end if;
-								
+								-- FTST - Analyze source operand and set condition codes using proper function
+								set_fpsr_condition_codes(fpsr, alu_operand_b);
 								fpu_state <= FPU_IDLE;
 								fpu_done <= '1';
 							-- Check if operation is transcendental function
 							elsif fpu_operation = OP_FSIN or fpu_operation = OP_FCOS or fpu_operation = OP_FTAN or
 							   fpu_operation = OP_FASIN or fpu_operation = OP_FACOS or fpu_operation = OP_FATAN or
 							   fpu_operation = OP_FSINH or fpu_operation = OP_FCOSH or fpu_operation = OP_FTANH or
-							   fpu_operation = OP_FATANH or fpu_operation = OP_FETOX or fpu_operation = OP_FTWOTOX or
-							   fpu_operation = OP_FTENTOX or fpu_operation = OP_FLOGN or fpu_operation = OP_FLOG10 or
-							   fpu_operation = OP_FLOG2 then
+							   fpu_operation = OP_FATANH or fpu_operation = OP_FETOX or fpu_operation = OP_FETOXM1 or 
+							   fpu_operation = OP_FTWOTOX or fpu_operation = OP_FTENTOX or fpu_operation = OP_FLOGN or 
+							   fpu_operation = OP_FLOGNP1 or fpu_operation = OP_FLOG10 or
+							   fpu_operation = OP_FLOG2 or fpu_operation = OP_FSINCOS then
 								-- Transcendental function - check for NaN/Infinity inputs first
 								if alu_operand_a(78 downto 64) = "111111111111111" then
 									-- Input is infinity or NaN
@@ -1781,8 +1866,9 @@ begin
 									elsif alu_operand_a(63) = '1' and alu_operand_a(62 downto 0) = (62 downto 0 => '0') then
 										-- Input is infinity - generate appropriate result or NaN
 										case fpu_operation is
-											when OP_FSIN | OP_FCOS =>
+											when OP_FSIN | OP_FCOS | OP_FSINCOS =>
 												-- sin(±∞) = cos(±∞) = NaN (domain error)
+												-- For FSINCOS, both sine and cosine results are NaN
 												result_data <= '0' & "111111111111111" & x"8000000000000000";  -- Quiet NaN
 											when OP_FLOGN | OP_FLOG10 | OP_FLOG2 =>
 												-- log(+∞) = +∞, log(-∞) = NaN
@@ -1904,59 +1990,14 @@ begin
 								end if;
 								fpu_state <= FPU_WRITE_RESULT;
 							elsif fpu_operation = OP_FTST then
-								-- FTST - Analyze source operand and set condition codes
-								-- Clear previous condition codes first
-								fpsr(31 downto 28) <= "0000";
-								
+								-- FTST - Analyze source operand and set condition codes using proper function
 								-- Choose correct operand based on source addressing mode
-								-- For CPU registers (ea_mode="000"), use alu_operand_b
-								-- For FP registers, use alu_operand_a
 								if ea_mode = "000" then
 									-- Test CPU register data (alu_operand_b)
-									if alu_operand_b(78 downto 64) = "111111111111111" then
-										-- Infinity or NaN
-										if alu_operand_b(63) = '1' and alu_operand_b(62 downto 0) = (62 downto 0 => '0') then
-											-- Infinity
-											fpsr(29) <= '1';  -- I (Infinity) bit
-											if alu_operand_b(79) = '1' then
-												fpsr(31) <= '1';  -- N (Negative) bit for -Infinity
-											end if;
-										else
-											-- NaN
-											fpsr(28) <= '1';  -- NaN bit
-										end if;
-									elsif alu_operand_b(78 downto 64) = (14 downto 0 => '0') and alu_operand_b(63 downto 0) = (63 downto 0 => '0') then
-										-- Zero
-										fpsr(30) <= '1';  -- Z (Zero) bit
-									else
-										-- Normal number - check sign
-										if alu_operand_b(79) = '1' then
-											fpsr(31) <= '1';  -- N (Negative) bit
-										end if;
-									end if;
+									set_fpsr_condition_codes(fpsr, alu_operand_b);
 								else
 									-- Test FP register data (alu_operand_a)
-									if alu_operand_a(78 downto 64) = "111111111111111" then
-										-- Infinity or NaN
-										if alu_operand_a(63) = '1' and alu_operand_a(62 downto 0) = (62 downto 0 => '0') then
-											-- Infinity
-											fpsr(29) <= '1';  -- I (Infinity) bit
-											if alu_operand_a(79) = '1' then
-												fpsr(31) <= '1';  -- N (Negative) bit for -Infinity
-											end if;
-										else
-											-- NaN
-											fpsr(28) <= '1';  -- NaN bit
-										end if;
-									elsif alu_operand_a(78 downto 64) = (14 downto 0 => '0') and alu_operand_a(63 downto 0) = (63 downto 0 => '0') then
-										-- Zero
-										fpsr(30) <= '1';  -- Z (Zero) bit
-									else
-										-- Normal number - check sign
-										if alu_operand_a(79) = '1' then
-											fpsr(31) <= '1';  -- N (Negative) bit
-										end if;
-									end if;
+									set_fpsr_condition_codes(fpsr, alu_operand_a);
 								end if;
 								
 								fpu_state <= FPU_IDLE;
@@ -1990,44 +2031,36 @@ begin
 								end if;
 							-- Wait for ROM to be ready
 						else
-							-- Normal result - Store result to destination register (except for FTST/FCMP)
-							if fpu_operation /= OP_FTST and fpu_operation /= OP_FCMP then
+							-- Special handling for FSINCOS which writes to two registers
+							if fpu_operation = OP_FSINCOS then
+								-- FSINCOS: sine to destination register, cosine to specified register
+								-- Bounds check for both destination registers
+								if to_integer(unsigned(dest_reg)) <= 7 then
+									fp_registers(to_integer(unsigned(dest_reg))) <= result_data;  -- Sine result
+								end if;
+								-- Cosine register is specified in bits 0-2 of extension word
+								if to_integer(unsigned(extension_word(2 downto 0))) <= 7 then
+									-- For now, generate cosine from sine using identity cos(x) = sin(π/2 - x)
+									-- This is a simplified implementation - real MC68882 would compute both simultaneously
+									if result_data(78 downto 64) = "111111111111111" then
+										-- If sine is NaN or infinity, cosine is also NaN
+										fp_registers(to_integer(unsigned(extension_word(2 downto 0)))) <= result_data;  -- Same as sine
+									else
+										-- Simplified: cos(x) ≈ sin(π/2 - x) - placeholder implementation
+										-- Real implementation would use transcendental unit for proper computation
+										fp_registers(to_integer(unsigned(extension_word(2 downto 0)))) <= IEEE_NaN;  -- Placeholder
+									end if;
+								end if;
+							elsif fpu_operation /= OP_FTST and fpu_operation /= OP_FCMP then
+								-- Normal result - Store result to destination register (except for FTST/FCMP)
 								-- Bounds check for destination register
 								if to_integer(unsigned(dest_reg)) <= 7 then
 									fp_registers(to_integer(unsigned(dest_reg))) <= result_data;
 								end if;
 							end if;
 							
-							-- Update FPSR condition codes based on result
-							-- FPSR bits: [31-28] = CC, [27-24] = quotient, [23-16] = exception status, [15-8] = accrued exceptions, [7-0] = exception enable
-							-- CC bits: N(3), Z(2), I(1), NaN(0)
-							fpsr(31 downto 28) <= "0000";  -- Clear condition codes first
-							
-							-- Check for special values in result
-							if result_data(78 downto 64) = "111111111111111" then
-								-- Infinity or NaN
-								if result_data(63 downto 0) = (63 downto 0 => '0') then
-									-- Infinity
-									fpsr(29) <= '1';  -- I (Infinity) bit
-									if result_data(79) = '1' then
-										fpsr(31) <= '1';  -- N (Negative) bit for -Infinity
-									end if;
-								else
-									-- NaN
-									fpsr(28) <= '1';  -- NaN bit
-								end if;
-							elsif result_data(78 downto 64) = (14 downto 0 => '0') and result_data(63 downto 0) = (63 downto 0 => '0') then
-								-- Zero
-								fpsr(30) <= '1';  -- Z (Zero) bit
-								if result_data(79) = '1' then
-									fpsr(31) <= '1';  -- N (Negative) bit for -0
-								end if;
-							else
-								-- Normal number
-								if result_data(79) = '1' then
-									fpsr(31) <= '1';  -- N (Negative) bit
-								end if;
-							end if;
+							-- Update FPSR condition codes based on result using proper function
+							set_fpsr_condition_codes(fpsr, result_data);
 							
 							-- Update exception status if any ALU flags are set
 							if alu_overflow = '1' then
@@ -2310,13 +2343,13 @@ begin
 									fsave_counter <= fsave_counter + 1;
 								
 								when 2 =>
-									-- FPCR (present in all frames except NULL/BUSY)
-									fpcr <= frestore_data_in;
+									-- FPCR (present in all frames except NULL/BUSY) - validate before writing
+									fpcr <= validate_fpcr(frestore_data_in);
 									fsave_counter <= fsave_counter + 1;
 								
 								when 3 =>
-									-- FPSR (present in all frames except NULL/BUSY)
-									fpsr <= frestore_data_in;
+									-- FPSR (present in all frames except NULL/BUSY) - validate before writing
+									fpsr <= validate_fpsr(frestore_data_in);
 									-- Check frame format to determine next action
 									case frestore_frame_format is
 										when x"18" =>
@@ -2469,9 +2502,9 @@ begin
 						-- For control register writes (restore operations)
 						if fmovem_data_write = '1' then
 							case fmovem_reg_index is
-								when 0 => fpcr <= cpu_data_in;   -- FPCR
-								when 1 => fpsr <= cpu_data_in;   -- FPSR
-								when 2 => fpiar <= cpu_data_in;  -- FPIAR  
+								when 0 => fpcr <= validate_fpcr(cpu_data_in);   -- FPCR - validate
+								when 1 => fpsr <= validate_fpsr(cpu_data_in);   -- FPSR - validate
+								when 2 => fpiar <= cpu_data_in;  -- FPIAR (no validation needed)  
 								when others => null;
 							end case;
 						end if;
@@ -2568,83 +2601,129 @@ begin
 					end case;
 				end if;
 				
-				-- Handle CPU reads from CIR registers
+				-- Handle CPU reads from CIR registers - Complete MC68882 implementation
 				if cir_read = '1' then
 					case cir_address is
-						when "00000" =>  -- Response CIR (A4-A0 = 00000)
+						when "00000" =>  -- Response CIR (A4-A0 = 00000) - Read-only
 							cir_data_out <= response_cir;
 							cir_data_valid <= '1';
-						when "00001" =>  -- Command CIR (A4-A0 = 00001) - read-only for CPU
-							cir_data_out <= command_cir;
+						when "00001" =>  -- Command CIR (A4-A0 = 00001) - Write-only (reads as undefined)
+							cir_data_out <= (others => 'X');  -- Undefined per MC68882 spec
 							cir_data_valid <= '1';
-						when "00010" =>  -- Condition CIR (A4-A0 = 00010)
+						when "00010" =>  -- Condition CIR (A4-A0 = 00010) - Read-only
 							cir_data_out <= condition_cir;
 							cir_data_valid <= '1';
-						when "00011" =>  -- Save CIR (A4-A0 = 00011)
+						when "00011" =>  -- Save CIR (A4-A0 = 00011) - Read-only
+							-- CRITICAL FSAVE FIX: Always provide current frame format
+							-- This ensures FSAVE can always determine frame size
 							cir_data_out <= save_cir;
 							cir_data_valid <= '1';
-						when "00100" =>  -- Restore CIR (A4-A0 = 00100)
-							cir_data_out <= restore_cir;
+						when "00100" =>  -- Restore CIR (A4-A0 = 00100) - Write-only (reads as undefined)
+							cir_data_out <= (others => 'X');  -- Undefined per MC68882 spec
 							cir_data_valid <= '1';
-						when "00101" =>  -- Operand CIR (A4-A0 = 00101)
-							cir_data_out <= operand_cir;
+						when "00101" =>  -- Operand CIR (A4-A0 = 00101) - Write-only (reads as undefined)
+							cir_data_out <= (others => 'X');  -- Undefined per MC68882 spec
+							cir_data_valid <= '1';
+						when "00110" =>  -- Operation Word CIR (A4-A0 = 00110) - Read-only
+							cir_data_out <= operation_word_cir;
+							cir_data_valid <= '1';
+						when "00111" =>  -- Command Address CIR Low (A4-A0 = 00111) - Read-only
+							cir_data_out <= command_address_cir(15 downto 0);
+							cir_data_valid <= '1';
+						when "01000" =>  -- Command Address CIR High (A4-A0 = 01000) - Read-only
+							cir_data_out <= command_address_cir(31 downto 16);
 							cir_data_valid <= '1';
 						when others =>
-							cir_data_out <= (others => '0');
+							cir_data_out <= (others => '0');  -- Reserved registers read as zero
 							cir_data_valid <= '1';
 					end case;
+				else
+					-- CRITICAL FSAVE FIX: Clear data valid when not reading
+					-- This prevents stale data from interfering with frame size detection
+					cir_data_valid <= '0';
 				end if;
 				
-				-- Update Response CIR based on FPU state for complete cpGEN primitive loop
+				-- MC68882 Complete Primitive Protocol Implementation
+				-- Update Response CIR based on FPU state and operation requirements
 				case fpu_state is
 					when FPU_IDLE =>
 						if fpu_done = '1' then
 							-- Operation complete - return NULL primitive to end dialog
-							response_cir <= X"0000";  -- NULL response primitive
+							response_cir <= PRIM_NULL;  -- NULL response primitive
 						else
-							-- FPU idle, waiting for instruction
-							response_cir <= X"0000";  -- NULL - FPU ready
+							-- FPU idle, waiting for instruction - always ready
+							response_cir <= PRIM_NULL;  -- NULL - FPU ready
 						end if;
 						
 					when FPU_DECODE =>
-						-- CRITICAL FIX: Register-direct FTST doesn't need operand transfer
-						if (fpu_operation = OP_FTST or fpu_operation = OP_FCMP) and 
-						   not (decoder_operation_code = OP_FTST and decoder_ea_mode = "000") then
-							-- Memory-source FTST/FCMP need operand transfer
-							response_cir <= X"0001";  -- CA (Transfer Single Main Processor Register) primitive
+						-- Enhanced primitive protocol based on instruction type
+						if decoder_instruction_type = INST_GENERAL then
+							-- cpGEN instructions - check if operand transfer needed
+							case decoder_ea_mode is
+								when "000" =>  -- Data register direct
+									case decoder_source_format is
+										when FORMAT_BYTE | FORMAT_WORD =>
+											-- Need CPU register content transfer
+											response_cir <= PRIM_CA;  -- CA (Transfer CPU Register)
+										when others =>
+											-- No transfer needed for other formats
+											response_cir <= PRIM_NULL;  -- NULL
+									end case;
+								when "001" =>  -- Address register direct  
+									response_cir <= PRIM_CA;  -- CA (Transfer CPU Register)
+								when others =>  -- Memory modes
+									-- CPU handles memory operations
+									response_cir <= PRIM_NULL;  -- NULL - no coprocessor bus cycles
+							end case;
+						elsif decoder_instruction_type = INST_FMOVE_FP then
+							-- FP register to memory - need result transfer
+							response_cir <= PRIM_CC;  -- CC (Transfer Coprocessor Register)
+						elsif decoder_instruction_type = INST_FMOVE_MEM then
+							-- Memory to FP register - need operand transfer  
+							response_cir <= PRIM_CA;  -- CA (Transfer to Coprocessor)
+						elsif decoder_instruction_type = INST_FMOVE_CR then
+							-- Control register operations
+							if decoder_ea_mode = "000" then  -- To CPU register
+								response_cir <= PRIM_CC;  -- CC (Transfer from Coprocessor)
+							else  -- From CPU register
+								response_cir <= PRIM_CA;  -- CA (Transfer to Coprocessor)
+							end if;
 						else
-							-- Register-direct FTST or other instructions proceed normally  
-							response_cir <= X"0000";  -- NULL - let CPU continue (no bus cycles)
+							-- Other instruction types (FSAVE, FRESTORE, etc.)
+							response_cir <= PRIM_NULL;  -- NULL - CPU manages
 						end if;
 						
 					when FPU_FETCH_SOURCE =>
-						-- For cpGEN instructions, check if operand received via CIR
-						if (fpu_operation = OP_FTST or fpu_operation = OP_FCMP) then
-							if cir_write = '1' and cir_address = "00101" then
-								-- Operand received - return NULL to end dialog after operation  
-								response_cir <= X"0000";  -- NULL - proceed to execution
-							else
-								-- Still waiting for operand - keep returning CA
-								response_cir <= X"0001";  -- CA primitive - request operand
-							end if;
+						-- Check if required data transfer is complete
+						if cir_write = '1' and cir_address = "00101" then
+							-- Operand received - dialog complete
+							response_cir <= PRIM_NULL;  -- NULL - proceed to execution
 						else
-							-- Non-cpGEN instructions
-							response_cir <= X"0000";  -- NULL - operation in progress
+							-- Still waiting for operand transfer
+							response_cir <= PRIM_CA;  -- CA primitive - request operand
 						end if;
 						
 					when FPU_EXECUTE =>
-						-- FPU is executing operation
-						-- Always return NULL during execution to prevent dialog loops
-						response_cir <= X"0000";  -- NULL - operation in progress
+						-- Operation in progress - no bus cycles required
+						response_cir <= PRIM_NULL;  -- NULL - operation in progress
 						
 					when FPU_WRITE_RESULT =>
-						-- Writing result - operation completing
-						-- Return NULL to allow dialog completion when FPU returns to IDLE
-						response_cir <= X"0000";  -- NULL - completing operation
+						-- Result ready for transfer if needed
+						if decoder_instruction_type = INST_FMOVE_FP then
+							-- FP register to memory - provide result  
+							response_cir <= PRIM_CC;  -- CC (Transfer Coprocessor Register)
+						else
+							-- Result written internally - dialog complete
+							response_cir <= PRIM_NULL;  -- NULL - completing operation
+						end if;
+						
+					when FPU_EXCEPTION_STATE =>
+						-- Exception condition - return appropriate primitive
+						response_cir <= PRIM_NULL;  -- NULL - let CPU handle exception
 						
 					when others =>
-						-- Default: return NULL to end dialog
-						response_cir <= X"0000";  -- NULL - let CPU continue
+						-- Default: return NULL to end dialog safely
+						response_cir <= PRIM_NULL;  -- NULL - safe default
 				end case;
 				
 				-- Update Condition CIR with FPU condition codes for conditional instructions

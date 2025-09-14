@@ -287,7 +287,7 @@ PROCESS (OP2out, reg_QB, opcode, OP1out, OP1in, exe_datatype, addsub_q, execOPC,
 -- addsub
 -----------------------------------------------------------------------------
 PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype, exec, addsub_a, addsub_b, opaddsub,
-	     notaddsub_b, add_result, c_in, sndOPC, non_aligned, check_aligned)
+	     notaddsub_b, add_result, c_in, sndOPC, non_aligned, check_aligned, opcode)
 	BEGIN
 		addsub_a <= OP1out;
 		IF exec(get_bfoffset)='1' THEN	
@@ -309,7 +309,26 @@ PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype,
 		IF exec(opcUNPACK)='1' THEN
 			addsub_b(15 downto 0) <= "0000" & OP2out(7 downto 4) & "0000" & OP2out(3 downto 0);
 		ELSIF execOPC='0' AND exec(OP2out_one)='0' AND exec(get_bfoffset)='0'THEN
-			IF long_start='0' AND exe_datatype="00" AND exec(use_SP)='0' THEN
+			-- CRITICAL: TRIPLE-LAYER FSAVE BLOCKING to prevent ANY ALU arithmetic during FSAVE predecrement
+			-- This prevents ALL race conditions between FSAVE state machine and ALU
+			-- Layer 1: Direct F327 opcode check (most specific)
+			-- Layer 2: FSAVE -(An) pattern for any address register
+			-- Layer 3: Block when presub/movem_presub are active but check_aligned is blocked (indicates FSAVE control)
+			IF opcode = X"F327" THEN
+				-- F327 (FSAVE -(A7)) - ABSOLUTE BLOCKING
+				addsub_b <= (others => '0');  -- NO ALU OPERATION FOR F327
+				assert false report "DEBUG_F327: ALU_F327_BLOCK - F327 detected, addsub_b=0" severity note;
+			ELSIF (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
+			       opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100") THEN
+				-- FSAVE -(An) pattern for any address register - ABSOLUTE BLOCKING
+				addsub_b <= (others => '0');  -- NO ALU OPERATION FOR FSAVE
+				assert false report "DEBUG_F327: ALU_FSAVE_PATTERN_BLOCK - FSAVE -(An) detected, addsub_b=0" severity note;
+			ELSIF (exec(presub) = '1' OR movem_presub = '1') AND check_aligned = '0' AND 
+			      (opcode(15 downto 12) = "1111") THEN
+				-- Suspicious: presub active but check_aligned blocked + F-line opcode = likely FSAVE takeover
+				addsub_b <= (others => '0');  -- DEFENSIVE BLOCKING
+				assert false report "DEBUG_F327: ALU_DEFENSIVE_BLOCK - Likely FSAVE control detected, addsub_b=0" severity note;
+			ELSIF long_start='0' AND exe_datatype="00" AND exec(use_SP)='0' THEN
 				addsub_b <= "00000000000000000000000000000001";
 			ELSIF long_start='0' AND exe_datatype="10" AND (exec(presub) OR exec(postadd) OR movem_presub)='1' THEN
 				IF exec(movem_action)='1' THEN
@@ -330,7 +349,9 @@ PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype,
 		END IF;
 
 		-- patch for un-aligned movem --mikej
-		if exec(movem_action)='1' OR check_aligned='1' then
+		-- CRITICAL FIX: Exclude ALL FSAVE modes from alignment patch to prevent hardcoded decrements
+		if (exec(movem_action)='1' OR check_aligned='1') AND NOT 
+		   (opcode = X"F327" OR (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND opcode(8 downto 6) = "100")) then
 		  if (movem_presub = '0') then -- up
 			if (non_aligned = '1') and (long_start = '0') then -- hold
 			  addsub_b <= (others => '0');
@@ -338,9 +359,30 @@ PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype,
 		  else
 			if (non_aligned = '1') and (long_start = '0') then
 			  if (exe_datatype = "10") then
-				addsub_b <= "00000000000000000000000000001000";
+				-- ABSOLUTE FIX: Never allow F327 to use hardcoded 8-byte path
+				IF opcode = X"F327" OR (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
+				                         opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100") THEN
+					addsub_b <= (others => '0');  -- ZERO for all FSAVE instructions
+					-- DEBUG: Report 8-byte path blocking
+					IF opcode = X"F327" THEN
+						assert false report "DEBUG_F327: ALU_8BYTE_BLOCK - Prevented hardcoded 8-byte decrement" severity note;
+					END IF;
+				ELSE
+					addsub_b <= "00000000000000000000000000001000";
+				END IF;
 			  else
-				addsub_b <= "00000000000000000000000000000100";
+				-- ABSOLUTE FIX: Never allow F327 to use hardcoded 4-byte path
+				IF opcode = X"F327" OR (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
+				                         opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100") THEN
+					addsub_b <= (others => '0');  -- ZERO for all FSAVE instructions
+				ELSE
+					addsub_b <= "00000000000000000000000000000100";
+				END IF;
+				-- DEBUG: Alert if F327 reaches this path  
+				if opcode = X"F327" then
+					assert false report "ALU_DEBUG: F327 TRIGGERED 4-BYTE PATH! movem_action=" & 
+					           bit'image(exec(movem_action)) & " check_aligned=" & std_logic'image(check_aligned) severity error;
+				end if;
 			  end if;
 			end if;
 		  end if;

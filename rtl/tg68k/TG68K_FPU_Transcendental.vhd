@@ -58,7 +58,7 @@ end TG68K_FPU_Transcendental;
 architecture rtl of TG68K_FPU_Transcendental is
 
 	-- MC68881/68882 Transcendental operation codes
-	constant OP_FSINH		: std_logic_vector(6 downto 0) := "0000010";
+	constant OP_FSINH		: std_logic_vector(6 downto 0) := "0001011";  -- Hyperbolic sine
 	constant OP_FTANH		: std_logic_vector(6 downto 0) := "0001001";
 	constant OP_FATAN		: std_logic_vector(6 downto 0) := "0001010";
 	constant OP_FASIN		: std_logic_vector(6 downto 0) := "0001100";
@@ -68,9 +68,11 @@ architecture rtl of TG68K_FPU_Transcendental is
 	constant OP_FETOX		: std_logic_vector(6 downto 0) := "0010000";
 	constant OP_FTWOTOX		: std_logic_vector(6 downto 0) := "0010001";
 	constant OP_FTENTOX		: std_logic_vector(6 downto 0) := "0010010";
+	constant OP_FETOXM1		: std_logic_vector(6 downto 0) := "0000111";  -- e^x - 1
 	constant OP_FLOGN		: std_logic_vector(6 downto 0) := "0010100";
 	constant OP_FLOG10		: std_logic_vector(6 downto 0) := "0010101";
 	constant OP_FLOG2		: std_logic_vector(6 downto 0) := "0010110";
+	constant OP_FLOGNP1		: std_logic_vector(6 downto 0) := "0000101";  -- ln(x + 1)
 	constant OP_FCOSH		: std_logic_vector(6 downto 0) := "0011001";
 	constant OP_FACOS		: std_logic_vector(6 downto 0) := "0011100";
 	constant OP_FCOS		: std_logic_vector(6 downto 0) := "0011101";
@@ -947,6 +949,142 @@ begin
 											shift_right(unsigned(exp_argument), 5)  -- Approximation x/32 ≈ x⁴/24
 										);
 										series_sum <= std_logic_vector(unsigned(series_sum) + unsigned(series_term));
+									else
+										-- Higher order terms become negligible
+										null;
+									end if;
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Assemble final result
+									result_sign <= series_sum(79);
+									result_exp <= series_sum(78 downto 64);
+									result_mant <= series_sum(63 downto 0);
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
+							when OP_FETOXM1 =>
+								-- Enhanced e^x - 1 function (more accurate for small x)
+								if iteration_count = 0 then
+									if input_zero = '1' then
+										-- e^0 - 1 = 0
+										result_sign <= '0';
+										result_exp <= (others => '0');
+										result_mant <= (others => '0');
+										trans_state <= TRANS_DONE;
+									else
+										-- Check for overflow/underflow conditions
+										if input_sign = '1' and unsigned(input_exp) > to_unsigned(16383 + 6, 15) then
+											-- Very large negative x: e^x - 1 ≈ -1 (underflow to -1)
+											result_sign <= '1';
+											result_exp <= FP_ONE(78 downto 64);
+											result_mant <= FP_ONE(63 downto 0);
+											trans_underflow <= '1';
+											trans_state <= TRANS_DONE;
+										elsif input_sign = '0' and unsigned(input_exp) > to_unsigned(16383 + 6, 15) then
+											-- Very large positive x: e^x - 1 = +∞ (overflow)
+											result_sign <= '0';
+											result_exp <= (others => '1');
+											result_mant <= X"8000000000000000";
+											trans_overflow <= '1';
+											trans_state <= TRANS_DONE;
+										else
+											-- Normal range: use Taylor series for e^x - 1 = x + x²/2! + x³/3! + ...
+											exp_argument <= operand;
+											series_sum <= operand;  -- Start with x (first term)
+											series_term <= operand; -- First term = x
+											iteration_count <= iteration_count + 1;
+										end if;
+									end if;
+								elsif iteration_count <= 5 then
+									-- Taylor series: e^x - 1 = x + x²/2! + x³/3! + x⁴/4! + ...
+									if iteration_count = 1 then
+										-- Second term: x²/2!
+										series_term <= std_logic_vector(
+											resize(unsigned(exp_argument(63 downto 48)) * unsigned(exp_argument(63 downto 48)) / 2, 80)
+										);
+										series_sum <= std_logic_vector(unsigned(series_sum) + unsigned(series_term));
+									elsif iteration_count = 2 then
+										-- Third term: x³/3! = x³/6
+										series_term <= std_logic_vector(
+											resize(unsigned(exp_argument(63 downto 48)) * unsigned(exp_argument(63 downto 48)) * 
+											       unsigned(exp_argument(63 downto 48)) / 6, 80)
+										);
+										series_sum <= std_logic_vector(unsigned(series_sum) + unsigned(series_term));
+									elsif iteration_count = 3 then
+										-- Fourth term: x⁴/4! = x⁴/24
+										series_term <= std_logic_vector(
+											shift_right(unsigned(exp_argument), 5)  -- Approximation x/32 ≈ x⁴/24
+										);
+										series_sum <= std_logic_vector(unsigned(series_sum) + unsigned(series_term));
+									else
+										-- Higher order terms become negligible
+										null;
+									end if;
+									iteration_count <= iteration_count + 1;
+									trans_inexact <= '1';
+								else
+									-- Assemble final result
+									result_sign <= series_sum(79);
+									result_exp <= series_sum(78 downto 64);
+									result_mant <= series_sum(63 downto 0);
+									trans_state <= TRANS_NORMALIZE;
+								end if;
+								
+							when OP_FLOGNP1 =>
+								-- Enhanced ln(x + 1) function (more accurate for small x)
+								if iteration_count = 0 then
+									if input_sign = '1' and unsigned(input_exp) >= to_unsigned(16383, 15) then
+										-- ln(x + 1) where x < -1 is invalid
+										trans_invalid <= '1';
+										result_sign <= '0';
+										result_exp <= (others => '1');
+										result_mant <= X"C000000000000000";  -- NaN
+										trans_state <= TRANS_DONE;
+									elsif input_zero = '1' then
+										-- ln(0 + 1) = ln(1) = 0
+										result_sign <= '0';
+										result_exp <= (others => '0');
+										result_mant <= (others => '0');
+										trans_state <= TRANS_DONE;
+									elsif unsigned(input_exp) = to_unsigned(16383, 15) and 
+									      input_mant = FP_ONE(63 downto 0) and input_sign = '1' then
+										-- ln(-1 + 1) = ln(0) = -∞
+										result_sign <= '1';
+										result_exp <= (others => '1');
+										result_mant <= X"8000000000000000";
+										trans_state <= TRANS_DONE;
+									else
+										-- Normal range: use Taylor series for ln(1 + x)
+										-- ln(1 + x) = x - x²/2 + x³/3 - x⁴/4 + ... for |x| < 1
+										log_argument <= operand;
+										series_sum <= operand;  -- Start with x (first term)
+										series_term <= operand; -- First term = x
+										iteration_count <= iteration_count + 1;
+									end if;
+								elsif iteration_count <= 5 then
+									-- Taylor series: ln(1 + x) = x - x²/2 + x³/3 - x⁴/4 + ...
+									if iteration_count = 1 then
+										-- Second term: -x²/2
+										series_term <= std_logic_vector(
+											resize(unsigned(log_argument(63 downto 48)) * unsigned(log_argument(63 downto 48)) / 2, 80)
+										);
+										series_term(79) <= '1';  -- Make it negative
+										series_sum <= std_logic_vector(unsigned(series_sum) - unsigned(series_term));
+									elsif iteration_count = 2 then
+										-- Third term: +x³/3
+										series_term <= std_logic_vector(
+											resize(unsigned(log_argument(63 downto 48)) * unsigned(log_argument(63 downto 48)) * 
+											       unsigned(log_argument(63 downto 48)) / 3, 80)
+										);
+										series_sum <= std_logic_vector(unsigned(series_sum) + unsigned(series_term));
+									elsif iteration_count = 3 then
+										-- Fourth term: -x⁴/4
+										series_term <= std_logic_vector(
+											shift_right(unsigned(log_argument), 2)  -- Approximation x/4 ≈ x⁴/4
+										);
+										series_term(79) <= '1';  -- Make it negative
+										series_sum <= std_logic_vector(unsigned(series_sum) - unsigned(series_term));
 									else
 										-- Higher order terms become negligible
 										null;
