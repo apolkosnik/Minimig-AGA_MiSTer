@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-integration setup help
+.PHONY: all clean test-pmmu test-cache test-cacr test-integration test-diagrom setup help
 
 # Default target
 all: test-all
@@ -29,6 +29,7 @@ help:
 	@echo "  test-cache    - Test Cache component only"  
 	@echo "  test-cacr     - Test CACR register only"
 	@echo "  test-integration - Test full system integration"
+	@echo "  test-diagrom  - Test DiagROM boot sequence (debug CPU lockup)"
 	@echo "  test-all      - Run comprehensive test suite"
 	@echo "  clean         - Clean generated files"
 	@echo "  syntax-check  - Check VHDL syntax only"
@@ -81,6 +82,10 @@ test-cacr: compile
 test-integration: compile
 	@echo "Running Integration tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 100us; quit" tb_integration_test
+
+test-diagrom: compile
+	@echo "Running DiagROM boot simulation..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "do run_diagrom_boot.tcl; run 50us; quit"
 
 # Comprehensive test suite
 test-all: compile

@@ -12,11 +12,28 @@ This is the Minimig-AGA_MiSTer project - an FPGA implementation of the Amiga com
 - Use Intel Quartus Prime to build the FPGA bitstream
 - Main project files: `Minimig.qpf` and `Minimig.qsf` (standard build), `Minimig_Q13.qpf` and `Minimig_Q13.qsf` (Quartus 13 compatibility)
 - Build generates RBF files for the MiSTer platform
+- Keep track of the build's PID, you don't want to pkill builds from another instance!
+- **Remember to check for multiple drivers before starting a build**
+
+#### Linux Build Commands
+```bash
+# Full compilation
+quartus_sh --flow compile Minimig
+
+# Background build with logging
+nohup quartus_sh --flow compile Minimig > build.log 2>&1 &
+
+# Check build progress
+tail -f build.log
+
+# Clean and rebuild
+./clean.sh && quartus_sh --flow compile Minimig
+```
 
 ### Cleaning Build Files
 ```bash
-# Windows batch file for cleanup
-clean.bat
+# Linux cleanup script
+./clean.sh
 ```
 Removes all generated build files including db/, incremental_db/, output_files/, simulation directories, and temporary files.
 
@@ -108,6 +125,7 @@ Removes all generated build files including db/, incremental_db/, output_files/,
 - **Performance Optimization**: Cache hit/miss handling in memory access cycles
 
 ### 68030 Technical Implementation Details
+- **Specifications**: `https://www.nxp.com/docs/en/reference-manual/MC68030UM.pdf`
 
 #### PMMU (Paged Memory Management Unit)
 - **File**: `rtl/tg68k/TG68K_PMMU_030.vhd`
@@ -166,9 +184,63 @@ Removes all generated build files including db/, incremental_db/, output_files/,
 - CD32 gamepad support development
 
 ### Testing
-- No automated test suite - testing typically done with actual Amiga software
+
+#### TG68K 68030 Test Suite (`tests/tg68k_030/`)
+- **Comprehensive VHDL simulation test suite** for 68030 components using ModelSim
+- **Test Components**:
+  - PMMU (Paged Memory Management Unit) functionality tests
+  - Cache system tests (instruction and data cache)
+  - CACR (Cache Control Register) tests
+  - System integration tests with full CPU kernel
+  - Page table walker tests
+  - Address translation and fault handling tests
+
+#### Test Infrastructure
+- **ModelSim Integration**: Uses Intel ModelSim ASE for VHDL simulation
+- **Automated Test Runner**: `Makefile` provides easy test execution commands
+- **Test Scripts**: TCL scripts for automated test sequences
+- **Waveform Analysis**: Generates `.wlf` files for detailed signal analysis
+
+#### Running Tests
+```bash
+# Navigate to test directory
+cd tests/tg68k_030/
+
+# Run all tests
+make test-all
+
+# Run individual component tests
+make test-pmmu    # PMMU tests only
+make test-cache   # Cache tests only  
+make test-cacr    # CACR register tests only
+make test-integration  # Full system tests
+
+# Interactive debugging with GUI
+make test-gui
+
+# Quick functional verification
+make test-quick
+
+# Clean test artifacts
+make clean
+```
+
+#### Test Coverage
+- **PMMU Tests**: Register access, translation requests, page table walking, fault conditions
+- **Cache Tests**: Cache line operations, hit/miss behavior, CINV/CPUSH instructions
+- **CACR Tests**: Cache control register functionality and self-clearing bits
+- **Integration Tests**: Full CPU-PMMU-Cache interaction scenarios
+- **Fault Testing**: MMU exception handling and status reporting
+
+#### Requirements
+- Intel ModelSim ASE (configured for path `/opt/intelFPGA_lite/17.0/modelsim_ase`)
+- VHDL source files in `rtl/tg68k/` directory
+- Proper VHDL-93 compilation environment
+
+#### Hardware Testing
+- **MiSTer Platform**: Testing with actual Amiga software on MiSTer hardware
 - Use Amiga Kickstart ROMs and software for validation
-- Test with various OCS/ECS/AGA software configurations
+- Test with various OCS/ECS/AGA software configurations  
 - **68030 Testing**: Requires 68030-aware software for validation
 
 ## File Organization Conventions
@@ -184,3 +256,14 @@ Removes all generated build files including db/, incremental_db/, output_files/,
 3. Build using Quartus Prime
 4. Test generated RBF file on MiSTer hardware
 5. Verify functionality with Amiga software
+
+## Build Environment
+- We are building on Linux
+
+## Memories
+
+### Build-Related Memories
+- Keep track of the build's PID, you don't want to pkill builds from another instance!
+
+### Test-Related Memories
+- I don't want any simpler tests, fix the existing test!

@@ -41,21 +41,21 @@ architecture behavior of tb_integration_test is
   -- Clock and basic signals
   constant clk_period : time := 20 ns; -- 50MHz
   signal CLK : std_logic := '0';
-  signal RESET : std_logic;
-  signal HALT : std_logic;
-  signal BERR : std_logic := '1';
-  signal IPL : std_logic_vector(2 downto 0) := "111";
-  signal ADDR : std_logic_vector(31 downto 0);
-  signal FC : std_logic_vector(2 downto 0);
-  signal DATA : std_logic_vector(15 downto 0);
-  signal AS : std_logic;
-  signal UDS : std_logic;
-  signal LDS : std_logic;
-  signal RW : std_logic;
+  signal RESET : std_logic := 'H';  -- Weak pull-up initially  
+  signal HALT : std_logic := 'H';   -- Weak pull-up initially
+  signal BERR : std_logic := '1';  -- Bus error inactive (high)
+  signal IPL : std_logic_vector(2 downto 0) := "111";  -- No interrupt (all high)
+  signal ADDR : std_logic_vector(31 downto 0) := (others => '0');
+  signal FC : std_logic_vector(2 downto 0) := (others => '0');
+  signal DATA : std_logic_vector(15 downto 0) := (others => 'Z');
+  signal AS : std_logic := '1';
+  signal UDS : std_logic := '1';
+  signal LDS : std_logic := '1';
+  signal RW : std_logic := '1';
   signal DTACK : std_logic := '1';
-  signal E : std_logic;
+  signal E : std_logic := '1';
   signal VPA : std_logic := '1';
-  signal VMA : std_logic;
+  signal VMA : std_logic := '1';
 
   -- Memory simulation
   type memory_t is array(0 to 4095) of std_logic_vector(15 downto 0);
@@ -67,6 +67,10 @@ architecture behavior of tb_integration_test is
   signal memory_accesses : integer := 0;
 
 begin
+
+  -- External pullup resistors for bidirectional signals  
+  -- In VHDL, we need to use a resolved signal approach
+  -- For simplicity, let's create proper pullups using separate driver processes
 
   -- Instantiate 68030 CPU
   cpu: TG68K
@@ -104,37 +108,47 @@ begin
     wait;
   end process;
 
-  -- Simple memory model
+  -- Improved memory model with proper 68000 bus timing
   memory_process: process(CLK)
     variable addr_int : integer;
     variable data_out : std_logic_vector(15 downto 0);
+    variable prev_as : std_logic := '1';
   begin
-    if rising_edge(CLK) then
-      DTACK <= '1'; -- Default no acknowledge
+    if falling_edge(CLK) then
+      -- 68000 uses falling edge timing for memory interface
+      prev_as := AS;
       
-      if AS = '0' then -- Active bus cycle
-        addr_int := to_integer(unsigned(ADDR(12 downto 1))); -- Word address
+      -- Default state: no acknowledge, data high-impedance  
+      DTACK <= '1';
+      DATA <= (others => 'Z');
+      
+      if AS = '0' and (UDS = '0' or LDS = '0') then -- Valid bus cycle
+        -- Calculate word-aligned address
+        addr_int := to_integer(unsigned(ADDR(12 downto 1))); 
         
         if addr_int < 4096 then
           if RW = '1' then
-            -- Read cycle
+            -- Read cycle - provide data and acknowledge
             data_out := memory(addr_int);
             DATA <= data_out;
-            DTACK <= '0'; -- Acknowledge
+            DTACK <= '0'; -- Acknowledge read
+            if prev_as = '1' then -- First cycle of bus access
+              memory_accesses <= memory_accesses + 1;
+            end if;
           else
-            -- Write cycle  
+            -- Write cycle - accept data and acknowledge
             if UDS = '0' then
               memory(addr_int)(15 downto 8) <= DATA(15 downto 8);
             end if;
             if LDS = '0' then
               memory(addr_int)(7 downto 0) <= DATA(7 downto 0);
             end if;
-            DTACK <= '0'; -- Acknowledge
+            DTACK <= '0'; -- Acknowledge write
+            if prev_as = '1' then -- First cycle of bus access
+              memory_accesses <= memory_accesses + 1;
+            end if;
           end if;
-          memory_accesses <= memory_accesses + 1;
         end if;
-      else
-        DATA <= (others => 'Z');
       end if;
     end if;
   end process;
@@ -170,12 +184,22 @@ begin
     
     procedure setup_test_memory is
     begin
-      -- Setup some test instructions/data
-      memory(0) <= x"4E71"; -- NOP
-      memory(1) <= x"4E71"; -- NOP  
-      memory(2) <= x"4E71"; -- NOP
-      memory(3) <= x"4E71"; -- NOP
-      memory(4) <= x"4E75"; -- RTS (end)
+      -- Setup 68000 reset vectors at address 0x000000 and 0x000004
+      -- Initial Supervisor Stack Pointer (SSP) = 0x00001000
+      memory(0) <= x"0000"; -- SSP high word
+      memory(1) <= x"1000"; -- SSP low word
+      -- Initial Program Counter (PC) = 0x00000008  
+      memory(2) <= x"0000"; -- PC high word
+      memory(3) <= x"0008"; -- PC low word
+      
+      -- Setup some test instructions starting at 0x000008
+      memory(4) <= x"4E71"; -- NOP at 0x000008
+      memory(5) <= x"4E71"; -- NOP at 0x00000A
+      memory(6) <= x"4E71"; -- NOP at 0x00000C
+      memory(7) <= x"4E71"; -- NOP at 0x00000E
+      memory(8) <= x"4EF9"; -- JMP absolute long at 0x000010
+      memory(9) <= x"0000"; -- Jump target high word
+      memory(10) <= x"0010"; -- Jump target low word - creates infinite loop
       
       -- Setup some PMMU test data (page tables)
       memory(100) <= x"0000"; -- Page table entry high
@@ -217,18 +241,48 @@ begin
     -- Initialize memory
     setup_test_memory;
     
-    -- Reset sequence
-    RESET <= '0';
-    wait_cycles(10);
-    RESET <= 'Z'; -- Release reset
-    wait_cycles(20);
+    -- Reset sequence - proper reset for TG68K bidirectional reset
+    -- Apply external reset by driving RESET low
+    RESET <= '0';  -- Apply external reset (active low)
+    wait_cycles(50); -- Hold reset for sufficient time
+    RESET <= 'H';  -- Release to weak pull-up
+    -- HALT should follow RESET naturally through CPU internal logic
+    wait_cycles(2000); -- Wait much longer for CPU to fully stabilize and start
 
     -- TEST 1: Basic CPU Operation
     write(l, string'("TEST 1: Basic CPU Operation"));
     writeline(output, l);
     
-    -- Let CPU run for a while
-    wait_cycles(1000);
+    -- Debug: Check signals immediately after reset
+    write(l, string'("Debug: RESET = "));
+    write(l, RESET);
+    writeline(output, l);
+    write(l, string'("Debug: HALT = "));
+    write(l, HALT);
+    writeline(output, l);
+    write(l, string'("Debug: AS = "));
+    write(l, AS);
+    writeline(output, l);
+    
+    -- Let CPU run for a while and monitor for any activity
+    for i in 1 to 5000 loop
+      wait_cycles(1);
+      if AS = '0' then
+        write(l, string'("SUCCESS: AS went active at cycle ") & integer'image(i));
+        writeline(output, l);
+        exit;
+      end if;
+    end loop;
+    
+    -- Debug: Check signals after running
+    write(l, string'("Debug after 1000 cycles:"));
+    writeline(output, l);
+    write(l, string'("Debug: AS = "));
+    write(l, AS);
+    writeline(output, l);
+    write(l, string'("Debug: RW = "));
+    write(l, RW);
+    writeline(output, l);
     
     report_test("CPU Started", bus_cycle_count > 0);
     report_test("Memory Access", memory_accesses > 0);

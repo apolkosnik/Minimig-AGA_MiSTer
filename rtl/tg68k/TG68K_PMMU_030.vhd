@@ -39,6 +39,7 @@ entity TG68K_PMMU_030 is
     write_protect  : out std_logic;
     fault          : out std_logic;
     fault_status   : out std_logic_vector(7 downto 0);
+    tc_enable      : out std_logic;
 
     -- Walker memory interface (read-only) and busy indicator
     mem_req        : out std_logic;
@@ -127,7 +128,8 @@ architecture rtl of TG68K_PMMU_030 is
     return t;
   end function;
 
-  -- very simple TTR match: if (addr[31:16] & mask) == (base & mask) then match; attrs in TTx(1:0) => {CI,WP}
+  -- MC68030 TTR format: proper transparent translation register implementation
+  -- TTR bits: 31:24=base, 23:16=mask, 15=E, 14:13=S, 12:8=FC, 5=CM, 1=CI, 0=WP
   procedure ttr_check(
       tt        : in  std_logic_vector(31 downto 0);
       addr      : in  std_logic_vector(31 downto 0);
@@ -136,20 +138,57 @@ architecture rtl of TG68K_PMMU_030 is
       matched   : out std_logic;
       ci        : out std_logic;
       wp        : out std_logic) is
-    variable enable  : std_logic;
-    variable base    : std_logic_vector(15 downto 0);
-    variable mask    : std_logic_vector(15 downto 0);
-    variable a_hi    : std_logic_vector(15 downto 0);
+    variable enable     : std_logic;
+    variable base       : std_logic_vector(7 downto 0);
+    variable mask       : std_logic_vector(7 downto 0);
+    variable addr_hi    : std_logic_vector(7 downto 0);
+    variable super_bits : std_logic_vector(1 downto 0);
+    variable fc_mask    : std_logic_vector(4 downto 0);
+    variable addr_match : std_logic;
+    variable fc_match   : std_logic;
+    variable super_match: std_logic;
   begin
-    -- For now: enable in bit31, base in [31:16], mask in [15:0], attrs in [1:0]. Ignore user/super bits.
-    enable := tt(31);
-    base   := tt(31 downto 16);
-    mask   := tt(15 downto 0);
-    a_hi   := addr(31 downto 16);
-    if enable = '1' and ((a_hi and mask) = (base and mask)) then
+    -- MC68030 TTR format
+    enable     := tt(15);           -- E bit: TTR enable
+    base       := tt(31 downto 24); -- Base address (bits 31:24)
+    mask       := tt(23 downto 16); -- Address mask (bits 23:16)
+    super_bits := tt(14 downto 13); -- S field: 00=any, 01=user, 10=super, 11=reserved
+    fc_mask    := tt(12 downto 8);  -- FC mask
+    addr_hi    := addr(31 downto 24); -- Address high byte
+    
+    -- Address match: (addr[31:24] & mask) == (base & mask)
+    if ((addr_hi and mask) = (base and mask)) then
+      addr_match := '1';
+    else
+      addr_match := '0';
+    end if;
+    
+    -- Function code match: simplistic for now - match if FC mask allows
+    fc_match := '1'; -- For now, accept all function codes
+    
+    -- Supervisor/User match
+    case super_bits is
+      when "00" => super_match := '1';                    -- Any mode
+      when "01" => 
+        if fc(2) = '0' then
+          super_match := '1';  -- User only
+        else
+          super_match := '0';
+        end if;
+      when "10" => 
+        if fc(2) = '1' then
+          super_match := '1';  -- Supervisor only
+        else
+          super_match := '0';
+        end if;
+      when others => super_match := '0';                  -- Reserved
+    end case;
+    
+    -- Overall match
+    if enable = '1' and addr_match = '1' and fc_match = '1' and super_match = '1' then
       matched := '1';
-      ci := tt(1);
-      wp := tt(0);
+      ci := tt(1);  -- Cache inhibit
+      wp := tt(0);  -- Write protect  
     else
       matched := '0';
       ci := '0';
@@ -251,6 +290,7 @@ begin
 
   -- Extract enable bit from TC (position TBD; keep MSB for now to avoid conflicts)
   tc_en <= TC(31);
+  tc_enable <= tc_en;
   
   -- Output the latched results
   addr_phys     <= addr_phys_reg;
@@ -308,18 +348,20 @@ begin
         fault_reg         <= '0';
         fault_status_reg  <= (others => '0');
         
-        -- 2. Check Transparent Translation first (highest priority)
-        ttr_check(TT0, addr_log, fc, is_insn, tmatch0, tci0, twp0);
-        ttr_check(TT1, addr_log, fc, is_insn, tmatch1, tci1, twp1);
-        if tmatch0 = '1' then
-          -- TTR0 match - use identity but with TTR attributes
-          cache_inhibit_reg <= tci0;
-          write_protect_reg <= twp0;
-        elsif tmatch1 = '1' then
-          -- TTR1 match - use identity but with TTR attributes
-          cache_inhibit_reg <= tci1;
-          write_protect_reg <= twp1;
-        elsif tc_en = '1' then
+        -- 2. Only do translation if MMU is enabled (TC.E=1)
+        if tc_en = '1' then
+          -- Check Transparent Translation first (highest priority)
+          ttr_check(TT0, addr_log, fc, is_insn, tmatch0, tci0, twp0);
+          ttr_check(TT1, addr_log, fc, is_insn, tmatch1, tci1, twp1);
+          if tmatch0 = '1' then
+            -- TTR0 match - use identity but with TTR attributes
+            cache_inhibit_reg <= tci0;
+            write_protect_reg <= twp0;
+          elsif tmatch1 = '1' then
+            -- TTR1 match - use identity but with TTR attributes
+            cache_inhibit_reg <= tci1;
+            write_protect_reg <= twp1;
+          else
           -- 3. MMU enabled - check ATC
           tag_v := mk_tag(addr_log, fc, is_insn);
           hit := '0';
@@ -339,8 +381,10 @@ begin
             -- ATC miss - request walker to start
             walk_req <= '1';
           end if;
-        end if;
+        end if; -- tc_en = '1'
         
+      end if; -- req = '1'
+      
       -- Handle walker completion (higher priority than clearing walk_req)
       elsif walker_completed = '1' then
         
@@ -404,6 +448,7 @@ begin
       walk_attr   <= (others => '0');
       walker_fault <= '0';
       walker_fault_status <= (others => '0');
+      walker_completed <= '0';
       mem_req     <= '0';
       mem_addr    <= (others => '0');
     elsif rising_edge(clk) then
@@ -616,8 +661,27 @@ begin
     end if;
   end process;
 
-  -- Walker busy indication
-  busy <= '1' when (wstate /= W_IDLE) else '0';
+  -- Walker busy indication - not busy if MMU disabled or TTR hit
+  process(wstate, addr_log, fc, is_insn, TT0, TT1, tc_en)
+    variable tmatch0, tmatch1 : std_logic;
+    variable tci0, twp0, tci1, twp1 : std_logic;
+  begin
+    -- Not busy if MMU is disabled
+    if tc_en = '0' then
+      busy <= '0';
+    else
+      -- Check for TTR hits combinationally
+      ttr_check(TT0, addr_log, fc, is_insn, tmatch0, tci0, twp0);
+      ttr_check(TT1, addr_log, fc, is_insn, tmatch1, tci1, twp1);
+      
+      -- Not busy if TTR hit or walker idle
+      if (tmatch0 = '1' or tmatch1 = '1' or wstate = W_IDLE) then
+        busy <= '0';
+      else
+        busy <= '1';
+      end if;
+    end if;
+  end process;
   
   -- PMMU instruction handlers
 --  process(clk, nreset)

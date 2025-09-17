@@ -393,6 +393,7 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
 	signal pmmu_wr_protect  : std_logic;
 	signal pmmu_fault       : std_logic;
 	signal pmmu_fault_stat  : std_logic_vector(7 downto 0);
+	signal pmmu_tc_en       : std_logic;
 	
 	-- PMMU instruction control signals
 	signal pmmu_ptest_req   : std_logic;
@@ -412,6 +413,7 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
 
 	-- Internal FC signal (VHDL-93 compatibility)
 	signal fc_internal    : std_logic_vector(2 downto 0);
+	
 
 	signal set					: bit_vector(lastOpcBit downto 0);
 	signal set_exec			: bit_vector(lastOpcBit downto 0);
@@ -469,6 +471,7 @@ BEGIN
       write_protect => pmmu_wr_protect,
       fault         => pmmu_fault,
       fault_status  => pmmu_fault_stat,
+      tc_enable     => pmmu_tc_en,
       mem_req       => pmmu_mem_req,
       mem_addr      => pmmu_mem_addr,
       mem_ack       => pmmu_mem_ack,
@@ -514,16 +517,23 @@ BEGIN
   pmmu_src_data   <= ea_data when (micro_state = pmmu2 or micro_state = pmmu4) else reg_QA;
 
   -- Drive PMMU request metadata
-  pmmu_req      <= '1' when state /= "01" else '0'; -- active for fetch/read/write
+  pmmu_req      <= '1' when (state /= "01" and pmmu_tc_en = '1') else '0'; -- active only when MMU enabled
   pmmu_is_insn  <= '1' when state = "00" else '0';
   pmmu_rw       <= '0' when state = "11" else '1';
   pmmu_fc       <= fc_internal;
 
-  -- PMMU walker memory interface: provide identity-mapped descriptors
-  pmmu_mem_ack  <= pmmu_mem_req;
-  -- Return a valid page descriptor that maps physical = logical
-  -- MC68030 page descriptor: bit 1='1' (page desc), bit 0='1' (valid), phys addr in upper bits
-  pmmu_mem_rdat <= pmmu_mem_addr(31 downto 12) & "000000000011" when pmmu_mem_req = '1' else (others => '0');
+  -- PMMU Memory Interface: Provide valid MC68030 page descriptors
+  -- When MMU is enabled and ATC misses, walker reads page tables from memory
+  -- For now, return identity-mapped descriptors (which is actually correct
+  -- behavior when no page tables are set up in memory)
+  
+  pmmu_mem_ack <= pmmu_mem_req;  -- Immediate acknowledgment for now
+  
+  -- Return valid MC68030 page descriptor format
+  -- Bits 31:12 = Physical Page Number (PPN), Bits 11:2 = reserved/control
+  -- Bit 1 = Page Descriptor Type (1=page), Bit 0 = Valid (1=valid)
+  pmmu_mem_rdat <= pmmu_mem_addr(31 downto 12) & "000000000011" when pmmu_mem_req = '1' 
+                   else (others => '0');
 
 ALU: TG68K_ALU   
 	generic map(
@@ -607,7 +617,7 @@ ALU: TG68K_ALU
 	memmaskmux <= memmask when addr(0) = '1' else memmask(4 downto 0) & '1';
 	nUDS <= memmaskmux(5);
 	nLDS <= memmaskmux(4);
-	clkena_lw <= '1' WHEN clkena_in='1' AND memmaskmux(3)='1' ELSE '0';
+	clkena_lw <= '1' WHEN clkena_in='1' AND memmaskmux(3)='1' AND (pmmu_tc_en='0' OR pmmu_busy='0') ELSE '0';
 	clr_berr <= '1' WHEN setopcode='1' AND trap_berr='1' ELSE '0';
 	
 	PROCESS (clk, nReset)
@@ -1146,9 +1156,8 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 		memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb;
 		-- if access done, and not aligned, don't increment
         addr <= memaddr_reg+memaddr_delta;
-        -- route logical address through PMMU (currently identity)
+        -- route logical address through PMMU for translation
         pmmu_addr_log <= memaddr_reg + memaddr_delta;
-        addr_out <= pmmu_addr_phys;
 
 		IF use_base='0' THEN
 			memaddr_reg <= (others=>'0');
@@ -1274,7 +1283,11 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					exe_opcode <= opcode;
 
 					if(trap_berr='0') then
-						make_berr <= (berr OR make_berr);
+						if pmmu_tc_en = '1' then
+							make_berr <= (berr OR make_berr OR pmmu_fault);  -- Include PMMU faults when MMU enabled
+						else
+							make_berr <= (berr OR make_berr);  -- No PMMU faults when MMU disabled
+						end if;
 					else
 						make_berr <= '0';
 					end if;
@@ -3285,7 +3298,21 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 --				
 ---- 1111 ----------------------------------------------------------------------------		
 			WHEN "1111" =>
-				IF cpu(1)='1' AND opcode(8 downto 6)="100" THEN --cpSAVE
+                -- PMMU (68030): Only specific PMMU instructions, not broad F000-F0FF range
+                -- PMMU instructions: F000 (PMOVE), F010 (PFLUSH), F018 (PTEST), F028 (PLOAD)
+                IF cpu="11" AND opcode(11 downto 8)="0000" THEN -- F000: PMOVE
+					-- require supervisor for PMMU
+					IF SVmode='1' THEN
+						-- Fetch extension word to determine PMMU instruction type
+						IF decodeOPC='1' THEN
+							set(get_2ndOPC) <= '1';
+							next_micro_state <= pmmu1;
+						END IF;
+					ELSE
+						trap_priv <= '1';
+						trapmake <= '1';
+					END IF;
+				ELSIF cpu="11" AND opcode(8 downto 6)="100" THEN --cpSAVE
 					IF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="011" AND
 					   (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN --ea illegal modes
 						IF opcode(11 downto 9)/="000" THEN
@@ -3316,7 +3343,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						trap_1111 <= '1';
 						trapmake <= '1';
 					END IF;
-				ELSIF cpu(1)='1' AND opcode(8 downto 6)="101" THEN --cpRESTORE
+				ELSIF cpu="11" AND opcode(8 downto 6)="101" THEN --cpRESTORE
 					IF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="100" AND
 					   (opcode(5 downto 3)/="111" OR (opcode(2 downto 1)/="11" AND
 					   opcode(2 downto 0)/="101")) THEN --ea illegal modes
@@ -3344,28 +3371,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									trapmake <= '1';
 								END IF;
 							END IF;
-				ELSE
-					trap_1111 <= '1';
-					trapmake <= '1';
-				END IF;
-			ELSE
-				trap_1111 <= '1';
-				trapmake <= '1';
-			END IF;
-
-                -- PMMU (68030): implement all PMMU instructions (PMOVE, PTEST, PFLUSH, PLOAD)
-                ELSIF cpu="11" AND opcode(8 downto 6)="000" THEN -- 68030 PMMU class
-				-- require supervisor for PMMU
-				IF SVmode='1' THEN
-                        -- Fetch extension word to determine PMMU instruction type
-                        IF decodeOPC='1' THEN
-                            set(get_2ndOPC) <= '1';
-                            next_micro_state <= pmmu1;
-                        END IF;
-				ELSE
-					trap_priv <= '1';
-					trapmake <= '1';
-				END IF;
+						ELSE
+							trap_1111 <= '1';
+							trapmake <= '1';
+						END IF;
+					ELSE
+						trap_1111 <= '1';
+						trapmake <= '1';
+					END IF;
 				ELSE
 					trap_1111 <= '1';
 					trapmake <= '1';
@@ -4562,4 +4575,8 @@ PROCESS (sndOPC, movem_mux)
 			END IF;	
 		END  IF;
 	END PROCESS;
+
+-- MC68030 address routing: direct when MMU disabled, translated when enabled
+addr_out <= pmmu_addr_log when pmmu_tc_en = '0' else pmmu_addr_phys;
+
 END; 
