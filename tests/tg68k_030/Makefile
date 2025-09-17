@@ -12,28 +12,32 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-integration test-diagrom setup help
+.PHONY: all clean test-pmmu test-cache test-cacr test-integration test-diagrom test-advanced test-fault test-stress setup help
 
 # Default target
-all: test-all
+all: test-comprehensive
 
 # Help target
 help:
-	@echo "TG68K 68030 Test Suite"
-	@echo "======================"
+	@echo "TG68K 68030 Enhanced Test Suite"
+	@echo "==============================="
 	@echo ""
 	@echo "Available targets:"
-	@echo "  all           - Run all tests"
-	@echo "  setup         - Setup ModelSim environment"
-	@echo "  test-pmmu     - Test PMMU component only"
-	@echo "  test-cache    - Test Cache component only"  
-	@echo "  test-cacr     - Test CACR register only"
+	@echo "  all              - Run comprehensive test suite"
+	@echo "  setup            - Setup ModelSim environment"
+	@echo "  test-pmmu        - Test basic PMMU component"
+	@echo "  test-cache       - Test Cache component only"  
+	@echo "  test-cacr        - Test CACR register only"
 	@echo "  test-integration - Test full system integration"
-	@echo "  test-diagrom  - Test DiagROM boot sequence (debug CPU lockup)"
-	@echo "  test-all      - Run comprehensive test suite"
-	@echo "  clean         - Clean generated files"
-	@echo "  syntax-check  - Check VHDL syntax only"
-	@echo "  help          - Show this help"
+	@echo "  test-diagrom     - Test DiagROM boot sequence"
+	@echo "  test-advanced    - Run advanced PMMU functionality tests"
+	@echo "  test-fault       - Run comprehensive fault handling tests"
+	@echo "  test-stress      - Run page walker stress tests"
+	@echo "  test-all         - Run original test suite"
+	@echo "  test-comprehensive - Run ALL enhanced tests"
+	@echo "  clean            - Clean generated files"
+	@echo "  syntax-check     - Check VHDL syntax only"
+	@echo "  help             - Show this help"
 	@echo ""
 	@echo "Requirements:"
 	@echo "  - ModelSim ASE installed at $(MODELSIM_PATH)"
@@ -57,18 +61,32 @@ syntax-check: setup
 
 # Compile sources
 compile: setup
-	@echo "Compiling VHDL sources..."
+	@echo "Compiling basic VHDL sources..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Cache_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cache_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cacr_test.vhd || true
-	@echo "Compilation completed (errors ignored for initial testing)"
+	@echo "Basic compilation completed (errors ignored for initial testing)"
+
+# Compile enhanced test sources
+compile-advanced: setup
+	@echo "Compiling enhanced comprehensive test sources..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Cache_030.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_030.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cache_030.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cacr_test.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_advanced.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_fault_comprehensive.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_page_walker_stress.vhd || true
+	@echo "Enhanced compilation completed (errors ignored for initial testing)"
 
 # Individual tests
 test-pmmu: compile
-	@echo "Running PMMU tests..."
+	@echo "Running basic PMMU tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmmu_030
 
 test-cache: compile
@@ -87,16 +105,61 @@ test-diagrom: compile
 	@echo "Running DiagROM boot simulation..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "do run_diagrom_boot.tcl; run 50us; quit"
 
-# Comprehensive test suite
+# Enhanced comprehensive tests
+test-advanced: compile-advanced
+	@echo "Running advanced PMMU functionality tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 200us; quit" tb_pmmu_advanced
+
+test-fault: compile-advanced
+	@echo "Running comprehensive fault handling tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 150us; quit" tb_mmu_fault_comprehensive
+
+test-stress: compile-advanced
+	@echo "Running page walker stress tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 300us; quit" tb_page_walker_stress
+
+# Original comprehensive test suite
 test-all: compile
 	@echo "========================================"
-	@echo "Running TG68K 68030 Comprehensive Tests"
+	@echo "Running TG68K 68030 Basic Test Suite"
 	@echo "========================================"
 	@cd $(TEST_DIR) && $(VSIM) -batch -do run_tests.do
-	@echo "All tests completed!"
+	@echo "Basic tests completed!"
 	@echo ""
 	@echo "Check the following files for results:"
 	@ls -la $(TEST_DIR)/*.wlf 2>/dev/null || echo "No waveform files generated"
+
+# Enhanced comprehensive test suite
+test-comprehensive: compile-advanced
+	@echo "=========================================================="
+	@echo "Running TG68K 68030 Enhanced Comprehensive Test Suite"
+	@echo "=========================================================="
+	@echo "Running advanced PMMU functionality tests..."
+	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_pmmu_advanced; run 200us; quit -sim"
+	@echo ""
+	@echo "Running comprehensive fault handling tests..."
+	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_mmu_fault_comprehensive; run 150us; quit -sim"
+	@echo ""
+	@echo "Running page walker stress tests..."
+	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_page_walker_stress; run 300us; quit -sim"
+	@echo ""
+	@echo "Running basic test suite..."
+	@cd $(TEST_DIR) && $(VSIM) -batch -do run_tests.do
+	@echo ""
+	@echo "=========================================================="
+	@echo "ALL ENHANCED COMPREHENSIVE TESTS COMPLETED!"
+	@echo "=========================================================="
+	@echo "Check the following files for results:"
+	@ls -la $(TEST_DIR)/*.wlf 2>/dev/null || echo "No waveform files generated"
+
+# Real validation test for actual implementation
+test-real: compile
+	@echo "========================================"
+	@echo "Running REAL PMMU Implementation Tests"
+	@echo "========================================"
+	@cd $(TEST_DIR) && $(VCOM) -93 tb_pmmu_real_validation.vhd
+	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_pmmu_real_validation; run 100us; quit -sim"
+	@echo "Real validation tests completed!"
 
 # GUI mode for interactive debugging
 test-gui: compile

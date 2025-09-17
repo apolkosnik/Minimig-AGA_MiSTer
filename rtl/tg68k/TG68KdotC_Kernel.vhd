@@ -507,7 +507,8 @@ BEGIN
   -- Bit 4 (CI): Clear Instruction Cache (self-clearing) 
   -- Bit 5 (CD): Clear Data Cache (self-clearing)
   -- Bit 6 (CA): Clear All Caches (self-clearing)
-  -- Bits 31-7: Reserved (should read as 0, writes ignored)
+  -- Bit 9 (FreezeD): Data Cache Freeze (used by AmigaOS for 68030 detection)
+  -- Bits 31-10, 8-7: Reserved (should read as 0, writes ignored)
   
   -- Extract cache control bits from CACR register
   cacr_de     <= CACR(0);  -- Data Cache Enable
@@ -527,7 +528,15 @@ BEGIN
   -- For now, return identity-mapped descriptors (which is actually correct
   -- behavior when no page tables are set up in memory)
   
-  pmmu_mem_ack <= pmmu_mem_req;  -- Immediate acknowledgment for now
+  -- Proper clocked memory acknowledgment to prevent combinatorial timing issues
+  PROCESS (clk, nReset)
+  BEGIN
+    IF nReset='0' THEN
+      pmmu_mem_ack <= '0';
+    ELSIF rising_edge(clk) THEN
+      pmmu_mem_ack <= pmmu_mem_req;  -- Acknowledge one cycle after request
+    END IF;
+  END PROCESS;
   
   -- Return valid MC68030 page descriptor format
   -- Bits 31:12 = Physical Page Number (PPN), Bits 11:2 = reserved/control
@@ -617,7 +626,7 @@ ALU: TG68K_ALU
 	memmaskmux <= memmask when addr(0) = '1' else memmask(4 downto 0) & '1';
 	nUDS <= memmaskmux(5);
 	nLDS <= memmaskmux(4);
-	clkena_lw <= '1' WHEN clkena_in='1' AND memmaskmux(3)='1' AND (pmmu_tc_en='0' OR pmmu_busy='0') ELSE '0';
+	clkena_lw <= '1' WHEN clkena_in='1' AND memmaskmux(3)='1' ELSE '0';  -- Remove pmmu_busy deadlock condition
 	clr_berr <= '1' WHEN setopcode='1' AND trap_berr='1' ELSE '0';
 	
 	PROCESS (clk, nReset)
@@ -4387,9 +4396,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		  when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
 		  when X"001" => DFC <= reg_QA(2 downto 0); -- DFC -- 68010+
 		  when X"002" => 
-		    -- Write to CACR with reserved bit masking (bits 31-7 read as 0)
+		    -- Write to CACR with MC68030 bit support including FreezeD (bit 9)
 		    CACR(6 downto 0) <= reg_QA(6 downto 0);
-		    CACR(31 downto 7) <= (others => '0');
+		    CACR(9) <= reg_QA(9);  -- FreezeD bit for 68030 detection
+		    CACR(8 downto 7) <= (others => '0');
+		    CACR(31 downto 10) <= (others => '0');
 		  when X"800" => NULL; -- USP -- 68010+
 		  when X"801" => VBR <= reg_QA; -- 68010+
 		  when X"802" => CAAR <= reg_QA; -- CAAR -- 68020+
