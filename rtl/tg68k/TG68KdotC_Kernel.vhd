@@ -4052,7 +4052,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					set(briefext) <= '1';
 					set_writePCbig <='1';
 					IF (brief(11 downto 0)=X"000" OR brief(11 downto 0)=X"001" OR brief(11 downto 0)=X"800" OR brief(11 downto 0)=X"801") OR 
-					   (cpu(1)='1' AND (brief(11 downto 0)=X"002" OR brief(11 downto 0)=X"802" OR brief(11 downto 0)=X"803" OR brief(11 downto 0)=X"804")) THEN
+					   (cpu(1)='1' AND (brief(11 downto 0)=X"002" OR brief(11 downto 0)=X"802" OR brief(11 downto 0)=X"803" OR brief(11 downto 0)=X"804")) OR
+					   (cpu="11" AND (brief(11 downto 0)=X"004" OR brief(11 downto 0)=X"005" OR brief(11 downto 0)=X"805")) THEN
 						IF opcode(0)='0' THEN
 							set(Regwrena) <= '1';
 						END IF;
@@ -4394,6 +4395,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		  when X"802" => CAAR <= reg_QA; -- CAAR -- 68020+
 		  when X"803" => NULL; -- MSP -- 68020+
 		  when X"804" => NULL; -- isP -- 68020+
+		  when X"004" => NULL; -- TT0 -- 68030+ (PMMU handles via separate interface)
+		  when X"005" => NULL; -- TT1 -- 68030+ (PMMU handles via separate interface)  
+		  when X"805" => NULL; -- MMUSR -- 68030+ (PMMU handles via separate interface)
 		  when others => NULL;
 		end case;
   elsif clkena_lw = '1' then
@@ -4410,6 +4414,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		when X"001" => movec_data <= "00000000000000000000000000000" & DFC;
 	  when X"002" => movec_data <= CACR; -- CACR full 32-bit read
 	  when X"802" => movec_data <= CAAR;
+	  when X"004" => movec_data <= pmmu_reg_rdat; -- TT0 -- 68030+
+	  when X"005" => movec_data <= pmmu_reg_rdat; -- TT1 -- 68030+
+	  when X"805" => movec_data <= pmmu_reg_rdat; -- MMUSR -- 68030+
 
 	  when X"801" => 
 		movec_data <= VBR;
