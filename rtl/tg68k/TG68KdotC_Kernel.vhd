@@ -440,6 +440,24 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
     return s;
   end function;
 
+  -- Function to map MOVEC brief(11:0) encodings to PMMU register select
+  -- MOVEC encodings used here:
+  --  X"004" => TT0, X"005" => TT1, X"805" => MMUSR
+  function pmmu_sel_from_movec(b : std_logic_vector(11 downto 0)) return std_logic_vector is
+    variable s : std_logic_vector(3 downto 0);
+  begin
+    if b = x"004" then
+      s := x"3"; -- TT0
+    elsif b = x"005" then
+      s := x"4"; -- TT1
+    elsif b = x"805" then
+      s := x"5"; -- MMUSR
+    else
+      s := x"F"; -- not a PMMU reg handled via MOVEC here
+    end if;
+    return s;
+  end function;
+
 BEGIN  
 
   -- PMMU (68030) instance (identity translation for now)
@@ -4446,7 +4464,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
   -- Drive PMMU register interface during PMOVE execution
   process(clk)
-    variable sel : std_logic_vector(3 downto 0);
+    variable sel   : std_logic_vector(3 downto 0);
+    variable msel  : std_logic_vector(3 downto 0);
+    variable mselr : std_logic_vector(3 downto 0);
   begin
     if rising_edge(clk) then
       if Reset = '1' then
@@ -4464,6 +4484,28 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         pmmu_reg_part_d <= '0';
 
         sel := pmmu_sel_from_brief(brief(11 downto 0));
+
+        -- Handle MOVEC to/from TT0/TT1/MMUSR via PMMU register port (68030 only)
+        if CPU = "11" then
+          -- MOVEC Dn -> <MMU reg>
+          if exec(movec_wr) = '1' then
+            -- Only TT0/TT1/MMUSR are routed to PMMU here
+            -- Use the exact MOVEC brief mapping
+            msel := pmmu_sel_from_movec(brief(11 downto 0));
+            if msel /= x"F" then
+              pmmu_reg_sel_d  <= msel;
+              pmmu_reg_wdat_d <= reg_QA;
+              pmmu_reg_we_d   <= '1';
+            end if;
+          -- MOVEC <MMU reg> -> Dn
+          elsif exec(movec_rd) = '1' then
+            mselr := pmmu_sel_from_movec(brief(11 downto 0));
+            if mselr /= x"F" then
+              pmmu_reg_sel_d <= mselr;
+              pmmu_reg_re_d  <= '1';
+            end if;
+          end if;
+        end if;
 
         if exec(pmmu_wr) = '1' then
           -- PMOVE Dn -> <MMU reg>

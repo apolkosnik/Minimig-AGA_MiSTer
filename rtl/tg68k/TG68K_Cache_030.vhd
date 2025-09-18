@@ -87,10 +87,6 @@ architecture rtl of TG68K_Cache_030 is
   -- Internal signals to track fill request state (VHDL-93 compatibility)
   signal i_fill_req_int : std_logic := '0';
   signal d_fill_req_int : std_logic := '0';
-  
-  -- Edge detection for cache control instructions (prevents continuous operation)
-  signal cinv_req_prev  : std_logic := '0';
-  signal cpush_req_prev : std_logic := '0';
 
 begin
 
@@ -123,8 +119,8 @@ begin
         i_fill_req_int <= '0';  -- Clear fill request when data arrives
       end if;
       
-      -- Cache invalidation (edge-triggered to prevent continuous clearing)
-      if cinv_req = '1' and cinv_req_prev = '0' and (cache_op_cache = "10" or cache_op_cache = "00" or cache_op_cache = "11") then
+      -- Cache invalidation
+      if cinv_req = '1' and (cache_op_cache = "10" or cache_op_cache = "00" or cache_op_cache = "11") then
         case cache_op_scope is
           when "10"|"11" => -- Invalidate all
             for i in 0 to NUM_LINES-1 loop
@@ -140,10 +136,6 @@ begin
             null;
         end case;
       end if;
-      
-      -- Update edge detection signals
-      cinv_req_prev <= cinv_req;
-      cpush_req_prev <= cpush_req;
       
       -- Cache miss detection and fill request
       if i_req = '1' and cacr_ie = '1' then
@@ -191,9 +183,6 @@ begin
       end loop;
       d_fill_req_int <= '0';
       d_fill_addr <= (others => '0');
-      -- Reset edge detection signals
-      cinv_req_prev <= '0';
-      cpush_req_prev <= '0';
     elsif rising_edge(clk) then
       -- Cache fill completion
       if d_fill_valid = '1' then
@@ -203,8 +192,8 @@ begin
         d_fill_req_int <= '0';  -- Clear fill request when data arrives
       end if;
       
-      -- Cache invalidation (edge-triggered to prevent continuous clearing)
-      if cinv_req = '1' and cinv_req_prev = '0' and (cache_op_cache = "01" or cache_op_cache = "00" or cache_op_cache = "11") then
+      -- Cache invalidation
+      if cinv_req = '1' and (cache_op_cache = "01" or cache_op_cache = "00" or cache_op_cache = "11") then
         case cache_op_scope is
           when "10"|"11" => -- Invalidate all
             for i in 0 to NUM_LINES-1 loop
