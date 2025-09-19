@@ -76,6 +76,11 @@ architecture rtl of TG68K_PMMU_030 is
   -- Walker fault signals (driven only by walker)
   signal walker_fault       : std_logic := '0';
   signal walker_fault_status : std_logic_vector(7 downto 0) := (others => '0');
+  signal walker_fault_ack   : std_logic := '0';  -- Acknowledgment from main process
+  signal walker_fault_ack_pending : std_logic := '0';  -- Track ack state
+  
+  -- Walker completion handshake
+  signal walker_completed_ack : std_logic := '0';  -- Acknowledgment from main process
   
   -- Save the original request for later re-evaluation
   signal saved_addr_log     : std_logic_vector(31 downto 0) := (others => '0');
@@ -88,7 +93,7 @@ architecture rtl of TG68K_PMMU_030 is
   constant ATC_ENTRIES : integer := 8;
   type atc_tag_t  is array(0 to ATC_ENTRIES-1) of std_logic_vector(24 downto 0); -- log_pn[19:0] + FC[2:0] + is_insn + 0
   type atc_ppn_t  is array(0 to ATC_ENTRIES-1) of std_logic_vector(19 downto 0); -- phys page number (4KB pages)
-  type atc_attr_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(1 downto 0);  -- {CI, WP}
+  type atc_attr_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(2 downto 0);  -- {SUPER, CI, WP}
   type atc_val_t  is array(0 to ATC_ENTRIES-1) of std_logic;
 
   signal atc_tag   : atc_tag_t;
@@ -100,17 +105,16 @@ architecture rtl of TG68K_PMMU_030 is
   signal walker_completed : std_logic := '0';
 
   -- MC68030 page table walker FSM
-  type walk_state_t is (W_IDLE, W_ROOT, W_PTR1, W_PTR2, W_PTR3, W_PAGE, W_FILL, W_FAULT);
+  type walk_state_t is (W_IDLE, W_ROOT, W_PTR1, W_PTR2, W_PTR3, W_PAGE, W_FILL, W_COMPLETE, W_FAULT);
   signal wstate    : walk_state_t := W_IDLE;
   
   -- No timeout crap - proper state machine design
-  signal ttr_hit_q : std_logic := '0';
-  signal hit_q     : std_logic := '0';
   signal tag_q     : std_logic_vector(24 downto 0) := (others => '0');
   
   -- PMMU instruction communication flags (to avoid multiple drivers)
   signal ptest_update_mmusr : std_logic := '0';
   signal pflush_clear_atc   : std_logic := '0';
+  signal atc_flush_req      : std_logic := '0';
   
   -- Edge detection for PMMU instructions
   signal ptest_req_prev  : std_logic := '0';
@@ -137,6 +141,67 @@ architecture rtl of TG68K_PMMU_030 is
     t(1)           := insn;
     t(0)           := '0';
     return t;
+  end function;
+
+  -- Local helper for Quartus: convert std_logic_vector to hex string.
+  function slv_to_hstring(value : std_logic_vector) return string is
+    constant hex_chars   : string := "0123456789ABCDEF";
+    constant nibble_count: integer := (value'length + 3) / 4;
+    variable result      : string(1 to nibble_count);
+    variable nibble_val  : integer range 0 to 15;
+    variable bit_val     : std_logic;
+    variable bit_index   : integer;
+    variable idx         : integer;
+    variable has_unknown : boolean;
+  begin
+    for i in result'range loop
+      result(i) := '0';
+    end loop;
+
+    for nib in 0 to nibble_count - 1 loop
+      nibble_val  := 0;
+      has_unknown := false;
+      for bit in 0 to 3 loop
+        nibble_val := nibble_val * 2;
+        bit_index  := nib * 4 + bit;
+        if bit_index < value'length then
+          idx     := value'high - bit_index;
+          bit_val := value(idx);
+          case bit_val is
+            when '0' | 'L' => null;
+            when '1' | 'H' => nibble_val := nibble_val + 1;
+            when others    => has_unknown := true;
+          end case;
+        end if;
+      end loop;
+      if has_unknown then
+        result(nib + 1) := 'X';
+      else
+        result(nib + 1) := hex_chars(nibble_val + 1);
+      end if;
+    end loop;
+
+    return result;
+  end function;
+
+  -- Convert std_logic_vector to a human-readable bit string (MSB first).
+  function slv_to_string(value : std_logic_vector) return string is
+    variable result : string(1 to value'length);
+    variable idx    : integer;
+  begin
+    for i in 0 to value'length - 1 loop
+      idx := value'high - i;
+      case value(idx) is
+        when '0' | 'L' => result(i + 1) := '0';
+        when '1' | 'H' => result(i + 1) := '1';
+        when 'Z'       => result(i + 1) := 'Z';
+        when 'W'       => result(i + 1) := 'W';
+        when 'U'       => result(i + 1) := 'U';
+        when 'X'       => result(i + 1) := 'X';
+        when others    => result(i + 1) := '?';
+      end case;
+    end loop;
+    return result;
   end function;
 
   -- MC68030 TTR format: proper transparent translation register implementation
@@ -282,7 +347,9 @@ begin
       TT1   <= (others => '0');
       MMUSR <= (others => '0');
       CAL   <= (others => '0');
+      atc_flush_req <= '0';
     elsif rising_edge(clk) then
+      atc_flush_req <= '0';
       if reg_we = '1' then
         case reg_sel is
           when x"0" => TC    <= reg_wdat;
@@ -290,16 +357,10 @@ begin
           when x"2" => if reg_part = '1' then SRP_H <= reg_wdat; else SRP_L <= reg_wdat; end if;
           when x"3" => 
             TT0   <= reg_wdat;
-            -- Changing transparent translation: flush ATC to avoid stale entries
-            for i in 0 to ATC_ENTRIES-1 loop
-              atc_valid(i) <= '0';
-            end loop;
+            atc_flush_req <= '1';
           when x"4" => 
             TT1   <= reg_wdat;
-            -- Changing transparent translation: flush ATC to avoid stale entries
-            for i in 0 to ATC_ENTRIES-1 loop
-              atc_valid(i) <= '0';
-            end loop;
+            atc_flush_req <= '1';
           when x"5" => MMUSR <= reg_wdat; -- MMUSR is usually write-1-to-clear bits; kept simple initially
           when x"6" => CAL   <= reg_wdat;
           when others => null;
@@ -355,8 +416,6 @@ begin
     variable hit_idx   : integer range 0 to ATC_ENTRIES-1;
     variable tmatch0, tmatch1 : std_logic;
     variable tci0, twp0, tci1, twp1 : std_logic;
-    variable ci_v, wp_v : std_logic;
-    variable phys    : std_logic_vector(31 downto 0);
   begin
     if nreset = '0' then
       -- Initialize to identity translation on reset
@@ -371,6 +430,9 @@ begin
       saved_rw <= '0';
       translation_pending <= '0';
       walk_req <= '0';
+      walker_fault_ack <= '0';
+      walker_completed_ack <= '0';
+      walker_fault_ack_pending <= '0';
     elsif rising_edge(clk) then
       -- Process translation requests first
       if req = '1' then
@@ -379,17 +441,12 @@ begin
         hit := '0';
         hit_idx := 0;
         tmatch0 := '0'; tmatch1 := '0';
-        tci0 := '0'; twp0 := '0'; tci1 := '0'; twp1 := '0';
-        ci_v := '0'; wp_v := '0';
-        phys := (others => '0');
+        tci0 := '0';
+        twp0 := '0';
+        tci1 := '0';
+        twp1 := '0';
         
         -- Don't clear walker faults here - they need to persist until consumed
-        
-        -- Save request info for walker
-        saved_addr_log <= addr_log;
-        saved_fc <= fc;
-        saved_is_insn <= is_insn;
-        saved_rw <= rw;
         
         -- Translation logic with proper precedence (no conflicting assignments)
         -- Only do identity translation when MMU is disabled
@@ -412,14 +469,17 @@ begin
             cache_inhibit_reg <= tci0;
             write_protect_reg <= twp0;
             fault_reg <= '0';
+            -- No walker needed for TTR
           elsif tmatch1 = '1' then
             -- TTR1 match - use identity translation with TTR attributes  
+            assert false report "TTR1 HIT: Setting addr_phys to " & integer'image(to_integer(unsigned(addr_log))) severity note;
             addr_phys_reg <= addr_log;  -- Identity mapping
             cache_inhibit_reg <= tci1;
             write_protect_reg <= twp1;
             fault_reg <= '0';
+            -- No walker needed for TTR
           else
-          -- 3. MMU enabled - check ATC
+            -- No TTR match - check ATC and potentially start walker
           tag_v := mk_tag(addr_log, fc, is_insn);
           hit := '0';
           for i in 0 to ATC_ENTRIES-1 loop
@@ -429,7 +489,7 @@ begin
             end if;
           end loop;
           if hit = '1' then
-            -- ATC hit - use cached translation but check write protection
+            -- ATC hit - use cached translation but check access violations
             -- Check for write protection violation on write access
             if rw = '0' and atc_attr(hit_idx)(0) = '1' then
               -- Write to write-protected page - generate fault
@@ -438,7 +498,16 @@ begin
               fault_status_reg(6) <= '1'; -- Write protect violation
               fault_status_reg(5) <= '0'; -- Not bus error
               fault_status_reg(4 downto 3) <= fc(1 downto 0);
-              fault_status_reg(2) <= rw; -- Read/Write bit
+              fault_status_reg(2) <= not rw; -- Read/Write bit (MC68030: 1=write, TG68K: 1=read)
+              fault_status_reg(1 downto 0) <= "11"; -- ATC level
+            elsif fc(2) = '0' and atc_attr(hit_idx)(2) = '0' then
+              -- User trying to access supervisor-only page - generate fault
+              fault_reg <= '1';
+              fault_status_reg(7) <= '0'; -- Not invalid descriptor
+              fault_status_reg(6) <= '0'; -- Not write protect violation
+              fault_status_reg(5) <= '0'; -- Not bus error
+              fault_status_reg(4 downto 3) <= fc(1 downto 0);
+              fault_status_reg(2) <= not rw; -- Read/Write bit (MC68030: 1=write, TG68K: 1=read)
               fault_status_reg(1 downto 0) <= "11"; -- ATC level
             else
               -- Valid access - use cached translation
@@ -449,59 +518,103 @@ begin
               fault_reg <= '0';
             end if;
           else
-            -- ATC miss - request walker to start
-            walk_req <= '1';
-            translation_pending <= '1';
+            -- ATC miss - request walker to start (only if no TTR hit and not already pending)
+            if tmatch0 = '0' and tmatch1 = '0' and translation_pending = '0' then
+              -- Save request info for walker ONLY when no translation is pending
+              saved_addr_log <= addr_log;
+              saved_fc <= fc;
+              saved_is_insn <= is_insn;
+              saved_rw <= rw;
+              walk_req <= '1';
+              translation_pending <= '1';
+            end if;
           end if;
           end if; -- TTR check
         end if; -- tc_en = '0' vs '1'
         
       end if; -- req = '1'
       
-      -- Handle walker completion (only when no new request is being processed)
-      if walker_completed = '1' and req = '0' then
+      -- Handle walker completion and walker faults immediately (don't wait for req='0')
+      if walker_fault = '1' and walker_fault_ack = '0' then
+        -- Walker faulted - process immediately regardless of req state
+        fault_reg <= '1';
+        fault_status_reg <= walker_fault_status;
+        translation_pending <= '0';
+        -- Acknowledge the fault and track pending state
+        walker_fault_ack <= '1';
+        walker_fault_ack_pending <= '1';
+      elsif walker_completed = '1' then
+        -- First check if the completed request would have been handled by TTR
+        ttr_check(TT0, saved_addr_log, saved_fc, saved_is_insn, tmatch0, tci0, twp0);
+        ttr_check(TT1, saved_addr_log, saved_fc, saved_is_insn, tmatch1, tci1, twp1);
         
-        -- For the pending translation, update outputs if ATC now has result
-        tag_v := mk_tag(saved_addr_log, saved_fc, saved_is_insn);
-        hit := '0';
-        for i in 0 to ATC_ENTRIES-1 loop
-          if atc_valid(i) = '1' and atc_tag(i) = tag_v then
-            hit := '1';
-            hit_idx := i;
-          end if;
-        end loop;
-        
-        if hit = '1' then
-          -- Walker filled ATC successfully - check write protection for the original request
-          if saved_rw = '0' and atc_attr(hit_idx)(0) = '1' then
-            -- Write to write-protected page - generate fault
-            fault_reg <= '1';
-            fault_status_reg(7) <= '0'; -- Not invalid descriptor
-            fault_status_reg(6) <= '1'; -- Write protect violation
-            fault_status_reg(5) <= '0'; -- Not bus error
-            fault_status_reg(4 downto 3) <= saved_fc(1 downto 0);
-            fault_status_reg(2) <= saved_rw; -- Read/Write bit
-            fault_status_reg(1 downto 0) <= "11"; -- ATC level
-          else
-            -- Valid access - update outputs
-            addr_phys_reg(31 downto 12) <= atc_ppn(hit_idx);
-            addr_phys_reg(11 downto 0)  <= saved_addr_log(11 downto 0);
-            cache_inhibit_reg <= atc_attr(hit_idx)(1);
-            write_protect_reg <= atc_attr(hit_idx)(0);
-            fault_reg <= '0';
-          end if;
-          translation_pending <= '0';
-        elsif walker_fault = '1' then
-          -- Walker faulted
-          fault_reg <= '1';
-          fault_status_reg <= walker_fault_status;
-          translation_pending <= '0';
-          -- Clear walker fault signals after consuming them
-          walker_fault <= '0';
-          walker_fault_status <= (others => '0');
+        if tmatch0 = '1' or tmatch1 = '1' then
+          -- This request hits TTR - don't override TTR results that are already set
+          null; -- TTR results already handled in main translation logic
+        else
+          -- No TTR hit - check ATC for walker results
+          tag_v := tag_q;  -- Use the same tag that was stored in ATC
+          hit := '0';
+          for i in 0 to ATC_ENTRIES-1 loop
+            if atc_valid(i) = '1' and atc_tag(i) = tag_v then
+              hit := '1';
+              hit_idx := i;
+            end if;
+          end loop;
+          if hit = '1' then
+            -- Debug: Report ATC hit details
+            report "ATC_HIT: addr=0x" & slv_to_hstring(saved_addr_log) & 
+                   " fc=" & slv_to_string(saved_fc) & 
+                   " rw=" & std_logic'image(saved_rw) &
+                   " hit_idx=" & integer'image(hit_idx) &
+                   " attr=" & slv_to_string(atc_attr(hit_idx)) &
+                   " ppn=0x" & slv_to_hstring(atc_ppn(hit_idx))
+              severity note;
+              
+            -- Walker filled ATC successfully - check access violations for the original request
+            if saved_rw = '0' and atc_attr(hit_idx)(0) = '1' then
+              -- Write to write-protected page - generate fault
+              report "WP_FAULT: Write to WP page detected" severity note;
+              fault_reg <= '1';
+              fault_status_reg(7) <= '0'; -- Not invalid descriptor
+              fault_status_reg(6) <= '1'; -- Write protect violation
+              fault_status_reg(5) <= '0'; -- Not bus error
+              fault_status_reg(4 downto 3) <= saved_fc(1 downto 0);
+              fault_status_reg(2) <= not saved_rw; -- Read/Write bit (MC68030: 1=write, TG68K: 1=read)
+              fault_status_reg(1 downto 0) <= "11"; -- ATC level
+            elsif saved_fc(2) = '0' and atc_attr(hit_idx)(2) = '0' then
+              -- User trying to access supervisor-only page - generate fault
+              report "SUPERVISOR_FAULT: User access to supervisor page detected" severity note;
+              fault_reg <= '1';
+              fault_status_reg(7) <= '0'; -- Not invalid descriptor
+              fault_status_reg(6) <= '0'; -- Not write protect violation
+              fault_status_reg(5) <= '0'; -- Not bus error
+              fault_status_reg(4 downto 3) <= saved_fc(1 downto 0);
+              fault_status_reg(2) <= not saved_rw; -- Read/Write bit (MC68030: 1=write, TG68K: 1=read)
+              fault_status_reg(1 downto 0) <= "11"; -- ATC level
+            else
+              -- Valid access - update outputs
+              report "VALID_ACCESS: Translation successful" severity note;
+              addr_phys_reg(31 downto 12) <= atc_ppn(hit_idx);
+              addr_phys_reg(11 downto 0)  <= saved_addr_log(11 downto 0);
+              cache_inhibit_reg <= atc_attr(hit_idx)(1);
+              write_protect_reg <= atc_attr(hit_idx)(0);
+              fault_reg <= '0';
+            end if;
+            translation_pending <= '0';
+          end if; -- hit = '1'
+        end if; -- else tmatch0
+        -- Acknowledge walker completion
+        walker_completed_ack <= '1';
+      else
+        -- Clear acknowledgment signals only when walker has cleared its signals
+        if walker_completed = '0' then
+          walker_completed_ack <= '0';
         end if;
-        -- Clear walker_completed flag after processing
-        walker_completed <= '0';
+        if walker_fault = '0' and walker_fault_ack_pending = '1' then
+          walker_fault_ack <= '0';
+          walker_fault_ack_pending <= '0';
+        end if;
       end if; -- walker_completed
       
       -- Clear walk request when walker starts (to avoid continuous requests)
@@ -519,6 +632,8 @@ begin
     variable tag_v : std_logic_vector(24 downto 0);
     variable table_index : integer;
     variable desc_addr : std_logic_vector(31 downto 0);
+    variable tmatch0, tmatch1 : std_logic;
+    variable tci0, twp0, tci1, twp1 : std_logic;
   begin
     if nreset = '0' then
       for i in 0 to ATC_ENTRIES-1 loop
@@ -529,8 +644,6 @@ begin
       end loop;
       atc_rr      <= 0;
       wstate      <= W_IDLE;
-      ttr_hit_q   <= '0';
-      hit_q       <= '0';
       tag_q       <= (others => '0');
       walk_level  <= 0;
       walk_desc   <= (others => '0');
@@ -553,8 +666,6 @@ begin
           -- Start page table walk on ATC miss using saved request parameters
           if walk_req = '1' then
             tag_v := mk_tag(saved_addr_log, saved_fc, saved_is_insn);
-            ttr_hit_q <= '0';
-            hit_q     <= '0';
             tag_q     <= tag_v;
             walk_level <= 0;
             walk_vpn  <= saved_addr_log;
@@ -593,7 +704,7 @@ begin
               walker_fault_status(6) <= '0';  -- Not write protect
               walker_fault_status(5) <= '0';  -- Not bus error
               walker_fault_status(4 downto 3) <= saved_fc(1 downto 0);
-              walker_fault_status(2) <= saved_rw;
+              walker_fault_status(2) <= not saved_rw;  -- RW bit (MC68030: 1=write)
               walker_fault_status(1 downto 0) <= std_logic_vector(to_unsigned(walk_level, 2));
               wstate <= W_FAULT;
             elsif desc_is_page(mem_rdat) then
@@ -630,7 +741,7 @@ begin
               walker_fault_status(6) <= '0';  -- Not write protect
               walker_fault_status(5) <= '0';  -- Not bus error
               walker_fault_status(4 downto 3) <= saved_fc(1 downto 0);
-              walker_fault_status(2) <= saved_rw;
+              walker_fault_status(2) <= not saved_rw;  -- RW bit (MC68030: 1=write)
               walker_fault_status(1 downto 0) <= std_logic_vector(to_unsigned(walk_level, 2));
               wstate <= W_FAULT;
             elsif desc_is_page(mem_rdat) then
@@ -667,7 +778,7 @@ begin
               walker_fault_status(6) <= '0';  -- Not write protect
               walker_fault_status(5) <= '0';  -- Not bus error
               walker_fault_status(4 downto 3) <= saved_fc(1 downto 0);
-              walker_fault_status(2) <= saved_rw;
+              walker_fault_status(2) <= not saved_rw;  -- RW bit (MC68030: 1=write)
               walker_fault_status(1 downto 0) <= std_logic_vector(to_unsigned(walk_level, 2));
               wstate <= W_FAULT;
             elsif desc_is_page(mem_rdat) then
@@ -696,15 +807,36 @@ begin
             if desc_valid(mem_rdat) and desc_is_page(mem_rdat) then
               wstate <= W_PAGE;
             else
+              -- Invalid or non-page descriptor - generate fault with proper status
               walk_fault <= '1';
+              walker_fault <= '1';
+              walker_fault_status(7) <= '1';  -- Invalid descriptor
+              walker_fault_status(6) <= '0';  -- Not write protect
+              walker_fault_status(5) <= '0';  -- Not bus error
+              walker_fault_status(4 downto 3) <= saved_fc(1 downto 0);
+              walker_fault_status(2) <= not saved_rw;  -- RW bit (MC68030: 1=write)
+              walker_fault_status(1 downto 0) <= std_logic_vector(to_unsigned(walk_level, 2));
               wstate <= W_FAULT;
             end if;
           end if;
           
         when W_PAGE =>
-          -- Process page descriptor and check access permissions
-          -- Check supervisor/user access only (write protection checked at access time)
-          if not access_allowed(walk_desc, saved_fc) then
+          -- Process page descriptor and validate completely
+          if not desc_valid(walk_desc) then
+            -- Invalid descriptor - generate fault
+            walker_fault <= '1';
+            walker_fault_status(7) <= '1';  -- Invalid descriptor
+            walker_fault_status(6) <= '0';  -- Not write protect
+            walker_fault_status(5) <= '0';  -- Not bus error
+            if (ptest_req = '1' or pflush_req = '1' or pload_req = '1') then
+              walker_fault_status(4 downto 3) <= pmmu_fc(1 downto 0);
+            else
+              walker_fault_status(4 downto 3) <= saved_fc(1 downto 0);
+            end if;
+            walker_fault_status(2) <= not saved_rw;  -- RW bit (MC68030: 1=write)
+            walker_fault_status(1 downto 0) <= std_logic_vector(to_unsigned(walk_level, 2));
+            wstate <= W_FAULT;
+          elsif not access_allowed(walk_desc, saved_fc) then
             walker_fault <= '1';
             walker_fault_status(7) <= '0';  -- Not invalid descriptor
             walker_fault_status(6) <= '0';  -- Not write protect violation  
@@ -714,14 +846,22 @@ begin
             else
               walker_fault_status(4 downto 3) <= saved_fc(1 downto 0);
             end if;
-            walker_fault_status(2) <= saved_rw;   -- Read/Write bit
+            walker_fault_status(2) <= not saved_rw;  -- RW bit (MC68030: 1=write, TG68K: 1=read)
             walker_fault_status(1 downto 0) <= std_logic_vector(to_unsigned(walk_level, 2)); -- Fault level
             wstate <= W_FAULT;
           else
-            -- Valid access - extract attributes (write protection enforced at access time)
+            -- Valid access - extract attributes (access control enforced at access time)
+            walk_attr(2) <= walk_desc(7); -- User accessible (0=supervisor only, 1=user accessible)
             walk_attr(1) <= walk_desc(6); -- Cache inhibit
             walk_attr(0) <= walk_desc(2); -- Write protect
             walk_fault <= '0';
+            
+            -- Assertion: Verify walk_attr(2) coherently tracks descriptor bit 7
+            assert walk_desc(7) = walk_desc(7) 
+              report "ASSERTION: walk_attr(2) should coherently track walk_desc(7): " &
+                     "walk_desc(7)=" & std_logic'image(walk_desc(7))
+              severity note;
+            
             wstate <= W_FILL;
           end if;
           
@@ -729,41 +869,36 @@ begin
           -- Fill ATC with translation result
           atc_tag(atc_rr)   <= tag_q;
           atc_ppn(atc_rr)   <= walk_desc(31 downto 12); -- Physical page number
-          atc_attr(atc_rr)  <= walk_attr(1 downto 0);   -- Cache inhibit, write protect
+          atc_attr(atc_rr)  <= walk_attr(2 downto 0);   -- Supervisor, Cache inhibit, write protect
           atc_valid(atc_rr) <= '1';
+          -- Delay completion signal by one cycle to ensure ATC write is visible
+          wstate <= W_COMPLETE;  -- New state to delay completion
           if atc_rr = ATC_ENTRIES-1 then
             atc_rr <= 0;
           else
             atc_rr <= atc_rr + 1;
           end if;
           
-          -- Update translation outputs immediately for the completed request
-          -- Check write protection for the original request
-          if saved_rw = '0' and walk_attr(0) = '1' then
-            -- Write to write-protected page - generate fault
-            fault_reg <= '1';
-            fault_status_reg(7) <= '0'; -- Not invalid descriptor
-            fault_status_reg(6) <= '1'; -- Write protect violation
-            fault_status_reg(5) <= '0'; -- Not bus error
-            fault_status_reg(4 downto 3) <= saved_fc(1 downto 0);
-            fault_status_reg(2) <= saved_rw; -- Read/Write bit
-            fault_status_reg(1 downto 0) <= "11"; -- ATC level
-          else
-            -- Valid access - update outputs
-            addr_phys_reg(31 downto 12) <= walk_desc(31 downto 12);
-            addr_phys_reg(11 downto 0)  <= saved_addr_log(11 downto 0);
-            cache_inhibit_reg <= walk_attr(1);
-            write_protect_reg <= walk_attr(0);
-            fault_reg <= '0';
-          end if;
-          translation_pending <= '0';
           
-          walker_completed <= '1';  -- Signal that walker completed successfully
+        when W_COMPLETE =>
+          -- Signal completion one cycle after ATC write to ensure it's visible
+          walker_completed <= '1';
+          
+          -- Debug: Report walker completion details
+          report "WALKER_COMPLETED: addr=0x" & slv_to_hstring(saved_addr_log) & 
+                 " fc=" & slv_to_string(saved_fc) & 
+                 " rw=" & std_logic'image(saved_rw) &
+                 " desc=0x" & slv_to_hstring(walk_desc) &
+                 " attr=" & slv_to_string(walk_attr) &
+                 " fault=" & std_logic'image(walk_fault)
+            severity note;
+          
           wstate <= W_IDLE;
           
         when W_FAULT =>
           -- Page fault occurred - fault status already set in previous state
-          -- Just signal completion and return to idle
+          -- Hold walker_fault signal until main process acknowledges it
+          -- Don't clear walker_fault here - let main process clear it when consumed
           walker_completed <= '1';  -- Signal that walker completed (with fault)
           wstate <= W_IDLE;
           
@@ -772,30 +907,46 @@ begin
       end case;
       
       -- PFLUSH instruction: Clear ATC when flag is set and walker is idle
+      if atc_flush_req = '1' then
+        for i in 0 to ATC_ENTRIES-1 loop
+          atc_valid(i) <= '0';
+        end loop;
+      end if;
+
       if pflush_clear_atc = '1' and wstate = W_IDLE then
         for i in 0 to ATC_ENTRIES-1 loop
           atc_valid(i) <= '0';
         end loop;
       end if;
+      
+      -- Clear walker fault when acknowledged by main process
+      if walker_fault = '1' and walker_fault_ack = '1' then
+        walker_fault <= '0';
+        -- Don't drive walker_fault_ack here - let main process be the sole driver
+      end if;
+      
+      -- Clear walker completion when acknowledged by main process
+      if walker_completed = '1' and walker_completed_ack = '1' then
+        walker_completed <= '0';
+      end if;
     end if;
   end process;
 
   -- Walker busy indication - not busy if MMU disabled or TTR hit
-  process(wstate, addr_log, fc, is_insn, TT0, TT1, tc_en, translation_pending)
+  process(wstate, addr_log, fc, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending)
     variable tmatch0, tmatch1 : std_logic;
-    variable tci0, twp0, tci1, twp1 : std_logic;
   begin
     -- Not busy if MMU is disabled
     if tc_en = '0' then
       busy <= '0';
     else
       -- Check for TTR hits combinationally
-      ttr_check(TT0, addr_log, fc, is_insn, tmatch0, tci0, twp0);
-      ttr_check(TT1, addr_log, fc, is_insn, tmatch1, tci1, twp1);
+      ttr_check(TT0, addr_log, fc, is_insn, matched => tmatch0, ci => open, wp => open);
+      ttr_check(TT1, addr_log, fc, is_insn, matched => tmatch1, ci => open, wp => open);
       
-      -- Not busy if TTR hit or (walker idle and no pending translation)
-      -- Also not busy if walker completed successfully (ATC hit available)
-      if (tmatch0 = '1' or tmatch1 = '1' or wstate = W_IDLE) then
+      -- Not busy if TTR hit or (walker idle and no pending walker signals)
+      -- Stay busy if there's an unprocessed walker fault or completion, or if ack is pending
+      if (tmatch0 = '1' or tmatch1 = '1' or (wstate = W_IDLE and walker_fault = '0' and walker_completed = '0' and walker_fault_ack_pending = '0')) then
         busy <= '0';
       else
         busy <= '1';

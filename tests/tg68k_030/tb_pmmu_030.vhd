@@ -274,9 +274,9 @@ begin
     
     -- Test TT0 register
     test_name <= "TT0 Register Write/Read                 ";
-    write_register(x"3", x"80000000"); -- TT0 enable
+    write_register(x"3", x"00008000"); -- TT0: E=1(bit15), base=0x00, mask=0x00
     read_register(x"3");
-    report_test("TT0 Register Write/Read", reg_rdat = x"80000000");
+    report_test("TT0 Register Write/Read", reg_rdat = x"00008000");
 
     wait_cycles(10);
 
@@ -315,8 +315,8 @@ begin
     writeline(output, l);
     
     test_name <= "TTR Bypass Test                         ";
-    write_register(x"3", x"80000000"); -- TT0: enable, base=0x0000, mask=0x0000
-    test_translation(x"00001234", "101", '1'); -- Should bypass MMU
+    write_register(x"3", x"00008000"); -- TT0: E=1(bit15), base=0x00(31:24), mask=0x00(23:16)  
+    test_translation(x"00001234", "101", '1'); -- Should bypass MMU via TTR0
     report_test("TTR Bypass", addr_phys = x"00001234" and fault = '0');
 
     -- TEST 4: PMMU Instructions
