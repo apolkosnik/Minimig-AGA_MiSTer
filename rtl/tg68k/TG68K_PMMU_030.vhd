@@ -363,46 +363,40 @@ architecture rtl of TG68K_PMMU_030 is
   -- Extract table index from virtual address (MC68030 compliant)
   impure function get_table_index(addr : std_logic_vector(31 downto 0);
                                   level : integer) return integer is
-    variable upper : integer;
-    variable lower : integer;
-    variable width : integer;
-    variable lvl   : integer;
-    variable total_bits_used : integer;
+    variable result : integer;
+    variable shift_amount : integer;
+    variable mask_width : integer;
+    variable temp_addr : unsigned(31 downto 0);
   begin
     if level < 0 or level > 3 then
       return 0;
     end if;
 
-    width := tc_idx_bits(level);
-    if width <= 0 then
+    mask_width := tc_idx_bits(level);
+    if mask_width <= 0 then
       return 0;
     end if;
 
-    -- Standard MC68030 bit allocation
-    -- Level 0: tc_idx_bits(0) bits starting from bit 31-IS
-    -- Level 1: tc_idx_bits(1) bits continuing downward
-    -- etc.
-    
-    -- Start from the top of the address and work down by level
-    upper := 31 - tc_initial_shift;
-    
-    -- Subtract widths of levels 0 through level-1 (only non-zero widths)
-    for lvl in 0 to level-1 loop
+    -- Calculate shift amount: start from 31-IS and subtract widths of previous levels
+    shift_amount := 31 - tc_initial_shift;
+    for lvl in 0 to 3 loop
+      exit when lvl >= level;
       if tc_idx_bits(lvl) > 0 then
-        upper := upper - tc_idx_bits(lvl);
+        shift_amount := shift_amount - tc_idx_bits(lvl);
       end if;
     end loop;
     
-    -- Calculate lower bit position
-    lower := upper - width + 1;
-    
-    -- Bounds checking
-    if upper < 0 or lower < 0 or upper >= 32 or lower >= 32 or upper < lower then
+    -- Ensure valid shift amount
+    if shift_amount < 0 or shift_amount >= 32 then
       return 0;
     end if;
-
-    -- Extract the index bits for this level
-    return to_integer(unsigned(addr(upper downto lower)));
+    
+    -- Extract bits by shifting and masking
+    temp_addr := unsigned(addr);
+    temp_addr := shift_right(temp_addr, shift_amount - mask_width + 1);
+    result := to_integer(temp_addr and to_unsigned((2**mask_width) - 1, 32));
+    
+    return result;
   end function;
   
   -- Check if descriptor is valid 
@@ -584,14 +578,17 @@ begin
         mmusr_update_req <= '0';
       end if;
 
-      -- Only clear faults when explicitly requested, not on every new translation
-      -- Faults should persist until consumed by software or explicit clearing
-      -- Remove automatic fault clearing to allow tests to sample fault status
+      -- Clear faults at start of each new translation request (MC68030 behavior)
+      -- Each translation request starts with clean fault state
+      -- Faults are only set if the current translation fails
 
       -- Process translation requests first
       if req = '1' then
-        -- Debug: Log translation request for failing test addresses
-        if addr_log = x"12343000" or addr_log = x"12344000" then
+        -- Clear previous fault state for new translation request
+        fault_reg <= '0';
+        fault_status_reg <= (others => '0');
+        -- Debug: Log translation request for test addresses
+        if addr_log = x"12343000" or addr_log = x"12344000" or addr_log = x"12345000" then
           report "DEBUG_REQUEST: Starting translation for addr=0x" & slv_to_hstring(addr_log) &
                  " fc=" & slv_to_string(fc) & " rw=" & std_logic'image(rw) &
                  " tc_en=" & std_logic'image(tc_en)
