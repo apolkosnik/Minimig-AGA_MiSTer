@@ -25,6 +25,9 @@
 //--------------------------------------------------------------------------//
 
 module cpu_wrapper
+#(
+	parameter USE_68030_CACHE = 0  // 0=use existing cache, 1=use new 68030 cache
+)
 (
 	input             reset,
 	output reg        reset_out,
@@ -71,7 +74,13 @@ module cpu_wrapper
 
 	output reg  [1:0] cpustate,
 	output reg  [3:0] cacr,
-	output reg [31:0] nmi_addr
+	output reg [31:0] nmi_addr,
+
+	// 68030 Cache interface (when USE_68030_CACHE=1)
+	output            cache_req,
+	output     [31:0] cache_addr,
+	input      [15:0] cache_data,
+	input             cache_ack
 );
 
 assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
@@ -130,7 +139,33 @@ assign fastchip_rnw = wr;
 
 reg  [31:0] cpu_addr;
 reg  [15:0] cpu_dout;
-wire [15:0] cpu_din = ramsel ? ramdat : fastchip_selack ? fastchip_dout : {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
+// CPU data input mux with cache support
+reg [15:0] cache_data_out_16;
+always @(*) begin
+	// Select appropriate 16-bit data from 32-bit cache output based on address
+	case (pmmu_addr_log_p[1:0])
+		2'b00: begin
+			// Instruction cache (always 16-bit aligned) or data cache lower word
+			if (cpustate_p == 2'b00) 
+				cache_data_out_16 = i_cache_data[15:0];   // Instruction fetch
+			else
+				cache_data_out_16 = d_cache_data_out[15:0];   // Data lower word
+		end
+		2'b10: begin
+			// Upper word or instruction at +2
+			if (cpustate_p == 2'b00)
+				cache_data_out_16 = i_cache_data[31:16];  // Instruction at +2  
+			else
+				cache_data_out_16 = d_cache_data_out[31:16];  // Data upper word
+		end
+		2'b01: cache_data_out_16 = {8'h0, d_cache_data_out[15:8]};   // Byte at +1
+		2'b11: cache_data_out_16 = {8'h0, d_cache_data_out[31:24]};  // Byte at +3
+	endcase
+end
+
+wire [15:0] cpu_din = (USE_68030_CACHE & cache_hit) ? cache_data_out_16 :
+                      ramsel ? ramdat : fastchip_selack ? fastchip_dout : 
+                      {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
 reg         wr;
 reg         uds_in;
 reg         lds_in;
@@ -190,6 +225,40 @@ wire        uds_p;
 wire        lds_p;
 wire        reset_out_p;
 wire        longword;
+wire [31:0] pmmu_addr_log_p;
+wire [31:0] pmmu_addr_phys_p;
+
+// Cache interface signals (68030 only)
+wire        cache_enabled;
+wire        cache_hit;
+wire        cache_miss;
+wire        cache_cinv_req;
+wire        cache_cpush_req;
+wire  [1:0] cache_op_scope;
+wire  [1:0] cache_op_cache;
+wire [31:0] cache_op_addr;
+wire        cacr_ie;
+wire        cacr_de;
+wire        cacr_freeze;
+wire        i_cache_req;
+wire [31:0] i_cache_addr;
+wire [31:0] i_cache_data;
+wire        i_cache_hit;
+wire        i_fill_req;
+wire [31:0] i_fill_addr;
+wire[127:0] i_fill_data;
+wire        i_fill_valid;
+wire        d_cache_req;
+wire [31:0] d_cache_addr;
+wire        d_cache_we;
+wire [31:0] d_cache_data_in;
+wire [31:0] d_cache_data_out;
+wire        d_cache_hit;
+wire  [3:0] d_cache_be;
+wire        d_fill_req;
+wire [31:0] d_fill_addr;
+wire[127:0] d_fill_data;
+wire        d_fill_valid;
 
 TG68KdotC_Kernel
 #(
@@ -204,7 +273,7 @@ cpu_inst_p
 (
   .clk(clk),
   .nreset(reset),
-  .clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
+  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready) & ~(USE_68030_CACHE & cache_miss)),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -220,7 +289,20 @@ cpu_inst_p
   .cpu(cpucfg),
   .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
   .cacr_out(cacr_p),
-  .vbr_out(vbr_p)
+  .vbr_out(vbr_p),
+  // Cache control interface (68030)
+  .cache_cinv_req(cache_cinv_req),
+  .cache_cpush_req(cache_cpush_req),
+  .cache_op_scope(cache_op_scope),
+  .cache_op_cache(cache_op_cache),
+  .cacr_ie(cacr_ie),
+  .cacr_de(cacr_de),
+  .cacr_freeze(cacr_freeze),
+  // PMMU address interface
+  .pmmu_addr_log(pmmu_addr_log_p),
+  .pmmu_addr_phys(pmmu_addr_phys_p),
+  // Cache operation address
+  .cache_op_addr(cache_op_addr)
 );
 
 wire [15:0] cpu_dout_o;
@@ -264,6 +346,160 @@ fx68k cpu_inst_o
 	.oEdb(cpu_dout_o),
 	.eab(cpu_addr_o)
 );
+
+// 68030 Cache implementation (conditional instantiation)
+generate
+if (USE_68030_CACHE) begin : gen_68030_cache
+
+	// Cache enable logic - only for 68030 
+	assign cache_enabled = (cpucfg == 2'b11) & cacr_ie; // 68030 with instruction cache enabled
+
+	// 68030 Cache instantiation
+	TG68K_Cache_030 cache_inst
+	(
+		.clk(clk),
+		.nreset(reset),
+		// Cache Control (from CACR register)
+		.cacr_ie(cacr_ie),
+		.cacr_de(cacr_de),
+		.cacr_freeze(cacr_freeze),
+		// Cache Control Instructions
+		.cinv_req(cache_cinv_req),
+		.cpush_req(cache_cpush_req),
+		.cache_op_scope(cache_op_scope),
+		.cache_op_cache(cache_op_cache),
+		.cache_op_addr(cache_op_addr),
+		// Instruction Cache Interface
+		.i_addr(i_cache_addr),
+		.i_addr_phys(pmmu_addr_phys_p),  // Physical address from PMMU
+		.i_req(i_cache_req),
+		.i_data(i_cache_data),
+		.i_hit(i_cache_hit),
+		.i_fill_req(i_fill_req),
+		.i_fill_addr(i_fill_addr),
+		.i_fill_data(i_fill_data),
+		.i_fill_valid(i_fill_valid),
+		// Data Cache Interface
+		.d_addr(d_cache_addr),
+		.d_addr_phys(pmmu_addr_phys_p),  // Physical address from PMMU
+		.d_req(d_cache_req),
+		.d_we(d_cache_we),
+		.d_data_in(d_cache_data_in),
+		.d_data_out(d_cache_data_out),
+		.d_be(d_cache_be),
+		.d_hit(d_cache_hit),
+		.d_fill_req(d_fill_req),
+		.d_fill_addr(d_fill_addr),
+		.d_fill_data(d_fill_data),
+		.d_fill_valid(d_fill_valid)
+	);
+
+	// Cache interface logic
+	assign i_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
+	assign i_cache_req = cache_enabled & (cpustate_p == 2'b00); // Instruction fetch
+	assign d_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing 
+	assign d_cache_req = cache_enabled & (cpustate_p == 2'b10 | cpustate_p == 2'b11); // Data read/write
+	assign d_cache_we = (cpustate_p == 2'b11); // Write enable for data cache
+	
+	// Generate 32-bit data and byte enables from 16-bit CPU interface
+	// CPU provides 16-bit data with UDS/LDS strobes
+	// Convert to 32-bit aligned data with proper byte enables
+	wire [1:0] addr_low = pmmu_addr_log_p[1:0];
+	
+	// Data positioning based on address alignment
+	assign d_cache_data_in = (addr_low == 2'b00) ? {16'h0, cpu_dout_p} :
+	                         (addr_low == 2'b01) ? {24'h0, cpu_dout_p[7:0]} :
+	                         (addr_low == 2'b10) ? {cpu_dout_p, 16'h0} :
+	                                               {cpu_dout_p[7:0], 24'h0};
+	
+	// Byte enable generation
+	assign d_cache_be = (addr_low == 2'b00) ? {2'b00, ~uds_p, ~lds_p} :
+	                    (addr_low == 2'b01) ? {3'b000, ~lds_p} :
+	                    (addr_low == 2'b10) ? {~uds_p, ~lds_p, 2'b00} :
+	                                          {~uds_p, 3'b000};
+
+	// Cache hit/miss logic
+	assign cache_hit = (i_cache_hit & i_cache_req) | (d_cache_hit & d_cache_req);
+	assign cache_miss = cache_enabled & ((~i_cache_hit & i_cache_req) | (~d_cache_hit & d_cache_req));
+
+	// Connect cache fill interface to external memory controller
+	assign cache_req = i_fill_req | d_fill_req;
+	assign cache_addr = i_fill_req ? i_fill_addr : d_fill_addr;
+
+	// Cache fill logic - accumulate 16-bit reads into 128-bit cache lines
+	reg [2:0] fill_count;
+	reg [127:0] fill_buffer;
+	reg fill_active;
+
+	always @(posedge clk) begin
+		if (~reset) begin
+			fill_count <= 0;
+			fill_buffer <= 0;
+			fill_active <= 0;
+		end else begin
+			if (cache_req & cache_ack) begin
+				if (~fill_active) begin
+					fill_active <= 1;
+					fill_count <= 0;
+				end
+				
+				// Accumulate 16-bit words into 128-bit cache line
+				case (fill_count)
+					3'd0: fill_buffer[15:0]    <= cache_data;
+					3'd1: fill_buffer[31:16]   <= cache_data;
+					3'd2: fill_buffer[47:32]   <= cache_data;
+					3'd3: fill_buffer[63:48]   <= cache_data;
+					3'd4: fill_buffer[79:64]   <= cache_data;
+					3'd5: fill_buffer[95:80]   <= cache_data;
+					3'd6: fill_buffer[111:96]  <= cache_data;
+					3'd7: begin
+						fill_buffer[127:112] <= cache_data;
+						fill_active <= 0;  // Complete cache line
+					end
+				endcase
+				
+				if (fill_count < 7) fill_count <= fill_count + 1;
+			end
+		end
+	end
+
+	// Provide filled cache line to cache module
+	assign i_fill_data = fill_buffer;
+	assign i_fill_valid = fill_active & (fill_count == 7);
+	assign d_fill_data = fill_buffer; 
+	assign d_fill_valid = fill_active & (fill_count == 7);
+
+end else begin : gen_no_68030_cache
+
+	// Disable 68030 cache when not using it
+	assign cache_enabled = 1'b0;
+	assign cache_hit = 1'b0;
+	assign cache_miss = 1'b0;
+	assign i_cache_req = 1'b0;
+	assign i_cache_addr = 32'h0;
+	assign i_cache_data = 32'h0;
+	assign i_cache_hit = 1'b0;
+	assign i_fill_req = 1'b0;
+	assign i_fill_addr = 32'h0;
+	assign i_fill_data = 128'h0;
+	assign i_fill_valid = 1'b0;
+	assign d_cache_req = 1'b0;
+	assign d_cache_addr = 32'h0;
+	assign d_cache_we = 1'b0;
+	assign d_cache_data_in = 32'h0;
+	assign d_cache_data_out = 32'h0;
+	assign d_cache_hit = 1'b0;
+	assign d_fill_req = 1'b0;
+	assign d_fill_addr = 32'h0;
+	assign d_fill_data = 128'h0;
+	assign d_fill_valid = 1'b0;
+
+	// Disable cache interface
+	assign cache_req = 1'b0;
+	assign cache_addr = 32'h0;
+
+end
+endgenerate
 
 wire cpu_req = (cpustate != 1);
 

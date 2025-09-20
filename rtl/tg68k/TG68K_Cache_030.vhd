@@ -22,9 +22,11 @@ entity TG68K_Cache_030 is
     cpush_req      : in  std_logic;  -- CPUSH (Cache Push) request
     cache_op_scope : in  std_logic_vector(1 downto 0); -- 00=line, 01=page, 10=all, 11=all
     cache_op_cache : in  std_logic_vector(1 downto 0); -- 00=both, 01=data, 10=insn, 11=both
+    cache_op_addr  : in  std_logic_vector(31 downto 0); -- Address for line/page operations
     
     -- Instruction Cache Interface
-    i_addr         : in  std_logic_vector(31 downto 0);
+    i_addr         : in  std_logic_vector(31 downto 0);     -- Logical address from CPU
+    i_addr_phys    : in  std_logic_vector(31 downto 0);     -- Physical address from PMMU
     i_req          : in  std_logic;
     i_data         : out std_logic_vector(31 downto 0);
     i_hit          : out std_logic;
@@ -34,11 +36,13 @@ entity TG68K_Cache_030 is
     i_fill_valid   : in  std_logic;
     
     -- Data Cache Interface  
-    d_addr         : in  std_logic_vector(31 downto 0);
+    d_addr         : in  std_logic_vector(31 downto 0);     -- Logical address from CPU
+    d_addr_phys    : in  std_logic_vector(31 downto 0);     -- Physical address from PMMU
     d_req          : in  std_logic;
     d_we           : in  std_logic;
     d_data_in      : in  std_logic_vector(31 downto 0);
     d_data_out     : out std_logic_vector(31 downto 0);
+    d_be           : in  std_logic_vector(3 downto 0);      -- Byte enables (3=byte3, 2=byte2, 1=byte1, 0=byte0)
     d_hit          : out std_logic;
     d_fill_req     : out std_logic;
     d_fill_addr    : out std_logic_vector(31 downto 0);
@@ -87,18 +91,33 @@ architecture rtl of TG68K_Cache_030 is
   -- Internal signals to track fill request state (VHDL-93 compatibility)
   signal i_fill_req_int : std_logic := '0';
   signal d_fill_req_int : std_logic := '0';
+  
+  -- Cache operation address parsing
+  signal cache_op_line_idx : integer range 0 to NUM_LINES-1;
+  signal cache_op_tag      : std_logic_vector(TAG_BITS-1 downto 0);
+  signal cache_op_page_mask : std_logic_vector(TAG_BITS-1 downto 0);
 
 begin
 
   -- Address parsing for instruction cache
+  -- Use logical address for index (cache is virtually indexed)
   i_line_idx <= to_integer(unsigned(i_addr(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
-  i_tag      <= i_addr(31 downto ADDR_BITS+OFFSET_BITS);
+  -- Use physical address for tag (cache is physically tagged)
+  i_tag      <= i_addr_phys(31 downto ADDR_BITS+OFFSET_BITS);
   i_offset   <= to_integer(unsigned(i_addr(OFFSET_BITS-1 downto 2))) * 4; -- Word-aligned
 
-  -- Address parsing for data cache
+  -- Address parsing for data cache  
+  -- Use logical address for index (cache is virtually indexed)
   d_line_idx <= to_integer(unsigned(d_addr(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
-  d_tag      <= d_addr(31 downto ADDR_BITS+OFFSET_BITS);  
+  -- Use physical address for tag (cache is physically tagged)
+  d_tag      <= d_addr_phys(31 downto ADDR_BITS+OFFSET_BITS);  
   d_offset   <= to_integer(unsigned(d_addr(OFFSET_BITS-1 downto 2))) * 4; -- Word-aligned
+  
+  -- Cache operation address parsing
+  cache_op_line_idx <= to_integer(unsigned(cache_op_addr(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
+  cache_op_tag      <= cache_op_addr(31 downto ADDR_BITS+OFFSET_BITS);
+  -- Page mask for 4KB pages (MC68030 standard page size)
+  cache_op_page_mask <= cache_op_addr(31 downto 12) & (11 downto ADDR_BITS+OFFSET_BITS => '0');
 
   -- Instruction Cache Logic
   process(clk, nreset)
@@ -119,19 +138,53 @@ begin
         i_fill_req_int <= '0';  -- Clear fill request when data arrives
       end if;
       
-      -- Cache invalidation
+      -- Cache invalidation (instruction cache)
       if cinv_req = '1' and (cache_op_cache = "10" or cache_op_cache = "00" or cache_op_cache = "11") then
         case cache_op_scope is
           when "10"|"11" => -- Invalidate all
             for i in 0 to NUM_LINES-1 loop
               i_valid_array(i) <= '0';
             end loop;
-          when "01" => -- Invalidate page (simplified: invalidate all for now)
+          when "01" => -- Invalidate page
             for i in 0 to NUM_LINES-1 loop
-              i_valid_array(i) <= '0';
+              -- Check if cache line tag matches the page
+              if i_valid_array(i) = '1' and 
+                 (i_tag_array(i)(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) = 
+                  cache_op_page_mask(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS)) then
+                i_valid_array(i) <= '0';
+              end if;
             end loop;
-          when "00" => -- Invalidate line
-            i_valid_array(i_line_idx) <= '0';
+          when "00" => -- Invalidate specific line
+            -- Invalidate line if tag matches
+            if i_valid_array(cache_op_line_idx) = '1' and
+               i_tag_array(cache_op_line_idx) = cache_op_tag then
+              i_valid_array(cache_op_line_idx) <= '0';
+            end if;
+          when others =>
+            null;
+        end case;
+      end if;
+      
+      -- Cache push (CPUSH) for instruction cache - invalidate after push
+      if cpush_req = '1' and (cache_op_cache = "10" or cache_op_cache = "00" or cache_op_cache = "11") then
+        case cache_op_scope is
+          when "10"|"11" => -- Push all
+            for i in 0 to NUM_LINES-1 loop
+              i_valid_array(i) <= '0';  -- Invalidate after push
+            end loop;
+          when "01" => -- Push page
+            for i in 0 to NUM_LINES-1 loop
+              if i_valid_array(i) = '1' and 
+                 (i_tag_array(i)(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) = 
+                  cache_op_page_mask(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS)) then
+                i_valid_array(i) <= '0';  -- Invalidate after push
+              end if;
+            end loop;
+          when "00" => -- Push specific line
+            if i_valid_array(cache_op_line_idx) = '1' and
+               i_tag_array(cache_op_line_idx) = cache_op_tag then
+              i_valid_array(cache_op_line_idx) <= '0';  -- Invalidate after push
+            end if;
           when others =>
             null;
         end case;
@@ -144,7 +197,8 @@ begin
           -- Only request fill if not frozen
           if cacr_freeze = '0' then
             i_fill_req_int <= '1';
-            i_fill_addr <= i_addr(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
+            -- Use physical address for memory fill
+            i_fill_addr <= i_addr_phys(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
           end if;
         end if;
       end if;
@@ -162,7 +216,10 @@ begin
   end process;
 
   -- Instruction cache hit/miss detection and data output
-  i_hit <= '1' when (cacr_ie = '1' and i_req = '1' and i_valid_array(i_line_idx) = '1' and i_tag_array(i_line_idx) = i_tag) else '0';
+  -- When cache is frozen, bypass cache (miss) to prevent CPU lockup
+  i_hit <= '1' when (cacr_ie = '1' and i_req = '1' and cacr_freeze = '0' and
+                     i_valid_array(i_line_idx) = '1' and i_tag_array(i_line_idx) = i_tag) 
+                     else '0';
   i_fill_req <= i_fill_req_int;
   
   -- Extract 32-bit word from 128-bit cache line based on offset
@@ -192,19 +249,54 @@ begin
         d_fill_req_int <= '0';  -- Clear fill request when data arrives
       end if;
       
-      -- Cache invalidation
+      -- Cache invalidation (data cache)
       if cinv_req = '1' and (cache_op_cache = "01" or cache_op_cache = "00" or cache_op_cache = "11") then
         case cache_op_scope is
           when "10"|"11" => -- Invalidate all
             for i in 0 to NUM_LINES-1 loop
               d_valid_array(i) <= '0';
             end loop;
-          when "01" => -- Invalidate page (simplified: invalidate all for now)  
+          when "01" => -- Invalidate page
             for i in 0 to NUM_LINES-1 loop
-              d_valid_array(i) <= '0';
+              -- Check if cache line tag matches the page
+              if d_valid_array(i) = '1' and 
+                 (d_tag_array(i)(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) = 
+                  cache_op_page_mask(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS)) then
+                d_valid_array(i) <= '0';
+              end if;
             end loop;
-          when "00" => -- Invalidate line
-            d_valid_array(d_line_idx) <= '0';
+          when "00" => -- Invalidate specific line
+            -- Invalidate line if tag matches
+            if d_valid_array(cache_op_line_idx) = '1' and
+               d_tag_array(cache_op_line_idx) = cache_op_tag then
+              d_valid_array(cache_op_line_idx) <= '0';
+            end if;
+          when others =>
+            null;
+        end case;
+      end if;
+      
+      -- Cache push (CPUSH) - for write-through cache, this is mostly a no-op
+      -- but we invalidate the line after "pushing" to maintain coherency
+      if cpush_req = '1' and (cache_op_cache = "01" or cache_op_cache = "00" or cache_op_cache = "11") then
+        case cache_op_scope is
+          when "10"|"11" => -- Push all (followed by invalidation)
+            for i in 0 to NUM_LINES-1 loop
+              d_valid_array(i) <= '0';  -- Invalidate after push
+            end loop;
+          when "01" => -- Push page
+            for i in 0 to NUM_LINES-1 loop
+              if d_valid_array(i) = '1' and 
+                 (d_tag_array(i)(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) = 
+                  cache_op_page_mask(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS)) then
+                d_valid_array(i) <= '0';  -- Invalidate after push
+              end if;
+            end loop;
+          when "00" => -- Push specific line
+            if d_valid_array(cache_op_line_idx) = '1' and
+               d_tag_array(cache_op_line_idx) = cache_op_tag then
+              d_valid_array(cache_op_line_idx) <= '0';  -- Invalidate after push
+            end if;
           when others =>
             null;
         end case;
@@ -214,12 +306,28 @@ begin
       if d_req = '1' and cacr_de = '1' then
         -- Handle write (write-through for now)
         if d_we = '1' and d_valid_array(d_line_idx) = '1' and d_tag_array(d_line_idx) = d_tag then
-          -- Update cache line on write hit  
+          -- Update cache line on write hit with byte enable support
           case d_offset is
-            when 0  => d_data_array(d_line_idx)(31 downto 0)   <= d_data_in;
-            when 4  => d_data_array(d_line_idx)(63 downto 32)  <= d_data_in;
-            when 8  => d_data_array(d_line_idx)(95 downto 64)  <= d_data_in;
-            when 12 => d_data_array(d_line_idx)(127 downto 96) <= d_data_in;
+            when 0  =>  -- Bytes 0-3
+              if d_be(0) = '1' then d_data_array(d_line_idx)(7 downto 0)    <= d_data_in(7 downto 0); end if;
+              if d_be(1) = '1' then d_data_array(d_line_idx)(15 downto 8)   <= d_data_in(15 downto 8); end if;
+              if d_be(2) = '1' then d_data_array(d_line_idx)(23 downto 16)  <= d_data_in(23 downto 16); end if;
+              if d_be(3) = '1' then d_data_array(d_line_idx)(31 downto 24)  <= d_data_in(31 downto 24); end if;
+            when 4  =>  -- Bytes 4-7
+              if d_be(0) = '1' then d_data_array(d_line_idx)(39 downto 32)  <= d_data_in(7 downto 0); end if;
+              if d_be(1) = '1' then d_data_array(d_line_idx)(47 downto 40)  <= d_data_in(15 downto 8); end if;
+              if d_be(2) = '1' then d_data_array(d_line_idx)(55 downto 48)  <= d_data_in(23 downto 16); end if;
+              if d_be(3) = '1' then d_data_array(d_line_idx)(63 downto 56)  <= d_data_in(31 downto 24); end if;
+            when 8  =>  -- Bytes 8-11
+              if d_be(0) = '1' then d_data_array(d_line_idx)(71 downto 64)  <= d_data_in(7 downto 0); end if;
+              if d_be(1) = '1' then d_data_array(d_line_idx)(79 downto 72)  <= d_data_in(15 downto 8); end if;
+              if d_be(2) = '1' then d_data_array(d_line_idx)(87 downto 80)  <= d_data_in(23 downto 16); end if;
+              if d_be(3) = '1' then d_data_array(d_line_idx)(95 downto 88)  <= d_data_in(31 downto 24); end if;
+            when 12 =>  -- Bytes 12-15
+              if d_be(0) = '1' then d_data_array(d_line_idx)(103 downto 96)  <= d_data_in(7 downto 0); end if;
+              if d_be(1) = '1' then d_data_array(d_line_idx)(111 downto 104) <= d_data_in(15 downto 8); end if;
+              if d_be(2) = '1' then d_data_array(d_line_idx)(119 downto 112) <= d_data_in(23 downto 16); end if;
+              if d_be(3) = '1' then d_data_array(d_line_idx)(127 downto 120) <= d_data_in(31 downto 24); end if;
             when others => null;
           end case;
         elsif d_we = '0' then
@@ -228,9 +336,30 @@ begin
             -- Only request fill if not frozen
             if cacr_freeze = '0' then
               d_fill_req_int <= '1';
-              d_fill_addr <= d_addr(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
+              -- Use physical address for memory fill
+              d_fill_addr <= d_addr_phys(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
             end if;
           end if;
+        end if;
+      end if;
+      
+      -- Automatic cache coherency: invalidate on external writes
+      -- When a write occurs that doesn't hit in cache, invalidate any potentially aliasing lines
+      -- This handles cases where external agents (DMA, other CPUs) modify memory
+      if d_req = '1' and d_we = '1' and cacr_de = '1' then
+        -- If write misses in cache, check if any other lines might alias with this physical address
+        if not (d_valid_array(d_line_idx) = '1' and d_tag_array(d_line_idx) = d_tag) then
+          -- Look for potential aliases in other cache lines (same physical page)
+          for i in 0 to NUM_LINES-1 loop
+            if d_valid_array(i) = '1' and i /= d_line_idx then
+              -- Check if this line is from the same 4KB page
+              if d_tag_array(i)(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) = 
+                 d_tag(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) then
+                -- Potential alias - invalidate for safety
+                d_valid_array(i) <= '0';
+              end if;
+            end if;
+          end loop;
         end if;
       end if;
       
@@ -246,8 +375,11 @@ begin
     end if;
   end process;
 
-  -- Data cache hit/miss detection and data output
-  d_hit <= '1' when (cacr_de = '1' and d_req = '1' and d_valid_array(d_line_idx) = '1' and d_tag_array(d_line_idx) = d_tag) else '0';
+  -- Data cache hit/miss detection and data output  
+  -- When cache is frozen, bypass cache (miss) to prevent CPU lockup
+  d_hit <= '1' when (cacr_de = '1' and d_req = '1' and cacr_freeze = '0' and
+                     d_valid_array(d_line_idx) = '1' and d_tag_array(d_line_idx) = d_tag)
+                     else '0';
   d_fill_req <= d_fill_req_int;
   
   -- Extract 32-bit word from 128-bit cache line based on offset

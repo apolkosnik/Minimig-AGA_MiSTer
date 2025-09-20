@@ -152,7 +152,12 @@ entity TG68KdotC_Kernel is
 		pmmu_reg_re				: out std_logic;
 		pmmu_reg_sel			: out std_logic_vector(3 downto 0);
 		pmmu_reg_wdat			: out std_logic_vector(31 downto 0);
-		pmmu_reg_part			: out std_logic
+		pmmu_reg_part			: out std_logic;
+-- PMMU address interface (68030)
+		pmmu_addr_log			: out std_logic_vector(31 downto 0);
+		pmmu_addr_phys			: out std_logic_vector(31 downto 0);
+-- Cache operation address (68030)
+		cache_op_addr			: out std_logic_vector(31 downto 0)
 		);
 end TG68KdotC_Kernel;
 
@@ -387,12 +392,16 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
 	signal pmmu_is_insn     : std_logic;
 	signal pmmu_rw          : std_logic;
 	signal pmmu_fc          : std_logic_vector(2 downto 0);
-	signal pmmu_addr_log    : std_logic_vector(31 downto 0);
-	signal pmmu_addr_phys   : std_logic_vector(31 downto 0);
+	signal pmmu_addr_log_int : std_logic_vector(31 downto 0);
+	signal pmmu_addr_phys_int : std_logic_vector(31 downto 0);
+	
+	-- Cache operation control signals
+	signal cache_op_scope_int : std_logic_vector(1 downto 0);
+	signal cache_op_cache_int : std_logic_vector(1 downto 0);
 	signal pmmu_ch_inhibit  : std_logic;
 	signal pmmu_wr_protect  : std_logic;
 	signal pmmu_fault       : std_logic;
-	signal pmmu_fault_stat  : std_logic_vector(7 downto 0);
+	signal pmmu_fault_stat  : std_logic_vector(31 downto 0);
 	signal pmmu_tc_en       : std_logic;
 	
 	-- PMMU instruction control signals
@@ -435,18 +444,24 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
       when x"4" => s := x"4"; -- TT1
       when x"5" => s := x"5"; -- MMUSR
       when x"6" => s := x"6"; -- CAL
+      when x"7" => s := x"7"; -- VAL
+      when x"8" => s := x"8"; -- SCC
+      when x"9" => s := x"9"; -- AC
       when others => s := x"F"; -- invalid
     end case;
     return s;
   end function;
 
   -- Function to map MOVEC brief(11:0) encodings to PMMU register select
-  -- MOVEC encodings used here:
-  --  X"004" => TT0, X"005" => TT1, X"805" => MMUSR
+  -- MC68030 MOVEC encodings for PMMU registers (only these are accessible via MOVEC):
+  --  X"003" => TC, X"004" => TT0, X"005" => TT1, X"805" => MMUSR
+  -- Note: CRP, SRP, CAL, VAL, SCC, AC are only accessible via PMOVE, not MOVEC
   function pmmu_sel_from_movec(b : std_logic_vector(11 downto 0)) return std_logic_vector is
     variable s : std_logic_vector(3 downto 0);
   begin
-    if b = x"004" then
+    if b = x"003" then
+      s := x"0"; -- TC (Translation Control Register)
+    elsif b = x"004" then
       s := x"3"; -- TT0
     elsif b = x"005" then
       s := x"4"; -- TT1
@@ -483,8 +498,8 @@ BEGIN
       is_insn       => pmmu_is_insn,
       rw            => pmmu_rw,
       fc            => pmmu_fc,
-      addr_log      => pmmu_addr_log,
-      addr_phys     => pmmu_addr_phys,
+      addr_log      => pmmu_addr_log_int,
+      addr_phys     => pmmu_addr_phys_int,
       cache_inhibit => pmmu_ch_inhibit,
       write_protect => pmmu_wr_protect,
       fault         => pmmu_fault,
@@ -504,18 +519,50 @@ BEGIN
   pmmu_reg_wdat <= pmmu_reg_wdat_d when CPU = "11" else (others => '0');
   pmmu_reg_part <= pmmu_reg_part_d when CPU = "11" else '0';
   
+  -- PMMU address interface (for cache virtually-indexed, physically-tagged operation)
+  pmmu_addr_log  <= pmmu_addr_log_int;   -- Logical address (for cache indexing)
+  pmmu_addr_phys <= pmmu_addr_phys_int;  -- Physical address (for cache tagging)
+  
   -- PMMU instruction control
   pmmu_ptest_req  <= '1' when exec(pmmu_ptest) = '1' else '0';
   pmmu_pflush_req <= '1' when exec(pmmu_pflush) = '1' else '0';
   pmmu_pload_req  <= '1' when exec(pmmu_pload) = '1' else '0';
   pmmu_cmd_fc     <= fc_internal;  -- Use internal FC signal
-  pmmu_cmd_addr   <= pmmu_addr_log;  -- Use logical address (before translation)
+  pmmu_cmd_addr   <= pmmu_addr_log_int;  -- Use logical address (before translation)
   
   -- Cache instruction control  
-  cache_cinv_req  <= '1' when exec(cache_cinv) = '1' else '0';
+  cache_cinv_req  <= '1' when (exec(cache_cinv) = '1' or 
+                                CACR(3) = '1' or CACR(4) = '1' or CACR(5) = '1' or CACR(6) = '1') else '0';
   cache_cpush_req <= '1' when exec(cache_cpush) = '1' else '0';
-  cache_op_scope  <= brief(4 downto 3);  -- From extension word
-  cache_op_cache  <= brief(1 downto 0);  -- From extension word
+  
+  -- Cache operation scope and cache selection
+  process(brief, CACR, exec)
+  begin
+    if exec(cache_cinv) = '1' or exec(cache_cpush) = '1' then
+      -- CINV/CPUSH instruction: use extension word
+      cache_op_scope_int <= brief(4 downto 3);  -- From extension word
+      cache_op_cache_int <= brief(1 downto 0);  -- From extension word
+    else
+      -- CACR self-clearing bits: determine operation type
+      cache_op_scope_int <= "10";  -- All caches (global invalidation)
+      if CACR(4) = '1' then
+        cache_op_cache_int <= "10";  -- CI: Clear Instruction Cache only
+      elsif CACR(5) = '1' then  
+        cache_op_cache_int <= "01";  -- CD: Clear Data Cache only
+      elsif CACR(6) = '1' or CACR(3) = '1' then
+        cache_op_cache_int <= "11";  -- CA/CE: Clear All Caches
+      else
+        cache_op_cache_int <= "00";  -- Default: both caches
+      end if;
+    end if;
+  end process;
+  
+  -- Connect internal signals to outputs
+  cache_op_scope <= cache_op_scope_int;
+  cache_op_cache <= cache_op_cache_int;
+  
+  -- Cache operation address: use effective address for CINV/CPUSH instructions
+  cache_op_addr <= memaddr when (exec(cache_cinv) = '1' or exec(cache_cpush) = '1') else pmmu_addr_phys_int;
   
   -- CACR (Cache Control Register) bit definitions for MC68030:
   -- Bit 0 (DE): Data Cache Enable
@@ -1184,7 +1231,7 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 		-- if access done, and not aligned, don't increment
         addr <= memaddr_reg+memaddr_delta;
         -- route logical address through PMMU for translation
-        pmmu_addr_log <= memaddr_reg + memaddr_delta;
+        pmmu_addr_log_int <= memaddr_reg + memaddr_delta;
 
 		IF use_base='0' THEN
 			memaddr_reg <= (others=>'0');
@@ -4637,6 +4684,6 @@ PROCESS (sndOPC, movem_mux)
 	END PROCESS;
 
 -- MC68030 address routing: direct when MMU disabled, translated when enabled
-addr_out <= pmmu_addr_log when pmmu_tc_en = '0' else pmmu_addr_phys;
+addr_out <= pmmu_addr_log_int when pmmu_tc_en = '0' else pmmu_addr_phys_int;
 
 END; 

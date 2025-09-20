@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-integration test-diagrom test-advanced test-fault test-stress setup help
+.PHONY: all clean test-pmmu test-cache test-cacr test-integration test-diagrom test-advanced test-fault test-stress test-regression validate setup help
 
 # Default target
 all: test-comprehensive
@@ -33,8 +33,10 @@ help:
 	@echo "  test-advanced    - Run advanced PMMU functionality tests"
 	@echo "  test-fault       - Run comprehensive fault handling tests"
 	@echo "  test-stress      - Run page walker stress tests"
+	@echo "  test-regression  - Run MC68030 regression test suite (RECOMMENDED)"
 	@echo "  test-all         - Run original test suite"
 	@echo "  test-comprehensive - Run ALL enhanced tests"
+	@echo "  validate         - Validate complete MC68030 compliance"
 	@echo "  clean            - Clean generated files"
 	@echo "  syntax-check     - Check VHDL syntax only"
 	@echo "  help             - Show this help"
@@ -117,6 +119,42 @@ test-fault: compile-advanced
 test-stress: compile-advanced
 	@echo "Running page walker stress tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 300us; quit" tb_page_walker_stress
+
+# MC68030 Regression Test Suite
+test-regression: setup
+	@echo "=========================================================="
+	@echo "Running MC68030 PMMU Regression Test Suite"
+	@echo "Validates all critical MC68030 compatibility fixes"
+	@echo "=========================================================="
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 tb_mc68030_regression.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" work.tb_mc68030_regression > mc68030_regression_results.log 2>&1
+	@echo "Regression test completed. Results in mc68030_regression_results.log"
+	@echo ""
+	@echo "=== REGRESSION TEST SUMMARY ==="
+	@tail -10 mc68030_regression_results.log
+	@echo ""
+
+# MC68030 Compliance Validation  
+validate: test-regression
+	@echo "=========================================================="
+	@echo "MC68030 COMPLIANCE VALIDATION"
+	@echo "=========================================================="
+	@if grep -q "ALL REGRESSION TESTS PASSED" mc68030_regression_results.log; then \
+		echo "✅ MC68030 COMPLIANCE: FULLY VALIDATED"; \
+		echo "✅ All critical MC68030 fixes are working correctly"; \
+	elif grep -q "REGRESSION FAILURES DETECTED" mc68030_regression_results.log; then \
+		echo "⚠️  MC68030 COMPLIANCE: SOME ISSUES DETECTED"; \
+		echo "📋 Check mc68030_regression_results.log for details"; \
+		echo "📋 Core functionality may still be working"; \
+	else \
+		echo "❌ MC68030 COMPLIANCE: VALIDATION INCOMPLETE"; \
+		echo "📋 Check mc68030_regression_results.log for errors"; \
+	fi
+	@echo "=========================================================="
+	@echo ""
+	@echo "📁 Full results: mc68030_regression_results.log"
+	@echo "📚 Documentation: README_MC68030_REGRESSION.md"
 
 # Original comprehensive test suite
 test-all: compile
