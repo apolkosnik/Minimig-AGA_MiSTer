@@ -26,7 +26,7 @@
 
 module cpu_wrapper
 #(
-	parameter USE_68030_CACHE = 0  // 0=use existing cache, 1=use new 68030 cache
+	parameter USE_68030_CACHE = 1  // 0=use existing cache, 1=use new 68030 cache
 )
 (
 	input             reset,

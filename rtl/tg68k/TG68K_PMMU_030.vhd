@@ -441,13 +441,15 @@ architecture rtl of TG68K_PMMU_030 is
     -- Address format: [31:IS+TIA+TIB+TIC+TID] [TIA bits] [TIB bits] [TIC bits] [TID bits] [IS bits]
     -- Each level extracts its portion from the logical address after IS initial shift
     
-    -- Calculate how many bits come after this level (towards LSB)
+    -- Calculate shift amount for this level
+    -- MC68030 format: [31:x] [Level0] [Level1] [Level2] [Level3] [IS bits]
+    -- For each level, sum up the bits that come after it (lower levels + IS)
     remaining_bits := initial_shift; -- Start with IS (initial shift bits)
-    for lvl in 0 to 3 loop
-      if lvl > level then
-        remaining_bits := remaining_bits + idx_bits(lvl);
-      end if;
-    end loop;
+    
+    -- Add bits from levels that come after this one
+    if level < 1 then remaining_bits := remaining_bits + idx_bits(1); end if;
+    if level < 2 then remaining_bits := remaining_bits + idx_bits(2); end if;
+    if level < 3 then remaining_bits := remaining_bits + idx_bits(3); end if;
     
     -- The shift amount is the starting bit position for this level
     shift_amount := remaining_bits;
@@ -1457,16 +1459,16 @@ begin
             );
             wstate <= W_FAULT;
           else
-            -- Valid access - extract page size from descriptor PS field (bits 3:2)
-            walk_page_shift <= get_desc_page_shift(walk_desc);
-            walk_page_size  <= get_desc_page_size(walk_desc);
-            walk_log_base   <= align_addr(saved_addr_log, get_desc_page_shift(walk_desc));
-            walk_phys_base  <= phys_base_from_desc(walk_desc, get_desc_page_shift(walk_desc));
+            -- Valid access - use page size from TC register, not descriptor
+            walk_page_shift <= tc_page_shift;
+            walk_page_size  <= tc_page_size;
+            walk_log_base   <= align_addr(saved_addr_log, tc_page_shift);
+            walk_phys_base  <= phys_base_from_desc(walk_desc, tc_page_shift);
             -- Debug: Log page size extraction for large page test
             if saved_addr_log = x"00400000" then
               report "DEBUG_PAGE_SIZE: desc=0x" & slv_to_hstring(walk_desc) &
-                     " PS=" & integer'image(get_desc_page_size(walk_desc)) &
-                     " shift=" & integer'image(get_desc_page_shift(walk_desc))
+                     " TC_PS=" & integer'image(tc_page_size) &
+                     " shift=" & integer'image(tc_page_shift)
                 severity note;
             end if;
             walk_attr(2) <= walk_desc(7); -- User accessible (0=supervisor only, 1=user accessible)

@@ -26,6 +26,7 @@ help:
 	@echo "  all              - Run comprehensive test suite"
 	@echo "  setup            - Setup ModelSim environment"
 	@echo "  test-pmmu        - Test basic PMMU component"
+	@echo "  test-diagnostic  - Run PMMU diagnostic tests (RECOMMENDED FIRST)"
 	@echo "  test-cache       - Test Cache component only"  
 	@echo "  test-cacr        - Test CACR register only"
 	@echo "  test-integration - Test full system integration"
@@ -70,6 +71,7 @@ compile: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cache_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cacr_test.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_diagnostic.vhd || true
 	@echo "Basic compilation completed (errors ignored for initial testing)"
 
 # Compile enhanced test sources
@@ -90,6 +92,10 @@ compile-advanced: setup
 test-pmmu: compile
 	@echo "Running basic PMMU tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmmu_030
+
+test-diagnostic: compile
+	@echo "Running PMMU diagnostic tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 5us; quit" tb_pmmu_diagnostic
 
 test-cache: compile
 	@echo "Running Cache tests..."

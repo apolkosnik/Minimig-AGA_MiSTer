@@ -390,7 +390,7 @@ assign host_bs = 2'b11;
 
 reg [7:0] t_memory_config = 8'b0_0_00_01_01;
 reg [5:0] t_ide_config = 0;
-reg [4:0] t_cpu_config = 5'b00011; // Default to 68030 (TT=11) for this development branch
+reg [4:0] t_cpu_config = 5'b11111; // Default to 68030 (TT=11), turn on caches too for this development branch
 reg [4:0] t_chipset_config = 0;
 
 // configuration changes only while reset is active
@@ -407,7 +407,8 @@ always @(posedge clk) begin
 	end
 	
 	ide_config <= ide_cfg;
-	cpu_config <= cpu_cfg;
+	//cpu_config <= cpu_cfg;
+	cpu_config <= t_cpu_config[1:0]; // hard setting 68030 for now
 end
 
 always @(posedge clk) begin
