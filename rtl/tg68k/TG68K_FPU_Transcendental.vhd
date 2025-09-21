@@ -94,10 +94,37 @@ architecture rtl of TG68K_FPU_Transcendental is
 		TRANS_EXTRACT,
 		TRANS_COMPUTE,
 		TRANS_SERIES,
+		TRANS_CORDIC,
 		TRANS_NORMALIZE,
 		TRANS_DONE
 	);
 	signal trans_state : trans_state_t := TRANS_IDLE;
+	
+	-- CORDIC algorithm constants
+	type cordic_atan_table_t is array (0 to 15) of std_logic_vector(63 downto 0);
+	constant CORDIC_ATAN_TABLE : cordic_atan_table_t := (
+		X"C90FDAA22168C235",  -- atan(2^0) = π/4
+		X"76B19C1586509F26",  -- atan(2^-1)
+		X"3EB6EBF2D927DAD4",  -- atan(2^-2)
+		X"1FD5BA9AAC2F6AC5",  -- atan(2^-3)
+		X"0FFAADE8D5B8F0BB",  -- atan(2^-4)
+		X"07FF556EEA5F7A5E",  -- atan(2^-5)
+		X"03FFEAAB77573ABA",  -- atan(2^-6)
+		X"01FFFD555BBB9776",  -- atan(2^-7)
+		X"00FFFFAAAB55576B",  -- atan(2^-8)
+		X"007FFFFD555ABB9D",  -- atan(2^-9)
+		X"003FFFFFF555AAAB",  -- atan(2^-10)
+		X"001FFFFFFEAAAAAB",  -- atan(2^-11)
+		X"000FFFFFFFFAAAAB",  -- atan(2^-12)
+		X"0007FFFFFFFFF555",  -- atan(2^-13)
+		X"0003FFFFFFFFFEAB",  -- atan(2^-14)
+		X"0001FFFFFFFFFFFF"   -- atan(2^-15)
+	);
+	
+	-- CORDIC working registers
+	signal cordic_x, cordic_y, cordic_z : signed(63 downto 0);
+	signal cordic_iteration : integer range 0 to 16;
+	signal cordic_mode : std_logic;  -- 0=rotation, 1=vectoring
 	
 	-- IEEE field extraction
 	signal input_sign		: std_logic;
