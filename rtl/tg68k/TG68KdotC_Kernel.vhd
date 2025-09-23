@@ -4245,20 +4245,21 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									IF decodeOPC='1' THEN
 										next_micro_state <= fpu1;
 									END IF;
-								ELSIF SVmode='1' OR interrupt='1' OR setinterrupt='1' OR trap_interrupt='1' THEN
+								ELSIF SVmode='1' THEN
 									-- Other coprocessors (002-007) not present in this system
 									-- Generate F-line exception for coprocessor not present
-									-- CRITICAL FIX: Allow operation during interrupt processing (supervisor mode transition)
-									-- Added setinterrupt='1' and trap_interrupt='1' to fix HRTmon privilege violation
+									-- MC68020 SECURITY FIX: Only allow in supervisor mode, no interrupt bypass
 									trap_1111 <= '1';
 									trapmake <= '1';
 								ELSE
+									-- SECURITY FIX: Always require supervisor mode for coprocessor operations
+									-- No privilege bypass during interrupt processing per MC68020 specification
 									trap_priv <= '1';
 									trapmake <= '1';
 								END IF;
 							ELSE
-								IF SVmode='1' OR interrupt='1' OR setinterrupt='1' OR trap_interrupt='1' THEN
-									-- Allow operation during interrupt processing (supervisor mode transition)
+								IF SVmode='1' THEN
+									-- MC68020 SECURITY FIX: Only allow in supervisor mode, no interrupt bypass
 									trap_1111 <= '1';
 									trapmake <= '1';
 								ELSE
@@ -4275,10 +4276,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									IF decodeOPC='1' THEN
 										next_micro_state <= fpu1;
 									END IF;
-								ELSIF SVmode='1' OR interrupt='1' OR setinterrupt='1' OR trap_interrupt='1' THEN
+								ELSIF SVmode='1' THEN
 									-- Other coprocessors (002-007) not present in this system
 									-- Generate F-line exception for coprocessor not present
-									-- Allow operation during interrupt processing (supervisor mode transition)
+									-- MC68020 SECURITY FIX: Only allow in supervisor mode, no interrupt bypass
 									trap_1111 <= '1';
 									trapmake <= '1';
 								ELSE
@@ -4286,8 +4287,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									trapmake <= '1';
 								END IF;
 							ELSE
-								IF SVmode='1' OR interrupt='1' OR setinterrupt='1' OR trap_interrupt='1' THEN
-									-- Allow operation during interrupt processing (supervisor mode transition)
+								IF SVmode='1' THEN
+									-- MC68020 SECURITY FIX: Only allow in supervisor mode, no interrupt bypass
 									trap_1111 <= '1';
 									trapmake <= '1';
 								ELSE
@@ -4308,10 +4309,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									IF decodeOPC='1' THEN
 										next_micro_state <= fpu1;
 									END IF;
-								ELSIF SVmode='1' OR interrupt='1' OR setinterrupt='1' OR trap_interrupt='1' THEN
+								ELSIF SVmode='1' THEN
 									-- Other coprocessors (002-007) not present in this system
 									-- Generate F-line exception for coprocessor not present
-									-- Allow operation during interrupt processing (supervisor mode transition)
+									-- MC68020 SECURITY FIX: Only allow in supervisor mode, no interrupt bypass
 									trap_1111 <= '1';
 									trapmake <= '1';
 								ELSE
@@ -4331,10 +4332,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									IF decodeOPC='1' THEN
 										next_micro_state <= fpu1;
 									END IF;
-								ELSIF SVmode='1' OR interrupt='1' OR setinterrupt='1' OR trap_interrupt='1' THEN
+								ELSIF SVmode='1' THEN
 									-- Other coprocessors (002-007) not present in this system
 									-- Generate F-line exception for coprocessor not present
-									-- Allow operation during interrupt processing (supervisor mode transition)
+									-- MC68020 SECURITY FIX: Only allow in supervisor mode, no interrupt bypass
 									trap_1111 <= '1';
 									trapmake <= '1';
 								ELSE

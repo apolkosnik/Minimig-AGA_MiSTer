@@ -113,20 +113,20 @@ begin
 		ea_register <= opcode(2 downto 0);
 		
 		-- Extension word formats vary by instruction type
-		-- For general instructions: 0 R/M 0 SF fff ooooooo 0 DF nnn
-		--   R/M = register/memory bit
-		--   SF = source format
-		--   fff = source specifier
-		--   ooooooo = opmode (operation)
-		--   DF = destination format  
-		--   nnn = destination register
+		-- For general instructions: 0 R/M 0 fff SSS ooooooo 0 DF nnn (per WinUAE table68k)
+		--   R/M = register/memory bit (bit 14)
+		--   fff = source specifier (bits 15-13)
+		--   SSS = source format (bits 12-10)
+		--   ooooooo = opmode (operation) (bits 9-3)
+		--   DF = destination format (bits 2-1)
+		--   nnn = destination register (bits 2-0)
 		
 		if inst_type_bits = "000" then  -- General instruction (always has extension)
 			-- FIXED: Always use extension_word for format/opcode fields
 			-- All general FPU instructions (including register-direct) need extension word
 			format_field <= extension_word(12 downto 10);	-- Source format from extension word
 			opmode_field <= extension_word(9 downto 3);		-- Operation from extension word
-			rm_field <= extension_word(12 downto 10);		-- Source specifier 
+			rm_field <= extension_word(15 downto 13);		-- Source specifier (corrected bit range)
 			rn_field <= extension_word(2 downto 0);			-- Destination register
 		else
 			format_field <= "000";
@@ -206,6 +206,7 @@ begin
 							-- Check if this is control register FMOVEM
 							if extension_word(12 downto 10) /= "000" and extension_word(7 downto 0) = "00000000" then
 								instruction_type_int <= INST_FMOVEM_CR;  -- FMOVEM control registers
+								privileged_instruction <= '1';  -- Control register access requires supervisor mode
 							elsif extension_word(12 downto 8) = "00000" then
 								instruction_type_int <= INST_FMOVEM;     -- Valid FP register FMOVEM
 							else
@@ -222,6 +223,7 @@ begin
 				when "111" =>  -- FMOVE from memory or FMOVE control register
 					if extension_word(15 downto 13) = "100" then
 						instruction_type_int <= INST_FMOVE_CR;   -- FMOVE control register
+						privileged_instruction <= '1';  -- Control register access requires supervisor mode
 					else
 						instruction_type_int <= INST_FMOVE_MEM;  -- FMOVE <ea>,FPn
 					end if;
@@ -263,17 +265,20 @@ begin
 				valid_format <= '0';
 		end case;
 		
-		-- Check opmode validity (simplified - could be expanded)
-		-- Most opcodes 0x00-0x7F are valid
-		if opmode_field(6) = '0' then
+		-- Enhanced opmode validity check (per WinUAE table68k)
+		-- Valid operation ranges: 0x00-0x3F for most operations, specific patterns for transcendental
+		-- Use range checks instead of case ranges for VHDL compatibility
+		if (opmode_field >= "0000000" and opmode_field <= "0001111") or  -- Basic arithmetic (0x00-0x0F)
+		   (opmode_field >= "0100000" and opmode_field <= "0101111") or  -- Comparison ops (0x20-0x2F)
+		   (opmode_field >= "0001100" and opmode_field <= "0011111") then -- Transcendental (0x0C-0x1F)
 			valid_opmode <= '1';
 		else
 			valid_opmode <= '0';
 		end if;
 		
-		-- Overall validity
-		valid_instruction <= decode_enable and valid_f_line and valid_coprocessor_id;
-		illegal_instruction <= decode_enable and not (valid_f_line and valid_coprocessor_id and valid_format);
+		-- Overall validity (enhanced with comprehensive validation)
+		valid_instruction <= decode_enable and valid_f_line and valid_coprocessor_id and valid_format and valid_opmode;
+		illegal_instruction <= decode_enable and not (valid_f_line and valid_coprocessor_id and valid_format and valid_opmode);
 		
 		-- Mark unimplemented instructions
 		-- Transcendental functions are now supported

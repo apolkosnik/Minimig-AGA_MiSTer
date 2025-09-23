@@ -137,6 +137,7 @@ architecture rtl of TG68K_FPU is
 	signal fpiar_valid : std_logic := '0';  -- FPIAR contains valid instruction address
 	signal fpcr_rounding_mode_valid : std_logic := '1';  -- Rounding mode bits are valid
 	signal fpcr_precision_valid : std_logic := '1';  -- Precision control bits are valid
+	signal fpcr_precision_bits : std_logic_vector(1 downto 0);  -- Cached precision control bits
 	signal fpsr_condition_code_valid : std_logic := '1';  -- Condition codes are valid
 	-- CLEANUP: Removed fpsr_quotient_valid - never used, saves 1 register bit
 	
@@ -1895,7 +1896,7 @@ begin
 														fp_to_int_result <= fp_registers(to_integer(unsigned(decoder_source_reg)))(63 downto 32);
 													when 1 to 31 =>
 														-- Shift right by fp_to_int_shift bits to extract integer portion
-														fp_to_int_result <= std_logic_vector(shift_right(unsigned(fp_registers(to_integer(unsigned(decoder_source_reg)))(63 downto 0)), fp_to_int_shift))(31 downto 0);
+														fp_to_int_result <= std_logic_vector(shift_right(unsigned(fp_registers(to_integer(unsigned(decoder_source_reg)))(63 downto 0)), fp_to_int_shift)(31 downto 0));
 													when others =>
 														fp_to_int_result <= (others => '0');
 												end case;
@@ -2586,8 +2587,9 @@ begin
 								-- No trapping exception, continue with result
 								-- ACTUAL IMPLEMENTATION: Apply precision control enforcement
 								if fpcr_precision_valid = '1' then
-									-- Apply FPCR precision control (bits 7:6) 
-									case get_fpcr_precision(fpcr) is
+									-- Apply FPCR precision control (bits 7:6)
+									fpcr_precision_bits <= get_fpcr_precision(fpcr);
+									case fpcr_precision_bits is
 										when "00" =>  -- Extended precision (80-bit) - no reduction needed
 											result_data <= final_result;
 										when "01" =>  -- Single precision (32-bit) - round to single precision
