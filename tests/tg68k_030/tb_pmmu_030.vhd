@@ -41,7 +41,7 @@ architecture behavior of tb_pmmu_030 is
       cache_inhibit  : out std_logic;
       write_protect  : out std_logic;
       fault          : out std_logic;
-      fault_status   : out std_logic_vector(7 downto 0);
+      fault_status   : out std_logic_vector(31 downto 0);
       -- Walker memory interface
       mem_req        : out std_logic;
       mem_addr       : out std_logic_vector(31 downto 0);
@@ -83,7 +83,7 @@ architecture behavior of tb_pmmu_030 is
   signal cache_inhibit : std_logic;
   signal write_protect : std_logic;
   signal fault : std_logic;
-  signal fault_status : std_logic_vector(7 downto 0);
+    signal fault_status : std_logic_vector(31 downto 0);
   
   -- Walker memory interface
   signal mem_req : std_logic;

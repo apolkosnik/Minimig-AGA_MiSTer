@@ -1116,6 +1116,8 @@ begin
       walker_fault_ack_pending <= '0';
       mmusr_update_req <= '0';
       mmusr_update_value <= (others => '0');
+      -- Initialize PLRU tree
+      atc_plru_tree <= (others => '0');
     elsif rising_edge(clk) then
       status_tmp := fault_status_reg;
 
@@ -1508,6 +1510,8 @@ begin
                 write_protect => atc_attr(hit_idx)(0),   -- WP bit from page attributes  
                 transparent => '0'                       -- Not a transparent translation
               );
+              -- Update PLRU tree to mark this entry as most recently used
+              atc_plru_tree <= plru_update_tree(atc_plru_tree, hit_idx);
               report "VALID_ACCESS: phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
             end if;
           else
@@ -1964,8 +1968,7 @@ begin
           atc_is_insn(victim_idx)   <= saved_is_insn;
           atc_valid(victim_idx)     <= '1';
 
-          -- Update PLRU tree to mark this entry as most recently used
-          atc_plru_tree <= plru_update_tree(atc_plru_tree, victim_idx);
+          -- PLRU tree update moved to translation process to avoid driver conflict
 
           -- Update round-robin as fallback (for debugging/fallback)
           if atc_rr = ATC_ENTRIES-1 then

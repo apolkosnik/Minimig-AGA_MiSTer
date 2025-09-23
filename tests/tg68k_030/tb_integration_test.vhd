@@ -18,7 +18,7 @@ architecture behavior of tb_integration_test is
     generic(
       CPU : std_logic_vector(1 downto 0) := "01"
     );
-    port(        
+    port(
       CLK : in std_logic;
       RESET : inout std_logic;
       HALT : inout std_logic;
@@ -34,7 +34,15 @@ architecture behavior of tb_integration_test is
       DTACK : in std_logic;
       E : out std_logic;
       VPA : in std_logic;
-      VMA : out std_logic
+      VMA : out std_logic;
+      -- Cache memory interface (68030 only)
+      cache_req : buffer std_logic;
+      cache_addr : buffer std_logic_vector(31 downto 0);
+      cache_data : in std_logic_vector(15 downto 0);
+      cache_ack : in std_logic;
+      -- Cache control
+      cache_hit : out std_logic;
+      cache_miss : out std_logic
     );
   end component;
 
@@ -56,6 +64,14 @@ architecture behavior of tb_integration_test is
   signal E : std_logic := '1';
   signal VPA : std_logic := '1';
   signal VMA : std_logic := '1';
+
+  -- Cache interface signals
+  signal cache_req : std_logic := '0';
+  signal cache_addr : std_logic_vector(31 downto 0) := (others => '0');
+  signal cache_data : std_logic_vector(15 downto 0) := (others => '0');
+  signal cache_ack : std_logic := '0';
+  signal cache_hit : std_logic := '0';
+  signal cache_miss : std_logic := '0';
 
   -- Memory simulation
   type memory_t is array(0 to 4095) of std_logic_vector(15 downto 0);
@@ -93,7 +109,14 @@ begin
       DTACK => DTACK,
       E => E,
       VPA => VPA,
-      VMA => VMA
+      VMA => VMA,
+      -- Cache interface
+      cache_req => cache_req,
+      cache_addr => cache_addr,
+      cache_data => cache_data,
+      cache_ack => cache_ack,
+      cache_hit => cache_hit,
+      cache_miss => cache_miss
     );
 
   -- Clock generation
