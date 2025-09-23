@@ -103,7 +103,12 @@ COMPONENT TG68KdotC_Kernel
       cache_op_cache  : out std_logic_vector(1 downto 0);
       cacr_ie         : out std_logic;
       cacr_de         : out std_logic;
-      cacr_freeze     : out std_logic
+      cacr_freeze     : out std_logic;
+-- PMMU address interface (68030)
+      pmmu_addr_log   : out std_logic_vector(31 downto 0);
+      pmmu_addr_phys  : out std_logic_vector(31 downto 0);
+-- Cache operation address (68030)
+      cache_op_addr   : out std_logic_vector(31 downto 0)
 --      longword       : out std_logic;
 --      clr_berr       : out std_logic;
    );
@@ -122,8 +127,10 @@ COMPONENT TG68K_Cache_030
       cpush_req      : in  std_logic;
       cache_op_scope : in  std_logic_vector(1 downto 0);
       cache_op_cache : in  std_logic_vector(1 downto 0);
+      cache_op_addr  : in  std_logic_vector(31 downto 0);
       -- Instruction Cache Interface
       i_addr         : in  std_logic_vector(31 downto 0);
+      i_addr_phys    : in  std_logic_vector(31 downto 0);
       i_req          : in  std_logic;
       i_data         : out std_logic_vector(31 downto 0);
       i_hit          : out std_logic;
@@ -133,9 +140,11 @@ COMPONENT TG68K_Cache_030
       i_fill_valid   : in  std_logic;
       -- Data Cache Interface
       d_addr         : in  std_logic_vector(31 downto 0);
+      d_addr_phys    : in  std_logic_vector(31 downto 0);
       d_req          : in  std_logic;
       d_we           : in  std_logic;
       d_data_in      : in  std_logic_vector(31 downto 0);
+      d_be           : in  std_logic_vector(3 downto 0);
       d_data_out     : out std_logic_vector(31 downto 0);
       d_hit          : out std_logic;
       d_fill_req     : out std_logic;
@@ -182,6 +191,11 @@ COMPONENT TG68K_Cache_030
    SIGNAL cacr_ie         : std_logic;
    SIGNAL cacr_de         : std_logic;
    SIGNAL cacr_freeze     : std_logic;
+
+   -- PMMU address signals (68030)
+   SIGNAL pmmu_addr_log   : std_logic_vector(31 downto 0);
+   SIGNAL pmmu_addr_phys  : std_logic_vector(31 downto 0);
+   SIGNAL cache_op_addr   : std_logic_vector(31 downto 0);
 
    -- Cache interface signals  
    SIGNAL i_cache_addr    : std_logic_vector(31 downto 0);
@@ -267,7 +281,12 @@ cpu1: TG68KdotC_Kernel
       cache_op_cache => cache_op_cache,   -- : out std_logic_vector(1 downto 0);
       cacr_ie => cacr_ie,                 -- : out std_logic;
       cacr_de => cacr_de,                 -- : out std_logic;
-      cacr_freeze => cacr_freeze          -- : out std_logic
+      cacr_freeze => cacr_freeze,         -- : out std_logic
+      -- PMMU address interface (68030)
+      pmmu_addr_log => pmmu_addr_log,     -- : out std_logic_vector(31 downto 0);
+      pmmu_addr_phys => pmmu_addr_phys,   -- : out std_logic_vector(31 downto 0)
+      -- Cache operation address (68030)
+      cache_op_addr => cache_op_addr      -- : out std_logic_vector(31 downto 0)
    );
  
    PROCESS (CLK)
@@ -408,8 +427,10 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
       cpush_req      => cache_cpush_req,
       cache_op_scope => cache_op_scope,
       cache_op_cache => cache_op_cache,
+      cache_op_addr  => cache_op_addr,
       -- Instruction Cache Interface
       i_addr         => i_cache_addr,
+      i_addr_phys    => pmmu_addr_phys,   -- Physical address from PMMU
       i_req          => i_cache_req,
       i_data         => i_cache_data,
       i_hit          => i_cache_hit,
@@ -419,8 +440,10 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
       i_fill_valid   => i_fill_valid,
       -- Data Cache Interface
       d_addr         => d_cache_addr,
+      d_addr_phys    => pmmu_addr_phys,   -- Physical address from PMMU
       d_req          => d_cache_req,
       d_we           => d_cache_we,
+      d_be           => "1111",           -- All bytes enabled for now
       d_data_in      => d_cache_data_in,
       d_data_out     => d_cache_data_out,
       d_hit          => d_cache_hit,

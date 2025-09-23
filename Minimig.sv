@@ -436,7 +436,21 @@ wire        ramshared;
 wire [7:0] toccata_base;
 wire toccata_ena;
 
-cpu_wrapper cpu_wrapper
+// 68030 Cache interface signals
+wire        cpu_cache_req;
+wire [31:0] cpu_cache_addr;
+wire [15:0] cpu_cache_data;
+wire        cpu_cache_ack;
+
+// Cache fill interface - connect cache requests to RAM
+assign cpu_cache_data = ram_dout;
+assign cpu_cache_ack = ram_ready & cpu_cache_req;
+
+cpu_wrapper
+#(
+	.USE_68030_CACHE(1)  // Enable new 68030 cache implementation
+)
+cpu_wrapper
 (
 	.reset        (cpu_rst         ),
 	.reset_out    (cpu_nrst_out    ),
@@ -484,7 +498,13 @@ cpu_wrapper cpu_wrapper
 	//custom CPU signals
 	.cpustate     (cpu_state       ),
 	.cacr         (cpu_cacr        ),
-	.nmi_addr     (cpu_nmi_addr    )
+	.nmi_addr     (cpu_nmi_addr    ),
+
+	// 68030 Cache interface
+	.cache_req    (cpu_cache_req   ),
+	.cache_addr   (cpu_cache_addr  ),
+	.cache_data   (cpu_cache_data  ),
+	.cache_ack    (cpu_cache_ack   )
 );
 
 wire [15:0] ram_dout1;

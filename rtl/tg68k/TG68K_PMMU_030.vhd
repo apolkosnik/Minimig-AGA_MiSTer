@@ -70,8 +70,21 @@ architecture rtl of TG68K_PMMU_030 is
   signal SCC    : std_logic_vector(31 downto 0); -- Stack Change Control
   signal AC     : std_logic_vector(31 downto 0); -- Access Control
 
-  -- Internal
+  -- Internal  
   signal tc_en  : std_logic; -- translation enable bit (TC[31] in some docs; keep flexible here)
+  
+  -- MC68030 register write masks (workaround for VHDL synthesis issues)
+  -- TC register mask: preserve E(31), SRE(25), FCL(24), and all field bits (23-0), clear reserved bits 30-26
+  constant TC_WRITE_MASK : std_logic_vector(31 downto 0) := "10000011111111111111111111111111";
+
+  -- TTR register mask: preserve address bits (31-16), FC bits (7-4), control bits (2-0), clear reserved bits 15-8,3
+  constant TTR_WRITE_MASK : std_logic_vector(31 downto 0) := "11111111111111110000000011110111";
+
+  -- CRP/SRP HIGH mask: preserve table address (31-4), clear reserved bits (3-0)
+  constant CRP_HIGH_MASK : std_logic_vector(31 downto 0) := "11111111111111111111111111110000";
+
+  -- CRP/SRP LOW mask: preserve DT field (15-8), clear reserved bits (31-16,7-0)
+  constant CRP_LOW_MASK : std_logic_vector(31 downto 0) := "00000000000000001111111100000000";
   
   -- Translation result latches
   signal addr_phys_reg      : std_logic_vector(31 downto 0) := (others => '0');
@@ -124,8 +137,10 @@ architecture rtl of TG68K_PMMU_030 is
   constant DEFAULT_TC_IS   : integer := 0;
   signal tc_idx_bits      : tc_bits_array_t := DEFAULT_TC_BITS;
   signal tc_initial_shift : integer range 0 to 15 := DEFAULT_TC_IS;
-  signal tc_page_size     : integer range 0 to 15 := 0;
+  signal tc_page_size     : integer range 0 to 7 := 0;
   signal tc_page_shift    : integer range 0 to 31 := 12;
+  signal tc_sre           : std_logic := '0';  -- Supervisor Root Enable
+  signal tc_fcl           : std_logic := '0';  -- Function Code Lookup
 
   -- MMUSR update handshake between translation pipeline and register file
   signal mmusr_update_req   : std_logic := '0';
@@ -246,23 +261,25 @@ architecture rtl of TG68K_PMMU_030 is
 
   function align_addr(addr : std_logic_vector(31 downto 0);
                       shift : integer) return std_logic_vector is
-    variable res : std_logic_vector(31 downto 0) := addr;
-    variable lim : integer := shift;
+    variable result : std_logic_vector(31 downto 0) := addr;
+    variable mask : std_logic_vector(31 downto 0) := (others => '1');
   begin
-    if lim > 32 then
-      lim := 32;
+    if shift <= 0 or shift >= 32 then
+      return addr; -- No alignment needed
     end if;
-    if lim > 0 then
-      res(lim-1 downto 0) := (others => '0');
-    end if;
-    return res;
+    
+    -- Create alignment mask by shifting (synthesis-friendly)
+    mask := std_logic_vector(shift_left(unsigned(mask), shift));
+    result := addr and mask;
+    
+    return result;
   end function;
 
   -- Calculate page offset bits based on MC68030 PS field (TC bits 23:20)
   function get_page_offset_bits(ps_field : integer) return integer is
   begin
     case ps_field is
-      when 0 => return 12;  -- 4KB (MC68030 default for PS=0)
+      when 0 => return 8;   -- 256 bytes (MC68030 PS=0 maps to 256B pages)
       when 1 => return 9;   -- 512 bytes
       when 2 => return 10;  -- 1KB
       when 3 => return 11;  -- 2KB
@@ -336,12 +353,20 @@ architecture rtl of TG68K_PMMU_030 is
     fc_mask    := tt(12 downto 8);  -- FC mask
     addr_hi    := addr(31 downto 24); -- Address high byte
     
+    -- Early exit if TTR is disabled - prevents any false matches
+    if enable = '0' then
+      matched := '0';
+      ci := '0';
+      wp := '0';
+      return;
+    end if;
+    
     -- Address match: MC68030 TTR mask logic
     -- mask=1 means "must match", mask=0 means "don't care"
     -- Match when all masked bits of addr equal all masked bits of base
     -- Implementation: XOR to find differences, then mask to ignore don't-care bits
     -- If result is zero, all required bits match
-    if ((addr_hi xor base) and mask) = x"00" then
+    if ((addr_hi XOR base) AND mask) = x"00" then
       addr_match := '1';
     else
       addr_match := '0';
@@ -349,28 +374,24 @@ architecture rtl of TG68K_PMMU_030 is
     
     -- Function code match: MC68030 TTR FC mask implementation
     -- FC mask bits (12:8) control which function codes are allowed
-    -- Each bit position corresponds to a specific function code:
-    -- Bit 12: FC=4 (unused), Bit 11: FC=3 (unused), Bit 10: FC=2 (supervisor data)
-    -- Bit 9: FC=1 (supervisor instruction), Bit 8: FC=0 (user data), etc.
-    -- However, MC68030 uses a simpler model: check if FC matches the I/D and S/U expectation
+    -- MC68030 Function Code Specification:
+    -- FC=001: User Data
+    -- FC=010: User Program (Instruction)  
+    -- FC=101: Supervisor Data
+    -- FC=110: Supervisor Program (Instruction)
+    -- FC=000,011,100,111: Reserved
     
-    -- Simple but correct implementation: check data vs instruction access
-    -- TTR should handle both instruction and data accesses appropriately
-    -- For proper MC68030 compatibility, check if the access type matches TTR configuration
     if fc_mask = "00000" then
       fc_match := '1'; -- Default: allow all function codes when mask is 0
     else
       -- Check if the function code matches the mask
-      -- Convert 3-bit FC to a bit position and check if that bit is set in fc_mask
+      -- Map MC68030 function codes to TTR FC mask bit positions
       case fc is
-        when "000" => fc_match := fc_mask(0); -- User data
-        when "001" => fc_match := fc_mask(1); -- User instruction
-        when "010" => fc_match := fc_mask(2); -- User instruction (alternate)
-        when "011" => fc_match := fc_mask(3); -- User data (alternate)  
-        when "100" => fc_match := fc_mask(4); -- Reserved
-        when "101" => fc_match := fc_mask(2); -- Supervisor data
-        when "110" => fc_match := fc_mask(1); -- Supervisor instruction
-        when "111" => fc_match := fc_mask(3); -- Supervisor data (alternate)
+        when "001" => fc_match := fc_mask(0); -- User Data → bit 0
+        when "010" => fc_match := fc_mask(1); -- User Program → bit 1
+        when "101" => fc_match := fc_mask(2); -- Supervisor Data → bit 2
+        when "110" => fc_match := fc_mask(3); -- Supervisor Program → bit 3
+        when "000" | "011" | "100" | "111" => fc_match := fc_mask(4); -- Reserved → bit 4
         when others => fc_match := '0';
       end case;
     end if;
@@ -393,11 +414,23 @@ architecture rtl of TG68K_PMMU_030 is
       when others => super_match := '0';                  -- Reserved
     end case;
     
-    -- Overall match
-    if enable = '1' and addr_match = '1' and fc_match = '1' and super_match = '1' then
+    -- Overall match - MUST check enable first
+    if enable = '1' AND addr_match = '1' AND fc_match = '1' AND super_match = '1' then
       matched := '1';
       ci := tt(1);  -- Cache inhibit
-      wp := tt(0);  -- Write protect  
+      wp := tt(0);  -- Write protect
+      -- Debug for write protection test
+      if addr(31 downto 12) = x"00002" then
+        report "TTR_MATCH_DEBUG: addr=0x" & slv_to_hstring(addr) & 
+               " base=0x" & slv_to_hstring("000000" & base) &
+               " mask=0x" & slv_to_hstring("000000" & mask) &
+               " addr_hi=0x" & slv_to_hstring("000000" & addr_hi) &
+               " enable=" & std_logic'image(enable) &
+               " addr_match=" & std_logic'image(addr_match) &
+               " fc_match=" & std_logic'image(fc_match) &
+               " super_match=" & std_logic'image(super_match) &
+               " tt_reg=0x" & slv_to_hstring(tt) severity note;
+      end if;
     else
       matched := '0';
       ci := '0';
@@ -443,10 +476,11 @@ architecture rtl of TG68K_PMMU_030 is
     
     -- Calculate shift amount for this level
     -- MC68030 format: [31:x] [Level0] [Level1] [Level2] [Level3] [IS bits]
-    -- For each level, sum up the bits that come after it (lower levels + IS)
+    -- For each level, sum up the bits that come after it (ALL lower levels + IS)
     remaining_bits := initial_shift; -- Start with IS (initial shift bits)
     
-    -- Add bits from levels that come after this one
+    -- Add bits from ALL levels that come after this one (0 is highest, 3 is lowest)
+    -- Use explicit checks instead of variable loop bounds (synthesis compatible)
     if level < 1 then remaining_bits := remaining_bits + idx_bits(1); end if;
     if level < 2 then remaining_bits := remaining_bits + idx_bits(2); end if;
     if level < 3 then remaining_bits := remaining_bits + idx_bits(3); end if;
@@ -462,7 +496,7 @@ architecture rtl of TG68K_PMMU_030 is
     -- Extract bits by shifting right and masking
     temp_addr := unsigned(addr);
     temp_addr := shift_right(temp_addr, shift_amount);
-    result := to_integer(temp_addr and to_unsigned((2**mask_width) - 1, 32));
+    result := to_integer(temp_addr AND to_unsigned((2**mask_width) - 1, 32));
     
     return result;
   end function;
@@ -478,7 +512,7 @@ architecture rtl of TG68K_PMMU_030 is
   -- Check if descriptor is a valid table descriptor
   function desc_is_table(desc : std_logic_vector(31 downto 0)) return boolean is
   begin
-    return desc(1 downto 0) = "10" or desc(1 downto 0) = "11"; -- Table descriptors
+    return desc(1 downto 0) = "10" OR desc(1 downto 0) = "11"; -- Table descriptors
   end function;
 
   -- Check if descriptor is valid (not invalid type 00)
@@ -507,7 +541,7 @@ architecture rtl of TG68K_PMMU_030 is
     if is_supervisor_fc then
       return true; -- Supervisor access - allowed to both types
     else
-      return not is_supervisor_page; -- User access - only to user pages (desc(7)=1)
+      return NOT is_supervisor_page; -- User access - only to user pages (desc(7)=1)
     end if;
   end function;
   
@@ -538,7 +572,6 @@ architecture rtl of TG68K_PMMU_030 is
   ) return std_logic_vector is
     variable result : std_logic_vector(31 downto 0);
   begin
-    result := (others => '0');
     result(15) := bus_error;
     result(14) := limit_violation;
     result(13) := supervisor_violation;
@@ -550,6 +583,10 @@ architecture rtl of TG68K_PMMU_030 is
     -- Bits 7-5 reserved (0)
     result(4 downto 3) := level;
     -- Bits 2-0 reserved (0)
+    -- Ensure reserved bits are always 0 (force correct MC68030 format)
+    result(7 downto 5) := "000";  -- Reserved bits must be 0
+    result(2 downto 0) := "000";  -- Reserved bits must be 0
+    result := (others => '0');
     return result;
   end function;
   
@@ -565,6 +602,12 @@ architecture rtl of TG68K_PMMU_030 is
     result(11) := write_protect;  -- WP bit  
     result(9) := transparent;     -- T bit
     result(8) := '1';             -- R bit (resident - translation successful)
+    -- Ensure reserved bits are always 0 (force correct MC68030 format)
+    result(31 downto 16) := (others => '0');  -- Upper bits reserved
+    result(15 downto 13) := "000";            -- Reserved fault bits for success case
+    result(10) := '0';                        -- Modified bit (not set for success)
+    result(7 downto 5) := "000";              -- Reserved bits must be 0
+    result(4 downto 0) := "00000";            -- Reserved bits must be 0  
     return result;
   end function;
 
@@ -594,51 +637,108 @@ begin
     elsif rising_edge(clk) then
       atc_flush_req <= '0';
       mmusr_update_ack <= '0';
-      if reg_we = '1' then
-        case reg_sel is
-          when x"0" => TC    <= reg_wdat;
-          when x"1" => if reg_part = '1' then CRP_H <= reg_wdat; else CRP_L <= reg_wdat; end if;
-          when x"2" => if reg_part = '1' then SRP_H <= reg_wdat; else SRP_L <= reg_wdat; end if;
-          when x"3" => 
-            TT0   <= reg_wdat;
-            atc_flush_req <= '1';
-          when x"4" => 
-            TT1   <= reg_wdat;
-            atc_flush_req <= '1';
-          when x"5" => MMUSR <= reg_wdat; -- MMUSR is usually write-1-to-clear bits; kept simple initially
-          when x"6" => CAL   <= reg_wdat;
-          when x"7" => VAL   <= reg_wdat;
-          when x"8" => SCC   <= reg_wdat;
-          when x"9" => AC    <= reg_wdat;
-          when others => null;
-        end case;
-      end if;
-      
-      -- PTEST instruction: Perform actual translation test and update MMUSR
+      -- Handle MMUSR updates with MC68030-compliant priority (avoid multiple drivers)
       if ptest_update_mmusr = '1' then
-        -- Trigger a PTEST translation using the saved PMMU address and function code
-        -- This will be handled by the translation process which will update MMUSR
-        -- Set a flag to indicate this is a PTEST operation (don't fill ATC)
+        -- Highest priority: PTEST instruction (MC68030 specification)
         ptest_active <= '1';
         ptest_addr <= pmmu_addr;
         ptest_fc <= pmmu_fc;
-        -- Start translation request for PTEST
         if tc_en = '0' then
           -- MMU disabled - PTEST always succeeds with identity translation
           MMUSR <= encode_mmusr_success(
             cache_inhibit => '0',        -- No cache inhibit for identity
-            write_protect => '0',        -- No write protect for identity  
+            write_protect => '0',        -- No write protect for identity
             transparent => '0'           -- Not transparent (MMU disabled)
           );
         else
           -- MMU enabled - will be handled by main translation logic
           null; -- Translation process will update MMUSR
         end if;
-      end if;
-
-      if mmusr_update_req = '1' then
+      elsif mmusr_update_req = '1' then
+        -- Medium priority: Translation engine update (automatic updates)
         MMUSR <= mmusr_update_value;
         mmusr_update_ack <= '1';
+      elsif reg_we = '1' then
+        -- Lowest priority: Direct register writes (MC68030 MMUSR is mostly read-only)
+        -- MC68030 Specification: MMU register access requires supervisor mode (FC2=1)
+        if fc(2) = '1' then
+          case reg_sel is
+          when x"0" =>
+            -- MC68030 TC Register Write with proper compliance
+            -- Valid bits: 31(E), 25(SRE), 24(FCL), 23-20(PS), 19-16(IS), 15-12(TIA), 11-8(TIB), 7-4(TIC), 3-0(TID)
+            -- Reserved bits: 30-26, 23(partial validation in PS field), others per MC68030
+            -- Mask reserved bits and flush ATC since TC affects all translations
+            -- Apply MC68030 reserved bit masking manually (workaround for VHDL issue)
+            -- Clear reserved bits 30-26, keep everything else
+            TC(31) <= reg_wdat(31);          -- E (Enable)
+            TC(30 downto 26) <= "00000";     -- Reserved bits (force to 0)
+            TC(25) <= reg_wdat(25);          -- SRE (Supervisor Root Enable)
+            TC(24) <= reg_wdat(24);          -- FCL (Function Code Lookup)
+            TC(23 downto 0) <= reg_wdat(23 downto 0); -- All other valid fields
+            atc_flush_req <= '1'; -- TC changes invalidate all cached translations
+            report "TC_WRITE_MANUAL: input=0x" & slv_to_hstring(reg_wdat) &
+                   " manual_result constructed bit-by-bit" severity note;
+          when x"1" =>
+            -- CRP register write with MC68030 reserved bit masking
+            if reg_part = '1' then
+              -- CRP HIGH: clear reserved bits 3-0
+              CRP_H(31 downto 4) <= reg_wdat(31 downto 4); -- Table address
+              CRP_H(3 downto 0) <= "0000";                 -- Reserved bits
+            else
+              -- CRP LOW: clear reserved bits 31-16 and 7-0, keep DT field 15-8
+              CRP_L(31 downto 16) <= (others => '0');      -- Reserved bits
+              CRP_L(15 downto 8) <= reg_wdat(15 downto 8); -- DT field
+              CRP_L(7 downto 0) <= (others => '0');        -- Reserved bits
+            end if;
+            atc_flush_req <= '1'; -- CRP changes invalidate all cached translations
+          when x"2" =>
+            -- SRP register write with MC68030 reserved bit masking
+            if reg_part = '1' then
+              -- SRP HIGH: clear reserved bits 3-0
+              SRP_H(31 downto 4) <= reg_wdat(31 downto 4); -- Table address
+              SRP_H(3 downto 0) <= "0000";                 -- Reserved bits
+            else
+              -- SRP LOW: clear reserved bits 31-16 and 7-0, keep DT field 15-8
+              SRP_L(31 downto 16) <= (others => '0');      -- Reserved bits
+              SRP_L(15 downto 8) <= reg_wdat(15 downto 8); -- DT field
+              SRP_L(7 downto 0) <= (others => '0');        -- Reserved bits
+            end if;
+            atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
+          when x"3" =>
+            -- TTR0 register write with MC68030 reserved bit masking
+            TT0(31 downto 16) <= reg_wdat(31 downto 16);   -- Address mask/base
+            TT0(15 downto 8) <= (others => '0');           -- Reserved bits
+            TT0(7 downto 4) <= reg_wdat(7 downto 4);       -- Function code bits
+            TT0(3) <= '0';                                  -- Reserved bit
+            TT0(2 downto 0) <= reg_wdat(2 downto 0);       -- Control bits (S,CI,WP)
+            atc_flush_req <= '1';
+            report "TTR0_WRITE_FIXED: input=0x" & slv_to_hstring(reg_wdat) &
+                   " masked with reserved bits cleared" severity note;
+          when x"4" =>
+            -- TTR1 register write with MC68030 reserved bit masking
+            TT1(31 downto 16) <= reg_wdat(31 downto 16);   -- Address mask/base
+            TT1(15 downto 8) <= (others => '0');           -- Reserved bits
+            TT1(7 downto 4) <= reg_wdat(7 downto 4);       -- Function code bits
+            TT1(3) <= '0';                                  -- Reserved bit
+            TT1(2 downto 0) <= reg_wdat(2 downto 0);       -- Control bits (S,CI,WP)
+            atc_flush_req <= '1';
+          when x"5" =>
+            -- MMUSR register: MC68030 MMUSR is mostly read-only with some write-1-to-clear bits
+            -- For now, implement basic write capability for testing purposes
+            -- TODO: Implement proper MC68030 MMUSR semantics (write-1-to-clear for fault bits)
+            MMUSR <= reg_wdat;
+          when x"6" => CAL   <= reg_wdat;
+          when x"7" => VAL   <= reg_wdat;
+          when x"8" => SCC   <= reg_wdat;
+          when x"9" => AC    <= reg_wdat;
+          when others => null;
+          end case;
+        else
+          -- MC68030 Specification: Privilege violation - MMU register access in user mode
+          -- User mode attempts to access MMU registers should be ignored/faulted
+          report "PRIVILEGE_VIOLATION: User mode attempt to write MMU register sel=0x" &
+                 slv_to_hstring(reg_sel) & " FC=" & slv_to_hstring(fc) severity warning;
+        end if;
       end if;
     end if;
   end process;
@@ -650,45 +750,119 @@ begin
       reg_rdat <= (others => '0');
     elsif rising_edge(clk) then
       if reg_re = '1' then
-        case reg_sel is
-          when x"0" => reg_rdat <= TC;
-          when x"1" => if reg_part = '1' then reg_rdat <= CRP_H; else reg_rdat <= CRP_L; end if;
-          when x"2" => if reg_part = '1' then reg_rdat <= SRP_H; else reg_rdat <= SRP_L; end if;
-          when x"3" => reg_rdat <= TT0;
-          when x"4" => reg_rdat <= TT1;
-          when x"5" => reg_rdat <= MMUSR;
-          when x"6" => reg_rdat <= CAL;
-          when x"7" => reg_rdat <= VAL;
-          when x"8" => reg_rdat <= SCC;
-          when x"9" => reg_rdat <= AC;
-          when others => reg_rdat <= (others => '0');
-        end case;
+        -- MC68030 Specification: MMU register access requires supervisor mode (FC2=1)
+        if fc(2) = '1' then
+          case reg_sel is
+            when x"0" => reg_rdat <= TC;
+            when x"1" => if reg_part = '1' then reg_rdat <= CRP_H; else reg_rdat <= CRP_L; end if;
+            when x"2" => if reg_part = '1' then reg_rdat <= SRP_H; else reg_rdat <= SRP_L; end if;
+            when x"3" => reg_rdat <= TT0;
+            when x"4" => reg_rdat <= TT1;
+            when x"5" => reg_rdat <= MMUSR;
+            when x"6" => reg_rdat <= CAL;
+            when x"7" => reg_rdat <= VAL;
+            when x"8" => reg_rdat <= SCC;
+            when x"9" => reg_rdat <= AC;
+            when others => reg_rdat <= (others => '0');
+          end case;
+        else
+          -- MC68030 Specification: Privilege violation - MMU register access in user mode
+          -- User mode attempts to read MMU registers should return zeros or fault
+          reg_rdat <= (others => '0');
+          report "PRIVILEGE_VIOLATION: User mode attempt to read MMU register sel=0x" &
+                 slv_to_hstring(reg_sel) & " FC=" & slv_to_hstring(fc) severity warning;
+        end if;
       end if;
     end if;
   end process;
 
-  -- Extract enable bit from TC (position TBD; keep MSB for now to avoid conflicts)
+  -- Extract TC register fields according to MC68030 specification
+  -- TC Register Format (MC68030):
+  -- Bit 31: E (Enable)
+  -- Bit 25: SRE (Supervisor Root Enable) 
+  -- Bit 24: FCL (Function Code Lookup)
+  -- Bits 23-20: PS (Page Size)
+  -- Bits 19-16: IS (Initial Shift)
+  -- Bits 15-12: TIA (Table A Index)
+  -- Bits 11-8: TIB (Table B Index)
+  -- Bits 7-4: TIC (Table C Index)  
+  -- Bits 3-0: TID (Table D Index)
   tc_en <= TC(31);
+  tc_sre <= TC(25);
+  tc_fcl <= TC(24);
   tc_enable <= tc_en;
   
   process(TC)
     variable ps_val : integer;
-    variable total  : integer;
+    variable total_bits : integer;
+    variable is_bits : integer;
+    variable page_offset_bits : integer;
+    variable tia_bits, tib_bits, tic_bits, tid_bits : integer;
   begin
-    tc_idx_bits(0) <= decode_tc_field(TC(15 downto 12), DEFAULT_TC_BITS(0));
-    tc_idx_bits(1) <= decode_tc_field(TC(11 downto 8),  DEFAULT_TC_BITS(1));
-    tc_idx_bits(2) <= decode_tc_field(TC(7 downto 4),   DEFAULT_TC_BITS(2));
-    tc_idx_bits(3) <= decode_tc_field(TC(3 downto 0),   DEFAULT_TC_BITS(3));
+    -- Decode TC register fields with MC68030 validation
+    tia_bits := decode_tc_field(TC(15 downto 12), DEFAULT_TC_BITS(0));
+    tib_bits := decode_tc_field(TC(11 downto 8),  DEFAULT_TC_BITS(1));
+    tic_bits := decode_tc_field(TC(7 downto 4),   DEFAULT_TC_BITS(2));
+    tid_bits := decode_tc_field(TC(3 downto 0),   DEFAULT_TC_BITS(3));
+    
+    tc_idx_bits(0) <= tia_bits;
+    tc_idx_bits(1) <= tib_bits;
+    tc_idx_bits(2) <= tic_bits;
+    tc_idx_bits(3) <= tid_bits;
 
+    -- Initial Shift (IS) field
     if to_integer(unsigned(TC(19 downto 16))) = 0 then
-      tc_initial_shift <= DEFAULT_TC_IS;
+      is_bits := DEFAULT_TC_IS;
     else
-      tc_initial_shift <= to_integer(unsigned(TC(19 downto 16)));
+      is_bits := to_integer(unsigned(TC(19 downto 16)));
     end if;
+    tc_initial_shift <= is_bits;
 
+    -- Page Size (PS) field - MC68030 valid range is 0-7
     ps_val := to_integer(unsigned(TC(23 downto 20)));
+    -- Clamp invalid PS values (8-15) to valid range (0-7)
+    if ps_val > 7 then
+      ps_val := 7; -- Clamp to maximum valid PS value (32KB pages)
+      report "TC_PS_CLAMP: Invalid page size " & integer'image(to_integer(unsigned(TC(23 downto 20)))) & 
+             " clamped to 7 (32KB pages)" severity warning;
+    end if;
+    page_offset_bits := get_page_offset_bits(ps_val);
     tc_page_size  <= ps_val;
-    tc_page_shift <= get_page_offset_bits(ps_val);
+    tc_page_shift <= page_offset_bits;
+    
+    -- MC68030 Requirement: IS + TIA + TIB + TIC + TID + page_offset_bits = 32
+    total_bits := is_bits + tia_bits + tib_bits + tic_bits + tid_bits + page_offset_bits;
+    
+    -- MC68030 Constraints validation:
+    -- 1. Total bits must equal 32
+    -- 2. TIA must be > 0 (root table must have at least 1 bit)
+    -- 3. If TIB > 0, it must be >= 2 (minimum 4 entries per table)
+    -- 4. Page size must be valid (0-7)
+    if total_bits /= 32 then
+      report "TC_VALIDATION_ERROR: Field sum " & integer'image(total_bits) & " != 32" &
+             " (IS=" & integer'image(is_bits) &
+             " TIA=" & integer'image(tia_bits) &
+             " TIB=" & integer'image(tib_bits) &
+             " TIC=" & integer'image(tic_bits) &
+             " TID=" & integer'image(tid_bits) &
+             " PS_bits=" & integer'image(page_offset_bits) & ")"
+        severity warning;
+    end if;
+    
+    if tia_bits = 0 then
+      report "TC_VALIDATION_ERROR: TIA field must be > 0 (root table needs at least 1 bit)"
+        severity warning;
+    end if;
+    
+    if tib_bits > 0 and tib_bits < 2 then
+      report "TC_VALIDATION_ERROR: TIB field must be >= 2 when used (minimum 4 table entries)"
+        severity warning;
+    end if;
+    
+    if ps_val > 7 then
+      report "TC_VALIDATION_ERROR: Page size " & integer'image(ps_val) & " > 7 (invalid)"
+        severity warning;
+    end if;
   end process;
   
   -- Output the latched results
@@ -786,9 +960,11 @@ begin
           -- Check Transparent Translation first (highest priority)
           ttr_check(TT0, addr_log, fc, is_insn, tmatch0, tci0, twp0);
           ttr_check(TT1, addr_log, fc, is_insn, tmatch1, tci1, twp1);
-          -- Debug: Log TTR check results for failing test addresses
-          if addr_log = x"12343000" or addr_log = x"12344000" then
-            report "DEBUG_TTR: addr=0x" & slv_to_hstring(addr_log) &
+          -- Debug: Log TTR check results for write protection test address
+          if addr_log = x"00002000" then
+            report "DEBUG_TTR_WP: addr=0x" & slv_to_hstring(addr_log) &
+                   " TT0=0x" & slv_to_hstring(TT0) &
+                   " TT1=0x" & slv_to_hstring(TT1) &
                    " tmatch0=" & std_logic'image(tmatch0) &
                    " tmatch1=" & std_logic'image(tmatch1)
               severity note;
@@ -805,6 +981,9 @@ begin
               write_protect => twp0,     -- WP bit from TTR attributes  
               transparent => '1'         -- This IS a transparent translation
             );
+            if addr_log = x"00002000" then
+              report "TTR0_STATUS: Setting transparent status for addr=0x" & slv_to_hstring(addr_log) severity note;
+            end if;
             -- No walker needed for TTR
           elsif tmatch1 = '1' then
             -- TTR1 match - use identity translation with TTR attributes (always successful, no faults)
@@ -855,8 +1034,11 @@ begin
           end loop;
           if hit = '1' then
             -- ATC hit - use cached translation but check access violations
-            -- Check for write protection violation on write access
-            if rw = '0' and atc_attr(hit_idx)(0) = '1' then
+            -- But don't overwrite walker faults that are still pending
+            if walker_fault = '1' and walker_fault_ack_pending = '1' then
+              -- Walker fault is pending - don't overwrite with ATC results
+              report "ATC_SKIP: Skipping ATC processing due to pending walker fault, addr=0x" & slv_to_hstring(addr_log) severity note;
+            elsif rw = '1' and atc_attr(hit_idx)(0) = '1' then
               -- Write to write-protected page - generate fault
               status_tmp := encode_mmusr_fault(
                 bus_error => '0',
@@ -894,20 +1076,35 @@ begin
               report "SUPERVISOR_FAULT_ATC: Setting fault_reg=1 for supervisor violation, addr=0x" & slv_to_hstring(addr_log) severity note;
             else
               -- Valid access - use cached translation and clear any previous faults
-              phys_base := unsigned(atc_phys_base(hit_idx));
-              offset    := unsigned(addr_log) - unsigned(atc_log_base(hit_idx));
-              phys_result := phys_base + offset;
-              addr_phys_reg <= std_logic_vector(phys_result);
-              cache_inhibit_reg <= atc_attr(hit_idx)(1);
-              write_protect_reg <= atc_attr(hit_idx)(0);
-              fault_reg <= '0';
-              -- Set successful translation MMUSR with MC68030 format
-              fault_status_reg <= encode_mmusr_success(
-                cache_inhibit => atc_attr(hit_idx)(1),   -- CI bit from page attributes
-                write_protect => atc_attr(hit_idx)(0),   -- WP bit from page attributes  
-                transparent => '0'                       -- Not a transparent translation
-              );
-              report "ATC_HIT: successful translation, phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
+              -- But don't overwrite walker faults that are still pending
+              if walker_fault = '1' and walker_fault_ack_pending = '1' then
+                -- Walker fault is pending - don't overwrite with successful ATC results
+                report "ATC_SUCCESS_SKIP: Skipping ATC success due to pending walker fault, addr=0x" & slv_to_hstring(addr_log) severity note;
+              else
+                phys_base := unsigned(atc_phys_base(hit_idx));
+                offset    := unsigned(addr_log) - unsigned(atc_log_base(hit_idx));
+                phys_result := phys_base + offset;
+                -- Debug address calculation for PS=0 test
+                if addr_log = x"00001100" then
+                  report "DEBUG_ATC_CALC: addr=0x" & slv_to_hstring(addr_log) &
+                         " phys_base=0x" & slv_to_hstring(std_logic_vector(phys_base)) &
+                         " log_base=0x" & slv_to_hstring(atc_log_base(hit_idx)) &
+                         " offset=0x" & slv_to_hstring(std_logic_vector(offset)) &
+                         " phys_result=0x" & slv_to_hstring(std_logic_vector(phys_result))
+                    severity note;
+                end if;
+                addr_phys_reg <= std_logic_vector(phys_result);
+                cache_inhibit_reg <= atc_attr(hit_idx)(1);
+                write_protect_reg <= atc_attr(hit_idx)(0);
+                fault_reg <= '0';
+                -- Set successful translation MMUSR with MC68030 format
+                fault_status_reg <= encode_mmusr_success(
+                  cache_inhibit => atc_attr(hit_idx)(1),   -- CI bit from page attributes
+                  write_protect => atc_attr(hit_idx)(0),   -- WP bit from page attributes  
+                  transparent => '0'                       -- Not a transparent translation
+                );
+                report "ATC_HIT: successful translation, phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
+              end if;
             end if;
           else
             -- ATC miss - request walker to start (only if no TTR hit and not already pending)
@@ -995,8 +1192,9 @@ begin
         mmusr_update_value <= status_tmp;  -- Full 32-bit MC68030 format
         mmusr_update_req <= '1';
         translation_pending <= '0';
-        -- Debug: Report walker fault processing
-        report "WALKER_FAULT: Setting fault_reg=1 status=0x" & slv_to_hstring(walker_fault_status) &
+        -- Debug: Report walker fault processing with corruption tracking
+        report "WALKER_FAULT: Setting fault_reg=1 walker_status=0x" & slv_to_hstring(walker_fault_status) &
+               " status_tmp=0x" & slv_to_hstring(status_tmp) &
                " addr=0x" & slv_to_hstring(saved_addr_log)
           severity note;
         -- Acknowledge the fault and track pending state
@@ -1040,7 +1238,7 @@ begin
               severity note;
               
             -- Walker filled ATC successfully - check access violations for the original request
-            if saved_rw = '0' and atc_attr(hit_idx)(0) = '1' then
+            if saved_rw = '1' and atc_attr(hit_idx)(0) = '1' then
               -- Write to write-protected page - generate fault
               report "WP_FAULT: Write to WP page detected" severity note;
               status_tmp := encode_mmusr_fault(
@@ -1188,11 +1386,19 @@ begin
             walk_log_base   <= align_addr(saved_addr_log, tc_page_shift);
             walk_phys_base  <= (others => '0');
             -- Don't clear walker fault signals here - they need to persist until consumed
-            -- Use CRP for user space, SRP for supervisor
-            if saved_fc(2) = '1' then -- Supervisor
-              walk_addr <= SRP_L(31 downto 4) & "0000"; -- Root pointer base
-            else -- User
-              walk_addr <= CRP_L(31 downto 4) & "0000"; -- Root pointer base  
+            -- MC68030 Root Pointer Selection:
+            -- Use SRP for supervisor access only when both FC2=1 AND TC.SRE=1
+            -- Otherwise use CRP for all accesses
+            if saved_fc(2) = '1' and tc_sre = '1' then -- Supervisor with SRE enabled
+              walk_addr <= SRP_L(31 downto 4) & "0000"; -- Supervisor Root Pointer
+              report "ROOT_POINTER: Using SRP for supervisor access with SRE=1" severity note;
+            else -- User or supervisor without SRE
+              walk_addr <= CRP_L(31 downto 4) & "0000"; -- CPU Root Pointer
+              if saved_fc(2) = '1' then
+                report "ROOT_POINTER: Using CRP for supervisor access with SRE=0" severity note;
+              else
+                report "ROOT_POINTER: Using CRP for user access" severity note;
+              end if;
             end if;
             wstate <= W_ROOT;
           end if;
@@ -1246,6 +1452,10 @@ begin
                 resident => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 2))
               );
+              -- Debug: Track where bus errors occur
+              report "BUS_ERROR_ROOT: Invalid descriptor at level=" & integer'image(walk_level) &
+                     " addr=0x" & slv_to_hstring(saved_addr_log) &
+                     " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
             elsif desc_is_page(mem_rdat) then
               -- Early termination - this is a page descriptor
@@ -1305,6 +1515,10 @@ begin
                 resident => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 2))
               );
+              -- Debug: Track where bus errors occur
+              report "BUS_ERROR_PTR1: Invalid descriptor at level=" & integer'image(walk_level) &
+                     " addr=0x" & slv_to_hstring(saved_addr_log) &
+                     " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
               -- Debug: Log walker fault for Large Page Translation
               if saved_addr_log = x"00400000" then
@@ -1373,6 +1587,10 @@ begin
                 resident => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 2))
               );
+              -- Debug: Track where bus errors occur
+              report "BUS_ERROR_PTR2: Invalid descriptor at level=" & integer'image(walk_level) &
+                     " addr=0x" & slv_to_hstring(saved_addr_log) &
+                     " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
               -- Debug: Log walker fault for failing test addresses  
               if saved_addr_log = x"12343000" then
@@ -1422,6 +1640,10 @@ begin
                 resident => '0',                 -- Not resident due to fault
                 level => std_logic_vector(to_unsigned(walk_level, 2))
               );
+              -- Debug: Track where bus errors occur
+              report "BUS_ERROR_PTR3: Invalid descriptor at level=" & integer'image(walk_level) &
+                     " addr=0x" & slv_to_hstring(saved_addr_log) &
+                     " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
             end if;
           end if;
@@ -1442,6 +1664,10 @@ begin
               resident => '0',                 -- Not resident due to fault
               level => std_logic_vector(to_unsigned(walk_level, 2))
             );
+            -- Debug: Track where bus errors occur
+            report "BUS_ERROR_PAGE: Invalid page descriptor at level=" & integer'image(walk_level) &
+                   " addr=0x" & slv_to_hstring(saved_addr_log) &
+                   " desc=0x" & slv_to_hstring(walk_desc) severity note;
             wstate <= W_FAULT;
           elsif not access_allowed(walk_desc, saved_fc) then
             -- Supervisor violation - user trying to access supervisor page
@@ -1458,18 +1684,39 @@ begin
               level => std_logic_vector(to_unsigned(walk_level, 2))
             );
             wstate <= W_FAULT;
+          elsif saved_rw = '1' and walk_desc(2) = '1' then
+            -- Write protection violation - write to write-protected page
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '0',                
+              limit_violation => '0',
+              supervisor_violation => '0',
+              cache_inhibit => walk_desc(6),   -- Include page attributes
+              write_protect => '1',            -- This is a write protection fault
+              modified => '0',
+              transparent => '0',
+              resident => '0',                 -- Not resident due to fault
+              level => std_logic_vector(to_unsigned(walk_level, 2))
+            );
+            wstate <= W_FAULT;
+            report "WP_FAULT_WALKER: Write to WP page detected during walk, addr=0x" & slv_to_hstring(saved_addr_log) severity note;
           else
-            -- Valid access - use page size from TC register, not descriptor
-            walk_page_shift <= tc_page_shift;
-            walk_page_size  <= tc_page_size;
-            walk_log_base   <= align_addr(saved_addr_log, tc_page_shift);
-            walk_phys_base  <= phys_base_from_desc(walk_desc, tc_page_shift);
-            -- Debug: Log page size extraction for large page test
-            if saved_addr_log = x"00400000" then
-              report "DEBUG_PAGE_SIZE: desc=0x" & slv_to_hstring(walk_desc) &
-                     " TC_PS=" & integer'image(tc_page_size) &
-                     " shift=" & integer'image(tc_page_shift)
-                severity note;
+            -- Valid access - MC68030 behavior: use descriptor PS if large page, otherwise TC PS
+            if is_large_page(walk_desc) then
+              -- Large page descriptor - use descriptor's PS field
+              walk_page_shift <= get_desc_page_shift(walk_desc);
+              walk_page_size  <= get_desc_page_size(walk_desc);
+              walk_log_base   <= align_addr(saved_addr_log, get_desc_page_shift(walk_desc));
+              walk_phys_base  <= phys_base_from_desc(walk_desc, get_desc_page_shift(walk_desc));
+              report "LARGE_PAGE: Using descriptor PS=" & integer'image(get_desc_page_size(walk_desc)) &
+                     " shift=" & integer'image(get_desc_page_shift(walk_desc)) & 
+                     " for addr=0x" & slv_to_hstring(saved_addr_log) severity note;
+            else
+              -- Regular page - use TC register page size
+              walk_page_shift <= tc_page_shift;
+              walk_page_size  <= tc_page_size;
+              walk_log_base   <= align_addr(saved_addr_log, tc_page_shift);
+              walk_phys_base  <= phys_base_from_desc(walk_desc, tc_page_shift);
             end if;
             walk_attr(2) <= walk_desc(7); -- User accessible (0=supervisor only, 1=user accessible)
             walk_attr(1) <= walk_desc(6); -- Cache inhibit

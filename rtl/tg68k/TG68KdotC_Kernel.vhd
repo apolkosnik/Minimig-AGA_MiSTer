@@ -4490,11 +4490,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		when X"001" => movec_data <= "00000000000000000000000000000" & DFC;
 	  when X"002" => movec_data <= CACR; -- CACR full 32-bit read
 	  when X"802" => movec_data <= CAAR;
-	  when X"004" => movec_data <= pmmu_reg_rdat; -- TT0 -- 68030+
-	  when X"005" => movec_data <= pmmu_reg_rdat; -- TT1 -- 68030+
-	  when X"805" => movec_data <= pmmu_reg_rdat; -- MMUSR -- 68030+
+	  -- 68030 MMU registers accessible via MOVEC: TC, TT0, TT1
 
-	  when X"801" => 
+	  when X"801" =>
 		movec_data <= VBR;
 		--end if;
 	  when others => NULL;
@@ -4512,8 +4510,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
   -- Drive PMMU register interface during PMOVE execution
   process(clk)
     variable sel   : std_logic_vector(3 downto 0);
-    variable msel  : std_logic_vector(3 downto 0);
-    variable mselr : std_logic_vector(3 downto 0);
+    -- msel, mselr variables removed - MOVEC MMU register access no longer supported
   begin
     if rising_edge(clk) then
       if Reset = '1' then
@@ -4522,7 +4519,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         pmmu_reg_sel_d  <= (others => '0');
         pmmu_reg_wdat_d <= (others => '0');
         pmmu_reg_part_d <= '0';
-      elsif clkena_lw = '1' then
+      elsif clkena_lw = '1' OR (CPU="11" AND clkena_in='1' AND (exec(pmmu_wr)='1' OR exec(pmmu_rd)='1')) then
         -- defaults
         pmmu_reg_we_d   <= '0';
         pmmu_reg_re_d   <= '0';
@@ -4532,29 +4529,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
         sel := pmmu_sel_from_brief(brief(11 downto 0));
 
-        -- Handle MOVEC to/from TT0/TT1/MMUSR via PMMU register port (68030 only)
-        if CPU = "11" then
-          -- MOVEC Dn -> <MMU reg>
-          if exec(movec_wr) = '1' then
-            -- Only TT0/TT1/MMUSR are routed to PMMU here
-            -- Use the exact MOVEC brief mapping
-            msel := pmmu_sel_from_movec(brief(11 downto 0));
-            if msel /= x"F" then
-              pmmu_reg_sel_d  <= msel;
-              pmmu_reg_wdat_d <= reg_QA;
-              pmmu_reg_we_d   <= '1';
-            end if;
-          -- MOVEC <MMU reg> -> Dn
-          elsif exec(movec_rd) = '1' then
-            mselr := pmmu_sel_from_movec(brief(11 downto 0));
-            if mselr /= x"F" then
-              pmmu_reg_sel_d <= mselr;
-              pmmu_reg_re_d  <= '1';
-            end if;
-          end if;
-        end if;
+        -- MMU registers (TT0, TT1, MMUSR, etc.) are PMOVE-only on MC68030
+        -- MOVEC attempts to access these registers trigger illegal instruction exceptions
 
-        if exec(pmmu_wr) = '1' then
+        -- PMOVE instruction handling (only if MOVEC is not active to avoid conflicts)
+        if exec(pmmu_wr) = '1' and not (CPU = "11" and exec(movec_wr) = '1') then
           -- PMOVE Dn -> <MMU reg>
           if sel /= x"F" then
             pmmu_reg_sel_d  <= sel;
@@ -4569,7 +4548,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
             end if;
             pmmu_reg_we_d   <= '1';
           end if;
-        elsif exec(pmmu_rd) = '1' then
+        elsif exec(pmmu_rd) = '1' and not (CPU = "11" and exec(movec_rd) = '1') then
           -- PMOVE <MMU reg> -> Dn
           if sel /= x"F" then
             pmmu_reg_sel_d <= sel;
