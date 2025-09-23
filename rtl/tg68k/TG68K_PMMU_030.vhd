@@ -34,6 +34,7 @@ entity TG68K_PMMU_030 is
     rw             : in  std_logic; -- '1' read, '0' write
     fc             : in  std_logic_vector(2 downto 0);
     addr_log       : in  std_logic_vector(31 downto 0);
+    access_size    : in  std_logic_vector(1 downto 0) := "10"; -- "00"=byte, "01"=word, "10"=long, "11"=reserved
     addr_phys      : out std_logic_vector(31 downto 0);
     cache_inhibit  : out std_logic;
     write_protect  : out std_logic;
@@ -109,8 +110,9 @@ architecture rtl of TG68K_PMMU_030 is
   signal saved_rw           : std_logic := '0';
   signal translation_pending : std_logic := '0';
 
-  -- Simple ATC (Address Translation Cache), 8 entries, dynamic page sizes
-  constant ATC_ENTRIES : integer := 8;
+  -- Enhanced ATC (Address Translation Cache), 16 entries, dynamic page sizes
+  -- Increased from 8 to 16 entries for better hit rates, especially in multi-tasking scenarios
+  constant ATC_ENTRIES : integer := 16;
   type atc_attr_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(2 downto 0);  -- {SUPER, CI, WP}
   type atc_val_t  is array(0 to ATC_ENTRIES-1) of std_logic;
   type atc_base_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(31 downto 0);
@@ -127,7 +129,11 @@ architecture rtl of TG68K_PMMU_030 is
   signal atc_is_insn : atc_isn_t;
   signal atc_shift : atc_shift_t;
   signal atc_page_size : atc_page_size_t;
-  signal atc_rr    : integer range 0 to ATC_ENTRIES-1 := 0; -- simple round-robin
+  signal atc_rr    : integer range 0 to ATC_ENTRIES-1 := 0; -- simple round-robin (fallback)
+
+  -- PLRU (Pseudo-Least Recently Used) replacement for 16-entry ATC
+  -- Uses a 15-bit binary tree to track usage for efficient replacement
+  signal atc_plru_tree : std_logic_vector(14 downto 0) := (others => '0'); -- 15 bits for 16 entries
   signal walk_req  : std_logic;
   signal walker_completed : std_logic := '0';
 
@@ -314,6 +320,213 @@ architecture rtl of TG68K_PMMU_030 is
   function is_large_page(desc : std_logic_vector(31 downto 0)) return boolean is
   begin
     return get_desc_page_size(desc) > 0;
+  end function;
+
+  -- PLRU (Pseudo-Least Recently Used) functions for 16-entry ATC
+  -- Binary tree implementation: 15 bits for 16 entries
+  -- Tree structure: bit 0 = root, left subtree = 0, right subtree = 1
+  function plru_get_victim(tree : std_logic_vector(14 downto 0)) return integer is
+    variable idx : integer := 0;
+  begin
+    -- Start at root and follow the tree to find victim
+    if tree(0) = '0' then
+      -- Go left subtree (entries 0-7)
+      idx := 1;
+      if tree(1) = '0' then
+        idx := 3;
+        if tree(3) = '0' then
+          idx := 7;
+          if tree(7) = '0' then
+            return 0;
+          else
+            return 1;
+          end if;
+        else
+          idx := 8;
+          if tree(8) = '0' then
+            return 2;
+          else
+            return 3;
+          end if;
+        end if;
+      else
+        idx := 4;
+        if tree(4) = '0' then
+          idx := 9;
+          if tree(9) = '0' then
+            return 4;
+          else
+            return 5;
+          end if;
+        else
+          idx := 10;
+          if tree(10) = '0' then
+            return 6;
+          else
+            return 7;
+          end if;
+        end if;
+      end if;
+    else
+      -- Go right subtree (entries 8-15)
+      idx := 2;
+      if tree(2) = '0' then
+        idx := 5;
+        if tree(5) = '0' then
+          idx := 11;
+          if tree(11) = '0' then
+            return 8;
+          else
+            return 9;
+          end if;
+        else
+          idx := 12;
+          if tree(12) = '0' then
+            return 10;
+          else
+            return 11;
+          end if;
+        end if;
+      else
+        idx := 6;
+        if tree(6) = '0' then
+          idx := 13;
+          if tree(13) = '0' then
+            return 12;
+          else
+            return 13;
+          end if;
+        else
+          idx := 14;
+          if tree(14) = '0' then
+            return 14;
+          else
+            return 15;
+          end if;
+        end if;
+      end if;
+    end if;
+  end function;
+
+  function plru_update_tree(tree : std_logic_vector(14 downto 0); used_entry : integer)
+    return std_logic_vector is
+    variable new_tree : std_logic_vector(14 downto 0) := tree;
+  begin
+    -- Update tree based on which entry was accessed
+    case used_entry is
+      when 0 =>  new_tree(0) := '1'; new_tree(1) := '1'; new_tree(3) := '1'; new_tree(7) := '1';
+      when 1 =>  new_tree(0) := '1'; new_tree(1) := '1'; new_tree(3) := '1'; new_tree(7) := '0';
+      when 2 =>  new_tree(0) := '1'; new_tree(1) := '1'; new_tree(3) := '0'; new_tree(8) := '1';
+      when 3 =>  new_tree(0) := '1'; new_tree(1) := '1'; new_tree(3) := '0'; new_tree(8) := '0';
+      when 4 =>  new_tree(0) := '1'; new_tree(1) := '0'; new_tree(4) := '1'; new_tree(9) := '1';
+      when 5 =>  new_tree(0) := '1'; new_tree(1) := '0'; new_tree(4) := '1'; new_tree(9) := '0';
+      when 6 =>  new_tree(0) := '1'; new_tree(1) := '0'; new_tree(4) := '0'; new_tree(10) := '1';
+      when 7 =>  new_tree(0) := '1'; new_tree(1) := '0'; new_tree(4) := '0'; new_tree(10) := '0';
+      when 8 =>  new_tree(0) := '0'; new_tree(2) := '1'; new_tree(5) := '1'; new_tree(11) := '1';
+      when 9 =>  new_tree(0) := '0'; new_tree(2) := '1'; new_tree(5) := '1'; new_tree(11) := '0';
+      when 10 => new_tree(0) := '0'; new_tree(2) := '1'; new_tree(5) := '0'; new_tree(12) := '1';
+      when 11 => new_tree(0) := '0'; new_tree(2) := '1'; new_tree(5) := '0'; new_tree(12) := '0';
+      when 12 => new_tree(0) := '0'; new_tree(2) := '0'; new_tree(6) := '1'; new_tree(13) := '1';
+      when 13 => new_tree(0) := '0'; new_tree(2) := '0'; new_tree(6) := '1'; new_tree(13) := '0';
+      when 14 => new_tree(0) := '0'; new_tree(2) := '0'; new_tree(6) := '0'; new_tree(14) := '1';
+      when 15 => new_tree(0) := '0'; new_tree(2) := '0'; new_tree(6) := '0'; new_tree(14) := '0';
+      when others => null; -- Invalid entry, don't update
+    end case;
+    return new_tree;
+  end function;
+
+  -- Unaligned access detection functions
+  function get_access_size_bytes(size : std_logic_vector(1 downto 0)) return integer is
+  begin
+    case size is
+      when "00" => return 1; -- byte
+      when "01" => return 2; -- word
+      when "10" => return 4; -- long
+      when others => return 1; -- reserved, treat as byte
+    end case;
+  end function;
+
+  function is_unaligned_access(addr : std_logic_vector(31 downto 0); size : std_logic_vector(1 downto 0)) return boolean is
+  begin
+    case size is
+      when "00" => return false; -- byte access is always aligned
+      when "01" => return addr(0) = '1'; -- word must be even aligned
+      when "10" => return addr(1 downto 0) /= "00"; -- long must be 4-byte aligned
+      when others => return false; -- reserved
+    end case;
+  end function;
+
+  function crosses_page_boundary(addr : std_logic_vector(31 downto 0); size : std_logic_vector(1 downto 0); page_shift : integer) return boolean is
+    variable end_addr : unsigned(31 downto 0);
+    variable page_mask : unsigned(31 downto 0);
+  begin
+    end_addr := unsigned(addr) + to_unsigned(get_access_size_bytes(size) - 1, 32);
+    page_mask := (others => '1');
+    page_mask(page_shift-1 downto 0) := (others => '0');
+
+    -- Check if start and end addresses are in different pages
+    return (unsigned(addr) and page_mask) /= (end_addr and page_mask);
+  end function;
+
+  -- Enhanced function code validation for MC68030
+  function is_valid_fc(fc : std_logic_vector(2 downto 0)) return boolean is
+  begin
+    -- MC68030 supports all 8 function codes (0-7)
+    -- FC2=0: User mode (FC 0-3), FC2=1: Supervisor mode (FC 4-7)
+    -- FC1,FC0: 00=reserved, 01=User/Supervisor Data, 10=User/Supervisor Program, 11=reserved/CPU
+    case fc is
+      when "000" => return false; -- Reserved in user mode
+      when "001" => return true;  -- User data
+      when "010" => return true;  -- User program
+      when "011" => return false; -- Reserved in user mode
+      when "100" => return false; -- Reserved in supervisor mode
+      when "101" => return true;  -- Supervisor data
+      when "110" => return true;  -- Supervisor program
+      when "111" => return true;  -- CPU space (supervisor only)
+      when others => return false;
+    end case;
+  end function;
+
+  function fc_allows_supervisor_access(fc : std_logic_vector(2 downto 0)) return boolean is
+  begin
+    -- Check if FC indicates supervisor mode access
+    return fc(2) = '1'; -- FC2=1 means supervisor mode
+  end function;
+
+  function fc_matches_required_access(page_fc : std_logic_vector(2 downto 0); access_fc : std_logic_vector(2 downto 0)) return boolean is
+  begin
+    -- For now, simple match - could be enhanced with FC lookup mode
+    return page_fc = access_fc;
+  end function;
+
+  -- Limit checking functions for MC68030 page table walks
+  function check_table_limit(desc : std_logic_vector(31 downto 0); index : integer; tc_bits : integer) return boolean is
+    variable limit : unsigned(15 downto 0);
+    variable max_index : integer;
+  begin
+    -- Extract limit field from descriptor (upper 16 bits for table descriptors)
+    limit := unsigned(desc(31 downto 16));
+
+    -- Calculate maximum valid index based on TC bits
+    max_index := (2 ** tc_bits) - 1;
+
+    -- Check if index exceeds descriptor limit or TC-defined maximum
+    return index <= to_integer(limit) and index <= max_index;
+  end function;
+
+  function get_effective_limit(desc : std_logic_vector(31 downto 0); tc_bits : integer) return integer is
+    variable desc_limit : integer;
+    variable tc_limit : integer;
+  begin
+    desc_limit := to_integer(unsigned(desc(31 downto 16)));
+    tc_limit := (2 ** tc_bits) - 1;
+
+    -- Return the more restrictive limit
+    if desc_limit < tc_limit then
+      return desc_limit;
+    else
+      return tc_limit;
+    end if;
   end function;
 
   function phys_base_from_desc(desc : std_logic_vector(31 downto 0);
@@ -572,6 +785,10 @@ architecture rtl of TG68K_PMMU_030 is
   ) return std_logic_vector is
     variable result : std_logic_vector(31 downto 0);
   begin
+    -- Initialize to zero
+    result := (others => '0');
+
+    -- Set the fault bits according to MC68030 MMUSR format
     result(15) := bus_error;
     result(14) := limit_violation;
     result(13) := supervisor_violation;
@@ -580,13 +797,10 @@ architecture rtl of TG68K_PMMU_030 is
     result(10) := modified;
     result(9) := transparent;
     result(8) := resident;
-    -- Bits 7-5 reserved (0)
+    -- Bits 7-5 reserved (0) - already cleared
     result(4 downto 3) := level;
-    -- Bits 2-0 reserved (0)
-    -- Ensure reserved bits are always 0 (force correct MC68030 format)
-    result(7 downto 5) := "000";  -- Reserved bits must be 0
-    result(2 downto 0) := "000";  -- Reserved bits must be 0
-    result := (others => '0');
+    -- Bits 2-0 reserved (0) - already cleared
+
     return result;
   end function;
   
@@ -1103,7 +1317,9 @@ begin
                   write_protect => atc_attr(hit_idx)(0),   -- WP bit from page attributes  
                   transparent => '0'                       -- Not a transparent translation
                 );
-                report "ATC_HIT: successful translation, phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
+                -- Update PLRU tree to mark this entry as most recently used
+                atc_plru_tree <= plru_update_tree(atc_plru_tree, hit_idx);
+                report "ATC_HIT: successful translation, phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) & " hit_idx=" & integer'image(hit_idx) severity note;
               end if;
             end if;
           else
@@ -1332,6 +1548,7 @@ begin
     variable desc_addr : std_logic_vector(31 downto 0);
     variable tmatch0, tmatch1 : std_logic;
     variable tci0, twp0, tci1, twp1 : std_logic;
+    variable victim_idx : integer range 0 to ATC_ENTRIES-1;
   begin
     if nreset = '0' then
       for i in 0 to ATC_ENTRIES-1 loop
@@ -1733,30 +1950,40 @@ begin
           end if;
           
         when W_FILL =>
-          -- Fill ATC with translation result
-          atc_log_base(atc_rr)  <= walk_log_base;
-          atc_phys_base(atc_rr) <= walk_phys_base;
-          atc_shift(atc_rr)     <= walk_page_shift;
-          atc_page_size(atc_rr) <= walk_page_size;
-          atc_attr(atc_rr)      <= walk_attr(2 downto 0);
-          atc_fc(atc_rr)        <= saved_fc;
-          atc_is_insn(atc_rr)   <= saved_is_insn;
-          atc_valid(atc_rr)     <= '1';
+          -- Fill ATC with translation result using PLRU replacement
+          -- Find victim entry using PLRU algorithm
+          victim_idx := plru_get_victim(atc_plru_tree);
+
+          -- Fill the victim entry
+          atc_log_base(victim_idx)  <= walk_log_base;
+          atc_phys_base(victim_idx) <= walk_phys_base;
+          atc_shift(victim_idx)     <= walk_page_shift;
+          atc_page_size(victim_idx) <= walk_page_size;
+          atc_attr(victim_idx)      <= walk_attr(2 downto 0);
+          atc_fc(victim_idx)        <= saved_fc;
+          atc_is_insn(victim_idx)   <= saved_is_insn;
+          atc_valid(victim_idx)     <= '1';
+
+          -- Update PLRU tree to mark this entry as most recently used
+          atc_plru_tree <= plru_update_tree(atc_plru_tree, victim_idx);
+
+          -- Update round-robin as fallback (for debugging/fallback)
+          if atc_rr = ATC_ENTRIES-1 then
+            atc_rr <= 0;
+          else
+            atc_rr <= atc_rr + 1;
+          end if;
+
           -- Debug: Log ATC fill for large page test
           if saved_addr_log = x"00400000" then
             report "DEBUG_ATC_FILL: addr=0x" & slv_to_hstring(saved_addr_log) &
-                   " filling ATC[" & integer'image(atc_rr) & "]" &
+                   " filling ATC[" & integer'image(victim_idx) & "] (PLRU victim)" &
                    " shift=" & integer'image(walk_page_shift) &
                    " page_size=" & integer'image(walk_page_size)
               severity note;
           end if;
           -- Delay completion signal by one cycle to ensure ATC write is visible
           wstate <= W_COMPLETE;  -- New state to delay completion
-          if atc_rr = ATC_ENTRIES-1 then
-            atc_rr <= 0;
-          else
-            atc_rr <= atc_rr + 1;
-          end if;
           
           
         when W_COMPLETE =>

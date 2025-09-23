@@ -116,13 +116,13 @@ Removes all generated build files including db/, incremental_db/, output_files/,
 - **Descriptor Validation**: Proper MC68030 page descriptor parsing and validation
 - **Access Control**: Supervisor/user privilege checking and write protection
 
-#### ⚠️ In Progress:
-- **Cache Integration**: Cache component declared but not fully connected to memory system
+#### ✅ Recently Completed:
+- **Cache Integration**: Physical addresses from PMMU now properly connected to cache system
+- **Cache Memory Interface**: Cache modules connected to memory controller with proper address routing
 
-#### ❌ Still Missing:
-- **Cache Memory Interface**: Cache fill/writeback integration with existing memory timing
-- **Cache Bus Integration**: Full cache line fill and write-back with external memory
-- **Performance Optimization**: Cache hit/miss handling in memory access cycles
+#### ⚠️ In Progress:
+- **Cache Bus Integration**: Full cache line fill and write-back with external memory timing
+- **Performance Optimization**: Cache hit/miss handling in memory access cycles needs validation
 
 ### 68030 Technical Implementation Details
 - **Specifications**: `https://www.nxp.com/docs/en/reference-manual/MC68030UM.pdf`
@@ -171,11 +171,12 @@ Removes all generated build files including db/, incremental_db/, output_files/,
 ### Important TODOs
 
 #### Next Priority Items for 68030:
-1. **Cache Memory Integration**: Connect cache modules to memory controller for actual cache line fills
+1. **Cache Performance Integration**: Optimize cache line fill timing and memory access cycles
 2. **Performance Testing**: Benchmark 68030 performance vs 68020 mode with memory-intensive software
 3. **PMMU Testing**: Test with actual AmigaOS 3.x MMU-aware software and applications
-4. **Cache Effectiveness**: Measure cache hit rates and performance improvements
+4. **Cache Effectiveness**: Measure cache hit rates and performance improvements  
 5. **Compatibility Testing**: Ensure 68000/68010/68020 modes still work correctly
+6. **Test Suite Updates**: Update testbenches to work with new 32-bit MMUSR and cache interfaces
 
 #### General Project TODOs (not in scope for now):
 - AGA chipset enhancements (bitplane shifter improvements, sprite positioning)
@@ -267,3 +268,4 @@ make clean
 
 ### Test-Related Memories
 - I don't want any simpler tests, fix the existing test!
+- ModelSim is not having persistent library issues, you just forget to fix them properly!
