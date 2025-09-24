@@ -436,18 +436,18 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
   function pmmu_sel_from_brief(b : std_logic_vector(11 downto 0)) return std_logic_vector is
     variable s : std_logic_vector(3 downto 0);
   begin
-    case b(11 downto 8) is
-      when x"0" => s := x"0"; -- TC
-      when x"1" => s := x"1"; -- CRP (low 32 only for now)
-      when x"2" => s := x"2"; -- SRP (low 32 only for now)
-      when x"3" => s := x"3"; -- TT0
-      when x"4" => s := x"4"; -- TT1
-      when x"5" => s := x"5"; -- MMUSR
-      when x"6" => s := x"6"; -- CAL
-      when x"7" => s := x"7"; -- VAL
-      when x"8" => s := x"8"; -- SCC
-      when x"9" => s := x"9"; -- AC
-      when others => s := x"F"; -- invalid
+    case b is
+      when x"000" => s := x"0"; -- TC (Translation Control)
+      when x"010" => s := x"1"; -- CRP (CPU Root Pointer)
+      when x"011" => s := x"2"; -- SRP (Supervisor Root Pointer)
+      when x"004" => s := x"3"; -- TT0 (Transparent Translation 0)
+      when x"005" => s := x"4"; -- TT1 (Transparent Translation 1)
+      when x"805" => s := x"5"; -- MMUSR (MMU Status Register)
+      when x"017" => s := x"6"; -- CAL (Current Access Level)
+      when x"016" => s := x"7"; -- VAL (Validate Access Level)
+      when x"015" => s := x"8"; -- SCC (Stack Change Control)
+      when x"014" => s := x"9"; -- AC (Access Control)
+      when others => s := x"F"; -- invalid/not supported
     end case;
     return s;
   end function;
@@ -4638,27 +4638,32 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		case brief(11 downto 0) is
 		  when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
 		  when X"001" => DFC <= reg_QA(2 downto 0); -- DFC -- 68010+
-		  when X"002" => 
-		    -- Write to CACR with MC68030 bit support including FreezeD (bit 9)
-		    CACR(6 downto 0) <= reg_QA(6 downto 0);
-		    CACR(9) <= reg_QA(9);  -- FreezeD bit for 68030 detection
+		  when X"002" =>
+		    -- Write to CACR with proper MC68030 behavior
+		    -- Sticky control bits (retain value until explicitly changed):
+		    CACR(2 downto 0) <= reg_QA(2 downto 0); -- DE, IE, FREEZE - sticky enable/control bits
+		    -- Command bits (6 downto 3) are NEVER stored - they trigger immediate cache operations
+		    -- and always read as 0. Cache invalidation happens during MOVEC execution.
+		    CACR(6 downto 3) <= (others => '0'); -- Command bits always read as 0
 		    CACR(8 downto 7) <= (others => '0');
+		    CACR(9) <= reg_QA(9);  -- FreezeD bit for 68030 detection
 		    CACR(31 downto 10) <= (others => '0');
+		    -- TODO: Implement actual cache invalidation logic based on reg_QA(6 downto 3)
+		    -- For now, the command bits trigger no actual cache operations in this emulation
 		  when X"800" => NULL; -- USP -- 68010+
 		  when X"801" => VBR <= reg_QA; -- 68010+
 		  when X"802" => CAAR <= reg_QA; -- CAAR -- 68020+
 		  when X"803" => NULL; -- MSP -- 68020+
 		  when X"804" => NULL; -- isP -- 68020+
 		  when X"004" => NULL; -- TT0 -- 68030+ (PMMU handles via separate interface)
-		  when X"005" => NULL; -- TT1 -- 68030+ (PMMU handles via separate interface)  
+		  when X"005" => NULL; -- TT1 -- 68030+ (PMMU handles via separate interface)
 		  when X"805" => NULL; -- MMUSR -- 68030+ (PMMU handles via separate interface)
 		  when others => NULL;
 		end case;
   elsif clkena_lw = '1' then
-    -- Auto-clear self-clearing bits after they've been set
-    if CACR(3) = '1' or CACR(4) = '1' or CACR(5) = '1' or CACR(6) = '1' then
-      CACR(6 downto 3) <= (others => '0');  -- Clear CE, CI, CD, CA bits
-    end if;
+    -- No auto-clearing needed - CACR command bits are never stored (always read as 0)
+    -- Cache invalidation is immediate during MOVEC write, not delayed
+    null;
 	  end if;
 	end if;
 
@@ -4708,10 +4713,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         sel := pmmu_sel_from_brief(brief(11 downto 0));
 
         -- MMU registers (TT0, TT1, MMUSR, etc.) are PMOVE-only on MC68030
-        -- MOVEC attempts to access these registers trigger illegal instruction exceptions
-
-        -- PMOVE instruction handling (only if MOVEC is not active to avoid conflicts)
-        if exec(pmmu_wr) = '1' and not (CPU = "11" and exec(movec_wr) = '1') then
+        if exec(pmmu_wr) = '1' AND CPU = "11" then
           -- PMOVE Dn -> <MMU reg>
           if sel /= x"F" then
             pmmu_reg_sel_d  <= sel;
@@ -4726,7 +4728,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
             end if;
             pmmu_reg_we_d   <= '1';
           end if;
-        elsif exec(pmmu_rd) = '1' and not (CPU = "11" and exec(movec_rd) = '1') then
+        elsif exec(pmmu_rd) = '1' AND CPU = "11" then
           -- PMOVE <MMU reg> -> Dn
           if sel /= x"F" then
             pmmu_reg_sel_d <= sel;
