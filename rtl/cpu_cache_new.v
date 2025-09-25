@@ -250,12 +250,10 @@ always @ (posedge clk) begin
 	end
 end 
 
-// slice up cpu address - use PMMU physical address for 68030 coherency
-// When PMMU is enabled, use physical address to prevent cache aliasing
-wire [31:0] effective_addr = (pmmu_addr_phys != 32'h0) ? pmmu_addr_phys : {cpu_adr, 1'b0};
-assign cpu_adr_blk = effective_addr[2:1];    // cache block address (inside cache row), 2 bits for 4x16 rows
-assign cpu_adr_idx = effective_addr[10:3];   // cache row address, 8 bits
-assign cpu_adr_tag = effective_addr[28:11];  // tag, 18 bits
+// slice up cpu address for fast cache access
+assign cpu_adr_blk = cpu_adr[2:1];    // cache block address (inside cache row), 2 bits for 4x16 rows
+assign cpu_adr_idx = cpu_adr[10:3];   // cache row address, 8 bits
+assign cpu_adr_tag = cpu_adr[28:11];  // tag, 18 bits
 
 // cpu side state machine
 always @ (posedge clk) begin
