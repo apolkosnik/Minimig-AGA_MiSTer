@@ -37,6 +37,16 @@ module sdram_ctrl
 	input             cache_rst,
 	input             cache_inhibit,
 	input       [3:0] cpu_cache_ctrl,
+	// 68030 Cache Control Interface
+	input             cpu_cacr_ie,        // CACR instruction cache enable
+	input             cpu_cacr_de,        // CACR data cache enable
+	input             cpu_cacr_freeze,    // CACR cache freeze
+	input             cpu_cache_cinv_req, // CINV cache invalidate request
+	input             cpu_cache_cpush_req,// CPUSH cache push request
+	input       [1:0] cpu_cache_op_scope, // Cache operation scope
+	input       [1:0] cpu_cache_op_cache, // Cache operation target
+	input      [31:0] cpu_cache_op_addr,  // Cache operation address
+	input      [31:0] cpu_pmmu_addr_phys, // PMMU physical address
 	// sdram
 	output reg [12:0] sd_addr,
 	output reg  [1:0] sd_ba,
@@ -112,6 +122,18 @@ cpu_cache_new cpu_cache
 	.rst              (!reset || !cache_rst),  // cache reset
 	.cpu_cache_ctrl   (cpu_cache_ctrl),        // CPU cache control
 	.cache_inhibit    (cache_inhibit),         // cache inhibit
+
+	// 68030 Cache Control Interface - connected to CPU wrapper outputs
+	.cacr_ie          (cpu_cacr_ie),           // Instruction cache enable from CPU wrapper
+	.cacr_de          (cpu_cacr_de),           // Data cache enable from CPU wrapper
+	.cacr_freeze      (cpu_cacr_freeze),       // Cache freeze from CPU wrapper
+	.cinv_req         (cpu_cache_cinv_req),    // CINV request from CPU wrapper
+	.cpush_req        (cpu_cache_cpush_req),   // CPUSH request from CPU wrapper
+	.cache_op_scope   (cpu_cache_op_scope),    // Cache operation scope from CPU wrapper
+	.cache_op_cache   (cpu_cache_op_cache),    // Cache operation target from CPU wrapper
+	.cache_op_addr    (cpu_cache_op_addr),     // Cache operation address from CPU wrapper
+	.pmmu_addr_phys   (cpu_pmmu_addr_phys),    // PMMU physical address from CPU wrapper
+
 	.cpu_cs           (ramsel),                // cpu activity
 	.cpu_adr          (cpuAddr),               // cpu address
 	.cpu_bs           ({!cpuU, !cpuL}),        // cpu byte selects

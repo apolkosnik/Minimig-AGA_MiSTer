@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-integration test-diagrom test-advanced test-fault test-stress test-regression validate setup help
+.PHONY: all clean test-pmmu test-cache test-cacr test-integration test-diagrom test-advanced test-fault test-stress test-regression test-cache-crash test-cache-crash-gui test-cache-focused test-caar test-caar-compliance test-caar-movec test-caar-permissions test-caar-reset test-caar-effects validate setup help
 
 # Default target
 all: test-comprehensive
@@ -27,8 +27,16 @@ help:
 	@echo "  setup            - Setup ModelSim environment"
 	@echo "  test-pmmu        - Test basic PMMU component"
 	@echo "  test-diagnostic  - Run PMMU diagnostic tests (RECOMMENDED FIRST)"
-	@echo "  test-cache       - Test Cache component only"  
+	@echo "  test-cache       - Test Cache component only"
+	@echo "  test-cache-crash - Investigate cache enable crashes (DEBUGGING)"
+	@echo "  test-cache-focused - Focused cache enable test (RECOMMENDED)"
 	@echo "  test-cacr        - Test CACR register only"
+	@echo "  test-caar        - Test CAAR register compliance (RECOMMENDED)"
+	@echo "  test-caar-compliance - Comprehensive CAAR specification compliance"
+	@echo "  test-caar-movec  - CAAR MOVEC instruction validation"
+	@echo "  test-caar-permissions - CAAR access permissions (68020 vs 68030)"
+	@echo "  test-caar-reset  - CAAR reset and cache effects"
+	@echo "  test-caar-effects - CAAR side effects and special behaviors"
 	@echo "  test-integration - Test full system integration"
 	@echo "  test-diagrom     - Test DiagROM boot sequence"
 	@echo "  test-advanced    - Run advanced PMMU functionality tests"
@@ -101,9 +109,100 @@ test-cache: compile
 	@echo "Running Cache tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_cache_030
 
+test-cache-crash: setup
+	@echo "Running Cache Enable Crash Investigation Test..."
+	@echo "This test investigates why cache enable causes system crashes"
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Cache_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 tb_cache_enable_crash_test.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "do run_cache_enable_crash_test.tcl; exit" > cache_enable_crash_test.log 2>&1
+	@echo ""
+	@echo "=== CACHE CRASH INVESTIGATION RESULTS ==="
+	@if grep -q "CACHE ENABLE CRASH DETECTED" cache_enable_crash_test.log; then \
+		echo "🔴 CRASH CONFIRMED: Cache enable causes system hang"; \
+		echo "📋 Check cache_enable_crash_test.log for details"; \
+		echo "📋 Use 'make test-cache-crash-gui' for waveform analysis"; \
+	elif grep -q "CACHE ENABLE SUCCESS" cache_enable_crash_test.log; then \
+		echo "✅ SUCCESS: Cache enable works correctly"; \
+		echo "📋 The issue may be environment-specific"; \
+	else \
+		echo "⚠️  INCONCLUSIVE: Check cache_enable_crash_test.log"; \
+	fi
+	@echo "=========================================="
+
+test-cache-crash-gui: setup
+	@echo "Starting Cache Enable Crash Investigation in GUI mode..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Cache_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 tb_cache_enable_crash_test.vhd
+	@echo "Launching ModelSim GUI - use 'do run_cache_enable_crash_test.tcl' to run test"
+	@cd $(TEST_DIR) && $(VSIM) -gui work.tb_cache_enable_crash_test &
+
+test-cache-focused: setup
+	@echo "Running Focused Cache Enable Test..."
+	@echo "This test specifically targets cache enable/disable logic"
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Cache_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 tb_cache_enable_focused_test.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "do run_cache_focused_test.tcl; exit" > cache_focused_test.log 2>&1
+	@echo ""
+	@echo "=== FOCUSED CACHE TEST RESULTS ==="
+	@if grep -q "CACHE ENABLE TEST FAILED" cache_focused_test.log; then \
+		echo "🔴 FAILURE: Specific cache issues detected"; \
+		echo "📋 Check cache_focused_test.log for details"; \
+	elif grep -q "CACHE ENABLE TEST PASSED" cache_focused_test.log; then \
+		echo "✅ SUCCESS: Cache enable/disable logic working"; \
+		echo "📋 The system crash may be due to external factors"; \
+	else \
+		echo "⚠️  INCONCLUSIVE: Check cache_focused_test.log"; \
+	fi
+	@echo "========================================="
+
 test-cacr: compile
 	@echo "Running CACR tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_cacr_test
+
+# CAAR (Cache Address Access Register) Test Suite
+test-caar: test-caar-compliance
+	@echo "============================================"
+	@echo "CAAR Register Test Suite Summary"
+	@echo "============================================"
+	@echo "All CAAR tests completed. Check individual logs for details."
+
+test-caar-compliance: compile
+	@echo "============================================"
+	@echo "Running CAAR Specification Compliance Test"
+	@echo "============================================"
+	@cd $(TEST_DIR) && $(VSIM) -c -do "do run_caar_compliance_tests.tcl" 2>&1 | tee caar_compliance_test.log
+	@if grep -q "ALL CAAR COMPLIANCE TESTS PASSED" caar_compliance_test.log; then \
+		echo "✅ CAAR SPECIFICATION COMPLIANCE: PASSED"; \
+	else \
+		echo "❌ CAAR SPECIFICATION COMPLIANCE: ISSUES DETECTED"; \
+		echo "Check caar_compliance_test.log for details"; \
+	fi
+
+test-caar-movec: compile
+	@echo "Running CAAR MOVEC Instruction Validation..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "vsim tb_caar_movec_validation; run 30us; quit -sim" 2>&1 | tee caar_movec_test.log
+	@echo "CAAR MOVEC test completed. Check caar_movec_test.log for results."
+
+test-caar-permissions: compile
+	@echo "Running CAAR Access Permissions Test..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "vsim tb_caar_permissions_test; run 25us; quit -sim" 2>&1 | tee caar_permissions_test.log
+	@echo "CAAR permissions test completed. Check caar_permissions_test.log for results."
+
+test-caar-reset: compile
+	@echo "Running CAAR Reset and Cache Effects Test..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "vsim tb_caar_reset_cache_effects; run 40us; quit -sim" 2>&1 | tee caar_reset_test.log
+	@echo "CAAR reset test completed. Check caar_reset_test.log for results."
+
+test-caar-effects: compile
+	@echo "Running CAAR Side Effects Test..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "vsim tb_caar_side_effects_test; run 35us; quit -sim" 2>&1 | tee caar_effects_test.log
+	@echo "CAAR side effects test completed. Check caar_effects_test.log for results."
 
 test-integration: compile
 	@echo "Running Integration tests..."

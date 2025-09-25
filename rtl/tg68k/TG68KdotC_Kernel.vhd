@@ -387,6 +387,7 @@ signal pmmu_reg_we_d    : std_logic;
 signal pmmu_reg_re_d    : std_logic;
 signal pmmu_reg_sel_d   : std_logic_vector(3 downto 0);
 signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
+signal pmmu_flush_disable : std_logic; -- PMOVE FD bit: '1' = disable ATC flush, '0' = enable ATC flush
 
 	signal pmmu_req         : std_logic;
 	signal pmmu_is_insn     : std_logic;
@@ -401,7 +402,7 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
 	signal pmmu_ch_inhibit  : std_logic;
 	signal pmmu_wr_protect  : std_logic;
 	signal pmmu_fault       : std_logic;
-	signal pmmu_fault_stat  : std_logic_vector(31 downto 0);
+	signal pmmu_fault_stat  : std_logic_vector(15 downto 0);
 	signal pmmu_tc_en       : std_logic;
 	
 	-- PMMU instruction control signals
@@ -452,27 +453,7 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
     return s;
   end function;
 
-  -- Function to map MOVEC brief(11:0) encodings to PMMU register select
-  -- MC68030 MOVEC encodings for PMMU registers (only these are accessible via MOVEC):
-  --  X"003" => TC, X"004" => TT0, X"005" => TT1, X"805" => MMUSR
-  -- Note: CRP, SRP, CAL, VAL, SCC, AC are only accessible via PMOVE, not MOVEC
-  function pmmu_sel_from_movec(b : std_logic_vector(11 downto 0)) return std_logic_vector is
-    variable s : std_logic_vector(3 downto 0);
-  begin
-    if b = x"003" then
-      s := x"0"; -- TC (Translation Control Register)
-    elsif b = x"004" then
-      s := x"3"; -- TT0
-    elsif b = x"005" then
-      s := x"4"; -- TT1
-    elsif b = x"805" then
-      s := x"5"; -- MMUSR
-    else
-      s := x"F"; -- not a PMMU reg handled via MOVEC here
-    end if;
-    return s;
-  end function;
-
+ 
 BEGIN  
 
   -- PMMU (68030) instance (identity translation for now)
@@ -487,7 +468,8 @@ BEGIN
       reg_wdat      => pmmu_reg_wdat_d,
       reg_rdat      => pmmu_reg_rdat,
       reg_part      => pmmu_reg_part_d,
-      
+      reg_flush_disable => pmmu_flush_disable, -- PMOVE FD bit controls ATC flushing
+
       ptest_req     => pmmu_ptest_req,
       pflush_req    => pmmu_pflush_req,
       pload_req     => pmmu_pload_req,
@@ -4200,49 +4182,19 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN movec1 =>		-- Enhanced MOVEC instruction validation
 					set(briefext) <= '1';
 					set_writePCbig <='1';
-
-					-- Enhanced MOVEC validation with comprehensive control register bounds checking
-					-- Valid control registers per CPU type with proper range validation:
-					-- 68000: None (MOVEC not supported)
-					-- 68010: SFC(000), DFC(001), USP(800), VBR(801)
-					-- 68020: + CACR(002), CAAR(802), MSP(803), ISP(804)
-					-- 68030: + TC(003), TT0(004), TT1(005), MMUSR(805)
-
-					-- Enhanced bounds checking for register field (bits 15-12 must be 0)
-					IF brief(15 downto 12) /= "0000" THEN
-						-- Invalid register field upper bits
-						trap_illegal <= '1';
-						trapmake <= '1';
-					-- Enhanced validation: Check CPU-specific register access
-					ELSIF (brief(11 downto 0)=X"000" OR brief(11 downto 0)=X"001" OR brief(11 downto 0)=X"800" OR brief(11 downto 0)=X"801") OR
-					      (cpu(1)='1' AND (brief(11 downto 0)=X"002" OR brief(11 downto 0)=X"802" OR brief(11 downto 0)=X"803" OR brief(11 downto 0)=X"804")) OR
-					      (cpu="11" AND (brief(11 downto 0)=X"004" OR brief(11 downto 0)=X"005" OR brief(11 downto 0)=X"805")) THEN
-						-- Enhanced direction validation for MOVEC
+					-- MC68030 MOVEC accessible registers: SFC, DFC, CACR, VBR, CAAR, MSP, ISP
+					-- TT0, TT1, MMUSR are PMOVE-only on MC68030 (not accessible via MOVEC)
+					IF (brief(11 downto 0)=X"000" OR brief(11 downto 0)=X"001" OR brief(11 downto 0)=X"800" OR brief(11 downto 0)=X"801") OR
+					   (cpu(1)='1' AND (brief(11 downto 0)=X"002" OR brief(11 downto 0)=X"802" OR brief(11 downto 0)=X"803" OR brief(11 downto 0)=X"804")) THEN
 						IF opcode(0)='0' THEN
-							-- MOVEC Rc,Rn (Control Register to General Register)
 							set(Regwrena) <= '1';
-						ELSE
-							-- MOVEC Rn,Rc (General Register to Control Register)
-							-- Additional validation for write-only registers
-							IF brief(11 downto 0)=X"802" THEN -- CAAR is write-only on 68020
-								-- CAAR read is illegal
-								trap_illegal <= '1';
-								trapmake <= '1';
-							END IF;
 						END IF;
-					-- Enhanced validation: Check for reserved register encodings
-					ELSIF brief(11 downto 0) >= X"006" AND brief(11 downto 0) <= X"7FF" THEN
-						-- Reserved register range - always illegal
-						trap_illegal <= '1';
-						trapmake <= '1';
-					ELSIF brief(11 downto 0) >= X"806" AND brief(11 downto 0) <= X"FFF" THEN
-						-- Reserved high register range - always illegal
-						trap_illegal <= '1';
-						trapmake <= '1';
+--					ELSIF brief(11 downto 0)=X"800"OR brief(11 downto 0)=X"001" OR brief(11 downto 0)=X"000" THEN
+--						trap_addr_error <= '1';
+--						trapmake <= '1';
 					ELSE
-						-- Invalid or unsupported control register for this CPU
-						trap_illegal <= '1';
-						trapmake <= '1';
+					trap_illegal <= '1';
+					trapmake <= '1';
 					END IF;
 
                 WHEN pmmu1 =>		-- PMMU instruction dispatch with enhanced validation
@@ -4626,7 +4578,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 -----------------------------------------------------------------------------
 -- MOVEC
 -----------------------------------------------------------------------------
-  process (clk, SFC, DFC, VBR, CACR, CAAR, brief)
+  process (clk)
   begin
 	-- all other hexa codes should give illegal isntruction exception
 	if rising_edge(clk) then
@@ -4641,23 +4593,19 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		  when X"002" =>
 		    -- Write to CACR with proper MC68030 behavior
 		    -- Sticky control bits (retain value until explicitly changed):
-		    CACR(2 downto 0) <= reg_QA(2 downto 0); -- DE, IE, FREEZE - sticky enable/control bits
+		    CACR(4 downto 0) <= reg_QA(4 downto 0); -- DE, IE, FREEZE - sticky enable/control bits
 		    -- Command bits (6 downto 3) are NEVER stored - they trigger immediate cache operations
 		    -- and always read as 0. Cache invalidation happens during MOVEC execution.
-		    CACR(6 downto 3) <= (others => '0'); -- Command bits always read as 0
-		    CACR(8 downto 7) <= (others => '0');
-		    CACR(9) <= reg_QA(9);  -- FreezeD bit for 68030 detection
-		    CACR(31 downto 10) <= (others => '0');
-		    -- TODO: Implement actual cache invalidation logic based on reg_QA(6 downto 3)
-		    -- For now, the command bits trigger no actual cache operations in this emulation
+		    CACR(7 downto 5) <= (others => '0'); -- Command bits always read as 0
+		    CACR(13 downto 8) <= reg_QA(13 downto 8); -- FreezeD bit for 68030 detection
+			CACR(31 downto 14) <= (others => '0');
 		  when X"800" => NULL; -- USP -- 68010+
 		  when X"801" => VBR <= reg_QA; -- 68010+
 		  when X"802" => CAAR <= reg_QA; -- CAAR -- 68020+
 		  when X"803" => NULL; -- MSP -- 68020+
-		  when X"804" => NULL; -- isP -- 68020+
-		  when X"004" => NULL; -- TT0 -- 68030+ (PMMU handles via separate interface)
-		  when X"005" => NULL; -- TT1 -- 68030+ (PMMU handles via separate interface)
-		  when X"805" => NULL; -- MMUSR -- 68030+ (PMMU handles via separate interface)
+		  when X"804" => NULL; -- ISP -- 68020+
+		  -- TT0, TT1, MMUSR not handled here - they are PMOVE-only on MC68030
+		  -- Accessing them via MOVEC should generate illegal instruction exception
 		  when others => NULL;
 		end case;
   elsif clkena_lw = '1' then
@@ -4666,18 +4614,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
     null;
 	  end if;
 	end if;
+  end process;
 
+  process (brief, SFC, DFC, CACR, CAAR, VBR)
+  begin
 	movec_data <= (others => '0');
 	case brief(11 downto 0) is
 		when X"000" => movec_data <= "00000000000000000000000000000" & SFC;
 		when X"001" => movec_data <= "00000000000000000000000000000" & DFC;
 	  when X"002" => movec_data <= CACR; -- CACR full 32-bit read
 	  when X"802" => movec_data <= CAAR;
-	  -- 68030 MMU registers accessible via MOVEC: TC, TT0, TT1
-
-	  when X"801" =>
-		movec_data <= VBR;
-		--end if;
+	  when X"801" => movec_data <= VBR;
+	  -- TT0, TT1, MMUSR not handled here - they are PMOVE-only on MC68030
 	  when others => NULL;
 	end case;
   end process;
@@ -4702,6 +4650,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         pmmu_reg_sel_d  <= (others => '0');
         pmmu_reg_wdat_d <= (others => '0');
         pmmu_reg_part_d <= '0';
+        pmmu_flush_disable <= '0'; -- Default: enable ATC flush
       elsif clkena_lw = '1' OR (CPU="11" AND clkena_in='1' AND (exec(pmmu_wr)='1' OR exec(pmmu_rd)='1')) then
         -- defaults
         pmmu_reg_we_d   <= '0';
@@ -4709,6 +4658,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         pmmu_reg_sel_d  <= (others => '0');
         pmmu_reg_wdat_d <= (others => '0');
         pmmu_reg_part_d <= '0';
+
+        -- Extract FD (Flush Disable) bit from PMOVE instruction extension word
+        -- MC68030 PMOVE format: FD bit is at bit 8 of extension word
+        pmmu_flush_disable <= brief(8);
 
         sel := pmmu_sel_from_brief(brief(11 downto 0));
 

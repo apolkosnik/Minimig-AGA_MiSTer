@@ -22,7 +22,18 @@ module cpu_cache_new
   input       [3:0] cpu_cache_ctrl, // CPU cache control
   input             cache_inhibit,  // cache inhibit
 
-  // cpu    
+  // 68030 Cache Control Interface (new)
+  input             cacr_ie,        // Instruction cache enable (from CACR bit 1)
+  input             cacr_de,        // Data cache enable (from CACR bit 0)
+  input             cacr_freeze,    // Cache freeze (from CACR bit 2)
+  input             cinv_req,       // CINV (Cache Invalidate) request
+  input             cpush_req,      // CPUSH (Cache Push) request
+  input       [1:0] cache_op_scope, // 00=line, 01=page, 10=all, 11=all
+  input       [1:0] cache_op_cache, // 00=both, 01=data, 10=insn, 11=both
+  input      [31:0] cache_op_addr,  // Address for line/page operations
+  input      [31:0] pmmu_addr_phys, // Physical address from PMMU (68030 mode)
+
+  // cpu
   input             cpu_cs,         // cpu activity
   input      [28:1] cpu_adr,        // cpu address
   input       [1:0] cpu_bs,         // cpu byte selects
@@ -43,7 +54,7 @@ module cpu_cache_new
 
   // snoop
   input             snoop_act,      // snoop act (write only - just update existing data in cache)
-  input      [28:1] snoop_adr,      // chip address                      
+  input      [28:1] snoop_adr,      // chip address
   input      [15:0] snoop_dat_w,    // snoop write data
   input       [1:0] snoop_bs
 );
@@ -213,9 +224,19 @@ always @ (posedge clk) begin
 	else if (!cpu_cs) cc_clr_r <= {cc_clr_r[0], cpu_cache_ctrl[3]};
 end
 
-assign cpu_cache_enable = cpu_cache_ctrl[0];
-//assign cpu_cache_freeze = cpu_cache_ctrl[1];
-assign cpu_cache_clear  = cc_clr_r[0] && !cc_clr_r[1];
+// 68030 CACR-based cache control - use new 68030 interface when available
+assign cpu_cache_enable = (|{cacr_ie, cacr_de}) ? (cacr_ie | cacr_de) : cpu_cache_ctrl[0];
+//assign cpu_cache_freeze = cacr_freeze;  // Use CACR freeze when available
+
+// 68030 CINV instruction cache clear logic
+wire cinv_cache_clear;
+assign cinv_cache_clear = cinv_req && (cache_op_scope == 2'b10 || cache_op_scope == 2'b11); // All caches
+
+assign cpu_cache_clear  = (cc_clr_r[0] && !cc_clr_r[1]) || cinv_cache_clear;
+
+// Separate instruction and data cache enable
+wire i_cache_enable = (|{cacr_ie, cacr_de}) ? cacr_ie : cpu_cache_ctrl[0];
+wire d_cache_enable = (|{cacr_ie, cacr_de}) ? cacr_de : cpu_cache_ctrl[0];
 
 always @ (posedge clk) begin
 	if (rst) begin
@@ -224,15 +245,17 @@ always @ (posedge clk) begin
 		cc_clr <= 1'b0;
 	end else if (!cpu_cs) begin
 		cc_en  <= cpu_cache_enable;
-		//cc_fr  <= cpu_cache_freeze;
+		//cc_fr  <= cacr_freeze;
 		cc_clr <= cpu_cache_clear;
 	end
 end 
 
-// slice up cpu address
-assign cpu_adr_blk = cpu_adr[2:1];    // cache block address (inside cache row), 2 bits for 4x16 rows
-assign cpu_adr_idx = cpu_adr[10:3];   // cache row address, 8 bits
-assign cpu_adr_tag = cpu_adr[28:11];  // tag, 18 bits
+// slice up cpu address - use PMMU physical address for 68030 coherency
+// When PMMU is enabled, use physical address to prevent cache aliasing
+wire [31:0] effective_addr = (pmmu_addr_phys != 32'h0) ? pmmu_addr_phys : {cpu_adr, 1'b0};
+assign cpu_adr_blk = effective_addr[2:1];    // cache block address (inside cache row), 2 bits for 4x16 rows
+assign cpu_adr_idx = effective_addr[10:3];   // cache row address, 8 bits
+assign cpu_adr_tag = effective_addr[28:11];  // tag, 18 bits
 
 // cpu side state machine
 always @ (posedge clk) begin
@@ -435,6 +458,8 @@ always @ (posedge clk) begin
   end
 end
 
+// 68030 Cache freeze support
+wire cache_frozen = cacr_freeze;
 
 //// sdram side ////
 

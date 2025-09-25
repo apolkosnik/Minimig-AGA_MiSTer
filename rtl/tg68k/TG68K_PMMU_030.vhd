@@ -20,6 +20,7 @@ entity TG68K_PMMU_030 is
     reg_wdat       : in  std_logic_vector(31 downto 0);
     reg_rdat       : out std_logic_vector(31 downto 0);
     reg_part       : in  std_logic; -- '1' = high, '0' = low for 64-bit regs (CRP/SRP)
+    reg_flush_disable : in  std_logic; -- PMOVE FD bit: '1' = disable ATC flush, '0' = enable ATC flush
     
     -- PMMU instruction control
     ptest_req      : in  std_logic; -- PTEST instruction request
@@ -39,7 +40,7 @@ entity TG68K_PMMU_030 is
     cache_inhibit  : out std_logic;
     write_protect  : out std_logic;
     fault          : out std_logic;
-    fault_status   : out std_logic_vector(31 downto 0);
+    fault_status   : out std_logic_vector(15 downto 0);
     tc_enable      : out std_logic;
 
     -- Walker memory interface (read-only) and busy indicator
@@ -65,7 +66,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal SRP_L  : std_logic_vector(31 downto 0); -- Supervisor Root Pointer low 32 bits (64-bit total)
   signal TT0    : std_logic_vector(31 downto 0); -- Transparent Translation Register 0
   signal TT1    : std_logic_vector(31 downto 0); -- Transparent Translation Register 1
-  signal MMUSR  : std_logic_vector(31 downto 0); -- MMU Status Register
+  signal MMUSR  : std_logic_vector(15 downto 0); -- MMU Status Register (16-bit per MC68030 spec)
   signal CAL    : std_logic_vector(31 downto 0); -- Current Access Level
   signal VAL    : std_logic_vector(31 downto 0); -- Valid Access Level
   signal SCC    : std_logic_vector(31 downto 0); -- Stack Change Control
@@ -92,11 +93,11 @@ architecture rtl of TG68K_PMMU_030 is
   signal cache_inhibit_reg  : std_logic := '0';
   signal write_protect_reg  : std_logic := '0';
   signal fault_reg          : std_logic := '0';
-  signal fault_status_reg   : std_logic_vector(31 downto 0) := (others => '0');
+  signal fault_status_reg   : std_logic_vector(15 downto 0) := (others => '0');
   
   -- Walker fault signals (driven only by walker)
   signal walker_fault       : std_logic := '0';
-  signal walker_fault_status : std_logic_vector(31 downto 0) := (others => '0');
+  signal walker_fault_status : std_logic_vector(15 downto 0) := (others => '0');
   signal walker_fault_ack   : std_logic := '0';  -- Acknowledgment from main process
   signal walker_fault_ack_pending : std_logic := '0';  -- Track ack state
   
@@ -151,7 +152,7 @@ architecture rtl of TG68K_PMMU_030 is
   -- MMUSR update handshake between translation pipeline and register file
   signal mmusr_update_req   : std_logic := '0';
   signal mmusr_update_ack   : std_logic := '0';
-  signal mmusr_update_value : std_logic_vector(31 downto 0) := (others => '0');
+  signal mmusr_update_value : std_logic_vector(15 downto 0) := (others => '0');
 
   -- MC68030 page table walker FSM
   type walk_state_t is (W_IDLE, W_ROOT, W_PTR1, W_PTR2, W_PTR3, W_PAGE, W_FILL, W_COMPLETE, W_FAULT);
@@ -783,7 +784,7 @@ architecture rtl of TG68K_PMMU_030 is
     resident : std_logic;
     level : std_logic_vector(1 downto 0)
   ) return std_logic_vector is
-    variable result : std_logic_vector(31 downto 0);
+    variable result : std_logic_vector(15 downto 0);
   begin
     -- Initialize to zero
     result := (others => '0');
@@ -809,19 +810,32 @@ architecture rtl of TG68K_PMMU_030 is
     write_protect : std_logic;
     transparent : std_logic
   ) return std_logic_vector is
-    variable result : std_logic_vector(31 downto 0);
+    variable result : std_logic_vector(15 downto 0);
   begin
+    -- MC68030 MMUSR Format (16-bit register) - Success Case
     result := (others => '0');
-    result(12) := cache_inhibit;  -- CI bit
-    result(11) := write_protect;  -- WP bit  
-    result(9) := transparent;     -- T bit
-    result(8) := '1';             -- R bit (resident - translation successful)
-    -- Ensure reserved bits are always 0 (force correct MC68030 format)
-    result(31 downto 16) := (others => '0');  -- Upper bits reserved
-    result(15 downto 13) := "000";            -- Reserved fault bits for success case
-    result(10) := '0';                        -- Modified bit (not set for success)
-    result(7 downto 5) := "000";              -- Reserved bits must be 0
-    result(4 downto 0) := "00000";            -- Reserved bits must be 0  
+
+    -- Fault status bits (15-13) - all clear for successful translation
+    result(15) := '0';            -- Bus Error (clear for success)
+    result(14) := '0';            -- Limit Violation (clear for success)
+    result(13) := '0';            -- Supervisor Violation (clear for success)
+
+    -- Status attribute bits (12-8)
+    result(12) := cache_inhibit;  -- Cache Inhibit bit from page descriptor
+    result(11) := write_protect;  -- Write Protect bit from page descriptor
+    result(10) := '0';            -- Modified bit (not set for success)
+    result(9) := transparent;     -- Transparent bit (1 if TTR hit, 0 if page table)
+    result(8) := '1';             -- Resident bit (1 = translation successful)
+
+    -- Reserved bits (7-5) - must be zero per MC68030 specification
+    result(7 downto 5) := "000";
+
+    -- Level information (4-3) - indicates final translation level
+    result(4 downto 3) := "00";   -- Level 0 for successful translations
+
+    -- Reserved bits (2-0) - must be zero per MC68030 specification
+    result(2 downto 0) := "000";
+
     return result;
   end function;
 
@@ -863,7 +877,7 @@ begin
             cache_inhibit => '0',        -- No cache inhibit for identity
             write_protect => '0',        -- No write protect for identity
             transparent => '0'           -- Not transparent (MMU disabled)
-          );
+          )(15 downto 0);
         else
           -- MMU enabled - will be handled by main translation logic
           null; -- Translation process will update MMUSR
@@ -893,7 +907,10 @@ begin
             TC(11 downto 8) <= reg_wdat(11 downto 8);   -- TIB (Table Index B)
             TC(7 downto 4) <= reg_wdat(7 downto 4);     -- TIC (Table Index C)
             TC(3 downto 0) <= reg_wdat(3 downto 0);     -- TID (Table Index D)
-            atc_flush_req <= '1'; -- TC changes invalidate all cached translations
+            -- MC68030 PMOVE FD bit: '0' = flush ATC, '1' = disable flush
+            if reg_flush_disable = '0' then
+              atc_flush_req <= '1'; -- TC changes invalidate all cached translations
+            end if;
             report "TC_WRITE_SPEC_COMPLIANT: input=0x" & slv_to_hstring(reg_wdat) &
                    " reserved bits 30-26 masked to zero" severity note;
           when x"1" =>
@@ -910,7 +927,10 @@ begin
               CRP_L(15 downto 8) <= reg_wdat(15 downto 8);   -- DT (Descriptor Type)
               CRP_L(7 downto 0) <= reg_wdat(7 downto 0);     -- Lower Limit
             end if;
-            atc_flush_req <= '1'; -- CRP changes invalidate all cached translations
+            -- MC68030 PMOVE FD bit: '0' = flush ATC, '1' = disable flush
+            if reg_flush_disable = '0' then
+              atc_flush_req <= '1'; -- CRP changes invalidate all cached translations
+            end if;
           when x"2" =>
             -- SRP register write - MC68030 Long-Format Root Pointer (same as CRP)
             if reg_part = '1' then
@@ -925,7 +945,10 @@ begin
               SRP_L(15 downto 8) <= reg_wdat(15 downto 8);   -- DT (Descriptor Type)
               SRP_L(7 downto 0) <= reg_wdat(7 downto 0);     -- Lower Limit
             end if;
-            atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
+            -- MC68030 PMOVE FD bit: '0' = flush ATC, '1' = disable flush
+            if reg_flush_disable = '0' then
+              atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
+            end if;
           when x"3" =>
             -- TT0 register write - MC68030 Transparent Translation Register per User's Manual section 9.2.6
             -- MC68030 TT0/TT1 bit layout:
@@ -941,7 +964,10 @@ begin
             TT0(3) <= '0';                                  -- Reserved (must be zero)
             TT0(2 downto 1) <= reg_wdat(2 downto 1);       -- RWM, RW
             TT0(0) <= '0';                                  -- Reserved (must be zero)
-            atc_flush_req <= '1';
+            -- MC68030 PMOVE FD bit: '0' = flush ATC, '1' = disable flush
+            if reg_flush_disable = '0' then
+              atc_flush_req <= '1';
+            end if;
             report "TT0_WRITE_SPEC_COMPLIANT: input=0x" & slv_to_hstring(reg_wdat) &
                    " reserved bits 14-10,3,0 masked to zero" severity note;
           when x"4" =>
@@ -959,12 +985,20 @@ begin
             TT1(3) <= '0';                                  -- Reserved (must be zero)
             TT1(2 downto 1) <= reg_wdat(2 downto 1);       -- RWM, RW
             TT1(0) <= '0';                                  -- Reserved (must be zero)
-            atc_flush_req <= '1';
+            -- MC68030 PMOVE FD bit: '0' = flush ATC, '1' = disable flush
+            if reg_flush_disable = '0' then
+              atc_flush_req <= '1';
+            end if;
           when x"5" =>
-            -- MMUSR register: MC68030 MMUSR is mostly read-only with some write-1-to-clear bits
-            -- For now, implement basic write capability for testing purposes
-            -- TODO: Implement proper MC68030 MMUSR semantics (write-1-to-clear for fault bits)
-            MMUSR <= reg_wdat;
+            MMUSR(5 downto 3) <= "000";                     -- Reserved (must be zero)
+            MMUSR(8 downto 7) <= "00";                      -- Reserved (must be zero)
+            MMUSR(12) <= '0';                               -- Reserved (must be zero)
+            -- MMUSR register: MC68030 MMUSR with proper write-1-to-clear semantics
+            -- Bits 15-13: Fault status bits (write-1-to-clear)
+            -- Bits 12-0: Read-only status bits (cannot be written by software)
+            -- Write-1-to-clear: if write data has '1', clear that bit in MMUSR
+            MMUSR(15 downto 13) <= MMUSR(15 downto 13) and not reg_wdat(15 downto 13);
+            -- Read-only bits remain unchanged during writes
           when x"6" => CAL   <= reg_wdat;
           when x"7" => VAL   <= reg_wdat;
           when x"8" => SCC   <= reg_wdat;
@@ -996,7 +1030,7 @@ begin
             when x"2" => if reg_part = '1' then reg_rdat <= SRP_H; else reg_rdat <= SRP_L; end if;
             when x"3" => reg_rdat <= TT0;
             when x"4" => reg_rdat <= TT1;
-            when x"5" => reg_rdat <= MMUSR;
+            when x"5" => reg_rdat <= x"0000" & MMUSR; -- Zero-extend 16-bit MMUSR to 32-bit
             when x"6" => reg_rdat <= CAL;
             when x"7" => reg_rdat <= VAL;
             when x"8" => reg_rdat <= SCC;
@@ -1117,7 +1151,7 @@ begin
     variable hit_idx   : integer range 0 to ATC_ENTRIES-1;
     variable tmatch0, tmatch1 : std_logic;
     variable tci0, twp0, tci1, twp1 : std_logic;
-    variable status_tmp : std_logic_vector(31 downto 0);
+    variable status_tmp : std_logic_vector(15 downto 0);
     variable aligned_addr : std_logic_vector(31 downto 0);
     variable offset       : unsigned(31 downto 0);
     variable phys_base    : unsigned(31 downto 0);
@@ -1144,7 +1178,7 @@ begin
       -- Initialize PLRU tree
       atc_plru_tree <= (others => '0');
     elsif rising_edge(clk) then
-      status_tmp := fault_status_reg;
+      status_tmp := fault_status_reg(15 downto 0);
 
       if mmusr_update_ack = '1' then
         mmusr_update_req <= '0';
@@ -1192,7 +1226,7 @@ begin
           -- Set successful identity translation MMUSR with MC68030 format
           fault_status_reg <= encode_mmusr_success(
             cache_inhibit => '0',        -- No cache inhibit for identity
-            write_protect => '0',        -- No write protect for identity  
+            write_protect => '0',        -- No write protect for identity
             transparent => '0'           -- Not transparent (MMU disabled)
           );
           translation_pending <= '0';
@@ -1432,7 +1466,7 @@ begin
         status_tmp := walker_fault_status;
         fault_reg <= '1';
         fault_status_reg <= status_tmp;
-        mmusr_update_value <= status_tmp;  -- Full 32-bit MC68030 format
+        mmusr_update_value <= status_tmp;  -- 16-bit MC68030 format
         mmusr_update_req <= '1';
         translation_pending <= '0';
         -- Debug: Report walker fault processing with corruption tracking

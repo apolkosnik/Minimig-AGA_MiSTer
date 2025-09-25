@@ -442,6 +442,17 @@ wire [31:0] cpu_cache_addr;
 wire [15:0] cpu_cache_data;
 wire        cpu_cache_ack;
 
+// 68030 Cache control signals from cpu_wrapper
+wire        cpu_cacr_ie;        // CACR instruction cache enable
+wire        cpu_cacr_de;        // CACR data cache enable
+wire        cpu_cacr_freeze;    // CACR cache freeze
+wire        cpu_cache_cinv_req; // CINV cache invalidate request
+wire        cpu_cache_cpush_req;// CPUSH cache push request
+wire  [1:0] cpu_cache_op_scope; // Cache operation scope
+wire  [1:0] cpu_cache_op_cache; // Cache operation target
+wire [31:0] cpu_cache_op_addr;  // Cache operation address
+wire [31:0] cpu_pmmu_addr_phys; // PMMU physical address
+
 // Cache fill interface - connect cache requests to RAM
 assign cpu_cache_data = ram_dout;
 assign cpu_cache_ack = ram_ready & cpu_cache_req;
@@ -504,7 +515,18 @@ cpu_wrapper
 	.cache_req    (cpu_cache_req   ),
 	.cache_addr   (cpu_cache_addr  ),
 	.cache_data   (cpu_cache_data  ),
-	.cache_ack    (cpu_cache_ack   )
+	.cache_ack    (cpu_cache_ack   ),
+
+	// 68030 Cache control outputs
+	.cacr_ie          (cpu_cacr_ie        ),
+	.cacr_de          (cpu_cacr_de        ),
+	.cacr_freeze      (cpu_cacr_freeze    ),
+	.cache_cinv_req   (cpu_cache_cinv_req ),
+	.cache_cpush_req  (cpu_cache_cpush_req),
+	.cache_op_scope   (cpu_cache_op_scope ),
+	.cache_op_cache   (cpu_cache_op_cache ),
+	.cache_op_addr    (cpu_cache_op_addr  ),
+	.pmmu_addr_phys   (cpu_pmmu_addr_phys )
 );
 
 wire [15:0] ram_dout1;
@@ -518,6 +540,15 @@ sdram_ctrl ram1
 
 	.cache_rst    (cpu_rst         ),
 	.cpu_cache_ctrl(cpu_cacr       ),
+	.cpu_cacr_ie        (cpu_cacr_ie),
+	.cpu_cacr_de        (cpu_cacr_de),
+	.cpu_cacr_freeze    (cpu_cacr_freeze),
+	.cpu_cache_cinv_req (cpu_cache_cinv_req),
+	.cpu_cache_cpush_req(cpu_cache_cpush_req),
+	.cpu_cache_op_scope (cpu_cache_op_scope),
+	.cpu_cache_op_cache (cpu_cache_op_cache),
+	.cpu_cache_op_addr  (cpu_cache_op_addr),
+	.cpu_pmmu_addr_phys (cpu_pmmu_addr_phys),
 
 	.sd_data      (SDRAM_DQ        ),
 	.sd_addr      (SDRAM_A         ),
@@ -560,6 +591,15 @@ ddram_ctrl ram2
 
 	.cache_rst    (cpu_rst         ),
 	.cpu_cache_ctrl(cpu_cacr       ),
+	.cpu_cacr_ie        (cpu_cacr_ie),
+	.cpu_cacr_de        (cpu_cacr_de),
+	.cpu_cacr_freeze    (cpu_cacr_freeze),
+	.cpu_cache_cinv_req (cpu_cache_cinv_req),
+	.cpu_cache_cpush_req(cpu_cache_cpush_req),
+	.cpu_cache_op_scope (cpu_cache_op_scope),
+	.cpu_cache_op_cache (cpu_cache_op_cache),
+	.cpu_cache_op_addr  (cpu_cache_op_addr),
+	.cpu_pmmu_addr_phys (cpu_pmmu_addr_phys),
 
 	.DDRAM_CLK    (DDRAM_CLK       ),
 	.DDRAM_BUSY   (DDRAM_BUSY      ),

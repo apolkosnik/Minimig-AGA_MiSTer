@@ -26,7 +26,7 @@
 
 module cpu_wrapper
 #(
-	parameter USE_68030_CACHE = 1  // 0=use existing cache, 1=use new 68030 cache
+	parameter USE_68030_CACHE = 0  // 0=use existing cache, 1=use new 68030 cache
 )
 (
 	input             reset,
@@ -80,7 +80,18 @@ module cpu_wrapper
 	output            cache_req,
 	output     [31:0] cache_addr,
 	input      [15:0] cache_data,
-	input             cache_ack
+	input             cache_ack,
+
+	// 68030 CACR and PMMU interface outputs
+	output            cacr_ie,        // CACR instruction cache enable
+	output            cacr_de,        // CACR data cache enable
+	output            cacr_freeze,    // CACR cache freeze
+	output            cache_cinv_req, // CINV cache invalidate request
+	output            cache_cpush_req,// CPUSH cache push request
+	output      [1:0] cache_op_scope, // Cache operation scope
+	output      [1:0] cache_op_cache, // Cache operation target
+	output     [31:0] cache_op_addr,  // Cache operation address
+	output     [31:0] pmmu_addr_phys  // PMMU physical address
 );
 
 assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
@@ -232,14 +243,6 @@ wire [31:0] pmmu_addr_phys_p;
 wire        cache_enabled;
 wire        cache_hit;
 wire        cache_miss;
-wire        cache_cinv_req;
-wire        cache_cpush_req;
-wire  [1:0] cache_op_scope;
-wire  [1:0] cache_op_cache;
-wire [31:0] cache_op_addr;
-wire        cacr_ie;
-wire        cacr_de;
-wire        cacr_freeze;
 wire        i_cache_req;
 wire [31:0] i_cache_addr;
 wire [31:0] i_cache_data;
@@ -351,48 +354,9 @@ fx68k cpu_inst_o
 generate
 if (USE_68030_CACHE) begin : gen_68030_cache
 
-	// Cache enable logic - only for 68030 
-	assign cache_enabled = (cpucfg == 2'b11) & cacr_ie; // 68030 with instruction cache enabled
-
-	// 68030 Cache instantiation
-	TG68K_Cache_030 cache_inst
-	(
-		.clk(clk),
-		.nreset(reset),
-		// Cache Control (from CACR register)
-		.cacr_ie(cacr_ie),
-		.cacr_de(cacr_de),
-		.cacr_freeze(cacr_freeze),
-		// Cache Control Instructions
-		.cinv_req(cache_cinv_req),
-		.cpush_req(cache_cpush_req),
-		.cache_op_scope(cache_op_scope),
-		.cache_op_cache(cache_op_cache),
-		.cache_op_addr(cache_op_addr),
-		// Instruction Cache Interface
-		.i_addr(i_cache_addr),
-		.i_addr_phys(pmmu_addr_phys_p),  // Physical address from PMMU
-		.i_req(i_cache_req),
-		.i_data(i_cache_data),
-		.i_hit(i_cache_hit),
-		.i_fill_req(i_fill_req),
-		.i_fill_addr(i_fill_addr),
-		.i_fill_data(i_fill_data),
-		.i_fill_valid(i_fill_valid),
-		// Data Cache Interface
-		.d_addr(d_cache_addr),
-		.d_addr_phys(pmmu_addr_phys_p),  // Physical address from PMMU
-		.d_req(d_cache_req),
-		.d_we(d_cache_we),
-		.d_data_in(d_cache_data_in),
-		.d_data_out(d_cache_data_out),
-		.d_be(d_cache_be),
-		.d_hit(d_cache_hit),
-		.d_fill_req(d_fill_req),
-		.d_fill_addr(d_fill_addr),
-		.d_fill_data(d_fill_data),
-		.d_fill_valid(d_fill_valid)
-	);
+	// Cache enable logic - using legacy cache with 68030 control interface
+	// The legacy cpu_cache_new.v now handles 68030 CACR and CINV instructions
+	assign cache_enabled = 1'b0; // Disable separate 68030 cache - using legacy cache
 
 	// Cache interface logic
 	assign i_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing

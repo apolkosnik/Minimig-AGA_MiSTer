@@ -114,45 +114,6 @@ COMPONENT TG68KdotC_Kernel
    );
    END COMPONENT;
 
-COMPONENT TG68K_Cache_030
-   port(
-      clk            : in  std_logic;
-      nreset         : in  std_logic;
-      -- Cache Control (from CACR register)
-      cacr_ie        : in  std_logic;
-      cacr_de        : in  std_logic;
-      cacr_freeze    : in  std_logic;
-      -- Cache Control Instructions
-      cinv_req       : in  std_logic;
-      cpush_req      : in  std_logic;
-      cache_op_scope : in  std_logic_vector(1 downto 0);
-      cache_op_cache : in  std_logic_vector(1 downto 0);
-      cache_op_addr  : in  std_logic_vector(31 downto 0);
-      -- Instruction Cache Interface
-      i_addr         : in  std_logic_vector(31 downto 0);
-      i_addr_phys    : in  std_logic_vector(31 downto 0);
-      i_req          : in  std_logic;
-      i_data         : out std_logic_vector(31 downto 0);
-      i_hit          : out std_logic;
-      i_fill_req     : out std_logic;
-      i_fill_addr    : out std_logic_vector(31 downto 0);
-      i_fill_data    : in  std_logic_vector(127 downto 0);
-      i_fill_valid   : in  std_logic;
-      -- Data Cache Interface
-      d_addr         : in  std_logic_vector(31 downto 0);
-      d_addr_phys    : in  std_logic_vector(31 downto 0);
-      d_req          : in  std_logic;
-      d_we           : in  std_logic;
-      d_data_in      : in  std_logic_vector(31 downto 0);
-      d_be           : in  std_logic_vector(3 downto 0);
-      d_data_out     : out std_logic_vector(31 downto 0);
-      d_hit          : out std_logic;
-      d_fill_req     : out std_logic;
-      d_fill_addr    : out std_logic_vector(31 downto 0);
-      d_fill_data    : in  std_logic_vector(127 downto 0);
-      d_fill_valid   : in  std_logic
-   );
-   END COMPONENT;
 
    SIGNAL data_write  : std_logic_vector(15 downto 0);
    SIGNAL r_data      : std_logic_vector(15 downto 0);
@@ -184,6 +145,8 @@ COMPONENT TG68K_Cache_030
 
    -- Cache control signals
    SIGNAL cache_enabled   : std_logic;
+   SIGNAL i_cache_enabled : std_logic;
+   SIGNAL d_cache_enabled : std_logic;
    SIGNAL cache_cinv_req  : std_logic;
    SIGNAL cache_cpush_req : std_logic;
    SIGNAL cache_op_scope  : std_logic_vector(1 downto 0);
@@ -222,6 +185,7 @@ COMPONENT TG68K_Cache_030
    SIGNAL cache_fill_active : std_logic;
    SIGNAL cache_fill_count  : std_logic_vector(1 downto 0);
    SIGNAL cache_fill_buffer : std_logic_vector(127 downto 0);
+   SIGNAL cpu_stall_for_cache : std_logic;
 
    type sync_state_t is (sync0, sync1, sync2, sync3, sync4, sync5, sync6, sync7, sync8, sync9);
    signal sync_state : sync_state_t;
@@ -238,7 +202,12 @@ BEGIN
    cpu1reset <= RESET OR HALT;
    
    -- Cache is only available on 68030 (CPU="11")
+   -- Use actual CACR register bits for cache enable control
    cache_enabled <= '1' WHEN CPU="11" ELSE '0';
+
+   -- Individual cache enable signals from CACR register
+   i_cache_enabled <= cacr_ie when CPU="11" else '0';
+   d_cache_enabled <= cacr_de when CPU="11" else '0';
    
    -- Cache control comes from CPU core CACR register
    -- Fallback to basic enable if no cache control (for older CPU modes)
@@ -413,105 +382,5 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
       END IF;
    END PROCESS;
 
-   -- Cache instantiation (68030 only)
-   cache_inst: TG68K_Cache_030 
-   port map(
-      clk            => CLK,
-      nreset         => cpu1reset,
-      -- Cache Control (from CACR register)
-      cacr_ie        => cacr_ie,
-      cacr_de        => cacr_de,
-      cacr_freeze    => cacr_freeze,
-      -- Cache Control Instructions
-      cinv_req       => cache_cinv_req,
-      cpush_req      => cache_cpush_req,
-      cache_op_scope => cache_op_scope,
-      cache_op_cache => cache_op_cache,
-      cache_op_addr  => cache_op_addr,
-      -- Instruction Cache Interface
-      i_addr         => i_cache_addr,
-      i_addr_phys    => pmmu_addr_phys,   -- Physical address from PMMU
-      i_req          => i_cache_req,
-      i_data         => i_cache_data,
-      i_hit          => i_cache_hit,
-      i_fill_req     => i_fill_req,
-      i_fill_addr    => i_fill_addr,
-      i_fill_data    => i_fill_data,
-      i_fill_valid   => i_fill_valid,
-      -- Data Cache Interface
-      d_addr         => d_cache_addr,
-      d_addr_phys    => pmmu_addr_phys,   -- Physical address from PMMU
-      d_req          => d_cache_req,
-      d_we           => d_cache_we,
-      d_be           => "1111",           -- All bytes enabled for now
-      d_data_in      => d_cache_data_in,
-      d_data_out     => d_cache_data_out,
-      d_hit          => d_cache_hit,
-      d_fill_req     => d_fill_req,
-      d_fill_addr    => d_fill_addr,
-      d_fill_data    => d_fill_data,
-      d_fill_valid   => d_fill_valid
-   );
-
-   -- Cache interface logic for 68030
-   i_cache_addr <= ADDR;
-   i_cache_req <= '1' when (state="00" and cache_enabled='1') else '0';  -- Instruction fetch
-   i_fill_data <= cache_fill_buffer;
-   i_fill_valid <= '1' when (cache_fill_active='1' and cache_fill_count="11") else '0';
-
-   d_cache_addr <= ADDR;
-   d_cache_req <= '1' when ((state="10" or state="11") and cache_enabled='1') else '0';  -- Data read/write
-   d_cache_we <= not wr;
-   d_cache_data_in <= data_write & data_write;  -- Replicate 16-bit data to 32-bit
-   d_fill_data <= cache_fill_buffer;
-   d_fill_valid <= '1' when (cache_fill_active='1' and cache_fill_count="11") else '0';
-
-   -- Cache hit/miss logic
-   cache_hit <= (i_cache_hit and i_cache_req) or (d_cache_hit and d_cache_req);
-   cache_miss <= ((not i_cache_hit and i_cache_req) or (not d_cache_hit and d_cache_req)) when cache_enabled='1' else '0';
-
-   -- Cache memory interface - connect to SDRAM controller
-   cache_req <= (i_fill_req or d_fill_req) when cache_enabled='1' else '0';
-   cache_addr <= i_fill_addr when i_fill_req='1' else d_fill_addr;
-
-   -- Cache fill process - accumulate 4 words into 128-bit cache line
-   PROCESS (CLK, cpu1reset)
-   BEGIN
-      IF cpu1reset='0' THEN
-         cache_fill_active <= '0';
-         cache_fill_count <= "00";
-         cache_fill_buffer <= (others => '0');
-      ELSIF rising_edge(CLK) THEN
-         IF cache_req='1' and cache_ack='1' THEN
-            -- Start cache fill sequence
-            IF cache_fill_active='0' THEN
-               cache_fill_active <= '1';
-               cache_fill_count <= "00";
-            END IF;
-         END IF;
-
-         IF cache_fill_active='1' and cache_ack='1' THEN
-            -- Accumulate 16-bit words into 128-bit cache line
-            CASE cache_fill_count IS
-               WHEN "00" => cache_fill_buffer(15 downto 0)   <= cache_data;
-               WHEN "01" => cache_fill_buffer(31 downto 16)  <= cache_data;
-               WHEN "10" => cache_fill_buffer(47 downto 32)  <= cache_data;
-               WHEN "11" => cache_fill_buffer(63 downto 48)  <= cache_data;
-                           -- For now, replicate the 4 words to fill 8 words (128 bits)
-                           -- TODO: Implement proper 8-word burst from SDRAM
-                           cache_fill_buffer(79 downto 64)  <= cache_fill_buffer(15 downto 0);
-                           cache_fill_buffer(95 downto 80)  <= cache_fill_buffer(31 downto 16);
-                           cache_fill_buffer(111 downto 96) <= cache_fill_buffer(47 downto 32);
-                           cache_fill_buffer(127 downto 112)<= cache_fill_buffer(63 downto 48);
-                           cache_fill_active <= '0';  -- Complete cache line
-               WHEN OTHERS => NULL;
-            END CASE;
-            
-            IF cache_fill_count /= "11" THEN
-               cache_fill_count <= cache_fill_count + 1;
-            END IF;
-         END IF;
-      END IF;
-   END PROCESS;
 
 END;
