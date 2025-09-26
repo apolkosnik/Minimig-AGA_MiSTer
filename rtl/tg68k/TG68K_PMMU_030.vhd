@@ -664,63 +664,87 @@ begin
         if fc(2) = '1' then
           case reg_sel is
           when x"0" =>
-            -- MC68030 TC Register Write with proper compliance
-            -- Valid bits: 31(E), 25(SRE), 24(FCL), 23-20(PS), 19-16(IS), 15-12(TIA), 11-8(TIB), 7-4(TIC), 3-0(TID)
-            -- Reserved bits: 30-26, 23(partial validation in PS field), others per MC68030
-            -- Mask reserved bits and flush ATC since TC affects all translations
-            -- Apply MC68030 reserved bit masking manually (workaround for VHDL issue)
-            -- Clear reserved bits 30-26, keep everything else
+            -- MC68030 TC Register Write - exact specification compliance
+            -- MC68030 TC bit layout per User's Manual section 9.2.1:
+            -- 31: E (Enable), 30-26: Reserved, 25: SRE, 24: FCL
+            -- 23-20: PS (Page Size), 19-16: IS (Initial Shift), 15-12: TIA, 11-8: TIB, 7-4: TIC, 3-0: TID
+            -- Reserved bits: 30-26 only (all other bits are valid control fields)
             TC(31) <= reg_wdat(31);          -- E (Enable)
             TC(30 downto 26) <= "00000";     -- Reserved bits (force to 0)
             TC(25) <= reg_wdat(25);          -- SRE (Supervisor Root Enable)
             TC(24) <= reg_wdat(24);          -- FCL (Function Code Lookup)
-            TC(23 downto 0) <= reg_wdat(23 downto 0); -- All other valid fields
+            TC(23 downto 20) <= reg_wdat(23 downto 20); -- PS (Page Size)
+            TC(19 downto 16) <= reg_wdat(19 downto 16); -- IS (Initial Shift)
+            TC(15 downto 12) <= reg_wdat(15 downto 12); -- TIA (Table Index A)
+            TC(11 downto 8) <= reg_wdat(11 downto 8);   -- TIB (Table Index B)
+            TC(7 downto 4) <= reg_wdat(7 downto 4);     -- TIC (Table Index C)
+            TC(3 downto 0) <= reg_wdat(3 downto 0);     -- TID (Table Index D)
             atc_flush_req <= '1'; -- TC changes invalidate all cached translations
-            report "TC_WRITE_MANUAL: input=0x" & slv_to_hstring(reg_wdat) &
-                   " manual_result constructed bit-by-bit" severity note;
+            report "TC_WRITE_SPEC_COMPLIANT: input=0x" & slv_to_hstring(reg_wdat) &
+                   " reserved bits 30-26 masked to zero" severity note;
           when x"1" =>
-            -- CRP register write with MC68030 reserved bit masking
+            -- CRP register write - MC68030 Long-Format Root Pointer per User's Manual section 9.2.2
             if reg_part = '1' then
-              -- CRP HIGH: clear reserved bits 3-0
-              CRP_H(31 downto 4) <= reg_wdat(31 downto 4); -- Table address
-              CRP_H(3 downto 0) <= "0000";                 -- Reserved bits
+              -- CRP HIGH WORD (bits 63-32): Table Address[31:4] + Reserved[3:0]
+              -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
+              CRP_H(31 downto 4) <= reg_wdat(31 downto 4); -- Table address (16-byte aligned)
+              CRP_H(3 downto 0) <= "0000";                 -- Reserved (must be zero)
             else
-              -- CRP LOW: clear reserved bits 31-16 and 7-0, keep DT field 15-8
-              CRP_L(31 downto 16) <= (others => '0');      -- Reserved bits
-              CRP_L(15 downto 8) <= reg_wdat(15 downto 8); -- DT field
-              CRP_L(7 downto 0) <= (others => '0');        -- Reserved bits
+              -- CRP LOW WORD (bits 31-0): Upper Limit[31:16] + DT[15:8] + Lower Limit[7:0]
+              -- MC68030 spec: All bits are valid in long-format root pointer low word
+              CRP_L(31 downto 16) <= reg_wdat(31 downto 16); -- Upper Limit
+              CRP_L(15 downto 8) <= reg_wdat(15 downto 8);   -- DT (Descriptor Type)
+              CRP_L(7 downto 0) <= reg_wdat(7 downto 0);     -- Lower Limit
             end if;
             atc_flush_req <= '1'; -- CRP changes invalidate all cached translations
           when x"2" =>
-            -- SRP register write with MC68030 reserved bit masking
+            -- SRP register write - MC68030 Long-Format Root Pointer (same as CRP)
             if reg_part = '1' then
-              -- SRP HIGH: clear reserved bits 3-0
-              SRP_H(31 downto 4) <= reg_wdat(31 downto 4); -- Table address
-              SRP_H(3 downto 0) <= "0000";                 -- Reserved bits
+              -- SRP HIGH WORD (bits 63-32): Table Address[31:4] + Reserved[3:0]
+              -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
+              SRP_H(31 downto 4) <= reg_wdat(31 downto 4); -- Table address (16-byte aligned)
+              SRP_H(3 downto 0) <= "0000";                 -- Reserved (must be zero)
             else
-              -- SRP LOW: clear reserved bits 31-16 and 7-0, keep DT field 15-8
-              SRP_L(31 downto 16) <= (others => '0');      -- Reserved bits
-              SRP_L(15 downto 8) <= reg_wdat(15 downto 8); -- DT field
-              SRP_L(7 downto 0) <= (others => '0');        -- Reserved bits
+              -- SRP LOW WORD (bits 31-0): Upper Limit[31:16] + DT[15:8] + Lower Limit[7:0]
+              -- MC68030 spec: All bits are valid in long-format root pointer low word
+              SRP_L(31 downto 16) <= reg_wdat(31 downto 16); -- Upper Limit
+              SRP_L(15 downto 8) <= reg_wdat(15 downto 8);   -- DT (Descriptor Type)
+              SRP_L(7 downto 0) <= reg_wdat(7 downto 0);     -- Lower Limit
             end if;
             atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
           when x"3" =>
-            -- TTR0 register write with MC68030 reserved bit masking
-            TT0(31 downto 16) <= reg_wdat(31 downto 16);   -- Address mask/base
-            TT0(15 downto 8) <= (others => '0');           -- Reserved bits
-            TT0(7 downto 4) <= reg_wdat(7 downto 4);       -- Function code bits
-            TT0(3) <= '0';                                  -- Reserved bit
-            TT0(2 downto 0) <= reg_wdat(2 downto 0);       -- Control bits (S,CI,WP)
+            -- TT0 register write - MC68030 Transparent Translation Register per User's Manual section 9.2.6
+            -- MC68030 TT0/TT1 bit layout:
+            -- 31-24: Logical Address Base, 23-16: Logical Address Mask
+            -- 15: E (Enable), 14-10: Reserved, 9-8: CI (Cache Inhibit)
+            -- 7-4: Function Code Mask, 3: Reserved, 2: RWM, 1: RW, 0: Reserved
+            TT0(31 downto 24) <= reg_wdat(31 downto 24);   -- Logical Address Base
+            TT0(23 downto 16) <= reg_wdat(23 downto 16);   -- Logical Address Mask
+            TT0(15) <= reg_wdat(15);                        -- E (Enable)
+            TT0(14 downto 10) <= "00000";                  -- Reserved (must be zero)
+            TT0(9 downto 8) <= reg_wdat(9 downto 8);       -- CI (Cache Inhibit)
+            TT0(7 downto 4) <= reg_wdat(7 downto 4);       -- Function Code Mask
+            TT0(3) <= '0';                                  -- Reserved (must be zero)
+            TT0(2 downto 1) <= reg_wdat(2 downto 1);       -- RWM, RW
+            TT0(0) <= '0';                                  -- Reserved (must be zero)
             atc_flush_req <= '1';
-            report "TTR0_WRITE_FIXED: input=0x" & slv_to_hstring(reg_wdat) &
-                   " masked with reserved bits cleared" severity note;
+            report "TT0_WRITE_SPEC_COMPLIANT: input=0x" & slv_to_hstring(reg_wdat) &
+                   " reserved bits 14-10,3,0 masked to zero" severity note;
           when x"4" =>
-            -- TTR1 register write with MC68030 reserved bit masking
-            TT1(31 downto 16) <= reg_wdat(31 downto 16);   -- Address mask/base
-            TT1(15 downto 8) <= (others => '0');           -- Reserved bits
-            TT1(7 downto 4) <= reg_wdat(7 downto 4);       -- Function code bits
-            TT1(3) <= '0';                                  -- Reserved bit
-            TT1(2 downto 0) <= reg_wdat(2 downto 0);       -- Control bits (S,CI,WP)
+            -- TT1 register write - MC68030 Transparent Translation Register (same layout as TT0)
+            -- MC68030 TT0/TT1 bit layout:
+            -- 31-24: Logical Address Base, 23-16: Logical Address Mask
+            -- 15: E (Enable), 14-10: Reserved, 9-8: CI (Cache Inhibit)
+            -- 7-4: Function Code Mask, 3: Reserved, 2: RWM, 1: RW, 0: Reserved
+            TT1(31 downto 24) <= reg_wdat(31 downto 24);   -- Logical Address Base
+            TT1(23 downto 16) <= reg_wdat(23 downto 16);   -- Logical Address Mask
+            TT1(15) <= reg_wdat(15);                        -- E (Enable)
+            TT1(14 downto 10) <= "00000";                  -- Reserved (must be zero)
+            TT1(9 downto 8) <= reg_wdat(9 downto 8);       -- CI (Cache Inhibit)
+            TT1(7 downto 4) <= reg_wdat(7 downto 4);       -- Function Code Mask
+            TT1(3) <= '0';                                  -- Reserved (must be zero)
+            TT1(2 downto 1) <= reg_wdat(2 downto 1);       -- RWM, RW
+            TT1(0) <= '0';                                  -- Reserved (must be zero)
             atc_flush_req <= '1';
           when x"5" =>
             -- MMUSR register: MC68030 MMUSR is mostly read-only with some write-1-to-clear bits
@@ -834,11 +858,11 @@ begin
     total_bits := is_bits + tia_bits + tib_bits + tic_bits + tid_bits + page_offset_bits;
     
     -- MC68030 Constraints validation:
-    -- 1. Total bits must equal 32
+    -- 1. Total bits must equal 32 (only when MMU is enabled - TC.E = 1)
     -- 2. TIA must be > 0 (root table must have at least 1 bit)
     -- 3. If TIB > 0, it must be >= 2 (minimum 4 entries per table)
     -- 4. Page size must be valid (0-7)
-    if total_bits /= 32 then
+    if TC(31) = '1' and total_bits /= 32 then
       report "TC_VALIDATION_ERROR: Field sum " & integer'image(total_bits) & " != 32" &
              " (IS=" & integer'image(is_bits) &
              " TIA=" & integer'image(tia_bits) &
@@ -849,12 +873,12 @@ begin
         severity warning;
     end if;
     
-    if tia_bits = 0 then
+    if TC(31) = '1' and tia_bits = 0 then
       report "TC_VALIDATION_ERROR: TIA field must be > 0 (root table needs at least 1 bit)"
         severity warning;
     end if;
     
-    if tib_bits > 0 and tib_bits < 2 then
+    if TC(31) = '1' and tib_bits > 0 and tib_bits < 2 then
       report "TC_VALIDATION_ERROR: TIB field must be >= 2 when used (minimum 4 table entries)"
         severity warning;
     end if;

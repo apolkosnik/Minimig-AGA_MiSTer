@@ -20,7 +20,8 @@ architecture behavior of tb_cache_030 is
       -- Cache Control
       cacr_ie        : in  std_logic;
       cacr_de        : in  std_logic;
-      cacr_freeze    : in  std_logic;
+      cacr_ifreeze    : in  std_logic;
+      cacr_dfreeze    : in  std_logic;
       -- Cache Control Instructions
       cinv_req       : in  std_logic;
       cpush_req      : in  std_logic;
@@ -59,7 +60,8 @@ architecture behavior of tb_cache_030 is
   -- Cache control
   signal cacr_ie : std_logic := '0';
   signal cacr_de : std_logic := '0';
-  signal cacr_freeze : std_logic := '0';
+  signal cacr_ifreeze : std_logic := '0';
+  signal cacr_dfreeze : std_logic := '0';
   
   -- Cache control instructions
   signal cinv_req : std_logic := '0';
@@ -100,7 +102,8 @@ begin
     nreset => nreset,
     cacr_ie => cacr_ie,
     cacr_de => cacr_de,
-    cacr_freeze => cacr_freeze,
+    cacr_ifreeze => cacr_ifreeze,
+    cacr_dfreeze => cacr_dfreeze,
     cinv_req => cinv_req,
     cpush_req => cpush_req,
     cache_op_scope => cache_op_scope,
@@ -349,18 +352,32 @@ begin
     write(l, string'("TEST 7: Cache Freeze Testing"));
     writeline(output, l);
     
-    cacr_freeze <= '1';
+    cacr_ifreeze <= '1';
     wait_cycles(1); -- Let freeze take effect
     test_i_access(x"00003000"); -- New address with freeze
-    report_test("Cache Freeze", i_fill_req = '0'); -- Should not request fill
+    report_test("iCache Freeze", i_fill_req = '0'); -- Should not request fill
     i_req <= '0';
     wait_cycles(1);
     
-    cacr_freeze <= '0';
+    cacr_ifreeze <= '0';
     test_i_access(x"00003000"); -- Same address without freeze
-    report_test("Cache Unfreeze", i_fill_req = '1'); -- Should request fill
+    report_test("iCache Unfreeze", i_fill_req = '1'); -- Should request fill
     i_req <= '0';
     wait_cycles(1);
+
+    cacr_dfreeze <= '1';
+    wait_cycles(1); -- Let freeze take effect
+    test_i_access(x"00003000"); -- New address with freeze
+    report_test("dCache Freeze", i_fill_req = '0'); -- Should not request fill
+    i_req <= '0';
+    wait_cycles(1);
+    
+    cacr_dfreeze <= '0';
+    test_i_access(x"00003000"); -- Same address without freeze
+    report_test("dCache Unfreeze", i_fill_req = '1'); -- Should request fill
+    i_req <= '0';
+    wait_cycles(1);
+
 
     wait_cycles(20);
     write(l, string'("======================================"));

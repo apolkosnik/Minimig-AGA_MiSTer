@@ -103,7 +103,8 @@ COMPONENT TG68KdotC_Kernel
       cache_op_cache  : out std_logic_vector(1 downto 0);
       cacr_ie         : out std_logic;
       cacr_de         : out std_logic;
-      cacr_freeze     : out std_logic;
+      cacr_ifreeze     : out std_logic;
+      cacr_dfreeze     : out std_logic;
 -- PMMU address interface (68030)
       pmmu_addr_log   : out std_logic_vector(31 downto 0);
       pmmu_addr_phys  : out std_logic_vector(31 downto 0);
@@ -121,7 +122,8 @@ COMPONENT TG68K_Cache_030
       -- Cache Control (from CACR register)
       cacr_ie        : in  std_logic;
       cacr_de        : in  std_logic;
-      cacr_freeze    : in  std_logic;
+      cacr_ifreeze    : in  std_logic;
+      cacr_dfreeze    : in  std_logic;
       -- Cache Control Instructions
       cinv_req       : in  std_logic;
       cpush_req      : in  std_logic;
@@ -190,7 +192,8 @@ COMPONENT TG68K_Cache_030
    SIGNAL cache_op_cache  : std_logic_vector(1 downto 0);
    SIGNAL cacr_ie         : std_logic;
    SIGNAL cacr_de         : std_logic;
-   SIGNAL cacr_freeze     : std_logic;
+   SIGNAL cacr_ifreeze     : std_logic;
+   SIGNAL cacr_dfreeze     : std_logic;
 
    -- PMMU address signals (68030)
    SIGNAL pmmu_addr_log   : std_logic_vector(31 downto 0);
@@ -242,7 +245,7 @@ BEGIN
    
    -- Cache control comes from CPU core CACR register
    -- Fallback to basic enable if no cache control (for older CPU modes)
-   -- Note: cacr_ie, cacr_de, cacr_freeze now come from CPU core
+   -- Note: cacr_ie, cacr_de, cacr_ifreeze, cacr_dfreeze now come from CPU core
 
 cpu1: TG68KdotC_Kernel 
    generic map(
@@ -281,7 +284,8 @@ cpu1: TG68KdotC_Kernel
       cache_op_cache => cache_op_cache,   -- : out std_logic_vector(1 downto 0);
       cacr_ie => cacr_ie,                 -- : out std_logic;
       cacr_de => cacr_de,                 -- : out std_logic;
-      cacr_freeze => cacr_freeze,         -- : out std_logic
+      cacr_ifreeze => cacr_ifreeze,         -- : out std_logic;
+      cacr_dfreeze => cacr_dfreeze,         -- : out std_logic;
       -- PMMU address interface (68030)
       pmmu_addr_log => pmmu_addr_log,     -- : out std_logic_vector(31 downto 0);
       pmmu_addr_phys => pmmu_addr_phys,   -- : out std_logic_vector(31 downto 0)
@@ -421,7 +425,8 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
       -- Cache Control (from CACR register)
       cacr_ie        => cacr_ie,
       cacr_de        => cacr_de,
-      cacr_freeze    => cacr_freeze,
+      cacr_ifreeze    => cacr_ifreeze,
+      cacr_dfreeze    => cacr_dfreeze,
       -- Cache Control Instructions
       cinv_req       => cache_cinv_req,
       cpush_req      => cache_cpush_req,

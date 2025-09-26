@@ -146,7 +146,8 @@ entity TG68KdotC_Kernel is
 		cache_op_cache			: out std_logic_vector(1 downto 0);
 		cacr_ie					: out std_logic;
 		cacr_de					: out std_logic;
-		cacr_freeze				: out std_logic;
+		cacr_ifreeze				: out std_logic;
+		cacr_dfreeze				: out std_logic;
 -- PMMU register interface (68030)
 		pmmu_reg_we				: out std_logic;
 		pmmu_reg_re				: out std_logic;
@@ -436,18 +437,18 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
   function pmmu_sel_from_brief(b : std_logic_vector(11 downto 0)) return std_logic_vector is
     variable s : std_logic_vector(3 downto 0);
   begin
-    case b(11 downto 8) is
-      when x"0" => s := x"0"; -- TC
-      when x"1" => s := x"1"; -- CRP (low 32 only for now)
-      when x"2" => s := x"2"; -- SRP (low 32 only for now)
-      when x"3" => s := x"3"; -- TT0
-      when x"4" => s := x"4"; -- TT1
-      when x"5" => s := x"5"; -- MMUSR
-      when x"6" => s := x"6"; -- CAL
-      when x"7" => s := x"7"; -- VAL
-      when x"8" => s := x"8"; -- SCC
-      when x"9" => s := x"9"; -- AC
-      when others => s := x"F"; -- invalid
+    case b is
+      when x"000" => s := x"0"; -- TC (Translation Control)
+      when x"010" => s := x"1"; -- CRP (CPU Root Pointer)
+      when x"011" => s := x"2"; -- SRP (Supervisor Root Pointer)
+      when x"004" => s := x"3"; -- TT0 (Transparent Translation 0)
+      when x"005" => s := x"4"; -- TT1 (Transparent Translation 1)
+      when x"805" => s := x"5"; -- MMUSR (MMU Status Register)
+      when x"017" => s := x"6"; -- CAL (Current Access Level)
+      when x"016" => s := x"7"; -- VAL (Validate Access Level)
+      when x"015" => s := x"8"; -- SCC (Stack Change Control)
+      when x"014" => s := x"9"; -- AC (Access Control)
+      when others => s := x"F"; -- invalid/not supported
     end case;
     return s;
   end function;
@@ -565,20 +566,25 @@ BEGIN
   cache_op_addr <= memaddr when (exec(cache_cinv) = '1' or exec(cache_cpush) = '1') else pmmu_addr_phys_int;
   
   -- CACR (Cache Control Register) bit definitions for MC68030:
-  -- Bit 0 (DE): Data Cache Enable
-  -- Bit 1 (IE): Instruction Cache Enable  
-  -- Bit 2 (FREEZE): Cache Freeze (inhibit replacement)
-  -- Bit 3 (CE): Clear Entry (self-clearing)
-  -- Bit 4 (CI): Clear Instruction Cache (self-clearing) 
-  -- Bit 5 (CD): Clear Data Cache (self-clearing)
-  -- Bit 6 (CA): Clear All Caches (self-clearing)
+  -- Bit 0 (IE): Instruction Cache Enable  
+  -- Bit 1 (FREEZE): Cache Freeze (inhibit replacement)
+  -- Bit 2 (CEI): Clear Entry in Instruction Cache
+  -- Bit 3 (CI): Clear Instruction Cache (self-clearing)
+  -- Bit 4 (CEI): Clear Entry (self-clearing)
+  -- Bit 8 (DE): Data Cache Enable
   -- Bit 9 (FreezeD): Data Cache Freeze (used by AmigaOS for 68030 detection)
-  -- Bits 31-10, 8-7: Reserved (should read as 0, writes ignored)
+  -- Bit 10 (CED): Clear Entry in Data Cache
+  -- Bit 11 (CD): Clear Data Cache
+  -- Bit 12 (DBE): Data Burst Enable
+  -- Bit 13 (WA): Write Allocate
+  -- Bits 31-14, 7-5: Reserved (should read as 0, writes ignored)
   
   -- Extract cache control bits from CACR register
-  cacr_de     <= CACR(0);  -- Data Cache Enable
-  cacr_ie     <= CACR(1);  -- Instruction Cache Enable
-  cacr_freeze <= CACR(2);  -- Cache Freeze
+
+  cacr_ie     <= CACR(0);  -- Instruction Cache Enable
+  cacr_ifreeze <= CACR(1);  -- ICache Freeze
+  cacr_de     <= CACR(8);  -- Data Cache Enable
+  cacr_dfreeze <= CACR(9);  -- ICache Freeze
   -- Source data for PMMU register writes: from Dn normally, or from memory EA in pmmu2
   pmmu_src_data   <= ea_data when (micro_state = pmmu2 or micro_state = pmmu4) else reg_QA;
 
@@ -4461,11 +4467,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		  when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
 		  when X"001" => DFC <= reg_QA(2 downto 0); -- DFC -- 68010+
 		  when X"002" => 
-		    -- Write to CACR with MC68030 bit support including FreezeD (bit 9)
-		    CACR(6 downto 0) <= reg_QA(6 downto 0);
-		    CACR(9) <= reg_QA(9);  -- FreezeD bit for 68030 detection
-		    CACR(8 downto 7) <= (others => '0');
-		    CACR(31 downto 10) <= (others => '0');
+		    -- Write to CACR with proper MC68030 behavior
+		    -- Sticky control bits (retain value until explicitly changed):
+		    CACR(4 downto 0) <= reg_QA(4 downto 0); -- DE, IE, FREEZE - sticky enable/control bits
+		    -- Command bits (6 downto 3) are NEVER stored - they trigger immediate cache operations
+		    -- and always read as 0. Cache invalidation happens during MOVEC execution.
+		    CACR(7 downto 5) <= (others => '0'); -- Command bits always read as 0
+		    CACR(13 downto 8) <= reg_QA(13 downto 8);  -- FreezeD bit for 68030 detection
+		    CACR(31 downto 14) <= (others => '0');
+		    -- TODO: Implement actual cache invalidation logic based on reg_QA(6 downto 3)
+		    -- For now, the command bits trigger no actual cache operations in this emulation
 		  when X"800" => NULL; -- USP -- 68010+
 		  when X"801" => VBR <= reg_QA; -- 68010+
 		  when X"802" => CAAR <= reg_QA; -- CAAR -- 68020+
@@ -4521,11 +4532,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         pmmu_reg_part_d <= '0';
       elsif clkena_lw = '1' OR (CPU="11" AND clkena_in='1' AND (exec(pmmu_wr)='1' OR exec(pmmu_rd)='1')) then
         -- defaults
-        pmmu_reg_we_d   <= '0';
-        pmmu_reg_re_d   <= '0';
-        pmmu_reg_sel_d  <= (others => '0');
-        pmmu_reg_wdat_d <= (others => '0');
-        pmmu_reg_part_d <= '0';
+        --pmmu_reg_we_d   <= '0';
+        --pmmu_reg_re_d   <= '0';
+        --pmmu_reg_sel_d  <= (others => '0');
+        --pmmu_reg_wdat_d <= (others => '0');
+        --pmmu_reg_part_d <= '0';
 
         sel := pmmu_sel_from_brief(brief(11 downto 0));
 
@@ -4533,7 +4544,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         -- MOVEC attempts to access these registers trigger illegal instruction exceptions
 
         -- PMOVE instruction handling (only if MOVEC is not active to avoid conflicts)
-        if exec(pmmu_wr) = '1' and not (CPU = "11" and exec(movec_wr) = '1') then
+        if exec(pmmu_wr) = '1' and CPU = "11" then
           -- PMOVE Dn -> <MMU reg>
           if sel /= x"F" then
             pmmu_reg_sel_d  <= sel;
@@ -4548,7 +4559,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
             end if;
             pmmu_reg_we_d   <= '1';
           end if;
-        elsif exec(pmmu_rd) = '1' and not (CPU = "11" and exec(movec_rd) = '1') then
+        elsif exec(pmmu_rd) = '1' and CPU = "11" then
           -- PMOVE <MMU reg> -> Dn
           if sel /= x"F" then
             pmmu_reg_sel_d <= sel;

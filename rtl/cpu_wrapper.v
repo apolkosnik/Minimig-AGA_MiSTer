@@ -229,7 +229,8 @@ wire [31:0] pmmu_addr_log_p;
 wire [31:0] pmmu_addr_phys_p;
 
 // Cache interface signals (68030 only)
-wire        cache_enabled;
+wire        i_cache_enabled;
+wire        d_cache_enabled;
 wire        cache_hit;
 wire        cache_miss;
 wire        cache_cinv_req;
@@ -239,7 +240,8 @@ wire  [1:0] cache_op_cache;
 wire [31:0] cache_op_addr;
 wire        cacr_ie;
 wire        cacr_de;
-wire        cacr_freeze;
+wire        cacr_ifreeze;
+wire        cacr_dfreeze;
 wire        i_cache_req;
 wire [31:0] i_cache_addr;
 wire [31:0] i_cache_data;
@@ -297,7 +299,8 @@ cpu_inst_p
   .cache_op_cache(cache_op_cache),
   .cacr_ie(cacr_ie),
   .cacr_de(cacr_de),
-  .cacr_freeze(cacr_freeze),
+  .cacr_ifreeze(cacr_ifreeze),
+  .cacr_dfreeze(cacr_dfreeze),
   // PMMU address interface
   .pmmu_addr_log(pmmu_addr_log_p),
   .pmmu_addr_phys(pmmu_addr_phys_p),
@@ -351,8 +354,9 @@ fx68k cpu_inst_o
 generate
 if (USE_68030_CACHE) begin : gen_68030_cache
 
-	// Cache enable logic - only for 68030 
-	assign cache_enabled = (cpucfg == 2'b11) & cacr_ie; // 68030 with instruction cache enabled
+	// Cache enable logic - independent control for instruction and data caches
+	assign i_cache_enabled = (cpucfg == 2'b11) & cacr_ie; // 68030 with instruction cache enabled
+	assign d_cache_enabled = (cpucfg == 2'b11) & cacr_de; // 68030 with data cache enabled
 
 	// 68030 Cache instantiation
 	TG68K_Cache_030 cache_inst
@@ -362,7 +366,8 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 		// Cache Control (from CACR register)
 		.cacr_ie(cacr_ie),
 		.cacr_de(cacr_de),
-		.cacr_freeze(cacr_freeze),
+		.cacr_ifreeze(cacr_ifreeze),
+		.cacr_dfreeze(cacr_dfreeze),
 		// Cache Control Instructions
 		.cinv_req(cache_cinv_req),
 		.cpush_req(cache_cpush_req),
@@ -396,9 +401,9 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 
 	// Cache interface logic
 	assign i_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
-	assign i_cache_req = cache_enabled & (cpustate_p == 2'b00); // Instruction fetch
-	assign d_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing 
-	assign d_cache_req = cache_enabled & (cpustate_p == 2'b10 | cpustate_p == 2'b11); // Data read/write
+	assign i_cache_req = i_cache_enabled & (cpustate_p == 2'b00); // Instruction fetch
+	assign d_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
+	assign d_cache_req = d_cache_enabled & (cpustate_p == 2'b10 | cpustate_p == 2'b11); // Data read/write
 	assign d_cache_we = (cpustate_p == 2'b11); // Write enable for data cache
 	
 	// Generate 32-bit data and byte enables from 16-bit CPU interface
@@ -420,7 +425,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 
 	// Cache hit/miss logic
 	assign cache_hit = (i_cache_hit & i_cache_req) | (d_cache_hit & d_cache_req);
-	assign cache_miss = cache_enabled & ((~i_cache_hit & i_cache_req) | (~d_cache_hit & d_cache_req));
+	assign cache_miss = ((i_cache_enabled & ~i_cache_hit & i_cache_req) | (d_cache_enabled & ~d_cache_hit & d_cache_req));
 
 	// Connect cache fill interface to external memory controller
 	assign cache_req = i_fill_req | d_fill_req;
@@ -472,7 +477,8 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 end else begin : gen_no_68030_cache
 
 	// Disable 68030 cache when not using it
-	assign cache_enabled = 1'b0;
+	assign i_cache_enabled = 1'b0;
+	assign d_cache_enabled = 1'b0;
 	assign cache_hit = 1'b0;
 	assign cache_miss = 1'b0;
 	assign i_cache_req = 1'b0;

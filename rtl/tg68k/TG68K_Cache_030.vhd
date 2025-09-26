@@ -15,7 +15,8 @@ entity TG68K_Cache_030 is
     -- Cache Control (from CACR register)
     cacr_ie        : in  std_logic;  -- Instruction cache enable
     cacr_de        : in  std_logic;  -- Data cache enable  
-    cacr_freeze    : in  std_logic;  -- Cache freeze (inhibit replacements)
+    cacr_ifreeze    : in  std_logic;  -- Cache freeze (inhibit replacements)
+    cacr_dfreeze    : in  std_logic;  -- Cache freeze (inhibit replacements)
     
     -- Cache Control Instructions
     cinv_req       : in  std_logic;  -- CINV (Cache Invalidate) request
@@ -195,7 +196,7 @@ begin
         -- Check for cache miss
         if i_valid_array(i_line_idx) = '0' or i_tag_array(i_line_idx) /= i_tag then
           -- Only request fill if not frozen
-          if cacr_freeze = '0' then
+          if cacr_ifreeze = '0' then
             i_fill_req_int <= '1';
             -- Use physical address for memory fill
             i_fill_addr <= i_addr_phys(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
@@ -206,7 +207,7 @@ begin
       -- Keep fill request active until data arrives (independent of i_req)
       -- But clear it if cache is frozen
       if i_fill_req_int = '1' and i_fill_valid = '0' then
-        if cacr_freeze = '1' then
+        if cacr_ifreeze = '1' then
           i_fill_req_int <= '0'; -- Cancel fill if frozen
         else
           i_fill_req_int <= '1';
@@ -217,7 +218,7 @@ begin
 
   -- Instruction cache hit/miss detection and data output
   -- When cache is frozen, bypass cache (miss) to prevent CPU lockup
-  i_hit <= '1' when (cacr_ie = '1' and i_req = '1' and cacr_freeze = '0' and
+  i_hit <= '1' when (cacr_ie = '1' and i_req = '1' and cacr_ifreeze = '0' and
                      i_valid_array(i_line_idx) = '1' and i_tag_array(i_line_idx) = i_tag) 
                      else '0';
   i_fill_req <= i_fill_req_int;
@@ -334,7 +335,7 @@ begin
           -- Check for read cache miss
           if d_valid_array(d_line_idx) = '0' or d_tag_array(d_line_idx) /= d_tag then
             -- Only request fill if not frozen
-            if cacr_freeze = '0' then
+            if cacr_dfreeze = '0' then
               d_fill_req_int <= '1';
               -- Use physical address for memory fill
               d_fill_addr <= d_addr_phys(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
@@ -366,7 +367,7 @@ begin
       -- Keep fill request active until data arrives (independent of d_req)
       -- But clear it if cache is frozen
       if d_fill_req_int = '1' and d_fill_valid = '0' then
-        if cacr_freeze = '1' then
+        if cacr_dfreeze = '1' then
           d_fill_req_int <= '0'; -- Cancel fill if frozen
         else
           d_fill_req_int <= '1';
@@ -377,7 +378,7 @@ begin
 
   -- Data cache hit/miss detection and data output  
   -- When cache is frozen, bypass cache (miss) to prevent CPU lockup
-  d_hit <= '1' when (cacr_de = '1' and d_req = '1' and cacr_freeze = '0' and
+  d_hit <= '1' when (cacr_de = '1' and d_req = '1' and cacr_dfreeze = '0' and
                      d_valid_array(d_line_idx) = '1' and d_tag_array(d_line_idx) = d_tag)
                      else '0';
   d_fill_req <= d_fill_req_int;
