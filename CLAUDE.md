@@ -1,0 +1,1 @@
+- There might be other instances of quartus running the builds, don't just pkill those, you got to keep track of your own porcesses!

@@ -1,0 +1,323 @@
+$date
+	Fri Sep 26 23:51:07 2025
+$end
+$version
+	Icarus Verilog
+$end
+$timescale
+	1ps
+$end
+$scope module test_wf68k30l_poweron $end
+$var wire 32 ! cpu_dout_w [31:0] $end
+$var wire 1 " ds_w $end
+$var wire 3 # fc_w [2:0] $end
+$var wire 1 $ reset_out_w $end
+$var wire 1 % rmc_w $end
+$var wire 2 & size_w [1:0] $end
+$var wire 1 ' wr_w $end
+$var wire 1 ( uds_w $end
+$var wire 1 ) longword_w $end
+$var wire 1 * lds_w $end
+$var wire 2 + dsack_w [1:0] $end
+$var wire 2 , cpustate_w [1:0] $end
+$var wire 32 - cpu_addr_w [31:0] $end
+$var wire 2 . byte_lanes [1:0] $end
+$var wire 1 / as_w $end
+$var parameter 4 0 CPU_FAILED $end
+$var parameter 4 1 CPU_FETCH_PC_H $end
+$var parameter 4 2 CPU_FETCH_PC_L $end
+$var parameter 4 3 CPU_FETCH_SSP_H $end
+$var parameter 4 4 CPU_FETCH_SSP_L $end
+$var parameter 4 5 CPU_RESET $end
+$var parameter 4 6 CPU_RUNNING $end
+$var reg 4 7 access_delay_counter [3:0] $end
+$var reg 8 8 bus_timeout_counter [7:0] $end
+$var reg 3 9 cachecfg [2:0] $end
+$var reg 3 : chip_ipl [2:0] $end
+$var reg 1 ; clk $end
+$var reg 32 < cpu_din [31:0] $end
+$var reg 4 = cpu_state [3:0] $end
+$var reg 3 > cpucfg [2:0] $end
+$var reg 1 ? dtack_active $end
+$var reg 32 @ initial_pc [31:0] $end
+$var reg 32 A initial_ssp [31:0] $end
+$var reg 1 B mem_access_pending $end
+$var reg 32 C mock_addr [31:0] $end
+$var reg 1 / mock_as $end
+$var reg 32 D mock_dout [31:0] $end
+$var reg 1 E mock_ds $end
+$var reg 3 F mock_fc [2:0] $end
+$var reg 1 G mock_reset_out $end
+$var reg 1 H mock_rmc $end
+$var reg 1 ' mock_rw $end
+$var reg 2 I mock_size [1:0] $end
+$var reg 1 J prev_as_w $end
+$var reg 2 K prev_dsack_w [1:0] $end
+$var reg 2 L prev_size_w [1:0] $end
+$var reg 1 M reset $end
+$var reg 1 N test_failed $end
+$var reg 1 O test_passed $end
+$var integer 32 P cycle_count [31:0] $end
+$var integer 32 Q reset_vector_fetches [31:0] $end
+$upscope $end
+$enddefinitions $end
+$comment Show the parameter values. $end
+$dumpall
+b101 6
+b0 5
+b10 4
+b1 3
+b100 2
+b11 1
+b1111 0
+$end
+#0
+$dumpvars
+b0 Q
+b0 P
+0O
+0N
+1M
+bx L
+bx K
+xJ
+bx I
+xH
+xG
+bx F
+xE
+bx D
+bx C
+0B
+bx A
+bx @
+0?
+b100 >
+bx =
+bx <
+0;
+b111 :
+b0 9
+bx 8
+b0 7
+x/
+bx .
+bx -
+bx ,
+b11 +
+x*
+x)
+x(
+x'
+bx &
+x%
+x$
+bx #
+x"
+bx !
+$end
+#10000
+0(
+1*
+b1 ,
+b0 .
+b0 8
+b0 @
+b0 A
+0$
+0G
+b0 !
+b0 D
+b110 #
+b110 F
+1%
+1H
+1"
+1E
+1'
+1/
+0)
+b0 &
+b0 I
+b0 -
+b0 C
+b0 =
+b0 <
+b11 K
+b1 P
+1;
+#20000
+0;
+#30000
+b0 L
+1J
+b10 P
+1;
+#40000
+0;
+#50000
+b11 P
+1;
+#60000
+0;
+#70000
+b100 P
+1;
+#80000
+0;
+#90000
+b101 P
+1;
+#100000
+0;
+#110000
+b110 P
+1;
+#120000
+0;
+#130000
+b111 P
+1;
+#140000
+0;
+#150000
+b1000 P
+1;
+#160000
+0;
+#170000
+b1001 P
+1;
+#180000
+0;
+#190000
+b1010 P
+1;
+#200000
+0;
+0M
+#210000
+b1 =
+1$
+1G
+b1011 P
+1;
+#220000
+0;
+#230000
+0*
+b10 ,
+0(
+b1100 P
+b1 8
+0"
+0E
+0/
+1)
+b11 &
+b11 I
+1;
+#240000
+0;
+#250000
+b10 8
+b100 7
+1B
+b11 L
+0J
+b1101 P
+1;
+#260000
+0;
+#270000
+b1110 P
+b11 7
+b11 8
+1;
+#280000
+0;
+#290000
+b100 8
+b10 7
+b1111 P
+1;
+#300000
+0;
+#310000
+b10000 P
+b1 7
+b101 8
+1;
+#320000
+0;
+#330000
+b110 8
+b0 7
+b10001 P
+1;
+#340000
+0;
+#350000
+b0 +
+b10010 P
+1?
+b10000000000000000000 <
+b111 8
+1;
+#360000
+0;
+#370000
+b1 ,
+b1 Q
+b11 =
+1"
+1E
+1/
+b10000000000000000000 A
+b0 K
+b10011 P
+1;
+#380000
+0;
+#390000
+b11 +
+1J
+b10100 P
+0B
+0?
+1O
+b10 Q
+b101 =
+b10000000000000000000 @
+1"
+1E
+1/
+b100 -
+b100 C
+1;
+#400000
+0;
+#410000
+b11 K
+b10101 P
+1;
+#420000
+0;
+#430000
+b10110 P
+1;
+#440000
+0;
+#450000
+b10111 P
+1;
+#460000
+0;
+#470000
+b11000 P
+1;
+#480000
+0;
+#490000
+b11001 P
+1;

@@ -44,7 +44,7 @@ module cart
 	input         clk7_en,
 	input         clk7n_en,
 	input         cpu_rst,
-	input  [23:1] cpu_address_in,
+	input  [31:1] cpu_address_in,
 	input         _cpu_as,
 	input         cpu_rd,
 	input         cpu_hwr,

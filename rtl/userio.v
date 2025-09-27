@@ -59,7 +59,7 @@ module userio
 	output reg  [1:0] ar,
 	output reg  [1:0] blver,
 	output reg  [5:0] ide_config,
-	output reg  [1:0] cpu_config,
+	output reg  [2:0] cpu_config,
 	output reg  [2:0] cache_config,
 	output reg        bootrom =0, // do the A1000 bootrom magic in gary.v
 	output reg        usrrst,     // user reset from osd module
@@ -70,7 +70,7 @@ module userio
 	output reg [23:0] host_adr,
 	output reg        host_we,
 	output      [1:0] host_bs,
-	output reg [15:0] host_wdat,
+	output reg [31:0] host_wdat,
 	input      [15:0] host_rdat,
 	input             host_ack
 );
@@ -388,30 +388,32 @@ assign _mthird = ~mouse_btn[2];
 
 assign host_bs = 2'b11;
 
+
 reg [7:0] t_memory_config = 8'b0_0_00_01_01;
 reg [5:0] t_ide_config = 0;
-reg [4:0] t_cpu_config = 0;
+reg [5:0] t_cpu_config = 6'b111100; // Default to WF68K30L (TT=100), turn on caches too for this development branch
 reg [4:0] t_chipset_config = 0;
 
 // configuration changes only while reset is active
 always @(posedge clk) begin
 	reg [5:0] ide_cfg = 0;
-	reg [1:0] cpu_cfg = 0;
+	reg [2:0] cpu_cfg = 0;
 
 	if (reset) begin
 		chipset_config <= t_chipset_config;
 		ide_cfg <= t_ide_config;
-		cpu_cfg <= t_cpu_config[1:0];
+		cpu_cfg <= t_cpu_config[2:0];
 		memory_config[5:0] <= t_memory_config[5:0];
 		memory_config[7] <= t_memory_config[7];
 	end
 	
 	ide_config <= ide_cfg;
-	cpu_config <= cpu_cfg;
+	//cpu_config <= cpu_cfg;
+	cpu_config <= t_cpu_config[2:0]; // hard setting 68030 for now
 end
 
 always @(posedge clk) begin
-	cache_config[2:0] <= t_cpu_config[4:2];
+	cache_config[2:0] <= t_cpu_config[5:3];
 	memory_config[6] <= t_memory_config[6];
 end
 
@@ -422,7 +424,7 @@ wire mem_write_sel    = (cmd[3:0] == 0); // A_A_A_A B,B,... || write system memo
 wire reset_ctrl_sel   = (cmd[3:0] == 1); // XXXXHRBC || reset control   | H - CPU halt, R - reset, B - reset to bootloader, C - reset control block
 wire aud_sel          = (cmd[3:0] == 2);
 wire chip_cfg_sel     = (cmd[3:0] == 3); // XXXGEANT || chipset config  | G - AGA, E - ECS, A - OCS A1000, N - NTSC, T - turbo
-wire cpu_cfg_sel      = (cmd[3:0] == 4); // XXXXKCTT || cpu config      | K - fast kickstart enable, C - CPU cache enable, TT - CPU type (00=68k, 01=68k10, 10=68k20)
+wire cpu_cfg_sel      = (cmd[3:0] == 4); // XXXXKCTTT || cpu config      | K - fast kickstart enable, C - CPU cache enable, TTT - CPU type (000=68k, 001=68k10, 010=68k20, 100=68k30L)
 wire memory_cfg_sel   = (cmd[3:0] == 5); // XHFFSSCC || memory config   | H - HRTmon, FF - fast, SS - slow, CC - chip
 wire video_cfg_sel    = (cmd[3:0] == 6); // DDHHLLSS || video config    | DD - dither, HH - hires interp. filter, LL - lowres interp. filter, SS - scanline mode
 wire floppy_cfg_sel   = (cmd[3:0] == 7); // XXXXXFFS || floppy config   | FF - drive number, S - floppy speed
@@ -445,6 +447,7 @@ always @(posedge clk) begin
 	if(~IO_ENA) begin
 		IO_WAIT <= 0;
 		has_cmd <= 0;
+		host_wdat[31:16] <= 16'h0000; // Zero-extend upper 16 bits for 32-bit compatibility
 		mrx     <= 0;
 		bcnt    <= 0;
       btoggle <= 0;
@@ -458,7 +461,7 @@ always @(posedge clk) begin
 			if(!bcnt) begin
 				if (reset_ctrl_sel)   {cpuhlt, cpurst, usrrst} <= IO_DIN[2:0];
 				if (chip_cfg_sel)     t_chipset_config <= IO_DIN[4:0];
-				if (cpu_cfg_sel)      t_cpu_config <= IO_DIN[4:0];
+				if (cpu_cfg_sel)      t_cpu_config <= IO_DIN[5:0];
 				if (memory_cfg_sel)   t_memory_config <= IO_DIN[7:0];
 				if (video_cfg_sel)    {blver, ar, scanline} <= {IO_DIN[11:8],IO_DIN[2:0]};
 				if (floppy_cfg_sel)   floppy_config <= IO_DIN[3:0];

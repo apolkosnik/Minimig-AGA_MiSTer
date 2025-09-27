@@ -48,9 +48,9 @@
 
 module gary
 (
-	input  [23:1] cpu_address_in, //cpu address bus input
+	input  [31:1] cpu_address_in, //cpu address bus input (expanded to 32-bit)
 	input  [20:1] dma_address_in, //agnus dma memory address input
-	output [23:1] ram_address_out, //full ram address output to make memory mapping easier
+	output [31:1] ram_address_out, //full ram address output (expanded to 32-bit)
 	input  [31:0] cpu_data_out,
 	output [31:0] cpu_data_in,
 	input  [15:0] custom_data_out,
@@ -107,13 +107,13 @@ wire	sel_bank_1; 				// $200000-$3FFFFF
 
 //--------------------------------------------------------------------------------------
 
-assign ram_data_in    = dbr ? {custom_data_out, custom_data_out} : cpu_data_out;
+assign ram_data_in    = dbr ? {16'h0000, custom_data_out} : cpu_data_out;
 `ifdef MINIMIG_32BIT_BUSES
 assign custom_data_in = dbr ? ram_data_out[15:0] : cpu_rd ? 16'hFFFF : cpu_data_out[15:0];
 `else
 assign custom_data_in = dbr ? ram_data_out[15:0] : cpu_rd ? 16'hFFFF : cpu_data_out[15:0];
 `endif
-assign cpu_data_in    = dbr ? 32'h00000000 : {custom_data_out, custom_data_out} | ram_data_out | {32{sel_bank_1}};
+assign cpu_data_in    = dbr ? 32'h00000000 : {16'h0000, custom_data_out} | ram_data_out | {32{sel_bank_1}};
 
 //read write control signals
 assign ram_rd  = dbr ? ~dbwe : cpu_rd;
@@ -122,10 +122,9 @@ assign ram_lwr = dbr ?  dbwe : cpu_lwr;
 
 //--------------------------------------------------------------------------------------
 
-// ram address multiplexer (512KB bank)		
-// assign ram_address_out = dbr ? dma_address_in[18:1] : cpu_address_in[18:1];
-// output full address to make mapping easier.  
-assign ram_address_out  = dbr ? {3'b000, dma_address_in[20:1]} : cpu_address_in[23:1];
+// ram address multiplexer - 32-bit CPU address support
+// DMA addresses stay 20-bit (original Amiga), CPU addresses expanded to 32-bit
+assign ram_address_out  = dbr ? {11'b00000000000, dma_address_in[20:1]} : cpu_address_in[31:1];
    
    
 //--------------------------------------------------------------------------------------

@@ -220,7 +220,7 @@ amiga_clk amiga_clk
 );
 
 
-wire cpu_type = cpucfg[1];
+wire cpu_type = cpucfg[1] | cpucfg[2];
 reg  cpu_ph1;
 reg  cpu_ph2;
 reg  ram_cs;
@@ -260,6 +260,7 @@ wire        cpu_nrst_out;
 wire  [3:0] cpu_cacr;
 wire [31:0] cpu_nmi_addr;
 wire        cpu_rst;
+wire        cpu_longword;
 
 wire  [2:0] chip_ipl;
 wire        chip_dtack;
@@ -269,7 +270,7 @@ wire        chip_lds;
 wire        chip_rw;
 wire [31:0] chip_dout;
 wire [31:0] chip_din;
-wire [23:1] chip_addr;
+wire [31:1] chip_addr;
 
 wire [28:1] ram_addr;
 wire        ram_sel;
@@ -280,6 +281,7 @@ wire [31:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
 wire        zram_sel  = |ram_addr[28:26];
 wire        ramshared;
+
 
 wire [7:0] toccata_base;
 wire toccata_ena;
@@ -332,7 +334,8 @@ cpu_wrapper cpu_wrapper
 	//custom CPU signals
 	.cpustate     (cpu_state       ),
 	.cacr         (cpu_cacr        ),
-	.nmi_addr     (cpu_nmi_addr    )
+	.nmi_addr     (cpu_nmi_addr    ),
+	.cpu_longword (cpu_longword    )
 );
 
 wire [31:0] ram_dout1;
@@ -489,7 +492,7 @@ assign UART_TXD = (hps_mpu & mt32_use) | uart_tx;
 ///////////////////////////////////////////////////////////////////////
 
 //// minimig top ////
-wire  [1:0] cpucfg;
+wire  [2:0] cpucfg;
 wire  [2:0] cachecfg;
 wire  [6:0] memcfg;
 wire        bootrom;   
@@ -533,6 +536,7 @@ minimig minimig
 	._cpu_reset   (cpu_rst          ), // M68K reset
 	._cpu_reset_in(cpu_nrst_out     ), // M68K reset out
 	.nmi_addr     (cpu_nmi_addr     ), // M68K NMI address
+	.longword     (cpu_longword     ), // M68K longword operation
 
 	//sram pins
 	.ram_data     (ram_data         ), // SRAM data bus
@@ -1076,5 +1080,16 @@ end
 assign AUDIO_S = 1;
 assign AUDIO_L = out_l;
 assign AUDIO_R = out_r;
+
+`ifdef MISTER_DUAL_SDRAM
+// Tristate SDRAM2 signals when not enabled
+assign SDRAM2_CLK  = SDRAM2_EN ? 1'b0 : 1'bZ;
+assign SDRAM2_A    = SDRAM2_EN ? 13'h0 : 13'bZ;
+assign SDRAM2_BA   = SDRAM2_EN ? 2'b0 : 2'bZ;
+assign SDRAM2_nCS  = SDRAM2_EN ? 1'b1 : 1'bZ;
+assign SDRAM2_nCAS = SDRAM2_EN ? 1'b1 : 1'bZ;
+assign SDRAM2_nRAS = SDRAM2_EN ? 1'b1 : 1'bZ;
+assign SDRAM2_nWE  = SDRAM2_EN ? 1'b1 : 1'bZ;
+`endif
 
 endmodule

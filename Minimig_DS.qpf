@@ -19,14 +19,14 @@
 #
 # Quartus Prime
 # Version 17.0.2 Build 602 07/19/2017 SJ Standard Edition
-# Date created = 09:50:41  September 10, 2025
+# Date created = 14:35:37  July 21, 2025
 #
 # -------------------------------------------------------------------------- #
 
 QUARTUS_VERSION = "17.0"
-DATE = "09:50:41  September 10, 2025"
+DATE = "14:35:37  July 21, 2025"
 
 # Revisions
 
-PROJECT_REVISION = "Minimig"
 PROJECT_REVISION = "Minimig_DS"
+PROJECT_REVISION = "Minimig"

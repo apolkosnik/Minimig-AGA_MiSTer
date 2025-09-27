@@ -1,0 +1,122 @@
+# --------------------------------------------------------------------------
+#
+# MiSTer project
+#
+# WARNING WARNING WARNING:
+# Do not add files to project in Quartus IDE! It will mess this file!
+# Add the files manually to files.qip file.
+#
+# --------------------------------------------------------------------------
+
+set_global_assignment -name TOP_LEVEL_ENTITY sys_top
+set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top
+set_global_assignment -name PARTITION_FITTER_PRESERVATION_LEVEL PLACEMENT_AND_ROUTING -section_id Top
+set_global_assignment -name PARTITION_COLOR 16764057 -section_id Top
+
+set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Standard Edition"
+
+set_global_assignment -name GENERATE_RBF_FILE ON
+set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
+set_global_assignment -name NUM_PARALLEL_PROCESSORS ALL
+set_global_assignment -name SAVE_DISK_SPACE OFF
+set_global_assignment -name SMART_RECOMPILE ON
+set_global_assignment -name MIN_CORE_JUNCTION_TEMP "-40"
+set_global_assignment -name MAX_CORE_JUNCTION_TEMP 100
+set_global_assignment -name POWER_PRESET_COOLING_SOLUTION "23 MM HEAT SINK WITH 200 LFPM AIRFLOW"
+set_global_assignment -name POWER_BOARD_THERMAL_MODEL "NONE (CONSERVATIVE)"
+set_global_assignment -name TIMEQUEST_MULTICORNER_ANALYSIS OFF
+set_global_assignment -name OPTIMIZE_POWER_DURING_FITTING OFF
+set_global_assignment -name FINAL_PLACEMENT_OPTIMIZATION ALWAYS
+set_global_assignment -name FITTER_EFFORT "STANDARD FIT"
+set_global_assignment -name OPTIMIZATION_MODE "BALANCED"
+set_global_assignment -name ALLOW_POWER_UP_DONT_CARE ON
+set_global_assignment -name QII_AUTO_PACKED_REGISTERS "SPARSE AUTO"
+set_global_assignment -name ROUTER_LCELL_INSERTION_AND_LOGIC_DUPLICATION ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_EFFORT EXTRA
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON
+set_global_assignment -name OPTIMIZATION_TECHNIQUE AREA
+set_global_assignment -name MUX_RESTRUCTURE ON
+set_global_assignment -name REMOVE_REDUNDANT_LOGIC_CELLS ON
+set_global_assignment -name AUTO_DELAY_CHAINS_FOR_HIGH_FANOUT_INPUT_PINS ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC_FOR_AREA ON
+set_global_assignment -name ADV_NETLIST_OPT_SYNTH_WYSIWYG_REMAP ON
+set_global_assignment -name SYNTH_GATED_CLOCK_CONVERSION ON
+set_global_assignment -name PRE_MAPPING_RESYNTHESIS ON
+set_global_assignment -name ROUTER_CLOCKING_TOPOLOGY_ANALYSIS ON
+set_global_assignment -name ECO_OPTIMIZE_TIMING ON
+set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
+set_global_assignment -name ALM_REGISTER_PACKING_EFFORT LOW
+set_global_assignment -name OPTIMIZE_POWER_DURING_SYNTHESIS OFF
+set_global_assignment -name ROUTER_REGISTER_DUPLICATION ON
+set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
+set_global_assignment -name SEED 1
+set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_FB_PALETTE=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_DUAL_SDRAM=1"
+
+# SDRAM2 pin timing and placement constraints
+set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to SDRAM2_*
+set_instance_assignment -name FAST_OUTPUT_ENABLE_REGISTER ON -to SDRAM2_DQ[*]
+set_instance_assignment -name FAST_INPUT_REGISTER ON -to SDRAM2_DQ[*]
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to SDRAM2_DQ[*]
+set_instance_assignment -name ALLOW_SYNCH_CTRL_USAGE OFF -to *|SDRAM2_*
+
+# Aggressive area optimization for 32-bit version
+set_global_assignment -name AUTO_RESOURCE_SHARING ON
+set_global_assignment -name ALLOW_ANY_SHIFT_REGISTER_SIZE_FOR_RECOGNITION ON
+set_global_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION ALWAYS
+set_global_assignment -name AUTO_RAM_RECOGNITION ON
+set_global_assignment -name AUTO_ROM_RECOGNITION ON
+set_global_assignment -name DISABLE_REGISTER_MERGING_ACROSS_HIERARCHIES OFF
+set_global_assignment -name FORCE_SYNCH_CLEAR OFF
+set_global_assignment -name AUTO_MERGE_PLLS ON
+set_global_assignment -name CYCLONEII_OPTIMIZATION_TECHNIQUE AREA
+set_global_assignment -name STATE_MACHINE_PROCESSING "MINIMAL BITS"
+
+# disable bilinear filtering when downscaling
+set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
+
+# disable adaptive scanline filtering
+#set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
+
+# Disable YC / Composite output to save some resources
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_YC=1"
+
+# Disable ALSA audio output to save some resources
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
+
+source sys/sys.tcl
+# source sys/sys_analog.tcl ## Dual_SDRAM needs some pins used by Analog- PIN_AH26, PIN_AH27
+source sys/sys_dual_sdram.tcl
+source files.qip
+
+set_global_assignment -name QIP_FILE rtl/tg68k/TG68K.qip
+set_global_assignment -name QIP_FILE rtl/fx68k/fx68k.qip
+set_global_assignment -name QIP_FILE rtl/ram.qip
+set_global_assignment -name QIP_FILE rtl/agnus.qip
+set_global_assignment -name QIP_FILE rtl/cia.qip
+set_global_assignment -name QIP_FILE rtl/gayle.qip
+set_global_assignment -name QIP_FILE rtl/paula.qip
+set_global_assignment -name QIP_FILE rtl/denise.qip
+set_global_assignment -name QIP_FILE "rtl/fpga-toccata/toccata.qip"
+set_global_assignment -name VERILOG_FILE rtl/gary.v
+set_global_assignment -name VERILOG_FILE rtl/rtg.v
+set_global_assignment -name VERILOG_FILE rtl/akiko.v
+set_global_assignment -name VERILOG_FILE rtl/fastchip.v
+set_global_assignment -name VERILOG_FILE rtl/userio.v
+set_global_assignment -name VERILOG_FILE rtl/cart.v
+set_global_assignment -name VERILOG_FILE rtl/amiga_clk.v
+set_global_assignment -name VERILOG_FILE rtl/minimig_syscontrol.v
+set_global_assignment -name VERILOG_FILE rtl/minimig_sram_bridge.v
+set_global_assignment -name VERILOG_FILE rtl/minimig_m68k_bridge.v
+set_global_assignment -name VERILOG_FILE rtl/minimig_bankmapper.v
+set_global_assignment -name VERILOG_FILE rtl/minimig.v
+set_global_assignment -name VERILOG_FILE rtl/cpu_wrapper.v
+set_global_assignment -name VERILOG_FILE hps_ext.v
+set_global_assignment -name VERILOG_FILE rtl/cdda.v
+set_global_assignment -name SDC_FILE Minimig.sdc
+set_global_assignment -name SYSTEMVERILOG_FILE Minimig.sv
+set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top

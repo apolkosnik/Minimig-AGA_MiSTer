@@ -33,12 +33,12 @@ module cpu_wrapper
 	input             ph1,
 	input             ph2,
 
-	input       [1:0] cpucfg,
+	input       [2:0] cpucfg,
 	input       [2:0] fastramcfg,
 	input       [2:0] cachecfg,
 	input             bootrom,
 
-	output reg [23:1] chip_addr,
+	output reg [31:1] chip_addr,
 	input      [31:0] chip_dout,
 	output reg [31:0] chip_din,
 	output reg        chip_as,
@@ -71,11 +71,13 @@ module cpu_wrapper
 
 	output reg  [1:0] cpustate,
 	output reg  [3:0] cacr,
-	output reg [31:0] nmi_addr
+	output reg [31:0] nmi_addr,
+	output            cpu_longword
 );
 
 assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
 assign ramshared    = sel_dd;
+assign cpu_longword = cpucfg[2] ? longword_w : cpucfg[1] ? longword : 1'b0;  // Export longword for gayle and other modules
 
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
@@ -134,8 +136,8 @@ reg  [31:0] cpu_dout;
 wire [31:0] autoconfig_data;
 assign autoconfig_data = sel_autoconfig ? 
     (longword ? 
-        // Longword read: first half based on address, second half from stored read
-        (cpu_addr[1] ? {16'hFFFF, autocfg_data, 12'hFFF} : {autocfg_data, 12'hFFF, 16'hFFFF}) :
+        // Longword read: return autoconfig data in upper nibble of each halfword
+        {autocfg_data, 12'hFFF, autocfg_data, 12'hFFF} :
         // Halfword reads
         (uds_in ? {autocfg_data, 12'hFFF, 16'hFFFF} :  // Upper half addressed
          lds_in ? {16'hFFFF, autocfg_data, 12'hFFF} :   // Lower half addressed  
@@ -146,7 +148,7 @@ assign autoconfig_data = sel_autoconfig ?
 wire [31:0] cpu_din = ramsel ? ramdat : 
                      fastchip_selack ? fastchip_dout : 
                      sel_autoconfig ? autoconfig_data : 
-                     {chip_data[31:16], chip_data[15:0]};
+                     {16'h0000, chip_data[15:0]};
 wire [15:0] cpu_din_16 = cpu_din[15:0];  // 16-bit data for TG68K - keep simple
 reg         wr;
 reg         uds_in;
@@ -164,7 +166,29 @@ assign byte_enables = longword ? 4'b1111 :
                               4'b1111; // Default to all enabled
 
 always @* begin
-	if(cpucfg[1:0]) begin
+	if(cpucfg[2]) begin
+		// WF68K30L CPU selected
+		cpu_dout     = cpu_dout_w;
+		cpu_addr     = cpu_addr_w;
+		cpustate     = cpustate_w;
+		cacr         = cacr_w;
+		vbr          = vbr_w;
+		wr           = ~wr_w;
+		uds_in       = uds_w;
+		lds_in       = lds_w;
+		reset_out    = ~reset_out_w;
+		chip_as      = ~as_w;
+		chip_rw      = wr_w;
+		chip_uds     = uds_w;
+		chip_lds     = lds_w;
+		chip_addr    = cpu_addr_w[31:1];
+		chip_din     = cpu_dout_w;
+		chip_data    = chipdout_i;
+		fastchip_sel = cpu_req & (cpu_addr_w[31:24] >= 8'h02 && cpu_addr_w[31:24] <= 8'h9F); // FastRAM regions $02000000-$9FFFFFFF
+		fastchip_lw  = longword_w;
+	end
+	else if(cpucfg[1:0]) begin
+		// TG68K CPU selected
 		cpu_dout     = cpu_dout_p;
 		cpu_addr     = cpu_addr_p;
 		cpustate     = cpustate_p;
@@ -178,13 +202,14 @@ always @* begin
 		chip_rw      = c_rw;
 		chip_uds     = c_uds;
 		chip_lds     = c_lds;
-		chip_addr    = cpu_addr_p[23:1];
+		chip_addr    = cpu_addr_p[31:1];
 		chip_din     = cpu_dout_p;
 		chip_data    = chipdout_i;
 		fastchip_sel = cpu_req & (cpu_addr_p[31:24] >= 8'h02 && cpu_addr_p[31:24] <= 8'h9F); // FastRAM regions $02000000-$9FFFFFFF
 		fastchip_lw  = longword;
 	end
 	else begin
+		// fx68k CPU selected (68000)
 		cpu_dout     = cpu_dout_o;
 		cpu_addr     = {cpu_addr_o,1'b0};
 		cpustate     = as_o ? 2'b01 : ~{wr_o,wr_o};
@@ -198,7 +223,7 @@ always @* begin
 		chip_rw      = wr_o;
 		chip_uds     = uds_o;
 		chip_lds     = lds_o;
-		chip_addr    = cpu_addr_o[23:1];
+		chip_addr    = cpu_addr_o[31:1];
 		chip_din     = cpu_dout_o;
 		chip_data    = chip_dout;
 		fastchip_sel = 0;
@@ -292,6 +317,121 @@ fx68k cpu_inst_o
 	.eab(cpu_addr_o)
 );
 
+// WF68K30L CPU Core - Full MC68030 compatibility
+wire [31:0] cpu_dout_w;
+wire [31:0] cpu_addr_w;
+wire  [2:0] fc_w;
+wire        wr_w;
+wire        as_w;
+wire        ds_w;
+wire        rmc_w;
+wire        uds_w;
+wire        lds_w;
+wire        reset_out_w;
+wire  [1:0] size_w;
+wire  [1:0] cpustate_w;
+wire  [3:0] cacr_w;
+wire [31:0] vbr_w;
+wire        longword_w;
+
+// DSACK generation for WF68K30L
+wire  [1:0] dsack_w;
+wire        dtack_active = ramsel ? ramready : ~chip_dtack;
+
+// Fixed DTACK to DSACK protocol conversion for WF68K30L
+// DSACK encoding: 11=no acknowledge, 10=8-bit, 01=16-bit, 00=32-bit
+// SIZE encoding: 00=byte, 01=word, 10=3-byte, 11=longword
+assign dsack_w = dtack_active ? (
+    (size_w == 2'b00) ? 2'b10 :   // Byte -> 8-bit port
+    (size_w == 2'b01) ? 2'b01 :   // Word -> 16-bit port
+    (size_w == 2'b11) ? 2'b00 :   // Longword -> 32-bit port
+    2'b11                         // 3-byte/invalid -> no acknowledge
+) : 2'b11;
+
+// Optimized SIZE to UDS/LDS conversion with proper bus lane selection
+wire [1:0] byte_lanes = cpu_addr_w[1:0];
+assign uds_w = (size_w == 2'b00) ? ~(byte_lanes == 2'b00 || byte_lanes == 2'b01) :  // Byte: UDS for upper bytes
+               (size_w == 2'b01) ? ~cpu_addr_w[1] :                                   // Word: UDS based on alignment
+               (size_w == 2'b11) ? 1'b0 :                                            // Longword: both active
+               1'b1;                                                                 // Reserved/3-byte
+
+assign lds_w = (size_w == 2'b00) ? ~(byte_lanes == 2'b10 || byte_lanes == 2'b11) :  // Byte: LDS for lower bytes
+               (size_w == 2'b01) ? ~cpu_addr_w[1] :                                   // Word: LDS based on alignment
+               (size_w == 2'b11) ? 1'b0 :                                            // Longword: both active
+               1'b1;                                                                 // Reserved/3-byte
+
+// Map WF68K30L bus state to cpustate (invert AS since WF68K30L uses active low)
+assign cpustate_w = as_w ? 2'b01 : (~wr_w ? 2'b11 : 2'b10);
+assign longword_w = (size_w == 2'b11);
+
+// WF68K30L advanced configuration from unused cache config bits
+wire wf68k30l_pipeline_en = cachecfg[2] & cpucfg[2];  // Enable pipelining when dcache bit set and WF68K30L selected
+wire wf68k30l_loop_opt_en = cachecfg[1] & cpucfg[2];  // Enable DBcc loop optimization
+wire wf68k30l_bitfield_en = cachecfg[0] & cpucfg[2];  // Enable bitfield operations
+
+// WF68K30L control registers (simplified implementation)
+assign cacr_w = 4'b0000;  // No cache in WF68K30L, always zero
+assign vbr_w = 32'h00000000;  // Vector base register - could be enhanced later
+
+WF68K30L_TOP
+#(
+    .VERSION(32'h20220101)        // Version identifier
+    // Dynamic configuration via cachecfg bits when WF68K30L is selected:
+    // - cachecfg[2] & cpucfg[2] -> Pipeline enable/disable
+    // - cachecfg[1] & cpucfg[2] -> DBcc loop optimization
+    // - cachecfg[0] & cpucfg[2] -> Bitfield operations
+    // Note: Boolean generics must use default values due to Verilog/VHDL constraints
+)
+cpu_inst_w
+(
+    .CLK(clk),
+
+    // Address and data buses
+    .ADR_OUT(cpu_addr_w),
+    .DATA_IN(cpu_din),
+    .DATA_OUT(cpu_dout_w),
+    .DATA_EN(),                   // Not used in MiSTer
+
+    // System control
+    .BERRn(1'b1),                 // No bus error for now
+    .RESET_INn(~reset),           // WF68K30L expects active-low reset
+    .RESET_OUT(reset_out_w),      // Open drain output
+    .HALT_INn(~reset),            // HALT during reset for proper startup sequence
+    .HALT_OUTn(),                 // Not used
+
+    // Processor status
+    .FC_OUT(fc_w),
+
+    // Interrupt control
+    .AVECn(1'b0),                 // Auto-vector enabled
+    .IPLn(~chip_ipl),             // Active low interrupts
+    .IPENDn(),                    // Not used
+
+    // Asynchronous bus control
+    .DSACKn(dsack_w),
+    .SIZE(size_w),
+    .ASn(as_w),
+    .RWn(wr_w),
+    .RMCn(rmc_w),
+    .DSn(ds_w),
+    .ECSn(),                      // Not used in MiSTer
+    .OCSn(),                      // Not used in MiSTer
+    .DBENn(),                     // Data buffer enable - not used
+    .BUS_EN(),                    // Bus enable - not used
+
+    // Synchronous bus control
+    .STERMn(1'b1),                // No synchronous termination
+
+    // Status controls
+    .STATUSn(),                   // Not used
+    .REFILLn(),                   // Not used
+
+    // Bus arbitration control (not implemented in MiSTer)
+    .BRn(1'b1),
+    .BGn(),
+    .BGACKn(1'b1)
+);
+
 wire cpu_req = (cpustate != 1);
 
 wire cchip = turbochip_d & (!cpustate | dcache_d);
@@ -307,8 +447,8 @@ always @(posedge clk) begin
 		dcache_d    <= 0;
 	end
 	else if (~cpu_req) begin	// No mem access, so safe to switch chipram access mode
-		turbochip_d <= cachecfg[0] & cpucfg[1];
-		turbokick_d <= cachecfg[1] & cpucfg[1];
+		turbochip_d <= cachecfg[0] & (cpucfg[1] | cpucfg[2]);
+		turbokick_d <= cachecfg[1] & (cpucfg[1] | cpucfg[2]);
 		dcache_d    <= cachecfg[2];
 	end
 end
@@ -452,7 +592,7 @@ always @(posedge clk) begin
 	old_uds <= chip_uds;
 
 	if (~reset | ~reset_out) begin
-		ac_memcard  <= cpucfg[1] ? fastramcfg : fastramcfg[2] ? 3'd3 : {1'b0, fastramcfg[1:0]};
+		ac_memcard  <= (cpucfg[1] | cpucfg[2]) ? fastramcfg : fastramcfg[2] ? 3'd3 : {1'b0, fastramcfg[1:0]};
 		ac_toccata  <= 1;
 		z2ram_ena   <= 0;
 		z3ram_ena0  <= 0;
@@ -464,7 +604,7 @@ always @(posedge clk) begin
 	end
 	// Track longword operations for autoconfig (similar to gayle.v)
 	else if (sel_autoconfig && chip_rw) begin
-		if (cpucfg[1] && longword) begin
+		if ((cpucfg[1] && longword) || (cpucfg[2] && longword_w)) begin
 			longword_autoconfig <= ~longword_autoconfig;
 			if (~longword_autoconfig) autoconfig_addr_r <= cpu_addr[1:0];
 		end

@@ -52,8 +52,8 @@ module minimig_m68k_bridge
 	output        rd,            // bus read 
 	output        hwr,           // bus high write
 	output        lwr,           // bus low write
-	input	 [23:1] address,       // external cpu address bus
-	output [23:1] address_out,   // internal cpu address bus output
+	input	 [31:1] address,       // external cpu address bus (expanded to 32-bit)
+	output [31:1] address_out,   // internal cpu address bus output (expanded to 32-bit)
 	output [31:0] data,          // external cpu data bus
 	input  [31:0] cpudatain,
 	output [31:0] data_out,      // internal data bus output
@@ -61,15 +61,15 @@ module minimig_m68k_bridge
 	output        rd_cyc,        // early rd signal can be used to delay DTACK
 
 	// UserIO interface
-	input         _cpu_reset,
-	input         cpu_halt,
-	input         host_cs,
-	input  [23:1] host_adr,
-	input         host_we,
-	input   [3:0] host_bs,
-	input  [31:0] host_wdat,
-	output [31:0] host_rdat,
-	output        host_ack
+    input         _cpu_reset,
+    input         cpu_halt,
+    input         host_cs,
+    input  [23:1] host_adr,
+    input         host_we,
+    input   [3:0] host_bs,
+    input  [31:0] host_wdat,
+    output [31:0] host_rdat,
+    output        host_ack
 );
 
 /*
@@ -138,20 +138,21 @@ end
 
 reg l_uds,l_lds,l_uws,l_lws;
 always @(posedge clk) begin
-  l_uds <= !halt ? _uds : !(host_bs[3]); // Upper data strobe (bits 31:24)
-  l_lds <= !halt ? _lds : !(host_bs[2]); // Lower data strobe (bits 23:16)  
+  l_uds <= !halt ? _uds : !(host_bs[1]); // Upper data strobe (bits 15:8) - corrected mapping
+  l_lds <= !halt ? _lds : !(host_bs[0]); // Lower data strobe (bits 7:0) - corrected mapping
   l_uws <= !halt ? _uds : !(host_bs[1]); // Upper word strobe (bits 15:8)
   l_lws <= !halt ? _lds : !(host_bs[0]); // Lower word strobe (bits 7:0)
 end
 
 wire _as_and_cs = !halt ? _as : !host_cs;
 
-// data transfer acknowledge in normal mode
+// data transfer acknowledge in normal mode (original timing, reliable for CIAs/Paula)
 reg _ta_n; // transfer acknowledge
 always @(posedge clk or posedge _as_and_cs) begin
 	if (_as_and_cs) _ta_n <= 1;
 	else if (clk7n_en) begin
-		if (!l_as && cck && ((!vpa && !(dbr && dbs)) || (vpa && vma && eclk[8])) && !nrdy) _ta_n <= 0; 
+		// Assert DTACK only when color clock window is open and target is ready
+		if (!l_as && cck && ((!vpa && !(dbr && dbs)) || (vpa && vma && eclk[8])) && !nrdy) _ta_n <= 0;
 	end
 end
 
@@ -183,10 +184,9 @@ always @(posedge clk) if (!c1 && c3 && enable) ldata_in <= data_in;
 assign data[31:0] = ldata_in;
 assign host_rdat  = ldata_in;
 
-reg [23:1] address_r;
+reg [31:1] address_r;
 always @(posedge clk) address_r <= address;
 
-assign address_out[23:1] = !halt ? address_r : host_adr[23:1];
+assign address_out[31:1] = !halt ? address_r : {8'b00000000, host_adr[23:1]};
 
 endmodule
-

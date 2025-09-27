@@ -15,7 +15,7 @@ module minimig_sram_bridge
 
 	//chipset internal port
 	input	  [7:0] bank,			// memory bank select (512KB)
-	input	 [23:1] address_in,	// bus address
+	input	 [31:1] address_in,	// bus address (expanded to 32-bit)
 	input	 [31:0] data_in,		// bus data in
 	output [31:0] data_out,		// bus data out
 	input         rd,			   // bus read

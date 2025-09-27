@@ -152,7 +152,7 @@
 module minimig
 (
 	//m68k pins
-	input  [23:1] cpu_address, // m68k address bus
+	input  [31:1] cpu_address, // m68k address bus (expanded to 32-bit)
 	output [31:0] cpu_data,    // m68k data bus
 	input  [31:0] cpudata_in,  // m68k data in
 	output  [2:0] _cpu_ipl,    // m68k interrupt request
@@ -165,6 +165,7 @@ module minimig
 	input 	     _cpu_reset_in,//m68k reset in
 	input  [31:0] nmi_addr,    // m68k NMI address
 	output 	     ovr,         // NMI address decoding override
+	input        longword,     // m68k longword operation signal
 
 	//sram pins
 	output [31:0] ram_data,    // sram data bus
@@ -252,7 +253,7 @@ module minimig
 	output [15:0] toccata_aud_right,
 
 	//user i/o
-	output  [1:0] cpucfg,
+	output  [2:0] cpucfg,
 	output  [2:0] cachecfg,
 	output  [6:0] memcfg,
 	output        bootrom,     // enable bootrom magic in gary.v
@@ -310,9 +311,9 @@ wire [31:0] gary_ram_data_in;	//Gary to RAM data (32-bit)
 wire [31:0] gary_cpu_data_in;	//Gary to CPU data (32-bit)
 
 //local signals for address bus
-wire [23:1] cpu_address_out;	//cpu address out
+wire [31:1] cpu_address_out;	//cpu address out (expanded to 32-bit)
 wire [20:1] dma_address_out;	//agnus address out
-wire [23:1] ram_address_out;	//ram address out
+wire [31:1] ram_address_out;	//ram address out (expanded to 32-bit)
 
 //local signals for control bus
 wire        ram_rd;				//ram read enable
@@ -451,7 +452,7 @@ assign cachecfg = {cachecfg_pre[2], ~ovl, ~ovl};
 always @(posedge clk) if (clk7_en && reset) ntsc <= chipset_config[1];
 
 assign ide_ena  = ide_config[0];
-assign ide_fast = ~ide_config[5] & cpucfg[1];
+assign ide_fast = ~ide_config[5] & (cpucfg[1] | cpucfg[2]);
 
 //--------------------------------------------------------------------------------------
 
@@ -856,11 +857,11 @@ gayle GAYLE1
 (
 	.clk(clk),
 	.reset(reset),
-	.addr(cpu_address_out),
+	.addr(cpu_address_out[23:1]),
 `ifdef DISABLE_CART_32BIT
 	.data_in(cpu_data_out[15:0]),
 `else
-	.data_in(cpu_data_out),
+	.data_in(cpu_data_out[15:0]),
 `endif
 	.data_out(gayle_data_out),
 	.rd(cpu_rd),
@@ -869,6 +870,7 @@ gayle GAYLE1
 	.sel_gayle(sel_gayle),
 	.irq(gayle_irq),
 	.nrdy(gayle_nrdy),
+	.longword(longword),
 
 	.ide_req(ide_req),
 	.ide_address(ide_address),
@@ -1014,4 +1016,3 @@ assign rst_out = reset;
 
 
 endmodule
-
