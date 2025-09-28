@@ -471,6 +471,9 @@ reg [31:0] chipdout_i;
 reg  [2:0] ipl_i;
 reg        c_as,c_rw,c_uds,c_lds;
 
+// WF68K30L fast path detection
+wire wf68k30l_fast_access = cpucfg[2] && (ramsel || fastchip_sel || sel_kickram);
+
 always @(negedge clk, negedge reset) begin
 	reg [1:0] stage;
 	reg waitm;
@@ -486,7 +489,12 @@ always @(negedge clk, negedge reset) begin
 	end
 	else begin
 		if (ph2n) begin
-			waitm <= chip_dtack;
+			// Fast DTACK for WF68K30L accessing fast resources
+			if (wf68k30l_fast_access) begin
+				waitm <= 1'b0;  // Immediate DTACK for fast resources
+			end else begin
+				waitm <= chip_dtack;  // Standard DTACK for slow resources
+			end
 			if(~stage[0]) ipl_i <= chip_ipl;
 		end
 
@@ -494,28 +502,49 @@ always @(negedge clk, negedge reset) begin
 		if (ph1n) begin
 			chipready <= ready;
 			ready <= 0;
-			case (stage)
-				0: if (chipreq) begin
-						c_as <= 0;
-						c_rw <= wr;
-						c_uds <= uds_in;
-						c_lds <= lds_in;
-						stage <= 1;
-					end
-				1: stage <= 2;
-				2: begin
-						chipdout_i <= chip_dout;
-						if (~waitm) begin
+
+			// Ultra-fast single-cycle mode for WF68K30L fast accesses
+			if (wf68k30l_fast_access && chipreq && stage == 0) begin
+				// Single-cycle completion for WF68K30L fast resources
+				c_as <= 0;
+				c_rw <= wr;
+				c_uds <= uds_in;
+				c_lds <= lds_in;
+				chipdout_i <= chip_dout;
+				ready <= 1;
+				stage <= 3;  // Skip to completion stage
+			end
+			else begin
+				case (stage)
+					0: if (chipreq) begin
+							c_as <= 0;
+							c_rw <= wr;
+							c_uds <= uds_in;
+							c_lds <= lds_in;
+							// Fast path for WF68K30L - skip to stage 2 for immediate response
+							stage <= wf68k30l_fast_access ? 2 : 1;
+						end
+					1: stage <= 2;
+					2: begin
+							chipdout_i <= chip_dout;
+							if (~waitm) begin
+								c_as <= 1;
+								c_rw <= 1;
+								c_uds <= 1;
+								c_lds <= 1;
+								ready <= 1;
+								stage <= 3;
+							end
+						end
+					3: begin
 							c_as <= 1;
 							c_rw <= 1;
 							c_uds <= 1;
 							c_lds <= 1;
-							ready <= 1;
-							stage <= 3;
+							stage <= 0;
 						end
-					end
-				3: stage <= 0;
-			endcase
+				endcase
+			end
 		end
 	end
 end
