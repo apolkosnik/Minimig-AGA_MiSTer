@@ -23,7 +23,7 @@ module gayle
 	input	        clk,
 	input	        reset,
 
-	input	 [23:1] addr,
+	input	 [31:1] addr,
 	input	 [15:0] data_in,
 	output [15:0] data_out,
 	input         rd,

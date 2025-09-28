@@ -170,7 +170,7 @@ module minimig
 	//sram pins
 	output [31:0] ram_data,    // sram data bus
 	input  [31:0] ramdata_in,  // sram data bus in
-	output [23:1] ram_address, // sram address bus
+	output [31:1] ram_address, // sram address bus
 	output 	     _ram_bhe,    // sram upper byte select
 	output 	     _ram_ble,    // sram lower byte select
 	output 	     _ram_we,     // sram write enable
@@ -428,7 +428,7 @@ wire	[7:0] bank;					//memory bank select
 
 // host interface
 wire        host_cs;
-wire [23:0] host_adr;
+wire [31:0] host_adr;
 wire        host_we;
 wire [ 1:0] host_bs;
 wire [31:0] host_wdat;
@@ -717,7 +717,7 @@ minimig_m68k_bridge CPU1
 	._cpu_reset (_cpu_reset),
 	.cpu_halt (cpuhlt),
 	.host_cs (host_cs),
-	.host_adr (host_adr[23:1]),
+	.host_adr (host_adr[31:1]),
 	.host_we (host_we),
 	.host_bs (host_bs),
 	.host_wdat (host_wdat),
@@ -857,11 +857,11 @@ gayle GAYLE1
 (
 	.clk(clk),
 	.reset(reset),
-	.addr(cpu_address_out[23:1]),
+	.addr(cpu_address_out[31:1]),
 `ifdef DISABLE_CART_32BIT
 	.data_in(cpu_data_out[15:0]),
 `else
-	.data_in(cpu_data_out[15:0]),
+	.data_in(longword ? (cpu_address_out[1] ? cpu_data_out[15:0] : cpu_data_out[31:16]) : cpu_data_out[15:0]),
 `endif
 	.data_out(gayle_data_out),
 	.rd(cpu_rd),

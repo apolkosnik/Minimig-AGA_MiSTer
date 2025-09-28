@@ -29,7 +29,7 @@ module fastchip
 	output        sel_ack, // 1 when fast chip is used instead of legacy chip
 	output        ready,
 
-	input  [23:0] addr,
+	input  [31:0] addr,
 	input  [15:0] din,
 	output [15:0] dout,
 	input         lds,
@@ -96,7 +96,7 @@ gayle gayle
 	.clk(clk_sys),
 	.reset(reset),
 
-	.addr(addr[23:1]),
+	.addr(addr[31:1]),
 	.data_in(din),
 	.data_out(ide_dout),
 	.rd(rnw & uds),

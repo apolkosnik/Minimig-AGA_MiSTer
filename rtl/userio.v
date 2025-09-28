@@ -67,7 +67,7 @@ module userio
 	output reg        cpuhlt,
 	// host
 	output reg        host_cs,
-	output reg [23:0] host_adr,
+	output reg [31:0] host_adr,
 	output reg        host_we,
 	output      [1:0] host_bs,
 	output reg [31:0] host_wdat,
@@ -397,7 +397,7 @@ reg [4:0] t_chipset_config = 0;
 // configuration changes only while reset is active
 always @(posedge clk) begin
 	reg [5:0] ide_cfg = 0;
-	reg [2:0] cpu_cfg = 0;
+	reg [2:0] cpu_cfg = 3'b100;
 
 	if (reset) begin
 		chipset_config <= t_chipset_config;
@@ -408,8 +408,8 @@ always @(posedge clk) begin
 	end
 	
 	ide_config <= ide_cfg;
-	//cpu_config <= cpu_cfg;
-	cpu_config <= t_cpu_config[2:0]; // hard setting 68030 for now
+	cpu_config <= cpu_cfg;
+	//cpu_config <= t_cpu_config[2:0]; // hard setting 68030 for now
 end
 
 always @(posedge clk) begin
@@ -441,7 +441,8 @@ always @(posedge clk) begin
 	old_ack <= host_ack;
 	if (old_ack & ~host_ack) begin
 		IO_WAIT  <= 0;
-		host_adr <= host_adr + 24'd2;
+		host_adr <= host_adr + 32'd2;
+		//host_adr <= host_adr + 24'd2;
 	end
 
 	if(~IO_ENA) begin
@@ -475,13 +476,16 @@ always @(posedge clk) begin
 				  0 : host_adr[ 7: 0] <= IO_DIN[7:0];
 				  1 : host_adr[15: 8] <= IO_DIN[7:0];
 				  2 : host_adr[23:16] <= IO_DIN[7:0];
-				  //3 : mem_page[ 7: 0] <= IO_DIN[7:0];
+				  3 : host_adr[31:24] <= IO_DIN[7:0]; // Will that work???
+				  //3 : mem_page[ 7: 0] <= IO_DIN[7:0]; // this was already commented out
 				endcase
 
 				if(bcnt[2]) begin
 				   // If OSD writes to $f80000, it could be a bootrom. When a Kickstart is loaded, $fe0000 is also written.
-				   if (host_adr == 24'hF80000) bootrom_r <= 1; 
-				   if (host_adr == 24'hFE0000) bootrom_r <= 0;  
+				   if (host_adr == 32'h00F80000) bootrom_r <= 1; 
+				   if (host_adr == 32'h00FE0000) bootrom_r <= 0;  
+				   //if (host_adr == 24'hF80000) bootrom_r <= 1; 
+				   //if (host_adr == 24'hFE0000) bootrom_r <= 0;  
 					btoggle <= ~btoggle;
 					if(btoggle) begin
 						host_wdat[7:0] <= IO_DIN[7:0];

@@ -13,7 +13,7 @@ module shared_sdram_controller
     // CPU/Memory interface
     input  [31:0] data_in,
     output [31:0] data_out,
-    input  [23:1] addr_in,
+    input  [31:1] addr_in,
     input         read_enable,
     input         write_enable,
     input  [3:0]  byte_enables,  // 4-bit for 32-bit access

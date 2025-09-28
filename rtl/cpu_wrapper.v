@@ -365,9 +365,9 @@ assign cpustate_w = as_w ? 2'b01 : (~wr_w ? 2'b11 : 2'b10);
 assign longword_w = (size_w == 2'b11);
 
 // WF68K30L advanced configuration from unused cache config bits
-wire wf68k30l_pipeline_en = cachecfg[2] & cpucfg[2];  // Enable pipelining when dcache bit set and WF68K30L selected
-wire wf68k30l_loop_opt_en = cachecfg[1] & cpucfg[2];  // Enable DBcc loop optimization
-wire wf68k30l_bitfield_en = cachecfg[0] & cpucfg[2];  // Enable bitfield operations
+wire wf68k30l_pipeline_en = 1'b1; //cachecfg[2] & cpucfg[2];  // Enable pipelining when dcache bit set and WF68K30L selected
+wire wf68k30l_loop_opt_en = 1'b1; //cachecfg[1] & cpucfg[2];  // Enable DBcc loop optimization
+wire wf68k30l_bitfield_en = 1'b1; //cachecfg[0] & cpucfg[2];  // Enable bitfield operations
 
 // WF68K30L control registers (simplified implementation)
 assign cacr_w = 4'b0000;  // No cache in WF68K30L, always zero

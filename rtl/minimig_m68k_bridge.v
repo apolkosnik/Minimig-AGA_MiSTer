@@ -64,7 +64,7 @@ module minimig_m68k_bridge
     input         _cpu_reset,
     input         cpu_halt,
     input         host_cs,
-    input  [23:1] host_adr,
+    input  [31:1] host_adr,
     input         host_we,
     input   [3:0] host_bs,
     input  [31:0] host_wdat,
@@ -187,6 +187,6 @@ assign host_rdat  = ldata_in;
 reg [31:1] address_r;
 always @(posedge clk) address_r <= address;
 
-assign address_out[31:1] = !halt ? address_r : {8'b00000000, host_adr[23:1]};
+assign address_out[31:1] = !halt ? address_r : {host_adr[31:1]};
 
 endmodule
