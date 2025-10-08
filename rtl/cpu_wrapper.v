@@ -132,6 +132,11 @@ assign fastchip_rnw = wr;
 
 reg  [31:0] cpu_addr;
 reg  [31:0] cpu_dout;
+
+// For now, run WF68K30L at full system clock speed
+// The DSACK protocol will handle timing automatically
+wire clk_cpu = clk;
+
 // Proper autoconfig halfword selection with byte-lane discipline
 wire [31:0] autoconfig_data;
 assign autoconfig_data = sel_autoconfig ? 
@@ -145,10 +150,10 @@ assign autoconfig_data = sel_autoconfig ?
     32'hFFFFFFFF;
 
 // Clean multiplexer to prevent bit contamination - only one source active
-wire [31:0] cpu_din = ramsel ? ramdat : 
-                     fastchip_selack ? fastchip_dout : 
-                     sel_autoconfig ? autoconfig_data : 
-                     {16'h0000, chip_data[15:0]};
+wire [31:0] cpu_din = ramsel ? ramdat :
+                     fastchip_selack ? fastchip_dout :
+                     sel_autoconfig ? autoconfig_data :
+                     chip_data;
 wire [15:0] cpu_din_16 = cpu_din[15:0];  // 16-bit data for TG68K - keep simple
 reg         wr;
 reg         uds_in;
@@ -177,17 +182,17 @@ always @* begin
 		uds_in       = uds_w;
 		lds_in       = lds_w;
 		reset_out    = ~reset_out_w;
-		chip_as      = ~as_w;
+		chip_as      = as_w;
 		chip_rw      = wr_w;
 		chip_uds     = uds_w;
 		chip_lds     = lds_w;
 		chip_addr    = cpu_addr_w[31:1];
 		chip_din     = cpu_dout_w;
-		chip_data    = chipdout_i;
+		chip_data    = chip_dout;
 		fastchip_sel = cpu_req & (cpu_addr_w[31:24] >= 8'h02 && cpu_addr_w[31:24] <= 8'h9F); // FastRAM regions $02000000-$9FFFFFFF
 		fastchip_lw  = longword_w;
 	end
-	else if(cpucfg[1:0]) begin
+	else if(cpucfg == 3'b001 || cpucfg == 3'b010 || cpucfg == 3'b011) begin
 		// TG68K CPU selected
 		cpu_dout     = cpu_dout_p;
 		cpu_addr     = cpu_addr_p;
@@ -344,8 +349,9 @@ wire        dtack_active = ramsel ? ramready : ~chip_dtack;
 assign dsack_w = dtack_active ? (
     (size_w == 2'b00) ? 2'b10 :   // Byte -> 8-bit port
     (size_w == 2'b01) ? 2'b01 :   // Word -> 16-bit port
+    (size_w == 2'b10) ? 2'b01 :   // 3-byte -> treat as 16-bit port
     (size_w == 2'b11) ? 2'b00 :   // Longword -> 32-bit port
-    2'b11                         // 3-byte/invalid -> no acknowledge
+    2'b11                         // Invalid -> no acknowledge
 ) : 2'b11;
 
 // Optimized SIZE to UDS/LDS conversion with proper bus lane selection
@@ -384,7 +390,7 @@ WF68K30L_TOP
 )
 cpu_inst_w
 (
-    .CLK(clk),
+    .CLK(clk_cpu),            // Use divided clock for WF68K30L (28.5 MHz)
 
     // Address and data buses
     .ADR_OUT(cpu_addr_w),

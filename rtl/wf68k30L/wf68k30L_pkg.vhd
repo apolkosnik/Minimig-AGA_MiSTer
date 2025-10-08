@@ -144,7 +144,7 @@ component WF68K30L_ALU
         ALU_COND            : out boolean;
         ALU_INIT            : in bit;
         ALU_BSY             : out bit;
-        ALU_REQ             : out bit;
+        ALU_REQ             : buffer bit;
         ALU_ACK             : in bit;
         USE_DREG            : in bit;
         HILOn               : in bit;
@@ -201,7 +201,7 @@ component WF68K30L_BUS_INTERFACE
         AVECn               : in std_logic;
         HALTn               : in std_logic;
         BERRn               : in std_logic;
-        AERR                : out bit;
+        AERR                : buffer bit;
         BUS_BSY             : out bit
     );
 end component;
@@ -431,8 +431,8 @@ component WF68K30L_OPCODE_DECODER
         LOOP_EXIT           : in bit;
         LOOP_BSY            : out bit;
         OPD_ACK_MAIN        : out bit;
-        EW_ACK              : out bit;
-        PC_EW_OFFSET        : out std_logic_vector(3 downto 0);
+        EW_ACK              : buffer bit;
+        PC_EW_OFFSET        : buffer std_logic_vector(3 downto 0);
         PC_INC              : out bit;
         PC_INC_EXH          : in bit;
         PC_ADR_OFFSET       : out std_logic_vector(7 downto 0);
@@ -450,8 +450,8 @@ component WF68K30L_OPCODE_DECODER
         FB                  : out std_logic;
         SBIT                : in std_logic;
         TRAP_CODE           : out TRAPTYPE_OPC;
-        OP                  : out OP_68K;
-        BIW_0               : out std_logic_vector(15 downto 0);
+        OP                  : buffer OP_68K;
+        BIW_0               : buffer std_logic_vector(15 downto 0);
         BIW_1               : out std_logic_vector(15 downto 0);
         BIW_2               : out std_logic_vector(15 downto 0);
         EXT_WORD            : out std_logic_vector(15 downto 0)

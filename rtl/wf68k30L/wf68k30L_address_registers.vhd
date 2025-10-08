@@ -14,7 +14,7 @@
 ----                                                                ----
 ------------------------------------------------------------------------
 ----                                                                ----
----- Copyright © 2014... Wolfgang Foerster - Inventronik GmbH.      ----
+---- Copyright ï¿½ 2014... Wolfgang Foerster - Inventronik GmbH.      ----
 ----                                                                ----
 ---- This documentation describes Open Hardware and is licensed     ----
 ---- under the CERN OHL v. 1.2. You may redistribute and modify     ----
@@ -48,8 +48,8 @@
 -- Revision 2K21A 20211224 WF
 --   The SSP_DEC can now handle both supervisor stack pointers.
 --   Fixed a data hazard in the effective address calculation.
---   Fixed index register suppressing in 68K20+ addressing modes, thanks to Markus Fröschle and Udo Matthe.
---   Fixed base register suppressing in 68K20+ addressing modes thanks to Udo Matthe and Markus Fröschle.
+--   Fixed index register suppressing in 68K20+ addressing modes, thanks to Markus Frï¿½schle and Udo Matthe.
+--   Fixed base register suppressing in 68K20+ addressing modes thanks to Udo Matthe and Markus Frï¿½schle.
 -- 
 
 use work.WF68K30L_PKG.all;
@@ -153,12 +153,12 @@ signal AR_PNTR_WB_1     : integer range 0 to 7;
 signal AR_PNTR_WB_2     : integer range 0 to 7;
 signal AR_USED_1        : std_logic_vector(3 downto 0);
 signal AR_USED_2        : std_logic_vector(3 downto 0);
-signal DFC_REG          : std_logic_vector(2 downto 0); -- Special function code registers.
+--signal DFC_REG          : std_logic_vector(2 downto 0); -- Special function code registers.
 signal ISP_REG          : std_logic_vector(31 downto 0); -- Interrupt stack pointer (refers to A7'' in the supervisor mode).
 signal MSBIT            : std_logic_vector(1 downto 0);
 signal MSP_REG          : std_logic_vector(31 downto 0); -- Master stack pointer (refers to A7' in the supervisor mode).
 signal PC_I             : std_logic_vector(31 downto 0); -- Active program counter.
-signal SFC_REG          : std_logic_vector(2 downto 0); -- Special function code registers.
+--signal SFC_REG          : std_logic_vector(2 downto 0); -- Special function code registers.
 signal USP_REG          : std_logic_vector(31 downto 0); -- User stack pointer (refers to A7 in the user mode.).
 begin
     INBUFFER: process

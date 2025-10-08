@@ -476,7 +476,7 @@ always @(posedge clk) begin
 				  0 : host_adr[ 7: 0] <= IO_DIN[7:0];
 				  1 : host_adr[15: 8] <= IO_DIN[7:0];
 				  2 : host_adr[23:16] <= IO_DIN[7:0];
-				  3 : host_adr[31:24] <= IO_DIN[7:0]; // Will that work???
+				  //3 : host_adr[31:24] <= IO_DIN[7:0]; // Will that work???
 				  //3 : mem_page[ 7: 0] <= IO_DIN[7:0]; // this was already commented out
 				endcase
 
