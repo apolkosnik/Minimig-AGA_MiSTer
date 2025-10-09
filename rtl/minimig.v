@@ -159,6 +159,7 @@ module minimig
 	input 	     _cpu_as,     // m68k address strobe
 	input 	     _cpu_uds,    // m68k upper data strobe
 	input 	     _cpu_lds,    // m68k lower data strobe
+	input   [3:0] _cpu_be,     // m68k 4-byte enables (active-low) for 32-bit support
 	input 	     cpu_r_w,     // m68k read / write
 	output 	     _cpu_dtack,  // m68k data acknowledge
 	output 	     _cpu_reset,  // m68k reset
@@ -321,8 +322,12 @@ wire        ram_hwr;				//ram high byte write enable
 wire        ram_lwr;				//ram low byte write enable 
 wire        cpu_rd; 				//cpu read enable
 wire        rd_cyc;
-wire        cpu_hwr;				//cpu high byte write enable
-wire        cpu_lwr;				//cpu low byte write enable
+wire        cpu_hwr;				//cpu high byte write enable (legacy, bits 15:8)
+wire        cpu_lwr;				//cpu low byte write enable (legacy, bits 7:0)
+wire        cpu_byte3_wr;			//cpu byte 3 write enable (bits 31:24) - NEW 32-bit
+wire        cpu_byte2_wr;			//cpu byte 2 write enable (bits 23:16) - NEW 32-bit
+wire        cpu_byte1_wr;			//cpu byte 1 write enable (bits 15:8) - NEW 32-bit
+wire        cpu_byte0_wr;			//cpu byte 0 write enable (bits 7:0) - NEW 32-bit
 
 //register address bus
 wire  [8:1] reg_address; 		//main register address bus
@@ -702,12 +707,17 @@ minimig_m68k_bridge CPU1
 	._as(_cpu_as),
 	._lds(_cpu_lds),
 	._uds(_cpu_uds),
+	._be(_cpu_be),        // NEW: 4-byte enables for 32-bit support
 	.r_w(cpu_r_w),
 	._dtack(_cpu_dtack),
 	.rd(cpu_rd),
 	.rd_cyc(rd_cyc),
 	.hwr(cpu_hwr),
 	.lwr(cpu_lwr),
+	.byte3_wr(cpu_byte3_wr),  // NEW: Byte 3 write (bits 31:24)
+	.byte2_wr(cpu_byte2_wr),  // NEW: Byte 2 write (bits 23:16)
+	.byte1_wr(cpu_byte1_wr),  // NEW: Byte 1 write (bits 15:8)
+	.byte0_wr(cpu_byte0_wr),  // NEW: Byte 0 write (bits 7:0)
 	.address(cpu_address),
 	.address_out(cpu_address_out),
 	.cpudatain(cpudata_in),

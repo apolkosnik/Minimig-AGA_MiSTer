@@ -531,6 +531,7 @@ minimig minimig
 	._cpu_as      (chip_as          ), // M68K address strobe
 	._cpu_uds     (chip_uds         ), // M68K upper data strobe
 	._cpu_lds     (chip_lds         ), // M68K lower data strobe
+	._cpu_be      (chip_be          ), // M68K 4-byte enables (32-bit support)
 	.cpu_r_w      (chip_rw          ), // M68K read / write
 	._cpu_dtack   (chip_dtack       ), // M68K data acknowledge
 	._cpu_reset   (cpu_rst          ), // M68K reset

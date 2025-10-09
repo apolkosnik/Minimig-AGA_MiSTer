@@ -25,7 +25,7 @@ reg  [31:0] ram_dout = 32'h00000000;
 reg         ram_ready = 0;
 
 // Configuration
-reg [1:0] cpucfg = 2'b11; // WF68K30L
+reg [2:0] cpucfg = 2'b100; // WF68K30L
 reg [2:0] cachecfg = 3'b000;
 reg [2:0] fastramcfg = 3'b000;
 reg       bootrom = 0;

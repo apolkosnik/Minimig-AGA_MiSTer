@@ -47,11 +47,16 @@ module minimig_m68k_bridge
 	input	        _as,           // m68k adress strobe
 	input	        _lds,          // m68k lower data strobe d0-d7
 	input	        _uds,          // m68k upper data strobe d8-d15
+	input   [3:0] _be,           // 4-byte enables (active-low): BE3(31:24), BE2(23:16), BE1(15:8), BE0(7:0)
 	input	        r_w,           // m68k read / write
 	output        _dtack,        // m68k data acknowledge to cpu
-	output        rd,            // bus read 
-	output        hwr,           // bus high write
-	output        lwr,           // bus low write
+	output        rd,            // bus read
+	output        hwr,           // bus high write (bits 15:8) - legacy
+	output        lwr,           // bus low write (bits 7:0) - legacy
+	output        byte3_wr,      // byte 3 write (bits 31:24) - NEW 32-bit support
+	output        byte2_wr,      // byte 2 write (bits 23:16) - NEW 32-bit support
+	output        byte1_wr,      // byte 1 write (bits 15:8)
+	output        byte0_wr,      // byte 0 write (bits 7:0)
 	input	 [31:1] address,       // external cpu address bus (expanded to 32-bit)
 	output [31:1] address_out,   // internal cpu address bus output (expanded to 32-bit)
 	output [31:0] data,          // external cpu data bus
@@ -136,12 +141,18 @@ always @ (posedge clk) begin
 	end
 end
 
+// Latch all 4 byte enables for true 32-bit support
 reg l_uds,l_lds,l_uws,l_lws;
+reg [3:0] l_be;  // Latched 4-byte enables
 always @(posedge clk) begin
-  l_uds <= !halt ? _uds : !(host_bs[1]); // Upper data strobe (bits 15:8) - corrected mapping
-  l_lds <= !halt ? _lds : !(host_bs[0]); // Lower data strobe (bits 7:0) - corrected mapping
+  // Legacy 16-bit strobes (for backward compatibility)
+  l_uds <= !halt ? _uds : !(host_bs[1]); // Upper data strobe (bits 15:8)
+  l_lds <= !halt ? _lds : !(host_bs[0]); // Lower data strobe (bits 7:0)
   l_uws <= !halt ? _uds : !(host_bs[1]); // Upper word strobe (bits 15:8)
   l_lws <= !halt ? _lds : !(host_bs[0]); // Lower word strobe (bits 7:0)
+
+  // NEW: Latch all 4 byte enables (active-low)
+  l_be <= !halt ? _be : ~host_bs;  // BE3(31:24), BE2(23:16), BE1(15:8), BE0(7:0)
 end
 
 wire _as_and_cs = !halt ? _as : !host_cs;
@@ -162,8 +173,17 @@ assign _dtack   = _ta_n;
 // synchronous control signals
 wire   enable = ~l_as & ~l_dtack & ~cck;
 assign rd = enable & lr_w;
-assign hwr = enable & ~lr_w & (~l_uds | ~l_uws);
-assign lwr = enable & ~lr_w & (~l_lds | ~l_lws);
+
+// TRUE 32-BIT WRITE STROBES: Generate 4 independent byte write signals
+assign byte3_wr = enable & ~lr_w & ~l_be[3];  // Byte 3 write (bits 31:24)
+assign byte2_wr = enable & ~lr_w & ~l_be[2];  // Byte 2 write (bits 23:16)
+assign byte1_wr = enable & ~lr_w & ~l_be[1];  // Byte 1 write (bits 15:8)
+assign byte0_wr = enable & ~lr_w & ~l_be[0];  // Byte 0 write (bits 7:0)
+
+// Legacy 16-bit write strobes (for backward compatibility with old code)
+assign hwr = enable & ~lr_w & (~l_uds | ~l_uws);  // DEPRECATED: Use byte1_wr instead
+assign lwr = enable & ~lr_w & (~l_lds | ~l_lws);  // DEPRECATED: Use byte0_wr instead
+
 assign rd_cyc = ~l_as & lr_w;
 
 //blitter slow down signalling, asserted whenever CPU is missing bus access to chip ram, slow ram and custom registers 

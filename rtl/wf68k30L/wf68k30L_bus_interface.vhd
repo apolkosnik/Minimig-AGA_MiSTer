@@ -769,8 +769,9 @@ begin
              '0' when T_SLICE = S2 or T_SLICE = S3 or T_SLICE = S4 else '1'; -- Read.
 
     -- Bus tri state controls:
-    BUS_EN <= '1' when ARB_STATE = IDLE and RESET_CPU_I = '0' else '0';
-    DATA_PORT_EN <= '1' when WRITE_ACCESS = '1' and ARB_STATE = IDLE and RESET_CPU_I = '0' else '0';
+    -- Note: RESET_CPU_I = '1' means CPU is running (reset released)
+    BUS_EN <= '1' when ARB_STATE = IDLE and RESET_CPU_I = '1' else '0';
+    DATA_PORT_EN <= '1' when WRITE_ACCESS = '1' and ARB_STATE = IDLE and RESET_CPU_I = '1' else '0';
 
     -- Progress controls:
     BUS_CYC_RDY <=  '0' when RETRY = '1' else
@@ -847,9 +848,9 @@ begin
             RESET_CPU_I <= '1'; -- Release internal reset.
             STARTUP := true;
         elsif STARTUP = false then
-            RESET_CPU_I <= '1';
+            RESET_CPU_I <= '0'; -- Keep CPU in reset until initialization complete
         else
-            RESET_CPU_I <= '0';
+            RESET_CPU_I <= '1'; -- Keep CPU reset released after startup
         end if;
     end process RESET_FILTER;
 

@@ -44,6 +44,7 @@ module cpu_wrapper
 	output reg        chip_as,
 	output reg        chip_uds,
 	output reg        chip_lds,
+	output reg  [3:0] chip_be,     // NEW: 4-byte enables (active-low) for 32-bit support
 	output reg        chip_rw,
 	input             chip_dtack,
 	input       [2:0] chip_ipl,
@@ -137,6 +138,25 @@ reg  [31:0] cpu_dout;
 // The DSACK protocol will handle timing automatically
 wire clk_cpu = clk;
 
+// WF68K30L initialization sequencer
+// Required: RESET_INn=1 AND HALT_INn=0 for 10+ clocks to release internal CPU reset
+reg [3:0] wf68k_init_count;
+reg wf68k_halt_n;
+
+always @(posedge clk) begin
+    if (reset) begin
+        wf68k_init_count <= 4'd0;
+        wf68k_halt_n <= 1'b0;  // Assert HALT during system reset
+    end else begin
+        if (wf68k_init_count < 4'd15) begin
+            wf68k_init_count <= wf68k_init_count + 4'd1;
+            wf68k_halt_n <= 1'b0;  // Keep HALT asserted for 15 clocks after reset release
+        end else begin
+            wf68k_halt_n <= 1'b1;  // Release HALT after initialization complete
+        end
+    end
+end
+
 // Proper autoconfig halfword selection with byte-lane discipline
 wire [31:0] autoconfig_data;
 assign autoconfig_data = sel_autoconfig ? 
@@ -183,9 +203,10 @@ always @* begin
 		lds_in       = lds_w;
 		reset_out    = ~reset_out_w;
 		chip_as      = as_w;
-		chip_rw      = wr_w;
+		chip_rw      = ~wr_w;  // CRITICAL FIX: RWn is active-low, chip_rw is active-high (1=write)
 		chip_uds     = uds_w;
 		chip_lds     = lds_w;
+		chip_be      = be_w;  // NEW: Export 4-byte enables for 32-bit support
 		chip_addr    = cpu_addr_w[31:1];
 		chip_din     = cpu_dout_w;
 		chip_data    = chip_dout;
@@ -207,6 +228,7 @@ always @* begin
 		chip_rw      = c_rw;
 		chip_uds     = c_uds;
 		chip_lds     = c_lds;
+		chip_be      = {2'b11, ~c_uds, ~c_lds};  // TG68K: Convert UDS/LDS to byte enables
 		chip_addr    = cpu_addr_p[31:1];
 		chip_din     = cpu_dout_p;
 		chip_data    = chipdout_i;
@@ -228,6 +250,7 @@ always @* begin
 		chip_rw      = wr_o;
 		chip_uds     = uds_o;
 		chip_lds     = lds_o;
+		chip_be      = {2'b11, ~uds_o, ~lds_o};  // FX68K: Convert UDS/LDS to byte enables
 		chip_addr    = cpu_addr_o[31:1];
 		chip_din     = cpu_dout_o;
 		chip_data    = chip_dout;
@@ -330,8 +353,9 @@ wire        wr_w;
 wire        as_w;
 wire        ds_w;
 wire        rmc_w;
-wire        uds_w;
-wire        lds_w;
+wire  [3:0] be_w;        // 4-byte enables: BE3(31:24), BE2(23:16), BE1(15:8), BE0(7:0)
+wire        uds_w;       // Legacy 16-bit UDS (for backward compatibility)
+wire        lds_w;       // Legacy 16-bit LDS (for backward compatibility)
 wire        reset_out_w;
 wire  [1:0] size_w;
 wire  [1:0] cpustate_w;
@@ -341,12 +365,14 @@ wire        longword_w;
 
 // DSACK generation for WF68K30L
 wire  [1:0] dsack_w;
+// Note: chip_dtack is active-low from minimig module (._cpu_dtack)
 wire        dtack_active = ramsel ? ramready : ~chip_dtack;
 
 // Fixed DTACK to DSACK protocol conversion for WF68K30L
 // DSACK encoding: 11=no acknowledge, 10=8-bit, 01=16-bit, 00=32-bit
 // SIZE encoding: 00=byte, 01=word, 10=3-byte, 11=longword
-assign dsack_w = dtack_active ? (
+// CRITICAL: Only assert DSACK when ASn is active (low) AND dtack is ready
+assign dsack_w = (~as_w & dtack_active) ? (
     (size_w == 2'b00) ? 2'b10 :   // Byte -> 8-bit port
     (size_w == 2'b01) ? 2'b01 :   // Word -> 16-bit port
     (size_w == 2'b10) ? 2'b01 :   // 3-byte -> treat as 16-bit port
@@ -354,26 +380,39 @@ assign dsack_w = dtack_active ? (
     2'b11                         // Invalid -> no acknowledge
 ) : 2'b11;
 
-// Optimized SIZE to UDS/LDS conversion with proper bus lane selection
+// TRUE 32-BIT BUS: SIZE to 4-byte-enable conversion
+// This removes the 16-bit bottleneck and enables full 32-bit bandwidth
+// BE[3:0] active-low: BE3(31:24), BE2(23:16), BE1(15:8), BE0(7:0)
 wire [1:0] byte_lanes = cpu_addr_w[1:0];
-assign uds_w = (size_w == 2'b00) ? ~(byte_lanes == 2'b00 || byte_lanes == 2'b01) :  // Byte: UDS for upper bytes
-               (size_w == 2'b01) ? ~cpu_addr_w[1] :                                   // Word: UDS based on alignment
-               (size_w == 2'b11) ? 1'b0 :                                            // Longword: both active
-               1'b1;                                                                 // Reserved/3-byte
+assign be_w = ds_w ? 4'b1111 : (  // When DSn inactive, all byte enables off
+    (size_w == 2'b00) ? (  // Byte access - enable single byte based on address
+        (byte_lanes == 2'b00) ? 4'b1110 :  // Byte 3 (bits 31:24)
+        (byte_lanes == 2'b01) ? 4'b1101 :  // Byte 2 (bits 23:16)
+        (byte_lanes == 2'b10) ? 4'b1011 :  // Byte 1 (bits 15:8)
+        (byte_lanes == 2'b11) ? 4'b0111 :  // Byte 0 (bits 7:0)
+        4'b1111
+    ) :
+    (size_w == 2'b01) ? (  // Word (16-bit) - enable 2 bytes based on address
+        cpu_addr_w[1] ? 4'b0011 :  // Upper word (bits 31:16) - BE3,BE2 active
+                        4'b1100    // Lower word (bits 15:0)  - BE1,BE0 active
+    ) :
+    (size_w == 2'b11) ? 4'b0000 :  // Longword (32-bit) - all 4 bytes active
+    4'b1111  // Invalid/3-byte size
+);
 
-assign lds_w = (size_w == 2'b00) ? ~(byte_lanes == 2'b10 || byte_lanes == 2'b11) :  // Byte: LDS for lower bytes
-               (size_w == 2'b01) ? ~cpu_addr_w[1] :                                   // Word: LDS based on alignment
-               (size_w == 2'b11) ? 1'b0 :                                            // Longword: both active
-               1'b1;                                                                 // Reserved/3-byte
+// Legacy 16-bit UDS/LDS for backward compatibility with minimig_m68k_bridge
+// Map 4-byte enables to 16-bit strobes: UDS=BE1, LDS=BE0
+assign uds_w = be_w[1];  // Byte 1 enable (bits 15:8)
+assign lds_w = be_w[0];  // Byte 0 enable (bits 7:0)
 
 // Map WF68K30L bus state to cpustate (invert AS since WF68K30L uses active low)
 assign cpustate_w = as_w ? 2'b01 : (~wr_w ? 2'b11 : 2'b10);
 assign longword_w = (size_w == 2'b11);
 
 // WF68K30L advanced configuration from unused cache config bits
-wire wf68k30l_pipeline_en = 1'b1; //cachecfg[2] & cpucfg[2];  // Enable pipelining when dcache bit set and WF68K30L selected
-wire wf68k30l_loop_opt_en = 1'b1; //cachecfg[1] & cpucfg[2];  // Enable DBcc loop optimization
-wire wf68k30l_bitfield_en = 1'b1; //cachecfg[0] & cpucfg[2];  // Enable bitfield operations
+wire wf68k30l_pipeline_en = 1'b0; //cachecfg[2] & cpucfg[2];  // Enable pipelining when dcache bit set and WF68K30L selected
+wire wf68k30l_loop_opt_en = 1'b0; //cachecfg[1] & cpucfg[2];  // Enable DBcc loop optimization
+wire wf68k30l_bitfield_en = 1'b0; //cachecfg[0] & cpucfg[2];  // Enable bitfield operations
 
 // WF68K30L control registers (simplified implementation)
 assign cacr_w = 4'b0000;  // No cache in WF68K30L, always zero
@@ -402,7 +441,7 @@ cpu_inst_w
     .BERRn(1'b1),                 // No bus error for now
     .RESET_INn(~reset),           // WF68K30L expects active-low reset
     .RESET_OUT(reset_out_w),      // Open drain output
-    .HALT_INn(~reset),            // HALT during reset for proper startup sequence
+    .HALT_INn(wf68k_halt_n),      // Proper initialization sequence: RESET=1,HALT=0 for 10+ clocks
     .HALT_OUTn(),                 // Not used
 
     // Processor status
