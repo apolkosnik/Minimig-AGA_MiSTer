@@ -29,18 +29,20 @@ entity TG68K_Cache_030 is
     i_addr         : in  std_logic_vector(31 downto 0);     -- Logical address from CPU
     i_addr_phys    : in  std_logic_vector(31 downto 0);     -- Physical address from PMMU
     i_req          : in  std_logic;
+    i_cache_inhibit : in  std_logic;                         -- Cache inhibit from PMMU
     i_data         : out std_logic_vector(31 downto 0);
     i_hit          : out std_logic;
     i_fill_req     : out std_logic;
     i_fill_addr    : out std_logic_vector(31 downto 0);
     i_fill_data    : in  std_logic_vector(127 downto 0); -- 16-byte cache line
     i_fill_valid   : in  std_logic;
-    
-    -- Data Cache Interface  
+
+    -- Data Cache Interface
     d_addr         : in  std_logic_vector(31 downto 0);     -- Logical address from CPU
     d_addr_phys    : in  std_logic_vector(31 downto 0);     -- Physical address from PMMU
     d_req          : in  std_logic;
     d_we           : in  std_logic;
+    d_cache_inhibit : in  std_logic;                         -- Cache inhibit from PMMU
     d_data_in      : in  std_logic_vector(31 downto 0);
     d_data_out     : out std_logic_vector(31 downto 0);
     d_be           : in  std_logic_vector(3 downto 0);      -- Byte enables (3=byte3, 2=byte2, 1=byte1, 0=byte0)
@@ -101,18 +103,16 @@ architecture rtl of TG68K_Cache_030 is
 begin
 
   -- Address parsing for instruction cache
-  -- Use logical address for index (cache is virtually indexed)
-  i_line_idx <= to_integer(unsigned(i_addr(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
-  -- Use physical address for tag (cache is physically tagged)
+  -- Use physical address for both index and tag (cache is physically indexed, physically tagged)
+  i_line_idx <= to_integer(unsigned(i_addr_phys(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
   i_tag      <= i_addr_phys(31 downto ADDR_BITS+OFFSET_BITS);
-  i_offset   <= to_integer(unsigned(i_addr(OFFSET_BITS-1 downto 2))) * 4; -- Word-aligned
+  i_offset   <= to_integer(unsigned(i_addr_phys(OFFSET_BITS-1 downto 2))) * 4; -- Word-aligned
 
-  -- Address parsing for data cache  
-  -- Use logical address for index (cache is virtually indexed)
-  d_line_idx <= to_integer(unsigned(d_addr(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
-  -- Use physical address for tag (cache is physically tagged)
-  d_tag      <= d_addr_phys(31 downto ADDR_BITS+OFFSET_BITS);  
-  d_offset   <= to_integer(unsigned(d_addr(OFFSET_BITS-1 downto 2))) * 4; -- Word-aligned
+  -- Address parsing for data cache
+  -- Use physical address for both index and tag (cache is physically indexed, physically tagged)
+  d_line_idx <= to_integer(unsigned(d_addr_phys(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
+  d_tag      <= d_addr_phys(31 downto ADDR_BITS+OFFSET_BITS);
+  d_offset   <= to_integer(unsigned(d_addr_phys(OFFSET_BITS-1 downto 2))) * 4; -- Word-aligned
   
   -- Cache operation address parsing
   cache_op_line_idx <= to_integer(unsigned(cache_op_addr(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
@@ -192,7 +192,7 @@ begin
       end if;
       
       -- Cache miss detection and fill request
-      if i_req = '1' and cacr_ie = '1' then
+      if i_req = '1' and cacr_ie = '1' and i_cache_inhibit = '0' then
         -- Check for cache miss
         if i_valid_array(i_line_idx) = '0' or i_tag_array(i_line_idx) /= i_tag then
           -- Only request fill if not frozen
@@ -205,21 +205,19 @@ begin
       end if;
       
       -- Keep fill request active until data arrives (independent of i_req)
-      -- But clear it if cache is frozen
-      if i_fill_req_int = '1' and i_fill_valid = '0' then
-        if cacr_ifreeze = '1' then
-          i_fill_req_int <= '0'; -- Cancel fill if frozen
-        else
-          i_fill_req_int <= '1';
-        end if;
+      -- Clear it only when frozen (fill completion is handled by line 139)
+      if i_fill_req_int = '1' and cacr_ifreeze = '1' then
+        i_fill_req_int <= '0'; -- Cancel fill if frozen
       end if;
+      -- Note: Fill completion clears i_fill_req_int at line 139
     end if;
   end process;
 
   -- Instruction cache hit/miss detection and data output
-  -- When cache is frozen, bypass cache (miss) to prevent CPU lockup
-  i_hit <= '1' when (cacr_ie = '1' and i_req = '1' and cacr_ifreeze = '0' and
-                     i_valid_array(i_line_idx) = '1' and i_tag_array(i_line_idx) = i_tag) 
+  -- When cache inhibited, bypass cache (miss) to prevent CPU lockup
+  -- Freeze only prevents new fills, but existing cache lines can still hit
+  i_hit <= '1' when (cacr_ie = '1' and i_req = '1' and i_cache_inhibit = '0' and
+                     i_valid_array(i_line_idx) = '1' and i_tag_array(i_line_idx) = i_tag)
                      else '0';
   i_fill_req <= i_fill_req_int;
   
@@ -304,7 +302,7 @@ begin
       end if;
       
       -- Cache access handling
-      if d_req = '1' and cacr_de = '1' then
+      if d_req = '1' and cacr_de = '1' and d_cache_inhibit = '0' then
         -- Handle write (write-through for now)
         if d_we = '1' and d_valid_array(d_line_idx) = '1' and d_tag_array(d_line_idx) = d_tag then
           -- Update cache line on write hit with byte enable support
@@ -347,7 +345,7 @@ begin
       -- Automatic cache coherency: invalidate on external writes
       -- When a write occurs that doesn't hit in cache, invalidate any potentially aliasing lines
       -- This handles cases where external agents (DMA, other CPUs) modify memory
-      if d_req = '1' and d_we = '1' and cacr_de = '1' then
+      if d_req = '1' and d_we = '1' and cacr_de = '1' and d_cache_inhibit = '0' then
         -- If write misses in cache, check if any other lines might alias with this physical address
         if not (d_valid_array(d_line_idx) = '1' and d_tag_array(d_line_idx) = d_tag) then
           -- Look for potential aliases in other cache lines (same physical page)
@@ -365,20 +363,18 @@ begin
       end if;
       
       -- Keep fill request active until data arrives (independent of d_req)
-      -- But clear it if cache is frozen
-      if d_fill_req_int = '1' and d_fill_valid = '0' then
-        if cacr_dfreeze = '1' then
-          d_fill_req_int <= '0'; -- Cancel fill if frozen
-        else
-          d_fill_req_int <= '1';
-        end if;
+      -- Clear it only when frozen (fill completion is handled by line 251)
+      if d_fill_req_int = '1' and cacr_dfreeze = '1' then
+        d_fill_req_int <= '0'; -- Cancel fill if frozen
       end if;
+      -- Note: Fill completion clears d_fill_req_int at line 251
     end if;
   end process;
 
-  -- Data cache hit/miss detection and data output  
-  -- When cache is frozen, bypass cache (miss) to prevent CPU lockup
-  d_hit <= '1' when (cacr_de = '1' and d_req = '1' and cacr_dfreeze = '0' and
+  -- Data cache hit/miss detection and data output
+  -- When cache inhibited, bypass cache (miss) to prevent CPU lockup
+  -- Freeze only prevents new fills, but existing cache lines can still hit
+  d_hit <= '1' when (cacr_de = '1' and d_req = '1' and d_cache_inhibit = '0' and
                      d_valid_array(d_line_idx) = '1' and d_tag_array(d_line_idx) = d_tag)
                      else '0';
   d_fill_req <= d_fill_req_int;

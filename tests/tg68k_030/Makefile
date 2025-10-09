@@ -7,12 +7,12 @@ VSIM = $(MODELSIM_PATH)/linuxaloem/vsim
 VCOM = $(MODELSIM_PATH)/linuxaloem/vcom
 VLIB = $(MODELSIM_PATH)/linuxaloem/vlib
 
-PROJECT_ROOT = /home/adam/68030/Minimig-AGA_MiSTer
+PROJECT_ROOT = /home/adam/030_mmu/Minimig-AGA_MiSTer
 TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-integration test-diagrom test-advanced test-fault test-stress test-regression validate setup help
+.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-integration test-diagrom test-advanced test-fault test-stress test-regression validate setup help
 
 # Default target
 all: test-comprehensive
@@ -27,8 +27,14 @@ help:
 	@echo "  setup            - Setup ModelSim environment"
 	@echo "  test-pmmu        - Test basic PMMU component"
 	@echo "  test-diagnostic  - Run PMMU diagnostic tests (RECOMMENDED FIRST)"
-	@echo "  test-cache       - Test Cache component only"  
+	@echo "  test-cache       - Test Cache component only"
 	@echo "  test-cacr        - Test CACR register only"
+	@echo "  test-movec-cacr  - Test MOVEC CACR corner cases"
+	@echo "  test-pmove-tc    - Test PMOVE Dx,TC (write) corner cases"
+	@echo "  test-pmove-tc-read - Test PMOVE TC,Dx (read) corner cases"
+	@echo "  test-pmove-tt0-read - Test PMOVE TT0,Dx (read) corner cases"
+	@echo "  test-pmove-tt0-mem-read - Test PMOVE.L (d16,An),TT0 memory read (NEW)"
+	@echo "  test-pmove-tt1-mem - Test PMOVE.L TT1,(d16,An) memory write"
 	@echo "  test-integration - Test full system integration"
 	@echo "  test-diagrom     - Test DiagROM boot sequence"
 	@echo "  test-advanced    - Run advanced PMMU functionality tests"
@@ -71,6 +77,12 @@ compile: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cache_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cacr_test.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_movec_cacr_corner.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_tc_corner.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_tc_read.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_tt0_read.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_tt0_mem_read.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_tt1_mem.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_diagnostic.vhd || true
 	@echo "Basic compilation completed (errors ignored for initial testing)"
 
@@ -104,6 +116,30 @@ test-cache: compile
 test-cacr: compile
 	@echo "Running CACR tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_cacr_test
+
+test-movec-cacr: compile
+	@echo "Running MOVEC CACR corner case tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_movec_cacr_corner
+
+test-pmove-tc: compile
+	@echo "Running PMOVE Dx,TC (write) corner case tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_pmove_tc_corner
+
+test-pmove-tc-read: compile
+	@echo "Running PMOVE TC,Dx (read) corner case tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_pmove_tc_read
+
+test-pmove-tt0-read: compile
+	@echo "Running PMOVE TT0,Dx (read) corner case tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_pmove_tt0_read
+
+test-pmove-tt0-mem-read: compile
+	@echo "Running PMOVE.L (d16,An),TT0 (memory read) tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_pmove_tt0_mem_read
+
+test-pmove-tt1-mem: compile
+	@echo "Running PMOVE.L TT1,(d16,An) memory write tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_pmove_tt1_mem
 
 test-integration: compile
 	@echo "Running Integration tests..."

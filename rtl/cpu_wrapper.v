@@ -275,7 +275,7 @@ cpu_inst_p
 (
   .clk(clk),
   .nreset(reset),
-  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready) & ~(USE_68030_CACHE & cache_miss)),
+  .clkena_in(~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit)),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),

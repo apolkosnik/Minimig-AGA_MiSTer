@@ -423,10 +423,14 @@ wire [15:0] chip_dout;
 wire [15:0] chip_din;
 wire [23:1] chip_addr;
 
-wire [28:1] ram_addr;
-wire        ram_sel;
-wire        ram_lds;
-wire        ram_uds;
+wire [28:1] ram_addr_cpu;
+wire [28:1] ram_addr = cache_fill_active ? cache_fill_addr[28:1] : ram_addr_cpu;
+wire        ram_sel_cpu;
+wire        ram_sel = cache_fill_active ? 1'b1 : ram_sel_cpu;
+wire        ram_lds_cpu;
+wire        ram_uds_cpu;
+wire        ram_lds = cache_fill_active ? 1'b0 : ram_lds_cpu;  // Active low - enable both bytes for cache
+wire        ram_uds = cache_fill_active ? 1'b0 : ram_uds_cpu;  // Active low - enable both bytes for cache
 wire [15:0] ram_din;
 wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
@@ -442,9 +446,40 @@ wire [31:0] cpu_cache_addr;
 wire [15:0] cpu_cache_data;
 wire        cpu_cache_ack;
 
-// Cache fill interface - connect cache requests to RAM
+// Cache fill state machine - handles 8 consecutive reads for 128-bit cache line
+reg  [2:0]  cache_fill_cnt;
+reg         cache_fill_active;
+reg  [31:0] cache_fill_addr;
+wire        cache_fill_done = cache_fill_active & (cache_fill_cnt == 3'd7) & ram_ready;
+
+always @(posedge clk_sys) begin
+	if (cpu_rst) begin
+		cache_fill_cnt <= 3'd0;
+		cache_fill_active <= 1'b0;
+		cache_fill_addr <= 32'd0;
+	end else begin
+		if (cpu_cache_req & !cache_fill_active) begin
+			// Start new cache fill sequence
+			cache_fill_active <= 1'b1;
+			cache_fill_cnt <= 3'd0;
+			cache_fill_addr <= cpu_cache_addr;
+		end else if (cache_fill_active & ram_ready) begin
+			if (cache_fill_cnt == 3'd7) begin
+				// Cache fill complete
+				cache_fill_active <= 1'b0;
+				cache_fill_cnt <= 3'd0;
+			end else begin
+				// Continue filling cache line
+				cache_fill_cnt <= cache_fill_cnt + 3'd1;
+				cache_fill_addr <= cache_fill_addr + 32'd2; // Next word (16-bit increment)
+			end
+		end
+	end
+end
+
+// Cache fill interface - connect cache requests to RAM with proper sequencing
 assign cpu_cache_data = ram_dout;
-assign cpu_cache_ack = ram_ready & cpu_cache_req;
+assign cpu_cache_ack = cache_fill_active & ram_ready;
 
 cpu_wrapper
 #(
@@ -486,13 +521,13 @@ cpu_wrapper
 	.toccata_ena  (toccata_ena     ),
 	.toccata_base (toccata_base    ),
 	
-	.ramsel       (ram_sel         ),
-	.ramaddr      (ram_addr        ),
-	.ramlds       (ram_lds         ),
-	.ramuds       (ram_uds         ),
+	.ramsel       (ram_sel_cpu     ),
+	.ramaddr      (ram_addr_cpu    ),
+	.ramlds       (ram_lds_cpu     ),
+	.ramuds       (ram_uds_cpu     ),
 	.ramdout      (ram_dout        ),
 	.ramdin       (ram_din         ),
-	.ramready     (ram_ready       ),
+	.ramready     (ram_ready & ~cache_fill_active),  // Block ramready during cache fills
 	.ramshared    (ramshared       ),
 
 	//custom CPU signals

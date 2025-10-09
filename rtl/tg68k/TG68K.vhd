@@ -108,6 +108,7 @@ COMPONENT TG68KdotC_Kernel
 -- PMMU address interface (68030)
       pmmu_addr_log   : out std_logic_vector(31 downto 0);
       pmmu_addr_phys  : out std_logic_vector(31 downto 0);
+      pmmu_cache_inhibit : out std_logic;
 -- Cache operation address (68030)
       cache_op_addr   : out std_logic_vector(31 downto 0)
 --      longword       : out std_logic;
@@ -134,6 +135,7 @@ COMPONENT TG68K_Cache_030
       i_addr         : in  std_logic_vector(31 downto 0);
       i_addr_phys    : in  std_logic_vector(31 downto 0);
       i_req          : in  std_logic;
+      i_cache_inhibit : in  std_logic;
       i_data         : out std_logic_vector(31 downto 0);
       i_hit          : out std_logic;
       i_fill_req     : out std_logic;
@@ -145,6 +147,7 @@ COMPONENT TG68K_Cache_030
       d_addr_phys    : in  std_logic_vector(31 downto 0);
       d_req          : in  std_logic;
       d_we           : in  std_logic;
+      d_cache_inhibit : in  std_logic;
       d_data_in      : in  std_logic_vector(31 downto 0);
       d_be           : in  std_logic_vector(3 downto 0);
       d_data_out     : out std_logic_vector(31 downto 0);
@@ -198,6 +201,7 @@ COMPONENT TG68K_Cache_030
    -- PMMU address signals (68030)
    SIGNAL pmmu_addr_log   : std_logic_vector(31 downto 0);
    SIGNAL pmmu_addr_phys  : std_logic_vector(31 downto 0);
+   SIGNAL pmmu_ch_inhibit : std_logic;
    SIGNAL cache_op_addr   : std_logic_vector(31 downto 0);
 
    -- Cache interface signals  
@@ -289,6 +293,7 @@ cpu1: TG68KdotC_Kernel
       -- PMMU address interface (68030)
       pmmu_addr_log => pmmu_addr_log,     -- : out std_logic_vector(31 downto 0);
       pmmu_addr_phys => pmmu_addr_phys,   -- : out std_logic_vector(31 downto 0)
+      pmmu_cache_inhibit => pmmu_ch_inhibit, -- : out std_logic
       -- Cache operation address (68030)
       cache_op_addr => cache_op_addr      -- : out std_logic_vector(31 downto 0)
    );
@@ -437,6 +442,7 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
       i_addr         => i_cache_addr,
       i_addr_phys    => pmmu_addr_phys,   -- Physical address from PMMU
       i_req          => i_cache_req,
+      i_cache_inhibit => pmmu_ch_inhibit,  -- Cache inhibit from PMMU
       i_data         => i_cache_data,
       i_hit          => i_cache_hit,
       i_fill_req     => i_fill_req,
@@ -448,6 +454,7 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
       d_addr_phys    => pmmu_addr_phys,   -- Physical address from PMMU
       d_req          => d_cache_req,
       d_we           => d_cache_we,
+      d_cache_inhibit => pmmu_ch_inhibit,  -- Cache inhibit from PMMU
       d_be           => "1111",           -- All bytes enabled for now
       d_data_in      => d_cache_data_in,
       d_data_out     => d_cache_data_out,

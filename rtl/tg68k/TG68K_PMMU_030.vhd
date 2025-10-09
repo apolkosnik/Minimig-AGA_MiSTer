@@ -20,13 +20,15 @@ entity TG68K_PMMU_030 is
     reg_wdat       : in  std_logic_vector(31 downto 0);
     reg_rdat       : out std_logic_vector(31 downto 0);
     reg_part       : in  std_logic; -- '1' = high, '0' = low for 64-bit regs (CRP/SRP)
+    reg_fd         : in  std_logic; -- '1' = flush disable (PMOVEFD)
     
     -- PMMU instruction control
     ptest_req      : in  std_logic; -- PTEST instruction request
-    pflush_req     : in  std_logic; -- PFLUSH instruction request  
+    pflush_req     : in  std_logic; -- PFLUSH instruction request
     pload_req      : in  std_logic; -- PLOAD instruction request
     pmmu_fc        : in  std_logic_vector(2 downto 0); -- Function code for PTEST/PFLUSH/PLOAD
     pmmu_addr      : in  std_logic_vector(31 downto 0); -- Address for PTEST/PFLUSH/PLOAD
+    pmmu_brief     : in  std_logic_vector(15 downto 0); -- Brief/extension word for instruction modes
 
     -- Translation request (combinational response acceptable for identity)
     req            : in  std_logic;
@@ -171,11 +173,19 @@ architecture rtl of TG68K_PMMU_030 is
   signal ptest_active : std_logic := '0';
   signal ptest_addr : std_logic_vector(31 downto 0) := (others => '0');
   signal ptest_fc : std_logic_vector(2 downto 0) := (others => '0');
-  
+  signal ptest_rw : std_logic := '1';  -- '1'=PTESTR (read), '0'=PTESTW (write), from brief(9)
+
   -- PLOAD operation state
   signal pload_active : std_logic := '0';
   signal pload_addr : std_logic_vector(31 downto 0) := (others => '0');
   signal pload_fc : std_logic_vector(2 downto 0) := (others => '0');
+  signal pload_rw : std_logic := '1';  -- '1'=PLOADR (read), '0'=PLOADW (write), from brief(9)
+
+  -- PFLUSH operation state
+  signal pflush_active : std_logic := '0';
+  signal pflush_addr : std_logic_vector(31 downto 0) := (others => '0');
+  signal pflush_fc : std_logic_vector(2 downto 0) := (others => '0');
+  signal pflush_mode : std_logic_vector(12 downto 8) := (others => '0');  -- From brief word
   
   -- Page table walking state
   signal walk_level     : integer range 0 to 4 := 0; -- Current level being walked  
@@ -326,12 +336,13 @@ architecture rtl of TG68K_PMMU_030 is
   end function;
 
   -- MC68030 TTR format: proper transparent translation register implementation
-  -- TTR bits: 31:24=base, 23:16=mask, 15=E, 14:13=S, 12:8=FC, 5=CM, 1=CI, 0=WP
+  -- TTR bits: 31:24=base, 23:16=mask, 15=E, 14:13=S, 12:8=FC, 9:8=CI, 2=RWM, 1=RW, 0=Reserved
   procedure ttr_check(
       tt        : in  std_logic_vector(31 downto 0);
       addr      : in  std_logic_vector(31 downto 0);
       fc        : in  std_logic_vector(2 downto 0);
       is_insn   : in  std_logic;
+      rw        : in  std_logic;  -- '1'=read, '0'=write
       matched   : out std_logic;
       ci        : out std_logic;
       wp        : out std_logic) is
@@ -362,11 +373,11 @@ architecture rtl of TG68K_PMMU_030 is
     end if;
     
     -- Address match: MC68030 TTR mask logic
-    -- mask=1 means "must match", mask=0 means "don't care"
-    -- Match when all masked bits of addr equal all masked bits of base
-    -- Implementation: XOR to find differences, then mask to ignore don't-care bits
+    -- MC68030: mask=0 means "must match", mask=1 means "don't care" (ignore)
+    -- Match when all non-masked bits of addr equal all non-masked bits of base
+    -- Implementation: XOR to find differences, then AND with NOT mask to check only required bits
     -- If result is zero, all required bits match
-    if ((addr_hi XOR base) AND mask) = x"00" then
+    if ((addr_hi XOR base) AND (NOT mask)) = x"00" then
       addr_match := '1';
     else
       addr_match := '0';
@@ -417,8 +428,31 @@ architecture rtl of TG68K_PMMU_030 is
     -- Overall match - MUST check enable first
     if enable = '1' AND addr_match = '1' AND fc_match = '1' AND super_match = '1' then
       matched := '1';
-      ci := tt(1);  -- Cache inhibit
-      wp := tt(0);  -- Write protect
+      -- MC68030 TTR CI field (bits 9:8): 00=cacheable, 01=serialized, 10/11=cache inhibit
+      -- For simplicity, treat any non-zero value as cache inhibit
+      if tt(9 downto 8) /= "00" then
+        ci := '1';  -- Cache inhibit if CI field is non-zero
+      else
+        ci := '0';  -- Cacheable
+      end if;
+      -- MC68030 TTR RW field (bits 2:1): Controls read/write permissions
+      -- Bit 2 (RWM): 0=don't care about R/W, 1=check RW bit
+      -- Bit 1 (RW): 0=write-only, 1=read-only (when RWM=1)
+      if tt(2) = '1' then  -- RWM=1: check RW bit
+        if tt(1) = '1' and rw = '0' then
+          -- RW=1 (read-only) but this is a write - no match
+          matched := '0';
+          wp := '0';
+        elsif tt(1) = '0' and rw = '1' then
+          -- RW=0 (write-only) but this is a read - no match
+          matched := '0';
+          wp := '0';
+        else
+          wp := '0';  -- Access allowed
+        end if;
+      else  -- RWM=0: don't care about R/W
+        wp := '0';  -- No write protection
+      end if;
       -- Debug for write protection test
       if addr(31 downto 12) = x"00002" then
         report "TTR_MATCH_DEBUG: addr=0x" & slv_to_hstring(addr) & 
@@ -447,7 +481,7 @@ architecture rtl of TG68K_PMMU_030 is
     variable dummy_ci : std_logic;
     variable dummy_wp : std_logic;
   begin
-    ttr_check(tt, addr, fc, is_insn, matched, dummy_ci, dummy_wp);
+    ttr_check(tt, addr, fc, is_insn, '1', matched, dummy_ci, dummy_wp);  -- Default to read for simple match check
   end procedure;
   
   -- Extract table index from virtual address (MC68030 compliant)
@@ -643,6 +677,7 @@ begin
         ptest_active <= '1';
         ptest_addr <= pmmu_addr;
         ptest_fc <= pmmu_fc;
+        ptest_rw <= NOT pmmu_brief(9);  -- brief(9): 0=PTESTR(read), 1=PTESTW(write); invert for rw signal
         if tc_en = '0' then
           -- MMU disabled - PTEST always succeeds with identity translation
           MMUSR <= encode_mmusr_success(
@@ -660,9 +695,13 @@ begin
         mmusr_update_ack <= '1';
       elsif reg_we = '1' then
         -- Lowest priority: Direct register writes (MC68030 MMUSR is mostly read-only)
-        -- MC68030 Specification: MMU register access requires supervisor mode (FC2=1)
-        if fc(2) = '1' then
-          case reg_sel is
+        -- MC68030 Specification: MMU register access requires supervisor mode
+        -- Privilege check is performed by TG68KdotC_Kernel before asserting reg_we,
+        -- so no additional FC check is needed here
+        report "PMMU_REG_WRITE: sel=0x" & slv_to_hstring(reg_sel) &
+               " wdat=0x" & slv_to_hstring(reg_wdat) &
+               " part=" & std_logic'image(reg_part) severity note;
+        case reg_sel is
           when x"0" =>
             -- MC68030 TC Register Write - exact specification compliance
             -- MC68030 TC bit layout per User's Manual section 9.2.1:
@@ -679,9 +718,10 @@ begin
             TC(11 downto 8) <= reg_wdat(11 downto 8);   -- TIB (Table Index B)
             TC(7 downto 4) <= reg_wdat(7 downto 4);     -- TIC (Table Index C)
             TC(3 downto 0) <= reg_wdat(3 downto 0);     -- TID (Table Index D)
-            atc_flush_req <= '1'; -- TC changes invalidate all cached translations
-            report "TC_WRITE_SPEC_COMPLIANT: input=0x" & slv_to_hstring(reg_wdat) &
-                   " reserved bits 30-26 masked to zero" severity note;
+            -- TC changes invalidate ATC unless PMOVEFD (flush disable)
+            if reg_fd = '0' then
+              atc_flush_req <= '1';
+            end if;
           when x"1" =>
             -- CRP register write - MC68030 Long-Format Root Pointer per User's Manual section 9.2.2
             if reg_part = '1' then
@@ -696,7 +736,10 @@ begin
               CRP_L(15 downto 8) <= reg_wdat(15 downto 8);   -- DT (Descriptor Type)
               CRP_L(7 downto 0) <= reg_wdat(7 downto 0);     -- Lower Limit
             end if;
-            atc_flush_req <= '1'; -- CRP changes invalidate all cached translations
+            -- CRP changes invalidate ATC unless PMOVEFD (flush disable)
+            if reg_fd = '0' then
+              atc_flush_req <= '1';
+            end if;
           when x"2" =>
             -- SRP register write - MC68030 Long-Format Root Pointer (same as CRP)
             if reg_part = '1' then
@@ -711,7 +754,9 @@ begin
               SRP_L(15 downto 8) <= reg_wdat(15 downto 8);   -- DT (Descriptor Type)
               SRP_L(7 downto 0) <= reg_wdat(7 downto 0);     -- Lower Limit
             end if;
-            atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
+            if reg_fd = '0' then  -- Only flush if NOT PMOVEFD
+              atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
+            end if;
           when x"3" =>
             -- TT0 register write - MC68030 Transparent Translation Register per User's Manual section 9.2.6
             -- MC68030 TT0/TT1 bit layout:
@@ -747,22 +792,26 @@ begin
             TT1(0) <= '0';                                  -- Reserved (must be zero)
             atc_flush_req <= '1';
           when x"5" =>
-            -- MMUSR register: MC68030 MMUSR is mostly read-only with some write-1-to-clear bits
-            -- For now, implement basic write capability for testing purposes
-            -- TODO: Implement proper MC68030 MMUSR semantics (write-1-to-clear for fault bits)
-            MMUSR <= reg_wdat;
+            -- MMUSR register: MC68030 MMUSR write-1-to-clear semantics
+            -- Writing '1' to bits 15:13 (fault status bits) clears them
+            -- Bits 15:13 = Bus Error, Limit Violation, Supervisor Violation
+            -- Other bits are read-only and ignore writes
+            if reg_wdat(15) = '1' then
+              MMUSR(15) <= '0';  -- Clear Bus Error bit
+            end if;
+            if reg_wdat(14) = '1' then
+              MMUSR(14) <= '0';  -- Clear Limit Violation bit
+            end if;
+            if reg_wdat(13) = '1' then
+              MMUSR(13) <= '0';  -- Clear Supervisor Violation bit
+            end if;
+            -- All other bits are read-only
           when x"6" => CAL   <= reg_wdat;
           when x"7" => VAL   <= reg_wdat;
           when x"8" => SCC   <= reg_wdat;
           when x"9" => AC    <= reg_wdat;
           when others => null;
           end case;
-        else
-          -- MC68030 Specification: Privilege violation - MMU register access in user mode
-          -- User mode attempts to access MMU registers should be ignored/faulted
-          report "PRIVILEGE_VIOLATION: User mode attempt to write MMU register sel=0x" &
-                 slv_to_hstring(reg_sel) & " FC=" & slv_to_hstring(fc) severity warning;
-        end if;
       end if;
     end if;
   end process;
@@ -774,28 +823,54 @@ begin
       reg_rdat <= (others => '0');
     elsif rising_edge(clk) then
       if reg_re = '1' then
-        -- MC68030 Specification: MMU register access requires supervisor mode (FC2=1)
-        if fc(2) = '1' then
-          case reg_sel is
-            when x"0" => reg_rdat <= TC;
-            when x"1" => if reg_part = '1' then reg_rdat <= CRP_H; else reg_rdat <= CRP_L; end if;
-            when x"2" => if reg_part = '1' then reg_rdat <= SRP_H; else reg_rdat <= SRP_L; end if;
-            when x"3" => reg_rdat <= TT0;
-            when x"4" => reg_rdat <= TT1;
-            when x"5" => reg_rdat <= MMUSR;
-            when x"6" => reg_rdat <= CAL;
-            when x"7" => reg_rdat <= VAL;
-            when x"8" => reg_rdat <= SCC;
-            when x"9" => reg_rdat <= AC;
-            when others => reg_rdat <= (others => '0');
+        -- MC68030 Specification: MMU register access requires supervisor mode
+        -- Privilege check is performed by TG68KdotC_Kernel before asserting reg_re,
+        -- so no additional FC check is needed here
+        case reg_sel is
+            when x"0" =>
+              reg_rdat <= TC;
+              report "PMMU_REG_READ: TC=0x" & slv_to_hstring(TC) severity note;
+            when x"1" =>
+              if reg_part = '1' then
+                reg_rdat <= CRP_H;
+                report "PMMU_REG_READ: CRP_H=0x" & slv_to_hstring(CRP_H) severity note;
+              else
+                reg_rdat <= CRP_L;
+                report "PMMU_REG_READ: CRP_L=0x" & slv_to_hstring(CRP_L) severity note;
+              end if;
+            when x"2" =>
+              if reg_part = '1' then
+                reg_rdat <= SRP_H;
+                report "PMMU_REG_READ: SRP_H=0x" & slv_to_hstring(SRP_H) severity note;
+              else
+                reg_rdat <= SRP_L;
+                report "PMMU_REG_READ: SRP_L=0x" & slv_to_hstring(SRP_L) severity note;
+              end if;
+            when x"3" =>
+              reg_rdat <= TT0;
+              report "PMMU_REG_READ: TT0=0x" & slv_to_hstring(TT0) severity note;
+            when x"4" =>
+              reg_rdat <= TT1;
+              report "PMMU_REG_READ: TT1=0x" & slv_to_hstring(TT1) severity note;
+            when x"5" =>
+              reg_rdat <= MMUSR;
+              report "PMMU_REG_READ: MMUSR=0x" & slv_to_hstring(MMUSR) severity note;
+            when x"6" =>
+              reg_rdat <= CAL;
+              report "PMMU_REG_READ: CAL=0x" & slv_to_hstring(CAL) severity note;
+            when x"7" =>
+              reg_rdat <= VAL;
+              report "PMMU_REG_READ: VAL=0x" & slv_to_hstring(VAL) severity note;
+            when x"8" =>
+              reg_rdat <= SCC;
+              report "PMMU_REG_READ: SCC=0x" & slv_to_hstring(SCC) severity note;
+            when x"9" =>
+              reg_rdat <= AC;
+              report "PMMU_REG_READ: AC=0x" & slv_to_hstring(AC) severity note;
+            when others =>
+              reg_rdat <= (others => '0');
+              report "PMMU_REG_READ: UNKNOWN sel=0x" & slv_to_hstring(reg_sel) severity warning;
           end case;
-        else
-          -- MC68030 Specification: Privilege violation - MMU register access in user mode
-          -- User mode attempts to read MMU registers should return zeros or fault
-          reg_rdat <= (others => '0');
-          report "PRIVILEGE_VIOLATION: User mode attempt to read MMU register sel=0x" &
-                 slv_to_hstring(reg_sel) & " FC=" & slv_to_hstring(fc) severity warning;
-        end if;
       end if;
     end if;
   end process;
@@ -982,8 +1057,8 @@ begin
         else
           -- MMU enabled - do full translation
           -- Check Transparent Translation first (highest priority)
-          ttr_check(TT0, addr_log, fc, is_insn, tmatch0, tci0, twp0);
-          ttr_check(TT1, addr_log, fc, is_insn, tmatch1, tci1, twp1);
+          ttr_check(TT0, addr_log, fc, is_insn, rw, tmatch0, tci0, twp0);
+          ttr_check(TT1, addr_log, fc, is_insn, rw, tmatch1, tci1, twp1);
           -- Debug: Log TTR check results for write protection test address
           if addr_log = x"00002000" then
             report "DEBUG_TTR_WP: addr=0x" & slv_to_hstring(addr_log) &
@@ -1161,14 +1236,52 @@ begin
         end if; -- tc_en = '0' vs '1'
         
       end if; -- req = '1'
-      
+
+      -- Handle PTEST requests - perform translation and update MMUSR
+      if ptest_active = '1' then
+        -- PTEST request active - perform translation to test page (update MMUSR, don't cache)
+        if tc_en = '1' and translation_pending = '0' then
+          -- Check Transparent Translation first
+          ttr_check(TT0, ptest_addr, ptest_fc, '0', ptest_rw, tmatch0, tci0, twp0);  -- Use PTEST R/W from brief(9)
+          ttr_check(TT1, ptest_addr, ptest_fc, '0', ptest_rw, tmatch1, tci1, twp1);  -- Use PTEST R/W from brief(9)
+
+          if tmatch0 = '1' then
+            -- TTR0 match - PTEST succeeds with transparent translation
+            mmusr_update_value <= encode_mmusr_success(
+              cache_inhibit => tci0,
+              write_protect => twp0,
+              transparent => '1'
+            );
+            mmusr_update_req <= '1';
+          elsif tmatch1 = '1' then
+            -- TTR1 match - PTEST succeeds with transparent translation
+            mmusr_update_value <= encode_mmusr_success(
+              cache_inhibit => tci1,
+              write_protect => twp1,
+              transparent => '1'
+            );
+            mmusr_update_req <= '1';
+          else
+            -- No TTR match - trigger walker to test translation
+            saved_addr_log <= ptest_addr;
+            saved_fc <= ptest_fc;
+            saved_is_insn <= '0';
+            saved_rw <= ptest_rw;  -- Use PTEST R/W from brief(9): 0=PTESTR(read), 1=PTESTW(write)
+            walk_req <= '1';
+            translation_pending <= '1';
+            report "PTEST: Triggered walker for addr=0x" & slv_to_hstring(ptest_addr) &
+                   " fc=" & slv_to_string(ptest_fc) severity note;
+          end if;
+        end if;
+      end if;
+
       -- Handle PLOAD requests - trigger translation to pre-load ATC
       if pload_active = '1' then
         -- PLOAD request active - perform translation to fill ATC
         if tc_en = '1' and translation_pending = '0' then
           -- Check Transparent Translation first
-          ttr_check(TT0, pload_addr, pload_fc, '0', tmatch0, tci0, twp0);
-          ttr_check(TT1, pload_addr, pload_fc, '0', tmatch1, tci1, twp1);
+          ttr_check(TT0, pload_addr, pload_fc, '0', pload_rw, tmatch0, tci0, twp0);  -- Use PLOAD R/W from brief(9)
+          ttr_check(TT1, pload_addr, pload_fc, '0', pload_rw, tmatch1, tci1, twp1);  -- Use PLOAD R/W from brief(9)
           
           if tmatch0 = '0' and tmatch1 = '0' then
             -- No TTR match - check ATC
@@ -1190,7 +1303,7 @@ begin
               saved_addr_log <= pload_addr;
               saved_fc <= pload_fc;
               saved_is_insn <= '0';
-              saved_rw <= '1'; -- PLOAD is like a read operation
+              saved_rw <= pload_rw;  -- Use PLOAD R/W from brief(9): 0=PLOADR(read), 1=PLOADW(write)
               walk_req <= '1';
               translation_pending <= '1';
               report "PLOAD: Triggered walker for addr=0x" & slv_to_hstring(pload_addr) &
@@ -1229,8 +1342,8 @@ begin
         -- A successful walker completion means this specific translation succeeded
         
         -- First check if the completed request would have been handled by TTR
-        ttr_check(TT0, saved_addr_log, saved_fc, saved_is_insn, tmatch0, tci0, twp0);
-        ttr_check(TT1, saved_addr_log, saved_fc, saved_is_insn, tmatch1, tci1, twp1);
+        ttr_check(TT0, saved_addr_log, saved_fc, saved_is_insn, saved_rw, tmatch0, tci0, twp0);
+        ttr_check(TT1, saved_addr_log, saved_fc, saved_is_insn, saved_rw, tmatch1, tci1, twp1);
         
         if tmatch0 = '1' or tmatch1 = '1' then
           -- This request hits TTR - don't override TTR results that are already set
@@ -1356,6 +1469,10 @@ begin
     variable desc_addr : std_logic_vector(31 downto 0);
     variable tmatch0, tmatch1 : std_logic;
     variable tci0, twp0, tci1, twp1 : std_logic;
+    -- For CRP/SRP limit checking
+    variable lower_limit : unsigned(7 downto 0);
+    variable upper_limit : unsigned(15 downto 0);
+    variable rp_low : std_logic_vector(31 downto 0);
   begin
     if nreset = '0' then
       for i in 0 to ATC_ENTRIES-1 loop
@@ -1413,11 +1530,12 @@ begin
             -- MC68030 Root Pointer Selection:
             -- Use SRP for supervisor access only when both FC2=1 AND TC.SRE=1
             -- Otherwise use CRP for all accesses
+            -- CRITICAL: Use HIGH word (bits 63-32) which contains table address, NOT LOW word (limits/DT)
             if saved_fc(2) = '1' and tc_sre = '1' then -- Supervisor with SRE enabled
-              walk_addr <= SRP_L(31 downto 4) & "0000"; -- Supervisor Root Pointer
+              walk_addr <= SRP_H(31 downto 4) & "0000"; -- Supervisor Root Pointer (HIGH word = table address)
               report "ROOT_POINTER: Using SRP for supervisor access with SRE=1" severity note;
             else -- User or supervisor without SRE
-              walk_addr <= CRP_L(31 downto 4) & "0000"; -- CPU Root Pointer
+              walk_addr <= CRP_H(31 downto 4) & "0000"; -- CPU Root Pointer (HIGH word = table address)
               if saved_fc(2) = '1' then
                 report "ROOT_POINTER: Using CRP for supervisor access with SRE=0" severity note;
               else
@@ -1430,9 +1548,43 @@ begin
         when W_ROOT =>
           -- Read root table descriptor - deadlock-proof design
           table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_idx_bits);
+
+          -- MC68030 Root Pointer Limit Check (only for root level)
+          -- CRP_L/SRP_L format: Upper Limit[31:16], DT[15:8], Lower Limit[7:0]
+          -- Select appropriate root pointer low word based on FC and SRE
+          if saved_fc(2) = '1' and tc_sre = '1' then
+            rp_low := SRP_L;  -- Supervisor Root Pointer
+          else
+            rp_low := CRP_L;  -- CPU Root Pointer
+          end if;
+
+          lower_limit := unsigned(rp_low(7 downto 0));
+          upper_limit := unsigned(rp_low(31 downto 16));
+
+          -- Check if table_index is within bounds
+          if to_unsigned(table_index, 16) < lower_limit or to_unsigned(table_index, 16) > upper_limit then
+            -- Limit violation - generate fault
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '0',
+              limit_violation => '1',  -- This is a limit violation
+              supervisor_violation => '0',
+              cache_inhibit => '0',
+              write_protect => '0',
+              modified => '0',
+              transparent => '0',
+              resident => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 2))
+            );
+            report "LIMIT_VIOLATION: table_index=" & integer'image(table_index) &
+                   " lower=" & integer'image(to_integer(lower_limit)) &
+                   " upper=" & integer'image(to_integer(upper_limit)) severity note;
+            wstate <= W_FAULT;
+          end if;
+
           desc_addr := walk_addr(31 downto 4) & "0000"; -- Align to table boundary
           desc_addr := std_logic_vector(unsigned(desc_addr) + to_unsigned(table_index * 4, 32));
-          
+
           -- Debug: Log walker state for failing test addresses
           if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" or saved_addr_log = x"12345000" then
             report "DEBUG_WALKER: W_ROOT addr=0x" & slv_to_hstring(saved_addr_log) &
@@ -1818,9 +1970,33 @@ begin
       end if;
 
       if pflush_clear_atc = '1' and wstate = W_IDLE then
-        for i in 0 to ATC_ENTRIES-1 loop
-          atc_valid(i) <= '0';
-        end loop;
+        -- MC68030 PFLUSH variants:
+        -- pflush_mode(12:8) determines flush type:
+        -- "00000" = PFLUSHA (flush all)
+        -- "01000" = PFLUSHAN (flush all non-global)
+        -- Others with EA = PFLUSH(An) or PFLUSHN(An) - flush specific page
+
+        if pflush_mode = "00000" then
+          -- PFLUSHA - flush all ATC entries
+          for i in 0 to ATC_ENTRIES-1 loop
+            atc_valid(i) <= '0';
+          end loop;
+        elsif pflush_mode = "01000" then
+          -- PFLUSHAN - flush all non-global entries (for now, flush all since we don't track global bit)
+          for i in 0 to ATC_ENTRIES-1 loop
+            atc_valid(i) <= '0';
+          end loop;
+        else
+          -- PFLUSH(An) or PFLUSHN(An) - flush specific page matching address and FC
+          for i in 0 to ATC_ENTRIES-1 loop
+            if atc_valid(i) = '1' then
+              -- Check if this entry matches the flush criteria
+              if atc_fc(i) = pflush_fc and align_addr(pflush_addr, atc_shift(i)) = atc_log_base(i) then
+                atc_valid(i) <= '0';
+              end if;
+            end if;
+          end loop;
+        end if;
       end if;
       
       -- Clear walker fault when acknowledged by main process
@@ -1879,9 +2055,17 @@ begin
         ptest_update_mmusr <= '0';
       end if;
       
-      -- PFLUSH: Set flag on rising edge only (prevents multiple triggers)
+      -- PFLUSH: Edge detection and parameter capture
       if pflush_req = '1' and pflush_req_prev = '0' then
+        pflush_active <= '1';
+        pflush_addr <= pmmu_addr;
+        pflush_fc <= pmmu_fc;
+        pflush_mode <= pmmu_brief(12 downto 8);  -- Capture PFLUSH mode from brief word
         pflush_clear_atc <= '1';
+      elsif pflush_active = '1' then
+        -- PFLUSH operation active - clear after one cycle
+        pflush_active <= '0';
+        pflush_clear_atc <= '0';
       else
         pflush_clear_atc <= '0';
       end if;
@@ -1889,9 +2073,12 @@ begin
       -- PLOAD: Edge detection and implementation
       if pload_req = '1' and pload_req_prev = '0' then
         -- PLOAD rising edge detected - activate page pre-loading
+        -- MC68030: pmmu_brief(9) determines R/W: 0=PLOADR (read), 1=PLOADW (write)
         pload_active <= '1';
         pload_addr <= pmmu_addr;
         pload_fc <= pmmu_fc;
+        pload_rw <= NOT pmmu_brief(9);  -- brief(9): 0=PLOADR(read), 1=PLOADW(write); invert for rw signal
+        -- PLOADR vs PLOADW affects access permissions tested during load
       elsif pload_active = '1' then
         -- PLOAD operation active - clear after one cycle
         pload_active <= '0';

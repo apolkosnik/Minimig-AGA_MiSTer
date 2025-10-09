@@ -4,17 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the Minimig-AGA_MiSTer project - an FPGA implementation of the Amiga computer for the MiSTer platform. It emulates Amiga OCS, ECS, and AGA chipsets with support for 68000, 68010, 68020, and 68030 CPUs. Active development is focused on 68030 CPU implementation with full PMMU and cache support.
+This is the Minimig-AGA_MiSTer project - an FPGA implementation of the Amiga computer for the MiSTer platform. It emulates Amiga OCS, ECS, and AGA chipsets with support for 68000 and 68020 CPUs.
 
 ## Development Commands
 
 ### Building the Core
 - Use Intel Quartus Prime to build the FPGA bitstream
-- Main project files: `Minimig.qpf` and `Minimig.qsf` (standard build), `Minimig_Q13.qpf` and `Minimig_Q13.qsf` (Quartus 13 compatibility, not currently used)
+- Main project files: `Minimig.qpf` and `Minimig.qsf` (standard build), `Minimig_Q13.qpf` and `Minimig_Q13.qsf` (Quartus 13 compatibility)
 - Build generates RBF files for the MiSTer platform
 - Keep track of the build's PID, you don't want to pkill builds from another instance!
-- create and run regression tests and correctness tests before building the rbf
-- **Remember to check for multiple drivers issues before starting a build**
+- **Remember to check for multiple drivers before starting a build**
 
 #### Linux Build Commands
 ```bash
@@ -28,16 +27,15 @@ nohup quartus_sh --flow compile Minimig > build.log 2>&1 &
 tail -f build.log
 
 # Clean and rebuild
-rm -rf db/ incremental_db/ output_files/ && quartus_sh --flow compile Minimig
+./clean.sh && quartus_sh --flow compile Minimig
 ```
 
 ### Cleaning Build Files
 ```bash
-# Remove all build artifacts
-rm -rf db/ incremental_db/ output_files/ simulation/ greybox_tmp/
-rm -f build_id.v *.rpt *.done *.summary *.smsg *.pin *.sof *.pof *.rbf
+# Linux cleanup script
+./clean.sh
 ```
-Note: No clean.sh script exists in the repository root.
+Removes all generated build files including db/, incremental_db/, output_files/, simulation directories, and temporary files.
 
 ### Build System
 - Uses Intel Quartus Prime for FPGA synthesis
@@ -127,7 +125,7 @@ Note: No clean.sh script exists in the repository root.
 - **Performance Optimization**: Cache hit/miss handling in memory access cycles
 
 ### 68030 Technical Implementation Details
-- **Specifications**: `/home/adam/Downloads/MC68030UM-P1.pdf`
+- **Specifications**: `https://www.nxp.com/docs/en/reference-manual/MC68030UM.pdf`
 
 #### PMMU (Paged Memory Management Unit)
 - **File**: `rtl/tg68k/TG68K_PMMU_030.vhd`
@@ -208,19 +206,20 @@ Note: No clean.sh script exists in the repository root.
 # Navigate to test directory
 cd tests/tg68k_030/
 
-# Run comprehensive test suite
-make test-all            # All basic tests
-make test-regression     # MC68030 compliance tests
+# Run all tests
+make test-all
 
-# Component-specific tests
-make test-pmmu          # PMMU functionality
-make test-cache         # Cache operations
-make test-cacr          # CACR register
-make test-pmove-tc      # PMOVE TC operations
-make test-integration   # Full system tests
+# Run individual component tests
+make test-pmmu    # PMMU tests only
+make test-cache   # Cache tests only  
+make test-cacr    # CACR register tests only
+make test-integration  # Full system tests
 
-# Debug with GUI
-make test-gui           # Interactive ModelSim
+# Interactive debugging with GUI
+make test-gui
+
+# Quick functional verification
+make test-quick
 
 # Clean test artifacts
 make clean
@@ -253,11 +252,10 @@ make clean
 
 ## Development Workflow
 1. Make changes to RTL files in `rtl/` directory
-2. Run ModelSim tests: `cd tests/tg68k_030 && make test-regression`
-3. Update version in `rtl/minimig_version.vh` if needed
-4. Build using Quartus Prime: `quartus_sh --flow compile Minimig`
-5. Test generated RBF file on MiSTer hardware
-6. Verify functionality with Amiga software
+2. Update version in `rtl/minimig_version.vh` if needed
+3. Build using Quartus Prime
+4. Test generated RBF file on MiSTer hardware
+5. Verify functionality with Amiga software
 
 ## Build Environment
 - We are building on Linux
@@ -297,7 +295,7 @@ Bits 31-14: Reserved (should read as 0, writes ignored)
 **Cache Control Logic**:
 - Command bits (3-2, 11-10) are self-clearing and never stored
 - Enable/freeze bits (1-0, 9-8) are sticky until explicitly changed
-- Reserved bits (31-14, 7-5) are read as 0
+- Reserved bits are masked on write and read as 0
 
 #### VBR - Vector Base Register (0x801) - 32-bit
 ```
@@ -316,9 +314,7 @@ Bits 2-0: Function code for destination operand of MOVES instruction
 
 #### CAAR - Cache Address Access Register (0x802) - 32-bit
 ```
-Bits 31-8: Cache Function Address
-Bits 7-2: INDEX
-Bits 1-0: Always 0
+Bits 31-0: Cache address for cache access operations (68020+ feature)
 ```
 
 #### USP - User Stack Pointer (0x800) - 32-bit
@@ -355,6 +351,8 @@ Bits 11-8 (TIB):  Table Index B field size
 Bits 7-4 (TIC):   Table Index C field size
 Bits 3-0 (TID):   Table Index D field size
 ```
+
+**Write Mask**: `TC_WRITE_MASK = 0x83FFFFFF` (preserves E, SRE, FCL, all field bits)
 
 #### CRP - CPU Root Pointer - 64-bit
 **Register Select**: 0x1 (requires reg_part for high/low)
@@ -536,3 +534,4 @@ will trigger illegal instruction exceptions per MC68030 specification. Use PMOVE
                                 CACR(2) = '1' or CACR(3) = '1' or CACR(10) = '1' or CACR(11) = '1') else '0';
   cache_cpush_req <= '1' when exec(cache_cpush) = '1' else '0';
 ```
+

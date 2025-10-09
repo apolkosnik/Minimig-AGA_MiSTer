@@ -59,17 +59,27 @@ begin
         CACR <= (others => '0');
       elsif clkena_lw = '1' and exec_movec_wr = '1' then
         case brief(11 downto 0) is
-          when X"002" => 
-            -- Write to CACR with reserved bit masking (bits 31-7 read as 0)
-            CACR(6 downto 0) <= reg_QA(6 downto 0);
-            CACR(31 downto 7) <= (others => '0');
+          when X"002" =>
+            -- Write to CACR with proper MC68030 behavior
+            CACR(1 downto 0) <= reg_QA(1 downto 0);     -- IE, FI - instruction cache enable/freeze
+            -- Bits 2-3 are self-clearing command bits - NOT stored
+            CACR(4) <= reg_QA(4);                        -- IBE - Instruction Burst Enable
+            CACR(7 downto 5) <= (others => '0');         -- Reserved bits
+            CACR(9 downto 8) <= reg_QA(9 downto 8);     -- DE, FD - data cache enable/freeze
+            -- Bits 10-11 are self-clearing command bits - NOT stored
+            CACR(13 downto 12) <= reg_QA(13 downto 12); -- DBE, WA
+            CACR(31 downto 14) <= (others => '0');       -- Reserved bits
           when others => 
             null;
         end case;
       elsif clkena_lw = '1' then
-        -- Auto-clear self-clearing bits after they've been set
-        if CACR(3) = '1' or CACR(4) = '1' or CACR(5) = '1' or CACR(6) = '1' then
-          CACR(6 downto 3) <= (others => '0');  -- Clear CE, CI, CD, CA bits
+        -- Auto-clear self-clearing command bits after they've been set
+        -- MC68030 spec: bits 2 (CEI), 3 (CI), 10 (CED), 11 (CD) are self-clearing
+        if CACR(2) = '1' or CACR(3) = '1' or CACR(10) = '1' or CACR(11) = '1' then
+          CACR(2) <= '0';   -- Clear CEI (Clear Entry in Instruction Cache)
+          CACR(3) <= '0';   -- Clear CI (Clear Instruction Cache)
+          CACR(10) <= '0';  -- Clear CED (Clear Entry in Data Cache)
+          CACR(11) <= '0';  -- Clear CD (Clear Data Cache)
         end if;
       end if;
     end if;
@@ -89,10 +99,10 @@ begin
     end if;
   end process;
 
-  -- Extract cache control bits from CACR register
-  cacr_de     <= CACR(0);  -- Data Cache Enable
-  cacr_ie     <= CACR(1);  -- Instruction Cache Enable
-  cacr_freeze <= CACR(2);  -- Cache Freeze
+  -- Extract cache control bits from CACR register (correct MC68030 bit positions)
+  cacr_ie     <= CACR(0);  -- Instruction Cache Enable (bit 0)
+  cacr_de     <= CACR(8);  -- Data Cache Enable (bit 8)
+  cacr_freeze <= CACR(1);  -- Instruction Cache Freeze (bit 1)
 
   -- Test stimulus
   stim_proc: process
@@ -154,79 +164,82 @@ begin
     -- TEST 1: Basic CACR Read/Write
     write(l, string'("TEST 1: Basic CACR Operations"));
     writeline(output, l);
-    
-    movec_write_cacr(x"00000007"); -- DE=1, IE=1, FREEZE=1
+
+    movec_write_cacr(x"00000103"); -- IE=1 (bit 0), FI=1 (bit 1), DE=1 (bit 8)
     movec_read_cacr;
-    report_test("Basic Write/Read", movec_data = x"00000007");
-    report_test("DE Bit Extraction", cacr_de = '1');
+    report_test("Basic Write/Read", movec_data = x"00000103");
     report_test("IE Bit Extraction", cacr_ie = '1');
+    report_test("DE Bit Extraction", cacr_de = '1');
     report_test("FREEZE Bit Extraction", cacr_freeze = '1');
 
     -- TEST 2: Reserved Bit Masking
     write(l, string'("TEST 2: Reserved Bit Masking"));
     writeline(output, l);
-    
+
     movec_write_cacr(x"FFFFFFFF"); -- All bits set
     movec_read_cacr;
-    report_test("Reserved Bits Masked", movec_data = x"0000007F"); -- Only bits 6-0 should be set
+    -- MC68030 CACR: bits 0,1,4,8,9,12,13 are sticky (not 2,3,10,11 which are self-clearing)
+    -- Reserved bits 5-7, 14-31 should be masked to 0
+    report_test("Reserved Bits Masked", movec_data = x"00003313"); -- IE,FI,IBE,DE,FD,DBE,WA = 0x3313
 
     -- TEST 3: Self-Clearing Bits
     write(l, string'("TEST 3: Self-Clearing Bits"));
     writeline(output, l);
-    
-    -- Set cache control bits (CE, CI, CD, CA)
-    movec_write_cacr(x"00000078"); -- CE=1, CI=1, CD=1, CA=1 (bits 6-3)
+
+    -- Set cache control command bits (CEI, CI, CED, CD)
+    movec_write_cacr(x"00000C0C"); -- CEI=1 (bit 2), CI=1 (bit 3), CED=1 (bit 10), CD=1 (bit 11)
     movec_read_cacr;
-    report_test("Cache Control Bits Set", movec_data = x"00000078");
-    
+    report_test("Cache Control Bits Set", movec_data = x"00000C0C");
+
     -- Trigger self-clearing by enabling clock
     clkena_lw <= '1';
     wait_cycles(1);
     clkena_lw <= '0';
     wait_cycles(1);
-    
+
     movec_read_cacr;
     report_test("Cache Control Bits Auto-Clear", movec_data = x"00000000");
 
     -- TEST 4: Persistent Bits Don't Clear
     write(l, string'("TEST 4: Persistent Bits"));
     writeline(output, l);
-    
-    movec_write_cacr(x"00000007"); -- DE=1, IE=1, FREEZE=1 (persistent)
+
+    movec_write_cacr(x"00000103"); -- IE=1 (bit 0), FI=1 (bit 1), DE=1 (bit 8) (persistent)
     clkena_lw <= '1';
     wait_cycles(5); -- Multiple cycles
     clkena_lw <= '0';
-    
+
     movec_read_cacr;
-    report_test("Persistent Bits Remain", movec_data = x"00000007");
+    report_test("Persistent Bits Remain", movec_data = x"00000103");
 
     -- TEST 5: Mixed Persistent and Self-Clearing
     write(l, string'("TEST 5: Mixed Bit Types"));
     writeline(output, l);
-    
-    movec_write_cacr(x"0000007F"); -- All 7 bits set
+
+    movec_write_cacr(x"00000F0F"); -- All sticky + command bits set
+                                    -- IE,FI,CEI,CI (bits 0-3) + DE,FD,CED,CD (bits 8-11)
     movec_read_cacr;
-    report_test("All Bits Initially Set", movec_data = x"0000007F");
-    
+    report_test("All Bits Initially Set", movec_data = x"00000F0F");
+
     clkena_lw <= '1';
     wait_cycles(1);
     clkena_lw <= '0';
     wait_cycles(1);
-    
+
     movec_read_cacr;
-    -- Should have only bits 2-0 (persistent) remaining
-    report_test("Only Persistent Bits Remain", movec_data = x"00000007");
+    -- Should have only persistent bits remaining: IE,FI (0-1) + DE,FD (8-9)
+    report_test("Only Persistent Bits Remain", movec_data = x"00000303");
 
     -- TEST 6: Reset Behavior
     write(l, string'("TEST 6: Reset Behavior"));
     writeline(output, l);
-    
-    movec_write_cacr(x"0000007F");
+
+    movec_write_cacr(x"00000F0F");
     Reset <= '1';
     wait_cycles(2);
     Reset <= '0';
     wait_cycles(2);
-    
+
     movec_read_cacr;
     report_test("Reset Clears All Bits", movec_data = x"00000000");
 

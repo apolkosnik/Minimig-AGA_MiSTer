@@ -157,6 +157,7 @@ entity TG68KdotC_Kernel is
 -- PMMU address interface (68030)
 		pmmu_addr_log			: out std_logic_vector(31 downto 0);
 		pmmu_addr_phys			: out std_logic_vector(31 downto 0);
+		pmmu_cache_inhibit		: out std_logic;
 -- Cache operation address (68030)
 		cache_op_addr			: out std_logic_vector(31 downto 0)
 		);
@@ -388,6 +389,7 @@ signal pmmu_reg_we_d    : std_logic;
 signal pmmu_reg_re_d    : std_logic;
 signal pmmu_reg_sel_d   : std_logic_vector(3 downto 0);
 signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
+signal pmmu_reg_fd_d    : std_logic;
 
 	signal pmmu_req         : std_logic;
 	signal pmmu_is_insn     : std_logic;
@@ -411,6 +413,8 @@ signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
 	signal pmmu_pload_req   : std_logic;
 	signal pmmu_cmd_fc      : std_logic_vector(2 downto 0);
 	signal pmmu_cmd_addr    : std_logic_vector(31 downto 0);
+	signal pmmu_cmd_rw      : std_logic;  -- For PTEST/PLOAD: 0=write test, 1=read test
+	signal pmmu_cmd_brief   : std_logic_vector(15 downto 0);  -- Store brief word for PMMU instructions
 	
 	-- Cache control signals (declared as output ports, no need for internal signals)
 
@@ -488,12 +492,14 @@ BEGIN
       reg_wdat      => pmmu_reg_wdat_d,
       reg_rdat      => pmmu_reg_rdat,
       reg_part      => pmmu_reg_part_d,
-      
+      reg_fd        => pmmu_reg_fd_d,
+
       ptest_req     => pmmu_ptest_req,
       pflush_req    => pmmu_pflush_req,
       pload_req     => pmmu_pload_req,
       pmmu_fc       => pmmu_cmd_fc,
       pmmu_addr     => pmmu_cmd_addr,
+      pmmu_brief    => brief,
 
       req           => pmmu_req,
       is_insn       => pmmu_is_insn,
@@ -528,12 +534,20 @@ BEGIN
   pmmu_ptest_req  <= '1' when exec(pmmu_ptest) = '1' else '0';
   pmmu_pflush_req <= '1' when exec(pmmu_pflush) = '1' else '0';
   pmmu_pload_req  <= '1' when exec(pmmu_pload) = '1' else '0';
-  pmmu_cmd_fc     <= fc_internal;  -- Use internal FC signal
-  pmmu_cmd_addr   <= pmmu_addr_log_int;  -- Use logical address (before translation)
+
+  -- For PTEST/PFLUSH/PLOAD: use FC from brief word, else use current FC
+  -- Brief(12:10) contains FC for these instructions
+  pmmu_cmd_fc     <= brief(12 downto 10) when (exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
+                                                 (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
+                     else fc_internal;
+
+  -- For PTEST/PLOAD/PFLUSH with EA: use EA address, else use current logical address
+  pmmu_cmd_addr   <= OP1out when (micro_state = ptest1 or micro_state = pload1 or micro_state = pflush1)
+                     else pmmu_addr_log_int;
   
   -- Cache instruction control  
-  cache_cinv_req  <= '1' when (exec(cache_cinv) = '1' or 
-                                CACR(3) = '1' or CACR(4) = '1' or CACR(5) = '1' or CACR(6) = '1') else '0';
+  cache_cinv_req  <= '1' when (exec(cache_cinv) = '1' or
+                                CACR(2) = '1' or CACR(3) = '1' or CACR(10) = '1' or CACR(11) = '1') else '0';
   cache_cpush_req <= '1' when exec(cache_cpush) = '1' else '0';
   
   -- Cache operation scope and cache selection
@@ -546,12 +560,12 @@ BEGIN
     else
       -- CACR self-clearing bits: determine operation type
       cache_op_scope_int <= "10";  -- All caches (global invalidation)
-      if CACR(4) = '1' then
-        cache_op_cache_int <= "10";  -- CI: Clear Instruction Cache only
-      elsif CACR(5) = '1' then  
-        cache_op_cache_int <= "01";  -- CD: Clear Data Cache only
-      elsif CACR(6) = '1' or CACR(3) = '1' then
-        cache_op_cache_int <= "11";  -- CA/CE: Clear All Caches
+      if CACR(3) = '1' then
+        cache_op_cache_int <= "10";  -- CI (bit 3): Clear Instruction Cache only
+      elsif CACR(11) = '1' then
+        cache_op_cache_int <= "01";  -- CD (bit 11): Clear Data Cache only
+      elsif CACR(2) = '1' or CACR(10) = '1' then
+        cache_op_cache_int <= "11";  -- CEI (bit 2) or CED (bit 10): Clear Entry operations
       else
         cache_op_cache_int <= "00";  -- Default: both caches
       end if;
@@ -564,20 +578,24 @@ BEGIN
   
   -- Cache operation address: use effective address for CINV/CPUSH instructions
   cache_op_addr <= memaddr when (exec(cache_cinv) = '1' or exec(cache_cpush) = '1') else pmmu_addr_phys_int;
+
+  -- Cache inhibit from PMMU
+  pmmu_cache_inhibit <= pmmu_ch_inhibit;
   
   -- CACR (Cache Control Register) bit definitions for MC68030:
-  -- Bit 0 (IE): Instruction Cache Enable  
-  -- Bit 1 (FREEZE): Cache Freeze (inhibit replacement)
-  -- Bit 2 (CEI): Clear Entry in Instruction Cache
+  -- Bit 0 (IE): Instruction Cache Enable (sticky)
+  -- Bit 1 (FI): Instruction Cache Freeze - inhibit replacement (sticky)
+  -- Bit 2 (CEI): Clear Entry in Instruction Cache (self-clearing, 68040)
   -- Bit 3 (CI): Clear Instruction Cache (self-clearing)
-  -- Bit 4 (CEI): Clear Entry (self-clearing)
-  -- Bit 8 (DE): Data Cache Enable
-  -- Bit 9 (FreezeD): Data Cache Freeze (used by AmigaOS for 68030 detection)
-  -- Bit 10 (CED): Clear Entry in Data Cache
-  -- Bit 11 (CD): Clear Data Cache
-  -- Bit 12 (DBE): Data Burst Enable
-  -- Bit 13 (WA): Write Allocate
-  -- Bits 31-14, 7-5: Reserved (should read as 0, writes ignored)
+  -- Bit 4 (IBE): Instruction Burst Enable (sticky)
+  -- Bits 7-5: Reserved (should read as 0, writes ignored)
+  -- Bit 8 (DE): Data Cache Enable (sticky)
+  -- Bit 9 (FD): Data Cache Freeze (sticky, used by AmigaOS for 68030 detection)
+  -- Bit 10 (CED): Clear Entry in Data Cache (self-clearing, 68040)
+  -- Bit 11 (CD): Clear Data Cache (self-clearing)
+  -- Bit 12 (DBE): Data Burst Enable (sticky)
+  -- Bit 13 (WA): Write Allocate (sticky)
+  -- Bits 31-14: Reserved (should read as 0, writes ignored)
   
   -- Extract cache control bits from CACR register
 
@@ -838,7 +856,7 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 			regin <= USP;	
 		ELSIF exec(movec_rd)='1' THEN
 			regin <= movec_data;
-		ELSIF exec(pmmu_rd)='1' THEN
+		ELSIF set(pmmu_rd)='1' OR exec(pmmu_rd)='1' THEN
 			regin <= pmmu_reg_rdat;
 		END IF;
 		
@@ -4146,54 +4164,115 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					END IF;
 
                 WHEN pmmu1 =>		-- PMMU instruction dispatch based on extension word
-                    set(briefext) <= '1';
                     set_writePCbig <='1';
-                    
-                    -- Decode PMMU instruction type from extension word (brief register)
-                    -- Extension word bits 15-13 determine instruction type
+                    set(update_FC) <= '1';  -- Ensure FC reflects supervisor mode
+
+                    -- MC68030 PMMU instruction extension word format:
+                    -- Bits 15-13: Instruction type
+                    --   000: PMOVE
+                    --   001: PFLUSH/PMOVEFD (differentiated by bits 12-8)
+                    --   010: PLOAD (bits 12-10 determine R/W)
+                    --   100: PTEST (bits 9 and 5 determine R/W)
+                    -- Bits 12-8: Subtype/mode/FC for PFLUSH/PLOAD/PTEST
+                    -- Bits 7-0: P-register number or flags
+
                     CASE brief(15 downto 13) IS
-                        WHEN "000"|"001"|"010"|"011" =>  -- PMOVE and PMMU instruction variants
-                            -- First check if this is actually PFLUSH/PLOAD (001/010 with special bits)
-                            IF brief(15 downto 13) = "001" AND brief(12 downto 10) /= "000" THEN
-                                -- PFLUSH instruction
-                                set_exec(pmmu_pflush) <= '1';
-                                next_micro_state <= pflush1;
-                            ELSIF brief(15 downto 13) = "010" AND brief(12 downto 10) /= "000" THEN
-                                -- PLOAD instruction
-                                set_exec(pmmu_pload) <= '1';
-                                next_micro_state <= pload1;
-                            ELSE
-                                -- PMOVE instruction (including 001/010 with bits 12-10 = 000)
+                        WHEN "000" =>  -- PMOVE (standard, no FD)
                             -- Dn direct EA
                             IF opcode(5 downto 3)="000" THEN
-                                -- Direction heuristic: opcode(7)=0 read from MMU to Dn, else write Dn to MMU
+                                -- For PMOVE Dn: trigger the PMMU operation immediately (not deferred with set_exec)
+                                -- This ensures reg_QA is read with the correct opcode(2:0) value
                                 IF opcode(7)='0' THEN
+                                    -- PMOVE <MMU reg>,Dn - Read from MMU, write to Dn
                                     set(Regwrena) <= '1';
-                                    set_exec(pmmu_rd) <= '1';
+                                    set(pmmu_rd) <= '1';
                                 ELSE
-                                    set_exec(pmmu_wr) <= '1';
+                                    -- PMOVE Dn,<MMU reg> - Read from Dn, write to MMU
+                                    -- MC68030: MMUSR is strictly read-only, writes generate illegal instruction
+                                    IF brief(11 downto 0) = X"805" THEN
+                                        trap_illegal <= '1';
+                                        trapmake <= '1';
+                                    ELSE
+                                        set(pmmu_wr) <= '1';
+                                    END IF;
                                 END IF;
                             ELSE
-                                -- memory EA: support both directions for 32-bit regs (CRP/SRP later)
+                                -- memory EA
                                 IF opcode(7)='0' THEN
-                                    -- MMU -> memory
+                                    -- PMOVE <MMU reg>,<ea> - Read from MMU, write to memory
                                     set(ea_build) <= '1';
-                                    datatype <= "10"; -- long
-                                    setstate <= "11"; -- write
-                                    set_exec(pmmu_rd) <= '1'; -- fetch PMMU reg value
+                                    datatype <= "10";
+                                    setstate <= "11";
+                                    set_exec(pmmu_rd) <= '1';
                                     next_micro_state <= pmmu3;
                                 ELSE
-                                    -- memory -> MMU
-                                    set(ea_build) <= '1';
-                                    set(ea_data_OP1) <= '1';
-                                    datatype <= "10"; -- long
-                                    setstate <= "10"; -- read
-                                    next_micro_state <= pmmu2;
+                                    -- PMOVE <ea>,<MMU reg> - Read from memory, write to MMU
+                                    -- MC68030: MMUSR is strictly read-only, writes generate illegal instruction
+                                    IF brief(11 downto 0) = X"805" THEN
+                                        trap_illegal <= '1';
+                                        trapmake <= '1';
+                                    ELSE
+                                        set(ea_build) <= '1';
+                                        set(ea_data_OP1) <= '1';
+                                        datatype <= "10";
+                                        setstate <= "10";
+                                        next_micro_state <= pmmu2;
+                                    END IF;
                                 END IF;
                             END IF;
-                            END IF; -- Close ELSE for PMOVE vs PFLUSH/PLOAD discrimination
-                        
-                        WHEN "100" =>  -- PTEST instruction
+
+                        WHEN "001" =>  -- PFLUSH or PMOVEFD
+                            -- MC68030: brief(12:8) encoding determines PFLUSH variant or PMOVEFD
+                            -- PFLUSHA:   001 00000 (0x2000)
+                            -- PFLUSHAN:  001 01000 (0x2800)
+                            -- PFLUSH:    001 00001-00111 with FC in bits 7-5, bit 4=mode
+                            -- PFLUSHN:   001 01001-01111 with FC in bits 7-5, bit 4=mode
+                            -- PMOVEFD:   001 00000 with bit 8 = 0, opcode EA mode != 000
+
+                            IF brief(12 downto 8) = "00000" AND opcode(5 downto 3) /= "000" THEN
+                                -- PMOVEFD (ea),MRn - Flush Disable variant (memory -> MMU, no ATC flush)
+                                set(ea_build) <= '1';
+                                set(ea_data_OP1) <= '1';
+                                datatype <= "10";
+                                setstate <= "10";
+                                next_micro_state <= pmmu2;  -- Use same path as PMOVE but with FD flag
+                            ELSIF brief(12 downto 8) = "00000" THEN
+                                -- PFLUSHA - Flush all ATC entries
+                                set_exec(pmmu_pflush) <= '1';
+                                next_micro_state <= pflush1;
+                            ELSIF brief(12 downto 8) = "01000" THEN
+                                -- PFLUSHAN - Flush all non-global ATC entries
+                                set_exec(pmmu_pflush) <= '1';
+                                next_micro_state <= pflush1;
+                            ELSIF brief(12) = '0' OR brief(12) = '1' THEN
+                                -- PFLUSH(An) or PFLUSHN(An) - with EA
+                                -- Brief bit 11 (N flag): 0=PFLUSH, 1=PFLUSHN
+                                set(ea_build) <= '1';
+                                datatype <= "10";
+                                setstate <= "10";  -- Read EA for address
+                                set_exec(pmmu_pflush) <= '1';
+                                next_micro_state <= pflush1;
+                            ELSE
+                                trap_illegal <= '1';
+                                trapmake <= '1';
+                            END IF;
+
+                        WHEN "010" =>  -- PLOAD
+                            -- MC68030: brief(9) determines R/W: 0=PLOADR, 1=PLOADW
+                            -- FC in brief(12:10), EA required
+                            set(ea_build) <= '1';
+                            datatype <= "10";
+                            setstate <= "10";  -- Read EA for address
+                            set_exec(pmmu_pload) <= '1';
+                            next_micro_state <= pload1;
+
+                        WHEN "100" =>  -- PTEST
+                            -- MC68030: brief(9) determines R/W: 0=PTESTR, 1=PTESTW
+                            -- FC in brief(12:10), EA required
+                            -- Level in brief(12:10) for some variants
+                            set(ea_build) <= '1';
+                            datatype <= "10";
+                            setstate <= "10";  -- Read EA for address
                             set_exec(pmmu_ptest) <= '1';
                             next_micro_state <= ptest1;
                             
@@ -4236,45 +4315,35 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- low part read completed; write to MMU
                     set_exec(pmmu_wr) <= '1';
                     
-                -- New PMMU instruction implementations
+                -- PMMU instruction implementations
                 WHEN ptest1 =>
-                    -- PTEST: Test page translation
-                    -- Format: PTEST <function code>,<effective address>,#level
-                    -- For now, implement basic version that tests translation
-                    set(ea_build) <= '1';
-                    datatype <= "10"; -- long address
-                    setstate <= "10"; -- read to trigger translation
-                    next_micro_state <= ptest2;
-                    
-                WHEN ptest2 =>
-                    -- PTEST completion: update MMUSR with test results
-                    -- This would normally update MMUSR based on translation results
-                    -- For now, just complete the instruction
-                    next_micro_state <= nop;
-                    
+                    -- PTEST: Test page translation (EA already built in pmmu1)
+                    -- MC68030 PTEST format:
+                    -- - FC from brief(12:10)
+                    -- - R/W from brief(9): 0=PTESTR (read), 1=PTESTW (write)
+                    -- - Level from brief(12:10) in some encodings
+                    -- - Address from EA (already in OP1out)
+                    -- PMMU module updates MMUSR with test results
+                    null;  -- PTEST request already set in pmmu1, PMMU handles the rest
+
                 WHEN pflush1 =>
-                    -- PFLUSH: Flush pages from ATC
-                    -- Format: PFLUSH <function code>,<mask>,<effective address>
-                    -- Different variants based on brief bits:
-                    -- - PFLUSH (no args): flush all
-                    -- - PFLUSH <function code>,<mask>: flush by FC/mask  
-                    -- - PFLUSH <function code>,<mask>,<EA>: flush specific page
-                    IF brief(12 downto 10) = "001" THEN
-                        -- PFLUSH with EA - build EA first
-                        set(ea_build) <= '1';
-                        datatype <= "10"; -- long address
-                    END IF;
-                    -- Flush operation will be handled in PMMU module
-                    next_micro_state <= nop;
-                    
+                    -- PFLUSH: Flush pages from ATC (EA built in pmmu1 if needed)
+                    -- MC68030 PFLUSH variants already decoded in pmmu1:
+                    -- - PFLUSHA:   brief(12:8)="00000" - flush all
+                    -- - PFLUSHAN:  brief(12:8)="01000" - flush all non-global
+                    -- - PFLUSH:    brief(12)='0', brief(11)='0' - flush with FC/EA
+                    -- - PFLUSHN:   brief(12)='0', brief(11)='1' - flush non-global with FC/EA
+                    -- PMMU module handles actual flush operation
+                    null;  -- PFLUSH request already set in pmmu1, PMMU handles the rest
+
                 WHEN pload1 =>
-                    -- PLOAD: Load page into ATC
-                    -- Format: PLOAD <function code>,<effective address>
-                    set(ea_build) <= '1';
-                    datatype <= "10"; -- long address
-                    setstate <= "10"; -- read to trigger page load
-                    -- Page load operation will be handled in PMMU module
-                    next_micro_state <= nop;
+                    -- PLOAD: Load page into ATC (EA already built in pmmu1)
+                    -- MC68030 PLOAD format:
+                    -- - FC from brief(12:10)
+                    -- - R/W from brief(9): 0=PLOADR (read), 1=PLOADW (write)
+                    -- - Address from EA (already in OP1out)
+                    -- PMMU module performs page table walk and loads result into ATC
+                    null;  -- PLOAD request already set in pmmu1, PMMU handles the rest
                     
                 -- Cache control instruction implementations
                 WHEN cinv1 =>
@@ -4466,17 +4535,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		case brief(11 downto 0) is
 		  when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
 		  when X"001" => DFC <= reg_QA(2 downto 0); -- DFC -- 68010+
-		  when X"002" => 
+		  when X"002" =>
 		    -- Write to CACR with proper MC68030 behavior
 		    -- Sticky control bits (retain value until explicitly changed):
-		    CACR(4 downto 0) <= reg_QA(4 downto 0); -- DE, IE, FREEZE - sticky enable/control bits
-		    -- Command bits (6 downto 3) are NEVER stored - they trigger immediate cache operations
-		    -- and always read as 0. Cache invalidation happens during MOVEC execution.
-		    CACR(7 downto 5) <= (others => '0'); -- Command bits always read as 0
-		    CACR(13 downto 8) <= reg_QA(13 downto 8);  -- FreezeD bit for 68030 detection
-		    CACR(31 downto 14) <= (others => '0');
-		    -- TODO: Implement actual cache invalidation logic based on reg_QA(6 downto 3)
-		    -- For now, the command bits trigger no actual cache operations in this emulation
+		    CACR(1 downto 0) <= reg_QA(1 downto 0);   -- IE, FI - instruction cache enable/freeze
+		    -- Bit 2 (CEI) and Bit 3 (CI) are self-clearing command bits - NOT stored
+		    CACR(4) <= reg_QA(4);                      -- IBE - Instruction Burst Enable
+		    CACR(7 downto 5) <= (others => '0');       -- Reserved bits
+		    CACR(9 downto 8) <= reg_QA(9 downto 8);   -- DE, FD - data cache enable/freeze
+		    -- Bit 10 (CED) and Bit 11 (CD) are self-clearing command bits - NOT stored
+		    CACR(13 downto 12) <= reg_QA(13 downto 12); -- DBE, WA - data burst enable, write allocate
+		    CACR(31 downto 14) <= (others => '0');     -- Reserved bits
+		    -- Cache invalidation triggered by self-clearing bits happens via cache_cinv_req signal
 		  when X"800" => NULL; -- USP -- 68010+
 		  when X"801" => VBR <= reg_QA; -- 68010+
 		  when X"802" => CAAR <= reg_QA; -- CAAR -- 68020+
@@ -4488,9 +4558,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		  when others => NULL;
 		end case;
   elsif clkena_lw = '1' then
-    -- Auto-clear self-clearing bits after they've been set
-    if CACR(3) = '1' or CACR(4) = '1' or CACR(5) = '1' or CACR(6) = '1' then
-      CACR(6 downto 3) <= (others => '0');  -- Clear CE, CI, CD, CA bits
+    -- Auto-clear self-clearing command bits after they've been set
+    -- MC68030 spec: bits 2 (CEI), 3 (CI), 10 (CED), 11 (CD) are self-clearing
+    if CACR(2) = '1' or CACR(3) = '1' or CACR(10) = '1' or CACR(11) = '1' then
+      CACR(2) <= '0';   -- Clear CEI (Clear Entry in Instruction Cache)
+      CACR(3) <= '0';   -- Clear CI (Clear Instruction Cache)
+      CACR(10) <= '0';  -- Clear CED (Clear Entry in Data Cache)
+      CACR(11) <= '0';  -- Clear CD (Clear Data Cache)
     end if;
 	  end if;
 	end if;
@@ -4530,48 +4604,60 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         pmmu_reg_sel_d  <= (others => '0');
         pmmu_reg_wdat_d <= (others => '0');
         pmmu_reg_part_d <= '0';
-      elsif clkena_lw = '1' OR (CPU="11" AND clkena_in='1' AND (exec(pmmu_wr)='1' OR exec(pmmu_rd)='1')) then
-        -- defaults
-        --pmmu_reg_we_d   <= '0';
-        --pmmu_reg_re_d   <= '0';
-        --pmmu_reg_sel_d  <= (others => '0');
-        --pmmu_reg_wdat_d <= (others => '0');
-        --pmmu_reg_part_d <= '0';
+        pmmu_reg_fd_d   <= '0';
+      elsif clkena_in='1' then
+        -- Clear PMMU control signals by default (single-cycle pulses)
+        pmmu_reg_we_d   <= '0';
+        pmmu_reg_re_d   <= '0';
 
-        sel := pmmu_sel_from_brief(brief(11 downto 0));
+        -- PMMU instruction handling (only on 68030)
+        -- Handle both set() for immediate execution and exec() for deferred execution
+        if CPU="11" AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
+          sel := pmmu_sel_from_brief(brief(11 downto 0));
+          -- Latch source data only when actually doing PMMU operation to ensure correct value
+          pmmu_reg_wdat_d <= pmmu_src_data;
 
-        -- MMU registers (TT0, TT1, MMUSR, etc.) are PMOVE-only on MC68030
-        -- MOVEC attempts to access these registers trigger illegal instruction exceptions
+          -- MMU registers (TT0, TT1, MMUSR, etc.) are PMOVE-only on MC68030
+          -- MOVEC attempts to access these registers trigger illegal instruction exceptions
 
-        -- PMOVE instruction handling (only if MOVEC is not active to avoid conflicts)
-        if exec(pmmu_wr) = '1' and CPU = "11" then
-          -- PMOVE Dn -> <MMU reg>
-          if sel /= x"F" then
-            pmmu_reg_sel_d  <= sel;
-            pmmu_reg_wdat_d <= pmmu_src_data; -- source (Dn or memory EA)
-            -- For CRP/SRP choose part: in pmmu2 (first read from mem) assume high part
-            if (sel = x"1") or (sel = x"2") then
-              if micro_state = pmmu2 then
-                pmmu_reg_part_d <= '1';
-              else
-                pmmu_reg_part_d <= '0';
+          -- PMOVE instruction handling (only if MOVEC is not active to avoid conflicts)
+          if set(pmmu_wr) = '1' OR exec(pmmu_wr) = '1' then
+            -- PMOVE Dn -> <MMU reg>
+            if sel /= x"F" then
+              pmmu_reg_sel_d  <= sel;
+              -- pmmu_reg_wdat_d already latched above from pmmu_src_data
+              -- For CRP/SRP choose part: in pmmu2 (first read from mem) assume high part
+              if (sel = x"1") or (sel = x"2") then
+                if micro_state = pmmu2 then
+                  pmmu_reg_part_d <= '1';
+                else
+                  pmmu_reg_part_d <= '0';
+                end if;
               end if;
+              -- Check if this is PMOVEFD (Flush Disable): brief(15:13)="001" AND brief(12:8)="00000" AND EA mode != 000
+              if brief(15 downto 13) = "001" and brief(12 downto 8) = "00000" and exe_opcode(5 downto 3) /= "000" then
+                pmmu_reg_fd_d <= '1';  -- PMOVEFD - disable ATC flush
+              else
+                pmmu_reg_fd_d <= '0';  -- Normal PMOVE - flush ATC
+              end if;
+              pmmu_reg_we_d   <= '1';
             end if;
-            pmmu_reg_we_d   <= '1';
           end if;
-        elsif exec(pmmu_rd) = '1' and CPU = "11" then
-          -- PMOVE <MMU reg> -> Dn
-          if sel /= x"F" then
-            pmmu_reg_sel_d <= sel;
-            -- For CRP/SRP choose part: in pmmu3 (first write to mem) assume high part
-            if (sel = x"1") or (sel = x"2") then
-              if micro_state = pmmu3 then
-                pmmu_reg_part_d <= '1';
-              else
-                pmmu_reg_part_d <= '0';
+
+          if set(pmmu_rd) = '1' OR exec(pmmu_rd) = '1' then
+            -- PMOVE <MMU reg> -> Dn
+            if sel /= x"F" then
+              pmmu_reg_sel_d <= sel;
+              -- For CRP/SRP choose part: in pmmu3 (first write to mem) assume high part
+              if (sel = x"1") or (sel = x"2") then
+                if micro_state = pmmu3 then
+                  pmmu_reg_part_d <= '1';
+                else
+                  pmmu_reg_part_d <= '0';
+                end if;
               end if;
+              pmmu_reg_re_d  <= '1';
             end if;
-            pmmu_reg_re_d  <= '1';
           end if;
         end if;
       end if;
