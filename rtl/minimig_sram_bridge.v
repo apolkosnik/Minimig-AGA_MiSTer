@@ -19,8 +19,12 @@ module minimig_sram_bridge
 	input	 [31:0] data_in,		// bus data in
 	output [31:0] data_out,		// bus data out
 	input         rd,			   // bus read
-	input         hwr,			// bus high word write
-	input         lwr,			// bus low word write
+	input         hwr,			// bus high word write (legacy, bits 15:8)
+	input         lwr,			// bus low word write (legacy, bits 7:0)
+	input         byte3_wr,		// bus byte 3 write (bits 31:24) - NEW 32-bit
+	input         byte2_wr,		// bus byte 2 write (bits 23:16) - NEW 32-bit
+	input         byte1_wr,		// bus byte 1 write (bits 15:8) - NEW 32-bit
+	input         byte0_wr,		// bus byte 0 write (bits 7:0) - NEW 32-bit
 
 	//RAM external signals  
 	output        _bhe,			// sram upper byte
@@ -65,12 +69,16 @@ _oe                  \_________________/     \_________________/     \__________
 // generate enable signal if any of the banks is selected
 wire	enable = |bank[7:0]; // indicates memory access cycle
 
-assign _we   = (!hwr && !lwr) | !enable;
-assign _oe   = !rd  | !enable; 
-assign _bhe  = !hwr | !enable;
-assign _ble  = !lwr | !enable;
-assign _whe  = !hwr | !enable;
-assign _wle  = !lwr | !enable;
+// TRUE 32-BIT: Use all 4 byte enables for write control
+// Global write enable: active when ANY byte is being written
+assign _we   = (!(byte3_wr | byte2_wr | byte1_wr | byte0_wr)) | !enable;
+assign _oe   = !rd  | !enable;
+
+// Individual byte enables (active-low)
+assign _bhe  = !byte1_wr | !enable;  // Byte 1 (bits 15:8) - legacy "high byte" of word 0
+assign _ble  = !byte0_wr | !enable;  // Byte 0 (bits 7:0) - legacy "low byte" of word 0
+assign _whe  = !byte3_wr | !enable;  // Byte 3 (bits 31:24) - NEW: "high byte" of word 1
+assign _wle  = !byte2_wr | !enable;  // Byte 2 (bits 23:16) - NEW: "low byte" of word 1
 
 assign address[17:1]  = address_in[17:1];
 assign address[22:18] = bank[6] ? 5'b111_11 : //access f8-fb and !ovl and !halt, map to fc-ff

@@ -62,8 +62,12 @@ module gary
 	input         clk,
 	input         reset, //global reset signal
 	input         cpu_rd, //cpu read
-	input         cpu_hwr, //cpu high write
-	input         cpu_lwr, //cpu low write
+	input         cpu_hwr, //cpu high write (legacy, bits 15:8)
+	input         cpu_lwr, //cpu low write (legacy, bits 7:0)
+	input         cpu_byte3_wr, //cpu byte 3 write (bits 31:24) - NEW 32-bit
+	input         cpu_byte2_wr, //cpu byte 2 write (bits 23:16) - NEW 32-bit
+	input         cpu_byte1_wr, //cpu byte 1 write (bits 15:8) - NEW 32-bit
+	input         cpu_byte0_wr, //cpu byte 0 write (bits 7:0) - NEW 32-bit
 	input         cpu_hlt,
 
 	input         ovl, //overlay kickstart rom over chipram
@@ -80,8 +84,12 @@ module gary
 	input   [7:0] toccata_base,
 
 	output        ram_rd, //bus read
-	output        ram_hwr, //bus high write
-	output        ram_lwr, //bus low write
+	output        ram_hwr, //bus high write (legacy, bits 15:8)
+	output        ram_lwr, //bus low write (legacy, bits 7:0)
+	output        ram_byte3_wr, //ram byte 3 write (bits 31:24) - NEW 32-bit
+	output        ram_byte2_wr, //ram byte 2 write (bits 23:16) - NEW 32-bit
+	output        ram_byte1_wr, //ram byte 1 write (bits 15:8) - NEW 32-bit
+	output        ram_byte0_wr, //ram byte 0 write (bits 7:0) - NEW 32-bit
 
 	output        sel_reg, //select chip register bank
 	output reg [3:0] sel_chip, //select chip memory
@@ -117,8 +125,18 @@ assign cpu_data_in    = dbr ? 32'h00000000 : {16'h0000, custom_data_out} | ram_d
 
 //read write control signals
 assign ram_rd  = dbr ? ~dbwe : cpu_rd;
+
+// Legacy 16-bit write strobes (for backward compatibility)
 assign ram_hwr = dbr ?  dbwe : cpu_hwr;
 assign ram_lwr = dbr ?  dbwe : cpu_lwr;
+
+// TRUE 32-BIT: Pass through all 4 byte write enables
+// When DMA is active (dbr=1), Agnus drives both bytes for 16-bit transfers
+// When CPU is active (dbr=0), pass through individual byte enables
+assign ram_byte3_wr = dbr ? 1'b0      : cpu_byte3_wr;  // Byte 3 (bits 31:24)
+assign ram_byte2_wr = dbr ? 1'b0      : cpu_byte2_wr;  // Byte 2 (bits 23:16)
+assign ram_byte1_wr = dbr ? dbwe      : cpu_byte1_wr;  // Byte 1 (bits 15:8) - DMA uses this
+assign ram_byte0_wr = dbr ? dbwe      : cpu_byte0_wr;  // Byte 0 (bits 7:0) - DMA uses this
 
 //--------------------------------------------------------------------------------------
 

@@ -318,8 +318,12 @@ wire [31:1] ram_address_out;	//ram address out (expanded to 32-bit)
 
 //local signals for control bus
 wire        ram_rd;				//ram read enable
-wire        ram_hwr;				//ram high byte write enable 
-wire        ram_lwr;				//ram low byte write enable 
+wire        ram_hwr;				//ram high byte write enable
+wire        ram_lwr;				//ram low byte write enable
+wire        ram_byte3_wr;			//ram byte 3 write enable (bits 31:24) - NEW 32-bit
+wire        ram_byte2_wr;			//ram byte 2 write enable (bits 23:16) - NEW 32-bit
+wire        ram_byte1_wr;			//ram byte 1 write enable (bits 15:8) - NEW 32-bit
+wire        ram_byte0_wr;			//ram byte 0 write enable (bits 7:0) - NEW 32-bit 
 wire        cpu_rd; 				//cpu read enable
 wire        rd_cyc;
 wire        cpu_hwr;				//cpu high byte write enable (legacy, bits 15:8)
@@ -766,6 +770,10 @@ minimig_sram_bridge RAM1
 	.rd(ram_rd),
 	.hwr(ram_hwr),
 	.lwr(ram_lwr),
+	.byte3_wr(ram_byte3_wr),
+	.byte2_wr(ram_byte2_wr),
+	.byte1_wr(ram_byte1_wr),
+	.byte0_wr(ram_byte0_wr),
 	._bhe(_ram_bhe),
 	._ble(_ram_ble),
 	._we(_ram_we),
@@ -817,6 +825,10 @@ gary GARY1
 	.cpu_rd(cpu_rd),
 	.cpu_hwr(cpu_hwr),
 	.cpu_lwr(cpu_lwr),
+	.cpu_byte3_wr(cpu_byte3_wr),
+	.cpu_byte2_wr(cpu_byte2_wr),
+	.cpu_byte1_wr(cpu_byte1_wr),
+	.cpu_byte0_wr(cpu_byte0_wr),
 	.cpu_hlt(cpuhlt),
 	.ovl(ovl),
 	.dbr(dbr),
@@ -830,6 +842,10 @@ gary GARY1
 	.ram_rd(ram_rd),
 	.ram_hwr(ram_hwr),
 	.ram_lwr(ram_lwr),
+	.ram_byte3_wr(ram_byte3_wr),
+	.ram_byte2_wr(ram_byte2_wr),
+	.ram_byte1_wr(ram_byte1_wr),
+	.ram_byte0_wr(ram_byte0_wr),
 	.ecs(|chipset_config[4:3]),
 	.a1k(chipset_config[2]),
 	.sel_chip(sel_chip),
