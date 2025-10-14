@@ -159,7 +159,20 @@ entity TG68KdotC_Kernel is
 		pmmu_addr_phys			: out std_logic_vector(31 downto 0);
 		pmmu_cache_inhibit		: out std_logic;
 -- Cache operation address (68030)
-		cache_op_addr			: out std_logic_vector(31 downto 0)
+		cache_op_addr			: out std_logic_vector(31 downto 0);
+-- PMMU walker memory interface (68030) - connects to real memory via cpu_wrapper
+		pmmu_walker_req		: out std_logic;
+		pmmu_walker_addr		: out std_logic_vector(31 downto 0);
+		pmmu_walker_ack		: in  std_logic;
+		pmmu_walker_data		: in  std_logic_vector(31 downto 0);
+-- DEBUG: Supervisor mode tracking signals
+		debug_SVmode			: out std_logic;
+		debug_preSVmode		: out std_logic;
+		debug_FlagsSR_S		: out std_logic;
+		debug_changeMode		: out std_logic;
+		debug_setopcode		: out std_logic;
+		debug_exec_directSR	: out std_logic;
+		debug_exec_to_SR		: out std_logic
 		);
 end TG68KdotC_Kernel;
 
@@ -320,6 +333,10 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_vector		: std_logic_vector(31 downto 0);
 	signal trap_vector_vbr	: std_logic_vector(31 downto 0);
 	signal USP					: std_logic_vector(31 downto 0);
+	signal SSP					: std_logic_vector(31 downto 0);  -- Supervisor Stack Pointer (68000/68010)
+	signal MSP					: std_logic_vector(31 downto 0);  -- BUG #18: Master Stack Pointer (68020+)
+	signal ISP					: std_logic_vector(31 downto 0);  -- BUG #18: Interrupt Stack Pointer (68020+)
+	signal interrupt_mode		: std_logic := '0';  -- BUG #18: 0=normal supervisor, 1=interrupt processing
 --	signal illegal_write_mode	: bit;
 --	signal illegal_read_mode	: bit;
 --	signal illegal_byteaddr		: bit;
@@ -418,7 +435,7 @@ signal pmmu_reg_fd_d    : std_logic;
 	
 	-- Cache control signals (declared as output ports, no need for internal signals)
 
-	-- PMMU walker memory interface
+	-- PMMU walker memory interface (internal stub - will be connected to real memory in future)
 	signal pmmu_mem_req   : std_logic;
 	signal pmmu_mem_addr  : std_logic_vector(31 downto 0);
 	signal pmmu_mem_ack   : std_logic;
@@ -438,45 +455,22 @@ signal pmmu_reg_fd_d    : std_logic;
 	
 
   -- Function to map brief(11:8) to PMMU register select
-  function pmmu_sel_from_brief(b : std_logic_vector(11 downto 0)) return std_logic_vector is
+  function pmmu_sel_from_brief(b : std_logic_vector(14 downto 10)) return std_logic_vector is
     variable s : std_logic_vector(3 downto 0);
   begin
     case b is
-      when x"000" => s := x"0"; -- TC (Translation Control)
-      when x"010" => s := x"1"; -- CRP (CPU Root Pointer)
-      when x"011" => s := x"2"; -- SRP (Supervisor Root Pointer)
-      when x"004" => s := x"3"; -- TT0 (Transparent Translation 0)
-      when x"005" => s := x"4"; -- TT1 (Transparent Translation 1)
-      when x"805" => s := x"5"; -- MMUSR (MMU Status Register)
-      when x"017" => s := x"6"; -- CAL (Current Access Level)
-      when x"016" => s := x"7"; -- VAL (Validate Access Level)
-      when x"015" => s := x"8"; -- SCC (Stack Change Control)
-      when x"014" => s := x"9"; -- AC (Access Control)
-      when others => s := x"F"; -- invalid/not supported
+      when "00010" => s := x"0"; -- TT0 (Transparent Translation 0) - 0x02
+      when "00011" => s := x"1"; -- TT1 (Transparent Translation 1) - 0x03
+      when "10000" => s := x"2"; -- TC (Translation Control) - 0x10
+      when "10001" => s := x"3"; -- DRP (DMA Root Pointer) - 0x11
+      when "10010" => s := x"4"; -- SRP (Supervisor Root Pointer) - 0x12
+      when "10011" => s := x"5"; -- CRP (CPU Root Pointer) - 0x13
+      when "11000" => s := x"6"; -- MMUSR (MMU Status Register) - 0x18
+      when others => s := x"7"; -- invalid/not supported
     end case;
     return s;
   end function;
 
-  -- Function to map MOVEC brief(11:0) encodings to PMMU register select
-  -- MC68030 MOVEC encodings for PMMU registers (only these are accessible via MOVEC):
-  --  X"003" => TC, X"004" => TT0, X"005" => TT1, X"805" => MMUSR
-  -- Note: CRP, SRP, CAL, VAL, SCC, AC are only accessible via PMOVE, not MOVEC
-  function pmmu_sel_from_movec(b : std_logic_vector(11 downto 0)) return std_logic_vector is
-    variable s : std_logic_vector(3 downto 0);
-  begin
-    if b = x"003" then
-      s := x"0"; -- TC (Translation Control Register)
-    elsif b = x"004" then
-      s := x"3"; -- TT0
-    elsif b = x"005" then
-      s := x"4"; -- TT1
-    elsif b = x"805" then
-      s := x"5"; -- MMUSR
-    else
-      s := x"F"; -- not a PMMU reg handled via MOVEC here
-    end if;
-    return s;
-  end function;
 
 BEGIN  
 
@@ -551,12 +545,24 @@ BEGIN
   cache_cpush_req <= '1' when exec(cache_cpush) = '1' else '0';
   
   -- Cache operation scope and cache selection
-  process(brief, CACR, exec)
+  -- BUG #17 FIX: Handle both two-word (0x4E78) and single-word (0xF4xx) forms
+  process(brief, CACR, exec, opcode)
   begin
     if exec(cache_cinv) = '1' or exec(cache_cpush) = '1' then
-      -- CINV/CPUSH instruction: use extension word
-      cache_op_scope_int <= brief(4 downto 3);  -- From extension word
-      cache_op_cache_int <= brief(1 downto 0);  -- From extension word
+      -- CINV/CPUSH instruction active
+      -- Check if single-word form (0xF4xx) or two-word form (0x4E78)
+      if opcode(15 downto 12) = "1111" and opcode(11 downto 8) = "0100" then
+        -- Single-word form (0xF4xx): Extract parameters from opcode
+        -- Format: 1111 0100 00ss ccxx
+        --   ss (bits 4:3) = scope
+        --   cc (bits 3:2) = cache selection
+        cache_op_scope_int <= opcode(4 downto 3);  -- From opcode
+        cache_op_cache_int <= opcode(3 downto 2);  -- From opcode
+      else
+        -- Two-word form (0x4E78): Use extension word in brief
+        cache_op_scope_int <= brief(4 downto 3);  -- From extension word
+        cache_op_cache_int <= brief(1 downto 0);  -- From extension word
+      end if;
     else
       -- CACR self-clearing bits: determine operation type
       cache_op_scope_int <= "10";  -- All caches (global invalidation)
@@ -612,26 +618,12 @@ BEGIN
   pmmu_rw       <= '0' when state = "11" else '1';
   pmmu_fc       <= fc_internal;
 
-  -- PMMU Memory Interface: Provide valid MC68030 page descriptors
-  -- When MMU is enabled and ATC misses, walker reads page tables from memory
-  -- For now, return identity-mapped descriptors (which is actually correct
-  -- behavior when no page tables are set up in memory)
-  
-  -- Proper clocked memory acknowledgment to prevent combinatorial timing issues
-  PROCESS (clk, nReset)
-  BEGIN
-    IF nReset='0' THEN
-      pmmu_mem_ack <= '0';
-    ELSIF rising_edge(clk) THEN
-      pmmu_mem_ack <= pmmu_mem_req;  -- Acknowledge one cycle after request
-    END IF;
-  END PROCESS;
-  
-  -- Return valid MC68030 page descriptor format
-  -- Bits 31:12 = Physical Page Number (PPN), Bits 11:2 = reserved/control
-  -- Bit 1 = Page Descriptor Type (1=page), Bit 0 = Valid (1=valid)
-  pmmu_mem_rdat <= pmmu_mem_addr(31 downto 12) & "000000000011" when pmmu_mem_req = '1' 
-                   else (others => '0');
+  -- PMMU Memory Interface: Connect to external memory arbiter in cpu_wrapper
+  -- The walker requests are routed to real memory to read actual page table descriptors
+  pmmu_walker_req  <= pmmu_mem_req;
+  pmmu_walker_addr <= pmmu_mem_addr;
+  pmmu_mem_ack     <= pmmu_walker_ack;
+  pmmu_mem_rdat    <= pmmu_walker_data;
 
 ALU: TG68K_ALU   
 	generic map(
@@ -834,10 +826,6 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 				IF Wwrena='1' THEN
 					regfile(RDindex_A) <= regin;
 				END IF;
-				
-				IF exec(to_USP)='1' THEN
-					USP <= reg_QA;
-				END IF;	
 			END IF;
 		END IF;
 	END PROCESS;
@@ -845,15 +833,21 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 -----------------------------------------------------------------------------
 -- Write Reg
 -----------------------------------------------------------------------------
-PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, movec_data)
+PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, SSP, MSP, ISP, movec_data)
 	BEGIN
 		regin <= ALUout;
 		IF exec(save_memaddr)='1' THEN
-			regin <= memaddr;	
+			regin <= memaddr;
 		ELSIF exec(get_ea_now)='1' AND ea_only='1' THEN
-			regin <= memaddr_a;	
+			regin <= memaddr_a;
 		ELSIF exec(from_USP)='1' THEN
-			regin <= USP;	
+			regin <= USP;
+		ELSIF exec(from_SSP)='1' THEN
+			regin <= SSP;
+		ELSIF exec(from_MSP)='1' THEN
+			regin <= MSP;
+		ELSIF exec(from_ISP)='1' THEN
+			regin <= ISP;
 		ELSIF exec(movec_rd)='1' THEN
 			regin <= movec_data;
 		ELSIF set(pmmu_rd)='1' OR exec(pmmu_rd)='1' THEN
@@ -893,7 +887,7 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 -----------------------------------------------------------------------------
 -- set dest regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read)
+PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, micro_state)
 	BEGIN
 		IF exec(movem_action) ='1' THEN
 			rf_dest_addr <= rf_source_addrd;
@@ -913,30 +907,33 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 			rf_dest_addr <= '0'&last_data_read(2 downto 0);
 		ELSIF dest_2ndLbits='1' THEN
 			rf_dest_addr <= '0'&sndOPC(2 downto 0);
-		ELSIF setstackaddr='1' THEN	
+		ELSIF setstackaddr='1' THEN
 			rf_dest_addr <= "1111";
-		ELSIF dest_hbits='1' THEN	
+		ELSIF dest_hbits='1' THEN
 			rf_dest_addr <= dest_areg&opcode(11 downto 9);
+		ELSIF micro_state = pmmu_dn_low THEN
+			-- PMOVE 64-bit: LOW word goes to Dn+1 (increment register number)
+			rf_dest_addr <= dest_areg&(opcode(2 downto 0) + "001");
 		ELSE
-			IF opcode(5 downto 3)="000" OR data_is_source='1' THEN 			
+			IF opcode(5 downto 3)="000" OR data_is_source='1' THEN
 				rf_dest_addr <= dest_areg&opcode(2 downto 0);
 			ELSE
 				rf_dest_addr <= '1'&opcode(2 downto 0);
 			END IF;
-		END IF;	
+		END IF;
 	END PROCESS;
 	
 -----------------------------------------------------------------------------
 -- set source regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, source_2ndMbits)
+PROCESS (opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, source_2ndMbits, micro_state)
 	BEGIN
 		IF exec(movem_action)='1' OR set(movem_action) ='1' THEN
 			IF movem_presub='1' THEN
 				rf_source_addr <= movem_regaddr XOR "1111";
 			ELSE
 				rf_source_addr <= movem_regaddr;
-			END IF; 
+			END IF;
 		ELSIF source_2ndLbits='1' THEN
 			rf_source_addr <= '0'&sndOPC(2 downto 0);
 		ELSIF source_2ndHbits='1' THEN
@@ -951,9 +948,12 @@ PROCESS (opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOP
 			rf_source_addr <= source_areg&opcode(2 downto 0);
 		ELSIF exec(linksp)='1' THEN
 			rf_source_addr <= "1111";
+		ELSIF micro_state = pmmu_dn_low THEN
+			-- PMOVE Dn→MMU 64-bit: LOW word source is Dn+1 (increment register number)
+			rf_source_addr <= source_areg&(opcode(2 downto 0) + "001");
 		ELSE
 			rf_source_addr <= source_areg&opcode(11 downto 9);
-		END IF;	
+		END IF;
 	END PROCESS;
 	
 -----------------------------------------------------------------------------
@@ -1672,13 +1672,15 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;
 				IF exec(directSR)='1' OR set_stop='1' THEN
 					FlagsSR <= data_read(15 downto 8);
-				END IF;	
+					preSVmode <= data_read(13);  -- BUG #15 FIX: Sync preSVmode with SR(5) on RTE
+				END IF;
 				IF interrupt='1' AND trap_interrupt='1' THEN
 					FlagsSR(2 downto 0) <=rIPL_nr;
-				END IF;	
+				END IF;
 				IF exec(to_SR)='1' THEN
 					FlagsSR(7 downto 0) <= SRin;	--SR
 					fc_internal(2) <= SRin(5);
+					preSVmode <= SRin(5);  -- BUG #15 FIX: Sync preSVmode with SR(5) on MOVE to SR
 				ELSIF exec(update_FC)='1' THEN
 					fc_internal(2) <= FlagsSR(5);
 				END IF;
@@ -1843,11 +1845,36 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			next_micro_state <= int1;
 			set(update_ld) <= '1';
 			setstate <= "10";
+			-- BUG #18: Set interrupt mode for proper ISP selection (68020+)
+			interrupt_mode <= '1';
 		END IF;
 			
-		IF set(changeMode)='1' THEN		
-			set(to_USP) <= '1';
-			set(from_USP) <= '1';
+		-- BUG #18: Stack pointer switching on mode changes (68020/68030)
+		IF set(changeMode)='1' THEN
+			IF cpu(1)='1' THEN
+				-- 68020/68030: Use MSP/ISP based on interrupt_mode
+				IF preSVmode='0' THEN
+					-- Currently in user mode, switching to supervisor mode
+					set(to_USP) <= '1';
+					IF interrupt_mode='1' THEN
+						set(from_ISP) <= '1';
+					ELSE
+						set(from_MSP) <= '1';
+					END IF;
+				ELSE
+					-- Currently in supervisor mode, switching to user mode
+					IF interrupt_mode='1' THEN
+						set(to_ISP) <= '1';
+					ELSE
+						set(to_MSP) <= '1';
+					END IF;
+					set(from_USP) <= '1';
+				END IF;
+			ELSE
+				-- 68000/68010: Simple USP/SSP switching
+				set(to_USP) <= '1';
+				set(from_USP) <= '1';
+			END IF;
 			setstackaddr <='1';
 		END IF;
 			
@@ -3410,6 +3437,34 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						trap_priv <= '1';
 						trapmake <= '1';
 					END IF;
+				-- BUG #17 FIX: Single-word CINV/CPUSH variants (68030)
+				-- These are used by Kickstart for cache invalidation
+				-- Format: 1111 0100 00xx xxxx (0xF4xx range)
+				-- CINVA IC/DC/BC (0xF428, 0xF424, 0xF42C)
+				-- CINVP IC/DC/BC (0xF418, 0xF414, 0xF41C)
+				-- CINVL IC/DC/BC (0xF408, 0xF404, 0xF40C)
+				-- CPUSHA IC/DC/BC (0xF468, 0xF464, 0xF46C)
+				-- CPUSHP IC/DC/BC (0xF458, 0xF454, 0xF45C)
+				ELSIF cpu="11" AND opcode(11 downto 8)="0100" AND opcode(7 downto 6)="00" THEN
+					-- Single-word cache instructions: require supervisor
+					IF SVmode='0' THEN
+						trap_priv <= '1';
+						trapmake <= '1';
+					ELSE
+						-- Dispatch to cache control microstate
+						-- These are functionally similar to the two-word CINV/CPUSH at 0x4E78
+						-- The scope and cache selection are encoded in bits 5-2 of the opcode
+						IF decodeOPC='1' THEN
+							-- Set brief to encode the cache operation parameters
+							-- brief(6) = 0 for CINV, 1 for CPUSH
+							-- brief(4:3) = scope (from opcode 5:4)
+							-- brief(1:0) = cache selection (from opcode 3:2)
+							next_micro_state <= cinv1;
+							-- Extract operation type from opcode(5) (0=CINV, 1=CPUSH)
+							-- and other parameters from opcode(5:2)
+							-- This will be handled in cinv1 microstate
+						END IF;
+					END IF;
 				ELSIF cpu="11" AND opcode(8 downto 6)="100" THEN --cpSAVE
 					IF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="011" AND
 					   (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN --ea illegal modes
@@ -4138,6 +4193,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					end if;
 				WHEN rte5 =>            -- RTE
 					next_micro_state <= nop;
+					-- BUG #18: Clear interrupt mode when returning from exception (68020+)
+					interrupt_mode <= '0';
 -------------------------------------
 
 				WHEN rtd1 =>		-- RTD
@@ -4149,9 +4206,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN movec1 =>		-- MOVEC
 					set(briefext) <= '1';
 					set_writePCbig <='1';
-					IF (brief(11 downto 0)=X"000" OR brief(11 downto 0)=X"001" OR brief(11 downto 0)=X"800" OR brief(11 downto 0)=X"801") OR 
-					   (cpu(1)='1' AND (brief(11 downto 0)=X"002" OR brief(11 downto 0)=X"802" OR brief(11 downto 0)=X"803" OR brief(11 downto 0)=X"804")) OR
-					   (cpu="11" AND (brief(11 downto 0)=X"004" OR brief(11 downto 0)=X"005" OR brief(11 downto 0)=X"805")) THEN
+					-- MC68030 MOVEC: Per MC68030 User's Manual Table 4-2
+					-- 68000: SFC(000), DFC(001), USP(800), VBR(801)
+					-- 68020+: Add CACR(002), CAAR(802), MSP(803), ISP(804)
+					-- NOTE: All PMMU registers (TC, TT0, TT1, CRP, SRP, MMUSR) are PMOVE-only!
+					IF (brief(11 downto 0)=X"000" OR brief(11 downto 0)=X"001" OR brief(11 downto 0)=X"800" OR brief(11 downto 0)=X"801") OR
+					   (cpu(1)='1' AND (brief(11 downto 0)=X"002" OR brief(11 downto 0)=X"802" OR brief(11 downto 0)=X"803" OR brief(11 downto 0)=X"804")) THEN
 						IF opcode(0)='0' THEN
 							set(Regwrena) <= '1';
 						END IF;
@@ -4180,20 +4240,26 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         WHEN "000" =>  -- PMOVE (standard, no FD)
                             -- Dn direct EA
                             IF opcode(5 downto 3)="000" THEN
-                                -- For PMOVE Dn: trigger the PMMU operation immediately (not deferred with set_exec)
-                                -- This ensures reg_QA is read with the correct opcode(2:0) value
+                                -- For PMOVE Dn: use set_exec to ensure execution happens via setexecOPC path
                                 IF opcode(7)='0' THEN
                                     -- PMOVE <MMU reg>,Dn - Read from MMU, write to Dn
-                                    set(Regwrena) <= '1';
-                                    set(pmmu_rd) <= '1';
+                                    set_exec(Regwrena) <= '1';
+                                    set_exec(pmmu_rd) <= '1';
+                                    -- Check if 64-bit register (CRP=0x13/SRP=0x12) - need two register transfers
+                                    IF brief(14 downto 10)=X"12" OR brief(14 downto 10)=X"13" THEN
+                                        next_micro_state <= pmmu_dn_high;  -- HIGH word to Dn, then LOW word to Dn+1
+                                    ELSE
+                                        next_micro_state <= nop;  -- 32-bit register: Complete and return to normal execution
+                                    END IF;
                                 ELSE
                                     -- PMOVE Dn,<MMU reg> - Read from Dn, write to MMU
-                                    -- MC68030: MMUSR is strictly read-only, writes generate illegal instruction
-                                    IF brief(11 downto 0) = X"805" THEN
-                                        trap_illegal <= '1';
-                                        trapmake <= '1';
+                                    -- MC68030: All PMMU registers support PMOVE writes (MMUSR has write-1-to-clear semantics)
+                                    set_exec(pmmu_wr) <= '1';
+                                    -- Check if 64-bit register (CRP=0x13/SRP=0x12) - need two register transfers
+                                    IF brief(14 downto 10)=X"12" OR brief(14 downto 10)=X"13" THEN
+                                        next_micro_state <= pmmu_dn_high;  -- HIGH word from Dn, then LOW word from Dn+1
                                     ELSE
-                                        set(pmmu_wr) <= '1';
+                                        next_micro_state <= nop;  -- 32-bit register: Complete and return to normal execution
                                     END IF;
                                 END IF;
                             ELSE
@@ -4207,17 +4273,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     next_micro_state <= pmmu3;
                                 ELSE
                                     -- PMOVE <ea>,<MMU reg> - Read from memory, write to MMU
-                                    -- MC68030: MMUSR is strictly read-only, writes generate illegal instruction
-                                    IF brief(11 downto 0) = X"805" THEN
-                                        trap_illegal <= '1';
-                                        trapmake <= '1';
-                                    ELSE
-                                        set(ea_build) <= '1';
-                                        set(ea_data_OP1) <= '1';
-                                        datatype <= "10";
-                                        setstate <= "10";
-                                        next_micro_state <= pmmu2;
-                                    END IF;
+                                    -- MC68030: All PMMU registers support PMOVE writes (MMUSR has write-1-to-clear semantics)
+                                    set(ea_build) <= '1';
+                                    set(ea_data_OP1) <= '1';
+                                    datatype <= "10";
+                                    setstate <= "10";
+                                    next_micro_state <= pmmu2;
                                 END IF;
                             END IF;
 
@@ -4284,7 +4345,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- complete mem->MMU by issuing PMMU write using ea_data as source (high part for 64-bit)
                     set_exec(pmmu_wr) <= '1';
                     -- If CRP/SRP (64-bit), advance EA and read low part
-                    IF brief(11 downto 8)=X"1" OR brief(11 downto 8)=X"2" THEN
+                    IF brief(14 downto 10)=X"12" OR brief(14 downto 10)=X"13" THEN
                         set(mem_addsub) <= '1';
                         set(OP1addr) <= '1';
                         datatype <= "10"; -- long
@@ -4295,7 +4356,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- MMU -> memory write (high part for 64-bit CRP/SRP, or only part for 32-bit regs)
                     -- data_write_tmp sourced from pmmu_reg_rdat in write datapath
                     -- For CRP/SRP, advance EA and read low part next
-                    IF brief(11 downto 8)=X"1" OR brief(11 downto 8)=X"2" THEN
+                    IF brief(14 downto 10)=X"12" OR brief(14 downto 10)=X"13" THEN
                         set(mem_addsub) <= '1';
                         set(OP1addr) <= '1';
                         datatype <= "10"; -- long
@@ -4305,15 +4366,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         next_micro_state <= pmmu5;
                     ELSE
                         -- single long write completed in this state
-                        null;
+                        next_micro_state <= nop;  -- FIX: Return to normal execution after 32-bit write
                     END IF;
                 WHEN pmmu5 =>
                     -- MMU -> memory write of low part (for CRP/SRP)
                     -- data_write_tmp sourced from pmmu_reg_rdat in write datapath
                     setstate <= "11"; -- write
+                    next_micro_state <= nop;  -- FIX: Return to normal execution after LOW word write
                 WHEN pmmu4 =>
                     -- low part read completed; write to MMU
                     set_exec(pmmu_wr) <= '1';
+                    next_micro_state <= nop;  -- FIX: Return to normal execution after LOW word read+write
                     
                 -- PMMU instruction implementations
                 WHEN ptest1 =>
@@ -4325,6 +4388,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- - Address from EA (already in OP1out)
                     -- PMMU module updates MMUSR with test results
                     null;  -- PTEST request already set in pmmu1, PMMU handles the rest
+                    next_micro_state <= nop;  -- FIX: Return to normal execution after PTEST
 
                 WHEN pflush1 =>
                     -- PFLUSH: Flush pages from ATC (EA built in pmmu1 if needed)
@@ -4335,6 +4399,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- - PFLUSHN:   brief(12)='0', brief(11)='1' - flush non-global with FC/EA
                     -- PMMU module handles actual flush operation
                     null;  -- PFLUSH request already set in pmmu1, PMMU handles the rest
+                    next_micro_state <= nop;  -- FIX: Return to normal execution after PFLUSH
 
                 WHEN pload1 =>
                     -- PLOAD: Load page into ATC (EA already built in pmmu1)
@@ -4344,21 +4409,69 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- - Address from EA (already in OP1out)
                     -- PMMU module performs page table walk and loads result into ATC
                     null;  -- PLOAD request already set in pmmu1, PMMU handles the rest
-                    
+                    next_micro_state <= nop;  -- FIX: Return to normal execution after PLOAD
+
+                -- PMOVE Dn direct mode for 64-bit registers (CRP/SRP)
+                WHEN pmmu_dn_high =>
+                    -- First transfer completed (HIGH word in/out of first register)
+                    -- Now handle LOW word with next register (Dn+1)
+                    -- The register number increment is handled by modifying rf_dest_addr
+                    set_writePCbig <= '1';
+                    next_micro_state <= pmmu_dn_low;
+
+                WHEN pmmu_dn_low =>
+                    -- Second transfer for 64-bit register (LOW word)
+                    -- For PMOVE <MMU>,Dn: Read LOW word to Dn+1
+                    -- For PMOVE Dn,<MMU>: Write LOW word from Dn+1
+                    IF opcode(7)='0' THEN
+                        -- PMOVE <MMU reg>,Dn+1 - Read LOW word from MMU, write to Dn+1
+                        set_exec(Regwrena) <= '1';
+                        set_exec(pmmu_rd) <= '1';
+                    ELSE
+                        -- PMOVE Dn+1,<MMU reg> - Read from Dn+1, write LOW word to MMU
+                        set_exec(pmmu_wr) <= '1';
+                    END IF;
+                    next_micro_state <= nop;  -- Complete after LOW word transfer
+
                 -- Cache control instruction implementations
                 WHEN cinv1 =>
-                    -- CINV/CPUSH: Decode extension word and execute cache operation
-                    -- Extension word format determines operation:
-                    -- bit 6: 0=CINV, 1=CPUSH
-                    -- bits 1-0: cache selection (00=both, 01=data, 10=instruction, 11=both)
-                    -- bits 4-3: scope (00=line, 01=page, 10=all, 11=all)
+                    -- CINV/CPUSH: Two forms supported
+                    -- 1. Two-word form (0x4E78): Extension word in brief determines operation
+                    -- 2. Single-word form (0xF4xx): Opcode bits determine operation (BUG #17 FIX)
+                    --
+                    -- For single-word form (opcode(15:12)="1111"):
+                    --   opcode(5) = operation (0=CINV, 1=CPUSH)
+                    --   opcode(4:3) = scope
+                    --   opcode(3:2) = cache selection
+                    --
+                    -- For two-word form (opcode(15:12)="0100"):
+                    --   brief(6) = operation (0=CINV, 1=CPUSH)
+                    --   brief(4:3) = scope
+                    --   brief(1:0) = cache selection
+
                     set(briefext) <= '1';
-                    IF brief(6) = '0' THEN
-                        -- CINV (Cache Invalidate)
-                        set_exec(cache_cinv) <= '1';
+
+                    -- BUG #17 FIX: Check if this is single-word or two-word form
+                    IF opcode(15 downto 12) = "1111" THEN
+                        -- Single-word form: Extract parameters from opcode
+                        IF opcode(5) = '0' THEN
+                            -- CINV (Cache Invalidate)
+                            set_exec(cache_cinv) <= '1';
+                        ELSE
+                            -- CPUSH (Cache Push)
+                            set_exec(cache_cpush) <= '1';
+                        END IF;
+                        -- Note: Scope and cache selection will be extracted from opcode
+                        -- by cache control logic (lines 567-591)
                     ELSE
-                        -- CPUSH (Cache Push) - for write-back caches
-                        set_exec(cache_cpush) <= '1';
+                        -- Two-word form: Use extension word from brief
+                        IF brief(6) = '0' THEN
+                            -- CINV (Cache Invalidate)
+                            set_exec(cache_cinv) <= '1';
+                        ELSE
+                            -- CPUSH (Cache Push) - for write-back caches
+                            set_exec(cache_cpush) <= '1';
+                        END IF;
                     END IF;
                     next_micro_state <= cpush1;
                     
@@ -4523,7 +4636,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 -----------------------------------------------------------------------------
 -- MOVEC
 -----------------------------------------------------------------------------
-  process (clk, SFC, DFC, VBR, CACR, CAAR, brief)
+  process (clk, SFC, DFC, VBR, CACR, CAAR, USP, SSP, MSP, ISP, brief, pmmu_reg_rdat)
   begin
 	-- all other hexa codes should give illegal isntruction exception
 	if rising_edge(clk) then
@@ -4531,6 +4644,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		VBR <= (others => '0');
 		CACR <= (others => '0');
 		CAAR <= (others => '0');
+		USP <= (others => '0');   -- BUG #18: Initialize USP
+		SSP <= (others => '0');   -- BUG #18: Initialize SSP
+		MSP <= (others => '0');   -- BUG #18: Initialize MSP
+		ISP <= (others => '0');   -- BUG #18: Initialize ISP
 	  elsif clkena_lw = '1' and exec(movec_wr) = '1' then
 		case brief(11 downto 0) is
 		  when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
@@ -4547,17 +4664,27 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		    CACR(13 downto 12) <= reg_QA(13 downto 12); -- DBE, WA - data burst enable, write allocate
 		    CACR(31 downto 14) <= (others => '0');     -- Reserved bits
 		    -- Cache invalidation triggered by self-clearing bits happens via cache_cinv_req signal
-		  when X"800" => NULL; -- USP -- 68010+
+		  when X"800" => USP <= reg_QA; -- BUG #18: USP -- 68010+
 		  when X"801" => VBR <= reg_QA; -- 68010+
 		  when X"802" => CAAR <= reg_QA; -- CAAR -- 68020+
-		  when X"803" => NULL; -- MSP -- 68020+
-		  when X"804" => NULL; -- isP -- 68020+
-		  when X"004" => NULL; -- TT0 -- 68030+ (PMMU handles via separate interface)
-		  when X"005" => NULL; -- TT1 -- 68030+ (PMMU handles via separate interface)  
-		  when X"805" => NULL; -- MMUSR -- 68030+ (PMMU handles via separate interface)
+		  when X"803" => MSP <= reg_QA; -- BUG #18: MSP -- 68020+
+		  when X"804" => ISP <= reg_QA; -- BUG #18: ISP -- 68020+
 		  when others => NULL;
 		end case;
   elsif clkena_lw = '1' then
+    -- BUG #18: Handle stack pointer save operations during mode switches
+    if exec(to_USP) = '1' then
+      USP <= reg_QA;
+    end if;
+    if exec(to_SSP) = '1' then
+      SSP <= reg_QA;
+    end if;
+    if exec(to_MSP) = '1' then
+      MSP <= reg_QA;
+    end if;
+    if exec(to_ISP) = '1' then
+      ISP <= reg_QA;
+    end if;
     -- Auto-clear self-clearing command bits after they've been set
     -- MC68030 spec: bits 2 (CEI), 3 (CI), 10 (CED), 11 (CD) are self-clearing
     if CACR(2) = '1' or CACR(3) = '1' or CACR(10) = '1' or CACR(11) = '1' then
@@ -4574,12 +4701,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		when X"000" => movec_data <= "00000000000000000000000000000" & SFC;
 		when X"001" => movec_data <= "00000000000000000000000000000" & DFC;
 	  when X"002" => movec_data <= CACR; -- CACR full 32-bit read
-	  when X"802" => movec_data <= CAAR;
-	  -- 68030 MMU registers accessible via MOVEC: TC, TT0, TT1
-
-	  when X"801" =>
-		movec_data <= VBR;
-		--end if;
+	  when X"800" => movec_data <= USP;  -- BUG #18: USP -- 68010+
+	  when X"801" => movec_data <= VBR;  -- 68010+
+	  when X"802" => movec_data <= CAAR; -- 68020+
+	  when X"803" => movec_data <= MSP;  -- BUG #18: MSP -- 68020+
+	  when X"804" => movec_data <= ISP;  -- BUG #18: ISP -- 68020+
 	  when others => NULL;
 	end case;
   end process;
@@ -4595,7 +4721,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
   -- Drive PMMU register interface during PMOVE execution
   process(clk)
     variable sel   : std_logic_vector(3 downto 0);
-    -- msel, mselr variables removed - MOVEC MMU register access no longer supported
   begin
     if rising_edge(clk) then
       if Reset = '1' then
@@ -4613,7 +4738,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         -- PMMU instruction handling (only on 68030)
         -- Handle both set() for immediate execution and exec() for deferred execution
         if CPU="11" AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
-          sel := pmmu_sel_from_brief(brief(11 downto 0));
+          sel := pmmu_sel_from_brief(brief(14 downto 10));
+		--   when x"02" => s := x"0"; -- TT0 (Transparent Translation 0)
+		--   when x"03" => s := x"1"; -- TT1 (Transparent Translation 1)
+		--   when x"10" => s := x"2"; -- TC (Translation Control)
+		--   when x"11" => s := x"3"; -- DRP (DMA Root Pointer)
+		--   when x"12" => s := x"4"; -- SRP (Supervisor Root Pointer)
+		--   when x"13" => s := x"5"; -- CRP (CPU Root Pointer)
+		--   when x"18" => s := x"6"; -- MMUSR (MMU Status Register)
+		--   when others => s := x"7"; -- invalid/not supported
           -- Latch source data only when actually doing PMMU operation to ensure correct value
           pmmu_reg_wdat_d <= pmmu_src_data;
 
@@ -4623,15 +4756,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
           -- PMOVE instruction handling (only if MOVEC is not active to avoid conflicts)
           if set(pmmu_wr) = '1' OR exec(pmmu_wr) = '1' then
             -- PMOVE Dn -> <MMU reg>
-            if sel /= x"F" then
+            if sel /= x"7" then
               pmmu_reg_sel_d  <= sel;
               -- pmmu_reg_wdat_d already latched above from pmmu_src_data
-              -- For CRP/SRP choose part: in pmmu2 (first read from mem) assume high part
-              if (sel = x"1") or (sel = x"2") then
-                if micro_state = pmmu2 then
-                  pmmu_reg_part_d <= '1';
+              -- For CRP/SRP choose part: HIGH word first, LOW word second
+              if (sel = x"4") or (sel = x"5") then
+                if micro_state = pmmu2 OR micro_state = pmmu1 OR micro_state = pmmu_dn_high then
+                  pmmu_reg_part_d <= '1';  -- HIGH word (mem EA first read, Dn first transfer)
                 else
-                  pmmu_reg_part_d <= '0';
+                  pmmu_reg_part_d <= '0';  -- LOW word (mem EA second read, Dn second transfer)
                 end if;
               end if;
               -- Check if this is PMOVEFD (Flush Disable): brief(15:13)="001" AND brief(12:8)="00000" AND EA mode != 000
@@ -4646,14 +4779,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
           if set(pmmu_rd) = '1' OR exec(pmmu_rd) = '1' then
             -- PMOVE <MMU reg> -> Dn
-            if sel /= x"F" then
+            if sel /= x"7" then
               pmmu_reg_sel_d <= sel;
-              -- For CRP/SRP choose part: in pmmu3 (first write to mem) assume high part
-              if (sel = x"1") or (sel = x"2") then
-                if micro_state = pmmu3 then
-                  pmmu_reg_part_d <= '1';
+              -- For CRP/SRP choose part: HIGH word first, LOW word second
+              if (sel = x"4") or (sel = x"5") then
+                if micro_state = pmmu3 OR micro_state = pmmu1 OR micro_state = pmmu_dn_high then
+                  pmmu_reg_part_d <= '1';  -- HIGH word (mem EA first write, Dn first transfer)
                 else
-                  pmmu_reg_part_d <= '0';
+                  pmmu_reg_part_d <= '0';  -- LOW word (mem EA second write, Dn second transfer)
                 end if;
               end if;
               pmmu_reg_re_d  <= '1';
@@ -4761,5 +4894,15 @@ PROCESS (sndOPC, movem_mux)
 
 -- MC68030 address routing: direct when MMU disabled, translated when enabled
 addr_out <= pmmu_addr_log_int when pmmu_tc_en = '0' else pmmu_addr_phys_int;
+
+-- DEBUG: Output supervisor mode tracking signals for analysis
+-- Convert bit type to std_logic for output
+debug_SVmode <= '1' when SVmode='1' else '0';
+debug_preSVmode <= '1' when preSVmode='1' else '0';
+debug_FlagsSR_S <= FlagsSR(5);
+debug_changeMode <= '1' when set(changeMode)='1' else '0';
+debug_setopcode <= '1' when setopcode='1' else '0';
+debug_exec_directSR <= '1' when exec(directSR)='1' else '0';
+debug_exec_to_SR <= '1' when exec(to_SR)='1' else '0';
 
 END; 

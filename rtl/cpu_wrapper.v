@@ -73,7 +73,7 @@ module cpu_wrapper
 	output reg  [7:0] toccata_base,
 
 	output reg  [1:0] cpustate,
-	output reg  [3:0] cacr,
+	output reg [31:0] cacr,
 	output reg [31:0] nmi_addr,
 
 	// 68030 Cache interface (when USE_68030_CACHE=1)
@@ -187,7 +187,11 @@ always @* begin
 		chip_rw      = c_rw;
 		chip_uds     = c_uds;
 		chip_lds     = c_lds;
-		chip_addr    = cpu_addr_p[23:1];
+		// Address mux: PMMU walker overrides CPU address during page table walks
+		if (USE_68030_CACHE && walker_active)
+			chip_addr    = walker_chip_addr;
+		else
+			chip_addr    = cpu_addr_p[23:1];
 		chip_din     = cpu_dout_p;
 		chip_data    = chipdout_i;
 		fastchip_sel = cpu_req & !cpu_addr_p[31:24];
@@ -218,7 +222,7 @@ end
 wire [15:0] cpu_dout_p;
 wire [31:0] cpu_addr_p;
 wire  [1:0] cpustate_p;
-wire  [3:0] cacr_p;
+wire [31:0] cacr_p;
 wire [31:0] vbr_p;
 wire        wr_p;
 wire        uds_p;
@@ -227,6 +231,14 @@ wire        reset_out_p;
 wire        longword;
 wire [31:0] pmmu_addr_log_p;
 wire [31:0] pmmu_addr_phys_p;
+wire        pmmu_walker_req_p;
+wire [31:0] pmmu_walker_addr_p;
+reg         pmmu_walker_ack_p;
+reg  [31:0] pmmu_walker_data_p;
+
+// PMMU walker address mux signals (for bus arbitration)
+reg         walker_active;
+wire [23:1] walker_chip_addr;
 
 // Cache interface signals (68030 only)
 wire        i_cache_enabled;
@@ -275,7 +287,7 @@ cpu_inst_p
 (
   .clk(clk),
   .nreset(reset),
-  .clkena_in(~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit)),
+  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit)) & ~pmmu_walker_req_p),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -304,6 +316,11 @@ cpu_inst_p
   // PMMU address interface
   .pmmu_addr_log(pmmu_addr_log_p),
   .pmmu_addr_phys(pmmu_addr_phys_p),
+  // PMMU walker memory interface
+  .pmmu_walker_req(pmmu_walker_req_p),
+  .pmmu_walker_addr(pmmu_walker_addr_p),
+  .pmmu_walker_ack(pmmu_walker_ack_p),
+  .pmmu_walker_data(pmmu_walker_data_p),
   // Cache operation address
   .cache_op_addr(cache_op_addr)
 );
@@ -378,6 +395,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 		.i_addr(i_cache_addr),
 		.i_addr_phys(pmmu_addr_phys_p),  // Physical address from PMMU
 		.i_req(i_cache_req),
+		.i_cache_inhibit(pmmu_cache_inhibit_p),  // Cache inhibit from PMMU
 		.i_data(i_cache_data),
 		.i_hit(i_cache_hit),
 		.i_fill_req(i_fill_req),
@@ -389,6 +407,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 		.d_addr_phys(pmmu_addr_phys_p),  // Physical address from PMMU
 		.d_req(d_cache_req),
 		.d_we(d_cache_we),
+		.d_cache_inhibit(pmmu_cache_inhibit_p),  // Cache inhibit from PMMU
 		.d_data_in(d_cache_data_in),
 		.d_data_out(d_cache_data_out),
 		.d_be(d_cache_be),
@@ -471,14 +490,120 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// Provide filled cache line to cache module
 	assign i_fill_data = fill_buffer;
 	assign i_fill_valid = fill_active & (fill_count == 7);
-	assign d_fill_data = fill_buffer; 
+	assign d_fill_data = fill_buffer;
 	assign d_fill_valid = fill_active & (fill_count == 7);
+
+	// PMMU Walker Memory Arbiter (Stall-Based Approach)
+	// The walker needs 32-bit descriptors from memory via two sequential 16-bit reads.
+	// Strategy: When walker requests, stall CPU (via clkena_in gate), drive walker address
+	// onto bus, perform reads, and acknowledge when complete.
+
+	reg [2:0] walker_state;
+	reg [15:0] walker_data_low;
+	reg [31:1] walker_addr_latch;  // Latch address to hold during multi-cycle read
+
+	localparam WALKER_IDLE       = 3'd0;
+	localparam WALKER_START      = 3'd1;
+	localparam WALKER_READ_LOW   = 3'd2;
+	localparam WALKER_WAIT_LOW   = 3'd3;
+	localparam WALKER_READ_HIGH  = 3'd4;
+	localparam WALKER_WAIT_HIGH  = 3'd5;
+	localparam WALKER_DONE       = 3'd6;
+
+	// Address multiplexing: Walker overrides CPU address during active states
+	// Walker addresses are byte addresses, chip_addr is word address (23:1)
+	// To read 32-bit descriptor: read word at addr[23:1], then addr[23:1]+1
+	wire walker_read_low_phase = (walker_state == WALKER_READ_LOW) | (walker_state == WALKER_WAIT_LOW);
+	wire [23:1] walker_base_addr = walker_addr_latch[23:1];  // Byte to word address
+	assign walker_chip_addr = walker_read_low_phase ?
+	                          walker_base_addr :           // Low word at base address
+	                          (walker_base_addr + 1'b1);   // High word at base+1
+
+	always @(posedge clk) begin
+		if (~reset) begin
+			walker_state <= WALKER_IDLE;
+			pmmu_walker_ack_p <= 0;
+			pmmu_walker_data_p <= 0;
+			walker_data_low <= 0;
+			walker_addr_latch <= 0;
+			walker_active <= 0;
+		end else begin
+			case (walker_state)
+				WALKER_IDLE: begin
+					pmmu_walker_ack_p <= 0;
+					walker_active <= 0;
+					if (pmmu_walker_req_p) begin
+						// Latch walker address and start read sequence
+						walker_addr_latch <= pmmu_walker_addr_p[31:1];
+						walker_state <= WALKER_START;
+					end
+				end
+
+				WALKER_START: begin
+					// Wait one cycle for CPU to stall (clkena_in gated low)
+					walker_active <= 1;  // Walker now owns the bus
+					walker_state <= WALKER_READ_LOW;
+				end
+
+				WALKER_READ_LOW: begin
+					// Drive walker address with LSB=0 for low word via walker_chip_addr mux
+					// Memory controller sees our address
+					walker_state <= WALKER_WAIT_LOW;
+				end
+
+				WALKER_WAIT_LOW: begin
+					if (chipready | ramready | fastchip_ready) begin
+						// Capture low 16 bits
+						walker_data_low <= cpu_din;
+						walker_state <= WALKER_READ_HIGH;
+					end
+				end
+
+				WALKER_READ_HIGH: begin
+					// Drive walker address with LSB=1 for high word via walker_chip_addr mux
+					walker_state <= WALKER_WAIT_HIGH;
+				end
+
+				WALKER_WAIT_HIGH: begin
+					if (chipready | ramready | fastchip_ready) begin
+						// Capture high 16 bits and assemble 32-bit descriptor
+						pmmu_walker_data_p <= {cpu_din, walker_data_low};
+						walker_state <= WALKER_DONE;
+					end
+				end
+
+				WALKER_DONE: begin
+					// Acknowledge completion to PMMU
+					pmmu_walker_ack_p <= 1;
+					walker_active <= 0;  // Release bus
+					if (~pmmu_walker_req_p) begin
+						// PMMU has deasserted request, return to idle
+						walker_state <= WALKER_IDLE;
+					end
+				end
+			endcase
+		end
+	end
 
 end else begin : gen_no_68030_cache
 
 	// Disable 68030 cache when not using it
 	assign i_cache_enabled = 1'b0;
 	assign d_cache_enabled = 1'b0;
+
+	// No walker arbiter when cache disabled
+	assign walker_chip_addr = 23'b0;  // Unused
+
+	always @(posedge clk) begin
+		if (~reset) begin
+			pmmu_walker_ack_p <= 0;
+			walker_active <= 0;
+			pmmu_walker_data_p <= 0;
+		end else begin
+			pmmu_walker_ack_p <= 0;
+			pmmu_walker_data_p <= 0;
+		end
+	end
 	assign cache_hit = 1'b0;
 	assign cache_miss = 1'b0;
 	assign i_cache_req = 1'b0;

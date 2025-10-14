@@ -110,7 +110,15 @@ COMPONENT TG68KdotC_Kernel
       pmmu_addr_phys  : out std_logic_vector(31 downto 0);
       pmmu_cache_inhibit : out std_logic;
 -- Cache operation address (68030)
-      cache_op_addr   : out std_logic_vector(31 downto 0)
+      cache_op_addr   : out std_logic_vector(31 downto 0);
+-- DEBUG: Supervisor mode tracking signals
+      debug_SVmode        : out std_logic;
+      debug_preSVmode     : out std_logic;
+      debug_FlagsSR_S     : out std_logic;
+      debug_changeMode    : out std_logic;
+      debug_setopcode     : out std_logic;
+      debug_exec_directSR : out std_logic;
+      debug_exec_to_SR    : out std_logic
 --      longword       : out std_logic;
 --      clr_berr       : out std_logic;
    );
@@ -233,6 +241,15 @@ COMPONENT TG68K_Cache_030
    type sync_state_t is (sync0, sync1, sync2, sync3, sync4, sync5, sync6, sync7, sync8, sync9);
    signal sync_state : sync_state_t;
 
+   -- DEBUG: Supervisor mode tracking signals
+   SIGNAL debug_SVmode_int        : std_logic;
+   SIGNAL debug_preSVmode_int     : std_logic;
+   SIGNAL debug_FlagsSR_S_int     : std_logic;
+   SIGNAL debug_changeMode_int    : std_logic;
+   SIGNAL debug_setopcode_int     : std_logic;
+   SIGNAL debug_exec_directSR_int : std_logic;
+   SIGNAL debug_exec_to_SR_int    : std_logic;
+
 BEGIN  
    DATA <= data_write WHEN data_akt_e='1' OR data_akt_s='1' ELSE "ZZZZZZZZZZZZZZZZ";
    AS <= as_s AND as_e;
@@ -295,7 +312,15 @@ cpu1: TG68KdotC_Kernel
       pmmu_addr_phys => pmmu_addr_phys,   -- : out std_logic_vector(31 downto 0)
       pmmu_cache_inhibit => pmmu_ch_inhibit, -- : out std_logic
       -- Cache operation address (68030)
-      cache_op_addr => cache_op_addr      -- : out std_logic_vector(31 downto 0)
+      cache_op_addr => cache_op_addr,     -- : out std_logic_vector(31 downto 0)
+      -- DEBUG: Supervisor mode tracking signals
+      debug_SVmode => debug_SVmode_int,
+      debug_preSVmode => debug_preSVmode_int,
+      debug_FlagsSR_S => debug_FlagsSR_S_int,
+      debug_changeMode => debug_changeMode_int,
+      debug_setopcode => debug_setopcode_int,
+      debug_exec_directSR => debug_exec_directSR_int,
+      debug_exec_to_SR => debug_exec_to_SR_int
    );
  
    PROCESS (CLK)

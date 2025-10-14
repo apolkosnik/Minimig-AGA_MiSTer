@@ -14,6 +14,8 @@ This is the Minimig-AGA_MiSTer project - an FPGA implementation of the Amiga com
 - Build generates RBF files for the MiSTer platform
 - Keep track of the build's PID, you don't want to pkill builds from another instance!
 - create and run regression tests and correctness tests before building the rbf
+- Check if the process is there with ps instead of trying to kill it right away
+- Never convert the existing SOF to RBF!
 - **Remember to check for multiple drivers issues before starting a build**
 
 #### Linux Build Commands
@@ -237,6 +239,7 @@ make clean
 - Intel ModelSim ASE (configured for path `/opt/intelFPGA_lite/17.0/modelsim_ase`)
 - VHDL source files in `rtl/tg68k/` directory
 - Proper VHDL-93 compilation environment
+- Alternatively, iverilog is available
 
 #### Hardware Testing
 - **MiSTer Platform**: Testing with actual Amiga software on MiSTer hardware
@@ -356,6 +359,22 @@ Bits 7-4 (TIC):   Table Index C field size
 Bits 3-0 (TID):   Table Index D field size
 ```
 
+##### TC - Page Size (PS) field
+```
+Page Size (PS) - 4-bit field specifies the system page size:
+1000: 256 bytes
+1001: 512 bytes
+1010: 1K bytes
+1011: 2K bytes
+1100: 4K bytes
+1101: 8K bytes
+1110: 16K bytes
+1111: 32K bytes
+
+All other bit combinations are reserved by Motorola for future use; an
+attempt to load other values into this field of the TC register causes an MMU configuration exception. 
+```
+
 #### CRP - CPU Root Pointer - 64-bit
 **Register Select**: 0x1 (requires reg_part for high/low)
 ```
@@ -470,10 +489,11 @@ LOW:
 
 
 #### TT0 - Transparent Translation Register 0 - 32-bit
+##### MC68030 TTR format
 **Register Select**: 0x3
 ```
 Bits 31-24: Logical Address Base
-Bits 23-16: Logical Address Mask (A31-A24 to be ignored)
+Bits 23-16: Logical Address Mask
 Bit 15 (E):  Enable
 Bits 14-11: Reserved
 Bits 10 (CI): Cache Inhibit
@@ -482,7 +502,7 @@ Bit 8 (RWM):  Read/Write Mask
 Bit 7:       Reserved (forced to 0)
 Bits 6-4:    Function Code Base
 Bit 3:       Reserved (forced to 0)
-Bits 2-0:    Function Code Base
+Bits 2-0:    Function Code Mask
 ```
 
 #### TT1 - Transparent Translation Register 1 - 32-bit
