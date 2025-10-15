@@ -408,8 +408,8 @@ always @(posedge clk) begin
 	end
 	
 	ide_config <= ide_cfg;
-	cpu_config <= cpu_cfg;
-	//cpu_config <= t_cpu_config[2:0]; // hard setting 68030 for now
+	//cpu_config <= cpu_cfg;
+	cpu_config <= t_cpu_config[2:0]; // hard setting 68030 for now
 end
 
 always @(posedge clk) begin
@@ -462,7 +462,8 @@ always @(posedge clk) begin
 			if(!bcnt) begin
 				if (reset_ctrl_sel)   {cpuhlt, cpurst, usrrst} <= IO_DIN[2:0];
 				if (chip_cfg_sel)     t_chipset_config <= IO_DIN[4:0];
-				if (cpu_cfg_sel)      t_cpu_config <= IO_DIN[5:0];
+				//if (cpu_cfg_sel)      t_cpu_config <= IO_DIN[5:0];
+				if (cpu_cfg_sel)      t_cpu_config <= 6'b000100;				
 				if (memory_cfg_sel)   t_memory_config <= IO_DIN[7:0];
 				if (video_cfg_sel)    {blver, ar, scanline} <= {IO_DIN[11:8],IO_DIN[2:0]};
 				if (floppy_cfg_sel)   floppy_config <= IO_DIN[3:0];
@@ -476,7 +477,7 @@ always @(posedge clk) begin
 				  0 : host_adr[ 7: 0] <= IO_DIN[7:0];
 				  1 : host_adr[15: 8] <= IO_DIN[7:0];
 				  2 : host_adr[23:16] <= IO_DIN[7:0];
-				  //3 : host_adr[31:24] <= IO_DIN[7:0]; // Will that work???
+				  3 : host_adr[31:24] <= IO_DIN[7:0]; // Will that work???
 				  //3 : mem_page[ 7: 0] <= IO_DIN[7:0]; // this was already commented out
 				endcase
 

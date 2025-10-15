@@ -22,28 +22,37 @@ module cpu_cache_new
   input       [3:0] cpu_cache_ctrl, // CPU cache control
   input             cache_inhibit,  // cache inhibit
 
-  // cpu    
+  // cpu
   input             cpu_cs,         // cpu activity
   input      [28:1] cpu_adr,        // cpu address
   input       [1:0] cpu_bs,         // cpu byte selects
   input             cpu_we,         // cpu write
   input             cpu_ir,         // cpu instruction read
   input             cpu_dr,         // cpu data read
-  input      [15:0] cpu_dat_w,      // cpu write data
-  output reg [15:0] cpu_dat_r,      // cpu read data
+`ifdef MISTER_DUAL_SDRAM
+  input      [31:0] cpu_dat_w,      // cpu write data (32-bit for dual SDRAM)
+  output reg [31:0] cpu_dat_r,      // cpu read data (32-bit for dual SDRAM)
+`else
+  input      [15:0] cpu_dat_w,      // cpu write data (16-bit legacy)
+  output reg [15:0] cpu_dat_r,      // cpu read data (16-bit legacy)
+`endif
   output reg        cpu_ack,        // cpu acknowledge
 
   // writebuffer
   output reg        wb_en,          // writebuffer enable
 
   // sdram
-  input      [15:0] sdr_dat_r,      // sdram read data
+`ifdef MISTER_DUAL_SDRAM
+  input      [31:0] sdr_dat_r,      // sdram read data (32-bit for dual SDRAM)
+`else
+  input      [15:0] sdr_dat_r,      // sdram read data (16-bit legacy)
+`endif
   output reg        sdr_read_req,   // sdram read request from cache
   input             sdr_read_ack,   // sdram read acknowledge to cache
 
   // snoop
   input             snoop_act,      // snoop act (write only - just update existing data in cache)
-  input      [28:1] snoop_adr,      // chip address                      
+  input      [28:1] snoop_adr,      // chip address
   input      [15:0] snoop_dat_w,    // snoop write data
   input       [1:0] snoop_bs
 );
@@ -66,7 +75,11 @@ reg         cpu_sm_iram1_we;
 reg         cpu_sm_dram0_we;
 reg         cpu_sm_dram1_we;
 reg   [1:0] cpu_sm_bs;
+`ifdef MISTER_DUAL_SDRAM
+reg  [31:0] cpu_sm_mem_dat_w;
+`else
 reg  [15:0] cpu_sm_mem_dat_w;
+`endif
 reg  [39:0] cpu_sm_tag_dat_w;
 reg         cpu_sm_id;
 reg         cpu_sm_ilru;
@@ -78,7 +91,11 @@ reg         sdr_sm_iram0_we;
 reg         sdr_sm_iram1_we;
 reg         sdr_sm_dram0_we;
 reg         sdr_sm_dram1_we;
+`ifdef MISTER_DUAL_SDRAM
+reg  [31:0] sdr_sm_mem_dat_w;
+`else
 reg  [15:0] sdr_sm_mem_dat_w;
+`endif
 reg  [39:0] sdr_sm_tag_dat_w;
 reg         sdr_sm_id;
 reg         sdr_sm_ilru;
@@ -98,8 +115,13 @@ wire [17:0] cpu_adr_tag;
 wire  [9:0] idram0_cpu_adr;
 wire  [1:0] idram0_cpu_bs;
 wire        idram0_cpu_we;
+`ifdef MISTER_DUAL_SDRAM
+wire [31:0] idram0_cpu_dat_w;
+wire [31:0] idram0_cpu_dat_r;
+`else
 wire [15:0] idram0_cpu_dat_w;
 wire [15:0] idram0_cpu_dat_r;
+`endif
 wire  [9:0] idram0_sdr_adr;
 wire  [1:0] idram0_sdr_bs;
 wire        idram0_sdr_we;
@@ -109,8 +131,13 @@ wire [15:0] idram0_sdr_dat_r;
 wire  [9:0] idram1_cpu_adr;
 wire  [1:0] idram1_cpu_bs;
 wire        idram1_cpu_we;
+`ifdef MISTER_DUAL_SDRAM
+wire [31:0] idram1_cpu_dat_w;
+wire [31:0] idram1_cpu_dat_r;
+`else
 wire [15:0] idram1_cpu_dat_w;
 wire [15:0] idram1_cpu_dat_r;
+`endif
 wire  [9:0] idram1_sdr_adr;
 wire  [1:0] idram1_sdr_bs;
 wire        idram1_sdr_we;
@@ -120,8 +147,13 @@ wire [15:0] idram1_sdr_dat_r;
 wire  [9:0] ddram0_cpu_adr;
 wire  [1:0] ddram0_cpu_bs;
 wire        ddram0_cpu_we;
+`ifdef MISTER_DUAL_SDRAM
+wire [31:0] ddram0_cpu_dat_w;
+wire [31:0] ddram0_cpu_dat_r;
+`else
 wire [15:0] ddram0_cpu_dat_w;
 wire [15:0] ddram0_cpu_dat_r;
+`endif
 wire  [9:0] ddram0_sdr_adr;
 wire  [1:0] ddram0_sdr_bs;
 wire        ddram0_sdr_we;
@@ -131,8 +163,13 @@ wire [15:0] ddram0_sdr_dat_r;
 wire  [9:0] ddram1_cpu_adr;
 wire  [1:0] ddram1_cpu_bs;
 wire        ddram1_cpu_we;
+`ifdef MISTER_DUAL_SDRAM
+wire [31:0] ddram1_cpu_dat_w;
+wire [31:0] ddram1_cpu_dat_r;
+`else
 wire [15:0] ddram1_cpu_dat_w;
 wire [15:0] ddram1_cpu_dat_r;
+`endif
 wire  [9:0] ddram1_sdr_adr;
 wire  [1:0] ddram1_sdr_bs;
 wire        ddram1_sdr_we;
@@ -551,7 +588,11 @@ assign idram0_sdr_bs    = snoop_bs;
 assign idram0_sdr_we    = sdr_sm_iram0_we;
 assign idram0_sdr_dat_w = sdr_sm_mem_dat_w;
 
+`ifdef MISTER_DUAL_SDRAM
+dpram_be_1024x32 idram0 (
+`else
 dpram_be_1024x16 idram0 (
+`endif
   .clock      (clk              ),
   .address_a  (idram0_cpu_adr   ),
   .byteena_a  (idram0_cpu_bs    ),
@@ -575,7 +616,11 @@ assign idram1_sdr_bs    = snoop_bs;
 assign idram1_sdr_we    = sdr_sm_iram1_we;
 assign idram1_sdr_dat_w = sdr_sm_mem_dat_w;
 
+`ifdef MISTER_DUAL_SDRAM
+dpram_be_1024x32 idram1 (
+`else
 dpram_be_1024x16 idram1 (
+`endif
   .clock      (clk              ),
   .address_a  (idram1_cpu_adr   ),
   .byteena_a  (idram1_cpu_bs    ),
@@ -631,7 +676,11 @@ assign ddram0_sdr_bs    = snoop_bs;
 assign ddram0_sdr_we    = sdr_sm_dram0_we;
 assign ddram0_sdr_dat_w = sdr_sm_mem_dat_w;
 
+`ifdef MISTER_DUAL_SDRAM
+dpram_be_1024x32 ddram0 (
+`else
 dpram_be_1024x16 ddram0 (
+`endif
   .clock      (clk              ),
   .address_a  (ddram0_cpu_adr   ),
   .byteena_a  (ddram0_cpu_bs    ),
@@ -655,7 +704,11 @@ assign ddram1_sdr_bs    = snoop_bs;
 assign ddram1_sdr_we    = sdr_sm_dram1_we;
 assign ddram1_sdr_dat_w = sdr_sm_mem_dat_w;
 
+`ifdef MISTER_DUAL_SDRAM
+dpram_be_1024x32 ddram1 (
+`else
 dpram_be_1024x16 ddram1 (
+`endif
   .clock      (clk              ),
   .address_a  (ddram1_cpu_adr   ),
   .byteena_a  (ddram1_cpu_bs    ),
@@ -716,3 +769,81 @@ dpram #(10,8) ram_u
 );
 
 endmodule
+
+`ifdef MISTER_DUAL_SDRAM
+// 32-bit dual-port RAM with byte enables (for dual SDRAM mode)
+module dpram_be_1024x32
+(
+	input         clock,
+
+	input	  [9:0] address_a,
+	input	  [3:0] byteena_a,  // 4-byte enables for 32-bit
+	input	 [31:0] data_a,
+	input         wren_a,
+	output [31:0] q_a,
+
+	input	  [9:0] address_b,
+	input	  [1:0] byteena_b,  // Keep 2-byte for snoop (16-bit)
+	input	 [15:0] data_b,
+	input	        wren_b,
+	output [31:0] q_b
+);
+
+// Byte 0 (bits 7:0)
+dpram #(10,8) ram_b0
+(
+	.clock(clock),
+	.address_a(address_a),
+	.data_a(data_a[7:0]),
+	.wren_a(byteena_a[0] & wren_a),
+	.q_a(q_a[7:0]),
+	.address_b(address_b),
+	.data_b(data_b[7:0]),
+	.wren_b(byteena_b[0] & wren_b),
+	.q_b(q_b[7:0])
+);
+
+// Byte 1 (bits 15:8)
+dpram #(10,8) ram_b1
+(
+	.clock(clock),
+	.address_a(address_a),
+	.data_a(data_a[15:8]),
+	.wren_a(byteena_a[1] & wren_a),
+	.q_a(q_a[15:8]),
+	.address_b(address_b),
+	.data_b(data_b[15:8]),
+	.wren_b(byteena_b[1] & wren_b),
+	.q_b(q_b[15:8])
+);
+
+// Byte 2 (bits 23:16) - NEW for 32-bit
+dpram #(10,8) ram_b2
+(
+	.clock(clock),
+	.address_a(address_a),
+	.data_a(data_a[23:16]),
+	.wren_a(byteena_a[2] & wren_a),
+	.q_a(q_a[23:16]),
+	.address_b(address_b),
+	.data_b(8'h00),  // Snoop doesn't write upper 16 bits
+	.wren_b(1'b0),
+	.q_b(q_b[23:16])
+);
+
+// Byte 3 (bits 31:24) - NEW for 32-bit
+dpram #(10,8) ram_b3
+(
+	.clock(clock),
+	.address_a(address_a),
+	.data_a(data_a[31:24]),
+	.wren_a(byteena_a[3] & wren_a),
+	.q_a(q_a[31:24]),
+	.address_b(address_b),
+	.data_b(8'h00),  // Snoop doesn't write upper 16 bits
+	.wren_b(1'b0),
+	.q_b(q_b[31:24])
+);
+
+endmodule
+`endif

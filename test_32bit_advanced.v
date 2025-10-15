@@ -51,9 +51,9 @@ module test_32bit_advanced();
     assign longword_w = (size_w == 2'b10);
 
     // Advanced configuration signals
-    wire wf68k30l_pipeline_en = cachecfg[2] & cpucfg[2];
-    wire wf68k30l_loop_opt_en = cachecfg[1] & cpucfg[2];
-    wire wf68k30l_bitfield_en = cachecfg[0] & cpucfg[2];
+    wire wf68k30l_pipeline_en = cachecfg[2] & cpucfg == 3'b100;
+    wire wf68k30l_loop_opt_en = cachecfg[1] & cpucfg == 3'b100;
+    wire wf68k30l_bitfield_en = cachecfg[0] & cpucfg == 3'b100;
 
     // Test procedure
     initial begin

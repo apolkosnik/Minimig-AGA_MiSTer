@@ -188,25 +188,25 @@ begin
 	end
 end
 
-assign t_sel_slow[0] = (cpu_address_in[23:19]==5'b1100_0) && |memory_config[3:2]; //$C00000 - $C7FFFF
-assign t_sel_slow[1] = (cpu_address_in[23:19]==5'b1100_1) &&  memory_config[3];   //$C80000 - $CFFFFF
-assign t_sel_slow[2] = (cpu_address_in[23:19]==5'b1101_0) && &memory_config[3:2]; //$D00000 - $D7FFFF
+assign t_sel_slow[0] = (cpu_address_in[31:19]==13'b0000_0000_1100_0) && |memory_config[3:2]; //$C00000 - $C7FFFF
+assign t_sel_slow[1] = (cpu_address_in[31:19]==13'b0000_0000_1100_1) &&  memory_config[3];   //$C80000 - $CFFFFF
+assign t_sel_slow[2] = (cpu_address_in[31:19]==13'b0000_0000_1101_0) && &memory_config[3:2]; //$D00000 - $D7FFFF
 
 // 32-bit addressing: chip selectors only active in 24-bit compatible space
-assign sel_ide   = chip_space_32bit && hdc_ena && cpu_address_in[23:16]==8'b1101_1010;        //IDE registers at $DA0000 - $DAFFFF
-assign sel_gayle = chip_space_32bit && hdc_ena && cpu_address_in[23:12]==12'b1101_1110_0001;  //GAYLE registers at $DE1000 - $DE1FFF
-assign sel_rtc   = chip_space_32bit && cpu_address_in[23:16]==8'b1101_1100;                   //RTC registers at $DC0000 - $DCFFFF
-assign sel_reg   = chip_space_32bit && cpu_address_in[23:21]==3'b110 ? ~(|t_sel_slow | sel_rtc | sel_ide | sel_gayle) : 1'b0;	//chip registers at $DF0000 - $DFFFFF
-assign sel_cia   = chip_space_32bit && cpu_address_in[23:16]==8'hBF; // $BFxxxx
+assign sel_ide   = chip_space_32bit && hdc_ena && cpu_address_in[31:16]==16'b0000_0000_1101_1010;        //IDE registers at $DA0000 - $DAFFFF
+assign sel_gayle = chip_space_32bit && hdc_ena && cpu_address_in[31:12]==20'b0000_0000_1101_1110_0001;  //GAYLE registers at $DE1000 - $DE1FFF
+assign sel_rtc   = chip_space_32bit && cpu_address_in[31:16]==16'b000_0000_1101_1100;                   //RTC registers at $DC0000 - $DCFFFF
+assign sel_reg   = chip_space_32bit && cpu_address_in[31:21]==11'b0000_0000_110 ? ~(|t_sel_slow | sel_rtc | sel_ide | sel_gayle) : 1'b0;	//chip registers at $DF0000 - $DFFFFF
+assign sel_cia   = chip_space_32bit && cpu_address_in[31:16]==8'h00BF; // $BFxxxx
 assign sel_cia_a = sel_cia & ~cpu_address_in[12];
 assign sel_cia_b = sel_cia & ~cpu_address_in[13];
-assign sel_rtg   = chip_space_32bit && cpu_address_in[23:16]==8'hB8; // $B8xxxxx
-assign sel_bank_1 = chip_space_32bit && cpu_address_in[23:21]==3'b001;
+assign sel_rtg   = chip_space_32bit && cpu_address_in[31:16]==8'h00B8; // $B8xxxxx
+assign sel_bank_1 = chip_space_32bit && cpu_address_in[31:21]==11'b0000_0000_001;
 
 assign sel_toccata = chip_space_32bit && toccata_ena && cpu_address_in[23:16]==toccata_base; // Nominally $e9xxxx
 
 //data bus slow down - only apply in 24-bit compatible space
-assign dbs = chip_space_32bit && (cpu_address_in[23:21]==3'b000 || cpu_address_in[23:20]==4'b1100 || cpu_address_in[23:19]==5'b1101_0 || cpu_address_in[23:16]==8'b1101_1111);
+assign dbs = chip_space_32bit && (cpu_address_in[31:21]==3'b0000_0000_000 || cpu_address_in[31:20]==12'b0000_0000_1100 || cpu_address_in[31:19]==13'b0000_0000_1101_0 || cpu_address_in[31:16]==16'b0000_0000_1101_1111);
 assign xbs = ~(sel_cia | sel_gayle | sel_ide);
 
 endmodule

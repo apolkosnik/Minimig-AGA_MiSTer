@@ -78,7 +78,7 @@ module cpu_wrapper
 
 assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
 assign ramshared    = sel_dd;
-assign cpu_longword = cpucfg[2] ? longword_w : cpucfg[1] ? longword : 1'b0;  // Export longword for gayle and other modules
+assign cpu_longword = cpucfg == 3'b100 ? longword_w : cpucfg[1] ? longword : 1'b0;  // Export longword for gayle and other modules
 
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
@@ -134,25 +134,45 @@ assign fastchip_rnw = wr;
 reg  [31:0] cpu_addr;
 reg  [31:0] cpu_dout;
 
-// For now, run WF68K30L at full system clock speed
-// The DSACK protocol will handle timing automatically
+// WF68K30L runs at full system clock speed
 wire clk_cpu = clk;
 
 // WF68K30L initialization sequencer
-// Required: RESET_INn=1 AND HALT_INn=0 for 10+ clocks to release internal CPU reset
-reg [3:0] wf68k_init_count;
+// Per MC68030 datasheet: After RESET negated, assert HALT for 10+ clocks minimum
+// Sequence: RESET asserted (LOW) -> RESET released (HIGH) + HALT asserted (LOW) for 10+ clocks -> HALT released (HIGH)
+// NOTE: Running at full speed (~57 MHz), so doubled cycle counts vs half-speed version
+reg [5:0] wf68k_init_count;
+reg wf68k_reset_n;
 reg wf68k_halt_n;
 
-always @(posedge clk) begin
-    if (reset) begin
-        wf68k_init_count <= 4'd0;
-        wf68k_halt_n <= 1'b0;  // Assert HALT during system reset
+// CRITICAL: Run reset/HALT FSM on CPU clock to match WF68K30L expectations
+always @(posedge clk_cpu) begin
+    if (reset || cpucfg != 3'b100) begin
+        // Keep WF68K30L in reset when not selected or during system reset
+        wf68k_init_count <= 6'd0;
+        wf68k_reset_n <= 1'b0;  // Assert RESET
+        wf68k_halt_n <= 1'b0;   // Assert HALT
     end else begin
-        if (wf68k_init_count < 4'd15) begin
-            wf68k_init_count <= wf68k_init_count + 4'd1;
-            wf68k_halt_n <= 1'b0;  // Keep HALT asserted for 15 clocks after reset release
+        // WF68K30L selected and system reset released - run init sequence
+        if (wf68k_init_count < 6'd50) begin
+            wf68k_init_count <= wf68k_init_count + 6'd1;
+            // Stage 1 (cycles 0-23): Keep RESET asserted for RESET_FILTER counter
+            // WF68K30L RESET_FILTER needs RESET_IN=1 for >10 cycles (0xA)
+            // to set RESET_CPU_I=1 and enable BUS_EN
+            // Doubled from 12 to 24 for full-speed clock
+            if (wf68k_init_count < 6'd24) begin
+                wf68k_reset_n <= 1'b0;  // RESET still asserted
+                wf68k_halt_n <= 1'b0;   // HALT asserted
+            end
+            // Stage 2 (cycles 24-49): Release RESET, keep HALT for stabilization
+            // Doubled from 25 to 50 for full-speed clock
+            else begin
+                wf68k_reset_n <= 1'b1;  // RESET released
+                wf68k_halt_n <= 1'b0;   // HALT asserted for initialization
+            end
         end else begin
-            wf68k_halt_n <= 1'b1;  // Release HALT after initialization complete
+            wf68k_reset_n <= 1'b1;  // RESET released
+            wf68k_halt_n <= 1'b1;   // HALT released - CPU can run
         end
     end
 end
@@ -191,8 +211,8 @@ assign byte_enables = longword ? 4'b1111 :
                               4'b1111; // Default to all enabled
 
 always @* begin
-	if(cpucfg[2]) begin
-		// WF68K30L CPU selected
+	if(cpucfg == 3'b100) begin
+		// WF68K30L CPU selected - Use state machine for chipset compatibility
 		cpu_dout     = cpu_dout_w;
 		cpu_addr     = cpu_addr_w;
 		cpustate     = cpustate_w;
@@ -201,40 +221,40 @@ always @* begin
 		wr           = ~wr_w;
 		uds_in       = uds_w;
 		lds_in       = lds_w;
-		reset_out    = ~reset_out_w;
-		chip_as      = as_w;
-		chip_rw      = ~wr_w;  // CRITICAL FIX: RWn is active-low, chip_rw is active-high (1=write)
-		chip_uds     = uds_w;
-		chip_lds     = lds_w;
-		chip_be      = be_w;  // NEW: Export 4-byte enables for 32-bit support
-		chip_addr    = cpu_addr_w[31:1];
-		chip_din     = cpu_dout_w;
-		chip_data    = chip_dout;
-		fastchip_sel = cpu_req & (cpu_addr_w[31:24] >= 8'h02 && cpu_addr_w[31:24] <= 8'h9F); // FastRAM regions $02000000-$9FFFFFFF
-		fastchip_lw  = longword_w;
-	end
-	else if(cpucfg == 3'b001 || cpucfg == 3'b010 || cpucfg == 3'b011) begin
-		// TG68K CPU selected
-		cpu_dout     = cpu_dout_p;
-		cpu_addr     = cpu_addr_p;
-		cpustate     = cpustate_p;
-		cacr         = cacr_p;
-		vbr          = vbr_p;
-		wr           = wr_p;
-		uds_in       = uds_p;
-		lds_in       = lds_p;
-		reset_out    = reset_out_p;
-		chip_as      = c_as;
+		reset_out    = reset_out_w;
+		chip_as      = c_as;  // Use state machine - chipset needs proper timing
 		chip_rw      = c_rw;
 		chip_uds     = c_uds;
 		chip_lds     = c_lds;
-		chip_be      = {2'b11, ~c_uds, ~c_lds};  // TG68K: Convert UDS/LDS to byte enables
-		chip_addr    = cpu_addr_p[31:1];
-		chip_din     = cpu_dout_p;
-		chip_data    = chipdout_i;
-		fastchip_sel = cpu_req & (cpu_addr_p[31:24] >= 8'h02 && cpu_addr_p[31:24] <= 8'h9F); // FastRAM regions $02000000-$9FFFFFFF
-		fastchip_lw  = longword;
+		chip_be      = be_w;  // 4-byte enables for 32-bit support
+		chip_addr    = cpu_addr_w[31:1];
+		chip_din     = cpu_dout_w;
+		chip_data    = chipdout_i;  // Use state machine buffered chipset data
+		fastchip_sel = cpu_req & (cpu_addr_w[31:24] >= 8'h02 && cpu_addr_w[31:24] <= 8'h9F);
+		fastchip_lw  = longword_w;
 	end
+	// else if(cpucfg == 3'b001 || cpucfg == 3'b010 || cpucfg == 3'b011) begin
+	// 	// TG68K CPU selected
+	// 	cpu_dout     = cpu_dout_p;
+	// 	cpu_addr     = cpu_addr_p;
+	// 	cpustate     = cpustate_p;
+	// 	cacr         = cacr_p;
+	// 	vbr          = vbr_p;
+	// 	wr           = wr_p;
+	// 	uds_in       = uds_p;
+	// 	lds_in       = lds_p;
+	// 	reset_out    = reset_out_p;
+	// 	chip_as      = c_as;
+	// 	chip_rw      = c_rw;
+	// 	chip_uds     = c_uds;
+	// 	chip_lds     = c_lds;
+	// 	chip_be      = {2'b11, ~c_uds, ~c_lds};  // TG68K: Convert UDS/LDS to byte enables
+	// 	chip_addr    = cpu_addr_p[31:1];
+	// 	chip_din     = cpu_dout_p;
+	// 	chip_data    = chipdout_i;
+	// 	fastchip_sel = cpu_req & (cpu_addr_p[31:24] >= 8'h02 && cpu_addr_p[31:24] <= 8'h9F); // FastRAM regions $02000000-$9FFFFFFF
+	// 	fastchip_lw  = longword;
+	// end
 	else begin
 		// fx68k CPU selected (68000)
 		cpu_dout     = cpu_dout_o;
@@ -365,26 +385,45 @@ wire        longword_w;
 
 // DSACK generation for WF68K30L
 wire  [1:0] dsack_w;
-// Note: chip_dtack is active-low from minimig module (._cpu_dtack)
-wire        dtack_active = ramsel ? ramready : ~chip_dtack;
+
+// WF68K30L DSACK generation with proper chipset support
+// Chipset access goes through state machine, which generates chipready
+// RAM and fastchip access is direct with their own ready signals
+wire dtack_active = ramsel ? ramready :
+                   fastchip_selack ? fastchip_ready :
+                   chipready;  // Chipset: use state machine's chipready
+
+// CRITICAL: Register dtack_active on CPU clock to avoid glitches during DSACK generation
+reg dtack_active_r;
+always @(posedge clk_cpu) begin
+    dtack_active_r <= dtack_active;
+end
 
 // Fixed DTACK to DSACK protocol conversion for WF68K30L
 // DSACK encoding: 11=no acknowledge, 10=8-bit, 01=16-bit, 00=32-bit
 // SIZE encoding: 00=byte, 01=word, 10=3-byte, 11=longword
 // CRITICAL: Only assert DSACK when ASn is active (low) AND dtack is ready
-assign dsack_w = (~as_w & dtack_active) ? (
+// Use registered dtack_active_r to avoid glitches across clock domains
+assign dsack_w = (~as_w & dtack_active_r) ? (
+`ifdef MISTER_DUAL_SDRAM
+    // TRUE 32-BIT MODE: With dual SDRAM, we have full 32-bit bandwidth
     (size_w == 2'b00) ? 2'b10 :   // Byte -> 8-bit port
     (size_w == 2'b01) ? 2'b01 :   // Word -> 16-bit port
-    (size_w == 2'b10) ? 2'b01 :   // 3-byte -> treat as 16-bit port
-    (size_w == 2'b11) ? 2'b00 :   // Longword -> 32-bit port
-    2'b11                         // Invalid -> no acknowledge
-) : 2'b11;
+    2'b00                         // Longword -> 32-bit port (single cycle!)
+`else
+    // 16-BIT MODE: RAM is actually 16-bit (sdram_ctrl.v outputs [15:0])
+    // Tell CPU it's a 16-bit port so it splits longword accesses into two cycles
+    // Otherwise upper 16 bits of longwords will be garbage (zero)
+    (size_w == 2'b00) ? 2'b10 :   // Byte -> 8-bit port
+    2'b01                         // Word/Longword -> 16-bit port (force 2 cycles for longs)
+`endif
+) : 2'b11;  // No acknowledge when AS inactive or not ready
 
 // TRUE 32-BIT BUS: SIZE to 4-byte-enable conversion
 // This removes the 16-bit bottleneck and enables full 32-bit bandwidth
 // BE[3:0] active-low: BE3(31:24), BE2(23:16), BE1(15:8), BE0(7:0)
 wire [1:0] byte_lanes = cpu_addr_w[1:0];
-assign be_w = ds_w ? 4'b1111 : (  // When DSn inactive, all byte enables off
+assign be_w = ~ds_w ? (  // When DSn active (LOW), generate byte enables
     (size_w == 2'b00) ? (  // Byte access - enable single byte based on address
         (byte_lanes == 2'b00) ? 4'b1110 :  // Byte 3 (bits 31:24)
         (byte_lanes == 2'b01) ? 4'b1101 :  // Byte 2 (bits 23:16)
@@ -398,7 +437,7 @@ assign be_w = ds_w ? 4'b1111 : (  // When DSn inactive, all byte enables off
     ) :
     (size_w == 2'b11) ? 4'b0000 :  // Longword (32-bit) - all 4 bytes active
     4'b1111  // Invalid/3-byte size
-);
+) : 4'b1111;  // When DSn inactive (HIGH), all byte enables off
 
 // Legacy 16-bit UDS/LDS for backward compatibility with minimig_m68k_bridge
 // Map 4-byte enables to 16-bit strobes: UDS=BE1, LDS=BE0
@@ -410,9 +449,9 @@ assign cpustate_w = as_w ? 2'b01 : (~wr_w ? 2'b11 : 2'b10);
 assign longword_w = (size_w == 2'b11);
 
 // WF68K30L advanced configuration from unused cache config bits
-wire wf68k30l_pipeline_en = 1'b0; //cachecfg[2] & cpucfg[2];  // Enable pipelining when dcache bit set and WF68K30L selected
-wire wf68k30l_loop_opt_en = 1'b0; //cachecfg[1] & cpucfg[2];  // Enable DBcc loop optimization
-wire wf68k30l_bitfield_en = 1'b0; //cachecfg[0] & cpucfg[2];  // Enable bitfield operations
+wire wf68k30l_pipeline_en = 1'b0; //cachecfg[2] & cpucfg == 3'b100;  // Enable pipelining when dcache bit set and WF68K30L selected
+wire wf68k30l_loop_opt_en = 1'b0; //cachecfg[1] & cpucfg == 3'b100;  // Enable DBcc loop optimization
+wire wf68k30l_bitfield_en = 1'b0; //cachecfg[0] & cpucfg == 3'b100;  // Enable bitfield operations
 
 // WF68K30L control registers (simplified implementation)
 assign cacr_w = 4'b0000;  // No cache in WF68K30L, always zero
@@ -422,14 +461,14 @@ WF68K30L_TOP
 #(
     .VERSION(32'h20220101)        // Version identifier
     // Dynamic configuration via cachecfg bits when WF68K30L is selected:
-    // - cachecfg[2] & cpucfg[2] -> Pipeline enable/disable
-    // - cachecfg[1] & cpucfg[2] -> DBcc loop optimization
-    // - cachecfg[0] & cpucfg[2] -> Bitfield operations
+    // - cachecfg[2] & cpucfg == 3'b100 -> Pipeline enable/disable
+    // - cachecfg[1] & cpucfg == 3'b100 -> DBcc loop optimization
+    // - cachecfg[0] & cpucfg == 3'b100 -> Bitfield operations
     // Note: Boolean generics must use default values due to Verilog/VHDL constraints
 )
 cpu_inst_w
 (
-    .CLK(clk_cpu),            // Use divided clock for WF68K30L (28.5 MHz)
+    .CLK(clk_cpu),            // Full-speed clock for WF68K30L (~57 MHz)
 
     // Address and data buses
     .ADR_OUT(cpu_addr_w),
@@ -439,9 +478,9 @@ cpu_inst_w
 
     // System control
     .BERRn(1'b1),                 // No bus error for now
-    .RESET_INn(~reset),           // WF68K30L expects active-low reset
+    .RESET_INn(wf68k_reset_n),    // Sequenced reset with proper initialization timing
     .RESET_OUT(reset_out_w),      // Open drain output
-    .HALT_INn(wf68k_halt_n),      // Proper initialization sequence: RESET=1,HALT=0 for 10+ clocks
+    .HALT_INn(wf68k_halt_n),      // Sequenced HALT for proper initialization
     .HALT_OUTn(),                 // Not used
 
     // Processor status
@@ -449,7 +488,7 @@ cpu_inst_w
 
     // Interrupt control
     .AVECn(1'b0),                 // Auto-vector enabled
-    .IPLn(~chip_ipl),             // Active low interrupts
+    .IPLn(chip_ipl),              // CRITICAL FIX: chip_ipl already in correct encoding (111=no interrupt)
     .IPENDn(),                    // Not used
 
     // Asynchronous bus control
@@ -479,8 +518,11 @@ cpu_inst_w
 
 wire cpu_req = (cpustate != 1);
 
-wire cchip = turbochip_d & (!cpustate | dcache_d);
-wire ckick = turbokick_d & (!cpustate | dcache_d);
+// CRITICAL FIX: All CPUs must have chip/kick access by default
+// WF68K30L (100) and fx68k (000) need this regardless of turbo config
+// Without this, the very first vector fetch is blocked and the CPU hangs
+wire cchip = (cpucfg == 3'b100) | (cpucfg == 3'b000) | (turbochip_d & (!cpustate | dcache_d));
+wire ckick = (cpucfg == 3'b100) | (cpucfg == 3'b000) | (turbokick_d & (!cpustate | dcache_d));
 
 reg turbochip_d;
 reg turbokick_d;
@@ -492,8 +534,9 @@ always @(posedge clk) begin
 		dcache_d    <= 0;
 	end
 	else if (~cpu_req) begin	// No mem access, so safe to switch chipram access mode
-		turbochip_d <= cachecfg[0] & (cpucfg[1] | cpucfg[2]);
-		turbokick_d <= cachecfg[1] & (cpucfg[1] | cpucfg[2]);
+		// Enable turbo for all CPUs: fx68k (000), TG68K (001/010), WF68K30L (100)
+		turbochip_d <= cachecfg[0];
+		turbokick_d <= cachecfg[1];
 		dcache_d    <= cachecfg[2];
 	end
 end
@@ -517,7 +560,11 @@ reg  [2:0] ipl_i;
 reg        c_as,c_rw,c_uds,c_lds;
 
 // WF68K30L fast path detection
-wire wf68k30l_fast_access = cpucfg[2] && (ramsel || fastchip_sel || sel_kickram);
+wire wf68k30l_fast_access = cpucfg == 3'b100 && (ramsel || fastchip_sel || sel_kickram);
+
+// WF68K30L runs on direct clock, fx68k uses ph1/ph2
+wire ph2_trigger = (cpucfg == 3'b100) || ph2n;
+wire ph1_trigger = (cpucfg == 3'b100) || ph1n;
 
 always @(negedge clk, negedge reset) begin
 	reg [1:0] stage;
@@ -533,7 +580,7 @@ always @(negedge clk, negedge reset) begin
 		ready <= 0;
 	end
 	else begin
-		if (ph2n) begin
+		if (ph2_trigger) begin
 			// Fast DTACK for WF68K30L accessing fast resources
 			if (wf68k30l_fast_access) begin
 				waitm <= 1'b0;  // Immediate DTACK for fast resources
@@ -544,22 +591,26 @@ always @(negedge clk, negedge reset) begin
 		end
 
 		chipready <= 0;
-		if (ph1n) begin
-			chipready <= ready;
-			ready <= 0;
-
-			// Ultra-fast single-cycle mode for WF68K30L fast accesses
+		if (ph1_trigger) begin
+			// CRITICAL FIX: For WF68K30L ultra-fast path, set chipready directly
+			// instead of using ready register (which causes 1-cycle delay)
 			if (wf68k30l_fast_access && chipreq && stage == 0) begin
+				// FAST PATH: Set chipready immediately for WF68K30L fast resources
+				chipready <= 1;
+				ready <= 0;
+
 				// Single-cycle completion for WF68K30L fast resources
 				c_as <= 0;
 				c_rw <= wr;
 				c_uds <= uds_in;
 				c_lds <= lds_in;
 				chipdout_i <= chip_dout;
-				ready <= 1;
 				stage <= 3;  // Skip to completion stage
 			end
 			else begin
+				// NORMAL PATH: Use ready register for standard flow
+				chipready <= ready;
+				ready <= 0;
 				case (stage)
 					0: if (chipreq) begin
 							c_as <= 0;
@@ -666,7 +717,7 @@ always @(posedge clk) begin
 	old_uds <= chip_uds;
 
 	if (~reset | ~reset_out) begin
-		ac_memcard  <= (cpucfg[1] | cpucfg[2]) ? fastramcfg : fastramcfg[2] ? 3'd3 : {1'b0, fastramcfg[1:0]};
+		ac_memcard  <= (cpucfg[1] | cpucfg == 3'b100) ? fastramcfg : fastramcfg[2] ? 3'd3 : {1'b0, fastramcfg[1:0]};
 		ac_toccata  <= 1;
 		z2ram_ena   <= 0;
 		z3ram_ena0  <= 0;
@@ -678,7 +729,7 @@ always @(posedge clk) begin
 	end
 	// Track longword operations for autoconfig (similar to gayle.v)
 	else if (sel_autoconfig && chip_rw) begin
-		if ((cpucfg[1] && longword) || (cpucfg[2] && longword_w)) begin
+		if ((cpucfg[1] && longword) || (cpucfg == 3'b100 && longword_w)) begin
 			longword_autoconfig <= ~longword_autoconfig;
 			if (~longword_autoconfig) autoconfig_addr_r <= cpu_addr[1:0];
 		end

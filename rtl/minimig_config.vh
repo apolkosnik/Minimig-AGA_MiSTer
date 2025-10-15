@@ -37,7 +37,7 @@
 // MEMORY CONFIGURATION
 // =============================================================================
 
-// `define MISTER_DUAL_SDRAM
+`define MISTER_DUAL_SDRAM
 // Dual SDRAM support (requires MISTER_DUAL_SDRAM=1 in QSF)
 `ifdef MISTER_DUAL_SDRAM
     `define DUAL_SDRAM_SUPPORT

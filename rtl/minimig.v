@@ -461,7 +461,7 @@ assign cachecfg = {cachecfg_pre[2], ~ovl, ~ovl};
 always @(posedge clk) if (clk7_en && reset) ntsc <= chipset_config[1];
 
 assign ide_ena  = ide_config[0];
-assign ide_fast = ~ide_config[5] & (cpucfg[1] | cpucfg[2]);
+assign ide_fast = ~ide_config[5] & (cpucfg[1] | cpucfg == 3'b100);
 
 //--------------------------------------------------------------------------------------
 
@@ -808,7 +808,8 @@ cart CART1
 );
 
 //level 7 interrupt for CPU
-assign _cpu_ipl = int7 ? 3'b000 : _iplx;	//m68k interrupt request
+// Ensure IPL defaults to 111 (no interrupt) during reset to prevent spurious interrupts
+assign _cpu_ipl = reset ? 3'b111 : (int7 ? 3'b000 : _iplx);
 
 //instantiate gary
 gary GARY1 

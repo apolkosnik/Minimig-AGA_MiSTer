@@ -37,7 +37,7 @@ module sdram_ctrl
 	input             cache_rst,
 	input             cache_inhibit,
 	input       [3:0] cpu_cache_ctrl,
-	// sdram
+	// sdram (chip 1 - lower 16 bits)
 	output reg [12:0] sd_addr,
 	output reg  [1:0] sd_ba,
 	output            sd_cs,
@@ -48,6 +48,18 @@ module sdram_ctrl
 	inout  reg [15:0] sd_data,
 	output reg        sd_clk,
 	output            sd_cke,
+`ifdef MISTER_DUAL_SDRAM
+	// sdram2 (chip 2 - upper 16 bits)
+	output reg [12:0] sd2_addr,
+	output reg  [1:0] sd2_ba,
+	output            sd2_cs,
+	output reg        sd2_we,
+	output reg        sd2_ras,
+	output reg        sd2_cas,
+	output reg  [1:0] sd2_dqm,
+	inout  reg [15:0] sd2_data,
+	output reg        sd2_clk,
+`endif
 	// chip
 	input      [24:1] chipAddr,
 	input             chipL,
@@ -63,13 +75,39 @@ module sdram_ctrl
 	input       [1:0] cpustate,
 	input             cpuL,
 	input             cpuU,
-	input      [15:0] cpuWR,
-	output     [15:0] cpuRD,
+`ifdef MISTER_DUAL_SDRAM
+	input      [31:0] cpuWR,        // 32-bit CPU write data (dual SDRAM mode)
+	output     [31:0] cpuRD,        // 32-bit CPU read data (dual SDRAM mode)
+`else
+	input      [15:0] cpuWR,        // 16-bit CPU write data (single SDRAM mode)
+	output     [15:0] cpuRD,        // 16-bit CPU read data (single SDRAM mode)
+`endif
 	output            ramready
 );
 
 assign sd_cs = 0;
 assign sd_cke = 1;
+
+`ifdef MISTER_DUAL_SDRAM
+// DUAL SDRAM mode: True 32-bit memory with two 16-bit chips
+assign sd2_cs = 0;
+
+// Split 32-bit CPU write data into two 16-bit chips
+wire [15:0] cpuWR_low  = cpuWR[15:0];   // Lower 16 bits → SDRAM chip 1
+wire [15:0] cpuWR_high = cpuWR[31:16];  // Upper 16 bits → SDRAM chip 2
+
+// Combine 16-bit read data from two chips into 32-bit (BIG-ENDIAN)
+// Cache now handles full 32-bit data with dual SDRAM
+// Big-endian: high word at lower address goes to upper 16 bits
+wire [31:0] sdr_dat_r_combined = {sdata_reg, sdata2_reg};  // Chip0=high word, Chip1=low word
+wire [31:0] cpuRD_internal;
+assign cpuRD = cpuRD_internal;
+`else
+// Single 16-bit SDRAM mode (legacy)
+wire [15:0] cpuWR_low  = cpuWR;
+wire [15:0] cpuRD_low;
+assign cpuRD = cpuRD_low;
+`endif
 
 //// parameters ////
 localparam [2:0]
@@ -118,11 +156,20 @@ cpu_cache_new cpu_cache
 	.cpu_we           (cpustate == 3),         // cpu write
 	.cpu_ir           (cpustate == 0),         // cpu instruction read
 	.cpu_dr           (cpustate == 2),         // cpu data read
-	.cpu_dat_w        (cpuWR),                 // cpu write data
-	.cpu_dat_r        (cpuRD),                 // cpu read data
+`ifdef MISTER_DUAL_SDRAM
+	.cpu_dat_w        (cpuWR),                 // cpu write data (32-bit)
+	.cpu_dat_r        (cpuRD_internal),        // cpu read data (32-bit)
+`else
+	.cpu_dat_w        (cpuWR_low),             // cpu write data (16-bit)
+	.cpu_dat_r        (cpuRD_low),             // cpu read data (16-bit)
+`endif
 	.cpu_ack          (cache_rd_ack),          // cpu acknowledge
 	.wb_en            (cache_wr_ack),          // write enable
-	.sdr_dat_r        (sdata_reg),             // sdram read data
+`ifdef MISTER_DUAL_SDRAM
+	.sdr_dat_r        (sdr_dat_r_combined),    // sdram read data (32-bit)
+`else
+	.sdr_dat_r        (sdata_reg),             // sdram read data (16-bit)
+`endif
 	.sdr_read_req     (cache_req),             // sdram read request from cache
 	.sdr_read_ack     (cache_fill),            // sdram read acknowledge to cache
 	.snoop_act        (chipWE),                // snoop act (write only - just update existing data in cache)
@@ -162,7 +209,11 @@ always @ (posedge sysclk) begin
 			default:
 				if(~write_ena && ramsel && cpustate == 3) begin
 					writeAddr <= cpuAddr;
-					writeDat  <= cpuWR;
+`ifdef MISTER_DUAL_SDRAM
+					writeDat  <= cpuWR[15:0];    // Lower 16 bits for write buffer (upper handled separately)
+`else
+					writeDat  <= cpuWR_low;      // 16-bit write buffer
+`endif
 					write_dqm <= {cpuU, cpuL};
 					write_req <= 1;
 					if(cache_wr_ack) begin
@@ -242,8 +293,14 @@ end
 //// sdram control ////
 
 reg  [2:0] slot_type = IDLE;
+`ifdef MISTER_DUAL_SDRAM
+reg        chip_addr_bit1;  // Store original chipAddr[1] for address interleaving
+`endif
 reg [15:0] sdata_reg;
 reg        chipWE;
+`ifdef MISTER_DUAL_SDRAM
+reg [15:0] sdata2_reg;  // Data register for second SDRAM chip
+`endif
 
 always @ (posedge sysclk) begin
 	reg        cas_sd_cas;
@@ -255,15 +312,30 @@ always @ (posedge sysclk) begin
 	
 	sd_clk <= sdram_state[0];
 
+`ifdef MISTER_DUAL_SDRAM
+	// Second SDRAM chip clock (same as first)
+	sd2_clk <= sdram_state[0];
+`endif
+
 	if(~sdram_state[0]) begin
 		sd_ras                <= 1;
 		sd_cas                <= 1;
 		sd_we                 <= 1;
 		sd_data               <= 16'hZZZZ;
 		chipWE                <= 0;
+`ifdef MISTER_DUAL_SDRAM
+		// Second chip control (same as first for control signals)
+		sd2_ras               <= 1;
+		sd2_cas               <= 1;
+		sd2_we                <= 1;
+		sd2_data              <= 16'hZZZZ;
+`endif
 	end
 
 	if(sdram_state[0]) sdata_reg <= sd_data;
+`ifdef MISTER_DUAL_SDRAM
+	if(sdram_state[0]) sdata2_reg <= sd2_data;
+`endif
 
 	if(!init_done) begin
 		slot_type             <= IDLE;
@@ -271,6 +343,10 @@ always @ (posedge sysclk) begin
 		rcnt                  <= 0;
 		sd_dqm                <= 3;
 		sd_ba                 <= 0;
+`ifdef MISTER_DUAL_SDRAM
+		sd2_dqm               <= 3;
+		sd2_ba                <= 0;
+`endif
 		if(sdram_state == 0) begin
 			case(initstate)
 				4 : begin // PRECHARGE
@@ -278,17 +354,34 @@ always @ (posedge sysclk) begin
 					sd_ras       <= 0;
 					sd_cas       <= 1;
 					sd_we        <= 0;
+`ifdef MISTER_DUAL_SDRAM
+					sd2_addr[10] <= 1;
+					sd2_ras      <= 0;
+					sd2_cas      <= 1;
+					sd2_we       <= 0;
+`endif
 				end
 				8,10 : begin // AUTOREFRESH
 					sd_ras       <= 0;
 					sd_cas       <= 0;
 					sd_we        <= 1;
+`ifdef MISTER_DUAL_SDRAM
+					sd2_ras      <= 0;
+					sd2_cas      <= 0;
+					sd2_we       <= 1;
+`endif
 				end
 				13 : begin // LOAD MODE REGISTER
 					sd_ras       <= 0;
 					sd_cas       <= 0;
 					sd_we        <= 0;
 					sd_addr      <= 13'b0001000100010; // CL=2, BURST=4
+`ifdef MISTER_DUAL_SDRAM
+					sd2_ras      <= 0;
+					sd2_cas      <= 0;
+					sd2_we       <= 0;
+					sd2_addr     <= 13'b0001000100010; // CL=2, BURST=4
+`endif
 				end
 			endcase
 		end
@@ -302,6 +395,9 @@ always @ (posedge sysclk) begin
 				cas_sd_we       <= 1;
 				cas_dqm         <= 0;
 				sd_dqm          <= 3;
+`ifdef MISTER_DUAL_SDRAM
+				sd2_dqm         <= 3;
+`endif
 				slot_type       <= IDLE;
 
 				if(~&rcnt) rcnt <= rcnt + 1'd1;
@@ -310,8 +406,21 @@ always @ (posedge sysclk) begin
 				// (this includes anything on the "motherboard" - chip RAM, slow RAM and Kickstart, turbo modes notwithstanding)
 				if(~chipDMA | ~chipRW) begin
 					slot_type    <= CHIP;
+`ifdef MISTER_DUAL_SDRAM
+					// CRITICAL INTERLEAVING for 32-bit operation:
+					// Route 16-bit CHIP writes based on address LSB:
+					// - Even word addresses (A[0]=0) → Chip 0 only
+					// - Odd word addresses (A[0]=1) → Chip 1 only
+					// Both chips addressed at chipAddr >> 1 (drop LSB)
+					chip_addr_bit1 <= chipAddr[1];  // Save LSB to route write
+					{sd_ba,sd_addr,casaddr[8:0]} <= chipAddr >> 1;  // Drop LSB
+					{sd2_ba,sd2_addr} <= chipAddr >> 1;  // Same address
+					sd_ras       <= 0;
+					sd2_ras      <= 0;
+`else
 					{sd_ba,sd_addr,casaddr[8:0]} <= chipAddr;
 					sd_ras       <= 0;
+`endif
 					cas_dqm      <= {chipU,chipL};
 					cas_sd_cas   <= 0;
 					cas_sd_we    <= chipRW;
@@ -320,8 +429,18 @@ always @ (posedge sysclk) begin
 				end
 				else if(write_req) begin
 					slot_type    <= CPU_WRITECACHE;
+`ifdef MISTER_DUAL_SDRAM
+					// CPU writes with INTERLEAVING:
+					// Both chips write at writeAddr >> 1 (drop LSB)
+					// Chip 0 writes HIGH word, Chip 1 writes LOW word
+					{sd_ba,sd_addr,casaddr[8:0]} <= writeAddr >> 1;              // Chip 0: addr >> 1
+					{sd2_ba,sd2_addr} <= writeAddr >> 1;                         // Chip 1: addr >> 1
+					sd_ras       <= 0;
+					sd2_ras      <= 0;
+`else
 					{sd_ba,sd_addr,casaddr[8:0]} <= writeAddr;
 					sd_ras       <= 0;
+`endif
 					cas_dqm      <= write_dqm;
 					cas_sd_we    <= 0;
 					cas_sd_cas   <= 0;
@@ -331,8 +450,18 @@ always @ (posedge sysclk) begin
 				// request from read cache
 				else if(cache_req) begin
 					slot_type    <= CPU_READCACHE;
+`ifdef MISTER_DUAL_SDRAM
+					// CPU reads with INTERLEAVING:
+					// Both chips read from cpuAddr >> 1 (drop LSB)
+					// Chip 0 has even words (HIGH), Chip 1 has odd words (LOW)
+					{sd_ba,sd_addr,casaddr[8:0]} <= cpuAddr >> 1;               // Chip 0: addr >> 1
+					{sd2_ba,sd2_addr} <= cpuAddr >> 1;                          // Chip 1: addr >> 1
+					sd_ras       <= 0;
+					sd2_ras      <= 0;
+`else
 					{sd_ba,sd_addr,casaddr[8:0]} <= cpuAddr;
 					sd_ras       <= 0;
+`endif
 					cas_sd_cas   <= 0;
 				end
 				else if(&rcnt) begin
@@ -340,6 +469,10 @@ always @ (posedge sysclk) begin
 					sd_ras       <= 0;
 					sd_cas       <= 0;
 					rcnt         <= 0;
+`ifdef MISTER_DUAL_SDRAM
+					sd2_ras      <= 0;
+					sd2_cas      <= 0;
+`endif
 				end
 			end
 
@@ -349,12 +482,42 @@ always @ (posedge sysclk) begin
 				sd_cas          <= cas_sd_cas;
 				sd_dqm          <= 0;
 				if(!cas_sd_we) begin
+`ifdef MISTER_DUAL_SDRAM
+					// Data routing:
+					// For CHIP: write to Chip 0 only if even word address (A[1]=0)
+					// For CPU: cpuWR_high goes to Chip 0
+					sd_data      <= (slot_type == CHIP) ? datawr : cpuWR_high;
+					// Mask Chip 0 if CHIP write to odd address
+					sd_dqm       <= (slot_type == CHIP && chip_addr_bit1) ? 2'b11 : cas_dqm;
+`else
 					sd_data      <= datawr;
-					sd_addr[12:11]<= cas_dqm;
 					sd_dqm       <= cas_dqm;
+`endif
+					sd_addr[12:11]<= cas_dqm;
 					sd_we        <= 0;
 				end
 				write_ack       <= 0; // indicate to write that it's safe to accept the next write
+`ifdef MISTER_DUAL_SDRAM
+				// Second chip CAS cycle
+				sd2_addr        <= {1'b1, casaddr}; // AUTO PRECHARGE
+				sd2_cas         <= cas_sd_cas;
+				sd2_dqm         <= 0;
+				if(!cas_sd_we) begin
+					// CRITICAL INTERLEAVING + CPU 32-bit:
+					// For CHIP writes: write to Chip 1 only if odd word address (A[1]=1)
+					// For CPU writes: split 32-bit data (HIGH→Chip0, LOW→Chip1)
+					if (slot_type == CHIP) begin
+						sd2_data     <= datawr;  // CHIP: same data
+						sd2_dqm      <= chip_addr_bit1 ? cas_dqm : 2'b11;  // Write only if A[1]=1 (odd)
+						sd2_we       <= 0;
+					end else begin
+						sd2_data     <= cpuWR_low;  // CPU: lower 16 bits go to Chip 1
+						sd2_dqm      <= cas_dqm;
+						sd2_we       <= 0;
+					end
+					sd2_addr[12:11]<= cas_dqm;
+				end
+`endif
 			end
 		endcase
 	end

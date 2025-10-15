@@ -42,14 +42,19 @@ module ddram_ctrl
 	output reg  [7:0] DDRAM_BE,
 	output reg        DDRAM_WE,
 
-	// cpu    
+	// cpu
 	input      [28:1] cpuAddr,
 	input             cpuCS,
 	input       [1:0] cpustate,
 	input             cpuL,
 	input             cpuU,
-	input      [15:0] cpuWR,
-	output     [15:0] cpuRD,
+`ifdef MISTER_DUAL_SDRAM
+	input      [31:0] cpuWR,        // 32-bit CPU write data (dual SDRAM mode)
+	output     [31:0] cpuRD,        // 32-bit CPU read data (dual SDRAM mode)
+`else
+	input      [15:0] cpuWR,        // 16-bit CPU write data (single SDRAM mode)
+	output     [15:0] cpuRD,        // 16-bit CPU read data (single SDRAM mode)
+`endif
 	input             ramshared,
 	output            ramready
 );
@@ -73,11 +78,20 @@ cpu_cache_new cpu_cache
 	.cpu_we           (cpustate == 3),          // cpu write
 	.cpu_ir           (cpustate == 0),          // cpu instruction read
 	.cpu_dr           (cpustate == 2),          // cpu data read
-	.cpu_dat_w        (cpuWR),                  // cpu write data
-	.cpu_dat_r        (cpuRD),                  // cpu read data
+`ifdef MISTER_DUAL_SDRAM
+	.cpu_dat_w        (cpuWR),                  // cpu write data (32-bit)
+	.cpu_dat_r        (cpuRD),                  // cpu read data (32-bit)
+`else
+	.cpu_dat_w        (cpuWR),                  // cpu write data (16-bit)
+	.cpu_dat_r        (cpuRD),                  // cpu read data (16-bit)
+`endif
 	.cpu_ack          (cache_hit),              // cpu acknowledge
 	.wb_en            (cache_ack),              // write enable
-	.sdr_dat_r        (ddr_swap ? {ddr_data[7:0], ddr_data[15:8]} : ddr_data), // sdram read data
+`ifdef MISTER_DUAL_SDRAM
+	.sdr_dat_r        (ddr_data_32bit),         // DDR read data (32-bit from consecutive words)
+`else
+	.sdr_dat_r        (ddr_swap ? {ddr_data[7:0], ddr_data[15:8]} : ddr_data), // sdram read data (16-bit)
+`endif
 	.sdr_read_req     (cache_req),              // sdram read request from cache
 	.sdr_read_ack     (cache_fill)              // sdram read acknowledge to cache
 );
@@ -88,7 +102,11 @@ reg        write_req;
 reg        write_ack;
 reg  [1:0] writeBE;
 reg [28:1] writeAddr;
-reg [15:0] writeDat;
+`ifdef MISTER_DUAL_SDRAM
+reg [31:0] writeDat;  // 32-bit write data for dual SDRAM mode
+`else
+reg [15:0] writeDat;  // 16-bit write data
+`endif
 
 always @ (posedge sysclk) begin
 	reg  [1:0] write_state;
@@ -102,7 +120,11 @@ always @ (posedge sysclk) begin
 			default:
 				if(ramsel && cpustate == 3) begin
 					writeAddr <= cpuAddr;
+`ifdef MISTER_DUAL_SDRAM
+					writeDat  <= cpuWR;  // 32-bit data, no swapping needed
+`else
 					writeDat  <= ramshared ? {cpuWR[7:0],cpuWR[15:8]} : cpuWR;
+`endif
 					writeBE   <= ramshared ? ~{cpuL, cpuU} : ~{cpuU, cpuL};
 					write_req <= 1;
 					if(cache_ack) begin
@@ -130,6 +152,9 @@ assign DDRAM_BURSTCNT = 1;
 
 reg        ddr_swap;
 reg [15:0] ddr_data;
+`ifdef MISTER_DUAL_SDRAM
+reg [31:0] ddr_data_32bit;  // 32-bit data for dual SDRAM mode
+`endif
 
 always @ (posedge sysclk) begin
 	reg  [2:0] state = 0;
@@ -138,6 +163,20 @@ always @ (posedge sysclk) begin
 
 	cache_fill <= 0;
 	ddr_data <= dout[{ba, 4'b0000} +:16];
+`ifdef MISTER_DUAL_SDRAM
+	// For 32-bit mode: extract 32 bits (two consecutive 16-bit words) based on ba[1:0]
+	// ba[1:0] determines which pair of consecutive words in the 64-bit burst:
+	//   00: words [31:0]   (word 0-1)
+	//   01: words [47:16]  (word 1-2) - overlapping for unaligned access
+	//   10: words [63:32]  (word 2-3)
+	//   11: words [15:0] (word 3) + wrap - shouldn't happen for aligned longwords
+	case(ba[1:0])
+		2'b00: ddr_data_32bit <= dout[31:0];
+		2'b01: ddr_data_32bit <= dout[47:16];
+		2'b10: ddr_data_32bit <= dout[63:32];
+		2'b11: ddr_data_32bit <= {dout[15:0], dout[63:48]};  // Wrapped case
+	endcase
+`endif
 
 	if(~DDRAM_BUSY) begin
 		DDRAM_WE  <= 0;
@@ -154,7 +193,11 @@ always @ (posedge sysclk) begin
 					if(~write_ack & write_req) begin
 						DDRAM_ADDR <= {3'b001, writeAddr[28:3]};
 						DDRAM_BE   <= {6'b000000,writeBE}<<{writeAddr[2:1],1'b0};
-						DDRAM_DIN  <= {writeDat,writeDat,writeDat,writeDat};
+`ifdef MISTER_DUAL_SDRAM
+						DDRAM_DIN  <= {writeDat,writeDat};  // Replicate 32-bit data twice for 64-bit bus
+`else
+						DDRAM_DIN  <= {writeDat,writeDat,writeDat,writeDat};  // Replicate 16-bit data four times
+`endif
 						DDRAM_WE   <= 1;
 						write_ack  <= 1;
 					end

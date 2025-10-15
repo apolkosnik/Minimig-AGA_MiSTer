@@ -9,7 +9,7 @@ module test_wf68k30l_poweron();
     // Basic test signals
     reg clk = 0;
     reg reset = 1;
-    reg [2:0] cpucfg = 3'b100;     // WF68K30L selected (cpucfg[2] = 1)
+    reg [2:0] cpucfg = 3'b100;     // WF68K30L selected (cpucfg == 3'b100 = 1)
     reg [2:0] cachecfg = 3'b000;   // No cache optimizations for testing
     reg [2:0] chip_ipl = 3'b111;   // No interrupts during startup
 
