@@ -17,7 +17,7 @@ entity TG68K_PMMU_030 is
     -- Register access port (driven by PMOVE decode)
     reg_we         : in  std_logic;
     reg_re         : in  std_logic;
-    reg_sel        : in  std_logic_vector(3 downto 0); -- 0:TC 1:CRP 2:SRP 3:TT0 4:TT1 5:MMUSR 6:CAL
+    reg_sel        : in  std_logic_vector(3 downto 0); -- 0:TT0 1:TT1 2:TC 3:SRP 4:CRP 5:MMUSR
     reg_wdat       : in  std_logic_vector(31 downto 0);
     reg_rdat       : out std_logic_vector(31 downto 0);
     reg_part       : in  std_logic; -- '1' = high, '0' = low for 64-bit regs (CRP/SRP)
@@ -707,10 +707,6 @@ begin
       TT0   <= (others => '0');
       TT1   <= (others => '0');
       MMUSR <= (others => '0');
-      CAL   <= (others => '0');
-      VAL   <= (others => '0');
-      SCC   <= (others => '0');
-      AC    <= (others => '0');
       atc_flush_req <= '0';
       mmusr_update_ack <= '0';
       ptest_active <= '0';
@@ -758,6 +754,30 @@ begin
                " part=" & std_logic'image(reg_part) severity note;
         case reg_sel is
           when x"0" =>
+            -- TT0 register write - MC68030 Transparent Translation Register per User's Manual section 9.2.6
+            -- MC68030 TT0/TT1 bit layout:
+            -- 31-24: Logical Address Base, 23-16: Logical Address Mask
+            -- 15: E (Enable), 14-11: Reserved, 10: CI (Cache Inhibit), 9: RW, 8: RWM
+            -- 7: Reserved, 6-4: FC Base, 3: Reserved, 2-0: FC Mask
+            TT0 <= (reg_wdat and TTR_WRITE_MASK);
+            -- TT0 changes invalidate ATC unless PMOVEFD (flush disable)
+            if reg_fd = '0' then
+              atc_flush_req <= '1';
+            end if;
+            report "TT0_WRITE_SPEC_COMPLIANT: input=0x" & slv_to_hstring(reg_wdat) &
+                   " reserved bits 14-11,7,3 masked to zero" severity note;
+          when x"1" =>
+            -- TT1 register write - MC68030 Transparent Translation Register (same layout as TT0)
+            -- MC68030 TT0/TT1 bit layout:
+            -- 31-24: Logical Address Base, 23-16: Logical Address Mask
+            -- 15: E (Enable), 14-11: Reserved, 10: CI (Cache Inhibit), 9: RW, 8: RWM
+            -- 7: Reserved, 6-4: FC Base, 3: Reserved, 2-0: FC Mask
+            TT1 <= (reg_wdat and TTR_WRITE_MASK);
+            -- TT1 changes invalidate ATC unless PMOVEFD (flush disable)
+            if reg_fd = '0' then
+              atc_flush_req <= '1';
+            end if;
+          when x"2" =>
             -- MC68030 TC Register Write - exact specification compliance
             -- MC68030 TC bit layout per User's Manual section 9.2.1:
             -- 31: E (Enable), 30-26: Reserved, 25: SRE, 24: FCL
@@ -769,22 +789,7 @@ begin
             if reg_fd = '0' then
               atc_flush_req <= '1';
             end if;
-          when x"1" =>
-            -- CRP register write - MC68030 Long-Format Root Pointer per User's Manual section 9.2.2
-            if reg_part = '1' then
-              -- CRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
-              -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
-              CRP_H <= (reg_wdat and CRP_HIGH_MASK);
-            else
-              -- CRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
-              -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
-              CRP_L <= (reg_wdat and CRP_LOW_MASK);
-            end if;
-            -- CRP changes invalidate ATC unless PMOVEFD (flush disable)
-            if reg_fd = '0' then
-              atc_flush_req <= '1';
-            end if;
-          when x"2" =>
+          when x"3" =>
             -- SRP register write - MC68030 Long-Format Root Pointer (same format as CRP)
             if reg_part = '1' then
               -- SRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
@@ -798,27 +803,18 @@ begin
             if reg_fd = '0' then  -- Only flush if NOT PMOVEFD
               atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
             end if;
-          when x"3" =>
-            -- TT0 register write - MC68030 Transparent Translation Register per User's Manual section 9.2.6
-            -- MC68030 TT0/TT1 bit layout:
-            -- 31-24: Logical Address Base, 23-16: Logical Address Mask
-            -- 15: E (Enable), 14-11: Reserved, 10: CI (Cache Inhibit), 9: RW, 8: RWM
-            -- 7: Reserved, 6-4: FC Base, 3: Reserved, 2-0: FC Mask
-            TT0 <= (reg_wdat and TTR_WRITE_MASK);
-            -- TT0 changes invalidate ATC unless PMOVEFD (flush disable)
-            if reg_fd = '0' then
-              atc_flush_req <= '1';
-            end if;
-            report "TT0_WRITE_SPEC_COMPLIANT: input=0x" & slv_to_hstring(reg_wdat) &
-                   " reserved bits 14-11,7,3 masked to zero" severity note;
           when x"4" =>
-            -- TT1 register write - MC68030 Transparent Translation Register (same layout as TT0)
-            -- MC68030 TT0/TT1 bit layout:
-            -- 31-24: Logical Address Base, 23-16: Logical Address Mask
-            -- 15: E (Enable), 14-11: Reserved, 10: CI (Cache Inhibit), 9: RW, 8: RWM
-            -- 7: Reserved, 6-4: FC Base, 3: Reserved, 2-0: FC Mask
-            TT1 <= (reg_wdat and TTR_WRITE_MASK);
-            -- TT1 changes invalidate ATC unless PMOVEFD (flush disable)
+            -- CRP register write - MC68030 Long-Format Root Pointer per User's Manual section 9.2.2
+            if reg_part = '1' then
+              -- CRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
+              -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
+              CRP_H <= (reg_wdat and CRP_HIGH_MASK);
+            else
+              -- CRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
+              -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
+              CRP_L <= (reg_wdat and CRP_LOW_MASK);
+            end if;
+            -- CRP changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
               atc_flush_req <= '1';
             end if;
@@ -837,10 +833,6 @@ begin
               MMUSR(13) <= '0';  -- Clear Supervisor Violation bit
             end if;
             -- All other bits are read-only
-          when x"6" => CAL   <= reg_wdat;
-          when x"7" => VAL   <= reg_wdat;
-          when x"8" => SCC   <= reg_wdat;
-          when x"9" => AC    <= reg_wdat;
           when others => null;
           end case;
       end if;
@@ -859,17 +851,15 @@ begin
         -- so no additional FC check is needed here
         case reg_sel is
             when x"0" =>
+              reg_rdat <= TT0;
+              report "PMMU_REG_READ: TT0=0x" & slv_to_hstring(TT0) severity note;
+            when x"1" =>
+              reg_rdat <= TT1;
+              report "PMMU_REG_READ: TT1=0x" & slv_to_hstring(TT1) severity note;
+            when x"2" =>
               reg_rdat <= TC;
               report "PMMU_REG_READ: TC=0x" & slv_to_hstring(TC) severity note;
-            when x"1" =>
-              if reg_part = '1' then
-                reg_rdat <= CRP_H;
-                report "PMMU_REG_READ: CRP_H=0x" & slv_to_hstring(CRP_H) severity note;
-              else
-                reg_rdat <= CRP_L;
-                report "PMMU_REG_READ: CRP_L=0x" & slv_to_hstring(CRP_L) severity note;
-              end if;
-            when x"2" =>
+            when x"3" =>
               if reg_part = '1' then
                 reg_rdat <= SRP_H;
                 report "PMMU_REG_READ: SRP_H=0x" & slv_to_hstring(SRP_H) severity note;
@@ -877,27 +867,17 @@ begin
                 reg_rdat <= SRP_L;
                 report "PMMU_REG_READ: SRP_L=0x" & slv_to_hstring(SRP_L) severity note;
               end if;
-            when x"3" =>
-              reg_rdat <= TT0;
-              report "PMMU_REG_READ: TT0=0x" & slv_to_hstring(TT0) severity note;
             when x"4" =>
-              reg_rdat <= TT1;
-              report "PMMU_REG_READ: TT1=0x" & slv_to_hstring(TT1) severity note;
+              if reg_part = '1' then
+                reg_rdat <= CRP_H;
+                report "PMMU_REG_READ: CRP_H=0x" & slv_to_hstring(CRP_H) severity note;
+              else
+                reg_rdat <= CRP_L;
+                report "PMMU_REG_READ: CRP_L=0x" & slv_to_hstring(CRP_L) severity note;
+              end if;
             when x"5" =>
               reg_rdat <= MMUSR;
               report "PMMU_REG_READ: MMUSR=0x" & slv_to_hstring(MMUSR) severity note;
-            when x"6" =>
-              reg_rdat <= CAL;
-              report "PMMU_REG_READ: CAL=0x" & slv_to_hstring(CAL) severity note;
-            when x"7" =>
-              reg_rdat <= VAL;
-              report "PMMU_REG_READ: VAL=0x" & slv_to_hstring(VAL) severity note;
-            when x"8" =>
-              reg_rdat <= SCC;
-              report "PMMU_REG_READ: SCC=0x" & slv_to_hstring(SCC) severity note;
-            when x"9" =>
-              reg_rdat <= AC;
-              report "PMMU_REG_READ: AC=0x" & slv_to_hstring(AC) severity note;
             when others =>
               reg_rdat <= (others => '0');
               report "PMMU_REG_READ: UNKNOWN sel=0x" & slv_to_hstring(reg_sel) severity warning;

@@ -60,7 +60,7 @@ architecture behavior of tb_pmove_tt0_read is
   -- PMMU register interface
   signal reg_we   : std_logic := '0';
   signal reg_re   : std_logic := '0';
-  signal reg_sel  : std_logic_vector(3 downto 0) := x"0";
+  signal reg_sel  : std_logic_vector(3 downto 0) := x"2";
   signal reg_wdat : std_logic_vector(31 downto 0) := (others => '0');
   signal reg_rdat : std_logic_vector(31 downto 0);
   signal reg_part : std_logic := '0';
@@ -168,7 +168,7 @@ begin
     procedure pmove_write_tt0(value : std_logic_vector(31 downto 0)) is
     begin
       reg_wdat <= value;
-      reg_sel <= x"3";  -- TT0 register selector
+      reg_sel <= x"0";  -- TT0 register selector
       reg_part <= '0';  -- Not used for TT0 (32-bit register)
       reg_fd <= '0';    -- Flush enabled
       reg_we <= '1';
@@ -179,7 +179,7 @@ begin
 
     procedure pmove_read_tt0 is
     begin
-      reg_sel <= x"3";  -- TT0 register selector
+      reg_sel <= x"0";  -- TT0 register selector
       reg_part <= '0';  -- Not used for TT0
       reg_re <= '1';
       wait_cycles(1);

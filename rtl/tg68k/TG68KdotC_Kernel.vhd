@@ -462,11 +462,10 @@ signal pmmu_reg_fd_d    : std_logic;
       when "00010" => s := x"0"; -- TT0 (Transparent Translation 0) - 0x02
       when "00011" => s := x"1"; -- TT1 (Transparent Translation 1) - 0x03
       when "10000" => s := x"2"; -- TC (Translation Control) - 0x10
-      when "10001" => s := x"3"; -- DRP (DMA Root Pointer) - 0x11
-      when "10010" => s := x"4"; -- SRP (Supervisor Root Pointer) - 0x12
-      when "10011" => s := x"5"; -- CRP (CPU Root Pointer) - 0x13
-      when "11000" => s := x"6"; -- MMUSR (MMU Status Register) - 0x18
-      when others => s := x"7"; -- invalid/not supported
+      when "10010" => s := x"3"; -- SRP (Supervisor Root Pointer) - 0x12
+      when "10011" => s := x"4"; -- CRP (CPU Root Pointer) - 0x13
+      when "11000" => s := x"5"; -- MMUSR (MMU Status Register) - 0x18
+      when others => s := x"6"; -- invalid/not supported
     end case;
     return s;
   end function;
@@ -1672,7 +1671,7 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;
 				IF exec(directSR)='1' OR set_stop='1' THEN
 					FlagsSR <= data_read(15 downto 8);
-					preSVmode <= data_read(13);  -- BUG #15 FIX: Sync preSVmode with SR(5) on RTE
+					--preSVmode <= data_read(13);  -- BUG #15 FIX: Sync preSVmode with SR(5) on RTE
 				END IF;
 				IF interrupt='1' AND trap_interrupt='1' THEN
 					FlagsSR(2 downto 0) <=rIPL_nr;
@@ -1680,7 +1679,7 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF exec(to_SR)='1' THEN
 					FlagsSR(7 downto 0) <= SRin;	--SR
 					fc_internal(2) <= SRin(5);
-					preSVmode <= SRin(5);  -- BUG #15 FIX: Sync preSVmode with SR(5) on MOVE to SR
+					--preSVmode <= SRin(5);  -- BUG #15 FIX: Sync preSVmode with SR(5) on MOVE to SR
 				ELSIF exec(update_FC)='1' THEN
 					fc_internal(2) <= FlagsSR(5);
 				END IF;
@@ -4283,22 +4282,33 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                             END IF;
 
                         WHEN "001" =>  -- PFLUSH or PMOVEFD
-                            -- MC68030: brief(12:8) encoding determines PFLUSH variant or PMOVEFD
-                            -- PFLUSHA:   001 00000 (0x2000)
-                            -- PFLUSHAN:  001 01000 (0x2800)
-                            -- PFLUSH:    001 00001-00111 with FC in bits 7-5, bit 4=mode
-                            -- PFLUSHN:   001 01001-01111 with FC in bits 7-5, bit 4=mode
-                            -- PMOVEFD:   001 00000 with bit 8 = 0, opcode EA mode != 000
+                            -- MC68030 extension word encoding (bits 15-13 = "001"):
+                            -- Bits 14-10: P-register selector (for PMOVEFD only)
+                            -- Bits 9-8:   Differentiator:
+                            --   "00" = PMOVEFD (with EA mode != Dn)
+                            --   "00" = PFLUSHA (with EA mode = Dn, bits 12-10 also "000")
+                            --   "01" = PFLUSHAN (bits 12-10 = "000")
+                            --   "00"-"01" with bits 12-10 != "000" = PFLUSH/PFLUSHN variants
+                            -- PFLUSHA:   001 00000 00xxx (bits 15-10 = "001000", bits 9-8 = "00")
+                            -- PFLUSHAN:  001 00001 00xxx (bits 15-10 = "001000", bits 9-8 = "01")
+                            -- PFLUSH:    001 xxxx1-xxxx0 with FC/mode in lower bits
+                            -- PMOVEFD:   001 <Preg> 00xxx (bits 9-8 = "00", EA mode != Dn)
 
-                            IF brief(12 downto 8) = "00000" AND opcode(5 downto 3) /= "000" THEN
+                            -- BUG FIX: Check bits 9-8 (not 12-8) to avoid register selector overlap in bits 14-10
+                            -- PMOVEFD: bits 9-8 = "00" with memory EA, register selector in bits 14-10
+                            -- PFLUSHA: bits 14-8 = all zeros (no register selector)
+                            IF brief(9 downto 8) = "00" AND brief(14 downto 10) /= "00000" AND opcode(5 downto 3) /= "000" THEN
                                 -- PMOVEFD (ea),MRn - Flush Disable variant (memory -> MMU, no ATC flush)
+                                -- bits 9-8 = "00", bits 14-10 != "00000" (valid register selector), memory EA
+                                -- Register selector in bits 14-10 can be TT0, TT1, TC, SRP, CRP, or MMUSR
                                 set(ea_build) <= '1';
                                 set(ea_data_OP1) <= '1';
                                 datatype <= "10";
                                 setstate <= "10";
                                 next_micro_state <= pmmu2;  -- Use same path as PMOVE but with FD flag
-                            ELSIF brief(12 downto 8) = "00000" THEN
+                            ELSIF brief(14 downto 8) = "0000000" THEN
                                 -- PFLUSHA - Flush all ATC entries
+                                -- bits 14-8 all zero (distinguishes from PMOVEFD which has register in 14-10)
                                 set_exec(pmmu_pflush) <= '1';
                                 next_micro_state <= pflush1;
                             ELSIF brief(12 downto 8) = "01000" THEN
@@ -4742,11 +4752,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		--   when x"02" => s := x"0"; -- TT0 (Transparent Translation 0)
 		--   when x"03" => s := x"1"; -- TT1 (Transparent Translation 1)
 		--   when x"10" => s := x"2"; -- TC (Translation Control)
-		--   when x"11" => s := x"3"; -- DRP (DMA Root Pointer)
-		--   when x"12" => s := x"4"; -- SRP (Supervisor Root Pointer)
-		--   when x"13" => s := x"5"; -- CRP (CPU Root Pointer)
-		--   when x"18" => s := x"6"; -- MMUSR (MMU Status Register)
-		--   when others => s := x"7"; -- invalid/not supported
+		--   when x"12" => s := x"3"; -- SRP (Supervisor Root Pointer)
+		--   when x"13" => s := x"4"; -- CRP (CPU Root Pointer)
+		--   when x"18" => s := x"5"; -- MMUSR (MMU Status Register)
+		--   when others => s := x"6"; -- invalid/not supported
           -- Latch source data only when actually doing PMMU operation to ensure correct value
           pmmu_reg_wdat_d <= pmmu_src_data;
 
@@ -4756,19 +4765,20 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
           -- PMOVE instruction handling (only if MOVEC is not active to avoid conflicts)
           if set(pmmu_wr) = '1' OR exec(pmmu_wr) = '1' then
             -- PMOVE Dn -> <MMU reg>
-            if sel /= x"7" then
+            if sel /= x"6" then
               pmmu_reg_sel_d  <= sel;
               -- pmmu_reg_wdat_d already latched above from pmmu_src_data
               -- For CRP/SRP choose part: HIGH word first, LOW word second
-              if (sel = x"4") or (sel = x"5") then
+              if (sel = x"3") or (sel = x"4") then
                 if micro_state = pmmu2 OR micro_state = pmmu1 OR micro_state = pmmu_dn_high then
                   pmmu_reg_part_d <= '1';  -- HIGH word (mem EA first read, Dn first transfer)
                 else
                   pmmu_reg_part_d <= '0';  -- LOW word (mem EA second read, Dn second transfer)
                 end if;
               end if;
-              -- Check if this is PMOVEFD (Flush Disable): brief(15:13)="001" AND brief(12:8)="00000" AND EA mode != 000
-              if brief(15 downto 13) = "001" and brief(12 downto 8) = "00000" and exe_opcode(5 downto 3) /= "000" then
+              -- Check if this is PMOVEFD (Flush Disable): brief(15:13)="001" AND brief(9:8)="00" AND register selector present
+              -- BUG FIX: Check bits 9-8 (not 12-8) to avoid register selector overlap in bits 14-10
+              if brief(15 downto 13) = "001" and brief(9 downto 8) = "00" and brief(14 downto 10) /= "00000" and exe_opcode(5 downto 3) /= "000" then
                 pmmu_reg_fd_d <= '1';  -- PMOVEFD - disable ATC flush
               else
                 pmmu_reg_fd_d <= '0';  -- Normal PMOVE - flush ATC
@@ -4779,16 +4789,19 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
           if set(pmmu_rd) = '1' OR exec(pmmu_rd) = '1' then
             -- PMOVE <MMU reg> -> Dn
-            if sel /= x"7" then
+            if sel /= x"6" then
               pmmu_reg_sel_d <= sel;
               -- For CRP/SRP choose part: HIGH word first, LOW word second
-              if (sel = x"4") or (sel = x"5") then
+              if (sel = x"3") or (sel = x"4") then
                 if micro_state = pmmu3 OR micro_state = pmmu1 OR micro_state = pmmu_dn_high then
                   pmmu_reg_part_d <= '1';  -- HIGH word (mem EA first write, Dn first transfer)
                 else
                   pmmu_reg_part_d <= '0';  -- LOW word (mem EA second write, Dn second transfer)
                 end if;
               end if;
+              -- BUG FIX: PMOVE reads never flush ATC (MC68030 spec: only writes can flush)
+              -- Always set flush disable for read operations
+              pmmu_reg_fd_d <= '1';
               pmmu_reg_re_d  <= '1';
             end if;
           end if;

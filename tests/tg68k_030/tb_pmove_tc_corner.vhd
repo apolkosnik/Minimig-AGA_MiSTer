@@ -60,7 +60,7 @@ architecture behavior of tb_pmove_tc_corner is
   -- PMMU register interface
   signal reg_we   : std_logic := '0';
   signal reg_re   : std_logic := '0';
-  signal reg_sel  : std_logic_vector(3 downto 0) := x"0";
+  signal reg_sel  : std_logic_vector(3 downto 0) := x"2";
   signal reg_wdat : std_logic_vector(31 downto 0) := (others => '0');
   signal reg_rdat : std_logic_vector(31 downto 0);
   signal reg_part : std_logic := '0';
@@ -168,7 +168,7 @@ begin
     procedure pmove_write_tc(value : std_logic_vector(31 downto 0)) is
     begin
       reg_wdat <= value;
-      reg_sel <= x"0";  -- TC register selector
+      reg_sel <= x"2";  -- TC register selector
       reg_part <= '0';  -- Not used for TC (32-bit register)
       reg_fd <= '0';    -- Flush enabled
       reg_we <= '1';
@@ -179,7 +179,7 @@ begin
 
     procedure pmove_read_tc is
     begin
-      reg_sel <= x"0";  -- TC register selector
+      reg_sel <= x"2";  -- TC register selector
       reg_part <= '0';  -- Not used for TC
       reg_re <= '1';
       wait_cycles(1);
@@ -385,7 +385,7 @@ begin
     writeline(output, l);
     pmove_write_tc(x"80087764");
     reg_wdat <= x"80187754";
-    reg_sel <= x"0";
+    reg_sel <= x"2";
     reg_part <= '0';
     reg_fd <= '1';  -- Flush disable
     reg_we <= '1';
