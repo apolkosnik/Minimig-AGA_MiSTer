@@ -220,7 +220,7 @@ amiga_clk amiga_clk
 );
 
 
-wire cpu_type = cpucfg[1] | cpucfg[2];
+wire cpu_type = cpucfg[1] | cpucfg == 3'b100;
 reg  cpu_ph1;
 reg  cpu_ph2;
 reg  ram_cs;
@@ -360,6 +360,18 @@ sdram_ctrl ram1
 	.sd_cas       (SDRAM_nCAS      ),
 	.sd_cke       (SDRAM_CKE       ),
 	.sd_clk       (SDRAM_CLK       ),
+`ifdef MISTER_DUAL_SDRAM
+	// Second SDRAM chip (upper 16 bits) - no separate DQM on MiSTer hardware
+	.sd2_data     (SDRAM2_DQ       ),
+	.sd2_addr     (SDRAM2_A        ),
+	.sd2_dqm      (2'b00           ),  // Always enabled (no DQM pins on hardware)
+	.sd2_cs       (SDRAM2_nCS      ),
+	.sd2_ba       (SDRAM2_BA       ),
+	.sd2_we       (SDRAM2_nWE      ),
+	.sd2_ras      (SDRAM2_nRAS     ),
+	.sd2_cas      (SDRAM2_nCAS     ),
+	.sd2_clk      (SDRAM2_CLK      ),
+`endif
 
 	.cpuWR        (ram_din         ),
 	.cpuAddr      (ram_addr[22:1]  ),
@@ -376,7 +388,7 @@ sdram_ctrl ram1
 	.chipL        (_ram_ble        ),
 	.chipRW       (_ram_we         ),
 	.chipDMA      (_ram_oe         ),
-	.chipRD       (ramdata_in      ),
+	.chipRD       (chipRD_16bit    ),
 	.chip48       (chip48          )
 );
 
@@ -414,7 +426,8 @@ ddram_ctrl ram2
 	.ramready     (ram_ready2      )
 );
 
-wire [31:0] fastchip_dout;
+wire [15:0] fastchip_dout_16bit;  // 16-bit fastchip data
+wire [31:0] fastchip_dout = {16'h0000, fastchip_dout_16bit};  // Pad to 32-bit for CPU
 wire        fastchip_sel;
 wire        fastchip_lds;
 wire        fastchip_uds;
@@ -444,7 +457,7 @@ fastchip fastchip
 
 	.addr         ({chip_addr,1'b0}  ),
 	.din          (chip_din          ),
-	.dout         (fastchip_dout     ),
+	.dout         (fastchip_dout_16bit),
 	.lds          (~fastchip_lds     ),
 	.uds          (~fastchip_uds     ),
 	.rnw          (fastchip_rnw      ),
@@ -495,9 +508,10 @@ assign UART_TXD = (hps_mpu & mt32_use) | uart_tx;
 wire  [2:0] cpucfg;
 wire  [2:0] cachecfg;
 wire  [6:0] memcfg;
-wire        bootrom;   
+wire        bootrom;
 wire [31:0] ram_data;      // sram data bus
-wire [31:0] ramdata_in;    // sram data bus in
+wire [15:0] chipRD_16bit;  // 16-bit chip read from SDRAM controller
+wire [31:0] ramdata_in = {16'h0000, chipRD_16bit};  // Pad to 32-bit (upper 16 bits unused by chipset)
 wire [47:0] chip48;        // big chip read
 wire [23:1] ram_address;   // sram address bus
 wire        _ram_bhe;      // sram upper byte select
@@ -1083,14 +1097,16 @@ assign AUDIO_L = out_l;
 assign AUDIO_R = out_r;
 
 `ifdef MISTER_DUAL_SDRAM
-// Tristate SDRAM2 signals when not enabled
-assign SDRAM2_CLK  = SDRAM2_EN ? 1'b0 : 1'bZ;
-assign SDRAM2_A    = SDRAM2_EN ? 13'h0 : 13'bZ;
-assign SDRAM2_BA   = SDRAM2_EN ? 2'b0 : 2'bZ;
-assign SDRAM2_nCS  = SDRAM2_EN ? 1'b1 : 1'bZ;
-assign SDRAM2_nCAS = SDRAM2_EN ? 1'b1 : 1'bZ;
-assign SDRAM2_nRAS = SDRAM2_EN ? 1'b1 : 1'bZ;
-assign SDRAM2_nWE  = SDRAM2_EN ? 1'b1 : 1'bZ;
+// SDRAM2 signals are driven by sdram_ctrl module when SDRAM2_EN is active
+// Tristate them only when disabled
+// NOTE: With our implementation, SDRAM2 should always be enabled, so these might not be needed
+// assign SDRAM2_CLK  = SDRAM2_EN ? SDRAM2_CLK : 1'bZ;   // Driven by sdram_ctrl
+// assign SDRAM2_A    = SDRAM2_EN ? SDRAM2_A : 13'bZ;    // Driven by sdram_ctrl
+// assign SDRAM2_BA   = SDRAM2_EN ? SDRAM2_BA : 2'bZ;    // Driven by sdram_ctrl
+// assign SDRAM2_nCS  = SDRAM2_EN ? SDRAM2_nCS : 1'bZ;   // Driven by sdram_ctrl
+// assign SDRAM2_nCAS = SDRAM2_EN ? SDRAM2_nCAS : 1'bZ;  // Driven by sdram_ctrl
+// assign SDRAM2_nRAS = SDRAM2_EN ? SDRAM2_nRAS : 1'bZ;  // Driven by sdram_ctrl
+// assign SDRAM2_nWE  = SDRAM2_EN ? SDRAM2_nWE : 1'bZ;   // Driven by sdram_ctrl
 `endif
 
 endmodule
