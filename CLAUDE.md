@@ -129,7 +129,8 @@ Note: No clean.sh script exists in the repository root.
 - **Performance Optimization**: Cache hit/miss handling in memory access cycles
 
 ### 68030 Technical Implementation Details
-- **Specifications**: `/home/adam/Downloads/MC68030UM-P1.pdf`
+- **Specifications**: `/home/adam/Desktop/MC68030UM.pdf`
+
 
 #### PMMU (Paged Memory Management Unit)
 - **File**: `rtl/tg68k/TG68K_PMMU_030.vhd`
@@ -266,6 +267,7 @@ make clean
 - We are building on Linux
 
 ## Memories
+- check if the process is there with ps instead of trying to kill it right away
 
 ### Build-Related Memories
 - Keep track of the build's PID, you don't want to pkill builds from another instance!
@@ -555,4 +557,44 @@ will trigger illegal instruction exceptions per MC68030 specification. Use PMOVE
   cache_cinv_req  <= '1' when (exec(cache_cinv) = '1' or 
                                 CACR(2) = '1' or CACR(3) = '1' or CACR(10) = '1' or CACR(11) = '1') else '0';
   cache_cpush_req <= '1' when exec(cache_cpush) = '1' else '0';
+```
+### Coprocessor Primitives and their functions
+```
+**Processor Synchronization:
+- Busy with Current Instruction
+- Proceed with Next Instruction If No Trace
+- Service Interrupts and Requery If Trace Enabled
+- Proceed with Execution, Condition True/False
+**Instruction Manipulation:
+- Transfer Operation Word
+- Transfer Words from Instruction Stream
+**Exception Handling:
+- Take Privilege Violation If S Bit Not Set
+- Take Pre-Instruction Exception
+- Take Mid-Instruction Exception
+- Take Post-Instruction Exception
+**General Operand Transfer:
+- Evaluate and Pass (ea)
+- Evaluate (ea) and Transfer Data
+- Write to Previously Evaluated (ea)
+- Take Address and Transfer Data
+- Transfer to/from Top of Stack
+**Register Transfer:
+- Transfer CPU Register
+- Transfer CPU Control Register
+- Transfer Multiple CPU Registers
+- Transfer Multiple Coprocessor Registers
+- Transfer CPU SR and/or ScanPC
+```
+### MC68030 PFLUSH, PLOAD, PMOVE, PTEST Valid Addressing Modes
+```
+The following are supported for both source and destination:
+(An) Mode:010 Register:An
+(d16,An) Mode: 101 Register:An
+(d8,An,Xn) Mode: 110 Register:An
+(bd,An,Xn) Mode: 110 Register:An
+([bd,An,Xn],od) Mode: 110 Register:An
+([bd,An],Xn,od) Mode: 110 Register:An
+xxx.W Mode: 111 Register:000
+xxx.L Mode:111 Register:001
 ```

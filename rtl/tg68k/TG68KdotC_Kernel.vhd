@@ -2895,22 +2895,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 											trapmake <= '1';
 										END IF;
 										
-									WHEN "1111000" =>  									--CINV/CPUSH (68030 only)
-										IF cpu="11" THEN  -- 68030 only
-											IF SVmode='0' THEN
-												trap_priv <= '1';
-												trapmake <= '1';
-											ELSE
-												-- Fetch extension word to distinguish CINV vs CPUSH
-												IF decodeOPC='1' THEN
-													set(get_2ndOPC) <= '1';
-													next_micro_state <= cinv1;
-												END IF;
-											END IF;
-										ELSE
-											trap_illegal <= '1';
-											trapmake <= '1';
-										END IF;
+									WHEN "1111000" =>  									--CINV/CPUSH (68040+ only, NOT 68030)
+										-- MC68030 does not support CINV/CPUSH instructions
+										-- MC68030 uses CACR register bits (via MOVEC) for cache control:
+										--   CI (bit 3) = Clear Instruction Cache
+										--   CEI (bit 2) = Clear Entry in Instruction Cache
+										--   CD (bit 11) = Clear Data Cache
+										--   CED (bit 10) = Clear Entry in Data Cache
+										-- CINV/CPUSH were introduced in MC68040
+										trap_illegal <= '1';
+										trapmake <= '1';
 									
 									WHEN "1111010"|"1111011" =>  									--movec
 										IF cpu="00" THEN
@@ -3429,7 +3423,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF SVmode='1' THEN
 						-- Fetch extension word to determine PMMU instruction type
 						IF decodeOPC='1' THEN
-							set(get_2ndOPC) <= '1';
+							set(get_2ndOPC) <= '1';  -- REVERT to Build #9 - getbrief causes DiagROM hang
 							next_micro_state <= pmmu1;
 						END IF;
 					ELSE
@@ -3445,25 +3439,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				-- CPUSHA IC/DC/BC (0xF468, 0xF464, 0xF46C)
 				-- CPUSHP IC/DC/BC (0xF458, 0xF454, 0xF45C)
 				ELSIF cpu="11" AND opcode(11 downto 8)="0100" AND opcode(7 downto 6)="00" THEN
-					-- Single-word cache instructions: require supervisor
-					IF SVmode='0' THEN
-						trap_priv <= '1';
-						trapmake <= '1';
-					ELSE
-						-- Dispatch to cache control microstate
-						-- These are functionally similar to the two-word CINV/CPUSH at 0x4E78
-						-- The scope and cache selection are encoded in bits 5-2 of the opcode
-						IF decodeOPC='1' THEN
-							-- Set brief to encode the cache operation parameters
-							-- brief(6) = 0 for CINV, 1 for CPUSH
-							-- brief(4:3) = scope (from opcode 5:4)
-							-- brief(1:0) = cache selection (from opcode 3:2)
-							next_micro_state <= cinv1;
-							-- Extract operation type from opcode(5) (0=CINV, 1=CPUSH)
-							-- and other parameters from opcode(5:2)
-							-- This will be handled in cinv1 microstate
-						END IF;
-					END IF;
+					-- Single-word cache instructions (CINV/CPUSH): 68040+ only, NOT 68030
+					-- MC68030 does not have CINV/CPUSH - uses CACR bits via MOVEC instead
+					trap_illegal <= '1';
+					trapmake <= '1';
 				ELSIF cpu="11" AND opcode(8 downto 6)="100" THEN --cpSAVE
 					IF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="011" AND
 					   (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN --ea illegal modes
@@ -4237,32 +4216,22 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
                     CASE brief(15 downto 13) IS
                         WHEN "000" =>  -- PMOVE (standard, no FD)
-                            -- Dn direct EA
-                            IF opcode(5 downto 3)="000" THEN
-                                -- For PMOVE Dn: use set_exec to ensure execution happens via setexecOPC path
-                                IF opcode(7)='0' THEN
-                                    -- PMOVE <MMU reg>,Dn - Read from MMU, write to Dn
-                                    set_exec(Regwrena) <= '1';
-                                    set_exec(pmmu_rd) <= '1';
-                                    -- Check if 64-bit register (CRP=0x13/SRP=0x12) - need two register transfers
-                                    IF brief(14 downto 10)=X"12" OR brief(14 downto 10)=X"13" THEN
-                                        next_micro_state <= pmmu_dn_high;  -- HIGH word to Dn, then LOW word to Dn+1
-                                    ELSE
-                                        next_micro_state <= nop;  -- 32-bit register: Complete and return to normal execution
-                                    END IF;
-                                ELSE
-                                    -- PMOVE Dn,<MMU reg> - Read from Dn, write to MMU
-                                    -- MC68030: All PMMU registers support PMOVE writes (MMUSR has write-1-to-clear semantics)
-                                    set_exec(pmmu_wr) <= '1';
-                                    -- Check if 64-bit register (CRP=0x13/SRP=0x12) - need two register transfers
-                                    IF brief(14 downto 10)=X"12" OR brief(14 downto 10)=X"13" THEN
-                                        next_micro_state <= pmmu_dn_high;  -- HIGH word from Dn, then LOW word from Dn+1
-                                    ELSE
-                                        next_micro_state <= nop;  -- 32-bit register: Complete and return to normal execution
-                                    END IF;
-                                END IF;
+                            -- MC68030 PMOVE: Only control alterable addressing modes allowed
+                            -- Legal modes: (An), (d16,An), (d8,An,Xn), (bd,An,Xn), ([bd,An,Xn],od), ([bd,An],Xn,od), xxx.W, xxx.L
+                            -- Mode:010, 101, 110, 111(reg 000-001 only)
+                            -- ILLEGAL: Dn(000), An(001), (An)+(011), -(An)(100), PC-relative(111/010-011), immediate(111/100)
+
+                            -- Validate EA mode
+                            IF opcode(5 downto 3)="000" OR  -- Dn direct - ILLEGAL
+                               opcode(5 downto 3)="001" OR  -- An direct - ILLEGAL
+                               opcode(5 downto 3)="011" OR  -- (An)+ - ILLEGAL
+                               opcode(5 downto 3)="100" OR  -- -(An) - ILLEGAL
+                               (opcode(5 downto 3)="111" AND opcode(2 downto 1)/="00") THEN  -- PC-relative or immediate - ILLEGAL
+                                -- Illegal EA mode for PMOVE
+                                trap_illegal <= '1';
+                                trapmake <= '1';
                             ELSE
-                                -- memory EA
+                                -- Legal memory EA modes: (An), (d16,An), (d8,An,Xn), xxx.W, xxx.L
                                 IF opcode(7)='0' THEN
                                     -- PMOVE <MMU reg>,<ea> - Read from MMU, write to memory
                                     set(ea_build) <= '1';
@@ -4297,15 +4266,26 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                             -- BUG FIX: Check bits 9-8 (not 12-8) to avoid register selector overlap in bits 14-10
                             -- PMOVEFD: bits 9-8 = "00" with memory EA, register selector in bits 14-10
                             -- PFLUSHA: bits 14-8 = all zeros (no register selector)
-                            IF brief(9 downto 8) = "00" AND brief(14 downto 10) /= "00000" AND opcode(5 downto 3) /= "000" THEN
+                            IF brief(9 downto 8) = "00" AND brief(14 downto 10) /= "00000" THEN
                                 -- PMOVEFD (ea),MRn - Flush Disable variant (memory -> MMU, no ATC flush)
                                 -- bits 9-8 = "00", bits 14-10 != "00000" (valid register selector), memory EA
                                 -- Register selector in bits 14-10 can be TT0, TT1, TC, SRP, CRP, or MMUSR
-                                set(ea_build) <= '1';
-                                set(ea_data_OP1) <= '1';
-                                datatype <= "10";
-                                setstate <= "10";
-                                next_micro_state <= pmmu2;  -- Use same path as PMOVE but with FD flag
+
+                                -- Validate EA mode - same restrictions as PMOVE (control alterable only)
+                                IF opcode(5 downto 3)="000" OR  -- Dn direct - ILLEGAL
+                                   opcode(5 downto 3)="001" OR  -- An direct - ILLEGAL
+                                   opcode(5 downto 3)="011" OR  -- (An)+ - ILLEGAL
+                                   opcode(5 downto 3)="100" OR  -- -(An) - ILLEGAL
+                                   (opcode(5 downto 3)="111" AND opcode(2 downto 1)/="00") THEN  -- PC-relative or immediate - ILLEGAL
+                                    trap_illegal <= '1';
+                                    trapmake <= '1';
+                                ELSE
+                                    set(ea_build) <= '1';
+                                    set(ea_data_OP1) <= '1';
+                                    datatype <= "10";
+                                    setstate <= "10";
+                                    next_micro_state <= pmmu2;  -- Use same path as PMOVE but with FD flag
+                                END IF;
                             ELSIF brief(14 downto 8) = "0000000" THEN
                                 -- PFLUSHA - Flush all ATC entries
                                 -- bits 14-8 all zero (distinguishes from PMOVEFD which has register in 14-10)
@@ -4318,11 +4298,22 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                             ELSIF brief(12) = '0' OR brief(12) = '1' THEN
                                 -- PFLUSH(An) or PFLUSHN(An) - with EA
                                 -- Brief bit 11 (N flag): 0=PFLUSH, 1=PFLUSHN
-                                set(ea_build) <= '1';
-                                datatype <= "10";
-                                setstate <= "10";  -- Read EA for address
-                                set_exec(pmmu_pflush) <= '1';
-                                next_micro_state <= pflush1;
+
+                                -- Validate EA mode - same restrictions as PMOVE (control alterable only)
+                                IF opcode(5 downto 3)="000" OR  -- Dn direct - ILLEGAL
+                                   opcode(5 downto 3)="001" OR  -- An direct - ILLEGAL
+                                   opcode(5 downto 3)="011" OR  -- (An)+ - ILLEGAL
+                                   opcode(5 downto 3)="100" OR  -- -(An) - ILLEGAL
+                                   (opcode(5 downto 3)="111" AND opcode(2 downto 1)/="00") THEN  -- PC-relative or immediate - ILLEGAL
+                                    trap_illegal <= '1';
+                                    trapmake <= '1';
+                                ELSE
+                                    set(ea_build) <= '1';
+                                    datatype <= "10";
+                                    setstate <= "10";  -- Read EA for address
+                                    set_exec(pmmu_pflush) <= '1';
+                                    next_micro_state <= pflush1;
+                                END IF;
                             ELSE
                                 trap_illegal <= '1';
                                 trapmake <= '1';
@@ -4331,21 +4322,43 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         WHEN "010" =>  -- PLOAD
                             -- MC68030: brief(9) determines R/W: 0=PLOADR, 1=PLOADW
                             -- FC in brief(12:10), EA required
-                            set(ea_build) <= '1';
-                            datatype <= "10";
-                            setstate <= "10";  -- Read EA for address
-                            set_exec(pmmu_pload) <= '1';
-                            next_micro_state <= pload1;
+
+                            -- Validate EA mode - same restrictions as PMOVE (control alterable only)
+                            IF opcode(5 downto 3)="000" OR  -- Dn direct - ILLEGAL
+                               opcode(5 downto 3)="001" OR  -- An direct - ILLEGAL
+                               opcode(5 downto 3)="011" OR  -- (An)+ - ILLEGAL
+                               opcode(5 downto 3)="100" OR  -- -(An) - ILLEGAL
+                               (opcode(5 downto 3)="111" AND opcode(2 downto 1)/="00") THEN  -- PC-relative or immediate - ILLEGAL
+                                trap_illegal <= '1';
+                                trapmake <= '1';
+                            ELSE
+                                set(ea_build) <= '1';
+                                datatype <= "10";
+                                setstate <= "10";  -- Read EA for address
+                                set_exec(pmmu_pload) <= '1';
+                                next_micro_state <= pload1;
+                            END IF;
 
                         WHEN "100" =>  -- PTEST
                             -- MC68030: brief(9) determines R/W: 0=PTESTR, 1=PTESTW
                             -- FC in brief(12:10), EA required
                             -- Level in brief(12:10) for some variants
-                            set(ea_build) <= '1';
-                            datatype <= "10";
-                            setstate <= "10";  -- Read EA for address
-                            set_exec(pmmu_ptest) <= '1';
-                            next_micro_state <= ptest1;
+
+                            -- Validate EA mode - same restrictions as PMOVE (control alterable only)
+                            IF opcode(5 downto 3)="000" OR  -- Dn direct - ILLEGAL
+                               opcode(5 downto 3)="001" OR  -- An direct - ILLEGAL
+                               opcode(5 downto 3)="011" OR  -- (An)+ - ILLEGAL
+                               opcode(5 downto 3)="100" OR  -- -(An) - ILLEGAL
+                               (opcode(5 downto 3)="111" AND opcode(2 downto 1)/="00") THEN  -- PC-relative or immediate - ILLEGAL
+                                trap_illegal <= '1';
+                                trapmake <= '1';
+                            ELSE
+                                set(ea_build) <= '1';
+                                datatype <= "10";
+                                setstate <= "10";  -- Read EA for address
+                                set_exec(pmmu_ptest) <= '1';
+                                next_micro_state <= ptest1;
+                            END IF;
                             
                         WHEN OTHERS =>
                             trap_illegal <= '1';
@@ -4355,7 +4368,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- complete mem->MMU by issuing PMMU write using ea_data as source (high part for 64-bit)
                     set_exec(pmmu_wr) <= '1';
                     -- If CRP/SRP (64-bit), advance EA and read low part
-                    IF brief(14 downto 10)=X"12" OR brief(14 downto 10)=X"13" THEN
+                    IF brief(14 downto 10)="10010" OR brief(14 downto 10)="10011" THEN  -- SRP=0x12, CRP=0x13
                         set(mem_addsub) <= '1';
                         set(OP1addr) <= '1';
                         datatype <= "10"; -- long
@@ -4366,7 +4379,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- MMU -> memory write (high part for 64-bit CRP/SRP, or only part for 32-bit regs)
                     -- data_write_tmp sourced from pmmu_reg_rdat in write datapath
                     -- For CRP/SRP, advance EA and read low part next
-                    IF brief(14 downto 10)=X"12" OR brief(14 downto 10)=X"13" THEN
+                    IF brief(14 downto 10)="10010" OR brief(14 downto 10)="10011" THEN  -- SRP=0x12, CRP=0x13
                         set(mem_addsub) <= '1';
                         set(OP1addr) <= '1';
                         datatype <= "10"; -- long
