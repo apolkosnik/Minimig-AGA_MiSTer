@@ -49,7 +49,10 @@ entity TG68K_PMMU_030 is
     mem_addr       : out std_logic_vector(31 downto 0);
     mem_ack        : in  std_logic;
     mem_rdat       : in  std_logic_vector(31 downto 0);
-    busy           : out std_logic
+    busy           : out std_logic;
+
+    -- MMU Configuration Exception (MC68030 vector 56)
+    mmu_config_err : out std_logic
   );
 end TG68K_PMMU_030;
 
@@ -118,7 +121,7 @@ architecture rtl of TG68K_PMMU_030 is
 
   -- Simple ATC (Address Translation Cache), 8 entries, dynamic page sizes
   constant ATC_ENTRIES : integer := 8;
-  type atc_attr_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(2 downto 0);  -- {SUPER, CI, WP}
+  type atc_attr_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(3 downto 0);  -- {SUPER, CI, M, WP}
   type atc_val_t  is array(0 to ATC_ENTRIES-1) of std_logic;
   type atc_base_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(31 downto 0);
   type atc_fc_t   is array(0 to ATC_ENTRIES-1) of std_logic_vector(2 downto 0);
@@ -153,6 +156,9 @@ architecture rtl of TG68K_PMMU_030 is
   signal mmusr_update_req   : std_logic := '0';
   signal mmusr_update_ack   : std_logic := '0';
   signal mmusr_update_value : std_logic_vector(31 downto 0) := (others => '0');
+
+  -- MMU Configuration Exception tracking
+  signal mmu_config_error   : std_logic := '0';
 
   -- MC68030 page table walker FSM
   -- Added W_*_LOW states for reading LOW word of long-format (64-bit) descriptors
@@ -697,6 +703,13 @@ begin
 
   -- Reset and register writes
   process(clk, nreset)
+    -- Variables for TC validation (MMU configuration exception detection)
+    variable tc_e : std_logic;
+    variable ps_val : integer;
+    variable is_val : integer;
+    variable tia_val, tib_val, tic_val, tid_val : integer;
+    variable total_bits : integer;
+    variable page_offset_bits : integer;
   begin
     if nreset = '0' then
       TC    <= (others => '0');
@@ -712,9 +725,11 @@ begin
       ptest_active <= '0';
       ptest_addr <= (others => '0');
       ptest_fc <= (others => '0');
+      mmu_config_error <= '0';
     elsif rising_edge(clk) then
       atc_flush_req <= '0';
       mmusr_update_ack <= '0';
+      mmu_config_error <= '0';
 
       -- Handle MMUSR updates with MC68030-compliant priority (MMUSR register only)
       -- IMPORTANT: These only affect MMUSR, not other registers!
@@ -785,6 +800,40 @@ begin
             -- Reserved bits: 30-26 only (all other bits are valid control fields)
             -- Use masked write to avoid multiple drivers
             TC <= (reg_wdat and TC_WRITE_MASK);
+
+            -- MC68030 MMU Configuration Exception Detection
+            -- Per spec section 9.7.5.3: Register is loaded BEFORE exception is taken
+            tc_e := reg_wdat(31);
+            if tc_e = '1' then
+              -- Only validate when MMU is being enabled
+              ps_val := to_integer(unsigned(reg_wdat(23 downto 20)));
+
+              -- Check 1: PS field must be 8-15 (values 0-7 are reserved)
+              if ps_val < 8 then
+                mmu_config_error <= '1';
+                report "MMU_CONFIG_EXCEPTION: Invalid PS field=" & integer'image(ps_val) & " (must be 8-15)" severity warning;
+              else
+                -- Check 2: Field sum must equal 32
+                is_val := to_integer(unsigned(reg_wdat(19 downto 16)));
+                if is_val = 0 then
+                  is_val := DEFAULT_TC_IS;
+                end if;
+
+                tia_val := decode_tc_field(reg_wdat(15 downto 12), DEFAULT_TC_BITS(0));
+                tib_val := decode_tc_field(reg_wdat(11 downto 8), DEFAULT_TC_BITS(1));
+                tic_val := decode_tc_field(reg_wdat(7 downto 4), DEFAULT_TC_BITS(2));
+                tid_val := decode_tc_field(reg_wdat(3 downto 0), DEFAULT_TC_BITS(3));
+
+                page_offset_bits := get_page_offset_bits(ps_val);
+                total_bits := is_val + tia_val + tib_val + tic_val + tid_val + page_offset_bits;
+
+                if total_bits /= 32 then
+                  mmu_config_error <= '1';
+                  report "MMU_CONFIG_EXCEPTION: Field sum=" & integer'image(total_bits) & " (must be 32)" severity warning;
+                end if;
+              end if;
+            end if;
+
             -- TC changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
               atc_flush_req <= '1';
@@ -795,6 +844,13 @@ begin
               -- SRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
               -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
               SRP_H <= (reg_wdat and CRP_HIGH_MASK);
+
+              -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
+              -- Per spec: Register is loaded BEFORE exception is taken
+              if reg_wdat(1 downto 0) = "00" then
+                mmu_config_error <= '1';
+                report "MMU_CONFIG_EXCEPTION: SRP_H DT=00 (invalid descriptor type)" severity warning;
+              end if;
             else
               -- SRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
@@ -809,6 +865,13 @@ begin
               -- CRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
               -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
               CRP_H <= (reg_wdat and CRP_HIGH_MASK);
+
+              -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
+              -- Per spec: Register is loaded BEFORE exception is taken
+              if reg_wdat(1 downto 0) = "00" then
+                mmu_config_error <= '1';
+                report "MMU_CONFIG_EXCEPTION: CRP_H DT=00 (invalid descriptor type)" severity warning;
+              end if;
             else
               -- CRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
@@ -1224,13 +1287,13 @@ begin
                     severity note;
                 end if;
                 addr_phys_reg <= std_logic_vector(phys_result);
-                cache_inhibit_reg <= atc_attr(hit_idx)(1);
+                cache_inhibit_reg <= atc_attr(hit_idx)(2);
                 write_protect_reg <= atc_attr(hit_idx)(0);
                 fault_reg <= '0';
                 -- Set successful translation MMUSR with MC68030 format
                 fault_status_reg <= encode_mmusr_success(
                   write_protect => atc_attr(hit_idx)(0),   -- WP bit from page attributes
-                  modified => '0',                         -- TODO: Track M bit from descriptor
+                  modified => atc_attr(hit_idx)(1),        -- M bit from page descriptor
                   transparent => '0',                      -- Not a transparent translation
                   level => "011"                           -- Page translation (3 levels typical)
                 );
@@ -1474,13 +1537,13 @@ begin
               offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
               phys_result := phys_base + offset;
               addr_phys_reg <= std_logic_vector(phys_result);
-              cache_inhibit_reg <= atc_attr(hit_idx)(1);
+              cache_inhibit_reg <= atc_attr(hit_idx)(2);
               write_protect_reg <= atc_attr(hit_idx)(0);
               fault_reg <= '0';
               -- Set successful translation MMUSR with MC68030 format
               fault_status_reg <= encode_mmusr_success(
                 write_protect => atc_attr(hit_idx)(0),   -- WP bit from page attributes
-                modified => '0',                         -- TODO: Track M bit from descriptor
+                modified => atc_attr(hit_idx)(1),        -- M bit from page descriptor
                 transparent => '0',                      -- Not a transparent translation
                 level => "011"                           -- Page translation (3 levels typical)
               );
@@ -2139,8 +2202,9 @@ begin
               walk_phys_base <= walk_desc_high(31 downto 8) & x"00";
             end if;
             -- Extract attributes - bit positions are same in both formats
-            walk_attr(2) <= NOT get_supervisor_bit(walk_desc_high, walk_desc_is_long); -- User accessible (inverted from S bit)
-            walk_attr(1) <= walk_desc_high(6); -- Cache inhibit (CI)
+            walk_attr(3) <= NOT get_supervisor_bit(walk_desc_high, walk_desc_is_long); -- User accessible (inverted from S bit)
+            walk_attr(2) <= walk_desc_high(6); -- Cache inhibit (CI)
+            walk_attr(1) <= walk_desc_high(4); -- Modified (M)
             walk_attr(0) <= walk_desc_high(2); -- Write protect (WP)
             walk_fault <= '0';
 
@@ -2148,6 +2212,7 @@ begin
             if walk_desc_is_long = '1' then
               report "W_PAGE: Long-format descriptor, S=" & std_logic'image(get_supervisor_bit(walk_desc_high, walk_desc_is_long)) &
                      " CI=" & std_logic'image(walk_desc_high(6)) &
+                     " M=" & std_logic'image(walk_desc_high(4)) &
                      " WP=" & std_logic'image(walk_desc_high(2))
                 severity note;
             end if;
@@ -2161,7 +2226,7 @@ begin
           atc_phys_base(atc_rr) <= walk_phys_base;
           atc_shift(atc_rr)     <= walk_page_shift;
           atc_page_size(atc_rr) <= walk_page_size;
-          atc_attr(atc_rr)      <= walk_attr(2 downto 0);
+          atc_attr(atc_rr)      <= walk_attr(3 downto 0);
           atc_fc(atc_rr)        <= saved_fc;
           atc_is_insn(atc_rr)   <= saved_is_insn;
           atc_valid(atc_rr)     <= '1';
@@ -2332,4 +2397,8 @@ begin
       end if;
     end if;
   end process;
+
+  -- MMU Configuration Exception output
+  mmu_config_err <= mmu_config_error;
+
 end rtl;

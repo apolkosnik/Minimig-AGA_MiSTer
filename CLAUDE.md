@@ -268,6 +268,8 @@ make clean
 
 ## Memories
 - check if the process is there with ps instead of trying to kill it right away
+- don't create separate .md files for everything, we need just a few
+- tests and testbenches belong in tests folder not in root of the project
 
 ### Build-Related Memories
 - Keep track of the build's PID, you don't want to pkill builds from another instance!

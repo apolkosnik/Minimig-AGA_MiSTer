@@ -13,6 +13,7 @@ This is the Minimig-AGA_MiSTer project - an FPGA implementation of the Amiga com
 - Main project files: `Minimig.qpf` and `Minimig.qsf` (standard build), `Minimig_Q13.qpf` and `Minimig_Q13.qsf` (Quartus 13 compatibility)
 - Build generates RBF files for the MiSTer platform
 - Keep track of the build's PID, you don't want to pkill builds from another instance!
+- Check if the process is there with ps instead of trying to kill it right away
 - **Remember to check for multiple drivers before starting a build**
 
 #### Linux Build Commands
@@ -261,6 +262,8 @@ make clean
 - We are building on Linux
 
 ## Memories
+- check if the process is there with ps instead of trying to kill it right away
+
 
 ### Build-Related Memories
 - Keep track of the build's PID, you don't want to pkill builds from another instance!
@@ -535,3 +538,31 @@ will trigger illegal instruction exceptions per MC68030 specification. Use PMOVE
   cache_cpush_req <= '1' when exec(cache_cpush) = '1' else '0';
 ```
 
+### Coprocessor Primitives and their functions
+```
+**Processor Synchronization:
+- Busy with Current Instruction
+- Proceed with Next Instruction If No Trace
+- Service Interrupts and Requery If Trace Enabled
+- Proceed with Execution, Condition True/False
+**Instruction Manipulation:
+- Transfer Operation Word
+- Transfer Words from Instruction Stream
+**Exception Handling:
+- Take Privilege Violation If S Bit Not Set
+- Take Pre-Instruction Exception
+- Take Mid-Instruction Exception
+- Take Post-Instruction Exception
+**General Operand Transfer:
+- Evaluate and Pass (ea)
+- Evaluate (ea) and Transfer Data
+- Write to Previously Evaluated (ea)
+- Take Address and Transfer Data
+- Transfer to/from Top of Stack
+**Register Transfer:
+- Transfer CPU Register
+- Transfer CPU Control Register
+- Transfer Multiple CPU Registers
+- Transfer Multiple Coprocessor Registers
+- Transfer CPU SR and/or ScanPC
+```

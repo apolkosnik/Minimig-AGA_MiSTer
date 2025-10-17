@@ -321,6 +321,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_trap			: bit;
 	signal trap_trapv			: bit;
 	signal trap_interrupt	: bit;
+	signal trap_mmu_config	: bit;  -- MC68030 MMU Configuration Exception (vector 56)
 	signal trapmake			: bit;
 	signal trapd				: bit;
 	signal trap_SR				: std_logic_vector(7 downto 0);
@@ -441,6 +442,7 @@ signal pmmu_reg_fd_d    : std_logic;
 	signal pmmu_mem_ack   : std_logic;
 	signal pmmu_mem_rdat  : std_logic_vector(31 downto 0);
 	signal pmmu_busy      : std_logic;
+	signal pmmu_config_err : std_logic;
 
 	-- Internal FC signal (VHDL-93 compatibility)
 	signal fc_internal    : std_logic_vector(2 downto 0);
@@ -509,7 +511,8 @@ BEGIN
       mem_addr      => pmmu_mem_addr,
       mem_ack       => pmmu_mem_ack,
       mem_rdat      => pmmu_mem_rdat,
-      busy          => pmmu_busy
+      busy          => pmmu_busy,
+      mmu_config_err => pmmu_config_err
     );
 
   -- PMMU register interface connected (enabled for 68030)
@@ -1177,7 +1180,10 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				END IF;	
 				IF trap_interrupt='1' or set_vectoraddr = '1' THEN
 					trap_vector(9 downto 0) <= IPL_vec & "00";      --TH
-				END IF;	
+				END IF;
+				IF trap_mmu_config='1' THEN
+					trap_vector(9 downto 0) <= "11" & X"80";  -- Vector 56 (0xE0)
+				END IF;
 			END IF;
 		END IF;
 		IF use_VBR_Stackframe='1' THEN
@@ -1388,7 +1394,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					else
 						make_berr <= '0';
 					end if;
-						
+
 					stop <= set_stop OR (stop AND NOT setinterrupt);
 					IF setinterrupt='1' THEN
 						trap_interrupt <= '0';
@@ -1671,7 +1677,6 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;
 				IF exec(directSR)='1' OR set_stop='1' THEN
 					FlagsSR <= data_read(15 downto 8);
-					--preSVmode <= data_read(13);  -- BUG #15 FIX: Sync preSVmode with SR(5) on RTE
 				END IF;
 				IF interrupt='1' AND trap_interrupt='1' THEN
 					FlagsSR(2 downto 0) <=rIPL_nr;
@@ -1679,7 +1684,6 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF exec(to_SR)='1' THEN
 					FlagsSR(7 downto 0) <= SRin;	--SR
 					fc_internal(2) <= SRin(5);
-					--preSVmode <= SRin(5);  -- BUG #15 FIX: Sync preSVmode with SR(5) on MOVE to SR
 				ELSIF exec(update_FC)='1' THEN
 					fc_internal(2) <= FlagsSR(5);
 				END IF;
@@ -1746,6 +1750,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		trap_1111 <='0';
 		trap_trap <='0';
 		trap_trapv <= '0';
+		trap_mmu_config <= '0';
 		trapmake <='0';
 		set_vectoraddr <='0';
 		writeSR <= '0';
@@ -1755,6 +1760,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 --		illegal_byteaddr <= '0';
 		set_Z_error <= '0';
 		check_aligned <='0';
+
+		-- MC68030 MMU Configuration Exception (vector 56)
+		-- Triggered when invalid TC/CRP/SRP values are written to PMMU registers
+		IF pmmu_config_err = '1' THEN
+			trap_mmu_config <= '1';
+			trapmake <= '1';
+		END IF;
 
 		next_micro_state <= idle;
 		build_logical <= '0';
@@ -4209,9 +4221,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- Bits 15-13: Instruction type
                     --   000: PMOVE
                     --   001: PFLUSH/PMOVEFD (differentiated by bits 12-8)
-                    --   010: PLOAD (bits 12-10 determine R/W)
-                    --   100: PTEST (bits 9 and 5 determine R/W)
-                    -- Bits 12-8: Subtype/mode/FC for PFLUSH/PLOAD/PTEST
+                    --   010: PLOAD (bit 9 = R/W, bits 12-10 = FC)
+                    --   100: PTEST (bit 9 = R/W, bits 12-10 = FC, bit 5 = An return enable)
+                    -- Bits 12-10: FC (Function Code) for PTEST/PLOAD/PFLUSH (when applicable)
+                    -- Bits 9: R/W for PTEST/PLOAD (0=read, 1=write)
                     -- Bits 7-0: P-register number or flags
 
                     CASE brief(15 downto 13) IS
@@ -4342,7 +4355,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         WHEN "100" =>  -- PTEST
                             -- MC68030: brief(9) determines R/W: 0=PTESTR, 1=PTESTW
                             -- FC in brief(12:10), EA required
-                            -- Level in brief(12:10) for some variants
+                            -- NOTE: Level parameter in brief(12:10) is 68040+ only, NOT MC68030
 
                             -- Validate EA mode - same restrictions as PMOVE (control alterable only)
                             IF opcode(5 downto 3)="000" OR  -- Dn direct - ILLEGAL

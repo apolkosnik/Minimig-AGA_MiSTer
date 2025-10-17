@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-integration test-diagrom test-advanced test-fault test-stress test-regression validate setup help
+.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-integration test-diagrom test-cpu-mmu-detection test-advanced test-fault test-stress test-regression validate setup help
 
 # Default target
 all: test-comprehensive
@@ -37,6 +37,7 @@ help:
 	@echo "  test-pmove-tt1-mem - Test PMOVE.L TT1,(d16,An) memory write"
 	@echo "  test-integration - Test full system integration"
 	@echo "  test-diagrom     - Test DiagROM boot sequence"
+	@echo "  test-cpu-mmu-detection - Test CPU/MMU detection (TypeOfCPU + GetMMUType)"
 	@echo "  test-advanced    - Run advanced PMMU functionality tests"
 	@echo "  test-fault       - Run comprehensive fault handling tests"
 	@echo "  test-stress      - Run page walker stress tests"
@@ -148,6 +149,10 @@ test-integration: compile
 test-diagrom: compile
 	@echo "Running DiagROM boot simulation..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "do run_diagrom_boot.tcl; run 50us; quit"
+
+test-cpu-mmu-detection: compile
+	@echo "Running CPU/MMU detection tests (TypeOfCPU + GetMMUType)..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_cpu_mmu_detection
 
 # Enhanced comprehensive tests
 test-advanced: compile-advanced
