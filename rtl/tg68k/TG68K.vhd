@@ -235,8 +235,9 @@ COMPONENT TG68K_Cache_030
 
    -- Cache memory interface signals
    SIGNAL cache_fill_active : std_logic;
-   SIGNAL cache_fill_count  : std_logic_vector(1 downto 0);
+   SIGNAL cache_fill_count  : std_logic_vector(2 downto 0);  -- Changed from 1 downto 0 to support 8-word fills
    SIGNAL cache_fill_buffer : std_logic_vector(127 downto 0);
+   SIGNAL byte_enables      : std_logic_vector(3 downto 0);  -- Dynamic byte enables based on UDS/LDS
 
    type sync_state_t is (sync0, sync1, sync2, sync3, sync4, sync5, sync6, sync7, sync8, sync9);
    signal sync_state : sync_state_t;
@@ -260,12 +261,13 @@ BEGIN
    RESET <= '0' WHEN nResetOut='0' ELSE 'Z';
    HALT <=  '0' WHEN nResetOut='0' ELSE 'Z';
    cpu1reset <= RESET OR HALT;
-   
-   -- Cache is only available on 68030 (CPU="11")
-   cache_enabled <= '1' WHEN CPU="11" ELSE '0';
-   
+
+   -- Cache is only available on 68030 (CPU="11") AND when either I-cache or D-cache is enabled
+   -- This signal controls the overall cache subsystem (memory interface, etc.)
+   cache_enabled <= '1' WHEN (CPU="11" AND (cacr_ie='1' OR cacr_de='1')) ELSE '0';
+
    -- Cache control comes from CPU core CACR register
-   -- Fallback to basic enable if no cache control (for older CPU modes)
+   -- Individual i_cache_req and d_cache_req check their specific enable bits (cacr_ie, cacr_de)
    -- Note: cacr_ie, cacr_de, cacr_ifreeze, cacr_dfreeze now come from CPU core
 
 cpu1: TG68KdotC_Kernel 
@@ -480,7 +482,7 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
       d_req          => d_cache_req,
       d_we           => d_cache_we,
       d_cache_inhibit => pmmu_ch_inhibit,  -- Cache inhibit from PMMU
-      d_be           => "1111",           -- All bytes enabled for now
+      d_be           => byte_enables,     -- Dynamic byte enables based on UDS/LDS
       d_data_in      => d_cache_data_in,
       d_data_out     => d_cache_data_out,
       d_hit          => d_cache_hit,
@@ -492,16 +494,30 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
 
    -- Cache interface logic for 68030
    i_cache_addr <= ADDR;
-   i_cache_req <= '1' when (state="00" and cache_enabled='1') else '0';  -- Instruction fetch
+   -- Instruction cache request only when CPU is 68030 AND cacr_ie is enabled
+   i_cache_req <= '1' when (state="00" and CPU="11" and cacr_ie='1') else '0';
    i_fill_data <= cache_fill_buffer;
-   i_fill_valid <= '1' when (cache_fill_active='1' and cache_fill_count="11") else '0';
+   i_fill_valid <= '1' when (cache_fill_active='1' and cache_fill_count="111") else '0';  -- Changed from "11" to "111"
 
    d_cache_addr <= ADDR;
-   d_cache_req <= '1' when ((state="10" or state="11") and cache_enabled='1') else '0';  -- Data read/write
+   -- Data cache request only when CPU is 68030 AND cacr_de is enabled
+   d_cache_req <= '1' when ((state="10" or state="11") and CPU="11" and cacr_de='1') else '0';
    d_cache_we <= not wr;
    d_cache_data_in <= data_write & data_write;  -- Replicate 16-bit data to 32-bit
    d_fill_data <= cache_fill_buffer;
-   d_fill_valid <= '1' when (cache_fill_active='1' and cache_fill_count="11") else '0';
+   d_fill_valid <= '1' when (cache_fill_active='1' and cache_fill_count="111") else '0';  -- Changed from "11" to "111"
+
+   -- Calculate byte enables from UDS/LDS and address bits
+   -- For 68030, the cache module needs to know which bytes are being written
+   -- Use internal signals uds_s and lds_s (can't read output ports UDS/LDS in VHDL)
+   byte_enables <= "1111" when (uds_s='0' and lds_s='0') else  -- Longword access (both strobes)
+                   "1100" when (uds_s='0' and lds_s='1') else  -- High word only
+                   "0011" when (uds_s='1' and lds_s='0') else  -- Low word only
+                   "1000" when (uds_s='0' and ADDR(0)='1') else  -- Byte at odd address (high byte of high word)
+                   "0100" when (uds_s='0' and ADDR(0)='0') else  -- Byte at even address (low byte of high word)
+                   "0010" when (lds_s='0' and ADDR(0)='1') else  -- Byte at odd address (high byte of low word)
+                   "0001" when (lds_s='0' and ADDR(0)='0') else  -- Byte at even address (low byte of low word)
+                   "0000";  -- No access
 
    -- Cache hit/miss logic
    cache_hit <= (i_cache_hit and i_cache_req) or (d_cache_hit and d_cache_req);
@@ -511,40 +527,39 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
    cache_req <= (i_fill_req or d_fill_req) when cache_enabled='1' else '0';
    cache_addr <= i_fill_addr when i_fill_req='1' else d_fill_addr;
 
-   -- Cache fill process - accumulate 4 words into 128-bit cache line
+   -- Cache fill process - accumulate 8 words into 128-bit cache line
+   -- MC68030 cache lines are 16 bytes (128 bits) = 8 words of 16 bits each
    PROCESS (CLK, cpu1reset)
    BEGIN
       IF cpu1reset='0' THEN
          cache_fill_active <= '0';
-         cache_fill_count <= "00";
+         cache_fill_count <= "000";  -- Changed from "00" to "000" for 8-word count
          cache_fill_buffer <= (others => '0');
       ELSIF rising_edge(CLK) THEN
          IF cache_req='1' and cache_ack='1' THEN
             -- Start cache fill sequence
             IF cache_fill_active='0' THEN
                cache_fill_active <= '1';
-               cache_fill_count <= "00";
+               cache_fill_count <= "000";  -- Changed from "00" to "000"
             END IF;
          END IF;
 
          IF cache_fill_active='1' and cache_ack='1' THEN
-            -- Accumulate 16-bit words into 128-bit cache line
+            -- Accumulate 16-bit words into 128-bit cache line (8 words total)
             CASE cache_fill_count IS
-               WHEN "00" => cache_fill_buffer(15 downto 0)   <= cache_data;
-               WHEN "01" => cache_fill_buffer(31 downto 16)  <= cache_data;
-               WHEN "10" => cache_fill_buffer(47 downto 32)  <= cache_data;
-               WHEN "11" => cache_fill_buffer(63 downto 48)  <= cache_data;
-                           -- For now, replicate the 4 words to fill 8 words (128 bits)
-                           -- TODO: Implement proper 8-word burst from SDRAM
-                           cache_fill_buffer(79 downto 64)  <= cache_fill_buffer(15 downto 0);
-                           cache_fill_buffer(95 downto 80)  <= cache_fill_buffer(31 downto 16);
-                           cache_fill_buffer(111 downto 96) <= cache_fill_buffer(47 downto 32);
-                           cache_fill_buffer(127 downto 112)<= cache_fill_buffer(63 downto 48);
-                           cache_fill_active <= '0';  -- Complete cache line
+               WHEN "000" => cache_fill_buffer(15 downto 0)    <= cache_data;
+               WHEN "001" => cache_fill_buffer(31 downto 16)   <= cache_data;
+               WHEN "010" => cache_fill_buffer(47 downto 32)   <= cache_data;
+               WHEN "011" => cache_fill_buffer(63 downto 48)   <= cache_data;
+               WHEN "100" => cache_fill_buffer(79 downto 64)   <= cache_data;
+               WHEN "101" => cache_fill_buffer(95 downto 80)   <= cache_data;
+               WHEN "110" => cache_fill_buffer(111 downto 96)  <= cache_data;
+               WHEN "111" => cache_fill_buffer(127 downto 112) <= cache_data;
+                             cache_fill_active <= '0';  -- Complete after 8 words (128 bits)
                WHEN OTHERS => NULL;
             END CASE;
-            
-            IF cache_fill_count /= "11" THEN
+
+            IF cache_fill_count /= "111" THEN  -- Changed from "11" to "111"
                cache_fill_count <= cache_fill_count + 1;
             END IF;
          END IF;
