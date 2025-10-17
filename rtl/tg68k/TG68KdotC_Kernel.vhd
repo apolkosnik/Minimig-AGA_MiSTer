@@ -1439,8 +1439,17 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					fc_internal(0) <= setstate(1) AND (NOT PCbase OR setstate(0));
 					IF interrupt='1' THEN
 						fc_internal(1 downto 0) <= "11";
-					END IF;	
-					
+					END IF;
+					-- MOVES instruction FC override (uses SFC/DFC instead of current FC)
+					-- Note: Only override fc_internal(1 downto 0) here; fc_internal(2) is set elsewhere in clocked process
+					IF set(use_sfc_dfc)='1' OR exec(use_sfc_dfc)='1' THEN
+						IF set(sfc_not_dfc)='1' OR exec(sfc_not_dfc)='1' THEN
+							fc_internal(1 downto 0) <= SFC(1 downto 0);  -- Use SFC for memory read
+						ELSE
+							fc_internal(1 downto 0) <= DFC(1 downto 0);  -- Use DFC for memory write
+						END IF;
+					END IF;
+
 					IF state="11" THEN
 						exec_write_back <= '0';
 					ELSIF setstate="10" AND setaddrvalue='0' AND write_back='1' THEN
@@ -1686,6 +1695,14 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 					fc_internal(2) <= SRin(5);
 				ELSIF exec(update_FC)='1' THEN
 					fc_internal(2) <= FlagsSR(5);
+				END IF;
+				-- MOVES instruction FC(2) override
+				IF set(use_sfc_dfc)='1' OR exec(use_sfc_dfc)='1' THEN
+					IF set(sfc_not_dfc)='1' OR exec(sfc_not_dfc)='1' THEN
+						fc_internal(2) <= SFC(2);  -- Use SFC(2) for supervisor bit
+					ELSE
+						fc_internal(2) <= DFC(2);  -- Use DFC(2) for supervisor bit
+					END IF;
 				END IF;
 				IF interrupt='1' THEN
 					fc_internal(2) <= '1';
@@ -2076,20 +2093,33 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						trap_illegal <= '1';
 						trapmake <= '1';
 					END IF;
-				ELSIF opcode(11 downto 9)="111" THEN		--MOVES not in 68000
-					IF cpu(0)='1' AND opcode(7 downto 6)/="11" AND opcode(5 downto 4)/="00" AND (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN
-						IF SVmode='1' THEN
-							--TODO: implement MOVES
-							trap_illegal <= '1';
-							trapmake <= '1';
+				ELSIF opcode(11 downto 8)="1101" AND opcode(7 downto 6)="11" THEN		--MOVES (68010+)
+					-- MOVES opcode: 0000 1110 11xx xxxx
+					-- Privileged instruction - uses SFC/DFC for memory access
+					IF cpu(0)='1' THEN  -- 68010+ only
+						-- Valid EA modes: all except immediate (111/100), PC-relative (111/010,011), and An direct (001)
+						IF opcode(5 downto 4)/="00" AND (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN
+							IF SVmode='1' THEN
+								datatype <= opcode(7 downto 6);
+								IF decodeOPC='1' THEN
+									next_micro_state <= moves1;
+									getbrief <='1';
+								END IF;
+							ELSE
+								trap_priv <= '1';
+								trapmake <= '1';
+							END IF;
 						ELSE
-							trap_priv <= '1';
+							trap_illegal <= '1';
 							trapmake <= '1';
 						END IF;
 					ELSE
 						trap_illegal <= '1';
 						trapmake <= '1';
 					END IF;
+				ELSIF opcode(11 downto 9)="111" THEN		--other 0000111x instructions
+					trap_illegal <= '1';
+					trapmake <= '1';
 				ELSE								--andi, ...xxxi
 					IF opcode(7 downto 6)/="11" AND opcode(5 downto 3)/="001" THEN --ea An illegal mode
 						IF opcode(11 downto 9)="000" THEN	--ORI
@@ -4211,6 +4241,27 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					ELSE
 					trap_illegal <= '1';
 					trapmake <= '1';
+					END IF;
+
+				WHEN moves1 =>		-- MOVES instruction
+					-- MC68030 MOVES extension word format:
+					-- Bits 15-12: Register number (0-7)
+					-- Bit 11: Register type (0=Dn, 1=An)
+					-- Bits 10-1: Reserved (should be 0)
+					-- Bit 0: Direction (0=Rn->EA using DFC, 1=EA->Rn using SFC)
+					set(briefext) <= '1';  -- Use brief(11)&brief(14:12) for register selection
+					set_writePCbig <='1';
+					set_exec(opcMOVE) <= '1';
+					set_exec(use_sfc_dfc) <= '1';  -- Use SFC/DFC for FC
+					IF brief(0)='1' THEN
+						-- MOVES <ea>,Rn - Memory to Register using SFC
+						setstate <= "10";  -- Read from EA
+						set(Regwrena) <= '1';
+						set_exec(sfc_not_dfc) <= '1';  -- Use SFC for read
+					ELSE
+						-- MOVES Rn,<ea> - Register to Memory using DFC
+						setstate <= "11";  -- Write to EA
+						-- No sfc_not_dfc means use DFC for write
 					END IF;
 
                 WHEN pmmu1 =>		-- PMMU instruction dispatch based on extension word
