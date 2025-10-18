@@ -64,7 +64,7 @@ module agnus
 	input  [15:0] data_in,         // data bus in
 	output [15:0] data_out,        // data bus out
 	input   [8:1] address_in,      // 256 words (512 bytes) adress input,
-	output reg [20:1] address_out, // chip address output,
+	output reg [22:1] address_out, // chip address output,
 	output  [8:1] reg_address_out, // 256 words (512 bytes) register address out,
 	output reg    cpu_custom,      // CPU has access to custom chipset (registers and chipRAM / slowRAM)
 	output reg    dbr,             // agnus requests data bus
@@ -274,7 +274,7 @@ agnus_refresh ref1
 
 wire        dma_dsk;         //disk dma uses its slot
 wire        wr_dsk;          //disk dma engine write enable out
-wire [20:1] address_dsk;     //disk dma engine chip address out
+wire [22:1] address_dsk;     //disk dma engine chip address out
 wire  [8:1] reg_address_dsk; //disk dma engine register address out
 
 //instantiate disk dma engine
@@ -297,7 +297,7 @@ agnus_diskdma dsk1
 //--------------------------------------------------------------------------------------
 
 wire        dma_aud;         //audio dma uses its slot
-wire [20:1] address_aud;     //audio dma engine chip address out
+wire [22:1] address_aud;     //audio dma engine chip address out
 wire  [8:1] reg_address_aud; //audio dma engine register address out
 
 //instantiate audio dma engine
@@ -318,7 +318,7 @@ agnus_audiodma aud1
 //--------------------------------------------------------------------------------------
 
 wire        dma_bpl;         //bitplane dma engine uses it's slot
-wire [20:1] address_bpl;     //bitplane dma engine chip address out
+wire [22:1] address_bpl;     //bitplane dma engine chip address out
 wire  [8:1] reg_address_bpl; //bitplane dma engine register address out
 
 //instantiate bitplane dma
@@ -346,7 +346,7 @@ agnus_bitplanedma bpd1
 //--------------------------------------------------------------------------------------
 
 wire        req_spr;         //sprite dma request
-wire [20:1] address_spr;     //sprite dma engine chip address out
+wire [22:1] address_spr;     //sprite dma engine chip address out
 wire  [8:1] reg_address_spr; //sprite dma engine register address out
 
 //instantiate sprite dma engine
@@ -372,7 +372,7 @@ agnus_spritedma spr1
 //--------------------------------------------------------------------------------------
 
 wire        req_cop;         //copper dma request
-wire [20:1] address_cop;     //copper dma engine chip address out
+wire [22:1] address_cop;     //copper dma engine chip address out
 wire  [8:1] reg_address_cop; //copper dma engine register address out
 
 //instantiate copper
@@ -408,7 +408,7 @@ end
 wire        blit_busy;       //blitter busy status
 wire        blit_zero;       //blitter zero status
 wire        req_blt;         //blitter dma request
-wire [20:1] address_blt;     //blitter dma engine chip address out
+wire [22:1] address_blt;     //blitter dma engine chip address out
 wire  [8:1] reg_address_blt; //blitter dma engine register address out
 wire [15:0] data_blt;        //blitter dma engine data out
 wire        we_blt;          //blitter dma engine write enable out

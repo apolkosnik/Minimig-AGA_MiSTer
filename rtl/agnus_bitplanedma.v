@@ -43,7 +43,7 @@ module agnus_bitplanedma (
   input  wire [  9-1:1] reg_address_in,   // register address inputs
   output reg  [  9-1:1] reg_address_out,  // register address outputs
   input  wire [ 16-1:0] data_in,          // bus data in
-  output wire [ 21-1:1] address_out       // chip address out
+  output wire [ 23-1:1] address_out       // chip address out
 );
 
 
@@ -78,8 +78,8 @@ wire         hires;               // bplcon0 - high resolution display mode
 wire         shres;               // bplcon0 - super high resolution display mode
 wire [ 3: 0] bpu;                 // bplcon0 - selected number of bitplanes
 
-reg  [20: 1] newpt;               // new pointer
-reg  [20:16] bplpth [7:0];        // upper 5 bits bitplane pointers
+reg  [22: 1] newpt;               // new pointer
+reg  [22:16] bplpth [7:0];        // upper 7 bits bitplane pointers
 reg  [15: 1] bplptl [7:0];        // lower 16 bits bitplane pointers
 reg  [ 4: 0] plane;               // plane pointer select
 
@@ -104,7 +104,7 @@ reg    [8:0] hdiwstrt;
 reg    [8:0] hdiwstop;
 
 wire [ 2: 0] bplptr_sel;          // bitplane pointer select
-wire [20:16] bplpth_in;
+wire [22:16] bplpth_in;
 wire [15: 1] bplptl_in;
 wire         ddfstrt_sel;
 
@@ -217,7 +217,7 @@ end
 assign bplptr_sel = dma ? plane[2:0] : reg_address_in[4:2];
 
 // high word pointer register bank (implemented using distributed ram)
-assign bplpth_in = dma ? newpt[20:16] : data_in[4:0];
+assign bplpth_in = dma ? newpt[22:16] : data_in[6:0];
 
 // TODO high bitplane pointer probably needs a delay (writing to pointer doesn't seem to take effect next cycle ...)
 always @ (posedge clk) begin
@@ -227,7 +227,7 @@ always @ (posedge clk) begin
   end
 end
 
-assign address_out[20:16] = bplpth[plane[2:0]];
+assign address_out[22:16] = bplpth[plane[2:0]];
 
 // low word pointer register bank (implemented using distributed ram)
 assign bplptl_in = dma ? newpt[15:1] : data_in[15:1];
@@ -479,11 +479,11 @@ assign bpl2mod_bscan = fmode[14] ? ((vdiwstrt[0] ^ vpos[0]) ? bpl2mod : bpl1mod)
 always @ (*) begin
   if (mod) begin
     if (plane[0]) // even plane modulo
-      newpt[20:1] = address_out[20:1] + {{5{bpl2mod_bscan[15]}},bpl2mod_bscan[15:1]} + (fmode[1:0] == 2'b11 ? 3'd4 : fmode[1:0] == 2'b00 ? 3'd1 : 3'd2);
+      newpt[22:1] = address_out[22:1] + {{7{bpl2mod_bscan[15]}},bpl2mod_bscan[15:1]} + (fmode[1:0] == 2'b11 ? 3'd4 : fmode[1:0] == 2'b00 ? 3'd1 : 3'd2);
     else // odd plane modulo
-      newpt[20:1] = address_out[20:1] + {{5{bpl1mod_bscan[15]}},bpl1mod_bscan[15:1]} + (fmode[1:0] == 2'b11 ? 3'd4 : fmode[1:0] == 2'b00 ? 3'd1 : 3'd2);
+      newpt[22:1] = address_out[22:1] + {{7{bpl1mod_bscan[15]}},bpl1mod_bscan[15:1]} + (fmode[1:0] == 2'b11 ? 3'd4 : fmode[1:0] == 2'b00 ? 3'd1 : 3'd2);
   end else begin
-    newpt[20:1] = address_out[20:1] + (fmode[1:0] == 2'b11 ? 3'd4 : fmode[1:0] == 2'b00 ? 3'd1 : 3'd2);
+    newpt[22:1] = address_out[22:1] + (fmode[1:0] == 2'b11 ? 3'd4 : fmode[1:0] == 2'b00 ? 3'd1 : 3'd2);
   end
 end
 

@@ -15,7 +15,7 @@ module agnus_diskdma
 	input 	[8:1] reg_address_in,	//register address inputs
 	output 	[8:1] reg_address_out,	//register address outputs
 	input	[15:0] data_in,			//bus data in
-	output	reg [20:1] address_out	//chip address out current disk dma pointer
+	output	reg [22:1] address_out	//chip address out current disk dma pointer
 );
 //register names and adresses
 parameter DSKPTH  = 9'h020;
@@ -24,7 +24,7 @@ parameter DSKDAT  = 9'h026;
 parameter DSKDATR = 9'h008;
 
 //local signals
-wire	[20:1] address_outnew;	//new disk dma pointer
+wire	[22:1] address_outnew;	//new disk dma pointer
 reg		dmaslot;				//indicates if the current slot can be used to transfer data
 
 //--------------------------------------------------------------------------------------
@@ -53,13 +53,13 @@ assign wr = ~dmas;
 //--------------------------------------------------------------------------------------
 
 //address_out input multiplexer and ALU
-assign address_outnew[20:1] = dma ? address_out[20:1]+1'b1 : {data_in[4:0],data_in[15:1]};
+assign address_outnew[22:1] = dma ? address_out[22:1]+1'b1 : {data_in[6:0],data_in[15:1]};
 
 //disk pointer control
 always @(posedge clk)
   if (clk7_en) begin
   	if (dma || (reg_address_in[8:1] == DSKPTH[8:1]))
-  		address_out[20:16] <= address_outnew[20:16];//high 5 bits
+  		address_out[22:16] <= address_outnew[22:16];//high 7 bits
   end
 
 always @(posedge clk)

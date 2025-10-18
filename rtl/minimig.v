@@ -306,8 +306,9 @@ wire        dbwe;					//data bus write enable, Agnus tells the RAM it's writing 
 wire        dbs;					//data bus slow down, used for slowing down CPU access to chip, slow and custor register address space
 wire        xbs;					//cross bridge access (memory and custom registers)
 wire        _led;					//power led
-wire  [3:0] sel_chip;			//chip ram select
+wire [15:0] sel_chip;			//chip ram select (16 banks for 8MB mode)
 wire  [2:0] sel_slow;			//slow ram select
+wire        chip8mb;				//8MB chip RAM mode enable (AGA only)
 wire        sel_kick;			//rom select
 wire        sel_kick1mb;      // 1MB upper rom select
 wire        sel_kick256kmirror;// mirror f8-fb to fc-ff in a1k mode    
@@ -420,6 +421,7 @@ always @(posedge clk) if (clk7_en && reset) ntsc <= chipset_config[1];
 
 assign ide_ena  = ide_config[0];
 assign ide_fast = ~ide_config[5] & cpucfg[1];
+assign chip8mb  = memory_config[7] & chipset_config[4]; // 8MB ChipRAM only when AGA enabled
 
 //--------------------------------------------------------------------------------------
 
@@ -698,7 +700,19 @@ minimig_bankmapper BMAP1
 	.chip0((~ovr|~cpu_rd|dbr|cpuhlt) & sel_chip[0]),
 	.chip1(sel_chip[1]),
 	.chip2(sel_chip[2]),
-	.chip3(sel_chip[3]),	
+	.chip3(sel_chip[3]),
+	.chip4(sel_chip[4]),
+	.chip5(sel_chip[5]),
+	.chip6(sel_chip[6]),
+	.chip7(sel_chip[7]),
+	.chip8(sel_chip[8]),
+	.chip9(sel_chip[9]),
+	.chip10(sel_chip[10]),
+	.chip11(sel_chip[11]),
+	.chip12(sel_chip[12]),
+	.chip13(sel_chip[13]),
+	.chip14(sel_chip[14]),
+	.chip15(sel_chip[15]),
 	.slow0(sel_slow[0]),
 	.slow1(sel_slow[1]),
 	.slow2(sel_slow[2]),
@@ -706,6 +720,7 @@ minimig_bankmapper BMAP1
 	.kick1mb(sel_kick1mb),
 	.kick256kmirror(sel_kick256kmirror),
  	.cart(sel_cart),
+	.chip8mb(chip8mb),
 	.memory_config(memory_config[3:0]),
 	.bank(bank)
 );
@@ -781,7 +796,8 @@ gary GARY1
 	.dbs(dbs),
 	.xbs(xbs),
 	.memory_config(memory_config[3:0]),
-	.hdc_ena(ide_ena & ~ide_fast), // Gayle decoding enable	
+	.chip8mb(chip8mb),
+	.hdc_ena(ide_ena & ~ide_fast), // Gayle decoding enable
 	.toccata_ena(toccata_ena),
 	.toccata_base(toccata_base),
 	.ram_rd(ram_rd),

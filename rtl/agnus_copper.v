@@ -71,7 +71,7 @@ module agnus_copper
 	input 	[15:0] data_in,	    		// data bus input
 	input 	[8:1] reg_address_in,		// register address input
 	output 	reg [8:1] reg_address_out,	// register address output
-	output 	reg [20:1] address_out 		// chip address output
+	output 	reg [22:1] address_out 		// chip address output
 );
 
 // register names and adresses		
@@ -92,9 +92,9 @@ parameter WAITSKIP1 = 3'b111;
 parameter WAITSKIP2 = 3'b110;
 
 // local signals
-reg		[20:16] cop1lch;	// copper location register 1
+reg		[22:16] cop1lch;	// copper location register 1
 reg		[15:1] cop1lcl;		// copper location register 1
-reg		[20:16] cop2lch;	// copper location register 2
+reg		[22:16] cop2lch;	// copper location register 2
 reg		[15:1] cop2lcl;		// copper location register 2
 reg		cdang;				// copper danger bit
 reg		[15:1] ir1;			// instruction register 1
@@ -139,9 +139,9 @@ assign clk_ena = hpos[0];
 always @(posedge clk)
   if (clk7_en) begin
   	if (reset)
-  		cop1lch[20:16] <= 0;
+  		cop1lch[22:16] <= 0;
   	else if (reg_address_in[8:1]==COP1LCH[8:1])
-  		cop1lch[20:16] <= data_in[4:0];
+  		cop1lch[22:16] <= data_in[6:0];
   end
 		
 always @(posedge clk)
@@ -156,9 +156,9 @@ always @(posedge clk)
 always @(posedge clk)
   if (clk7_en) begin
   	if (reset)
-  		cop2lch[20:16]<=0;
+  		cop2lch[22:16]<=0;
   	else if (reg_address_in[8:1]==COP2LCH[8:1])
-  		cop2lch[20:16] <= data_in[4:0];
+  		cop2lch[22:16] <= data_in[6:0];
   end
 
 always @(posedge clk)
@@ -194,11 +194,11 @@ always @(posedge clk)
 always @(posedge clk)
   if (clk7_en) begin
   	if (dma_ack && strobe1 && copper_state==RESET)//load pointer with location register 1
-  		address_out[20:1] <= {cop1lch[20:16],cop1lcl[15:1]};
+  		address_out[22:1] <= {cop1lch[22:16],cop1lcl[15:1]};
   	else if (dma_ack && strobe2 && copper_state==RESET)//load pointer with location register 2
-  		address_out[20:1] <= {cop2lch[20:16],cop2lcl[15:1]};
-  	else if (dma_ack && (selins || selreg))//increment address pointer (when not dummy cycle) 
-  		address_out[20:1] <= address_out[20:1] + 1'b1;
+  		address_out[22:1] <= {cop2lch[22:16],cop2lcl[15:1]};
+  	else if (dma_ack && (selins || selreg))//increment address pointer (when not dummy cycle)
+  		address_out[22:1] <= address_out[22:1] + 1'b1;
   end
 
 //--------------------------------------------------------------------------------------

@@ -49,7 +49,7 @@
 module gary
 (
 	input  [23:1] cpu_address_in, //cpu address bus input
-	input  [20:1] dma_address_in, //agnus dma memory address input
+	input  [22:1] dma_address_in, //agnus dma memory address input
 	output [23:1] ram_address_out, //full ram address output to make memory mapping easier
 	input  [15:0] cpu_data_out,
 	output [15:0] cpu_data_in,
@@ -75,6 +75,7 @@ module gary
 	input   [3:0] memory_config, //selected memory configuration
 	input         ecs, // ECS chipset enable
 	input         hdc_ena, //enables hdd interface
+	input         chip8mb, //8MB chipram enable (only when AGA enabled)
 
 	input         toccata_ena,
 	input   [7:0] toccata_base,
@@ -84,7 +85,7 @@ module gary
 	output        ram_lwr, //bus low write
 
 	output        sel_reg, //select chip register bank
-	output reg [3:0] sel_chip, //select chip memory
+	output reg [15:0] sel_chip, //select chip memory (16 banks for 8MB mode)
 	output reg [2:0] sel_slow, //select slowfast memory ($C0000)
 	output reg   sel_kick, //select kickstart rom
 	output reg   sel_kick1mb, // 1MB kickstart rom 'upper' half
@@ -118,10 +119,10 @@ assign ram_lwr = dbr ?  dbwe : cpu_lwr;
 
 //--------------------------------------------------------------------------------------
 
-// ram address multiplexer (512KB bank)		
+// ram address multiplexer (512KB bank)
 // assign ram_address_out = dbr ? dma_address_in[18:1] : cpu_address_in[18:1];
-// output full address to make mapping easier.  
-assign ram_address_out  = dbr ? {3'b000, dma_address_in[20:1]} : cpu_address_in[23:1];
+// output full address to make mapping easier.
+assign ram_address_out  = dbr ? {1'b0, dma_address_in[22:1]} : cpu_address_in[23:1];
    
    
 //--------------------------------------------------------------------------------------
@@ -137,10 +138,32 @@ always @(*)
 begin
 	if (dbr)//agnus only accesses chipram
 	begin
-		sel_chip[0] = ~dma_address_in[20] & ~dma_address_in[19];
-		sel_chip[1] = ~dma_address_in[20] &  dma_address_in[19];
-		sel_chip[2] =  dma_address_in[20] & ~dma_address_in[19];
-		sel_chip[3] =  dma_address_in[20] &  dma_address_in[19];
+		if (chip8mb) begin
+			// 8MB mode: decode all 16 banks using bits [22:19]
+			sel_chip[ 0] = ~dma_address_in[22] & ~dma_address_in[21] & ~dma_address_in[20] & ~dma_address_in[19];
+			sel_chip[ 1] = ~dma_address_in[22] & ~dma_address_in[21] & ~dma_address_in[20] &  dma_address_in[19];
+			sel_chip[ 2] = ~dma_address_in[22] & ~dma_address_in[21] &  dma_address_in[20] & ~dma_address_in[19];
+			sel_chip[ 3] = ~dma_address_in[22] & ~dma_address_in[21] &  dma_address_in[20] &  dma_address_in[19];
+			sel_chip[ 4] = ~dma_address_in[22] &  dma_address_in[21] & ~dma_address_in[20] & ~dma_address_in[19];
+			sel_chip[ 5] = ~dma_address_in[22] &  dma_address_in[21] & ~dma_address_in[20] &  dma_address_in[19];
+			sel_chip[ 6] = ~dma_address_in[22] &  dma_address_in[21] &  dma_address_in[20] & ~dma_address_in[19];
+			sel_chip[ 7] = ~dma_address_in[22] &  dma_address_in[21] &  dma_address_in[20] &  dma_address_in[19];
+			sel_chip[ 8] =  dma_address_in[22] & ~dma_address_in[21] & ~dma_address_in[20] & ~dma_address_in[19];
+			sel_chip[ 9] =  dma_address_in[22] & ~dma_address_in[21] & ~dma_address_in[20] &  dma_address_in[19];
+			sel_chip[10] =  dma_address_in[22] & ~dma_address_in[21] &  dma_address_in[20] & ~dma_address_in[19];
+			sel_chip[11] =  dma_address_in[22] & ~dma_address_in[21] &  dma_address_in[20] &  dma_address_in[19];
+			sel_chip[12] =  dma_address_in[22] &  dma_address_in[21] & ~dma_address_in[20] & ~dma_address_in[19];
+			sel_chip[13] =  dma_address_in[22] &  dma_address_in[21] & ~dma_address_in[20] &  dma_address_in[19];
+			sel_chip[14] =  dma_address_in[22] &  dma_address_in[21] &  dma_address_in[20] & ~dma_address_in[19];
+			sel_chip[15] =  dma_address_in[22] &  dma_address_in[21] &  dma_address_in[20] &  dma_address_in[19];
+		end else begin
+			// 2MB mode: decode 4 banks using bits [20:19], upper banks unused
+			sel_chip[ 0] = ~dma_address_in[20] & ~dma_address_in[19];
+			sel_chip[ 1] = ~dma_address_in[20] &  dma_address_in[19];
+			sel_chip[ 2] =  dma_address_in[20] & ~dma_address_in[19];
+			sel_chip[ 3] =  dma_address_in[20] &  dma_address_in[19];
+			sel_chip[15:4] = 12'b0;
+		end
 		sel_slow[0] =  ecs && memory_config==4'b0100 && dma_address_in[20:19]==2'b01; //use slow0 as chipmem, when only chip0 and slow0 are enabled.
 		sel_slow[1] = 0;
 		sel_slow[2] = 0;
@@ -150,10 +173,32 @@ begin
 	end
 	else
 	begin
-		sel_chip[0] = cpu_address_in[23:19]==5'b0000_0 && (!ovl || cpu_hlt);
-		sel_chip[1] = cpu_address_in[23:19]==5'b0000_1;
-		sel_chip[2] = cpu_address_in[23:19]==5'b0001_0;
-		sel_chip[3] = cpu_address_in[23:19]==5'b0001_1;
+		if (chip8mb) begin
+			// 8MB mode: CPU can access all 16 chip banks using bits [22:19]
+			sel_chip[ 0] = cpu_address_in[23:19]==5'b0000_0 && (!ovl || cpu_hlt);
+			sel_chip[ 1] = cpu_address_in[23:19]==5'b0000_1;
+			sel_chip[ 2] = cpu_address_in[23:19]==5'b0001_0;
+			sel_chip[ 3] = cpu_address_in[23:19]==5'b0001_1;
+			sel_chip[ 4] = cpu_address_in[23:19]==5'b0010_0;
+			sel_chip[ 5] = cpu_address_in[23:19]==5'b0010_1;
+			sel_chip[ 6] = cpu_address_in[23:19]==5'b0011_0;
+			sel_chip[ 7] = cpu_address_in[23:19]==5'b0011_1;
+			sel_chip[ 8] = cpu_address_in[23:19]==5'b0100_0;
+			sel_chip[ 9] = cpu_address_in[23:19]==5'b0100_1;
+			sel_chip[10] = cpu_address_in[23:19]==5'b0101_0;
+			sel_chip[11] = cpu_address_in[23:19]==5'b0101_1;
+			sel_chip[12] = cpu_address_in[23:19]==5'b0110_0;
+			sel_chip[13] = cpu_address_in[23:19]==5'b0110_1;
+			sel_chip[14] = cpu_address_in[23:19]==5'b0111_0;
+			sel_chip[15] = cpu_address_in[23:19]==5'b0111_1;
+		end else begin
+			// 2MB mode: CPU can access 4 chip banks using bits [23:19]
+			sel_chip[ 0] = cpu_address_in[23:19]==5'b0000_0 && (!ovl || cpu_hlt);
+			sel_chip[ 1] = cpu_address_in[23:19]==5'b0000_1;
+			sel_chip[ 2] = cpu_address_in[23:19]==5'b0001_0;
+			sel_chip[ 3] = cpu_address_in[23:19]==5'b0001_1;
+			sel_chip[15:4] = 12'b0;
+		end
 		sel_slow[0] = t_sel_slow[0];
 		sel_slow[1] = t_sel_slow[1];
 		sel_slow[2] = t_sel_slow[2];

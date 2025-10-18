@@ -45,7 +45,7 @@ module agnus_audiodma
   input  wire [  9-1:1] reg_address_in,   // register address inputs
   output reg  [  9-1:1] reg_address_out,  // register address outputs
   input  wire [ 16-1:0] data_in,          // bus data in
-  output wire [ 21-1:1] address_out       // chip address out
+  output wire [ 23-1:1] address_out       // chip address out
 );
 
 
@@ -58,11 +58,11 @@ parameter AUD3DAT_REG = 9'h0DA;
 // local signals
 wire          audlcena;     // audio dma location pointer register address enable
 wire [  1: 0] audlcsel;     // audio dma location pointer select
-reg  [ 20:16] audlch [3:0]; // audio dma location pointer bank (high word)
+reg  [ 22:16] audlch [3:0]; // audio dma location pointer bank (high word)
 reg  [ 15: 1] audlcl [3:0]; // audio dma location pointer bank (low word)
-wire [ 20: 1] audlcout;     // audio dma location pointer bank output
-reg  [ 20: 1] audpt [3:0];  // audio dma pointer bank
-wire [ 20: 1] audptout;     // audio dma pointer bank output
+wire [ 22: 1] audlcout;     // audio dma location pointer bank output
+reg  [ 22: 1] audpt [3:0];  // audio dma pointer bank
+wire [ 22: 1] audptout;     // audio dma pointer bank output
 reg  [  1: 0] channel;      // audio dma channel select
 reg           dmal;
 reg           dmas;
@@ -79,7 +79,7 @@ assign audlcsel = {~reg_address_in[5],reg_address_in[4]};
 always @ (posedge clk) begin
   if (clk7_en) begin
     if (audlcena & ~reg_address_in[1]) // AUDxLCH
-      audlch[audlcsel] <= #1 data_in[4:0];
+      audlch[audlcsel] <= #1 data_in[6:0];
   end
 end
 
@@ -129,18 +129,18 @@ always @ (*) begin
 end
 
 // memory address output
-assign address_out[20:1] = audptout[20:1];
+assign address_out[22:1] = audptout[22:1];
 
 // audio pointers register bank (implemented using distributed ram) and ALU
 always @ (posedge clk) begin
   if (clk7_en) begin
     if (dmal)
-      audpt[channel] <= #1 dmas ? audlcout[20:1] : audptout[20:1] + 1'b1;
+      audpt[channel] <= #1 dmas ? audlcout[22:1] : audptout[22:1] + 1'b1;
   end
 end
 
 // audio pointer output
-assign audptout[20:1] = audpt[channel];
+assign audptout[22:1] = audpt[channel];
 
 // register address output multiplexer
 always @ (*) begin

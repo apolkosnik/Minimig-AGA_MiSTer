@@ -98,7 +98,7 @@ module agnus_spritedma (
   input  [8:1] reg_address_in,    // register address inputs
   output   reg [8:1] reg_address_out,  // register address outputs
   input  [15:0] data_in,        // bus data in
-  output  [20:1] address_out      // chip address out
+  output  [22:1] address_out      // chip address out
 );
 
 
@@ -108,7 +108,7 @@ parameter SPRPOSCTLBASE_REG = 9'h140;    //sprite data, position and control reg
 parameter FMODE_REG         = 9'h1fc;
 
 //local signals
-reg   [20:16] sprpth [7:0];    //upper 5 bits sprite pointers register bank
+reg   [22:16] sprpth [7:0];    //upper 7 bits sprite pointers register bank
 reg   [15:1]  sprptl [7:0];    //lower 16 bits sprite pointers register bank
 reg    [15:8]  sprpos [7:0];    //sprite vertical start position register bank
 reg           sprposh [7:0];  // sprite horizontal position (SH10)
@@ -119,7 +119,7 @@ wire  [9:0] vstart;        //vertical start of selected sprite
 wire        spr_sscan2;   // sprite scan double bit
 wire  [9:0] vstop;        //vertical stop of selected sprite
 reg    [2:0] sprite;        //sprite select signal
-wire  [20:1] newptr;        //new sprite pointer value
+wire  [22:1] newptr;        //new sprite pointer value
 
 reg   enable;            //horizontal position in sprite region
 
@@ -172,11 +172,11 @@ assign ptsel = (ackdma) ? sprite : reg_address_in[4:2];
 assign pcsel = (ackdma) ? sprite : reg_address_in[5:3];
 
 //sprite pointer arithmetic unit
-assign newptr = address_out[20:1] + spr_fmode_ptradd;
+assign newptr = address_out[22:1] + spr_fmode_ptradd;
 
 //sprite pointer high word register bank (implemented using distributed ram)
-wire [20:16] sprpth_in;
-assign sprpth_in = ackdma ? newptr[20:16] : data_in[4:0];
+wire [22:16] sprpth_in;
+assign sprpth_in = ackdma ? newptr[22:16] : data_in[6:0];
 
 always @ (posedge clk) begin
   if (clk7_en) begin
@@ -185,7 +185,7 @@ always @ (posedge clk) begin
   end
 end
 
-assign address_out[20:16] = sprpth[sprite];
+assign address_out[22:16] = sprpth[sprite];
 
 //sprite pointer low word register bank (implemented using distributed ram)
 wire [15:1]sprptl_in;
