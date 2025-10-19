@@ -15,6 +15,7 @@ This is the Minimig-AGA_MiSTer project - an FPGA implementation of the Amiga com
 - Keep track of the build's PID, you don't want to pkill builds from another instance!
 - create and run regression tests and correctness tests before building the rbf
 - Check if the process is there with ps instead of trying to kill it right away
+- Ask me 3 times before you attempt to run git checkout, you can try git diff or git show
 - Never convert the existing SOF to RBF!
 - **Remember to check for multiple drivers issues before starting a build**
 
@@ -590,13 +591,33 @@ will trigger illegal instruction exceptions per MC68030 specification. Use PMOVE
 ```
 ### MC68030 PFLUSH, PLOAD, PMOVE, PTEST Valid Addressing Modes
 ```
-The following are supported for both source and destination:
-(An) Mode:010 Register:An
-(d16,An) Mode: 101 Register:An
-(d8,An,Xn) Mode: 110 Register:An
-(bd,An,Xn) Mode: 110 Register:An
-([bd,An,Xn],od) Mode: 110 Register:An
-([bd,An],Xn,od) Mode: 110 Register:An
-xxx.W Mode: 111 Register:000
-xxx.L Mode:111 Register:001
+The valid addressing modes for the MMU instructions on the MC68030—which include `PFLUSH`, `PFLUSHA`, `PLOAD`, `PMOVE`, and `PTEST`—are strictly limited to **Control Alterable Addressing Modes**.
+
+If any other addressing mode is used for an MMU instruction, the MC68030 initiates F-line emulator exception processing.
+
+The Control Alterable Addressing Modes are those that are both designated as "Control" (used for control-related operations, including supervisor/MMU tasks) and "Alterable" (can be written to).
+
+### Valid Addressing Modes for MC68030 MMU Instructions
+
+The following addressing modes fall into the Control Alterable category supported by the MMU instructions:
+
+| Addressing Mode Type | Assembler Syntax | Notes |
+| :--- | :--- | :--- |
+| **Data Register Direct** | `Dn` | Used by instructions like `PMOVE` for register transfer |
+| **Address Register Indirect** | `(An)` | A mode classified as Control Alterable |
+| **Address Register Indirect with Predecrement** | `-(An)` | A mode classified as Control Alterable |
+| **Address Register Indirect with Displacement** | `(d16,An)` | A mode classified as Control Alterable |
+| **Indexed Addressing Modes** | `(d8,An,Xn)`, `(bd,An,Xn)`, `([bd,An],Xn,od)`, `([bd,An,Xn],od)` | All forms of Address Register Indirect with Index and Memory Indirect modes are considered Control Alterable |
+| **Absolute Short Addressing Mode** | `(xxx).W` | A mode classified as Control Alterable |
+| **Absolute Long Addressing Mode** | `(xxx).L` | A mode classified as Control Alterable |
+
+### Context for MMU Operations
+
+1.  **PMOVE:** This instruction transfers data between a CPU register or memory location and one of the six MMU registers (CRP, SRP, TC, TT0, TT1, MMUSR). When transferring to or from a CPU register (e.g., `Dn`), the Data Register Direct mode (`Dn`) is utilized.
+2.  **PFLUSH and PTEST:** Although the full set of Control Alterable modes applies, for `PFLUSH <ea>` and `PTEST <ea>`, the function is primarily to retrieve a logical address from memory or a register to search the Address Translation Cache (ATC) or tables. The addressing modes used for these operands must adhere to the Control Addressing Modes, which largely overlaps with the Control Alterable set when acting as a source.
+3.  **Excluded Modes:** Certain addressing modes common in general CPU instructions are excluded due to the strict "Control Alterable" requirement:
+    *   Address Register Direct (`An`)
+    *   Address Register Indirect with Postincrement (`(An)+`)
+    *   Program Counter (PC) relative modes (e.g., `(d16,PC)`, `(d8,PC,Xn)`, and PC memory indirect modes), because these are categorized as "Control" but **not** "Alterable".
+    *   Immediate Data (`#<data>`), which is neither Control nor Alterable.
 ```

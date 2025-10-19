@@ -58,6 +58,8 @@ entity TG68K is
       cache_addr    : buffer std_logic_vector(31 downto 0);
       cache_data    : in  std_logic_vector(15 downto 0);
       cache_ack     : in  std_logic;
+      cache_burst   : buffer std_logic;  -- Burst mode request (4 longwords)
+      cache_burst_len : buffer std_logic_vector(2 downto 0);  -- Burst length (words to transfer)
 -- Cache control
       cache_hit     : out std_logic;
       cache_miss    : out std_logic
@@ -105,6 +107,9 @@ COMPONENT TG68KdotC_Kernel
       cacr_de         : out std_logic;
       cacr_ifreeze     : out std_logic;
       cacr_dfreeze     : out std_logic;
+      cacr_ibe        : out std_logic;  -- Instruction Burst Enable
+      cacr_dbe        : out std_logic;  -- Data Burst Enable
+      cacr_wa         : out std_logic;  -- Write Allocate
 -- PMMU address interface (68030)
       pmmu_addr_log   : out std_logic_vector(31 downto 0);
       pmmu_addr_phys  : out std_logic_vector(31 downto 0);
@@ -133,6 +138,7 @@ COMPONENT TG68K_Cache_030
       cacr_de        : in  std_logic;
       cacr_ifreeze    : in  std_logic;
       cacr_dfreeze    : in  std_logic;
+      cacr_wa        : in  std_logic;
       -- Cache Control Instructions
       cinv_req       : in  std_logic;
       cpush_req      : in  std_logic;
@@ -205,6 +211,9 @@ COMPONENT TG68K_Cache_030
    SIGNAL cacr_de         : std_logic;
    SIGNAL cacr_ifreeze     : std_logic;
    SIGNAL cacr_dfreeze     : std_logic;
+   SIGNAL cacr_ibe        : std_logic;  -- Instruction Burst Enable (CACR bit 4)
+   SIGNAL cacr_dbe        : std_logic;  -- Data Burst Enable (CACR bit 12)
+   SIGNAL cacr_wa         : std_logic;  -- Write Allocate (CACR bit 13)
 
    -- PMMU address signals (68030)
    SIGNAL pmmu_addr_log   : std_logic_vector(31 downto 0);
@@ -264,7 +273,8 @@ BEGIN
 
    -- Cache is only available on 68030 (CPU="11") AND when either I-cache or D-cache is enabled
    -- This signal controls the overall cache subsystem (memory interface, etc.)
-   cache_enabled <= '1' WHEN (CPU="11" AND (cacr_ie='1' OR cacr_de='1')) ELSE '0';
+   --cache_enabled <= '1' WHEN (CPU="11" AND (cacr_ie='1' OR cacr_de='1')) ELSE '0';
+   cache_enabled <= '1' WHEN (CPU(1)='1' AND (cacr_ie='1' OR cacr_de='1')) ELSE '0';
 
    -- Cache control comes from CPU core CACR register
    -- Individual i_cache_req and d_cache_req check their specific enable bits (cacr_ie, cacr_de)
@@ -309,6 +319,9 @@ cpu1: TG68KdotC_Kernel
       cacr_de => cacr_de,                 -- : out std_logic;
       cacr_ifreeze => cacr_ifreeze,         -- : out std_logic;
       cacr_dfreeze => cacr_dfreeze,         -- : out std_logic;
+      cacr_ibe => cacr_ibe,                 -- : out std_logic;
+      cacr_dbe => cacr_dbe,                 -- : out std_logic;
+      cacr_wa => cacr_wa,                   -- : out std_logic;
       -- PMMU address interface (68030)
       pmmu_addr_log => pmmu_addr_log,     -- : out std_logic_vector(31 downto 0);
       pmmu_addr_phys => pmmu_addr_phys,   -- : out std_logic_vector(31 downto 0)
@@ -459,6 +472,7 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
       cacr_de        => cacr_de,
       cacr_ifreeze    => cacr_ifreeze,
       cacr_dfreeze    => cacr_dfreeze,
+      cacr_wa        => cacr_wa,
       -- Cache Control Instructions
       cinv_req       => cache_cinv_req,
       cpush_req      => cache_cpush_req,
@@ -495,13 +509,15 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
    -- Cache interface logic for 68030
    i_cache_addr <= ADDR;
    -- Instruction cache request only when CPU is 68030 AND cacr_ie is enabled
-   i_cache_req <= '1' when (state="00" and CPU="11" and cacr_ie='1') else '0';
+   --i_cache_req <= '1' when (state="00" and CPU="11" and cacr_ie='1') else '0';
+   i_cache_req <= '1' when (state="00" and CPU(1)='1' and cacr_ie='1') else '0';
    i_fill_data <= cache_fill_buffer;
    i_fill_valid <= '1' when (cache_fill_active='1' and cache_fill_count="111") else '0';  -- Changed from "11" to "111"
 
    d_cache_addr <= ADDR;
    -- Data cache request only when CPU is 68030 AND cacr_de is enabled
-   d_cache_req <= '1' when ((state="10" or state="11") and CPU="11" and cacr_de='1') else '0';
+   --d_cache_req <= '1' when ((state="10" or state="11") and CPU="11" and cacr_de='1') else '0';
+   d_cache_req <= '1' when ((state="10" or state="11") and CPU(1)='1' and cacr_de='1') else '0';
    d_cache_we <= not wr;
    d_cache_data_in <= data_write & data_write;  -- Replicate 16-bit data to 32-bit
    d_fill_data <= cache_fill_buffer;
@@ -526,6 +542,14 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
    -- Cache memory interface - connect to SDRAM controller
    cache_req <= (i_fill_req or d_fill_req) when cache_enabled='1' else '0';
    cache_addr <= i_fill_addr when i_fill_req='1' else d_fill_addr;
+
+   -- Burst mode control
+   -- When IBE=1 (instruction) or DBE=1 (data), request burst transfer of 8 words
+   -- Otherwise, request individual word transfers
+   cache_burst <= '1' when (cache_enabled='1' and
+                            ((i_fill_req='1' and cacr_ibe='1') or
+                             (d_fill_req='1' and cacr_dbe='1'))) else '0';
+   cache_burst_len <= "111";  -- Always request 8 words (128-bit cache line)
 
    -- Cache fill process - accumulate 8 words into 128-bit cache line
    -- MC68030 cache lines are 16 bytes (128 bits) = 8 words of 16 bits each

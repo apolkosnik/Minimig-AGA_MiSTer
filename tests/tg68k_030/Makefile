@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-integration test-diagrom test-cpu-mmu-detection test-advanced test-fault test-stress test-regression validate setup help
+.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-multiple-regs test-integration test-diagrom test-cpu-mmu-detection test-advanced test-fault test-stress test-regression validate setup help
 
 # Default target
 all: test-comprehensive
@@ -35,6 +35,7 @@ help:
 	@echo "  test-pmove-tt0-read - Test PMOVE TT0,Dx (read) corner cases"
 	@echo "  test-pmove-tt0-mem-read - Test PMOVE.L (d16,An),TT0 memory read (NEW)"
 	@echo "  test-pmove-tt1-mem - Test PMOVE.L TT1,(d16,An) memory write"
+	@echo "  test-pmove-multiple-regs - Test PMOVE multiple regs from (A7) - OP1addr conflict validation"
 	@echo "  test-integration - Test full system integration"
 	@echo "  test-diagrom     - Test DiagROM boot sequence"
 	@echo "  test-cpu-mmu-detection - Test CPU/MMU detection (TypeOfCPU + GetMMUType)"
@@ -84,6 +85,7 @@ compile: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_tt0_read.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_tt0_mem_read.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_tt1_mem.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_multiple_regs_from_a7.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_diagnostic.vhd || true
 	@echo "Basic compilation completed (errors ignored for initial testing)"
 
@@ -141,6 +143,10 @@ test-pmove-tt0-mem-read: compile
 test-pmove-tt1-mem: compile
 	@echo "Running PMOVE.L TT1,(d16,An) memory write tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_pmove_tt1_mem
+
+test-pmove-multiple-regs: compile
+	@echo "Running PMOVE multiple registers from (A7) test (OP1addr conflict validation)..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_pmove_multiple_regs_from_a7
 
 test-integration: compile
 	@echo "Running Integration tests..."

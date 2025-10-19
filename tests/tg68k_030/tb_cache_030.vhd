@@ -22,14 +22,18 @@ architecture behavior of tb_cache_030 is
       cacr_de        : in  std_logic;
       cacr_ifreeze    : in  std_logic;
       cacr_dfreeze    : in  std_logic;
+      cacr_wa        : in  std_logic;
       -- Cache Control Instructions
       cinv_req       : in  std_logic;
       cpush_req      : in  std_logic;
       cache_op_scope : in  std_logic_vector(1 downto 0);
       cache_op_cache : in  std_logic_vector(1 downto 0);
+      cache_op_addr  : in  std_logic_vector(31 downto 0);
       -- Instruction Cache Interface
       i_addr         : in  std_logic_vector(31 downto 0);
+      i_addr_phys    : in  std_logic_vector(31 downto 0);
       i_req          : in  std_logic;
+      i_cache_inhibit : in  std_logic;
       i_data         : out std_logic_vector(31 downto 0);
       i_hit          : out std_logic;
       i_fill_req     : out std_logic;
@@ -38,10 +42,13 @@ architecture behavior of tb_cache_030 is
       i_fill_valid   : in  std_logic;
       -- Data Cache Interface
       d_addr         : in  std_logic_vector(31 downto 0);
+      d_addr_phys    : in  std_logic_vector(31 downto 0);
       d_req          : in  std_logic;
       d_we           : in  std_logic;
+      d_cache_inhibit : in  std_logic;
       d_data_in      : in  std_logic_vector(31 downto 0);
       d_data_out     : out std_logic_vector(31 downto 0);
+      d_be           : in  std_logic_vector(3 downto 0);
       d_hit          : out std_logic;
       d_fill_req     : out std_logic;
       d_fill_addr    : out std_logic_vector(31 downto 0);
@@ -62,16 +69,20 @@ architecture behavior of tb_cache_030 is
   signal cacr_de : std_logic := '0';
   signal cacr_ifreeze : std_logic := '0';
   signal cacr_dfreeze : std_logic := '0';
-  
+  signal cacr_wa : std_logic := '0';
+
   -- Cache control instructions
   signal cinv_req : std_logic := '0';
   signal cpush_req : std_logic := '0';
   signal cache_op_scope : std_logic_vector(1 downto 0) := (others => '0');
   signal cache_op_cache : std_logic_vector(1 downto 0) := (others => '0');
-  
+  signal cache_op_addr : std_logic_vector(31 downto 0) := (others => '0');
+
   -- Instruction cache
   signal i_addr : std_logic_vector(31 downto 0) := (others => '0');
+  signal i_addr_phys : std_logic_vector(31 downto 0) := (others => '0');
   signal i_req : std_logic := '0';
+  signal i_cache_inhibit : std_logic := '0';
   signal i_data : std_logic_vector(31 downto 0);
   signal i_hit : std_logic;
   signal i_fill_req : std_logic;
@@ -81,10 +92,13 @@ architecture behavior of tb_cache_030 is
   
   -- Data cache
   signal d_addr : std_logic_vector(31 downto 0) := (others => '0');
+  signal d_addr_phys : std_logic_vector(31 downto 0) := (others => '0');
   signal d_req : std_logic := '0';
   signal d_we : std_logic := '0';
+  signal d_cache_inhibit : std_logic := '0';
   signal d_data_in : std_logic_vector(31 downto 0) := (others => '0');
   signal d_data_out : std_logic_vector(31 downto 0);
+  signal d_be : std_logic_vector(3 downto 0) := "1111";
   signal d_hit : std_logic;
   signal d_fill_req : std_logic;
   signal d_fill_addr : std_logic_vector(31 downto 0);
@@ -104,12 +118,16 @@ begin
     cacr_de => cacr_de,
     cacr_ifreeze => cacr_ifreeze,
     cacr_dfreeze => cacr_dfreeze,
+    cacr_wa => cacr_wa,
     cinv_req => cinv_req,
     cpush_req => cpush_req,
     cache_op_scope => cache_op_scope,
     cache_op_cache => cache_op_cache,
+    cache_op_addr => cache_op_addr,
     i_addr => i_addr,
+    i_addr_phys => i_addr_phys,
     i_req => i_req,
+    i_cache_inhibit => i_cache_inhibit,
     i_data => i_data,
     i_hit => i_hit,
     i_fill_req => i_fill_req,
@@ -117,10 +135,13 @@ begin
     i_fill_data => i_fill_data,
     i_fill_valid => i_fill_valid,
     d_addr => d_addr,
+    d_addr_phys => d_addr_phys,
     d_req => d_req,
     d_we => d_we,
+    d_cache_inhibit => d_cache_inhibit,
     d_data_in => d_data_in,
     d_data_out => d_data_out,
+    d_be => d_be,
     d_hit => d_hit,
     d_fill_req => d_fill_req,
     d_fill_addr => d_fill_addr,
@@ -199,6 +220,7 @@ begin
     procedure test_i_access(addr : std_logic_vector(31 downto 0)) is
     begin
       i_addr <= addr;
+      i_addr_phys <= addr;  -- No MMU translation in this test
       i_req <= '1';
       wait until rising_edge(clk);
       wait until rising_edge(clk); -- Give one cycle for miss detection
@@ -208,6 +230,7 @@ begin
     procedure test_d_read(addr : std_logic_vector(31 downto 0)) is
     begin
       d_addr <= addr;
+      d_addr_phys <= addr;  -- No MMU translation in this test
       d_req <= '1';
       d_we <= '0';
       wait until rising_edge(clk);
@@ -218,6 +241,7 @@ begin
     procedure test_d_write(addr : std_logic_vector(31 downto 0); data : std_logic_vector(31 downto 0)) is
     begin
       d_addr <= addr;
+      d_addr_phys <= addr;  -- No MMU translation in this test
       d_data_in <= data;
       d_req <= '1';
       d_we <= '1';

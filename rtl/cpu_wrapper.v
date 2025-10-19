@@ -80,7 +80,9 @@ module cpu_wrapper
 	output            cache_req,
 	output     [31:0] cache_addr,
 	input      [15:0] cache_data,
-	input             cache_ack
+	input             cache_ack,
+	output            cache_burst,      // Burst mode request
+	output      [2:0] cache_burst_len   // Burst length (number of words)
 );
 
 assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
@@ -254,6 +256,9 @@ wire        cacr_ie;
 wire        cacr_de;
 wire        cacr_ifreeze;
 wire        cacr_dfreeze;
+wire        cacr_ibe;  // Instruction Burst Enable
+wire        cacr_dbe;  // Data Burst Enable
+wire        cacr_wa;   // Write Allocate
 wire        i_cache_req;
 wire [31:0] i_cache_addr;
 wire [31:0] i_cache_data;
@@ -313,6 +318,9 @@ cpu_inst_p
   .cacr_de(cacr_de),
   .cacr_ifreeze(cacr_ifreeze),
   .cacr_dfreeze(cacr_dfreeze),
+  .cacr_ibe(cacr_ibe),
+  .cacr_dbe(cacr_dbe),
+  .cacr_wa(cacr_wa),
   // PMMU address interface
   .pmmu_addr_log(pmmu_addr_log_p),
   .pmmu_addr_phys(pmmu_addr_phys_p),
@@ -385,6 +393,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 		.cacr_de(cacr_de),
 		.cacr_ifreeze(cacr_ifreeze),
 		.cacr_dfreeze(cacr_dfreeze),
+		.cacr_wa(cacr_wa),
 		// Cache Control Instructions
 		.cinv_req(cache_cinv_req),
 		.cpush_req(cache_cpush_req),
@@ -449,6 +458,10 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// Connect cache fill interface to external memory controller
 	assign cache_req = i_fill_req | d_fill_req;
 	assign cache_addr = i_fill_req ? i_fill_addr : d_fill_addr;
+
+	// Burst mode control - request burst when IBE/DBE bits are set
+	assign cache_burst = ((i_fill_req & cacr_ibe) | (d_fill_req & cacr_dbe));
+	assign cache_burst_len = 3'd7;  // Always 8 words for 128-bit cache line
 
 	// Cache fill logic - accumulate 16-bit reads into 128-bit cache lines
 	reg [2:0] fill_count;
@@ -628,6 +641,8 @@ end else begin : gen_no_68030_cache
 	// Disable cache interface
 	assign cache_req = 1'b0;
 	assign cache_addr = 32'h0;
+	assign cache_burst = 1'b0;
+	assign cache_burst_len = 3'b0;
 
 end
 endgenerate

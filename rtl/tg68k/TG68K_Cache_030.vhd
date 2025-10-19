@@ -14,9 +14,10 @@ entity TG68K_Cache_030 is
 
     -- Cache Control (from CACR register)
     cacr_ie        : in  std_logic;  -- Instruction cache enable
-    cacr_de        : in  std_logic;  -- Data cache enable  
+    cacr_de        : in  std_logic;  -- Data cache enable
     cacr_ifreeze    : in  std_logic;  -- Cache freeze (inhibit replacements)
     cacr_dfreeze    : in  std_logic;  -- Cache freeze (inhibit replacements)
+    cacr_wa        : in  std_logic;  -- Write Allocate (allocate line on write miss)
     
     -- Cache Control Instructions
     cinv_req       : in  std_logic;  -- CINV (Cache Invalidate) request
@@ -332,6 +333,17 @@ begin
         elsif d_we = '0' then
           -- Check for read cache miss
           if d_valid_array(d_line_idx) = '0' or d_tag_array(d_line_idx) /= d_tag then
+            -- Only request fill if not frozen
+            if cacr_dfreeze = '0' then
+              d_fill_req_int <= '1';
+              -- Use physical address for memory fill
+              d_fill_addr <= d_addr_phys(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
+            end if;
+          end if;
+        else
+          -- Write miss: check if write allocate is enabled
+          if cacr_wa = '1' and (d_valid_array(d_line_idx) = '0' or d_tag_array(d_line_idx) /= d_tag) then
+            -- Write allocate: request cache line fill before writing
             -- Only request fill if not frozen
             if cacr_dfreeze = '0' then
               d_fill_req_int <= '1';
