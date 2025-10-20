@@ -154,7 +154,7 @@ entity TG68KdotC_Kernel is
 -- PMMU register interface (68030)
 		pmmu_reg_we				: out std_logic;
 		pmmu_reg_re				: out std_logic;
-		pmmu_reg_sel			: out std_logic_vector(3 downto 0);
+		pmmu_reg_sel			: out std_logic_vector(4 downto 0);
 		pmmu_reg_wdat			: out std_logic_vector(31 downto 0);
 		pmmu_reg_part			: out std_logic;
 -- PMMU address interface (68030)
@@ -408,7 +408,7 @@ signal pmmu_src_data    : std_logic_vector(31 downto 0);
 signal pmmu_reg_part_d  : std_logic;
 signal pmmu_reg_we_d    : std_logic;
 signal pmmu_reg_re_d    : std_logic;
-signal pmmu_reg_sel_d   : std_logic_vector(3 downto 0);
+signal pmmu_reg_sel_d   : std_logic_vector(4 downto 0);
 signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
 signal pmmu_reg_fd_d    : std_logic;
 
@@ -459,21 +459,21 @@ signal pmmu_reg_fd_d    : std_logic;
 	signal next_micro_state	: micro_states;
 	
 
-  -- Function to map brief(11:8) to PMMU register select
-  function pmmu_sel_from_brief(b : std_logic_vector(14 downto 10)) return std_logic_vector is
-    variable s : std_logic_vector(3 downto 0);
-  begin
-    case b is
-      when "00010" => s := x"0"; -- TT0 (Transparent Translation 0) - 0x02
-      when "00011" => s := x"1"; -- TT1 (Transparent Translation 1) - 0x03
-      when "10000" => s := x"2"; -- TC (Translation Control) - 0x10
-      when "10010" => s := x"3"; -- SRP (Supervisor Root Pointer) - 0x12
-      when "10011" => s := x"4"; -- CRP (CPU Root Pointer) - 0x13
-      when "11000" => s := x"5"; -- MMUSR (MMU Status Register) - 0x18
-      when others => s := x"6"; -- invalid/not supported
-    end case;
-    return s;
-  end function;
+--   -- Function to map brief(11:8) to PMMU register select
+--   function pmmu_sel_from_brief(b : std_logic_vector(14 downto 10)) return std_logic_vector is
+--     variable s : std_logic_vector(3 downto 0);
+--   begin
+--     case b is
+--       when "00010" => s := x"0"; -- TT0 (Transparent Translation 0) - 0x02
+--       when "00011" => s := x"1"; -- TT1 (Transparent Translation 1) - 0x03
+--       when "10000" => s := x"2"; -- TC (Translation Control) - 0x10
+--       when "10010" => s := x"3"; -- SRP (Supervisor Root Pointer) - 0x12
+--       when "10011" => s := x"4"; -- CRP (CPU Root Pointer) - 0x13
+--       when "11000" => s := x"5"; -- MMUSR (MMU Status Register) - 0x18
+--       when others => s := x"6"; -- invalid/not supported
+--     end case;
+--     return s;
+--   end function;
 
 
 BEGIN  
@@ -3482,7 +3482,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF SVmode='1' THEN
 						-- Fetch extension word to determine PMMU instruction type
 						IF decodeOPC='1' THEN
-							set(get_2ndOPC) <= '1';  -- REVERT to Build #9 - getbrief causes DiagROM hang
+							set(get_2ndOPC) <= '1';
+							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
 							next_micro_state <= pmmu1;
 						END IF;
 					ELSE
@@ -4316,12 +4317,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     END IF;
 
                     -- Check if this is a valid PMOVE register selector (NOT PMOVEFD)
-                    IF (brief(14 downto 10) = "00010" OR  -- TT0
-                        brief(14 downto 10) = "00011" OR  -- TT1
-                        brief(14 downto 10) = "10000" OR  -- TC
-                        brief(14 downto 10) = "10010" OR  -- SRP
-                        brief(14 downto 10) = "10011" OR  -- CRP
-                        brief(14 downto 10) = "11000") AND  -- MMUSR
+                    -- TT0/TT1 use format "000", TC/SRP/CRP use format "010", MMUSR uses format "110"
+                    IF ((brief(15 downto 13) = "000" AND (brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011")) OR  -- TT0/TT1
+                        (brief(15 downto 13) = "010" AND (brief(14 downto 10) = "10000" OR brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011")) OR  -- TC/SRP/CRP
+                        (brief(15 downto 13) = "110" AND brief(14 downto 10) = "11000")) AND  -- MMUSR
                        NOT (brief(15 downto 13) = "001" AND brief(9 downto 8) = "00") THEN
                         -- PMOVE instruction with valid register (excluding PMOVEFD)
 
@@ -4340,8 +4339,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                 -- Dn direct mode - register to register transfer
                                 IF opcode(7)='0' THEN
                                     -- PMOVE <MMU reg>,Dn - Read from MMU, write to Dn
-                                    set_exec(pmmu_rd) <= '1';
-                                    set(Regwrena) <= '1';
+                                    set(pmmu_rd) <= '1';
+                                    set_exec(Regwrena) <= '1';
                                 ELSE
                                     -- PMOVE Dn,<MMU reg> - Read from Dn, write to MMU
                                     set_exec(pmmu_wr) <= '1';
@@ -4829,7 +4828,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
   -- Drive PMMU register interface during PMOVE execution
   process(clk)
-    variable sel   : std_logic_vector(3 downto 0);
+    -- variable sel   : std_logic_vector(3 downto 0);
   begin
     if rising_edge(clk) then
       if Reset = '1' then
@@ -4848,14 +4847,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         -- Handle both set() for immediate execution and exec() for deferred execution
         --if CPU="11" AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
         if CPU(1)='1' AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
-          sel := pmmu_sel_from_brief(brief(14 downto 10));
-		  when x"02" => s := x"0"; -- TT0 (Transparent Translation 0)
-		  when x"03" => s := x"1"; -- TT1 (Transparent Translation 1)
-		  when x"10" => s := x"2"; -- TC (Translation Control)
-		  when x"12" => s := x"3"; -- SRP (Supervisor Root Pointer)
-		  when x"13" => s := x"4"; -- CRP (CPU Root Pointer)
-		  when x"18" => s := x"5"; -- MMUSR (MMU Status Register)
-		  when others => s := x"6"; -- invalid/not supported
           -- Latch source data only when actually doing PMMU operation to ensure correct value
           pmmu_reg_wdat_d <= pmmu_src_data;
 
@@ -4865,11 +4856,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
           -- PMOVE instruction handling (only if MOVEC is not active to avoid conflicts)
           if set(pmmu_wr) = '1' OR exec(pmmu_wr) = '1' then
             -- PMOVE Dn -> <MMU reg>
-            if sel /= x"6" then
-              pmmu_reg_sel_d  <= sel;
+            if brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
+               brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000" then
+              pmmu_reg_sel_d  <= brief(14 downto 10);
               -- pmmu_reg_wdat_d already latched above from pmmu_src_data
               -- For CRP/SRP choose part: HIGH word first, LOW word second
-              if (sel = x"3") or (sel = x"4") then
+              if (brief(14 downto 10) = "10010") or (brief(14 downto 10) = "10011") then
                 if micro_state = pmmu2 OR micro_state = pmmu1 OR micro_state = pmmu_dn_high then
                   pmmu_reg_part_d <= '1';  -- HIGH word (mem EA first read, Dn first transfer)
                 else
@@ -4889,10 +4881,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
           if set(pmmu_rd) = '1' OR exec(pmmu_rd) = '1' then
             -- PMOVE <MMU reg> -> Dn
-            if sel /= x"6" then
-              pmmu_reg_sel_d <= sel;
+            if brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
+               brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000" then
+              pmmu_reg_sel_d <= brief(14 downto 10);
               -- For CRP/SRP choose part: HIGH word first, LOW word second
-              if (sel = x"3") or (sel = x"4") then
+              if (brief(14 downto 10) = "10010") or (brief(14 downto 10) = "10011") then
                 if micro_state = pmmu3 OR micro_state = pmmu1 OR micro_state = pmmu_dn_high then
                   pmmu_reg_part_d <= '1';  -- HIGH word (mem EA first write, Dn first transfer)
                 else

@@ -17,7 +17,7 @@ entity TG68K_PMMU_030 is
     -- Register access port (driven by PMOVE decode)
     reg_we         : in  std_logic;
     reg_re         : in  std_logic;
-    reg_sel        : in  std_logic_vector(3 downto 0); -- 0:TT0 1:TT1 2:TC 3:SRP 4:CRP 5:MMUSR
+    reg_sel        : in  std_logic_vector(4 downto 0); -- brief(14:10): 00010=TT0 00011=TT1 10000=TC 10010=SRP 10011=CRP 11000=MMUSR
     reg_wdat       : in  std_logic_vector(31 downto 0);
     reg_rdat       : out std_logic_vector(31 downto 0);
     reg_part       : in  std_logic; -- '1' = high, '0' = low for 64-bit regs (CRP/SRP)
@@ -768,7 +768,7 @@ begin
                " wdat=0x" & slv_to_hstring(reg_wdat) &
                " part=" & std_logic'image(reg_part) severity note;
         case reg_sel is
-          when x"0" =>
+          when "00010" =>
             -- TT0 register write - MC68030 Transparent Translation Register per User's Manual section 9.2.6
             -- MC68030 TT0/TT1 bit layout:
             -- 31-24: Logical Address Base, 23-16: Logical Address Mask
@@ -781,7 +781,7 @@ begin
             end if;
             report "TT0_WRITE_SPEC_COMPLIANT: input=0x" & slv_to_hstring(reg_wdat) &
                    " reserved bits 14-11,7,3 masked to zero" severity note;
-          when x"1" =>
+          when "00011" =>
             -- TT1 register write - MC68030 Transparent Translation Register (same layout as TT0)
             -- MC68030 TT0/TT1 bit layout:
             -- 31-24: Logical Address Base, 23-16: Logical Address Mask
@@ -792,7 +792,7 @@ begin
             if reg_fd = '0' then
               atc_flush_req <= '1';
             end if;
-          when x"2" =>
+          when "10000" =>
             -- MC68030 TC Register Write - exact specification compliance
             -- MC68030 TC bit layout per User's Manual section 9.2.1:
             -- 31: E (Enable), 30-26: Reserved, 25: SRE, 24: FCL
@@ -838,7 +838,7 @@ begin
             if reg_fd = '0' then
               atc_flush_req <= '1';
             end if;
-          when x"3" =>
+          when "10010" =>
             -- SRP register write - MC68030 Long-Format Root Pointer (same format as CRP)
             if reg_part = '1' then
               -- SRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
@@ -859,7 +859,7 @@ begin
             if reg_fd = '0' then  -- Only flush if NOT PMOVEFD
               atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
             end if;
-          when x"4" =>
+          when "10011" =>
             -- CRP register write - MC68030 Long-Format Root Pointer per User's Manual section 9.2.2
             if reg_part = '1' then
               -- CRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
@@ -881,7 +881,7 @@ begin
             if reg_fd = '0' then
               atc_flush_req <= '1';
             end if;
-          when x"5" =>
+          when "11000" =>
             -- MMUSR register: MC68030 MMUSR write-1-to-clear semantics
             -- Writing '1' to bits 15:13 (fault status bits) clears them
             -- Bits 15:13 = Bus Error, Limit Violation, Supervisor Violation
@@ -913,16 +913,16 @@ begin
         -- Privilege check is performed by TG68KdotC_Kernel before asserting reg_re,
         -- so no additional FC check is needed here
         case reg_sel is
-            when x"0" =>
+            when "00010" =>
               reg_rdat <= TT0;
               report "PMMU_REG_READ: TT0=0x" & slv_to_hstring(TT0) severity note;
-            when x"1" =>
+            when "00011" =>
               reg_rdat <= TT1;
               report "PMMU_REG_READ: TT1=0x" & slv_to_hstring(TT1) severity note;
-            when x"2" =>
+            when "10000" =>
               reg_rdat <= TC;
               report "PMMU_REG_READ: TC=0x" & slv_to_hstring(TC) severity note;
-            when x"3" =>
+            when "10010" =>
               if reg_part = '1' then
                 reg_rdat <= SRP_H;
                 report "PMMU_REG_READ: SRP_H=0x" & slv_to_hstring(SRP_H) severity note;
@@ -930,7 +930,7 @@ begin
                 reg_rdat <= SRP_L;
                 report "PMMU_REG_READ: SRP_L=0x" & slv_to_hstring(SRP_L) severity note;
               end if;
-            when x"4" =>
+            when "10011" =>
               if reg_part = '1' then
                 reg_rdat <= CRP_H;
                 report "PMMU_REG_READ: CRP_H=0x" & slv_to_hstring(CRP_H) severity note;
@@ -938,7 +938,7 @@ begin
                 reg_rdat <= CRP_L;
                 report "PMMU_REG_READ: CRP_L=0x" & slv_to_hstring(CRP_L) severity note;
               end if;
-            when x"5" =>
+            when "11000" =>
               reg_rdat <= MMUSR;
               report "PMMU_REG_READ: MMUSR=0x" & slv_to_hstring(MMUSR) severity note;
             when others =>
