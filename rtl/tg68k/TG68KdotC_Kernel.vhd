@@ -3545,8 +3545,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							IF opcode(11 downto 9)="001" OR opcode(11 downto 9)="010" THEN
 								IF SVmode='1' THEN
 									IF opcode(5 downto 3)="101" THEN
-										--cpRESTORE not implemented
-										trap_illegal <= '1';
+										--cpRESTORE not implemented - F-line exception
+										trap_1111 <= '1';
 										trapmake <= '1';
 									ELSE
 										trap_1111 <= '1';
@@ -3570,12 +3570,32 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							trapmake <= '1';
 						END IF;
 					ELSE
-						trap_1111 <= '1';
-						trapmake <= '1';
+						-- Valid EA mode for cpRESTORE
+						IF SVmode='1' THEN
+							IF opcode(11 downto 9)="000" THEN  -- FPU coprocessor - implement FRESTORE
+								next_micro_state <= frestore1;
+							ELSE
+								trap_1111 <= '1';  -- Other coprocessors - F-line exception
+								trapmake <= '1';
+							END IF;
+						ELSE
+							trap_priv <= '1';
+							trapmake <= '1';
+						END IF;
 					END IF;
 				ELSE
-					trap_1111 <= '1';
-					trapmake <= '1';
+					-- Valid EA mode for cpSAVE
+					IF SVmode='1' THEN
+						IF opcode(11 downto 9)="000" THEN  -- FPU coprocessor - implement FSAVE
+							next_micro_state <= fsave1;
+						ELSE
+							trap_1111 <= '1';  -- Other coprocessors - F-line exception
+							trapmake <= '1';
+						END IF;
+					ELSE
+						trap_priv <= '1';
+						trapmake <= '1';
+					END IF;
 				END IF;
 --							
 ----      ----------------------------------------------------------------------------		
@@ -4445,7 +4465,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                 END IF;
 
                             WHEN OTHERS =>
-                                trap_illegal <= '1';
+                                -- Invalid PMMU instruction - trigger F-line exception
+                                trap_1111 <= '1';
                                 trapmake <= '1';
                         END CASE;
                     END IF;

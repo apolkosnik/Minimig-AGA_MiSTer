@@ -34,7 +34,10 @@ package TG68K_Pack is
                           trap4, trap5, trap6, movec1, moves1, movep1, movep2, movep3, movep4, movep5, rota1, bf1,
                           pmmu1, pmmu2, pmmu3, pmmu4, pmmu5, ptest1, ptest2, pflush1, pload1,
                           pmmu_dn_high, pmmu_dn_low,
+                          pmove_decode, pmove_reg_xfer, pmove_mem_read, pmove_mem_write,
+                          pmove_64_high, pmove_64_low,
                           cinv1, cpush1,
+                          fsave1, fsave2, frestore1, frestore2,
                           mul1, mul2, mul_end1,  mul_end2, div1, div2, div3, div4, div_end1, div_end2);
 	
 	constant opcMOVE				: integer := 0; --
