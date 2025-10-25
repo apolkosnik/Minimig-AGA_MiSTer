@@ -4254,8 +4254,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					end if;
 				WHEN rte5 =>            -- RTE
 					next_micro_state <= nop;
-					-- BUG #18: Clear interrupt mode when returning from exception (68020+)
-					interrupt_mode <= '0';
+					-- BUG #18: Clear interrupt mode only when returning to user mode (MC68030)
+					-- RTE restores SR which contains S bit (supervisor mode bit in bit 5)
+					-- Only clear interrupt_mode if returning to user mode (FlagsSR(5)=0)
+					-- This prevents clearing interrupt_mode when RTE is called from within an interrupt handler
+					IF FlagsSR(5)='0' THEN
+						interrupt_mode <= '0';
+					END IF;
 -------------------------------------
 
 				WHEN rtd1 =>		-- RTD
@@ -4365,8 +4370,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     -- PMOVE Dn,<MMU reg> - Read from Dn, write to MMU
                                     set_exec(pmmu_wr) <= '1';
                                 END IF;
-                                -- Check if 64-bit register (CRP/SRP)
-                                IF brief(14 downto 10)="10010" OR brief(14 downto 10)="10011" THEN
+                                -- Check if 64-bit register (CRP/SRP) - need second Dn transfer
+                                IF (brief(14 downto 10)="10010" OR brief(14 downto 10)="10011") THEN
                                     -- CRP or SRP - need second Dn transfer
                                     next_micro_state <= pmmu_dn_high;
                                 ELSE
@@ -4474,7 +4479,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- complete mem->MMU by issuing PMMU write using ea_data as source (high part for 64-bit)
                     set_exec(pmmu_wr) <= '1';
                     -- If CRP/SRP (64-bit), advance EA and read low part
-                    IF brief(14 downto 10)="10010" OR brief(14 downto 10)="10011" THEN  -- SRP=0x12, CRP=0x13
+                    IF (brief(14 downto 10)="10010" OR brief(14 downto 10)="10011") THEN  -- SRP or CRP
                         set(mem_addsub) <= '1';
                         set(OP1addr) <= '1';
                         datatype <= "10"; -- long
@@ -4484,8 +4489,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 WHEN pmmu3 =>
                     -- MMU -> memory write (high part for 64-bit CRP/SRP, or only part for 32-bit regs)
                     -- data_write_tmp sourced from pmmu_reg_rdat in write datapath
-                    -- For CRP/SRP, advance EA and read low part next
-                    IF brief(14 downto 10)="10010" OR brief(14 downto 10)="10011" THEN  -- SRP=0x12, CRP=0x13
+                    -- For CRP/SRP (64-bit), advance EA and read low part next
+                    IF (brief(14 downto 10)="10010" OR brief(14 downto 10)="10011") THEN  -- SRP or CRP
                         set(mem_addsub) <= '1';
                         set(OP1addr) <= '1';
                         datatype <= "10"; -- long
