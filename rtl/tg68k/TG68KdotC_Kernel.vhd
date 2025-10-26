@@ -341,6 +341,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal MSP					: std_logic_vector(31 downto 0);  -- BUG #18: Master Stack Pointer (68020+)
 	signal ISP					: std_logic_vector(31 downto 0);  -- BUG #18: Interrupt Stack Pointer (68020+)
 	signal interrupt_mode		: std_logic := '0';  -- BUG #18: 0=normal supervisor, 1=interrupt processing
+	signal movec_sp_sync : std_logic := '0';  -- BUG #18: Flag to sync regfile(15) after MOVEC
+	signal movec_sp_sel  : std_logic_vector(1 downto 0) := "00";  -- BUG #18: Which SP: 00=USP, 01=MSP, 10=ISP
 --	signal illegal_write_mode	: bit;
 --	signal illegal_read_mode	: bit;
 --	signal illegal_byteaddr		: bit;
@@ -541,9 +543,12 @@ BEGIN
   pmmu_pflush_req <= '1' when exec(pmmu_pflush) = '1' else '0';
   pmmu_pload_req  <= '1' when exec(pmmu_pload) = '1' else '0';
 
-  -- For PTEST/PFLUSH/PLOAD: use FC from brief word, else use current FC
-  -- Brief(12:10) contains FC for these instructions
-  pmmu_cmd_fc     <= brief(12 downto 10) when (exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
+  -- For PTEST/PFLUSH/PLOAD: use FC from brief word per MC68030 spec
+  -- MC68030 PTEST/PLOAD format (Table 9-11):
+  --   Bit 4 = 0: Use FC value from bits 8-6
+  --   Bit 4 = 1: Use FC from SFC (bit 3=0) or DFC (bit 3=1)
+  -- For now, simplified implementation: use bits 8-6 for FC value
+  pmmu_cmd_fc     <= brief(8 downto 6) when (exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
                                                  (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
                      else fc_internal;
 
@@ -1912,13 +1917,42 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					set(from_USP) <= '1';
 				END IF;
 			ELSE
-				-- 68000/68010: Simple USP/SSP switching
-				set(to_USP) <= '1';
-				set(from_USP) <= '1';
+				-- 68000/68010: Need to check preSVmode to swap USP/SSP correctly
+				IF preSVmode='0' THEN
+					-- Currently in user mode, switching to supervisor mode
+					set(to_SSP) <= '1';
+					set(from_USP) <= '1';
+				ELSE
+					-- Currently in supervisor mode, switching to user mode
+					set(to_USP) <= '1';
+					set(from_SSP) <= '1';
+				END IF;
 			END IF;
 			setstackaddr <='1';
 		END IF;
-			
+
+		-- BUG #18: MOVEC stack pointer synchronization
+		-- When MOVEC writes to USP/MSP/ISP, sync regfile(15) if that SP is currently active
+		IF movec_sp_sync='1' THEN
+			setstackaddr <= '1';
+			set(Regwrena) <= '1';
+			CASE movec_sp_sel IS
+				WHEN "00" =>  -- USP
+					IF SVmode='0' THEN
+						set(from_USP) <= '1';
+					END IF;
+				WHEN "01" =>  -- MSP
+					IF SVmode='1' AND interrupt_mode='0' THEN
+						set(from_MSP) <= '1';
+					END IF;
+				WHEN "10" =>  -- ISP
+					IF interrupt_mode='1' THEN
+						set(from_ISP) <= '1';
+					END IF;
+				WHEN OTHERS => NULL;
+			END CASE;
+		END IF;
+
 		IF ea_only='0' AND set(get_ea_now)='1' THEN
 			setstate <= "10";
 --			set_recall_last <= '1';
@@ -4249,7 +4283,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						setstackaddr <= '1';
 						next_micro_state <= rte5;
 					else
+						-- Format-0/1 frames: also need to clear interrupt_mode here
+						-- (rte5 is only reached for format-2 frames)
 						datatype <= "01";
+						IF FlagsSR(5)='0' THEN
+							interrupt_mode <= '0';
+						END IF;
 						next_micro_state <= nop;
 					end if;
 				WHEN rte5 =>            -- RTE
@@ -4314,6 +4353,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     set_writePCbig <='1';
                     set(update_FC) <= '1';  -- Ensure FC reflects supervisor mode
 
+                    -- MC68030 SPEC: ALL PMMU instructions are PRIVILEGED
+                    -- PMOVE, PTEST, PFLUSH, PLOAD all require supervisor mode
+                    IF SVmode='0' THEN
+                        trap_priv <= '1';
+                        trapmake <= '1';
+                    ELSE
                     -- MC68030 PMMU instruction differentiation by extension word
                     -- ALL PMMU instructions use opcode F0xx, differentiated by extension word
                     --
@@ -4474,7 +4519,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                 trap_1111 <= '1';
                                 trapmake <= '1';
                         END CASE;
-                    END IF;
+                    END IF;  -- End of privilege check (SVmode)
+                    END IF;  -- End of CASE brief(15 downto 13)
                 WHEN pmmu2 =>
                     -- complete mem->MMU by issuing PMMU write using ea_data as source (high part for 64-bit)
                     set_exec(pmmu_wr) <= '1';
@@ -4782,6 +4828,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		SSP <= (others => '0');   -- BUG #18: Initialize SSP
 		MSP <= (others => '0');   -- BUG #18: Initialize MSP
 		ISP <= (others => '0');   -- BUG #18: Initialize ISP
+		movec_sp_sync <= '0';     -- BUG #18: Initialize MOVEC sync flag
+		movec_sp_sel <= "00";     -- BUG #18: Initialize MOVEC selector
 	  elsif clkena_lw = '1' and exec(movec_wr) = '1' then
 		case brief(11 downto 0) is
 		  when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
@@ -4798,11 +4846,20 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		    CACR(13 downto 12) <= reg_QA(13 downto 12); -- DBE, WA - data burst enable, write allocate
 		    CACR(31 downto 14) <= (others => '0');     -- Reserved bits
 		    -- Cache invalidation triggered by self-clearing bits happens via cache_cinv_req signal
-		  when X"800" => USP <= reg_QA; -- BUG #18: USP -- 68010+
+		  when X"800" =>
+		    USP <= reg_QA; -- BUG #18: USP -- 68010+
+		    movec_sp_sync <= '1';  -- BUG #18: Trigger A7 sync
+		    movec_sp_sel <= "00";  -- BUG #18: USP selector
 		  when X"801" => VBR <= reg_QA; -- 68010+
 		  when X"802" => CAAR <= reg_QA; -- CAAR -- 68020+
-		  when X"803" => MSP <= reg_QA; -- BUG #18: MSP -- 68020+
-		  when X"804" => ISP <= reg_QA; -- BUG #18: ISP -- 68020+
+		  when X"803" =>
+		    MSP <= reg_QA; -- BUG #18: MSP -- 68020+
+		    movec_sp_sync <= '1';  -- BUG #18: Trigger A7 sync
+		    movec_sp_sel <= "01";  -- BUG #18: MSP selector
+		  when X"804" =>
+		    ISP <= reg_QA; -- BUG #18: ISP -- 68020+
+		    movec_sp_sync <= '1';  -- BUG #18: Trigger A7 sync
+		    movec_sp_sel <= "10";  -- BUG #18: ISP selector
 		  when others => NULL;
 		end case;
   elsif clkena_lw = '1' then
@@ -4826,6 +4883,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
       CACR(3) <= '0';   -- Clear CI (Clear Instruction Cache)
       CACR(10) <= '0';  -- Clear CED (Clear Entry in Data Cache)
       CACR(11) <= '0';  -- Clear CD (Clear Data Cache)
+    end if;
+    -- BUG #18: Clear MOVEC stack pointer sync flag after use
+    if movec_sp_sync = '1' then
+      movec_sp_sync <= '0';
     end if;
 	  end if;
 	end if;
