@@ -544,15 +544,28 @@ BEGIN
   pmmu_pload_req  <= '1' when exec(pmmu_pload) = '1' else '0';
 
   -- For PTEST/PFLUSH/PLOAD: use FC from brief word per MC68030 spec
-  -- MC68030 PTEST/PLOAD format:
-  --   Extension word bits 4-0 encode FC source:
-  --     10XXX: Immediate FC value in bits 2-0 (XXX)
-  --     01DDD: FC from Dn register (DDD = register number) - NOT IMPLEMENTED YET
-  --     00000: FC from SFC register - NOT IMPLEMENTED YET
-  --     00001: FC from DFC register - NOT IMPLEMENTED YET
-  --   For now: Only support immediate FC (bits 4-3="10", value in bits 2-0)
-  pmmu_cmd_fc     <= brief(2 downto 0) when (exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
-                                                 (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
+  -- MC68030 PTEST/PLOAD/PFLUSH FC encoding (extension word bits 4-0):
+  --   10XXX: Immediate FC value in bits 2-0 (XXX) - 3-bit FC value (0-7)
+  --   01DDD: FC from Dn register (DDD = register number, bits 2-0)
+  --   00000: FC from SFC register
+  --   00001: FC from DFC register
+  --   All others: Reserved
+  --
+  -- BUG FIX: Implement proper FC selector logic per MC68030 spec
+  -- Check bits 4-3 to determine FC source, then extract value accordingly
+  pmmu_cmd_fc     <= brief(2 downto 0) when ((exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
+                                              (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
+                                              and brief(4 downto 3) = "10")  -- Immediate FC (3-bit value in bits 2-0)
+                     else SFC when ((exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
+                                    (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
+                                    and brief(4 downto 0) = "00000")  -- FC from SFC
+                     else DFC when ((exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
+                                    (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
+                                    and brief(4 downto 0) = "00001")  -- FC from DFC
+                     -- NOTE: FC from Dn register (brief(4:3)="01") not yet implemented
+                     -- Would require: Read Dn(brief(2:0))[2:0] during decode phase
+                     -- Rarely used in practice - most software uses immediate FC, SFC, or DFC
+                     -- If needed, would add register read in pmmu1 state before PTEST/PLOAD/PFLUSH
                      else fc_internal;
 
   -- For PTEST/PLOAD/PFLUSH with EA: use EA address, else use current logical address
@@ -4611,12 +4624,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- Second transfer for 64-bit register (LOW word)
                     -- For PMOVE <MMU>,Dn: Read LOW word to Dn+1
                     -- For PMOVE Dn,<MMU>: Write LOW word from Dn+1
-                    IF opcode(7)='0' THEN
-                        -- PMOVE <MMU reg>,Dn+1 - Read LOW word from MMU, write to Dn+1
+                    -- BUG FIX: Use brief(9) for direction, NOT opcode(7)!
+                    -- PMOVE uses extension word bit 9 for direction, same as first transfer
+                    IF brief(9)='0' THEN
+                        -- PMOVE <MMU reg>,Dn+1 - Read LOW word from MMU, write to Dn+1 (brief(9)=0)
                         set_exec(Regwrena) <= '1';
                         set_exec(pmmu_rd) <= '1';
                     ELSE
-                        -- PMOVE Dn+1,<MMU reg> - Read from Dn+1, write LOW word to MMU
+                        -- PMOVE Dn+1,<MMU reg> - Read from Dn+1, write LOW word to MMU (brief(9)=1)
                         set_exec(pmmu_wr) <= '1';
                     END IF;
                     next_micro_state <= nop;  -- Complete after LOW word transfer
