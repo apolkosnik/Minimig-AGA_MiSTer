@@ -4419,6 +4419,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                            (opcode(5 downto 3)="111" AND opcode(2 downto 1)="01") THEN  -- PC-relative (010/011) - ILLEGAL
                             trap_illegal <= '1';
                             trapmake <= '1';
+                        -- BUG #6 FIX: Validate SZ bit (brief(8)) - .D (SZ=1) only valid for CRP/SRP
+                        ELSIF brief(8) = '1' AND NOT (brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011") THEN
+                            -- Illegal: .D (doubleword) on TC/TT0/TT1/MMUSR
+                            -- MC68030 spec: SZ=1 (.D) only valid for CRP (10011) and SRP (10010)
+                            trap_illegal <= '1';
+                            trapmake <= '1';
                         ELSE
                             -- Legal EA modes: Dn, (An), -(An), (d16,An), (d8,An,Xn), xxx.W, xxx.L
                             IF opcode(5 downto 3)="000" THEN
@@ -4432,12 +4438,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     -- PMOVE Dn,<MMU reg> - Read from Dn, write to MMU (brief(9)=1)
                                     set_exec(pmmu_wr) <= '1';
                                 END IF;
-                                -- Check if 64-bit register (CRP/SRP) - need second Dn transfer
-                                IF (brief(14 downto 10)="10010" OR brief(14 downto 10)="10011") THEN
-                                    -- CRP or SRP - need second Dn transfer
+                                -- BUG #6 FIX: Check SZ bit for dual-word transfer, not just register type
+                                -- MC68030 spec: .D (SZ=1) means 64-bit transfer (CRP/SRP only, validated above)
+                                --              .L (SZ=0) means 32-bit transfer (all registers)
+                                IF brief(8) = '1' THEN
+                                    -- .D (doubleword) - need second Dn transfer (only CRP/SRP reach here)
                                     next_micro_state <= pmmu_dn_high;
                                 ELSE
-                                    -- 32-bit register - done
+                                    -- .L (longword) - single 32-bit transfer
                                     next_micro_state <= nop;
                                 END IF;
                             ELSE
@@ -4447,7 +4455,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     -- PMOVE <MMU reg>,<ea> - Read from MMU, write to memory
                                     set(ea_build) <= '1';
                                     set(OP1addr) <= '1';
-                                    datatype <= "10";
+                                    -- BUG #7 FIX: Use word (16-bit) transfer for MMUSR, longword for others
+                                    IF brief(14 downto 10) = "11000" THEN
+                                        datatype <= "01";  -- Word (16-bit) for MMUSR
+                                    ELSE
+                                        datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
+                                    END IF;
                                     setstate <= "11";
                                     set_exec(pmmu_rd) <= '1';
                                     next_micro_state <= pmmu3;
@@ -4455,7 +4468,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     -- PMOVE <ea>,<MMU reg> - Read from memory, write to MMU
                                     set(ea_build) <= '1';
                                     set(ea_data_OP1) <= '1';
-                                    datatype <= "10";
+                                    -- BUG #7 FIX: Use word (16-bit) transfer for MMUSR, longword for others
+                                    IF brief(14 downto 10) = "11000" THEN
+                                        datatype <= "01";  -- Word (16-bit) for MMUSR
+                                    ELSE
+                                        datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
+                                    END IF;
                                     setstate <= "10";
                                     next_micro_state <= pmmu2;
                                 END IF;
