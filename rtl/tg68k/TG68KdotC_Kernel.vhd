@@ -544,11 +544,14 @@ BEGIN
   pmmu_pload_req  <= '1' when exec(pmmu_pload) = '1' else '0';
 
   -- For PTEST/PFLUSH/PLOAD: use FC from brief word per MC68030 spec
-  -- MC68030 PTEST/PLOAD format (Table 9-11):
-  --   Bit 4 = 0: Use FC value from bits 8-6
-  --   Bit 4 = 1: Use FC from SFC (bit 3=0) or DFC (bit 3=1)
-  -- For now, simplified implementation: use bits 8-6 for FC value
-  pmmu_cmd_fc     <= brief(8 downto 6) when (exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
+  -- MC68030 PTEST/PLOAD format:
+  --   Extension word bits 4-0 encode FC source:
+  --     10XXX: Immediate FC value in bits 2-0 (XXX)
+  --     01DDD: FC from Dn register (DDD = register number) - NOT IMPLEMENTED YET
+  --     00000: FC from SFC register - NOT IMPLEMENTED YET
+  --     00001: FC from DFC register - NOT IMPLEMENTED YET
+  --   For now: Only support immediate FC (bits 4-3="10", value in bits 2-0)
+  pmmu_cmd_fc     <= brief(2 downto 0) when (exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
                                                  (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
                      else fc_internal;
 
@@ -4407,12 +4410,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                             -- Legal EA modes: Dn, (An), -(An), (d16,An), (d8,An,Xn), xxx.W, xxx.L
                             IF opcode(5 downto 3)="000" THEN
                                 -- Dn direct mode - register to register transfer
-                                IF opcode(7)='0' THEN
-                                    -- PMOVE <MMU reg>,Dn - Read from MMU, write to Dn
+                                -- MC68030 PMOVE: Direction from extension word bit 9, NOT opcode(7)
+                                IF brief(9)='0' THEN
+                                    -- PMOVE <MMU reg>,Dn - Read from MMU, write to Dn (brief(9)=0)
                                     set(pmmu_rd) <= '1';
                                     set_exec(Regwrena) <= '1';
                                 ELSE
-                                    -- PMOVE Dn,<MMU reg> - Read from Dn, write to MMU
+                                    -- PMOVE Dn,<MMU reg> - Read from Dn, write to MMU (brief(9)=1)
                                     set_exec(pmmu_wr) <= '1';
                                 END IF;
                                 -- Check if 64-bit register (CRP/SRP) - need second Dn transfer
@@ -4425,7 +4429,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                 END IF;
                             ELSE
                                 -- Memory EA modes
-                                IF opcode(7)='0' THEN
+                                -- MC68030 PMOVE: Direction from extension word bit 9, NOT opcode(7)
+                                IF brief(9)='0' THEN
                                     -- PMOVE <MMU reg>,<ea> - Read from MMU, write to memory
                                     set(ea_build) <= '1';
                                     set(OP1addr) <= '1';
@@ -4561,10 +4566,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 -- PMMU instruction implementations
                 WHEN ptest1 =>
                     -- PTEST: Test page translation (EA already built in pmmu1)
-                    -- MC68030 PTEST format:
-                    -- - FC from brief(12:10)
-                    -- - R/W from brief(9): 0=PTESTR (read), 1=PTESTW (write)
-                    -- - Level from brief(12:10) in some encodings
+                    -- MC68030 PTEST format (extension word):
+                    -- - Bits 15-13: "100" (PTEST identifier)
+                    -- - Bits 12-10: LEVEL (0-7)
+                    -- - Bit 9: R/W (0=PTESTW/write, 1=PTESTR/read)
+                    -- - Bit 8: A (address register return option)
+                    -- - Bits 7-5: REG (address register number if A=1)
+                    -- - Bits 4-0: FC encoding (10XXX=immediate FC in bits 2-0)
                     -- - Address from EA (already in OP1out)
                     -- PMMU module updates MMUSR with test results
                     null;  -- PTEST request already set in pmmu1, PMMU handles the rest

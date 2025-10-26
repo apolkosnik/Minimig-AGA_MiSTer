@@ -126,7 +126,8 @@ Removes all generated build files including db/, incremental_db/, output_files/,
 - **Performance Optimization**: Cache hit/miss handling in memory access cycles
 
 ### 68030 Technical Implementation Details
-- **Specifications**: `https://www.nxp.com/docs/en/reference-manual/MC68030UM.pdf`
+- **Specifications**: `https://www.nxp.com/docs/en/reference-manual/MC68030UM.pdf`, `https://amigasourcecodepreservation.gitlab.io/mc680x0-reference/`
+
 
 #### PMMU (Paged Memory Management Unit)
 - **File**: `rtl/tg68k/TG68K_PMMU_030.vhd`

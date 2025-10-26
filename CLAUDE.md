@@ -130,7 +130,7 @@ Note: No clean.sh script exists in the repository root.
 - **Performance Optimization**: Cache hit/miss handling in memory access cycles
 
 ### 68030 Technical Implementation Details
-- **Specifications**: `/home/adam/Desktop/MC68030UM.pdf`
+- **Specifications**: `/home/adam/Desktop/MC68030UM.pdf`, `https://amigasourcecodepreservation.gitlab.io/mc680x0-reference/`
 
 
 #### PMMU (Paged Memory Management Unit)
