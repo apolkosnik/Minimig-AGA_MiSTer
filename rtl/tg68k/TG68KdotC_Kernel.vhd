@@ -4939,59 +4939,53 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         pmmu_reg_re_d   <= '0';
 
         -- PMMU instruction handling (only on 68030)
-        -- Handle both set() for immediate execution and exec() for deferred execution
-        --if CPU="11" AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
-        if CPU(1)='1' AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
-          -- Latch source data only when actually doing PMMU operation to ensure correct value
-          pmmu_reg_wdat_d <= pmmu_src_data;
+        -- BUG FIX: Separate decode phase (latch selector/controls) from execute phase (generate enables)
+        -- This prevents brief signal corruption when multiple PMOVE instructions execute back-to-back
 
-          -- MMU registers (TT0, TT1, MMUSR, etc.) are PMOVE-only on MC68030
-          -- MOVEC attempts to access these registers trigger illegal instruction exceptions
+        -- DECODE PHASE: Latch register selector and control signals from brief word
+        -- Only during set() to capture extension word before it changes
+        if CPU(1)='1' AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1') then
+          -- Latch register selector during decode - this is the ONLY place it should be latched
+          if brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
+             brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000" then
+            pmmu_reg_sel_d  <= brief(14 downto 10);
 
-          -- PMOVE instruction handling (only if MOVEC is not active to avoid conflicts)
-          if set(pmmu_wr) = '1' OR exec(pmmu_wr) = '1' then
-            -- PMOVE Dn -> <MMU reg>
-            if brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
-               brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000" then
-              pmmu_reg_sel_d  <= brief(14 downto 10);
-              -- pmmu_reg_wdat_d already latched above from pmmu_src_data
-              -- For CRP/SRP choose part: HIGH word first, LOW word second
-              if (brief(14 downto 10) = "10010") or (brief(14 downto 10) = "10011") then
-                if micro_state = pmmu2 OR micro_state = pmmu1 OR micro_state = pmmu_dn_high then
-                  pmmu_reg_part_d <= '1';  -- HIGH word (mem EA first read, Dn first transfer)
-                else
-                  pmmu_reg_part_d <= '0';  -- LOW word (mem EA second read, Dn second transfer)
-                end if;
-              end if;
-              -- Check if this is PMOVEFD (Flush Disable): brief(15:13)="001" AND brief(9:8)="00" AND register selector present
-              -- BUG FIX: Check bits 9-8 (not 12-8) to avoid register selector overlap in bits 14-10
-              if brief(15 downto 13) = "001" and brief(9 downto 8) = "00" and brief(14 downto 10) /= "00000" and exe_opcode(5 downto 3) /= "000" then
-                pmmu_reg_fd_d <= '1';  -- PMOVEFD - disable ATC flush
+            -- Latch CRP/SRP part selector during decode
+            if (brief(14 downto 10) = "10010") or (brief(14 downto 10) = "10011") then
+              if micro_state = pmmu1 OR micro_state = pmmu_dn_high then
+                pmmu_reg_part_d <= '1';  -- HIGH word (first transfer)
               else
-                pmmu_reg_fd_d <= '0';  -- Normal PMOVE - flush ATC
+                pmmu_reg_part_d <= '0';  -- LOW word (second transfer)
               end if;
-              pmmu_reg_we_d   <= '1';
+            end if;
+
+            -- Latch flush disable flag during decode
+            if brief(15 downto 13) = "001" and brief(9 downto 8) = "00" and brief(14 downto 10) /= "00000" and opcode(5 downto 3) /= "000" then
+              pmmu_reg_fd_d <= '1';  -- PMOVEFD - disable ATC flush
+            else
+              pmmu_reg_fd_d <= '0';  -- Normal PMOVE - flush ATC
             end if;
           end if;
+        end if;
 
-          if set(pmmu_rd) = '1' OR exec(pmmu_rd) = '1' then
-            -- PMOVE <MMU reg> -> Dn
-            if brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
-               brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000" then
-              pmmu_reg_sel_d <= brief(14 downto 10);
-              -- For CRP/SRP choose part: HIGH word first, LOW word second
-              if (brief(14 downto 10) = "10010") or (brief(14 downto 10) = "10011") then
-                if micro_state = pmmu3 OR micro_state = pmmu1 OR micro_state = pmmu_dn_high then
-                  pmmu_reg_part_d <= '1';  -- HIGH word (mem EA first write, Dn first transfer)
-                else
-                  pmmu_reg_part_d <= '0';  -- LOW word (mem EA second write, Dn second transfer)
-                end if;
-              end if;
-              -- BUG FIX: PMOVE reads never flush ATC (MC68030 spec: only writes can flush)
-              -- Always set flush disable for read operations
-              pmmu_reg_fd_d <= '1';
-              pmmu_reg_re_d  <= '1';
-            end if;
+        -- EXECUTE PHASE: Generate write/read enables and latch data
+        -- During both set() and exec() to handle multi-cycle instructions
+        if CPU(1)='1' AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
+          -- Latch source data on every cycle to ensure correct value for multi-cycle ops
+          pmmu_reg_wdat_d <= pmmu_src_data;
+
+          -- Generate write enable using LATCHED selector (not brief!)
+          if (set(pmmu_wr) = '1' OR exec(pmmu_wr) = '1') AND
+             (pmmu_reg_sel_d = "00010" OR pmmu_reg_sel_d = "00011" OR pmmu_reg_sel_d = "10000" OR
+              pmmu_reg_sel_d = "10010" OR pmmu_reg_sel_d = "10011" OR pmmu_reg_sel_d = "11000") then
+            pmmu_reg_we_d <= '1';
+          end if;
+
+          -- Generate read enable using LATCHED selector (not brief!)
+          if (set(pmmu_rd) = '1' OR exec(pmmu_rd) = '1') AND
+             (pmmu_reg_sel_d = "00010" OR pmmu_reg_sel_d = "00011" OR pmmu_reg_sel_d = "10000" OR
+              pmmu_reg_sel_d = "10010" OR pmmu_reg_sel_d = "10011" OR pmmu_reg_sel_d = "11000") then
+            pmmu_reg_re_d <= '1';
           end if;
         end if;
       end if;
