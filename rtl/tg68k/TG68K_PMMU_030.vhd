@@ -1217,8 +1217,8 @@ begin
             if walker_fault = '1' and walker_fault_ack_pending = '1' then
               -- Walker fault is pending - don't overwrite with ATC results
               report "ATC_SKIP: Skipping ATC processing due to pending walker fault, addr=0x" & slv_to_hstring(addr_log) severity note;
-            elsif rw = '1' and atc_attr(hit_idx)(0) = '1' then
-              -- Write to write-protected page - generate fault
+            elsif rw = '0' and atc_attr(hit_idx)(0) = '1' then
+              -- Write to write-protected page - generate fault (rw='0' is WRITE)
               status_tmp := encode_mmusr_fault(
                 bus_error => '0',
                 limit_violation => '0',
@@ -1242,8 +1242,8 @@ begin
               write_protect_reg <= '1';  -- Mark as write-protected
               report "WP_FAULT_ATC: Setting fault_reg=1 for WP violation, addr=0x" & slv_to_hstring(addr_log) &
                      " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
-            elsif fc(2) = '0' and atc_attr(hit_idx)(2) = '0' then
-              -- User trying to access supervisor-only page - generate fault
+            elsif fc(2) = '0' and atc_attr(hit_idx)(3) = '0' then
+              -- User trying to access supervisor-only page - generate fault (bit 3 is U bit)
               status_tmp := encode_mmusr_fault(
                 bus_error => '0',
                 limit_violation => '0',
@@ -1504,8 +1504,8 @@ begin
               write_protect_reg <= '1';
               report "WP_FAULT_WALKER: Setting fault_reg=1 for WP violation after walker, addr=0x" & slv_to_hstring(saved_addr_log) &
                      " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
-            elsif saved_fc(2) = '0' and atc_attr(hit_idx)(2) = '0' then
-              -- User trying to access supervisor-only page - generate fault
+            elsif saved_fc(2) = '0' and atc_attr(hit_idx)(3) = '0' then
+              -- User trying to access supervisor-only page - generate fault (bit 3 is U bit)
               report "SUPERVISOR_FAULT: User access to supervisor page detected" severity note;
               status_tmp := encode_mmusr_fault(
                 bus_error => '0',
@@ -2171,8 +2171,8 @@ begin
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
-          elsif saved_rw = '1' and walk_desc_high(2) = '1' then
-            -- Write protection violation - write to write-protected page
+          elsif saved_rw = '0' and walk_desc_high(2) = '1' then
+            -- Write protection violation - write to write-protected page (saved_rw='0' is WRITE)
             -- WP is at bit 2 in both short and long formats
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
