@@ -738,7 +738,9 @@ begin
         ptest_active <= '1';
         ptest_addr <= pmmu_addr;
         ptest_fc <= pmmu_fc;
-        ptest_rw <= NOT pmmu_brief(9);  -- brief(9): 0=PTESTR(read), 1=PTESTW(write); invert for rw signal
+        -- BUG #14 FIX: MC68030 spec - brief(9): 0=PTESTW(write), 1=PTESTR(read)
+        -- rw signal: 0=write, 1=read, so direct assignment (no NOT)
+        ptest_rw <= pmmu_brief(9);
         if tc_en = '0' then
           -- MMU disabled - PTEST always succeeds with identity translation
           MMUSR <= encode_mmusr_success(
@@ -2385,11 +2387,12 @@ begin
       -- PLOAD: Edge detection and implementation
       if pload_req = '1' and pload_req_prev = '0' then
         -- PLOAD rising edge detected - activate page pre-loading
-        -- MC68030: pmmu_brief(9) determines R/W: 0=PLOADR (read), 1=PLOADW (write)
+        -- BUG #14 FIX: MC68030 spec - pmmu_brief(9): 0=PLOADW (write), 1=PLOADR (read)
+        -- rw signal: 0=write, 1=read, so direct assignment (no NOT)
         pload_active <= '1';
         pload_addr <= pmmu_addr;
         pload_fc <= pmmu_fc;
-        pload_rw <= NOT pmmu_brief(9);  -- brief(9): 0=PLOADR(read), 1=PLOADW(write); invert for rw signal
+        pload_rw <= pmmu_brief(9);
         -- PLOADR vs PLOADW affects access permissions tested during load
       elsif pload_active = '1' then
         -- PLOAD operation active - clear after one cycle

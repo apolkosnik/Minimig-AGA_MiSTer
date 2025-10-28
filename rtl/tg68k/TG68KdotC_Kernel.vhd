@@ -1979,6 +1979,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			set(longaktion) <= '1';
 		END IF;
 
+		-- Allow PMMU memory instructions to kick off EA generation during decode
+		IF decodeOPC='1' AND opcode(15 downto 12)="1111" AND cpu(1)='1' AND opcode(11 downto 8)="0000" THEN
+			IF opcode(5 downto 3)/="000" AND opcode(5 downto 3)/="001" THEN
+				ea_build_now <= '1';
+			END IF;
+		END IF;
+
 		IF (ea_build_now='1' AND decodeOPC='1') OR exec(ea_build)='1' THEN
 			CASE opcode(5 downto 3) IS		--source
 				WHEN "010"|"011"|"100" =>						-- -(An)+
@@ -3535,6 +3542,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							set(get_2ndOPC) <= '1';
 							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
 							next_micro_state <= pmmu1;
+							-- F-line cpGEN with memory source/destination needs EA immediately
+							IF opcode(5 downto 3) /= "000" AND opcode(5 downto 3) /= "001" THEN
+								ea_build_now <= '1';
+							END IF;
 						END IF;
 					ELSE
 						trap_priv <= '1';
@@ -3697,10 +3708,23 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				set_exec(Regwrena) <= '1';
 			END IF;
 		END IF;
-		
 
-------------------------------------------------------------------------------		
-------------------------------------------------------------------------------		
+-- Allow FPU memory instructions to kick off EA generation during decode
+		IF decodeOPC='1' AND opcode(15 downto 12)="1111" AND FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
+			IF opcode(5 downto 3)/="000" AND opcode(5 downto 3)/="001" THEN
+				ea_build_now <= '1';
+			END IF;
+		END IF;
+
+-- Allow PMMU memory instructions to kick off EA generation during decode
+		IF decodeOPC='1' AND opcode(15 downto 12)="1111" AND cpu="11" AND opcode(11 downto 8)="0000" THEN
+			IF opcode(5 downto 3)/="000" AND opcode(5 downto 3)/="001" THEN
+				ea_build_now <= '1';
+			END IF;
+		END IF;
+
+------------------------------------------------------------------------------
+------------------------------------------------------------------------------
 		IF set_Z_error='1'  THEN		-- divu by zero
 			trapmake <= '1';			--wichtig for USP
 			IF trapd='0' THEN
@@ -4430,13 +4454,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                             IF opcode(5 downto 3)="000" THEN
                                 -- Dn direct mode - register to register transfer
                                 -- MC68030 PMOVE: Direction from extension word bit 9, NOT opcode(7)
+                                -- BUG #12 FIX: Swap direction - RW=0 means WRITE to MMU, RW=1 means READ from MMU
                                 IF brief(9)='0' THEN
-                                    -- PMOVE <MMU reg>,Dn - Read from MMU, write to Dn (brief(9)=0)
+                                    -- PMOVE Dn,<MMU reg> - Read from Dn, write to MMU (brief(9)=0, RW=0)
+                                    set_exec(pmmu_wr) <= '1';
+                                ELSE
+                                    -- PMOVE <MMU reg>,Dn - Read from MMU, write to Dn (brief(9)=1, RW=1)
                                     set(pmmu_rd) <= '1';
                                     set_exec(Regwrena) <= '1';
-                                ELSE
-                                    -- PMOVE Dn,<MMU reg> - Read from Dn, write to MMU (brief(9)=1)
-                                    set_exec(pmmu_wr) <= '1';
                                 END IF;
                                 -- BUG #6 FIX: Check SZ bit for dual-word transfer, not just register type
                                 -- MC68030 spec: .D (SZ=1) means 64-bit transfer (CRP/SRP only, validated above)
@@ -4451,8 +4476,21 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                             ELSE
                                 -- Memory EA modes
                                 -- MC68030 PMOVE: Direction from extension word bit 9, NOT opcode(7)
+                                -- BUG #12 FIX: Swap direction - RW=0 means WRITE to MMU, RW=1 means READ from MMU
                                 IF brief(9)='0' THEN
-                                    -- PMOVE <MMU reg>,<ea> - Read from MMU, write to memory
+                                    -- PMOVE <ea>,<MMU reg> - Read from memory, write to MMU (brief(9)=0, RW=0)
+                                    set(ea_build) <= '1';
+                                    set(ea_data_OP1) <= '1';
+                                    -- BUG #7 FIX: Use word (16-bit) transfer for MMUSR, longword for others
+                                    IF brief(14 downto 10) = "11000" THEN
+                                        datatype <= "01";  -- Word (16-bit) for MMUSR
+                                    ELSE
+                                        datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
+                                    END IF;
+                                    setstate <= "10";
+                                    next_micro_state <= pmmu2;
+                                ELSE
+                                    -- PMOVE <MMU reg>,<ea> - Read from MMU, write to memory (brief(9)=1, RW=1)
                                     set(ea_build) <= '1';
                                     set(OP1addr) <= '1';
                                     -- BUG #7 FIX: Use word (16-bit) transfer for MMUSR, longword for others
@@ -4464,18 +4502,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     setstate <= "11";
                                     set_exec(pmmu_rd) <= '1';
                                     next_micro_state <= pmmu3;
-                                ELSE
-                                    -- PMOVE <ea>,<MMU reg> - Read from memory, write to MMU
-                                    set(ea_build) <= '1';
-                                    set(ea_data_OP1) <= '1';
-                                    -- BUG #7 FIX: Use word (16-bit) transfer for MMUSR, longword for others
-                                    IF brief(14 downto 10) = "11000" THEN
-                                        datatype <= "01";  -- Word (16-bit) for MMUSR
-                                    ELSE
-                                        datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
-                                    END IF;
-                                    setstate <= "10";
-                                    next_micro_state <= pmmu2;
                                 END IF;
                             END IF;
                         END IF;
@@ -4624,7 +4650,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- PLOAD: Load page into ATC (EA already built in pmmu1)
                     -- MC68030 PLOAD format:
                     -- - FC from brief(12:10)
-                    -- - R/W from brief(9): 0=PLOADR (read), 1=PLOADW (write)
+                    -- BUG #13 FIX: R/W from brief(9): 0=PLOADW (write), 1=PLOADR (read) - same as PTEST
                     -- - Address from EA (already in OP1out)
                     -- PMMU module performs page table walk and loads result into ATC
                     null;  -- PLOAD request already set in pmmu1, PMMU handles the rest
@@ -4644,13 +4670,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- For PMOVE Dn,<MMU>: Write LOW word from Dn+1
                     -- BUG FIX: Use brief(9) for direction, NOT opcode(7)!
                     -- PMOVE uses extension word bit 9 for direction, same as first transfer
+                    -- BUG #12 FIX: Swap direction - RW=0 means WRITE to MMU, RW=1 means READ from MMU
                     IF brief(9)='0' THEN
-                        -- PMOVE <MMU reg>,Dn+1 - Read LOW word from MMU, write to Dn+1 (brief(9)=0)
+                        -- PMOVE Dn+1,<MMU reg> - Read from Dn+1, write LOW word to MMU (brief(9)=0, RW=0)
+                        set_exec(pmmu_wr) <= '1';
+                    ELSE
+                        -- PMOVE <MMU reg>,Dn+1 - Read LOW word from MMU, write to Dn+1 (brief(9)=1, RW=1)
                         set_exec(Regwrena) <= '1';
                         set_exec(pmmu_rd) <= '1';
-                    ELSE
-                        -- PMOVE Dn+1,<MMU reg> - Read from Dn+1, write LOW word to MMU (brief(9)=1)
-                        set_exec(pmmu_wr) <= '1';
                     END IF;
                     next_micro_state <= nop;  -- Complete after LOW word transfer
 
