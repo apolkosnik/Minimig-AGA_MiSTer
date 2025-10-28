@@ -3709,19 +3709,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			END IF;
 		END IF;
 
--- Allow FPU memory instructions to kick off EA generation during decode
-		IF decodeOPC='1' AND opcode(15 downto 12)="1111" AND FPU_Enable = 1 AND opcode(11 downto 9) = "001" THEN
-			IF opcode(5 downto 3)/="000" AND opcode(5 downto 3)/="001" THEN
-				ea_build_now <= '1';
-			END IF;
-		END IF;
-
--- Allow PMMU memory instructions to kick off EA generation during decode
-		IF decodeOPC='1' AND opcode(15 downto 12)="1111" AND cpu="11" AND opcode(11 downto 8)="0000" THEN
-			IF opcode(5 downto 3)/="000" AND opcode(5 downto 3)/="001" THEN
-				ea_build_now <= '1';
-			END IF;
-		END IF;
 
 ------------------------------------------------------------------------------
 ------------------------------------------------------------------------------
