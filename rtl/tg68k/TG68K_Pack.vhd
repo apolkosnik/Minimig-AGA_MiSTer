@@ -32,7 +32,7 @@ package TG68K_Pack is
 						  rte4, rte5, rtd1, rtd2, trap00, trap0, trap1, trap2, trap3, cas1, cas2, cas21, cas22, cas23, cas24,
 						  cas25, cas26, cas27, cas28, chk20, chk21, chk22, chk23, chk24,
                           trap4, trap5, trap6, movec1, moves1, movep1, movep2, movep3, movep4, movep5, rota1, bf1,
-                          pmmu1, pmmu2, pmmu3, pmmu4, pmmu5, ptest1, ptest2, pflush1, pload1,
+                          pmmu1, pmmu1_wait, pmmu2, pmmu3, pmmu4, pmmu5, ptest1, ptest2, pflush1, pload1,
                           pmmu_dn_high, pmmu_dn_low,
                           pmove_decode, pmove_reg_xfer, pmove_mem_read, pmove_mem_write,
                           pmove_64_high, pmove_64_low,

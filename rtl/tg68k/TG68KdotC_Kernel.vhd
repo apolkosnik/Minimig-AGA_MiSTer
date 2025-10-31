@@ -407,6 +407,9 @@ signal SFC					: std_logic_vector(2 downto 0);
 	-- PMMU register signals (now declared as output ports)
 signal pmmu_reg_rdat    : std_logic_vector(31 downto 0);
 signal pmmu_src_data    : std_logic_vector(31 downto 0);
+signal pmmu_dn_data     : std_logic_vector(31 downto 0);  -- BUG #39: Direct register file read for Dn mode
+signal pmmu_mem_wdat_hold : std_logic_vector(31 downto 0);
+signal pmmu_mem_wdat_valid : std_logic;
 signal pmmu_reg_part_d  : std_logic;
 signal pmmu_reg_we_d    : std_logic;
 signal pmmu_reg_re_d    : std_logic;
@@ -543,6 +546,22 @@ BEGIN
   pmmu_pflush_req <= '1' when exec(pmmu_pflush) = '1' else '0';
   pmmu_pload_req  <= '1' when exec(pmmu_pload) = '1' else '0';
 
+  -- BUG #19 FIX: Make pmmu_reg_we_d and pmmu_reg_re_d combinational (not sequential)
+  -- Sequential signals with clkena gating caused missed writes when clkena_in wasn't '1' every cycle
+  -- Now these signals follow exec() directly, like pmmu_ptest_req/pflush_req/pload_req
+  -- BUG #29 FIX: Critical timing issue - write enable vs data latch mismatch!
+  -- ONLY use exec(), NOT set_exec()!  This delays write by one cycle for BOTH Dn and memory modes.
+  -- Dn mode: Avoids register addressing timing race (Bug #28)
+  -- Memory mode: Data held in pmmu_mem_wdat_hold (valid flag managed at line 5023)
+  pmmu_reg_we_d <= '1' when CPU(1)='1' AND exec(pmmu_wr)='1' AND
+                             (pmmu_reg_sel_d = "00010" OR pmmu_reg_sel_d = "00011" OR pmmu_reg_sel_d = "10000" OR
+                              pmmu_reg_sel_d = "10010" OR pmmu_reg_sel_d = "10011" OR pmmu_reg_sel_d = "11000")
+                   else '0';
+  pmmu_reg_re_d <= '1' when CPU(1)='1' AND exec(pmmu_rd)='1' AND
+                             (pmmu_reg_sel_d = "00010" OR pmmu_reg_sel_d = "00011" OR pmmu_reg_sel_d = "10000" OR
+                              pmmu_reg_sel_d = "10010" OR pmmu_reg_sel_d = "10011" OR pmmu_reg_sel_d = "11000")
+                   else '0';
+
   -- For PTEST/PFLUSH/PLOAD: use FC from brief word per MC68030 spec
   -- MC68030 PTEST/PLOAD/PFLUSH FC encoding (extension word bits 4-0):
   --   10XXX: Immediate FC value in bits 2-0 (XXX) - 3-bit FC value (0-7)
@@ -645,8 +664,18 @@ BEGIN
   cacr_dfreeze <= CACR(9);  -- DCache Freeze
   cacr_dbe    <= CACR(12); -- Data Burst Enable
   cacr_wa     <= CACR(13); -- Write Allocate
+  -- BUG #39 FIX: Bypass reg_QA for PMMU Dn mode operations
+  -- reg_QA depends on RDindex_A which only updates on clkena_lw='1'
+  -- During pmmu1, clkena_lw='0' -> RDindex_A stale -> reg_QA reads wrong register!
+  -- Solution: Read regfile directly using last_opc_read register selector (bits 2:0) for Dn mode
+  -- For PMOVE Dn,<MMU reg>: last_opc_read[2:0] = Dn register number
+  pmmu_dn_data <= regfile(conv_integer(last_opc_read(2 downto 0)));  -- BUG #39 V4: Use last_opc_read!
+
   -- Source data for PMMU register writes: from Dn normally, or from memory EA in pmmu2
-  pmmu_src_data   <= ea_data when (micro_state = pmmu2 or micro_state = pmmu4) else reg_QA;
+  -- PMOVE <ea>,<MMU reg>: use latched EA data while PMMU write strobes are asserted
+  pmmu_src_data   <= ea_data when (micro_state = pmmu2 or micro_state = pmmu4) else
+                     pmmu_mem_wdat_hold when pmmu_mem_wdat_valid = '1' else
+                     pmmu_dn_data;
 
   -- Drive PMMU request metadata
   pmmu_req      <= '1' when (state /= "01" and pmmu_tc_en = '1') else '0'; -- active only when MMU enabled
@@ -869,7 +898,9 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 -----------------------------------------------------------------------------
 -- Write Reg
 -----------------------------------------------------------------------------
-PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, SSP, MSP, ISP, movec_data)
+-- BUG #20 FIX: Added pmmu_reg_rdat to sensitivity list
+-- Without it, PMOVE TC,Dn doesn't update Dn when pmmu_reg_rdat changes
+PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, SSP, MSP, ISP, movec_data, pmmu_reg_rdat)
 	BEGIN
 		regin <= ALUout;
 		IF exec(save_memaddr)='1' THEN
@@ -886,14 +917,22 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 			regin <= ISP;
 		ELSIF exec(movec_rd)='1' THEN
 			regin <= movec_data;
-		ELSIF set(pmmu_rd)='1' OR exec(pmmu_rd)='1' THEN
+		ELSIF exec(pmmu_rd)='1' THEN
+			-- BUG #24 FIX: ONLY use exec(pmmu_rd), NOT set(pmmu_rd)!
+			-- PMMU register read is CLOCKED (edge-triggered), so reg_rdat is valid
+			-- ONE CYCLE AFTER reg_re goes high. Using set(pmmu_rd) captures OLD value!
+			-- By waiting for exec(pmmu_rd), we ensure reg_rdat has been updated.
 			regin <= pmmu_reg_rdat;
 		END IF;
-		
-		IF Bwrena='1' THEN
+
+		-- BUG #25 FIX: Don't preserve register bits for PMMU reads!
+		-- PMMU always writes full 32-bit values, so we should not mix with old register data.
+		-- If we preserve bits when exec(pmmu_rd)='1', we can end up with stale data from
+		-- the previous instruction's RDindex_A if clkena_lw wasn't '1' to update it.
+		IF Bwrena='1' AND exec(pmmu_rd)='0' THEN
 			regin(15 downto 8) <= reg_QA(15 downto 8);
 		END IF;
-		IF Lwrena='0' THEN
+		IF Lwrena='0' AND exec(pmmu_rd)='0' THEN
 			regin(31 downto 16) <= reg_QA(31 downto 16);
 		END IF;
 
@@ -1358,7 +1397,18 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			END IF;
 		END IF;	
 		setexecOPC <= '0';
+		-- BUG #32 FIX: Allow setstate="01" for PMMU operations ONLY!
+		-- Bug #30 sets setstate="01" to enable clkena_lw, but original check only allowed setstate="00".
+		-- This prevented setexecOPC for PMMU register reads, breaking exec(Regwrena) transfer.
+		-- BUG #34 FIX: setstate="01" is used by MANY operations (20+ places), not just PMMU!
+		-- Allowing it unconditionally breaks AmigaOS boot (yellow screen)!
+		-- Only allow setstate="01" when PMMU operations are pending in set_exec layer.
 		IF setstate="00" AND next_micro_state=idle AND set_direct_data='0' AND (exec_write_back='0' OR (state="10" AND addrvalue='0')) THEN
+			setexecOPC <= '1';
+		ELSIF setstate="01" AND next_micro_state=idle AND set_direct_data='0' AND (exec_write_back='0' OR (state="10" AND addrvalue='0')) AND
+		      (set_exec(pmmu_wr)='1' OR set_exec(pmmu_rd)='1' OR set(pmmu_rd)='1') THEN
+			-- CRITICAL: Only for PMMU Dn mode operations! Other operations using setstate="01" don't need setexecOPC.
+			-- Check for: set_exec(pmmu_wr) (writes), set_exec(pmmu_rd) (pmmu_dn_low reads), set(pmmu_rd) (pmmu1 reads)
 			setexecOPC <= '1';
 		END IF;
 		
@@ -1979,12 +2029,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			set(longaktion) <= '1';
 		END IF;
 
-		-- Allow PMMU memory instructions to kick off EA generation during decode
-		IF decodeOPC='1' AND opcode(15 downto 12)="1111" AND cpu(1)='1' AND opcode(11 downto 8)="0000" THEN
-			IF opcode(5 downto 3)/="000" AND opcode(5 downto 3)/="001" THEN
-				ea_build_now <= '1';
-			END IF;
-		END IF;
+		-- BUG #22 FIX: Removed early EA building for PMMU instructions
+		-- PMMU instructions must decode extension word FIRST in pmmu1, then build EA
+		-- Early EA building caused duplicate EA operation and extra PC increment
+		-- (Removed lines that set ea_build_now for PMMU instructions)
 
 		IF (ea_build_now='1' AND decodeOPC='1') OR exec(ea_build)='1' THEN
 			CASE opcode(5 downto 3) IS		--source
@@ -3542,10 +3590,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							set(get_2ndOPC) <= '1';
 							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
 							next_micro_state <= pmmu1;
-							-- F-line cpGEN with memory source/destination needs EA immediately
-							IF opcode(5 downto 3) /= "000" AND opcode(5 downto 3) /= "001" THEN
-								ea_build_now <= '1';
-							END IF;
+							-- BUG #22 FIX: DO NOT build EA here! PMMU instructions build EA in pmmu1
+							-- after decoding the extension word. Early EA building causes duplicate
+							-- EA operation which increments PC by 2 extra bytes (6 instead of 4).
+							-- The ea_build in pmmu1 (line 4488) is the correct place for PMMU EA building.
 						END IF;
 					ELSE
 						trap_priv <= '1';
@@ -4442,6 +4490,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                 -- Dn direct mode - register to register transfer
                                 -- MC68030 PMOVE: Direction from extension word bit 9, NOT opcode(7)
                                 -- BUG #12 FIX: Swap direction - RW=0 means WRITE to MMU, RW=1 means READ from MMU
+                                -- BUG #30 FIX: Set setstate="01" to ensure memmask="111111" (bit 3='1')
+                                -- Without this, memmask defaults to "100111" (bit 3='0'), causing clkena_lw='0',
+                                -- which prevents RDindex_A from being updated, causing reads from wrong register!
+                                setstate <= "01";
                                 IF brief(9)='0' THEN
                                     -- PMOVE Dn,<MMU reg> - Read from Dn, write to MMU (brief(9)=0, RW=0)
                                     set_exec(pmmu_wr) <= '1';
@@ -4458,7 +4510,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     next_micro_state <= pmmu_dn_high;
                                 ELSE
                                     -- .L (longword) - single 32-bit transfer
-                                    next_micro_state <= nop;
+                                    -- BUG #20 REAL FIX: Must use 'idle' not 'nop' to trigger setexecOPC
+                                    -- setexecOPC is only set when next_micro_state=idle (line 1381)
+                                    -- Without setexecOPC, set_exec(Regwrena) never becomes exec(Regwrena)
+                                    next_micro_state <= idle;
                                 END IF;
                             ELSE
                                 -- Memory EA modes
@@ -4475,18 +4530,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                         datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
                                     END IF;
                                     setstate <= "10";
-                                    next_micro_state <= pmmu2;
+                                    -- BUG #21 FIX: Wait one cycle for ea_data to be valid
+                                    next_micro_state <= pmmu1_wait;
                                 ELSE
                                     -- PMOVE <MMU reg>,<ea> - Read from MMU, write to memory (brief(9)=1, RW=1)
                                     set(ea_build) <= '1';
                                     set(OP1addr) <= '1';
-                                    -- BUG #7 FIX: Use word (16-bit) transfer for MMUSR, longword for others
-                                    IF brief(14 downto 10) = "11000" THEN
-                                        datatype <= "01";  -- Word (16-bit) for MMUSR
-                                    ELSE
-                                        datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
-                                    END IF;
-                                    setstate <= "11";
+                                    -- BUG #9 FIX: Don't set setstate here - pmmu3 will set it after PMMU register is read
                                     set_exec(pmmu_rd) <= '1';
                                     next_micro_state <= pmmu3;
                                 END IF;
@@ -4570,6 +4620,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         END CASE;
                     END IF;  -- End of privilege check (SVmode)
                     END IF;  -- End of CASE brief(15 downto 13)
+
+                WHEN pmmu1_wait =>
+                    -- BUG #21 FIX: Wait state to ensure ea_data is valid
+                    -- Memory read was initiated in pmmu1 (setstate="10")
+                    -- At the end of this cycle, ea_data <= data_read completes
+                    -- Next cycle (pmmu2), ea_data will have the correct value
+                    next_micro_state <= pmmu2;
+
                 WHEN pmmu2 =>
                     -- complete mem->MMU by issuing PMMU write using ea_data as source (high part for 64-bit)
                     set_exec(pmmu_wr) <= '1';
@@ -4594,8 +4652,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         set_exec(pmmu_rd) <= '1';
                         next_micro_state <= pmmu5;
                     ELSE
-                        -- single long write completed in this state
-                        next_micro_state <= nop;  -- FIX: Return to normal execution after 32-bit write
+                        -- BUG #9 FIX: Setup write for 32-bit PMMU registers
+                        datatype <= "10"; -- long
+                        setstate <= "11"; -- write
+                        next_micro_state <= nop;
                     END IF;
                 WHEN pmmu5 =>
                     -- MMU -> memory write of low part (for CRP/SRP)
@@ -4658,6 +4718,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- BUG FIX: Use brief(9) for direction, NOT opcode(7)!
                     -- PMOVE uses extension word bit 9 for direction, same as first transfer
                     -- BUG #12 FIX: Swap direction - RW=0 means WRITE to MMU, RW=1 means READ from MMU
+                    -- BUG #30 FIX: Set setstate="01" for same reason as pmmu1 Dn mode
+                    setstate <= "01";
                     IF brief(9)='0' THEN
                         -- PMOVE Dn+1,<MMU reg> - Read from Dn+1, write LOW word to MMU (brief(9)=0, RW=0)
                         set_exec(pmmu_wr) <= '1';
@@ -4971,19 +5033,48 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
   -- Drive PMMU register interface during PMOVE execution
   process(clk)
     -- variable sel   : std_logic_vector(3 downto 0);
+    variable should_latch_write_data : boolean;
   begin
     if rising_edge(clk) then
       if Reset = '1' then
-        pmmu_reg_we_d   <= '0';
-        pmmu_reg_re_d   <= '0';
+        -- BUG #19 FIX: pmmu_reg_we_d and pmmu_reg_re_d are now combinational (no reset needed)
         pmmu_reg_sel_d  <= (others => '0');
         pmmu_reg_wdat_d <= (others => '0');
         pmmu_reg_part_d <= '0';
         pmmu_reg_fd_d   <= '0';
+        pmmu_mem_wdat_hold <= (others => '0');
+        pmmu_mem_wdat_valid <= '0';
       elsif clkena_in='1' then
-        -- Clear PMMU control signals by default (single-cycle pulses)
-        pmmu_reg_we_d   <= '0';
-        pmmu_reg_re_d   <= '0';
+        -- BUG #39 FIX: Use clkena_in instead of completely unconditional!
+        -- Bug #37-#38 tried unconditional latch, but RDindex_A only updates on clkena_lw!
+        -- If clkena_lw='0' during pmmu1, RDindex_A is stale -> reg_QA reads WRONG register!
+        -- Solution: Use clkena_in which is high during pmmu1, and nest clkena_lw inside it.
+
+        -- Data latch must execute when clkena_in='1' (which includes pmmu1)
+        if CPU(1)='1' then
+          pmmu_reg_wdat_d <= pmmu_src_data;
+        end if;
+
+        -- BUG #38 FIX: pmmu_mem_wdat_valid clearing must execute when clkena_in='1'
+        -- Track memory-sourced PMOVE data so it is available when the PMMU write strobe asserts
+        if micro_state = pmmu2 or micro_state = pmmu4 then
+          pmmu_mem_wdat_hold  <= ea_data;
+          pmmu_mem_wdat_valid <= '1';
+        elsif exec(pmmu_wr) = '1' then
+          if set_exec(pmmu_wr) = '0' then
+            pmmu_mem_wdat_valid <= '0';
+            pmmu_mem_wdat_hold  <= (others => '0');
+          end if;
+        else
+          pmmu_mem_wdat_valid <= '0';
+          pmmu_mem_wdat_hold  <= (others => '0');
+        end if;
+
+      -- BUG #31 FIX: clkena_lw dependent logic (register file addressing sync)
+      -- Register file RDindex_A updates on clkena_lw (line 881), selector latch must match
+      if clkena_lw='1' then
+        -- BUG #19 FIX: pmmu_reg_we_d and pmmu_reg_re_d are now combinational (above)
+        -- No need to clear them here anymore
 
         -- PMMU instruction handling (only on 68030)
         -- BUG FIX: Separate decode phase (latch selector/controls) from execute phase (generate enables)
@@ -4991,7 +5082,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
         -- DECODE PHASE: Latch register selector and control signals from brief word
         -- Only during set() to capture extension word before it changes
-        if CPU(1)='1' AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1') then
+        -- BUG #27 FIX: Missing set_exec() checks! Same pattern as Bug #23 and Bug #26.
+        -- Memory operations (EA modes) use set_exec(pmmu_wr) in pmmu2, not set(pmmu_wr) in pmmu1!
+        -- Without set_exec() checks, register selector is never latched for memory operations.
+        if CPU(1)='1' AND (set(pmmu_wr)='1' OR set_exec(pmmu_wr)='1' OR
+                           set(pmmu_rd)='1' OR set_exec(pmmu_rd)='1') then
           -- Latch register selector during decode - this is the ONLY place it should be latched
           if brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
              brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000" then
@@ -5014,29 +5109,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
             end if;
           end if;
         end if;
-
-        -- EXECUTE PHASE: Generate write/read enables and latch data
-        -- During both set() and exec() to handle multi-cycle instructions
-        if CPU(1)='1' AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
-          -- Latch source data on every cycle to ensure correct value for multi-cycle ops
-          pmmu_reg_wdat_d <= pmmu_src_data;
-
-          -- Generate write enable using LATCHED selector (not brief!)
-          if (set(pmmu_wr) = '1' OR exec(pmmu_wr) = '1') AND
-             (pmmu_reg_sel_d = "00010" OR pmmu_reg_sel_d = "00011" OR pmmu_reg_sel_d = "10000" OR
-              pmmu_reg_sel_d = "10010" OR pmmu_reg_sel_d = "10011" OR pmmu_reg_sel_d = "11000") then
-            pmmu_reg_we_d <= '1';
-          end if;
-
-          -- Generate read enable using LATCHED selector (not brief!)
-          if (set(pmmu_rd) = '1' OR exec(pmmu_rd) = '1') AND
-             (pmmu_reg_sel_d = "00010" OR pmmu_reg_sel_d = "00011" OR pmmu_reg_sel_d = "10000" OR
-              pmmu_reg_sel_d = "10010" OR pmmu_reg_sel_d = "10011" OR pmmu_reg_sel_d = "11000") then
-            pmmu_reg_re_d <= '1';
-          end if;
-        end if;
+        -- NOTE: Data latch moved OUTSIDE clkena_lw block (Bug #37 fix above)
       end if;
     end if;
+  end if;
   end process;
 -----------------------------------------------------------------------------
 -- Conditions

@@ -180,7 +180,10 @@ architecture rtl of TG68K_PMMU_030 is
   signal ptest_req_prev  : std_logic := '0';
   signal pflush_req_prev : std_logic := '0';
   signal pload_req_prev  : std_logic := '0';
-  
+  -- BUG #16 FIX: Edge detection for PMOVE register access
+  signal reg_we_prev     : std_logic := '0';
+  signal reg_re_prev     : std_logic := '0';
+
   -- PTEST operation state
   signal ptest_active : std_logic := '0';
   signal ptest_addr : std_logic_vector(31 downto 0) := (others => '0');
@@ -762,7 +765,8 @@ begin
       -- Handle direct register writes (TC, CRP, SRP, TT0, TT1, etc.)
       -- CRITICAL FIX: These are INDEPENDENT of MMUSR updates and execute concurrently
       -- BUG #12: Was using "elsif" which blocked all register writes when MMUSR updates active
-      if reg_we = '1' then
+      -- BUG #16 FIX: Use edge detection instead of level (prevents multi-cycle writes)
+      if reg_we = '1' and reg_we_prev = '0' then
         -- MC68030 Specification: MMU register access requires supervisor mode
         -- Privilege check is performed by TG68KdotC_Kernel before asserting reg_we,
         -- so no additional FC check is needed here
@@ -884,10 +888,12 @@ begin
               atc_flush_req <= '1';
             end if;
           when "11000" =>
-            -- MMUSR register: MC68030 MMUSR write-1-to-clear semantics
-            -- Writing '1' to bits 15:13 (fault status bits) clears them
+            -- BUG #15 FIX: MMUSR register - MC68030 MMUSR write-1-to-clear semantics
+            -- MC68030 spec: MMUSR is 16-bit (upper 16 bits always read as zero)
+            -- Writing '1' to bits 15:13 (fault status bits) and bit 9 (Modified) clears them
             -- Bits 15:13 = Bus Error, Limit Violation, Supervisor Violation
-            -- Other bits are read-only and ignore writes
+            -- Bit 9 = Modified (also write-1-to-clear per MC68030 spec)
+            -- All other bits are read-only and ignore writes
             if reg_wdat(15) = '1' then
               MMUSR(15) <= '0';  -- Clear Bus Error bit
             end if;
@@ -897,7 +903,9 @@ begin
             if reg_wdat(13) = '1' then
               MMUSR(13) <= '0';  -- Clear Supervisor Violation bit
             end if;
-            -- All other bits are read-only
+            if reg_wdat(9) = '1' then
+              MMUSR(9) <= '0';  -- Clear Modified bit
+            end if;
           when others => null;
           end case;
       end if;
@@ -910,7 +918,8 @@ begin
     if nreset = '0' then
       reg_rdat <= (others => '0');
     elsif rising_edge(clk) then
-      if reg_re = '1' then
+      -- BUG #16 FIX: Use edge detection instead of level (prevents multi-cycle reads)
+      if reg_re = '1' and reg_re_prev = '0' then
         -- MC68030 Specification: MMU register access requires supervisor mode
         -- Privilege check is performed by TG68KdotC_Kernel before asserting reg_re,
         -- so no additional FC check is needed here
@@ -941,8 +950,9 @@ begin
                 report "PMMU_REG_READ: CRP_L=0x" & slv_to_hstring(CRP_L) severity note;
               end if;
             when "11000" =>
-              reg_rdat <= MMUSR;
-              report "PMMU_REG_READ: MMUSR=0x" & slv_to_hstring(MMUSR) severity note;
+              -- BUG #15 FIX: MMUSR is 16-bit per MC68030 spec, upper 16 bits always zero
+              reg_rdat <= X"0000" & MMUSR(15 downto 0);
+              report "PMMU_REG_READ: MMUSR=0x" & slv_to_hstring(MMUSR(15 downto 0)) severity note;
             when others =>
               reg_rdat <= (others => '0');
               report "PMMU_REG_READ: UNKNOWN sel=0x" & slv_to_hstring(reg_sel) severity warning;
@@ -1365,7 +1375,7 @@ begin
             saved_addr_log <= ptest_addr;
             saved_fc <= ptest_fc;
             saved_is_insn <= '0';
-            saved_rw <= ptest_rw;  -- Use PTEST R/W from brief(9): 0=PTESTR(read), 1=PTESTW(write)
+            saved_rw <= ptest_rw;  -- BUG #17 FIX: PTEST R/W from brief(9): 0=PTESTW(write), 1=PTESTR(read)
             walk_req <= '1';
             translation_pending <= '1';
             report "PTEST: Triggered walker for addr=0x" & slv_to_hstring(ptest_addr) &
@@ -1402,7 +1412,7 @@ begin
               saved_addr_log <= pload_addr;
               saved_fc <= pload_fc;
               saved_is_insn <= '0';
-              saved_rw <= pload_rw;  -- Use PLOAD R/W from brief(9): 0=PLOADR(read), 1=PLOADW(write)
+              saved_rw <= pload_rw;  -- BUG #17 FIX: PLOAD R/W from brief(9): 0=PLOADW(write), 1=PLOADR(read)
               walk_req <= '1';
               translation_pending <= '1';
               report "PLOAD: Triggered walker for addr=0x" & slv_to_hstring(pload_addr) &
@@ -1480,7 +1490,8 @@ begin
               severity note;
               
             -- Walker filled ATC successfully - check access violations for the original request
-            if saved_rw = '1' and atc_attr(hit_idx)(0) = '1' then
+            -- BUG #17 FIX: saved_rw='0' is WRITE, saved_rw='1' is READ
+            if saved_rw = '0' and atc_attr(hit_idx)(0) = '1' then
               -- Write to write-protected page - generate fault
               report "WP_FAULT: Write to WP page detected" severity note;
               status_tmp := encode_mmusr_fault(
@@ -2356,11 +2367,15 @@ begin
       ptest_req_prev <= '0';
       pflush_req_prev <= '0';
       pload_req_prev <= '0';
+      reg_we_prev <= '0';  -- BUG #16 FIX
+      reg_re_prev <= '0';  -- BUG #16 FIX
     elsif rising_edge(clk) then
       -- Update previous values for edge detection
       ptest_req_prev <= ptest_req;
       pflush_req_prev <= pflush_req;
       pload_req_prev <= pload_req;
+      reg_we_prev <= reg_we;  -- BUG #16 FIX
+      reg_re_prev <= reg_re;  -- BUG #16 FIX
       
       -- PTEST: Set flag on rising edge only (prevents multiple triggers)
       if ptest_req = '1' and ptest_req_prev = '0' then
