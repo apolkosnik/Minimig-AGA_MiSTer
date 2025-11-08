@@ -47,7 +47,7 @@ module cpu_wrapper
 	output reg        chip_rw,
 	input             chip_dtack,
 	input       [2:0] chip_ipl,
-	
+
 	input      [15:0] fastchip_dout,
 	output reg        fastchip_sel,
 	output            fastchip_lds,
@@ -59,11 +59,10 @@ module cpu_wrapper
 
 	output            ramsel,
 	output     [28:1] ramaddr,
-	output     [15:0] ramdin,
-	input      [15:0] ramdout,
+	output     [31:0] ramdin,       // Widened to 32-bit for TG68K
+	input      [31:0] ramdout,      // Widened to 32-bit for TG68K
 	input             ramready,
-	output            ramlds,
-	output            ramuds,
+	output      [3:0] rambe,        // 4 byte enables for 32-bit RAM access
 	output            ramshared,
 
 	output            toccata_ena,
@@ -96,12 +95,20 @@ wire sel_chipram   = !cpu_addr[31:21] && cchip; 		             //$000000 - $1FFF
 // decide what to do, would not be good style to replicate that here). 
 wire sel_nmi_vector = (cpu_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
 
-wire [15:0] ramdat;
+wire [31:0] ramdat;
 
-assign ramlds = sel_rtg ? uds_in : lds_in;
-assign ramuds = sel_rtg ? lds_in : uds_in;
-assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
-assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
+// RAM byte enables: For TG68K use 4 byte enables, for FX68K use legacy UDS/LDS
+assign rambe = cpucfg[1] ? be_p : {2'b11, uds_in, lds_in};
+
+// RAM data out: For TG68K pass full 32-bit, handle RTG byte swap if needed
+assign ramdin = cpucfg[1] ? cpu_dout_p_32 :
+                sel_rtg ? {16'h0000, cpu_dout[7:0], cpu_dout[15:8]} :
+                {16'h0000, cpu_dout};
+
+// RAM data in: For TG68K use full 32-bit
+assign ramdat = cpucfg[1] ? ramdout :
+                sel_rtg ? {16'h0000, ramdout[7:0], ramdout[15:8]} :
+                {16'h0000, ramdout[15:0]};
 
 //       Main  DDx  RTG  8M  128M  256M
 //       ----  ---  ---  --  ----  ----
@@ -139,6 +146,7 @@ reg  [31:0] vbr;
 
 always @* begin
 	if(cpucfg[1:0]) begin
+		// TG68K modes (68000/68010/68020) - now with 32-bit bus
 		cpu_dout     = cpu_dout_p;
 		cpu_addr     = cpu_addr_p;
 		cpustate     = cpustate_p;
@@ -159,6 +167,7 @@ always @* begin
 		fastchip_lw  = longword;
 	end
 	else begin
+		// FX68K mode
 		cpu_dout     = cpu_dout_o;
 		cpu_addr     = {cpu_addr_o,1'b0};
 		cpustate     = as_o ? 2'b01 : ~{wr_o,wr_o};
@@ -180,47 +189,58 @@ always @* begin
 	end
 end
 
-wire [15:0] cpu_dout_p;
+// TG68K 32-bit signals
+wire [31:0] cpu_dout_p_32;
 wire [31:0] cpu_addr_p;
 wire  [1:0] cpustate_p;
 wire  [3:0] cacr_p;
 wire [31:0] vbr_p;
 wire        wr_p;
-wire        uds_p;
-wire        lds_p;
+wire  [3:0] be_p;           // 4 byte enables from 32-bit wrapper
 wire        reset_out_p;
 wire        longword;
 
-TG68KdotC_Kernel
+// Extract 16-bit data for compatibility (lower 16 bits)
+wire [15:0] cpu_dout_p = cpu_dout_p_32[15:0];
+// Map byte enables to UDS/LDS for backward compatibility
+wire        uds_p = be_p[1];
+wire        lds_p = be_p[0];
+
+// Create 32-bit cpu_din from various sources
+// For TG68K 32-bit mode: use full 32-bit RAM data, or extend 16-bit chip/fastchip data
+wire [31:0] cpu_din_32 = ramsel ? ramdat :
+                         fastchip_selack ? {16'h0000, fastchip_dout} :
+                         {16'h0000, sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
+
+TG68K_32bit_wrapper
 #(
-	.sr_read(2),        // 0=>user,   1=>privileged,    2=>switchable with CPU(0)
-	.vbr_stackframe(2), // 0=>no,     1=>yes/extended,  2=>switchable with CPU(0)
-	.extaddr_mode(2),   // 0=>no,     1=>yes,           2=>switchable with CPU(1)
-	.mul_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no MUL,
-	.div_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,
-	.bitfield(2)        // 0=>no,     1=>yes,           2=>switchable with CPU(1)
+	.SR_Read(2),        // 0=>user,   1=>privileged,    2=>switchable with CPU(0)
+	.VBR_Stackframe(2), // 0=>no,     1=>yes/extended,  2=>switchable with CPU(0)
+	.extAddr_Mode(2),   // 0=>no,     1=>yes,           2=>switchable with CPU(1)
+	.MUL_Mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no MUL,
+	.DIV_Mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,
+	.BitField(2)        // 0=>no,     1=>yes,           2=>switchable with CPU(1)
 )
 cpu_inst_p
 (
   .clk(clk),
-  .nreset(reset),
+  .nReset(reset),
   .clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
-  .data_in(cpu_din),
-  .ipl(cpu_ipl),
-  .ipl_autovector(1),
+  .data_in(cpu_din_32),
+  .IPL(cpu_ipl),
+  .IPL_autovector(1'b1),
   .regin_out(),
   .addr_out(cpu_addr_p),
-  .data_write(cpu_dout_p),
-  .nwr(wr_p),
-  .nuds(uds_p),
-  .nlds(lds_p),
-  .nresetout(reset_out_p),
+  .data_write(cpu_dout_p_32),
+  .nWr(wr_p),
+  .nBE(be_p),             // 4 byte enables
+  .nResetOut(reset_out_p),
   .longword(longword),
-  
-  .cpu(cpucfg),
-  .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
-  .cacr_out(cacr_p),
-  .vbr_out(vbr_p)
+
+  .CPU(cpucfg),
+  .busstate(cpustate_p),  // 0: fetch code, 1: no memaccess, 2: read data, 3: write data
+  .CACR_out(cacr_p),
+  .VBR_out(vbr_p)
 );
 
 wire [15:0] cpu_dout_o;

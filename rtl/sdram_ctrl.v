@@ -61,10 +61,9 @@ module sdram_ctrl
 	input      [24:1] cpuAddr,
 	input             cpuCS,
 	input       [1:0] cpustate,
-	input             cpuL,
-	input             cpuU,
-	input      [15:0] cpuWR,
-	output     [15:0] cpuRD,
+	input       [3:0] cpuBE,        // 4 byte enables for 32-bit access
+	input      [31:0] cpuWR,        // Widened to 32-bit for TG68K
+	output     [31:0] cpuRD,        // Widened to 32-bit for TG68K
 	output            ramready
 );
 
@@ -100,6 +99,14 @@ always @(posedge sysclk) begin
 	end
 end
 
+// Map 32-bit byte enables to 16-bit access (use lower 2 byte enables)
+wire cpuU = cpuBE[1];  // Upper byte of lower word
+wire cpuL = cpuBE[0];  // Lower byte of lower word
+
+// Duplicate lower 16 bits to upper 16 bits for 32-bit output
+// TG68K wrapper will select correct half based on address
+assign cpuRD[31:16] = cpuRD[15:0];
+
 wire ramsel = cpuCS & (~&cpustate | ~cpuU | ~cpuL);
 
 // cpu cache
@@ -118,8 +125,8 @@ cpu_cache_new cpu_cache
 	.cpu_we           (cpustate == 3),         // cpu write
 	.cpu_ir           (cpustate == 0),         // cpu instruction read
 	.cpu_dr           (cpustate == 2),         // cpu data read
-	.cpu_dat_w        (cpuWR),                 // cpu write data
-	.cpu_dat_r        (cpuRD),                 // cpu read data
+	.cpu_dat_w        (cpuWR[15:0]),           // cpu write data (use lower 16 bits)
+	.cpu_dat_r        (cpuRD[15:0]),           // cpu read data (lower 16 bits)
 	.cpu_ack          (cache_rd_ack),          // cpu acknowledge
 	.wb_en            (cache_wr_ack),          // write enable
 	.sdr_dat_r        (sdata_reg),             // sdram read data
@@ -162,7 +169,7 @@ always @ (posedge sysclk) begin
 			default:
 				if(~write_ena && ramsel && cpustate == 3) begin
 					writeAddr <= cpuAddr;
-					writeDat  <= cpuWR;
+					writeDat  <= cpuWR[15:0];  // Use lower 16 bits
 					write_dqm <= {cpuU, cpuL};
 					write_req <= 1;
 					if(cache_wr_ack) begin

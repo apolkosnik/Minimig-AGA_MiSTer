@@ -425,10 +425,9 @@ wire [23:1] chip_addr;
 
 wire [28:1] ram_addr;
 wire        ram_sel;
-wire        ram_lds;
-wire        ram_uds;
-wire [15:0] ram_din;
-wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
+wire  [3:0] rambe;          // 4 byte enables for 32-bit access
+wire [31:0] ram_din;        // Widened to 32-bit for TG68K
+wire [31:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
 wire        zram_sel  = |ram_addr[28:26];
 wire        ramshared;
@@ -474,10 +473,9 @@ cpu_wrapper cpu_wrapper
 	
 	.ramsel       (ram_sel         ),
 	.ramaddr      (ram_addr        ),
-	.ramlds       (ram_lds         ),
-	.ramuds       (ram_uds         ),
-	.ramdout      (ram_dout        ),
-	.ramdin       (ram_din         ),
+	.rambe        (rambe           ),  // 4 byte enables
+	.ramdout      (ram_dout        ),  // 32-bit
+	.ramdin       (ram_din         ),  // 32-bit
 	.ramready     (ram_ready       ),
 	.ramshared    (ramshared       ),
 
@@ -487,7 +485,7 @@ cpu_wrapper cpu_wrapper
 	.nmi_addr     (cpu_nmi_addr    )
 );
 
-wire [15:0] ram_dout1;
+wire [31:0] ram_dout1;  // Widened to 32-bit
 wire        ram_ready1;
 
 sdram_ctrl ram1
@@ -510,13 +508,12 @@ sdram_ctrl ram1
 	.sd_cke       (SDRAM_CKE       ),
 	.sd_clk       (SDRAM_CLK       ),
 
-	.cpuWR        (ram_din         ),
+	.cpuWR        (ram_din         ),  // 32-bit
 	.cpuAddr      (ram_addr[22:1]  ),
-	.cpuU         (ram_uds         ),
-	.cpuL         (ram_lds         ),
+	.cpuBE        (rambe           ),  // 4 byte enables
 	.cpustate     (cpu_state       ),
 	.cpuCS        (~zram_sel&ram_cs),
-	.cpuRD        (ram_dout1       ),
+	.cpuRD        (ram_dout1       ),  // 32-bit
 	.ramready     (ram_ready1      ),
 
 	.chipWR       (ram_data        ),
@@ -529,10 +526,10 @@ sdram_ctrl ram1
 	.chip48       (chip48          )
 );
 
-wire [15:0] ram_dout2;
+wire [31:0] ram_dout2;  // Widened to 32-bit
 wire        ram_ready2;
 wire  [7:0] DDRAM_BE_S;
-   
+
 ddram_ctrl ram2
 (
 	.sysclk       (clk_114         ),
@@ -552,13 +549,12 @@ ddram_ctrl ram2
 	.DDRAM_BE     (DDRAM_BE        ),
 	.DDRAM_WE     (DDRAM_WE        ),
 
-	.cpuWR        (ram_din         ),
+	.cpuWR        (ram_din         ),  // 32-bit
 	.cpuAddr      (ram_addr        ),
-	.cpuU         (ram_uds         ),
-	.cpuL         (ram_lds         ),
+	.cpuBE        (rambe           ),  // 4 byte enables
 	.cpustate     (cpu_state       ),
 	.cpuCS        (zram_sel&ram_cs ),
-	.cpuRD        (ram_dout2       ),
+	.cpuRD        (ram_dout2       ),  // 32-bit
 	.ramshared    (ramshared       ),
 	.ramready     (ram_ready2      )
 );

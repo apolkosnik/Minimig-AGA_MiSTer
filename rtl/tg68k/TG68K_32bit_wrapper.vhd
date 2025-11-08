@@ -103,12 +103,6 @@ architecture logic of TG68K_32bit_wrapper is
    signal core_longword   : std_logic;
    signal core_busstate   : std_logic_vector(1 downto 0);
 
-   -- State machine for 32-bit transfers
-   type state_t is (IDLE, FIRST_WORD, SECOND_WORD);
-   signal state : state_t;
-   signal addr_latch : std_logic;
-   signal data_latch : std_logic_vector(15 downto 0);
-
 BEGIN
 
    -- Instantiate the 16-bit TG68K core
@@ -153,31 +147,14 @@ BEGIN
    longword <= core_longword;
 
    -- Generate 4 byte enables from UDS/LDS and address
-   -- For 32-bit aligned longword accesses:
-   --   All 4 bytes enabled when longword=1 and addr[1:0]=00
-   -- For word accesses:
-   --   Upper word (bits 31:16) when addr[1]=0
-   --   Lower word (bits 15:0) when addr[1]=1
-   -- For byte accesses:
-   --   Individual byte based on addr[1:0] and UDS/LDS
-
+   -- TG68K uses address bits to select which half of 32-bit bus to access
    process(core_longword, core_nUDS, core_nLDS, core_addr)
    begin
       if core_longword = '1' then
-         -- Longword access: enable all 4 bytes (assuming aligned)
-         if core_addr(1) = '0' then
-            nBE <= "0000";  -- All bytes enabled
-         else
-            -- Misaligned longword - split into two words
-            -- This is handled by the core's state machine
-            if core_addr(0) = '0' then
-               nBE <= '0' & '0' & core_nUDS & core_nLDS;  -- Upper 2 bytes
-            else
-               nBE <= core_nUDS & core_nLDS & '1' & '1';  -- Lower 2 bytes (byte access)
-            end if;
-         end if;
+         -- Longword access: enable all 4 bytes for aligned access
+         nBE <= "0000";
       else
-         -- Word or byte access
+         -- Word or byte access: enable appropriate bytes based on address
          if core_addr(1) = '0' then
             -- Accessing upper word (bits 31:16)
             nBE <= core_nUDS & core_nLDS & '1' & '1';
@@ -188,66 +165,12 @@ BEGIN
       end if;
    end process;
 
-   -- Data input muxing: route correct 16 bits from 32-bit bus to core
-   process(core_addr, data_in, core_longword, state, data_latch)
-   begin
-      if core_longword = '1' and core_addr(1 downto 0) = "00" then
-         -- Aligned longword: first access gets upper word
-         if state = FIRST_WORD or state = IDLE then
-            core_data_in <= data_in(31 downto 16);
-         else
-            core_data_in <= data_in(15 downto 0);
-         end if;
-      else
-         -- Word/byte access or misaligned: route based on address bit 1
-         if core_addr(1) = '0' then
-            core_data_in <= data_in(31 downto 16);  -- Upper word
-         else
-            core_data_in <= data_in(15 downto 0);   -- Lower word
-         end if;
-      end if;
-   end process;
+   -- Data input routing: select correct 16 bits from 32-bit bus based on address
+   core_data_in <= data_in(31 downto 16) when core_addr(1) = '0' else data_in(15 downto 0);
 
-   -- Data output: combine two 16-bit writes into 32-bit output
-   -- For longword writes, latch first 16 bits, combine with second 16 bits
-   -- For word writes, place in correct half based on address
-   process(clk, nReset)
-   begin
-      if nReset = '0' then
-         state <= IDLE;
-         data_latch <= (others => '0');
-         data_write <= (others => '0');
-      elsif rising_edge(clk) then
-         if clkena_in = '1' then
-            case state is
-               when IDLE =>
-                  if core_busstate = "11" then  -- Write cycle
-                     if core_longword = '1' and core_addr(1 downto 0) = "00" then
-                        -- Aligned longword write: latch first word
-                        data_latch <= core_data_write;
-                        state <= FIRST_WORD;
-                     else
-                        -- Word/byte write: output immediately on correct half
-                        if core_addr(1) = '0' then
-                           data_write <= core_data_write & x"0000";
-                        else
-                           data_write <= x"0000" & core_data_write;
-                        end if;
-                        state <= IDLE;
-                     end if;
-                  end if;
-
-               when FIRST_WORD =>
-                  -- Second word of longword write
-                  data_write <= data_latch & core_data_write;
-                  state <= SECOND_WORD;
-
-               when SECOND_WORD =>
-                  state <= IDLE;
-
-            end case;
-         end if;
-      end if;
-   end process;
+   -- Data output routing: place 16-bit write data in correct position on 32-bit bus
+   data_write <= core_data_write & core_data_write &core_data_write & core_data_write when core_longword = '1' else
+                 core_data_write & x"0000" when core_addr(1) = '0' else
+                 x"0000" & core_data_write;
 
 end logic;
