@@ -891,7 +891,7 @@ begin
 	-- CRITICAL: Use exception handler's updated FPSR when it has processed an operation
 	fpsr_out <= exception_fpsr_out when (exception_op_valid = '1' and exception_pending_internal = '0') else fpsr;  
 	fpiar_out <= fpiar;
-	fsave_frame_size <= fsave_frame_size_latched;  -- Use latched value for stability
+	fsave_frame_size <= fsave_frame_size_internal;  -- CRITICAL FIX: Must output current frame size BEFORE FSAVE state for CPU predecrement
 	fsave_size_valid <= fsave_size_valid_internal;
 	-- fpu_data_out is now handled within the state machine process
 	
