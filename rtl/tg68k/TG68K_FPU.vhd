@@ -111,7 +111,7 @@ architecture rtl of TG68K_FPU is
 	constant BUSY_FRAME_SIZE : integer := 53;  -- 216 bytes = 54 longwords - 1 (indexed from 0)
 	constant UNIMP_FRAME_SIZE : integer := 11; -- 48 bytes = 12 longwords - 1 (indexed from 0)
 	constant NORMAL_FRAME_SIZE : integer := 23; -- 96 bytes = 24 longwords - 1 (indexed from 0)
-	constant IDLE_FRAME_END : integer := 27;   -- IDLE frame ends at counter 27
+	constant IDLE_FRAME_END : integer := 14;   -- IDLE frame ends at counter 14 (60 bytes = 15 longwords, indices 0-14)
 	constant NORMAL_FRAME_END : integer := 23; -- Normal frame ends at counter 23
 	
 	-- Control and Status Registers with proper MC68882 defaults
@@ -2980,34 +2980,36 @@ begin
 									else
 										fpu_data_out <= x"00000000";
 									end if;
-								when 4 to 11 =>
-									-- IDLE frame or BUSY frame - High 32 bits of FP registers 0-7
-									if fsave_frame_format_latched = X"60" or fsave_frame_format_latched = X"D8" then
-										fpu_data_out <= fp_registers(fsave_data_index - 4)(79 downto 48);
+								when 4 to 27 =>
+									-- IDLE frame (4-14): Padding/reserved (IDLE frame does NOT save FP registers!)
+									-- BUSY frame (4-27): Internal execution state / padding before FP registers
+									fpu_data_out <= x"00000000";
+								when 28 to 35 =>
+									-- BUSY frame only - High 32 bits of FP registers 0-7
+									if fsave_frame_format_latched = X"D8" then
+										fpu_data_out <= fp_registers(fsave_data_index - 28)(79 downto 48);
 									else
 										fpu_data_out <= x"00000000";
 									end if;
-								when 12 to 19 =>
-									-- IDLE frame or BUSY frame - Middle 32 bits of FP registers 0-7
-									if fsave_frame_format_latched = X"60" or fsave_frame_format_latched = X"D8" then
-										fpu_data_out <= fp_registers(fsave_data_index - 12)(47 downto 16);
+								when 36 to 43 =>
+									-- BUSY frame only - Middle 32 bits of FP registers 0-7
+									if fsave_frame_format_latched = X"D8" then
+										fpu_data_out <= fp_registers(fsave_data_index - 36)(47 downto 16);
 									else
 										fpu_data_out <= x"00000000";
 									end if;
-								when 20 to 27 =>
-									-- IDLE frame or BUSY frame - Low 16 bits of FP registers 0-7
-									-- FIXED: Output low 16 bits in upper half of longword (big-endian format)
-									if fsave_frame_format_latched = X"60" or fsave_frame_format_latched = X"D8" then
-										fpu_data_out(31 downto 16) <= fp_registers(fsave_data_index - 20)(15 downto 0);
+								when 44 to 51 =>
+									-- BUSY frame only - Low 16 bits of FP registers 0-7
+									-- Output low 16 bits in upper half of longword (big-endian format)
+									if fsave_frame_format_latched = X"D8" then
+										fpu_data_out(31 downto 16) <= fp_registers(fsave_data_index - 44)(15 downto 0);
 										fpu_data_out(15 downto 0) <= (others => '0');
 									else
 										fpu_data_out <= x"00000000";
 									end if;
-								when 28 to 54 =>
-									-- BUSY frame only - Extended execution state data
-									if fsave_frame_format = X"D8" then
-										-- For now, output zeros for extended BUSY frame data
-										-- This includes intermediate execution state, exception info, etc.
+								when 52 to 54 =>
+									-- BUSY frame only - Additional execution state data
+									if fsave_frame_format_latched = X"D8" then
 										fpu_data_out <= x"00000000";
 									else
 										fpu_data_out <= x"00000000";
@@ -3137,67 +3139,42 @@ begin
 											fpu_state <= FPU_IDLE;
 											fpu_done <= '1';
 										when x"41" | x"60" =>
-											-- $41/$60 frame - continue with FP registers (60 bytes total)
+											-- $41/$60 IDLE frame - NO FP register data, just padding
+											-- Skip to end (frame is 60 bytes = 15 longwords, indices 0-14)
 											fsave_counter <= fsave_counter + 1;
 										when x"38" =>
 											-- $38 frame - continue with extended context (96 bytes total)
+											fsave_counter <= fsave_counter + 1;
+										when x"D8" =>
+											-- $D8 BUSY frame - has FP registers starting at index 28
 											fsave_counter <= fsave_counter + 1;
 										when others =>
 											-- Unknown frame format
 											fpu_state <= FPU_IDLE;
 											fpu_done <= '1';
 									end case;
-								
-								when 4 to 11 =>
-									-- IDLE frames ($41/$60): High 32 bits of FP registers 0-7
-									-- Normal frame ($38): Also part of FP register restoration
-									if frestore_frame_format = x"41" or frestore_frame_format = x"60" or frestore_frame_format = x"38" then
-										-- FIXED: Accumulate high 32 bits into buffer for later write
-										frestore_reg_buffer(79 downto 48) <= frestore_data_in;
-										frestore_reg_index <= fsave_counter - 4;  -- Track which register (0-7)
-										-- Track register allocation
-										fp_reg_allocated(fsave_counter - 4) <= '1';
-										fp_reg_last_write <= std_logic_vector(to_unsigned(fsave_counter - 4, 3));
-									end if;
-									fsave_counter <= fsave_counter + 1;
-								
-								when 12 to 19 =>
-									-- IDLE frames ($41/$60): Middle 32 bits of FP registers 0-7
-									if frestore_frame_format = x"41" or frestore_frame_format = x"60" then
-										-- FIXED: Accumulate middle 32 bits into buffer
-										frestore_reg_buffer(47 downto 16) <= frestore_data_in;
-										-- Register index should match (fsave_counter - 12 should equal previous index)
-										-- Track register allocation
-										fp_reg_allocated(fsave_counter - 12) <= '1';
-										fp_reg_last_write <= std_logic_vector(to_unsigned(fsave_counter - 12, 3));
-									end if;
-									fsave_counter <= fsave_counter + 1;
-									
-								when 20 to 27 =>
-									-- IDLE frames ($41/$60): Low 16 bits of FP registers 0-7
-									if frestore_frame_format = x"41" or frestore_frame_format = x"60" then
-										-- FIXED: Complete the 80-bit register and write it
-										-- Low 16 bits are in upper 16 bits of the longword (big-endian)
-										-- Build complete 80-bit value: high(79:48) & middle(47:16) & low(15:0)
-										fp_reg_write_addr <= std_logic_vector(to_unsigned(fsave_counter - 20, 3));
-										fp_reg_write_data <= frestore_reg_buffer(79 downto 16) & frestore_data_in(31 downto 16);
-										fp_reg_write_enable <= '1';
-										fp_reg_access_valid <= '1';
-										-- Track register allocation
-										fp_reg_allocated(fsave_counter - 20) <= '1';
-										fp_reg_last_write <= std_logic_vector(to_unsigned(fsave_counter - 20, 3));
 
-										if fsave_counter = IDLE_FRAME_END then
-											-- IDLE frame complete (60 bytes = 15 longwords)
+								when 4 to 14 =>
+									-- IDLE frames ($41/$60): Padding/reserved (indices 4-14)
+									-- IDLE frames do NOT contain FP register data!
+									-- Just skip through padding data
+									if frestore_frame_format = x"41" or frestore_frame_format = x"60" then
+										if fsave_counter = 14 then
+											-- IDLE frame complete (60 bytes = 15 longwords, indices 0-14)
 											fpu_state <= FPU_IDLE;
 											fpu_done <= '1';
 										else
 											fsave_counter <= fsave_counter + 1;
 										end if;
 									else
-										-- Other frame types - let CPU handle
+										-- Other frame types - continue
 										fsave_counter <= fsave_counter + 1;
 									end if;
+
+								when 15 to 27 =>
+									-- BUSY/Normal frames: Internal execution state (padding for now)
+									-- No FP registers in this range
+									fsave_counter <= fsave_counter + 1;
 								
 								when 28 to 54 =>
 									-- Extended frames for BUSY or other large frame types
