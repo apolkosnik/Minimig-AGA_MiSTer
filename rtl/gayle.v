@@ -131,7 +131,7 @@ assign nrdy = sel_tfr & !addr[4:2] & (port_num ? ide1_nodata : ide0_nodata);
 assign irq  = intreq & intena;
 
 reg longword_r;
-always @(posedge clk) longword_r <= rd && longword && !addr[4:1];
+always @(posedge clk) longword_r <= rd && longword && !addr[4:2];
 
 wire port_num = addr[12];
 wire data_wr  = wr_stb || ((addr[4:1] == 1) && wr);
