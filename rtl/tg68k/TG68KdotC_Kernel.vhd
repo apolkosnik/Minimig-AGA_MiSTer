@@ -5077,7 +5077,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
           end if;
         end if;
 
-        -- BUG #53 FIX: Clear pending flag at instruction boundary
+        -- BUG #53 FIX: Clear pending flag at instruction boundary (safety fallback)
+        -- Normal clearing now happens in Stage 2 after selector is latched
+        -- This only fires if Stage 2 never ran (error condition)
         if setopcode='1' then
           pmmu_reg_sel_pending <= '0';
         end if;
@@ -5109,28 +5111,29 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
              pmmu_reg_sel_latch(14 downto 10) = "10010" OR pmmu_reg_sel_latch(14 downto 10) = "10011" OR pmmu_reg_sel_latch(14 downto 10) = "11000" then
             pmmu_reg_sel_d  <= pmmu_reg_sel_latch(14 downto 10);
 
-            -- Latch CRP/SRP part selector during decode
-            if (pmmu_reg_sel_latch(14 downto 10) = "10010") or (pmmu_reg_sel_latch(14 downto 10) = "10011") then
-              if micro_state = pmmu1 OR micro_state = pmmu_dn_high then
-                pmmu_reg_part_d <= '1';  -- HIGH word (first transfer)
-              else
-                pmmu_reg_part_d <= '0';  -- LOW word (second transfer)
-              end if;
-            end if;
-
             -- Latch flush disable flag during decode
             if pmmu_reg_sel_latch(15 downto 13) = "001" and pmmu_reg_sel_latch(9 downto 8) = "00" and pmmu_reg_sel_latch(14 downto 10) /= "00000" and opcode(5 downto 3) /= "000" then
               pmmu_reg_fd_d <= '1';  -- PMOVEFD - disable ATC flush
             else
               pmmu_reg_fd_d <= '0';  -- Normal PMOVE - flush ATC
             end if;
-          end if;
 
-          -- BUG #53 FIX: DON'T clear pending flag here!
-          -- Clearing immediately allows consecutive PMOVEs to overwrite the selector
-          -- before the current instruction completes its PMMU read/write.
-          -- Clear at instruction boundary instead (when setopcode='1')
-          -- pmmu_reg_sel_pending <= '0';  -- REMOVED - moved to setopcode logic
+            -- BUG FIX (PMOVE TT0/TT1): Clear pending immediately after latching selector
+            -- This allows consecutive PMOVE instructions to capture their own selectors
+            -- The previous BUG #53 fix was incorrect - it prevented consecutive PMOVEs
+            -- from working correctly by blocking Stage 1 capture
+            pmmu_reg_sel_pending <= '0';
+          end if;
+        end if;
+
+        -- CRP/SRP part selector: Update independently based on current micro_state
+        -- This runs every cycle to track HIGH/LOW word transitions for 64-bit registers
+        if (pmmu_reg_sel_d = "10010") or (pmmu_reg_sel_d = "10011") then
+          if micro_state = pmmu1 OR micro_state = pmmu_dn_high then
+            pmmu_reg_part_d <= '1';  -- HIGH word (first transfer)
+          elsif micro_state = pmmu2 OR micro_state = pmmu4 OR micro_state = pmmu_dn_low then
+            pmmu_reg_part_d <= '0';  -- LOW word (second transfer)
+          end if;
         end if;
         -- NOTE: Data latch moved OUTSIDE clkena_lw block (Bug #37 fix above)
       end if;
