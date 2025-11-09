@@ -450,14 +450,37 @@ architecture rtl of TG68K_FPU is
 	constant FORMAT_DOUBLE		: std_logic_vector(2 downto 0) := "101";	-- 64-bit IEEE double
 	constant FORMAT_BYTE		: std_logic_vector(2 downto 0) := "110";	-- 8-bit integer
 
-	-- MC68882 Coprocessor Primitive Response Codes (Complete Implementation)
-	constant PRIM_NULL			: std_logic_vector(15 downto 0) := X"0000";	-- NULL - No bus cycles required
-	constant PRIM_CA			: std_logic_vector(15 downto 0) := X"0001";	-- CA - Transfer CPU register to coprocessor
-	constant PRIM_CC			: std_logic_vector(15 downto 0) := X"0002";	-- CC - Transfer coprocessor register to CPU
-	constant PRIM_CW			: std_logic_vector(15 downto 0) := X"0003";	-- CW - Write CPU register from coprocessor
-	constant PRIM_CR			: std_logic_vector(15 downto 0) := X"0004";	-- CR - Read CPU register to coprocessor
-	constant PRIM_DR			: std_logic_vector(15 downto 0) := X"0005";	-- DR - Supervisor check
-	constant PRIM_BUSY			: std_logic_vector(15 downto 0) := X"0006";	-- BUSY - Coprocessor busy, try later
+	-- MC68020/MC68882 Coprocessor Response Primitive Format (Per MC68020 UM Section 7.4.2)
+	-- Bit 15 (CA): Comes Again - 1=CPU services primitive then reads response CIR again, 0=CPU proceeds to next instruction
+	-- Bit 14 (PC): Pass Program Counter - 1=CPU passes PC to instruction address CIR
+	-- Bit 13: Reserved (0)
+	-- Bits 12-0: Primitive-specific encoding (type and parameters)
+
+	-- Response Primitive Type Codes (bits 12-0)
+	constant PRIM_NULL			: std_logic_vector(15 downto 0) := X"0000";	-- NULL - Operation complete, no service needed
+	constant PRIM_TRANSFER_CPU_REG		: std_logic_vector(15 downto 0) := X"0001";	-- Transfer single main processor register
+	constant PRIM_TRANSFER_COPROC_REG	: std_logic_vector(15 downto 0) := X"0002";	-- Transfer single coprocessor register
+	constant PRIM_WRITE_CPU_REG		: std_logic_vector(15 downto 0) := X"0003";	-- Write to CPU register
+	constant PRIM_READ_CPU_REG		: std_logic_vector(15 downto 0) := X"0004";	-- Read from CPU register
+	constant PRIM_SUPERVISOR_CHECK		: std_logic_vector(15 downto 0) := X"0005";	-- Supervisor privilege check
+	constant PRIM_EVAL_EA_TRANSFER		: std_logic_vector(15 downto 0) := X"0007";	-- Evaluate EA and transfer data
+
+	-- Primitive attribute bit positions (MC68020 UM Section 7.4.2)
+	constant CA_BIT				: integer := 15;	-- Comes Again bit (1=come back, 0=proceed)
+	constant PC_BIT				: integer := 14;	-- Pass Program Counter bit
+
+	-- Helper function to set CA bit (force CPU to come back)
+	function set_ca_bit(primitive : std_logic_vector(15 downto 0)) return std_logic_vector is
+	begin
+		return primitive or X"8000";	-- Set bit 15
+	end function;
+
+	-- Legacy aliases for backward compatibility (DEPRECATED - use correct names)
+	constant PRIM_CA			: std_logic_vector(15 downto 0) := PRIM_TRANSFER_CPU_REG;
+	constant PRIM_CC			: std_logic_vector(15 downto 0) := PRIM_TRANSFER_COPROC_REG;
+	constant PRIM_CW			: std_logic_vector(15 downto 0) := PRIM_WRITE_CPU_REG;
+	constant PRIM_CR			: std_logic_vector(15 downto 0) := PRIM_READ_CPU_REG;
+	constant PRIM_DR			: std_logic_vector(15 downto 0) := PRIM_SUPERVISOR_CHECK;
 	
 	-- CIR Protocol Timeout Constants
 	constant CIR_TIMEOUT_LIMIT	: integer := 1000;	-- Maximum cycles to wait for CIR handshake
@@ -891,7 +914,7 @@ begin
 	-- CRITICAL: Use exception handler's updated FPSR when it has processed an operation
 	fpsr_out <= exception_fpsr_out when (exception_op_valid = '1' and exception_pending_internal = '0') else fpsr;  
 	fpiar_out <= fpiar;
-	fsave_frame_size <= fsave_frame_size_internal;  -- CRITICAL FIX: Must output current frame size BEFORE FSAVE state for CPU predecrement
+	fsave_frame_size <= fsave_frame_size_internal;  -- CRITICAL FIX: Use immediate combinatorial value for CPU predecrement calculation
 	fsave_size_valid <= fsave_size_valid_internal;
 	-- fpu_data_out is now handled within the state machine process
 	
@@ -3830,40 +3853,41 @@ begin
 						
 					when FPU_DECODE =>
 						-- Enhanced primitive protocol based on instruction type
+						-- Set CA=1 when requesting CPU service, CA=0 when CPU can proceed
 						if decoder_instruction_type = INST_GENERAL then
 							-- cpGEN instructions - check if operand transfer needed
 							case decoder_ea_mode is
 								when "000" =>  -- Data register direct
 									case decoder_source_format is
 										when FORMAT_BYTE | FORMAT_WORD =>
-											-- Need CPU register content transfer
-											response_cir <= PRIM_CA;  -- CA (Transfer CPU Register)
+											-- Need CPU register content transfer - set CA=1
+											response_cir <= set_ca_bit(PRIM_TRANSFER_CPU_REG);  -- CA=1
 										when others =>
 											-- No transfer needed for other formats
-											response_cir <= PRIM_NULL;  -- NULL
+											response_cir <= PRIM_NULL;  -- CA=0: CPU can proceed
 									end case;
-								when "001" =>  -- Address register direct  
-									response_cir <= PRIM_CA;  -- CA (Transfer CPU Register)
+								when "001" =>  -- Address register direct
+									response_cir <= set_ca_bit(PRIM_TRANSFER_CPU_REG);  -- CA=1
 								when others =>  -- Memory modes
 									-- CPU handles memory operations
-									response_cir <= PRIM_NULL;  -- NULL - no coprocessor bus cycles
+									response_cir <= PRIM_NULL;  -- CA=0: no coprocessor bus cycles needed
 							end case;
 						elsif decoder_instruction_type = INST_FMOVE_FP then
 							-- FP register to memory - need result transfer
-							response_cir <= PRIM_CC;  -- CC (Transfer Coprocessor Register)
+							response_cir <= set_ca_bit(PRIM_TRANSFER_COPROC_REG);  -- CA=1
 						elsif decoder_instruction_type = INST_FMOVE_MEM then
-							-- Memory to FP register - need operand transfer  
-							response_cir <= PRIM_CA;  -- CA (Transfer to Coprocessor)
+							-- Memory to FP register - need operand transfer
+							response_cir <= set_ca_bit(PRIM_TRANSFER_CPU_REG);  -- CA=1
 						elsif decoder_instruction_type = INST_FMOVE_CR then
 							-- Control register operations
 							if decoder_ea_mode = "000" then  -- To CPU register
-								response_cir <= PRIM_CC;  -- CC (Transfer from Coprocessor)
+								response_cir <= set_ca_bit(PRIM_TRANSFER_COPROC_REG);  -- CA=1
 							else  -- From CPU register
-								response_cir <= PRIM_CA;  -- CA (Transfer to Coprocessor)
+								response_cir <= set_ca_bit(PRIM_TRANSFER_CPU_REG);  -- CA=1
 							end if;
 						else
 							-- Other instruction types (FSAVE, FRESTORE, etc.)
-							response_cir <= PRIM_NULL;  -- NULL - CPU manages
+							response_cir <= PRIM_NULL;  -- CA=0: CPU manages independently
 						end if;
 						
 					when FPU_FETCH_SOURCE =>
@@ -3879,7 +3903,8 @@ begin
 							-- Note: Exception handling moved to main state machine to avoid multiple drivers
 						else
 							-- Still waiting for operand transfer with timeout counting
-							response_cir <= PRIM_CA;  -- CA primitive - request operand  
+							-- Set CA=1 to force CPU to come back after transferring operand
+							response_cir <= set_ca_bit(PRIM_TRANSFER_CPU_REG);  -- CA=1: CPU must transfer then come back
 							-- REMOVED: state_timeout_counter increment to avoid multiple drivers
 						end if;
 						
