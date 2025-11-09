@@ -857,8 +857,11 @@ ALU: TG68K_ALU
 				
 				-- Default FSAVE state handling
 				-- These signals are managed based on FSAVE instruction detection
-				if opcode(15 downto 9) /= "1111001" or opcode(8 downto 6) /= "100" then
-					-- Not a FSAVE instruction - reset flags
+				-- CRITICAL FIX: Don't reset frame size valid flag during FSAVE execution
+				-- This prevents the flag from being cleared while state machine is running
+				if (opcode(15 downto 9) /= "1111001" or opcode(8 downto 6) /= "100") AND
+				   fsave_predecr_state = FSAVE_PREDECR_IDLE then
+					-- Not a FSAVE instruction AND state machine is idle - safe to reset flags
 					-- save_cir_read_done handled in CIR process
 					-- fsave_size_captured handled in CIR process
 					fsave_frame_size_valid_latched <= '0';
