@@ -894,11 +894,12 @@ ALU: TG68K_ALU
 								if fpu_fsave_size_valid = '1' then
 									-- FPU provided explicit frame size - validate and latch atomically
 									-- ATOMIC SECTION: Prevent race conditions by validating and latching in same cycle
-									if fpu_fsave_frame_size >= 4 and fpu_fsave_frame_size <= 216 and (fpu_fsave_frame_size mod 4) = 0 then
+									-- CRITICAL FIX: Only accept valid MC68882 frame sizes (4, 60, or 216 bytes)
+									if fpu_fsave_frame_size = 4 or fpu_fsave_frame_size = 60 or fpu_fsave_frame_size = 216 then
 										fsave_frame_size_latched <= fpu_fsave_frame_size;
 										fsave_frame_size_latched_lw <= fpu_fsave_frame_size / 4;
 									else
-										-- Out-of-range value from FPU - fall back to safe default IDLE frame
+										-- Invalid frame size from FPU - fall back to safe default IDLE frame
 										fsave_frame_size_latched <= 60;
 										fsave_frame_size_latched_lw <= 15;
 									end if;
