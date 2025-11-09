@@ -240,6 +240,10 @@ architecture rtl of TG68K_FPU is
 	-- FRESTORE temporary buffers for FP register reconstruction (80-bit from three 32-bit words)
 	signal frestore_reg_buffer : std_logic_vector(79 downto 0) := (others => '0');  -- Accumulates 80-bit register data
 	signal frestore_reg_index : integer range 0 to 7 := 0;  -- Current FP register being restored (0-7)
+	-- CRITICAL FIX: Temporary register array for FRESTORE to properly accumulate 80-bit values
+	-- The MC68882 BUSY frame stores FP registers as: all high bits, all middle bits, all low bits
+	-- We need to accumulate each register separately before writing to the register file
+	signal frestore_fp_temp : fp_reg_t;  -- Temporary FP register storage during FRESTORE
 	
 	-- Instruction decode signals from decoder
 	signal decoder_instruction_type	: std_logic_vector(3 downto 0);
@@ -3007,7 +3011,7 @@ begin
 									else
 										fpu_data_out <= x"00000000";
 									end if;
-								when 52 to 54 =>
+								when 52 to 53 =>
 									-- BUSY frame only - Additional execution state data
 									if fsave_frame_format_latched = X"D8" then
 										fpu_data_out <= x"00000000";
@@ -3175,13 +3179,14 @@ begin
 									-- BUSY/Normal frames: Internal execution state (padding for now)
 									-- No FP registers in this range
 									fsave_counter <= fsave_counter + 1;
-								
-								when 28 to 54 =>
+
+								when 28 to 53 =>
 									-- Extended frames for BUSY or other large frame types
 									case frestore_frame_format is
 										when x"38" =>
-											-- Normal frame (96 bytes = 24 longwords)
+											-- Normal frame (96 bytes = 24 longwords, indices 0-23)
 											if fsave_counter = NORMAL_FRAME_END then
+												-- Complete at index 23 (last longword)
 												fpu_state <= FPU_IDLE;
 												fpu_done <= '1';
 											else
@@ -3192,27 +3197,25 @@ begin
 											-- Format for BUSY frame includes full FPU context at specific offsets
 											case fsave_counter is
 												when 28 to 35 =>
-													-- FP registers 0-7 high 32 bits (same as IDLE frame offset + 24)
-													-- FIXED: Accumulate high 32 bits into buffer
-													frestore_reg_buffer(79 downto 48) <= frestore_data_in;
-													frestore_reg_index <= fsave_counter - 28;  -- Track which register (0-7)
-													-- Track register allocation
-													fp_reg_allocated(fsave_counter - 28) <= '1';
-													fp_reg_last_write <= std_logic_vector(to_unsigned(fsave_counter - 28, 3));
+													-- FP registers 0-7 high 32 bits
+													-- CRITICAL FIX: Store to temporary register array, not single buffer
+													-- Index 28=FP0, 29=FP1, ..., 35=FP7
+													frestore_fp_temp(fsave_counter - 28)(79 downto 48) <= frestore_data_in;
 													fsave_counter <= fsave_counter + 1;
 												when 36 to 43 =>
-													-- FP registers 0-7 middle 32 bits (same as IDLE frame offset + 24)
-													-- FIXED: Accumulate middle 32 bits into buffer
-													frestore_reg_buffer(47 downto 16) <= frestore_data_in;
-													-- Track register allocation
-													fp_reg_allocated(fsave_counter - 36) <= '1';
-													fp_reg_last_write <= std_logic_vector(to_unsigned(fsave_counter - 36, 3));
+													-- FP registers 0-7 middle 32 bits
+													-- CRITICAL FIX: Store to temporary register array
+													-- Index 36=FP0, 37=FP1, ..., 43=FP7
+													frestore_fp_temp(fsave_counter - 36)(47 downto 16) <= frestore_data_in;
 													fsave_counter <= fsave_counter + 1;
 												when 44 to 51 =>
-													-- FP registers 0-7 low 16 bits (same as IDLE frame offset + 24)
-													-- FIXED: Complete the 80-bit register and write it
+													-- FP registers 0-7 low 16 bits
+													-- CRITICAL FIX: Complete 80-bit value and write to actual register file
+													-- Index 44=FP0, 45=FP1, ..., 51=FP7
+													frestore_fp_temp(fsave_counter - 44)(15 downto 0) <= frestore_data_in(31 downto 16);
+													-- Now write the complete 80-bit register
 													fp_reg_write_addr <= std_logic_vector(to_unsigned(fsave_counter - 44, 3));
-													fp_reg_write_data <= frestore_reg_buffer(79 downto 16) & frestore_data_in(31 downto 16);
+													fp_reg_write_data <= frestore_fp_temp(fsave_counter - 44)(79 downto 16) & frestore_data_in(31 downto 16);
 													fp_reg_write_enable <= '1';
 													fp_reg_access_valid <= '1';
 													-- Track register allocation
@@ -3221,7 +3224,9 @@ begin
 													fsave_counter <= fsave_counter + 1;
 												when others =>
 													-- Other BUSY frame data (execution state, etc.) - CPU handles
-													if fsave_counter = BUSY_FRAME_SIZE + 1 then
+													-- Indices 52-53 (final 2 longwords of 54-longword frame)
+													if fsave_counter = BUSY_FRAME_SIZE then
+														-- Complete at index 53 (last longword of BUSY frame)
 														fpu_state <= FPU_IDLE;
 														fpu_done <= '1';
 													else
@@ -3230,7 +3235,8 @@ begin
 											end case;
 										when others =>
 											-- Other frame types (up to 216 bytes = 54 longwords)
-											if fsave_counter = BUSY_FRAME_SIZE + 1 then
+											-- Complete at maximum frame size
+											if fsave_counter = BUSY_FRAME_SIZE then
 												fpu_state <= FPU_IDLE;
 												fpu_done <= '1';
 											else
