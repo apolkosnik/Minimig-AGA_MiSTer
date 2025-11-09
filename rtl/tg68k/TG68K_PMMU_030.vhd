@@ -708,6 +708,7 @@ begin
   process(clk, nreset)
     -- Variables for TC validation (MMU configuration exception detection)
     variable tc_e : std_logic;
+    variable tc_write_val : std_logic_vector(31 downto 0);  -- BUG #48: TC value with conditional E bit
     variable ps_val : integer;
     variable is_val : integer;
     variable tia_val, tib_val, tic_val, tid_val : integer;
@@ -804,20 +805,23 @@ begin
             -- 31: E (Enable), 30-26: Reserved, 25: SRE, 24: FCL
             -- 23-20: PS (Page Size), 19-16: IS (Initial Shift), 15-12: TIA, 11-8: TIB, 7-4: TIC, 3-0: TID
             -- Reserved bits: 30-26 only (all other bits are valid control fields)
-            -- Use masked write to avoid multiple drivers
-            TC <= (reg_wdat and TC_WRITE_MASK);
 
-            -- MC68030 MMU Configuration Exception Detection
-            -- Per spec section 9.7.5.3: Register is loaded BEFORE exception is taken
+            -- BUG #48 FIX: Validate configuration BEFORE writing TC to prevent lockup
+            -- If configuration is invalid and E=1, clear E bit to prevent MMU activation
+            -- This prevents system lockup from invalid MMU config while still taking exception
+            tc_write_val := reg_wdat and TC_WRITE_MASK;
             tc_e := reg_wdat(31);
+
             if tc_e = '1' then
               -- Only validate when MMU is being enabled
               ps_val := to_integer(unsigned(reg_wdat(23 downto 20)));
 
               -- Check 1: PS field must be 8-15 (values 0-7 are reserved)
               if ps_val < 8 then
+                -- Invalid PS - clear E bit to prevent MMU activation
+                tc_write_val(31) := '0';
                 mmu_config_error <= '1';
-                report "MMU_CONFIG_EXCEPTION: Invalid PS field=" & integer'image(ps_val) & " (must be 8-15)" severity warning;
+                report "MMU_CONFIG_EXCEPTION: Invalid PS field=" & integer'image(ps_val) & " (must be 8-15), E bit cleared" severity warning;
               else
                 -- Check 2: Field sum must equal 32
                 is_val := to_integer(unsigned(reg_wdat(19 downto 16)));
@@ -834,11 +838,16 @@ begin
                 total_bits := is_val + tia_val + tib_val + tic_val + tid_val + page_offset_bits;
 
                 if total_bits /= 32 then
+                  -- Invalid field sum - clear E bit to prevent MMU activation
+                  tc_write_val(31) := '0';
                   mmu_config_error <= '1';
-                  report "MMU_CONFIG_EXCEPTION: Field sum=" & integer'image(total_bits) & " (must be 32)" severity warning;
+                  report "MMU_CONFIG_EXCEPTION: Field sum=" & integer'image(total_bits) & " (must be 32), E bit cleared" severity warning;
                 end if;
               end if;
             end if;
+
+            -- Write TC with potentially cleared E bit (prevents lockup on invalid config)
+            TC <= tc_write_val;
 
             -- TC changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then

@@ -401,21 +401,29 @@ architecture logic of TG68KdotC_Kernel is
 	-- 68020/030 Cache Address Register (CAAR). Present for compatibility; no side effects here.
 	signal CAAR                : std_logic_vector(31 downto 0);
 	signal DFC					: std_logic_vector(2 downto 0);
-signal SFC					: std_logic_vector(2 downto 0);
+	signal SFC					: std_logic_vector(2 downto 0);
 
--- PMMU (68030) interface signals (Phase 1 scaffold)
-	-- PMMU register signals (now declared as output ports)
-signal pmmu_reg_rdat    : std_logic_vector(31 downto 0);
-signal pmmu_src_data    : std_logic_vector(31 downto 0);
-signal pmmu_dn_data     : std_logic_vector(31 downto 0);  -- BUG #39: Direct register file read for Dn mode
-signal pmmu_mem_wdat_hold : std_logic_vector(31 downto 0);
-signal pmmu_mem_wdat_valid : std_logic;
-signal pmmu_reg_part_d  : std_logic;
-signal pmmu_reg_we_d    : std_logic;
-signal pmmu_reg_re_d    : std_logic;
-signal pmmu_reg_sel_d   : std_logic_vector(4 downto 0);
-signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
-signal pmmu_reg_fd_d    : std_logic;
+	-- PMMU (68030) interface signals (Phase 1 scaffold)
+		-- PMMU register signals (now declared as output ports)
+	signal pmmu_reg_rdat    : std_logic_vector(31 downto 0);
+	signal pmmu_src_data    : std_logic_vector(31 downto 0);
+	signal pmmu_dn_data     : std_logic_vector(31 downto 0);  -- BUG #39: Direct register file read for Dn mode
+	signal pmove_dn_regnum  : std_logic_vector(2 downto 0);   -- Active data register selector for PMOVE Dn mode
+	signal pmove_dn_regnum_pending : std_logic_vector(2 downto 0);  -- Stage-1 selector capture
+	signal pmove_dn_pending_valid  : std_logic;               -- Tracks pending selector validity
+	signal pmove_dn_mode    : std_logic;                      -- Indicates current PMOVE uses Dn source/dest
+	signal pmove_dn_capture_req : std_logic;                  -- Combinational request to capture selector
+	signal pmove_dn_capture_data : std_logic_vector(2 downto 0);
+	signal pmmu_mem_wdat_hold : std_logic_vector(31 downto 0);
+	signal pmmu_mem_wdat_valid : std_logic;
+	signal pmmu_reg_part_d  : std_logic;
+	signal pmmu_reg_we_d    : std_logic;
+	signal pmmu_reg_re_d    : std_logic;
+	signal pmmu_reg_sel_d   : std_logic_vector(4 downto 0);
+	signal pmmu_reg_sel_pending : std_logic;  -- BUG #50 FIX: Pipeline register for selector latch
+	signal pmmu_reg_sel_latch : std_logic_vector(15 downto 0);  -- BUG #52 FIX: Latch extension word with pending flag
+	signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
+	signal pmmu_reg_fd_d    : std_logic;
 
 	signal pmmu_req         : std_logic;
 	signal pmmu_is_insn     : std_logic;
@@ -664,12 +672,9 @@ BEGIN
   cacr_dfreeze <= CACR(9);  -- DCache Freeze
   cacr_dbe    <= CACR(12); -- Data Burst Enable
   cacr_wa     <= CACR(13); -- Write Allocate
-  -- BUG #39 FIX: Bypass reg_QA for PMMU Dn mode operations
-  -- reg_QA depends on RDindex_A which only updates on clkena_lw='1'
-  -- During pmmu1, clkena_lw='0' -> RDindex_A stale -> reg_QA reads wrong register!
-  -- Solution: Read regfile directly using last_opc_read register selector (bits 2:0) for Dn mode
-  -- For PMOVE Dn,<MMU reg>: last_opc_read[2:0] = Dn register number
-  pmmu_dn_data <= regfile(conv_integer(last_opc_read(2 downto 0)));  -- BUG #39 V4: Use last_opc_read!
+  -- PMOVE Dn source selects live register file using the latched selector
+  -- Selector is captured during decode and transferred when the instruction enters execution
+  pmmu_dn_data <= regfile(conv_integer(pmove_dn_regnum));
 
   -- Source data for PMMU register writes: from Dn normally, or from memory EA in pmmu2
   -- PMOVE <ea>,<MMU reg>: use latched EA data while PMMU write strobes are asserted
@@ -962,8 +967,12 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 -----------------------------------------------------------------------------
 -- set dest regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, micro_state)
+PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, micro_state, pmove_dn_regnum, pmove_dn_mode)
+	variable dn_sel : std_logic_vector(2 downto 0);
+	variable dn_mode_active : boolean;
 	BEGIN
+		dn_sel := pmove_dn_regnum;
+        dn_mode_active := (pmove_dn_mode = '1');
 		IF exec(movem_action) ='1' THEN
 			rf_dest_addr <= rf_source_addrd;
 		ELSIF set(briefext)='1' THEN
@@ -988,7 +997,9 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 			rf_dest_addr <= dest_areg&opcode(11 downto 9);
 		ELSIF micro_state = pmmu_dn_low THEN
 			-- PMOVE 64-bit: LOW word goes to Dn+1 (increment register number)
-			rf_dest_addr <= dest_areg&(opcode(2 downto 0) + "001");
+			rf_dest_addr <= dest_areg&(dn_sel + "001");
+		ELSIF dn_mode_active THEN
+			rf_dest_addr <= dest_areg&dn_sel;
 		ELSE
 			IF opcode(5 downto 3)="000" OR data_is_source='1' THEN
 				rf_dest_addr <= dest_areg&opcode(2 downto 0);
@@ -1001,8 +1012,12 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 -----------------------------------------------------------------------------
 -- set source regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, source_2ndMbits, micro_state)
+PROCESS (opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_mode)
+	variable dn_sel : std_logic_vector(2 downto 0);
+	variable dn_mode_active : boolean;
 	BEGIN
+		dn_sel := pmove_dn_regnum;
+		dn_mode_active := (pmove_dn_mode = '1');
 		IF exec(movem_action)='1' OR set(movem_action) ='1' THEN
 			IF movem_presub='1' THEN
 				rf_source_addr <= movem_regaddr XOR "1111";
@@ -1025,7 +1040,9 @@ PROCESS (opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOP
 			rf_source_addr <= "1111";
 		ELSIF micro_state = pmmu_dn_low THEN
 			-- PMOVE Dn→MMU 64-bit: LOW word source is Dn+1 (increment register number)
-			rf_source_addr <= source_areg&(opcode(2 downto 0) + "001");
+			rf_source_addr <= source_areg&(dn_sel + "001");
+		ELSIF dn_mode_active THEN
+			rf_source_addr <= source_areg&dn_sel;
 		ELSE
 			rf_source_addr <= source_areg&opcode(11 downto 9);
 		END IF;
@@ -1432,13 +1449,17 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 --				byte <= '0';
 --				IPL_nr <= "000";
 				trap_trace <= '0';
-				trap_berr <= '0';
-				writePCbig <= '0';
+					trap_berr <= '0';
+					writePCbig <= '0';
 --				recall_last <= '0';
-				Suppress_Base <= '0'; 
-				make_berr <= '0';
-				memmask <= "111111";
-				exec_write_back <= '0';
+					Suppress_Base <= '0';
+					make_berr <= '0';
+					memmask <= "111111";
+					exec_write_back <= '0';
+					pmove_dn_regnum <= (others => '0');
+					pmove_dn_regnum_pending <= (others => '0');
+					pmove_dn_pending_valid <= '0';
+					pmove_dn_mode <= '0';
 			ELSE
 --				IPL_nr <= NOT IPL;
 				IF clkena_in='1' THEN
@@ -1499,7 +1520,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					IF micro_state=trap0 AND IPL_autovector='0' THEN 			
 						IPL_vec <= last_data_read(7 downto 0);    --	TH
 					END IF;	
-					IF state="00" THEN				
+					IF state="00" THEN
 						last_opc_read <= data_read(15 downto 0);
 						last_opc_pc <= tg68_pc;--TH
 					END IF;	
@@ -1508,6 +1529,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						trap_trace <= '0';
 						TG68_PC_word <= '0';
 						trap_berr <= '0';
+						pmove_dn_mode <= '0';  -- Clear PMOVE Dn mode flag between instructions
 					ELSIF opcode(7 downto 0)="00000000" OR opcode(7 downto 0)="11111111" OR data_is_source='1' THEN
 						TG68_PC_word <= '1';
 					END IF;	
@@ -1636,22 +1658,37 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					PCbase <= '0';
 				END IF;	
 			END IF;	
-			IF clkena_lw='1' THEN
-				exec <= set;
+				IF clkena_lw='1' THEN
+					exec <= set;
 				exec(alu_move) <= set(opcMOVE) OR set(alu_move);
 				exec(alu_setFlags) <= set(opcADD) OR set(alu_setFlags);
 				exec_tas <= '0';
 				exec(subidx) <= set(presub) or set(subidx);
-				IF setexecOPC='1' THEN
-					exec <= set_exec OR set;
+					IF setexecOPC='1' THEN
+						exec <= set_exec OR set;
 					exec(alu_move) <= set_exec(opcMOVE) OR set(opcMOVE) OR set(alu_move);
 					exec(alu_setFlags) <= set_exec(opcADD) OR set(opcADD) OR set(alu_setFlags);
 					exec_tas <= set_exec_tas;
-				END IF;	
-				exec(get_2ndOPC) <= set(get_2ndOPC) OR setopcode;
-			END IF;	
-		END IF;	
-	END PROCESS;
+					END IF;	
+					exec(get_2ndOPC) <= set(get_2ndOPC) OR setopcode;
+
+					-- Stage 1: capture pending Dn selector as soon as decode requests it
+					-- BUG FIX: Only capture if not already pending (prevent consecutive PMOVE race)
+					IF pmove_dn_capture_req='1' AND pmove_dn_pending_valid='0' THEN
+						pmove_dn_regnum_pending <= pmove_dn_capture_data;
+						pmove_dn_pending_valid <= '1';
+					END IF;
+					
+					-- Stage 2: once exec(get_2ndOPC) asserts, make the selector active for this instruction
+					-- Set pmove_dn_mode when pending valid - DON'T clear here, only at setopcode
+					IF exec(get_2ndOPC)='1' AND pmove_dn_pending_valid='1' THEN
+						pmove_dn_regnum <= pmove_dn_regnum_pending;
+						pmove_dn_mode <= '1';
+						pmove_dn_pending_valid <= '0';
+					END IF;
+				END IF;
+			END IF;
+		END PROCESS;
 	
 ------------------------------------------------------------------------------
 --prepare Bitfield Parameters
@@ -1807,7 +1844,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		 build_bcd, set_Z_error, trapd, movem_run, last_data_read, set, set_V_Flag, z_error, trap_trace, trap_interrupt,
 		 SVmode, preSVmode, stop, long_done, ea_only, setstate, addrvalue, execOPC, exec_write_back, exe_datatype,
 		 datatype, interrupt, c_out, trapmake, rot_cnt, brief, addr, trap_trapv, last_data_in, use_VBR_Stackframe,
-		 long_start, set_datatype, sndOPC, set_exec, exec, ea_build_now, reg_QA, reg_QB, make_berr, trap_berr)
+		 long_start, set_datatype, sndOPC, set_exec, exec, ea_build_now, reg_QA, reg_QB, make_berr, trap_berr, last_opc_read)
 	BEGIN
 		TG68_PC_brw <= '0';	
 		setstate <= "00";
@@ -1827,6 +1864,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		setstackaddr <= '0';
 		writePC <= '0';
 		ea_build_now <= '0';
+		pmove_dn_capture_req <= '0';
+		pmove_dn_capture_data <= (others => '0');
 --		set_rot_bits <= "00";
 		set_rot_bits <= opcode(4 downto 3);
 		set_rot_cnt <= "000001";
@@ -3590,6 +3629,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							set(get_2ndOPC) <= '1';
 							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
 							next_micro_state <= pmmu1;
+
+							-- BUG #53 FIX: Latch Dn selector using last_opc_read before opcode is overwritten
+							IF last_opc_read(5 downto 3)="000" THEN
+								pmove_dn_capture_req <= '1';
+								pmove_dn_capture_data <= last_opc_read(2 downto 0);
+							END IF;
+
 							-- BUG #22 FIX: DO NOT build EA here! PMMU instructions build EA in pmmu1
 							-- after decoding the extension word. Early EA building causes duplicate
 							-- EA operation which increments PC by 2 extra bytes (6 instead of 4).
@@ -3599,20 +3645,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						trap_priv <= '1';
 						trapmake <= '1';
 					END IF;
-				-- BUG #17 FIX: Single-word CINV/CPUSH variants (68030)
-				-- These are used by Kickstart for cache invalidation
-				-- Format: 1111 0100 00xx xxxx (0xF4xx range)
-				-- CINVA IC/DC/BC (0xF428, 0xF424, 0xF42C)
-				-- CINVP IC/DC/BC (0xF418, 0xF414, 0xF41C)
-				-- CINVL IC/DC/BC (0xF408, 0xF404, 0xF40C)
-				-- CPUSHA IC/DC/BC (0xF468, 0xF464, 0xF46C)
-				-- CPUSHP IC/DC/BC (0xF458, 0xF454, 0xF45C)
-				--ELSIF cpu="11" AND opcode(11 downto 8)="0100" AND opcode(7 downto 6)="00" THEN
-				ELSIF cpu(1)='1' AND opcode(11 downto 8)="0100" AND opcode(7 downto 6)="00" THEN
-					-- Single-word cache instructions (CINV/CPUSH): 68040+ only, NOT 68030
-					-- MC68030 does not have CINV/CPUSH - uses CACR bits via MOVEC instead
-					trap_illegal <= '1';
-					trapmake <= '1';
 				--ELSIF cpu="11" AND opcode(8 downto 6)="100" THEN --cpSAVE
 				ELSIF cpu(1)='1' AND opcode(8 downto 6)="100" THEN --cpSAVE
 					IF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="011" AND
@@ -3681,8 +3713,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					ELSE
 						-- Valid EA mode for cpRESTORE
 						IF SVmode='1' THEN
-							IF opcode(11 downto 9)="000" THEN  -- FPU coprocessor - implement FRESTORE
-								next_micro_state <= frestore1;
+							IF opcode(11 downto 9)="000" THEN  -- FPU coprocessor - FRESTORE not implemented
+								trap_1111 <= '1';  -- F-line exception (no FPU)
+								trapmake <= '1';
 							ELSE
 								trap_1111 <= '1';  -- Other coprocessors - F-line exception
 								trapmake <= '1';
@@ -3695,8 +3728,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				ELSE
 					-- Valid EA mode for cpSAVE
 					IF SVmode='1' THEN
-						IF opcode(11 downto 9)="000" THEN  -- FPU coprocessor - implement FSAVE
-							next_micro_state <= fsave1;
+						IF opcode(11 downto 9)="000" THEN  -- FPU coprocessor - FSAVE not implemented
+							trap_1111 <= '1';  -- F-line exception (no FPU)
+							trapmake <= '1';
 						ELSE
 							trap_1111 <= '1';  -- Other coprocessors - F-line exception
 							trapmake <= '1';
@@ -4730,53 +4764,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     END IF;
                     next_micro_state <= nop;  -- Complete after LOW word transfer
 
-                -- Cache control instruction implementations
-                WHEN cinv1 =>
-                    -- CINV/CPUSH: Two forms supported
-                    -- 1. Two-word form (0x4E78): Extension word in brief determines operation
-                    -- 2. Single-word form (0xF4xx): Opcode bits determine operation (BUG #17 FIX)
-                    --
-                    -- For single-word form (opcode(15:12)="1111"):
-                    --   opcode(5) = operation (0=CINV, 1=CPUSH)
-                    --   opcode(4:3) = scope
-                    --   opcode(3:2) = cache selection
-                    --
-                    -- For two-word form (opcode(15:12)="0100"):
-                    --   brief(6) = operation (0=CINV, 1=CPUSH)
-                    --   brief(4:3) = scope
-                    --   brief(1:0) = cache selection
-
-                    set(briefext) <= '1';
-
-                    -- BUG #17 FIX: Check if this is single-word or two-word form
-                    IF opcode(15 downto 12) = "1111" THEN
-                        -- Single-word form: Extract parameters from opcode
-                        IF opcode(5) = '0' THEN
-                            -- CINV (Cache Invalidate)
-                            set_exec(cache_cinv) <= '1';
-                        ELSE
-                            -- CPUSH (Cache Push)
-                            set_exec(cache_cpush) <= '1';
-                        END IF;
-                        -- Note: Scope and cache selection will be extracted from opcode
-                        -- by cache control logic (lines 567-591)
-                    ELSE
-                        -- Two-word form: Use extension word from brief
-                        IF brief(6) = '0' THEN
-                            -- CINV (Cache Invalidate)
-                            set_exec(cache_cinv) <= '1';
-                        ELSE
-                            -- CPUSH (Cache Push) - for write-back caches
-                            set_exec(cache_cpush) <= '1';
-                        END IF;
-                    END IF;
-                    next_micro_state <= cpush1;
-                    
-                WHEN cpush1 =>
-                    -- Complete cache operation
-                    -- Cache control signals will be driven by exec() bits
-                    next_micro_state <= nop;
-					
 				WHEN movep1 =>		-- MOVEP d(An)
 					setdisp <= '1';	
 					set(mem_addsub) <= '1';	
@@ -5039,6 +5026,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
       if Reset = '1' then
         -- BUG #19 FIX: pmmu_reg_we_d and pmmu_reg_re_d are now combinational (no reset needed)
         pmmu_reg_sel_d  <= (others => '0');
+        pmmu_reg_sel_pending <= '0';  -- BUG #50 FIX: Reset pipeline register
+        pmmu_reg_sel_latch <= (others => '0');  -- BUG #52 FIX: Reset extension word latch
         pmmu_reg_wdat_d <= (others => '0');
         pmmu_reg_part_d <= '0';
         pmmu_reg_fd_d   <= '0';
@@ -5070,6 +5059,29 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
           pmmu_mem_wdat_hold  <= (others => '0');
         end if;
 
+        -- BUG #50 FIX (V3 - CORRECTED PIPELINE): Stage 1 moved outside clkena_lw block
+        -- CRITICAL: getbrief fires BEFORE setstate="01", so clkena_lw='0' at that time!
+        -- Stage 1 must execute with clkena_in='1' only, not clkena_lw='1'
+        -- BUG #52 FIX: Latch extension word to avoid race with consecutive PMOVEs
+        -- Stage 1: Mark that extension word is being loaded AND latch it
+        -- Set pending for ALL instructions with extension words, filter in Stage 2
+        -- BUG #53 FIX: Only latch if not already pending (consecutive PMOVE protection)
+        if CPU(1)='1' AND getbrief='1' AND pmmu_reg_sel_pending='0' then
+          pmmu_reg_sel_pending <= '1';
+          -- BUG #52 FIX: Capture extension word when available
+          -- When getbrief='1', use current data_read or last_opc_read based on state
+          if state(1)='1' then
+            pmmu_reg_sel_latch <= last_opc_read(15 downto 0);
+          else
+            pmmu_reg_sel_latch <= data_read(15 downto 0);
+          end if;
+        end if;
+
+        -- BUG #53 FIX: Clear pending flag at instruction boundary
+        if setopcode='1' then
+          pmmu_reg_sel_pending <= '0';
+        end if;
+
       -- BUG #31 FIX: clkena_lw dependent logic (register file addressing sync)
       -- Register file RDindex_A updates on clkena_lw (line 881), selector latch must match
       if clkena_lw='1' then
@@ -5081,19 +5093,24 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         -- This prevents brief signal corruption when multiple PMOVE instructions execute back-to-back
 
         -- DECODE PHASE: Latch register selector and control signals from brief word
-        -- Only during set() to capture extension word before it changes
-        -- BUG #27 FIX: Missing set_exec() checks! Same pattern as Bug #23 and Bug #26.
-        -- Memory operations (EA modes) use set_exec(pmmu_wr) in pmmu2, not set(pmmu_wr) in pmmu1!
-        -- Without set_exec() checks, register selector is never latched for memory operations.
-        if CPU(1)='1' AND (set(pmmu_wr)='1' OR set_exec(pmmu_wr)='1' OR
-                           set(pmmu_rd)='1' OR set_exec(pmmu_rd)='1') then
-          -- Latch register selector during decode - this is the ONLY place it should be latched
-          if brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
-             brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000" then
-            pmmu_reg_sel_d  <= brief(14 downto 10);
+        -- BUG #50 FIX (V2 - PIPELINE): Two-stage selector latch to avoid race condition
+        -- Build 184 failed because brief and last_opc_read have the SAME timing (brief is loaded FROM last_opc_read).
+        -- Problem: Extension word arrives via getbrief at the SAME cycle selector is latched -> race condition!
+        -- Solution: Pipeline the latch in two stages:
+        --   Stage 1: Set pending flag when getbrief fires (moved outside clkena_lw block above)
+        --   Stage 2: Latch selector on NEXT cycle when extension word is stable in last_opc_read
+
+        -- Stage 2: Latch selector on NEXT cycle when extension word is stable
+        if pmmu_reg_sel_pending='1' then
+          -- BUG #52 FIX: Use latched extension word instead of last_opc_read
+          -- This avoids race condition when consecutive PMOVEs execute quickly
+          -- Latch register selector - extension word was captured in Stage 1
+          if pmmu_reg_sel_latch(14 downto 10) = "00010" OR pmmu_reg_sel_latch(14 downto 10) = "00011" OR pmmu_reg_sel_latch(14 downto 10) = "10000" OR
+             pmmu_reg_sel_latch(14 downto 10) = "10010" OR pmmu_reg_sel_latch(14 downto 10) = "10011" OR pmmu_reg_sel_latch(14 downto 10) = "11000" then
+            pmmu_reg_sel_d  <= pmmu_reg_sel_latch(14 downto 10);
 
             -- Latch CRP/SRP part selector during decode
-            if (brief(14 downto 10) = "10010") or (brief(14 downto 10) = "10011") then
+            if (pmmu_reg_sel_latch(14 downto 10) = "10010") or (pmmu_reg_sel_latch(14 downto 10) = "10011") then
               if micro_state = pmmu1 OR micro_state = pmmu_dn_high then
                 pmmu_reg_part_d <= '1';  -- HIGH word (first transfer)
               else
@@ -5102,12 +5119,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
             end if;
 
             -- Latch flush disable flag during decode
-            if brief(15 downto 13) = "001" and brief(9 downto 8) = "00" and brief(14 downto 10) /= "00000" and opcode(5 downto 3) /= "000" then
+            if pmmu_reg_sel_latch(15 downto 13) = "001" and pmmu_reg_sel_latch(9 downto 8) = "00" and pmmu_reg_sel_latch(14 downto 10) /= "00000" and opcode(5 downto 3) /= "000" then
               pmmu_reg_fd_d <= '1';  -- PMOVEFD - disable ATC flush
             else
               pmmu_reg_fd_d <= '0';  -- Normal PMOVE - flush ATC
             end if;
           end if;
+
+          -- BUG #53 FIX: DON'T clear pending flag here!
+          -- Clearing immediately allows consecutive PMOVEs to overwrite the selector
+          -- before the current instruction completes its PMMU read/write.
+          -- Clear at instruction boundary instead (when setopcode='1')
+          -- pmmu_reg_sel_pending <= '0';  -- REMOVED - moved to setopcode logic
         end if;
         -- NOTE: Data latch moved OUTSIDE clkena_lw block (Bug #37 fix above)
       end if;

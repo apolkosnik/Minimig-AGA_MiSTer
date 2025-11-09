@@ -117,17 +117,17 @@ Note: No clean.sh script exists in the repository root.
 - **Transparent Translation**: TT0/TT1 register support for bypassing MMU
 - **CACR Register**: Full 32-bit Cache Control Register with self-clearing bits
 - **MMU Exception Handling**: Complete fault detection and status reporting
-- **Cache Modules**: 256-byte instruction and data cache implementations
+- **Cache Modules**: 256-byte instruction and data cache implementations (TG68K_Cache_030.vhd)
+- **Cache Integration**: Complete cache-to-memory interface with 128-bit line fills
+- **Cache Memory Interface**: Full cache fill/writeback integration in cpu_wrapper.v and Minimig.sv
+- **Cache Bus Arbitration**: PMMU walker and cache fill requests properly arbitrated
+- **Cache Hit/Miss Handling**: Full hit/miss detection with bypass for cache-inhibited regions
+- **Burst Mode Support**: Cache line fills with burst when CACR IBE/DBE bits enabled
 - **Descriptor Validation**: Proper MC68030 page descriptor parsing and validation
 - **Access Control**: Supervisor/user privilege checking and write protection
 
-#### ⚠️ In Progress:
-- **Cache Integration**: Cache component declared but not fully connected to memory system
-
 #### ❌ Still Missing:
-- **Cache Memory Interface**: Cache fill/writeback integration with existing memory timing
-- **Cache Bus Integration**: Full cache line fill and write-back with external memory
-- **Performance Optimization**: Cache hit/miss handling in memory access cycles
+- **None**: All planned 68030 PMMU and cache features are implemented and integrated
 
 ### 68030 Technical Implementation Details
 - **Specifications**: `/home/adam/Desktop/MC68030UM.pdf`, `https://amigasourcecodepreservation.gitlab.io/mc680x0-reference/`
@@ -144,13 +144,21 @@ Note: No clean.sh script exists in the repository root.
   - Write protection and cache control attribute extraction
 
 #### Cache System
-- **Files**: `rtl/tg68k/TG68K_Cache_030.vhd`
-- **Architecture**: 
+- **Files**: `rtl/tg68k/TG68K_Cache_030.vhd`, `rtl/cpu_wrapper.v`, `Minimig.sv`
+- **Architecture**:
   - 256-byte instruction cache (direct-mapped, 16 lines × 16 bytes)
   - 256-byte data cache (direct-mapped, 16 lines × 16 bytes)
   - Write-through data cache policy
-  - Cache line fill support (128-bit cache lines)
+  - Cache line fill support (128-bit cache lines via 8×16-bit reads)
   - CINV/CPUSH instruction support for cache control
+  - Physically-indexed, physically-tagged (PIPT) design
+- **Integration**:
+  - Cache module instantiated in cpu_wrapper.v with USE_68030_CACHE=1
+  - Cache fill state machine in Minimig.sv handles 8-word sequential reads
+  - Burst mode support when CACR IBE/DBE bits enabled
+  - PMMU walker memory arbiter manages bus access between CPU, cache, and page table walks
+  - Cache-inhibit signals from PMMU properly connected and honored
+  - Hit/miss detection integrated with memory controller timing
 
 #### CACR Register Implementation
 - **Features**:
@@ -177,11 +185,11 @@ Note: No clean.sh script exists in the repository root.
 ### Important TODOs
 
 #### Next Priority Items for 68030:
-1. **Cache Memory Integration**: Connect cache modules to memory controller for actual cache line fills
-2. **Performance Testing**: Benchmark 68030 performance vs 68020 mode with memory-intensive software
-3. **PMMU Testing**: Test with actual AmigaOS 3.x MMU-aware software and applications
-4. **Cache Effectiveness**: Measure cache hit rates and performance improvements
-5. **Compatibility Testing**: Ensure 68000/68010/68020 modes still work correctly
+1. **Performance Testing**: Benchmark 68030 performance vs 68020 mode with memory-intensive software
+2. **PMMU Testing**: Test with actual AmigaOS 3.x MMU-aware software and applications
+3. **Cache Effectiveness**: Measure cache hit rates and performance improvements with real workloads
+4. **Compatibility Testing**: Ensure 68000/68010/68020 modes still work correctly
+5. **Hardware Validation**: Extended testing on MiSTer hardware with various Amiga software
 
 #### General Project TODOs (not in scope for now):
 - AGA chipset enhancements (bitplane shifter improvements, sprite positioning)
@@ -500,7 +508,7 @@ LOW:
 Bits 31-24: Logical Address Base
 Bits 23-16: Logical Address Mask
 Bit 15 (E):  Enable
-Bits 14-11: Reserved
+Bits 14-11: Reserved (forced to 0)
 Bits 10 (CI): Cache Inhibit
 Bit 9 (RW):   Read/Write
 Bit 8 (RWM):  Read/Write Mask

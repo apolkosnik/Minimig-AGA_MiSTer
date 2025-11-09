@@ -380,8 +380,9 @@ generate
 if (USE_68030_CACHE) begin : gen_68030_cache
 
 	// Cache enable logic - independent control for instruction and data caches
-	assign i_cache_enabled = (cpucfg == 2'b11) & cacr_ie; // 68030 with instruction cache enabled
-	assign d_cache_enabled = (cpucfg == 2'b11) & cacr_de; // 68030 with data cache enabled
+	// OSD sends cpucfg=10 for 68030 (temporary encoding until 68020 option added)
+	assign i_cache_enabled = cpucfg[1] & cacr_ie; // 68030 (cpucfg=10 or 11) with instruction cache enabled --cpu(1)=1
+	assign d_cache_enabled = cpucfg[1] & cacr_de; // 68030 (cpucfg=10 or 11) with data cache enabled --cpu(1)=1
 
 	// 68030 Cache instantiation
 	TG68K_Cache_030 cache_inst

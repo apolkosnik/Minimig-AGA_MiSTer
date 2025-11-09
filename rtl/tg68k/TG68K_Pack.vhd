@@ -36,8 +36,6 @@ package TG68K_Pack is
                           pmmu_dn_high, pmmu_dn_low,
                           pmove_decode, pmove_reg_xfer, pmove_mem_read, pmove_mem_write,
                           pmove_64_high, pmove_64_low,
-                          cinv1, cpush1,
-                          fsave1, fsave2, frestore1, frestore2,
                           mul1, mul2, mul_end1,  mul_end2, div1, div2, div3, div4, div_end1, div_end2);
 	
 	constant opcMOVE				: integer := 0; --
