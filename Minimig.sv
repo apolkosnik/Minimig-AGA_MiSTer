@@ -468,6 +468,7 @@ cpu_wrapper cpu_wrapper
 	.cachecfg     (cachecfg        ),
 	.fastramcfg   (memcfg[6:4]     ),
 	.bootrom      (bootrom         ),
+	.chip8mb      (chip8mb         ),
 
 	.toccata_ena  (toccata_ena     ),
 	.toccata_base (toccata_base    ),
@@ -644,7 +645,8 @@ assign UART_TXD = (hps_mpu & mt32_use) | uart_tx;
 wire  [1:0] cpucfg;
 wire  [2:0] cachecfg;
 wire  [6:0] memcfg;
-wire        bootrom;   
+wire        bootrom;
+wire        chip8mb;   
 wire [15:0] ram_data;      // sram data bus
 wire [15:0] ramdata_in;    // sram data bus in
 wire [47:0] chip48;        // big chip read
@@ -775,7 +777,8 @@ minimig minimig
 	.cpucfg       (cpucfg           ), // CPU config
 	.cachecfg     (cachecfg         ), // Cache config
 	.memcfg       (memcfg           ), // memory config
-	.bootrom      (bootrom          ), // bootrom mode. Needed here to tell tg68k to also mirror the 256k Kickstart 
+	.bootrom      (bootrom          ), // bootrom mode. Needed here to tell tg68k to also mirror the 256k Kickstart
+	.chip8mb      (chip8mb          ), // 8MB ChipRAM mode
 
 	.ide_fast     (ide_fast         ),
 	.ide_ext_irq  (ide_f_irq        ),

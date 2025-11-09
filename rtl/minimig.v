@@ -253,6 +253,7 @@ module minimig
 	output  [2:0] cachecfg,
 	output  [6:0] memcfg,
 	output        bootrom,     // enable bootrom magic in gary.v
+	output        chip8mb,     // 8MB ChipRAM mode enabled
 	output        ide_ena,
 
 	output        ide_fast,
@@ -308,7 +309,6 @@ wire        xbs;					//cross bridge access (memory and custom registers)
 wire        _led;					//power led
 wire [15:0] sel_chip;			//chip ram select (16 banks for 8MB mode)
 wire  [2:0] sel_slow;			//slow ram select
-wire        chip8mb;				//8MB chip RAM mode enable (AGA only)
 wire        sel_kick;			//rom select
 wire        sel_kick1mb;      // 1MB upper rom select
 wire        sel_kick256kmirror;// mirror f8-fb to fc-ff in a1k mode    
@@ -421,7 +421,7 @@ always @(posedge clk) if (clk7_en && reset) ntsc <= chipset_config[1];
 
 assign ide_ena  = ide_config[0];
 assign ide_fast = ~ide_config[5] & cpucfg[1];
-assign chip8mb  = memory_config[7] & chipset_config[4]; // 8MB ChipRAM only when AGA enabled
+assign chip8mb  = (memory_config[1:0] == 2'b11) & chipset_config[4]; // 8MB ChipRAM only when AGA enabled and memory_config[1:0]=11
 
 //--------------------------------------------------------------------------------------
 

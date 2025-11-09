@@ -37,6 +37,7 @@ module cpu_wrapper
 	input       [2:0] fastramcfg,
 	input       [2:0] cachecfg,
 	input             bootrom,
+	input             chip8mb,
 
 	output reg [23:1] chip_addr,
 	input      [15:0] chip_dout,
@@ -82,15 +83,16 @@ always @(posedge clk) nmi_addr <= vbr + 32'h7c;
 
 wire sel_z3ram0 = (cpu_addr[31:27] == z3ram_base0) && z3ram_ena0;
 wire sel_z3ram1 = (cpu_addr[31:28] == z3ram_base1) && z3ram_ena1;
-wire sel_z2ram  = !cpu_addr[31:24] && (cpu_addr[23] ^ |cpu_addr[22:21]) && z2ram_ena; // addr[23:21] = 1..4
+// Zorro II RAM: addr[23:21] = 1..4 normally, but disabled when chip8mb is enabled to avoid conflict with 8MB chipram
+wire sel_z2ram  = !(|cpu_addr[31:24]) && (cpu_addr[23] ^ |cpu_addr[22:21]) && z2ram_ena && !chip8mb; // addr[23:21] = 1..4
 wire sel_zram   = sel_z3ram0 | sel_z3ram1 | sel_z2ram;
 wire sel_dd     = (cpu_addr[31:16] == 16'h00DD) && (cpu_addr[15:13] == 'b010);
 wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
 
 // don't sel_kickram when writing
-wire sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx
-wire sel_kicklower = !cpu_addr[31:24] && (cpu_addr[23:18] == 6'b111110);
-wire sel_chipram   = !cpu_addr[31:21] && cchip; 		             //$000000 - $1FFFFF
+wire sel_kickram   = !(|cpu_addr[31:24]) && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx
+wire sel_kicklower = !(|cpu_addr[31:24]) && (cpu_addr[23:18] == 6'b111110);
+wire sel_chipram   = chip8mb ? (!(|cpu_addr[31:23]) && cchip) : (!(|cpu_addr[31:21]) && cchip); //$000000 - $1FFFFF (2MB) or $000000 - $7FFFFF (8MB)
 
 // we route everything hrtmon related through cart.v (needs a couple of signals to
 // decide what to do, would not be good style to replicate that here). 
