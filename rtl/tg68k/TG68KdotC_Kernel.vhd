@@ -890,16 +890,25 @@ ALU: TG68K_ALU
 						when FSAVE_PREDECR_WAIT =>
 							-- CRITICAL FIX: Atomic frame size determination with race condition prevention
 							-- Wait for frame size to be determined; prefer direct FPU handshake when available
+							report "FSAVE_PREDECR_WAIT: Waiting for frame size, valid_latched=" & std_logic'image(fsave_frame_size_valid_latched) &
+							       " fpu_size_valid=" & std_logic'image(fpu_fsave_size_valid) &
+							       " fpu_frame_size=" & integer'image(fpu_fsave_frame_size);
 							if fsave_frame_size_valid_latched = '0' then
 								if fpu_fsave_size_valid = '1' then
 									-- FPU provided explicit frame size - validate and latch atomically
 									-- ATOMIC SECTION: Prevent race conditions by validating and latching in same cycle
 									-- CRITICAL FIX: Only accept valid MC68882 frame sizes (4, 60, or 216 bytes)
+									report "FSAVE_PREDECR_WAIT: Got frame size from FPU: " & integer'image(fpu_fsave_frame_size) &
+									       " size_valid=" & std_logic'image(fpu_fsave_size_valid);
 									if fpu_fsave_frame_size = 4 or fpu_fsave_frame_size = 60 or fpu_fsave_frame_size = 216 then
+										report "FSAVE_PREDECR_WAIT: VALID frame size, latching " & integer'image(fpu_fsave_frame_size) & " bytes (" &
+										       integer'image(fpu_fsave_frame_size / 4) & " longwords)";
 										fsave_frame_size_latched <= fpu_fsave_frame_size;
 										fsave_frame_size_latched_lw <= fpu_fsave_frame_size / 4;
 									else
 										-- Invalid frame size from FPU - fall back to safe default IDLE frame
+										report "FSAVE_PREDECR_WAIT: INVALID frame size " & integer'image(fpu_fsave_frame_size) &
+										       " - falling back to IDLE frame (60 bytes)" severity error;
 										fsave_frame_size_latched <= 60;
 										fsave_frame_size_latched_lw <= 15;
 									end if;
@@ -946,21 +955,32 @@ ALU: TG68K_ALU
 						when FSAVE_PREDECR_CALC =>
 							-- CRITICAL STACK FIX: Atomic stack pointer calculation with corruption prevention
 							-- This ensures stack pointer is decremented by the correct amount safely
+							report "FSAVE_PREDECR_CALC: Starting calculation, frame_size_valid_latched=" & std_logic'image(fsave_frame_size_valid_latched) &
+							       " frame_size_latched=" & integer'image(fsave_frame_size_latched) &
+							       " reg_QA=" & to_hstring(reg_QA);
 							if fsave_frame_size_valid_latched = '1' then
 								-- ATOMIC CALCULATION: Validate frame size and calculate new SP in single cycle
 								-- Prevent stack corruption by validating frame size before calculation
 								case fsave_frame_size_latched is
 									when 4 =>
 										-- NULL frame: 4 bytes
+										report "FSAVE_PREDECR_CALC: NULL frame (4 bytes), new_sp = " & to_hstring(reg_QA) & " - 4 = " &
+										       to_hstring(reg_QA - X"00000004");
 										fsave_new_sp <= reg_QA - X"00000004";
 									when 60 =>
-										-- IDLE frame: 60 bytes  
+										-- IDLE frame: 60 bytes
+										report "FSAVE_PREDECR_CALC: IDLE frame (60 bytes), new_sp = " & to_hstring(reg_QA) & " - 60 = " &
+										       to_hstring(reg_QA - X"0000003C");
 										fsave_new_sp <= reg_QA - X"0000003C";
 									when 216 =>
 										-- BUSY frame: 216 bytes
+										report "FSAVE_PREDECR_CALC: BUSY frame (216 bytes), new_sp = " & to_hstring(reg_QA) & " - 216 = " &
+										       to_hstring(reg_QA - X"000000D8");
 										fsave_new_sp <= reg_QA - X"000000D8";
 									when others =>
 										-- SAFETY: Invalid frame size - use NULL frame to prevent corruption
+										report "FSAVE_PREDECR_CALC: INVALID frame size " & integer'image(fsave_frame_size_latched) &
+										       " - using NULL frame (4 bytes) fallback" severity error;
 										fsave_new_sp <= reg_QA - X"00000004";
 										-- Log error condition for debugging
 										fsave_addr_error <= '1';

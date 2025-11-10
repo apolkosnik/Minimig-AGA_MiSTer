@@ -893,14 +893,21 @@ begin
 	-- Output assignments
 	fpcr_out <= fpcr;
 	-- CRITICAL: Use exception handler's updated FPSR when it has processed an operation
-	fpsr_out <= exception_fpsr_out when (exception_op_valid = '1' and exception_pending_internal = '0') else fpsr;  
+	fpsr_out <= exception_fpsr_out when (exception_op_valid = '1' and exception_pending_internal = '0') else fpsr;
 	fpiar_out <= fpiar;
 	fsave_frame_size <= fsave_frame_size_internal;  -- CRITICAL FIX: Must output current frame size BEFORE FSAVE state for CPU predecrement
 	fsave_size_valid <= fsave_size_valid_internal;
 	-- fpu_data_out is now handled within the state machine process
-	
+
 	-- CRITICAL: Route exception information to CPU
 	exception_code <= exception_vector_internal when exception_pending_internal = '1' else exception_code_internal;
+
+	-- DEBUG: Monitor frame size output changes
+	debug_fsave_monitor: process(fsave_frame_size_internal, fsave_size_valid_internal)
+	begin
+		report "FSAVE_OUTPUT: fsave_frame_size_internal=" & integer'image(fsave_frame_size_internal) &
+		       " fsave_size_valid=" & std_logic'image(fsave_size_valid_internal);
+	end process;
 	
 	-- Dynamic FSAVE frame format and size determination process
 	-- CRITICAL: This process provides the frame size to CPU BEFORE predecrement occurs
@@ -916,31 +923,36 @@ begin
 				any_register_nonzero := '1';
 			end if;
 		end loop;
-		
+
 		-- Check if control registers have meaningful state (including accrued exceptions)
 		any_control_nonzero := '0';
 		if fpcr /= X"00000000" or fpsr /= X"00000000" then
 			any_control_nonzero := '1';
 		end if;
-		
+
 		-- Check for pending exceptions in FPSR
 		has_pending_exception := fpu_exception or fpsr(15) or fpsr(14) or fpsr(13) or fpsr(12) or fpsr(11) or fpsr(10) or fpsr(9) or fpsr(8);
-		
+
 		-- MC68882 Frame Format Determination per specification:
 		-- - NULL frame (4 bytes): FPU completely idle, no state modified
 		-- - IDLE frame (60 bytes): FPU has state but no operations in progress
 		-- - BUSY frame (216 bytes): FPU has operations in progress or pending exceptions
-		
+
 		if has_pending_exception = '1' or fpu_busy_internal = '1' or fpu_state /= FPU_IDLE then
 			-- BUSY frame: FPU is executing or has pending exceptions
+			report "FSAVE_FORMAT: Selecting BUSY frame (216 bytes) - has_exception=" & std_logic'image(has_pending_exception) &
+			       " fpu_busy=" & std_logic'image(fpu_busy_internal) & " fpu_state=" & fpu_state_t'image(fpu_state);
 			fsave_frame_format <= X"D8";  -- MC68882 BUSY frame format
 			fsave_frame_size_internal <= 216;  -- 216 bytes = 54 longwords
 		elsif any_register_nonzero = '1' or any_control_nonzero = '1' then
 			-- IDLE frame: FPU has some state but is idle
+			report "FSAVE_FORMAT: Selecting IDLE frame (60 bytes) - any_reg_nonzero=" & std_logic'image(any_register_nonzero) &
+			       " any_ctrl_nonzero=" & std_logic'image(any_control_nonzero) & " FPCR=" & to_hstring(fpcr) & " FPSR=" & to_hstring(fpsr);
 			fsave_frame_format <= X"60";  -- MC68882 IDLE frame format
 			fsave_frame_size_internal <= 60;  -- 60 bytes = 15 longwords
 		else
 			-- NULL frame: FPU completely idle with no state
+			report "FSAVE_FORMAT: Selecting NULL frame (4 bytes) - FPU completely idle";
 			fsave_frame_format <= X"00";  -- MC68882 NULL frame format
 			fsave_frame_size_internal <= 4;   -- 4 bytes = 1 longword
 		end if;
@@ -1177,20 +1189,27 @@ begin
 						
 						-- Check for direct CPU requests (bypassing decode)
 						if fsave_data_request = '1' then
+							report "FSAVE_IDLE: CPU requesting FSAVE data directly, supervisor_mode=" & std_logic'image(supervisor_mode);
 							-- FSAVE - Requires supervisor privilege per MC68882 specification
 							if supervisor_mode = '0' then
 								-- Privilege violation - generate exception
+								report "FSAVE_IDLE: PRIVILEGE VIOLATION - not in supervisor mode";
 								fpu_state <= FPU_EXCEPTION_STATE;
 								fpu_exception <= '1';
 								exception_code_internal <= X"20";  -- Privilege violation
 							else
 								-- CPU is requesting FSAVE data - enter FSAVE state directly
+								report "FSAVE_IDLE: Entering FSAVE state, format=" & to_hstring(fsave_frame_format) &
+								       " size=" & integer'image(fsave_frame_size_internal) &
+								       " size_valid=" & std_logic'image(fsave_size_valid_internal);
 								fpu_done <= '0';  -- Reset completion signal
 								fsave_counter <= 0;
 								-- CRITICAL: Latch frame format and size at FSAVE start for stability
 								fsave_frame_format_latched <= fsave_frame_format;
 								fsave_frame_size_latched <= fsave_frame_size_internal;
 									-- CLEANUP: Removed fsave_frame_size_debug assignment - unused debug signal
+								report "FSAVE_IDLE: Latched format=" & to_hstring(fsave_frame_format) &
+								       " latched_size=" & integer'image(fsave_frame_size_internal);
 								fpu_state <= FPU_FSAVE_WRITE;
 							end if;
 						elsif frestore_data_write = '1' then
@@ -1614,20 +1633,27 @@ begin
 							fpu_done <= '1';  -- Signal CPU to handle the transfers
 						end if;
 					elsif decoder_instruction_type = INST_FSAVE then
+							report "FSAVE_DECODE: FSAVE instruction detected, supervisor_mode=" & std_logic'image(supervisor_mode);
 							-- FSAVE - Requires supervisor privilege per MC68882 specification
 							if supervisor_mode = '0' then
 								-- Privilege violation - generate exception
+								report "FSAVE_DECODE: PRIVILEGE VIOLATION - not in supervisor mode";
 								fpu_state <= FPU_EXCEPTION_STATE;
 								fpu_exception <= '1';
 								exception_code_internal <= X"20";  -- Privilege violation
 							else
 								-- FSAVE - Provide FPU state frame data to CPU
 								-- CPU will handle memory writes and addressing
+								report "FSAVE_DECODE: Entering FSAVE state via decode, format=" & to_hstring(fsave_frame_format) &
+								       " size=" & integer'image(fsave_frame_size_internal) &
+								       " size_valid=" & std_logic'image(fsave_size_valid_internal);
 								fsave_counter <= 0;
 								-- CRITICAL: Latch frame format and size at FSAVE start for stability
 								fsave_frame_format_latched <= fsave_frame_format;
 								fsave_frame_size_latched <= fsave_frame_size_internal;
 									-- CLEANUP: Removed fsave_frame_size_debug assignment - unused debug signal
+								report "FSAVE_DECODE: Latched format=" & to_hstring(fsave_frame_format) &
+								       " latched_size=" & integer'image(fsave_frame_size_internal);
 								fpu_state <= FPU_FSAVE_WRITE;
 							end if;
 						elsif decoder_instruction_type = INST_FRESTORE then
@@ -2953,8 +2979,11 @@ begin
 					when FPU_FSAVE_WRITE =>
 						-- FSAVE - Dynamic frame format based on FPU state
 						-- CPU manages all memory operations, FPU only provides data when requested
-						
+
 						if fsave_data_request = '1' then
+							report "FSAVE_WRITE: CPU requesting data at index=" & integer'image(fsave_data_index) &
+							       " latched_format=" & to_hstring(fsave_frame_format_latched) &
+							       " latched_size=" & integer'image(fsave_frame_size_latched);
 							case fsave_data_index is
 								when 0 =>
 									-- Frame format word - use latched format for stability
