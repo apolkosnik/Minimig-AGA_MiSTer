@@ -873,15 +873,20 @@ ALU: TG68K_ALU
 							if (opcode(15 downto 12) = "1111" and opcode(11 downto 9) = "001" and
 							    opcode(8 downto 6) = "100" and opcode(5 downto 4) = "10") or
 							   (micro_state = fpu2 and opcode(8 downto 6) = "100" and opcode(5 downto 4) = "10") then
+								report "FSAVE_STATE: IDLE->detected FSAVE -(An), opcode=" & to_hstring(opcode) &
+								       " micro_state=" & micro_states'image(micro_state) &
+								       " reg_QA=" & to_hstring(reg_QA);
 								-- FSAVE -(An) detected - check initial stack pointer alignment first
 								-- ADDRESS ERROR CHECK: Verify current stack pointer is even aligned
 								if reg_QA(0) /= '0' then
 									-- Address error: Current stack pointer is misaligned for longword FSAVE
+									report "FSAVE_STATE: ADDRESS ERROR - stack pointer misaligned!" severity error;
 									fsave_addr_error <= '1';
 									fsave_trap_make <= '1';
 									-- Stay in IDLE state to abort FSAVE operation
 								else
 									-- Stack pointer is properly aligned - proceed with FSAVE
+									report "FSAVE_STATE: IDLE->WAIT, starting frame size determination";
 									fsave_frame_size_valid_latched <= '0';  -- Reset latch flag for new FSAVE
 									fsave_predecr_state <= FSAVE_PREDECR_WAIT;
 								end if;
@@ -941,9 +946,11 @@ ALU: TG68K_ALU
 							if fsave_frame_size_valid_latched = '1' then
 								-- ATOMIC: Verify we have a valid frame size before proceeding
 								if fsave_frame_size_latched = 4 or fsave_frame_size_latched = 60 or fsave_frame_size_latched = 216 then
+									report "FSAVE_STATE: WAIT->CALC, valid frame size latched: " & integer'image(fsave_frame_size_latched) & " bytes";
 									fsave_predecr_state <= FSAVE_PREDECR_CALC;
 								else
 									-- Invalid frame size latched - use safe default path
+									report "FSAVE_STATE: WAIT->CALC with INVALID frame size: " & integer'image(fsave_frame_size_latched) & " bytes" severity warning;
 									fsave_predecr_state <= FSAVE_PREDECR_CALC;
 								end if;
 							end if;
@@ -989,9 +996,12 @@ ALU: TG68K_ALU
 								-- CRITICAL: Verify new stack pointer won't cause overflow/underflow
 								if reg_QA >= fsave_frame_size_latched then
 									-- Safe to proceed with calculated stack pointer
+									report "FSAVE_STATE: CALC->WRITE, calculated new_sp=" & to_hstring(fsave_new_sp);
 									fsave_predecr_state <= FSAVE_PREDECR_WRITE;
 								else
 									-- Stack underflow would occur - abort operation
+									report "FSAVE_STATE: CALC->IDLE, STACK UNDERFLOW would occur! reg_QA=" & to_hstring(reg_QA) &
+									       " < frame_size=" & integer'image(fsave_frame_size_latched) severity error;
 									fsave_addr_error <= '1';
 									fsave_trap_make <= '1';
 									fsave_predecr_state <= FSAVE_PREDECR_IDLE;
@@ -1006,15 +1016,17 @@ ALU: TG68K_ALU
 							-- Stay in WRITE state until register writeback is triggered and completed
 							if state = "00" then
 								-- CPU is ready for register write, transition to DONE after writeback
+								report "FSAVE_STATE: WRITE->DONE, register write complete";
 								fsave_predecr_state <= FSAVE_PREDECR_DONE;
 							end if;
-							
+
 					when FSAVE_PREDECR_DONE =>
 						-- Predecrement complete - stay here until instruction ends
 						-- Reset to IDLE when no longer FSAVE -(An)
 						if not (opcode(15 downto 12) = "1111" and opcode(11 downto 9) = "001" and
 						       opcode(8 downto 6) = "100" and opcode(5 downto 4) = "10") or
 						       next_micro_state = idle then  -- Allow transition when going to idle
+							report "FSAVE_STATE: DONE->IDLE, FSAVE predecrement sequence complete";
 							fsave_predecr_state <= FSAVE_PREDECR_IDLE;
 							-- Note: CIR handshake signals reset in main CPU process to avoid multiple drivers
 						end if;
@@ -1239,6 +1251,7 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 		
 		IF fsave_predecr_state = FSAVE_PREDECR_WRITE THEN
 			-- Priority 1: FSAVE predecrement write - atomic completion required
+			report "REGIN: FSAVE priority 1, fsave_new_sp=" & to_hstring(fsave_new_sp);
 			regin <= fsave_new_sp;
 		ELSIF exec(save_memaddr)='1' THEN
 			-- Priority 2: Memory address save operations
@@ -1278,12 +1291,15 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 			ELSE
 				regin <= reg_QA;
 			END IF;
-		ELSIF NOT (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
+		ELSIF NOT (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND
 		           opcode(8 downto 6) = "100" AND opcode(5 downto 4) = "10") THEN
 			-- Priority 7: Normal ALU output (blocked for FSAVE -(An) to prevent double decrement)
+			report "REGIN: ALU output priority 7, ALUout=" & to_hstring(ALUout) &
+			       " opcode=" & to_hstring(opcode) & " dest_areg=" & to_string(dest_areg);
 			regin <= ALUout;
 		ELSE
-			-- Default case: preserve current register value
+			-- Default case: preserve current register value (FSAVE blocked path)
+			report "REGIN: Default case (FSAVE blocked), preserving reg_QA=" & to_hstring(reg_QA);
 			regin <= reg_QA;
 		END IF;
 		
@@ -1303,11 +1319,15 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 		-- Priority-based write enable logic (only one path can be active)
 		-- Priority 1: FSAVE predecrement write (highest - must complete atomically)
 		IF fsave_predecr_state = FSAVE_PREDECR_WRITE THEN
+			report "REGWRITE: FSAVE predecrement write, writing regin=" & to_hstring(regin) &
+			       " to register, dest_addr=" & to_string(dest_areg);
 			Wwrena <= '1';
 			Lwrena <= '1';  -- Address registers are always longword
 		-- Priority 2: Presub/postadd operations (excluding FSAVE to prevent conflicts)
-		ELSIF (exec(presub)='1' OR exec(postadd)='1' OR exec(changeMode)='1') AND NOT 
+		ELSIF (exec(presub)='1' OR exec(postadd)='1' OR exec(changeMode)='1') AND NOT
 		      (opcode(15 downto 9) = "1111001" AND opcode(8 downto 6) = "100" AND opcode(5 downto 4) = "10") THEN
+			report "REGWRITE: Normal presub/postadd, writing regin=" & to_hstring(regin) &
+			       " to register, dest_addr=" & to_string(dest_areg) & " opcode=" & to_hstring(opcode);
 			Wwrena <= '1';
 			Lwrena <= '1';
 		-- Priority 3: Conditional register operations (dbcc, etc.)
@@ -1763,25 +1783,35 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				memaddr_a <= last_data_read;
 			END IF;	 
 		-- Priority 2: FSAVE predecrement operations (must be atomic)
-		ELSIF set(presub)='1' AND 
+		ELSIF set(presub)='1' AND
 		      opcode(15 downto 9) = "1111001" AND opcode(8 downto 6) = "100" AND opcode(5 downto 4) = "10" THEN
 			-- FSAVE -(An) predecrement: Coordinated with state machine for ALL address registers
 			-- ATOMIC FIX: Use state-dependent addressing to prevent double decrements
+			report "MEMADDR: FSAVE predecrement path taken, fsave_predecr_state=" & fsave_predecr_state_t'image(fsave_predecr_state) &
+			       " reg_QA=" & to_hstring(reg_QA);
 			IF fsave_predecr_state = FSAVE_PREDECR_DONE OR fsave_predecr_state = FSAVE_PREDECR_WRITE THEN
 				-- State machine has atomically calculated An - use the stored decremented value
+				report "MEMADDR: Using fsave_new_sp=" & to_hstring(fsave_new_sp);
 				memaddr_a <= fsave_new_sp;  -- Contains decremented address for any An register (A0-A7)
 			ELSE
 				-- Still in calculation phase - use current An value, don't interfere
+				report "MEMADDR: Still calculating, using reg_QA=" & to_hstring(reg_QA);
 				memaddr_a <= reg_QA;  -- reg_QA contains current An value
 			END IF;
 		-- Priority 3: Normal predecrement operations (excluding FSAVE)
 		ELSIF set(presub)='1' THEN
 			-- Normal predecrement logic using bit pattern approach (original behavior)
-			IF set(longaktion)='1' THEN	
+			report "MEMADDR: NORMAL predecrement path taken, longaktion=" & bit'image(set(longaktion)) &
+			       " datatype=" & to_string(datatype) & " use_SP=" & bit'image(set(use_SP)) &
+			       " opcode=" & to_hstring(opcode);
+			IF set(longaktion)='1' THEN
+				report "MEMADDR: Longword predecrement, setting lower 5 bits to 11100 (0x1C=28)";
 				memaddr_a(4 downto 0) <= "11100";  -- 0x1C for longword predecrement
 			ELSIF datatype="00" AND set(use_SP)='0' THEN
+				report "MEMADDR: Byte predecrement (non-SP), setting lower 5 bits to 11111 (0x1F=31)";
 				memaddr_a(4 downto 0) <= "11111";  -- 0x1F for byte predecrement (non-SP)
 			ELSE
+				report "MEMADDR: Word predecrement, setting lower 5 bits to 11110 (0x1E=30)";
 				memaddr_a(4 downto 0) <= "11110";  -- 0x1E for word predecrement
 			END IF;
 		-- Priority 4: Interrupt vector operations
