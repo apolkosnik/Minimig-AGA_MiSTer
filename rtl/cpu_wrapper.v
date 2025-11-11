@@ -137,6 +137,26 @@ reg         lds_in;
 reg  [15:0] chip_data;
 reg  [31:0] vbr;
 
+//========================================
+// MC68030 F-line MMU instruction support
+//========================================
+
+// F-line interface signals
+wire fline_is_mmu;
+wire fline_is_pmove;
+wire fline_is_pflush;
+wire fline_is_ptest;
+wire fline_exec_req;
+reg  fline_exec_done;
+
+// Opcode capture
+reg [15:0] fline_opcode;
+reg [15:0] fline_extension;
+reg fline_opcode_valid;
+
+// Supervisor mode detection
+wire cpu_supervisor = (cpustate_p == 2'b01);
+
 always @* begin
 	if(cpucfg[1:0]) begin
 		cpu_dout     = cpu_dout_p;
@@ -220,7 +240,15 @@ cpu_inst_p
   .cpu(cpucfg),
   .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
   .cacr_out(cacr_p),
-  .vbr_out(vbr_p)
+  .vbr_out(vbr_p),
+
+  // MC68030 F-line interface
+  .fline_is_mmu(fline_is_mmu & cpucfg[1]),
+  .fline_is_pmove(fline_is_pmove & cpucfg[1]),
+  .fline_is_pflush(fline_is_pflush & cpucfg[1]),
+  .fline_is_ptest(fline_is_ptest & cpucfg[1]),
+  .fline_exec_req(fline_exec_req),
+  .fline_exec_done(fline_exec_done)
 );
 
 wire [15:0] cpu_dout_o;
@@ -463,5 +491,255 @@ always @(posedge clk) begin
 end
 
 assign toccata_ena = ~ac_toccata;
+
+//========================================
+// MC68030 F-line opcode capture
+//========================================
+
+always @(posedge clk) begin
+	if (~reset | ~reset_out) begin
+		fline_opcode <= 16'h0000;
+		fline_extension <= 16'h0000;
+		fline_opcode_valid <= 1'b0;
+	end
+	else if (cpucfg[1]) begin  // Only in 68010/68020/68030 modes
+		if (cpustate == 2'b00) begin  // Instruction fetch
+			fline_opcode <= cpu_dout_p;
+			fline_opcode_valid <= 1'b1;
+		end
+		else if (fline_exec_req && fline_opcode_valid) begin
+			fline_extension <= cpu_dout_p;
+		end
+	end
+end
+
+//========================================
+// MC68030 F-line component instantiation
+// Minimal integration: decoders + executors for PMOVE/PFLUSH/PTEST
+//========================================
+
+// Decoder outputs
+wire pmove_is_pmove, pmove_is_pmovefd;
+wire pmove_direction;
+wire [7:0] pmove_reg_code;
+wire [1:0] pmove_size;
+wire pmove_sel_tc, pmove_sel_tt0, pmove_sel_tt1;
+wire pmove_sel_crp, pmove_sel_srp, pmove_sel_mmusr;
+
+wire pflush_is_pflush;
+wire [1:0] pflush_mode;
+
+wire ptest_is_ptest;
+
+// Executor control
+wire pmove_start, pmove_done, pmove_busy;
+wire pflush_start, pflush_done, pflush_busy;
+wire ptest_start, ptest_done, ptest_busy;
+
+// MMU register interface
+wire mmu_reg_read, mmu_reg_write;
+wire [3:0] mmu_reg_addr;
+wire [1:0] mmu_reg_size;
+wire [63:0] mmu_data_in_64, mmu_data_out_64;
+
+// Stub signals for incomplete interfaces
+wire stub_mem_ready = 1'b1;
+wire stub_atc_inv_ack = 1'b1;
+
+// Combine decoder outputs
+assign fline_is_pmove = pmove_is_pmove;
+assign fline_is_pflush = pflush_is_pflush;
+assign fline_is_ptest = ptest_is_ptest;
+assign fline_is_mmu = pmove_is_pmove | pflush_is_pflush | ptest_is_ptest;
+
+// PMOVE Decoder
+TG68K030_PMOVE_Decoder pmove_decoder
+(
+	.clk(clk),
+	.reset(~reset),
+	.opcode(fline_opcode),
+	.extension(fline_extension),
+	.opcode_valid(fline_opcode_valid),
+	.supervisor(cpu_supervisor),
+	.is_pmove(pmove_is_pmove),
+	.is_pmovefd(pmove_is_pmovefd),
+	.pmove_direction(pmove_direction),
+	.pmove_reg_code(pmove_reg_code),
+	.pmove_ea_mode(),
+	.pmove_ea_reg(),
+	.pmove_size(pmove_size),
+	.pmove_sel_tc(pmove_sel_tc),
+	.pmove_sel_tt0(pmove_sel_tt0),
+	.pmove_sel_tt1(pmove_sel_tt1),
+	.pmove_sel_crp(pmove_sel_crp),
+	.pmove_sel_srp(pmove_sel_srp),
+	.pmove_sel_mmusr(pmove_sel_mmusr),
+	.illegal_instr(),
+	.priv_violation()
+);
+
+// PFLUSH Decoder
+TG68K030_PFLUSH_Decoder pflush_decoder
+(
+	.clk(clk),
+	.reset(~reset),
+	.opcode(fline_opcode),
+	.extension(fline_extension),
+	.opcode_valid(fline_opcode_valid),
+	.supervisor(cpu_supervisor),
+	.is_pflush(pflush_is_pflush),
+	.pflush_mode(pflush_mode),
+	.pflush_fc(),
+	.illegal_instr(),
+	.priv_violation()
+);
+
+// PTEST Decoder
+TG68K030_PTEST_Decoder ptest_decoder
+(
+	.clk(clk),
+	.reset(~reset),
+	.opcode(fline_opcode),
+	.extension(fline_extension),
+	.opcode_valid(fline_opcode_valid),
+	.supervisor(cpu_supervisor),
+	.is_ptest(ptest_is_ptest),
+	.ptest_level(),
+	.ptest_fc(),
+	.ptest_rw(),
+	.ptest_return_reg(),
+	.illegal_instr(),
+	.priv_violation()
+);
+
+// MMU Registers
+TG68K030_MMU_Registers mmu_regs
+(
+	.clk(clk),
+	.reset(~reset),
+	.supervisor(cpu_supervisor),
+	.reg_addr(mmu_reg_addr),
+	.reg_write(mmu_reg_write),
+	.reg_read(mmu_reg_read),
+	.reg_size(mmu_reg_size),
+	.data_in(mmu_data_out_64),
+	.data_out(mmu_data_in_64),
+	.tc_out(),
+	.tt0_out(),
+	.tt1_out(),
+	.crp_out(),
+	.srp_out(),
+	.mmusr_out()
+);
+
+// PMOVE Executor
+TG68K030_PMOVE_Execute pmove_exec
+(
+	.clk(clk),
+	.reset(~reset),
+	.pmove_start(pmove_start),
+	.pmove_direction(pmove_direction),
+	.pmove_fd(pmove_is_pmovefd),
+	.pmove_size(pmove_size),
+	.pmove_sel_tc(pmove_sel_tc),
+	.pmove_sel_tt0(pmove_sel_tt0),
+	.pmove_sel_tt1(pmove_sel_tt1),
+	.pmove_sel_crp(pmove_sel_crp),
+	.pmove_sel_srp(pmove_sel_srp),
+	.pmove_sel_mmusr(pmove_sel_mmusr),
+	.mem_addr(32'h00000000),
+	.mem_data_in(32'h00000000),
+	.mem_data_out(),
+	.mem_read(),
+	.mem_write(),
+	.mem_size(),
+	.mem_ready(stub_mem_ready),
+	.mmu_data_in(mmu_data_in_64),
+	.mmu_data_out(mmu_data_out_64),
+	.mmu_reg_addr(mmu_reg_addr),
+	.mmu_read(mmu_reg_read),
+	.mmu_write(mmu_reg_write),
+	.mmu_size(mmu_reg_size),
+	.atc_flush(),
+	.atc_flush_all(),
+	.pmove_done(pmove_done),
+	.pmove_busy(pmove_busy)
+);
+
+// PFLUSH Executor (Stub)
+TG68K030_PFLUSH_Execute pflush_exec
+(
+	.clk(clk),
+	.reset(~reset),
+	.pflush_start(pflush_start),
+	.pflush_mode(pflush_mode),
+	.pflush_fc(3'b000),
+	.atc_inv_addr(32'h00000000),
+	.atc_inv_req(),
+	.atc_inv_ack(stub_atc_inv_ack),
+	.pflush_done(pflush_done),
+	.pflush_busy(pflush_busy)
+);
+
+// PTEST Executor (Stub)
+TG68K030_PTEST_Execute ptest_exec
+(
+	.clk(clk),
+	.reset(~reset),
+	.ptest_start(ptest_start),
+	.ptest_level(3'b000),
+	.ptest_fc(3'b000),
+	.ptest_rw(1'b0),
+	.test_addr(32'h00000000),
+	.atc_hit(),
+	.atc_entry(),
+	.walk_start(),
+	.walk_done(1'b1),
+	.walk_result(16'h0000),
+	.mmusr_update(),
+	.mmusr_value(),
+	.return_reg(3'b000),
+	.return_value(),
+	.return_write(),
+	.ptest_done(ptest_done),
+	.ptest_busy(ptest_busy)
+);
+
+// Execution Coordinator
+reg pmove_start_r, pflush_start_r, ptest_start_r;
+
+always @(posedge clk) begin
+	if (~reset) begin
+		pmove_start_r <= 1'b0;
+		pflush_start_r <= 1'b0;
+		ptest_start_r <= 1'b0;
+		fline_exec_done <= 1'b0;
+	end
+	else if (fline_exec_req && !fline_exec_done) begin
+		// Start appropriate executor
+		if (fline_is_pmove && !pmove_busy) begin
+			pmove_start_r <= 1'b1;
+		end
+		else if (fline_is_pflush && !pflush_busy) begin
+			pflush_start_r <= 1'b1;
+		end
+		else if (fline_is_ptest && !ptest_busy) begin
+			ptest_start_r <= 1'b1;
+		end
+
+		// Signal completion when executor done
+		fline_exec_done <= pmove_done | pflush_done | ptest_done;
+	end
+	else begin
+		pmove_start_r <= 1'b0;
+		pflush_start_r <= 1'b0;
+		ptest_start_r <= 1'b0;
+		fline_exec_done <= 1'b0;
+	end
+end
+
+assign pmove_start = pmove_start_r;
+assign pflush_start = pflush_start_r;
+assign ptest_start = ptest_start_r;
 
 endmodule
