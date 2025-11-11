@@ -149,6 +149,16 @@ wire fline_is_ptest;
 wire fline_exec_req;
 reg  fline_exec_done;
 
+// F-line memory interface signals
+wire [31:0] fline_ea;
+wire fline_ea_valid;
+reg  fline_mem_req;
+reg  fline_mem_write;
+reg  [1:0] fline_mem_size;
+reg  [63:0] fline_mem_dataout;
+wire [63:0] fline_mem_datain;
+wire fline_mem_done;
+
 // Opcode capture
 reg [15:0] fline_opcode;
 reg [15:0] fline_extension;
@@ -248,7 +258,17 @@ cpu_inst_p
   .fline_is_pflush(fline_is_pflush & cpucfg[1]),
   .fline_is_ptest(fline_is_ptest & cpucfg[1]),
   .fline_exec_req(fline_exec_req),
-  .fline_exec_done(fline_exec_done)
+  .fline_exec_done(fline_exec_done),
+
+  // MC68030 F-line memory interface
+  .fline_ea(fline_ea),
+  .fline_ea_valid(fline_ea_valid),
+  .fline_mem_req(fline_mem_req),
+  .fline_mem_write(fline_mem_write),
+  .fline_mem_size(fline_mem_size),
+  .fline_mem_dataout(fline_mem_dataout),
+  .fline_mem_datain(fline_mem_datain),
+  .fline_mem_done(fline_mem_done)
 );
 
 wire [15:0] cpu_dout_o;
@@ -542,8 +562,7 @@ wire [3:0] mmu_reg_addr;
 wire [1:0] mmu_reg_size;
 wire [63:0] mmu_data_in_64, mmu_data_out_64;
 
-// Stub signals for incomplete interfaces
-wire stub_mem_ready = 1'b1;
+// Stub signals for incomplete interfaces (PFLUSH still stubbed)
 wire stub_atc_inv_ack = 1'b1;
 
 // Combine decoder outputs
@@ -633,6 +652,10 @@ TG68K030_MMU_Registers mmu_regs
 );
 
 // PMOVE Executor
+wire pmove_mem_read, pmove_mem_write;
+wire [1:0] pmove_mem_size;
+wire [63:0] pmove_mem_dataout;
+
 TG68K030_PMOVE_Execute pmove_exec
 (
 	.clk(clk),
@@ -647,13 +670,13 @@ TG68K030_PMOVE_Execute pmove_exec
 	.pmove_sel_crp(pmove_sel_crp),
 	.pmove_sel_srp(pmove_sel_srp),
 	.pmove_sel_mmusr(pmove_sel_mmusr),
-	.mem_addr(32'h00000000),
-	.mem_data_in(32'h00000000),
-	.mem_data_out(),
-	.mem_read(),
-	.mem_write(),
-	.mem_size(),
-	.mem_ready(stub_mem_ready),
+	.mem_addr(fline_ea),                 // ✅ From TG68K EA calculation
+	.mem_data_in(fline_mem_datain),      // ✅ From TG68K memory read
+	.mem_data_out(pmove_mem_dataout),    // ✅ To memory arbiter
+	.mem_read(pmove_mem_read),           // ✅ Memory read request
+	.mem_write(pmove_mem_write),         // ✅ Memory write request
+	.mem_size(pmove_mem_size),           // ✅ Transfer size
+	.mem_ready(fline_mem_done),          // ✅ From TG68K
 	.mmu_data_in(mmu_data_in_64),
 	.mmu_data_out(mmu_data_out_64),
 	.mmu_reg_addr(mmu_reg_addr),
@@ -741,5 +764,25 @@ end
 assign pmove_start = pmove_start_r;
 assign pflush_start = pflush_start_r;
 assign ptest_start = ptest_start_r;
+
+// F-line Memory Request Arbiter
+// Combines memory requests from all F-line executors
+always @(*) begin
+	// Default: no memory request
+	fline_mem_req = 1'b0;
+	fline_mem_write = 1'b0;
+	fline_mem_size = 2'b00;
+	fline_mem_dataout = 64'h0;
+
+	// Priority: PMOVE > PFLUSH > PTEST
+	if (pmove_mem_read | pmove_mem_write) begin
+		fline_mem_req = 1'b1;
+		fline_mem_write = pmove_mem_write;
+		fline_mem_size = pmove_mem_size;
+		fline_mem_dataout = pmove_mem_dataout;
+	end
+	// PFLUSH and PTEST memory operations would go here
+	// (currently they don't use memory interface)
+end
 
 endmodule

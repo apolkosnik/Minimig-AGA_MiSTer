@@ -145,7 +145,16 @@ entity TG68KdotC_Kernel is
 		fline_is_pflush		: in std_logic:='0';		-- PFLUSH detected
 		fline_is_ptest			: in std_logic:='0';		-- PTEST detected
 		fline_exec_req			: out std_logic;				-- Request external F-line execution
-		fline_exec_done		: in std_logic:='0'		-- F-line execution complete
+		fline_exec_done		: in std_logic:='0';		-- F-line execution complete
+-- MC68030 F-line memory interface (for memory EA operations)
+		fline_ea				: out std_logic_vector(31 downto 0);		-- Effective address
+		fline_ea_valid			: out std_logic;				-- EA calculated and valid
+		fline_mem_req			: in std_logic:='0';		-- F-line requests memory access
+		fline_mem_write		: in std_logic:='0';		-- 0=read, 1=write
+		fline_mem_size			: in std_logic_vector(1 downto 0):="00";		-- Transfer size (00=byte, 01=word, 10=long, 11=quad)
+		fline_mem_dataout		: in std_logic_vector(63 downto 0):=(others=>'0');		-- Data to write
+		fline_mem_datain		: out std_logic_vector(63 downto 0);		-- Data read
+		fline_mem_done			: out std_logic				-- Memory operation complete
 		);
 end TG68KdotC_Kernel;
 
@@ -1489,6 +1498,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		build_bcd <= '0';
 		skipFetch <= make_berr;
 		fline_exec_req <= '0';  -- MC68030 F-line execution request
+		fline_ea <= (others => '0');  -- MC68030 F-line effective address
+		fline_ea_valid <= '0';  -- MC68030 F-line EA valid
+		fline_mem_datain <= (others => '0');  -- MC68030 F-line memory data in
+		fline_mem_done <= '0';  -- MC68030 F-line memory operation done
 		set_writePCbig <= '0';
 --		set_recall_last <= '0';
 		set_Suppress_Base <= '0';
@@ -4015,7 +4028,28 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				-- MC68030 F-line MMU instruction execution
 				-- External executor handles the actual operation
 				fline_exec_req <= '1';
-				IF fline_exec_done='1' THEN
+
+				-- Provide effective address to F-line executor
+				fline_ea <= memaddr;
+				fline_ea_valid <= '1';
+
+				-- Provide memory data to F-line executor
+				-- For 64-bit transfers, combine last_data_read and data_read
+				fline_mem_datain <= last_data_read & data_read;
+
+				-- Handle memory requests from F-line executor
+				IF fline_mem_req='1' THEN
+					-- F-line executor requesting memory access
+					IF fline_mem_write='1' THEN
+						-- Write to memory
+						setstate <= "01";  -- Write state
+						-- Data from fline_mem_dataout will be used by wrapper
+					ELSE
+						-- Read from memory
+						setstate <= "10";  -- Read state
+					END IF;
+					fline_mem_done <= '1';  -- Signal completion (simplified - assumes single cycle)
+				ELSIF fline_exec_done='1' THEN
 					next_micro_state <= idle;  -- Return to idle when done
 				END IF;
 
