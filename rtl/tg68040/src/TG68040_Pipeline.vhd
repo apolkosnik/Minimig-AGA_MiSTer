@@ -33,6 +33,7 @@ use work.TG68040_Pack.all;
 use work.TG68040_Pipeline_Regs.all;
 use work.TG68040_Branch_Pack.all;
 use work.TG68040_MMU_Pack.all;
+use work.TG68040_FPU_Pack.all;
 
 entity TG68040_Pipeline is
     port(
@@ -161,6 +162,23 @@ architecture rtl of TG68040_Pipeline is
     signal mmu_datc_lookups : std_logic_vector(31 downto 0);
     signal mmu_datc_hits : std_logic_vector(31 downto 0);
     signal mmu_datc_misses : std_logic_vector(31 downto 0);
+
+    -- FPU signals (Phase 10)
+    signal fpu_enable : std_logic := '0';
+    signal fpu_operation : fp_operation_t := FP_OP_NOP;
+    signal fpu_rounding_mode : fp_rounding_t := ROUND_NEAREST;
+    signal fpu_src_reg_a : std_logic_vector(2 downto 0) := (others => '0');
+    signal fpu_src_reg_b : std_logic_vector(2 downto 0) := (others => '0');
+    signal fpu_dst_reg : std_logic_vector(2 downto 0) := (others => '0');
+    signal fpu_write_enable : std_logic := '0';
+    signal fpu_data_in : std_logic_vector(79 downto 0) := (others => '0');
+    signal fpu_data_out : std_logic_vector(79 downto 0);
+    signal fpu_result_valid : std_logic;
+    signal fpu_busy : std_logic;
+    signal fpu_fpsr : fpsr_register_t;
+    signal fpu_fpcr : fpcr_register_t := FPCR_REGISTER_INIT;
+    signal fpu_operations : std_logic_vector(31 downto 0);
+    signal fpu_exceptions : std_logic_vector(31 downto 0);
 
     -- Component declarations
     component TG68040_ICache is
@@ -292,6 +310,28 @@ architecture rtl of TG68040_Pipeline is
         );
     end component;
 
+    component TG68040_FPU is
+        port(
+            clk            : in std_logic;
+            reset          : in std_logic;
+            enable         : in std_logic;
+            operation      : in fp_operation_t;
+            rounding_mode  : in fp_rounding_t;
+            src_reg_a      : in std_logic_vector(2 downto 0);
+            src_reg_b      : in std_logic_vector(2 downto 0);
+            dst_reg        : in std_logic_vector(2 downto 0);
+            write_enable   : in std_logic;
+            data_in        : in std_logic_vector(79 downto 0);
+            data_out       : out std_logic_vector(79 downto 0);
+            result_valid   : out std_logic;
+            busy           : out std_logic;
+            fpsr           : out fpsr_register_t;
+            fpcr           : in fpcr_register_t;
+            operations     : out std_logic_vector(31 downto 0);
+            exceptions     : out std_logic_vector(31 downto 0)
+        );
+    end component;
+
 begin
 
     -- Outputs
@@ -395,6 +435,30 @@ begin
             datc_lookups   => mmu_datc_lookups,
             datc_hits      => mmu_datc_hits,
             datc_misses    => mmu_datc_misses
+        );
+
+    ------------------------------------------------------------------------------
+    -- FPU (Phase 10)
+    ------------------------------------------------------------------------------
+    fpu_inst: TG68040_FPU
+        port map(
+            clk            => clk,
+            reset          => reset,
+            enable         => fpu_enable,
+            operation      => fpu_operation,
+            rounding_mode  => fpu_rounding_mode,
+            src_reg_a      => fpu_src_reg_a,
+            src_reg_b      => fpu_src_reg_b,
+            dst_reg        => fpu_dst_reg,
+            write_enable   => fpu_write_enable,
+            data_in        => fpu_data_in,
+            data_out       => fpu_data_out,
+            result_valid   => fpu_result_valid,
+            busy           => fpu_busy,
+            fpsr           => fpu_fpsr,
+            fpcr           => fpu_fpcr,
+            operations     => fpu_operations,
+            exceptions     => fpu_exceptions
         );
 
     ------------------------------------------------------------------------------
@@ -569,6 +633,30 @@ begin
                     id_ea.branch_info <= branch_info_var;
                     id_ea.predicted_taken <= if_id.predicted_taken;
                     id_ea.predicted_target <= if_id.predicted_target;
+
+                    -- Phase 10: Detect FP instructions (F-line instructions)
+                    -- F-line instructions have bits 15-12 = "1111" (0xF)
+                    if opcode_high = x"F" then
+                        -- FP instruction detected
+                        -- For Phase 10 baseline: simple FADD stub
+                        -- Real decode would extract operation, source/dest FP regs
+                        fpu_enable <= '1';
+                        fpu_operation <= FP_OP_ADD;  -- Stub: always ADD for now
+                        fpu_src_reg_a <= if_id.instruction(2 downto 0);   -- Source FP reg
+                        fpu_src_reg_b <= if_id.instruction(9 downto 7);   -- Dest FP reg (also src2)
+                        fpu_dst_reg <= if_id.instruction(9 downto 7);     -- Dest FP reg
+                        fpu_write_enable <= '1';
+                        fpu_rounding_mode <= ROUND_NEAREST;
+
+                        -- Mark as FP instruction (don't execute in integer pipeline)
+                        id_ea.instr_type <= INSTR_NONE;
+                        id_ea.src_reg1 <= (others => '0');
+                        id_ea.src_reg2 <= (others => '0');
+                        id_ea.dst_reg <= (others => '0');
+                    else
+                        -- Non-FP instruction
+                        fpu_enable <= '0';
+                    end if;
 
                     -- Simple decode (Phase 3 - basic instruction set)
                     if if_id.instruction = x"4E71" then
