@@ -34,6 +34,7 @@ use work.TG68040_Pipeline_Regs.all;
 use work.TG68040_Branch_Pack.all;
 use work.TG68040_MMU_Pack.all;
 use work.TG68040_FPU_Pack.all;
+use work.TG68040_Exception_Pack.all;
 
 entity TG68040_Pipeline is
     port(
@@ -179,6 +180,28 @@ architecture rtl of TG68040_Pipeline is
     signal fpu_fpcr : fpcr_register_t := FPCR_REGISTER_INIT;
     signal fpu_operations : std_logic_vector(31 downto 0);
     signal fpu_exceptions : std_logic_vector(31 downto 0);
+
+    -- Exception signals (Phase 11)
+    -- Exception detection in each pipeline stage
+    signal if_exception : exception_info_t := EXCEPTION_INFO_NONE;
+    signal id_exception : exception_info_t := EXCEPTION_INFO_NONE;
+    signal ea_exception : exception_info_t := EXCEPTION_INFO_NONE;
+    signal of_exception : exception_info_t := EXCEPTION_INFO_NONE;
+    signal ex_exception : exception_info_t := EXCEPTION_INFO_NONE;
+
+    -- Exception arbitration
+    signal exception_pending : exception_info_t := EXCEPTION_INFO_NONE;
+    signal exception_active : std_logic := '0';
+
+    -- Status register
+    signal sr_register : status_register_t := SR_INIT;
+
+    -- Vector Base Register (VBR)
+    signal vbr_register : std_logic_vector(31 downto 0) := (others => '0');
+
+    -- Exception statistics
+    signal exception_count : std_logic_vector(31 downto 0) := (others => '0');
+    signal interrupt_count : std_logic_vector(31 downto 0) := (others => '0');
 
     -- Component declarations
     component TG68040_ICache is
