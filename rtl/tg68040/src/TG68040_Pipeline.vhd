@@ -1011,6 +1011,9 @@ begin
                     end if;
 
                     -- Simple decode (Phase 3 - basic instruction set)
+                    -- Default: no immediate value (will be overridden by instructions that use it)
+                    id_ea.immediate <= (others => '0');
+
                     -- Phase 11D: RTE instruction detection
                     if if_id.instruction = x"4E73" then
                         -- RTE (Return from Exception) instruction
@@ -1020,6 +1023,26 @@ begin
                         id_ea.src_reg1 <= (others => '0');
                         id_ea.src_reg2 <= (others => '0');
                         id_ea.dst_reg <= (others => '0');
+
+                    -- Phase 12: MOVEQ instruction (MVIS)
+                    elsif opcode_high = x"7" and if_id.instruction(8) = '0' then
+                        -- MOVEQ #<data>,Dn
+                        -- Format: 0111 RRR0 DDDDDDDD
+                        -- Sign-extend 8-bit immediate to 32 bits
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_OTHER;
+                        id_ea.src_reg1 <= (others => '0');  -- No source register
+                        id_ea.src_reg2 <= (others => '0');
+                        id_ea.dst_reg <= "0" & if_id.instruction(11 downto 9);  -- Destination Dn (D0-D7)
+
+                        -- Sign-extend 8-bit immediate to 32 bits
+                        if if_id.instruction(7) = '1' then
+                            -- Negative number (bit 7 = 1)
+                            id_ea.immediate <= x"FFFFFF" & if_id.instruction(7 downto 0);
+                        else
+                            -- Positive number (bit 7 = 0)
+                            id_ea.immediate <= x"000000" & if_id.instruction(7 downto 0);
+                        end if;
 
                     elsif if_id.instruction = x"4E71" then
                         -- NOP instruction
@@ -1045,13 +1068,33 @@ begin
                         id_ea.src_reg2 <= (others => '0');
                         id_ea.dst_reg <= "0" & if_id.instruction(11 downto 9);  -- Dest reg
 
+                    -- Phase 12: CMP instruction (0xBxxx, but check opmode to distinguish from EOR)
+                    elsif opcode_high = x"B" and if_id.instruction(8 downto 6) = "000" then
+                        -- CMP Dn,Dn (longword)
+                        -- Format: 1011 DDD 0SS 000 SSS
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_OTHER;
+                        id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);   -- Source Dn
+                        id_ea.src_reg2 <= "0" & if_id.instruction(11 downto 9);  -- Dest Dn
+                        id_ea.dst_reg <= (others => '0');  -- No destination (flags only)
+
                     elsif opcode_high = x"4" then
                         exc_unit_rte_req <= '0';
-                        -- Miscellaneous instructions (RTS, etc.)
-                        id_ea.instr_type <= INSTR_OTHER;
-                        id_ea.src_reg1 <= (others => '0');
-                        id_ea.src_reg2 <= (others => '0');
-                        id_ea.dst_reg <= (others => '0');
+                        -- Phase 12: Check for TST instruction (0x4A00-0x4AFF)
+                        if if_id.instruction(15 downto 8) = x"4A" then
+                            -- TST (Test) instruction
+                            -- Format: 01001010 SS 000 RRR (data register direct)
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source register to test
+                            id_ea.src_reg2 <= (others => '0');
+                            id_ea.dst_reg <= (others => '0');  -- No destination (flags only)
+                        else
+                            -- Other miscellaneous instructions (RTS, etc.)
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= (others => '0');
+                            id_ea.src_reg2 <= (others => '0');
+                            id_ea.dst_reg <= (others => '0');
+                        end if;
 
                     else
                         exc_unit_rte_req <= '0';
@@ -1062,7 +1105,6 @@ begin
                         id_ea.dst_reg <= (others => '0');
                     end if;
 
-                    id_ea.immediate <= (others => '0');
                     id_ea.exception <= if_id.exception;
                 end if;
             end if;
@@ -1135,12 +1177,27 @@ begin
 
                     -- Fetch operands with forwarding (Phase 4)
                     -- Use forwarded data if hazard detected, else register file
-                    of_ex.operand1 <= operand1_forwarded;
-                    of_ex.operand2 <= operand2_forwarded;
+                    -- Phase 12: For MOVEQ, use immediate value from ea_addr
+                    if ea_of.opcode(15 downto 12) = x"7" and ea_of.opcode(8) = '0' then
+                        -- MOVEQ: use immediate value from EA stage
+                        of_ex.operand1 <= ea_of.ea_addr;
+                        of_ex.operand2 <= (others => '0');
+                    else
+                        -- Normal register operands with forwarding
+                        of_ex.operand1 <= operand1_forwarded;
+                        of_ex.operand2 <= operand2_forwarded;
+                    end if;
 
                     -- Determine if we need to write back
+                    -- Phase 12: CMP and TST don't write to registers (flags only)
                     if ea_of.instr_type = INSTR_OTHER then
-                        of_ex.write_reg <= '1';
+                        -- Check if it's CMP or TST (flags only, no writeback)
+                        if (ea_of.opcode(15 downto 12) = x"B" and ea_of.opcode(8 downto 6) = "000") or
+                           (ea_of.opcode(15 downto 8) = x"4A") then
+                            of_ex.write_reg <= '0';  -- CMP or TST: no register write
+                        else
+                            of_ex.write_reg <= '1';  -- Normal instruction: write result
+                        end if;
                     else
                         of_ex.write_reg <= '0';
                     end if;
@@ -1232,6 +1289,53 @@ begin
                     elsif opcode_high = x"3" or opcode_high = x"2" or opcode_high = x"1" then
                         -- MOVE operation - pass through operand1
                         ex_wb.result <= of_ex.operand1;
+                        ex_wb.flags(3) <= of_ex.operand1(31);  -- Negative
+                        if of_ex.operand1 = x"00000000" then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12: MOVEQ instruction (MVIS)
+                    elsif opcode_high = x"7" and of_ex.opcode(8) = '0' then
+                        -- MOVEQ #<data>,Dn
+                        -- Move immediate (already sign-extended) to data register
+                        ex_wb.result <= of_ex.operand1;
+                        -- Set flags according to MC68040 spec:
+                        -- N = MSB of result, Z = result is zero, V = 0, C = 0, X unchanged
+                        ex_wb.flags(3) <= of_ex.operand1(31);  -- Negative
+                        if of_ex.operand1 = x"00000000" then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12: CMP instruction (MVIS)
+                    elsif opcode_high = x"B" and of_ex.opcode(8 downto 6) = "000" then
+                        -- CMP Dn,Dn - Compare (Dest - Source)
+                        -- Result not stored, only flags updated
+                        alu_result := unsigned(of_ex.operand2) - unsigned(of_ex.operand1);
+                        ex_wb.result <= (others => '0');  -- No result stored
+                        -- Set flags: N, Z, V, C according to subtraction
+                        ex_wb.flags(3) <= alu_result(31);  -- Negative
+                        if alu_result = 0 then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow (simplified)
+                        ex_wb.flags(0) <= '0';  -- Carry (simplified)
+
+                    -- Phase 12: TST instruction (MVIS)
+                    elsif opcode_high = x"4" and of_ex.opcode(15 downto 8) = x"4A" then
+                        -- TST - Test operand against zero
+                        -- Result not stored, only flags updated
+                        ex_wb.result <= (others => '0');  -- No result stored
+                        -- Set flags: N, Z according to operand, V=0, C=0
                         ex_wb.flags(3) <= of_ex.operand1(31);  -- Negative
                         if of_ex.operand1 = x"00000000" then
                             ex_wb.flags(2) <= '1';  -- Zero
