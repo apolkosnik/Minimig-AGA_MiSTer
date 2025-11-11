@@ -8,7 +8,7 @@ TG68040 is an FPGA implementation of the Motorola MC68040 processor, based on th
 
 🚧 **UNDER ACTIVE DEVELOPMENT** 🚧
 
-**Current Phase:** Phase 3 - Pipeline Foundation
+**Current Phase:** Phase 4 - Hazard Detection (Next)
 **Target Completion:** Q3 2025 (estimated)
 
 ### Completed Milestones
@@ -24,16 +24,22 @@ TG68040 is an FPGA implementation of the Motorola MC68040 processor, based on th
   - CINV/CPUSH cache operations (stubs)
   - Instruction decoder types
   - 20 unit tests (100% passing)
+- ✅ Phase 3: Pipeline Foundation (2025-11-11)
+  - 6-stage pipeline (IF, ID, EA, OF, EX, WB)
+  - Pipeline register definitions
+  - Basic instruction support (NOP, MOVE, ADD, SUB)
+  - Pipeline control (stall/flush)
+  - 25 unit tests
 
 ### Current Work
-- 🔨 Phase 3: Pipeline Foundation (Next)
-  - 6-stage pipeline design
-  - Pipeline registers
-  - Instruction flow control
+- 🔨 Phase 4: Hazard Detection (Next)
+  - RAW/WAW/WAR hazard detection
+  - Data forwarding paths
+  - Pipeline optimization
 
 ### Upcoming
-- ⏳ Phase 4: Hazard detection and forwarding
 - ⏳ Phase 5: Instruction cache (stub)
+- ⏳ Phase 6: Data cache (stub)
 
 ## Features (Planned)
 
@@ -153,7 +159,7 @@ This project follows a rigorous, incremental development methodology:
 | 0 | Foundation | 1-2 days | ✅ Complete (2025-11-11) |
 | 1 | Core Extension & CPU ID | 3-5 days | ✅ Complete (2025-11-11) |
 | 2 | New Instructions (Simple) | 5-7 days | ✅ Complete (2025-11-11) |
-| 3 | Pipeline Foundation | 7-10 days | ⏳ Planned |
+| 3 | Pipeline Foundation | 7-10 days | ✅ Complete (2025-11-11) |
 | 4 | Pipeline Hazard Detection | 7-10 days | ⏳ Planned |
 | 5 | Instruction Cache (Stub) | 5-7 days | ⏳ Planned |
 | 6 | Data Cache (Stub) | 5-7 days | ⏳ Planned |
@@ -277,6 +283,6 @@ See [LICENSE](../../LICENSE) for full license text.
 
 ---
 
-**Status:** Foundation complete, Phase 1 in progress
+**Status:** Phase 3 complete, Phase 4 next
 **Last Updated:** 2025-11-11
-**Next Milestone:** Phase 1 completion (CPU mode & registers)
+**Next Milestone:** Phase 4 - Hazard detection and data forwarding
