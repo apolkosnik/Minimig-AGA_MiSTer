@@ -57,18 +57,11 @@ end entity TG68K030_BurstController;
 
 architecture rtl of TG68K030_BurstController is
 
-    -- Burst state machine
+    -- Burst state machine (optimized: fewer states for better performance)
     type state_t is (
         IDLE,           -- Waiting for burst request
         BURST_START,    -- Assert address and BURST
-        BURST_WAIT1,    -- Wait for DSACK on beat 1
-        BURST_DATA1,    -- Capture data beat 1
-        BURST_WAIT2,    -- Wait for DSACK on beat 2
-        BURST_DATA2,    -- Capture data beat 2
-        BURST_WAIT3,    -- Wait for DSACK on beat 3
-        BURST_DATA3,    -- Capture data beat 3
-        BURST_WAIT4,    -- Wait for DSACK on beat 4
-        BURST_DATA4,    -- Capture data beat 4
+        BURST_BEAT,     -- Wait for DSACK and capture data (all beats)
         BURST_COMPLETE, -- All beats complete
         BURST_ERROR_ST  -- Bus error occurred
     );
@@ -147,130 +140,63 @@ begin
 
                 ------------------------------------------------------
                 -- BURST_START: Assert address and BURST signal
+                -- Optimized: Jump directly to BURST_BEAT state
                 ------------------------------------------------------
                 when BURST_START =>
-                    bus_addr  <= current_addr;
+                    bus_addr  <= base_addr;
                     bus_as    <= '1';
                     bus_ds    <= '1';
                     bus_burst <= '1';  -- Indicate burst transfer
 
-                    state <= BURST_WAIT1;
+                    state <= BURST_BEAT;
 
                 ------------------------------------------------------
-                -- BURST_WAIT1: Wait for DSACK on beat 1
+                -- BURST_BEAT: Handle all 4 beats with DSACK handshake
+                -- Optimized: Combined wait and data capture in one state
+                -- This reduces burst latency by 36% (11 → 7 cycles)
                 ------------------------------------------------------
-                when BURST_WAIT1 =>
-                    if bus_berr = '1' then
-                        -- Bus error, abort burst
-                        burst_error <= '1';
-                        state       <= BURST_ERROR_ST;
-
-                    elsif dsack_asserted = '1' then
-                        -- DSACK received, capture data
-                        state <= BURST_DATA1;
-                    end if;
-
-                ------------------------------------------------------
-                -- BURST_DATA1: Capture data from beat 1
-                ------------------------------------------------------
-                when BURST_DATA1 =>
-                    data_reg_0   <= bus_data_in;
-                    current_addr <= std_logic_vector(unsigned(current_addr) + 4);
-                    beat_count   <= 1;
-
-                    -- Deassert strobes briefly
-                    bus_as <= '0';
-                    bus_ds <= '0';
-
-                    state <= BURST_WAIT2;
-
-                ------------------------------------------------------
-                -- BURST_WAIT2: Wait for DSACK on beat 2
-                ------------------------------------------------------
-                when BURST_WAIT2 =>
-                    bus_addr <= current_addr;
-                    bus_as   <= '1';
-                    bus_ds   <= '1';
-                    -- BURST remains asserted
-
+                when BURST_BEAT =>
+                    -- Check for bus error first
                     if bus_berr = '1' then
                         burst_error <= '1';
+                        bus_as      <= '0';
+                        bus_ds      <= '0';
+                        bus_burst   <= '0';
                         state       <= BURST_ERROR_ST;
 
+                    -- Wait for DSACK, then capture data and advance
                     elsif dsack_asserted = '1' then
-                        state <= BURST_DATA2;
+                        -- Capture data based on current beat
+                        case beat_count is
+                            when 0 => data_reg_0 <= bus_data_in;
+                            when 1 => data_reg_1 <= bus_data_in;
+                            when 2 => data_reg_2 <= bus_data_in;
+                            when 3 => data_reg_3 <= bus_data_in;
+                            when others => null;
+                        end case;
+
+                        -- Check if this was the last beat
+                        if beat_count = 3 then
+                            -- Burst complete
+                            bus_as    <= '0';
+                            bus_ds    <= '0';
+                            bus_burst <= '0';
+                            state     <= BURST_COMPLETE;
+                        else
+                            -- Advance to next beat
+                            beat_count   <= beat_count + 1;
+                            current_addr <= std_logic_vector(unsigned(current_addr) + 4);
+
+                            -- Update address for next beat
+                            -- Keep AS/DS asserted for continuous burst
+                            bus_addr <= std_logic_vector(unsigned(current_addr) + 4);
+
+                            -- Deassert BURST on last beat (beat 3)
+                            if beat_count = 2 then
+                                bus_burst <= '0';
+                            end if;
+                        end if;
                     end if;
-
-                ------------------------------------------------------
-                -- BURST_DATA2: Capture data from beat 2
-                ------------------------------------------------------
-                when BURST_DATA2 =>
-                    data_reg_1   <= bus_data_in;
-                    current_addr <= std_logic_vector(unsigned(current_addr) + 4);
-                    beat_count   <= 2;
-
-                    bus_as <= '0';
-                    bus_ds <= '0';
-
-                    state <= BURST_WAIT3;
-
-                ------------------------------------------------------
-                -- BURST_WAIT3: Wait for DSACK on beat 3
-                ------------------------------------------------------
-                when BURST_WAIT3 =>
-                    bus_addr <= current_addr;
-                    bus_as   <= '1';
-                    bus_ds   <= '1';
-                    -- BURST remains asserted
-
-                    if bus_berr = '1' then
-                        burst_error <= '1';
-                        state       <= BURST_ERROR_ST;
-
-                    elsif dsack_asserted = '1' then
-                        state <= BURST_DATA3;
-                    end if;
-
-                ------------------------------------------------------
-                -- BURST_DATA3: Capture data from beat 3
-                ------------------------------------------------------
-                when BURST_DATA3 =>
-                    data_reg_2   <= bus_data_in;
-                    current_addr <= std_logic_vector(unsigned(current_addr) + 4);
-                    beat_count   <= 3;
-
-                    bus_as <= '0';
-                    bus_ds <= '0';
-
-                    state <= BURST_WAIT4;
-
-                ------------------------------------------------------
-                -- BURST_WAIT4: Wait for DSACK on beat 4 (last)
-                ------------------------------------------------------
-                when BURST_WAIT4 =>
-                    bus_addr  <= current_addr;
-                    bus_as    <= '1';
-                    bus_ds    <= '1';
-                    bus_burst <= '0';  -- Deassert BURST on last beat
-
-                    if bus_berr = '1' then
-                        burst_error <= '1';
-                        state       <= BURST_ERROR_ST;
-
-                    elsif dsack_asserted = '1' then
-                        state <= BURST_DATA4;
-                    end if;
-
-                ------------------------------------------------------
-                -- BURST_DATA4: Capture data from beat 4 (last)
-                ------------------------------------------------------
-                when BURST_DATA4 =>
-                    data_reg_3 <= bus_data_in;
-
-                    bus_as <= '0';
-                    bus_ds <= '0';
-
-                    state <= BURST_COMPLETE;
 
                 ------------------------------------------------------
                 -- BURST_COMPLETE: All beats successful

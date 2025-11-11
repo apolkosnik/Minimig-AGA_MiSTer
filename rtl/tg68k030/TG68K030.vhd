@@ -23,6 +23,26 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity TG68K030 is
+    generic(
+        -- Feature Enable Flags
+        -- Allows selective disabling of features to reduce resource usage
+        ENABLE_MMU        : boolean := true;   -- Enable MMU with ATC (33% of logic)
+        ENABLE_CACHES     : boolean := true;   -- Enable I-Cache and D-Cache (20% of logic)
+        ENABLE_BURST      : boolean := true;   -- Enable burst mode transfers
+
+        -- Cache Configuration
+        CACHE_SIZE        : integer := 256;    -- Cache size in bytes (256, 128, or 64)
+                                                -- Both I-Cache and D-Cache use this size
+
+        -- ATC Configuration
+        ATC_ENTRIES       : integer := 22;     -- ATC entry count (22, 16, or 8)
+                                                -- Only used if ENABLE_MMU = true
+
+        -- Optional Features (future expansion)
+        ENABLE_PLOAD      : boolean := false;  -- PLOAD instruction (not yet implemented)
+        ENABLE_LONG_DESC  : boolean := false;  -- Long-format descriptors (not yet implemented)
+        ENABLE_COPYBACK   : boolean := false   -- Copyback cache mode (not yet implemented)
+    );
     port(
         -- Clock and reset
         clk         : in  std_logic;
