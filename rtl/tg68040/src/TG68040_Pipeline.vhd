@@ -1096,6 +1096,16 @@ begin
                             id_ea.dst_reg <= (others => '0');
                         end if;
 
+                    -- Phase 12: Bcc (branch) instructions (MVIS)
+                    -- These are already detected by branch unit, just mark as INSTR_NONE
+                    elsif opcode_high = x"6" then
+                        -- Bcc family (BRA, Bcc)
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_NONE;  -- No ALU operation (handled by branch unit)
+                        id_ea.src_reg1 <= (others => '0');
+                        id_ea.src_reg2 <= (others => '0');
+                        id_ea.dst_reg <= (others => '0');
+
                     else
                         exc_unit_rte_req <= '0';
                         -- Other/unknown instruction - treat as NOP for Phase 3
