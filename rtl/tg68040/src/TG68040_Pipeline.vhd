@@ -1078,9 +1078,39 @@ begin
                         id_ea.src_reg2 <= "0" & if_id.instruction(11 downto 9);  -- Dest Dn
                         id_ea.dst_reg <= (others => '0');  -- No destination (flags only)
 
+                    -- Phase 12: EOR instruction (0xBxxx with opmode 1xx)
+                    elsif opcode_high = x"B" and if_id.instruction(8) = '1' then
+                        -- EOR Dn,Dn (longword) - Exclusive OR
+                        -- Format: 1011 DDD 1SS MMM RRR (Dn ^ <ea> → <ea>)
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_OTHER;
+                        id_ea.src_reg1 <= "0" & if_id.instruction(11 downto 9);  -- Source Dn (data)
+                        id_ea.src_reg2 <= "0" & if_id.instruction(2 downto 0);   -- Dest Dn (also src2)
+                        id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);    -- Dest Dn
+
+                    -- Phase 12: AND instruction (0xCxxx with opmode 0xx for Dn & <ea> → Dn)
+                    elsif opcode_high = x"C" and if_id.instruction(8) = '0' then
+                        -- AND Dn,Dn (longword) - Logical AND
+                        -- Format: 1100 DDD 0SS MMM RRR (Dn & <ea> → Dn)
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_OTHER;
+                        id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);   -- Source Dn
+                        id_ea.src_reg2 <= "0" & if_id.instruction(11 downto 9);  -- Dest Dn (also src2)
+                        id_ea.dst_reg <= "0" & if_id.instruction(11 downto 9);   -- Dest Dn
+
+                    -- Phase 12: OR instruction (0x8xxx with opmode 0xx for Dn | <ea> → Dn)
+                    elsif opcode_high = x"8" and if_id.instruction(8) = '0' then
+                        -- OR Dn,Dn (longword) - Logical OR
+                        -- Format: 1000 DDD 0SS MMM RRR (Dn | <ea> → Dn)
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_OTHER;
+                        id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);   -- Source Dn
+                        id_ea.src_reg2 <= "0" & if_id.instruction(11 downto 9);  -- Dest Dn (also src2)
+                        id_ea.dst_reg <= "0" & if_id.instruction(11 downto 9);   -- Dest Dn
+
                     elsif opcode_high = x"4" then
                         exc_unit_rte_req <= '0';
-                        -- Phase 12: Check for TST instruction (0x4A00-0x4AFF)
+                        -- Phase 12: Check for various 0x4xxx instructions
                         if if_id.instruction(15 downto 8) = x"4A" then
                             -- TST (Test) instruction
                             -- Format: 01001010 SS 000 RRR (data register direct)
@@ -1088,6 +1118,27 @@ begin
                             id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source register to test
                             id_ea.src_reg2 <= (others => '0');
                             id_ea.dst_reg <= (others => '0');  -- No destination (flags only)
+                        elsif if_id.instruction(15 downto 8) = x"46" then
+                            -- NOT (Logical complement) instruction
+                            -- Format: 01000110 SS 000 RRR (~<ea> → <ea>)
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source register
+                            id_ea.src_reg2 <= (others => '0');
+                            id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);   -- Dest = source
+                        elsif if_id.instruction(15 downto 8) = x"44" then
+                            -- NEG (Negate) instruction
+                            -- Format: 01000100 SS 000 RRR (0 - <ea> → <ea>)
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source register
+                            id_ea.src_reg2 <= (others => '0');
+                            id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);   -- Dest = source
+                        elsif if_id.instruction(15 downto 8) = x"42" then
+                            -- CLR (Clear) instruction
+                            -- Format: 01000010 SS 000 RRR (0 → <ea>)
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= (others => '0');  -- No source (always zero)
+                            id_ea.src_reg2 <= (others => '0');
+                            id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);   -- Dest register
                         else
                             -- Other miscellaneous instructions (RTS, etc.)
                             id_ea.instr_type <= INSTR_OTHER;
@@ -1352,6 +1403,95 @@ begin
                         else
                             ex_wb.flags(2) <= '0';
                         end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12: AND instruction (Phase 12A)
+                    elsif opcode_high = x"C" and of_ex.opcode(8) = '0' then
+                        -- AND Dn,Dn - Logical AND
+                        alu_result := unsigned(of_ex.operand1) and unsigned(of_ex.operand2);
+                        ex_wb.result <= std_logic_vector(alu_result);
+                        -- Set flags: N, Z according to result, V=0, C=0
+                        ex_wb.flags(3) <= alu_result(31);  -- Negative
+                        if alu_result = 0 then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12: OR instruction (Phase 12A)
+                    elsif opcode_high = x"8" and of_ex.opcode(8) = '0' then
+                        -- OR Dn,Dn - Logical OR
+                        alu_result := unsigned(of_ex.operand1) or unsigned(of_ex.operand2);
+                        ex_wb.result <= std_logic_vector(alu_result);
+                        -- Set flags: N, Z according to result, V=0, C=0
+                        ex_wb.flags(3) <= alu_result(31);  -- Negative
+                        if alu_result = 0 then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12: EOR instruction (Phase 12A)
+                    elsif opcode_high = x"B" and of_ex.opcode(8) = '1' then
+                        -- EOR Dn,Dn - Exclusive OR
+                        alu_result := unsigned(of_ex.operand1) xor unsigned(of_ex.operand2);
+                        ex_wb.result <= std_logic_vector(alu_result);
+                        -- Set flags: N, Z according to result, V=0, C=0
+                        ex_wb.flags(3) <= alu_result(31);  -- Negative
+                        if alu_result = 0 then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12: NOT instruction (Phase 12A)
+                    elsif opcode_high = x"4" and of_ex.opcode(15 downto 8) = x"46" then
+                        -- NOT - Logical complement
+                        alu_result := not unsigned(of_ex.operand1);
+                        ex_wb.result <= std_logic_vector(alu_result);
+                        -- Set flags: N, Z according to result, V=0, C=0
+                        ex_wb.flags(3) <= alu_result(31);  -- Negative
+                        if alu_result = 0 then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12: NEG instruction (Phase 12A)
+                    elsif opcode_high = x"4" and of_ex.opcode(15 downto 8) = x"44" then
+                        -- NEG - Negate (0 - operand)
+                        alu_result := unsigned(not of_ex.operand1) + 1;  -- Two's complement
+                        ex_wb.result <= std_logic_vector(alu_result);
+                        -- Set flags: N, Z, V, C according to result
+                        ex_wb.flags(3) <= alu_result(31);  -- Negative
+                        if alu_result = 0 then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow (simplified)
+                        if alu_result = 0 then
+                            ex_wb.flags(0) <= '0';  -- Carry cleared if result is zero
+                        else
+                            ex_wb.flags(0) <= '1';  -- Carry set if result is non-zero
+                        end if;
+
+                    -- Phase 12: CLR instruction (Phase 12A)
+                    elsif opcode_high = x"4" and of_ex.opcode(15 downto 8) = x"42" then
+                        -- CLR - Clear (0 → destination)
+                        ex_wb.result <= (others => '0');
+                        -- Set flags: N=0, Z=1, V=0, C=0
+                        ex_wb.flags(3) <= '0';  -- Negative cleared
+                        ex_wb.flags(2) <= '1';  -- Zero set
                         ex_wb.flags(1) <= '0';  -- Overflow cleared
                         ex_wb.flags(0) <= '0';  -- Carry cleared
 
