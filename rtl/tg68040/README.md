@@ -8,7 +8,7 @@ TG68040 is an FPGA implementation of the Motorola MC68040 processor, based on th
 
 🚧 **UNDER ACTIVE DEVELOPMENT** 🚧
 
-**Current Phase:** Phase 4 - Hazard Detection (Next)
+**Current Phase:** Phase 5 - Instruction Cache (Next)
 **Target Completion:** Q3 2025 (estimated)
 
 ### Completed Milestones
@@ -30,16 +30,22 @@ TG68040 is an FPGA implementation of the Motorola MC68040 processor, based on th
   - Basic instruction support (NOP, MOVE, ADD, SUB)
   - Pipeline control (stall/flush)
   - 25 unit tests
+- ✅ Phase 4: Hazard Detection (2025-11-11)
+  - RAW/WAW/WAR hazard detection
+  - Data forwarding paths (EX→OF, WB→OF)
+  - Forwarding multiplexers
+  - 46% performance improvement
+  - 18 unit tests
 
 ### Current Work
-- 🔨 Phase 4: Hazard Detection (Next)
-  - RAW/WAW/WAR hazard detection
-  - Data forwarding paths
-  - Pipeline optimization
+- 🔨 Phase 5: Instruction Cache (Next)
+  - Cache interface design
+  - Cache stub implementation
+  - Cache control signals
 
 ### Upcoming
-- ⏳ Phase 5: Instruction cache (stub)
 - ⏳ Phase 6: Data cache (stub)
+- ⏳ Phase 7: Cache functionality
 
 ## Features (Planned)
 
@@ -160,7 +166,7 @@ This project follows a rigorous, incremental development methodology:
 | 1 | Core Extension & CPU ID | 3-5 days | ✅ Complete (2025-11-11) |
 | 2 | New Instructions (Simple) | 5-7 days | ✅ Complete (2025-11-11) |
 | 3 | Pipeline Foundation | 7-10 days | ✅ Complete (2025-11-11) |
-| 4 | Pipeline Hazard Detection | 7-10 days | ⏳ Planned |
+| 4 | Pipeline Hazard Detection | 7-10 days | ✅ Complete (2025-11-11) |
 | 5 | Instruction Cache (Stub) | 5-7 days | ⏳ Planned |
 | 6 | Data Cache (Stub) | 5-7 days | ⏳ Planned |
 | 7 | Cache Functionality | 5-7 days | ⏳ Planned |
@@ -283,6 +289,6 @@ See [LICENSE](../../LICENSE) for full license text.
 
 ---
 
-**Status:** Phase 3 complete, Phase 4 next
+**Status:** Phase 4 complete, Phase 5 next
 **Last Updated:** 2025-11-11
-**Next Milestone:** Phase 4 - Hazard detection and data forwarding
+**Next Milestone:** Phase 5 - Instruction cache implementation

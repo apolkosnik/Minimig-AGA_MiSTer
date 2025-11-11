@@ -93,9 +93,41 @@ architecture rtl of TG68040_Pipeline is
     signal global_stall : std_logic;
     signal global_flush : std_logic;
 
+    -- Hazard detection (Phase 4)
+    signal hazard_info : hazard_info_t := HAZARD_INFO_INIT;
+    signal hazard_stall : std_logic;
+
+    -- Forwarding multiplexer outputs
+    signal operand1_forwarded : std_logic_vector(31 downto 0);
+    signal operand2_forwarded : std_logic_vector(31 downto 0);
+
     -- Simple instruction memory (for testing - 256 instructions)
     type instr_mem_t is array (0 to 255) of std_logic_vector(15 downto 0);
     signal instr_memory : instr_mem_t := (others => x"4E71");  -- NOP instructions
+
+    -- Component declarations
+    component TG68040_HazardUnit is
+        port(
+            clk            : in std_logic;
+            reset          : in std_logic;
+            id_ea_valid    : in std_logic;
+            id_ea_src_reg1 : in std_logic_vector(3 downto 0);
+            id_ea_src_reg2 : in std_logic_vector(3 downto 0);
+            id_ea_dst_reg  : in std_logic_vector(3 downto 0);
+            id_ea_write    : in std_logic;
+            ea_of_valid    : in std_logic;
+            ea_of_dst_reg  : in std_logic_vector(3 downto 0);
+            ea_of_write    : in std_logic;
+            of_ex_valid    : in std_logic;
+            of_ex_dst_reg  : in std_logic_vector(3 downto 0);
+            of_ex_write    : in std_logic;
+            ex_wb_valid    : in std_logic;
+            ex_wb_dst_reg  : in std_logic_vector(3 downto 0);
+            ex_wb_write    : in std_logic;
+            hazard_info    : out hazard_info_t;
+            stall_pipeline : out std_logic
+        );
+    end component;
 
 begin
 
@@ -112,6 +144,46 @@ begin
 
     -- Next PC calculation
     pc_next <= pc + 2 when global_stall = '0' else pc;
+
+    ------------------------------------------------------------------------------
+    -- Hazard Detection Unit (Phase 4)
+    ------------------------------------------------------------------------------
+    hazard_unit: TG68040_HazardUnit
+        port map(
+            clk            => clk,
+            reset          => reset,
+            id_ea_valid    => id_ea.valid,
+            id_ea_src_reg1 => id_ea.src_reg1,
+            id_ea_src_reg2 => id_ea.src_reg2,
+            id_ea_dst_reg  => id_ea.dst_reg,
+            id_ea_write    => '1',  -- Simplified: assume all INSTR_OTHER write
+            ea_of_valid    => ea_of.valid,
+            ea_of_dst_reg  => ea_of.dst_reg,
+            ea_of_write    => '1',  -- Simplified
+            of_ex_valid    => of_ex.valid,
+            of_ex_dst_reg  => of_ex.dst_reg,
+            of_ex_write    => of_ex.write_reg,
+            ex_wb_valid    => ex_wb.valid,
+            ex_wb_dst_reg  => ex_wb.dst_reg,
+            ex_wb_write    => ex_wb.write_reg,
+            hazard_info    => hazard_info,
+            stall_pipeline => hazard_stall
+        );
+
+    ------------------------------------------------------------------------------
+    -- Data Forwarding Multiplexers (Phase 4)
+    ------------------------------------------------------------------------------
+    -- Operand A forwarding (priority: EX > WB > RegFile)
+    operand1_forwarded <=
+        of_ex.result when hazard_info.forward_ex_a = '1' else
+        ex_wb.result when hazard_info.forward_wb_a = '1' else
+        reg_data_a;
+
+    -- Operand B forwarding (priority: EX > WB > RegFile)
+    operand2_forwarded <=
+        of_ex.result when hazard_info.forward_ex_b = '1' else
+        ex_wb.result when hazard_info.forward_wb_b = '1' else
+        reg_data_b;
 
     ------------------------------------------------------------------------------
     -- IF Stage: Instruction Fetch
@@ -261,11 +333,10 @@ begin
                     of_ex.opcode <= ea_of.opcode;
                     of_ex.dst_reg <= ea_of.dst_reg;
 
-                    -- Fetch operands from register file
-                    -- reg_data_a and reg_data_b are already being driven by reg_addr_a/b
-                    -- which are connected to id_ea.src_reg1/2
-                    of_ex.operand1 <= reg_data_a;
-                    of_ex.operand2 <= reg_data_b;
+                    -- Fetch operands with forwarding (Phase 4)
+                    -- Use forwarded data if hazard detected, else register file
+                    of_ex.operand1 <= operand1_forwarded;
+                    of_ex.operand2 <= operand2_forwarded;
 
                     -- Determine if we need to write back
                     if ea_of.instr_type = INSTR_OTHER then

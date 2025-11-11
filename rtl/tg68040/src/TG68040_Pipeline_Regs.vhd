@@ -226,4 +226,29 @@ package TG68040_Pipeline_Regs is
         flushes_total => (others => '0')
     );
 
+    ------------------------------------------------------------------------------
+    -- Hazard Detection Information (Phase 4)
+    ------------------------------------------------------------------------------
+    type hazard_info_t is record
+        raw_hazard      : std_logic;  -- Read After Write detected
+        waw_hazard      : std_logic;  -- Write After Write detected
+        war_hazard      : std_logic;  -- Write After Read detected
+        stall_required  : std_logic;  -- Must stall pipeline
+        forward_ex_a    : std_logic;  -- Forward from EX stage to operand A
+        forward_ex_b    : std_logic;  -- Forward from EX stage to operand B
+        forward_wb_a    : std_logic;  -- Forward from WB stage to operand A
+        forward_wb_b    : std_logic;  -- Forward from WB stage to operand B
+    end record;
+
+    constant HAZARD_INFO_INIT : hazard_info_t := (
+        raw_hazard     => '0',
+        waw_hazard     => '0',
+        war_hazard     => '0',
+        stall_required => '0',
+        forward_ex_a   => '0',
+        forward_ex_b   => '0',
+        forward_wb_a   => '0',
+        forward_wb_b   => '0'
+    );
+
 end package TG68040_Pipeline_Regs;
