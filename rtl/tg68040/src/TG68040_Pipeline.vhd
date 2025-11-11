@@ -31,6 +31,7 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 use work.TG68040_Pack.all;
 use work.TG68040_Pipeline_Regs.all;
+use work.TG68040_Branch_Pack.all;
 
 entity TG68040_Pipeline is
     port(
@@ -123,6 +124,23 @@ architecture rtl of TG68040_Pipeline is
     signal dcache_read_count : std_logic_vector(31 downto 0);
     signal dcache_write_count : std_logic_vector(31 downto 0);
 
+    -- Branch Prediction signals (Phase 8)
+    signal branch_predict_valid : std_logic;
+    signal branch_predict_taken : std_logic;
+    signal branch_predict_target : std_logic_vector(31 downto 0);
+    signal branch_btb_hit : std_logic;
+    signal branch_ras_hit : std_logic;
+    signal branch_resolve_en : std_logic;
+    signal branch_resolve_type : branch_type_t;
+    signal branch_resolve_taken : std_logic;
+    signal branch_resolve_target : std_logic_vector(31 downto 0);
+    signal branch_mispredict : std_logic;
+    signal branch_correct_target : std_logic_vector(31 downto 0);
+    signal branch_count : std_logic_vector(31 downto 0);
+    signal branch_correct_count : std_logic_vector(31 downto 0);
+    signal branch_mispredict_count : std_logic_vector(31 downto 0);
+    signal ccr_register : std_logic_vector(7 downto 0) := (others => '0');
+
     -- Component declarations
     component TG68040_ICache is
         port(
@@ -197,6 +215,37 @@ architecture rtl of TG68040_Pipeline is
         );
     end component;
 
+    component TG68040_BranchUnit is
+        port(
+            clk                 : in std_logic;
+            reset               : in std_logic;
+            predict_pc          : in std_logic_vector(31 downto 0);
+            predict_instr       : in std_logic_vector(15 downto 0);
+            predict_valid       : out std_logic;
+            predict_taken       : out std_logic;
+            predict_target      : out std_logic_vector(31 downto 0);
+            btb_hit             : out std_logic;
+            ras_hit             : out std_logic;
+            resolve_en          : in std_logic;
+            resolve_pc          : in std_logic_vector(31 downto 0);
+            resolve_type        : in branch_type_t;
+            resolve_taken       : in std_logic;
+            resolve_target      : in std_logic_vector(31 downto 0);
+            resolve_ccr         : in std_logic_vector(7 downto 0);
+            mispredict          : out std_logic;
+            correct_target      : out std_logic_vector(31 downto 0);
+            predicted_taken_if  : in std_logic;
+            predicted_target_if : in std_logic_vector(31 downto 0);
+            branches            : out std_logic_vector(31 downto 0);
+            correct_preds       : out std_logic_vector(31 downto 0);
+            mispreds            : out std_logic_vector(31 downto 0);
+            btb_hits            : out std_logic_vector(31 downto 0);
+            btb_misses          : out std_logic_vector(31 downto 0);
+            ras_hits_stat       : out std_logic_vector(31 downto 0);
+            ras_misses          : out std_logic_vector(31 downto 0)
+        );
+    end component;
+
 begin
 
     -- Outputs
@@ -210,8 +259,11 @@ begin
     global_stall <= ctrl.stall_if or ctrl.stall_id or ctrl.stall_ea or ctrl.stall_of or ctrl.stall_ex;
     global_flush <= ctrl.flush_if or ctrl.flush_id or ctrl.flush_ea or ctrl.flush_of or ctrl.flush_ex;
 
-    -- Next PC calculation
-    pc_next <= pc + 2 when global_stall = '0' else pc;
+    -- Next PC calculation (Phase 8: with branch prediction)
+    pc_next <= unsigned(branch_correct_target) when branch_mispredict = '1' else  -- Misprediction
+               unsigned(branch_predict_target) when (branch_predict_valid = '1' and branch_predict_taken = '1' and global_stall = '0') else  -- Predicted taken
+               pc + 2 when global_stall = '0' else  -- Sequential
+               pc;  -- Stalled
 
     ------------------------------------------------------------------------------
     -- Hazard Detection Unit (Phase 4+6)
@@ -237,6 +289,39 @@ begin
             ex_wb_write    => ex_wb.write_reg,
             hazard_info    => hazard_info,
             stall_pipeline => hazard_stall
+        );
+
+    ------------------------------------------------------------------------------
+    -- Branch Prediction Unit (Phase 8)
+    ------------------------------------------------------------------------------
+    branch_unit: TG68040_BranchUnit
+        port map(
+            clk                 => clk,
+            reset               => reset,
+            predict_pc          => std_logic_vector(pc),
+            predict_instr       => icache_fetch_data,
+            predict_valid       => branch_predict_valid,
+            predict_taken       => branch_predict_taken,
+            predict_target      => branch_predict_target,
+            btb_hit             => branch_btb_hit,
+            ras_hit             => branch_ras_hit,
+            resolve_en          => branch_resolve_en,
+            resolve_pc          => of_ex.pc,
+            resolve_type        => branch_resolve_type,
+            resolve_taken       => branch_resolve_taken,
+            resolve_target      => branch_resolve_target,
+            resolve_ccr         => ccr_register,
+            mispredict          => branch_mispredict,
+            correct_target      => branch_correct_target,
+            predicted_taken_if  => of_ex.predicted_taken,
+            predicted_target_if => of_ex.predicted_target,
+            branches            => branch_count,
+            correct_preds       => branch_correct_count,
+            mispreds            => branch_mispredict_count,
+            btb_hits            => open,
+            btb_misses          => open,
+            ras_hits_stat       => open,
+            ras_misses          => open
         );
 
     ------------------------------------------------------------------------------
@@ -336,6 +421,12 @@ begin
                         if_id.instruction <= icache_fetch_data;
                         if_id.exception <= '0';
 
+                        -- Phase 8: Store branch prediction
+                        if_id.predicted_taken <= branch_predict_taken;
+                        if_id.predicted_target <= branch_predict_target;
+                        if_id.btb_hit <= branch_btb_hit;
+                        if_id.ras_hit <= branch_ras_hit;
+
                         -- Update PC
                         pc <= pc_next;
                     end if;
@@ -349,6 +440,8 @@ begin
     ------------------------------------------------------------------------------
     id_stage: process(clk)
         variable opcode_high : std_logic_vector(3 downto 0);
+        variable branch_type_var : branch_type_t;
+        variable branch_info_var : branch_info_t;
     begin
         if rising_edge(clk) then
             if reset = '1' then
@@ -364,6 +457,24 @@ begin
                     id_ea.pc <= if_id.pc;
                     id_ea.opcode <= if_id.instruction;
                     opcode_high := if_id.instruction(15 downto 12);
+
+                    -- Phase 8: Detect branches
+                    branch_type_var := decode_branch_type(if_id.instruction);
+                    if branch_type_var /= BRANCH_NONE then
+                        branch_info_var.is_branch := '1';
+                        branch_info_var.branch_type := branch_type_var;
+                        branch_info_var.condition := decode_branch_condition(if_id.instruction);
+                        branch_info_var.displacement := get_branch_displacement(if_id.instruction, (others => '0'));
+                        branch_info_var.target_addr := calculate_branch_target(
+                            if_id.pc, branch_info_var.displacement, branch_type_var);
+                        branch_info_var.predicted_taken := if_id.predicted_taken;
+                        branch_info_var.predicted_target := if_id.predicted_target;
+                    else
+                        branch_info_var := BRANCH_INFO_INIT;
+                    end if;
+                    id_ea.branch_info <= branch_info_var;
+                    id_ea.predicted_taken <= if_id.predicted_taken;
+                    id_ea.predicted_target <= if_id.predicted_target;
 
                     -- Simple decode (Phase 3 - basic instruction set)
                     if if_id.instruction = x"4E71" then
@@ -430,6 +541,11 @@ begin
                     ea_of.opcode <= id_ea.opcode;
                     ea_of.dst_reg <= id_ea.dst_reg;
 
+                    -- Phase 8: Propagate branch information
+                    ea_of.branch_info <= id_ea.branch_info;
+                    ea_of.predicted_taken <= id_ea.predicted_taken;
+                    ea_of.predicted_target <= id_ea.predicted_target;
+
                     -- Calculate effective address (simplified for Phase 3)
                     -- For now, just pass through - real EA calc in future phases
                     ea_of.ea_addr <= id_ea.immediate;
@@ -462,6 +578,12 @@ begin
                     of_ex.opcode <= ea_of.opcode;
                     of_ex.dst_reg <= ea_of.dst_reg;
 
+                    -- Phase 8: Propagate branch information for resolution in EX
+                    of_ex.branch_info <= ea_of.branch_info;
+                    of_ex.predicted_taken <= ea_of.predicted_taken;
+                    of_ex.predicted_target <= ea_of.predicted_target;
+                    of_ex.ccr <= ccr_register;
+
                     -- Fetch operands with forwarding (Phase 4)
                     -- Use forwarded data if hazard detected, else register file
                     of_ex.operand1 <= operand1_forwarded;
@@ -491,6 +613,7 @@ begin
         variable opcode_high : std_logic_vector(3 downto 0);
         variable alu_result : unsigned(31 downto 0);
         variable alu_carry : std_logic;
+        variable branch_actual_taken : std_logic;
     begin
         if rising_edge(clk) then
             if reset = '1' then
@@ -505,6 +628,22 @@ begin
                     ex_wb.valid <= of_ex.valid;
                     ex_wb.pc <= of_ex.pc;
                     ex_wb.dst_reg <= of_ex.dst_reg;
+
+                    -- Phase 8: Branch resolution
+                    branch_resolve_en <= of_ex.branch_info.is_branch;
+                    branch_resolve_type <= of_ex.branch_info.branch_type;
+                    branch_resolve_target <= of_ex.branch_info.target_addr;
+
+                    -- Evaluate branch condition for conditional branches
+                    if of_ex.branch_info.branch_type = BRANCH_COND or
+                       of_ex.branch_info.branch_type = BRANCH_DBCC then
+                        branch_actual_taken := evaluate_branch_condition(
+                            of_ex.branch_info.condition, of_ex.ccr);
+                        branch_resolve_taken <= branch_actual_taken;
+                    else
+                        -- Unconditional branches always taken
+                        branch_resolve_taken <= '1';
+                    end if;
 
                     opcode_high := of_ex.opcode(15 downto 12);
 
@@ -563,6 +702,11 @@ begin
                     ex_wb.write_mem <= of_ex.write_mem;
                     ex_wb.update_flags <= '1';  -- Update flags for all operations
 
+                    -- Phase 8: Update CCR register for next cycle
+                    if ex_wb.update_flags = '1' then
+                        ccr_register <= ex_wb.flags;
+                    end if;
+
                     ex_wb.exception <= of_ex.exception;
                 end if;
             end if;
@@ -604,7 +748,7 @@ begin
     end process;
 
     ------------------------------------------------------------------------------
-    -- Pipeline Control Logic (Phase 3+4+6)
+    -- Pipeline Control Logic (Phase 3+4+6+8)
     ------------------------------------------------------------------------------
     control_logic: process(clk)
     begin
@@ -633,8 +777,16 @@ begin
                     ctrl.stall_ea <= '1';
                 end if;
 
-                -- Flush logic will be added when branches are implemented
-                -- For Phase 3, no automatic flushing
+                -- Phase 8: Flush on branch misprediction
+                -- When a misprediction is detected in EX stage, flush IF, ID, EA, OF stages
+                -- (instructions that came after the branch)
+                if branch_mispredict = '1' then
+                    ctrl.flush_if <= '1';
+                    ctrl.flush_id <= '1';
+                    ctrl.flush_ea <= '1';
+                    ctrl.flush_of <= '1';
+                    -- Don't flush EX - let the branch complete
+                end if;
             end if;
         end if;
     end process;

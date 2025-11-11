@@ -28,6 +28,7 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 use work.TG68040_Pack.all;
+use work.TG68040_Branch_Pack.all;
 
 package TG68040_Pipeline_Regs is
 
@@ -40,6 +41,11 @@ package TG68040_Pipeline_Regs is
         instruction : std_logic_vector(15 downto 0);    -- Fetched instruction
         exception   : std_logic;                        -- Exception occurred
         exc_vector  : std_logic_vector(7 downto 0);    -- Exception vector number
+        -- Branch prediction (Phase 8)
+        predicted_taken  : std_logic;                   -- Branch predicted taken
+        predicted_target : std_logic_vector(31 downto 0); -- Predicted target address
+        btb_hit          : std_logic;                   -- BTB had prediction
+        ras_hit          : std_logic;                   -- RAS had prediction
     end record;
 
     constant IF_ID_REG_INIT : if_id_reg_t := (
@@ -47,7 +53,11 @@ package TG68040_Pipeline_Regs is
         pc          => (others => '0'),
         instruction => (others => '0'),
         exception   => '0',
-        exc_vector  => (others => '0')
+        exc_vector  => (others => '0'),
+        predicted_taken  => '0',
+        predicted_target => (others => '0'),
+        btb_hit          => '0',
+        ras_hit          => '0'
     );
 
     ------------------------------------------------------------------------------
@@ -66,6 +76,10 @@ package TG68040_Pipeline_Regs is
         data_size   : std_logic_vector(1 downto 0);     -- 00=byte, 01=word, 10=long
         exception   : std_logic;                        -- Exception occurred
         exc_vector  : std_logic_vector(7 downto 0);     -- Exception vector
+        -- Branch information (Phase 8)
+        branch_info      : branch_info_t;              -- Branch detection info
+        predicted_taken  : std_logic;                  -- From IF stage
+        predicted_target : std_logic_vector(31 downto 0); -- From IF stage
     end record;
 
     constant ID_EA_REG_INIT : id_ea_reg_t := (
@@ -80,7 +94,10 @@ package TG68040_Pipeline_Regs is
         addr_mode   => (others => '0'),
         data_size   => "10",  -- Default to long
         exception   => '0',
-        exc_vector  => (others => '0')
+        exc_vector  => (others => '0'),
+        branch_info      => BRANCH_INFO_INIT,
+        predicted_taken  => '0',
+        predicted_target => (others => '0')
     );
 
     ------------------------------------------------------------------------------
@@ -97,6 +114,10 @@ package TG68040_Pipeline_Regs is
         use_ea      : std_logic;                        -- Use EA address for fetch
         exception   : std_logic;                        -- Exception occurred
         exc_vector  : std_logic_vector(7 downto 0);     -- Exception vector
+        -- Branch information (Phase 8)
+        branch_info      : branch_info_t;              -- Branch info
+        predicted_taken  : std_logic;                  -- Prediction from IF
+        predicted_target : std_logic_vector(31 downto 0); -- Prediction from IF
     end record;
 
     constant EA_OF_REG_INIT : ea_of_reg_t := (
@@ -109,7 +130,10 @@ package TG68040_Pipeline_Regs is
         data_size   => "10",
         use_ea      => '0',
         exception   => '0',
-        exc_vector  => (others => '0')
+        exc_vector  => (others => '0'),
+        branch_info      => BRANCH_INFO_INIT,
+        predicted_taken  => '0',
+        predicted_target => (others => '0')
     );
 
     ------------------------------------------------------------------------------
@@ -130,6 +154,11 @@ package TG68040_Pipeline_Regs is
         read_mem    : std_logic;                        -- Read from memory (Phase 6)
         exception   : std_logic;                        -- Exception occurred
         exc_vector  : std_logic_vector(7 downto 0);     -- Exception vector
+        -- Branch information (Phase 8) - for resolution in EX
+        branch_info      : branch_info_t;              -- Branch detection and prediction
+        predicted_taken  : std_logic;                  -- What was predicted
+        predicted_target : std_logic_vector(31 downto 0); -- Predicted target
+        ccr              : std_logic_vector(7 downto 0);  -- CCR for condition eval
     end record;
 
     constant OF_EX_REG_INIT : of_ex_reg_t := (
@@ -146,7 +175,11 @@ package TG68040_Pipeline_Regs is
         write_mem   => '0',
         read_mem    => '0',
         exception   => '0',
-        exc_vector  => (others => '0')
+        exc_vector  => (others => '0'),
+        branch_info      => BRANCH_INFO_INIT,
+        predicted_taken  => '0',
+        predicted_target => (others => '0'),
+        ccr              => (others => '0')
     );
 
     ------------------------------------------------------------------------------
