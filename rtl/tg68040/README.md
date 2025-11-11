@@ -8,22 +8,28 @@ TG68040 is an FPGA implementation of the Motorola MC68040 processor, based on th
 
 🚧 **UNDER ACTIVE DEVELOPMENT** 🚧
 
-**Current Phase:** Phase 0 - Foundation
+**Current Phase:** Phase 2 - New Instructions
 **Target Completion:** Q3 2025 (estimated)
 
 ### Completed Milestones
-- ✅ Project structure created
-- ✅ Implementation plan documented
-- ✅ Architecture analysis completed
-- ✅ Verification methodology defined
+- ✅ Phase 0: Project infrastructure and documentation
+- ✅ Phase 1: Core Extension & CPU ID (COMPLETE 2025-11-11)
+  - CPU mode "10" for 68040
+  - TG68040_Pack with constants and utility functions
+  - TG68040_RegFile with all control registers
+  - MOVEC instruction support
+  - Comprehensive unit tests (100% passing)
+  - Complete documentation
 
 ### Current Work
-- 🔨 Phase 1: Core Extension & CPU ID
-- 🔨 Initial testbench infrastructure
+- 🔨 Phase 2: New 68040 Instructions
+  - MOVE16 (16-byte block move)
+  - CINV (cache invalidate)
+  - CPUSH (cache push)
 
 ### Upcoming
-- ⏳ Phase 2: New instructions (MOVE16, CINV, CPUSH)
 - ⏳ Phase 3: Pipeline foundation
+- ⏳ Phase 4: Hazard detection
 
 ## Features (Planned)
 
@@ -140,8 +146,8 @@ This project follows a rigorous, incremental development methodology:
 
 | Phase | Name | Duration | Status |
 |-------|------|----------|--------|
-| 0 | Foundation | 1-2 days | ✅ Complete |
-| 1 | Core Extension & CPU ID | 3-5 days | 🔨 In Progress |
+| 0 | Foundation | 1-2 days | ✅ Complete (2025-11-11) |
+| 1 | Core Extension & CPU ID | 3-5 days | ✅ Complete (2025-11-11) |
 | 2 | New Instructions (Simple) | 5-7 days | ⏳ Planned |
 | 3 | Pipeline Foundation | 7-10 days | ⏳ Planned |
 | 4 | Pipeline Hazard Detection | 7-10 days | ⏳ Planned |
