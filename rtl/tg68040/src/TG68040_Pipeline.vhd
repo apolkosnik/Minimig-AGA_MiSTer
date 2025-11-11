@@ -110,6 +110,19 @@ architecture rtl of TG68040_Pipeline is
     signal icache_miss_count : std_logic_vector(31 downto 0);
     signal icache_access_count : std_logic_vector(31 downto 0);
 
+    -- Data Cache signals (Phase 6)
+    signal dcache_mem_req : std_logic;
+    signal dcache_mem_write : std_logic;
+    signal dcache_mem_size : std_logic_vector(1 downto 0);
+    signal dcache_mem_addr : std_logic_vector(31 downto 0);
+    signal dcache_mem_data_in : std_logic_vector(31 downto 0);
+    signal dcache_mem_data_out : std_logic_vector(31 downto 0);
+    signal dcache_mem_ready : std_logic;
+    signal dcache_hit_count : std_logic_vector(31 downto 0);
+    signal dcache_miss_count : std_logic_vector(31 downto 0);
+    signal dcache_read_count : std_logic_vector(31 downto 0);
+    signal dcache_write_count : std_logic_vector(31 downto 0);
+
     -- Component declarations
     component TG68040_ICache is
         port(
@@ -132,6 +145,34 @@ architecture rtl of TG68040_Pipeline is
         );
     end component;
 
+    component TG68040_DCache is
+        port(
+            clk            : in std_logic;
+            reset          : in std_logic;
+            cache_enable   : in std_logic;
+            cache_freeze   : in std_logic;
+            cache_invalidate : in std_logic;
+            cache_flush    : in std_logic;
+            mem_req        : in std_logic;
+            mem_write      : in std_logic;
+            mem_size       : in std_logic_vector(1 downto 0);
+            mem_addr       : in std_logic_vector(31 downto 0);
+            mem_data_in    : in std_logic_vector(31 downto 0);
+            mem_data_out   : out std_logic_vector(31 downto 0);
+            mem_ready      : out std_logic;
+            bus_req        : out std_logic;
+            bus_write      : out std_logic;
+            bus_addr       : out std_logic_vector(31 downto 0);
+            bus_data_in    : out std_logic_vector(127 downto 0);
+            bus_data_out   : in std_logic_vector(127 downto 0);
+            bus_ready      : in std_logic;
+            hit_count      : out std_logic_vector(31 downto 0);
+            miss_count     : out std_logic_vector(31 downto 0);
+            read_count     : out std_logic_vector(31 downto 0);
+            write_count    : out std_logic_vector(31 downto 0)
+        );
+    end component;
+
     component TG68040_HazardUnit is
         port(
             clk            : in std_logic;
@@ -147,6 +188,7 @@ architecture rtl of TG68040_Pipeline is
             of_ex_valid    : in std_logic;
             of_ex_dst_reg  : in std_logic_vector(3 downto 0);
             of_ex_write    : in std_logic;
+            of_ex_read_mem : in std_logic;
             ex_wb_valid    : in std_logic;
             ex_wb_dst_reg  : in std_logic_vector(3 downto 0);
             ex_wb_write    : in std_logic;
@@ -172,7 +214,7 @@ begin
     pc_next <= pc + 2 when global_stall = '0' else pc;
 
     ------------------------------------------------------------------------------
-    -- Hazard Detection Unit (Phase 4)
+    -- Hazard Detection Unit (Phase 4+6)
     ------------------------------------------------------------------------------
     hazard_unit: TG68040_HazardUnit
         port map(
@@ -189,6 +231,7 @@ begin
             of_ex_valid    => of_ex.valid,
             of_ex_dst_reg  => of_ex.dst_reg,
             of_ex_write    => of_ex.write_reg,
+            of_ex_read_mem => of_ex.read_mem,  -- Phase 6
             ex_wb_valid    => ex_wb.valid,
             ex_wb_dst_reg  => ex_wb.dst_reg,
             ex_wb_write    => ex_wb.write_reg,
@@ -217,6 +260,36 @@ begin
             hit_count      => icache_hit_count,
             miss_count     => icache_miss_count,
             access_count   => icache_access_count
+        );
+
+    ------------------------------------------------------------------------------
+    -- Data Cache (Phase 6)
+    ------------------------------------------------------------------------------
+    dcache: TG68040_DCache
+        port map(
+            clk            => clk,
+            reset          => reset,
+            cache_enable   => '1',  -- Always enabled for Phase 6
+            cache_freeze   => '0',  -- Not frozen
+            cache_invalidate => '0',  -- No invalidation for now
+            cache_flush    => '0',  -- No flush for now
+            mem_req        => dcache_mem_req,
+            mem_write      => dcache_mem_write,
+            mem_size       => dcache_mem_size,
+            mem_addr       => dcache_mem_addr,
+            mem_data_in    => dcache_mem_data_in,
+            mem_data_out   => dcache_mem_data_out,
+            mem_ready      => dcache_mem_ready,
+            bus_req        => open,  -- Unused in stub
+            bus_write      => open,  -- Unused in stub
+            bus_addr       => open,  -- Unused in stub
+            bus_data_in    => open,  -- Unused in stub
+            bus_data_out   => (others => '0'),
+            bus_ready      => '0',
+            hit_count      => dcache_hit_count,
+            miss_count     => dcache_miss_count,
+            read_count     => dcache_read_count,
+            write_count    => dcache_write_count
         );
 
     ------------------------------------------------------------------------------
@@ -401,7 +474,9 @@ begin
                         of_ex.write_reg <= '0';
                     end if;
 
-                    of_ex.write_mem <= '0';
+                    -- Memory operations (stub for Phase 6)
+                    of_ex.write_mem <= '0';  -- No memory writes yet
+                    of_ex.read_mem <= '0';   -- No memory reads yet
 
                     of_ex.exception <= ea_of.exception;
                 end if;
@@ -529,7 +604,7 @@ begin
     end process;
 
     ------------------------------------------------------------------------------
-    -- Pipeline Control Logic
+    -- Pipeline Control Logic (Phase 3+4+6)
     ------------------------------------------------------------------------------
     control_logic: process(clk)
     begin
@@ -541,7 +616,7 @@ begin
                 -- Default: no stalls or flushes
                 ctrl <= PIPELINE_CTRL_INIT;
 
-                -- Stall logic (Phase 3 - very simple)
+                -- Stall logic
                 -- Stall if memory not ready
                 if mem_ready = '0' then
                     ctrl.stall_if <= '1';
@@ -549,6 +624,13 @@ begin
                     ctrl.stall_ea <= '1';
                     ctrl.stall_of <= '1';
                     ctrl.stall_ex <= '1';
+                end if;
+
+                -- Stall for load-use hazards (Phase 6)
+                if hazard_info.stall_for_load = '1' then
+                    ctrl.stall_if <= '1';
+                    ctrl.stall_id <= '1';
+                    ctrl.stall_ea <= '1';
                 end if;
 
                 -- Flush logic will be added when branches are implemented

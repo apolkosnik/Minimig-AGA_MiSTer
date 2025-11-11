@@ -8,7 +8,7 @@ TG68040 is an FPGA implementation of the Motorola MC68040 processor, based on th
 
 🚧 **UNDER ACTIVE DEVELOPMENT** 🚧
 
-**Current Phase:** Phase 6 - Data Cache (Next)
+**Current Phase:** Phase 7 - Real Caches (Next)
 **Target Completion:** Q3 2025 (estimated)
 
 ### Completed Milestones
@@ -42,16 +42,23 @@ TG68040 is an FPGA implementation of the Motorola MC68040 processor, based on th
   - Pipeline integration
   - Statistics tracking
   - 11 unit tests
+- ✅ Phase 6: Data Cache (2025-11-11)
+  - D-cache stub (always hit)
+  - Load-use hazard detection
+  - Byte/word/longword support
+  - Cache statistics tracking
+  - 22 unit tests
 
 ### Current Work
-- 🔨 Phase 6: Data Cache (Next)
-  - D-cache stub implementation
-  - Load-use hazard detection
-  - Cache coherency
+- 🔨 Phase 7: Real Caches (Next)
+  - 4-way set-associative I-cache
+  - 4-way set-associative D-cache
+  - LRU replacement
+  - Write-back with dirty bits
 
 ### Upcoming
-- ⏳ Phase 7: Cache functionality (real implementation)
 - ⏳ Phase 8: Branch handling
+- ⏳ Phase 9: MMU implementation
 
 ## Features (Planned)
 

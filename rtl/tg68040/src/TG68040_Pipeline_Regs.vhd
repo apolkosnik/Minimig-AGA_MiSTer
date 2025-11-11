@@ -127,6 +127,7 @@ package TG68040_Pipeline_Regs is
         data_size   : std_logic_vector(1 downto 0);     -- Data size
         write_reg   : std_logic;                        -- Write to register
         write_mem   : std_logic;                        -- Write to memory
+        read_mem    : std_logic;                        -- Read from memory (Phase 6)
         exception   : std_logic;                        -- Exception occurred
         exc_vector  : std_logic_vector(7 downto 0);     -- Exception vector
     end record;
@@ -143,6 +144,7 @@ package TG68040_Pipeline_Regs is
         data_size   => "10",
         write_reg   => '0',
         write_mem   => '0',
+        read_mem    => '0',
         exception   => '0',
         exc_vector  => (others => '0')
     );
@@ -227,13 +229,15 @@ package TG68040_Pipeline_Regs is
     );
 
     ------------------------------------------------------------------------------
-    -- Hazard Detection Information (Phase 4)
+    -- Hazard Detection Information (Phase 4+6)
     ------------------------------------------------------------------------------
     type hazard_info_t is record
         raw_hazard      : std_logic;  -- Read After Write detected
         waw_hazard      : std_logic;  -- Write After Write detected
         war_hazard      : std_logic;  -- Write After Read detected
+        load_use_hazard : std_logic;  -- Load-use hazard detected (Phase 6)
         stall_required  : std_logic;  -- Must stall pipeline
+        stall_for_load  : std_logic;  -- Stall for load-use (Phase 6)
         forward_ex_a    : std_logic;  -- Forward from EX stage to operand A
         forward_ex_b    : std_logic;  -- Forward from EX stage to operand B
         forward_wb_a    : std_logic;  -- Forward from WB stage to operand A
@@ -241,14 +245,16 @@ package TG68040_Pipeline_Regs is
     end record;
 
     constant HAZARD_INFO_INIT : hazard_info_t := (
-        raw_hazard     => '0',
-        waw_hazard     => '0',
-        war_hazard     => '0',
-        stall_required => '0',
-        forward_ex_a   => '0',
-        forward_ex_b   => '0',
-        forward_wb_a   => '0',
-        forward_wb_b   => '0'
+        raw_hazard      => '0',
+        waw_hazard      => '0',
+        war_hazard      => '0',
+        load_use_hazard => '0',
+        stall_required  => '0',
+        stall_for_load  => '0',
+        forward_ex_a    => '0',
+        forward_ex_b    => '0',
+        forward_wb_a    => '0',
+        forward_wb_b    => '0'
     );
 
 end package TG68040_Pipeline_Regs;
