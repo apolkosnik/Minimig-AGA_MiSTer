@@ -355,6 +355,49 @@ architecture rtl of TG68040_Pipeline is
         );
     end component;
 
+    component TG68040_Exception_Unit is
+        port(
+            clk            : in std_logic;
+            reset          : in std_logic;
+            exception_in   : in exception_info_t;
+            exception_ack  : out std_logic;
+            vbr            : in std_logic_vector(31 downto 0);
+            ssp            : in std_logic_vector(31 downto 0);
+            ssp_out        : out std_logic_vector(31 downto 0);
+            ssp_write      : out std_logic;
+            sr_in          : in status_register_t;
+            sr_out         : out status_register_t;
+            sr_write       : out std_logic;
+            mem_req        : out std_logic;
+            mem_write      : out std_logic;
+            mem_addr       : out std_logic_vector(31 downto 0);
+            mem_data       : out std_logic_vector(31 downto 0);
+            mem_ready      : in std_logic;
+            handler_pc     : out std_logic_vector(31 downto 0);
+            handler_valid  : out std_logic;
+            pipeline_flush : out std_logic;
+            exceptions_processed : out std_logic_vector(31 downto 0)
+        );
+    end component;
+
+    -- Exception unit signals (Phase 11)
+    signal exc_unit_ack : std_logic;
+    signal exc_unit_ssp_out : std_logic_vector(31 downto 0);
+    signal exc_unit_ssp_write : std_logic;
+    signal exc_unit_sr_out : status_register_t;
+    signal exc_unit_sr_write : std_logic;
+    signal exc_unit_mem_req : std_logic;
+    signal exc_unit_mem_write : std_logic;
+    signal exc_unit_mem_addr : std_logic_vector(31 downto 0);
+    signal exc_unit_mem_data : std_logic_vector(31 downto 0);
+    signal exc_unit_handler_pc : std_logic_vector(31 downto 0);
+    signal exc_unit_handler_valid : std_logic;
+    signal exc_unit_flush : std_logic;
+    signal exc_unit_exceptions_processed : std_logic_vector(31 downto 0);
+
+    -- Supervisor Stack Pointer (A7 in supervisor mode)
+    signal ssp_register : std_logic_vector(31 downto 0) := (others => '0');
+
 begin
 
     -- Outputs
@@ -366,13 +409,44 @@ begin
     -- Global control signals
     any_valid <= if_id.valid or id_ea.valid or ea_of.valid or of_ex.valid or ex_wb.valid;
     global_stall <= ctrl.stall_if or ctrl.stall_id or ctrl.stall_ea or ctrl.stall_of or ctrl.stall_ex;
-    global_flush <= ctrl.flush_if or ctrl.flush_id or ctrl.flush_ea or ctrl.flush_of or ctrl.flush_ex;
+    global_flush <= ctrl.flush_if or ctrl.flush_id or ctrl.flush_ea or ctrl.flush_of or ctrl.flush_ex or exc_unit_flush;
 
-    -- Next PC calculation (Phase 8: with branch prediction)
-    pc_next <= unsigned(branch_correct_target) when branch_mispredict = '1' else  -- Misprediction
+    -- Next PC calculation (Phase 8 + Phase 11: with branch prediction and exception handling)
+    pc_next <= unsigned(exc_unit_handler_pc) when exc_unit_handler_valid = '1' else  -- Exception handler (highest priority)
+               unsigned(branch_correct_target) when branch_mispredict = '1' else     -- Misprediction
                unsigned(branch_predict_target) when (branch_predict_valid = '1' and branch_predict_taken = '1' and global_stall = '0') else  -- Predicted taken
                pc + 2 when global_stall = '0' else  -- Sequential
                pc;  -- Stalled
+
+    ------------------------------------------------------------------------------
+    -- Exception Unit Register Updates (Phase 11)
+    ------------------------------------------------------------------------------
+    -- Update SR and SSP when exception unit signals changes
+    exception_reg_update: process(clk)
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                sr_register <= SR_INIT;
+                ssp_register <= (others => '0');
+                exception_count <= (others => '0');
+            else
+                -- Update SR when exception unit writes it
+                if exc_unit_sr_write = '1' then
+                    sr_register <= exc_unit_sr_out;
+                end if;
+
+                -- Update SSP when exception unit writes it
+                if exc_unit_ssp_write = '1' then
+                    ssp_register <= exc_unit_ssp_out;
+                end if;
+
+                -- Track exception count
+                if exc_unit_ack = '1' then
+                    exception_count <= std_logic_vector(unsigned(exception_count) + 1);
+                end if;
+            end if;
+        end if;
+    end process;
 
     ------------------------------------------------------------------------------
     -- Hazard Detection Unit (Phase 4+6)
@@ -482,6 +556,33 @@ begin
             fpcr           => fpu_fpcr,
             operations     => fpu_operations,
             exceptions     => fpu_exceptions
+        );
+
+    ------------------------------------------------------------------------------
+    -- Exception Unit (Phase 11)
+    ------------------------------------------------------------------------------
+    exception_unit: TG68040_Exception_Unit
+        port map(
+            clk            => clk,
+            reset          => reset,
+            exception_in   => exception_pending,
+            exception_ack  => exc_unit_ack,
+            vbr            => vbr_register,
+            ssp            => ssp_register,
+            ssp_out        => exc_unit_ssp_out,
+            ssp_write      => exc_unit_ssp_write,
+            sr_in          => sr_register,
+            sr_out         => exc_unit_sr_out,
+            sr_write       => exc_unit_sr_write,
+            mem_req        => exc_unit_mem_req,
+            mem_write      => exc_unit_mem_write,
+            mem_addr       => exc_unit_mem_addr,
+            mem_data       => exc_unit_mem_data,
+            mem_ready      => mem_ready,
+            handler_pc     => exc_unit_handler_pc,
+            handler_valid  => exc_unit_handler_valid,
+            pipeline_flush => exc_unit_flush,
+            exceptions_processed => exc_unit_exceptions_processed
         );
 
     ------------------------------------------------------------------------------
@@ -1231,6 +1332,16 @@ begin
                     ctrl.flush_ea <= '1';
                     ctrl.flush_of <= '1';
                     -- Don't flush EX - let the branch complete
+                end if;
+
+                -- Phase 11: Flush on exception entry
+                -- When exception unit signals flush, flush entire pipeline
+                if exc_unit_flush = '1' then
+                    ctrl.flush_if <= '1';
+                    ctrl.flush_id <= '1';
+                    ctrl.flush_ea <= '1';
+                    ctrl.flush_of <= '1';
+                    ctrl.flush_ex <= '1';
                 end if;
             end if;
         end if;
