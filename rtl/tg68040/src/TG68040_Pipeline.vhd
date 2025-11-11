@@ -101,11 +101,37 @@ architecture rtl of TG68040_Pipeline is
     signal operand1_forwarded : std_logic_vector(31 downto 0);
     signal operand2_forwarded : std_logic_vector(31 downto 0);
 
-    -- Simple instruction memory (for testing - 256 instructions)
-    type instr_mem_t is array (0 to 255) of std_logic_vector(15 downto 0);
-    signal instr_memory : instr_mem_t := (others => x"4E71");  -- NOP instructions
+    -- Instruction Cache signals (Phase 5)
+    signal icache_fetch_req : std_logic;
+    signal icache_fetch_addr : std_logic_vector(31 downto 0);
+    signal icache_fetch_data : std_logic_vector(15 downto 0);
+    signal icache_fetch_ready : std_logic;
+    signal icache_hit_count : std_logic_vector(31 downto 0);
+    signal icache_miss_count : std_logic_vector(31 downto 0);
+    signal icache_access_count : std_logic_vector(31 downto 0);
 
     -- Component declarations
+    component TG68040_ICache is
+        port(
+            clk            : in std_logic;
+            reset          : in std_logic;
+            cache_enable   : in std_logic;
+            cache_freeze   : in std_logic;
+            cache_invalidate : in std_logic;
+            fetch_req      : in std_logic;
+            fetch_addr     : in std_logic_vector(31 downto 0);
+            fetch_data     : out std_logic_vector(15 downto 0);
+            fetch_ready    : out std_logic;
+            mem_req        : out std_logic;
+            mem_addr       : out std_logic_vector(31 downto 0);
+            mem_data       : in std_logic_vector(127 downto 0);
+            mem_ready      : in std_logic;
+            hit_count      : out std_logic_vector(31 downto 0);
+            miss_count     : out std_logic_vector(31 downto 0);
+            access_count   : out std_logic_vector(31 downto 0)
+        );
+    end component;
+
     component TG68040_HazardUnit is
         port(
             clk            : in std_logic;
@@ -171,6 +197,29 @@ begin
         );
 
     ------------------------------------------------------------------------------
+    -- Instruction Cache (Phase 5)
+    ------------------------------------------------------------------------------
+    icache: TG68040_ICache
+        port map(
+            clk            => clk,
+            reset          => reset,
+            cache_enable   => '1',  -- Always enabled for Phase 5
+            cache_freeze   => '0',  -- Not frozen
+            cache_invalidate => '0',  -- No invalidation for now
+            fetch_req      => icache_fetch_req,
+            fetch_addr     => icache_fetch_addr,
+            fetch_data     => icache_fetch_data,
+            fetch_ready    => icache_fetch_ready,
+            mem_req        => open,  -- Unused in stub
+            mem_addr       => open,  -- Unused in stub
+            mem_data       => (others => '0'),
+            mem_ready      => '0',
+            hit_count      => icache_hit_count,
+            miss_count     => icache_miss_count,
+            access_count   => icache_access_count
+        );
+
+    ------------------------------------------------------------------------------
     -- Data Forwarding Multiplexers (Phase 4)
     ------------------------------------------------------------------------------
     -- Operand A forwarding (priority: EX > WB > RegFile)
@@ -186,8 +235,13 @@ begin
         reg_data_b;
 
     ------------------------------------------------------------------------------
-    -- IF Stage: Instruction Fetch
+    -- IF Stage: Instruction Fetch (with I-Cache, Phase 5)
     ------------------------------------------------------------------------------
+    -- Cache fetch request (combinational)
+    icache_fetch_req <= '1' when (enable = '1' and ctrl.stall_if = '0' and ctrl.flush_if = '0') else '0';
+    icache_fetch_addr <= std_logic_vector(pc);
+
+    -- IF stage process
     if_stage: process(clk)
     begin
         if rising_edge(clk) then
@@ -201,15 +255,17 @@ begin
                     if_id.valid <= '0';
 
                 elsif ctrl.stall_if = '0' then
-                    -- Fetch next instruction
-                    if_id.valid <= '1';
-                    if_id.pc <= std_logic_vector(pc);
-                    -- Fetch from instruction memory (simplified)
-                    if_id.instruction <= instr_memory(to_integer(pc(9 downto 1)));
-                    if_id.exception <= '0';
+                    -- Fetch from I-cache (Phase 5)
+                    -- Stub always returns ready in 1 cycle
+                    if icache_fetch_ready = '1' then
+                        if_id.valid <= '1';
+                        if_id.pc <= std_logic_vector(pc);
+                        if_id.instruction <= icache_fetch_data;
+                        if_id.exception <= '0';
 
-                    -- Update PC
-                    pc <= pc_next;
+                        -- Update PC
+                        pc <= pc_next;
+                    end if;
                 end if;
             end if;
         end if;

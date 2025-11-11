@@ -8,7 +8,7 @@ TG68040 is an FPGA implementation of the Motorola MC68040 processor, based on th
 
 🚧 **UNDER ACTIVE DEVELOPMENT** 🚧
 
-**Current Phase:** Phase 5 - Instruction Cache (Next)
+**Current Phase:** Phase 6 - Data Cache (Next)
 **Target Completion:** Q3 2025 (estimated)
 
 ### Completed Milestones
@@ -36,16 +36,22 @@ TG68040 is an FPGA implementation of the Motorola MC68040 processor, based on th
   - Forwarding multiplexers
   - 46% performance improvement
   - 18 unit tests
+- ✅ Phase 5: Instruction Cache (2025-11-11)
+  - I-cache stub (always hit)
+  - Cache interface design
+  - Pipeline integration
+  - Statistics tracking
+  - 11 unit tests
 
 ### Current Work
-- 🔨 Phase 5: Instruction Cache (Next)
-  - Cache interface design
-  - Cache stub implementation
-  - Cache control signals
+- 🔨 Phase 6: Data Cache (Next)
+  - D-cache stub implementation
+  - Load-use hazard detection
+  - Cache coherency
 
 ### Upcoming
-- ⏳ Phase 6: Data cache (stub)
-- ⏳ Phase 7: Cache functionality
+- ⏳ Phase 7: Cache functionality (real implementation)
+- ⏳ Phase 8: Branch handling
 
 ## Features (Planned)
 
@@ -167,7 +173,7 @@ This project follows a rigorous, incremental development methodology:
 | 2 | New Instructions (Simple) | 5-7 days | ✅ Complete (2025-11-11) |
 | 3 | Pipeline Foundation | 7-10 days | ✅ Complete (2025-11-11) |
 | 4 | Pipeline Hazard Detection | 7-10 days | ✅ Complete (2025-11-11) |
-| 5 | Instruction Cache (Stub) | 5-7 days | ⏳ Planned |
+| 5 | Instruction Cache (Stub) | 5-7 days | ✅ Complete (2025-11-11) |
 | 6 | Data Cache (Stub) | 5-7 days | ⏳ Planned |
 | 7 | Cache Functionality | 5-7 days | ⏳ Planned |
 | 8 | MMU - Address Translation | 10-14 days | ⏳ Planned |
@@ -289,6 +295,6 @@ See [LICENSE](../../LICENSE) for full license text.
 
 ---
 
-**Status:** Phase 4 complete, Phase 5 next
+**Status:** Phase 5 complete, Phase 6 next
 **Last Updated:** 2025-11-11
-**Next Milestone:** Phase 5 - Instruction cache implementation
+**Next Milestone:** Phase 6 - Data cache implementation
