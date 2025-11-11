@@ -1,0 +1,48 @@
+# TG68K030 MC68030 CPU Extension Files
+# Quartus IP File for MC68030-specific components
+
+# MMU Registers
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_MMU_Registers.vhd ]
+
+# Cache Registers
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_Cache_Registers.vhd ]
+
+# ATC (Address Translation Cache)
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_ATC.vhd ]
+
+# Transparent Translation
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_TransparentTranslation.vhd ]
+
+# Page Table Walker
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_PageTableWalk.vhd ]
+
+# MMU Components
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_MMU.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_MMU_Integration.vhd ]
+
+# PMOVE Instruction (F-line $02xx)
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_PMOVE_Decoder.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_PMOVE_Execute.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_PMOVE.vhd ]
+
+# PFLUSH Instruction (F-line $2xxx)
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_PFLUSH_Decoder.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_PFLUSH_Execute.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_PFLUSH.vhd ]
+
+# PTEST Instruction (F-line $8xxx)
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_PTEST_Decoder.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_PTEST_Execute.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_PTEST.vhd ]
+
+# Instruction and Data Caches
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_ICache.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_DCache.vhd ]
+
+# Bus Arbiter and Memory Controller
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_BusArbiter.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_BurstController.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030_MemoryController.vhd ]
+
+# Top-level TG68K030 wrapper (must be last)
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) TG68K030.vhd ]
