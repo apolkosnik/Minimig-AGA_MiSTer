@@ -567,6 +567,222 @@ begin
         reg_data_b;
 
     ------------------------------------------------------------------------------
+    -- Exception Detection and Arbitration (Phase 11)
+    ------------------------------------------------------------------------------
+
+    -- Exception detection process (combinational)
+    -- Detects exceptions in each pipeline stage and arbitrates priorities
+    exception_detection: process(all)
+        variable temp_exception : exception_info_t;
+        variable opcode : std_logic_vector(15 downto 0);
+        variable opcode_high : std_logic_vector(3 downto 0);
+        variable is_privileged : boolean;
+        variable is_illegal : boolean;
+        variable ea_addr : std_logic_vector(31 downto 0);
+        variable is_misaligned : boolean;
+    begin
+        -- Initialize all exception signals
+        if_exception <= EXCEPTION_INFO_NONE;
+        id_exception <= EXCEPTION_INFO_NONE;
+        ea_exception <= EXCEPTION_INFO_NONE;
+        of_exception <= EXCEPTION_INFO_NONE;
+        ex_exception <= EXCEPTION_INFO_NONE;
+
+        ----------------------------------------------------------------------
+        -- IF Stage Exception Detection
+        ----------------------------------------------------------------------
+        -- Bus error on instruction fetch (from MMU)
+        if mmu_itrans_resp.ready = '1' and mmu_itrans_resp.fault /= FAULT_NONE then
+            if_exception.valid <= '1';
+            if_exception.exc_type <= EXC_BUS_ERROR;
+            if_exception.vector <= VECTOR_BUS_ERROR;
+            if_exception.priority <= PRIORITY_BUS_ERROR;
+            if_exception.frame_format <= FRAME_FORMAT_7;  -- Access error frame
+            if_exception.fault_addr <= mmu_itrans_resp.fault_address;
+            if_exception.fault_pc <= std_logic_vector(pc);
+            if_exception.fault_sr <= pack_sr(sr_register);
+        end if;
+
+        ----------------------------------------------------------------------
+        -- ID Stage Exception Detection
+        ----------------------------------------------------------------------
+        if id_ea.valid = '1' then
+            opcode := id_ea.opcode;
+            opcode_high := opcode(15 downto 12);
+            is_privileged := false;
+            is_illegal := false;
+
+            -- Detect privileged instructions
+            -- Privileged instructions include: MOVE to SR, MOVE from SR, STOP, RESET, RTE, etc.
+            if opcode = x"46FC" then
+                -- MOVE #imm,SR - privileged
+                is_privileged := true;
+            elsif opcode = x"4E70" then
+                -- RESET - privileged
+                is_privileged := true;
+            elsif opcode = x"4E72" then
+                -- STOP - privileged
+                is_privileged := true;
+            elsif opcode = x"4E73" then
+                -- RTE - privileged
+                is_privileged := true;
+            elsif opcode(15 downto 6) = "0100011011" then
+                -- MOVE to SR - privileged (01000110 11xxxxxx)
+                is_privileged := true;
+            elsif opcode(15 downto 8) = x"F5" then
+                -- CPUSHA, CINVA, etc. - privileged
+                is_privileged := true;
+            end if;
+
+            -- Check if running in user mode (supervisor_mode = '0')
+            if is_privileged and sr_register.supervisor_mode = '0' then
+                -- Privilege violation
+                id_exception.valid <= '1';
+                id_exception.exc_type <= EXC_PRIVILEGE_VIOLATION;
+                id_exception.vector <= VECTOR_PRIVILEGE_VIOLATION;
+                id_exception.priority <= PRIORITY_PRIVILEGE;
+                id_exception.frame_format <= FRAME_FORMAT_2;  -- Instruction exception frame
+                id_exception.fault_pc <= id_ea.pc;
+                id_exception.fault_sr <= pack_sr(sr_register);
+            end if;
+
+            -- Detect illegal instructions
+            -- For Phase 11, we'll detect a few obvious illegal patterns
+            if opcode(15 downto 12) = x"A" then
+                -- Line A emulator trap (not illegal, but unimplemented)
+                is_illegal := true;
+            elsif opcode = x"4AFC" then
+                -- ILLEGAL instruction
+                is_illegal := true;
+            end if;
+
+            -- Only report illegal if no privilege violation (privilege has higher priority)
+            if is_illegal and id_exception.valid = '0' then
+                id_exception.valid <= '1';
+                id_exception.exc_type <= EXC_ILLEGAL_INSTRUCTION;
+                id_exception.vector <= VECTOR_ILLEGAL_INSTRUCTION;
+                id_exception.priority <= PRIORITY_ILLEGAL;
+                id_exception.frame_format <= FRAME_FORMAT_2;  -- Instruction exception frame
+                id_exception.fault_pc <= id_ea.pc;
+                id_exception.fault_sr <= pack_sr(sr_register);
+            end if;
+        end if;
+
+        ----------------------------------------------------------------------
+        -- EA Stage Exception Detection
+        ----------------------------------------------------------------------
+        -- Address error on misaligned access
+        if ea_of.valid = '1' and ea_of.use_ea = '1' then
+            ea_addr := ea_of.ea_addr;
+            is_misaligned := false;
+
+            -- Check for misaligned word/longword access
+            -- MC68040 requires word (16-bit) accesses to be aligned to 2-byte boundaries
+            -- and longword (32-bit) accesses to be aligned to 4-byte boundaries
+            -- For this baseline, we'll check longword alignment only
+            if ea_addr(1 downto 0) /= "00" then
+                is_misaligned := true;
+            end if;
+
+            if is_misaligned then
+                ea_exception.valid <= '1';
+                ea_exception.exc_type <= EXC_ADDRESS_ERROR;
+                ea_exception.vector <= VECTOR_ADDRESS_ERROR;
+                ea_exception.priority <= PRIORITY_ADDRESS_ERROR;
+                ea_exception.frame_format <= FRAME_FORMAT_7;  -- Access error frame
+                ea_exception.fault_addr <= ea_addr;
+                ea_exception.fault_pc <= ea_of.pc;
+                ea_exception.fault_sr <= pack_sr(sr_register);
+            end if;
+        end if;
+
+        ----------------------------------------------------------------------
+        -- OF Stage Exception Detection
+        ----------------------------------------------------------------------
+        -- FP exceptions (reported from FPU)
+        if of_ex.valid = '1' and fpu_fpsr.exception_status /= "00000000" then
+            -- FP exception detected
+            of_exception.valid <= '1';
+            of_exception.exc_type <= EXC_FP_EXCEPTION;
+            of_exception.vector <= x"30";  -- FP exception base vector (48)
+            of_exception.priority <= PRIORITY_FP_EXCEPTION;
+            of_exception.frame_format <= FRAME_FORMAT_0;  -- Normal frame for FP exceptions
+            of_exception.fault_pc <= of_ex.pc;
+            of_exception.fault_sr <= pack_sr(sr_register);
+        end if;
+
+        ----------------------------------------------------------------------
+        -- EX Stage Exception Detection
+        ----------------------------------------------------------------------
+        -- Divide by zero detection
+        if ex_wb.valid = '1' then
+            opcode := of_ex.opcode;
+            opcode_high := opcode(15 downto 12);
+
+            -- Check for divide instructions (DIV/DIVU)
+            -- DIV: opcode 1000xxx111xxxxxx (0x8xxx with specific bits)
+            -- DIVU: opcode 1000xxx011xxxxxx
+            if opcode_high = x"8" and
+               (opcode(8 downto 6) = "011" or opcode(8 downto 6) = "111") then
+                -- Check if divisor (operand1) is zero
+                if of_ex.operand1 = x"00000000" then
+                    ex_exception.valid <= '1';
+                    ex_exception.exc_type <= EXC_DIVIDE_BY_ZERO;
+                    ex_exception.vector <= VECTOR_DIVIDE_BY_ZERO;
+                    ex_exception.priority <= PRIORITY_DIVIDE_BY_ZERO;
+                    ex_exception.frame_format <= FRAME_FORMAT_0;  -- Normal frame
+                    ex_exception.fault_pc <= ex_wb.pc;
+                    ex_exception.fault_sr <= pack_sr(sr_register);
+                end if;
+            end if;
+        end if;
+
+        ----------------------------------------------------------------------
+        -- Exception Priority Arbitration
+        ----------------------------------------------------------------------
+        -- Select highest priority exception from all stages
+        -- Priority order: IF > ID > EA > OF > EX (earlier stages have priority for same level)
+
+        temp_exception := EXCEPTION_INFO_NONE;
+
+        -- Start with EX stage (lowest priority position)
+        if ex_exception.valid = '1' then
+            temp_exception := ex_exception;
+        end if;
+
+        -- Check OF stage
+        if of_exception.valid = '1' then
+            if exception_has_higher_priority(of_exception, temp_exception) then
+                temp_exception := of_exception;
+            end if;
+        end if;
+
+        -- Check EA stage
+        if ea_exception.valid = '1' then
+            if exception_has_higher_priority(ea_exception, temp_exception) then
+                temp_exception := ea_exception;
+            end if;
+        end if;
+
+        -- Check ID stage
+        if id_exception.valid = '1' then
+            if exception_has_higher_priority(id_exception, temp_exception) then
+                temp_exception := id_exception;
+            end if;
+        end if;
+
+        -- Check IF stage (highest priority position)
+        if if_exception.valid = '1' then
+            if exception_has_higher_priority(if_exception, temp_exception) then
+                temp_exception := if_exception;
+            end if;
+        end if;
+
+        -- Output the winning exception
+        exception_pending <= temp_exception;
+    end process;
+
+    ------------------------------------------------------------------------------
     -- IF Stage: Instruction Fetch (with I-Cache + MMU, Phase 5 + 9)
     ------------------------------------------------------------------------------
     -- I-ATC translation request (combinational, Phase 9)

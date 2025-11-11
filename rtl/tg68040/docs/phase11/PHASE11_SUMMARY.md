@@ -4,7 +4,7 @@
 
 **Phase:** 11 of 15
 **Goal:** Implement MC68040 exception processing and interrupt handling
-**Status:** **In Progress - Phase 11A Complete (~25%)**
+**Status:** **In Progress - Phase 11B Complete (~50%)**
 **Date Started:** 2025-11-11
 **Estimated Completion:** 2-3 sessions
 
@@ -94,39 +94,94 @@ Create exception types and basic infrastructure for exception processing.
 - Vector number calculation
 - Exception classification utilities
 
-#### ⏳ Pipeline Exception Signals
-**Status:** Pending
+#### ✅ Pipeline Exception Signals
+**Status:** Complete (Phase 11A)
 **Goal:** Add exception signals to pipeline stages
 
-**Planned Changes:**
-- Add exception_info_t signals to each pipeline stage
-- Add exception detection flags
-- Add exception priority arbitration logic
-- Add exception entry control signals
+**Implemented Changes:**
+- Added exception_info_t signals to each pipeline stage (IF, ID, EA, OF, EX)
+- Added exception_pending signal for arbitrated exception
+- Added exception_active flag
+- Added Status Register (sr_register) and VBR (vbr_register)
+- Added exception statistics counters
 
 ---
 
-## Phase 11B: Exception Detection (Pending)
+## Phase 11B: Exception Detection ✅ COMPLETE
 
 ### Goal
 Detect exceptions in each pipeline stage.
 
-### Planned Components
+### Deliverables
 
-#### Exception Detection Points
-1. **IF Stage:** Bus error on instruction fetch
-2. **ID Stage:** Illegal instruction, privilege violation
-3. **EA Stage:** Address error (misaligned access)
-4. **OF Stage:** FP exceptions
-5. **EX Stage:** Arithmetic exceptions (divide by zero)
-6. **All Stages:** Trace exceptions
+#### ✅ Exception Detection Logic (~215 lines)
+**Status:** Complete
+**Location:** `rtl/tg68040/src/TG68040_Pipeline.vhd` (lines 570-783)
 
-#### Exception Priority Arbitration
-- Detect multiple simultaneous exceptions
-- Select highest priority exception
-- Clear lower priority exceptions
+**Implemented Detection Points:**
 
-**Estimated Lines:** ~300 lines (detection logic + arbitration)
+1. **IF Stage: Bus Error on Instruction Fetch**
+   - Monitors MMU I-ATC fault responses
+   - Detects `FAULT_NONE` condition from `mmu_itrans_resp`
+   - Creates EXC_BUS_ERROR with Format 7 (access error frame)
+   - Captures fault address, PC, and SR
+
+2. **ID Stage: Illegal Instruction and Privilege Violation**
+   - **Privilege Violation Detection:**
+     - Detects privileged instructions: MOVE to SR (0x46FC), RESET (0x4E70), STOP (0x4E72), RTE (0x4E73)
+     - Detects cache control instructions (0xF5xx)
+     - Checks supervisor mode bit in SR
+     - Creates EXC_PRIVILEGE_VIOLATION with Format 2 (instruction exception frame)
+   - **Illegal Instruction Detection:**
+     - Detects Line A emulator (opcodes 0xAxxx)
+     - Detects ILLEGAL instruction (0x4AFC)
+     - Creates EXC_ILLEGAL_INSTRUCTION with Format 2
+   - **Priority Handling:** Privilege violation has higher priority than illegal instruction
+
+3. **EA Stage: Address Error on Misaligned Access**
+   - Checks effective address alignment (longword = 4-byte boundary)
+   - Detects misaligned memory operations
+   - Creates EXC_ADDRESS_ERROR with Format 7 (access error frame)
+   - Captures fault address, PC, and SR
+
+4. **OF Stage: FP Exceptions**
+   - Monitors FPU exception status from `fpu_fpsr.exception_status`
+   - Detects any non-zero exception bits
+   - Creates EXC_FP_EXCEPTION with vector 0x30 (FP exception base)
+   - Uses Format 0 (normal frame) for FP exceptions
+
+5. **EX Stage: Divide by Zero**
+   - Detects DIV/DIVU instructions (opcode 0x8xxx with bits[8:6] = 011 or 111)
+   - Checks if divisor (operand1) is zero
+   - Creates EXC_DIVIDE_BY_ZERO with Format 0 (normal frame)
+   - Captures PC and SR at time of division
+
+#### ✅ Exception Priority Arbitration (~40 lines)
+**Status:** Complete
+**Location:** `rtl/tg68040/src/TG68040_Pipeline.vhd` (lines 740-783)
+
+**Arbitration Algorithm:**
+- Collects exceptions from all 5 pipeline stages
+- Compares using `exception_has_higher_priority()` function
+- Priority order (same level): IF > ID > EA > OF > EX (earlier stages win)
+- Priority order (different levels): Lower priority number wins (0=highest)
+- Outputs winning exception to `exception_pending` signal
+
+**Priority Levels Implemented:**
+- Priority 0: Reset (not yet implemented)
+- Priority 1: Bus Error, Address Error (IF, EA stages)
+- Priority 2: Trace (not yet implemented)
+- Priority 3: Interrupts (not yet implemented)
+- Priority 4: Illegal Instruction, Privilege Violation (ID stage)
+- Priority 5: FP Exception (OF stage)
+- Priority 6: CHK, TRAP, TRAPV (not yet implemented)
+- Priority 7: Divide by Zero (EX stage)
+
+**Key Features:**
+- Combinational process for zero-latency detection
+- All stages checked in parallel
+- Uses standard `process(all)` sensitivity for clean synthesis
+- Properly handles simultaneous exceptions from multiple stages
 
 ---
 
@@ -235,25 +290,26 @@ Implement Return from Exception instruction.
 
 ## Code Statistics
 
-### Completed (Phase 11A)
+### Completed (Phase 11A + 11B)
 | Component | Lines | Status |
 |-----------|-------|--------|
-| TG68040_Exception_Pack.vhd | 410 | ✅ Complete |
-| **Total** | **410** | **25%** |
+| TG68040_Exception_Pack.vhd | 410 | ✅ Complete (11A) |
+| Pipeline exception signals | 25 | ✅ Complete (11A) |
+| Exception detection logic | 215 | ✅ Complete (11B) |
+| Exception arbitration | 40 | ✅ Complete (11B) |
+| **Total** | **690** | **50%** |
 
 ### Pending
 | Component | Lines (est.) | Status |
 |-----------|--------------|--------|
-| Pipeline exception signals | 50 | ⏳ Pending |
-| Exception detection logic | 200 | ⏳ Pending |
-| Exception arbitration | 100 | ⏳ Pending |
-| TG68040_Exception_Unit.vhd | 400 | ⏳ Pending |
-| Pipeline exception integration | 150 | ⏳ Pending |
-| RTE implementation | 100 | ⏳ Pending |
-| **Total Pending** | **1,000** | **75%** |
+| TG68040_Exception_Unit.vhd | 400 | ⏳ Pending (11C) |
+| Pipeline exception integration | 150 | ⏳ Pending (11C) |
+| RTE implementation | 100 | ⏳ Pending (11D) |
+| Exception entry FSM | 50 | ⏳ Pending (11C) |
+| **Total Pending** | **700** | **50%** |
 
 ### Grand Total Estimated
-**~1,410 lines** across Phase 11
+**~1,390 lines** across Phase 11 (reduced from initial estimate)
 
 ---
 
@@ -313,14 +369,11 @@ Implement Return from Exception instruction.
 
 ## Next Steps
 
-### Immediate (Phase 11B)
-1. Add exception signals to pipeline stages
-2. Implement exception detection in ID stage (illegal instruction, privilege violation)
-3. Implement exception detection in EA stage (address error)
-4. Implement exception detection in EX stage (divide by zero)
-5. Implement exception priority arbitration
+### Immediate (Phase 11C)
+✅ Phase 11A complete: Exception infrastructure
+✅ Phase 11B complete: Exception detection and arbitration
 
-### Following (Phase 11C)
+### Next (Phase 11C)
 1. Create TG68040_Exception_Unit.vhd
 2. Implement stack frame creation
 3. Implement VBR-based vector lookup
@@ -344,7 +397,7 @@ Implement Return from Exception instruction.
 
 ---
 
-**Document Version:** 1.0
+**Document Version:** 2.0
 **Last Updated:** 2025-11-11
-**Phase Status:** Phase 11A Complete (25%)
+**Phase Status:** Phase 11B Complete (50%)
 **Author:** Claude AI (Anthropic)
