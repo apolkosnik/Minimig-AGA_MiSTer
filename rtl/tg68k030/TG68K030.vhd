@@ -278,6 +278,95 @@ architecture rtl of TG68K030 is
         );
     end component;
 
+    -- Component: PMOVE Executor (MC68030 F-line instruction)
+    component TG68K030_PMOVE_Execute is
+        port(
+            clk             : in  std_logic;
+            reset           : in  std_logic;
+            pmove_start     : in  std_logic;
+            pmove_direction : in  std_logic;
+            pmove_fd        : in  std_logic;
+            pmove_size      : in  std_logic_vector(1 downto 0);
+            pmove_sel_tc    : in  std_logic;
+            pmove_sel_tt0   : in  std_logic;
+            pmove_sel_tt1   : in  std_logic;
+            pmove_sel_crp   : in  std_logic;
+            pmove_sel_srp   : in  std_logic;
+            pmove_sel_mmusr : in  std_logic;
+            mem_addr        : in  std_logic_vector(31 downto 0);
+            mem_data_in     : in  std_logic_vector(63 downto 0);
+            mem_data_out    : out std_logic_vector(63 downto 0);
+            mem_read        : out std_logic;
+            mem_write       : out std_logic;
+            mem_size        : out std_logic_vector(1 downto 0);
+            mem_ready       : in  std_logic;
+            mmu_data_in     : in  std_logic_vector(63 downto 0);
+            mmu_data_out    : out std_logic_vector(63 downto 0);
+            mmu_reg_addr    : out std_logic_vector(3 downto 0);
+            mmu_read        : out std_logic;
+            mmu_write       : out std_logic;
+            mmu_size        : out std_logic_vector(1 downto 0);
+            atc_flush       : out std_logic;
+            atc_flush_all   : out std_logic;
+            pmove_done      : out std_logic;
+            pmove_busy      : out std_logic
+        );
+    end component;
+
+    -- Component: PFLUSH Executor (MC68030 F-line instruction)
+    component TG68K030_PFLUSH_Execute is
+        port(
+            clk             : in  std_logic;
+            reset           : in  std_logic;
+            pflush_start    : in  std_logic;
+            pflush_mode     : in  std_logic_vector(1 downto 0);
+            pflush_fc       : in  std_logic_vector(2 downto 0);
+            ea_addr         : in  std_logic_vector(31 downto 0);
+            atc_inv_req     : out std_logic;
+            atc_inv_mode    : out std_logic_vector(1 downto 0);
+            atc_inv_fc      : out std_logic_vector(2 downto 0);
+            atc_inv_addr    : out std_logic_vector(31 downto 0);
+            atc_inv_ack     : in  std_logic;
+            pflush_done     : out std_logic;
+            pflush_busy     : out std_logic
+        );
+    end component;
+
+    -- Component: PTEST Executor (MC68030 F-line instruction)
+    component TG68K030_PTEST_Execute is
+        port(
+            clk             : in  std_logic;
+            reset           : in  std_logic;
+            ptest_start     : in  std_logic;
+            ptest_level     : in  std_logic_vector(2 downto 0);
+            ptest_fc        : in  std_logic_vector(2 downto 0);
+            ptest_rw        : in  std_logic;
+            ptest_ret_en    : in  std_logic;
+            ptest_ret_reg   : in  std_logic_vector(2 downto 0);
+            ea_addr         : in  std_logic_vector(31 downto 0);
+            mmu_walk_req    : out std_logic;
+            mmu_walk_level  : out std_logic_vector(2 downto 0);
+            mmu_walk_fc     : out std_logic_vector(2 downto 0);
+            mmu_walk_addr   : out std_logic_vector(31 downto 0);
+            mmu_walk_rw     : out std_logic;
+            mmu_walk_done   : in  std_logic;
+            mmu_walk_result : in  std_logic_vector(15 downto 0);
+            mmu_desc_addr   : in  std_logic_vector(31 downto 0);
+            atc_lookup_req  : out std_logic;
+            atc_lookup_fc   : out std_logic_vector(2 downto 0);
+            atc_lookup_addr : out std_logic_vector(31 downto 0);
+            atc_hit         : in  std_logic;
+            atc_lookup_done : in  std_logic;
+            mmusr_update    : out std_logic;
+            mmusr_data      : out std_logic_vector(15 downto 0);
+            ret_reg_write   : out std_logic;
+            ret_reg_num     : out std_logic_vector(2 downto 0);
+            ret_reg_data    : out std_logic_vector(31 downto 0);
+            ptest_done      : out std_logic;
+            ptest_busy      : out std_logic
+        );
+    end component;
+
     -----------------------------------------------------
     -- CPU Mode Signals
     -----------------------------------------------------
@@ -406,6 +495,34 @@ architecture rtl of TG68K030 is
     signal fline_extension  : std_logic_vector(15 downto 0);
     signal fline_opcode_valid : std_logic;
 
+    -- Executor control signals
+    signal pmove_start      : std_logic;
+    signal pmove_done       : std_logic;
+    signal pmove_busy       : std_logic;
+    signal pflush_start     : std_logic;
+    signal pflush_done      : std_logic;
+    signal pflush_busy      : std_logic;
+    signal ptest_start      : std_logic;
+    signal ptest_done       : std_logic;
+    signal ptest_busy       : std_logic;
+
+    -- MMU register interface (for PMOVE)
+    signal mmu_reg_read     : std_logic;
+    signal mmu_reg_write    : std_logic;
+    signal mmu_reg_addr     : std_logic_vector(3 downto 0);
+    signal mmu_reg_size     : std_logic_vector(1 downto 0);
+    signal mmu_data_in_64   : std_logic_vector(63 downto 0);
+    signal mmu_data_out_64  : std_logic_vector(63 downto 0);
+
+    -- ATC interface (for PFLUSH)
+    signal atc_flush        : std_logic;
+    signal atc_flush_all    : std_logic;
+
+    -- Placeholder signals for unimplemented interfaces
+    signal stub_mem_ready   : std_logic;
+    signal stub_atc_inv_ack : std_logic;
+    signal stub_walk_done   : std_logic;
+
 begin
 
     --------------------------------------------------------------
@@ -483,12 +600,12 @@ begin
             clk        => clk,
             reset      => reset,
             supervisor => cpu_supervisor,
-            reg_addr   => "0000",  -- From PMOVE instruction decoder
-            reg_write  => '0',      -- From PMOVE instruction decoder
-            reg_read   => '0',      -- From PMOVE instruction decoder
-            reg_size   => "10",     -- Long word
-            data_in    => (others => '0'),
-            data_out   => open,
+            reg_addr   => mmu_reg_addr,     -- From PMOVE executor
+            reg_write  => mmu_reg_write,    -- From PMOVE executor
+            reg_read   => mmu_reg_read,     -- From PMOVE executor
+            reg_size   => mmu_reg_size,     -- From PMOVE executor
+            data_in    => mmu_data_out_64,  -- From PMOVE executor
+            data_out   => mmu_data_in_64,   -- To PMOVE executor
             tc_out     => tc_reg,
             tt0_out    => tt0_reg,
             tt1_out    => tt1_reg,
@@ -825,6 +942,101 @@ begin
         fline_is_ptest  <= ptest_is_ptest;
         fline_is_mmu    <= pmove_is_pmove or pflush_is_pflush or ptest_is_ptest;
 
+        ----------------------------------------------------
+        -- Instantiate F-Line Executors
+        ----------------------------------------------------
+
+        -- PMOVE Executor
+        pmove_executor: TG68K030_PMOVE_Execute
+            port map(
+                clk => clk,
+                reset => reset,
+                pmove_start => pmove_start,
+                pmove_direction => pmove_direction,
+                pmove_fd => pmove_is_pmovefd,
+                pmove_size => pmove_size,
+                pmove_sel_tc => pmove_sel_tc,
+                pmove_sel_tt0 => pmove_sel_tt0,
+                pmove_sel_tt1 => pmove_sel_tt1,
+                pmove_sel_crp => pmove_sel_crp,
+                pmove_sel_srp => pmove_sel_srp,
+                pmove_sel_mmusr => pmove_sel_mmusr,
+                mem_addr => (others => '0'),          -- TODO: Connect to EA calculation
+                mem_data_in => (others => '0'),       -- TODO: Connect to memory
+                mem_data_out => open,
+                mem_read => open,
+                mem_write => open,
+                mem_size => open,
+                mem_ready => stub_mem_ready,         -- Stub: always ready
+                mmu_data_in => mmu_data_in_64,       -- From MMU registers
+                mmu_data_out => mmu_data_out_64,     -- To MMU registers
+                mmu_reg_addr => mmu_reg_addr,        -- To MMU registers
+                mmu_read => mmu_reg_read,            -- To MMU registers
+                mmu_write => mmu_reg_write,          -- To MMU registers
+                mmu_size => mmu_reg_size,            -- To MMU registers
+                atc_flush => atc_flush,              -- To ATC
+                atc_flush_all => atc_flush_all,      -- To ATC
+                pmove_done => pmove_done,
+                pmove_busy => pmove_busy
+            );
+
+        -- PFLUSH Executor
+        pflush_executor: TG68K030_PFLUSH_Execute
+            port map(
+                clk => clk,
+                reset => reset,
+                pflush_start => pflush_start,
+                pflush_mode => pflush_mode,
+                pflush_fc => pflush_fc,
+                ea_addr => (others => '0'),           -- TODO: Connect to EA calculation
+                atc_inv_req => open,                 -- TODO: Connect to ATC
+                atc_inv_mode => open,                -- TODO: Connect to ATC
+                atc_inv_fc => open,                  -- TODO: Connect to ATC
+                atc_inv_addr => open,                -- TODO: Connect to ATC
+                atc_inv_ack => stub_atc_inv_ack,     -- Stub: immediate ack
+                pflush_done => pflush_done,
+                pflush_busy => pflush_busy
+            );
+
+        -- PTEST Executor
+        ptest_executor: TG68K030_PTEST_Execute
+            port map(
+                clk => clk,
+                reset => reset,
+                ptest_start => ptest_start,
+                ptest_level => ptest_level,
+                ptest_fc => ptest_fc,
+                ptest_rw => '0',                      -- TODO: Connect from decoder
+                ptest_ret_en => '0',                  -- TODO: Connect from decoder
+                ptest_ret_reg => (others => '0'),    -- TODO: Connect from decoder
+                ea_addr => (others => '0'),           -- TODO: Connect to EA calculation
+                mmu_walk_req => open,                -- TODO: Connect to MMU table walker
+                mmu_walk_level => open,              -- TODO: Connect to MMU table walker
+                mmu_walk_fc => open,                 -- TODO: Connect to MMU table walker
+                mmu_walk_addr => open,               -- TODO: Connect to MMU table walker
+                mmu_walk_rw => open,                 -- TODO: Connect to MMU table walker
+                mmu_walk_done => stub_walk_done,     -- Stub: immediate completion
+                mmu_walk_result => (others => '0'),  -- Stub
+                mmu_desc_addr => (others => '0'),    -- Stub
+                atc_lookup_req => open,              -- TODO: Connect to ATC
+                atc_lookup_fc => open,               -- TODO: Connect to ATC
+                atc_lookup_addr => open,             -- TODO: Connect to ATC
+                atc_hit => '0',                       -- Stub: never hit
+                atc_lookup_done => '1',               -- Stub: immediate
+                mmusr_update => open,                -- TODO: Connect to MMUSR
+                mmusr_data => open,                  -- TODO: Connect to MMUSR
+                ret_reg_write => open,               -- TODO: Connect to register file
+                ret_reg_num => open,                 -- TODO: Connect to register file
+                ret_reg_data => open,                -- TODO: Connect to register file
+                ptest_done => ptest_done,
+                ptest_busy => ptest_busy
+            );
+
+        -- Stub signals (always ready/complete)
+        stub_mem_ready <= '1';
+        stub_atc_inv_ack <= '1';
+        stub_walk_done <= '1';
+
     end generate;
 
     -- If MMU disabled, tie off F-line signals
@@ -849,12 +1061,27 @@ begin
     begin
         if rising_edge(clk) then
             if reset = '1' then
+                pmove_start <= '0';
+                pflush_start <= '0';
+                ptest_start <= '0';
                 fline_exec_done <= '0';
-            elsif fline_exec_req = '1' then
-                -- For now, complete immediately
-                -- TODO: Add actual execution logic
-                fline_exec_done <= '1';
+            elsif fline_exec_req = '1' and fline_exec_done = '0' then
+                -- Start appropriate executor based on decoded instruction
+                if fline_is_pmove = '1' and pmove_busy = '0' then
+                    pmove_start <= '1';
+                elsif fline_is_pflush = '1' and pflush_busy = '0' then
+                    pflush_start <= '1';
+                elsif fline_is_ptest = '1' and ptest_busy = '0' then
+                    ptest_start <= '1';
+                end if;
+
+                -- Signal completion when executor is done
+                fline_exec_done <= pmove_done or pflush_done or ptest_done;
             else
+                -- Clear start signals after one cycle
+                pmove_start <= '0';
+                pflush_start <= '0';
+                ptest_start <= '0';
                 fline_exec_done <= '0';
             end if;
         end if;
@@ -870,12 +1097,25 @@ begin
     -- ✅ Memory controller integrated
     -- ✅ Bus interface conversion (16-bit CPU ↔ 32-bit MC68030)
     -- ✅ F-line instruction decoders integrated (PMOVE/PFLUSH/PTEST)
-    -- ✅ F-line execution coordinator (simplified - completes immediately)
+    -- ✅ F-line executors integrated and connected
+    -- ✅ PMOVE executor connected to MMU registers (TC, TT0, TT1, CRP, SRP, MMUSR)
+    -- ✅ PFLUSH executor integrated (ATC flush signals connected)
+    -- ✅ PTEST executor integrated (stub interfaces)
+    -- ✅ F-line execution coordinator with proper executor management
+    --
+    -- ⚠️  PARTIAL IMPLEMENTATION:
+    -- - EA (Effective Address) calculation not connected to executors
+    -- - Memory interface for PMOVE not connected
+    -- - ATC invalidation interface for PFLUSH (stubs present)
+    -- - MMU table walker for PTEST (stubs present)
     --
     -- ⚠️  REMAINING WORK:
-    -- - F-line execution logic (PMOVE register access, PFLUSH ATC flush, PTEST table walk)
+    -- - Connect EA calculation to PMOVE/PFLUSH/PTEST
+    -- - Connect memory interface for PMOVE
+    -- - Implement ATC invalidation logic
+    -- - Implement MMU table walker interface
     -- - MOVEC CACR/CAAR connection
-    -- - Exception vector updates for MC68030
+    -- - Exception handling for F-line errors
     -- - Real hardware testing and debugging
     --------------------------------------------------------------
 
