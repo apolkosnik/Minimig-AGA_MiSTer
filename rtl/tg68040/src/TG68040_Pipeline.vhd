@@ -1106,6 +1106,16 @@ begin
                         id_ea.src_reg2 <= "0" & if_id.instruction(11 downto 9);  -- Dest Dn
                         id_ea.dst_reg <= (others => '0');  -- No destination (flags only)
 
+                    -- Phase 12A: CMPA instruction (0xBxxx with opmode 011 or 111)
+                    elsif opcode_high = x"B" and (if_id.instruction(8 downto 6) = "011" or if_id.instruction(8 downto 6) = "111") then
+                        -- CMPA Dn,An (longword) - Compare Address
+                        -- Format: 1011 AAA 0/1 11 MMM RRR
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_OTHER;
+                        id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);   -- Source Dn
+                        id_ea.src_reg2 <= "1" & if_id.instruction(11 downto 9);  -- Dest An
+                        id_ea.dst_reg <= (others => '0');  -- No destination (flags only)
+
                     -- Phase 12: EOR instruction (0xBxxx with opmode 1xx)
                     elsif opcode_high = x"B" and if_id.instruction(8) = '1' then
                         -- EOR Dn,Dn (longword) - Exclusive OR
@@ -1156,6 +1166,13 @@ begin
                         elsif if_id.instruction(15 downto 8) = x"44" then
                             -- NEG (Negate) instruction
                             -- Format: 01000100 SS 000 RRR (0 - <ea> → <ea>)
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source register
+                            id_ea.src_reg2 <= (others => '0');
+                            id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);   -- Dest = source
+                        elsif if_id.instruction(15 downto 8) = x"40" then
+                            -- NEGX (Negate with Extend) instruction (Phase 12A)
+                            -- Format: 01000000 SS 000 RRR (0 - <ea> - X → <ea>)
                             id_ea.instr_type <= INSTR_OTHER;
                             id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source register
                             id_ea.src_reg2 <= (others => '0');
@@ -1282,13 +1299,15 @@ begin
                     end if;
 
                     -- Determine if we need to write back
-                    -- Phase 12: CMP, TST, and CMPI don't write to registers (flags only)
+                    -- Phase 12: CMP, TST, CMPI, and CMPA don't write to registers (flags only)
                     if ea_of.instr_type = INSTR_OTHER then
-                        -- Check if it's CMP, TST, or CMPI (flags only, no writeback)
-                        if (ea_of.opcode(15 downto 12) = x"B" and ea_of.opcode(8 downto 6) = "000") or
+                        -- Check if it's CMP, CMPA, TST, or CMPI (flags only, no writeback)
+                        if (ea_of.opcode(15 downto 12) = x"B" and (ea_of.opcode(8 downto 6) = "000" or
+                                                                     ea_of.opcode(8 downto 6) = "011" or
+                                                                     ea_of.opcode(8 downto 6) = "111")) or
                            (ea_of.opcode(15 downto 8) = x"4A") or
                            (ea_of.opcode(15 downto 8) = x"0C") then
-                            of_ex.write_reg <= '0';  -- CMP, TST, or CMPI: no register write
+                            of_ex.write_reg <= '0';  -- CMP, CMPA, TST, or CMPI: no register write
                         else
                             of_ex.write_reg <= '1';  -- Normal instruction: write result
                         end if;
@@ -1437,6 +1456,22 @@ begin
                         ex_wb.flags(1) <= '0';  -- Overflow (simplified)
                         ex_wb.flags(0) <= '0';  -- Carry (simplified)
 
+                    -- Phase 12A: CMPA instruction (Compare Address)
+                    elsif opcode_high = x"B" and (of_ex.opcode(8 downto 6) = "011" or of_ex.opcode(8 downto 6) = "111") then
+                        -- CMPA Dn,An - Compare Address (An - Dn)
+                        -- Result not stored, only flags updated
+                        alu_result := unsigned(of_ex.operand2) - unsigned(of_ex.operand1);
+                        ex_wb.result <= (others => '0');  -- No result stored
+                        -- Set flags: N, Z, V, C according to subtraction
+                        ex_wb.flags(3) <= alu_result(31);  -- Negative
+                        if alu_result = 0 then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow (simplified)
+                        ex_wb.flags(0) <= '0';  -- Carry (simplified)
+
                     -- Phase 12: CMPI instruction (Phase 12A)
                     elsif opcode_high = x"0" and of_ex.opcode(15 downto 8) = x"0C" then
                         -- CMPI #<data>,Dn - Compare immediate with register
@@ -1527,6 +1562,30 @@ begin
                         end if;
                         ex_wb.flags(1) <= '0';  -- Overflow cleared
                         ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12A: NEGX instruction (Negate with Extend)
+                    elsif opcode_high = x"4" and of_ex.opcode(15 downto 8) = x"40" then
+                        -- NEGX - Negate with Extend (0 - operand - X)
+                        -- X bit is bit 4 of CCR (simplified - using bit 0 as placeholder)
+                        if of_ex.ccr(0) = '1' then
+                            alu_result := unsigned(not of_ex.operand1) + 1 - 1;  -- Include X bit
+                        else
+                            alu_result := unsigned(not of_ex.operand1) + 1;  -- No X bit
+                        end if;
+                        ex_wb.result <= std_logic_vector(alu_result);
+                        -- Set flags: N, Z, V, C, X according to result
+                        ex_wb.flags(3) <= alu_result(31);  -- Negative
+                        if alu_result = 0 then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow (simplified)
+                        if alu_result = 0 then
+                            ex_wb.flags(0) <= '0';  -- Carry and X cleared if result is zero
+                        else
+                            ex_wb.flags(0) <= '1';  -- Carry and X set if result is non-zero
+                        end if;
 
                     -- Phase 12: NEG instruction (Phase 12A)
                     elsif opcode_high = x"4" and of_ex.opcode(15 downto 8) = x"44" then
