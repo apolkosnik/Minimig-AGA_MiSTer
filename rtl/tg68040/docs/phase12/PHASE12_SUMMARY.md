@@ -4,10 +4,10 @@
 
 **Phase:** 12 of 15
 **Goal:** Implement comprehensive MC68040 instruction set
-**Status:** **In Progress - 15%**
+**Status:** **In Progress - 41%**
 **Date Started:** 2025-11-11
 **Date Updated:** 2025-11-11
-**Estimated Completion:** 3-4 sessions
+**Estimated Completion:** 2-3 sessions
 
 ---
 
@@ -27,7 +27,7 @@
 
 **Total Pre-Phase 12:** 7 instructions (5 real, 2 special)
 
-### Implemented (Phase 12 - MVIS)
+### Implemented (Phase 12)
 
 | Instruction | Opcode | Status | Commit |
 |-------------|--------|--------|--------|
@@ -35,9 +35,15 @@
 | CMP Dn,Dn | 0xBxxx | ✅ Complete | b8be41e |
 | TST Dn | 0x4Axx | ✅ Complete | b8be41e |
 | Bcc (all 16 conditions) | 0x6xxx | ✅ Complete | c098163 |
+| AND Dn,Dn | 0xCxxx | ✅ Complete | 36cda91 |
+| OR Dn,Dn | 0x8xxx | ✅ Complete | 36cda91 |
+| EOR Dn,Dn | 0xBxxx | ✅ Complete | 36cda91 |
+| NOT Dn | 0x46xx | ✅ Complete | 36cda91 |
+| NEG Dn | 0x44xx | ✅ Complete | 36cda91 |
+| CLR Dn | 0x42xx | ✅ Complete | 36cda91 |
 
-**Total Phase 12:** 4 instructions (MVIS core)
-**Grand Total:** 11 instructions
+**Total Phase 12:** 10 instructions
+**Grand Total:** 17 instructions
 
 ### Target Instruction Count
 
@@ -98,14 +104,14 @@ Implement core ALU operations with proper CCR updates.
 
 | Instruction | Opcode | Size | Status |
 |-------------|--------|------|--------|
-| AND | 0xCxxx | B/W/L | ⏳ Pending |
-| OR | 0x8xxx | B/W/L | ⏳ Pending |
-| EOR | 0xBxxx | B/W/L | ⏳ Pending |
-| NOT | 0x4600 | B/W/L | ⏳ Pending |
-| NEG | 0x4400 | B/W/L | ⏳ Pending |
+| **AND** | **0xCxxx** | **L only** | **✅ Complete (Dn,Dn)** |
+| **OR** | **0x8xxx** | **L only** | **✅ Complete (Dn,Dn)** |
+| **EOR** | **0xBxxx** | **L only** | **✅ Complete (Dn,Dn)** |
+| **NOT** | **0x4600** | **L only** | **✅ Complete (Dn)** |
+| **NEG** | **0x4400** | **L only** | **✅ Complete (Dn)** |
 | NEGX | 0x4000 | B/W/L | ⏳ Pending |
-| CLR | 0x4200 | B/W/L | ⏳ Pending |
-| **TST** | **0x4A00** | **L only** | **✅ Complete** |
+| **CLR** | **0x4200** | **L only** | **✅ Complete (Dn)** |
+| **TST** | **0x4A00** | **L only** | **✅ Complete (Dn)** |
 | **CMP** | **0xBxxx** | **L only** | **✅ Complete (Dn,Dn)** |
 | CMPA | 0xBxC0/C8 | W/L | ⏳ Pending |
 | CMPI | 0x0C00 | B/W/L | ⏳ Pending |
@@ -113,7 +119,8 @@ Implement core ALU operations with proper CCR updates.
 | SUBA | 0x9xC0/C8 | W/L | ⏳ Pending |
 
 **Estimated Lines:** 200
-**Status:** 2/13 complete (15%)
+**Actual Lines:** ~205 (ID stage: ~50, EX stage: ~155)
+**Status:** 8/13 complete (62%)
 
 ---
 
@@ -312,7 +319,7 @@ Implement comprehensive addressing mode support.
 
 | Sub-Phase | Lines (actual) | Instructions | Status |
 |-----------|----------------|--------------|--------|
-| 12A (partial) | 40 | 2 (CMP, TST) | ✅ 15% |
+| 12A (partial) | 205 | 8 (AND, OR, EOR, NOT, NEG, CLR, CMP, TST) | ✅ 62% |
 | 12B | 0 | 0 | ⏳ Pending |
 | 12C | 0 | 0 | ⏳ Pending |
 | 12D (partial) | 8 | 16 (Bcc family) | ✅ 89% |
@@ -321,13 +328,13 @@ Implement comprehensive addressing mode support.
 | 12G | 0 | 0 | ⏳ Pending |
 | 12H | 0 | 0 | ⏳ Pending |
 | 12I | 0 | 0 | ⏳ Pending |
-| **Total** | **83** | **19 instructions** | **~15%** |
+| **Total** | **248** | **25 instructions** | **~41%** |
 
 ### Planned (All Sub-Phases)
 
 | Sub-Phase | Lines (est.) | Instructions | Status |
 |-----------|--------------|--------------|--------|
-| 12A | 200 | 13 | ✅ 2/13 (15%) |
+| 12A | 200 | 13 | ✅ 8/13 (62%) |
 | 12B | 250 | 8 | ⏳ 0/8 |
 | 12C | 300 | 4 | ⏳ 0/4 |
 | 12D | 150 | 18 | ✅ 16/18 (89%) |
@@ -336,18 +343,18 @@ Implement comprehensive addressing mode support.
 | 12G | 150 | 4 | ⏳ 0/4 |
 | 12H | 80 | 2 | ⏳ 0/2 |
 | 12I | 400 | N/A (modes) | ⏳ 0/12 modes |
-| **Total** | **1,880** | **61+ instructions** | **✅ 19/61 (31%)** |
+| **Total** | **1,880** | **61+ instructions** | **✅ 25/61 (41%)** |
 
 ### Minimal Viable Instruction Set (MVIS)
 
 | Component | Lines | Instructions | Status |
 |-----------|-------|--------------|----------|
-| Basic ALU | 40 / 100 | CMP, TST (of AND, OR, NOT, CMP, TST) | ✅ 40% |
+| Basic ALU | 205 / 100 | AND, OR, EOR, NOT, NEG, CLR, CMP, TST | ✅ 100% |
 | MOVEQ | 35 / 20 | MOVEQ | ✅ 100% |
 | Branches | 8 / 80 | Bcc family (all 16 conditions) | ✅ 100% |
 | Subroutines | 0 / 60 | JSR, RTS | ⏳ 0% |
 | Basic addressing | 0 / 150 | (An), (An)+, -(An), d(An) | ⏳ 0% |
-| **MVIS Total** | **83 / 410** | **4 of ~25 instructions** | **✅ 20%** |
+| **MVIS Total** | **248 / 410** | **10 of ~25 instructions** | **✅ 60%** |
 
 ---
 
@@ -449,30 +456,72 @@ Successfully implemented core MVIS (Minimal Viable Instruction Set) components:
 - Branch prediction and resolution
 - ~8 lines in ID stage
 
+**5. AND Dn,Dn** (Commit 36cda91)
+- Logical AND operation
+- Result stored in destination register
+- CCR flag updates (N, Z)
+- ~25 lines in ID/EX stages
+
+**6. OR Dn,Dn** (Commit 36cda91)
+- Logical OR operation
+- Result stored in destination register
+- CCR flag updates (N, Z)
+- ~25 lines in ID/EX stages
+
+**7. EOR Dn,Dn** (Commit 36cda91)
+- Exclusive OR operation
+- Result stored in destination register
+- CCR flag updates (N, Z)
+- ~25 lines in ID/EX stages
+
+**8. NOT Dn** (Commit 36cda91)
+- Logical complement (bitwise NOT)
+- Result stored in same register
+- CCR flag updates (N, Z)
+- ~23 lines in ID/EX stages
+
+**9. NEG Dn** (Commit 36cda91)
+- Two's complement negation
+- Result stored in same register
+- CCR flag updates (N, Z, C)
+- ~25 lines in ID/EX stages
+
+**10. CLR Dn** (Commit 36cda91)
+- Clear register (write zero)
+- Result always zero
+- CCR flags: N=0, Z=1, V=0, C=0
+- ~18 lines in ID/EX stages
+
 ### Commits
 
 1. **b8be41e** - TG68040: Phase 12 Started - MVIS Instructions (MOVEQ, CMP, TST)
 2. **c098163** - TG68040: Phase 12 - Add Bcc (Conditional Branch) Support
+3. **36cda91** - TG68040: Phase 12A - Add Logical and Arithmetic ALU Instructions
 
 ### Files Modified
 
-- **TG68040_Pipeline.vhd**: +121 lines total
-  - ID stage: Instruction decode for MOVEQ, CMP, TST, Bcc
+- **TG68040_Pipeline.vhd**: +262 lines total
+  - ID stage: Instruction decode for all 10 instructions
   - OF stage: Immediate value routing for MOVEQ, write_reg control
-  - EX stage: Execution logic for MOVEQ, CMP, TST
+  - EX stage: Execution logic for all instructions
 
 ### Current Capabilities
 
-With these 4 instructions + previous 7, the MC68040 implementation now supports:
+With these 10 instructions + previous 7, the MC68040 implementation now supports:
 - **Data movement**: MOVE, MOVEQ
-- **Arithmetic**: ADD, SUB
+- **Arithmetic**: ADD, SUB, NEG, CLR
+- **Logical**: AND, OR, EOR, NOT
 - **Comparison**: CMP, TST
 - **Control flow**: All 16 Bcc conditions (BRA, BEQ, BNE, BGT, BLE, etc.)
 - **Exception handling**: ILLEGAL, RTE
 - **Floating point**: FADD (stub)
 
-**Total Instructions**: 11 (4 new in Phase 12)
-**Can now run**: Simple programs with loops, conditionals, and immediate data
+**Total Instructions**: 17 (10 new in Phase 12)
+**Can now run**: Programs with:
+- Loops and conditionals
+- Bit manipulation
+- Arithmetic and logical operations
+- Immediate data loading
 
 ### Next Steps
 
@@ -481,19 +530,21 @@ With these 4 instructions + previous 7, the MC68040 implementation now supports:
 - Implement basic addressing modes: (An), (An)+, -(An), d(An)
 - Would enable function calls and memory access patterns
 
-**Option B: Expand ALU Instructions**
-- Implement AND, OR, EOR, NOT (logical operations)
-- Implement NEG, CLR (arithmetic operations)
-- Would enable bit manipulation and more arithmetic
+**Option B: Expand Phase 12A**
+- Implement CMPA, CMPI (address/immediate comparison)
+- Implement ADDA, SUBA (address arithmetic)
+- Implement NEGX (negate with extend)
+- Would complete Phase 12A (13/13 instructions)
 
-**Option C: Add More Move Instructions**
-- Implement MOVEA, MOVEM, LEA, PEA
-- Implement EXG, SWAP, EXT
-- Would enable more data movement patterns
+**Option C: Add More Move Instructions (Phase 12F)**
+- Implement MOVEA, LEA (address operations)
+- Implement EXG, SWAP (register exchange)
+- Implement EXT (sign extension)
+- Would enable more data manipulation patterns
 
 ---
 
-**Document Version:** 2.0
+**Document Version:** 3.0
 **Last Updated:** 2025-11-11
-**Phase Status:** In Progress (15% - Core MVIS Complete)
+**Phase Status:** In Progress (41% - MVIS 60% Complete)
 **Author:** Claude AI (Anthropic)
