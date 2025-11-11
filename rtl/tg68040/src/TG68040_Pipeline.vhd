@@ -1014,8 +1014,26 @@ begin
                     -- Default: no immediate value (will be overridden by instructions that use it)
                     id_ea.immediate <= (others => '0');
 
+                    -- Phase 12: CMPI instruction (simplified - immediate in lower byte)
+                    if if_id.instruction(15 downto 8) = x"0C" then
+                        -- CMPI #<data>,Dn (simplified)
+                        -- Format: 0000 1100 SS 000 RRR
+                        -- For simplification, treat bits 7-0 as 8-bit immediate (will be extended)
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_OTHER;
+                        id_ea.src_reg1 <= (others => '0');  -- No source register
+                        id_ea.src_reg2 <= "0" & if_id.instruction(2 downto 0);  -- Dest register (for comparison)
+                        id_ea.dst_reg <= (others => '0');  -- No destination (flags only)
+
+                        -- Sign-extend 8-bit immediate to 32 bits (simplified)
+                        if if_id.instruction(7) = '1' then
+                            id_ea.immediate <= x"FFFFFF" & if_id.instruction(7 downto 0);
+                        else
+                            id_ea.immediate <= x"000000" & if_id.instruction(7 downto 0);
+                        end if;
+
                     -- Phase 11D: RTE instruction detection
-                    if if_id.instruction = x"4E73" then
+                    elsif if_id.instruction = x"4E73" then
                         -- RTE (Return from Exception) instruction
                         -- This is a privileged instruction and triggers RTE
                         exc_unit_rte_req <= '1';
@@ -1054,11 +1072,21 @@ begin
 
                     elsif opcode_high = x"D" or opcode_high = x"9" then
                         exc_unit_rte_req <= '0';
-                        -- ADD/SUB Dn,Dn (simplified)
-                        id_ea.instr_type <= INSTR_OTHER;
-                        id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);   -- Source Dn
-                        id_ea.src_reg2 <= "0" & if_id.instruction(11 downto 9);  -- Dest Dn (also src2)
-                        id_ea.dst_reg <= "0" & if_id.instruction(11 downto 9);   -- Dest Dn
+                        -- Phase 12: Distinguish ADD/SUB vs ADDA/SUBA
+                        if if_id.instruction(8 downto 6) = "011" or if_id.instruction(8 downto 6) = "111" then
+                            -- ADDA/SUBA (opmode 011 for word, 111 for long)
+                            -- Format: 1101/1001 RRR 0/1 11 MMM RRR (destination is An)
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);   -- Source Dn
+                            id_ea.src_reg2 <= "1" & if_id.instruction(11 downto 9);  -- Dest An (also src2)
+                            id_ea.dst_reg <= "1" & if_id.instruction(11 downto 9);   -- Dest An
+                        else
+                            -- ADD/SUB Dn,Dn (data register operations)
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);   -- Source Dn
+                            id_ea.src_reg2 <= "0" & if_id.instruction(11 downto 9);  -- Dest Dn (also src2)
+                            id_ea.dst_reg <= "0" & if_id.instruction(11 downto 9);   -- Dest Dn
+                        end if;
 
                     elsif opcode_high = x"3" or opcode_high = x"2" or opcode_high = x"1" then
                         exc_unit_rte_req <= '0';
@@ -1238,11 +1266,15 @@ begin
 
                     -- Fetch operands with forwarding (Phase 4)
                     -- Use forwarded data if hazard detected, else register file
-                    -- Phase 12: For MOVEQ, use immediate value from ea_addr
+                    -- Phase 12: For MOVEQ and CMPI, use immediate value from ea_addr
                     if ea_of.opcode(15 downto 12) = x"7" and ea_of.opcode(8) = '0' then
                         -- MOVEQ: use immediate value from EA stage
                         of_ex.operand1 <= ea_of.ea_addr;
                         of_ex.operand2 <= (others => '0');
+                    elsif ea_of.opcode(15 downto 8) = x"0C" then
+                        -- CMPI: use immediate value from EA stage, register in operand2
+                        of_ex.operand1 <= ea_of.ea_addr;  -- Immediate value
+                        of_ex.operand2 <= operand2_forwarded;  -- Register value
                     else
                         -- Normal register operands with forwarding
                         of_ex.operand1 <= operand1_forwarded;
@@ -1250,12 +1282,13 @@ begin
                     end if;
 
                     -- Determine if we need to write back
-                    -- Phase 12: CMP and TST don't write to registers (flags only)
+                    -- Phase 12: CMP, TST, and CMPI don't write to registers (flags only)
                     if ea_of.instr_type = INSTR_OTHER then
-                        -- Check if it's CMP or TST (flags only, no writeback)
+                        -- Check if it's CMP, TST, or CMPI (flags only, no writeback)
                         if (ea_of.opcode(15 downto 12) = x"B" and ea_of.opcode(8 downto 6) = "000") or
-                           (ea_of.opcode(15 downto 8) = x"4A") then
-                            of_ex.write_reg <= '0';  -- CMP or TST: no register write
+                           (ea_of.opcode(15 downto 8) = x"4A") or
+                           (ea_of.opcode(15 downto 8) = x"0C") then
+                            of_ex.write_reg <= '0';  -- CMP, TST, or CMPI: no register write
                         else
                             of_ex.write_reg <= '1';  -- Normal instruction: write result
                         end if;
@@ -1321,31 +1354,44 @@ begin
                         ex_wb.flags <= (others => '0');
 
                     elsif opcode_high = x"D" then
-                        -- ADD operation
+                        -- ADD/ADDA operation
                         alu_result := unsigned(of_ex.operand1) + unsigned(of_ex.operand2);
                         ex_wb.result <= std_logic_vector(alu_result);
-                        -- Simple flag generation (N, Z, V, C)
-                        ex_wb.flags(3) <= alu_result(31);  -- Negative
-                        if alu_result = 0 then
-                            ex_wb.flags(2) <= '1';  -- Zero
+                        -- Phase 12: ADDA doesn't affect flags (opmode 011 or 111)
+                        if of_ex.opcode(8 downto 6) = "011" or of_ex.opcode(8 downto 6) = "111" then
+                            -- ADDA - don't update flags
+                            ex_wb.flags <= (others => '0');
                         else
-                            ex_wb.flags(2) <= '0';
+                            -- ADD - update flags (N, Z, V, C)
+                            ex_wb.flags(3) <= alu_result(31);  -- Negative
+                            if alu_result = 0 then
+                                ex_wb.flags(2) <= '1';  -- Zero
+                            else
+                                ex_wb.flags(2) <= '0';
+                            end if;
+                            ex_wb.flags(1) <= '0';  -- Overflow (simplified)
+                            ex_wb.flags(0) <= '0';  -- Carry (simplified)
                         end if;
-                        ex_wb.flags(1) <= '0';  -- Overflow (simplified)
-                        ex_wb.flags(0) <= '0';  -- Carry (simplified)
 
                     elsif opcode_high = x"9" then
-                        -- SUB operation
+                        -- SUB/SUBA operation
                         alu_result := unsigned(of_ex.operand2) - unsigned(of_ex.operand1);
                         ex_wb.result <= std_logic_vector(alu_result);
-                        ex_wb.flags(3) <= alu_result(31);  -- Negative
-                        if alu_result = 0 then
-                            ex_wb.flags(2) <= '1';  -- Zero
+                        -- Phase 12: SUBA doesn't affect flags (opmode 011 or 111)
+                        if of_ex.opcode(8 downto 6) = "011" or of_ex.opcode(8 downto 6) = "111" then
+                            -- SUBA - don't update flags
+                            ex_wb.flags <= (others => '0');
                         else
-                            ex_wb.flags(2) <= '0';
+                            -- SUB - update flags (N, Z, V, C)
+                            ex_wb.flags(3) <= alu_result(31);  -- Negative
+                            if alu_result = 0 then
+                                ex_wb.flags(2) <= '1';  -- Zero
+                            else
+                                ex_wb.flags(2) <= '0';
+                            end if;
+                            ex_wb.flags(1) <= '0';  -- Overflow (simplified)
+                            ex_wb.flags(0) <= '0';  -- Carry (simplified)
                         end if;
-                        ex_wb.flags(1) <= '0';  -- Overflow (simplified)
-                        ex_wb.flags(0) <= '0';  -- Carry (simplified)
 
                     elsif opcode_high = x"3" or opcode_high = x"2" or opcode_high = x"1" then
                         -- MOVE operation - pass through operand1
@@ -1378,6 +1424,22 @@ begin
                     -- Phase 12: CMP instruction (MVIS)
                     elsif opcode_high = x"B" and of_ex.opcode(8 downto 6) = "000" then
                         -- CMP Dn,Dn - Compare (Dest - Source)
+                        -- Result not stored, only flags updated
+                        alu_result := unsigned(of_ex.operand2) - unsigned(of_ex.operand1);
+                        ex_wb.result <= (others => '0');  -- No result stored
+                        -- Set flags: N, Z, V, C according to subtraction
+                        ex_wb.flags(3) <= alu_result(31);  -- Negative
+                        if alu_result = 0 then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow (simplified)
+                        ex_wb.flags(0) <= '0';  -- Carry (simplified)
+
+                    -- Phase 12: CMPI instruction (Phase 12A)
+                    elsif opcode_high = x"0" and of_ex.opcode(15 downto 8) = x"0C" then
+                        -- CMPI #<data>,Dn - Compare immediate with register
                         -- Result not stored, only flags updated
                         alu_result := unsigned(of_ex.operand2) - unsigned(of_ex.operand1);
                         ex_wb.result <= (others => '0');  -- No result stored
