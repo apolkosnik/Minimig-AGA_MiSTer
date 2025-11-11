@@ -116,7 +116,14 @@ architecture rtl of TG68K030 is
             skipFetch : out std_logic;
             regin_out : out std_logic_vector(31 downto 0);
             CACR_out : out std_logic_vector(3 downto 0);
-            VBR_out : out std_logic_vector(31 downto 0)
+            VBR_out : out std_logic_vector(31 downto 0);
+            -- MC68030 F-line MMU instruction interface
+            fline_is_mmu : in std_logic;
+            fline_is_pmove : in std_logic;
+            fline_is_pflush : in std_logic;
+            fline_is_ptest : in std_logic;
+            fline_exec_req : out std_logic;
+            fline_exec_done : in std_logic
         );
     end component;
 
@@ -200,6 +207,74 @@ architecture rtl of TG68K030 is
             enable_dcache   : out std_logic;
             freeze_icache   : out std_logic;
             freeze_dcache   : out std_logic
+        );
+    end component;
+
+    -- Component: PMOVE Decoder (MC68030 F-line instruction)
+    component TG68K030_PMOVE_Decoder is
+        port(
+            clk             : in  std_logic;
+            reset           : in  std_logic;
+            opcode          : in  std_logic_vector(15 downto 0);
+            extension       : in  std_logic_vector(15 downto 0);
+            opcode_valid    : in  std_logic;
+            supervisor      : in  std_logic;
+            is_pmove        : out std_logic;
+            is_pmovefd      : out std_logic;
+            pmove_direction : out std_logic;
+            pmove_reg_code  : out std_logic_vector(7 downto 0);
+            pmove_ea_mode   : out std_logic_vector(2 downto 0);
+            pmove_ea_reg    : out std_logic_vector(2 downto 0);
+            pmove_size      : out std_logic_vector(1 downto 0);
+            pmove_sel_tc    : out std_logic;
+            pmove_sel_tt0   : out std_logic;
+            pmove_sel_tt1   : out std_logic;
+            pmove_sel_crp   : out std_logic;
+            pmove_sel_srp   : out std_logic;
+            pmove_sel_mmusr : out std_logic;
+            illegal_instr   : out std_logic;
+            priv_violation  : out std_logic
+        );
+    end component;
+
+    -- Component: PFLUSH Decoder (MC68030 F-line instruction)
+    component TG68K030_PFLUSH_Decoder is
+        port(
+            clk             : in  std_logic;
+            reset           : in  std_logic;
+            opcode          : in  std_logic_vector(15 downto 0);
+            extension       : in  std_logic_vector(15 downto 0);
+            opcode_valid    : in  std_logic;
+            supervisor      : in  std_logic;
+            is_pflush       : out std_logic;
+            pflush_mode     : out std_logic_vector(1 downto 0);
+            pflush_fc       : out std_logic_vector(2 downto 0);
+            pflush_ea_mode  : out std_logic_vector(2 downto 0);
+            pflush_ea_reg   : out std_logic_vector(2 downto 0);
+            illegal_instr   : out std_logic;
+            priv_violation  : out std_logic
+        );
+    end component;
+
+    -- Component: PTEST Decoder (MC68030 F-line instruction)
+    component TG68K030_PTEST_Decoder is
+        port(
+            clk             : in  std_logic;
+            reset           : in  std_logic;
+            opcode          : in  std_logic_vector(15 downto 0);
+            extension       : in  std_logic_vector(15 downto 0);
+            opcode_valid    : in  std_logic;
+            supervisor      : in  std_logic;
+            is_ptest        : out std_logic;
+            ptest_level     : out std_logic_vector(2 downto 0);
+            ptest_fc        : out std_logic_vector(2 downto 0);
+            ptest_rw        : out std_logic;
+            ptest_ret_en    : out std_logic;
+            ptest_ret_reg   : out std_logic_vector(2 downto 0);
+            ptest_ea_mode   : out std_logic_vector(2 downto 0);
+            ptest_ea_reg    : out std_logic_vector(2 downto 0);
+            illegal_instr   : out std_logic;
+            priv_violation  : out std_logic
         );
     end component;
 
@@ -292,6 +367,45 @@ architecture rtl of TG68K030 is
     -- CPU State
     signal core_state       : std_logic_vector(5 downto 0);
 
+    -----------------------------------------------------
+    -- F-Line MMU Instruction Signals
+    -----------------------------------------------------
+    -- Decoder outputs
+    signal fline_is_mmu     : std_logic;
+    signal fline_is_pmove   : std_logic;
+    signal fline_is_pflush  : std_logic;
+    signal fline_is_ptest   : std_logic;
+    signal fline_exec_req   : std_logic;
+    signal fline_exec_done  : std_logic;
+
+    -- PMOVE decoder signals
+    signal pmove_is_pmove   : std_logic;
+    signal pmove_is_pmovefd : std_logic;
+    signal pmove_direction  : std_logic;
+    signal pmove_reg_code   : std_logic_vector(7 downto 0);
+    signal pmove_size       : std_logic_vector(1 downto 0);
+    signal pmove_sel_tc     : std_logic;
+    signal pmove_sel_tt0    : std_logic;
+    signal pmove_sel_tt1    : std_logic;
+    signal pmove_sel_crp    : std_logic;
+    signal pmove_sel_srp    : std_logic;
+    signal pmove_sel_mmusr  : std_logic;
+
+    -- PFLUSH decoder signals
+    signal pflush_is_pflush : std_logic;
+    signal pflush_mode      : std_logic_vector(1 downto 0);
+    signal pflush_fc        : std_logic_vector(2 downto 0);
+
+    -- PTEST decoder signals
+    signal ptest_is_ptest   : std_logic;
+    signal ptest_level      : std_logic_vector(2 downto 0);
+    signal ptest_fc         : std_logic_vector(2 downto 0);
+
+    -- Opcode/extension word signals for decoders
+    signal fline_opcode     : std_logic_vector(15 downto 0);
+    signal fline_extension  : std_logic_vector(15 downto 0);
+    signal fline_opcode_valid : std_logic;
+
 begin
 
     --------------------------------------------------------------
@@ -342,7 +456,14 @@ begin
             skipFetch => tg68k_skipFetch,
             regin_out => tg68k_regin,
             CACR_out => tg68k_CACR,
-            VBR_out => tg68k_VBR
+            VBR_out => tg68k_VBR,
+            -- MC68030 F-line MMU instruction interface
+            fline_is_mmu => fline_is_mmu,
+            fline_is_pmove => fline_is_pmove,
+            fline_is_pflush => fline_is_pflush,
+            fline_is_ptest => fline_is_ptest,
+            fline_exec_req => fline_exec_req,
+            fline_exec_done => fline_exec_done
         );
 
     -- CPU Supervisor mode detection from Function Code
@@ -598,6 +719,148 @@ begin
     cpu_state <= "0000" & tg68k_busstate;
 
     --------------------------------------------------------------
+    -- F-Line MMU Instruction Support (MC68030)
+    --------------------------------------------------------------
+    -- Opcode and extension word capture
+    -- These come from CPU's data bus during instruction fetch
+    -- For simplicity, we'll use a placeholder implementation that
+    -- captures from the instruction data path
+    --------------------------------------------------------------
+
+    -- Capture opcode and extension word from instruction fetch
+    fline_capture: process(clk)
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                fline_opcode <= (others => '0');
+                fline_extension <= (others => '0');
+                fline_opcode_valid <= '0';
+            elsif clkena = '1' and mode_68030 = '1' then
+                -- When CPU fetches instruction (busstate = "00")
+                if tg68k_busstate = "00" then
+                    fline_opcode <= cpu_inst_data(31 downto 16);  -- First word
+                    fline_opcode_valid <= '1';
+                -- When CPU fetches extension word
+                elsif fline_exec_req = '1' and fline_opcode_valid = '1' then
+                    fline_extension <= cpu_inst_data(31 downto 16);  -- Extension word
+                end if;
+            end if;
+        end if;
+    end process;
+
+    --------------------------------------------------------------
+    -- Instantiate F-Line Decoders (only for MC68030 mode)
+    --------------------------------------------------------------
+
+    gen_fline_decoders: if ENABLE_MMU generate
+
+        -- PMOVE Decoder
+        pmove_decoder: TG68K030_PMOVE_Decoder
+            port map(
+                clk => clk,
+                reset => reset,
+                opcode => fline_opcode,
+                extension => fline_extension,
+                opcode_valid => fline_opcode_valid,
+                supervisor => cpu_supervisor,
+                is_pmove => pmove_is_pmove,
+                is_pmovefd => pmove_is_pmovefd,
+                pmove_direction => pmove_direction,
+                pmove_reg_code => pmove_reg_code,
+                pmove_ea_mode => open,
+                pmove_ea_reg => open,
+                pmove_size => pmove_size,
+                pmove_sel_tc => pmove_sel_tc,
+                pmove_sel_tt0 => pmove_sel_tt0,
+                pmove_sel_tt1 => pmove_sel_tt1,
+                pmove_sel_crp => pmove_sel_crp,
+                pmove_sel_srp => pmove_sel_srp,
+                pmove_sel_mmusr => pmove_sel_mmusr,
+                illegal_instr => open,
+                priv_violation => open
+            );
+
+        -- PFLUSH Decoder
+        pflush_decoder: TG68K030_PFLUSH_Decoder
+            port map(
+                clk => clk,
+                reset => reset,
+                opcode => fline_opcode,
+                extension => fline_extension,
+                opcode_valid => fline_opcode_valid,
+                supervisor => cpu_supervisor,
+                is_pflush => pflush_is_pflush,
+                pflush_mode => pflush_mode,
+                pflush_fc => pflush_fc,
+                pflush_ea_mode => open,
+                pflush_ea_reg => open,
+                illegal_instr => open,
+                priv_violation => open
+            );
+
+        -- PTEST Decoder
+        ptest_decoder: TG68K030_PTEST_Decoder
+            port map(
+                clk => clk,
+                reset => reset,
+                opcode => fline_opcode,
+                extension => fline_extension,
+                opcode_valid => fline_opcode_valid,
+                supervisor => cpu_supervisor,
+                is_ptest => ptest_is_ptest,
+                ptest_level => ptest_level,
+                ptest_fc => ptest_fc,
+                ptest_rw => open,
+                ptest_ret_en => open,
+                ptest_ret_reg => open,
+                ptest_ea_mode => open,
+                ptest_ea_reg => open,
+                illegal_instr => open,
+                priv_violation => open
+            );
+
+        -- Combine decoder outputs
+        fline_is_pmove  <= pmove_is_pmove;
+        fline_is_pflush <= pflush_is_pflush;
+        fline_is_ptest  <= ptest_is_ptest;
+        fline_is_mmu    <= pmove_is_pmove or pflush_is_pflush or ptest_is_ptest;
+
+    end generate;
+
+    -- If MMU disabled, tie off F-line signals
+    gen_no_fline: if not ENABLE_MMU generate
+        fline_is_mmu <= '0';
+        fline_is_pmove <= '0';
+        fline_is_pflush <= '0';
+        fline_is_ptest <= '0';
+    end generate;
+
+    --------------------------------------------------------------
+    -- F-Line Instruction Execution Coordinator
+    --------------------------------------------------------------
+    -- Simplified execution: Just signal completion immediately
+    -- In full implementation, this would coordinate with:
+    -- - PMOVE: MMU register read/write
+    -- - PFLUSH: ATC invalidation
+    -- - PTEST: MMU table walk
+    --------------------------------------------------------------
+
+    fline_exec: process(clk)
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                fline_exec_done <= '0';
+            elsif fline_exec_req = '1' then
+                -- For now, complete immediately
+                -- TODO: Add actual execution logic
+                fline_exec_done <= '1';
+            else
+                fline_exec_done <= '0';
+            end if;
+        end if;
+    end process;
+
+    --------------------------------------------------------------
     -- IMPLEMENTATION STATUS:
     --------------------------------------------------------------
     -- ✅ TG68KdotC_Kernel CPU core integrated
@@ -606,9 +869,11 @@ begin
     -- ✅ Burst mode controller integrated
     -- ✅ Memory controller integrated
     -- ✅ Bus interface conversion (16-bit CPU ↔ 32-bit MC68030)
+    -- ✅ F-line instruction decoders integrated (PMOVE/PFLUSH/PTEST)
+    -- ✅ F-line execution coordinator (simplified - completes immediately)
     --
     -- ⚠️  REMAINING WORK:
-    -- - F-line instruction recognition (PMOVE/PFLUSH/PTEST)
+    -- - F-line execution logic (PMOVE register access, PFLUSH ATC flush, PTEST table walk)
     -- - MOVEC CACR/CAAR connection
     -- - Exception vector updates for MC68030
     -- - Real hardware testing and debugging
