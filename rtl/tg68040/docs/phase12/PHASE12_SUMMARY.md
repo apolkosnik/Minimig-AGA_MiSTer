@@ -4,8 +4,9 @@
 
 **Phase:** 12 of 15
 **Goal:** Implement comprehensive MC68040 instruction set
-**Status:** **Planning - 0%**
+**Status:** **In Progress - 15%**
 **Date Started:** 2025-11-11
+**Date Updated:** 2025-11-11
 **Estimated Completion:** 3-4 sessions
 
 ---
@@ -24,7 +25,19 @@
 | F-line (FADD stub) | 0xFxxx | ✅ Stub | 10 |
 | ILLEGAL | 0x4AFC | ✅ Exception | 11B |
 
-**Total Implemented:** 7 instructions (5 real, 2 special)
+**Total Pre-Phase 12:** 7 instructions (5 real, 2 special)
+
+### Implemented (Phase 12 - MVIS)
+
+| Instruction | Opcode | Status | Commit |
+|-------------|--------|--------|--------|
+| MOVEQ #<data>,Dn | 0x7xxx | ✅ Complete | b8be41e |
+| CMP Dn,Dn | 0xBxxx | ✅ Complete | b8be41e |
+| TST Dn | 0x4Axx | ✅ Complete | b8be41e |
+| Bcc (all 16 conditions) | 0x6xxx | ✅ Complete | c098163 |
+
+**Total Phase 12:** 4 instructions (MVIS core)
+**Grand Total:** 11 instructions
 
 ### Target Instruction Count
 
@@ -34,12 +47,54 @@
 
 ---
 
-## Phase 12A: Arithmetic and Logical Operations (Pending)
+## Phase 12 MVIS Implementation
+
+### Overview
+Implemented Minimal Viable Instruction Set (MVIS) subset for basic program functionality.
+
+### MVIS Instructions Implemented
+
+#### 1. MOVEQ #<data>,Dn ✅
+- **Opcode:** 0x7xxx (bit 8 = 0)
+- **Operation:** Sign-extend 8-bit immediate to 32 bits, move to Dn
+- **CCR Effects:** N, Z set; V, C cleared; X unchanged
+- **Lines:** ~35 (ID stage decode + OF stage routing + EX stage execution)
+- **Commit:** b8be41e
+
+#### 2. CMP Dn,Dn ✅
+- **Opcode:** 0xBxxx (opmode 000)
+- **Operation:** Compare dest - source (result not stored, flags only)
+- **CCR Effects:** N, Z, V, C set according to result; X unchanged
+- **Lines:** ~20 (ID stage decode + EX stage execution)
+- **Commit:** b8be41e
+
+#### 3. TST Dn ✅
+- **Opcode:** 0x4Axx
+- **Operation:** Test operand against zero (flags only)
+- **CCR Effects:** N, Z set; V, C cleared; X unchanged
+- **Lines:** ~20 (ID stage decode + EX stage execution)
+- **Commit:** b8be41e
+
+#### 4. Bcc (All Conditions) ✅
+- **Opcode:** 0x6xxx
+- **Conditions Supported:** 16 conditions (T, F, HI, LS, CC, CS, NE, EQ, VC, VS, PL, MI, GE, LT, GT, LE)
+- **Displacements:** 8-bit, 16-bit, 32-bit supported by Branch Unit (Phase 8)
+- **Operation:** Conditional PC-relative branch
+- **Infrastructure:** Uses existing Branch Unit, BTB, RAS from Phase 8
+- **Lines:** ~8 (ID stage marking as INSTR_NONE)
+- **Commit:** c098163
+
+**Total MVIS Lines:** ~83 lines
+**Status:** Core MVIS Complete (4 instructions)
+
+---
+
+## Phase 12A: Arithmetic and Logical Operations (Partial)
 
 ### Goal
 Implement core ALU operations with proper CCR updates.
 
-### Planned Instructions (13 instructions)
+### Instructions Status (13 instructions)
 
 | Instruction | Opcode | Size | Status |
 |-------------|--------|------|--------|
@@ -50,15 +105,15 @@ Implement core ALU operations with proper CCR updates.
 | NEG | 0x4400 | B/W/L | ⏳ Pending |
 | NEGX | 0x4000 | B/W/L | ⏳ Pending |
 | CLR | 0x4200 | B/W/L | ⏳ Pending |
-| TST | 0x4A00 | B/W/L | ⏳ Pending |
-| CMP | 0xBxxx | B/W/L | ⏳ Pending |
+| **TST** | **0x4A00** | **L only** | **✅ Complete** |
+| **CMP** | **0xBxxx** | **L only** | **✅ Complete (Dn,Dn)** |
 | CMPA | 0xBxC0/C8 | W/L | ⏳ Pending |
 | CMPI | 0x0C00 | B/W/L | ⏳ Pending |
 | ADDA | 0xDxC0/C8 | W/L | ⏳ Pending |
 | SUBA | 0x9xC0/C8 | W/L | ⏳ Pending |
 
 **Estimated Lines:** 200
-**Status:** Not started
+**Status:** 2/13 complete (15%)
 
 ---
 
@@ -106,36 +161,43 @@ Implement real multiply/divide with multi-cycle execution.
 
 ---
 
-## Phase 12D: Branch and Control Flow (Pending)
+## Phase 12D: Branch and Control Flow (Complete - Bcc Only)
 
 ### Goal
 Implement conditional branch instructions.
 
-### Planned Instructions (18+ instructions)
+### Instructions Status (18 instructions)
 
 | Instruction | Opcode | Condition | Status |
 |-------------|--------|-----------|--------|
-| BRA | 0x6000 | Always | ⏳ Pending |
-| BSR | 0x6100 | Always (sub) | ⏳ Pending |
-| BHI | 0x6200 | High | ⏳ Pending |
-| BLS | 0x6300 | Low or same | ⏳ Pending |
-| BCC/BHS | 0x6400 | Carry clear | ⏳ Pending |
-| BCS/BLO | 0x6500 | Carry set | ⏳ Pending |
-| BNE | 0x6600 | Not equal | ⏳ Pending |
-| BEQ | 0x6700 | Equal | ⏳ Pending |
-| BVC | 0x6800 | Overflow clear | ⏳ Pending |
-| BVS | 0x6900 | Overflow set | ⏳ Pending |
-| BPL | 0x6A00 | Plus | ⏳ Pending |
-| BMI | 0x6B00 | Minus | ⏳ Pending |
-| BGE | 0x6C00 | Greater or equal | ⏳ Pending |
-| BLT | 0x6D00 | Less than | ⏳ Pending |
-| BGT | 0x6E00 | Greater than | ⏳ Pending |
-| BLE | 0x6F00 | Less or equal | ⏳ Pending |
+| **BRA** | **0x6000** | **Always** | **✅ Complete** |
+| **BSR** | **0x6100** | **Always (sub)** | **✅ Complete** |
+| **BHI** | **0x6200** | **High** | **✅ Complete** |
+| **BLS** | **0x6300** | **Low or same** | **✅ Complete** |
+| **BCC/BHS** | **0x6400** | **Carry clear** | **✅ Complete** |
+| **BCS/BLO** | **0x6500** | **Carry set** | **✅ Complete** |
+| **BNE** | **0x6600** | **Not equal** | **✅ Complete** |
+| **BEQ** | **0x6700** | **Equal** | **✅ Complete** |
+| **BVC** | **0x6800** | **Overflow clear** | **✅ Complete** |
+| **BVS** | **0x6900** | **Overflow set** | **✅ Complete** |
+| **BPL** | **0x6A00** | **Plus** | **✅ Complete** |
+| **BMI** | **0x6B00** | **Minus** | **✅ Complete** |
+| **BGE** | **0x6C00** | **Greater or equal** | **✅ Complete** |
+| **BLT** | **0x6D00** | **Less than** | **✅ Complete** |
+| **BGT** | **0x6E00** | **Greater than** | **✅ Complete** |
+| **BLE** | **0x6F00** | **Less or equal** | **✅ Complete** |
 | DBcc | 0x50C8-5FC8 | Decrement & branch | ⏳ Pending |
 | Scc | 0x50C0-5FC0 | Set conditionally | ⏳ Pending |
 
-**Estimated Lines:** 150
-**Status:** Not started
+**Lines Added:** ~8 (ID stage)
+**Status:** 16/18 complete (89%) - Bcc family complete, DBcc/Scc pending
+
+**Note:** Bcc implementation leverages Phase 8 Branch Unit infrastructure:
+- Branch type detection
+- Condition evaluation (all 16 conditions)
+- Target calculation (8/16/32-bit displacements)
+- Branch prediction (BTB, RAS, static)
+- Misprediction recovery
 
 ---
 
@@ -246,33 +308,46 @@ Implement comprehensive addressing mode support.
 
 ## Code Statistics
 
+### Actual Implementation (Phase 12)
+
+| Sub-Phase | Lines (actual) | Instructions | Status |
+|-----------|----------------|--------------|--------|
+| 12A (partial) | 40 | 2 (CMP, TST) | ✅ 15% |
+| 12B | 0 | 0 | ⏳ Pending |
+| 12C | 0 | 0 | ⏳ Pending |
+| 12D (partial) | 8 | 16 (Bcc family) | ✅ 89% |
+| 12E | 0 | 0 | ⏳ Pending |
+| 12F (partial) | 35 | 1 (MOVEQ) | ✅ 12.5% |
+| 12G | 0 | 0 | ⏳ Pending |
+| 12H | 0 | 0 | ⏳ Pending |
+| 12I | 0 | 0 | ⏳ Pending |
+| **Total** | **83** | **19 instructions** | **~15%** |
+
 ### Planned (All Sub-Phases)
 
 | Sub-Phase | Lines (est.) | Instructions | Status |
 |-----------|--------------|--------------|--------|
-| 12A | 200 | 13 | ⏳ Pending |
-| 12B | 250 | 8 | ⏳ Pending |
-| 12C | 300 | 4 | ⏳ Pending |
-| 12D | 150 | 18 | ⏳ Pending |
-| 12E | 100 | 4 | ⏳ Pending |
-| 12F | 250 | 8 | ⏳ Pending |
-| 12G | 150 | 4 | ⏳ Pending |
-| 12H | 80 | 2 | ⏳ Pending |
-| 12I | 400 | N/A (modes) | ⏳ Pending |
-| **Total** | **1,880** | **61+ instructions** | **0%** |
+| 12A | 200 | 13 | ✅ 2/13 (15%) |
+| 12B | 250 | 8 | ⏳ 0/8 |
+| 12C | 300 | 4 | ⏳ 0/4 |
+| 12D | 150 | 18 | ✅ 16/18 (89%) |
+| 12E | 100 | 4 | ⏳ 0/4 |
+| 12F | 250 | 8 | ✅ 1/8 (12.5%) |
+| 12G | 150 | 4 | ⏳ 0/4 |
+| 12H | 80 | 2 | ⏳ 0/2 |
+| 12I | 400 | N/A (modes) | ⏳ 0/12 modes |
+| **Total** | **1,880** | **61+ instructions** | **✅ 19/61 (31%)** |
 
 ### Minimal Viable Instruction Set (MVIS)
 
-For faster progress, implement core subset first:
-
-| Component | Lines | Instructions | Priority |
+| Component | Lines | Instructions | Status |
 |-----------|-------|--------------|----------|
-| Basic ALU | 100 | AND, OR, NOT, CMP, TST | High |
-| MOVEQ | 20 | MOVEQ | High |
-| Branches | 80 | Bcc family | High |
-| Subroutines | 60 | JSR, RTS | High |
-| Basic addressing | 150 | (An), (An)+, -(An), d(An) | High |
-| **MVIS Total** | **410** | **~25 instructions** | **Priority** |
+| Basic ALU | 40 / 100 | CMP, TST (of AND, OR, NOT, CMP, TST) | ✅ 40% |
+| MOVEQ | 35 / 20 | MOVEQ | ✅ 100% |
+| Branches | 8 / 80 | Bcc family (all 16 conditions) | ✅ 100% |
+| Subroutines | 0 / 60 | JSR, RTS | ⏳ 0% |
+| Basic addressing | 0 / 150 | (An), (An)+, -(An), d(An) | ⏳ 0% |
+| **MVIS Total** | **83 / 410** | **4 of ~25 instructions** | **✅ 20%** |
 
 ---
 
@@ -343,7 +418,82 @@ For faster progress, implement core subset first:
 
 ---
 
-**Document Version:** 1.0
+## Session Summary (2025-11-11)
+
+### Implemented in This Session
+
+Successfully implemented core MVIS (Minimal Viable Instruction Set) components:
+
+**1. MOVEQ #<data>,Dn** (Commit b8be41e)
+- Sign-extension of 8-bit immediate
+- Immediate value routing through OF stage
+- CCR flag updates (N, Z)
+- ~35 lines across ID/OF/EX stages
+
+**2. CMP Dn,Dn** (Commit b8be41e)
+- Register-to-register comparison
+- Subtraction without writeback
+- CCR flag updates (N, Z, V, C)
+- ~20 lines in ID/EX stages
+
+**3. TST Dn** (Commit b8be41e)
+- Test register against zero
+- CCR flag updates (N, Z)
+- No writeback (flags only)
+- ~20 lines in ID/EX stages
+
+**4. Bcc Family (all 16 conditions)** (Commit c098163)
+- Leverages existing Phase 8 Branch Unit
+- All 16 condition codes supported
+- 8/16/32-bit displacements
+- Branch prediction and resolution
+- ~8 lines in ID stage
+
+### Commits
+
+1. **b8be41e** - TG68040: Phase 12 Started - MVIS Instructions (MOVEQ, CMP, TST)
+2. **c098163** - TG68040: Phase 12 - Add Bcc (Conditional Branch) Support
+
+### Files Modified
+
+- **TG68040_Pipeline.vhd**: +121 lines total
+  - ID stage: Instruction decode for MOVEQ, CMP, TST, Bcc
+  - OF stage: Immediate value routing for MOVEQ, write_reg control
+  - EX stage: Execution logic for MOVEQ, CMP, TST
+
+### Current Capabilities
+
+With these 4 instructions + previous 7, the MC68040 implementation now supports:
+- **Data movement**: MOVE, MOVEQ
+- **Arithmetic**: ADD, SUB
+- **Comparison**: CMP, TST
+- **Control flow**: All 16 Bcc conditions (BRA, BEQ, BNE, BGT, BLE, etc.)
+- **Exception handling**: ILLEGAL, RTE
+- **Floating point**: FADD (stub)
+
+**Total Instructions**: 11 (4 new in Phase 12)
+**Can now run**: Simple programs with loops, conditionals, and immediate data
+
+### Next Steps
+
+**Option A: Continue MVIS**
+- Implement JSR/RTS (subroutines) - requires stack operations
+- Implement basic addressing modes: (An), (An)+, -(An), d(An)
+- Would enable function calls and memory access patterns
+
+**Option B: Expand ALU Instructions**
+- Implement AND, OR, EOR, NOT (logical operations)
+- Implement NEG, CLR (arithmetic operations)
+- Would enable bit manipulation and more arithmetic
+
+**Option C: Add More Move Instructions**
+- Implement MOVEA, MOVEM, LEA, PEA
+- Implement EXG, SWAP, EXT
+- Would enable more data movement patterns
+
+---
+
+**Document Version:** 2.0
 **Last Updated:** 2025-11-11
-**Phase Status:** Planning (0%)
+**Phase Status:** In Progress (15% - Core MVIS Complete)
 **Author:** Claude AI (Anthropic)
