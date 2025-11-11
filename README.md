@@ -51,20 +51,29 @@ The Minimig-MiSTer variant in this repository has been upgraded with [AGA chipse
 - ✅ **ATC (Address Translation Cache)**: 22-entry fully associative cache with invalidation support
 - ✅ **Build system**: Ready for Quartus synthesis
 
-### Recent Enhancements (Phase 13)
+### Recent Enhancements
 
-**New in this update:**
-- 🆕 F-line memory interface - PMOVE with memory effective addresses now works
-- 🆕 PFLUSH ATC invalidation - Actually flushes translation cache entries
-- 🆕 ATC instantiation and integration
-- 🆕 Complete memory arbiter for F-line operations
+**Phase 13 Complete** (November 2025):
+- ✅ F-line memory interface - PMOVE with memory effective addresses now works
+- ✅ PFLUSH ATC invalidation - Actually flushes translation cache entries
+- ✅ ATC instantiation and integration
+- ✅ Complete memory arbiter for F-line operations
+
+**Phase 14 In Progress**:
+- 🆕 Bus width adapter designed and implemented (32-bit ↔ 16-bit conversion)
+- 🆕 TG68K030 wrapper integration strategy documented
+- 🆕 Comprehensive planning for full MMU integration
+- ⏳ **Next**: Hardware validation on MiSTer FPGA (recommended before further development)
 
 ### Documentation
 
 Complete technical documentation available in [`docs/mc68030/`](docs/mc68030/):
 - **[Quick Start Guide](docs/mc68030/QUICK_START.md)** - How to build and test
 - **[Project Status](docs/mc68030/PROJECT_STATUS_FINAL.md)** - Complete implementation status (96%)
-- **[Phase 13 Completion Status](docs/mc68030/PHASE13_COMPLETION_STATUS.md)** - Latest enhancements
+- **[Phase 13 Completion](docs/mc68030/PHASE13_COMPLETION_STATUS.md)** - Latest enhancements
+- **[Phase 14 Planning](docs/mc68030/PHASE14_PLANNING.md)** - Future integration roadmap
+- **[Integration Strategy](docs/mc68030/TG68K030_WRAPPER_INTEGRATION_STRATEGY.md)** - Analysis and recommendations
+- **[Bus Adapter Design](docs/mc68030/BUS_ADAPTER_DESIGN.md)** - 32/16-bit bridge specification
 - **[Synthesis Guide](docs/mc68030/SYNTHESIS_GUIDE.md)** - Quartus compilation instructions
 
 ### Implementation Details
