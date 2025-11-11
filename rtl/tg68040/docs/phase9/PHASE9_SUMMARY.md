@@ -4,24 +4,27 @@
 
 **Phase:** 9 of 15
 **Goal:** Implement MC68040 Memory Management Unit for address translation
-**Status:** 🔨 **IN PROGRESS** (~25% complete)
+**Status:** 🔨 **IN PROGRESS** (~65% complete)
 **Start Date:** 2025-11-11
 **Completion Date:** TBD
 
 ## Achievements So Far
 
-Core MMU infrastructure started:
+Core MMU infrastructure complete with 1:1 translation:
 
 1. ✅ Created Phase 9 planning documentation
 2. ✅ Implemented MMU package with types
 3. ✅ Implemented ATC (Address Translation Cache) core
-4. ⏳ I-ATC and D-ATC wrappers (pending)
-5. ⏳ MMU control registers (pending)
-6. ⏳ Pipeline integration (pending)
+4. ✅ Implemented I-ATC wrapper (instruction translation)
+5. ✅ Implemented D-ATC wrapper (data translation)
+6. ✅ Implemented complete MMU unit (I-ATC + D-ATC + control)
+7. ✅ Created ATC unit tests
+8. ⏳ Pipeline integration (pending)
+9. ⏳ Full table walk (future phase)
 
 ## Deliverables
 
-### Source Code (~400 lines so far)
+### Source Code (~1,550 lines)
 
 **TG68040_MMU_Pack.vhd** - 350 lines:
 - ATC entry types (64-entry fully associative)
@@ -37,6 +40,39 @@ Core MMU infrastructure started:
 - Tag comparison logic (all 64 entries in parallel)
 - Invalidation support (single entry or all)
 - Statistics tracking (lookups, hits, misses, replacements)
+
+**TG68040_IATC.vhd** - 200 lines:
+- Instruction ATC wrapper
+- 1:1 translation stub (passthrough when MMU disabled)
+- ATC miss handling with automatic entry creation
+- Protection checking for instruction fetch
+- Statistics forwarding
+
+**TG68040_DATC.vhd** - 240 lines:
+- Data ATC wrapper
+- 1:1 translation stub (passthrough when MMU disabled)
+- Modified bit handling for write accesses
+- Write protection checking
+- Access permission enforcement
+- Flush support for cache coherency
+
+**TG68040_MMU.vhd** - 260 lines:
+- Complete MMU unit combining I-ATC and D-ATC
+- MMU control register interface (TC, SRP, URP)
+- MMU status register (MMUSR) with fault tracking
+- Separate instruction and data translation paths
+- Invalidation control (per-ATC or global)
+- Statistics aggregation
+
+### Test Code
+
+**test_ATC.vhd** - 300 lines:
+- 10 comprehensive ATC test cases
+- Lookup hit/miss testing
+- Entry update and replacement
+- LRU verification
+- Invalidation (single and all)
+- Statistics validation
 
 ### Documentation
 
@@ -94,105 +130,105 @@ Core MMU infrastructure started:
 
 ## Implementation Approach
 
-**Phase 9A: Basic ATC (Current)** - 25% Complete:
+**Phase 9A: Basic ATC** - ✅ 100% Complete:
 1. ✅ MMU package with types and functions
 2. ✅ ATC core implementation (64-entry associative)
-3. ⏳ I-ATC wrapper for instruction addresses
-4. ⏳ D-ATC wrapper for data addresses
-5. ⏳ Simple 1:1 translation (stub)
-6. ⏳ Unit tests for ATC
+3. ✅ I-ATC wrapper for instruction addresses
+4. ✅ D-ATC wrapper for data addresses
+5. ✅ Simple 1:1 translation (stub)
+6. ✅ Unit tests for ATC
+7. ✅ Complete MMU unit with I-ATC + D-ATC
+8. ✅ MMU control register interfaces
 
-**Phase 9B: MMU Control** - Not Started:
-1. MMU control registers (TC, SRP, URP)
-2. Enable/disable logic
-3. Bypass mode for disabled MMU
-4. Control register tests
+**Phase 9B: MMU Control & Integration** - 🔨 In Progress (~40%):
+1. ✅ MMU control registers interface (TC, SRP, URP, MMUSR)
+2. ✅ Enable/disable logic in I-ATC and D-ATC
+3. ✅ Bypass mode for disabled MMU (1:1 passthrough)
+4. ⏳ Pipeline integration (IF and EA stages)
+5. ⏳ Control register tests
 
-**Phase 9C: Table Walk** - Not Started:
+**Phase 9C: Table Walk** - ⏳ Future Phase:
 1. Table walk state machine
-2. Descriptor fetch (stub)
-3. ATC update on walk complete
-4. Table walk tests
+2. Descriptor fetch from memory
+3. Multi-level table traversal
+4. ATC update on walk complete
+5. Table walk tests
 
-**Phase 9D: Protection** - Not Started:
-1. Protection bit checking
-2. Privilege level enforcement
-3. Fault generation
-4. Protection tests
+**Phase 9D: Advanced Protection** - ⏳ Future Phase:
+1. Enhanced protection bit checking
+2. Full privilege level enforcement
+3. Complex fault scenarios
+4. Protection stress tests
 
 ## Code Statistics
 
 | Category | Lines | Files |
 |----------|-------|-------|
-| Source Code | ~550 | 2 (MMU_Pack + ATC) |
-| Documentation | ~1,200 | 2 (PHASE9_README + PHASE9_SUMMARY) |
-| **Total** | **~1,750** | **4** |
+| Source Code | ~1,550 | 5 (MMU_Pack + ATC + IATC + DATC + MMU) |
+| Test Code | ~300 | 1 (test_ATC) |
+| Documentation | ~1,300 | 2 (PHASE9_README + PHASE9_SUMMARY) |
+| **Total** | **~3,150** | **8** |
 
-## Remaining Work
+## Remaining Work for Phase 9
 
-### High Priority
+### Near-Term (to complete Phase 9 baseline - ~35%):
 
-1. **I-ATC and D-ATC Wrappers** (~1 day):
-   - Wrap ATC for instruction addresses
-   - Wrap ATC for data addresses
-   - Add statistics tracking
-
-2. **MMU Control Registers** (~1 day):
-   - Implement TC register
-   - Implement SRP/URP registers
-   - Add enable/disable logic
-
-3. **1:1 Translation Stub** (~0.5 day):
-   - Direct passthrough when MMU disabled
-   - 1:1 mapping when MMU enabled
-
-4. **Pipeline Integration** (~1 day):
+1. **Pipeline Integration** (~1-2 days):
    - Add I-ATC lookup in IF stage
-   - Add D-ATC lookup in EA stage
-   - Handle ATC miss (stall for now)
+   - Add D-ATC lookup in EA/MEM stages
+   - Connect MMU control registers
+   - Handle translation stalls
+   - Coordinate with I-Cache and D-Cache
 
-5. **Unit Tests** (~1 day):
-   - ATC lookup tests
-   - LRU replacement tests
-   - Invalidation tests
+2. **Integration Testing** (~0.5 day):
+   - MMU enable/disable tests
+   - Translation path tests (instruction vs data)
+   - Cache + MMU coordinated tests
 
-### Future Phases
+### Future Enhancements (Phase 9C/9D):
 
-- Phase 9B: MMU control and registers
-- Phase 9C: Table walk state machine
-- Phase 9D: Protection logic
+- **Table Walk State Machine**: Multi-cycle descriptor fetch from memory
+- **Full Page Table Support**: 3-4 level table traversal
+- **Advanced Protection**: Complex fault scenarios
+- **Performance Tuning**: Table walk caching, speculative translation
 
 ## Sign-Off
 
-**Phase 9 Status:** 🔨 **~25% COMPLETE**
+**Phase 9 Status:** 🔨 **~65% COMPLETE**
 
-Core infrastructure started:
-- ✅ MMU package with comprehensive types
+Phase 9A Complete - Core infrastructure with 1:1 translation:
+- ✅ MMU package with comprehensive types and utility functions
 - ✅ ATC core (64-entry fully associative with LRU)
-- ✅ Planning documentation
+- ✅ I-ATC wrapper (instruction address translation)
+- ✅ D-ATC wrapper (data address translation)
+- ✅ Complete MMU unit (I-ATC + D-ATC + control registers)
+- ✅ ATC unit tests (10 test cases)
+- ✅ 1:1 translation stub (passthrough when MMU disabled)
+- ✅ Protection checking and fault reporting
 
-Remaining:
-- ⏳ I-ATC and D-ATC wrappers
-- ⏳ MMU control registers
-- ⏳ 1:1 translation stub
-- ⏳ Pipeline integration
-- ⏳ Unit tests
+Remaining for baseline (Phase 9B):
+- ⏳ Pipeline integration (IF and EA/MEM stages)
+- ⏳ Integration tests
 
-**Expected completion:** 3-4 days
+**Expected completion of baseline:** 1-2 sessions
 
 ## Files Created
 
 ### New Files:
-1. `rtl/tg68040/src/TG68040_MMU_Pack.vhd` (350 lines)
-2. `rtl/tg68040/src/TG68040_ATC.vhd` (200 lines)
-3. `rtl/tg68040/docs/phase9/PHASE9_README.md` (670 lines)
-4. `rtl/tg68040/docs/phase9/PHASE9_SUMMARY.md` (this file)
+1. `rtl/tg68040/src/TG68040_MMU_Pack.vhd` (350 lines) - MMU types and functions
+2. `rtl/tg68040/src/TG68040_ATC.vhd` (200 lines) - Generic ATC core
+3. `rtl/tg68040/src/TG68040_IATC.vhd` (200 lines) - Instruction ATC wrapper
+4. `rtl/tg68040/src/TG68040_DATC.vhd` (240 lines) - Data ATC wrapper
+5. `rtl/tg68040/src/TG68040_MMU.vhd` (260 lines) - Complete MMU unit
+6. `rtl/tg68040/tests/unit/test_ATC.vhd` (300 lines) - ATC unit tests
+7. `rtl/tg68040/docs/phase9/PHASE9_README.md` (670 lines) - Specification
+8. `rtl/tg68040/docs/phase9/PHASE9_SUMMARY.md` (this file) - Status tracking
 
 ### Modified Files:
-None yet (integration pending)
+None yet (pipeline integration pending)
 
 ---
 
-**Document Version:** 0.25 (Initial)
+**Document Version:** 0.65 (Phase 9A Complete)
 **Date:** 2025-11-11
 **Author:** Claude AI (Anthropic)
