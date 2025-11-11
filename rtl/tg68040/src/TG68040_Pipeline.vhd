@@ -32,6 +32,7 @@ use ieee.numeric_std.all;
 use work.TG68040_Pack.all;
 use work.TG68040_Pipeline_Regs.all;
 use work.TG68040_Branch_Pack.all;
+use work.TG68040_MMU_Pack.all;
 
 entity TG68040_Pipeline is
     port(
@@ -141,6 +142,26 @@ architecture rtl of TG68040_Pipeline is
     signal branch_mispredict_count : std_logic_vector(31 downto 0);
     signal ccr_register : std_logic_vector(7 downto 0) := (others => '0');
 
+    -- MMU signals (Phase 9)
+    signal mmu_tc_reg : tc_register_t := TC_REGISTER_INIT;
+    signal mmu_srp_reg : root_pointer_t := ROOT_POINTER_INIT;
+    signal mmu_urp_reg : root_pointer_t := ROOT_POINTER_INIT;
+    signal mmu_mmusr_reg : mmusr_register_t;
+    signal mmu_itrans_req : translation_request_t := TRANSLATION_REQUEST_INIT;
+    signal mmu_itrans_resp : translation_response_t;
+    signal mmu_dtrans_req : translation_request_t := TRANSLATION_REQUEST_INIT;
+    signal mmu_dtrans_resp : translation_response_t;
+    signal mmu_invalidate_all : std_logic := '0';
+    signal mmu_invalidate_i : std_logic := '0';
+    signal mmu_invalidate_d : std_logic := '0';
+    signal mmu_flush_d : std_logic := '0';
+    signal mmu_iatc_lookups : std_logic_vector(31 downto 0);
+    signal mmu_iatc_hits : std_logic_vector(31 downto 0);
+    signal mmu_iatc_misses : std_logic_vector(31 downto 0);
+    signal mmu_datc_lookups : std_logic_vector(31 downto 0);
+    signal mmu_datc_hits : std_logic_vector(31 downto 0);
+    signal mmu_datc_misses : std_logic_vector(31 downto 0);
+
     -- Component declarations
     component TG68040_ICache is
         port(
@@ -246,6 +267,31 @@ architecture rtl of TG68040_Pipeline is
         );
     end component;
 
+    component TG68040_MMU is
+        port(
+            clk            : in std_logic;
+            reset          : in std_logic;
+            tc_reg         : in tc_register_t;
+            srp_reg        : in root_pointer_t;
+            urp_reg        : in root_pointer_t;
+            mmusr_reg      : out mmusr_register_t;
+            itrans_req     : in translation_request_t;
+            itrans_resp    : out translation_response_t;
+            dtrans_req     : in translation_request_t;
+            dtrans_resp    : out translation_response_t;
+            invalidate_all : in std_logic;
+            invalidate_i   : in std_logic;
+            invalidate_d   : in std_logic;
+            flush_d        : in std_logic;
+            iatc_lookups   : out std_logic_vector(31 downto 0);
+            iatc_hits      : out std_logic_vector(31 downto 0);
+            iatc_misses    : out std_logic_vector(31 downto 0);
+            datc_lookups   : out std_logic_vector(31 downto 0);
+            datc_hits      : out std_logic_vector(31 downto 0);
+            datc_misses    : out std_logic_vector(31 downto 0)
+        );
+    end component;
+
 begin
 
     -- Outputs
@@ -325,6 +371,33 @@ begin
         );
 
     ------------------------------------------------------------------------------
+    -- MMU (Phase 9)
+    ------------------------------------------------------------------------------
+    mmu_inst: TG68040_MMU
+        port map(
+            clk            => clk,
+            reset          => reset,
+            tc_reg         => mmu_tc_reg,
+            srp_reg        => mmu_srp_reg,
+            urp_reg        => mmu_urp_reg,
+            mmusr_reg      => mmu_mmusr_reg,
+            itrans_req     => mmu_itrans_req,
+            itrans_resp    => mmu_itrans_resp,
+            dtrans_req     => mmu_dtrans_req,
+            dtrans_resp    => mmu_dtrans_resp,
+            invalidate_all => mmu_invalidate_all,
+            invalidate_i   => mmu_invalidate_i,
+            invalidate_d   => mmu_invalidate_d,
+            flush_d        => mmu_flush_d,
+            iatc_lookups   => mmu_iatc_lookups,
+            iatc_hits      => mmu_iatc_hits,
+            iatc_misses    => mmu_iatc_misses,
+            datc_lookups   => mmu_datc_lookups,
+            datc_hits      => mmu_datc_hits,
+            datc_misses    => mmu_datc_misses
+        );
+
+    ------------------------------------------------------------------------------
     -- Instruction Cache (Phase 5)
     ------------------------------------------------------------------------------
     icache: TG68040_ICache
@@ -346,6 +419,20 @@ begin
             miss_count     => icache_miss_count,
             access_count   => icache_access_count
         );
+
+    ------------------------------------------------------------------------------
+    -- D-ATC Translation (Phase 9)
+    ------------------------------------------------------------------------------
+    -- Create D-ATC translation request (combinational)
+    -- Translation happens for memory operations in EA/MEM stages
+    mmu_dtrans_req.logical_addr <= ea_of.ea_addr;
+    mmu_dtrans_req.access_type <= ACCESS_WRITE when ea_of.use_ea = '1' and of_ex.write_mem = '1' else ACCESS_READ;
+    mmu_dtrans_req.supervisor <= '1';  -- Simplified: always supervisor mode
+    mmu_dtrans_req.enable <= ea_of.use_ea;  -- Enable when EA is valid for memory ops
+
+    -- D-Cache access uses physical address from D-ATC
+    dcache_mem_addr <= mmu_dtrans_resp.physical_addr;
+    dcache_mem_req <= ea_of.use_ea and mmu_dtrans_resp.ready when mmu_dtrans_resp.fault = FAULT_NONE else '0';
 
     ------------------------------------------------------------------------------
     -- Data Cache (Phase 6)
@@ -393,11 +480,18 @@ begin
         reg_data_b;
 
     ------------------------------------------------------------------------------
-    -- IF Stage: Instruction Fetch (with I-Cache, Phase 5)
+    -- IF Stage: Instruction Fetch (with I-Cache + MMU, Phase 5 + 9)
     ------------------------------------------------------------------------------
+    -- I-ATC translation request (combinational, Phase 9)
+    mmu_itrans_req.logical_addr <= std_logic_vector(pc);
+    mmu_itrans_req.access_type <= ACCESS_EXECUTE;
+    mmu_itrans_req.supervisor <= '1';  -- Simplified: always supervisor mode
+    mmu_itrans_req.enable <= '1' when (enable = '1' and ctrl.stall_if = '0' and ctrl.flush_if = '0') else '0';
+
     -- Cache fetch request (combinational)
-    icache_fetch_req <= '1' when (enable = '1' and ctrl.stall_if = '0' and ctrl.flush_if = '0') else '0';
-    icache_fetch_addr <= std_logic_vector(pc);
+    -- Use physical address from I-ATC for cache lookup
+    icache_fetch_req <= '1' when (enable = '1' and ctrl.stall_if = '0' and ctrl.flush_if = '0' and mmu_itrans_resp.ready = '1') else '0';
+    icache_fetch_addr <= mmu_itrans_resp.physical_addr;
 
     -- IF stage process
     if_stage: process(clk)
@@ -775,6 +869,30 @@ begin
                     ctrl.stall_if <= '1';
                     ctrl.stall_id <= '1';
                     ctrl.stall_ea <= '1';
+                end if;
+
+                -- Phase 9: Stall for MMU translation
+                -- Stall IF if I-ATC translation not ready
+                if mmu_itrans_req.enable = '1' and mmu_itrans_resp.ready = '0' then
+                    ctrl.stall_if <= '1';
+                end if;
+
+                -- Stall EA if D-ATC translation not ready
+                if mmu_dtrans_req.enable = '1' and mmu_dtrans_resp.ready = '0' then
+                    ctrl.stall_ea <= '1';
+                end if;
+
+                -- Handle MMU faults (generate exception)
+                if mmu_itrans_resp.ready = '1' and mmu_itrans_resp.fault /= FAULT_NONE then
+                    -- I-ATC fault: flush pipeline
+                    ctrl.flush_if <= '1';
+                    ctrl.flush_id <= '1';
+                end if;
+
+                if mmu_dtrans_resp.ready = '1' and mmu_dtrans_resp.fault /= FAULT_NONE then
+                    -- D-ATC fault: flush EA stage and later
+                    ctrl.flush_ea <= '1';
+                    ctrl.flush_of <= '1';
                 end if;
 
                 -- Phase 8: Flush on branch misprediction
