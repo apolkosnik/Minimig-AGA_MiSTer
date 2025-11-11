@@ -138,7 +138,14 @@ entity TG68KdotC_Kernel is
 		skipFetch				: out std_logic;
 		regin_out				: out std_logic_vector(31 downto 0);
 		CACR_out					: out std_logic_vector( 3 downto 0);
-		VBR_out					: out std_logic_vector(31 downto 0)
+		VBR_out					: out std_logic_vector(31 downto 0);
+-- MC68030 F-line MMU instruction interface (for external decoder/executor)
+		fline_is_mmu			: in std_logic:='0';		-- Recognized MMU instruction (PMOVE/PFLUSH/PTEST)
+		fline_is_pmove			: in std_logic:='0';		-- PMOVE detected
+		fline_is_pflush		: in std_logic:='0';		-- PFLUSH detected
+		fline_is_ptest			: in std_logic:='0';		-- PTEST detected
+		fline_exec_req			: out std_logic;				-- Request external F-line execution
+		fline_exec_done		: in std_logic:='0'		-- F-line execution complete
 		);
 end TG68KdotC_Kernel;
 
@@ -1481,6 +1488,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		build_logical <= '0';
 		build_bcd <= '0';
 		skipFetch <= make_berr;
+		fline_exec_req <= '0';  -- MC68030 F-line execution request
 		set_writePCbig <= '0';
 --		set_recall_last <= '0';
 		set_Suppress_Base <= '0';
@@ -3168,6 +3176,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						trap_1111 <= '1';
 						trapmake <= '1';
 					END IF;
+				ELSIF fline_is_mmu='1' THEN
+					-- MC68030 MMU instruction (PMOVE/PFLUSH/PTEST) - route to external executor
+					IF decodeOPC='1' THEN
+						set(get_2ndOPC) <= '1';          -- Fetch extension word
+						next_micro_state <= fline_exec1;  -- Go to execution state
+					END IF;
 				ELSE
 					trap_1111 <= '1';
 					trapmake <= '1';
@@ -3997,6 +4011,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN bf1 =>
 					setstate <="10";
 	
+			WHEN fline_exec1 =>
+				-- MC68030 F-line MMU instruction execution
+				-- External executor handles the actual operation
+				fline_exec_req <= '1';
+				IF fline_exec_done='1' THEN
+					next_micro_state <= idle;  -- Return to idle when done
+				END IF;
+
 				WHEN OTHERS => NULL;
 			END CASE;
 	END PROCESS;
