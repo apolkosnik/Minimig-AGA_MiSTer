@@ -82,6 +82,44 @@ end entity TG68K030;
 
 architecture rtl of TG68K030 is
 
+    -- Component: TG68KdotC_Kernel (base CPU core)
+    component TG68KdotC_Kernel is
+        generic(
+            SR_Read : integer := 2;
+            VBR_Stackframe : integer := 2;
+            extAddr_Mode : integer := 2;
+            MUL_Mode : integer := 2;
+            DIV_Mode : integer := 2;
+            BitField : integer := 2;
+            BarrelShifter : integer := 1;
+            MUL_Hardware : integer := 1
+        );
+        port(
+            clk : in std_logic;
+            nReset : in std_logic;
+            clkena_in : in std_logic;
+            data_in : in std_logic_vector(15 downto 0);
+            IPL : in std_logic_vector(2 downto 0);
+            IPL_autovector : in std_logic;
+            berr : in std_logic;
+            CPU : in std_logic_vector(1 downto 0);
+            addr_out : out std_logic_vector(31 downto 0);
+            data_write : out std_logic_vector(15 downto 0);
+            nWr : out std_logic;
+            nUDS : out std_logic;
+            nLDS : out std_logic;
+            busstate : out std_logic_vector(1 downto 0);
+            longword : out std_logic;
+            nResetOut : out std_logic;
+            FC : out std_logic_vector(2 downto 0);
+            clr_berr : out std_logic;
+            skipFetch : out std_logic;
+            regin_out : out std_logic_vector(31 downto 0);
+            CACR_out : out std_logic_vector(3 downto 0);
+            VBR_out : out std_logic_vector(31 downto 0)
+        );
+    end component;
+
     -- Component: Memory Controller (MC68030 extensions)
     component TG68K030_MemoryController is
         port(
@@ -232,9 +270,26 @@ architecture rtl of TG68K030 is
     signal bus_berr         : std_logic;
 
     -----------------------------------------------------
-    -- Simplified CPU Core Simulation
-    -- In real implementation, this would connect to TG68KdotC_Kernel
+    -- TG68K CPU Core Signals
     -----------------------------------------------------
+    signal tg68k_addr_out   : std_logic_vector(31 downto 0);
+    signal tg68k_data_write : std_logic_vector(15 downto 0);
+    signal tg68k_data_read  : std_logic_vector(15 downto 0);
+    signal tg68k_nWr        : std_logic;
+    signal tg68k_nUDS       : std_logic;
+    signal tg68k_nLDS       : std_logic;
+    signal tg68k_busstate   : std_logic_vector(1 downto 0);
+    signal tg68k_longword   : std_logic;
+    signal tg68k_nResetOut  : std_logic;
+    signal tg68k_FC         : std_logic_vector(2 downto 0);
+    signal tg68k_clr_berr   : std_logic;
+    signal tg68k_skipFetch  : std_logic;
+    signal tg68k_regin      : std_logic_vector(31 downto 0);
+    signal tg68k_CACR       : std_logic_vector(3 downto 0);
+    signal tg68k_VBR        : std_logic_vector(31 downto 0);
+    signal tg68k_clkena     : std_logic;
+
+    -- CPU State
     signal core_state       : std_logic_vector(5 downto 0);
 
 begin
@@ -245,6 +300,59 @@ begin
     --------------------------------------------------------------
     mode_68030  <= '1' when cpucfg = "10" else '0';
     mode_bypass <= not mode_68030;
+
+    --------------------------------------------------------------
+    -- Instantiate TG68KdotC_Kernel CPU Core
+    --------------------------------------------------------------
+    -- This is the actual 68000/68010/68020 processor core
+    -- For MC68030 mode (cpucfg = 10), it operates in 68020 mode
+    -- with MC68030 extensions handled by surrounding logic
+    --------------------------------------------------------------
+
+    cpu_core: TG68KdotC_Kernel
+        generic map(
+            SR_Read => 2,           -- Switchable with CPU(0)
+            VBR_Stackframe => 2,    -- Switchable with CPU(0)
+            extAddr_Mode => 2,      -- Switchable with CPU(1)
+            MUL_Mode => 2,          -- Switchable with CPU(1)
+            DIV_Mode => 2,          -- Switchable with CPU(1)
+            BitField => 2,          -- Switchable with CPU(1)
+            BarrelShifter => 1,     -- Yes
+            MUL_Hardware => 1       -- Yes
+        )
+        port map(
+            clk => clk,
+            nReset => not reset,    -- TG68K uses active-low reset
+            clkena_in => tg68k_clkena,
+            data_in => tg68k_data_read,
+            IPL => ipl,
+            IPL_autovector => '1',  -- Amiga uses autovector interrupts
+            berr => '0',            -- Bus error (not used in basic config)
+            CPU => cpucfg,          -- CPU mode: 00=68000, 01=68010, 10/11=68020
+            addr_out => tg68k_addr_out,
+            data_write => tg68k_data_write,
+            nWr => tg68k_nWr,
+            nUDS => tg68k_nUDS,
+            nLDS => tg68k_nLDS,
+            busstate => tg68k_busstate,
+            longword => tg68k_longword,
+            nResetOut => tg68k_nResetOut,
+            FC => tg68k_FC,
+            clr_berr => tg68k_clr_berr,
+            skipFetch => tg68k_skipFetch,
+            regin_out => tg68k_regin,
+            CACR_out => tg68k_CACR,
+            VBR_out => tg68k_VBR
+        );
+
+    -- CPU Supervisor mode detection from Function Code
+    -- FC = 4,5,6,7 indicates supervisor mode
+    cpu_supervisor <= tg68k_FC(2);
+
+    -- CPU clock enable: allow CPU to run when memory is ready
+    -- In MC68030 mode, gate with memory controller ready signals
+    tg68k_clkena <= clkena when mode_bypass = '1' else
+                    clkena and (cpu_inst_ready or cpu_data_ready);
 
     --------------------------------------------------------------
     -- Instantiate MMU Registers
@@ -289,6 +397,96 @@ begin
             freeze_icache => icache_freeze,
             freeze_dcache => dcache_freeze
         );
+
+    --------------------------------------------------------------
+    -- CPU Bus Interface Conversion
+    --------------------------------------------------------------
+    -- Convert TG68K's 16-bit unified bus interface to separate
+    -- instruction and data paths required by MC68030 Memory Controller
+    --
+    -- TG68K busstate encoding:
+    --   00: fetch code (instruction)
+    --   01: no memory access
+    --   10: read data
+    --   11: write data
+    --------------------------------------------------------------
+
+    process(clk, reset)
+    begin
+        if reset = '1' then
+            cpu_inst_req  <= '0';
+            cpu_data_req  <= '0';
+            cpu_inst_addr <= (others => '0');
+            cpu_data_addr <= (others => '0');
+            cpu_inst_fc   <= "000";
+            cpu_data_fc   <= "000";
+            cpu_data_rw   <= '0';
+            cpu_data_size <= "00";
+            cpu_data_in   <= (others => '0');
+
+        elsif rising_edge(clk) then
+            -- Instruction Fetch (busstate = 00)
+            if tg68k_busstate = "00" then
+                cpu_inst_req  <= '1';
+                cpu_inst_addr <= tg68k_addr_out;
+                cpu_inst_fc   <= tg68k_FC;
+                cpu_data_req  <= '0';
+
+            -- Data Read (busstate = 10)
+            elsif tg68k_busstate = "10" then
+                cpu_data_req  <= '1';
+                cpu_data_addr <= tg68k_addr_out;
+                cpu_data_fc   <= tg68k_FC;
+                cpu_data_rw   <= '0';  -- Read
+                cpu_inst_req  <= '0';
+
+                -- Determine transfer size from UDS/LDS
+                if tg68k_longword = '1' then
+                    cpu_data_size <= "10";  -- Longword (32-bit)
+                elsif tg68k_nUDS = '0' and tg68k_nLDS = '0' then
+                    cpu_data_size <= "01";  -- Word (16-bit)
+                else
+                    cpu_data_size <= "00";  -- Byte (8-bit)
+                end if;
+
+            -- Data Write (busstate = 11)
+            elsif tg68k_busstate = "11" then
+                cpu_data_req  <= '1';
+                cpu_data_addr <= tg68k_addr_out;
+                cpu_data_fc   <= tg68k_FC;
+                cpu_data_rw   <= '1';  -- Write
+                cpu_inst_req  <= '0';
+
+                -- Determine transfer size
+                if tg68k_longword = '1' then
+                    cpu_data_size <= "10";  -- Longword
+                elsif tg68k_nUDS = '0' and tg68k_nLDS = '0' then
+                    cpu_data_size <= "01";  -- Word
+                else
+                    cpu_data_size <= "00";  -- Byte
+                end if;
+
+                -- Convert 16-bit write data to 32-bit
+                -- Replicate data in both upper and lower word for byte/word ops
+                cpu_data_in <= tg68k_data_write & tg68k_data_write;
+
+            -- No Memory Access (busstate = 01)
+            else
+                cpu_inst_req <= '0';
+                cpu_data_req <= '0';
+            end if;
+
+            -- Data read from memory controller (32-bit) to CPU (16-bit)
+            -- Select upper or lower word based on address bit 1
+            if tg68k_addr_out(1) = '0' then
+                tg68k_data_read <= cpu_inst_data(31 downto 16) when tg68k_busstate = "00" else
+                                   cpu_data_out(31 downto 16);
+            else
+                tg68k_data_read <= cpu_inst_data(15 downto 0) when tg68k_busstate = "00" else
+                                   cpu_data_out(15 downto 0);
+            end if;
+        end if;
+    end process;
 
     --------------------------------------------------------------
     -- Instantiate Memory Controller (MC68030 mode only)
@@ -340,12 +538,16 @@ begin
     --------------------------------------------------------------
     -- Bus Multiplexing: 68030 mode vs Bypass mode
     --------------------------------------------------------------
+    -- In MC68030 mode: route through memory controller (caches, MMU)
+    -- In Bypass mode: direct TG68K signals (68000/68010 compatibility)
+    --------------------------------------------------------------
     bus_mux: process(mode_68030, mc_bus_addr, mc_bus_as, mc_bus_rw,
                      mc_bus_burst, mc_bus_fc, mc_bus_data_out,
-                     cpu_inst_addr, cpu_data_addr)
+                     tg68k_addr_out, tg68k_nWr, tg68k_nUDS, tg68k_nLDS,
+                     tg68k_FC, tg68k_data_write, tg68k_busstate)
     begin
         if mode_68030 = '1' then
-            -- MC68030 mode: use memory controller
+            -- MC68030 mode: use memory controller with caches and MMU
             addr       <= mc_bus_addr;
             as         <= mc_bus_as;
             rw         <= mc_bus_rw;
@@ -356,20 +558,20 @@ begin
             -- Generate UDS/LDS from size
             uds <= mc_bus_ds;
             lds <= mc_bus_ds;
-            siz <= "10";  -- Long word (simplified)
+            siz <= "10";  -- Long word
 
         else
-            -- Bypass mode: direct connection (68000/68010/68020)
-            -- This would connect directly to TG68K core
-            addr       <= cpu_inst_addr;  -- Simplified
-            as         <= '0';
-            rw         <= '1';
-            burst      <= '0';
-            fc         <= "110";
-            data_write <= (others => '0');
-            uds        <= '0';
-            lds        <= '0';
-            siz        <= "10";
+            -- Bypass mode: direct TG68K connection (no caches/MMU)
+            -- Used for 68000/68010 modes or when MC68030 disabled
+            addr       <= tg68k_addr_out;
+            as         <= '1' when tg68k_busstate /= "01" else '0';  -- Assert AS during memory access
+            rw         <= not tg68k_nWr;
+            burst      <= '0';  -- No burst in bypass mode
+            fc         <= tg68k_FC;
+            data_write <= tg68k_data_write & tg68k_data_write;  -- Replicate to 32-bit
+            uds        <= tg68k_nUDS;
+            lds        <= tg68k_nLDS;
+            siz        <= "01";  -- Word (16-bit)
         end if;
     end process;
 
@@ -384,30 +586,32 @@ begin
     --------------------------------------------------------------
     -- Bus State Output
     --------------------------------------------------------------
-    busstate <= "00" when as = '0' else
-                "01" when as = '1' and dtack = '1' else
-                "10";
+    -- Pass through TG68K busstate
+    -- 00: fetch code, 01: no access, 10: read data, 11: write data
+    busstate <= tg68k_busstate;
 
     --------------------------------------------------------------
     -- CPU State Debug Output
     --------------------------------------------------------------
-    cpu_state <= core_state;
+    -- Lower 2 bits: busstate
+    -- Upper bits: additional debug info
+    cpu_state <= "0000" & tg68k_busstate;
 
     --------------------------------------------------------------
-    -- Note: In full implementation, this module would instantiate
-    -- TG68KdotC_Kernel and connect:
-    --   - Instruction fetch interface
-    --   - Data access interface
-    --   - Exception handling
-    --   - Interrupt handling
-    --   - Register access
+    -- IMPLEMENTATION STATUS:
+    --------------------------------------------------------------
+    -- ✅ TG68KdotC_Kernel CPU core integrated
+    -- ✅ MMU components connected (ATC, TT, page table walk)
+    -- ✅ Cache components connected (I-cache, D-cache)
+    -- ✅ Burst mode controller integrated
+    -- ✅ Memory controller integrated
+    -- ✅ Bus interface conversion (16-bit CPU ↔ 32-bit MC68030)
     --
-    -- The TG68K core would be modified to:
-    --   - Recognize F-line instructions (PMOVE/PFLUSH/PTEST)
-    --   - Forward to MMU instruction executors
-    --   - Handle cache control instructions (MOVEC CACR)
-    --   - Provide cpu_supervisor signal
-    --   - Interface with memory controller
+    -- ⚠️  REMAINING WORK:
+    -- - F-line instruction recognition (PMOVE/PFLUSH/PTEST)
+    -- - MOVEC CACR/CAAR connection
+    -- - Exception vector updates for MC68030
+    -- - Real hardware testing and debugging
     --------------------------------------------------------------
 
 end architecture rtl;
