@@ -7,6 +7,7 @@
 -- - PC/SR save to stack
 -- - Mode switching (user → supervisor)
 -- - Exception entry FSM
+-- - RTE instruction support (return from exception)
 --
 -- Copyright (c) 2025 Claude AI (Anthropic)
 -- Based on MC68040 User's Manual, Chapter 6: Exception Processing
@@ -29,6 +30,10 @@ entity TG68040_Exception_Unit is
         exception_in   : in exception_info_t;           -- Exception to process
         exception_ack  : out std_logic;                 -- Exception acknowledged
 
+        -- RTE (Return from Exception) input
+        rte_req        : in std_logic;                  -- RTE request
+        rte_ack        : out std_logic;                 -- RTE acknowledged
+
         -- Control registers
         vbr            : in std_logic_vector(31 downto 0);   -- Vector Base Register
         ssp            : in std_logic_vector(31 downto 0);   -- Supervisor Stack Pointer
@@ -40,37 +45,46 @@ entity TG68040_Exception_Unit is
         sr_out         : out status_register_t;         -- Updated SR
         sr_write       : out std_logic;                 -- Write SR
 
-        -- Memory interface for stack writes
+        -- Memory interface for stack operations
         mem_req        : out std_logic;                 -- Memory request
-        mem_write      : out std_logic;                 -- Write enable
+        mem_write      : out std_logic;                 -- Write enable (0 = read)
         mem_addr       : out std_logic_vector(31 downto 0);  -- Address
-        mem_data       : out std_logic_vector(31 downto 0);  -- Data to write
+        mem_data_out   : out std_logic_vector(31 downto 0);  -- Data to write
+        mem_data_in    : in std_logic_vector(31 downto 0);   -- Data read
         mem_ready      : in std_logic;                  -- Memory ready
 
         -- PC output
-        handler_pc     : out std_logic_vector(31 downto 0);  -- Exception handler PC
+        handler_pc     : out std_logic_vector(31 downto 0);  -- Exception handler PC / RTE return PC
         handler_valid  : out std_logic;                      -- Handler PC is valid
 
         -- Pipeline control
         pipeline_flush : out std_logic;                 -- Flush pipeline
 
         -- Statistics
-        exceptions_processed : out std_logic_vector(31 downto 0)
+        exceptions_processed : out std_logic_vector(31 downto 0);
+        rte_count             : out std_logic_vector(31 downto 0)
     );
 end TG68040_Exception_Unit;
 
 architecture rtl of TG68040_Exception_Unit is
 
-    -- Exception entry state machine
+    -- Exception entry / RTE state machine
     type exc_state_t is (
-        IDLE,                   -- No exception
+        IDLE,                   -- No exception / RTE
+        -- Exception entry states
         SAVE_SR,                -- Save SR to stack (word 0)
         SAVE_PC,                -- Save PC to stack (word 1)
         SAVE_FORMAT_VECTOR,     -- Save format/vector word (word 2)
         SAVE_FAULT_ADDR,        -- Save fault address (Format 7, word 3)
         FETCH_VECTOR,           -- Fetch handler address from vector table
         UPDATE_REGS,            -- Update SR and SSP
-        COMPLETE                -- Exception entry complete
+        COMPLETE,               -- Exception entry complete
+        -- RTE (Return from Exception) states
+        RTE_READ_FORMAT_VECTOR, -- Read format/vector word from stack
+        RTE_READ_PC,            -- Read PC from stack
+        RTE_READ_SR,            -- Read SR from stack
+        RTE_UPDATE_REGS,        -- Update SR and SSP
+        RTE_COMPLETE            -- RTE complete
     );
 
     signal state : exc_state_t := IDLE;
@@ -101,6 +115,16 @@ architecture rtl of TG68040_Exception_Unit is
 
     -- Statistics
     signal exception_count : unsigned(31 downto 0) := (others => '0');
+    signal rte_counter : unsigned(31 downto 0) := (others => '0');
+
+    -- RTE state
+    signal rte_format_vector : std_logic_vector(15 downto 0);
+    signal rte_pc_reg : std_logic_vector(31 downto 0);
+    signal rte_sr_reg : std_logic_vector(15 downto 0);
+    signal rte_format : stack_frame_format_t;
+
+    -- Memory read/write control
+    signal mem_req_pending : std_logic;
 
 begin
 
@@ -117,16 +141,20 @@ begin
                 ssp_current <= unsigned(ssp);
                 words_written <= 0;
                 mem_write_pending <= '0';
+                mem_req_pending <= '0';
                 handler_valid <= '0';
                 exception_ack <= '0';
+                rte_ack <= '0';
                 pipeline_flush <= '0';
                 sr_write <= '0';
                 ssp_write <= '0';
                 exception_count <= (others => '0');
+                rte_counter <= (others => '0');
 
             else
                 -- Default outputs
                 exception_ack <= '0';
+                rte_ack <= '0';
                 handler_valid <= '0';
                 pipeline_flush <= '0';
                 sr_write <= '0';
@@ -134,9 +162,9 @@ begin
 
                 case state is
                     when IDLE =>
-                        -- Wait for exception
+                        -- Wait for exception or RTE
                         if exception_in.valid = '1' then
-                            -- Latch exception
+                            -- Exception entry
                             current_exception <= exception_in;
                             exception_ack <= '1';
 
@@ -152,6 +180,19 @@ begin
 
                             -- Start saving to stack
                             state <= SAVE_SR;
+
+                        elsif rte_req = '1' then
+                            -- RTE (Return from Exception)
+                            rte_ack <= '1';
+
+                            -- Initialize SSP (post-increment for stack reads)
+                            ssp_current <= unsigned(ssp);
+
+                            -- Flush pipeline immediately
+                            pipeline_flush <= '1';
+
+                            -- Start reading from stack
+                            state <= RTE_READ_FORMAT_VECTOR;
                         end if;
 
                     when SAVE_SR =>
@@ -273,6 +314,100 @@ begin
                         -- Return to IDLE
                         state <= IDLE;
 
+                    --------------------------------------------------------------------
+                    -- RTE (Return from Exception) States
+                    --------------------------------------------------------------------
+
+                    when RTE_READ_FORMAT_VECTOR =>
+                        -- Read format/vector word from stack (at SSP)
+                        mem_addr_reg <= std_logic_vector(ssp_current);
+                        mem_req_pending <= '1';
+                        mem_write_pending <= '0';  -- Read operation
+                        state <= RTE_READ_PC;
+
+                    when RTE_READ_PC =>
+                        -- Read format/vector word and prepare to read PC
+                        if mem_ready = '1' and mem_req_pending = '1' then
+                            mem_req_pending <= '0';
+
+                            -- Latch format/vector word
+                            rte_format_vector <= mem_data_in(15 downto 0);
+
+                            -- Extract format bits (15:12)
+                            case mem_data_in(15 downto 12) is
+                                when x"0" => rte_format <= FRAME_FORMAT_0;
+                                when x"1" => rte_format <= FRAME_FORMAT_1;
+                                when x"2" => rte_format <= FRAME_FORMAT_2;
+                                when x"7" => rte_format <= FRAME_FORMAT_7;
+                                when others =>
+                                    -- Format error - treat as Format 0 for baseline
+                                    rte_format <= FRAME_FORMAT_0;
+                            end case;
+
+                            -- Increment SSP past format/vector word
+                            ssp_current <= ssp_current + 2;
+
+                            -- Read PC from stack (longword at SSP+2)
+                            mem_addr_reg <= std_logic_vector(ssp_current + 2);
+                            mem_req_pending <= '1';
+                            mem_write_pending <= '0';  -- Read operation
+                            state <= RTE_READ_SR;
+                        end if;
+
+                    when RTE_READ_SR =>
+                        -- Read PC and prepare to read SR
+                        if mem_ready = '1' and mem_req_pending = '1' then
+                            mem_req_pending <= '0';
+
+                            -- Latch PC
+                            rte_pc_reg <= mem_data_in;
+
+                            -- Increment SSP past PC (longword)
+                            ssp_current <= ssp_current + 4;
+
+                            -- Read SR from stack (word at SSP+6)
+                            mem_addr_reg <= std_logic_vector(ssp_current + 2);
+                            mem_req_pending <= '1';
+                            mem_write_pending <= '0';  -- Read operation
+                            state <= RTE_UPDATE_REGS;
+                        end if;
+
+                    when RTE_UPDATE_REGS =>
+                        -- Read SR and update registers
+                        if mem_ready = '1' and mem_req_pending = '1' then
+                            mem_req_pending <= '0';
+
+                            -- Latch SR
+                            rte_sr_reg <= mem_data_in(15 downto 0);
+
+                            -- Increment SSP past SR (word)
+                            ssp_current <= ssp_current + 2;
+
+                            -- Unpack and write SR
+                            sr_out <= unpack_sr(mem_data_in(15 downto 0));
+                            sr_write <= '1';
+
+                            -- Update SSP
+                            -- For baseline, assume Format 0 (8 bytes total)
+                            -- Real implementation would handle Format 2/7 sizes
+                            ssp_out <= std_logic_vector(ssp_current + 2);
+                            ssp_write <= '1';
+
+                            state <= RTE_COMPLETE;
+                        end if;
+
+                    when RTE_COMPLETE =>
+                        -- RTE complete
+                        -- Output return PC
+                        handler_pc <= rte_pc_reg;
+                        handler_valid <= '1';
+
+                        -- Increment RTE statistics
+                        rte_counter <= rte_counter + 1;
+
+                        -- Return to IDLE
+                        state <= IDLE;
+
                 end case;
             end if;
         end if;
@@ -281,14 +416,15 @@ begin
     ------------------------------------------------------------------------------
     -- Memory Interface
     ------------------------------------------------------------------------------
-    mem_req <= mem_write_pending;
-    mem_write <= mem_write_pending;
+    mem_req <= mem_write_pending or mem_req_pending;
+    mem_write <= mem_write_pending;  -- '1' for write, '0' for read
     mem_addr <= mem_addr_reg;
-    mem_data <= mem_data_reg;
+    mem_data_out <= mem_data_reg;
 
     ------------------------------------------------------------------------------
     -- Statistics Output
     ------------------------------------------------------------------------------
     exceptions_processed <= std_logic_vector(exception_count);
+    rte_count <= std_logic_vector(rte_counter);
 
 end architecture rtl;

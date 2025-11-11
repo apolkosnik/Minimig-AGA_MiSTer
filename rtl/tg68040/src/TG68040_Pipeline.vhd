@@ -361,6 +361,8 @@ architecture rtl of TG68040_Pipeline is
             reset          : in std_logic;
             exception_in   : in exception_info_t;
             exception_ack  : out std_logic;
+            rte_req        : in std_logic;
+            rte_ack        : out std_logic;
             vbr            : in std_logic_vector(31 downto 0);
             ssp            : in std_logic_vector(31 downto 0);
             ssp_out        : out std_logic_vector(31 downto 0);
@@ -371,17 +373,21 @@ architecture rtl of TG68040_Pipeline is
             mem_req        : out std_logic;
             mem_write      : out std_logic;
             mem_addr       : out std_logic_vector(31 downto 0);
-            mem_data       : out std_logic_vector(31 downto 0);
+            mem_data_out   : out std_logic_vector(31 downto 0);
+            mem_data_in    : in std_logic_vector(31 downto 0);
             mem_ready      : in std_logic;
             handler_pc     : out std_logic_vector(31 downto 0);
             handler_valid  : out std_logic;
             pipeline_flush : out std_logic;
-            exceptions_processed : out std_logic_vector(31 downto 0)
+            exceptions_processed : out std_logic_vector(31 downto 0);
+            rte_count      : out std_logic_vector(31 downto 0)
         );
     end component;
 
     -- Exception unit signals (Phase 11)
     signal exc_unit_ack : std_logic;
+    signal exc_unit_rte_req : std_logic := '0';
+    signal exc_unit_rte_ack : std_logic;
     signal exc_unit_ssp_out : std_logic_vector(31 downto 0);
     signal exc_unit_ssp_write : std_logic;
     signal exc_unit_sr_out : status_register_t;
@@ -389,11 +395,13 @@ architecture rtl of TG68040_Pipeline is
     signal exc_unit_mem_req : std_logic;
     signal exc_unit_mem_write : std_logic;
     signal exc_unit_mem_addr : std_logic_vector(31 downto 0);
-    signal exc_unit_mem_data : std_logic_vector(31 downto 0);
+    signal exc_unit_mem_data_out : std_logic_vector(31 downto 0);
+    signal exc_unit_mem_data_in : std_logic_vector(31 downto 0);
     signal exc_unit_handler_pc : std_logic_vector(31 downto 0);
     signal exc_unit_handler_valid : std_logic;
     signal exc_unit_flush : std_logic;
     signal exc_unit_exceptions_processed : std_logic_vector(31 downto 0);
+    signal exc_unit_rte_count : std_logic_vector(31 downto 0);
 
     -- Supervisor Stack Pointer (A7 in supervisor mode)
     signal ssp_register : std_logic_vector(31 downto 0) := (others => '0');
@@ -567,6 +575,8 @@ begin
             reset          => reset,
             exception_in   => exception_pending,
             exception_ack  => exc_unit_ack,
+            rte_req        => exc_unit_rte_req,
+            rte_ack        => exc_unit_rte_ack,
             vbr            => vbr_register,
             ssp            => ssp_register,
             ssp_out        => exc_unit_ssp_out,
@@ -577,12 +587,14 @@ begin
             mem_req        => exc_unit_mem_req,
             mem_write      => exc_unit_mem_write,
             mem_addr       => exc_unit_mem_addr,
-            mem_data       => exc_unit_mem_data,
+            mem_data_out   => exc_unit_mem_data_out,
+            mem_data_in    => exc_unit_mem_data_in,
             mem_ready      => mem_ready,
             handler_pc     => exc_unit_handler_pc,
             handler_valid  => exc_unit_handler_valid,
             pipeline_flush => exc_unit_flush,
-            exceptions_processed => exc_unit_exceptions_processed
+            exceptions_processed => exc_unit_exceptions_processed,
+            rte_count      => exc_unit_rte_count
         );
 
     ------------------------------------------------------------------------------
@@ -999,14 +1011,26 @@ begin
                     end if;
 
                     -- Simple decode (Phase 3 - basic instruction set)
-                    if if_id.instruction = x"4E71" then
+                    -- Phase 11D: RTE instruction detection
+                    if if_id.instruction = x"4E73" then
+                        -- RTE (Return from Exception) instruction
+                        -- This is a privileged instruction and triggers RTE
+                        exc_unit_rte_req <= '1';
+                        id_ea.instr_type <= INSTR_NONE;
+                        id_ea.src_reg1 <= (others => '0');
+                        id_ea.src_reg2 <= (others => '0');
+                        id_ea.dst_reg <= (others => '0');
+
+                    elsif if_id.instruction = x"4E71" then
                         -- NOP instruction
+                        exc_unit_rte_req <= '0';
                         id_ea.instr_type <= INSTR_NONE;
                         id_ea.src_reg1 <= (others => '0');
                         id_ea.src_reg2 <= (others => '0');
                         id_ea.dst_reg <= (others => '0');
 
                     elsif opcode_high = x"D" or opcode_high = x"9" then
+                        exc_unit_rte_req <= '0';
                         -- ADD/SUB Dn,Dn (simplified)
                         id_ea.instr_type <= INSTR_OTHER;
                         id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);   -- Source Dn
@@ -1014,6 +1038,7 @@ begin
                         id_ea.dst_reg <= "0" & if_id.instruction(11 downto 9);   -- Dest Dn
 
                     elsif opcode_high = x"3" or opcode_high = x"2" or opcode_high = x"1" then
+                        exc_unit_rte_req <= '0';
                         -- MOVE instruction (simplified - register direct only)
                         id_ea.instr_type <= INSTR_OTHER;
                         id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source reg
@@ -1021,6 +1046,7 @@ begin
                         id_ea.dst_reg <= "0" & if_id.instruction(11 downto 9);  -- Dest reg
 
                     elsif opcode_high = x"4" then
+                        exc_unit_rte_req <= '0';
                         -- Miscellaneous instructions (RTS, etc.)
                         id_ea.instr_type <= INSTR_OTHER;
                         id_ea.src_reg1 <= (others => '0');
@@ -1028,6 +1054,7 @@ begin
                         id_ea.dst_reg <= (others => '0');
 
                     else
+                        exc_unit_rte_req <= '0';
                         -- Other/unknown instruction - treat as NOP for Phase 3
                         id_ea.instr_type <= INSTR_OTHER;
                         id_ea.src_reg1 <= (others => '0');
@@ -1379,12 +1406,15 @@ begin
     end process;
 
     ------------------------------------------------------------------------------
-    -- Memory Interface (Stub for Phase 3)
+    -- Memory Interface (Stub for Phase 3 + Exception Unit Phase 11)
     ------------------------------------------------------------------------------
     mem_addr <= ea_of.ea_addr;
     mem_read <= '0';  -- Will be set when implementing memory operations
     mem_write <= '0';
     mem_data_write <= (others => '0');
+
+    -- Connect exception unit memory data input to memory read data
+    exc_unit_mem_data_in <= mem_data_read;
 
     ------------------------------------------------------------------------------
     -- Register File Interface (Stub for Phase 3)
