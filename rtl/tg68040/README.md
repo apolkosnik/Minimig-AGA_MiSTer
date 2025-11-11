@@ -8,28 +8,32 @@ TG68040 is an FPGA implementation of the Motorola MC68040 processor, based on th
 
 🚧 **UNDER ACTIVE DEVELOPMENT** 🚧
 
-**Current Phase:** Phase 2 - New Instructions
+**Current Phase:** Phase 3 - Pipeline Foundation
 **Target Completion:** Q3 2025 (estimated)
 
 ### Completed Milestones
-- ✅ Phase 0: Project infrastructure and documentation
-- ✅ Phase 1: Core Extension & CPU ID (COMPLETE 2025-11-11)
+- ✅ Phase 0: Project infrastructure and documentation (2025-11-11)
+- ✅ Phase 1: Core Extension & CPU ID (2025-11-11)
   - CPU mode "10" for 68040
   - TG68040_Pack with constants and utility functions
   - TG68040_RegFile with all control registers
   - MOVEC instruction support
   - Comprehensive unit tests (100% passing)
-  - Complete documentation
+- ✅ Phase 2: New Instructions (2025-11-11)
+  - MOVE16 instruction (16-byte block move)
+  - CINV/CPUSH cache operations (stubs)
+  - Instruction decoder types
+  - 20 unit tests (100% passing)
 
 ### Current Work
-- 🔨 Phase 2: New 68040 Instructions
-  - MOVE16 (16-byte block move)
-  - CINV (cache invalidate)
-  - CPUSH (cache push)
+- 🔨 Phase 3: Pipeline Foundation (Next)
+  - 6-stage pipeline design
+  - Pipeline registers
+  - Instruction flow control
 
 ### Upcoming
-- ⏳ Phase 3: Pipeline foundation
-- ⏳ Phase 4: Hazard detection
+- ⏳ Phase 4: Hazard detection and forwarding
+- ⏳ Phase 5: Instruction cache (stub)
 
 ## Features (Planned)
 
@@ -148,7 +152,7 @@ This project follows a rigorous, incremental development methodology:
 |-------|------|----------|--------|
 | 0 | Foundation | 1-2 days | ✅ Complete (2025-11-11) |
 | 1 | Core Extension & CPU ID | 3-5 days | ✅ Complete (2025-11-11) |
-| 2 | New Instructions (Simple) | 5-7 days | ⏳ Planned |
+| 2 | New Instructions (Simple) | 5-7 days | ✅ Complete (2025-11-11) |
 | 3 | Pipeline Foundation | 7-10 days | ⏳ Planned |
 | 4 | Pipeline Hazard Detection | 7-10 days | ⏳ Planned |
 | 5 | Instruction Cache (Stub) | 5-7 days | ⏳ Planned |

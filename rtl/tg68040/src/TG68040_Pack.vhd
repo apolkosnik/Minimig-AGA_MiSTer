@@ -246,18 +246,83 @@ package TG68040_Pack is
 	-- Format: 1111 0110 00xx xxxx for various addressing modes
 	constant OPC_MOVE16_BASE : std_logic_vector(15 downto 8) := x"F6";
 
+	-- MOVE16 variants (bits 3-0)
+	constant MOVE16_AN_INC_ABS  : std_logic_vector(3 downto 0) := "0000"; -- (An)+, (xxx).L
+	constant MOVE16_ABS_AN_INC  : std_logic_vector(3 downto 0) := "1000"; -- (xxx).L, (An)+
+	constant MOVE16_AN_ABS      : std_logic_vector(3 downto 0) := "0001"; -- (An), (xxx).L
+	constant MOVE16_ABS_AN      : std_logic_vector(3 downto 0) := "1001"; -- (xxx).L, (An)
+
 	-- Cache instructions
 	-- CINV - Cache Invalidate
-	-- Format: 1111 0100 0001 xxxx
-	constant OPC_CINVL  : std_logic_vector(15 downto 4) := x"F41"; -- Invalidate line
-	constant OPC_CINVP  : std_logic_vector(15 downto 4) := x"F42"; -- Invalidate page
-	constant OPC_CINVA  : std_logic_vector(15 downto 4) := x"F43"; -- Invalidate all
+	-- Format: 1111 0100 0xx0 1xxx (bit 9-8: scope, bit 6: cache, bit 3: 1)
+	constant OPC_CINV_BASE : std_logic_vector(15 downto 10) := "111101";
+	constant CINV_LINE : std_logic_vector(9 downto 8) := "01";  -- Invalidate line
+	constant CINV_PAGE : std_logic_vector(9 downto 8) := "10";  -- Invalidate page
+	constant CINV_ALL  : std_logic_vector(9 downto 8) := "11";  -- Invalidate all
 
 	-- CPUSH - Cache Push
-	-- Format: 1111 0100 0010 xxxx
-	constant OPC_CPUSHL : std_logic_vector(15 downto 4) := x"F45"; -- Push line
-	constant OPC_CPUSHP : std_logic_vector(15 downto 4) := x"F46"; -- Push page
-	constant OPC_CPUSHA : std_logic_vector(15 downto 4) := x"F47"; -- Push all
+	-- Format: 1111 0100 0xx1 0xxx (bit 9-8: scope, bit 6: cache, bit 3: 0)
+	constant OPC_CPUSH_BASE : std_logic_vector(15 downto 10) := "111101";
+	constant CPUSH_LINE : std_logic_vector(9 downto 8) := "01";  -- Push line
+	constant CPUSH_PAGE : std_logic_vector(9 downto 8) := "10";  -- Push page
+	constant CPUSH_ALL  : std_logic_vector(9 downto 8) := "11";  -- Push all
+
+	-- Cache selector (bit 6)
+	constant CACHE_DATA : std_logic := '0';  -- Data cache
+	constant CACHE_INSN : std_logic := '1';  -- Instruction cache
+
+	------------------------------------------------------------------------------
+	-- Instruction Decoder Types
+	------------------------------------------------------------------------------
+	-- Instruction type enumeration
+	type instr_type_t is (
+		INSTR_NONE,      -- No instruction
+		INSTR_MOVE16,    -- MOVE16
+		INSTR_CINV,      -- Cache invalidate
+		INSTR_CPUSH,     -- Cache push
+		INSTR_OTHER      -- Other instructions (handled by TG68K)
+	);
+
+	-- Cache operation scope
+	type cache_op_scope_t is (
+		SCOPE_LINE,      -- Single cache line
+		SCOPE_PAGE,      -- All lines in 4KB page
+		SCOPE_ALL        -- Entire cache
+	);
+
+	-- Cache operation type
+	type cache_op_type_t is (
+		CACHE_OP_NONE,   -- No operation
+		CACHE_OP_INV,    -- Invalidate
+		CACHE_OP_PUSH    -- Push (write-back + invalidate)
+	);
+
+	-- Cache selector type
+	type cache_select_t is (
+		CACHE_SEL_DATA,  -- Data cache
+		CACHE_SEL_INSN,  -- Instruction cache
+		CACHE_SEL_BOTH   -- Both caches (supervisor only)
+	);
+
+	-- MOVE16 addressing mode
+	type move16_mode_t is (
+		MOVE16_AN_INC_TO_ABS,  -- (An)+, (xxx).L
+		MOVE16_ABS_TO_AN_INC,  -- (xxx).L, (An)+
+		MOVE16_AN_TO_ABS,      -- (An), (xxx).L
+		MOVE16_ABS_TO_AN       -- (xxx).L, (An)
+	);
+
+	------------------------------------------------------------------------------
+	-- Cache Operation Control Structure
+	------------------------------------------------------------------------------
+	-- Control signals for cache operations (to cache controller, future)
+	type cache_op_ctrl_t is record
+		enable      : std_logic;                       -- Operation enable
+		op_type     : cache_op_type_t;                 -- Invalidate or push
+		scope       : cache_op_scope_t;                -- Line, page, or all
+		cache_sel   : cache_select_t;                  -- Which cache(s)
+		address     : std_logic_vector(31 downto 0);   -- Address for line/page ops
+	end record;
 
 	------------------------------------------------------------------------------
 	-- Cache Line Structure
@@ -328,6 +393,18 @@ package TG68040_Pack is
 	------------------------------------------------------------------------------
 	function page_offset(addr : std_logic_vector(31 downto 0)) return std_logic_vector;
 
+	------------------------------------------------------------------------------
+	-- Function: is_aligned_16
+	-- Check if address is 16-byte aligned (for MOVE16)
+	------------------------------------------------------------------------------
+	function is_aligned_16(addr : std_logic_vector(31 downto 0)) return boolean;
+
+	------------------------------------------------------------------------------
+	-- Function: align_to_16
+	-- Align address down to 16-byte boundary
+	------------------------------------------------------------------------------
+	function align_to_16(addr : std_logic_vector(31 downto 0)) return std_logic_vector;
+
 end package TG68040_Pack;
 
 ------------------------------------------------------------------------------
@@ -386,6 +463,24 @@ package body TG68040_Pack is
 	function page_offset(addr : std_logic_vector(31 downto 0)) return std_logic_vector is
 	begin
 		return addr(PAGE_OFFSET_BITS_4KB - 1 downto 0);
+	end function;
+
+	------------------------------------------------------------------------------
+	-- Function: is_aligned_16
+	-- Check if lower 4 bits are zero (16-byte alignment)
+	------------------------------------------------------------------------------
+	function is_aligned_16(addr : std_logic_vector(31 downto 0)) return boolean is
+	begin
+		return addr(3 downto 0) = "0000";
+	end function;
+
+	------------------------------------------------------------------------------
+	-- Function: align_to_16
+	-- Clear lower 4 bits to align to 16-byte boundary
+	------------------------------------------------------------------------------
+	function align_to_16(addr : std_logic_vector(31 downto 0)) return std_logic_vector is
+	begin
+		return addr(31 downto 4) & "0000";
 	end function;
 
 end package body TG68040_Pack;
