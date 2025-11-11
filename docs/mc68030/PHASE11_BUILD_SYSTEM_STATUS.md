@@ -422,6 +422,99 @@ quartus_sh --flow compile Minimig
 
 ---
 
+## Critical Finding: Integration Gap 🔴
+
+### Discovery
+
+During Phase 11 build system analysis, a **critical integration gap** was discovered:
+
+**Problem**: TG68KdotC_Kernel has F-line interface ports (added in Phase 10), but **cpu_wrapper.v does NOT connect them**.
+
+### Impact Analysis
+
+**What This Means**:
+- ❌ F-line decoders/executors are **never instantiated**
+- ❌ F-line signals default to '0' → instructions **trap as illegal**
+- ❌ PMOVE, PFLUSH, PTEST **do not execute**
+- ❌ MC68030-specific functionality is **inactive at runtime**
+
+**Current State**:
+```verilog
+// cpu_wrapper.v lines 194-224
+TG68KdotC_Kernel cpu_inst_p
+(
+    .clk(clk),
+    .nreset(reset),
+    ...
+    .cacr_out(cacr_p),
+    .vbr_out(vbr_p)
+    // ❌ MISSING: .fline_is_mmu()
+    // ❌ MISSING: .fline_is_pmove()
+    // ❌ MISSING: .fline_is_pflush()
+    // ❌ MISSING: .fline_is_ptest()
+    // ❌ MISSING: .fline_exec_req()
+    // ❌ MISSING: .fline_exec_done()
+);
+```
+
+### What Works vs What Doesn't
+
+| Component | Compiles | Instantiated | Works at Runtime |
+|-----------|----------|--------------|------------------|
+| TG68KdotC_Kernel (base) | ✅ Yes | ✅ Yes | ✅ Yes |
+| F-line interface (ports) | ✅ Yes | ❌ No | ❌ No |
+| TG68K030 wrapper | ✅ Yes | ❌ No | ❌ No |
+| F-line decoders | ✅ Yes | ❌ No | ❌ No |
+| F-line executors | ✅ Yes | ❌ No | ❌ No |
+| MMU registers | ✅ Yes | ❌ No | ❌ No |
+| ATC | ✅ Yes | ❌ No | ❌ No |
+| Caches | ✅ Yes | ❌ No | ❌ No |
+
+**Summary**: Everything compiles ✅, nothing executes ❌
+
+### Integration Options
+
+Three approaches identified for resolving this:
+
+**Option 1: Use TG68K030 Wrapper (Recommended)**
+- Replace TG68KdotC_Kernel with TG68K030 in cpu_wrapper.v
+- Requires 32-bit ↔ 16-bit data adapter
+- Provides complete MC68030 functionality
+- **Effort**: 7-11 hours
+- **Status**: Documented in CPU_WRAPPER_INTEGRATION_STATUS.md
+
+**Option 2: Manual F-Line Integration (Not Recommended)**
+- Wire F-line components directly to TG68KdotC_Kernel
+- Duplicates TG68K030 work
+- Complex and error-prone
+- **Effort**: 5-8 hours
+- **Status**: Not recommended
+
+**Option 3: Hybrid Approach**
+- Use TG68K030 only for cpucfg=11
+- Keep existing cores for cpucfg=00/01/10
+- Clean separation, no regression
+- **Effort**: 8-12 hours
+- **Status**: Best long-term solution
+
+### Resolution Plan
+
+**Immediate** (This Session):
+- ✅ Document integration gap (CPU_WRAPPER_INTEGRATION_STATUS.md)
+- ✅ Update Phase 11 status
+- ✅ Mark as known limitation
+- ✅ Proceed with build system validation
+
+**Phase 11.5** (Future Work):
+- ⏳ Implement Option 3 (Hybrid Approach)
+- ⏳ Create 32-bit to 16-bit data adapter
+- ⏳ Integrate TG68K030 for cpucfg=11
+- ⏳ Test on MiSTer hardware
+
+**Status**: Integration gap **documented and understood**, resolution **planned for future phase**.
+
+---
+
 ## Comparison: Before vs After Phase 11
 
 | Aspect | Before Phase 11 | After Phase 11 |
@@ -453,8 +546,9 @@ Phase 11 Stage 1 (Build System Configuration) is **COMPLETE** ✅.
 
 ### Blocking Issues:
 - **None** for build system stage
+- ⚠️ **Integration Gap**: TG68K030 not wired into cpu_wrapper.v (Phase 11.5 future work)
 - Requires Quartus environment for synthesis testing
-- Requires MiSTer hardware for functional validation
+- Requires MiSTer hardware for functional validation (after integration)
 
 ### Ready For:
 - ✅ Quartus synthesis (when environment available)
@@ -471,7 +565,7 @@ Phase 11 Stage 1 (Build System Configuration) is **COMPLETE** ✅.
 
 ---
 
-*Document Version*: 1.0
+*Document Version*: 1.1
 *Last Updated*: 2025-11-11
 *Branch*: claude/mc68030-implementation-011CV1P7SFSGPVf8P7bhgzsY
-*Commit*: 83fa6a1
+*Commit*: 06e46f1 (build system + docs) + integration gap analysis
