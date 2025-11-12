@@ -540,8 +540,10 @@ On MiSTer:
 - [x] Add reset logic
 - [x] Fix DTACK handshaking bug (added LONG_WAIT state)
 - [x] Add to build system (files.qip)
-- [ ] Write testbench
-- [ ] Simulate test cases
+- [x] Write testbench (rtl/TG68K030_Bus_Adapter_tb.v - 520 lines)
+- [x] Create simulation script (rtl/run_bus_adapter_sim.sh)
+- [x] Document simulation procedure (BUS_ADAPTER_SIMULATION.md)
+- [ ] Run simulation (requires iverilog - user can run locally)
 - [ ] Review timing
 - [ ] Synthesize and check resources
 - [ ] Integrate with cpu_wrapper.v (conditional compilation)
@@ -569,9 +571,19 @@ On MiSTer:
 - MC68030 User's Manual, Section 6: Bus Operation
 - Minimig-AGA cpu_wrapper.v implementation
 - TG68K030.vhd interface specification
+- **[BUS_ADAPTER_SIMULATION.md](BUS_ADAPTER_SIMULATION.md)** - Testbench documentation and simulation guide
 
 ---
 
-**Status**: Implementation complete with bug fixes
-**File**: rtl/TG68K030_Bus_Adapter.v (260 lines)
-**Next Step**: Testbench development and simulation validation
+## Related Files
+
+- **rtl/TG68K030_Bus_Adapter.v** - Implementation (260 lines)
+- **rtl/TG68K030_Bus_Adapter_tb.v** - Testbench (520 lines)
+- **rtl/run_bus_adapter_sim.sh** - Simulation automation script
+- **docs/mc68030/BUS_ADAPTER_SIMULATION.md** - Simulation guide
+
+---
+
+**Status**: Implementation and testbench complete
+**Files**: Implementation (260 lines) + Testbench (520 lines)
+**Next Step**: Local simulation validation (requires iverilog) or hardware testing

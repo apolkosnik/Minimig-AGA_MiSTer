@@ -75,15 +75,17 @@ Complete technical documentation available in [`docs/mc68030/`](docs/mc68030/):
 - **[Phase 14 Planning](docs/mc68030/PHASE14_PLANNING.md)** - Future integration roadmap
 - **[Integration Strategy](docs/mc68030/TG68K030_WRAPPER_INTEGRATION_STRATEGY.md)** - Analysis and recommendations
 - **[Bus Adapter Design](docs/mc68030/BUS_ADAPTER_DESIGN.md)** - 32/16-bit bridge specification
+- **[Bus Adapter Simulation](docs/mc68030/BUS_ADAPTER_SIMULATION.md)** - Testbench and validation guide
 - **[Bug Fixes Nov 2025](docs/mc68030/BUGFIXES_2025-11-12.md)** - Critical fixes applied
 - **[Synthesis Guide](docs/mc68030/SYNTHESIS_GUIDE.md)** - Quartus compilation instructions
 
 ### Implementation Details
 
-- **25,000+ lines** of new code (15,000 VHDL + 425 Verilog integration + 9,500 documentation)
-- **42+ files** implementing MMU, ATC, caches, F-line instructions
+- **26,000+ lines** of new code (15,000 VHDL + 1,000 Verilog + 10,000 documentation)
+- **45+ files** implementing MMU, ATC, caches, F-line instructions, bus adapter + testbench
 - **21 VHDL component files** + enhanced TG68KdotC_Kernel integration
 - **F-line instructions** now execute with full memory support
+- **Bus adapter testbench** included for validation (520 lines, 9 test cases)
 - **FPGA usage**: ~10% of Cyclone V capacity
 
 This is the **first implementation** where MC68030 mode is functionally different from 68020 mode:
