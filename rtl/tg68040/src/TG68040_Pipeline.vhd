@@ -1090,11 +1090,21 @@ begin
 
                     elsif opcode_high = x"3" or opcode_high = x"2" or opcode_high = x"1" then
                         exc_unit_rte_req <= '0';
-                        -- MOVE instruction (simplified - register direct only)
-                        id_ea.instr_type <= INSTR_OTHER;
-                        id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source reg
-                        id_ea.src_reg2 <= (others => '0');
-                        id_ea.dst_reg <= "0" & if_id.instruction(11 downto 9);  -- Dest reg
+                        -- Phase 12F: Distinguish MOVE vs MOVEA
+                        if (opcode_high = x"3" or opcode_high = x"2") and if_id.instruction(8 downto 6) = "001" then
+                            -- MOVEA instruction (Move to Address register)
+                            -- Format: 00SS AAA 001 MMM RRR (SS: 11=word, 10=long)
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source Dn
+                            id_ea.src_reg2 <= (others => '0');
+                            id_ea.dst_reg <= "1" & if_id.instruction(11 downto 9);  -- Dest An
+                        else
+                            -- MOVE instruction (simplified - register direct only)
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source reg
+                            id_ea.src_reg2 <= (others => '0');
+                            id_ea.dst_reg <= "0" & if_id.instruction(11 downto 9);  -- Dest reg
+                        end if;
 
                     -- Phase 12: CMP instruction (0xBxxx, but check opmode to distinguish from EOR)
                     elsif opcode_high = x"B" and if_id.instruction(8 downto 6) = "000" then
@@ -1125,6 +1135,32 @@ begin
                         id_ea.src_reg1 <= "0" & if_id.instruction(11 downto 9);  -- Source Dn (data)
                         id_ea.src_reg2 <= "0" & if_id.instruction(2 downto 0);   -- Dest Dn (also src2)
                         id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);    -- Dest Dn
+
+                    -- Phase 12F: EXG instruction (0xCxxx with bit 8 = 1)
+                    elsif opcode_high = x"C" and if_id.instruction(8) = '1' then
+                        -- EXG - Exchange registers
+                        -- Format: 1100 RRR 1 OPMODE RRR
+                        -- Opmode: 01000 (Dx,Dy), 01001 (Ax,Ay), 10001 (Dx,Ay)
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_OTHER;
+                        -- For EXG, we need both registers as sources and destinations
+                        -- We'll handle the register type based on opmode in execution
+                        if if_id.instruction(7 downto 3) = "01000" then
+                            -- EXG Dx,Dy (data-data)
+                            id_ea.src_reg1 <= "0" & if_id.instruction(11 downto 9);  -- Rx (data)
+                            id_ea.src_reg2 <= "0" & if_id.instruction(2 downto 0);   -- Ry (data)
+                            id_ea.dst_reg <= "0" & if_id.instruction(11 downto 9);   -- Will write to both
+                        elsif if_id.instruction(7 downto 3) = "01001" then
+                            -- EXG Ax,Ay (address-address)
+                            id_ea.src_reg1 <= "1" & if_id.instruction(11 downto 9);  -- Rx (address)
+                            id_ea.src_reg2 <= "1" & if_id.instruction(2 downto 0);   -- Ry (address)
+                            id_ea.dst_reg <= "1" & if_id.instruction(11 downto 9);   -- Will write to both
+                        else
+                            -- EXG Dx,Ay (data-address) - opmode 10001
+                            id_ea.src_reg1 <= "0" & if_id.instruction(11 downto 9);  -- Rx (data)
+                            id_ea.src_reg2 <= "1" & if_id.instruction(2 downto 0);   -- Ry (address)
+                            id_ea.dst_reg <= "0" & if_id.instruction(11 downto 9);   -- Will write to both
+                        end if;
 
                     -- Phase 12: AND instruction (0xCxxx with opmode 0xx for Dn & <ea> → Dn)
                     elsif opcode_high = x"C" and if_id.instruction(8) = '0' then
@@ -1184,6 +1220,27 @@ begin
                             id_ea.src_reg1 <= (others => '0');  -- No source (always zero)
                             id_ea.src_reg2 <= (others => '0');
                             id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);   -- Dest register
+                        elsif if_id.instruction(15 downto 8) = x"48" and if_id.instruction(7 downto 3) = "01000" then
+                            -- Phase 12F: SWAP instruction
+                            -- Format: 01001000 01000 RRR (Swap words of Dn)
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source register
+                            id_ea.src_reg2 <= (others => '0');
+                            id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);   -- Dest = source
+                        elsif if_id.instruction(15 downto 8) = x"48" and (if_id.instruction(7 downto 3) = "10000" or if_id.instruction(7 downto 3) = "11000") then
+                            -- Phase 12F: EXT instruction
+                            -- Format: 01001000 1X000 RRR (X=0: byte→word, X=1: word→long)
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source register
+                            id_ea.src_reg2 <= (others => '0');
+                            id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);   -- Dest = source
+                        elsif if_id.instruction(15 downto 8) = x"49" and if_id.instruction(7 downto 3) = "11000" then
+                            -- Phase 12F: EXTB.L instruction (byte→long)
+                            -- Format: 01001001 11000 RRR
+                            id_ea.instr_type <= INSTR_OTHER;
+                            id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Source register
+                            id_ea.src_reg2 <= (others => '0');
+                            id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);   -- Dest = source
                         else
                             -- Other miscellaneous instructions (RTS, etc.)
                             id_ea.instr_type <= INSTR_OTHER;
@@ -1413,16 +1470,23 @@ begin
                         end if;
 
                     elsif opcode_high = x"3" or opcode_high = x"2" or opcode_high = x"1" then
-                        -- MOVE operation - pass through operand1
+                        -- MOVE/MOVEA operation - pass through operand1
                         ex_wb.result <= of_ex.operand1;
-                        ex_wb.flags(3) <= of_ex.operand1(31);  -- Negative
-                        if of_ex.operand1 = x"00000000" then
-                            ex_wb.flags(2) <= '1';  -- Zero
+                        -- Phase 12F: MOVEA doesn't affect flags (opmode 001)
+                        if (opcode_high = x"3" or opcode_high = x"2") and of_ex.opcode(8 downto 6) = "001" then
+                            -- MOVEA - no flag updates
+                            ex_wb.flags <= (others => '0');
                         else
-                            ex_wb.flags(2) <= '0';
+                            -- MOVE - update flags
+                            ex_wb.flags(3) <= of_ex.operand1(31);  -- Negative
+                            if of_ex.operand1 = x"00000000" then
+                                ex_wb.flags(2) <= '1';  -- Zero
+                            else
+                                ex_wb.flags(2) <= '0';
+                            end if;
+                            ex_wb.flags(1) <= '0';  -- Overflow cleared
+                            ex_wb.flags(0) <= '0';  -- Carry cleared
                         end if;
-                        ex_wb.flags(1) <= '0';  -- Overflow cleared
-                        ex_wb.flags(0) <= '0';  -- Carry cleared
 
                     -- Phase 12: MOVEQ instruction (MVIS)
                     elsif opcode_high = x"7" and of_ex.opcode(8) = '0' then
@@ -1613,6 +1677,74 @@ begin
                         -- Set flags: N=0, Z=1, V=0, C=0
                         ex_wb.flags(3) <= '0';  -- Negative cleared
                         ex_wb.flags(2) <= '1';  -- Zero set
+                        ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12F: SWAP instruction
+                    elsif opcode_high = x"4" and of_ex.opcode(15 downto 8) = x"48" and of_ex.opcode(7 downto 3) = "01000" then
+                        -- SWAP - Swap upper and lower words
+                        ex_wb.result <= of_ex.operand1(15 downto 0) & of_ex.operand1(31 downto 16);
+                        -- Set flags: N, Z based on result; V, C cleared
+                        ex_wb.flags(3) <= of_ex.operand1(15);  -- Negative (new MSB is old bit 15)
+                        if of_ex.operand1(15 downto 0) & of_ex.operand1(31 downto 16) = x"00000000" then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12F: EXT.W instruction (byte → word)
+                    elsif opcode_high = x"4" and of_ex.opcode(15 downto 8) = x"48" and of_ex.opcode(7 downto 3) = "10000" then
+                        -- EXT.W - Sign-extend byte to word (bit 7 → bits 8-15)
+                        if of_ex.operand1(7) = '1' then
+                            ex_wb.result <= of_ex.operand1(31 downto 16) & x"FF" & of_ex.operand1(7 downto 0);
+                        else
+                            ex_wb.result <= of_ex.operand1(31 downto 16) & x"00" & of_ex.operand1(7 downto 0);
+                        end if;
+                        -- Set flags: N, Z based on result; V, C cleared
+                        ex_wb.flags(3) <= of_ex.operand1(7);  -- Negative
+                        if of_ex.operand1(7 downto 0) = x"00" or (of_ex.operand1(7) = '1' and of_ex.operand1(7 downto 0) = x"80") then
+                            ex_wb.flags(2) <= '1';  -- Zero if byte is 0
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12F: EXT.L instruction (word → long)
+                    elsif opcode_high = x"4" and of_ex.opcode(15 downto 8) = x"48" and of_ex.opcode(7 downto 3) = "11000" then
+                        -- EXT.L - Sign-extend word to long (bit 15 → bits 16-31)
+                        if of_ex.operand1(15) = '1' then
+                            ex_wb.result <= x"FFFF" & of_ex.operand1(15 downto 0);
+                        else
+                            ex_wb.result <= x"0000" & of_ex.operand1(15 downto 0);
+                        end if;
+                        -- Set flags: N, Z based on result; V, C cleared
+                        ex_wb.flags(3) <= of_ex.operand1(15);  -- Negative
+                        if of_ex.operand1(15 downto 0) = x"0000" then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12F: EXTB.L instruction (byte → long)
+                    elsif opcode_high = x"4" and of_ex.opcode(15 downto 8) = x"49" and of_ex.opcode(7 downto 3) = "11000" then
+                        -- EXTB.L - Sign-extend byte to long (bit 7 → bits 8-31)
+                        if of_ex.operand1(7) = '1' then
+                            ex_wb.result <= x"FFFFFF" & of_ex.operand1(7 downto 0);
+                        else
+                            ex_wb.result <= x"000000" & of_ex.operand1(7 downto 0);
+                        end if;
+                        -- Set flags: N, Z based on result; V, C cleared
+                        ex_wb.flags(3) <= of_ex.operand1(7);  -- Negative
+                        if of_ex.operand1(7 downto 0) = x"00" then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
                         ex_wb.flags(1) <= '0';  -- Overflow cleared
                         ex_wb.flags(0) <= '0';  -- Carry cleared
 
