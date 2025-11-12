@@ -1259,6 +1259,37 @@ begin
                         id_ea.src_reg2 <= (others => '0');
                         id_ea.dst_reg <= (others => '0');
 
+                    -- Phase 12B: Shift/Rotate instructions
+                    elsif opcode_high = x"E" then
+                        -- Shift/Rotate family (ASL, ASR, LSL, LSR, ROL, ROR, ROXL, ROXR)
+                        -- Format: 1110 CCC D SS i 00 RRR
+                        -- CCC: Count (immediate or register)
+                        -- D: Direction (0=right, 1=left)
+                        -- SS: Size (00=byte, 01=word, 10=long)
+                        -- i: 0=immediate, 1=register
+                        -- RRR: Register
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_OTHER;
+                        id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Data register
+                        if if_id.instruction(5) = '1' then
+                            -- Register count: Dy specified in bits 11-9
+                            id_ea.src_reg2 <= "0" & if_id.instruction(11 downto 9);  -- Count register
+                        else
+                            -- Immediate count in bits 11-9 (000=8, 001-111=1-7)
+                            id_ea.src_reg2 <= (others => '0');
+                        end if;
+                        id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);  -- Dest = source
+                        -- Store immediate count in immediate field for easy access
+                        if if_id.instruction(5) = '0' then
+                            if if_id.instruction(11 downto 9) = "000" then
+                                id_ea.immediate <= x"00000008";  -- Count = 8
+                            else
+                                id_ea.immediate <= x"0000000" & "0" & if_id.instruction(11 downto 9);  -- Count = 1-7
+                            end if;
+                        else
+                            id_ea.immediate <= (others => '0');
+                        end if;
+
                     else
                         exc_unit_rte_req <= '0';
                         -- Other/unknown instruction - treat as NOP for Phase 3
@@ -1349,6 +1380,16 @@ begin
                         -- CMPI: use immediate value from EA stage, register in operand2
                         of_ex.operand1 <= ea_of.ea_addr;  -- Immediate value
                         of_ex.operand2 <= operand2_forwarded;  -- Register value
+                    elsif ea_of.opcode(15 downto 12) = x"E" then
+                        -- Phase 12B: Shift/Rotate instructions
+                        of_ex.operand1 <= operand1_forwarded;  -- Data register
+                        if ea_of.opcode(5) = '0' then
+                            -- Immediate shift count from ea_addr
+                            of_ex.operand2 <= ea_of.ea_addr;
+                        else
+                            -- Register shift count (use lower 6 bits only)
+                            of_ex.operand2 <= operand2_forwarded;
+                        end if;
                     else
                         -- Normal register operands with forwarding
                         of_ex.operand1 <= operand1_forwarded;
@@ -1747,6 +1788,121 @@ begin
                         end if;
                         ex_wb.flags(1) <= '0';  -- Overflow cleared
                         ex_wb.flags(0) <= '0';  -- Carry cleared
+
+                    -- Phase 12B: Shift and Rotate instructions
+                    elsif opcode_high = x"E" then
+                        -- Get shift count (modulo 64 for register, 1-8 for immediate)
+                        variable shift_count : integer range 0 to 63;
+                        variable operation : std_logic_vector(2 downto 0);  -- bits 4:3 define operation
+                        variable direction : std_logic;  -- bit 8: 0=right, 1=left
+
+                        shift_count := to_integer(unsigned(of_ex.operand2(5 downto 0)));  -- Use lower 6 bits
+                        operation := of_ex.opcode(4 downto 3);  -- 00=AS, 01=LS, 10=ROXS, 11=ROS
+                        direction := of_ex.opcode(8);  -- 0=right, 1=left
+
+                        -- Perform shift/rotate based on operation and direction
+                        if operation = "00" then
+                            -- Arithmetic Shift (AS)
+                            if direction = '1' then
+                                -- ASL: Arithmetic Shift Left
+                                if shift_count = 0 then
+                                    alu_result := unsigned(of_ex.operand1);
+                                    ex_wb.flags(0) <= '0';  -- Carry cleared for 0 shift
+                                elsif shift_count < 32 then
+                                    alu_result := shift_left(unsigned(of_ex.operand1), shift_count);
+                                    ex_wb.flags(0) <= of_ex.operand1(32 - shift_count);  -- Last bit shifted out
+                                else
+                                    alu_result := (others => '0');
+                                    ex_wb.flags(0) <= '0';
+                                end if;
+                            else
+                                -- ASR: Arithmetic Shift Right (preserves sign)
+                                if shift_count = 0 then
+                                    alu_result := unsigned(of_ex.operand1);
+                                    ex_wb.flags(0) <= '0';  -- Carry cleared for 0 shift
+                                elsif shift_count < 32 then
+                                    alu_result := unsigned(shift_right(signed(of_ex.operand1), shift_count));
+                                    ex_wb.flags(0) <= of_ex.operand1(shift_count - 1);  -- Last bit shifted out
+                                else
+                                    -- Shift by 32+ fills with sign bit
+                                    if of_ex.operand1(31) = '1' then
+                                        alu_result := (others => '1');
+                                    else
+                                        alu_result := (others => '0');
+                                    end if;
+                                    ex_wb.flags(0) <= of_ex.operand1(31);
+                                end if;
+                            end if;
+                        elsif operation = "01" then
+                            -- Logical Shift (LS)
+                            if direction = '1' then
+                                -- LSL: Logical Shift Left
+                                if shift_count = 0 then
+                                    alu_result := unsigned(of_ex.operand1);
+                                    ex_wb.flags(0) <= '0';
+                                elsif shift_count < 32 then
+                                    alu_result := shift_left(unsigned(of_ex.operand1), shift_count);
+                                    ex_wb.flags(0) <= of_ex.operand1(32 - shift_count);
+                                else
+                                    alu_result := (others => '0');
+                                    ex_wb.flags(0) <= '0';
+                                end if;
+                            else
+                                -- LSR: Logical Shift Right
+                                if shift_count = 0 then
+                                    alu_result := unsigned(of_ex.operand1);
+                                    ex_wb.flags(0) <= '0';
+                                elsif shift_count < 32 then
+                                    alu_result := shift_right(unsigned(of_ex.operand1), shift_count);
+                                    ex_wb.flags(0) <= of_ex.operand1(shift_count - 1);
+                                else
+                                    alu_result := (others => '0');
+                                    ex_wb.flags(0) <= '0';
+                                end if;
+                            end if;
+                        elsif operation = "11" then
+                            -- Rotate (RO)
+                            if direction = '1' then
+                                -- ROL: Rotate Left
+                                if shift_count = 0 then
+                                    alu_result := unsigned(of_ex.operand1);
+                                    ex_wb.flags(0) <= '0';
+                                else
+                                    alu_result := rotate_left(unsigned(of_ex.operand1), shift_count mod 32);
+                                    ex_wb.flags(0) <= alu_result(0);  -- Bit rotated to LSB
+                                end if;
+                            else
+                                -- ROR: Rotate Right
+                                if shift_count = 0 then
+                                    alu_result := unsigned(of_ex.operand1);
+                                    ex_wb.flags(0) <= '0';
+                                else
+                                    alu_result := rotate_right(unsigned(of_ex.operand1), shift_count mod 32);
+                                    ex_wb.flags(0) <= alu_result(31);  -- Bit rotated to MSB
+                                end if;
+                            end if;
+                        else
+                            -- ROXL/ROXR: Rotate through Extend (simplified - treat as RO)
+                            if direction = '1' then
+                                -- ROXL
+                                alu_result := rotate_left(unsigned(of_ex.operand1), shift_count mod 32);
+                                ex_wb.flags(0) <= alu_result(0);
+                            else
+                                -- ROXR
+                                alu_result := rotate_right(unsigned(of_ex.operand1), shift_count mod 32);
+                                ex_wb.flags(0) <= alu_result(31);
+                            end if;
+                        end if;
+
+                        ex_wb.result <= std_logic_vector(alu_result);
+                        -- Set flags: N, Z, V=0, C (already set above)
+                        ex_wb.flags(3) <= alu_result(31);  -- Negative
+                        if alu_result = 0 then
+                            ex_wb.flags(2) <= '1';  -- Zero
+                        else
+                            ex_wb.flags(2) <= '0';
+                        end if;
+                        ex_wb.flags(1) <= '0';  -- Overflow cleared
 
                     else
                         -- Unknown operation - pass operand1
