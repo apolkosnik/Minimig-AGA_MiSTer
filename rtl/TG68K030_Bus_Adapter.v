@@ -47,12 +47,13 @@ module TG68K030_Bus_Adapter
 // State Machine
 //--------------------------------------------------------------------------
 
-localparam IDLE       = 2'b00;
-localparam LONG_UPPER = 2'b01;
-localparam LONG_LOWER = 2'b10;
-localparam WAIT_READY = 2'b11;
+localparam IDLE         = 3'b000;
+localparam LONG_UPPER   = 3'b001;
+localparam LONG_WAIT    = 3'b010;  // Wait for dtack deassert between long word cycles
+localparam LONG_LOWER   = 3'b011;
+localparam WAIT_READY   = 3'b100;
 
-reg [1:0] state;
+reg [2:0] state;
 reg [15:0] data_buffer;  // Buffer for long word upper 16 bits
 
 //--------------------------------------------------------------------------
@@ -80,6 +81,10 @@ always @(*) begin
 
         LONG_UPPER: begin
             sys_data_write = cpu_data_write[31:16]; // Upper word
+        end
+
+        LONG_WAIT: begin
+            sys_data_write = cpu_data_write[15:0];  // Prepare lower word during wait
         end
 
         LONG_LOWER: begin
@@ -154,6 +159,12 @@ always @(*) begin
                 sys_uds = 1'b0;
                 sys_lds = 1'b0;
             end
+
+            LONG_WAIT: begin
+                // No strobes during wait state
+                sys_uds = 1'b1;
+                sys_lds = 1'b1;
+            end
         endcase
     end
 end
@@ -201,8 +212,18 @@ always @(posedge clk) begin
                         data_buffer <= sys_data_read;
                     end
 
-                    // Move to lower word (increment address by 2)
-                    sys_addr <= sys_addr + 32'd2;
+                    // Deassert AS and wait for dtack to go high
+                    sys_as <= 1'b1;
+                    state <= LONG_WAIT;
+                end
+            end
+
+            LONG_WAIT: begin
+                // Wait for dtack to deassert before starting second transfer
+                if (sys_dtack == 1'b1) begin
+                    // dtack deasserted, start second transfer
+                    sys_addr <= sys_addr + 32'd2;  // Increment address by 2
+                    sys_as <= 1'b0;                 // Assert AS for second cycle
                     state <= LONG_LOWER;
                 end
             end

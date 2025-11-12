@@ -665,9 +665,9 @@ wire [31:0] atc_load_vaddr, atc_load_paddr;
 wire [2:0] atc_load_fc;
 wire atc_load_wp, atc_load_s, atc_load_ci, atc_load_m, atc_load_u;
 
-wire atc_inv_all, atc_inv_fc, atc_inv_fc_ea;
-wire [2:0] atc_inv_fc_val;
-wire [31:0] atc_inv_ea_val;
+reg atc_inv_all, atc_inv_fc, atc_inv_fc_ea;
+reg [2:0] atc_inv_fc_val;
+reg [31:0] atc_inv_ea_val;
 
 // ATC currently not used for lookups (MMU not active)
 assign atc_lookup_req = 1'b0;
