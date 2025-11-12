@@ -72,6 +72,7 @@ Complete technical documentation available in [`docs/mc68030/`](docs/mc68030/):
 - **[Quick Start Guide](docs/mc68030/QUICK_START.md)** - How to build and test
 - **[Project Status](docs/mc68030/PROJECT_STATUS_FINAL.md)** - Complete implementation status (96%)
 - **[Phase 13 Completion](docs/mc68030/PHASE13_COMPLETION_STATUS.md)** - Latest enhancements
+- **[Phase 14 Status](docs/mc68030/PHASE14_STATUS.md)** - 🆕 Step 1 completion report
 - **[Phase 14 Planning](docs/mc68030/PHASE14_PLANNING.md)** - Future integration roadmap
 - **[Integration Strategy](docs/mc68030/TG68K030_WRAPPER_INTEGRATION_STRATEGY.md)** - Analysis and recommendations
 - **[Bus Adapter Design](docs/mc68030/BUS_ADAPTER_DESIGN.md)** - 32/16-bit bridge specification
