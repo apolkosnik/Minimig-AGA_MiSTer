@@ -420,10 +420,16 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_reg_we_d    : std_logic;
 	signal pmmu_reg_re_d    : std_logic;
 	signal pmmu_reg_sel_d   : std_logic_vector(4 downto 0);
-	signal pmmu_reg_sel_pending : std_logic;  -- BUG #50 FIX: Pipeline register for selector latch
-	signal pmmu_reg_sel_latch : std_logic_vector(15 downto 0);  -- BUG #52 FIX: Latch extension word with pending flag
+	-- BUG #53 FIX: 1-stage pipeline - these 2-stage signals no longer needed
+	-- signal pmmu_reg_sel_pending : std_logic;  -- REMOVED: Old 2-stage pipeline
+	-- signal pmmu_reg_sel_latch : std_logic_vector(15 downto 0);  -- REMOVED: Old 2-stage pipeline
 	signal pmmu_reg_wdat_d  : std_logic_vector(31 downto 0);
 	signal pmmu_reg_fd_d    : std_logic;
+
+	-- DIAGNOSTIC: Track brief and pmmu_reg_sel_d timing
+	signal dbg_brief_capture : std_logic_vector(15 downto 0);
+	signal dbg_pmmu_reg_sel_when_set : std_logic_vector(4 downto 0);
+	signal dbg_brief_when_sel_set : std_logic_vector(15 downto 0);
 
 	signal pmmu_req         : std_logic;
 	signal pmmu_is_insn     : std_logic;
@@ -993,13 +999,15 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 			rf_dest_addr <= '0'&sndOPC(2 downto 0);
 		ELSIF setstackaddr='1' THEN
 			rf_dest_addr <= "1111";
-		ELSIF dest_hbits='1' THEN
-			rf_dest_addr <= dest_areg&opcode(11 downto 9);
 		ELSIF micro_state = pmmu_dn_low THEN
+			-- BUG #59 FIX: PMOVE checks must come BEFORE dest_hbits!
 			-- PMOVE 64-bit: LOW word goes to Dn+1 (increment register number)
 			rf_dest_addr <= dest_areg&(dn_sel + "001");
 		ELSIF dn_mode_active THEN
+			-- BUG #59 FIX: Use latched pmove_dn_regnum, not opcode(11:9) which gets overwritten!
 			rf_dest_addr <= dest_areg&dn_sel;
+		ELSIF dest_hbits='1' THEN
+			rf_dest_addr <= dest_areg&opcode(11 downto 9);
 		ELSE
 			IF opcode(5 downto 3)="000" OR data_is_source='1' THEN
 				rf_dest_addr <= dest_areg&opcode(2 downto 0);
@@ -1465,17 +1473,28 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				IF clkena_in='1' THEN
 					memmask <= memmask(3 downto 0)&"11";
 					memread <= memread(1 downto 0)&memmaskmux(5 downto 4);
---					IF wbmemmask(5 downto 4)="11" THEN	
+--					IF wbmemmask(5 downto 4)="11" THEN
 --						wbmemmask <= memmask;
 --					END IF;
 					IF exec(directPC)='1' THEN
 						TG68_PC <= data_read;
 					ELSIF exec(ea_to_pc)='1' THEN
 						TG68_PC <= addr;
-					ELSIF (state ="00" OR TG68_PC_brw = '1') AND stop='0'  THEN				
+					ELSIF (state ="00" OR TG68_PC_brw = '1') AND stop='0'  THEN
 						TG68_PC <= TG68_PC_add;
-					END IF;	
-				END IF;	
+					END IF;
+
+					-- BUG #53 FIX: Move extension word capture to clkena_in block (1-stage pipeline)
+					-- Previously in clkena_lw block, which never executed for PMOVE memory EA modes!
+					-- PMOVE memory EA sets memmask="100111" → clkena_lw='0' → brief never captured
+					IF getbrief='1' THEN
+						IF state(1)='1' THEN
+							brief <= last_opc_read(15 downto 0);
+						ELSE
+							brief <= data_read(15 downto 0);
+						END IF;
+					END IF;
+				END IF;
 				IF clkena_lw='1' THEN
 					interrupt <= setinterrupt;
 					decodeOPC <= setopcode;
@@ -1612,17 +1631,19 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					
 					IF set_Suppress_Base='1' THEN
 						Suppress_Base <= '1';
-					ELSIF setstate(1)='1' OR (ea_only='1' AND set(get_ea_now)='1') THEN	
+					ELSIF setstate(1)='1' OR (ea_only='1' AND set(get_ea_now)='1') THEN
 						Suppress_Base <= '0';
 					END IF;
-					IF getbrief='1' THEN
-						IF state(1)='1' THEN
-							brief <= last_opc_read(15 downto 0);
-						ELSE
-							brief <= data_read(15 downto 0);
-						END IF;
-					END IF;	
-					
+					-- BUG #53 FIX: Extension word capture moved to clkena_in block (line 1482)
+					-- Old code removed from clkena_lw block to prevent multiple drivers
+					-- IF getbrief='1' THEN
+					-- 	IF state(1)='1' THEN
+					-- 		brief <= last_opc_read(15 downto 0);
+					-- 	ELSE
+					-- 		brief <= data_read(15 downto 0);
+					-- 	END IF;
+					-- END IF;
+
 					IF setopcode='1' AND berr='0' THEN
 						IF state="00" THEN
 							opcode <= data_read(15 downto 0);
@@ -2077,7 +2098,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			CASE opcode(5 downto 3) IS		--source
 				WHEN "010"|"011"|"100" =>						-- -(An)+
 					set(get_ea_now) <='1';
-					setnextpass <= '1';
+					-- BUG #54 FIX: Only set setnextpass during decode path, not exec(ea_build) path!
+					-- Regular instructions: ea_build_now='1' fires during decode (correct timing)
+					-- PMOVE: exec(ea_build)='1' fires after extension fetch (wrong timing → +6)
+					IF ea_build_now='1' AND decodeOPC='1' THEN
+						setnextpass <= '1';
+					END IF;
 					IF opcode(3)='1' THEN	--(An)+
 						set(postadd) <= '1';
 						IF opcode(2 downto 0)="111" THEN
@@ -2429,6 +2455,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								next_micro_state <= nop;
 								IF nextpass='0' THEN
 									set(write_reg) <= '1';
+								END IF;
+								IF ea_build_now='1' AND decodeOPC='1' THEN
+									setnextpass <= '1';
 								END IF;
 							WHEN "101" =>				--(d16,An)
 								next_micro_state <= st_dAn1;
@@ -3630,10 +3659,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
 							next_micro_state <= pmmu1;
 
-							-- BUG #53 FIX: Latch Dn selector using last_opc_read before opcode is overwritten
-							IF last_opc_read(5 downto 3)="000" THEN
+							-- BUG #59 FIX: CRITICAL! Capture Dn destination register from OPCODE(11:9), not EA register!
+							-- For PMOVE <MMU>,Dn: opcode(11:9) contains destination Dn number
+							-- For PMOVE Dn,<MMU>: opcode(11:9) contains source Dn number
+							-- last_opc_read is WRONG - it gets overwritten by extension word!
+							-- Use opcode(11:9) which still contains the correct instruction
+							IF opcode(5 downto 3)="000" THEN
 								pmove_dn_capture_req <= '1';
-								pmove_dn_capture_data <= last_opc_read(2 downto 0);
+								pmove_dn_capture_data <= opcode(11 downto 9);  -- FIX: Use opcode, not last_opc_read!
 							END IF;
 
 							-- BUG #22 FIX: DO NOT build EA here! PMMU instructions build EA in pmmu1
@@ -4459,7 +4492,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					END IF;
 
                 WHEN pmmu1 =>		-- PMMU instruction dispatch based on extension word
-                    set_writePCbig <='1';
+                    -- BUG #54 FIX: set_writePCbig moved to Dn mode only (line 4548)
+                    -- Memory EA modes use EA builder which handles PC increment correctly
+                    -- set_writePCbig <='1';  -- REMOVED - was causing +6 PC increment for memory EA
                     set(update_FC) <= '1';  -- Ensure FC reflects supervisor mode
 
                     -- MC68030 SPEC: ALL PMMU instructions are PRIVILEGED
@@ -4522,6 +4557,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                             -- Legal EA modes: Dn, (An), -(An), (d16,An), (d8,An,Xn), xxx.W, xxx.L
                             IF opcode(5 downto 3)="000" THEN
                                 -- Dn direct mode - register to register transfer
+                                -- BUG #54 FIX: Only increment PC for Dn mode, not memory EA modes
+                                set_writePCbig <='1';
                                 -- MC68030 PMOVE: Direction from extension word bit 9, NOT opcode(7)
                                 -- BUG #12 FIX: Swap direction - RW=0 means WRITE to MMU, RW=1 means READ from MMU
                                 -- BUG #30 FIX: Set setstate="01" to ensure memmask="111111" (bit 3='1')
@@ -5020,122 +5057,82 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
   -- Drive PMMU register interface during PMOVE execution
   process(clk)
     -- variable sel   : std_logic_vector(3 downto 0);
-    variable should_latch_write_data : boolean;
   begin
     if rising_edge(clk) then
       if Reset = '1' then
-        -- BUG #19 FIX: pmmu_reg_we_d and pmmu_reg_re_d are now combinational (no reset needed)
+        -- BUG #19 FIX: pmmu_reg_we_d and pmmu_reg_re_d are combinational (lines 564/568), don't reset them here
+        -- pmmu_reg_we_d   <= '0';  -- REMOVED - combinational signal
+        -- pmmu_reg_re_d   <= '0';  -- REMOVED - combinational signal
         pmmu_reg_sel_d  <= (others => '0');
-        pmmu_reg_sel_pending <= '0';  -- BUG #50 FIX: Reset pipeline register
-        pmmu_reg_sel_latch <= (others => '0');  -- BUG #52 FIX: Reset extension word latch
         pmmu_reg_wdat_d <= (others => '0');
         pmmu_reg_part_d <= '0';
         pmmu_reg_fd_d   <= '0';
-        pmmu_mem_wdat_hold <= (others => '0');
-        pmmu_mem_wdat_valid <= '0';
       elsif clkena_in='1' then
-        -- BUG #39 FIX: Use clkena_in instead of completely unconditional!
-        -- Bug #37-#38 tried unconditional latch, but RDindex_A only updates on clkena_lw!
-        -- If clkena_lw='0' during pmmu1, RDindex_A is stale -> reg_QA reads WRONG register!
-        -- Solution: Use clkena_in which is high during pmmu1, and nest clkena_lw inside it.
-
-        -- Data latch must execute when clkena_in='1' (which includes pmmu1)
-        if CPU(1)='1' then
-          pmmu_reg_wdat_d <= pmmu_src_data;
-        end if;
-
-        -- BUG #38 FIX: pmmu_mem_wdat_valid clearing must execute when clkena_in='1'
-        -- Track memory-sourced PMOVE data so it is available when the PMMU write strobe asserts
-        if micro_state = pmmu2 or micro_state = pmmu4 then
-          pmmu_mem_wdat_hold  <= ea_data;
-          pmmu_mem_wdat_valid <= '1';
-        elsif exec(pmmu_wr) = '1' then
-          if set_exec(pmmu_wr) = '0' then
-            pmmu_mem_wdat_valid <= '0';
-            pmmu_mem_wdat_hold  <= (others => '0');
-          end if;
-        else
-          pmmu_mem_wdat_valid <= '0';
-          pmmu_mem_wdat_hold  <= (others => '0');
-        end if;
-
-        -- BUG #50 FIX (V3 - CORRECTED PIPELINE): Stage 1 moved outside clkena_lw block
-        -- CRITICAL: getbrief fires BEFORE setstate="01", so clkena_lw='0' at that time!
-        -- Stage 1 must execute with clkena_in='1' only, not clkena_lw='1'
-        -- BUG #52 FIX: Latch extension word to avoid race with consecutive PMOVEs
-        -- Stage 1: Mark that extension word is being loaded AND latch it
-        -- Set pending for ALL instructions with extension words, filter in Stage 2
-        -- BUG #53 FIX: Only latch if not already pending (consecutive PMOVE protection)
-        if CPU(1)='1' AND getbrief='1' AND pmmu_reg_sel_pending='0' then
-          pmmu_reg_sel_pending <= '1';
-          -- BUG #52 FIX: Capture extension word when available
-          -- When getbrief='1', use current data_read or last_opc_read based on state
-          if state(1)='1' then
-            pmmu_reg_sel_latch <= last_opc_read(15 downto 0);
-          else
-            pmmu_reg_sel_latch <= data_read(15 downto 0);
-          end if;
-        end if;
-
-        -- BUG #53 FIX: Clear pending flag at instruction boundary
-        if setopcode='1' then
-          pmmu_reg_sel_pending <= '0';
-        end if;
-
-      -- BUG #31 FIX: clkena_lw dependent logic (register file addressing sync)
-      -- Register file RDindex_A updates on clkena_lw (line 881), selector latch must match
-      if clkena_lw='1' then
-        -- BUG #19 FIX: pmmu_reg_we_d and pmmu_reg_re_d are now combinational (above)
-        -- No need to clear them here anymore
+        -- BUG #19 FIX: pmmu_reg_we_d and pmmu_reg_re_d are combinational, don't drive them here
+        -- Clear PMMU control signals by default (single-cycle pulses)
+        -- pmmu_reg_we_d   <= '0';  -- REMOVED - combinational signal
+        -- pmmu_reg_re_d   <= '0';  -- REMOVED - combinational signal
 
         -- PMMU instruction handling (only on 68030)
-        -- BUG FIX: Separate decode phase (latch selector/controls) from execute phase (generate enables)
-        -- This prevents brief signal corruption when multiple PMOVE instructions execute back-to-back
+        -- Handle both set() for immediate execution and exec() for deferred execution
+        --if CPU="11" AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
+        if CPU(1)='1' AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
+          -- Latch source data only when actually doing PMMU operation to ensure correct value
+          pmmu_reg_wdat_d <= pmmu_src_data;
 
-        -- DECODE PHASE: Latch register selector and control signals from brief word
-        -- BUG #50 FIX (V2 - PIPELINE): Two-stage selector latch to avoid race condition
-        -- Build 184 failed because brief and last_opc_read have the SAME timing (brief is loaded FROM last_opc_read).
-        -- Problem: Extension word arrives via getbrief at the SAME cycle selector is latched -> race condition!
-        -- Solution: Pipeline the latch in two stages:
-        --   Stage 1: Set pending flag when getbrief fires (moved outside clkena_lw block above)
-        --   Stage 2: Latch selector on NEXT cycle when extension word is stable in last_opc_read
+          -- MMU registers (TT0, TT1, MMUSR, etc.) are PMOVE-only on MC68030
+          -- MOVEC attempts to access these registers trigger illegal instruction exceptions
 
-        -- Stage 2: Latch selector on NEXT cycle when extension word is stable
-        if pmmu_reg_sel_pending='1' then
-          -- BUG #52 FIX: Use latched extension word instead of last_opc_read
-          -- This avoids race condition when consecutive PMOVEs execute quickly
-          -- Latch register selector - extension word was captured in Stage 1
-          if pmmu_reg_sel_latch(14 downto 10) = "00010" OR pmmu_reg_sel_latch(14 downto 10) = "00011" OR pmmu_reg_sel_latch(14 downto 10) = "10000" OR
-             pmmu_reg_sel_latch(14 downto 10) = "10010" OR pmmu_reg_sel_latch(14 downto 10) = "10011" OR pmmu_reg_sel_latch(14 downto 10) = "11000" then
-            pmmu_reg_sel_d  <= pmmu_reg_sel_latch(14 downto 10);
-
-            -- Latch CRP/SRP part selector during decode
-            if (pmmu_reg_sel_latch(14 downto 10) = "10010") or (pmmu_reg_sel_latch(14 downto 10) = "10011") then
-              if micro_state = pmmu1 OR micro_state = pmmu_dn_high then
-                pmmu_reg_part_d <= '1';  -- HIGH word (first transfer)
-              else
-                pmmu_reg_part_d <= '0';  -- LOW word (second transfer)
+          -- PMOVE instruction handling (only if MOVEC is not active to avoid conflicts)
+          if set(pmmu_wr) = '1' OR exec(pmmu_wr) = '1' then
+            -- PMOVE Dn -> <MMU reg>
+            if brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
+               brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000" then
+              pmmu_reg_sel_d  <= brief(14 downto 10);
+              -- pmmu_reg_wdat_d already latched above from pmmu_src_data
+              -- For CRP/SRP choose part: HIGH word first, LOW word second
+              if (brief(14 downto 10) = "10010") or (brief(14 downto 10) = "10011") then
+                if micro_state = pmmu2 OR micro_state = pmmu1 OR micro_state = pmmu_dn_high then
+                  pmmu_reg_part_d <= '1';  -- HIGH word (mem EA first read, Dn first transfer)
+                else
+                  pmmu_reg_part_d <= '0';  -- LOW word (mem EA second read, Dn second transfer)
+                end if;
               end if;
-            end if;
-
-            -- Latch flush disable flag during decode
-            if pmmu_reg_sel_latch(15 downto 13) = "001" and pmmu_reg_sel_latch(9 downto 8) = "00" and pmmu_reg_sel_latch(14 downto 10) /= "00000" and opcode(5 downto 3) /= "000" then
-              pmmu_reg_fd_d <= '1';  -- PMOVEFD - disable ATC flush
-            else
-              pmmu_reg_fd_d <= '0';  -- Normal PMOVE - flush ATC
+              -- Check if this is PMOVEFD (Flush Disable): brief(15:13)="001" AND brief(9:8)="00" AND register selector present
+              -- BUG FIX: Check bits 9-8 (not 12-8) to avoid register selector overlap in bits 14-10
+              if brief(15 downto 13) = "001" and brief(9 downto 8) = "00" and brief(14 downto 10) /= "00000" and exe_opcode(5 downto 3) /= "000" then
+                pmmu_reg_fd_d <= '1';  -- PMOVEFD - disable ATC flush
+              else
+                pmmu_reg_fd_d <= '0';  -- Normal PMOVE - flush ATC
+              end if;
+              -- BUG #19 FIX: pmmu_reg_we_d is combinational (line 564), don't drive it here
+              -- pmmu_reg_we_d   <= '1';  -- REMOVED - combinational signal
             end if;
           end if;
 
-          -- BUG #53 FIX: DON'T clear pending flag here!
-          -- Clearing immediately allows consecutive PMOVEs to overwrite the selector
-          -- before the current instruction completes its PMMU read/write.
-          -- Clear at instruction boundary instead (when setopcode='1')
-          -- pmmu_reg_sel_pending <= '0';  -- REMOVED - moved to setopcode logic
+          if set(pmmu_rd) = '1' OR exec(pmmu_rd) = '1' then
+            -- PMOVE <MMU reg> -> Dn
+            if brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
+               brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000" then
+              pmmu_reg_sel_d <= brief(14 downto 10);
+              -- For CRP/SRP choose part: HIGH word first, LOW word second
+              if (brief(14 downto 10) = "10010") or (brief(14 downto 10) = "10011") then
+                if micro_state = pmmu3 OR micro_state = pmmu1 OR micro_state = pmmu_dn_high then
+                  pmmu_reg_part_d <= '1';  -- HIGH word (mem EA first write, Dn first transfer)
+                else
+                  pmmu_reg_part_d <= '0';  -- LOW word (mem EA second write, Dn second transfer)
+                end if;
+              end if;
+              -- BUG FIX: PMOVE reads never flush ATC (MC68030 spec: only writes can flush)
+              -- Always set flush disable for read operations
+              pmmu_reg_fd_d <= '1';
+              -- BUG #19 FIX: pmmu_reg_re_d is combinational (line 568), don't drive it here
+              -- pmmu_reg_re_d  <= '1';  -- REMOVED - combinational signal
+            end if;
+          end if;
         end if;
-        -- NOTE: Data latch moved OUTSIDE clkena_lw block (Bug #37 fix above)
       end if;
     end if;
-  end if;
   end process;
 -----------------------------------------------------------------------------
 -- Conditions
