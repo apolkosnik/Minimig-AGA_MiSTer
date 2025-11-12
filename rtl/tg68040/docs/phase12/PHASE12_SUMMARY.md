@@ -4,7 +4,7 @@
 
 **Phase:** 12 of 15
 **Goal:** Implement comprehensive MC68040 instruction set
-**Status:** **In Progress - 49%**
+**Status:** **In Progress - 54%**
 **Date Started:** 2025-11-11
 **Date Updated:** 2025-11-11
 **Estimated Completion:** 2 sessions
@@ -46,9 +46,15 @@
 | CMPI #<data>,Dn | 0x0Cxx | ✅ Complete | a1d76e0 |
 | CMPA Dn,An | 0xBxxx | ✅ Complete | 8fd7350 |
 | NEGX Dn | 0x40xx | ✅ Complete | 8fd7350 |
+| MOVEA Dn,An | 0x2/3xxx | ✅ Complete | ae71544 |
+| EXG Rx,Ry | 0xC1xx | ⚠️ Partial | ae71544 |
+| SWAP Dn | 0x4840 | ✅ Complete | ae71544 |
+| EXT.W Dn | 0x4880 | ✅ Complete | ae71544 |
+| EXT.L Dn | 0x48C0 | ✅ Complete | ae71544 |
+| EXTB.L Dn | 0x49C0 | ✅ Complete | ae71544 |
 
-**Total Phase 12:** 15 instructions
-**Grand Total:** 22 instructions
+**Total Phase 12:** 21 instructions (20 complete, 1 partial)
+**Grand Total:** 28 instructions (27 complete, 1 partial)
 
 ### Target Instruction Count
 
@@ -232,26 +238,29 @@ Implement subroutine and jump instructions.
 
 ---
 
-## Phase 12F: Extended Data Movement (Pending)
+## Phase 12F: Extended Data Movement
 
 ### Goal
 Implement advanced move and data manipulation instructions.
 
-### Planned Instructions (8 instructions)
+### Instructions Status (8 planned, 6 implemented)
 
 | Instruction | Opcode | Operation | Status |
 |-------------|--------|-----------|--------|
-| MOVEA | 0x2/3xxx | Move to An | ⏳ Pending |
-| MOVEQ | 0x7xxx | Move quick (imm8) | ⏳ Pending |
+| **MOVEA** | **0x2/3xxx** | **Move to An** | **✅ Complete** |
+| MOVEQ | 0x7xxx | Move quick (imm8) | ✅ Already in MVIS |
 | MOVEM | 0x4880/4C80 | Move multiple | ⏳ Pending |
 | LEA | 0x41C0 | Load effective address | ⏳ Pending |
 | PEA | 0x4840 | Push effective address | ⏳ Pending |
-| EXG | 0xC100 | Exchange registers | ⏳ Pending |
-| SWAP | 0x4840 | Swap register halves | ⏳ Pending |
-| EXT | 0x4880/48C0 | Sign extend | ⏳ Pending |
+| **EXG** | **0xC1xx** | **Exchange registers** | **⚠️ Partial (needs dual-write WB)** |
+| **SWAP** | **0x4840** | **Swap register halves** | **✅ Complete** |
+| **EXT.W** | **0x4880** | **Byte → Word extend** | **✅ Complete** |
+| **EXT.L** | **0x48C0** | **Word → Long extend** | **✅ Complete** |
+| **EXTB.L** | **0x49C0** | **Byte → Long extend** | **✅ Complete** |
 
 **Estimated Lines:** 250
-**Status:** Not started
+**Actual Lines:** ~144 lines
+**Status:** 6/10 instructions complete (60%)
 
 ---
 
@@ -527,6 +536,39 @@ Successfully implemented core MVIS (Minimal Viable Instruction Set) components:
 - Updates CCR flags (N, Z, V, C, X)
 - ~31 lines in ID/EX stages
 
+**16. MOVEA Dn,An** (Commit ae71544)
+- Move data register to address register
+- No flag updates (unlike MOVE)
+- Opmode 001 distinguishes from MOVE
+- ~20 lines in ID/EX stages
+
+**17. EXG Rx,Ry** (Commit ae71544 - Partial)
+- Exchange two registers (Dx↔Dy, Ax↔Ay, Dx↔Ay)
+- Three opmode variants supported
+- ID stage decode complete
+- Note: Requires dual-write WB for full implementation
+- ~26 lines in ID stage
+
+**18. SWAP Dn** (Commit ae71544)
+- Swap upper and lower 16-bit words
+- Updates N, Z flags; clears V, C
+- ~16 lines in ID/EX stages
+
+**19. EXT.W Dn** (Commit ae71544)
+- Sign-extend byte to word (bit 7 → bits 8-15)
+- Updates N, Z flags; clears V, C
+- ~18 lines in ID/EX stages
+
+**20. EXT.L Dn** (Commit ae71544)
+- Sign-extend word to long (bit 15 → bits 16-31)
+- Updates N, Z flags; clears V, C
+- ~18 lines in ID/EX stages
+
+**21. EXTB.L Dn** (Commit ae71544)
+- Sign-extend byte to long (bit 7 → bits 8-31)
+- Updates N, Z flags; clears V, C
+- ~18 lines in ID/EX stages
+
 ### Commits
 
 1. **b8be41e** - TG68040: Phase 12 Started - MVIS Instructions (MOVEQ, CMP, TST)
@@ -534,57 +576,67 @@ Successfully implemented core MVIS (Minimal Viable Instruction Set) components:
 3. **36cda91** - TG68040: Phase 12A - Add Logical and Arithmetic ALU Instructions
 4. **a1d76e0** - TG68040: Phase 12A - Add Address Arithmetic and Immediate Comparison
 5. **8fd7350** - TG68040: Phase 12A - Complete Phase 12A with CMPA and NEGX
+6. **99f7089** - TG68040: Phase 12A - Update Documentation for 100% Completion
+7. **ae71544** - TG68040: Phase 12F - Add Move and Data Manipulation Instructions
 
 ### Files Modified
 
-- **TG68040_Pipeline.vhd**: +413 lines total
-  - ID stage: Instruction decode for all 15 instructions
+- **TG68040_Pipeline.vhd**: +557 lines total
+  - ID stage: Instruction decode for all 21 instructions
   - OF stage: Immediate value routing for MOVEQ, CMPI; write_reg control for CMPA
   - EX stage: Execution logic for all instructions
 
 ### Current Capabilities
 
-With these 15 instructions + previous 7, the MC68040 implementation now supports:
-- **Data movement**: MOVE, MOVEQ
+With these 21 instructions + previous 7, the MC68040 implementation now supports:
+- **Data movement**: MOVE, MOVEA, MOVEQ, SWAP
 - **Arithmetic**: ADD, SUB, ADDA, SUBA, NEG, NEGX, CLR
 - **Logical**: AND, OR, EOR, NOT
 - **Comparison**: CMP, CMPA, CMPI, TST
+- **Sign extension**: EXT.W, EXT.L, EXTB.L
+- **Register exchange**: EXG (partial - decode only)
 - **Control flow**: All 16 Bcc conditions (BRA, BEQ, BNE, BGT, BLE, etc.)
 - **Exception handling**: ILLEGAL, RTE
 - **Floating point**: FADD (stub)
 
-**Total Instructions**: 22 (15 new in Phase 12)
+**Total Instructions**: 28 (21 new in Phase 12, 1 partial)
 **Phase 12A Status**: ✅ **COMPLETE** (13/13 instructions - 100%)
+**Phase 12F Status**: 60% **COMPLETE** (6/10 instructions)
 **Can now run**: Programs with:
 - Loops and conditionals
-- Bit manipulation
+- Bit manipulation and word swapping
 - Arithmetic and logical operations with extend
 - Address register operations and comparisons
 - Immediate data loading and comparison
+- Sign extension for byte/word/long operations
 
 ### Next Steps
 
 **Phase 12A Status:** ✅ **COMPLETE**
+**Phase 12F Status:** 60% **COMPLETE**
 
-**Option A: Continue MVIS**
+**Option A: Complete Phase 12F**
+- Complete EXG (requires dual-write WB architectural changes)
+- Implement LEA, MOVEM, PEA (require addressing modes)
+- Would complete Phase 12F (10/10 instructions - 100%)
+
+**Option B: Continue MVIS**
 - Implement JSR/RTS (subroutines) - requires stack operations
 - Implement basic addressing modes: (An), (An)+, -(An), d(An)
 - Would enable function calls and memory access patterns
-
-**Option B: Add More Move Instructions (Phase 12F)**
-- Implement MOVEA, LEA (address operations)
-- Implement EXG, SWAP (register exchange)
-- Implement EXT (sign extension)
-- Would enable more data manipulation patterns
 
 **Option C: Implement Shift/Rotate (Phase 12B)**
 - Implement ASL, ASR, LSL, LSR
 - Implement ROL, ROR, ROXL, ROXR
 - Would enable bit manipulation and arithmetic shifts
 
+**Option D: Implement Bit Manipulation (Phase 12G)**
+- Implement BTST, BSET, BCLR, BCHG
+- Would enable bit-level operations
+
 ---
 
-**Document Version:** 5.0
-**Last Updated:** 2025-11-11
-**Phase Status:** In Progress (49% - MVIS 80% Complete, Phase 12A 100% COMPLETE ✅)
+**Document Version:** 6.0
+**Last Updated:** 2025-11-12
+**Phase Status:** In Progress (54% - MVIS 80% Complete, Phase 12A 100% ✅, Phase 12F 60%)
 **Author:** Claude AI (Anthropic)
