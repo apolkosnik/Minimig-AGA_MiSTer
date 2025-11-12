@@ -59,10 +59,11 @@ The Minimig-MiSTer variant in this repository has been upgraded with [AGA chipse
 - ✅ ATC instantiation and integration
 - ✅ Complete memory arbiter for F-line operations
 
-**Phase 14 In Progress**:
-- 🆕 Bus width adapter designed and implemented (32-bit ↔ 16-bit conversion)
-- 🆕 TG68K030 wrapper integration strategy documented
-- 🆕 Comprehensive planning for full MMU integration
+**Phase 14 Step 1 Complete** (November 2025):
+- ✅ Bus width adapter designed and implemented (32-bit ↔ 16-bit conversion)
+- ✅ Critical bug fixes applied (DTACK handshaking, signal types, build system)
+- ✅ TG68K030 wrapper integration strategy documented
+- ✅ Comprehensive planning for full MMU integration
 - ⏳ **Next**: Hardware validation on MiSTer FPGA (recommended before further development)
 
 ### Documentation
@@ -74,6 +75,7 @@ Complete technical documentation available in [`docs/mc68030/`](docs/mc68030/):
 - **[Phase 14 Planning](docs/mc68030/PHASE14_PLANNING.md)** - Future integration roadmap
 - **[Integration Strategy](docs/mc68030/TG68K030_WRAPPER_INTEGRATION_STRATEGY.md)** - Analysis and recommendations
 - **[Bus Adapter Design](docs/mc68030/BUS_ADAPTER_DESIGN.md)** - 32/16-bit bridge specification
+- **[Bug Fixes Nov 2025](docs/mc68030/BUGFIXES_2025-11-12.md)** - Critical fixes applied
 - **[Synthesis Guide](docs/mc68030/SYNTHESIS_GUIDE.md)** - Quartus compilation instructions
 
 ### Implementation Details

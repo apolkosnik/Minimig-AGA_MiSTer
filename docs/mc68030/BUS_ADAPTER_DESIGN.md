@@ -105,29 +105,36 @@ Result: CPU data_in[31:0] = buffer
 ```
 IDLE         - Waiting for CPU request
 LONG_UPPER   - Transferring upper 16 bits of long word
+LONG_WAIT    - Wait for dtack deassert between long word cycles
 LONG_LOWER   - Transferring lower 16 bits of long word
 WAIT_READY   - Waiting for system bus ready
 ```
+
+**Note**: The LONG_WAIT state was added to ensure proper 68000 bus protocol compliance. The bus requires dtack to deassert between consecutive transfers to avoid bus contention.
 
 ### State Transitions
 
 ```
 IDLE:
-  - cpu_req && size==LONG → LONG_UPPER
-  - cpu_req && size!=LONG → WAIT_READY
-  - !cpu_req → IDLE
+  - cpu_as==0 && size==LONG → LONG_UPPER
+  - cpu_as==0 && size!=LONG → WAIT_READY
+  - cpu_as==1 → IDLE
 
 LONG_UPPER:
-  - sys_ready → LONG_LOWER
-  - !sys_ready → LONG_UPPER
+  - sys_dtack==0 → LONG_WAIT (deassert sys_as, buffer read data)
+  - sys_dtack==1 → LONG_UPPER
+
+LONG_WAIT:
+  - sys_dtack==1 → LONG_LOWER (assert sys_as, increment address)
+  - sys_dtack==0 → LONG_WAIT
 
 LONG_LOWER:
-  - sys_ready → IDLE (assert cpu_ready)
-  - !sys_ready → LONG_LOWER
+  - sys_dtack==0 → IDLE (assert cpu_dtack, deassert sys_as)
+  - sys_dtack==1 → LONG_LOWER
 
 WAIT_READY:
-  - sys_ready → IDLE (assert cpu_ready)
-  - !sys_ready → WAIT_READY
+  - sys_dtack==0 → IDLE (assert cpu_dtack, deassert sys_as)
+  - sys_dtack==1 → WAIT_READY
 ```
 
 ---
@@ -273,13 +280,14 @@ end
 
 ```verilog
 // State machine registers
-reg [1:0] state;
-reg [31:16] data_buffer;  // Buffer for long word upper 16 bits
+reg [2:0] state;
+reg [15:0] data_buffer;  // Buffer for long word upper 16 bits
 
-localparam IDLE       = 2'b00;
-localparam LONG_UPPER = 2'b01;
-localparam LONG_LOWER = 2'b10;
-localparam WAIT_READY = 2'b11;
+localparam IDLE       = 3'b000;
+localparam LONG_UPPER = 3'b001;
+localparam LONG_WAIT  = 3'b010;
+localparam LONG_LOWER = 3'b011;
+localparam WAIT_READY = 3'b100;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -318,8 +326,18 @@ always @(posedge clk) begin
                         data_buffer <= sys_data_read;
                     end
 
-                    // Move to lower word
-                    sys_addr <= cpu_addr + 2;  // Increment address by 2
+                    // Deassert AS and wait for dtack to go high
+                    sys_as <= 1'b1;
+                    state <= LONG_WAIT;
+                end
+            end
+
+            LONG_WAIT: begin
+                // Wait for dtack to deassert before starting second transfer
+                if (sys_dtack == 1'b1) begin
+                    // dtack deasserted, start second transfer
+                    sys_addr <= sys_addr + 32'd2;  // Increment address by 2
+                    sys_as <= 1'b0;                // Assert AS for second cycle
                     state <= LONG_LOWER;
                 end
             end
@@ -401,17 +419,19 @@ cpu_dtack:‾‾‾‾‾‾‾\_____/‾‾‾‾‾
 State:    IDLE→WAIT_READY→IDLE
 ```
 
-### Long Word Transfer (2 cycles)
+### Long Word Transfer (3 states, 2 bus cycles)
 
 ```
-Clock:    ___/‾‾‾\___/‾‾‾\___/‾‾‾\___
-cpu_as:   ‾‾‾\___________________/‾‾‾
-sys_as:   ‾‾‾\___________________/‾‾‾
-sys_dtack:‾‾‾‾‾‾‾\_____/‾‾‾\_____/‾‾‾
-cpu_dtack:‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\_____/‾‾‾‾‾
-State:    IDLE→LONG_UPPER→LONG_LOWER→IDLE
-Address:  XXXX→XXXX→XXXX+2→XXXX
+Clock:    ___/‾‾‾\___/‾‾‾\___/‾‾‾\___/‾‾‾\___
+cpu_as:   ‾‾‾\___________________________/‾‾‾
+sys_as:   ‾‾‾\___/‾‾‾‾‾‾‾\___________/‾‾‾‾‾‾‾
+sys_dtack:‾‾‾‾‾‾‾\_____/‾‾‾‾‾‾‾\_____/‾‾‾‾‾‾‾
+cpu_dtack:‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\_____/‾‾‾‾‾‾‾
+State:    IDLE→LONG_UPPER→LONG_WAIT→LONG_LOWER→IDLE
+Address:  XXXX→XXXX→XXXX→XXXX+2→XXXX
 ```
+
+**Note**: The sys_as signal deasserts during LONG_WAIT to ensure proper bus protocol. This allows the bus to idle before the second transfer begins, preventing bus contention.
 
 ---
 
@@ -511,19 +531,36 @@ On MiSTer:
 
 ## Implementation Checklist
 
-- [ ] Create module skeleton
-- [ ] Implement state machine
-- [ ] Implement data routing (write)
-- [ ] Implement data routing (read)
-- [ ] Implement UDS/LDS generation
-- [ ] Implement address handling
-- [ ] Add reset logic
+- [x] Create module skeleton
+- [x] Implement state machine (5-state FSM with LONG_WAIT)
+- [x] Implement data routing (write)
+- [x] Implement data routing (read)
+- [x] Implement UDS/LDS generation
+- [x] Implement address handling
+- [x] Add reset logic
+- [x] Fix DTACK handshaking bug (added LONG_WAIT state)
+- [x] Add to build system (files.qip)
 - [ ] Write testbench
 - [ ] Simulate test cases
 - [ ] Review timing
 - [ ] Synthesize and check resources
-- [ ] Integrate with cpu_wrapper.v
+- [ ] Integrate with cpu_wrapper.v (conditional compilation)
 - [ ] Hardware testing
+
+---
+
+## Bug Fixes and Revisions
+
+### Revision 1 (2025-11-12): DTACK Handshaking Fix
+**Problem**: Original design transitioned directly from LONG_UPPER to LONG_LOWER without waiting for dtack to deassert, violating 68000 bus protocol.
+
+**Fix**: Added LONG_WAIT state to properly handle bus handshaking:
+- State machine expanded from 4 states to 5 states
+- LONG_UPPER now deasserts sys_as and transitions to LONG_WAIT
+- LONG_WAIT waits for sys_dtack to go high before starting second transfer
+- Ensures proper bus idle time between consecutive transfers
+
+**Impact**: Prevents bus contention and timing violations in hardware.
 
 ---
 
@@ -535,5 +572,6 @@ On MiSTer:
 
 ---
 
-**Status**: Design complete, ready for implementation
-**Next Step**: Implement TG68K030_Bus_Adapter.v module
+**Status**: Implementation complete with bug fixes
+**File**: rtl/TG68K030_Bus_Adapter.v (260 lines)
+**Next Step**: Testbench development and simulation validation
