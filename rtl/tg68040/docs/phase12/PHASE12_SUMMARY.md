@@ -617,6 +617,17 @@ Fixed overflow and carry flags for all arithmetic/comparison operations:
 - **CMP/CMPA/CMPI**: Applied SUB overflow/carry logic
 - Critical fix for correct Bcc condition code evaluation
 
+**ROXL/ROXR and NEG/NEGX Fixes** (Commit f5ae911)
+Fixed rotate-through-extend and negate overflow flags:
+- **ROXL/ROXR**: Changed from simplified 32-bit rotate to proper 33-bit rotation through X
+  - Forms {operand[31:0], X} for ROXL and {X, operand[31:0]} for ROXR
+  - Uses modulo 33 rotation period (not modulo 32)
+  - Properly updates X and C flags with rotated-out bit
+  - Enables correct multi-precision arithmetic operations
+- **NEG**: Fixed overflow flag to detect 0x80000000 negation (most negative value)
+- **NEGX**: Fixed overflow flag to account for X bit in overflow detection
+  - Overflow when (operand = 0x80000000 and X = 0) or (operand = 0x7FFFFFFF and X = 1)
+
 ### Commits
 
 1. **b8be41e** - TG68040: Phase 12 Started - MVIS Instructions (MOVEQ, CMP, TST)
@@ -630,13 +641,15 @@ Fixed overflow and carry flags for all arithmetic/comparison operations:
 9. **e824b32** - TG68040: Phase 12B - Implement Shift and Rotate Instructions
 10. **0668ff1** - TG68040: Phase 12B - Update Documentation for Phase 12B Completion
 11. **fbbf110** - TG68040: Fix Overflow/Carry Flags + Phase 12G Bit Manipulation
+12. **713dbf8** - TG68040: Phase 12G - Update Documentation for Phase 12G and Flag Fixes
+13. **f5ae911** - TG68040: Fix ROXL/ROXR and NEG/NEGX Flag Calculations
 
 ### Files Modified
 
-- **TG68040_Pipeline.vhd**: +713 lines total
-  - ID stage: Instruction decode for all 29 instructions
-  - OF stage: Immediate/count value routing for MOVEQ, CMPI, shifts; write_reg control
-  - EX stage: Execution logic for all instructions including complete shift/rotate
+- **TG68040_Pipeline.vhd**: +755+ lines total
+  - ID stage: Instruction decode for all 33 instructions
+  - OF stage: Immediate/count value routing for MOVEQ, CMPI, shifts, bit ops; write_reg control
+  - EX stage: Execution logic for all instructions including shift/rotate, bit manipulation, proper flag calculations
 
 ### Current Capabilities
 
@@ -694,7 +707,8 @@ With these 29 instructions + previous 7, the MC68040 implementation now supports
 
 ---
 
-**Document Version:** 7.0
-**Last Updated:** 2025-11-12
-**Phase Status:** In Progress (67% - Phase 12A 100% ✅, Phase 12B 100% ✅, Phase 12F 60%)
+**Document Version:** 7.1
+**Last Updated:** 2025-11-13
+**Phase Status:** In Progress (74% - Phase 12A 100% ✅, Phase 12B 100% ✅, Phase 12F 60%, Phase 12G 100% ✅)
+**Bug Fixes:** ROXL/ROXR 33-bit rotation, NEG/NEGX overflow flags
 **Author:** Claude AI (Anthropic)
