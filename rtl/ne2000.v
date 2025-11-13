@@ -130,30 +130,69 @@ always @(posedge clk) begin
 		tx_r_cnt <= tx_r_cnt + 1'd1;
 end
 
+// ------------- Clock Domain Crossing (CDC) synchronizers -------------
+// HPS signals come from clk_sys domain, need 2-FF sync to clk domain
+reg tx_begin_sync1, tx_begin_sync2;
+reg tx_strobe_sync1, tx_strobe_sync2;
+reg rx_begin_sync1, rx_begin_sync2;
+reg rx_strobe_sync1, rx_strobe_sync2;
+reg mac_begin_sync1, mac_begin_sync2;
+reg mac_strobe_sync1, mac_strobe_sync2;
+
+always @(posedge clk) begin
+	// 2-FF synchronizer for tx_begin
+	tx_begin_sync1 <= tx_begin;
+	tx_begin_sync2 <= tx_begin_sync1;
+
+	// 2-FF synchronizer for tx_strobe
+	tx_strobe_sync1 <= tx_strobe;
+	tx_strobe_sync2 <= tx_strobe_sync1;
+
+	// 2-FF synchronizer for rx_begin
+	rx_begin_sync1 <= rx_begin;
+	rx_begin_sync2 <= rx_begin_sync1;
+
+	// 2-FF synchronizer for rx_strobe
+	rx_strobe_sync1 <= rx_strobe;
+	rx_strobe_sync2 <= rx_strobe_sync1;
+
+	// 2-FF synchronizer for mac_begin
+	mac_begin_sync1 <= mac_begin;
+	mac_begin_sync2 <= mac_begin_sync1;
+
+	// 2-FF synchronizer for mac_strobe
+	mac_strobe_sync1 <= mac_strobe;
+	mac_strobe_sync2 <= mac_strobe_sync1;
+end
+
+// Use synchronized versions for edge detection
 reg tx_begin_r, tx_begin_r2, tx_begin_r3;
 reg tx_strobe_r, tx_strobe_r2, tx_strobe_r3;
 reg rx_begin_d;
 
 always @(posedge clk) begin
-	{tx_begin_r3, tx_begin_r2, tx_begin_r} <= {tx_begin_r2, tx_begin_r, tx_begin};
-	{tx_strobe_r3, tx_strobe_r2, tx_strobe_r} <= {tx_strobe_r2, tx_strobe_r, tx_strobe};
-	rx_begin_d <= rx_begin;
+	{tx_begin_r3, tx_begin_r2, tx_begin_r} <= {tx_begin_r2, tx_begin_r, tx_begin_sync2};
+	{tx_strobe_r3, tx_strobe_r2, tx_strobe_r} <= {tx_strobe_r2, tx_strobe_r, tx_strobe_sync2};
+	rx_begin_d <= rx_begin_sync2;
 end
 wire tx_done = tx_begin_r2 & !tx_begin_r3;
 
 // ------------- set local mac address ------------
 
-// mac address from io controller
+// mac address from io controller (synchronized)
 reg [7:0] mac [5:0];
 reg [2:0] mac_cnt;
 
+// Use synchronized HPS signals
 always @(posedge clk) begin
-	if (mac_begin)
+	if (mac_begin_sync2)
 		mac_cnt <= 0;
-	else if (mac_strobe) begin
+	else if (mac_strobe_sync2) begin
 		if(mac_cnt < 6) begin
 			mac[mac_cnt] <= mac_byte;
 			mac_cnt <= mac_cnt + 3'd1;
+			// Also update PAR registers to keep them in sync
+			par[mac_cnt] <= mac_byte;
 		end
 	end
 end
@@ -171,31 +210,37 @@ end
 reg [7:0] reg_read_data;
 always @(*) begin
 	reg_read_data = 8'd0;
+	data_out = 16'h0000;  // Default: don't drive bus unless selected
+
+	// Fix register addressing: use 5-bit address like original
+	// addr[5:1] gives us 32 register addresses (original used addr[4:0])
+	wire [4:0] reg_addr = addr[5:1];
+
 	if(ne_read && sel) begin
 		// cr, dma and reset are always available
-		if(addr[5:2] == 4'h0)   reg_read_data = cr;
+		if(reg_addr == 5'h00)   reg_read_data = cr;
 
 		// register page 0
 		if(ps == 2'd0) begin
-			if(addr[5:2] == 4'h4) reg_read_data = 8'h23;   // tsr: tx ok
-			if(addr[5:2] == 4'h7) reg_read_data = isr;
+			if(reg_addr == 5'h04) reg_read_data = 8'h23;   // tsr: tx ok
+			if(reg_addr == 5'h07) reg_read_data = isr;
 		end
 
 		// register page 1
 		if(ps == 2'd1) begin
-			if(addr[5:2] == 4'h7) reg_read_data = curr;
+			if(reg_addr == 5'h07) reg_read_data = curr;
 		end
 
 		// read dma register $10 - $17
-		if(addr[5:4] == 2'b10)
+		if(reg_addr[4:3] == 2'b10)
 			reg_read_data = rx_buffer[rx_r_cnt];
-	end
 
-	// Put byte data on correct half of 16-bit bus
-	if (byte_sel)
-		data_out = {8'h00, reg_read_data};  // odd byte (low half)
-	else
-		data_out = {reg_read_data, 8'h00};  // even byte (high half)
+		// Put byte data on correct half of 16-bit bus (only when selected)
+		if (byte_sel)
+			data_out = {8'h00, reg_read_data};  // odd byte (low half)
+		else
+			data_out = {reg_read_data, 8'h00};  // even byte (high half)
+	end
 end
 
 reg ne_resetD;
@@ -214,8 +259,9 @@ wire int_begin = (ne_reset & !ne_resetD) || header_begin;
 // data from the io controller or the ne2000 core itself setting the mac address
 // or adding the rx header
 
-wire rx_write_en = rx_strobe || int_strobe_en;
-wire rx_write_begin = (!rx_begin_d & rx_begin) || int_begin;
+// Use synchronized HPS signals for CDC safety
+wire rx_write_en = rx_strobe_sync2 || int_strobe_en;
+wire rx_write_begin = (!rx_begin_d & rx_begin_sync2) || int_begin;
 
 reg rx_lastByte;
 
@@ -382,11 +428,11 @@ always @(posedge clk) begin
 			end
 
 			// read dma register $10-$17
-			if(addr[5:4] == 2'b10)
+			if(reg_addr[4:3] == 2'b10)
 				rx_inc <= 1'b1;
 
 			// read reset register $18-$1f
-			if(addr[5:4] == 2'b11) begin
+			if(reg_addr[4:3] == 2'b11) begin
 				ne_reset <= 1'b1;      // read to reset register sets reset
 				isr[7] <= 1'b1;     // set reset flag in isr
 
@@ -396,7 +442,10 @@ always @(posedge clk) begin
 		end
 
 		if(ne_write_en) begin
-			if(addr[5:2] == 4'h0) begin
+			// Use 5-bit register address (same as read logic)
+			wire [4:0] wr_reg_addr = addr[5:1];
+
+			if(wr_reg_addr == 5'h00) begin
 				cr <= write_byte;
 
 				// writing the command register may actually start things ...
@@ -434,39 +483,42 @@ always @(posedge clk) begin
 
 			// register page 0
 			if(ps == 2'd0) begin
-				case (addr[5:2])
-					4'h1: pstart <= write_byte;
-					4'h2: pstop <= write_byte;
-					4'h3: bnry <= write_byte;
-					4'h4: tpsr <= write_byte;
-					4'h5: tbcr[7:0] <= write_byte;
-					4'h6: tbcr[15:8] <= write_byte;
-					4'h7: isr <= isr & (~write_byte);   // writing 1 clears bit
-					4'h8: rsar[7:0] <= write_byte;
-					4'h9: rsar[15:8] <= write_byte;
-					4'ha: rbcr[7:0] <= write_byte;
-					4'hb: rbcr[15:8] <= write_byte;
-					4'hc: rcr <= write_byte;
-					4'hd: tcr <= write_byte;
-					4'he: dcr <= write_byte;
-					4'hf: imr <= write_byte;
+				case (wr_reg_addr)
+					5'h01: pstart <= write_byte;
+					5'h02: pstop <= write_byte;
+					5'h03: bnry <= write_byte;
+					5'h04: tpsr <= write_byte;
+					5'h05: tbcr[7:0] <= write_byte;
+					5'h06: tbcr[15:8] <= write_byte;
+					5'h07: isr <= isr & (~write_byte);   // writing 1 clears bit
+					5'h08: rsar[7:0] <= write_byte;
+					5'h09: rsar[15:8] <= write_byte;
+					5'h0a: rbcr[7:0] <= write_byte;
+					5'h0b: rbcr[15:8] <= write_byte;
+					5'h0c: rcr <= write_byte;
+					5'h0d: tcr <= write_byte;
+					5'h0e: dcr <= write_byte;
+					5'h0f: imr <= write_byte;
 					default: ;
 				endcase
 			end
 
 			// register page 1
 			if(ps == 2'd1) begin
-				if((addr[5:2] >= 4'h1) && (addr[5:2] < 4'h7))
-					par[addr[5:2]-4'd1] <= write_byte;
+				if((wr_reg_addr >= 5'h01) && (wr_reg_addr < 5'h07)) begin
+					par[wr_reg_addr-5'd1] <= write_byte;
+					// Also sync to mac[] array for consistency
+					mac[wr_reg_addr-5'd1] <= write_byte;
+				end
 
-				if(addr[5:2] == 4'h7) curr <= write_byte;
+				if(wr_reg_addr == 5'h07) curr <= write_byte;
 
-				if((addr[5:2] >= 4'h8) && (addr[5:2] < 4'hf))
-					mar[addr[5:2]-4'd8] <= write_byte;
+				if((wr_reg_addr >= 5'h08) && (wr_reg_addr < 5'h10))
+					mar[wr_reg_addr-5'd8] <= write_byte;
 			end
 
 			// write to dma register $10-$17
-			if(addr[5:4] == 2'b10) begin
+			if(wr_reg_addr[4:3] == 2'b10) begin
 				// prevent writing over end of buffer (whatever then happens ...)
 				if(tx_w_cnt < FRAMESIZE) begin
 					// store byte in buffer
@@ -478,7 +530,7 @@ always @(posedge clk) begin
 			end
 
 			// reset register $18-$1f
-			if(addr[5:4] == 2'b11)
+			if(wr_reg_addr[4:3] == 2'b11)
 				ne_reset <= 1'b0; // write to reset register clears reset
 
 		end

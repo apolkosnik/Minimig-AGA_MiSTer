@@ -101,6 +101,7 @@ always@(posedge clk_sys) begin
 	reg cdda_cs = 0;
 	reg eth_cs = 0;
 	reg [1:0] eth_mode = 0; // 0=TX read, 1=RX write, 2=MAC write, 3=status read
+	reg [31:0] eth_status_latched = 0; // Latch status for atomic 32-bit read
 
 	sset <= 0;
 
@@ -145,7 +146,9 @@ always@(posedge clk_sys) begin
 				io_dout <= {4'hE, 2'b00, 1'b0, cdda_req, 2'b00, ide_req};
 			end
 			if(io_din == 'h64) begin
-				// Return ethernet status word (32-bit, sent as 2x16-bit)
+				// Latch ethernet status for atomic 32-bit read
+				eth_status_latched <= eth_status;
+				// Return upper 16 bits
 				io_dout <= eth_status[31:16];
 			end
 		end else begin
@@ -224,8 +227,8 @@ always@(posedge clk_sys) begin
 					// Ethernet operations
 					case(byte_cnt)
 						1: begin
-							// Return lower 16 bits of status on second byte
-							io_dout <= eth_status[15:0];
+							// Return lower 16 bits of latched status on second byte
+							io_dout <= eth_status_latched[15:0];
 						end
 
 						2: begin
