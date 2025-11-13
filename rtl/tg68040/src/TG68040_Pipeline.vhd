@@ -1032,6 +1032,23 @@ begin
                             id_ea.immediate <= x"000000" & if_id.instruction(7 downto 0);
                         end if;
 
+                    -- Phase 12G: Bit manipulation instructions (BTST, BCHG, BCLR, BSET)
+                    elsif opcode_high = x"0" and if_id.instruction(5 downto 3) = "000" then
+                        -- Bit operations with register bit number
+                        -- Format: 0000 RRR OP 000 RRR
+                        -- OP: 100=BTST, 101=BCHG, 110=BCLR, 111=BSET
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_OTHER;
+                        id_ea.src_reg1 <= "0" & if_id.instruction(11 downto 9);  -- Bit number register (Dn)
+                        id_ea.src_reg2 <= "0" & if_id.instruction(2 downto 0);   -- Data register (Dn)
+                        if if_id.instruction(8 downto 6) = "100" then
+                            -- BTST: test only, no writeback
+                            id_ea.dst_reg <= (others => '0');
+                        else
+                            -- BCHG, BCLR, BSET: write back modified value
+                            id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);
+                        end if;
+
                     -- Phase 11D: RTE instruction detection
                     elsif if_id.instruction = x"4E73" then
                         -- RTE (Return from Exception) instruction
@@ -1397,15 +1414,16 @@ begin
                     end if;
 
                     -- Determine if we need to write back
-                    -- Phase 12: CMP, TST, CMPI, and CMPA don't write to registers (flags only)
+                    -- Phase 12: CMP, TST, CMPI, CMPA, and BTST don't write to registers (flags only)
                     if ea_of.instr_type = INSTR_OTHER then
-                        -- Check if it's CMP, CMPA, TST, or CMPI (flags only, no writeback)
+                        -- Check if it's CMP, CMPA, TST, CMPI, or BTST (flags only, no writeback)
                         if (ea_of.opcode(15 downto 12) = x"B" and (ea_of.opcode(8 downto 6) = "000" or
                                                                      ea_of.opcode(8 downto 6) = "011" or
                                                                      ea_of.opcode(8 downto 6) = "111")) or
                            (ea_of.opcode(15 downto 8) = x"4A") or
-                           (ea_of.opcode(15 downto 8) = x"0C") then
-                            of_ex.write_reg <= '0';  -- CMP, CMPA, TST, or CMPI: no register write
+                           (ea_of.opcode(15 downto 8) = x"0C") or
+                           (ea_of.opcode(15 downto 12) = x"0" and ea_of.opcode(8 downto 6) = "100" and ea_of.opcode(5 downto 3) = "000") then
+                            of_ex.write_reg <= '0';  -- CMP, CMPA, TST, CMPI, or BTST: no register write
                         else
                             of_ex.write_reg <= '1';  -- Normal instruction: write result
                         end if;
@@ -1479,15 +1497,18 @@ begin
                             -- ADDA - don't update flags
                             ex_wb.flags <= (others => '0');
                         else
-                            -- ADD - update flags (N, Z, V, C)
+                            -- ADD - update flags (N, Z, V, C) with proper overflow/carry
                             ex_wb.flags(3) <= alu_result(31);  -- Negative
                             if alu_result = 0 then
                                 ex_wb.flags(2) <= '1';  -- Zero
                             else
                                 ex_wb.flags(2) <= '0';
                             end if;
-                            ex_wb.flags(1) <= '0';  -- Overflow (simplified)
-                            ex_wb.flags(0) <= '0';  -- Carry (simplified)
+                            -- Overflow: (A[31] == B[31]) AND (A[31] != Result[31])
+                            ex_wb.flags(1) <= (of_ex.operand1(31) xnor of_ex.operand2(31)) and
+                                              (of_ex.operand1(31) xor alu_result(31));
+                            -- Carry: Carry out from bit 31
+                            ex_wb.flags(0) <= alu_result(32);
                         end if;
 
                     elsif opcode_high = x"9" then
@@ -1499,15 +1520,18 @@ begin
                             -- SUBA - don't update flags
                             ex_wb.flags <= (others => '0');
                         else
-                            -- SUB - update flags (N, Z, V, C)
+                            -- SUB - update flags (N, Z, V, C) with proper overflow/carry
                             ex_wb.flags(3) <= alu_result(31);  -- Negative
                             if alu_result = 0 then
                                 ex_wb.flags(2) <= '1';  -- Zero
                             else
                                 ex_wb.flags(2) <= '0';
                             end if;
-                            ex_wb.flags(1) <= '0';  -- Overflow (simplified)
-                            ex_wb.flags(0) <= '0';  -- Carry (simplified)
+                            -- Overflow: (Dest[31] != Source[31]) AND (Dest[31] != Result[31])
+                            ex_wb.flags(1) <= (of_ex.operand2(31) xor of_ex.operand1(31)) and
+                                              (of_ex.operand2(31) xor alu_result(31));
+                            -- Carry: Borrow occurred (inverted - set if no borrow)
+                            ex_wb.flags(0) <= not alu_result(32);
                         end if;
 
                     elsif opcode_high = x"3" or opcode_high = x"2" or opcode_high = x"1" then
@@ -1551,15 +1575,18 @@ begin
                         -- Result not stored, only flags updated
                         alu_result := unsigned(of_ex.operand2) - unsigned(of_ex.operand1);
                         ex_wb.result <= (others => '0');  -- No result stored
-                        -- Set flags: N, Z, V, C according to subtraction
+                        -- Set flags: N, Z, V, C according to subtraction with proper overflow/carry
                         ex_wb.flags(3) <= alu_result(31);  -- Negative
                         if alu_result = 0 then
                             ex_wb.flags(2) <= '1';  -- Zero
                         else
                             ex_wb.flags(2) <= '0';
                         end if;
-                        ex_wb.flags(1) <= '0';  -- Overflow (simplified)
-                        ex_wb.flags(0) <= '0';  -- Carry (simplified)
+                        -- Overflow: (Dest[31] != Source[31]) AND (Dest[31] != Result[31])
+                        ex_wb.flags(1) <= (of_ex.operand2(31) xor of_ex.operand1(31)) and
+                                          (of_ex.operand2(31) xor alu_result(31));
+                        -- Carry: Borrow occurred (inverted)
+                        ex_wb.flags(0) <= not alu_result(32);
 
                     -- Phase 12A: CMPA instruction (Compare Address)
                     elsif opcode_high = x"B" and (of_ex.opcode(8 downto 6) = "011" or of_ex.opcode(8 downto 6) = "111") then
@@ -1567,15 +1594,18 @@ begin
                         -- Result not stored, only flags updated
                         alu_result := unsigned(of_ex.operand2) - unsigned(of_ex.operand1);
                         ex_wb.result <= (others => '0');  -- No result stored
-                        -- Set flags: N, Z, V, C according to subtraction
+                        -- Set flags: N, Z, V, C according to subtraction with proper overflow/carry
                         ex_wb.flags(3) <= alu_result(31);  -- Negative
                         if alu_result = 0 then
                             ex_wb.flags(2) <= '1';  -- Zero
                         else
                             ex_wb.flags(2) <= '0';
                         end if;
-                        ex_wb.flags(1) <= '0';  -- Overflow (simplified)
-                        ex_wb.flags(0) <= '0';  -- Carry (simplified)
+                        -- Overflow: (Dest[31] != Source[31]) AND (Dest[31] != Result[31])
+                        ex_wb.flags(1) <= (of_ex.operand2(31) xor of_ex.operand1(31)) and
+                                          (of_ex.operand2(31) xor alu_result(31));
+                        -- Carry: Borrow occurred (inverted)
+                        ex_wb.flags(0) <= not alu_result(32);
 
                     -- Phase 12: CMPI instruction (Phase 12A)
                     elsif opcode_high = x"0" and of_ex.opcode(15 downto 8) = x"0C" then
@@ -1583,15 +1613,18 @@ begin
                         -- Result not stored, only flags updated
                         alu_result := unsigned(of_ex.operand2) - unsigned(of_ex.operand1);
                         ex_wb.result <= (others => '0');  -- No result stored
-                        -- Set flags: N, Z, V, C according to subtraction
+                        -- Set flags: N, Z, V, C according to subtraction with proper overflow/carry
                         ex_wb.flags(3) <= alu_result(31);  -- Negative
                         if alu_result = 0 then
                             ex_wb.flags(2) <= '1';  -- Zero
                         else
                             ex_wb.flags(2) <= '0';
                         end if;
-                        ex_wb.flags(1) <= '0';  -- Overflow (simplified)
-                        ex_wb.flags(0) <= '0';  -- Carry (simplified)
+                        -- Overflow: (Dest[31] != Source[31]) AND (Dest[31] != Result[31])
+                        ex_wb.flags(1) <= (of_ex.operand2(31) xor of_ex.operand1(31)) and
+                                          (of_ex.operand2(31) xor alu_result(31));
+                        -- Carry: Borrow occurred (inverted)
+                        ex_wb.flags(0) <= not alu_result(32);
 
                     -- Phase 12: TST instruction (MVIS)
                     elsif opcode_high = x"4" and of_ex.opcode(15 downto 8) = x"4A" then
@@ -1903,6 +1936,42 @@ begin
                             ex_wb.flags(2) <= '0';
                         end if;
                         ex_wb.flags(1) <= '0';  -- Overflow cleared
+
+                    -- Phase 12G: Bit manipulation instructions
+                    elsif opcode_high = x"0" and of_ex.opcode(5 downto 3) = "000" then
+                        -- BTST, BCHG, BCLR, BSET
+                        -- Bit number is in operand1 (modulo 32 for data registers)
+                        variable bit_num : integer range 0 to 31;
+                        variable bit_mask : unsigned(31 downto 0);
+                        variable operation : std_logic_vector(2 downto 0);
+
+                        bit_num := to_integer(unsigned(of_ex.operand1(4 downto 0)));  -- Mod 32
+                        bit_mask := shift_left(to_unsigned(1, 32), bit_num);
+                        operation := of_ex.opcode(8 downto 6);  -- 100=BTST, 101=BCHG, 110=BCLR, 111=BSET
+
+                        -- Test bit and set Z flag (Z=1 if bit was 0, Z=0 if bit was 1)
+                        if (unsigned(of_ex.operand2) and bit_mask) = 0 then
+                            ex_wb.flags(2) <= '1';  -- Z=1: bit was 0
+                        else
+                            ex_wb.flags(2) <= '0';  -- Z=0: bit was 1
+                        end if;
+                        ex_wb.flags(3) <= '0';  -- N cleared
+                        ex_wb.flags(1) <= '0';  -- V cleared
+                        ex_wb.flags(0) <= '0';  -- C cleared
+
+                        if operation = "100" then
+                            -- BTST: Test only, no modification
+                            ex_wb.result <= of_ex.operand2;
+                        elsif operation = "101" then
+                            -- BCHG: Change bit (toggle)
+                            ex_wb.result <= std_logic_vector(unsigned(of_ex.operand2) xor bit_mask);
+                        elsif operation = "110" then
+                            -- BCLR: Clear bit
+                            ex_wb.result <= std_logic_vector(unsigned(of_ex.operand2) and not bit_mask);
+                        else  -- operation = "111"
+                            -- BSET: Set bit
+                            ex_wb.result <= std_logic_vector(unsigned(of_ex.operand2) or bit_mask);
+                        end if;
 
                     else
                         -- Unknown operation - pass operand1
