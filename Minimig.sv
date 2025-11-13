@@ -435,6 +435,7 @@ wire        ramshared;
 
 wire [7:0] toccata_base;
 wire toccata_ena;
+wire net_ena;
 
 cpu_wrapper cpu_wrapper
 (
@@ -471,7 +472,9 @@ cpu_wrapper cpu_wrapper
 
 	.toccata_ena  (toccata_ena     ),
 	.toccata_base (toccata_base    ),
-	
+
+	.net_ena      (net_ena         ),
+
 	.ramsel       (ram_sel         ),
 	.ramaddr      (ram_addr        ),
 	.ramlds       (ram_lds         ),
@@ -770,7 +773,10 @@ minimig minimig
 	.toccata_base (toccata_base),
 	.toccata_aud_left (toccata_aud_left),
 	.toccata_aud_right(toccata_aud_right),
-	
+
+	//ne2000 ethernet
+	.net_ena      (net_ena),
+
 	//user i/o
 	.cpucfg       (cpucfg           ), // CPU config
 	.cachecfg     (cachecfg         ), // Cache config

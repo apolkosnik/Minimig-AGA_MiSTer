@@ -248,6 +248,9 @@ module minimig
 	output [15:0] toccata_aud_left,
 	output [15:0] toccata_aud_right,
 
+	// NE2000 Ethernet
+	input         net_ena,
+
 	//user i/o
 	output  [1:0] cpucfg,
 	output  [2:0] cachecfg,
@@ -279,6 +282,7 @@ wire [15:0] denise_data_out;	//denise data bus out
 wire [15:0] user_data_out;	   //user IO data out
 wire [15:0] gary_data_out;	   //data out from memory bus multiplexer
 wire [15:0] gayle_data_out;	//Gayle data out
+wire [15:0] ne2000_data_out;	//NE2000 data out
 wire [15:0] cia_data_out;	   //cia A+B data bus out
 wire [15:0] ar3_data_out;	   //Action Replay data out
 
@@ -391,6 +395,10 @@ wire        sel_gayle;			//select GAYLE control registers
 wire        gayle_irq;			//interrupt request
 wire        gayle_nrdy;       // HDD fifo is not ready for reading
 
+//ne2000 ethernet
+wire        sel_ne2000;			//select NE2000 ethernet registers
+wire        ne2000_irq;			//ne2000 interrupt request
+
 wire	[7:0] bank;					//memory bank select
 
 // host interface
@@ -488,7 +496,7 @@ paula PAULA1
 	.sof(sof),
 	.strhor(strhor_paula),
 	.vblint(vbl_int),
-	.int2(int2|(ide_fast ? ide_ext_irq : gayle_irq)),
+	.int2(int2|(ide_fast ? ide_ext_irq : gayle_irq)|ne2000_irq),
 	.int3(int3),
 	.int6(int6 | int6_toccata),
 	._ipl(_iplx),
@@ -781,7 +789,8 @@ gary GARY1
 	.dbs(dbs),
 	.xbs(xbs),
 	.memory_config(memory_config[3:0]),
-	.hdc_ena(ide_ena & ~ide_fast), // Gayle decoding enable	
+	.hdc_ena(ide_ena & ~ide_fast), // Gayle decoding enable
+	.net_ena(net_ena),              // NE2000 ethernet enable
 	.toccata_ena(toccata_ena),
 	.toccata_base(toccata_base),
 	.ram_rd(ram_rd),
@@ -800,6 +809,7 @@ gary GARY1
 	.sel_cia_b(sel_cia_b),
 	.sel_ide(sel_ide),
 	.sel_gayle(sel_gayle),
+	.sel_ne2000(sel_ne2000),
 	.sel_rtc(sel_rtc),
 	.sel_toccata(sel_toccata),
 	.reset(reset),
@@ -830,6 +840,34 @@ gayle GAYLE1
 	.ide_readdata(ide_readdata),
 
 	.led(hdd_led)
+);
+
+//instantiate ne2000 ethernet controller
+ne2000 NE2000_1
+(
+	.clk(clk),
+	.reset(reset),
+	.sel(sel_ne2000),
+	.rd(cpu_rd),
+	.hwr(cpu_hwr),
+	.lwr(cpu_lwr),
+	.addr(cpu_address_out[15:1]),
+	.data_in(cpu_data_out),
+	.data_out(ne2000_data_out),
+	.irq(ne2000_irq),
+
+	// These signals would connect to HPS for actual network I/O
+	// For now, they are left unconnected (will need future integration)
+	.status(),
+	.tx_begin(1'b0),
+	.tx_strobe(1'b0),
+	.tx_byte(),
+	.rx_begin(1'b0),
+	.rx_strobe(1'b0),
+	.rx_byte(8'h00),
+	.mac_begin(1'b0),
+	.mac_strobe(1'b0),
+	.mac_byte(8'h00)
 );
 
 //instantiate system control
@@ -897,6 +935,7 @@ toccata #(
 assign cpu_data_in[15:0]= gary_data_out[15:0]
 							 | cia_data_out[15:0]
 							 | gayle_data_out[15:0]
+							 | ne2000_data_out[15:0]
 							 | cart_data_out[15:0]
 							 | rtc_out
 							 | toccata_out;

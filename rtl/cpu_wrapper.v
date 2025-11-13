@@ -69,6 +69,8 @@ module cpu_wrapper
 	output            toccata_ena,
 	output reg  [7:0] toccata_base,
 
+	output            net_ena,
+
 	output reg  [1:0] cpustate,
 	output reg  [3:0] cacr,
 	output reg [31:0] nmi_addr
@@ -463,5 +465,6 @@ always @(posedge clk) begin
 end
 
 assign toccata_ena = ~ac_toccata;
+assign net_ena = 1'b1;  // NE2000 ethernet always enabled at fixed address $EA0000
 
 endmodule

@@ -75,6 +75,7 @@ module gary
 	input   [3:0] memory_config, //selected memory configuration
 	input         ecs, // ECS chipset enable
 	input         hdc_ena, //enables hdd interface
+	input         net_ena, //enables NE2000 ethernet interface
 
 	input         toccata_ena,
 	input   [7:0] toccata_base,
@@ -96,6 +97,7 @@ module gary
 	output       sel_rtc, //select $DCxxxx
 	output       sel_ide, //select $DAxxxx
 	output       sel_gayle, //select $DExxxx
+	output       sel_ne2000, //select $EAxxxx (NE2000 ethernet)
 	output       sel_toccata, //select $E9xxxx (or whatever's specified by toccata_base)
 	output reg   rom_readonly = 0 //when zero allows to write to $fc-$ff, blocks effect of kick256kmirror.  
 );
@@ -167,9 +169,10 @@ assign t_sel_slow[0] = (cpu_address_in[23:19]==5'b1100_0) && |memory_config[3:2]
 assign t_sel_slow[1] = (cpu_address_in[23:19]==5'b1100_1) &&  memory_config[3];   //$C80000 - $CFFFFF
 assign t_sel_slow[2] = (cpu_address_in[23:19]==5'b1101_0) && &memory_config[3:2]; //$D00000 - $D7FFFF
 
-assign sel_ide   = hdc_ena && cpu_address_in[23:16]==8'b1101_1010;        //IDE registers at $DA0000 - $DAFFFF	
+assign sel_ide   = hdc_ena && cpu_address_in[23:16]==8'b1101_1010;        //IDE registers at $DA0000 - $DAFFFF
 assign sel_gayle = hdc_ena && cpu_address_in[23:12]==12'b1101_1110_0001;  //GAYLE registers at $DE1000 - $DE1FFF
 assign sel_rtc   = cpu_address_in[23:16]==8'b1101_1100;                   //RTC registers at $DC0000 - $DCFFFF
+assign sel_ne2000 = net_ena && cpu_address_in[23:16]==8'b1110_1010;       //NE2000 registers at $EA0000 - $EAFFFF
 assign sel_reg   = cpu_address_in[23:21]==3'b110 ? ~(|t_sel_slow | sel_rtc | sel_ide | sel_gayle) : 1'b0;	//chip registers at $DF0000 - $DFFFFF
 assign sel_cia   = cpu_address_in[23:16]==8'hBF; // $BFxxxx
 assign sel_cia_a = sel_cia & ~cpu_address_in[12];
