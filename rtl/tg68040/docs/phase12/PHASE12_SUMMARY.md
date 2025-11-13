@@ -4,9 +4,9 @@
 
 **Phase:** 12 of 15
 **Goal:** Implement comprehensive MC68040 instruction set
-**Status:** **In Progress - 67%**
+**Status:** **In Progress - 74%**
 **Date Started:** 2025-11-11
-**Date Updated:** 2025-11-12
+**Date Updated:** 2025-11-13
 **Estimated Completion:** 2 sessions
 
 ---
@@ -60,9 +60,13 @@
 | ROR Dn | 0xExxx | ✅ Complete | e824b32 |
 | ROXL Dn | 0xExxx | ✅ Complete | e824b32 |
 | ROXR Dn | 0xExxx | ✅ Complete | e824b32 |
+| BTST Dn,Dn | 0x01xx | ✅ Complete | fbbf110 |
+| BCHG Dn,Dn | 0x014x | ✅ Complete | fbbf110 |
+| BCLR Dn,Dn | 0x018x | ✅ Complete | fbbf110 |
+| BSET Dn,Dn | 0x01Cx | ✅ Complete | fbbf110 |
 
-**Total Phase 12:** 29 instructions (28 complete, 1 partial)
-**Grand Total:** 36 instructions (35 complete, 1 partial)
+**Total Phase 12:** 33 instructions (32 complete, 1 partial)
+**Grand Total:** 40 instructions (39 complete, 1 partial)
 
 ### Target Instruction Count
 
@@ -273,22 +277,23 @@ Implement advanced move and data manipulation instructions.
 
 ---
 
-## Phase 12G: Bit Manipulation (Pending)
+## Phase 12G: Bit Manipulation
 
 ### Goal
 Implement bit manipulation instructions.
 
-### Planned Instructions (4 instructions)
+### Instructions Status (4 instructions)
 
 | Instruction | Opcode | Operation | Status |
 |-------------|--------|-----------|--------|
-| BTST | 0x0100/0800 | Test bit | ⏳ Pending |
-| BSET | 0x01C0/08C0 | Set bit | ⏳ Pending |
-| BCLR | 0x0180/0880 | Clear bit | ⏳ Pending |
-| BCHG | 0x0140/0840 | Change bit | ⏳ Pending |
+| **BTST** | **0x0100** | **Test bit** | **✅ Complete (Dn,Dn)** |
+| **BCHG** | **0x0140** | **Change bit** | **✅ Complete (Dn,Dn)** |
+| **BCLR** | **0x0180** | **Clear bit** | **✅ Complete (Dn,Dn)** |
+| **BSET** | **0x01C0** | **Set bit** | **✅ Complete (Dn,Dn)** |
 
 **Estimated Lines:** 150
-**Status:** Not started
+**Actual Lines:** ~56 (ID stage: ~16, OF stage: ~3, EX stage: ~37)
+**Status:** 4/4 complete (100%) ✅ **COMPLETE**
 
 ---
 
@@ -592,6 +597,26 @@ All 8 shift/rotate instructions implemented:
 - All update N, Z flags; clear V; set C based on last bit shifted/rotated
 - ~156 lines total in ID/OF/EX stages
 
+**30-33. Bit Manipulation Instructions** (Commit fbbf110)
+All 4 bit manipulation instructions implemented:
+- **BTST Dn,Dn** (Test Bit): Tests bit, sets Z flag, no modification
+- **BCHG Dn,Dn** (Change Bit): Toggles bit, sets Z based on original value
+- **BCLR Dn,Dn** (Clear Bit): Clears bit to 0, sets Z based on original value
+- **BSET Dn,Dn** (Set Bit): Sets bit to 1, sets Z based on original value
+- Bit number register (Dn) specifies which bit (modulo 32)
+- Z flag: Z=1 if original bit was 0, Z=0 if original bit was 1
+- N, V, C flags cleared
+- ~56 lines total in ID/OF/EX stages
+
+**Flag Calculation Fixes** (Commit fbbf110)
+Fixed overflow and carry flags for all arithmetic/comparison operations:
+- **ADD**: Proper overflow detection (same sign inputs, different sign output)
+- **ADD**: Proper carry-out detection from bit 31
+- **SUB**: Proper overflow detection (different sign inputs, wrong sign output)
+- **SUB**: Proper borrow flag (inverted carry)
+- **CMP/CMPA/CMPI**: Applied SUB overflow/carry logic
+- Critical fix for correct Bcc condition code evaluation
+
 ### Commits
 
 1. **b8be41e** - TG68040: Phase 12 Started - MVIS Instructions (MOVEQ, CMP, TST)
@@ -603,6 +628,8 @@ All 8 shift/rotate instructions implemented:
 7. **ae71544** - TG68040: Phase 12F - Add Move and Data Manipulation Instructions
 8. **eba92b1** - TG68040: Phase 12F - Update Documentation for Phase 12F Implementation
 9. **e824b32** - TG68040: Phase 12B - Implement Shift and Rotate Instructions
+10. **0668ff1** - TG68040: Phase 12B - Update Documentation for Phase 12B Completion
+11. **fbbf110** - TG68040: Fix Overflow/Carry Flags + Phase 12G Bit Manipulation
 
 ### Files Modified
 
