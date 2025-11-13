@@ -1079,6 +1079,28 @@ begin
                             id_ea.immediate <= x"000000" & if_id.instruction(7 downto 0);
                         end if;
 
+                    -- Phase 12D: DBcc instruction (Decrement and Branch conditionally)
+                    elsif opcode_high = x"5" and if_id.instruction(7 downto 3) = "11001" then
+                        -- DBcc Dn,<displacement>
+                        -- Format: 0101 CCCC 11001 RRR
+                        -- Operation: if !cc then Dn-1 → Dn; if Dn ≠ -1 then PC+d → PC
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_OTHER;
+                        id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Dn to test/decrement
+                        id_ea.src_reg2 <= (others => '0');
+                        id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);   -- Write back to same Dn
+
+                    -- Phase 12D: Scc instruction (Set According to Condition)
+                    elsif opcode_high = x"5" and if_id.instruction(7 downto 6) = "11" and if_id.instruction(5 downto 3) /= "001" then
+                        -- Scc <ea>
+                        -- Format: 0101 CCCC 11 MMMRRR
+                        -- Operation: if cc then 0xFF → <ea> else 0x00 → <ea>
+                        exc_unit_rte_req <= '0';
+                        id_ea.instr_type <= INSTR_OTHER;
+                        id_ea.src_reg1 <= "0" & if_id.instruction(2 downto 0);  -- Destination Dn (byte operation)
+                        id_ea.src_reg2 <= (others => '0');
+                        id_ea.dst_reg <= "0" & if_id.instruction(2 downto 0);   -- Write back to same Dn
+
                     elsif if_id.instruction = x"4E71" then
                         -- NOP instruction
                         exc_unit_rte_req <= '0';
@@ -2005,6 +2027,55 @@ begin
                             -- BSET: Set bit
                             ex_wb.result <= std_logic_vector(unsigned(of_ex.operand2) or bit_mask);
                         end if;
+
+                    -- Phase 12D: DBcc instruction (Decrement and Branch conditionally)
+                    elsif opcode_high = x"5" and of_ex.opcode(7 downto 3) = "11001" then
+                        -- DBcc Dn,<displacement>
+                        variable condition : branch_condition_t;
+                        variable condition_result : std_logic;
+                        variable counter : unsigned(15 downto 0);
+
+                        -- Decode condition from opcode bits [11:8]
+                        condition := decode_branch_condition(of_ex.opcode);
+                        condition_result := evaluate_branch_condition(condition, of_ex.ccr);
+
+                        if condition_result = '1' then
+                            -- Condition TRUE: no operation, continue to next instruction
+                            ex_wb.result <= of_ex.operand1;  -- Keep register unchanged
+                            ex_wb.flags <= (others => '0');  -- No flag updates
+                        else
+                            -- Condition FALSE: decrement lower 16 bits
+                            counter := unsigned(of_ex.operand1(15 downto 0)) - 1;
+                            -- Result: upper 16 bits unchanged, lower 16 bits decremented
+                            ex_wb.result <= of_ex.operand1(31 downto 16) & std_logic_vector(counter);
+                            ex_wb.flags <= (others => '0');  -- No flag updates
+
+                            -- TODO: Branch logic needs to be implemented
+                            -- If counter ≠ 0xFFFF after decrement, should branch to PC + displacement
+                            -- This requires integration with the Branch Unit (Phase 8)
+                            -- For now, we just do the decrement part
+                        end if;
+
+                    -- Phase 12D: Scc instruction (Set According to Condition)
+                    elsif opcode_high = x"5" and of_ex.opcode(7 downto 6) = "11" and of_ex.opcode(5 downto 3) /= "001" then
+                        -- Scc <ea>
+                        variable condition : branch_condition_t;
+                        variable condition_result : std_logic;
+
+                        -- Decode condition from opcode bits [11:8]
+                        condition := decode_branch_condition(of_ex.opcode);
+                        condition_result := evaluate_branch_condition(condition, of_ex.ccr);
+
+                        if condition_result = '1' then
+                            -- Condition TRUE: Set destination byte to 0xFF
+                            -- Upper 3 bytes unchanged
+                            ex_wb.result <= of_ex.operand1(31 downto 8) & x"FF";
+                        else
+                            -- Condition FALSE: Set destination byte to 0x00
+                            -- Upper 3 bytes unchanged
+                            ex_wb.result <= of_ex.operand1(31 downto 8) & x"00";
+                        end if;
+                        ex_wb.flags <= (others => '0');  -- No flag updates
 
                     else
                         -- Unknown operation - pass operand1
