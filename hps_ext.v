@@ -36,6 +36,18 @@ module hps_ext
 	output reg        ide_wr,
 	input       [5:0] ide_req,
 
+	// NE2000 Ethernet interface
+	input      [31:0] eth_status,
+	input       [7:0] eth_tx_data,
+	output reg        eth_tx_rd_strobe,
+	output reg        eth_tx_begin,
+	output reg  [7:0] eth_rx_data,
+	output reg        eth_rx_wr_strobe,
+	output reg        eth_rx_begin,
+	output reg  [7:0] eth_mac_data,
+	output reg        eth_mac_strobe,
+	output reg        eth_mac_begin,
+
 	output reg  [2:0] mouse_buttons,
 	output reg        kbd_mouse_level,
 	output reg  [1:0] kbd_mouse_type,
@@ -71,7 +83,7 @@ assign io_fpga = EXT_BUS[35];
 localparam EXT_CMD_MIN  = UIO_GET_VMODE;
 localparam EXT_CMD_MAX  = UIO_SET_VPOS;
 localparam EXT_CMD_MIN2 = 'h61;
-localparam EXT_CMD_MAX2 = 'h63;
+localparam EXT_CMD_MAX2 = 'h64;
 
 localparam UIO_MOUSE     = 'h04;
 localparam UIO_KEYBOARD  = 'h05;
@@ -87,11 +99,14 @@ always@(posedge clk_sys) begin
 	reg [15:0] cmd;
 	reg ide_cs = 0;
 	reg cdda_cs = 0;
+	reg eth_cs = 0;
+	reg [1:0] eth_mode = 0; // 0=TX read, 1=RX write, 2=MAC write, 3=status read
 
 	sset <= 0;
 
 	{ide_rd, ide_wr} <= 0;
 	cdda_wr <= 0;
+	{eth_tx_rd_strobe, eth_rx_wr_strobe, eth_mac_strobe} <= 0;
 	if((ide_rd | ide_wr) & ~&ide_addr[3:0]) ide_addr <= ide_addr + 1'd1;
 
 	if(~io_uio) begin
@@ -100,6 +115,10 @@ always@(posedge clk_sys) begin
 		byte_cnt <= 0;
 		ide_cs <= 0;
 		cdda_cs <= 0;
+		eth_cs <= 0;
+		eth_tx_begin <= 0;
+		eth_rx_begin <= 0;
+		eth_mac_begin <= 0;
 		if(cmd == 'h2D) sset <= 1;
 	end
 	else if(io_strobe) begin
@@ -109,10 +128,14 @@ always@(posedge clk_sys) begin
 
 		ide_dout <= io_din;
 		cdda_dout <= io_din;
+		eth_rx_data <= io_din[7:0];
+		eth_mac_data <= io_din[7:0];
 		if(byte_cnt == 1) begin
 			ide_addr <= {io_din[8],io_din[3:0]};
-			ide_cs   <= (io_din[15:9] == 7'b1111000);
-			cdda_cs  <= (io_din[15:9] == 7'b1111001);
+			ide_cs   <= (io_din[15:9] == 7'b1111000);  // 0xF0xx - IDE
+			cdda_cs  <= (io_din[15:9] == 7'b1111001);  // 0xF2xx - CDDA
+			eth_cs   <= (io_din[15:9] == 7'b1111010);  // 0xF4xx - Ethernet
+			eth_mode <= io_din[1:0];  // Lower 2 bits select mode: 0=TX, 1=RX, 2=MAC, 3=status
 		end
 
 		if(byte_cnt == 0) begin
@@ -120,6 +143,10 @@ always@(posedge clk_sys) begin
 			dout_en <= (io_din >= EXT_CMD_MIN && io_din <= EXT_CMD_MAX) || (io_din >= EXT_CMD_MIN2 && io_din <= EXT_CMD_MAX2);
 			if(io_din == 'h63) begin
 				io_dout <= {4'hE, 2'b00, 1'b0, cdda_req, 2'b00, ide_req};
+			end
+			if(io_din == 'h64) begin
+				// Return ethernet status word (32-bit, sent as 2x16-bit)
+				io_dout <= eth_status[31:16];
 			end
 		end else begin
 			case(cmd)
@@ -192,6 +219,50 @@ always@(posedge clk_sys) begin
 							io_dout <= ide_din;
 							ide_rd <= 1;
 						end
+
+				'h64: begin
+					// Ethernet operations
+					case(byte_cnt)
+						1: begin
+							// Return lower 16 bits of status on second byte
+							io_dout <= eth_status[15:0];
+						end
+
+						2: begin
+							// Start transfer on byte 2
+							if(eth_cs) begin
+								case(eth_mode)
+									2'b00: eth_tx_begin <= 1;  // TX read mode
+									2'b01: eth_rx_begin <= 1;  // RX write mode
+									2'b10: eth_mac_begin <= 1; // MAC write mode
+								endcase
+							end
+						end
+
+						default: begin
+							// Data transfer starts at byte 3+
+							if(eth_cs && byte_cnt >= 3) begin
+								case(eth_mode)
+									2'b00: begin
+										// TX read: ARM reads from FPGA TX buffer
+										io_dout <= {8'h00, eth_tx_data};
+										eth_tx_rd_strobe <= 1;
+									end
+
+									2'b01: begin
+										// RX write: ARM writes to FPGA RX buffer
+										eth_rx_wr_strobe <= 1;
+									end
+
+									2'b10: begin
+										// MAC write: ARM writes MAC address (6 bytes)
+										eth_mac_strobe <= 1;
+									end
+								endcase
+							end
+						end
+					endcase
+				end
 			endcase
 		end
 	end

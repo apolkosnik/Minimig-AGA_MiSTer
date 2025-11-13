@@ -257,6 +257,18 @@ wire        ide_rd;
 wire        ide_wr;
 wire  [5:0] ide_req;
 
+// NE2000 Ethernet HPS signals
+wire [31:0] eth_status;
+wire  [7:0] eth_tx_data;
+wire        eth_tx_rd_strobe;
+wire        eth_tx_begin;
+wire  [7:0] eth_rx_data;
+wire        eth_rx_wr_strobe;
+wire        eth_rx_begin;
+wire  [7:0] eth_mac_data;
+wire        eth_mac_strobe;
+wire        eth_mac_begin;
+
 wire [35:0] EXT_BUS;
 hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata));
 
@@ -791,7 +803,19 @@ minimig minimig
 	.ide_write    (ide_wr           ),
 	.ide_writedata(ide_dout         ),
 	.ide_read     (ide_rd           ),
-	.ide_readdata (ide_c_readdata   )
+	.ide_readdata (ide_c_readdata   ),
+
+	// NE2000 Ethernet HPS interface
+	.eth_status       (eth_status       ),
+	.eth_tx_data      (eth_tx_data      ),
+	.eth_tx_rd_strobe (eth_tx_rd_strobe ),
+	.eth_tx_begin     (eth_tx_begin     ),
+	.eth_rx_data      (eth_rx_data      ),
+	.eth_rx_wr_strobe (eth_rx_wr_strobe ),
+	.eth_rx_begin     (eth_rx_begin     ),
+	.eth_mac_data     (eth_mac_data     ),
+	.eth_mac_strobe   (eth_mac_strobe   ),
+	.eth_mac_begin    (eth_mac_begin    )
 );
 
 // power led control

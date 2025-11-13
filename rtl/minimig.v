@@ -265,7 +265,19 @@ module minimig
 	input         ide_write,
 	input  [15:0] ide_writedata,
 	input         ide_read,
-	output [15:0] ide_readdata
+	output [15:0] ide_readdata,
+
+	// NE2000 Ethernet HPS interface
+	output [31:0] eth_status,
+	output  [7:0] eth_tx_data,
+	input         eth_tx_rd_strobe,
+	input         eth_tx_begin,
+	input   [7:0] eth_rx_data,
+	input         eth_rx_wr_strobe,
+	input         eth_rx_begin,
+	input   [7:0] eth_mac_data,
+	input         eth_mac_strobe,
+	input         eth_mac_begin
 );
 
 
@@ -856,18 +868,17 @@ ne2000 NE2000_1
 	.data_out(ne2000_data_out),
 	.irq(ne2000_irq),
 
-	// These signals would connect to HPS for actual network I/O
-	// For now, they are left unconnected (will need future integration)
-	.status(),
-	.tx_begin(1'b0),
-	.tx_strobe(1'b0),
-	.tx_byte(),
-	.rx_begin(1'b0),
-	.rx_strobe(1'b0),
-	.rx_byte(8'h00),
-	.mac_begin(1'b0),
-	.mac_strobe(1'b0),
-	.mac_byte(8'h00)
+	// HPS I/O controller interface for network traffic
+	.status(eth_status),
+	.tx_begin(eth_tx_begin),
+	.tx_strobe(eth_tx_rd_strobe),
+	.tx_byte(eth_tx_data),
+	.rx_begin(eth_rx_begin),
+	.rx_strobe(eth_rx_wr_strobe),
+	.rx_byte(eth_rx_data),
+	.mac_begin(eth_mac_begin),
+	.mac_strobe(eth_mac_strobe),
+	.mac_byte(eth_mac_data)
 );
 
 //instantiate system control
