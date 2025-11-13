@@ -1718,7 +1718,16 @@ begin
                         else
                             ex_wb.flags(2) <= '0';
                         end if;
-                        ex_wb.flags(1) <= '0';  -- Overflow (simplified)
+                        -- Overflow: Set when result would be outside signed 32-bit range
+                        -- NEGX = 0 - operand - X, overflow when:
+                        -- - operand = 0x80000000 and X = 0 (trying to produce +2^31)
+                        -- - operand = 0x7FFFFFFF and X = 1 (trying to produce +2^31)
+                        if (of_ex.operand1 = x"80000000" and of_ex.ccr(0) = '0') or
+                           (of_ex.operand1 = x"7FFFFFFF" and of_ex.ccr(0) = '1') then
+                            ex_wb.flags(1) <= '1';  -- Overflow set
+                        else
+                            ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        end if;
                         if alu_result = 0 then
                             ex_wb.flags(0) <= '0';  -- Carry and X cleared if result is zero
                         else
@@ -1737,7 +1746,13 @@ begin
                         else
                             ex_wb.flags(2) <= '0';
                         end if;
-                        ex_wb.flags(1) <= '0';  -- Overflow (simplified)
+                        -- Overflow: Set when negating 0x80000000 (most negative value)
+                        -- Because -(-2147483648) = +2147483648 which doesn't fit in signed 32-bit
+                        if of_ex.operand1 = x"80000000" then
+                            ex_wb.flags(1) <= '1';  -- Overflow set
+                        else
+                            ex_wb.flags(1) <= '0';  -- Overflow cleared
+                        end if;
                         if alu_result = 0 then
                             ex_wb.flags(0) <= '0';  -- Carry cleared if result is zero
                         else
@@ -1915,15 +1930,33 @@ begin
                                 end if;
                             end if;
                         else
-                            -- ROXL/ROXR: Rotate through Extend (simplified - treat as RO)
+                            -- ROXL/ROXR: Rotate through Extend (33-bit rotate through X)
+                            -- X bit is CCR bit 4 (using bit 0 as simplified representation)
+                            variable x_bit : std_logic;
+                            variable temp_val : unsigned(32 downto 0);  -- 33-bit value
+                            variable actual_count : integer range 0 to 63;
+
+                            x_bit := of_ex.ccr(0);  -- Current X bit
+                            actual_count := shift_count mod 33;  -- 33-bit rotation period
+
                             if direction = '1' then
-                                -- ROXL
-                                alu_result := rotate_left(unsigned(of_ex.operand1), shift_count mod 32);
-                                ex_wb.flags(0) <= alu_result(0);
+                                -- ROXL: Rotate left through X
+                                -- Form 33-bit value: {operand[31:0], X}
+                                temp_val := unsigned(of_ex.operand1) & x_bit;
+                                -- Rotate left by actual_count
+                                temp_val := rotate_left(temp_val, actual_count);
+                                -- Extract result and new X/C
+                                alu_result := temp_val(32 downto 1);
+                                ex_wb.flags(0) <= temp_val(0);  -- X bit (also C)
                             else
-                                -- ROXR
-                                alu_result := rotate_right(unsigned(of_ex.operand1), shift_count mod 32);
-                                ex_wb.flags(0) <= alu_result(31);
+                                -- ROXR: Rotate right through X
+                                -- Form 33-bit value: {X, operand[31:0]}
+                                temp_val := x_bit & unsigned(of_ex.operand1);
+                                -- Rotate right by actual_count
+                                temp_val := rotate_right(temp_val, actual_count);
+                                -- Extract result and new X/C
+                                alu_result := temp_val(31 downto 0);
+                                ex_wb.flags(0) <= temp_val(32);  -- X bit (also C)
                             end if;
                         end if;
 
