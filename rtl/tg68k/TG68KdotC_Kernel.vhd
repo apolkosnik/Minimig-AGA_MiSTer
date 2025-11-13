@@ -3659,14 +3659,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
 							next_micro_state <= pmmu1;
 
-							-- BUG #59 FIX: CRITICAL! Capture Dn destination register from OPCODE(11:9), not EA register!
-							-- For PMOVE <MMU>,Dn: opcode(11:9) contains destination Dn number
-							-- For PMOVE Dn,<MMU>: opcode(11:9) contains source Dn number
-							-- last_opc_read is WRONG - it gets overwritten by extension word!
-							-- Use opcode(11:9) which still contains the correct instruction
+							-- BUG #59 FIX: CRITICAL! Capture Dn destination register from OPCODE(2:0)!
+							-- For PMOVE with Dn direct mode (bits 5:3 = 000):
+							--   Bits 2:0 = Dn register number (D0-D7)
+							--   Bits 11:9 are F-line prefix bits (meaningless for register select!)
+							-- PMOVE TT0,D2: opcode(5:3)=000, opcode(2:0)=010 (D2)
+							-- Must capture opcode(2:0), NOT opcode(11:9)!
+							-- BUG #60 FIX: Enable early capture during F-line decode to prevent consecutive PMOVE race
 							IF opcode(5 downto 3)="000" THEN
-								pmove_dn_capture_req <= '1';
-								pmove_dn_capture_data <= opcode(11 downto 9);  -- FIX: Use opcode, not last_opc_read!
+								pmove_dn_capture_req <= '1';  -- Request capture NOW, not later in pmmu1
+								pmove_dn_capture_data <= opcode(2 downto 0);  -- Correct bits!
 							END IF;
 
 							-- BUG #22 FIX: DO NOT build EA here! PMMU instructions build EA in pmmu1
@@ -4572,6 +4574,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     -- PMOVE <MMU reg>,Dn - Read from MMU, write to Dn (brief(9)=1, RW=1)
                                     set(pmmu_rd) <= '1';
                                     set_exec(Regwrena) <= '1';
+                                    pmove_dn_capture_req <= '1';
+                                    pmove_dn_capture_data <= opcode(2 downto 0);  -- FIX: Dn register in bits 2:0!
                                 END IF;
                                 -- BUG #6 FIX: Check SZ bit for dual-word transfer, not just register type
                                 -- MC68030 spec: .D (SZ=1) means 64-bit transfer (CRP/SRP only, validated above)
@@ -4586,7 +4590,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     -- Without setexecOPC, set_exec(Regwrena) never becomes exec(Regwrena)
                                     next_micro_state <= idle;
                                 END IF;
-                            ELSE
+                            ELSE  -- NOT opcode(5 downto 3)="000" -- not from aregister
+
                                 -- Memory EA modes
                                 -- MC68030 PMOVE: Direction from extension word bit 9, NOT opcode(7)
                                 -- BUG #12 FIX: Swap direction - RW=0 means WRITE to MMU, RW=1 means READ from MMU
@@ -4602,8 +4607,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     END IF;
                                     setstate <= "10";
                                     -- BUG #21 FIX: Wait one cycle for ea_data to be valid
-                                    next_micro_state <= pmmu1_wait;
+                                    --next_micro_state <= pmmu1_wait;
+                                    next_micro_state <= pmmu3;
                                 ELSE
+                                    setstate <= "01";
                                     -- PMOVE <MMU reg>,<ea> - Read from MMU, write to memory (brief(9)=1, RW=1)
                                     set(ea_build) <= '1';
                                     set(OP1addr) <= '1';
