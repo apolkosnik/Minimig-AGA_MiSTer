@@ -222,13 +222,24 @@ always @(*) begin
 
 		// register page 0
 		if(ps == 2'd0) begin
-			if(reg_addr == 5'h04) reg_read_data = 8'h23;   // tsr: tx ok
-			if(reg_addr == 5'h07) reg_read_data = isr;
+			if(reg_addr == 5'h03) reg_read_data = bnry;    // BNRY: Boundary Page
+			if(reg_addr == 5'h04) reg_read_data = 8'h23;   // TSR: Transmit Status (always OK)
+			if(reg_addr == 5'h07) reg_read_data = isr;     // ISR: Interrupt Status
 		end
 
 		// register page 1
 		if(ps == 2'd1) begin
-			if(reg_addr == 5'h07) reg_read_data = curr;
+			// PAR0-5: Physical Address Registers (MAC address)
+			if((reg_addr >= 5'h01) && (reg_addr <= 5'h06))
+				reg_read_data = par[reg_addr - 5'h01];
+
+			// CURR: Current Page Register
+			if(reg_addr == 5'h07)
+				reg_read_data = curr;
+
+			// MAR0-7: Multicast Address Registers
+			if((reg_addr >= 5'h08) && (reg_addr <= 5'h0f))
+				reg_read_data = mar[reg_addr - 5'h08];
 		end
 
 		// read dma register $10 - $17
