@@ -5696,12 +5696,22 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						next_micro_state <= fpu_wait;  -- Process CIR response
 						skipFetch_next <= '1';
 					ELSE
-						-- FSAVE - MC68882 compatible implementation with all addressing modes
-						-- Write 15 longwords (60 bytes) to memory
-					
-					-- CRITICAL FIX: Force correct datatype for all FSAVE operations
-					-- This prevents byte mode from previous instructions corrupting registers
-					set_datatype <= "10";  -- Longword access - unified datatype control
+						-- DEAD CODE WARNING: This ELSE clause should NEVER execute!
+						--
+						-- Opcode(8:6) reaching here would be "110" (FMOVEM) or "111" (FMOVE FPcr)
+						-- - "110" (FMOVEM) routes from fpu1 → fpu_fmovem microstate (NOT fpu2!)
+						-- - "111" (FMOVE FPcr) routes from fpu_done → idle (NOT fpu2!)
+						--
+						-- This code was leftover from refactoring with incorrect "FSAVE" comment.
+						-- FSAVE (opcode "100") is handled by the ELSIF above at line 5594.
+						--
+						-- If this executes, it indicates a microstate routing bug!
+						--
+						-- Keeping code below for safety as error handler for unexpected opcodes:
+
+					-- ERROR HANDLER: Unexpected opcode in fpu2 microstate
+					-- This should only execute if there's a bug in microstate routing
+					set_datatype <= "10";  -- Longword access
 					
 					CASE opcode(5 downto 3) IS
 						WHEN "010" =>  -- (An) - Address Register Indirect
