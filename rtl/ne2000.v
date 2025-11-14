@@ -348,13 +348,13 @@ reg header_begin;
 always @(posedge clk) begin
 	header_begin <= 1'b0;
 
-	if(rx_begin_d & !rx_begin)
+	if(rx_begin_d & !rx_begin_sync2)
 		header_begin <= 1'b1;
 end
 
 // write counter - header size (4) = number of bytes written
 always @(posedge clk)
-	if (rx_begin_d & !rx_begin)
+	if (rx_begin_d & !rx_begin_sync2)
 		rx_len <= rx_w_cnt - 16'd4;
 
 // Extract write byte from appropriate half of 16-bit data bus
