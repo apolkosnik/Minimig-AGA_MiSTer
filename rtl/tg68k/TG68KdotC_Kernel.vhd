@@ -414,6 +414,16 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmove_dn_mode    : std_logic;                      -- Indicates current PMOVE uses Dn source/dest
 	signal pmove_dn_capture_req : std_logic;                  -- Combinational request to capture selector
 	signal pmove_dn_capture_data : std_logic_vector(2 downto 0);
+
+	-- BUG #65 FIX: PMOVE queue (2-entry FIFO) for BOTH directions
+	-- Prevents consecutive PMOVE operations from clobbering each other's selectors
+	type pmove_dn_queue_type is array (0 to 1) of std_logic_vector(2 downto 0);
+	signal pmove_dn_queue : pmove_dn_queue_type;
+	signal pmove_dn_queue_valid : std_logic_vector(1 downto 0);  -- Valid flags for each queue entry
+	signal pmove_dn_queue_wr_ptr : std_logic;  -- Write pointer (0 or 1)
+	signal pmove_dn_queue_rd_ptr : std_logic;  -- Read pointer (0 or 1)
+	signal pmove_dn_writeback_active : std_logic;  -- Active MMU→Dn writeback in progress
+	signal pmove_dn_write_active : std_logic;     -- Active Dn→MMU write in progress (SOURCE FIX)
 	signal pmmu_mem_wdat_hold : std_logic_vector(31 downto 0);
 	signal pmmu_mem_wdat_valid : std_logic;
 	signal pmmu_reg_part_d  : std_logic;
@@ -1468,6 +1478,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					pmove_dn_regnum_pending <= (others => '0');
 					pmove_dn_pending_valid <= '0';
 					pmove_dn_mode <= '0';
+					-- BUG #65 FIX: Initialize queue for both Dn→MMU and MMU→Dn
+					pmove_dn_queue(0) <= (others => '0');
+					pmove_dn_queue(1) <= (others => '0');
+					pmove_dn_queue_valid <= "00";
+					pmove_dn_queue_wr_ptr <= '0';
+					pmove_dn_queue_rd_ptr <= '0';
+					pmove_dn_writeback_active <= '0';
+					pmove_dn_write_active <= '0';  -- SOURCE FIX: Track Dn→MMU write completion
 			ELSE
 --				IPL_nr <= NOT IPL;
 				IF clkena_in='1' THEN
@@ -1548,7 +1566,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						trap_trace <= '0';
 						TG68_PC_word <= '0';
 						trap_berr <= '0';
-						pmove_dn_mode <= '0';  -- Clear PMOVE Dn mode flag between instructions
+						-- BUG #65 FIX: Do NOT clear pmove_dn_mode here!
+						-- pmove_dn_mode is now cleared ONLY when queue becomes empty (lines 1765-1766)
 					ELSIF opcode(7 downto 0)="00000000" OR opcode(7 downto 0)="11111111" OR data_is_source='1' THEN
 						TG68_PC_word <= '1';
 					END IF;	
@@ -1693,19 +1712,109 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					END IF;	
 					exec(get_2ndOPC) <= set(get_2ndOPC) OR setopcode;
 
-					-- Stage 1: capture pending Dn selector as soon as decode requests it
-					-- BUG FIX: Only capture if not already pending (prevent consecutive PMOVE race)
+					-- BUG #65 FIX: PMOVE MMU→Dn destination queue with proper completion detection
+
+					-- Stage 1: Capture pending Dn selector when decode requests it
 					IF pmove_dn_capture_req='1' AND pmove_dn_pending_valid='0' THEN
 						pmove_dn_regnum_pending <= pmove_dn_capture_data;
 						pmove_dn_pending_valid <= '1';
 					END IF;
-					
-					-- Stage 2: once exec(get_2ndOPC) asserts, make the selector active for this instruction
-					-- Set pmove_dn_mode when pending valid - DON'T clear here, only at setopcode
+
+					-- Stage 2: Enqueue selector when exec(get_2ndOPC) fires for PMOVE MMU→Dn
+					-- Only enqueue if queue is not full (check valid bit at write pointer)
 					IF exec(get_2ndOPC)='1' AND pmove_dn_pending_valid='1' THEN
-						pmove_dn_regnum <= pmove_dn_regnum_pending;
-						pmove_dn_mode <= '1';
-						pmove_dn_pending_valid <= '0';
+						-- Check if write slot is available (use direct indexing based on wr_ptr bit)
+						IF (pmove_dn_queue_wr_ptr='0' AND pmove_dn_queue_valid(0)='0') OR
+						   (pmove_dn_queue_wr_ptr='1' AND pmove_dn_queue_valid(1)='0') THEN
+							-- Enqueue: Write selector to queue at write pointer
+							IF pmove_dn_queue_wr_ptr='0' THEN
+								pmove_dn_queue(0) <= pmove_dn_regnum_pending;
+								pmove_dn_queue_valid(0) <= '1';
+							ELSE
+								pmove_dn_queue(1) <= pmove_dn_regnum_pending;
+								pmove_dn_queue_valid(1) <= '1';
+							END IF;
+							pmove_dn_queue_wr_ptr <= NOT pmove_dn_queue_wr_ptr;  -- Toggle 0↔1
+							pmove_dn_pending_valid <= '0';
+
+							-- Activate pmove_dn_mode if this is the first entry (read slot was empty)
+							IF (pmove_dn_queue_rd_ptr='0' AND pmove_dn_queue_valid(0)='0') OR
+							   (pmove_dn_queue_rd_ptr='1' AND pmove_dn_queue_valid(1)='0') THEN
+								-- Queue was empty, this is first entry - activate mode and load selector
+								pmove_dn_regnum <= pmove_dn_regnum_pending;
+								pmove_dn_mode <= '1';
+								pmove_dn_writeback_active <= '0';  -- Not yet in writeback
+								pmove_dn_write_active <= '0';      -- Not yet in write (SOURCE FIX)
+							END IF;
+						END IF;
+					END IF;
+
+					-- Stage 3a: Track Dn→MMU write completion (SOURCE FIX)
+					-- Mark write active when exec(pmmu_wr) fires
+					IF exec(pmmu_wr)='1' AND pmove_dn_mode='1' AND pmove_dn_write_active='0' AND pmove_dn_writeback_active='0' THEN
+						-- Mark write as active (will complete next cycle)
+						pmove_dn_write_active <= '1';
+					END IF;
+
+					-- Stage 3b: Dequeue when MMU→Dn writeback completes (exec(Regwrena)='1')
+					IF exec(Regwrena)='1' AND pmove_dn_mode='1' AND pmove_dn_writeback_active='0' AND pmove_dn_write_active='0' THEN
+						-- Mark writeback as active (will complete next cycle)
+						pmove_dn_writeback_active <= '1';
+					END IF;
+
+					-- Complete Dn→MMU write and dequeue (SOURCE FIX)
+					IF pmove_dn_write_active='1' THEN
+						-- Dequeue: Mark current entry as invalid (clear valid bit at read pointer)
+						IF pmove_dn_queue_rd_ptr='0' THEN
+							pmove_dn_queue_valid(0) <= '0';
+						ELSE
+							pmove_dn_queue_valid(1) <= '0';
+						END IF;
+						pmove_dn_queue_rd_ptr <= NOT pmove_dn_queue_rd_ptr;  -- Toggle 0↔1
+						pmove_dn_write_active <= '0';
+
+						-- Check if there's another entry in queue (at the NEW read pointer location AFTER toggle)
+						IF (pmove_dn_queue_rd_ptr='0' AND pmove_dn_queue_valid(1)='1') OR
+						   (pmove_dn_queue_rd_ptr='1' AND pmove_dn_queue_valid(0)='1') THEN
+							-- Load next selector from queue (AFTER toggle: rd_ptr=0→slot 1, rd_ptr=1→slot 0)
+							IF pmove_dn_queue_rd_ptr='0' THEN
+								pmove_dn_regnum <= pmove_dn_queue(1);
+							ELSE
+								pmove_dn_regnum <= pmove_dn_queue(0);
+							END IF;
+							pmove_dn_mode <= '1';  -- Keep mode active
+						ELSE
+							-- Queue is now empty, clear mode
+							pmove_dn_mode <= '0';
+						END IF;
+					END IF;
+
+					-- Complete MMU→Dn writeback and dequeue
+					IF pmove_dn_writeback_active='1' THEN
+						-- Dequeue: Mark current entry as invalid (clear valid bit at read pointer)
+						IF pmove_dn_queue_rd_ptr='0' THEN
+							pmove_dn_queue_valid(0) <= '0';
+						ELSE
+							pmove_dn_queue_valid(1) <= '0';
+						END IF;
+						pmove_dn_queue_rd_ptr <= NOT pmove_dn_queue_rd_ptr;  -- Toggle 0↔1
+						pmove_dn_writeback_active <= '0';
+
+						-- Check if there's another entry in queue (at the NEW read pointer location AFTER toggle)
+						-- BUG FIX: After toggle, check the matching slot (rd_ptr=0→slot 0, rd_ptr=1→slot 1)
+						IF (pmove_dn_queue_rd_ptr='0' AND pmove_dn_queue_valid(1)='1') OR
+						   (pmove_dn_queue_rd_ptr='1' AND pmove_dn_queue_valid(0)='1') THEN
+							-- Load next selector from queue (AFTER toggle: rd_ptr=0→slot 1, rd_ptr=1→slot 0)
+							IF pmove_dn_queue_rd_ptr='0' THEN
+								pmove_dn_regnum <= pmove_dn_queue(1);
+							ELSE
+								pmove_dn_regnum <= pmove_dn_queue(0);
+							END IF;
+							pmove_dn_mode <= '1';  -- Keep mode active
+						ELSE
+							-- Queue is now empty, clear mode
+							pmove_dn_mode <= '0';
+						END IF;
 					END IF;
 				END IF;
 			END IF;
@@ -3851,7 +3960,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			CASE micro_state IS
 				WHEN ld_nn =>		-- (nnnn).w/l=>
 					set(get_ea_now) <='1';
-					setnextpass <= '1';
+					-- BUG #65 FIX: Guard setnextpass - don't set when exec(ea_build)='1' (PMOVE path)
+					IF exec(ea_build)='0' THEN
+						setnextpass <= '1';
+					END IF;
 					set(addrlong) <= '1';
 					
 				WHEN st_nn =>		-- =>(nnnn).w/l
@@ -3862,7 +3974,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN ld_dAn1 =>		-- d(An)=>, --d(PC)=>
 					set(get_ea_now) <='1';
 					setdisp <= '1';		--word
-					setnextpass <= '1';
+					-- BUG #65 FIX: Guard setnextpass - don't set when exec(ea_build)='1' (PMOVE path)
+					IF exec(ea_build)='0' THEN
+						setnextpass <= '1';
+					END IF;
 					
 				WHEN ld_AnXn1 =>		-- d(An,Xn)=>, --d(PC,Xn)=>
 					IF brief(8)='0' OR extAddr_Mode=0 OR (cpu(1)='0' AND extAddr_Mode=2) THEN
@@ -3890,7 +4005,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN ld_AnXn2 =>
 					set(get_ea_now) <='1';
 					setdisp <= '1';		--brief
-					setnextpass <= '1';
+					-- BUG #65 FIX: Guard setnextpass - don't set when exec(ea_build)='1' (PMOVE path)
+					IF exec(ea_build)='0' THEN
+						setnextpass <= '1';
+					END IF;
 					
 -------------------------------------------------------------------------------------					
 					
@@ -3909,7 +4027,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					ELSE
 						IF brief(1 downto 0)="00" THEN
 							set(get_ea_now) <='1';
-							setnextpass <= '1';
+							-- BUG #65 FIX: Guard setnextpass - don't set when exec(ea_build)='1' (PMOVE path)
+							IF exec(ea_build)='0' THEN
+								setnextpass <= '1';
+							END IF;
 						ELSE
 							setstate <= "10";
 							setaddrvalue <= '1';
@@ -3947,7 +4068,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						next_micro_state <= ld_AnXn2;
 					ELSE
 						set(get_ea_now) <='1';
-						setnextpass <= '1';
+						-- BUG #65 FIX: Guard setnextpass - don't set when exec(ea_build)='1' (PMOVE path)
+						IF exec(ea_build)='0' THEN
+							setnextpass <= '1';
+						END IF;
 					END IF;
 					
 ----------------------------------------------------------------------------------------				
