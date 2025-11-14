@@ -207,14 +207,14 @@ always @(posedge clk) begin
 end
 
 // cpu register read
+// Fix register addressing: use 5-bit address like original
+// addr[5:1] gives us 32 register addresses (original used addr[4:0])
+wire [4:0] reg_addr = addr[5:1];
+
 reg [7:0] reg_read_data;
 always @(*) begin
 	reg_read_data = 8'd0;
 	data_out = 16'h0000;  // Default: don't drive bus unless selected
-
-	// Fix register addressing: use 5-bit address like original
-	// addr[5:1] gives us 32 register addresses (original used addr[4:0])
-	wire [4:0] reg_addr = addr[5:1];
 
 	if(ne_read && sel) begin
 		// cr, dma and reset are always available
@@ -360,6 +360,9 @@ always @(posedge clk)
 // Extract write byte from appropriate half of 16-bit data bus
 wire [7:0] write_byte = byte_sel ? data_in[7:0] : data_in[15:8];
 
+// Write register address (same 5-bit addressing as read)
+wire [4:0] wr_reg_addr = addr[5:1];
+
 // cpu write handling
 always @(posedge clk) begin
 	if (reset) begin
@@ -453,9 +456,6 @@ always @(posedge clk) begin
 		end
 
 		if(ne_write_en) begin
-			// Use 5-bit register address (same as read logic)
-			wire [4:0] wr_reg_addr = addr[5:1];
-
 			if(wr_reg_addr == 5'h00) begin
 				cr <= write_byte;
 
