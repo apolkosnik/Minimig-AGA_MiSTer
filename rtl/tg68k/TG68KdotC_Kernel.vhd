@@ -5591,8 +5591,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							next_micro_state <= fpu_wait;  -- Process condition result
 							skipFetch_next <= '1';
 						END IF;
-					ELSIF opcode(8 downto 6) = "100" THEN
-						-- cpSAVE instruction - Robust Atomic Predecrement Implementation
+					ELSIF opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100" THEN
+						-- cpSAVE instruction with PREDECREMENT mode - Robust Atomic Predecrement Implementation
+						-- CRITICAL FIX: Only catch -(An) predecrement mode here; other modes use ELSE clause
 						-- CRITICAL FIX: Force longword datatype to prevent FTST byte corruption
 						set_datatype <= "10";  -- Ensure exe_datatype gets updated to longword
 						
@@ -5696,22 +5697,23 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						next_micro_state <= fpu_wait;  -- Process CIR response
 						skipFetch_next <= '1';
 					ELSE
-						-- DEAD CODE WARNING: This ELSE clause should NEVER execute!
+						-- FSAVE - MC68882 compatible implementation for NON-PREDECREMENT addressing modes
 						--
-						-- Opcode(8:6) reaching here would be "110" (FMOVEM) or "111" (FMOVE FPcr)
-						-- - "110" (FMOVEM) routes from fpu1 → fpu_fmovem microstate (NOT fpu2!)
-						-- - "111" (FMOVE FPcr) routes from fpu_done → idle (NOT fpu2!)
+						-- This ELSE clause handles FSAVE (opcode "100") for ALL addressing modes EXCEPT predecrement:
+						-- - (An) - Address register indirect
+						-- - (An)+ - Postincrement
+						-- - (d16,An) - Displacement
+						-- - (d8,An,Xn) - Index
+						-- - (xxxx).w/.l - Absolute
 						--
-						-- This code was leftover from refactoring with incorrect "FSAVE" comment.
-						-- FSAVE (opcode "100") is handled by the ELSIF above at line 5594.
+						-- Predecrement -(An) mode is handled by dedicated state machine in ELSIF above
+						-- to ensure atomic A7 := A7 - frame_size before memory writes.
 						--
-						-- If this executes, it indicates a microstate routing bug!
-						--
-						-- Keeping code below for safety as error handler for unexpected opcodes:
+						-- This clause may also handle other opcodes that reach fpu2:
+						-- - "010" (FScc), "011" (FTRAPcc) if they route through fpu2
 
-					-- ERROR HANDLER: Unexpected opcode in fpu2 microstate
-					-- This should only execute if there's a bug in microstate routing
-					set_datatype <= "10";  -- Longword access
+					-- FSAVE addressing mode handling
+					set_datatype <= "10";  -- Longword access for FSAVE
 					
 					CASE opcode(5 downto 3) IS
 						WHEN "010" =>  -- (An) - Address Register Indirect
