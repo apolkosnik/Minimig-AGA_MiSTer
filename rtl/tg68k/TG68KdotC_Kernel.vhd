@@ -871,8 +871,8 @@ ALU: TG68K_ALU
 							-- CRITICAL FIX: Also activate when in fpu2 microstate processing FSAVE
 							-- F327: 1111 0011 0010 0111 = FSAVE -(A7)
 							if (opcode(15 downto 12) = "1111" and opcode(11 downto 9) = "001" and
-							    opcode(8 downto 6) = "100" and opcode(5 downto 4) = "10") or
-							   (micro_state = fpu2 and opcode(8 downto 6) = "100" and opcode(5 downto 4) = "10") then
+							    opcode(8 downto 6) = "100" and opcode(5 downto 3) = "100") or
+							   (micro_state = fpu2 and opcode(8 downto 6) = "100" and opcode(5 downto 3) = "100") then
 								-- FSAVE -(An) detected - check initial stack pointer alignment first
 								-- ADDRESS ERROR CHECK: Verify current stack pointer is even aligned
 								if reg_QA(0) /= '0' then
@@ -993,7 +993,7 @@ ALU: TG68K_ALU
 						-- Predecrement complete - stay here until instruction ends
 						-- Reset to IDLE when no longer FSAVE -(An)
 						if not (opcode(15 downto 12) = "1111" and opcode(11 downto 9) = "001" and
-						       opcode(8 downto 6) = "100" and opcode(5 downto 4) = "10") or
+						       opcode(8 downto 6) = "100" and opcode(5 downto 3) = "100") or
 						       next_micro_state = idle then  -- Allow transition when going to idle
 							fsave_predecr_state <= FSAVE_PREDECR_IDLE;
 							-- Note: CIR handshake signals reset in main CPU process to avoid multiple drivers
@@ -1184,7 +1184,7 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 				RDindex_B <= conv_integer(rf_source_addr(3 downto 0));
 				IF Wwrena='1' THEN
 					IF NOT (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
-					           opcode(8 downto 6) = "100" AND opcode(5 downto 4) = "10") THEN
+					           opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100") THEN
 						-- Normal register write path (blocked during FSAVE predecrement modes)
 						regfile(RDindex_A) <= regin;
 					END IF;
@@ -1259,7 +1259,7 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 				regin <= reg_QA;
 			END IF;
 		ELSIF NOT (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
-		           opcode(8 downto 6) = "100" AND opcode(5 downto 4) = "10") THEN
+		           opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100") THEN
 			-- Priority 7: Normal ALU output (blocked for FSAVE -(An) to prevent double decrement)
 			regin <= ALUout;
 		ELSE
@@ -1287,7 +1287,7 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 			Lwrena <= '1';  -- Address registers are always longword
 		-- Priority 2: Presub/postadd operations (excluding FSAVE to prevent conflicts)
 		ELSIF (exec(presub)='1' OR exec(postadd)='1' OR exec(changeMode)='1') AND NOT 
-		      (opcode(15 downto 9) = "1111001" AND opcode(8 downto 6) = "100" AND opcode(5 downto 4) = "10") THEN
+		      (opcode(15 downto 9) = "1111001" AND opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100") THEN
 			Wwrena <= '1';
 			Lwrena <= '1';
 		-- Priority 3: Conditional register operations (dbcc, etc.)
@@ -1744,7 +1744,7 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 			END IF;	 
 		-- Priority 2: FSAVE predecrement operations (must be atomic)
 		ELSIF set(presub)='1' AND 
-		      opcode(15 downto 9) = "1111001" AND opcode(8 downto 6) = "100" AND opcode(5 downto 4) = "10" THEN
+		      opcode(15 downto 9) = "1111001" AND opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100" THEN
 			-- FSAVE -(An) predecrement: Coordinated with state machine for ALL address registers
 			-- ATOMIC FIX: Use state-dependent addressing to prevent double decrements
 			IF fsave_predecr_state = FSAVE_PREDECR_DONE OR fsave_predecr_state = FSAVE_PREDECR_WRITE THEN
@@ -2205,7 +2205,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- FSAVE -(An) check: F-line (1111) + copro ID 001 + type 100 + mode 100
 					-- Fixed condition: Check for FSAVE -(An) for ANY address register
 					IF set(presub) = '1' AND NOT (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
-					                              opcode(8 downto 6) = "100" AND opcode(5 downto 4) = "10") THEN
+					                              opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100") THEN
 						-- Normal predecrement: needs ALU subtract for address calculation  
 						exec(subidx) <= '1';
 					ELSE
@@ -2215,7 +2215,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				-- CRITICAL FIX: Block presub for FSAVE to prevent ALU 4-byte subtraction
 				-- Fixed condition: Check for FSAVE -(An) for ANY address register, not just A4
 				IF set(presub) = '1' AND (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
-				                          opcode(8 downto 6) = "100" AND opcode(5 downto 4) = "10") THEN
+				                          opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100") THEN
 					exec(presub) <= '0';  -- Disable ALU presub for FSAVE - use dedicated FSM instead
 				ELSE
 					exec(presub) <= set(presub);  -- Normal presub operations
@@ -2230,7 +2230,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						-- FSAVE -(An) check: F-line (1111) + copro ID 001 + type 100 + mode 100
 						-- Fixed condition: Check for FSAVE -(An) for ANY address register
 						IF (set_exec(presub) = '1' OR set(presub) = '1') AND NOT (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
-						                                                           opcode(8 downto 6) = "100" AND opcode(5 downto 4) = "10") THEN
+						                                                           opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100") THEN
 							exec(subidx) <= '1';
 						ELSE
 							exec(subidx) <= set_exec(subidx) OR set(subidx);
@@ -2239,7 +2239,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- CRITICAL FIX: Block presub for FSAVE in setexecOPC path too
 					-- Fixed condition: Check for FSAVE -(An) for ANY address register, not just A4
 					IF (set_exec(presub) = '1' OR set(presub) = '1') AND (opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND 
-					                                                        opcode(8 downto 6) = "100" AND opcode(5 downto 4) = "10") THEN
+					                                                        opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100") THEN
 						exec(presub) <= '0';  -- Disable ALU presub for FSAVE
 					ELSE
 						exec(presub) <= set_exec(presub) OR set(presub);  -- Normal presub operations
@@ -5601,21 +5601,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- State machine ensures atomic A7 := A7 - frame_size before any memory writes
 						CASE fsave_predecr_state IS
 							WHEN FSAVE_PREDECR_IDLE =>
-								-- Start predecrement sequence for -(An) addressing modes  
-								-- CRITICAL FIX: Match all predecrement modes (-(A0) through -(A7))
-								-- Wait for either FPU frame size handshake OR old CIR compatibility
-								IF opcode(5 downto 4) = "10" THEN
-									-- Predecrement mode detected - begin sequence (frame size latched in WAIT state)
-									setstate <= "00";  -- Hold state during calculation
-									next_micro_state <= fpu2;  -- Stay in fpu2
-									skipFetch_next <= '1';
-									-- State machine will advance to CALC in clocked process
-								ELSE
-									-- Non-predecrement mode - stay in fpu2 until normal EA handling completes
-									setstate <= "00";  -- Hold state
-									next_micro_state <= fpu2;  -- Stay in fpu2 until ready
-									skipFetch_next <= '1';
-								END IF;
+								-- Start predecrement sequence - ELSIF guarantees we're in -(An) mode
+								-- Wait for FPU frame size handshake to begin calculation
+								setstate <= "00";  -- Hold state during calculation
+								next_micro_state <= fpu2;  -- Stay in fpu2
+								skipFetch_next <= '1';
+								-- State machine will advance to WAIT in clocked process
 								
 							WHEN FSAVE_PREDECR_WAIT =>
 								-- Waiting for FPU to provide frame size
@@ -5763,67 +5754,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								next_micro_state <= fpu2;
 							END IF;
 							
-						WHEN "100" =>  -- -(An) - Address Register Indirect with Predecrement
-							-- FIXED: Two-phase predecrement for proper register update timing
-							-- Frame size is determined in clocked process using dedicated state machine
-							
-							-- Frame size validation removed - CIR decode handles this now
-							
-							-- CRITICAL FIX: FSAVE predecrement gate - no writes until predecrement complete
-							-- Wait for predecrement state machine completion (don't depend on CIR)
-							IF fsave_predecr_state /= FSAVE_PREDECR_DONE THEN
-								-- Phase 0: Wait for predecrement completion
-								setstate <= "00";  -- Hold - no memory writes until predecrement complete
-								next_micro_state <= fpu2;  -- Stay in fpu2
-								skipFetch_next <= '1';
-								-- Ensure no premature write cycles
-								fpu_data_request <= '0';
-							ELSIF fsave_counter = 0 THEN
-								-- Atomic predecrement operation after frame size is determined
-								IF state = "00" THEN
-									-- Phase 1: FSAVE full-frame predecrement handled by dedicated state machine
-									-- DO NOT set presub - that would trigger ALU 4-byte decrement!
-									-- The FSAVE_PREDECR_WRITE state provides the full-frame decremented value
-									
-									-- NO: set(presub) <= '1';  -- This would cause 4-byte decrement, not frame size!
-									
-									IF opcode(2 downto 0) = "111" THEN
-										set(use_SP) <= '1';           -- Use stack pointer if -(A7)
-										setstackaddr <= '1';          -- Ensure update goes to stack pointer
-									END IF;
-									
-									-- Register writeback will use fsave_new_sp when fsave_predecr_state = FSAVE_PREDECR_WRITE
-									set(Regwrena) <= '1';             -- Update An with decremented value
-									setstate <= "01";                 -- Wait for register update to complete
-									next_micro_state <= fpu2;         -- Stay in fpu2 for next phase
-								ELSE
-									-- Phase 2: Start memory write after register update completed
-									fpu_data_request <= '1';          -- Request data from FPU
-									setstate <= "11";                 -- Memory write
-									next_micro_state <= fpu2;         -- Continue for more writes
-								END IF;
-								
-							ELSE
-								-- Subsequent writes: Use saved base address + offset
-								-- The base address was calculated and saved during first write
-								set(mem_addsub) <= '1';               -- Use memory address with offset
-								
-								fpu_data_request <= '1';              -- Request data from FPU
-								
-								IF (fsave_counter + 1) < fsave_frame_size_latched_lw THEN
-									setstate <= "11";                 -- Memory write
-									next_micro_state <= fpu2;         -- More writes to do
-								ELSIF (fsave_counter + 1) = fsave_frame_size_latched_lw THEN
-									-- CONSOLIDATED: Last write handling
-									setstate <= "11";                 -- Final memory write
-									next_micro_state <= fpu2;         -- Stay to monitor completion
-								ELSE
-									-- All writes complete, go to idle
-									setstate <= "00";                 -- Ensure proper endOPC condition
-									next_micro_state <= idle;         -- All done
-								END IF;
-							END IF;
-							
+						WHEN "100" =>  -- -(An) - UNREACHABLE: Predecrement caught by ELSIF above
+							-- Predecrement FSAVE is exclusively handled by dedicated state machine
+							-- in ELSIF at line 5594. This case should never execute.
+							-- If reached, indicates microstate routing bug.
+							setstate <= "00";
+							next_micro_state <= idle;  -- Error recovery
+
 						WHEN "101" =>  -- (d16,An) - Address Register Indirect with Displacement
 							IF fsave_counter = 0 THEN
 								-- First write: Calculate EA, then continue in fpu_done
@@ -6931,7 +6868,7 @@ BEGIN
 			   (micro_state = fpu_wait OR micro_state = fpu_done OR 
 			    micro_state = fpu_fmovem OR micro_state = fpu_fmovem_cr OR
 			    micro_state = fpu_fdbcc OR 
-			    (micro_state = fpu2 AND opcode(8 downto 6) = "100" AND opcode(5 downto 4) = "10")) THEN
+			    (micro_state = fpu2 AND opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100")) THEN
 				fpu_endop <= '1';  -- Generate completion signal
 				fpu_in_flight <= '0';
 				fpu_transfer_active <= '0';
