@@ -15,7 +15,7 @@ This is the Minimig-AGA_MiSTer project - an FPGA implementation of the Amiga com
 - Keep track of the build's PID, you don't want to pkill builds from another instance!
 - create and run regression tests and correctness tests before building the rbf
 - Check if the process is there with ps instead of trying to kill it right away
-- Ask me 3 times before you attempt to run git checkout, you can try git diff or git show
+- Ask before you attempt to run git checkout, you can try git diff or git show
 - Never convert the existing SOF to RBF!
 - **Remember to check for multiple drivers issues before starting a build**
 
