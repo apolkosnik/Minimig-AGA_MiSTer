@@ -175,7 +175,18 @@ entity TG68KdotC_Kernel is
 		debug_changeMode		: out std_logic;
 		debug_setopcode		: out std_logic;
 		debug_exec_directSR	: out std_logic;
-		debug_exec_to_SR		: out std_logic
+		debug_exec_to_SR		: out std_logic;
+-- DEBUG: PMOVE Dn queue mechanism (BUG #65)
+		debug_pmove_dn_capture_data : out std_logic_vector(2 downto 0);
+		debug_pmove_dn_pending_valid : out std_logic;
+		debug_pmove_dn_mode : out std_logic;
+		debug_pmove_dn_regnum : out std_logic_vector(2 downto 0);
+		debug_pmove_dn_queue_0 : out std_logic_vector(2 downto 0);
+		debug_pmove_dn_queue_1 : out std_logic_vector(2 downto 0);
+		debug_pmove_dn_queue_valid_0 : out std_logic;
+		debug_pmove_dn_queue_valid_1 : out std_logic;
+		debug_pmove_dn_queue_rd_ptr : out std_logic;
+		debug_pmove_dn_queue_wr_ptr : out std_logic
 		);
 end TG68KdotC_Kernel;
 
@@ -1710,19 +1721,27 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					exec(alu_setFlags) <= set_exec(opcADD) OR set(opcADD) OR set(alu_setFlags);
 					exec_tas <= set_exec_tas;
 					END IF;	
-					exec(get_2ndOPC) <= set(get_2ndOPC) OR setopcode;
+				exec(get_2ndOPC) <= set(get_2ndOPC) OR setopcode;
 
 					-- BUG #65 FIX: PMOVE MMU→Dn destination queue with proper completion detection
 
-					-- Stage 1: Capture pending Dn selector when decode requests it
-					IF pmove_dn_capture_req='1' AND pmove_dn_pending_valid='0' THEN
-						pmove_dn_regnum_pending <= pmove_dn_capture_data;
-						pmove_dn_pending_valid <= '1';
-					END IF;
+				-- Stage 0: Clear pending on new instruction decode to prevent stale state
+				-- If previous F-line instruction set pending_valid='1' but was NOT a PMOVE,
+				-- it never enqueued and never cleared. Clear it here so next capture can proceed.
+				-- CRITICAL: Only clear if NOT capturing this cycle (otherwise blocks F-line capture)
+				IF setopcode='1' AND pmove_dn_capture_req='0' THEN
+					pmove_dn_pending_valid <= '0';
+				ELSIF pmove_dn_capture_req='1' THEN
+					pmove_dn_regnum_pending <= pmove_dn_capture_data;
+					pmove_dn_pending_valid <= '1';
+				END IF;
 
-					-- Stage 2: Enqueue selector when exec(get_2ndOPC) fires for PMOVE MMU→Dn
+					-- Stage 2: Enqueue selector when exec(pmmu_rd) fires for PMOVE MMU→Dn
+					-- BUG #65 FIX: Use exec(pmmu_rd) instead of exec(get_2ndOPC) to ensure
+					-- enqueue ONLY happens for validated PMOVE MMU→Dn operations, not for
+					-- all F-line instructions (FPU, coprocessor, etc.)
 					-- Only enqueue if queue is not full (check valid bit at write pointer)
-					IF exec(get_2ndOPC)='1' AND pmove_dn_pending_valid='1' THEN
+					IF exec(pmmu_rd)='1' AND pmove_dn_pending_valid='1' THEN
 						-- Check if write slot is available (use direct indexing based on wr_ptr bit)
 						IF (pmove_dn_queue_wr_ptr='0' AND pmove_dn_queue_valid(0)='0') OR
 						   (pmove_dn_queue_wr_ptr='1' AND pmove_dn_queue_valid(1)='0') THEN
@@ -1735,9 +1754,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								pmove_dn_queue_valid(1) <= '1';
 							END IF;
 							pmove_dn_queue_wr_ptr <= NOT pmove_dn_queue_wr_ptr;  -- Toggle 0↔1
-							pmove_dn_pending_valid <= '0';
+							pmove_dn_pending_valid <= '0';  -- Safe to clear after enqueueing
 
-							-- Activate pmove_dn_mode if this is the first entry (read slot was empty)
+							-- Activate pmove_dn_mode if this is the first entry (read slot was empty BEFORE enqueue)
+							-- Check uses OLD value of valid bit (before this cycle's assignment takes effect)
 							IF (pmove_dn_queue_rd_ptr='0' AND pmove_dn_queue_valid(0)='0') OR
 							   (pmove_dn_queue_rd_ptr='1' AND pmove_dn_queue_valid(1)='0') THEN
 								-- Queue was empty, this is first entry - activate mode and load selector
@@ -2249,7 +2269,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							set_Suppress_Base <= '1';
 							set_PCbase <= '1';
 						WHEN "100" =>				--#data
-							setnextpass <= '1';
+							-- BUG #65 FIX: Guard setnextpass - only set during decode, not exec(ea_build)
+							IF ea_build_now='1' AND decodeOPC='1' THEN
+								setnextpass <= '1';
+							END IF;
 							set_direct_data <= '1';
 							IF datatype="10" THEN
 								set(longaktion) <= '1';
@@ -3768,17 +3791,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
 							next_micro_state <= pmmu1;
 
-							-- BUG #59 FIX: CRITICAL! Capture Dn destination register from OPCODE(2:0)!
-							-- For PMOVE with Dn direct mode (bits 5:3 = 000):
-							--   Bits 2:0 = Dn register number (D0-D7)
-							--   Bits 11:9 are F-line prefix bits (meaningless for register select!)
-							-- PMOVE TT0,D2: opcode(5:3)=000, opcode(2:0)=010 (D2)
-							-- Must capture opcode(2:0), NOT opcode(11:9)!
-							-- BUG #60 FIX: Enable early capture during F-line decode to prevent consecutive PMOVE race
-							IF opcode(5 downto 3)="000" THEN
-								pmove_dn_capture_req <= '1';  -- Request capture NOW, not later in pmmu1
-								pmove_dn_capture_data <= opcode(2 downto 0);  -- Correct bits!
-							END IF;
+							-- BUG #65 FIX: Early capture of Dn selector during F-line decode
+							-- Captures opcode(2:0) BEFORE next instruction can overwrite it
+							-- Enqueue will only happen if pmmu1 validates this as PMOVE Dn mode
+							pmove_dn_capture_req <= '1';
+							pmove_dn_capture_data <= opcode(2 downto 0);
 
 							-- BUG #22 FIX: DO NOT build EA here! PMMU instructions build EA in pmmu1
 							-- after decoding the extension word. Early EA building causes duplicate
@@ -4698,8 +4715,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     -- PMOVE <MMU reg>,Dn - Read from MMU, write to Dn (brief(9)=1, RW=1)
                                     set(pmmu_rd) <= '1';
                                     set_exec(Regwrena) <= '1';
-                                    pmove_dn_capture_req <= '1';
-                                    pmove_dn_capture_data <= opcode(2 downto 0);  -- FIX: Dn register in bits 2:0!
                                 END IF;
                                 -- BUG #6 FIX: Check SZ bit for dual-word transfer, not just register type
                                 -- MC68030 spec: .D (SZ=1) means 64-bit transfer (CRP/SRP only, validated above)
@@ -4817,6 +4832,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
                             WHEN OTHERS =>
                                 -- Invalid PMMU instruction - trigger F-line exception
+                                -- Early capture at line 3782 speculatively captures ALL F000-F0FF,
+                                -- but if this isn't a valid PMOVE, we must clear the pending capture
+                                -- to prevent queue corruption
                                 trap_1111 <= '1';
                                 trapmake <= '1';
                         END CASE;
@@ -5373,5 +5391,17 @@ debug_changeMode <= '1' when set(changeMode)='1' else '0';
 debug_setopcode <= '1' when setopcode='1' else '0';
 debug_exec_directSR <= '1' when exec(directSR)='1' else '0';
 debug_exec_to_SR <= '1' when exec(to_SR)='1' else '0';
+
+-- DEBUG: PMOVE Dn queue mechanism (BUG #65)
+debug_pmove_dn_capture_data <= pmove_dn_capture_data;
+debug_pmove_dn_pending_valid <= pmove_dn_pending_valid;
+debug_pmove_dn_mode <= pmove_dn_mode;
+debug_pmove_dn_regnum <= pmove_dn_regnum;
+debug_pmove_dn_queue_0 <= pmove_dn_queue(0);
+debug_pmove_dn_queue_1 <= pmove_dn_queue(1);
+debug_pmove_dn_queue_valid_0 <= pmove_dn_queue_valid(0);
+debug_pmove_dn_queue_valid_1 <= pmove_dn_queue_valid(1);
+debug_pmove_dn_queue_rd_ptr <= pmove_dn_queue_rd_ptr;
+debug_pmove_dn_queue_wr_ptr <= pmove_dn_queue_wr_ptr;
 
 END; 
