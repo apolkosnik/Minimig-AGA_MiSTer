@@ -1,0 +1,760 @@
+MC68882 Floating-Point Coprocessor (FPU)
+Functional Specification
+========================================
+
+Document Version: 1.0
+Date: 2025-11-15
+Target: Minimig-AGA Implementation
+
+
+1. INTRODUCTION
+===============
+
+The MC68882 is Motorola's enhanced floating-point coprocessor designed to work
+with the MC68020/030/040 family of microprocessors. It implements the IEEE 754-1985
+binary floating-point arithmetic standard and provides hardware acceleration for
+floating-point operations. The MC68882 is a pin-compatible, higher-performance
+version of the MC68881.
+
+
+1.1 Key Features
+----------------
+
+- IEEE 754-1985 compliant floating-point arithmetic
+- Eight 80-bit floating-point data registers (FP0-FP7)
+- Support for seven data formats (byte, word, long, single, double, extended, packed-BCD)
+- 46 floating-point instructions
+- Pipelined architecture for concurrent operation with main CPU
+- Coprocessor interface protocol for seamless integration
+- Clock speeds: 16 MHz, 20 MHz, 25 MHz, 33 MHz, 40 MHz, 50 MHz variants
+- Full 32-bit data bus interface
+
+
+1.2 Differences from MC68881
+-----------------------------
+
+The MC68882 offers improved performance over the MC68881:
+- Enhanced pipelined execution (deeper pipeline)
+- Concurrent instruction execution capability
+- Faster execution times for most instructions
+- Improved throughput for transcendental functions
+- Same instruction set and programmer's model (software compatible)
+
+
+2. ARCHITECTURE OVERVIEW
+========================
+
+2.1 Programmer's Model
+----------------------
+
+The MC68882 contains three types of user-visible registers:
+
+1. Eight 80-bit Floating-Point Data Registers (FP0-FP7)
+   - Store all values in extended-precision format internally
+   - Always maintain full 80-bit precision
+   - Organized as: 1 sign bit, 15-bit exponent, 64-bit mantissa
+
+2. Three 32-bit Control Registers:
+
+   a) Floating-Point Control Register (FPCR)
+      - Exception enable byte
+      - Mode control byte (rounding mode, precision control)
+
+   b) Floating-Point Status Register (FPSR)
+      - Exception status byte
+      - Quotient byte (remainder)
+      - Condition code byte (N, Z, I, NAN)
+      - Accrued exception byte
+
+   c) Floating-Point Instruction Address Register (FPIAR)
+      - Contains address of last floating-point instruction executed
+      - Used for exception handling
+
+
+2.2 Internal Architecture
+--------------------------
+
+The MC68882 consists of several functional units:
+
+- Bus Interface Unit (BIU)
+  - Handles all communication with main processor
+  - Implements coprocessor interface protocol
+  - Manages instruction and operand transfers
+
+- Execution Unit
+  - Performs all arithmetic operations
+  - Contains the datapath and ALU
+  - Implements the 80-bit extended precision calculations
+
+- Microcode Control Unit
+  - Decodes and sequences FPU instructions
+  - Controls datapath operations
+  - Manages pipeline stages
+
+- Register File
+  - Eight 80-bit FP registers
+  - Control/Status registers
+
+
+2.3 Pipeline Architecture
+--------------------------
+
+The MC68882 features a three-stage pipeline:
+
+1. Instruction Decode Stage
+   - Fetches and decodes FPU instructions
+   - Determines operand requirements
+
+2. Operand Fetch Stage
+   - Retrieves operands from registers or memory
+   - Converts operands to extended precision if necessary
+
+3. Execution Stage
+   - Performs the arithmetic operation
+   - Updates status flags
+   - Writes results
+
+This pipelining allows the MC68882 to begin processing a new instruction before
+the previous instruction has completed, significantly improving throughput.
+
+
+3. DATA FORMATS
+===============
+
+The MC68882 supports seven data formats for operands:
+
+
+3.1 Integer Formats
+-------------------
+
+Byte Integer (8-bit)
+   - Range: -128 to +127
+   - Two's complement representation
+
+Word Integer (16-bit)
+   - Range: -32,768 to +32,767
+   - Two's complement representation
+
+Long Word Integer (32-bit)
+   - Range: -2,147,483,648 to +2,147,483,647
+   - Two's complement representation
+
+
+3.2 Real Floating-Point Formats (IEEE 754)
+-------------------------------------------
+
+Single Precision (32-bit)
+   - 1 sign bit, 8-bit exponent, 23-bit mantissa
+   - Implied leading 1 in mantissa (24-bit effective precision)
+   - Exponent bias: 127
+   - Range: approximately ±1.2E-38 to ±3.4E+38
+   - Precision: ~7 decimal digits
+
+Double Precision (64-bit)
+   - 1 sign bit, 11-bit exponent, 52-bit mantissa
+   - Implied leading 1 in mantissa (53-bit effective precision)
+   - Exponent bias: 1023
+   - Range: approximately ±2.2E-308 to ±1.8E+308
+   - Precision: ~16 decimal digits
+
+Extended Precision (80-bit) [Internal Format]
+   - 1 sign bit, 15-bit exponent, 64-bit mantissa
+   - Explicit leading bit in mantissa (no implied bit)
+   - Exponent bias: 16383
+   - Range: approximately ±3.4E-4932 to ±1.2E+4932
+   - Precision: ~19 decimal digits
+
+
+3.3 Packed Decimal String Format (96-bit)
+------------------------------------------
+
+- Three 32-bit words
+- Decimal exponent and sign
+- 17-digit packed BCD mantissa
+- Used for decimal I/O conversion
+
+
+4. INSTRUCTION SET
+==================
+
+The MC68882 provides 46 floating-point instructions organized into categories:
+
+
+4.1 Data Movement Instructions
+-------------------------------
+
+FMOVE      - Move floating-point data
+FMOVEM     - Move multiple FP registers
+FMOVECR    - Move constant ROM value to FP register
+
+
+4.2 Monadic Arithmetic Operations
+----------------------------------
+
+FABS       - Absolute value
+FNEG       - Negate
+FSQRT      - Square root
+FINT       - Integer part (round to integer)
+FINTRZ     - Integer part (round toward zero)
+
+
+4.3 Dyadic Arithmetic Operations
+---------------------------------
+
+FADD       - Add
+FSUB       - Subtract
+FMUL       - Multiply
+FDIV       - Divide
+FMOD       - Modulo remainder
+FREM       - IEEE remainder
+FSCALE     - Scale exponent
+FSGLDIV    - Single-precision divide
+FSGLMUL    - Single-precision multiply
+
+
+4.4 Transcendental Functions
+-----------------------------
+
+FSIN       - Sine
+FCOS       - Cosine
+FTAN       - Tangent
+FSINCOS    - Simultaneous sine and cosine
+FASIN      - Arc sine
+FACOS      - Arc cosine
+FATAN      - Arc tangent
+FSINH      - Hyperbolic sine
+FCOSH      - Hyperbolic cosine
+FTANH      - Hyperbolic tangent
+FATANH     - Hyperbolic arc tangent
+FETOX      - e to the x power
+FETOXM1    - e to the x power minus 1
+FTWOTOX    - 2 to the x power
+FTENTOX    - 10 to the x power
+FLOG2      - Log base 2
+FLOG10     - Log base 10
+FLOGN      - Natural log (base e)
+FLOGNP1    - Log base e of (x+1)
+
+
+4.5 Comparison Instructions
+----------------------------
+
+FCMP       - Compare
+FTST       - Test (compare with 0.0)
+
+
+4.6 Branch Instructions
+-----------------------
+
+FBcc       - Branch on FP condition
+FDBcc      - Decrement and branch on FP condition
+FScc       - Set byte on FP condition
+FTRAPcc    - Trap on FP condition
+
+
+4.7 Miscellaneous Instructions
+-------------------------------
+
+FNOP       - No operation
+FRESTORE   - Restore internal state
+FSAVE      - Save internal state
+
+
+4.8 Condition Codes
+-------------------
+
+32 floating-point condition codes available for branches:
+F, EQ, OGT, OGE, OLT, OLE, OGL, OR, UN, UEQ, UGT, UGE, ULT, ULE, NE, T,
+SF, SEQ, GT, GE, LT, LE, GL, GLE, NGLE, NGL, NLE, NLT, NGE, NGT, SNE, ST
+
+
+5. COPROCESSOR INTERFACE PROTOCOL
+==================================
+
+5.1 Signal Description
+----------------------
+
+The MC68882 connects to the host processor through a coprocessor interface:
+
+Signals:
+  CLK       - System clock input
+  A[4:0]    - Address bus (coprocessor register select)
+  D[31:0]   - Bidirectional data bus
+  CS        - Chip select (active low)
+  DS        - Data strobe (active low)
+  R/W       - Read/Write control
+  SIZE[1:0] - Transfer size
+  RESET     - Reset input (active low)
+  SENSE     - FPU presence detect (tied to ground when FPU present)
+  DSACK[1:0]- Data transfer acknowledge
+
+
+5.2 Interface Protocol
+----------------------
+
+The MC68882 uses the MC68020 coprocessor interface protocol:
+
+1. Main CPU initiates F-line instruction (opcode $F000-$FFFF)
+2. CPU asserts CS and presents coprocessor ID on A[4:2]
+3. FPU responds if ID matches
+4. FPU decodes instruction and determines requirements
+5. FPU may request operands from CPU via protocol
+6. FPU executes instruction
+7. FPU may return results to CPU
+8. FPU signals completion via DSACK
+
+
+5.3 Concurrent Operation
+------------------------
+
+Key feature: The MC68882 can execute in parallel with the main CPU
+
+- CPU can continue executing non-FP instructions while FPU operates
+- FPU signals "instruction complete" when done
+- CPU checks FPU status before issuing dependent instructions
+- Enables significant performance improvements in FP-intensive code
+
+
+6. EXCEPTION HANDLING
+=====================
+
+6.1 Exception Types
+-------------------
+
+The MC68882 supports eight exception conditions:
+
+1. Branch/Set on Unordered (BSUN)
+   - Branch on unordered comparison result
+
+2. Inexact (INEX)
+   - Result cannot be represented exactly
+   - Result was rounded
+
+3. Divide by Zero (DZ)
+   - Division by zero attempted
+
+4. Underflow (UNFL)
+   - Result too small to represent
+   - Exponent underflow
+
+5. Operand Error (OPERR)
+   - Invalid operand for operation
+   - Examples: SQRT of negative number
+
+6. Overflow (OVFL)
+   - Result too large to represent
+   - Exponent overflow
+
+7. Signaling NaN (SNAN)
+   - Operation on signaling NaN encountered
+
+8. Inexact Decimal Input (INEX2)
+   - Packed decimal conversion inexact
+
+
+6.2 Exception Enable and Handling
+----------------------------------
+
+- Each exception has an enable bit in FPCR
+- When enabled and exception occurs:
+  - FPSR exception status bit set
+  - Pre-instruction exception: reported before execution
+  - Post-instruction exception: reported after execution
+  - CPU takes exception via FP exception vector
+
+- When disabled:
+  - FPSR accrued exception bit set
+  - Default result provided
+  - Execution continues
+
+
+6.3 Special Values
+------------------
+
+The MC68882 supports IEEE 754 special values:
+
+- Zero (+0, -0)
+- Infinity (+INF, -INF)
+- Not a Number (NaN)
+  - Quiet NaN (QNaN): propagates through operations
+  - Signaling NaN (SNaN): signals exception
+- Denormalized numbers (gradual underflow)
+
+
+7. PERFORMANCE CHARACTERISTICS
+==============================
+
+7.1 Execution Times (Approximate)
+---------------------------------
+
+The following are typical execution times for a 16 MHz MC68882:
+
+Basic Operations:
+  FMOVE (reg-reg):       1 cycle
+  FADD/FSUB:             2-5 cycles
+  FMUL:                  2-4 cycles
+  FDIV:                  20-44 cycles (data dependent)
+  FSQRT:                 37-40 cycles
+
+Transcendental Functions:
+  FSIN/FCOS/FTAN:        71-111 cycles (argument dependent)
+  FATAN:                 82-137 cycles
+  FETOX:                 90-130 cycles
+  FLOG:                  99-153 cycles
+
+Note: Higher clock rates scale proportionally. MC68882 is generally
+      1.5-2x faster than MC68881 for most operations.
+
+
+7.2 Throughput Optimization
+----------------------------
+
+Maximum throughput achieved through:
+- Instruction pipelining
+- Concurrent CPU/FPU operation
+- Efficient register usage (avoid memory moves)
+- Use of FSGLMUL/FSGLDIV for single-precision when appropriate
+
+
+8. INTEGRATION REQUIREMENTS
+===========================
+
+8.1 Hardware Requirements
+-------------------------
+
+For integration into Amiga/Minimig system:
+
+Clock:
+  - 14.18 MHz (PAL) or 14.32 MHz (NTSC) for A1200
+  - Can use 16 MHz part with slight overclocking
+  - 68020/030 systems: match processor clock
+
+Chip Select Generation:
+  - Decode FC0-FC2 for coprocessor access space
+  - Assert CS when coprocessor ID = 001 (FPU)
+  - Reference: see A1200 expansion notes section 2.9.2
+
+SENSE Signal:
+  - Tie to ground when FPU present
+  - Allows software to detect FPU presence
+  - Used by operating system and applications
+
+Power:
+  - Vcc: +5V ±5%
+  - Typical current: 500-700 mA @ 16 MHz
+
+
+8.2 Software Requirements
+--------------------------
+
+Operating System Support:
+  - AmigaOS floating-point library (mathieee*.library)
+  - Exception vector setup (TRAP #11)
+  - Context switching (FSAVE/FRESTORE)
+  - FPU detection code
+
+Compiler Support:
+  - 68881/68882 code generation option
+  - IEEE 754 compliance
+  - Inline FPU instructions or library calls
+
+
+8.3 Memory Map (Amiga Implementation)
+--------------------------------------
+
+The FPU coprocessor registers are accessed through F-line instructions
+and do not occupy a dedicated memory address range. Integration into
+the Amiga memory map occurs at the processor level.
+
+Detection:
+  - Check SENSE signal (grounded if present)
+  - Attempt FPU instruction with exception handler
+  - Check AttnFlags in ExecBase ($00000128)
+    - Bit 4 (AFF_68881): MC68881/882 present
+    - Bit 6 (AFF_FPU40): MC68040 FPU present
+
+
+9. DESIGN CONSIDERATIONS
+========================
+
+9.1 Timing Constraints
+----------------------
+
+For FPGA implementation:
+- Synchronous design recommended
+- All FPU signals should be registered
+- Meet coprocessor interface timing requirements
+- Account for clock domain crossing if async clocks used
+
+
+9.2 Testing and Validation
+---------------------------
+
+Recommended test approach:
+- IEEE 754 compliance test suites
+- Motorola diagnostic software
+- Application benchmarks (LINPACK, Dhrystone with FP)
+- Exception handling tests
+- Denormal number handling
+
+
+9.3 Implementation Options
+---------------------------
+
+For Minimig-AGA_MiSTer implementation:
+
+Full Hardware Implementation:
+  + Maximum performance
+  + Cycle-accurate
+  - High resource usage (LUTs, DSP blocks)
+  - Complex design
+
+Microcode/Soft Implementation:
+  + Lower resource usage
+  + Easier to debug
+  - Slower performance
+  - May not be cycle-accurate
+
+Hybrid Approach:
+  + Balance performance and resources
+  + Hardware for common ops (add, mul, div)
+  + Microcode for transcendentals
+  - Moderate complexity
+
+
+10. REGISTERS DETAILED SPECIFICATION
+====================================
+
+10.1 Floating-Point Control Register (FPCR) - 32 bits
+------------------------------------------------------
+
+Bit Layout:
+
+31                 16 15     12 11  8 7    6 5  4 3    0
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|   Reserved (0)    |Exception|Mode |Prec|Rnd|Reserved|
+|                   | Enable  |Ctrl |    |Mode|        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+Exception Enable Byte (bits 15-8):
+  Bit 15: BSUN enable
+  Bit 14: SNAN enable
+  Bit 13: OPERR enable
+  Bit 12: OVFL enable
+  Bit 11: UNFL enable
+  Bit 10: DZ enable
+  Bit 9:  INEX2 enable
+  Bit 8:  INEX enable
+
+Mode Control Byte (bits 7-4):
+  Bits 7-6: Rounding Mode
+    00 = Round to nearest (RN)
+    01 = Round toward zero (RZ)
+    10 = Round toward minus infinity (RM)
+    11 = Round toward plus infinity (RP)
+
+  Bits 5-4: Rounding Precision
+    00 = Extend to extended precision
+    01 = Single precision
+    10 = Double precision
+    11 = Undefined
+
+
+10.2 Floating-Point Status Register (FPSR) - 32 bits
+-----------------------------------------------------
+
+Bit Layout:
+
+31  28 27  24 23            16 15   8 7      3 2   0
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|Cond | Quotient  | Exception   |Accrued|Reserved|0|
+|Code | Sign      | Status      | Except|        | |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+Condition Code Byte (bits 27-24):
+  Bit 27: N (Negative)
+  Bit 26: Z (Zero)
+  Bit 25: I (Infinity)
+  Bit 24: NAN (Not a Number)
+
+Quotient Byte (bits 23-16):
+  Bit 23: Sign of quotient
+  Bits 22-16: Seven least significant bits of quotient
+  (Used by FMOD, FREM instructions)
+
+Exception Status Byte (bits 15-8):
+  Bit 15: BSUN
+  Bit 14: SNAN
+  Bit 13: OPERR
+  Bit 12: OVFL
+  Bit 11: UNFL
+  Bit 10: DZ
+  Bit 9:  INEX2
+  Bit 8:  INEX
+
+Accrued Exception Byte (bits 7-3):
+  Bit 7:  IOP (Invalid operation)
+  Bit 6:  OVFL (Overflow)
+  Bit 5:  UNFL (Underflow)
+  Bit 4:  DZ (Divide by zero)
+  Bit 3:  INEX (Inexact)
+
+
+10.3 Floating-Point Instruction Address Register (FPIAR)
+---------------------------------------------------------
+
+32-bit register containing the program counter address of the last
+floating-point instruction executed. Used for exception handling and
+debugging.
+
+
+11. CONSTANT ROM
+================
+
+The MC68882 includes a ROM containing common constants for improved
+performance and accuracy. Accessed via FMOVECR instruction.
+
+Offset  Value                           Description
+------  -----                           -----------
+$00     Pi (π)                          3.14159265358979323846...
+$0B     Log10(2)                        0.30102999566398119521...
+$0C     e                               2.71828182845904523536...
+$0D     Log2(e)                         1.44269504088896340736...
+$0E     Log10(e)                        0.43429448190325182765...
+$0F     Zero                            0.0
+$30     ln(2)                           0.69314718055994530942...
+$31     ln(10)                          2.30258509299404568402...
+$32     1                               1.0
+$33     10                              10.0
+$34     100                             100.0
+$35     1E4                             10,000.0
+$36     1E8                             100,000,000.0
+$37     1E16                            10,000,000,000,000,000.0
+$38     1E32                            1.0E+32
+$39     1E64                            1.0E+64
+$3A     1E128                           1.0E+128
+$3B     1E256                           1.0E+256
+$3C     1E512                           1.0E+512
+$3D     1E1024                          1.0E+1024
+$3E     1E2048                          1.0E+2048
+$3F     1E4096                          1.0E+4096
+
+
+12. REFERENCES
+==============
+
+[1] MC68881/MC68882 Floating-Point Coprocessor User's Manual
+    Motorola Inc., 1987 (Rev. 1)
+
+[2] IEEE Standard for Binary Floating-Point Arithmetic
+    ANSI/IEEE Std 754-1985
+
+[3] MC68020 32-Bit Microprocessor User's Manual
+    Motorola Inc., Third Edition
+
+[4] Amiga 1200 Hardware Reference Manual
+    Commodore-Amiga Inc., 1992
+
+[5] "A1200 Hardware Developer / Expansion Slot Notes"
+    by George Robbins, included in A1200 Functional Specification
+
+
+13. REVISION HISTORY
+====================
+
+Version 1.0 - 2025-11-15
+  - Initial specification document
+  - Created for Minimig-AGA_MiSTer project
+  - Covers MC68882 architecture, instruction set, and integration
+
+
+14. APPENDIX A - IMPLEMENTATION NOTES
+======================================
+
+14.1 Resource Estimates (FPGA)
+-------------------------------
+
+Estimated resource requirements for Cyclone/Stratix family FPGAs:
+
+Minimal Implementation (Add/Sub/Mul/Div only):
+  - Logic Elements: ~8,000-12,000 LEs
+  - Memory: ~10 KB
+  - DSP Blocks: 4-8 multipliers
+  - Clock: 50-100 MHz achievable
+
+Full Implementation (All instructions):
+  - Logic Elements: ~25,000-40,000 LEs
+  - Memory: ~30 KB (microcode + constants)
+  - DSP Blocks: 8-16 multipliers
+  - Clock: 40-80 MHz achievable
+
+Note: Actual requirements depend on optimization level and features implemented.
+
+
+14.2 Development Phases
+-----------------------
+
+Recommended implementation phases:
+
+Phase 1: Basic Infrastructure
+  - Coprocessor interface protocol
+  - Register file (FP0-FP7, FPCR, FPSR, FPIAR)
+  - Data format conversions
+  - FMOVE instruction
+
+Phase 2: Basic Arithmetic
+  - FADD, FSUB
+  - FMUL
+  - FDIV, FSQRT
+  - FCMP, FTST
+  - FABS, FNEG
+
+Phase 3: Extended Arithmetic
+  - FMOD, FREM
+  - FSCALE
+  - FINT, FINTRZ
+  - FSGLDIV, FSGLMUL
+
+Phase 4: Transcendental Functions
+  - FSIN, FCOS, FTAN, FSINCOS
+  - FASIN, FACOS, FATAN
+  - FETOX, FTWOTOX, FTENTOX
+  - FLOGN, FLOG2, FLOG10
+
+Phase 5: System Integration
+  - Exception handling
+  - FSAVE/FRESTORE
+  - FBcc, FDBcc, FScc, FTRAPcc
+  - Full software compatibility testing
+
+
+14.3 Testing Strategy
+---------------------
+
+Verification approach:
+
+1. Unit Tests
+   - Individual instruction verification
+   - IEEE 754 compliance checking
+   - Boundary condition testing
+
+2. Integration Tests
+   - Coprocessor protocol compliance
+   - CPU/FPU concurrent operation
+   - Exception handling
+
+3. System Tests
+   - Run actual Amiga software
+   - Benchmarks (FFP, LINPACK)
+   - 3D graphics applications
+   - Scientific software
+
+4. Compliance Tests
+   - IEEE 754 test suites
+   - Motorola diagnostic ROMs
+   - Known algorithm results
+
+
+===============================================================================
+End of MC68882 FPU Specification
+===============================================================================
