@@ -1541,9 +1541,11 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						IPL_vec <= last_data_read(7 downto 0);    --	TH
 					END IF;	
 				-- BUG #70 SIMPLIFICATION: Capture pmove_dn register number in pmmu1 state (per BUILD_238)
-				-- When PMOVE Dn mode detected, capture register selector from extension word
-				IF micro_state = pmmu1 AND last_opc_read(8 downto 6) = "000" THEN
-					pmove_dn_regnum <= last_opc_read(2 downto 0);  -- D0-D7 selector
+				-- BUG #71 FIX: Check opcode(5:3) for Dn mode, NOT last_opc_read(8:6)!
+				-- opcode(5:3)="000" = Dn mode (data register direct addressing)
+				-- last_opc_read = extension word, NOT opcode - wrong signal was used!
+				IF micro_state = pmmu1 AND opcode(5 downto 3) = "000" THEN
+					pmove_dn_regnum <= last_opc_read(2 downto 0);  -- D0-D7 selector from extension word
 					pmove_dn_mode <= '1';  -- Flag that PMOVE uses Dn mode
 				END IF;
 					IF state="00" THEN
