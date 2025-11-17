@@ -176,17 +176,9 @@ entity TG68KdotC_Kernel is
 		debug_setopcode		: out std_logic;
 		debug_exec_directSR	: out std_logic;
 		debug_exec_to_SR		: out std_logic;
--- DEBUG: PMOVE Dn queue mechanism (BUG #65)
-		debug_pmove_dn_capture_data : out std_logic_vector(2 downto 0);
-		debug_pmove_dn_pending_valid : out std_logic;
+-- DEBUG: PMOVE Dn simplified mechanism (BUG #70)
 		debug_pmove_dn_mode : out std_logic;
-		debug_pmove_dn_regnum : out std_logic_vector(2 downto 0);
-		debug_pmove_dn_queue_0 : out std_logic_vector(2 downto 0);
-		debug_pmove_dn_queue_1 : out std_logic_vector(2 downto 0);
-		debug_pmove_dn_queue_valid_0 : out std_logic;
-		debug_pmove_dn_queue_valid_1 : out std_logic;
-		debug_pmove_dn_queue_rd_ptr : out std_logic;
-		debug_pmove_dn_queue_wr_ptr : out std_logic
+		debug_pmove_dn_regnum : out std_logic_vector(2 downto 0)
 		);
 end TG68KdotC_Kernel;
 
@@ -419,22 +411,11 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_reg_rdat    : std_logic_vector(31 downto 0);
 	signal pmmu_src_data    : std_logic_vector(31 downto 0);
 	signal pmmu_dn_data     : std_logic_vector(31 downto 0);  -- BUG #39: Direct register file read for Dn mode
-	signal pmove_dn_regnum  : std_logic_vector(2 downto 0);   -- Active data register selector for PMOVE Dn mode
-	signal pmove_dn_regnum_pending : std_logic_vector(2 downto 0);  -- Stage-1 selector capture
-	signal pmove_dn_pending_valid  : std_logic;               -- Tracks pending selector validity
-	signal pmove_dn_mode    : std_logic;                      -- Indicates current PMOVE uses Dn source/dest
-	signal pmove_dn_capture_req : std_logic;                  -- Combinational request to capture selector
-	signal pmove_dn_capture_data : std_logic_vector(2 downto 0);
-
-	-- BUG #65 FIX: PMOVE queue (2-entry FIFO) for BOTH directions
-	-- Prevents consecutive PMOVE operations from clobbering each other's selectors
-	type pmove_dn_queue_type is array (0 to 1) of std_logic_vector(2 downto 0);
-	signal pmove_dn_queue : pmove_dn_queue_type;
-	signal pmove_dn_queue_valid : std_logic_vector(1 downto 0);  -- Valid flags for each queue entry
-	signal pmove_dn_queue_wr_ptr : std_logic;  -- Write pointer (0 or 1)
-	signal pmove_dn_queue_rd_ptr : std_logic;  -- Read pointer (0 or 1)
-	signal pmove_dn_writeback_active : std_logic;  -- Active MMU→Dn writeback in progress
-	signal pmove_dn_write_active : std_logic;     -- Active Dn→MMU write in progress (SOURCE FIX)
+	-- BUG #70 SIMPLIFICATION (per BUILD_238): Simple 2-signal mechanism
+	-- BUILD_238 showed complex queue (for DESTINATION) was broken, simple mechanism (for SOURCE) worked
+	-- Unify both SOURCE and DESTINATION to use same simple capture/clear mechanism
+	signal pmove_dn_regnum  : std_logic_vector(2 downto 0);   -- Data register selector (D0-D7) captured in pmmu1 state
+	signal pmove_dn_mode    : std_logic;                      -- Flag: '1' when PMOVE uses Dn mode (set in pmmu1, cleared in setexecOPC)
 	signal pmmu_mem_wdat_hold : std_logic_vector(31 downto 0);
 	signal pmmu_mem_wdat_valid : std_logic;
 	signal pmmu_reg_part_d  : std_logic;
@@ -1485,18 +1466,9 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					make_berr <= '0';
 					memmask <= "111111";
 					exec_write_back <= '0';
+					-- BUG #70 SIMPLIFICATION: Simple 2-signal initialization
 					pmove_dn_regnum <= (others => '0');
-					pmove_dn_regnum_pending <= (others => '0');
-					pmove_dn_pending_valid <= '0';
 					pmove_dn_mode <= '0';
-					-- BUG #65 FIX: Initialize queue for both Dn→MMU and MMU→Dn
-					pmove_dn_queue(0) <= (others => '0');
-					pmove_dn_queue(1) <= (others => '0');
-					pmove_dn_queue_valid <= "00";
-					pmove_dn_queue_wr_ptr <= '0';
-					pmove_dn_queue_rd_ptr <= '0';
-					pmove_dn_writeback_active <= '0';
-					pmove_dn_write_active <= '0';  -- SOURCE FIX: Track Dn→MMU write completion
 			ELSE
 --				IPL_nr <= NOT IPL;
 				IF clkena_in='1' THEN
@@ -1568,6 +1540,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					IF micro_state=trap0 AND IPL_autovector='0' THEN 			
 						IPL_vec <= last_data_read(7 downto 0);    --	TH
 					END IF;	
+				-- BUG #70 SIMPLIFICATION: Capture pmove_dn register number in pmmu1 state (per BUILD_238)
+				-- When PMOVE Dn mode detected, capture register selector from extension word
+				IF micro_state = pmmu1 AND last_opc_read(8 downto 6) = "000" THEN
+					pmove_dn_regnum <= last_opc_read(2 downto 0);  -- D0-D7 selector
+					pmove_dn_mode <= '1';  -- Flag that PMOVE uses Dn mode
+				END IF;
 					IF state="00" THEN
 						last_opc_read <= data_read(15 downto 0);
 						last_opc_pc <= tg68_pc;--TH
@@ -1720,122 +1698,11 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					exec(alu_move) <= set_exec(opcMOVE) OR set(opcMOVE) OR set(alu_move);
 					exec(alu_setFlags) <= set_exec(opcADD) OR set(opcADD) OR set(alu_setFlags);
 					exec_tas <= set_exec_tas;
+					-- BUG #70 SIMPLIFICATION: Clear pmove_dn_mode when instruction completes
+					pmove_dn_mode <= '0';
 					END IF;	
 				exec(get_2ndOPC) <= set(get_2ndOPC) OR setopcode;
 
-					-- BUG #65 FIX: PMOVE MMU→Dn destination queue with proper completion detection
-
-				-- Stage 0: Clear pending on new instruction decode to prevent stale state
-				-- If previous F-line instruction set pending_valid='1' but was NOT a PMOVE,
-				-- it never enqueued and never cleared. Clear it here so next capture can proceed.
-				-- CRITICAL: Only clear if NOT capturing this cycle (otherwise blocks F-line capture)
-				IF setopcode='1' AND pmove_dn_capture_req='0' THEN
-					pmove_dn_pending_valid <= '0';
-				ELSIF pmove_dn_capture_req='1' THEN
-					pmove_dn_regnum_pending <= pmove_dn_capture_data;
-					pmove_dn_pending_valid <= '1';
-				END IF;
-
-					-- Stage 2: Enqueue selector when exec(pmmu_rd) fires for PMOVE MMU→Dn
-					-- BUG #65 FIX: Use exec(pmmu_rd) instead of exec(get_2ndOPC) to ensure
-					-- enqueue ONLY happens for validated PMOVE MMU→Dn operations, not for
-					-- all F-line instructions (FPU, coprocessor, etc.)
-					-- Only enqueue if queue is not full (check valid bit at write pointer)
-					IF exec(pmmu_rd)='1' AND pmove_dn_pending_valid='1' THEN
-						-- Check if write slot is available (use direct indexing based on wr_ptr bit)
-						IF (pmove_dn_queue_wr_ptr='0' AND pmove_dn_queue_valid(0)='0') OR
-						   (pmove_dn_queue_wr_ptr='1' AND pmove_dn_queue_valid(1)='0') THEN
-							-- Enqueue: Write selector to queue at write pointer
-							IF pmove_dn_queue_wr_ptr='0' THEN
-								pmove_dn_queue(0) <= pmove_dn_regnum_pending;
-								pmove_dn_queue_valid(0) <= '1';
-							ELSE
-								pmove_dn_queue(1) <= pmove_dn_regnum_pending;
-								pmove_dn_queue_valid(1) <= '1';
-							END IF;
-							pmove_dn_queue_wr_ptr <= NOT pmove_dn_queue_wr_ptr;  -- Toggle 0↔1
-							pmove_dn_pending_valid <= '0';  -- Safe to clear after enqueueing
-
-							-- Activate pmove_dn_mode if this is the first entry (read slot was empty BEFORE enqueue)
-							-- Check uses OLD value of valid bit (before this cycle's assignment takes effect)
-							IF (pmove_dn_queue_rd_ptr='0' AND pmove_dn_queue_valid(0)='0') OR
-							   (pmove_dn_queue_rd_ptr='1' AND pmove_dn_queue_valid(1)='0') THEN
-								-- Queue was empty, this is first entry - activate mode and load selector
-								pmove_dn_regnum <= pmove_dn_regnum_pending;
-								pmove_dn_mode <= '1';
-								pmove_dn_writeback_active <= '0';  -- Not yet in writeback
-								pmove_dn_write_active <= '0';      -- Not yet in write (SOURCE FIX)
-							END IF;
-						END IF;
-					END IF;
-
-					-- Stage 3a: Track Dn→MMU write completion (SOURCE FIX)
-					-- Mark write active when exec(pmmu_wr) fires
-					IF exec(pmmu_wr)='1' AND pmove_dn_mode='1' AND pmove_dn_write_active='0' AND pmove_dn_writeback_active='0' THEN
-						-- Mark write as active (will complete next cycle)
-						pmove_dn_write_active <= '1';
-					END IF;
-
-					-- Stage 3b: Dequeue when MMU→Dn writeback completes (exec(Regwrena)='1')
-					IF exec(Regwrena)='1' AND pmove_dn_mode='1' AND pmove_dn_writeback_active='0' AND pmove_dn_write_active='0' THEN
-						-- Mark writeback as active (will complete next cycle)
-						pmove_dn_writeback_active <= '1';
-					END IF;
-
-					-- Complete Dn→MMU write and dequeue (SOURCE FIX)
-					IF pmove_dn_write_active='1' THEN
-						-- Dequeue: Mark current entry as invalid (clear valid bit at read pointer)
-						IF pmove_dn_queue_rd_ptr='0' THEN
-							pmove_dn_queue_valid(0) <= '0';
-						ELSE
-							pmove_dn_queue_valid(1) <= '0';
-						END IF;
-						pmove_dn_queue_rd_ptr <= NOT pmove_dn_queue_rd_ptr;  -- Toggle 0↔1
-						pmove_dn_write_active <= '0';
-
-						-- Check if there's another entry in queue (at the NEW read pointer location AFTER toggle)
-						IF (pmove_dn_queue_rd_ptr='0' AND pmove_dn_queue_valid(1)='1') OR
-						   (pmove_dn_queue_rd_ptr='1' AND pmove_dn_queue_valid(0)='1') THEN
-							-- Load next selector from queue (AFTER toggle: rd_ptr=0→slot 1, rd_ptr=1→slot 0)
-							IF pmove_dn_queue_rd_ptr='0' THEN
-								pmove_dn_regnum <= pmove_dn_queue(1);
-							ELSE
-								pmove_dn_regnum <= pmove_dn_queue(0);
-							END IF;
-							pmove_dn_mode <= '1';  -- Keep mode active
-						ELSE
-							-- Queue is now empty, clear mode
-							pmove_dn_mode <= '0';
-						END IF;
-					END IF;
-
-					-- Complete MMU→Dn writeback and dequeue
-					IF pmove_dn_writeback_active='1' THEN
-						-- Dequeue: Mark current entry as invalid (clear valid bit at read pointer)
-						IF pmove_dn_queue_rd_ptr='0' THEN
-							pmove_dn_queue_valid(0) <= '0';
-						ELSE
-							pmove_dn_queue_valid(1) <= '0';
-						END IF;
-						pmove_dn_queue_rd_ptr <= NOT pmove_dn_queue_rd_ptr;  -- Toggle 0↔1
-						pmove_dn_writeback_active <= '0';
-
-						-- Check if there's another entry in queue (at the NEW read pointer location AFTER toggle)
-						-- BUG FIX: After toggle, check the matching slot (rd_ptr=0→slot 0, rd_ptr=1→slot 1)
-						IF (pmove_dn_queue_rd_ptr='0' AND pmove_dn_queue_valid(1)='1') OR
-						   (pmove_dn_queue_rd_ptr='1' AND pmove_dn_queue_valid(0)='1') THEN
-							-- Load next selector from queue (AFTER toggle: rd_ptr=0→slot 1, rd_ptr=1→slot 0)
-							IF pmove_dn_queue_rd_ptr='0' THEN
-								pmove_dn_regnum <= pmove_dn_queue(1);
-							ELSE
-								pmove_dn_regnum <= pmove_dn_queue(0);
-							END IF;
-							pmove_dn_mode <= '1';  -- Keep mode active
-						ELSE
-							-- Queue is now empty, clear mode
-							pmove_dn_mode <= '0';
-						END IF;
-					END IF;
 				END IF;
 			END IF;
 		END PROCESS;
@@ -2014,8 +1881,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		setstackaddr <= '0';
 		writePC <= '0';
 		ea_build_now <= '0';
-		pmove_dn_capture_req <= '0';
-		pmove_dn_capture_data <= (others => '0');
 --		set_rot_bits <= "00";
 		set_rot_bits <= opcode(4 downto 3);
 		set_rot_cnt <= "000001";
@@ -3791,12 +3656,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
 							next_micro_state <= pmmu1;
 
-							-- BUG #65 FIX: Early capture of Dn selector during F-line decode
-							-- Captures opcode(2:0) BEFORE next instruction can overwrite it
-							-- Enqueue will only happen if pmmu1 validates this as PMOVE Dn mode
-							pmove_dn_capture_req <= '1';
-							pmove_dn_capture_data <= opcode(2 downto 0);
-
 							-- BUG #22 FIX: DO NOT build EA here! PMMU instructions build EA in pmmu1
 							-- after decoding the extension word. Early EA building causes duplicate
 							-- EA operation which increments PC by 2 extra bytes (6 instead of 4).
@@ -5392,16 +5251,8 @@ debug_setopcode <= '1' when setopcode='1' else '0';
 debug_exec_directSR <= '1' when exec(directSR)='1' else '0';
 debug_exec_to_SR <= '1' when exec(to_SR)='1' else '0';
 
--- DEBUG: PMOVE Dn queue mechanism (BUG #65)
-debug_pmove_dn_capture_data <= pmove_dn_capture_data;
-debug_pmove_dn_pending_valid <= pmove_dn_pending_valid;
+-- DEBUG: PMOVE Dn simplified mechanism (BUG #70)
 debug_pmove_dn_mode <= pmove_dn_mode;
 debug_pmove_dn_regnum <= pmove_dn_regnum;
-debug_pmove_dn_queue_0 <= pmove_dn_queue(0);
-debug_pmove_dn_queue_1 <= pmove_dn_queue(1);
-debug_pmove_dn_queue_valid_0 <= pmove_dn_queue_valid(0);
-debug_pmove_dn_queue_valid_1 <= pmove_dn_queue_valid(1);
-debug_pmove_dn_queue_rd_ptr <= pmove_dn_queue_rd_ptr;
-debug_pmove_dn_queue_wr_ptr <= pmove_dn_queue_wr_ptr;
 
 END; 
