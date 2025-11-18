@@ -2,8 +2,8 @@ MC68882 Floating-Point Coprocessor (FPU)
 Functional Specification
 ========================================
 
-Document Version: 1.0
-Date: 2025-11-15
+Document Version: 1.1
+Date: 2025-11-18
 Target: Minimig-AGA Implementation
 
 
@@ -54,19 +54,19 @@ The MC68882 contains three types of user-visible registers:
    - Always maintain full 80-bit precision
    - Organized as: 1 sign bit, 15-bit exponent, 64-bit mantissa
 
-2. Three 32-bit Control Registers:
+2. Three Control Registers:
 
-   a) Floating-Point Control Register (FPCR)
+   a) Floating-Point Control Register (FPCR) - 16 bits
       - Exception enable byte
       - Mode control byte (rounding mode, precision control)
 
-   b) Floating-Point Status Register (FPSR)
+   b) Floating-Point Status Register (FPSR) - 32 bits
       - Exception status byte
       - Quotient byte (remainder)
       - Condition code byte (N, Z, I, NAN)
       - Accrued exception byte
 
-   c) Floating-Point Instruction Address Register (FPIAR)
+   c) Floating-Point Instruction Address Register (FPIAR) - 32 bits
       - Contains address of last floating-point instruction executed
       - Used for exception handling
 
@@ -525,16 +525,16 @@ Hybrid Approach:
 10. REGISTERS DETAILED SPECIFICATION
 ====================================
 
-10.1 Floating-Point Control Register (FPCR) - 32 bits
+10.1 Floating-Point Control Register (FPCR) - 16 bits
 ------------------------------------------------------
 
 Bit Layout:
 
-31                 16 15     12 11  8 7    6 5  4 3    0
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   Reserved (0)    |Exception|Mode |Prec|Rnd|Reserved|
-|                   | Enable  |Ctrl |    |Mode|        |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+15     12 11  8 7    6 5  4 3    0
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|Exception|Mode |Prec|Rnd|Reserved|
+| Enable  |Ctrl |    |Mode|        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 Exception Enable Byte (bits 15-8):
   Bit 15: BSUN enable
@@ -661,6 +661,13 @@ $3F     1E4096                          1.0E+4096
 
 13. REVISION HISTORY
 ====================
+
+Version 1.1 - 2025-11-18
+  - Corrected FPCR register size from 32-bit to 16-bit
+  - Updated FPCR bit layout diagram to reflect 16-bit width
+  - Verified against official MC68881/MC68882 documentation
+  - Confirmed instruction set completeness (46 instructions)
+  - Validated constant ROM values and FMOVECR offsets
 
 Version 1.0 - 2025-11-15
   - Initial specification document
