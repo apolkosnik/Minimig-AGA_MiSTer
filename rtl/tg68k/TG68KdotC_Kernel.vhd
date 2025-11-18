@@ -5234,24 +5234,22 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							next_micro_state <= fpu2;  -- Proceed to read Response CIR for true/false result
 							skipFetch_next <= '1';
 						END IF;
+					ELSIF opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100" THEN
+						-- cpSAVE instruction with PREDECREMENT -(An)
+						-- Route directly to fpu2 where dedicated state machine handles everything
+						-- CRITICAL: Do NOT set any state here - fpu2 state machine needs clean start
+						setstate <= "00";  -- Ensure clean state for fpu2 state machine
+						next_micro_state <= fpu2;  -- Go to fpu2 state machine
+						skipFetch_next <= '1';
 					ELSIF opcode(8 downto 6) = "100" THEN
-						-- cpSAVE instruction - follow MC68020 coprocessor state frame protocol
-						-- CRITICAL FIX: Handle addressing mode FIRST before CIR protocol
+						-- cpSAVE instruction (NON-predecrement modes)
+						-- CRITICAL FIX: Predecrement handled separately above
 						IF state = "00" THEN
-							-- Check if we need to handle addressing mode
-							IF opcode(5 downto 3) = "100" THEN
-								-- FSAVE -(An) - need to handle predecrement
-								-- Let the main decode logic handle EA calculation
-								set(get_ea_now) <= '1';  -- Trigger EA calculation
-								setstate <= "01";  -- Will trigger predecrement
-								next_micro_state <= fpu2;  -- Continue after EA done
-							ELSE
-								-- Other addressing modes or direct FSAVE
-								-- Phase 1: Read Save CIR (register 0x03) for format word
-								-- CPU space cycle with FC=111, A4-A0=00011 (Save CIR)
-								setstate <= "10";  -- Read cycle from coprocessor
-								next_micro_state <= fpu2;  -- Process format word and begin save
-							END IF;
+							-- Non-predecrement addressing modes
+							-- Phase 1: Read Save CIR (register 0x03) for format word
+							-- CPU space cycle with FC=111, A4-A0=00011 (Save CIR)
+							setstate <= "10";  -- Read cycle from coprocessor
+							next_micro_state <= fpu2;  -- Process format word and begin save
 							skipFetch_next <= '1';
 						END IF;
 					ELSIF opcode(8 downto 6) = "101" THEN
@@ -5644,7 +5642,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								
 							WHEN FSAVE_PREDECR_DONE =>
 								-- A7 writeback complete - start memory writes
-								IF fsave_counter = 0 THEN
+								-- CRITICAL: Wait for state="00" before starting memory operations
+								IF state /= "00" THEN
+									-- Register write still in progress - wait
+									setstate <= "00";  -- Clear state after register write
+									next_micro_state <= fpu2;
+									skipFetch_next <= '1';
+								ELSIF fsave_counter = 0 THEN
 									-- First write - use calculated base address
 									-- CRITICAL: Set up address from updated A7
 									-- use_base controlled in main addr process
