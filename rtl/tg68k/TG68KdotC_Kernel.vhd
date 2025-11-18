@@ -4512,12 +4512,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                            (opcode(5 downto 3)="111" AND opcode(2 downto 1)="01") THEN  -- PC-relative (010/011) - ILLEGAL
                             trap_illegal <= '1';
                             trapmake <= '1';
-                        -- BUG #6 FIX: Validate SZ bit (brief(8)) - .D (SZ=1) only valid for CRP/SRP
-                        ELSIF brief(8) = '1' AND NOT (brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011") THEN
-                            -- Illegal: .D (doubleword) on TC/TT0/TT1/MMUSR
-                            -- MC68030 spec: SZ=1 (.D) only valid for CRP (10011) and SRP (10010)
-                            trap_illegal <= '1';
-                            trapmake <= '1';
+                        -- BUG #4 FIX: Removed incorrect brief(8) "SZ bit" check
+                        -- MC68030 PMOVE has NO size field - size is IMPLICIT from register selector
+                        -- CRP/SRP are always 64-bit, TC/TT0/TT1/MMUSR are always 32-bit
                         ELSE
                             -- Legal EA modes: Dn, (An), -(An), (d16,An), (d8,An,Xn), xxx.W, xxx.L
                             IF opcode(5 downto 3)="000" THEN
@@ -4536,14 +4533,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                     set(pmmu_rd) <= '1';
                                     set_exec(Regwrena) <= '1';
                                 END IF;
-                                -- BUG #6 FIX: Check SZ bit for dual-word transfer, not just register type
-                                -- MC68030 spec: .D (SZ=1) means 64-bit transfer (CRP/SRP only, validated above)
-                                --              .L (SZ=0) means 32-bit transfer (all registers)
-                                IF brief(8) = '1' THEN
-                                    -- .D (doubleword) - need second Dn transfer (only CRP/SRP reach here)
+                                -- BUG #4 FIX: Determine transfer size from P-register selector, NOT brief(8)
+                                -- MC68030 PMOVE has NO "SZ" bit - size is IMPLICIT from register type
+                                -- CRP (10011) and SRP (10010) are always 64-bit, all others are 32-bit
+                                IF (brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011") THEN
+                                    -- 64-bit transfer for CRP/SRP - need second Dn transfer (Dn+1)
                                     next_micro_state <= pmmu_dn_high;
                                 ELSE
-                                    -- .L (longword) - single 32-bit transfer
+                                    -- 32-bit transfer for TC/TT0/TT1/MMUSR - single Dn transfer
                                     -- BUG #20 REAL FIX: Must use 'idle' not 'nop' to trigger setexecOPC
                                     -- setexecOPC is only set when next_micro_state=idle (line 1381)
                                     -- Without setexecOPC, set_exec(Regwrena) never becomes exec(Regwrena)
