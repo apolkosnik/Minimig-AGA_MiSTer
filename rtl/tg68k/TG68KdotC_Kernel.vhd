@@ -6610,19 +6610,18 @@ BEGIN
 				-- Store format word and decode frame size
 				coprocessor_format_word <= data_read;  -- Store format from memory
 				-- UNIFIED FRESTORE FORMAT: Single place decision on first longword high byte
-				-- Accept standard MC68881/68882 formats per spec  
+				-- Accept standard MC68881/68882 formats per spec
 				CASE data_read(31 downto 24) IS
-					WHEN X"00" => -- NULL frame (short)
+					WHEN X"00" => -- NULL frame (MC68882 NULL state)
 						-- fpu_fsave_frame_size is driven by FPU, not CPU
-					WHEN X"01" => -- BUSY frame (short - some 68881 implementations)
-						-- fpu_fsave_frame_size is driven by FPU, not CPU  
 					WHEN X"60" => -- IDLE frame (MC68882 standard)
 						-- fpu_fsave_frame_size is driven by FPU, not CPU
 					WHEN X"41" => -- IDLE frame (MC68881 alternative)
 						-- fpu_fsave_frame_size is driven by FPU, not CPU
-					WHEN X"C0" | X"D0" | X"E0" | X"F0" => -- BUSY frame variants (MC68882)
+					WHEN X"C0" | X"D0" | X"E0" | X"F0" | X"D8" => -- BUSY frame variants (MC68882)
+						-- Multiple BUSY frame formats depending on pending operation
 						-- fpu_fsave_frame_size is driven by FPU, not CPU
-					WHEN OTHERS => -- Default to IDLE for unknown formats
+					WHEN OTHERS => -- Unknown format - rely on FPU frame size signal
 						-- fpu_fsave_frame_size is driven by FPU, not CPU
 				END CASE;
 				cpRESTORE_state <= 1;  -- Advance to write format to CIR
@@ -6641,20 +6640,26 @@ BEGIN
 					-- First read: analyze frame format from data_read
 					coprocessor_format_word <= data_read;  -- Complete format word
 					CASE data_read(31 downto 24) IS
-						WHEN X"18" =>
+						WHEN X"00" =>
 							-- NULL frame = 4 bytes (1 longword only)
+							-- MC68882 NULL state frame format
 							-- fpu_fsave_frame_size is driven by FPU, not CPU
 							null;
 						WHEN X"60" =>
 							-- MC68882 IDLE frame = 60 bytes (15 longwords)
 							-- fpu_fsave_frame_size is driven by FPU, not CPU
 							null;
-						WHEN X"D8" =>
+						WHEN X"41" =>
+							-- MC68881 IDLE frame = 60 bytes (15 longwords)
+							-- fpu_fsave_frame_size is driven by FPU, not CPU
+							null;
+						WHEN X"C0" | X"D0" | X"E0" | X"F0" | X"D8" =>
 							-- MC68882 BUSY frame = 216 bytes (54 longwords)
+							-- Multiple BUSY frame variants depending on pending operation
 							-- fpu_fsave_frame_size is driven by FPU, not CPU
 							null;
 						WHEN OTHERS =>
-							-- Check frame type by format bits - FPU determines frame size
+							-- Unknown format - FPU determines frame size
 							-- fpu_fsave_frame_size is driven by FPU, not CPU
 							null;
 					END CASE;
