@@ -1829,12 +1829,13 @@ begin
 
         when W_ROOT_LOW =>
           -- Read LOW word of long-format descriptor at desc_addr+4
-          -- mem_addr should already be set correctly from previous state
+          -- BUG #1 FIX: Use mem_addr (signal) instead of desc_addr (variable)
+          -- Variables don't persist across clock cycles, but mem_addr was set in W_ROOT state
           if mem_req = '0' then
             -- Request LOW word at descriptor address + 4
             mem_req <= '1';
-            mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
-            report "W_ROOT_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
+            mem_addr <= std_logic_vector(unsigned(mem_addr) + 4);
+            report "W_ROOT_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(mem_addr) + 4)) severity note;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
@@ -1930,10 +1931,11 @@ begin
 
         when W_PTR1_LOW =>
           -- Read LOW word of long-format descriptor at desc_addr+4
+          -- BUG #1 FIX: Use mem_addr (signal) instead of desc_addr (variable)
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
-            report "W_PTR1_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
+            mem_addr <= std_logic_vector(unsigned(mem_addr) + 4);
+            report "W_PTR1_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(mem_addr) + 4)) severity note;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
@@ -2036,10 +2038,11 @@ begin
 
         when W_PTR2_LOW =>
           -- Read LOW word of long-format descriptor at desc_addr+4
+          -- BUG #1 FIX: Use mem_addr (signal) instead of desc_addr (variable)
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
-            report "W_PTR2_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
+            mem_addr <= std_logic_vector(unsigned(mem_addr) + 4);
+            report "W_PTR2_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(mem_addr) + 4)) severity note;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
@@ -2126,10 +2129,11 @@ begin
 
         when W_PTR3_LOW =>
           -- Read LOW word of long-format descriptor at desc_addr+4
+          -- BUG #1 FIX: Use mem_addr (signal) instead of desc_addr (variable)
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
-            report "W_PTR3_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
+            mem_addr <= std_logic_vector(unsigned(mem_addr) + 4);
+            report "W_PTR3_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(mem_addr) + 4)) severity note;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
@@ -2224,9 +2228,11 @@ begin
               walk_phys_base <= walk_desc_high(31 downto 8) & x"00";
             end if;
             -- Extract attributes - bit positions are same in both formats
+            -- BUG #2 FIX: Modified bit is at bit 3, not bit 4 (bit 4 is Used bit)
+            -- MC68030 Page Descriptor: bit 6=CI, bit 5=G, bit 4=U, bit 3=M, bit 2=WP
             walk_attr(3) <= NOT get_supervisor_bit(walk_desc_high, walk_desc_is_long); -- User accessible (inverted from S bit)
             walk_attr(2) <= walk_desc_high(6); -- Cache inhibit (CI)
-            walk_attr(1) <= walk_desc_high(4); -- Modified (M)
+            walk_attr(1) <= walk_desc_high(3); -- Modified (M) - CORRECTED from bit 4 to bit 3
             walk_attr(0) <= walk_desc_high(2); -- Write protect (WP)
             walk_fault <= '0';
 
@@ -2234,7 +2240,7 @@ begin
             if walk_desc_is_long = '1' then
               report "W_PAGE: Long-format descriptor, S=" & std_logic'image(get_supervisor_bit(walk_desc_high, walk_desc_is_long)) &
                      " CI=" & std_logic'image(walk_desc_high(6)) &
-                     " M=" & std_logic'image(walk_desc_high(4)) &
+                     " M=" & std_logic'image(walk_desc_high(3)) &
                      " WP=" & std_logic'image(walk_desc_high(2))
                 severity note;
             end if;
