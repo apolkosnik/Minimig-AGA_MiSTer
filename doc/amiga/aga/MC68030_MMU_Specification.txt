@@ -3,8 +3,9 @@
                         FUNCTIONAL SPECIFICATION
 ================================================================================
 
-Document Version: 1.0
-Date: 2025-11-15
+Document Version: 1.1
+Date: 2025-11-18
+Last Updated: 2025-11-18 - Corrected table level specifications (4 levels max, not 5)
 Target: MiSTer FPGA Implementation for Minimig-AGA
 Reference: Motorola MC68030 Enhanced 32-Bit Microprocessor User's Manual
            (Third Edition, MC68030UM/AD)
@@ -42,7 +43,7 @@ Key Features:
 -------------
 - Demand-paged virtual memory support
 - Configurable page sizes (256 bytes to 32 Kbytes)
-- Two-level or three-level translation table structure
+- Flexible translation table structure (1 to 4 levels)
 - 22-entry fully associative Translation Lookaside Buffer (TLB)
 - Separate supervisor/user address spaces
 - Write protection on page/table basis
@@ -145,14 +146,20 @@ The translation table is a hierarchical tree structure with:
 
 4.2  TABLE LEVELS
 -----------------
-The MC68030 supports 1 to 8 levels of tables, configurable via TC register.
+The MC68030 supports 1 to 4 levels of tables, configurable via TC register.
 Typical configurations:
+
+Single-Level:
+    Root -> Page Descriptors (early termination)
 
 Two-Level (common):
     Root -> Table Descriptors -> Page Descriptors
 
 Three-Level:
     Root -> Upper Table Descriptors -> Lower Table Descriptors -> Page Descriptors
+
+Four-Level (maximum):
+    Root -> Level A -> Level B -> Level C -> Page Descriptors
 
 4.3  TABLE SIZES
 ----------------
@@ -353,10 +360,10 @@ Use PFLUSH instruction to invalidate affected TLB entries.
 ---------------------------------------
 32-bit register controlling MMU operation
 
- 31  30  29  28  27  26  25  24  23-16  15  14  13-8  7-4  3-0
- +---+---+---+---+---+---+---+---+------+---+---+-----+----+----+
- | E |SRE| 0 |FCL|PS3|PS2|PS1|PS0|  IS  |TIA|TIB| TIC | TID| TIE|
- +---+---+---+---+---+---+---+---+------+---+---+-----+----+----+
+ 31  30  29  28  27  26  25  24  23-16  15-12 11-8  7-4  3-0
+ +---+---+---+---+---+---+---+---+------+-----+-----+-----+----+
+ | E |SRE| 0 |FCL|PS3|PS2|PS1|PS0|  IS  | TIA | TIB | TIC | TID|
+ +---+---+---+---+---+---+---+---+------+-----+-----+-----+----+
 
 Field Definitions:
 
@@ -381,15 +388,15 @@ IS (Initial Shift) - Bits 16-23:
   Number of upper bits of logical address to ignore before first table index
   Range: 0-31
 
-TIA-TIE (Table Index fields A through E):
+TIA-TID (Table Index fields A through D):
   Each field specifies number of bits for that index level
   0000 = This level not used
   0001-1111 = Use 1-15 bits for index at this level
 
-Maximum levels = 5 (A, B, C, D, E)
+Maximum levels = 4 (A, B, C, D)
 
 Example TC Configuration (Two-level, 4KB pages):
-  E=1, SRE=0, FCL=0, PS=12, IS=0, TIA=10, TIB=10, TIC-TIE=0
+  E=1, SRE=0, FCL=0, PS=12, IS=0, TIA=10, TIB=10, TIC=0, TID=0
   - 10 bits for first level index (1024 entries)
   - 10 bits for second level index (1024 entries)
   - 12 bits for page offset (4096 byte pages)
@@ -757,7 +764,7 @@ Function:
 Parameters:
 - FC: Function code for access (immediate or register)
 - <ea>: Logical address to translate
-- #level: Number of levels to search (0-7)
+- #level: Number of levels to search (0-7, but max 4 levels on MC68030)
 - An: Address register to receive next table pointer (optional)
 
 Usage: Operating system uses PTEST to:
@@ -1125,7 +1132,7 @@ Differences from MC68040/060 MMU:
 
 MC68040/060 Changes:
 - Four KB page size only (no variable page size)
-- Two-level tables only (no three/four/five level)
+- Two-level tables only (no three/four level)
 - Separate instruction and data TLBs (64+64 entries)
 - Different descriptor format
 - Different control registers
@@ -1161,4 +1168,8 @@ END OF SPECIFICATION
 
 Revision History:
 -----------------
+Version 1.1 - 2025-11-18 - Corrected specifications:
+                          - Fixed TC register bit layout (TIA/TIB shown as 4-bit fields)
+                          - Corrected maximum table levels from 5 to 4 (no TIE field)
+                          - Updated all references to table level counts
 Version 1.0 - 2025-11-15 - Initial specification for MiSTer implementation
