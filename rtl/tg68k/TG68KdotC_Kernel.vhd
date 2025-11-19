@@ -360,6 +360,7 @@ architecture logic of TG68KdotC_Kernel is
 	);
 	signal fsave_predecr_state	: fsave_predecr_state_t := FSAVE_PREDECR_IDLE;
 	signal fsave_new_sp		: std_logic_vector(31 downto 0);  -- Calculated decremented SP
+	signal fsave_original_sp	: std_logic_vector(31 downto 0);  -- Original SP before decrement (for BERR recovery)
 	signal fsave_frame_size_new	: integer range 4 to 216 := 4;  -- Dynamic frame size (bytes) - new state machine
 	-- fsave_frame_size_latched_lw is calculated from fpu_fsave_frame_size (removed duplicate declaration)
 	signal coprocessor_format_word	: std_logic_vector(31 downto 0) := X"00000004";  -- MC68020 format word
@@ -837,6 +838,7 @@ ALU: TG68K_ALU
 			if nReset = '0' then
 				fsave_predecr_state <= FSAVE_PREDECR_IDLE;
 				fsave_new_sp <= (others => '0');
+				fsave_original_sp <= (others => '0');
 				fsave_frame_size_new <= 4;
 				-- Initialize frame size signals in this process
 				fsave_frame_size_latched <= 60;  -- Default to IDLE frame
@@ -883,6 +885,7 @@ ALU: TG68K_ALU
 								else
 									-- Stack pointer is properly aligned - proceed with FSAVE
 									fsave_frame_size_valid_latched <= '0';  -- Reset latch flag for new FSAVE
+									fsave_original_sp <= reg_QA;  -- BERR RECOVERY: Save original SP before modification
 									fsave_predecr_state <= FSAVE_PREDECR_WAIT;
 								end if;
 							end if;
@@ -991,10 +994,14 @@ ALU: TG68K_ALU
 							
 					when FSAVE_PREDECR_DONE =>
 						-- Predecrement complete - stay here until instruction ends
-						-- Reset to IDLE when no longer FSAVE -(An)
-						if not (opcode(15 downto 12) = "1111" and opcode(11 downto 9) = "001" and
-						       opcode(8 downto 6) = "100" and opcode(5 downto 3) = "100") or
-						       next_micro_state = idle then  -- Allow transition when going to idle
+						-- Reset to IDLE when no longer FSAVE -(An) OR on bus error
+						if trap_berr = '1' then
+							-- BERR during memory writes - reset state machine
+							-- Register restoration handled in register file process
+							fsave_predecr_state <= FSAVE_PREDECR_IDLE;
+						elsif not (opcode(15 downto 12) = "1111" and opcode(11 downto 9) = "001" and
+						           opcode(8 downto 6) = "100" and opcode(5 downto 3) = "100") or
+						           next_micro_state = idle then  -- Allow transition when going to idle
 							fsave_predecr_state <= FSAVE_PREDECR_IDLE;
 							-- Note: CIR handshake signals reset in main CPU process to avoid multiple drivers
 						end if;
@@ -1162,6 +1169,23 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 				-- Reset: Let the 68K reset sequence load A7 from reset vector at $000000
 				-- The reset opcode at line 1429 (X"2E79") will handle this properly
 				NULL;  -- No manual A7 initialization - use proper 68K reset sequence
+		    ELSIF trap_berr = '1' AND fsave_predecr_state = FSAVE_PREDECR_DONE AND
+		          opcode(15 downto 12) = "1111" AND opcode(11 downto 9) = "001" AND
+		          opcode(8 downto 6) = "100" AND opcode(5 downto 3) = "100" THEN
+				-- BERR RECOVERY: Restore original SP before exception
+				-- Bus error occurred during FSAVE memory writes after SP was decremented
+				-- Restore SP to original value so instruction can be restarted after exception
+				rf_source_addrd <= rf_source_addr;
+				WR_AReg <= rf_dest_addr(3);
+				RDindex_A <= conv_integer(rf_dest_addr(3 downto 0));
+				RDindex_B <= conv_integer(rf_source_addr(3 downto 0));
+				IF opcode(2 downto 0) = "111" THEN
+					-- A7 register restore
+					regfile(15) <= fsave_original_sp;
+				ELSE
+					-- Other address registers A0-A6 restore
+					regfile(8 + conv_integer(opcode(2 downto 0))) <= fsave_original_sp;
+				END IF;
 		    ELSIF fsave_predecr_state = FSAVE_PREDECR_WRITE AND Wwrena='1' THEN
 				-- FSAVE predecrement: Special case write bypassing clkena_lw
 				rf_source_addrd <= rf_source_addr;
@@ -6512,7 +6536,19 @@ BEGIN
 		ELSIF clkena_lw='1' THEN
 			trapd <= trapmake;
 			micro_state <= next_micro_state;
-			
+
+			-- BERR RECOVERY for FSAVE predecrement operations
+			-- If bus error occurs after A7 decremented but before frame fully written,
+			-- restore A7 to original value so instruction can be restarted after exception
+			IF trap_berr = '1' AND FPU_Enable = 1 AND
+			   opcode(15 downto 9) = "1111001" AND opcode(8 downto 6) = "100" AND
+			   opcode(5 downto 3) = "100" THEN
+				-- BERR during FSAVE -(An) - this is handled by register file restore in regfile process
+				-- The fsave_original_sp signal is used by the register file to restore the original value
+				-- State machine will be reset to IDLE when next_micro_state = idle during trap handling
+				NULL;  -- Recovery handled in register file and state machine processes
+			END IF;
+
 			-- fpu_cpgen_complete mechanism removed
 			-- CIR Response primitives now handle all instruction sequencing
 			
