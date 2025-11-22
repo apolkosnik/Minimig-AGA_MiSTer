@@ -94,7 +94,13 @@ always @(posedge clk) nmi_addr <= vbr + 32'h7c;
 wire sel_z3ram0 = (cpu_addr[31:27] == z3ram_base0) && z3ram_ena0;
 wire sel_z3ram1 = (cpu_addr[31:28] == z3ram_base1) && z3ram_ena1;
 wire sel_z2ram  = !cpu_addr[31:24] && (cpu_addr[23] ^ |cpu_addr[22:21]) && z2ram_ena; // addr[23:21] = 1..4
-wire sel_zram   = sel_z3ram0 | sel_z3ram1 | sel_z2ram;
+// BUG #94 FIX: Amiga 32-bit Memory Map - Motherboard Fast RAM
+// $04000000-$07FFFFFF (64MB): Motherboard Fast RAM (Amiga specification)
+// Without this mapping, addresses above $00FFFFFF wrap around to 24-bit chip space!
+// This prevents the 24-bit address bus test at $04000700 from wrapping to $000700
+// Only enabled on 68020/030 CPUs (cpucfg[1]=1) to maintain 24-bit compatibility for 68000/68010
+wire sel_z3ram2 = (cpu_addr[31:26] == 6'b000001) && cpucfg[1]; // $04000000-$07FFFFFF on 68020/030 only
+wire sel_zram   = sel_z3ram0 | sel_z3ram1 | sel_z2ram | sel_z3ram2;
 wire sel_dd     = (cpu_addr[31:16] == 16'h00DD) && (cpu_addr[15:13] == 'b010);
 wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
 
@@ -125,11 +131,12 @@ assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
 // This is the mapping to the sram
 // map 00-1f to 00-1f (chipram), a0-ff to 20-7f. All non-fastram goes into the first
-// 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v 
+// 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v
 // All Zorro RAM goes to DDR3
-assign ramaddr[28]    = sel_zram & ~sel_z3ram0;
-assign ramaddr[27]    = sel_zram & (~sel_z3ram1 | cpu_addr[27]);
-assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}});
+// BUG #94 FIX: Map sel_z3ram2 ($04-$07) to DDR3 region at ramaddr $08000000-$0BFFFFFF (128MB-192MB)
+assign ramaddr[28]    = sel_zram & ~sel_z3ram0 & ~sel_z3ram2;
+assign ramaddr[27]    = sel_zram & ((sel_z3ram2 & cpu_addr[25]) | (~sel_z3ram1 | cpu_addr[27]));
+assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1 | sel_z3ram2) ? cpu_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}});
 assign ramaddr[22:19] = {4{sel_dd}} | cpu_addr[22:19];
 assign ramaddr[18]    =    sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18];
 assign ramaddr[17:16] = {2{sel_dd}} | cpu_addr[17:16];
