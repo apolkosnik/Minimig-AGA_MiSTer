@@ -37,6 +37,10 @@ localparam OP_ASL     = 6'd20;
 localparam OP_ASR     = 6'd21;
 localparam OP_ROL     = 6'd22;
 localparam OP_ROR     = 6'd23;
+localparam OP_CLR     = 6'd25;
+localparam OP_NEG     = 6'd26;
+localparam OP_NOT     = 6'd27;
+localparam OP_TST     = 6'd28;
 
 // Internal signals
 wire [32:0] add_result;
@@ -300,6 +304,36 @@ always @(posedge clk or negedge nreset) begin
                 flags[2] <= 1'b0;                          // V
                 flags[1] <= shift_carry;                    // C - properly calculated per operation
                 flags[0] <= shift_carry;                    // X - extend flag same as carry
+            end
+
+            OP_NEG: begin
+                // NEG: 0 - operand (2's complement negation)
+                result <= sub_result[31:0];  // 0 - operand1
+                flags[4] <= sub_result[31];                 // N
+                flags[3] <= (sub_result[31:0] == 32'h0);   // Z
+                flags[2] <= sub_result[32];                 // V (overflow)
+                flags[1] <= sub_result[32];                 // C (borrow)
+                flags[0] <= sub_result[32];                 // X (extend = carry)
+            end
+
+            OP_NOT: begin
+                // NOT: 1's complement (~operand)
+                result <= ~operand1;
+                flags[4] <= ~operand1[31];                  // N
+                flags[3] <= (~operand1 == 32'h0);          // Z
+                flags[2] <= 1'b0;                          // V (cleared)
+                flags[1] <= 1'b0;                          // C (cleared)
+                flags[0] <= flags[0];                      // X (not affected)
+            end
+
+            OP_TST: begin
+                // TST: Test operand (set flags based on operand1)
+                result <= operand1;
+                flags[4] <= operand1[31];                   // N
+                flags[3] <= (operand1 == 32'h0);           // Z
+                flags[2] <= 1'b0;                          // V (cleared)
+                flags[1] <= 1'b0;                          // C (cleared)
+                flags[0] <= flags[0];                      // X (not affected)
             end
 
             default: begin

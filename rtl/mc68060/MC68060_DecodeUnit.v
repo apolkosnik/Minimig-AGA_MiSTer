@@ -93,6 +93,7 @@ localparam OP_BCC     = 6'd9;
 localparam OP_JMP     = 6'd10;
 localparam OP_JSR     = 6'd11;
 localparam OP_RTS     = 6'd12;
+localparam OP_BSR     = 6'd24;
 localparam OP_LEA     = 6'd13;
 localparam OP_MULU    = 6'd14;
 localparam OP_MULS    = 6'd15;
@@ -104,6 +105,10 @@ localparam OP_ASL     = 6'd20;
 localparam OP_ASR     = 6'd21;
 localparam OP_ROL     = 6'd22;
 localparam OP_ROR     = 6'd23;
+localparam OP_CLR     = 6'd25;
+localparam OP_NEG     = 6'd26;
+localparam OP_NOT     = 6'd27;
+localparam OP_TST     = 6'd28;
 
 always @(posedge clk or negedge nreset) begin
     if (!nreset) begin
@@ -213,6 +218,34 @@ always @(posedge clk or negedge nreset) begin
                     rf_raddr2 <= 4'd0;
                     dest_reg_out <= 4'd0;  // RTS doesn't write to a register
                     instr_length <= 3'd1;   // RTS is always 1 word
+                end else if (instr_word0[11:8] == 4'h2) begin
+                    // CLR: 0100 0010 xx xxxxxx
+                    opcode_out <= OP_CLR;
+                    rf_raddr1 <= {1'b0, instr_ea};
+                    rf_raddr2 <= 4'd0;
+                    dest_reg_out <= {1'b0, instr_ea};  // CLR writes to EA
+                    instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
+                end else if (instr_word0[11:8] == 4'h4) begin
+                    // NEG: 0100 0100 xx xxxxxx
+                    opcode_out <= OP_NEG;
+                    rf_raddr1 <= {1'b0, instr_ea};
+                    rf_raddr2 <= 4'd0;
+                    dest_reg_out <= {1'b0, instr_ea};  // NEG writes to EA
+                    instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
+                end else if (instr_word0[11:8] == 4'h6) begin
+                    // NOT: 0100 0110 xx xxxxxx
+                    opcode_out <= OP_NOT;
+                    rf_raddr1 <= {1'b0, instr_ea};
+                    rf_raddr2 <= 4'd0;
+                    dest_reg_out <= {1'b0, instr_ea};  // NOT writes to EA
+                    instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
+                end else if (instr_word0[11:8] == 4'hA) begin
+                    // TST: 0100 1010 xx xxxxxx
+                    opcode_out <= OP_TST;
+                    rf_raddr1 <= {1'b0, instr_ea};
+                    rf_raddr2 <= 4'd0;
+                    dest_reg_out <= 4'd0;  // TST doesn't write
+                    instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
                 end else begin
                     opcode_out <= OP_NOP;
                     rf_raddr1 <= {1'b0, instr_ea};
@@ -245,11 +278,17 @@ always @(posedge clk or negedge nreset) begin
                 // Bcc, BSR, BRA
                 if (instr_word0[11:8] == 4'h0) begin
                     opcode_out <= OP_BRA;
+                    rf_raddr1 <= 4'd0;
+                    rf_raddr2 <= 4'd0;
+                end else if (instr_word0[11:8] == 4'h1) begin
+                    opcode_out <= OP_BSR;  // Branch to Subroutine
+                    rf_raddr1 <= 4'd15;    // Read A7 (stack pointer)
+                    rf_raddr2 <= 4'd0;
                 end else begin
                     opcode_out <= OP_BCC;
+                    rf_raddr1 <= 4'd0;
+                    rf_raddr2 <= 4'd0;
                 end
-                rf_raddr1 <= 4'd0;
-                rf_raddr2 <= 4'd0;
                 dest_reg_out <= 4'd0;  // Branches don't write registers
                 // Branch: 1 word if 8-bit displacement, 2 words if 16-bit displacement
                 instr_length <= (instr_word0[7:0] == 8'h00) ? 3'd2 : 3'd1;

@@ -65,6 +65,7 @@ localparam OP_BCC     = 6'd9;
 localparam OP_JMP     = 6'd10;
 localparam OP_JSR     = 6'd11;
 localparam OP_RTS     = 6'd12;
+localparam OP_BSR     = 6'd24;
 localparam OP_LEA     = 6'd13;
 localparam OP_MULU    = 6'd14;
 localparam OP_MULS    = 6'd15;
@@ -76,6 +77,10 @@ localparam OP_ASL     = 6'd20;
 localparam OP_ASR     = 6'd21;
 localparam OP_ROL     = 6'd22;
 localparam OP_ROR     = 6'd23;
+localparam OP_CLR     = 6'd25;
+localparam OP_NEG     = 6'd26;
+localparam OP_NOT     = 6'd27;
+localparam OP_TST     = 6'd28;
 
 // ALU signals
 wire [31:0] alu_result;
@@ -143,7 +148,7 @@ always @(posedge clk or negedge nreset) begin
             write_enable <= 1'b0;
 
             case (saved_opcode)
-                OP_JSR: begin
+                OP_JSR, OP_BSR: begin
                     case (jsr_rts_state)
                         MULTI_FIRST: begin
                             // First cycle: write high word of return address
@@ -390,6 +395,28 @@ always @(posedge clk or negedge nreset) begin
                 valid_out <= 1'b0;  // Not done yet
             end
 
+            OP_BSR: begin
+                // Branch to subroutine - save return address and branch
+                // Similar to JSR but uses PC-relative addressing
+                // This is a multi-cycle operation:
+                // Cycle 1: Write high word of PC to [SP-2]
+                // Cycle 2: Write low word of PC to [SP-4], decrement SP, branch to PC+disp
+
+                // Update stack pointer
+                stack_ptr_out <= stack_pointer - 32'd4;
+                stack_ptr_write <= 1'b1;
+
+                // Save PC and calculate target (PC + displacement from operand1)
+                saved_pc <= pc_in;
+                return_addr <= pc_in + operand1;  // PC-relative branch target
+                saved_opcode <= OP_BSR;
+
+                // Start multi-cycle operation (reuses JSR logic)
+                jsr_rts_state <= MULTI_FIRST;
+                write_enable <= 1'b0;
+                valid_out <= 1'b0;  // Not done yet
+            end
+
             OP_LEA: begin
                 // LEA - Load Effective Address
                 // Result is the calculated EA itself, not the value at that address
@@ -420,6 +447,33 @@ always @(posedge clk or negedge nreset) begin
             OP_LSL, OP_LSR, OP_ASL, OP_ASR, OP_ROL, OP_ROR: begin
                 result_out <= alu_result;
                 write_enable <= 1'b1;
+            end
+
+            OP_CLR: begin
+                // Clear - set destination to 0
+                result_out <= 32'h0;
+                write_enable <= 1'b1;
+                flags_out <= 5'b01000;  // N=0, Z=1, V=0, C=0, X unchanged
+            end
+
+            OP_NEG: begin
+                // Negate - 0 - operand
+                result_out <= alu_result;
+                write_enable <= 1'b1;
+                flags_out <= alu_flags;
+            end
+
+            OP_NOT: begin
+                // Logical NOT - 1's complement
+                result_out <= alu_result;
+                write_enable <= 1'b1;
+                flags_out <= alu_flags;
+            end
+
+            OP_TST: begin
+                // Test - set flags only, no write
+                write_enable <= 1'b0;
+                flags_out <= alu_flags;
             end
 
             default: begin
