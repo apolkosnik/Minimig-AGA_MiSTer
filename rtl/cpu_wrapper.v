@@ -138,7 +138,29 @@ reg  [15:0] chip_data;
 reg  [31:0] vbr;
 
 always @* begin
-	if(cpucfg[1:0]) begin
+	if(cpucfg[1:0] == 2'b10) begin
+		// MC68060 CPU selected
+		cpu_dout     = cpu_dout_060;
+		cpu_addr     = cpu_addr_060;
+		cpustate     = cpustate_060;
+		cacr         = cacr_060;
+		vbr          = vbr_060;
+		wr           = wr_060;
+		uds_in       = uds_060;
+		lds_in       = lds_060;
+		reset_out    = reset_out_060;
+		chip_as      = c_as;
+		chip_rw      = c_rw;
+		chip_uds     = c_uds;
+		chip_lds     = c_lds;
+		chip_addr    = cpu_addr_060[23:1];
+		chip_din     = cpu_dout_060;
+		chip_data    = chipdout_i;
+		fastchip_sel = cpu_req & !cpu_addr_060[31:24];
+		fastchip_lw  = longword_060;
+	end
+	else if(cpucfg[1:0]) begin
+		// TG68K CPU selected (68010/68020)
 		cpu_dout     = cpu_dout_p;
 		cpu_addr     = cpu_addr_p;
 		cpustate     = cpustate_p;
@@ -159,6 +181,7 @@ always @* begin
 		fastchip_lw  = longword;
 	end
 	else begin
+		// fx68k CPU selected (68000)
 		cpu_dout     = cpu_dout_o;
 		cpu_addr     = {cpu_addr_o,1'b0};
 		cpustate     = as_o ? 2'b01 : ~{wr_o,wr_o};
@@ -190,6 +213,18 @@ wire        uds_p;
 wire        lds_p;
 wire        reset_out_p;
 wire        longword;
+
+// MC68060 CPU signals
+wire [15:0] cpu_dout_060;
+wire [31:0] cpu_addr_060;
+wire  [1:0] cpustate_060;
+wire  [3:0] cacr_060;
+wire [31:0] vbr_060;
+wire        wr_060;
+wire        uds_060;
+wire        lds_060;
+wire        reset_out_060;
+wire        longword_060;
 
 TG68KdotC_Kernel
 #(
@@ -251,7 +286,7 @@ fx68k cpu_inst_o
 
 	.FC0(fc_o[0]),
 	.FC1(fc_o[1]),
-	.FC2(fc_o[2]), 
+	.FC2(fc_o[2]),
 
 	.VPAn(~&fc_o),
 	.BERRn(1),
@@ -263,6 +298,28 @@ fx68k cpu_inst_o
 	.iEdb(cpu_din),
 	.oEdb(cpu_dout_o),
 	.eab(cpu_addr_o)
+);
+
+// MC68060 CPU instance
+MC68060_Top cpu_inst_060
+(
+	.clk(clk),
+	.nreset(reset),
+	.clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
+	.cpu(cpucfg),
+	.data_in(cpu_din),
+	.data_write(cpu_dout_060),
+	.addr_out(cpu_addr_060),
+	.nwr(wr_060),
+	.nuds(uds_060),
+	.nlds(lds_060),
+	.nresetout(reset_out_060),
+	.longword(longword_060),
+	.ipl(cpu_ipl),
+	.ipl_autovector(1),
+	.busstate(cpustate_060),
+	.cacr_out(cacr_060),
+	.vbr_out(vbr_060)
 );
 
 wire cpu_req = (cpustate != 1);

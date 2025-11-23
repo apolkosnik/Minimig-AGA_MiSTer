@@ -1,0 +1,13 @@
+# MC68060 CPU Core - Quartus IP File
+# All Verilog source files for the MC68060 implementation
+
+set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_Top.v
+set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_FetchUnit.v
+set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_DecodeUnit.v
+set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_ExecuteUnit.v
+set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_ALU.v
+set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_RegisterFile.v
+set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_ICache.v
+set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_DCache.v
+set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_BranchUnit.v
+set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_FPU.v
