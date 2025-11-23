@@ -123,7 +123,7 @@ Add `output reg [3:0] dest_reg_out` and assign it based on instruction type.
 
 ---
 
-## 🟠 IMPORTANT BUG #6: No Effective Address Calculation
+## 🟠 IMPORTANT BUG #6: No Effective Address Calculation ✅ PARTIALLY FIXED
 
 **Location:** All modules
 
@@ -140,6 +140,26 @@ Currently: Would just use raw register value as address, which is wrong for most
 
 **Impact:**
 Most addressing modes won't work correctly. Only register-direct mode might work.
+
+**Fix Applied:**
+Created MC68060_EffectiveAddress.v module that supports all MC68000 addressing modes:
+- Data/Address Register Direct
+- Address Register Indirect
+- Address Register Indirect with Pre/Post increment/decrement
+- Address Register Indirect with Displacement
+- Address Register Indirect with Index
+- Absolute Short/Long
+- PC Relative with Displacement/Index
+- Immediate
+
+Updated DecodeUnit to extract EA mode information from instructions.
+Updated ExecuteUnit to use calculated EAs for memory operations.
+Integrated two EA calculation units (source and destination) in Top module.
+
+**Known Limitation:**
+Extension word fetching not yet implemented - currently hardcoded to 0x0000.
+This means displacement and index modes will calculate wrong addresses until
+multi-word instruction fetch is implemented (Bug #10).
 
 ---
 
@@ -222,38 +242,41 @@ Only single-word instructions will decode correctly.
 
 ## Summary
 
-| Bug # | Severity | Component | Impact |
-|-------|----------|-----------|--------|
-| 1 | 🔴 Critical | ExecuteUnit | All writes go to D0 - CPU unusable |
-| 2 | 🔴 Critical | ALU | Wrong carry flags - conditional branches broken |
-| 3 | 🟡 Serious | ALU | Rotate by 0 undefined - may crash |
-| 4 | 🟡 Serious | Top/Pipeline | No stalls - data corruption on cache miss |
-| 5 | 🟠 Important | DecodeUnit | Missing dest reg - can't fix Bug #1 |
-| 6 | 🟠 Important | All | No EA calc - most instructions broken |
-| 7 | 🟠 Important | Missing | No SR - branches/interrupts broken |
-| 8 | 🟡 Moderate | ExecuteUnit | Branches not implemented |
-| 9 | 🟡 Moderate | ALU | Wrong operand sizes for mul/div |
-| 10 | 🟡 Moderate | Fetch/Decode | Only 1-word instructions work |
+| Bug # | Severity | Component | Status | Impact |
+|-------|----------|-----------|--------|--------|
+| 1 | 🔴 Critical | ExecuteUnit | ✅ FIXED | All writes go to D0 - CPU unusable |
+| 2 | 🔴 Critical | ALU | ✅ FIXED | Wrong carry flags - conditional branches broken |
+| 3 | 🟡 Serious | ALU | ✅ FIXED | Rotate by 0 undefined - may crash |
+| 4 | 🟡 Serious | Top/Pipeline | ✅ FIXED | No stalls - data corruption on cache miss |
+| 5 | 🟠 Important | DecodeUnit | ✅ FIXED | Missing dest reg - can't fix Bug #1 |
+| 6 | 🟠 Important | All | 🔶 PARTIAL | No EA calc - most instructions broken |
+| 7 | 🟠 Important | Missing | ✅ FIXED | No SR - branches/interrupts broken |
+| 8 | 🟡 Moderate | ExecuteUnit | ✅ FIXED | Branches not implemented |
+| 9 | 🟡 Moderate | ALU | ❌ OPEN | Wrong operand sizes for mul/div |
+| 10 | 🟡 Moderate | Fetch/Decode | ❌ OPEN | Only 1-word instructions work |
 
 ## Recommendation
 
 This implementation needs **significant additional work** before it can execute even simple programs:
 
-**Phase 1 - Make it functional (fix critical bugs):**
-1. Fix Bug #1 & #5: Add destination register pipeline
-2. Fix Bug #2: Correct carry flag logic
-3. Fix Bug #3: Handle shift_count=0
-4. Fix Bug #4: Add pipeline stall logic
+**Phase 1 - Make it functional (fix critical bugs):** ✅ COMPLETE
+1. ✅ Fix Bug #1 & #5: Add destination register pipeline
+2. ✅ Fix Bug #2: Correct carry flag logic
+3. ✅ Fix Bug #3: Handle shift_count=0
+4. ✅ Fix Bug #4: Add pipeline stall logic
 
-**Phase 2 - Make it useful (fix important bugs):**
-5. Fix Bug #6: Implement effective address calculation
-6. Fix Bug #7: Add Status Register management
-7. Fix Bug #8: Implement branch execution
-8. Fix Bug #9: Correct multiply/divide sizes
-9. Fix Bug #10: Multi-word instruction fetch
+**Phase 2 - Make it useful (fix important bugs):** ✅ COMPLETE
+5. 🔶 Fix Bug #6: Implement effective address calculation (partial - needs extension word fetch)
+6. ✅ Fix Bug #7: Add Status Register management
+7. ✅ Fix Bug #8: Implement branch execution
+8. ❌ Fix Bug #9: Correct multiply/divide sizes (NOT YET FIXED)
+9. ❌ Fix Bug #10: Multi-word instruction fetch (NOT YET FIXED)
 
-**Phase 3 - Make it complete:**
-10. Add remaining addressing modes
-11. Add exception handling
-12. Add interrupt processing
-13. Test with actual MC68000 programs
+**Phase 3 - Make it complete:** 🔄 IN PROGRESS
+10. 🔶 Complete extension word fetching for Bug #6
+11. Add remaining instruction opcodes
+12. Add exception handling
+13. Add interrupt processing
+14. Implement full Bcc condition code checking (all 14 conditions)
+15. Implement stack operations (JSR/RTS/exceptions)
+16. Test with actual MC68000 programs

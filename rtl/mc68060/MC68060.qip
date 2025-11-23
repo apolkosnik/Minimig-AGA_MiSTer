@@ -4,6 +4,7 @@
 set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_Top.v
 set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_FetchUnit.v
 set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_DecodeUnit.v
+set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_EffectiveAddress.v
 set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_ExecuteUnit.v
 set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_ALU.v
 set_global_assignment -name VERILOG_FILE rtl/mc68060/MC68060_RegisterFile.v

@@ -10,11 +10,18 @@ module MC68060_ExecuteUnit
     input  wire        enable,
 
     input  wire [5:0]  opcode_in,
+    input  wire [3:0]  dest_reg_in,
     input  wire [31:0] pc_in,
     input  wire        valid_in,
 
     input  wire [31:0] operand1,
     input  wire [31:0] operand2,
+
+    // Effective Address inputs
+    input  wire [31:0] ea_src,         // Calculated source EA
+    input  wire [31:0] ea_dst,         // Calculated destination EA
+    input  wire        ea_valid_src,   // Source EA is valid
+    input  wire        ea_valid_dst,   // Destination EA is valid
 
     output reg  [31:0] result_out,
     output reg  [3:0]  write_addr,
@@ -114,26 +121,77 @@ always @(posedge clk or negedge nreset) begin
             end
 
             OP_MOVE: begin
-                result_out <= operand1;
-                write_enable <= 1'b1;
+                // MOVE instruction
+                if (ea_valid_src) begin
+                    // Source is memory - need to read from ea_src
+                    mem_addr <= ea_src;
+                    mem_read <= 1'b1;
+                    mem_uds <= 1'b1;
+                    mem_lds <= 1'b1;
+                    result_out <= operand1;  // Will be updated in memory stage
+                end else begin
+                    // Source is register - use operand1 directly
+                    result_out <= operand1;
+                end
+
+                if (ea_valid_dst) begin
+                    // Destination is memory - need to write to ea_dst
+                    mem_addr <= ea_dst;
+                    mem_write <= 1'b1;
+                    mem_wdata <= operand1[15:0];
+                    mem_uds <= 1'b1;
+                    mem_lds <= 1'b1;
+                    write_enable <= 1'b0;  // No register write
+                end else begin
+                    // Destination is register - write to register file
+                    write_enable <= 1'b1;
+                end
             end
 
             OP_ADD: begin
+                if (ea_valid_src) begin
+                    // Source is memory - read from EA
+                    mem_addr <= ea_src;
+                    mem_read <= 1'b1;
+                    mem_uds <= 1'b1;
+                    mem_lds <= 1'b1;
+                end
                 result_out <= alu_result;
                 write_enable <= 1'b1;
             end
 
             OP_SUB: begin
+                if (ea_valid_src) begin
+                    // Source is memory - read from EA
+                    mem_addr <= ea_src;
+                    mem_read <= 1'b1;
+                    mem_uds <= 1'b1;
+                    mem_lds <= 1'b1;
+                end
                 result_out <= alu_result;
                 write_enable <= 1'b1;
             end
 
             OP_AND: begin
+                if (ea_valid_src) begin
+                    // Source is memory - read from EA
+                    mem_addr <= ea_src;
+                    mem_read <= 1'b1;
+                    mem_uds <= 1'b1;
+                    mem_lds <= 1'b1;
+                end
                 result_out <= alu_result;
                 write_enable <= 1'b1;
             end
 
             OP_OR: begin
+                if (ea_valid_src) begin
+                    // Source is memory - read from EA
+                    mem_addr <= ea_src;
+                    mem_read <= 1'b1;
+                    mem_uds <= 1'b1;
+                    mem_lds <= 1'b1;
+                end
                 result_out <= alu_result;
                 write_enable <= 1'b1;
             end
@@ -192,7 +250,9 @@ always @(posedge clk or negedge nreset) begin
             end
 
             OP_LEA: begin
-                result_out <= operand1;  // Effective address
+                // LEA - Load Effective Address
+                // Result is the calculated EA itself, not the value at that address
+                result_out <= ea_src;
                 write_enable <= 1'b1;
             end
 

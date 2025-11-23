@@ -84,6 +84,33 @@ wire [5:0]  exec_opcode;
 wire [3:0]  exec_dest_reg;
 wire        exec_valid;
 
+// Effective Address signals from decode
+wire [2:0]  ea_mode_src;
+wire [2:0]  ea_reg_src;
+wire [2:0]  ea_mode_dst;
+wire [2:0]  ea_reg_dst;
+wire [1:0]  ea_size;
+wire        needs_ea_src;
+wire        needs_ea_dst;
+
+// Effective Address calculation results
+wire [31:0] ea_src_addr;
+wire [31:0] ea_dst_addr;
+wire        ea_src_valid;
+wire        ea_dst_valid;
+wire        ea_src_is_areg;
+wire        ea_src_is_dreg;
+wire        ea_dst_is_areg;
+wire        ea_dst_is_dreg;
+
+// Address register update from EA
+wire        areg_update_src;
+wire [3:0]  areg_update_num_src;
+wire [31:0] areg_update_val_src;
+wire        areg_update_dst;
+wire [3:0]  areg_update_num_dst;
+wire [31:0] areg_update_val_dst;
+
 // Register file signals
 wire [3:0]  rf_read_addr1, rf_read_addr2;
 wire [31:0] rf_read_data1, rf_read_data2;
@@ -202,7 +229,82 @@ MC68060_DecodeUnit decode_unit
     .opcode_out     (exec_opcode),
     .dest_reg_out   (exec_dest_reg),
     .pc_out         (decode_pc),
-    .valid_out      (decode_valid)
+    .valid_out      (decode_valid),
+
+    // Effective Address outputs
+    .ea_mode_src    (ea_mode_src),
+    .ea_reg_src     (ea_reg_src),
+    .ea_mode_dst    (ea_mode_dst),
+    .ea_reg_dst     (ea_reg_dst),
+    .ea_size        (ea_size),
+    .needs_ea_src   (needs_ea_src),
+    .needs_ea_dst   (needs_ea_dst)
+);
+
+//------------------------------------------------------------------------------
+// Effective Address Calculation - Source
+//------------------------------------------------------------------------------
+MC68060_EffectiveAddress ea_src_unit
+(
+    .clk            (clk),
+    .nreset         (nreset),
+    .enable         (clkena_in && needs_ea_src),
+
+    .ea_mode        (ea_mode_src),
+    .ea_reg         (ea_reg_src),
+    .ea_size        (ea_size),
+
+    .extension1     (16'h0000),  // TODO: Fetch extension words
+    .extension2     (16'h0000),
+
+    .areg_value     (rf_read_data1),  // Address register value
+    .dreg_value     (rf_read_data2),  // Data register value for index
+
+    .pc_in          (decode_pc),
+
+    .ea_out         (ea_src_addr),
+    .ea_is_areg     (ea_src_is_areg),
+    .ea_is_dreg     (ea_src_is_dreg),
+    .ea_reg_num     (),  // Not used for now
+
+    .areg_update    (areg_update_src),
+    .areg_update_num(areg_update_num_src),
+    .areg_update_val(areg_update_val_src),
+
+    .valid_out      (ea_src_valid)
+);
+
+//------------------------------------------------------------------------------
+// Effective Address Calculation - Destination
+//------------------------------------------------------------------------------
+MC68060_EffectiveAddress ea_dst_unit
+(
+    .clk            (clk),
+    .nreset         (nreset),
+    .enable         (clkena_in && needs_ea_dst),
+
+    .ea_mode        (ea_mode_dst),
+    .ea_reg         (ea_reg_dst),
+    .ea_size        (ea_size),
+
+    .extension1     (16'h0000),  // TODO: Fetch extension words
+    .extension2     (16'h0000),
+
+    .areg_value     (rf_read_data2),  // Address register value
+    .dreg_value     (rf_read_data1),  // Data register value for index
+
+    .pc_in          (decode_pc),
+
+    .ea_out         (ea_dst_addr),
+    .ea_is_areg     (ea_dst_is_areg),
+    .ea_is_dreg     (ea_dst_is_dreg),
+    .ea_reg_num     (),  // Not used for now
+
+    .areg_update    (areg_update_dst),
+    .areg_update_num(areg_update_num_dst),
+    .areg_update_val(areg_update_val_dst),
+
+    .valid_out      (ea_dst_valid)
 );
 
 //------------------------------------------------------------------------------
@@ -221,6 +323,12 @@ MC68060_ExecuteUnit exec_unit
 
     .operand1       (rf_read_data1),
     .operand2       (rf_read_data2),
+
+    // Effective Address inputs
+    .ea_src         (ea_src_addr),
+    .ea_dst         (ea_dst_addr),
+    .ea_valid_src   (ea_src_valid && needs_ea_src),
+    .ea_valid_dst   (ea_dst_valid && needs_ea_dst),
 
     .result_out     (rf_write_data),
     .write_addr     (rf_write_addr),

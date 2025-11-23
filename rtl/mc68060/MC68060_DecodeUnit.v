@@ -21,7 +21,16 @@ module MC68060_DecodeUnit
     output reg  [5:0]  opcode_out,
     output reg  [3:0]  dest_reg_out,   // Destination register for writeback
     output reg  [31:0] pc_out,
-    output reg         valid_out
+    output reg         valid_out,
+
+    // Effective Address information
+    output reg  [2:0]  ea_mode_src,    // Source EA mode
+    output reg  [2:0]  ea_reg_src,     // Source EA register
+    output reg  [2:0]  ea_mode_dst,    // Destination EA mode
+    output reg  [2:0]  ea_reg_dst,     // Destination EA register
+    output reg  [1:0]  ea_size,        // Operand size: 00=byte, 01=word, 10=long
+    output reg         needs_ea_src,   // Source needs EA calculation
+    output reg         needs_ea_dst    // Destination needs EA calculation
 );
 
 // Instruction format fields
@@ -65,9 +74,21 @@ always @(posedge clk or negedge nreset) begin
         valid_out <= 1'b0;
         rf_raddr1 <= 4'd0;
         rf_raddr2 <= 4'd0;
+        ea_mode_src <= 3'b000;
+        ea_reg_src <= 3'b000;
+        ea_mode_dst <= 3'b000;
+        ea_reg_dst <= 3'b000;
+        ea_size <= 2'b10;
+        needs_ea_src <= 1'b0;
+        needs_ea_dst <= 1'b0;
     end else if (enable && valid_in) begin
         pc_out <= pc_in;
         valid_out <= 1'b1;
+
+        // Default: no EA calculation needed
+        needs_ea_src <= 1'b0;
+        needs_ea_dst <= 1'b0;
+        ea_size <= instr_size;  // Get size from instruction
 
         // Decode instruction based on high nibble
         case (instr_op)
@@ -91,6 +112,16 @@ always @(posedge clk or negedge nreset) begin
                 rf_raddr1 <= {1'b0, instr_ea};      // Source
                 rf_raddr2 <= {1'b0, instr_reg};     // Destination
                 dest_reg_out <= {1'b0, instr_reg}; // Write to destination register
+
+                // Extract EA information
+                ea_mode_src <= instr_mode;          // Source EA mode
+                ea_reg_src <= instr_ea;             // Source EA register
+                ea_mode_dst <= instr_in[8:6];       // Destination EA mode (rearranged in MOVE)
+                ea_reg_dst <= instr_reg;            // Destination EA register
+
+                // Determine if EA calculation is needed (not register direct)
+                needs_ea_src <= (instr_mode != 3'b000);  // Not data register direct
+                needs_ea_dst <= (instr_in[8:6] != 3'b000);
             end
 
             4'h4: begin
@@ -100,6 +131,11 @@ always @(posedge clk or negedge nreset) begin
                     rf_raddr1 <= {1'b0, instr_ea};
                     rf_raddr2 <= {1'b0, instr_reg};
                     dest_reg_out <= {1'b0, instr_reg};  // LEA writes to address register
+
+                    // LEA always needs EA calculation
+                    ea_mode_src <= instr_mode;
+                    ea_reg_src <= instr_ea;
+                    needs_ea_src <= 1'b1;
                 end else begin
                     opcode_out <= OP_NOP;
                     rf_raddr1 <= {1'b0, instr_ea};
@@ -154,6 +190,11 @@ always @(posedge clk or negedge nreset) begin
                 rf_raddr1 <= {1'b0, instr_ea};
                 rf_raddr2 <= {1'b0, instr_reg};
                 dest_reg_out <= {1'b0, instr_reg};  // Write to register
+
+                // EA information for source operand
+                ea_mode_src <= instr_mode;
+                ea_reg_src <= instr_ea;
+                needs_ea_src <= (instr_mode != 3'b000) && (instr_mode != 3'b001);
             end
 
             4'h9, 4'hD: begin
@@ -162,6 +203,11 @@ always @(posedge clk or negedge nreset) begin
                 rf_raddr1 <= {1'b0, instr_ea};
                 rf_raddr2 <= {1'b0, instr_reg};
                 dest_reg_out <= {1'b0, instr_reg};  // Write to register
+
+                // EA information for source operand
+                ea_mode_src <= instr_mode;
+                ea_reg_src <= instr_ea;
+                needs_ea_src <= (instr_mode != 3'b000) && (instr_mode != 3'b001);  // Not Dn/An direct
             end
 
             4'hB: begin
@@ -187,6 +233,11 @@ always @(posedge clk or negedge nreset) begin
                 rf_raddr1 <= {1'b0, instr_ea};
                 rf_raddr2 <= {1'b0, instr_reg};
                 dest_reg_out <= {1'b0, instr_reg};  // Write to register
+
+                // EA information for source operand
+                ea_mode_src <= instr_mode;
+                ea_reg_src <= instr_ea;
+                needs_ea_src <= (instr_mode != 3'b000) && (instr_mode != 3'b001);
             end
 
             4'hE: begin
