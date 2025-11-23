@@ -124,6 +124,15 @@ wire [3:0]  rf_write_addr;
 wire [31:0] rf_write_data;
 wire        rf_write_enable;
 
+// Stack pointer signals (A7 = register 15)
+wire [31:0] stack_ptr_new;
+wire        stack_ptr_write;
+wire [31:0] stack_pointer;
+
+// Stack pointer is A7 (register 15) - read it separately
+assign stack_pointer = (rf_read_addr1 == 4'd15) ? rf_read_data1 :
+                       (rf_read_addr2 == 4'd15) ? rf_read_data2 : 32'h0;
+
 // Memory interface signals
 wire [31:0] mem_addr;
 wire [15:0] mem_wdata;
@@ -362,10 +371,16 @@ MC68060_ExecuteUnit exec_unit
 
     .mem_addr       (mem_addr),
     .mem_wdata      (mem_wdata),
+    .mem_rdata      (data_in),         // Memory read data from bus
     .mem_read       (mem_read),
     .mem_write      (mem_write),
     .mem_uds        (mem_uds),
     .mem_lds        (mem_lds),
+
+    // Stack pointer access
+    .stack_pointer  (stack_pointer),
+    .stack_ptr_out  (stack_ptr_new),
+    .stack_ptr_write(stack_ptr_write),
 
     .fpu_busy       (fpu_busy),
 
@@ -380,6 +395,11 @@ MC68060_ExecuteUnit exec_unit
 //------------------------------------------------------------------------------
 // Register File (D0-D7, A0-A7)
 //------------------------------------------------------------------------------
+// Multiplex register writes: prioritize stack pointer writes
+wire [3:0]  rf_write_addr_mux = stack_ptr_write ? 4'd15 : rf_write_addr;
+wire [31:0] rf_write_data_mux = stack_ptr_write ? stack_ptr_new : rf_write_data;
+wire        rf_write_enable_mux = stack_ptr_write | rf_write_enable;
+
 MC68060_RegisterFile regfile
 (
     .clk            (clk),
@@ -390,9 +410,9 @@ MC68060_RegisterFile regfile
     .read_data1     (rf_read_data1),
     .read_data2     (rf_read_data2),
 
-    .write_addr     (rf_write_addr),
-    .write_data     (rf_write_data),
-    .write_enable   (rf_write_enable)
+    .write_addr     (rf_write_addr_mux),
+    .write_data     (rf_write_data_mux),
+    .write_enable   (rf_write_enable_mux)
 );
 
 //------------------------------------------------------------------------------

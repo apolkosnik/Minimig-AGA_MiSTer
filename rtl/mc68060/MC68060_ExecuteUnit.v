@@ -30,10 +30,16 @@ module MC68060_ExecuteUnit
 
     output reg  [31:0] mem_addr,
     output reg  [15:0] mem_wdata,
+    input  wire [15:0] mem_rdata,      // Memory read data
     output reg         mem_read,
     output reg         mem_write,
     output reg         mem_uds,
     output reg         mem_lds,
+
+    // Stack pointer access (A7 = register 15)
+    input  wire [31:0] stack_pointer,  // Current value of A7
+    output reg  [31:0] stack_ptr_out,  // New value for A7
+    output reg         stack_ptr_write, // Update A7
 
     input  wire        fpu_busy,
 
@@ -75,6 +81,17 @@ localparam OP_ROR     = 6'd23;
 wire [31:0] alu_result;
 wire [4:0]  alu_flags;
 
+// Multi-cycle operation state for JSR/RTS
+reg [1:0]  jsr_rts_state;   // 0=idle, 1=first, 2=second, 3=third
+reg [31:0] saved_pc;         // Saved PC for JSR
+reg [31:0] return_addr;      // Return address being read for RTS
+reg [5:0]  saved_opcode;     // Remember which operation we're doing
+
+localparam MULTI_IDLE   = 2'd0;
+localparam MULTI_FIRST  = 2'd1;
+localparam MULTI_SECOND = 2'd2;
+localparam MULTI_THIRD  = 2'd3;
+
 // Instantiate ALU
 MC68060_ALU alu
 (
@@ -103,19 +120,117 @@ always @(posedge clk or negedge nreset) begin
         mem_write <= 1'b0;
         mem_uds <= 1'b0;
         mem_lds <= 1'b0;
+        stack_ptr_out <= 32'h0;
+        stack_ptr_write <= 1'b0;
         flags_out <= 5'h0;
         branch_taken <= 1'b0;
         branch_target <= 32'h0;
         pc_out <= 32'h0;
         valid_out <= 1'b0;
-    end else if (enable && valid_in) begin
+        jsr_rts_state <= MULTI_IDLE;
+        saved_pc <= 32'h0;
+        return_addr <= 32'h0;
+        saved_opcode <= 6'd0;
+    end else if (enable) begin
+
+        // Handle multi-cycle JSR/RTS operations
+        if (jsr_rts_state != MULTI_IDLE) begin
+            // Default: clear control signals
+            mem_read <= 1'b0;
+            mem_write <= 1'b0;
+            branch_taken <= 1'b0;
+            stack_ptr_write <= 1'b0;
+            write_enable <= 1'b0;
+
+            case (saved_opcode)
+                OP_JSR: begin
+                    case (jsr_rts_state)
+                        MULTI_FIRST: begin
+                            // First cycle: write high word of return address
+                            mem_addr <= stack_pointer - 32'd2;
+                            mem_write <= 1'b1;
+                            mem_wdata <= saved_pc[31:16];  // High word
+                            mem_uds <= 1'b1;
+                            mem_lds <= 1'b1;
+                            jsr_rts_state <= MULTI_SECOND;
+                            valid_out <= 1'b0;  // Not done yet
+                        end
+
+                        MULTI_SECOND: begin
+                            // Second cycle: write low word and complete
+                            mem_addr <= stack_pointer - 32'd4;
+                            mem_write <= 1'b1;
+                            mem_wdata <= saved_pc[15:0];   // Low word
+                            mem_uds <= 1'b1;
+                            mem_lds <= 1'b1;
+
+                            // Complete the JSR - branch to target
+                            branch_taken <= 1'b1;
+                            branch_target <= return_addr;  // Reusing return_addr to save target
+
+                            jsr_rts_state <= MULTI_IDLE;
+                            valid_out <= 1'b1;
+                        end
+
+                        default: jsr_rts_state <= MULTI_IDLE;
+                    endcase
+                end
+
+                OP_RTS: begin
+                    case (jsr_rts_state)
+                        MULTI_FIRST: begin
+                            // First cycle: read low word of return address from [SP]
+                            mem_addr <= stack_pointer;
+                            mem_read <= 1'b1;
+                            mem_uds <= 1'b1;
+                            mem_lds <= 1'b1;
+                            jsr_rts_state <= MULTI_SECOND;
+                            valid_out <= 1'b0;  // Not done yet
+                        end
+
+                        MULTI_SECOND: begin
+                            // Second cycle: latch low word, read high word from [SP+2]
+                            return_addr[15:0] <= mem_rdata;  // Low word from previous read
+
+                            mem_addr <= stack_pointer + 32'd2;
+                            mem_read <= 1'b1;
+                            mem_uds <= 1'b1;
+                            mem_lds <= 1'b1;
+
+                            jsr_rts_state <= MULTI_THIRD;
+                            valid_out <= 1'b0;  // Still not done
+                        end
+
+                        MULTI_THIRD: begin
+                            // Third cycle: latch high word and complete
+                            return_addr[31:16] <= mem_rdata;  // High word from second read
+
+                            // Complete the RTS - branch to return address
+                            branch_taken <= 1'b1;
+                            branch_target <= {mem_rdata, return_addr[15:0]};
+
+                            jsr_rts_state <= MULTI_IDLE;
+                            valid_out <= 1'b1;  // Done!
+                        end
+
+                        default: jsr_rts_state <= MULTI_IDLE;
+                    endcase
+                end
+
+                default: jsr_rts_state <= MULTI_IDLE;
+            endcase
+        end
+
+        // Normal single-cycle operations
+        else if (valid_in) begin
         pc_out <= pc_in;
         valid_out <= 1'b1;
         mem_read <= 1'b0;
         mem_write <= 1'b0;
         branch_taken <= 1'b0;
-        write_addr <= dest_reg_in;  // Always set destination register
-        flags_out <= alu_flags;      // Propagate ALU flags
+        stack_ptr_write <= 1'b0;      // Default: don't update stack pointer
+        write_addr <= dest_reg_in;    // Always set destination register
+        flags_out <= alu_flags;        // Propagate ALU flags
 
         case (opcode_in)
             OP_NOP: begin
@@ -236,19 +351,43 @@ always @(posedge clk or negedge nreset) begin
             end
 
             OP_JSR: begin
-                // Jump to subroutine - save return address
-                branch_taken <= 1'b1;
-                branch_target <= operand1;
-                // Should push PC to stack - not implemented yet
+                // Jump to subroutine - save return address on stack
+                // This is a multi-cycle operation:
+                // Cycle 1: Write high word of PC to [SP-2]
+                // Cycle 2: Write low word of PC to [SP-4], decrement SP, branch
+
+                // Update stack pointer
+                stack_ptr_out <= stack_pointer - 32'd4;
+                stack_ptr_write <= 1'b1;
+
+                // Save PC and target for multi-cycle operation
+                saved_pc <= pc_in;
+                return_addr <= ea_src;  // Save target address
+                saved_opcode <= OP_JSR;
+
+                // Start multi-cycle operation
+                jsr_rts_state <= MULTI_FIRST;
                 write_enable <= 1'b0;
+                valid_out <= 1'b0;  // Not done yet
             end
 
             OP_RTS: begin
-                // Return from subroutine
-                // Should pop PC from stack - not implemented yet
-                branch_taken <= 1'b1;
-                branch_target <= 32'h0;  // Placeholder
+                // Return from subroutine - restore return address from stack
+                // This is a multi-cycle operation:
+                // Cycle 1: Read high word of return address from [SP]
+                // Cycle 2: Read low word from [SP+2], increment SP, branch
+
+                // Update stack pointer
+                stack_ptr_out <= stack_pointer + 32'd4;
+                stack_ptr_write <= 1'b1;
+
+                // Save opcode for multi-cycle operation
+                saved_opcode <= OP_RTS;
+
+                // Start multi-cycle operation
+                jsr_rts_state <= MULTI_FIRST;
                 write_enable <= 1'b0;
+                valid_out <= 1'b0;  // Not done yet
             end
 
             OP_LEA: begin

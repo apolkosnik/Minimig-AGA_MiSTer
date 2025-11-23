@@ -178,7 +178,7 @@ always @(posedge clk or negedge nreset) begin
             end
 
             4'h4: begin
-                // Miscellaneous: NEGX, CLR, NEG, NOT, EXT, NBCD, SWAP, PEA, MOVEM, LEA, CHK, etc.
+                // Miscellaneous: NEGX, CLR, NEG, NOT, EXT, NBCD, SWAP, PEA, MOVEM, LEA, CHK, JSR, RTS, etc.
                 if (instr_word0[11:9] == 3'b111 && instr_word0[7:6] == 2'b01) begin
                     opcode_out <= OP_LEA;
                     rf_raddr1 <= {1'b0, instr_ea};
@@ -192,6 +192,27 @@ always @(posedge clk or negedge nreset) begin
 
                     // Length: 1 + EA extension words
                     instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
+                end else if (instr_word0[11:6] == 6'b111010) begin
+                    // JSR: 0100 1110 10 xxx xxx
+                    opcode_out <= OP_JSR;
+                    rf_raddr1 <= 4'd15;  // Read A7 (stack pointer) for use in execute
+                    rf_raddr2 <= 4'd0;
+                    dest_reg_out <= 4'd0;  // JSR doesn't write to a register directly
+
+                    // JSR needs EA calculation for target address
+                    ea_mode_src <= instr_mode;
+                    ea_reg_src <= instr_ea;
+                    needs_ea_src <= 1'b1;
+
+                    // Length: 1 + EA extension words
+                    instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
+                end else if (instr_word0 == 16'h4E75) begin
+                    // RTS: 0100 1110 0111 0101
+                    opcode_out <= OP_RTS;
+                    rf_raddr1 <= 4'd15;  // Read A7 (stack pointer)
+                    rf_raddr2 <= 4'd0;
+                    dest_reg_out <= 4'd0;  // RTS doesn't write to a register
+                    instr_length <= 3'd1;   // RTS is always 1 word
                 end else begin
                     opcode_out <= OP_NOP;
                     rf_raddr1 <= {1'b0, instr_ea};
