@@ -1832,10 +1832,10 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;
 				IF exec(directSR)='1' OR set_stop='1' THEN
 					FlagsSR <= data_read(15 downto 8);
-					-- BUG #15 FIX: Sync preSVmode with SR bit 13 (supervisor bit) on RTE
-					-- When RTE restores SR from stack, preSVmode must track the restored S bit
-					-- Without this, supervisor→user transitions fail, breaking MMU detection!
-					preSVmode <= data_read(13);
+					-- -- BUG #15 FIX: Sync preSVmode with SR bit 13 (supervisor bit) on RTE
+					-- -- When RTE restores SR from stack, preSVmode must track the restored S bit
+					-- -- Without this, supervisor→user transitions fail, breaking MMU detection!
+					-- preSVmode <= data_read(13);
 				END IF;
 				IF interrupt='1' AND trap_interrupt='1' THEN
 					FlagsSR(2 downto 0) <=rIPL_nr;
@@ -1843,10 +1843,10 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF exec(to_SR)='1' THEN
 					FlagsSR(7 downto 0) <= SRin;	--SR
 					fc_internal(2) <= SRin(5);
-					-- BUG #15 FIX: Sync preSVmode with SR bit 5 (supervisor bit in low byte) on MOVE to SR
-					-- When MOVE to SR or MOVE to CCR executes, preSVmode must track the new S bit
-					-- Without this, MOVE #$0000,SR (enter user mode) doesn't work, breaking MMU detection!
-					preSVmode <= SRin(5);
+					-- -- BUG #15 FIX: Sync preSVmode with SR bit 5 (supervisor bit in low byte) on MOVE to SR
+					-- -- When MOVE to SR or MOVE to CCR executes, preSVmode must track the new S bit
+					-- -- Without this, MOVE #$0000,SR (enter user mode) doesn't work, breaking MMU detection!
+					-- preSVmode <= SRin(5);
 				ELSIF exec(update_FC)='1' THEN
 					fc_internal(2) <= FlagsSR(5);
 				END IF;
