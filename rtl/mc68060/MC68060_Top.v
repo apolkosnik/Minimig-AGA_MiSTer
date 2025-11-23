@@ -72,12 +72,18 @@ wire memory_stall;
 
 // Pipeline registers
 wire [31:0] fetch_pc;
-wire [15:0] fetch_instr;
+wire [15:0] fetch_word0;
+wire [15:0] fetch_word1;
+wire [15:0] fetch_word2;
+wire [15:0] fetch_word3;
+wire [2:0]  fetch_words_valid;
 wire        fetch_valid;
 
 wire [31:0] decode_pc;
-wire [15:0] decode_instr;
+wire [2:0]  decode_instr_length;
 wire        decode_valid;
+wire [15:0] decode_ext_word1;
+wire [15:0] decode_ext_word2;
 
 wire [31:0] exec_pc;
 wire [5:0]  exec_opcode;
@@ -193,17 +199,26 @@ MC68060_FetchUnit fetch_unit
     .enable         (clkena_in),
 
     .pc_in          (pc),
-    .branch_taken   (branch_taken),
-    .branch_target  (branch_target),
+    .branch_taken   (exec_branch_taken),
+    .branch_target  (exec_branch_target),
+
+    // Instruction length feedback from decode
+    .instr_words    (decode_instr_length),
+    .instr_consumed (decode_valid && clkena_in),
 
     .icache_enable  (icache_enable),
     .icache_hit     (icache_hit),
 
     .mem_addr       (fetch_pc),
     .mem_data       (icache_hit ? icache_data : data_in),  // Use cache data on hit
-    .mem_ready      (mem_ready && (cpu_state == STATE_FETCH)),
+    .mem_ready      (mem_ready || icache_hit),
 
-    .instr_out      (fetch_instr),
+    // Multi-word instruction output
+    .instr_word0    (fetch_word0),
+    .instr_word1    (fetch_word1),
+    .instr_word2    (fetch_word2),
+    .instr_word3    (fetch_word3),
+    .words_valid    (fetch_words_valid),
     .pc_out         (fetch_pc),
     .valid_out      (fetch_valid)
 );
@@ -217,7 +232,12 @@ MC68060_DecodeUnit decode_unit
     .nreset         (nreset),
     .enable         (clkena_in),
 
-    .instr_in       (fetch_instr),
+    // Multi-word instruction input
+    .instr_word0    (fetch_word0),
+    .instr_word1    (fetch_word1),
+    .instr_word2    (fetch_word2),
+    .instr_word3    (fetch_word3),
+    .words_available(fetch_words_valid),
     .pc_in          (fetch_pc),
     .valid_in       (fetch_valid),
 
@@ -230,6 +250,7 @@ MC68060_DecodeUnit decode_unit
     .dest_reg_out   (exec_dest_reg),
     .pc_out         (decode_pc),
     .valid_out      (decode_valid),
+    .instr_length   (decode_instr_length),
 
     // Effective Address outputs
     .ea_mode_src    (ea_mode_src),
@@ -238,7 +259,11 @@ MC68060_DecodeUnit decode_unit
     .ea_reg_dst     (ea_reg_dst),
     .ea_size        (ea_size),
     .needs_ea_src   (needs_ea_src),
-    .needs_ea_dst   (needs_ea_dst)
+    .needs_ea_dst   (needs_ea_dst),
+
+    // Extension words for EA calculation
+    .ext_word1      (decode_ext_word1),
+    .ext_word2      (decode_ext_word2)
 );
 
 //------------------------------------------------------------------------------
@@ -254,8 +279,8 @@ MC68060_EffectiveAddress ea_src_unit
     .ea_reg         (ea_reg_src),
     .ea_size        (ea_size),
 
-    .extension1     (16'h0000),  // TODO: Fetch extension words
-    .extension2     (16'h0000),
+    .extension1     (decode_ext_word1),  // Extension words from fetch/decode
+    .extension2     (decode_ext_word2),
 
     .areg_value     (rf_read_data1),  // Address register value
     .dreg_value     (rf_read_data2),  // Data register value for index
@@ -287,8 +312,8 @@ MC68060_EffectiveAddress ea_dst_unit
     .ea_reg         (ea_reg_dst),
     .ea_size        (ea_size),
 
-    .extension1     (16'h0000),  // TODO: Fetch extension words
-    .extension2     (16'h0000),
+    .extension1     (decode_ext_word1),  // Extension words from fetch/decode
+    .extension2     (decode_ext_word2),
 
     .areg_value     (rf_read_data2),  // Address register value
     .dreg_value     (rf_read_data1),  // Data register value for index

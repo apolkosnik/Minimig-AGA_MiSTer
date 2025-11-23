@@ -9,7 +9,12 @@ module MC68060_DecodeUnit
     input  wire        nreset,
     input  wire        enable,
 
-    input  wire [15:0] instr_in,
+    // Multi-word instruction input
+    input  wire [15:0] instr_word0,    // Opcode word
+    input  wire [15:0] instr_word1,    // Extension word 1
+    input  wire [15:0] instr_word2,    // Extension word 2
+    input  wire [15:0] instr_word3,    // Extension word 3
+    input  wire [2:0]  words_available,// How many words available
     input  wire [31:0] pc_in,
     input  wire        valid_in,
 
@@ -22,6 +27,7 @@ module MC68060_DecodeUnit
     output reg  [3:0]  dest_reg_out,   // Destination register for writeback
     output reg  [31:0] pc_out,
     output reg         valid_out,
+    output reg  [2:0]  instr_length,   // Instruction length in words (1-5)
 
     // Effective Address information
     output reg  [2:0]  ea_mode_src,    // Source EA mode
@@ -30,15 +36,48 @@ module MC68060_DecodeUnit
     output reg  [2:0]  ea_reg_dst,     // Destination EA register
     output reg  [1:0]  ea_size,        // Operand size: 00=byte, 01=word, 10=long
     output reg         needs_ea_src,   // Source needs EA calculation
-    output reg         needs_ea_dst    // Destination needs EA calculation
+    output reg         needs_ea_dst,   // Destination needs EA calculation
+
+    // Extension words for EA calculation
+    output reg  [15:0] ext_word1,      // First extension word
+    output reg  [15:0] ext_word2       // Second extension word
 );
 
-// Instruction format fields
-wire [3:0]  instr_op = instr_in[15:12];
-wire [2:0]  instr_reg = instr_in[11:9];
-wire [2:0]  instr_mode = instr_in[5:3];
-wire [2:0]  instr_ea = instr_in[2:0];
-wire [1:0]  instr_size = instr_in[7:6];
+// Instruction format fields (from opcode word)
+wire [3:0]  instr_op = instr_word0[15:12];
+wire [2:0]  instr_reg = instr_word0[11:9];
+wire [2:0]  instr_mode = instr_word0[5:3];
+wire [2:0]  instr_ea = instr_word0[2:0];
+wire [1:0]  instr_size = instr_word0[7:6];
+
+// Function to calculate instruction length based on EA mode
+function [2:0] calc_ea_length;
+    input [2:0] mode;
+    input [2:0] reg_field;
+    input [1:0] size;
+    begin
+        case (mode)
+            3'b000, 3'b001:  calc_ea_length = 3'd0;  // Dn, An - no extension
+            3'b010, 3'b011, 3'b100:  calc_ea_length = 3'd0;  // (An), (An)+, -(An) - no extension
+            3'b101:  calc_ea_length = 3'd1;  // d16(An) - 1 extension word
+            3'b110:  calc_ea_length = 3'd1;  // d8(An,Xn) - 1 extension word (brief format)
+            3'b111: begin
+                case (reg_field)
+                    3'b000:  calc_ea_length = 3'd1;  // xxx.W - 1 extension word
+                    3'b001:  calc_ea_length = 3'd2;  // xxx.L - 2 extension words
+                    3'b010:  calc_ea_length = 3'd1;  // d16(PC) - 1 extension word
+                    3'b011:  calc_ea_length = 3'd1;  // d8(PC,Xn) - 1 extension word
+                    3'b100: begin
+                        // Immediate - size dependent
+                        calc_ea_length = (size == 2'b10) ? 3'd2 : 3'd1;  // Long=2, Byte/Word=1
+                    end
+                    default: calc_ea_length = 3'd0;
+                endcase
+            end
+            default: calc_ea_length = 3'd0;
+        endcase
+    end
+endfunction
 
 // Decoded opcode types
 localparam OP_NOP     = 6'd0;
@@ -72,6 +111,7 @@ always @(posedge clk or negedge nreset) begin
         dest_reg_out <= 4'd0;
         pc_out <= 32'h0;
         valid_out <= 1'b0;
+        instr_length <= 3'd1;
         rf_raddr1 <= 4'd0;
         rf_raddr2 <= 4'd0;
         ea_mode_src <= 3'b000;
@@ -81,22 +121,27 @@ always @(posedge clk or negedge nreset) begin
         ea_size <= 2'b10;
         needs_ea_src <= 1'b0;
         needs_ea_dst <= 1'b0;
+        ext_word1 <= 16'h0;
+        ext_word2 <= 16'h0;
     end else if (enable && valid_in) begin
         pc_out <= pc_in;
         valid_out <= 1'b1;
 
-        // Default: no EA calculation needed
+        // Default: no EA calculation needed, instruction is 1 word
         needs_ea_src <= 1'b0;
         needs_ea_dst <= 1'b0;
         ea_size <= instr_size;  // Get size from instruction
+        instr_length <= 3'd1;   // Default to 1-word instruction
+        ext_word1 <= instr_word1;
+        ext_word2 <= instr_word2;
 
         // Decode instruction based on high nibble
         case (instr_op)
             4'h0: begin
                 // ORI, ANDI, SUBI, ADDI, BTST, BCHG, BCLR, BSET, MOVEP, etc.
-                if (instr_in[11:8] == 4'h0) begin
+                if (instr_word0[11:8] == 4'h0) begin
                     opcode_out <= OP_OR;  // ORI
-                end else if (instr_in[11:8] == 4'h2) begin
+                end else if (instr_word0[11:8] == 4'h2) begin
                     opcode_out <= OP_AND; // ANDI
                 end else begin
                     opcode_out <= OP_NOP;
@@ -104,6 +149,9 @@ always @(posedge clk or negedge nreset) begin
                 rf_raddr1 <= {1'b0, instr_ea};
                 rf_raddr2 <= {1'b0, instr_ea};  // Destination is same as source for these
                 dest_reg_out <= {1'b0, instr_ea};
+                // Length: 1 + immediate data + EA extension
+                instr_length <= 3'd1 + ((instr_size == 2'b10) ? 3'd2 : 3'd1) +
+                               calc_ea_length(instr_mode, instr_ea, instr_size);
             end
 
             4'h1, 4'h2, 4'h3: begin
@@ -116,17 +164,22 @@ always @(posedge clk or negedge nreset) begin
                 // Extract EA information
                 ea_mode_src <= instr_mode;          // Source EA mode
                 ea_reg_src <= instr_ea;             // Source EA register
-                ea_mode_dst <= instr_in[8:6];       // Destination EA mode (rearranged in MOVE)
+                ea_mode_dst <= instr_word0[8:6];    // Destination EA mode (rearranged in MOVE)
                 ea_reg_dst <= instr_reg;            // Destination EA register
 
                 // Determine if EA calculation is needed (not register direct)
                 needs_ea_src <= (instr_mode != 3'b000);  // Not data register direct
-                needs_ea_dst <= (instr_in[8:6] != 3'b000);
+                needs_ea_dst <= (instr_word0[8:6] != 3'b000);
+
+                // Calculate instruction length: 1 + src_ea_words + dst_ea_words
+                instr_length <= 3'd1 +
+                               calc_ea_length(instr_mode, instr_ea, instr_size) +
+                               calc_ea_length(instr_word0[8:6], instr_reg, instr_size);
             end
 
             4'h4: begin
                 // Miscellaneous: NEGX, CLR, NEG, NOT, EXT, NBCD, SWAP, PEA, MOVEM, LEA, CHK, etc.
-                if (instr_in[11:9] == 3'b111 && instr_in[7:6] == 2'b01) begin
+                if (instr_word0[11:9] == 3'b111 && instr_word0[7:6] == 2'b01) begin
                     opcode_out <= OP_LEA;
                     rf_raddr1 <= {1'b0, instr_ea};
                     rf_raddr2 <= {1'b0, instr_reg};
@@ -136,25 +189,32 @@ always @(posedge clk or negedge nreset) begin
                     ea_mode_src <= instr_mode;
                     ea_reg_src <= instr_ea;
                     needs_ea_src <= 1'b1;
+
+                    // Length: 1 + EA extension words
+                    instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
                 end else begin
                     opcode_out <= OP_NOP;
                     rf_raddr1 <= {1'b0, instr_ea};
                     rf_raddr2 <= 4'd0;
                     dest_reg_out <= 4'd0;
+                    instr_length <= 3'd1;
                 end
             end
 
             4'h5: begin
                 // ADDQ, SUBQ, Scc, DBcc
-                if (instr_in[7:6] == 2'b11) begin
+                if (instr_word0[7:6] == 2'b11) begin
                     opcode_out <= OP_NOP;  // DBcc
                     dest_reg_out <= 4'd0;
-                end else if (instr_in[8]) begin
+                    instr_length <= 3'd2;  // DBcc has displacement word
+                end else if (instr_word0[8]) begin
                     opcode_out <= OP_SUB;  // SUBQ
                     dest_reg_out <= {1'b0, instr_ea};  // Destination
+                    instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
                 end else begin
                     opcode_out <= OP_ADD;  // ADDQ
                     dest_reg_out <= {1'b0, instr_ea};  // Destination
+                    instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
                 end
                 rf_raddr1 <= {1'b0, instr_ea};
                 rf_raddr2 <= {1'b0, instr_ea};
@@ -162,7 +222,7 @@ always @(posedge clk or negedge nreset) begin
 
             4'h6: begin
                 // Bcc, BSR, BRA
-                if (instr_in[11:8] == 4'h0) begin
+                if (instr_word0[11:8] == 4'h0) begin
                     opcode_out <= OP_BRA;
                 end else begin
                     opcode_out <= OP_BCC;
@@ -170,6 +230,8 @@ always @(posedge clk or negedge nreset) begin
                 rf_raddr1 <= 4'd0;
                 rf_raddr2 <= 4'd0;
                 dest_reg_out <= 4'd0;  // Branches don't write registers
+                // Branch: 1 word if 8-bit displacement, 2 words if 16-bit displacement
+                instr_length <= (instr_word0[7:0] == 8'h00) ? 3'd2 : 3'd1;
             end
 
             4'h7: begin
@@ -178,11 +240,12 @@ always @(posedge clk or negedge nreset) begin
                 rf_raddr1 <= 4'd0;
                 rf_raddr2 <= {1'b0, instr_reg};
                 dest_reg_out <= {1'b0, instr_reg};  // MOVEQ writes to data register
+                instr_length <= 3'd1;  // MOVEQ is always 1 word
             end
 
             4'h8: begin
                 // OR, DIV, SBCD
-                if (instr_in[7:6] == 2'b11) begin
+                if (instr_word0[7:6] == 2'b11) begin
                     opcode_out <= OP_DIVU;
                 end else begin
                     opcode_out <= OP_OR;
@@ -195,6 +258,9 @@ always @(posedge clk or negedge nreset) begin
                 ea_mode_src <= instr_mode;
                 ea_reg_src <= instr_ea;
                 needs_ea_src <= (instr_mode != 3'b000) && (instr_mode != 3'b001);
+
+                // Length: 1 + EA extension words
+                instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
             end
 
             4'h9, 4'hD: begin
@@ -208,11 +274,14 @@ always @(posedge clk or negedge nreset) begin
                 ea_mode_src <= instr_mode;
                 ea_reg_src <= instr_ea;
                 needs_ea_src <= (instr_mode != 3'b000) && (instr_mode != 3'b001);  // Not Dn/An direct
+
+                // Length: 1 + EA extension words
+                instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
             end
 
             4'hB: begin
                 // CMP, CMPM, EOR
-                if (instr_in[8:6] == 3'b100) begin
+                if (instr_word0[8:6] == 3'b100) begin
                     opcode_out <= OP_EOR;
                     dest_reg_out <= {1'b0, instr_ea};  // EOR writes to EA
                 end else begin
@@ -221,11 +290,14 @@ always @(posedge clk or negedge nreset) begin
                 end
                 rf_raddr1 <= {1'b0, instr_ea};
                 rf_raddr2 <= {1'b0, instr_reg};
+
+                // Length: 1 + EA extension words
+                instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
             end
 
             4'hC: begin
                 // AND, MUL, ABCD, EXG
-                if (instr_in[7:6] == 2'b11) begin
+                if (instr_word0[7:6] == 2'b11) begin
                     opcode_out <= OP_MULU;
                 end else begin
                     opcode_out <= OP_AND;
@@ -238,11 +310,14 @@ always @(posedge clk or negedge nreset) begin
                 ea_mode_src <= instr_mode;
                 ea_reg_src <= instr_ea;
                 needs_ea_src <= (instr_mode != 3'b000) && (instr_mode != 3'b001);
+
+                // Length: 1 + EA extension words
+                instr_length <= 3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size);
             end
 
             4'hE: begin
                 // Shift/Rotate instructions
-                case (instr_in[4:3])
+                case (instr_word0[4:3])
                     2'b00: opcode_out <= OP_ASR;
                     2'b01: opcode_out <= OP_LSR;
                     2'b10: opcode_out <= OP_ROR;
@@ -251,6 +326,10 @@ always @(posedge clk or negedge nreset) begin
                 rf_raddr1 <= {1'b0, instr_ea};
                 rf_raddr2 <= {1'b0, instr_reg};
                 dest_reg_out <= {1'b0, instr_ea};  // Shift writes to EA
+
+                // Length: 1 + EA extension words (for memory shifts only)
+                instr_length <= (instr_word0[7:6] == 2'b11) ?
+                                3'd1 + calc_ea_length(instr_mode, instr_ea, instr_size) : 3'd1;
             end
 
             default: begin
@@ -258,6 +337,7 @@ always @(posedge clk or negedge nreset) begin
                 rf_raddr1 <= 4'd0;
                 rf_raddr2 <= 4'd0;
                 dest_reg_out <= 4'd0;
+                instr_length <= 3'd1;
             end
         endcase
     end else begin
