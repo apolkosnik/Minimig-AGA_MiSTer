@@ -296,16 +296,18 @@ always @(posedge clk or negedge nreset) begin
                     opcode_out <= OP_BRA;
                     rf_raddr1 <= 4'd0;
                     rf_raddr2 <= 4'd0;
+                    dest_reg_out <= 4'd0;
                 end else if (instr_word0[11:8] == 4'h1) begin
                     opcode_out <= OP_BSR;  // Branch to Subroutine
                     rf_raddr1 <= 4'd15;    // Read A7 (stack pointer)
                     rf_raddr2 <= 4'd0;
+                    dest_reg_out <= 4'd0;
                 end else begin
                     opcode_out <= OP_BCC;
                     rf_raddr1 <= 4'd0;
                     rf_raddr2 <= 4'd0;
+                    dest_reg_out <= instr_word0[11:8];  // Pass condition code in dest_reg
                 end
-                dest_reg_out <= 4'd0;  // Branches don't write registers
                 // Branch: 1 word if 8-bit displacement, 2 words if 16-bit displacement
                 instr_length <= (instr_word0[7:0] == 8'h00) ? 3'd2 : 3'd1;
             end

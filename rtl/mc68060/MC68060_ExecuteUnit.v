@@ -94,10 +94,45 @@ reg [31:0] saved_pc;         // Saved PC for JSR
 reg [31:0] return_addr;      // Return address being read for RTS
 reg [5:0]  saved_opcode;     // Remember which operation we're doing
 
+// Current CPU condition codes (flags register)
+reg [4:0]  cpu_flags;        // {N, Z, V, C, X}
+
 localparam MULTI_IDLE   = 2'd0;
 localparam MULTI_FIRST  = 2'd1;
 localparam MULTI_SECOND = 2'd2;
 localparam MULTI_THIRD  = 2'd3;
+
+// Function to evaluate condition codes
+function evaluate_condition;
+    input [3:0] condition;
+    input [4:0] flags;  // {N, Z, V, C, X}
+    reg n, z, v, c;
+    begin
+        n = flags[4];
+        z = flags[3];
+        v = flags[2];
+        c = flags[1];
+
+        case (condition)
+            4'h0: evaluate_condition = 1'b1;         // T  - True (always)
+            4'h1: evaluate_condition = 1'b0;         // F  - False (never)
+            4'h2: evaluate_condition = ~c & ~z;      // HI - High (C=0 & Z=0)
+            4'h3: evaluate_condition = c | z;        // LS - Low or Same (C=1 | Z=1)
+            4'h4: evaluate_condition = ~c;           // CC - Carry Clear (C=0)
+            4'h5: evaluate_condition = c;            // CS - Carry Set (C=1)
+            4'h6: evaluate_condition = ~z;           // NE - Not Equal (Z=0)
+            4'h7: evaluate_condition = z;            // EQ - Equal (Z=1)
+            4'h8: evaluate_condition = ~v;           // VC - Overflow Clear (V=0)
+            4'h9: evaluate_condition = v;            // VS - Overflow Set (V=1)
+            4'hA: evaluate_condition = ~n;           // PL - Plus (N=0)
+            4'hB: evaluate_condition = n;            // MI - Minus (N=1)
+            4'hC: evaluate_condition = (n & v) | (~n & ~v);  // GE - Greater or Equal (N=V)
+            4'hD: evaluate_condition = (n & ~v) | (~n & v);  // LT - Less Than (N!=V)
+            4'hE: evaluate_condition = ~z & ((n & v) | (~n & ~v));  // GT - Greater Than (Z=0 & N=V)
+            4'hF: evaluate_condition = z | ((n & ~v) | (~n & v));   // LE - Less or Equal (Z=1 | N!=V)
+        endcase
+    end
+endfunction
 
 // Instantiate ALU
 MC68060_ALU alu
@@ -138,6 +173,7 @@ always @(posedge clk or negedge nreset) begin
         saved_pc <= 32'h0;
         return_addr <= 32'h0;
         saved_opcode <= 6'd0;
+        cpu_flags <= 5'h0;
     end else if (enable) begin
 
         // Handle multi-cycle JSR/RTS operations
@@ -282,6 +318,7 @@ always @(posedge clk or negedge nreset) begin
                 end
                 result_out <= alu_result;
                 write_enable <= 1'b1;
+                flags_out <= alu_flags;
             end
 
             OP_SUB: begin
@@ -294,6 +331,7 @@ always @(posedge clk or negedge nreset) begin
                 end
                 result_out <= alu_result;
                 write_enable <= 1'b1;
+                flags_out <= alu_flags;
             end
 
             OP_AND: begin
@@ -306,6 +344,7 @@ always @(posedge clk or negedge nreset) begin
                 end
                 result_out <= alu_result;
                 write_enable <= 1'b1;
+                flags_out <= alu_flags;
             end
 
             OP_OR: begin
@@ -318,16 +357,19 @@ always @(posedge clk or negedge nreset) begin
                 end
                 result_out <= alu_result;
                 write_enable <= 1'b1;
+                flags_out <= alu_flags;
             end
 
             OP_EOR: begin
                 result_out <= alu_result;
                 write_enable <= 1'b1;
+                flags_out <= alu_flags;
             end
 
             OP_CMP: begin
                 // CMP doesn't write back, only sets flags
                 write_enable <= 1'b0;
+                flags_out <= alu_flags;
             end
 
             OP_BRA: begin
@@ -338,10 +380,9 @@ always @(posedge clk or negedge nreset) begin
             end
 
             OP_BCC: begin
-                // Conditional branch - check condition codes
-                // For now, simplified: just implement BNE (Branch if Not Equal)
-                // Real implementation would check operand1 for condition code
-                if (alu_flags[3] == 1'b0) begin  // Z flag == 0 (not equal)
+                // Conditional branch - evaluate condition code
+                // Condition code is in dest_reg_in[3:0]
+                if (evaluate_condition(dest_reg_in[3:0], cpu_flags)) begin
                     branch_taken <= 1'b1;
                     branch_target <= pc_in + {{24{operand1[7]}}, operand1[7:0]};
                 end else begin
@@ -429,26 +470,31 @@ always @(posedge clk or negedge nreset) begin
             OP_MULU: begin
                 result_out <= alu_result;
                 write_enable <= 1'b1;
+                flags_out <= alu_flags;
             end
 
             OP_MULS: begin
                 result_out <= alu_result;
                 write_enable <= 1'b1;
+                flags_out <= alu_flags;
             end
 
             OP_DIVU: begin
                 result_out <= alu_result;
                 write_enable <= 1'b1;
+                flags_out <= alu_flags;
             end
 
             OP_DIVS: begin
                 result_out <= alu_result;
                 write_enable <= 1'b1;
+                flags_out <= alu_flags;
             end
 
             OP_LSL, OP_LSR, OP_ASL, OP_ASR, OP_ROL, OP_ROR: begin
                 result_out <= alu_result;
                 write_enable <= 1'b1;
+                flags_out <= alu_flags;
             end
 
             OP_CLR: begin
@@ -527,6 +573,12 @@ always @(posedge clk or negedge nreset) begin
                 write_enable <= 1'b0;
             end
         endcase
+
+        // Update CPU flags from instruction output (for next instruction)
+        // Only update if this is a valid instruction that modifies flags
+        if (valid_in) begin
+            cpu_flags <= flags_out;
+        end
     end else begin
         valid_out <= 1'b0;
         write_enable <= 1'b0;
