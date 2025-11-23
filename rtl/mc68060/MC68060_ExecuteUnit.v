@@ -16,6 +16,7 @@ module MC68060_ExecuteUnit
 
     input  wire [31:0] operand1,
     input  wire [31:0] operand2,
+    input  wire [1:0]  operand_size,   // 00=byte, 01=word, 10=long
 
     // Effective Address inputs
     input  wire [31:0] ea_src,         // Calculated source EA
@@ -84,6 +85,7 @@ MC68060_ALU alu
     .opcode     (opcode_in),
     .operand1   (operand1),
     .operand2   (operand2),
+    .size       (operand_size),
 
     .result     (alu_result),
     .flags      (alu_flags)    // {N, Z, V, C, X}

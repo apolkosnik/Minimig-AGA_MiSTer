@@ -348,6 +348,7 @@ MC68060_ExecuteUnit exec_unit
 
     .operand1       (rf_read_data1),
     .operand2       (rf_read_data2),
+    .operand_size   (ea_size),
 
     // Effective Address inputs
     .ea_src         (ea_src_addr),

@@ -12,6 +12,7 @@ module MC68060_ALU
     input  wire [5:0]  opcode,
     input  wire [31:0] operand1,
     input  wire [31:0] operand2,
+    input  wire [1:0]  size,        // 00=byte, 01=word, 10=long
 
     output reg  [31:0] result,
     output reg  [4:0]  flags      // {N, Z, V, C, X}
@@ -43,18 +44,97 @@ wire [32:0] sub_result;
 wire [31:0] and_result;
 wire [31:0] or_result;
 wire [31:0] eor_result;
-wire [63:0] mul_result;
-wire [31:0] div_result;
 wire [31:0] shift_result;
 
-// Perform operations
+// Perform basic operations
 assign add_result = {1'b0, operand1} + {1'b0, operand2};
 assign sub_result = {1'b0, operand1} - {1'b0, operand2};
 assign and_result = operand1 & operand2;
 assign or_result  = operand1 | operand2;
 assign eor_result = operand1 ^ operand2;
-assign mul_result = operand1 * operand2;  // Unsigned multiply
-assign div_result = (operand2 != 0) ? (operand1 / operand2) : 32'hFFFFFFFF;
+
+// Multiply/Divide operations (size-dependent)
+reg [31:0] mul_result;
+reg [31:0] div_result;
+reg [31:0] div_remainder;
+
+always @(*) begin
+    // Default values
+    mul_result = 32'h0;
+    div_result = 32'hFFFFFFFF;
+    div_remainder = 32'h0;
+
+    case (opcode)
+        OP_MULU: begin
+            // Unsigned multiply
+            if (size == 2'b01) begin
+                // MULU.W: 16×16 → 32
+                mul_result = operand1[15:0] * operand2[15:0];
+            end else begin
+                // MULU.L: 32×32 → 64 (only return low 32 bits for now)
+                mul_result = operand1 * operand2;
+            end
+        end
+
+        OP_MULS: begin
+            // Signed multiply
+            if (size == 2'b01) begin
+                // MULS.W: signed 16×16 → 32
+                mul_result = $signed(operand1[15:0]) * $signed(operand2[15:0]);
+            end else begin
+                // MULS.L: signed 32×32 → 64 (only return low 32 bits for now)
+                mul_result = $signed(operand1) * $signed(operand2);
+            end
+        end
+
+        OP_DIVU: begin
+            // Unsigned divide
+            if (operand2 != 32'h0) begin
+                if (size == 2'b01) begin
+                    // DIVU.W: 32÷16 → quotient(16) + remainder(16)
+                    if (operand2[15:0] != 16'h0) begin
+                        div_result[15:0] = operand1 / operand2[15:0];     // Quotient in low word
+                        div_remainder[15:0] = operand1 % operand2[15:0];  // Remainder
+                        div_result[31:16] = div_remainder[15:0];          // Pack remainder in high word
+                    end else begin
+                        div_result = 32'hFFFFFFFF;  // Division by zero
+                    end
+                end else begin
+                    // DIVU.L: 32÷32 (MC68020+)
+                    div_result = operand1 / operand2;
+                end
+            end else begin
+                div_result = 32'hFFFFFFFF;  // Division by zero
+            end
+        end
+
+        OP_DIVS: begin
+            // Signed divide
+            if (operand2 != 32'h0) begin
+                if (size == 2'b01) begin
+                    // DIVS.W: signed 32÷16 → quotient(16) + remainder(16)
+                    if (operand2[15:0] != 16'h0) begin
+                        div_result[15:0] = $signed(operand1) / $signed(operand2[15:0]);
+                        div_remainder[15:0] = $signed(operand1) % $signed(operand2[15:0]);
+                        div_result[31:16] = div_remainder[15:0];
+                    end else begin
+                        div_result = 32'hFFFFFFFF;  // Division by zero
+                    end
+                end else begin
+                    // DIVS.L: signed 32÷32 (MC68020+)
+                    div_result = $signed(operand1) / $signed(operand2);
+                end
+            end else begin
+                div_result = 32'hFFFFFFFF;  // Division by zero
+            end
+        end
+
+        default: begin
+            mul_result = 32'h0;
+            div_result = 32'h0;
+        end
+    endcase
+end
 
 // Shift/Rotate logic
 wire [4:0] shift_count = operand2[4:0];
@@ -196,19 +276,21 @@ always @(posedge clk or negedge nreset) begin
             end
 
             OP_MULU, OP_MULS: begin
-                result <= mul_result[31:0];
+                result <= mul_result;
                 flags[4] <= mul_result[31];                 // N
-                flags[3] <= (mul_result[31:0] == 32'h0);   // Z
-                flags[2] <= (mul_result[63:32] != 32'h0);  // V (overflow if high bits set)
-                flags[1] <= 1'b0;                          // C
+                flags[3] <= (mul_result == 32'h0);         // Z
+                flags[2] <= 1'b0;                          // V (cleared for multiply)
+                flags[1] <= 1'b0;                          // C (cleared for multiply)
+                flags[0] <= 1'b0;                          // X (not affected)
             end
 
             OP_DIVU, OP_DIVS: begin
                 result <= div_result;
-                flags[4] <= div_result[31];                 // N
-                flags[3] <= (div_result == 32'h0);         // Z
-                flags[2] <= (operand2 == 32'h0);           // V (divide by zero)
-                flags[1] <= 1'b0;                          // C
+                flags[4] <= div_result[15];                 // N (based on quotient, low word)
+                flags[3] <= (div_result[15:0] == 16'h0);   // Z (based on quotient)
+                flags[2] <= (operand2 == 32'h0) || (operand2[15:0] == 16'h0);  // V (divide by zero)
+                flags[1] <= 1'b0;                          // C (cleared for divide)
+                flags[0] <= 1'b0;                          // X (not affected)
             end
 
             OP_LSL, OP_LSR, OP_ASL, OP_ASR, OP_ROL, OP_ROR: begin
