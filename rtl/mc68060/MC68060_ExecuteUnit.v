@@ -17,7 +17,7 @@ module MC68060_ExecuteUnit
     input  wire [31:0] operand2,
 
     output reg  [31:0] result_out,
-    output reg  [2:0]  write_addr,
+    output reg  [3:0]  write_addr,
     output reg         write_enable,
 
     output reg  [31:0] mem_addr,
@@ -82,7 +82,7 @@ MC68060_ALU alu
 always @(posedge clk or negedge nreset) begin
     if (!nreset) begin
         result_out <= 32'h0;
-        write_addr <= 3'd0;
+        write_addr <= 4'd0;
         write_enable <= 1'b0;
         mem_addr <= 32'h0;
         mem_wdata <= 16'h0;

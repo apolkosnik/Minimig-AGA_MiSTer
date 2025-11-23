@@ -13,8 +13,8 @@ module MC68060_DecodeUnit
     input  wire [31:0] pc_in,
     input  wire        valid_in,
 
-    output reg  [2:0]  rf_raddr1,
-    output reg  [2:0]  rf_raddr2,
+    output reg  [3:0]  rf_raddr1,
+    output reg  [3:0]  rf_raddr2,
     input  wire [31:0] rf_rdata1,
     input  wire [31:0] rf_rdata2,
 
@@ -61,8 +61,8 @@ always @(posedge clk or negedge nreset) begin
         opcode_out <= OP_NOP;
         pc_out <= 32'h0;
         valid_out <= 1'b0;
-        rf_raddr1 <= 3'd0;
-        rf_raddr2 <= 3'd0;
+        rf_raddr1 <= 4'd0;
+        rf_raddr2 <= 4'd0;
     end else if (enable && valid_in) begin
         pc_out <= pc_in;
         valid_out <= 1'b1;
@@ -78,27 +78,27 @@ always @(posedge clk or negedge nreset) begin
                 end else begin
                     opcode_out <= OP_NOP;
                 end
-                rf_raddr1 <= instr_ea;
-                rf_raddr2 <= 3'd0;
+                rf_raddr1 <= {1'b0, instr_ea};
+                rf_raddr2 <= 4'd0;
             end
 
             4'h1, 4'h2, 4'h3: begin
                 // MOVE instructions
                 opcode_out <= OP_MOVE;
-                rf_raddr1 <= instr_ea;      // Source
-                rf_raddr2 <= instr_reg;     // Destination
+                rf_raddr1 <= {1'b0, instr_ea};      // Source
+                rf_raddr2 <= {1'b0, instr_reg};     // Destination
             end
 
             4'h4: begin
                 // Miscellaneous: NEGX, CLR, NEG, NOT, EXT, NBCD, SWAP, PEA, MOVEM, LEA, CHK, etc.
                 if (instr_in[11:9] == 3'b111 && instr_in[7:6] == 2'b01) begin
                     opcode_out <= OP_LEA;
-                    rf_raddr1 <= instr_ea;
-                    rf_raddr2 <= instr_reg;
+                    rf_raddr1 <= {1'b0, instr_ea};
+                    rf_raddr2 <= {1'b0, instr_reg};
                 end else begin
                     opcode_out <= OP_NOP;
-                    rf_raddr1 <= instr_ea;
-                    rf_raddr2 <= 3'd0;
+                    rf_raddr1 <= {1'b0, instr_ea};
+                    rf_raddr2 <= 4'd0;
                 end
             end
 
@@ -111,8 +111,8 @@ always @(posedge clk or negedge nreset) begin
                 end else begin
                     opcode_out <= OP_ADD;  // ADDQ
                 end
-                rf_raddr1 <= instr_ea;
-                rf_raddr2 <= 3'd0;
+                rf_raddr1 <= {1'b0, instr_ea};
+                rf_raddr2 <= 4'd0;
             end
 
             4'h6: begin
@@ -122,15 +122,15 @@ always @(posedge clk or negedge nreset) begin
                 end else begin
                     opcode_out <= OP_BCC;
                 end
-                rf_raddr1 <= 3'd0;
-                rf_raddr2 <= 3'd0;
+                rf_raddr1 <= 4'd0;
+                rf_raddr2 <= 4'd0;
             end
 
             4'h7: begin
                 // MOVEQ
                 opcode_out <= OP_MOVE;
-                rf_raddr1 <= 3'd0;
-                rf_raddr2 <= instr_reg;
+                rf_raddr1 <= 4'd0;
+                rf_raddr2 <= {1'b0, instr_reg};
             end
 
             4'h8: begin
@@ -140,15 +140,15 @@ always @(posedge clk or negedge nreset) begin
                 end else begin
                     opcode_out <= OP_OR;
                 end
-                rf_raddr1 <= instr_ea;
-                rf_raddr2 <= instr_reg;
+                rf_raddr1 <= {1'b0, instr_ea};
+                rf_raddr2 <= {1'b0, instr_reg};
             end
 
             4'h9, 4'hD: begin
                 // SUB, SUBX, SUBA
                 opcode_out <= OP_SUB;
-                rf_raddr1 <= instr_ea;
-                rf_raddr2 <= instr_reg;
+                rf_raddr1 <= {1'b0, instr_ea};
+                rf_raddr2 <= {1'b0, instr_reg};
             end
 
             4'hB: begin
@@ -158,8 +158,8 @@ always @(posedge clk or negedge nreset) begin
                 end else begin
                     opcode_out <= OP_CMP;
                 end
-                rf_raddr1 <= instr_ea;
-                rf_raddr2 <= instr_reg;
+                rf_raddr1 <= {1'b0, instr_ea};
+                rf_raddr2 <= {1'b0, instr_reg};
             end
 
             4'hC: begin
@@ -169,8 +169,8 @@ always @(posedge clk or negedge nreset) begin
                 end else begin
                     opcode_out <= OP_AND;
                 end
-                rf_raddr1 <= instr_ea;
-                rf_raddr2 <= instr_reg;
+                rf_raddr1 <= {1'b0, instr_ea};
+                rf_raddr2 <= {1'b0, instr_reg};
             end
 
             4'hE: begin
@@ -181,14 +181,14 @@ always @(posedge clk or negedge nreset) begin
                     2'b10: opcode_out <= OP_ROR;
                     2'b11: opcode_out <= OP_ROR;  // ROXR
                 endcase
-                rf_raddr1 <= instr_ea;
-                rf_raddr2 <= instr_reg;
+                rf_raddr1 <= {1'b0, instr_ea};
+                rf_raddr2 <= {1'b0, instr_reg};
             end
 
             default: begin
                 opcode_out <= OP_NOP;
-                rf_raddr1 <= 3'd0;
-                rf_raddr2 <= 3'd0;
+                rf_raddr1 <= 4'd0;
+                rf_raddr2 <= 4'd0;
             end
         endcase
     end else begin

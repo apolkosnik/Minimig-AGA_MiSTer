@@ -73,9 +73,9 @@ wire [5:0]  exec_opcode;
 wire        exec_valid;
 
 // Register file signals
-wire [2:0]  rf_read_addr1, rf_read_addr2;
+wire [3:0]  rf_read_addr1, rf_read_addr2;
 wire [31:0] rf_read_data1, rf_read_data2;
-wire [2:0]  rf_write_addr;
+wire [3:0]  rf_write_addr;
 wire [31:0] rf_write_data;
 wire        rf_write_enable;
 
@@ -94,6 +94,10 @@ wire        icache_enable;
 wire        dcache_enable;
 wire        icache_hit;
 wire        dcache_hit;
+wire        icache_valid;
+wire        dcache_valid;
+wire [15:0] icache_data;
+wire [15:0] dcache_data;
 
 // Branch prediction
 wire        branch_taken;
@@ -152,7 +156,7 @@ MC68060_FetchUnit fetch_unit
     .icache_hit     (icache_hit),
 
     .mem_addr       (fetch_pc),
-    .mem_data       (data_in),
+    .mem_data       (icache_hit ? icache_data : data_in),  // Use cache data on hit
     .mem_ready      (mem_ready && (cpu_state == STATE_FETCH)),
 
     .instr_out      (fetch_instr),
@@ -245,10 +249,10 @@ MC68060_ICache icache
 
     .addr           (fetch_pc),
     .data_in        (data_in),
-    .data_out       (),
+    .data_out       (icache_data),
 
     .hit            (icache_hit),
-    .valid          ()
+    .valid          (icache_valid)
 );
 
 //------------------------------------------------------------------------------
@@ -262,11 +266,11 @@ MC68060_DCache dcache
 
     .addr           (mem_addr),
     .data_in        (data_in),
-    .data_out       (),
+    .data_out       (dcache_data),
     .write          (mem_write),
 
     .hit            (dcache_hit),
-    .valid          ()
+    .valid          (dcache_valid)
 );
 
 //------------------------------------------------------------------------------
@@ -366,7 +370,28 @@ always @(posedge clk or negedge nreset) begin
     end
 end
 
-// Memory ready signal (simplified - actual implementation would interface with system)
-assign mem_ready = 1'b1;  // For now, assume memory is always ready
+// Memory ready signal
+// Ready when: cache hit OR external memory would be ready
+// In actual integration, this should connect to chipready, ramready, fastchip_ready
+// For now, we assume cache hit means immediate ready, otherwise ready next cycle
+reg mem_ready_reg;
+always @(posedge clk or negedge nreset) begin
+    if (!nreset) begin
+        mem_ready_reg <= 1'b0;
+    end else begin
+        // Cache hit provides immediate data
+        if ((cpu_state == STATE_FETCH) && icache_hit) begin
+            mem_ready_reg <= 1'b1;
+        end else if ((cpu_state == STATE_MEMORY) && dcache_hit) begin
+            mem_ready_reg <= 1'b1;
+        end else begin
+            // Without cache hit, assume memory ready next cycle
+            // In real integration, connect to actual memory ready signals
+            mem_ready_reg <= (cpu_state == STATE_FETCH) || (cpu_state == STATE_MEMORY);
+        end
+    end
+end
+
+assign mem_ready = mem_ready_reg;
 
 endmodule

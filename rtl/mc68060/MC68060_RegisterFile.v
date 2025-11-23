@@ -10,15 +10,15 @@ module MC68060_RegisterFile
     input  wire        nreset,
 
     // Read port 1
-    input  wire [2:0]  read_addr1,
+    input  wire [3:0]  read_addr1,
     output reg  [31:0] read_data1,
 
     // Read port 2
-    input  wire [2:0]  read_addr2,
+    input  wire [3:0]  read_addr2,
     output reg  [31:0] read_data2,
 
     // Write port
-    input  wire [2:0]  write_addr,
+    input  wire [3:0]  write_addr,
     input  wire [31:0] write_data,
     input  wire        write_enable
 );
