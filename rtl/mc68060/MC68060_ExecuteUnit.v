@@ -81,6 +81,8 @@ localparam OP_CLR     = 6'd25;
 localparam OP_NEG     = 6'd26;
 localparam OP_NOT     = 6'd27;
 localparam OP_TST     = 6'd28;
+localparam OP_LINK    = 6'd29;
+localparam OP_UNLK    = 6'd30;
 
 // ALU signals
 wire [31:0] alu_result;
@@ -474,6 +476,51 @@ always @(posedge clk or negedge nreset) begin
                 // Test - set flags only, no write
                 write_enable <= 1'b0;
                 flags_out <= alu_flags;
+            end
+
+            OP_LINK: begin
+                // LINK An,#disp - Create stack frame
+                // operand1 = SP, operand2 = An value, ea_src = displacement
+                // 1. Push An onto stack
+                // 2. Copy SP to An
+                // 3. Add displacement to SP
+
+                // For simplicity, doing this in one cycle (should be multi-cycle)
+                // Push An onto stack
+                mem_addr <= stack_pointer - 32'd4;
+                mem_write <= 1'b1;
+                mem_wdata <= operand2[15:0];  // Write An (low word)
+                mem_uds <= 1'b1;
+                mem_lds <= 1'b1;
+
+                // Update An to point to old SP
+                result_out <= stack_pointer;
+                write_enable <= 1'b1;
+
+                // Update SP = SP - 4 + displacement (from operand2 high bits or separate input)
+                stack_ptr_out <= stack_pointer - 32'd4 + {{16{operand2[31]}}, operand2[31:16]};
+                stack_ptr_write <= 1'b1;
+            end
+
+            OP_UNLK: begin
+                // UNLK An - Destroy stack frame
+                // operand1 = SP, operand2 = An value
+                // 1. Copy An to SP
+                // 2. Pop An from stack
+
+                // Read An from stack
+                mem_addr <= operand2;  // An value is the frame pointer
+                mem_read <= 1'b1;
+                mem_uds <= 1'b1;
+                mem_lds <= 1'b1;
+
+                // Restore SP from An
+                stack_ptr_out <= operand2 + 32'd4;  // An + 4 (after pop)
+                stack_ptr_write <= 1'b1;
+
+                // Restore An from stack (would need mem_rdata in real implementation)
+                result_out <= mem_rdata;  // Restore An value
+                write_enable <= 1'b1;
             end
 
             default: begin

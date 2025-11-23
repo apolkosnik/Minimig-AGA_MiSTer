@@ -109,6 +109,8 @@ localparam OP_CLR     = 6'd25;
 localparam OP_NEG     = 6'd26;
 localparam OP_NOT     = 6'd27;
 localparam OP_TST     = 6'd28;
+localparam OP_LINK    = 6'd29;
+localparam OP_UNLK    = 6'd30;
 
 always @(posedge clk or negedge nreset) begin
     if (!nreset) begin
@@ -218,6 +220,20 @@ always @(posedge clk or negedge nreset) begin
                     rf_raddr2 <= 4'd0;
                     dest_reg_out <= 4'd0;  // RTS doesn't write to a register
                     instr_length <= 3'd1;   // RTS is always 1 word
+                end else if (instr_word0[15:3] == 13'b0100_1110_0101_0) begin
+                    // LINK: 0100 1110 0101 0xxx
+                    opcode_out <= OP_LINK;
+                    rf_raddr1 <= 4'd15;              // Read A7 (stack pointer)
+                    rf_raddr2 <= {1'b1, instr_word0[2:0]};  // Read An
+                    dest_reg_out <= {1'b1, instr_word0[2:0]};  // Write to An
+                    instr_length <= 3'd2;   // LINK has displacement word
+                end else if (instr_word0[15:3] == 13'b0100_1110_0101_1) begin
+                    // UNLK: 0100 1110 0101 1xxx
+                    opcode_out <= OP_UNLK;
+                    rf_raddr1 <= 4'd15;              // Read A7 (stack pointer)
+                    rf_raddr2 <= {1'b1, instr_word0[2:0]};  // Read An
+                    dest_reg_out <= {1'b1, instr_word0[2:0]};  // Write to An
+                    instr_length <= 3'd1;   // UNLK is 1 word
                 end else if (instr_word0[11:8] == 4'h2) begin
                     // CLR: 0100 0010 xx xxxxxx
                     opcode_out <= OP_CLR;
