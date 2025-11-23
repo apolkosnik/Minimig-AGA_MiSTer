@@ -59,6 +59,17 @@ reg [31:0] vbr;
 reg [3:0] cacr;
 reg reset_out_n;
 
+// Status Register (SR)
+// Bits: 15=T 14=T 13=S 12=0 11=0 10=I 9=I 8=I 7=0 6=0 5=0 4=X 3=N 2=Z 1=V 0=C
+reg [15:0] sr;
+wire [4:0] ccr = sr[4:0];  // Condition Code Register (lower 5 bits of SR)
+
+// Pipeline stall signals
+wire fetch_stall;
+wire decode_stall;
+wire exec_stall;
+wire memory_stall;
+
 // Pipeline registers
 wire [31:0] fetch_pc;
 wire [15:0] fetch_instr;
@@ -89,6 +100,11 @@ wire        mem_write;
 wire        mem_uds;
 wire        mem_lds;
 wire        mem_ready;
+
+// Flags and branch control from execute
+wire [4:0]  exec_flags;
+wire        exec_branch_taken;
+wire [31:0] exec_branch_target;
 
 // Cache control
 wire        icache_enable;
@@ -219,6 +235,10 @@ MC68060_ExecuteUnit exec_unit
 
     .fpu_busy       (fpu_busy),
 
+    .flags_out      (exec_flags),
+    .branch_taken   (exec_branch_taken),
+    .branch_target  (exec_branch_target),
+
     .pc_out         (exec_pc),
     .valid_out      (exec_valid)
 );
@@ -329,32 +349,44 @@ always @(posedge clk or negedge nreset) begin
             end
 
             STATE_FETCH: begin
-                if (fetch_valid) begin
+                // Stall if: cache miss AND memory not ready
+                if (fetch_valid && !fetch_stall) begin
                     cpu_state <= STATE_DECODE;
                     pc <= pc + 32'd2;  // Increment PC by 2 (word)
                 end
+                // else: stay in FETCH until data ready
             end
 
             STATE_DECODE: begin
-                if (decode_valid) begin
+                // Stall if: register dependencies or resource conflicts
+                if (decode_valid && !decode_stall) begin
                     cpu_state <= STATE_EXECUTE;
                 end
+                // else: stay in DECODE
             end
 
             STATE_EXECUTE: begin
-                if (exec_valid) begin
-                    if (mem_read || mem_write) begin
+                // Stall if: FPU busy or multi-cycle operation
+                if (exec_valid && !exec_stall) begin
+                    // Handle branches
+                    if (exec_branch_taken) begin
+                        pc <= exec_branch_target;  // Update PC with branch target
+                        cpu_state <= STATE_FETCH;   // Restart fetch from new PC
+                    end else if (mem_read || mem_write) begin
                         cpu_state <= STATE_MEMORY;
                     end else begin
                         cpu_state <= STATE_WRITEBACK;
                     end
                 end
+                // else: stay in EXECUTE
             end
 
             STATE_MEMORY: begin
-                if (mem_ready) begin
+                // Stall if: cache miss or memory not ready
+                if (mem_ready && !memory_stall) begin
                     cpu_state <= STATE_WRITEBACK;
                 end
+                // else: stay in MEMORY until ready
             end
 
             STATE_WRITEBACK: begin
@@ -373,28 +405,62 @@ always @(posedge clk or negedge nreset) begin
     end
 end
 
+// Pipeline stall conditions
+assign fetch_stall = (cpu_state == STATE_FETCH) && !icache_hit && !mem_ready;
+assign decode_stall = 1'b0;  // No decode stalls for now (would need hazard detection)
+assign exec_stall = fpu_busy;  // Stall if FPU is busy
+assign memory_stall = (cpu_state == STATE_MEMORY) && !dcache_hit && !mem_ready;
+
 // Memory ready signal
 // Ready when: cache hit OR external memory would be ready
 // In actual integration, this should connect to chipready, ramready, fastchip_ready
-// For now, we assume cache hit means immediate ready, otherwise ready next cycle
 reg mem_ready_reg;
+reg [1:0] mem_wait_count;  // Simulate memory latency
+
 always @(posedge clk or negedge nreset) begin
     if (!nreset) begin
         mem_ready_reg <= 1'b0;
+        mem_wait_count <= 2'b00;
     end else begin
         // Cache hit provides immediate data
-        if ((cpu_state == STATE_FETCH) && icache_hit) begin
+        if (icache_hit && (cpu_state == STATE_FETCH)) begin
             mem_ready_reg <= 1'b1;
-        end else if ((cpu_state == STATE_MEMORY) && dcache_hit) begin
+            mem_wait_count <= 2'b00;
+        end else if (dcache_hit && (cpu_state == STATE_MEMORY)) begin
             mem_ready_reg <= 1'b1;
+            mem_wait_count <= 2'b00;
         end else begin
-            // Without cache hit, assume memory ready next cycle
-            // In real integration, connect to actual memory ready signals
-            mem_ready_reg <= (cpu_state == STATE_FETCH) || (cpu_state == STATE_MEMORY);
+            // Cache miss - simulate memory latency (2 cycles)
+            if ((cpu_state == STATE_FETCH) || (cpu_state == STATE_MEMORY)) begin
+                if (mem_wait_count < 2'b10) begin
+                    mem_wait_count <= mem_wait_count + 1'b1;
+                    mem_ready_reg <= 1'b0;
+                end else begin
+                    mem_ready_reg <= 1'b1;  // Data ready after 2 cycles
+                end
+            end else begin
+                mem_wait_count <= 2'b00;
+                mem_ready_reg <= 1'b0;
+            end
         end
     end
 end
 
 assign mem_ready = mem_ready_reg;
+
+// Status Register management
+// Update SR with ALU flags after execute stage
+always @(posedge clk or negedge nreset) begin
+    if (!nreset) begin
+        sr <= 16'h2700;  // Supervisor mode, interrupts masked (I=111, S=1)
+    end else if (clkena_in) begin
+        // Update CCR (condition codes) from execute stage
+        if (exec_valid && (cpu_state == STATE_EXECUTE)) begin
+            // Update flags: X, N, Z, V, C (bits 4:0)
+            sr[4:0] <= exec_flags[4:0];
+        end
+        // Note: System byte (sr[15:8]) is only updated by privileged instructions
+    end
+end
 
 endmodule

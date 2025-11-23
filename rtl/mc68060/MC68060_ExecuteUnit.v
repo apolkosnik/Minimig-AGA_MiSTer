@@ -29,6 +29,10 @@ module MC68060_ExecuteUnit
 
     input  wire        fpu_busy,
 
+    output reg  [4:0]  flags_out,     // Flags for SR update (X, N, Z, V, C)
+    output reg         branch_taken,   // Branch was taken
+    output reg  [31:0] branch_target,  // Branch target address
+
     output reg  [31:0] pc_out,
     output reg         valid_out
 );
@@ -90,6 +94,9 @@ always @(posedge clk or negedge nreset) begin
         mem_write <= 1'b0;
         mem_uds <= 1'b0;
         mem_lds <= 1'b0;
+        flags_out <= 5'h0;
+        branch_taken <= 1'b0;
+        branch_target <= 32'h0;
         pc_out <= 32'h0;
         valid_out <= 1'b0;
     end else if (enable && valid_in) begin
@@ -97,7 +104,9 @@ always @(posedge clk or negedge nreset) begin
         valid_out <= 1'b1;
         mem_read <= 1'b0;
         mem_write <= 1'b0;
+        branch_taken <= 1'b0;
         write_addr <= dest_reg_in;  // Always set destination register
+        flags_out <= alu_flags;      // Propagate ALU flags
 
         case (opcode_in)
             OP_NOP: begin
@@ -136,6 +145,49 @@ always @(posedge clk or negedge nreset) begin
 
             OP_CMP: begin
                 // CMP doesn't write back, only sets flags
+                write_enable <= 1'b0;
+            end
+
+            OP_BRA: begin
+                // Unconditional branch
+                branch_taken <= 1'b1;
+                branch_target <= pc_in + {{24{operand1[7]}}, operand1[7:0]};  // Sign-extended 8-bit displacement
+                write_enable <= 1'b0;
+            end
+
+            OP_BCC: begin
+                // Conditional branch - check condition codes
+                // For now, simplified: just implement BNE (Branch if Not Equal)
+                // Real implementation would check operand1 for condition code
+                if (alu_flags[3] == 1'b0) begin  // Z flag == 0 (not equal)
+                    branch_taken <= 1'b1;
+                    branch_target <= pc_in + {{24{operand1[7]}}, operand1[7:0]};
+                end else begin
+                    branch_taken <= 1'b0;
+                end
+                write_enable <= 1'b0;
+            end
+
+            OP_JMP: begin
+                // Jump to address in operand1
+                branch_taken <= 1'b1;
+                branch_target <= operand1;
+                write_enable <= 1'b0;
+            end
+
+            OP_JSR: begin
+                // Jump to subroutine - save return address
+                branch_taken <= 1'b1;
+                branch_target <= operand1;
+                // Should push PC to stack - not implemented yet
+                write_enable <= 1'b0;
+            end
+
+            OP_RTS: begin
+                // Return from subroutine
+                // Should pop PC from stack - not implemented yet
+                branch_taken <= 1'b1;
+                branch_target <= 32'h0;  // Placeholder
                 write_enable <= 1'b0;
             end
 
