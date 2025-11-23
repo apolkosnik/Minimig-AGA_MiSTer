@@ -19,6 +19,7 @@ module MC68060_DecodeUnit
     input  wire [31:0] rf_rdata2,
 
     output reg  [5:0]  opcode_out,
+    output reg  [3:0]  dest_reg_out,   // Destination register for writeback
     output reg  [31:0] pc_out,
     output reg         valid_out
 );
@@ -59,6 +60,7 @@ localparam OP_ROR     = 6'd23;
 always @(posedge clk or negedge nreset) begin
     if (!nreset) begin
         opcode_out <= OP_NOP;
+        dest_reg_out <= 4'd0;
         pc_out <= 32'h0;
         valid_out <= 1'b0;
         rf_raddr1 <= 4'd0;
@@ -79,7 +81,8 @@ always @(posedge clk or negedge nreset) begin
                     opcode_out <= OP_NOP;
                 end
                 rf_raddr1 <= {1'b0, instr_ea};
-                rf_raddr2 <= 4'd0;
+                rf_raddr2 <= {1'b0, instr_ea};  // Destination is same as source for these
+                dest_reg_out <= {1'b0, instr_ea};
             end
 
             4'h1, 4'h2, 4'h3: begin
@@ -87,6 +90,7 @@ always @(posedge clk or negedge nreset) begin
                 opcode_out <= OP_MOVE;
                 rf_raddr1 <= {1'b0, instr_ea};      // Source
                 rf_raddr2 <= {1'b0, instr_reg};     // Destination
+                dest_reg_out <= {1'b0, instr_reg}; // Write to destination register
             end
 
             4'h4: begin
@@ -95,10 +99,12 @@ always @(posedge clk or negedge nreset) begin
                     opcode_out <= OP_LEA;
                     rf_raddr1 <= {1'b0, instr_ea};
                     rf_raddr2 <= {1'b0, instr_reg};
+                    dest_reg_out <= {1'b0, instr_reg};  // LEA writes to address register
                 end else begin
                     opcode_out <= OP_NOP;
                     rf_raddr1 <= {1'b0, instr_ea};
                     rf_raddr2 <= 4'd0;
+                    dest_reg_out <= 4'd0;
                 end
             end
 
@@ -106,13 +112,16 @@ always @(posedge clk or negedge nreset) begin
                 // ADDQ, SUBQ, Scc, DBcc
                 if (instr_in[7:6] == 2'b11) begin
                     opcode_out <= OP_NOP;  // DBcc
+                    dest_reg_out <= 4'd0;
                 end else if (instr_in[8]) begin
                     opcode_out <= OP_SUB;  // SUBQ
+                    dest_reg_out <= {1'b0, instr_ea};  // Destination
                 end else begin
                     opcode_out <= OP_ADD;  // ADDQ
+                    dest_reg_out <= {1'b0, instr_ea};  // Destination
                 end
                 rf_raddr1 <= {1'b0, instr_ea};
-                rf_raddr2 <= 4'd0;
+                rf_raddr2 <= {1'b0, instr_ea};
             end
 
             4'h6: begin
@@ -124,6 +133,7 @@ always @(posedge clk or negedge nreset) begin
                 end
                 rf_raddr1 <= 4'd0;
                 rf_raddr2 <= 4'd0;
+                dest_reg_out <= 4'd0;  // Branches don't write registers
             end
 
             4'h7: begin
@@ -131,6 +141,7 @@ always @(posedge clk or negedge nreset) begin
                 opcode_out <= OP_MOVE;
                 rf_raddr1 <= 4'd0;
                 rf_raddr2 <= {1'b0, instr_reg};
+                dest_reg_out <= {1'b0, instr_reg};  // MOVEQ writes to data register
             end
 
             4'h8: begin
@@ -142,6 +153,7 @@ always @(posedge clk or negedge nreset) begin
                 end
                 rf_raddr1 <= {1'b0, instr_ea};
                 rf_raddr2 <= {1'b0, instr_reg};
+                dest_reg_out <= {1'b0, instr_reg};  // Write to register
             end
 
             4'h9, 4'hD: begin
@@ -149,14 +161,17 @@ always @(posedge clk or negedge nreset) begin
                 opcode_out <= OP_SUB;
                 rf_raddr1 <= {1'b0, instr_ea};
                 rf_raddr2 <= {1'b0, instr_reg};
+                dest_reg_out <= {1'b0, instr_reg};  // Write to register
             end
 
             4'hB: begin
                 // CMP, CMPM, EOR
                 if (instr_in[8:6] == 3'b100) begin
                     opcode_out <= OP_EOR;
+                    dest_reg_out <= {1'b0, instr_ea};  // EOR writes to EA
                 end else begin
                     opcode_out <= OP_CMP;
+                    dest_reg_out <= 4'd0;  // CMP doesn't write
                 end
                 rf_raddr1 <= {1'b0, instr_ea};
                 rf_raddr2 <= {1'b0, instr_reg};
@@ -171,6 +186,7 @@ always @(posedge clk or negedge nreset) begin
                 end
                 rf_raddr1 <= {1'b0, instr_ea};
                 rf_raddr2 <= {1'b0, instr_reg};
+                dest_reg_out <= {1'b0, instr_reg};  // Write to register
             end
 
             4'hE: begin
@@ -183,12 +199,14 @@ always @(posedge clk or negedge nreset) begin
                 endcase
                 rf_raddr1 <= {1'b0, instr_ea};
                 rf_raddr2 <= {1'b0, instr_reg};
+                dest_reg_out <= {1'b0, instr_ea};  // Shift writes to EA
             end
 
             default: begin
                 opcode_out <= OP_NOP;
                 rf_raddr1 <= 4'd0;
                 rf_raddr2 <= 4'd0;
+                dest_reg_out <= 4'd0;
             end
         endcase
     end else begin

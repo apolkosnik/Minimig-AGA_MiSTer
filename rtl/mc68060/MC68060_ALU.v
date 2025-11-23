@@ -60,15 +60,77 @@ assign div_result = (operand2 != 0) ? (operand1 / operand2) : 32'hFFFFFFFF;
 wire [4:0] shift_count = operand2[4:0];
 
 reg [31:0] shift_temp;
+reg shift_carry;  // Carry flag for shift operations
+
 always @(*) begin
+    shift_temp = operand1;
+    shift_carry = 1'b0;
+
     case (opcode)
-        OP_LSL: shift_temp = operand1 << shift_count;
-        OP_LSR: shift_temp = operand1 >> shift_count;
-        OP_ASL: shift_temp = operand1 << shift_count;
-        OP_ASR: shift_temp = $signed(operand1) >>> shift_count;
-        OP_ROL: shift_temp = (operand1 << shift_count) | (operand1 >> (32 - shift_count));
-        OP_ROR: shift_temp = (operand1 >> shift_count) | (operand1 << (32 - shift_count));
-        default: shift_temp = operand1;
+        OP_LSL: begin
+            if (shift_count == 0) begin
+                shift_temp = operand1;
+                shift_carry = 1'b0;
+            end else begin
+                shift_temp = operand1 << shift_count;
+                shift_carry = operand1[32 - shift_count];  // Last bit shifted out
+            end
+        end
+
+        OP_LSR: begin
+            if (shift_count == 0) begin
+                shift_temp = operand1;
+                shift_carry = 1'b0;
+            end else begin
+                shift_temp = operand1 >> shift_count;
+                shift_carry = operand1[shift_count - 1];  // Last bit shifted out
+            end
+        end
+
+        OP_ASL: begin
+            if (shift_count == 0) begin
+                shift_temp = operand1;
+                shift_carry = 1'b0;
+            end else begin
+                shift_temp = operand1 << shift_count;
+                shift_carry = operand1[32 - shift_count];
+            end
+        end
+
+        OP_ASR: begin
+            if (shift_count == 0) begin
+                shift_temp = operand1;
+                shift_carry = 1'b0;
+            end else begin
+                shift_temp = $signed(operand1) >>> shift_count;
+                shift_carry = operand1[shift_count - 1];
+            end
+        end
+
+        OP_ROL: begin
+            if (shift_count == 0) begin
+                shift_temp = operand1;
+                shift_carry = 1'b0;
+            end else begin
+                shift_temp = (operand1 << shift_count) | (operand1 >> (32 - shift_count));
+                shift_carry = operand1[32 - shift_count];  // Bit rotated out
+            end
+        end
+
+        OP_ROR: begin
+            if (shift_count == 0) begin
+                shift_temp = operand1;
+                shift_carry = 1'b0;
+            end else begin
+                shift_temp = (operand1 >> shift_count) | (operand1 << (32 - shift_count));
+                shift_carry = operand1[shift_count - 1];  // Bit rotated out
+            end
+        end
+
+        default: begin
+            shift_temp = operand1;
+            shift_carry = 1'b0;
+        end
     endcase
 end
 
@@ -154,8 +216,8 @@ always @(posedge clk or negedge nreset) begin
                 flags[4] <= shift_result[31];               // N
                 flags[3] <= (shift_result == 32'h0);       // Z
                 flags[2] <= 1'b0;                          // V
-                // C flag is last bit shifted out (simplified)
-                flags[1] <= (shift_count != 0) ? operand1[shift_count-1] : 1'b0;
+                flags[1] <= shift_carry;                    // C - properly calculated per operation
+                flags[0] <= shift_carry;                    // X - extend flag same as carry
             end
 
             default: begin

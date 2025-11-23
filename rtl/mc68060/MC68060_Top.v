@@ -70,6 +70,7 @@ wire        decode_valid;
 
 wire [31:0] exec_pc;
 wire [5:0]  exec_opcode;
+wire [3:0]  exec_dest_reg;
 wire        exec_valid;
 
 // Register file signals
@@ -183,6 +184,7 @@ MC68060_DecodeUnit decode_unit
     .rf_rdata2      (rf_read_data2),
 
     .opcode_out     (exec_opcode),
+    .dest_reg_out   (exec_dest_reg),
     .pc_out         (decode_pc),
     .valid_out      (decode_valid)
 );
@@ -197,6 +199,7 @@ MC68060_ExecuteUnit exec_unit
     .enable         (clkena_in),
 
     .opcode_in      (exec_opcode),
+    .dest_reg_in    (exec_dest_reg),
     .pc_in          (decode_pc),
     .valid_in       (decode_valid),
 

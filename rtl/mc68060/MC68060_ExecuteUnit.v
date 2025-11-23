@@ -97,6 +97,7 @@ always @(posedge clk or negedge nreset) begin
         valid_out <= 1'b1;
         mem_read <= 1'b0;
         mem_write <= 1'b0;
+        write_addr <= dest_reg_in;  // Always set destination register
 
         case (opcode_in)
             OP_NOP: begin
