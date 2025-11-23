@@ -766,8 +766,8 @@ begin
       -- Handle direct register writes (TC, CRP, SRP, TT0, TT1, etc.)
       -- CRITICAL FIX: These are INDEPENDENT of MMUSR updates and execute concurrently
       -- BUG #12: Was using "elsif" which blocked all register writes when MMUSR updates active
-      -- BUG #16 FIX: Use edge detection instead of level (prevents multi-cycle writes)
-      if reg_we = '1' and reg_we_prev = '0' then
+      -- SWITCHED TO LEVEL: Use level-triggered logic instead of edge detection
+      if reg_we = '1' then
         -- MC68030 Specification: MMU register access requires supervisor mode
         -- Privilege check is performed by TG68KdotC_Kernel before asserting reg_we,
         -- so no additional FC check is needed here
@@ -921,54 +921,19 @@ begin
     end if;
   end process;
 
-  -- Register reads (latch data when reg_re asserted)
-  process(clk, nreset)
-  begin
-    if nreset = '0' then
-      reg_rdat <= (others => '0');
-    elsif rising_edge(clk) then
-      -- BUG #16 FIX: Use edge detection instead of level (prevents multi-cycle reads)
-      if reg_re = '1' and reg_re_prev = '0' then
-        -- MC68030 Specification: MMU register access requires supervisor mode
-        -- Privilege check is performed by TG68KdotC_Kernel before asserting reg_re,
-        -- so no additional FC check is needed here
-        case reg_sel is
-            when "00010" =>
-              reg_rdat <= TT0;
-              report "PMMU_REG_READ: TT0=0x" & slv_to_hstring(TT0) severity note;
-            when "00011" =>
-              reg_rdat <= TT1;
-              report "PMMU_REG_READ: TT1=0x" & slv_to_hstring(TT1) severity note;
-            when "10000" =>
-              reg_rdat <= TC;
-              report "PMMU_REG_READ: TC=0x" & slv_to_hstring(TC) severity note;
-            when "10010" =>
-              if reg_part = '1' then
-                reg_rdat <= SRP_H;
-                report "PMMU_REG_READ: SRP_H=0x" & slv_to_hstring(SRP_H) severity note;
-              else
-                reg_rdat <= SRP_L;
-                report "PMMU_REG_READ: SRP_L=0x" & slv_to_hstring(SRP_L) severity note;
-              end if;
-            when "10011" =>
-              if reg_part = '1' then
-                reg_rdat <= CRP_H;
-                report "PMMU_REG_READ: CRP_H=0x" & slv_to_hstring(CRP_H) severity note;
-              else
-                reg_rdat <= CRP_L;
-                report "PMMU_REG_READ: CRP_L=0x" & slv_to_hstring(CRP_L) severity note;
-              end if;
-            when "11000" =>
-              -- BUG #15 FIX: MMUSR is 16-bit per MC68030 spec, upper 16 bits always zero
-              reg_rdat <= X"0000" & MMUSR(15 downto 0);
-              report "PMMU_REG_READ: MMUSR=0x" & slv_to_hstring(MMUSR(15 downto 0)) severity note;
-            when others =>
-              reg_rdat <= (others => '0');
-              report "PMMU_REG_READ: UNKNOWN sel=0x" & slv_to_hstring(reg_sel) severity warning;
-          end case;
-      end if;
-    end if;
-  end process;
+  -- BUG #83 FIX: Register reads must be COMBINATIONAL, not registered!
+  -- The registers (TT0, TT1, TC, etc.) are always valid, so output them
+  -- immediately based on reg_sel. Using a registered output caused first
+  -- PMOVE MMU->Dn reads to return 0 (stale data).
+  reg_rdat <= TT0                          when reg_sel = "00010" else
+              TT1                          when reg_sel = "00011" else
+              TC                           when reg_sel = "10000" else
+              SRP_H                        when reg_sel = "10010" and reg_part = '1' else
+              SRP_L                        when reg_sel = "10010" and reg_part = '0' else
+              CRP_H                        when reg_sel = "10011" and reg_part = '1' else
+              CRP_L                        when reg_sel = "10011" and reg_part = '0' else
+              X"0000" & MMUSR(15 downto 0) when reg_sel = "11000" else
+              (others => '0');
 
   -- Extract TC register fields according to MC68030 specification
   -- TC Register Format (MC68030):

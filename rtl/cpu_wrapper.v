@@ -85,7 +85,7 @@ module cpu_wrapper
 	output      [2:0] cache_burst_len   // Burst length (number of words)
 );
 
-assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_mbram| sel_chipram | sel_kickram | sel_dd | sel_rtg);
+assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
 assign ramshared    = sel_dd;
 
 // NMI
