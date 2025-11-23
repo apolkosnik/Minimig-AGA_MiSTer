@@ -111,6 +111,7 @@ localparam OP_NOT     = 6'd27;
 localparam OP_TST     = 6'd28;
 localparam OP_LINK    = 6'd29;
 localparam OP_UNLK    = 6'd30;
+localparam OP_MOVEQ   = 6'd31;
 
 always @(posedge clk or negedge nreset) begin
     if (!nreset) begin
@@ -313,12 +314,13 @@ always @(posedge clk or negedge nreset) begin
             end
 
             4'h7: begin
-                // MOVEQ
-                opcode_out <= OP_MOVE;
+                // MOVEQ - Move Quick (sign-extended 8-bit immediate)
+                opcode_out <= OP_MOVEQ;
                 rf_raddr1 <= 4'd0;
-                rf_raddr2 <= {1'b0, instr_reg};
+                rf_raddr2 <= 4'd0;
                 dest_reg_out <= {1'b0, instr_reg};  // MOVEQ writes to data register
                 instr_length <= 3'd1;  // MOVEQ is always 1 word
+                // Note: Immediate data in bits [7:0] will be sign-extended in ExecuteUnit
             end
 
             4'h8: begin

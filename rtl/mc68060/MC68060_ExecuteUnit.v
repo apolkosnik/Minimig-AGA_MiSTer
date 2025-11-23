@@ -83,6 +83,7 @@ localparam OP_NOT     = 6'd27;
 localparam OP_TST     = 6'd28;
 localparam OP_LINK    = 6'd29;
 localparam OP_UNLK    = 6'd30;
+localparam OP_MOVEQ   = 6'd31;
 
 // ALU signals
 wire [31:0] alu_result;
@@ -567,6 +568,18 @@ always @(posedge clk or negedge nreset) begin
                 // Restore An from stack (would need mem_rdata in real implementation)
                 result_out <= mem_rdata;  // Restore An value
                 write_enable <= 1'b1;
+            end
+
+            OP_MOVEQ: begin
+                // MOVEQ - Move Quick with sign extension
+                // Sign-extend 8-bit immediate from operand1[7:0] to 32 bits
+                result_out <= {{24{operand1[7]}}, operand1[7:0]};
+                write_enable <= 1'b1;
+                // Set flags based on result
+                flags_out[4] <= operand1[7];              // N flag
+                flags_out[3] <= (operand1[7:0] == 8'h0);  // Z flag
+                flags_out[2] <= 1'b0;                     // V cleared
+                flags_out[1] <= 1'b0;                     // C cleared
             end
 
             default: begin
