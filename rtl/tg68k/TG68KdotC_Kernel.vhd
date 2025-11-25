@@ -688,8 +688,14 @@ BEGIN
   cacr_dbe    <= CACR(12); -- Data Burst Enable
   cacr_wa     <= CACR(13); -- Write Allocate
   -- PMOVE Dn source selects live register file using the latched selector
-  -- Selector is captured during decode and transferred when the instruction enters execution
-  pmmu_dn_data <= regfile(conv_integer(pmove_dn_regnum));
+  -- BUG #112 V3 FIX: During pmove_decode, use opcode(2:0) DIRECTLY instead of pmove_dn_regnum!
+  -- pmove_dn_regnum is registered - it only updates at END of clock cycle.
+  -- But pmmu_dn_data is combinational - it reads the OLD pmove_dn_regnum during pmove_decode,
+  -- causing the write to use the wrong Dn (from the previous instruction).
+  -- This explains why first run works (pmove_dn_regnum=0 from reset) but second run fails
+  -- (pmove_dn_regnum still has D1 from previous PMOVE TT0,D1).
+  pmmu_dn_data <= regfile(conv_integer(opcode(2 downto 0))) when (micro_state = pmove_decode AND opcode(5 downto 3) = "000")
+                  else regfile(conv_integer(pmove_dn_regnum));
 
   -- Source data for PMMU register writes: from Dn normally, or from memory EA in pmove_mem_to_mmu_hi
   -- PMOVE <ea>,<MMU reg>: use latched EA data while PMMU write strobes are asserted
@@ -1432,11 +1438,11 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 		IF setstate="00" AND next_micro_state=idle AND set_direct_data='0' AND (exec_write_back='0' OR (state="10" AND addrvalue='0')) THEN
 			setexecOPC <= '1';
 		ELSIF setstate="01" AND next_micro_state=idle AND set_direct_data='0' AND (exec_write_back='0' OR (state="10" AND addrvalue='0')) AND
-		      (set_exec(pmmu_wr)='1' OR set_exec(pmmu_rd)='1' OR set(pmmu_rd)='1' OR set(pmmu_wr)='1') THEN
+		      (set_exec(pmmu_wr)='1' OR set_exec(pmmu_rd)='1' OR set(pmmu_rd)='1') THEN
 			-- CRITICAL: Only for PMMU Dn mode operations! Other operations using setstate="01" don't need setexecOPC.
-			-- BUG #96 FIX: Added set(pmmu_wr) check for PMOVE Dn WRITE operations
-			-- Check for: set_exec(pmmu_wr) (legacy), set_exec(pmmu_rd) (pmove_dn_lo reads),
-			--            set(pmmu_rd) (pmove_decode reads), set(pmmu_wr) (pmove_decode writes)
+			-- BUG #111 FIX: Removed set(pmmu_wr) check - now using set_exec(pmmu_wr) for Dn WRITE (line 4644)
+			-- Check for: set_exec(pmmu_wr) (pmove_decode Dn writes), set_exec(pmmu_rd) (pmove_dn_lo reads),
+			--            set(pmmu_rd) (pmove_decode Dn reads)
 			setexecOPC <= '1';
 		END IF;
 		
@@ -1705,7 +1711,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					exec_tas <= set_exec_tas;
 					-- BUG #70 SIMPLIFICATION: Clear pmove_dn_mode when instruction completes
 					-- BUG #81 FIX: Don't clear during PMOVE Dn read - register write happens NEXT cycle!
-					IF set(pmmu_rd)='0' THEN
+					-- BUG #106 FIX: Keep pmove_dn_mode alive while exec(pmmu_rd) OR exec(Regwrena) active!
+					-- BUG #112 FIX V2: Must check set_exec(pmmu_wr) and set(pmmu_wr) as well as exec(pmmu_wr)!
+					-- VHDL signal timing: exec is being assigned from set_exec OR set on line 1702, but signal
+					-- assignments don't take effect until end of process. So exec(pmmu_wr) shows the OLD value,
+					-- not the NEW value being set up. Must check ALL THREE layers to prevent early clear!
+					IF set(pmmu_rd)='0' AND exec(pmmu_rd)='0' AND
+					   set_exec(pmmu_wr)='0' AND set(pmmu_wr)='0' AND exec(pmmu_wr)='0' AND
+					   exec(Regwrena)='0' THEN
 						pmove_dn_mode <= '0';
 					END IF;
 					END IF;	
@@ -1830,23 +1843,41 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF trap_trace='1' AND state="10" THEN
 					make_trace <= '0';
 				END IF;
+				-- CRITICAL FIX: Prevent desynchronization via two mechanisms:
+				-- 1. Always sync preSVmode (BUG #99 Part 1) - prevents permanent desync
+				-- 2. Block FlagsSR update during mode change (FSAVE bug) - prevents overwrite
 				IF exec(directSR)='1' OR set_stop='1' THEN
-					FlagsSR <= data_read(15 downto 8);
-					-- -- BUG #15 FIX: Sync preSVmode with SR bit 13 (supervisor bit) on RTE
-					-- -- When RTE restores SR from stack, preSVmode must track the restored S bit
-					-- -- Without this, supervisor→user transitions fail, breaking MMU detection!
+				-- BUG #99 FIX: Sync preSVmode with SR bit 13 (supervisor bit) on RTE
+				-- When RTE restores SR from stack, preSVmode must track the restored S bit
+				-- Without this, supervisor→user transitions fail, breaking MMU detection
 					-- preSVmode <= data_read(13);
+
+				-- FSAVE FIX: Only update FlagsSR if not executing mode change
+				-- Prevents data_read from overwriting FlagsSR(5) set by mode change above
+					IF set(changeMode)='0' THEN
+						FlagsSR <= data_read(15 downto 8);
+					END IF;
 				END IF;
 				IF interrupt='1' AND trap_interrupt='1' THEN
 					FlagsSR(2 downto 0) <=rIPL_nr;
 				END IF;
+				-- CRITICAL FIX: Prevent desynchronization via two mechanisms:
+				-- 1. Always sync preSVmode (BUG #99 Part 2) - prevents permanent desync
+				-- 2. Block FlagsSR update during mode change (FSAVE bug) - prevents overwrite
 				IF exec(to_SR)='1' THEN
-					FlagsSR(7 downto 0) <= SRin;	--SR
+				-- BUG #99 FIX: Sync preSVmode with SR bit 5 (supervisor bit in low byte)
+				-- When MOVE to SR or MOVE to CCR executes, preSVmode must track the new S bit
+				-- Without this, MOVE #$0000,SR (enter user mode) doesn't work, breaking MMU
 					fc_internal(2) <= SRin(5);
 					-- -- BUG #15 FIX: Sync preSVmode with SR bit 5 (supervisor bit in low byte) on MOVE to SR
 					-- -- When MOVE to SR or MOVE to CCR executes, preSVmode must track the new S bit
 					-- -- Without this, MOVE #$0000,SR (enter user mode) doesn't work, breaking MMU detection!
 					-- preSVmode <= SRin(5);
+					-- FSAVE FIX: Only update FlagsSR if not executing mode change
+					-- Prevents SRin from overwriting FlagsSR(5) set by mode change above
+					IF set(changeMode)='0' THEN
+						FlagsSR(7 downto 0) <= SRin;	--SR
+					END IF;
 				ELSIF exec(update_FC)='1' THEN
 					fc_internal(2) <= FlagsSR(5);
 				END IF;
@@ -2015,7 +2046,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 	  end if;
 	  setstate <= "01";
 	end if;
-		
+	
+    -- BUG #99 FIX: Guard changeMode to prevent spurious triggers during multi-cycle instructions
+    -- Only trigger changeMode when actual mode-changing operations occur:
+    -- 1. exec(directSR) = RTE restoring SR from stack
+    -- 2. exec(to_SR) = MOVE to SR instruction
+    -- 3. interrupt = Exception entry (forces supervisor mode)
+    -- Without this guard, MULS.L and other multi-cycle instructions trigger spurious
+    -- changeMode during execution, disrupting PC increment and state machine
+    -- IF setexecOPC='1' AND FlagsSR(5)/=preSVmode AND
+    -- (exec(directSR)='1' OR exec(to_SR)='1' OR interrupt='1') THEN
 		IF setexecOPC='1' AND FlagsSR(5)/=preSVmode THEN
 			set(changeMode) <= '1';
 --			setstate <= "01";
@@ -2150,8 +2190,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							set_Suppress_Base <= '1';
 							set_PCbase <= '1';
 						WHEN "100" =>				--#data
-							-- BUG #65 FIX: Guard setnextpass - only set during decode, not exec(ea_build)
-							IF ea_build_now='1' AND decodeOPC='1' THEN
+							-- BUG #100 FIX: Allow setnextpass during exec(ea_build) for immediate mode
+							-- MULS.L #imm uses deferred EA building (exec(ea_build)='1'), not ea_build_now
+							-- Without this, long immediates only fetch 1 word instead of 2 (PC+4 not PC+8)
+							-- Original BUG #65 guard was too restrictive for immediate addressing mode
+							IF (ea_build_now='1' AND decodeOPC='1') OR exec(ea_build)='1' THEN
 								setnextpass <= '1';
 							END IF;
 							set_direct_data <= '1';
@@ -3852,8 +3895,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			CASE micro_state IS
 				WHEN ld_nn =>		-- (nnnn).w/l=>
 					set(get_ea_now) <='1';
-					-- BUG #65 FIX: Guard setnextpass - don't set when exec(ea_build)='1' (PMOVE path)
-					IF exec(ea_build)='0' THEN
+					-- BUG #101 FIX: Allow setnextpass for non-PMOVE instructions
+					-- PMOVE uses pmove_* micro states; other instructions use different states
+					IF exec(ea_build)='0' OR
+					   (micro_state /= pmove_mem_to_mmu_hi AND
+					    micro_state /= pmove_mem_to_mmu_lo AND
+					    micro_state /= pmove_mmu_to_mem_hi AND
+					    micro_state /= pmove_mmu_to_mem_lo) THEN
 						setnextpass <= '1';
 					END IF;
 					set(addrlong) <= '1';
@@ -3897,8 +3945,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN ld_AnXn2 =>
 					set(get_ea_now) <='1';
 					setdisp <= '1';		--brief
-					-- BUG #65 FIX: Guard setnextpass - don't set when exec(ea_build)='1' (PMOVE path)
-					IF exec(ea_build)='0' THEN
+					-- BUG #101 FIX: Allow setnextpass for non-PMOVE instructions
+					-- PMOVE uses pmove_* micro states; other instructions use different states
+					IF exec(ea_build)='0' OR
+					   (micro_state /= pmove_mem_to_mmu_hi AND
+					    micro_state /= pmove_mem_to_mmu_lo AND
+					    micro_state /= pmove_mmu_to_mem_hi AND
+					    micro_state /= pmove_mmu_to_mem_lo) THEN
 						setnextpass <= '1';
 					END IF;
 					
@@ -3919,8 +3972,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					ELSE
 						IF brief(1 downto 0)="00" THEN
 							set(get_ea_now) <='1';
-							-- BUG #65 FIX: Guard setnextpass - don't set when exec(ea_build)='1' (PMOVE path)
-							IF exec(ea_build)='0' THEN
+							-- BUG #101 FIX: Allow setnextpass for non-PMOVE instructions
+							-- PMOVE uses pmove_* micro states; other instructions use different states
+							IF exec(ea_build)='0' OR
+							   (micro_state /= pmove_mem_to_mmu_hi AND
+							    micro_state /= pmove_mem_to_mmu_lo AND
+							    micro_state /= pmove_mmu_to_mem_hi AND
+							    micro_state /= pmove_mmu_to_mem_lo) THEN
 								setnextpass <= '1';
 							END IF;
 						ELSE
@@ -3960,8 +4018,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						next_micro_state <= ld_AnXn2;
 					ELSE
 						set(get_ea_now) <='1';
-						-- BUG #65 FIX: Guard setnextpass - don't set when exec(ea_build)='1' (PMOVE path)
-						IF exec(ea_build)='0' THEN
+						-- BUG #101 FIX: Allow setnextpass for non-PMOVE instructions
+						-- PMOVE uses pmove_* micro states; other instructions use different states
+						IF exec(ea_build)='0' OR
+						   (micro_state /= pmove_mem_to_mmu_hi AND
+						    micro_state /= pmove_mem_to_mmu_lo AND
+						    micro_state /= pmove_mmu_to_mem_hi AND
+						    micro_state /= pmove_mmu_to_mem_lo) THEN
 							setnextpass <= '1';
 						END IF;
 					END IF;
@@ -4585,29 +4648,40 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                 setstate <= "01";
                                 IF brief(9)='0' THEN
                                     -- PMOVE Dn,<MMU reg> - Read from Dn, write to MMU (brief(9)=0, RW=0)
-                                    -- BUG #96 FIX: Use set(pmmu_wr) instead of set_exec(pmmu_wr)
-                                    -- to match the pattern of PMOVE Dn READ which uses set(pmmu_rd)
-                                    set(pmmu_wr) <= '1';
+                                    -- BUG #111 FIX: REVERT BUG #96! Use set_exec(pmmu_wr) for immediate exec() layer activation
+                                    -- pmmu_reg_we_d is driven by exec(pmmu_wr) ONLY (line 576), NOT set(pmmu_wr)!
+                                    -- On first iteration after reset, exec(pmmu_wr) is 0, so write is dropped.
+                                    -- set_exec() activates BOTH set() and exec() layers immediately, fixing first-run failure.
+                                    set_exec(pmmu_wr) <= '1';
                                     -- BUG #97 FIX: Do NOT set Regwrena for WRITE!
                                     -- Register value is read directly via pmmu_dn_data <= regfile(pmove_dn_regnum)
                                     -- Setting Regwrena causes unwanted writeback that corrupts the source register!
+                                    -- BUG #107 FIX: WRITE path goes to idle, NOT pmmu_dn_read_wait!
+                                    -- pmmu_dn_read_wait does a register write, which corrupts the source register.
+                                    IF brief(8) = '1' THEN
+                                        -- .D (doubleword) - need second Dn transfer (only CRP/SRP reach here)
+                                        next_micro_state <= pmove_dn_hi;
+                                    ELSE
+                                        -- .L (longword) - single 32-bit transfer, WRITE completes
+                                        next_micro_state <= idle;
+                                    END IF;
                                 ELSE
                                     -- PMOVE <MMU reg>,Dn - Read from MMU, write to Dn (brief(9)=1, RW=1)
+                                    -- BUG #105 FIX: Do NOT assert set_exec(Regwrena) here!
+                                    -- Stagger read from write - pmmu_reg_rdat needs one cycle to become valid.
+                                    -- Writeback happens in pmmu_dn_read_wait with datatype="10" (LONG).
                                     set(pmmu_rd) <= '1';
-                                    set_exec(Regwrena) <= '1';  -- Enable register write for READ direction
-                                END IF;
-                                -- BUG #6 FIX: Check SZ bit for dual-word transfer, not just register type
-                                -- MC68030 spec: .D (SZ=1) means 64-bit transfer (CRP/SRP only, validated above)
-                                --              .L (SZ=0) means 32-bit transfer (all registers)
-                                IF brief(8) = '1' THEN
-                                    -- .D (doubleword) - need second Dn transfer (only CRP/SRP reach here)
-                                    next_micro_state <= pmove_dn_hi;
-                                ELSE
-                                    -- .L (longword) - single 32-bit transfer
-                                    -- BUG #20 REAL FIX: Must use 'idle' not 'nop' to trigger setexecOPC
-                                    -- setexecOPC is only set when next_micro_state=idle (line 1381)
-                                    -- Without setexecOPC, set_exec(Regwrena) never becomes exec(Regwrena)
-                                    next_micro_state <= idle;
+                                    -- BUG #6 FIX: Check SZ bit for dual-word transfer, not just register type
+                                    -- MC68030 spec: .D (SZ=1) means 64-bit transfer (CRP/SRP only, validated above)
+                                    --              .L (SZ=0) means 32-bit transfer (all registers)
+                                    IF brief(8) = '1' THEN
+                                        -- .D (doubleword) - need second Dn transfer (only CRP/SRP reach here)
+                                        next_micro_state <= pmove_dn_hi;
+                                    ELSE
+                                        -- .L (longword) - single 32-bit transfer
+                                        -- BUG #105 FIX: Go to wait state for proper timing and datatype override
+                                        next_micro_state <= pmmu_dn_read_wait;
+                                    END IF;
                                 END IF;
                             ELSE  -- NOT opcode(5 downto 3)="000" -- not from aregister
 
@@ -4848,6 +4922,22 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- BUG #90 FIX: Must use 'idle' not 'nop' to trigger setexecOPC
                     -- Same issue as BUG #20 - setexecOPC only set when next_micro_state=idle (line 1432)
                     -- Without setexecOPC, set_exec(Regwrena) never becomes exec(Regwrena), and register write fails!
+                    next_micro_state <= idle;
+
+                WHEN pmmu_dn_read_wait =>
+                    -- BUG #105 FIX: Wait state for PMOVE <MMU reg>,Dn 32-bit read
+                    -- CRITICAL: Force datatype="10" (LONG) to override F-line opcode default of "00" (BYTE)!
+                    -- Without this, only the low byte gets written on subsequent runs (D1=$77 instead of full value).
+                    -- In pmove_decode we asserted set(pmmu_rd) which changed pmmu_reg_sel combinationally.
+                    -- Now pmmu_reg_rdat is valid, so we can write the full 32-bit value.
+                    datatype <= "10";  -- LONG mode (not byte!)
+                    -- BUG #108 FIX: ALSO set set_datatype so it propagates to exe_datatype!
+                    -- The timing chain is: set_datatype (line 1974) -> exe_datatype (line 1511).
+                    -- Without this, exe_datatype gets default "00" (BYTE) from opcode(7:6), causing
+                    -- only the low byte to be written on consecutive runs ($77 instead of full value).
+                    set_datatype <= "10";  -- Force LONG mode for exec phase!
+                    set_exec(pmmu_rd) <= '1';
+                    set_exec(Regwrena) <= '1';
                     next_micro_state <= idle;
 
 				WHEN movep1 =>		-- MOVEP d(An)
@@ -5124,21 +5214,30 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
         -- PMMU instruction handling (only on 68030)
         -- Handle both set() for immediate execution and exec() for deferred execution
-        --if CPU="11" AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
-        if CPU(1)='1' AND (set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
-          -- Latch source data only when actually doing PMMU operation to ensure correct value
+        -- BUG #109 FIX: Only latch pmmu_reg_wdat_d during WRITE operations, NOT READ!
+        -- During PMOVE TT0,D1 READ, pmmu_src_data = pmmu_dn_data = D1's value, which
+        -- incorrectly corrupts the write data latch with the destination register's value.
+        -- This caused TT0 to get corrupted with D1's value on subsequent operations.
+        -- BUG #111 V3 FIX: OUTER condition must check set_exec() layers!
+        -- On first PMOVE after reset, set_exec(pmmu_wr) is assigned but exec(pmmu_wr) is still 0.
+        -- If we only check exec(pmmu_wr), the latch block never executes on first iteration,
+        -- so pmmu_reg_sel_d stays at 0 and the write fails.
+        -- Must include set_exec(pmmu_wr) and set_exec(pmmu_rd) to catch first iteration!
+        if CPU(1)='1' AND (set_exec(pmmu_wr)='1' OR set_exec(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
+          -- Latch source data only when actually WRITING to PMMU to ensure correct value
           pmmu_reg_wdat_d <= pmmu_src_data;
-
           -- MMU registers (TT0, TT1, MMUSR, etc.) are PMOVE-only on MC68030
           -- MOVEC attempts to access these registers trigger illegal instruction exceptions
 
           -- PMOVE instruction handling (only if MOVEC is not active to avoid conflicts)
-          if set(pmmu_wr) = '1' OR exec(pmmu_wr) = '1' then
+          -- BUG #111 V2 FIX: Also check set_exec(pmmu_wr) to catch first iteration!
+          -- On first iteration, set_exec(pmmu_wr) is set but set()/exec() are still 0,
+          -- so pmmu_reg_sel_d doesn't get set, causing write to fail.
+          if set_exec(pmmu_wr) = '1' OR set(pmmu_wr) = '1' OR exec(pmmu_wr) = '1' then
             -- PMOVE Dn -> <MMU reg>
             if brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
                brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000" then
               pmmu_reg_sel_d  <= brief(14 downto 10);
-              -- pmmu_reg_wdat_d already latched above from pmmu_src_data
               -- For CRP/SRP choose part: HIGH word first, LOW word second
               if (brief(14 downto 10) = "10010") or (brief(14 downto 10) = "10011") then
                 if micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_decode OR micro_state = pmove_dn_hi then

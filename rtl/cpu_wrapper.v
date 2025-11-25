@@ -99,7 +99,7 @@ wire sel_z2ram  = !cpu_addr[31:24] && (cpu_addr[23] ^ |cpu_addr[22:21]) && z2ram
 // Without this mapping, addresses above $00FFFFFF wrap around to 24-bit chip space!
 // This prevents the 24-bit address bus test at $04000700 from wrapping to $000700
 // Only enabled on 68020/030 CPUs (cpucfg[1]=1) to maintain 24-bit compatibility for 68000/68010
-wire sel_mbram = (cpu_addr[31:24] == 8'h04) && cpucfg[1]; // $04000000-$04FFFFFF (16MB) on 68020/030 only
+wire sel_mbram = 1'b0; // DISABLED - Motherboard Fast RAM at $04000000-$04FFFFFF (16MB)
 wire sel_zram   = sel_z3ram0 | sel_z3ram1 | sel_z2ram | sel_mbram;
 wire sel_dd     = (cpu_addr[31:16] == 16'h00DD) && (cpu_addr[15:13] == 'b010);
 wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
