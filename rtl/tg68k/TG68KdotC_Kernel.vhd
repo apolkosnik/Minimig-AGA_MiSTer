@@ -4836,19 +4836,21 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                 END IF;
                             END IF;
 
-                        ELSIF brief(15 downto 13) = "100" AND opcode(5 downto 3)="001" OR  -- An direct - ILLEGAL
-                                    opcode(5 downto 3)="011" OR  -- (An)+ - ILLEGAL
-                                    (opcode(5 downto 3)="111" AND opcode(2 downto 0)="100") OR  -- Immediate - ILLEGAL
-                                    (opcode(5 downto 3)="111" AND opcode(2 downto 1)="01") THEN  -- PC-relative - ILLEGAL
-                                        trap_illegal <= '1';
-                                        trapmake <= '1';
-                                    ELSE
-                                        set(ea_build) <= '1';
-                                        datatype <= "10";
-                                        setstate <= "10";
-                                        set_exec(pmmu_ptest) <= '1';
-                                        next_micro_state <= ptest1;
-                                    END IF;
+                        ELSIF brief(15 downto 13) = "100" THEN  -- PTEST
+                            -- PTEST - Control Alterable modes
+                            IF opcode(5 downto 3)="001" OR  -- An direct - ILLEGAL
+                               opcode(5 downto 3)="011" OR  -- (An)+ - ILLEGAL
+                               (opcode(5 downto 3)="111" AND opcode(2 downto 0)="100") OR  -- Immediate - ILLEGAL
+                               (opcode(5 downto 3)="111" AND opcode(2 downto 1)="01") THEN  -- PC-relative - ILLEGAL
+                                trap_illegal <= '1';
+                                trapmake <= '1';
+                            ELSE
+                                set(ea_build) <= '1';
+                                datatype <= "10";
+                                setstate <= "10";
+                                set_exec(pmmu_ptest) <= '1';
+                                next_micro_state <= ptest1;
+                            END IF;
                         ELSE
                             -- Invalid PMMU instruction - trigger F-line exception
                             -- Early capture at line 3782 speculatively captures ALL F000-F0FF,
