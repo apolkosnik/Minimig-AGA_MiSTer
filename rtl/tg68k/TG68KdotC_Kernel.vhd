@@ -420,6 +420,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_reg_we_d    : std_logic;
 	signal pmmu_reg_re_d    : std_logic;
 	signal pmmu_reg_sel_d   : std_logic_vector(4 downto 0);
+	signal pmmu_reg_sel_int : std_logic_vector(4 downto 0);  -- BUG #119: Internal signal for VHDL-93 compatibility
 	-- BUG #53 FIX: 1-stage pipeline - these 2-stage signals no longer needed
 	-- signal pmmu_reg_sel_pending : std_logic;  -- REMOVED: Old 2-stage pipeline
 	-- signal pmmu_reg_sel_latch : std_logic_vector(15 downto 0);  -- REMOVED: Old 2-stage pipeline
@@ -505,8 +506,15 @@ BEGIN
 
       reg_we        => pmmu_reg_we_d,
       reg_re        => pmmu_reg_re_d,
-      reg_sel       => pmmu_reg_sel_d,
-      reg_wdat      => pmmu_reg_wdat_d,
+      -- BUG #119 FIX: Use combinational pmmu_reg_sel_int instead of registered pmmu_reg_sel_d
+      -- pmmu_reg_sel_int uses brief(14:10) directly when write enable is active
+      reg_sel       => pmmu_reg_sel_int,
+      -- BUG #119 FIX: Use combinational pmmu_src_data instead of registered pmmu_reg_wdat_d
+      -- pmmu_reg_we_d is combinational (fires on set_exec(pmmu_wr)), but pmmu_reg_wdat_d
+      -- is registered (latched on next clock edge). This timing mismatch means PMMU sees
+      -- reg_we='1' but reg_wdat still has OLD value (0 if first PMOVE).
+      -- pmmu_src_data is combinational and has correct value when reg_we asserts.
+      reg_wdat      => pmmu_src_data,
       reg_rdat      => pmmu_reg_rdat,
       reg_part      => pmmu_reg_part_d,
       reg_fd        => pmmu_reg_fd_d,
@@ -550,9 +558,13 @@ BEGIN
   -- BUG #84 FIX: Use brief(14:10) directly during PMOVE to avoid 1-cycle delay
   -- pmmu_reg_sel_d is registered - first PMOVE sees 0 (reset value), returns wrong data
   -- Using brief directly ensures reg_sel is valid immediately when set(pmmu_rd) asserted
-  pmmu_reg_sel  <= brief(14 downto 10) when CPU(1) = '1' AND (set(pmmu_rd)='1' OR exec(pmmu_rd)='1' OR set(pmmu_wr)='1' OR exec(pmmu_wr)='1') else
-                   pmmu_reg_sel_d when CPU(1) = '1' else
-                   (others => '0');
+  -- BUG #119 FIX: Also check set_exec(pmmu_wr/pmmu_rd) for memory transfers
+  -- pmove_mem_to_mmu_hi uses set_exec(pmmu_wr), pmove_decode MMU->mem uses set_exec(pmmu_rd)
+  -- Use internal signal for VHDL-93 compatibility (cannot read output port)
+  pmmu_reg_sel_int <= brief(14 downto 10) when CPU(1) = '1' AND (set(pmmu_rd)='1' OR exec(pmmu_rd)='1' OR set(pmmu_wr)='1' OR exec(pmmu_wr)='1' OR set_exec(pmmu_wr)='1' OR set_exec(pmmu_rd)='1') else
+                      pmmu_reg_sel_d when CPU(1) = '1' else
+                      (others => '0');
+  pmmu_reg_sel  <= pmmu_reg_sel_int;  -- Drive output port from internal signal
   pmmu_reg_wdat <= pmmu_reg_wdat_d when CPU(1) = '1'  else (others => '0');
   pmmu_reg_part <= pmmu_reg_part_d when CPU(1) = '1'  else '0';
 
@@ -569,20 +581,27 @@ BEGIN
   -- Sequential signals with clkena gating caused missed writes when clkena_in wasn't '1' every cycle
   -- Now these signals follow exec() directly, like pmmu_ptest_req/pflush_req/pload_req
   -- BUG #29 FIX: Critical timing issue - write enable vs data latch mismatch!
-  -- ONLY use exec(), NOT set_exec()!  This delays write by one cycle for BOTH Dn and memory modes.
-  -- BUG #29 FIX: Use exec(pmmu_wr) not set_exec() to avoid register addressing timing race
+  -- Originally used exec() only to avoid register addressing timing races.
+  -- BUG #118 FIX: Also accept set_exec(pmmu_wr) so PMOVE memory->MMU writes still assert WE
+  -- even when clkena_lw is gated off (memmaskmux(3)='0') in pmove_mem_to_mmu_hi.
   -- Dn mode: Uses pmmu_dn_data from register file
   -- Memory mode: Uses ea_data captured in pmove_mem_to_mmu_hi/pmove_mem_to_mmu_lo states
-  pmmu_reg_we_d <= '1' when CPU(1)='1' AND exec(pmmu_wr)='1' AND
-                             (pmmu_reg_sel_d = "00010" OR pmmu_reg_sel_d = "00011" OR pmmu_reg_sel_d = "10000" OR
-                              pmmu_reg_sel_d = "10010" OR pmmu_reg_sel_d = "10011" OR pmmu_reg_sel_d = "11000")
+  -- BUG #117 FIX: Use brief(14:10) directly for validity check, not pmmu_reg_sel_d (registered)
+  -- pmmu_reg_sel_d is one cycle late - first PMOVE after reset has pmmu_reg_sel_d="00000"
+  -- which fails the validity check and causes pmmu_reg_we/re to stay '0'
+  -- This matches BUG #84 fix on line 553 which uses brief(14:10) for pmmu_reg_sel
+  pmmu_reg_we_d <= '1' when CPU(1)='1' AND (set_exec(pmmu_wr)='1' OR exec(pmmu_wr)='1') AND
+                             (brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
+                              brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000")
                    else '0';
   -- BUG #81 REAL FIX: Must check BOTH set(pmmu_rd) and exec(pmmu_rd)!
   -- pmove_decode Dn read uses set(pmmu_rd), pmove_dn_lo uses exec(pmmu_rd)
   -- Without set(pmmu_rd) check, pmmu_reg_re stays '0' for pmove_decode reads!
-  pmmu_reg_re_d <= '1' when CPU(1)='1' AND (set(pmmu_rd)='1' OR exec(pmmu_rd)='1') AND
-                             (pmmu_reg_sel_d = "00010" OR pmmu_reg_sel_d = "00011" OR pmmu_reg_sel_d = "10000" OR
-                              pmmu_reg_sel_d = "10010" OR pmmu_reg_sel_d = "10011" OR pmmu_reg_sel_d = "11000")
+  -- BUG #117 FIX: Use brief(14:10) directly for validity check (same as write enable)
+  -- BUG #119 FIX: Also check set_exec(pmmu_rd) for MMU->memory reads (pmove_decode uses set_exec)
+  pmmu_reg_re_d <= '1' when CPU(1)='1' AND (set(pmmu_rd)='1' OR exec(pmmu_rd)='1' OR set_exec(pmmu_rd)='1') AND
+                             (brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
+                              brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000")
                    else '0';
 
   -- For PTEST/PFLUSH/PLOAD: use FC from brief word per MC68030 spec
