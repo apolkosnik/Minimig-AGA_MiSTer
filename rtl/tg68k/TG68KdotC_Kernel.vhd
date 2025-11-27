@@ -4775,7 +4775,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                         -- For displacement/index modes: EA builder sets next_micro_state,
                                         -- ld_dAn1/ld_AnXn1 will set up memory read and transition
                                     ELSE
-                                        setstate <= "01";
                                         -- PMOVE <MMU reg>,<ea> - Read from MMU, write to memory (brief(9)=1, RW=1)
                                         set(ea_build) <= '1';
                                         set(OP1addr) <= '1';
@@ -4791,17 +4790,30 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                         -- because the address fetch is handled by the memory interface via
                                         -- set(longaktion), NOT by ld_nn. Setting next_micro_state here
                                         -- bypasses ld_nn's setnextpass which causes PC over-increment.
+                                        -- BUG #120 FIX: Do NOT set setstate="01" for simple EA modes!
+                                        -- setstate="01" means "extension fetch mode" - wait for extension word.
+                                        -- Simple modes (An), -(An) have NO extension word, so CPU hangs waiting forever!
+                                        -- Only set setstate="01" for complex modes that actually need extension fetch.
+                                        -- BUG #121 FIX: Still force write state for simple modes to stop extra prefetch
+                                        -- PMOVE <MMU reg>,(An)/-(An) was leaving setstate="00" here, so PC advanced an
+                                        -- extra word (PC+6 instead of PC+4) before the write microstate ran.
                                         IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="100" THEN
                                             -- Simple EA modes: (An), -(An) - no extra words to fetch
+                                            -- Do NOT set setstate="01" here - go directly to pmove_mmu_to_mem_hi
+                                            setstate <= "11";  -- hold bus in write phase, prevent stray prefetch/PC bump
                                             next_micro_state <= pmove_mmu_to_mem_hi;
                                         ELSIF opcode(5 downto 3)="111" AND (opcode(2 downto 0)="000" OR opcode(2 downto 0)="001") THEN
                                             -- BUG #114: Absolute modes xxx.W, xxx.L - address fetched by memory interface
                                             -- The longaktion signal handles 32-bit address fetch for xxx.L
                                             -- We can safely set next_micro_state here to bypass ld_nn's setnextpass
+                                            -- Also do NOT set setstate="01" - address comes from instruction stream
                                             next_micro_state <= pmove_mmu_to_mem_hi;
+                                        ELSE
+                                            -- Complex EA modes with displacement/index need extension fetch
+                                            setstate <= "01";
+                                            -- EA builder sets next_micro_state to ld_dAn1/ld_AnXn1
+                                            -- which will transition to pmove_mmu_to_mem_hi after EA is built
                                         END IF;
-                                        -- For complex EA modes with displacement/index: EA builder sets next_micro_state,
-                                        -- then ld_dAn1/ld_AnXn1 will transition to pmove_mmu_to_mem_hi
                                     END IF;
                                 END IF;
                             END IF;
