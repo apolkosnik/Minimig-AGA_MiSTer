@@ -4982,7 +4982,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- First transfer completed (HIGH word in/out of first register)
                     -- Now handle LOW word with next register (Dn+1)
                     -- The register number increment is handled by modifying rf_dest_addr
-                    set_writePCbig <= '1';
+                    -- BUG #122 FIX: Remove redundant set_writePCbig - already set in pmove_decode!
+                    -- PMOVE instruction is only 4 bytes, PC increment already handled.
                     next_micro_state <= pmove_dn_lo;
 
                 WHEN pmove_dn_lo =>
@@ -4992,8 +4993,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- BUG FIX: Use brief(9) for direction, NOT opcode(7)!
                     -- PMOVE uses extension word bit 9 for direction, same as first transfer
                     -- BUG #12 FIX: Swap direction - RW=0 means WRITE to MMU, RW=1 means READ from MMU
-                    -- BUG #30 FIX: Set setstate="01" for same reason as pmove_decode Dn mode
-                    setstate <= "01";
+                    -- BUG #122 FIX: Use setstate="11" instead of "01" to prevent PC over-increment!
+                    -- setstate="01" causes extra prefetch which increments PC by +2.
+                    -- setstate="11" (write) sets memmask bit 3='1' for clkena_lw without PC increment.
+                    -- Same fix pattern as BUG #121 for memory EA modes.
+                    setstate <= "11";
                     IF brief(9)='0' THEN
                         -- PMOVE Dn+1,<MMU reg> - Read from Dn+1, write LOW word to MMU (brief(9)=0, RW=0)
                         set_exec(pmmu_wr) <= '1';

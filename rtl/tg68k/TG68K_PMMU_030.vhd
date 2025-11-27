@@ -81,6 +81,7 @@ architecture rtl of TG68K_PMMU_030 is
   
   -- MC68030 register write masks (workaround for VHDL synthesis issues)
   -- TC register mask: preserve E(31), SRE(25), FCL(24), and all field bits (23-0), clear reserved bits 30-26
+  -- Note: Bit 23 (PS MSB) is forced to 1 in write logic since all valid PS values (8-15) have MSB=1
   constant TC_WRITE_MASK : std_logic_vector(31 downto 0) := "10000011111111111111111111111111";
 
   -- TTR register mask (MC68030 User's Manual section 9.2.6):
@@ -716,7 +717,9 @@ begin
     variable page_offset_bits : integer;
   begin
     if nreset = '0' then
-      TC    <= (others => '0');
+      -- MC68030: PS field (bits 23-20) must always have bit 23=1 for valid page sizes
+      -- Initialize with PS=1100 (4KB pages), MMU disabled (bit 31=0)
+      TC    <= x"00C00000";
       CRP_H <= (others => '0');
       CRP_L <= (others => '0');
       SRP_H <= (others => '0');
@@ -810,6 +813,8 @@ begin
             -- If configuration is invalid and E=1, clear E bit to prevent MMU activation
             -- This prevents system lockup from invalid MMU config while still taking exception
             tc_write_val := reg_wdat and TC_WRITE_MASK;
+            -- MC68030: PS field bit 23 must always be 1 for valid page sizes (PS=8-15 all have MSB=1)
+            tc_write_val(23) := '1';
             tc_e := reg_wdat(31);
 
             if tc_e = '1' then
