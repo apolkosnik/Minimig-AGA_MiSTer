@@ -192,15 +192,28 @@ always @* begin
 		uds_in       = uds_p;
 		lds_in       = lds_p;
 		reset_out    = reset_out_p;
-		chip_as      = c_as;
-		chip_rw      = c_rw;
-		chip_uds     = c_uds;
-		chip_lds     = c_lds;
-		// Address mux: PMMU walker overrides CPU address during page table walks
-		if (USE_68030_CACHE && walker_active)
+		// BUG #124 FIX: PMMU walker must drive bus signals during page table walks
+		// When walker is reading, drive chip_as=0 (active low), chip_rw=1 (read), chip_uds/lds=0 (both bytes)
+		if (USE_68030_CACHE && walker_reading) begin
 			chip_addr    = walker_chip_addr;
-		else
+			chip_as      = 0;  // Address strobe active (low)
+			chip_rw      = 1;  // Read operation
+			chip_uds     = 0;  // Upper byte strobe active (low)
+			chip_lds     = 0;  // Lower byte strobe active (low)
+		end else if (USE_68030_CACHE && walker_active) begin
+			// Walker active but not reading (transitional states) - hold address, use CPU strobes
+			chip_addr    = walker_chip_addr;
+			chip_as      = c_as;
+			chip_rw      = c_rw;
+			chip_uds     = c_uds;
+			chip_lds     = c_lds;
+		end else begin
 			chip_addr    = cpu_addr_p[23:1];
+			chip_as      = c_as;
+			chip_rw      = c_rw;
+			chip_uds     = c_uds;
+			chip_lds     = c_lds;
+		end
 		chip_din     = cpu_dout_p;
 		chip_data    = chipdout_i;
 		fastchip_sel = cpu_req & !cpu_addr_p[31:24];
@@ -247,7 +260,9 @@ reg  [31:0] pmmu_walker_data_p;
 
 // PMMU walker address mux signals (for bus arbitration)
 reg         walker_active;
+reg   [2:0] walker_state;  // BUG #124 FIX: Walker state visible for bus mux
 wire [23:1] walker_chip_addr;
+wire        walker_reading;  // BUG #124 FIX: Walker actively reading memory
 
 // Cache interface signals (68030 only)
 wire        i_cache_enabled;
@@ -519,7 +534,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// Strategy: When walker requests, stall CPU (via clkena_in gate), drive walker address
 	// onto bus, perform reads, and acknowledge when complete.
 
-	reg [2:0] walker_state;
+	// walker_state declared outside generate block (line 263) for bus mux visibility
 	reg [15:0] walker_data_low;
 	reg [31:1] walker_addr_latch;  // Latch address to hold during multi-cycle read
 
@@ -535,6 +550,10 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// Walker addresses are byte addresses, chip_addr is word address (23:1)
 	// To read 32-bit descriptor: read word at addr[23:1], then addr[23:1]+1
 	wire walker_read_low_phase = (walker_state == WALKER_READ_LOW) | (walker_state == WALKER_WAIT_LOW);
+	wire walker_read_high_phase = (walker_state == WALKER_READ_HIGH) | (walker_state == WALKER_WAIT_HIGH);
+	// BUG #124 FIX: Walker must also drive address strobe and data strobes during read phases
+	// walker_reading declared outside generate block, assigned here
+	assign walker_reading = walker_read_low_phase | walker_read_high_phase;
 	wire [23:1] walker_base_addr = walker_addr_latch[23:1];  // Byte to word address
 	assign walker_chip_addr = walker_read_low_phase ?
 	                          walker_base_addr :           // Low word at base address
@@ -614,11 +633,13 @@ end else begin : gen_no_68030_cache
 
 	// No walker arbiter when cache disabled
 	assign walker_chip_addr = 23'b0;  // Unused
+	assign walker_reading = 1'b0;     // BUG #124: No walker when cache disabled
 
 	always @(posedge clk) begin
 		if (~reset) begin
 			pmmu_walker_ack_p <= 0;
 			walker_active <= 0;
+			walker_state <= 3'd0;  // BUG #124: Keep state at 0
 			pmmu_walker_data_p <= 0;
 		end else begin
 			pmmu_walker_ack_p <= 0;

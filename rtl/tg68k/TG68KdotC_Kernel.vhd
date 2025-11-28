@@ -3975,10 +3975,24 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- - opcode(15:12)="1111" = F-line instruction
 					-- - brief(15:13)="010" or "011" = PMOVE encoding
 					-- - brief(9)='1' = MMU->memory direction (read from MMU)
+					-- - brief(9)='0' = memory->MMU direction (write to MMU)
 					IF opcode(15 downto 12)="1111" AND
-					   (brief(15 downto 13)="010" OR brief(15 downto 13)="011") AND
-					   brief(9)='1' THEN
-						next_micro_state <= pmove_mmu_to_mem_hi;
+					   (brief(15 downto 13)="010" OR brief(15 downto 13)="011") THEN
+						IF brief(9)='1' THEN
+							-- MMU->mem direction
+							next_micro_state <= pmove_mmu_to_mem_hi;
+						ELSE
+							-- BUG #123 FIX: mem->MMU direction was not handled!
+							-- PMOVE (d16,An),<MMU> needs to set up memory read and go to pmove_mem_to_mmu_hi
+							setstate <= "10";  -- Memory read at computed EA
+							-- Set datatype based on register (MMUSR=16-bit, others=32-bit)
+							IF brief(14 downto 10) = "11000" THEN
+								datatype <= "01";  -- Word (16-bit) for MMUSR
+							ELSE
+								datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
+							END IF;
+							next_micro_state <= pmove_mem_to_mmu_hi;
+						END IF;
 					END IF;
 					
 				WHEN ld_AnXn1 =>		-- d(An,Xn)=>, --d(PC,Xn)=>
@@ -5347,8 +5361,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
             end if;
           end if;
 
-          if set(pmmu_rd) = '1' OR exec(pmmu_rd) = '1' then
-            -- PMOVE <MMU reg> -> Dn
+          -- BUG #125 FIX: Also check set_exec(pmmu_rd) to match pmmu_reg_re_d (line 602)!
+          -- pmove_decode (line 4796), pmove_mmu_to_mem_hi (line 4929), and pmove_dn_lo (line 5042)
+          -- all use set_exec(pmmu_rd). Without this, pmmu_reg_sel_d gets stale value and
+          -- all subsequent reads return the same wrong register ("same values in all MMU registers")!
+          if set(pmmu_rd) = '1' OR exec(pmmu_rd) = '1' OR set_exec(pmmu_rd) = '1' then
+            -- PMOVE <MMU reg> -> Dn or memory
             if brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
                brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000" then
               pmmu_reg_sel_d <= brief(14 downto 10);
