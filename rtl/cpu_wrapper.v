@@ -82,7 +82,8 @@ module cpu_wrapper
 	input      [15:0] cache_data,
 	input             cache_ack,
 	output            cache_burst,      // Burst mode request
-	output      [2:0] cache_burst_len   // Burst length (number of words)
+	output      [2:0] cache_burst_len,  // Burst length (number of words)
+	output     [28:1] cache_ramaddr     // Properly encoded ramaddr for cache fill
 );
 
 assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
@@ -94,13 +95,9 @@ always @(posedge clk) nmi_addr <= vbr + 32'h7c;
 wire sel_z3ram0 = (cpu_addr[31:27] == z3ram_base0) && z3ram_ena0;
 wire sel_z3ram1 = (cpu_addr[31:28] == z3ram_base1) && z3ram_ena1;
 wire sel_z2ram  = !cpu_addr[31:24] && (cpu_addr[23] ^ |cpu_addr[22:21]) && z2ram_ena; // addr[23:21] = 1..4
-// BUG #94 FIX: Amiga 32-bit Memory Map - Motherboard Fast RAM
-// $04000000-$04FFFFFF (16MB): Motherboard Fast RAM (Amiga specification)
-// Without this mapping, addresses above $00FFFFFF wrap around to 24-bit chip space!
-// This prevents the 24-bit address bus test at $04000700 from wrapping to $000700
-// Only enabled on 68020/030 CPUs (cpucfg[1]=1) to maintain 24-bit compatibility for 68000/68010
-wire sel_mbram = 1'b0; // DISABLED - Motherboard Fast RAM at $04000000-$04FFFFFF (16MB)
-wire sel_zram   = sel_z3ram0 | sel_z3ram1 | sel_z2ram | sel_mbram;
+// Motherboard Fast RAM mapping DISABLED - caused issues
+
+wire sel_zram   = sel_z3ram0 | sel_z3ram1 | sel_z2ram;
 wire sel_dd     = (cpu_addr[31:16] == 16'h00DD) && (cpu_addr[15:13] == 'b010);
 wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
 
@@ -133,14 +130,26 @@ assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 // map 00-1f to 00-1f (chipram), a0-ff to 20-7f. All non-fastram goes into the first
 // 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v
 // All Zorro RAM goes to DDR3
-// BUG #94 FIX: Map sel_mbram ($04) to DDR3 region at ramaddr $04000000-$04FFFFFF (16MB at 64MB offset)
-assign ramaddr[28]    = sel_zram & ~sel_z3ram0 & ~sel_mbram;
-assign ramaddr[27]    = sel_zram & ((sel_mbram & cpu_addr[25]) | (~sel_z3ram1 | cpu_addr[27]));
-assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1 | sel_mbram) ? cpu_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}});
+assign ramaddr[28]    = sel_zram & ~sel_z3ram0;
+assign ramaddr[27]    = sel_zram & (~sel_z3ram1 | cpu_addr[27]);
+assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}});
 assign ramaddr[22:19] = {4{sel_dd}} | cpu_addr[22:19];
 assign ramaddr[18]    =    sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18];
 assign ramaddr[17:16] = {2{sel_dd}} | cpu_addr[17:16];
 assign ramaddr[15:1]  = cpu_addr[15:1];
+
+// BUG #128 FIX: Compute properly encoded ramaddr for cache fill addresses
+// Cache fills use cache_addr (physical address from PMMU) instead of cpu_addr
+// This encoding is needed so DDR3 controller gets correct Z3 RAM addresses
+wire sel_z3ram0_cache = (cache_addr[31:27] == z3ram_base0) && z3ram_ena0;
+wire sel_z3ram1_cache = (cache_addr[31:28] == z3ram_base1) && z3ram_ena1;
+wire sel_z2ram_cache  = !cache_addr[31:24] && (cache_addr[23] ^ |cache_addr[22:21]) && z2ram_ena;
+wire sel_zram_cache   = sel_z3ram0_cache | sel_z3ram1_cache | sel_z2ram_cache;
+
+assign cache_ramaddr[28]    = sel_zram_cache & ~sel_z3ram0_cache;
+assign cache_ramaddr[27]    = sel_zram_cache & (~sel_z3ram1_cache | cache_addr[27]);
+assign cache_ramaddr[26:23] = (sel_z3ram0_cache | sel_z3ram1_cache) ? cache_addr[26:23] : 4'b0000;
+assign cache_ramaddr[22:1]  = cache_addr[22:1];
 
 assign fastchip_lds = lds_in;
 assign fastchip_uds = uds_in;
@@ -253,6 +262,7 @@ wire        reset_out_p;
 wire        longword;
 wire [31:0] pmmu_addr_log_p;
 wire [31:0] pmmu_addr_phys_p;
+wire        pmmu_cache_inhibit_p;  // BUG #126 FIX: Cache inhibit from PMMU (was unconnected)
 wire        pmmu_walker_req_p;
 wire [31:0] pmmu_walker_addr_p;
 reg         pmmu_walker_ack_p;
@@ -346,6 +356,7 @@ cpu_inst_p
   // PMMU address interface
   .pmmu_addr_log(pmmu_addr_log_p),
   .pmmu_addr_phys(pmmu_addr_phys_p),
+  .pmmu_cache_inhibit(pmmu_cache_inhibit_p),  // BUG #126 FIX: Cache inhibit from PMMU
   // PMMU walker memory interface
   .pmmu_walker_req(pmmu_walker_req_p),
   .pmmu_walker_addr(pmmu_walker_addr_p),

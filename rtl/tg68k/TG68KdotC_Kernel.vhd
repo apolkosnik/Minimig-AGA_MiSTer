@@ -421,6 +421,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_reg_re_d    : std_logic;
 	signal pmmu_reg_sel_d   : std_logic_vector(4 downto 0);
 	signal pmmu_reg_sel_int : std_logic_vector(4 downto 0);  -- BUG #119: Internal signal for VHDL-93 compatibility
+	signal pmmu_reg_sel_valid : boolean;  -- Valid selector gating for PMMU register access
 	-- BUG #53 FIX: 1-stage pipeline - these 2-stage signals no longer needed
 	-- signal pmmu_reg_sel_pending : std_logic;  -- REMOVED: Old 2-stage pipeline
 	-- signal pmmu_reg_sel_latch : std_logic_vector(15 downto 0);  -- REMOVED: Old 2-stage pipeline
@@ -564,6 +565,9 @@ BEGIN
   pmmu_reg_sel_int <= brief(14 downto 10) when CPU(1) = '1' AND (set(pmmu_rd)='1' OR exec(pmmu_rd)='1' OR set(pmmu_wr)='1' OR exec(pmmu_wr)='1' OR set_exec(pmmu_wr)='1' OR set_exec(pmmu_rd)='1') else
                       pmmu_reg_sel_d when CPU(1) = '1' else
                       (others => '0');
+  pmmu_reg_sel_valid <= true when (pmmu_reg_sel_int = "00010" OR pmmu_reg_sel_int = "00011" OR pmmu_reg_sel_int = "10000" OR
+                                   pmmu_reg_sel_int = "10010" OR pmmu_reg_sel_int = "10011" OR pmmu_reg_sel_int = "11000")
+                        else false;
   pmmu_reg_sel  <= pmmu_reg_sel_int;  -- Drive output port from internal signal
   pmmu_reg_wdat <= pmmu_reg_wdat_d when CPU(1) = '1'  else (others => '0');
   pmmu_reg_part <= pmmu_reg_part_d when CPU(1) = '1'  else '0';
@@ -590,18 +594,14 @@ BEGIN
   -- pmmu_reg_sel_d is one cycle late - first PMOVE after reset has pmmu_reg_sel_d="00000"
   -- which fails the validity check and causes pmmu_reg_we/re to stay '0'
   -- This matches BUG #84 fix on line 553 which uses brief(14:10) for pmmu_reg_sel
-  pmmu_reg_we_d <= '1' when CPU(1)='1' AND (set_exec(pmmu_wr)='1' OR exec(pmmu_wr)='1') AND
-                             (brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
-                              brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000")
+  pmmu_reg_we_d <= '1' when CPU(1)='1' AND (set_exec(pmmu_wr)='1' OR exec(pmmu_wr)='1') AND pmmu_reg_sel_valid
                    else '0';
   -- BUG #81 REAL FIX: Must check BOTH set(pmmu_rd) and exec(pmmu_rd)!
   -- pmove_decode Dn read uses set(pmmu_rd), pmove_dn_lo uses exec(pmmu_rd)
   -- Without set(pmmu_rd) check, pmmu_reg_re stays '0' for pmove_decode reads!
   -- BUG #117 FIX: Use brief(14:10) directly for validity check (same as write enable)
   -- BUG #119 FIX: Also check set_exec(pmmu_rd) for MMU->memory reads (pmove_decode uses set_exec)
-  pmmu_reg_re_d <= '1' when CPU(1)='1' AND (set(pmmu_rd)='1' OR exec(pmmu_rd)='1' OR set_exec(pmmu_rd)='1') AND
-                             (brief(14 downto 10) = "00010" OR brief(14 downto 10) = "00011" OR brief(14 downto 10) = "10000" OR
-                              brief(14 downto 10) = "10010" OR brief(14 downto 10) = "10011" OR brief(14 downto 10) = "11000")
+  pmmu_reg_re_d <= '1' when CPU(1)='1' AND (set(pmmu_rd)='1' OR exec(pmmu_rd)='1' OR set_exec(pmmu_rd)='1') AND pmmu_reg_sel_valid
                    else '0';
 
   -- For PTEST/PFLUSH/PLOAD: use FC from brief word per MC68030 spec
@@ -3977,7 +3977,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- - brief(9)='1' = MMU->memory direction (read from MMU)
 					-- - brief(9)='0' = memory->MMU direction (write to MMU)
 					IF opcode(15 downto 12)="1111" AND
-					   (brief(15 downto 13)="010" OR brief(15 downto 13)="011") THEN
+					   (brief(15 downto 13)="010" OR brief(15 downto 13)="011" OR brief(15 downto 13)="000") THEN
 						IF brief(9)='1' THEN
 							-- MMU->mem direction
 							next_micro_state <= pmove_mmu_to_mem_hi;

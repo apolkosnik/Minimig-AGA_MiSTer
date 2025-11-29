@@ -1033,7 +1033,11 @@ begin
   end process;
   
   -- Output the latched results
-  addr_phys     <= addr_phys_reg;
+  -- BUG #129 FIX: Add combinational bypass for identity translation when MMU disabled
+  -- This eliminates the 1-cycle lag that caused cache to sample stale physical address
+  -- When MMU is disabled (tc_en='0'), use logical address directly (same cycle)
+  -- When MMU is enabled, use registered translation result (allows for page table walks)
+  addr_phys     <= addr_log when tc_en = '0' else addr_phys_reg;
   cache_inhibit <= cache_inhibit_reg;
   write_protect <= write_protect_reg;
   fault         <= fault_reg;

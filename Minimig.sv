@@ -424,7 +424,11 @@ wire [15:0] chip_din;
 wire [23:1] chip_addr;
 
 wire [28:1] ram_addr_cpu;
-wire [28:1] ram_addr = cache_fill_active ? cache_fill_addr[28:1] : ram_addr_cpu;
+// BUG #128 FIX: Use properly encoded ramaddr for cache fills
+// BUG #130 FIX: Use latched high bits (from fill start) to ensure stable Z3 RAM encoding throughout fill
+// High bits from cache_fill_ramaddr_hi (latched), low bits from cache_fill_addr (incrementing)
+wire [28:1] cache_fill_ramaddr = {cache_fill_ramaddr_hi, cache_fill_addr[22:1]};
+wire [28:1] ram_addr = cache_fill_active ? cache_fill_ramaddr : ram_addr_cpu;
 wire        ram_sel_cpu;
 wire        ram_sel = cache_fill_active ? 1'b1 : ram_sel_cpu;
 wire        ram_lds_cpu;
@@ -445,11 +449,13 @@ wire        cpu_cache_req;
 wire [31:0] cpu_cache_addr;
 wire [15:0] cpu_cache_data;
 wire        cpu_cache_ack;
+wire [28:1] cpu_cache_ramaddr;  // BUG #128: Properly encoded ramaddr for cache fills
 
 // Cache fill state machine - handles 8 consecutive reads for 128-bit cache line
 reg  [2:0]  cache_fill_cnt;
 reg         cache_fill_active;
 reg  [31:0] cache_fill_addr;
+reg  [28:23] cache_fill_ramaddr_hi;  // BUG #130: Latch encoded high bits at fill start
 wire        cache_fill_done = cache_fill_active & (cache_fill_cnt == 3'd7) & ram_ready;
 
 always @(posedge clk_sys) begin
@@ -457,12 +463,14 @@ always @(posedge clk_sys) begin
 		cache_fill_cnt <= 3'd0;
 		cache_fill_active <= 1'b0;
 		cache_fill_addr <= 32'd0;
+		cache_fill_ramaddr_hi <= 6'd0;
 	end else begin
 		if (cpu_cache_req & !cache_fill_active) begin
 			// Start new cache fill sequence
 			cache_fill_active <= 1'b1;
 			cache_fill_cnt <= 3'd0;
 			cache_fill_addr <= cpu_cache_addr;
+			cache_fill_ramaddr_hi <= cpu_cache_ramaddr[28:23];  // BUG #130: Latch Z3 RAM encoding
 		end else if (cache_fill_active & ram_ready) begin
 			if (cache_fill_cnt == 3'd7) begin
 				// Cache fill complete
@@ -539,7 +547,8 @@ cpu_wrapper
 	.cache_req    (cpu_cache_req   ),
 	.cache_addr   (cpu_cache_addr  ),
 	.cache_data   (cpu_cache_data  ),
-	.cache_ack    (cpu_cache_ack   )
+	.cache_ack    (cpu_cache_ack   ),
+	.cache_ramaddr(cpu_cache_ramaddr)  // BUG #128: Properly encoded ramaddr for cache fills
 );
 
 wire [15:0] ram_dout1;

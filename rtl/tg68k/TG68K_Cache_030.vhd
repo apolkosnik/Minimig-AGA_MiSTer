@@ -95,6 +95,13 @@ architecture rtl of TG68K_Cache_030 is
   -- Internal signals to track fill request state (VHDL-93 compatibility)
   signal i_fill_req_int : std_logic := '0';
   signal d_fill_req_int : std_logic := '0';
+
+  -- BUG #131 FIX: Latch line index and tag when fill is requested
+  -- Must use latched values at fill completion, not current values which may have changed
+  signal i_fill_line_idx : integer range 0 to NUM_LINES-1 := 0;
+  signal i_fill_tag      : std_logic_vector(TAG_BITS-1 downto 0) := (others => '0');
+  signal d_fill_line_idx : integer range 0 to NUM_LINES-1 := 0;
+  signal d_fill_tag      : std_logic_vector(TAG_BITS-1 downto 0) := (others => '0');
   
   -- Cache operation address parsing
   signal cache_op_line_idx : integer range 0 to NUM_LINES-1;
@@ -132,11 +139,11 @@ begin
       i_fill_req_int <= '0';
       i_fill_addr <= (others => '0');
     elsif rising_edge(clk) then
-      -- Cache fill completion
+      -- Cache fill completion - BUG #131 FIX: Use LATCHED values, not current
       if i_fill_valid = '1' then
-        i_data_array(i_line_idx) <= i_fill_data;
-        i_tag_array(i_line_idx) <= i_tag;
-        i_valid_array(i_line_idx) <= '1';
+        i_data_array(i_fill_line_idx) <= i_fill_data;
+        i_tag_array(i_fill_line_idx) <= i_fill_tag;
+        i_valid_array(i_fill_line_idx) <= '1';
         i_fill_req_int <= '0';  -- Clear fill request when data arrives
       end if;
       
@@ -193,12 +200,17 @@ begin
       end if;
       
       -- Cache miss detection and fill request
-      if i_req = '1' and cacr_ie = '1' and i_cache_inhibit = '0' then
+      -- BUG #132 FIX: Only start new fill if no fill is already in progress
+      -- Otherwise latched values would be overwritten, corrupting the pending fill
+      if i_req = '1' and cacr_ie = '1' and i_cache_inhibit = '0' and i_fill_req_int = '0' then
         -- Check for cache miss
         if i_valid_array(i_line_idx) = '0' or i_tag_array(i_line_idx) /= i_tag then
           -- Only request fill if not frozen
           if cacr_ifreeze = '0' then
             i_fill_req_int <= '1';
+            -- BUG #131 FIX: Latch line index and tag NOW for use at fill completion
+            i_fill_line_idx <= i_line_idx;
+            i_fill_tag <= i_tag;
             -- Use physical address for memory fill
             i_fill_addr <= i_addr_phys(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
           end if;
@@ -241,11 +253,11 @@ begin
       d_fill_req_int <= '0';
       d_fill_addr <= (others => '0');
     elsif rising_edge(clk) then
-      -- Cache fill completion
+      -- Cache fill completion - BUG #131 FIX: Use LATCHED values, not current
       if d_fill_valid = '1' then
-        d_data_array(d_line_idx) <= d_fill_data;
-        d_tag_array(d_line_idx) <= d_tag;
-        d_valid_array(d_line_idx) <= '1';
+        d_data_array(d_fill_line_idx) <= d_fill_data;
+        d_tag_array(d_fill_line_idx) <= d_fill_tag;
+        d_valid_array(d_fill_line_idx) <= '1';
         d_fill_req_int <= '0';  -- Clear fill request when data arrives
       end if;
       
@@ -332,21 +344,29 @@ begin
           end case;
         elsif d_we = '0' then
           -- Check for read cache miss
-          if d_valid_array(d_line_idx) = '0' or d_tag_array(d_line_idx) /= d_tag then
+          -- BUG #132 FIX: Only start new fill if no fill is already in progress
+          if d_fill_req_int = '0' and (d_valid_array(d_line_idx) = '0' or d_tag_array(d_line_idx) /= d_tag) then
             -- Only request fill if not frozen
             if cacr_dfreeze = '0' then
               d_fill_req_int <= '1';
+              -- BUG #131 FIX: Latch line index and tag NOW for use at fill completion
+              d_fill_line_idx <= d_line_idx;
+              d_fill_tag <= d_tag;
               -- Use physical address for memory fill
               d_fill_addr <= d_addr_phys(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
             end if;
           end if;
         else
           -- Write miss: check if write allocate is enabled
-          if cacr_wa = '1' and (d_valid_array(d_line_idx) = '0' or d_tag_array(d_line_idx) /= d_tag) then
+          -- BUG #132 FIX: Only start new fill if no fill is already in progress
+          if d_fill_req_int = '0' and cacr_wa = '1' and (d_valid_array(d_line_idx) = '0' or d_tag_array(d_line_idx) /= d_tag) then
             -- Write allocate: request cache line fill before writing
             -- Only request fill if not frozen
             if cacr_dfreeze = '0' then
               d_fill_req_int <= '1';
+              -- BUG #131 FIX: Latch line index and tag NOW for use at fill completion
+              d_fill_line_idx <= d_line_idx;
+              d_fill_tag <= d_tag;
               -- Use physical address for memory fill
               d_fill_addr <= d_addr_phys(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
             end if;
