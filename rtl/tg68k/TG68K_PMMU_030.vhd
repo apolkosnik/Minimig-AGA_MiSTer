@@ -372,21 +372,30 @@ architecture rtl of TG68K_PMMU_030 is
     variable base       : std_logic_vector(7 downto 0);
     variable mask       : std_logic_vector(7 downto 0);
     variable addr_hi    : std_logic_vector(7 downto 0);
-    variable super_bits : std_logic_vector(1 downto 0);
-    variable fc_base    : std_logic_vector(2 downto 0);  -- FIXED: FC Base from bits 6:4
-    variable fc_mask    : std_logic_vector(2 downto 0);  -- FIXED: FC Mask from bits 2:0
+    variable fc_base    : std_logic_vector(2 downto 0);  -- FC Base from bits 6:4
+    variable fc_mask    : std_logic_vector(2 downto 0);  -- FC Mask from bits 2:0
     variable addr_match : std_logic;
     variable fc_match   : std_logic;
-    variable super_match: std_logic;
   begin
-    -- MC68030 TTR format
+    -- MC68030 TTR format (per MC68030 User's Manual section 9.2.6):
+    -- Bits 31-24: Logical Address Base
+    -- Bits 23-16: Logical Address Mask
+    -- Bit 15: Enable (E)
+    -- Bits 14-11: Reserved (must be 0)
+    -- Bit 10: Cache Inhibit (CI)
+    -- Bit 9: R/W (read/write attribute)
+    -- Bit 8: RWM (R/W mask)
+    -- Bit 7: Reserved
+    -- Bits 6-4: Function Code Base
+    -- Bit 3: Reserved
+    -- Bits 2-0: Function Code Mask
     enable     := tt(15);           -- E bit: TTR enable
     base       := tt(31 downto 24); -- Base address (bits 31:24)
     mask       := tt(23 downto 16); -- Address mask (bits 23:16)
-    super_bits := tt(14 downto 13); -- S field: 00=any, 01=user, 10=super, 11=reserved
-    -- CRITICAL BUG FIX: FC field is split into Base (6:4) and Mask (2:0)
+    -- NOTE: Bits 14-11 are RESERVED in MC68030 TTR - no supervisor field exists!
+    -- Supervisor/user matching is done via FC Base and FC Mask fields only
     fc_base    := tt(6 downto 4);   -- Function Code Base
-    fc_mask    := tt(2 downto 0);   -- Function Code Mask (CORRECTED from tt(12:8))
+    fc_mask    := tt(2 downto 0);   -- Function Code Mask
     addr_hi    := addr(31 downto 24); -- Address high byte
 
     -- Early exit if TTR is disabled - prevents any false matches
@@ -413,33 +422,15 @@ architecture rtl of TG68K_PMMU_030 is
     -- FC Mask (bits 2:0) specifies which FC bits to ignore
     -- Match when: (actual_fc XOR fc_base) AND (NOT fc_mask) == "000"
     -- This allows flexible matching: mask=111 matches any FC, mask=000 requires exact match
-
+    -- NOTE: Supervisor/user matching is done here via FC - FC bit 2 = 1 for supervisor
     if ((fc XOR fc_base) AND (NOT fc_mask)) = "000" then
       fc_match := '1';
     else
       fc_match := '0';
     end if;
-    
-    -- Supervisor/User match
-    case super_bits is
-      when "00" => super_match := '1';                    -- Any mode
-      when "01" => 
-        if fc(2) = '0' then
-          super_match := '1';  -- User only
-        else
-          super_match := '0';
-        end if;
-      when "10" => 
-        if fc(2) = '1' then
-          super_match := '1';  -- Supervisor only
-        else
-          super_match := '0';
-        end if;
-      when others => super_match := '0';                  -- Reserved
-    end case;
-    
-    -- Overall match - MUST check enable first
-    if enable = '1' AND addr_match = '1' AND fc_match = '1' AND super_match = '1' then
+
+    -- Overall match - check address and FC (no separate supervisor field in MC68030 TTR)
+    if enable = '1' AND addr_match = '1' AND fc_match = '1' then
       matched := '1';
       -- MC68030 TTR CI field (bit 10): Cache Inhibit
       -- 0=cacheable, 1=cache inhibit
@@ -448,34 +439,34 @@ architecture rtl of TG68K_PMMU_030 is
       else
         ci := '0';  -- Cacheable
       end if;
-      -- MC68030 TTR RW field: Controls read/write permissions
-      -- Bit 8 (RWM): 0=don't care about R/W, 1=check RW bit
-      -- Bit 9 (RW): 0=write-only, 1=read-only (when RWM=1)
-      if tt(8) = '1' then  -- RWM=1: check RW bit
+      -- MC68030 TTR R/W field (per User's Manual section 9.2.6):
+      -- Bit 8 (RWM): 0 = R/W field used, 1 = R/W field ignored
+      -- Bit 9 (R/W): 0 = write accesses transparent, 1 = read accesses transparent
+      -- When RWM=1, both read and write accesses are transparently translated
+      if tt(8) = '0' then  -- RWM=0: R/W field is USED (check access type)
         if tt(9) = '1' and rw = '0' then
-          -- RW=1 (read-only) but this is a write - no match
+          -- R/W=1 (read-only transparent) but this is a write - no match
           matched := '0';
           wp := '0';
         elsif tt(9) = '0' and rw = '1' then
-          -- RW=0 (write-only) but this is a read - no match
+          -- R/W=0 (write-only transparent) but this is a read - no match
           matched := '0';
           wp := '0';
         else
-          wp := '0';  -- Access allowed
+          wp := '0';  -- Access type matches
         end if;
-      else  -- RWM=0: don't care about R/W
-        wp := '0';  -- No write protection
+      else  -- RWM=1: R/W field is IGNORED (both reads and writes allowed)
+        wp := '0';  -- No write protection, both access types allowed
       end if;
       -- Debug for write protection test
       if addr(31 downto 12) = x"00002" then
-        report "TTR_MATCH_DEBUG: addr=0x" & slv_to_hstring(addr) & 
+        report "TTR_MATCH_DEBUG: addr=0x" & slv_to_hstring(addr) &
                " base=0x" & slv_to_hstring("000000" & base) &
                " mask=0x" & slv_to_hstring("000000" & mask) &
                " addr_hi=0x" & slv_to_hstring("000000" & addr_hi) &
                " enable=" & std_logic'image(enable) &
                " addr_match=" & std_logic'image(addr_match) &
                " fc_match=" & std_logic'image(fc_match) &
-               " super_match=" & std_logic'image(super_match) &
                " tt_reg=0x" & slv_to_hstring(tt) severity note;
       end if;
     else
@@ -630,24 +621,18 @@ architecture rtl of TG68K_PMMU_030 is
   end function;
   
   -- MC68030 MMUSR encoding functions
-  -- MMUSR Bit Assignments (MC68030 User's Manual):
-  -- Bit 15: Bus Error (B)
-  -- Bit 14: Limit Violation (L) 
-  -- Bit 13: Supervisor Violation (S)
-  -- Bit 12: Cache Inhibit (CI)
-  -- Bit 11: Write Protect (WP)
-  -- Bit 10: Modified (M)
-  -- Bit 9: Transparent (T)
-  -- Bit 8: Resident (R)
-  -- Bits 7-5: Reserved (0)
-  -- Bits 4-3: Level (at which fault occurred)
-  -- Bits 2-0: Reserved (0)
-  
-  -- MC68030 MMUSR Status Register Encoding per User's Manual section 9.2.7
-  -- Bit 15 (B): Bus Error, 14 (L): Limit Violation, 13 (S): Supervisor-Only
-  -- Bit 12: Reserved, 11 (W): Write Protected, 10 (I): Invalid
-  -- Bit 9 (M): Modified, Bits 8-7: Reserved, Bit 6 (T): Transparent Access
-  -- Bits 5-3: Reserved, Bits 2-0 (N): Number of Levels
+  -- MMUSR Bit Assignments (MC68030 User's Manual section 9.2.7):
+  -- Bit 15: B (Bus Error)
+  -- Bit 14: L (Limit Violation)
+  -- Bit 13: S (Supervisor-Only violation)
+  -- Bit 12: Reserved (0)
+  -- Bit 11: W (Write Protected)
+  -- Bit 10: I (Invalid descriptor)
+  -- Bit 9: M (Modified)
+  -- Bits 8-7: Reserved (0)
+  -- Bit 6: T (Transparent Access via TT0/TT1)
+  -- Bits 5-3: Reserved (0)
+  -- Bits 2-0: N (Number of Levels accessed, 0-7)
   function encode_mmusr_fault(
     bus_error : std_logic;
     limit_violation : std_logic;
