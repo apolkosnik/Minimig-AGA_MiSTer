@@ -163,7 +163,8 @@ architecture rtl of TG68K_PMMU_030 is
 
   -- MC68030 page table walker FSM
   -- Added W_*_LOW states for reading LOW word of long-format (64-bit) descriptors
-  type walk_state_t is (W_IDLE, W_ROOT, W_ROOT_LOW, W_PTR1, W_PTR1_LOW, W_PTR2, W_PTR2_LOW, W_PTR3, W_PTR3_LOW, W_PAGE, W_FILL, W_COMPLETE, W_FAULT);
+  -- Added W_INDIRECT states for indirect descriptor support (MC68030 spec section 9.5.3.2)
+  type walk_state_t is (W_IDLE, W_ROOT, W_ROOT_LOW, W_PTR1, W_PTR1_LOW, W_PTR2, W_PTR2_LOW, W_PTR3, W_PTR3_LOW, W_INDIRECT, W_PAGE, W_FILL, W_COMPLETE, W_FAULT);
   signal wstate    : walk_state_t := W_IDLE;
   
   -- Walker bookkeeping
@@ -213,6 +214,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal walk_vpn       : std_logic_vector(31 downto 0) := (others => '0'); -- Virtual page being walked
   signal walk_fault     : std_logic := '0'; -- Page fault flag
   signal walk_attr      : std_logic_vector(7 downto 0) := (others => '0'); -- Page attributes
+  signal indirect_addr  : std_logic_vector(31 downto 0) := (others => '0'); -- Target address for indirect descriptor
 
   -- Local helper for Quartus: convert std_logic_vector to hex string.
   function slv_to_hstring(value : std_logic_vector) return string is
@@ -1914,6 +1916,13 @@ begin
               -- Page descriptor found (short format)
               walk_desc_is_long <= '0';  -- Short format
               wstate <= W_PAGE;
+            elsif tc_idx_bits(2) = 0 then
+              -- TIC=0 means W_PTR1 is the final level (MC68030 spec section 9.5.3.2)
+              -- DT=10 at final level = short-format indirect descriptor
+              walk_desc_is_long <= '0';  -- Short format indirect
+              indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
+              report "W_PTR1: Short indirect descriptor detected (DT=10, TIC=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+              wstate <= W_INDIRECT;
             else
               -- Continue to next level (short format table descriptor)
               walk_desc_is_long <= '0';  -- Short format
@@ -1940,6 +1949,13 @@ begin
               -- Page descriptor
               report "W_PTR1_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
               wstate <= W_PAGE;
+            elsif tc_idx_bits(2) = 0 then
+              -- TIC=0 means W_PTR1 is the final level (MC68030 spec section 9.5.3.2)
+              -- DT=11 at final level = long-format indirect descriptor
+              -- Target address is in LOW word bits 31:2 (longword aligned)
+              indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
+              report "W_PTR1_LOW: Long indirect descriptor (DT=11, TIC=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+              wstate <= W_INDIRECT;
             else
               -- Table descriptor - extract address from LOW word and continue
               walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
@@ -1948,7 +1964,7 @@ begin
               wstate <= W_PTR2;
             end if;
           end if;
-          
+
         when W_PTR2 =>
           -- Read level 2 table descriptor - deadlock-proof design
           table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
@@ -2020,6 +2036,13 @@ begin
               -- Short format page descriptor
               walk_desc_is_long <= '0';  -- Short format
               wstate <= W_PAGE;
+            elsif tc_idx_bits(3) = 0 then
+              -- TID=0 means W_PTR2 is the final level (MC68030 spec section 9.5.3.2)
+              -- DT=10 at final level = short-format indirect descriptor
+              walk_desc_is_long <= '0';  -- Short format indirect
+              indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
+              report "W_PTR2: Short indirect descriptor detected (DT=10, TID=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+              wstate <= W_INDIRECT;
             else
               -- Short format table descriptor
               walk_desc_is_long <= '0';  -- Short format
@@ -2046,6 +2069,13 @@ begin
               -- Page descriptor
               report "W_PTR2_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
               wstate <= W_PAGE;
+            elsif tc_idx_bits(3) = 0 then
+              -- TID=0 means W_PTR2 is the final level (MC68030 spec section 9.5.3.2)
+              -- DT=11 at final level = long-format indirect descriptor
+              -- Target address is in LOW word bits 31:2 (longword aligned)
+              indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
+              report "W_PTR2_LOW: Long indirect descriptor (DT=11, TID=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+              wstate <= W_INDIRECT;
             else
               -- Table descriptor - extract address from LOW word and continue
               walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
@@ -2100,44 +2130,60 @@ begin
               walk_desc_is_long <= '0';  -- Short format
               wstate <= W_PAGE;
             else
-              -- Non-page descriptor at final level is an error
-              walk_desc_is_long <= '0';  -- Short format
-              walk_fault <= '1';
-              walker_fault <= '1';
-              walker_fault_status <= encode_mmusr_fault(
-                bus_error => '1',                -- Bus error due to non-page at final level
-                limit_violation => '0',
-                supervisor_violation => '0',
-                write_protect => '0',
-                invalid => '1',
-                modified => '0',
-                transparent => '0',
-                level => std_logic_vector(to_unsigned(walk_level, 3))
-              );
-              report "BUS_ERROR_PTR3: Non-page descriptor at final level, desc=0x" & slv_to_hstring(mem_rdat) severity note;
-              wstate <= W_FAULT;
+              -- DT=10 at final level = short-format indirect descriptor (MC68030 spec section 9.5.3.2)
+              -- The descriptor points to another descriptor (the target) that will be used
+              -- Target address is in bits 31:2 (must be 4-byte aligned)
+              walk_desc_is_long <= '0';  -- Short format indirect
+              indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
+              report "W_PTR3: Short indirect descriptor detected (DT=10), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+              wstate <= W_INDIRECT;
             end if;
           end if;
 
         when W_PTR3_LOW =>
           -- Read LOW word of long-format descriptor at desc_addr+4
+          -- At final level with DT=11, this is a long-format indirect descriptor (MC68030 spec 9.5.3.2)
           if mem_req = '0' then
             mem_req <= '1';
             mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
             report "W_PTR3_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
           elsif mem_ack = '1' then
-            -- Got LOW word - save it and process complete descriptor
+            -- Got LOW word - save it and process
             walk_desc_low <= mem_rdat;
             mem_req <= '0';
             report "W_PTR3_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
 
-            -- At final level, must be page descriptor
-            if desc_is_page(walk_desc_high) then
-              -- Page descriptor
-              report "W_PTR3_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
+            -- At final level with DT=11, this is a LONG INDIRECT descriptor
+            -- Target address is in LOW word bits 31:2 (longword aligned)
+            -- Note: walk_desc_high has DT=11 (that's how we got here from W_PTR3)
+            indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
+            report "W_PTR3_LOW: Long indirect descriptor, target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+            wstate <= W_INDIRECT;
+          end if;
+
+        when W_INDIRECT =>
+          -- Fetch target descriptor from indirect descriptor pointer (MC68030 spec 9.5.3.2)
+          -- Target descriptor is always 4 bytes (short format page descriptor expected)
+          if mem_req = '0' then
+            mem_req <= '1';
+            mem_addr <= indirect_addr;
+            report "W_INDIRECT: Fetching target descriptor at addr=0x" & slv_to_hstring(indirect_addr) severity note;
+          elsif mem_ack = '1' then
+            -- Got target descriptor - validate it
+            mem_req <= '0';
+            report "W_INDIRECT: Got target descriptor=0x" & slv_to_hstring(mem_rdat) severity note;
+
+            -- Check target descriptor type - must be page (DT=01)
+            -- MC68030: Nested indirect (target DT=10/11) causes bus error
+            if mem_rdat(1 downto 0) = "01" then
+              -- Valid page descriptor - save and proceed to W_PAGE
+              walk_desc <= mem_rdat;
+              walk_desc_high <= mem_rdat;
+              walk_desc_is_long <= '0';  -- Target is always short format
+              report "W_INDIRECT: Valid page descriptor target, proceeding to W_PAGE" severity note;
               wstate <= W_PAGE;
-            else
-              -- Non-page at final level is an error
+            elsif mem_rdat(1 downto 0) = "00" then
+              -- Invalid descriptor
               walker_fault <= '1';
               walker_fault_status <= encode_mmusr_fault(
                 bus_error => '1',
@@ -2149,11 +2195,26 @@ begin
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
-              report "BUS_ERROR_PTR3_LOW: Non-page descriptor at final level" severity note;
+              report "W_INDIRECT: Invalid target descriptor (DT=00)" severity note;
+              wstate <= W_FAULT;
+            else
+              -- Nested indirect (DT=10 or DT=11) - bus error per MC68030 spec
+              walker_fault <= '1';
+              walker_fault_status <= encode_mmusr_fault(
+                bus_error => '1',                -- Bus error due to nested indirect
+                limit_violation => '0',
+                supervisor_violation => '0',
+                write_protect => '0',
+                invalid => '1',
+                modified => '0',
+                transparent => '0',
+                level => std_logic_vector(to_unsigned(walk_level, 3))
+              );
+              report "W_INDIRECT: Nested indirect descriptor (DT=" & slv_to_string(mem_rdat(1 downto 0)) & ") - bus error" severity note;
               wstate <= W_FAULT;
             end if;
           end if;
-          
+
         when W_PAGE =>
           -- Process page descriptor and validate completely
           if not desc_valid(walk_desc) then
