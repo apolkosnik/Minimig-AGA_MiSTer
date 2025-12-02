@@ -489,9 +489,11 @@ architecture rtl of TG68K_PMMU_030 is
   end procedure;
   
   -- Extract table index from virtual address (MC68030 compliant)
+  -- BUG FIX: Added page_size parameter - was missing, causing wrong index extraction
   function get_table_index(addr : std_logic_vector(31 downto 0);
                           level : integer;
                           initial_shift : integer;
+                          page_size : integer;
                           idx_bits : tc_bits_array_t) return integer is
     variable result : integer;
     variable shift_amount : integer;
@@ -509,33 +511,40 @@ architecture rtl of TG68K_PMMU_030 is
     end if;
 
     -- MC68030 table index calculation:
-    -- Address format: [31:IS+TIA+TIB+TIC+TID] [TIA bits] [TIB bits] [TIC bits] [TID bits] [IS bits]
-    -- Each level extracts its portion from the logical address after IS initial shift
-    
-    -- Calculate shift amount for this level
-    -- MC68030 format: [31:x] [Level0] [Level1] [Level2] [Level3] [IS bits]
-    -- For each level, sum up the bits that come after it (ALL lower levels + IS)
-    remaining_bits := initial_shift; -- Start with IS (initial shift bits)
-    
-    -- Add bits from ALL levels that come after this one (0 is highest, 3 is lowest)
-    -- Use explicit checks instead of variable loop bounds (synthesis compatible)
+    -- Address format after ignoring IS bits: [TIA] [TIB] [TIC] [TID] [Page Offset (PS bits)]
+    -- Each level's index bits are extracted from specific positions
+    --
+    -- Shift amount = Page Size + sum of all TIx bits BELOW this level
+    -- Level 0 (TIA): shift = PS + TIB + TIC + TID
+    -- Level 1 (TIB): shift = PS + TIC + TID
+    -- Level 2 (TIC): shift = PS + TID
+    -- Level 3 (TID): shift = PS
+
+    -- Start with page size (page offset bits at bottom)
+    remaining_bits := page_size;
+
+    -- Add bits from ALL levels that come BELOW this one (level 3 is lowest, level 0 is highest)
+    -- Level 0 adds: TIB + TIC + TID
+    -- Level 1 adds: TIC + TID
+    -- Level 2 adds: TID
+    -- Level 3 adds: nothing (already at bottom)
     if level < 1 then remaining_bits := remaining_bits + idx_bits(1); end if;
     if level < 2 then remaining_bits := remaining_bits + idx_bits(2); end if;
     if level < 3 then remaining_bits := remaining_bits + idx_bits(3); end if;
-    
-    -- The shift amount is the starting bit position for this level
+
+    -- The shift amount positions this level's index bits at bit 0
     shift_amount := remaining_bits;
-    
+
     -- Ensure valid shift amount
     if shift_amount < 0 or shift_amount >= 32 then
       return 0;
     end if;
-    
+
     -- Extract bits by shifting right and masking
     temp_addr := unsigned(addr);
     temp_addr := shift_right(temp_addr, shift_amount);
     result := to_integer(temp_addr AND to_unsigned((2**mask_width) - 1, 32));
-    
+
     return result;
   end function;
   
@@ -1679,7 +1688,7 @@ begin
           
         when W_ROOT =>
           -- Read root table descriptor - deadlock-proof design
-          table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_idx_bits);
+          table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
 
           -- MC68030 Root Pointer Limit Check (only for root level)
           -- CRP_H/SRP_H format: L/U[31], Limit[30:16], Reserved[15:1], DT[0]
@@ -1844,7 +1853,7 @@ begin
 
         when W_PTR1 =>
           -- Read level 1 table descriptor - deadlock-proof design
-          table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_idx_bits);
+          table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr := walk_addr(31 downto 4) & "0000";
           desc_addr := std_logic_vector(unsigned(desc_addr) + to_unsigned(table_index * 4, 32));
           
@@ -1942,7 +1951,7 @@ begin
           
         when W_PTR2 =>
           -- Read level 2 table descriptor - deadlock-proof design
-          table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_idx_bits);
+          table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr := walk_addr(31 downto 4) & "0000";
           desc_addr := std_logic_vector(unsigned(desc_addr) + to_unsigned(table_index * 4, 32));
           
@@ -2048,7 +2057,7 @@ begin
           
         when W_PTR3 =>
           -- Final level - must be page descriptor - deadlock-proof design
-          table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_idx_bits);
+          table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr := walk_addr(31 downto 4) & "0000";
           desc_addr := std_logic_vector(unsigned(desc_addr) + to_unsigned(table_index * 4, 32));
           
