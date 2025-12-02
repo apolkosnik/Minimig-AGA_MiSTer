@@ -123,7 +123,7 @@ entity TG68KdotC_Kernel is
 		IPL						: in std_logic_vector(2 downto 0):="111";
 		IPL_autovector			: in std_logic:='0';
 		berr						: in std_logic:='0';					-- only 68000 Stackpointer dummy
-		CPU						: in std_logic_vector(1 downto 0):="00";  -- 00->68000  01->68010  10->68020  11->68030
+		CPU						: in std_logic_vector(1 downto 0):="00";  -- 00->68000  01->68010  10->68030 (with PMMU)
 		addr_out					: out std_logic_vector(31 downto 0);
 		data_write				: out std_logic_vector(15 downto 0);
 		nWr						: out std_logic;
@@ -139,9 +139,8 @@ entity TG68KdotC_Kernel is
 		regin_out				: out std_logic_vector(31 downto 0);
 		CACR_out					: out std_logic_vector(31 downto 0);
 		VBR_out					: out std_logic_vector(31 downto 0);
--- Cache control interface (68030)		
-		cache_cinv_req			: out std_logic;
-		cache_cpush_req		: out std_logic;
+-- Cache control interface (68030)
+		cache_inv_req			: out std_logic;  -- Cache invalidation request (from CACR bits)
 		cache_op_scope			: out std_logic_vector(1 downto 0);
 		cache_op_cache			: out std_logic_vector(1 downto 0);
 		cacr_ie					: out std_logic;
@@ -288,6 +287,12 @@ architecture logic of TG68KdotC_Kernel is
 	signal ea_only				: bit;
 	signal source_areg		: std_logic;
 	signal source_lowbits	: bit;
+	-- BUG #149 FIX: Track MOVES bus access in progress
+	-- This signal is set when moves1 schedules a bus access and cleared when it completes
+	-- It's used to maintain source_areg/source_lowbits and prevent address corruption
+	signal moves_bus_pending : std_logic := '0';
+	signal moves_ea_areg     : std_logic := '0';  -- Latched: is EA an address register mode?
+	signal moves_ea_regnum   : std_logic_vector(2 downto 0) := "000";  -- Latched EA register number
 	signal source_LDRLbits 	: bit;
 	signal source_LDRMbits 	: bit;
 	signal source_2ndHbits	: bit;
@@ -437,6 +442,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_is_insn     : std_logic;
 	signal pmmu_rw          : std_logic;
 	signal pmmu_fc          : std_logic_vector(2 downto 0);
+	signal pmmu_fc_from_dn  : std_logic_vector(2 downto 0);  -- FC value from Dn register for PTEST/PLOAD/PFLUSH
 	signal pmmu_addr_log_int : std_logic_vector(31 downto 0);
 	signal pmmu_addr_phys_int : std_logic_vector(31 downto 0);
 	
@@ -617,67 +623,51 @@ BEGIN
   pmmu_cmd_fc     <= brief(2 downto 0) when ((exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
                                               (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
                                               and brief(4 downto 3) = "10")  -- Immediate FC (3-bit value in bits 2-0)
+                     else pmmu_fc_from_dn when ((exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
+                                    (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
+                                    and brief(4 downto 3) = "01")  -- FC from Dn register (Dn specified by brief(2:0))
                      else SFC when ((exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
                                     (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
                                     and brief(4 downto 0) = "00000")  -- FC from SFC
                      else DFC when ((exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
                                     (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
                                     and brief(4 downto 0) = "00001")  -- FC from DFC
-                     -- NOTE: FC from Dn register (brief(4:3)="01") not yet implemented
-                     -- Would require: Read Dn(brief(2:0))[2:0] during decode phase
-                     -- Rarely used in practice - most software uses immediate FC, SFC, or DFC
-                     -- If needed, would add register read in pmove_decode state before PTEST/PLOAD/PFLUSH
                      else fc_internal;
 
   -- For PTEST/PLOAD/PFLUSH with EA: use EA address, else use current logical address
   pmmu_cmd_addr   <= OP1out when (micro_state = ptest1 or micro_state = pload1 or micro_state = pflush1)
                      else pmmu_addr_log_int;
   
-  -- Cache instruction control  
-  cache_cinv_req  <= '1' when (exec(cache_cinv) = '1' or
-                                CACR(2) = '1' or CACR(3) = '1' or CACR(10) = '1' or CACR(11) = '1') else '0';
-  cache_cpush_req <= '1' when exec(cache_cpush) = '1' else '0';
-  
-  -- Cache operation scope and cache selection
-  -- BUG #17 FIX: Handle both two-word (0x4E78) and single-word (0xF4xx) forms
-  process(brief, CACR, exec, opcode)
+  -- Cache invalidation control
+  -- MC68030 uses CACR self-clearing bits for cache invalidation:
+  --   Bit 2: CEI - Clear Entry in Instruction Cache
+  --   Bit 3: CI - Clear Instruction Cache
+  --   Bit 10: CED - Clear Entry in Data Cache
+  --   Bit 11: CD - Clear Data Cache
+  cache_inv_req  <= '1' when (CACR(2) = '1' or CACR(3) = '1' or CACR(10) = '1' or CACR(11) = '1') else '0';
+
+  -- Cache operation scope and cache selection for 68030 CACR bits
+  process(CACR)
   begin
-    if exec(cache_cinv) = '1' or exec(cache_cpush) = '1' then
-      -- CINV/CPUSH instruction active
-      -- Check if single-word form (0xF4xx) or two-word form (0x4E78)
-      if opcode(15 downto 12) = "1111" and opcode(11 downto 8) = "0100" then
-        -- Single-word form (0xF4xx): Extract parameters from opcode
-        -- Format: 1111 0100 00ss ccxx
-        --   ss (bits 4:3) = scope
-        --   cc (bits 3:2) = cache selection
-        cache_op_scope_int <= opcode(4 downto 3);  -- From opcode
-        cache_op_cache_int <= opcode(3 downto 2);  -- From opcode
-      else
-        -- Two-word form (0x4E78): Use extension word in brief
-        cache_op_scope_int <= brief(4 downto 3);  -- From extension word
-        cache_op_cache_int <= brief(1 downto 0);  -- From extension word
-      end if;
+    -- CACR self-clearing bits: determine operation type
+    cache_op_scope_int <= "10";  -- All caches (global invalidation)
+    if CACR(3) = '1' then
+      cache_op_cache_int <= "10";  -- CI (bit 3): Clear Instruction Cache only
+    elsif CACR(11) = '1' then
+      cache_op_cache_int <= "01";  -- CD (bit 11): Clear Data Cache only
+    elsif CACR(2) = '1' or CACR(10) = '1' then
+      cache_op_cache_int <= "11";  -- CEI (bit 2) or CED (bit 10): Clear Entry operations
     else
-      -- CACR self-clearing bits: determine operation type
-      cache_op_scope_int <= "10";  -- All caches (global invalidation)
-      if CACR(3) = '1' then
-        cache_op_cache_int <= "10";  -- CI (bit 3): Clear Instruction Cache only
-      elsif CACR(11) = '1' then
-        cache_op_cache_int <= "01";  -- CD (bit 11): Clear Data Cache only
-      elsif CACR(2) = '1' or CACR(10) = '1' then
-        cache_op_cache_int <= "11";  -- CEI (bit 2) or CED (bit 10): Clear Entry operations
-      else
-        cache_op_cache_int <= "00";  -- Default: both caches
-      end if;
+      cache_op_cache_int <= "00";  -- Default: no operation
     end if;
   end process;
-  
+
   -- Connect internal signals to outputs
   cache_op_scope <= cache_op_scope_int;
   cache_op_cache <= cache_op_cache_int;
-  
-  -- Cache operation address: use effective address for CINV/CPUSH instructions
-  cache_op_addr <= memaddr when (exec(cache_cinv) = '1' or exec(cache_cpush) = '1') else pmmu_addr_phys_int;
+
+  -- Cache operation address: use physical address from PMMU
+  cache_op_addr <= pmmu_addr_phys_int;
 
   -- Cache inhibit from PMMU
   pmmu_cache_inhibit <= pmmu_ch_inhibit;
@@ -731,6 +721,10 @@ BEGIN
   pmmu_is_insn  <= '1' when state = "00" else '0';
   pmmu_rw       <= '0' when state = "11" else '1';
   pmmu_fc       <= fc_internal;
+
+  -- FC from Dn for PTEST/PLOAD/PFLUSH: Read Dn register specified by brief(2:0), extract FC from bits [2:0]
+  -- MC68030 spec: When brief(4:3) = "01", FC comes from Dn(2:0) where n = brief(2:0)
+  pmmu_fc_from_dn <= regfile(conv_integer(brief(2 downto 0)))(2 downto 0);
 
   -- PMMU Memory Interface: Connect to external memory arbiter in cpu_wrapper
   -- The walker requests are routed to real memory to read actual page table descriptors
@@ -797,8 +791,52 @@ ALU: TG68K_ALU
 	execOPC_ALU <= execOPC OR exec(alu_exec);
 	
 	-- Drive FC output from internal signal (VHDL-93 compatibility)
-	FC <= fc_internal;
-	
+	-- BUG #149 FIX: Add combinational override for MOVES instruction FC
+	-- This bypasses delta cycle timing issues with set/exec latching
+	process(fc_internal, micro_state, brief, SFC, DFC)
+	begin
+		if micro_state = moves1 then
+			-- MOVES instruction: override FC with SFC or DFC
+			-- brief(11)=dr: dr=0 means read (use SFC), dr=1 means write (use DFC)
+			if brief(11)='0' then
+				FC <= SFC;  -- Read operation uses SFC
+			else
+				FC <= DFC;  -- Write operation uses DFC
+			end if;
+		else
+			FC <= fc_internal;
+		end if;
+	end process;
+
+	-- BUG #149 FIX: Track MOVES bus access in progress
+	-- This process latches the EA register info when moves1 schedules a bus access
+	-- and maintains it until the bus access completes
+	process(clk, nReset)
+	begin
+		if nReset = '0' then
+			moves_bus_pending <= '0';
+			moves_ea_areg <= '0';
+			moves_ea_regnum <= "000";
+		elsif rising_edge(clk) then
+			if clkena_in = '1' then
+				-- Set when moves1 schedules a bus access
+				if micro_state = moves1 then
+					moves_bus_pending <= '1';
+					-- Latch EA register info: (An) modes use address registers
+					if opcode(5 downto 3) = "010" or opcode(5 downto 3) = "011" or opcode(5 downto 3) = "100" then
+						moves_ea_areg <= '1';
+					else
+						moves_ea_areg <= '0';
+					end if;
+					moves_ea_regnum <= opcode(2 downto 0);
+				-- Clear when bus access completes (state returns to idle or fetch)
+				elsif state = "00" or state = "01" then
+					moves_bus_pending <= '0';
+				end if;
+			end if;
+		end if;
+	end process;
+
 	process (memmaskmux)
 	begin
 		non_aligned <= '0';
@@ -836,7 +874,10 @@ ALU: TG68K_ALU
 			END IF;
 		END IF;
 		IF rising_edge(clk) THEN
-			IF VBR_Stackframe=1 or (cpu(0)='1' and VBR_Stackframe=2) THEN
+			-- BUG FIX: Enable VBR and extended stack frames for 68010+ (cpu(0)='1') AND 68030 (cpu(1)='1')
+			-- Original code only checked cpu(0), but CPU="10" (68030 in Minimig) has cpu(0)='0'
+			-- This caused 68000-style stack frames without vector offset, breaking MMU detection
+			IF VBR_Stackframe=1 or ((cpu(0)='1' or cpu(1)='1') and VBR_Stackframe=2) THEN
 				use_VBR_Stackframe<='1';
 			ELSE
 				use_VBR_Stackframe<='0';
@@ -1009,10 +1050,26 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 -----------------------------------------------------------------------------
 -- set dest regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, pmove_dn_regnum, pmove_dn_mode)
+PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, pmove_dn_regnum, pmove_dn_mode, moves_bus_pending, moves_ea_areg, moves_ea_regnum)
 	BEGIN
 		IF exec(movem_action) ='1' THEN
 			rf_dest_addr <= rf_source_addrd;
+		-- BUG #150 FIX: MOVES bus access needs EA register for address calculation
+		-- This MUST come before set(briefext) which would override with the data register
+		-- The address register value goes through rf_dest_addr -> RDindex_A -> reg_QA -> memaddr_reg
+		ELSIF moves_bus_pending = '1' THEN
+			rf_dest_addr <= moves_ea_areg & moves_ea_regnum;
+		-- BUG #150 FIX: Also handle moves0/moves1 states to set up RDindex_A one cycle early
+		-- (RDindex_A is registered, so we need the correct value one cycle BEFORE bus access)
+		ELSIF micro_state = moves0 OR micro_state = moves1 THEN
+			-- Use EA register from opcode for address
+			IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR
+			   opcode(5 downto 3)="100" OR opcode(5 downto 3)="101" OR
+			   opcode(5 downto 3)="110" THEN
+				rf_dest_addr <= '1'&opcode(2 downto 0);  -- Address register
+			ELSE
+				rf_dest_addr <= '0'&opcode(2 downto 0);  -- Data register or absolute
+			END IF;
 		ELSIF set(briefext)='1' THEN
 			rf_dest_addr <= brief(15 downto 12);
 		ELSIF set(get_bfoffset)='1' THEN
@@ -1052,7 +1109,7 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 -----------------------------------------------------------------------------
 -- set source regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, last_opc_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_mode)
+PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, last_opc_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_mode, moves_bus_pending, moves_ea_areg, moves_ea_regnum)
 	BEGIN
 		IF exec(movem_action)='1' OR set(movem_action) ='1' THEN
 			IF movem_presub='1' THEN
@@ -1070,6 +1127,25 @@ PROCESS (opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOP
 			rf_source_addr <= '0'&last_data_read(2 downto 0);
 		ELSIF source_LDRMbits='1' THEN
 			rf_source_addr <= '0'&last_data_read(8 downto 6);
+		-- BUG #149 FIX: MOVES bus access uses latched EA register info
+		-- During moves0/moves1 states, derive from opcode directly
+		-- During nop state with moves_bus_pending='1', use latched values
+		ELSIF moves_bus_pending = '1' THEN
+			-- Use latched EA register info from when moves1 was active
+			rf_source_addr <= moves_ea_areg & moves_ea_regnum;
+		-- BUG #149 FIX: MOVES needs opcode(2:0) for EA register selection
+		-- exe_opcode is NOT latched for MOVES because next_micro_state=moves0 prevents setexecOPC='1'
+		-- opcode is stable during microstate execution and contains the MOVES instruction
+		-- Derive address/data register from EA mode (opcode(5:3)) combinationally
+		-- EA modes using address registers: 010=(An), 011=(An)+, 100=-(An), 101=(d16,An), 110=(d8,An,Xn)
+		ELSIF micro_state = moves0 OR micro_state = moves1 THEN
+			IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR
+			   opcode(5 downto 3)="100" OR opcode(5 downto 3)="101" OR
+			   opcode(5 downto 3)="110" THEN
+				rf_source_addr <= '1'&opcode(2 downto 0);  -- Address register
+			ELSE
+				rf_source_addr <= '0'&opcode(2 downto 0);  -- Data register or absolute
+			END IF;
 		ELSIF source_lowbits='1' THEN
 			rf_source_addr <= source_areg&opcode(2 downto 0);
 		ELSIF exec(linksp)='1' THEN
@@ -1229,8 +1305,15 @@ PROCESS (clk)
                     data_write_tmp <= last_data_read;
                 ELSIF writeSR='1'THEN
                     data_write_tmp(15 downto 0) <= trap_SR(7 downto 0)& Flags(7 downto 0);
-                ELSIF micro_state=pmove_mmu_to_mem_hi OR micro_state=pmove_mmu_to_mem_lo THEN
+                ELSIF micro_state=pmove_mmu_to_mem_hi OR micro_state=pmove_mmu_to_mem_lo
+                      OR next_micro_state=pmove_mmu_to_mem_hi OR next_micro_state=pmove_mmu_to_mem_lo THEN
                     -- MMU->memory: source data from PMMU register readback
+                    -- BUG #140 FIX: Also check next_micro_state to latch data_write_tmp ONE CYCLE EARLIER.
+                    -- When pmove_decode sets setstate="11" AND next_micro_state=pmove_mmu_to_mem_hi,
+                    -- the write state becomes active on the SAME clock edge as micro_state transitions.
+                    -- Without checking next_micro_state, data_write_tmp would have stale data on the
+                    -- first write cycle because the micro_state check uses pre-edge value.
+                    -- This caused PMOVE TC,(SP) to write garbage instead of the TC register value!
                     data_write_tmp <= pmmu_reg_rdat;
                 ELSE 
                     data_write_tmp <= OP2out;
@@ -1347,9 +1430,18 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				IF exec(get_2ndOPC)='1' OR (state="10" AND memread(0)='1') THEN
 					tmp_TG68_PC <= addr;
 				END IF;
-				use_base <= '0'; 
+				use_base <= '0';
 				memaddr_delta_regb <= (others => '0');
-				IF memmaskmux(3)='0' OR exec(mem_addsub)='1' THEN
+				-- BUG #149 FIX: MOVES states AND bus access pending need use_base='1' for address register EA
+				-- CRITICAL: Do NOT set use_base during decode! That would corrupt the extension word fetch.
+				-- Only set use_base during moves0/moves1 states when we actually need the EA address.
+				-- Also maintain use_base='1' during moves_bus_pending when the actual bus access happens.
+				-- MOVES opcode: 0000 1110 ss mmm rrr (opcode(15:8)="00001110")
+				IF (micro_state = moves0 OR micro_state = moves1 OR moves_bus_pending = '1') AND
+				    (moves_ea_areg = '1' OR opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100") THEN
+					memaddr_delta_rega <= (others => '0');  -- No delta for simple (An) mode
+					use_base <= '1';  -- Force memaddr_reg = reg_QA
+				ELSIF memmaskmux(3)='0' OR exec(mem_addsub)='1' THEN
 					memaddr_delta_rega <= addsub_q;
 				ELSIF set(restore_ADDR)='1' THEN
 					memaddr_delta_rega <= tmp_TG68_PC;
@@ -1359,7 +1451,10 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					memaddr_delta_rega <= addr;
 				ELSIF set(addrlong)='1' THEN
 					memaddr_delta_rega <= last_data_read;
-				ELSIF setstate="00" THEN
+				-- BUG #149 FIX: MOVES states AND bus access pending need to bypass normal address calc
+				-- setstate="00" during moves0/moves1 (assignment is next-cycle), but we need use_base='1'
+				-- Also exclude moves_bus_pending to prevent PC increment during MOVES bus access
+				ELSIF setstate="00" AND micro_state /= moves0 AND micro_state /= moves1 AND moves_bus_pending = '0' THEN
 					memaddr_delta_rega <= TG68_PC_add;
 				ELSIF exec(dispouter)='1' THEN
 					memaddr_delta_rega <= ea_data;
@@ -2030,6 +2125,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			setstate <= "01";
 		END IF;	
 		IF trapmake='1' AND trapd='0' THEN
+			-- Stack frame format selection (MC68030 User's Manual 6.4.3):
+			-- Format #2 (6-word): TRAPV, CHK, CHK2, Divide by Zero, Trace, cpTRAPcc
+			-- Format #0 (4-word): All others including privilege violation, F-line, illegal
 			IF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1') THEN
 				next_micro_state <= trap00;
 			else
@@ -2353,18 +2451,26 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						trap_illegal <= '1';
 						trapmake <= '1';
 					END IF;
-				ELSIF opcode(11 downto 8)="1101" AND opcode(7 downto 6)="11" THEN		--MOVES (68010+)
-					-- MOVES opcode: 0000 1110 11xx xxxx
+				ELSIF opcode(11 downto 8)="1110" AND opcode(7 downto 6)/="11" THEN		--MOVES (68010+)
+					-- BUG #142 FIX: MOVES opcode is 0000 1110 ss mm mrrr
+					-- Was checking for "1101" (wrong!) and size="11" (invalid!)
+					-- Correct: bits 11:8 = 1110 ($E), size = 00/01/10 (byte/word/long)
 					-- Privileged instruction - uses SFC/DFC for memory access
-					IF cpu(0)='1' THEN  -- 68010+ only
+					-- BUG FIX: Check cpu(0) OR cpu(1) for 68010+ detection (68030 has cpu(1)='1')
+					IF cpu(0)='1' OR cpu(1)='1' THEN  -- 68010+ (including 68030)
 						-- Valid EA modes: all except immediate (111/100), PC-relative (111/010,011), and An direct (001)
 						IF opcode(5 downto 4)/="00" AND (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN
 							IF SVmode='1' THEN
 								datatype <= opcode(7 downto 6);
+								-- BUG #149 FIX: Set source_lowbits to select EA register from opcode(2:0)
+								-- For (An) modes, we also need source_areg='1' to select address registers
+								source_lowbits <= '1';
+								IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" THEN
+									source_areg <= '1';  -- (An), (An)+, -(An) modes use address register
+								END IF;
 								IF decodeOPC='1' THEN
-									next_micro_state <= moves1;
+									next_micro_state <= moves0;  -- BUG #149: Go to moves0 first to set up address
 									getbrief <='1';
-									set(ea_build) <= '1';  -- CRITICAL: Build EA before moves1 executes
 								END IF;
 							ELSE
 								trap_priv <= '1';
@@ -2643,12 +2749,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							IF (opcode(5 downto 3)/="001" AND --ea An illegal mode
 							   (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00")) THEN --ea illegal modes
 								IF opcode(7 downto 6)="11" THEN					--move from SR
-									IF SR_Read=0 OR (cpu(0)='0' AND SR_Read=2) OR SVmode='1'  THEN
+									-- BUG FIX: Check both cpu(0) and cpu(1) for 68000 detection
+									-- Only 68000 (cpu="00") allows user mode MOVE from SR
+									-- 68010+ (cpu(0)='1') and 68030 (cpu(1)='1') require supervisor mode
+									IF SR_Read=0 OR (cpu(0)='0' AND cpu(1)='0' AND SR_Read=2) OR SVmode='1'  THEN
 										ea_build_now <= '1';
 										set_exec(opcMOVESR) <= '1';
 										datatype <= "01";
 										write_back <='1';							-- im 68000 wird auch erst gelesen
-										IF cpu(0)='1' AND state="10" AND addrvalue='0' THEN
+										-- BUG FIX: Check cpu(0) OR cpu(1) for 68010+ optimization
+										IF (cpu(0)='1' OR cpu(1)='1') AND state="10" AND addrvalue='0' THEN
 											skipFetch <= '1';
 										END IF;
 										IF opcode(5 downto 4)="00" THEN
@@ -2680,7 +2790,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							IF (opcode(5 downto 3)/="001" AND --ea An illegal mode
 							   (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00")) THEN --ea illegal modes
 								IF opcode(7 downto 6)="11" THEN					--move from CCR 68010
-									IF SR_Read=1 OR (cpu(0)='1' AND SR_Read=2) THEN
+									-- BUG FIX: Check cpu(0) OR cpu(1) for 68010+ detection (68030 has cpu(1)='1')
+									IF SR_Read=1 OR ((cpu(0)='1' OR cpu(1)='1') AND SR_Read=2) THEN
 										ea_build_now <= '1';
 										set_exec(opcMOVESR) <= '1';
 										datatype <= "01";
@@ -2699,7 +2810,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									ea_build_now <= '1';
 									write_back <='1';
 									set_exec(opcAND) <= '1';
-									IF cpu(0)='1' AND state="10" AND addrvalue='0' THEN
+									-- BUG FIX: Check cpu(0) OR cpu(1) for 68010+ optimization
+									IF (cpu(0)='1' OR cpu(1)='1') AND state="10" AND addrvalue='0' THEN
 										skipFetch <= '1';
 									END IF;
 									IF setexecOPC='1' THEN
@@ -3283,7 +3395,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							ea_build_now <= '1';
 							write_back <= '1';
 							set_exec(opcScc) <= '1';
-							IF cpu(0)='1' AND state="10" AND addrvalue='0' THEN
+							-- BUG FIX: Check cpu(0) OR cpu(1) for 68010+ optimization
+							IF (cpu(0)='1' OR cpu(1)='1') AND state="10" AND addrvalue='0' THEN
 								skipFetch <= '1';
 							END IF;
 							IF opcode(5 downto 4)="00" THEN
@@ -4627,25 +4740,60 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					trapmake <= '1';
 					END IF;
 
+				WHEN moves0 =>		-- MOVES address setup state (BUG #149 FIX)
+					-- Set up register selection one cycle before memory access
+					-- This allows memaddr_reg to be updated with correct An value at clock edge
+					-- before moves1 starts the actual memory operation
+					-- NOTE: Use opcode, not exe_opcode - exe_opcode wasn't latched for MOVES
+					source_lowbits <= '1';
+					IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" THEN
+						source_areg <= '1';  -- (An), (An)+, -(An) modes use address register
+					END IF;
+					-- BUG #149 FIX: Set FC override signals one cycle early
+					-- This way exec(use_sfc_dfc) will be '1' in moves1 when the bus op happens
+					-- brief(11)=dr: dr=1 means write (use DFC), dr=0 means read (use SFC)
+					set(use_sfc_dfc) <= '1';
+					IF brief(11)='0' THEN
+						set(sfc_not_dfc) <= '1';  -- Read operation uses SFC
+					END IF;
+					-- setstate must NOT be "00" to reach the ELSE branch where use_base <= '1'
+					-- Using "01" as an intermediate state to enable address register base loading
+					setstate <= "01";
+					next_micro_state <= moves1;
+
 				WHEN moves1 =>		-- MOVES instruction
 					-- MC68030 MOVES extension word format:
-					-- Bits 15-12: Register number (0-7)
-					-- Bit 11: Register type (0=Dn, 1=An)
-					-- Bits 10-1: Reserved (should be 0)
-					-- Bit 0: Direction (0=Rn->EA using DFC, 1=EA->Rn using SFC)
-					set(briefext) <= '1';  -- Use brief(11)&brief(14:12) for register selection
-					set_writePCbig <='1';
+					-- Bit 15: D/A (0=Dn, 1=An)
+					-- Bits 14-12: Register number (0-7)
+					-- Bit 11: Direction (dr):
+					--   dr=1: Rn->EA (write to memory, use DFC)
+					--   dr=0: EA->Rn (read from memory, use SFC)
+					-- Bits 10-0: Reserved (zeros)
+					set(briefext) <= '1';  -- Use brief(15)&brief(14:12) for register selection
+					-- BUG #149 FIX: REMOVED set_writePCbig - was causing PC to be set to EA!
+					-- PC increment is handled by the extension word fetch (getbrief)
+					-- Same fix as BUG #54 for pmove_decode
 					set_exec(opcMOVE) <= '1';
-					set_exec(use_sfc_dfc) <= '1';  -- Use SFC/DFC for FC
-					IF brief(0)='1' THEN
-						-- MOVES <ea>,Rn - Memory to Register using SFC
+					set(use_sfc_dfc) <= '1';  -- Use SFC/DFC for FC override
+					-- BUG #149 FIX: Keep source_lowbits set to maintain EA register selection
+					-- memaddr_reg is updated every clock, so we need correct rf_source_addr continuously
+					-- NOTE: Use opcode, not exe_opcode - exe_opcode wasn't latched for MOVES
+					source_lowbits <= '1';
+					IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" THEN
+						source_areg <= '1';  -- (An), (An)+, -(An) modes use address register
+					END IF;
+					-- BUG #149 FIX: Must transition to nop state to hold the data access
+					-- Without this, next_micro_state defaults to idle and state goes back to "00" (fetch)
+					next_micro_state <= nop;
+					IF brief(11)='1' THEN
+						-- MOVES Rn,<ea> - Register to Memory using DFC (dr=1)
+						setstate <= "11";  -- Write to EA
+						-- DFC used for write (sfc_not_dfc stays '0')
+					ELSE
+						-- MOVES <ea>,Rn - Memory to Register using SFC (dr=0)
 						setstate <= "10";  -- Read from EA
 						set(Regwrena) <= '1';
-						set_exec(sfc_not_dfc) <= '1';  -- Use SFC for read
-					ELSE
-						-- MOVES Rn,<ea> - Register to Memory using DFC
-						setstate <= "11";  -- Write to EA
-						-- No sfc_not_dfc means use DFC for write
+						set(sfc_not_dfc) <= '1';  -- Use SFC for read
 					END IF;
 
                 WHEN pmove_decode =>		-- PMMU instruction dispatch based on extension word
@@ -4967,8 +5115,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- - Bits 4-0: FC encoding (10XXX=immediate FC in bits 2-0)
                     -- - Address from EA (already in OP1out)
                     -- PMMU module updates MMUSR with test results
-                    null;  -- PTEST request already set in pmove_decode, PMMU handles the rest
-                    next_micro_state <= nop;  -- FIX: Return to normal execution after PTEST
+                    -- BUG #133 FIX: Wait for PMMU walker to complete before proceeding
+                    -- WhichAmiga does "ptestw #5,(a0),#7" then immediately "pmove mmusr,(sp)"
+                    -- Without waiting, PMMU hasn't updated MMUSR yet, causing MMU detection failure
+                    IF pmmu_busy = '1' THEN
+                        next_micro_state <= ptest1;  -- Stay here until walker completes
+                    ELSE
+                        next_micro_state <= nop;  -- Walker done, MMUSR valid, proceed
+                    END IF;
 
                 WHEN pflush1 =>
                     -- PFLUSH: Flush pages from ATC (EA built in pmove_decode if needed)
@@ -4988,8 +5142,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- BUG #13 FIX: R/W from brief(9): 0=PLOADW (write), 1=PLOADR (read) - same as PTEST
                     -- - Address from EA (already in OP1out)
                     -- PMMU module performs page table walk and loads result into ATC
-                    null;  -- PLOAD request already set in pmove_decode, PMMU handles the rest
-                    next_micro_state <= nop;  -- FIX: Return to normal execution after PLOAD
+                    -- BUG #134 FIX: Wait for PMMU walker to complete before proceeding
+                    -- PLOAD does a full page table walk, must wait for walker to finish
+                    IF pmmu_busy = '1' THEN
+                        next_micro_state <= pload1;  -- Stay here until walker completes
+                    ELSE
+                        next_micro_state <= nop;  -- Walker done, ATC loaded, proceed
+                    END IF;
 
                 -- PMOVE Dn direct mode for 64-bit registers (CRP/SRP)
                 WHEN pmove_dn_hi =>
@@ -5219,16 +5378,24 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		  when X"001" => DFC <= reg_QA(2 downto 0); -- DFC -- 68010+
 		  when X"002" =>
 		    -- Write to CACR with proper MC68030 behavior
-		    -- Sticky control bits (retain value until explicitly changed):
-		    CACR(1 downto 0) <= reg_QA(1 downto 0);   -- IE, FI - instruction cache enable/freeze
-		    -- Bit 2 (CEI) and Bit 3 (CI) are self-clearing command bits - NOT stored
-		    CACR(4) <= reg_QA(4);                      -- IBE - Instruction Burst Enable
+		    -- MC68030 uses CACR bits for cache invalidation (no CINV/CPUSH instructions):
+		    --   Bit 0: EI - Enable Instruction Cache (sticky)
+		    --   Bit 1: FI - Freeze Instruction Cache (sticky)
+		    --   Bit 2: CEI - Clear Entry in I-Cache (self-clearing)
+		    --   Bit 3: CI - Clear Instruction Cache (self-clearing)
+		    --   Bit 4: IBE - Instruction Burst Enable (sticky)
+		    --   Bit 8: ED - Enable Data Cache (sticky)
+		    --   Bit 9: FD - Freeze Data Cache (sticky)
+		    --   Bit 10: CED - Clear Entry in D-Cache (self-clearing)
+		    --   Bit 11: CD - Clear Data Cache (self-clearing)
+		    --   Bit 12: DBE - Data Burst Enable (sticky)
+		    --   Bit 13: WA - Write Allocate (sticky)
+		    -- Self-clearing bits MUST be written to trigger cache_inv_req
+		    -- They auto-clear on the next clkena_lw cycle
+		    CACR(4 downto 0) <= reg_QA(4 downto 0);   -- EI, FI, CEI, CI, IBE
 		    CACR(7 downto 5) <= (others => '0');       -- Reserved bits
-		    CACR(9 downto 8) <= reg_QA(9 downto 8);   -- DE, FD - data cache enable/freeze
-		    -- Bit 10 (CED) and Bit 11 (CD) are self-clearing command bits - NOT stored
-		    CACR(13 downto 12) <= reg_QA(13 downto 12); -- DBE, WA - data burst enable, write allocate
+		    CACR(13 downto 8) <= reg_QA(13 downto 8); -- ED, FD, CED, CD, DBE, WA
 		    CACR(31 downto 14) <= (others => '0');     -- Reserved bits
-		    -- Cache invalidation triggered by self-clearing bits happens via cache_cinv_req signal
 		  when X"800" =>
 		    USP <= reg_QA; -- BUG #18: USP -- 68010+
 		    movec_sp_sync <= '1';  -- BUG #18: Trigger A7 sync

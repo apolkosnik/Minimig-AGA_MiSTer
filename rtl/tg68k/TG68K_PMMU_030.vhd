@@ -565,6 +565,41 @@ architecture rtl of TG68K_PMMU_030 is
     return desc(1 downto 0) = "11"; -- DT=11 means long format (8 bytes)
   end function;
 
+  -- Calculate TC bit sum per MC68030 spec: add PS+IS and TIx fields
+  -- stopping at the first TIx that is zero (remaining TIx are ignored).
+  -- IS defaults to DEFAULT_TC_IS when zero; PS is validated separately.
+  function tc_total_bits(tc : std_logic_vector(31 downto 0)) return integer is
+    variable ps_val : integer;
+    variable is_val : integer;
+    variable tia_val, tib_val, tic_val, tid_val : integer;
+    variable total_bits : integer;
+  begin
+    ps_val := to_integer(unsigned(tc(23 downto 20)));
+    is_val := to_integer(unsigned(tc(19 downto 16)));
+    if is_val = 0 then
+      is_val := DEFAULT_TC_IS;
+    end if;
+    tia_val := to_integer(unsigned(tc(15 downto 12)));
+    tib_val := to_integer(unsigned(tc(11 downto 8)));
+    tic_val := to_integer(unsigned(tc(7 downto 4)));
+    tid_val := to_integer(unsigned(tc(3 downto 0)));
+
+    total_bits := get_page_offset_bits(ps_val) + is_val;
+    if tia_val /= 0 then
+      total_bits := total_bits + tia_val;
+      if tib_val /= 0 then
+        total_bits := total_bits + tib_val;
+        if tic_val /= 0 then
+          total_bits := total_bits + tic_val;
+          if tid_val /= 0 then
+            total_bits := total_bits + tid_val;
+          end if;
+        end if;
+      end if;
+    end if;
+    return total_bits;
+  end function;
+
   -- Check if descriptor is short format (DT=10, 32-bit)
   function desc_is_short(desc : std_logic_vector(31 downto 0)) return boolean is
   begin
@@ -702,9 +737,9 @@ begin
     variable page_offset_bits : integer;
   begin
     if nreset = '0' then
-      -- MC68030: PS field (bits 23-20) must always have bit 23=1 for valid page sizes
-      -- Initialize with PS=1100 (4KB pages), MMU disabled (bit 31=0)
-      TC    <= x"00C00000";
+      -- MC68030: Initialize TC to 0 - MMU disabled (E=0), PS=0
+      -- Software configures all fields before enabling
+      TC    <= x"00000000";
       CRP_H <= (others => '0');
       CRP_L <= (others => '0');
       SRP_H <= (others => '0');
@@ -813,19 +848,8 @@ begin
                 mmu_config_error <= '1';
                 report "MMU_CONFIG_EXCEPTION: Invalid PS field=" & integer'image(ps_val) & " (must be 8-15), E bit cleared" severity warning;
               else
-                -- Check 2: Field sum must equal 32
-                is_val := to_integer(unsigned(reg_wdat(19 downto 16)));
-                if is_val = 0 then
-                  is_val := DEFAULT_TC_IS;
-                end if;
-
-                tia_val := decode_tc_field(reg_wdat(15 downto 12), DEFAULT_TC_BITS(0));
-                tib_val := decode_tc_field(reg_wdat(11 downto 8), DEFAULT_TC_BITS(1));
-                tic_val := decode_tc_field(reg_wdat(7 downto 4), DEFAULT_TC_BITS(2));
-                tid_val := decode_tc_field(reg_wdat(3 downto 0), DEFAULT_TC_BITS(3));
-
-                page_offset_bits := get_page_offset_bits(ps_val);
-                total_bits := is_val + tia_val + tib_val + tic_val + tid_val + page_offset_bits;
+                -- Check 2: Field sum must equal 32 per MC68030 spec (stop adding TIx at first zero)
+                total_bits := tc_total_bits(reg_wdat);
 
                 if total_bits /= 32 then
                   -- Invalid field sum - clear E bit to prevent MMU activation
@@ -948,12 +972,15 @@ begin
     variable page_offset_bits : integer;
     variable tia_bits, tib_bits, tic_bits, tid_bits : integer;
   begin
-    -- Decode TC register fields with MC68030 validation
-    tia_bits := decode_tc_field(TC(15 downto 12), DEFAULT_TC_BITS(0));
-    tib_bits := decode_tc_field(TC(11 downto 8),  DEFAULT_TC_BITS(1));
-    tic_bits := decode_tc_field(TC(7 downto 4),   DEFAULT_TC_BITS(2));
-    tid_bits := decode_tc_field(TC(3 downto 0),   DEFAULT_TC_BITS(3));
-    
+    -- MC68030 TIx field decoding:
+    -- IMPORTANT: TIx=0 means "terminate table tree at this level" per MC68030 spec
+    -- DO NOT substitute defaults - 0 has semantic meaning for table tree termination!
+    -- The walker checks idx_bits(level) <= 0 to determine if that level exists
+    tia_bits := to_integer(unsigned(TC(15 downto 12)));
+    tib_bits := to_integer(unsigned(TC(11 downto 8)));
+    tic_bits := to_integer(unsigned(TC(7 downto 4)));
+    tid_bits := to_integer(unsigned(TC(3 downto 0)));
+
     tc_idx_bits(0) <= tia_bits;
     tc_idx_bits(1) <= tib_bits;
     tc_idx_bits(2) <= tic_bits;
@@ -984,8 +1011,8 @@ begin
     tc_page_size  <= ps_val;
     tc_page_shift <= page_offset_bits;
     
-    -- MC68030 Requirement: IS + TIA + TIB + TIC + TID + page_offset_bits = 32
-    total_bits := is_bits + tia_bits + tib_bits + tic_bits + tid_bits + page_offset_bits;
+    -- MC68030 Requirement: Sum PS+IS+TIx until first TIx=0 (remaining TIx ignored)
+    total_bits := tc_total_bits(TC);
     
     -- MC68030 Constraints validation:
     -- 1. Total bits must equal 32 (only when MMU is enabled - TC.E = 1)

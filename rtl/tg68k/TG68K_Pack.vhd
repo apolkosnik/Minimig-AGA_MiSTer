@@ -31,7 +31,7 @@ package TG68K_Pack is
 						  andi, pack1, pack2, pack3, op_AxAy, cmpm, link1, link2, unlink1, unlink2, int1, int2, int3, int4, rte1, rte2, rte3, 
 						  rte4, rte5, rtd1, rtd2, trap00, trap0, trap1, trap2, trap3, cas1, cas2, cas21, cas22, cas23, cas24,
 						  cas25, cas26, cas27, cas28, chk20, chk21, chk22, chk23, chk24,
-                          trap4, trap5, trap6, movec1, moves1, movep1, movep2, movep3, movep4, movep5, rota1, bf1,
+                          trap4, trap5, trap6, movec1, moves0, moves1, movep1, movep2, movep3, movep4, movep5, rota1, bf1,
                           pmove_decode, pmove_decode_wait, pmove_mem_to_mmu_hi, pmove_mmu_to_mem_hi, pmove_mem_to_mmu_lo, pmove_mmu_to_mem_lo, ptest1, ptest2, pflush1, pload1,
                           pmove_dn_hi, pmove_dn_lo, pmmu_dn_read_wait,
                           mul1, mul2, mul_end1,  mul_end2, div1, div2, div3, div4, div_end1, div_end2);
@@ -131,18 +131,16 @@ package TG68K_Pack is
     constant pmmu_ptest			: integer := 91; -- PTEST
     constant pmmu_pflush			: integer := 92; -- PFLUSH
     constant pmmu_pload			: integer := 93; -- PLOAD
-    constant cache_cinv			: integer := 94; -- CINV (Cache Invalidate)
-    constant cache_cpush			: integer := 95; -- CPUSH (Cache Push)
-    constant to_SSP				: integer := 96; -- Save A7 to SSP (68000/68010)
-    constant from_SSP				: integer := 97; -- Load A7 from SSP (68000/68010)
-    constant to_MSP				: integer := 98; -- Save A7 to MSP (68020/68030)
-    constant from_MSP				: integer := 99; -- Load A7 from MSP (68020/68030)
-    constant to_ISP				: integer := 100; -- Save A7 to ISP (68020/68030)
-    constant from_ISP				: integer := 101; -- Load A7 from ISP (68020/68030)
-    constant use_sfc_dfc			: integer := 102; -- MOVES: Use SFC/DFC for FC
-    constant sfc_not_dfc			: integer := 103; -- MOVES: 1=SFC (read), 0=DFC (write)
+    constant to_SSP				: integer := 94; -- Save A7 to SSP (68000/68010)
+    constant from_SSP				: integer := 95; -- Load A7 from SSP (68000/68010)
+    constant to_MSP				: integer := 96; -- Save A7 to MSP (68020/68030)
+    constant from_MSP				: integer := 97; -- Load A7 from MSP (68020/68030)
+    constant to_ISP				: integer := 98; -- Save A7 to ISP (68020/68030)
+    constant from_ISP				: integer := 99; -- Load A7 from ISP (68020/68030)
+    constant use_sfc_dfc			: integer := 100; -- MOVES: Use SFC/DFC for FC
+    constant sfc_not_dfc			: integer := 101; -- MOVES: 1=SFC (read), 0=DFC (write)
 
-    constant lastOpcBit			: integer := 103;
+    constant lastOpcBit			: integer := 101;
 
 	component TG68K_ALU
 	generic(

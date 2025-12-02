@@ -86,7 +86,9 @@ module cpu_wrapper
 	output     [28:1] cache_ramaddr     // Properly encoded ramaddr for cache fill
 );
 
-assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
+// BUG #136 FIX: Include walker Fast RAM access in ramsel
+// When walker is reading from Fast RAM (Z2, Z3), it needs to trigger RAM controller
+assign ramsel       = (cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)) | walker_fast_ram;
 assign ramshared    = sel_dd;
 
 // NMI
@@ -112,8 +114,10 @@ wire sel_nmi_vector = (cpu_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
 
 wire [15:0] ramdat;
 
-assign ramlds = sel_rtg ? uds_in : lds_in;
-assign ramuds = sel_rtg ? lds_in : uds_in;
+// BUG #137 FIX: Walker Fast RAM reads need data strobes active (0 = active)
+// When walker_fast_ram is true, force both bytes active for 16-bit reads
+assign ramlds = walker_fast_ram ? 1'b0 : (sel_rtg ? uds_in : lds_in);
+assign ramuds = walker_fast_ram ? 1'b0 : (sel_rtg ? lds_in : uds_in);
 assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
 assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
@@ -130,13 +134,14 @@ assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 // map 00-1f to 00-1f (chipram), a0-ff to 20-7f. All non-fastram goes into the first
 // 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v
 // All Zorro RAM goes to DDR3
-assign ramaddr[28]    = sel_zram & ~sel_z3ram0;
-assign ramaddr[27]    = sel_zram & (~sel_z3ram1 | cpu_addr[27]);
-assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}});
-assign ramaddr[22:19] = {4{sel_dd}} | cpu_addr[22:19];
-assign ramaddr[18]    =    sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18];
-assign ramaddr[17:16] = {2{sel_dd}} | cpu_addr[17:16];
-assign ramaddr[15:1]  = cpu_addr[15:1];
+// BUG #136 FIX: Use walker_ramaddr when walker is reading from Fast RAM
+assign ramaddr[28]    = walker_fast_ram ? walker_ramaddr[28] : (sel_zram & ~sel_z3ram0);
+assign ramaddr[27]    = walker_fast_ram ? walker_ramaddr[27] : (sel_zram & (~sel_z3ram1 | cpu_addr[27]));
+assign ramaddr[26:23] = walker_fast_ram ? walker_ramaddr[26:23] : ((sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}}));
+assign ramaddr[22:19] = walker_fast_ram ? walker_ramaddr[22:19] : ({4{sel_dd}} | cpu_addr[22:19]);
+assign ramaddr[18]    = walker_fast_ram ? walker_ramaddr[18] : (sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18]);
+assign ramaddr[17:16] = walker_fast_ram ? walker_ramaddr[17:16] : ({2{sel_dd}} | cpu_addr[17:16]);
+assign ramaddr[15:1]  = walker_fast_ram ? walker_ramaddr[15:1] : cpu_addr[15:1];
 
 // BUG #128 FIX: Compute properly encoded ramaddr for cache fill addresses
 // Cache fills use cache_addr (physical address from PMMU) instead of cpu_addr
@@ -150,6 +155,33 @@ assign cache_ramaddr[28]    = sel_zram_cache & ~sel_z3ram0_cache;
 assign cache_ramaddr[27]    = sel_zram_cache & (~sel_z3ram1_cache | cache_addr[27]);
 assign cache_ramaddr[26:23] = (sel_z3ram0_cache | sel_z3ram1_cache) ? cache_addr[26:23] : 4'b0000;
 assign cache_ramaddr[22:1]  = cache_addr[22:1];
+
+// BUG #136 FIX: Walker Fast RAM path support
+// When page tables are in Fast RAM (Z2, Z3), walker needs to trigger RAM controller
+// walker_addr_latch is declared outside generate block, contains 32-bit physical address
+// Walker state phases (computed from walker_state which is outside generate block)
+// WALKER_READ_LOW=2, WALKER_WAIT_LOW=3, WALKER_READ_HIGH=4, WALKER_WAIT_HIGH=5
+wire walker_read_low_phase_global = (walker_state == 3'd2) | (walker_state == 3'd3);
+// Compute walker address for low word (bits 23:1) and high word (+1)
+wire [31:1] walker_addr_word = walker_read_low_phase_global ? {walker_addr_latch[31:2], 1'b0} :
+                                                               {walker_addr_latch[31:2], 1'b1};
+
+// Walker RAM selection (uses same logic as cpu_addr but with walker address)
+wire sel_z3ram0_walker = (walker_addr_word[31:27] == z3ram_base0) && z3ram_ena0;
+wire sel_z3ram1_walker = (walker_addr_word[31:28] == z3ram_base1) && z3ram_ena1;
+wire sel_z2ram_walker  = !walker_addr_word[31:24] && (walker_addr_word[23] ^ |walker_addr_word[22:21]) && z2ram_ena;
+wire sel_zram_walker   = sel_z3ram0_walker | sel_z3ram1_walker | sel_z2ram_walker;
+wire sel_chipram_walker = !walker_addr_word[31:21] && cchip;  // $000000-$1FFFFF
+
+// Walker Fast RAM request: walker reading from Fast RAM (not chip RAM)
+wire walker_fast_ram = USE_68030_CACHE && walker_reading && sel_zram_walker;
+
+// Walker encoded RAM address (same encoding as cpu->ramaddr)
+wire [28:1] walker_ramaddr;
+assign walker_ramaddr[28]    = sel_zram_walker & ~sel_z3ram0_walker;
+assign walker_ramaddr[27]    = sel_zram_walker & (~sel_z3ram1_walker | walker_addr_word[27]);
+assign walker_ramaddr[26:23] = (sel_z3ram0_walker | sel_z3ram1_walker) ? walker_addr_word[26:23] : 4'b0000;
+assign walker_ramaddr[22:1]  = walker_addr_word[22:1];
 
 assign fastchip_lds = lds_in;
 assign fastchip_uds = uds_in;
@@ -269,18 +301,22 @@ reg         pmmu_walker_ack_p;
 reg  [31:0] pmmu_walker_data_p;
 
 // PMMU walker address mux signals (for bus arbitration)
+// NOTE: Walker supports full 32-bit addressing:
+//   - Chip RAM (<2MB): uses walker_chip_addr[23:1] -> chip_addr bus
+//   - Z3/Z2 Fast RAM: uses walker_addr_word[31:1] -> walker_ramaddr -> ramsel path
+// Page tables in Z3 RAM above 16MB are fully supported via the ramaddr path.
 reg         walker_active;
 reg   [2:0] walker_state;  // BUG #124 FIX: Walker state visible for bus mux
-wire [23:1] walker_chip_addr;
+wire [23:1] walker_chip_addr;  // For Chip RAM only (inherently <2MB)
 wire        walker_reading;  // BUG #124 FIX: Walker actively reading memory
+reg  [31:1] walker_addr_latch;  // BUG #135 FIX: Declare outside generate for chipreq logic
 
 // Cache interface signals (68030 only)
 wire        i_cache_enabled;
 wire        d_cache_enabled;
 wire        cache_hit;
 wire        cache_miss;
-wire        cache_cinv_req;
-wire        cache_cpush_req;
+wire        cache_inv_req;
 wire  [1:0] cache_op_scope;
 wire  [1:0] cache_op_cache;
 wire [31:0] cache_op_addr;
@@ -324,7 +360,9 @@ cpu_inst_p
 (
   .clk(clk),
   .nreset(reset),
-  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit)) & ~pmmu_walker_req_p),
+  // BUG #139: Reset must bypass walker stall - allow clkena_in during reset recovery
+  // so CPU internal reset can propagate even if walker is stuck
+  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit) | ~reset) & (~pmmu_walker_req_p | ~reset | walker_timeout_error)),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -342,8 +380,7 @@ cpu_inst_p
   .cacr_out(cacr_p),
   .vbr_out(vbr_p),
   // Cache control interface (68030)
-  .cache_cinv_req(cache_cinv_req),
-  .cache_cpush_req(cache_cpush_req),
+  .cache_inv_req(cache_inv_req),
   .cache_op_scope(cache_op_scope),
   .cache_op_cache(cache_op_cache),
   .cacr_ie(cacr_ie),
@@ -428,9 +465,8 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 		.cacr_ifreeze(cacr_ifreeze),
 		.cacr_dfreeze(cacr_dfreeze),
 		.cacr_wa(cacr_wa),
-		// Cache Control Instructions
-		.cinv_req(cache_cinv_req),
-		.cpush_req(cache_cpush_req),
+		// Cache invalidation (68030 via CACR bits)
+		.inv_req(cache_inv_req),
 		.cache_op_scope(cache_op_scope),
 		.cache_op_cache(cache_op_cache),
 		.cache_op_addr(cache_op_addr),
@@ -545,9 +581,13 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// Strategy: When walker requests, stall CPU (via clkena_in gate), drive walker address
 	// onto bus, perform reads, and acknowledge when complete.
 
-	// walker_state declared outside generate block (line 263) for bus mux visibility
+	// walker_state and walker_addr_latch declared outside generate block for bus mux visibility
 	reg [15:0] walker_data_low;
-	reg [31:1] walker_addr_latch;  // Latch address to hold during multi-cycle read
+
+	// BUG #138: Walker timeout counter - abort if no memory response
+	reg [11:0] walker_timeout_cnt;  // 12-bit counter = 4096 cycles max (~36us @ 114MHz)
+	reg walker_timeout_error;       // Set when walker times out
+	localparam WALKER_TIMEOUT_LIMIT = 12'd2048;  // Timeout after 2048 cycles (~18us)
 
 	localparam WALKER_IDLE       = 3'd0;
 	localparam WALKER_START      = 3'd1;
@@ -565,7 +605,8 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// BUG #124 FIX: Walker must also drive address strobe and data strobes during read phases
 	// walker_reading declared outside generate block, assigned here
 	assign walker_reading = walker_read_low_phase | walker_read_high_phase;
-	wire [23:1] walker_base_addr = walker_addr_latch[23:1];  // Byte to word address
+	// Chip RAM path only - Z3 RAM uses walker_ramaddr with full 32-bit walker_addr_word
+	wire [23:1] walker_base_addr = walker_addr_latch[23:1];  // Lower 23 bits for chip_addr bus
 	assign walker_chip_addr = walker_read_low_phase ?
 	                          walker_base_addr :           // Low word at base address
 	                          (walker_base_addr + 1'b1);   // High word at base+1
@@ -578,11 +619,17 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 			walker_data_low <= 0;
 			walker_addr_latch <= 0;
 			walker_active <= 0;
+			// BUG #138: Reset timeout counter and error flag
+			walker_timeout_cnt <= 0;
+			walker_timeout_error <= 0;
 		end else begin
 			case (walker_state)
 				WALKER_IDLE: begin
 					pmmu_walker_ack_p <= 0;
 					walker_active <= 0;
+					// BUG #138: Reset timeout counter and error flag when idle
+					walker_timeout_cnt <= 0;
+					walker_timeout_error <= 0;
 					if (pmmu_walker_req_p) begin
 						// Latch walker address and start read sequence
 						walker_addr_latch <= pmmu_walker_addr_p[31:1];
@@ -599,27 +646,52 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				WALKER_READ_LOW: begin
 					// Drive walker address with LSB=0 for low word via walker_chip_addr mux
 					// Memory controller sees our address
+					// BUG #138: Reset timeout counter when entering wait state
+					walker_timeout_cnt <= 0;
 					walker_state <= WALKER_WAIT_LOW;
 				end
 
 				WALKER_WAIT_LOW: begin
-					if (chipready | ramready | fastchip_ready) begin
+					// BUG #138: Check for timeout first
+					if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						// Timeout - signal error and return to idle
+						walker_timeout_error <= 1;
+						// BUG #140: Use invalid descriptor (bits 1:0 = 00) so PMMU generates fault
+						// 0xDEADDEAD had bits 1:0 = 01 which is valid page descriptor!
+						pmmu_walker_data_p <= 32'hDEADDEA0;  // Invalid descriptor pattern
+						walker_state <= WALKER_DONE;  // Go to DONE to signal completion with error
+					end else if (chipready | ramready | fastchip_ready) begin
 						// Capture low 16 bits
 						walker_data_low <= cpu_din;
 						walker_state <= WALKER_READ_HIGH;
+					end else begin
+						// BUG #138: Increment timeout counter while waiting
+						walker_timeout_cnt <= walker_timeout_cnt + 1;
 					end
 				end
 
 				WALKER_READ_HIGH: begin
 					// Drive walker address with LSB=1 for high word via walker_chip_addr mux
+					// BUG #138: Reset timeout counter when entering wait state
+					walker_timeout_cnt <= 0;
 					walker_state <= WALKER_WAIT_HIGH;
 				end
 
 				WALKER_WAIT_HIGH: begin
-					if (chipready | ramready | fastchip_ready) begin
+					// BUG #138: Check for timeout first
+					if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						// Timeout - signal error and return to idle
+						walker_timeout_error <= 1;
+						// BUG #140: Use invalid descriptor (bits 1:0 = 00) so PMMU generates fault
+						pmmu_walker_data_p <= 32'hDEADDEA0;  // Invalid descriptor pattern
+						walker_state <= WALKER_DONE;  // Go to DONE to signal completion with error
+					end else if (chipready | ramready | fastchip_ready) begin
 						// Capture high 16 bits and assemble 32-bit descriptor
 						pmmu_walker_data_p <= {cpu_din, walker_data_low};
 						walker_state <= WALKER_DONE;
+					end else begin
+						// BUG #138: Increment timeout counter while waiting
+						walker_timeout_cnt <= walker_timeout_cnt + 1;
 					end
 				end
 
@@ -710,8 +782,21 @@ end
 
 reg       chipreq;
 reg [2:0] cpu_ipl;
+
+// BUG #135 FIX: Walker chip RAM access detection
+// When walker is reading from chip RAM (address below 2MB), it needs to trigger
+// the chipset state machine. Otherwise chipready never goes high and walker hangs.
+// Chip RAM is $000000-$1FFFFF = bits 31:21 all zero
+wire walker_chip_ram = USE_68030_CACHE && walker_reading && !walker_addr_latch[31] &&
+                       !walker_addr_latch[30] && !walker_addr_latch[29] &&
+                       !walker_addr_latch[28] && !walker_addr_latch[27] &&
+                       !walker_addr_latch[26] && !walker_addr_latch[25] &&
+                       !walker_addr_latch[24] && !walker_addr_latch[23] &&
+                       !walker_addr_latch[22] && !walker_addr_latch[21];
+
 always @(posedge clk) begin
-	chipreq <= cpu_req & ~ramsel & ~fastchip_selack;
+	// BUG #135 FIX: Include walker chip RAM access in chipreq
+	chipreq <= (cpu_req & ~ramsel & ~fastchip_selack) | walker_chip_ram;
 	cpu_ipl <= ipl_i;
 end
 
