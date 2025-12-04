@@ -7,7 +7,7 @@ VSIM = $(MODELSIM_PATH)/linuxaloem/vsim
 VCOM = $(MODELSIM_PATH)/linuxaloem/vcom
 VLIB = $(MODELSIM_PATH)/linuxaloem/vlib
 
-PROJECT_ROOT = /home/adam/030_mmu/Minimig-AGA_MiSTer
+PROJECT_ROOT = /home/user/Minimig-AGA_MiSTer
 TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
