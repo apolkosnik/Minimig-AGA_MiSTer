@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-multiple-regs test-integration test-diagrom test-cpu-mmu-detection test-advanced test-fault test-stress test-regression validate setup help
+.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-multiple-regs test-integration test-diagrom test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pmove-cpu-execution test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves validate setup help
 
 # Default target
 all: test-comprehensive
@@ -43,6 +43,13 @@ help:
 	@echo "  test-fault       - Run comprehensive fault handling tests"
 	@echo "  test-stress      - Run page walker stress tests"
 	@echo "  test-regression  - Run MC68030 regression test suite (RECOMMENDED)"
+	@echo "  test-pmove-addressing - Test PMOVE with all legal addressing modes"
+	@echo "  test-pmove-cpu-execution - Test PMOVE via CPU execution (PC tracking)"
+	@echo "  test-pflush-ptest-pload - Test PFLUSH/PTEST/PLOAD instructions"
+	@echo "  test-indirect-descriptor - Test indirect descriptors"
+	@echo "  test-mmu-instruction-suite - Run complete MMU instruction test suite"
+	@echo "  test-amiga-sequence - Test Amiga ROM MMU initialization sequence"
+	@echo "  test-moves       - Test MOVES instruction FC handling"
 	@echo "  test-all         - Run original test suite"
 	@echo "  test-comprehensive - Run ALL enhanced tests"
 	@echo "  validate         - Validate complete MC68030 compliance"
@@ -172,6 +179,80 @@ test-fault: compile-advanced
 test-stress: compile-advanced
 	@echo "Running page walker stress tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 300us; quit" tb_page_walker_stress
+
+# New MMU instruction tests
+test-pmove-addressing: setup
+	@echo "Running PMOVE addressing modes tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_addressing_modes.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 20us; quit" tb_pmove_addressing_modes
+
+test-pmove-cpu-execution: setup
+	@echo "Running PMOVE CPU execution tests (PC tracking)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_cpu_execution.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_cpu_execution
+
+test-pflush-ptest-pload: setup
+	@echo "Running PFLUSH/PTEST/PLOAD tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pflush_ptest_pload.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_pflush_ptest_pload
+
+test-indirect-descriptor: setup
+	@echo "Running indirect descriptor tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_indirect_descriptor.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_indirect_descriptor
+
+test-amiga-sequence: setup
+	@echo "Running Amiga ROM MMU initialization sequence test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_amiga_mmu_sequence.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_amiga_mmu_sequence
+
+test-moves: setup
+	@echo "Running MOVES instruction FC handling test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_moves_instruction.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_moves_instruction
+
+# Complete MMU Instruction Test Suite
+test-mmu-instruction-suite: setup
+	@echo "=========================================================="
+	@echo "Running Complete MMU Instruction Test Suite"
+	@echo "=========================================================="
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd || true
+	@echo ""
+	@echo "--- PMOVE Addressing Modes ---"
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_addressing_modes.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 20us; quit" tb_pmove_addressing_modes
+	@echo ""
+	@echo "--- PFLUSH/PTEST/PLOAD ---"
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pflush_ptest_pload.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_pflush_ptest_pload
+	@echo ""
+	@echo "--- Indirect Descriptors ---"
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_indirect_descriptor.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_indirect_descriptor
+	@echo ""
+	@echo "--- Amiga MMU Sequence ---"
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_amiga_mmu_sequence.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_amiga_mmu_sequence
+	@echo ""
+	@echo "=========================================================="
+	@echo "MMU Instruction Test Suite Complete"
+	@echo "=========================================================="
 
 # MC68030 Regression Test Suite
 test-regression: setup

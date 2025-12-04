@@ -21,7 +21,7 @@ architecture behavior of tb_pmove_tt0_mem_read is
       nreset         : in  std_logic;
       reg_we         : in  std_logic;
       reg_re         : in  std_logic;
-      reg_sel        : in  std_logic_vector(3 downto 0);
+      reg_sel        : in  std_logic_vector(4 downto 0);
       reg_wdat       : in  std_logic_vector(31 downto 0);
       reg_rdat       : out std_logic_vector(31 downto 0);
       reg_part       : in  std_logic;
@@ -60,7 +60,7 @@ architecture behavior of tb_pmove_tt0_mem_read is
   -- PMMU register interface
   signal reg_we   : std_logic := '0';
   signal reg_re   : std_logic := '0';
-  signal reg_sel  : std_logic_vector(3 downto 0) := x"2";
+  signal reg_sel : std_logic_vector(4 downto 0) := x"2";
   signal reg_wdat : std_logic_vector(31 downto 0) := (others => '0');
   signal reg_rdat : std_logic_vector(31 downto 0);
   signal reg_part : std_logic := '0';

@@ -139,8 +139,9 @@ package TG68K_Pack is
     constant from_ISP				: integer := 99; -- Load A7 from ISP (68020/68030)
     constant use_sfc_dfc			: integer := 100; -- MOVES: Use SFC/DFC for FC
     constant sfc_not_dfc			: integer := 101; -- MOVES: 1=SFC (read), 0=DFC (write)
+    constant pmmu_addr_inc        : integer := 102; -- PMMU: +4 address increment for 64-bit CRP/SRP second transfer (no reg write-back)
 
-    constant lastOpcBit			: integer := 101;
+    constant lastOpcBit			: integer := 102;
 
 	component TG68K_ALU
 	generic(

@@ -89,9 +89,9 @@ architecture rtl of TG68K_PMMU_030 is
   -- Clear reserved: bits 14-11, 7, 3
   constant TTR_WRITE_MASK : std_logic_vector(31 downto 0) := "11111111111111111000011101110111"; -- 0xFFFF8777
 
-  -- CRP/SRP HIGH mask: preserve L/U (31), Limit (30-16), DT (0); clear reserved (15-1)
-  -- HIGH word format: L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
-  constant CRP_HIGH_MASK : std_logic_vector(31 downto 0) := "11111111111111110000000000000001"; -- 0xFFFF0001
+  -- CRP/SRP HIGH mask: preserve L/U (31), Limit (30-16), DT (1:0); clear reserved (15-2)
+  -- HIGH word format: L/U[63] + Limit[62:48] + Reserved[47:34] + DT[33:32]
+  constant CRP_HIGH_MASK : std_logic_vector(31 downto 0) := "11111111111111110000000000000011"; -- 0xFFFF0003
 
   -- CRP/SRP LOW mask: preserve table address (31-4), clear reserved bits (3-0)
   -- LOW word format: Table Address[31:4] + Reserved[3:0]
@@ -844,12 +844,12 @@ begin
             -- If configuration is invalid and E=1, clear E bit to prevent MMU activation
             -- This prevents system lockup from invalid MMU config while still taking exception
             tc_write_val := reg_wdat and TC_WRITE_MASK;
-            -- MC68030: PS field bit 23 must always be 1 for valid page sizes (PS=8-15 all have MSB=1)
-            tc_write_val(23) := '1';
             tc_e := reg_wdat(31);
 
             if tc_e = '1' then
               -- Only validate when MMU is being enabled
+              -- MC68030: PS field bit 23 must be 1 for valid page sizes (PS=8-15 all have MSB=1)
+              tc_write_val(23) := '1';
               ps_val := to_integer(unsigned(reg_wdat(23 downto 20)));
 
               -- Check 1: PS field must be 8-15 (values 0-7 are reserved)
@@ -1575,9 +1575,15 @@ begin
             addr_phys_reg <= saved_addr_log;  -- Pass through logical address as fallback
             cache_inhibit_reg <= '1';  -- Inhibit cache when walker fails to populate ATC
             write_protect_reg <= '0';  -- No protection info available
-            fault_reg <= '0';  -- Not a fault, just unexpected state
-            report "WALKER_COMPLETED: No ATC hit found after successful walker completion, using passthrough addr=0x" &
-                   slv_to_hstring(saved_addr_log) severity warning;
+            -- BUG #142 FIX: Do NOT clear fault_reg if walker just faulted!
+            -- walker_fault_ack_pending='1' means walker_fault handler just set fault_reg='1'
+            -- Clearing it here would make the fault invisible to the CPU, causing infinite loop
+            if walker_fault_ack_pending = '0' then
+              fault_reg <= '0';  -- Only clear fault if not a faulted walker completion
+            end if;
+            report "WALKER_COMPLETED: No ATC hit found after walker completion" &
+                   " walker_fault_ack_pending=" & std_logic'image(walker_fault_ack_pending) &
+                   " addr=0x" & slv_to_hstring(saved_addr_log) severity warning;
           end if; -- hit = '1'
           -- Always clear translation_pending when walker completes, regardless of result
           translation_pending <= '0';

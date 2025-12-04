@@ -104,22 +104,54 @@ attempt to load other values into this field of the TC register causes an MMU co
 
 ### CRP - CPU Root Pointer - 64-bit
 **Register Select**: 0x1 (requires reg_part for high/low)
-```
-HIGH (63-32):
-  Bit 63 (LU): Lower or Upper Page Range
-  Bits 62-48 (LIMIT): Limit on Table Index for This Table address
-  Bits 47-33: Reserved (forced to 0)
-  Bits 32 (DT): Descriptor Type
+**Description**: Specifies the root table pointer used when CPU is in User mode
 
+**MC68030 Root Pointer Format**:
+```
++------------------------------------------------+
+| ROOT POINTER (CRP/SRP)                         |
++-----+--------+---------------------------------+
+| Bit | Length | Contents                        |
++-----+--------+---------------------------------+
+| 00  |   04   | Reserved (must be 0)            |
+| 04  |   28   | TableA Address (upper 28 bits)  |
+| 32  |   02   | Descriptor Type (DT)            |
+| 34  |   14   | Reserved (must be 0)            |
+| 48  |   15   | Limit                           |
+| 63  |   01   | L/U (Lower/Upper limit)         |
++-----+--------+---------------------------------+
+
+HIGH (63-32):
+  Bit 63 (L/U): Lower or Upper limit flag
+  Bits 62-48 (LIMIT): Maximum or minimum value for indexing TableA
+  Bits 47-34: Reserved (forced to 0)
+  Bits 33-32 (DT): Descriptor Type (2 bits)
+    00 = INVALID (causes MMU exception)
+    01 = PAGE DESCRIPTOR (early termination, transparent translation)
+    10 = VALID 4 BYTE (TableA uses short 4-byte entries)
+    11 = VALID 8 BYTE (TableA uses long 8-byte entries)
 
 LOW (31-0):
-  Bits 31-16: Table Address (PA31 - PA16)
-  Bits 15-4: Table Address (PA15 - PA4)
+  Bits 31-4: TableA Address (upper 28 bits)
   Bits 3-0: Reserved (forced to 0)
 ```
 
+**TableA Address**: Only upper 28 bits specified, so TableA must be aligned to 16-byte boundary
+
+**Limit Usage**:
+- When L/U=1: Limit specifies unsigned upper limit for table index
+- When L/U=0: Limit specifies unsigned lower limit for table index
+- To disable limit checking:
+  - L/U=0, LIMIT=0x7FFF (no lower limit)
+  - L/U=1, LIMIT=0x0000 (no upper limit)
+
+**Special Cases**:
+- DT=01, TableA Address=0: Transparent translation of entire memory space
+- Limit field can reduce TableA size by limiting valid index range
+
 ### SRP - Supervisor Root Pointer - 64-bit
 **Register Select**: 0x2 (requires reg_part for high/low)
+**Description**: Specifies the root table pointer used when CPU is in Supervisor mode
 ```
 Same format as CRP - provides separate page tables for supervisor mode
 ```

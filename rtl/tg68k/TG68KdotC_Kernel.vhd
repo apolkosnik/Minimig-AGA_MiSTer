@@ -4815,10 +4815,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- P-register selectors (bits 14-10):
                         --   00010 (0x02): TT0  → bits 15-13 = 000 ✓
                         --   00011 (0x03): TT1  → bits 15-13 = 000 ✓
-                        --   10000 (0x10): TC   → bits 15-13 = 010 (conflicts with PLOAD!)
-                        --   10010 (0x12): SRP  → bits 15-13 = 010 (conflicts with PLOAD!)
-                        --   10011 (0x13): CRP  → bits 15-13 = 010 (conflicts with PLOAD!)
-                        --   11000 (0x18): MMUSR→ bits 15-13 = 011
+                        --   10000 (0x10): TC   → bits 15-13 = 010 ✓
+                        --   10010 (0x12): SRP  → bits 15-13 = 010 ✓
+                        --   10011 (0x13): CRP  → bits 15-13 = 010 ✓
+                        --   11000 (0x18): MMUSR→ bits 15-13 = 011 ✓
                         --
                         -- Extension word dispatch (bits 15-13):
                         --   000: PMOVE or PMOVEFD (TT0/TT1)
@@ -5055,7 +5055,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     set_exec(pmmu_wr) <= '1';
                     -- If CRP/SRP (64-bit), advance EA and read LOW word
                     IF (brief(14 downto 10)="10010" OR brief(14 downto 10)="10011") THEN  -- SRP or CRP
-                        set(mem_addsub) <= '1';
+                        set_exec(mem_addsub) <= '1';
+                        set_exec(pmmu_addr_inc) <= '1';
                         set(OP1addr) <= '1';
                         datatype <= "10"; -- long
                         setstate <= "10"; -- read LOW word from memory
@@ -5069,7 +5070,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- data_write_tmp sourced from pmmu_reg_rdat in write datapath
                     -- For CRP/SRP (64-bit), advance EA and read low part next
                     IF (brief(14 downto 10)="10010" OR brief(14 downto 10)="10011") THEN  -- SRP or CRP
-                        set(mem_addsub) <= '1';
+                        set_exec(mem_addsub) <= '1';
+                        set_exec(pmmu_addr_inc) <= '1';
                         set(OP1addr) <= '1';
                         datatype <= "10"; -- long
                         setstate <= "11"; -- write
@@ -5092,8 +5094,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 WHEN pmove_mmu_to_mem_lo =>
                     -- MMU -> memory write of low part (for CRP/SRP)
                     -- data_write_tmp sourced from pmmu_reg_rdat in write datapath
-                    setstate <= "11"; -- write
-                    next_micro_state <= nop;  -- FIX: Return to normal execution after LOW word write
+                    -- Hold EA computed in HI transfer (no additional increment)
+                    -- EA already advanced in HI state; hold it here and enable clkena_lw
+                    set_exec(mem_addsub) <= '1';  -- raise memmask bit 3 to pulse clkena_lw
+                    set(OP1addr) <= '1';
+                    datatype <= "10";  -- long write for low word
+                    set_datatype <= "10";  -- propagate to exe_datatype for bus mask/datapath
+                    set_exec(pmmu_rd) <= '1';     -- keep PMMU selector active for low word
+                    setstate <= "11"; -- write low part
+                    -- Return to idle to resume fetch/PC sequencing
+                    next_micro_state <= idle;
                 WHEN pmove_mem_to_mmu_lo =>
                     -- low part read completed; write to MMU
                     set_exec(pmmu_wr) <= '1';
@@ -5539,10 +5549,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
               pmmu_reg_sel_d <= brief(14 downto 10);
               -- For CRP/SRP choose part: HIGH word first, LOW word second
               if (brief(14 downto 10) = "10010") or (brief(14 downto 10) = "10011") then
-                if micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_decode OR micro_state = pmove_dn_hi then
-                  pmmu_reg_part_d <= '1';  -- HIGH word (mem EA first write, Dn first transfer)
+                if micro_state = pmove_mmu_to_mem_lo then
+                  pmmu_reg_part_d <= '0';  -- Force LOW part in low write state
+                elsif micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_decode OR micro_state = pmove_dn_hi then
+                  pmmu_reg_part_d <= '1';  -- HIGH word (first transfer)
                 else
-                  pmmu_reg_part_d <= '0';  -- LOW word (mem EA second write, Dn second transfer)
+                  pmmu_reg_part_d <= '0';  -- LOW word (second transfer)
                 end if;
               end if;
               -- BUG FIX: PMOVE reads never flush ATC (MC68030 spec: only writes can flush)

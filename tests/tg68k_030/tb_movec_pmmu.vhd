@@ -20,47 +20,70 @@ architecture behavior of tb_movec_pmmu is
   -- Component Declaration for TG68KdotC_Kernel
   component TG68KdotC_Kernel
     generic(
-      sr_read           : integer := 2;
-      vbr_stackframe    : integer := 2;
-      extaddr_mode      : integer := 2;
-      mul_mode          : integer := 2;
-      div_mode          : integer := 2;
-      bitfield          : integer := 2
+      SR_Read           : integer := 2;
+      VBR_Stackframe    : integer := 2;
+      extAddr_Mode      : integer := 2;
+      MUL_Mode          : integer := 2;
+      DIV_Mode          : integer := 2;
+      BitField          : integer := 2;
+      BarrelShifter     : integer := 1;
+      MUL_Hardware      : integer := 1
     );
     port(
       clk               : in std_logic;
-      nreset            : in std_logic;
+      nReset            : in std_logic;
       clkena_in         : in std_logic;
       data_in           : in std_logic_vector(15 downto 0);
-      ipl               : in std_logic_vector(2 downto 0);
-      ipl_autovector    : in std_logic;
+      IPL               : in std_logic_vector(2 downto 0);
+      IPL_autovector    : in std_logic;
+      berr              : in std_logic;
+      CPU               : in std_logic_vector(1 downto 0);
       addr_out          : out std_logic_vector(31 downto 0);
       data_write        : out std_logic_vector(15 downto 0);
-      state_out         : out std_logic_vector(1 downto 0);
-      decodeopa         : buffer std_logic;
-      wr                : out std_logic;
-      uds               : out std_logic;
-      lds               : out std_logic;
-      as                : out std_logic;
-      cpu_type          : out std_logic_vector(1 downto 0);
-      -- Cache control (68030)
-      cache_cinv_req    : out std_logic;
-      cache_cpush_req   : out std_logic;
+      nWr               : out std_logic;
+      nUDS              : out std_logic;
+      nLDS              : out std_logic;
+      busstate          : out std_logic_vector(1 downto 0);
+      longword          : out std_logic;
+      nResetOut         : out std_logic;
+      FC                : out std_logic_vector(2 downto 0);
+      clr_berr          : out std_logic;
+      skipFetch         : out std_logic;
+      regin_out         : out std_logic_vector(31 downto 0);
+      CACR_out          : out std_logic_vector(31 downto 0);
+      VBR_out           : out std_logic_vector(31 downto 0);
+      cache_inv_req     : out std_logic;
       cache_op_scope    : out std_logic_vector(1 downto 0);
       cache_op_cache    : out std_logic_vector(1 downto 0);
-      cache_op_addr     : out std_logic_vector(31 downto 0);
       cacr_ie           : out std_logic;
       cacr_de           : out std_logic;
       cacr_ifreeze      : out std_logic;
       cacr_dfreeze      : out std_logic;
-      -- PMMU address interface
+      cacr_ibe          : out std_logic;
+      cacr_dbe          : out std_logic;
+      cacr_wa           : out std_logic;
+      pmmu_reg_we       : out std_logic;
+      pmmu_reg_re       : out std_logic;
+      pmmu_reg_sel      : out std_logic_vector(4 downto 0);
+      pmmu_reg_wdat     : out std_logic_vector(31 downto 0);
+      pmmu_reg_part     : out std_logic;
       pmmu_addr_log     : out std_logic_vector(31 downto 0);
-      pmmu_addr_phys    : in std_logic_vector(31 downto 0);
-      -- PMMU control
-      pmmu_cache_inhibit: in std_logic;
-      pmmu_write_protect: in std_logic;
-      pmmu_fault        : in std_logic;
-      pmmu_fault_status : in std_logic_vector(31 downto 0)
+      pmmu_addr_phys    : out std_logic_vector(31 downto 0);
+      pmmu_cache_inhibit: out std_logic;
+      cache_op_addr     : out std_logic_vector(31 downto 0);
+      pmmu_walker_req   : out std_logic;
+      pmmu_walker_addr  : out std_logic_vector(31 downto 0);
+      pmmu_walker_ack   : in std_logic;
+      pmmu_walker_data  : in std_logic_vector(31 downto 0);
+      debug_SVmode      : out std_logic;
+      debug_preSVmode   : out std_logic;
+      debug_FlagsSR_S   : out std_logic;
+      debug_changeMode  : out std_logic;
+      debug_setopcode   : out std_logic;
+      debug_exec_directSR : out std_logic;
+      debug_exec_to_SR  : out std_logic;
+      debug_pmove_dn_mode : out std_logic;
+      debug_pmove_dn_regnum : out std_logic_vector(2 downto 0)
     );
   end component;
 
@@ -74,19 +97,25 @@ architecture behavior of tb_movec_pmmu is
   signal data_in : std_logic_vector(15 downto 0) := (others => '0');
   signal ipl : std_logic_vector(2 downto 0) := "111";
   signal ipl_autovector : std_logic := '0';
+  signal berr : std_logic := '0';
+  signal cpu_mode : std_logic_vector(1 downto 0) := "11"; -- 68030
   signal addr_out : std_logic_vector(31 downto 0);
   signal data_write : std_logic_vector(15 downto 0);
-  signal state_out : std_logic_vector(1 downto 0);
-  signal decodeopa : std_logic;
-  signal wr : std_logic;
-  signal uds : std_logic;
-  signal lds : std_logic;
-  signal as_out : std_logic;
-  signal cpu_type : std_logic_vector(1 downto 0);
+  signal nWr : std_logic;
+  signal nUDS : std_logic;
+  signal nLDS : std_logic;
+  signal busstate : std_logic_vector(1 downto 0);
+  signal longword : std_logic;
+  signal nResetOut : std_logic;
+  signal FC : std_logic_vector(2 downto 0);
+  signal clr_berr : std_logic;
+  signal skipFetch : std_logic;
+  signal regin_out : std_logic_vector(31 downto 0);
+  signal CACR_out : std_logic_vector(31 downto 0);
+  signal VBR_out : std_logic_vector(31 downto 0);
 
   -- Cache control
-  signal cache_cinv_req : std_logic;
-  signal cache_cpush_req : std_logic;
+  signal cache_inv_req : std_logic;
   signal cache_op_scope : std_logic_vector(1 downto 0);
   signal cache_op_cache : std_logic_vector(1 downto 0);
   signal cache_op_addr : std_logic_vector(31 downto 0);
@@ -94,14 +123,38 @@ architecture behavior of tb_movec_pmmu is
   signal cacr_de : std_logic;
   signal cacr_ifreeze : std_logic;
   signal cacr_dfreeze : std_logic;
+  signal cacr_ibe : std_logic;
+  signal cacr_dbe : std_logic;
+  signal cacr_wa : std_logic;
 
-  -- PMMU signals
+  -- PMMU register interface
+  signal pmmu_reg_we : std_logic;
+  signal pmmu_reg_re : std_logic;
+  signal pmmu_reg_sel : std_logic_vector(4 downto 0);
+  signal pmmu_reg_wdat : std_logic_vector(31 downto 0);
+  signal pmmu_reg_part : std_logic;
+
+  -- PMMU address interface
   signal pmmu_addr_log : std_logic_vector(31 downto 0);
-  signal pmmu_addr_phys : std_logic_vector(31 downto 0) := (others => '0');
-  signal pmmu_cache_inhibit : std_logic := '0';
-  signal pmmu_write_protect : std_logic := '0';
-  signal pmmu_fault : std_logic := '0';
-  signal pmmu_fault_status : std_logic_vector(31 downto 0) := (others => '0');
+  signal pmmu_addr_phys : std_logic_vector(31 downto 0);
+  signal pmmu_cache_inhibit : std_logic;
+
+  -- PMMU walker memory interface
+  signal pmmu_walker_req : std_logic;
+  signal pmmu_walker_addr : std_logic_vector(31 downto 0);
+  signal pmmu_walker_ack : std_logic := '0';
+  signal pmmu_walker_data : std_logic_vector(31 downto 0) := (others => '0');
+
+  -- Debug signals
+  signal debug_SVmode : std_logic;
+  signal debug_preSVmode : std_logic;
+  signal debug_FlagsSR_S : std_logic;
+  signal debug_changeMode : std_logic;
+  signal debug_setopcode : std_logic;
+  signal debug_exec_directSR : std_logic;
+  signal debug_exec_to_SR : std_logic;
+  signal debug_pmove_dn_mode : std_logic;
+  signal debug_pmove_dn_regnum : std_logic_vector(2 downto 0);
 
   -- Memory array (64KB for test program and data)
   type memory_array is array (0 to 32767) of std_logic_vector(15 downto 0);
@@ -130,44 +183,70 @@ begin
   -- Instantiate CPU
   cpu: TG68KdotC_Kernel
     generic map(
-      sr_read => 2,
-      vbr_stackframe => 2,
-      extaddr_mode => 2,
-      mul_mode => 2,
-      div_mode => 2,
-      bitfield => 2
+      SR_Read => 2,
+      VBR_Stackframe => 2,
+      extAddr_Mode => 2,
+      MUL_Mode => 2,
+      DIV_Mode => 2,
+      BitField => 2,
+      BarrelShifter => 1,
+      MUL_Hardware => 1
     )
     port map(
       clk => clk,
-      nreset => nreset,
+      nReset => nreset,
       clkena_in => clkena,
       data_in => data_in,
-      ipl => ipl,
-      ipl_autovector => ipl_autovector,
+      IPL => ipl,
+      IPL_autovector => ipl_autovector,
+      berr => berr,
+      CPU => cpu_mode,
       addr_out => addr_out,
       data_write => data_write,
-      state_out => state_out,
-      decodeopa => decodeopa,
-      wr => wr,
-      uds => uds,
-      lds => lds,
-      as => as_out,
-      cpu_type => cpu_type,
-      cache_cinv_req => cache_cinv_req,
-      cache_cpush_req => cache_cpush_req,
+      nWr => nWr,
+      nUDS => nUDS,
+      nLDS => nLDS,
+      busstate => busstate,
+      longword => longword,
+      nResetOut => nResetOut,
+      FC => FC,
+      clr_berr => clr_berr,
+      skipFetch => skipFetch,
+      regin_out => regin_out,
+      CACR_out => CACR_out,
+      VBR_out => VBR_out,
+      cache_inv_req => cache_inv_req,
       cache_op_scope => cache_op_scope,
       cache_op_cache => cache_op_cache,
-      cache_op_addr => cache_op_addr,
       cacr_ie => cacr_ie,
       cacr_de => cacr_de,
       cacr_ifreeze => cacr_ifreeze,
       cacr_dfreeze => cacr_dfreeze,
+      cacr_ibe => cacr_ibe,
+      cacr_dbe => cacr_dbe,
+      cacr_wa => cacr_wa,
+      pmmu_reg_we => pmmu_reg_we,
+      pmmu_reg_re => pmmu_reg_re,
+      pmmu_reg_sel => pmmu_reg_sel,
+      pmmu_reg_wdat => pmmu_reg_wdat,
+      pmmu_reg_part => pmmu_reg_part,
       pmmu_addr_log => pmmu_addr_log,
       pmmu_addr_phys => pmmu_addr_phys,
       pmmu_cache_inhibit => pmmu_cache_inhibit,
-      pmmu_write_protect => pmmu_write_protect,
-      pmmu_fault => pmmu_fault,
-      pmmu_fault_status => pmmu_fault_status
+      cache_op_addr => cache_op_addr,
+      pmmu_walker_req => pmmu_walker_req,
+      pmmu_walker_addr => pmmu_walker_addr,
+      pmmu_walker_ack => pmmu_walker_ack,
+      pmmu_walker_data => pmmu_walker_data,
+      debug_SVmode => debug_SVmode,
+      debug_preSVmode => debug_preSVmode,
+      debug_FlagsSR_S => debug_FlagsSR_S,
+      debug_changeMode => debug_changeMode,
+      debug_setopcode => debug_setopcode,
+      debug_exec_directSR => debug_exec_directSR,
+      debug_exec_to_SR => debug_exec_to_SR,
+      debug_pmove_dn_mode => debug_pmove_dn_mode,
+      debug_pmove_dn_regnum => debug_pmove_dn_regnum
     );
 
   -- Clock generation
@@ -188,15 +267,16 @@ begin
   begin
     if rising_edge(clk) then
       -- Simple memory - provide data on read
-      if as_out = '0' then
+      -- busstate: "00"=fetch, "10"=read, "11"=write, "01"=no access
+      if busstate /= "01" then
         addr_word := to_integer(unsigned(addr_out(15 downto 1)));
         if addr_word < 32768 then
-          if wr = '0' then
+          if nWr = '0' then
+            -- Write (nWr active low)
+            memory(addr_word) <= data_write;
+          else
             -- Read
             data_in <= memory(addr_word);
-          else
-            -- Write
-            memory(addr_word) <= data_write;
           end if;
         else
           data_in <= x"FFFF"; -- Invalid address
@@ -381,8 +461,8 @@ begin
     variable last_pc : std_logic_vector(31 downto 0) := (others => '0');
   begin
     if rising_edge(clk) then
-      -- Track PC for test progress
-      if state_out = "00" and as_out = '0' then
+      -- Track PC for test progress (busstate "00" = fetch)
+      if busstate = "00" then
         if addr_out /= last_pc then
           last_pc := addr_out;
 
