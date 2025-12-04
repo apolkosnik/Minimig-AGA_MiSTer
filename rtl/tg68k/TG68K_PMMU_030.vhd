@@ -1260,7 +1260,7 @@ begin
               offset    := unsigned(addr_log) - unsigned(atc_log_base(hit_idx));
               phys_result := phys_base + offset;
               addr_phys_reg <= std_logic_vector(phys_result);  -- Provide faulting address
-              cache_inhibit_reg <= atc_attr(hit_idx)(1);
+              cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= '1';  -- Mark as write-protected
               report "WP_FAULT_ATC: Setting fault_reg=1 for WP violation, addr=0x" & slv_to_hstring(addr_log) &
                      " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
@@ -1285,7 +1285,7 @@ begin
               offset    := unsigned(addr_log) - unsigned(atc_log_base(hit_idx));
               phys_result := phys_base + offset;
               addr_phys_reg <= std_logic_vector(phys_result);
-              cache_inhibit_reg <= atc_attr(hit_idx)(1);
+              cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= atc_attr(hit_idx)(0);
               report "SUPERVISOR_FAULT_ATC: Setting fault_reg=1 for supervisor violation, addr=0x" & slv_to_hstring(addr_log) &
                      " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
@@ -1523,7 +1523,7 @@ begin
               offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
               phys_result := phys_base + offset;
               addr_phys_reg <= std_logic_vector(phys_result);
-              cache_inhibit_reg <= atc_attr(hit_idx)(1);
+              cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= '1';
               report "WP_FAULT_WALKER: Setting fault_reg=1 for WP violation after walker, addr=0x" & slv_to_hstring(saved_addr_log) &
                      " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
@@ -1549,7 +1549,7 @@ begin
               offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
               phys_result := phys_base + offset;
               addr_phys_reg <= std_logic_vector(phys_result);
-              cache_inhibit_reg <= atc_attr(hit_idx)(1);
+              cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= atc_attr(hit_idx)(0);
               report "SUPERVISOR_FAULT_WALKER: Setting fault_reg=1 for supervisor violation after walker, addr=0x" & slv_to_hstring(saved_addr_log) &
                      " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
