@@ -4919,6 +4919,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                         -- BUG #114 FIX (READ direction): Handle each EA mode correctly
                                         IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="100" THEN
                                             -- Simple EA modes: (An), -(An) - address already in An, do immediate read
+                                            -- BUG #150 FIX: Must set presub for -(An) mode to decrement address register!
+                                            -- Without this, PMOVE <ea>,<MMU reg> with -(An) reads from wrong address
+                                            -- and corrupts address register (doesn't decrement it).
+                                            IF opcode(5 downto 3)="100" THEN
+                                                set(presub) <= '1';
+                                            END IF;
                                             setstate <= "10";  -- Memory read
                                             next_micro_state <= pmove_mem_to_mmu_hi;
                                         ELSIF opcode(5 downto 3)="111" AND (opcode(2 downto 0)="000" OR opcode(2 downto 0)="001") THEN
@@ -4962,6 +4968,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                         IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="100" THEN
                                             -- Simple EA modes: (An), -(An) - no extra words to fetch
                                             -- Do NOT set setstate="01" here - go directly to pmove_mmu_to_mem_hi
+                                            -- BUG #150 FIX: Must set presub for -(An) mode to decrement address register!
+                                            -- Without this, PMOVE <MMU reg>,-(An) writes to wrong address
+                                            -- and corrupts address register (doesn't decrement it).
+                                            IF opcode(5 downto 3)="100" THEN
+                                                set(presub) <= '1';
+                                            END IF;
                                             setstate <= "11";  -- hold bus in write phase, prevent stray prefetch/PC bump
                                             next_micro_state <= pmove_mmu_to_mem_hi;
                                         ELSIF opcode(5 downto 3)="111" AND (opcode(2 downto 0)="000" OR opcode(2 downto 0)="001") THEN
