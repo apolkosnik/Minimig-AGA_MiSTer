@@ -585,8 +585,10 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	reg [15:0] walker_data_low;
 
 	// BUG #138: Walker timeout counter - abort if no memory response
+	// On timeout, returns invalid descriptor (0xDEADDEA0, DT=00) to trigger PMMU fault
+	// The walker_timeout_error signal also unblocks clkena_in to allow CPU recovery
 	reg [11:0] walker_timeout_cnt;  // 12-bit counter = 4096 cycles max (~36us @ 114MHz)
-	reg walker_timeout_error;       // Set when walker times out
+	reg walker_timeout_error /* synthesis preserve */;  // Set when walker times out
 	localparam WALKER_TIMEOUT_LIMIT = 12'd2048;  // Timeout after 2048 cycles (~18us)
 
 	localparam WALKER_IDLE       = 3'd0;

@@ -71,13 +71,14 @@ architecture rtl of TG68K_PMMU_030 is
   signal TT0    : std_logic_vector(31 downto 0); -- Transparent Translation Register 0
   signal TT1    : std_logic_vector(31 downto 0); -- Transparent Translation Register 1
   signal MMUSR  : std_logic_vector(31 downto 0); -- MMU Status Register
-  signal CAL    : std_logic_vector(31 downto 0); -- Current Access Level
-  signal VAL    : std_logic_vector(31 downto 0); -- Valid Access Level
-  signal SCC    : std_logic_vector(31 downto 0); -- Stack Change Control
-  signal AC     : std_logic_vector(31 downto 0); -- Access Control
+  -- NOTE: CAL, VAL, SCC, AC registers are defined in MC68030 but not implemented
+  -- They were removed as unused signals to avoid synthesis warnings
 
-  -- Internal  
+  -- Internal
   signal tc_en  : std_logic; -- translation enable bit (TC[31] in some docs; keep flexible here)
+
+  -- Walker descriptor address register (must persist across clock cycles for W_*_LOW states)
+  signal desc_addr_reg : std_logic_vector(31 downto 0) := (others => '0');
   
   -- MC68030 register write masks (workaround for VHDL synthesis issues)
   -- TC register mask: preserve E(31), SRE(25), FCL(24), and all field bits (23-0), clear reserved bits 30-26
@@ -216,6 +217,8 @@ architecture rtl of TG68K_PMMU_030 is
   signal walk_attr      : std_logic_vector(7 downto 0) := (others => '0'); -- Page attributes
   signal indirect_addr  : std_logic_vector(31 downto 0) := (others => '0'); -- Target address for indirect descriptor
 
+  -- synthesis translate_off
+  -- Debug helper functions - only used for simulation report statements
   -- Local helper for Quartus: convert std_logic_vector to hex string.
   function slv_to_hstring(value : std_logic_vector) return string is
     constant hex_chars   : string := "0123456789ABCDEF";
@@ -276,6 +279,7 @@ architecture rtl of TG68K_PMMU_030 is
     end loop;
     return result;
   end function;
+  -- synthesis translate_on
 
   -- Decode a TC field, falling back to the default when zero (per 68030 spec).
   function decode_tc_field(field : std_logic_vector(3 downto 0);
@@ -1615,7 +1619,7 @@ begin
   -- MC68030 page table walker with proper descriptor traversal
   process(clk, nreset)
     variable table_index : integer;
-    variable desc_addr : std_logic_vector(31 downto 0);
+    variable desc_addr_v : std_logic_vector(31 downto 0);  -- Local variable for address calculation
     variable tmatch0, tmatch1 : std_logic;
     variable tci0, twp0, tci1, twp1 : std_logic;
     -- For CRP/SRP limit checking
@@ -1754,22 +1758,23 @@ begin
             end if;
           end if;
 
-          desc_addr := walk_addr(31 downto 4) & "0000"; -- Align to table boundary
-          desc_addr := std_logic_vector(unsigned(desc_addr) + to_unsigned(table_index * 4, 32));
+          desc_addr_v := walk_addr(31 downto 4) & "0000"; -- Align to table boundary
+          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
 
           -- Debug: Log walker state for failing test addresses
           if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" or saved_addr_log = x"12345000" then
             report "DEBUG_WALKER: W_ROOT addr=0x" & slv_to_hstring(saved_addr_log) &
                    " level=" & integer'image(walk_level) &
                    " table_index=" & integer'image(table_index) &
-                   " desc_addr=0x" & slv_to_hstring(desc_addr)
+                   " desc_addr=0x" & slv_to_hstring(desc_addr_v)
               severity note;
           end if;
-          
+
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= desc_addr;
+            mem_addr <= desc_addr_v;
+            desc_addr_reg <= desc_addr_v;  -- Save for use in W_ROOT_LOW state
           elsif mem_ack = '1' then
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
@@ -1831,13 +1836,13 @@ begin
           end if;
 
         when W_ROOT_LOW =>
-          -- Read LOW word of long-format descriptor at desc_addr+4
-          -- mem_addr should already be set correctly from previous state
+          -- Read LOW word of long-format descriptor at desc_addr_reg+4
+          -- desc_addr_reg was saved in W_ROOT state when memory request was issued
           if mem_req = '0' then
             -- Request LOW word at descriptor address + 4
             mem_req <= '1';
-            mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
-            report "W_ROOT_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
+            mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
+            report "W_ROOT_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr_reg) + 4)) severity note;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
@@ -1862,17 +1867,18 @@ begin
         when W_PTR1 =>
           -- Read level 1 table descriptor - deadlock-proof design
           table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
-          desc_addr := walk_addr(31 downto 4) & "0000";
-          desc_addr := std_logic_vector(unsigned(desc_addr) + to_unsigned(table_index * 4, 32));
-          
+          desc_addr_v := walk_addr(31 downto 4) & "0000";
+          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
             if saved_addr_log = x"00400000" or saved_addr_log = x"12345000" then
-              report "W_PTR1: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr)
+              report "W_PTR1: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr_v)
                 severity note;
             end if;
             mem_req <= '1';
-            mem_addr <= desc_addr;
+            mem_addr <= desc_addr_v;
+            desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR1_LOW state
           elsif mem_ack = '1' then
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
@@ -1939,11 +1945,11 @@ begin
           end if;
 
         when W_PTR1_LOW =>
-          -- Read LOW word of long-format descriptor at desc_addr+4
+          -- Read LOW word of long-format descriptor at desc_addr_reg+4
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
-            report "W_PTR1_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
+            mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
+            report "W_PTR1_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr_reg) + 4)) severity note;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
@@ -1974,13 +1980,13 @@ begin
         when W_PTR2 =>
           -- Read level 2 table descriptor - deadlock-proof design
           table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
-          desc_addr := walk_addr(31 downto 4) & "0000";
-          desc_addr := std_logic_vector(unsigned(desc_addr) + to_unsigned(table_index * 4, 32));
-          
+          desc_addr_v := walk_addr(31 downto 4) & "0000";
+          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
             if saved_addr_log = x"00400000" then
-              report "W_PTR2: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr)
+              report "W_PTR2: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr_v)
                 severity note;
             end if;
             -- Debug: Log W_PTR2 access for failing test addresses
@@ -1988,11 +1994,12 @@ begin
               report "DEBUG_W_PTR2: addr=0x" & slv_to_hstring(saved_addr_log) &
                      " level=" & integer'image(walk_level) &
                      " table_index=" & integer'image(table_index) &
-                     " desc_addr=0x" & slv_to_hstring(desc_addr)
+                     " desc_addr=0x" & slv_to_hstring(desc_addr_v)
                 severity note;
             end if;
             mem_req <= '1';
-            mem_addr <= desc_addr;
+            mem_addr <= desc_addr_v;
+            desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR2_LOW state
           elsif mem_ack = '1' then
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
@@ -2059,11 +2066,11 @@ begin
           end if;
 
         when W_PTR2_LOW =>
-          -- Read LOW word of long-format descriptor at desc_addr+4
+          -- Read LOW word of long-format descriptor at desc_addr_reg+4
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
-            report "W_PTR2_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
+            mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
+            report "W_PTR2_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr_reg) + 4)) severity note;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
@@ -2094,13 +2101,14 @@ begin
         when W_PTR3 =>
           -- Final level - must be page descriptor - deadlock-proof design
           table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
-          desc_addr := walk_addr(31 downto 4) & "0000";
-          desc_addr := std_logic_vector(unsigned(desc_addr) + to_unsigned(table_index * 4, 32));
-          
+          desc_addr_v := walk_addr(31 downto 4) & "0000";
+          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= desc_addr;
+            mem_addr <= desc_addr_v;
+            desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR3_LOW state
           elsif mem_ack = '1' then
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
@@ -2147,12 +2155,12 @@ begin
           end if;
 
         when W_PTR3_LOW =>
-          -- Read LOW word of long-format descriptor at desc_addr+4
+          -- Read LOW word of long-format descriptor at desc_addr_reg+4
           -- At final level with DT=11, this is a long-format indirect descriptor (MC68030 spec 9.5.3.2)
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
-            report "W_PTR3_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
+            mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
+            report "W_PTR3_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr_reg) + 4)) severity note;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process
             walk_desc_low <= mem_rdat;
