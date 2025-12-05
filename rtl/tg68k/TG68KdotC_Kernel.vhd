@@ -2007,7 +2007,13 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;
 				IF interrupt='1' THEN
 					fc_internal(2) <= '1';
-				END IF;	
+					-- BUG #151 FIX: Ensure supervisor mode is entered on interrupt
+					-- This handles the desync case where preSVmode='1' but FlagsSR(5)='0'
+					-- (can happen after RTE to user mode followed by immediate interrupt)
+					-- Without this, interrupt handler runs with wrong privilege level
+					FlagsSR(5) <= '1';
+					preSVmode <= '1';
+				END IF;
 				IF cpu(1)='0' THEN
 					FlagsSR(4) <= '0';
 					FlagsSR(6) <= '0';
@@ -2119,6 +2125,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		
 		IF interrupt='1' AND trap_berr='1' THEN
 			next_micro_state <= trap0;
+			-- Only need stack swap if A7 currently has user stack (preSVmode='0')
+			-- If preSVmode='1', A7 already has supervisor stack, no swap needed
+			-- FlagsSR(5) update to '1' is handled in sequential process (see BUG #151)
 			IF preSVmode='0' THEN
 				set(changeMode) <= '1';
 			END IF;
@@ -2137,11 +2146,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				set(writePC_add) <= '1';
 --				set_datatype <= "10";
 			END IF;
+			-- Only swap if A7 has user stack (preSVmode='0')
+			-- FlagsSR(5) update handled in sequential process (BUG #151)
 			IF preSVmode='0' THEN
 				set(changeMode) <= '1';
 			END IF;
 			setstate <= "01";
-		END IF;	
+		END IF;
 		IF micro_state=int1 OR (interrupt='1' AND trap_trace='1') THEN
 -- paste and copy form TH	---------	
 			if trap_trace='1' AND cpu(1) = '1' then
@@ -2154,17 +2165,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 --			IF cpu(0)='0' THEN
 --				set_datatype <= "10";
 --			END IF;
+			-- Only swap if A7 has user stack (preSVmode='0')
+			-- FlagsSR(5) update handled in sequential process (BUG #151)
 			IF preSVmode='0' THEN
 				set(changeMode) <= '1';
 			END IF;
 			setstate <= "01";
-		END IF;	
-	if micro_state = int1 or (interrupt = '1' and trap_trace = '1') then
-	  if preSVmode = '0' then
-		set(changeMode) <= '1';
-	  end if;
-	  setstate <= "01";
-	end if;
+		END IF;
 	
     -- BUG #99 FIX: Guard changeMode to prevent spurious triggers during multi-cycle instructions
     -- Only trigger changeMode when actual mode-changing operations occur:
@@ -2191,11 +2198,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		END IF;
 			
 		-- BUG #18: Stack pointer switching on mode changes (68020/68030)
+		-- NOTE: preSVmode tells us what stack is currently in A7, so use it for swap direction.
+		-- The swap saves current A7 to the stack indicated by preSVmode, loads from the other.
 		IF set(changeMode)='1' THEN
 			IF cpu(1)='1' THEN
 				-- 68020/68030: Use MSP/ISP based on interrupt_mode
 				IF preSVmode='0' THEN
-					-- Currently in user mode, switching to supervisor mode
+					-- A7 has user stack, save to USP, load from supervisor stack
 					set(to_USP) <= '1';
 					IF interrupt_mode='1' THEN
 						set(from_ISP) <= '1';
@@ -2203,7 +2212,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						set(from_MSP) <= '1';
 					END IF;
 				ELSE
-					-- Currently in supervisor mode, switching to user mode
+					-- A7 has supervisor stack, save to ISP/MSP, load from USP
 					IF interrupt_mode='1' THEN
 						set(to_ISP) <= '1';
 					ELSE
@@ -2212,15 +2221,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					set(from_USP) <= '1';
 				END IF;
 			ELSE
-				-- 68000/68010: Need to check preSVmode to swap USP/SSP correctly
+				-- 68000/68010: preSVmode indicates current stack
 				IF preSVmode='0' THEN
-					-- Currently in user mode, switching to supervisor mode
-					set(to_SSP) <= '1';
-					set(from_USP) <= '1';
-				ELSE
-					-- Currently in supervisor mode, switching to user mode
+					-- A7 has user stack, switching to supervisor
 					set(to_USP) <= '1';
 					set(from_SSP) <= '1';
+				ELSE
+					-- A7 has supervisor stack, switching to user
+					set(to_SSP) <= '1';
+					set(from_USP) <= '1';
 				END IF;
 			END IF;
 			setstackaddr <='1';
