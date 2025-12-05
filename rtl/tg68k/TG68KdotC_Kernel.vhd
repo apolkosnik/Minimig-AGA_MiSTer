@@ -333,6 +333,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_trapv			: bit;
 	signal trap_interrupt	: bit;
 	signal trap_mmu_config	: bit;  -- MC68030 MMU Configuration Exception (vector 56)
+	-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not used on MC68030
 	signal trapmake			: bit;
 	signal trapd				: bit;
 	signal trap_SR				: std_logic_vector(7 downto 0);
@@ -1391,8 +1392,9 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					trap_vector(9 downto 0) <= IPL_vec & "00";      --TH
 				END IF;
 				IF trap_mmu_config='1' THEN
-					trap_vector(9 downto 0) <= "11" & X"80";  -- Vector 56 (0xE0)
+					trap_vector(9 downto 0) <= "11" & X"80";  -- Vector 56 (0xE0) - MMU Configuration Error
 				END IF;
+				-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not MC68030
 			END IF;
 		END IF;
 		IF use_VBR_Stackframe='1' THEN
@@ -1944,7 +1946,8 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 						SVmode <= preSVmode;
 					END IF;	
 				END IF;
-				IF trap_berr='1' OR trap_illegal='1' OR trap_addr_error='1' OR trap_priv='1' OR trap_1010='1' OR trap_1111='1' THEN
+				IF trap_berr='1' OR trap_illegal='1' OR trap_addr_error='1' OR trap_priv='1' OR trap_1010='1' OR trap_1111='1' OR
+				   trap_mmu_config='1' THEN
 					make_trace <= '0';
 					FlagsSR(7) <= '0';
 				END IF;
@@ -1965,8 +1968,8 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF exec(directSR)='1' OR set_stop='1' THEN
 				-- BUG #99 FIX: Sync preSVmode with SR bit 13 (supervisor bit) on RTE
 				-- When RTE restores SR from stack, preSVmode must track the restored S bit
-				-- Without this, supervisor→user transitions fail, breaking MMU detection
-					-- preSVmode <= data_read(13);
+				-- Without this, supervisor->user transitions fail, breaking MMU detection
+				-- ROLLED BACK: preSVmode <= data_read(13);
 
 				-- FSAVE FIX: Only update FlagsSR if not executing mode change
 				-- Prevents data_read from overwriting FlagsSR(5) set by mode change above
@@ -1988,7 +1991,7 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 					-- -- BUG #15 FIX: Sync preSVmode with SR bit 5 (supervisor bit in low byte) on MOVE to SR
 					-- -- When MOVE to SR or MOVE to CCR executes, preSVmode must track the new S bit
 					-- -- Without this, MOVE #$0000,SR (enter user mode) doesn't work, breaking MMU detection!
-					-- preSVmode <= SRin(5);
+					-- ROLLED BACK: preSVmode <= SRin(5);
 					-- FSAVE FIX: Only update FlagsSR if not executing mode change
 					-- Prevents SRin from overwriting FlagsSR(5) set by mode change above
 					IF set(changeMode)='0' THEN
@@ -2309,13 +2312,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							set_Suppress_Base <= '1';
 							set_PCbase <= '1';
 						WHEN "100" =>				--#data
-							-- BUG #100 FIX: Allow setnextpass during exec(ea_build) for immediate mode
-							-- MULS.L #imm uses deferred EA building (exec(ea_build)='1'), not ea_build_now
-							-- Without this, long immediates only fetch 1 word instead of 2 (PC+4 not PC+8)
-							-- Original BUG #65 guard was too restrictive for immediate addressing mode
-							IF (ea_build_now='1' AND decodeOPC='1') OR exec(ea_build)='1' THEN
-								setnextpass <= '1';
-							END IF;
+							setnextpass <= '1';
 							set_direct_data <= '1';
 							IF datatype="10" THEN
 								set(longaktion) <= '1';
@@ -4919,6 +4916,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                         -- BUG #114 FIX (READ direction): Handle each EA mode correctly
                                         IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="100" THEN
                                             -- Simple EA modes: (An), -(An) - address already in An, do immediate read
+                                            -- BUG #150 FIX: Must set presub for -(An) mode to decrement address register!
+                                            -- Without this, PMOVE <ea>,<MMU reg> with -(An) reads from wrong address
+                                            -- and corrupts address register (doesn't decrement it).
+                                            IF opcode(5 downto 3)="100" THEN
+                                                set(presub) <= '1';
+                                            END IF;
                                             setstate <= "10";  -- Memory read
                                             next_micro_state <= pmove_mem_to_mmu_hi;
                                         ELSIF opcode(5 downto 3)="111" AND (opcode(2 downto 0)="000" OR opcode(2 downto 0)="001") THEN
@@ -4962,6 +4965,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                         IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="100" THEN
                                             -- Simple EA modes: (An), -(An) - no extra words to fetch
                                             -- Do NOT set setstate="01" here - go directly to pmove_mmu_to_mem_hi
+                                            -- BUG #150 FIX: Must set presub for -(An) mode to decrement address register!
+                                            -- Without this, PMOVE <MMU reg>,-(An) writes to wrong address
+                                            -- and corrupts address register (doesn't decrement it).
+                                            IF opcode(5 downto 3)="100" THEN
+                                                set(presub) <= '1';
+                                            END IF;
                                             setstate <= "11";  -- hold bus in write phase, prevent stray prefetch/PC bump
                                             next_micro_state <= pmove_mmu_to_mem_hi;
                                         ELSIF opcode(5 downto 3)="111" AND (opcode(2 downto 0)="000" OR opcode(2 downto 0)="001") THEN
@@ -5033,10 +5042,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                 next_micro_state <= ptest1;
                             END IF;
                         ELSE
-                            -- Invalid PMMU instruction - trigger F-line exception
-                            -- Early capture at line 3782 speculatively captures ALL F000-F0FF,
-                            -- but if this isn't a valid PMOVE, we must clear the pending capture
-                            -- to prevent queue corruption
+                            -- Invalid PMMU instruction - trigger F-line exception (Vector 11)
+                            -- Note: Vectors 57/58 are 68851-only; MC68030 uses F-line for all invalid PMMU encodings
                             trap_1111 <= '1';
                             trapmake <= '1';
                         END IF;
@@ -5056,7 +5063,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- If CRP/SRP (64-bit), advance EA and read LOW word
                     IF (brief(14 downto 10)="10010" OR brief(14 downto 10)="10011") THEN  -- SRP or CRP
                         set_exec(mem_addsub) <= '1';
-                        set_exec(pmmu_addr_inc) <= '1';
+                        set(pmmu_addr_inc) <= '1';  -- BUG #144 FIX: Use set() layer for +4 increment (ALU checks exec(pmmu_addr_inc))
                         set(OP1addr) <= '1';
                         datatype <= "10"; -- long
                         setstate <= "10"; -- read LOW word from memory
@@ -5071,7 +5078,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- For CRP/SRP (64-bit), advance EA and read low part next
                     IF (brief(14 downto 10)="10010" OR brief(14 downto 10)="10011") THEN  -- SRP or CRP
                         set_exec(mem_addsub) <= '1';
-                        set_exec(pmmu_addr_inc) <= '1';
+                        set(pmmu_addr_inc) <= '1';  -- BUG #144 FIX: Use set() layer for +4 increment (ALU checks exec(pmmu_addr_inc))
                         set(OP1addr) <= '1';
                         datatype <= "10"; -- long
                         setstate <= "11"; -- write
@@ -5105,12 +5112,19 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- Return to idle to resume fetch/PC sequencing
                     next_micro_state <= idle;
                 WHEN pmove_mem_to_mmu_lo =>
-                    -- low part read completed; write to MMU
+                    -- Memory->MMU: Low part read completed; write LOW word to MMU register
+                    -- BUG #145 FIX: Must set datatype, set_datatype, setstate, mem_addsub, OP1addr
+                    -- to ensure clkena_lw pulses so FSM advances to idle. Without these, the FSM
+                    -- stalls and PC increment logic runs again, causing PC over-increment by 4.
                     set_exec(pmmu_wr) <= '1';
+                    set_exec(mem_addsub) <= '1';  -- raise memmask bit 3 to pulse clkena_lw
+                    set(OP1addr) <= '1';          -- hold EA from HI transfer
+                    datatype <= "10";             -- long for proper memmask
+                    set_datatype <= "10";         -- propagate to exe_datatype for bus mask
+                    setstate <= "10";             -- memory read state (data already latched)
                     -- BUG #91 FIX: Must use 'idle' not 'nop' to trigger setexecOPC
                     -- Same issue as BUG #20 and BUG #90 - setexecOPC only set when next_micro_state=idle
                     -- Without setexecOPC, set_exec(pmmu_wr) never becomes exec(pmmu_wr), and PMMU write fails!
-                    -- This breaks 64-bit PMOVE (An),CRP/SRP - LOW word never written to MMU!
                     next_micro_state <= idle;
                     
                 -- PMMU instruction implementations

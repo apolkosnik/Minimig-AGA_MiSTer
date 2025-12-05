@@ -311,13 +311,15 @@ PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype,
 		ELSIF execOPC='0' AND exec(OP2out_one)='0' AND exec(get_bfoffset)='0'THEN
 			IF long_start='0' AND exe_datatype="00" AND exec(use_SP)='0' THEN
 				addsub_b <= "00000000000000000000000000000001";
-			ELSIF long_start='0' AND exe_datatype="10" AND (exec(presub) OR exec(postadd) OR movem_presub)='1' THEN
+			-- BUG #144 FIX: Added exec(pmmu_addr_inc) for PMOVE CRP/SRP 64-bit +4 address increment
+			-- pmmu_addr_inc avoids register write-back side effect that postadd would cause
+			ELSIF long_start='0' AND exe_datatype="10" AND (exec(presub) OR exec(postadd) OR movem_presub OR exec(pmmu_addr_inc))='1' THEN
 				IF exec(movem_action)='1' THEN
 					addsub_b <= "00000000000000000000000000000110";
 				ELSE
 					addsub_b <= "00000000000000000000000000000100";
 				END IF;
-			ELSE 
+			ELSE
 				addsub_b <= "00000000000000000000000000000010";
 			END IF;
 		ELSE	

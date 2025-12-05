@@ -767,7 +767,8 @@ begin
     elsif rising_edge(clk) then
       atc_flush_req <= '0';
       mmusr_update_ack <= '0';
-      mmu_config_error <= '0';
+      -- BUG #146: Don't auto-clear mmu_config_error - let it latch until acknowledged
+      -- mmu_config_error <= '0';  -- REMOVED: was creating one-cycle pulse
 
       -- Handle MMUSR updates with MC68030-compliant priority (MMUSR register only)
       -- IMPORTANT: These only affect MMUSR, not other registers!
@@ -867,6 +868,9 @@ begin
                   tc_write_val(31) := '0';
                   mmu_config_error <= '1';
                   report "MMU_CONFIG_EXCEPTION: Field sum=" & integer'image(total_bits) & " (must be 32), E bit cleared" severity warning;
+                else
+                  -- BUG #146: Valid TC write - clear any previous config error
+                  mmu_config_error <= '0';
                 end if;
               end if;
             end if;
@@ -890,11 +894,16 @@ begin
               if reg_wdat(1 downto 0) = "00" then
                 mmu_config_error <= '1';
                 report "MMU_CONFIG_EXCEPTION: SRP_H DT=00 (invalid descriptor type)" severity warning;
+              else
+                -- BUG #146: Valid SRP_H write - clear any previous config error
+                mmu_config_error <= '0';
               end if;
             else
               -- SRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
               SRP_L <= (reg_wdat and CRP_LOW_MASK);
+              -- BUG #146: Valid SRP_L write - clear any previous config error
+              mmu_config_error <= '0';
             end if;
             if reg_fd = '0' then  -- Only flush if NOT PMOVEFD
               atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
@@ -911,11 +920,16 @@ begin
               if reg_wdat(1 downto 0) = "00" then
                 mmu_config_error <= '1';
                 report "MMU_CONFIG_EXCEPTION: CRP_H DT=00 (invalid descriptor type)" severity warning;
+              else
+                -- BUG #146: Valid CRP_H write - clear any previous config error
+                mmu_config_error <= '0';
               end if;
             else
               -- CRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
               CRP_L <= (reg_wdat and CRP_LOW_MASK);
+              -- BUG #146: Valid CRP_L write - clear any previous config error
+              mmu_config_error <= '0';
             end if;
             -- CRP changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
@@ -1061,7 +1075,9 @@ begin
   -- When MMU is disabled (tc_en='0'), use logical address directly (same cycle)
   -- When MMU is enabled, use registered translation result (allows for page table walks)
   addr_phys     <= addr_log when tc_en = '0' else addr_phys_reg;
-  cache_inhibit <= cache_inhibit_reg;
+  -- BUG #126 V2 FIX: Combinational bypass for cache_inhibit when MMU disabled
+  -- Without this, cache_inhibit_reg retains stale value (pmmu_req='0' when MMU off)
+  cache_inhibit <= '0' when tc_en = '0' else cache_inhibit_reg;
   write_protect <= write_protect_reg;
   fault         <= fault_reg;
   fault_status  <= fault_status_reg;
