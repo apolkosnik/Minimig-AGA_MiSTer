@@ -628,16 +628,16 @@ BEGIN
   -- BUG FIX: Implement proper FC selector logic per MC68030 spec
   -- Check bits 4-3 to determine FC source, then extract value accordingly
   pmmu_cmd_fc     <= brief(2 downto 0) when ((exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
-                                              (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
+                                              (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "00100" and brief(12 downto 8) /= "01000"))
                                               and brief(4 downto 3) = "10")  -- Immediate FC (3-bit value in bits 2-0)
                      else pmmu_fc_from_dn when ((exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
-                                    (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
+                                    (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "00100" and brief(12 downto 8) /= "01000"))
                                     and brief(4 downto 3) = "01")  -- FC from Dn register (Dn specified by brief(2:0))
                      else SFC when ((exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
-                                    (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
+                                    (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "00100" and brief(12 downto 8) /= "01000"))
                                     and brief(4 downto 0) = "00000")  -- FC from SFC
                      else DFC when ((exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or
-                                    (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "01000"))
+                                    (exec(pmmu_pflush) = '1' and brief(12 downto 8) /= "00000" and brief(12 downto 8) /= "00100" and brief(12 downto 8) /= "01000"))
                                     and brief(4 downto 0) = "00001")  -- FC from DFC
                      else fc_internal;
 
@@ -4955,10 +4955,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         ELSIF brief(15 downto 13) = "001" AND  brief(12 downto 10) = "001" THEN  -- PFLUSH
                             -- PFLUSH - Control Alterable modes
                             set_exec(pmmu_pflush) <= '1';
-                            IF brief(14 downto 8) = "0000000" OR brief(12 downto 8) = "01000" THEN
-                                -- BUG #147 FIX: PFLUSHA/PFLUSHAN - no EA needed, prevent spurious prefetch
-                                -- Without setstate="01", state defaults to "00" (fetch), causing extra PC+2
-                                setstate <= "01";  -- No memaccess - prevents PC overincrement
+                            IF brief(12 downto 8) = "00000" OR brief(12 downto 8) = "00100" OR brief(12 downto 8) = "01000" THEN
+                                -- BUG #147 FIX: PFLUSH variants without EA (A/A N/FC mask only) must not trigger EA prefetch
+                                -- setstate="01" holds fetch/prefetch to avoid an extra PC increment
+                                setstate <= "01";  -- No EA fetch
                                 next_micro_state <= pflush1;
                             ELSE
                                 IF opcode(5 downto 3)="001" OR  -- An direct - ILLEGAL
@@ -5091,6 +5091,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- BUG #133 FIX: Wait for PMMU walker to complete before proceeding
                     -- WhichAmiga does "ptestw #5,(a0),#7" then immediately "pmove mmusr,(sp)"
                     -- Without waiting, PMMU hasn't updated MMUSR yet, causing MMU detection failure
+                    -- BUG #147 FIX: setstate="01" prevents extra PC increment when exiting ptest1
+                    setstate <= "01";  -- No fetch cycle - prevents PC over-increment
                     IF pmmu_busy = '1' THEN
                         next_micro_state <= ptest1;  -- Stay here until walker completes
                     ELSE
@@ -5105,7 +5107,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- - PFLUSH:    brief(12)='0', brief(11)='0' - flush with FC/EA
                     -- - PFLUSHN:   brief(12)='0', brief(11)='1' - flush non-global with FC/EA
                     -- PMMU module handles actual flush operation
-                    null;  -- PFLUSH request already set in pmove_decode, PMMU handles the rest
+                    -- BUG #147 FIX: setstate="01" prevents extra PC increment when exiting pflush1
+                    -- Without this, setstate defaults to "00" (fetch), causing PC+2 over-increment
+                    setstate <= "01";  -- No fetch cycle - prevents PC over-increment
                     next_micro_state <= nop;  -- FIX: Return to normal execution after PFLUSH
 
                 WHEN pload1 =>
@@ -5117,6 +5121,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- PMMU module performs page table walk and loads result into ATC
                     -- BUG #134 FIX: Wait for PMMU walker to complete before proceeding
                     -- PLOAD does a full page table walk, must wait for walker to finish
+                    -- BUG #147 FIX: setstate="01" prevents extra PC increment when exiting pload1
+                    setstate <= "01";  -- No fetch cycle - prevents PC over-increment
                     IF pmmu_busy = '1' THEN
                         next_micro_state <= pload1;  -- Stay here until walker completes
                     ELSE
