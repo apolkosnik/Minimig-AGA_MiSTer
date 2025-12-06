@@ -4001,10 +4001,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- For PMOVE with (xxx).L mode, setnextpass causes PC over-increment
 					-- (PC+10 instead of PC+8 for the 8-byte instruction)
 					-- brief(15:13) format: "000"=TT0/TT1, "010"=TC/SRP/CRP, "011"=MMUSR
-						setnextpass <= '1';
+					-- BUG #146 FIX: REMOVED unconditional setnextpass <= '1' that was here!
+					-- The old code set setnextpass='1' BEFORE checking for PMOVE, and the
+					-- PMOVE branch never cleared it - causing PC overincrement in hardware.
+					-- Now setnextpass is only set in the ELSE branch (non-PMOVE).
 					IF opcode(15 downto 12)="1111" AND
 					   (brief(15 downto 13)="000" OR brief(15 downto 13)="010" OR brief(15 downto 13)="011") THEN
 						-- PMOVE with (xxx).L: go to pmove state, NO setnextpass
+						-- BUG #146 FIX: Explicitly clear setnextpass to prevent PC overincrement
+						setnextpass <= '0';
 						IF brief(9)='1' THEN
 							-- MMU->mem direction (read from MMU, write to memory)
 							next_micro_state <= pmove_mmu_to_mem_hi;
@@ -4026,8 +4031,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							next_micro_state <= pmove_mem_to_mmu_hi;
 						END IF;
 					ELSE
-						-- Non-PMOVE: always allow setnextpass
-						-- (outer IF already excludes PMOVE instructions)
+						-- Non-PMOVE: set setnextpass for normal EA processing
 						setnextpass <= '1';
 					END IF;
 					
@@ -4952,6 +4956,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                             -- PFLUSH - Control Alterable modes
                             set_exec(pmmu_pflush) <= '1';
                             IF brief(14 downto 8) = "0000000" OR brief(12 downto 8) = "01000" THEN
+                                -- BUG #147 FIX: PFLUSHA/PFLUSHAN - no EA needed, prevent spurious prefetch
+                                -- Without setstate="01", state defaults to "00" (fetch), causing extra PC+2
+                                setstate <= "01";  -- No memaccess - prevents PC overincrement
                                 next_micro_state <= pflush1;
                             ELSE
                                 IF opcode(5 downto 3)="001" OR  -- An direct - ILLEGAL

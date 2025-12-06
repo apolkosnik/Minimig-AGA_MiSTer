@@ -880,6 +880,10 @@ begin
                   mmu_config_error <= '0';
                 end if;
               end if;
+            else
+              -- BUG #148 FIX: TC write with E=0 (MMU disabled) clears any previous config error
+              -- This allows exception handlers to acknowledge the error by disabling the MMU
+              mmu_config_error <= '0';
             end if;
 
             -- Write TC with potentially cleared E bit (prevents lockup on invalid config)
@@ -902,15 +906,16 @@ begin
                 mmu_config_error <= '1';
                --  -- report "MMU_CONFIG_EXCEPTION: SRP_H DT=00 (invalid descriptor type)" severity warning;
               else
-                -- BUG #146: Valid SRP_H write - clear any previous config error
+                -- BUG #146: Valid SRP_H write (DT!=00) - clear any previous config error
                 mmu_config_error <= '0';
               end if;
             else
               -- SRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
               SRP_L <= (reg_wdat and CRP_LOW_MASK);
-              -- BUG #146: Valid SRP_L write - clear any previous config error
-              mmu_config_error <= '0';
+              -- BUG #148 FIX: Do NOT clear mmu_config_error on low word write
+              -- If high word had DT=00, error must remain latched until explicitly acknowledged
+              -- (via valid high word write or TC write with E=0)
             end if;
             if reg_fd = '0' then  -- Only flush if NOT PMOVEFD
               atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
@@ -928,15 +933,16 @@ begin
                 mmu_config_error <= '1';
                --  -- report "MMU_CONFIG_EXCEPTION: CRP_H DT=00 (invalid descriptor type)" severity warning;
               else
-                -- BUG #146: Valid CRP_H write - clear any previous config error
+                -- BUG #146: Valid CRP_H write (DT!=00) - clear any previous config error
                 mmu_config_error <= '0';
               end if;
             else
               -- CRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
               CRP_L <= (reg_wdat and CRP_LOW_MASK);
-              -- BUG #146: Valid CRP_L write - clear any previous config error
-              mmu_config_error <= '0';
+              -- BUG #148 FIX: Do NOT clear mmu_config_error on low word write
+              -- If high word had DT=00, error must remain latched until explicitly acknowledged
+              -- (via valid high word write or TC write with E=0)
             end if;
             -- CRP changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
