@@ -246,6 +246,7 @@ COMPONENT TG68K_Cache_030
    SIGNAL cache_fill_active : std_logic;
    SIGNAL cache_fill_count  : std_logic_vector(2 downto 0);  -- Changed from 1 downto 0 to support 8-word fills
    SIGNAL cache_fill_buffer : std_logic_vector(127 downto 0);
+   SIGNAL cache_fill_complete : std_logic;  -- One-cycle pulse when fill is complete
    SIGNAL byte_enables      : std_logic_vector(3 downto 0);  -- Dynamic byte enables based on UDS/LDS
 
    type sync_state_t is (sync0, sync1, sync2, sync3, sync4, sync5, sync6, sync7, sync8, sync9);
@@ -512,7 +513,8 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
    --i_cache_req <= '1' when (state="00" and CPU="11" and cacr_ie='1') else '0';
    i_cache_req <= '1' when (state="00" and CPU(1)='1' and cacr_ie='1') else '0';
    i_fill_data <= cache_fill_buffer;
-   i_fill_valid <= '1' when (cache_fill_active='1' and cache_fill_count="111") else '0';  -- Changed from "11" to "111"
+   -- Use registered completion signal to ensure buffer is fully filled before asserting valid
+   i_fill_valid <= cache_fill_complete;
 
    d_cache_addr <= ADDR;
    -- Data cache request only when CPU is 68030 AND cacr_de is enabled
@@ -521,19 +523,17 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
    d_cache_we <= not wr;
    d_cache_data_in <= data_write & data_write;  -- Replicate 16-bit data to 32-bit
    d_fill_data <= cache_fill_buffer;
-   d_fill_valid <= '1' when (cache_fill_active='1' and cache_fill_count="111") else '0';  -- Changed from "11" to "111"
+   -- Use registered completion signal to ensure buffer is fully filled before asserting valid
+   d_fill_valid <= cache_fill_complete;
 
-   -- Calculate byte enables from UDS/LDS and address bits
+   -- Calculate byte enables from UDS/LDS
    -- For 68030, the cache module needs to know which bytes are being written
    -- Use internal signals uds_s and lds_s (can't read output ports UDS/LDS in VHDL)
-   byte_enables <= "1111" when (uds_s='0' and lds_s='0') else  -- Longword access (both strobes)
-                   "1100" when (uds_s='0' and lds_s='1') else  -- High word only
-                   "0011" when (uds_s='1' and lds_s='0') else  -- Low word only
-                   "1000" when (uds_s='0' and ADDR(0)='1') else  -- Byte at odd address (high byte of high word)
-                   "0100" when (uds_s='0' and ADDR(0)='0') else  -- Byte at even address (low byte of high word)
-                   "0010" when (lds_s='0' and ADDR(0)='1') else  -- Byte at odd address (high byte of low word)
-                   "0001" when (lds_s='0' and ADDR(0)='0') else  -- Byte at even address (low byte of low word)
-                   "0000";  -- No access
+   -- Simplified logic: conditions 1-3 cover all valid access types
+   byte_enables <= "1111" when (uds_s='0' and lds_s='0') else  -- Word access (both strobes active)
+                   "1100" when (uds_s='0') else                 -- Upper byte only (UDS active)
+                   "0011" when (lds_s='0') else                 -- Lower byte only (LDS active)
+                   "0000";  -- No access (both strobes inactive)
 
    -- Cache hit/miss logic
    cache_hit <= (i_cache_hit and i_cache_req) or (d_cache_hit and d_cache_req);
@@ -557,14 +557,18 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
    BEGIN
       IF cpu1reset='0' THEN
          cache_fill_active <= '0';
-         cache_fill_count <= "000";  -- Changed from "00" to "000" for 8-word count
+         cache_fill_count <= "000";
          cache_fill_buffer <= (others => '0');
+         cache_fill_complete <= '0';
       ELSIF rising_edge(CLK) THEN
+         -- Default: clear completion pulse
+         cache_fill_complete <= '0';
+
          IF cache_req='1' and cache_ack='1' THEN
             -- Start cache fill sequence
             IF cache_fill_active='0' THEN
                cache_fill_active <= '1';
-               cache_fill_count <= "000";  -- Changed from "00" to "000"
+               cache_fill_count <= "000";
             END IF;
          END IF;
 
@@ -579,7 +583,9 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
                WHEN "101" => cache_fill_buffer(95 downto 80)   <= cache_data;
                WHEN "110" => cache_fill_buffer(111 downto 96)  <= cache_data;
                WHEN "111" => cache_fill_buffer(127 downto 112) <= cache_data;
-                             cache_fill_active <= '0';  -- Complete after 8 words (128 bits)
+                             cache_fill_active <= '0';
+                             -- Generate completion pulse AFTER last word is stored
+                             cache_fill_complete <= '1';
                WHEN OTHERS => NULL;
             END CASE;
 

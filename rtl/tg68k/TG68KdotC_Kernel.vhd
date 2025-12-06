@@ -164,7 +164,9 @@ entity TG68KdotC_Kernel is
 		cache_op_addr			: out std_logic_vector(31 downto 0);
 -- PMMU walker memory interface (68030) - connects to real memory via cpu_wrapper
 		pmmu_walker_req		: out std_logic;
+		pmmu_walker_we		: out std_logic;  -- MC68030 U/M bit: write enable for descriptor updates
 		pmmu_walker_addr		: out std_logic_vector(31 downto 0);
+		pmmu_walker_wdat		: out std_logic_vector(31 downto 0);  -- MC68030 U/M bit: write data
 		pmmu_walker_ack		: in  std_logic;
 		pmmu_walker_data		: in  std_logic_vector(31 downto 0);
 -- DEBUG: Supervisor mode tracking signals
@@ -469,7 +471,9 @@ architecture logic of TG68KdotC_Kernel is
 
 	-- PMMU walker memory interface (internal stub - will be connected to real memory in future)
 	signal pmmu_mem_req   : std_logic;
+	signal pmmu_mem_we    : std_logic;  -- MC68030 U/M bit: write enable for descriptor updates
 	signal pmmu_mem_addr  : std_logic_vector(31 downto 0);
+	signal pmmu_mem_wdat  : std_logic_vector(31 downto 0);  -- MC68030 U/M bit: write data
 	signal pmmu_mem_ack   : std_logic;
 	signal pmmu_mem_rdat  : std_logic_vector(31 downto 0);
 	signal pmmu_busy      : std_logic;
@@ -546,7 +550,9 @@ BEGIN
       fault_status  => pmmu_fault_stat,
       tc_enable     => pmmu_tc_en,
       mem_req       => pmmu_mem_req,
+      mem_we        => pmmu_mem_we,
       mem_addr      => pmmu_mem_addr,
+      mem_wdat      => pmmu_mem_wdat,
       mem_ack       => pmmu_mem_ack,
       mem_rdat      => pmmu_mem_rdat,
       busy          => pmmu_busy,
@@ -730,7 +736,9 @@ BEGIN
   -- PMMU Memory Interface: Connect to external memory arbiter in cpu_wrapper
   -- The walker requests are routed to real memory to read actual page table descriptors
   pmmu_walker_req  <= pmmu_mem_req;
+  pmmu_walker_we   <= pmmu_mem_we;  -- MC68030 U/M bit: forward write enable
   pmmu_walker_addr <= pmmu_mem_addr;
+  pmmu_walker_wdat <= pmmu_mem_wdat;  -- MC68030 U/M bit: forward write data
   pmmu_mem_ack     <= pmmu_walker_ack;
   pmmu_mem_rdat    <= pmmu_walker_data;
 
@@ -1946,8 +1954,7 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 						SVmode <= preSVmode;
 					END IF;	
 				END IF;
-				IF trap_berr='1' OR trap_illegal='1' OR trap_addr_error='1' OR trap_priv='1' OR trap_1010='1' OR trap_1111='1' OR
-				   trap_mmu_config='1' THEN
+				IF trap_berr='1' OR trap_illegal='1' OR trap_addr_error='1' OR trap_priv='1' OR trap_1010='1' OR trap_1111='1' OR trap_mmu_config='1' THEN
 					make_trace <= '0';
 					FlagsSR(7) <= '0';
 				END IF;
@@ -1962,41 +1969,23 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF trap_trace='1' AND state="10" THEN
 					make_trace <= '0';
 				END IF;
-				-- CRITICAL FIX: Prevent desynchronization via two mechanisms:
-				-- 1. Always sync preSVmode (BUG #99 Part 1) - prevents permanent desync
-				-- 2. Block FlagsSR update during mode change (FSAVE bug) - prevents overwrite
 				IF exec(directSR)='1' OR set_stop='1' THEN
-				-- BUG #99 FIX: Sync preSVmode with SR bit 13 (supervisor bit) on RTE
-				-- When RTE restores SR from stack, preSVmode must track the restored S bit
-				-- Without this, supervisor->user transitions fail, breaking MMU detection
-				-- ROLLED BACK: preSVmode <= data_read(13);
-
-				-- FSAVE FIX: Only update FlagsSR if not executing mode change
-				-- Prevents data_read from overwriting FlagsSR(5) set by mode change above
-					IF set(changeMode)='0' THEN
-						FlagsSR <= data_read(15 downto 8);
-					END IF;
+					FlagsSR <= data_read(15 downto 8);
+					-- -- BUG #15 FIX: Sync preSVmode with SR bit 13 (supervisor bit) on RTE
+					-- -- When RTE restores SR from stack, preSVmode must track the restored S bit
+					-- -- Without this, supervisor->user transitions fail, breaking MMU detection!
+					-- preSVmode <= data_read(13);
 				END IF;
 				IF interrupt='1' AND trap_interrupt='1' THEN
 					FlagsSR(2 downto 0) <=rIPL_nr;
 				END IF;
-				-- CRITICAL FIX: Prevent desynchronization via two mechanisms:
-				-- 1. Always sync preSVmode (BUG #99 Part 2) - prevents permanent desync
-				-- 2. Block FlagsSR update during mode change (FSAVE bug) - prevents overwrite
 				IF exec(to_SR)='1' THEN
-				-- BUG #99 FIX: Sync preSVmode with SR bit 5 (supervisor bit in low byte)
-				-- When MOVE to SR or MOVE to CCR executes, preSVmode must track the new S bit
-				-- Without this, MOVE #$0000,SR (enter user mode) doesn't work, breaking MMU
+					FlagsSR(7 downto 0) <= SRin;	--SR
 					fc_internal(2) <= SRin(5);
 					-- -- BUG #15 FIX: Sync preSVmode with SR bit 5 (supervisor bit in low byte) on MOVE to SR
 					-- -- When MOVE to SR or MOVE to CCR executes, preSVmode must track the new S bit
 					-- -- Without this, MOVE #$0000,SR (enter user mode) doesn't work, breaking MMU detection!
-					-- ROLLED BACK: preSVmode <= SRin(5);
-					-- FSAVE FIX: Only update FlagsSR if not executing mode change
-					-- Prevents SRin from overwriting FlagsSR(5) set by mode change above
-					IF set(changeMode)='0' THEN
-						FlagsSR(7 downto 0) <= SRin;	--SR
-					END IF;
+					-- preSVmode <= SRin(5);
 				ELSIF exec(update_FC)='1' THEN
 					fc_internal(2) <= FlagsSR(5);
 				END IF;
@@ -2010,7 +1999,7 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;
 				IF interrupt='1' THEN
 					fc_internal(2) <= '1';
-				END IF;	
+				END IF;
 				IF cpu(1)='0' THEN
 					FlagsSR(4) <= '0';
 					FlagsSR(6) <= '0';
@@ -2122,6 +2111,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		
 		IF interrupt='1' AND trap_berr='1' THEN
 			next_micro_state <= trap0;
+			-- Only need stack swap if A7 currently has user stack (preSVmode='0')
+			-- If preSVmode='1', A7 already has supervisor stack, no swap needed
+			-- FlagsSR(5) update to '1' is handled in sequential process (see BUG #151)
 			IF preSVmode='0' THEN
 				set(changeMode) <= '1';
 			END IF;
@@ -2144,9 +2136,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				set(changeMode) <= '1';
 			END IF;
 			setstate <= "01";
-		END IF;	
+		END IF;
 		IF micro_state=int1 OR (interrupt='1' AND trap_trace='1') THEN
--- paste and copy form TH	---------	
+-- paste and copy form TH	---------
 			if trap_trace='1' AND cpu(1) = '1' then
 				next_micro_state <= trap00;  --TH
 			else
@@ -2161,23 +2153,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				set(changeMode) <= '1';
 			END IF;
 			setstate <= "01";
-		END IF;	
-	if micro_state = int1 or (interrupt = '1' and trap_trace = '1') then
-	  if preSVmode = '0' then
-		set(changeMode) <= '1';
-	  end if;
-	  setstate <= "01";
-	end if;
-	
-    -- BUG #99 FIX: Guard changeMode to prevent spurious triggers during multi-cycle instructions
-    -- Only trigger changeMode when actual mode-changing operations occur:
-    -- 1. exec(directSR) = RTE restoring SR from stack
-    -- 2. exec(to_SR) = MOVE to SR instruction
-    -- 3. interrupt = Exception entry (forces supervisor mode)
-    -- Without this guard, MULS.L and other multi-cycle instructions trigger spurious
-    -- changeMode during execution, disrupting PC increment and state machine
-    -- IF setexecOPC='1' AND FlagsSR(5)/=preSVmode AND
-    -- (exec(directSR)='1' OR exec(to_SR)='1' OR interrupt='1') THEN
+		END IF;
+
 		IF setexecOPC='1' AND FlagsSR(5)/=preSVmode THEN
 			set(changeMode) <= '1';
 --			setstate <= "01";
@@ -3936,19 +3913,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						END IF;
 					END IF;
 				ELSE
-					-- Valid EA mode for cpSAVE
-					IF SVmode='1' THEN
-						IF opcode(11 downto 9)="000" THEN  -- FPU coprocessor - FSAVE not implemented
-							trap_1111 <= '1';  -- F-line exception (no FPU)
-							trapmake <= '1';
-						ELSE
-							trap_1111 <= '1';  -- Other coprocessors - F-line exception
-							trapmake <= '1';
-						END IF;
-					ELSE
-						trap_priv <= '1';
-						trapmake <= '1';
-					END IF;
+					-- Unrecognized F-line instruction (cpGEN, cpBcc, etc.)
+					-- FPU/coprocessor instructions without hardware support
+					-- MC68030: F-line exception (vector 11) regardless of supervisor/user mode
+					-- FPU general instructions like FADD, FMUL are NOT privileged
+					trap_1111 <= '1';
+					trapmake <= '1';
 				END IF;
 --							
 ----      ----------------------------------------------------------------------------		
@@ -4031,6 +4001,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- For PMOVE with (xxx).L mode, setnextpass causes PC over-increment
 					-- (PC+10 instead of PC+8 for the 8-byte instruction)
 					-- brief(15:13) format: "000"=TT0/TT1, "010"=TC/SRP/CRP, "011"=MMUSR
+						setnextpass <= '1';
 					IF opcode(15 downto 12)="1111" AND
 					   (brief(15 downto 13)="000" OR brief(15 downto 13)="010" OR brief(15 downto 13)="011") THEN
 						-- PMOVE with (xxx).L: go to pmove state, NO setnextpass
@@ -4055,14 +4026,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							next_micro_state <= pmove_mem_to_mmu_hi;
 						END IF;
 					ELSE
-						-- Non-PMOVE: allow setnextpass per BUG #101 fix
-						IF exec(ea_build)='0' OR
-						   (micro_state /= pmove_mem_to_mmu_hi AND
-						    micro_state /= pmove_mem_to_mmu_lo AND
-						    micro_state /= pmove_mmu_to_mem_hi AND
-						    micro_state /= pmove_mmu_to_mem_lo) THEN
-							setnextpass <= '1';
-						END IF;
+						-- Non-PMOVE: always allow setnextpass
+						-- (outer IF already excludes PMOVE instructions)
+						setnextpass <= '1';
 					END IF;
 					
 				WHEN st_nn =>		-- =>(nnnn).w/l
@@ -4131,15 +4097,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN ld_AnXn2 =>
 					set(get_ea_now) <='1';
 					setdisp <= '1';		--brief
-					-- BUG #101 FIX: Allow setnextpass for non-PMOVE instructions
-					-- PMOVE uses pmove_* micro states; other instructions use different states
-					IF exec(ea_build)='0' OR
-					   (micro_state /= pmove_mem_to_mmu_hi AND
-					    micro_state /= pmove_mem_to_mmu_lo AND
-					    micro_state /= pmove_mmu_to_mem_hi AND
-					    micro_state /= pmove_mmu_to_mem_lo) THEN
-						setnextpass <= '1';
-					END IF;
+					setnextpass <= '1';
 					
 -------------------------------------------------------------------------------------					
 					
@@ -4158,15 +4116,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					ELSE
 						IF brief(1 downto 0)="00" THEN
 							set(get_ea_now) <='1';
-							-- BUG #101 FIX: Allow setnextpass for non-PMOVE instructions
-							-- PMOVE uses pmove_* micro states; other instructions use different states
-							IF exec(ea_build)='0' OR
-							   (micro_state /= pmove_mem_to_mmu_hi AND
-							    micro_state /= pmove_mem_to_mmu_lo AND
-							    micro_state /= pmove_mmu_to_mem_hi AND
-							    micro_state /= pmove_mmu_to_mem_lo) THEN
-								setnextpass <= '1';
-							END IF;
+							setnextpass <= '1';
 						ELSE
 							setstate <= "10";
 							setaddrvalue <= '1';
@@ -4174,7 +4124,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							next_micro_state <= ld_229_3;
 						END IF;
 					END IF;
-					
+
 				WHEN ld_229_2 =>		-- (bd,An,Xn)=>, --(bd,PC,Xn)=>
 					setdisp <= '1';		-- add Index
 					setstate <= "10";
@@ -4204,15 +4154,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						next_micro_state <= ld_AnXn2;
 					ELSE
 						set(get_ea_now) <='1';
-						-- BUG #101 FIX: Allow setnextpass for non-PMOVE instructions
-						-- PMOVE uses pmove_* micro states; other instructions use different states
-						IF exec(ea_build)='0' OR
-						   (micro_state /= pmove_mem_to_mmu_hi AND
-						    micro_state /= pmove_mem_to_mmu_lo AND
-						    micro_state /= pmove_mmu_to_mem_hi AND
-						    micro_state /= pmove_mmu_to_mem_lo) THEN
-							setnextpass <= '1';
-						END IF;
+						setnextpass <= '1';
 					END IF;
 					
 ----------------------------------------------------------------------------------------				

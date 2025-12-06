@@ -44,9 +44,11 @@ entity TG68K_PMMU_030 is
     fault_status   : out std_logic_vector(31 downto 0);
     tc_enable      : out std_logic;
 
-    -- Walker memory interface (read-only) and busy indicator
+    -- Walker memory interface (read/write) and busy indicator
     mem_req        : buffer std_logic;
+    mem_we         : out std_logic;  -- Write enable for descriptor updates (U/M bits)
     mem_addr       : out std_logic_vector(31 downto 0);
+    mem_wdat       : out std_logic_vector(31 downto 0);  -- Write data for descriptor updates
     mem_ack        : in  std_logic;
     mem_rdat       : in  std_logic_vector(31 downto 0);
     busy           : out std_logic;
@@ -71,14 +73,15 @@ architecture rtl of TG68K_PMMU_030 is
   signal TT0    : std_logic_vector(31 downto 0); -- Transparent Translation Register 0
   signal TT1    : std_logic_vector(31 downto 0); -- Transparent Translation Register 1
   signal MMUSR  : std_logic_vector(31 downto 0); -- MMU Status Register
-  signal CAL    : std_logic_vector(31 downto 0); -- Current Access Level
-  signal VAL    : std_logic_vector(31 downto 0); -- Valid Access Level
-  signal SCC    : std_logic_vector(31 downto 0); -- Stack Change Control
-  signal AC     : std_logic_vector(31 downto 0); -- Access Control
+  -- NOTE: CAL, VAL, SCC, AC registers are defined in MC68030 but not implemented
+  -- They were removed as unused signals to avoid synthesis warnings
 
-  -- Internal  
+  -- Internal
   signal tc_en  : std_logic; -- translation enable bit (TC[31] in some docs; keep flexible here)
-  
+
+  -- Walker descriptor address register (must persist across clock cycles for W_*_LOW states)
+  signal desc_addr_reg : std_logic_vector(31 downto 0) := (others => '0');
+
   -- MC68030 register write masks (workaround for VHDL synthesis issues)
   -- TC register mask: preserve E(31), SRE(25), FCL(24), and all field bits (23-0), clear reserved bits 30-26
   -- Note: Bit 23 (PS MSB) is forced to 1 in write logic since all valid PS values (8-15) have MSB=1
@@ -122,7 +125,7 @@ architecture rtl of TG68K_PMMU_030 is
 
   -- Simple ATC (Address Translation Cache), 8 entries, dynamic page sizes
   constant ATC_ENTRIES : integer := 8;
-  type atc_attr_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(3 downto 0);  -- {SUPER, CI, M, WP}
+  type atc_attr_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(3 downto 0);  -- {U_ACC, CI, M, WP} where U_ACC=NOT(S)=user accessible
   type atc_val_t  is array(0 to ATC_ENTRIES-1) of std_logic;
   type atc_base_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(31 downto 0);
   type atc_fc_t   is array(0 to ATC_ENTRIES-1) of std_logic_vector(2 downto 0);
@@ -164,7 +167,7 @@ architecture rtl of TG68K_PMMU_030 is
   -- MC68030 page table walker FSM
   -- Added W_*_LOW states for reading LOW word of long-format (64-bit) descriptors
   -- Added W_INDIRECT states for indirect descriptor support (MC68030 spec section 9.5.3.2)
-  type walk_state_t is (W_IDLE, W_ROOT, W_ROOT_LOW, W_PTR1, W_PTR1_LOW, W_PTR2, W_PTR2_LOW, W_PTR3, W_PTR3_LOW, W_INDIRECT, W_PAGE, W_FILL, W_COMPLETE, W_FAULT);
+  type walk_state_t is (W_IDLE, W_ROOT, W_ROOT_LOW, W_PTR1, W_PTR1_LOW, W_PTR2, W_PTR2_LOW, W_PTR3, W_PTR3_LOW, W_INDIRECT, W_PAGE, W_UPDATE_DESC, W_FILL, W_COMPLETE, W_FAULT);
   signal wstate    : walk_state_t := W_IDLE;
   
   -- Walker bookkeeping
@@ -216,66 +219,70 @@ architecture rtl of TG68K_PMMU_030 is
   signal walk_attr      : std_logic_vector(7 downto 0) := (others => '0'); -- Page attributes
   signal indirect_addr  : std_logic_vector(31 downto 0) := (others => '0'); -- Target address for indirect descriptor
 
-  -- Local helper for Quartus: convert std_logic_vector to hex string.
-  function slv_to_hstring(value : std_logic_vector) return string is
-    constant hex_chars   : string := "0123456789ABCDEF";
-    constant nibble_count: integer := (value'length + 3) / 4;
-    variable result      : string(1 to nibble_count);
-    variable nibble_val  : integer range 0 to 15;
-    variable bit_val     : std_logic;
-    variable bit_index   : integer;
-    variable idx         : integer;
-    variable has_unknown : boolean;
-  begin
-    for i in result'range loop
-      result(i) := '0';
-    end loop;
+  -- MC68030 U/M bit tracking (Issue #3, #4)
+  -- U (Used) bit 3: Set when page is accessed (any access)
+  -- M (Modified) bit 4: Set when page is written
+  signal desc_update_needed : std_logic := '0';  -- Need to write back descriptor with U/M
+  signal desc_update_data   : std_logic_vector(31 downto 0) := (others => '0'); -- Updated descriptor
 
-    for nib in 0 to nibble_count - 1 loop
-      nibble_val  := 0;
-      has_unknown := false;
-      for bit in 0 to 3 loop
-        nibble_val := nibble_val * 2;
-        bit_index  := nib * 4 + bit;
-        if bit_index < value'length then
-          idx     := value'high - bit_index;
-          bit_val := value(idx);
-          case bit_val is
-            when '0' | 'L' => null;
-            when '1' | 'H' => nibble_val := nibble_val + 1;
-            when others    => has_unknown := true;
-          end case;
-        end if;
-      end loop;
-      if has_unknown then
-        result(nib + 1) := 'X';
-      else
-        result(nib + 1) := hex_chars(nibble_val + 1);
-      end if;
-    end loop;
-
-    return result;
-  end function;
-
-  -- Convert std_logic_vector to a human-readable bit string (MSB first).
-  function slv_to_string(value : std_logic_vector) return string is
-    variable result : string(1 to value'length);
-    variable idx    : integer;
-  begin
-    for i in 0 to value'length - 1 loop
-      idx := value'high - i;
-      case value(idx) is
-        when '0' | 'L' => result(i + 1) := '0';
-        when '1' | 'H' => result(i + 1) := '1';
-        when 'Z'       => result(i + 1) := 'Z';
-        when 'W'       => result(i + 1) := 'W';
-        when 'U'       => result(i + 1) := 'U';
-        when 'X'       => result(i + 1) := 'X';
-        when others    => result(i + 1) := '?';
-      end case;
-    end loop;
-    return result;
-  end function;
+  -- Debug helper functions commented out for synthesis (Quartus doesn't respect translate_off)
+  -- synthesis translate_off
+  -- function slv_to_hstring(value : std_logic_vector) return string is
+  --   constant hex_chars   : string := "0123456789ABCDEF";
+  --   constant nibble_count: integer := (value'length + 3) / 4;
+  --   variable result      : string(1 to nibble_count);
+  --   variable nibble_val  : integer range 0 to 15;
+  --   variable bit_val     : std_logic;
+  --   variable bit_index   : integer;
+  --   variable idx         : integer;
+  --   variable has_unknown : boolean;
+  -- begin
+  --   for i in result'range loop
+  --     result(i) := '0';
+  --   end loop;
+  --   for nib in 0 to nibble_count - 1 loop
+  --     nibble_val  := 0;
+  --     has_unknown := false;
+  --     for bit in 0 to 3 loop
+  --       nibble_val := nibble_val * 2;
+  --       bit_index  := nib * 4 + bit;
+  --       if bit_index < value'length then
+  --         idx     := value'high - bit_index;
+  --         bit_val := value(idx);
+  --         case bit_val is
+  --           when '0' | 'L' => null;
+  --           when '1' | 'H' => nibble_val := nibble_val + 1;
+  --           when others    => has_unknown := true;
+  --         end case;
+  --       end if;
+  --     end loop;
+  --     if has_unknown then
+  --       result(nib + 1) := 'X';
+  --     else
+  --       result(nib + 1) := hex_chars(nibble_val + 1);
+  --     end if;
+  --   end loop;
+  --   return result;
+  -- end function;
+  -- function slv_to_string(value : std_logic_vector) return string is
+  --   variable result : string(1 to value'length);
+  --   variable idx    : integer;
+  -- begin
+  --   for i in 0 to value'length - 1 loop
+  --     idx := value'high - i;
+  --     case value(idx) is
+  --       when '0' | 'L' => result(i + 1) := '0';
+  --       when '1' | 'H' => result(i + 1) := '1';
+  --       when 'Z'       => result(i + 1) := 'Z';
+  --       when 'W'       => result(i + 1) := 'W';
+  --       when 'U'       => result(i + 1) := 'U';
+  --       when 'X'       => result(i + 1) := 'X';
+  --       when others    => result(i + 1) := '?';
+  --     end case;
+  --   end loop;
+  --   return result;
+  -- end function;
+  -- synthesis translate_on
 
   -- Decode a TC field, falling back to the default when zero (per 68030 spec).
   function decode_tc_field(field : std_logic_vector(3 downto 0);
@@ -460,17 +467,17 @@ architecture rtl of TG68K_PMMU_030 is
       else  -- RWM=1: R/W field is IGNORED (both reads and writes allowed)
         wp := '0';  -- No write protection, both access types allowed
       end if;
-      -- Debug for write protection test
-      if addr(31 downto 12) = x"00002" then
-        report "TTR_MATCH_DEBUG: addr=0x" & slv_to_hstring(addr) &
-               " base=0x" & slv_to_hstring("000000" & base) &
-               " mask=0x" & slv_to_hstring("000000" & mask) &
-               " addr_hi=0x" & slv_to_hstring("000000" & addr_hi) &
-               " enable=" & std_logic'image(enable) &
-               " addr_match=" & std_logic'image(addr_match) &
-               " fc_match=" & std_logic'image(fc_match) &
-               " tt_reg=0x" & slv_to_hstring(tt) severity note;
-      end if;
+      -- Debug for write protection test (commented out for synthesis)
+      -- if addr(31 downto 12) = x"00002" then
+      --   report "TTR_MATCH_DEBUG: addr=0x" & slv_to_hstring(addr) &
+      --          " base=0x" & slv_to_hstring("000000" & base) &
+      --          " mask=0x" & slv_to_hstring("000000" & mask) &
+      --          " addr_hi=0x" & slv_to_hstring("000000" & addr_hi) &
+      --          " enable=" & std_logic'image(enable) &
+      --          " addr_match=" & std_logic'image(addr_match) &
+      --          " fc_match=" & std_logic'image(fc_match) &
+     --  --          " tt_reg=0x" & slv_to_hstring(tt) severity note;
+      -- end if;
     else
       matched := '0';
       ci := '0';
@@ -806,9 +813,9 @@ begin
         -- MC68030 Specification: MMU register access requires supervisor mode
         -- Privilege check is performed by TG68KdotC_Kernel before asserting reg_we,
         -- so no additional FC check is needed here
-        report "PMMU_REG_WRITE: sel=0x" & slv_to_hstring(reg_sel) &
-               " wdat=0x" & slv_to_hstring(reg_wdat) &
-               " part=" & std_logic'image(reg_part) severity note;
+        -- report "PMMU_REG_WRITE: sel=0x" & slv_to_hstring(reg_sel) &
+               -- " wdat=0x" & slv_to_hstring(reg_wdat) &
+              --  -- " part=" & std_logic'image(reg_part) severity note;
         case reg_sel is
           when "00010" =>
             -- TT0 register write - MC68030 Transparent Translation Register per User's Manual section 9.2.6
@@ -821,8 +828,8 @@ begin
             if reg_fd = '0' then
               atc_flush_req <= '1';
             end if;
-            report "TT0_WRITE_SPEC_COMPLIANT: input=0x" & slv_to_hstring(reg_wdat) &
-                   " reserved bits 14-11,7,3 masked to zero" severity note;
+            -- report "TT0_WRITE_SPEC_COMPLIANT: input=0x" & slv_to_hstring(reg_wdat) &
+                  --  -- " reserved bits 14-11,7,3 masked to zero" severity note;
           when "00011" =>
             -- TT1 register write - MC68030 Transparent Translation Register (same layout as TT0)
             -- MC68030 TT0/TT1 bit layout:
@@ -858,7 +865,7 @@ begin
                 -- Invalid PS - clear E bit to prevent MMU activation
                 tc_write_val(31) := '0';
                 mmu_config_error <= '1';
-                report "MMU_CONFIG_EXCEPTION: Invalid PS field=" & integer'image(ps_val) & " (must be 8-15), E bit cleared" severity warning;
+               --  -- report "MMU_CONFIG_EXCEPTION: Invalid PS field=" & integer'image(ps_val) & " (must be 8-15), E bit cleared" severity warning;
               else
                 -- Check 2: Field sum must equal 32 per MC68030 spec (stop adding TIx at first zero)
                 total_bits := tc_total_bits(reg_wdat);
@@ -867,7 +874,7 @@ begin
                   -- Invalid field sum - clear E bit to prevent MMU activation
                   tc_write_val(31) := '0';
                   mmu_config_error <= '1';
-                  report "MMU_CONFIG_EXCEPTION: Field sum=" & integer'image(total_bits) & " (must be 32), E bit cleared" severity warning;
+                 --  -- report "MMU_CONFIG_EXCEPTION: Field sum=" & integer'image(total_bits) & " (must be 32), E bit cleared" severity warning;
                 else
                   -- BUG #146: Valid TC write - clear any previous config error
                   mmu_config_error <= '0';
@@ -893,7 +900,7 @@ begin
               -- Per spec: Register is loaded BEFORE exception is taken
               if reg_wdat(1 downto 0) = "00" then
                 mmu_config_error <= '1';
-                report "MMU_CONFIG_EXCEPTION: SRP_H DT=00 (invalid descriptor type)" severity warning;
+               --  -- report "MMU_CONFIG_EXCEPTION: SRP_H DT=00 (invalid descriptor type)" severity warning;
               else
                 -- BUG #146: Valid SRP_H write - clear any previous config error
                 mmu_config_error <= '0';
@@ -919,7 +926,7 @@ begin
               -- Per spec: Register is loaded BEFORE exception is taken
               if reg_wdat(1 downto 0) = "00" then
                 mmu_config_error <= '1';
-                report "MMU_CONFIG_EXCEPTION: CRP_H DT=00 (invalid descriptor type)" severity warning;
+               --  -- report "MMU_CONFIG_EXCEPTION: CRP_H DT=00 (invalid descriptor type)" severity warning;
               else
                 -- BUG #146: Valid CRP_H write - clear any previous config error
                 mmu_config_error <= '0';
@@ -1025,10 +1032,10 @@ begin
 
     -- MC68030 Specification compliance check
     if ps_val < 8 then
-      report "TC_PS_ERROR: Reserved page size value " & integer'image(ps_val) &
-             " (valid range: 8-15). MC68030 should generate MMU configuration exception." &
-             " Defaulting to PS=12 (4KB pages) for synthesis compatibility."
-        severity error;
+      -- report "TC_PS_ERROR: Reserved page size value " & integer'image(ps_val) &
+             -- " (valid range: 8-15). MC68030 should generate MMU configuration exception." &
+             -- " Defaulting to PS=12 (4KB pages) for synthesis compatibility."
+       --  -- severity error;
       ps_val := 12; -- Default to 4KB to prevent synthesis errors
     end if;
 
@@ -1045,24 +1052,24 @@ begin
     -- 3. If TIB > 0, it must be >= 2 (minimum 4 entries per table)
     -- 4. Page size must be valid (0-7)
     if TC(31) = '1' and total_bits /= 32 then
-      report "TC_VALIDATION_ERROR: Field sum " & integer'image(total_bits) & " != 32" &
-             " (IS=" & integer'image(is_bits) &
-             " TIA=" & integer'image(tia_bits) &
-             " TIB=" & integer'image(tib_bits) &
-             " TIC=" & integer'image(tic_bits) &
-             " TID=" & integer'image(tid_bits) &
-             " PS_bits=" & integer'image(page_offset_bits) & ")"
-        severity warning;
+      -- report "TC_VALIDATION_ERROR: Field sum " & integer'image(total_bits) & " != 32" &
+             -- " (IS=" & integer'image(is_bits) &
+             -- " TIA=" & integer'image(tia_bits) &
+             -- " TIB=" & integer'image(tib_bits) &
+             -- " TIC=" & integer'image(tic_bits) &
+             -- " TID=" & integer'image(tid_bits) &
+             -- " PS_bits=" & integer'image(page_offset_bits) & ")"
+       --  -- severity warning;
     end if;
     
     if TC(31) = '1' and tia_bits = 0 then
-      report "TC_VALIDATION_ERROR: TIA field must be > 0 (root table needs at least 1 bit)"
-        severity warning;
+      -- report "TC_VALIDATION_ERROR: TIA field must be > 0 (root table needs at least 1 bit)"
+       --  -- severity warning;
     end if;
     
     if TC(31) = '1' and tib_bits > 0 and tib_bits < 2 then
-      report "TC_VALIDATION_ERROR: TIB field must be >= 2 when used (minimum 4 table entries)"
-        severity warning;
+      -- report "TC_VALIDATION_ERROR: TIB field must be >= 2 when used (minimum 4 table entries)"
+       --  -- severity warning;
     end if;
 
     -- Page size validation already done above with proper error reporting
@@ -1133,10 +1140,10 @@ begin
         end if;
         -- Debug: Log translation request for test addresses
         if addr_log = x"12343000" or addr_log = x"12344000" or addr_log = x"12345000" then
-          report "DEBUG_REQUEST: Starting translation for addr=0x" & slv_to_hstring(addr_log) &
-                 " fc=" & slv_to_string(fc) & " rw=" & std_logic'image(rw) &
-                 " tc_en=" & std_logic'image(tc_en)
-            severity note;
+          -- report "DEBUG_REQUEST: Starting translation for addr=0x" & slv_to_hstring(addr_log) &
+                 -- " fc=" & slv_to_string(fc) & " rw=" & std_logic'image(rw) &
+                 -- " tc_en=" & std_logic'image(tc_en)
+           --  -- severity note;
         end if;
         -- Initialize variables to clean values
         hit := '0';
@@ -1173,12 +1180,12 @@ begin
           ttr_check(TT1, addr_log, fc, is_insn, rw, tmatch1, tci1, twp1);
           -- Debug: Log TTR check results for write protection test address
           if addr_log = x"00002000" then
-            report "DEBUG_TTR_WP: addr=0x" & slv_to_hstring(addr_log) &
-                   " TT0=0x" & slv_to_hstring(TT0) &
-                   " TT1=0x" & slv_to_hstring(TT1) &
-                   " tmatch0=" & std_logic'image(tmatch0) &
-                   " tmatch1=" & std_logic'image(tmatch1)
-              severity note;
+            -- report "DEBUG_TTR_WP: addr=0x" & slv_to_hstring(addr_log) &
+                   -- " TT0=0x" & slv_to_hstring(TT0) &
+                   -- " TT1=0x" & slv_to_hstring(TT1) &
+                   -- " tmatch0=" & std_logic'image(tmatch0) &
+                   -- " tmatch1=" & std_logic'image(tmatch1)
+             --  -- severity note;
           end if;
           if tmatch0 = '1' then
             -- TTR0 match - use identity translation with TTR attributes (always successful, no faults)
@@ -1194,12 +1201,12 @@ begin
               level => "000"             -- No table walk for TTR
             );
             if addr_log = x"00002000" then
-              report "TTR0_STATUS: Setting transparent status for addr=0x" & slv_to_hstring(addr_log) severity note;
+             --  -- report "TTR0_STATUS: Setting transparent status for addr=0x" & slv_to_hstring(addr_log) severity note;
             end if;
             -- No walker needed for TTR
           elsif tmatch1 = '1' then
             -- TTR1 match - use identity translation with TTR attributes (always successful, no faults)
-            assert false report "TTR1 HIT: Setting addr_phys to 0x" & slv_to_hstring(addr_log) severity note;
+           --  -- assert false report "TTR1 HIT: Setting addr_phys to 0x" & slv_to_hstring(addr_log) severity note;
             addr_phys_reg <= addr_log;  -- Identity mapping
             cache_inhibit_reg <= tci1;
             write_protect_reg <= twp1;
@@ -1220,13 +1227,13 @@ begin
               aligned_addr := align_addr(addr_log, atc_shift(i));
               -- Debug: Log ATC check details for failing test addresses
               if addr_log = x"12343000" or addr_log = x"12344000" then
-                report "DEBUG_ATC_CHECK: addr=0x" & slv_to_hstring(addr_log) &
-                       " ATC[" & integer'image(i) & "] base=0x" & slv_to_hstring(atc_log_base(i)) &
-                       " shift=" & integer'image(atc_shift(i)) &
-                       " aligned=0x" & slv_to_hstring(aligned_addr) &
-                       " fc_match=" & std_logic'image(atc_fc(i)(0)) & std_logic'image(atc_fc(i)(1)) & std_logic'image(atc_fc(i)(2)) &
-                       " vs " & std_logic'image(fc(0)) & std_logic'image(fc(1)) & std_logic'image(fc(2))
-                  severity note;
+                -- report "DEBUG_ATC_CHECK: addr=0x" & slv_to_hstring(addr_log) &
+                       -- " ATC[" & integer'image(i) & "] base=0x" & slv_to_hstring(atc_log_base(i)) &
+                       -- " shift=" & integer'image(atc_shift(i)) &
+                       -- " aligned=0x" & slv_to_hstring(aligned_addr) &
+                       -- " fc_match=" & std_logic'image(atc_fc(i)(0)) & std_logic'image(atc_fc(i)(1)) & std_logic'image(atc_fc(i)(2)) &
+                       -- " vs " & std_logic'image(fc(0)) & std_logic'image(fc(1)) & std_logic'image(fc(2))
+                 --  -- severity note;
               end if;
               if atc_fc(i) = fc and
                  atc_is_insn(i) = is_insn and
@@ -1235,12 +1242,12 @@ begin
                 hit_idx := i;
                 -- Debug: Log ATC hit for failing test addresses
                 if addr_log = x"12343000" or addr_log = x"12344000" then
-                  report "DEBUG_ATC_HIT: addr=0x" & slv_to_hstring(addr_log) &
-                         " hit ATC[" & integer'image(i) & "] base=0x" & slv_to_hstring(atc_log_base(i)) &
-                         " shift=" & integer'image(atc_shift(i)) &
-                         " aligned_addr=0x" & slv_to_hstring(aligned_addr) &
-                         " fc=" & slv_to_string(fc) & " vs atc_fc=" & slv_to_string(atc_fc(i))
-                    severity note;
+                  -- report "DEBUG_ATC_HIT: addr=0x" & slv_to_hstring(addr_log) &
+                         -- " hit ATC[" & integer'image(i) & "] base=0x" & slv_to_hstring(atc_log_base(i)) &
+                         -- " shift=" & integer'image(atc_shift(i)) &
+                         -- " aligned_addr=0x" & slv_to_hstring(aligned_addr) &
+                         -- " fc=" & slv_to_string(fc) & " vs atc_fc=" & slv_to_string(atc_fc(i))
+                   --  -- severity note;
                 end if;
               end if;
             end if;
@@ -1250,7 +1257,7 @@ begin
             -- But don't overwrite walker faults that are still pending
             if walker_fault = '1' and walker_fault_ack_pending = '1' then
               -- Walker fault is pending - don't overwrite with ATC results
-              report "ATC_SKIP: Skipping ATC processing due to pending walker fault, addr=0x" & slv_to_hstring(addr_log) severity note;
+             --  -- report "ATC_SKIP: Skipping ATC processing due to pending walker fault, addr=0x" & slv_to_hstring(addr_log) severity note;
             elsif rw = '0' and atc_attr(hit_idx)(0) = '1' then
               -- Write to write-protected page - generate fault (rw='0' is WRITE)
               status_tmp := encode_mmusr_fault(
@@ -1274,10 +1281,11 @@ begin
               addr_phys_reg <= std_logic_vector(phys_result);  -- Provide faulting address
               cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= '1';  -- Mark as write-protected
-              report "WP_FAULT_ATC: Setting fault_reg=1 for WP violation, addr=0x" & slv_to_hstring(addr_log) &
-                     " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
+              -- report "WP_FAULT_ATC: Setting fault_reg=1 for WP violation, addr=0x" & slv_to_hstring(addr_log) &
+                    --  -- " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
             elsif fc(2) = '0' and atc_attr(hit_idx)(3) = '0' then
-              -- User trying to access supervisor-only page - generate fault (bit 3 is U bit)
+              -- User trying to access supervisor-only page - generate fault
+              -- atc_attr(3) = U_ACC = NOT(S): 0 means supervisor-only, 1 means user accessible
               status_tmp := encode_mmusr_fault(
                 bus_error => '0',
                 limit_violation => '0',
@@ -1299,26 +1307,26 @@ begin
               addr_phys_reg <= std_logic_vector(phys_result);
               cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= atc_attr(hit_idx)(0);
-              report "SUPERVISOR_FAULT_ATC: Setting fault_reg=1 for supervisor violation, addr=0x" & slv_to_hstring(addr_log) &
-                     " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
+              -- report "SUPERVISOR_FAULT_ATC: Setting fault_reg=1 for supervisor violation, addr=0x" & slv_to_hstring(addr_log) &
+                    --  -- " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
             else
               -- Valid access - use cached translation and clear any previous faults
               -- But don't overwrite walker faults that are still pending
               if walker_fault = '1' and walker_fault_ack_pending = '1' then
                 -- Walker fault is pending - don't overwrite with successful ATC results
-                report "ATC_SUCCESS_SKIP: Skipping ATC success due to pending walker fault, addr=0x" & slv_to_hstring(addr_log) severity note;
+               --  -- report "ATC_SUCCESS_SKIP: Skipping ATC success due to pending walker fault, addr=0x" & slv_to_hstring(addr_log) severity note;
               else
                 phys_base := unsigned(atc_phys_base(hit_idx));
                 offset    := unsigned(addr_log) - unsigned(atc_log_base(hit_idx));
                 phys_result := phys_base + offset;
                 -- Debug address calculation for PS=0 test
                 if addr_log = x"00001100" then
-                  report "DEBUG_ATC_CALC: addr=0x" & slv_to_hstring(addr_log) &
-                         " phys_base=0x" & slv_to_hstring(std_logic_vector(phys_base)) &
-                         " log_base=0x" & slv_to_hstring(atc_log_base(hit_idx)) &
-                         " offset=0x" & slv_to_hstring(std_logic_vector(offset)) &
-                         " phys_result=0x" & slv_to_hstring(std_logic_vector(phys_result))
-                    severity note;
+                  -- report "DEBUG_ATC_CALC: addr=0x" & slv_to_hstring(addr_log) &
+                         -- " phys_base=0x" & slv_to_hstring(std_logic_vector(phys_base)) &
+                         -- " log_base=0x" & slv_to_hstring(atc_log_base(hit_idx)) &
+                         -- " offset=0x" & slv_to_hstring(std_logic_vector(offset)) &
+                         -- " phys_result=0x" & slv_to_hstring(std_logic_vector(phys_result))
+                   --  -- severity note;
                 end if;
                 addr_phys_reg <= std_logic_vector(phys_result);
                 cache_inhibit_reg <= atc_attr(hit_idx)(2);
@@ -1331,7 +1339,7 @@ begin
                   transparent => '0',                      -- Not a transparent translation
                   level => "011"                           -- Page translation (3 levels typical)
                 );
-                report "ATC_HIT: successful translation, phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
+               --  -- report "ATC_HIT: successful translation, phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
               end if;
             end if;
           else
@@ -1339,9 +1347,9 @@ begin
             if tmatch0 = '0' and tmatch1 = '0' and translation_pending = '0' then
               -- Debug: Log ATC miss for failing test addresses
               if addr_log = x"12343000" or addr_log = x"12344000" then
-                report "DEBUG_ATC_MISS: addr=0x" & slv_to_hstring(addr_log) &
-                       " starting walker"
-                  severity note;
+                -- report "DEBUG_ATC_MISS: addr=0x" & slv_to_hstring(addr_log) &
+                       -- " starting walker"
+                 --  -- severity note;
               end if;
               -- Save request info for walker ONLY when no translation is pending
               saved_addr_log <= addr_log;
@@ -1353,11 +1361,11 @@ begin
             else
               -- Debug: Log why walker didn't start for failing test addresses
               if addr_log = x"12343000" or addr_log = x"12344000" then
-                report "DEBUG_NO_WALKER: addr=0x" & slv_to_hstring(addr_log) &
-                       " tmatch0=" & std_logic'image(tmatch0) &
-                       " tmatch1=" & std_logic'image(tmatch1) &
-                       " translation_pending=" & std_logic'image(translation_pending)
-                  severity note;
+                -- report "DEBUG_NO_WALKER: addr=0x" & slv_to_hstring(addr_log) &
+                       -- " tmatch0=" & std_logic'image(tmatch0) &
+                       -- " tmatch1=" & std_logic'image(tmatch1) &
+                       -- " translation_pending=" & std_logic'image(translation_pending)
+                 --  -- severity note;
               end if;
             end if;
           end if;
@@ -1400,8 +1408,8 @@ begin
             saved_rw <= ptest_rw;  -- BUG #17 FIX: PTEST R/W from brief(9): 0=PTESTW(write), 1=PTESTR(read)
             walk_req <= '1';
             translation_pending <= '1';
-            report "PTEST: Triggered walker for addr=0x" & slv_to_hstring(ptest_addr) &
-                   " fc=" & slv_to_string(ptest_fc) severity note;
+            -- report "PTEST: Triggered walker for addr=0x" & slv_to_hstring(ptest_addr) &
+                  --  -- " fc=" & slv_to_string(ptest_fc) severity note;
           end if;
         end if;
       end if;
@@ -1437,16 +1445,16 @@ begin
               saved_rw <= pload_rw;  -- BUG #17 FIX: PLOAD R/W from brief(9): 0=PLOADW(write), 1=PLOADR(read)
               walk_req <= '1';
               translation_pending <= '1';
-              report "PLOAD: Triggered walker for addr=0x" & slv_to_hstring(pload_addr) &
-                     " fc=" & slv_to_string(pload_fc) severity note;
+              -- report "PLOAD: Triggered walker for addr=0x" & slv_to_hstring(pload_addr) &
+                    --  -- " fc=" & slv_to_string(pload_fc) severity note;
             else
               -- ATC hit - PLOAD complete (translation already cached)
-              report "PLOAD: ATC hit for addr=0x" & slv_to_hstring(pload_addr) &
-                     " hit_idx=" & integer'image(hit_idx) severity note;
+              -- report "PLOAD: ATC hit for addr=0x" & slv_to_hstring(pload_addr) &
+                    --  -- " hit_idx=" & integer'image(hit_idx) severity note;
             end if;
           else
             -- TTR match - PLOAD complete (no need to cache transparent translations)
-            report "PLOAD: TTR match for addr=0x" & slv_to_hstring(pload_addr) severity note;
+           --  -- report "PLOAD: TTR match for addr=0x" & slv_to_hstring(pload_addr) severity note;
           end if;
         end if;
       end if;
@@ -1466,11 +1474,11 @@ begin
         cache_inhibit_reg <= '1';  -- Inhibit cache on faults
         write_protect_reg <= '1';  -- Protect on faults
         -- Debug: Report walker fault processing with corruption tracking
-        report "WALKER_FAULT: Setting fault_reg=1 walker_status=0x" & slv_to_hstring(walker_fault_status) &
-               " status_tmp=0x" & slv_to_hstring(status_tmp) &
-               " addr=0x" & slv_to_hstring(saved_addr_log) &
-               " addr_phys_out=0x" & slv_to_hstring(saved_addr_log)
-          severity note;
+        -- report "WALKER_FAULT: Setting fault_reg=1 walker_status=0x" & slv_to_hstring(walker_fault_status) &
+               -- " status_tmp=0x" & slv_to_hstring(status_tmp) &
+               -- " addr=0x" & slv_to_hstring(saved_addr_log) &
+               -- " addr_phys_out=0x" & slv_to_hstring(saved_addr_log)
+         --  -- severity note;
         -- Acknowledge the fault and track pending state
         walker_fault_ack <= '1';
         walker_fault_ack_pending <= '1';
@@ -1501,21 +1509,21 @@ begin
           end loop;
           if hit = '1' then
             -- Debug: Report ATC hit details
-            report "ATC_HIT: addr=0x" & slv_to_hstring(saved_addr_log) & 
-                   " fc=" & slv_to_string(saved_fc) & 
-                   " rw=" & std_logic'image(saved_rw) &
-                   " hit_idx=" & integer'image(hit_idx) &
-                   " attr=" & slv_to_string(atc_attr(hit_idx)) &
-                   " base=0x" & slv_to_hstring(atc_phys_base(hit_idx)) &
-                   " shift=" & integer'image(atc_shift(hit_idx)) &
-                   " page_size=" & integer'image(atc_page_size(hit_idx))
-              severity note;
+            -- report "ATC_HIT: addr=0x" & slv_to_hstring(saved_addr_log) &
+                   -- " fc=" & slv_to_string(saved_fc) &
+                   -- " rw=" & std_logic'image(saved_rw) &
+                   -- " hit_idx=" & integer'image(hit_idx) &
+                   -- " attr=" & slv_to_string(atc_attr(hit_idx)) &
+                   -- " base=0x" & slv_to_hstring(atc_phys_base(hit_idx)) &
+                   -- " shift=" & integer'image(atc_shift(hit_idx)) &
+                   -- " page_size=" & integer'image(atc_page_size(hit_idx))
+             --  -- severity note;
               
             -- Walker filled ATC successfully - check access violations for the original request
             -- BUG #17 FIX: saved_rw='0' is WRITE, saved_rw='1' is READ
             if saved_rw = '0' and atc_attr(hit_idx)(0) = '1' then
               -- Write to write-protected page - generate fault
-              report "WP_FAULT: Write to WP page detected" severity note;
+             --  -- report "WP_FAULT: Write to WP page detected" severity note;
               status_tmp := encode_mmusr_fault(
                 bus_error => '0',
                 limit_violation => '0',
@@ -1537,11 +1545,12 @@ begin
               addr_phys_reg <= std_logic_vector(phys_result);
               cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= '1';
-              report "WP_FAULT_WALKER: Setting fault_reg=1 for WP violation after walker, addr=0x" & slv_to_hstring(saved_addr_log) &
-                     " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
+              -- report "WP_FAULT_WALKER: Setting fault_reg=1 for WP violation after walker, addr=0x" & slv_to_hstring(saved_addr_log) &
+                    --  -- " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
             elsif saved_fc(2) = '0' and atc_attr(hit_idx)(3) = '0' then
-              -- User trying to access supervisor-only page - generate fault (bit 3 is U bit)
-              report "SUPERVISOR_FAULT: User access to supervisor page detected" severity note;
+              -- User trying to access supervisor-only page - generate fault
+              -- atc_attr(3) = U_ACC = NOT(S): 0 means supervisor-only, 1 means user accessible
+             --  -- report "SUPERVISOR_FAULT: User access to supervisor page detected" severity note;
               status_tmp := encode_mmusr_fault(
                 bus_error => '0',
                 limit_violation => '0',
@@ -1563,11 +1572,11 @@ begin
               addr_phys_reg <= std_logic_vector(phys_result);
               cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= atc_attr(hit_idx)(0);
-              report "SUPERVISOR_FAULT_WALKER: Setting fault_reg=1 for supervisor violation after walker, addr=0x" & slv_to_hstring(saved_addr_log) &
-                     " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
+              -- report "SUPERVISOR_FAULT_WALKER: Setting fault_reg=1 for supervisor violation after walker, addr=0x" & slv_to_hstring(saved_addr_log) &
+                    --  -- " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
             else
               -- Valid access - update outputs and clear faults for successful translation
-              report "VALID_ACCESS: Translation successful" severity note;
+             --  -- report "VALID_ACCESS: Translation successful" severity note;
               phys_base := unsigned(atc_phys_base(hit_idx));
               offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
               phys_result := phys_base + offset;
@@ -1582,7 +1591,7 @@ begin
                 transparent => '0',                      -- Not a transparent translation
                 level => "011"                           -- Page translation (3 levels typical)
               );
-              report "VALID_ACCESS: phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
+             --  -- report "VALID_ACCESS: phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
             end if;
           else
             -- No ATC hit found after walker completion - this shouldn't happen normally
@@ -1597,9 +1606,9 @@ begin
             if walker_fault_ack_pending = '0' then
               fault_reg <= '0';  -- Only clear fault if not a faulted walker completion
             end if;
-            report "WALKER_COMPLETED: No ATC hit found after walker completion" &
-                   " walker_fault_ack_pending=" & std_logic'image(walker_fault_ack_pending) &
-                   " addr=0x" & slv_to_hstring(saved_addr_log) severity warning;
+            -- report "WALKER_COMPLETED: No ATC hit found after walker completion" &
+                   -- " walker_fault_ack_pending=" & std_logic'image(walker_fault_ack_pending) &
+                  --  -- " addr=0x" & slv_to_hstring(saved_addr_log) severity warning;
           end if; -- hit = '1'
           -- Always clear translation_pending when walker completes, regardless of result
           translation_pending <= '0';
@@ -1614,7 +1623,7 @@ begin
         if walker_fault = '0' and walker_fault_ack_pending = '1' then
           walker_fault_ack <= '0';
           walker_fault_ack_pending <= '0';
-          report "FAULT_ACK: Cleared walker fault acknowledgment" severity note;
+         --  -- report "FAULT_ACK: Cleared walker fault acknowledgment" severity note;
         end if;
       end if; -- walker_completed
       
@@ -1631,7 +1640,7 @@ begin
   -- MC68030 page table walker with proper descriptor traversal
   process(clk, nreset)
     variable table_index : integer;
-    variable desc_addr : std_logic_vector(31 downto 0);
+    variable desc_addr_v : std_logic_vector(31 downto 0);  -- Local variable for address calculation
     variable tmatch0, tmatch1 : std_logic;
     variable tci0, twp0, tci1, twp1 : std_logic;
     -- For CRP/SRP limit checking
@@ -1666,7 +1675,11 @@ begin
       walker_fault_status <= (others => '0');
       walker_completed <= '0';
       mem_req     <= '0';
+      mem_we      <= '0';
       mem_addr    <= (others => '0');
+      mem_wdat    <= (others => '0');
+      desc_update_needed <= '0';
+      desc_update_data   <= (others => '0');
     elsif rising_edge(clk) then
       -- Deadlock-proof state machine - no timeouts needed
       
@@ -1678,14 +1691,16 @@ begin
           if walk_req = '1' then
             -- Debug: Log walker startup for failing test addresses
             if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" or saved_addr_log = x"12345000" then
-              report "DEBUG_WALKER_START: addr=0x" & slv_to_hstring(saved_addr_log) &
-                     " fc=" & slv_to_string(saved_fc) & " rw=" & std_logic'image(saved_rw)
-                severity note;
+              -- report "DEBUG_WALKER_START: addr=0x" & slv_to_hstring(saved_addr_log) &
+                     -- " fc=" & slv_to_string(saved_fc) & " rw=" & std_logic'image(saved_rw)
+               --  -- severity note;
             end if;
             walk_level <= 0;
             walk_vpn  <= saved_addr_log;
             walk_fault <= '0';  -- Clear fault at start of walk
             walk_attr <= (others => '0');
+            mem_we <= '0';  -- Clear write enable at start of walk
+            desc_update_needed <= '0';  -- Clear descriptor update flag
             -- Initialize with TC default, will be updated from descriptor
             walk_page_shift <= tc_page_shift;
             walk_page_size  <= tc_page_size;
@@ -1698,13 +1713,13 @@ begin
             -- MC68030 Root Pointer: LOW word (bits 31-0) contains table address, HIGH word contains limit/DT
             if saved_fc(2) = '1' and tc_sre = '1' then -- Supervisor with SRE enabled
               walk_addr <= SRP_L(31 downto 4) & "0000"; -- Supervisor Root Pointer (LOW word = table address)
-              report "ROOT_POINTER: Using SRP for supervisor access with SRE=1" severity note;
+             --  -- report "ROOT_POINTER: Using SRP for supervisor access with SRE=1" severity note;
             else -- User or supervisor without SRE
               walk_addr <= CRP_L(31 downto 4) & "0000"; -- CPU Root Pointer (LOW word = table address)
               if saved_fc(2) = '1' then
-                report "ROOT_POINTER: Using CRP for supervisor access with SRE=0" severity note;
+               --  -- report "ROOT_POINTER: Using CRP for supervisor access with SRE=0" severity note;
               else
-                report "ROOT_POINTER: Using CRP for user access" severity note;
+               --  -- report "ROOT_POINTER: Using CRP for user access" severity note;
               end if;
             end if;
             wstate <= W_ROOT;
@@ -1743,9 +1758,9 @@ begin
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
-              report "LIMIT_VIOLATION: table_index=" & integer'image(table_index) &
-                     " limit(lower)=" & integer'image(to_integer(limit_value)) &
-                     " (L/U=0, must be >= limit)" severity note;
+              -- report "LIMIT_VIOLATION: table_index=" & integer'image(table_index) &
+                     -- " limit(lower)=" & integer'image(to_integer(limit_value)) &
+                     -- " (L/U=0, must be >= limit)" severity note;
               wstate <= W_FAULT;
             end if;
           else
@@ -1763,29 +1778,29 @@ begin
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
-              report "LIMIT_VIOLATION: table_index=" & integer'image(table_index) &
-                     " limit(upper)=" & integer'image(to_integer(limit_value)) &
-                     " (L/U=1, must be <= limit)" severity note;
+              -- report "LIMIT_VIOLATION: table_index=" & integer'image(table_index) &
+                     -- " limit(upper)=" & integer'image(to_integer(limit_value)) &
+                     -- " (L/U=1, must be <= limit)" severity note;
               wstate <= W_FAULT;
             end if;
           end if;
 
-          desc_addr := walk_addr(31 downto 4) & "0000"; -- Align to table boundary
-          desc_addr := std_logic_vector(unsigned(desc_addr) + to_unsigned(table_index * 4, 32));
+          desc_addr_v := walk_addr(31 downto 4) & "0000"; -- Align to table boundary
+          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
 
           -- Debug: Log walker state for failing test addresses
           if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" or saved_addr_log = x"12345000" then
-            report "DEBUG_WALKER: W_ROOT addr=0x" & slv_to_hstring(saved_addr_log) &
-                   " level=" & integer'image(walk_level) &
-                   " table_index=" & integer'image(table_index) &
-                   " desc_addr=0x" & slv_to_hstring(desc_addr)
-              severity note;
+            -- report "DEBUG_WALKER: W_ROOT addr=0x" & slv_to_hstring(saved_addr_log) &
+                   -- " level=" & integer'image(walk_level) &
+                   -- " table_index=" & integer'image(table_index) &
+                   -- " desc_addr=0x" & slv_to_hstring(desc_addr_v)
+             --  -- severity note;
           end if;
-          
+
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= desc_addr;
+            mem_addr <= desc_addr_v;
           elsif mem_ack = '1' then
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
@@ -1793,16 +1808,16 @@ begin
             mem_req <= '0';
             -- Debug: Log descriptor read for failing test addresses
             if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" or saved_addr_log = x"12345000" then
-              report "DEBUG_W_ROOT_DESC: addr=0x" & slv_to_hstring(saved_addr_log) &
-                     " descriptor_high=0x" & slv_to_hstring(mem_rdat) &
-                     " bits_1_0=" & std_logic'image(mem_rdat(1)) & std_logic'image(mem_rdat(0))
-                severity note;
+              -- report "DEBUG_W_ROOT_DESC: addr=0x" & slv_to_hstring(saved_addr_log) &
+                     -- " descriptor_high=0x" & slv_to_hstring(mem_rdat) &
+                     -- " bits_1_0=" & std_logic'image(mem_rdat(1)) & std_logic'image(mem_rdat(0))
+               --  -- severity note;
             end if;
             -- Check descriptor validity
             if mem_rdat(1 downto 0) = "00" then
               -- Invalid descriptor - fault immediately
               if saved_addr_log = x"12345000" then
-                report "DEBUG_INVALID: descriptor is invalid (bits 1:0 = 00)" severity note;
+               --  -- report "DEBUG_INVALID: descriptor is invalid (bits 1:0 = 00)" severity note;
               end if;
               walk_desc_is_long <= '0';  -- Clear format flag
               walk_fault <= '1';
@@ -1818,26 +1833,26 @@ begin
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
               -- Debug: Track where bus errors occur
-              report "BUS_ERROR_ROOT: Invalid descriptor at level=" & integer'image(walk_level) &
-                     " addr=0x" & slv_to_hstring(saved_addr_log) &
-                     " desc=0x" & slv_to_hstring(mem_rdat) severity note;
+              -- report "BUS_ERROR_ROOT: Invalid descriptor at level=" & integer'image(walk_level) &
+                     -- " addr=0x" & slv_to_hstring(saved_addr_log) &
+                    --  -- " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
             elsif desc_is_long(mem_rdat) then
               -- Long format (DT=11) - need to read LOW word at addr+4
-              report "W_ROOT: Long-format descriptor detected (DT=11), reading LOW word" severity note;
+             --  -- report "W_ROOT: Long-format descriptor detected (DT=11), reading LOW word" severity note;
               walk_desc_is_long <= '1';
               wstate <= W_ROOT_LOW;
             elsif desc_is_page(mem_rdat) then
               -- Early termination - this is a page descriptor (short format, DT=01)
               if saved_addr_log = x"12345000" then
-                report "DEBUG_PAGE: descriptor is page (bits 1:0 = 01)" severity note;
+               --  -- report "DEBUG_PAGE: descriptor is page (bits 1:0 = 01)" severity note;
               end if;
               walk_desc_is_long <= '0';  -- Short format
               wstate <= W_PAGE;
             else
               -- Table pointer (short format, DT=10) - continue to next level
               if saved_addr_log = x"12345000" then
-                report "DEBUG_TABLE: descriptor is table pointer (DT=10), continuing to W_PTR1" severity note;
+               --  -- report "DEBUG_TABLE: descriptor is table pointer (DT=10), continuing to W_PTR1" severity note;
               end if;
               walk_desc_is_long <= '0';  -- Short format
               walk_addr <= mem_rdat(31 downto 4) & "0000";
@@ -1847,30 +1862,30 @@ begin
           end if;
 
         when W_ROOT_LOW =>
-          -- Read LOW word of long-format descriptor at desc_addr+4
-          -- mem_addr should already be set correctly from previous state
+          -- Read LOW word of long-format descriptor at desc_addr_reg+4
+          -- desc_addr_reg was saved in W_ROOT state when memory request was issued
           if mem_req = '0' then
             -- Request LOW word at descriptor address + 4
             mem_req <= '1';
-            mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
-            report "W_ROOT_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
+            mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
+           --  -- report "W_ROOT_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr_reg) + 4)) severity note;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
             mem_req <= '0';
-            report "W_ROOT_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
+           --  -- report "W_ROOT_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
 
             -- Now we have both HIGH (walk_desc_high) and LOW (walk_desc_low) words
             -- Determine next state based on descriptor type
             if desc_is_page(walk_desc_high) then
               -- Page descriptor - go to W_PAGE for processing
-              report "W_ROOT_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
+             --  -- report "W_ROOT_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
               wstate <= W_PAGE;
             else
               -- Table descriptor - extract address from LOW word and continue
               walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
               walk_level <= walk_level + 1;
-              report "W_ROOT_LOW: Long-format table descriptor, continuing to W_PTR1" severity note;
+             --  -- report "W_ROOT_LOW: Long-format table descriptor, continuing to W_PTR1" severity note;
               wstate <= W_PTR1;
             end if;
           end if;
@@ -1878,17 +1893,18 @@ begin
         when W_PTR1 =>
           -- Read level 1 table descriptor - deadlock-proof design
           table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
-          desc_addr := walk_addr(31 downto 4) & "0000";
-          desc_addr := std_logic_vector(unsigned(desc_addr) + to_unsigned(table_index * 4, 32));
-          
+          desc_addr_v := walk_addr(31 downto 4) & "0000";
+          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
             if saved_addr_log = x"00400000" or saved_addr_log = x"12345000" then
-              report "W_PTR1: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr)
-                severity note;
+              -- report "W_PTR1: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr_v)
+               --  -- severity note;
             end if;
             mem_req <= '1';
-            mem_addr <= desc_addr;
+            mem_addr <= desc_addr_v;
+            desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR1_LOW state
           elsif mem_ack = '1' then
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
@@ -1896,10 +1912,10 @@ begin
             mem_req <= '0';
             -- Debug: Log descriptor read for Large Page Translation
             if saved_addr_log = x"00400000" or saved_addr_log = x"12345000" then
-              report "W_PTR1_DESC: addr=0x" & slv_to_hstring(saved_addr_log) &
-                     " descriptor_high=0x" & slv_to_hstring(mem_rdat) &
-                     " bits_1_0=" & std_logic'image(mem_rdat(1)) & std_logic'image(mem_rdat(0))
-                severity note;
+              -- report "W_PTR1_DESC: addr=0x" & slv_to_hstring(saved_addr_log) &
+                     -- " descriptor_high=0x" & slv_to_hstring(mem_rdat) &
+                     -- " bits_1_0=" & std_logic'image(mem_rdat(1)) & std_logic'image(mem_rdat(0))
+               --  -- severity note;
             end if;
             -- Force a known transition to prevent falling through to "when others"
             if mem_rdat(1 downto 0) = "00" then
@@ -1918,20 +1934,20 @@ begin
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
               -- Debug: Track where bus errors occur
-              report "BUS_ERROR_PTR1: Invalid descriptor at level=" & integer'image(walk_level) &
-                     " addr=0x" & slv_to_hstring(saved_addr_log) &
-                     " desc=0x" & slv_to_hstring(mem_rdat) severity note;
+              -- report "BUS_ERROR_PTR1: Invalid descriptor at level=" & integer'image(walk_level) &
+                     -- " addr=0x" & slv_to_hstring(saved_addr_log) &
+                    --  -- " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
               -- Debug: Log walker fault for Large Page Translation
               if saved_addr_log = x"00400000" then
-                report "W_PTR1_FAULT: addr=0x" & slv_to_hstring(saved_addr_log) &
-                       " invalid descriptor=0x" & slv_to_hstring(mem_rdat) &
-                       " at level=" & integer'image(walk_level)
-                  severity note;
+                -- report "W_PTR1_FAULT: addr=0x" & slv_to_hstring(saved_addr_log) &
+                       -- " invalid descriptor=0x" & slv_to_hstring(mem_rdat) &
+                       -- " at level=" & integer'image(walk_level)
+                 --  -- severity note;
               end if;
             elsif desc_is_long(mem_rdat) then
               -- Long format (DT=11) - need to read LOW word at addr+4
-              report "W_PTR1: Long-format descriptor detected (DT=11), reading LOW word" severity note;
+             --  -- report "W_PTR1: Long-format descriptor detected (DT=11), reading LOW word" severity note;
               walk_desc_is_long <= '1';
               wstate <= W_PTR1_LOW;
             elsif desc_is_page(mem_rdat) then
@@ -1943,7 +1959,7 @@ begin
               -- DT=10 at final level = short-format indirect descriptor
               walk_desc_is_long <= '0';  -- Short format indirect
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
-              report "W_PTR1: Short indirect descriptor detected (DT=10, TIC=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+             --  -- report "W_PTR1: Short indirect descriptor detected (DT=10, TIC=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
               -- Continue to next level (short format table descriptor)
@@ -1955,34 +1971,34 @@ begin
           end if;
 
         when W_PTR1_LOW =>
-          -- Read LOW word of long-format descriptor at desc_addr+4
+          -- Read LOW word of long-format descriptor at desc_addr_reg+4
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
-            report "W_PTR1_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
+            mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
+           --  -- report "W_PTR1_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr_reg) + 4)) severity note;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
             mem_req <= '0';
-            report "W_PTR1_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
+           --  -- report "W_PTR1_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
 
             -- Determine next state based on descriptor type
             if desc_is_page(walk_desc_high) then
               -- Page descriptor
-              report "W_PTR1_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
+             --  -- report "W_PTR1_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
               wstate <= W_PAGE;
             elsif tc_idx_bits(2) = 0 then
               -- TIC=0 means W_PTR1 is the final level (MC68030 spec section 9.5.3.2)
               -- DT=11 at final level = long-format indirect descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
-              report "W_PTR1_LOW: Long indirect descriptor (DT=11, TIC=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+             --  -- report "W_PTR1_LOW: Long indirect descriptor (DT=11, TIC=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
               -- Table descriptor - extract address from LOW word and continue
               walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
               walk_level <= walk_level + 1;
-              report "W_PTR1_LOW: Long-format table descriptor, continuing to W_PTR2" severity note;
+             --  -- report "W_PTR1_LOW: Long-format table descriptor, continuing to W_PTR2" severity note;
               wstate <= W_PTR2;
             end if;
           end if;
@@ -1990,25 +2006,26 @@ begin
         when W_PTR2 =>
           -- Read level 2 table descriptor - deadlock-proof design
           table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
-          desc_addr := walk_addr(31 downto 4) & "0000";
-          desc_addr := std_logic_vector(unsigned(desc_addr) + to_unsigned(table_index * 4, 32));
-          
+          desc_addr_v := walk_addr(31 downto 4) & "0000";
+          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
             if saved_addr_log = x"00400000" then
-              report "W_PTR2: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr)
-                severity note;
+              -- report "W_PTR2: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr_v)
+               --  severity note;
             end if;
             -- Debug: Log W_PTR2 access for failing test addresses
             if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" then
-              report "DEBUG_W_PTR2: addr=0x" & slv_to_hstring(saved_addr_log) &
-                     " level=" & integer'image(walk_level) &
-                     " table_index=" & integer'image(table_index) &
-                     " desc_addr=0x" & slv_to_hstring(desc_addr)
-                severity note;
+              -- report "DEBUG_W_PTR2: addr=0x" & slv_to_hstring(saved_addr_log) &
+                     -- " level=" & integer'image(walk_level) &
+                     -- " table_index=" & integer'image(table_index) &
+                     -- " desc_addr=0x" & slv_to_hstring(desc_addr_v)
+               --  severity note;
             end if;
             mem_req <= '1';
-            mem_addr <= desc_addr;
+            mem_addr <= desc_addr_v;
+            desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR2_LOW state
           elsif mem_ack = '1' then
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
@@ -2016,10 +2033,10 @@ begin
             mem_req <= '0';
             -- Debug: Log descriptor read for failing test addresses
             if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" then
-              report "DEBUG_W_PTR2_DESC: addr=0x" & slv_to_hstring(saved_addr_log) &
-                     " descriptor_high=0x" & slv_to_hstring(mem_rdat) &
-                     " bits_1_0=" & std_logic'image(mem_rdat(1)) & std_logic'image(mem_rdat(0))
-                severity note;
+              -- report "DEBUG_W_PTR2_DESC: addr=0x" & slv_to_hstring(saved_addr_log) &
+                     -- " descriptor_high=0x" & slv_to_hstring(mem_rdat) &
+                     -- " bits_1_0=" & std_logic'image(mem_rdat(1)) & std_logic'image(mem_rdat(0))
+               --  severity note;
             end if;
             -- Check descriptor validity
             if mem_rdat(1 downto 0) = "00" then
@@ -2038,20 +2055,20 @@ begin
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
               -- Debug: Track where bus errors occur
-              report "BUS_ERROR_PTR2: Invalid descriptor at level=" & integer'image(walk_level) &
-                     " addr=0x" & slv_to_hstring(saved_addr_log) &
-                     " desc=0x" & slv_to_hstring(mem_rdat) severity note;
+              -- report "BUS_ERROR_PTR2: Invalid descriptor at level=" & integer'image(walk_level) &
+                     -- " addr=0x" & slv_to_hstring(saved_addr_log) &
+                    --  -- " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
               -- Debug: Log walker fault for failing test addresses
               if saved_addr_log = x"12343000" then
-                report "DEBUG_WALKER_FAULT_PTR2: addr=0x" & slv_to_hstring(saved_addr_log) &
-                       " invalid descriptor=0x" & slv_to_hstring(mem_rdat) &
-                       " at level=" & integer'image(walk_level)
-                  severity note;
+                -- report "DEBUG_WALKER_FAULT_PTR2: addr=0x" & slv_to_hstring(saved_addr_log) &
+                       -- " invalid descriptor=0x" & slv_to_hstring(mem_rdat) &
+                       -- " at level=" & integer'image(walk_level)
+                 --  severity note;
               end if;
             elsif desc_is_long(mem_rdat) then
               -- Long format (DT=11) - need to read LOW word at addr+4
-              report "W_PTR2: Long-format descriptor detected (DT=11), reading LOW word" severity note;
+             --  -- report "W_PTR2: Long-format descriptor detected (DT=11), reading LOW word" severity note;
               walk_desc_is_long <= '1';
               wstate <= W_PTR2_LOW;
             elsif desc_is_page(mem_rdat) then
@@ -2063,7 +2080,7 @@ begin
               -- DT=10 at final level = short-format indirect descriptor
               walk_desc_is_long <= '0';  -- Short format indirect
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
-              report "W_PTR2: Short indirect descriptor detected (DT=10, TID=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+             --  -- report "W_PTR2: Short indirect descriptor detected (DT=10, TID=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
               -- Short format table descriptor
@@ -2075,34 +2092,34 @@ begin
           end if;
 
         when W_PTR2_LOW =>
-          -- Read LOW word of long-format descriptor at desc_addr+4
+          -- Read LOW word of long-format descriptor at desc_addr_reg+4
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
-            report "W_PTR2_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
+            mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
+           --  -- report "W_PTR2_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr_reg) + 4)) severity note;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
             mem_req <= '0';
-            report "W_PTR2_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
+           --  -- report "W_PTR2_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
 
             -- Determine next state based on descriptor type
             if desc_is_page(walk_desc_high) then
               -- Page descriptor
-              report "W_PTR2_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
+             --  -- report "W_PTR2_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
               wstate <= W_PAGE;
             elsif tc_idx_bits(3) = 0 then
               -- TID=0 means W_PTR2 is the final level (MC68030 spec section 9.5.3.2)
               -- DT=11 at final level = long-format indirect descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
-              report "W_PTR2_LOW: Long indirect descriptor (DT=11, TID=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+             --  -- report "W_PTR2_LOW: Long indirect descriptor (DT=11, TID=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
               -- Table descriptor - extract address from LOW word and continue
               walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
               walk_level <= walk_level + 1;
-              report "W_PTR2_LOW: Long-format table descriptor, continuing to W_PTR3" severity note;
+             --  -- report "W_PTR2_LOW: Long-format table descriptor, continuing to W_PTR3" severity note;
               wstate <= W_PTR3;
             end if;
           end if;
@@ -2110,13 +2127,14 @@ begin
         when W_PTR3 =>
           -- Final level - must be page descriptor - deadlock-proof design
           table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
-          desc_addr := walk_addr(31 downto 4) & "0000";
-          desc_addr := std_logic_vector(unsigned(desc_addr) + to_unsigned(table_index * 4, 32));
-          
+          desc_addr_v := walk_addr(31 downto 4) & "0000";
+          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= desc_addr;
+            mem_addr <= desc_addr_v;
+            desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR3_LOW state
           elsif mem_ack = '1' then
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
@@ -2138,13 +2156,13 @@ begin
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
               -- Debug: Track where bus errors occur
-              report "BUS_ERROR_PTR3: Invalid descriptor at level=" & integer'image(walk_level) &
-                     " addr=0x" & slv_to_hstring(saved_addr_log) &
-                     " desc=0x" & slv_to_hstring(mem_rdat) severity note;
+              -- report "BUS_ERROR_PTR3: Invalid descriptor at level=" & integer'image(walk_level) &
+                     -- " addr=0x" & slv_to_hstring(saved_addr_log) &
+                    --  -- " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
             elsif desc_is_long(mem_rdat) then
               -- Long format (DT=11) - need to read LOW word at addr+4
-              report "W_PTR3: Long-format descriptor detected (DT=11), reading LOW word" severity note;
+             --  -- report "W_PTR3: Long-format descriptor detected (DT=11), reading LOW word" severity note;
               walk_desc_is_long <= '1';
               wstate <= W_PTR3_LOW;
             elsif desc_is_page(mem_rdat) then
@@ -2157,29 +2175,29 @@ begin
               -- Target address is in bits 31:2 (must be 4-byte aligned)
               walk_desc_is_long <= '0';  -- Short format indirect
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
-              report "W_PTR3: Short indirect descriptor detected (DT=10), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+             --  -- report "W_PTR3: Short indirect descriptor detected (DT=10), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             end if;
           end if;
 
         when W_PTR3_LOW =>
-          -- Read LOW word of long-format descriptor at desc_addr+4
+          -- Read LOW word of long-format descriptor at desc_addr_reg+4
           -- At final level with DT=11, this is a long-format indirect descriptor (MC68030 spec 9.5.3.2)
           if mem_req = '0' then
             mem_req <= '1';
-            mem_addr <= std_logic_vector(unsigned(desc_addr) + 4);
-            report "W_PTR3_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr) + 4)) severity note;
+            mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
+           --  -- report "W_PTR3_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr_reg) + 4)) severity note;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process
             walk_desc_low <= mem_rdat;
             mem_req <= '0';
-            report "W_PTR3_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
+           --  -- report "W_PTR3_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
 
             -- At final level with DT=11, this is a LONG INDIRECT descriptor
             -- Target address is in LOW word bits 31:2 (longword aligned)
             -- Note: walk_desc_high has DT=11 (that's how we got here from W_PTR3)
             indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
-            report "W_PTR3_LOW: Long indirect descriptor, target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+           --  -- report "W_PTR3_LOW: Long indirect descriptor, target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
             wstate <= W_INDIRECT;
           end if;
 
@@ -2189,11 +2207,11 @@ begin
           if mem_req = '0' then
             mem_req <= '1';
             mem_addr <= indirect_addr;
-            report "W_INDIRECT: Fetching target descriptor at addr=0x" & slv_to_hstring(indirect_addr) severity note;
+           --  -- report "W_INDIRECT: Fetching target descriptor at addr=0x" & slv_to_hstring(indirect_addr) severity note;
           elsif mem_ack = '1' then
             -- Got target descriptor - validate it
             mem_req <= '0';
-            report "W_INDIRECT: Got target descriptor=0x" & slv_to_hstring(mem_rdat) severity note;
+           --  -- report "W_INDIRECT: Got target descriptor=0x" & slv_to_hstring(mem_rdat) severity note;
 
             -- Check target descriptor type - must be page (DT=01)
             -- MC68030: Nested indirect (target DT=10/11) causes bus error
@@ -2202,7 +2220,7 @@ begin
               walk_desc <= mem_rdat;
               walk_desc_high <= mem_rdat;
               walk_desc_is_long <= '0';  -- Target is always short format
-              report "W_INDIRECT: Valid page descriptor target, proceeding to W_PAGE" severity note;
+             --  -- report "W_INDIRECT: Valid page descriptor target, proceeding to W_PAGE" severity note;
               wstate <= W_PAGE;
             elsif mem_rdat(1 downto 0) = "00" then
               -- Invalid descriptor
@@ -2217,7 +2235,7 @@ begin
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
-              report "W_INDIRECT: Invalid target descriptor (DT=00)" severity note;
+             --  -- report "W_INDIRECT: Invalid target descriptor (DT=00)" severity note;
               wstate <= W_FAULT;
             else
               -- Nested indirect (DT=10 or DT=11) - bus error per MC68030 spec
@@ -2232,7 +2250,7 @@ begin
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
-              report "W_INDIRECT: Nested indirect descriptor (DT=" & slv_to_string(mem_rdat(1 downto 0)) & ") - bus error" severity note;
+             --  -- report "W_INDIRECT: Nested indirect descriptor (DT=" & slv_to_string(mem_rdat(1 downto 0)) & ") - bus error" severity note;
               wstate <= W_FAULT;
             end if;
           end if;
@@ -2253,9 +2271,9 @@ begin
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             -- Debug: Track where bus errors occur
-            report "BUS_ERROR_PAGE: Invalid page descriptor at level=" & integer'image(walk_level) &
-                   " addr=0x" & slv_to_hstring(saved_addr_log) &
-                   " desc=0x" & slv_to_hstring(walk_desc) severity note;
+            -- report "BUS_ERROR_PAGE: Invalid page descriptor at level=" & integer'image(walk_level) &
+                   -- " addr=0x" & slv_to_hstring(saved_addr_log) &
+                  --  -- " desc=0x" & slv_to_hstring(walk_desc) severity note;
             wstate <= W_FAULT;
           elsif not access_allowed(walk_desc_high, saved_fc, walk_desc_is_long) then
             -- Supervisor violation - user trying to access supervisor page
@@ -2286,7 +2304,7 @@ begin
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
-            report "WP_FAULT_WALKER: Write to WP page detected during walk, addr=0x" & slv_to_hstring(saved_addr_log) severity note;
+           --  -- report "WP_FAULT_WALKER: Write to WP page detected during walk, addr=0x" & slv_to_hstring(saved_addr_log) severity note;
           else
             -- MC68030: Page size is ALWAYS from TC register, never from descriptor
             -- Descriptor bits 3:2 are U (Used) and WP (Write Protect), NOT page size
@@ -2302,7 +2320,7 @@ begin
               walk_phys_base <= walk_desc_high(31 downto 8) & x"00";
             end if;
             -- Extract attributes - bit positions are same in both formats
-            walk_attr(3) <= NOT get_supervisor_bit(walk_desc_high, walk_desc_is_long); -- User accessible (inverted from S bit)
+            walk_attr(3) <= NOT get_supervisor_bit(walk_desc_high, walk_desc_is_long); -- U_ACC = NOT(S): 1=user accessible, 0=supervisor-only
             walk_attr(2) <= walk_desc_high(6); -- Cache inhibit (CI)
             walk_attr(1) <= walk_desc_high(4); -- Modified (M)
             walk_attr(0) <= walk_desc_high(2); -- Write protect (WP)
@@ -2310,16 +2328,52 @@ begin
 
             -- Debug: Log attribute extraction for long-format descriptors
             if walk_desc_is_long = '1' then
-              report "W_PAGE: Long-format descriptor, S=" & std_logic'image(get_supervisor_bit(walk_desc_high, walk_desc_is_long)) &
-                     " CI=" & std_logic'image(walk_desc_high(6)) &
-                     " M=" & std_logic'image(walk_desc_high(4)) &
-                     " WP=" & std_logic'image(walk_desc_high(2))
-                severity note;
+              -- report "W_PAGE: Long-format descriptor, S=" & std_logic'image(get_supervisor_bit(walk_desc_high, walk_desc_is_long)) &
+                     -- " CI=" & std_logic'image(walk_desc_high(6)) &
+                     -- " M=" & std_logic'image(walk_desc_high(4)) &
+                     -- " WP=" & std_logic'image(walk_desc_high(2))
+               --  severity note;
             end if;
 
+            -- MC68030 Issue #3/#4: U (Used) and M (Modified) bit tracking
+            -- U bit (bit 3): Set on any page access if not already set
+            -- M bit (bit 4): Set on write access if not already set
+            -- Note: These bits are in walk_desc_high for both short and long formats
+            if walk_desc_high(3) = '0' or (saved_rw = '0' and walk_desc_high(4) = '0') then
+              -- Need to update descriptor with U/M bits
+              desc_update_needed <= '1';
+              -- Prepare updated descriptor: set U bit, and M bit if write
+              desc_update_data <= walk_desc_high(31 downto 5) &
+                                  (walk_desc_high(4) or (not saved_rw)) &  -- M bit: set if write (saved_rw='0')
+                                  '1' &  -- U bit: always set
+                                  walk_desc_high(2 downto 0);
+              wstate <= W_UPDATE_DESC;
+            else
+              -- U and M bits already set appropriately, go straight to fill
+              wstate <= W_FILL;
+            end if;
+          end if;
+
+        when W_UPDATE_DESC =>
+          -- Write back descriptor with U/M bits set (MC68030 Issue #3/#4)
+          -- desc_addr_reg holds the address of the page descriptor (HIGH word)
+          -- desc_update_data holds the updated descriptor value
+          if mem_req = '0' then
+            mem_req <= '1';
+            mem_we <= '1';  -- Write operation
+            mem_addr <= desc_addr_reg;  -- Address of descriptor to update
+            mem_wdat <= desc_update_data;  -- Updated descriptor with U/M bits set
+          elsif mem_ack = '1' then
+            -- Write completed, proceed to fill ATC
+            mem_req <= '0';
+            mem_we <= '0';
+            desc_update_needed <= '0';
+            -- Update walk_desc_high with the written values for ATC fill
+            -- This ensures the M bit is reflected in the ATC entry
+            walk_attr(1) <= desc_update_data(4);  -- Update M bit in walk_attr
             wstate <= W_FILL;
           end if;
-          
+
         when W_FILL =>
           -- Fill ATC with translation result
           atc_log_base(atc_rr)  <= walk_log_base;
@@ -2332,11 +2386,11 @@ begin
           atc_valid(atc_rr)     <= '1';
           -- Debug: Log ATC fill for large page test
           if saved_addr_log = x"00400000" then
-            report "DEBUG_ATC_FILL: addr=0x" & slv_to_hstring(saved_addr_log) &
-                   " filling ATC[" & integer'image(atc_rr) & "]" &
-                   " shift=" & integer'image(walk_page_shift) &
-                   " page_size=" & integer'image(walk_page_size)
-              severity note;
+            -- report "DEBUG_ATC_FILL: addr=0x" & slv_to_hstring(saved_addr_log) &
+                   -- " filling ATC[" & integer'image(atc_rr) & "]" &
+                   -- " shift=" & integer'image(walk_page_shift) &
+                   -- " page_size=" & integer'image(walk_page_size)
+             --  severity note;
           end if;
           -- Delay completion signal by one cycle to ensure ATC write is visible
           wstate <= W_COMPLETE;  -- New state to delay completion
@@ -2352,13 +2406,13 @@ begin
           walker_completed <= '1';
           
           -- Debug: Report walker completion details
-          report "WALKER_COMPLETED: addr=0x" & slv_to_hstring(saved_addr_log) & 
-                 " fc=" & slv_to_string(saved_fc) & 
-                 " rw=" & std_logic'image(saved_rw) &
-                 " desc=0x" & slv_to_hstring(walk_desc) &
-                 " attr=" & slv_to_string(walk_attr) &
-                 " fault=" & std_logic'image(walk_fault)
-            severity note;
+          -- report "WALKER_COMPLETED: addr=0x" & slv_to_hstring(saved_addr_log) & 
+                 -- " fc=" & slv_to_string(saved_fc) & 
+                 -- " rw=" & std_logic'image(saved_rw) &
+                 -- " desc=0x" & slv_to_hstring(walk_desc) &
+                 -- " attr=" & slv_to_string(walk_attr) &
+                 -- " fault=" & std_logic'image(walk_fault)
+           --  severity note;
           
           wstate <= W_IDLE;
           
@@ -2366,7 +2420,7 @@ begin
           -- Page fault occurred - fault status already set in previous state
           -- Hold walker_fault signal until main process acknowledges it
           -- Don't clear walker_fault here - let main process clear it when consumed
-          report "W_FAULT: Setting walker_completed=1 with fault status=0x" & slv_to_hstring(walker_fault_status) severity note;
+         --  -- report "W_FAULT: Setting walker_completed=1 with fault status=0x" & slv_to_hstring(walker_fault_status) severity note;
           walker_completed <= '1';  -- Signal that walker completed (with fault)
           wstate <= W_IDLE;
           

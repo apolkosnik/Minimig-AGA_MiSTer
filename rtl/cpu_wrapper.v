@@ -166,7 +166,10 @@ assign cache_ramaddr[22:1]  = cache_addr[22:1];
 // walker_addr_latch is declared outside generate block, contains 32-bit physical address
 // Walker state phases (computed from walker_state which is outside generate block)
 // WALKER_READ_LOW=2, WALKER_WAIT_LOW=3, WALKER_READ_HIGH=4, WALKER_WAIT_HIGH=5
-wire walker_read_low_phase_global = (walker_state == 3'd2) | (walker_state == 3'd3);
+// WALKER_WRITE_LOW=7, WALKER_WAIT_WR_LOW=8, WALKER_WRITE_HIGH=9, WALKER_WAIT_WR_HIGH=10
+wire walker_read_low_phase_global = (walker_state == 4'd2) | (walker_state == 4'd3);
+wire walker_write_low_phase_global = (walker_state == 4'd7) | (walker_state == 4'd8);
+wire walker_write_high_phase_global = (walker_state == 4'd9) | (walker_state == 4'd10);
 // Compute walker address for low word (bits 23:1) and high word (+1)
 wire [31:1] walker_addr_word = walker_read_low_phase_global ? {walker_addr_latch[31:2], 1'b0} :
                                                                {walker_addr_latch[31:2], 1'b1};
@@ -249,21 +252,32 @@ always @* begin
 			chip_rw      = 1;  // Read operation
 			chip_uds     = 0;  // Upper byte strobe active (low)
 			chip_lds     = 0;  // Lower byte strobe active (low)
+			chip_din     = cpu_dout_p;  // Not used for reads
+		end else if (USE_68030_CACHE && walker_writing) begin
+			// MC68030 U/M bit: Walker writing descriptor update
+			chip_addr    = walker_chip_addr;
+			chip_as      = 0;  // Address strobe active (low)
+			chip_rw      = 0;  // Write operation
+			chip_uds     = 0;  // Upper byte strobe active (low)
+			chip_lds     = 0;  // Lower byte strobe active (low)
+			// Select low or high word from latched write data
+			chip_din     = walker_write_low_phase ? walker_wdata_latch[15:0] : walker_wdata_latch[31:16];
 		end else if (USE_68030_CACHE && walker_active) begin
-			// Walker active but not reading (transitional states) - hold address, use CPU strobes
+			// Walker active but not reading/writing (transitional states) - hold address, use CPU strobes
 			chip_addr    = walker_chip_addr;
 			chip_as      = c_as;
 			chip_rw      = c_rw;
 			chip_uds     = c_uds;
 			chip_lds     = c_lds;
+			chip_din     = cpu_dout_p;
 		end else begin
 			chip_addr    = cpu_addr_p[23:1];
 			chip_as      = c_as;
 			chip_rw      = c_rw;
 			chip_uds     = c_uds;
 			chip_lds     = c_lds;
+			chip_din     = cpu_dout_p;
 		end
-		chip_din     = cpu_dout_p;
 		chip_data    = chipdout_i;
 		fastchip_sel = cpu_req & !cpu_addr_p[31:24];
 		fastchip_lw  = longword;
@@ -304,7 +318,9 @@ wire [31:0] pmmu_addr_log_p;
 wire [31:0] pmmu_addr_phys_p;
 wire        pmmu_cache_inhibit_p;  // BUG #126 FIX: Cache inhibit from PMMU (was unconnected)
 wire        pmmu_walker_req_p;
+wire        pmmu_walker_we_p;    // MC68030 U/M bit: write enable for descriptor updates
 wire [31:0] pmmu_walker_addr_p;
+wire [31:0] pmmu_walker_wdat_p;  // MC68030 U/M bit: write data
 reg         pmmu_walker_ack_p;
 reg  [31:0] pmmu_walker_data_p;
 
@@ -314,9 +330,12 @@ reg  [31:0] pmmu_walker_data_p;
 //   - Z3/Z2 Fast RAM: uses walker_addr_word[31:1] -> walker_ramaddr -> ramsel path
 // Page tables in Z3 RAM above 16MB are fully supported via the ramaddr path.
 reg         walker_active;
-reg   [2:0] walker_state;  // BUG #124 FIX: Walker state visible for bus mux
+reg   [3:0] walker_state;  // BUG #124 FIX: Walker state visible for bus mux (4-bit for write states)
+reg  [31:0] walker_wdata_latch;  // MC68030 U/M bit: Latch write data from PMMU
 wire [23:1] walker_chip_addr;  // For Chip RAM only (inherently <2MB)
 wire        walker_reading;  // BUG #124 FIX: Walker actively reading memory
+wire        walker_writing;  // MC68030 U/M bit: Walker actively writing memory
+wire        walker_write_low_phase;  // MC68030 U/M bit: Writing low word
 reg  [31:1] walker_addr_latch;  // BUG #135 FIX: Declare outside generate for chipreq logic
 
 // Cache interface signals (68030 only)
@@ -404,7 +423,9 @@ cpu_inst_p
   .pmmu_cache_inhibit(pmmu_cache_inhibit_p),  // BUG #126 FIX: Cache inhibit from PMMU
   // PMMU walker memory interface
   .pmmu_walker_req(pmmu_walker_req_p),
+  .pmmu_walker_we(pmmu_walker_we_p),    // MC68030 U/M bit: write enable
   .pmmu_walker_addr(pmmu_walker_addr_p),
+  .pmmu_walker_wdat(pmmu_walker_wdat_p),  // MC68030 U/M bit: write data
   .pmmu_walker_ack(pmmu_walker_ack_p),
   .pmmu_walker_data(pmmu_walker_data_p),
   // Cache operation address
@@ -593,29 +614,45 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	reg [15:0] walker_data_low;
 
 	// BUG #138: Walker timeout counter - abort if no memory response
+	// On timeout, returns invalid descriptor (0xDEADDEA0, DT=00) to trigger PMMU fault
+	// The walker_timeout_error signal also unblocks clkena_in to allow CPU recovery
 	reg [11:0] walker_timeout_cnt;  // 12-bit counter = 4096 cycles max (~36us @ 114MHz)
-	reg walker_timeout_error;       // Set when walker times out
+	reg walker_timeout_error /* synthesis preserve */;  // Set when walker times out
 	localparam WALKER_TIMEOUT_LIMIT = 12'd2048;  // Timeout after 2048 cycles (~18us)
 
-	localparam WALKER_IDLE       = 3'd0;
-	localparam WALKER_START      = 3'd1;
-	localparam WALKER_READ_LOW   = 3'd2;
-	localparam WALKER_WAIT_LOW   = 3'd3;
-	localparam WALKER_READ_HIGH  = 3'd4;
-	localparam WALKER_WAIT_HIGH  = 3'd5;
-	localparam WALKER_DONE       = 3'd6;
+	localparam WALKER_IDLE       = 4'd0;
+	localparam WALKER_START      = 4'd1;
+	localparam WALKER_READ_LOW   = 4'd2;
+	localparam WALKER_WAIT_LOW   = 4'd3;
+	localparam WALKER_READ_HIGH  = 4'd4;
+	localparam WALKER_WAIT_HIGH  = 4'd5;
+	localparam WALKER_DONE       = 4'd6;
+	// MC68030 U/M bit: Write states for descriptor updates
+	localparam WALKER_WRITE_LOW  = 4'd7;
+	localparam WALKER_WAIT_WR_LOW  = 4'd8;
+	localparam WALKER_WRITE_HIGH = 4'd9;
+	localparam WALKER_WAIT_WR_HIGH = 4'd10;
 
 	// Address multiplexing: Walker overrides CPU address during active states
 	// Walker addresses are byte addresses, chip_addr is word address (23:1)
 	// To read 32-bit descriptor: read word at addr[23:1], then addr[23:1]+1
 	wire walker_read_low_phase = (walker_state == WALKER_READ_LOW) | (walker_state == WALKER_WAIT_LOW);
 	wire walker_read_high_phase = (walker_state == WALKER_READ_HIGH) | (walker_state == WALKER_WAIT_HIGH);
+	// MC68030 U/M bit: Write phase detection
+	wire walker_write_low_phase_i = (walker_state == WALKER_WRITE_LOW) | (walker_state == WALKER_WAIT_WR_LOW);
+	wire walker_write_high_phase_i = (walker_state == WALKER_WRITE_HIGH) | (walker_state == WALKER_WAIT_WR_HIGH);
+	wire walker_writing_i = walker_write_low_phase_i | walker_write_high_phase_i;
+	// Assign to outer wires for bus mux visibility
+	assign walker_writing = walker_writing_i;
+	assign walker_write_low_phase = walker_write_low_phase_i;
 	// BUG #124 FIX: Walker must also drive address strobe and data strobes during read phases
 	// walker_reading declared outside generate block, assigned here
 	assign walker_reading = walker_read_low_phase | walker_read_high_phase;
 	// Chip RAM path only - Z3 RAM uses walker_ramaddr with full 32-bit walker_addr_word
 	wire [23:1] walker_base_addr = walker_addr_latch[23:1];  // Lower 23 bits for chip_addr bus
-	assign walker_chip_addr = walker_read_low_phase ?
+	// Address mux for read/write operations
+	wire walker_low_phase = walker_read_low_phase | walker_write_low_phase_i;
+	assign walker_chip_addr = walker_low_phase ?
 	                          walker_base_addr :           // Low word at base address
 	                          (walker_base_addr + 1'b1);   // High word at base+1
 
@@ -627,6 +664,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 			walker_data_low <= 0;
 			walker_addr_latch <= 0;
 			walker_active <= 0;
+			walker_wdata_latch <= 0;  // MC68030 U/M bit: Reset write data latch
 			// BUG #138: Reset timeout counter and error flag
 			walker_timeout_cnt <= 0;
 			walker_timeout_error <= 0;
@@ -648,7 +686,14 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				WALKER_START: begin
 					// Wait one cycle for CPU to stall (clkena_in gated low)
 					walker_active <= 1;  // Walker now owns the bus
-					walker_state <= WALKER_READ_LOW;
+					// MC68030 U/M bit: Check if this is a write operation
+					if (pmmu_walker_we_p) begin
+						// Write operation - latch data and start write sequence
+						walker_wdata_latch <= pmmu_walker_wdat_p;
+						walker_state <= WALKER_WRITE_LOW;
+					end else begin
+						walker_state <= WALKER_READ_LOW;
+					end
 				end
 
 				WALKER_READ_LOW: begin
@@ -712,6 +757,49 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						walker_state <= WALKER_IDLE;
 					end
 				end
+
+				// MC68030 U/M bit: Write states for descriptor updates
+				WALKER_WRITE_LOW: begin
+					// Drive walker address with LSB=0 for low word
+					// Write data (walker_wdata_latch[15:0]) is driven via chip_din mux
+					walker_timeout_cnt <= 0;
+					walker_state <= WALKER_WAIT_WR_LOW;
+				end
+
+				WALKER_WAIT_WR_LOW: begin
+					// Wait for write to complete
+					if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						// Timeout - go to done anyway
+						walker_timeout_error <= 1;
+						walker_state <= WALKER_DONE;
+					end else if (chipready | ramready | fastchip_ready) begin
+						// Low word written, now write high word
+						walker_state <= WALKER_WRITE_HIGH;
+					end else begin
+						walker_timeout_cnt <= walker_timeout_cnt + 1;
+					end
+				end
+
+				WALKER_WRITE_HIGH: begin
+					// Drive walker address with LSB=1 for high word
+					// Write data (walker_wdata_latch[31:16]) is driven via chip_din mux
+					walker_timeout_cnt <= 0;
+					walker_state <= WALKER_WAIT_WR_HIGH;
+				end
+
+				WALKER_WAIT_WR_HIGH: begin
+					// Wait for write to complete
+					if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						// Timeout - go to done anyway
+						walker_timeout_error <= 1;
+						walker_state <= WALKER_DONE;
+					end else if (chipready | ramready | fastchip_ready) begin
+						// Write complete
+						walker_state <= WALKER_DONE;
+					end else begin
+						walker_timeout_cnt <= walker_timeout_cnt + 1;
+					end
+				end
 			endcase
 		end
 	end
@@ -725,13 +813,16 @@ end else begin : gen_no_68030_cache
 	// No walker arbiter when cache disabled
 	assign walker_chip_addr = 23'b0;  // Unused
 	assign walker_reading = 1'b0;     // BUG #124: No walker when cache disabled
+	assign walker_writing = 1'b0;     // MC68030 U/M bit: No walker when cache disabled
+	assign walker_write_low_phase = 1'b0;
 
 	always @(posedge clk) begin
 		if (~reset) begin
 			pmmu_walker_ack_p <= 0;
 			walker_active <= 0;
-			walker_state <= 3'd0;  // BUG #124: Keep state at 0
+			walker_state <= 4'd0;  // BUG #124: Keep state at 0
 			pmmu_walker_data_p <= 0;
+			walker_wdata_latch <= 0;  // MC68030 U/M bit
 		end else begin
 			pmmu_walker_ack_p <= 0;
 			pmmu_walker_data_p <= 0;
@@ -792,10 +883,11 @@ reg       chipreq;
 reg [2:0] cpu_ipl;
 
 // BUG #135 FIX: Walker chip RAM access detection
-// When walker is reading from chip RAM (address below 2MB), it needs to trigger
+// When walker is reading from or writing to chip RAM (address below 2MB), it needs to trigger
 // the chipset state machine. Otherwise chipready never goes high and walker hangs.
 // Chip RAM is $000000-$1FFFFF = bits 31:21 all zero
-wire walker_chip_ram = USE_68030_CACHE && walker_reading && !walker_addr_latch[31] &&
+// MC68030 U/M bit: Include walker writes for descriptor updates
+wire walker_chip_ram = USE_68030_CACHE && (walker_reading | walker_writing) && !walker_addr_latch[31] &&
                        !walker_addr_latch[30] && !walker_addr_latch[29] &&
                        !walker_addr_latch[28] && !walker_addr_latch[27] &&
                        !walker_addr_latch[26] && !walker_addr_latch[25] &&

@@ -125,7 +125,9 @@ begin
   cache_op_line_idx <= to_integer(unsigned(cache_op_addr(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
   cache_op_tag      <= cache_op_addr(31 downto ADDR_BITS+OFFSET_BITS);
   -- Page mask for 4KB pages (MC68030 standard page size)
-  cache_op_page_mask <= cache_op_addr(31 downto 12) & (11 downto ADDR_BITS+OFFSET_BITS => '0');
+  -- Note: ADDR_BITS + OFFSET_BITS = 8, so we need bits 11:8 = 4 bits of zeros
+  -- Using explicit zeros for better synthesis tool compatibility
+  cache_op_page_mask <= cache_op_addr(31 downto 12) & "0000";
 
   -- Instruction Cache Logic
   process(clk, nreset)
