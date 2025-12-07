@@ -170,7 +170,8 @@ architecture rtl of TG68K_PMMU_030 is
   -- MC68030 page table walker FSM
   -- Added W_*_LOW states for reading LOW word of long-format (64-bit) descriptors
   -- Added W_INDIRECT states for indirect descriptor support (MC68030 spec section 9.5.3.2)
-  type walk_state_t is (W_IDLE, W_ROOT, W_ROOT_LOW, W_PTR1, W_PTR1_LOW, W_PTR2, W_PTR2_LOW, W_PTR3, W_PTR3_LOW, W_INDIRECT, W_PAGE, W_UPDATE_DESC, W_FILL, W_COMPLETE, W_FAULT);
+  -- BUG #164 FIX: Added W_INDIRECT_LOW for long-format indirect descriptor targets
+  type walk_state_t is (W_IDLE, W_ROOT, W_ROOT_LOW, W_PTR1, W_PTR1_LOW, W_PTR2, W_PTR2_LOW, W_PTR3, W_PTR3_LOW, W_INDIRECT, W_INDIRECT_LOW, W_PAGE, W_UPDATE_DESC, W_FILL, W_COMPLETE, W_FAULT);
   signal wstate    : walk_state_t := W_IDLE;
   
   -- Walker bookkeeping
@@ -223,6 +224,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal walk_global    : std_logic := '0'; -- G bit from long-format descriptor (bit 10)
   signal walk_supervisor : std_logic := '0'; -- BUG #157 FIX: Cumulative S bit from TABLE descriptors
   signal indirect_addr  : std_logic_vector(31 downto 0) := (others => '0'); -- Target address for indirect descriptor
+  signal indirect_target_long : std_logic := '0'; -- BUG #164 FIX: DT=11 indirect -> long-format target
 
   -- BUG #155 FIX: MC68030 table descriptor limit checking (applies to next level index)
   -- Only long-format (DT=11) table descriptors have limit fields
@@ -2070,6 +2072,7 @@ begin
               -- DT=10 at final level = short-format indirect descriptor
               walk_desc_is_long <= '0';  -- Short format indirect
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
+              indirect_target_long <= '0';  -- BUG #164 FIX: DT=10 -> short-format target
              --  -- report "W_PTR1: Short indirect descriptor detected (DT=10, TIC=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
@@ -2115,6 +2118,7 @@ begin
               -- DT=11 at final level = long-format indirect descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
+              indirect_target_long <= '1';  -- BUG #164 FIX: DT=11 -> long-format target
              --  -- report "W_PTR1_LOW: Long indirect descriptor (DT=11, TIC=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
@@ -2248,6 +2252,7 @@ begin
               -- DT=10 at final level = short-format indirect descriptor
               walk_desc_is_long <= '0';  -- Short format indirect
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
+              indirect_target_long <= '0';  -- BUG #164 FIX: DT=10 -> short-format target
              --  -- report "W_PTR2: Short indirect descriptor detected (DT=10, TID=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
@@ -2293,6 +2298,7 @@ begin
               -- DT=11 at final level = long-format indirect descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
+              indirect_target_long <= '1';  -- BUG #164 FIX: DT=11 -> long-format target
              --  -- report "W_PTR2_LOW: Long indirect descriptor (DT=11, TID=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
@@ -2400,6 +2406,7 @@ begin
               -- Target address is in bits 31:2 (must be 4-byte aligned)
               walk_desc_is_long <= '0';  -- Short format indirect
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
+              indirect_target_long <= '0';  -- BUG #164 FIX: DT=10 -> short-format target
              --  -- report "W_PTR3: Short indirect descriptor detected (DT=10), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             end if;
@@ -2432,6 +2439,7 @@ begin
             -- Target address is in LOW word bits 31:2 (longword aligned)
             -- Note: walk_desc_high has DT=11 (that's how we got here from W_PTR3)
             indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
+            indirect_target_long <= '1';  -- BUG #164 FIX: DT=11 -> long-format target
            --  -- report "W_PTR3_LOW: Long indirect descriptor, target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
             wstate <= W_INDIRECT;
           end if;
@@ -2462,12 +2470,18 @@ begin
             -- Check target descriptor type - must be page (DT=01)
             -- MC68030: Nested indirect (target DT=10/11) causes bus error
             if mem_rdat(1 downto 0) = "01" then
-              -- Valid page descriptor - save and proceed to W_PAGE
-              walk_desc <= mem_rdat;
+              -- Valid page descriptor - check if short or long format target
               walk_desc_high <= mem_rdat;
-              walk_desc_is_long <= '0';  -- Target is always short format
-             --  -- report "W_INDIRECT: Valid page descriptor target, proceeding to W_PAGE" severity note;
-              wstate <= W_PAGE;
+              if indirect_target_long = '0' then
+                -- BUG #164: Short-format target - done, proceed to W_PAGE
+                walk_desc <= mem_rdat;
+                walk_desc_is_long <= '0';
+                wstate <= W_PAGE;
+              else
+                -- BUG #164 FIX: Long-format target - need LOW word
+                walk_desc_is_long <= '1';
+                wstate <= W_INDIRECT_LOW;
+              end if;
             elsif mem_rdat(1 downto 0) = "00" then
               -- Invalid descriptor (DT=00)
               walker_fault <= '1';
@@ -2499,6 +2513,31 @@ begin
              --  -- report "W_INDIRECT: Nested indirect descriptor - invalid" severity note;
               wstate <= W_FAULT;
             end if;
+          end if;
+
+        when W_INDIRECT_LOW =>
+          -- BUG #164 FIX: Read LOW word of long-format target page descriptor
+          -- Per MC68030 spec 9.5.3.2: DT=11 indirect -> long-format page descriptor target
+          if mem_req = '0' then
+            mem_req <= '1';
+            mem_addr <= std_logic_vector(unsigned(indirect_addr) + 4);
+          elsif mem_berr = '1' then
+            mem_req <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
+          elsif mem_ack = '1' then
+            -- Got LOW word of long-format page descriptor target
+            walk_desc_low <= mem_rdat;
+            walk_desc <= mem_rdat;  -- For W_PAGE: walk_desc has LOW word for address extraction
+            mem_req <= '0';
+            -- Proceed to W_PAGE with complete long-format page descriptor
+            wstate <= W_PAGE;
           end if;
 
         when W_PAGE =>
