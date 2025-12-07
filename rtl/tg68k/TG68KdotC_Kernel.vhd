@@ -336,12 +336,14 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_trapv			: bit;
 	signal trap_interrupt	: bit;
 	signal trap_mmu_config	: bit;  -- MC68030 MMU Configuration Exception (vector 56)
+	signal trap_mmu_berr    : bit;  -- BUG #159: MC68030 MMU Bus Error (vector 61)
 	-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not used on MC68030
 	signal trapmake			: bit;
 	signal trapd				: bit;
 	signal trap_SR				: std_logic_vector(7 downto 0);
 	signal make_trace			: std_logic;
 	signal make_berr			: std_logic;
+	signal make_mmu_berr     : std_logic;  -- BUG #159: Distinguish MMU bus error from normal BERR
 	signal useStackframe2	: std_logic;
 	
 	signal set_stop			: bit;
@@ -1408,6 +1410,9 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				IF trap_mmu_config='1' THEN
 					trap_vector(9 downto 0) <= "11" & X"80";  -- Vector 56 (0xE0) - MMU Configuration Error
 				END IF;
+				IF trap_mmu_berr='1' THEN
+					trap_vector(9 downto 0) <= "00" & X"F4";  -- Vector 61 (0xF4) - MC68030 MMU Bus Error
+				END IF;
 				-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not MC68030
 			END IF;
 		END IF;
@@ -1649,14 +1654,23 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					exe_datatype <= set_datatype;
 					exe_opcode <= opcode;
 
-					if(trap_berr='0') then
+					if(trap_berr='0' and trap_mmu_berr='0') then
 						if pmmu_tc_en = '1' then
 							make_berr <= (berr OR make_berr OR pmmu_fault);  -- Include PMMU faults when MMU enabled
+							-- BUG #159 FIX: Track if PMMU fault is a bus error (B bit = pmmu_fault_stat(15))
+							-- This determines whether to use vector 2 (normal BERR) or vector 61 (MMU BERR)
+							if pmmu_fault = '1' and pmmu_fault_stat(15) = '1' then
+								make_mmu_berr <= '1';
+							else
+								make_mmu_berr <= make_mmu_berr;  -- Keep previous value
+							end if;
 						else
 							make_berr <= (berr OR make_berr);  -- No PMMU faults when MMU disabled
+							make_mmu_berr <= '0';
 						end if;
 					else
 						make_berr <= '0';
+						make_mmu_berr <= '0';
 					end if;
 
 					stop <= set_stop OR (stop AND NOT setinterrupt);
@@ -1665,14 +1679,21 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						trap_trace <= '0';
 --						TG68_PC_word <= '0';
 						make_berr <= '0';
+						make_mmu_berr <= '0';  -- BUG #159: Clear MMU BERR flag
 						trap_berr <= '0';
+						trap_mmu_berr <= '0';  -- BUG #159: Clear MMU BERR trap
 						IF make_trace='1' THEN
 							trap_trace <= '1';
 						ELSIF make_berr='1' THEN
-							trap_berr <= '1';
-						ELSE	
+							-- BUG #159 FIX: Distinguish MMU bus error (vector 61) from normal BERR (vector 2)
+							IF make_mmu_berr='1' THEN
+								trap_mmu_berr <= '1';  -- Use vector 61 for MMU bus error
+							ELSE
+								trap_berr <= '1';  -- Use vector 2 for normal bus error
+							END IF;
+						ELSE
 							rIPL_nr <= IPL_nr;
-							IPL_vec <= "00011"&IPL_nr;            --	TH		
+							IPL_vec <= "00011"&IPL_nr;            --	TH
 							trap_interrupt <= '1';
 						END IF;
 					END IF;	
@@ -1960,7 +1981,7 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 						SVmode <= preSVmode;
 					END IF;	
 				END IF;
-				IF trap_berr='1' OR trap_illegal='1' OR trap_addr_error='1' OR trap_priv='1' OR trap_1010='1' OR trap_1111='1' OR trap_mmu_config='1' THEN
+				IF trap_berr='1' OR trap_illegal='1' OR trap_addr_error='1' OR trap_priv='1' OR trap_1010='1' OR trap_1111='1' OR trap_mmu_config='1' OR trap_mmu_berr='1' THEN
 					make_trace <= '0';
 					FlagsSR(7) <= '0';
 				END IF;
@@ -2067,6 +2088,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		trap_trap <='0';
 		trap_trapv <= '0';
 		trap_mmu_config <= '0';
+		-- Note: trap_mmu_berr is NOT set here - only in sequencer process (BUG #159)
 		trapmake <='0';
 		set_vectoraddr <='0';
 		writeSR <= '0';

@@ -315,11 +315,7 @@ wire [31:0] pmmu_walker_addr_p;
 wire [31:0] pmmu_walker_wdat_p;  // MC68030 U/M bit: write data
 reg         pmmu_walker_ack_p;
 reg  [31:0] pmmu_walker_data_p;
-wire        pmmu_walker_berr_p;  // MC68030: Bus error during table walk (sets MMUSR B bit)
-// TODO: Connect to actual memory bus error signal when available
-// For now, tie to 0 - the walker_timeout_error is a system-level safety mechanism
-// and is separate from true bus errors (which would set MMUSR B bit)
-assign pmmu_walker_berr_p = 1'b0;
+reg         pmmu_walker_berr_p;  // BUG #156 FIX: Bus error during table walk (sets MMUSR B bit)
 
 // PMMU walker address mux signals (for bus arbitration)
 // NOTE: Walker supports full 32-bit addressing:
@@ -659,6 +655,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 			walker_state <= WALKER_IDLE;
 			pmmu_walker_ack_p <= 0;
 			pmmu_walker_data_p <= 0;
+			pmmu_walker_berr_p <= 0;  // BUG #156 FIX: Reset BERR signal
 			walker_data_low <= 0;
 			walker_addr_latch <= 0;
 			walker_active <= 0;
@@ -670,6 +667,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 			case (walker_state)
 				WALKER_IDLE: begin
 					pmmu_walker_ack_p <= 0;
+					pmmu_walker_berr_p <= 0;  // BUG #156 FIX: Clear BERR at start of new walk
 					walker_active <= 0;
 					// BUG #138: Reset timeout counter and error flag when idle
 					walker_timeout_cnt <= 0;
@@ -705,12 +703,12 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				WALKER_WAIT_LOW: begin
 					// BUG #138: Check for timeout first
 					if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
-						// Timeout - signal error and return to idle
+						// BUG #156 FIX: Timeout is a bus error - assert BERR signal
+						// MC68030 spec: Bus errors during table walk set MMUSR B bit
 						walker_timeout_error <= 1;
-						// BUG #140: Use invalid descriptor (bits 1:0 = 00) so PMMU generates fault
-						// 0xDEADDEAD had bits 1:0 = 01 which is valid page descriptor!
-						pmmu_walker_data_p <= 32'hDEADDEA0;  // Invalid descriptor pattern
-						walker_state <= WALKER_DONE;  // Go to DONE to signal completion with error
+						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
+						pmmu_walker_data_p <= 32'h0;  // Data doesn't matter when BERR is set
+						walker_state <= WALKER_DONE;
 					end else if (chipready | ramready | fastchip_ready) begin
 						// Capture low 16 bits
 						walker_data_low <= cpu_din;
@@ -731,11 +729,11 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				WALKER_WAIT_HIGH: begin
 					// BUG #138: Check for timeout first
 					if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
-						// Timeout - signal error and return to idle
+						// BUG #156 FIX: Timeout is a bus error - assert BERR signal
 						walker_timeout_error <= 1;
-						// BUG #140: Use invalid descriptor (bits 1:0 = 00) so PMMU generates fault
-						pmmu_walker_data_p <= 32'hDEADDEA0;  // Invalid descriptor pattern
-						walker_state <= WALKER_DONE;  // Go to DONE to signal completion with error
+						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
+						pmmu_walker_data_p <= 32'h0;
+						walker_state <= WALKER_DONE;
 					end else if (chipready | ramready | fastchip_ready) begin
 						// Capture high 16 bits and assemble 32-bit descriptor
 						pmmu_walker_data_p <= {cpu_din, walker_data_low};
@@ -767,8 +765,9 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				WALKER_WAIT_WR_LOW: begin
 					// Wait for write to complete
 					if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
-						// Timeout - go to done anyway
+						// BUG #156 FIX: Timeout is a bus error
 						walker_timeout_error <= 1;
+						pmmu_walker_berr_p <= 1;
 						walker_state <= WALKER_DONE;
 					end else if (chipready | ramready | fastchip_ready) begin
 						// Low word written, now write high word
@@ -788,8 +787,9 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				WALKER_WAIT_WR_HIGH: begin
 					// Wait for write to complete
 					if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
-						// Timeout - go to done anyway
+						// BUG #156 FIX: Timeout is a bus error
 						walker_timeout_error <= 1;
+						pmmu_walker_berr_p <= 1;
 						walker_state <= WALKER_DONE;
 					end else if (chipready | ramready | fastchip_ready) begin
 						// Write complete
@@ -817,12 +817,14 @@ end else begin : gen_no_68030_cache
 	always @(posedge clk) begin
 		if (~reset) begin
 			pmmu_walker_ack_p <= 0;
+			pmmu_walker_berr_p <= 0;  // BUG #156 FIX: Reset BERR signal
 			walker_active <= 0;
 			walker_state <= 4'd0;  // BUG #124: Keep state at 0
 			pmmu_walker_data_p <= 0;
 			walker_wdata_latch <= 0;  // MC68030 U/M bit
 		end else begin
 			pmmu_walker_ack_p <= 0;
+			pmmu_walker_berr_p <= 0;  // BUG #156 FIX: No BERR when cache disabled
 			pmmu_walker_data_p <= 0;
 		end
 	end

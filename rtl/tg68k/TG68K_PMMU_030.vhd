@@ -221,7 +221,15 @@ architecture rtl of TG68K_PMMU_030 is
   signal walk_fault     : std_logic := '0'; -- Page fault flag
   signal walk_attr      : std_logic_vector(7 downto 0) := (others => '0'); -- Page attributes
   signal walk_global    : std_logic := '0'; -- G bit from long-format descriptor (bit 10)
+  signal walk_supervisor : std_logic := '0'; -- BUG #157 FIX: Cumulative S bit from TABLE descriptors
   signal indirect_addr  : std_logic_vector(31 downto 0) := (others => '0'); -- Target address for indirect descriptor
+
+  -- BUG #155 FIX: MC68030 table descriptor limit checking (applies to next level index)
+  -- Only long-format (DT=11) table descriptors have limit fields
+  -- SHORT format (DT=10) has NO limit field - walk_limit_valid stays '0'
+  signal walk_limit_valid : std_logic := '0';  -- '1' if previous descriptor had limit field
+  signal walk_limit_lu    : std_logic := '0';  -- L/U flag: 0=lower limit, 1=upper limit
+  signal walk_limit_value : unsigned(14 downto 0) := (others => '0');  -- 15-bit limit value
 
   -- MC68030 U/M bit tracking (Issue #3, #4)
   -- U (Used) bit 3: Set when page is accessed (any access)
@@ -1694,6 +1702,9 @@ begin
       mem_wdat    <= (others => '0');
       desc_update_needed <= '0';
       desc_update_data   <= (others => '0');
+      walk_limit_valid <= '0';  -- BUG #155: Reset limit tracking
+      walk_limit_lu    <= '0';
+      walk_limit_value <= (others => '0');
     elsif rising_edge(clk) then
       -- Deadlock-proof state machine - no timeouts needed
       
@@ -1722,6 +1733,8 @@ begin
             walk_attr <= (others => '0');
             mem_we <= '0';  -- Clear write enable at start of walk
             desc_update_needed <= '0';  -- Clear descriptor update flag
+            walk_limit_valid <= '0';  -- BUG #155: Clear limit tracking at walk start
+            walk_supervisor <= '0';  -- BUG #157: Clear cumulative S bit at walk start
             -- Initialize with TC default, will be updated from descriptor
             walk_page_shift <= tc_page_shift;
             walk_page_size  <= tc_page_size;
@@ -1895,6 +1908,8 @@ begin
               walk_desc_is_long <= '0';  -- Short format
               walk_addr <= mem_rdat(31 downto 4) & "0000";
               walk_level <= walk_level + 1;
+              -- BUG #155 FIX: Short format has NO limit field
+              walk_limit_valid <= '0';
               wstate <= W_PTR1;
             end if;
           end if;
@@ -1934,6 +1949,13 @@ begin
               -- Table descriptor - extract address from LOW word and continue
               walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
               walk_level <= walk_level + 1;
+              -- BUG #155 FIX: Save limit from long-format table descriptor for next level
+              walk_limit_valid <= '1';  -- Long format always has limit
+              walk_limit_lu    <= walk_desc_high(31);  -- L/U flag
+              walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
+              -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
+              -- Per MC68030 spec, S bit only exists in TABLE descriptors, not PAGE descriptors
+              walk_supervisor <= walk_supervisor or walk_desc_high(8);
              --  -- report "W_ROOT_LOW: Long-format table descriptor, continuing to W_PTR1" severity note;
               wstate <= W_PTR1;
             end if;
@@ -1947,13 +1969,42 @@ begin
 
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
-            if saved_addr_log = x"00400000" or saved_addr_log = x"12345000" then
-              -- report "W_PTR1: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr_v)
-               --  -- severity note;
+            -- BUG #155 FIX: Check limit from previous level's long-format table descriptor
+            if walk_limit_valid = '1' then
+              if walk_limit_lu = '0' then
+                -- Lower limit: table_index must be >= limit
+                if to_unsigned(table_index, 15) < walk_limit_value then
+                  walker_fault <= '1';
+                  walker_fault_status <= encode_mmusr_fault(
+                    bus_error => '0', limit_violation => '1', supervisor_violation => '0',
+                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    level => std_logic_vector(to_unsigned(walk_level, 3))
+                  );
+                  wstate <= W_FAULT;
+                end if;
+              else
+                -- Upper limit: table_index must be <= limit
+                if to_unsigned(table_index, 15) > walk_limit_value then
+                  walker_fault <= '1';
+                  walker_fault_status <= encode_mmusr_fault(
+                    bus_error => '0', limit_violation => '1', supervisor_violation => '0',
+                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    level => std_logic_vector(to_unsigned(walk_level, 3))
+                  );
+                  wstate <= W_FAULT;
+                end if;
+              end if;
             end if;
-            mem_req <= '1';
-            mem_addr <= desc_addr_v;
-            desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR1_LOW state
+            -- Only proceed if no limit violation (wstate unchanged means OK)
+            if wstate = W_PTR1 then
+              if saved_addr_log = x"00400000" or saved_addr_log = x"12345000" then
+                -- report "W_PTR1: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr_v)
+                 --  -- severity note;
+              end if;
+              mem_req <= '1';
+              mem_addr <= desc_addr_v;
+              desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR1_LOW state
+            end if;
           elsif mem_berr = '1' then
             -- Bus error during table walk
             mem_req <= '0';
@@ -2026,6 +2077,8 @@ begin
               walk_desc_is_long <= '0';  -- Short format
               walk_addr <= mem_rdat(31 downto 4) & "0000";
               walk_level <= walk_level + 1;
+              -- BUG #155 FIX: Short format has NO limit field
+              walk_limit_valid <= '0';
               wstate <= W_PTR2;
             end if;
           end if;
@@ -2068,6 +2121,12 @@ begin
               -- Table descriptor - extract address from LOW word and continue
               walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
               walk_level <= walk_level + 1;
+              -- BUG #155 FIX: Save limit from long-format table descriptor for next level
+              walk_limit_valid <= '1';  -- Long format always has limit
+              walk_limit_lu    <= walk_desc_high(31);  -- L/U flag
+              walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
+              -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
+              walk_supervisor <= walk_supervisor or walk_desc_high(8);
              --  -- report "W_PTR1_LOW: Long-format table descriptor, continuing to W_PTR2" severity note;
               wstate <= W_PTR2;
             end if;
@@ -2081,21 +2140,50 @@ begin
 
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
-            if saved_addr_log = x"00400000" then
-              -- report "W_PTR2: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr_v)
-               --  severity note;
+            -- BUG #155 FIX: Check limit from previous level's long-format table descriptor
+            if walk_limit_valid = '1' then
+              if walk_limit_lu = '0' then
+                -- Lower limit: table_index must be >= limit
+                if to_unsigned(table_index, 15) < walk_limit_value then
+                  walker_fault <= '1';
+                  walker_fault_status <= encode_mmusr_fault(
+                    bus_error => '0', limit_violation => '1', supervisor_violation => '0',
+                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    level => std_logic_vector(to_unsigned(walk_level, 3))
+                  );
+                  wstate <= W_FAULT;
+                end if;
+              else
+                -- Upper limit: table_index must be <= limit
+                if to_unsigned(table_index, 15) > walk_limit_value then
+                  walker_fault <= '1';
+                  walker_fault_status <= encode_mmusr_fault(
+                    bus_error => '0', limit_violation => '1', supervisor_violation => '0',
+                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    level => std_logic_vector(to_unsigned(walk_level, 3))
+                  );
+                  wstate <= W_FAULT;
+                end if;
+              end if;
             end if;
-            -- Debug: Log W_PTR2 access for failing test addresses
-            if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" then
-              -- report "DEBUG_W_PTR2: addr=0x" & slv_to_hstring(saved_addr_log) &
-                     -- " level=" & integer'image(walk_level) &
-                     -- " table_index=" & integer'image(table_index) &
-                     -- " desc_addr=0x" & slv_to_hstring(desc_addr_v)
-               --  severity note;
+            -- Only proceed if no limit violation (wstate unchanged means OK)
+            if wstate = W_PTR2 then
+              if saved_addr_log = x"00400000" then
+                -- report "W_PTR2: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr_v)
+                 --  severity note;
+              end if;
+              -- Debug: Log W_PTR2 access for failing test addresses
+              if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" then
+                -- report "DEBUG_W_PTR2: addr=0x" & slv_to_hstring(saved_addr_log) &
+                       -- " level=" & integer'image(walk_level) &
+                       -- " table_index=" & integer'image(table_index) &
+                       -- " desc_addr=0x" & slv_to_hstring(desc_addr_v)
+                 --  severity note;
+              end if;
+              mem_req <= '1';
+              mem_addr <= desc_addr_v;
+              desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR2_LOW state
             end if;
-            mem_req <= '1';
-            mem_addr <= desc_addr_v;
-            desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR2_LOW state
           elsif mem_berr = '1' then
             mem_req <= '0';
             walk_fault <= '1';
@@ -2167,6 +2255,8 @@ begin
               walk_desc_is_long <= '0';  -- Short format
               walk_addr <= mem_rdat(31 downto 4) & "0000";
               walk_level <= walk_level + 1;
+              -- BUG #155 FIX: Short format has NO limit field
+              walk_limit_valid <= '0';
               wstate <= W_PTR3;
             end if;
           end if;
@@ -2209,11 +2299,17 @@ begin
               -- Table descriptor - extract address from LOW word and continue
               walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
               walk_level <= walk_level + 1;
+              -- BUG #155 FIX: Save limit from long-format table descriptor for next level
+              walk_limit_valid <= '1';  -- Long format always has limit
+              walk_limit_lu    <= walk_desc_high(31);  -- L/U flag
+              walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
+              -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
+              walk_supervisor <= walk_supervisor or walk_desc_high(8);
              --  -- report "W_PTR2_LOW: Long-format table descriptor, continuing to W_PTR3" severity note;
               wstate <= W_PTR3;
             end if;
           end if;
-          
+
         when W_PTR3 =>
           -- Final level - must be page descriptor - deadlock-proof design
           table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
@@ -2222,9 +2318,38 @@ begin
 
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
-            mem_req <= '1';
-            mem_addr <= desc_addr_v;
-            desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR3_LOW state
+            -- BUG #155 FIX: Check limit from previous level's long-format table descriptor
+            if walk_limit_valid = '1' then
+              if walk_limit_lu = '0' then
+                -- Lower limit: table_index must be >= limit
+                if to_unsigned(table_index, 15) < walk_limit_value then
+                  walker_fault <= '1';
+                  walker_fault_status <= encode_mmusr_fault(
+                    bus_error => '0', limit_violation => '1', supervisor_violation => '0',
+                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    level => std_logic_vector(to_unsigned(walk_level, 3))
+                  );
+                  wstate <= W_FAULT;
+                end if;
+              else
+                -- Upper limit: table_index must be <= limit
+                if to_unsigned(table_index, 15) > walk_limit_value then
+                  walker_fault <= '1';
+                  walker_fault_status <= encode_mmusr_fault(
+                    bus_error => '0', limit_violation => '1', supervisor_violation => '0',
+                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    level => std_logic_vector(to_unsigned(walk_level, 3))
+                  );
+                  wstate <= W_FAULT;
+                end if;
+              end if;
+            end if;
+            -- Only proceed if no limit violation (wstate unchanged means OK)
+            if wstate = W_PTR3 then
+              mem_req <= '1';
+              mem_addr <= desc_addr_v;
+              desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR3_LOW state
+            end if;
           elsif mem_berr = '1' then
             mem_req <= '0';
             walk_fault <= '1';
@@ -2396,8 +2521,10 @@ begin
                    -- " addr=0x" & slv_to_hstring(saved_addr_log) &
                   --  -- " desc=0x" & slv_to_hstring(walk_desc) severity note;
             wstate <= W_FAULT;
-          elsif not access_allowed(walk_desc_high, saved_fc, walk_desc_is_long) then
-            -- Supervisor violation - user trying to access supervisor page
+          elsif saved_fc(2) = '0' and walk_supervisor = '1' then
+            -- BUG #157 FIX: Supervisor violation check uses cumulative S bit from TABLE descriptors
+            -- Per MC68030 spec: S bit only exists in TABLE descriptors, not PAGE descriptors
+            -- User code (FC2=0) cannot access pages reached through supervisor-only tables
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '0',
@@ -2441,7 +2568,8 @@ begin
               walk_phys_base <= walk_desc_high(31 downto 8) & x"00";
             end if;
             -- Extract attributes - bit positions are same in both formats
-            walk_attr(3) <= NOT get_supervisor_bit(walk_desc_high, walk_desc_is_long); -- U_ACC = NOT(S): 1=user accessible, 0=supervisor-only
+            -- BUG #157 FIX: U_ACC uses cumulative S bit from TABLE descriptors, not page descriptor
+            walk_attr(3) <= NOT walk_supervisor; -- U_ACC = NOT(S): 1=user accessible, 0=supervisor-only
             walk_attr(2) <= walk_desc_high(6); -- Cache inhibit (CI)
             walk_attr(1) <= walk_desc_high(4); -- Modified (M)
             walk_attr(0) <= walk_desc_high(2); -- Write protect (WP)
