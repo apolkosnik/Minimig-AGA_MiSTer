@@ -87,9 +87,8 @@ module cpu_wrapper
 );
 
 // BUG #136 FIX: Include walker Fast RAM access in ramsel
-// When walker is reading from Fast RAM (Z2, Z3), it needs to trigger RAM controller
-// DISABLED: Walker Fast RAM support commented out - page tables must be in Chip RAM
-assign ramsel       = (cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)); // | walker_fast_ram;
+// When walker is reading/writing page tables in Fast RAM (Z2, Z3), it needs to trigger RAM controller
+assign ramsel       = (cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)) | walker_fast_ram;
 assign ramshared    = sel_dd;
 
 // NMI
@@ -115,12 +114,12 @@ wire sel_nmi_vector = (cpu_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
 
 wire [15:0] ramdat;
 
-// BUG #137 FIX: Walker Fast RAM reads need data strobes active (0 = active)
-// When walker_fast_ram is true, force both bytes active for 16-bit reads
-// DISABLED: Walker Fast RAM support commented out - page tables must be in Chip RAM
-assign ramlds = sel_rtg ? uds_in : lds_in;  // walker_fast_ram ? 1'b0 : ...
-assign ramuds = sel_rtg ? lds_in : uds_in;  // walker_fast_ram ? 1'b0 : ...
-assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
+// BUG #137 FIX: Walker Fast RAM cycles need data strobes active (0 = active)
+// When walker_fast_ram is true, force both bytes active for 16-bit reads/writes
+assign ramlds = walker_fast_ram ? 1'b0 : (sel_rtg ? uds_in : lds_in);
+assign ramuds = walker_fast_ram ? 1'b0 : (sel_rtg ? lds_in : uds_in);
+assign ramdin = (walker_fast_ram && walker_writing) ? (walker_write_low_phase ? walker_wdata_latch[15:0] : walker_wdata_latch[31:16]) :
+                 sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
 assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
 //       Main  DDx  RTG  8M  128M  256M
@@ -136,15 +135,14 @@ assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 // map 00-1f to 00-1f (chipram), a0-ff to 20-7f. All non-fastram goes into the first
 // 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v
 // All Zorro RAM goes to DDR3
-// BUG #136 FIX: Use walker_ramaddr when walker is reading from Fast RAM
-// DISABLED: Walker Fast RAM support commented out - page tables must be in Chip RAM
-assign ramaddr[28]    = sel_zram & ~sel_z3ram0;  // walker_fast_ram ? walker_ramaddr[28] : ...
-assign ramaddr[27]    = sel_zram & (~sel_z3ram1 | cpu_addr[27]);  // walker_fast_ram ? walker_ramaddr[27] : ...
-assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}});  // walker_fast_ram ? walker_ramaddr[26:23] : ...
-assign ramaddr[22:19] = {4{sel_dd}} | cpu_addr[22:19];  // walker_fast_ram ? walker_ramaddr[22:19] : ...
-assign ramaddr[18]    = sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18];  // walker_fast_ram ? walker_ramaddr[18] : ...
-assign ramaddr[17:16] = {2{sel_dd}} | cpu_addr[17:16];  // walker_fast_ram ? walker_ramaddr[17:16] : ...
-assign ramaddr[15:1]  = cpu_addr[15:1];  // walker_fast_ram ? walker_ramaddr[15:1] : ...
+// BUG #136 FIX: Use walker_ramaddr when walker is accessing Fast RAM
+assign ramaddr[28]    = walker_fast_ram ? walker_ramaddr[28] : (sel_zram & ~sel_z3ram0);
+assign ramaddr[27]    = walker_fast_ram ? walker_ramaddr[27] : (sel_zram & (~sel_z3ram1 | cpu_addr[27]));
+assign ramaddr[26:23] = walker_fast_ram ? walker_ramaddr[26:23] : ((sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}}));
+assign ramaddr[22:19] = walker_fast_ram ? walker_ramaddr[22:19] : ({4{sel_dd}} | cpu_addr[22:19]);
+assign ramaddr[18]    = walker_fast_ram ? walker_ramaddr[18] : (sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18]);
+assign ramaddr[17:16] = walker_fast_ram ? walker_ramaddr[17:16] : ({2{sel_dd}} | cpu_addr[17:16]);
+assign ramaddr[15:1]  = walker_fast_ram ? walker_ramaddr[15:1] : cpu_addr[15:1];
 
 // BUG #128 FIX: Compute properly encoded ramaddr for cache fill addresses
 // Cache fills use cache_addr (physical address from PMMU) instead of cpu_addr
@@ -160,29 +158,26 @@ assign cache_ramaddr[26:23] = (sel_z3ram0_cache | sel_z3ram1_cache) ? cache_addr
 assign cache_ramaddr[22:1]  = cache_addr[22:1];
 
 // BUG #136 FIX: Walker Fast RAM path support
-// When page tables are in Fast RAM (Z2, Z3), walker needs to trigger RAM controller
-// DISABLED: Walker Fast RAM support commented out - page tables must be in Chip RAM
-/*
+// When page tables are in Fast RAM (Z2, Z3), walker needs to drive RAM controller
 // walker_addr_latch is declared outside generate block, contains 32-bit physical address
 // Walker state phases (computed from walker_state which is outside generate block)
 // WALKER_READ_LOW=2, WALKER_WAIT_LOW=3, WALKER_READ_HIGH=4, WALKER_WAIT_HIGH=5
 // WALKER_WRITE_LOW=7, WALKER_WAIT_WR_LOW=8, WALKER_WRITE_HIGH=9, WALKER_WAIT_WR_HIGH=10
-wire walker_read_low_phase_global = (walker_state == 4'd2) | (walker_state == 4'd3);
+wire walker_read_low_phase_global  = (walker_state == 4'd2) | (walker_state == 4'd3);
 wire walker_write_low_phase_global = (walker_state == 4'd7) | (walker_state == 4'd8);
-wire walker_write_high_phase_global = (walker_state == 4'd9) | (walker_state == 4'd10);
 // Compute walker address for low word (bits 23:1) and high word (+1)
-wire [31:1] walker_addr_word = walker_read_low_phase_global ? {walker_addr_latch[31:2], 1'b0} :
-                                                               {walker_addr_latch[31:2], 1'b1};
+wire walker_low_phase_global = walker_read_low_phase_global | walker_write_low_phase_global;
+wire [31:1] walker_addr_word = walker_low_phase_global ? {walker_addr_latch[31:2], 1'b0} :
+                                                            {walker_addr_latch[31:2], 1'b1};
 
 // Walker RAM selection (uses same logic as cpu_addr but with walker address)
 wire sel_z3ram0_walker = (walker_addr_word[31:27] == z3ram_base0) && z3ram_ena0;
 wire sel_z3ram1_walker = (walker_addr_word[31:28] == z3ram_base1) && z3ram_ena1;
 wire sel_z2ram_walker  = !walker_addr_word[31:24] && (walker_addr_word[23] ^ |walker_addr_word[22:21]) && z2ram_ena;
 wire sel_zram_walker   = sel_z3ram0_walker | sel_z3ram1_walker | sel_z2ram_walker;
-wire sel_chipram_walker = !walker_addr_word[31:21] && cchip;  // $000000-$1FFFFF
 
-// Walker Fast RAM request: walker reading from Fast RAM (not chip RAM)
-wire walker_fast_ram = USE_68030_CACHE && walker_reading && sel_zram_walker;
+// Walker Fast RAM request: walker accessing Fast RAM (not chip RAM)
+wire walker_fast_ram = USE_68030_CACHE && (walker_reading | walker_writing) && sel_zram_walker;
 
 // Walker encoded RAM address (same encoding as cpu->ramaddr)
 wire [28:1] walker_ramaddr;
@@ -190,9 +185,6 @@ assign walker_ramaddr[28]    = sel_zram_walker & ~sel_z3ram0_walker;
 assign walker_ramaddr[27]    = sel_zram_walker & (~sel_z3ram1_walker | walker_addr_word[27]);
 assign walker_ramaddr[26:23] = (sel_z3ram0_walker | sel_z3ram1_walker) ? walker_addr_word[26:23] : 4'b0000;
 assign walker_ramaddr[22:1]  = walker_addr_word[22:1];
-*/
-// Stub signals to prevent compile errors (walker Fast RAM disabled)
-wire walker_fast_ram = 1'b0;
 
 assign fastchip_lds = lds_in;
 assign fastchip_uds = uds_in;
@@ -323,6 +315,11 @@ wire [31:0] pmmu_walker_addr_p;
 wire [31:0] pmmu_walker_wdat_p;  // MC68030 U/M bit: write data
 reg         pmmu_walker_ack_p;
 reg  [31:0] pmmu_walker_data_p;
+wire        pmmu_walker_berr_p;  // MC68030: Bus error during table walk (sets MMUSR B bit)
+// TODO: Connect to actual memory bus error signal when available
+// For now, tie to 0 - the walker_timeout_error is a system-level safety mechanism
+// and is separate from true bus errors (which would set MMUSR B bit)
+assign pmmu_walker_berr_p = 1'b0;
 
 // PMMU walker address mux signals (for bus arbitration)
 // NOTE: Walker supports full 32-bit addressing:
@@ -428,6 +425,7 @@ cpu_inst_p
   .pmmu_walker_wdat(pmmu_walker_wdat_p),  // MC68030 U/M bit: write data
   .pmmu_walker_ack(pmmu_walker_ack_p),
   .pmmu_walker_data(pmmu_walker_data_p),
+  .pmmu_walker_berr(pmmu_walker_berr_p),  // MC68030: Bus error (sets MMUSR B bit)
   // Cache operation address
   .cache_op_addr(cache_op_addr)
 );

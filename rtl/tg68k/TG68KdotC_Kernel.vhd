@@ -169,6 +169,7 @@ entity TG68KdotC_Kernel is
 		pmmu_walker_wdat		: out std_logic_vector(31 downto 0);  -- MC68030 U/M bit: write data
 		pmmu_walker_ack		: in  std_logic;
 		pmmu_walker_data		: in  std_logic_vector(31 downto 0);
+		pmmu_walker_berr		: in  std_logic;  -- MC68030: Bus error during table walk (sets MMUSR B bit)
 -- DEBUG: Supervisor mode tracking signals
 		debug_SVmode			: out std_logic;
 		debug_preSVmode		: out std_logic;
@@ -475,9 +476,11 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_mem_addr  : std_logic_vector(31 downto 0);
 	signal pmmu_mem_wdat  : std_logic_vector(31 downto 0);  -- MC68030 U/M bit: write data
 	signal pmmu_mem_ack   : std_logic;
+	signal pmmu_mem_berr  : std_logic;  -- Bus error during walker access (sets MMUSR B bit)
 	signal pmmu_mem_rdat  : std_logic_vector(31 downto 0);
 	signal pmmu_busy      : std_logic;
 	signal pmmu_config_err : std_logic;
+	signal pmmu_config_ack : std_logic;  -- BUG #154: Acknowledge MMU config exception to clear error
 
 	-- Internal FC signal (VHDL-93 compatibility)
 	signal fc_internal    : std_logic_vector(2 downto 0);
@@ -554,9 +557,11 @@ BEGIN
       mem_addr      => pmmu_mem_addr,
       mem_wdat      => pmmu_mem_wdat,
       mem_ack       => pmmu_mem_ack,
+      mem_berr      => pmmu_mem_berr,  -- Bus error from external watchdog/timeout
       mem_rdat      => pmmu_mem_rdat,
       busy          => pmmu_busy,
-      mmu_config_err => pmmu_config_err
+      mmu_config_err => pmmu_config_err,
+      mmu_config_ack => pmmu_config_ack  -- BUG #154: Acknowledge to clear error
     );
 
 --   -- PMMU register interface connected (enabled for 68030)
@@ -741,6 +746,7 @@ BEGIN
   pmmu_walker_wdat <= pmmu_mem_wdat;  -- MC68030 U/M bit: forward write data
   pmmu_mem_ack     <= pmmu_walker_ack;
   pmmu_mem_rdat    <= pmmu_walker_data;
+  pmmu_mem_berr    <= pmmu_walker_berr;  -- MC68030: Bus error from external memory
 
 ALU: TG68K_ALU   
 	generic map(
@@ -3822,6 +3828,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							set(get_2ndOPC) <= '1';
 							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
 							next_micro_state <= pmove_decode;
+							-- BUG #150 FIX: Removed setstate <= "01" that was added for BUG #147.
+							-- That fix broke PMOVE by preventing extension word fetch from completing.
+							-- The extension word is fetched via get_2ndOPC and getbrief during
+							-- the normal state="00" (instruction fetch) - forcing idle state breaks this.
 
 							-- BUG #22 FIX: DO NOT build EA here! PMMU instructions build EA in pmove_decode
 							-- after decoding the extension word. Early EA building causes duplicate
@@ -3987,9 +3997,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		IF rising_edge(clk) THEN
 	        IF Reset='1' THEN
 				micro_state <= ld_nn;
+				pmmu_config_ack <= '0';  -- BUG #154: Reset ack signal
 			ELSIF clkena_lw='1' THEN
 				trapd <= trapmake;
 				micro_state <= next_micro_state;
+				-- BUG #154 FIX: Acknowledge MMU config error when trap is taken
+				-- This clears mmu_config_error in PMMU to prevent infinite exception loop
+				if trap_mmu_config='1' and trapd='0' then
+					pmmu_config_ack <= '1';
+				else
+					pmmu_config_ack <= '0';
+				end if;
 			END IF;
 		END IF;
 

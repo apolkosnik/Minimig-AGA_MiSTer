@@ -50,11 +50,13 @@ entity TG68K_PMMU_030 is
     mem_addr       : out std_logic_vector(31 downto 0);
     mem_wdat       : out std_logic_vector(31 downto 0);  -- Write data for descriptor updates
     mem_ack        : in  std_logic;
+    mem_berr       : in  std_logic;  -- Bus error during table walk (sets MMUSR B bit)
     mem_rdat       : in  std_logic_vector(31 downto 0);
     busy           : out std_logic;
 
     -- MMU Configuration Exception (MC68030 vector 56)
-    mmu_config_err : out std_logic
+    mmu_config_err : out std_logic;
+    mmu_config_ack : in  std_logic   -- Acknowledgment from kernel when trap is taken
   );
 end TG68K_PMMU_030;
 
@@ -141,6 +143,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal atc_is_insn : atc_isn_t;
   signal atc_shift : atc_shift_t;
   signal atc_page_size : atc_page_size_t;
+  signal atc_global : atc_val_t;  -- G bit: global page (survives PFLUSHAN)
   signal atc_rr    : integer range 0 to ATC_ENTRIES-1 := 0; -- simple round-robin
   signal walk_req  : std_logic;
   signal walker_completed : std_logic := '0';
@@ -217,6 +220,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal walk_vpn       : std_logic_vector(31 downto 0) := (others => '0'); -- Virtual page being walked
   signal walk_fault     : std_logic := '0'; -- Page fault flag
   signal walk_attr      : std_logic_vector(7 downto 0) := (others => '0'); -- Page attributes
+  signal walk_global    : std_logic := '0'; -- G bit from long-format descriptor (bit 10)
   signal indirect_addr  : std_logic_vector(31 downto 0) := (others => '0'); -- Target address for indirect descriptor
 
   -- MC68030 U/M bit tracking (Issue #3, #4)
@@ -774,8 +778,12 @@ begin
     elsif rising_edge(clk) then
       atc_flush_req <= '0';
       mmusr_update_ack <= '0';
-      -- BUG #146: Don't auto-clear mmu_config_error - let it latch until acknowledged
-      -- mmu_config_error <= '0';  -- REMOVED: was creating one-cycle pulse
+      -- BUG #154 FIX: Clear mmu_config_error when kernel acknowledges the trap
+      -- This prevents infinite exception loops - the error latches until the
+      -- kernel takes the trap and pulses mmu_config_ack
+      if mmu_config_ack = '1' then
+        mmu_config_error <= '0';
+      end if;
 
       -- Handle MMUSR updates with MC68030-compliant priority (MMUSR register only)
       -- IMPORTANT: These only affect MMUSR, not other registers!
@@ -1692,7 +1700,14 @@ begin
       case wstate is
         when W_IDLE =>
           -- Don't auto-clear walker_completed here - let translation handler clear it
-          
+
+          -- BUG #149 FIX: Clear walker_fault when acknowledged to prevent pmmu_busy deadlock
+          -- Without this, walker_fault stays high forever after a fault, keeping busy='1'
+          -- which causes the CPU to hang in ptest1/pload1 waiting for pmmu_busy='0'
+          if walker_fault = '1' and walker_fault_ack = '1' then
+            walker_fault <= '0';
+          end if;
+
           -- Start page table walk on ATC miss using saved request parameters
           if walk_req = '1' then
             -- Debug: Log walker startup for failing test addresses
@@ -1807,6 +1822,23 @@ begin
           if mem_req = '0' then
             mem_req <= '1';
             mem_addr <= desc_addr_v;
+            desc_addr_reg <= desc_addr_v;  -- BUG #151 FIX: Save for W_ROOT_LOW to read LOW word at +4
+          elsif mem_berr = '1' then
+            -- Bus error during table walk - set MMUSR B bit per MC68030 spec
+            mem_req <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1',                -- B bit: external BERR during table search
+              limit_violation => '0',
+              supervisor_violation => '0',
+              write_protect => '0',
+              invalid => '0',                  -- Not invalid - actual bus error
+              modified => '0',
+              transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
           elsif mem_ack = '1' then
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
@@ -1829,17 +1861,17 @@ begin
               walk_fault <= '1';
               walker_fault <= '1';
               walker_fault_status <= encode_mmusr_fault(
-                bus_error => '1',                -- Invalid descriptor is a bus error
+                bus_error => '0',                -- BUG #153 FIX: B bit is for external BERR only
                 limit_violation => '0',
                 supervisor_violation => '0',
                 write_protect => '0',
-                invalid => '1',                  -- This is an invalid descriptor
+                invalid => '1',                  -- DT=00: Only I bit should be set per MC68030 spec
                 modified => '0',
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
-              -- Debug: Track where bus errors occur
-              -- report "BUS_ERROR_ROOT: Invalid descriptor at level=" & integer'image(walk_level) &
+              -- Debug: Track invalid descriptor
+              -- report "INVALID_DESC_ROOT: Invalid descriptor at level=" & integer'image(walk_level) &
                      -- " addr=0x" & slv_to_hstring(saved_addr_log) &
                     --  -- " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
@@ -1875,6 +1907,17 @@ begin
             mem_req <= '1';
             mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
            --  -- report "W_ROOT_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr_reg) + 4)) severity note;
+          elsif mem_berr = '1' then
+            -- Bus error during table walk
+            mem_req <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
@@ -1911,6 +1954,17 @@ begin
             mem_req <= '1';
             mem_addr <= desc_addr_v;
             desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR1_LOW state
+          elsif mem_berr = '1' then
+            -- Bus error during table walk
+            mem_req <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
           elsif mem_ack = '1' then
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
@@ -1930,17 +1984,17 @@ begin
               walk_fault <= '1';
               walker_fault <= '1';
               walker_fault_status <= encode_mmusr_fault(
-                bus_error => '1',                -- Invalid descriptor is a bus error
+                bus_error => '0',                -- BUG #153 FIX: B bit is for external BERR only
                 limit_violation => '0',
                 supervisor_violation => '0',
                 write_protect => '0',
-                invalid => '1',                  -- This is an invalid descriptor
+                invalid => '1',                  -- DT=00: Only I bit should be set per MC68030 spec
                 modified => '0',
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
-              -- Debug: Track where bus errors occur
-              -- report "BUS_ERROR_PTR1: Invalid descriptor at level=" & integer'image(walk_level) &
+              -- Debug: Track invalid descriptor
+              -- report "INVALID_DESC_PTR1: Invalid descriptor at level=" & integer'image(walk_level) &
                      -- " addr=0x" & slv_to_hstring(saved_addr_log) &
                     --  -- " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
@@ -1982,6 +2036,16 @@ begin
             mem_req <= '1';
             mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
            --  -- report "W_PTR1_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr_reg) + 4)) severity note;
+          elsif mem_berr = '1' then
+            mem_req <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
@@ -2032,6 +2096,16 @@ begin
             mem_req <= '1';
             mem_addr <= desc_addr_v;
             desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR2_LOW state
+          elsif mem_berr = '1' then
+            mem_req <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
           elsif mem_ack = '1' then
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
@@ -2051,17 +2125,17 @@ begin
               walk_fault <= '1';
               walker_fault <= '1';
               walker_fault_status <= encode_mmusr_fault(
-                bus_error => '1',                -- Invalid descriptor is a bus error
+                bus_error => '0',                -- BUG #153 FIX: B bit is for external BERR only
                 limit_violation => '0',
                 supervisor_violation => '0',
                 write_protect => '0',
-                invalid => '1',                  -- This is an invalid descriptor
+                invalid => '1',                  -- DT=00: Only I bit should be set per MC68030 spec
                 modified => '0',
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
-              -- Debug: Track where bus errors occur
-              -- report "BUS_ERROR_PTR2: Invalid descriptor at level=" & integer'image(walk_level) &
+              -- Debug: Track invalid descriptor
+              -- report "INVALID_DESC_PTR2: Invalid descriptor at level=" & integer'image(walk_level) &
                      -- " addr=0x" & slv_to_hstring(saved_addr_log) &
                     --  -- " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
@@ -2103,6 +2177,16 @@ begin
             mem_req <= '1';
             mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
            --  -- report "W_PTR2_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr_reg) + 4)) severity note;
+          elsif mem_berr = '1' then
+            mem_req <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
@@ -2141,6 +2225,16 @@ begin
             mem_req <= '1';
             mem_addr <= desc_addr_v;
             desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR3_LOW state
+          elsif mem_berr = '1' then
+            mem_req <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
           elsif mem_ack = '1' then
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
@@ -2152,17 +2246,17 @@ begin
               walk_fault <= '1';
               walker_fault <= '1';
               walker_fault_status <= encode_mmusr_fault(
-                bus_error => '1',                -- Bus error due to invalid table descriptor
+                bus_error => '0',                -- BUG #153 FIX: B bit is for external BERR only
                 limit_violation => '0',
                 supervisor_violation => '0',
                 write_protect => '0',
-                invalid => '1',                  -- This is an invalid descriptor
+                invalid => '1',                  -- DT=00: Only I bit should be set per MC68030 spec
                 modified => '0',
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
-              -- Debug: Track where bus errors occur
-              -- report "BUS_ERROR_PTR3: Invalid descriptor at level=" & integer'image(walk_level) &
+              -- Debug: Track invalid descriptor
+              -- report "INVALID_DESC_PTR3: Invalid descriptor at level=" & integer'image(walk_level) &
                      -- " addr=0x" & slv_to_hstring(saved_addr_log) &
                     --  -- " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
@@ -2193,6 +2287,16 @@ begin
             mem_req <= '1';
             mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
            --  -- report "W_PTR3_LOW: Reading LOW word at addr=0x" & slv_to_hstring(std_logic_vector(unsigned(desc_addr_reg) + 4)) severity note;
+          elsif mem_berr = '1' then
+            mem_req <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process
             walk_desc_low <= mem_rdat;
@@ -2213,7 +2317,18 @@ begin
           if mem_req = '0' then
             mem_req <= '1';
             mem_addr <= indirect_addr;
+            desc_addr_reg <= indirect_addr;  -- BUG #152 FIX: Save for W_UPDATE_DESC U/M bit writeback
            --  -- report "W_INDIRECT: Fetching target descriptor at addr=0x" & slv_to_hstring(indirect_addr) severity note;
+          elsif mem_berr = '1' then
+            mem_req <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
           elsif mem_ack = '1' then
             -- Got target descriptor - validate it
             mem_req <= '0';
@@ -2229,14 +2344,14 @@ begin
              --  -- report "W_INDIRECT: Valid page descriptor target, proceeding to W_PAGE" severity note;
               wstate <= W_PAGE;
             elsif mem_rdat(1 downto 0) = "00" then
-              -- Invalid descriptor
+              -- Invalid descriptor (DT=00)
               walker_fault <= '1';
               walker_fault_status <= encode_mmusr_fault(
-                bus_error => '1',
+                bus_error => '0',                -- BUG #153 FIX: B bit is for external BERR only
                 limit_violation => '0',
                 supervisor_violation => '0',
                 write_protect => '0',
-                invalid => '1',
+                invalid => '1',                  -- DT=00: Only I bit should be set
                 modified => '0',
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
@@ -2244,19 +2359,19 @@ begin
              --  -- report "W_INDIRECT: Invalid target descriptor (DT=00)" severity note;
               wstate <= W_FAULT;
             else
-              -- Nested indirect (DT=10 or DT=11) - bus error per MC68030 spec
+              -- Nested indirect (DT=10 or DT=11) - invalid per MC68030 spec
               walker_fault <= '1';
               walker_fault_status <= encode_mmusr_fault(
-                bus_error => '1',                -- Bus error due to nested indirect
+                bus_error => '0',                -- BUG #153 FIX: B bit is for external BERR only
                 limit_violation => '0',
                 supervisor_violation => '0',
                 write_protect => '0',
-                invalid => '1',
+                invalid => '1',                  -- Nested indirect sets I bit per MC68030 spec
                 modified => '0',
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
-             --  -- report "W_INDIRECT: Nested indirect descriptor (DT=" & slv_to_string(mem_rdat(1 downto 0)) & ") - bus error" severity note;
+             --  -- report "W_INDIRECT: Nested indirect descriptor - invalid" severity note;
               wstate <= W_FAULT;
             end if;
           end if;
@@ -2264,20 +2379,20 @@ begin
         when W_PAGE =>
           -- Process page descriptor and validate completely
           if not desc_valid(walk_desc) then
-            -- Invalid page descriptor - this is a bus error in MC68030
+            -- Invalid page descriptor (DT=00)
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
-              bus_error => '1',                -- Bus error due to invalid page descriptor
+              bus_error => '0',                -- BUG #153 FIX: B bit is for external BERR only
               limit_violation => '0',
               supervisor_violation => '0',
               write_protect => '0',
-              invalid => '1',                  -- This is an invalid descriptor
+              invalid => '1',                  -- DT=00: Only I bit should be set per MC68030 spec
               modified => '0',
               transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
-            -- Debug: Track where bus errors occur
-            -- report "BUS_ERROR_PAGE: Invalid page descriptor at level=" & integer'image(walk_level) &
+            -- Debug: Track invalid descriptor
+            -- report "INVALID_DESC_PAGE: Invalid page descriptor at level=" & integer'image(walk_level) &
                    -- " addr=0x" & slv_to_hstring(saved_addr_log) &
                   --  -- " desc=0x" & slv_to_hstring(walk_desc) severity note;
             wstate <= W_FAULT;
@@ -2330,6 +2445,13 @@ begin
             walk_attr(2) <= walk_desc_high(6); -- Cache inhibit (CI)
             walk_attr(1) <= walk_desc_high(4); -- Modified (M)
             walk_attr(0) <= walk_desc_high(2); -- Write protect (WP)
+            -- G bit (Global) is at bit 10 in long-format descriptors only
+            -- Short-format has no G bit, so non-global by default
+            if walk_desc_is_long = '1' then
+              walk_global <= walk_desc_high(10);  -- G bit for PFLUSHAN semantics
+            else
+              walk_global <= '0';  -- Short format = non-global
+            end if;
             walk_fault <= '0';
 
             -- Debug: Log attribute extraction for long-format descriptors
@@ -2369,6 +2491,18 @@ begin
             mem_we <= '1';  -- Write operation
             mem_addr <= desc_addr_reg;  -- Address of descriptor to update
             mem_wdat <= desc_update_data;  -- Updated descriptor with U/M bits set
+          elsif mem_berr = '1' then
+            -- Bus error during U/M bit write
+            mem_req <= '0';
+            mem_we <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
           elsif mem_ack = '1' then
             -- Write completed, proceed to fill ATC
             mem_req <= '0';
@@ -2389,6 +2523,7 @@ begin
           atc_attr(atc_rr)      <= walk_attr(3 downto 0);
           atc_fc(atc_rr)        <= saved_fc;
           atc_is_insn(atc_rr)   <= saved_is_insn;
+          atc_global(atc_rr)    <= walk_global;  -- G bit for PFLUSHAN semantics
           atc_valid(atc_rr)     <= '1';
           -- Debug: Log ATC fill for large page test
           if saved_addr_log = x"00400000" then
@@ -2454,17 +2589,26 @@ begin
             atc_valid(i) <= '0';
           end loop;
         elsif pflush_mode = "01000" then
-          -- PFLUSHAN - flush all non-global entries (for now, flush all since we don't track global bit)
+          -- PFLUSHAN - flush all non-global entries per MC68030 spec
+          -- Global pages (G bit = 1) survive PFLUSHAN
           for i in 0 to ATC_ENTRIES-1 loop
-            atc_valid(i) <= '0';
+            if atc_global(i) = '0' then
+              atc_valid(i) <= '0';  -- Only flush non-global entries
+            end if;
           end loop;
         else
           -- PFLUSH(An) or PFLUSHN(An) - flush specific page matching address and FC
+          -- pflush_mode(11) = N bit: 0=flush all, 1=flush only non-global
           for i in 0 to ATC_ENTRIES-1 loop
             if atc_valid(i) = '1' then
               -- Check if this entry matches the flush criteria
               if atc_fc(i) = pflush_fc and align_addr(pflush_addr, atc_shift(i)) = atc_log_base(i) then
-                atc_valid(i) <= '0';
+                -- Check N bit (bit 11 of extension word = pflush_mode(11))
+                if pflush_mode(11) = '0' or atc_global(i) = '0' then
+                  -- N=0: flush regardless of global bit
+                  -- N=1: only flush non-global entries
+                  atc_valid(i) <= '0';
+                end if;
               end if;
             end if;
           end loop;
