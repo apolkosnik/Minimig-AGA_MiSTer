@@ -1470,6 +1470,14 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				    (moves_ea_areg = '1' OR opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100") THEN
 					memaddr_delta_rega <= (others => '0');  -- No delta for simple (An) mode
 					use_base <= '1';  -- Force memaddr_reg = reg_QA
+				-- BUG #172 FIX: PMOVE with simple EA modes needs use_base='1'
+				-- Without this, PMOVE TC,(An) writes to wrong address (PC+offset instead of An)
+				-- Must force use_base='1' during pmove_mmu_to_mem and pmove_mem_to_mmu states for (An)/-(An) modes
+				ELSIF (micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo OR
+				       micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_mem_to_mmu_lo) AND
+				      (opcode(5 downto 3)="010" OR opcode(5 downto 3)="100") THEN
+					memaddr_delta_rega <= (others => '0');  -- No delta for simple (An) mode
+					use_base <= '1';  -- Force memaddr_reg = reg_QA
 				ELSIF memmaskmux(3)='0' OR exec(mem_addsub)='1' THEN
 					memaddr_delta_rega <= addsub_q;
 				ELSIF set(restore_ADDR)='1' THEN
