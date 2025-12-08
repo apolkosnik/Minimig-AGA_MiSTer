@@ -1074,8 +1074,16 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 		-- BUG #150 FIX: MOVES bus access needs EA register for address calculation
 		-- This MUST come before set(briefext) which would override with the data register
 		-- The address register value goes through rf_dest_addr -> RDindex_A -> reg_QA -> memaddr_reg
+		-- BUG #168 FIX: During register write phase (exec(Regwrena)='1'), use brief(15:12) for destination
+		-- Otherwise the EA register would be written instead of the intended Rn from extension word
 		ELSIF moves_bus_pending = '1' THEN
-			rf_dest_addr <= moves_ea_areg & moves_ea_regnum;
+			IF exec(Regwrena)='1' THEN
+				-- MOVES register write: destination is D/A + register from brief(15:12)
+				rf_dest_addr <= brief(15 downto 12);
+			ELSE
+				-- MOVES address calculation: use EA register for memory address
+				rf_dest_addr <= moves_ea_areg & moves_ea_regnum;
+			END IF;
 		-- BUG #150 FIX: Also handle moves0/moves1 states to set up RDindex_A one cycle early
 		-- (RDindex_A is registered, so we need the correct value one cycle BEFORE bus access)
 		ELSIF micro_state = moves0 OR micro_state = moves1 THEN
@@ -4752,7 +4760,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- Bit 11: Direction (dr):
 					--   dr=1: Rn->EA (write to memory, use DFC)
 					--   dr=0: EA->Rn (read from memory, use SFC)
-					-- Bits 10-0: Reserved (zeros)
+					-- Bits 10-0: Reserved (must be zeros per MC68030 spec)
+					-- BUG #170 FIX: Validate reserved bits are zero
+					-- MC68030 spec says these must be zero; non-zero should trap as illegal
+					IF brief(10 downto 0) /= "00000000000" THEN
+						trap_illegal <= '1';
+						trapmake <= '1';
+					ELSE
 					set(briefext) <= '1';  -- Use brief(15)&brief(14:12) for register selection
 					-- BUG #149 FIX: REMOVED set_writePCbig - was causing PC to be set to EA!
 					-- PC increment is handled by the extension word fetch (getbrief)
@@ -4779,6 +4793,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						set(Regwrena) <= '1';
 						set(sfc_not_dfc) <= '1';  -- Use SFC for read
 					END IF;
+					END IF;  -- BUG #170: reserved bits check
 
                 WHEN pmove_decode =>		-- PMMU instruction dispatch based on extension word
                     -- BUG #54 FIX: set_writePCbig moved to Dn mode only (line 4548)
