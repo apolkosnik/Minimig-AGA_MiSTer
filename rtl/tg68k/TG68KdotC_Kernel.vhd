@@ -4992,11 +4992,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                             END IF;
 
 
-                        ELSIF brief(15 downto 13) = "001" AND  brief(12 downto 10) = "001" THEN  -- PFLUSH
+                        ELSIF brief(15 downto 13) = "001" AND (brief(12 downto 10) = "001" OR
+                                                               brief(12 downto 10) = "100" OR
+                                                               brief(12 downto 10) = "110") THEN  -- PFLUSH
                             -- PFLUSH - Control Alterable modes
+                            -- MC68030 PFLUSH modes (bits 12-10):
+                            --   001 = PFLUSHA/PFLUSHAN (flush all, no EA)
+                            --   100 = PFLUSH FC,MASK (flush by FC, no EA)
+                            --   110 = PFLUSH FC,MASK,<ea> (flush by FC with EA)
                             set_exec(pmmu_pflush) <= '1';
-                            IF brief(12 downto 8) = "00000" OR brief(12 downto 8) = "00100" OR brief(12 downto 8) = "01000" THEN
-                                -- BUG #147 FIX: PFLUSH variants without EA (A/A N/FC mask only) must not trigger EA prefetch
+                            IF brief(12 downto 10) = "001" OR brief(12 downto 10) = "100" THEN
+                                -- PFLUSHA/PFLUSHAN or PFLUSH FC,MASK - no EA needed
                                 -- setstate="01" holds fetch/prefetch to avoid an extra PC increment
                                 setstate <= "01";  -- No EA fetch
                                 next_micro_state <= pflush1;

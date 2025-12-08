@@ -2745,18 +2745,21 @@ begin
 
       if pflush_clear_atc = '1' and wstate = W_IDLE then
         -- MC68030 PFLUSH variants:
-        -- pflush_mode(12:8) determines flush type:
-        -- "00000" = PFLUSHA (flush all)
-        -- "01000" = PFLUSHAN (flush all non-global)
-        -- Others with EA = PFLUSH(An) or PFLUSHN(An) - flush specific page
+        -- pflush_mode(12:8) = pmmu_brief(12:8) determines flush type:
+        -- Bits 12-10 = MODE:
+        --   001 = PFLUSHA/PFLUSHAN (flush all, A bit in bit 9)
+        --   100 = PFLUSH FC,MASK (flush by FC, no EA)
+        --   110 = PFLUSH FC,MASK,<ea> (flush by FC with EA)
+        -- Bit 9 = A/N: 0=flush all, 1=flush all except global (for MODE=001)
+        -- Bit 8 = reserved (0)
 
-        if pflush_mode = "00000" then
-          -- PFLUSHA - flush all ATC entries
+        if pflush_mode(12 downto 10) = "001" and pflush_mode(9) = '0' then
+          -- PFLUSHA - flush all ATC entries (MODE=001, A=0)
           for i in 0 to ATC_ENTRIES-1 loop
             atc_valid(i) <= '0';
           end loop;
-        elsif pflush_mode = "01000" then
-          -- PFLUSHAN - flush all non-global entries per MC68030 spec
+        elsif pflush_mode(12 downto 10) = "001" and pflush_mode(9) = '1' then
+          -- PFLUSHAN - flush all non-global entries per MC68030 spec (MODE=001, A=1)
           -- Global pages (G bit = 1) survive PFLUSHAN
           for i in 0 to ATC_ENTRIES-1 loop
             if atc_global(i) = '0' then
@@ -2764,14 +2767,16 @@ begin
             end if;
           end loop;
         else
-          -- PFLUSH(An) or PFLUSHN(An) - flush specific page matching address and FC
-          -- pflush_mode(11) = N bit: 0=flush all, 1=flush only non-global
+          -- PFLUSH FC,MASK or PFLUSH FC,MASK,<ea> - flush by FC (with optional EA)
+          -- MODE=100: PFLUSH FC,MASK (no EA) or PFLUSHN FC,MASK
+          -- MODE=110: PFLUSH FC,MASK,<ea> or PFLUSHN FC,MASK,<ea>
+          -- pflush_mode(9) = N bit: 0=flush all, 1=flush only non-global
           for i in 0 to ATC_ENTRIES-1 loop
             if atc_valid(i) = '1' then
               -- Check if this entry matches the flush criteria
               if atc_fc(i) = pflush_fc and align_addr(pflush_addr, atc_shift(i)) = atc_log_base(i) then
-                -- Check N bit (bit 11 of extension word = pflush_mode(11))
-                if pflush_mode(11) = '0' or atc_global(i) = '0' then
+                -- Check N bit (bit 9 of extension word = pflush_mode(9))
+                if pflush_mode(9) = '0' or atc_global(i) = '0' then
                   -- N=0: flush regardless of global bit
                   -- N=1: only flush non-global entries
                   atc_valid(i) <= '0';
