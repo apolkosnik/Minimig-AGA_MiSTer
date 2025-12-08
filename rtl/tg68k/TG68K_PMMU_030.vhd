@@ -835,7 +835,7 @@ begin
                -- " wdat=0x" & slv_to_hstring(reg_wdat) &
               --  -- " part=" & std_logic'image(reg_part) severity note;
         case reg_sel is
-          when "00010" =>
+          when "00010" =>  -- TT0: P-reg 0x02
             -- TT0 register write - MC68030 Transparent Translation Register per User's Manual section 9.2.6
             -- MC68030 TT0/TT1 bit layout:
             -- 31-24: Logical Address Base, 23-16: Logical Address Mask
@@ -848,7 +848,7 @@ begin
             end if;
             -- report "TT0_WRITE_SPEC_COMPLIANT: input=0x" & slv_to_hstring(reg_wdat) &
                   --  -- " reserved bits 14-11,7,3 masked to zero" severity note;
-          when "00011" =>
+          when "00011" =>  -- TT1: P-reg 0x03
             -- TT1 register write - MC68030 Transparent Translation Register (same layout as TT0)
             -- MC68030 TT0/TT1 bit layout:
             -- 31-24: Logical Address Base, 23-16: Logical Address Mask
@@ -859,7 +859,7 @@ begin
             if reg_fd = '0' then
               atc_flush_req <= '1';
             end if;
-          when "10000" =>
+          when "10000" =>  -- TC: P-reg 0x10
             -- MC68030 TC Register Write - exact specification compliance
             -- MC68030 TC bit layout per User's Manual section 9.2.1:
             -- 31: E (Enable), 30-26: Reserved, 25: SRE, 24: FCL
@@ -911,7 +911,7 @@ begin
             if reg_fd = '0' then
               atc_flush_req <= '1';
             end if;
-          when "10010" =>
+          when "10010" =>  -- SRP: P-reg 0x12
             -- SRP register write - MC68030 Long-Format Root Pointer (same format as CRP)
             if reg_part = '1' then
               -- SRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
@@ -938,7 +938,7 @@ begin
             if reg_fd = '0' then  -- Only flush if NOT PMOVEFD
               atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
             end if;
-          when "10011" =>
+          when "10011" =>  -- CRP: P-reg 0x13
             -- CRP register write - MC68030 Long-Format Root Pointer per User's Manual section 9.2.2
             if reg_part = '1' then
               -- CRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
@@ -995,6 +995,9 @@ begin
   -- The registers (TT0, TT1, TC, etc.) are always valid, so output them
   -- immediately based on reg_sel. Using a registered output caused first
   -- PMOVE MMU->Dn reads to return 0 (stale data).
+  -- BUG #178 FIX: Use correct extension word P-register selectors (bits 14-10):
+  --   TT0: 00010 (0x02), TT1: 00011 (0x03), TC: 10000 (0x10)
+  --   SRP: 10010 (0x12), CRP: 10011 (0x13), MMUSR: 11000 (0x18)
   reg_rdat <= TT0                          when reg_sel = "00010" else
               TT1                          when reg_sel = "00011" else
               TC                           when reg_sel = "10000" else
