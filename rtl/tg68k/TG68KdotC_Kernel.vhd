@@ -2212,11 +2212,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					END IF;
 				ELSE
 					-- Currently in supervisor mode, switching to user mode
-					IF interrupt_mode='1' THEN
-						set(to_ISP) <= '1';
-					ELSE
-						set(to_MSP) <= '1';
-					END IF;
+					-- BUG #167 FIX: Save A7 to BOTH MSP and ISP
+					-- After reset, ISP=0 because the initial A7 value was never synced.
+					-- When switching to user mode, save current A7 to both shadow registers
+					-- so that future interrupt (uses ISP) and RTE (uses MSP) both work correctly.
+					set(to_ISP) <= '1';
+					set(to_MSP) <= '1';
 					set(from_USP) <= '1';
 				END IF;
 			ELSE
