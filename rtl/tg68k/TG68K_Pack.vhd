@@ -140,8 +140,9 @@ package TG68K_Pack is
     constant use_sfc_dfc			: integer := 100; -- MOVES: Use SFC/DFC for FC
     constant sfc_not_dfc			: integer := 101; -- MOVES: 1=SFC (read), 0=DFC (write)
     constant pmmu_addr_inc        : integer := 102; -- PMMU: +4 address increment for 64-bit CRP/SRP second transfer (no reg write-back)
+    constant pmmu_dbl             : integer := 103; -- PMMU: CRP/SRP doubleword size for (An)+/-(An) (updates An by 8)
 
-    constant lastOpcBit			: integer := 102;
+    constant lastOpcBit			: integer := 103;
 
 	component TG68K_ALU
 	generic(

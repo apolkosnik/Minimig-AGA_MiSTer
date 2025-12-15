@@ -222,7 +222,7 @@ test-moves: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_moves_instruction.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_instruction.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_moves_instruction
 
 # Complete MMU Instruction Test Suite

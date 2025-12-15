@@ -132,7 +132,9 @@ architecture rtl of TG68K_PMMU_030 is
   type atc_base_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(31 downto 0);
   type atc_fc_t   is array(0 to ATC_ENTRIES-1) of std_logic_vector(2 downto 0);
   type atc_isn_t  is array(0 to ATC_ENTRIES-1) of std_logic;
-  type atc_shift_t is array(0 to ATC_ENTRIES-1) of integer range 8 to 15; -- Page offset bits (256B to 32KB)
+  -- ATC shift stores the effective page shift for the translation that populated the entry.
+  -- This can exceed TC.PS when a page descriptor terminates the walk early (large pages).
+  type atc_shift_t is array(0 to ATC_ENTRIES-1) of integer range 0 to 31;
   type atc_page_size_t is array(0 to ATC_ENTRIES-1) of integer range 0 to 15; -- MC68030 PS field value (8-15)
 
   signal atc_log_base : atc_base_t;
@@ -177,7 +179,8 @@ architecture rtl of TG68K_PMMU_030 is
   -- Walker bookkeeping
   signal walk_log_base  : std_logic_vector(31 downto 0) := (others => '0');
   signal walk_phys_base : std_logic_vector(31 downto 0) := (others => '0');
-  signal walk_page_shift: integer range 8 to 15 := 12;
+  -- Effective page shift for the current translation (may exceed TC.PS for large pages).
+  signal walk_page_shift: integer range 0 to 31 := 12;
   signal walk_page_size : integer range 0 to 15 := 12;  -- MC68030: PS values 8-15
   
   -- PMMU instruction communication flags (to avoid multiple drivers)
@@ -230,7 +233,10 @@ architecture rtl of TG68K_PMMU_030 is
   -- Only long-format (DT=11) table descriptors have limit fields
   -- SHORT format (DT=10) has NO limit field - walk_limit_valid stays '0'
   signal walk_limit_valid : std_logic := '0';  -- '1' if previous descriptor had limit field
-  signal walk_limit_lu    : std_logic := '0';  -- L/U flag: 0=lower limit, 1=upper limit
+  -- MC68030 Root/Table Descriptor L/U semantics:
+  -- L/U=1 selects LOWER-limit checking (index must be >= LIMIT)
+  -- L/U=0 selects UPPER-limit checking (index must be <= LIMIT)
+  signal walk_limit_lu    : std_logic := '0';
   signal walk_limit_value : unsigned(14 downto 0) := (others => '0');  -- 15-bit limit value
 
   -- MC68030 U/M bit tracking (Issue #3, #4)
@@ -568,6 +574,23 @@ architecture rtl of TG68K_PMMU_030 is
     temp_addr := shift_right(temp_addr, shift_amount);
     result := to_integer(temp_addr AND to_unsigned((2**mask_width) - 1, 32));
 
+    return result;
+  end function;
+
+  -- MC68030 Function Code Lookup (TC.FCL):
+  -- When FCL=1, the table search uses FC[2:0] as the top bits of the logical address.
+  -- This effectively replaces A[31:29] with FC[2:0], preserving a 32-bit search key:
+  --   search_addr = {FC[2:0], A[28:0]}
+  function fcl_search_addr(addr : std_logic_vector(31 downto 0);
+                           fc   : std_logic_vector(2 downto 0);
+                           fcl  : std_logic) return std_logic_vector is
+    variable result : std_logic_vector(31 downto 0);
+  begin
+    if fcl = '1' then
+      result := fc & addr(28 downto 0);
+    else
+      result := addr;
+    end if;
     return result;
   end function;
   
@@ -1766,7 +1789,7 @@ begin
           
         when W_ROOT =>
           -- Read root table descriptor - deadlock-proof design
-          table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
+          table_index := get_table_index(fcl_search_addr(walk_vpn, saved_fc, tc_fcl), walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
 
           -- MC68030 Root Pointer Limit Check (only for root level)
           -- CRP_H/SRP_H format: L/U[31], Limit[30:16], Reserved[15:1], DT[0]
@@ -1778,11 +1801,11 @@ begin
           end if;
 
           -- Extract L/U flag and limit value from HIGH word
-          lu_flag := rp_high(31);           -- Bit 63 (L/U): 0=lower limit, 1=upper limit
+          lu_flag := rp_high(31);           -- L/U semantics: 1=lower limit, 0=upper limit
           limit_value := unsigned(rp_high(30 downto 16));  -- Bits 62-48 (LIMIT)
 
           -- Check if table_index is within bounds based on L/U flag
-          if lu_flag = '0' then
+          if lu_flag = '1' then
             -- Lower limit: table_index must be >= limit
             if to_unsigned(table_index, 15) < limit_value then
               -- Limit violation - generate fault
@@ -1799,7 +1822,7 @@ begin
               );
               -- report "LIMIT_VIOLATION: table_index=" & integer'image(table_index) &
                      -- " limit(lower)=" & integer'image(to_integer(limit_value)) &
-                     -- " (L/U=0, must be >= limit)" severity note;
+                     -- " (L/U=1, must be >= limit)" severity note;
               wstate <= W_FAULT;
             end if;
           else
@@ -1819,7 +1842,7 @@ begin
               );
               -- report "LIMIT_VIOLATION: table_index=" & integer'image(table_index) &
                      -- " limit(upper)=" & integer'image(to_integer(limit_value)) &
-                     -- " (L/U=1, must be <= limit)" severity note;
+                     -- " (L/U=0, must be <= limit)" severity note;
               wstate <= W_FAULT;
             end if;
           end if;
@@ -1968,7 +1991,7 @@ begin
 
         when W_PTR1 =>
           -- Read level 1 table descriptor - deadlock-proof design
-          table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
+          table_index := get_table_index(fcl_search_addr(walk_vpn, saved_fc, tc_fcl), walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
           desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
 
@@ -1976,7 +1999,7 @@ begin
           if mem_req = '0' then
             -- BUG #155 FIX: Check limit from previous level's long-format table descriptor
             if walk_limit_valid = '1' then
-              if walk_limit_lu = '0' then
+              if walk_limit_lu = '1' then
                 -- Lower limit: table_index must be >= limit
                 if to_unsigned(table_index, 15) < walk_limit_value then
                   walker_fault <= '1';
@@ -2141,7 +2164,7 @@ begin
 
         when W_PTR2 =>
           -- Read level 2 table descriptor - deadlock-proof design
-          table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
+          table_index := get_table_index(fcl_search_addr(walk_vpn, saved_fc, tc_fcl), walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
           desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
 
@@ -2149,7 +2172,7 @@ begin
           if mem_req = '0' then
             -- BUG #155 FIX: Check limit from previous level's long-format table descriptor
             if walk_limit_valid = '1' then
-              if walk_limit_lu = '0' then
+              if walk_limit_lu = '1' then
                 -- Lower limit: table_index must be >= limit
                 if to_unsigned(table_index, 15) < walk_limit_value then
                   walker_fault <= '1';
@@ -2321,7 +2344,7 @@ begin
 
         when W_PTR3 =>
           -- Final level - must be page descriptor - deadlock-proof design
-          table_index := get_table_index(walk_vpn, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
+          table_index := get_table_index(fcl_search_addr(walk_vpn, saved_fc, tc_fcl), walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
           desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
 
@@ -2329,7 +2352,7 @@ begin
           if mem_req = '0' then
             -- BUG #155 FIX: Check limit from previous level's long-format table descriptor
             if walk_limit_valid = '1' then
-              if walk_limit_lu = '0' then
+              if walk_limit_lu = '1' then
                 -- Lower limit: table_index must be >= limit
                 if to_unsigned(table_index, 15) < walk_limit_value then
                   walker_fault <= '1';
