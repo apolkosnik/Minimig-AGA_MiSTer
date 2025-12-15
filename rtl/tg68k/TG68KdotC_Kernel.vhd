@@ -740,12 +740,8 @@ BEGIN
                   else regfile(conv_integer(pmove_dn_regnum));
 
   -- Source data for PMMU register writes: from Dn normally, or from memory read in pmove_mem_to_mmu_hi
-  -- PMOVE <ea>,<MMU reg>: use data_read directly (combinational) for memory->MMU transfers
-  -- PMMU write data source selection:
-  -- - Memory EA mode: data_read (combinational memory read) when in pmove_mem_to_mmu_hi or pmove_mem_to_mmu_lo
-  --   BUG #115 FIX: Use data_read instead of ea_data because ea_data is registered and hasn't
-  --   been updated yet when set_exec(pmmu_wr) triggers the latch. data_read has correct value combinationally.
-  -- - Dn mode: pmmu_dn_data (from register file) otherwise
+  -- PMOVE <ea>,<MMU reg>: use data_read (combinational) so the freshly returned bus data is written immediately
+  -- pmove_decode_wait already ensured the bus cycle finished; data_read carries the just-fetched operand without waiting for the ea_data register update
   pmmu_src_data   <= data_read when (micro_state = pmove_mem_to_mmu_hi or micro_state = pmove_mem_to_mmu_lo) else
                      pmmu_dn_data;
 
@@ -1493,11 +1489,12 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				-- BUG #172 FIX: PMOVE with simple EA modes needs use_base='1'
 				-- Without this, PMOVE TC,(An) writes to wrong address (PC+offset instead of An)
 				-- Must force use_base='1' during pmove_mmu_to_mem and pmove_mem_to_mmu states for (An)/-(An) modes
-				ELSIF (micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo OR
-				       micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_mem_to_mmu_lo) AND
-				      (opcode(5 downto 3)="010" OR opcode(5 downto 3)="100") THEN
-					memaddr_delta_rega <= (others => '0');  -- No delta for simple (An) mode
-					use_base <= '1';  -- Force memaddr_reg = reg_QA
+					ELSIF (micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo OR
+					       micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_mem_to_mmu_lo) AND
+					      (opcode(5 downto 3)="010" OR opcode(5 downto 3)="100") AND
+					      memmaskmux(3)='1' THEN
+						memaddr_delta_rega <= (others => '0');  -- No delta for simple (An) mode
+						use_base <= '1';  -- Force memaddr_reg = reg_QA
 				ELSIF memmaskmux(3)='0' OR exec(mem_addsub)='1' THEN
 					memaddr_delta_rega <= addsub_q;
 				ELSIF set(restore_ADDR)='1' THEN
@@ -5077,6 +5074,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                             IF opcode(5 downto 3)="100" THEN
                                                 set(presub) <= '1';
                                             END IF;
+                                            IF pmmu_brief(14 downto 10) /= "11000" THEN  -- Not MMUSR
+                                                set(longaktion) <= '1';  -- PMOVE mem->MMU uses full 32-bit read
+                                            END IF;
                                             setstate <= "10";  -- Memory read
                                             next_micro_state <= pmove_mem_to_mmu_hi;
                                         ELSIF opcode(5 downto 3)="111" AND (opcode(2 downto 0)="000" OR opcode(2 downto 0)="001") THEN
@@ -5126,14 +5126,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                             IF opcode(5 downto 3)="100" THEN
                                                 set(presub) <= '1';
                                             END IF;
-                                            -- -- BUG #190 FIX: Must set longaktion for 32-bit memory writes!
-                                            -- -- Without this, memmask stays at "100111" (word mode) and both 16-bit
-                                            -- -- bus cycles get the same upper half of the data. MMUSR is 16-bit (no longaktion).
-                                            -- -- Note: DO NOT set hold_dwr here! It must be set in pmove_mmu_to_mem_hi
-                                            -- -- AFTER data_write_tmp is loaded, otherwise hold_dwr prevents the load.
-                                            -- IF pmmu_brief(14 downto 10) /= "11000" THEN  -- Not MMUSR
-                                            --     set(longaktion) <= '1';
-                                            -- END IF;
+                                            -- BUG #190 FIX: Must set longaktion for 32-bit memory writes!
+                                            -- Without this, memmask stays at word mode and both 16-bit cycles
+                                            -- write the high half. MMUSR is 16-bit, so skip it.
+                                            IF pmmu_brief(14 downto 10) /= "11000" THEN  -- Not MMUSR
+                                                set(longaktion) <= '1';
+                                            END IF;
                                             setstate <= "11";  -- hold bus in write phase, prevent stray prefetch/PC bump
                                             next_micro_state <= pmove_mmu_to_mem_hi;
                                         ELSIF opcode(5 downto 3)="111" AND (opcode(2 downto 0)="000" OR opcode(2 downto 0)="001") THEN
@@ -5141,11 +5139,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                             -- The longaktion signal handles 32-bit address fetch for xxx.L
                                             -- We can safely set next_micro_state here to bypass ld_nn's setnextpass
                                             -- Also do NOT set setstate="01" - address comes from instruction stream
-                                            -- -- BUG #190 FIX: Must set longaktion for 32-bit memory writes (not MMUSR)
-                                            -- -- Note: DO NOT set hold_dwr here - must be set in pmove_mmu_to_mem_hi
-                                            -- IF pmmu_brief(14 downto 10) /= "11000" THEN  -- Not MMUSR
-                                            --     set(longaktion) <= '1';
-                                            -- END IF;
+                                            -- BUG #190 FIX: Must set longaktion for 32-bit memory writes (not MMUSR)
+                                            IF pmmu_brief(14 downto 10) /= "11000" THEN  -- Not MMUSR
+                                                set(longaktion) <= '1';
+                                            END IF;
                                             next_micro_state <= pmove_mmu_to_mem_hi;
                                         ELSE
                                             -- Complex EA modes with displacement/index need extension fetch
