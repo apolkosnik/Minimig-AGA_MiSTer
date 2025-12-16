@@ -4215,38 +4215,27 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN ld_dAn1 =>		-- d(An)=>, --d(PC)=>
 					set(get_ea_now) <='1';
 					setdisp <= '1';		--word
-					-- BUG #113 FIX: Always set setnextpass for (d16,An) mode
-					-- The displacement word must be accounted for in PC increment
-					-- Previous BUG #95 blocked this for PMOVE causing PC to be 2 bytes short
+					-- BUG #191 FIX V2: Set setnextpass unconditionally FIRST (for normal instructions)
+					-- Then override to '0' for PMOVE to prevent PC over-increment
 					setnextpass <= '1';
-					-- BUG #113 FIX V2: Check opcode directly, not exec(pmmu_rd)!
-					-- exec(pmmu_rd) gets CLEARED before we reach ld_dAn1:
-					-- pmove_decode sets set_exec(pmmu_rd), EA builder cycle has setexecOPC='0'
-					-- so exec <= set which clears pmmu_rd (since set(pmmu_rd)='0').
-					-- Instead, check opcode for F-line PMOVE with MMU->mem direction:
-					-- - opcode(15:12)="1111" = F-line instruction
-					-- - pmmu_brief(15:13)="010" or "011" = PMOVE encoding
-					-- - pmmu_brief(9)='1' = MMU->memory direction (read from MMU)
-					-- - pmmu_brief(9)='0' = memory->MMU direction (write to MMU)
-					-- F-Line Context: Use pmmu_brief for stable values
-						IF opcode(15 downto 12)="1111" AND
-						   (pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011" OR pmmu_brief(15 downto 13)="000") THEN
-							IF pmmu_brief(9)='1' THEN
-								-- MMU->mem direction
-								next_micro_state <= pmove_mmu_to_mem_hi;
+					IF opcode(15 downto 12)="1111" AND
+					   (pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011" OR pmmu_brief(15 downto 13)="000") THEN
+						-- PMOVE with (d16,An): clear setnextpass to prevent PC over-increment
+						setnextpass <= '0';
+						IF pmmu_brief(9)='1' THEN
+							-- MMU->mem direction
+							next_micro_state <= pmove_mmu_to_mem_hi;
 						ELSE
-							-- BUG #123 FIX: mem->MMU direction was not handled!
-							-- PMOVE (d16,An),<MMU> needs to set up memory read and go to pmove_mem_to_mmu_hi
+							-- BUG #123 FIX: mem->MMU direction
 							setstate <= "10";  -- Memory read at computed EA
-							-- Set datatype based on register (MMUSR=16-bit, others=32-bit)
 							IF pmmu_brief(14 downto 10) = "11000" THEN
 								datatype <= "01";  -- Word (16-bit) for MMUSR
 							ELSE
 								datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
 							END IF;
-								next_micro_state <= pmove_mem_to_mmu_hi;
-							END IF;
+							next_micro_state <= pmove_mem_to_mmu_hi;
 						END IF;
+					END IF;
 
 						-- MOVES (d16,An): after fetching the displacement word and computing EA,
 						-- continue into moves1 which performs the actual data transfer using SFC/DFC.
@@ -5378,14 +5367,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 WHEN pmove_mmu_to_mem_lo =>
                     -- MMU -> memory write of low part (for CRP/SRP)
                     -- data_write_tmp sourced from pmmu_reg_rdat in write datapath
-                    -- Hold EA computed in HI transfer (no additional increment)
-                    -- EA already advanced in HI state; hold it here and enable clkena_lw
-                    set_exec(mem_addsub) <= '1';  -- raise memmask bit 3 to pulse clkena_lw
+                    -- BUG #190 FIX: EA must be +4 from HI state! pmmu_addr_inc adds 4 to address.
+                    -- The comment "Hold EA computed in HI transfer" was WRONG - HI state pmmu_addr_inc
+                    -- didn't persist, so LO state was writing to same address as HI!
+                    set(mem_addsub) <= '1';  -- Must use set(), not set_exec() - setexecOPC=0 in write state
                     set(OP1addr) <= '1';
+                    set(pmmu_addr_inc) <= '1';  -- BUG #190 FIX: Add 4 to address for CRP_L/SRP_L write
                     datatype <= "10";  -- long write for low word
                     set_datatype <= "10";  -- propagate to exe_datatype for bus mask/datapath
-                    -- BUG #190 FIX: Must set longaktion for 32-bit memory writes (CRP_L/SRP_L)!
-                    set(longaktion) <= '1';
+                    -- BUG #190 V6: set(longaktion) is safe now with sequence check at line 1896!
+                    -- The check prevents memmask reset when already in sequence ("100001"/"000111"/"011111"),
+                    -- allowing the shift to progress while still initializing new longword writes.
+                    set(longaktion) <= '1';  -- Required for 32-bit CRP_L/SRP_L write
                     -- Post-increment (An)+ for CRP/SRP must add 8 total; update here once using pmmu_dbl
                     IF opcode(5 downto 3)="011" THEN
                         set(postadd) <= '1';
@@ -5415,7 +5408,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         END IF;
                     END IF;
                     set_exec(mem_addsub) <= '1';  -- raise memmask bit 3 to pulse clkena_lw
-                    set(OP1addr) <= '1';          -- hold EA from HI transfer
+                    set(OP1addr) <= '1';
+                    set(pmmu_addr_inc) <= '1';  -- BUG #190 FIX: Add 4 to address for CRP_L/SRP_L read
                     datatype <= "10";             -- long for proper memmask
                     set_datatype <= "10";         -- propagate to exe_datatype for bus mask
                     setstate <= "10";             -- memory read state (data already latched)
