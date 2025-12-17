@@ -176,8 +176,11 @@ wire sel_z3ram1_walker = (walker_addr_word[31:28] == z3ram_base1) && z3ram_ena1;
 wire sel_z2ram_walker  = !walker_addr_word[31:24] && (walker_addr_word[23] ^ |walker_addr_word[22:21]) && z2ram_ena;
 wire sel_zram_walker   = sel_z3ram0_walker | sel_z3ram1_walker | sel_z2ram_walker;
 
-// Walker Fast RAM request: walker accessing Fast RAM (not chip RAM)
-wire walker_fast_ram = USE_68030_CACHE && (walker_reading | walker_writing) && sel_zram_walker;
+// BUG #192 FIX: Use walker_active instead of (walker_reading | walker_writing)
+// walker_reading/walker_writing go to 0 combinationally when entering WALKER_DONE,
+// causing ramsel/ramaddr/ramdin to glitch mid-write before CPU is ungated.
+// walker_active stays high during WALKER_DONE, ensuring clean bus handoff.
+wire walker_fast_ram = USE_68030_CACHE && walker_active && sel_zram_walker;
 
 // Walker encoded RAM address (same encoding as cpu->ramaddr)
 wire [28:1] walker_ramaddr;

@@ -3450,36 +3450,22 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 											trapmake <= '1';
 										ELSE
 											datatype <= "10";	--Long
-												IF last_data_read(11 downto 0)=X"800" THEN
-													set(from_USP) <= '1';
-													IF opcode(0)='1' THEN
-														set(to_USP) <= '1';
-													END IF;
-												ELSIF cpu(1)='1' THEN
-													-- 68020+: MSP/ISP are separate control registers
-													CASE last_data_read(11 downto 0) IS
-														WHEN X"803" =>  -- MSP (Master Stack Pointer)
-															set(from_MSP) <= '1';
-															IF opcode(0)='1' THEN
-																set(to_MSP) <= '1';
-															END IF;
-														WHEN X"804" =>  -- ISP (Interrupt Stack Pointer)
-															set(from_ISP) <= '1';
-															IF opcode(0)='1' THEN
-																set(to_ISP) <= '1';
-															END IF;
-														WHEN OTHERS =>
-															NULL;
-													END CASE;
-												END IF;
+											-- BUG #193 FIX: Removed register selector decode from here!
+											-- Using last_data_read before getbrief has loaded brief is WRONG
+											-- This caused MOVEC to use stale data (BSET immediate $0003)
+											-- Moved to movec1 state where brief is valid
 											IF opcode(0)='0' THEN
 												set_exec(movec_rd) <= '1';
-											ELSE		
+											ELSE
 												set_exec(movec_wr) <= '1';
 											END IF;
 											IF decodeOPC='1' THEN
 												next_micro_state <= movec1;
 												getbrief <='1';
+												-- BUG #193 FIX: Set setnextpass to ensure PC increments before brief capture
+												-- Without this, brief captures stale data from opcode fetch cycle
+												-- causing extension word to be wrong (shows as NOP after BSET)
+												setnextpass <= '1';
 											END IF;
 										END IF;
 									
@@ -4891,6 +4877,30 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN movec1 =>		-- MOVEC
 					set(briefext) <= '1';
 					set_writePCbig <='1';
+					-- BUG #193 FIX: Decode stack pointer registers using brief (now valid after getbrief)
+					-- This was incorrectly done during decode using last_data_read
+					IF brief(11 downto 0)=X"800" THEN
+						set(from_USP) <= '1';
+						IF opcode(0)='1' THEN
+							set(to_USP) <= '1';
+						END IF;
+					ELSIF cpu(1)='1' THEN
+						-- 68020+: MSP/ISP are separate control registers
+						CASE brief(11 downto 0) IS
+							WHEN X"803" =>  -- MSP (Master Stack Pointer)
+								set(from_MSP) <= '1';
+								IF opcode(0)='1' THEN
+									set(to_MSP) <= '1';
+								END IF;
+							WHEN X"804" =>  -- ISP (Interrupt Stack Pointer)
+								set(from_ISP) <= '1';
+								IF opcode(0)='1' THEN
+									set(to_ISP) <= '1';
+								END IF;
+							WHEN OTHERS =>
+								NULL;
+						END CASE;
+					END IF;
 					-- MC68030 MOVEC: Per MC68030 User's Manual Table 4-2
 					-- 68000: SFC(000), DFC(001), USP(800), VBR(801)
 					-- 68020+: Add CACR(002), CAAR(802), MSP(803), ISP(804)
