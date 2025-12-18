@@ -4175,18 +4175,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				else
 					pmmu_config_ack <= '0';
 				end if;
-				-- BUG #197 FIX V6: Latch DISPLACEMENT during ld_dAn1 when setdisp='1'
+				-- BUG #197 FIX V8: Latch DISPLACEMENT during ld_dAn1 when setdisp='1'
 				-- memaddr_a contains the displacement ONLY when setdisp='1' (during ld_dAn1)
 				-- After ld_dAn1, setdisp='0' resets memaddr_a to zero, so we must capture it here
+				-- CORRECTED: Check opcode EA mode bits (5:3) for displacement modes, not pmmu_brief register class
 				if micro_state = ld_dAn1 and setdisp='1' and
-				   opcode(15 downto 12)="1111" and  -- F-line (PMOVE)
-				   (pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011" OR pmmu_brief(15 downto 13)="000") then
-					-- This is a PMOVE instruction with displacement mode
+				   opcode(15 downto 12)="1111" and  -- F-line (PMOVE/FPU/etc)
+				   (opcode(5 downto 3)="101" OR opcode(5 downto 3)="110") then  -- (d16,An) or (d8,An,Xn) modes
+					-- This is an F-line instruction with displacement addressing mode
 					pmove_disp_latched <= memaddr_a;
 					report "BUG197_DEBUG: Latching displacement" severity note;
 					report "  memaddr_a (latched disp) = " & integer'image(conv_integer(memaddr_a)) & " decimal" severity note;
-					report "  last_data_read (fetched) = " & integer'image(conv_integer(last_data_read)) & " decimal" severity note;
-					report "  brief (extension word) = " & integer'image(conv_integer(pmmu_brief)) & " decimal" severity note;
+					report "  opcode EA mode = " & integer'image(conv_integer(opcode(5 downto 3))) & " (should be 5 or 6)" severity note;
 				end if;
 			END IF;
 		END IF;
