@@ -259,6 +259,13 @@ architecture logic of TG68KdotC_Kernel is
 	signal mem_address		: std_logic_vector(31 downto 0);
 	signal memaddr_a			: std_logic_vector(31 downto 0);
 
+	-- BUG #197 FIX V6: Latch the DISPLACEMENT during ld_dAn1, not the final address
+	-- memaddr_a contains displacement only when setdisp='1' (during ld_dAn1)
+	-- After ld_dAn1, setdisp='0' resets memaddr_a to zero
+	-- So we must preserve the displacement value to use in pmove states
+	signal pmove_disp_latched : std_logic_vector(31 downto 0);  -- Latched displacement
+	signal pmove_ea_latched	: std_logic_vector(31 downto 0);
+
 	signal TG68_PC_brw		: bit;
 	signal TG68_PC_word		: bit;
 	signal getbrief			: bit;
@@ -1232,15 +1239,21 @@ PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source
 -----------------------------------------------------------------------------
 -- set OP1out
 -----------------------------------------------------------------------------
-PROCESS (reg_QA, store_in_tmp, ea_data, long_start, addr, exec, memmaskmux)
+PROCESS (reg_QA, store_in_tmp, ea_data, long_start, addr, exec, memmaskmux, micro_state, pmove_ea_latched)
 	BEGIN
 		OP1out <= reg_QA;
 		IF exec(OP1out_zero)='1' THEN
-			OP1out <= (OTHERS => '0');	
+			OP1out <= (OTHERS => '0');
 		ELSIF exec(ea_data_OP1)='1' AND store_in_tmp='1' THEN
 			OP1out <= ea_data;
-		ELSIF exec(movem_action)='1' OR memmaskmux(3)='0' OR exec(OP1addr)='1' THEN 
-			OP1out <= addr;
+		ELSIF exec(movem_action)='1' OR memmaskmux(3)='0' OR exec(OP1addr)='1' THEN
+			-- BUG #197 FIX: For PMOVE write states, use latched EA instead of current addr
+			-- pmove_ea_latched was captured at end of ld_dAn1 when base+disp was valid
+			IF micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo THEN
+				OP1out <= pmove_ea_latched;
+			ELSE
+				OP1out <= addr;
+			END IF;
 		END IF;
 	END PROCESS;
 	
@@ -1417,7 +1430,8 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 -- MEM_IO 
 -----------------------------------------------------------------------------
 PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatype, interrupt, rIPL_nr, IPL_vec,
-         memaddr_reg, memaddr_delta_rega, memaddr_delta_regb, reg_QA, use_base, VBR, last_data_read, trap_vector, exec, set, cpu, use_VBR_Stackframe)
+         memaddr_reg, memaddr_delta_rega, memaddr_delta_regb, reg_QA, use_base, VBR, last_data_read, trap_vector, exec, set, cpu, use_VBR_Stackframe,
+         pmove_disp_latched, micro_state, opcode, moves_ea_areg, moves_bus_pending, memmaskmux)
 	BEGIN
 		
 		IF rising_edge(clk) THEN
@@ -1520,11 +1534,20 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				-- BUG #172 FIX: PMOVE with simple EA modes needs use_base='1'
 				-- Without this, PMOVE TC,(An) writes to wrong address (PC+offset instead of An)
 				-- Must force use_base='1' during pmove_mmu_to_mem and pmove_mem_to_mmu states for (An)/-(An) modes
+				-- BUG #197 FIX V6: Extend to mode 101 (d16,An) and other displacement modes
+				-- For displacement modes, use pmove_disp_latched (captured during ld_dAn1 when setdisp='1')
+				-- Cannot use memaddr_a here because it's zero (setdisp='0' outside ld_dAn1)
 					ELSIF (micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo OR
 					       micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_mem_to_mmu_lo) AND
-					      (opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100") AND
-					      memmaskmux(3)='1' THEN
-						memaddr_delta_rega <= (others => '0');  -- No delta for simple (An) mode
+					      (opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" OR
+					       opcode(5 downto 3)="101" OR opcode(5 downto 3)="110") THEN
+						-- Modes 010/011/100: Simple (An)/(An)+/-(An) - no displacement
+						-- Modes 101/110: (d16,An)/(d8,An,Xn) - displacement in pmove_disp_latched
+						IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" THEN
+							memaddr_delta_rega <= (others => '0');  -- No delta for simple (An) mode
+						ELSE
+							memaddr_delta_rega <= pmove_disp_latched;  -- BUG #197 V6: Use latched displacement
+						END IF;
 						use_base <= '1';  -- Force memaddr_reg = reg_QA
 				ELSIF memmaskmux(3)='0' OR exec(mem_addsub)='1' THEN
 					memaddr_delta_rega <= addsub_q;
@@ -4137,6 +4160,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 	        IF Reset='1' THEN
 				micro_state <= ld_nn;
 				pmmu_config_ack <= '0';  -- BUG #154: Reset ack signal
+				pmove_disp_latched <= (others => '0');  -- BUG #197 V6: Initialize displacement latch
 			ELSIF clkena_lw='1' THEN
 				trapd <= trapmake;
 				micro_state <= next_micro_state;
@@ -4146,6 +4170,19 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					pmmu_config_ack <= '1';
 				else
 					pmmu_config_ack <= '0';
+				end if;
+				-- BUG #197 FIX V6: Latch DISPLACEMENT during ld_dAn1 when setdisp='1'
+				-- memaddr_a contains the displacement ONLY when setdisp='1' (during ld_dAn1)
+				-- After ld_dAn1, setdisp='0' resets memaddr_a to zero, so we must capture it here
+				if micro_state = ld_dAn1 and setdisp='1' and
+				   opcode(15 downto 12)="1111" and  -- F-line (PMOVE)
+				   (pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011" OR pmmu_brief(15 downto 13)="000") then
+					-- This is a PMOVE instruction with displacement mode
+					pmove_disp_latched <= memaddr_a;
+					report "BUG197_DEBUG: Latching displacement" severity note;
+					report "  memaddr_a (latched disp) = " & integer'image(conv_integer(memaddr_a)) & " decimal" severity note;
+					report "  last_data_read (fetched) = " & integer'image(conv_integer(last_data_read)) & " decimal" severity note;
+					report "  brief (extension word) = " & integer'image(conv_integer(pmmu_brief)) & " decimal" severity note;
 				end if;
 			END IF;
 		END IF;
@@ -4210,6 +4247,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						setnextpass <= '0';
 						IF pmmu_brief(9)='1' THEN
 							-- MMU->mem direction
+							-- BUG #196 FIX: Must set write state and longaktion for PMOVE TC,(d16,An)
+							-- Without this, no write occurs to memory
+							-- BUG #197 FIX: Must latch EA NOW while memaddr_a still contains displacement!
+							-- By pmove_mmu_to_mem_hi, setdisp='0' resets memaddr_a to zero, corrupting EA.
+							set(OP1addr) <= '1';  -- Latch addr (base+disp) into OP1out for write
+							setstate <= "11";  -- Write state
+							IF pmmu_brief(14 downto 10) = "11000" THEN
+								datatype <= "01";  -- MMUSR is 16-bit
+							ELSE
+								datatype <= "10";  -- TC/TT0/TT1 are 32-bit
+								set(longaktion) <= '1';  -- Required for 32-bit write
+							END IF;
 							next_micro_state <= pmove_mmu_to_mem_hi;
 						ELSE
 							-- BUG #123 FIX: mem->MMU direction
@@ -5353,6 +5402,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     ELSE
                         -- BUG #9 FIX: Setup write for 32-bit PMMU registers (TC/TT0/TT1) or 16-bit MMUSR
                         -- BUG #92 FIX: MMUSR is 16-bit, not 32-bit! Check register selector.
+                        -- BUG #197 FIX: For simple EA modes (An)/(An)+/-(An), must latch OP1addr here.
+                        -- For displacement modes (d16,An), OP1addr was already latched in ld_dAn1 (line 4226).
+                        -- Redundant set() calls are safe - last one before exec() wins.
+                        set(OP1addr) <= '1';
                         IF pmmu_brief(14 downto 10) = "11000" THEN
                             datatype <= "01"; -- Word (16-bit) for MMUSR
                         ELSE

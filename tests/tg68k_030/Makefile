@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-multiple-regs test-integration test-diagrom test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pmove-cpu-execution test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves validate setup help
+.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-comprehensive test-pmove-multiple-regs test-integration test-diagrom test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pmove-cpu-execution test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves validate setup help
 
 # Default target
 all: test-comprehensive
@@ -35,6 +35,8 @@ help:
 	@echo "  test-pmove-tt0-read - Test PMOVE TT0,Dx (read) corner cases"
 	@echo "  test-pmove-tt0-mem-read - Test PMOVE.L (d16,An),TT0 memory read (NEW)"
 	@echo "  test-pmove-tt1-mem - Test PMOVE.L TT1,(d16,An) memory write"
+	@echo "  test-pmove-crp-a7-postinc - Test PMOVE.Q CRP,(A7)+ stack update"
+	@echo "  test-pmove-comprehensive - PMOVE encoding + d16,An regression"
 	@echo "  test-pmove-multiple-regs - Test PMOVE multiple regs from (A7) - OP1addr conflict validation"
 	@echo "  test-integration - Test full system integration"
 	@echo "  test-diagrom     - Test DiagROM boot sequence"
@@ -81,8 +83,10 @@ syntax-check: setup
 compile: setup
 	@echo "Compiling basic VHDL sources..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Cache_030.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cache_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cacr_test.vhd || true
@@ -92,6 +96,8 @@ compile: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_tt0_read.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_tt0_mem_read.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_tt1_mem.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_crp_a7_postinc.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_comprehensive.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_multiple_regs_from_a7.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_diagnostic.vhd || true
 	@echo "Basic compilation completed (errors ignored for initial testing)"
@@ -100,8 +106,10 @@ compile: setup
 compile-advanced: setup
 	@echo "Compiling enhanced comprehensive test sources..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Cache_030.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cache_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cacr_test.vhd || true
@@ -150,6 +158,14 @@ test-pmove-tt0-mem-read: compile
 test-pmove-tt1-mem: compile
 	@echo "Running PMOVE.L TT1,(d16,An) memory write tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_pmove_tt1_mem
+
+test-pmove-crp-a7-postinc: compile
+	@echo "Running PMOVE.Q CRP,(A7)+ stack postincrement regression..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 5us; quit" tb_pmove_crp_a7_postinc
+
+test-pmove-comprehensive: compile
+	@echo "Running PMOVE comprehensive regression..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_comprehensive
 
 test-pmove-multiple-regs: compile
 	@echo "Running PMOVE multiple registers from (A7) test (OP1addr conflict validation)..."

@@ -239,16 +239,18 @@ always @* begin
 		uds_in       = uds_p;
 		lds_in       = lds_p;
 		reset_out    = reset_out_p;
-		// BUG #124 FIX: PMMU walker must drive bus signals during page table walks
-		// When walker is reading, drive chip_as=0 (active low), chip_rw=1 (read), chip_uds/lds=0 (both bytes)
-		if (USE_68030_CACHE && walker_reading) begin
+		// BUG #194 FIX: Walker must ONLY drive chip bus when accessing CHIP RAM ($000000-$1FFFFF)
+		// When walker reads from Fast RAM (Z2/Z3), it uses ramdata bus, NOT chip bus!
+		// Driving chip_as during Fast RAM access causes bus conflicts with CPU instruction fetch
+		// This was causing WhichAmiga and cputest lockups when page tables were in Fast RAM
+		if (walker_chip_ram && walker_reading) begin
 			chip_addr    = walker_chip_addr;
 			chip_as      = 0;  // Address strobe active (low)
 			chip_rw      = 1;  // Read operation
 			chip_uds     = 0;  // Upper byte strobe active (low)
 			chip_lds     = 0;  // Lower byte strobe active (low)
 			chip_din     = cpu_dout_p;  // Not used for reads
-		end else if (USE_68030_CACHE && walker_writing) begin
+		end else if (walker_chip_ram && walker_writing) begin
 			// MC68030 U/M bit: Walker writing descriptor update
 			chip_addr    = walker_chip_addr;
 			chip_as      = 0;  // Address strobe active (low)
