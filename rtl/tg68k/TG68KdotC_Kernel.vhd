@@ -4175,18 +4175,19 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				else
 					pmmu_config_ack <= '0';
 				end if;
-				-- BUG #197 FIX V8: Latch DISPLACEMENT during ld_dAn1 when setdisp='1'
+				-- BUG #197 FIX V9: Latch DISPLACEMENT during ld_dAn1 when setdisp='1'
 				-- memaddr_a contains the displacement ONLY when setdisp='1' (during ld_dAn1)
 				-- After ld_dAn1, setdisp='0' resets memaddr_a to zero, so we must capture it here
+				-- CRITICAL: Use fline_opcode_latch (stable) instead of opcode (may be unstable during EA building)
 				-- CORRECTED: Check opcode EA mode bits (5:3) for displacement modes, not pmmu_brief register class
-				if micro_state = ld_dAn1 and setdisp='1' and
-				   opcode(15 downto 12)="1111" and  -- F-line (PMOVE/FPU/etc)
-				   (opcode(5 downto 3)="101" OR opcode(5 downto 3)="110") then  -- (d16,An) or (d8,An,Xn) modes
+				if micro_state = ld_dAn1 and setdisp='1' and fline_context_valid = '1' and
+				   fline_opcode_latch(15 downto 12)="1111" and  -- F-line (PMOVE/FPU/etc)
+				   (fline_opcode_latch(5 downto 3)="101" OR fline_opcode_latch(5 downto 3)="110") then  -- (d16,An) or (d8,An,Xn) modes
 					-- This is an F-line instruction with displacement addressing mode
 					pmove_disp_latched <= memaddr_a;
 					report "BUG197_DEBUG: Latching displacement" severity note;
 					report "  memaddr_a (latched disp) = " & integer'image(conv_integer(memaddr_a)) & " decimal" severity note;
-					report "  opcode EA mode = " & integer'image(conv_integer(opcode(5 downto 3))) & " (should be 5 or 6)" severity note;
+					report "  fline_opcode_latch EA mode = " & integer'image(conv_integer(fline_opcode_latch(5 downto 3))) & " (should be 5 or 6)" severity note;
 				end if;
 			END IF;
 		END IF;
@@ -5867,11 +5868,21 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         pmmu_reg_wdat_d <= (others => '0');
         pmmu_reg_part_d <= '0';
         pmmu_reg_fd_d   <= '0';
+        -- BUG #199 FIX: Initialize pmove_ea_latched
+        pmove_ea_latched <= (others => '0');
       elsif clkena_in='1' then
         -- BUG #19 FIX: pmmu_reg_we_d and pmmu_reg_re_d are combinational, don't drive them here
         -- Clear PMMU control signals by default (single-cycle pulses)
         -- pmmu_reg_we_d   <= '0';  -- REMOVED - combinational signal
         -- pmmu_reg_re_d   <= '0';  -- REMOVED - combinational signal
+
+        -- BUG #199 FIX: Capture EA for EVERY PMOVE memory write operation!
+        -- Each PMOVE must latch its own computed EA, not reuse a stale value from first PMOVE.
+        -- When exec(OP1addr)='1', the EA building is complete and addr contains the final EA.
+        -- Capture it NOW so pmove_mmu_to_mem_hi/lo states can use the correct address.
+        if exec(OP1addr)='1' then
+            pmove_ea_latched <= addr;
+        end if;
 
         -- PMMU instruction handling (only on 68030)
         -- Handle both set() for immediate execution and exec() for deferred execution
