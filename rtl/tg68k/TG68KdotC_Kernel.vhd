@@ -1812,6 +1812,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					ELSE
 						pmove_dn_mode <= '0';  -- Clear for non-Dn modes
 					END IF;
+				-- BUG #198 FIX: Increment pmove_dn_regnum for second half of 64-bit PMOVE
+				ELSIF micro_state = pmove_dn_hi THEN
+					-- Transition from pmove_dn_hi to pmove_dn_lo: increment for Dn+1
+					pmove_dn_regnum <= pmove_dn_regnum + "001";
 				END IF;
 				-- F-Line Context Capture: Latch all context when entering pmove_decode
 				-- This provides stable opcode/brief values throughout F-line instruction execution
@@ -5538,7 +5542,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 WHEN pmove_dn_hi =>
                     -- First transfer completed (HIGH word in/out of first register)
                     -- Now handle LOW word with next register (Dn+1)
-                    -- The register number increment is handled by modifying rf_dest_addr
+                    -- BUG #198 FIX: Increment pmove_dn_regnum for source data from Dn+1
+                    -- rf_dest_addr already handles Dn+1 for writes (line 1170)
+                    -- But pmmu_dn_data needs pmove_dn_regnum incremented for reads (line 749)
                     -- BUG #122 FIX: Remove redundant set_writePCbig - already set in pmove_decode!
                     -- PMOVE instruction is only 4 bytes, PC increment already handled.
                     next_micro_state <= pmove_dn_lo;
@@ -5963,16 +5969,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
           -- Solution: Set pmmu_reg_part_d based on next_micro_state BEFORE entering
           -- the write/read state, independent of pmmu_wr/pmmu_rd signals.
           -- This runs AFTER the pmmu_wr/pmmu_rd blocks, so it takes priority (last assignment wins).
-          if CPU(1) = '1' AND ((pmmu_brief(14 downto 10) = "10010") or (pmmu_brief(14 downto 10) = "10011")) then
-            -- Set reg_part one cycle EARLY based on NEXT state
-            if next_micro_state = pmove_mem_to_mmu_hi OR next_micro_state = pmove_mmu_to_mem_hi OR
-               next_micro_state = pmove_dn_hi then
-              pmmu_reg_part_d <= '1';  -- HIGH word for first transfer (setup before entering state)
-            elsif next_micro_state = pmove_mem_to_mmu_lo OR next_micro_state = pmove_mmu_to_mem_lo OR
-                  next_micro_state = pmove_dn_lo then
-              pmmu_reg_part_d <= '0';  -- LOW word for second transfer (setup before entering state)
-            end if;
-          end if;
+          -- BUG #199 FIX: Remove the entire BUG #189 fix block - it conflicts with the pmmu_rd/pmmu_wr blocks above
+          -- The pmmu_rd block (lines 5948-5959) already handles pmmu_reg_part_d correctly.
+          -- The BUG #189 fix was trying to solve a problem that doesn't exist if the pmmu_rd block works.
 
         end if;
       end if;
