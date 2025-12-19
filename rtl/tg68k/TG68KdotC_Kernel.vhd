@@ -3956,11 +3956,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 -- The opcode check must be complete here, not relying on IF-ELSIF fallthrough
                 --IF cpu="11" AND opcode(11 downto 8)="0000" THEN -- F000: PMOVE
                 IF cpu(1)='1' AND opcode(11 downto 8)="0000" THEN -- F000-F0FF: All PMMU instructions
-					-- Fetch extension word to determine PMMU instruction type
-					IF decodeOPC='1' THEN
-						set(get_2ndOPC) <= '1';
-						getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
-						next_micro_state <= pmove_decode;
+					-- BUG #209 FIX: PMMU instructions require supervisor mode
+					IF SVmode='1' THEN
+						-- Fetch extension word to determine PMMU instruction type
+						IF decodeOPC='1' THEN
+							set(get_2ndOPC) <= '1';
+							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
+							next_micro_state <= pmove_decode;
 						-- BUG #150 FIX: Removed setstate <= "01" that was added for BUG #147.
 						-- That fix broke PMOVE by preventing extension word fetch from completing.
 						-- The extension word is fetched via get_2ndOPC and getbrief during
@@ -3970,6 +3972,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- after decoding the extension word. Early EA building causes duplicate
 						-- EA operation which increments PC by 2 extra bytes (6 instead of 4).
 						-- The ea_build in pmove_decode (line 4488) is the correct place for PMMU EA building.
+						END IF;
+					ELSE
+						trap_priv <= '1';
+						trapmake <= '1';
 					END IF;
 				--ELSIF cpu="11" AND opcode(8 downto 6)="100" THEN --cpSAVE
 				ELSIF cpu(1)='1' AND opcode(8 downto 6)="100" THEN --cpSAVE
