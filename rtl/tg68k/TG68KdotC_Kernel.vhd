@@ -364,8 +364,6 @@ architecture logic of TG68KdotC_Kernel is
 	signal MSP					: std_logic_vector(31 downto 0);  -- BUG #18: Master Stack Pointer (68020+)
 	signal ISP					: std_logic_vector(31 downto 0);  -- BUG #18: Interrupt Stack Pointer (68020+)
 	signal interrupt_mode		: std_logic := '0';  -- BUG #18: 0=normal supervisor, 1=interrupt processing
-	signal movec_sp_sync : std_logic := '0';  -- BUG #18: Flag to sync regfile(15) after MOVEC
-	signal movec_sp_sel  : std_logic_vector(1 downto 0) := "00";  -- BUG #18: Which SP: 00=USP, 01=MSP, 10=ISP
 --	signal illegal_write_mode	: bit;
 --	signal illegal_read_mode	: bit;
 --	signal illegal_byteaddr		: bit;
@@ -2362,40 +2360,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					set(from_USP) <= '1';
 				END IF;
 			ELSE
-				-- 68000/68010: Need to check preSVmode to swap USP/SSP correctly
-				IF preSVmode='0' THEN
-					-- Currently in user mode, switching to supervisor mode
-					set(to_SSP) <= '1';
-					set(from_USP) <= '1';
-				ELSE
-					-- Currently in supervisor mode, switching to user mode
-					set(to_USP) <= '1';
-					set(from_SSP) <= '1';
-				END IF;
+				-- 68000/68010: Simple USP/SSP switching
+				set(to_USP) <= '1';
+				set(from_USP) <= '1';
 			END IF;
 			setstackaddr <='1';
-		END IF;
-
-		-- BUG #18: MOVEC stack pointer synchronization
-		-- When MOVEC writes to USP/MSP/ISP, sync regfile(15) if that SP is currently active
-		IF movec_sp_sync='1' THEN
-			setstackaddr <= '1';
-			set(Regwrena) <= '1';
-			CASE movec_sp_sel IS
-				WHEN "00" =>  -- USP
-					IF SVmode='0' THEN
-						set(from_USP) <= '1';
-					END IF;
-				WHEN "01" =>  -- MSP
-					IF SVmode='1' AND interrupt_mode='0' THEN
-						set(from_MSP) <= '1';
-					END IF;
-				WHEN "10" =>  -- ISP
-					IF interrupt_mode='1' THEN
-						set(from_ISP) <= '1';
-					END IF;
-				WHEN OTHERS => NULL;
-			END CASE;
 		END IF;
 
 		IF ea_only='0' AND set(get_ea_now)='1' THEN
@@ -3987,26 +3956,20 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 -- The opcode check must be complete here, not relying on IF-ELSIF fallthrough
                 --IF cpu="11" AND opcode(11 downto 8)="0000" THEN -- F000: PMOVE
                 IF cpu(1)='1' AND opcode(11 downto 8)="0000" THEN -- F000-F0FF: All PMMU instructions
-					-- require supervisor for PMMU
-					IF SVmode='1' THEN
-						-- Fetch extension word to determine PMMU instruction type
-						IF decodeOPC='1' THEN
-							set(get_2ndOPC) <= '1';
-							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
-							next_micro_state <= pmove_decode;
-							-- BUG #150 FIX: Removed setstate <= "01" that was added for BUG #147.
-							-- That fix broke PMOVE by preventing extension word fetch from completing.
-							-- The extension word is fetched via get_2ndOPC and getbrief during
-							-- the normal state="00" (instruction fetch) - forcing idle state breaks this.
+					-- Fetch extension word to determine PMMU instruction type
+					IF decodeOPC='1' THEN
+						set(get_2ndOPC) <= '1';
+						getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
+						next_micro_state <= pmove_decode;
+						-- BUG #150 FIX: Removed setstate <= "01" that was added for BUG #147.
+						-- That fix broke PMOVE by preventing extension word fetch from completing.
+						-- The extension word is fetched via get_2ndOPC and getbrief during
+						-- the normal state="00" (instruction fetch) - forcing idle state breaks this.
 
-							-- BUG #22 FIX: DO NOT build EA here! PMMU instructions build EA in pmove_decode
-							-- after decoding the extension word. Early EA building causes duplicate
-							-- EA operation which increments PC by 2 extra bytes (6 instead of 4).
-							-- The ea_build in pmove_decode (line 4488) is the correct place for PMMU EA building.
-						END IF;
-					ELSE
-						trap_priv <= '1';
-						trapmake <= '1';
+						-- BUG #22 FIX: DO NOT build EA here! PMMU instructions build EA in pmove_decode
+						-- after decoding the extension word. Early EA building causes duplicate
+						-- EA operation which increments PC by 2 extra bytes (6 instead of 4).
+						-- The ea_build in pmove_decode (line 4488) is the correct place for PMMU EA building.
 					END IF;
 				--ELSIF cpu="11" AND opcode(8 downto 6)="100" THEN --cpSAVE
 				ELSIF cpu(1)='1' AND opcode(8 downto 6)="100" THEN --cpSAVE
@@ -4903,12 +4866,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						setstackaddr <= '1';
 						next_micro_state <= rte5;
 					else
-						-- Format-0/1 frames: also need to clear interrupt_mode here
-						-- (rte5 is only reached for format-2 frames)
 						datatype <= "01";
-						IF FlagsSR(5)='0' THEN
-							interrupt_mode <= '0';
-						END IF;
 						next_micro_state <= nop;
 					end if;
 				WHEN rte5 =>            -- RTE
@@ -5054,13 +5012,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- set_writePCbig <='1';  -- REMOVED - was causing +6 PC increment for memory EA
                     set(update_FC) <= '1';  -- Ensure FC reflects supervisor mode
 
-                    -- MC68030 SPEC: ALL PMMU instructions are PRIVILEGED
-                    -- PMOVE, PTEST, PFLUSH, PLOAD all require supervisor mode
-                    IF SVmode='0' THEN
-                        trap_priv <= '1';
-                        trapmake <= '1';
-                    ELSE
-                        -- MC68030 PMMU instruction differentiation by extension word
+                    -- MC68030 PMMU instruction differentiation by extension word
                         -- ALL PMMU instructions use opcode F0xx, differentiated by extension word
                         --
                         -- CRITICAL FIX: Check for valid PMOVE P-register selector FIRST!
@@ -5350,8 +5302,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                             trap_1111 <= '1';
                             trapmake <= '1';
                         END IF;
-                    END IF;  -- End of privilege check (SVmode)
-
 
                 WHEN pmove_decode_wait =>
                     -- BUG #21 FIX: Wait state to ensure ea_data is valid
@@ -5762,8 +5712,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		SSP <= (others => '0');   -- BUG #18: Initialize SSP
 		MSP <= (others => '0');   -- BUG #18: Initialize MSP
 		ISP <= (others => '0');   -- BUG #18: Initialize ISP
-		movec_sp_sync <= '0';     -- BUG #18: Initialize MOVEC sync flag
-		movec_sp_sel <= "00";     -- BUG #18: Initialize MOVEC selector
 	  elsif clkena_lw = '1' and exec(movec_wr) = '1' then
 		case brief(11 downto 0) is
 		  when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
@@ -5788,20 +5736,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		    CACR(7 downto 5) <= (others => '0');       -- Reserved bits
 		    CACR(13 downto 8) <= reg_QA(13 downto 8); -- ED, FD, CED, CD, DBE, WA
 		    CACR(31 downto 14) <= (others => '0');     -- Reserved bits
-		  when X"800" =>
-		    USP <= reg_QA; -- BUG #18: USP -- 68010+
-		    movec_sp_sync <= '1';  -- BUG #18: Trigger A7 sync
-		    movec_sp_sel <= "00";  -- BUG #18: USP selector
+		  when X"800" => USP <= reg_QA; -- BUG #18: USP -- 68010+
 		  when X"801" => VBR <= reg_QA; -- 68010+
 		  when X"802" => CAAR <= reg_QA; -- CAAR -- 68020+
-		  when X"803" =>
-		    MSP <= reg_QA; -- BUG #18: MSP -- 68020+
-		    movec_sp_sync <= '1';  -- BUG #18: Trigger A7 sync
-		    movec_sp_sel <= "01";  -- BUG #18: MSP selector
-		  when X"804" =>
-		    ISP <= reg_QA; -- BUG #18: ISP -- 68020+
-		    movec_sp_sync <= '1';  -- BUG #18: Trigger A7 sync
-		    movec_sp_sel <= "10";  -- BUG #18: ISP selector
+		  when X"803" => MSP <= reg_QA; -- BUG #18: MSP -- 68020+
+		  when X"804" => ISP <= reg_QA; -- BUG #18: ISP -- 68020+
 		  when others => NULL;
 		end case;
   elsif clkena_lw = '1' then
@@ -5825,10 +5764,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
       CACR(3) <= '0';   -- Clear CI (Clear Instruction Cache)
       CACR(10) <= '0';  -- Clear CED (Clear Entry in Data Cache)
       CACR(11) <= '0';  -- Clear CD (Clear Data Cache)
-    end if;
-    -- BUG #18: Clear MOVEC stack pointer sync flag after use
-    if movec_sp_sync = '1' then
-      movec_sp_sync <= '0';
     end if;
 	  end if;
 	end if;
