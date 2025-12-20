@@ -2391,11 +2391,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			CASE opcode(5 downto 3) IS		--source
 				WHEN "010"|"011"|"100" =>						-- -(An)+
 					set(get_ea_now) <='1';
-					-- BUG #54 FIX: Only set setnextpass during decode path, not exec(ea_build) path!
+					-- BUG #54/#212 UNIFIED FIX: Centralized PMMU detection in EA builder
 					-- Regular instructions: ea_build_now='1' fires during decode (correct timing)
-					-- PMOVE: exec(ea_build)='1' fires after extension fetch (wrong timing → +6)
+					-- PMOVE: exec(ea_build)='1' fires after extension fetch, suppress setnextpass
+					-- CAS/CHK2/DIVUL/MULS: exec(ea_build)='1' but NOT PMMU, allow setnextpass
 					IF ea_build_now='1' AND decodeOPC='1' THEN
-						setnextpass <= '1';
+						setnextpass <= '1';  -- Regular instructions (immediate EA build)
+					ELSIF exec(ea_build)='1' AND NOT (fline_context_valid='1' AND fline_is_pmmu='1') THEN
+						setnextpass <= '1';  -- Non-PMMU deferred EA (CAS/CHK2/DIVUL/MULS/future FPU)
 					END IF;
 					IF opcode(3)='1' THEN	--(An)+
 						set(postadd) <= '1';
@@ -2524,6 +2527,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 										set(get_2ndOPC) <= '1';
 										set(ea_build) <= '1';
 									END IF;
+									-- BUG #212 REMOVED: Workaround no longer needed with centralized PMMU detection
+									-- Centralized fix at line 2400 handles (An) mode for all deferred EA instructions
 									IF micro_state=idle AND nextpass='1' THEN
 										source_2ndLbits <= '1';
 										set(ea_data_OP1) <= '1';
@@ -2552,6 +2557,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									set(mem_addsub) <= '1';
 									set(OP1addr) <= '1';
 								END IF;
+								-- BUG #212 REMOVED: Workaround no longer needed with centralized PMMU detection
+								-- Centralized fix at line 2400 handles (An) mode for all deferred EA instructions
 								IF micro_state=idle AND nextpass='1' THEN
 									setstate <= "10";
 									set(hold_OP2) <='1';
@@ -3083,7 +3090,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								END IF;	
 							ELSE
 								IF opcode(10)='1' THEN						--MUL.L, DIV.L 68020
-	 --FPGA Multiplier for long							
+	 --FPGA Multiplier for long
 									IF opcode(8 downto 7)="00" AND opcode(5 downto 3)/="001" AND (opcode(5 downto 2)/="1111" OR opcode(1 downto 0)="00") AND--ea An illegal mode
 									   MUL_Hardware=1 AND (opcode(6)='0' AND (MUL_Mode=1 OR (cpu(1)='1' AND MUL_Mode=2))) THEN
 										IF decodeOPC='1' THEN
@@ -3091,7 +3098,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 											set(get_2ndOPC) <= '1';
 											set(ea_build) <= '1';
 										END IF;
-										IF (micro_state=idle AND nextpass='1') OR (opcode(5 downto 4)="00" AND exec(ea_build)='1') THEN
+										-- BUG #212 REMOVED: (An) workaround no longer needed with centralized PMMU detection
+										-- Original: (opcode(5 downto 4)="00" ...) handles Dn mode
+										-- Centralized fix at line 2400 handles (An) mode for all deferred EA instructions
+										IF (micro_state=idle AND nextpass='1') OR
+										   (opcode(5 downto 4)="00" AND exec(ea_build)='1') THEN
 											dest_2ndHbits <= '1';
 											datatype <= "10";
 											set(opcMULU) <= '1';
@@ -3114,13 +3125,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 											set(get_2ndOPC) <= '1';
 											set(ea_build) <= '1';
 										END IF;
-										IF (micro_state=idle AND nextpass='1') OR (opcode(5 downto 4)="00" AND exec(ea_build)='1')THEN
+										-- BUG #212 REMOVED: (An) workaround no longer needed with centralized PMMU detection
+										-- Original: (opcode(5 downto 4)="00" ...) handles Dn mode
+										-- Centralized fix at line 2400 handles (An) mode for all deferred EA instructions
+										IF (micro_state=idle AND nextpass='1') OR
+										   (opcode(5 downto 4)="00" AND exec(ea_build)='1') THEN
 											setstate <="01";
 											dest_2ndHbits <= '1';
 											source_2ndLbits <= '1';
 											IF opcode(6)='1' THEN
 												next_micro_state <= div1;
-											ELSE	
+											ELSE
 												next_micro_state <= mul1;
 												set(ld_rot_cnt) <= '1';
 											END IF;
@@ -3388,8 +3403,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 												setstackaddr <= '1';
 												IF opcode(2)='1' THEN
 													set(directCCR) <= '1';
-												ELSE	
-													set(directSR) <= '1';	
+												ELSE
+													set(directSR) <= '1';
 												END IF;
 												next_micro_state <= rte1;
 											END IF;
