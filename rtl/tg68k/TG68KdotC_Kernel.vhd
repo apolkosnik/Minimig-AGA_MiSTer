@@ -346,6 +346,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_interrupt	: bit;
 	signal trap_mmu_config	: bit;  -- MC68030 MMU Configuration Exception (vector 56)
 	signal trap_mmu_berr    : bit;  -- BUG #159: MC68030 MMU Bus Error (vector 61)
+	signal trap_format_error : bit; -- BUG #211: MC68030 Format Error during RTE (vector 14)
 	-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not used on MC68030
 	signal trapmake			: bit;
 	signal trapd				: bit;
@@ -1477,6 +1478,9 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				IF trap_mmu_berr='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"F4";  -- Vector 61 (0xF4) - MC68030 MMU Bus Error
 				END IF;
+				IF trap_format_error='1' THEN
+					trap_vector(9 downto 0) <= "00" & X"38";  -- Vector 14 (0x38) - Format Error
+				END IF;
 				-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not MC68030
 			END IF;
 		END IF;
@@ -2227,6 +2231,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		trap_trap <='0';
 		trap_trapv <= '0';
 		trap_mmu_config <= '0';
+		trap_format_error <= '0';
 		-- Note: trap_mmu_berr is NOT set here - only in sequencer process (BUG #159)
 		trapmake <='0';
 		set_vectoraddr <='0';
@@ -4863,17 +4868,34 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 											-- arrive
 					next_micro_state <= rte4;
 				WHEN rte4 =>         -- RTE
-											-- check for stack frame format #2
+					-- MC68030 stack frame format validation (bits 15-12 of format/vector word)
+					-- Valid formats for MC68030:
+					--   0x0: 4-word frame (short format) - most exceptions
+					--   0x2: 6-word frame (instruction continuation) - bus/address errors
+					--   0x9: 10-word frame (coprocessor mid-instruction)
+					-- Invalid formats for MC68030 (trigger Format Error exception, vector 14):
+					--   0x1, 0x3-0x8, 0xA-0xF (formats A/B are 68040-only)
 					if last_data_in(15 downto 12)="0010" then
-										  -- read another 32 bits in this case
+						-- Format 2: 6-word frame - read another 32 bits
 						setstate <= "10"; -- read
 						datatype <= "10"; -- long word
 						set(postadd) <= '1';
 						setstackaddr <= '1';
 						next_micro_state <= rte5;
-					else
+					elsif last_data_in(15 downto 12)="1001" then
+						-- Format 9: 10-word frame (coprocessor) - read 6 more words (12 bytes)
+						-- TODO: Implement format 9 support if needed (coprocessor context)
+						-- For now, treat as format error since coprocessor not implemented
+						trap_format_error <= '1';
+						trapmake <= '1';
+					elsif last_data_in(15 downto 12)="0000" then
+						-- Format 0: 4-word frame (normal) - no additional reads needed
 						datatype <= "01";
 						next_micro_state <= nop;
+					else
+						-- Invalid format for MC68030 - generate Format Error exception
+						trap_format_error <= '1';
+						trapmake <= '1';
 					end if;
 				WHEN rte5 =>            -- RTE
 					next_micro_state <= nop;
