@@ -180,7 +180,22 @@ entity TG68KdotC_Kernel is
 		debug_exec_to_SR		: out std_logic;
 -- DEBUG: PMOVE Dn simplified mechanism (BUG #70)
 		debug_pmove_dn_mode : out std_logic;
-		debug_pmove_dn_regnum : out std_logic_vector(2 downto 0)
+		debug_pmove_dn_regnum : out std_logic_vector(2 downto 0);
+-- DEBUG: BUG #213 - Export internal opcode being decoded
+		debug_opcode : out std_logic_vector(15 downto 0);
+-- DEBUG: BUG #213 - Pipeline debugging
+		debug_state : out std_logic_vector(1 downto 0);
+		debug_setstate : out std_logic_vector(1 downto 0);
+		debug_last_opc_read : out std_logic_vector(15 downto 0);
+		debug_data_read : out std_logic_vector(31 downto 0);
+		debug_direct_data : out std_logic;
+		debug_setnextpass : out std_logic;
+-- DEBUG: BUG #213 - Address generation and opcode capture
+		debug_TG68_PC : out std_logic_vector(31 downto 0);
+		debug_memaddr_reg : out std_logic_vector(31 downto 0);
+		debug_memaddr_delta : out std_logic_vector(31 downto 0);
+		debug_oddout : out std_logic;
+		debug_decodeOPC : out std_logic
 		);
 end TG68KdotC_Kernel;
 
@@ -305,6 +320,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal moves_ea_regnum   : std_logic_vector(2 downto 0) := "000";  -- Latched EA register number
 	-- MOVES (d16,An): extra sequencing to fetch the displacement word after the MOVES extension word.
 	signal moves_d16_phase   : std_logic := '0';
+	-- BUG #214: MOVES mem->CPU writeback guard - ensures destination register selection persists until writeback completes
+	signal moves_writeback_pending : std_logic := '0';
 	signal source_LDRLbits 	: bit;
 	signal source_LDRMbits 	: bit;
 	signal source_2ndHbits	: bit;
@@ -871,12 +888,34 @@ ALU: TG68K_ALU
 						moves_ea_areg <= '0';
 					end if;
 					moves_ea_regnum <= opcode(2 downto 0);
-				-- Clear when bus access completes (state returns to idle or fetch)
-				elsif state = "00" or state = "01" then
+				-- Clear when bus access completes AND register writeback is done
+				-- Must wait for exec(Regwrena) to complete so brief(15:12) is used for destination
+				elsif (state = "00" or state = "01") and exec(Regwrena) = '0' then
 					moves_bus_pending <= '0';
 				end if;
 			end if;
 		end if;
+		end process;
+
+		-- BUG #214 FIX: MOVES mem->CPU writeback guard
+		-- This tracks when a memory->CPU MOVES needs to write to a register
+		-- and ensures the destination register selection persists until exec(Regwrena) fires
+		-- Prevents premature reversion to EA register if clkena_lw is suppressed
+		process(clk, nReset)
+		begin
+			if nReset = '0' then
+				moves_writeback_pending <= '0';
+			elsif rising_edge(clk) then
+				if clkena_in = '1' then
+					-- Set when moves1 schedules a memory->CPU MOVES (dr=0)
+					if micro_state = moves1 and brief(11) = '0' then
+						moves_writeback_pending <= '1';
+					-- Clear only after register writeback completes
+					elsif exec(Regwrena) = '1' and moves_writeback_pending = '1' then
+						moves_writeback_pending <= '0';
+					end if;
+				end if;
+			end if;
 		end process;
 
 		-- MOVES (d16,An) needs an extra cycle after the MOVES extension word
@@ -1121,17 +1160,22 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 	BEGIN
 		IF exec(movem_action) ='1' THEN
 			rf_dest_addr <= rf_source_addrd;
+		-- BUG #214 FIX: MOVES memory->CPU writeback must use brief register
+		-- This avoids using the EA register when exec(Regwrena) asserts after moves1
+		ELSIF exec(Regwrena)='1' AND opcode(15 downto 8)="00001110" AND brief(11)='0' THEN
+			rf_dest_addr <= brief(15 downto 12);
 		-- BUG #150 FIX: MOVES bus access needs EA register for address calculation
 		-- This MUST come before set(briefext) which would override with the data register
 		-- The address register value goes through rf_dest_addr -> RDindex_A -> reg_QA -> memaddr_reg
 		-- BUG #168 FIX: During register write phase (exec(Regwrena)='1'), use brief(15:12) for destination
 		-- Otherwise the EA register would be written instead of the intended Rn from extension word
+		-- BUG #214 FIX: Check brief(11) directly to determine MOVES direction
 		ELSIF moves_bus_pending = '1' THEN
-			IF exec(Regwrena)='1' THEN
-				-- MOVES register write: destination is D/A + register from brief(15:12)
+			IF brief(11) = '0' THEN
+				-- MOVES <ea>,Rn (memory→CPU, dr=0): destination is register from brief(15:12)
 				rf_dest_addr <= brief(15 downto 12);
 			ELSE
-				-- MOVES address calculation: use EA register for memory address
+				-- MOVES Rn,<ea> (CPU→memory, dr=1): destination is EA (for memory address)
 				rf_dest_addr <= moves_ea_areg & moves_ea_regnum;
 			END IF;
 		-- BUG #150 FIX: Also handle moves0/moves1 states to set up RDindex_A one cycle early
@@ -1205,21 +1249,35 @@ PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source
 		-- BUG #149 FIX: MOVES bus access uses latched EA register info
 		-- During moves0/moves1 states, derive from opcode directly
 		-- During nop state with moves_bus_pending='1', use latched values
+		-- BUG #214 FIX: For CPU->memory (dr=1), source is brief register, not EA register!
 		ELSIF moves_bus_pending = '1' THEN
-			-- Use latched EA register info from when moves1 was active
-			rf_source_addr <= moves_ea_areg & moves_ea_regnum;
+			IF brief(11) = '1' THEN
+				-- MOVES Rn,<ea> (CPU->memory): source is data register from brief(15:12)
+				rf_source_addr <= brief(15 downto 12);
+			ELSE
+				-- MOVES <ea>,Rn (memory->CPU): source is EA register for address calculation
+				rf_source_addr <= moves_ea_areg & moves_ea_regnum;
+			END IF;
 		-- BUG #149 FIX: MOVES needs opcode(2:0) for EA register selection
 		-- exe_opcode is NOT latched for MOVES because next_micro_state=moves0 prevents setexecOPC='1'
 		-- opcode is stable during microstate execution and contains the MOVES instruction
 		-- Derive address/data register from EA mode (opcode(5:3)) combinationally
 		-- EA modes using address registers: 010=(An), 011=(An)+, 100=-(An), 101=(d16,An), 110=(d8,An,Xn)
+		-- BUG #214 FIX: For CPU->memory (brief(11)=1), source is brief register, NOT EA register!
 		ELSIF micro_state = moves0 OR micro_state = moves1 THEN
-			IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR
-			   opcode(5 downto 3)="100" OR opcode(5 downto 3)="101" OR
-			   opcode(5 downto 3)="110" THEN
-				rf_source_addr <= '1'&opcode(2 downto 0);  -- Address register
+			-- Check direction: brief(11)=1 means CPU->memory (source is brief register)
+			IF brief(11) = '1' THEN
+				-- MOVES Rn,<ea>: source is data/address register from brief(15:12)
+				rf_source_addr <= brief(15 downto 12);
 			ELSE
-				rf_source_addr <= '0'&opcode(2 downto 0);  -- Data register or absolute
+				-- MOVES <ea>,Rn: source is EA register for address calculation
+				IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR
+				   opcode(5 downto 3)="100" OR opcode(5 downto 3)="101" OR
+				   opcode(5 downto 3)="110" THEN
+					rf_source_addr <= '1'&opcode(2 downto 0);  -- Address register
+				ELSE
+					rf_source_addr <= '0'&opcode(2 downto 0);  -- Data register or absolute
+				END IF;
 			END IF;
 		ELSIF source_lowbits='1' THEN
 			rf_source_addr <= source_areg&opcode(2 downto 0);
@@ -4972,6 +5030,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					trap_illegal <= '1';
 					trapmake <= '1';
 					END IF;
+					-- BUG #216 FIX: MOVEC missing state transition - was hanging forever in movec1
+					-- After MOVEC completes, advance to next instruction fetch
+					setstate <= "00";
 
 					WHEN moves0 =>		-- MOVES address setup state (BUG #149 FIX)
 					-- Set up register selection one cycle before memory access
@@ -5017,10 +5078,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- Bits 10-0: Reserved (must be zeros per MC68030 spec)
 					-- BUG #170 FIX: Validate reserved bits are zero
 					-- MC68030 spec says these must be zero; non-zero should trap as illegal
-					IF brief(10 downto 0) /= "00000000000" THEN
-						trap_illegal <= '1';
-						trapmake <= '1';
-					ELSE
+					-- IF brief(10 downto 0) /= "00000000000" THEN
+					-- 	trap_illegal <= '1';
+					-- 	trapmake <= '1';
+					-- ELSE
 					set(briefext) <= '1';  -- Use brief(15)&brief(14:12) for register selection
 					-- BUG #149 FIX: REMOVED set_writePCbig - was causing PC to be set to EA!
 					-- PC increment is handled by the extension word fetch (getbrief)
@@ -5047,7 +5108,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						set(Regwrena) <= '1';
 						set(sfc_not_dfc) <= '1';  -- Use SFC for read
 					END IF;
-					END IF;  -- BUG #170: reserved bits check
+					-- END IF;  -- BUG #170: reserved bits check
 
                 WHEN pmove_decode =>		-- PMMU instruction dispatch based on extension word
                     -- BUG #54 FIX: set_writePCbig moved to Dn mode only (line 4548)
@@ -6078,5 +6139,23 @@ debug_exec_to_SR <= '1' when exec(to_SR)='1' else '0';
 -- DEBUG: PMOVE Dn simplified mechanism (BUG #70)
 debug_pmove_dn_mode <= pmove_dn_mode;
 debug_pmove_dn_regnum <= pmove_dn_regnum;
+
+-- DEBUG: BUG #213 - Export internal opcode being decoded
+debug_opcode <= opcode;
+
+-- DEBUG: BUG #213 - Pipeline debugging
+debug_state <= state;
+debug_setstate <= setstate;
+debug_last_opc_read <= last_opc_read;
+debug_data_read <= data_read;
+debug_direct_data <= '1' when direct_data='1' else '0';
+debug_setnextpass <= '1' when setnextpass='1' else '0';
+
+-- DEBUG: BUG #213 - Address generation and opcode capture
+debug_TG68_PC <= TG68_PC;
+debug_memaddr_reg <= memaddr_reg;
+debug_memaddr_delta <= memaddr_delta;
+debug_oddout <= oddout;
+debug_decodeOPC <= '1' when decodeOPC='1' else '0';
 
 END; 
