@@ -47,12 +47,16 @@ architecture behavior of tb_pmmu_030 is
       tc_enable      : out std_logic;
       -- Walker memory interface
       mem_req        : buffer std_logic;
+      mem_we         : out std_logic;
       mem_addr       : out std_logic_vector(31 downto 0);
+      mem_wdat       : out std_logic_vector(31 downto 0);
       mem_ack        : in  std_logic;
+      mem_berr       : in  std_logic;
       mem_rdat       : in  std_logic_vector(31 downto 0);
       busy           : out std_logic;
       -- MMU Configuration Exception
-      mmu_config_err : out std_logic
+      mmu_config_err : out std_logic;
+      mmu_config_ack : in  std_logic
     );
   end component;
 
@@ -95,11 +99,15 @@ architecture behavior of tb_pmmu_030 is
 
   -- Walker memory interface
   signal mem_req : std_logic;
+  signal mem_we : std_logic;
   signal mem_addr : std_logic_vector(31 downto 0);
+  signal mem_wdat : std_logic_vector(31 downto 0);
   signal mem_ack : std_logic := '0';
+  signal mem_berr : std_logic := '0';
   signal mem_rdat : std_logic_vector(31 downto 0) := (others => '0');
   signal busy : std_logic;
   signal mmu_config_err : std_logic;
+  signal mmu_config_ack : std_logic := '0';
 
   -- Test control
   signal test_running : boolean := true;
@@ -136,11 +144,15 @@ begin
     fault_status => fault_status,
     tc_enable => tc_enable,
     mem_req => mem_req,
+    mem_we => mem_we,
     mem_addr => mem_addr,
+    mem_wdat => mem_wdat,
     mem_ack => mem_ack,
+    mem_berr => mem_berr,
     mem_rdat => mem_rdat,
     busy => busy,
-    mmu_config_err => mmu_config_err
+    mmu_config_err => mmu_config_err,
+    mmu_config_ack => mmu_config_ack
   );
 
   -- Clock process definitions

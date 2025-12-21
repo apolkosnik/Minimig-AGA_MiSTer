@@ -24,8 +24,7 @@ architecture behavior of tb_cache_030 is
       cacr_dfreeze    : in  std_logic;
       cacr_wa        : in  std_logic;
       -- Cache Control Instructions
-      cinv_req       : in  std_logic;
-      cpush_req      : in  std_logic;
+      inv_req        : in  std_logic;
       cache_op_scope : in  std_logic_vector(1 downto 0);
       cache_op_cache : in  std_logic_vector(1 downto 0);
       cache_op_addr  : in  std_logic_vector(31 downto 0);
@@ -72,8 +71,7 @@ architecture behavior of tb_cache_030 is
   signal cacr_wa : std_logic := '0';
 
   -- Cache control instructions
-  signal cinv_req : std_logic := '0';
-  signal cpush_req : std_logic := '0';
+  signal inv_req : std_logic := '0';
   signal cache_op_scope : std_logic_vector(1 downto 0) := (others => '0');
   signal cache_op_cache : std_logic_vector(1 downto 0) := (others => '0');
   signal cache_op_addr : std_logic_vector(31 downto 0) := (others => '0');
@@ -119,8 +117,7 @@ begin
     cacr_ifreeze => cacr_ifreeze,
     cacr_dfreeze => cacr_dfreeze,
     cacr_wa => cacr_wa,
-    cinv_req => cinv_req,
-    cpush_req => cpush_req,
+    inv_req => inv_req,
     cache_op_scope => cache_op_scope,
     cache_op_cache => cache_op_cache,
     cache_op_addr => cache_op_addr,
@@ -362,11 +359,11 @@ begin
     writeline(output, l);
     
     -- Test CINV (Cache Invalidate)
-    cinv_req <= '1';
+    inv_req <= '1';
     cache_op_scope <= "10"; -- All
     cache_op_cache <= "00"; -- Both caches
     wait_cycles(1);
-    cinv_req <= '0';
+    inv_req <= '0';
     wait_cycles(5);
     
     test_i_access(x"00001000"); -- Should miss after invalidate
