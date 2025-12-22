@@ -388,15 +388,15 @@ begin
 
     cacr_dfreeze <= '1';
     wait_cycles(1); -- Let freeze take effect
-    test_i_access(x"00003000"); -- New address with freeze
-    report_test("dCache Freeze", i_fill_req = '0'); -- Should not request fill
-    i_req <= '0';
+    test_d_read(x"00004000"); -- New address with freeze
+    report_test("dCache Freeze", d_fill_req = '0'); -- Should not request fill
+    d_req <= '0';
     wait_cycles(1);
-    
+
     cacr_dfreeze <= '0';
-    test_i_access(x"00003000"); -- Same address without freeze
-    report_test("dCache Unfreeze", i_fill_req = '1'); -- Should request fill
-    i_req <= '0';
+    test_d_read(x"00004000"); -- Same address without freeze
+    report_test("dCache Unfreeze", d_fill_req = '1'); -- Should request fill
+    d_req <= '0';
     wait_cycles(1);
 
 

@@ -773,6 +773,40 @@ BEGIN
       );
   end generate FPU_GEN;
 
+  -- FPU enable signal control process
+  process(clk, nReset)
+  begin
+    if nReset = '0' then
+      fpu_enable_sig <= '0';  -- Initialize FPU enable signal to inactive
+    elsif rising_edge(clk) then
+      if clkena_in = '1' then
+        -- Enable FPU ONLY during FPU microcode states AND F-line instructions
+        -- CRITICAL FIX: Don't enable FPU for non-F-line instructions
+        if (micro_state = fpu1 or micro_state = fpu2 or micro_state = fpu_wait or
+            micro_state = fpu_done or micro_state = fpu_fmovem or micro_state = fpu_fmovem_cr or
+            micro_state = fpu_fdbcc) AND
+           (opcode(15 downto 12) = "1111" AND
+            (opcode(11 downto 9) = "001" OR opcode(8 downto 6) = "000" OR opcode(8 downto 6) = "100")) then
+          fpu_enable_sig <= '1';
+        else
+          fpu_enable_sig <= '0';
+        end if;
+      end if;
+    end if;
+  end process;
+
+  FPU_DISABLE: if FPU_Enable = 0 generate
+    fpu_enable_sig <= '0';
+    fpu_busy <= '0';
+    fpu_complete <= '0';
+    fpu_exception <= '0';
+    fpu_exception_code <= (others => '0');
+    fpu_data_out <= (others => '0');
+    fpcr_out <= (others => '0');
+    fpsr_out <= (others => '0');
+    fpiar_out <= (others => '0');
+  end generate FPU_DISABLE;
+
 --   -- PMMU register interface connected (enabled for 68030)
 --   pmmu_reg_we   <= pmmu_reg_we_d when CPU = "11" else '0';
 --   pmmu_reg_re   <= pmmu_reg_re_d when CPU = "11" else '0';
@@ -1937,7 +1971,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					fline_brief_latch <= (others => '0');
 					fline_context_valid <= '0';
 					fline_is_pmmu <= '0';
-					fline_is_fpu <= '0';
+					-- NOTE: fline_is_fpu removed from clocked process - now driven entirely by decode process
 					fline_has_brief <= '0';
 			ELSE
 --				IPL_nr <= NOT IPL;
@@ -2060,11 +2094,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					ELSE
 						fline_is_pmmu <= '0';
 					END IF;
-					IF opcode(11 downto 9) = "001" THEN
-						fline_is_fpu <= '1';
-					ELSE
-						fline_is_fpu <= '0';
-					END IF;
+					-- NOTE: fline_is_fpu is now set in WHEN "1111" decode, not here
 					fline_has_brief <= '1';
 				END IF;
 				-- Clear F-line context when instruction completes
@@ -2458,6 +2488,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		trap_priv <='0';
 		trap_1010 <='0';
 		trap_1111 <='0';
+		fline_is_fpu <= '0';  -- Default: F-line is not FPU (overridden in WHEN "1111" decode)
 		trap_trap <='0';
 		trap_trapv <= '0';
 		trap_mmu_config <= '0';
@@ -4197,9 +4228,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						set_exec(Regwrena) <= '1';
 					END IF;
 				END IF;
---				
----- 1111 ----------------------------------------------------------------------------		
+--
+---- 1111 ----------------------------------------------------------------------------
 			WHEN "1111" =>
+                -- CRITICAL: Set FPU detection flag during decode for all F-line instructions
+                IF decodeOPC='1' THEN
+                    IF opcode(11 downto 9) = "001" THEN
+                        fline_is_fpu <= '1';
+                    ELSE
+                        fline_is_fpu <= '0';
+                    END IF;
+                END IF;
+
                 -- PMMU (68030): Only specific PMMU instructions, not broad F000-F0FF range
                 -- PMMU instructions: F000 (PMOVE), F010 (PFLUSH), F018 (PTEST), F028 (PLOAD)
                 -- BUG FIX: Must handle PMMU instructions FIRST before falling through to cpSAVE/cpRESTORE
