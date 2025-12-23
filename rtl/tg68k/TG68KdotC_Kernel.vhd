@@ -123,7 +123,7 @@ entity TG68KdotC_Kernel is
 		IPL						: in std_logic_vector(2 downto 0):="111";
 		IPL_autovector			: in std_logic:='0';
 		berr						: in std_logic:='0';					-- only 68000 Stackpointer dummy
-		CPU						: in std_logic_vector(1 downto 0):="00";  -- 00->68000  01->68010  10->68030 (with PMMU)
+		CPU						: in std_logic_vector(1 downto 0);  -- 00->68000  01->68010  10->68030 (with PMMU)
 		addr_out					: out std_logic_vector(31 downto 0);
 		data_write				: out std_logic_vector(15 downto 0);
 		nWr						: out std_logic;
@@ -195,7 +195,14 @@ entity TG68KdotC_Kernel is
 		debug_memaddr_reg : out std_logic_vector(31 downto 0);
 		debug_memaddr_delta : out std_logic_vector(31 downto 0);
 		debug_oddout : out std_logic;
-		debug_decodeOPC : out std_logic
+		debug_decodeOPC : out std_logic;
+-- DEBUG: MOVES instruction trace signals
+		debug_brief : out std_logic_vector(15 downto 0);
+		debug_moves_bus_pending : out std_logic;
+		debug_moves_writeback_pending : out std_logic;
+		debug_clkena_lw : out std_logic;
+		debug_regfile_d0 : out std_logic_vector(31 downto 0);
+		debug_regfile_a0 : out std_logic_vector(31 downto 0)
 		);
 end TG68KdotC_Kernel;
 
@@ -1085,7 +1092,12 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 				RDindex_A <= conv_integer(rf_dest_addr(3 downto 0));
 				RDindex_B <= conv_integer(rf_source_addr(3 downto 0));
 				IF Wwrena='1' THEN
-					regfile(RDindex_A) <= regin;
+					-- MOVES mem->CPU: use brief register index to avoid RDindex_A timing race
+					IF exec(Regwrena)='1' AND opcode(15 downto 8)="00001110" AND brief(11)='0' THEN
+						regfile(conv_integer(brief(15 downto 12))) <= regin;
+					ELSE
+						regfile(RDindex_A) <= regin;
+					END IF;
 				END IF;
 			END IF;
 		END IF;
@@ -2244,7 +2256,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		 build_bcd, set_Z_error, trapd, movem_run, last_data_read, set, set_V_Flag, z_error, trap_trace, trap_interrupt,
 		 SVmode, preSVmode, stop, long_done, ea_only, setstate, addrvalue, execOPC, exec_write_back, exe_datatype,
 		 datatype, interrupt, c_out, trapmake, rot_cnt, brief, addr, trap_trapv, last_data_in, use_VBR_Stackframe,
-		 long_start, set_datatype, sndOPC, set_exec, exec, ea_build_now, reg_QA, reg_QB, make_berr, trap_berr, last_opc_read)
+		 long_start, set_datatype, sndOPC, set_exec, exec, ea_build_now, reg_QA, reg_QB, make_berr, trap_berr, last_opc_read,
+		 moves_writeback_pending)
 	BEGIN
 		TG68_PC_brw <= '0';	
 		setstate <= "00";
@@ -5043,12 +5056,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" THEN
 						source_areg <= '1';  -- (An), (An)+, -(An) modes use address register
 					END IF;
-					-- BUG #149 FIX: Set FC override signals one cycle early
+					set(no_Flags) <= '1';  -- BUG #220: MOVES does not affect condition codes
+                    -- BUG #149 FIX: Set FC override signals one cycle early
 					-- This way exec(use_sfc_dfc) will be '1' in moves1 when the bus op happens
 					-- brief(11)=dr: dr=1 means write (use DFC), dr=0 means read (use SFC)
 					set(use_sfc_dfc) <= '1';
 						IF brief(11)='0' THEN
 							set(sfc_not_dfc) <= '1';  -- Read operation uses SFC
+
 						END IF;
 						-- MOVES (d16,An): after the MOVES extension word, fetch the displacement word
 						-- from the instruction stream before performing the actual data access in moves1.
@@ -5082,12 +5097,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- 	trap_illegal <= '1';
 					-- 	trapmake <= '1';
 					-- ELSE
+					-- BUG #222 FIX: MOVES opcode bits 7:6 encode size (00=byte, 01=word, 10=long)
+					-- Must set datatype for correct memmask and byte lane selection
+					datatype <= opcode(7 downto 6);
+					set_datatype <= opcode(7 downto 6);
 					set(briefext) <= '1';  -- Use brief(15)&brief(14:12) for register selection
 					-- BUG #149 FIX: REMOVED set_writePCbig - was causing PC to be set to EA!
 					-- PC increment is handled by the extension word fetch (getbrief)
 					-- Same fix as BUG #54 for pmove_decode
-					set_exec(opcMOVE) <= '1';
+					set(opcMOVE) <= '1';
 					set(use_sfc_dfc) <= '1';  -- Use SFC/DFC for FC override
+					set(no_Flags) <= '1';  -- BUG #220: MOVES does not affect condition codes (MC68030 spec)
 					-- BUG #149 FIX: Keep source_lowbits set to maintain EA register selection
 					-- memaddr_reg is updated every clock, so we need correct rf_source_addr continuously
 					-- NOTE: Use opcode, not exe_opcode - exe_opcode wasn't latched for MOVES
@@ -5107,6 +5127,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						setstate <= "10";  -- Read from EA
 						set(Regwrena) <= '1';
 						set(sfc_not_dfc) <= '1';  -- Use SFC for read
+				set(no_Flags) <= '1';  -- BUG #220: MOVES does not affect condition codes
 					END IF;
 					-- END IF;  -- BUG #170: reserved bits check
 
@@ -5794,6 +5815,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
 				WHEN OTHERS => NULL;
 			END CASE;
+			-- BUG #215 FIX: Reassert MOVES mem->CPU writeback signals
+			-- BUG #219 FIX: Check state="00" not "10" because state transitions before exec latches!
+			-- Timing: moves1 sets setstate="10" → nop has state="10" but setstate="00" → next cycle state="00"
+			IF moves_writeback_pending = '1' AND state = "00" THEN
+				set(Regwrena) <= '1';
+				set(briefext) <= '1';  -- BUG #218: Must re-assert to select correct dest register
+				set(opcMOVE) <= '1';
+				set(ea_data_OP2) <= '1';
+				set(use_sfc_dfc) <= '1';
+				set(sfc_not_dfc) <= '1';
+				set(no_Flags) <= '1';  -- BUG #220: MOVES does not affect condition codes
+			END IF;
 	END PROCESS;
 
 -----------------------------------------------------------------------------
@@ -6157,5 +6190,13 @@ debug_memaddr_reg <= memaddr_reg;
 debug_memaddr_delta <= memaddr_delta;
 debug_oddout <= oddout;
 debug_decodeOPC <= '1' when decodeOPC='1' else '0';
+
+-- DEBUG: MOVES instruction trace signals
+debug_brief <= brief;
+debug_moves_bus_pending <= moves_bus_pending;
+debug_moves_writeback_pending <= moves_writeback_pending;
+debug_clkena_lw <= clkena_lw;
+debug_regfile_d0 <= regfile(0);
+debug_regfile_a0 <= regfile(8);
 
 END; 
