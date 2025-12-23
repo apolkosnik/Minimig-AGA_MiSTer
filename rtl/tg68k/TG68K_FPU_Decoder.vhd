@@ -125,7 +125,7 @@ begin
 			-- FIXED: Always use extension_word for format/opcode fields
 			-- All general FPU instructions (including register-direct) need extension word
 			format_field <= extension_word(12 downto 10);	-- Source format from extension word
-			opmode_field <= extension_word(9 downto 3);		-- Operation from extension word
+			opmode_field <= extension_word(6 downto 0);		-- CRITICAL FIX: Operation is bits 6:0, not 9:3!
 			rm_field <= extension_word(15 downto 13);		-- Source specifier (corrected bit range)
 			rn_field <= extension_word(2 downto 0);			-- Destination register
 		else
