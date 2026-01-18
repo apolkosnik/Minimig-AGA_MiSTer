@@ -198,6 +198,7 @@ architecture rtl of TG68K_PMMU_030 is
 
   -- PTEST operation state
   signal ptest_active : std_logic := '0';
+  signal ptest_done : std_logic := '0';  -- Handshake: translation process signals completion
   signal ptest_addr : std_logic_vector(31 downto 0) := (others => '0');
   signal ptest_fc : std_logic_vector(2 downto 0) := (others => '0');
   signal ptest_rw : std_logic := '1';  -- '1'=PTESTR (read), '0'=PTESTW (write), from brief(9)
@@ -876,6 +877,11 @@ begin
         mmusr_update_ack <= '1';
       end if;
 
+      -- BUG FIX: Clear ptest_active when translation process signals completion
+      if ptest_done = '1' then
+        ptest_active <= '0';
+      end if;
+
       -- Handle direct register writes (TC, CRP, SRP, TT0, TT1, etc.)
       -- CRITICAL FIX: These are INDEPENDENT of MMUSR updates and execute concurrently
       -- BUG #12: Was using "elsif" which blocked all register writes when MMUSR updates active
@@ -1199,8 +1205,12 @@ begin
       walker_fault_ack_pending <= '0';
       mmusr_update_req <= '0';
       mmusr_update_value <= (others => '0');
+      ptest_done <= '0';
     elsif rising_edge(clk) then
       status_tmp := fault_status_reg;
+
+      -- Clear ptest_done pulse (it's only set for one cycle)
+      ptest_done <= '0';
 
       if mmusr_update_ack = '1' then
         mmusr_update_req <= '0';
@@ -1471,6 +1481,7 @@ begin
               level => "000"
             );
             mmusr_update_req <= '1';
+            ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after TTR0 match
           elsif tmatch1 = '1' then
             -- TTR1 match - PTEST succeeds with transparent translation
             mmusr_update_value <= encode_mmusr_success(
@@ -1480,6 +1491,7 @@ begin
               level => "000"
             );
             mmusr_update_req <= '1';
+            ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after TTR1 match
           else
             -- No TTR match - trigger walker to test translation
             saved_addr_log <= ptest_addr;
@@ -1488,6 +1500,7 @@ begin
             saved_rw <= ptest_rw;  -- BUG #17 FIX: PTEST R/W from brief(9): 0=PTESTW(write), 1=PTESTR(read)
             walk_req <= '1';
             translation_pending <= '1';
+            ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after triggering walker
             -- report "PTEST: Triggered walker for addr=0x" & slv_to_hstring(ptest_addr) &
                   --  -- " fc=" & slv_to_string(ptest_fc) severity note;
           end if;
