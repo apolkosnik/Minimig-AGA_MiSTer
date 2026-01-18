@@ -4127,83 +4127,48 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					END IF;
 				--ELSIF cpu="11" AND opcode(8 downto 6)="100" THEN --cpSAVE
 				ELSIF cpu(1)='1' AND opcode(8 downto 6)="100" THEN --cpSAVE
+					-- cpSAVE valid EA modes: control alterable or predecrement
+					-- Valid: (An), -(An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
+					-- Invalid: Dn, An, (An)+, #imm, (d16,PC), (d8,PC,Xn)
 					IF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="011" AND
-					   (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN --ea illegal modes
-						IF opcode(11 downto 9)/="000" THEN
-							IF SVmode='1' THEN
-								IF opcode(5)='0' AND opcode(5 downto 4)/="01" THEN
-									--never reached according to cputest?!
-									--cpSAVE not implemented
-									trap_illegal <= '1';
-									trapmake <= '1';
-								ELSE
-									trap_1111 <= '1';
-									trapmake <= '1';
-								END IF;
-							ELSE
-								trap_priv <= '1';
-								trapmake <= '1';
-							END IF;
+					   (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN
+						-- Valid EA mode for cpSAVE - this is a PRIVILEGED instruction
+						IF SVmode='1' THEN
+							-- Supervisor mode without FPU: F-line exception
+							trap_1111 <= '1';
+							trapmake <= '1';
 						ELSE
-							IF SVmode='1' THEN
-								trap_1111 <= '1';
-								trapmake <= '1';
-							ELSE
-								trap_priv <= '1';
-								trapmake <= '1';
-							END IF;
+							-- User mode: privilege violation (cpSAVE is privileged)
+							trap_priv <= '1';
+							trapmake <= '1';
 						END IF;
 					ELSE
+						-- Invalid EA mode: F-line exception regardless of mode
 						trap_1111 <= '1';
 						trapmake <= '1';
 					END IF;
 				--ELSIF cpu="11" AND opcode(8 downto 6)="101" THEN --cpRESTORE
 				ELSIF cpu(1)='1' AND opcode(8 downto 6)="101" THEN --cpRESTORE
+					-- cpRESTORE valid EA modes: control or postincrement
+					-- Valid: (An), (An)+, (d16,An), (d8,An,Xn), (xxx).W, (xxx).L, (d16,PC), (d8,PC,Xn)
+					-- Invalid: Dn, An, -(An), #imm
+					-- Mode 111 valid: reg 0-3 only (absolute and PC-relative, NOT #imm which is reg 4)
 					IF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="100" AND
-					   (opcode(5 downto 3)/="111" OR (opcode(2 downto 1)/="11" AND
-					   opcode(2 downto 0)/="101")) THEN --ea illegal modes
-						IF opcode(5 downto 1)/="11110" THEN
-							IF opcode(11 downto 9)="001" OR opcode(11 downto 9)="010" THEN
-								IF SVmode='1' THEN
-									IF opcode(5 downto 3)="101" THEN
-										--cpRESTORE not implemented - F-line exception
-										trap_1111 <= '1';
-										trapmake <= '1';
-									ELSE
-										trap_1111 <= '1';
-										trapmake <= '1';
-									END IF;
-								ELSE
-									trap_priv <= '1';
-									trapmake <= '1';
-								END IF;
-							ELSE
-								IF SVmode='1' THEN
-									trap_1111 <= '1';
-									trapmake <= '1';
-								ELSE
-									trap_priv <= '1';
-									trapmake <= '1';
-								END IF;
-							END IF;
-						ELSE
+					   (opcode(5 downto 3)/="111" OR opcode(2)='0') THEN
+						-- Valid EA mode for cpRESTORE - this is a PRIVILEGED instruction
+						IF SVmode='1' THEN
+							-- Supervisor mode without FPU: F-line exception
 							trap_1111 <= '1';
 							trapmake <= '1';
-						END IF;
-					ELSE
-						-- Valid EA mode for cpRESTORE
-						IF SVmode='1' THEN
-							IF opcode(11 downto 9)="000" THEN  -- FPU coprocessor - FRESTORE not implemented
-								trap_1111 <= '1';  -- F-line exception (no FPU)
-								trapmake <= '1';
-							ELSE
-								trap_1111 <= '1';  -- Other coprocessors - F-line exception
-								trapmake <= '1';
-							END IF;
 						ELSE
+							-- User mode: privilege violation (cpRESTORE is privileged)
 							trap_priv <= '1';
 							trapmake <= '1';
 						END IF;
+					ELSE
+						-- Invalid EA mode: F-line exception regardless of mode
+						trap_1111 <= '1';
+						trapmake <= '1';
 					END IF;
 				ELSE
 					-- Unrecognized F-line instruction (cpGEN, cpBcc, etc.)
@@ -5113,6 +5078,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" THEN
 						source_areg <= '1';  -- (An), (An)+, -(An) modes use address register
 					END IF;
+					-- FIX: Set datatype for correct address adjustment in (An)+/-(An) modes
+					datatype <= opcode(7 downto 6);
+					set_datatype <= opcode(7 downto 6);
 					set(no_Flags) <= '1';  -- BUG #220: MOVES does not affect condition codes
                     -- BUG #149 FIX: Set FC override signals one cycle early
 					-- This way exec(use_sfc_dfc) will be '1' in moves1 when the bus op happens
@@ -5171,6 +5139,19 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					source_lowbits <= '1';
 					IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" THEN
 						source_areg <= '1';  -- (An), (An)+, -(An) modes use address register
+					END IF;
+					-- FIX: Handle (An)+ and -(An) addressing modes with correct size
+					IF opcode(5 downto 3)="011" THEN  -- (An)+
+						set(postadd) <= '1';
+						IF opcode(2 downto 0)="111" THEN
+							set(use_SP) <= '1';  -- SP uses special increment rules
+						END IF;
+					END IF;
+					IF opcode(5 downto 3)="100" THEN  -- -(An)
+						set(presub) <= '1';
+						IF opcode(2 downto 0)="111" THEN
+							set(use_SP) <= '1';  -- SP uses special decrement rules
+						END IF;
 					END IF;
 					-- BUG #149 FIX: Must transition to nop state to hold the data access
 					-- Without this, next_micro_state defaults to idle and state goes back to "00" (fetch)
