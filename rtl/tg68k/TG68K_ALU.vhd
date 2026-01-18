@@ -313,13 +313,19 @@ PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype,
 				addsub_b <= "00000000000000000000000000000001";
 				-- BUG #144 FIX: Added exec(pmmu_addr_inc) for PMOVE CRP/SRP 64-bit +4 address increment
 				-- pmmu_addr_inc avoids register write-back side effect that postadd would cause
+				-- BUG #291 FIX: When postadd AND pmmu_dbl are set, use +8 for register update!
+				-- pmmu_addr_inc is for address calculation only, pmmu_dbl is for register write-back.
+				-- The priority must be: pmmu_dbl (when postadd) > pmmu_addr_inc (address only).
 				ELSIF long_start='0' AND exe_datatype="10" AND (exec(presub) OR exec(postadd) OR movem_presub OR exec(pmmu_addr_inc))='1' THEN
 					IF exec(movem_action)='1' THEN
 						addsub_b <= "00000000000000000000000000000110";
-					ELSIF exec(pmmu_addr_inc)='1' THEN
-						addsub_b <= "00000000000000000000000000000100";
+					-- BUG #291 FIX: Check pmmu_dbl BEFORE pmmu_addr_inc!
+					-- When postadd=1 (register update), pmmu_dbl gives +8 for CRP/SRP.
+					-- When postadd=0 (address calc only), pmmu_addr_inc gives +4.
 					ELSIF exec(pmmu_dbl)='1' AND (exec(presub) OR exec(postadd) OR movem_presub)='1' THEN
 						addsub_b <= "00000000000000000000000000001000";
+					ELSIF exec(pmmu_addr_inc)='1' THEN
+						addsub_b <= "00000000000000000000000000000100";
 					ELSE
 						addsub_b <= "00000000000000000000000000000100";
 					END IF;

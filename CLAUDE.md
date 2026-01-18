@@ -28,8 +28,26 @@ This is the Minimig-AGA_MiSTer project - an FPGA implementation of the Amiga com
 - Keep track of build PIDs - don't pkill builds from other instances
 - Check if a process exists with `ps` before attempting to kill it
 - NEVER manually convert SOF to RBF - always run full Quartus compile
-- Check for multiple driver issues before starting a build
-- Ask before running `git checkout` - use `git diff` or `git show` first
+- Check for multiple driver issues before starting a build (see Pre-Build Checks below)
+
+### Git and Code Safety
+- **ALWAYS ask permission** before running `git checkout`, `git revert`, or any destructive git command
+- Use `git diff` or `git show` to review changes before suggesting reversions
+- Create backups of modified files before making significant changes: `cp file.vhd file.vhd.backup`
+- If reverting a fix, explain why and get explicit approval first
+- Use `git stash` to safely preserve work-in-progress changes
+
+### Pre-Build Checks
+```bash
+# Check for multiple driver issues in VHDL before building
+grep -n "multiple drivers" output_files/*.rpt 2>/dev/null || echo "No previous build"
+
+# Syntax check without full build
+cd tests/tg68k_030 && make syntax-check
+
+# Check that the build PID file matches a running process
+cat .current_build_pid 2>/dev/null && ps -p $(cat .current_build_pid) || echo "No active build"
+```
 
 ## Development Commands
 
@@ -66,6 +84,14 @@ make test-cache         # Cache operations
 make test-cacr          # CACR register
 make test-pmove-tc      # PMOVE TC operations
 make test-diagnostic    # PMMU diagnostic tests (quick sanity check)
+make test-moves         # MOVES instruction FC handling
+make test-mmu-instruction-suite  # Complete MMU instruction test suite
+
+# Run all comprehensive tests
+make test-comprehensive  # ALL enhanced tests including advanced/fault/stress
+
+# Interactive debugging with waveforms
+make test-gui           # Opens ModelSim GUI for step-through debugging
 
 # Direct ModelSim commands
 /opt/intelFPGA_lite/17.0/modelsim_ase/linuxaloem/vcom -93 <file.vhd>
@@ -132,3 +158,14 @@ See [TG68K_REGISTERS.md](TG68K_REGISTERS.md) for detailed specifications:
 - PMMU Registers (TC, CRP, SRP, TT0, TT1, MMUSR)
 - Page descriptor formats (short/long format table, page, invalid, indirect)
 - PMOVE addressing modes (Control Alterable only - no PC-relative or immediate)
+
+### Understanding PMOVE Instructions
+PMOVE instructions work like MOVE but with MMU registers. Think of them as equivalent:
+```
+PMOVE TC,(A7)      ~  MOVE.L D0,(A7)      ; Write 32-bit TC to memory at A7
+PMOVE (A7),TC      ~  MOVE.L (A7),D0      ; Read 32-bit from memory to TC
+PMOVE CRP,(A7)     ~  two MOVE.L ops      ; Write 64-bit CRP to memory (two longwords)
+PMOVE TT0,(d16,A5) ~  MOVE.L D0,(d16,A5)  ; Write 32-bit TT0 with displacement
+PMOVE MMUSR,(A7)   ~  MOVE.W D0,(A7)      ; Write 16-bit MMUSR to memory
+```
+The EA calculation, memory access timing, and addressing modes follow the same patterns as MOVE.

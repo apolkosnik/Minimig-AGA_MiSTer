@@ -84,23 +84,23 @@ architecture rtl of TG68K_PMMU_030 is
   -- Walker descriptor address register (must persist across clock cycles for W_*_LOW states)
   signal desc_addr_reg : std_logic_vector(31 downto 0) := (others => '0');
 
-  -- MC68030 register write masks (workaround for VHDL synthesis issues)
+  -- MC68030 register write masks (DISABLED for now - allowing raw writes)
   -- TC register mask: preserve E(31), SRE(25), FCL(24), and all field bits (23-0), clear reserved bits 30-26
   -- Note: Bit 23 (PS MSB) is forced to 1 in write logic since all valid PS values (8-15) have MSB=1
-  constant TC_WRITE_MASK : std_logic_vector(31 downto 0) := "10000011111111111111111111111111";
+  -- constant TC_WRITE_MASK : std_logic_vector(31 downto 0) := "10000011111111111111111111111111";
 
   -- TTR register mask (MC68030 User's Manual section 9.2.6):
   -- Preserve: Address(31:16), E(15), CI(10), RW(9), RWM(8), FC_Base(6:4), FC_Mask(2:0)
   -- Clear reserved: bits 14-11, 7, 3
-  constant TTR_WRITE_MASK : std_logic_vector(31 downto 0) := "11111111111111111000011101110111"; -- 0xFFFF8777
+  -- constant TTR_WRITE_MASK : std_logic_vector(31 downto 0) := "11111111111111111000011101110111"; -- 0xFFFF8777
 
   -- CRP/SRP HIGH mask: preserve L/U (31), Limit (30-16), DT (1:0); clear reserved (15-2)
   -- HIGH word format: L/U[63] + Limit[62:48] + Reserved[47:34] + DT[33:32]
-  constant CRP_HIGH_MASK : std_logic_vector(31 downto 0) := "11111111111111110000000000000011"; -- 0xFFFF0003
+  -- constant CRP_HIGH_MASK : std_logic_vector(31 downto 0) := "11111111111111110000000000000011"; -- 0xFFFF0003
 
   -- CRP/SRP LOW mask: preserve table address (31-4), clear reserved bits (3-0)
   -- LOW word format: Table Address[31:4] + Reserved[3:0]
-  constant CRP_LOW_MASK : std_logic_vector(31 downto 0) := "11111111111111111111111111110000"; -- 0xFFFFFFF0
+  -- constant CRP_LOW_MASK : std_logic_vector(31 downto 0) := "11111111111111111111111111110000"; -- 0xFFFFFFF0
   
   -- Translation result latches
   signal addr_phys_reg      : std_logic_vector(31 downto 0) := (others => '0');
@@ -778,6 +778,36 @@ architecture rtl of TG68K_PMMU_030 is
     return result;
   end function;
 
+  -- Calculate effective page shift for early termination
+  -- MC68030 spec: When a page descriptor (DT=01) is found before the final table level,
+  -- the remaining index bits become part of the page offset, creating a larger "super page".
+  -- For early termination at level L, effective page shift = PS + TID + TIC + TIB + ... (remaining levels)
+  -- walk_level: 0=ROOT, 1=PTR1, 2=PTR2, 3=PTR3
+  function calc_effective_page_shift(
+    base_page_shift : integer;      -- TC.PS value (8-15)
+    level : integer;                -- walk_level where page descriptor was found
+    idx_bits : tc_bits_array_t      -- tc_idx_bits: (0)=TIA, (1)=TIB, (2)=TIC, (3)=TID
+  ) return integer is
+    variable result : integer;
+  begin
+    result := base_page_shift;
+    -- Add remaining index bits based on termination level
+    -- Level 0: Add TID + TIC + TIB (all remaining levels)
+    -- Level 1: Add TID + TIC
+    -- Level 2: Add TID
+    -- Level 3: No addition (final level, just PS)
+    if level <= 2 then
+      result := result + idx_bits(3);  -- Add TID
+    end if;
+    if level <= 1 then
+      result := result + idx_bits(2);  -- Add TIC
+    end if;
+    if level = 0 then
+      result := result + idx_bits(1);  -- Add TIB
+    end if;
+    return result;
+  end function;
+
 begin
 
   -- Reset and register writes
@@ -864,7 +894,7 @@ begin
             -- 31-24: Logical Address Base, 23-16: Logical Address Mask
             -- 15: E (Enable), 14-11: Reserved, 10: CI (Cache Inhibit), 9: RW, 8: RWM
             -- 7: Reserved, 6-4: FC Base, 3: Reserved, 2-0: FC Mask
-            TT0 <= (reg_wdat and TTR_WRITE_MASK);
+            TT0 <= reg_wdat;  -- Mask disabled for now
             -- TT0 changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
               atc_flush_req <= '1';
@@ -877,7 +907,7 @@ begin
             -- 31-24: Logical Address Base, 23-16: Logical Address Mask
             -- 15: E (Enable), 14-11: Reserved, 10: CI (Cache Inhibit), 9: RW, 8: RWM
             -- 7: Reserved, 6-4: FC Base, 3: Reserved, 2-0: FC Mask
-            TT1 <= (reg_wdat and TTR_WRITE_MASK);
+            TT1 <= reg_wdat;  -- Mask disabled for now
             -- TT1 changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
               atc_flush_req <= '1';
@@ -892,7 +922,7 @@ begin
             -- BUG #48 FIX: Validate configuration BEFORE writing TC to prevent lockup
             -- If configuration is invalid and E=1, clear E bit to prevent MMU activation
             -- This prevents system lockup from invalid MMU config while still taking exception
-            tc_write_val := reg_wdat and TC_WRITE_MASK;
+            tc_write_val := reg_wdat;  -- Mask disabled for now
             tc_e := reg_wdat(31);
 
             if tc_e = '1' then
@@ -939,7 +969,7 @@ begin
             if reg_part = '1' then
               -- SRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
               -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
-              SRP_H <= (reg_wdat and CRP_HIGH_MASK);
+              SRP_H <= reg_wdat;  -- Mask disabled for now
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
               -- Per spec: Register is loaded BEFORE exception is taken
@@ -953,7 +983,7 @@ begin
             else
               -- SRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
-              SRP_L <= (reg_wdat and CRP_LOW_MASK);
+              SRP_L <= reg_wdat;  -- Mask disabled for now
               -- BUG #148 FIX: Do NOT clear mmu_config_error on low word write
               -- If high word had DT=00, error must remain latched until explicitly acknowledged
               -- (via valid high word write or TC write with E=0)
@@ -966,7 +996,7 @@ begin
             if reg_part = '1' then
               -- CRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
               -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
-              CRP_H <= (reg_wdat and CRP_HIGH_MASK);
+              CRP_H <= reg_wdat;  -- Mask disabled for now
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
               -- Per spec: Register is loaded BEFORE exception is taken
@@ -980,7 +1010,7 @@ begin
             else
               -- CRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
-              CRP_L <= (reg_wdat and CRP_LOW_MASK);
+              CRP_L <= reg_wdat;  -- Mask disabled for now
               -- BUG #148 FIX: Do NOT clear mmu_config_error on low word write
               -- If high word had DT=00, error must remain latched until explicitly acknowledged
               -- (via valid high word write or TC write with E=0)
@@ -2619,11 +2649,14 @@ begin
             wstate <= W_FAULT;
            --  -- report "WP_FAULT_WALKER: Write to WP page detected during walk, addr=0x" & slv_to_hstring(saved_addr_log) severity note;
           else
-            -- MC68030: Page size is ALWAYS from TC register, never from descriptor
-            -- Descriptor bits 3:2 are U (Used) and WP (Write Protect), NOT page size
-            walk_page_shift <= tc_page_shift;
-            walk_page_size  <= tc_page_size;
-            walk_log_base   <= align_addr(saved_addr_log, tc_page_shift);
+            -- MC68030: Early termination page size calculation
+            -- When page descriptor found before final level, remaining index bits become offset
+            -- This creates "super pages" larger than TC.PS specifies
+            -- Example: TC.PS=13 (8KB), early term at level 0 with TIB=7,TIC=8,TID=0
+            --          -> effective shift = 13+0+8+7 = 28 bits = 256MB page
+            walk_page_shift <= calc_effective_page_shift(tc_page_shift, walk_level, tc_idx_bits);
+            walk_page_size  <= tc_page_size;  -- Keep original for compatibility
+            walk_log_base   <= align_addr(saved_addr_log, calc_effective_page_shift(tc_page_shift, walk_level, tc_idx_bits));
             -- Extract physical address based on descriptor format
             if walk_desc_is_long = '1' then
               -- Long format: page address from LOW word bits 31-8
