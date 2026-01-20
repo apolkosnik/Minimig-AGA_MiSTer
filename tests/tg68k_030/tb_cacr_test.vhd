@@ -61,13 +61,9 @@ begin
         case brief(11 downto 0) is
           when X"002" =>
             -- Write to CACR with proper MC68030 behavior
-            CACR(1 downto 0) <= reg_QA(1 downto 0);     -- IE, FI - instruction cache enable/freeze
-            -- Bits 2-3 are self-clearing command bits - NOT stored
-            CACR(4) <= reg_QA(4);                        -- IBE - Instruction Burst Enable
+            CACR(4 downto 0) <= reg_QA(4 downto 0);      -- IE, FI, CEI, CI, IBE
             CACR(7 downto 5) <= (others => '0');         -- Reserved bits
-            CACR(9 downto 8) <= reg_QA(9 downto 8);     -- DE, FD - data cache enable/freeze
-            -- Bits 10-11 are self-clearing command bits - NOT stored
-            CACR(13 downto 12) <= reg_QA(13 downto 12); -- DBE, WA
+            CACR(13 downto 8) <= reg_QA(13 downto 8);    -- DE, FD, CED, CD, DBE, WA
             CACR(31 downto 14) <= (others => '0');       -- Reserved bits
           when others => 
             null;
@@ -178,9 +174,10 @@ begin
 
     movec_write_cacr(x"FFFFFFFF"); -- All bits set
     movec_read_cacr;
-    -- MC68030 CACR: bits 0,1,4,8,9,12,13 are sticky (not 2,3,10,11 which are self-clearing)
+    -- MC68030 CACR valid bits: 0-4 (IE,FI,CEI,CI,IBE) and 8-13 (DE,FD,CED,CD,DBE,WA)
     -- Reserved bits 5-7, 14-31 should be masked to 0
-    report_test("Reserved Bits Masked", movec_data = x"00003313"); -- IE,FI,IBE,DE,FD,DBE,WA = 0x3313
+    -- Self-clearing bits (2,3,10,11) are still visible immediately after write (see TEST 3)
+    report_test("Reserved Bits Masked", movec_data = x"00003F1F"); -- All valid bits set, reserved=0
 
     -- TEST 3: Self-Clearing Bits
     write(l, string'("TEST 3: Self-Clearing Bits"));

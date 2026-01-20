@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-comprehensive test-pmove-multiple-regs test-integration test-diagrom test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pmove-cpu-execution test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves validate setup help
+.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-integration test-diagrom test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pmove-cpu-execution test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-rte-formats validate setup help
 
 # Default target
 all: test-comprehensive
@@ -37,6 +37,8 @@ help:
 	@echo "  test-pmove-tt1-mem - Test PMOVE.L TT1,(d16,An) memory write"
 	@echo "  test-pmove-crp-a7-postinc - Test PMOVE.Q CRP,(A7)+ stack update"
 	@echo "  test-pmove-comprehensive - PMOVE encoding + d16,An regression"
+	@echo "  test-pmove-d16an-pc - Test PMOVE (d16,An) PC increment + data values"
+	@echo "  test-pmove-d8anxn-pc - Test PMOVE (d8,An,Xn) PC increment + data values"
 	@echo "  test-pmove-multiple-regs - Test PMOVE multiple regs from (A7) - OP1addr conflict validation"
 	@echo "  test-integration - Test full system integration"
 	@echo "  test-diagrom     - Test DiagROM boot sequence"
@@ -52,6 +54,8 @@ help:
 	@echo "  test-mmu-instruction-suite - Run complete MMU instruction test suite"
 	@echo "  test-amiga-sequence - Test Amiga ROM MMU initialization sequence"
 	@echo "  test-moves       - Test MOVES instruction FC handling"
+	@echo "  test-moves-validation - Run MOVES validation testbench"
+	@echo "  test-rte-formats - Test all RTE stack frame formats (0,1,2,9,A,B + invalid)"
 	@echo "  test-all         - Run original test suite"
 	@echo "  test-comprehensive - Run ALL enhanced tests"
 	@echo "  validate         - Validate complete MC68030 compliance"
@@ -100,6 +104,7 @@ compile: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_comprehensive.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_multiple_regs_from_a7.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_diagnostic.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_validation.vhd || true
 	@echo "Basic compilation completed (errors ignored for initial testing)"
 
 # Compile enhanced test sources
@@ -158,6 +163,14 @@ test-pmove-tt0-mem-read: compile
 test-pmove-tt1-mem: compile
 	@echo "Running PMOVE.L TT1,(d16,An) memory write tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_pmove_tt1_mem
+
+test-pmove-d16an-pc: compile
+	@echo "Running PMOVE (d16,An) PC increment + data value tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_d16an_pc
+
+test-pmove-d8anxn-pc: compile
+	@echo "Running PMOVE (d8,An,Xn) PC increment + data value tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_d8anxn_pc
 
 test-pmove-crp-a7-postinc: compile
 	@echo "Running PMOVE.Q CRP,(A7)+ stack postincrement regression..."
@@ -240,6 +253,22 @@ test-moves: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_instruction.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_moves_instruction
+
+test-moves-validation: setup
+	@echo "Running MOVES validation testbench..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_validation.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_moves_validation
+
+test-rte-formats: setup
+	@echo "Running RTE stack frame format validation tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_rte_all_formats.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_rte_all_formats 2>&1 | grep -E "(PASS|FAIL|Format|Test|Error|=====)"
 
 # Complete MMU Instruction Test Suite
 test-mmu-instruction-suite: setup

@@ -47,6 +47,7 @@ architecture behavior of tb_pmove_tt0_mem_read is
       mem_addr       : out std_logic_vector(31 downto 0);
       mem_ack        : in  std_logic;
       mem_rdat       : in  std_logic_vector(31 downto 0);
+      mem_berr       : in  std_logic;
       busy           : out std_logic
     );
   end component;
@@ -60,7 +61,7 @@ architecture behavior of tb_pmove_tt0_mem_read is
   -- PMMU register interface
   signal reg_we   : std_logic := '0';
   signal reg_re   : std_logic := '0';
-  signal reg_sel : std_logic_vector(4 downto 0) := x"2";
+  signal reg_sel : std_logic_vector(4 downto 0) := "00000";
   signal reg_wdat : std_logic_vector(31 downto 0) := (others => '0');
   signal reg_rdat : std_logic_vector(31 downto 0);
   signal reg_part : std_logic := '0';
@@ -92,6 +93,7 @@ architecture behavior of tb_pmove_tt0_mem_read is
   signal mem_addr : std_logic_vector(31 downto 0);
   signal mem_ack  : std_logic := '0';
   signal mem_rdat : std_logic_vector(31 downto 0) := (others => '0');
+  signal mem_berr : std_logic := '0';
   signal busy     : std_logic;
 
 begin
@@ -129,6 +131,7 @@ begin
       mem_addr => mem_addr,
       mem_ack => mem_ack,
       mem_rdat => mem_rdat,
+      mem_berr => mem_berr,
       busy => busy
     );
 
@@ -169,7 +172,7 @@ begin
     procedure pmove_write_tt0_from_memory(value : std_logic_vector(31 downto 0)) is
     begin
       reg_wdat <= value;
-      reg_sel <= x"0";  -- TT0 register selector
+      reg_sel <= "00000";  -- TT0 register selector
       reg_part <= '0';  -- Not used for TT0 (32-bit register)
       reg_fd <= '0';    -- Flush enabled
       reg_we <= '1';
@@ -180,7 +183,7 @@ begin
 
     procedure pmove_read_tt0 is
     begin
-      reg_sel <= x"0";  -- TT0 register selector
+      reg_sel <= "00000";  -- TT0 register selector
       reg_part <= '0';  -- Not used for TT0
       reg_re <= '1';
       wait_cycles(1);

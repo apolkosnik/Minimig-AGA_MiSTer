@@ -3,9 +3,10 @@
 
 # Set up environment
 set MODELSIM_PATH "/opt/intelFPGA_lite/17.0/modelsim_ase"
-set PROJECT_ROOT "/home/adam/68030/Minimig-AGA_MiSTer"
-set TEST_DIR "$PROJECT_ROOT/tests/tg68k_030"
-set RTL_DIR "$PROJECT_ROOT/rtl/tg68k"
+set SCRIPT_DIR [file dirname [file normalize [info script]]]
+set PROJECT_ROOT [file normalize [file join $SCRIPT_DIR ".." ".."]]
+set TEST_DIR [file normalize [file join $PROJECT_ROOT "tests" "tg68k_030"]]
+set RTL_DIR [file normalize [file join $PROJECT_ROOT "rtl" "tg68k"]]
 
 # Create work library
 vlib work
@@ -51,8 +52,12 @@ proc run_test {testbench duration description} {
     # Run simulation
     run $duration
     
-    # Save waveform
-    write format wave -window .main_pane.wave.interior.cs.body.pw.wf "$testbench.wlf"
+    # Save waveform only in GUI mode (batch mode doesn't support write format)
+    if {![batch_mode]} {
+        write format wave -window .main_pane.wave.interior.cs.body.pw.wf "$testbench.wlf"
+    } else {
+        echo "Batch mode: skipping waveform save for $testbench"
+    }
     
     quit -sim
     echo "$description completed"

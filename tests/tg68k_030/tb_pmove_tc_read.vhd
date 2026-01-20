@@ -47,6 +47,7 @@ architecture behavior of tb_pmove_tc_read is
       mem_addr       : out std_logic_vector(31 downto 0);
       mem_ack        : in  std_logic;
       mem_rdat       : in  std_logic_vector(31 downto 0);
+      mem_berr       : in  std_logic;
       busy           : out std_logic
     );
   end component;
@@ -92,6 +93,7 @@ architecture behavior of tb_pmove_tc_read is
   signal mem_addr : std_logic_vector(31 downto 0);
   signal mem_ack  : std_logic := '0';
   signal mem_rdat : std_logic_vector(31 downto 0) := (others => '0');
+  signal mem_berr : std_logic := '0';
   signal busy     : std_logic;
 
 begin
@@ -129,6 +131,7 @@ begin
       mem_addr => mem_addr,
       mem_ack => mem_ack,
       mem_rdat => mem_rdat,
+      mem_berr => mem_berr,
       busy => busy
     );
 

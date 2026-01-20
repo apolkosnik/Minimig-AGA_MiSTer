@@ -24,7 +24,7 @@ architecture behavior of tb_integration_test is
       HALT : inout std_logic;
       BERR : in std_logic;
       IPL : in std_logic_vector(2 downto 0);
-      ADDR : out std_logic_vector(31 downto 0);
+      ADDR : buffer std_logic_vector(31 downto 0);
       FC : out std_logic_vector(2 downto 0);
       DATA : inout std_logic_vector(15 downto 0);
       AS : out std_logic;
@@ -34,7 +34,15 @@ architecture behavior of tb_integration_test is
       DTACK : in std_logic;
       E : out std_logic;
       VPA : in std_logic;
-      VMA : out std_logic
+      VMA : out std_logic;
+      cache_req : buffer std_logic;
+      cache_addr : buffer std_logic_vector(31 downto 0);
+      cache_data : in std_logic_vector(15 downto 0);
+      cache_ack : in std_logic;
+      cache_burst : buffer std_logic;
+      cache_burst_len : buffer std_logic_vector(2 downto 0);
+      cache_hit : out std_logic;
+      cache_miss : out std_logic
     );
   end component;
 
@@ -56,6 +64,14 @@ architecture behavior of tb_integration_test is
   signal E : std_logic := '1';
   signal VPA : std_logic := '1';
   signal VMA : std_logic := '1';
+  signal cache_req : std_logic := '0';
+  signal cache_addr : std_logic_vector(31 downto 0) := (others => '0');
+  signal cache_data : std_logic_vector(15 downto 0) := (others => '0');
+  signal cache_ack : std_logic := '0';
+  signal cache_burst : std_logic := '0';
+  signal cache_burst_len : std_logic_vector(2 downto 0) := (others => '0');
+  signal cache_hit : std_logic := '0';
+  signal cache_miss : std_logic := '0';
 
   -- Memory simulation
   type memory_t is array(0 to 4095) of std_logic_vector(15 downto 0);
@@ -93,7 +109,15 @@ begin
       DTACK => DTACK,
       E => E,
       VPA => VPA,
-      VMA => VMA
+      VMA => VMA,
+      cache_req => cache_req,
+      cache_addr => cache_addr,
+      cache_data => cache_data,
+      cache_ack => cache_ack,
+      cache_burst => cache_burst,
+      cache_burst_len => cache_burst_len,
+      cache_hit => cache_hit,
+      cache_miss => cache_miss
     );
 
   -- Clock generation
@@ -149,6 +173,26 @@ begin
             end if;
           end if;
         end if;
+      end if;
+    end if;
+  end process;
+
+  -- Simple cache fill responder
+  cache_process: process(CLK)
+    variable cache_addr_int : integer;
+  begin
+    if rising_edge(CLK) then
+      if cache_req = '1' then
+        cache_ack <= '1';
+        cache_addr_int := to_integer(unsigned(cache_addr(12 downto 1)));
+        if cache_addr_int < 4096 then
+          cache_data <= memory(cache_addr_int);
+        else
+          cache_data <= x"4E71";
+        end if;
+      else
+        cache_ack <= '0';
+        cache_data <= (others => '0');
       end if;
     end if;
   end process;
