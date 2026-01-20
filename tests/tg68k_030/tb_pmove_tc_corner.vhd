@@ -48,7 +48,9 @@ architecture behavior of tb_pmove_tc_corner is
       mem_ack        : in  std_logic;
       mem_rdat       : in  std_logic_vector(31 downto 0);
       mem_berr       : in  std_logic;
-      busy           : out std_logic
+      busy           : out std_logic;
+      mmu_config_err : out std_logic;
+      mmu_config_ack : in  std_logic
     );
   end component;
 
@@ -95,6 +97,8 @@ architecture behavior of tb_pmove_tc_corner is
   signal mem_rdat : std_logic_vector(31 downto 0) := (others => '0');
   signal mem_berr : std_logic := '0';
   signal busy     : std_logic;
+  signal mmu_config_err : std_logic;
+  signal mmu_config_ack : std_logic := '0';
 
 begin
 
@@ -132,7 +136,9 @@ begin
       mem_ack => mem_ack,
       mem_rdat => mem_rdat,
       mem_berr => mem_berr,
-      busy => busy
+      busy => busy,
+      mmu_config_err => mmu_config_err,
+      mmu_config_ack => mmu_config_ack
     );
 
   -- Clock generation

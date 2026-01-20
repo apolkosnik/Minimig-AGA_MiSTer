@@ -154,7 +154,7 @@ package TG68K_Pack is
 	port(
 		clk						: in std_logic;
 		Reset						: in std_logic;
-		CPU						: in std_logic_vector(1 downto 0):="00";  -- 00->68000  01->68010  10->68020  11->68030
+		CPU						: in std_logic_vector(1 downto 0):="10";  -- 00->68000  01->68010  10->68030
 		clkena_lw				: in std_logic:='1';
 		execOPC					: in bit;
 		decodeOPC				: in bit;
