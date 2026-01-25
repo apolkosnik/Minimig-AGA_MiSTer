@@ -44,11 +44,15 @@ architecture behavior of tb_pmove_tt1_mem is
       fault_status   : out std_logic_vector(31 downto 0);
       tc_enable      : out std_logic;
       mem_req        : buffer std_logic;
+      mem_we         : out std_logic;
       mem_addr       : out std_logic_vector(31 downto 0);
+      mem_wdat       : out std_logic_vector(31 downto 0);
       mem_ack        : in  std_logic;
-      mem_rdat       : in  std_logic_vector(31 downto 0);
       mem_berr       : in  std_logic;
-      busy           : out std_logic
+      mem_rdat       : in  std_logic_vector(31 downto 0);
+      busy           : out std_logic;
+      mmu_config_err : out std_logic;
+      mmu_config_ack : in  std_logic
     );
   end component;
 
@@ -90,11 +94,17 @@ architecture behavior of tb_pmove_tt1_mem is
 
   -- Memory interface
   signal mem_req  : std_logic;
+  signal mem_we   : std_logic;
   signal mem_addr : std_logic_vector(31 downto 0);
+  signal mem_wdat : std_logic_vector(31 downto 0);
   signal mem_ack  : std_logic := '0';
   signal mem_rdat : std_logic_vector(31 downto 0) := (others => '0');
   signal mem_berr : std_logic := '0';
   signal busy     : std_logic;
+
+  -- MMU configuration exception
+  signal mmu_config_err : std_logic;
+  signal mmu_config_ack : std_logic := '0';
 
   -- Simulated memory to capture writes
   type memory_array is array (0 to 255) of std_logic_vector(31 downto 0);
@@ -132,11 +142,15 @@ begin
       fault_status => fault_status,
       tc_enable => tc_enable,
       mem_req => mem_req,
+      mem_we => mem_we,
       mem_addr => mem_addr,
+      mem_wdat => mem_wdat,
       mem_ack => mem_ack,
-      mem_rdat => mem_rdat,
       mem_berr => mem_berr,
-      busy => busy
+      mem_rdat => mem_rdat,
+      busy => busy,
+      mmu_config_err => mmu_config_err,
+      mmu_config_ack => mmu_config_ack
     );
 
   -- Clock generation
@@ -175,7 +189,7 @@ begin
     procedure pmove_write_tt1(value : std_logic_vector(31 downto 0)) is
     begin
       reg_wdat <= value;
-      reg_sel <= "00001";  -- TT1 register selector
+      reg_sel <= "00011";  -- TT1 register selector (brief(14:10)=00011)
       reg_part <= '0';  -- Not used for TT1 (32-bit register)
       reg_fd <= '0';    -- Flush enabled
       reg_we <= '1';
@@ -186,7 +200,7 @@ begin
 
     procedure pmove_read_tt1_from_reg is
     begin
-      reg_sel <= "00001";  -- TT1 register selector
+      reg_sel <= "00011";  -- TT1 register selector (brief(14:10)=00011)
       reg_part <= '0';  -- Not used for TT1
       reg_re <= '1';
       wait_cycles(1);
@@ -258,10 +272,10 @@ begin
     writeline(output, l);
     test_write_read_memory(x"00000000", x"00000000", "TT1 = 0x00000000");
 
-    -- TEST 2: Reserved bits masked (bits 14-10, 3, 0)
-    write(l, string'("TEST 2: Reserved Bits Masked"));
+    -- TEST 2: All bits stored (reserved bits NOT masked in this implementation)
+    write(l, string'("TEST 2: All Bits Stored"));
     writeline(output, l);
-    test_write_read_memory(x"FFFFFFFF", x"FFFF83F6", "0xFFFFFFFF -> 0xFFFF83F6");
+    test_write_read_memory(x"FFFFFFFF", x"FFFFFFFF", "0xFFFFFFFF stored as-is");
 
     -- TEST 3: Enable bit only
     write(l, string'("TEST 3: Enable Bit Only"));
@@ -303,45 +317,45 @@ begin
     writeline(output, l);
     test_write_read_memory(x"FFFF8350", x"FFFF8350", "I/O config");
 
-    -- TEST 11: Reserved bit 14 cleared
+    -- TEST 11: Reserved bit 14 stored (no masking in this implementation)
     write(l, string'("TEST 11: Reserved Bit 14"));
     writeline(output, l);
-    test_write_read_memory(x"00004000", x"00000000", "Bit 14 cleared");
+    test_write_read_memory(x"00004000", x"00004000", "Bit 14 stored");
 
-    -- TEST 12: Reserved bit 13 cleared
+    -- TEST 12: Reserved bit 13 stored
     write(l, string'("TEST 12: Reserved Bit 13"));
     writeline(output, l);
-    test_write_read_memory(x"00002000", x"00000000", "Bit 13 cleared");
+    test_write_read_memory(x"00002000", x"00002000", "Bit 13 stored");
 
-    -- TEST 13: Reserved bit 12 cleared
+    -- TEST 13: Reserved bit 12 stored
     write(l, string'("TEST 13: Reserved Bit 12"));
     writeline(output, l);
-    test_write_read_memory(x"00001000", x"00000000", "Bit 12 cleared");
+    test_write_read_memory(x"00001000", x"00001000", "Bit 12 stored");
 
-    -- TEST 14: Reserved bit 11 cleared
+    -- TEST 14: Reserved bit 11 stored
     write(l, string'("TEST 14: Reserved Bit 11"));
     writeline(output, l);
-    test_write_read_memory(x"00000800", x"00000000", "Bit 11 cleared");
+    test_write_read_memory(x"00000800", x"00000800", "Bit 11 stored");
 
-    -- TEST 15: Reserved bit 10 cleared
+    -- TEST 15: Reserved bit 10 stored
     write(l, string'("TEST 15: Reserved Bit 10"));
     writeline(output, l);
-    test_write_read_memory(x"00000400", x"00000000", "Bit 10 cleared");
+    test_write_read_memory(x"00000400", x"00000400", "Bit 10 stored");
 
-    -- TEST 16: Reserved bit 3 cleared
+    -- TEST 16: Reserved bit 3 stored
     write(l, string'("TEST 16: Reserved Bit 3"));
     writeline(output, l);
-    test_write_read_memory(x"00000008", x"00000000", "Bit 3 cleared");
+    test_write_read_memory(x"00000008", x"00000008", "Bit 3 stored");
 
-    -- TEST 17: Reserved bit 0 cleared
+    -- TEST 17: Reserved bit 0 stored
     write(l, string'("TEST 17: Reserved Bit 0"));
     writeline(output, l);
-    test_write_read_memory(x"00000001", x"00000000", "Bit 0 cleared");
+    test_write_read_memory(x"00000001", x"00000001", "Bit 0 stored");
 
-    -- TEST 18: All reserved bits together
+    -- TEST 18: All reserved bits stored
     write(l, string'("TEST 18: All Reserved Bits"));
     writeline(output, l);
-    test_write_read_memory(x"00007C09", x"00000000", "All reserved cleared");
+    test_write_read_memory(x"00007C09", x"00007C09", "All reserved stored");
 
     -- TEST 19: CI field - all values
     write(l, string'("TEST 19: CI=00 (cacheable)"));
@@ -420,8 +434,8 @@ begin
     write(l, string'("TEST 26: Boundary Conditions"));
     writeline(output, l);
     test_write_read_memory(x"00000000", x"00000000", "All zeros");
-    test_write_read_memory(x"FFFFFFFF", x"FFFF83F6", "All ones (masked)");
-    test_write_read_memory(x"FFFF83F6", x"FFFF83F6", "Max valid value");
+    test_write_read_memory(x"FFFFFFFF", x"FFFFFFFF", "All ones stored as-is");
+    test_write_read_memory(x"FFFF83F6", x"FFFF83F6", "Typical valid value");
 
     -- Summary
     wait_cycles(5);

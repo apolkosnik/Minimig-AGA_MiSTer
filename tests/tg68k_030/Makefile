@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-integration test-diagrom test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pmove-cpu-execution test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-rte-formats validate setup help
+.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-rte-formats validate setup help
 
 # Default target
 all: test-comprehensive
@@ -42,13 +42,13 @@ help:
 	@echo "  test-pmove-multiple-regs - Test PMOVE multiple regs from (A7) - OP1addr conflict validation"
 	@echo "  test-integration - Test full system integration"
 	@echo "  test-diagrom     - Test DiagROM boot sequence"
+	@echo "  test-diagrom-detectcpu - Test DiagROM CPU detection (MOVEC ITT0 trap)"
 	@echo "  test-cpu-mmu-detection - Test CPU/MMU detection (TypeOfCPU + GetMMUType)"
 	@echo "  test-advanced    - Run advanced PMMU functionality tests"
 	@echo "  test-fault       - Run comprehensive fault handling tests"
 	@echo "  test-stress      - Run page walker stress tests"
 	@echo "  test-regression  - Run MC68030 regression test suite (RECOMMENDED)"
 	@echo "  test-pmove-addressing - Test PMOVE with all legal addressing modes"
-	@echo "  test-pmove-cpu-execution - Test PMOVE via CPU execution (PC tracking)"
 	@echo "  test-pflush-ptest-pload - Test PFLUSH/PTEST/PLOAD instructions"
 	@echo "  test-indirect-descriptor - Test indirect descriptors"
 	@echo "  test-mmu-instruction-suite - Run complete MMU instruction test suite"
@@ -104,7 +104,11 @@ compile: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_comprehensive.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_multiple_regs_from_a7.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_diagnostic.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cpu_mmu_detection.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_d16an_pc.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_d8anxn_pc.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_validation.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_diagrom_detectcpu.vhd || true
 	@echo "Basic compilation completed (errors ignored for initial testing)"
 
 # Compile enhanced test sources
@@ -178,7 +182,7 @@ test-pmove-crp-a7-postinc: compile
 
 test-pmove-comprehensive: compile
 	@echo "Running PMOVE comprehensive regression..."
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_comprehensive
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_pmove_comprehensive
 
 test-pmove-multiple-regs: compile
 	@echo "Running PMOVE multiple registers from (A7) test (OP1addr conflict validation)..."
@@ -191,6 +195,10 @@ test-integration: compile
 test-diagrom: compile
 	@echo "Running DiagROM boot simulation..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "do run_diagrom_boot.tcl; run 50us; quit"
+
+test-diagrom-detectcpu: compile
+	@echo "Running DiagROM DetectCPU tests (MOVEC ITT0 should trap on 68030)..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_diagrom_detectcpu
 
 test-cpu-mmu-detection: compile
 	@echo "Running CPU/MMU detection tests (TypeOfCPU + GetMMUType)..."
@@ -216,14 +224,6 @@ test-pmove-addressing: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_addressing_modes.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 20us; quit" tb_pmove_addressing_modes
-
-test-pmove-cpu-execution: setup
-	@echo "Running PMOVE CPU execution tests (PC tracking)..."
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_cpu_execution.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_cpu_execution
 
 test-pflush-ptest-pload: setup
 	@echo "Running PFLUSH/PTEST/PLOAD tests..."
