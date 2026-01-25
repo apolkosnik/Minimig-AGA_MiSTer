@@ -470,6 +470,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal fline_is_pmmu       : std_logic := '0';
 	signal fline_is_fpu        : std_logic := '0';
 	signal fline_has_brief     : std_logic := '0';
+	signal pmmu_ea_mode_latched  : std_logic_vector(5 downto 0);  -- BUG #302: Latch EA mode+reg bits
 	-- Helper signals: use latched values when F-line context valid
 	signal pmmu_brief          : std_logic_vector(15 downto 0);
 	signal pmmu_opcode         : std_logic_vector(15 downto 0);
@@ -1678,6 +1679,7 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 						-- BUG #290 FIX: LO state first word uses pmove_ea_latched (already has +4 from HI)
 						memaddr_delta_rega <= pmove_ea_latched;
 						use_base <= '0';  -- Don't use reg_QA, use latched address directly
+					-- BUG #302 FIX: Special case for (An)+ mode CRP/SRP LOW word reads
 					ELSIF (micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo OR
 					       micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_mem_to_mmu_lo) AND
 					      (opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" OR
@@ -1691,7 +1693,11 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 							memaddr_delta_rega <= pmove_disp_latched;  -- BUG #197 V6: Use latched displacement
 						END IF;
 						use_base <= '1';  -- Force memaddr_reg = reg_QA
-				ELSIF memmaskmux(3)='0' OR exec(mem_addsub)='1' THEN
+				-- BUG #302: Exclude (An)+ CRP/SRP in pmove_mem_to_mmu_lo from using addsub_q
+				ELSIF (memmaskmux(3)='0' OR exec(mem_addsub)='1') AND NOT
+				      ((micro_state = pmove_mem_to_mmu_lo) AND
+				       (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") AND
+				       pmmu_ea_mode_latched(5 downto 3)="011") THEN
 					memaddr_delta_rega <= addsub_q;
 				ELSIF set(restore_ADDR)='1' THEN
 					memaddr_delta_rega <= tmp_TG68_PC;
@@ -1727,7 +1733,21 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 			END IF;
 		END IF;
 
-		memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb;
+		-- BUG #302: Combinational +4 offset for (An)+ CRP/SRP LOW word reads
+		IF (micro_state = pmove_mem_to_mmu_lo) AND
+		   (next_micro_state = pmove_mem_to_mmu_lo OR next_micro_state = idle) AND
+		   (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") AND
+		   pmmu_ea_mode_latched(5 downto 3)="011" THEN
+			-- Add +4 base offset, +2 more for second word of longword
+			IF memmaskmux(3)='1' THEN
+				memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb + X"00000006";
+			ELSE
+				memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb + X"00000004";
+			END IF;
+		ELSE
+			memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb;
+		END IF;
+
 		-- if access done, and not aligned, don't increment
         addr <= memaddr_reg+memaddr_delta;
         -- route logical address through PMMU for translation
@@ -1849,6 +1869,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					fline_is_pmmu <= '0';
 					fline_is_fpu <= '0';
 					fline_has_brief <= '0';
+					pmmu_ea_mode_latched <= (others => '0');  -- BUG #302: Initialize EA mode latch
 			ELSE
 --				IPL_nr <= NOT IPL;
 				IF clkena_in='1' THEN
@@ -1894,6 +1915,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						fline_is_pmmu <= '1';
 						fline_is_fpu <= '0';
 						fline_has_brief <= '1';  -- PMMU instructions with memory EA have extension word
+						pmmu_ea_mode_latched <= opcode(5 downto 0);  -- BUG #302: Latch EA mode+reg bits
 						fline_context_valid <= '1';
 					END IF;
 				END IF;
@@ -5614,8 +5636,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- F-Line Context: Use pmmu_brief for stable values
                     IF (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") THEN  -- SRP or CRP
                         set_exec(mem_addsub) <= '1';
-                        set(pmmu_addr_inc) <= '1';  -- BUG #144 FIX: Use set() layer for +4 increment (ALU checks exec(pmmu_addr_inc))
-                        set(OP1addr) <= '1';
+                        -- BUG #302 FIX: For (An)+ mode, do NOT set pmmu_addr_inc or OP1addr here!
+                        -- For (An)+ mode, the +4 offset for LOW word is handled by memaddr_delta, not register update.
+                        IF pmmu_ea_mode_latched(5 downto 3) /= "011" THEN  -- NOT (An)+ mode
+                            set(pmmu_addr_inc) <= '1';
+                            set(OP1addr) <= '1';
+                        END IF;
                         datatype <= "10"; -- long
                         setstate <= "10"; -- read LOW word from memory
                         next_micro_state <= pmove_mem_to_mmu_lo;
@@ -5700,27 +5726,28 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     next_micro_state <= idle;
                 WHEN pmove_mem_to_mmu_lo =>
                     -- Memory->MMU: Low part read completed; write LOW word to MMU register
-                    -- BUG #145 FIX: Must set datatype, set_datatype, setstate, mem_addsub, OP1addr
-                    -- to ensure clkena_lw pulses so FSM advances to idle. Without these, the FSM
-                    -- stalls and PC increment logic runs again, causing PC over-increment by 4.
+                    -- BUG #302 FIX: For (An)+ mode, DON'T use pmmu_addr_inc OR OP1addr.
+                    -- OP1addr captures pmove_ea_latched with +6 offset baked in.
+                    -- This avoids double-increment: offset from OP1addr + postadd+pmmu_dbl = +14 total (wrong!).
+                    -- For (An)+ mode, reg_QA (base address) is used directly with postadd+pmmu_dbl for +8 increment.
                     set_exec(pmmu_wr) <= '1';
-                    -- Post-increment (An)+ for CRP/SRP must add 8 total; update here once using pmmu_dbl
-                    IF opcode(5 downto 3)="011" THEN
+                    set_exec(mem_addsub) <= '1';  -- raise memmask bit 3 to pulse clkena_lw
+                    IF pmmu_ea_mode_latched(5 downto 3) /= "011" THEN
+                        -- Non-(An)+ modes: use OP1addr and pmmu_addr_inc for address offset
+                        set(OP1addr) <= '1';
+                        set(pmmu_addr_inc) <= '1';
+                    ELSE
+                        -- (An)+ mode: Don't use OP1addr or pmmu_addr_inc (offset handled by memaddr_delta).
+                        -- Set post-increment for +8 register writeback from base (reg_QA).
                         set(postadd) <= '1';
                         set(pmmu_dbl) <= '1';
-                        IF opcode(2 downto 0)="111" THEN
+                        IF pmmu_ea_mode_latched(2 downto 0) = "111" THEN
                             set(use_SP) <= '1';
                         END IF;
                     END IF;
-                    set_exec(mem_addsub) <= '1';  -- raise memmask bit 3 to pulse clkena_lw
-                    set(OP1addr) <= '1';
-                    set(pmmu_addr_inc) <= '1';  -- BUG #190 FIX: Add 4 to address for CRP_L/SRP_L read
                     datatype <= "10";             -- long for proper memmask
                     set_datatype <= "10";         -- propagate to exe_datatype for bus mask
                     setstate <= "10";             -- memory read state (data already latched)
-                    -- BUG #91 FIX: Must use 'idle' not 'nop' to trigger setexecOPC
-                    -- Same issue as BUG #20 and BUG #90 - setexecOPC only set when next_micro_state=idle
-                    -- Without setexecOPC, set_exec(pmmu_wr) never becomes exec(pmmu_wr), and PMMU write fails!
                     next_micro_state <= idle;
 
                 -- PMMU instruction implementations

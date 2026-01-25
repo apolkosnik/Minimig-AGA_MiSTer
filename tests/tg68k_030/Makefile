@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-rte-formats validate setup help
+.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-rte-formats validate setup help
 
 # Default target
 all: test-comprehensive
@@ -36,6 +36,7 @@ help:
 	@echo "  test-pmove-tt0-mem-read - Test PMOVE.L (d16,An),TT0 memory read (NEW)"
 	@echo "  test-pmove-tt1-mem - Test PMOVE.L TT1,(d16,An) memory write"
 	@echo "  test-pmove-crp-a7-postinc - Test PMOVE.Q CRP,(A7)+ stack update"
+	@echo "  test-pmove-crp-mem-to-mmu-postinc - Test PMOVE.Q (A7)+,CRP memory-to-MMU read"
 	@echo "  test-pmove-comprehensive - PMOVE encoding + d16,An regression"
 	@echo "  test-pmove-d16an-pc - Test PMOVE (d16,An) PC increment + data values"
 	@echo "  test-pmove-d8anxn-pc - Test PMOVE (d8,An,Xn) PC increment + data values"
@@ -179,6 +180,10 @@ test-pmove-d8anxn-pc: compile
 test-pmove-crp-a7-postinc: compile
 	@echo "Running PMOVE.Q CRP,(A7)+ stack postincrement regression..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 5us; quit" tb_pmove_crp_a7_postinc
+
+test-pmove-crp-mem-to-mmu-postinc: compile
+	@echo "Running PMOVE.Q (A7)+,CRP memory-to-MMU postincrement test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_crp_mem_to_mmu_postinc.vhd && $(VSIM) -c -do "run 5us; quit" tb_pmove_crp_mem_to_mmu_postinc
 
 test-pmove-comprehensive: compile
 	@echo "Running PMOVE comprehensive regression..."
