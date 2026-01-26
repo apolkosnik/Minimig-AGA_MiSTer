@@ -1007,7 +1007,7 @@ ALU: TG68K_ALU
 			-- BUG FIX: Enable VBR and extended stack frames for 68010+ (cpu(0)='1') AND 68030 (cpu(1)='1')
 			-- Original code only checked cpu(0), but CPU="10" (68030 in Minimig) has cpu(0)='0'
 			-- This caused 68000-style stack frames without vector offset, breaking MMU detection
-			IF VBR_Stackframe=1 or ((cpu(0)='1' or cpu(1)='1') and VBR_Stackframe=2) THEN
+			IF VBR_Stackframe=1 or (cpu(0)='1' and VBR_Stackframe=2) THEN
 				use_VBR_Stackframe<='1';
 			ELSE
 				use_VBR_Stackframe<='0';

@@ -79,23 +79,28 @@ make test-regression     # MC68030 compliance tests
 make validate            # Full compliance validation with pass/fail summary
 
 # Component-specific tests
-make test-pmmu          # PMMU functionality
-make test-cache         # Cache operations
-make test-cacr          # CACR register
-make test-pmove-tc      # PMOVE TC operations
-make test-diagnostic    # PMMU diagnostic tests (quick sanity check)
-make test-moves         # MOVES instruction FC handling
+make test-pmmu           # PMMU functionality
+make test-cache          # Cache operations
+make test-cacr           # CACR register
+make test-pmove-tc       # PMOVE TC operations
+make test-diagnostic     # PMMU diagnostic tests (quick sanity check)
+make test-moves          # MOVES instruction FC handling
+make test-rte-formats    # RTE stack frame formats (0,1,2,9,A,B)
 make test-mmu-instruction-suite  # Complete MMU instruction test suite
 
 # Run all comprehensive tests
 make test-comprehensive  # ALL enhanced tests including advanced/fault/stress
 
 # Interactive debugging with waveforms
-make test-gui           # Opens ModelSim GUI for step-through debugging
+make test-gui            # Opens ModelSim GUI for step-through debugging
 
 # Direct ModelSim commands
 /opt/intelFPGA_lite/17.0/modelsim_ase/linuxaloem/vcom -93 <file.vhd>
 /opt/intelFPGA_lite/17.0/modelsim_ase/linuxaloem/vsim -c -do "run -all; quit" <testbench>
+
+# Run a single specific testbench manually
+cd tests/tg68k_030 && make setup
+vsim -c -do "run 50us; quit" tb_<testbench_name>
 ```
 
 ## Code Architecture
@@ -106,11 +111,21 @@ make test-gui           # Opens ModelSim GUI for step-through debugging
 - `sys/sys_top.v`: MiSTer system-specific hardware interface
 
 ### CPU Subsystem (68030 Focus)
-- `rtl/tg68k/TG68KdotC_Kernel.vhd`: Main CPU core with PMMU and cache control
-- `rtl/tg68k/TG68K_PMMU_030.vhd`: Complete MC68030-compatible PMMU
+- `rtl/tg68k/TG68KdotC_Kernel.vhd`: Main CPU core (~9000 lines) with PMMU and cache control
+- `rtl/tg68k/TG68K_PMMU_030.vhd`: Complete MC68030-compatible PMMU (~4000 lines)
 - `rtl/tg68k/TG68K_Cache_030.vhd`: 256-byte instruction and data caches
 - `rtl/tg68k/TG68K_Pack.vhd`: Package definitions and constants
 - `rtl/cpu_wrapper.v`: CPU integration wrapper (USE_68030_CACHE=1)
+
+### TG68KdotC_Kernel Key Signals
+- `state` - main state machine (idle, addr, data, etc.)
+- `exec` - instruction execution flags vector
+- `setstate` / `setexec` - next state/exec assignments (combinational)
+- `opcode` / `last_opc_read` - current instruction word
+- `brief` / `last_opc_read` - extension word handling
+- `memmask` - memory operation type mask
+- `clkena_lw` - main clock enable (gated by wait states)
+- `clkena_in` - external clock enable input
 
 ### Memory and Cache Integration
 - Cache fill state machine in `Minimig.sv` handles 8-word sequential reads
@@ -138,6 +153,20 @@ make test-gui           # Opens ModelSim GUI for step-through debugging
 - Burst mode when CACR IBE/DBE bits enabled
 - MMU exception handling for invalid descriptors, write protection, privilege violations
 
+### PMMU State Machine
+The page walker uses states defined in TG68K_PMMU_030.vhd:
+- `W_IDLE` - waiting for translation request
+- `W_ROOT` - reading root pointer from CRP/SRP
+- `W_PTR1..W_PTR3` - reading table descriptors
+- `W_PAGE` - final page descriptor lookup
+- `W_DONE` - translation complete, result in ATC
+
+### Critical Implementation Notes
+- PMOVE uses `brief(11:8)` for register selection (not opcode bits)
+- Register selector must be latched at proper clock phase to avoid races
+- Memory-to-MMU vs MMU-to-memory paths have different timing requirements
+- 64-bit registers (CRP/SRP) require two bus cycles with `reg_part` tracking high/low word
+
 ### Specifications
 - MC68030 User Manual: `/home/adam/Desktop/MC68030UM.pdf` (primary reference for PMMU, cache, instruction timing)
 - Online Reference: `https://amigasourcecodepreservation.gitlab.io/mc680x0-reference/`
@@ -150,6 +179,33 @@ make test-gui           # Opens ModelSim GUI for step-through debugging
 4. Build using Quartus: `quartus_sh --flow compile Minimig`
 5. Test generated RBF file on MiSTer hardware
 6. Verify functionality with Amiga software
+
+## Common Debugging Patterns
+
+### Signal Timing Issues
+When debugging PMMU or cache timing issues, check these signals in order:
+1. `clkena_lw` / `clkena_in` - clock enable gating
+2. `setstate` / `setexec` - state machine transitions
+3. `state` / `exec` - current execution state
+4. `memmask` - memory operation mask
+
+### VHDL Signal Assignment Debugging
+```bash
+# Check for multiple drivers (causes synthesis failure)
+grep -n "multiple drivers" output_files/*.rpt
+
+# Find all assignments to a signal
+grep -n "signal_name\s*<=" rtl/tg68k/TG68KdotC_Kernel.vhd
+
+# Check signal sensitivity lists
+grep -B5 "process" rtl/tg68k/TG68KdotC_Kernel.vhd | grep -A5 "signal_name"
+```
+
+### When Tests Pass But Hardware Fails
+- Check if test uses actual clock enable conditions (`clkena_lw`, `clkena_in`)
+- Verify test simulates proper memory wait states
+- Ensure test exercises the exact instruction sequence from hardware
+- Check FC (function code) values match expected user/supervisor mode
 
 ## TG68K Register Reference
 

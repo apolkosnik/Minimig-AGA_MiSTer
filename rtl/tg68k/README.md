@@ -109,7 +109,7 @@ moves0, moves1
 
 ## 7. CPU MODE ENCODING
 
-- `CPU="10"` or `"11"` -> 68030 mode (with PMMU)
+- `CPU="10"`-> 68030 mode (with PMMU)
 - `cpu(1)='1'` checks enable 68020/68030 features
 
 ---
