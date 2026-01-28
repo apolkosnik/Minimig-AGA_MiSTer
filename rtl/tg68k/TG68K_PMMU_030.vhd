@@ -173,7 +173,8 @@ architecture rtl of TG68K_PMMU_030 is
   -- Added W_*_LOW states for reading LOW word of long-format (64-bit) descriptors
   -- Added W_INDIRECT states for indirect descriptor support (MC68030 spec section 9.5.3.2)
   -- BUG #164 FIX: Added W_INDIRECT_LOW for long-format indirect descriptor targets
-  type walk_state_t is (W_IDLE, W_ROOT, W_ROOT_LOW, W_PTR1, W_PTR1_LOW, W_PTR2, W_PTR2_LOW, W_PTR3, W_PTR3_LOW, W_INDIRECT, W_INDIRECT_LOW, W_PAGE, W_UPDATE_DESC, W_FILL, W_COMPLETE, W_FAULT);
+  -- Added W_PTR4, W_PTR4_LOW for 5-level table walks when FCL=1 and all TI fields used
+  type walk_state_t is (W_IDLE, W_ROOT, W_ROOT_LOW, W_PTR1, W_PTR1_LOW, W_PTR2, W_PTR2_LOW, W_PTR3, W_PTR3_LOW, W_PTR4, W_PTR4_LOW, W_INDIRECT, W_INDIRECT_LOW, W_PAGE, W_UPDATE_DESC, W_FILL, W_COMPLETE, W_FAULT);
   signal wstate    : walk_state_t := W_IDLE;
   
   -- Walker bookkeeping
@@ -216,7 +217,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal pflush_mode : std_logic_vector(12 downto 8) := (others => '0');  -- From brief word
   
   -- Page table walking state
-  signal walk_level     : integer range 0 to 4 := 0; -- Current level being walked
+  signal walk_level     : integer range 0 to 5 := 0; -- Current level being walked (0-4 for FCL=0, 0-5 for FCL=1)
   signal walk_desc      : std_logic_vector(31 downto 0) := (others => '0'); -- Current descriptor (short format or HIGH word)
   signal walk_desc_high : std_logic_vector(31 downto 0) := (others => '0'); -- HIGH word (all formats)
   signal walk_desc_low  : std_logic_vector(31 downto 0) := (others => '0'); -- LOW word (long format only)
@@ -579,22 +580,75 @@ architecture rtl of TG68K_PMMU_030 is
   end function;
 
   -- MC68030 Function Code Lookup (TC.FCL):
-  -- When FCL=1, the table search uses FC[2:0] as the top bits of the logical address.
-  -- This effectively replaces A[31:29] with FC[2:0], preserving a 32-bit search key:
-  --   search_addr = {FC[2:0], A[28:0]}
+  -- When FCL=1, FC[2:0] indexes the FIRST table (8 entries).
+  -- Then TIA/TIB/TIC/TID index subsequent tables using ORIGINAL address bits.
+  -- Per MC68030 spec: FCL adds a separate FC-indexed level, NOT address bit replacement.
+  -- The bit-sum rule stays unchanged: IS + PS + TIA + TIB + TIC + TID = 32.
+  --
+  -- This function now returns the original address unchanged.
+  -- FCL handling is done at table index calculation time, not address modification.
   function fcl_search_addr(addr : std_logic_vector(31 downto 0);
                            fc   : std_logic_vector(2 downto 0);
                            fcl  : std_logic) return std_logic_vector is
-    variable result : std_logic_vector(31 downto 0);
+  begin
+    -- Return original address - FCL is handled by get_fcl_table_index
+    return addr;
+  end function;
+
+  -- MC68030 Function Code Lookup table index calculation
+  -- When FCL=1 and level=0: Return FC directly (3-bit index into 8-entry table)
+  -- When FCL=1 and level>0: Use TIA/TIB/TIC/TID from original address (shifted by 1 level)
+  -- When FCL=0: Normal TIA/TIB/TIC/TID indexing
+  function get_fcl_table_index(addr : std_logic_vector(31 downto 0);
+                               fc   : std_logic_vector(2 downto 0);
+                               fcl  : std_logic;
+                               level : integer;
+                               initial_shift : integer;
+                               page_size : integer;
+                               idx_bits : tc_bits_array_t) return integer is
   begin
     if fcl = '1' then
-      result := fc & addr(28 downto 0);
+      if level = 0 then
+        -- FCL=1, first level: FC indexes the root table (8 entries max)
+        return to_integer(unsigned(fc));
+      else
+        -- FCL=1, subsequent levels: shift TIx usage by 1
+        -- level 1 uses TIA (idx_bits(0)), level 2 uses TIB (idx_bits(1)), etc.
+        return get_table_index(addr, level - 1, initial_shift, page_size, idx_bits);
+      end if;
     else
-      result := addr;
+      -- FCL=0: Normal indexing
+      return get_table_index(addr, level, initial_shift, page_size, idx_bits);
     end if;
-    return result;
   end function;
-  
+
+  -- Check if current level is the final table level before page descriptor
+  -- Returns true if the next TI field is 0 (no more levels to walk)
+  -- FCL shifts which TI field corresponds to each walker level:
+  --   FCL=0: level 1 uses TIB, level 2 uses TIC, level 3 uses TID
+  --   FCL=1: level 1 uses TIA, level 2 uses TIB, level 3 uses TIC, level 4 uses TID
+  -- This function checks if the NEXT level's TI field is zero
+  function is_final_table_level(fcl : std_logic; level : integer; idx_bits : tc_bits_array_t) return boolean is
+    variable check_idx : integer;
+  begin
+    -- Map level to the TI field index that would be used for the NEXT level
+    -- We need to check if the next level exists (has non-zero TI bits)
+    if fcl = '1' then
+      -- FCL=1: level N uses idx_bits(N-1), so next level uses idx_bits(N)
+      check_idx := level;
+    else
+      -- FCL=0: level N uses idx_bits(N), so next level uses idx_bits(N+1)
+      check_idx := level + 1;
+    end if;
+
+    if check_idx > 3 then
+      -- Beyond TID (idx 3), always final - no more TI fields
+      return true;
+    else
+      return idx_bits(check_idx) = 0;
+    end if;
+  end function;
+
   -- Check if descriptor is a page descriptor (not table pointer)
   -- MC68030 descriptor format: bits 1:0 determine type
   -- 00 = Invalid, 01 = Page descriptor, 10/11 = Table pointer
@@ -823,9 +877,9 @@ begin
     variable page_offset_bits : integer;
   begin
     if nreset = '0' then
-      -- MC68030: Initialize TC to 0 - MMU disabled (E=0), PS=0
-      -- Software configures all fields before enabling
-      TC    <= x"00000000";
+      -- MC68030: Initialize TC with E=0 (disabled) but PS=8 (minimum valid)
+      -- Bit 23 must be 1 for valid PS values (8-15), so initialize to x"00800000"
+      TC    <= x"00800000";
       CRP_H <= (others => '0');
       CRP_L <= (others => '0');
       SRP_H <= (others => '0');
@@ -880,6 +934,15 @@ begin
       -- BUG FIX: Clear ptest_active when translation process signals completion
       if ptest_done = '1' then
         ptest_active <= '0';
+        report "PMMU_PTEST_DONE: MMUSR=0x" &
+               integer'image(to_integer(unsigned(MMUSR(15 downto 0)))) &
+               " B=" & std_logic'image(MMUSR(15)) &
+               " L=" & std_logic'image(MMUSR(14)) &
+               " S=" & std_logic'image(MMUSR(13)) &
+               " W=" & std_logic'image(MMUSR(12)) &
+               " I=" & std_logic'image(MMUSR(10)) &
+               " M=" & std_logic'image(MMUSR(9)) &
+               " T=" & std_logic'image(MMUSR(8)) severity note;
       end if;
 
       -- Handle direct register writes (TC, CRP, SRP, TT0, TT1, etc.)
@@ -975,6 +1038,8 @@ begin
             if reg_part = '1' then
               -- SRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
               -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
+              report "PMMU_REG_WRITE: SRP_H reg_part=" & std_logic'image(reg_part) &
+                     " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
               SRP_H <= reg_wdat;  -- Mask disabled for now
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
@@ -989,6 +1054,8 @@ begin
             else
               -- SRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
+              report "PMMU_REG_WRITE: SRP_L reg_part=" & std_logic'image(reg_part) &
+                     " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
               SRP_L <= reg_wdat;  -- Mask disabled for now
               -- BUG #148 FIX: Do NOT clear mmu_config_error on low word write
               -- If high word had DT=00, error must remain latched until explicitly acknowledged
@@ -1066,6 +1133,25 @@ begin
               CRP_L                        when reg_sel = "10011" and reg_part = '0' else
               X"0000" & MMUSR(15 downto 0) when reg_sel = "11000" else
               (others => '0');
+
+  -- DEBUG: Monitor CRP/MMUSR reads
+  process(reg_sel, reg_part, MMUSR)
+  begin
+    if reg_sel = "10011" then
+      report "PMMU_REG_READ: CRP reg_part=" & std_logic'image(reg_part) severity note;
+    end if;
+    if reg_sel = "11000" then
+      report "PMMU_REG_READ: MMUSR=0x" &
+             integer'image(to_integer(unsigned(MMUSR(15 downto 0)))) &
+             " B=" & std_logic'image(MMUSR(15)) &
+             " L=" & std_logic'image(MMUSR(14)) &
+             " S=" & std_logic'image(MMUSR(13)) &
+             " W=" & std_logic'image(MMUSR(12)) &
+             " I=" & std_logic'image(MMUSR(10)) &
+             " M=" & std_logic'image(MMUSR(9)) &
+             " T=" & std_logic'image(MMUSR(8)) severity note;
+    end if;
+  end process;
 
   -- Extract TC register fields according to MC68030 specification
   -- TC Register Format (MC68030):
@@ -1832,7 +1918,7 @@ begin
           
         when W_ROOT =>
           -- Read root table descriptor - deadlock-proof design
-          table_index := get_table_index(fcl_search_addr(walk_vpn, saved_fc, tc_fcl), walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
+          table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
 
           -- MC68030 Root Pointer Limit Check (only for root level)
           -- CRP_H/SRP_H format: L/U[31], Limit[30:16], Reserved[15:1], DT[0]
@@ -2034,7 +2120,7 @@ begin
 
         when W_PTR1 =>
           -- Read level 1 table descriptor - deadlock-proof design
-          table_index := get_table_index(fcl_search_addr(walk_vpn, saved_fc, tc_fcl), walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
+          table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
           desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
 
@@ -2136,13 +2222,13 @@ begin
               -- Page descriptor found (short format)
               walk_desc_is_long <= '0';  -- Short format
               wstate <= W_PAGE;
-            elsif tc_idx_bits(2) = 0 then
-              -- TIC=0 means W_PTR1 is the final level (MC68030 spec section 9.5.3.2)
+            elsif is_final_table_level(tc_fcl, 1, tc_idx_bits) then
+              -- No more TI levels after this (FCL-aware check)
               -- DT=10 at final level = short-format indirect descriptor
               walk_desc_is_long <= '0';  -- Short format indirect
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
               indirect_target_long <= '0';  -- BUG #164 FIX: DT=10 -> short-format target
-             --  -- report "W_PTR1: Short indirect descriptor detected (DT=10, TIC=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+             --  -- report "W_PTR1: Short indirect descriptor detected (DT=10, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
               -- Continue to next level (short format table descriptor)
@@ -2182,13 +2268,13 @@ begin
               -- Page descriptor
              --  -- report "W_PTR1_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
               wstate <= W_PAGE;
-            elsif tc_idx_bits(2) = 0 then
-              -- TIC=0 means W_PTR1 is the final level (MC68030 spec section 9.5.3.2)
+            elsif is_final_table_level(tc_fcl, 1, tc_idx_bits) then
+              -- No more TI levels after this (FCL-aware check)
               -- DT=11 at final level = long-format indirect descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
               indirect_target_long <= '1';  -- BUG #164 FIX: DT=11 -> long-format target
-             --  -- report "W_PTR1_LOW: Long indirect descriptor (DT=11, TIC=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+             --  -- report "W_PTR1_LOW: Long indirect descriptor (DT=11, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
               -- Table descriptor - extract address from LOW word and continue
@@ -2207,7 +2293,7 @@ begin
 
         when W_PTR2 =>
           -- Read level 2 table descriptor - deadlock-proof design
-          table_index := get_table_index(fcl_search_addr(walk_vpn, saved_fc, tc_fcl), walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
+          table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
           desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
 
@@ -2316,13 +2402,13 @@ begin
               -- Short format page descriptor
               walk_desc_is_long <= '0';  -- Short format
               wstate <= W_PAGE;
-            elsif tc_idx_bits(3) = 0 then
-              -- TID=0 means W_PTR2 is the final level (MC68030 spec section 9.5.3.2)
+            elsif is_final_table_level(tc_fcl, 2, tc_idx_bits) then
+              -- No more TI levels after this (FCL-aware check)
               -- DT=10 at final level = short-format indirect descriptor
               walk_desc_is_long <= '0';  -- Short format indirect
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
               indirect_target_long <= '0';  -- BUG #164 FIX: DT=10 -> short-format target
-             --  -- report "W_PTR2: Short indirect descriptor detected (DT=10, TID=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+             --  -- report "W_PTR2: Short indirect descriptor detected (DT=10, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
               -- Short format table descriptor
@@ -2362,13 +2448,13 @@ begin
               -- Page descriptor
              --  -- report "W_PTR2_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
               wstate <= W_PAGE;
-            elsif tc_idx_bits(3) = 0 then
-              -- TID=0 means W_PTR2 is the final level (MC68030 spec section 9.5.3.2)
+            elsif is_final_table_level(tc_fcl, 2, tc_idx_bits) then
+              -- No more TI levels after this (FCL-aware check)
               -- DT=11 at final level = long-format indirect descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
               indirect_target_long <= '1';  -- BUG #164 FIX: DT=11 -> long-format target
-             --  -- report "W_PTR2_LOW: Long indirect descriptor (DT=11, TID=0 final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+             --  -- report "W_PTR2_LOW: Long indirect descriptor (DT=11, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
               -- Table descriptor - extract address from LOW word and continue
@@ -2387,7 +2473,7 @@ begin
 
         when W_PTR3 =>
           -- Final level - must be page descriptor - deadlock-proof design
-          table_index := get_table_index(fcl_search_addr(walk_vpn, saved_fc, tc_fcl), walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
+          table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
           desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
 
@@ -2469,15 +2555,22 @@ begin
               -- Short format page descriptor
               walk_desc_is_long <= '0';  -- Short format
               wstate <= W_PAGE;
-            else
+            elsif is_final_table_level(tc_fcl, 3, tc_idx_bits) then
               -- DT=10 at final level = short-format indirect descriptor (MC68030 spec section 9.5.3.2)
               -- The descriptor points to another descriptor (the target) that will be used
               -- Target address is in bits 31:2 (must be 4-byte aligned)
               walk_desc_is_long <= '0';  -- Short format indirect
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
               indirect_target_long <= '0';  -- BUG #164 FIX: DT=10 -> short-format target
-             --  -- report "W_PTR3: Short indirect descriptor detected (DT=10), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+             --  -- report "W_PTR3: Short indirect descriptor detected (DT=10, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
+            else
+              -- FCL=1 and TID!=0: Continue to W_PTR4 (5th level)
+              walk_desc_is_long <= '0';  -- Short format table descriptor
+              walk_addr <= mem_rdat(31 downto 4) & "0000";
+              walk_level <= walk_level + 1;
+              walk_limit_valid <= '0';  -- Short format has no limit
+              wstate <= W_PTR4;
             end if;
           end if;
 
@@ -2499,18 +2592,159 @@ begin
             );
             wstate <= W_FAULT;
           elsif mem_ack = '1' then
-            -- Got LOW word - save it and process
+            -- Got LOW word - save it and process complete long-format descriptor
             walk_desc_low <= mem_rdat;
             mem_req <= '0';
            --  -- report "W_PTR3_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
 
-            -- At final level with DT=11, this is a LONG INDIRECT descriptor
-            -- Target address is in LOW word bits 31:2 (longword aligned)
-            -- Note: walk_desc_high has DT=11 (that's how we got here from W_PTR3)
-            indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
-            indirect_target_long <= '1';  -- BUG #164 FIX: DT=11 -> long-format target
-           --  -- report "W_PTR3_LOW: Long indirect descriptor, target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
-            wstate <= W_INDIRECT;
+            -- Determine next state based on descriptor type
+            if desc_is_page(walk_desc_high) then
+              -- Long-format page descriptor
+             --  -- report "W_PTR3_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
+              wstate <= W_PAGE;
+            elsif is_final_table_level(tc_fcl, 3, tc_idx_bits) then
+              -- At final level with DT=11, this is a LONG INDIRECT descriptor
+              -- Target address is in LOW word bits 31:2 (longword aligned)
+              indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
+              indirect_target_long <= '1';  -- BUG #164 FIX: DT=11 -> long-format target
+             --  -- report "W_PTR3_LOW: Long indirect descriptor (final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+              wstate <= W_INDIRECT;
+            else
+              -- FCL=1 and TID!=0: Continue to W_PTR4 (5th level)
+              walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
+              walk_level <= walk_level + 1;
+              -- Save limit from long-format table descriptor for next level
+              walk_limit_valid <= '1';  -- Long format always has limit
+              walk_limit_lu    <= walk_desc_high(31);  -- L/U flag
+              walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
+              -- Accumulate S bit from long-format TABLE descriptor
+              walk_supervisor <= walk_supervisor or walk_desc_high(8);
+             --  -- report "W_PTR3_LOW: Long-format table descriptor, continuing to W_PTR4" severity note;
+              wstate <= W_PTR4;
+            end if;
+          end if;
+
+        when W_PTR4 =>
+          -- Level 4 (TID when FCL=1) - always final level before page descriptor
+          table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
+          desc_addr_v := walk_addr(31 downto 4) & "0000";
+          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+
+          -- Simple memory request - always deassert req after ack
+          if mem_req = '0' then
+            -- Check limit from previous level's long-format table descriptor
+            if walk_limit_valid = '1' then
+              if walk_limit_lu = '1' then
+                -- Lower limit: table_index must be >= limit
+                if to_unsigned(table_index, 15) < walk_limit_value then
+                  walker_fault <= '1';
+                  walker_fault_status <= encode_mmusr_fault(
+                    bus_error => '0', limit_violation => '1', supervisor_violation => '0',
+                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    level => std_logic_vector(to_unsigned(walk_level, 3))
+                  );
+                  wstate <= W_FAULT;
+                end if;
+              else
+                -- Upper limit: table_index must be <= limit
+                if to_unsigned(table_index, 15) > walk_limit_value then
+                  walker_fault <= '1';
+                  walker_fault_status <= encode_mmusr_fault(
+                    bus_error => '0', limit_violation => '1', supervisor_violation => '0',
+                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    level => std_logic_vector(to_unsigned(walk_level, 3))
+                  );
+                  wstate <= W_FAULT;
+                end if;
+              end if;
+            end if;
+            -- Only proceed if no limit violation (wstate unchanged means OK)
+            if wstate = W_PTR4 then
+              mem_req <= '1';
+              mem_addr <= desc_addr_v;
+              desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR4_LOW state
+            end if;
+          elsif mem_berr = '1' then
+            mem_req <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
+          elsif mem_ack = '1' then
+            -- Got response - process HIGH word of descriptor
+            walk_desc <= mem_rdat;
+            walk_desc_high <= mem_rdat;  -- Save HIGH word for long format
+            mem_req <= '0';
+            if mem_rdat(1 downto 0) = "00" then
+              -- Invalid descriptor - fault immediately
+              walk_desc_is_long <= '0';
+              walk_fault <= '1';
+              walker_fault <= '1';
+              walker_fault_status <= encode_mmusr_fault(
+                bus_error => '0',
+                limit_violation => '0',
+                supervisor_violation => '0',
+                write_protect => '0',
+                invalid => '1',
+                modified => '0',
+                transparent => '0',
+                level => std_logic_vector(to_unsigned(walk_level, 3))
+              );
+              wstate <= W_FAULT;
+            elsif desc_is_long(mem_rdat) then
+              -- Long format (DT=11) - need to read LOW word at addr+4
+              walk_desc_is_long <= '1';
+              wstate <= W_PTR4_LOW;
+            elsif desc_is_page(mem_rdat) then
+              -- Short format page descriptor
+              walk_desc_is_long <= '0';
+              wstate <= W_PAGE;
+            else
+              -- DT=10 at final level = short-format indirect descriptor
+              -- W_PTR4 is always final level (TID is last TI field)
+              walk_desc_is_long <= '0';
+              indirect_addr <= mem_rdat(31 downto 2) & "00";
+              indirect_target_long <= '0';
+              wstate <= W_INDIRECT;
+            end if;
+          end if;
+
+        when W_PTR4_LOW =>
+          -- Read LOW word of long-format descriptor at desc_addr_reg+4
+          -- W_PTR4 is always final level, so DT=11 is long-format indirect descriptor
+          if mem_req = '0' then
+            mem_req <= '1';
+            mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
+          elsif mem_berr = '1' then
+            mem_req <= '0';
+            walk_fault <= '1';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
+          elsif mem_ack = '1' then
+            -- Got LOW word - save it and process complete descriptor
+            walk_desc_low <= mem_rdat;
+            mem_req <= '0';
+
+            -- Determine next state based on descriptor type
+            if desc_is_page(walk_desc_high) then
+              -- Long-format page descriptor
+              wstate <= W_PAGE;
+            else
+              -- DT=11 at final level = long-format indirect descriptor
+              -- Target address is in LOW word bits 31:2 (longword aligned)
+              indirect_addr <= mem_rdat(31 downto 2) & "00";
+              indirect_target_long <= '1';
+              wstate <= W_INDIRECT;
+            end if;
           end if;
 
         when W_INDIRECT =>
