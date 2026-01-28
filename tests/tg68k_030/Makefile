@@ -40,6 +40,7 @@ help:
 	@echo "  test-pmove-comprehensive - PMOVE encoding + d16,An regression"
 	@echo "  test-pmove-d16an-pc - Test PMOVE (d16,An) PC increment + data values"
 	@echo "  test-pmove-d8anxn-pc - Test PMOVE (d8,An,Xn) PC increment + data values"
+	@echo "  test-pmove-pc-all-regs - COMPREHENSIVE: All regs (TC,TT0,TT1,CRP,SRP,MMUSR) + all EA modes"
 	@echo "  test-pmove-multiple-regs - Test PMOVE multiple regs from (A7) - OP1addr conflict validation"
 	@echo "  test-integration - Test full system integration"
 	@echo "  test-diagrom     - Test DiagROM boot sequence"
@@ -176,6 +177,12 @@ test-pmove-d16an-pc: compile
 test-pmove-d8anxn-pc: compile
 	@echo "Running PMOVE (d8,An,Xn) PC increment + data value tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_d8anxn_pc
+
+test-pmove-pc-all-regs: compile
+	@echo "Running PMOVE PC increment test for ALL registers and addressing modes..."
+	@echo "Tests: TC, TT0, TT1, CRP, SRP, MMUSR"
+	@echo "Modes: Dn, (An), (An)+, -(An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L"
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_pc_all_regs.vhd && $(VSIM) -c -do "run 500us; quit" tb_pmove_pc_all_regs
 
 test-pmove-crp-a7-postinc: compile
 	@echo "Running PMOVE.Q CRP,(A7)+ stack postincrement regression..."
