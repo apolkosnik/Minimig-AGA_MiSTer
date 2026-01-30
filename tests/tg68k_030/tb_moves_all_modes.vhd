@@ -225,7 +225,9 @@ architecture behavioral of tb_moves_all_modes is
   signal tests_failed : integer := 0;
   signal current_test : integer := 0;
   signal reported : std_logic_vector(15 downto 1) := (others => '0');
-  -- (settle_count removed - using boundary-based test reporting)
+  signal all_done : std_logic := '0';  -- Set after STOP to trigger reporting
+  signal report_idx : integer range 0 to 16 := 0;  -- One-per-cycle deferred reporting counter
+  signal reporting_done : std_logic := '0';  -- Set when all 15 tests have been reported
 
   -- FC tracking
   signal last_fc_read : std_logic_vector(2 downto 0) := "000";
@@ -247,6 +249,7 @@ architecture behavioral of tb_moves_all_modes is
 
   -- Debug signals for MOVES tracking
   signal debug_moves_bus_pending : std_logic;
+  signal debug_moves_writeback_pending : std_logic;
   signal debug_brief : std_logic_vector(15 downto 0);
   signal debug_clkena_lw : std_logic;
   signal debug_regfile_a0 : std_logic_vector(31 downto 0);
@@ -255,6 +258,11 @@ architecture behavioral of tb_moves_all_modes is
   signal debug_memaddr_reg : std_logic_vector(31 downto 0);
   signal debug_opcode : std_logic_vector(15 downto 0);
   signal debug_regfile_d0 : std_logic_vector(31 downto 0);
+  signal debug_TG68_PC : std_logic_vector(31 downto 0);
+  signal debug_state : std_logic_vector(1 downto 0);
+  signal debug_setstate : std_logic_vector(1 downto 0);
+  signal debug_setnextpass : std_logic;
+  signal debug_memaddr_delta : std_logic_vector(31 downto 0);
 
 begin
   clk <= not clk after CLK_PERIOD/2;
@@ -287,6 +295,7 @@ begin
       pmmu_walker_berr => '0',
       -- Debug signals
       debug_moves_bus_pending => debug_moves_bus_pending,
+      debug_moves_writeback_pending => debug_moves_writeback_pending,
       debug_brief => debug_brief,
       debug_memaddr_reg => debug_memaddr_reg,
       debug_opcode => debug_opcode,
@@ -294,7 +303,12 @@ begin
       debug_regfile_d0 => debug_regfile_d0,
       debug_clkena_lw => debug_clkena_lw,
       debug_pmove_dn_mode => debug_pmove_dn_mode,
-      debug_pmove_dn_regnum => debug_pmove_dn_regnum
+      debug_pmove_dn_regnum => debug_pmove_dn_regnum,
+      debug_TG68_PC => debug_TG68_PC,
+      debug_state => debug_state,
+      debug_setstate => debug_setstate,
+      debug_setnextpass => debug_setnextpass,
+      debug_memaddr_delta => debug_memaddr_delta
     );
 
   -- Combinational memory read
@@ -337,7 +351,7 @@ begin
           if nLDS = '0' then
             ram(ram_addr)(7 downto 0) <= data_write(7 downto 0);
           end if;
-          report "RAM WRITE: addr=$" & slv_to_hex(addr_out) & " data=$" & slv_to_hex(data_write) & " FC=" & integer'image(to_integer(unsigned(FC_out))) & " nUDS=" & std_logic'image(nUDS) & " nLDS=" & std_logic'image(nLDS) & " ram_addr=" & integer'image(ram_addr);
+          report "RAM WRITE: addr=$" & slv_to_hex(addr_out) & " data=$" & slv_to_hex(data_write) & " FC=" & integer'image(to_integer(unsigned(FC_out))) & " nUDS=" & std_logic'image(nUDS) & " nLDS=" & std_logic'image(nLDS) & " ram_addr=" & integer'image(ram_addr) & " PC=$" & slv_to_hex(debug_TG68_PC) & " cy=" & integer'image(cycle);
           last_fc_write <= FC_out;
         end if;
       end if;
@@ -347,7 +361,7 @@ begin
         addr_int := to_integer(unsigned(addr_out(23 downto 0)));
         if addr_int >= 16#1000# and addr_int < 16#2000# then
           last_fc_read <= FC_out;
-          report "RAM READ: addr=$" & slv_to_hex(addr_out) & " FC=" & integer'image(to_integer(unsigned(FC_out)));
+          report "RAM READ: addr=$" & slv_to_hex(addr_out) & " FC=" & integer'image(to_integer(unsigned(FC_out))) & " PC=$" & slv_to_hex(debug_TG68_PC) & " cy=" & integer'image(cycle);
         end if;
 
         -- Per-test read tracking (expect SFC=5)
@@ -524,13 +538,18 @@ begin
       else
         cycle <= cycle + 1;
 
-        -- Trace PC-related signals every cycle when debugging
-        -- (Disabled - debug signals removed)
-        -- if cycle >= 25 and cycle <= 50 then
-        --   report "CYCLE=" & integer'image(cycle) &
-        --          " busstate=" & integer'image(to_integer(unsigned(busstate))) &
-        --          " addr=$" & slv_to_hex(addr_out);
-        -- end if;
+        -- Trace: show A0, PC, bus state for cycles between test 2 and test 4
+        if cycle >= 32 and cycle <= 55 then
+          report "TRACE cy=" & integer'image(cycle) &
+                 " PC=$" & slv_to_hex(debug_TG68_PC) &
+                 " st=" & integer'image(to_integer(unsigned(debug_state))) &
+                 " bus=" & integer'image(to_integer(unsigned(busstate))) &
+                 " addr=$" & slv_to_hex(addr_out) &
+                 " A0=$" & slv_to_hex(debug_regfile_a0) &
+                 " opc=$" & slv_to_hex(debug_opcode) &
+                 " mbp=" & std_logic'image(debug_moves_bus_pending) &
+                 " mwp=" & std_logic'image(debug_moves_writeback_pending);
+        end if;
 
         if busstate = "00" then
           addr_int := to_integer(unsigned(addr_out(23 downto 0)));
@@ -551,83 +570,36 @@ begin
                    " A0=$" & slv_to_hex(debug_regfile_a0);
           end if;
 
-          -- Report each test when the CPU fetches the NEXT test's first address.
-          -- By the time the CPU moves to the next instruction fetch, the previous
-          -- MOVES bus operation (read/write) has completed and RAM/FC flags are valid.
-          case addr_int is
-            when 16#11E# =>
-              current_test <= 1;  -- TEST 1 MOVES opcode fetched
-            when 16#122# =>
-              -- TEST 2 MOVES opcode; TEST 1 bus write is complete
-              if reported(1) = '0' then report_test(1); end if;
-              current_test <= 2;
-            when 16#126# =>
-              -- TEST 3 setup (MOVEA.L); TEST 2 bus read is complete
-              if reported(2) = '0' then report_test(2); end if;
-              current_test <= 3;
-            when 16#130# =>
-              -- TEST 4 setup; TEST 3 bus write is complete
-              if reported(3) = '0' then report_test(3); end if;
-              current_test <= 4;
-            when 16#13A# =>
-              -- TEST 5 setup; TEST 4 bus read is complete
-              if reported(4) = '0' then report_test(4); end if;
-              current_test <= 5;
-            when 16#144# =>
-              -- TEST 6 setup; TEST 5 bus write is complete
-              if reported(5) = '0' then report_test(5); end if;
-              current_test <= 6;
-            when 16#14E# =>
-              -- TEST 7 setup; TEST 6 bus read is complete
-              if reported(6) = '0' then report_test(6); end if;
-              current_test <= 7;
-            when 16#15A# =>
-              -- TEST 8 setup; TEST 7 bus write is complete
-              if reported(7) = '0' then report_test(7); end if;
-              current_test <= 8;
-            when 16#166# =>
-              -- TEST 9 setup; TEST 8 bus read is complete
-              if reported(8) = '0' then report_test(8); end if;
-              current_test <= 9;
-            when 16#172# =>
-              -- TEST 10 setup; TEST 9 bus write is complete
-              if reported(9) = '0' then report_test(9); end if;
-              current_test <= 10;
-            when 16#17E# =>
-              -- TEST 11 MOVES opcode; TEST 10 bus read is complete
-              if reported(10) = '0' then report_test(10); end if;
-              current_test <= 11;
-            when 16#184# =>
-              -- TEST 12 MOVES opcode; TEST 11 bus write is complete
-              if reported(11) = '0' then report_test(11); end if;
-              current_test <= 12;
-            when 16#18A# =>
-              -- TEST 13 MOVES opcode; TEST 12 bus read is complete
-              if reported(12) = '0' then report_test(12); end if;
-              current_test <= 13;
-            when 16#192# =>
-              -- TEST 14 MOVES opcode; TEST 13 bus write is complete
-              if reported(13) = '0' then report_test(13); end if;
-              current_test <= 14;
-            when 16#19A# =>
-              -- TEST 15 (MOVE SR,D0); TEST 14 bus read is complete
-              if reported(14) = '0' then report_test(14); end if;
-              current_test <= 15;
-            when 16#19C# =>
-              -- STOP instruction; TEST 15 is complete
-              if reported(15) = '0' then report_test(15); end if;
-            when others => null;
-          end case;
-
           -- Timeout detection (only once per test)
           if timeout_count > 200 and current_test /= 0 and reported(current_test) = '0' then
             report "TEST " & integer'image(current_test) & " TIMEOUT/NO PROGRESS (possible lockup)";
             tests_failed <= tests_failed + 1;
             reported(current_test) <= '1';
           end if;
+        end if;  -- busstate = "00"
+
+        -- Deferred reporting: report ONE test per clock cycle after STOP.
+        -- MUST be outside busstate="00" check because after STOP the CPU halts
+        -- and busstate is no longer "00" (instruction fetch).
+        -- Using a counter avoids the signal-vs-variable race where calling
+        -- report_test 15 times in one cycle would read the same old value of
+        -- tests_passed/tests_failed (signals only update after process suspends).
+        if all_done = '1' and reporting_done = '0' then
+          if report_idx >= 1 and report_idx <= 15 then
+            if reported(report_idx) = '0' then
+              report_test(report_idx);
+            end if;
+          end if;
+          if report_idx < 16 then
+            report_idx <= report_idx + 1;
+          end if;
+          if report_idx = 15 then
+            reporting_done <= '1';
+          end if;
         end if;
-      end if;
-    end if;
+
+      end if;  -- nReset
+    end if;  -- rising_edge
   end process;
 
   -- Test control and summary (per-test results are reported on the fly)
@@ -653,13 +625,28 @@ begin
       wait until rising_edge(clk);
     end loop;
 
+    -- Signal that all bus operations are done; trigger deferred test reporting
+    -- The monitoring process reports one test per clock cycle to avoid
+    -- signal-vs-variable race conditions.
+    all_done <= '1';
+
+    -- Wait for all 15 tests to be reported (one per cycle)
+    for i in 0 to 50 loop
+      wait until rising_edge(clk);
+      if reporting_done = '1' then
+        exit;
+      end if;
+    end loop;
+    -- One extra cycle for final signal updates to propagate
+    wait until rising_edge(clk);
+
     report "========================================";
     report "Final Results:";
     report "Results: Tests Passed: " & integer'image(tests_passed);
     report "Results: Tests Failed: " & integer'image(tests_failed);
     report "========================================";
 
-    if tests_failed = 0 then
+    if tests_failed = 0 and (tests_passed + tests_failed) > 0 then
       report "*** MOVES ALL MODES TEST PASSED ***";
     else
       report "*** MOVES ALL MODES TEST FAILED ***" severity error;

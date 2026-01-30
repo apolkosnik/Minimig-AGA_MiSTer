@@ -141,7 +141,8 @@ test-pmmu: compile
 test-pmmu-all-modes: compile
 	@echo "Running PMMU all modes test..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_all_modes_test.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmmu_all_modes_test 2>&1 | grep -E "(Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*TEST)"
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmmu_all_modes_test
+#2>&1 | grep -E "(Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*TEST)"
 
 test-diagnostic: compile
 	@echo "Running PMMU diagnostic tests..."
@@ -289,7 +290,8 @@ test-rte-formats: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_rte_all_formats.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_rte_all_formats 2>&1 | grep -E "(PASS|FAIL|Format|Test|Error|=====)"
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_rte_all_formats 
+#2>&1 | grep -E "(PASS|FAIL|Format|Test|Error|=====)"
 
 # MOVEC Illegal Register Trap Test
 test-movec-illegal: setup
@@ -298,7 +300,8 @@ test-movec-illegal: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_movec_illegal.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 20us; quit" tb_movec_illegal 2>&1 | grep -E "(Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*true|Note:.*false|Note:.*SUCCESS)"
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 20us; quit" tb_movec_illegal
+#2>&1 | grep -E "(Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*true|Note:.*false|Note:.*SUCCESS)"
 
 # MMU.library Style PMMU Detection Test
 test-mmu-library-detect: setup
@@ -307,7 +310,8 @@ test-mmu-library-detect: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_library_detect.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_mmu_library_detect 2>&1 | grep -E "(Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*true|Note:.*false|Note:.*PMMU)"
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_mmu_library_detect
+#2>&1 | grep -E "(Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*true|Note:.*false|Note:.*PMMU)"
 
 # MOVES All Addressing Modes Test
 test-moves-all-modes: setup
@@ -317,7 +321,8 @@ test-moves-all-modes: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_moves_all_modes.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 100us; quit" tb_moves_all_modes 2>&1 | grep -E "(Note:.*TEST|Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*RAM)"
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 100us; quit" tb_moves_all_modes
+#2>&1 | grep -E "(Note:.*TEST|Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*RAM)"
 
 test-pmove:
 	vlib work

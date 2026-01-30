@@ -336,6 +336,11 @@ architecture logic of TG68KdotC_Kernel is
 	-- These latched values preserve the MOVES-specific info (direction and register).
 	signal moves_direction : std_logic := '0';  -- Latched brief(11): 0=mem->CPU(SFC), 1=CPU->mem(DFC)
 	signal moves_reg : std_logic_vector(3 downto 0) := "0000";  -- Latched brief(15:12): D/A + reg#
+	-- BUG #322: Latched EA for MOVES complex addressing modes (d16,An), (d8,An,Xn), (xxx).W/L
+	-- The EA computed during ld_dAn1/ld_AnXn2/ld_nn is only valid for one cycle in memaddr_delta_rega.
+	-- By the time moves1 executes, it's overwritten. These signals preserve the EA.
+	signal moves_ea_latched : std_logic_vector(31 downto 0) := (others => '0');
+	signal moves_ea_use_base : bit := '0';  -- '1'=displacement mode (use reg_QA base), '0'=absolute
 	signal source_LDRLbits 	: bit;
 	signal source_LDRMbits 	: bit;
 	signal source_2ndHbits	: bit;
@@ -915,6 +920,27 @@ ALU: TG68K_ALU
 					moves_direction <= brief(11);  -- 0=mem->CPU(SFC), 1=CPU->mem(DFC)
 					moves_reg <= brief(15 downto 12);  -- D/A bit + register number
 				end if;
+				-- BUG #322 FIX: Latch EA for MOVES complex addressing modes.
+				-- The displacement/address computed by ld_dAn1/ld_AnXn2/ld_nn is only valid
+				-- for one cycle in memaddr_delta_rega. By moves1, it's overwritten.
+				-- (d16,An): memaddr_a = displacement from setdisp='1'
+				if micro_state = ld_dAn1 and opcode(15 downto 8) = "00001110" and
+				   opcode(7 downto 6) /= "11" and opcode(5 downto 3) = "101" then
+					moves_ea_latched <= memaddr_a;
+					moves_ea_use_base <= '1';  -- base = An
+				end if;
+				-- (d8,An,Xn): memaddr_a = indexed offset from setdisp='1'/briefext
+				if micro_state = ld_AnXn2 and opcode(15 downto 8) = "00001110" and
+				   opcode(7 downto 6) /= "11" and opcode(5 downto 3) = "110" then
+					moves_ea_latched <= memaddr_a;
+					moves_ea_use_base <= '1';  -- base = An
+				end if;
+				-- (xxx).W/L: absolute address in last_data_read
+				if micro_state = ld_nn and opcode(15 downto 8) = "00001110" and
+				   opcode(7 downto 6) /= "11" and opcode(5 downto 3) = "111" then
+					moves_ea_latched <= last_data_read;
+					moves_ea_use_base <= '0';  -- absolute, no base register
+				end if;
 				-- Set when moves1 schedules a bus access
 				if micro_state = moves1 then
 					moves_bus_pending <= '1';
@@ -932,7 +958,11 @@ ALU: TG68K_ALU
 				-- state is already "01" (fetch), so condition never becomes true.
 				-- Using micro_state = idle works because idle persists for at least
 				-- one full clock when instruction completes, and all MOVES states != idle.
-				elsif micro_state = idle and exec(Regwrena) = '0' then
+				-- BUG #323c: Clear moves_bus_pending immediately when returning to idle.
+				-- Previously checked exec(Regwrena)='0' too, but this kept mbp='1' during
+				-- the deferred writeback cycle, overriding rf_dest_addr/rf_source_addr and
+				-- corrupting the next instruction's register selection.
+				elsif micro_state = idle then
 					moves_bus_pending <= '0';
 				end if;
 				if micro_state = moves0 or micro_state = moves1 then
@@ -958,8 +988,10 @@ ALU: TG68K_ALU
 					-- BUG #318 FIX: Use latched moves_direction instead of brief(11)
 					if micro_state = moves1 and moves_direction = '0' then
 						moves_writeback_pending <= '1';
-					-- Clear only after register writeback completes
-					elsif moves_active = '1' and exec(Regwrena) = '1' and moves_writeback_pending = '1' then
+					-- BUG #323 FIX: Clear when direct register write fires (state="10"
+					-- with last word of transfer). memmaskmux(3)='1' matches clkena_lw='1'
+					-- which is when the register file process performs the direct write.
+					elsif state = "10" and memmaskmux(3) = '1' and moves_writeback_pending = '1' then
 						moves_writeback_pending <= '0';
 					end if;
 				end if;
@@ -1155,12 +1187,25 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 				RDindex_A <= conv_integer(rf_dest_addr(3 downto 0));
 				RDindex_B <= conv_integer(rf_source_addr(3 downto 0));
 				IF Wwrena='1' THEN
-					-- MOVES mem->CPU: use brief register index to avoid RDindex_A timing race
-					IF exec(Regwrena)='1' AND opcode(15 downto 8)="00001110" AND brief(11)='0' THEN
-						regfile(conv_integer(brief(15 downto 12))) <= regin;
-					ELSE
-						regfile(RDindex_A) <= regin;
-					END IF;
+					regfile(RDindex_A) <= regin;
+				END IF;
+				-- BUG #323 FIX: Direct MOVES mem->CPU register write.
+				-- Writes data_read directly to the destination register during the
+				-- bus read cycle (state="10"), bypassing the exec pipeline entirely.
+				-- This avoids the deferred writeback at state="00" which conflicted
+				-- with the next instruction's decode (set signals overriding MOVEA etc).
+				-- data_read is the 32-bit assembled bus value (handles long/word/byte).
+				-- For longword, clkena_lw='1' only on the second word, so data_read
+				-- contains the full 32-bit value at that point.
+				IF moves_writeback_pending = '1' AND state = "10" THEN
+					CASE exe_datatype IS
+						WHEN "00" =>  -- Byte: write only bits 7:0
+							regfile(conv_integer(moves_reg))(7 downto 0) <= data_read(7 downto 0);
+						WHEN "01" =>  -- Word: write only bits 15:0
+							regfile(conv_integer(moves_reg))(15 downto 0) <= data_read(15 downto 0);
+						WHEN OTHERS =>  -- Long: write full 32 bits
+							regfile(conv_integer(moves_reg)) <= data_read;
+					END CASE;
 				END IF;
 			END IF;
 		END IF;
@@ -1572,7 +1617,8 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 -----------------------------------------------------------------------------
 PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatype, interrupt, rIPL_nr, IPL_vec,
          memaddr_reg, memaddr_delta_rega, memaddr_delta_regb, reg_QA, use_base, VBR, last_data_read, trap_vector, exec, set, cpu, use_VBR_Stackframe,
-         pmove_disp_latched, micro_state, opcode, moves_ea_areg, moves_bus_pending, memmaskmux)
+         pmove_disp_latched, micro_state, opcode, moves_ea_areg, moves_bus_pending, memmaskmux,
+         moves_ea_latched, moves_ea_use_base)
 	BEGIN
 		
 		IF rising_edge(clk) THEN
@@ -1690,10 +1736,30 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				-- BUG #317 FIX: Only zero delta on FIRST word of longword (memmaskmux(3)='1')
 				-- During second word (memmaskmux(3)='0'), allow the +2 increment via addsub
 				-- Without this, MOVES.L writes both words to the same address!
+				-- BUG #321 FIX: MOVES -(An) pre-decrement needs address = addsub_q = A0-size
+				-- Unlike (An) and (An)+, the pre-decrement must happen BEFORE memory access.
+				-- addsub_q = A0-size because exec(presub) sets opaddsub='1' (subtraction).
+				-- Must check BEFORE the general (An)/(An)+/-(An) override below.
+				ELSIF (micro_state = moves1 OR moves_bus_pending = '1') AND
+				    opcode(5 downto 3) = "100" AND memmaskmux(3)='1' THEN
+					memaddr_delta_rega <= addsub_q;
+					-- use_base stays '0': addr = 0 + addsub_q = A0-size
+				-- BUG #322 FIX: MOVES complex EA modes - use latched displacement/address.
+				-- For (d16,An), (d8,An,Xn), and (xxx).W/L, the EA computed by ld_dAn1/ld_AnXn2/ld_nn
+				-- is stored in memaddr_delta_rega for only one cycle. By the time moves1 runs,
+				-- the ELSE branch overwrites it with memaddr_a=0. Use the latched values instead.
+				ELSIF (micro_state = moves1 OR moves_bus_pending = '1') AND
+				    opcode(15 downto 8) = "00001110" AND opcode(7 downto 6) /= "11" AND
+				    (opcode(5 downto 3) = "101" OR opcode(5 downto 3) = "110" OR opcode(5 downto 3) = "111") AND
+				    memmaskmux(3)='1' THEN
+					memaddr_delta_rega <= moves_ea_latched;
+					use_base <= moves_ea_use_base;
+				-- MOVES (An)/(An)+: use base register directly (addr = reg_QA + 0)
 				ELSIF (micro_state = moves0 OR micro_state = moves1 OR moves_bus_pending = '1') AND
 				    (moves_ea_areg = '1' OR opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100") AND
+				    opcode(5 downto 3) /= "100" AND
 				    memmaskmux(3)='1' THEN
-					memaddr_delta_rega <= (others => '0');  -- No delta for simple (An) mode, first word only
+					memaddr_delta_rega <= (others => '0');  -- No delta for simple (An)/(An)+ mode, first word only
 					use_base <= '1';  -- Force memaddr_reg = reg_QA
 				-- BUG #172 FIX: PMOVE with simple EA modes needs use_base='1'
 				-- Without this, PMOVE TC,(An) writes to wrong address (PC+offset instead of An)
@@ -1743,10 +1809,13 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					memaddr_delta_rega <= addr;
 				ELSIF set(addrlong)='1' THEN
 					memaddr_delta_rega <= last_data_read;
-				-- BUG #149 FIX: MOVES states AND bus access pending need to bypass normal address calc
-				-- setstate="00" during moves0/moves1 (assignment is next-cycle), but we need use_base='1'
-				-- Also exclude moves_bus_pending to prevent PC increment during MOVES bus access
-				ELSIF setstate="00" AND micro_state /= moves0 AND micro_state /= moves1 AND moves_bus_pending = '0' THEN
+				-- BUG #149 FIX: MOVES bus access pending needs to bypass normal address calc
+				-- Exclude moves_bus_pending to prevent PC increment during MOVES bus access
+				-- BUG #322 FIX: Removed moves0 exclusion - moves0 with setstate="00" is a fetch cycle
+				-- that needs PC-based addressing. The exclusion was corrupting the address for
+				-- displacement/indexed/absolute EA modes that need to read from the instruction stream.
+				-- moves1 exclusion also removed since moves1 never has setstate="00" (always "10" or "11").
+				ELSIF setstate="00" AND moves_bus_pending = '0' THEN
 					memaddr_delta_rega <= TG68_PC_add;
 				ELSIF exec(dispouter)='1' THEN
 					memaddr_delta_rega <= ea_data;
@@ -1933,14 +2002,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						END IF;
 					END IF;
 
-					-- BUG #318 FIX: MOVES indexed mode (d8,An,Xn) needs the EA extension
-					-- word in brief for ld_AnXn1. The first moves0 cycle (phase 0) fetched it
-					-- from the instruction stream into last_opc_read. Now load it into brief
-					-- before transitioning to ld_AnXn1.
-					IF micro_state = moves0 AND opcode(15 downto 8) = "00001110" AND
-					   opcode(5 downto 3) = "110" AND moves_d16_phase = '1' THEN
-						brief <= last_opc_read;
-					END IF;
+					-- BUG #318/322 FIX: MOVES indexed mode (d8,An,Xn) brief loading
+					-- Replaced two-phase approach (phase 1 loaded from last_opc_read) with
+					-- getbrief='1' in moves0 which loads brief from data_read at rising edge.
+					-- The old phase 1 code is no longer needed.
 
 					-- BUG #289 FIX: F-Line context capture must be in clkena_in block!
 					-- The clkena_lw block doesn't execute for PMOVE memory EA (memmask="100111").
@@ -4449,6 +4514,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					ELSIF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND
 					      opcode(5 downto 3)="111" THEN
 						setnextpass <= '0';
+						setstate <= "01";  -- BUG #322: Prevent fetch, preserve absolute address
 						ea_only <= '1';
 						next_micro_state <= moves1;
 					ELSE
@@ -4501,6 +4567,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- MOVES (d16,An): after fetching the displacement word and computing EA,
 						-- continue into moves1 which performs the actual data transfer using SFC/DFC.
 						IF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND opcode(5 downto 3)="101" THEN
+							-- BUG #322 FIX: Must clear setnextpass and set state "01" to:
+							-- 1. Prevent nextpass mechanism from corrupting instruction flow
+							-- 2. Prevent unwanted fetch (setstate="00" → PC advances by 2)
+							-- 3. Ensure memaddr_delta_rega gets displacement (not TG68_PC_add)
+							--    via the ELSE branch at line 1768 (which requires setstate/="00")
+							setnextpass <= '0';
+							setstate <= "01";
 							ea_only <= '1';
 							next_micro_state <= moves1;
 						END IF;
@@ -4559,6 +4632,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND
 					   opcode(5 downto 3)="110" THEN
 						setnextpass <= '0';
+						setstate <= "01";  -- BUG #322: Prevent fetch, preserve indexed offset
 						ea_only <= '1';
 						next_micro_state <= moves1;
 					END IF;
@@ -5277,28 +5351,23 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							set(sfc_not_dfc) <= '1';  -- Read operation uses SFC
 
 						END IF;
-						-- MOVES (d16,An): after the MOVES extension word, fetch the displacement word
-						-- from the instruction stream before performing the actual data access in moves1.
+						-- BUG #322 FIX: Eliminated two-phase moves0 approach.
+						-- The displacement/brief word is being fetched THIS cycle (state="00").
+						-- last_data_read will contain it at the next rising edge.
+						-- Go directly to the EA handler - no second moves0 cycle needed.
+						-- The old two-phase approach caused phase 1 to fetch from wrong address
+						-- (BUG #149 exclusion corrupted addr) AND overwrite the displacement data.
 						IF opcode(5 downto 3)="101" THEN
-							-- (d16,An): fetch displacement word then compute EA
-							IF moves_d16_phase='0' THEN
-								-- Keep setstate="00" so PC advances and last_data_read captures the displacement
-								next_micro_state <= moves0;
-							ELSE
-								-- Displacement is available; compute EA in ld_dAn1, then continue in moves1
-								setstate <= "01";  -- stall fetch while computing EA
-								next_micro_state <= ld_dAn1;
-							END IF;
+							-- (d16,An): displacement word fetched this cycle, available in last_data_read
+							-- at ld_dAn1 which uses setdisp='1' to read it
+							setstate <= "01";  -- prevent next cycle from fetching
+							next_micro_state <= ld_dAn1;
 						ELSIF opcode(5 downto 3)="110" THEN
-							-- (d8,An,Xn): fetch EA extension word then route to ld_AnXn1
-							IF moves_d16_phase='0' THEN
-								-- Phase 0: fetch EA brief extension word from instruction stream
-								next_micro_state <= moves0;
-							ELSE
-								-- Phase 1: brief loaded by clkena_in override, route to indexed EA builder
-								setstate <= "01";
-								next_micro_state <= ld_AnXn1;
-							END IF;
+							-- (d8,An,Xn): EA extension word fetched this cycle
+							-- Load it into brief via getbrief for ld_AnXn1
+							getbrief <= '1';
+							setstate <= "01";
+							next_micro_state <= ld_AnXn1;
 						ELSIF opcode(5 downto 3)="111" THEN
 							-- Absolute modes: route to ld_nn for address fetch
 							IF opcode(2 downto 0)="001" THEN
@@ -5333,7 +5402,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- BUG #149 FIX: REMOVED set_writePCbig - was causing PC to be set to EA!
 					-- PC increment is handled by the extension word fetch (getbrief)
 					-- Same fix as BUG #54 for pmove_decode
-					set(opcMOVE) <= '1';
+					-- BUG #319 FIX: REMOVED set(opcMOVE) - it causes exec(alu_move)='1' on the
+					-- next cycle, which makes ALUout=OP2out instead of addsub_q. This corrupts
+					-- the postadd/presub register writeback (A0 gets D2 value instead of A0+2).
+					-- BUG #320 FIX: Use set(write_reg) for CPU->mem to route reg_QB directly
+					-- to data_write_muxin, bypassing the registered data_write_tmp.
 					set(use_sfc_dfc) <= '1';  -- Use SFC/DFC for FC override
 					set(no_Flags) <= '1';  -- BUG #220: MOVES does not affect condition codes (MC68030 spec)
 					-- BUG #149 FIX: Keep source_lowbits set to maintain EA register selection
@@ -5362,13 +5435,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF moves_direction='1' THEN
 						-- MOVES Rn,<ea> - Register to Memory using DFC (dr=1)
 						setstate <= "11";  -- Write to EA
+						set(write_reg) <= '1';  -- BUG #320: Route reg_QB directly to bus data
 						-- DFC used for write (sfc_not_dfc stays '0')
 						ELSE
 							-- MOVES <ea>,Rn - Memory to Register using SFC (dr=0)
 							setstate <= "10";  -- Read from EA
-						    set(Regwrena) <= '1';
+							-- BUG #323a: Do NOT set Regwrena here! Setting it causes a premature
+							-- register write during the bus access cycle with wrong data (ALUout
+							-- instead of bus read data). The deferred writeback at the end of
+							-- this process (line ~6155) handles the register write after bus data
+							-- is available, using moves_writeback_pending.
 							set(sfc_not_dfc) <= '1';  -- Use SFC for read
-					set(no_Flags) <= '1';  -- BUG #220: MOVES does not affect condition codes
+							set(no_Flags) <= '1';  -- BUG #220: MOVES does not affect condition codes
 						END IF;
 					-- END IF;  -- BUG #170: reserved bits check
 
@@ -6092,18 +6170,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
 				WHEN OTHERS => NULL;
 			END CASE;
-			-- BUG #215 FIX: Reassert MOVES mem->CPU writeback signals
-			-- BUG #219 FIX: Check state="00" not "10" because state transitions before exec latches!
-			-- Timing: moves1 sets setstate="10" → nop has state="10" but setstate="00" → next cycle state="00"
-			IF moves_active = '1' AND moves_writeback_pending = '1' AND state = "00" THEN
-				set(Regwrena) <= '1';
-				set(briefext) <= '1';  -- BUG #218: Must re-assert to select correct dest register
-				set(opcMOVE) <= '1';
-				set(ea_data_OP2) <= '1';
-				set(use_sfc_dfc) <= '1';
-				set(sfc_not_dfc) <= '1';
-				set(no_Flags) <= '1';  -- BUG #220: MOVES does not affect condition codes
-			END IF;
+			-- BUG #323 FIX: Deferred writeback REMOVED. The register write for
+			-- MOVES mem->CPU is now performed directly in the register file process
+			-- during the bus read cycle (state="10"), bypassing the exec pipeline.
+			-- The old deferred writeback at state="00" conflicted with the next
+			-- instruction's decode (set signals overriding MOVEA, etc).
 			IF moves_active = '1' AND (micro_state = moves0 OR micro_state = moves1 OR moves_writeback_pending = '1') THEN
 				set(no_Flags) <= '1';
 			END IF;
