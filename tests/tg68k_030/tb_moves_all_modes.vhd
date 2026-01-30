@@ -27,7 +27,7 @@ architecture behavioral of tb_moves_all_modes is
 
   signal clk : std_logic := '0';
   signal nReset : std_logic := '0';
-  signal clkena_in : std_logic := '1';
+  signal clkena_in : std_logic := '1';  -- Driven by wait state process
   signal data_in : std_logic_vector(15 downto 0) := (others => '0');
   signal IPL : std_logic_vector(2 downto 0) := "111";
   signal CPU : std_logic_vector(1 downto 0) := "11";  -- 68030 mode
@@ -46,6 +46,9 @@ architecture behavioral of tb_moves_all_modes is
   signal pmmu_walker_data : std_logic_vector(31 downto 0) := (others => '0');
 
   constant CLK_PERIOD : time := 20 ns;
+  -- Wait state simulation: 1 cycle wait for memory access (mimics real hardware)
+  constant WAIT_CYCLES : integer := 1;
+  signal wait_counter : integer range 0 to 3 := 0;
   signal cycle : integer := 0;
   signal test_phase : integer := 0;
   signal test_name : string(1 to 40) := (others => ' ');
@@ -290,15 +293,50 @@ architecture behavioral of tb_moves_all_modes is
     279 => x"23CD", 280 => x"0000", 281 => x"1E08",  -- MOVE.L A5,($1E08).L at $22E
 
     -- ============================================
+    -- TEST 31: MOVES.L D2,(A1) - CPU->mem using A1 as EA register
+    -- BUG #327: Verify A1 does NOT get corrupted and data is written correctly
+    -- D2=$12345678 (source), A1=$1D10 (EA address)
+    -- Extension: $2800 (bit15=0=Dn, bits14:12=010=D2, bit11=1=write)
+    -- ============================================
+    282 => x"227C", 283 => x"0000", 284 => x"1D10",  -- MOVEA.L #$1D10,A1 at $234
+    285 => x"0E91", 286 => x"2800",                    -- MOVES.L D2,(A1) at $23A
+    -- Store A1 to RAM to verify it was NOT corrupted
+    287 => x"23C9", 288 => x"0000", 289 => x"1E10",  -- MOVE.L A1,($1E10).L at $23E
+
+    -- ============================================
+    -- TEST 32: MOVES.L (A1),A5 - mem->CPU using A1 as EA register
+    -- BUG #327: Verify A5 gets the value from memory at A1
+    -- A1=$1D10 (address of test 31 data), A5 should get $12345678
+    -- Extension: $D000 (bit15=1=An, bits14:12=101=A5, bit11=0=read)
+    -- ============================================
+    290 => x"227C", 291 => x"0000", 292 => x"1D10",  -- MOVEA.L #$1D10,A1 at $244
+    293 => x"0E91", 294 => x"D000",                    -- MOVES.L (A1),A5 at $24A
+    -- Store A5 to RAM for verification
+    295 => x"23CD", 296 => x"0000", 297 => x"1E18",  -- MOVE.L A5,($1E18).L at $24E
+
+    -- ============================================
+    -- TEST 33: MOVES.W (A1),A5 - word read to address register
+    -- BUG #327: Address register should be sign-extended from 16 to 32 bits
+    -- Memory at $1D10 contains $1234 (from test 31), A5 should get $00001234
+    -- Extension: $D000 (bit15=1=An, bits14:12=101=A5, bit11=0=read)
+    -- MOVES.W opcode: $0E51 (bits 7:6 = 01 = word, EA mode 010 reg 001 = (A1))
+    -- ============================================
+    298 => x"227C", 299 => x"0000", 300 => x"1D10",  -- MOVEA.L #$1D10,A1 at $254
+    301 => x"2A7C", 302 => x"FFFF", 303 => x"FFFF",  -- MOVEA.L #$FFFFFFFF,A5 at $25A (pre-fill with $FF)
+    304 => x"0E51", 305 => x"D000",                    -- MOVES.W (A1),A5 at $260
+    -- Store A5 to RAM for verification
+    306 => x"23CD", 307 => x"0000", 308 => x"1E20",  -- MOVE.L A5,($1E20).L at $262
+
+    -- ============================================
     -- TEST 28: Verify CCR unchanged
     -- Move SR to D0 to check
     -- ============================================
-    282 => x"42C0",  -- MOVE SR,D0 at $234
+    309 => x"42C0",  -- MOVE SR,D0 at $268
 
     -- ============================================
     -- End of tests - STOP
     -- ============================================
-    283 => x"4E72", 284 => x"2700",  -- STOP #$2700 at $236
+    310 => x"4E72", 311 => x"2700",  -- STOP #$2700 at $26A
 
     others => x"4E71"  -- NOP fill
   );
@@ -313,9 +351,9 @@ architecture behavioral of tb_moves_all_modes is
   signal tests_passed : integer := 0;
   signal tests_failed : integer := 0;
   signal current_test : integer := 0;
-  signal reported : std_logic_vector(30 downto 1) := (others => '0');
+  signal reported : std_logic_vector(33 downto 1) := (others => '0');
   signal all_done : std_logic := '0';  -- Set after STOP to trigger reporting
-  signal report_idx : integer range 0 to 31 := 0;  -- One-per-cycle deferred reporting counter
+  signal report_idx : integer range 0 to 34 := 0;  -- One-per-cycle deferred reporting counter
   signal reporting_done : std_logic := '0';  -- Set when all tests have been reported
 
   -- FC tracking
@@ -345,6 +383,8 @@ architecture behavioral of tb_moves_all_modes is
   -- MOVES.L An register tracking
   signal t30_hi_ok : std_logic := '0';  -- MOVES.L (A0),A5 read at $1D00
   signal t30_lo_ok : std_logic := '0';  -- MOVES.L (A0),A5 read at $1D02
+  signal t32_hi_ok : std_logic := '0';  -- MOVES.L (A1),A5 read at $1D10
+  signal t32_lo_ok : std_logic := '0';  -- MOVES.L (A1),A5 read at $1D12
 
   -- Debug signals for MOVES tracking
   signal debug_moves_bus_pending : std_logic;
@@ -365,6 +405,32 @@ architecture behavioral of tb_moves_all_modes is
 
 begin
   clk <= not clk after CLK_PERIOD/2;
+
+  -- Wait state generation: simulate real hardware memory latency
+  -- When CPU requests a bus cycle (state "10" or "11"), hold clkena_in low
+  -- for WAIT_CYCLES clocks before asserting it.
+  process(clk)
+  begin
+    if rising_edge(clk) then
+      if nReset = '0' then
+        wait_counter <= 0;
+        clkena_in <= '1';
+      elsif busstate(1) = '1' then
+        -- Bus cycle active (state "10" = read, "11" = write)
+        if wait_counter < WAIT_CYCLES then
+          wait_counter <= wait_counter + 1;
+          clkena_in <= '0';  -- Hold CPU stalled
+        else
+          clkena_in <= '1';  -- Memory ready
+          wait_counter <= 0;
+        end if;
+      else
+        -- No bus cycle: CPU runs freely
+        wait_counter <= 0;
+        clkena_in <= '1';
+      end if;
+    end if;
+  end process;
 
   uut: entity work.TG68KdotC_Kernel
     port map (
@@ -487,6 +553,9 @@ begin
             -- MOVES.L (A0),A5 read tracking
             when 16#1D00# => t30_hi_ok <= '1';
             when 16#1D02# => t30_lo_ok <= '1';
+            -- MOVES.L (A1),A5 read tracking
+            when 16#1D10# => t32_hi_ok <= '1';
+            when 16#1D12# => t32_lo_ok <= '1';
             when others => null;
           end case;
         end if;
@@ -778,11 +847,61 @@ begin
           if t30_hi_ok = '0' or t30_lo_ok = '0' then
             report "TEST 30: WARNING - SFC reads not detected at $1D00/$1D02";
           end if;
+        when 31 =>
+          -- MOVES.L D2,(A1): check memory=$12345678 AND A1=$1D10 (not corrupted)
+          -- RAM at $1D10: index 1672 (hi), 1673 (lo)
+          -- RAM at $1E10: index 1800 (hi), 1801 (lo) - stored A1 value
+          ram_value := ram(1672)(15 downto 0) & ram(1673)(15 downto 0);
+          if ram_value /= x"12345678" then
+            report "TEST 31: MOVES.L D2,(A1) -> FAILED: memory=$" & slv_to_hex(ram_value) & " expected $12345678";
+            pass := false;
+          else
+            -- Check A1 was preserved (stored to $1E10)
+            ram_value := ram(1800)(15 downto 0) & ram(1801)(15 downto 0);
+            if ram_value = x"00001D10" then
+              report "TEST 31: MOVES.L D2,(A1) -> PASSED (mem=$12345678, A1=$1D10 preserved)";
+              pass := true;
+            else
+              report "TEST 31: MOVES.L D2,(A1) -> FAILED: A1=$" & slv_to_hex(ram_value) & " expected $00001D10 (BUG #327: A1 corrupted!)";
+              pass := false;
+            end if;
+          end if;
+        when 32 =>
+          -- MOVES.L (A1),A5: check A5 got $12345678 (stored at $1E18)
+          -- RAM at $1E18: index 1804 (hi), 1805 (lo)
+          ram_value := ram(1804)(15 downto 0) & ram(1805)(15 downto 0);
+          if ram_value = x"12345678" then
+            pass := true;
+            report "TEST 32: MOVES.L (A1),A5 -> PASSED (A5=$12345678)";
+          else
+            pass := false;
+            report "TEST 32: MOVES.L (A1),A5 -> FAILED (A5=$" & slv_to_hex(ram_value) & " expected $12345678)";
+          end if;
+          -- Also check SFC reads happened
+          if t32_hi_ok = '0' or t32_lo_ok = '0' then
+            report "TEST 32: WARNING - SFC reads not detected at $1D10/$1D12";
+          end if;
+        when 33 =>
+          -- MOVES.W (A1),A5: check A5 got sign-extended $00001234 (stored at $1E20)
+          -- A5 was pre-filled with $FFFFFFFF, so if word only writes low 16 bits,
+          -- A5 would be $FFFF1234 instead of $00001234
+          -- RAM at $1E20: index = ($1E20-$1000)/2 = 1808 (hi), 1809 (lo)
+          ram_value := ram(1808)(15 downto 0) & ram(1809)(15 downto 0);
+          if ram_value = x"00001234" then
+            pass := true;
+            report "TEST 33: MOVES.W (A1),A5 -> PASSED (A5=$00001234 sign-extended)";
+          elsif ram_value = x"FFFF1234" then
+            pass := false;
+            report "TEST 33: MOVES.W (A1),A5 -> FAILED (A5=$FFFF1234 - word not sign-extended to An!)";
+          else
+            pass := false;
+            report "TEST 33: MOVES.W (A1),A5 -> FAILED (A5=$" & slv_to_hex(ram_value) & " expected $00001234)";
+          end if;
         when others =>
           null;
       end case;
 
-      if test_id >= 1 and test_id <= 30 then
+      if test_id >= 1 and test_id <= 33 then
         if pass then
           tests_passed <= tests_passed + 1;
         else
@@ -831,7 +950,7 @@ begin
           end if;
 
           -- Timeout detection (only once per test)
-          if timeout_count > 200 and current_test /= 0 and reported(current_test) = '0' then
+          if timeout_count > 200 and current_test >= 1 and current_test <= 33 and reported(current_test) = '0' then
             report "TEST " & integer'image(current_test) & " TIMEOUT/NO PROGRESS (possible lockup)";
             tests_failed <= tests_failed + 1;
             reported(current_test) <= '1';
@@ -845,15 +964,15 @@ begin
         -- report_test 15 times in one cycle would read the same old value of
         -- tests_passed/tests_failed (signals only update after process suspends).
         if all_done = '1' and reporting_done = '0' then
-          if report_idx >= 1 and report_idx <= 30 then
+          if report_idx >= 1 and report_idx <= 33 then
             if reported(report_idx) = '0' then
               report_test(report_idx);
             end if;
           end if;
-          if report_idx < 31 then
+          if report_idx < 34 then
             report_idx <= report_idx + 1;
           end if;
-          if report_idx = 30 then
+          if report_idx = 33 then
             reporting_done <= '1';
           end if;
         end if;
@@ -873,9 +992,9 @@ begin
     nReset <= '1';
 
     -- Wait for STOP instruction
-    for i in 0 to 10000 loop
+    for i in 0 to 20000 loop
       wait until rising_edge(clk);
-      if to_integer(unsigned(addr_out(23 downto 0))) = 16#236# and busstate = "00" then
+      if to_integer(unsigned(addr_out(23 downto 0))) = 16#26A# and busstate = "00" then
         exit;
       end if;
     end loop;

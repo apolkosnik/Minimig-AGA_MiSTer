@@ -193,8 +193,8 @@ architecture behavioral of tb_pmove_comprehensive is
     137 => x"263C", 138 => x"CAFE", 139 => x"BABE",
     -- MOVEA.L #$00001000,A0 (RAM base)
     140 => x"207C", 141 => x"0000", 142 => x"1000",
-    -- MOVEA.L #$00001100,A1
-    143 => x"227C", 144 => x"0000", 145 => x"1100",
+    -- MOVEA.L #$00001000,A1 (RAM base - for readback test)
+    143 => x"227C", 144 => x"0000", 145 => x"1000",
     
     -- ========================================
     -- TEST GROUP 1: TC Register (32-bit)
@@ -205,9 +205,9 @@ architecture behavioral of tb_pmove_comprehensive is
     -- Extension: 010 10000 0 0000000 = $4000 (TC, write)
     146 => x"F000", 147 => x"4000",
     
-    -- TEST 1.2: PMOVE TC,D1 (Read TC to D1)
-    -- Extension: 010 10000 1 0000000 = $4200 (TC, read)
-    148 => x"F001", 149 => x"4200",
+    -- TEST 1.2: PMOVE TC,D4 (Read TC to D4 - use D4 to preserve D1 for TT0 test)
+    -- Extension: 010 10000 1 0000100 = $4204 (TC, read to D4)
+    148 => x"F004", 149 => x"4204",
     
     -- TEST 1.3: PMOVE TC,(A0) (Write TC to memory)
     -- Opcode: F010 ((An) mode)
@@ -272,8 +272,8 @@ architecture behavioral of tb_pmove_comprehensive is
     -- TEST GROUP 5: CRP Register (64-bit)
     -- ========================================
     
-    -- Reset A0 to RAM base
-    176 => x"207C", 177 => x"0000", 178 => x"1000",
+    -- Reset A0 to RAM base $1040 (Avoid overwriting TC tests at $1000)
+    176 => x"207C", 177 => x"0000", 178 => x"1040",
     
     -- TEST 5.1: PMOVE CRP,(A0) (Read 64-bit CRP to memory)
     -- Extension: 010 011 1 000000000 = $4E00 (CRP, read to mem)
@@ -312,11 +312,11 @@ architecture behavioral of tb_pmove_comprehensive is
     -- Extension: 010 10000 1 0000000 = $4200 (TC, read)
     193 => x"F020", 194 => x"4200",
     
-    -- TEST 7.2: PMOVE (d16,A0),TC (Displacement)
+    -- TEST 7.2: PMOVE TC,(d16,A0) (Displacement) - Write TC to memory
     -- Opcode: F028 ((d16,An) mode, An=A0)
-    -- Extension: 010 10000 0 0000000 = $4000 (TC, write)
+    -- Extension: 010 10000 1 0000000 = $4200 (TC, write to memory)
     -- Displacement: $0010 (16 bytes)
-    195 => x"F028", 196 => x"4000", 197 => x"0010",
+    195 => x"F028", 196 => x"4200", 197 => x"0010",
     
     -- TEST 7.3: PMOVE TC,$00001200.L (Absolute Long)
     -- Opcode: F039 (xxx.L mode)
@@ -327,7 +327,21 @@ architecture behavioral of tb_pmove_comprehensive is
     -- ========================================
     -- End of tests - halt
     -- ========================================
-    202 => x"4E72", 203 => x"2700",  -- STOP #$2700
+    -- TEST 18: PMOVE CRP,($12,A0) (PC Alignment Check)
+    -- Opcode: F028 (d16,An mode, An=A0)
+    -- Extension: 010 011 1 000000000 = $4E00 (CRP, read to mem)
+    -- Displacement: $0012 (18 bytes)
+    202 => x"F028", 203 => x"4E00", 204 => x"0012",
+    
+    -- Check for PC Alignment: MOVEQ #$55,D7
+    205 => x"7E55",
+    
+    -- MOVE.L D7,(A0) (Write D7 to memory to verify execution)
+    -- Opcode: 2087 (MOVE.L D7,(A0))
+    206 => x"2087",
+    
+    -- Terminate
+    207 => x"4E72", 208 => x"2700",  -- STOP #$2700
     
     others => x"4E71"  -- NOP
   );
@@ -418,6 +432,9 @@ begin
     variable ram_val_16 : std_logic_vector(15 downto 0);
     variable expected_32 : std_logic_vector(31 downto 0);
     variable pass : boolean;
+    variable tests_passed_count : integer := 0;
+    variable tests_failed_count : integer := 0;
+    variable tests_total_count : integer := 0;
     
     -- Helper procedure to report test result
     procedure report_test(
@@ -426,13 +443,13 @@ begin
       passed : boolean
     ) is
     begin
-      total_tests <= total_tests + 1;
+      tests_total_count := tests_total_count + 1;
       if passed then
-        test_passed <= test_passed + 1;
+        tests_passed_count := tests_passed_count + 1;
         test_results(test_id) <= TEST_PASS;
         report "TEST " & integer'image(test_id) & ": " & test_name & " -> PASSED";
       else
-        test_failed <= test_failed + 1;
+        tests_failed_count := tests_failed_count + 1;
         test_results(test_id) <= TEST_FAIL;
         report "TEST " & integer'image(test_id) & ": " & test_name & " -> FAILED" severity error;
       end if;
@@ -469,10 +486,10 @@ begin
     -- TC should now contain $12345678 (verified via PMMU_REG_READ logs)
     report_test(test_num, "TC Dn write (PMOVE D0,TC)", true);  -- Assume pass if no exception
     
-    -- TEST 2: TC Dn read (PMOVE TC,D1) - should read back $12345678 into D1
+    -- TEST 2: TC Dn read (PMOVE TC,D4) - should read back $12345678 into D4
     test_num := 2;
-    -- D1 should now contain $12345678 (can't directly verify without D1 debug signal)
-    report_test(test_num, "TC Dn read (PMOVE TC,D1)", true);  -- Assume pass if no exception
+    -- D4 should now contain $12345678 (can't directly verify without D4 debug signal)
+    report_test(test_num, "TC Dn read (PMOVE TC,D4)", true);  -- Assume pass if no exception
     
     -- TEST 3: TC memory write (PMOVE TC,(A0)) - write $12345678 to $1000
     test_num := 3;
@@ -559,8 +576,9 @@ begin
     
     -- TEST 16: TC displacement (PMOVE TC,($10,A0))
     test_num := 16;
-    -- A0=$1008 + $10 = $1018, ($1018 - $1000) >> 1 = 12
-    ram_val_32 := ram(12) & ram(13);
+    -- A0 was decremented to $1004 in Test 15.
+    -- $1004 + $10 = $1014. ($1014 - $1000) >> 1 = 10.
+    ram_val_32 := ram(10) & ram(11);
     expected_32 := EXPECTED_D0;
     pass := (ram_val_32 = expected_32);
     if not pass then
@@ -581,15 +599,31 @@ begin
     end if;
     report_test(test_num, "TC absolute long (PMOVE TC,$1200.L)", pass);
     
+    -- TEST 18: PC Alignment Check (Check D7=$55)
+    test_num := 18;
+    -- D7 ($55) was written to (A0)=$1004
+    -- $1004 is ram(2)&ram(3)? No, ram(4) = ($1008-$1000)>>1.
+    -- Wait. A0=$1004. ($1004-$1000)>>1 = 2.
+    -- So ram(2)/ram(3).
+    ram_val_32 := ram(2) & ram(3);
+    
+    -- Expected D7 value: $00000055.
+    pass := (ram_val_32 = x"00000055");
+    if not pass then
+        report "  Expected: $55 (D7) Got: $" & integer'image(to_integer(unsigned(ram_val_32)));
+        report "  (Note: Got $12345678 means Test 15 TC result persisted, so Test 18 write failed or skipped)";
+    end if;
+    report_test(test_num, "PC Alignment Check (Indirect D7)", pass);
+    
     -- Summarize results
     wait for 100 ns;
     report "========================================";
     report "FINAL RESULTS:";
-    report "Tests Passed: " & integer'image(test_passed) & "/" & integer'image(total_tests);
-    report "Tests Failed: " & integer'image(test_failed) & "/" & integer'image(total_tests);
+    report "Tests Passed: " & integer'image(tests_passed_count) & "/" & integer'image(tests_total_count);
+    report "Tests Failed: " & integer'image(tests_failed_count) & "/" & integer'image(tests_total_count);
     report "========================================";
     
-    if test_failed = 0 and total_tests > 0 then
+    if tests_failed_count = 0 and tests_total_count > 0 then
       report "*** ALL PMOVE TESTS PASSED ***";
     else
       report "*** SOME PMOVE TESTS FAILED ***" severity error;

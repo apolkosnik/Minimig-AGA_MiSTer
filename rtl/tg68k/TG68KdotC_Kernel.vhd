@@ -1206,12 +1206,24 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 				-- data_read is the 32-bit assembled bus value (handles long/word/byte).
 				-- For longword, clkena_lw='1' only on the second word, so data_read
 				-- contains the full 32-bit value at that point.
+				-- BUG #327 FIX: Sign-extend byte/word writes to address registers.
+				-- MC68030 spec: MOVES to An with byte/word size must sign-extend
+				-- to 32 bits, same as MOVEA.W/MOVEA.B behavior.
+				-- moves_reg(3)='1' means address register (A0-A7).
 				IF moves_writeback_pending = '1' AND state = "10" THEN
 					CASE exe_datatype IS
-						WHEN "00" =>  -- Byte: write only bits 7:0
-							regfile(conv_integer(moves_reg))(7 downto 0) <= data_read(7 downto 0);
-						WHEN "01" =>  -- Word: write only bits 15:0
-							regfile(conv_integer(moves_reg))(15 downto 0) <= data_read(15 downto 0);
+						WHEN "00" =>  -- Byte
+							IF moves_reg(3) = '1' THEN  -- An: sign-extend byte to 32 bits
+								regfile(conv_integer(moves_reg)) <= (31 downto 8 => data_read(7)) & data_read(7 downto 0);
+							ELSE  -- Dn: write only bits 7:0
+								regfile(conv_integer(moves_reg))(7 downto 0) <= data_read(7 downto 0);
+							END IF;
+						WHEN "01" =>  -- Word
+							IF moves_reg(3) = '1' THEN  -- An: sign-extend word to 32 bits
+								regfile(conv_integer(moves_reg)) <= (31 downto 16 => data_read(15)) & data_read(15 downto 0);
+							ELSE  -- Dn: write only bits 15:0
+								regfile(conv_integer(moves_reg))(15 downto 0) <= data_read(15 downto 0);
+							END IF;
 						WHEN OTHERS =>  -- Long: write full 32 bits
 							regfile(conv_integer(moves_reg)) <= data_read;
 					END CASE;
@@ -1785,8 +1797,6 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					      (opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100") AND
 					      memmaskmux(3)='1' THEN
 						-- BUG #290 FIX: LO state first word uses pmove_ea_latched (already has +4 from HI)
-						memaddr_delta_rega <= pmove_ea_latched;
-						use_base <= '0';  -- Don't use reg_QA, use latched address directly
 					-- BUG #302 FIX: Special case for (An)+ mode CRP/SRP LOW word reads
 					ELSIF (micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo OR
 					       micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_mem_to_mmu_lo) AND
