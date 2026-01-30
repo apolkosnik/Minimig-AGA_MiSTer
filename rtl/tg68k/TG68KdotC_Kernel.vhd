@@ -1285,7 +1285,7 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 -----------------------------------------------------------------------------
 -- set dest regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, pmove_dn_regnum, pmove_dn_mode, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg)
+PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, pmove_dn_regnum, pmove_dn_mode, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
 	BEGIN
 		IF exec(movem_action) ='1' THEN
 			rf_dest_addr <= rf_source_addrd;
@@ -1293,7 +1293,12 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 		-- register (An) for address calculation AND for postadd/presub register updates.
 		-- The MOVES destination register write is handled by direct write in the register
 		-- file process, so rf_dest_addr never needs to point to moves_reg.
-		ELSIF moves_bus_pending = '1' THEN
+		-- BUG #326 FIX: Guard with setopcode='0' AND micro_state /= idle to prevent
+		-- contaminating the next instruction's register selection. moves_bus_pending
+		-- stays '1' for up to two cycles after MOVES completes:
+		-- Cycle N (last bus write): setopcode='1' -> blocked by setopcode guard
+		-- Cycle N+1 (idle): micro_state=idle -> blocked by idle guard
+		ELSIF moves_bus_pending = '1' AND setopcode = '0' AND micro_state /= idle THEN
 			rf_dest_addr <= moves_ea_areg & moves_ea_regnum;
 		-- BUG #150 FIX: Also handle moves0/moves1 states to set up RDindex_A one cycle early
 		-- (RDindex_A is registered, so we need the correct value one cycle BEFORE bus access)
@@ -1345,7 +1350,7 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 -----------------------------------------------------------------------------
 -- set source regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, last_opc_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_mode, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg)
+PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, last_opc_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_mode, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
 	BEGIN
 		IF exec(movem_action)='1' OR set(movem_action) ='1' THEN
 			IF movem_presub='1' THEN
@@ -1365,7 +1370,12 @@ PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source
 			rf_source_addr <= '0'&last_data_read(8 downto 6);
 		-- BUG #149 FIX: MOVES bus access uses latched EA register info
 		-- BUG #318 FIX: Use latched moves_direction/moves_reg instead of brief
-		ELSIF moves_bus_pending = '1' THEN
+		-- BUG #326 FIX: Guard with setopcode='0' AND micro_state /= idle to prevent
+		-- contaminating the next instruction's register selection. moves_bus_pending
+		-- stays '1' for up to two cycles after MOVES completes:
+		-- Cycle N (last bus write): setopcode='1' -> blocked by setopcode guard
+		-- Cycle N+1 (idle): micro_state=idle -> blocked by idle guard
+		ELSIF moves_bus_pending = '1' AND setopcode = '0' AND micro_state /= idle THEN
 			IF moves_direction = '1' THEN
 				-- MOVES Rn,<ea> (CPU->memory): source is data register from moves_reg
 				rf_source_addr <= moves_reg;
