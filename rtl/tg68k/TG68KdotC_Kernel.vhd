@@ -1280,25 +1280,12 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 	BEGIN
 		IF exec(movem_action) ='1' THEN
 			rf_dest_addr <= rf_source_addrd;
-		-- BUG #214 FIX: MOVES memory->CPU writeback must use MOVES register
-		-- This avoids using the EA register when exec(Regwrena) asserts after moves1
-		-- BUG #318 FIX: Use latched moves_direction/moves_reg instead of brief(11)/brief(15:12)
-		ELSIF exec(Regwrena)='1' AND opcode(15 downto 8)="00001110" AND moves_direction='0' THEN
-			rf_dest_addr <= moves_reg;
-		-- BUG #150 FIX: MOVES bus access needs EA register for address calculation
-		-- This MUST come before set(briefext) which would override with the data register
-		-- The address register value goes through rf_dest_addr -> RDindex_A -> reg_QA -> memaddr_reg
-		-- BUG #168 FIX: During register write phase (exec(Regwrena)='1'), use moves_reg for destination
-		-- Otherwise the EA register would be written instead of the intended Rn from extension word
-		-- BUG #318 FIX: Use latched moves_direction/moves_reg instead of brief(11)/brief(15:12)
+		-- BUG #323 FIX: During MOVES bus access, rf_dest_addr must point to the EA
+		-- register (An) for address calculation AND for postadd/presub register updates.
+		-- The MOVES destination register write is handled by direct write in the register
+		-- file process, so rf_dest_addr never needs to point to moves_reg.
 		ELSIF moves_bus_pending = '1' THEN
-			IF moves_direction = '0' THEN
-				-- MOVES <ea>,Rn (memory->CPU, dr=0): destination is register from moves_reg
-				rf_dest_addr <= moves_reg;
-			ELSE
-				-- MOVES Rn,<ea> (CPU->memory, dr=1): destination is EA (for memory address)
-				rf_dest_addr <= moves_ea_areg & moves_ea_regnum;
-			END IF;
+			rf_dest_addr <= moves_ea_areg & moves_ea_regnum;
 		-- BUG #150 FIX: Also handle moves0/moves1 states to set up RDindex_A one cycle early
 		-- (RDindex_A is registered, so we need the correct value one cycle BEFORE bus access)
 		ELSIF micro_state = moves0 OR micro_state = moves1 THEN
@@ -5339,6 +5326,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" THEN
 						source_areg <= '1';  -- (An), (An)+, -(An) modes use address register
 					END IF;
+					-- BUG #324 FIX: Pre-set ALU subtract direction for -(An) mode.
+					-- memaddr_delta_rega is REGISTERED (latched at clkena_lw edge), and during
+					-- moves1 it latches addsub_q. But addsub_q uses the CURRENT exec (from
+					-- moves0's set), which doesn't have presub/subidx. By setting subidx here
+					-- in moves0, exec(subidx)='1' is ready during moves1, making addsub_q
+					-- correctly subtract (An - size) instead of add (An + size).
+					-- Note: We set subidx, NOT presub, to avoid triggering Wwrena (register write).
+					IF opcode(5 downto 3)="100" THEN
+						set(subidx) <= '1';
+					END IF;
 					-- FIX: Set datatype for correct address adjustment in (An)+/-(An) modes
 					datatype <= opcode(7 downto 6);
 					set_datatype <= opcode(7 downto 6);
@@ -5425,6 +5422,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					END IF;
 					IF opcode(5 downto 3)="100" THEN  -- -(An)
 						set(presub) <= '1';
+						set(addsub) <= '1';  -- BUG #324: Ensure ALU subtracts when execOPC='1'
 						IF opcode(2 downto 0)="111" THEN
 							set(use_SP) <= '1';  -- SP uses special decrement rules
 						END IF;
