@@ -224,6 +224,8 @@ architecture behavioral of tb_moves_all_modes is
   signal tests_passed : integer := 0;
   signal tests_failed : integer := 0;
   signal current_test : integer := 0;
+  signal reported : std_logic_vector(15 downto 1) := (others => '0');
+  -- (settle_count removed - using boundary-based test reporting)
 
   -- FC tracking
   signal last_fc_read : std_logic_vector(2 downto 0) := "000";
@@ -246,18 +248,13 @@ architecture behavioral of tb_moves_all_modes is
   -- Debug signals for MOVES tracking
   signal debug_moves_bus_pending : std_logic;
   signal debug_brief : std_logic_vector(15 downto 0);
+  signal debug_clkena_lw : std_logic;
+  signal debug_regfile_a0 : std_logic_vector(31 downto 0);
+  signal debug_pmove_dn_mode : std_logic;
+  signal debug_pmove_dn_regnum : std_logic_vector(2 downto 0);
   signal debug_memaddr_reg : std_logic_vector(31 downto 0);
   signal debug_opcode : std_logic_vector(15 downto 0);
-  signal debug_regfile_a0 : std_logic_vector(31 downto 0);
   signal debug_regfile_d0 : std_logic_vector(31 downto 0);
-  signal debug_clkena_lw : std_logic;
-  -- Debug signals for PC corruption investigation
-  signal debug_exec_ea_to_pc : std_logic;
-  signal debug_moves_active : std_logic;
-  signal debug_micro_state : micro_states;
-  signal debug_tmp_TG68_PC : std_logic_vector(31 downto 0);
-  signal debug_TG68_PC_brw : std_logic;
-  signal debug_TG68_PC_add : std_logic_vector(31 downto 0);
 
 begin
   clk <= not clk after CLK_PERIOD/2;
@@ -296,13 +293,8 @@ begin
       debug_regfile_a0 => debug_regfile_a0,
       debug_regfile_d0 => debug_regfile_d0,
       debug_clkena_lw => debug_clkena_lw,
-      -- PC corruption investigation
-      debug_exec_ea_to_pc => debug_exec_ea_to_pc,
-      debug_moves_active => debug_moves_active,
-      debug_micro_state => debug_micro_state,
-      debug_tmp_TG68_PC => debug_tmp_TG68_PC,
-      debug_TG68_PC_brw => debug_TG68_PC_brw,
-      debug_TG68_PC_add => debug_TG68_PC_add
+      debug_pmove_dn_mode => debug_pmove_dn_mode,
+      debug_pmove_dn_regnum => debug_pmove_dn_regnum
     );
 
   -- Combinational memory read
@@ -396,6 +388,135 @@ begin
   -- Monitoring
   process(clk)
     variable addr_int : integer;
+    variable ram_value : std_logic_vector(31 downto 0);
+    variable pass : boolean;
+    variable timeout_count : integer := 0;
+    variable last_fetch_addr : integer := -1;
+    procedure report_test(test_id : integer) is
+    begin
+      pass := false;
+      case test_id is
+        when 1 =>
+          ram_value := ram(0)(15 downto 0) & ram(1)(15 downto 0);
+          pass := (ram_value = x"12345678");
+          if pass then
+            report "TEST 1: MOVES.L D2,(A0) -> PASSED ($12345678)";
+          else
+            report "TEST 1: MOVES.L D2,(A0) -> FAILED (got $" & slv_to_hex(ram_value) & ")";
+          end if;
+        when 2 =>
+          pass := (t2_hi_ok = '1' and t2_lo_ok = '1');
+          if pass then
+            report "TEST 2: MOVES.L (A0),D4 -> PASSED (SFC reads seen)";
+          else
+            report "TEST 2: MOVES.L (A0),D4 -> FAILED (read missing/FC mismatch)";
+          end if;
+        when 3 =>
+          ram_value := x"0000" & ram(128)(15 downto 0);
+          pass := (ram_value = x"00005678");
+          if pass then
+            report "TEST 3: MOVES.W D2,(A0)+ -> PASSED ($5678)";
+          else
+            report "TEST 3: MOVES.W D2,(A0)+ -> FAILED (got $" & slv_to_hex(ram(128)) & ")";
+          end if;
+        when 4 =>
+          pass := (t4_ok = '1');
+          if pass then
+            report "TEST 4: MOVES.W (A0)+,D5 -> PASSED (SFC read seen)";
+          else
+            report "TEST 4: MOVES.W (A0)+,D5 -> FAILED (read missing/FC mismatch)";
+          end if;
+        when 5 =>
+          ram_value := x"0000" & ram(257)(15 downto 0);
+          pass := (ram_value = x"00000078");
+          if pass then
+            report "TEST 5: MOVES.B D2,-(A0) -> PASSED ($78)";
+          else
+            report "TEST 5: MOVES.B D2,-(A0) -> FAILED (got $" & slv_to_hex(ram(257)) & ")";
+          end if;
+        when 6 =>
+          pass := (t6_ok = '1');
+          if pass then
+            report "TEST 6: MOVES.B -(A0),D6 -> PASSED (SFC read seen)";
+          else
+            report "TEST 6: MOVES.B -(A0),D6 -> FAILED (read missing/FC mismatch)";
+          end if;
+        when 7 =>
+          ram_value := ram(386)(15 downto 0) & ram(387)(15 downto 0);
+          pass := (ram_value = x"12345678");
+          if pass then
+            report "TEST 7: MOVES.L D2,(4,A0) -> PASSED ($12345678)";
+          else
+            report "TEST 7: MOVES.L D2,(4,A0) -> FAILED (got $" & slv_to_hex(ram_value) & ")";
+          end if;
+        when 8 =>
+          pass := (t8_hi_ok = '1' and t8_lo_ok = '1');
+          if pass then
+            report "TEST 8: MOVES.L (4,A0),D7 -> PASSED (SFC reads seen)";
+          else
+            report "TEST 8: MOVES.L (4,A0),D7 -> FAILED (read missing/FC mismatch)";
+          end if;
+        when 9 =>
+          ram_value := x"0000" & ram(515)(15 downto 0);
+          pass := (ram_value = x"00005678");
+          if pass then
+            report "TEST 9: MOVES.W D2,(2,A0,D3.W) -> PASSED ($5678)";
+          else
+            report "TEST 9: MOVES.W D2,(2,A0,D3.W) -> FAILED (got $" & slv_to_hex(ram(515)) & ")";
+          end if;
+        when 10 =>
+          pass := (t10_ok = '1');
+          if pass then
+            report "TEST 10: MOVES.W (2,A0,D3.W),D4 -> PASSED (SFC read seen)";
+          else
+            report "TEST 10: MOVES.W (2,A0,D3.W),D4 -> FAILED (read missing/FC mismatch)";
+          end if;
+        when 11 =>
+          ram_value := ram(640)(15 downto 0) & ram(641)(15 downto 0);
+          pass := (ram_value = x"12345678");
+          if pass then
+            report "TEST 11: MOVES.L D2,($1500).W -> PASSED ($12345678)";
+          else
+            report "TEST 11: MOVES.L D2,($1500).W -> FAILED (got $" & slv_to_hex(ram_value) & ")";
+          end if;
+        when 12 =>
+          pass := (t12_hi_ok = '1' and t12_lo_ok = '1');
+          if pass then
+            report "TEST 12: MOVES.L ($1500).W,D4 -> PASSED (SFC reads seen)";
+          else
+            report "TEST 12: MOVES.L ($1500).W,D4 -> FAILED (read missing/FC mismatch)";
+          end if;
+        when 13 =>
+          ram_value := ram(768)(15 downto 0) & ram(769)(15 downto 0);
+          pass := (ram_value = x"12345678");
+          if pass then
+            report "TEST 13: MOVES.L D2,($1600).L -> PASSED ($12345678)";
+          else
+            report "TEST 13: MOVES.L D2,($1600).L -> FAILED (got $" & slv_to_hex(ram_value) & ")";
+          end if;
+        when 14 =>
+          pass := (t14_hi_ok = '1' and t14_lo_ok = '1');
+          if pass then
+            report "TEST 14: MOVES.L ($1600).L,D5 -> PASSED (SFC reads seen)";
+          else
+            report "TEST 14: MOVES.L ($1600).L,D5 -> FAILED (read missing/FC mismatch)";
+          end if;
+        when 15 =>
+          pass := true;
+          report "TEST 15: CCR verification -> PASSED (check skipped)";
+        when others =>
+          null;
+      end case;
+
+      if test_id >= 1 and test_id <= 15 then
+        if pass then
+          tests_passed <= tests_passed + 1;
+        else
+          tests_failed <= tests_failed + 1;
+        end if;
+        reported(test_id) <= '1';
+      end if;
+    end procedure;
   begin
     if rising_edge(clk) then
       if nReset = '0' then
@@ -404,58 +525,113 @@ begin
         cycle <= cycle + 1;
 
         -- Trace PC-related signals every cycle when debugging
-        if cycle >= 25 and cycle <= 50 then
-          report "CYCLE=" & integer'image(cycle) &
-                 " PC_brw=" & std_logic'image(debug_TG68_PC_brw) &
-                 " tmp_PC=$" & slv_to_hex(debug_tmp_TG68_PC) &
-                 " PC_add=$" & slv_to_hex(debug_TG68_PC_add) &
-                 " busstate=" & integer'image(to_integer(unsigned(busstate))) &
-                 " addr=$" & slv_to_hex(addr_out);
-        end if;
+        -- (Disabled - debug signals removed)
+        -- if cycle >= 25 and cycle <= 50 then
+        --   report "CYCLE=" & integer'image(cycle) &
+        --          " busstate=" & integer'image(to_integer(unsigned(busstate))) &
+        --          " addr=$" & slv_to_hex(addr_out);
+        -- end if;
 
         if busstate = "00" then
           addr_int := to_integer(unsigned(addr_out(23 downto 0)));
+
+          -- detect progress to avoid false timeouts
+          if addr_int = last_fetch_addr then
+            timeout_count := timeout_count + 1;
+          else
+            timeout_count := 0;
+            last_fetch_addr := addr_int;
+          end if;
 
           -- Trace all fetches to understand execution flow
           if cycle < 100 then
             report "FETCH cycle=" & integer'image(cycle) & " PC=$" & slv_to_hex(addr_out) &
                    " data_in=$" & slv_to_hex(data_in) &
                    " D0=$" & slv_to_hex(debug_regfile_d0) &
-                   " A0=$" & slv_to_hex(debug_regfile_a0) &
-                   " ea_to_pc=" & std_logic'image(debug_exec_ea_to_pc) &
-                   " moves_active=" & std_logic'image(debug_moves_active);
+                   " A0=$" & slv_to_hex(debug_regfile_a0);
           end if;
 
-          -- Track test progress based on PC
+          -- Report each test when the CPU fetches the NEXT test's first address.
+          -- By the time the CPU moves to the next instruction fetch, the previous
+          -- MOVES bus operation (read/write) has completed and RAM/FC flags are valid.
           case addr_int is
-            when 16#11E# => current_test <= 1; report "TEST 1: MOVES.L D2,(A0) - CPU->mem (An)";
-            when 16#122# => current_test <= 2; report "TEST 2: MOVES.L (A0),D4 - mem->CPU (An)";
-            when 16#12C# => current_test <= 3; report "TEST 3: MOVES.W D2,(A0)+ - CPU->mem (An)+";
-            when 16#136# => current_test <= 4; report "TEST 4: MOVES.W (A0)+,D5 - mem->CPU (An)+";
-            when 16#140# => current_test <= 5; report "TEST 5: MOVES.B D2,-(A0) - CPU->mem -(An)";
-            when 16#14A# => current_test <= 6; report "TEST 6: MOVES.B -(A0),D6 - mem->CPU -(An)";
-            when 16#154# => current_test <= 7; report "TEST 7: MOVES.L D2,(4,A0) - CPU->mem (d16,An)";
-            when 16#160# => current_test <= 8; report "TEST 8: MOVES.L (4,A0),D7 - mem->CPU (d16,An)";
-            when 16#16C# => current_test <= 9; report "TEST 9: MOVES.W D2,(2,A0,D3.W) - CPU->mem (d8,An,Xn)";
-            when 16#178# => current_test <= 10; report "TEST 10: MOVES.W (2,A0,D3.W),D4 - mem->CPU (d8,An,Xn)";
-            when 16#17E# => current_test <= 11; report "TEST 11: MOVES.L D2,($1500).W - CPU->mem xxx.W";
-            when 16#184# => current_test <= 12; report "TEST 12: MOVES.L ($1500).W,D4 - mem->CPU xxx.W";
-            when 16#18A# => current_test <= 13; report "TEST 13: MOVES.L D2,($1600).L - CPU->mem xxx.L";
-            when 16#192# => current_test <= 14; report "TEST 14: MOVES.L ($1600).L,D5 - mem->CPU xxx.L";
-            when 16#19A# => current_test <= 15; report "TEST 15: CCR verification";
-            when 16#19C# => report "Reached STOP instruction";
+            when 16#11E# =>
+              current_test <= 1;  -- TEST 1 MOVES opcode fetched
+            when 16#122# =>
+              -- TEST 2 MOVES opcode; TEST 1 bus write is complete
+              if reported(1) = '0' then report_test(1); end if;
+              current_test <= 2;
+            when 16#126# =>
+              -- TEST 3 setup (MOVEA.L); TEST 2 bus read is complete
+              if reported(2) = '0' then report_test(2); end if;
+              current_test <= 3;
+            when 16#130# =>
+              -- TEST 4 setup; TEST 3 bus write is complete
+              if reported(3) = '0' then report_test(3); end if;
+              current_test <= 4;
+            when 16#13A# =>
+              -- TEST 5 setup; TEST 4 bus read is complete
+              if reported(4) = '0' then report_test(4); end if;
+              current_test <= 5;
+            when 16#144# =>
+              -- TEST 6 setup; TEST 5 bus write is complete
+              if reported(5) = '0' then report_test(5); end if;
+              current_test <= 6;
+            when 16#14E# =>
+              -- TEST 7 setup; TEST 6 bus read is complete
+              if reported(6) = '0' then report_test(6); end if;
+              current_test <= 7;
+            when 16#15A# =>
+              -- TEST 8 setup; TEST 7 bus write is complete
+              if reported(7) = '0' then report_test(7); end if;
+              current_test <= 8;
+            when 16#166# =>
+              -- TEST 9 setup; TEST 8 bus read is complete
+              if reported(8) = '0' then report_test(8); end if;
+              current_test <= 9;
+            when 16#172# =>
+              -- TEST 10 setup; TEST 9 bus write is complete
+              if reported(9) = '0' then report_test(9); end if;
+              current_test <= 10;
+            when 16#17E# =>
+              -- TEST 11 MOVES opcode; TEST 10 bus read is complete
+              if reported(10) = '0' then report_test(10); end if;
+              current_test <= 11;
+            when 16#184# =>
+              -- TEST 12 MOVES opcode; TEST 11 bus write is complete
+              if reported(11) = '0' then report_test(11); end if;
+              current_test <= 12;
+            when 16#18A# =>
+              -- TEST 13 MOVES opcode; TEST 12 bus read is complete
+              if reported(12) = '0' then report_test(12); end if;
+              current_test <= 13;
+            when 16#192# =>
+              -- TEST 14 MOVES opcode; TEST 13 bus write is complete
+              if reported(13) = '0' then report_test(13); end if;
+              current_test <= 14;
+            when 16#19A# =>
+              -- TEST 15 (MOVE SR,D0); TEST 14 bus read is complete
+              if reported(14) = '0' then report_test(14); end if;
+              current_test <= 15;
+            when 16#19C# =>
+              -- STOP instruction; TEST 15 is complete
+              if reported(15) = '0' then report_test(15); end if;
             when others => null;
           end case;
+
+          -- Timeout detection (only once per test)
+          if timeout_count > 200 and current_test /= 0 and reported(current_test) = '0' then
+            report "TEST " & integer'image(current_test) & " TIMEOUT/NO PROGRESS (possible lockup)";
+            tests_failed <= tests_failed + 1;
+            reported(current_test) <= '1';
+          end if;
         end if;
       end if;
     end if;
   end process;
 
-  -- Test control and validation
+  -- Test control and summary (per-test results are reported on the fly)
   process
-    variable pass_count : integer := 0;
-    variable fail_count : integer := 0;
-    variable ram_value : std_logic_vector(31 downto 0);
   begin
     report "=== MOVES ALL ADDRESSING MODES TEST ===";
     report "Testing all 7 valid EA modes, both directions, multiple sizes";
@@ -478,169 +654,12 @@ begin
     end loop;
 
     report "========================================";
-    report "Test Execution Complete - Validating Results";
-    report "========================================";
-
-    -- Validate RAM contents
-    -- DEBUG: Show RAM contents at key locations
-    report "DEBUG: ram(0)=$" & slv_to_hex(ram(0)) & " ram(1)=$" & slv_to_hex(ram(1));
-    report "DEBUG: ram(128)=$" & slv_to_hex(ram(128)) & " ram(2305)=$" & slv_to_hex(ram(2305));
-    report "DEBUG: ram(386)=$" & slv_to_hex(ram(386)) & " ram(387)=$" & slv_to_hex(ram(387));
-    report "DEBUG: ram(515)=$" & slv_to_hex(ram(515));
-    report "DEBUG: ram(640)=$" & slv_to_hex(ram(640)) & " ram(641)=$" & slv_to_hex(ram(641));
-    report "DEBUG: ram(768)=$" & slv_to_hex(ram(768)) & " ram(769)=$" & slv_to_hex(ram(769));
-
-    -- TEST 1: (A0) at $1000 should have $12345678
-    ram_value := ram(0)(15 downto 0) & ram(1)(15 downto 0);
-    if ram_value = x"12345678" then
-      report "TEST 1 PASSED: (A0) write correct ($12345678)";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 1 FAILED: Expected $12345678, got $" & slv_to_hex(ram_value) severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 2: (A0) read should have used SFC (FC=5) for both words
-    if t2_hi_ok = '1' and t2_lo_ok = '1' then
-      report "TEST 2 PASSED: (A0) read observed with SFC";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 2 FAILED: (A0) read missing/FC mismatch" severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 3: (A0)+ at $1100 should have word $5678
-    ram_value := x"0000" & ram(128)(15 downto 0);
-    if ram_value = x"00005678" then
-      report "TEST 3 PASSED: (A0)+ write correct ($5678)";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 3 FAILED: Expected $5678, got $" & slv_to_hex(ram(128)) severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 4: (A0)+ read should have used SFC (FC=5)
-    if t4_ok = '1' then
-      report "TEST 4 PASSED: (A0)+ read observed with SFC";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 4 FAILED: (A0)+ read missing/FC mismatch" severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 5: -(A0) at $1203 should have byte $78 (word at $1202 = $0078)
-    ram_value := x"0000" & ram(2305)(15 downto 0);
-    if ram_value = x"00000078" then
-      report "TEST 5 PASSED: -(A0) byte write correct ($78)";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 5 FAILED: Expected $78, got $" & slv_to_hex(ram(2305)) severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 6: -(A0) read should have used SFC (FC=5)
-    if t6_ok = '1' then
-      report "TEST 6 PASSED: -(A0) read observed with SFC";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 6 FAILED: -(A0) read missing/FC mismatch" severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 7: (4,A0) at $1304 should have $12345678
-    ram_value := ram(386)(15 downto 0) & ram(387)(15 downto 0);
-    if ram_value = x"12345678" then
-      report "TEST 7 PASSED: (4,A0) write correct ($12345678)";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 7 FAILED: Expected $12345678, got $" & slv_to_hex(ram_value) severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 8: (4,A0) read should have used SFC (FC=5) for both words
-    if t8_hi_ok = '1' and t8_lo_ok = '1' then
-      report "TEST 8 PASSED: (4,A0) read observed with SFC";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 8 FAILED: (4,A0) read missing/FC mismatch" severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 9: (2,A0,D3.W) at $1406 should have word $5678
-    ram_value := x"0000" & ram(515)(15 downto 0);
-    if ram_value = x"00005678" then
-      report "TEST 9 PASSED: (2,A0,D3.W) write correct ($5678)";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 9 FAILED: Expected $5678, got $" & slv_to_hex(ram(515)) severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 10: (2,A0,D3.W) read should have used SFC (FC=5)
-    if t10_ok = '1' then
-      report "TEST 10 PASSED: (2,A0,D3.W) read observed with SFC";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 10 FAILED: (2,A0,D3.W) read missing/FC mismatch" severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 11: xxx.W at $1500 should have $12345678
-    ram_value := ram(640)(15 downto 0) & ram(641)(15 downto 0);
-    if ram_value = x"12345678" then
-      report "TEST 11 PASSED: ($1500).W write correct ($12345678)";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 11 FAILED: Expected $12345678, got $" & slv_to_hex(ram_value) severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 12: xxx.W read should have used SFC (FC=5) for both words
-    if t12_hi_ok = '1' and t12_lo_ok = '1' then
-      report "TEST 12 PASSED: ($1500).W read observed with SFC";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 12 FAILED: ($1500).W read missing/FC mismatch" severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 13: xxx.L at $1600 should have $12345678
-    ram_value := ram(768)(15 downto 0) & ram(769)(15 downto 0);
-    if ram_value = x"12345678" then
-      report "TEST 13 PASSED: ($1600).L write correct ($12345678)";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 13 FAILED: Expected $12345678, got $" & slv_to_hex(ram_value) severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 14: xxx.L read should have used SFC (FC=5) for both words
-    if t14_hi_ok = '1' and t14_lo_ok = '1' then
-      report "TEST 14 PASSED: ($1600).L read observed with SFC";
-      pass_count := pass_count + 1;
-    else
-      report "TEST 14 FAILED: ($1600).L read missing/FC mismatch" severity note;
-      fail_count := fail_count + 1;
-    end if;
-
-    -- TEST 15: CCR verification (not directly observable without SR/CCR tap)
-    report "TEST 15 PASSED: CCR check skipped (no SR/CCR tap)";
-    pass_count := pass_count + 1;
-
-    -- FC validation
-    report "FC during writes: " & integer'image(to_integer(unsigned(last_fc_write)));
-    report "FC during reads: " & integer'image(to_integer(unsigned(last_fc_read)));
-
-    -- Note: FC validation depends on proper MOVEC SFC/DFC implementation
-    -- SFC should be 5, DFC should be 1 for MOVES operations
-
-    report "========================================";
     report "Final Results:";
-    report "Results: Tests Passed: " & integer'image(pass_count);
-    report "Results: Tests Failed: " & integer'image(fail_count);
+    report "Results: Tests Passed: " & integer'image(tests_passed);
+    report "Results: Tests Failed: " & integer'image(tests_failed);
     report "========================================";
 
-    if fail_count = 0 then
+    if tests_failed = 0 then
       report "*** MOVES ALL MODES TEST PASSED ***";
     else
       report "*** MOVES ALL MODES TEST FAILED ***" severity error;

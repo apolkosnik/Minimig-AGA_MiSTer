@@ -326,11 +326,16 @@ architecture logic of TG68KdotC_Kernel is
 	signal moves_bus_pending : std_logic := '0';
 	signal moves_ea_areg     : std_logic := '0';  -- Latched: is EA an address register mode?
 	signal moves_ea_regnum   : std_logic_vector(2 downto 0) := "000";  -- Latched EA register number
-	-- MOVES (d16,An): extra sequencing to fetch the displacement word after the MOVES extension word.
+	-- MOVES (d16,An) and (d8,An,Xn): extra sequencing for extension words after MOVES extension.
 	signal moves_d16_phase   : std_logic := '0';
 	-- BUG #214: MOVES mem->CPU writeback guard - ensures destination register selection persists until writeback completes
 	signal moves_writeback_pending : std_logic := '0';
 	signal moves_active : std_logic := '0';
+	-- BUG #318: Latched MOVES extension word fields
+	-- For indexed/absolute EA modes, brief gets overwritten with the EA extension word.
+	-- These latched values preserve the MOVES-specific info (direction and register).
+	signal moves_direction : std_logic := '0';  -- Latched brief(11): 0=mem->CPU(SFC), 1=CPU->mem(DFC)
+	signal moves_reg : std_logic_vector(3 downto 0) := "0000";  -- Latched brief(15:12): D/A + reg#
 	signal source_LDRLbits 	: bit;
 	signal source_LDRMbits 	: bit;
 	signal source_2ndHbits	: bit;
@@ -870,12 +875,15 @@ ALU: TG68K_ALU
 		-- BUG #149 FIX: Add combinational override for MOVES instruction FC.
 		-- Also apply during the actual bus access (moves_bus_pending='1') so MOVES uses
 		-- SFC/DFC even if the micro_state advances while the bus cycle is in progress.
-		process(fc_internal, micro_state, moves_bus_pending, brief, SFC, DFC)
+		-- BUG #318 FIX: Use latched moves_direction instead of brief(11).
+		-- For indexed/absolute EA modes, brief gets overwritten with the EA extension
+		-- word before moves1 executes, so brief(11) is no longer the MOVES direction bit.
+		process(fc_internal, micro_state, moves_bus_pending, moves_direction, SFC, DFC)
 		begin
 			if micro_state = moves1 or moves_bus_pending = '1' then
 				-- MOVES instruction: override FC with SFC or DFC
-				-- brief(11)=dr: dr=0 means read (use SFC), dr=1 means write (use DFC)
-				if brief(11)='0' then
+				-- moves_direction: 0=read (use SFC), 1=write (use DFC)
+				if moves_direction='0' then
 					FC <= SFC;  -- Read operation uses SFC
 				else
 					FC <= DFC;  -- Write operation uses DFC
@@ -895,8 +903,18 @@ ALU: TG68K_ALU
 			moves_ea_areg <= '0';
 			moves_ea_regnum <= "000";
 			moves_active <= '0';
+			moves_direction <= '0';
+			moves_reg <= "0000";
 		elsif rising_edge(clk) then
 			if clkena_in = '1' then
+				-- BUG #318 FIX: Latch MOVES extension word fields when first entering moves0.
+				-- At this point, brief still has the MOVES extension word ($xxxx).
+				-- For indexed/absolute EA modes, brief gets overwritten later with the
+				-- EA extension word, so these latched values preserve direction and register.
+				if micro_state = moves0 and moves_d16_phase = '0' then
+					moves_direction <= brief(11);  -- 0=mem->CPU(SFC), 1=CPU->mem(DFC)
+					moves_reg <= brief(15 downto 12);  -- D/A bit + register number
+				end if;
 				-- Set when moves1 schedules a bus access
 				if micro_state = moves1 then
 					moves_bus_pending <= '1';
@@ -907,9 +925,14 @@ ALU: TG68K_ALU
 						moves_ea_areg <= '0';
 					end if;
 					moves_ea_regnum <= opcode(2 downto 0);
-				-- Clear when bus access completes AND register writeback is done
-				-- Must wait for exec(Regwrena) to complete so brief(15:12) is used for destination
-				elsif (state = "00" or state = "01") and exec(Regwrena) = '0' then
+				-- BUG #316 FIX: Use micro_state = idle for reliable context clear
+				-- Previous check (state="00" AND moves_bus_active='0') had timing window:
+				-- moves_bus_active clears same cycle as state="00", but VHDL pre-edge
+				-- semantics mean the check sees old moves_bus_active='1', then next cycle
+				-- state is already "01" (fetch), so condition never becomes true.
+				-- Using micro_state = idle works because idle persists for at least
+				-- one full clock when instruction completes, and all MOVES states != idle.
+				elsif micro_state = idle and exec(Regwrena) = '0' then
 					moves_bus_pending <= '0';
 				end if;
 				if micro_state = moves0 or micro_state = moves1 then
@@ -932,7 +955,8 @@ ALU: TG68K_ALU
 			elsif rising_edge(clk) then
 				if clkena_in = '1' then
 					-- Set when moves1 schedules a memory->CPU MOVES (dr=0)
-					if micro_state = moves1 and brief(11) = '0' then
+					-- BUG #318 FIX: Use latched moves_direction instead of brief(11)
+					if micro_state = moves1 and moves_direction = '0' then
 						moves_writeback_pending <= '1';
 					-- Clear only after register writeback completes
 					elsif moves_active = '1' and exec(Regwrena) = '1' and moves_writeback_pending = '1' then
@@ -952,9 +976,10 @@ ALU: TG68K_ALU
 				if clkena_in = '1' then
 					if micro_state /= moves0 then
 						moves_d16_phase <= '0';
-					elsif opcode(5 downto 3) = "101" then
-						-- Phase 0: first moves0 cycle (prepare/fetch displacement)
-						-- Phase 1: second moves0 cycle (displacement available in last_data_read)
+					elsif opcode(5 downto 3) = "101" OR opcode(5 downto 3) = "110" then
+						-- Phase 0: first moves0 cycle (fetch extra word from instruction stream)
+						-- Phase 1: second moves0 cycle (word available in last_opc_read/last_data_read)
+						-- Used for d16 (mode 101) and indexed (mode 110) addressing modes
 						if moves_d16_phase = '0' then
 							moves_d16_phase <= '1';
 						else
@@ -1007,7 +1032,7 @@ ALU: TG68K_ALU
 			-- BUG FIX: Enable VBR and extended stack frames for 68010+ (cpu(0)='1') AND 68030 (cpu(1)='1')
 			-- Original code only checked cpu(0), but CPU="10" (68030 in Minimig) has cpu(0)='0'
 			-- This caused 68000-style stack frames without vector offset, breaking MMU detection
-			IF VBR_Stackframe=1 or (cpu(0)='1' and VBR_Stackframe=2) THEN
+			IF VBR_Stackframe=1 or (cpu /="00" and VBR_Stackframe=2) THEN
 				use_VBR_Stackframe<='1';
 			ELSE
 				use_VBR_Stackframe<='0';
@@ -1206,26 +1231,27 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 -----------------------------------------------------------------------------
 -- set dest regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, pmove_dn_regnum, pmove_dn_mode, moves_bus_pending, moves_ea_areg, moves_ea_regnum)
+PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, pmove_dn_regnum, pmove_dn_mode, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg)
 	BEGIN
 		IF exec(movem_action) ='1' THEN
 			rf_dest_addr <= rf_source_addrd;
-		-- BUG #214 FIX: MOVES memory->CPU writeback must use brief register
+		-- BUG #214 FIX: MOVES memory->CPU writeback must use MOVES register
 		-- This avoids using the EA register when exec(Regwrena) asserts after moves1
-		ELSIF exec(Regwrena)='1' AND opcode(15 downto 8)="00001110" AND brief(11)='0' THEN
-			rf_dest_addr <= brief(15 downto 12);
+		-- BUG #318 FIX: Use latched moves_direction/moves_reg instead of brief(11)/brief(15:12)
+		ELSIF exec(Regwrena)='1' AND opcode(15 downto 8)="00001110" AND moves_direction='0' THEN
+			rf_dest_addr <= moves_reg;
 		-- BUG #150 FIX: MOVES bus access needs EA register for address calculation
 		-- This MUST come before set(briefext) which would override with the data register
 		-- The address register value goes through rf_dest_addr -> RDindex_A -> reg_QA -> memaddr_reg
-		-- BUG #168 FIX: During register write phase (exec(Regwrena)='1'), use brief(15:12) for destination
+		-- BUG #168 FIX: During register write phase (exec(Regwrena)='1'), use moves_reg for destination
 		-- Otherwise the EA register would be written instead of the intended Rn from extension word
-		-- BUG #214 FIX: Check brief(11) directly to determine MOVES direction
+		-- BUG #318 FIX: Use latched moves_direction/moves_reg instead of brief(11)/brief(15:12)
 		ELSIF moves_bus_pending = '1' THEN
-			IF brief(11) = '0' THEN
-				-- MOVES <ea>,Rn (memory→CPU, dr=0): destination is register from brief(15:12)
-				rf_dest_addr <= brief(15 downto 12);
+			IF moves_direction = '0' THEN
+				-- MOVES <ea>,Rn (memory->CPU, dr=0): destination is register from moves_reg
+				rf_dest_addr <= moves_reg;
 			ELSE
-				-- MOVES Rn,<ea> (CPU→memory, dr=1): destination is EA (for memory address)
+				-- MOVES Rn,<ea> (CPU->memory, dr=1): destination is EA (for memory address)
 				rf_dest_addr <= moves_ea_areg & moves_ea_regnum;
 			END IF;
 		-- BUG #150 FIX: Also handle moves0/moves1 states to set up RDindex_A one cycle early
@@ -1278,7 +1304,7 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 -----------------------------------------------------------------------------
 -- set source regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, last_opc_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_mode, moves_bus_pending, moves_ea_areg, moves_ea_regnum)
+PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, last_opc_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_mode, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg)
 	BEGIN
 		IF exec(movem_action)='1' OR set(movem_action) ='1' THEN
 			IF movem_presub='1' THEN
@@ -1297,28 +1323,22 @@ PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source
 		ELSIF source_LDRMbits='1' THEN
 			rf_source_addr <= '0'&last_data_read(8 downto 6);
 		-- BUG #149 FIX: MOVES bus access uses latched EA register info
-		-- During moves0/moves1 states, derive from opcode directly
-		-- During nop state with moves_bus_pending='1', use latched values
-		-- BUG #214 FIX: For CPU->memory (dr=1), source is brief register, not EA register!
+		-- BUG #318 FIX: Use latched moves_direction/moves_reg instead of brief
 		ELSIF moves_bus_pending = '1' THEN
-			IF brief(11) = '1' THEN
-				-- MOVES Rn,<ea> (CPU->memory): source is data register from brief(15:12)
-				rf_source_addr <= brief(15 downto 12);
+			IF moves_direction = '1' THEN
+				-- MOVES Rn,<ea> (CPU->memory): source is data register from moves_reg
+				rf_source_addr <= moves_reg;
 			ELSE
 				-- MOVES <ea>,Rn (memory->CPU): source is EA register for address calculation
 				rf_source_addr <= moves_ea_areg & moves_ea_regnum;
 			END IF;
 		-- BUG #149 FIX: MOVES needs opcode(2:0) for EA register selection
-		-- exe_opcode is NOT latched for MOVES because next_micro_state=moves0 prevents setexecOPC='1'
-		-- opcode is stable during microstate execution and contains the MOVES instruction
-		-- Derive address/data register from EA mode (opcode(5:3)) combinationally
-		-- EA modes using address registers: 010=(An), 011=(An)+, 100=-(An), 101=(d16,An), 110=(d8,An,Xn)
-		-- BUG #214 FIX: For CPU->memory (brief(11)=1), source is brief register, NOT EA register!
+		-- BUG #318 FIX: Use latched moves_direction/moves_reg instead of brief
 		ELSIF micro_state = moves0 OR micro_state = moves1 THEN
-			-- Check direction: brief(11)=1 means CPU->memory (source is brief register)
-			IF brief(11) = '1' THEN
-				-- MOVES Rn,<ea>: source is data/address register from brief(15:12)
-				rf_source_addr <= brief(15 downto 12);
+			-- Check direction: moves_direction=1 means CPU->memory (source is moves_reg)
+			IF moves_direction = '1' THEN
+				-- MOVES Rn,<ea>: source is data/address register from moves_reg
+				rf_source_addr <= moves_reg;
 			ELSE
 				-- MOVES <ea>,Rn: source is EA register for address calculation
 				IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR
@@ -1655,9 +1675,25 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				-- Only set use_base during moves0/moves1 states when we actually need the EA address.
 				-- Also maintain use_base='1' during moves_bus_pending when the actual bus access happens.
 				-- MOVES opcode: 0000 1110 ss mmm rrr (opcode(15:8)="00001110")
-				IF (micro_state = moves0 OR micro_state = moves1 OR moves_bus_pending = '1') AND
-				    (moves_ea_areg = '1' OR opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100") THEN
-					memaddr_delta_rega <= (others => '0');  -- No delta for simple (An) mode
+				-- BUG #318 FIX: When MOVES bus cycle completes, force PC-based addressing.
+				-- Without this, the next fetch uses EA address instead of PC because
+				-- the moves_bus_pending condition below forces use_base='1' and delta=0.
+				-- CRITICAL: Must fire on the LAST bus cycle (state(1)='1', memmaskmux(3)='1')
+				-- as well as state="00". memaddr_delta_rega is registered, so the assignment
+				-- during the last bus cycle takes effect on the NEXT cycle (the fetch).
+				-- The current bus cycle still uses the previous EA-based values.
+				IF moves_bus_pending = '1' AND
+				   (state = "00" OR (state(1) = '1' AND memmaskmux(3) = '1' AND setstate = "00")) AND
+				   micro_state /= moves0 AND micro_state /= moves1 THEN
+					memaddr_delta_rega <= TG68_PC_add;
+					-- use_base stays '0' (default), addr = 0 + TG68_PC = PC
+				-- BUG #317 FIX: Only zero delta on FIRST word of longword (memmaskmux(3)='1')
+				-- During second word (memmaskmux(3)='0'), allow the +2 increment via addsub
+				-- Without this, MOVES.L writes both words to the same address!
+				ELSIF (micro_state = moves0 OR micro_state = moves1 OR moves_bus_pending = '1') AND
+				    (moves_ea_areg = '1' OR opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100") AND
+				    memmaskmux(3)='1' THEN
+					memaddr_delta_rega <= (others => '0');  -- No delta for simple (An) mode, first word only
 					use_base <= '1';  -- Force memaddr_reg = reg_QA
 				-- BUG #172 FIX: PMOVE with simple EA modes needs use_base='1'
 				-- Without this, PMOVE TC,(An) writes to wrong address (PC+offset instead of An)
@@ -1895,6 +1931,15 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						ELSE
 							brief <= data_read(15 downto 0);
 						END IF;
+					END IF;
+
+					-- BUG #318 FIX: MOVES indexed mode (d8,An,Xn) needs the EA extension
+					-- word in brief for ld_AnXn1. The first moves0 cycle (phase 0) fetched it
+					-- from the instruction stream into last_opc_read. Now load it into brief
+					-- before transitioning to ld_AnXn1.
+					IF micro_state = moves0 AND opcode(15 downto 8) = "00001110" AND
+					   opcode(5 downto 3) = "110" AND moves_d16_phase = '1' THEN
+						brief <= last_opc_read;
 					END IF;
 
 					-- BUG #289 FIX: F-Line context capture must be in clkena_in block!
@@ -3472,7 +3517,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								
 								
 								
-							IF opcode(7)='1' THEN		--jsr, jmp
+							-- BUG #318 FIX: Exclude MOVES from JMP/JSR path
+							-- MOVES has opcode(7)='1' but it's NOT a JMP/JSR! During MOVES execution,
+							-- opcode gets overwritten with extension word, so we can't check opcode bits.
+							-- Instead, check micro_state - if in moves0/moves1, it's MOVES not JMP/JSR
+							IF opcode(7)='1' AND micro_state /= moves0 AND micro_state /= moves1 THEN		--jsr, jmp (but NOT MOVES)
 								IF (opcode(5)='1' OR opcode(4 downto 3)="10") AND
 								   opcode(5 downto 3)/="100" AND opcode(5 downto 2)/="1111" THEN --ea illegal modes
 									datatype <= "10";
@@ -4395,11 +4444,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							END IF;
 							next_micro_state <= pmove_mem_to_mmu_hi;
 						END IF;
+					-- MOVES: After absolute address is loaded, go to moves1 for data transfer
+					-- using SFC/DFC. Override setnextpass to prevent returning to normal flow.
+					ELSIF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND
+					      opcode(5 downto 3)="111" THEN
+						setnextpass <= '0';
+						ea_only <= '1';
+						next_micro_state <= moves1;
 					ELSE
-						-- Non-PMOVE: set setnextpass for normal EA processing
+						-- Non-PMOVE, non-MOVES: set setnextpass for normal EA processing
 						setnextpass <= '1';
 					END IF;
-					
+
 				WHEN st_nn =>		-- =>(nnnn).w/l
 					setstate <= "11";
 					set(addrlong) <= '1';
@@ -4497,9 +4553,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							next_micro_state <= pmove_mem_to_mmu_hi;
 						END IF;
 					END IF;
-					
--------------------------------------------------------------------------------------					
-					
+
+					-- MOVES: After indexed EA is computed, go to moves1 for data transfer
+					-- using SFC/DFC. Override setnextpass to prevent returning to normal flow.
+					IF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND
+					   opcode(5 downto 3)="110" THEN
+						setnextpass <= '0';
+						ea_only <= '1';
+						next_micro_state <= moves1;
+					END IF;
+
+-------------------------------------------------------------------------------------
+
 				WHEN ld_229_1 =>		-- (bd,An,Xn)=>, --(bd,PC,Xn)=>
 					IF brief(5)='1' THEN    --Base Displacement
 						setdisp <= '1';		--add last_data_read
@@ -5215,6 +5280,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- MOVES (d16,An): after the MOVES extension word, fetch the displacement word
 						-- from the instruction stream before performing the actual data access in moves1.
 						IF opcode(5 downto 3)="101" THEN
+							-- (d16,An): fetch displacement word then compute EA
 							IF moves_d16_phase='0' THEN
 								-- Keep setstate="00" so PC advances and last_data_read captures the displacement
 								next_micro_state <= moves0;
@@ -5223,9 +5289,24 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								setstate <= "01";  -- stall fetch while computing EA
 								next_micro_state <= ld_dAn1;
 							END IF;
+						ELSIF opcode(5 downto 3)="110" THEN
+							-- (d8,An,Xn): fetch EA extension word then route to ld_AnXn1
+							IF moves_d16_phase='0' THEN
+								-- Phase 0: fetch EA brief extension word from instruction stream
+								next_micro_state <= moves0;
+							ELSE
+								-- Phase 1: brief loaded by clkena_in override, route to indexed EA builder
+								setstate <= "01";
+								next_micro_state <= ld_AnXn1;
+							END IF;
+						ELSIF opcode(5 downto 3)="111" THEN
+							-- Absolute modes: route to ld_nn for address fetch
+							IF opcode(2 downto 0)="001" THEN
+								set(longaktion) <= '1';  -- xxx.L needs two-word address fetch
+							END IF;
+							next_micro_state <= ld_nn;
 						ELSE
-							-- setstate must NOT be "00" to reach the ELSE branch where use_base <= '1'
-							-- Using "01" as an intermediate state to enable address register base loading
+							-- Simple (An), (An)+, -(An) modes: go directly to moves1
 							setstate <= "01";
 							next_micro_state <= moves1;
 						END IF;
@@ -5278,7 +5359,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- BUG #149 FIX: Must transition to nop state to hold the data access
 					-- Without this, next_micro_state defaults to idle and state goes back to "00" (fetch)
 					next_micro_state <= nop;
-					IF brief(11)='1' THEN
+					IF moves_direction='1' THEN
 						-- MOVES Rn,<ea> - Register to Memory using DFC (dr=1)
 						setstate <= "11";  -- Write to EA
 						-- DFC used for write (sfc_not_dfc stays '0')
@@ -5292,6 +5373,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- END IF;  -- BUG #170: reserved bits check
 
                 WHEN pmove_decode =>		-- PMMU instruction dispatch based on extension word
+
                     -- BUG #54 FIX: set_writePCbig moved to Dn mode only (line 4548)
                     -- Memory EA modes use EA builder which handles PC increment correctly
                     -- set_writePCbig <='1';  -- REMOVED - was causing +6 PC increment for memory EA
@@ -5620,6 +5702,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         END IF;
 
                 WHEN pmove_mem_to_mmu_hi =>
+
                     -- Memory->MMU: Write ea_data to PMMU register (HIGH word for 64-bit)
                     set_exec(pmmu_wr) <= '1';
                     -- Post-increment (An)+ must occur after the memory read completes
@@ -5747,7 +5830,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     END IF;
                     datatype <= "10";             -- long for proper memmask
                     set_datatype <= "10";         -- propagate to exe_datatype for bus mask
-                    setstate <= "10";             -- memory read state (data already latched)
+                    -- BUG #303 FIX: Use setstate="01" (stall), NOT "10" (read)!
+                    -- Data is already latched from _hi state. setstate="10" triggers an extra
+                    -- memory cycle which increments PC +2, causing PC to advance +6 instead of +4.
+                    -- setstate="01" stalls without extra fetch, allowing proper idle transition.
+                    setstate <= "01";             -- stall state (data already latched)
                     next_micro_state <= idle;
 
                 -- PMMU instruction implementations
@@ -5805,6 +5892,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
                 -- PMOVE Dn direct mode for 64-bit registers (CRP/SRP)
                 WHEN pmove_dn_hi =>
+
                     -- First transfer completed (HIGH word in/out of first register)
                     -- Now handle LOW word with next register (Dn+1)
                     -- BUG #198 FIX: Increment pmove_dn_regnum for source data from Dn+1

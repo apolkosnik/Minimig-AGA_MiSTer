@@ -132,24 +132,35 @@ architecture behavioral of tb_pmove_comprehensive is
   signal test_failed : integer := 0;
   signal total_tests : integer := 0;
 
-  -- PMOVE Extension Word Encoding:
-  -- Bits 15-13: Format (000=TT0/TT1, 010=TC/SRP/CRP, 011=MMUSR)
-  -- Bits 14-10: P-register select (00010=TT0, 00011=TT1, 10000=TC, 10010=SRP, 10011=CRP, 11000=MMUSR)
-  -- Bit 9: RW direction (0=Write to MMU, 1=Read from MMU)
-  -- Bit 8: FD (Flush Disable - for PMOVEFD)
+  -- PMOVE Extension Word Encoding (Python-verified):
+  -- bits 14-10 = preg_value << 10, bit 9 = R/W direction
+  --
+  -- TT0 (preg=2): write=$0800, read=$0A00  (bits 14-10=00010)
+  -- TT1 (preg=3): write=$0C00, read=$0E00  (bits 14-10=00011)
+  -- TC  (preg=16): write=$4000, read=$4200 (bits 14-10=10000)
+  -- SRP (preg=18): write=$4800, read=$4A00
+  -- CRP (preg=19): write=$4C00, read=$4E00
+  -- MMUSR (preg=24): write=$6000, read=$6200
   
-  -- Register selectors:
-  -- TT0:   00010 (0x02) - Format 000
-  -- TT1:   00011 (0x03) - Format 000
-  -- TC:    10000 (0x10) - Format 010
-  -- SRP:   10010 (0x12) - Format 010
-  -- CRP:   10011 (0x13) - Format 010
-  -- MMUSR: 11000 (0x18) - Format 011
-  
+
+
   signal rom : rom_type := (
     -- Reset vectors (addresses 0x0-0x7)
     0 => x"0000", 1 => x"2000",  -- Initial SSP = $00002000
     2 => x"0000", 3 => x"0100",  -- Initial PC  = $00000100
+    
+    -- Exception vectors - point to STOP instruction at $184 (word index 194)
+    -- to catch any exceptions and halt cleanly instead of running garbage
+    -- Bus Error (vector 2, address $08)
+    4 => x"0000", 5 => x"0184",
+    -- Address Error (vector 3, address $0C)
+    6 => x"0000", 7 => x"0184",
+    -- Illegal Instruction (vector 4, address $10)
+    8 => x"0000", 9 => x"0184",
+    -- Privilege Violation (vector 8, address $20)
+    16 => x"0000", 17 => x"0184",
+    -- F-Line Emulator (vector 11, address $2C)
+    22 => x"0000", 23 => x"0184",
 
     -- ========================================
     -- Code starts at $100 (word index 128)
@@ -196,42 +207,38 @@ architecture behavioral of tb_pmove_comprehensive is
     -- ========================================
     
     -- TEST 2.1: PMOVE D2,TT0 (Write D2 to TT0)
-    -- Extension: 000 00010 0 0000000 = $0400 (TT0, write)
-    154 => x"F002", 155 => x"0400",
+    154 => x"F002", 155 => x"0800",  -- TT0 write
     
     -- TEST 2.2: PMOVE TT0,D3 (Read TT0 to D3)
-    -- Extension: 000 00010 1 0000000 = $0600 (TT0, read)
-    156 => x"F003", 157 => x"0600",
+    156 => x"F003", 157 => x"0A00",  -- TT0 read
     
     -- TEST 2.3: PMOVE TT0,(A0)+ (Read TT0 to memory, postincrement)
-    -- Opcode: F018 ((An)+ mode)
-    -- Extension: 000 00010 1 0000000 = $0600 (TT0, read)
-    158 => x"F018", 159 => x"0600",
+    158 => x"F018", 159 => x"0A00",  -- TT0 read
     
     -- ========================================
     -- TEST GROUP 3: TT1 Register (32-bit)
     -- ========================================
     
     -- TEST 3.1: PMOVE D0,TT1 (Write D0 to TT1)
-    -- Extension: 000 00011 0 0000000 = $0600 (TT1, write)
-    160 => x"F000", 161 => x"0600",
+    160 => x"F000", 161 => x"0C00",  -- TT1 write
     
     -- TEST 3.2: PMOVE TT1,D1 (Read TT1 to D1)
-    -- Extension: 000 00011 1 0000000 = $0700 (TT1, read)
-    162 => x"F001", 163 => x"0700",
+    162 => x"F001", 163 => x"0E00",  -- TT1 read
+
     
     -- ========================================
     -- TEST GROUP 4: MMUSR Register (16-bit)
     -- ========================================
     
-    -- TEST 4.1: PMOVE MMUSR,(A0) (Write MMUSR to memory)
+    -- TEST 4.1: PMOVE MMUSR,(A0) (Read MMUSR to memory)
     -- Opcode: F010 ((An) mode)
-    -- Extension: 011 11000 1 0000000 = $6200 (MMUSR, read)
+    -- bits 15-13=011, bits 14-10=11000, bit9=1 => $6200
     164 => x"F010", 165 => x"6200",
     
-    -- TEST 4.2: PMOVE (A0),MMUSR (Read memory to MMUSR)
-    -- Extension: 011 11000 0 0000000 = $6000 (MMUSR, write)
+    -- TEST 4.2: PMOVE (A0),MMUSR (Write memory to MMUSR)
+    -- bits 15-13=011, bits 14-10=11000, bit9=0 => $6000
     166 => x"F010", 167 => x"6000",
+
     
     -- ========================================
     -- TEST GROUP 5: CRP Register (64-bit)
@@ -240,13 +247,13 @@ architecture behavioral of tb_pmove_comprehensive is
     -- Reset A0 to RAM base
     168 => x"207C", 169 => x"0000", 170 => x"1000",
     
-    -- TEST 5.1: PMOVE CRP,(A0) (Write 64-bit CRP to memory)
-    -- Extension: 010 10011 1 0000000 = $4E00 (CRP, read to mem)
+    -- TEST 5.1: PMOVE CRP,(A0) (Read 64-bit CRP to memory)
+    -- Extension: 010 011 1 000000000 = $4E00 (CRP, read to mem)
     -- NOTE: CRP cannot use Dn mode - must use memory EA
     171 => x"F010", 172 => x"4E00",
     
-    -- TEST 5.2: PMOVE (A0),CRP (Read 64-bit memory to CRP)
-    -- Extension: 010 10011 0 0000000 = $4C00 (CRP, write from mem)
+    -- TEST 5.2: PMOVE (A0),CRP (Write 64-bit memory to CRP)
+    -- Extension: 010 011 0 000000000 = $4C00 (CRP, write from mem)
     173 => x"F010", 174 => x"4C00",
     
     -- ========================================
@@ -256,20 +263,21 @@ architecture behavioral of tb_pmove_comprehensive is
     -- Reset A0 to different RAM location
     175 => x"207C", 176 => x"0000", 177 => x"1080",
     
-    -- TEST 6.1: PMOVE SRP,(A0) (Write 64-bit SRP to memory)
-    -- Extension: 010 10010 1 0000000 = $4A00 (SRP, read to mem)
+    -- TEST 6.1: PMOVE SRP,(A0) (Read 64-bit SRP to memory)
+    -- Extension: 010 010 1 000000000 = $4A00 (SRP, read to mem)
     178 => x"F010", 179 => x"4A00",
     
-    -- TEST 6.2: PMOVE (A0),SRP (Read 64-bit memory to SRP)
-    -- Extension: 010 10010 0 0000000 = $4800 (SRP, write from mem)
+    -- TEST 6.2: PMOVE (A0),SRP (Write 64-bit memory to SRP)
+    -- Extension: 010 010 0 000000000 = $4800 (SRP, write from mem)
     180 => x"F010", 181 => x"4800",
+
     
     -- ========================================
     -- TEST GROUP 7: Additional Addressing Modes
     -- ========================================
     
-    -- Reset A0
-    182 => x"207C", 183 => x"0000", 184 => x"1000",
+    -- Reset A0 to $1008 (so -(A0)=$1004 lands in RAM, not ROM at $FFC!)
+    182 => x"207C", 183 => x"0000", 184 => x"1008",
     
     -- TEST 7.1: PMOVE TC,-(A0) (Predecrement)
     -- Opcode: F020 (-(An) mode, An=A0)
