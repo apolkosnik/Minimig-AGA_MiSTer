@@ -319,6 +319,24 @@ test-moves-all-modes: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_moves_all_modes.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 100us; quit" tb_moves_all_modes 2>&1 | grep -E "(Note:.*TEST|Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*RAM)"
 
+test-pmove:
+	vlib work
+	vcom -93 $(RTL_DIR)/TG68K_Pack.vhd
+	vcom -93 $(RTL_DIR)/TG68K_ALU.vhd
+	vcom -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	vcom -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	vcom -93 tb_pmove.vhd
+	vsim -c -do "run -all" tb_pmove
+
+test-pmove-comprehensive:
+	vlib work
+	vcom -93 $(RTL_DIR)/TG68K_Pack.vhd
+	vcom -93 $(RTL_DIR)/TG68K_ALU.vhd
+	vcom -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	vcom -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	vcom -93 tb_pmove_comprehensive.vhd
+	vsim -c -do "run -all" tb_pmove_comprehensive
+
 # Complete MMU Instruction Test Suite
 test-mmu-instruction-suite: setup
 	@echo "=========================================================="
