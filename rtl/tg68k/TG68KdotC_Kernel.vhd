@@ -935,10 +935,19 @@ ALU: TG68K_ALU
 					moves_ea_latched <= memaddr_a;
 					moves_ea_use_base <= '1';  -- base = An
 				end if;
-				-- (xxx).W/L: absolute address in last_data_read
+				-- (xxx).W/L: absolute address
 				if micro_state = ld_nn and opcode(15 downto 8) = "00001110" and
 				   opcode(7 downto 6) /= "11" and opcode(5 downto 3) = "111" then
-					moves_ea_latched <= last_data_read;
+					if opcode(2 downto 0) = "001" then
+						-- BUG #325 FIX: Absolute LONG without longaktion.
+						-- High word was fetched during moves0 and stored in last_opc_read.
+						-- Low word is being fetched this cycle in data_read.
+						-- Assemble the full 32-bit address from both halves.
+						moves_ea_latched <= last_opc_read & data_read(15 downto 0);
+					else
+						-- Absolute WORD: sign-extended 16-bit address in last_data_read
+						moves_ea_latched <= last_data_read;
+					end if;
 					moves_ea_use_base <= '0';  -- absolute, no base register
 				end if;
 				-- Set when moves1 schedules a bus access
@@ -5367,8 +5376,20 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							next_micro_state <= ld_AnXn1;
 						ELSIF opcode(5 downto 3)="111" THEN
 							-- Absolute modes: route to ld_nn for address fetch
+							-- BUG #325 FIX: Do NOT use longaktion for absolute LONG mode.
+							-- moves0 runs at state="00" which already fetches the first address word
+							-- (high word). Using longaktion would cause ld_nn to fetch 2 MORE words
+							-- via the memmask="100001" sequence, giving 3 total fetches for a 2-word
+							-- address and overincrementing PC by 2 bytes.
+							-- Instead, let ld_nn run at state="00" for one cycle to fetch the second
+							-- (low) word. The 32-bit address is assembled in the EA capture from
+							-- last_opc_read (high, from moves0) & data_read (low, from ld_nn).
+							-- For absolute WORD, setstate="01" prevents an extra fetch (only 1 word needed,
+							-- already fetched during moves0).
 							IF opcode(2 downto 0)="001" THEN
-								set(longaktion) <= '1';  -- xxx.L needs two-word address fetch
+								NULL;  -- xxx.L: state stays "00" for one more fetch (the low word)
+							ELSE
+								setstate <= "01";  -- xxx.W: word already fetched, prevent extra fetch
 							END IF;
 							next_micro_state <= ld_nn;
 						ELSE
@@ -5429,7 +5450,23 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					END IF;
 					-- BUG #149 FIX: Must transition to nop state to hold the data access
 					-- Without this, next_micro_state defaults to idle and state goes back to "00" (fetch)
-					next_micro_state <= nop;
+					-- BUG #325 FIX: For complex EA modes (d16/indexed/absolute), use nopnop
+					-- instead of nop. After the bus operation, nop causes setendOPC to fire
+					-- immediately (next_micro_state=idle, setstate="00"). At this point
+					-- state is "11"/"10" (bus cycle), so opcode <= last_opc_read (line 2231).
+					-- But last_opc_read still contains the displacement/index/address word
+					-- from the instruction stream, NOT the next instruction.
+					-- nopnop->nop adds one cycle: the nopnop cycle has next_micro_state=nop
+					-- which blocks setendOPC. Then state transitions to "00" (fetch), and
+					-- when setendOPC fires in the nop cycle, opcode <= data_read (line 2228)
+					-- which is the freshly fetched next instruction word.
+					-- Simple modes (An)/(An)+/-(An) don't need this because moves0's
+					-- state="00" cycle already fetched the next instruction into last_opc_read.
+					IF opcode(5 downto 3)="101" OR opcode(5 downto 3)="110" OR opcode(5 downto 3)="111" THEN
+						next_micro_state <= nopnop;
+					ELSE
+						next_micro_state <= nop;
+					END IF;
 					IF moves_direction='1' THEN
 						-- MOVES Rn,<ea> - Register to Memory using DFC (dr=1)
 						setstate <= "11";  -- Write to EA

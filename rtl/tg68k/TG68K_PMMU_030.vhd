@@ -1134,23 +1134,49 @@ begin
               X"0000" & MMUSR(15 downto 0) when reg_sel = "11000" else
               (others => '0');
 
-  -- DEBUG: Monitor CRP/MMUSR reads
-  process(reg_sel, reg_part, MMUSR)
+  -- DEBUG: Monitor all PMMU register reads
+  process(reg_sel, reg_part, TC, TT0, TT1, SRP_H, SRP_L, CRP_H, CRP_L, MMUSR)
+    variable reg_val_int : integer;
   begin
-    if reg_sel = "10011" then
-      report "PMMU_REG_READ: CRP reg_part=" & std_logic'image(reg_part) severity note;
-    end if;
-    if reg_sel = "11000" then
-      report "PMMU_REG_READ: MMUSR=0x" &
-             integer'image(to_integer(unsigned(MMUSR(15 downto 0)))) &
-             " B=" & std_logic'image(MMUSR(15)) &
-             " L=" & std_logic'image(MMUSR(14)) &
-             " S=" & std_logic'image(MMUSR(13)) &
-             " W=" & std_logic'image(MMUSR(12)) &
-             " I=" & std_logic'image(MMUSR(10)) &
-             " M=" & std_logic'image(MMUSR(9)) &
-             " T=" & std_logic'image(MMUSR(8)) severity note;
-    end if;
+    case reg_sel is
+      when "00010" =>  -- TT0
+        reg_val_int := to_integer(unsigned(TT0));
+        report "PMMU_REG_READ: TT0=0x" & integer'image(reg_val_int) severity note;
+      when "00011" =>  -- TT1
+        reg_val_int := to_integer(unsigned(TT1));
+        report "PMMU_REG_READ: TT1=0x" & integer'image(reg_val_int) severity note;
+      when "10000" =>  -- TC
+        reg_val_int := to_integer(unsigned(TC));
+        report "PMMU_REG_READ: TC=0x" & integer'image(reg_val_int) severity note;
+      when "10010" =>  -- SRP
+        if reg_part = '1' then
+          reg_val_int := to_integer(unsigned(SRP_H));
+          report "PMMU_REG_READ: SRP_H=0x" & integer'image(reg_val_int) severity note;
+        else
+          reg_val_int := to_integer(unsigned(SRP_L));
+          report "PMMU_REG_READ: SRP_L=0x" & integer'image(reg_val_int) severity note;
+        end if;
+      when "10011" =>  -- CRP
+        if reg_part = '1' then
+          reg_val_int := to_integer(unsigned(CRP_H));
+          report "PMMU_REG_READ: CRP_H=0x" & integer'image(reg_val_int) severity note;
+        else
+          reg_val_int := to_integer(unsigned(CRP_L));
+          report "PMMU_REG_READ: CRP_L=0x" & integer'image(reg_val_int) severity note;
+        end if;
+      when "11000" =>  -- MMUSR
+        report "PMMU_REG_READ: MMUSR=0x" &
+               integer'image(to_integer(unsigned(MMUSR(15 downto 0)))) &
+               " B=" & std_logic'image(MMUSR(15)) &
+               " L=" & std_logic'image(MMUSR(14)) &
+               " S=" & std_logic'image(MMUSR(13)) &
+               " W=" & std_logic'image(MMUSR(12)) &
+               " I=" & std_logic'image(MMUSR(10)) &
+               " M=" & std_logic'image(MMUSR(9)) &
+               " T=" & std_logic'image(MMUSR(8)) severity note;
+      when others =>
+        null;
+    end case;
   end process;
 
   -- Extract TC register fields according to MC68030 specification

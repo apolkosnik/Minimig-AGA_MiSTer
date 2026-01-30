@@ -399,6 +399,24 @@ begin
     end if;
   end process;
 
+  -- Debug: Monitor A0 during test 9 time window
+  process(clk)
+  begin
+    if rising_edge(clk) then
+      if cycle >= 60 and cycle <= 100 then
+        report "DBG cy=" & integer'image(cycle) &
+               " A0=$" & slv_to_hex(debug_regfile_a0) &
+               " st=" & integer'image(to_integer(unsigned(debug_state))) &
+               " mbp=" & std_logic'image(debug_moves_bus_pending) &
+               " mwp=" & std_logic'image(debug_moves_writeback_pending) &
+               " opc=$" & slv_to_hex(debug_opcode) &
+               " PC=$" & slv_to_hex(debug_TG68_PC) &
+               " br=$" & slv_to_hex(debug_brief) &
+               " lw=" & std_logic'image(debug_clkena_lw);
+      end if;
+    end if;
+  end process;
+
   -- Monitoring
   process(clk)
     variable addr_int : integer;
