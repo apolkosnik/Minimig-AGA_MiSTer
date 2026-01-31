@@ -402,6 +402,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal MSP					: std_logic_vector(31 downto 0);  -- BUG #18: Master Stack Pointer (68020+)
 	signal ISP					: std_logic_vector(31 downto 0);  -- BUG #18: Interrupt Stack Pointer (68020+)
 	signal interrupt_mode		: std_logic := '0';  -- BUG #18: 0=normal supervisor, 1=interrupt processing
+	signal format1_chain_active : std_logic := '0';  -- MC68030: Set during Format $1 RTE dual-frame chain
 --	signal illegal_write_mode	: bit;
 --	signal illegal_read_mode	: bit;
 --	signal illegal_byteaddr		: bit;
@@ -551,7 +552,7 @@ architecture logic of TG68KdotC_Kernel is
 
 	signal micro_state		: micro_states;
 	signal next_micro_state	: micro_states;
-	
+
 
 --   -- Function to map brief(11:8) to PMMU register select
 --   function pmmu_sel_from_brief(b : std_logic_vector(14 downto 10)) return std_logic_vector is
@@ -1199,12 +1200,67 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 			END IF;
 		END IF;
 	END PROCESS;
-	
+
+	-- MC68030: Format $1 dual-frame chain tracking (registered to avoid combinational latch)
+	-- When RTE encounters Format $1 with M=1, this flag tracks the dual-frame chain
+	-- so the swap-back (MSP->ISP) executes after the second frame completes.
+	-- Must be registered (not combinational) to prevent delta-cycle re-evaluation from
+	-- canceling the swap-back set signals in the main combinational process.
+	PROCESS (clk)
+	BEGIN
+		IF rising_edge(clk) THEN
+			IF Reset='1' THEN
+				format1_chain_active <= '0';
+			ELSIF clkena_lw='1' THEN
+				IF setopcode='1' THEN
+					format1_chain_active <= '0';
+				ELSIF micro_state = rte4 THEN
+					IF rte_format_word(15 downto 12) = "0001" AND FlagsSR(4)='1' AND cpu(1)='1' THEN
+						format1_chain_active <= '1';
+					ELSIF (rte_format_word(15 downto 12) = "0000" OR rte_format_word(15 downto 12) = "0011") AND format1_chain_active='1' THEN
+						format1_chain_active <= '0';
+					END IF;
+				ELSIF micro_state = rte5 AND rot_cnt = "000001" AND format1_chain_active='1' THEN
+					format1_chain_active <= '0';
+				END IF;
+			END IF;
+		END IF;
+	END PROCESS;
+
 PROCESS (long_start, reg_QB, data_write_tmp, exec, data_read, data_write_mux, memmaskmux, bf_ext_out,
 		 data_write_muxin, memmask, oddout, addr,
-		 moves_bus_pending, moves_direction, moves_reg, addsub_q, opcode)
+		 moves_bus_pending, moves_direction, moves_reg, addsub_q, opcode, micro_state, TG68_PC,
+		 trap_SR, Flags, last_opc_read, trap_vector)
 	BEGIN
-		IF exec(write_reg)='1' THEN
+        -- MC68030 Bus Error Stack Frame Data Multiplexer
+        IF micro_state = berr1 OR micro_state = berr3 THEN
+            data_write_muxin <= (others => '0'); -- Internal registers (implementation-defined)
+        ELSIF micro_state = berr2 THEN
+            -- Data Output Buffer ($18-$1B): Data being written when fault occurred
+            data_write_muxin <= data_write_tmp;
+        ELSIF micro_state = berr5 THEN
+            -- Instruction Pipe ($0C-$0F): Stage B (opcode) and Stage C (prefetch)
+            data_write_muxin <= opcode & last_opc_read(15 downto 0);
+        ELSIF micro_state = berr4 THEN
+            -- Fault Address: Use current CPU address output
+            data_write_muxin <= addr;
+        ELSIF micro_state = berr6 THEN
+            -- SSW ($0A) & Internal ($08): Stub SSW ($0000)
+            data_write_muxin <= (others => '0');
+        ELSIF micro_state = berr7 THEN
+            -- PC Lo ($04) & Format/Vector ($06)
+            -- data_write_muxin is 32-bit. High Word=PC Lo, Low Word=Format.
+            -- Stack grows down: PUSH Long writes [SP-4]..[SP-1].
+            -- Mem[Offset $04] = PC Lo (High 16 of Long). Mem[Offset $06] = Format (Low 16).
+            -- Format $A = short bus fault frame (16 words)
+            -- Vector offset from trap_vector (e.g., $08=bus error, $F4=MMU bus error)
+            data_write_muxin <= TG68_PC(15 downto 0) & "1010" & trap_vector(11 downto 0); 
+        ELSIF micro_state = berr8 THEN
+            -- SR ($00) & PC Hi ($02).
+            -- High Word = SR (saved at decode time). Low Word = PC Hi.
+            -- Mem[Offset 0] = SR. Mem[Offset 2] = PC Hi.
+            data_write_muxin <= (trap_SR & Flags) & TG68_PC(31 downto 16);
+		ELSIF exec(write_reg)='1' THEN
 			-- BUG #328 FIX: Forward post-modified address register value when
 			-- MOVES CPU->mem source register (from extension word) matches the
 			-- EA address register with auto-modify (postadd/presub).
@@ -1649,8 +1705,11 @@ PROCESS (clk)
 						data_write_tmp(15 downto 0) <= "0000" & trap_vector(11 downto 0);
 						writePCnext <= trap_trap OR trap_trapv OR exec(trap_chk) OR Z_error;
 					end if;
+				elsif micro_state = int3 then
+					-- MC68030: Format $1 throwaway frame format/vector word
+					data_write_tmp(15 downto 0) <= "0001" & trap_vector(11 downto 0);
 ------------------------------------
---				ELSIF micro_state=trap0 THEN	
+--				ELSIF micro_state=trap0 THEN
 --					data_write_tmp(15 downto 0) <= trap_vector(15 downto 0);
 				ELSIF exec(hold_dwr)='1' THEN
 					data_write_tmp <= data_write_tmp;
@@ -1877,8 +1936,8 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" OR fline_opcode_latch(5 downto 3)="100") THEN
 						-- Modes 010/011: Simple (An)/(An)+ - no delta
 						IF fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" THEN
-							memaddr_delta_rega <= (others => '0');
-							use_base <= '1';
+						memaddr_delta_rega <= (others => '0');
+						use_base <= '1';
 						
 						-- Mode 100: -(An) - Latch presub decrement during decode
 						ELSE  -- Must be 100 based on outer condition
@@ -1907,17 +1966,17 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 								memaddr_delta_rega <= X"FFFFFFFC";  -- -4
 							END IF;
 							use_base <= '1';
-							
+
 						-- Mode 101: (d16,An) - Use fetched displacement from MDR
 						ELSIF fline_opcode_latch(5 downto 3)="101" THEN
 							memaddr_delta_rega <= last_data_read;
 							use_base <= '1';
-							
+
 						-- Mode 111: Absolute - Use fetched address from MDR
 						ELSIF fline_opcode_latch(5 downto 3)="111" THEN
 							memaddr_delta_rega <= last_data_read;
 							use_base <= '0';
-							
+
 						-- Mode 110: (d8,An,Xn) - Use latched displacement
 						ELSE
 							memaddr_delta_rega <= pmove_disp_latched;
@@ -2006,9 +2065,9 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 
 		IF use_base='0' THEN
 			memaddr_reg <= (others=>'0');
-		ELSE	
+		ELSE
 			memaddr_reg <= reg_QA;
-		END IF;	
+		END IF;
     END PROCESS;
     
 -----------------------------------------------------------------------------
@@ -2418,8 +2477,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				PCbase <= set_PCbase OR PCbase;
 				IF setexecOPC='1' OR (state(1)='1' AND movem_run='0') THEN
 					PCbase <= '0';
-				END IF;	
-			END IF;	
+				END IF;
+			END IF;
 				IF clkena_lw='1' THEN
 					exec <= set;
 				exec(alu_move) <= set(opcMOVE) OR set(alu_move);
@@ -2574,6 +2633,10 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;
 				IF interrupt='1' AND trap_interrupt='1' THEN
 					FlagsSR(2 downto 0) <=rIPL_nr;
+					-- MC68030: Clear M bit on interrupt entry (handler uses ISP)
+					IF cpu(1)='1' THEN
+						FlagsSR(4) <= '0';
+					END IF;
 				END IF;
 				IF exec(to_SR)='1' THEN
 					FlagsSR(7 downto 0) <= SRin;	--SR
@@ -2709,7 +2772,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		END IF;
 		
 		IF interrupt='1' AND trap_berr='1' THEN
-			next_micro_state <= trap0;
+            IF cpu(1)='1' THEN
+                next_micro_state <= berr1;
+            ELSE
+			    next_micro_state <= trap0;
+            END IF;
 			-- Only need stack swap if A7 currently has user stack (preSVmode='0')
 			-- If preSVmode='1', A7 already has supervisor stack, no swap needed
 			-- FlagsSR(5) update to '1' is handled in sequential process (see BUG #151)
@@ -2722,7 +2789,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			-- Stack frame format selection (MC68030 User's Manual 6.4.3):
 			-- Format #2 (6-word): TRAPV, CHK, CHK2, Divide by Zero, Trace, cpTRAPcc
 			-- Format #0 (4-word): All others including privilege violation, F-line, illegal
-			IF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1') THEN
+            -- Format #A (16-word): Bus Error (MC68030)
+			IF cpu(1)='1' AND trap_berr='1' THEN
+				next_micro_state <= berr1;
+			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1') THEN
 				next_micro_state <= trap00;
 			else
 				next_micro_state <= trap0;
@@ -2772,14 +2842,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		-- BUG #18: Stack pointer switching on mode changes (68020/68030)
 		IF set(changeMode)='1' THEN
 			IF cpu(1)='1' THEN
-				-- 68020/68030: Use MSP/ISP based on interrupt_mode
+				-- 68020/68030: Use MSP/ISP based on M bit and interrupt_mode
 				IF preSVmode='0' THEN
 					-- Currently in user mode, switching to supervisor mode
 					set(to_USP) <= '1';
 					IF interrupt_mode='1' THEN
-						set(from_ISP) <= '1';
+						set(from_ISP) <= '1';   -- Interrupts: always ISP
+					ELSIF FlagsSR(4)='1' THEN
+						set(from_MSP) <= '1';   -- Non-interrupt, M=1: MSP
 					ELSE
-						set(from_MSP) <= '1';
+						set(from_ISP) <= '1';   -- Non-interrupt, M=0: ISP
 					END IF;
 				ELSE
 					-- Currently in supervisor mode, switching to user mode
@@ -2861,9 +2933,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						END IF;
 					END IF;	 	
 					IF opcode(5)='1' THEN	-- -(An)
-						set(presub) <= '1'; 					
-						IF opcode(2 downto 0)="111" THEN
-							set(use_SP) <= '1';
+							set(presub) <= '1';
+							IF opcode(2 downto 0)="111" THEN
+								set(use_SP) <= '1';
 						END IF;
 					END IF;	 	
 				WHEN "101" =>				--(d16,An)
@@ -4620,7 +4692,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			END IF;
 		END IF;
 
-			CASE micro_state IS
+		CASE micro_state IS
 				WHEN ld_nn =>		-- (nnnn).w/l=>
 					set(get_ea_now) <='1';
 					set(addrlong) <= '1';
@@ -5305,16 +5377,104 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					writeSR <= '1';
 					IF trap_berr='1' THEN
 						next_micro_state <= trap4;
+					ELSIF cpu(1)='1' AND trap_interrupt='1' AND trap_SR(4)='1' THEN
+						-- MC68030: M=1 interrupt dual-frame - push throwaway on ISP
+						next_micro_state <= int2;
 					ELSE
 						next_micro_state <= trap3;
 					END IF;
+				-- MC68030: Interrupt dual-frame push (M=1)
+				-- After trap2 pushes SR to MSP, swap to ISP and push Format $1 throwaway frame
+				WHEN int2 =>
+					-- Swap from MSP to ISP for throwaway frame
+					set(to_MSP) <= '1';     -- Save current A7 to MSP register
+					set(from_ISP) <= '1';   -- Load ISP into A7
+					set(Regwrena) <= '1';   -- Enable register file write for A7 update
+					setstackaddr <= '1';
+					setstate <= "01";        -- Idle: let swap settle
+					next_micro_state <= int3;
+				WHEN int3 =>
+					-- Push Format $1 format/vector word (16-bit) on ISP
+					set(presub) <= '1';
+					setstackaddr <= '1';
+					setstate <= "11";        -- Write
+					datatype <= "01";        -- 16-bit
+					-- data_write_tmp set in mux (Format $1 word)
+					next_micro_state <= int4;
+				WHEN int4 =>
+					-- Push Format $1 PC (32-bit) on ISP
+					writePC <= '1';          -- data_write_tmp <= TG68_PC
+					set(presub) <= '1';
+					setstackaddr <= '1';
+					setstate <= "11";        -- Write
+					datatype <= "10";        -- 32-bit
+					next_micro_state <= int5;
+				WHEN int5 =>
+					-- Push Format $1 SR (16-bit) on ISP, then load handler
+					set(presub) <= '1';
+					setstackaddr <= '1';
+					setstate <= "11";        -- Write
+					datatype <= "01";        -- 16-bit
+					writeSR <= '1';          -- data_write_tmp <= trap_SR & Flags
+					next_micro_state <= trap3;  -- Load handler vector
+
 				WHEN trap3 =>		-- TRAP
 					set_vectoraddr <= '1';
 					datatype <= "10";
-					set(direct_delta) <= '1';	
+					set(direct_delta) <= '1';
 					set(directPC) <= '1';
 					setstate <= "10";
 					next_micro_state <= nopnop;
+
+                -- MC68030 Bus Error Stack Frame Generation (Format $A - Short Bus Fault)
+                -- Pushes 16 words (8 Longs) to the stack.
+                -- Order: Internal($1E/1C) -> DataOut($1A/18) -> Internal($16/14) -> FaultAddr($12/10)
+                --        -> InstrPipe($0E/0C) -> SSW($0A/08) -> Format/PC_Lo($06/04) -> SR/PC_Hi($02/00)
+                WHEN berr1 => -- Push Internal Regs ($1C-$1F) - Stub
+                    setstate <= "11";
+                    set(presub) <= '1';
+                    datatype <= "10";
+                    next_micro_state <= berr2;
+                WHEN berr2 => -- Push Data Output Buffer ($18-$1B) - Stub
+                    setstate <= "11";
+                    set(presub) <= '1';
+                    datatype <= "10";
+                    next_micro_state <= berr3;
+                WHEN berr3 => -- Push Internal Regs ($14-$17) - Stub
+                    setstate <= "11";
+                    set(presub) <= '1';
+                    datatype <= "10";
+                    next_micro_state <= berr4;
+                WHEN berr4 => -- Push Fault Address ($10-$13) - Capture current Addr
+                    setstate <= "11";
+                    set(presub) <= '1';
+                    datatype <= "10";
+                    next_micro_state <= berr5;
+                WHEN berr5 => -- Push Instruction Pipe ($0C-$0F) - Stub
+                    setstate <= "11";
+                    set(presub) <= '1';
+                    datatype <= "10";
+                    next_micro_state <= berr6;
+                WHEN berr6 => -- Push SSW ($0A) & Internal ($08) - SSW Stub
+                    setstate <= "11";
+                    set(presub) <= '1';
+                    datatype <= "10";
+                    next_micro_state <= berr7;
+                WHEN berr7 => -- Push Format/Vector ($06) & PC Lo ($04)
+                    setstate <= "11";
+                    set(presub) <= '1';
+                    datatype <= "10";
+                    next_micro_state <= berr8;
+                WHEN berr8 => -- Push PC Hi ($02) & SR ($00) -> Exit to Handler
+                    setstate <= "11";
+                    set(presub) <= '1';
+                    datatype <= "10";
+                    -- Exit logic (matches trap3)
+                    set_vectoraddr <= '1';
+                    set(direct_delta) <= '1';	
+                    set(directPC) <= '1';
+                    next_micro_state <= nopnop;
+
 				WHEN trap4 =>		-- TRAP
 					set(presub) <= '1';
 					setstackaddr <='1';
@@ -5387,11 +5547,40 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					--   Format $B: 46-word frame (92 bytes) - long bus fault
 					-- Format code is in bits 15-12 of the format/vector word
 					CASE rte_format_word(15 downto 12) IS
-						WHEN "0000" | "0001" =>
-							-- Format 0/1: 4-word frame - no additional reads needed
-							-- Format 1 is "throwaway" frame used for interrupt return
+						WHEN "0001" =>
+							-- MC68030 Format $1: Throwaway frame - chain to second frame
+							-- SR already restored from this frame. FlagsSR(4) = M bit from throwaway SR.
+							IF cpu(1)='1' THEN
+								IF FlagsSR(4)='1' THEN
+									-- M=1: second frame on MSP, swap ISP->MSP
+									-- format1_chain_active set by registered process
+									set(to_ISP) <= '1';
+									set(from_MSP) <= '1';
+									set(Regwrena) <= '1';  -- Enable register file write for A7 update
+								END IF;
+								-- M=0: second frame on ISP (current stack), no swap needed
+								setstackaddr <= '1';
+								setstate <= "01";         -- Idle for swap to settle
+								next_micro_state <= rte6; -- Read SR from second frame
+							ELSE
+								-- 68000/68010: no Format $1 chaining, treat as normal
+								datatype <= "01";
+								next_micro_state <= nop;
+							END IF;
+						WHEN "0000" | "0011" =>
+							-- Format $0/$3: 4-word frame - no additional reads needed
+							-- Format 3 is accepted by real MC68030 hardware as 4-word frame
 							datatype <= "01";
 							next_micro_state <= nop;
+							IF format1_chain_active='1' THEN
+								-- Swap back after dual-frame: save A7 to MSP, load ISP
+								set(to_MSP) <= '1';
+								set(from_ISP) <= '1';
+								set(Regwrena) <= '1';  -- Enable register file write for A7 update
+								setstackaddr <= '1';
+								setstate <= "01";  -- Idle: ensures memmask="111111" so clkena_lw='1' for register write
+								-- format1_chain_active cleared by registered process
+							END IF;
 							-- Clear interrupt mode when returning to user mode
 							IF FlagsSR(5)='0' THEN
 								interrupt_mode <= '0';
@@ -5430,7 +5619,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							next_micro_state <= rte5;
 						WHEN OTHERS =>
 							-- Invalid format for MC68030 - generate Format Error exception (vector 14)
-							-- Formats $3-$8, $C-$F are not valid on MC68030
+							-- Formats $4-$8, $C-$F are not valid on MC68030
 							trap_format_error <= '1';
 							trapmake <= '1';
 					END CASE;
@@ -5439,10 +5628,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF rot_cnt = "000001" THEN
 						-- Last read completed - RTE is finishing
 						next_micro_state <= nop;
+						-- MC68030: Swap back after dual-frame if needed
+						IF format1_chain_active='1' THEN
+							set(to_MSP) <= '1';
+							set(from_ISP) <= '1';
+							set(Regwrena) <= '1';  -- Enable register file write for A7 update
+							setstackaddr <= '1';
+							setstate <= "01";  -- Idle: ensures memmask="111111" so clkena_lw='1' for register write
+							-- format1_chain_active cleared by registered process
+						END IF;
 						-- BUG #18: Clear interrupt mode only when returning to user mode (MC68030)
-						-- RTE restores SR which contains S bit (supervisor mode bit in bit 5)
-						-- Only clear interrupt_mode if returning to user mode (FlagsSR(5)=0)
-						-- This prevents clearing interrupt_mode when RTE is called from within an interrupt handler
 						IF FlagsSR(5)='0' THEN
 							interrupt_mode <= '0';
 						END IF;
@@ -5454,6 +5649,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						setstackaddr <= '1';
 						next_micro_state <= rte5;
 					END IF;
+
+				-- MC68030: RTE Format $1 chain - read SR from second stack frame
+				WHEN rte6 =>
+					-- A7 now points to the correct stack (MSP or ISP based on M bit)
+					setstate <= "10";            -- Read
+					set(postadd) <= '1';         -- Post-increment A7
+					setstackaddr <= '1';         -- Use stack address
+					set(directSR) <= '1';        -- Load SR from this read
+					datatype <= "01";            -- 16-bit (SR word)
+					next_micro_state <= rte1;    -- Continue with PC read
 -------------------------------------
 
 				WHEN rtd1 =>		-- RTD

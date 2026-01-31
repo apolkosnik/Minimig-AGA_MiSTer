@@ -85,6 +85,8 @@ make test-cacr           # CACR register
 make test-pmove-tc       # PMOVE TC operations
 make test-diagnostic     # PMMU diagnostic tests (quick sanity check)
 make test-moves          # MOVES instruction FC handling
+make test-moves-validation   # MOVES validation testbench
+make test-moves-all-modes    # MOVES with all addressing modes
 make test-rte-formats    # RTE stack frame formats (0,1,2,9,A,B)
 make test-mmu-instruction-suite  # Complete MMU instruction test suite
 
@@ -103,6 +105,10 @@ cd tests/tg68k_030 && make setup
 vsim -c -do "run 50us; quit" tb_<testbench_name>
 ```
 
+### Test Directory Structure
+- `tests/tg68k_030/` - Main test directory with primary testbenches (`tb_*.vhd`)
+- `tests/tg68k_030/mock/` - Bug-specific and exploratory testbenches (older, may need updates)
+
 ## Code Architecture
 
 ### Top-Level Structure
@@ -111,18 +117,32 @@ vsim -c -do "run 50us; quit" tb_<testbench_name>
 - `sys/sys_top.v`: MiSTer system-specific hardware interface
 
 ### CPU Subsystem (68030 Focus)
-- `rtl/tg68k/TG68KdotC_Kernel.vhd`: Main CPU core (~9000 lines) with PMMU and cache control
-- `rtl/tg68k/TG68K_PMMU_030.vhd`: Complete MC68030-compatible PMMU (~4000 lines)
+- `rtl/tg68k/TG68KdotC_Kernel.vhd`: Main CPU core (~6900 lines) with PMMU and cache control
+- `rtl/tg68k/TG68K_PMMU_030.vhd`: Complete MC68030-compatible PMMU (~3200 lines)
 - `rtl/tg68k/TG68K_Cache_030.vhd`: 256-byte instruction and data caches
-- `rtl/tg68k/TG68K_Pack.vhd`: Package definitions and constants
+- `rtl/tg68k/TG68K_ALU.vhd`: Arithmetic/Logic Unit (used by Kernel for all ALU operations)
+- `rtl/tg68k/TG68K_Pack.vhd`: Package definitions, constants, `micro_states` enum, `exec`/`set` bit indices
 - `rtl/cpu_wrapper.v`: CPU integration wrapper (USE_68030_CACHE=1)
 
-### TG68KdotC_Kernel Key Signals
-- `state` - main state machine (idle, addr, data, etc.)
-- `exec` - instruction execution flags vector
-- `setstate` / `setexec` - next state/exec assignments (combinational)
-- `opcode` / `last_opc_read` - current instruction word
-- `brief` / `last_opc_read` - extension word handling
+**VHDL Compilation Order** (dependency chain - must compile in this order):
+`TG68K_Pack.vhd` -> `TG68K_ALU.vhd` -> `TG68K_PMMU_030.vhd` -> `TG68K_Cache_030.vhd` -> `TG68KdotC_Kernel.vhd` -> testbenches
+
+### TG68KdotC_Kernel Architecture
+The Kernel is organized as ~17 concurrent PROCESS blocks. The most important ones:
+- **Main state machine process** (~line 2046): Clocked process containing `CASE state`, `CASE micro_state`, instruction decode (`decodeOPC`), and `setopcode`/`setexecOPC` phases. This is where most instruction behavior is defined.
+- **Instruction decode combinational** (~line 2640): Large combinational process handling opcode decoding, setting `setstate`, `setexec`, `next_micro_state` based on current opcode/state.
+- **Register file process** (~line 1292): Register read/write multiplexing.
+- **Data path processes** (~lines 1344, 1404, 1469): Write-back destination selection (`RDindex_A`), source register selection (`RDindex_B`).
+- **Address calculation** (~line 1740): EA displacement and brief extension word address computation.
+
+### Key Signals
+- `state` - main 2-bit state machine ("00"=idle/decode, "01"=execute, "10"=memory addr, "11"=memory data)
+- `micro_state` - sub-state enum (idle, nop, ld_nn, st_nn, pmove_decode, pmove_mem_to_mmu_hi/lo, etc.)
+- `exec` / `set` - execution flags vectors (bit indices defined as constants in TG68K_Pack.vhd)
+- `setstate` / `setexec` - next state/exec assignments (combinational, latched on `clkena_lw`)
+- `opcode` - current instruction word (latched from `last_opc_read` at `setopcode` time)
+- `last_opc_read` - most recent word fetched from instruction stream
+- `brief` - extension word (latched from `last_opc_read` during getbrief)
 - `memmask` - memory operation type mask
 - `clkena_lw` - main clock enable (gated by wait states)
 - `clkena_in` - external clock enable input
@@ -131,13 +151,6 @@ vsim -c -do "run 50us; quit" tb_<testbench_name>
 - Cache fill state machine in `Minimig.sv` handles 8-word sequential reads
 - PMMU walker memory arbiter manages bus access between CPU, cache, and page table walks
 - Cache-inhibit signals from PMMU properly connected and honored
-
-### Amiga Chipset (for reference)
-- `rtl/agnus*.v`: Graphics DMA (bitplane, sprite, blitter, copper)
-- `rtl/denise*.v`: Video output and rendering
-- `rtl/paula*.v`: Audio and I/O (4-channel audio, UART, floppy, interrupts)
-- `rtl/ciaa.v`, `rtl/ciab.v`: Complex Interface Adapters
-- `rtl/gary.v`, `rtl/gayle.v`: Memory controller and IDE interface
 
 ## 68030 Implementation
 
@@ -161,11 +174,138 @@ The page walker uses states defined in TG68K_PMMU_030.vhd:
 - `W_PAGE` - final page descriptor lookup
 - `W_DONE` - translation complete, result in ATC
 
-### Critical Implementation Notes
-- PMOVE uses `brief(11:8)` for register selection (not opcode bits)
+### PMOVE Instruction
+PMOVE transfers data between memory/registers and PMMU registers. All PMMU instructions share the F-line opcode space (`F0xx`), differentiated by the extension word.
+
+**Opcode**: `1111 0000 00EE EAAA` where EEE=EA mode, AAA=EA register
+**Extension word** (bits 15-13 dispatch instruction type):
+```
+Bits 15-13: Instruction type
+              000 = PMOVE/PMOVEFD (TT0/TT1)
+              001 = PFLUSH (12:10=001) / PLOAD (12:10=000)
+              010 = PMOVE/PMOVEFD (TC/SRP/CRP)
+              011 = PMOVE (MMUSR)
+              100 = PTEST
+Bits 14-10: P-register selector
+              00010=TT0, 00011=TT1, 10000=TC, 10010=SRP, 10011=CRP, 11000=MMUSR
+Bit 9:      Direction (RW): 0=write to MMU (EA->MMU), 1=read from MMU (MMU->EA)
+Bit 8:      FD (flush disable) - PMOVEFD variant when set
+```
+
+**Two execution paths**:
+
+1. **Dn mode** (`opcode(5:3)="000"`): Register-to-register transfer, no memory access
+   - Write to MMU (`brief(9)=0`): `set_exec(pmmu_wr)`, micro -> `idle` (32-bit) or `pmove_dn_hi` (64-bit CRP/SRP)
+   - Read from MMU (`brief(9)=1`): `set(pmmu_rd)`, micro -> `pmmu_dn_read_wait` (32-bit) or `pmove_dn_hi` (64-bit)
+
+2. **Memory EA modes**: Uses EA builder, then PMOVE-specific micro-states
+   - Write to MMU (`brief(9)=0`): EA build -> `pmove_mem_to_mmu_hi` (-> `pmove_mem_to_mmu_lo` for 64-bit)
+   - Read from MMU (`brief(9)=1`): EA build -> `pmove_mmu_to_mem_hi` (-> `pmove_mmu_to_mem_lo` for 64-bit)
+   - EA routing: simple modes (An)/(An)+/-(An) go direct; (d16,An) -> `ld_dAn1`; (d8,An,Xn) -> `ld_AnXn1`; absolute -> `ld_nn`
+
+**Key implementation details**:
+- Uses `pmmu_brief` (latched copy of `brief`) for stable values throughout F-line execution
+- Uses `fline_opcode_latch` instead of `opcode` for EA mode checks (opcode may be prefetched ahead)
 - Register selector must be latched at proper clock phase to avoid races
-- Memory-to-MMU vs MMU-to-memory paths have different timing requirements
+- MMUSR uses `datatype="01"` (word/16-bit); all others use `datatype="10"` (long/32-bit)
 - 64-bit registers (CRP/SRP) require two bus cycles with `reg_part` tracking high/low word
+- `set(longaktion)` required for 32-bit memory transfers (not MMUSR)
+- `set(presub)`/`set(pmmu_dbl)` needed for -(An) mode with 64-bit registers
+
+**Legal EA modes**: Dn, (An), (An)+, -(An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
+**Illegal EA modes**: An, PC-relative, immediate (triggers F-line exception)
+**Privilege**: Supervisor-only; user mode triggers privilege violation
+
+### MOVES Instruction
+MOVES (Move Address Space) transfers data between a general register and a memory location using SFC/DFC function codes instead of the normal FC. Supervisor-only instruction.
+
+**Extension word format** (second word after opcode `0x0E__`):
+```
+Bit 15:     D/A (0=data register, 1=address register)
+Bits 14-12: Register number (0-7)
+Bit 11:     Direction (0=EA->Rn read using SFC, 1=Rn->EA write using DFC)
+Bits 10-0:  Reserved (zeros)
+```
+
+**Micro-states**: `moves0` (address setup, latches extension word fields) -> `moves1` (bus access with FC override)
+
+**Key latched signals** (latched in `moves0` because `brief` gets overwritten by EA extension words):
+- `moves_direction` - from `brief(11)`: selects SFC (read) vs DFC (write)
+- `moves_reg` - from `brief(15:12)`: D/A flag + register number
+- `moves_bus_pending` - stays active during bus cycle to maintain FC override
+- `moves_writeback_pending` - defers register write for mem->CPU until bus data available
+- `moves_ea_areg`, `moves_ea_regnum` - latched EA register info for address calculation
+
+**FC override** (~line 878): When `micro_state=moves1` or `moves_bus_pending='1'`, the FC output is driven from SFC (reads) or DFC (writes) instead of the normal `fc_internal`.
+
+**Addressing modes**: Same as PMOVE - all memory alterable modes. Illegal: An direct, PC-relative, immediate.
+
+### Exceptions, Traps, and RTE
+
+#### Exception Priority
+At instruction boundary (`setinterrupt` time), exception sources are dispatched in priority order:
+1. **Trace** (`make_trace='1'`) - highest priority, sets `trap_trace`
+2. **Bus Error** (`make_berr='1'`) - sets `trap_berr` (vector 2) or `trap_mmu_berr` (vector 61)
+3. **External Interrupt** - lowest of the three, sets `trap_interrupt` with `IPL_vec`
+
+Bus error always takes precedence over pending interrupts, ensuring the correct Format $A frame is pushed instead of a Format $0 interrupt frame.
+
+#### Bus Error Exception (Format $A)
+MC68030 mode (`cpu(1)='1'`) generates a Format $A (Short Bus Fault, 16-word/32-byte) stack frame via `berr1`..`berr8` micro-states (~line 5355). Each state pushes one longword onto the supervisor stack using pre-decrement:
+
+| State | Stack Offset | Data Pushed | Source |
+|-------|-------------|-------------|--------|
+| berr1 | $1C-$1F | Internal registers (stub) | `0x00000000` |
+| berr2 | $18-$1B | Data output buffer | `data_write_tmp` |
+| berr3 | $14-$17 | Internal registers (stub) | `0x00000000` |
+| berr4 | $10-$13 | Fault address | `addr` (CPU address at fault time) |
+| berr5 | $0C-$0F | Instruction pipeline | `opcode & last_opc_read(15:0)` |
+| berr6 | $08-$0B | SSW + internal (stub) | `0x00000000` (SSW not yet implemented) |
+| berr7 | $04-$07 | PC Lo + Format/Vector | `TG68_PC(15:0) & "1010" & trap_vector(11:0)` |
+| berr8 | $00-$03 | SR + PC Hi | `(trap_SR & Flags) & TG68_PC(31:16)` |
+
+After berr8, `set_vectoraddr`/`set(directPC)` loads the exception handler address from the vector table.
+
+**MMU bus error**: When PMMU detects a fault with the B-bit set (`pmmu_fault_stat(15)='1'`), `trap_mmu_berr` is set instead of `trap_berr`, routing to vector 61 ($F4) instead of vector 2 ($08). Both use the same Format $A frame.
+
+**Key signals**: `trap_berr`, `trap_mmu_berr`, `make_berr`, `make_mmu_berr`, `trap_vector`, `clr_berr`
+
+#### RTE (Return from Exception)
+RTE (~line 3897) pops exception stack frames with format-dependent unwinding:
+
+**Micro-states**: `rte1` (read PC longword) -> `rte2` (read SR word + initiate format word read) -> `rte3` (wait for format word, capture into `rte_format_word`) -> `rte4` (decode format, set up unwind) -> `rte5` (loop to discard remaining words)
+
+**Format decoding** in rte4 (~line 5465) via `rte_format_word(15 downto 12)`:
+
+| Format | Frame Size | Extra Reads in rte5 | Use Case |
+|--------|-----------|---------------------|----------|
+| $0 | 4 words (8 bytes) | none | Most exceptions |
+| $1 | 4 words (8 bytes) | none | Throwaway (interrupt return) |
+| $2 | 6 words (12 bytes) | 1 longword (`rot_cnt=1`) | CHK, TRAPV, Trace, Div0, MMU config |
+| $9 | 10 words (20 bytes) | 3 longwords (`rot_cnt=3`) | Coprocessor mid-instruction |
+| $A | 16 words (32 bytes) | 6 longwords (`rot_cnt=6`) | Short bus fault |
+| $B | 46 words (92 bytes) | 21 longwords (`rot_cnt=21`) | Long bus fault |
+| Other | - | - | Format Error exception (vector 14) |
+
+The `rte5` state loops, reading and discarding one longword per iteration while decrementing `rot_cnt`, until `rot_cnt` reaches 1.
+
+**Key signals**: `rte_format_word` (latched format/vector word), `rot_cnt` (remaining longwords to discard), `trap_format_error` (invalid format detection)
+
+#### Exception Trap Signals
+| Signal | Vector | Trigger |
+|--------|--------|---------|
+| `trap_berr` | 2 ($08) | External BERR or PMMU fault (non-MMU) |
+| `trap_mmu_berr` | 61 ($F4) | PMMU fault with B-bit set |
+| `trap_addr_error` | 3 ($0C) | Misaligned memory access |
+| `trap_illegal` | 4 ($10) | Illegal/undefined opcode |
+| `trap_priv` | 8 ($20) | Supervisor instruction in user mode |
+| `trap_trace` | 9 ($24) | Trace mode single-step |
+| `trap_1010` | 10 ($28) | A-line emulator |
+| `trap_1111` | 11 ($2C) | F-line emulator |
+| `trap_format_error` | 14 ($38) | Invalid RTE stack frame format |
+| `trap_mmu_config` | 56 ($E0) | Invalid TC page size |
+| `trap_interrupt` | 24-31 | External interrupt (IPL level) |
+| `trap_trap` | 32-47 | TRAP #n instruction |
 
 ### Specifications
 - MC68030 User Manual: `/home/adam/Desktop/MC68030UM.pdf` (primary reference for PMMU, cache, instruction timing)
@@ -209,19 +349,13 @@ grep -B5 "process" rtl/tg68k/TG68KdotC_Kernel.vhd | grep -A5 "signal_name"
 
 ## TG68K Register Reference
 
-See [TG68K_REGISTERS.md](TG68K_REGISTERS.md) for detailed specifications:
-- Control Registers (CACR, VBR, SFC, DFC, CAAR, USP, MSP, ISP)
-- PMMU Registers (TC, CRP, SRP, TT0, TT1, MMUSR)
-- Page descriptor formats (short/long format table, page, invalid, indirect)
-- PMOVE addressing modes (Control Alterable only - no PC-relative or immediate)
+See [TG68K_REGISTERS.md](TG68K_REGISTERS.md) for detailed specifications of all control registers, PMMU registers, page descriptor formats, and PMOVE addressing modes.
 
-### Understanding PMOVE Instructions
-PMOVE instructions work like MOVE but with MMU registers. Think of them as equivalent:
-```
-PMOVE TC,(A7)      ~  MOVE.L D0,(A7)      ; Write 32-bit TC to memory at A7
-PMOVE (A7),TC      ~  MOVE.L (A7),D0      ; Read 32-bit from memory to TC
-PMOVE CRP,(A7)     ~  two MOVE.L ops      ; Write 64-bit CRP to memory (two longwords)
-PMOVE TT0,(d16,A5) ~  MOVE.L D0,(d16,A5)  ; Write 32-bit TT0 with displacement
-PMOVE MMUSR,(A7)   ~  MOVE.W D0,(A7)      ; Write 16-bit MMUSR to memory
-```
-The EA calculation, memory access timing, and addressing modes follow the same patterns as MOVE.
+Key quick facts:
+- PMOVE uses `pmmu_brief(14:10)` (5 bits) for P-register selection, dispatched by `brief(15:13)`:
+  - `"000"` group: TT0=`"00010"`, TT1=`"00011"`
+  - `"010"` group: TC=`"10000"`, SRP=`"10010"`, CRP=`"10011"`
+  - `"011"` group: MMUSR=`"11000"`
+- Register sizes: TC/TT0/TT1=32-bit, CRP/SRP=64-bit, MMUSR=16-bit
+- PMOVE addressing: Control Alterable modes only (no PC-relative, no immediate, no An direct)
+- PMOVE works like MOVE but with MMU registers - same EA calculation, memory timing, and bus cycles

@@ -288,9 +288,11 @@ test-moves-validation: setup
 test-rte-formats: setup
 	@echo "Running RTE stack frame format validation tests..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_rte_all_formats.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_rte_all_formats 
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_rte_all_formats
 #2>&1 | grep -E "(PASS|FAIL|Format|Test|Error|=====)"
 
 # MOVEC Illegal Register Trap Test
@@ -498,3 +500,10 @@ report: test-all
 	@echo "Test results in waveform files:" >> test_report.txt
 	@ls -la *.wlf 2>/dev/null >> test_report.txt || echo "No waveforms generated" >> test_report.txt
 	@echo "Test report generated: test_report.txt"
+
+# Exception Stack Frame Verification
+test-exceptions: $(BUILD_DIR)/tg68k.o
+	$(GHDL) -a $(GHDL_FLAGS) tb_exceptions.vhd
+	$(GHDL) -e $(GHDL_FLAGS) tb_exceptions
+	$(GHDL) -r $(GHDL_FLAGS) tb_exceptions --vcd=$(BUILD_DIR)/tb_exceptions.vcd --stop-time=10us
+
