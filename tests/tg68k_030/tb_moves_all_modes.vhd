@@ -328,15 +328,153 @@ architecture behavioral of tb_moves_all_modes is
     306 => x"23CD", 307 => x"0000", 308 => x"1E20",  -- MOVE.L A5,($1E20).L at $262
 
     -- ============================================
-    -- TEST 28: Verify CCR unchanged
-    -- Move SR to D0 to check
+    -- TEST 34: BUG #328 - MOVES.B A1,(A1)+ same register
+    -- A1=$1D30, MOVES.B A1,(A1)+ should write post-incremented value
+    -- Expected: byte at $1D30 = $31 (low byte of A1=$1D31 after +1)
+    -- Bug: writes $30 (pre-increment value) instead of $31
     -- ============================================
-    309 => x"42C0",  -- MOVE SR,D0 at $268
+    309 => x"227C", 310 => x"0000", 311 => x"1D30",  -- MOVEA.L #$1D30,A1
+    312 => x"0E19", 313 => x"9800",                    -- MOVES.B A1,(A1)+
+    -- Store A1 to verify post-increment
+    314 => x"23C9", 315 => x"0000", 316 => x"1E30",  -- MOVE.L A1,($1E30).L
+
+    -- ============================================
+    -- TEST 35: BUG #329 - MOVES.L -(A1),D0 word order
+    -- Memory at $1D40: $00A6, $1D42: $AAC6 => longword $00A6AAC6
+    -- A1=$1D44, -(A1) decrements by 4 to $1D40
+    -- Expected: D0=$00A6AAC6
+    -- Bug: D0=$AAC60000 (word order swapped)
+    -- ============================================
+    317 => x"31FC", 318 => x"00A6", 319 => x"1D40",  -- MOVE.W #$00A6,($1D40).W
+    320 => x"31FC", 321 => x"AAC6", 322 => x"1D42",  -- MOVE.W #$AAC6,($1D42).W
+    323 => x"227C", 324 => x"0000", 325 => x"1D44",  -- MOVEA.L #$1D44,A1
+    326 => x"0EA1", 327 => x"0000",                    -- MOVES.L -(A1),D0
+    -- Store results
+    328 => x"23C0", 329 => x"0000", 330 => x"1E40",  -- MOVE.L D0,($1E40).L
+    331 => x"23C9", 332 => x"0000", 333 => x"1E48",  -- MOVE.L A1,($1E48).L
+
+    -- ============================================
+    -- TEST 36: BUG #330 - MOVES.W D2,(d8,A0,Xn) with full-format extension
+    -- D2=$AAAA7F7F, A0=$1D50
+    -- Opcode: $0E70 (MOVES.W mode=110 reg=A0)
+    -- MOVES ext: $2FCE (D2, dr=1 CPU->mem, reserved bits non-zero)
+    -- Full ext:  $1350 (D1.W*2, IS=1 index suppressed, BD=null, no indirect)
+    -- Effective address = A0 = $1D50
+    -- Expected: word at $1D50 = $7F7F, A0 unchanged, SR unchanged
+    -- Bug: writes to address $0, value $0001, SR=$2004 (Z flag set)
+    -- Root cause: ld_229_1 missing MOVES redirect to moves1
+    -- ============================================
+    334 => x"243C", 335 => x"AAAA", 336 => x"7F7F",  -- MOVE.L #$AAAA7F7F,D2
+    337 => x"207C", 338 => x"0000", 339 => x"1D50",  -- MOVEA.L #$1D50,A0
+    340 => x"0E70", 341 => x"2FCE", 342 => x"1350",  -- MOVES.W D2,(d8,A0,Xn) full-format
+    -- Store A0 for verification
+    343 => x"23C8", 344 => x"0000", 345 => x"1E50",  -- MOVE.L A0,($1E50).L
+
+    -- ============================================
+    -- TEST 37: BUG #331 - MOVES.W with full-format BS=1, IS=1, BD=word
+    -- Base register A1=$DEAD0000 (should be IGNORED due to BS=1)
+    -- Index suppressed (IS=1), displacement only
+    -- Full ext: $01E0 (BS=1, IS=1, BD=word), BD=$1D60
+    -- EA = $1D60 (displacement only, base+index suppressed)
+    -- Expected: word at $1D60 = $7F7F, A1 unchanged
+    -- ============================================
+    346 => x"227C", 347 => x"DEAD", 348 => x"0000",  -- MOVEA.L #$DEAD0000,A1
+    349 => x"0E71", 350 => x"2800", 351 => x"01E0", 352 => x"1D60",  -- MOVES.W D2,(ff: BS=1 IS=1 BD=$1D60)
+    353 => x"23C9", 354 => x"0000", 355 => x"1E60",  -- MOVE.L A1,($1E60).L
+
+    -- ============================================
+    -- TEST 38: BUG #331 - MOVES.W with full-format BS=1, IS=0, D1.L index
+    -- Base register A1=$DEAD0000 (should be IGNORED due to BS=1)
+    -- D1=$00001000 (index register, used)
+    -- Full ext: $19A0 (D1.L*1, BS=1, IS=0, BD=word), BD=$0D70
+    -- EA = D1.L + $0D70 = $1000 + $0D70 = $1D70
+    -- Expected: word at $1D70 = $7F7F, A1 unchanged
+    -- ============================================
+    356 => x"223C", 357 => x"0000", 358 => x"1000",  -- MOVE.L #$00001000,D1
+    359 => x"227C", 360 => x"DEAD", 361 => x"0000",  -- MOVEA.L #$DEAD0000,A1
+    362 => x"0E71", 363 => x"2800", 364 => x"19A0", 365 => x"0D70",  -- MOVES.W D2,(ff: BS=1 D1.L BD=$0D70)
+    366 => x"23C9", 367 => x"0000", 368 => x"1E68",  -- MOVE.L A1,($1E68).L
+
+    -- ============================================
+    -- TEST 39: BUG #331 - MOVES.B with full-format BS=1, IS=0, D1.W index
+    -- Base register A1=$DEAD0000 (should be IGNORED due to BS=1)
+    -- D1=$00001000 (index register, used as D1.W=$1000)
+    -- Full ext: $11A0 (D1.W*1, BS=1, IS=0, BD=word), BD=$0D80
+    -- EA = sign_extend(D1.W) + $0D80 = $1000 + $0D80 = $1D80
+    -- Expected: byte at $1D80 = $7F (low byte of D2), A1 unchanged
+    -- ============================================
+    369 => x"227C", 370 => x"DEAD", 371 => x"0000",  -- MOVEA.L #$DEAD0000,A1
+    372 => x"0E31", 373 => x"2800", 374 => x"11A0", 375 => x"0D80",  -- MOVES.B D2,(ff: BS=1 D1.W BD=$0D80)
+    376 => x"23C9", 377 => x"0000", 378 => x"1E78",  -- MOVE.L A1,($1E78).L
+
+    -- ============================================
+    -- Setup for memory indirect tests: A3=$1000
+    -- ============================================
+    379 => x"267C", 380 => x"0000", 381 => x"1000",  -- MOVEA.L #$00001000,A3
+
+    -- ============================================
+    -- TEST 40: Memory indirect preindexed, null OD, IS=1, BS=0
+    -- MOVES.W D2,([$0E80.w,A3]) - CPU->mem
+    -- EA ext: full-format, BS=0, IS=1, BD=word($0E80), I/IS=001 (null OD)
+    -- A3=$1000, intermediate = A3 + $0E80 = $1E80
+    -- Read indirect pointer from $1E80 (pre-init: $00001F00)
+    -- Final EA = $1F00 (null outer displacement)
+    -- Expected: word at $1F00 = $7F7F (from D2=$AAAA7F7F)
+    -- ============================================
+    382 => x"0E73", 383 => x"2800", 384 => x"0161", 385 => x"0E80",
+    386 => x"23CB", 387 => x"0000", 388 => x"1E88",  -- MOVE.L A3,($1E88).L
+
+    -- ============================================
+    -- TEST 41: Memory indirect preindexed, word OD, IS=0, BS=1
+    -- MOVES.W D2,([D1.L*1],$0020.w) - CPU->mem
+    -- EA ext: full-format, BS=1, IS=0, BD=null, D1.L scale 1, I/IS=010 (word OD)
+    -- D1=$00001E90, intermediate = 0 + D1.L = $1E90
+    -- Read indirect pointer from $1E90 (pre-init: $00001F10)
+    -- Outer displacement = $0020
+    -- Final EA = $1F10 + $0020 = $1F30
+    -- Expected: word at $1F30 = $7F7F
+    -- ============================================
+    389 => x"223C", 390 => x"0000", 391 => x"1E90",  -- MOVE.L #$00001E90,D1
+    392 => x"0E73", 393 => x"2800", 394 => x"1992", 395 => x"0020",
+    396 => x"23C1", 397 => x"0000", 398 => x"1E98",  -- MOVE.L D1,($1E98).L
+
+    -- ============================================
+    -- TEST 42: Memory indirect, IS=1, BS=1, BD=word, null OD
+    -- MOVES.B D2,([$1EA0.w]) - CPU->mem, both base and index suppressed
+    -- EA ext: full-format, BS=1, IS=1, BD=word($1EA0), I/IS=001 (null OD)
+    -- Intermediate = $1EA0 (base suppressed, index suppressed, BD only)
+    -- Read indirect pointer from $1EA0 (pre-init: $00001F40)
+    -- Final EA = $1F40
+    -- Expected: byte at $1F40 = $7F (high byte of word at $1F40)
+    -- ============================================
+    399 => x"0E33", 400 => x"2800", 401 => x"01E1", 402 => x"1EA0",
+
+    -- ============================================
+    -- TEST 43: Memory indirect POSTINDEXED, null OD, BS=0, IS=0
+    -- MOVES.W D2,([$0E80.w,A3],D1.L*1) - CPU->mem
+    -- EA ext: full-format, D1.L*1, BS=0, IS=0, BD=word($0E80), I/IS=101 (postindex null OD)
+    -- A3=$1000, intermediate = A3 + $0E80 = $1E80
+    -- Read indirect pointer from $1E80 (pre-init: $00001F00)
+    -- Final EA = $1F00 + D1.L*1 = $1F00 + $0004 = $1F04
+    -- Expected: word at $1F04 = $7F7F (from D2=$AAAA7F7F)
+    -- Bug: ld_AnXn2 context capture sets moves_ea_use_base='1' for postindex,
+    -- causing base register A3 to be added a second time (already in intermediate addr)
+    -- ============================================
+    403 => x"223C", 404 => x"0000", 405 => x"0004",  -- MOVE.L #$00000004,D1
+    406 => x"0E73", 407 => x"2800", 408 => x"1925", 409 => x"0E80",
+    410 => x"23CB", 411 => x"0000", 412 => x"1EA8",  -- MOVE.L A3,($1EA8).L
+    413 => x"23C1", 414 => x"0000", 415 => x"1EB0",  -- MOVE.L D1,($1EB0).L
+
+    -- ============================================
+    -- TEST 28: Verify SR unchanged after all MOVES tests
+    -- ============================================
+    416 => x"40C0",                                     -- MOVE SR,D0
+    417 => x"23C0", 418 => x"0000", 419 => x"1E58",  -- MOVE.L D0,($1E58).L
 
     -- ============================================
     -- End of tests - STOP
     -- ============================================
-    310 => x"4E72", 311 => x"2700",  -- STOP #$2700 at $26A
+    420 => x"4E72", 421 => x"2700",  -- STOP #$2700
 
     others => x"4E71"  -- NOP fill
   );
@@ -345,15 +483,24 @@ architecture behavioral of tb_moves_all_modes is
 
   -- RAM for data area ($1000-$1FFF) and stack ($2000-$2FFF)
   type ram_type is array (0 to 4095) of std_logic_vector(15 downto 0);
-  signal ram : ram_type := (others => x"0000");
+  -- RAM pre-init: indirect pointers for memory indirect MOVES tests (40-42)
+  -- Byte addr $1E80 (index 1856,1857): indirect pointer -> $00001F00
+  -- Byte addr $1E90 (index 1864,1865): indirect pointer -> $00001F10
+  -- Byte addr $1EA0 (index 1872,1873): indirect pointer -> $00001F40
+  signal ram : ram_type := (
+    1857 => x"1F00",  -- low word of indirect ptr at $1E80
+    1865 => x"1F10",  -- low word of indirect ptr at $1E90
+    1873 => x"1F40",  -- low word of indirect ptr at $1EA0
+    others => x"0000"
+  );
 
   -- Test tracking
   signal tests_passed : integer := 0;
   signal tests_failed : integer := 0;
   signal current_test : integer := 0;
-  signal reported : std_logic_vector(33 downto 1) := (others => '0');
+  signal reported : std_logic_vector(43 downto 1) := (others => '0');
   signal all_done : std_logic := '0';  -- Set after STOP to trigger reporting
-  signal report_idx : integer range 0 to 34 := 0;  -- One-per-cycle deferred reporting counter
+  signal report_idx : integer range 0 to 44 := 0;  -- One-per-cycle deferred reporting counter
   signal reporting_done : std_logic := '0';  -- Set when all tests have been reported
 
   -- FC tracking
@@ -897,11 +1044,206 @@ begin
             pass := false;
             report "TEST 33: MOVES.W (A1),A5 -> FAILED (A5=$" & slv_to_hex(ram_value) & " expected $00001234)";
           end if;
+        when 34 =>
+          -- BUG #328: MOVES.B A1,(A1)+ with A1=$1D30
+          -- Expected: byte at $1D30 = $31 (low byte of POST-incremented A1=$1D31)
+          -- Bug: writes $30 (pre-increment value)
+          -- RAM at $1D30: word index = ($1D30-$1000)/2 = 1688, byte at high byte
+          -- A1 stored at $1E30: index = ($1E30-$1000)/2 = 1816 (hi), 1817 (lo)
+          if ram(1688)(15 downto 8) = x"31" then
+            -- Check A1 post-increment value
+            ram_value := ram(1816)(15 downto 0) & ram(1817)(15 downto 0);
+            if ram_value = x"00001D31" then
+              pass := true;
+              report "TEST 34: MOVES.B A1,(A1)+ -> PASSED (byte=$31 post-incremented, A1=$1D31)";
+            else
+              pass := false;
+              report "TEST 34: MOVES.B A1,(A1)+ -> FAILED: A1=$" & slv_to_hex(ram_value) & " expected $00001D31";
+            end if;
+          elsif ram(1688)(15 downto 8) = x"30" then
+            pass := false;
+            report "TEST 34: MOVES.B A1,(A1)+ -> FAILED: byte=$30 (BUG #328: pre-increment value, expected $31)";
+          else
+            pass := false;
+            report "TEST 34: MOVES.B A1,(A1)+ -> FAILED: byte=$" & slv_to_hex(ram(1688)(15 downto 8)) & " expected $31";
+          end if;
+        when 35 =>
+          -- BUG #329: MOVES.L -(A1),D0 word order
+          -- Memory at $1D40=$00A6, $1D42=$AAC6. A1=$1D44, -(A1)=$1D40
+          -- Expected: D0=$00A6AAC6
+          -- Bug: D0=$AAC60000 (word order swapped)
+          -- D0 stored at $1E40: index = ($1E40-$1000)/2 = 1824 (hi), 1825 (lo)
+          -- A1 stored at $1E48: index = ($1E48-$1000)/2 = 1828 (hi), 1829 (lo)
+          ram_value := ram(1824)(15 downto 0) & ram(1825)(15 downto 0);
+          if ram_value = x"00A6AAC6" then
+            -- Check A1 = $1D40 (decremented by 4)
+            ram_value := ram(1828)(15 downto 0) & ram(1829)(15 downto 0);
+            if ram_value = x"00001D40" then
+              pass := true;
+              report "TEST 35: MOVES.L -(A1),D0 -> PASSED (D0=$00A6AAC6, A1=$1D40)";
+            else
+              pass := false;
+              report "TEST 35: MOVES.L -(A1),D0 -> FAILED: A1=$" & slv_to_hex(ram_value) & " expected $00001D40";
+            end if;
+          elsif ram_value = x"AAC60000" then
+            pass := false;
+            report "TEST 35: MOVES.L -(A1),D0 -> FAILED: D0=$AAC60000 (BUG #329: word order swapped, expected $00A6AAC6)";
+          else
+            pass := false;
+            report "TEST 35: MOVES.L -(A1),D0 -> FAILED: D0=$" & slv_to_hex(ram_value) & " expected $00A6AAC6";
+          end if;
+        when 36 =>
+          -- BUG #330: MOVES.W D2,(A0) with D2=$AAAA7F7F, A0=$1D50
+          -- Expected: word at $1D50 = $7F7F, A0=$1D50 unchanged
+          -- Bug: writes to address $0, value $0001, SR modified
+          -- RAM at $1D50: word index = ($1D50-$1000)/2 = 1704
+          -- A0 stored at $1E50: index = ($1E50-$1000)/2 = 1832 (hi), 1833 (lo)
+          if ram(1704)(15 downto 0) = x"7F7F" then
+            -- Check A0 preserved
+            ram_value := ram(1832)(15 downto 0) & ram(1833)(15 downto 0);
+            if ram_value = x"00001D50" then
+              pass := true;
+              report "TEST 36: MOVES.W D2,(A0) -> PASSED (mem=$7F7F, A0=$1D50 preserved)";
+            else
+              pass := false;
+              report "TEST 36: MOVES.W D2,(A0) -> FAILED: A0=$" & slv_to_hex(ram_value) & " expected $00001D50";
+            end if;
+          else
+            pass := false;
+            report "TEST 36: MOVES.W D2,(A0) -> FAILED: mem=$" & slv_to_hex(ram(1704)(15 downto 0)) & " expected $7F7F (BUG #330)";
+          end if;
+        when 37 =>
+          -- BUG #331: MOVES.W with full-format BS=1, IS=1, BD=word($1D60)
+          -- EA = $1D60 (base A1 suppressed, index suppressed, displacement only)
+          -- RAM at $1D60: word index = ($1D60-$1000)/2 = 1712
+          -- A1 at $1E60: word index = ($1E60-$1000)/2 = 1840 (hi), 1841 (lo)
+          if ram(1712)(15 downto 0) = x"7F7F" then
+            ram_value := ram(1840)(15 downto 0) & ram(1841)(15 downto 0);
+            if ram_value = x"DEAD0000" then
+              pass := true;
+              report "TEST 37: MOVES.W D2,(ff:BS=1,IS=1,BD=$1D60) -> PASSED (mem=$7F7F, A1=$DEAD0000)";
+            else
+              pass := false;
+              report "TEST 37: MOVES.W D2,(ff:BS=1,IS=1,BD=$1D60) -> FAILED: A1=$" & slv_to_hex(ram_value) & " expected $DEAD0000";
+            end if;
+          else
+            pass := false;
+            report "TEST 37: MOVES.W D2,(ff:BS=1,IS=1,BD=$1D60) -> FAILED: mem=$" & slv_to_hex(ram(1712)(15 downto 0)) & " expected $7F7F (BUG #331: base not suppressed?)";
+          end if;
+        when 38 =>
+          -- BUG #331: MOVES.W with full-format BS=1, IS=0, D1.L index, BD=$0D70
+          -- EA = D1.L + $0D70 = $1000 + $0D70 = $1D70
+          -- RAM at $1D70: word index = ($1D70-$1000)/2 = 1720
+          -- A1 at $1E68: word index = ($1E68-$1000)/2 = 1844 (hi), 1845 (lo)
+          if ram(1720)(15 downto 0) = x"7F7F" then
+            ram_value := ram(1844)(15 downto 0) & ram(1845)(15 downto 0);
+            if ram_value = x"DEAD0000" then
+              pass := true;
+              report "TEST 38: MOVES.W D2,(ff:BS=1,D1.L,BD=$0D70) -> PASSED (mem=$7F7F, A1=$DEAD0000)";
+            else
+              pass := false;
+              report "TEST 38: MOVES.W D2,(ff:BS=1,D1.L,BD=$0D70) -> FAILED: A1=$" & slv_to_hex(ram_value) & " expected $DEAD0000";
+            end if;
+          else
+            pass := false;
+            report "TEST 38: MOVES.W D2,(ff:BS=1,D1.L,BD=$0D70) -> FAILED: mem=$" & slv_to_hex(ram(1720)(15 downto 0)) & " expected $7F7F (BUG #331: base not suppressed?)";
+          end if;
+        when 39 =>
+          -- BUG #331: MOVES.B with full-format BS=1, IS=0, D1.W index, BD=$0D80
+          -- EA = sign_extend(D1.W) + $0D80 = $1000 + $0D80 = $1D80
+          -- RAM at $1D80: word index = ($1D80-$1000)/2 = 1728, byte in high byte
+          -- A1 at $1E78: word index = ($1E78-$1000)/2 = 1852 (hi), 1853 (lo)
+          if ram(1728)(15 downto 8) = x"7F" then
+            ram_value := ram(1852)(15 downto 0) & ram(1853)(15 downto 0);
+            if ram_value = x"DEAD0000" then
+              pass := true;
+              report "TEST 39: MOVES.B D2,(ff:BS=1,D1.W,BD=$0D80) -> PASSED (byte=$7F, A1=$DEAD0000)";
+            else
+              pass := false;
+              report "TEST 39: MOVES.B D2,(ff:BS=1,D1.W,BD=$0D80) -> FAILED: A1=$" & slv_to_hex(ram_value) & " expected $DEAD0000";
+            end if;
+          else
+            pass := false;
+            report "TEST 39: MOVES.B D2,(ff:BS=1,D1.W,BD=$0D80) -> FAILED: byte=$" & slv_to_hex(ram(1728)(15 downto 8)) & " expected $7F (BUG #331: base not suppressed?)";
+          end if;
+        when 40 =>
+          -- Memory indirect: MOVES.W D2,([$0E80.w,A3]) - preindexed, null OD
+          -- A3=$1000, BD=$0E80, intermediate=$1E80, indirect ptr->$1F00
+          -- RAM at $1F00: word index = ($1F00-$1000)/2 = 1920
+          -- A3 saved at $1E88: word index = ($1E88-$1000)/2 = 1860 (hi), 1861 (lo)
+          if ram(1920)(15 downto 0) = x"7F7F" then
+            ram_value := ram(1860)(15 downto 0) & ram(1861)(15 downto 0);
+            if ram_value = x"00001000" then
+              pass := true;
+              report "TEST 40: MOVES.W D2,([$0E80.w,A3]) -> PASSED (mem=$7F7F, A3=$00001000)";
+            else
+              pass := false;
+              report "TEST 40: MOVES.W D2,([$0E80.w,A3]) -> FAILED: A3=$" & slv_to_hex(ram_value) & " expected $00001000";
+            end if;
+          else
+            pass := false;
+            report "TEST 40: MOVES.W D2,([$0E80.w,A3]) -> FAILED: mem=$" & slv_to_hex(ram(1920)(15 downto 0)) & " expected $7F7F";
+          end if;
+        when 41 =>
+          -- Memory indirect: MOVES.W D2,([D1.L*1],$0020.w) - preindexed, word OD
+          -- D1=$1E90, BS=1, indirect ptr at $1E90->$1F10, OD=$0020, final EA=$1F30
+          -- RAM at $1F30: word index = ($1F30-$1000)/2 = 1944
+          -- D1 saved at $1E98: word index = ($1E98-$1000)/2 = 1868 (hi), 1869 (lo)
+          if ram(1944)(15 downto 0) = x"7F7F" then
+            ram_value := ram(1868)(15 downto 0) & ram(1869)(15 downto 0);
+            if ram_value = x"00001E90" then
+              pass := true;
+              report "TEST 41: MOVES.W D2,([D1.L*1],$0020.w) -> PASSED (mem=$7F7F, D1=$00001E90)";
+            else
+              pass := false;
+              report "TEST 41: MOVES.W D2,([D1.L*1],$0020.w) -> FAILED: D1=$" & slv_to_hex(ram_value) & " expected $00001E90";
+            end if;
+          else
+            pass := false;
+            report "TEST 41: MOVES.W D2,([D1.L*1],$0020.w) -> FAILED: mem=$" & slv_to_hex(ram(1944)(15 downto 0)) & " expected $7F7F";
+          end if;
+        when 42 =>
+          -- Memory indirect: MOVES.B D2,([$1EA0.w]) - BS=1, IS=1, BD=$1EA0, null OD
+          -- Intermediate=$1EA0, indirect ptr->$1F40, final EA=$1F40
+          -- RAM at $1F40: word index = ($1F40-$1000)/2 = 1952, byte in high byte
+          if ram(1952)(15 downto 8) = x"7F" then
+            pass := true;
+            report "TEST 42: MOVES.B D2,([$1EA0.w]) -> PASSED (byte=$7F)";
+          else
+            pass := false;
+            report "TEST 42: MOVES.B D2,([$1EA0.w]) -> FAILED: byte=$" & slv_to_hex(ram(1952)(15 downto 8)) & " expected $7F";
+          end if;
+        when 43 =>
+          -- Memory indirect POSTINDEXED: MOVES.W D2,([$0E80.w,A3],D1.L*1)
+          -- A3=$1000, BD=$0E80, intermediate=$1E80, indirect ptr->$1F00
+          -- D1=$0004, final EA = $1F00 + $0004 = $1F04
+          -- RAM at $1F04: word index = ($1F04-$1000)/2 = 1922
+          -- A3 saved at $1EA8: word index = ($1EA8-$1000)/2 = 1876 (hi), 1877 (lo)
+          -- D1 saved at $1EB0: word index = ($1EB0-$1000)/2 = 1880 (hi), 1881 (lo)
+          if ram(1922)(15 downto 0) = x"7F7F" then
+            ram_value := ram(1876)(15 downto 0) & ram(1877)(15 downto 0);
+            if ram_value = x"00001000" then
+              ram_value := ram(1880)(15 downto 0) & ram(1881)(15 downto 0);
+              if ram_value = x"00000004" then
+                pass := true;
+                report "TEST 43: MOVES.W D2,([$0E80.w,A3],D1.L*1) -> PASSED (mem=$7F7F, A3=$1000, D1=$0004)";
+              else
+                pass := false;
+                report "TEST 43: MOVES.W D2,(postindex) -> FAILED: D1=$" & slv_to_hex(ram_value) & " expected $00000004";
+              end if;
+            else
+              pass := false;
+              report "TEST 43: MOVES.W D2,(postindex) -> FAILED: A3=$" & slv_to_hex(ram_value) & " expected $00001000 (base added twice?)";
+            end if;
+          else
+            pass := false;
+            report "TEST 43: MOVES.W D2,(postindex) -> FAILED: mem=$" & slv_to_hex(ram(1922)(15 downto 0)) & " expected $7F7F (wrong address?)";
+          end if;
         when others =>
           null;
       end case;
 
-      if test_id >= 1 and test_id <= 33 then
+      if test_id >= 1 and test_id <= 43 then
         if pass then
           tests_passed <= tests_passed + 1;
         else
@@ -950,7 +1292,7 @@ begin
           end if;
 
           -- Timeout detection (only once per test)
-          if timeout_count > 200 and current_test >= 1 and current_test <= 33 and reported(current_test) = '0' then
+          if timeout_count > 200 and current_test >= 1 and current_test <= 43 and reported(current_test) = '0' then
             report "TEST " & integer'image(current_test) & " TIMEOUT/NO PROGRESS (possible lockup)";
             tests_failed <= tests_failed + 1;
             reported(current_test) <= '1';
@@ -964,15 +1306,15 @@ begin
         -- report_test 15 times in one cycle would read the same old value of
         -- tests_passed/tests_failed (signals only update after process suspends).
         if all_done = '1' and reporting_done = '0' then
-          if report_idx >= 1 and report_idx <= 33 then
+          if report_idx >= 1 and report_idx <= 43 then
             if reported(report_idx) = '0' then
               report_test(report_idx);
             end if;
           end if;
-          if report_idx < 34 then
+          if report_idx < 44 then
             report_idx <= report_idx + 1;
           end if;
-          if report_idx = 33 then
+          if report_idx = 43 then
             reporting_done <= '1';
           end if;
         end if;
@@ -994,7 +1336,7 @@ begin
     -- Wait for STOP instruction
     for i in 0 to 20000 loop
       wait until rising_edge(clk);
-      if to_integer(unsigned(addr_out(23 downto 0))) = 16#26A# and busstate = "00" then
+      if to_integer(unsigned(addr_out(23 downto 0))) = 16#348# and busstate = "00" then
         exit;
       end if;
     end loop;

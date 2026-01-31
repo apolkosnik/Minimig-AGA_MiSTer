@@ -929,11 +929,71 @@ ALU: TG68K_ALU
 					moves_ea_latched <= memaddr_a;
 					moves_ea_use_base <= '1';  -- base = An
 				end if;
-				-- (d8,An,Xn): memaddr_a = indexed offset from setdisp='1'/briefext
+				-- (d8,An,Xn) brief/full format: memaddr_a = indexed offset from setdisp='1'/briefext
 				if micro_state = ld_AnXn2 and opcode(15 downto 8) = "00001110" and
 				   opcode(7 downto 6) /= "11" and opcode(5 downto 3) = "110" then
 					moves_ea_latched <= memaddr_a;
-					moves_ea_use_base <= '1';  -- base = An
+					-- BUG #331 FIX: Check BS bit for base register suppression.
+					-- Full-format (brief(8)='1'): BS=brief(7), 1=suppress base.
+					-- Brief-format (brief(8)='0'): bit 7 is d8 sign bit, always use base.
+					-- Memory indirect postindex: ld_AnXn2 is reached from ld_229_4
+					-- when brief(6)='0' AND brief(2)='1'. The base register was already
+					-- resolved into the intermediate address (An+BD -> indirect read).
+					-- The final EA = indirect_pointer + index. Don't add base again.
+					-- NOTE: I/IS field (bits 2:0) only valid for full-format (bit 8=1).
+					-- For brief-format, bits 2:0 are displacement - don't misinterpret.
+					if brief(8) = '1' and brief(2 downto 0) /= "000" then
+						moves_ea_use_base <= '0';  -- memory indirect: base already resolved
+					elsif brief(8) = '1' and brief(7) = '1' then
+						moves_ea_use_base <= '0';  -- full-format BS=1: suppress base
+					else
+						moves_ea_use_base <= '1';  -- brief-format or BS=0: use base An
+					end if;
+				end if;
+				-- BUG #330 FIX: (d8,An,Xn) full-format: latch EA during ld_229_1.
+				-- Full-format extension words bypass ld_AnXn2 and go through ld_229_1.
+				-- Without this, moves_ea_latched stays $0 and MOVES writes to address 0.
+				-- BUG #332 FIX: When BD=word is being fetched (state="00"), memaddr_a reads
+				-- last_data_read which still has the EXTENSION WORD, not the BD word.
+				-- The BD word is in data_read (combinational from bus). Use data_read
+				-- directly for IS=1 path (ld_229_1 -> moves1, no ld_AnXn2 to correct it).
+				-- For IS=0 path, the ld_AnXn2 capture will override this with the correct
+				-- index+BD value (fixed via memaddr_delta_rega BUG #332 fix).
+				if micro_state = ld_229_1 and opcode(15 downto 8) = "00001110" and
+				   opcode(7 downto 6) /= "11" and opcode(5 downto 3) = "110" then
+					if brief(5) = '1' and state = "00" then
+						-- BD=word/long being fetched this cycle: use data_read (bus data)
+						-- data_read is sign-extended for word fetches (memread(0)='1')
+						moves_ea_latched <= data_read;
+					else
+						-- BD=null or non-fetch state: memaddr_a is correct (0 for null)
+						moves_ea_latched <= memaddr_a;
+					end if;
+					-- BUG #331 FIX: Check BS bit (brief(7)) for base suppression.
+					-- ld_229_1 is always full-format (brief(8)='1'), so just check BS.
+					if brief(7) = '1' then
+						moves_ea_use_base <= '0';  -- BS=1: suppress base register
+					else
+						moves_ea_use_base <= '1';  -- BS=0: use base register An
+					end if;
+				end if;
+				-- Memory indirect: latch EA from ld_229_4 (non-postindex path).
+				-- ea_data = indirect pointer (read from memory at ld_229_3).
+				-- For WORD/LONG outer displacement, use data_read (combinational from bus)
+				-- because last_data_read is stale (not yet updated with OD word).
+				-- For NULL outer displacement, ea_data alone is the final EA.
+				-- Base register was already resolved through the indirection chain,
+				-- so moves_ea_use_base='0' (no base register addition in moves1).
+				if micro_state = ld_229_4 and opcode(15 downto 8) = "00001110" and
+				   opcode(7 downto 6) /= "11" and opcode(5 downto 3) = "110" then
+					if brief(1) = '1' then
+						-- WORD/LONG outer displacement: ea_data + data_read
+						moves_ea_latched <= ea_data + data_read;
+					else
+						-- NULL outer displacement: indirect pointer only
+						moves_ea_latched <= ea_data;
+					end if;
+					moves_ea_use_base <= '0';  -- base resolved through indirection
 				end if;
 				-- (xxx).W/L: absolute address
 				if micro_state = ld_nn and opcode(15 downto 8) = "00001110" and
@@ -1140,11 +1200,26 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 		END IF;
 	END PROCESS;
 	
-PROCESS (long_start, reg_QB, data_write_tmp, exec, data_read, data_write_mux, memmaskmux, bf_ext_out, 
-		 data_write_muxin, memmask, oddout, addr)
+PROCESS (long_start, reg_QB, data_write_tmp, exec, data_read, data_write_mux, memmaskmux, bf_ext_out,
+		 data_write_muxin, memmask, oddout, addr,
+		 moves_bus_pending, moves_direction, moves_reg, addsub_q, opcode)
 	BEGIN
 		IF exec(write_reg)='1' THEN
-			data_write_muxin <= reg_QB;
+			-- BUG #328 FIX: Forward post-modified address register value when
+			-- MOVES CPU->mem source register (from extension word) matches the
+			-- EA address register with auto-modify (postadd/presub).
+			-- reg_QB reads the OLD value before the clock-edge writeback.
+			-- addsub_q has the correct updated value (An +/- size).
+			-- Guard with long_start='0' to avoid intermediate delta during
+			-- longaktion first cycle (where addsub_b=2 instead of 4).
+			IF moves_bus_pending = '1' AND moves_direction = '1' AND
+			   (exec(postadd) = '1' OR exec(presub) = '1') AND
+			   moves_reg = ('1' & opcode(2 downto 0)) AND
+			   long_start = '0' THEN
+				data_write_muxin <= addsub_q;
+			ELSE
+				data_write_muxin <= reg_QB;
+			END IF;
 		ELSE
 			data_write_muxin <= data_write_tmp;
 		END IF;
@@ -1635,7 +1710,7 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 -----------------------------------------------------------------------------
 PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatype, interrupt, rIPL_nr, IPL_vec,
          memaddr_reg, memaddr_delta_rega, memaddr_delta_regb, reg_QA, use_base, VBR, last_data_read, trap_vector, exec, set, cpu, use_VBR_Stackframe,
-         pmove_disp_latched, micro_state, opcode, moves_ea_areg, moves_bus_pending, memmaskmux,
+         pmove_disp_latched, micro_state, opcode, fline_opcode_latch, moves_ea_areg, moves_bus_pending, memmaskmux,
          moves_ea_latched, moves_ea_use_base)
 	BEGIN
 		
@@ -1754,14 +1829,12 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				-- BUG #317 FIX: Only zero delta on FIRST word of longword (memmaskmux(3)='1')
 				-- During second word (memmaskmux(3)='0'), allow the +2 increment via addsub
 				-- Without this, MOVES.L writes both words to the same address!
-				-- BUG #321 FIX: MOVES -(An) pre-decrement needs address = addsub_q = A0-size
-				-- Unlike (An) and (An)+, the pre-decrement must happen BEFORE memory access.
-				-- addsub_q = A0-size because exec(presub) sets opaddsub='1' (subtraction).
-				-- Must check BEFORE the general (An)/(An)+/-(An) override below.
-				ELSIF (micro_state = moves1 OR moves_bus_pending = '1') AND
-				    opcode(5 downto 3) = "100" AND memmaskmux(3)='1' THEN
-					memaddr_delta_rega <= addsub_q;
-					-- use_base stays '0': addr = 0 + addsub_q = A0-size
+				-- BUG #329 FIX: Removed MOVES -(An) handler that forced addr=addsub_q.
+				-- During moves1, exec(presub) isn't active yet so the ALU uses addsub_b=2
+				-- even for longword (which needs -4). The ELSE branch at the end of this
+				-- chain correctly uses memaddr_a which IS -4 for longaktion presub
+				-- (via set(presub)='1' AND set(longaktion)='1' at line 1719-1720).
+				-- This also fixes BUG #321 (MOVES -(An) pre-decrement) via the same path.
 				-- BUG #322 FIX: MOVES complex EA modes - use latched displacement/address.
 				-- For (d16,An), (d8,An,Xn), and (xxx).W/L, the EA computed by ld_dAn1/ld_AnXn2/ld_nn
 				-- is stored in memaddr_delta_rega for only one cycle. By the time moves1 runs,
@@ -1797,25 +1870,67 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					      (opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100") AND
 					      memmaskmux(3)='1' THEN
 						-- BUG #290 FIX: LO state first word uses pmove_ea_latched (already has +4 from HI)
+					
 					-- BUG #302 FIX: Special case for (An)+ mode CRP/SRP LOW word reads
+					-- BUG #339 FIX: pmove_decode handling - memmaskmux not reliable during decode
+					ELSIF micro_state = pmove_decode AND
+					      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" OR fline_opcode_latch(5 downto 3)="100") THEN
+						-- Modes 010/011: Simple (An)/(An)+ - no delta
+						IF fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" THEN
+							memaddr_delta_rega <= (others => '0');
+							use_base <= '1';
+						
+						-- Mode 100: -(An) - Latch presub decrement during decode
+						ELSE  -- Must be 100 based on outer condition
+							memaddr_delta_rega <= addsub_q;  -- Latch -4/-8 while presub is active
+							use_base <= '1';
+						END IF;
+					
+					-- BUG #339 FIX: PMOVE execution states with memmaskmux guard
 					ELSIF (micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo OR
 					       micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_mem_to_mmu_lo) AND
-					      (opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" OR
-					       opcode(5 downto 3)="101" OR opcode(5 downto 3)="110") AND
+					      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" OR
+					       fline_opcode_latch(5 downto 3)="101" OR fline_opcode_latch(5 downto 3)="110" OR
+					       (fline_opcode_latch(5 downto 3)="111" AND (fline_opcode_latch(2 downto 0)="000" OR fline_opcode_latch(2 downto 0)="001"))) AND
 					      memmaskmux(3)='1' THEN
-						-- Modes 010/011/100: Simple (An)/(An)+/-(An) - no displacement
-						-- Modes 101/110: (d16,An)/(d8,An,Xn) - displacement in pmove_disp_latched
-						IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100" THEN
-							memaddr_delta_rega <= (others => '0');  -- No delta for simple (An) mode
+						-- Modes 010/011: Simple (An)/(An)+ - no delta
+						IF fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" THEN
+							memaddr_delta_rega <= (others => '0');
+							use_base <= '1';
+						
+						-- Mode 100: -(An) - Compute delta based on datatype
+						ELSIF fline_opcode_latch(5 downto 3)="100" THEN
+							-- Predecrement: -2 for word, -4 for long, -8 for CRP/SRP
+							IF datatype="01" THEN  -- Word
+								memaddr_delta_rega <= X"FFFFFFFE";  -- -2
+							ELSE  -- Long (32-bit or 64-bit)
+								memaddr_delta_rega <= X"FFFFFFFC";  -- -4
+							END IF;
+							use_base <= '1';
+							
+						-- Mode 101: (d16,An) - Use fetched displacement from MDR
+						ELSIF fline_opcode_latch(5 downto 3)="101" THEN
+							memaddr_delta_rega <= last_data_read;
+							use_base <= '1';
+							
+						-- Mode 111: Absolute - Use fetched address from MDR
+						ELSIF fline_opcode_latch(5 downto 3)="111" THEN
+							memaddr_delta_rega <= last_data_read;
+							use_base <= '0';
+							
+						-- Mode 110: (d8,An,Xn) - Use latched displacement
 						ELSE
-							memaddr_delta_rega <= pmove_disp_latched;  -- BUG #197 V6: Use latched displacement
+							memaddr_delta_rega <= pmove_disp_latched;
+							use_base <= '1';
 						END IF;
-						use_base <= '1';  -- Force memaddr_reg = reg_QA
 				-- BUG #302: Exclude (An)+ CRP/SRP in pmove_mem_to_mmu_lo from using addsub_q
+				-- BUG #339: Exclude PMOVE -(An) to preserve latched delta from pmove_decode
 				ELSIF (memmaskmux(3)='0' OR exec(mem_addsub)='1') AND NOT
 				      ((micro_state = pmove_mem_to_mmu_lo) AND
 				       (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") AND
-				       pmmu_ea_mode_latched(5 downto 3)="011") THEN
+				       pmmu_ea_mode_latched(5 downto 3)="011") AND NOT
+				      ((micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo) AND
+				       fline_opcode_latch(5 downto 3)="100") THEN
 					memaddr_delta_rega <= addsub_q;
 				ELSIF set(restore_ADDR)='1' THEN
 					memaddr_delta_rega <= tmp_TG68_PC;
@@ -1838,6 +1953,21 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					memaddr_delta_regb <= memaddr_a;
 				ELSIF set_vectoraddr='1' THEN
 					memaddr_delta_rega <= trap_vector_vbr;
+				-- BUG #332 FIX: MOVES full-format BD=word fetch timing fix.
+				-- During ld_229_1 with state="00" (BD word fetch), memaddr_a reads
+				-- last_data_read which still has the EXTENSION WORD, not the BD word.
+				-- The BD word is in data_read (combinational from bus) but hasn't been
+				-- registered into last_data_read yet. Use data_read directly so that
+				-- memaddr_delta_rega has the correct displacement for ld_AnXn2 (IS=0 path).
+				-- For BD=word: data_read is sign-extended (memread(0)='1' during state="00").
+				ELSIF micro_state = ld_229_1 AND state = "00" AND brief(5) = '1' AND
+				      opcode(15 downto 8) = "00001110" AND opcode(7 downto 6) /= "11" AND
+				      opcode(5 downto 3) = "110" THEN
+					memaddr_delta_rega <= data_read;
+					IF brief(7) = '0' THEN
+						use_base <= '1';  -- BS=0: use base register
+					END IF;
+					-- BS=1: use_base stays '0' (default)
 				ELSE
 					memaddr_delta_rega <= memaddr_a;
 					IF interrupt='0' AND Suppress_Base='0' THEN
@@ -1927,7 +2057,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 		setopcode <= '0';
 		setendOPC <= '0';
 		setinterrupt <= '0';
-		IF setstate="00" AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0'THEN
+		-- BUG #340 FIX: PMOVE/FPU completes with next_micro_state=nop (not idle), must set setendOPC
+		-- to clear fline_context_valid, allowing subsequent F-line opcodes to latch
+		-- Only applies when fline_context_valid='1' to avoid affecting non-F-line nop transitions
+		IF setstate="00" AND (next_micro_state=idle OR (next_micro_state=nop AND fline_context_valid='1')) AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0'THEN
 			setendOPC <= '1';
 			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1' THEN
 				setinterrupt <= '1';
@@ -4551,10 +4684,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					setnextpass <= '1';
 					IF opcode(15 downto 12)="1111" AND
 					   (pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011" OR pmmu_brief(15 downto 13)="000") THEN
-						-- PMOVE with (d16,An): clear setnextpass to prevent PC over-increment
-						setnextpass <= '0';
+						-- BUG #341 FIX: Do NOT clear setnextpass! PC must increment past the displacement word.
+						-- setnextpass <= '0';  -- REMOVED: Caused execution of displacement as opcode!
 						IF pmmu_brief(9)='1' THEN
 							-- MMU->mem direction
+							-- BUG #196 FIX: Must set write state and longaktion for PMOVE TC,(d16,An)
+							-- Without this, no write occurs to memory
+							-- BUG #197 FIX: Do NOT latch EA here!
+							-- ld_dAn1 logic is not included in memaddr mux (Line 1791), so it latches Base or PC.
+							-- Defer latching to pmove_mmu_to_mem_hi which has correct mux logic.
+							-- set(OP1addr) <= '1';
+							
 							-- BUG #196 FIX: Must set write state and longaktion for PMOVE TC,(d16,An)
 							-- Without this, no write occurs to memory
 							-- BUG #197 FIX: Must latch EA NOW while memaddr_a still contains displacement!
@@ -4689,6 +4829,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									next_micro_state <= pmove_mem_to_mmu_hi;
 								END IF;
 							END IF;
+
+							-- BUG #330 FIX: MOVES with full-format indexed EA must dispatch
+							-- to moves1 for SFC/DFC bus transfer, just like ld_dAn1 and ld_AnXn2.
+							-- Without this, MOVES falls through to normal instruction flow,
+							-- causing wrong address, wrong data, and SR corruption.
+							IF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND
+							   opcode(5 downto 3)="110" THEN
+								setnextpass <= '0';
+								setstate <= "01";
+								ea_only <= '1';
+								next_micro_state <= moves1;
+							END IF;
 						ELSE
 							setstate <= "10";
 							setaddrvalue <= '1';
@@ -4744,9 +4896,20 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								next_micro_state <= pmove_mem_to_mmu_hi;
 							END IF;
 						END IF;
+
+						-- MOVES: memory-indirect EA completes here; dispatch to moves1
+						-- for SFC/DFC bus transfer. Without this, MOVES falls through
+						-- normal pipeline causing wrong FC, address, and data corruption.
+						IF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND
+						   opcode(5 downto 3)="110" THEN
+							setnextpass <= '0';
+							setstate <= "01";
+							ea_only <= '1';
+							next_micro_state <= moves1;
+						END IF;
 					END IF;
-					
-----------------------------------------------------------------------------------------				
+
+----------------------------------------------------------------------------------------
 				WHEN st_dAn1 =>		-- =>d(An)
 					setstate <= "11";
 					setdisp <= '1';		--word
@@ -5665,10 +5828,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                             -- BUG #228 FIX V6: (d16,An) mode - DO NOT set setstate="01"!
                                             -- setstate="01" puts CPU in wait mode WITHOUT fetching.
                                             -- Let default setstate="00" allow normal prefetch to fetch displacement.
-                                            -- This matches how regular instructions handle (d16,An).
+                                            -- BUG #341 FIX: Must set setnextpass='0' to prevent consuming the displacement!
+                                            -- pmove_decode is an extra state between Extension fetch and Displacement fetch.
+                                            -- If we set nextpass, we skip the displacement before ld_dAn1 can read it.
+                                            setnextpass <= '0';
                                             next_micro_state <= ld_dAn1;
                                         ELSIF fline_opcode_latch(5 downto 3)="110" THEN
                                             -- BUG #228 FIX V6: (d8,An,Xn) mode - DO NOT set setstate="01"!
+                                            -- BUG #341 FIX: Same as (d16,An), hold for ld_AnXn1.
+                                            setnextpass <= '0';
                                             next_micro_state <= ld_AnXn1;
                                             getbrief <= '1';
                                         END IF;
@@ -5865,6 +6033,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- 32-bit register (TC, TT0, TT1, MMUSR) - single transfer complete
                         next_micro_state <= idle;
                     END IF;
+
+
                 WHEN pmove_mmu_to_mem_hi =>
                     -- MMU -> memory write (high part for 64-bit CRP/SRP, or only part for 32-bit regs)
                     -- data_write_tmp sourced from pmmu_reg_rdat in write datapath
@@ -5904,6 +6074,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- Post-increment (An)+ must occur after the memory write completes
                         IF opcode(5 downto 3)="011" THEN
                             set(postadd) <= '1';
+                            IF opcode(2 downto 0)="111" THEN
+                                set(use_SP) <= '1';
+                            END IF;
+                        -- BUG #339 FIX: Pre-decrement -(An) must update register with decremented value
+                        -- Use PEA-style mechanism: get_ea_now routes addr to data_write_tmp (line 1625)
+                        -- when ea_only='1'. Then Regwrena writes data_write_tmp to the address register
+                        ELSIF opcode(5 downto 3)="100" THEN
+                            set_exec(get_ea_now) <= '1';
+                            ea_only <= '1';  -- Standalone signal, not part of exec array
+                            set_exec(Regwrena) <= '1';
                             IF opcode(2 downto 0)="111" THEN
                                 set(use_SP) <= '1';
                             END IF;
