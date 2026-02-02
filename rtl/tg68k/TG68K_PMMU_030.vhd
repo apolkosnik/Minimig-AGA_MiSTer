@@ -56,7 +56,10 @@ entity TG68K_PMMU_030 is
 
     -- MMU Configuration Exception (MC68030 vector 56)
     mmu_config_err : out std_logic;
-    mmu_config_ack : in  std_logic   -- Acknowledgment from kernel when trap is taken
+    mmu_config_ack : in  std_logic;   -- Acknowledgment from kernel when trap is taken
+
+    -- PTEST Support
+    ptest_desc_addr : out std_logic_vector(31 downto 0) -- Physical address of last descriptor (for A-bit)
   );
 end TG68K_PMMU_030;
 
@@ -215,6 +218,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal pflush_addr : std_logic_vector(31 downto 0) := (others => '0');
   signal pflush_fc : std_logic_vector(2 downto 0) := (others => '0');
   signal pflush_mode : std_logic_vector(12 downto 8) := (others => '0');  -- From brief word
+  signal pflush_mask : std_logic_vector(2 downto 0) := (others => '0');  -- FC comparison mask from brief(7:5)
   
   -- Page table walking state
   signal walk_level     : integer range 0 to 5 := 0; -- Current level being walked (0-4 for FCL=0, 0-5 for FCL=1)
@@ -864,6 +868,9 @@ architecture rtl of TG68K_PMMU_030 is
   end function;
 
 begin
+
+  -- Connect internal register to output port
+  ptest_desc_addr <= desc_addr_reg;
 
   -- Reset and register writes
   process(clk, nreset)
@@ -3098,19 +3105,30 @@ begin
               atc_valid(i) <= '0';  -- Only flush non-global entries
             end if;
           end loop;
-        else
-          -- PFLUSH FC,MASK or PFLUSH FC,MASK,<ea> - flush by FC (with optional EA)
-          -- MODE=100: PFLUSH FC,MASK (no EA) or PFLUSHN FC,MASK
-          -- MODE=110: PFLUSH FC,MASK,<ea> or PFLUSHN FC,MASK,<ea>
-          -- pflush_mode(9) = N bit: 0=flush all, 1=flush only non-global
+        elsif pflush_mode(12 downto 10) = "100" then
+          -- BUG F FIX: PFLUSH FC,MASK (mode=100, no EA) - flush ALL entries matching FC/mask
+          -- MC68030 spec: No address comparison when no EA is provided
+          -- pflush_mode(9) = N bit: 0=flush all matching, 1=flush only non-global matching
           for i in 0 to ATC_ENTRIES-1 loop
             if atc_valid(i) = '1' then
-              -- Check if this entry matches the flush criteria
-              if atc_fc(i) = pflush_fc and align_addr(pflush_addr, atc_shift(i)) = atc_log_base(i) then
-                -- Check N bit (bit 9 of extension word = pflush_mode(9))
+              -- BUG E FIX: Apply FC mask - XOR finds differences, AND with mask selects
+              -- relevant bits, "000" means all masked bits match (mask=0 matches any FC)
+              if ((atc_fc(i) xor pflush_fc) and pflush_mask) = "000" then
                 if pflush_mode(9) = '0' or atc_global(i) = '0' then
-                  -- N=0: flush regardless of global bit
-                  -- N=1: only flush non-global entries
+                  atc_valid(i) <= '0';
+                end if;
+              end if;
+            end if;
+          end loop;
+        else
+          -- PFLUSH FC,MASK,<ea> (mode=110) - flush entries matching FC/mask AND address
+          -- pflush_mode(9) = N bit: 0=flush all matching, 1=flush only non-global matching
+          for i in 0 to ATC_ENTRIES-1 loop
+            if atc_valid(i) = '1' then
+              -- BUG E FIX: Apply FC mask (same as mode=100 above)
+              if ((atc_fc(i) xor pflush_fc) and pflush_mask) = "000" and
+                 align_addr(pflush_addr, atc_shift(i)) = atc_log_base(i) then
+                if pflush_mode(9) = '0' or atc_global(i) = '0' then
                   atc_valid(i) <= '0';
                 end if;
               end if;
@@ -3185,6 +3203,7 @@ begin
         pflush_addr <= pmmu_addr;
         pflush_fc <= pmmu_fc;
         pflush_mode <= pmmu_brief(12 downto 8);  -- Capture PFLUSH mode from brief word
+        pflush_mask <= pmmu_brief(7 downto 5);  -- BUG E FIX: Capture FC comparison mask
         pflush_clear_atc <= '1';
       elsif pflush_active = '1' then
         -- PFLUSH operation active - clear after one cycle
