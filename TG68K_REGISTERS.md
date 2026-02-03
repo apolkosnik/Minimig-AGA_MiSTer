@@ -36,13 +36,30 @@ Bits 31-0: Vector table base address (must be on 4-byte boundary)
 
 ### SFC - Source Function Code (0x000) - 3-bit
 ```
-Bits 2-0: Function code for source operand of MOVES instruction
+Bits 2-0: Function code used for MOVES <ea>,Rn read operations
 ```
 
 ### DFC - Destination Function Code (0x001) - 3-bit
 ```
-Bits 2-0: Function code for destination operand of MOVES instruction
+Bits 2-0: Function code used for MOVES Rn,<ea> write operations
 ```
+
+### MOVES Instruction (Opcode 0x0E__)
+**Encoding**: `0000 1110 ssEE EAAA` where ss=size (00=byte, 01=word, 10=long), EEE=EA mode, AAA=EA register
+**Extension Word**:
+```
+Bit 15:     D/A flag (0=Data register, 1=Address register)
+Bits 14-12: Register number (0-7)
+Bit 11:     Direction (dr)
+              0 = EA -> Rn (memory read using SFC)
+              1 = Rn -> EA (memory write using DFC)
+Bits 10-0:  Reserved (must be 0)
+```
+**Micro-states**: `moves0` (latch extension word, set up EA) -> `moves1` (perform bus access with FC override)
+**Key signals**: `moves_direction` (latched `brief(11)`), `moves_reg` (latched `brief(15:12)`), `moves_bus_pending` (maintains FC override during bus cycle), `moves_writeback_pending` (defers register write for reads)
+**Legal EA modes**: (An), (An)+, -(An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
+**Illegal EA modes**: Dn, An, PC-relative, Immediate (trap as illegal instruction)
+**Privilege**: Supervisor-only; user mode triggers privilege violation exception
 
 ### CAAR - Cache Address Access Register (0x802) - 32-bit
 ```
@@ -72,7 +89,7 @@ Bits 31-0: Interrupt mode stack pointer (68020+)
 ## PMMU Registers (Accessible via PMOVE only)
 
 ### TC - Translation Control Register - 32-bit
-**Register Select**: 0x0 (`rtl/tg68k/TG68K_PMMU_030.vhd`)
+**P-Register Select**: `10000` (0x10) - extension word bits 14:10
 ```
 Bit 31 (E):      Enable MMU translation
 Bit 30-26:       Reserved (forced to 0)
@@ -103,7 +120,7 @@ attempt to load other values into this field of the TC register causes an MMU co
 ```
 
 ### CRP - CPU Root Pointer - 64-bit
-**Register Select**: 0x1 (requires reg_part for high/low)
+**P-Register Select**: `10011` (0x13) - extension word bits 14:10 (requires reg_part for high/low)
 **Description**: Specifies the root table pointer used when CPU is in User mode
 
 **MC68030 Root Pointer Format**:
@@ -150,7 +167,7 @@ LOW (31-0):
 - Limit field can reduce TableA size by limiting valid index range
 
 ### SRP - Supervisor Root Pointer - 64-bit
-**Register Select**: 0x2 (requires reg_part for high/low)
+**P-Register Select**: `10010` (0x12) - extension word bits 14:10 (requires reg_part for high/low)
 **Description**: Specifies the root table pointer used when CPU is in Supervisor mode
 ```
 Same format as CRP - provides separate page tables for supervisor mode
@@ -264,7 +281,7 @@ LOW:
 ```
 
 ### TT0 - Transparent Translation Register 0 - 32-bit
-**Register Select**: 0x3
+**P-Register Select**: `00010` (0x02) - extension word bits 14:10
 
 #### MC68030 TTR format
 ```
@@ -282,13 +299,13 @@ Bits 2-0:    Function Code Mask
 ```
 
 ### TT1 - Transparent Translation Register 1 - 32-bit
-**Register Select**: 0x4
+**P-Register Select**: `00011` (0x03) - extension word bits 14:10
 ```
 Same format as TT0
 ```
 
 ### MMUSR - MMU Status Register - 16-bit
-**Register Select**: 0x5
+**P-Register Select**: `11000` (0x18) - extension word bits 14:10
 ```
 Bit 15 (B):  Bus Error [READ-ONLY]
 Bit 14 (L):  Limit Violation [READ-ONLY]
@@ -306,7 +323,7 @@ Bits 2-0 (N):    Number of Levels [READ-ONLY]
 **Write Semantics**: Per MC68030 specification, MMUSR is mostly read-only. Only the Modified bit (9) supports write-1-to-clear operation. All other bits are updated by MMU hardware only.
 
 ### CAL - Current Access Level - Not implemented in 68030
-**Register Select**: 0x6
+**P-Register Select**: 0x6 (not used)
 ```
 N/A
 ```
@@ -315,15 +332,189 @@ N/A
 **Note**: PMMU registers (TC, TT0, TT1, MMUSR) attempted to be accessed via MOVEC
 will trigger illegal instruction exceptions per MC68030 specification. Use PMOVE instead.
 
+### PMOVE Instruction (Opcode F0xx - F-Line)
+All PMMU instructions share the F-line opcode space, differentiated by the extension word.
+
+**Opcode**: `1111 0000 00EE EAAA` where EEE=EA mode, AAA=EA register
+**Extension Word**:
+```
+Bits 15-13: Instruction type dispatch
+              000 = PMOVE/PMOVEFD (TT0/TT1)
+              001 = PFLUSH (bits 12:10=001) / PLOAD (bits 12:10=000)
+              010 = PMOVE/PMOVEFD (TC/SRP/CRP)
+              011 = PMOVE (MMUSR)
+              100 = PTEST
+Bits 14-10: P-register selector (5-bit)
+              00010 = TT0    (group 000)
+              00011 = TT1    (group 000)
+              10000 = TC     (group 010)
+              10010 = SRP    (group 010)
+              10011 = CRP    (group 010)
+              11000 = MMUSR  (group 011)
+Bit 9:      Direction (RW)
+              0 = Write to MMU register (EA -> MMU)
+              1 = Read from MMU register (MMU -> EA)
+Bit 8:      FD (Flush Disable) - PMOVEFD variant when set
+Bits 7-0:   Reserved (must be 0)
+```
+
+**Transfer sizes**:
+- TC, TT0, TT1: 32-bit (longword, `datatype="10"`)
+- CRP, SRP: 64-bit (two longword bus cycles, high word first via `reg_part`)
+- MMUSR: 16-bit (word, `datatype="01"`)
+
+**Execution paths** (in `TG68KdotC_Kernel.vhd`):
+
+| EA Mode | Write to MMU (RW=0) | Read from MMU (RW=1) |
+| :--- | :--- | :--- |
+| Dn | `set_exec(pmmu_wr)` -> `idle` or `pmove_dn_hi` (64-bit) | `set(pmmu_rd)` -> `pmmu_dn_read_wait` or `pmove_dn_hi` (64-bit) |
+| (An), (An)+, -(An) | EA direct -> `pmove_mem_to_mmu_hi` | `set_exec(pmmu_rd)` -> `pmove_mmu_to_mem_hi` |
+| (d16,An) | EA build -> `ld_dAn1` -> `pmove_mem_to_mmu_hi` | EA build -> `ld_dAn1` -> `pmove_mmu_to_mem_hi` |
+| (d8,An,Xn) | EA build -> `ld_AnXn1` -> `pmove_mem_to_mmu_hi` | EA build -> `ld_AnXn1` -> `pmove_mmu_to_mem_hi` |
+| (xxx).W, (xxx).L | EA build -> `ld_nn` -> `pmove_mem_to_mmu_hi` | `set_exec(pmmu_rd)` -> `pmove_mmu_to_mem_hi` |
+
+For 64-bit registers (CRP/SRP), `_hi` states chain to `_lo` states for the second longword.
+
+**Key implementation signals**:
+- `pmmu_brief` - latched copy of `brief`, stable throughout F-line execution (brief itself gets overwritten by EA extension words)
+- `fline_opcode_latch` - latched copy of `opcode` for EA mode checks (opcode may advance to next instruction during execution)
+- `pmmu_reg_sel_int` - combinational register selector from `pmmu_brief(14:10)`
+- `pmmu_reg_we_d` / `pmmu_reg_re_d` - registered write/read enables gated by `pmmu_reg_sel_valid`
+- `reg_part` - tracks high ('1') vs low ('0') word for 64-bit CRP/SRP transfers
+- `set(longaktion)` - required for 32-bit memory transfers (not set for MMUSR)
+- `set(presub)` / `set(pmmu_dbl)` - needed for -(An) mode with 64-bit registers
+
 ### PMOVE Error Handling (Enhanced MC68030 Compliance)
 - **Privilege Violation**: PMOVE instructions require supervisor mode (SVmode='1')
   - User mode attempts generate privilege violation exception (trap_priv)
 - **Invalid Register**: Unsupported register selectors generate illegal instruction exception (trap_illegal)
 - **Address Alignment**: Memory EA operations enforce proper alignment
-  - 32-bit registers (TC, TT0, TT1, MMUSR): 4-byte alignment required
+  - 16-bit register (MMUSR): 2-byte alignment required
+  - 32-bit registers (TC, TT0, TT1): 4-byte alignment required
   - 64-bit registers (CRP, SRP): 8-byte alignment recommended
   - Misaligned access triggers address error exception
 - **Reserved Bits**: Write operations to reserved register bits are masked or ignored
+
+## Exception Stack Frames
+
+### Exception Vector Table (Key Implemented Vectors)
+
+| Vector | Offset | Exception | Frame Format | Trap Signal |
+|--------|--------|-----------|-------------|-------------|
+| 2 | $008 | Bus Error | $A (16-word) | `trap_berr` |
+| 3 | $00C | Address Error | $0 (4-word) | `trap_addr_error` |
+| 4 | $010 | Illegal Instruction | $0 (4-word) | `trap_illegal` |
+| 5 | $014 | Zero Divide | $2 (6-word) | `set_Z_error` |
+| 6 | $018 | CHK/CHK2 | $2 (6-word) | `exec(trap_chk)` |
+| 7 | $01C | TRAPV/TRAPcc | $2 (6-word) | `trap_trapv` |
+| 8 | $020 | Privilege Violation | $0 (4-word) | `trap_priv` |
+| 9 | $024 | Trace | $2 (6-word) | `trap_trace` |
+| 10 | $028 | 1010 Emulator | $0 (4-word) | `trap_1010` |
+| 11 | $02C | 1111 Emulator (F-line) | $0 (4-word) | `trap_1111` |
+| 14 | $038 | Format Error | $0 (4-word) | `trap_format_error` |
+| 24-31 | $060-$07C | Interrupts (Level 1-7) | $0 (4-word) | `trap_interrupt` |
+| 32-47 | $080-$0BC | TRAP #0-#15 | $0 (4-word) | `trap_trap` |
+| 56 | $0E0 | MMU Configuration | $0 (4-word) | `trap_mmu_config` |
+| 61 | $0F4 | MMU Bus Error | $A (16-word) | `trap_mmu_berr` |
+
+All vectors are offset from VBR (Vector Base Register). Vector address = VBR + offset.
+
+### Stack Frame Format $0 - Four-Word Frame (8 bytes)
+Used by most exceptions (privilege violation, illegal instruction, interrupts, TRAP #n, F-line, etc.)
+```
+Offset  Size  Content
+$00     word  Status Register (SR)
+$02     long  Program Counter (PC)
+$06     word  Format/Vector Word: [15:12]=0000, [11:0]=vector offset
+```
+
+### Stack Frame Format $1 - Throwaway Frame (8 bytes)
+Same layout as Format $0 but marked as "throwaway" for interrupt return.
+```
+Offset  Size  Content
+$00     word  Status Register (SR)
+$02     long  Program Counter (PC)
+$06     word  Format/Vector Word: [15:12]=0001, [11:0]=vector offset
+```
+
+### Stack Frame Format $2 - Six-Word Frame (12 bytes)
+Used by CHK, CHK2, cpTRAPcc, TRAPV, Trace, Zero Divide, MMU Configuration exceptions.
+```
+Offset  Size  Content
+$00     word  Status Register (SR)
+$02     long  Program Counter (PC)
+$06     word  Format/Vector Word: [15:12]=0010, [11:0]=vector offset
+$08     long  Instruction Address (address of faulting instruction)
+```
+Generated via `trap00` micro-state path when `cpu(1)='1'` and condition is TRAPV/CHK/Div0.
+
+### Stack Frame Format $9 - Coprocessor Mid-Instruction Frame (20 bytes)
+```
+Offset  Size  Content
+$00     word  Status Register (SR)
+$02     long  Program Counter (PC)
+$06     word  Format/Vector Word: [15:12]=1001, [11:0]=vector offset
+$08     long  Instruction Address
+$0C     long  Internal Registers (4 words)
+```
+
+### Stack Frame Format $A - Short Bus Fault Frame (32 bytes)
+Generated by `berr1`..`berr8` micro-states for Bus Error (vector 2) and MMU Bus Error (vector 61).
+
+```
+Offset  Size  Content                              Pushed By  Data Source
+$00     word  Status Register (SR)                 berr8      trap_SR & Flags
+$02     word  Program Counter Hi                   berr8      TG68_PC(31:16)
+$04     word  Program Counter Lo                   berr7      TG68_PC(15:0)
+$06     word  Format ($A) / Vector Offset          berr7      "1010" & trap_vector(11:0)
+$08     word  Internal Register (stub)             berr6      0x0000
+$0A     word  Special Status Word (SSW) (stub)     berr6      0x0000
+$0C     word  Instruction Pipe Stage B             berr5      opcode(15:0)
+$0E     word  Instruction Pipe Stage C             berr5      last_opc_read(15:0)
+$10     word  Fault Address Hi                     berr4      addr(31:16)
+$12     word  Fault Address Lo                     berr4      addr(15:0)
+$14     long  Internal Registers (stub)            berr3      0x00000000
+$18     long  Data Output Buffer                   berr2      data_write_tmp
+$1C     long  Internal Registers (stub)            berr1      0x00000000
+```
+
+**Push order**: berr1 pushes $1C (highest offset), berr8 pushes $00 (lowest offset / top of stack).
+
+**SSW (Special Status Word)**: Currently stubbed as zero. MC68030 spec defines:
+```
+Bit 10 (DF): Data Fault
+Bit 9 (RM):  Rerun/Modified flag
+Bit 8 (RW):  Read/Write (1=read, 0=write)
+Bits 6-4:    Function Code at fault time
+Bits 3-0:    Reserved
+```
+
+### Stack Frame Format $B - Long Bus Fault Frame (92 bytes)
+46 words total. Same initial layout as Format $A with additional internal state. Supported by RTE for unwinding (21 extra longwords discarded via `rte5` loop) but not currently generated by this implementation.
+
+### Bus Error State Machine Detail
+
+Entry condition: `interrupt='1' AND trap_berr='1' AND cpu(1)='1'` -> `next_micro_state <= berr1`
+
+All berr states share: `setstate <= "11"` (write), `set(presub) <= '1'` (pre-decrement A7), `datatype <= "10"` (longword).
+
+After berr8: `set_vectoraddr <= '1'`, `set(directPC) <= '1'`, `set(direct_delta) <= '1'` loads exception handler address from vector table (VBR + trap_vector).
+
+### RTE Format Decoding
+
+RTE reads the format/vector word during `rte2`/`rte3` and latches it into `rte_format_word`. In `rte4`, bits 15-12 select the unwinding path:
+
+| `rte_format_word(15:12)` | Format | Action in rte4 | `rot_cnt` |
+|--------------------------|--------|----------------|-----------|
+| `"0000"` | $0 | Done (-> nop) | - |
+| `"0001"` | $1 | Done (-> nop) | - |
+| `"0010"` | $2 | Read 1 more longword (-> rte5) | 1 |
+| `"1001"` | $9 | Read 3 more longwords (-> rte5) | 3 |
+| `"1010"` | $A | Read 6 more longwords (-> rte5) | 6 |
+| `"1011"` | $B | Read 21 more longwords (-> rte5) | 21 |
+| Others | - | Format Error (vector 14) | - |
+
+The `rte5` state loops: each iteration reads one longword from the stack (post-increment A7), decrements `rot_cnt`, and exits to `nop` when `rot_cnt` reaches 1.
 
 ## Cache Control Instruction Integration
 ```verilog

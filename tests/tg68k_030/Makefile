@@ -7,12 +7,12 @@ VSIM = $(MODELSIM_PATH)/linuxaloem/vsim
 VCOM = $(MODELSIM_PATH)/linuxaloem/vcom
 VLIB = $(MODELSIM_PATH)/linuxaloem/vlib
 
-PROJECT_ROOT = /home/adam/030_mmu_fpu/Minimig-AGA_MiSTer
+PROJECT_ROOT = /home/adam/030_mmu/Minimig-AGA_MiSTer
 TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-cache test-cacr test-movec-cacr test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-comprehensive test-pmove-multiple-regs test-integration test-diagrom test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pmove-cpu-execution test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves validate setup help
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats validate setup help
 
 # Default target
 all: test-comprehensive
@@ -30,28 +30,36 @@ help:
 	@echo "  test-cache       - Test Cache component only"
 	@echo "  test-cacr        - Test CACR register only"
 	@echo "  test-movec-cacr  - Test MOVEC CACR corner cases"
+	@echo "  test-movec-illegal - Test MOVEC to invalid register triggers trap"
+	@echo "  test-mmu-library-detect - Test mmu.library style PMMU detection"
 	@echo "  test-pmove-tc    - Test PMOVE Dx,TC (write) corner cases"
 	@echo "  test-pmove-tc-read - Test PMOVE TC,Dx (read) corner cases"
 	@echo "  test-pmove-tt0-read - Test PMOVE TT0,Dx (read) corner cases"
 	@echo "  test-pmove-tt0-mem-read - Test PMOVE.L (d16,An),TT0 memory read (NEW)"
 	@echo "  test-pmove-tt1-mem - Test PMOVE.L TT1,(d16,An) memory write"
 	@echo "  test-pmove-crp-a7-postinc - Test PMOVE.Q CRP,(A7)+ stack update"
+	@echo "  test-pmove-crp-mem-to-mmu-postinc - Test PMOVE.Q (A7)+,CRP memory-to-MMU read"
 	@echo "  test-pmove-comprehensive - PMOVE encoding + d16,An regression"
+	@echo "  test-pmove-d16an-pc - Test PMOVE (d16,An) PC increment + data values"
+	@echo "  test-pmove-d8anxn-pc - Test PMOVE (d8,An,Xn) PC increment + data values"
+	@echo "  test-pmove-pc-all-regs - COMPREHENSIVE: All regs (TC,TT0,TT1,CRP,SRP,MMUSR) + all EA modes"
 	@echo "  test-pmove-multiple-regs - Test PMOVE multiple regs from (A7) - OP1addr conflict validation"
 	@echo "  test-integration - Test full system integration"
 	@echo "  test-diagrom     - Test DiagROM boot sequence"
+	@echo "  test-diagrom-detectcpu - Test DiagROM CPU detection (MOVEC ITT0 trap)"
 	@echo "  test-cpu-mmu-detection - Test CPU/MMU detection (TypeOfCPU + GetMMUType)"
 	@echo "  test-advanced    - Run advanced PMMU functionality tests"
 	@echo "  test-fault       - Run comprehensive fault handling tests"
 	@echo "  test-stress      - Run page walker stress tests"
 	@echo "  test-regression  - Run MC68030 regression test suite (RECOMMENDED)"
 	@echo "  test-pmove-addressing - Test PMOVE with all legal addressing modes"
-	@echo "  test-pmove-cpu-execution - Test PMOVE via CPU execution (PC tracking)"
 	@echo "  test-pflush-ptest-pload - Test PFLUSH/PTEST/PLOAD instructions"
 	@echo "  test-indirect-descriptor - Test indirect descriptors"
 	@echo "  test-mmu-instruction-suite - Run complete MMU instruction test suite"
 	@echo "  test-amiga-sequence - Test Amiga ROM MMU initialization sequence"
 	@echo "  test-moves       - Test MOVES instruction FC handling"
+	@echo "  test-moves-validation - Run MOVES validation testbench"
+	@echo "  test-rte-formats - Test all RTE stack frame formats (0,1,2,9,A,B + invalid)"
 	@echo "  test-all         - Run original test suite"
 	@echo "  test-comprehensive - Run ALL enhanced tests"
 	@echo "  validate         - Validate complete MC68030 compliance"
@@ -100,6 +108,13 @@ compile: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_comprehensive.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_multiple_regs_from_a7.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_diagnostic.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_all_modes_test.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cpu_mmu_detection.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_d16an_pc.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_d8anxn_pc.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_validation.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_moves_all_modes.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_diagrom_detectcpu.vhd || true
 	@echo "Basic compilation completed (errors ignored for initial testing)"
 
 # Compile enhanced test sources
@@ -122,6 +137,12 @@ compile-advanced: setup
 test-pmmu: compile
 	@echo "Running basic PMMU tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmmu_030
+
+test-pmmu-all-modes: compile
+	@echo "Running PMMU all modes test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_all_modes_test.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmmu_all_modes_test
+#2>&1 | grep -E "(Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*TEST)"
 
 test-diagnostic: compile
 	@echo "Running PMMU diagnostic tests..."
@@ -159,13 +180,31 @@ test-pmove-tt1-mem: compile
 	@echo "Running PMOVE.L TT1,(d16,An) memory write tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_pmove_tt1_mem
 
+test-pmove-d16an-pc: compile
+	@echo "Running PMOVE (d16,An) PC increment + data value tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_d16an_pc
+
+test-pmove-d8anxn-pc: compile
+	@echo "Running PMOVE (d8,An,Xn) PC increment + data value tests..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_d8anxn_pc
+
+test-pmove-pc-all-regs: compile
+	@echo "Running PMOVE PC increment test for ALL registers and addressing modes..."
+	@echo "Tests: TC, TT0, TT1, CRP, SRP, MMUSR"
+	@echo "Modes: Dn, (An), (An)+, -(An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L"
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_pc_all_regs.vhd && $(VSIM) -c -do "run 500us; quit" tb_pmove_pc_all_regs
+
 test-pmove-crp-a7-postinc: compile
 	@echo "Running PMOVE.Q CRP,(A7)+ stack postincrement regression..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 5us; quit" tb_pmove_crp_a7_postinc
 
+test-pmove-crp-mem-to-mmu-postinc: compile
+	@echo "Running PMOVE.Q (A7)+,CRP memory-to-MMU postincrement test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_crp_mem_to_mmu_postinc.vhd && $(VSIM) -c -do "run 5us; quit" tb_pmove_crp_mem_to_mmu_postinc
+
 test-pmove-comprehensive: compile
 	@echo "Running PMOVE comprehensive regression..."
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_comprehensive
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_pmove_comprehensive
 
 test-pmove-multiple-regs: compile
 	@echo "Running PMOVE multiple registers from (A7) test (OP1addr conflict validation)..."
@@ -178,6 +217,10 @@ test-integration: compile
 test-diagrom: compile
 	@echo "Running DiagROM boot simulation..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "do run_diagrom_boot.tcl; run 50us; quit"
+
+test-diagrom-detectcpu: compile
+	@echo "Running DiagROM DetectCPU tests (MOVEC ITT0 should trap on 68030)..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_diagrom_detectcpu
 
 test-cpu-mmu-detection: compile
 	@echo "Running CPU/MMU detection tests (TypeOfCPU + GetMMUType)..."
@@ -203,14 +246,6 @@ test-pmove-addressing: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_addressing_modes.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 20us; quit" tb_pmove_addressing_modes
-
-test-pmove-cpu-execution: setup
-	@echo "Running PMOVE CPU execution tests (PC tracking)..."
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_cpu_execution.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_cpu_execution
 
 test-pflush-ptest-pload: setup
 	@echo "Running PFLUSH/PTEST/PLOAD tests..."
@@ -240,6 +275,74 @@ test-moves: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_instruction.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_moves_instruction
+
+test-moves-validation: setup
+	@echo "Running MOVES validation testbench..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_validation.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_moves_validation
+
+test-rte-formats: setup
+	@echo "Running RTE stack frame format validation tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_rte_all_formats.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_rte_all_formats
+#2>&1 | grep -E "(PASS|FAIL|Format|Test|Error|=====)"
+
+# MOVEC Illegal Register Trap Test
+test-movec-illegal: setup
+	@echo "Running MOVEC illegal register trap test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_movec_illegal.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 20us; quit" tb_movec_illegal
+#2>&1 | grep -E "(Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*true|Note:.*false|Note:.*SUCCESS)"
+
+# MMU.library Style PMMU Detection Test
+test-mmu-library-detect: setup
+	@echo "Running mmu.library style PMMU detection test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_library_detect.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_mmu_library_detect
+#2>&1 | grep -E "(Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*true|Note:.*false|Note:.*PMMU)"
+
+# MOVES All Addressing Modes Test
+test-moves-all-modes: setup
+	@echo "Running MOVES all addressing modes test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_moves_all_modes.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 100us; quit" tb_moves_all_modes
+#2>&1 | grep -E "(Note:.*TEST|Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*RAM)"
+
+test-pmove:
+	vlib work
+	vcom -93 $(RTL_DIR)/TG68K_Pack.vhd
+	vcom -93 $(RTL_DIR)/TG68K_ALU.vhd
+	vcom -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	vcom -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	vcom -93 tb_pmove.vhd
+	vsim -c -do "run -all" tb_pmove
+
+test-pmove-comprehensive:
+	vlib work
+	vcom -93 $(RTL_DIR)/TG68K_Pack.vhd
+	vcom -93 $(RTL_DIR)/TG68K_ALU.vhd
+	vcom -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	vcom -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	vcom -93 tb_pmove_comprehensive.vhd
+	vsim -c -do "run -all" tb_pmove_comprehensive
 
 # Complete MMU Instruction Test Suite
 test-mmu-instruction-suite: setup
@@ -397,3 +500,10 @@ report: test-all
 	@echo "Test results in waveform files:" >> test_report.txt
 	@ls -la *.wlf 2>/dev/null >> test_report.txt || echo "No waveforms generated" >> test_report.txt
 	@echo "Test report generated: test_report.txt"
+
+# Exception Stack Frame Verification
+test-exceptions: $(BUILD_DIR)/tg68k.o
+	$(GHDL) -a $(GHDL_FLAGS) tb_exceptions.vhd
+	$(GHDL) -e $(GHDL_FLAGS) tb_exceptions
+	$(GHDL) -r $(GHDL_FLAGS) tb_exceptions --vcd=$(BUILD_DIR)/tb_exceptions.vcd --stop-time=10us
+

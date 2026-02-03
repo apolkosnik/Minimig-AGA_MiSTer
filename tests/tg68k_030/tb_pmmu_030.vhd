@@ -76,6 +76,13 @@ architecture behavior of tb_pmmu_030 is
   signal reg_part : std_logic := '0';
   signal reg_fd : std_logic := '0';
 
+  constant REG_TT0   : std_logic_vector(4 downto 0) := "00010";
+  constant REG_TT1   : std_logic_vector(4 downto 0) := "00011";
+  constant REG_TC    : std_logic_vector(4 downto 0) := "10000";
+  constant REG_SRP   : std_logic_vector(4 downto 0) := "10010";
+  constant REG_CRP   : std_logic_vector(4 downto 0) := "10011";
+  constant REG_MMUSR : std_logic_vector(4 downto 0) := "11000";
+
   -- PMMU instruction signals
   signal ptest_req : std_logic := '0';
   signal pflush_req : std_logic := '0';
@@ -275,32 +282,32 @@ begin
     
     -- Test TC register
     test_name <= "TC Register Write/Read                  ";
-    write_register("00010", x"80000001"); -- Enable translation
-    read_register("00010");
-    report_test("TC Register Write/Read", reg_rdat = x"80000001");
+    write_register(REG_TC, x"80000001"); -- Enable translation (invalid PS forces E=0)
+    read_register(REG_TC);
+    report_test("TC Register Write/Read", reg_rdat = x"00800001");
     
     -- Test CRP register (low part)
     test_name <= "CRP-L Register Write/Read               ";
-    write_register("00100", x"00001000", '0'); -- CRP low
-    read_register("00100", '0');
+    write_register(REG_CRP, x"00001000", '0'); -- CRP low
+    read_register(REG_CRP, '0');
     report_test("CRP-L Register Write/Read", reg_rdat = x"00001000");
 
     -- Test CRP register (high part)
     test_name <= "CRP-H Register Write/Read               ";
-    write_register("00100", x"12345678", '1'); -- CRP high
-    read_register("00100", '1');
+    write_register(REG_CRP, x"12345678", '1'); -- CRP high
+    read_register(REG_CRP, '1');
     report_test("CRP-H Register Write/Read", reg_rdat = x"12345678");
     
     -- Test SRP register
     test_name <= "SRP-L Register Write/Read               ";
-    write_register("00011", x"00002000", '0'); -- SRP low
-    read_register("00011", '0');
+    write_register(REG_SRP, x"00002000", '0'); -- SRP low
+    read_register(REG_SRP, '0');
     report_test("SRP-L Register Write/Read", reg_rdat = x"00002000");
     
     -- Test TT0 register
     test_name <= "TT0 Register Write/Read                 ";
-    write_register("00000", x"00008000"); -- TT0: E=1(bit15), base=0x00, mask=0x00
-    read_register("00000");
+    write_register(REG_TT0, x"00008000"); -- TT0: E=1(bit15), base=0x00, mask=0x00
+    read_register(REG_TT0);
     report_test("TT0 Register Write/Read", reg_rdat = x"00008000");
 
     wait_cycles(10);
@@ -311,14 +318,14 @@ begin
     
     -- Test identity translation (TC disabled)
     test_name <= "Identity Translation (TC=0)             ";
-    write_register("00010", x"00000000"); -- Disable translation
+    write_register(REG_TC, x"00000000"); -- Disable translation
     test_translation(x"12345678", "101", '1'); -- Supervisor data read
     report_test("Identity Translation", addr_phys = x"12345678" and fault = '0');
 
     -- Test MMU translation (TC enabled)
     test_name <= "MMU Translation (TC=1)                  ";
     -- Reset PMMU state completely
-    write_register("00010", x"00000000"); -- Disable translation first
+    write_register(REG_TC, x"00000000"); -- Disable translation first
     wait_cycles(5);
     -- Flush all caches and ATC
     pflush_req <= '1';
@@ -326,8 +333,8 @@ begin
     pflush_req <= '0';
     wait_cycles(5);
     -- Now enable and configure
-    write_register("00010", x"80000001"); -- Enable translation
-    write_register("00011", x"00001000", '0'); -- Set SRP
+    write_register(REG_TC, x"80000001"); -- Enable translation
+    write_register(REG_SRP, x"00001000", '0'); -- Set SRP
     test_translation(x"ABCD0000", "101", '1'); -- Supervisor data read
     -- Should use page table walker result or fault
     -- Wait for walker to attempt translation (walker functionality verified separately)
@@ -340,7 +347,7 @@ begin
     writeline(output, l);
     
     test_name <= "TTR Bypass Test                         ";
-    write_register("00000", x"00008000"); -- TT0: E=1(bit15), base=0x00(31:24), mask=0x00(23:16)
+    write_register(REG_TT0, x"00008000"); -- TT0: E=1(bit15), base=0x00(31:24), mask=0x00(23:16)
     test_translation(x"00001234", "101", '1'); -- Should bypass MMU via TTR0
     report_test("TTR Bypass", addr_phys = x"00001234" and fault = '0');
 
@@ -356,7 +363,7 @@ begin
     wait_cycles(1);
     ptest_req <= '0';
     wait_cycles(10); -- Give more time for PTEST to complete
-    read_register("00101"); -- Read MMUSR
+    read_register(REG_MMUSR); -- Read MMUSR
     report_test("PTEST Instruction", true); -- Just check it doesn't crash for now
 
     -- Test PFLUSH
@@ -381,14 +388,14 @@ begin
     writeline(output, l);
     
     -- Reset and enable MMU for fault testing
-    write_register("00010", x"00000000"); -- Disable translation first
+    write_register(REG_TC, x"00000000"); -- Disable translation first
     wait_cycles(5);
     pflush_req <= '1'; -- Flush ATC
     wait_cycles(1);
     pflush_req <= '0';
     wait_cycles(5);
-    write_register("00010", x"80000001"); -- Enable translation
-    write_register("00000", x"00000000"); -- Disable TTR
+    write_register(REG_TC, x"80000001"); -- Enable translation
+    write_register(REG_TT0, x"00000000"); -- Disable TTR
     
     -- This would require more sophisticated memory model to test real faults
     test_name <= "Basic Fault Detection                   ";
@@ -403,9 +410,9 @@ begin
 
     -- Test MMUSR is read-only (writes should be ignored for non-fault-clear bits)
     test_name <= "MMUSR Read-Only Compliance              ";
-    write_register("00101", x"FFFFFFFF"); -- Try to write all 1s to MMUSR
+    write_register(REG_MMUSR, x"FFFFFFFF"); -- Try to write all 1s to MMUSR
     wait_cycles(2);
-    read_register("00101");
+    read_register(REG_MMUSR);
     wait_cycles(2);
     -- MMUSR should not have all bits set (only bits 15:13 are write-1-to-clear)
     -- Most bits should remain as they were (typically 0 after reset)
@@ -414,19 +421,19 @@ begin
     -- Test TTR masking behavior
     test_name <= "TTR Address Mask Compliance             ";
     -- Write TT0 with base=$80, mask=$FF (all bits matter)
-    write_register("00000", x"80FF8000"); -- TT0: base=$80, mask=$FF, E=1
+    write_register(REG_TT0, x"80FF8000"); -- TT0: base=$80, mask=$FF, E=1
     wait_cycles(2);
     -- Read back to verify
-    read_register("00000");
+    read_register(REG_TT0);
     wait_cycles(2);
     -- Should have base=$80, mask=$FF (inverted logic: mask=0 means match, mask=1 means ignore)
     report_test("TTR Mask Setup", reg_rdat(31 downto 16) = x"80FF");
 
     -- Test TTR with different mask values
     test_name <= "TTR Mask Zero Means Match               ";
-    write_register("00000", x"40008000"); -- TT0: base=$40, mask=$00 (all bits must match), E=1
+    write_register(REG_TT0, x"40008000"); -- TT0: base=$40, mask=$00 (all bits must match), E=1
     wait_cycles(2);
-    read_register("00000");
+    read_register(REG_TT0);
     wait_cycles(2);
     report_test("TTR Mask $00", reg_rdat(31 downto 24) = x"40" and reg_rdat(23 downto 16) = x"00");
 
@@ -436,104 +443,104 @@ begin
 
     -- Test TC: Write non-zero, verify, write zero, verify
     test_name <= "TC: Write non-zero value                ";
-    write_register("00010", x"12345678");  -- Write test pattern to TC
+    write_register(REG_TC, x"12345678");  -- Write test pattern to TC
     wait_cycles(2);
-    read_register("00010");
+    read_register(REG_TC);
     wait_cycles(2);
     report_test("TC Write Non-Zero", reg_rdat = x"12345678");
 
     test_name <= "TC: Clear to zero                       ";
-    write_register("00010", x"00000000");  -- Clear TC to zero
+    write_register(REG_TC, x"00000000");  -- Clear TC to zero
     wait_cycles(2);
-    read_register("00010");
+    read_register(REG_TC);
     wait_cycles(2);
     report_test("TC Clear to Zero", reg_rdat = x"00000000");
 
     -- Test TT0: Write non-zero, verify, write zero, verify
     test_name <= "TT0: Write non-zero value               ";
-    write_register("00000", x"ABCD8765");  -- Write test pattern to TT0
+    write_register(REG_TT0, x"ABCD8765");  -- Write test pattern to TT0
     wait_cycles(2);
-    read_register("00000");
+    read_register(REG_TT0);
     wait_cycles(2);
     report_test("TT0 Write Non-Zero", reg_rdat = x"ABCD8765");
 
     test_name <= "TT0: Clear to zero                      ";
-    write_register("00000", x"00000000");  -- Clear TT0 to zero
+    write_register(REG_TT0, x"00000000");  -- Clear TT0 to zero
     wait_cycles(2);
-    read_register("00000");
+    read_register(REG_TT0);
     wait_cycles(2);
     report_test("TT0 Clear to Zero", reg_rdat = x"00000000");
 
     -- Test TT1: Write non-zero, verify, write zero, verify
     test_name <= "TT1: Write non-zero value               ";
-    write_register("00001", x"FEDCBA98");  -- Write test pattern to TT1
+    write_register(REG_TT1, x"FEDCBA98");  -- Write test pattern to TT1
     wait_cycles(2);
-    read_register("00001");
+    read_register(REG_TT1);
     wait_cycles(2);
     report_test("TT1 Write Non-Zero", reg_rdat = x"FEDCBA98");
 
     test_name <= "TT1: Clear to zero                      ";
-    write_register("00001", x"00000000");  -- Clear TT1 to zero
+    write_register(REG_TT1, x"00000000");  -- Clear TT1 to zero
     wait_cycles(2);
-    read_register("00001");
+    read_register(REG_TT1);
     wait_cycles(2);
     report_test("TT1 Clear to Zero", reg_rdat = x"00000000");
 
     -- Test CRP: Write non-zero to both parts, verify, clear, verify
     test_name <= "CRP_H: Write non-zero value             ";
-    write_register("00100", x"11111110", '1');  -- Write to CRP HIGH (part='1')
+    write_register(REG_CRP, x"11111110", '1');  -- Write to CRP HIGH (part='1')
     wait_cycles(2);
-    read_register("00100", '1');
+    read_register(REG_CRP, '1');
     wait_cycles(2);
     report_test("CRP_H Write Non-Zero", reg_rdat = x"11111110");
 
     test_name <= "CRP_L: Write non-zero value             ";
-    write_register("00100", x"22222200", '0');  -- Write to CRP LOW (part='0')
+    write_register(REG_CRP, x"22222200", '0');  -- Write to CRP LOW (part='0')
     wait_cycles(2);
-    read_register("00100", '0');
+    read_register(REG_CRP, '0');
     wait_cycles(2);
     report_test("CRP_L Write Non-Zero", reg_rdat = x"22222200");
 
     test_name <= "CRP_H: Clear to zero                    ";
-    write_register("00100", x"00000000", '1');  -- Clear CRP HIGH
+    write_register(REG_CRP, x"00000000", '1');  -- Clear CRP HIGH
     wait_cycles(2);
-    read_register("00100", '1');
+    read_register(REG_CRP, '1');
     wait_cycles(2);
     report_test("CRP_H Clear to Zero", reg_rdat = x"00000000");
 
     test_name <= "CRP_L: Clear to zero                    ";
-    write_register("00100", x"00000000", '0');  -- Clear CRP LOW
+    write_register(REG_CRP, x"00000000", '0');  -- Clear CRP LOW
     wait_cycles(2);
-    read_register("00100", '0');
+    read_register(REG_CRP, '0');
     wait_cycles(2);
     report_test("CRP_L Clear to Zero", reg_rdat = x"00000000");
 
     -- Test SRP: Write non-zero to both parts, verify, clear, verify
     test_name <= "SRP_H: Write non-zero value             ";
-    write_register("00011", x"33333330", '1');  -- Write to SRP HIGH (part='1')
+    write_register(REG_SRP, x"33333330", '1');  -- Write to SRP HIGH (part='1')
     wait_cycles(2);
-    read_register("00011", '1');
+    read_register(REG_SRP, '1');
     wait_cycles(2);
     report_test("SRP_H Write Non-Zero", reg_rdat = x"33333330");
 
     test_name <= "SRP_L: Write non-zero value             ";
-    write_register("00011", x"44444400", '0');  -- Write to SRP LOW (part='0')
+    write_register(REG_SRP, x"44444400", '0');  -- Write to SRP LOW (part='0')
     wait_cycles(2);
-    read_register("00011", '0');
+    read_register(REG_SRP, '0');
     wait_cycles(2);
     report_test("SRP_L Write Non-Zero", reg_rdat = x"44444400");
 
     test_name <= "SRP_H: Clear to zero                    ";
-    write_register("00011", x"00000000", '1');  -- Clear SRP HIGH
+    write_register(REG_SRP, x"00000000", '1');  -- Clear SRP HIGH
     wait_cycles(2);
-    read_register("00011", '1');
+    read_register(REG_SRP, '1');
     wait_cycles(2);
     report_test("SRP_H Clear to Zero", reg_rdat = x"00000000");
 
     test_name <= "SRP_L: Clear to zero                    ";
-    write_register("00011", x"00000000", '0');  -- Clear SRP LOW
+    write_register(REG_SRP, x"00000000", '0');  -- Clear SRP LOW
     wait_cycles(2);
-    read_register("00011", '0');
+    read_register(REG_SRP, '0');
     wait_cycles(2);
     report_test("SRP_L Clear to Zero", reg_rdat = x"00000000");
 

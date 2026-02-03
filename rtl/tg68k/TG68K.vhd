@@ -84,25 +84,30 @@ COMPONENT TG68KdotC_Kernel
       FPU_Enable : integer := 1        --0=>no FPU,   1=>FPU enabled
    );
    port(
-      CPU            : in std_logic_vector(1 downto 0):="01";  -- 00->68000  01->68010  10->68020  11->68030
+      CPU            : in std_logic_vector(1 downto 0):="10";  -- 00->68000  01->68010  10->68030
       clk            : in std_logic;
       nReset         : in std_logic:='1';    --low active
       clkena_in      : in std_logic:='1';
       data_in        : in std_logic_vector(15 downto 0);
       IPL            : in std_logic_vector(2 downto 0):="111";
       IPL_autovector : in std_logic:='0';
-      addr_out       : out std_logic_vector(31 downto 0);
       berr           : in std_logic:='0';     -- only 68000 Stackpointer dummy for Atari ST core
-      FC             : out std_logic_vector(2 downto 0);
+      addr_out       : out std_logic_vector(31 downto 0);
       data_write     : out std_logic_vector(15 downto 0);
-      busstate       : out std_logic_vector(1 downto 0);	
       nWr            : out std_logic;
       nUDS, nLDS     : out std_logic;
+      busstate       : out std_logic_vector(1 downto 0);	
+      longword       : out std_logic;
       nResetOut      : out std_logic;
+      FC             : out std_logic_vector(2 downto 0);
+      clr_berr       : out std_logic;
+-- for debug
       skipFetch      : out std_logic;
+      regin_out      : out std_logic_vector(31 downto 0);
+      CACR_out       : out std_logic_vector(31 downto 0);
+      VBR_out        : out std_logic_vector(31 downto 0);
 -- Cache control interface (68030)		
-      cache_cinv_req  : out std_logic;
-      cache_cpush_req : out std_logic;
+      cache_inv_req  : out std_logic;  -- Cache invalidation request (from CACR bits)
       cache_op_scope  : out std_logic_vector(1 downto 0);
       cache_op_cache  : out std_logic_vector(1 downto 0);
       cacr_ie         : out std_logic;
@@ -112,12 +117,26 @@ COMPONENT TG68KdotC_Kernel
       cacr_ibe        : out std_logic;  -- Instruction Burst Enable
       cacr_dbe        : out std_logic;  -- Data Burst Enable
       cacr_wa         : out std_logic;  -- Write Allocate
+-- PMMU register interface (68030)
+      pmmu_reg_we    : out std_logic;
+      pmmu_reg_re    : out std_logic;
+      pmmu_reg_sel   : out std_logic_vector(4 downto 0);
+      pmmu_reg_wdat  : out std_logic_vector(31 downto 0);
+      pmmu_reg_part  : out std_logic;
 -- PMMU address interface (68030)
       pmmu_addr_log   : out std_logic_vector(31 downto 0);
       pmmu_addr_phys  : out std_logic_vector(31 downto 0);
       pmmu_cache_inhibit : out std_logic;
 -- Cache operation address (68030)
       cache_op_addr   : out std_logic_vector(31 downto 0);
+-- PMMU walker memory interface (68030)
+      pmmu_walker_req  : out std_logic;
+      pmmu_walker_we   : out std_logic;
+      pmmu_walker_addr : out std_logic_vector(31 downto 0);
+      pmmu_walker_wdat : out std_logic_vector(31 downto 0);
+      pmmu_walker_ack  : in  std_logic;
+      pmmu_walker_data : in  std_logic_vector(31 downto 0);
+      pmmu_walker_berr : in  std_logic;
 -- DEBUG: Supervisor mode tracking signals
       debug_SVmode        : out std_logic;
       debug_preSVmode     : out std_logic;
@@ -125,9 +144,31 @@ COMPONENT TG68KdotC_Kernel
       debug_changeMode    : out std_logic;
       debug_setopcode     : out std_logic;
       debug_exec_directSR : out std_logic;
-      debug_exec_to_SR    : out std_logic
---      longword       : out std_logic;
---      clr_berr       : out std_logic;
+      debug_exec_to_SR    : out std_logic;
+-- DEBUG: PMOVE Dn simplified mechanism
+      debug_pmove_dn_mode : out std_logic;
+      debug_pmove_dn_regnum : out std_logic_vector(2 downto 0);
+-- DEBUG: Pipeline debugging
+      debug_opcode : out std_logic_vector(15 downto 0);
+      debug_state : out std_logic_vector(1 downto 0);
+      debug_setstate : out std_logic_vector(1 downto 0);
+      debug_last_opc_read : out std_logic_vector(15 downto 0);
+      debug_data_read : out std_logic_vector(31 downto 0);
+      debug_direct_data : out std_logic;
+      debug_setnextpass : out std_logic;
+-- DEBUG: Address generation and opcode capture
+      debug_TG68_PC : out std_logic_vector(31 downto 0);
+      debug_memaddr_reg : out std_logic_vector(31 downto 0);
+      debug_memaddr_delta : out std_logic_vector(31 downto 0);
+      debug_oddout : out std_logic;
+      debug_decodeOPC : out std_logic;
+-- DEBUG: MOVES instruction trace signals
+      debug_brief : out std_logic_vector(15 downto 0);
+      debug_moves_bus_pending : out std_logic;
+      debug_moves_writeback_pending : out std_logic;
+      debug_clkena_lw : out std_logic;
+      debug_regfile_d0 : out std_logic_vector(31 downto 0);
+      debug_regfile_a0 : out std_logic_vector(31 downto 0)
    );
    END COMPONENT;
 
@@ -142,8 +183,7 @@ COMPONENT TG68K_Cache_030
       cacr_dfreeze    : in  std_logic;
       cacr_wa        : in  std_logic;
       -- Cache Control Instructions
-      cinv_req       : in  std_logic;
-      cpush_req      : in  std_logic;
+      inv_req        : in  std_logic;
       cache_op_scope : in  std_logic_vector(1 downto 0);
       cache_op_cache : in  std_logic_vector(1 downto 0);
       cache_op_addr  : in  std_logic_vector(31 downto 0);
@@ -205,8 +245,7 @@ COMPONENT TG68K_Cache_030
 
    -- Cache control signals
    SIGNAL cache_enabled   : std_logic;
-   SIGNAL cache_cinv_req  : std_logic;
-   SIGNAL cache_cpush_req : std_logic;
+   SIGNAL cache_inv_req  : std_logic;
    SIGNAL cache_op_scope  : std_logic_vector(1 downto 0);
    SIGNAL cache_op_cache  : std_logic_vector(1 downto 0);
    SIGNAL cacr_ie         : std_logic;
@@ -292,7 +331,7 @@ cpu1: TG68KdotC_Kernel
       DIV_Mode => 2,             --0=>16Bit,    1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,  
       BitField => 2,             --0=>no,       1=>yes,           2=>switchable with CPU(1) 
 
-      BarrelShifter => 0,        --0=>no,       1=>yes,           2=>switchable with CPU(1)
+      BarrelShifter => 2,        --0=>no,       1=>yes,           2=>switchable with CPU(1)
       MUL_Hardware => 1,         --0=>no,       1=>yes,
       FPU_Enable => FPU_Enable   --0=>no FPU,   1=>FPU enabled
    )
@@ -313,10 +352,14 @@ cpu1: TG68KdotC_Kernel
       nUDS => uds_in,            -- : out std_logic;
       nLDS => lds_in,            -- : out std_logic;
       nResetOut => nResetOut,    -- : out std_logic;
+      longword => open,          -- : out std_logic;
       skipFetch => skipFetch,    -- : out std_logic
+      regin_out => open,
+      CACR_out => open,
+      VBR_out => open,
+      clr_berr => open,
       -- Cache control interface (68030)
-      cache_cinv_req => cache_cinv_req,   -- : out std_logic;
-      cache_cpush_req => cache_cpush_req, -- : out std_logic;
+      cache_inv_req => cache_inv_req,   -- : out std_logic;
       cache_op_scope => cache_op_scope,   -- : out std_logic_vector(1 downto 0);
       cache_op_cache => cache_op_cache,   -- : out std_logic_vector(1 downto 0);
       cacr_ie => cacr_ie,                 -- : out std_logic;
@@ -326,12 +369,26 @@ cpu1: TG68KdotC_Kernel
       cacr_ibe => cacr_ibe,                 -- : out std_logic;
       cacr_dbe => cacr_dbe,                 -- : out std_logic;
       cacr_wa => cacr_wa,                   -- : out std_logic;
+      -- PMMU register interface (68030)
+      pmmu_reg_we => open,
+      pmmu_reg_re => open,
+      pmmu_reg_sel => open,
+      pmmu_reg_wdat => open,
+      pmmu_reg_part => open,
       -- PMMU address interface (68030)
       pmmu_addr_log => pmmu_addr_log,     -- : out std_logic_vector(31 downto 0);
       pmmu_addr_phys => pmmu_addr_phys,   -- : out std_logic_vector(31 downto 0)
       pmmu_cache_inhibit => pmmu_ch_inhibit, -- : out std_logic
       -- Cache operation address (68030)
       cache_op_addr => cache_op_addr,     -- : out std_logic_vector(31 downto 0)
+      -- PMMU walker memory interface (68030)
+      pmmu_walker_req => open,
+      pmmu_walker_we => open,
+      pmmu_walker_addr => open,
+      pmmu_walker_wdat => open,
+      pmmu_walker_ack => '0',
+      pmmu_walker_data => (others => '0'),
+      pmmu_walker_berr => '0',
       -- DEBUG: Supervisor mode tracking signals
       debug_SVmode => debug_SVmode_int,
       debug_preSVmode => debug_preSVmode_int,
@@ -339,7 +396,27 @@ cpu1: TG68KdotC_Kernel
       debug_changeMode => debug_changeMode_int,
       debug_setopcode => debug_setopcode_int,
       debug_exec_directSR => debug_exec_directSR_int,
-      debug_exec_to_SR => debug_exec_to_SR_int
+      debug_exec_to_SR => debug_exec_to_SR_int,
+      debug_pmove_dn_mode => open,
+      debug_pmove_dn_regnum => open,
+      debug_opcode => open,
+      debug_state => open,
+      debug_setstate => open,
+      debug_last_opc_read => open,
+      debug_data_read => open,
+      debug_direct_data => open,
+      debug_setnextpass => open,
+      debug_TG68_PC => open,
+      debug_memaddr_reg => open,
+      debug_memaddr_delta => open,
+      debug_oddout => open,
+      debug_decodeOPC => open,
+      debug_brief => open,
+      debug_moves_bus_pending => open,
+      debug_moves_writeback_pending => open,
+      debug_clkena_lw => open,
+      debug_regfile_d0 => open,
+      debug_regfile_a0 => open
    );
  
    PROCESS (CLK)
@@ -478,8 +555,7 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
       cacr_dfreeze    => cacr_dfreeze,
       cacr_wa        => cacr_wa,
       -- Cache Control Instructions
-      cinv_req       => cache_cinv_req,
-      cpush_req      => cache_cpush_req,
+      inv_req       => cache_inv_req,
       cache_op_scope => cache_op_scope,
       cache_op_cache => cache_op_cache,
       cache_op_addr  => cache_op_addr,
