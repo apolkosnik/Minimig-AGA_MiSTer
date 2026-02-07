@@ -158,6 +158,19 @@ COMPONENT TG68KdotC_Kernel
       debug_TG68_PC : out std_logic_vector(31 downto 0);
       debug_memaddr_reg : out std_logic_vector(31 downto 0);
       debug_memaddr_delta : out std_logic_vector(31 downto 0);
+      debug_memaddr_delta_rega : out std_logic_vector(31 downto 0);
+      debug_memaddr_delta_regb : out std_logic_vector(31 downto 0);
+      debug_addsub_q : out std_logic_vector(31 downto 0);
+      debug_memmaskmux : out std_logic_vector(5 downto 0);
+      debug_fline_opcode_latch : out std_logic_vector(15 downto 0);
+      debug_pmmu_ea_mode_latched : out std_logic_vector(5 downto 0);
+      debug_exec_direct_delta : out std_logic;
+      debug_exec_directPC : out std_logic;
+      debug_exec_mem_addsub : out std_logic;
+      debug_set_addrlong : out std_logic;
+      debug_mdelta_src : out std_logic_vector(7 downto 0);
+      debug_pc_brw : out std_logic;
+      debug_pc_word : out std_logic;
       debug_oddout : out std_logic;
       debug_decodeOPC : out std_logic;
 -- DEBUG: MOVES instruction trace signals
@@ -166,7 +179,46 @@ COMPONENT TG68KdotC_Kernel
       debug_moves_writeback_pending : out std_logic;
       debug_clkena_lw : out std_logic;
       debug_regfile_d0 : out std_logic_vector(31 downto 0);
-      debug_regfile_a0 : out std_logic_vector(31 downto 0)
+      debug_regfile_d1 : out std_logic_vector(31 downto 0);
+      debug_regfile_d2 : out std_logic_vector(31 downto 0);
+      debug_regfile_d3 : out std_logic_vector(31 downto 0);
+      debug_regfile_d4 : out std_logic_vector(31 downto 0);
+      debug_regfile_d5 : out std_logic_vector(31 downto 0);
+      debug_regfile_d6 : out std_logic_vector(31 downto 0);
+      debug_regfile_d7 : out std_logic_vector(31 downto 0);
+      debug_regfile_a0 : out std_logic_vector(31 downto 0);
+      debug_regfile_a1 : out std_logic_vector(31 downto 0);
+      debug_regfile_a2 : out std_logic_vector(31 downto 0);
+      debug_regfile_a3 : out std_logic_vector(31 downto 0);
+      debug_regfile_a4 : out std_logic_vector(31 downto 0);
+      debug_regfile_a5 : out std_logic_vector(31 downto 0);
+      debug_regfile_a6 : out std_logic_vector(31 downto 0);
+      debug_regfile_a7 : out std_logic_vector(31 downto 0);
+      debug_regfile_we : out std_logic;
+      debug_regfile_waddr : out std_logic_vector(3 downto 0);
+      debug_regfile_wdata : out std_logic_vector(31 downto 0);
+      debug_fline_context_valid : out std_logic;
+      debug_trap_1111 : out std_logic;
+      debug_trapmake : out std_logic;
+      debug_trap_illegal : out std_logic;
+      debug_trap_priv : out std_logic;
+      debug_trap_addr_error : out std_logic;
+      debug_trap_berr : out std_logic;
+      debug_trap_mmu_berr : out std_logic;
+      debug_trap_vector : out std_logic_vector(31 downto 0);
+      debug_pc_add : out std_logic_vector(31 downto 0);
+      debug_pc_dataa : out std_logic_vector(31 downto 0);
+      debug_pc_datab : out std_logic_vector(31 downto 0);
+      debug_pmmu_brief : out std_logic_vector(15 downto 0);
+      debug_use_base : out std_logic;
+      debug_rf_source_addr : out std_logic_vector(3 downto 0);
+      debug_pmove_ea_latched : out std_logic_vector(31 downto 0);
+      debug_reg_QA : out std_logic_vector(31 downto 0);
+      debug_pmmu_busy : out std_logic;
+      debug_micro_state : out integer range 0 to 255;
+      debug_next_micro_state : out integer range 0 to 255;
+      debug_memmask : out std_logic_vector(5 downto 0);
+      debug_sndOPC : out std_logic_vector(15 downto 0)
    );
    END COMPONENT;
 
@@ -406,6 +458,19 @@ cpu1: TG68KdotC_Kernel
       debug_TG68_PC => open,
       debug_memaddr_reg => open,
       debug_memaddr_delta => open,
+      debug_memaddr_delta_rega => open,
+      debug_memaddr_delta_regb => open,
+      debug_addsub_q => open,
+      debug_memmaskmux => open,
+      debug_fline_opcode_latch => open,
+      debug_pmmu_ea_mode_latched => open,
+      debug_exec_direct_delta => open,
+      debug_exec_directPC => open,
+      debug_exec_mem_addsub => open,
+      debug_set_addrlong => open,
+      debug_mdelta_src => open,
+      debug_pc_brw => open,
+      debug_pc_word => open,
       debug_oddout => open,
       debug_decodeOPC => open,
       debug_brief => open,
@@ -413,7 +478,46 @@ cpu1: TG68KdotC_Kernel
       debug_moves_writeback_pending => open,
       debug_clkena_lw => open,
       debug_regfile_d0 => open,
-      debug_regfile_a0 => open
+      debug_regfile_d1 => open,
+      debug_regfile_d2 => open,
+      debug_regfile_d3 => open,
+      debug_regfile_d4 => open,
+      debug_regfile_d5 => open,
+      debug_regfile_d6 => open,
+      debug_regfile_d7 => open,
+      debug_regfile_a0 => open,
+      debug_regfile_a1 => open,
+      debug_regfile_a2 => open,
+      debug_regfile_a3 => open,
+      debug_regfile_a4 => open,
+      debug_regfile_a5 => open,
+      debug_regfile_a6 => open,
+      debug_regfile_a7 => open,
+      debug_regfile_we => open,
+      debug_regfile_waddr => open,
+      debug_regfile_wdata => open,
+      debug_fline_context_valid => open,
+      debug_trap_1111 => open,
+      debug_trapmake => open,
+      debug_trap_illegal => open,
+      debug_trap_priv => open,
+      debug_trap_addr_error => open,
+      debug_trap_berr => open,
+      debug_trap_mmu_berr => open,
+      debug_trap_vector => open,
+      debug_pc_add => open,
+      debug_pc_dataa => open,
+      debug_pc_datab => open,
+      debug_pmmu_brief => open,
+      debug_use_base => open,
+      debug_rf_source_addr => open,
+      debug_pmove_ea_latched => open,
+      debug_reg_QA => open,
+      debug_pmmu_busy => open,
+      debug_micro_state => open,
+      debug_next_micro_state => open,
+      debug_memmask => open,
+      debug_sndOPC => open
    );
  
    PROCESS (CLK)

@@ -9,7 +9,21 @@ entity tb_pmove_crp_mem_to_mmu_postinc is
 end entity;
 
 architecture behavioral of tb_pmove_crp_mem_to_mmu_postinc is
-	signal clk       : std_logic := '0';
+	
+
+    function slv_to_hex(value : std_logic_vector) return string is
+        constant hex_chars : string := "0123456789ABCDEF";
+        variable result : string(1 to value'length/4);
+        variable nibble : std_logic_vector(3 downto 0);
+    begin
+        for i in 0 to (value'length/4 - 1) loop
+            nibble := value(value'length - 1 - i*4 downto value'length - 4 - i*4);
+            result(i+1) := hex_chars(to_integer(unsigned(nibble)) + 1);
+        end loop;
+        return result;
+    end function;
+
+signal clk       : std_logic := '0';
 	signal nReset    : std_logic := '0';
 	signal clkena_in : std_logic := '1';
 

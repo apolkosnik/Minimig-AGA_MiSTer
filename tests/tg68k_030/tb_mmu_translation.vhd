@@ -17,7 +17,21 @@ end entity;
 
 architecture behavioral of tb_mmu_translation is
 
-    -- Clock
+    
+
+    function slv_to_hex(value : std_logic_vector) return string is
+        constant hex_chars : string := "0123456789ABCDEF";
+        variable result : string(1 to value'length/4);
+        variable nibble : std_logic_vector(3 downto 0);
+    begin
+        for i in 0 to (value'length/4 - 1) loop
+            nibble := value(value'length - 1 - i*4 downto value'length - 4 - i*4);
+            result(i+1) := hex_chars(to_integer(unsigned(nibble)) + 1);
+        end loop;
+        return result;
+    end function;
+
+-- Clock
     constant CLK_PERIOD : time := 10 ns;
     signal clk       : std_logic := '0';
     signal nReset    : std_logic := '0';
@@ -581,8 +595,7 @@ begin
         val32 := mem(2176) & mem(2177);
         pass := (val32 = x"AABB0011");
         if not pass then
-            report "  Phys $1100: expected $AABB0011, got 0x" &
-                   integer'image(to_integer(unsigned(val32(31 downto 16)))) & "_" &
+            report "  Phys $1100: expected $AABB0011, got 0x" & slv_to_hex(val32(31 downto 16)) & "_" &
                    integer'image(to_integer(unsigned(val32(15 downto 0))));
         end if;
         check_test(1, "Identity write + remap overwrite at phys $1100", pass);
@@ -592,8 +605,7 @@ begin
         val32 := mem(3848) & mem(3849);
         pass := (val32 = x"12345678");
         if not pass then
-            report "  D1@$1F10: expected $12345678, got 0x" &
-                   integer'image(to_integer(unsigned(val32(31 downto 16)))) & "_" &
+            report "  D1@$1F10: expected $12345678, got 0x" & slv_to_hex(val32(31 downto 16)) & "_" &
                    integer'image(to_integer(unsigned(val32(15 downto 0))));
         end if;
         check_test(2, "Identity read D1=$12345678", pass);
@@ -602,8 +614,7 @@ begin
         val32 := mem(3850) & mem(3851);
         pass := (val32 = x"AABB0011");
         if not pass then
-            report "  D2@$1F14: expected $AABB0011, got 0x" &
-                   integer'image(to_integer(unsigned(val32(31 downto 16)))) & "_" &
+            report "  D2@$1F14: expected $AABB0011, got 0x" & slv_to_hex(val32(31 downto 16)) & "_" &
                    integer'image(to_integer(unsigned(val32(15 downto 0))));
         end if;
         check_test(4, "Remap read D2=$AABB0011 (log $2100 -> phys $1100)", pass);
@@ -612,8 +623,7 @@ begin
         val32 := mem(3852) & mem(3853);
         pass := (val32 = x"AABB0011");
         if not pass then
-            report "  D3@$1F18: expected $AABB0011, got 0x" &
-                   integer'image(to_integer(unsigned(val32(31 downto 16)))) & "_" &
+            report "  D3@$1F18: expected $AABB0011, got 0x" & slv_to_hex(val32(31 downto 16)) & "_" &
                    integer'image(to_integer(unsigned(val32(15 downto 0))));
         end if;
         check_test(5, "Cross-verify D3=$AABB0011 (both map to phys $1100)", pass);
@@ -622,8 +632,7 @@ begin
         val32 := mem(3856) & mem(3857);
         pass := (val32(15) = '0' and val32(12) = '0' and val32(10) = '0');
         if not pass then
-            report "  MMUSR@$1F20: expected no B/W/I bits, got 0x" &
-                   integer'image(to_integer(unsigned(val32)));
+            report "  MMUSR@$1F20: expected no B/W/I bits, got 0x" & slv_to_hex(val32);
         end if;
         check_test(6, "PTEST W valid page: MMUSR has no fault bits", pass);
 
@@ -631,8 +640,7 @@ begin
         val32 := mem(3858) & mem(3859);
         pass := (val32(12) = '1');
         if not pass then
-            report "  MMUSR@$1F24: expected W bit (12) set, got 0x" &
-                   integer'image(to_integer(unsigned(val32)));
+            report "  MMUSR@$1F24: expected W bit (12) set, got 0x" & slv_to_hex(val32);
         end if;
         check_test(7, "PTEST W on WP page: MMUSR.W (bit 12) set", pass);
 
@@ -640,8 +648,7 @@ begin
         val32 := mem(3860) & mem(3861);
         pass := (val32(10) = '1');
         if not pass then
-            report "  MMUSR@$1F28: expected I bit (10) set, got 0x" &
-                   integer'image(to_integer(unsigned(val32)));
+            report "  MMUSR@$1F28: expected I bit (10) set, got 0x" & slv_to_hex(val32);
         end if;
         check_test(8, "PTEST R on invalid page: MMUSR.I (bit 10) set", pass);
 
@@ -649,8 +656,7 @@ begin
         val32 := mem(3862) & mem(3863);
         pass := (val32 = x"AABB0011");
         if not pass then
-            report "  D5@$1F2C: expected $AABB0011, got 0x" &
-                   integer'image(to_integer(unsigned(val32(31 downto 16)))) & "_" &
+            report "  D5@$1F2C: expected $AABB0011, got 0x" & slv_to_hex(val32(31 downto 16)) & "_" &
                    integer'image(to_integer(unsigned(val32(15 downto 0))));
         end if;
         check_test(9, "Post-PFLUSH re-walk reads $AABB0011", pass);
@@ -659,8 +665,7 @@ begin
         val32 := mem(3864) & mem(3865);
         pass := (val32(8) = '1');
         if not pass then
-            report "  MMUSR@$1F30: expected T bit (8) set, got 0x" &
-                   integer'image(to_integer(unsigned(val32)));
+            report "  MMUSR@$1F30: expected T bit (8) set, got 0x" & slv_to_hex(val32);
         end if;
         check_test(10, "PTEST with TT0 match: MMUSR.T (bit 8) set", pass);
 
@@ -671,8 +676,7 @@ begin
         val32 := mem(3840) & mem(3841);
         pass := (val32 = x"BE00000C");
         if not pass then
-            report "  Marker@$1F00: expected $BE00000C, got 0x" &
-                   integer'image(to_integer(unsigned(val32(31 downto 16)))) & "_" &
+            report "  Marker@$1F00: expected $BE00000C, got 0x" & slv_to_hex(val32(31 downto 16)) & "_" &
                    integer'image(to_integer(unsigned(val32(15 downto 0))));
         end if;
         check_test(12, "WP write triggers bus error (marker $BE00000C)", pass);

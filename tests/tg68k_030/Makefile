@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-all-modes test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-mmu-translation validate setup help
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-mmu-translation validate setup help
 
 # Default target
 all: test-comprehensive
@@ -43,6 +43,7 @@ help:
 	@echo "  test-pmove-d16an-pc - Test PMOVE (d16,An) PC increment + data values"
 	@echo "  test-pmove-d8anxn-pc - Test PMOVE (d8,An,Xn) PC increment + data values"
 	@echo "  test-pmove-pc-all-regs - COMPREHENSIVE: All regs (TC,TT0,TT1,CRP,SRP,MMUSR) + all EA modes"
+	@echo "  test-pmove-all-modes - PMOVE all regs + all legal EA modes (stdout detail)"
 	@echo "  test-pmove-multiple-regs - Test PMOVE multiple regs from (A7) - OP1addr conflict validation"
 	@echo "  test-integration - Test full system integration"
 	@echo "  test-diagrom     - Test DiagROM boot sequence"
@@ -113,6 +114,7 @@ compile: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cpu_mmu_detection.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_d16an_pc.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_d8anxn_pc.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_all_modes.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_validation.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_moves_all_modes.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_diagrom_detectcpu.vhd || true
@@ -195,6 +197,11 @@ test-pmove-pc-all-regs: compile
 	@echo "Tests: TC, TT0, TT1, CRP, SRP, MMUSR"
 	@echo "Modes: Dn, (An), (An)+, -(An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L"
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_pc_all_regs.vhd && $(VSIM) -c -do "run 500us; quit" tb_pmove_pc_all_regs
+
+test-pmove-all-modes: compile
+	@echo "Running PMOVE all regs + all legal EA modes test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_all_modes.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 3000us; quit" tb_pmove_all_modes
 
 test-pmove-crp-a7-postinc: compile
 	@echo "Running PMOVE.Q CRP,(A7)+ stack postincrement regression..."
@@ -336,15 +343,6 @@ test-pmove:
 	vcom -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	vcom -93 tb_pmove.vhd
 	vsim -c -do "run -all" tb_pmove
-
-test-pmove-comprehensive:
-	vlib work
-	vcom -93 $(RTL_DIR)/TG68K_Pack.vhd
-	vcom -93 $(RTL_DIR)/TG68K_ALU.vhd
-	vcom -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
-	vcom -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
-	vcom -93 tb_pmove_comprehensive.vhd
-	vsim -c -do "run -all" tb_pmove_comprehensive
 
 # Comprehensive MMU Translation Pipeline Test
 test-mmu-translation: setup

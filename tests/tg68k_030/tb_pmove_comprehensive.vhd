@@ -11,7 +11,21 @@ entity tb_pmove_comprehensive is
 end tb_pmove_comprehensive;
 
 architecture behavioral of tb_pmove_comprehensive is
-  -- Component Declaration
+  
+
+    function slv_to_hex(value : std_logic_vector) return string is
+        constant hex_chars : string := "0123456789ABCDEF";
+        variable result : string(1 to value'length/4);
+        variable nibble : std_logic_vector(3 downto 0);
+    begin
+        for i in 0 to (value'length/4 - 1) loop
+            nibble := value(value'length - 1 - i*4 downto value'length - 4 - i*4);
+            result(i+1) := hex_chars(to_integer(unsigned(nibble)) + 1);
+        end loop;
+        return result;
+    end function;
+
+-- Component Declaration
   component TG68KdotC_Kernel
     port(
       clk : in std_logic;

@@ -65,6 +65,18 @@ end TG68K_PMMU_030;
 
 architecture rtl of TG68K_PMMU_030 is
 
+  function slv_to_hex(value : std_logic_vector) return string is
+    constant hex_chars : string := "0123456789ABCDEF";
+    variable result : string(1 to value'length/4);
+    variable nibble : std_logic_vector(3 downto 0);
+  begin
+    for i in 0 to (value'length/4 - 1) loop
+      nibble := value(value'length - 1 - i*4 downto value'length - 4 - i*4);
+      result(i+1) := hex_chars(to_integer(unsigned(nibble)) + 1);
+    end loop;
+    return result;
+  end function;
+
   -- MC68030 PMMU Control Registers (complete set)
   -- MOVEC accessible: TC (0x003), TT0 (0x004), TT1 (0x005), MMUSR (0x805)
   -- PMOVE only: CRP, SRP, CAL, VAL, SCC, AC
@@ -1143,37 +1155,28 @@ begin
 
   -- DEBUG: Monitor all PMMU register reads
   process(reg_sel, reg_part, TC, TT0, TT1, SRP_H, SRP_L, CRP_H, CRP_L, MMUSR)
-    variable reg_val_int : integer;
   begin
     case reg_sel is
       when "00010" =>  -- TT0
-        reg_val_int := to_integer(unsigned(TT0));
-        report "PMMU_REG_READ: TT0=0x" & integer'image(reg_val_int) severity note;
+        report "PMMU_REG_READ: TT0=0x" & slv_to_hex(TT0) severity note;
       when "00011" =>  -- TT1
-        reg_val_int := to_integer(unsigned(TT1));
-        report "PMMU_REG_READ: TT1=0x" & integer'image(reg_val_int) severity note;
+        report "PMMU_REG_READ: TT1=0x" & slv_to_hex(TT1) severity note;
       when "10000" =>  -- TC
-        reg_val_int := to_integer(unsigned(TC));
-        report "PMMU_REG_READ: TC=0x" & integer'image(reg_val_int) severity note;
+        report "PMMU_REG_READ: TC=0x" & slv_to_hex(TC) severity note;
       when "10010" =>  -- SRP
         if reg_part = '1' then
-          reg_val_int := to_integer(unsigned(SRP_H));
-          report "PMMU_REG_READ: SRP_H=0x" & integer'image(reg_val_int) severity note;
+          report "PMMU_REG_READ: SRP_H=0x" & slv_to_hex(SRP_H) severity note;
         else
-          reg_val_int := to_integer(unsigned(SRP_L));
-          report "PMMU_REG_READ: SRP_L=0x" & integer'image(reg_val_int) severity note;
+          report "PMMU_REG_READ: SRP_L=0x" & slv_to_hex(SRP_L) severity note;
         end if;
       when "10011" =>  -- CRP
         if reg_part = '1' then
-          reg_val_int := to_integer(unsigned(CRP_H));
-          report "PMMU_REG_READ: CRP_H=0x" & integer'image(reg_val_int) severity note;
+          report "PMMU_REG_READ: CRP_H=0x" & slv_to_hex(CRP_H) severity note;
         else
-          reg_val_int := to_integer(unsigned(CRP_L));
-          report "PMMU_REG_READ: CRP_L=0x" & integer'image(reg_val_int) severity note;
+          report "PMMU_REG_READ: CRP_L=0x" & slv_to_hex(CRP_L) severity note;
         end if;
       when "11000" =>  -- MMUSR
-        report "PMMU_REG_READ: MMUSR=0x" &
-               integer'image(to_integer(unsigned(MMUSR(15 downto 0)))) &
+        report "PMMU_REG_READ: MMUSR=0x" & slv_to_hex(MMUSR(15 downto 0)) &
                " B=" & std_logic'image(MMUSR(15)) &
                " L=" & std_logic'image(MMUSR(14)) &
                " S=" & std_logic'image(MMUSR(13)) &

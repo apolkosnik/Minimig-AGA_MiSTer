@@ -13,7 +13,21 @@ end tb_whichamiga_mmu_test;
 
 architecture behavior of tb_whichamiga_mmu_test is
 
-    -- Component declaration
+    
+
+    function slv_to_hex(value : std_logic_vector) return string is
+        constant hex_chars : string := "0123456789ABCDEF";
+        variable result : string(1 to value'length/4);
+        variable nibble : std_logic_vector(3 downto 0);
+    begin
+        for i in 0 to (value'length/4 - 1) loop
+            nibble := value(value'length - 1 - i*4 downto value'length - 4 - i*4);
+            result(i+1) := hex_chars(to_integer(unsigned(nibble)) + 1);
+        end loop;
+        return result;
+    end function;
+
+-- Component declaration
     component TG68KdotC_Kernel
         port (
             clk : in std_logic;
@@ -286,16 +300,15 @@ begin
                     when others  => pmmu_reg_name := "UNKN  ";
                 end case;
 
-                report "PMMU_WRITE: " & pmmu_reg_name & " = 0x" &
-                       integer'image(to_integer(unsigned(pmmu_reg_wdat))) &
+                report "PMMU_WRITE: " & pmmu_reg_name & " = 0x" & slv_to_hex(pmmu_reg_wdat) &
                        " (part=" & integer'image(to_integer(unsigned'("" & pmmu_reg_part))) & ")"
                        severity note;
             end if;
 
             -- 2. Monitor stack pointer (A7) changes
             if regin_out /= last_a7 and regin_out /= x"00000000" then
-                report "STACK_PTR: A7 changed from 0x" & integer'image(to_integer(unsigned(last_a7))) &
-                       " to 0x" & integer'image(to_integer(unsigned(regin_out))) &
+                report "STACK_PTR: A7 changed from 0x" & slv_to_hex(last_a7) &
+                       " to 0x" & slv_to_hex(regin_out) &
                        " (delta=" & integer'image(to_integer(signed(regin_out)) - to_integer(signed(last_a7))) & ")"
                        severity note;
                 last_a7 := regin_out;
@@ -305,7 +318,7 @@ begin
             if busstate = "00" then  -- Instruction fetch
                 if to_integer(unsigned(addr)) >= 16#5000# and to_integer(unsigned(addr)) < 16#5600# then
                     -- In exception handler - RTE will be executed next
-                    report "IN_EXCEPTION_HANDLER: PC=0x" & integer'image(to_integer(unsigned(addr))) severity note;
+                    report "IN_EXCEPTION_HANDLER: PC=0x" & slv_to_hex(addr) severity note;
                 end if;
             end if;
         end if;
@@ -337,7 +350,7 @@ begin
             -- Debug: Track PC changes during instruction fetches
             if busstate = "00" then
                 if first_fetch then
-                    report "First instruction fetch at addr=0x" & integer'image(addr_int) severity note;
+                    report "First instruction fetch at addr=0x" & slv_to_hex(std_logic_vector(to_unsigned(addr_int, 32))) severity note;
                     first_fetch := false;
                 end if;
 
@@ -348,7 +361,7 @@ begin
 
                     -- Stop test when we reach the final NOP at 0x0400
                     if addr_int >= 16#400# and addr_int < 16#410# and not test_complete then
-                        report "SUCCESS: Reached final address 0x" & integer'image(addr_int) &
+                        report "SUCCESS: Reached final address 0x" & slv_to_hex(std_logic_vector(to_unsigned(addr_int, 32))) &
                                " after " & integer'image(pc_change_count) & " instruction fetches" severity note;
                         test_complete <= true;
                     end if;
@@ -357,16 +370,16 @@ begin
                     if addr_int >= 16#40# and addr_int < 16#500# then
                         -- Report ALL fetches in test program range (0x40-0x4FF) with opcode
                         if pc_change_count < 150 then  -- Limit to first 150 fetches in test range
-                            report "TEST: Fetch at PC=0x" & integer'image(addr_int) &
-                                   " opcode=0x" & integer'image(to_integer(unsigned(memory(addr_int/2)))) &
+                            report "TEST: Fetch at PC=0x" & slv_to_hex(std_logic_vector(to_unsigned(addr_int, 32))) &
+                                   " opcode=0x" & slv_to_hex(memory(addr_int/2)) &
                                    " (count=" & integer'image(pc_change_count) & ")" severity note;
                         end if;
                     elsif addr_int >= 16#5000# and addr_int < 16#5600# then
-                        report "EXCEPTION HANDLER at PC=0x" & integer'image(addr_int) &
+                        report "EXCEPTION HANDLER at PC=0x" & slv_to_hex(std_logic_vector(to_unsigned(addr_int, 32))) &
                                " (count=" & integer'image(pc_change_count) & ")" severity note;
                     elsif pc_change_count < 100 then
                         -- Report first 100 fetches wherever they are
-                        report "EARLY: Fetch at PC=0x" & integer'image(addr_int) &
+                        report "EARLY: Fetch at PC=0x" & slv_to_hex(std_logic_vector(to_unsigned(addr_int, 32))) &
                                " (count=" & integer'image(pc_change_count) & ")" severity note;
                     end if;
                 end if;
