@@ -91,7 +91,7 @@ begin
   -- Instantiate 68030 CPU
   cpu: TG68K
     generic map(
-      CPU => "11" -- 68030 mode
+      CPU => "10" -- 68030 mode
     )
     port map(
       CLK => CLK,

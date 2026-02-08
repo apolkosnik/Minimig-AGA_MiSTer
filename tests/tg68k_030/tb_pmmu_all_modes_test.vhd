@@ -128,7 +128,7 @@ begin
                     MUL_Hardware => 1, BarrelShifter => 2)
         port map(clk => clk, nReset => nReset, clkena_in => clkena_in,
                  data_in => data_in, IPL => "111", IPL_autovector => '1',
-                 CPU => "11", addr_out => addr_out, data_write => data_write,
+                 CPU => "10", addr_out => addr_out, data_write => data_write,
                  nWr => nWr, nUDS => nUDS, nLDS => nLDS, busstate => busstate, FC => FC,
                  pmmu_reg_we => open, pmmu_reg_re => open, pmmu_reg_sel => open,
                  pmmu_reg_wdat => open, pmmu_reg_part => open,
@@ -145,6 +145,20 @@ begin
 
     pc_tracker: process(clk)
     begin
+        if rising_edge(clk) then
+            -- synthesis translate_off
+            if to_integer(unsigned(addr_out)) >= 16#1038# and to_integer(unsigned(addr_out)) <= 16#1050# then
+                report "PC_AREA: addr=" & integer'image(to_integer(unsigned(addr_out))) &
+                       " bs=" & integer'image(to_integer(unsigned(busstate))) &
+                       " FC=" & integer'image(to_integer(unsigned(FC)));
+            end if;
+            if to_integer(unsigned(addr_out)) >= 16#2FF0# and to_integer(unsigned(addr_out)) <= 16#3020# then
+                report "DATA_AREA: addr=" & integer'image(to_integer(unsigned(addr_out))) &
+                       " bs=" & integer'image(to_integer(unsigned(busstate))) &
+                       " FC=" & integer'image(to_integer(unsigned(FC)));
+            end if;
+            -- synthesis translate_on
+        end if;
         if rising_edge(clk) and busstate = "00" and FC(1) = '1' then
             case to_integer(unsigned(addr_out)) is
                 when 16#1010# => report "T1: PMOVE D7,TC" severity note;

@@ -78,7 +78,7 @@ begin
                     MUL_Hardware => 1, BarrelShifter => 2)
         port map(clk => clk, nReset => nReset, clkena_in => clkena_in,
                  data_in => data_in, IPL => "111", IPL_autovector => '1',
-                 CPU => "11", addr_out => addr_out, data_write => data_write,
+                 CPU => "10", addr_out => addr_out, data_write => data_write,
                  nWr => nWr, nUDS => nUDS, nLDS => nLDS, busstate => busstate, FC => FC,
                  pmmu_reg_we => open, pmmu_reg_re => open, pmmu_reg_sel => open,
                  pmmu_reg_wdat => open, pmmu_reg_part => open,
