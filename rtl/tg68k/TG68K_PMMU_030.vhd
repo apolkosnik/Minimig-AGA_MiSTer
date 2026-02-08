@@ -117,6 +117,12 @@ architecture rtl of TG68K_PMMU_030 is
   -- LOW word format: Table Address[31:4] + Reserved[3:0]
   -- constant CRP_LOW_MASK : std_logic_vector(31 downto 0) := "11111111111111111111111111110000"; -- 0xFFFFFFF0
   
+  -- Combinational TTR match signals for zero-latency bypass
+  -- BUG #371 FIX: When MMU is first enabled, addr_phys_reg is stale (registered).
+  -- TTR transparent translations are identity (phys=log), so we can bypass the register.
+  signal ttr0_match_comb : std_logic;
+  signal ttr1_match_comb : std_logic;
+
   -- Translation result latches
   signal addr_phys_reg      : std_logic_vector(31 downto 0) := (others => '0');
   signal cache_inhibit_reg  : std_logic := '0';
@@ -884,6 +890,23 @@ begin
   -- Connect internal register to output port
   ptest_desc_addr <= desc_addr_reg;
 
+  -- BUG #371 FIX: Combinational TTR match for zero-latency addr_phys bypass
+  -- When MMU is first enabled, addr_phys_reg is stale (from previous cycle).
+  -- TTR transparent translations always produce phys=log (identity mapping),
+  -- so we can compute the match combinationally and bypass the registered result.
+  process(TT0, TT1, addr_log, fc, is_insn, rw, tc_en)
+    variable m0, m1 : std_logic;
+    variable ci_dummy, wp_dummy : std_logic;
+  begin
+    m0 := '0'; m1 := '0';
+    if tc_en = '1' then
+      ttr_check(TT0, addr_log, fc, is_insn, rw, m0, ci_dummy, wp_dummy);
+      ttr_check(TT1, addr_log, fc, is_insn, rw, m1, ci_dummy, wp_dummy);
+    end if;
+    ttr0_match_comb <= m0;
+    ttr1_match_comb <= m1;
+  end process;
+
   -- Reset and register writes
   process(clk, nreset)
     -- Variables for TC validation (MMU configuration exception detection)
@@ -972,9 +995,12 @@ begin
         -- MC68030 Specification: MMU register access requires supervisor mode
         -- Privilege check is performed by TG68KdotC_Kernel before asserting reg_we,
         -- so no additional FC check is needed here
-        -- report "PMMU_REG_WRITE: sel=0x" & slv_to_hstring(reg_sel) &
-               -- " wdat=0x" & slv_to_hstring(reg_wdat) &
-              --  -- " part=" & std_logic'image(reg_part) severity note;
+        -- synthesis translate_off
+        report "PMMU_REG_WRITE: sel=" & integer'image(to_integer(unsigned(reg_sel))) &
+               " wdat_hi=" & integer'image(to_integer(unsigned(reg_wdat(31 downto 16)))) &
+               " wdat_lo=" & integer'image(to_integer(unsigned(reg_wdat(15 downto 0)))) &
+               " part=" & std_logic'image(reg_part);
+        -- synthesis translate_on
         case reg_sel is
           when "00010" =>  -- TT0: P-reg 0x02
             -- TT0 register write - MC68030 Transparent Translation Register per User's Manual section 9.2.6
@@ -1289,7 +1315,11 @@ begin
   -- This eliminates the 1-cycle lag that caused cache to sample stale physical address
   -- When MMU is disabled (tc_en='0'), use logical address directly (same cycle)
   -- When MMU is enabled, use registered translation result (allows for page table walks)
-  addr_phys     <= addr_log when tc_en = '0' else addr_phys_reg;
+  -- BUG #371 FIX: Also bypass for TTR transparent translations (phys=log identity mapping)
+  -- Without this, the first fetch after MMU enable gets a stale addr_phys_reg
+  addr_phys     <= addr_log when tc_en = '0'
+                   else addr_log when (ttr0_match_comb = '1' or ttr1_match_comb = '1')
+                   else addr_phys_reg;
   -- BUG #126 V2 FIX: Combinational bypass for cache_inhibit when MMU disabled
   -- Without this, cache_inhibit_reg retains stale value (pmmu_req='0' when MMU off)
   cache_inhibit <= '0' when tc_en = '0' else cache_inhibit_reg;
