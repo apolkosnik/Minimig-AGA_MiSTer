@@ -1830,12 +1830,19 @@ begin
               write_protect_reg <= atc_attr(hit_idx)(0);
               fault_reg <= '0';
               -- Set successful translation MMUSR with MC68030 format
-              fault_status_reg <= encode_mmusr_success(
+              status_tmp := encode_mmusr_success(
                 write_protect => atc_attr(hit_idx)(0),   -- WP bit from page attributes
                 modified => atc_attr(hit_idx)(1),        -- M bit from page descriptor
                 transparent => '0',                      -- Not a transparent translation
                 level => "011"                           -- Page translation (3 levels typical)
               );
+              fault_status_reg <= status_tmp;
+              -- BUG #374 FIX: Update MMUSR on successful walker completion
+              -- Previously only fault paths set mmusr_update_req, so PTEST with
+              -- walker path (non-TTR, non-ATC) never updated MMUSR for valid translations.
+              -- This caused MMUSR to remain stale ($0000) after PTEST triggered a walk.
+              mmusr_update_value <= status_tmp;
+              mmusr_update_req <= '1';
              --  -- report "VALID_ACCESS: phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
             end if;
           else

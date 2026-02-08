@@ -55,6 +55,8 @@ help:
 	@echo "  test-regression  - Run MC68030 regression test suite (RECOMMENDED)"
 	@echo "  test-pmove-addressing - Test PMOVE with all legal addressing modes"
 	@echo "  test-pflush-ptest-pload - Test PFLUSH/PTEST/PLOAD instructions"
+	@echo "  test-ptest-all-modes - Test PTEST with all EA modes and page table walks"
+	@echo "  test-pload-all-modes - Test PLOAD with all EA modes and page table walks"
 	@echo "  test-indirect-descriptor - Test indirect descriptors"
 	@echo "  test-mmu-instruction-suite - Run complete MMU instruction test suite"
 	@echo "  test-amiga-sequence - Test Amiga ROM MMU initialization sequence"
@@ -263,6 +265,24 @@ test-pflush-ptest-pload: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pflush_ptest_pload.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_pflush_ptest_pload
 
+test-ptest-all-modes: setup
+	@echo "Running PTEST all addressing modes tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_ptest_all_modes.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_ptest_all_modes
+
+test-pload-all-modes: setup
+	@echo "Running PLOAD all addressing modes tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pload_all_modes.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 800us; quit" tb_pload_all_modes
+
 test-indirect-descriptor: setup
 	@echo "Running indirect descriptor tests..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
@@ -374,6 +394,16 @@ test-mmu-instruction-suite: setup
 	@echo "--- PFLUSH/PTEST/PLOAD ---"
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pflush_ptest_pload.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_pflush_ptest_pload
+	@echo ""
+	@echo "--- PTEST All Addressing Modes ---"
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_ptest_all_modes.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_ptest_all_modes
+	@echo ""
+	@echo "--- PLOAD All Addressing Modes ---"
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pload_all_modes.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 800us; quit" tb_pload_all_modes
 	@echo ""
 	@echo "--- Indirect Descriptors ---"
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_indirect_descriptor.vhd

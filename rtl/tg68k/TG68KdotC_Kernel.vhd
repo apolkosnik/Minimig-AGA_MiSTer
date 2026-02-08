@@ -2424,9 +2424,9 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					IF (setendOPC = '1' OR trapmake = '1') AND micro_state /= pmove_decode AND micro_state /= pmove_dn_hi AND micro_state /= pmmu_dn_read_wait THEN
 						fline_context_valid <= '0';
 						-- synthesis translate_off
-						report "FCTX_CLEAR: ms=" & micro_states'image(micro_state) &
-						       " setendOPC=" & bit'image(setendOPC) &
-						       " trapmake=" & bit'image(trapmake);
+						-- report "FCTX_CLEAR: ms=" & micro_states'image(micro_state) &
+						--       " setendOPC=" & bit'image(setendOPC) &
+						--       " trapmake=" & bit'image(trapmake);
 						-- synthesis translate_on
 
 					ELSIF (setendOPC = '1' OR trapmake = '1') AND (micro_state = pmove_decode OR micro_state = pmove_dn_hi OR micro_state = pmmu_dn_read_wait) THEN
