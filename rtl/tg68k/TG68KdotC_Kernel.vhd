@@ -1524,7 +1524,7 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 -----------------------------------------------------------------------------
 -- set dest regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, pmove_dn_regnum, pmove_dn_mode, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
+PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, next_micro_state, pmove_dn_regnum, pmove_dn_mode, fline_context_valid, fline_opcode_latch, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
 	BEGIN
 		IF exec(movem_action) ='1' THEN
 			rf_dest_addr <= rf_source_addrd;
@@ -1571,10 +1571,20 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 			rf_dest_addr <= '0'&sndOPC(2 downto 0);
 		ELSIF setstackaddr='1' THEN
 			rf_dest_addr <= "1111";
-		ELSIF micro_state = pmove_dn_lo THEN
+		ELSIF micro_state = pmove_dn_lo OR next_micro_state = pmove_dn_lo THEN
 			-- BUG #59 FIX: PMOVE checks must come BEFORE dest_hbits!
 			-- PMOVE 64-bit: LOW word goes to Dn+1 (increment register number)
+			-- BUG #376 FIX: Also check next_micro_state = pmove_dn_lo to set
+			-- rf_dest_addr ONE CYCLE EARLY. RDindex_A is registered, so the
+			-- register file write uses the PREVIOUS cycle's rf_dest_addr.
+			-- Without this, both HI and LO word writes target Dn instead of Dn/Dn+1.
 			rf_dest_addr <= dest_areg&(pmove_dn_regnum + "001");
+		ELSIF micro_state = pmove_decode AND fline_context_valid = '1' AND fline_opcode_latch(5 downto 3) = "000" THEN
+			-- BUG #376 FIX: During pmove_decode, pmove_dn_mode is not yet set
+			-- (it's registered, set at the NEXT clock edge). And opcode may have been
+			-- overwritten by prefetch. Use fline_opcode_latch for correct Dn register.
+			-- This ensures rf_dest_addr is correct ONE CYCLE BEFORE the HI word write fires.
+			rf_dest_addr <= '0' & fline_opcode_latch(2 downto 0);
 		ELSIF pmove_dn_mode = '1' THEN
 			-- BUG #59 FIX: Use latched pmove_dn_regnum, not opcode(11:9) which gets overwritten!
 			rf_dest_addr <= dest_areg&pmove_dn_regnum;
@@ -1592,7 +1602,7 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 -----------------------------------------------------------------------------
 -- set source regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, last_opc_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_mode, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
+PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, last_opc_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_mode, fline_opcode_latch, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
 	BEGIN
 		IF exec(movem_action)='1' OR set(movem_action) ='1' THEN
 			IF movem_presub='1' THEN
@@ -1653,10 +1663,12 @@ PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source
 			rf_source_addr <= source_areg&pmove_dn_regnum;
 		-- BUG #289 FIX: PMOVE MMU states need EA register from opcode(2:0), not opcode(11:9)
 		-- For PMOVE CRP,(A7)+, opcode(2:0)="111" (A7) but opcode(11:9)="000" (wrong!)
+		-- BUG #377 FIX: Use fline_opcode_latch instead of opcode! By pmove_mmu_to_mem/mem_to_mmu
+		-- time, opcode may have been overwritten by prefetch of the next instruction.
 		ELSIF (micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo OR
 		       micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_mem_to_mmu_lo) AND
-		      (opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" OR opcode(5 downto 3)="100") THEN
-			rf_source_addr <= '1'&opcode(2 downto 0);  -- Address register for (An)/(An)+/-(An) modes
+		      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" OR fline_opcode_latch(5 downto 3)="100") THEN
+			rf_source_addr <= '1'&fline_opcode_latch(2 downto 0);  -- Address register for (An)/(An)+/-(An) modes
 		ELSE
 			rf_source_addr <= source_areg&opcode(11 downto 9);
 		END IF;
@@ -2041,7 +2053,10 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					-- BUG #302 FIX: Special case for (An)+ mode CRP/SRP LOW word reads
 					-- BUG #339 FIX: pmove_decode handling - memmaskmux not reliable during decode
 					-- BUG #355 FIX: Guard with setstate /= "00" to prevent fetch address corruption!
+					-- BUG #382 FIX: Must verify this is a PMMU instruction using pmmu_brief(15:13)!
 					ELSIF micro_state = pmove_decode AND setstate /= "00" AND
+					      fline_opcode_latch(15 downto 12)="1111" AND
+					      (pmmu_brief(15 downto 13)="000" OR pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011") AND
 					      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" OR fline_opcode_latch(5 downto 3)="100") THEN
 						-- Modes 010/011: Simple (An)/(An)+ - no delta
 						IF fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" THEN
@@ -2063,8 +2078,11 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					-- using pmove_ea_latched. This ELSIF effectively only handles HI states,
 					-- where last_data_read is still valid (not yet overwritten by prefetch/read data).
 					-- BUG #355 FIX: Guard with setstate /= "00" to prevent fetch address corruption!
+					-- BUG #382 FIX: Must verify this is a PMMU instruction using pmmu_brief(15:13)!
 					ELSIF (micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo OR
 					       micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_mem_to_mmu_lo) AND
+					      fline_opcode_latch(15 downto 12)="1111" AND
+					      (pmmu_brief(15 downto 13)="000" OR pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011") AND
 					      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" OR
 					       fline_opcode_latch(5 downto 3)="100" OR
 					       fline_opcode_latch(5 downto 3)="101" OR fline_opcode_latch(5 downto 3)="110" OR
@@ -2261,7 +2279,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 		-- BUG #369 FIX: Also exclude ptest1/pflush1/pload1 - same stale opcode problem.
 		-- When these states retire with setstate="00", state is still "01" from the stall cycle,
 		-- causing opcode <= last_opc_read (stale extension word) instead of data_read (next instr).
-		IF (setstate="00" OR (setstate="01" AND fline_context_valid='1')) AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0' AND micro_state /= pmove_decode AND micro_state /= pmmu_dn_read_wait AND micro_state /= ptest1 AND micro_state /= pflush1 AND micro_state /= pload1 THEN
+		IF (setstate="00" OR (setstate="01" AND fline_context_valid='1')) AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0' AND micro_state /= pmmu_dn_read_wait AND micro_state /= pmove_decode AND micro_state /= ptest1 AND micro_state /= pflush1 AND micro_state /= pload1 THEN
 			setendOPC <= '1';
 			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1' THEN
 				setinterrupt <= '1';
@@ -2859,7 +2877,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		 SVmode, preSVmode, stop, long_done, ea_only, setstate, addrvalue, execOPC, exec_write_back, exe_datatype,
 		 datatype, interrupt, c_out, trapmake, rot_cnt, brief, addr, trap_trapv, last_data_in, use_VBR_Stackframe,
 		 long_start, set_datatype, sndOPC, set_exec, exec, ea_build_now, reg_QA, reg_QB, make_berr, trap_berr, last_opc_read,
-		 moves_writeback_pending, moves_active)
+		 moves_writeback_pending, moves_active, pmmu_opcode, pmmu_brief)
 	BEGIN
 		TG68_PC_brw <= '0';	
 		setstate <= "00";
@@ -4898,58 +4916,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
 		CASE micro_state IS
 
-				WHEN ld_nn =>		-- (nnnn).w/l=>
+				WHEN ld_nn =>		-- (nnnn).w/l=> CPU ONLY (PMMU uses pmmu_ld_nn)
 					set(get_ea_now) <='1';
 					set(addrlong) <= '1';
-					-- BUG #114 FIX: Check PMOVE FIRST, then decide setnextpass
-					-- For PMOVE with (xxx).L mode, setnextpass causes PC over-increment
-					-- (PC+10 instead of PC+8 for the 8-byte instruction)
-					-- brief(15:13) format: "000"=TT0/TT1, "010"=TC/SRP/CRP, "011"=MMUSR
-					-- BUG #146 FIX: REMOVED unconditional setnextpass <= '1' that was here!
-					-- The old code set setnextpass='1' BEFORE checking for PMOVE, and the
-					-- PMOVE branch never cleared it - causing PC overincrement in hardware.
-					-- Now setnextpass is only set in the ELSE branch (non-PMOVE).
-					-- F-Line Context: Use pmmu_brief for stable values
-					IF opcode(15 downto 12)="1111" AND
-					   (pmmu_brief(15 downto 13)="000" OR pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011") THEN
-						-- PMOVE with (xxx).L: go to pmove state, NO setnextpass
-						-- BUG #352 FIX: Wait for both words of 32-bit address for PMMU!
-						-- ld_nn sets longaktion='1' for 32-bit absolute addresses.
-						-- We must only jump to PMMU execution after the second word is fetched.
-						-- Use opcode bits directly to avoid combinational loop with set bit-vector.
-						IF nextpass='0' AND opcode(2 downto 0)="001" THEN
-							-- First word fetched, stay in ld_nn for second word
-							setnextpass <= '1';
-						ELSE
-							-- Second word of .L or single word of .W fetched, transition now
-							setnextpass <= '0';
-							IF pmmu_brief(9)='1' THEN
-								-- MMU->mem direction (read from MMU, write to memory)
-								next_micro_state <= pmove_mmu_to_mem_hi;
-							ELSE
-								-- mem->MMU direction (read from memory, write to MMU)
-								-- BUG #114 FIX: Set setstate="10" to trigger memory read at computed EA!
-								-- ld_nn already fetched the address into memaddr_reg.
-								setstate <= "10";  -- Memory read at computed EA
-								-- BUG #116 FIX: Must set datatype for proper longword read!
-								IF pmmu_brief(14 downto 10) = "11000" THEN
-									datatype <= "01";  -- Word (16-bit) for MMUSR
-								ELSE
-									datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
-								END IF;
-								next_micro_state <= pmove_mem_to_mmu_hi;
-							END IF;
-						END IF;
-					-- MOVES: After absolute address is loaded, go to moves1 for data transfer
-					-- using SFC/DFC. Override setnextpass to prevent returning to normal flow.
-					ELSIF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND
-					      opcode(5 downto 3)="111" THEN
+					-- MOVES: After absolute address is loaded, go to moves1 for data transfer using SFC/DFC
+					IF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND
+					   opcode(5 downto 3)="111" THEN
 						setnextpass <= '0';
 						setstate <= "01";  -- BUG #322: Prevent fetch, preserve absolute address
 						ea_only <= '1';
 						next_micro_state <= moves1;
 					ELSE
-						-- Non-PMOVE, non-MOVES: set setnextpass for normal EA processing
+						-- Normal CPU instruction: set setnextpass for standard EA processing
 						setnextpass <= '1';
 					END IF;
 
@@ -4958,63 +4936,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					set(addrlong) <= '1';
 					next_micro_state <= nop;
 					
-				WHEN ld_dAn1 =>		-- d(An)=>, --d(PC)=>
-					-- synthesis translate_off
-					report "LD_DAN1: state=" & integer'image(conv_integer(state)) &
-					       " opc1512=" & integer'image(conv_integer(opcode(15 downto 12))) &
-					       " brief1513=" & integer'image(conv_integer(pmmu_brief(15 downto 13))) &
-					       " brief9=" & std_logic'image(pmmu_brief(9));
-					-- synthesis translate_on
+				WHEN ld_dAn1 =>		-- d(An)=>, --d(PC)=> CPU ONLY (PMMU uses pmmu_ld_dAn1)
 					set(get_ea_now) <='1';
 					setdisp <= '1';		--word
-					-- BUG #191 FIX V2: Set setnextpass unconditionally FIRST (for normal instructions)
-					-- Then override to '0' for PMOVE to prevent PC over-increment
 					setnextpass <= '1';
-					IF opcode(15 downto 12)="1111" AND
-					   (pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011" OR pmmu_brief(15 downto 13)="000") THEN
-						-- BUG #364 FIX: Clear setnextpass for ALL PMOVE directions in ld_dAn1.
-						-- setnextpass='1' causes an extra fetch cycle that corrupts data_read
-						-- with instruction stream data (NOP 0x4E71 or zeros) for mem->MMU path.
-						-- The displacement word is already consumed by setdisp='1' above.
+					-- MOVES (d16,An): after fetching displacement word, route to moves1 for SFC/DFC transfer
+					IF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND opcode(5 downto 3)="101" THEN
 						setnextpass <= '0';
-						IF pmmu_brief(9)='1' THEN
-							-- MMU->mem direction
-							-- Match bed1fad approach: Do NOT write here in ld_dAn1!
-							-- Let pmove_mmu_to_mem_hi handle the write unconditionally.
-							-- Writing here caused pmmu_reg_part_d timing issues for CRP/SRP
-							-- (data_write_tmp latched before reg_part was set to HI).
-							next_micro_state <= pmove_mmu_to_mem_hi;
-						ELSE
-							-- BUG #123 FIX: mem->MMU direction
-							-- Latch EA (base+disp) now while setdisp is active.
-							-- Without OP1addr, the addr falls back to PC-based addressing
-							-- by the time pmove_mem_to_mmu_hi runs, giving displacement-only
-							-- address (e.g., $4 instead of An+$4).
-							set(OP1addr) <= '1';
-							setstate <= "10";  -- Memory read at computed EA
-							IF pmmu_brief(14 downto 10) = "11000" THEN
-								datatype <= "01";  -- Word (16-bit) for MMUSR
-							ELSE
-								datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
-								set(longaktion) <= '1';  -- Required for 32-bit read
-							END IF;
-							next_micro_state <= pmove_mem_to_mmu_hi;
-						END IF;
+						setstate <= "01";
+						ea_only <= '1';
+						next_micro_state <= moves1;
 					END IF;
-
-						-- MOVES (d16,An): after fetching the displacement word and computing EA,
-						-- continue into moves1 which performs the actual data transfer using SFC/DFC.
-						IF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND opcode(5 downto 3)="101" THEN
-							-- BUG #322 FIX: Must clear setnextpass and set state "01" to:
-							-- 1. Prevent nextpass mechanism from corrupting instruction flow
-							-- 2. Prevent unwanted fetch (setstate="00" → PC advances by 2)
-							-- 3. Ensure memaddr_delta_rega gets displacement (not TG68_PC_add)
-							--    via the ELSE branch at line 1768 (which requires setstate/="00")
-							setnextpass <= '0';
-							setstate <= "01";
-							ea_only <= '1';
-							next_micro_state <= moves1;
-						END IF;
 						
 					WHEN ld_AnXn1 =>		-- d(An,Xn)=>, --d(PC,Xn)=>
 					IF brief(8)='0' OR extAddr_Mode=0 OR (cpu(1)='0' AND extAddr_Mode=2) THEN
@@ -5039,47 +4971,22 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						next_micro_state <= ld_229_1;
 					END IF;
 					
-				WHEN ld_AnXn2 =>
+				WHEN ld_AnXn2 =>		-- CPU ONLY (PMMU uses pmmu_ld_AnXn2)
 					set(get_ea_now) <='1';
 					setdisp <= '1';		--brief
 					setnextpass <= '1';
-					
-					-- PMOVE: After indexed EA is computed, jump to PMOVE microstates.
-					-- Without this, PMOVE using (d8,An,Xn) / full index / memory-indirect modes
-					-- computes EA but never performs the PMMU<->memory transfer.
-					-- F-Line Context: Use pmmu_brief for stable values
-					IF opcode(15 downto 12)="1111" AND
-					   (pmmu_brief(15 downto 13)="000" OR pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011") THEN
-					-- BUG #345 FIX V2: Clear setnextpass for PMOVE (indexed)
-					setnextpass <= '0';
-						IF pmmu_brief(9)='1' THEN
-							-- MMU->mem direction (read from MMU, write to memory)
-							next_micro_state <= pmove_mmu_to_mem_hi;
-						ELSE
-							-- mem->MMU direction (read from memory, write to MMU)
-							setstate <= "10";  -- Memory read at computed EA
-							IF pmmu_brief(14 downto 10) = "11000" THEN
-								datatype <= "01";  -- Word (16-bit) for MMUSR
-							ELSE
-								datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
-							END IF;
-							next_micro_state <= pmove_mem_to_mmu_hi;
-						END IF;
-					END IF;
-
-					-- MOVES: After indexed EA is computed, go to moves1 for data transfer
-					-- using SFC/DFC. Override setnextpass to prevent returning to normal flow.
+					-- MOVES: After indexed EA is computed, go to moves1 for SFC/DFC transfer
 					IF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND
 					   opcode(5 downto 3)="110" THEN
 						setnextpass <= '0';
-						setstate <= "01";  -- BUG #322: Prevent fetch, preserve indexed offset
+						setstate <= "01";
 						ea_only <= '1';
 						next_micro_state <= moves1;
 					END IF;
 
 -------------------------------------------------------------------------------------
 
-				WHEN ld_229_1 =>		-- (bd,An,Xn)=>, --(bd,PC,Xn)=>
+				WHEN ld_229_1 =>		-- (bd,An,Xn)=>, --(bd,PC,Xn)=>  CPU ONLY (PMMU uses pmmu_ld_229_1)
 					IF brief(5)='1' THEN    --Base Displacement
 						setdisp <= '1';		--add last_data_read
 					END IF;
@@ -5088,36 +4995,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						setstate <= "01";
 						IF brief(1 downto 0)="00" THEN
 							next_micro_state <= ld_AnXn2;
-						ELSE	
+						ELSE
 							next_micro_state <= ld_229_2;
-						END IF;	
+						END IF;
 					ELSE
 						IF brief(1 downto 0)="00" THEN
 							set(get_ea_now) <='1';
 							setnextpass <= '1';
-							
-							-- PMOVE: full-format indexed EA (no memory-indirect) must still dispatch
-							-- into PMOVE transfer states after EA is ready.
-							-- F-Line Context: Use pmmu_brief for stable values
-							IF opcode(15 downto 12)="1111" AND
-							   (pmmu_brief(15 downto 13)="000" OR pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011") THEN
-								IF pmmu_brief(9)='1' THEN
-									next_micro_state <= pmove_mmu_to_mem_hi;
-								ELSE
-									setstate <= "10";  -- Memory read at computed EA
-									IF pmmu_brief(14 downto 10) = "11000" THEN
-										datatype <= "01";  -- Word (16-bit) for MMUSR
-									ELSE
-										datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
-									END IF;
-									next_micro_state <= pmove_mem_to_mmu_hi;
-								END IF;
-							END IF;
-
-							-- BUG #330 FIX: MOVES with full-format indexed EA must dispatch
-							-- to moves1 for SFC/DFC bus transfer, just like ld_dAn1 and ld_AnXn2.
-							-- Without this, MOVES falls through to normal instruction flow,
-							-- causing wrong address, wrong data, and SR corruption.
+							-- MOVES: full-format indexed EA dispatch to moves1 for SFC/DFC transfer
 							IF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND
 							   opcode(5 downto 3)="110" THEN
 								setnextpass <= '0';
@@ -5164,11 +5049,134 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						set(get_ea_now) <='1';
 						setnextpass <= '1';
 						
-						-- PMOVE: memory-indirect indexed EA completes here for some forms; dispatch.
-						-- F-Line Context: Use pmmu_brief for stable values
-						IF opcode(15 downto 12)="1111" AND
-						   (pmmu_brief(15 downto 13)="000" OR pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011") THEN
+						-- MOVES: memory-indirect EA completes here; dispatch to moves1
+						-- for SFC/DFC bus transfer. Without this, MOVES falls through
+						-- normal pipeline causing wrong FC, address, and data corruption.
+						IF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND
+						   opcode(5 downto 3)="110" THEN
+							setnextpass <= '0';
+							setstate <= "01";
+							ea_only <= '1';
+							next_micro_state <= moves1;
+						END IF;
+					END IF;
+
+----------------------------------------------------------------------------------------
+				-- PMMU-SPECIFIC EA BUILDERS: Use fline_opcode_latch and pmmu_brief exclusively
+				-- These states are ONLY for PMMU instructions (PMOVE, PTEST, PFLUSH, PLOAD)
+				----------------------------------------------------------------------------------------
+
+				WHEN pmmu_ld_nn =>		-- PMMU (xxx).W / (xxx).L
+					set(get_ea_now) <='1';
+					set(addrlong) <= '1';
+					-- BUG #383: No F-line checks needed - we're already in PMMU context
+					-- pmmu_brief(9): direction, pmmu_brief(14:10): register selector
+					IF nextpass='0' AND fline_opcode_latch(2 downto 0)="001" THEN
+						-- First word of .L address fetched, stay in pmmu_ld_nn for second word
+						setnextpass <= '1';
+					ELSE
+						-- Second word of .L or single word of .W fetched, transition now
+						setnextpass <= '0';
+						IF pmmu_brief(9)='1' THEN
+							-- MMU->mem direction (read from MMU, write to memory)
+							setstate <= "01";
+							next_micro_state <= pmove_mmu_to_mem_hi;
+						ELSE
+							-- mem->MMU direction (read from memory, write to MMU)
+							setstate <= "10";  -- Memory read at computed EA
+							IF pmmu_brief(14 downto 10) = "11000" THEN
+								datatype <= "01";  -- Word (16-bit) for MMUSR
+							ELSE
+								datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
+							END IF;
+							next_micro_state <= pmove_mem_to_mmu_hi;
+						END IF;
+					END IF;
+
+				WHEN pmmu_ld_dAn1 =>		-- PMMU (d16,An)
+					set(get_ea_now) <='1';
+					setdisp <= '1';		-- Load displacement word
+					setnextpass <= '0';  -- Always clear for PMMU
+					IF pmmu_brief(9)='1' THEN
+						-- MMU->mem direction
+						setstate <= "01";
+						next_micro_state <= pmove_mmu_to_mem_hi;
+					ELSE
+						-- mem->MMU direction
+						set(OP1addr) <= '1';  -- Latch EA (base+disp) while setdisp active
+						setstate <= "10";  -- Memory read at computed EA
+						IF pmmu_brief(14 downto 10) = "11000" THEN
+							datatype <= "01";  -- Word (16-bit) for MMUSR
+						ELSE
+							datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
+							set(longaktion) <= '1';  -- Required for 32-bit read
+						END IF;
+						next_micro_state <= pmove_mem_to_mmu_hi;
+					END IF;
+
+				WHEN pmmu_ld_AnXn1 =>		-- PMMU (d8,An,Xn) first phase
+					-- brief was already latched in pmove_decode via getbrief
+					IF brief(8)='0' OR extAddr_Mode=0 OR (cpu(1)='0' AND extAddr_Mode=2) THEN
+						-- Simple brief format
+						setdisp <= '1';		-- byte
+						setdispbyte <= '1';
+						setstate <= "01";
+						set(briefext) <= '1';
+						next_micro_state <= pmmu_ld_AnXn2;
+					ELSE
+						-- Full format - route to pmmu_ld_229_1
+						IF brief(7)='1'THEN		-- suppress Base
+							set_suppress_base <= '1';
+						ELSIF exec(dispouter)='1' THEN
+							set(dispouter) <= '1';
+						END IF;
+						IF brief(5)='0' THEN -- NULL Base Displacement
+							setstate <= "01";
+						ELSE  -- WORD Base Displacement
+							IF brief(4)='1' THEN
+								set(longaktion) <= '1'; -- LONG Base Displacement
+							END IF;
+						END IF;
+						next_micro_state <= pmmu_ld_229_1;
+					END IF;
+
+				WHEN pmmu_ld_AnXn2 =>		-- PMMU (d8,An,Xn) second phase
+					set(get_ea_now) <='1';
+					setdisp <= '1';		-- brief
+					setnextpass <= '0';  -- Always clear for PMMU
+					IF pmmu_brief(9)='1' THEN
+						-- MMU->mem direction
+						setstate <= "01";
+						next_micro_state <= pmove_mmu_to_mem_hi;
+					ELSE
+						-- mem->MMU direction
+						setstate <= "10";  -- Memory read at computed EA
+						IF pmmu_brief(14 downto 10) = "11000" THEN
+							datatype <= "01";  -- Word (16-bit) for MMUSR
+						ELSE
+							datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
+						END IF;
+						next_micro_state <= pmove_mem_to_mmu_hi;
+					END IF;
+
+				WHEN pmmu_ld_229_1 =>		-- PMMU full-format indexed (bd,An,Xn) phase 1
+					IF brief(5)='1' THEN    -- Base Displacement
+						setdisp <= '1';		-- add last_data_read
+					END IF;
+					IF brief(6)='0' AND brief(2)='0' THEN -- Preindex or Index
+						set(briefext) <= '1';
+						setstate <= "01";
+						IF brief(1 downto 0)="00" THEN
+							next_micro_state <= pmmu_ld_AnXn2;
+						ELSE
+							next_micro_state <= pmmu_ld_229_2;
+						END IF;
+					ELSE
+						IF brief(1 downto 0)="00" THEN
+							set(get_ea_now) <='1';
+							setnextpass <= '0';  -- Always clear for PMMU
 							IF pmmu_brief(9)='1' THEN
+								setstate <= "01";
 								next_micro_state <= pmove_mmu_to_mem_hi;
 							ELSE
 								setstate <= "10";  -- Memory read at computed EA
@@ -5179,17 +5187,55 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								END IF;
 								next_micro_state <= pmove_mem_to_mmu_hi;
 							END IF;
+						ELSE
+							setstate <= "10";
+							setaddrvalue <= '1';
+							set(longaktion) <= '1';
+							next_micro_state <= pmmu_ld_229_3;
 						END IF;
+					END IF;
 
-						-- MOVES: memory-indirect EA completes here; dispatch to moves1
-						-- for SFC/DFC bus transfer. Without this, MOVES falls through
-						-- normal pipeline causing wrong FC, address, and data corruption.
-						IF opcode(15 downto 8)="00001110" AND opcode(7 downto 6)/="11" AND
-						   opcode(5 downto 3)="110" THEN
-							setnextpass <= '0';
+				WHEN pmmu_ld_229_2 =>		-- PMMU full-format indexed (bd,An,Xn) phase 2
+					setdisp <= '1';		-- add Index
+					setstate <= "10";
+					setaddrvalue <= '1';
+					set(longaktion) <= '1';
+					next_micro_state <= pmmu_ld_229_3;
+
+				WHEN pmmu_ld_229_3 =>		-- PMMU full-format indexed (bd,An,Xn) phase 3
+					set_suppress_base <= '1';
+					set(dispouter) <= '1';
+					IF brief(1)='0' THEN -- NULL Outer Displacement
+						setstate <= "01";
+					ELSE  -- WORD Outer Displacement
+						IF brief(0)='1' THEN
+							set(longaktion) <= '1'; -- LONG Outer Displacement
+						END IF;
+					END IF;
+					next_micro_state <= pmmu_ld_229_4;
+
+				WHEN pmmu_ld_229_4 =>		-- PMMU full-format indexed (bd,An,Xn) phase 4
+					IF brief(1)='1' THEN  -- Outer Displacement
+						setdisp <= '1';	  -- add last_data_read
+					END IF;
+					IF brief(6)='0' AND brief(2)='1' THEN -- Postindex
+						set(briefext) <= '1';
+						setstate <= "01";
+						next_micro_state <= pmmu_ld_AnXn2;
+					ELSE
+						set(get_ea_now) <='1';
+						setnextpass <= '0';  -- Always clear for PMMU
+						IF pmmu_brief(9)='1' THEN
 							setstate <= "01";
-							ea_only <= '1';
-							next_micro_state <= moves1;
+							next_micro_state <= pmove_mmu_to_mem_hi;
+						ELSE
+							setstate <= "10";  -- Memory read at computed EA
+							IF pmmu_brief(14 downto 10) = "11000" THEN
+								datatype <= "01";  -- Word (16-bit) for MMUSR
+							ELSE
+								datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
+							END IF;
+							next_micro_state <= pmove_mem_to_mmu_hi;
 						END IF;
 					END IF;
 
@@ -6090,8 +6136,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     report "PMOVE_DECODE: brief15_13=" & integer'image(conv_integer(pmmu_brief(15 downto 13))) &
                            " brief14_10=" & integer'image(conv_integer(pmmu_brief(14 downto 10))) &
                            " brief9=" & std_logic'image(pmmu_brief(9)) &
-                           " opc53=" & integer'image(conv_integer(opcode(5 downto 3))) &
+                           " opc53=" & integer'image(conv_integer(pmmu_opcode(5 downto 3))) &
+                           " state=" & integer'image(conv_integer(state)) &
                            " fline_opc=" & integer'image(conv_integer(fline_opcode_latch)) &
+                           " pc=" & integer'image(conv_integer(TG68_PC)) &
                            " fctx=" & std_logic'image(fline_context_valid);
                     -- synthesis translate_on
                     setstate <= "01";       -- Suppress fetch during dispatch (PC already at +4)
@@ -6103,36 +6151,58 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         (pmmu_brief(15 downto 13) = "011" AND pmmu_brief(14 downto 10) = "11000" ) THEN  --MMUSR
                         
                         -- PMOVE
-                        IF opcode(5 downto 3)="001" OR (opcode(5 downto 3)="111" AND opcode(2)='1') OR (opcode(5 downto 3)="111" AND opcode(2 downto 1)="01") THEN
+                        -- BUG #377 FIX: Use pmmu_opcode (latched F-line opcode) instead of opcode!
+                        -- By pmove_decode time, opcode may have been overwritten by prefetch.
+                        -- fline_opcode_latch preserves the original F-line opcode EA mode bits.
+                        IF pmmu_opcode(5 downto 3)="001" OR (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') OR (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 1)="01") THEN
                              trap_illegal <= '1';
                              trapmake <= '1';
                         ELSE
                              -- Valid EA
-                             IF opcode(5 downto 3)="000" THEN
+                             IF pmmu_opcode(5 downto 3)="000" THEN
                                 -- Dn mode: 4 bytes (Opcode + Extension).
                                 -- PC increment handled by standard prefetch cycle (already at +4).
                                 IF pmmu_brief(9)='1' THEN
                                     -- Read from MMU
                                     set(pmmu_rd) <= '1';
                                     IF (pmmu_brief(14 downto 10) = "10010" OR pmmu_brief(14 downto 10) = "10011") THEN
+                                        -- BUG #376 FIX: 64-bit CRP/SRP Dn read - HI word needs
+                                        -- exec(Regwrena) + exec(pmmu_rd) at pmove_dn_hi to write Dn.
+                                        -- MUST use set() not set_exec() because setexecOPC='0' when
+                                        -- next_micro_state != idle. exec <= set propagates unconditionally.
+                                        set(Regwrena) <= '1';
+                                        -- Also set set_exec(pmmu_rd) to ensure the clocked PMMU
+                                        -- reg_sel/reg_part setup block (line 6926) outer condition fires.
+                                        -- set_exec won't propagate to exec (setexecOPC='0'), but it
+                                        -- satisfies the outer condition for reg_part_d/reg_sel_d setup.
+                                        set_exec(pmmu_rd) <= '1';
+                                        datatype <= "10"; -- Longword for HI word
                                         next_micro_state <= pmove_dn_hi;
                                     ELSE
-                                        -- BUG #361 FIX: Use setstate=00 + idle with fline_context_valid
-                                        -- BUG #373 FIX: Must set Regwrena for register write-back!
-                                        -- Without this, pmmu_reg_rdat routes to regin but register never written.
-                                        set_exec(Regwrena) <= '1';
+                                        -- BUG #375 FIX: Route through pmmu_dn_read_wait for proper
+                                        -- register write-back timing. set_exec(pmmu_rd) persists to
+                                        -- pmmu_dn_read_wait where exec(pmmu_rd) triggers Regwrena.
+                                        -- At idle, both exec(pmmu_rd) and exec(Regwrena) are active,
+                                        -- so regin=pmmu_reg_rdat AND Wwrena='1' -> correct write.
+                                        set_exec(pmmu_rd) <= '1';
                                         IF pmmu_brief(14 downto 10) = "11000" THEN
                                             datatype <= "01"; -- Word for MMUSR
                                         ELSE
                                             datatype <= "10"; -- Longword for TC/TT0/TT1
                                         END IF;
-                                        setstate <= "00";
-                                        next_micro_state <= idle;
+                                        -- Keep setstate="01" from line 6097 - suppress fetch during transition
+                                        next_micro_state <= pmmu_dn_read_wait;
                                     END IF;
                                 ELSE
                                     -- Write to MMU
                                     set_exec(pmmu_wr) <= '1';
                                     IF (pmmu_brief(14 downto 10) = "10010" OR pmmu_brief(14 downto 10) = "10011") THEN
+                                        -- BUG #376 FIX: 64-bit CRP/SRP Dn write. The first write at
+                                        -- pmove_decode uses stale reg_part (1-cycle pipeline delay).
+                                        -- At pmove_dn_hi, set_exec(pmmu_wr) fires again with correct
+                                        -- reg_part='1' (HI). At pmove_dn_lo, write LO word with
+                                        -- reg_part='0'. The stale first write gets overwritten.
+                                        datatype <= "10"; -- Longword
                                         next_micro_state <= pmove_dn_hi;
                                     ELSE
                                         -- BUG #361 FIX: Use setstate=01 + idle with fline_context_valid
@@ -6150,52 +6220,53 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                 END IF;
                                 
                                 -- Transition based on EA mode
-                                CASE opcode(5 downto 3) IS
+                                -- BUG #377 FIX: Use pmmu_opcode throughout (fline_opcode_latch)
+                                CASE pmmu_opcode(5 downto 3) IS
                                     WHEN "010" | "011" | "100" =>
                                         -- (An), (An)+, -(An)
                                         IF pmmu_brief(9)='1' THEN
                                             -- MMU -> Memory
                                             set_exec(pmmu_rd) <= '1';
                                             set(OP1addr) <= '1';
-                                            IF opcode(5 downto 3)="100" THEN
+                                            IF pmmu_opcode(5 downto 3)="100" THEN
                                                 set(presub) <= '1';
                                                 IF (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") THEN set(pmmu_dbl)<='1'; END IF;
-                                                IF opcode(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
+                                                IF pmmu_opcode(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
                                             END IF;
                                             setstate <= "01";
                                             next_micro_state <= pmove_mmu_to_mem_hi;
                                         ELSE
                                             -- Memory -> MMU
                                             set(ea_data_OP1) <= '1';
-                                            IF opcode(5 downto 3)="100" THEN
+                                            IF pmmu_opcode(5 downto 3)="100" THEN
                                                 set(presub) <= '1';
                                                 IF (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") THEN set(pmmu_dbl)<='1'; END IF;
-                                                IF opcode(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
+                                                IF pmmu_opcode(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
                                             END IF;
                                             setstate <= "10";
                                             next_micro_state <= pmove_mem_to_mmu_hi;
                                         END IF;
                                     WHEN "101" =>
-                                        -- BUG #366 FIX: Displacement word was fetched during pmove_decode
-                                        -- (state="00" from conditional setstate at F-line decode).
-                                        -- Set state="01" to prevent PC over-increment in ld_dAn1.
+                                        -- (d16,An): Displacement word was fetched during pmove_decode
+                                        -- Route to PMMU-specific state that uses fline_opcode_latch/pmmu_brief
                                         setstate <= "01";
-                                        next_micro_state <= ld_dAn1;
+                                        next_micro_state <= pmmu_ld_dAn1;
                                     WHEN "110" =>
-                                        -- BUG #366 FIX: d8Xn brief word fetched during pmove_decode
-                                        -- (state="00"). Latch it via getbrief, suppress further fetch.
+                                        -- (d8,An,Xn): Brief word fetched during pmove_decode
+                                        -- Route to PMMU-specific state that uses fline_opcode_latch/pmmu_brief
                                         setstate <= "01";
-                                        next_micro_state <= ld_AnXn1;
+                                        next_micro_state <= pmmu_ld_AnXn1;
                                         getbrief <= '1';
                                     WHEN "111" =>
-                                        IF opcode(2 downto 0) = "000" THEN
-                                            -- BUG #366 FIX: abs.W address fetched during pmove_decode
+                                        IF pmmu_opcode(2 downto 0) = "000" THEN
+                                            -- (xxx).W: Address fetched during pmove_decode
+                                            -- Route to PMMU-specific state that uses fline_opcode_latch/pmmu_brief
                                             setstate <= "01";
-                                            next_micro_state <= ld_nn;
-                                        ELSIF opcode(2 downto 0) = "001" THEN
-                                            -- BUG #366 FIX: abs.L - addr_hi fetched during pmove_decode,
-                                            -- ld_nn needs state="00" to fetch addr_lo (second word)
-                                            next_micro_state <= ld_nn;
+                                            next_micro_state <= pmmu_ld_nn;
+                                        ELSIF pmmu_opcode(2 downto 0) = "001" THEN
+                                            -- (xxx).L: addr_hi fetched during pmove_decode, need state="00" to fetch addr_lo
+                                            -- Route to PMMU-specific state that uses fline_opcode_latch/pmmu_brief
+                                            next_micro_state <= pmmu_ld_nn;
                                         ELSE
                                             trap_illegal <= '1';
                                             trapmake <= '1';
@@ -6256,6 +6327,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- synthesis translate_off
                     report "PMMU_MEM2MMU_HI: state=" & integer'image(conv_integer(state)) &
                            " clkena_lw=" & std_logic'image(clkena_lw) &
+                           " brief14_10=" & integer'image(conv_integer(pmmu_brief(14 downto 10))) &
                            " addr=" & integer'image(conv_integer(addr)) &
                            " base=" & integer'image(conv_integer(memaddr_reg)) &
                            " delta_a=" & integer'image(conv_integer(memaddr_delta_rega)) &
@@ -6331,6 +6403,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         set(pmmu_addr_inc) <= '1';  -- +4 address increment for LO write
                         set(OP1addr) <= '1';
                         datatype <= "10"; -- long (32-bit)
+                        set(longaktion) <= '1';  -- BUG #379 FIX: Need longaktion for 32-bit bus write
+                        set(hold_dwr) <= '1';  -- BUG #379 FIX: Hold data during bus write
                         setstate <= "11"; -- write CRP_H/SRP_H (32 bits)
                         set_exec(pmmu_rd) <= '1';  -- Keep PMMU selector active
                         next_micro_state <= pmove_mmu_to_mem_lo;
@@ -6371,6 +6445,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- asserts set(presub) when opcode(5:3)="100" in state="01".
                         -- No additional presub needed here — it would cause double-decrement.
                         END IF;
+                        -- BUG #379 FIX: Hold data_write_tmp during longword bus write!
+                        -- Without this, the second bus half-cycle (clkena_lw='1') re-evaluates
+                        -- data_write_tmp. Since micro_state=pmmu_dn_read_wait (not pmove_mmu_to_mem_hi),
+                        -- the ELSIF chain falls through to data_write_tmp<=OP2out, corrupting the LO word.
+                        set(hold_dwr) <= '1';
                         setstate <= "11"; -- write
                         -- BUG #303/353 FIX: Transition to wait state to allow write completion
                         next_micro_state <= pmmu_dn_read_wait;
@@ -6399,12 +6478,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                             set(use_SP) <= '1';
                         END IF;
                     END IF;
-                    -- BUG #190 FIX: Must hold data_write_tmp during second bus cycle!
-                    --set(hold_dwr) <= '1';
+                    -- BUG #379 FIX: Must hold data_write_tmp during bus write!
+                    set(hold_dwr) <= '1';
                     set_exec(pmmu_rd) <= '1';     -- keep PMMU selector active for low word
                     setstate <= "11"; -- write low part
-                    -- BUG #375 FIX: Use pmmu_dn_read_wait as retirement state
-                    next_micro_state <= pmmu_dn_read_wait;
+                    -- BUG #381 FIX: Use idle instead of pmmu_dn_read_wait to allow setendOPC firing!
+                    -- setendOPC requires next_micro_state=idle (line 2276). Without setendOPC, fline_context_valid
+                    -- stays '1', causing subsequent CRP/SRP to reuse stale fline_opcode_latch.
+                    next_micro_state <= idle;
                 WHEN pmove_mem_to_mmu_lo =>
                     -- Memory->MMU: Low part read completed; write LOW word to MMU register
                     -- BUG #302 FIX: For (An)+ mode, DON'T use pmmu_addr_inc OR OP1addr.
@@ -6436,10 +6517,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- 2. Address routing corruption (setstate="00" bypasses PMOVE ELSIF in memaddr_delta chain,
                     --    causing LO read address to use TG68_PC_add instead of base+4)
                     -- The PMMU write still fires because pmmu_reg_we_d is gated by set_exec(pmmu_wr) + clkena_lw
-                    -- (line 774), not setexecOPC. Use pmmu_dn_read_wait for clean retirement (excluded from
-                    -- setendOPC at line 2258), matching pmove_mmu_to_mem_lo's working pattern.
-                    setstate <= "01";
-                    next_micro_state <= pmmu_dn_read_wait;
+                    -- (line 774), not setexecOPC.
+                    -- BUG #381 FIX: Use idle instead of pmmu_dn_read_wait to allow setendOPC firing!
+                    -- setendOPC requires next_micro_state=idle (line 2276). Without setendOPC, fline_context_valid
+                    -- stays '1', causing subsequent CRP/SRP to reuse stale fline_opcode_latch.
+                    setstate <= "00";
+                    next_micro_state <= idle;
 
                 -- PMMU instruction implementations
                 WHEN ptest1 =>
@@ -6540,6 +6623,20 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- PMOVE instruction is only 4 bytes, PC increment already handled.
                     -- BUG #361 FIX: Do NOT set setstate here - let it inherit from pmove_decode
                     -- Setting setstate="01" here causes fetch suppression to carry into pmove_dn_lo
+                    -- BUG #376 FIX: Both directions need signals at pmove_dn_hi.
+                    IF pmmu_brief(9)='1' THEN
+                        -- READ direction: Chain exec signals so LO word write
+                        -- fires at pmove_dn_lo where rf_dest_addr correctly selects Dn+1.
+                        -- MUST use set() not set_exec() because setexecOPC='0' when
+                        -- next_micro_state != idle. exec <= set propagates unconditionally.
+                        set(pmmu_rd) <= '1';
+                        set(Regwrena) <= '1';
+                    ELSE
+                        -- WRITE direction: Fire HI word write here (deferred from pmove_decode).
+                        -- reg_part_d='1' (HI) was set at pmove_decode and is now latched.
+                        set_exec(pmmu_wr) <= '1';
+                    END IF;
+                    datatype <= "10"; -- Longword
                     next_micro_state <= pmove_dn_lo;
 
                 WHEN pmove_dn_lo =>
@@ -6554,10 +6651,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         set_exec(pmmu_wr) <= '1';
                     ELSE
                         -- PMOVE <MMU reg>,Dn+1 - Read LOW word from MMU, write to Dn+1 (pmmu_brief(9)=1, RW=1)
-                        -- BUG #89 FIX: Use set(pmmu_rd) not set_exec, consistent with 32-bit Dn mode (line 4581)
-                        -- reg_rdat is combinational (BUG #83), so immediate read works
-                        set(pmmu_rd) <= '1';
-                        set_exec(Regwrena) <= '1';
+                        -- BUG #376 FIX: LO word write already fires from exec(Regwrena)
+                        -- and exec(pmmu_rd) set at pmove_dn_hi. micro_state=pmove_dn_lo
+                        -- correctly routes rf_dest_addr to Dn+1. Just retire.
+                        datatype <= "10"; -- Longword for LO word
                     END IF;
                     -- BUG #346/360 FIX: Retire to idle with fetch enabled
                     setstate <= "00";
@@ -6566,10 +6663,19 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 WHEN pmmu_dn_read_wait =>
                     -- BUG #303/353 FIX: Repurposed as general PMU retirement wait state.
                     -- Handle Dn register write-back for PMOVE <MMU>,Dn 32-bit read.
+                    -- BUG #375 FIX: Also persist pmmu_rd to idle so regin=pmmu_reg_rdat
+                    -- when exec(Regwrena) fires. Without this, regin falls through to ALUout.
                     IF exec(pmmu_rd)='1' OR set(pmmu_rd)='1' THEN
-                        datatype <= "10";
-                        set_datatype <= "10";
+                        set_exec(pmmu_rd) <= '1';  -- Persist to idle
                         set_exec(Regwrena) <= '1';
+                        -- Handle MMUSR (16-bit) vs TC/TT0/TT1 (32-bit)
+                        IF pmmu_brief(14 downto 10) = "11000" THEN
+                            datatype <= "01";
+                            set_datatype <= "01";
+                        ELSE
+                            datatype <= "10";
+                            set_datatype <= "10";
+                        END IF;
                     END IF;
                     -- BUG #361 FIX: Enable fetch for final retirement
                     setstate <= "00";
@@ -6882,7 +6988,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         -- If we only check exec(pmmu_wr), the latch block never executes on first iteration,
         -- so pmmu_reg_sel_d stays at 0 and the write fails.
         -- Must include set_exec(pmmu_wr) and set_exec(pmmu_rd) to catch first iteration!
-        if CPU(1)='1' AND (set_exec(pmmu_wr)='1' OR set_exec(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
+        -- BUG #376 FIX: Also include set(pmmu_rd) and set(pmmu_wr) in outer condition!
+        -- 64-bit Dn read path uses set(pmmu_rd) (not set_exec) because setexecOPC='0'
+        -- when next_micro_state != idle. Without this, reg_part_d/reg_sel_d setup is
+        -- skipped entirely, causing stale reg_part and wrong HI/LO word selection.
+        if CPU(1)='1' AND (set_exec(pmmu_wr)='1' OR set_exec(pmmu_rd)='1' OR set(pmmu_wr)='1' OR set(pmmu_rd)='1' OR exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') then
           -- Latch source data only when actually WRITING to PMMU to ensure correct value
           pmmu_reg_wdat_d <= pmmu_src_data;
           -- MMU registers (TT0, TT1, MMUSR, etc.) are PMOVE-only on MC68030
@@ -6903,6 +7013,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
               if (pmmu_brief(14 downto 10) = "10010") or (pmmu_brief(14 downto 10) = "10011") then
                 if micro_state = pmove_mem_to_mmu_lo OR next_micro_state = pmove_mem_to_mmu_lo then
                   pmmu_reg_part_d <= '0';  -- LOW word (mem EA second read)
+                -- BUG #376 FIX: Also force LOW for Dn 64-bit write LO word
+                elsif micro_state = pmove_dn_lo OR next_micro_state = pmove_dn_lo then
+                  pmmu_reg_part_d <= '0';  -- LOW word (Dn 64-bit second transfer)
                 elsif micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_decode OR micro_state = pmove_dn_hi OR
                       next_micro_state = pmove_mem_to_mmu_hi then
                   pmmu_reg_part_d <= '1';  -- HIGH word (mem EA first read, Dn first transfer)
@@ -6948,6 +7061,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                   -- synthesis translate_on
                 elsif micro_state = pmove_mem_to_mmu_lo OR next_micro_state = pmove_mem_to_mmu_lo then
                   pmmu_reg_part_d <= '0';  -- Force LOW part for memory->MMU low read
+                -- BUG #376 FIX: Also force LOW when transitioning to pmove_dn_lo for 64-bit Dn read.
+                -- Without this, pmove_dn_hi keeps reg_part_d='1' (HI) and the LO word read
+                -- at pmove_dn_lo gets the HI word data instead.
+                elsif micro_state = pmove_dn_lo OR next_micro_state = pmove_dn_lo then
+                  pmmu_reg_part_d <= '0';  -- Force LOW part for Dn 64-bit read LO word
                 elsif micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_decode OR micro_state = pmove_dn_hi OR
                       next_micro_state = pmove_mmu_to_mem_hi OR next_micro_state = pmove_mem_to_mmu_hi then
                   pmmu_reg_part_d <= '1';  -- HIGH word (first transfer)
