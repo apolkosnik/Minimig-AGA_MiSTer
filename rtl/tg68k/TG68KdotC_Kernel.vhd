@@ -2279,7 +2279,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 		-- BUG #369 FIX: Also exclude ptest1/pflush1/pload1 - same stale opcode problem.
 		-- When these states retire with setstate="00", state is still "01" from the stall cycle,
 		-- causing opcode <= last_opc_read (stale extension word) instead of data_read (next instr).
-		IF (setstate="00" OR (setstate="01" AND fline_context_valid='1')) AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0' AND micro_state /= pmmu_dn_read_wait AND micro_state /= pmove_decode AND micro_state /= ptest1 AND micro_state /= pflush1 AND micro_state /= pload1 THEN
+		IF (setstate="00" OR (setstate="01" AND fline_context_valid='1')) AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0' AND micro_state /= pmmu_dn_read_wait AND micro_state /= pmove_decode AND micro_state /= pmove_mem_to_mmu_hi AND micro_state /= pmove_mem_to_mmu_lo AND micro_state /= pmove_mmu_to_mem_hi AND micro_state /= pmove_mmu_to_mem_lo AND micro_state /= ptest1 AND micro_state /= pflush1 AND micro_state /= pload1 THEN
 			setendOPC <= '1';
 			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1' THEN
 				setinterrupt <= '1';
@@ -5073,7 +5073,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- pmmu_brief(9): direction, pmmu_brief(14:10): register selector
 					IF nextpass='0' AND fline_opcode_latch(2 downto 0)="001" THEN
 						-- First word of .L address fetched, stay in pmmu_ld_nn for second word
+						setstate <= "00";  -- Allow fetch of second word
 						setnextpass <= '1';
+						next_micro_state <= pmmu_ld_nn;
 					ELSE
 						-- Second word of .L or single word of .W fetched, transition now
 						setnextpass <= '0';
