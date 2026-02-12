@@ -269,7 +269,8 @@ entity TG68KdotC_Kernel is
 		debug_pmmu_reg_re : out std_logic;
 		debug_pmmu_reg_sel : out std_logic_vector(4 downto 0);
 		debug_pmmu_reg_wdat : out std_logic_vector(31 downto 0);
-		debug_pmmu_reg_part : out std_logic
+		debug_pmmu_reg_part : out std_logic;
+		debug_pmmu_reg_rdat : out std_logic_vector(31 downto 0)
 		);
 end TG68KdotC_Kernel;
 
@@ -578,6 +579,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_addr_log_int : std_logic_vector(31 downto 0);
 	signal pmmu_addr_phys_int : std_logic_vector(31 downto 0);
 	signal pmmu_desc_addr : std_logic_vector(31 downto 0); -- Physical address of last descriptor
+	signal pmmu_debug_mmusr : std_logic_vector(15 downto 0); -- Direct MMUSR readout from PMMU
 	signal pmmu_ptest_a : std_logic; -- Control signal for PTEST/PLOAD A-bit writeback
 	
 	-- Cache operation control signals
@@ -692,7 +694,8 @@ BEGIN
       busy          => pmmu_busy,
       mmu_config_err => pmmu_config_err,
       mmu_config_ack => pmmu_config_ack, -- BUG #154: Acknowledge to clear error
-      ptest_desc_addr => pmmu_desc_addr -- Physical address of last descriptor
+      ptest_desc_addr => pmmu_desc_addr, -- Physical address of last descriptor
+      debug_mmusr => pmmu_debug_mmusr
     );
 
 --   -- PMMU register interface connected (enabled for 68030)
@@ -6698,8 +6701,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- Use set(pmmu_ptest) here so exec picks it up via "exec <= set" on clkena_lw.
                     set(pmmu_ptest) <= '1';
                     setstate <= "01";  -- Default to "01" (stall) while waiting
-                    IF pmmu_busy = '1' THEN
-                        next_micro_state <= ptest1;  -- Stay here until walker completes
+                    -- BUG FIX: Must wait for exec(pmmu_ptest) to be latched before checking busy.
+                    -- Same timing issue as pload1: on first ptest1 cycle, exec(pmmu_ptest)='0',
+                    -- so pmmu_ptest_req='0'. Without this guard, ptest1 exits immediately, and the
+                    -- PMMU captures the wrong address (pmmu_addr_log_int instead of OP1out).
+                    IF exec(pmmu_ptest) = '0' OR pmmu_busy = '1' THEN
+                        next_micro_state <= ptest1;  -- Stay here until request sent and walker completes
                     ELSE
                         -- PTEST A-bit support via pmmu_ptest_a control signal
                         IF pmmu_brief(8)='1' THEN
@@ -6752,8 +6759,24 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- BUG #372 FIX: Propagate pload request to exec via set layer
                     set(pmmu_pload) <= '1';
                     setstate <= "01";  -- No fetch cycle - prevents PC over-increment
-                    IF pmmu_busy = '1' THEN
-                        next_micro_state <= pload1;  -- Stay here until walker completes
+                    -- synthesis translate_off
+                    IF exec(pmmu_pload) = '1' THEN
+                        report "PLOAD1: exec=1 busy=" & std_logic'image(pmmu_busy)
+                        severity note;
+                    ELSE
+                        report "PLOAD1: exec=0 busy=" & std_logic'image(pmmu_busy)
+                        severity note;
+                    END IF;
+                    -- synthesis translate_on
+                    -- BUG FIX: Must wait for exec(pmmu_pload) to be latched before checking busy.
+                    -- On first pload1 cycle, set(pmmu_pload)='1' but exec(pmmu_pload)='0' (not yet in exec).
+                    -- Without this guard, pload1 exits immediately (busy='0'), and by the time the PMMU
+                    -- edge detector fires, micro_state has moved to pmmu_dn_read_wait, so pmmu_cmd_addr
+                    -- switches from OP1out (correct EA) to pmmu_addr_log_int (wrong instruction fetch addr).
+                    -- The guard keeps micro_state=pload1 for one extra cycle, ensuring the PMMU captures
+                    -- the correct EA address from OP1out when the edge fires.
+                    IF exec(pmmu_pload) = '0' OR pmmu_busy = '1' THEN
+                        next_micro_state <= pload1;  -- Stay here until request sent and walker completes
                     ELSE
                         -- PLOAD A-bit support via pmmu_ptest_a control signal
                         IF pmmu_brief(8)='1' THEN
@@ -7506,5 +7529,6 @@ debug_pmmu_reg_re <= pmmu_reg_re_d;
 debug_pmmu_reg_sel <= pmmu_reg_sel_int;
 debug_pmmu_reg_wdat <= pmmu_reg_wdat_d;
 debug_pmmu_reg_part <= pmmu_reg_part_d;
+debug_pmmu_reg_rdat <= x"0000" & pmmu_debug_mmusr;
 
 END;

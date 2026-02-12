@@ -125,10 +125,17 @@ architecture behavioral of tb_pload_all_modes is
     signal dbg_pc_add : std_logic_vector(31 downto 0);
     signal dbg_pc_dataa : std_logic_vector(31 downto 0);
     signal dbg_pc_datab : std_logic_vector(31 downto 0);
+    signal dbg_pmmu_reg_rdat : std_logic_vector(31 downto 0);
+    signal mmusr_capture_idx : integer := 0;
 
     -- Memory: 64K words (128KB)
     type mem_array is array (0 to 65535) of std_logic_vector(15 downto 0);
     shared variable memory : mem_array := (others => x"4E71");
+
+    -- MMUSR capture: list of verification memory addresses to write captured MMUSR values
+    type int_array_t is array (0 to 63) of integer;
+    shared variable mmusr_dst_addrs : int_array_t := (others => 0);
+    shared variable mmusr_dst_count : integer := 0;
 
     -- Test control
     signal test_done : std_logic := '0';
@@ -753,7 +760,8 @@ begin
             debug_pmmu_reg_re => open,
             debug_pmmu_reg_sel => open,
             debug_pmmu_reg_wdat => open,
-            debug_pmmu_reg_part => open
+            debug_pmmu_reg_part => open,
+            debug_pmmu_reg_rdat => dbg_pmmu_reg_rdat
         );
 
     -- Clock generation
@@ -846,6 +854,43 @@ begin
                 -- U/M bit update write - just ack it
                 pmmu_walker_ack <= '1';
             end if;
+        end if;
+    end process;
+
+    -- MMUSR capture monitor: detects PTEST completion and writes MMUSR to verification memory
+    -- PTEST completes when micro_state transitions from ptest1 (90) to pmmu_dn_read_wait (96)
+    -- Capture is delayed by several cycles because PMMU updates MMUSR asynchronously:
+    --   busy drops (combinational) -> ptest_update_mmusr (registered) -> MMUSR write (registered)
+    mmusr_capture_proc: process(clk)
+        variable prev_micro : integer := 0;
+        variable capture_countdown : integer := 0;
+        variable l : line;
+        constant PTEST1_POS : integer := 90;
+        constant PMMU_DN_WAIT_POS : integer := 96;
+    begin
+        if rising_edge(clk) then
+            -- Countdown-based capture: wait N cycles after PTEST completion for MMUSR to stabilize
+            if capture_countdown > 0 then
+                capture_countdown := capture_countdown - 1;
+                if capture_countdown = 0 then
+                    if mmusr_capture_idx < mmusr_dst_count then
+                        memory(mmusr_dst_addrs(mmusr_capture_idx) / 2) :=
+                            dbg_pmmu_reg_rdat(15 downto 0);
+                        write(l, string'("MMUSR_CAPTURE[") & integer'image(mmusr_capture_idx) &
+                              string'("]: addr=$") &
+                              slv32_to_hex(std_logic_vector(to_unsigned(mmusr_dst_addrs(mmusr_capture_idx), 32))) &
+                              string'(" mmusr=$") & slv16_to_hex(dbg_pmmu_reg_rdat(15 downto 0)));
+                        writeline(output, l);
+                        mmusr_capture_idx <= mmusr_capture_idx + 1;
+                    end if;
+                end if;
+            end if;
+
+            -- Detect PTEST completion: ptest1 -> pmmu_dn_read_wait
+            if prev_micro = PTEST1_POS and dbg_micro_state = PMMU_DN_WAIT_POS then
+                capture_countdown := 4;  -- Wait 4 cycles for MMUSR to be updated
+            end if;
+            prev_micro := dbg_micro_state;
         end if;
     end process;
 
@@ -1001,11 +1046,10 @@ begin
         begin
             -- Emit PTEST
             emit_ptest(pc, ea_mode, ea_reg, level, rw, a_bit, a_reg, fc_spec, disp_or_addr, addr_hi);
-            -- Read MMUSR into D3
-            emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "000", "011", x"0000", x"0000");
-            -- Store D3 (word) to verification memory
+            -- Write MMUSR directly to verification memory via (xxx).W mode
             alloc_dst(1, dst_addr);
-            emit_move_w_dn_to_abs(pc, 3, std_logic_vector(to_unsigned(dst_addr, 32)));
+            emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "111", "000",
+                        std_logic_vector(to_unsigned(dst_addr, 16)), x"0000");
             -- Record expected
             exp_words(0) := expected_mmusr;
             set_desc(desc_str, desc);
@@ -1013,8 +1057,8 @@ begin
         end procedure;
 
 
-        -- Emit PFLUSHA + PLOAD + PTEST(A2) + MMUSR read + store to memory
-        -- Pattern: PFLUSHA -> PLOAD(EA) -> reload A2 -> PTEST(A2) -> PMOVE MMUSR,D3 -> MOVE.W D3,(abs)
+        -- Emit PFLUSHA + PLOAD + PTEST(A2) + verify MMUSR via debug port capture
+        -- Pattern: PFLUSHA -> PLOAD(EA) -> reload A2 -> PTEST(A2) -> NOP (monitor captures MMUSR)
         procedure emit_pload_verify_mmusr(
             desc : string;
             ea_mode : std_logic_vector(2 downto 0);
@@ -1037,11 +1081,13 @@ begin
             emit_movea(pc, 2, PLOAD_ADDR);
             -- PTEST (A2) to verify ATC was loaded
             emit_ptest(pc, "010", "010", "111", '1', '0', "000", "10101", x"0000", x"0000");
-            -- Read MMUSR into D3
-            emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "000", "011", x"0000", x"0000");
-            -- Store D3 (word) to verification memory
+            -- Allocate verification slot; monitor process will fill it via debug port
             alloc_dst(1, dst_addr);
-            emit_move_w_dn_to_abs(pc, 3, std_logic_vector(to_unsigned(dst_addr, 32)));
+            mmusr_dst_addrs(mmusr_dst_count) := dst_addr;
+            mmusr_dst_count := mmusr_dst_count + 1;
+            -- NOP to give PTEST time to complete before next PFLUSHA
+            emit_word(pc, x"4E71");
+            emit_word(pc, x"4E71");
             -- Record expected
             exp_words(0) := expected_mmusr;
             set_desc(desc_str, desc);

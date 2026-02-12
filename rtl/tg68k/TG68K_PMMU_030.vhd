@@ -59,7 +59,10 @@ entity TG68K_PMMU_030 is
     mmu_config_ack : in  std_logic;   -- Acknowledgment from kernel when trap is taken
 
     -- PTEST Support
-    ptest_desc_addr : out std_logic_vector(31 downto 0) -- Physical address of last descriptor (for A-bit)
+    ptest_desc_addr : out std_logic_vector(31 downto 0); -- Physical address of last descriptor (for A-bit)
+
+    -- Debug
+    debug_mmusr : out std_logic_vector(15 downto 0)
   );
 end TG68K_PMMU_030;
 
@@ -1215,6 +1218,8 @@ begin
               CRP_L                        when reg_sel = "10011" and reg_part = '0' else
               X"0000" & MMUSR(15 downto 0) when reg_sel = "11000" else
               (others => '0');
+
+  debug_mmusr <= MMUSR(15 downto 0);
 
   -- DEBUG: Monitor all PMMU register reads
   process(reg_sel, reg_part, TC, TT0, TT1, SRP_H, SRP_L, CRP_H, CRP_L, MMUSR)
