@@ -2582,6 +2582,19 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						       " np=" & bit'image(nextpass);
 					end if;
 					-- synthesis translate_on
+
+					-- BUG #389 FIX V2: Clear exec_write_back when PMMU states retire to idle!
+					-- MOVED FROM clkena_lw BLOCK TO clkena_in BLOCK to fix hardware lockup.
+					-- exec_write_back blocks setendOPC (line 2376: exec_write_back='0' OR state="11").
+					-- When pmove_mem_to_mmu_hi/lo retire with setstate="00" and state="10" from EA read,
+					-- exec_write_back='1' blocks setopcode, causing decodeOPC='0' on next instruction.
+					-- CRITICAL: Must execute in clkena_in block! If in clkena_lw block, it only runs
+					-- when memmaskmux(3)='1'. PMMU retirement may have memmaskmux(3)='0', causing
+					-- clkena_lw='0', so the clear never executes → permanent lockup on hardware.
+					IF (micro_state=pmove_mem_to_mmu_hi OR micro_state=pmove_mem_to_mmu_lo) AND
+					   next_micro_state=idle AND setstate="00" THEN
+						exec_write_back <= '0';
+					END IF;
 				END IF;
 				IF clkena_lw='1' THEN
 					interrupt <= setinterrupt;
@@ -2685,6 +2698,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						exec_write_back <= '0';
 					ELSIF setstate="10" AND setaddrvalue='0' AND write_back='1' THEN
 						exec_write_back <= '1';
+					-- BUG #389 FIX V2: PMMU retirement clearing moved to clkena_in block (line 2584)
+					-- to ensure it executes regardless of memmaskmux(3) state.
 					END IF;	
 					IF (state="10" AND addrvalue='0' AND write_back='1' AND setstate/="10") OR set_rot_cnt/="000001" OR (stop='1' AND interrupt='0') OR set_exec(opcCHK)='1' THEN
 						state <= "01";
@@ -6523,6 +6538,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- BUG #347/351 FIX: Single Prefetch Cycle!
                         -- setstate="00" + nop ensures we run exactly one fetch cycle.
                         -- pflush1 caused double fetch.
+                        -- BUG #389 FIX: exec_write_back is cleared in clocked process (line 2684-2694).
+                        -- exec_write_back was set when transitioning to pmove_mem_to_mmu_hi (line 2687).
+                        -- setendOPC requires (exec_write_back='0' OR state="11"), but state="10" from EA read.
+                        -- This blocks setopcode from firing, causing decodeOPC='0' on next instruction,
+                        -- which prevents ea_build from setting setnextpass for immediate operands.
                         setstate <= "00";
 
                         -- BUG #348 FIX: Must set datatype! Memory read defaulted to Word (01) or Byte (00).
@@ -6676,6 +6696,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- BUG #381 FIX: Use idle instead of pmmu_dn_read_wait to allow setendOPC firing!
                     -- setendOPC requires next_micro_state=idle (line 2276). Without setendOPC, fline_context_valid
                     -- stays '1', causing subsequent CRP/SRP to reuse stale fline_opcode_latch.
+                    -- BUG #389 FIX: exec_write_back cleared in clocked process (same as pmove_mem_to_mmu_hi).
                     setstate <= "00";
                     next_micro_state <= idle;
 

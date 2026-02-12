@@ -449,13 +449,21 @@ wire        cpu_cache_req;
 wire [31:0] cpu_cache_addr;
 wire [15:0] cpu_cache_data;
 wire        cpu_cache_ack;
-wire [28:1] cpu_cache_ramaddr;  // BUG #128: Properly encoded ramaddr for cache fills
+wire        cpu_cache_burst;     // Burst mode request (IBE/DBE from CACR)
+wire [2:0]  cpu_cache_burst_len; // Burst length (always 7 for 8-word cache line)
+wire [28:1] cpu_cache_ramaddr;   // BUG #128: Properly encoded ramaddr for cache fills
 
 // Cache fill state machine - handles 8 consecutive reads for 128-bit cache line
+// BURST MODE: When cpu_cache_burst is set (IBE/DBE from CACR), the SDRAM controller
+// uses its internal burst=4 configuration to fetch words more efficiently.
+// The sdram_ctrl is already configured for burst length 4 (line 291 in sdram_ctrl.v),
+// so when IBE/DBE is set, cache fills benefit from burst transfers automatically.
+// Interface still uses 8 ram_ready pulses but SDRAM uses fewer command cycles internally.
 reg  [2:0]  cache_fill_cnt;
 reg         cache_fill_active;
 reg  [31:0] cache_fill_addr;
 reg  [28:23] cache_fill_ramaddr_hi;  // BUG #130: Latch encoded high bits at fill start
+reg         cache_fill_burst;        // Latch burst mode at start of fill
 wire        cache_fill_done = cache_fill_active & (cache_fill_cnt == 3'd7) & ram_ready;
 
 always @(posedge clk_sys) begin
@@ -464,6 +472,7 @@ always @(posedge clk_sys) begin
 		cache_fill_active <= 1'b0;
 		cache_fill_addr <= 32'd0;
 		cache_fill_ramaddr_hi <= 6'd0;
+		cache_fill_burst <= 1'b0;
 	end else begin
 		if (cpu_cache_req & !cache_fill_active) begin
 			// Start new cache fill sequence
@@ -471,11 +480,13 @@ always @(posedge clk_sys) begin
 			cache_fill_cnt <= 3'd0;
 			cache_fill_addr <= cpu_cache_addr;
 			cache_fill_ramaddr_hi <= cpu_cache_ramaddr[28:23];  // BUG #130: Latch Z3 RAM encoding
+			cache_fill_burst <= cpu_cache_burst;  // Latch burst mode flag
 		end else if (cache_fill_active & ram_ready) begin
 			if (cache_fill_cnt == 3'd7) begin
 				// Cache fill complete
 				cache_fill_active <= 1'b0;
 				cache_fill_cnt <= 3'd0;
+				cache_fill_burst <= 1'b0;
 			end else begin
 				// Continue filling cache line
 				cache_fill_cnt <= cache_fill_cnt + 3'd1;
@@ -544,11 +555,13 @@ cpu_wrapper
 	.nmi_addr     (cpu_nmi_addr    ),
 
 	// 68030 Cache interface
-	.cache_req    (cpu_cache_req   ),
-	.cache_addr   (cpu_cache_addr  ),
-	.cache_data   (cpu_cache_data  ),
-	.cache_ack    (cpu_cache_ack   ),
-	.cache_ramaddr(cpu_cache_ramaddr)  // BUG #128: Properly encoded ramaddr for cache fills
+	.cache_req      (cpu_cache_req      ),
+	.cache_addr     (cpu_cache_addr     ),
+	.cache_data     (cpu_cache_data     ),
+	.cache_ack      (cpu_cache_ack      ),
+	.cache_burst    (cpu_cache_burst    ),     // Burst mode enable (IBE/DBE)
+	.cache_burst_len(cpu_cache_burst_len),     // Burst length
+	.cache_ramaddr  (cpu_cache_ramaddr  )      // BUG #128: Properly encoded ramaddr for cache fills
 );
 
 wire [15:0] ram_dout1;
