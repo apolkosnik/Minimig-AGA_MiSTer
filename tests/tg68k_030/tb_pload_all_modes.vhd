@@ -175,7 +175,7 @@ architecture behavioral of tb_pload_all_modes is
 
     constant MAX_TESTS : integer := 64;
     constant VERBOSE : boolean := true;
-    constant TRACE_FETCH : boolean := true;
+    constant TRACE_FETCH : boolean := false;
     type test_array is array (0 to MAX_TESTS-1) of test_record;
 
     function slv16_to_hex(v : std_logic_vector(15 downto 0)) return string is
@@ -779,6 +779,13 @@ begin
         variable l : line;
     begin
         if rising_edge(clk) then
+            -- Debug: check write cycles for verification memory
+            if busstate = "11" and addr >= x"00002800" and addr < x"00002900" then
+                write(l, string'("WRCYC addr=$") & slv32_to_hex(addr) &
+                      string'(" nWr=") & std_logic'image(nWr) &
+                      string'(" PC=$") & slv32_to_hex(dbg_pc));
+                writeline(output, l);
+            end if;
             if busstate = "11" and nWr = '0' then
                 if addr(31 downto 17) = "000000000000000" then
                     mem_addr := to_integer(unsigned(addr(16 downto 1)));
@@ -791,15 +798,10 @@ begin
                         new_val(7 downto 0) := data_out(7 downto 0);
                     end if;
                     memory(mem_addr) := new_val;
+                    -- Debug ALL writes
                     write(l, string'("WRITE addr=$") & slv32_to_hex(addr));
                     write(l, string'(" data=$") & slv16_to_hex(data_out));
-                    write(l, string'(" old=$") & slv16_to_hex(old_val));
                     write(l, string'(" new=$") & slv16_to_hex(new_val));
-                    write(l, string'(" PC=$") & slv32_to_hex(dbg_pc));
-                    write(l, string'(" OPC=$") & slv16_to_hex(dbg_opcode));
-                    write(l, string'(" BRF=$") & slv16_to_hex(dbg_brief));
-                    write(l, string'(" PBR=$") & slv16_to_hex(dbg_pmmu_brief));
-                    write(l, string'(" ST=$") & slv16_to_hex("00000000000000" & dbg_state));
                     writeline(output, l);
                 end if;
             end if;
@@ -808,12 +810,13 @@ begin
                 if addr(31 downto 17) = "000000000000000" then
                     mem_addr := to_integer(unsigned(addr(16 downto 1)));
                     old_val := memory(mem_addr);
-                    write(l, string'("READ addr=$") & slv32_to_hex(addr));
-                    write(l, string'(" data=$") & slv16_to_hex(data_in));
-                    write(l, string'(" PC=$") & slv32_to_hex(dbg_pc));
-                    write(l, string'(" OPC=$") & slv16_to_hex(dbg_opcode));
-                    write(l, string'(" ST=$") & slv16_to_hex("00000000000000" & dbg_state));
-                    writeline(output, l);
+                    -- Debug output disabled for performance
+                    -- write(l, string'("READ addr=$") & slv32_to_hex(addr));
+                    -- write(l, string'(" data=$") & slv16_to_hex(data_in));
+                    -- write(l, string'(" PC=$") & slv32_to_hex(dbg_pc));
+                    -- write(l, string'(" OPC=$") & slv16_to_hex(dbg_opcode));
+                    -- write(l, string'(" ST=$") & slv16_to_hex("00000000000000" & dbg_state));
+                    -- writeline(output, l);
                 end if;
             end if;
         end if;
@@ -835,9 +838,10 @@ begin
                 end if;
                 pmmu_walker_ack <= '1';
                 -- synthesis translate_off
-                write(l, string'("WALKER_RD addr=$") & slv32_to_hex(pmmu_walker_addr) &
-                      string'(" data=$") & slv16_to_hex(memory(word_hi)) & slv16_to_hex(memory(word_hi + 1)));
-                writeline(output, l);
+                -- Debug output disabled for performance
+                -- write(l, string'("WALKER_RD addr=$") & slv32_to_hex(pmmu_walker_addr) &
+                --       string'(" data=$") & slv16_to_hex(memory(word_hi)) & slv16_to_hex(memory(word_hi + 1)));
+                -- writeline(output, l);
                 -- synthesis translate_on
             elsif pmmu_walker_req = '1' and pmmu_walker_we = '1' then
                 -- U/M bit update write - just ack it
@@ -901,15 +905,16 @@ begin
                     opc := mem_word(pc_int);
                     exec_seen <= '1';
                     exec_count_sig <= exec_count_sig + 1;
-                    write(l, string'("EXEC  PC=$") & slv32_to_hex(pc_exec));
-                    write(l, string'(" ") & decode_exec_string(opc, pc_int, dbg_brief));
-                    write(l, string'(" D0=$") & slv32_to_hex(dbg_reg_d0));
-                    write(l, string'(" D3=$") & slv32_to_hex(dbg_reg_d3));
-                    write(l, string'(" A2=$") & slv32_to_hex(dbg_reg_a2));
-                    write(l, string'(" A3=$") & slv32_to_hex(dbg_reg_a3));
-                    write(l, string'(" A4=$") & slv32_to_hex(dbg_reg_a4));
-                    write(l, string'(" MST=") & integer'image(dbg_micro_state));
-                    writeline(output, l);
+                    -- Selective debug for PMOVE and MOVE.W D3 only
+                    if opc(15 downto 12) = x"F" or opc = x"33C3" then
+                        write(l, string'("EXEC  PC=$") & slv32_to_hex(pc_exec));
+                        write(l, string'(" ") & decode_exec_string(opc, pc_int, dbg_brief));
+                        write(l, string'(" D0=$") & slv32_to_hex(dbg_reg_d0));
+                        write(l, string'(" D3=$") & slv32_to_hex(dbg_reg_d3));
+                        write(l, string'(" A2=$") & slv32_to_hex(dbg_reg_a2));
+                        write(l, string'(" MST=") & integer'image(dbg_micro_state));
+                        writeline(output, l);
+                    end if;
                 end if;
             end if;
         end if;
@@ -1290,7 +1295,7 @@ begin
         nReset <= '1';
 
         -- Run simulation (longer time for page table walks)
-        wait for 800 us;
+        wait for 15 us;
         if exec_seen = '0' then
             write(l, string'("FAIL: No EXEC observed"));
             writeline(output, l);

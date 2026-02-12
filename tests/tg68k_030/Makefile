@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-all-modes test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-mmu-translation validate setup help
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-mmu-translation validate setup help
 
 # Default target
 all: test-comprehensive
@@ -26,6 +26,8 @@ help:
 	@echo "  all              - Run comprehensive test suite"
 	@echo "  setup            - Setup ModelSim environment"
 	@echo "  test-pmmu        - Test basic PMMU component"
+	@echo "  test-pmmu-walker - Test PMMU page table walker (7 comprehensive tests)"
+	@echo "  test-pmmu-atc    - Test PMMU Address Translation Cache (10 comprehensive tests)"
 	@echo "  test-diagnostic  - Run PMMU diagnostic tests (RECOMMENDED FIRST)"
 	@echo "  test-cache       - Test Cache component only"
 	@echo "  test-cacr        - Test CACR register only"
@@ -133,6 +135,8 @@ compile-advanced: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cache_030.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cacr_test.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_walker_comprehensive.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_atc_comprehensive.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_advanced.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_fault_comprehensive.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_page_walker_stress.vhd || true
@@ -143,6 +147,28 @@ compile-advanced: setup
 test-pmmu: compile
 	@echo "Running basic PMMU tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmmu_030
+
+test-pmmu-walker: setup
+	@echo "=========================================================="
+	@echo "Running PMMU Page Table Walker Comprehensive Tests"
+	@echo "Tests: Basic walk, invalid descriptors, early termination,"
+	@echo "       write protection, long format, supervisor, FCL mode"
+	@echo "=========================================================="
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_walker_comprehensive.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 100us; quit" tb_pmmu_walker_comprehensive
+
+test-pmmu-atc: setup
+	@echo "=========================================================="
+	@echo "Running PMMU ATC (Address Translation Cache) Comprehensive Tests"
+	@echo "Tests: Hit/miss, FC matching, I/D separation, variable page"
+	@echo "       sizes, PFLUSHA, cache replacement, rapid accesses"
+	@echo "=========================================================="
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_atc_comprehensive.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 150us; quit" tb_pmmu_atc_comprehensive
 
 test-pmmu-all-modes: compile
 	@echo "Running PMMU all modes test..."
@@ -469,6 +495,12 @@ test-comprehensive: compile-advanced
 	@echo "=========================================================="
 	@echo "Running TG68K 68030 Enhanced Comprehensive Test Suite"
 	@echo "=========================================================="
+	@echo "Running PMMU page table walker tests..."
+	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_pmmu_walker_comprehensive; run 100us; quit -sim"
+	@echo ""
+	@echo "Running PMMU ATC (translation cache) tests..."
+	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_pmmu_atc_comprehensive; run 150us; quit -sim"
+	@echo ""
 	@echo "Running advanced PMMU functionality tests..."
 	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_pmmu_advanced; run 200us; quit -sim"
 	@echo ""

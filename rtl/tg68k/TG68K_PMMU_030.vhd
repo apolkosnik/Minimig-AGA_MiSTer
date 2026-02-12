@@ -552,6 +552,7 @@ architecture rtl of TG68K_PMMU_030 is
     variable shift_amount : integer;
     variable mask_width : integer;
     variable temp_addr : unsigned(31 downto 0);
+    variable addr_mask : unsigned(31 downto 0);
     variable remaining_bits : integer;
   begin
     if level < 0 or level > 3 then
@@ -593,8 +594,14 @@ architecture rtl of TG68K_PMMU_030 is
       return 0;
     end if;
 
-    -- Extract bits by shifting right and masking
+    -- Apply Initial Shift (IS): ignore top IS bits per MC68030 spec
     temp_addr := unsigned(addr);
+    if initial_shift > 0 then
+      addr_mask := shift_right(to_unsigned(16#FFFFFFFF#, 32), initial_shift);
+      temp_addr := temp_addr AND addr_mask;
+    end if;
+
+    -- Extract bits by shifting right and masking
     temp_addr := shift_right(temp_addr, shift_amount);
     result := to_integer(temp_addr AND to_unsigned((2**mask_width) - 1, 32));
 
@@ -863,24 +870,47 @@ architecture rtl of TG68K_PMMU_030 is
   function calc_effective_page_shift(
     base_page_shift : integer;      -- TC.PS value (8-15)
     level : integer;                -- walk_level where page descriptor was found
-    idx_bits : tc_bits_array_t      -- tc_idx_bits: (0)=TIA, (1)=TIB, (2)=TIC, (3)=TID
+    idx_bits : tc_bits_array_t;     -- tc_idx_bits: (0)=TIA, (1)=TIB, (2)=TIC, (3)=TID
+    fcl : std_logic                 -- TC.FCL (Function Code Lookup)
   ) return integer is
     variable result : integer;
   begin
     result := base_page_shift;
     -- Add remaining index bits based on termination level
-    -- Level 0: Add TID + TIC + TIB (all remaining levels)
-    -- Level 1: Add TID + TIC
-    -- Level 2: Add TID
-    -- Level 3: No addition (final level, just PS)
-    if level <= 2 then
-      result := result + idx_bits(3);  -- Add TID
-    end if;
-    if level <= 1 then
-      result := result + idx_bits(2);  -- Add TIC
-    end if;
-    if level = 0 then
-      result := result + idx_bits(1);  -- Add TIB
+    -- FCL=0:
+    --   Level 0 (TIA): add TIB + TIC + TID
+    --   Level 1 (TIB): add TIC + TID
+    --   Level 2 (TIC): add TID
+    --   Level 3 (TID): add none
+    -- FCL=1:
+    --   Level 0 (FC):  add TIA + TIB + TIC + TID
+    --   Level 1 (TIA): add TIB + TIC + TID
+    --   Level 2 (TIB): add TIC + TID
+    --   Level 3 (TIC): add TID
+    --   Level 4 (TID): add none
+    if fcl = '1' then
+      if level <= 3 then
+        result := result + idx_bits(3);  -- TID
+      end if;
+      if level <= 2 then
+        result := result + idx_bits(2);  -- TIC
+      end if;
+      if level <= 1 then
+        result := result + idx_bits(1);  -- TIB
+      end if;
+      if level = 0 then
+        result := result + idx_bits(0);  -- TIA
+      end if;
+    else
+      if level <= 2 then
+        result := result + idx_bits(3);  -- TID
+      end if;
+      if level <= 1 then
+        result := result + idx_bits(2);  -- TIC
+      end if;
+      if level = 0 then
+        result := result + idx_bits(1);  -- TIB
+      end if;
     end if;
     return result;
   end function;
@@ -1073,6 +1103,9 @@ begin
 
             -- Write TC with potentially cleared E bit (prevents lockup on invalid config)
             TC <= tc_write_val;
+            report "BUG387_TC_WRITE: tc_val=0x" &
+                   integer'image(to_integer(unsigned(tc_write_val(31 downto 16)))) & "_" &
+                   integer'image(to_integer(unsigned(tc_write_val(15 downto 0)))) severity note;
 
             -- TC changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
@@ -1114,6 +1147,8 @@ begin
             if reg_part = '1' then
               -- CRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
               -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
+              report "PMMU_REG_WRITE: CRP_H reg_part=" & std_logic'image(reg_part) &
+                     " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
               CRP_H <= reg_wdat;  -- Mask disabled for now
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
@@ -1128,6 +1163,8 @@ begin
             else
               -- CRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
+              report "PMMU_REG_WRITE: CRP_L reg_part=" & std_logic'image(reg_part) &
+                     " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
               CRP_L <= reg_wdat;  -- Mask disabled for now
               -- BUG #148 FIX: Do NOT clear mmu_config_error on low word write
               -- If high word had DT=00, error must remain latched until explicitly acknowledged
@@ -2974,9 +3011,9 @@ begin
             -- This creates "super pages" larger than TC.PS specifies
             -- Example: TC.PS=13 (8KB), early term at level 0 with TIB=7,TIC=8,TID=0
             --          -> effective shift = 13+0+8+7 = 28 bits = 256MB page
-            walk_page_shift <= calc_effective_page_shift(tc_page_shift, walk_level, tc_idx_bits);
+            walk_page_shift <= calc_effective_page_shift(tc_page_shift, walk_level, tc_idx_bits, tc_fcl);
             walk_page_size  <= tc_page_size;  -- Keep original for compatibility
-            walk_log_base   <= align_addr(saved_addr_log, calc_effective_page_shift(tc_page_shift, walk_level, tc_idx_bits));
+            walk_log_base   <= align_addr(saved_addr_log, calc_effective_page_shift(tc_page_shift, walk_level, tc_idx_bits, tc_fcl));
             -- Extract physical address based on descriptor format
             if walk_desc_is_long = '1' then
               -- Long format: page address from LOW word bits 31-8

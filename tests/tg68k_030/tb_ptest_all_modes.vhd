@@ -167,7 +167,7 @@ architecture behavioral of tb_ptest_all_modes is
 
     constant MAX_TESTS : integer := 64;
     constant VERBOSE : boolean := true;
-    constant TRACE_FETCH : boolean := true;
+    constant TRACE_FETCH : boolean := false;
     type test_array is array (0 to MAX_TESTS-1) of test_record;
 
     function slv16_to_hex(v : std_logic_vector(15 downto 0)) return string is
@@ -1182,7 +1182,7 @@ begin
         nReset <= '1';
 
         -- Run simulation
-        wait for 500 us;
+        wait for 15 us;
         if exec_seen = '0' then
             write(l, string'("FAIL: No EXEC observed"));
             writeline(output, l);
