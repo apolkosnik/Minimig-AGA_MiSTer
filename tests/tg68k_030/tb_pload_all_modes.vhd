@@ -887,8 +887,10 @@ begin
             end if;
 
             -- Detect PTEST completion: ptest1 -> pmmu_dn_read_wait
-            if prev_micro = PTEST1_POS and dbg_micro_state = PMMU_DN_WAIT_POS then
-                capture_countdown := 4;  -- Wait 4 cycles for MMUSR to be updated
+            -- Guard: ignore transitions during reset (nReset='0') to prevent false captures
+            -- from undefined micro_state values during initialization
+            if nReset = '1' and prev_micro = PTEST1_POS and dbg_micro_state = PMMU_DN_WAIT_POS then
+                capture_countdown := 20;  -- Wait for MMUSR to be updated (PTEST walker may still be running)
             end if;
             prev_micro := dbg_micro_state;
         end if;

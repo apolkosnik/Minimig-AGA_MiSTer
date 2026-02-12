@@ -780,7 +780,8 @@ begin
             debug_pmmu_reg_re => open,
             debug_pmmu_reg_sel => open,
             debug_pmmu_reg_wdat => open,
-            debug_pmmu_reg_part => open
+            debug_pmmu_reg_part => open,
+            debug_pmmu_reg_rdat => open
         );
 
     -- Clock generation

@@ -459,6 +459,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal make_trace			: std_logic;
 	signal make_berr			: std_logic;
 	signal make_mmu_berr     : std_logic;  -- BUG #159: Distinguish MMU bus error from normal BERR
+	signal berr_exception_active : std_logic;  -- MC68030: Bus error exception processing window
+	signal cpu_halted        : std_logic;  -- MC68030: Double bus fault halt (cleared only by reset)
 	signal useStackframe2	: std_logic;
 	
 	signal set_stop			: bit;
@@ -1861,14 +1863,6 @@ PROCESS (clk)
 				      OR next_micro_state=pmove_mmu_to_mem_hi OR next_micro_state=pmove_mmu_to_mem_lo THEN
 					-- MMU->memory: source data from PMMU register readback (ORIGINAL LOGIC)
 					data_write_tmp <= pmmu_reg_rdat;
-					-- synthesis translate_off
-					report "DWT_CAPTURE: micro=" & micro_states'image(micro_state) &
-					       " next=" & micro_states'image(next_micro_state) &
-					       " reg_part_d=" & std_logic'image(pmmu_reg_part_d) &
-					       " rdat=" & integer'image(conv_integer(pmmu_reg_rdat)) &
-					       " reg_sel=" & integer'image(conv_integer(pmmu_reg_sel_int)) &
-					       " brief14_10=" & integer'image(conv_integer(pmmu_brief(14 downto 10)));
-					-- synthesis translate_on
 				ELSIF exec(exg)='1' THEN
 					data_write_tmp <= OP1out;
 				ELSIF exec(get_ea_now)='1' AND ea_only='1' THEN		-- ist for pea
@@ -2242,6 +2236,15 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 						use_base <= '1';  -- BS=0: use base register
 					END IF;
 					-- BS=1: use_base stays '0' (default)
+				-- BUG #393 FIX: Hold address during PLOAD/PTEST/PFLUSH walker execution.
+				-- The EA was computed by PMMU EA builders (pmmu_ld_dAn1/AnXn2/nn) and
+				-- registered into memaddr_delta_rega on the transition to pload1/ptest1/pflush1.
+				-- Without this hold, the ELSE default overwrites it with memaddr_a=0 (setdisp='0'),
+				-- causing addr to revert to reg_QA (losing displacement/index/absolute offset).
+				ELSIF (micro_state = pload1 OR micro_state = ptest1 OR micro_state = pflush1) AND
+				      fline_context_valid = '1' AND setstate /= "00" THEN
+					memaddr_delta_rega <= memaddr_delta_rega;  -- hold computed EA
+					use_base <= use_base;  -- hold (0 for absolute, 1 for register-relative)
 				ELSE
 					memaddr_delta_rega <= memaddr_a;
 					IF interrupt='0' AND Suppress_Base='0' THEN
@@ -2252,16 +2255,6 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					
 		-- only used for movem address update
 --					IF (long_done='0' AND state(1)='1') OR movem_presub='0' THEN
-					-- synthesis translate_off
-					if micro_state = pmove_mem_to_mmu_hi and state(1)='1' then
-						report "BUG387_MEMIO: addr=" & integer'image(conv_integer(addr)) &
-							" delta_a=" & integer'image(conv_integer(memaddr_delta_rega)) &
-							" use_base=" & bit'image(use_base) &
-							" mmux3=" & std_logic'image(memmaskmux(3)) &
-							" data_in=" & integer'image(conv_integer(data_in)) &
-							" data_read=" & integer'image(conv_integer(data_read)) severity note;
-					end if;
-					-- synthesis translate_on
 					if ((memread(0) = '1') and state(1) = '1') or movem_presub = '0' then -- fix for unaligned movem mikej
 						memaddr <= addr;
 					END IF;
@@ -2303,7 +2296,7 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 -- PC Calc + fetch opcode
 -----------------------------------------------------------------------------
 PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data, next_micro_state, stop, make_trace, make_berr, IPL_nr, FlagsSR, set_rot_cnt, opcode, writePCbig, set_exec, exec,
-        PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, trap_trapv, interrupt, tmp_TG68_PC, TG68_PC, use_VBR_Stackframe, writePCnext, pmove_dn_mode)
+        PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, trap_trapv, interrupt, tmp_TG68_PC, TG68_PC, use_VBR_Stackframe, writePCnext, pmove_dn_mode, cpu_halted)
 	BEGIN
 	
 		PC_dataa <= TG68_PC;
@@ -2369,7 +2362,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 		-- BUG #369 FIX: Also exclude ptest1/pflush1/pload1 - same stale opcode problem.
 		-- When these states retire with setstate="00", state is still "01" from the stall cycle,
 		-- causing opcode <= last_opc_read (stale extension word) instead of data_read (next instr).
-		IF (setstate="00" OR (setstate="01" AND fline_context_valid='1')) AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0' AND micro_state /= pmmu_dn_read_wait AND micro_state /= pmove_decode AND micro_state /= pmove_mem_to_mmu_hi AND micro_state /= pmove_mem_to_mmu_lo AND micro_state /= pmove_mmu_to_mem_hi AND micro_state /= pmove_mmu_to_mem_lo AND micro_state /= ptest1 AND micro_state /= pflush1 AND micro_state /= pload1 THEN
+		IF (setstate="00" OR (setstate="01" AND fline_context_valid='1')) AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0' AND micro_state /= pmmu_dn_read_wait AND micro_state /= pmove_decode AND micro_state /= pmove_mem_to_mmu_hi AND micro_state /= pmove_mem_to_mmu_lo AND micro_state /= pmove_mmu_to_mem_hi AND micro_state /= pmove_mmu_to_mem_lo AND micro_state /= ptest1 AND micro_state /= pflush1 AND micro_state /= pload1 AND cpu_halted='0' THEN
 			setendOPC <= '1';
 			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1' THEN
 				setinterrupt <= '1';
@@ -2420,6 +2413,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 --				recall_last <= '0';
 					Suppress_Base <= '0';
 					make_berr <= '0';
+					berr_exception_active <= '0';
+					cpu_halted <= '0';
 					memmask <= "111111";
 					exec_write_back <= '0';
 					-- BUG #70 SIMPLIFICATION: Simple 2-signal initialization
@@ -2470,11 +2465,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- in the process (clkena_lw block updates it at line 2542).
 					-- Use data_read, matching the getbrief mechanism for state(1)='0'.
 					IF micro_state = pmove_decode AND next_micro_state = pmmu_ld_AnXn1 THEN
-						-- synthesis translate_off
-						report "PMMU_BRIEF_LATCH: data_read=" & integer'image(conv_integer(data_read(15 downto 0))) &
-						       " last_opc=" & integer'image(conv_integer(last_opc_read)) &
-						       " state=" & integer'image(conv_integer(state));
-						-- synthesis translate_on
 						brief <= data_read(15 downto 0);
 					END IF;
 
@@ -2490,16 +2480,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- CRITICAL: Use next_micro_state, not micro_state! At this clock edge,
 					-- micro_state still has the OLD value. next_micro_state has the value
 					-- that micro_state will become, which is pmove_decode when getbrief fired.
-					-- synthesis translate_off
-					IF next_micro_state = pmove_decode THEN
-						report "FLINE_CAPTURE_CHECK: fctx=" & std_logic'image(fline_context_valid) &
-						       " opc=" & integer'image(conv_integer(opcode)) &
-						       " ms=" & micro_states'image(micro_state) &
-						       " setendOPC=" & bit'image(setendOPC) &
-						       " trapmake=" & bit'image(trapmake) &
-						       " clkena_lw=" & std_logic'image(clkena_lw);
-					END IF;
-					-- synthesis translate_on
 					IF next_micro_state = pmove_decode AND fline_context_valid = '0' THEN
 						fline_opcode_latch <= opcode;
 						-- Capture from SAME source as brief to avoid timing issues
@@ -2549,39 +2529,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- resulting in stale opcode(5:3) dispatching as Dn mode instead of memory mode.
 					IF (setendOPC = '1' OR trapmake = '1') AND micro_state /= pmove_decode AND micro_state /= pmove_dn_hi AND micro_state /= pmmu_dn_read_wait THEN
 						fline_context_valid <= '0';
-						-- synthesis translate_off
-						report "FCTX_CLEAR: ms=" & micro_states'image(micro_state) &
-						       " setendOPC=" & bit'image(setendOPC) &
-						       " trapmake=" & bit'image(trapmake);
-						-- synthesis translate_on
-
-					ELSIF (setendOPC = '1' OR trapmake = '1') AND (micro_state = pmove_decode OR micro_state = pmove_dn_hi OR micro_state = pmmu_dn_read_wait) THEN
-					-- synthesis translate_off
-						report "FCTX_CLEAR_BLOCKED: ms=" & micro_states'image(micro_state) &
-						       " setendOPC=" & bit'image(setendOPC) &
-						       " trapmake=" & bit'image(trapmake);
-					-- synthesis translate_on
 					END IF;
-
-					-- synthesis translate_off
-					-- BUG387 DEBUG: Comprehensive PMMU state trace (fires on clkena_in)
-					if micro_state = pmmu_ld_nn or micro_state = pmove_decode or
-					   micro_state = pmove_mmu_to_mem_hi or micro_state = pmove_mem_to_mmu_hi or
-					   micro_state = pmmu_dn_read_wait then
-						report "BUG387_TRACE: ms=" & micro_states'image(micro_state) &
-						       " nms=" & micro_states'image(next_micro_state) &
-						       " fctx=" & std_logic'image(fline_context_valid) &
-						       " brief9=" & std_logic'image(pmmu_brief(9)) &
-						       " opc=" & integer'image(conv_integer(opcode)) &
-						       " flatch=" & integer'image(conv_integer(fline_opcode_latch)) &
-						       " blatch=" & integer'image(conv_integer(fline_brief_latch)) &
-						       " state=" & integer'image(conv_integer(state)) &
-						       " clkena_lw=" & std_logic'image(clkena_lw) &
-						       " mm=" & integer'image(conv_integer(memmask)) &
-						       " addr=" & integer'image(conv_integer(addr)) &
-						       " np=" & bit'image(nextpass);
-					end if;
-					-- synthesis translate_on
 
 					-- BUG #389 FIX V2: Clear exec_write_back when PMMU states retire to idle!
 					-- MOVED FROM clkena_lw BLOCK TO clkena_in BLOCK to fix hardware lockup.
@@ -2625,6 +2573,15 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 							make_mmu_berr <= '0';
 						end if;
 					else
+						-- MC68030 Double bus fault detection: bus error/fault during bus error processing
+						-- Per MC68030UM Section 8.4: "If a bus error is detected during exception
+						-- processing of a bus error, the processor enters the halted state."
+						if cpu(1) = '1' and (berr = '1' or (pmmu_tc_en = '1' and pmmu_fault = '1')) then
+							cpu_halted <= '1';
+							-- synthesis translate_off
+							report "DOUBLE BUS FAULT: fault during bus error exception processing - CPU HALTED" severity warning;
+							-- synthesis translate_on
+						end if;
 						make_berr <= '0';
 						make_mmu_berr <= '0';
 					end if;
@@ -2641,18 +2598,29 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						IF make_trace='1' THEN
 							trap_trace <= '1';
 						ELSIF make_berr='1' THEN
-							-- BUG #159 FIX: Distinguish MMU bus error (vector 61) from normal BERR (vector 2)
-							IF make_mmu_berr='1' THEN
-								trap_mmu_berr <= '1';  -- Use vector 61 for MMU bus error
+							-- MC68030 Double bus fault detection: bus error while still in berr exception window
+							-- This catches the case where the handler instruction fetch faults
+							IF cpu(1) = '1' AND berr_exception_active = '1' THEN
+								cpu_halted <= '1';
+								-- synthesis translate_off
+								report "DOUBLE BUS FAULT: bus error at handler dispatch - CPU HALTED" severity warning;
+								-- synthesis translate_on
 							ELSE
-								trap_berr <= '1';  -- Use vector 2 for normal bus error
+								-- BUG #159 FIX: Distinguish MMU bus error (vector 61) from normal BERR (vector 2)
+								IF make_mmu_berr='1' THEN
+									trap_mmu_berr <= '1';  -- Use vector 61 for MMU bus error
+								ELSE
+									trap_berr <= '1';  -- Use vector 2 for normal bus error
+								END IF;
+								berr_exception_active <= '1';
 							END IF;
 						ELSE
 							rIPL_nr <= IPL_nr;
 							IPL_vec <= "00011"&IPL_nr;            --	TH
 							trap_interrupt <= '1';
+							berr_exception_active <= '0';
 						END IF;
-					END IF;	
+					END IF;
 					IF micro_state=trap0 AND IPL_autovector='0' THEN 			
 						IPL_vec <= last_data_read(7 downto 0);    --	TH
 					END IF;	
@@ -2666,6 +2634,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						trap_trace <= '0';
 						TG68_PC_word <= '0';
 						trap_berr <= '0';
+						-- MC68030: Clear berr exception window when normal instruction fetches
+						-- Don't clear if trap_berr was still active (it reads the OLD value here)
+						-- or if make_berr is pending - handler fetch may have faulted
+						IF trap_berr='0' AND make_berr='0' THEN
+							berr_exception_active <= '0';
+						END IF;
 						-- BUG #65 FIX: Do NOT clear pmove_dn_mode here!
 						-- pmove_dn_mode is now cleared ONLY when queue becomes empty (lines 1765-1766)
 					ELSIF opcode(7 downto 0)="00000000" OR opcode(7 downto 0)="11111111" OR data_is_source='1' THEN
@@ -2727,13 +2701,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 							-- IF memmask /= "100001" AND memmask /= "000111" AND memmask /= "011111" THEN
 							 	memmask <= "100001";
 							 	wbmemmask <= "100001";
-							-- synthesis translate_off
-							report "BUG387_MMLATCH: mm=100001 ms=" & micro_states'image(micro_state) &
-							       " nms=" & micro_states'image(next_micro_state) &
-							       " state=" & integer'image(conv_integer(state)) &
-							       " np=" & bit'image(nextpass) &
-							       " setstate=" & integer'image(conv_integer(setstate));
-							-- synthesis translate_on
 							-- END IF;
 							oddout <= '0';
 --						ELSIF set_datatype="00" AND setstate(1)='1' AND setaddrvalue='0' THEN	
@@ -2792,17 +2759,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 							opcode <= last_opc_read(15 downto 0);
 							exe_pc <= last_opc_pc;--TH
 						END IF;
-						-- synthesis translate_off
-						report "OPCODE_UPDATE: setopcode=1 state=" & integer'image(conv_integer(state)) &
-						       " data_rd=" & integer'image(conv_integer(data_read(15 downto 0))) &
-						       " din=" & integer'image(conv_integer(data_in)) &
-						       " lor=" & integer'image(conv_integer(last_opc_read(15 downto 0))) &
-						       " addr=" & integer'image(conv_integer(addr)) &
-						       " mmx4=" & std_logic'image(memmaskmux(4)) &
-						       " mm=" & integer'image(conv_integer(memmask)) &
-						       " ms=" & micro_states'image(micro_state) &
-						       " pc=" & integer'image(conv_integer(tg68_pc));
-						-- synthesis translate_on
 						nextpass <= '0';
 					ELSIF setinterrupt='1' OR setopcode='1' THEN
 						opcode <= X"4E71";		--nop
@@ -5248,7 +5204,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						set(get_ea_now) <='1';
 						set(addrlong) <= '1';
 						setnextpass <= '0';
-						IF pmmu_brief(9)='1' THEN
+						-- BUG #393 FIX: Route PLOAD/PTEST/PFLUSH to walker handlers
+						IF pmmu_brief(15 downto 13) = "001" OR pmmu_brief(15 downto 13) = "100" THEN
+							set(OP1addr) <= '1';
+							setstate <= "01";
+							IF pmmu_brief(15 downto 13) = "100" THEN
+								next_micro_state <= ptest1;
+							ELSIF pmmu_brief(12 downto 10) = "000" THEN
+								next_micro_state <= pload1;
+							ELSE
+								next_micro_state <= pflush1;
+							END IF;
+						ELSIF pmmu_brief(9)='1' THEN
 							-- MMU->mem direction (read from MMU, write to memory)
 							setstate <= "01";
 							next_micro_state <= pmove_mmu_to_mem_hi;
@@ -5268,7 +5235,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					set(get_ea_now) <='1';
 					setdisp <= '1';		-- Load displacement word
 					setnextpass <= '0';  -- Always clear for PMMU
-					IF pmmu_brief(9)='1' THEN
+					-- BUG #393 FIX: Route PLOAD/PTEST/PFLUSH to walker handlers
+					IF pmmu_brief(15 downto 13) = "001" OR pmmu_brief(15 downto 13) = "100" THEN
+						set(OP1addr) <= '1';
+						setstate <= "01";
+						IF pmmu_brief(15 downto 13) = "100" THEN
+							next_micro_state <= ptest1;
+						ELSIF pmmu_brief(12 downto 10) = "000" THEN
+							next_micro_state <= pload1;
+						ELSE
+							next_micro_state <= pflush1;
+						END IF;
+					ELSIF pmmu_brief(9)='1' THEN
 						-- MMU->mem direction
 						setstate <= "01";
 						next_micro_state <= pmove_mmu_to_mem_hi;
@@ -5315,7 +5293,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					set(get_ea_now) <='1';
 					setdisp <= '1';		-- brief
 					setnextpass <= '0';  -- Always clear for PMMU
-					IF pmmu_brief(9)='1' THEN
+					-- BUG #393 FIX: Route PLOAD/PTEST/PFLUSH to walker handlers
+					IF pmmu_brief(15 downto 13) = "001" OR pmmu_brief(15 downto 13) = "100" THEN
+						set(OP1addr) <= '1';
+						setstate <= "01";
+						IF pmmu_brief(15 downto 13) = "100" THEN
+							next_micro_state <= ptest1;
+						ELSIF pmmu_brief(12 downto 10) = "000" THEN
+							next_micro_state <= pload1;
+						ELSE
+							next_micro_state <= pflush1;
+						END IF;
+					ELSIF pmmu_brief(9)='1' THEN
 						-- MMU->mem direction
 						setstate <= "01";
 						next_micro_state <= pmove_mmu_to_mem_hi;
@@ -5346,7 +5335,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						IF brief(1 downto 0)="00" THEN
 							set(get_ea_now) <='1';
 							setnextpass <= '0';  -- Always clear for PMMU
-							IF pmmu_brief(9)='1' THEN
+							-- BUG #393 FIX: Route PLOAD/PTEST/PFLUSH to walker handlers
+							IF pmmu_brief(15 downto 13) = "001" OR pmmu_brief(15 downto 13) = "100" THEN
+								set(OP1addr) <= '1';
+								setstate <= "01";
+								IF pmmu_brief(15 downto 13) = "100" THEN
+									next_micro_state <= ptest1;
+								ELSIF pmmu_brief(12 downto 10) = "000" THEN
+									next_micro_state <= pload1;
+								ELSE
+									next_micro_state <= pflush1;
+								END IF;
+							ELSIF pmmu_brief(9)='1' THEN
 								setstate <= "01";
 								next_micro_state <= pmove_mmu_to_mem_hi;
 							ELSE
@@ -5396,7 +5396,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					ELSE
 						set(get_ea_now) <='1';
 						setnextpass <= '0';  -- Always clear for PMMU
-						IF pmmu_brief(9)='1' THEN
+						-- BUG #393 FIX: Route PLOAD/PTEST/PFLUSH to walker handlers
+						IF pmmu_brief(15 downto 13) = "001" OR pmmu_brief(15 downto 13) = "100" THEN
+							set(OP1addr) <= '1';
+							setstate <= "01";
+							IF pmmu_brief(15 downto 13) = "100" THEN
+								next_micro_state <= ptest1;
+							ELSIF pmmu_brief(12 downto 10) = "000" THEN
+								next_micro_state <= pload1;
+							ELSE
+								next_micro_state <= pflush1;
+							END IF;
+						ELSIF pmmu_brief(9)='1' THEN
 							setstate <= "01";
 							next_micro_state <= pmove_mmu_to_mem_hi;
 						ELSE
@@ -6454,30 +6465,90 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                 END CASE;
                              END IF;
                         END IF;
-                    ELSIF pmmu_brief(15 downto 13) = "001" AND pmmu_brief(12 downto 10) = "000" THEN 
+                    ELSIF pmmu_brief(15 downto 13) = "001" AND pmmu_brief(12 downto 10) = "000" THEN
                         -- PLOAD
-                        IF (opcode(5 downto 3)="001" OR opcode(5 downto 3)="011" OR (opcode(5 downto 3)="111" AND opcode(2)='1')) THEN
+                        -- BUG #393 FIX: Use pmmu_opcode for EA mode checks (same as BUG #377 for PMOVE)
+                        -- BUG #393 FIX: Mode-specific dispatch through PMMU EA builders for correct
+                        -- address computation. Previously used generic set(ea_build) which computed
+                        -- addresses incorrectly for (d16,An), (d8,An,Xn), (xxx).W, (xxx).L modes.
+                        -- Control alterable modes only: Dn/An/(An)+/-(An)/PC-rel/imm are illegal
+                        IF pmmu_opcode(5 downto 3)="000" OR pmmu_opcode(5 downto 3)="001" OR
+                           pmmu_opcode(5 downto 3)="011" OR pmmu_opcode(5 downto 3)="100" OR
+                           (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') THEN
                              trap_illegal <= '1';
                              trapmake <= '1';
                         ELSE
-                             set(ea_build) <= '1';
-                             datatype <= "10";
-                             setstate <= "10";
                              set_exec(pmmu_pload) <= '1';
-                             next_micro_state <= pload1;
+                             datatype <= "10";
+                             CASE pmmu_opcode(5 downto 3) IS
+                                 WHEN "010" =>
+                                     -- (An): EA is register value, goes directly to pload1
+                                     setstate <= "01";
+                                     next_micro_state <= pload1;
+                                 WHEN "101" =>
+                                     -- (d16,An): Route through PMMU EA builder for displacement
+                                     setstate <= "01";
+                                     next_micro_state <= pmmu_ld_dAn1;
+                                 WHEN "110" =>
+                                     -- (d8,An,Xn): Route through PMMU EA builder for index
+                                     setstate <= "01";
+                                     next_micro_state <= pmmu_ld_AnXn1;
+                                 WHEN "111" =>
+                                     -- Absolute addressing
+                                     IF pmmu_opcode(2 downto 0) = "000" THEN
+                                         -- (xxx).W: Address word already fetched
+                                         setstate <= "01";
+                                         next_micro_state <= pmmu_ld_nn;
+                                     ELSIF pmmu_opcode(2 downto 0) = "001" THEN
+                                         -- (xxx).L: Need state="00" to fetch second address word
+                                         setstate <= "00";
+                                         next_micro_state <= pmmu_ld_nn;
+                                     ELSE
+                                         trap_illegal <= '1';
+                                         trapmake <= '1';
+                                     END IF;
+                                 WHEN OTHERS =>
+                                     trap_illegal <= '1';
+                                     trapmake <= '1';
+                             END CASE;
                         END IF;
                     ELSIF pmmu_brief(15 downto 13) = "001" AND (pmmu_brief(12 downto 10) = "001" OR pmmu_brief(12 downto 10) = "100" OR pmmu_brief(12 downto 10) = "110") THEN
                         -- PFLUSH
                         set_exec(pmmu_pflush) <= '1';
                         IF pmmu_brief(12 downto 10) = "110" THEN
-                             IF (opcode(5 downto 3)="001" OR opcode(5 downto 3)="011" OR (opcode(5 downto 3)="111" AND opcode(2)='1')) THEN
+                             -- PFLUSH with EA: same mode-specific dispatch as PLOAD (BUG #393)
+                             IF pmmu_opcode(5 downto 3)="000" OR pmmu_opcode(5 downto 3)="001" OR
+                                pmmu_opcode(5 downto 3)="011" OR pmmu_opcode(5 downto 3)="100" OR
+                                (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') THEN
                                  trap_illegal <= '1';
                                  trapmake <= '1';
                              ELSE
-                                 set(ea_build) <= '1';
                                  datatype <= "10";
-                                 setstate <= "10";
-                                 next_micro_state <= pflush1;
+                                 CASE pmmu_opcode(5 downto 3) IS
+                                     WHEN "010" =>
+                                         setstate <= "01";
+                                         next_micro_state <= pflush1;
+                                     WHEN "101" =>
+                                         setstate <= "01";
+                                         next_micro_state <= pmmu_ld_dAn1;
+                                     WHEN "110" =>
+                                         setstate <= "01";
+                                         next_micro_state <= pmmu_ld_AnXn1;
+                                     WHEN "111" =>
+                                         IF pmmu_opcode(2 downto 0) = "000" THEN
+                                             setstate <= "01";
+                                             next_micro_state <= pmmu_ld_nn;
+                                         ELSIF pmmu_opcode(2 downto 0) = "001" THEN
+                                             setstate <= "00";
+                                             next_micro_state <= pmmu_ld_nn;
+                                         ELSE
+                                             trap_illegal <= '1';
+                                             trapmake <= '1';
+                                         END IF;
+                                     WHEN OTHERS =>
+                                         trap_illegal <= '1';
+                                         trapmake <= '1';
+                                 END CASE;
                              END IF;
                         ELSE
                              setstate <= "01";
@@ -6485,15 +6556,41 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         END IF;
                     ELSIF pmmu_brief(15 downto 13) = "100" THEN
                         -- PTEST
-                        IF (opcode(5 downto 3)="001" OR opcode(5 downto 3)="011" OR (opcode(5 downto 3)="111" AND opcode(2)='1')) THEN
+                        -- BUG #393 FIX: Mode-specific dispatch (same as PLOAD fix)
+                        -- Control modes: Dn/An/(An)+/-(An)/imm are illegal (PC-rel allowed but not yet supported)
+                        IF pmmu_opcode(5 downto 3)="000" OR pmmu_opcode(5 downto 3)="001" OR
+                           pmmu_opcode(5 downto 3)="011" OR pmmu_opcode(5 downto 3)="100" OR
+                           (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') THEN
                              trap_illegal <= '1';
                              trapmake <= '1';
                         ELSE
-                             set(ea_build) <= '1';
-                             datatype <= "10";
-                             setstate <= "10";
                              set_exec(pmmu_ptest) <= '1';
-                             next_micro_state <= ptest1;
+                             datatype <= "10";
+                             CASE pmmu_opcode(5 downto 3) IS
+                                 WHEN "010" =>
+                                     setstate <= "01";
+                                     next_micro_state <= ptest1;
+                                 WHEN "101" =>
+                                     setstate <= "01";
+                                     next_micro_state <= pmmu_ld_dAn1;
+                                 WHEN "110" =>
+                                     setstate <= "01";
+                                     next_micro_state <= pmmu_ld_AnXn1;
+                                 WHEN "111" =>
+                                     IF pmmu_opcode(2 downto 0) = "000" THEN
+                                         setstate <= "01";
+                                         next_micro_state <= pmmu_ld_nn;
+                                     ELSIF pmmu_opcode(2 downto 0) = "001" THEN
+                                         setstate <= "00";
+                                         next_micro_state <= pmmu_ld_nn;
+                                     ELSE
+                                         trap_illegal <= '1';
+                                         trapmake <= '1';
+                                     END IF;
+                                 WHEN OTHERS =>
+                                     trap_illegal <= '1';
+                                     trapmake <= '1';
+                             END CASE;
                         END IF;
                     ELSE
                         trap_1111 <= '1';
@@ -6721,6 +6818,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- setexecOPC requires setstate="00"/"01" but EA build uses setstate="10".
                     -- Use set(pmmu_ptest) here so exec picks it up via "exec <= set" on clkena_lw.
                     set(pmmu_ptest) <= '1';
+                    set(OP1addr) <= '1';  -- BUG #393 FIX: Route addr to OP1out for pmmu_cmd_addr
                     setstate <= "01";  -- Default to "01" (stall) while waiting
                     -- BUG FIX: Must wait for exec(pmmu_ptest) to be latched before checking busy.
                     -- Same timing issue as pload1: on first ptest1 cycle, exec(pmmu_ptest)='0',
@@ -6758,6 +6856,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- Without this, setstate defaults to "00" (fetch), causing PC+2 over-increment
                     -- BUG #372 FIX: Propagate pflush request to exec via set layer
                     set(pmmu_pflush) <= '1';
+                    set(OP1addr) <= '1';  -- BUG #393 FIX: Route addr to OP1out for pmmu_cmd_addr
                     setstate <= "01";  -- No fetch cycle - prevents PC over-increment
                     IF pmmu_busy = '1' THEN
                         next_micro_state <= pflush1;
@@ -6779,16 +6878,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- BUG #147 FIX: setstate="01" prevents extra PC increment when exiting pload1
                     -- BUG #372 FIX: Propagate pload request to exec via set layer
                     set(pmmu_pload) <= '1';
+                    set(OP1addr) <= '1';  -- BUG #393 FIX: Route addr to OP1out for pmmu_cmd_addr
                     setstate <= "01";  -- No fetch cycle - prevents PC over-increment
-                    -- synthesis translate_off
-                    IF exec(pmmu_pload) = '1' THEN
-                        report "PLOAD1: exec=1 busy=" & std_logic'image(pmmu_busy)
-                        severity note;
-                    ELSE
-                        report "PLOAD1: exec=0 busy=" & std_logic'image(pmmu_busy)
-                        severity note;
-                    END IF;
-                    -- synthesis translate_on
                     -- BUG FIX: Must wait for exec(pmmu_pload) to be latched before checking busy.
                     -- On first pload1 cycle, set(pmmu_pload)='1' but exec(pmmu_pload)='0' (not yet in exec).
                     -- Without this guard, pload1 exits immediately (busy='0'), and by the time the PMMU
@@ -7264,9 +7355,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 if clkena_lw='1' then
                 if micro_state = pmove_mmu_to_mem_lo OR next_micro_state = pmove_mmu_to_mem_lo then
                   pmmu_reg_part_d <= '0';  -- Force LOW part in low write state (or about to enter)
-                  -- synthesis translate_off
-                  report "REG_PART_RD: <= 0 (LO) micro=" & micro_states'image(micro_state) & " next=" & micro_states'image(next_micro_state);
-                  -- synthesis translate_on
                 elsif micro_state = pmove_mem_to_mmu_lo OR next_micro_state = pmove_mem_to_mmu_lo then
                   pmmu_reg_part_d <= '0';  -- Force LOW part for memory->MMU low read
                 -- BUG #376 FIX: Also force LOW when transitioning to pmove_dn_lo for 64-bit Dn read.
@@ -7277,14 +7365,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 elsif micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_decode OR micro_state = pmove_dn_hi OR
                       next_micro_state = pmove_mmu_to_mem_hi OR next_micro_state = pmove_mem_to_mmu_hi then
                   pmmu_reg_part_d <= '1';  -- HIGH word (first transfer)
-                  -- synthesis translate_off
-                  report "REG_PART_RD: <= 1 (HI) micro=" & micro_states'image(micro_state) & " next=" & micro_states'image(next_micro_state);
-                  -- synthesis translate_on
                 else
                   pmmu_reg_part_d <= '0';  -- LOW word (second transfer)
-                  -- synthesis translate_off
-                  report "REG_PART_RD: <= 0 (default) micro=" & micro_states'image(micro_state) & " next=" & micro_states'image(next_micro_state);
-                  -- synthesis translate_on
                 end if;
                 end if; -- clkena_lw
               end if;
@@ -7325,17 +7407,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         if CPU(1)='1' and (pmmu_brief(14 downto 10) = "10010" or pmmu_brief(14 downto 10) = "10011") then
             if next_micro_state = pmove_mem_to_mmu_hi or next_micro_state = pmove_mmu_to_mem_hi then
                 pmmu_reg_part_d <= '1';  -- HI word will be accessed next cycle
-                -- synthesis translate_off
-                report "BUG389_EARLY: reg_part_d<=1 (HI) micro=" & micro_states'image(micro_state) &
-                       " next=" & micro_states'image(next_micro_state) &
-                       " brief14_10=" & integer'image(conv_integer(pmmu_brief(14 downto 10)));
-                -- synthesis translate_on
             elsif next_micro_state = pmove_mem_to_mmu_lo or next_micro_state = pmove_mmu_to_mem_lo then
                 pmmu_reg_part_d <= '0';  -- LO word will be accessed next cycle
-                -- synthesis translate_off
-                report "BUG389_EARLY: reg_part_d<=0 (LO) micro=" & micro_states'image(micro_state) &
-                       " next=" & micro_states'image(next_micro_state);
-                -- synthesis translate_on
             end if;
         end if;
         end if; -- clkena_lw
