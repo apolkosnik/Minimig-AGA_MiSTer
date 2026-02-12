@@ -175,7 +175,7 @@ architecture behavioral of tb_pload_all_modes is
 
     constant MAX_TESTS : integer := 64;
     constant VERBOSE : boolean := true;
-    constant TRACE_FETCH : boolean := false;
+    constant TRACE_FETCH : boolean := true;
     type test_array is array (0 to MAX_TESTS-1) of test_record;
 
     function slv16_to_hex(v : std_logic_vector(15 downto 0)) return string is
@@ -838,10 +838,9 @@ begin
                 end if;
                 pmmu_walker_ack <= '1';
                 -- synthesis translate_off
-                -- Debug output disabled for performance
-                -- write(l, string'("WALKER_RD addr=$") & slv32_to_hex(pmmu_walker_addr) &
-                --       string'(" data=$") & slv16_to_hex(memory(word_hi)) & slv16_to_hex(memory(word_hi + 1)));
-                -- writeline(output, l);
+                write(l, string'("WALKER_RD addr=$") & slv32_to_hex(pmmu_walker_addr) &
+                      string'(" data=$") & slv16_to_hex(memory(word_hi)) & slv16_to_hex(memory(word_hi + 1)));
+                writeline(output, l);
                 -- synthesis translate_on
             elsif pmmu_walker_req = '1' and pmmu_walker_we = '1' then
                 -- U/M bit update write - just ack it
@@ -905,16 +904,12 @@ begin
                     opc := mem_word(pc_int);
                     exec_seen <= '1';
                     exec_count_sig <= exec_count_sig + 1;
-                    -- Selective debug for PMOVE and MOVE.W D3 only
-                    if opc(15 downto 12) = x"F" or opc = x"33C3" then
-                        write(l, string'("EXEC  PC=$") & slv32_to_hex(pc_exec));
-                        write(l, string'(" ") & decode_exec_string(opc, pc_int, dbg_brief));
-                        write(l, string'(" D0=$") & slv32_to_hex(dbg_reg_d0));
-                        write(l, string'(" D3=$") & slv32_to_hex(dbg_reg_d3));
-                        write(l, string'(" A2=$") & slv32_to_hex(dbg_reg_a2));
-                        write(l, string'(" MST=") & integer'image(dbg_micro_state));
-                        writeline(output, l);
-                    end if;
+                    -- Show all instructions
+                    write(l, string'("EXEC  PC=$") & slv32_to_hex(pc_exec));
+                    write(l, string'(" ") & decode_exec_string(opc, pc_int, dbg_brief));
+                    write(l, string'(" D3=$") & slv32_to_hex(dbg_reg_d3));
+                    write(l, string'(" A2=$") & slv32_to_hex(dbg_reg_a2));
+                    writeline(output, l);
                 end if;
             end if;
         end if;
