@@ -102,23 +102,23 @@ architecture rtl of TG68K_PMMU_030 is
   -- Walker descriptor address register (must persist across clock cycles for W_*_LOW states)
   signal desc_addr_reg : std_logic_vector(31 downto 0) := (others => '0');
 
-  -- MC68030 register write masks (DISABLED for now - allowing raw writes)
+  -- MC68030 register write masks (ENABLED for spec compliance)
   -- TC register mask: preserve E(31), SRE(25), FCL(24), and all field bits (23-0), clear reserved bits 30-26
   -- Note: Bit 23 (PS MSB) is forced to 1 in write logic since all valid PS values (8-15) have MSB=1
-  -- constant TC_WRITE_MASK : std_logic_vector(31 downto 0) := "10000011111111111111111111111111";
+  constant TC_WRITE_MASK : std_logic_vector(31 downto 0) := "10000011111111111111111111111111";
 
   -- TTR register mask (MC68030 User's Manual section 9.2.6):
   -- Preserve: Address(31:16), E(15), CI(10), RW(9), RWM(8), FC_Base(6:4), FC_Mask(2:0)
   -- Clear reserved: bits 14-11, 7, 3
-  -- constant TTR_WRITE_MASK : std_logic_vector(31 downto 0) := "11111111111111111000011101110111"; -- 0xFFFF8777
+  constant TTR_WRITE_MASK : std_logic_vector(31 downto 0) := "11111111111111111000011101110111"; -- 0xFFFF8777
 
   -- CRP/SRP HIGH mask: preserve L/U (31), Limit (30-16), DT (1:0); clear reserved (15-2)
   -- HIGH word format: L/U[63] + Limit[62:48] + Reserved[47:34] + DT[33:32]
-  -- constant CRP_HIGH_MASK : std_logic_vector(31 downto 0) := "11111111111111110000000000000011"; -- 0xFFFF0003
+  constant CRP_HIGH_MASK : std_logic_vector(31 downto 0) := "11111111111111110000000000000011"; -- 0xFFFF0003
 
   -- CRP/SRP LOW mask: preserve table address (31-4), clear reserved bits (3-0)
   -- LOW word format: Table Address[31:4] + Reserved[3:0]
-  -- constant CRP_LOW_MASK : std_logic_vector(31 downto 0) := "11111111111111111111111111110000"; -- 0xFFFFFFF0
+  constant CRP_LOW_MASK : std_logic_vector(31 downto 0) := "11111111111111111111111111110000"; -- 0xFFFFFFF0
   
   -- Combinational TTR match signals for zero-latency bypass
   -- BUG #371 FIX: When MMU is first enabled, addr_phys_reg is stale (registered).
@@ -247,6 +247,10 @@ architecture rtl of TG68K_PMMU_030 is
   signal walk_desc_high : std_logic_vector(31 downto 0) := (others => '0'); -- HIGH word (all formats)
   signal walk_desc_low  : std_logic_vector(31 downto 0) := (others => '0'); -- LOW word (long format only)
   signal walk_desc_is_long : std_logic := '0'; -- 1=long format (DT=11), 0=short format (DT=10/01)
+
+  -- BUG #387 FIX: Walker timeout counter to detect stuck memory requests
+  signal walker_timeout_counter : integer range 0 to 1023 := 0;
+  constant WALKER_TIMEOUT_CYCLES : integer := 500; -- Timeout after 500 cycles without mem_ack
   signal walk_addr      : std_logic_vector(31 downto 0) := (others => '0'); -- Current table address
   signal walk_vpn       : std_logic_vector(31 downto 0) := (others => '0'); -- Virtual page being walked
   signal walk_fault     : std_logic := '0'; -- Page fault flag
@@ -1041,7 +1045,7 @@ begin
             -- 31-24: Logical Address Base, 23-16: Logical Address Mask
             -- 15: E (Enable), 14-11: Reserved, 10: CI (Cache Inhibit), 9: RW, 8: RWM
             -- 7: Reserved, 6-4: FC Base, 3: Reserved, 2-0: FC Mask
-            TT0 <= reg_wdat;  -- Mask disabled for now
+            TT0 <= reg_wdat and TTR_WRITE_MASK;  -- Clear reserved bits 14-11,7,3
             -- TT0 changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
               atc_flush_req <= '1';
@@ -1054,7 +1058,7 @@ begin
             -- 31-24: Logical Address Base, 23-16: Logical Address Mask
             -- 15: E (Enable), 14-11: Reserved, 10: CI (Cache Inhibit), 9: RW, 8: RWM
             -- 7: Reserved, 6-4: FC Base, 3: Reserved, 2-0: FC Mask
-            TT1 <= reg_wdat;  -- Mask disabled for now
+            TT1 <= reg_wdat and TTR_WRITE_MASK;  -- Clear reserved bits 14-11,7,3
             -- TT1 changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
               atc_flush_req <= '1';
@@ -1069,7 +1073,7 @@ begin
             -- BUG #48 FIX: Validate configuration BEFORE writing TC to prevent lockup
             -- If configuration is invalid and E=1, clear E bit to prevent MMU activation
             -- This prevents system lockup from invalid MMU config while still taking exception
-            tc_write_val := reg_wdat;  -- Mask disabled for now
+            tc_write_val := reg_wdat and TC_WRITE_MASK;  -- Clear reserved bits 30-26
             tc_e := reg_wdat(31);
 
             if tc_e = '1' then
@@ -1121,7 +1125,7 @@ begin
               -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
               report "PMMU_REG_WRITE: SRP_H reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              SRP_H <= reg_wdat;  -- Mask disabled for now
+              SRP_H <= reg_wdat and CRP_HIGH_MASK;  -- Clear reserved bits 47-33 (bits 15-2 in high word)
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
               -- Per spec: Register is loaded BEFORE exception is taken
@@ -1137,7 +1141,7 @@ begin
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
               report "PMMU_REG_WRITE: SRP_L reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              SRP_L <= reg_wdat;  -- Mask disabled for now
+              SRP_L <= reg_wdat and CRP_LOW_MASK;  -- Clear reserved bits 3-0
               -- BUG #148 FIX: Do NOT clear mmu_config_error on low word write
               -- If high word had DT=00, error must remain latched until explicitly acknowledged
               -- (via valid high word write or TC write with E=0)
@@ -1152,7 +1156,7 @@ begin
               -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
               report "PMMU_REG_WRITE: CRP_H reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              CRP_H <= reg_wdat;  -- Mask disabled for now
+              CRP_H <= reg_wdat and CRP_HIGH_MASK;  -- Clear reserved bits 47-33 (bits 15-2 in high word)
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
               -- Per spec: Register is loaded BEFORE exception is taken
@@ -1168,7 +1172,7 @@ begin
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
               report "PMMU_REG_WRITE: CRP_L reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              CRP_L <= reg_wdat;  -- Mask disabled for now
+              CRP_L <= reg_wdat and CRP_LOW_MASK;  -- Clear reserved bits 3-0
               -- BUG #148 FIX: Do NOT clear mmu_config_error on low word write
               -- If high word had DT=00, error must remain latched until explicitly acknowledged
               -- (via valid high word write or TC write with E=0)
@@ -1977,10 +1981,43 @@ begin
       walk_limit_valid <= '0';  -- BUG #155: Reset limit tracking
       walk_limit_lu    <= '0';
       walk_limit_value <= (others => '0');
+      walker_timeout_counter <= 0;  -- BUG #387: Reset timeout counter
     elsif rising_edge(clk) then
-      -- Deadlock-proof state machine - no timeouts needed
-      
-      case wstate is
+      -- BUG #387 FIX: Timeout mechanism to prevent walker deadlocks
+      -- Monitor mem_req without mem_ack and force fault after timeout
+      if wstate = W_IDLE then
+        walker_timeout_counter <= 0;  -- Reset counter when idle
+      elsif mem_req = '1' and mem_ack = '0' and mem_berr = '0' then
+        -- Waiting for memory response - increment timeout counter
+        if walker_timeout_counter < 1023 then
+          walker_timeout_counter <= walker_timeout_counter + 1;
+        end if;
+      elsif mem_ack = '1' or mem_berr = '1' then
+        -- Got response - reset timeout counter
+        walker_timeout_counter <= 0;
+      end if;
+
+      -- Check for timeout condition BEFORE case statement to prevent override
+      if walker_timeout_counter >= WALKER_TIMEOUT_CYCLES and mem_req = '1' then
+        -- Timeout exceeded - force bus error fault and transition to W_FAULT
+        walk_fault <= '1';
+        walker_fault <= '1';
+        walker_fault_status <= encode_mmusr_fault(
+          bus_error => '1',                -- B bit: timeout is a bus error
+          limit_violation => '0',
+          supervisor_violation => '0',
+          write_protect => '0',
+          invalid => '0',
+          modified => '0',
+          transparent => '0',
+          level => std_logic_vector(to_unsigned(walk_level, 3))
+        );
+        mem_req <= '0';  -- Stop requesting memory
+        walker_timeout_counter <= 0;  -- Reset counter
+        wstate <= W_FAULT;  -- Transition to fault state (which will set walker_completed)
+      else
+        -- Normal walker state machine (only runs if not in timeout)
+        case wstate is
         when W_IDLE =>
           -- Don't auto-clear walker_completed here - let translation handler clear it
 
@@ -3155,8 +3192,9 @@ begin
           
         when others =>
           wstate <= W_IDLE;
-      end case;
-      
+        end case;
+      end if;  -- End timeout vs normal state machine conditional
+
       -- PFLUSH instruction: Clear ATC when flag is set and walker is idle
       if atc_flush_req = '1' then
         for i in 0 to ATC_ENTRIES-1 loop

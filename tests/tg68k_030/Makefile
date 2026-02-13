@@ -51,6 +51,8 @@ help:
 	@echo "  test-diagrom     - Test DiagROM boot sequence"
 	@echo "  test-diagrom-detectcpu - Test DiagROM CPU detection (MOVEC ITT0 trap)"
 	@echo "  test-cpu-mmu-detection - Test CPU/MMU detection (TypeOfCPU + GetMMUType)"
+	@echo "  test-68030-library - Test 68030.library PMOVE initialization (An mode)"
+	@echo "  test-whichamiga  - Test WhichAmiga PMOVE TC/CRP and PTEST instructions"
 	@echo "  test-advanced    - Run advanced PMMU functionality tests"
 	@echo "  test-fault       - Run comprehensive fault handling tests"
 	@echo "  test-stress      - Run page walker stress tests"
@@ -124,13 +126,15 @@ compile: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_multiple_regs_from_a7.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_diagnostic.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_all_modes_test.vhd || true
-	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cpu_mmu_detection.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_detection_test.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_d16an_pc.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_d8anxn_pc.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_all_modes.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_validation.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_moves_all_modes.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_diagrom_detectcpu.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_68030_library_init.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_whichamiga_mmu.vhd || true
 	@echo "Basic compilation completed (errors ignored for initial testing)"
 
 # Compile enhanced test sources
@@ -269,8 +273,16 @@ test-diagrom-detectcpu: compile
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_diagrom_detectcpu
 
 test-cpu-mmu-detection: compile
-	@echo "Running CPU/MMU detection tests (TypeOfCPU + GetMMUType)..."
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_cpu_mmu_detection
+	@echo "Running CPU/MMU detection tests (DiagROM PMOVE sequence)..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_mmu_detection_test
+
+test-68030-library: compile
+	@echo "Running 68030.library PMOVE initialization test..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_68030_library_init
+
+test-whichamiga: compile
+	@echo "Running WhichAmiga MMU instruction test..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_whichamiga_mmu
 
 # Enhanced comprehensive tests
 test-advanced: compile-advanced

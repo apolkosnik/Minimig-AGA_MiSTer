@@ -219,10 +219,17 @@ begin
         nreset <= '1';
         wait for clk_period * 2;
 
-        -- Setup page table
-        page_table_mem(0) <= x"00001000";  -- CRP pointer
-        page_table_mem(4) <= x"80000001";  -- Valid descriptor
-        page_table_mem(8) <= x"00002001";  -- Page descriptor
+        -- Setup page table for TC = 0x82806666 (PS=8, TIA=6, TIB=6, TIC=6, TID=6)
+        -- Use early termination: root table entries are page descriptors (DT=01)
+        -- CRP will point to address 0, which is page_table_mem base
+        -- For any logical address, TIA index extracts bits 31-26
+        -- Addresses 0x0001xxxx have TIA=0, so will read page_table_mem(0)
+        -- Set up root table entry 0 as a valid page descriptor pointing to physical page 0
+        page_table_mem(0) <= x"00000001";  -- Page descriptor: phys addr 0, DT=01 (page descriptor, early termination)
+        page_table_mem(1) <= x"00001001";  -- Page descriptor: phys addr 0x1000
+        page_table_mem(2) <= x"00002001";  -- Page descriptor: phys addr 0x2000
+        page_table_mem(3) <= x"00003001";  -- Page descriptor: phys addr 0x3000
+        page_table_mem(4) <= x"00004001";  -- Page descriptor: phys addr 0x4000
 
         -- TEST 1: Normal walker operation with responsive memory
         write(l, string'(""));
@@ -233,8 +240,9 @@ begin
         writeline(output, l);
 
         -- Write TC (enable MMU, 8KB page size)
+        -- TC format: E=1, PS=8 (8KB pages), IS=6, TIA=6, TIB=6, TIC=6, TID=6 (total=32)
         reg_sel <= "10000";  -- TC
-        reg_wdat <= x"80800000";  -- E=1, SRE=0, FCL=0, PS=0 (8KB pages)
+        reg_wdat <= x"82806666";  -- E=1, SRE=0, FCL=0, PS=8, IS=0, TIA=6, TIB=6, TIC=6, TID=6
         reg_we <= '1';
         wait for clk_period;
         reg_we <= '0';
@@ -326,6 +334,12 @@ begin
         writeline(output, l);
         write(l, string'("This tests walker timeout recovery when memory never responds..."));
         writeline(output, l);
+
+        -- Flush ATC to force walker to do page table walk
+        pflush_req <= '1';
+        wait for clk_period;
+        pflush_req <= '0';
+        wait for clk_period;
 
         simulate_unresponsive_memory <= true;  -- Memory will NEVER respond
 
