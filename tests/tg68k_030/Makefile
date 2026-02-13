@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-mmu-translation validate setup help
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-lockup-all validate setup help
 
 # Default target
 all: test-comprehensive
@@ -66,6 +66,15 @@ help:
 	@echo "  test-moves-validation - Run MOVES validation testbench"
 	@echo "  test-rte-formats - Test all RTE stack frame formats (0,1,2,9,A,B + invalid)"
 	@echo "  test-mmu-translation - Comprehensive MMU translation pipeline test (walker + ATC + TT)"
+	@echo ""
+	@echo "Lockup/Deadlock Tests (CRITICAL ISSUES):"
+	@echo "  test-lockup-walker-timeout - Test walker timeout recovery (ISSUE #2)"
+	@echo "  test-lockup-bus-conflict   - Test graphical DMA vs walker bus conflict (ISSUE #3)"
+	@echo "  test-lockup-cache-fill     - Test cache fill starving walker (ISSUE #5)"
+	@echo "  test-lockup-atc-handshake  - Test ATC completion handshake deadlock (ISSUE #4)"
+	@echo "  test-lockup-mem-ack-race   - Test memory request ack race conditions (ISSUE #6)"
+	@echo "  test-lockup-all            - Run ALL lockup/deadlock tests"
+	@echo ""
 	@echo "  test-all         - Run original test suite"
 	@echo "  test-comprehensive - Run ALL enhanced tests"
 	@echo "  validate         - Validate complete MC68030 compliance"
@@ -403,6 +412,72 @@ test-mmu-translation: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_translation.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 250us; quit -f" tb_mmu_translation
+
+# Lockup/Deadlock Tests - CRITICAL ISSUES
+test-lockup-walker-timeout: setup
+	@echo "=========================================================="
+	@echo "Testing Walker Timeout Recovery (CRITICAL ISSUE #2)"
+	@echo "Tests for incomplete timeout recovery causing deadlock"
+	@echo "=========================================================="
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_lockup_walker_timeout.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 100us; quit" tb_lockup_walker_timeout
+
+test-lockup-bus-conflict: setup
+	@echo "=========================================================="
+	@echo "Testing Graphical DMA vs Walker Bus Conflict (CRITICAL ISSUE #3)"
+	@echo "Tests for bus collision between DMA and page table walker"
+	@echo "=========================================================="
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_lockup_bus_conflict.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 150us; quit" tb_lockup_bus_conflict
+
+test-lockup-cache-fill: setup
+	@echo "=========================================================="
+	@echo "Testing Cache Fill Starving Walker (CRITICAL ISSUE #5)"
+	@echo "Tests for cache fills blocking page table walker indefinitely"
+	@echo "=========================================================="
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_lockup_cache_fill.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 200us; quit" tb_lockup_cache_fill
+
+test-lockup-atc-handshake: setup
+	@echo "=========================================================="
+	@echo "Testing ATC Completion Handshake (CRITICAL ISSUE #4)"
+	@echo "Tests for missed walker_completed pulses causing deadlock"
+	@echo "=========================================================="
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_lockup_atc_handshake.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 150us; quit" tb_lockup_atc_handshake
+
+test-lockup-mem-ack-race: setup
+	@echo "=========================================================="
+	@echo "Testing Memory Request Ack Race (CRITICAL ISSUE #6)"
+	@echo "Tests for mem_req/mem_ack handshaking getting out of sync"
+	@echo "=========================================================="
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_lockup_mem_ack_race.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 150us; quit" tb_lockup_mem_ack_race
+
+# Run all lockup/deadlock tests
+test-lockup-all: test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race
+	@echo ""
+	@echo "=========================================================="
+	@echo "ALL LOCKUP/DEADLOCK TESTS COMPLETED"
+	@echo "=========================================================="
+	@echo ""
+	@echo "Review results above for:"
+	@echo "  - Walker timeout recovery (ISSUE #2)"
+	@echo "  - Bus conflict deadlocks (ISSUE #3)"
+	@echo "  - Cache fill starvation (ISSUE #5)"
+	@echo "  - ATC handshake races (ISSUE #4)"
+	@echo "  - Memory ack races (ISSUE #6)"
+	@echo ""
 
 # Complete MMU Instruction Test Suite
 test-mmu-instruction-suite: setup
