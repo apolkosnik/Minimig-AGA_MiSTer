@@ -118,21 +118,22 @@ architecture behavior of tb_whichamiga_mmu is
     signal tc_written : boolean := false;
     signal crp_written : boolean := false;
     signal tc_enabled : boolean := false;
+    signal tc_value_correct : boolean := false;
     signal ptest_executed : boolean := false;
     signal tc_write_count : integer := 0;
 
-    -- WhichAmiga TC test value: $00004780 (E=0 for testbench simplicity)
-    -- Bit 31 (E): Enable = 0 (disabled to avoid complex MMU translation in testbench)
+    -- WhichAmiga TC test value: $80D04780 (E=1 - MMU ENABLED - LOCKUP TEST!)
+    -- Bit 31 (E): Enable = 1 (ENABLED - this is where the lockup happens!)
     -- Bits 30-26: Reserved = 00000
     -- Bit 25 (SRE): Supervisor Root Enable = 0
     -- Bit 24 (FCL): Function Code Lookup = 0
-    -- Bits 23-20 (PS): Page Size = 0000
+    -- Bits 23-20 (PS): Page Size = 1101 (8K pages)
     -- Bits 19-16 (IS): Initial Shift = 0000
     -- Bits 15-12 (TIA): Table Index A = 0100
     -- Bits 11-8 (TIB): Table Index B = 0111
     -- Bits 7-4 (TIC): Table Index C = 1000
     -- Bits 3-0 (TID): Table Index D = 0000
-    constant TC_TEST_VALUE : std_logic_vector(31 downto 0) := x"00004780";
+    constant TC_TEST_VALUE : std_logic_vector(31 downto 0) := x"80D04780";
 
     -- CRP format: $80000002 + table_address
     -- Upper 32 bits: L/U=1, Limit=0, DT=10 (valid 4-byte descriptor)
@@ -181,9 +182,9 @@ architecture behavior of tb_whichamiga_mmu is
         16#28C# => x"F017",  -- PMOVE opcode
         16#28D# => x"4C00",  -- CRP, direction=0 (mem->MMU), quad
 
-        -- $51C: MOVE.L #$00004780,(SP) - Set TC test value (E=0, MMU disabled)
+        -- $51C: MOVE.L #$80D04780,(SP) - Set TC test value (E=1, MMU ENABLED!)
         16#28E# => x"2EBC",
-        16#28F# => x"0000",
+        16#28F# => x"80D0",
         16#290# => x"4780",
 
         -- $522: PMOVE.L (SP),TC - Write TC (but keep MMU disabled for testbench simplicity)
@@ -361,6 +362,18 @@ begin
     -- Memory read
     data_in <= mem(to_integer(unsigned(addr_out(16 downto 1))));
 
+    -- BUG #395 DEBUG: Monitor stack reads for PMOVE TC
+    stack_read_monitor: process(clk)
+    begin
+        if rising_edge(clk) then
+            -- Monitor reads from stack area during PMOVE execution
+            if addr_out(31 downto 4) = x"0000" & x"1FF" and busstate = "10" then  -- State 10 = memory read
+                report "STACK_READ: addr=$" & slv_to_hex(addr_out) &
+                       " data=$" & slv_to_hex(mem(to_integer(unsigned(addr_out(16 downto 1))))) severity note;
+            end if;
+        end if;
+    end process;
+
     -- Memory write
     mem_write: process(clk)
     begin
@@ -373,6 +386,23 @@ begin
                 if nLDS = '0' then
                     mem(to_integer(unsigned(addr_out(16 downto 1))))(7 downto 0) <= data_write(7 downto 0);
                 end if;
+                -- BUG #395 DEBUG: Monitor stack writes
+                if addr_out(16 downto 2) = "111111111111100" then  -- Stack area $7FF8-$7FFF
+                    report "STACK_WRITE: addr=$" & slv_to_hex(addr_out) &
+                           " data=$" & slv_to_hex(data_write) &
+                           " UDS=" & std_logic'image(nUDS) & " LDS=" & std_logic'image(nLDS) severity note;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -- BUG #395 DEBUG: Monitor micro_state transitions
+    micro_state_monitor: process(clk)
+    begin
+        if rising_edge(clk) then
+            if addr_out(15 downto 0) = x"0522" or addr_out(15 downto 0) = x"0524" then
+                report "MICRO_STATE at PC=$" & slv_to_hex(addr_out) &
+                       ": micro_state=" & integer'image(to_integer(unsigned(pmmu_reg_sel))) severity note;
             end if;
         end if;
     end process;
@@ -391,7 +421,15 @@ begin
                         -- Second write is the test value (first is clear at $50A, second is test at $522)
                         if tc_write_count = 1 and pmmu_reg_wdat /= x"00000000" then
                             tc_enabled <= true;
-                            report "  TC test value written (2nd write)" severity note;
+                            -- BUG #395 VERIFICATION: Check if TC value is correct
+                            if pmmu_reg_wdat = TC_TEST_VALUE then
+                                tc_value_correct <= true;
+                                report "  TC test value CORRECT: $" & slv_to_hex(pmmu_reg_wdat) severity note;
+                            else
+                                tc_value_correct <= false;
+                                report "  TC test value CORRUPTED! Expected $" & slv_to_hex(TC_TEST_VALUE) &
+                                       ", got $" & slv_to_hex(pmmu_reg_wdat) severity error;
+                            end if;
                         elsif pmmu_reg_wdat = x"00000000" then
                             report "  TC cleared" severity note;
                         end if;
@@ -508,9 +546,9 @@ begin
     test_monitor: process
     begin
         report "=====================================================" severity note;
-        report "WhichAmiga MMU Instruction Test" severity note;
+        report "WhichAmiga MMU Lockup Investigation" severity note;
         report "Tests PMOVE TC/CRP and PTEST instruction execution" severity note;
-        report "Note: TC.E=0 to simplify testbench (no full MMU translation)" severity note;
+        report "CRITICAL: TC.E=1 - MMU ENABLED - TESTING FOR HARDWARE LOCKUP!" severity note;
         report "=====================================================" severity note;
 
         -- Reset
@@ -552,6 +590,12 @@ begin
             report "  TC written with test value - PASS" severity note;
         else
             report "  TC written with test value - FAIL" severity error;
+        end if;
+
+        if tc_value_correct then
+            report "  TC value correct ($80D04780) - PASS" severity note;
+        else
+            report "  TC value correct ($80D04780) - FAIL (BUG #395!)" severity error;
         end if;
 
         if ptest_executed then

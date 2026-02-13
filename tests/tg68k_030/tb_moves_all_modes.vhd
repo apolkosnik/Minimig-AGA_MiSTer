@@ -466,15 +466,76 @@ architecture behavioral of tb_moves_all_modes is
     413 => x"23C1", 414 => x"0000", 415 => x"1EB0",  -- MOVE.L D1,($1EB0).L
 
     -- ============================================
+    -- A7/SP TESTS - WhichAmiga compatibility validation
+    -- ============================================
+
+    -- ============================================
+    -- TEST 44: MOVES.L D2,(A7) - CPU to memory using stack pointer
+    -- Pre-load A7=$2100 (stack area), D2=$12345678
+    -- Expected: longword at $2100 = $12345678, A7 unchanged
+    -- Opcode: $0E97 (size=10/long, EA mode=010/(An), reg=111/A7)
+    -- ============================================
+    416 => x"2E7C", 417 => x"0000", 418 => x"2100",  -- MOVEA.L #$2100,A7
+    419 => x"0E97", 420 => x"2800",                    -- MOVES.L D2,(A7)
+    421 => x"2A0F",                                     -- MOVE.L A7,D5  (save A7 to D5)
+    422 => x"23C5", 423 => x"0000", 424 => x"1EB8",  -- MOVE.L D5,($1EB8).L
+
+    -- ============================================
+    -- TEST 45: MOVES.L (A7),D5 - Memory to CPU using stack pointer
+    -- A7=$2100, memory at $2100 has $12345678 from test 44
+    -- Expected: D5=$12345678
+    -- Opcode: $0E97 (size=10/long, EA mode=010/(An), reg=111/A7)
+    -- Extension: $5000 (D5, direction=1 mem->CPU)
+    -- ============================================
+    425 => x"2E7C", 426 => x"0000", 427 => x"2100",  -- MOVEA.L #$2100,A7
+    428 => x"0E97", 429 => x"5000",                    -- MOVES.L (A7),D5
+    430 => x"23C5", 431 => x"0000", 432 => x"1EC0",  -- MOVE.L D5,($1EC0).L
+
+    -- ============================================
+    -- TEST 46: MOVES.W D2,(A7)+ - Postincrement on A7
+    -- Pre-load A7=$2200, D2=$12345678 (writes $5678)
+    -- Expected: word at $2200 = $5678, A7=$2202
+    -- Opcode: $0E5F (size=01/word, EA mode=011/(An)+, reg=111/A7)
+    -- Extension: $2800 (D2, direction=0 CPU->mem)
+    -- ============================================
+    433 => x"2E7C", 434 => x"0000", 435 => x"2200",  -- MOVEA.L #$2200,A7
+    436 => x"0E5F", 437 => x"2800",                    -- MOVES.W D2,(A7)+
+    438 => x"2A0F",                                     -- MOVE.L A7,D5
+    439 => x"23C5", 440 => x"0000", 441 => x"1EC8",  -- MOVE.L D5,($1EC8).L
+
+    -- ============================================
+    -- TEST 47: MOVES.W -(A7),D6 - Predecrement on A7
+    -- Pre-load A7=$2204, memory at $2202 has $5678 from test 46
+    -- Expected: D6=sign-extended $00005678, A7=$2202
+    -- Opcode: $0E67 (size=01/word, EA mode=100/-(An), reg=111/A7)
+    -- Extension: $6000 (D6, direction=1 mem->CPU)
+    -- ============================================
+    442 => x"2E7C", 443 => x"0000", 444 => x"2204",  -- MOVEA.L #$2204,A7
+    445 => x"0E67", 446 => x"6000",                    -- MOVES.W -(A7),D6
+    447 => x"23C6", 448 => x"0000", 449 => x"1ED0",  -- MOVE.L D6,($1ED0).L
+    450 => x"2A0F",                                     -- MOVE.L A7,D5
+    451 => x"23C5", 452 => x"0000", 453 => x"1ED8",  -- MOVE.L D5,($1ED8).L
+
+    -- ============================================
+    -- TEST 48: MOVES.L D2,(d16,A7) - Displacement with A7
+    -- A7=$2300, displacement=$0010, EA=$2310
+    -- Expected: longword at $2310 = $12345678, A7=$2300 unchanged
+    -- ============================================
+    454 => x"2E7C", 455 => x"0000", 456 => x"2300",  -- MOVEA.L #$2300,A7
+    457 => x"0EAF", 458 => x"2800", 459 => x"0010",  -- MOVES.L D2,($10,A7)
+    460 => x"2A0F",                                     -- MOVE.L A7,D5
+    461 => x"23C5", 462 => x"0000", 463 => x"1EE0",  -- MOVE.L D5,($1EE0).L
+
+    -- ============================================
     -- TEST 28: Verify SR unchanged after all MOVES tests
     -- ============================================
-    416 => x"40C0",                                     -- MOVE SR,D0
-    417 => x"23C0", 418 => x"0000", 419 => x"1E58",  -- MOVE.L D0,($1E58).L
+    464 => x"40C0",                                     -- MOVE SR,D0
+    465 => x"23C0", 466 => x"0000", 467 => x"1E58",  -- MOVE.L D0,($1E58).L
 
     -- ============================================
     -- End of tests - STOP
     -- ============================================
-    420 => x"4E72", 421 => x"2700",  -- STOP #$2700
+    468 => x"4E72", 469 => x"2700",  -- STOP #$2700
 
     others => x"4E71"  -- NOP fill
   );
@@ -498,9 +559,9 @@ architecture behavioral of tb_moves_all_modes is
   signal tests_passed : integer := 0;
   signal tests_failed : integer := 0;
   signal current_test : integer := 0;
-  signal reported : std_logic_vector(43 downto 1) := (others => '0');
+  signal reported : std_logic_vector(48 downto 1) := (others => '0');
   signal all_done : std_logic := '0';  -- Set after STOP to trigger reporting
-  signal report_idx : integer range 0 to 44 := 0;  -- One-per-cycle deferred reporting counter
+  signal report_idx : integer range 0 to 49 := 0;  -- One-per-cycle deferred reporting counter
   signal reporting_done : std_logic := '0';  -- Set when all tests have been reported
 
   -- FC tracking
@@ -1239,11 +1300,93 @@ begin
             pass := false;
             report "TEST 43: MOVES.W D2,(postindex) -> FAILED: mem=$" & slv_to_hex(ram(1922)(15 downto 0)) & " expected $7F7F (wrong address?)";
           end if;
+        when 44 =>
+          -- MOVES.L D2,(A7) with A7=$2100, D2=$12345678
+          -- Stack RAM at $2100: word index = ($2100-$1000)/2 = 2176 (hi), 2177 (lo)
+          -- A7 saved at $1EB8: word index = ($1EB8-$1000)/2 = 1884 (hi), 1885 (lo)
+          ram_value := ram(2176)(15 downto 0) & ram(2177)(15 downto 0);
+          if ram_value = x"12345678" then
+            ram_value := ram(1884)(15 downto 0) & ram(1885)(15 downto 0);
+            if ram_value = x"00002100" then
+              pass := true;
+              report "TEST 44: MOVES.L D2,(A7) -> PASSED (mem=$12345678, A7=$2100 preserved)";
+            else
+              pass := false;
+              report "TEST 44: MOVES.L D2,(A7) -> FAILED: A7=$" & slv_to_hex(ram_value) & " expected $00002100";
+            end if;
+          else
+            pass := false;
+            report "TEST 44: MOVES.L D2,(A7) -> FAILED: mem=$" & slv_to_hex(ram_value) & " expected $12345678";
+          end if;
+        when 45 =>
+          -- MOVES.L (A7),D5 with A7=$2100, memory=$12345678 (from test 44)
+          -- D5 stored at $1EC0: word index = ($1EC0-$1000)/2 = 1888 (hi), 1889 (lo)
+          ram_value := ram(1888)(15 downto 0) & ram(1889)(15 downto 0);
+          if ram_value = x"12345678" then
+            pass := true;
+            report "TEST 45: MOVES.L (A7),D5 -> PASSED (D5=$12345678)";
+          else
+            pass := false;
+            report "TEST 45: MOVES.L (A7),D5 -> FAILED: D5=$" & slv_to_hex(ram_value) & " expected $12345678";
+          end if;
+        when 46 =>
+          -- MOVES.W D2,(A7)+ with A7=$2200, D2=$12345678 (writes $5678)
+          -- Stack RAM at $2200: word index = ($2200-$1000)/2 = 2304
+          -- A7 saved at $1EC8: word index = ($1EC8-$1000)/2 = 1892 (hi), 1893 (lo)
+          if ram(2304)(15 downto 0) = x"5678" then
+            ram_value := ram(1892)(15 downto 0) & ram(1893)(15 downto 0);
+            if ram_value = x"00002202" then
+              pass := true;
+              report "TEST 46: MOVES.W D2,(A7)+ -> PASSED (mem=$5678, A7=$2202 post-incremented)";
+            else
+              pass := false;
+              report "TEST 46: MOVES.W D2,(A7)+ -> FAILED: A7=$" & slv_to_hex(ram_value) & " expected $00002202";
+            end if;
+          else
+            pass := false;
+            report "TEST 46: MOVES.W D2,(A7)+ -> FAILED: mem=$" & slv_to_hex(ram(2304)(15 downto 0)) & " expected $5678";
+          end if;
+        when 47 =>
+          -- MOVES.W -(A7),D6 with A7=$2204, -(A7)=$2202, memory=$5678
+          -- D6 stored at $1ED0: word index = ($1ED0-$1000)/2 = 1896 (hi), 1897 (lo)
+          -- A7 saved at $1ED8: word index = ($1ED8-$1000)/2 = 1900 (hi), 1901 (lo)
+          ram_value := ram(1896)(15 downto 0) & ram(1897)(15 downto 0);
+          if ram_value = x"00005678" then
+            ram_value := ram(1900)(15 downto 0) & ram(1901)(15 downto 0);
+            if ram_value = x"00002202" then
+              pass := true;
+              report "TEST 47: MOVES.W -(A7),D6 -> PASSED (D6=$00005678 sign-extended, A7=$2202 pre-decremented)";
+            else
+              pass := false;
+              report "TEST 47: MOVES.W -(A7),D6 -> FAILED: A7=$" & slv_to_hex(ram_value) & " expected $00002202";
+            end if;
+          else
+            pass := false;
+            report "TEST 47: MOVES.W -(A7),D6 -> FAILED: D6=$" & slv_to_hex(ram_value) & " expected $00005678";
+          end if;
+        when 48 =>
+          -- MOVES.L D2,(d16,A7) with A7=$2300, disp=$10, EA=$2310
+          -- Stack RAM at $2310: word index = ($2310-$1000)/2 = 2440 (hi), 2441 (lo)
+          -- A7 saved at $1EE0: word index = ($1EE0-$1000)/2 = 1904 (hi), 1905 (lo)
+          ram_value := ram(2440)(15 downto 0) & ram(2441)(15 downto 0);
+          if ram_value = x"12345678" then
+            ram_value := ram(1904)(15 downto 0) & ram(1905)(15 downto 0);
+            if ram_value = x"00002300" then
+              pass := true;
+              report "TEST 48: MOVES.L D2,($10,A7) -> PASSED (mem=$12345678, A7=$2300 preserved)";
+            else
+              pass := false;
+              report "TEST 48: MOVES.L D2,($10,A7) -> FAILED: A7=$" & slv_to_hex(ram_value) & " expected $00002300";
+            end if;
+          else
+            pass := false;
+            report "TEST 48: MOVES.L D2,($10,A7) -> FAILED: mem=$" & slv_to_hex(ram_value) & " expected $12345678";
+          end if;
         when others =>
           null;
       end case;
 
-      if test_id >= 1 and test_id <= 43 then
+      if test_id >= 1 and test_id <= 48 then
         if pass then
           tests_passed <= tests_passed + 1;
         else
@@ -1292,7 +1435,7 @@ begin
           end if;
 
           -- Timeout detection (only once per test)
-          if timeout_count > 200 and current_test >= 1 and current_test <= 43 and reported(current_test) = '0' then
+          if timeout_count > 200 and current_test >= 1 and current_test <= 48 and reported(current_test) = '0' then
             report "TEST " & integer'image(current_test) & " TIMEOUT/NO PROGRESS (possible lockup)";
             tests_failed <= tests_failed + 1;
             reported(current_test) <= '1';
@@ -1306,15 +1449,15 @@ begin
         -- report_test 15 times in one cycle would read the same old value of
         -- tests_passed/tests_failed (signals only update after process suspends).
         if all_done = '1' and reporting_done = '0' then
-          if report_idx >= 1 and report_idx <= 43 then
+          if report_idx >= 1 and report_idx <= 48 then
             if reported(report_idx) = '0' then
               report_test(report_idx);
             end if;
           end if;
-          if report_idx < 44 then
+          if report_idx < 49 then
             report_idx <= report_idx + 1;
           end if;
-          if report_idx = 43 then
+          if report_idx = 48 then
             reporting_done <= '1';
           end if;
         end if;

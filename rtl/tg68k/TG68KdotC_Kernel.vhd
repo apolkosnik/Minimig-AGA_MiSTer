@@ -5227,6 +5227,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							ELSE
 								datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
 							END IF;
+							set(longaktion) <= '1';  -- BUG #395 FIX: Required for 32-bit read!
 							next_micro_state <= pmove_mem_to_mmu_hi;
 						END IF;
 					END IF;
@@ -5234,6 +5235,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN pmmu_ld_dAn1 =>		-- PMMU (d16,An)
 					set(get_ea_now) <='1';
 					setdisp <= '1';		-- Load displacement word
+				-- BUG #395 FIX: Set use_SP for (d16,A7) mode
+				IF fline_opcode_latch(2 downto 0)="111" THEN
+					set(use_SP) <= '1';
+				END IF;
 					setnextpass <= '0';  -- Always clear for PMMU
 					-- BUG #393 FIX: Route PLOAD/PTEST/PFLUSH to walker handlers
 					IF pmmu_brief(15 downto 13) = "001" OR pmmu_brief(15 downto 13) = "100" THEN
@@ -5315,6 +5320,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							datatype <= "01";  -- Word (16-bit) for MMUSR
 						ELSE
 							datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
+							set(longaktion) <= '1';  -- BUG #395 FIX: Required for 32-bit read!
 						END IF;
 						next_micro_state <= pmove_mem_to_mmu_hi;
 					END IF;
@@ -5355,6 +5361,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									datatype <= "01";  -- Word (16-bit) for MMUSR
 								ELSE
 									datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
+								set(longaktion) <= '1';  -- BUG #395 FIX: Required for 32-bit read!
 								END IF;
 								next_micro_state <= pmove_mem_to_mmu_hi;
 							END IF;
@@ -5415,6 +5422,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							IF pmmu_brief(14 downto 10) = "11000" THEN
 								datatype <= "01";  -- Word (16-bit) for MMUSR
 							ELSE
+							set(longaktion) <= '1';  -- BUG #395 FIX: Required for 32-bit read!
 								datatype <= "10";  -- Longword (32-bit) for TC/TT0/TT1/CRP/SRP
 							END IF;
 							next_micro_state <= pmove_mem_to_mmu_hi;
@@ -6404,8 +6412,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                             IF pmmu_opcode(5 downto 3)="100" THEN
                                                 set(presub) <= '1';
                                                 IF (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") THEN set(pmmu_dbl)<='1'; END IF;
-                                                IF pmmu_opcode(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
                                             END IF;
+                                            -- BUG #395 FIX: Set use_SP for A7 in ALL modes (An), (An)+, -(An)
+                                            IF pmmu_opcode(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
                                             setstate <= "01";
                                             next_micro_state <= pmove_mmu_to_mem_hi;
                                         ELSE
@@ -6414,7 +6423,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                             IF pmmu_opcode(5 downto 3)="100" THEN
                                                 set(presub) <= '1';
                                                 IF (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") THEN set(pmmu_dbl)<='1'; END IF;
-                                                IF pmmu_opcode(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
+                                            END IF;
+                                            -- BUG #395 FIX: Set use_SP for A7 in ALL modes (An), (An)+, -(An)
+                                            IF pmmu_opcode(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
+                                            -- BUG #395 FIX: set longaktion for 32-bit registers (TC/TT0/TT1/CRP/SRP)
+                                            IF pmmu_brief(14 downto 10) /= "11000" THEN
+                                                set(longaktion) <= '1';  -- All except MMUSR (16-bit)
                                             END IF;
                                             setstate <= "10";
                                             next_micro_state <= pmove_mem_to_mmu_hi;

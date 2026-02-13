@@ -1292,6 +1292,29 @@ begin
             "010", "010", '1', "01000", x"0000", x"0000", x"0003");
 
         -- =====================================================
+        -- A7/SP MODE TESTS - WhichAmiga compatibility
+        -- =====================================================
+
+        -- Test 9: PLOADR (A7), FC=imm 5 (stack pointer)
+        emit_movea(pc, 7, PLOAD_ADDR);
+        emit_pload_verify_mmusr(
+            "PLOADR (A7), FC=imm5",
+            "010", "111", '1', "10101", x"0000", x"0000", x"0003");
+
+        -- Test 10: PLOADR (d16,A7), FC=imm 5
+        -- d16=$0010, so A7 = $1000 - $10 = $0FF0
+        emit_movea(pc, 7, std_logic_vector(unsigned(PLOAD_ADDR) - 16));
+        emit_pload_verify_mmusr(
+            "PLOADR (d16,A7), FC=imm5",
+            "101", "111", '1', "10101", x"0010", x"0000", x"0003");
+
+        -- Test 11: PLOADW (A7), FC=imm 5 (write variant with A7)
+        emit_movea(pc, 7, PLOAD_ADDR);
+        emit_pload_verify_mmusr(
+            "PLOADW (A7), FC=imm5",
+            "010", "111", '0', "10101", x"0000", x"0000", x"0003");
+
+        -- =====================================================
         -- Phase 3: Disable MMU
         -- =====================================================
         -- Use A5 (stable, never modified) pointing to zero

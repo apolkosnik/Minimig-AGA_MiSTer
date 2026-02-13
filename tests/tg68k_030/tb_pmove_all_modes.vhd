@@ -142,29 +142,35 @@ architecture behavioral of tb_pmove_all_modes is
     constant DIR_MMU_TO_MEM : std_logic := '1';
 
     -- Unique test values for Dn mode tests
-    -- TC: bit 31 (E) must be 0 to avoid enabling MMU
+    -- TC: bit 31 (E) must be 0 to avoid enabling MMU, bits 30-26 RESERVED (must be 0)
+    -- TC write mask: $83FFFFFF - bits 30-26 forced to 0 by hardware
+    -- TT0/TT1 write mask: $FFFF8777 - bits 14-11, 7, 3 reserved (forced to 0)
     -- TT0/TT1: bit 15 (E) should be 0 to avoid enabling transparent translation
-    -- CRP/SRP: bits 1:0 of HI word (DT field) must not be "00" to avoid config error
-    constant VAL_TC      : std_logic_vector(31 downto 0) := x"02345678";  -- E=0
-    constant VAL_TT0     : std_logic_vector(31 downto 0) := x"87650321";  -- E=0 (bit 15=0)
-    constant VAL_TT1     : std_logic_vector(31 downto 0) := x"A5A50A5A";  -- E=0 (bit 15=0)
-    constant VAL_CRP_HI  : std_logic_vector(31 downto 0) := x"11223345";  -- DT=01 (bits 1:0)
-    constant VAL_CRP_LO  : std_logic_vector(31 downto 0) := x"55667788";
-    constant VAL_SRP_HI  : std_logic_vector(31 downto 0) := x"99AABBCE";  -- DT=10 (bits 1:0)
-    constant VAL_SRP_LO  : std_logic_vector(31 downto 0) := x"DDEEFF00";
+    -- CRP/SRP write masks: HI word bits 15-1 forced to 0, LO word bits 3-0 forced to 0
+    -- CRP/SRP: DT field (bits 1:0 of HI word) must not be "00" to avoid config error
+    constant VAL_TC      : std_logic_vector(31 downto 0) := x"02345678";  -- E=0, bits 30-26 clear
+    constant VAL_TT0     : std_logic_vector(31 downto 0) := x"87650321";  -- E=0, bits 14-11,7,3 clear
+    constant VAL_TT1     : std_logic_vector(31 downto 0) := x"A5A50252";  -- E=0, bits 14-11,7,3 clear
+    constant VAL_CRP_HI  : std_logic_vector(31 downto 0) := x"11220001";  -- DT=01, bits 15-1 clear
+    constant VAL_CRP_LO  : std_logic_vector(31 downto 0) := x"55667780";  -- Bits 3-0 clear
+    constant VAL_SRP_HI  : std_logic_vector(31 downto 0) := x"99AA0002";  -- DT=10, bits 15-1 clear
+    constant VAL_SRP_LO  : std_logic_vector(31 downto 0) := x"DDEEFF00";  -- Bits 3-0 already clear
 
     -- DIFFERENT values for memory mode tests (must differ from Dn values above
     -- so that false positives from prior Dn writes are caught)
-    -- TC: bit 31 (E) must be 0 to avoid enabling MMU
+    -- TC: bit 31 (E) must be 0 to avoid enabling MMU, bits 30-26 RESERVED (must be 0)
+    -- TC write mask: $83FFFFFF - bits 30-26 forced to 0 by hardware
+    -- TT0/TT1 write mask: $FFFF8777 - bits 14-11, 7, 3 reserved (forced to 0)
     -- TT0/TT1: bit 15 (E) should be 0 to avoid enabling transparent translation
-    -- CRP/SRP: bits 1:0 of HI word (DT field) must not be "00" to avoid config error
-    constant VAL_TC_MEM      : std_logic_vector(31 downto 0) := x"7EDCBA98";
-    constant VAL_TT0_MEM     : std_logic_vector(31 downto 0) := x"76543210";
-    constant VAL_TT1_MEM     : std_logic_vector(31 downto 0) := x"5A5A5A5A";
-    constant VAL_CRP_HI_MEM  : std_logic_vector(31 downto 0) := x"AABBCCDD";  -- DT=01
-    constant VAL_CRP_LO_MEM  : std_logic_vector(31 downto 0) := x"EEFF1122";
-    constant VAL_SRP_HI_MEM  : std_logic_vector(31 downto 0) := x"33445566";  -- DT=10
-    constant VAL_SRP_LO_MEM  : std_logic_vector(31 downto 0) := x"778899AA";
+    -- CRP/SRP write masks: HI word bits 15-1 forced to 0, LO word bits 3-0 forced to 0
+    -- CRP/SRP: DT field (bits 1:0 of HI word) must not be "00" to avoid config error
+    constant VAL_TC_MEM      : std_logic_vector(31 downto 0) := x"01234567";  -- Bits 30-26 clear
+    constant VAL_TT0_MEM     : std_logic_vector(31 downto 0) := x"76540210";  -- Bits 14-11,7,3 clear
+    constant VAL_TT1_MEM     : std_logic_vector(31 downto 0) := x"5A5A0252";  -- Bits 14-11,7,3 clear
+    constant VAL_CRP_HI_MEM  : std_logic_vector(31 downto 0) := x"AABB0001";  -- DT=01, bits 15-1 clear
+    constant VAL_CRP_LO_MEM  : std_logic_vector(31 downto 0) := x"EEFF1120";  -- Bits 3-0 clear
+    constant VAL_SRP_HI_MEM  : std_logic_vector(31 downto 0) := x"33440002";  -- DT=10, bits 15-1 clear
+    constant VAL_SRP_LO_MEM  : std_logic_vector(31 downto 0) := x"778899A0";  -- Bits 3-0 clear
 
     -- PTEST setup values for populating MMUSR with non-zero value
     -- TT0 configured to match ALL addresses (transparent translation)
@@ -537,6 +543,10 @@ architecture behavioral of tb_pmove_all_modes is
             when 1 => opcode := x"227C";
             when 2 => opcode := x"247C";
             when 3 => opcode := x"267C";
+            when 4 => opcode := x"287C";
+            when 5 => opcode := x"2A7C";
+            when 6 => opcode := x"2C7C";
+            when 7 => opcode := x"2E7C";
             when others => opcode := x"207C";
         end case;
         emit_word(pc, opcode);
@@ -1311,32 +1321,103 @@ begin
                 end if;
             end if;
 
-            -- Load A0/A1 bases for modes that use An
+            -- Load An bases for modes that use An (including A7/SP)
+            -- BUG #395 FIX: Check if using A7 (register 7) and load A7 instead of A0/A1
             if ea_mode = "010" or ea_mode = "011" or ea_mode = "100" or ea_mode = "101" or ea_mode = "110" then
-                emit_movea(pc, 0, std_logic_vector(to_unsigned(dst_addr, 32)));
-                emit_movea(pc, 1, std_logic_vector(to_unsigned(src_addr, 32)));
+                if ea_reg_dst = "111" then
+                    emit_movea(pc, 7, std_logic_vector(to_unsigned(dst_addr, 32)));  -- Load A7 for destination
+                else
+                    emit_movea(pc, to_integer(unsigned(ea_reg_dst)), std_logic_vector(to_unsigned(dst_addr, 32)));
+                end if;
+
+                if ea_reg_src = "111" then
+                    emit_movea(pc, 7, std_logic_vector(to_unsigned(src_addr, 32)));  -- Load A7 for source
+                else
+                    emit_movea(pc, to_integer(unsigned(ea_reg_src)), std_logic_vector(to_unsigned(src_addr, 32)));
+                end if;
             end if;
 
             -- Adjust bases for -(An)
             if ea_mode = "100" then
-                emit_movea(pc, 0, std_logic_vector(to_unsigned(dst_addr + (words * 2), 32)));
-                emit_movea(pc, 1, std_logic_vector(to_unsigned(src_addr + (words * 2), 32)));
+                if ea_reg_dst = "111" then
+                    emit_movea(pc, 7, std_logic_vector(to_unsigned(dst_addr + (words * 2), 32)));
+                else
+                    emit_movea(pc, to_integer(unsigned(ea_reg_dst)), std_logic_vector(to_unsigned(dst_addr + (words * 2), 32)));
+                end if;
+
+                if ea_reg_src = "111" then
+                    emit_movea(pc, 7, std_logic_vector(to_unsigned(src_addr + (words * 2), 32)));
+                else
+                    emit_movea(pc, to_integer(unsigned(ea_reg_src)), std_logic_vector(to_unsigned(src_addr + (words * 2), 32)));
+                end if;
             end if;
 
             -- Adjust bases for (d16,An)
             if ea_mode = "101" then
-                emit_movea(pc, 0, std_logic_vector(to_unsigned(dst_addr - to_integer(unsigned(disp_dst)), 32)));
-                emit_movea(pc, 1, std_logic_vector(to_unsigned(src_addr - to_integer(unsigned(disp_src)), 32)));
+                if ea_reg_dst = "111" then
+                    emit_movea(pc, 7, std_logic_vector(to_unsigned(dst_addr - to_integer(unsigned(disp_dst)), 32)));
+                else
+                    emit_movea(pc, to_integer(unsigned(ea_reg_dst)), std_logic_vector(to_unsigned(dst_addr - to_integer(unsigned(disp_dst)), 32)));
+                end if;
+
+                if ea_reg_src = "111" then
+                    emit_movea(pc, 7, std_logic_vector(to_unsigned(src_addr - to_integer(unsigned(disp_src)), 32)));
+                else
+                    emit_movea(pc, to_integer(unsigned(ea_reg_src)), std_logic_vector(to_unsigned(src_addr - to_integer(unsigned(disp_src)), 32)));
+                end if;
             end if;
 
             -- Adjust bases for (d8,An,Xn)
             if ea_mode = "110" then
-                emit_movea(pc, 0, std_logic_vector(to_unsigned(dst_addr - 6, 32)));
-                emit_movea(pc, 1, std_logic_vector(to_unsigned(src_addr - 6, 32)));
+                if ea_reg_dst = "111" then
+                    emit_movea(pc, 7, std_logic_vector(to_unsigned(dst_addr - 6, 32)));
+                else
+                    emit_movea(pc, to_integer(unsigned(ea_reg_dst)), std_logic_vector(to_unsigned(dst_addr - 6, 32)));
+                end if;
+
+                if ea_reg_src = "111" then
+                    emit_movea(pc, 7, std_logic_vector(to_unsigned(src_addr - 6, 32)));
+                else
+                    emit_movea(pc, to_integer(unsigned(ea_reg_src)), std_logic_vector(to_unsigned(src_addr - 6, 32)));
+                end if;
             end if;
 
             -- PMOVE (mem->MMU)
             emit_pmove(pc, reg_sel, DIR_MEM_TO_MMU, ea_mode, ea_reg_src, disp_src, abs_hi_src);
+
+            -- BUG #395 FIX: If src and dst use the same address register, reload it with dst_addr
+            -- before the second PMOVE. The earlier MOVEA loaded src_addr last, so the dst write
+            -- would use the wrong address without this reload.
+            if (ea_mode = "010" or ea_mode = "011") and ea_reg_src = ea_reg_dst then
+                -- (An) and (An)+ modes: reload with base address
+                if ea_reg_dst = "111" then
+                    emit_movea(pc, 7, std_logic_vector(to_unsigned(dst_addr, 32)));
+                else
+                    emit_movea(pc, to_integer(unsigned(ea_reg_dst)), std_logic_vector(to_unsigned(dst_addr, 32)));
+                end if;
+            elsif ea_mode = "100" and ea_reg_src = ea_reg_dst then
+                -- -(An) mode: reload with dst_addr + offset (CPU will predecrement)
+                if ea_reg_dst = "111" then
+                    emit_movea(pc, 7, std_logic_vector(to_unsigned(dst_addr + (words * 2), 32)));
+                else
+                    emit_movea(pc, to_integer(unsigned(ea_reg_dst)), std_logic_vector(to_unsigned(dst_addr + (words * 2), 32)));
+                end if;
+            elsif ea_mode = "101" and ea_reg_src = ea_reg_dst then
+                -- (d16,An): reload with base address (dst_addr - displacement)
+                if ea_reg_dst = "111" then
+                    emit_movea(pc, 7, std_logic_vector(to_unsigned(dst_addr - to_integer(unsigned(disp_dst)), 32)));
+                else
+                    emit_movea(pc, to_integer(unsigned(ea_reg_dst)), std_logic_vector(to_unsigned(dst_addr - to_integer(unsigned(disp_dst)), 32)));
+                end if;
+            elsif ea_mode = "110" and ea_reg_src = ea_reg_dst then
+                -- (d8,An,Xn): reload with base address
+                if ea_reg_dst = "111" then
+                    emit_movea(pc, 7, std_logic_vector(to_unsigned(dst_addr - 6, 32)));
+                else
+                    emit_movea(pc, to_integer(unsigned(ea_reg_dst)), std_logic_vector(to_unsigned(dst_addr - 6, 32)));
+                end if;
+            end if;
+
             -- PMOVE (MMU->mem)
             emit_pmove(pc, reg_sel, DIR_MMU_TO_MEM, ea_mode, ea_reg_dst, disp_dst, abs_hi_dst);
 
@@ -1598,6 +1679,39 @@ begin
             record_test(desc_str, dst_addr, 1, exp_words);
         end procedure;
 
+        -- BUG #395 FIX VALIDATION: Test PMOVE with (A7)/SP modes
+        -- Critical test for WhichAmiga which uses PMOVE.L (SP),TC
+        procedure emit_all_a7_modes(
+            reg_sel : std_logic_vector(4 downto 0);
+            reg_name : string;
+            val_hi : std_logic_vector(31 downto 0);
+            val_lo : std_logic_vector(31 downto 0);
+            words : integer
+        ) is
+            variable src_addr : integer;
+            variable dst_addr : integer;
+        begin
+            -- (A7) src, (A7) dst - BUG #395: This is the mode WhichAmiga uses!
+            alloc_src(words, src_addr);
+            alloc_dst(words, dst_addr);
+            emit_pmove_mem_pair(reg_sel, reg_name, val_hi, val_lo, words, "(A7)/(A7)", "010", "111", "111", x"0000", x"0000", x"0000", x"0000", src_addr, dst_addr);
+
+            -- (A7)+ src, (A7)+ dst
+            alloc_src(words, src_addr);
+            alloc_dst(words, dst_addr);
+            emit_pmove_mem_pair(reg_sel, reg_name, val_hi, val_lo, words, "(A7)+/(A7)+", "011", "111", "111", x"0000", x"0000", x"0000", x"0000", src_addr, dst_addr);
+
+            -- -(A7) src, -(A7) dst - Critical for 64-bit CRP/SRP with pmmu_dbl flag
+            alloc_src(words, src_addr);
+            alloc_dst(words, dst_addr);
+            emit_pmove_mem_pair(reg_sel, reg_name, val_hi, val_lo, words, "-(A7)/-(A7)", "100", "111", "111", x"0000", x"0000", x"0000", x"0000", src_addr, dst_addr);
+
+            -- (d16,A7) src, (d16,A7) dst
+            alloc_src(words, src_addr);
+            alloc_dst(words, dst_addr);
+            emit_pmove_mem_pair(reg_sel, reg_name, val_hi, val_lo, words, "(d16,A7)/(d16,A7)", "101", "111", "111", x"0010", x"0010", x"0000", x"0000", src_addr, dst_addr);
+        end procedure;
+
     begin
         -- Initialize vectors
         memory(0) := x"0000"; memory(1) := x"2000";  -- SSP (Vec 0 @ $00)
@@ -1666,15 +1780,28 @@ begin
         -- MMUSR read-only (MMU->mem only, expect $0040 from PTEST)
         emit_mmusr_mem_modes;
 
+        -- =====================
+        -- BUG #395 FIX VALIDATION: (A7)/SP mode tests
+        -- WhichAmiga uses PMOVE.L (SP),TC which triggers the (A7) path
+        -- Test all MMU registers with (A7), (A7)+, -(A7), (d16,A7) modes
+        -- =====================
+        emit_all_a7_modes(REG_TC,   "TC",   VAL_TC,   (others => '0'), 2);
+        emit_all_a7_modes(REG_TT0,  "TT0",  VAL_TT0,  (others => '0'), 2);
+        emit_all_a7_modes(REG_TT1,  "TT1",  VAL_TT1,  (others => '0'), 2);
+        emit_all_a7_modes(REG_CRP,  "CRP",  VAL_CRP_HI, VAL_CRP_LO, 4);
+        emit_all_a7_modes(REG_SRP,  "SRP",  VAL_SRP_HI, VAL_SRP_LO, 4);
+
         -- STOP
         emit_word(pc, x"4E72");
         emit_word(pc, x"2700");
 
         write(l, string'("=============================================="));
         writeline(output, l);
-        write(l, string'("PMOVE ALL MODES TEST"));
+        write(l, string'("PMOVE ALL MODES TEST (including BUG #395 A7/SP validation)"));
         writeline(output, l);
         write(l, string'("Tests: Dn, (A1)/(A0), (A1)+/(A0)+, -(A1)/-(A0), (d16,A1/A0), (d8,A1/A0,D6), (xxx).W, (xxx).L"));
+        writeline(output, l);
+        write(l, string'("SP modes: (A7), (A7)+, -(A7), (d16,A7) - validates WhichAmiga PMOVE.L (SP),TC"));
         writeline(output, l);
         write(l, string'("Regs: TC, TT0, TT1, CRP, SRP, MMUSR ($0040 via PTEST T-bit)"));
         writeline(output, l);

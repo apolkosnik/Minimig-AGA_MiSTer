@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-lockup-all validate setup help
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-lockup-all validate setup help
 
 # Default target
 all: test-comprehensive
@@ -61,6 +61,7 @@ help:
 	@echo "  test-pflush-ptest-pload - Test PFLUSH/PTEST/PLOAD instructions"
 	@echo "  test-ptest-all-modes - Test PTEST with all EA modes and page table walks"
 	@echo "  test-pload-all-modes - Test PLOAD with all EA modes and page table walks"
+	@echo "  test-pflush-all-modes - Test PFLUSH with all EA modes and variants (PFLUSHA/PFLUSHAN)"
 	@echo "  test-indirect-descriptor - Test indirect descriptors"
 	@echo "  test-mmu-instruction-suite - Run complete MMU instruction test suite"
 	@echo "  test-amiga-sequence - Test Amiga ROM MMU initialization sequence"
@@ -330,6 +331,15 @@ test-pload-all-modes: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pload_all_modes.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 800us; quit" tb_pload_all_modes
 
+test-pflush-all-modes: setup
+	@echo "Running PFLUSH all addressing modes tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pflush_all_modes.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_pflush_all_modes
+
 test-indirect-descriptor: setup
 	@echo "Running indirect descriptor tests..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
@@ -399,7 +409,7 @@ test-moves-all-modes: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_moves_all_modes.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 100us; quit" tb_moves_all_modes
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 150us; quit" tb_moves_all_modes
 #2>&1 | grep -E "(Note:.*TEST|Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*RAM)"
 
 test-pmove:

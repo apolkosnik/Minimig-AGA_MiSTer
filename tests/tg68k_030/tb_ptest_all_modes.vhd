@@ -1134,6 +1134,33 @@ begin
         record_test(desc_str_tmp, dst_addr_tmp, 1, exp_words_tmp);
 
         -- =====================================================
+        -- A7/SP MODE TESTS - WhichAmiga compatibility
+        -- =====================================================
+
+        -- Test 12: PTESTR (A7), level=7, imm FC=5
+        -- Load A7 with PTEST_ADDR ($1000)
+        emit_movea(pc, 7, PTEST_ADDR);
+        emit_ptest_verify_mmusr(
+            "PTESTR (A7), level=7, FC=5",
+            "010", "111", "111", '1', '0', "000", "10101", x"0000", x"0000",
+            VAL_MMUSR_EXPECTED);
+
+        -- Test 13: PTESTR (d16,A7), level=7, imm FC=5
+        -- d16=$0010, so A7 = $1000 - $10 = $0FF0
+        emit_movea(pc, 7, std_logic_vector(unsigned(PTEST_ADDR) - 16));
+        emit_ptest_verify_mmusr(
+            "PTESTR (d16,A7), level=7, FC=5",
+            "101", "111", "111", '1', '0', "000", "10101", x"0010", x"0000",
+            VAL_MMUSR_EXPECTED);
+
+        -- Test 14: PTESTW (A7), level=7, imm FC=5 (write test with A7)
+        emit_movea(pc, 7, PTEST_ADDR);
+        emit_ptest_verify_mmusr(
+            "PTESTW (A7), level=7, FC=5",
+            "010", "111", "111", '0', '0', "000", "10101", x"0000", x"0000",
+            VAL_MMUSR_EXPECTED);
+
+        -- =====================================================
         -- Phase 3: Disable MMU
         -- =====================================================
         -- Use A5 (stable, never modified by PTEST EA modes) pointing to zero
