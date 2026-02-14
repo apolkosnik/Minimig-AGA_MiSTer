@@ -23,9 +23,12 @@ architecture behavioral of tb_mmu_translation is
         constant hex_chars : string := "0123456789ABCDEF";
         variable result : string(1 to value'length/4);
         variable nibble : std_logic_vector(3 downto 0);
+        -- Normalize to 0-based index so slices like (31 downto 16) work
+        variable v : std_logic_vector(value'length - 1 downto 0);
     begin
-        for i in 0 to (value'length/4 - 1) loop
-            nibble := value(value'length - 1 - i*4 downto value'length - 4 - i*4);
+        v := value;
+        for i in 0 to (v'length/4 - 1) loop
+            nibble := v(v'length - 1 - i*4 downto v'length - 4 - i*4);
             result(i+1) := hex_chars(to_integer(unsigned(nibble)) + 1);
         end loop;
         return result;
@@ -67,6 +70,35 @@ architecture behavioral of tb_mmu_translation is
     signal debug_state      : std_logic_vector(1 downto 0);
     signal debug_regfile_d0 : std_logic_vector(31 downto 0);
     signal debug_regfile_a0 : std_logic_vector(31 downto 0);
+    signal debug_micro_state : integer range 0 to 255;
+    signal debug_last_opc_read : std_logic_vector(15 downto 0);
+    signal debug_regfile_a1 : std_logic_vector(31 downto 0);
+    signal debug_setopcode  : std_logic;
+    signal debug_clkena_lw  : std_logic;
+    signal debug_trap_berr  : std_logic;
+    signal debug_make_berr  : std_logic;
+    signal debug_pmmu_fault : std_logic;
+    signal pmmu_addr_log    : std_logic_vector(31 downto 0);
+    signal debug_data_read  : std_logic_vector(31 downto 0);
+    signal debug_memmask    : std_logic_vector(5 downto 0);
+    signal debug_setnextpass : std_logic;
+    signal debug_decodeOPC  : std_logic;
+    signal debug_last_data_read : std_logic_vector(31 downto 0);
+    signal debug_regfile_we    : std_logic;
+    signal debug_regfile_waddr : std_logic_vector(3 downto 0);
+    signal debug_regfile_wdata : std_logic_vector(31 downto 0);
+    signal debug_regfile_a7    : std_logic_vector(31 downto 0);
+    signal debug_trap_mmu_berr : std_logic;
+    signal debug_trap_vector   : std_logic_vector(31 downto 0);
+
+    -- PMMU busy (for stalling CPU during ATC miss -> walker startup gap)
+    signal pmmu_busy : std_logic;
+
+    -- Memory wait state: simulates minimum 1-cycle memory latency from real hardware.
+    -- In cpu_wrapper.v: clkena_in = (~cpu_req | ready) & (~walker | ...)
+    -- cpu_req = (busstate != 1), and ready takes at least 1 cycle.
+    -- Without this, CPU advances with stale addr_phys during ATC miss detection.
+    signal mem_wait : std_logic := '0';
 
     -- Walker stall control
     signal stall_cooldown : integer range 0 to 3 := 0;
@@ -359,7 +391,7 @@ begin
             pmmu_reg_sel     => open,
             pmmu_reg_wdat    => open,
             pmmu_reg_part    => open,
-            pmmu_addr_log    => open,
+            pmmu_addr_log    => pmmu_addr_log,
             pmmu_addr_phys   => pmmu_addr_phys,
             pmmu_cache_inhibit => pmmu_cache_inhibit,
             pmmu_walker_req  => pmmu_walker_req,
@@ -373,24 +405,24 @@ begin
             debug_preSVmode  => open,
             debug_FlagsSR_S  => open,
             debug_changeMode => open,
-            debug_setopcode  => open,
+            debug_setopcode  => debug_setopcode,
             debug_exec_directSR => open,
             debug_exec_to_SR => open,
             debug_state      => debug_state,
             debug_setstate   => open,
-            debug_last_opc_read => open,
-            debug_data_read  => open,
+            debug_last_opc_read => debug_last_opc_read,
+            debug_data_read  => debug_data_read,
             debug_direct_data => open,
-            debug_setnextpass => open,
+            debug_setnextpass => debug_setnextpass,
             debug_TG68_PC    => debug_TG68_PC,
             debug_memaddr_reg => open,
             debug_memaddr_delta => open,
             debug_oddout     => open,
-            debug_decodeOPC  => open,
+            debug_decodeOPC  => debug_decodeOPC,
             debug_brief      => open,
             debug_moves_bus_pending => open,
             debug_moves_writeback_pending => open,
-            debug_clkena_lw  => open,
+            debug_clkena_lw  => debug_clkena_lw,
             debug_regfile_d0 => debug_regfile_d0,
             debug_regfile_a0 => debug_regfile_a0,
             debug_opcode     => debug_opcode,
@@ -403,7 +435,66 @@ begin
             debug_use_base   => open,
             debug_rf_source_addr => open,
             debug_pmove_ea_latched => open,
-            debug_reg_QA     => open
+            debug_reg_QA     => open,
+            debug_last_data_read => debug_last_data_read,
+            debug_last_opc_pc => open,
+            debug_getbrief => open,
+            debug_get_2ndopc => open,
+            debug_fline_brief_pending => open,
+            debug_fline_opcode_pc => open,
+            debug_exe_PC => open,
+            debug_memaddr_delta_rega => open,
+            debug_memaddr_delta_regb => open,
+            debug_addsub_q => open,
+            debug_memmaskmux => open,
+            debug_fline_opcode_latch => open,
+            debug_pmmu_ea_mode_latched => open,
+            debug_exec_direct_delta => open,
+            debug_exec_directPC => open,
+            debug_exec_mem_addsub => open,
+            debug_set_addrlong => open,
+            debug_mdelta_src => open,
+            debug_pc_brw => open,
+            debug_pc_word => open,
+            debug_regfile_d1 => open,
+            debug_regfile_d2 => open,
+            debug_regfile_d3 => open,
+            debug_regfile_d4 => open,
+            debug_regfile_d5 => open,
+            debug_regfile_d6 => open,
+            debug_regfile_d7 => open,
+            debug_regfile_a1 => debug_regfile_a1,
+            debug_regfile_a2 => open,
+            debug_regfile_a3 => open,
+            debug_regfile_a4 => open,
+            debug_regfile_a5 => open,
+            debug_regfile_a6 => open,
+            debug_regfile_a7 => debug_regfile_a7,
+            debug_regfile_we => debug_regfile_we,
+            debug_regfile_waddr => debug_regfile_waddr,
+            debug_regfile_wdata => debug_regfile_wdata,
+            debug_trap_illegal => open,
+            debug_trap_priv => open,
+            debug_trap_addr_error => open,
+            debug_trap_berr => debug_trap_berr,
+            debug_trap_mmu_berr => debug_trap_mmu_berr,
+            debug_trap_vector => debug_trap_vector,
+            debug_pc_add => open,
+            debug_pc_dataa => open,
+            debug_pc_datab => open,
+            debug_pmmu_busy  => pmmu_busy,
+            debug_micro_state => debug_micro_state,
+            debug_next_micro_state => open,
+            debug_memmask => debug_memmask,
+            debug_sndOPC => open,
+            debug_pmmu_reg_we => open,
+            debug_pmmu_reg_re => open,
+            debug_pmmu_reg_sel => open,
+            debug_pmmu_reg_wdat => open,
+            debug_pmmu_reg_part => open,
+            debug_pmmu_reg_rdat => open,
+            debug_make_berr => debug_make_berr,
+            debug_pmmu_fault => debug_pmmu_fault
         );
 
     ---------------------------------------------------------------
@@ -432,8 +523,10 @@ begin
         variable walker_word : integer;
     begin
         if rising_edge(clk) then
-            -- CPU writes (busstate "11" = data write, nWr = '0')
-            if busstate = "11" and nWr = '0' then
+            -- CPU writes: only execute when clkena_in='1' (PMMU translation stable).
+            -- In real hardware, memory controller waits for ready before writing.
+            -- Without this gate, writes fire during stalls with stale pmmu_addr_phys.
+            if busstate = "11" and nWr = '0' and clkena_in = '1' then
                 if not is_x(pmmu_addr_phys) and
                    unsigned(pmmu_addr_phys) < x"00008000" then
                     phys_word := to_integer(unsigned(pmmu_addr_phys(14 downto 1)));
@@ -441,8 +534,8 @@ begin
                 end if;
             end if;
 
-            -- Walker response: service page table walker requests
-            if pmmu_walker_req = '1' and pmmu_walker_ack = '0' then
+            -- Walker response: hold ack high while req is high (matches cpu_wrapper protocol)
+            if pmmu_walker_req = '1' then
                 if not is_x(pmmu_walker_addr) and
                    unsigned(pmmu_walker_addr) < x"00008000" then
                     walker_word := to_integer(unsigned(pmmu_walker_addr(14 downto 1)));
@@ -466,6 +559,28 @@ begin
     end process;
 
     ---------------------------------------------------------------
+    -- MEMORY WAIT STATE: Simulate minimum 1-cycle memory latency
+    -- In real hardware (cpu_wrapper.v line 390):
+    --   clkena_in = (~cpu_req | chipready|ramready|...) & (~walker|...)
+    -- cpu_req = (busstate != 1), ready signals take >= 1 cycle.
+    -- After each CPU-active cycle, insert 1 wait cycle. This gives
+    -- the PMMU time to detect ATC misses and assert busy before the
+    -- CPU can advance with a stale addr_phys_reg.
+    ---------------------------------------------------------------
+    mem_wait_gen: process(clk)
+    begin
+        if rising_edge(clk) then
+            if nReset = '0' then
+                mem_wait <= '0';
+            elsif clkena_in = '1' then
+                mem_wait <= '1';   -- 1 wait cycle after each CPU advance
+            else
+                mem_wait <= '0';
+            end if;
+        end if;
+    end process;
+
+    ---------------------------------------------------------------
     -- CPU STALL CONTROL: Stall CPU during walker activity
     -- Replicates cpu_wrapper.v behavior: clkena_in gated when
     -- walker is active or during 2-cycle cooldown after walker done
@@ -483,7 +598,15 @@ begin
         end if;
     end process;
 
-    clkena_in <= '0' when (pmmu_walker_req = '1' or stall_cooldown > 0) else '1';
+    -- CPU stall: walker active, walker cooldown, memory wait state, or PMMU busy
+    -- mem_wait provides 1-cycle latency; pmmu_busy holds during ATC miss->walk gap
+    -- BUG #399 FIX: Release clkena_in when PMMU has a pending fault (debug_pmmu_fault='1').
+    -- The real cpu_wrapper.v only gates on pmmu_walker_req_p, not pmmu_busy.
+    -- Without this, fault_reg='1' keeps pmmu_busy='1', keeping clkena_in='0' forever,
+    -- preventing the kernel from ever seeing the fault and triggering make_berr.
+    clkena_in <= '0' when (pmmu_walker_req = '1'
+                           or (pmmu_busy = '1' and debug_pmmu_fault = '0')
+                           or stall_cooldown > 0 or mem_wait = '1') else '1';
 
     ---------------------------------------------------------------
     -- CACHE INHIBIT OBSERVATION
@@ -501,9 +624,66 @@ begin
     -- PC TRACE (for debugging - reports key PC milestones)
     ---------------------------------------------------------------
     pc_trace: process(clk)
+        variable prev_pc : std_logic_vector(31 downto 0) := (others => '1');
+        variable cycle_count : integer := 0;
+        variable trace_active : boolean := false;
+        variable trace_countdown : integer := 0;
     begin
         if rising_edge(clk) then
+            cycle_count := cycle_count + 1;
+
             if not is_x(debug_TG68_PC) then
+                -- Activate detailed cycle-by-cycle trace when PC enters PTEST or WP fault range
+                -- Trace every cycle (not just PC changes) around the second PTEST and Test 12
+                if (unsigned(debug_TG68_PC) >= 16#018A# and
+                    unsigned(debug_TG68_PC) <= 16#01A0#) or
+                   (unsigned(debug_TG68_PC) >= 16#01C0# and
+                    unsigned(debug_TG68_PC) <= 16#01E0#) then
+                    trace_active := true;
+                    trace_countdown := 100;  -- Continue for 100 cycles after leaving range
+                elsif trace_active then
+                    trace_countdown := trace_countdown - 1;
+                    if trace_countdown <= 0 then
+                        trace_active := false;
+                    end if;
+                end if;
+
+                -- Cycle-by-cycle trace: every rising edge when active
+                if trace_active then
+                    report "CYC" & integer'image(cycle_count) &
+                           " ce=" & std_logic'image(clkena_in) &
+                           " lw=" & std_logic'image(debug_clkena_lw) &
+                           " st=" & slv_to_hex("000000" & debug_state) &
+                           " us=" & integer'image(debug_micro_state) &
+                           " PC=$" & slv_to_hex(debug_TG68_PC) &
+                           " op=$" & slv_to_hex(debug_opcode) &
+                           " lor=$" & slv_to_hex(debug_last_opc_read) &
+                           " din=$" & slv_to_hex(data_in) &
+                           " sop=" & std_logic'image(debug_setopcode) &
+                           " dec=" & std_logic'image(debug_decodeOPC) &
+                           " snp=" & std_logic'image(debug_setnextpass) &
+                           " mm=" & slv_to_hex("00" & debug_memmask) &
+                           " dr=$" & slv_to_hex(debug_data_read) &
+                           " ldr=$" & slv_to_hex(debug_last_data_read) &
+                           " A1=$" & slv_to_hex(debug_regfile_a1) &
+                           " rwe=" & std_logic'image(debug_regfile_we) &
+                           " rwa=" & slv_to_hex(debug_regfile_waddr) &
+                           " rwd=$" & slv_to_hex(debug_regfile_wdata) &
+                           " mb=" & std_logic'image(debug_make_berr) &
+                           " tb=" & std_logic'image(debug_trap_berr) &
+                           " tmb=" & std_logic'image(debug_trap_mmu_berr) &
+                           " pf=" & std_logic'image(debug_pmmu_fault) &
+                           " A7=$" & slv_to_hex(debug_regfile_a7) &
+                           " tv=$" & slv_to_hex(debug_trap_vector) &
+                           " pa=$" & slv_to_hex(pmmu_addr_phys) &
+                           " nW=" & std_logic'image(nWr);
+                end if;
+
+                -- Update prev_pc for milestone tracking (only on clkena_in transitions)
+                if debug_TG68_PC /= prev_pc and clkena_in = '1' then
+                    prev_pc := debug_TG68_PC;
+                end if;
+
                 case to_integer(unsigned(debug_TG68_PC)) is
                     when 16#0100# =>
                         report "PC=$0100: Program start (MMU setup)";
@@ -522,8 +702,8 @@ begin
                     when 16#0080# =>
                         report "PC=$0080: Bus error handler entered";
                     when 16#00A0# =>
-                        report "PC=$00A0: UNEXPECTED trap handler entered"
-                            severity warning;
+                        report "PC=$00A0: UNEXPECTED trap handler entered, op=$" &
+                               slv_to_hex(debug_opcode) severity warning;
                     when others =>
                         null;
                 end case;
@@ -571,15 +751,15 @@ begin
 
         -- Wait for STOP instruction or timeout
         -- Active polling: check every 100ns if CPU hit STOP
-        for i in 0 to 2000 loop
+        for i in 0 to 500 loop
             wait for 100 ns;
             if not is_x(debug_opcode) and debug_opcode = x"4E72" then
                 report "CPU reached STOP instruction at " &
                        time'image(now) & " - verifying results";
                 exit;
             end if;
-            if i = 2000 then
-                report "WARNING: CPU did not reach STOP after 200us"
+            if i = 500 then
+                report "WARNING: CPU did not reach STOP after 50us"
                     severity warning;
             end if;
         end loop;
@@ -601,8 +781,8 @@ begin
         check_test(1, "Identity write + remap overwrite at phys $1100", pass);
 
         -- Test 2: D1 at $1F10 = $12345678 (loaded before remap overwrite)
-        -- mem index: $1F10/2 = 3848
-        val32 := mem(3848) & mem(3849);
+        -- mem index: $1F10/2 = $0F88 = 3976
+        val32 := mem(3976) & mem(3977);
         pass := (val32 = x"12345678");
         if not pass then
             report "  D1@$1F10: expected $12345678, got 0x" & slv_to_hex(val32(31 downto 16)) & "_" &
@@ -611,7 +791,7 @@ begin
         check_test(2, "Identity read D1=$12345678", pass);
 
         -- Test 4: D2 at $1F14 = $AABB0011 (read from remapped page)
-        val32 := mem(3850) & mem(3851);
+        val32 := mem(3978) & mem(3979);
         pass := (val32 = x"AABB0011");
         if not pass then
             report "  D2@$1F14: expected $AABB0011, got 0x" & slv_to_hex(val32(31 downto 16)) & "_" &
@@ -620,7 +800,7 @@ begin
         check_test(4, "Remap read D2=$AABB0011 (log $2100 -> phys $1100)", pass);
 
         -- Test 5: D3 at $1F18 = $AABB0011 (cross-verify: $1100 == $2100)
-        val32 := mem(3852) & mem(3853);
+        val32 := mem(3980) & mem(3981);
         pass := (val32 = x"AABB0011");
         if not pass then
             report "  D3@$1F18: expected $AABB0011, got 0x" & slv_to_hex(val32(31 downto 16)) & "_" &
@@ -629,7 +809,8 @@ begin
         check_test(5, "Cross-verify D3=$AABB0011 (both map to phys $1100)", pass);
 
         -- Test 6: MMUSR at $1F20 - valid page PTEST, no fault bits
-        val32 := mem(3856) & mem(3857);
+        -- mem index: $1F20/2 = $0F90 = 3984
+        val32 := mem(3984) & mem(3985);
         pass := (val32(15) = '0' and val32(12) = '0' and val32(10) = '0');
         if not pass then
             report "  MMUSR@$1F20: expected no B/W/I bits, got 0x" & slv_to_hex(val32);
@@ -637,15 +818,17 @@ begin
         check_test(6, "PTEST W valid page: MMUSR has no fault bits", pass);
 
         -- Test 7: MMUSR at $1F24 - WP page PTEST W, W bit set
-        val32 := mem(3858) & mem(3859);
-        pass := (val32(12) = '1');
+        -- mem index: $1F24/2 = $0F92 = 3986
+        val32 := mem(3986) & mem(3987);
+        pass := (val32(11) = '1');
         if not pass then
-            report "  MMUSR@$1F24: expected W bit (12) set, got 0x" & slv_to_hex(val32);
+            report "  MMUSR@$1F24: expected W bit (11) set, got 0x" & slv_to_hex(val32);
         end if;
-        check_test(7, "PTEST W on WP page: MMUSR.W (bit 12) set", pass);
+        check_test(7, "PTEST W on WP page: MMUSR.W (bit 11) set", pass);
 
         -- Test 8: MMUSR at $1F28 - invalid page PTEST, I bit set
-        val32 := mem(3860) & mem(3861);
+        -- mem index: $1F28/2 = $0F94 = 3988
+        val32 := mem(3988) & mem(3989);
         pass := (val32(10) = '1');
         if not pass then
             report "  MMUSR@$1F28: expected I bit (10) set, got 0x" & slv_to_hex(val32);
@@ -653,7 +836,8 @@ begin
         check_test(8, "PTEST R on invalid page: MMUSR.I (bit 10) set", pass);
 
         -- Test 9: D5 at $1F2C = $AABB0011 (post-PFLUSH re-walk)
-        val32 := mem(3862) & mem(3863);
+        -- mem index: $1F2C/2 = $0F96 = 3990
+        val32 := mem(3990) & mem(3991);
         pass := (val32 = x"AABB0011");
         if not pass then
             report "  D5@$1F2C: expected $AABB0011, got 0x" & slv_to_hex(val32(31 downto 16)) & "_" &
@@ -662,18 +846,21 @@ begin
         check_test(9, "Post-PFLUSH re-walk reads $AABB0011", pass);
 
         -- Test 10: MMUSR at $1F30 - TT0 transparent match, T bit set
-        val32 := mem(3864) & mem(3865);
-        pass := (val32(8) = '1');
+        -- mem index: $1F30/2 = $0F98 = 3992
+        val32 := mem(3992) & mem(3993);
+        pass := (val32(6) = '1');
         if not pass then
-            report "  MMUSR@$1F30: expected T bit (8) set, got 0x" & slv_to_hex(val32);
+            report "  MMUSR@$1F30: expected T bit (6) set, got 0x" & slv_to_hex(val32);
+            report "  DEBUG A1=" & slv_to_hex(debug_regfile_a1);
         end if;
-        check_test(10, "PTEST with TT0 match: MMUSR.T (bit 8) set", pass);
+        check_test(10, "PTEST with TT0 match: MMUSR.T (bit 6) set", pass);
 
         -- Test 11: Cache inhibit signal observed
         check_test(11, "Cache inhibit observed during CI page access", ci_observed);
 
         -- Test 12: Bus error marker at $1F00 = $BE00000C
-        val32 := mem(3840) & mem(3841);
+        -- mem index: $1F00/2 = $0F80 = 3968
+        val32 := mem(3968) & mem(3969);
         pass := (val32 = x"BE00000C");
         if not pass then
             report "  Marker@$1F00: expected $BE00000C, got 0x" & slv_to_hex(val32(31 downto 16)) & "_" &

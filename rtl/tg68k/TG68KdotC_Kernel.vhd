@@ -270,7 +270,9 @@ entity TG68KdotC_Kernel is
 		debug_pmmu_reg_sel : out std_logic_vector(4 downto 0);
 		debug_pmmu_reg_wdat : out std_logic_vector(31 downto 0);
 		debug_pmmu_reg_part : out std_logic;
-		debug_pmmu_reg_rdat : out std_logic_vector(31 downto 0)
+		debug_pmmu_reg_rdat : out std_logic_vector(31 downto 0);
+		debug_make_berr : out std_logic;
+		debug_pmmu_fault : out std_logic
 		);
 end TG68KdotC_Kernel;
 
@@ -461,6 +463,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal make_mmu_berr     : std_logic;  -- BUG #159: Distinguish MMU bus error from normal BERR
 	signal berr_exception_active : std_logic;  -- MC68030: Bus error exception processing window
 	signal cpu_halted        : std_logic;  -- MC68030: Double bus fault halt (cleared only by reset)
+	signal pmmu_fault_dispatched : std_logic;  -- BUG #400: Tracks if current pmmu_fault was already dispatched as bus error
 	signal useStackframe2	: std_logic;
 	
 	signal set_stop			: bit;
@@ -823,8 +826,11 @@ BEGIN
                                     and pmmu_brief(4 downto 0) = "00001")  -- FC from DFC
                      else fc_internal;
 
-  -- For PTEST/PLOAD/PFLUSH with EA: use EA address, else use current logical address
-  pmmu_cmd_addr   <= OP1out when (micro_state = ptest1 or micro_state = pload1 or micro_state = pflush1)
+  -- BUG #397 FIX: Use exec() bits instead of micro_state for pmmu_cmd_addr mux.
+  -- exec(pmmu_ptest/pload/pflush) and exec(OP1addr) are latched at the same clkena_lw edge,
+  -- so OP1out=addr is valid when these exec bits are '1'. Using micro_state was wrong because
+  -- micro_state advances past ptest1/pload1/pflush1 at the same edge that sets exec().
+  pmmu_cmd_addr   <= OP1out when (exec(pmmu_ptest) = '1' or exec(pmmu_pload) = '1' or exec(pmmu_pflush) = '1')
                      else pmmu_addr_log_int;
   
   -- Cache invalidation control
@@ -1595,16 +1601,30 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 			-- overwritten by prefetch. Use fline_opcode_latch for correct Dn register.
 			-- This ensures rf_dest_addr is correct ONE CYCLE BEFORE the HI word write fires.
 			rf_dest_addr <= '0' & fline_opcode_latch(2 downto 0);
-		ELSIF pmove_dn_mode = '1' THEN
+		ELSIF micro_state = pmove_decode AND fline_context_valid = '1' AND
+		      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" OR fline_opcode_latch(5 downto 3)="100") THEN
+			-- BUG #397 FIX: During pmove_decode, set rf_dest_addr for (An)/(An)+/-(An)
+			-- modes so RDindex_A gets the EA register ONE CYCLE BEFORE ptest1/pload1/pflush1
+			-- reads reg_QA via memaddr_reg. Without this, opcode(2:0) may be stale.
+			rf_dest_addr <= '1' & fline_opcode_latch(2 downto 0);
+		ELSIF pmove_dn_mode = '1' AND fline_context_valid = '1' THEN
 			-- BUG #59 FIX: Use latched pmove_dn_regnum, not opcode(11:9) which gets overwritten!
+			-- BUG #398 FIX: Guard with fline_context_valid to prevent stale pmove_dn_mode from
+			-- overriding rf_dest_addr for subsequent non-PMMU instructions. pmove_dn_mode is
+			-- cleared at setexecOPC but exec(pmmu_wr) OLD value delays clearing by one cycle,
+			-- causing MOVEA.L after PMOVE D0,TT0 to write to A0 instead of A1.
 			rf_dest_addr <= dest_areg&pmove_dn_regnum;
 		-- BUG #384 FIX: PMOVE memory mode states need EA register from fline_opcode_latch,
 		-- not opcode! By pmove_mmu_to_mem/mem_to_mmu time, opcode has been overwritten by
 		-- prefetch. Without this, set(postadd)/set(presub) write-back targets the wrong
 		-- register (e.g., A0 instead of A1), corrupting address registers.
 		-- This mirrors the rf_source_addr fix at BUG #377.
+		-- BUG #397 FIX: Also applies to ptest1/pload1/pflush1 - they need the EA register
+		-- for addr/OP1out via memaddr_reg=reg_QA. Without this, addresses with non-zero
+		-- high byte (e.g. $FF000100 for PTEST TT0 match) get corrupted.
 		ELSIF (micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo OR
-		       micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_mem_to_mmu_lo) AND
+		       micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_mem_to_mmu_lo OR
+		       micro_state = ptest1 OR micro_state = pload1 OR micro_state = pflush1) AND
 		      fline_context_valid = '1' AND
 		      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" OR fline_opcode_latch(5 downto 3)="100") THEN
 			rf_dest_addr <= '1'&fline_opcode_latch(2 downto 0);
@@ -1622,7 +1642,7 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 -----------------------------------------------------------------------------
 -- set source regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, last_opc_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_mode, fline_opcode_latch, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
+PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, last_opc_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_mode, fline_context_valid, fline_opcode_latch, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
 	BEGIN
 		IF exec(movem_action)='1' OR set(movem_action) ='1' THEN
 			IF movem_presub='1' THEN
@@ -1679,7 +1699,8 @@ PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source
 		ELSIF micro_state = pmove_dn_lo THEN
 			-- PMOVE Dn→MMU 64-bit: LOW word source is Dn+1 (increment register number)
 			rf_source_addr <= source_areg&(pmove_dn_regnum + "001");
-		ELSIF pmove_dn_mode = '1' THEN
+		ELSIF pmove_dn_mode = '1' AND fline_context_valid = '1' THEN
+			-- BUG #398 FIX: Guard with fline_context_valid (same as rf_dest_addr fix)
 			rf_source_addr <= source_areg&pmove_dn_regnum;
 		-- BUG #289 FIX: PMOVE MMU states need EA register from opcode(2:0), not opcode(11:9)
 		-- For PMOVE CRP,(A7)+, opcode(2:0)="111" (A7) but opcode(11:9)="000" (wrong!)
@@ -2365,7 +2386,13 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 		-- causing opcode <= last_opc_read (stale extension word) instead of data_read (next instr).
 		IF (setstate="00" OR (setstate="01" AND fline_context_valid='1')) AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0' AND micro_state /= pmmu_dn_read_wait AND micro_state /= pmove_decode AND micro_state /= pmove_mem_to_mmu_hi AND micro_state /= pmove_mem_to_mmu_lo AND micro_state /= pmove_mmu_to_mem_hi AND micro_state /= pmove_mmu_to_mem_lo AND micro_state /= ptest1 AND micro_state /= pflush1 AND micro_state /= pload1 AND cpu_halted='0' THEN
 			setendOPC <= '1';
-			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1' THEN
+			-- BUG #400 FIX: Also check pmmu_fault directly (not just make_berr) for immediate
+			-- bus error dispatch. make_berr is registered and won't reflect pmmu_fault until
+			-- the NEXT clkena_lw edge, allowing the CPU to advance past the faulting instruction.
+			-- By checking pmmu_fault combinationally, the bus error is caught at the same edge
+			-- where the faulting memory write completes (state="11"->"00").
+			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1'
+			   OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0') THEN
 				setinterrupt <= '1';
 			ELSIF stop='0' THEN
 				setopcode <= '1';
@@ -2416,6 +2443,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					make_berr <= '0';
 					berr_exception_active <= '0';
 					cpu_halted <= '0';
+					pmmu_fault_dispatched <= '0';
 					memmask <= "111111";
 					exec_write_back <= '0';
 					-- BUG #70 SIMPLIFICATION: Simple 2-signal initialization
@@ -2550,6 +2578,11 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					decodeOPC <= setopcode;
 					endOPC <= setendOPC;
 					execOPC <= setexecOPC;
+					-- BUG #400 FIX: Clear dispatched flag when PMMU fault_reg is cleared
+					-- (happens when a new translation request is issued, e.g., berr stack push)
+					if pmmu_fault = '0' then
+						pmmu_fault_dispatched <= '0';
+					end if;
 --					IF setexecOPC='1' OR set(alu_exec)='1' THEN
 --						execOPC_ALU <= '1';
 --					ELSE
@@ -2577,7 +2610,11 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						-- MC68030 Double bus fault detection: bus error/fault during bus error processing
 						-- Per MC68030UM Section 8.4: "If a bus error is detected during exception
 						-- processing of a bus error, the processor enters the halted state."
-						if cpu(1) = '1' and (berr = '1' or (pmmu_tc_en = '1' and pmmu_fault = '1')) then
+						-- BUG #400 FIX: Only trigger on NEW pmmu_fault (pmmu_fault_dispatched='0').
+						-- The stale pmmu_fault from the just-dispatched bus error persists until
+						-- a new translation request clears fault_reg. Without this guard, every
+						-- PMMU bus error would immediately trigger a false double bus fault.
+						if cpu(1) = '1' and (berr = '1' or (pmmu_tc_en = '1' and pmmu_fault = '1' and pmmu_fault_dispatched = '0')) then
 							cpu_halted <= '1';
 							-- synthesis translate_off
 							report "DOUBLE BUS FAULT: fault during bus error exception processing - CPU HALTED" severity warning;
@@ -2598,7 +2635,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						trap_mmu_berr <= '0';  -- BUG #159: Clear MMU BERR trap
 						IF make_trace='1' THEN
 							trap_trace <= '1';
-						ELSIF make_berr='1' THEN
+						-- BUG #400 FIX: Also check pmmu_fault directly for same-cycle dispatch
+						ELSIF make_berr='1' OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0') THEN
 							-- MC68030 Double bus fault detection: bus error while still in berr exception window
 							-- This catches the case where the handler instruction fetch faults
 							IF cpu(1) = '1' AND berr_exception_active = '1' THEN
@@ -2608,11 +2646,17 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								-- synthesis translate_on
 							ELSE
 								-- BUG #159 FIX: Distinguish MMU bus error (vector 61) from normal BERR (vector 2)
-								IF make_mmu_berr='1' THEN
+								-- BUG #400 FIX: Also check pmmu_fault_stat directly for same-cycle dispatch
+								IF make_mmu_berr='1' OR (pmmu_fault='1' AND pmmu_fault_stat(15)='1') THEN
 									trap_mmu_berr <= '1';  -- Use vector 61 for MMU bus error
 								ELSE
 									trap_berr <= '1';  -- Use vector 2 for normal bus error
 								END IF;
+								-- BUG #400 FIX: Mark pmmu_fault as dispatched to prevent false
+								-- double bus fault from stale fault_reg before new translation clears it
+								if pmmu_fault = '1' then
+									pmmu_fault_dispatched <= '1';
+								end if;
 								berr_exception_active <= '1';
 							END IF;
 						ELSE
@@ -3083,11 +3127,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		END IF;
 		
 		IF interrupt='1' AND trap_berr='1' THEN
-            IF cpu(1)='1' THEN
-                next_micro_state <= berr1;
-            ELSE
-			    next_micro_state <= trap0;
-            END IF;
+			-- Route bus errors through the stable trap path.
+			-- The custom berr1..berr8 sequence is currently not robust and can
+			-- corrupt exception flow before handler dispatch.
+			next_micro_state <= trap0;
 			-- Only need stack swap if A7 currently has user stack (preSVmode='0')
 			-- If preSVmode='1', A7 already has supervisor stack, no swap needed
 			-- FlagsSR(5) update to '1' is handled in sequential process (see BUG #151)
@@ -3111,7 +3154,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			-- Format #0 (4-word): All others including privilege violation, F-line, illegal
             -- Format #A (16-word): Bus Error (MC68030)
 			IF cpu(1)='1' AND trap_berr='1' THEN
-				next_micro_state <= berr1;
+				-- Route bus errors through trap0 (see note above).
+				next_micro_state <= trap0;
 			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1') THEN
 				next_micro_state <= trap00;
 			else
@@ -5882,41 +5926,49 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 WHEN berr1 => -- Push Internal Regs ($1C-$1F) - Stub
                     setstate <= "11";
                     set(presub) <= '1';
+                    setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr2;
                 WHEN berr2 => -- Push Data Output Buffer ($18-$1B) - Stub
                     setstate <= "11";
                     set(presub) <= '1';
+                    setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr3;
                 WHEN berr3 => -- Push Internal Regs ($14-$17) - Stub
                     setstate <= "11";
                     set(presub) <= '1';
+                    setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr4;
                 WHEN berr4 => -- Push Fault Address ($10-$13) - Capture current Addr
                     setstate <= "11";
                     set(presub) <= '1';
+                    setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr5;
                 WHEN berr5 => -- Push Instruction Pipe ($0C-$0F) - Stub
                     setstate <= "11";
                     set(presub) <= '1';
+                    setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr6;
                 WHEN berr6 => -- Push SSW ($0A) & Internal ($08) - SSW Stub
                     setstate <= "11";
                     set(presub) <= '1';
+                    setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr7;
                 WHEN berr7 => -- Push Format/Vector ($06) & PC Lo ($04)
                     setstate <= "11";
                     set(presub) <= '1';
+                    setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr8;
                 WHEN berr8 => -- Push PC Hi ($02) & SR ($00) -> Exit to Handler
                     setstate <= "11";
                     set(presub) <= '1';
+                    setstackaddr <= '1';
                     datatype <= "10";
                     -- Exit logic (matches trap3)
                     set_vectoraddr <= '1';
@@ -6835,6 +6887,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     set(pmmu_ptest) <= '1';
                     set(OP1addr) <= '1';  -- BUG #393 FIX: Route addr to OP1out for pmmu_cmd_addr
                     setstate <= "01";  -- Default to "01" (stall) while waiting
+                    -- synthesis translate_off
+                    -- report "PTEST1: exec_pt=" & bit'image(exec(pmmu_ptest)) & " RDiA=" & integer'image(RDindex_A) &
+                    --        " addr31=" & std_logic'image(addr(31)) & std_logic'image(addr(30)) &
+                    --          std_logic'image(addr(29)) & std_logic'image(addr(28)) &
+                    --          std_logic'image(addr(27)) & std_logic'image(addr(26)) &
+                    --          std_logic'image(addr(25)) & std_logic'image(addr(24)) &
+                    --        " mra31=" & std_logic'image(memaddr_reg(31)) & std_logic'image(memaddr_reg(30)) &
+                    --          std_logic'image(memaddr_reg(29)) & std_logic'image(memaddr_reg(28)) &
+                    --          std_logic'image(memaddr_reg(27)) & std_logic'image(memaddr_reg(26)) &
+                    --          std_logic'image(memaddr_reg(25)) & std_logic'image(memaddr_reg(24)) &
+                    --        " ub=" & bit'image(use_base) severity note;
+                    -- synthesis translate_on
                     -- BUG FIX: Must wait for exec(pmmu_ptest) to be latched before checking busy.
                     -- Same timing issue as pload1: on first ptest1 cycle, exec(pmmu_ptest)='0',
                     -- so pmmu_ptest_req='0'. Without this guard, ptest1 exits immediately, and the
@@ -7639,5 +7703,7 @@ debug_pmmu_reg_sel <= pmmu_reg_sel_int;
 debug_pmmu_reg_wdat <= pmmu_reg_wdat_d;
 debug_pmmu_reg_part <= pmmu_reg_part_d;
 debug_pmmu_reg_rdat <= x"0000" & pmmu_debug_mmusr;
+debug_make_berr <= make_berr;
+debug_pmmu_fault <= pmmu_fault;
 
 END;

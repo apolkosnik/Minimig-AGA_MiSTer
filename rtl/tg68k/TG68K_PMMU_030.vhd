@@ -228,6 +228,11 @@ architecture rtl of TG68K_PMMU_030 is
   signal ptest_fc : std_logic_vector(2 downto 0) := (others => '0');
   signal ptest_rw : std_logic := '1';  -- '1'=PTESTR (read), '0'=PTESTW (write), from brief(9)
 
+  -- BUG #396: PTEST/PLOAD walk must NOT update addr_phys_reg.
+  -- ptest_active/pload_active are cleared after 1 cycle (before walker_completed).
+  -- This flag persists through the entire walk so walker_completed can skip addr_phys_reg.
+  signal instr_walk_pending : std_logic := '0';
+
   -- PLOAD operation state
   signal pload_active : std_logic := '0';
   signal pload_addr : std_logic_vector(31 downto 0) := (others => '0');
@@ -969,8 +974,7 @@ begin
       atc_flush_req <= '0';
       mmusr_update_ack <= '0';
       ptest_active <= '0';
-      ptest_addr <= (others => '0');
-      ptest_fc <= (others => '0');
+      -- ptest_addr, ptest_fc, ptest_rw now driven by edge detection process (BUG #397)
       mmu_config_error <= '0';
     elsif rising_edge(clk) then
       atc_flush_req <= '0';
@@ -986,12 +990,8 @@ begin
       -- IMPORTANT: These only affect MMUSR, not other registers!
       if ptest_update_mmusr = '1' then
         -- Highest priority: PTEST instruction (MC68030 specification)
+        -- BUG #397: addr/fc/rw captured in edge detection process (not here)
         ptest_active <= '1';
-        ptest_addr <= pmmu_addr;
-        ptest_fc <= pmmu_fc;
-        -- BUG #14 FIX: MC68030 spec - brief(9): 0=PTESTW(write), 1=PTESTR(read)
-        -- rw signal: 0=write, 1=read, so direct assignment (no NOT)
-        ptest_rw <= pmmu_brief(9);
         if tc_en = '0' then
           -- MMU disabled - PTEST always succeeds with identity translation
           MMUSR <= encode_mmusr_success(
@@ -1013,15 +1013,7 @@ begin
       -- BUG FIX: Clear ptest_active when translation process signals completion
       if ptest_done = '1' then
         ptest_active <= '0';
-        report "PMMU_PTEST_DONE: MMUSR=0x" &
-               integer'image(to_integer(unsigned(MMUSR(15 downto 0)))) &
-               " B=" & std_logic'image(MMUSR(15)) &
-               " L=" & std_logic'image(MMUSR(14)) &
-               " S=" & std_logic'image(MMUSR(13)) &
-               " W=" & std_logic'image(MMUSR(12)) &
-               " I=" & std_logic'image(MMUSR(10)) &
-               " M=" & std_logic'image(MMUSR(9)) &
-               " T=" & std_logic'image(MMUSR(8)) severity note;
+        -- (PMMU_PTEST_DONE report disabled for sim speed)
       end if;
 
       -- Handle direct register writes (TC, CRP, SRP, TT0, TT1, etc.)
@@ -1225,41 +1217,9 @@ begin
 
   debug_mmusr <= MMUSR(15 downto 0);
 
-  -- DEBUG: Monitor all PMMU register reads
-  process(reg_sel, reg_part, TC, TT0, TT1, SRP_H, SRP_L, CRP_H, CRP_L, MMUSR)
-  begin
-    case reg_sel is
-      when "00010" =>  -- TT0
-        report "PMMU_REG_READ: TT0=0x" & slv_to_hex(TT0) severity note;
-      when "00011" =>  -- TT1
-        report "PMMU_REG_READ: TT1=0x" & slv_to_hex(TT1) severity note;
-      when "10000" =>  -- TC
-        report "PMMU_REG_READ: TC=0x" & slv_to_hex(TC) severity note;
-      when "10010" =>  -- SRP
-        if reg_part = '1' then
-          report "PMMU_REG_READ: SRP_H=0x" & slv_to_hex(SRP_H) severity note;
-        else
-          report "PMMU_REG_READ: SRP_L=0x" & slv_to_hex(SRP_L) severity note;
-        end if;
-      when "10011" =>  -- CRP
-        if reg_part = '1' then
-          report "PMMU_REG_READ: CRP_H=0x" & slv_to_hex(CRP_H) severity note;
-        else
-          report "PMMU_REG_READ: CRP_L=0x" & slv_to_hex(CRP_L) severity note;
-        end if;
-      when "11000" =>  -- MMUSR
-        report "PMMU_REG_READ: MMUSR=0x" & slv_to_hex(MMUSR(15 downto 0)) &
-               " B=" & std_logic'image(MMUSR(15)) &
-               " L=" & std_logic'image(MMUSR(14)) &
-               " S=" & std_logic'image(MMUSR(13)) &
-               " W=" & std_logic'image(MMUSR(12)) &
-               " I=" & std_logic'image(MMUSR(10)) &
-               " M=" & std_logic'image(MMUSR(9)) &
-               " T=" & std_logic'image(MMUSR(8)) severity note;
-      when others =>
-        null;
-    end case;
-  end process;
+  -- DEBUG: Monitor all PMMU register reads (disabled for simulation speed)
+  -- process(reg_sel, reg_part, TC, TT0, TT1, SRP_H, SRP_L, CRP_H, CRP_L, MMUSR)
+  -- begin ... end process;
 
   -- Extract TC register fields according to MC68030 specification
   -- TC Register Format (MC68030):
@@ -1404,6 +1364,7 @@ begin
       mmusr_update_req <= '0';
       mmusr_update_value <= (others => '0');
       ptest_done <= '0';
+      instr_walk_pending <= '0';
     elsif rising_edge(clk) then
       status_tmp := fault_status_reg;
 
@@ -1426,13 +1387,7 @@ begin
           fault_reg <= '0';
           fault_status_reg <= (others => '0');
         end if;
-        -- Debug: Log translation request for test addresses
-        if addr_log = x"12343000" or addr_log = x"12344000" or addr_log = x"12345000" then
-          -- report "DEBUG_REQUEST: Starting translation for addr=0x" & slv_to_hstring(addr_log) &
-                 -- " fc=" & slv_to_string(fc) & " rw=" & std_logic'image(rw) &
-                 -- " tc_en=" & std_logic'image(tc_en)
-           --  -- severity note;
-        end if;
+        -- (debug XLAT_REQ report removed for sim speed)
         -- Initialize variables to clean values
         hit := '0';
         hit_idx := 0;
@@ -1665,12 +1620,38 @@ begin
       -- Handle PTEST requests - perform translation and update MMUSR
       if ptest_active = '1' then
         -- PTEST request active - perform translation to test page (update MMUSR, don't cache)
+        -- synthesis translate_off
+        -- report "PTEST_HANDLER: active=1 tc_en=" & std_logic'image(tc_en) &
+        --        " xlat_pend=" & std_logic'image(translation_pending) &
+        --        " rw=" & std_logic'image(ptest_rw) &
+        --        " TT0_E=" & std_logic'image(TT0(15)) severity note;
+        -- synthesis translate_on
         if tc_en = '1' and translation_pending = '0' then
           -- Check Transparent Translation first
           ttr_check(TT0, ptest_addr, ptest_fc, '0', ptest_rw, tmatch0, tci0, twp0);  -- Use PTEST R/W from brief(9)
           ttr_check(TT1, ptest_addr, ptest_fc, '0', ptest_rw, tmatch1, tci1, twp1);  -- Use PTEST R/W from brief(9)
+          -- synthesis translate_off
+          -- report "PTEST_TTR: tmatch0=" & std_logic'image(tmatch0) &
+          --        " tmatch1=" & std_logic'image(tmatch1) &
+          --        " addr31_24=" & std_logic'image(ptest_addr(31)) & std_logic'image(ptest_addr(30)) &
+          --          std_logic'image(ptest_addr(29)) & std_logic'image(ptest_addr(28)) &
+          --          std_logic'image(ptest_addr(27)) & std_logic'image(ptest_addr(26)) &
+          --          std_logic'image(ptest_addr(25)) & std_logic'image(ptest_addr(24)) &
+          --        " fc=" & std_logic'image(ptest_fc(2)) & std_logic'image(ptest_fc(1)) & std_logic'image(ptest_fc(0)) &
+          --        " TT0_base=" & std_logic'image(TT0(31)) & std_logic'image(TT0(30)) &
+          --          std_logic'image(TT0(29)) & std_logic'image(TT0(28)) &
+          --          std_logic'image(TT0(27)) & std_logic'image(TT0(26)) &
+          --          std_logic'image(TT0(25)) & std_logic'image(TT0(24)) &
+          --        " TT0_fcb=" & std_logic'image(TT0(6)) & std_logic'image(TT0(5)) & std_logic'image(TT0(4)) &
+          --        " TT0_fcm=" & std_logic'image(TT0(2)) & std_logic'image(TT0(1)) & std_logic'image(TT0(0))
+          --        severity note;
+          -- synthesis translate_on
 
           if tmatch0 = '1' then
+            -- synthesis translate_off
+            report "PTEST_TTR0_HIT: ptest_addr=" & slv_to_hex(ptest_addr) & " fc=" &
+                   std_logic'image(ptest_fc(2)) & std_logic'image(ptest_fc(1)) & std_logic'image(ptest_fc(0)) severity note;
+            -- synthesis translate_on
             -- TTR0 match - PTEST succeeds with transparent translation
             mmusr_update_value <= encode_mmusr_success(
               write_protect => twp0,
@@ -1692,12 +1673,18 @@ begin
             ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after TTR1 match
           else
             -- No TTR match - trigger walker to test translation
+            -- synthesis translate_off
+            report "PTEST_WALK: ptest_addr=" & slv_to_hex(ptest_addr) &
+                   " fc=" & std_logic'image(ptest_fc(2)) & std_logic'image(ptest_fc(1)) & std_logic'image(ptest_fc(0)) &
+                   " TT0=" & slv_to_hex(TT0) severity note;
+            -- synthesis translate_on
             saved_addr_log <= ptest_addr;
             saved_fc <= ptest_fc;
             saved_is_insn <= '0';
             saved_rw <= ptest_rw;  -- BUG #17 FIX: PTEST R/W from brief(9): 0=PTESTW(write), 1=PTESTR(read)
             walk_req <= '1';
             translation_pending <= '1';
+            instr_walk_pending <= '1';  -- BUG #396: Mark walk as PTEST-initiated
             ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after triggering walker
             -- report "PTEST: Triggered walker for addr=0x" & slv_to_hstring(ptest_addr) &
                   --  -- " fc=" & slv_to_string(ptest_fc) severity note;
@@ -1736,6 +1723,7 @@ begin
               saved_rw <= pload_rw;  -- BUG #17 FIX: PLOAD R/W from brief(9): 0=PLOADW(write), 1=PLOADR(read)
               walk_req <= '1';
               translation_pending <= '1';
+              instr_walk_pending <= '1';  -- BUG #396: Mark walk as PLOAD-initiated
               -- report "PLOAD: Triggered walker for addr=0x" & slv_to_hstring(pload_addr) &
                     --  -- " fc=" & slv_to_string(pload_fc) severity note;
             else
@@ -1754,33 +1742,34 @@ begin
       if walker_fault = '1' and walker_fault_ack = '0' then
         -- Walker faulted - process immediately regardless of req state
         status_tmp := walker_fault_status;
-        fault_reg <= '1';
-        fault_status_reg <= status_tmp;
-        mmusr_update_value <= status_tmp;  -- Full 32-bit MC68030 format
+        -- BUG #396b: PTEST/PLOAD walks must NOT set fault_reg or corrupt addr_phys_reg.
+        -- Walker faults during PTEST/PLOAD should only update MMUSR, not trigger CPU bus error.
+        -- Without this guard, PTEST W on a WP page causes walker_fault -> fault_reg=1 ->
+        -- make_berr=1 -> setinterrupt -> spurious bus error exception.
+        if instr_walk_pending = '0' then
+          fault_reg <= '1';
+          fault_status_reg <= status_tmp;
+          -- CRITICAL FIX: On fault, output the faulting logical address
+          -- This prevents the CPU from using garbage/uninitialized addresses
+          addr_phys_reg <= saved_addr_log;  -- Pass through faulting address
+          cache_inhibit_reg <= '1';  -- Inhibit cache on faults
+          write_protect_reg <= '1';  -- Protect on faults
+        end if;
+        mmusr_update_value <= status_tmp;  -- Always update MMUSR (PTEST needs this)
         mmusr_update_req <= '1';
         translation_pending <= '0';
-        -- CRITICAL FIX: On fault, output the faulting logical address
-        -- This prevents the CPU from using garbage/uninitialized addresses
-        addr_phys_reg <= saved_addr_log;  -- Pass through faulting address
-        cache_inhibit_reg <= '1';  -- Inhibit cache on faults
-        write_protect_reg <= '1';  -- Protect on faults
-        -- Debug: Report walker fault processing with corruption tracking
-        -- report "WALKER_FAULT: Setting fault_reg=1 walker_status=0x" & slv_to_hstring(walker_fault_status) &
-               -- " status_tmp=0x" & slv_to_hstring(status_tmp) &
-               -- " addr=0x" & slv_to_hstring(saved_addr_log) &
-               -- " addr_phys_out=0x" & slv_to_hstring(saved_addr_log)
-         --  -- severity note;
+        instr_walk_pending <= '0';  -- Clear PTEST/PLOAD flag on walker fault too
         -- Acknowledge the fault and track pending state
         walker_fault_ack <= '1';
         walker_fault_ack_pending <= '1';
       elsif walker_completed = '1' then
         -- Walker completed successfully - clear any previous fault status
         -- A successful walker completion means this specific translation succeeded
-        
+
         -- First check if the completed request would have been handled by TTR
         ttr_check(TT0, saved_addr_log, saved_fc, saved_is_insn, saved_rw, tmatch0, tci0, twp0);
         ttr_check(TT1, saved_addr_log, saved_fc, saved_is_insn, saved_rw, tmatch1, tci1, twp1);
-        
+
         if tmatch0 = '1' or tmatch1 = '1' then
           -- This request hits TTR - don't override TTR results that are already set
           null; -- TTR results already handled in main translation logic
@@ -1799,22 +1788,10 @@ begin
             end if;
           end loop;
           if hit = '1' then
-            -- Debug: Report ATC hit details
-            -- report "ATC_HIT: addr=0x" & slv_to_hstring(saved_addr_log) &
-                   -- " fc=" & slv_to_string(saved_fc) &
-                   -- " rw=" & std_logic'image(saved_rw) &
-                   -- " hit_idx=" & integer'image(hit_idx) &
-                   -- " attr=" & slv_to_string(atc_attr(hit_idx)) &
-                   -- " base=0x" & slv_to_hstring(atc_phys_base(hit_idx)) &
-                   -- " shift=" & integer'image(atc_shift(hit_idx)) &
-                   -- " page_size=" & integer'image(atc_page_size(hit_idx))
-             --  -- severity note;
-              
             -- Walker filled ATC successfully - check access violations for the original request
             -- BUG #17 FIX: saved_rw='0' is WRITE, saved_rw='1' is READ
             if saved_rw = '0' and atc_attr(hit_idx)(0) = '1' then
               -- Write to write-protected page - generate fault
-             --  -- report "WP_FAULT: Write to WP page detected" severity note;
               status_tmp := encode_mmusr_fault(
                 bus_error => '0',
                 limit_violation => '0',
@@ -1825,23 +1802,23 @@ begin
                 transparent => '0',
                 level => "011"                          -- Page level (3 bits)
               );
-              fault_reg <= '1';
-              fault_status_reg <= status_tmp;
+              -- BUG #396: PTEST/PLOAD walks must NOT update addr_phys_reg or fault_reg.
+              -- These are instruction-initiated walks that only test/preload the ATC.
+              -- Updating addr_phys_reg corrupts the ongoing code fetch translation.
+              if instr_walk_pending = '0' then
+                fault_reg <= '1';
+                fault_status_reg <= status_tmp;
+                phys_base := unsigned(atc_phys_base(hit_idx));
+                offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
+                phys_result := phys_base + offset;
+                addr_phys_reg <= std_logic_vector(phys_result);
+                cache_inhibit_reg <= atc_attr(hit_idx)(2);
+                write_protect_reg <= '1';
+              end if;
               mmusr_update_value <= status_tmp;
               mmusr_update_req <= '1';
-              -- CRITICAL FIX: Output address even on write-protect fault
-              phys_base := unsigned(atc_phys_base(hit_idx));
-              offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
-              phys_result := phys_base + offset;
-              addr_phys_reg <= std_logic_vector(phys_result);
-              cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
-              write_protect_reg <= '1';
-              -- report "WP_FAULT_WALKER: Setting fault_reg=1 for WP violation after walker, addr=0x" & slv_to_hstring(saved_addr_log) &
-                    --  -- " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
             elsif saved_fc(2) = '0' and atc_attr(hit_idx)(3) = '0' then
               -- User trying to access supervisor-only page - generate fault
-              -- atc_attr(3) = U_ACC = NOT(S): 0 means supervisor-only, 1 means user accessible
-             --  -- report "SUPERVISOR_FAULT: User access to supervisor page detected" severity note;
               status_tmp := encode_mmusr_fault(
                 bus_error => '0',
                 limit_violation => '0',
@@ -1852,29 +1829,31 @@ begin
                 transparent => '0',
                 level => "011"                          -- Page level (3 bits)
               );
-              fault_reg <= '1';
-              fault_status_reg <= status_tmp;
+              -- BUG #396: Skip addr_phys_reg update for PTEST/PLOAD walks
+              if instr_walk_pending = '0' then
+                fault_reg <= '1';
+                fault_status_reg <= status_tmp;
+                phys_base := unsigned(atc_phys_base(hit_idx));
+                offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
+                phys_result := phys_base + offset;
+                addr_phys_reg <= std_logic_vector(phys_result);
+                cache_inhibit_reg <= atc_attr(hit_idx)(2);
+                write_protect_reg <= atc_attr(hit_idx)(0);
+              end if;
               mmusr_update_value <= status_tmp;
               mmusr_update_req <= '1';
-              -- CRITICAL FIX: Output address even on supervisor fault
-              phys_base := unsigned(atc_phys_base(hit_idx));
-              offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
-              phys_result := phys_base + offset;
-              addr_phys_reg <= std_logic_vector(phys_result);
-              cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
-              write_protect_reg <= atc_attr(hit_idx)(0);
-              -- report "SUPERVISOR_FAULT_WALKER: Setting fault_reg=1 for supervisor violation after walker, addr=0x" & slv_to_hstring(saved_addr_log) &
-                    --  -- " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
             else
               -- Valid access - update outputs and clear faults for successful translation
-             --  -- report "VALID_ACCESS: Translation successful" severity note;
-              phys_base := unsigned(atc_phys_base(hit_idx));
-              offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
-              phys_result := phys_base + offset;
-              addr_phys_reg <= std_logic_vector(phys_result);
-              cache_inhibit_reg <= atc_attr(hit_idx)(2);
-              write_protect_reg <= atc_attr(hit_idx)(0);
-              fault_reg <= '0';
+              -- BUG #396: Skip addr_phys_reg update for PTEST/PLOAD walks
+              if instr_walk_pending = '0' then
+                phys_base := unsigned(atc_phys_base(hit_idx));
+                offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
+                phys_result := phys_base + offset;
+                addr_phys_reg <= std_logic_vector(phys_result);
+                cache_inhibit_reg <= atc_attr(hit_idx)(2);
+                write_protect_reg <= atc_attr(hit_idx)(0);
+                fault_reg <= '0';
+              end if;
               -- Set successful translation MMUSR with MC68030 format
               status_tmp := encode_mmusr_success(
                 write_protect => atc_attr(hit_idx)(0),   -- WP bit from page attributes
@@ -1884,33 +1863,28 @@ begin
               );
               fault_status_reg <= status_tmp;
               -- BUG #374 FIX: Update MMUSR on successful walker completion
-              -- Previously only fault paths set mmusr_update_req, so PTEST with
-              -- walker path (non-TTR, non-ATC) never updated MMUSR for valid translations.
-              -- This caused MMUSR to remain stale ($0000) after PTEST triggered a walk.
               mmusr_update_value <= status_tmp;
               mmusr_update_req <= '1';
-             --  -- report "VALID_ACCESS: phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
             end if;
           else
             -- No ATC hit found after walker completion - this shouldn't happen normally
             -- But clear translation_pending anyway to prevent deadlock
-            -- CRITICAL FIX: Output logical address as fallback to prevent garbage addresses
-            addr_phys_reg <= saved_addr_log;  -- Pass through logical address as fallback
-            cache_inhibit_reg <= '1';  -- Inhibit cache when walker fails to populate ATC
-            write_protect_reg <= '0';  -- No protection info available
-            -- BUG #142 FIX: Do NOT clear fault_reg if walker just faulted!
-            -- walker_fault_ack_pending='1' means walker_fault handler just set fault_reg='1'
-            -- Clearing it here would make the fault invisible to the CPU, causing infinite loop
-            if walker_fault_ack_pending = '0' then
-              fault_reg <= '0';  -- Only clear fault if not a faulted walker completion
+            -- BUG #396: Skip addr_phys_reg update for PTEST/PLOAD walks
+            if instr_walk_pending = '0' then
+              addr_phys_reg <= saved_addr_log;  -- Pass through logical address as fallback
+              cache_inhibit_reg <= '1';  -- Inhibit cache when walker fails to populate ATC
+              write_protect_reg <= '0';  -- No protection info available
+              -- BUG #142 FIX: Do NOT clear fault_reg if walker just faulted!
+              if walker_fault_ack_pending = '0' then
+                fault_reg <= '0';
+              end if;
             end if;
-            -- report "WALKER_COMPLETED: No ATC hit found after walker completion" &
-                   -- " walker_fault_ack_pending=" & std_logic'image(walker_fault_ack_pending) &
-                  --  -- " addr=0x" & slv_to_hstring(saved_addr_log) severity warning;
           end if; -- hit = '1'
           -- Always clear translation_pending when walker completes, regardless of result
           translation_pending <= '0';
         end if; -- else tmatch0
+        -- BUG #396: Clear instr_walk_pending on walker completion
+        instr_walk_pending <= '0';
         -- Acknowledge walker completion
         walker_completed_ack <= '1';
       else
@@ -3302,6 +3276,9 @@ begin
       pload_req_prev <= '0';
       reg_we_prev <= '0';  -- BUG #16 FIX
       reg_re_prev <= '0';  -- BUG #16 FIX
+      ptest_addr <= (others => '0');  -- BUG #397: driven from this process
+      ptest_fc <= (others => '0');    -- BUG #397: driven from this process
+      ptest_rw <= '1';               -- BUG #397: driven from this process
     elsif rising_edge(clk) then
       -- Update previous values for edge detection
       ptest_req_prev <= ptest_req;
@@ -3311,8 +3288,14 @@ begin
       reg_re_prev <= reg_re;  -- BUG #16 FIX
       
       -- PTEST: Set flag on rising edge only (prevents multiple triggers)
+      -- BUG #397: Capture addr/fc/rw HERE at edge time, not one cycle later
+      -- in the register process. By the register process cycle, micro_state
+      -- may have moved past ptest1, so pmmu_cmd_addr is no longer OP1out.
       if ptest_req = '1' and ptest_req_prev = '0' then
         ptest_update_mmusr <= '1';
+        ptest_addr <= pmmu_addr;
+        ptest_fc <= pmmu_fc;
+        ptest_rw <= pmmu_brief(9);
       else
         ptest_update_mmusr <= '0';
       end if;
