@@ -747,7 +747,8 @@ BEGIN
                                    pmmu_reg_sel_int = "10010" OR pmmu_reg_sel_int = "10011" OR pmmu_reg_sel_int = "11000")
                         else false;
   pmmu_reg_sel  <= pmmu_reg_sel_int;  -- Drive output port from internal signal
-  pmmu_reg_wdat <= pmmu_reg_wdat_d when CPU(1) = '1'  else (others => '0');
+  -- BUG #119 FIX (continued): Use combinational pmmu_src_data to match what PMMU actually receives
+  pmmu_reg_wdat <= pmmu_src_data when CPU(1) = '1'  else (others => '0');
   pmmu_reg_part <= pmmu_reg_part_d when CPU(1) = '1'  else '0';
 
   -- PMMU address interface (for cache virtually-indexed, physically-tagged operation)
