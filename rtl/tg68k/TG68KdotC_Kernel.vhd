@@ -6844,10 +6844,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     next_micro_state <= pmmu_dn_read_wait;
                 WHEN pmove_mem_to_mmu_lo =>
                     -- Memory->MMU: Low part read completed; write LOW word to MMU register
-                    -- BUG #302 FIX: For (An)+ mode, DON'T use pmmu_addr_inc OR OP1addr.
-                    -- OP1addr captures pmove_ea_latched with +6 offset baked in.
-                    -- This avoids double-increment: offset from OP1addr + postadd+pmmu_dbl = +14 total (wrong!).
-                    -- For (An)+ mode, reg_QA (base address) is used directly with postadd+pmmu_dbl for +8 increment.
                     report "DEBUG_PMOVE_LO: data_read=$" &
                            integer'image(conv_integer(data_read(31 downto 16))) & "_" &
                            integer'image(conv_integer(data_read(15 downto 0))) &
@@ -6858,6 +6854,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                            " st=" & integer'image(conv_integer(state)) &
                            " clk_lw=" & std_logic'image(clkena_lw)
                     severity note;
+                    -- BUG #302 FIX: For (An)+ mode, DON'T use pmmu_addr_inc OR OP1addr.
+                    -- OP1addr captures pmove_ea_latched with +6 offset baked in.
+                    -- This avoids double-increment: offset from OP1addr + postadd+pmmu_dbl = +14 total (wrong!).
+                    -- For (An)+ mode, reg_QA (base address) is used directly with postadd+pmmu_dbl for +8 increment.
                     set_exec(pmmu_wr) <= '1';
                     -- BUG #367 FIX: Removed set_exec(mem_addsub) that was causing memmask wait
                     -- cycles, keeping micro_state at pmove_mem_to_mmu_lo for extra cycles and

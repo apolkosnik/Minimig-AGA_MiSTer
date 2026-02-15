@@ -652,6 +652,34 @@ begin
         end if;
     end process;
 
+    -- DEBUG: Monitor PMMU addr_phys during CRP_L read at $1094-$1096
+    ---------------------------------------------------------------
+    phys_monitor: process(clk)
+        variable prev_phys : std_logic_vector(31 downto 0) := (others => '1');
+        variable prev_busy : std_logic := '0';
+        variable prev_walker : std_logic := '0';
+    begin
+        if rising_edge(clk) then
+            if unsigned(pmmu_addr_log) >= x"00001090" and unsigned(pmmu_addr_log) <= x"000010A0" then
+                if pmmu_addr_phys /= prev_phys or pmmu_busy /= prev_busy or pmmu_walker_req /= prev_walker then
+                    report "PHYS_MON: log=0x" & slv_to_hex(pmmu_addr_log) &
+                           " phys=0x" & slv_to_hex(pmmu_addr_phys) &
+                           " busy=" & std_logic'image(pmmu_busy) &
+                           " walk=" & std_logic'image(pmmu_walker_req) &
+                           " clk_in=" & std_logic'image(clkena_in) &
+                           " din=0x" & slv_to_hex(data_in) &
+                           " mwait=" & std_logic'image(mem_wait) &
+                           " fault=" & std_logic'image(debug_pmmu_fault)
+                    severity note;
+                end if;
+                prev_phys := pmmu_addr_phys;
+                prev_busy := pmmu_busy;
+                prev_walker := pmmu_walker_req;
+            end if;
+        end if;
+    end process;
+
+    ---------------------------------------------------------------
     ---------------------------------------------------------------
     -- PC TRACE (for debugging - reports key PC milestones)
     ---------------------------------------------------------------

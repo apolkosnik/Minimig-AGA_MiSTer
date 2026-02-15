@@ -1746,7 +1746,8 @@ begin
         -- Walker faults during PTEST/PLOAD should only update MMUSR, not trigger CPU bus error.
         -- Without this guard, PTEST W on a WP page causes walker_fault -> fault_reg=1 ->
         -- make_berr=1 -> setinterrupt -> spurious bus error exception.
-        if instr_walk_pending = '0' then
+        -- BUG #404: Skip when addr_log has moved past saved_addr_log
+        if instr_walk_pending = '0' and (req = '0' or addr_log = saved_addr_log) then
           fault_reg <= '1';
           fault_status_reg <= status_tmp;
           -- CRITICAL FIX: On fault, output the faulting logical address
@@ -1805,7 +1806,11 @@ begin
               -- BUG #396: PTEST/PLOAD walks must NOT update addr_phys_reg or fault_reg.
               -- These are instruction-initiated walks that only test/preload the ATC.
               -- Updating addr_phys_reg corrupts the ongoing code fetch translation.
-              if instr_walk_pending = '0' then
+              -- BUG #404: When the current addr_log has moved past saved_addr_log
+              -- (e.g., addr auto-incremented during a longword bus cycle), the req='1'
+              -- block above already set addr_phys_reg for the CURRENT address.
+              -- Don't overwrite it with the stale saved_addr_log result.
+              if instr_walk_pending = '0' and (req = '0' or addr_log = saved_addr_log) then
                 fault_reg <= '1';
                 fault_status_reg <= status_tmp;
                 phys_base := unsigned(atc_phys_base(hit_idx));
@@ -1830,7 +1835,8 @@ begin
                 level => "011"                          -- Page level (3 bits)
               );
               -- BUG #396: Skip addr_phys_reg update for PTEST/PLOAD walks
-              if instr_walk_pending = '0' then
+              -- BUG #404: Skip when addr_log has moved past saved_addr_log
+              if instr_walk_pending = '0' and (req = '0' or addr_log = saved_addr_log) then
                 fault_reg <= '1';
                 fault_status_reg <= status_tmp;
                 phys_base := unsigned(atc_phys_base(hit_idx));
@@ -1845,7 +1851,8 @@ begin
             else
               -- Valid access - update outputs and clear faults for successful translation
               -- BUG #396: Skip addr_phys_reg update for PTEST/PLOAD walks
-              if instr_walk_pending = '0' then
+              -- BUG #404: Skip when addr_log has moved past saved_addr_log
+              if instr_walk_pending = '0' and (req = '0' or addr_log = saved_addr_log) then
                 phys_base := unsigned(atc_phys_base(hit_idx));
                 offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
                 phys_result := phys_base + offset;
@@ -1870,7 +1877,8 @@ begin
             -- No ATC hit found after walker completion - this shouldn't happen normally
             -- But clear translation_pending anyway to prevent deadlock
             -- BUG #396: Skip addr_phys_reg update for PTEST/PLOAD walks
-            if instr_walk_pending = '0' then
+            -- BUG #404: Skip when addr_log has moved past saved_addr_log
+            if instr_walk_pending = '0' and (req = '0' or addr_log = saved_addr_log) then
               addr_phys_reg <= saved_addr_log;  -- Pass through logical address as fallback
               cache_inhibit_reg <= '1';  -- Inhibit cache when walker fails to populate ATC
               write_protect_reg <= '0';  -- No protection info available
