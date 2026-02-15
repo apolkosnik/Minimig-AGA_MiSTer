@@ -300,9 +300,9 @@ architecture behavioral of tb_mmu_translation is
         m(252) := x"23C1"; m(253) := x"0000"; m(254) := x"1F40";
         ---------------------------------------------------------------
         -- Phase 9: All Page Size Tests (Tests 14-19)
-        -- Each test: PMOVEFD CRP, MOVE.L #TC,D0, PFLUSHA, PMOVE D0,TC,
+        -- Each test: PMOVEFD CRP, MOVE.L #TC,D0, PMOVE D0,TC,
         --            NOP, MOVE.L $0,D1, MOVE.L D1,$1Fxx
-        -- CRP data placed at $02CE-$02FD (within code page 2 for PS=8)
+        -- CRP data placed at $02B6-$02E5 (within code page 2 for PS=8)
         ---------------------------------------------------------------
 
         -- Test 14: PS=8 (256B pages), TC=$8080CC00, CRP at $02B6

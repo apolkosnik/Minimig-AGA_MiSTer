@@ -125,6 +125,10 @@ architecture rtl of TG68K_PMMU_030 is
   -- TTR transparent translations are identity (phys=log), so we can bypass the register.
   signal ttr0_match_comb : std_logic;
   signal ttr1_match_comb : std_logic;
+  signal ttr0_ci_comb    : std_logic;
+  signal ttr0_wp_comb    : std_logic;
+  signal ttr1_ci_comb    : std_logic;
+  signal ttr1_wp_comb    : std_logic;
 
   -- Translation result latches
   signal addr_phys_reg      : std_logic_vector(31 downto 0) := (others => '0');
@@ -938,15 +942,21 @@ begin
   -- so we can compute the match combinationally and bypass the registered result.
   process(TT0, TT1, addr_log, fc, is_insn, rw, tc_en)
     variable m0, m1 : std_logic;
-    variable ci_dummy, wp_dummy : std_logic;
+    variable ci0, wp0, ci1, wp1 : std_logic;
   begin
     m0 := '0'; m1 := '0';
+    ci0 := '0'; wp0 := '0';
+    ci1 := '0'; wp1 := '0';
     if tc_en = '1' then
-      ttr_check(TT0, addr_log, fc, is_insn, rw, m0, ci_dummy, wp_dummy);
-      ttr_check(TT1, addr_log, fc, is_insn, rw, m1, ci_dummy, wp_dummy);
+      ttr_check(TT0, addr_log, fc, is_insn, rw, m0, ci0, wp0);
+      ttr_check(TT1, addr_log, fc, is_insn, rw, m1, ci1, wp1);
     end if;
     ttr0_match_comb <= m0;
     ttr1_match_comb <= m1;
+    ttr0_ci_comb <= ci0;
+    ttr0_wp_comb <= wp0;
+    ttr1_ci_comb <= ci1;
+    ttr1_wp_comb <= wp1;
   end process;
 
   -- Reset and register writes
@@ -1328,8 +1338,18 @@ begin
                    else addr_phys_reg;
   -- BUG #126 V2 FIX: Combinational bypass for cache_inhibit when MMU disabled
   -- Without this, cache_inhibit_reg retains stale value (pmmu_req='0' when MMU off)
-  cache_inhibit <= '0' when tc_en = '0' else cache_inhibit_reg;
-  write_protect <= write_protect_reg;
+  -- BUG #371 V2 FIX: Also bypass for TTR matches - cache_inhibit and write_protect
+  -- must be consistent with addr_phys in the same cycle, otherwise the cache sees
+  -- the correct I/O address but stale CI=0 from the previous RAM access and
+  -- incorrectly caches I/O data.
+  cache_inhibit <= '0' when tc_en = '0'
+                   else ttr0_ci_comb when ttr0_match_comb = '1'
+                   else ttr1_ci_comb when ttr1_match_comb = '1'
+                   else cache_inhibit_reg;
+  write_protect <= '0' when tc_en = '0'
+                   else ttr0_wp_comb when ttr0_match_comb = '1'
+                   else ttr1_wp_comb when ttr1_match_comb = '1'
+                   else write_protect_reg;
   fault         <= fault_reg;
   fault_status  <= fault_status_reg;
 
