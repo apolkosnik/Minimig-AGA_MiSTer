@@ -107,6 +107,11 @@ architecture behavioral of tb_mmu_translation is
     -- Cache inhibit observation
     signal ci_observed : boolean := false;
 
+    -- TTR CI bypass observation (Test 20)
+    -- Verifies cache_inhibit is correct in the same cycle as addr_phys for TTR matches
+    signal ttr_ci_seen : boolean := false;  -- CI=1 observed during TTR access
+    signal ttr_ci_bug  : boolean := false;  -- CI=0 observed during TTR access (stale!)
+
     -- Memory model: 16384 x 16-bit words = 32KB ($0000-$7FFF)
     type mem_type is array(0 to 16383) of std_logic_vector(15 downto 0);
 
@@ -355,8 +360,9 @@ architecture behavioral of tb_mmu_translation is
         m(339) := x"2239"; m(340) := x"0000"; m(341) := x"0000";
         m(342) := x"23C1"; m(343) := x"0000"; m(344) := x"1F58";
 
-        -- STOP #$2700
-        m(345) := x"4E72"; m(346) := x"2700";
+        -- BRA.W to Test 20 (skip over CRP data)
+        -- PC=$02B2, target=$02E6 (index 371), disp=$02E6-$02B4=$0032
+        m(345) := x"6000"; m(346) := x"0032";
 
         ---------------------------------------------------------------
         -- CRP DATA for Tests 14-19 (at $02B6-$02E5)
@@ -374,6 +380,26 @@ architecture behavioral of tb_mmu_translation is
         m(363) := x"0000"; m(364) := x"0002"; m(365) := x"0000"; m(366) := x"4800";
         -- Test 19 CRP at $02DE (idx 367): root=$4A00
         m(367) := x"0000"; m(368) := x"0002"; m(369) := x"0000"; m(370) := x"4A00";
+
+        ---------------------------------------------------------------
+        -- TEST 20: TTR CI Bypass (at $02E6, index 371)
+        -- Verifies that cache_inhibit output is correct in the SAME cycle
+        -- as addr_phys when a TTR match occurs with CI=1.
+        -- BUG #371 V2: Without combinational CI bypass, cache_inhibit uses
+        -- stale cache_inhibit_reg from the previous translation.
+        ---------------------------------------------------------------
+        -- Set TT1=$FE008507: base=$FE, mask=$00, E=1, CI=1, RWM=1, FC=any
+        m(371) := x"203C"; m(372) := x"FE00"; m(373) := x"8507";  -- MOVE.L #$FE008507,D0
+        m(374) := x"F000"; m(375) := x"0C00";                      -- PMOVE D0,TT1
+        m(376) := x"4E71";                                          -- NOP (pipeline settle)
+        -- Read from normal page to ensure cache_inhibit_reg=0
+        m(377) := x"2239"; m(378) := x"0000"; m(379) := x"0000";  -- MOVE.L $0,D1
+        -- Read from TTR CI=1 region - cache_inhibit must be 1 immediately
+        m(380) := x"2239"; m(381) := x"FE00"; m(382) := x"0000";  -- MOVE.L $FE000000,D1
+        -- Save result (value doesn't matter, CI timing is checked by observer)
+        m(383) := x"23C1"; m(384) := x"0000"; m(385) := x"1F5C";  -- MOVE.L D1,$1F5C
+        -- STOP #$2700
+        m(386) := x"4E72"; m(387) := x"2700";
 
         ---------------------------------------------------------------
         -- PAGE TABLES ($6000-$6FFF)
@@ -768,6 +794,25 @@ begin
         end if;
     end process;
 
+    ---------------------------------------------------------------
+    -- TTR CI BYPASS OBSERVATION (Test 20)
+    -- When addr_out shows a TTR-matched address ($FExxxxxx) during a bus access,
+    -- pmmu_cache_inhibit must already be 1 (not stale 0 from previous translation).
+    -- Without the combinational CI bypass, cache_inhibit_reg lags by 1 cycle.
+    ---------------------------------------------------------------
+    ttr_ci_observe: process(clk)
+    begin
+        if rising_edge(clk) then
+            if busstate /= "00" and addr_out(31 downto 24) = x"FE" then
+                if pmmu_cache_inhibit = '1' then
+                    ttr_ci_seen <= true;
+                else
+                    ttr_ci_bug <= true;
+                end if;
+            end if;
+        end if;
+    end process;
+
     -- DEBUG: Monitor PMMU addr_phys during CRP_L read at $1094-$1096
     ---------------------------------------------------------------
     phys_monitor: process(clk)
@@ -1102,6 +1147,20 @@ begin
             report "  Test 19: expected $00002000, got 0x" & slv_to_hex(val32);
         end if;
         check_test(19, "Page Size 16KB (PS=14, TC=$80E09900)", pass);
+
+        -- Test 20: TTR CI bypass timing
+        -- ttr_ci_seen=true means CI=1 was observed during TTR access (correct)
+        -- ttr_ci_bug=true means CI=0 was observed during TTR access (stale!)
+        pass := ttr_ci_seen and not ttr_ci_bug;
+        if not pass then
+            if ttr_ci_bug then
+                report "  Test 20: cache_inhibit was 0 (stale) during TTR CI=1 access!";
+            end if;
+            if not ttr_ci_seen then
+                report "  Test 20: cache_inhibit=1 never observed during TTR access";
+            end if;
+        end if;
+        check_test(20, "TTR CI bypass: cache_inhibit correct on TTR match", pass);
 
         -- Summary
         report "=========================================================";
