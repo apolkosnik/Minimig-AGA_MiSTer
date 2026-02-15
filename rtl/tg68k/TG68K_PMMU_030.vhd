@@ -1088,8 +1088,15 @@ begin
               if ps_val < 8 then
                 -- Invalid PS - clear E bit to prevent MMU activation
                 tc_write_val(31) := '0';
-                mmu_config_error <= '1';
-               --  -- report "MMU_CONFIG_EXCEPTION: Invalid PS field=" & integer'image(ps_val) & " (must be 8-15), E bit cleared" severity warning;
+                -- BUG #405 FIX: Do NOT fire mmu_config_error exception.
+                -- The E-bit clear already prevents lockup. Firing vector 56
+                -- crashes systems without a handler (e.g. AmigaOS).
+                -- The old code (pre-157efce) had a spurious double-write via
+                -- exec(pmmu_wr) that accidentally cleared mmu_config_error
+                -- before the kernel could dispatch the trap, masking this path.
+                -- synthesis translate_off
+                report "MMU_CONFIG: Invalid PS field=" & integer'image(ps_val) & " (must be 8-15), E bit cleared" severity warning;
+                -- synthesis translate_on
               else
                 -- Check 2: Field sum must equal 32 per MC68030 spec (stop adding TIx at first zero)
                 total_bits := tc_total_bits(reg_wdat);
@@ -1097,10 +1104,11 @@ begin
                 if total_bits /= 32 then
                   -- Invalid field sum - clear E bit to prevent MMU activation
                   tc_write_val(31) := '0';
-                  mmu_config_error <= '1';
-                 --  -- report "MMU_CONFIG_EXCEPTION: Field sum=" & integer'image(total_bits) & " (must be 32), E bit cleared" severity warning;
+                  -- BUG #405 FIX: Silent reject (see above)
+                  -- synthesis translate_off
+                  report "MMU_CONFIG: Field sum=" & integer'image(total_bits) & " (must be 32), E bit cleared" severity warning;
+                  -- synthesis translate_on
                 else
-                  -- BUG #146: Valid TC write - clear any previous config error
                   mmu_config_error <= '0';
                 end if;
               end if;
@@ -1131,11 +1139,12 @@ begin
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
               -- Per spec: Register is loaded BEFORE exception is taken
+              -- BUG #405 FIX: Do NOT fire mmu_config_error (see TC validation comment)
               if reg_wdat(1 downto 0) = "00" then
-                mmu_config_error <= '1';
-               --  -- report "MMU_CONFIG_EXCEPTION: SRP_H DT=00 (invalid descriptor type)" severity warning;
+                -- synthesis translate_off
+                report "MMU_CONFIG: SRP_H DT=00 (invalid descriptor type)" severity warning;
+                -- synthesis translate_on
               else
-                -- BUG #146: Valid SRP_H write (DT!=00) - clear any previous config error
                 mmu_config_error <= '0';
               end if;
             else
@@ -1144,9 +1153,6 @@ begin
               report "PMMU_REG_WRITE: SRP_L reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
               SRP_L <= reg_wdat and CRP_LOW_MASK;  -- Clear reserved bits 3-0
-              -- BUG #148 FIX: Do NOT clear mmu_config_error on low word write
-              -- If high word had DT=00, error must remain latched until explicitly acknowledged
-              -- (via valid high word write or TC write with E=0)
             end if;
             if reg_fd = '0' then  -- Only flush if NOT PMOVEFD
               atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
@@ -1162,11 +1168,12 @@ begin
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
               -- Per spec: Register is loaded BEFORE exception is taken
+              -- BUG #405 FIX: Do NOT fire mmu_config_error (see TC validation comment)
               if reg_wdat(1 downto 0) = "00" then
-                mmu_config_error <= '1';
-               --  -- report "MMU_CONFIG_EXCEPTION: CRP_H DT=00 (invalid descriptor type)" severity warning;
+                -- synthesis translate_off
+                report "MMU_CONFIG: CRP_H DT=00 (invalid descriptor type)" severity warning;
+                -- synthesis translate_on
               else
-                -- BUG #146: Valid CRP_H write (DT!=00) - clear any previous config error
                 mmu_config_error <= '0';
               end if;
             else
@@ -1175,9 +1182,6 @@ begin
               report "PMMU_REG_WRITE: CRP_L reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
               CRP_L <= reg_wdat and CRP_LOW_MASK;  -- Clear reserved bits 3-0
-              -- BUG #148 FIX: Do NOT clear mmu_config_error on low word write
-              -- If high word had DT=00, error must remain latched until explicitly acknowledged
-              -- (via valid high word write or TC write with E=0)
             end if;
             -- CRP changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
