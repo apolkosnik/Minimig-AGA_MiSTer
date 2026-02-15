@@ -1948,9 +1948,6 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 			-- This caused exception 8 (privilege) instead of exception 14 (format error).
 			IF clkena_in='1' THEN
 				trap_vector(31 downto 10) <= (others => '0');
-				IF trap_berr='1' THEN
-					trap_vector(9 downto 0) <= "00" & X"08";
-				END IF;
 				IF trap_addr_error='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"0C";
 				END IF;
@@ -1986,6 +1983,13 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				END IF;
 				IF trap_mmu_config='1' THEN
 					trap_vector(9 downto 0) <= "11" & X"80";  -- Vector 56 (0xE0) - MMU Configuration Error
+				END IF;
+				-- BUG #402 FIX: trap_berr and trap_mmu_berr must come AFTER
+				-- set_vectoraddr to have higher priority (VHDL last-assignment-wins).
+				-- berr8 sets set_vectoraddr='1' which would override trap_vector
+				-- with IPL_vec, corrupting the bus error vector address.
+				IF trap_berr='1' THEN
+					trap_vector(9 downto 0) <= "00" & X"08";
 				END IF;
 				IF trap_mmu_berr='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"F4";  -- Vector 61 (0xF4) - MC68030 MMU Bus Error
@@ -3127,10 +3131,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		END IF;
 		
 		IF interrupt='1' AND trap_berr='1' THEN
-			-- Route bus errors through the stable trap path.
-			-- The custom berr1..berr8 sequence is currently not robust and can
-			-- corrupt exception flow before handler dispatch.
-			next_micro_state <= trap0;
+			-- MC68030 bus errors MUST use berr1-berr8 to push Format $A (16-word) frame.
+			-- Format $0 from trap0 path would crash any handler expecting Format $A.
+			IF cpu(1)='1' THEN
+				next_micro_state <= berr1;
+			ELSE
+				next_micro_state <= trap0;
+			END IF;
+			-- BUG #401 FIX: Set setstackaddr at dispatch so RDindex_A latches A7 ("1111")
+			-- ONE CYCLE BEFORE berr1's first memory write.
+			setstackaddr <= '1';
 			-- Only need stack swap if A7 currently has user stack (preSVmode='0')
 			-- If preSVmode='1', A7 already has supervisor stack, no swap needed
 			-- FlagsSR(5) update to '1' is handled in sequential process (see BUG #151)
@@ -3154,8 +3164,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			-- Format #0 (4-word): All others including privilege violation, F-line, illegal
             -- Format #A (16-word): Bus Error (MC68030)
 			IF cpu(1)='1' AND trap_berr='1' THEN
-				-- Route bus errors through trap0 (see note above).
-				next_micro_state <= trap0;
+				next_micro_state <= berr1;
+				-- BUG #401 FIX: Set setstackaddr at dispatch (see interrupt path above)
+				setstackaddr <= '1';
 			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1') THEN
 				next_micro_state <= trap00;
 			else
@@ -6682,6 +6693,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- If CRP/SRP (64-bit), advance EA and read LOW word
                     -- F-Line Context: Use pmmu_brief for stable values
                     IF (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") THEN  -- SRP or CRP
+                        report "DEBUG_PMOVE_HI: CRP/SRP data_read=$" &
+                               integer'image(conv_integer(data_read(31 downto 16))) & "_" &
+                               integer'image(conv_integer(data_read(15 downto 0))) &
+                               " addr=$" & integer'image(conv_integer(addr)) &
+                               " state=" & integer'image(conv_integer(state))
+                        severity note;
                         set_exec(mem_addsub) <= '1';
                         -- BUG #302 FIX: For (An)+ mode, do NOT set pmmu_addr_inc or OP1addr here!
                         -- For (An)+ mode, the +4 offset for LOW word is handled by memaddr_delta, not register update.
@@ -6831,6 +6848,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- OP1addr captures pmove_ea_latched with +6 offset baked in.
                     -- This avoids double-increment: offset from OP1addr + postadd+pmmu_dbl = +14 total (wrong!).
                     -- For (An)+ mode, reg_QA (base address) is used directly with postadd+pmmu_dbl for +8 increment.
+                    report "DEBUG_PMOVE_LO: data_read=$" &
+                           integer'image(conv_integer(data_read(31 downto 16))) & "_" &
+                           integer'image(conv_integer(data_read(15 downto 0))) &
+                           " din=$" & integer'image(conv_integer(data_in)) &
+                           " ldi=$" & integer'image(conv_integer(last_data_in(15 downto 0))) &
+                           " addr=$" & integer'image(conv_integer(addr)) &
+                           " mm=" & integer'image(conv_integer(memmask)) &
+                           " st=" & integer'image(conv_integer(state)) &
+                           " clk_lw=" & std_logic'image(clkena_lw)
+                    severity note;
                     set_exec(pmmu_wr) <= '1';
                     -- BUG #367 FIX: Removed set_exec(mem_addsub) that was causing memmask wait
                     -- cycles, keeping micro_state at pmove_mem_to_mmu_lo for extra cycles and
@@ -7338,6 +7365,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
             pmove_ea_captured = '0' then
             -- addr is the base address (e.g., 0x1012 for PMOVE CRP,($12,A0))
             -- LO should read/write at base+4 (e.g., 0x1016)
+            report "DEBUG_EA_CAPTURE: addr=$" & integer'image(conv_integer(addr)) &
+                   " ea_latched will be $" & integer'image(conv_integer(addr + 4))
+            severity note;
             pmove_ea_latched <= addr + 4;
             pmove_ea_captured <= '1';
         end if;

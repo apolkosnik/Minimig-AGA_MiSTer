@@ -151,8 +151,8 @@ architecture behavioral of tb_mmu_translation is
         m(67) := x"8E86";
         -- $0088: MOVE.L D7,$1F00.L
         m(68) := x"23C7"; m(69) := x"0000"; m(70) := x"1F00";
-        -- $008E: STOP #$2700
-        m(71) := x"4E72"; m(72) := x"2700";
+        -- $008E: JMP $01E0 (Go to Test 13)
+        m(71) := x"4EF9"; m(72) := x"0000"; m(73) := x"01E0";
 
         ---------------------------------------------------------------
         -- UNEXPECTED TRAP HANDLER at $00A0 (indices 80-87)
@@ -281,8 +281,25 @@ architecture behavioral of tb_mmu_translation is
         -- MOVE.L #$FFFFFFFF,$1F00
         m(233) := x"23FC"; m(234) := x"FFFF"; m(235) := x"FFFF";
         m(236) := x"0000"; m(237) := x"1F00";
+        -- Fallthrough to Test 13
+        m(238) := x"4E71"; m(239) := x"4E71";
+
+        -- Phase 8: Large Page Size (32K) Crash Test (starts at index 240 = $01E0)
+        -- Test 13: Switch to 32K pages (TC=$80F09800)
+        -- PMOVE ($1090).W,CRP
+        m(240) := x"F038"; m(241) := x"4C00"; m(242) := x"1090";
+        -- MOVE.L #$80F09800,D0  (PS=15/32K, TIA=9, TIB=8)
+        m(243) := x"203C"; m(244) := x"80F0"; m(245) := x"9800";
+        -- PMOVE D0,TC
+        m(246) := x"F000"; m(247) := x"4000";
+        -- NOP (flush pipeline)
+        m(248) := x"4E71";
+        -- MOVE.L $0,D1 (Read from 0 - should map to 0)
+        m(249) := x"2239"; m(250) := x"0000"; m(251) := x"0000";
+        -- MOVE.L D1,$1F40 (Save result)
+        m(252) := x"23C1"; m(253) := x"0000"; m(254) := x"1F40";
         -- STOP #$2700
-        m(238) := x"4E72"; m(239) := x"2700";
+        m(255) := x"4E72"; m(256) := x"2700";
 
         ---------------------------------------------------------------
         -- PAGE TABLES ($6000-$6FFF)
@@ -309,6 +326,21 @@ architecture behavioral of tb_mmu_translation is
         m(12808) := x"0000"; m(12809) := x"4041";
         -- Entry 5: INVALID (DT=00)
         m(12810) := x"0000"; m(12811) := x"0000";
+
+        ---------------------------------------------------------------
+        -- TEST 13 DATA (32K Pages)
+        ---------------------------------------------------------------
+        -- Root Table at $7000 (index 14336)
+        -- TIA=9 bits. Entry 0 -> L1 at $7800 (DT=2)
+        m(14336) := x"0000"; m(14337) := x"7802";
+
+        -- L1 Table at $7800 (index 15360)
+        -- TIB=8 bits. Entry 0 -> Page 0 (DT=1)
+        m(15360) := x"0000"; m(15361) := x"0001";
+
+        -- CRP Data for Test 13 at $1090 (index 2120)
+        m(2120) := x"0000"; m(2121) := x"0002";
+        m(2122) := x"0000"; m(2123) := x"7000";
 
         ---------------------------------------------------------------
         -- CRP DATA at $1080 (index $1080/2 = 2112)
@@ -867,6 +899,16 @@ begin
                    integer'image(to_integer(unsigned(val32(15 downto 0))));
         end if;
         check_test(12, "WP write triggers bus error (marker $BE00000C)", pass);
+
+        -- Test 13: 32K Page Access
+        -- mem index: $1F40/2 = 4000
+        val32 := mem(4000) & mem(4001);
+        -- Expect to read $00002000 (Initial SSP at address 0)
+        pass := (val32 = x"00002000");
+        if not pass then
+            report "  Test 13: expected $00002000, got 0x" & slv_to_hex(val32);
+        end if;
+        check_test(13, "Large Page (32K) Access (TC=$80F09800)", pass);
 
         -- Summary
         report "=========================================================";
