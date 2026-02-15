@@ -3167,8 +3167,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				next_micro_state <= berr1;
 				-- BUG #401 FIX: Set setstackaddr at dispatch (see interrupt path above)
 				setstackaddr <= '1';
-			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1') THEN
-				next_micro_state <= trap00;
+			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR trap_mmu_config='1') THEN
+				next_micro_state <= trap00;  -- Format #2 (6-word) per MC68030 UM Table 8-4
 			else
 				next_micro_state <= trap0;
 			end if;
