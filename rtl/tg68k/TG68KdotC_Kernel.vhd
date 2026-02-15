@@ -2287,20 +2287,16 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 			END IF;
 		END IF;
 
-		-- BUG #390 V3 FIX: CRP/SRP 64-bit LO READ address override using pmove_ea_latched.
-		-- pmove_ea_latched (= EA + 4) was captured during the HI read's first bus cycle
-		-- and is always correct regardless of EA mode (An, An+, -An, d16, d8+Xn, abs).
-		-- At the exec->LO-read transition, ELSIF 2100 set use_base='0', so memaddr_reg=0
-		-- and memaddr_delta IS the full address. No delta_rega/regb mechanism needed.
-		-- First word: EA + 4, Second word: EA + 6 (the two words of the LO longword).
-		-- The WRITE path (pmove_mmu_to_mem_lo) does NOT use this override - it uses the
-		-- registered pmove_ea_latched via ELSIF 2066 and the normal delta_rega mechanism.
+		-- BUG #302: Combinational +4 offset for (An)+ CRP/SRP LOW word reads
 		IF (micro_state = pmove_mem_to_mmu_lo) AND
-		   (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") THEN
+		   (next_micro_state = pmove_mem_to_mmu_lo OR next_micro_state = idle) AND
+		   (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") AND
+		   pmmu_ea_mode_latched(5 downto 3)="011" THEN
+			-- Add +4 base offset, +2 more for second word of longword
 			IF memmaskmux(3)='1' THEN
-				memaddr_delta <= pmove_ea_latched + X"00000002";  -- EA + 6 (second word of LO longword)
+				memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb + X"00000006";
 			ELSE
-				memaddr_delta <= pmove_ea_latched;  -- EA + 4 (first word of LO longword)
+				memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb + X"00000004";
 			END IF;
 		ELSE
 			memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb;
