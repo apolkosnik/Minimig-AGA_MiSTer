@@ -554,10 +554,14 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	assign cache_miss = ((i_cache_enabled & ~i_cache_hit & i_cache_req) | (d_cache_enabled & ~d_cache_hit & d_cache_req));
 
 	// Connect cache fill interface to external memory controller
-	assign cache_req = i_fill_req | d_fill_req;
+	// IBE/DBE bits control whether cache fills are allowed (not burst mode itself)
+	// When IBE=0, instruction cache fills are disabled (all I-fetches bypass cache)
+	// When DBE=0, data cache fills are disabled (all D-accesses bypass cache)
+	// SDRAM burst mode is always BURST=4 (hardcoded in sdram_ctrl.v line 291)
+	assign cache_req = (i_fill_req & cacr_ibe) | (d_fill_req & cacr_dbe);
 	assign cache_addr = i_fill_req ? i_fill_addr : d_fill_addr;
 
-	// Burst mode control - request burst when IBE/DBE bits are set
+	// Burst control - unused (SDRAM permanently in BURST=4 mode)
 	assign cache_burst = ((i_fill_req & cacr_ibe) | (d_fill_req & cacr_dbe));
 	assign cache_burst_len = 3'd7;  // Always 8 words for 128-bit cache line
 

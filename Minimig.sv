@@ -454,11 +454,12 @@ wire [2:0]  cpu_cache_burst_len; // Burst length (always 7 for 8-word cache line
 wire [28:1] cpu_cache_ramaddr;   // BUG #128: Properly encoded ramaddr for cache fills
 
 // Cache fill state machine - handles 8 consecutive reads for 128-bit cache line
-// BURST MODE: When cpu_cache_burst is set (IBE/DBE from CACR), the SDRAM controller
-// uses its internal burst=4 configuration to fetch words more efficiently.
-// The sdram_ctrl is already configured for burst length 4 (line 291 in sdram_ctrl.v),
-// so when IBE/DBE is set, cache fills benefit from burst transfers automatically.
-// Interface still uses 8 ram_ready pulses but SDRAM uses fewer command cycles internally.
+// IBE/DBE CONTROL: CACR bits 4 (IBE) and 12 (DBE) control whether cache fills occur:
+//   - IBE=0: Instruction cache fills disabled, all I-fetches bypass cache
+//   - DBE=0: Data cache fills disabled, all D-accesses bypass cache
+//   - IBE/DBE=1: Cache fills enabled (current behavior)
+// SDRAM is permanently configured for BURST=4 (sdram_ctrl.v line 291).
+// Cache fills always use burst transfers; IBE/DBE just enable/disable fills entirely.
 reg  [2:0]  cache_fill_cnt;
 reg         cache_fill_active;
 reg  [31:0] cache_fill_addr;
