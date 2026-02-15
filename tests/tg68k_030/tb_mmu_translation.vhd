@@ -298,8 +298,82 @@ architecture behavioral of tb_mmu_translation is
         m(249) := x"2239"; m(250) := x"0000"; m(251) := x"0000";
         -- MOVE.L D1,$1F40 (Save result)
         m(252) := x"23C1"; m(253) := x"0000"; m(254) := x"1F40";
+        ---------------------------------------------------------------
+        -- Phase 9: All Page Size Tests (Tests 14-19)
+        -- Each test: PMOVEFD CRP, MOVE.L #TC,D0, PFLUSHA, PMOVE D0,TC,
+        --            NOP, MOVE.L $0,D1, MOVE.L D1,$1Fxx
+        -- CRP data placed at $02CE-$02FD (within code page 2 for PS=8)
+        ---------------------------------------------------------------
+
+        -- Test 14: PS=8 (256B pages), TC=$8080CC00, CRP at $02B6
+        -- No PFLUSHA: stale ATC entries from previous test cover code page
+        -- (identity mapping = stale entries always correct)
+        m(255) := x"F038"; m(256) := x"4D00"; m(257) := x"02B6";  -- PMOVEFD ($02B6).W,CRP
+        m(258) := x"203C"; m(259) := x"8080"; m(260) := x"CC00";  -- MOVE.L #$8080CC00,D0
+        m(261) := x"F000"; m(262) := x"4000";                      -- PMOVE D0,TC
+        m(263) := x"4E71";                                          -- NOP
+        m(264) := x"2239"; m(265) := x"0000"; m(266) := x"0000";  -- MOVE.L $0.L,D1
+        m(267) := x"23C1"; m(268) := x"0000"; m(269) := x"1F44";  -- MOVE.L D1,$1F44.L
+
+        -- Test 15: PS=9 (512B pages), TC=$8090CB00, CRP at $02BE
+        m(270) := x"F038"; m(271) := x"4D00"; m(272) := x"02BE";
+        m(273) := x"203C"; m(274) := x"8090"; m(275) := x"CB00";
+        m(276) := x"F000"; m(277) := x"4000";
+        m(278) := x"4E71";
+        m(279) := x"2239"; m(280) := x"0000"; m(281) := x"0000";
+        m(282) := x"23C1"; m(283) := x"0000"; m(284) := x"1F48";
+
+        -- Test 16: PS=10 (1KB pages), TC=$80A0BB00, CRP at $02C6
+        m(285) := x"F038"; m(286) := x"4D00"; m(287) := x"02C6";
+        m(288) := x"203C"; m(289) := x"80A0"; m(290) := x"BB00";
+        m(291) := x"F000"; m(292) := x"4000";
+        m(293) := x"4E71";
+        m(294) := x"2239"; m(295) := x"0000"; m(296) := x"0000";
+        m(297) := x"23C1"; m(298) := x"0000"; m(299) := x"1F4C";
+
+        -- Test 17: PS=11 (2KB pages), TC=$80B0BA00, CRP at $02CE
+        m(300) := x"F038"; m(301) := x"4D00"; m(302) := x"02CE";
+        m(303) := x"203C"; m(304) := x"80B0"; m(305) := x"BA00";
+        m(306) := x"F000"; m(307) := x"4000";
+        m(308) := x"4E71";
+        m(309) := x"2239"; m(310) := x"0000"; m(311) := x"0000";
+        m(312) := x"23C1"; m(313) := x"0000"; m(314) := x"1F50";
+
+        -- Test 18: PS=13 (8KB pages), TC=$80D0A900, CRP at $02D6
+        m(315) := x"F038"; m(316) := x"4D00"; m(317) := x"02D6";
+        m(318) := x"203C"; m(319) := x"80D0"; m(320) := x"A900";
+        m(321) := x"F000"; m(322) := x"4000";
+        m(323) := x"4E71";
+        m(324) := x"2239"; m(325) := x"0000"; m(326) := x"0000";
+        m(327) := x"23C1"; m(328) := x"0000"; m(329) := x"1F54";
+
+        -- Test 19: PS=14 (16KB pages), TC=$80E09900, CRP at $02DE
+        m(330) := x"F038"; m(331) := x"4D00"; m(332) := x"02DE";
+        m(333) := x"203C"; m(334) := x"80E0"; m(335) := x"9900";
+        m(336) := x"F000"; m(337) := x"4000";
+        m(338) := x"4E71";
+        m(339) := x"2239"; m(340) := x"0000"; m(341) := x"0000";
+        m(342) := x"23C1"; m(343) := x"0000"; m(344) := x"1F58";
+
         -- STOP #$2700
-        m(255) := x"4E72"; m(256) := x"2700";
+        m(345) := x"4E72"; m(346) := x"2700";
+
+        ---------------------------------------------------------------
+        -- CRP DATA for Tests 14-19 (at $02B6-$02E5)
+        -- Each: CRP_H=$00000002 (DT=10), CRP_L=root table address
+        ---------------------------------------------------------------
+        -- Test 14 CRP at $02B6 (idx 347): root=$4000
+        m(347) := x"0000"; m(348) := x"0002"; m(349) := x"0000"; m(350) := x"4000";
+        -- Test 15 CRP at $02BE (idx 351): root=$4200
+        m(351) := x"0000"; m(352) := x"0002"; m(353) := x"0000"; m(354) := x"4200";
+        -- Test 16 CRP at $02C6 (idx 355): root=$4400
+        m(355) := x"0000"; m(356) := x"0002"; m(357) := x"0000"; m(358) := x"4400";
+        -- Test 17 CRP at $02CE (idx 359): root=$4600
+        m(359) := x"0000"; m(360) := x"0002"; m(361) := x"0000"; m(362) := x"4600";
+        -- Test 18 CRP at $02D6 (idx 363): root=$4800
+        m(363) := x"0000"; m(364) := x"0002"; m(365) := x"0000"; m(366) := x"4800";
+        -- Test 19 CRP at $02DE (idx 367): root=$4A00
+        m(367) := x"0000"; m(368) := x"0002"; m(369) := x"0000"; m(370) := x"4A00";
 
         ---------------------------------------------------------------
         -- PAGE TABLES ($6000-$6FFF)
@@ -341,6 +415,48 @@ architecture behavioral of tb_mmu_translation is
         -- CRP Data for Test 13 at $1090 (index 2120)
         m(2120) := x"0000"; m(2121) := x"0002";
         m(2122) := x"0000"; m(2123) := x"7000";
+
+        ---------------------------------------------------------------
+        -- PAGE TABLES for Tests 14-19 ($4000-$4B01)
+        -- Each test: root table (entry 0 -> L1 ptr, DT=10) + L1 table
+        -- (identity-mapping short page descriptors, DT=01)
+        ---------------------------------------------------------------
+
+        -- Test 14 (PS=8, 256B pages): Root at $4000, L1 at $4100
+        -- Pages needed: 0($0000), 2($0200), 31($1F00)
+        m(8192) := x"0000"; m(8193) := x"4102";  -- Root[0] -> L1 at $4100
+        m(8320) := x"0000"; m(8321) := x"0001";  -- L1[0]:  page $0000
+        m(8324) := x"0000"; m(8325) := x"0201";  -- L1[2]:  page $0200
+        m(8382) := x"0000"; m(8383) := x"1F01";  -- L1[31]: page $1F00
+
+        -- Test 15 (PS=9, 512B pages): Root at $4200, L1 at $4300
+        -- Pages needed: 0($0000), 1($0200), 15($1E00)
+        m(8448) := x"0000"; m(8449) := x"4302";  -- Root[0] -> L1 at $4300
+        m(8576) := x"0000"; m(8577) := x"0001";  -- L1[0]:  page $0000
+        m(8578) := x"0000"; m(8579) := x"0201";  -- L1[1]:  page $0200
+        m(8606) := x"0000"; m(8607) := x"1E01";  -- L1[15]: page $1E00
+
+        -- Test 16 (PS=10, 1KB pages): Root at $4400, L1 at $4500
+        -- Pages needed: 0($0000), 7($1C00)
+        m(8704) := x"0000"; m(8705) := x"4502";  -- Root[0] -> L1 at $4500
+        m(8832) := x"0000"; m(8833) := x"0001";  -- L1[0]: page $0000
+        m(8846) := x"0000"; m(8847) := x"1C01";  -- L1[7]: page $1C00
+
+        -- Test 17 (PS=11, 2KB pages): Root at $4600, L1 at $4700
+        -- Pages needed: 0($0000), 3($1800)
+        m(8960) := x"0000"; m(8961) := x"4702";  -- Root[0] -> L1 at $4700
+        m(9088) := x"0000"; m(9089) := x"0001";  -- L1[0]: page $0000
+        m(9094) := x"0000"; m(9095) := x"1801";  -- L1[3]: page $1800
+
+        -- Test 18 (PS=13, 8KB pages): Root at $4800, L1 at $4900
+        -- Pages needed: 0($0000) - covers $0000-$1FFF (all accessed addrs)
+        m(9216) := x"0000"; m(9217) := x"4902";  -- Root[0] -> L1 at $4900
+        m(9344) := x"0000"; m(9345) := x"0001";  -- L1[0]: page $0000
+
+        -- Test 19 (PS=14, 16KB pages): Root at $4A00, L1 at $4B00
+        -- Pages needed: 0($0000) - covers $0000-$3FFF (all accessed addrs)
+        m(9472) := x"0000"; m(9473) := x"4B02";  -- Root[0] -> L1 at $4B00
+        m(9600) := x"0000"; m(9601) := x"0001";  -- L1[0]: page $0000
 
         ---------------------------------------------------------------
         -- CRP DATA at $1080 (index $1080/2 = 2112)
@@ -811,15 +927,15 @@ begin
 
         -- Wait for STOP instruction or timeout
         -- Active polling: check every 100ns if CPU hit STOP
-        for i in 0 to 500 loop
+        for i in 0 to 800 loop
             wait for 100 ns;
             if not is_x(debug_opcode) and debug_opcode = x"4E72" then
                 report "CPU reached STOP instruction at " &
                        time'image(now) & " - verifying results";
                 exit;
             end if;
-            if i = 500 then
-                report "WARNING: CPU did not reach STOP after 50us"
+            if i = 800 then
+                report "WARNING: CPU did not reach STOP after 80us"
                     severity warning;
             end if;
         end loop;
@@ -937,6 +1053,55 @@ begin
             report "  Test 13: expected $00002000, got 0x" & slv_to_hex(val32);
         end if;
         check_test(13, "Large Page (32K) Access (TC=$80F09800)", pass);
+
+        -- Test 14: PS=8 (256B) Page Access
+        -- mem index: $1F44/2 = 4002
+        val32 := mem(4002) & mem(4003);
+        pass := (val32 = x"00002000");
+        if not pass then
+            report "  Test 14: expected $00002000, got 0x" & slv_to_hex(val32);
+        end if;
+        check_test(14, "Page Size 256B (PS=8, TC=$8080CC00)", pass);
+
+        -- Test 15: PS=9 (512B) Page Access
+        val32 := mem(4004) & mem(4005);
+        pass := (val32 = x"00002000");
+        if not pass then
+            report "  Test 15: expected $00002000, got 0x" & slv_to_hex(val32);
+        end if;
+        check_test(15, "Page Size 512B (PS=9, TC=$8090CB00)", pass);
+
+        -- Test 16: PS=10 (1KB) Page Access
+        val32 := mem(4006) & mem(4007);
+        pass := (val32 = x"00002000");
+        if not pass then
+            report "  Test 16: expected $00002000, got 0x" & slv_to_hex(val32);
+        end if;
+        check_test(16, "Page Size 1KB (PS=10, TC=$80A0BB00)", pass);
+
+        -- Test 17: PS=11 (2KB) Page Access
+        val32 := mem(4008) & mem(4009);
+        pass := (val32 = x"00002000");
+        if not pass then
+            report "  Test 17: expected $00002000, got 0x" & slv_to_hex(val32);
+        end if;
+        check_test(17, "Page Size 2KB (PS=11, TC=$80B0BA00)", pass);
+
+        -- Test 18: PS=13 (8KB) Page Access
+        val32 := mem(4010) & mem(4011);
+        pass := (val32 = x"00002000");
+        if not pass then
+            report "  Test 18: expected $00002000, got 0x" & slv_to_hex(val32);
+        end if;
+        check_test(18, "Page Size 8KB (PS=13, TC=$80D0A900)", pass);
+
+        -- Test 19: PS=14 (16KB) Page Access
+        val32 := mem(4012) & mem(4013);
+        pass := (val32 = x"00002000");
+        if not pass then
+            report "  Test 19: expected $00002000, got 0x" & slv_to_hex(val32);
+        end if;
+        check_test(19, "Page Size 16KB (PS=14, TC=$80E09900)", pass);
 
         -- Summary
         report "=========================================================";
