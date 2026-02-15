@@ -6469,6 +6469,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                 CASE pmmu_opcode(5 downto 3) IS
                                     WHEN "010" | "011" | "100" =>
                                         -- (An), (An)+, -(An)
+                                        -- BUG #398 FIX: Clear ea_build for simple modes!
+                                        -- The ea_build set at line 6460 persists as exec(ea_build)
+                                        -- into pmove_mmu_to_mem_hi / pmove_mem_to_mmu_hi, causing
+                                        -- the EA builder (line 3264) to re-fire and assert
+                                        -- presub/postadd/get_ea_now again. This results in DOUBLE
+                                        -- presub for -(An) and DOUBLE postadd for (An)+, corrupting
+                                        -- the address register. Same fix as BUG #387 for mode "111".
+                                        set(ea_build) <= '0';
                                         IF pmmu_brief(9)='1' THEN
                                             -- MMU -> Memory
                                             set_exec(pmmu_rd) <= '1';
