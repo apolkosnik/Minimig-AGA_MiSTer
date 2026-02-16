@@ -1047,7 +1047,7 @@ begin
             -- 31-24: Logical Address Base, 23-16: Logical Address Mask
             -- 15: E (Enable), 14-11: Reserved, 10: CI (Cache Inhibit), 9: RW, 8: RWM
             -- 7: Reserved, 6-4: FC Base, 3: Reserved, 2-0: FC Mask
-            TT0 <= reg_wdat and TTR_WRITE_MASK;  -- Clear reserved bits 14-11,7,3
+            TT0 <= reg_wdat;  -- TEMP: masks disabled for debugging -- and TTR_WRITE_MASK;
             -- TT0 changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
               atc_flush_req <= '1';
@@ -1060,7 +1060,7 @@ begin
             -- 31-24: Logical Address Base, 23-16: Logical Address Mask
             -- 15: E (Enable), 14-11: Reserved, 10: CI (Cache Inhibit), 9: RW, 8: RWM
             -- 7: Reserved, 6-4: FC Base, 3: Reserved, 2-0: FC Mask
-            TT1 <= reg_wdat and TTR_WRITE_MASK;  -- Clear reserved bits 14-11,7,3
+            TT1 <= reg_wdat;  -- TEMP: masks disabled for debugging -- and TTR_WRITE_MASK;
             -- TT1 changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
               atc_flush_req <= '1';
@@ -1075,7 +1075,7 @@ begin
             -- BUG #48 FIX: Validate configuration BEFORE writing TC to prevent lockup
             -- If configuration is invalid and E=1, clear E bit to prevent MMU activation
             -- This prevents system lockup from invalid MMU config while still taking exception
-            tc_write_val := reg_wdat and TC_WRITE_MASK;  -- Clear reserved bits 30-26
+            tc_write_val := reg_wdat;  -- TEMP: masks disabled for debugging -- and TC_WRITE_MASK;
             tc_e := reg_wdat(31);
 
             if tc_e = '1' then
@@ -1135,7 +1135,7 @@ begin
               -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
               report "PMMU_REG_WRITE: SRP_H reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              SRP_H <= reg_wdat and CRP_HIGH_MASK;  -- Clear reserved bits 47-33 (bits 15-2 in high word)
+              SRP_H <= reg_wdat;  -- TEMP: masks disabled for debugging -- and CRP_HIGH_MASK;
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
               -- Per spec: Register is loaded BEFORE exception is taken
@@ -1152,7 +1152,7 @@ begin
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
               report "PMMU_REG_WRITE: SRP_L reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              SRP_L <= reg_wdat and CRP_LOW_MASK;  -- Clear reserved bits 3-0
+              SRP_L <= reg_wdat;  -- TEMP: masks disabled for debugging -- and CRP_LOW_MASK;
             end if;
             if reg_fd = '0' then  -- Only flush if NOT PMOVEFD
               atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
@@ -1164,7 +1164,7 @@ begin
               -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
               report "PMMU_REG_WRITE: CRP_H reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              CRP_H <= reg_wdat and CRP_HIGH_MASK;  -- Clear reserved bits 47-33 (bits 15-2 in high word)
+              CRP_H <= reg_wdat;  -- TEMP: masks disabled for debugging -- and CRP_HIGH_MASK;
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
               -- Per spec: Register is loaded BEFORE exception is taken
@@ -1181,7 +1181,7 @@ begin
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
               report "PMMU_REG_WRITE: CRP_L reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              CRP_L <= reg_wdat and CRP_LOW_MASK;  -- Clear reserved bits 3-0
+              CRP_L <= reg_wdat;  -- TEMP: masks disabled for debugging -- and CRP_LOW_MASK;
             end if;
             -- CRP changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then

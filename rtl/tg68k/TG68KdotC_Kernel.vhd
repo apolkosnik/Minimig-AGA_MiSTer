@@ -2108,6 +2108,12 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					      memmaskmux(3)='1' AND setstate /= "00" THEN
 						memaddr_delta_rega <= pmove_ea_latched;
 						use_base <= '0';
+						-- synthesis translate_off
+						report "DBG_LO_ELSIF: micro=" & micro_states'image(micro_state) &
+						       " ea_latched=$" & integer'image(conv_integer(pmove_ea_latched)) &
+						       " setstate=" & integer'image(conv_integer(setstate)) &
+						       " mmux3=" & std_logic'image(memmaskmux(3)) severity note;
+						-- synthesis translate_on
 					
 					-- BUG #302 FIX: Special case for (An)+ mode CRP/SRP LOW word reads
 					-- BUG #339 FIX: pmove_decode handling - memmaskmux not reliable during decode
@@ -2156,7 +2162,16 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 						-- is stale (overwritten by HI read data) for displacement modes.
 						IF micro_state = pmove_mem_to_mmu_hi AND
 						   (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") THEN
+							-- READ direction: LO word bus read is initiated by HI handler (setstate="10").
+							-- During HI longword bus cycle, mem_addsub ELSIF contaminates delta_rega
+							-- with the second-word address (EA+2) on clkena_in edges where memmaskmux(3)='0'.
+							-- Correct the LO address to EA+4 by adding 2 to the contaminated addr.
+							memaddr_delta_rega <= addr + 2;
 							use_base <= '0';
+							-- synthesis translate_off
+							report "DBG_HI_CRP: addr=$" & integer'image(conv_integer(addr)) &
+							       " setting delta_rega=$" & integer'image(conv_integer(addr + 2)) severity note;
+							-- synthesis translate_on
 						-- (An) / (An)+ / -(An) modes: zero delta, use register base
 						-- For -(An), the register was already decremented by presub during
 						-- pmove_decode, so use zero delta with the base register (which now
@@ -2204,9 +2219,6 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				-- corrupting last_opc_read. Fix: exclude this case so we fall through to
 				-- the setstate="00" ELSIF at line 2033 which correctly uses TG68_PC_add.
 				ELSIF (memmaskmux(3)='0' OR exec(mem_addsub)='1') AND NOT
-				      ((micro_state = pmove_mem_to_mmu_lo) AND
-				       (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") AND
-				       pmmu_ea_mode_latched(5 downto 3)="011") AND NOT
 				      -- BUG #392 FIX: Only block addsub_q for -(An) during setup (state /= "11").
 				      -- During the actual bus write (state="11"), addsub_q provides the +2 word
 				      -- increment needed for the second half of a longword transfer. Without this,
@@ -2287,20 +2299,9 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 			END IF;
 		END IF;
 
-		-- BUG #302: Combinational +4 offset for (An)+ CRP/SRP LOW word reads
-		IF (micro_state = pmove_mem_to_mmu_lo) AND
-		   (next_micro_state = pmove_mem_to_mmu_lo OR next_micro_state = idle) AND
-		   (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011") AND
-		   pmmu_ea_mode_latched(5 downto 3)="011" THEN
-			-- Add +4 base offset, +2 more for second word of longword
-			IF memmaskmux(3)='1' THEN
-				memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb + X"00000006";
-			ELSE
-				memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb + X"00000004";
-			END IF;
-		ELSE
-			memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb;
-		END IF;
+		-- CRP/SRP LO word address: handled by ELSIF chain above via pmove_ea_latched
+		-- (pmove_ea_latched = EA+4, set with use_base='0' as absolute address)
+		memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb;
 
 		-- if access done, and not aligned, don't increment
         addr <= memaddr_reg+memaddr_delta;
@@ -6804,7 +6805,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- the ELSIF chain falls through to data_write_tmp<=OP2out, corrupting the LO word.
                         set(hold_dwr) <= '1';
                         setstate <= "11"; -- write
-                        next_micro_state <= nop;
+                        -- BUG #303/353 FIX: Transition to wait state to allow write completion
+                        next_micro_state <= pmmu_dn_read_wait;
                     END IF;
                 WHEN pmove_mmu_to_mem_lo =>
                     -- MMU -> memory write of low part (for CRP/SRP)
@@ -6834,8 +6836,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     set(hold_dwr) <= '1';
                     set_exec(pmmu_rd) <= '1';     -- keep PMMU selector active for low word
                     setstate <= "11"; -- write low part
-                    -- Return to idle to resume fetch/PC sequencing
-                    next_micro_state <= idle;
+                    -- BUG #391 FIX: Use pmmu_dn_read_wait instead of idle to prevent premature
+                    -- retirement during the LO bus write. With idle, setendOPC fires (idle is
+                    -- NOT in the exclusion list), latching the brief word as the next opcode.
+                    -- pmmu_dn_read_wait IS in the exclusion list, so setendOPC is suppressed.
+                    next_micro_state <= pmmu_dn_read_wait;
                 WHEN pmove_mem_to_mmu_lo =>
                     -- Memory->MMU: Low part read completed; write LOW word to MMU register
                     report "DEBUG_PMOVE_LO: data_read=$" &
