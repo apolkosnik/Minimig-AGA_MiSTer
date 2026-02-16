@@ -1844,7 +1844,7 @@ begin
         nReset <= '1';
 
         -- Run simulation (cap runtime)
-        wait for 300 us;
+        wait for 150 us;
         if exec_seen = '0' then
             write(l, string'("FAIL: No EXEC observed (core never executed any instruction)"));
             writeline(output, l);
