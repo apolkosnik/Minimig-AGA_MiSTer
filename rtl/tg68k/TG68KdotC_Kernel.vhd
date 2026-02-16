@@ -6804,8 +6804,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- the ELSIF chain falls through to data_write_tmp<=OP2out, corrupting the LO word.
                         set(hold_dwr) <= '1';
                         setstate <= "11"; -- write
-                        -- BUG #303/353 FIX: Transition to wait state to allow write completion
-                        next_micro_state <= pmmu_dn_read_wait;
+                        next_micro_state <= nop;
                     END IF;
                 WHEN pmove_mmu_to_mem_lo =>
                     -- MMU -> memory write of low part (for CRP/SRP)
@@ -6835,17 +6834,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     set(hold_dwr) <= '1';
                     set_exec(pmmu_rd) <= '1';     -- keep PMMU selector active for low word
                     setstate <= "11"; -- write low part
-                    -- BUG #391 FIX: Use pmmu_dn_read_wait instead of idle to prevent premature
-                    -- retirement during the LO bus write. With idle, micro_state=idle during the
-                    -- LO write, causing setendOPC to fire (idle is NOT in the exclusion list),
-                    -- which latches the brief word ($4E00) as the next opcode and clears
-                    -- fline_context_valid. pmmu_dn_read_wait IS in the exclusion list, so
-                    -- setendOPC is suppressed during the bus write. Retirement still happens:
-                    -- pmmu_dn_read_wait -> idle (one cycle after LO write completes) -> setendOPC.
-                    -- (Supersedes BUG #381 which used idle - the extra retirement cycle delay
-                    -- is correct since BUG #381's concern about setendOPC is resolved by the
-                    -- natural idle transition from pmmu_dn_read_wait.)
-                    next_micro_state <= pmmu_dn_read_wait;
+                    -- Return to idle to resume fetch/PC sequencing
+                    next_micro_state <= idle;
                 WHEN pmove_mem_to_mmu_lo =>
                     -- Memory->MMU: Low part read completed; write LOW word to MMU register
                     report "DEBUG_PMOVE_LO: data_read=$" &
