@@ -2123,6 +2123,10 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					      fline_opcode_latch(15 downto 12)="1111" AND
 					      (pmmu_brief(15 downto 13)="000" OR pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011") AND
 					      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" OR fline_opcode_latch(5 downto 3)="100") THEN
+						-- synthesis translate_off
+						report "DBG_DECODE_ELSIF: micro=pmove_decode mode=" & integer'image(conv_integer(fline_opcode_latch(5 downto 3))) &
+						       " setstate=" & integer'image(conv_integer(setstate)) severity note;
+						-- synthesis translate_on
 						-- Modes 010/011: Simple (An)/(An)+ - no delta
 						IF fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" THEN
 						memaddr_delta_rega <= (others => '0');
@@ -2226,6 +2230,14 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				      ((micro_state = pmove_mmu_to_mem_hi OR micro_state = pmove_mmu_to_mem_lo) AND
 				       fline_opcode_latch(5 downto 3)="100" AND state /= "11") AND NOT
 				      (state="11" AND memmaskmux(3)='1' AND setstate="00") THEN
+					-- synthesis translate_off
+					IF micro_state = pmove_mem_to_mmu_hi OR micro_state = pmove_mem_to_mmu_lo THEN
+						report "DBG_ADDSUB: micro=" & micro_states'image(micro_state) &
+						       " addsub_q=$" & integer'image(conv_integer(addsub_q)) &
+						       " addr=$" & integer'image(conv_integer(addr)) &
+						       " mmux3=" & std_logic'image(memmaskmux(3)) severity note;
+					END IF;
+					-- synthesis translate_on
 					memaddr_delta_rega <= addsub_q;
 				ELSIF set(restore_ADDR)='1' THEN
 					memaddr_delta_rega <= tmp_TG68_PC;
@@ -7365,7 +7377,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
             -- addr is the base address (e.g., 0x1012 for PMOVE CRP,($12,A0))
             -- LO should read/write at base+4 (e.g., 0x1016)
             report "DEBUG_EA_CAPTURE: addr=$" & integer'image(conv_integer(addr)) &
-                   " ea_latched will be $" & integer'image(conv_integer(addr + 4))
+                   " ea_latched=$" & integer'image(conv_integer(addr + 4)) &
+                   " delta_rega=$" & integer'image(conv_integer(memaddr_delta_rega)) &
+                   " reg_QA=$" & integer'image(conv_integer(reg_QA)) &
+                   " mmux3=" & std_logic'image(memmaskmux(3))
             severity note;
             pmove_ea_latched <= addr + 4;
             pmove_ea_captured <= '1';

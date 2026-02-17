@@ -256,6 +256,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal walk_desc_high : std_logic_vector(31 downto 0) := (others => '0'); -- HIGH word (all formats)
   signal walk_desc_low  : std_logic_vector(31 downto 0) := (others => '0'); -- LOW word (long format only)
   signal walk_desc_is_long : std_logic := '0'; -- 1=long format (DT=11), 0=short format (DT=10/01)
+  signal walk_parent_dt_long : std_logic := '0'; -- BUG #409: 1=parent DT=11, entries are 8 bytes (stride 8)
 
   -- BUG #387 FIX: Walker timeout counter to detect stuck memory requests
   signal walker_timeout_counter : integer range 0 to 1023 := 0;
@@ -1502,9 +1503,13 @@ begin
                        -- " vs " & std_logic'image(fc(0)) & std_logic'image(fc(1)) & std_logic'image(fc(2))
                  --  -- severity note;
               end if;
+              -- BUG #410: On write, skip ATC entries where M=0 (unless WP=1, which faults anyway)
+              -- This forces a re-walk that sets M in the physical page descriptor
+              -- Per MC68030 spec and WinUAE cpummu30.cpp line 2078
               if atc_fc(i) = fc and
                  atc_is_insn(i) = is_insn and
-                 aligned_addr = atc_log_base(i) then
+                 aligned_addr = atc_log_base(i) and
+                 (rw = '1' or atc_attr(i)(1) = '1' or atc_attr(i)(0) = '1') then
                 hit := '1';
                 hit_idx := i;
                 -- Debug: Log ATC hit for failing test addresses
@@ -1519,6 +1524,7 @@ begin
               end if;
             end if;
           end loop;
+          -- (BUG #410 M-bit check is integrated into ATC match condition above)
           if hit = '1' then
             -- ATC hit - use cached translation but check access violations
             -- But don't overwrite walker faults that are still pending
@@ -2062,9 +2068,14 @@ begin
             -- MC68030 Root Pointer: LOW word (bits 31-0) contains table address, HIGH word contains limit/DT
             if saved_fc(2) = '1' and tc_sre = '1' then -- Supervisor with SRE enabled
               walk_addr <= SRP_L(31 downto 4) & "0000"; -- Supervisor Root Pointer (LOW word = table address)
+              -- BUG #409: Root pointer DT determines stride for root table
+              -- CRP_H/SRP_H format: L/U[31], Limit[30:16], Reserved[15:2], DT[1:0]
+              walk_parent_dt_long <= SRP_H(1) and SRP_H(0); -- DT=11 -> 8-byte entries
              --  -- report "ROOT_POINTER: Using SRP for supervisor access with SRE=1" severity note;
             else -- User or supervisor without SRE
               walk_addr <= CRP_L(31 downto 4) & "0000"; -- CPU Root Pointer (LOW word = table address)
+              -- BUG #409: Root pointer DT determines stride for root table
+              walk_parent_dt_long <= CRP_H(1) and CRP_H(0); -- DT=11 -> 8-byte entries
               if saved_fc(2) = '1' then
                --  -- report "ROOT_POINTER: Using CRP for supervisor access with SRE=0" severity note;
               else
@@ -2135,7 +2146,12 @@ begin
           end if;
 
           desc_addr_v := walk_addr(31 downto 4) & "0000"; -- Align to table boundary
-          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+          -- BUG #409: Stride depends on parent descriptor DT (4 bytes for DT=10, 8 bytes for DT=11)
+          if walk_parent_dt_long = '1' then
+            desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 8, 32));
+          else
+            desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+          end if;
 
           -- Debug: Log walker state for failing test addresses
           if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" or saved_addr_log = x"12345000" then
@@ -2225,6 +2241,7 @@ begin
               walk_level <= walk_level + 1;
               -- BUG #155 FIX: Short format has NO limit field
               walk_limit_valid <= '0';
+              walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
               wstate <= W_PTR1;
             end if;
           end if;
@@ -2271,6 +2288,7 @@ begin
               -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
               -- Per MC68030 spec, S bit only exists in TABLE descriptors, not PAGE descriptors
               walk_supervisor <= walk_supervisor or walk_desc_high(8);
+              walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
              --  -- report "W_ROOT_LOW: Long-format table descriptor, continuing to W_PTR1" severity note;
               wstate <= W_PTR1;
             end if;
@@ -2280,7 +2298,12 @@ begin
           -- Read level 1 table descriptor - deadlock-proof design
           table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
-          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+          -- BUG #409: Stride depends on parent descriptor DT (4 bytes for DT=10, 8 bytes for DT=11)
+          if walk_parent_dt_long = '1' then
+            desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 8, 32));
+          else
+            desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+          end if;
 
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
@@ -2395,6 +2418,7 @@ begin
               walk_level <= walk_level + 1;
               -- BUG #155 FIX: Short format has NO limit field
               walk_limit_valid <= '0';
+              walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
               wstate <= W_PTR2;
             end if;
           end if;
@@ -2444,6 +2468,7 @@ begin
               walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
               -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
               walk_supervisor <= walk_supervisor or walk_desc_high(8);
+              walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
              --  -- report "W_PTR1_LOW: Long-format table descriptor, continuing to W_PTR2" severity note;
               wstate <= W_PTR2;
             end if;
@@ -2453,7 +2478,12 @@ begin
           -- Read level 2 table descriptor - deadlock-proof design
           table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
-          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+          -- BUG #409: Stride depends on parent descriptor DT (4 bytes for DT=10, 8 bytes for DT=11)
+          if walk_parent_dt_long = '1' then
+            desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 8, 32));
+          else
+            desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+          end if;
 
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
@@ -2575,6 +2605,7 @@ begin
               walk_level <= walk_level + 1;
               -- BUG #155 FIX: Short format has NO limit field
               walk_limit_valid <= '0';
+              walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
               wstate <= W_PTR3;
             end if;
           end if;
@@ -2624,6 +2655,7 @@ begin
               walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
               -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
               walk_supervisor <= walk_supervisor or walk_desc_high(8);
+              walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
              --  -- report "W_PTR2_LOW: Long-format table descriptor, continuing to W_PTR3" severity note;
               wstate <= W_PTR3;
             end if;
@@ -2633,7 +2665,12 @@ begin
           -- Final level - must be page descriptor - deadlock-proof design
           table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
-          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+          -- BUG #409: Stride depends on parent descriptor DT (4 bytes for DT=10, 8 bytes for DT=11)
+          if walk_parent_dt_long = '1' then
+            desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 8, 32));
+          else
+            desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+          end if;
 
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then
@@ -2728,6 +2765,7 @@ begin
               walk_addr <= mem_rdat(31 downto 4) & "0000";
               walk_level <= walk_level + 1;
               walk_limit_valid <= '0';  -- Short format has no limit
+              walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
               wstate <= W_PTR4;
             end if;
           end if;
@@ -2777,6 +2815,7 @@ begin
               walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
               -- Accumulate S bit from long-format TABLE descriptor
               walk_supervisor <= walk_supervisor or walk_desc_high(8);
+              walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
              --  -- report "W_PTR3_LOW: Long-format table descriptor, continuing to W_PTR4" severity note;
               wstate <= W_PTR4;
             end if;
@@ -2786,7 +2825,12 @@ begin
           -- Level 4 (TID when FCL=1) - always final level before page descriptor
           table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
-          desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+          -- BUG #409: Stride depends on parent descriptor DT (4 bytes for DT=10, 8 bytes for DT=11)
+          if walk_parent_dt_long = '1' then
+            desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 8, 32));
+          else
+            desc_addr_v := std_logic_vector(unsigned(desc_addr_v) + to_unsigned(table_index * 4, 32));
+          end if;
 
           -- Simple memory request - always deassert req after ack
           if mem_req = '0' then

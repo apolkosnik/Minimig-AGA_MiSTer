@@ -88,7 +88,11 @@ module cpu_wrapper
 
 // BUG #136 FIX: Include walker Fast RAM access in ramsel
 // When walker is reading/writing page tables in Fast RAM (Z2, Z3), it needs to trigger RAM controller
-assign ramsel       = (cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)) | walker_fast_ram;
+// BUG #408 FIX: Suppress CPU's ramsel when walker is active. Without this, CPU's frozen address
+// (e.g., turbo-cached chip RAM or Kickstart ROM) triggers a spurious SDRAM read that races with
+// the walker's chip bus read. The spurious ramready can cause the walker to advance prematurely
+// or leave stale SDRAM state that interferes when the CPU resumes after the walk.
+assign ramsel       = (cpu_req & ~sel_nmi_vector & ~walker_active & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)) | walker_fast_ram;
 assign ramshared    = sel_dd;
 
 // NMI
@@ -220,8 +224,15 @@ always @(*) begin
 	endcase
 end
 
-wire [15:0] cpu_din = (USE_68030_CACHE & cache_hit) ? cache_data_out_16 :
-                      ramsel ? ramdat : fastchip_selack ? fastchip_dout : 
+// BUG #406 FIX: Don't let cache_hit intercept cpu_din during walker reads.
+// When walker is active and reading from memory, cpu_din must reflect the actual
+// memory bus data (chip_data/ramdat), not stale cache data from the CPU's frozen address.
+// BUG #408 FIX: When walker reads from chip RAM, force cpu_din to chip_data.
+// Without this, CPU's frozen address can set ramsel=1 (turbochip/kickstart), causing
+// cpu_din to select ramdat (SDRAM data at CPU address) instead of chip_data (page table).
+wire [15:0] cpu_din = (USE_68030_CACHE & cache_hit & ~walker_active) ? cache_data_out_16 :
+                      walker_chip_ram ? chip_data :
+                      ramsel ? ramdat : fastchip_selack ? fastchip_dout :
                       {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
 reg         wr;
 reg         uds_in;
@@ -260,8 +271,10 @@ always @* begin
 			chip_lds     = 0;  // Lower byte strobe active (low)
 			// BUG #405 FIX: Write high word [31:16] to low address, low word [15:0] to high address (big-endian)
 			chip_din     = walker_write_low_phase ? walker_wdata_latch[31:16] : walker_wdata_latch[15:0];
-		end else if (USE_68030_CACHE && walker_active) begin
-			// Walker active but not reading/writing (transitional states) - hold address, use CPU strobes
+		end else if (USE_68030_CACHE && walker_chip_cycle_active) begin
+			// BUG #408 FIX: Only hold walker address on chip bus when the walk target is Chip RAM.
+			// For Fast RAM walks, driving walker_chip_addr with CPU strobes can corrupt chip accesses.
+			// Keep walker address only for Chip-RAM transitional states (e.g. WALKER_DONE).
 			chip_addr    = walker_chip_addr;
 			chip_as      = c_as;
 			chip_rw      = c_rw;
@@ -319,6 +332,7 @@ wire        pmmu_walker_req_p;
 wire        pmmu_walker_we_p;    // MC68030 U/M bit: write enable for descriptor updates
 wire [31:0] pmmu_walker_addr_p;
 wire [31:0] pmmu_walker_wdat_p;  // MC68030 U/M bit: write data
+wire        pmmu_busy_p;         // BUG #407: PMMU busy (translation pending, not yet in walker)
 reg         pmmu_walker_ack_p;
 reg  [31:0] pmmu_walker_data_p;
 reg         pmmu_walker_berr_p;  // BUG #156 FIX: Bus error during table walk (sets MMUSR B bit)
@@ -388,7 +402,10 @@ cpu_inst_p
   .nreset(reset),
   // BUG #139: Reset must bypass walker stall - allow clkena_in during reset recovery
   // so CPU internal reset can propagate even if walker is stuck
-  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit) | ~reset) & (~pmmu_walker_req_p | ~reset | walker_timeout_error)),
+  // BUG #407: Also stall on pmmu_busy_p - catches the 1-cycle gap between ATC miss
+  // detection (translation_pending='1') and walker mem_req assertion. Without this,
+  // the CPU can advance with a stale physical address before the walker starts.
+  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit) | ~reset) & (~pmmu_walker_req_p | ~reset | walker_timeout_error) & (~pmmu_busy_p | ~reset)),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -428,6 +445,8 @@ cpu_inst_p
   .pmmu_walker_ack(pmmu_walker_ack_p),
   .pmmu_walker_data(pmmu_walker_data_p),
   .pmmu_walker_berr(pmmu_walker_berr_p),  // MC68030: Bus error (sets MMUSR B bit)
+  // BUG #407: PMMU busy signal for clkena_in gating
+  .debug_pmmu_busy(pmmu_busy_p),
   // Cache operation address
   .cache_op_addr(cache_op_addr)
 );
@@ -622,6 +641,12 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// The walker_timeout_error signal also unblocks clkena_in to allow CPU recovery
 	reg [11:0] walker_timeout_cnt;  // 12-bit counter = 4096 cycles max (~36us @ 114MHz)
 	reg walker_timeout_error /* synthesis preserve */;  // Set when walker times out
+
+	// BUG #408 FIX: Walker must wait for the correct ready signal based on memory region.
+	// Chip RAM reads wait for chipready; Fast RAM reads wait for ramready.
+	// Without this, a spurious SDRAM read (from CPU's frozen address) produces ramready
+	// before chipready, causing the walker to advance with stale/wrong chip_data.
+	wire walker_mem_ready = walker_chip_ram ? chipready : (walker_fast_ram ? ramready : (chipready | ramready | fastchip_ready));
 	localparam WALKER_TIMEOUT_LIMIT = 12'd2048;  // Timeout after 2048 cycles (~18us)
 
 	localparam WALKER_IDLE       = 4'd0;
@@ -719,7 +744,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
 						pmmu_walker_data_p <= 32'h0;  // Data doesn't matter when BERR is set
 						walker_state <= WALKER_DONE;
-					end else if (chipready | ramready | fastchip_ready) begin
+					end else if (walker_mem_ready) begin
 						// Capture low 16 bits
 						walker_data_low <= cpu_din;
 						walker_state <= WALKER_READ_HIGH;
@@ -744,7 +769,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
 						pmmu_walker_data_p <= 32'h0;
 						walker_state <= WALKER_DONE;
-					end else if (chipready | ramready | fastchip_ready) begin
+					end else if (walker_mem_ready) begin
 						// BUG #405 FIX: Assemble 32-bit descriptor in big-endian order
 						// walker_data_low was read from low address (= high word in big-endian)
 						// cpu_din was read from high address (= low word in big-endian)
@@ -781,7 +806,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						walker_timeout_error <= 1;
 						pmmu_walker_berr_p <= 1;
 						walker_state <= WALKER_DONE;
-					end else if (chipready | ramready | fastchip_ready) begin
+					end else if (walker_mem_ready) begin
 						// Low word written, now write high word
 						walker_state <= WALKER_WRITE_HIGH;
 					end else begin
@@ -803,7 +828,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						walker_timeout_error <= 1;
 						pmmu_walker_berr_p <= 1;
 						walker_state <= WALKER_DONE;
-					end else if (chipready | ramready | fastchip_ready) begin
+					end else if (walker_mem_ready) begin
 						// Write complete
 						walker_state <= WALKER_DONE;
 					end else begin
@@ -898,13 +923,16 @@ reg [2:0] cpu_ipl;
 // When walker is reading from or writing to chip RAM (address below 2MB), it needs to trigger
 // the chipset state machine. Otherwise chipready never goes high and walker hangs.
 // Chip RAM is $000000-$1FFFFF = bits 31:21 all zero
+wire walker_addr_is_chipram = !walker_addr_latch[31] && !walker_addr_latch[30] &&
+                              !walker_addr_latch[29] && !walker_addr_latch[28] &&
+                              !walker_addr_latch[27] && !walker_addr_latch[26] &&
+                              !walker_addr_latch[25] && !walker_addr_latch[24] &&
+                              !walker_addr_latch[23] && !walker_addr_latch[22] &&
+                              !walker_addr_latch[21];
+
 // MC68030 U/M bit: Include walker writes for descriptor updates
-wire walker_chip_ram = USE_68030_CACHE && (walker_reading | walker_writing) && !walker_addr_latch[31] &&
-                       !walker_addr_latch[30] && !walker_addr_latch[29] &&
-                       !walker_addr_latch[28] && !walker_addr_latch[27] &&
-                       !walker_addr_latch[26] && !walker_addr_latch[25] &&
-                       !walker_addr_latch[24] && !walker_addr_latch[23] &&
-                       !walker_addr_latch[22] && !walker_addr_latch[21];
+wire walker_chip_ram = USE_68030_CACHE && (walker_reading | walker_writing) && walker_addr_is_chipram;
+wire walker_chip_cycle_active = USE_68030_CACHE && walker_active && walker_addr_is_chipram;
 
 always @(posedge clk) begin
 	// BUG #135 FIX: Include walker chip RAM access in chipreq
