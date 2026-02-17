@@ -118,7 +118,8 @@ wire [15:0] ramdat;
 // When walker_fast_ram is true, force both bytes active for 16-bit reads/writes
 assign ramlds = walker_fast_ram ? 1'b0 : (sel_rtg ? uds_in : lds_in);
 assign ramuds = walker_fast_ram ? 1'b0 : (sel_rtg ? lds_in : uds_in);
-assign ramdin = (walker_fast_ram && walker_writing) ? (walker_write_low_phase ? walker_wdata_latch[15:0] : walker_wdata_latch[31:16]) :
+// BUG #405 FIX: Write high word [31:16] to low address, low word [15:0] to high address (big-endian)
+assign ramdin = (walker_fast_ram && walker_writing) ? (walker_write_low_phase ? walker_wdata_latch[31:16] : walker_wdata_latch[15:0]) :
                  sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
 assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
@@ -257,8 +258,8 @@ always @* begin
 			chip_rw      = 0;  // Write operation
 			chip_uds     = 0;  // Upper byte strobe active (low)
 			chip_lds     = 0;  // Lower byte strobe active (low)
-			// Select low or high word from latched write data
-			chip_din     = walker_write_low_phase ? walker_wdata_latch[15:0] : walker_wdata_latch[31:16];
+			// BUG #405 FIX: Write high word [31:16] to low address, low word [15:0] to high address (big-endian)
+			chip_din     = walker_write_low_phase ? walker_wdata_latch[31:16] : walker_wdata_latch[15:0];
 		end else if (USE_68030_CACHE && walker_active) begin
 			// Walker active but not reading/writing (transitional states) - hold address, use CPU strobes
 			chip_addr    = walker_chip_addr;
@@ -744,8 +745,10 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						pmmu_walker_data_p <= 32'h0;
 						walker_state <= WALKER_DONE;
 					end else if (chipready | ramready | fastchip_ready) begin
-						// Capture high 16 bits and assemble 32-bit descriptor
-						pmmu_walker_data_p <= {cpu_din, walker_data_low};
+						// BUG #405 FIX: Assemble 32-bit descriptor in big-endian order
+						// walker_data_low was read from low address (= high word in big-endian)
+						// cpu_din was read from high address (= low word in big-endian)
+						pmmu_walker_data_p <= {walker_data_low, cpu_din};
 						walker_state <= WALKER_DONE;
 					end else begin
 						// BUG #138: Increment timeout counter while waiting
