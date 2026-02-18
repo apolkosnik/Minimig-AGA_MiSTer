@@ -97,14 +97,14 @@ Removes all generated build files including db/, incremental_db/, output_files/,
 ### Current Branch Status
 - Working on branch `030` (68030 development)
 - Major 68030 implementation work completed:
-  - Updated CPU parameter encoding (CPU="11" now = 68030)
+  - Updated CPU parameter encoding (CPU="10" now = 68030)
   - Added PMMU instruction support (PMOVE, PTEST, PFLUSH, PLOAD)
   - Added cache control instruction framework (CINV, CPUSH)
   - Created basic cache module structure
 
 ### 68030 Implementation Status
 #### ✅ Completed Features:
-- **CPU Mode Encoding**: Updated to support 68030 as CPU="11"
+- **CPU Mode Encoding**: Updated to support 68030 as CPU="10"
 - **PMMU Instructions**: Full PMOVE, PTEST, PFLUSH, PLOAD implementation
 - **PMMU Registers**: TC, CRP, SRP, TT0, TT1, MMUSR, CAL with proper read/write handling
 - **Cache Instructions**: Complete CINV, CPUSH instruction implementation

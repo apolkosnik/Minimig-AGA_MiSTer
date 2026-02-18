@@ -464,6 +464,10 @@ architecture logic of TG68KdotC_Kernel is
 	signal berr_exception_active : std_logic;  -- MC68030: Bus error exception processing window
 	signal cpu_halted        : std_logic;  -- MC68030: Double bus fault halt (cleared only by reset)
 	signal pmmu_fault_dispatched : std_logic;  -- BUG #400: Tracks if current pmmu_fault was already dispatched as bus error
+	-- BUG #414/#415: Latched fault info for Format $A bus error frame
+	signal berr_fault_addr   : std_logic_vector(31 downto 0);  -- Faulting logical address
+	signal berr_ssw          : std_logic_vector(15 downto 0);  -- Special Status Word
+	signal berr_data_out_saved : std_logic_vector(31 downto 0);  -- Data output buffer saved at berr dispatch
 	signal useStackframe2	: std_logic;
 	
 	signal set_stop			: bit;
@@ -594,6 +598,10 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_wr_protect  : std_logic;
 	signal pmmu_fault       : std_logic;
 	signal pmmu_fault_stat  : std_logic_vector(31 downto 0);
+	signal pmmu_fault_addr_out : std_logic_vector(31 downto 0);  -- BUG #415: Faulting logical address from PMMU
+	signal pmmu_fault_fc_out   : std_logic_vector(2 downto 0);   -- BUG #414: FC at fault time from PMMU
+	signal pmmu_fault_rw_out   : std_logic;                       -- BUG #414: RW at fault time from PMMU
+	signal pmmu_fault_is_insn_out : std_logic;                    -- BUG #414: Instruction fetch flag from PMMU
 	signal pmmu_tc_en       : std_logic;
 	
 	-- PMMU instruction control signals
@@ -688,6 +696,10 @@ BEGIN
       write_protect => pmmu_wr_protect,
       fault         => pmmu_fault,
       fault_status  => pmmu_fault_stat,
+      fault_addr    => pmmu_fault_addr_out,
+      fault_fc      => pmmu_fault_fc_out,
+      fault_rw      => pmmu_fault_rw_out,
+      fault_is_insn => pmmu_fault_is_insn_out,
       tc_enable     => pmmu_tc_en,
       mem_req       => pmmu_mem_req,
       mem_we        => pmmu_mem_we,
@@ -1338,38 +1350,14 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 
 PROCESS (long_start, reg_QB, data_write_tmp, exec, data_read, data_write_mux, memmaskmux, bf_ext_out,
 		 data_write_muxin, memmask, oddout, addr,
-		 moves_bus_pending, moves_direction, moves_reg, addsub_q, opcode, micro_state, TG68_PC,
-		 trap_SR, Flags, last_opc_read, trap_vector)
+		 moves_bus_pending, moves_direction, moves_reg, addsub_q, opcode)
 	BEGIN
-        -- MC68030 Bus Error Stack Frame Data Multiplexer
-        IF micro_state = berr1 OR micro_state = berr3 THEN
-            data_write_muxin <= (others => '0'); -- Internal registers (implementation-defined)
-        ELSIF micro_state = berr2 THEN
-            -- Data Output Buffer ($18-$1B): Data being written when fault occurred
-            data_write_muxin <= data_write_tmp;
-        ELSIF micro_state = berr5 THEN
-            -- Instruction Pipe ($0C-$0F): Stage B (opcode) and Stage C (prefetch)
-            data_write_muxin <= opcode & last_opc_read(15 downto 0);
-        ELSIF micro_state = berr4 THEN
-            -- Fault Address: Use current CPU address output
-            data_write_muxin <= addr;
-        ELSIF micro_state = berr6 THEN
-            -- SSW ($0A) & Internal ($08): Stub SSW ($0000)
-            data_write_muxin <= (others => '0');
-        ELSIF micro_state = berr7 THEN
-            -- PC Lo ($04) & Format/Vector ($06)
-            -- data_write_muxin is 32-bit. High Word=PC Lo, Low Word=Format.
-            -- Stack grows down: PUSH Long writes [SP-4]..[SP-1].
-            -- Mem[Offset $04] = PC Lo (High 16 of Long). Mem[Offset $06] = Format (Low 16).
-            -- Format $A = short bus fault frame (16 words)
-            -- Vector offset from trap_vector (e.g., $08=bus error, $F4=MMU bus error)
-            data_write_muxin <= TG68_PC(15 downto 0) & "1010" & trap_vector(11 downto 0); 
-        ELSIF micro_state = berr8 THEN
-            -- SR ($00) & PC Hi ($02).
-            -- High Word = SR (saved at decode time). Low Word = PC Hi.
-            -- Mem[Offset 0] = SR. Mem[Offset 2] = PC Hi.
-            data_write_muxin <= (trap_SR & Flags) & TG68_PC(31 downto 16);
-		ELSIF exec(write_reg)='1' THEN
+		-- MC68030 Bus Error Frame: data_write_muxin uses data_write_tmp (default path).
+		-- berr state data is loaded into data_write_tmp in the sequential process
+		-- (see berr1-berr8 ELSIF chain in data_write_tmp loading section).
+		-- This avoids the off-by-one issue where micro_state has already advanced
+		-- to the next berr state by the time the longaktion bus write occurs.
+		IF exec(write_reg)='1' THEN
 			-- BUG #328 FIX: Forward post-modified address register value when
 			-- MOVES CPU->mem source register (from extension word) matches the
 			-- EA address register with auto-modify (postadd/presub).
@@ -1872,6 +1860,28 @@ PROCESS (clk)
 ------------------------------------
 --				ELSIF micro_state=trap0 THEN
 --					data_write_tmp(15 downto 0) <= trap_vector(15 downto 0);
+				-- MC68030 Bus Error Frame: Register frame data for each berr state.
+				-- data_write_muxin is combinational and reads micro_state, but micro_state
+				-- advances at the SAME clkena_lw edge that starts the longaktion write.
+				-- By the time the bus write happens, micro_state has already moved to the
+				-- next berr state. Loading data_write_tmp here (sequential) captures the
+				-- correct data because sequential reads see the OLD micro_state value.
+				ELSIF micro_state = berr1 THEN
+					data_write_tmp <= (others => '0');  -- Internal registers ($1C, stub)
+				ELSIF micro_state = berr2 THEN
+					data_write_tmp <= berr_data_out_saved;  -- Data output buffer ($18)
+				ELSIF micro_state = berr3 THEN
+					data_write_tmp <= last_opc_read(15 downto 0) & opcode;  -- Internal ($14)
+				ELSIF micro_state = berr4 THEN
+					data_write_tmp <= berr_fault_addr;  -- Fault address ($10)
+				ELSIF micro_state = berr5 THEN
+					data_write_tmp <= opcode & last_opc_read(15 downto 0);  -- Pipe ($0C)
+				ELSIF micro_state = berr6 THEN
+					data_write_tmp <= x"0000" & berr_ssw;  -- SSW ($08)
+				ELSIF micro_state = berr7 THEN
+					data_write_tmp <= TG68_PC(15 downto 0) & "1010" & trap_vector(11 downto 0);  -- Format/PC_lo ($04)
+				ELSIF micro_state = berr8 THEN
+					data_write_tmp <= (trap_SR & Flags) & TG68_PC(31 downto 16);  -- SR/PC_hi ($00)
 				-- BUG #391 FIX: Bypass hold_dwr at the CRP/SRP HI/LO write boundary.
 				-- At clkena_lw with micro_state=pmove_mmu_to_mem_lo, the HI longword bus
 				-- write is completing and we need data_write_tmp to be refreshed with CRP_L
@@ -2457,6 +2467,9 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					berr_exception_active <= '0';
 					cpu_halted <= '0';
 					pmmu_fault_dispatched <= '0';
+					berr_fault_addr <= (others => '0');
+					berr_ssw <= (others => '0');
+					berr_data_out_saved <= (others => '0');
 					memmask <= "111111";
 					exec_write_back <= '0';
 					-- BUG #70 SIMPLIFICATION: Simple 2-signal initialization
@@ -2671,6 +2684,65 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									pmmu_fault_dispatched <= '1';
 								end if;
 								berr_exception_active <= '1';
+								-- Save data output buffer for berr2 (data being written at fault time)
+								berr_data_out_saved <= data_write_tmp;
+								-- BUG #414/#415: Latch fault address and construct SSW
+								-- SSW layout: FC(15) FB(14) RC(13) RB(12) [11:9] DF(8) RM(7) RW(6) SIZE(5:4) [3] FC(2:0)
+								if pmmu_fault = '1' then
+									-- PMMU fault: use PMMU's latched fault info
+									berr_fault_addr <= pmmu_fault_addr_out;
+									-- SSW FC field (bits 2:0)
+									berr_ssw(2 downto 0) <= pmmu_fault_fc_out;
+									-- SSW RW bit (bit 6): 1=read, 0=write
+									berr_ssw(6) <= pmmu_fault_rw_out;
+									-- Pipeline bits based on instruction vs data fault
+									if pmmu_fault_is_insn_out = '1' then
+										-- Instruction fetch fault: FB=1, RB=1, SIZE=word
+										berr_ssw(14) <= '1';  -- FB
+										berr_ssw(12) <= '1';  -- RB
+										berr_ssw(8) <= '0';   -- DF=0
+										berr_ssw(9) <= '0';
+										berr_ssw(5 downto 4) <= "10";  -- SIZE=word (instruction fetches are 16-bit)
+									else
+										-- Data access fault: DF=1, bit9=1
+										berr_ssw(14) <= '0';  -- FB=0
+										berr_ssw(12) <= '0';  -- RB=0
+										berr_ssw(8) <= '1';   -- DF=1
+										berr_ssw(9) <= '1';   -- DF<<1
+										-- SIZE from current datatype: "00"=byte->"01", "01"=word->"10", "10"=long->"00"
+										case datatype is
+											when "00" => berr_ssw(5 downto 4) <= "01";  -- Byte
+											when "01" => berr_ssw(5 downto 4) <= "10";  -- Word
+											when others => berr_ssw(5 downto 4) <= "00";  -- Long
+										end case;
+									end if;
+									-- Clear unused bits
+									berr_ssw(15) <= '0';  -- FC class
+									berr_ssw(13) <= '0';  -- RC
+									berr_ssw(11 downto 10) <= "00";  -- Reserved
+									berr_ssw(7) <= '0';   -- RM (read-modify-write not tracked)
+									berr_ssw(3) <= '0';   -- Reserved
+								else
+									-- External BERR: use kernel's current state
+									berr_fault_addr <= addr;
+									berr_ssw(2 downto 0) <= fc_internal;
+									berr_ssw(6) <= pmmu_rw;  -- 1=read, 0=write
+									-- External bus errors are typically data faults
+									berr_ssw(14) <= '0';  -- FB=0
+									berr_ssw(12) <= '0';  -- RB=0
+									berr_ssw(8) <= '1';   -- DF=1
+									berr_ssw(9) <= '1';   -- DF<<1
+									case datatype is
+										when "00" => berr_ssw(5 downto 4) <= "01";
+										when "01" => berr_ssw(5 downto 4) <= "10";
+										when others => berr_ssw(5 downto 4) <= "00";
+									end case;
+									berr_ssw(15) <= '0';
+									berr_ssw(13) <= '0';
+									berr_ssw(11 downto 10) <= "00";
+									berr_ssw(7) <= '0';
+									berr_ssw(3) <= '0';
+								end if;
 							END IF;
 						ELSE
 							rIPL_nr <= IPL_nr;
@@ -5946,55 +6018,61 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 WHEN berr1 => -- Push Internal Regs ($1C-$1F) - Stub
                     setstate <= "11";
                     set(presub) <= '1';
+                    set(longaktion) <= '1';
                     setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr2;
-                WHEN berr2 => -- Push Data Output Buffer ($18-$1B) - Stub
+                WHEN berr2 => -- Push Data Output Buffer ($18-$1B)
                     setstate <= "11";
                     set(presub) <= '1';
+                    set(longaktion) <= '1';
                     setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr3;
-                WHEN berr3 => -- Push Internal Regs ($14-$17) - Stub
+                WHEN berr3 => -- Push Internal Regs ($14-$17)
                     setstate <= "11";
                     set(presub) <= '1';
+                    set(longaktion) <= '1';
                     setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr4;
-                WHEN berr4 => -- Push Fault Address ($10-$13) - Capture current Addr
+                WHEN berr4 => -- Push Fault Address ($10-$13)
                     setstate <= "11";
                     set(presub) <= '1';
+                    set(longaktion) <= '1';
                     setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr5;
-                WHEN berr5 => -- Push Instruction Pipe ($0C-$0F) - Stub
+                WHEN berr5 => -- Push Instruction Pipe ($0C-$0F)
                     setstate <= "11";
                     set(presub) <= '1';
+                    set(longaktion) <= '1';
                     setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr6;
-                WHEN berr6 => -- Push SSW ($0A) & Internal ($08) - SSW Stub
+                WHEN berr6 => -- Push SSW ($08-$0B)
                     setstate <= "11";
                     set(presub) <= '1';
+                    set(longaktion) <= '1';
                     setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr7;
                 WHEN berr7 => -- Push Format/Vector ($06) & PC Lo ($04)
                     setstate <= "11";
                     set(presub) <= '1';
+                    set(longaktion) <= '1';
                     setstackaddr <= '1';
                     datatype <= "10";
                     next_micro_state <= berr8;
-                WHEN berr8 => -- Push PC Hi ($02) & SR ($00) -> Exit to Handler
+                WHEN berr8 => -- Push PC Hi ($02) & SR ($00) -> Then read vector
                     setstate <= "11";
                     set(presub) <= '1';
+                    set(longaktion) <= '1';
                     setstackaddr <= '1';
                     datatype <= "10";
-                    -- Exit logic (matches trap3)
-                    set_vectoraddr <= '1';
-                    set(direct_delta) <= '1';	
-                    set(directPC) <= '1';
-                    next_micro_state <= nopnop;
+                    -- Transition to trap3 which does the vector table READ
+                    -- (set_vectoraddr + directPC need a READ cycle, not a WRITE)
+                    next_micro_state <= trap3;
 
 				WHEN trap4 =>		-- TRAP
 					set(presub) <= '1';

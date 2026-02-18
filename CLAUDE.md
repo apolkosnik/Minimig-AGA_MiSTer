@@ -155,7 +155,7 @@ The Kernel is organized as ~17 concurrent PROCESS blocks. The most important one
 ## 68030 Implementation
 
 ### Key Features
-- CPU="11" encoding for 68030 mode
+- CPU="10" encoding for 68030 mode
 - Full PMMU: PMOVE, PTEST, PFLUSH, PLOAD instructions
 - PMMU Registers: TC, CRP, SRP, TT0, TT1, MMUSR with proper read/write
 - Multi-level page table walking (W_ROOT->W_PTR1->W_PTR2->W_PTR3->W_PAGE)

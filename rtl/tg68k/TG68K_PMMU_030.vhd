@@ -42,6 +42,10 @@ entity TG68K_PMMU_030 is
     write_protect  : out std_logic;
     fault          : out std_logic;
     fault_status   : out std_logic_vector(31 downto 0);
+    fault_addr     : out std_logic_vector(31 downto 0);  -- BUG #415: Faulting logical address
+    fault_fc       : out std_logic_vector(2 downto 0);   -- BUG #414: FC at fault time
+    fault_rw       : out std_logic;                       -- BUG #414: RW at fault time (1=read, 0=write)
+    fault_is_insn  : out std_logic;                       -- BUG #414: Instruction fetch flag at fault time
     tc_enable      : out std_logic;
 
     -- Walker memory interface (read/write) and busy indicator
@@ -136,6 +140,10 @@ architecture rtl of TG68K_PMMU_030 is
   signal write_protect_reg  : std_logic := '0';
   signal fault_reg          : std_logic := '0';
   signal fault_status_reg   : std_logic_vector(31 downto 0) := (others => '0');
+  signal fault_addr_reg     : std_logic_vector(31 downto 0) := (others => '0');  -- BUG #415: Faulting logical address
+  signal fault_fc_reg       : std_logic_vector(2 downto 0) := (others => '0');   -- BUG #414: FC at fault time
+  signal fault_rw_reg       : std_logic := '1';                                   -- BUG #414: RW at fault time
+  signal fault_is_insn_reg  : std_logic := '0';                                   -- BUG #414: Instruction fetch flag
   
   -- Walker fault signals (driven only by walker)
   signal walker_fault       : std_logic := '0';
@@ -164,6 +172,7 @@ architecture rtl of TG68K_PMMU_030 is
   -- This can exceed TC.PS when a page descriptor terminates the walk early (large pages).
   type atc_shift_t is array(0 to ATC_ENTRIES-1) of integer range 0 to 31;
   type atc_page_size_t is array(0 to ATC_ENTRIES-1) of integer range 0 to 15; -- MC68030 PS field value (8-15)
+  type atc_level_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(2 downto 0); -- BUG #412: walk level for MMUSR N field
 
   signal atc_log_base : atc_base_t;
   signal atc_phys_base: atc_base_t;
@@ -174,6 +183,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal atc_shift : atc_shift_t;
   signal atc_page_size : atc_page_size_t;
   signal atc_global : atc_val_t;  -- G bit: global page (survives PFLUSHAN)
+  signal atc_level : atc_level_t;  -- BUG #412: walk level count for MMUSR N field
   signal atc_rr    : integer range 0 to ATC_ENTRIES-1 := 0; -- simple round-robin
   signal walk_req  : std_logic;
   signal walker_completed : std_logic := '0';
@@ -231,11 +241,13 @@ architecture rtl of TG68K_PMMU_030 is
   signal ptest_addr : std_logic_vector(31 downto 0) := (others => '0');
   signal ptest_fc : std_logic_vector(2 downto 0) := (others => '0');
   signal ptest_rw : std_logic := '1';  -- '1'=PTESTR (read), '0'=PTESTW (write), from brief(9)
+  signal ptest_level : std_logic_vector(2 downto 0) := "000";  -- BUG #413: PTEST level from brief(12:10)
 
   -- BUG #396: PTEST/PLOAD walk must NOT update addr_phys_reg.
   -- ptest_active/pload_active are cleared after 1 cycle (before walker_completed).
   -- This flag persists through the entire walk so walker_completed can skip addr_phys_reg.
   signal instr_walk_pending : std_logic := '0';
+  signal ptest_walk_no_update : std_logic := '0';  -- BUG #411: PTEST walk should not write back U/M bits
 
   -- PLOAD operation state
   signal pload_active : std_logic := '0';
@@ -1357,6 +1369,10 @@ begin
                    else write_protect_reg;
   fault         <= fault_reg;
   fault_status  <= fault_status_reg;
+  fault_addr    <= fault_addr_reg;     -- BUG #415: Faulting logical address
+  fault_fc      <= fault_fc_reg;       -- BUG #414: FC at fault time
+  fault_rw      <= fault_rw_reg;       -- BUG #414: RW at fault time
+  fault_is_insn <= fault_is_insn_reg;  -- BUG #414: Instruction fetch flag
 
   -- Simplified translation process - always provide immediate result
   process(clk, nreset)
@@ -1377,6 +1393,10 @@ begin
       write_protect_reg <= '0';
       fault_reg <= '0';
       fault_status_reg <= (others => '0');
+      fault_addr_reg <= (others => '0');
+      fault_fc_reg <= (others => '0');
+      fault_rw_reg <= '1';
+      fault_is_insn_reg <= '0';
       saved_addr_log <= (others => '0');
       saved_fc <= (others => '0');
       saved_is_insn <= '0';
@@ -1390,6 +1410,7 @@ begin
       mmusr_update_value <= (others => '0');
       ptest_done <= '0';
       instr_walk_pending <= '0';
+      ptest_walk_no_update <= '0';
     elsif rising_edge(clk) then
       status_tmp := fault_status_reg;
 
@@ -1541,10 +1562,14 @@ begin
                 invalid => '0',                         -- Descriptor was valid
                 modified => '0',
                 transparent => '0',
-                level => "011"                          -- Page level (3 bits)
+                level => atc_level(hit_idx)             -- BUG #412: actual walk level from ATC
               );
               fault_reg <= '1';
               fault_status_reg <= status_tmp;
+              fault_addr_reg <= addr_log;       -- BUG #415: Latch faulting logical address
+              fault_fc_reg <= fc;               -- BUG #414: Latch FC at fault time
+              fault_rw_reg <= rw;               -- BUG #414: Latch RW at fault time
+              fault_is_insn_reg <= is_insn;     -- BUG #414: Latch instruction fetch flag
               mmusr_update_value <= status_tmp;
               mmusr_update_req <= '1';
               -- CRITICAL FIX: Output address even on fault
@@ -1554,8 +1579,6 @@ begin
               addr_phys_reg <= std_logic_vector(phys_result);  -- Provide faulting address
               cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= '1';  -- Mark as write-protected
-              -- report "WP_FAULT_ATC: Setting fault_reg=1 for WP violation, addr=0x" & slv_to_hstring(addr_log) &
-                    --  -- " phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
             elsif fc(2) = '0' and atc_attr(hit_idx)(3) = '0' then
               -- User trying to access supervisor-only page - generate fault
               -- atc_attr(3) = U_ACC = NOT(S): 0 means supervisor-only, 1 means user accessible
@@ -1567,10 +1590,14 @@ begin
                 invalid => '0',                         -- Descriptor was valid
                 modified => '0',
                 transparent => '0',
-                level => "011"                          -- Page level (3 bits)
+                level => atc_level(hit_idx)             -- BUG #412: actual walk level from ATC
               );
               fault_reg <= '1';
               fault_status_reg <= status_tmp;
+              fault_addr_reg <= addr_log;       -- BUG #415: Latch faulting logical address
+              fault_fc_reg <= fc;               -- BUG #414: Latch FC at fault time
+              fault_rw_reg <= rw;               -- BUG #414: Latch RW at fault time
+              fault_is_insn_reg <= is_insn;     -- BUG #414: Latch instruction fetch flag
               mmusr_update_value <= status_tmp;
               mmusr_update_req <= '1';
               -- CRITICAL FIX: Output address even on supervisor fault
@@ -1610,7 +1637,7 @@ begin
                   write_protect => atc_attr(hit_idx)(0),   -- WP bit from page attributes
                   modified => atc_attr(hit_idx)(1),        -- M bit from page descriptor
                   transparent => '0',                      -- Not a transparent translation
-                  level => "011"                           -- Page translation (3 levels typical)
+                  level => atc_level(hit_idx)              -- BUG #412: actual walk level from ATC
                 );
                --  -- report "ATC_HIT: successful translation, phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
               end if;
@@ -1701,8 +1728,48 @@ begin
             );
             mmusr_update_req <= '1';
             ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after TTR1 match
+          elsif ptest_level = "000" then
+            -- BUG #413: PTEST level=0 - ATC-only search (no table walk)
+            -- Per MC68030 spec and WinUAE mmu030_ptest_atc_search():
+            -- Search ATC for matching entry, report status in MMUSR
+            hit := '0';
+            for i in 0 to ATC_ENTRIES-1 loop
+              if atc_valid(i) = '1' then
+                aligned_addr := align_addr(ptest_addr, atc_shift(i));
+                if atc_fc(i) = ptest_fc and
+                   aligned_addr = atc_log_base(i) then
+                  hit := '1';
+                  hit_idx := i;
+                end if;
+              end if;
+            end loop;
+            if hit = '1' then
+              -- ATC hit - report entry status in MMUSR
+              -- Check for bus error (stored as fault in ATC)
+              -- Report WP and M from ATC attributes
+              mmusr_update_value <= encode_mmusr_success(
+                write_protect => atc_attr(hit_idx)(0),   -- WP
+                modified => atc_attr(hit_idx)(1),        -- M
+                transparent => '0',
+                level => atc_level(hit_idx)              -- Level from ATC
+              );
+            else
+              -- ATC miss - set Invalid bit in MMUSR
+              mmusr_update_value <= encode_mmusr_fault(
+                bus_error => '0',
+                limit_violation => '0',
+                supervisor_violation => '0',
+                write_protect => '0',
+                invalid => '1',                          -- Not in ATC
+                modified => '0',
+                transparent => '0',
+                level => "000"
+              );
+            end if;
+            mmusr_update_req <= '1';
+            ptest_done <= '1';
           else
-            -- No TTR match - trigger walker to test translation
+            -- No TTR match, level>0 - trigger walker to test translation
             -- synthesis translate_off
             report "PTEST_WALK: ptest_addr=" & slv_to_hex(ptest_addr) &
                    " fc=" & std_logic'image(ptest_fc(2)) & std_logic'image(ptest_fc(1)) & std_logic'image(ptest_fc(0)) &
@@ -1715,6 +1782,7 @@ begin
             walk_req <= '1';
             translation_pending <= '1';
             instr_walk_pending <= '1';  -- BUG #396: Mark walk as PTEST-initiated
+            ptest_walk_no_update <= '1';  -- BUG #411: PTEST walk should not write back U/M
             ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after triggering walker
             -- report "PTEST: Triggered walker for addr=0x" & slv_to_hstring(ptest_addr) &
                   --  -- " fc=" & slv_to_string(ptest_fc) severity note;
@@ -1780,6 +1848,10 @@ begin
         if instr_walk_pending = '0' and (req = '0' or addr_log = saved_addr_log) then
           fault_reg <= '1';
           fault_status_reg <= status_tmp;
+          fault_addr_reg <= saved_addr_log;     -- BUG #415: Latch faulting logical address
+          fault_fc_reg <= saved_fc;             -- BUG #414: Latch FC at fault time
+          fault_rw_reg <= saved_rw;             -- BUG #414: Latch RW at fault time
+          fault_is_insn_reg <= saved_is_insn;   -- BUG #414: Latch instruction fetch flag
           -- CRITICAL FIX: On fault, output the faulting logical address
           -- This prevents the CPU from using garbage/uninitialized addresses
           addr_phys_reg <= saved_addr_log;  -- Pass through faulting address
@@ -1790,6 +1862,7 @@ begin
         mmusr_update_req <= '1';
         translation_pending <= '0';
         instr_walk_pending <= '0';  -- Clear PTEST/PLOAD flag on walker fault too
+        ptest_walk_no_update <= '0';  -- Clear PTEST U/M skip flag
         -- Acknowledge the fault and track pending state
         walker_fault_ack <= '1';
         walker_fault_ack_pending <= '1';
@@ -1831,7 +1904,7 @@ begin
                 invalid => '0',                         -- Descriptor was valid
                 modified => '0',
                 transparent => '0',
-                level => "011"                          -- Page level (3 bits)
+                level => atc_level(hit_idx)             -- BUG #412: actual walk level from ATC
               );
               -- BUG #396: PTEST/PLOAD walks must NOT update addr_phys_reg or fault_reg.
               -- These are instruction-initiated walks that only test/preload the ATC.
@@ -1843,6 +1916,10 @@ begin
               if instr_walk_pending = '0' and (req = '0' or addr_log = saved_addr_log) then
                 fault_reg <= '1';
                 fault_status_reg <= status_tmp;
+                fault_addr_reg <= saved_addr_log;     -- BUG #415: Latch faulting logical address
+                fault_fc_reg <= saved_fc;             -- BUG #414: Latch FC at fault time
+                fault_rw_reg <= saved_rw;             -- BUG #414: Latch RW at fault time
+                fault_is_insn_reg <= saved_is_insn;   -- BUG #414: Latch instruction fetch flag
                 phys_base := unsigned(atc_phys_base(hit_idx));
                 offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
                 phys_result := phys_base + offset;
@@ -1862,13 +1939,17 @@ begin
                 invalid => '0',                         -- Descriptor was valid
                 modified => '0',
                 transparent => '0',
-                level => "011"                          -- Page level (3 bits)
+                level => atc_level(hit_idx)             -- BUG #412: actual walk level from ATC
               );
               -- BUG #396: Skip addr_phys_reg update for PTEST/PLOAD walks
               -- BUG #404: Skip when addr_log has moved past saved_addr_log
               if instr_walk_pending = '0' and (req = '0' or addr_log = saved_addr_log) then
                 fault_reg <= '1';
                 fault_status_reg <= status_tmp;
+                fault_addr_reg <= saved_addr_log;     -- BUG #415: Latch faulting logical address
+                fault_fc_reg <= saved_fc;             -- BUG #414: Latch FC at fault time
+                fault_rw_reg <= saved_rw;             -- BUG #414: Latch RW at fault time
+                fault_is_insn_reg <= saved_is_insn;   -- BUG #414: Latch instruction fetch flag
                 phys_base := unsigned(atc_phys_base(hit_idx));
                 offset    := unsigned(saved_addr_log) - unsigned(atc_log_base(hit_idx));
                 phys_result := phys_base + offset;
@@ -1896,7 +1977,7 @@ begin
                 write_protect => atc_attr(hit_idx)(0),   -- WP bit from page attributes
                 modified => atc_attr(hit_idx)(1),        -- M bit from page descriptor
                 transparent => '0',                      -- Not a transparent translation
-                level => "011"                           -- Page translation (3 levels typical)
+                level => atc_level(hit_idx)              -- BUG #412: actual walk level from ATC
               );
               fault_status_reg <= status_tmp;
               -- BUG #374 FIX: Update MMUSR on successful walker completion
@@ -1923,6 +2004,7 @@ begin
         end if; -- else tmatch0
         -- BUG #396: Clear instr_walk_pending on walker completion
         instr_walk_pending <= '0';
+        ptest_walk_no_update <= '0';  -- BUG #411: Clear PTEST U/M skip flag
         -- Acknowledge walker completion
         walker_completed_ack <= '1';
       else
@@ -1968,6 +2050,7 @@ begin
         atc_shift(i)     <= 12;
         atc_page_size(i) <= 12;  -- MC68030: PS=12 (4KB pages)
         atc_attr(i)      <= (others => '0');
+        atc_level(i)     <= (others => '0');  -- BUG #412: walk level for MMUSR
       end loop;
       atc_rr      <= 0;
       wstate      <= W_IDLE;
@@ -3142,7 +3225,13 @@ begin
             -- U bit (bit 3): Set on any page access if not already set
             -- M bit (bit 4): Set on write access if not already set
             -- Note: These bits are in walk_desc_high for both short and long formats
-            if walk_desc_high(3) = '0' or (saved_rw = '0' and walk_desc_high(4) = '0') then
+            -- BUG #411: PTEST/PLOAD walks must NOT write back U/M bits.
+            -- Per MC68030 spec and WinUAE cpummu30.cpp line 1500: only level=0 (normal
+            -- translations) write back U/M. PTEST is diagnostic and must not modify descriptors.
+            if ptest_walk_no_update = '1' then
+              -- BUG #411: PTEST walk - skip U/M writeback, go straight to fill
+              wstate <= W_FILL;
+            elsif walk_desc_high(3) = '0' or (saved_rw = '0' and walk_desc_high(4) = '0') then
               -- Need to update descriptor with U/M bits
               desc_update_needed <= '1';
               -- Prepare updated descriptor: set U bit, and M bit if write
@@ -3199,6 +3288,7 @@ begin
           atc_fc(atc_rr)        <= saved_fc;
           atc_is_insn(atc_rr)   <= saved_is_insn;
           atc_global(atc_rr)    <= walk_global;  -- G bit for PFLUSHAN semantics
+          atc_level(atc_rr)     <= std_logic_vector(to_unsigned(walk_level + 1, 3));  -- BUG #412: store walk level for MMUSR
           atc_valid(atc_rr)     <= '1';
           -- Debug: Log ATC fill for large page test
           if saved_addr_log = x"00400000" then
@@ -3355,6 +3445,7 @@ begin
       ptest_addr <= (others => '0');  -- BUG #397: driven from this process
       ptest_fc <= (others => '0');    -- BUG #397: driven from this process
       ptest_rw <= '1';               -- BUG #397: driven from this process
+      ptest_level <= "000";          -- BUG #413: driven from this process
     elsif rising_edge(clk) then
       -- Update previous values for edge detection
       ptest_req_prev <= ptest_req;
@@ -3372,6 +3463,7 @@ begin
         ptest_addr <= pmmu_addr;
         ptest_fc <= pmmu_fc;
         ptest_rw <= pmmu_brief(9);
+        ptest_level <= pmmu_brief(12 downto 10);  -- BUG #413: capture PTEST level
       else
         ptest_update_mmusr <= '0';
       end if;

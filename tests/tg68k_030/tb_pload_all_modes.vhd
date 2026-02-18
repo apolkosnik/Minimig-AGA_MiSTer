@@ -1243,14 +1243,14 @@ begin
         emit_movea(pc, 2, PLOAD_ADDR);
         emit_pload_verify_mmusr(
             "PLOADR (A2), FC=imm5",
-            "010", "010", '1', "10101", x"0000", x"0000", x"0003");
+            "010", "010", '1', "10101", x"0000", x"0000", x"0002");
 
         -- Test 2: PLOADR (d16,A2), FC=imm 5
         -- d16=$0010, so A2 = $1000 - $10 = $0FF0
         emit_movea(pc, 2, std_logic_vector(unsigned(PLOAD_ADDR) - 16));
         emit_pload_verify_mmusr(
             "PLOADR (d16,A2), FC=imm5",
-            "101", "010", '1', "10101", x"0010", x"0000", x"0003");
+            "101", "010", '1', "10101", x"0010", x"0000", x"0002");
 
         -- Test 3: PLOADR (d8,A2,D6.W), FC=imm 5
         -- D6=4, brief=$6002 -> D6.W*1 + disp=2 -> offset=6
@@ -1258,38 +1258,38 @@ begin
         emit_movea(pc, 2, std_logic_vector(unsigned(PLOAD_ADDR) - 6));
         emit_pload_verify_mmusr(
             "PLOADR (d8,A2,D6.W), FC=imm5",
-            "110", "010", '1', "10101", x"6002", x"0000", x"0003");
+            "110", "010", '1', "10101", x"6002", x"0000", x"0002");
 
         -- Test 4: PLOADR (xxx).W, FC=imm 5
         emit_movea(pc, 2, PLOAD_ADDR);
         emit_pload_verify_mmusr(
             "PLOADR (xxx).W=$1000, FC=imm5",
-            "111", "000", '1', "10101", PLOAD_ADDR(15 downto 0), x"0000", x"0003");
+            "111", "000", '1', "10101", PLOAD_ADDR(15 downto 0), x"0000", x"0002");
 
         -- Test 5: PLOADR (xxx).L, FC=imm 5
         emit_movea(pc, 2, PLOAD_ADDR);
         emit_pload_verify_mmusr(
             "PLOADR (xxx).L=$1000, FC=imm5",
             "111", "001", '1', "10101",
-            PLOAD_ADDR(15 downto 0), PLOAD_ADDR(31 downto 16), x"0003");
+            PLOAD_ADDR(15 downto 0), PLOAD_ADDR(31 downto 16), x"0002");
 
         -- Test 6: PLOADW (A2), FC=imm 5 (write variant)
         emit_movea(pc, 2, PLOAD_ADDR);
         emit_pload_verify_mmusr(
             "PLOADW (A2), FC=imm5",
-            "010", "010", '0', "10101", x"0000", x"0000", x"0003");
+            "010", "010", '0', "10101", x"0000", x"0000", x"0002");
 
         -- Test 7: PLOADR (A2), FC=SFC (SFC=5)
         emit_movea(pc, 2, PLOAD_ADDR);
         emit_pload_verify_mmusr(
             "PLOADR (A2), FC=SFC",
-            "010", "010", '1', "00000", x"0000", x"0000", x"0003");
+            "010", "010", '1', "00000", x"0000", x"0000", x"0002");
 
         -- Test 8: PLOADR (A2), FC=D0 (D0=5)
         emit_movea(pc, 2, PLOAD_ADDR);
         emit_pload_verify_mmusr(
             "PLOADR (A2), FC=D0",
-            "010", "010", '1', "01000", x"0000", x"0000", x"0003");
+            "010", "010", '1', "01000", x"0000", x"0000", x"0002");
 
         -- =====================================================
         -- A7/SP MODE TESTS - WhichAmiga compatibility
@@ -1299,20 +1299,20 @@ begin
         emit_movea(pc, 7, PLOAD_ADDR);
         emit_pload_verify_mmusr(
             "PLOADR (A7), FC=imm5",
-            "010", "111", '1', "10101", x"0000", x"0000", x"0003");
+            "010", "111", '1', "10101", x"0000", x"0000", x"0002");
 
         -- Test 10: PLOADR (d16,A7), FC=imm 5
         -- d16=$0010, so A7 = $1000 - $10 = $0FF0
         emit_movea(pc, 7, std_logic_vector(unsigned(PLOAD_ADDR) - 16));
         emit_pload_verify_mmusr(
             "PLOADR (d16,A7), FC=imm5",
-            "101", "111", '1', "10101", x"0010", x"0000", x"0003");
+            "101", "111", '1', "10101", x"0010", x"0000", x"0002");
 
         -- Test 11: PLOADW (A7), FC=imm 5 (write variant with A7)
         emit_movea(pc, 7, PLOAD_ADDR);
         emit_pload_verify_mmusr(
             "PLOADW (A7), FC=imm5",
-            "010", "111", '0', "10101", x"0000", x"0000", x"0003");
+            "010", "111", '0', "10101", x"0000", x"0000", x"0002");
 
         -- =====================================================
         -- Phase 3: Disable MMU

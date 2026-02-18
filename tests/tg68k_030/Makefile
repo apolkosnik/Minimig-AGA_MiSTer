@@ -69,6 +69,7 @@ help:
 	@echo "  test-moves-validation - Run MOVES validation testbench"
 	@echo "  test-rte-formats - Test all RTE stack frame formats (0,1,2,9,A,B + invalid)"
 	@echo "  test-mmu-translation - Comprehensive MMU translation pipeline test (walker + ATC + TT)"
+	@echo "  test-berr-frame  - Test Format $$A bus error frame: SSW, fault address (BUG #414/#415)"
 	@echo ""
 	@echo "Lockup/Deadlock Tests (CRITICAL ISSUES):"
 	@echo "  test-lockup-walker-timeout - Test walker timeout recovery (ISSUE #2)"
@@ -434,6 +435,19 @@ test-mmu-translation: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_translation.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 250us; quit -f" tb_mmu_translation
+
+# Bus Error Frame Test (BUG #414/#415)
+test-berr-frame: setup
+	@echo "=========================================================="
+	@echo "Running Bus Error Frame (Format $$A) Test Suite"
+	@echo "Tests: SSW fields, fault address, format/vector (BUG #414/#415)"
+	@echo "=========================================================="
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_berr_frame.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 100us; quit -f" tb_berr_frame
 
 # Lockup/Deadlock Tests - CRITICAL ISSUES
 test-lockup-walker-timeout: setup
