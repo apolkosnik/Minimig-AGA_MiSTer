@@ -1456,6 +1456,27 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 							regfile(conv_integer(moves_reg)) <= data_read;
 					END CASE;
 				END IF;
+				-- MC68030: MSP/ISP swap when M bit changes within supervisor mode.
+				-- When MOVE to SR (or ANDI/ORI/EORI to SR) or RTE restores SR with
+				-- a different M bit while staying in supervisor mode, swap A7 between
+				-- MSP and ISP. The companion save of old A7 to the shadow register
+				-- is in the movec process (which owns MSP/ISP signals).
+				IF cpu(1)='1' AND preSVmode='1' THEN
+					IF exec(to_SR)='1' AND SRin(4) /= FlagsSR(4) THEN
+						IF SRin(4) = '1' THEN
+							regfile(15) <= MSP;  -- M 0->1: load MSP into A7
+						ELSE
+							regfile(15) <= ISP;  -- M 1->0: load ISP into A7
+						END IF;
+					END IF;
+					IF exec(directSR)='1' AND format1_chain_active='0' AND data_read(12) /= FlagsSR(4) THEN
+						IF data_read(12) = '1' THEN
+							regfile(15) <= MSP;  -- M 0->1: load MSP into A7
+						ELSE
+							regfile(15) <= ISP;  -- M 1->0: load ISP into A7
+						END IF;
+					END IF;
+				END IF;
 			END IF;
 		END IF;
 	END PROCESS;
@@ -7386,6 +7407,29 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
     end if;
     if exec(to_ISP) = '1' then
       ISP <= reg_QA;
+    end if;
+    -- MC68030: MSP/ISP swap - save old A7 to shadow register.
+    -- Companion to regfile(15) load in the regfile process.
+    -- When M bit changes within supervisor mode (via MOVE to SR or RTE),
+    -- save current A7 to the appropriate shadow register before the
+    -- regfile process loads the new value.
+    -- VHDL last-assignment-wins: this overrides exec(to_ISP)/exec(to_MSP)
+    -- above if both fire, but they shouldn't (different instructions).
+    if cpu(1)='1' and preSVmode='1' then
+      if exec(to_SR)='1' and SRin(4) /= FlagsSR(4) then
+        if SRin(4) = '1' then
+          ISP <= regfile(15);  -- M 0->1: save old A7 (was ISP) to ISP shadow
+        else
+          MSP <= regfile(15);  -- M 1->0: save old A7 (was MSP) to MSP shadow
+        end if;
+      end if;
+      if exec(directSR)='1' and format1_chain_active='0' and data_read(12) /= FlagsSR(4) then
+        if data_read(12) = '1' then
+          ISP <= regfile(15);  -- M 0->1: save old A7 (was ISP) to ISP shadow
+        else
+          MSP <= regfile(15);  -- M 1->0: save old A7 (was MSP) to MSP shadow
+        end if;
+      end if;
     end if;
     -- Auto-clear self-clearing command bits after they've been set
     -- MC68030 spec: bits 2 (CEI), 3 (CI), 10 (CED), 11 (CD) are self-clearing
