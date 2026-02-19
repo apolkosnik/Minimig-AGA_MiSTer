@@ -1336,9 +1336,13 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 			ELSIF clkena_lw='1' THEN
 				-- Save M bit before any SR modification that could change it.
 				-- Used by changeMode S->U to save A7 to the correct shadow.
-				-- For RTE: captured at rte1 entry (before directSR updates FlagsSR).
+				-- For RTE: captured on transition to rte1.
+				-- In the current flow, SR is loaded in rte6, then control moves to rte1.
+				-- Sampling FlagsSR here still sees the pre-directSR M bit, which is
+				-- required to choose the correct ISP/MSP shadow during deferred S->U
+				-- changeMode handling.
 				-- For MOVE to SR: captured at exec(to_SR) (before to_SR updates FlagsSR).
-				IF next_micro_state = rte1 AND micro_state /= rte6 THEN
+				IF next_micro_state = rte1 THEN
 					rte_saved_mbit <= FlagsSR(4);
 				END IF;
 				IF exec(to_SR)='1' THEN
