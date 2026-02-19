@@ -3161,6 +3161,16 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF interrupt='1' THEN
 					fc_internal(2) <= '1';
 				END IF;
+				-- Format Error during RTE: directSR already loaded frame SR (which may
+				-- have S=0). Since the format is invalid, restore the pre-RTE SR so
+				-- the exception handler runs in supervisor mode. trap_SR was captured
+				-- at decodeOPC before directSR changed FlagsSR.
+				-- MUST come AFTER exec(directSR)/exec(to_SR)/changeMode/interrupt
+				-- to have highest priority (VHDL last-assignment-wins).
+				IF trap_format_error='1' THEN
+					FlagsSR <= trap_SR;
+					fc_internal(2) <= trap_SR(5);
+				END IF;
 				IF cpu(1)='0' THEN
 					FlagsSR(4) <= '0';
 					FlagsSR(6) <= '0';
