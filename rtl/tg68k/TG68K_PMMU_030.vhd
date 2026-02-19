@@ -1152,8 +1152,8 @@ begin
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
               -- Per spec: Register is loaded BEFORE exception is taken
-              -- BUG #405 FIX: Do NOT fire mmu_config_error (see TC validation comment)
               if reg_wdat(1 downto 0) = "00" then
+                mmu_config_error <= '1';
                 -- synthesis translate_off
                 report "MMU_CONFIG: SRP_H DT=00 (invalid descriptor type)" severity warning;
                 -- synthesis translate_on
@@ -1181,8 +1181,8 @@ begin
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
               -- Per spec: Register is loaded BEFORE exception is taken
-              -- BUG #405 FIX: Do NOT fire mmu_config_error (see TC validation comment)
               if reg_wdat(1 downto 0) = "00" then
+                mmu_config_error <= '1';
                 -- synthesis translate_off
                 report "MMU_CONFIG: CRP_H DT=00 (invalid descriptor type)" severity warning;
                 -- synthesis translate_on
