@@ -92,7 +92,11 @@ module cpu_wrapper
 // (e.g., turbo-cached chip RAM or Kickstart ROM) triggers a spurious SDRAM read that races with
 // the walker's chip bus read. The spurious ramready can cause the walker to advance prematurely
 // or leave stale SDRAM state that interferes when the CPU resumes after the walk.
-assign ramsel       = (cpu_req & ~sel_nmi_vector & ~walker_active & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)) | walker_fast_ram;
+// MC68030 bus fault suppression: When PMMU is translating (busy) or has faulted, suppress
+// CPU bus accesses. On real 68030, faulting bus cycles are aborted before data reaches memory.
+// The busy->fault transition is glitch-free (at least one is always high during handshake).
+wire pmmu_suppress_bus = cpucfg[1] & (pmmu_busy_p | pmmu_fault_p);
+assign ramsel       = (cpu_req & ~sel_nmi_vector & ~walker_active & ~pmmu_suppress_bus & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)) | walker_fast_ram;
 assign ramshared    = sel_dd;
 
 // NMI
@@ -333,6 +337,7 @@ wire        pmmu_walker_we_p;    // MC68030 U/M bit: write enable for descriptor
 wire [31:0] pmmu_walker_addr_p;
 wire [31:0] pmmu_walker_wdat_p;  // MC68030 U/M bit: write data
 wire        pmmu_busy_p;         // BUG #407: PMMU busy (translation pending, not yet in walker)
+wire        pmmu_fault_p;        // PMMU translation fault (suppress bus access)
 reg         pmmu_walker_ack_p;
 reg  [31:0] pmmu_walker_data_p;
 reg         pmmu_walker_berr_p;  // BUG #156 FIX: Bus error during table walk (sets MMUSR B bit)
@@ -405,7 +410,10 @@ cpu_inst_p
   // BUG #407: Also stall on pmmu_busy_p - catches the 1-cycle gap between ATC miss
   // detection (translation_pending='1') and walker mem_req assertion. Without this,
   // the CPU can advance with a stale physical address before the walker starts.
-  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit) | ~reset) & (~pmmu_walker_req_p | ~reset | walker_timeout_error) & (~pmmu_busy_p | ~reset)),
+  // MC68030 bus fault: pmmu_fault_p bypasses pmmu_busy_p stall so the kernel can
+  // advance to process the fault (accumulate make_berr, detect double bus fault).
+  // Bus accesses are suppressed by pmmu_suppress_bus, so no stray writes occur.
+  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit) | pmmu_fault_p | ~reset) & (~pmmu_walker_req_p | ~reset | walker_timeout_error) & (~pmmu_busy_p | pmmu_fault_p | ~reset)),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -447,6 +455,8 @@ cpu_inst_p
   .pmmu_walker_berr(pmmu_walker_berr_p),  // MC68030: Bus error (sets MMUSR B bit)
   // BUG #407: PMMU busy signal for clkena_in gating
   .debug_pmmu_busy(pmmu_busy_p),
+  // MC68030 bus fault: PMMU fault signal for bus access suppression
+  .debug_pmmu_fault(pmmu_fault_p),
   // Cache operation address
   .cache_op_addr(cache_op_addr)
 );
@@ -945,7 +955,8 @@ wire walker_chip_cycle_active = USE_68030_CACHE && walker_active && walker_addr_
 
 always @(posedge clk) begin
 	// BUG #135 FIX: Include walker chip RAM access in chipreq
-	chipreq <= (cpu_req & ~ramsel & ~fastchip_selack) | walker_chip_ram;
+	// MC68030 bus fault: suppress chip bus when PMMU is translating or faulted
+	chipreq <= (cpu_req & ~ramsel & ~fastchip_selack & ~pmmu_suppress_bus) | walker_chip_ram;
 	cpu_ipl <= ipl_i;
 end
 

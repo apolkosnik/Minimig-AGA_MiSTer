@@ -465,6 +465,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal berr_exception_active : std_logic;  -- MC68030: Bus error exception processing window
 	signal cpu_halted        : std_logic;  -- MC68030: Double bus fault halt (cleared only by reset)
 	signal pmmu_fault_dispatched : std_logic;  -- BUG #400: Tracks if current pmmu_fault was already dispatched as bus error
+	signal pmmu_fault_was_cleared : std_logic;  -- MC68030: Detects new PMMU fault during stall (for double bus fault)
 	-- BUG #414/#415: Latched fault info for Format $A bus error frame
 	signal berr_fault_addr   : std_logic_vector(31 downto 0);  -- Faulting logical address
 	signal berr_ssw          : std_logic_vector(15 downto 0);  -- Special Status Word
@@ -2511,6 +2512,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					berr_exception_active <= '0';
 					cpu_halted <= '0';
 					pmmu_fault_dispatched <= '0';
+					pmmu_fault_was_cleared <= '0';
 					berr_fault_addr <= (others => '0');
 					berr_ssw <= (others => '0');
 					berr_data_out_saved <= (others => '0');
@@ -2644,6 +2646,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					END IF;
 				END IF;
 				IF clkena_lw='1' THEN
+					-- MC68030 double bus fault: Reset stall-monitor flag each active cycle
+					pmmu_fault_was_cleared <= '0';
 					interrupt <= setinterrupt;
 					decodeOPC <= setopcode;
 					endOPC <= setendOPC;
@@ -2684,7 +2688,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						-- The stale pmmu_fault from the just-dispatched bus error persists until
 						-- a new translation request clears fault_reg. Without this guard, every
 						-- PMMU bus error would immediately trigger a false double bus fault.
-						if cpu(1) = '1' and (berr = '1' or (pmmu_tc_en = '1' and pmmu_fault = '1' and pmmu_fault_dispatched = '0')) then
+						-- pmmu_fault_was_cleared: detects new faults during stall. When pmmu_fault
+						-- drops to '0' during stall (new translation started) then returns to '1'
+						-- (new fault), this flag proves it's a fresh fault, not the stale original.
+						if cpu(1) = '1' and (berr = '1' or (pmmu_tc_en = '1' and pmmu_fault = '1' and (pmmu_fault_dispatched = '0' or pmmu_fault_was_cleared = '1'))) then
 							cpu_halted <= '1';
 							-- synthesis translate_off
 							report "DOUBLE BUS FAULT: fault during bus error exception processing - CPU HALTED" severity warning;
@@ -2967,6 +2974,17 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 
 					IF decodeOPC='1' OR interrupt='1' THEN
 						trap_SR <= FlagsSR;
+					END IF;
+				ELSE
+					-- MC68030 double bus fault: Monitor pmmu_fault during CPU stall.
+					-- When clkena_lw='0', the CPU is stalled (waiting for bus or PMMU).
+					-- If pmmu_fault drops to '0' (PMMU started a new translation for
+					-- e.g. a berr frame write), latch pmmu_fault_was_cleared='1'.
+					-- When clkena_lw fires next with pmmu_fault='1', this proves it's
+					-- a NEW fault, enabling the double bus fault check to fire even when
+					-- pmmu_fault_dispatched='1' (which couldn't clear during the stall).
+					IF pmmu_fault = '0' THEN
+						pmmu_fault_was_cleared <= '1';
 					END IF;
 				END IF;
 			END IF;
