@@ -2154,18 +2154,45 @@ begin
               -- BUG #409: Root pointer DT determines stride for root table
               -- CRP_H/SRP_H format: L/U[31], Limit[30:16], Reserved[15:2], DT[1:0]
               walk_parent_dt_long <= SRP_H(1) and SRP_H(0); -- DT=11 -> 8-byte entries
-             --  -- report "ROOT_POINTER: Using SRP for supervisor access with SRE=1" severity note;
+              -- MC68030 spec: Root pointer DT=00 means invalid - fault immediately, no memory read
+              if SRP_H(1 downto 0) = "00" then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_fault(
+                  bus_error => '0',
+                  limit_violation => '0',
+                  supervisor_violation => '0',
+                  write_protect => '0',
+                  invalid => '1',
+                  modified => '0',
+                  transparent => '0',
+                  level => "000"
+                );
+                wstate <= W_FAULT;
+              else
+                wstate <= W_ROOT;
+              end if;
             else -- User or supervisor without SRE
               walk_addr <= CRP_L(31 downto 4) & "0000"; -- CPU Root Pointer (LOW word = table address)
               -- BUG #409: Root pointer DT determines stride for root table
               walk_parent_dt_long <= CRP_H(1) and CRP_H(0); -- DT=11 -> 8-byte entries
-              if saved_fc(2) = '1' then
-               --  -- report "ROOT_POINTER: Using CRP for supervisor access with SRE=0" severity note;
+              -- MC68030 spec: Root pointer DT=00 means invalid - fault immediately, no memory read
+              if CRP_H(1 downto 0) = "00" then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_fault(
+                  bus_error => '0',
+                  limit_violation => '0',
+                  supervisor_violation => '0',
+                  write_protect => '0',
+                  invalid => '1',
+                  modified => '0',
+                  transparent => '0',
+                  level => "000"
+                );
+                wstate <= W_FAULT;
               else
-               --  -- report "ROOT_POINTER: Using CRP for user access" severity note;
+                wstate <= W_ROOT;
               end if;
             end if;
-            wstate <= W_ROOT;
           end if;
           
         when W_ROOT =>

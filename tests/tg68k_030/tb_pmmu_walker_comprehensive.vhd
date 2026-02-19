@@ -257,8 +257,8 @@ begin
         write_pmmu_reg("10000", x"80C0AA00", '0');
 
         -- Initialize CRP (points to address 0x1000)
-        -- CRP_H: L/U=0 (upper limit), LIMIT=0x7FFF (allow all entries), DT=11
-        write_pmmu_reg("10011", x"7FFFC003", '1'); -- CRP_H with max limit
+        -- CRP_H: L/U=0 (upper limit), LIMIT=0x7FFF (allow all entries), DT=10 (4-byte entries)
+        write_pmmu_reg("10011", x"7FFFC002", '1'); -- CRP_H with max limit, DT=10
         write_pmmu_reg("10011", x"00001000", '0'); -- CRP_L
 
         -- Build page tables in simulated memory
@@ -499,9 +499,9 @@ begin
         write_pmmu_reg("10000", x"81C08C00", '0');
 
         -- Build FCL root table: 8 entries at 0x4000
-        -- CRP_H: L/U=0 (upper limit), LIMIT=7 (allow FC 0-7), DT=11
-        write_pmmu_reg("10011", x"00070003", '1'); -- CRP_H with limit=7
-        read_pmmu_reg("10011", '1', x"00070003", "TEST 7 CRP_H");
+        -- CRP_H: L/U=0 (upper limit), LIMIT=7 (allow FC 0-7), DT=10 (4-byte entries)
+        write_pmmu_reg("10011", x"00070002", '1'); -- CRP_H with limit=7, DT=10
+        read_pmmu_reg("10011", '1', x"00070002", "TEST 7 CRP_H");
         write_pmmu_reg("10011", x"00004000", '0');
 
         -- FC=2 (user program) entry points to table at 0x5000
@@ -527,6 +527,96 @@ begin
         end if;
 
         wait for 200 ns;
+
+        -- Flush ATC before next test
+        pmmu_brief <= x"2400";
+        pflush_req <= '1';
+        wait until rising_edge(clk);
+        pflush_req <= '0';
+        wait for 50 ns;
+
+        -- ================================================================
+        -- TEST 8: Invalid root pointer (CRP_H DT=00) - walker must fault
+        --         immediately without issuing any memory read
+        -- ================================================================
+        test_number <= 8;
+        report "TEST 8: Invalid root pointer (CRP_H DT=00)" severity note;
+
+        -- Write CRP with DT=00 (invalid root pointer)
+        -- CRP_H: L/U=0, Limit=0, DT=00
+        write_pmmu_reg("10011", x"00000000", '1');
+        -- CRP_L: table address = 0x1000 (should never be accessed)
+        write_pmmu_reg("10011", x"00001000", '0');
+        -- Acknowledge config exception from CRP_H DT=00 write
+        mmu_config_ack <= '1';
+        wait until rising_edge(clk);
+        mmu_config_ack <= '0';
+        wait for 50 ns;
+
+        -- Flush ATC after CRP change
+        pmmu_brief <= x"2400";
+        pflush_req <= '1';
+        wait until rising_edge(clk);
+        pflush_req <= '0';
+        wait for 50 ns;
+
+        -- Request translation - should fault immediately at root pointer
+        addr_log <= x"00000500";
+        fc <= "101"; -- supervisor data
+        req <= '1';
+        wait until busy = '0' or fault = '1';
+        req <= '0';
+
+        wait for 50 ns;
+        if fault = '1' and fault_status(10) = '1' then
+            report "TEST 8 PASS: Invalid root pointer (DT=00) fault detected" severity note;
+        else
+            report "TEST 8 FAIL: Expected invalid root pointer fault, fault=" &
+                   std_logic'image(fault) & " fault_status=0x" &
+                   integer'image(to_integer(unsigned(fault_status))) severity error;
+        end if;
+
+        wait for 200 ns;
+
+        -- Flush ATC before next test
+        pmmu_brief <= x"2400";
+        pflush_req <= '1';
+        wait until rising_edge(clk);
+        pflush_req <= '0';
+        wait for 50 ns;
+
+        -- ================================================================
+        -- TEST 9: CRP_H DT=00 write fires mmu_config_err (Exception 56)
+        -- ================================================================
+        test_number <= 9;
+        report "TEST 9: CRP_H DT=00 triggers MMU config exception" severity note;
+
+        -- First restore valid CRP so we start from a known state
+        write_pmmu_reg("10011", x"7FFFC002", '1'); -- CRP_H: valid DT=10
+        write_pmmu_reg("10011", x"00001000", '0'); -- CRP_L
+        wait for 50 ns;
+
+        -- Now write CRP_H with DT=00 and check mmu_config_err fires
+        write_pmmu_reg("10011", x"00000000", '1'); -- CRP_H: DT=00
+        wait for 20 ns;
+
+        if mmu_config_err = '1' then
+            report "TEST 9 PASS: mmu_config_err asserted on CRP_H DT=00 write" severity note;
+            -- Acknowledge the config exception
+            mmu_config_ack <= '1';
+            wait until rising_edge(clk);
+            mmu_config_ack <= '0';
+            wait for 50 ns;
+        else
+            report "TEST 9 FAIL: mmu_config_err NOT asserted on CRP_H DT=00 write" severity error;
+        end if;
+
+        wait for 200 ns;
+
+        -- Restore valid CRP for any future tests
+        write_pmmu_reg("10011", x"7FFFC002", '1');
+        write_pmmu_reg("10011", x"00001000", '0');
+        wait for 50 ns;
 
         -- ================================================================
         -- All tests complete
