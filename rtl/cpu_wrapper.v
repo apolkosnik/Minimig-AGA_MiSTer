@@ -570,7 +570,16 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	                                          {~uds_p, 3'b000};
 
 	// Cache hit/miss logic
-	assign cache_hit = (i_cache_hit & i_cache_req) | (d_cache_hit & d_cache_req);
+	// BUG #412 FIX: Data cache hits on WRITES must NOT bypass bus wait in clkena_in.
+	// MC68030 data cache is write-through: writes must go to BOTH cache AND memory.
+	// If cache_hit gates clkena_in during writes, the CPU advances before the actual
+	// bus write completes. For chip bus: chipreq is registered one clock late, so by the
+	// time the chip bus state machine starts, wr has changed to READ and chip_addr points
+	// to the new fetch address - the write becomes a read to the wrong address.
+	// For SDRAM: ramsel drops when cpu_req goes low, potentially losing the write.
+	// Fix: Exclude write cycles (d_cache_we) from cache_hit used for clkena_in gating.
+	// Reads can still be served entirely from cache; writes must wait for bus completion.
+	assign cache_hit = (i_cache_hit & i_cache_req) | (d_cache_hit & d_cache_req & ~d_cache_we);
 	assign cache_miss = ((i_cache_enabled & ~i_cache_hit & i_cache_req) | (d_cache_enabled & ~d_cache_hit & d_cache_req));
 
 	// Connect cache fill interface to external memory controller

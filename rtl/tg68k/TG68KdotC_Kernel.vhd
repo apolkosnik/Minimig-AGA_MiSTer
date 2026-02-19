@@ -454,6 +454,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_mmu_berr    : bit;  -- BUG #159: MC68030 MMU Bus Error (vector 61)
 	signal trap_format_error : bit; -- BUG #211: MC68030 Format Error during RTE (vector 14)
 	signal rte_format_word  : std_logic_vector(15 downto 0);
+	signal rte_saved_mbit   : std_logic;  -- M bit before RTE directSR updates it
 	-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not used on MC68030
 	signal trapmake			: bit;
 	signal trapd				: bit;
@@ -1229,7 +1230,9 @@ ALU: TG68K_ALU
 
 
 	nWr <= '0' WHEN state="11" ELSE '1';
-	busstate <= state;
+	-- Suppress instruction fetch bus cycle when PC is odd (address error).
+	-- On real MC68030, the misalignment is detected before AS* assertion.
+	busstate <= "01" WHEN state="00" AND TG68_PC(0)='1' ELSE state;
 	nResetOut <= '0' WHEN exec(opcRESET)='1' ELSE '1';
 	
 	-- does shift for byte access. note active low me
@@ -1301,20 +1304,16 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 				long_done <= to_bit(NOT memread(1));
 	END PROCESS;
 
-	-- Latch the RTE format/vector word so format decode is stable across bus activity.
-	-- BUG FIX: Use last_data_in which is already captured during normal read flow.
-	-- RTE format word latch: Capture the format/vector word during rte3->rte4 transition
-	-- The format word is read in rte2 (setstate="10"), then we idle in rte3 waiting for data.
-	-- In rte3, state is transitioning from "10" (read) to "01" (idle), and data_in has the format word.
-	-- Capture using clkena_in (not clkena_lw) since rte3 is an idle state (setstate="01").
+	-- RTE format word latch: Capture the format/vector word during rte3->rte4 transition.
+	-- Bus cycle pipeline: setstate/memmask from micro_state N execute during micro_state N+1.
+	-- rte2 sets up the format word read (setstate="10", datatype="01"), which executes
+	-- during rte3's bus cycle. So data_in holds the valid format word when this fires.
 	PROCESS (clk)
 	BEGIN
 		IF rising_edge(clk) THEN
 			IF Reset='1' THEN
 				rte_format_word <= (others => '0');
 			ELSIF clkena_in='1' THEN
-				-- Capture when the read completes: state is transitioning from "10" to "01"
-				-- At this moment, data_in has the format word from the just-completed read
 				IF micro_state = rte3 AND next_micro_state = rte4 THEN
 					rte_format_word <= data_in;
 				END IF;
@@ -1332,7 +1331,14 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 		IF rising_edge(clk) THEN
 			IF Reset='1' THEN
 				format1_chain_active <= '0';
+				rte_saved_mbit <= '0';
 			ELSIF clkena_lw='1' THEN
+				-- Save M bit when entering RTE (decodeOPC->rte1), but NOT from rte6->rte1
+				-- (second frame in Format $1 chain). At this edge, FlagsSR(4) still holds
+				-- the pre-RTE M value because directSR hasn't updated it yet.
+				IF next_micro_state = rte1 AND micro_state /= rte6 THEN
+					rte_saved_mbit <= FlagsSR(4);
+				END IF;
 				IF setopcode='1' THEN
 					format1_chain_active <= '0';
 				ELSIF micro_state = rte4 THEN
@@ -1462,14 +1468,21 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 				-- MSP and ISP. The companion save of old A7 to the shadow register
 				-- is in the movec process (which owns MSP/ISP signals).
 				IF cpu(1)='1' AND preSVmode='1' THEN
-					IF exec(to_SR)='1' AND SRin(4) /= FlagsSR(4) THEN
+					IF exec(to_SR)='1' AND SRin(5)='1' AND SRin(4) /= FlagsSR(4) THEN
+						-- M-bit swap for MOVE to SR / ANDI to SR / ORI to SR / EORI to SR.
+						-- SRin(5)='1' ensures we're STAYING in supervisor mode.
+						-- When going to user mode (SRin(5)='0'), changeMode handles the
+						-- USP/SSP switch; the M-bit swap would corrupt ISP with MSP.
 						IF SRin(4) = '1' THEN
 							regfile(15) <= MSP;  -- M 0->1: load MSP into A7
 						ELSE
 							regfile(15) <= ISP;  -- M 1->0: load ISP into A7
 						END IF;
 					END IF;
-					IF exec(directSR)='1' AND format1_chain_active='0' AND data_read(12) /= FlagsSR(4) THEN
+					-- Block directSR M-bit swap during RTE: exec(directSR) always fires at
+				-- micro_state=rte1, but A7 swap must be deferred until frame is consumed.
+				-- The deferred swap happens in rte4 (Format $0/$3) or rte5 (larger formats).
+				IF exec(directSR)='1' AND format1_chain_active='0' AND micro_state /= rte1 AND data_read(12) /= FlagsSR(4) THEN
 						IF data_read(12) = '1' THEN
 							regfile(15) <= MSP;  -- M 0->1: load MSP into A7
 						ELSE
@@ -1854,7 +1867,8 @@ PROCESS (clk)
 					-- BUG #387 FIX: Use exe_pc for exceptions that occur during instruction decode
 					-- (illegal instruction vector=0x10, privilege violation vector=0x20).
 					-- These exceptions fire after extension words are fetched, so TG68_PC_add is over-incremented.
-					IF trap_vector(9 downto 0) = "00" & X"10" OR trap_vector(9 downto 0) = "00" & X"20" THEN
+					IF trap_vector(9 downto 0) = "00" & X"10" OR trap_vector(9 downto 0) = "00" & X"20"
+				   OR trap_vector(9 downto 0) = "00" & X"0C" THEN
 						data_write_tmp <= exe_pc;
 					ELSE
 						data_write_tmp <= TG68_PC_add;
@@ -2436,7 +2450,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			-- By checking pmmu_fault combinationally, the bus error is caught at the same edge
 			-- where the faulting memory write completes (state="11"->"00").
 			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1'
-			   OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0') THEN
+			   OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0')
+			   OR TG68_PC(0)='1' THEN
 				setinterrupt <= '1';
 			ELSIF stop='0' THEN
 				setopcode <= '1';
@@ -2481,6 +2496,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 --				IPL_nr <= "000";
 				trap_trace <= '0';
 					trap_berr <= '0';
+					trap_addr_error <= '0';
 					writePCbig <= '0';
 --				recall_last <= '0';
 					Suppress_Base <= '0';
@@ -2680,6 +2696,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						make_mmu_berr <= '0';  -- BUG #159: Clear MMU BERR flag
 						trap_berr <= '0';
 						trap_mmu_berr <= '0';  -- BUG #159: Clear MMU BERR trap
+						trap_addr_error <= '0';  -- Clear by default
 						IF make_trace='1' THEN
 							trap_trace <= '1';
 						-- BUG #400 FIX: Also check pmmu_fault directly for same-cycle dispatch
@@ -2765,6 +2782,17 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									berr_ssw(3) <= '0';
 								end if;
 							END IF;
+						ELSIF TG68_PC(0)='1' THEN
+							-- Address Error (Group 0): odd instruction fetch address
+							IF cpu(1) = '1' AND berr_exception_active = '1' THEN
+								cpu_halted <= '1';  -- Double fault: halt CPU
+								-- synthesis translate_off
+								report "DOUBLE FAULT: address error during exception - CPU HALTED" severity warning;
+								-- synthesis translate_on
+							ELSE
+								trap_addr_error <= '1';
+								berr_exception_active <= '1';
+							END IF;
 						ELSE
 							rIPL_nr <= IPL_nr;
 							IPL_vec <= "00011"&IPL_nr;            --	TH
@@ -2785,6 +2813,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						trap_trace <= '0';
 						TG68_PC_word <= '0';
 						trap_berr <= '0';
+						trap_addr_error <= '0';
 						-- MC68030: Clear berr exception window when normal instruction fetches
 						-- Don't clear if trap_berr was still active (it reads the OLD value here)
 						-- or if make_berr is pending - handler fetch may have faulted
@@ -3172,7 +3201,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		set_direct_data <= '0';
 		set_exec_tas <= '0';
 		trap_illegal <='0';
-		trap_addr_error <= '0';
+		-- trap_addr_error: moved to process 2375 (registered, like trap_berr)
 		trap_priv <='0';
 		trap_1010 <='0';
 		trap_1111 <='0';
@@ -3250,7 +3279,20 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				set(changeMode) <= '1';
 			END IF;
 			setstate <= "01";
-		END IF;	
+		END IF;
+		IF interrupt='1' AND trap_addr_error='1' THEN
+			-- MC68030: Address error uses Format $2 (6-word) stack frame
+			IF cpu(1)='1' THEN
+				next_micro_state <= trap00;  -- Format #2
+			ELSE
+				next_micro_state <= trap0;   -- Format #0 for 68000/010
+			END IF;
+			setstackaddr <= '1';
+			IF preSVmode='0' THEN
+				set(changeMode) <= '1';
+			END IF;
+			setstate <= "01";
+		END IF;
 		IF trapmake='1' AND trapd='0' THEN
 			-- synthesis translate_off
 			report "TRAP_TAKEN: mmu_cfg=" & bit'image(trap_mmu_config) &
@@ -3261,15 +3303,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			       " ms=" & micro_states'image(micro_state) &
 			       " opc=" & integer'image(conv_integer(opcode)) severity warning;
 			-- synthesis translate_on
-			-- Stack frame format selection (MC68030 User's Manual 6.4.3):
-			-- Format #2 (6-word): TRAPV, CHK, CHK2, Divide by Zero, Trace, cpTRAPcc
+			-- Stack frame format selection (MC68030 User's Manual 6.4.3, Table 8-4):
+			-- Format #2 (6-word): TRAPV, CHK, CHK2, Divide by Zero, Trace, cpTRAPcc, Format Error
 			-- Format #0 (4-word): All others including privilege violation, F-line, illegal
-            -- Format #A (16-word): Bus Error (MC68030)
+			-- Format #A (16-word): Bus Error (MC68030)
 			IF cpu(1)='1' AND trap_berr='1' THEN
 				next_micro_state <= berr1;
 				-- BUG #401 FIX: Set setstackaddr at dispatch (see interrupt path above)
 				setstackaddr <= '1';
-			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR trap_mmu_config='1') THEN
+			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR trap_mmu_config='1' OR trap_format_error='1') THEN
 				next_micro_state <= trap00;  -- Format #2 (6-word) per MC68030 UM Table 8-4
 			else
 				next_micro_state <= trap0;
@@ -3332,12 +3374,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					END IF;
 				ELSE
 					-- Currently in supervisor mode, switching to user mode
-					-- BUG #167 FIX: Save A7 to BOTH MSP and ISP
-					-- After reset, ISP=0 because the initial A7 value was never synced.
-					-- When switching to user mode, save current A7 to both shadow registers
-					-- so that future interrupt (uses ISP) and RTE (uses MSP) both work correctly.
-					set(to_ISP) <= '1';
-					set(to_MSP) <= '1';
+					-- Save only the ACTIVE supervisor stack shadow.
+					-- Writing both shadows here corrupts the inactive one (e.g. MSP gets
+					-- overwritten by ISP value during S->U), which breaks later RTE flows.
+					IF interrupt_mode='1' OR FlagsSR(4)='0' THEN
+						set(to_ISP) <= '1';   -- Active stack is ISP
+					ELSE
+						set(to_MSP) <= '1';   -- Active stack is MSP
+					END IF;
 					set(from_USP) <= '1';
 				END IF;
 			ELSE
@@ -5103,10 +5147,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 -- use for ABCD, SBCD
 		IF build_bcd='1' THEN
 			set_exec(use_XZFlag) <= '1';
-			set_exec(ea_data_OP1) <= '1';
-			write_back <= '1';
 			source_lowbits <='1';
 			IF opcode(3)='1' THEN
+				set_exec(ea_data_OP1) <= '1';
+				write_back <= '1';
 				IF decodeOPC='1' THEN
 					IF opcode(2 downto 0)="111" THEN
 						set(use_SP) <= '1';
@@ -6196,10 +6240,28 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								-- Swap back after dual-frame: save A7 to MSP, load ISP
 								set(to_MSP) <= '1';
 								set(from_ISP) <= '1';
-								set(Regwrena) <= '1';  -- Enable register file write for A7 update
+								set(Regwrena) <= '1';
 								setstackaddr <= '1';
-								setstate <= "01";  -- Idle: ensures memmask="111111" so clkena_lw='1' for register write
+								setstate <= "01";
 								-- format1_chain_active cleared by registered process
+							ELSIF cpu(1)='1' AND preSVmode='1' AND FlagsSR(5)='1' AND rte_saved_mbit /= FlagsSR(4) THEN
+								-- Deferred M-bit swap: directSR loaded new M into FlagsSR,
+								-- but A7 swap was deferred until frame fully consumed.
+								-- FlagsSR(5)='1' ensures we're STAYING in supervisor mode.
+								-- When going to user mode (S=0), changeMode handles the
+								-- USP/SSP switch; the M-bit swap is irrelevant.
+								IF FlagsSR(4) = '1' THEN
+									-- M 0->1: save ISP (current A7), load MSP
+									set(to_ISP) <= '1';
+									set(from_MSP) <= '1';
+								ELSE
+									-- M 1->0: save MSP (current A7), load ISP
+									set(to_MSP) <= '1';
+									set(from_ISP) <= '1';
+								END IF;
+								set(Regwrena) <= '1';
+								setstackaddr <= '1';
+								setstate <= "01";
 							END IF;
 							-- Clear interrupt mode when returning to user mode
 							IF FlagsSR(5)='0' THEN
@@ -6252,10 +6314,23 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						IF format1_chain_active='1' THEN
 							set(to_MSP) <= '1';
 							set(from_ISP) <= '1';
-							set(Regwrena) <= '1';  -- Enable register file write for A7 update
+							set(Regwrena) <= '1';
 							setstackaddr <= '1';
-							setstate <= "01";  -- Idle: ensures memmask="111111" so clkena_lw='1' for register write
+							setstate <= "01";
 							-- format1_chain_active cleared by registered process
+						ELSIF cpu(1)='1' AND preSVmode='1' AND FlagsSR(5)='1' AND rte_saved_mbit /= FlagsSR(4) THEN
+							-- Deferred M-bit swap for Format $2/$9/$A/$B frames
+							-- FlagsSR(5)='1' ensures we're STAYING in supervisor mode.
+							IF FlagsSR(4) = '1' THEN
+								set(to_ISP) <= '1';
+								set(from_MSP) <= '1';
+							ELSE
+								set(to_MSP) <= '1';
+								set(from_ISP) <= '1';
+							END IF;
+							set(Regwrena) <= '1';
+							setstackaddr <= '1';
+							setstate <= "01";
 						END IF;
 						-- BUG #18: Clear interrupt mode only when returning to user mode (MC68030)
 						IF FlagsSR(5)='0' THEN
@@ -7416,14 +7491,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
     -- VHDL last-assignment-wins: this overrides exec(to_ISP)/exec(to_MSP)
     -- above if both fire, but they shouldn't (different instructions).
     if cpu(1)='1' and preSVmode='1' then
-      if exec(to_SR)='1' and SRin(4) /= FlagsSR(4) then
+      if exec(to_SR)='1' and SRin(5)='1' and SRin(4) /= FlagsSR(4) then
+        -- M-bit swap shadow save for MOVE to SR.
+        -- SRin(5)='1' ensures we're STAYING in supervisor mode.
         if SRin(4) = '1' then
           ISP <= regfile(15);  -- M 0->1: save old A7 (was ISP) to ISP shadow
         else
           MSP <= regfile(15);  -- M 1->0: save old A7 (was MSP) to MSP shadow
         end if;
       end if;
-      if exec(directSR)='1' and format1_chain_active='0' and data_read(12) /= FlagsSR(4) then
+      -- Block directSR M-bit swap during RTE (deferred to frame completion)
+      if exec(directSR)='1' and format1_chain_active='0' and micro_state /= rte1 and data_read(12) /= FlagsSR(4) then
         if data_read(12) = '1' then
           ISP <= regfile(15);  -- M 0->1: save old A7 (was ISP) to ISP shadow
         else

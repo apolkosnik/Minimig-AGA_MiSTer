@@ -351,6 +351,169 @@ begin
             wait for 1 us;
         end procedure;
 
+        -- Regression: invalid format word $4205 with frame SR=$0000 must
+        -- trigger Format Error without dropping to user mode or clobbering MSP.
+        procedure test_rte_format4205_s_to_u_msp_preserve is
+            constant test_name : string := "Fmt4 $4205 S->U SR/MSP preserve";
+            variable reached_stop : boolean;
+            variable saw_format_error : boolean;
+            variable saw_illegal : boolean;
+            variable local_fail : boolean;
+            variable exception_vector : std_logic_vector(7 downto 0);
+            variable sr_val : std_logic_vector(15 downto 0);
+            variable msp_hi : std_logic_vector(15 downto 0);
+            variable msp_lo : std_logic_vector(15 downto 0);
+        begin
+            current_test <= test_name & (test_name'length + 1 to 40 => ' ');
+            report "Testing invalid RTE frame $4205 with SR=$0000 (must keep S=1 and preserve MSP)..." severity note;
+
+            -- Reset memory
+            for i in 0 to 8191 loop
+                mem(i) := x"4E71";
+            end loop;
+
+            -- Reset vectors: SSP=$2000, PC=$1000
+            mem(0) := x"0000";
+            mem(1) := x"2000";
+            mem(2) := x"0000";
+            mem(3) := x"1000";
+
+            -- Format Error vector (14, offset $38) -> $1300
+            mem(16#38#/2) := x"0000";
+            mem(16#38#/2 + 1) := x"1300";
+
+            -- Illegal instruction vector (4, offset $10) -> $1400 (failure marker)
+            mem(16#10#/2) := x"0000";
+            mem(16#10#/2 + 1) := x"1400";
+            mem(16#1400#/2) := x"4E72";
+            mem(16#1400#/2 + 1) := x"2700";
+
+            -- Clear verification area
+            for i in 16#3000#/2 to 16#3008#/2 loop
+                mem(i) := x"DEAD";
+            end loop;
+
+            -- ===== Code at $1000 =====
+            -- Set MSP shadow = $0840
+            mem(16#1000#/2) := x"203C"; mem(16#1002#/2) := x"0000"; mem(16#1004#/2) := x"0840";  -- MOVE.L #$00000840,D0
+            mem(16#1006#/2) := x"4E7B"; mem(16#1008#/2) := x"0803";                               -- MOVEC D0,MSP
+            -- Set ISP shadow = $07C0 and make A7 point there (supervisor M=0 => A7=ISP)
+            mem(16#100A#/2) := x"203C"; mem(16#100C#/2) := x"0000"; mem(16#100E#/2) := x"07C0";  -- MOVE.L #$000007C0,D0
+            mem(16#1010#/2) := x"4E7B"; mem(16#1012#/2) := x"0801";                               -- MOVEC D0,ISP
+            mem(16#1014#/2) := x"2E7C"; mem(16#1016#/2) := x"0000"; mem(16#1018#/2) := x"07C0";  -- MOVEA.L #$000007C0,A7
+            -- Force known supervisor SR (S=1, M=0)
+            mem(16#101A#/2) := x"46FC"; mem(16#101C#/2) := x"2000";                               -- MOVE.W #$2000,SR
+            -- Execute RTE with invalid format frame at ISP
+            mem(16#101E#/2) := x"4E73";                                                            -- RTE
+
+            -- If RTE incorrectly returns to frame PC, this executes (failure marker)
+            mem(16#1580#/2) := x"4E72"; mem(16#1582#/2) := x"2700";                               -- STOP #$2700
+
+            -- ===== Frame at ISP ($07C0) =====
+            mem(16#07C0#/2) := x"0000";  -- SR from frame (user mode request)
+            mem(16#07C2#/2) := x"0000";  -- PC high
+            mem(16#07C4#/2) := x"1580";  -- PC low (must not be reached)
+            mem(16#07C6#/2) := x"4205";  -- Invalid format word (Format $4)
+
+            -- ===== Format Error handler at $1300 =====
+            mem(16#1300#/2) := x"4280";                                                            -- CLR.L D0
+            mem(16#1302#/2) := x"40C0";                                                            -- MOVE.W SR,D0
+            mem(16#1304#/2) := x"33C0"; mem(16#1306#/2) := x"0000"; mem(16#1308#/2) := x"3000";  -- MOVE.W D0,($3000).L
+            mem(16#130A#/2) := x"4E7A"; mem(16#130C#/2) := x"4803";                               -- MOVEC MSP,D4
+            mem(16#130E#/2) := x"23C4"; mem(16#1310#/2) := x"0000"; mem(16#1312#/2) := x"3002";  -- MOVE.L D4,($3002).L
+            mem(16#1314#/2) := x"4E72"; mem(16#1316#/2) := x"2700";                               -- STOP #$2700
+
+            -- ===== Execute =====
+            nReset <= '0';
+            wait for 100 ns;
+            nReset <= '1';
+
+            reached_stop := false;
+            saw_format_error := false;
+            saw_illegal := false;
+            exception_vector := x"00";
+            for i in 0 to 30000 loop
+                wait until rising_edge(clk);
+
+                -- Track exception vectors from vector table reads
+                if busstate = "10" and addr_out(31 downto 10) = (31 downto 10 => '0') then
+                    exception_vector := addr_out(9 downto 2);
+                    if exception_vector = x"0E" then
+                        saw_format_error := true;
+                    elsif exception_vector = x"04" then
+                        saw_illegal := true;
+                    end if;
+                end if;
+
+                -- Failure: RTE treated frame as valid and jumped to frame PC
+                if addr_out(15 downto 0) = x"1580" then
+                    report "FAIL: $4205 regression - RTE returned to frame PC instead of taking Format Error" severity error;
+                    test_failed <= test_failed + 1;
+                    wait for 1 us;
+                    return;
+                end if;
+
+                -- Failure: got Illegal Instruction vector (expected Format Error)
+                if saw_illegal then
+                    report "FAIL: $4205 regression - got exception vector 4 (Illegal), expected vector 14 (Format Error)" severity error;
+                    test_failed <= test_failed + 1;
+                    wait for 1 us;
+                    return;
+                end if;
+
+                -- Success path: reached STOP in Format Error handler
+                if addr_out(15 downto 0) = x"1314" then
+                    reached_stop := true;
+                    for j in 0 to 100 loop
+                        wait until rising_edge(clk);
+                    end loop;
+                    exit;
+                end if;
+            end loop;
+
+            if not reached_stop then
+                if saw_format_error then
+                    report "FAIL: $4205 regression - saw Format Error vector but handler did not complete" severity error;
+                else
+                    report "FAIL: $4205 regression - timeout waiting for Format Error vector/handler" severity error;
+                end if;
+                test_failed <= test_failed + 1;
+                wait for 1 us;
+                return;
+            end if;
+
+            -- ===== Verify post-exception state =====
+            local_fail := false;
+
+            -- Active SR should still be supervisor ($2000), not frame SR=$0000
+            sr_val := mem(16#3000#/2);
+            if sr_val /= x"2000" then
+                report "  FAIL: SR in Format Error handler = $" & integer'image(to_integer(unsigned(sr_val))) &
+                       ", expected $2000" severity error;
+                local_fail := true;
+            end if;
+
+            -- MSP shadow must remain at initialized value ($0840)
+            msp_hi := mem(16#3002#/2);
+            msp_lo := mem(16#3002#/2 + 1);
+            if msp_hi /= x"0000" or msp_lo /= x"0840" then
+                report "  FAIL: MSP = $" & integer'image(to_integer(unsigned(msp_hi))) &
+                       ":" & integer'image(to_integer(unsigned(msp_lo))) &
+                       ", expected $0000:$0840" severity error;
+                local_fail := true;
+            end if;
+
+            if local_fail then
+                report "FAIL: $4205 regression - SR/MSP state mismatch on Format Error" severity error;
+                test_failed <= test_failed + 1;
+            else
+                report "PASS: $4205 regression - Format Error taken, SR stayed supervisor, MSP preserved" severity note;
+                test_passed <= test_passed + 1;
+            end if;
+
+            wait for 1 us;
+        end procedure;
+
         -- Test SVmode tracking: RTE to user mode, TRAP, RTE back
         -- This tests whether preSVmode properly syncs when SR is restored
         procedure test_svmode_tracking is
@@ -1496,6 +1659,8 @@ begin
         -- $A605 = Format A (bits 15:12 = 1010), vector offset $605
         -- Format A is VALID for MC68030 (short bus fault frame, 16-word)
         test_rte_format_word(x"A605", "Format word $A605 (Format A)", true);
+        -- Targeted regression: invalid $4205 frame with SR=$0000 must not drop S or corrupt MSP
+        test_rte_format4205_s_to_u_msp_preserve;
 
         -- Edge case tests for SVmode tracking and timing
         report "---------------------------------------------------------" severity note;
