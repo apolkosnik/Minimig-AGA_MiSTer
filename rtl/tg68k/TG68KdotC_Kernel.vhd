@@ -1333,10 +1333,14 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 				format1_chain_active <= '0';
 				rte_saved_mbit <= '0';
 			ELSIF clkena_lw='1' THEN
-				-- Save M bit when entering RTE (decodeOPC->rte1), but NOT from rte6->rte1
-				-- (second frame in Format $1 chain). At this edge, FlagsSR(4) still holds
-				-- the pre-RTE M value because directSR hasn't updated it yet.
+				-- Save M bit before any SR modification that could change it.
+				-- Used by changeMode S->U to save A7 to the correct shadow.
+				-- For RTE: captured at rte1 entry (before directSR updates FlagsSR).
+				-- For MOVE to SR: captured at exec(to_SR) (before to_SR updates FlagsSR).
 				IF next_micro_state = rte1 AND micro_state /= rte6 THEN
+					rte_saved_mbit <= FlagsSR(4);
+				END IF;
+				IF exec(to_SR)='1' THEN
 					rte_saved_mbit <= FlagsSR(4);
 				END IF;
 				IF setopcode='1' THEN
@@ -1482,7 +1486,7 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 					-- Block directSR M-bit swap during RTE: exec(directSR) always fires at
 				-- micro_state=rte1, but A7 swap must be deferred until frame is consumed.
 				-- The deferred swap happens in rte4 (Format $0/$3) or rte5 (larger formats).
-				IF exec(directSR)='1' AND format1_chain_active='0' AND micro_state /= rte1 AND data_read(12) /= FlagsSR(4) THEN
+				IF exec(directSR)='1' AND format1_chain_active='0' AND micro_state /= rte1 AND data_read(13)='1' AND data_read(12) /= FlagsSR(4) THEN
 						IF data_read(12) = '1' THEN
 							regfile(15) <= MSP;  -- M 0->1: load MSP into A7
 						ELSE
@@ -1867,8 +1871,7 @@ PROCESS (clk)
 					-- BUG #387 FIX: Use exe_pc for exceptions that occur during instruction decode
 					-- (illegal instruction vector=0x10, privilege violation vector=0x20).
 					-- These exceptions fire after extension words are fetched, so TG68_PC_add is over-incremented.
-					IF trap_vector(9 downto 0) = "00" & X"10" OR trap_vector(9 downto 0) = "00" & X"20"
-				   OR trap_vector(9 downto 0) = "00" & X"0C" THEN
+					IF trap_vector(9 downto 0) = "00" & X"10" OR trap_vector(9 downto 0) = "00" & X"20" THEN
 						data_write_tmp <= exe_pc;
 					ELSE
 						data_write_tmp <= TG68_PC_add;
@@ -1914,7 +1917,11 @@ PROCESS (clk)
 				ELSIF micro_state = berr6 THEN
 					data_write_tmp <= x"0000" & berr_ssw;  -- SSW ($08)
 				ELSIF micro_state = berr7 THEN
-					data_write_tmp <= TG68_PC(15 downto 0) & "1010" & trap_vector(11 downto 0);  -- Format/PC_lo ($04)
+					IF trap_addr_error='1' THEN
+						data_write_tmp <= TG68_PC(15 downto 0) & "1011" & trap_vector(11 downto 0);  -- Format $B/PC_lo ($04)
+					ELSE
+						data_write_tmp <= TG68_PC(15 downto 0) & "1010" & trap_vector(11 downto 0);  -- Format $A/PC_lo ($04)
+					END IF;
 				ELSIF micro_state = berr8 THEN
 					data_write_tmp <= (trap_SR & Flags) & TG68_PC(31 downto 16);  -- SR/PC_hi ($00)
 				-- BUG #391 FIX: Bypass hold_dwr at the CRP/SRP HI/LO write boundary.
@@ -1993,9 +2000,6 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 			-- This caused exception 8 (privilege) instead of exception 14 (format error).
 			IF clkena_in='1' THEN
 				trap_vector(31 downto 10) <= (others => '0');
-				IF trap_addr_error='1' THEN
-					trap_vector(9 downto 0) <= "00" & X"0C";
-				END IF;
 				IF trap_illegal='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"10";
 				END IF;
@@ -2029,10 +2033,13 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				IF trap_mmu_config='1' THEN
 					trap_vector(9 downto 0) <= "11" & X"80";  -- Vector 56 (0xE0) - MMU Configuration Error
 				END IF;
-				-- BUG #402 FIX: trap_berr and trap_mmu_berr must come AFTER
+				-- BUG #402 FIX: trap_berr, trap_mmu_berr, and trap_addr_error must come AFTER
 				-- set_vectoraddr to have higher priority (VHDL last-assignment-wins).
-				-- berr8 sets set_vectoraddr='1' which would override trap_vector
-				-- with IPL_vec, corrupting the bus error vector address.
+				-- berr8/trap3 sets set_vectoraddr='1' which would override trap_vector
+				-- with IPL_vec, corrupting the bus/address error vector address.
+				IF trap_addr_error='1' THEN
+					trap_vector(9 downto 0) <= "00" & X"0C";
+				END IF;
 				IF trap_berr='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"08";
 				END IF;
@@ -2792,6 +2799,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 							ELSE
 								trap_addr_error <= '1';
 								berr_exception_active <= '1';
+								-- Address error frame data for berr1-berr8
+								berr_fault_addr <= TG68_PC;  -- The odd address
+								berr_data_out_saved <= (others => '0');
+								-- SSW: instruction fetch, read, word-size
+								berr_ssw <= (others => '0');
+								berr_ssw(6) <= '1';           -- RW=1 (read)
+								berr_ssw(5 downto 4) <= "10"; -- SIZE=word
+								berr_ssw(2 downto 0) <= fc_internal;  -- FC
 							END IF;
 						ELSE
 							rIPL_nr <= IPL_nr;
@@ -3281,9 +3296,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			setstate <= "01";
 		END IF;
 		IF interrupt='1' AND trap_addr_error='1' THEN
-			-- MC68030: Address error uses Format $2 (6-word) stack frame
+			-- MC68030: Address error uses bus fault frame (same as bus error)
 			IF cpu(1)='1' THEN
-				next_micro_state <= trap00;  -- Format #2
+				next_micro_state <= berr1;   -- Format $B (bus fault frame)
 			ELSE
 				next_micro_state <= trap0;   -- Format #0 for 68000/010
 			END IF;
@@ -3377,7 +3392,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- Save only the ACTIVE supervisor stack shadow.
 					-- Writing both shadows here corrupts the inactive one (e.g. MSP gets
 					-- overwritten by ISP value during S->U), which breaks later RTE flows.
-					IF interrupt_mode='1' OR FlagsSR(4)='0' THEN
+					-- Use rte_saved_mbit (pre-SR-change M bit) instead of FlagsSR(4),
+					-- because FlagsSR(4) has already been updated by directSR/to_SR
+					-- by the time the deferred changeMode fires at setexecOPC.
+					IF interrupt_mode='1' OR rte_saved_mbit='0' THEN
 						set(to_ISP) <= '1';   -- Active stack is ISP
 					ELSE
 						set(to_MSP) <= '1';   -- Active stack is MSP
@@ -6376,12 +6394,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- 68020+: MSP/ISP are separate control registers
 						CASE brief(11 downto 0) IS
 							WHEN X"803" =>  -- MSP (Master Stack Pointer)
-								set(from_MSP) <= '1';
 								IF opcode(0)='1' THEN
 									set(to_MSP) <= '1';
 								END IF;
 							WHEN X"804" =>  -- ISP (Interrupt Stack Pointer)
-								set(from_ISP) <= '1';
 								IF opcode(0)='1' THEN
 									set(to_ISP) <= '1';
 								END IF;
@@ -7426,7 +7442,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 -----------------------------------------------------------------------------
 -- MOVEC
 -----------------------------------------------------------------------------
-  process (clk, SFC, DFC, VBR, CACR, CAAR, USP, SSP, MSP, ISP, brief, pmmu_reg_rdat)
+  process (clk, SFC, DFC, VBR, CACR, CAAR, USP, SSP, MSP, ISP, brief, pmmu_reg_rdat,
+           regfile, FlagsSR, interrupt_mode)
   begin
 	-- all other hexa codes should give illegal isntruction exception
 	if rising_edge(clk) then
@@ -7501,7 +7518,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
         end if;
       end if;
       -- Block directSR M-bit swap during RTE (deferred to frame completion)
-      if exec(directSR)='1' and format1_chain_active='0' and micro_state /= rte1 and data_read(12) /= FlagsSR(4) then
+      if exec(directSR)='1' and format1_chain_active='0' and micro_state /= rte1 and data_read(13)='1' and data_read(12) /= FlagsSR(4) then
         if data_read(12) = '1' then
           ISP <= regfile(15);  -- M 0->1: save old A7 (was ISP) to ISP shadow
         else
@@ -7528,8 +7545,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 	  when X"800" => movec_data <= USP;  -- BUG #18: USP -- 68010+
 	  when X"801" => movec_data <= VBR;  -- 68010+
 	  when X"802" => movec_data <= CAAR; -- 68020+
-	  when X"803" => movec_data <= MSP;  -- BUG #18: MSP -- 68020+
-	  when X"804" => movec_data <= ISP;  -- BUG #18: ISP -- 68020+
+	  when X"803" =>  -- BUG #18: MSP -- 68020+
+	    if FlagsSR(4)='1' and interrupt_mode='0' then
+	      movec_data <= regfile(15);  -- MSP is active in A7
+	    else
+	      movec_data <= MSP;          -- MSP is in shadow
+	    end if;
+	  when X"804" =>  -- BUG #18: ISP -- 68020+
+	    if FlagsSR(4)='0' or interrupt_mode='1' then
+	      movec_data <= regfile(15);  -- ISP is active in A7
+	    else
+	      movec_data <= ISP;          -- ISP is in shadow
+	    end if;
 	  when others => NULL;
 	end case;
   end process;
