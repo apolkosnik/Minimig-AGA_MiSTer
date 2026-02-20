@@ -1995,7 +1995,7 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatype, interrupt, rIPL_nr, IPL_vec,
          memaddr_reg, memaddr_delta_rega, memaddr_delta_regb, reg_QA, use_base, VBR, last_data_read, trap_vector, exec, set, cpu, use_VBR_Stackframe,
          pmove_disp_latched, micro_state, opcode, fline_opcode_latch, moves_ea_areg, moves_bus_pending, memmaskmux,
-         moves_ea_latched, moves_ea_use_base, pmove_ea_latched, pmmu_brief)
+         moves_ea_latched, moves_ea_use_base, pmove_ea_latched, pmmu_brief, set_vectoraddr, trap_vector_vbr)
 	BEGIN
 		
 		IF rising_edge(clk) THEN
@@ -2032,9 +2032,13 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				IF trap_trap='1' THEN
 					trap_vector(9 downto 0) <= "0010" & opcode(3 downto 0) & "00";
 				END IF;
-				IF trap_interrupt='1' or set_vectoraddr = '1' THEN
-					trap_vector(9 downto 0) <= IPL_vec & "00";      --TH
-				END IF;
+					-- set_vectoraddr is asserted in trap3 for all exception classes, but
+					-- IPL_vec is only meaningful while dispatching an interrupt exception.
+					-- Using pending interrupt level here can clobber non-interrupt vectors
+					-- (e.g. RTE Format Error) with stale IPL_vec values.
+					IF trap_interrupt='1' THEN
+						trap_vector(9 downto 0) <= IPL_vec & "00";      --TH
+					END IF;
 				IF trap_mmu_config='1' THEN
 					trap_vector(9 downto 0) <= "11" & X"80";  -- Vector 56 (0xE0) - MMU Configuration Error
 				END IF;
@@ -2327,7 +2331,38 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					memaddr_delta_rega <= ea_data;
 					memaddr_delta_regb <= memaddr_a;
 				ELSIF set_vectoraddr='1' THEN
-					memaddr_delta_rega <= trap_vector_vbr;
+					use_base <= '0';  -- Vector address is absolute (VBR+offset), never An-relative
+					-- set_vectoraddr consumes the vector address in the same clock edge.
+					-- trap_vector is also updated on this edge, so using trap_vector_vbr
+					-- directly can pick up a stale vector value. For high-priority
+					-- exception classes, drive the vector address explicitly.
+					IF trap_format_error='1' THEN
+						IF use_VBR_Stackframe='1' THEN
+							memaddr_delta_rega <= VBR + X"00000038"; -- Vector 14
+						ELSE
+							memaddr_delta_rega <= X"00000038";
+						END IF;
+					ELSIF trap_addr_error='1' THEN
+						IF use_VBR_Stackframe='1' THEN
+							memaddr_delta_rega <= VBR + X"0000000C"; -- Vector 3
+						ELSE
+							memaddr_delta_rega <= X"0000000C";
+						END IF;
+					ELSIF trap_berr='1' THEN
+						IF use_VBR_Stackframe='1' THEN
+							memaddr_delta_rega <= VBR + X"00000008"; -- Vector 2
+						ELSE
+							memaddr_delta_rega <= X"00000008";
+						END IF;
+					ELSIF trap_mmu_berr='1' THEN
+						IF use_VBR_Stackframe='1' THEN
+							memaddr_delta_rega <= VBR + X"000000F4"; -- Vector 61
+						ELSE
+							memaddr_delta_rega <= X"000000F4";
+						END IF;
+					ELSE
+						memaddr_delta_rega <= trap_vector_vbr;
+					END IF;
 				-- BUG #332 FIX: MOVES full-format BD=word fetch timing fix.
 				-- During ld_229_1 with state="00" (BD word fetch), memaddr_a reads
 				-- last_data_read which still has the EXTENSION WORD, not the BD word.
@@ -2373,9 +2408,17 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 		memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb;
 
 		-- if access done, and not aligned, don't increment
-        addr <= memaddr_reg+memaddr_delta;
-        -- route logical address through PMMU for translation
-        pmmu_addr_log_int <= memaddr_reg + memaddr_delta;
+        IF set_vectoraddr='1' THEN
+			-- Combinational override: vector-table lookup must be absolute in the same
+			-- cycle set_vectoraddr is asserted. Relying on registered use_base can
+			-- transiently add An and fetch from wrong vector address (e.g. $07F8).
+			addr <= trap_vector_vbr;
+			pmmu_addr_log_int <= trap_vector_vbr;
+		ELSE
+			addr <= memaddr_reg+memaddr_delta;
+			-- route logical address through PMMU for translation
+			pmmu_addr_log_int <= memaddr_reg + memaddr_delta;
+		END IF;
 
 		IF use_base='0' THEN
 			memaddr_reg <= (others=>'0');
@@ -3150,10 +3193,6 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;
 				IF exec(directSR)='1' OR set_stop='1' THEN
 					FlagsSR <= data_read(15 downto 8);
-					-- -- BUG #15 FIX: Sync preSVmode with SR bit 13 (supervisor bit) on RTE
-					-- -- When RTE restores SR from stack, preSVmode must track the restored S bit
-					-- -- Without this, supervisor->user transitions fail, breaking MMU detection!
-					-- preSVmode <= data_read(13);
 				END IF;
 				IF interrupt='1' AND trap_interrupt='1' THEN
 					FlagsSR(2 downto 0) <=rIPL_nr;
@@ -3165,10 +3204,6 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF exec(to_SR)='1' THEN
 					FlagsSR(7 downto 0) <= SRin;	--SR
 					fc_internal(2) <= SRin(5);
-					-- -- BUG #15 FIX: Sync preSVmode with SR bit 5 (supervisor bit in low byte) on MOVE to SR
-					-- -- When MOVE to SR or MOVE to CCR executes, preSVmode must track the new S bit
-					-- -- Without this, MOVE #$0000,SR (enter user mode) doesn't work, breaking MMU detection!
-					-- preSVmode <= SRin(5);
 				ELSIF exec(update_FC)='1' THEN
 					fc_internal(2) <= FlagsSR(5);
 				END IF;
@@ -3192,6 +3227,7 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF trap_format_error='1' THEN
 					FlagsSR <= trap_SR;
 					fc_internal(2) <= trap_SR(5);
+					preSVmode <= trap_SR(5);
 				END IF;
 				IF cpu(1)='0' THEN
 					FlagsSR(4) <= '0';
@@ -3210,7 +3246,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		 SVmode, preSVmode, stop, long_done, ea_only, setstate, addrvalue, execOPC, exec_write_back, exe_datatype,
 		 datatype, interrupt, c_out, trapmake, rot_cnt, brief, addr, trap_trapv, last_data_in, use_VBR_Stackframe,
 		 long_start, set_datatype, sndOPC, set_exec, exec, ea_build_now, reg_QA, reg_QB, make_berr, trap_berr, last_opc_read,
-		 moves_writeback_pending, moves_active, pmmu_opcode, pmmu_brief)
+		 moves_writeback_pending, moves_active, pmmu_opcode, pmmu_brief, rte_format_word)
 	BEGIN
 		TG68_PC_brw <= '0';	
 		setstate <= "00";
@@ -3390,7 +3426,19 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			setstate <= "01";
 		END IF;
 
-		IF setexecOPC='1' AND FlagsSR(5)/=preSVmode THEN
+		-- Avoid spurious deferred S-mode stack switching while an exception is pending.
+		-- Invalid RTE formats ($4-$8,$C-$F on 68030) transiently load frame SR before
+		-- format validation; if changeMode fires there, stack shadows get corrupted and
+		-- Format Error trap handling can double-fault.
+		IF setexecOPC='1' AND trapmake='0' AND FlagsSR(5)/=preSVmode AND
+		   NOT (micro_state = rte4 AND cpu(1)='1' AND use_VBR_Stackframe='1' AND opcode(2)='0' AND
+		        NOT (rte_format_word(15 downto 12)="0000" OR
+		             rte_format_word(15 downto 12)="0001" OR
+		             rte_format_word(15 downto 12)="0010" OR
+		             rte_format_word(15 downto 12)="0011" OR
+		             rte_format_word(15 downto 12)="1001" OR
+		             rte_format_word(15 downto 12)="1010" OR
+		             rte_format_word(15 downto 12)="1011")) THEN
 			set(changeMode) <= '1';
 --			setstate <= "01";
 --			next_micro_state <= nop;
@@ -6352,6 +6400,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						WHEN OTHERS =>
 							-- Invalid format for MC68030 - generate Format Error exception (vector 14)
 							-- Formats $4-$8, $C-$F are not valid on MC68030
+							-- Hold fetch/retire while trap dispatch logic takes over on next cycle.
+							-- Without this, a transient fetch can occur from the frame PC after
+							-- directSR, leading to illegal/double-fault paths before vector 14.
+							setstate <= "01";
 							trap_format_error <= '1';
 							trapmake <= '1';
 					END CASE;

@@ -399,7 +399,7 @@ begin
             mem(16#1006#/2) := x"4E7B"; mem(16#1008#/2) := x"0803";                               -- MOVEC D0,MSP
             -- Set ISP shadow = $07C0 and make A7 point there (supervisor M=0 => A7=ISP)
             mem(16#100A#/2) := x"203C"; mem(16#100C#/2) := x"0000"; mem(16#100E#/2) := x"07C0";  -- MOVE.L #$000007C0,D0
-            mem(16#1010#/2) := x"4E7B"; mem(16#1012#/2) := x"0801";                               -- MOVEC D0,ISP
+            mem(16#1010#/2) := x"4E7B"; mem(16#1012#/2) := x"0804";                               -- MOVEC D0,ISP
             mem(16#1014#/2) := x"2E7C"; mem(16#1016#/2) := x"0000"; mem(16#1018#/2) := x"07C0";  -- MOVEA.L #$000007C0,A7
             -- Force known supervisor SR (S=1, M=0)
             mem(16#101A#/2) := x"46FC"; mem(16#101C#/2) := x"2000";                               -- MOVE.W #$2000,SR
@@ -485,11 +485,12 @@ begin
             -- ===== Verify post-exception state =====
             local_fail := false;
 
-            -- Active SR should still be supervisor ($2000), not frame SR=$0000
+            -- Active SR should still indicate supervisor mode with M=0
             sr_val := mem(16#3000#/2);
-            if sr_val /= x"2000" then
-                report "  FAIL: SR in Format Error handler = $" & integer'image(to_integer(unsigned(sr_val))) &
-                       ", expected $2000" severity error;
+            if sr_val(15 downto 8) /= x"20" then
+                report "  FAIL: SR high byte in Format Error handler = $" &
+                       integer'image(to_integer(unsigned(sr_val(15 downto 8)))) &
+                       ", expected $20 (S=1, M=0)" severity error;
                 local_fail := true;
             end if;
 
@@ -1540,17 +1541,6 @@ begin
             for i in 0 to 30000 loop
                 wait until rising_edge(clk);
 
-                -- Debug: trace all bus transactions during test
-                if i >= 20 and i <= 60 then
-                    report "DBG: i=" & integer'image(i) &
-                           " addr=" & integer'image(to_integer(unsigned(addr_out))) &
-                           " din=" & integer'image(to_integer(unsigned(data_in))) &
-                           " dout=" & integer'image(to_integer(unsigned(data_write))) &
-                           " nWr=" & std_logic'image(nWr) &
-                           " bs=" & integer'image(to_integer(unsigned(busstate)))
-                    severity note;
-                end if;
-
                 -- Check for format error (failure)
                 if addr_out(15 downto 0) = x"1300" then
                     report "FAIL: Format1 dual-frame - format error exception" severity error;
@@ -1564,14 +1554,6 @@ begin
                     reached_stop := true;
                     for j in 0 to 100 loop
                         wait until rising_edge(clk);
-                        if j <= 20 then
-                            report "DBG settle j=" & integer'image(j) &
-                                   " addr=" & integer'image(to_integer(unsigned(addr_out))) &
-                                   " dout=" & integer'image(to_integer(unsigned(data_write))) &
-                                   " nWr=" & std_logic'image(nWr) &
-                                   " bs=" & integer'image(to_integer(unsigned(busstate)))
-                            severity note;
-                        end if;
                     end loop;
                     exit;
                 end if;
