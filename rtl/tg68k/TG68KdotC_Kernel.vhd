@@ -1927,23 +1927,34 @@ PROCESS (clk)
 				-- next berr state. Loading data_write_tmp here (sequential) captures the
 				-- correct data because sequential reads see the OLD micro_state value.
 				ELSIF micro_state = berr1 THEN
-					data_write_tmp <= (others => '0');  -- Internal registers ($1C, stub)
+					-- MC68030 Format $A frame offset $1C: Internal registers (pipeline
+					-- prefetch validity/position on real 68030). TG68K doesn't track
+					-- pipeline stages this way - zeros are correct for this field.
+					data_write_tmp <= (others => '0');
 				ELSIF micro_state = berr2 THEN
 					data_write_tmp <= berr_data_out_saved;  -- Data output buffer ($18)
 				ELSIF micro_state = berr3 THEN
-					data_write_tmp <= last_opc_read(15 downto 0) & opcode;  -- Internal ($14)
+					-- $14: Current instruction opcode in high word (matches real 68030
+					-- "internal register, opcode of faulted bus cycle" field)
+					data_write_tmp <= last_opc_read(15 downto 0) & opcode;
 				ELSIF micro_state = berr4 THEN
-					data_write_tmp <= berr_fault_addr;  -- Fault address ($10)
+					data_write_tmp <= berr_fault_addr;  -- Data cycle fault address ($10)
 				ELSIF micro_state = berr5 THEN
-					data_write_tmp <= opcode & last_opc_read(15 downto 0);  -- Pipe ($0C)
+					-- $0C: Instruction pipe stage C (low word) and stage B (high word)
+					data_write_tmp <= opcode & last_opc_read(15 downto 0);
 				ELSIF micro_state = berr6 THEN
-					data_write_tmp <= x"0000" & berr_ssw;  -- SSW ($08)
+					-- $08: Internal transfer count register ($08-$09, zero stub) and
+					-- SSW Special Status Word ($0A-$0B, real data: FC/RW/SIZE/DF/FB/RB)
+					data_write_tmp <= x"0000" & berr_ssw;
 				ELSIF micro_state = berr7 THEN
-					IF trap_addr_error='1' THEN
-						data_write_tmp <= TG68_PC(15 downto 0) & "1011" & trap_vector(11 downto 0);  -- Format $B/PC_lo ($04)
-					ELSE
-						data_write_tmp <= TG68_PC(15 downto 0) & "1010" & trap_vector(11 downto 0);  -- Format $A/PC_lo ($04)
-					END IF;
+					-- BUG #392 FIX: Both bus errors and address errors use Format $A.
+					-- The berr1-berr8 chain pushes exactly 8 longwords (Format $A size).
+					-- Format $B requires 46 words of internal state that TG68K doesn't
+					-- track. Using $B format code with $A-sized data would cause RTE
+					-- to pop 15 extra longwords of garbage, corrupting the stack.
+					-- WinUAE uses $B for address errors because it has full internal
+					-- pipeline state; we use $A since our frame data is Format $A sized.
+					data_write_tmp <= TG68_PC(15 downto 0) & "1010" & trap_vector(11 downto 0);  -- Format $A/PC_lo ($04)
 				ELSIF micro_state = berr8 THEN
 					data_write_tmp <= (trap_SR & Flags) & TG68_PC(31 downto 16);  -- SR/PC_hi ($00)
 				-- BUG #391 FIX: Bypass hold_dwr at the CRP/SRP HI/LO write boundary.
@@ -2909,7 +2920,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- BUG #389 FIX V2: PMMU retirement clearing moved to clkena_in block (line 2584)
 					-- to ensure it executes regardless of memmaskmux(3) state.
 					END IF;	
-					IF (state="10" AND addrvalue='0' AND write_back='1' AND setstate/="10") OR set_rot_cnt/="000001" OR (stop='1' AND interrupt='0') OR set_exec(opcCHK)='1' THEN
+					-- BUG #391 FIX: Exempt RTE frame unwinding from set_rot_cnt idle override.
+				-- set_rot_cnt/="000001" forces state="01" to keep CPU idle during ALU
+				-- operations (shifts, mul, div). But RTE rte5 needs state="10" (memory
+				-- read) while counting down. Without the exemption, rte5 never reads
+				-- the extra frame data for Format $9/$A/$B, leaving SP wrong on return.
+				IF (state="10" AND addrvalue='0' AND write_back='1' AND setstate/="10") OR (set_rot_cnt/="000001" AND next_micro_state /= rte5) OR (stop='1' AND interrupt='0') OR set_exec(opcCHK)='1' THEN
 						state <= "01";
 						memmask <= "111111";
 						addrvalue <= '0';
@@ -2969,7 +2985,15 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					IF decodeOPC='1' OR exec(ld_rot_cnt)='1' OR rot_cnt/="000001" THEN
 						rot_cnt <= set_rot_cnt;
 					END IF;
-					
+					-- BUG #391 FIX: Direct rot_cnt load on rte4->rte5 transition.
+					-- Normal rot_cnt loading requires decodeOPC, ld_rot_cnt exec, or
+					-- rot_cnt/="000001" - none of which are true when rte4 first sets
+					-- set_rot_cnt for format unwinding. Load it directly here so rte5
+					-- sees the correct count on its first iteration.
+					IF micro_state = rte4 AND set_rot_cnt /= "000001" THEN
+						rot_cnt <= set_rot_cnt;
+					END IF;
+
 					IF set_Suppress_Base='1' THEN
 						Suppress_Base <= '1';
 					ELSIF setstate(1)='1' OR (ea_only='1' AND set(get_ea_now)='1') THEN
@@ -3366,9 +3390,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			setstate <= "01";
 		END IF;
 		IF interrupt='1' AND trap_addr_error='1' THEN
-			-- MC68030: Address error uses bus fault frame (same as bus error)
+			-- MC68030: Address error uses bus fault frame (Format $A, same as bus error)
 			IF cpu(1)='1' THEN
-				next_micro_state <= berr1;   -- Format $B (bus fault frame)
+				next_micro_state <= berr1;   -- Format $A (short bus fault frame)
 			ELSE
 				next_micro_state <= trap0;   -- Format #0 for 68000/010
 			END IF;
