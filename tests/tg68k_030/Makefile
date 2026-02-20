@@ -12,7 +12,7 @@ TEST_DIR = $(PROJECT_ROOT)/tests/tg68k_030
 RTL_DIR = $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-lockup-all validate setup help
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-movec-active-stack test-lockup-all validate setup help
 
 # Default target
 all: test-comprehensive
@@ -72,6 +72,7 @@ help:
 	@echo "  test-abcd-mbit - Test ABCD behavior with M-bit stack mode switching"
 	@echo "  test-rte-abcd-suite - Run all RTE/ABCD regression benches"
 	@echo "  test-branch-odd-addr - Odd-address branches & ISP/MSP integrity during mode transitions"
+	@echo "  test-movec-active-stack - Verify MOVEC ISP/MSP active A7 aliasing for RTE"
 	@echo "  test-mmu-translation - Comprehensive MMU translation pipeline test (walker + ATC + TT)"
 	@echo "  test-berr-frame  - Test Format $$A bus error frame: SSW, fault address (BUG #414/#415)"
 	@echo ""
@@ -141,6 +142,7 @@ compile: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_diagrom_detectcpu.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_68030_library_init.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_whichamiga_mmu.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_movec_active_stack.vhd || true
 	@echo "Basic compilation completed (errors ignored for initial testing)"
 
 # Compile enhanced test sources
@@ -403,7 +405,7 @@ test-abcd-mbit: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_abcd_mbit.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 5us; quit -f" tb_abcd_mbit
 
-test-rte-abcd-suite: test-rte-formats test-rte-mbit-abcd test-abcd-mbit
+test-rte-abcd-suite: test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-movec-active-stack
 	@echo "RTE/ABCD regression suite complete."
 
 test-branch-odd-addr: setup
@@ -415,6 +417,15 @@ test-branch-odd-addr: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_branch_odd_addr.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 300us; quit" tb_branch_odd_addr
 #2>&1 | grep -E "(PASS|FAIL|Format|Test|Error|=====)"
+
+test-movec-active-stack: setup
+	@echo "Running MOVEC active ISP/MSP -> A7 aliasing regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_movec_active_stack.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_movec_active_stack
 
 # MOVEC Illegal Register Trap Test
 test-movec-illegal: setup
