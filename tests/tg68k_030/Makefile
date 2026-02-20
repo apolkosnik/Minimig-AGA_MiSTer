@@ -416,6 +416,15 @@ test-branch-odd-addr: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_branch_odd_addr.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 300us; quit" tb_branch_odd_addr
+
+test-addr-error-pmmu: setup
+	@echo "Running address error with PMMU enabled tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_addr_error_pmmu.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit -f" tb_addr_error_pmmu
 #2>&1 | grep -E "(PASS|FAIL|Format|Test|Error|=====)"
 
 test-movec-active-stack: setup

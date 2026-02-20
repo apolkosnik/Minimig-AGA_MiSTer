@@ -924,7 +924,12 @@ BEGIN
                      pmmu_dn_data;
 
   -- Drive PMMU request metadata
-  pmmu_req      <= '1' when (state /= "01" and pmmu_tc_en = '1') else '0'; -- active only when MMU enabled
+  -- Suppress pmmu_req when bus cycle is suppressed due to odd PC (address alignment error).
+  -- busstate is overridden to "01" when state="00" AND TG68_PC(0)='1', but internal state stays "00",
+  -- so without this guard pmmu_req fires and the walker may fault on unmapped pages, causing
+  -- make_berr to override trap_addr_error in the setinterrupt priority chain.
+  pmmu_req      <= '1' when (state /= "01" and pmmu_tc_en = '1'
+                             and not (state = "00" and TG68_PC(0) = '1')) else '0';
   pmmu_is_insn  <= '1' when state = "00" else '0';
   pmmu_rw       <= '0' when state = "11" else '1';
   pmmu_fc       <= fc_internal;
