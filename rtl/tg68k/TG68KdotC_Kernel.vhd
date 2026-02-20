@@ -5894,10 +5894,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF exe_condition='0' THEN
 						Regwrena_now <= '1';
 						IF c_out(1)='1' THEN
-							skipFetch <= '1';				
+							skipFetch <= '1';
 							next_micro_state <= nop;
-							TG68_PC_brw <= '1';	
-						END IF;	
+							TG68_PC_brw <= '1';
+						-- BUG #394 FIX: MC68030 checks branch target alignment even when
+						-- counter expires. The pipeline computes target before the branch
+						-- decision is final. Odd target triggers address error regardless.
+						-- target = even_PC + displacement, so target(0) = displacement(0)
+						ELSIF last_data_read(0)='1' THEN
+							skipFetch <= '1';
+							next_micro_state <= nop;
+							TG68_PC_brw <= '1';
+						END IF;
 					END IF;
 
 				WHEN chk20 =>			--if C is set -> signed compare
