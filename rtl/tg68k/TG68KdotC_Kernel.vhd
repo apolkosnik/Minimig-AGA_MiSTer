@@ -3161,7 +3161,7 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 						SVmode <= preSVmode;
 					END IF;	
 				END IF;
-				IF trap_berr='1' OR trap_illegal='1' OR trap_addr_error='1' OR trap_priv='1' OR trap_1010='1' OR trap_1111='1' OR trap_mmu_config='1' OR trap_mmu_berr='1' THEN
+				IF trap_berr='1' OR trap_illegal='1' OR trap_addr_error='1' OR trap_priv='1' OR trap_1010='1' OR trap_1111='1' OR trap_mmu_config='1' OR trap_mmu_berr='1' OR trap_format_error='1' THEN
 					make_trace <= '0';
 					FlagsSR(7) <= '0';
 				END IF;
@@ -3172,6 +3172,10 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;
 				IF micro_state=trap3 THEN
 					FlagsSR(7) <= '0';
+					-- BUG #390 FIX: MC68030 UM 8.1 - clear both T1 and T0 on exception entry
+					IF cpu(1)='1' THEN
+						FlagsSR(6) <= '0';
+					END IF;
 				END IF;
 				IF trap_trace='1' AND state="10" THEN
 					make_trace <= '0';
@@ -3448,7 +3452,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- Currently in user mode, switching to supervisor mode
 					set(to_USP) <= '1';
 					IF interrupt_mode='1' THEN
-						set(from_ISP) <= '1';   -- Interrupts: always ISP
+						-- BUG #389 FIX: M=1 interrupt must use MSP for Format $0 frame.
+						-- Per MC68030 UM 6.3.2: M=1 interrupt pushes Format $0 on MSP,
+						-- then int2 swaps to ISP for Format $1 throwaway frame.
+						IF FlagsSR(4)='1' THEN
+							set(from_MSP) <= '1';
+						ELSE
+							set(from_ISP) <= '1';
+						END IF;
 					ELSIF FlagsSR(4)='1' THEN
 						set(from_MSP) <= '1';   -- Non-interrupt, M=1: MSP
 					ELSE
