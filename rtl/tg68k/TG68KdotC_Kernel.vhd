@@ -1362,7 +1362,7 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 				ELSIF micro_state = rte4 THEN
 					IF rte_format_word(15 downto 12) = "0001" AND FlagsSR(4)='1' AND cpu(1)='1' THEN
 						format1_chain_active <= '1';
-					ELSIF (rte_format_word(15 downto 12) = "0000" OR rte_format_word(15 downto 12) = "0011") AND format1_chain_active='1' THEN
+					ELSIF rte_format_word(15 downto 12) = "0000" AND format1_chain_active='1' THEN
 						format1_chain_active <= '0';
 					END IF;
 				ELSIF micro_state = rte5 AND rot_cnt = "000001" AND format1_chain_active='1' THEN
@@ -3325,12 +3325,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		-- Note: trap_mmu_berr is NOT set here - only in sequencer process (BUG #159)
 		trapmake <='0';
 		set_vectoraddr <='0';
-		-- MC68030 valid RTE frame formats
+		-- MC68030 UM: only six formats are valid for RTE
 		v_rte_format_valid := '0';
 		IF rte_format_word(15 downto 12) = "0000"     -- Format 0
 		   OR rte_format_word(15 downto 12) = "0001"  -- Format 1
 		   OR rte_format_word(15 downto 12) = "0010"  -- Format 2
-		   OR rte_format_word(15 downto 12) = "0011"  -- Format 3
 		   OR rte_format_word(15 downto 12) = "1001"  -- Format 9
 		   OR rte_format_word(15 downto 12) = "1010"  -- Format A
 		   OR rte_format_word(15 downto 12) = "1011"  -- Format B
@@ -6398,9 +6397,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								datatype <= "01";
 								next_micro_state <= nop;
 							END IF;
-						WHEN "0000" | "0011" =>
-							-- Format $0/$3: 4-word frame - no additional reads needed
-							-- Format 3 is accepted by real MC68030 hardware as 4-word frame
+						WHEN "0000" =>
+							-- Format $0: 4-word frame - no additional reads needed
 							datatype <= "01";
 							next_micro_state <= nop;
 							IF format1_chain_active='1' THEN

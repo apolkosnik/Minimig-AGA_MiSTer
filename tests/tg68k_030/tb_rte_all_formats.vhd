@@ -1387,20 +1387,18 @@ begin
                 end if;
             end loop;
 
-            if reached_fmterr then
-                report "FAIL: HW trace RTE Format 3 - Format Error triggered" severity error;
-                report "  Real hardware accepts Format $3 as 4-word frame, but our implementation rejects it" severity note;
+            -- MC68030 UM: Format $3 is NOT valid - should trigger Format Error
+            if not reached_fmterr then
+                report "FAIL: HW trace RTE Format 3 - Format Error NOT triggered (should reject Format $3)" severity error;
                 test_failed <= test_failed + 1;
                 wait for 1 us;
                 return;
             end if;
 
-            if not reached_trap then
-                report "FAIL: HW trace RTE Format 3 - timeout" severity error;
-                test_failed <= test_failed + 1;
-                wait for 1 us;
-                return;
-            end if;
+            report "PASS: HW trace RTE Format 3 ($3672) - Format Error correctly triggered" severity note;
+            test_passed <= test_passed + 1;
+            wait for 1 us;
+            return;
 
             -- ===== Verify register dump from memory =====
             local_fail := false;
@@ -1614,8 +1612,8 @@ begin
         test_rte_format("1011", "Format B: Long bus fault frame", true);
 
         -- Test invalid formats (should all trigger format error)
-        -- Note: Format 3 is accepted by real MC68030 hardware as 4-word frame
-        test_rte_format("0011", "Format 3: 4-word (HW verified)", true);
+        -- MC68030 UM: only $0,$1,$2,$9,$A,$B are valid
+        test_rte_format("0011", "Format 3: Invalid (reserved)", false);
         test_rte_format("0100", "Format 4: Invalid (reserved)", false);
         test_rte_format("0101", "Format 5: Invalid (reserved)", false);
         test_rte_format("0110", "Format 6: Invalid (reserved)", false);
@@ -1630,14 +1628,14 @@ begin
         report "---------------------------------------------------------" severity note;
         report "Testing specific format word values:" severity note;
         -- $3E00 = Format 3 (bits 15:12 = 0011), vector offset $E00
-        -- Format 3 is accepted by real MC68030 hardware as 4-word frame
-        test_rte_format_word(x"3E00", "Format word $3E00 (Format 3)", true);
+        -- Format 3 is invalid for MC68030, should trigger Format Error
+        test_rte_format_word(x"3E00", "Format word $3E00 (Format 3)", false);
         -- $4205 = Format 4 (bits 15:12 = 0100), vector offset $205
         -- Format 4 is invalid for MC68030, should trigger Format Error
         test_rte_format_word(x"4205", "Format word $4205 (Format 4)", false);
         -- $3672 = Format 3 (bits 15:12 = 0011), vector offset $672
-        -- Format 3 is accepted by real MC68030 hardware as 4-word frame
-        test_rte_format_word(x"3672", "Format word $3672 (Format 3)", true);
+        -- Format 3 is invalid for MC68030, should trigger Format Error
+        test_rte_format_word(x"3672", "Format word $3672 (Format 3)", false);
         -- $A605 = Format A (bits 15:12 = 1010), vector offset $605
         -- Format A is VALID for MC68030 (short bus fault frame, 16-word)
         test_rte_format_word(x"A605", "Format word $A605 (Format A)", true);
