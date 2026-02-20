@@ -476,6 +476,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal stop					: bit;
 	signal trap_vector		: std_logic_vector(31 downto 0);
 	signal trap_vector_vbr	: std_logic_vector(31 downto 0);
+	signal trap_vector_latched : std_logic_vector(31 downto 0);
 	signal USP					: std_logic_vector(31 downto 0);
 	signal SSP					: std_logic_vector(31 downto 0);  -- Supervisor Stack Pointer (68000/68010)
 	signal MSP					: std_logic_vector(31 downto 0);  -- BUG #18: Master Stack Pointer (68020+)
@@ -1995,7 +1996,7 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatype, interrupt, rIPL_nr, IPL_vec,
          memaddr_reg, memaddr_delta_rega, memaddr_delta_regb, reg_QA, use_base, VBR, last_data_read, trap_vector, exec, set, cpu, use_VBR_Stackframe,
          pmove_disp_latched, micro_state, opcode, fline_opcode_latch, moves_ea_areg, moves_bus_pending, memmaskmux,
-         moves_ea_latched, moves_ea_use_base, pmove_ea_latched, pmmu_brief, set_vectoraddr, trap_vector_vbr)
+         moves_ea_latched, moves_ea_use_base, pmove_ea_latched, pmmu_brief)
 	BEGIN
 		
 		IF rising_edge(clk) THEN
@@ -2059,6 +2060,12 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					trap_vector(9 downto 0) <= "00" & X"38";  -- Vector 14 (0x38) - Format Error
 				END IF;
 				-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not MC68030
+
+				-- Latch vector address each cycle. trap_vector is registered (set at
+				-- instruction boundary), so this is always one cycle behind -- exactly
+				-- right for vector fetch which occurs at least one cycle after dispatch.
+				-- Works for all paths: trap0->trap3, berr1->berr8, addr_error, interrupts.
+				trap_vector_latched <= trap_vector_vbr;
 			END IF;
 		END IF;
 		IF use_VBR_Stackframe='1' THEN
@@ -2331,38 +2338,8 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					memaddr_delta_rega <= ea_data;
 					memaddr_delta_regb <= memaddr_a;
 				ELSIF set_vectoraddr='1' THEN
-					use_base <= '0';  -- Vector address is absolute (VBR+offset), never An-relative
-					-- set_vectoraddr consumes the vector address in the same clock edge.
-					-- trap_vector is also updated on this edge, so using trap_vector_vbr
-					-- directly can pick up a stale vector value. For high-priority
-					-- exception classes, drive the vector address explicitly.
-					IF trap_format_error='1' THEN
-						IF use_VBR_Stackframe='1' THEN
-							memaddr_delta_rega <= VBR + X"00000038"; -- Vector 14
-						ELSE
-							memaddr_delta_rega <= X"00000038";
-						END IF;
-					ELSIF trap_addr_error='1' THEN
-						IF use_VBR_Stackframe='1' THEN
-							memaddr_delta_rega <= VBR + X"0000000C"; -- Vector 3
-						ELSE
-							memaddr_delta_rega <= X"0000000C";
-						END IF;
-					ELSIF trap_berr='1' THEN
-						IF use_VBR_Stackframe='1' THEN
-							memaddr_delta_rega <= VBR + X"00000008"; -- Vector 2
-						ELSE
-							memaddr_delta_rega <= X"00000008";
-						END IF;
-					ELSIF trap_mmu_berr='1' THEN
-						IF use_VBR_Stackframe='1' THEN
-							memaddr_delta_rega <= VBR + X"000000F4"; -- Vector 61
-						ELSE
-							memaddr_delta_rega <= X"000000F4";
-						END IF;
-					ELSE
-						memaddr_delta_rega <= trap_vector_vbr;
-					END IF;
+					use_base <= '0';
+					memaddr_delta_rega <= trap_vector_latched;
 				-- BUG #332 FIX: MOVES full-format BD=word fetch timing fix.
 				-- During ld_229_1 with state="00" (BD word fetch), memaddr_a reads
 				-- last_data_read which still has the EXTENSION WORD, not the BD word.
@@ -2408,17 +2385,9 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 		memaddr_delta <= memaddr_delta_rega + memaddr_delta_regb;
 
 		-- if access done, and not aligned, don't increment
-        IF set_vectoraddr='1' THEN
-			-- Combinational override: vector-table lookup must be absolute in the same
-			-- cycle set_vectoraddr is asserted. Relying on registered use_base can
-			-- transiently add An and fetch from wrong vector address (e.g. $07F8).
-			addr <= trap_vector_vbr;
-			pmmu_addr_log_int <= trap_vector_vbr;
-		ELSE
-			addr <= memaddr_reg+memaddr_delta;
-			-- route logical address through PMMU for translation
-			pmmu_addr_log_int <= memaddr_reg + memaddr_delta;
-		END IF;
+        addr <= memaddr_reg+memaddr_delta;
+        -- route logical address through PMMU for translation
+        pmmu_addr_log_int <= memaddr_reg + memaddr_delta;
 
 		IF use_base='0' THEN
 			memaddr_reg <= (others=>'0');
@@ -3247,8 +3216,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		 datatype, interrupt, c_out, trapmake, rot_cnt, brief, addr, trap_trapv, last_data_in, use_VBR_Stackframe,
 		 long_start, set_datatype, sndOPC, set_exec, exec, ea_build_now, reg_QA, reg_QB, make_berr, trap_berr, last_opc_read,
 		 moves_writeback_pending, moves_active, pmmu_opcode, pmmu_brief, rte_format_word)
+	variable v_rte_format_valid : std_logic;
 	BEGIN
-		TG68_PC_brw <= '0';	
+		TG68_PC_brw <= '0';
 		setstate <= "00";
 		setaddrvalue <= '0';
 		Regwrena_now <= '0';
@@ -3295,6 +3265,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		-- Note: trap_mmu_berr is NOT set here - only in sequencer process (BUG #159)
 		trapmake <='0';
 		set_vectoraddr <='0';
+		-- MC68030 valid RTE frame formats
+		v_rte_format_valid := '0';
+		IF rte_format_word(15 downto 12) = "0000"     -- Format 0
+		   OR rte_format_word(15 downto 12) = "0001"  -- Format 1
+		   OR rte_format_word(15 downto 12) = "0010"  -- Format 2
+		   OR rte_format_word(15 downto 12) = "0011"  -- Format 3
+		   OR rte_format_word(15 downto 12) = "1001"  -- Format 9
+		   OR rte_format_word(15 downto 12) = "1010"  -- Format A
+		   OR rte_format_word(15 downto 12) = "1011"  -- Format B
+		THEN
+			v_rte_format_valid := '1';
+		END IF;
 		writeSR <= '0';
 		set_stop <= '0';
 --		illegal_write_mode <= '0';
@@ -3426,22 +3408,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			setstate <= "01";
 		END IF;
 
-		-- Avoid spurious deferred S-mode stack switching while an exception is pending.
-		-- Invalid RTE formats ($4-$8,$C-$F on 68030) transiently load frame SR before
-		-- format validation; if changeMode fires there, stack shadows get corrupted and
-		-- Format Error trap handling can double-fault.
+		-- Suppress changeMode during invalid RTE format detection (would corrupt stacks
+		-- before Format Error fires). Valid formats proceed with normal mode switching.
 		IF setexecOPC='1' AND trapmake='0' AND FlagsSR(5)/=preSVmode AND
-		   NOT (micro_state = rte4 AND cpu(1)='1' AND use_VBR_Stackframe='1' AND opcode(2)='0' AND
-		        NOT (rte_format_word(15 downto 12)="0000" OR
-		             rte_format_word(15 downto 12)="0001" OR
-		             rte_format_word(15 downto 12)="0010" OR
-		             rte_format_word(15 downto 12)="0011" OR
-		             rte_format_word(15 downto 12)="1001" OR
-		             rte_format_word(15 downto 12)="1010" OR
-		             rte_format_word(15 downto 12)="1011")) THEN
+		   NOT (micro_state = rte4 AND cpu(1)='1' AND v_rte_format_valid='0') THEN
 			set(changeMode) <= '1';
---			setstate <= "01";
---			next_micro_state <= nop;
 		END IF;
 
 		IF interrupt='1' AND trap_interrupt='1'THEN
