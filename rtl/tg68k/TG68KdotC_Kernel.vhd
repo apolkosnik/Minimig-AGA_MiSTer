@@ -1931,6 +1931,9 @@ PROCESS (clk)
 				-- By the time the bus write happens, micro_state has already moved to the
 				-- next berr state. Loading data_write_tmp here (sequential) captures the
 				-- correct data because sequential reads see the OLD micro_state value.
+				ELSIF micro_state = berr_fill THEN
+					-- Format $B extra fields (offsets $58-$20): internal state not tracked by TG68K
+					data_write_tmp <= (others => '0');
 				ELSIF micro_state = berr1 THEN
 					-- MC68030 Format $A frame offset $1C: Internal registers (pipeline
 					-- prefetch validity/position on real 68030). TG68K doesn't track
@@ -1952,14 +1955,13 @@ PROCESS (clk)
 					-- SSW Special Status Word ($0A-$0B, real data: FC/RW/SIZE/DF/FB/RB)
 					data_write_tmp <= x"0000" & berr_ssw;
 				ELSIF micro_state = berr7 THEN
-					-- BUG #392 FIX: Both bus errors and address errors use Format $A.
-					-- The berr1-berr8 chain pushes exactly 8 longwords (Format $A size).
-					-- Format $B requires 46 words of internal state that TG68K doesn't
-					-- track. Using $B format code with $A-sized data would cause RTE
-					-- to pop 15 extra longwords of garbage, corrupting the stack.
-					-- WinUAE uses $B for address errors because it has full internal
-					-- pipeline state; we use $A since our frame data is Format $A sized.
-					data_write_tmp <= TG68_PC(15 downto 0) & "1010" & trap_vector(11 downto 0);  -- Format $A/PC_lo ($04)
+					-- Address errors use Format $B (MC68030 UM 8.4); bus errors use Format $A.
+					-- trap_addr_error persists through berr states (cleared at setinterrupt/setopcode).
+					IF trap_addr_error='1' THEN
+						data_write_tmp <= TG68_PC(15 downto 0) & "1011" & trap_vector(11 downto 0);  -- Format $B/PC_lo ($04)
+					ELSE
+						data_write_tmp <= TG68_PC(15 downto 0) & "1010" & trap_vector(11 downto 0);  -- Format $A/PC_lo ($04)
+					END IF;
 				ELSIF micro_state = berr8 THEN
 					data_write_tmp <= (trap_SR & Flags) & TG68_PC(31 downto 16);  -- SR/PC_hi ($00)
 				-- BUG #391 FIX: Bypass hold_dwr at the CRP/SRP HI/LO write boundary.
@@ -2930,7 +2932,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				-- operations (shifts, mul, div). But RTE rte5 needs state="10" (memory
 				-- read) while counting down. Without the exemption, rte5 never reads
 				-- the extra frame data for Format $9/$A/$B, leaving SP wrong on return.
-				IF (state="10" AND addrvalue='0' AND write_back='1' AND setstate/="10") OR (set_rot_cnt/="000001" AND next_micro_state /= rte5) OR (stop='1' AND interrupt='0') OR set_exec(opcCHK)='1' THEN
+				IF (state="10" AND addrvalue='0' AND write_back='1' AND setstate/="10") OR (set_rot_cnt/="000001" AND next_micro_state /= rte5 AND next_micro_state /= berr_fill) OR (stop='1' AND interrupt='0') OR set_exec(opcCHK)='1' THEN
 						state <= "01";
 						memmask <= "111111";
 						addrvalue <= '0';
@@ -2997,6 +2999,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- sees the correct count on its first iteration.
 					IF micro_state = rte4 AND set_rot_cnt /= "000001" THEN
 						rot_cnt <= set_rot_cnt;
+					END IF;
+					-- Format $B fill: initialize rot_cnt when address error dispatches to berr_fill
+					IF interrupt='1' AND trap_addr_error='1' AND cpu(1)='1' THEN
+						rot_cnt <= "001111";  -- 15 extra longwords for Format $B padding
 					END IF;
 
 					IF set_Suppress_Base='1' THEN
@@ -3395,9 +3401,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			setstate <= "01";
 		END IF;
 		IF interrupt='1' AND trap_addr_error='1' THEN
-			-- MC68030: Address error uses bus fault frame (Format $A, same as bus error)
+			-- MC68030: Address error uses Format $B (long bus fault, 92 bytes)
+			-- berr_fill pushes 15 zero longwords first, then berr1-berr8 push standard fields
 			IF cpu(1)='1' THEN
-				next_micro_state <= berr1;   -- Format $A (short bus fault frame)
+				next_micro_state <= berr_fill;   -- Format $B (long bus fault frame)
 			ELSE
 				next_micro_state <= trap0;   -- Format #0 for 68000/010
 			END IF;
@@ -6041,6 +6048,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN andi =>		--andi
 					IF opcode(5 downto 4)/="00" THEN
 						setnextpass <= '1';
+					-- Immediate-class register-destination ops (e.g. ADDI.B #imm,Dn)
+					-- can retire while bus state is still not "00" under wait-state timing.
+					-- Forcing a nop bridge in that case ensures the next opcode comes from
+					-- a real fetch cycle, not from stale last_opc_read (extension word).
+					ELSIF state /= "00" THEN
+						next_micro_state <= nop;
 					END IF;
 
 				WHEN pack1 =>		-- pack -(Ax),-(Ay)
@@ -6201,10 +6214,26 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					setstate <= "10";
 					next_micro_state <= nopnop;
 
-                -- MC68030 Bus Error Stack Frame Generation (Format $A - Short Bus Fault)
-                -- Pushes 16 words (8 Longs) to the stack.
+                -- MC68030 Bus Error Stack Frame Generation (Format $A/$B)
+                -- Bus errors: 16 words (Format $A). Address errors: 46 words (Format $B, with berr_fill prefix).
                 -- Order: Internal($1E/1C) -> DataOut($1A/18) -> Internal($16/14) -> FaultAddr($12/10)
                 --        -> InstrPipe($0E/0C) -> SSW($0A/08) -> Format/PC_Lo($06/04) -> SR/PC_Hi($02/00)
+                -- MC68030 Format $B extra fields (address errors only)
+                -- Pushes 15 zero longwords for offsets $58-$20 (internal state stubs).
+                -- After loop completes (rot_cnt=1), falls through to berr1-berr8
+                -- for the standard bus fault frame fields (offsets $1C-$00).
+                WHEN berr_fill =>
+                    setstate <= "11";
+                    set(presub) <= '1';
+                    set(longaktion) <= '1';
+                    setstackaddr <= '1';
+                    datatype <= "10";
+                    IF rot_cnt = "000001" THEN
+                        next_micro_state <= berr1;  -- Done filling, push standard frame
+                    ELSE
+                        next_micro_state <= berr_fill;  -- More zero longwords to push
+                    END IF;
+
                 WHEN berr1 => -- Push Internal Regs ($1C-$1F) - Stub
                     setstate <= "11";
                     set(presub) <= '1';
