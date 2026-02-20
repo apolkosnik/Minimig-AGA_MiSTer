@@ -2761,10 +2761,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						trap_berr <= '0';
 						trap_mmu_berr <= '0';  -- BUG #159: Clear MMU BERR trap
 						trap_addr_error <= '0';  -- Clear by default
-						IF make_trace='1' THEN
-							trap_trace <= '1';
+						-- BUG #393 FIX: MC68030 UM 8.1 exception priority:
+						-- Group 0 (highest): Reset, Address Error, Bus Error
+						-- Group 1: Trace, Interrupt, Illegal, Privilege
+						-- Address error and bus error must be checked BEFORE trace.
 						-- BUG #400 FIX: Also check pmmu_fault directly for same-cycle dispatch
-						ELSIF make_berr='1' OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0') THEN
+						IF make_berr='1' OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0') THEN
 							-- MC68030 Double bus fault detection: bus error while still in berr exception window
 							-- This catches the case where the handler instruction fetch faults
 							IF cpu(1) = '1' AND berr_exception_active = '1' THEN
@@ -2865,6 +2867,9 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								berr_ssw(5 downto 4) <= "10"; -- SIZE=word
 								berr_ssw(2 downto 0) <= fc_internal;  -- FC
 							END IF;
+						ELSIF make_trace='1' THEN
+							-- Trace (Group 1): lower priority than address error/bus error
+							trap_trace <= '1';
 						ELSE
 							rIPL_nr <= IPL_nr;
 							IPL_vec <= "00011"&IPL_nr;            --	TH
