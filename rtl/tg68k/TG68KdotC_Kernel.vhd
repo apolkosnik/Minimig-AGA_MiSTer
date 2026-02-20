@@ -1309,15 +1309,18 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 	-- RTE format word latch: Capture the format/vector word during rte3->rte4 transition.
 	-- Bus cycle pipeline: setstate/memmask from micro_state N execute during micro_state N+1.
 	-- rte2 sets up the format word read (setstate="10", datatype="01"), which executes
-	-- during rte3's bus cycle. So data_in holds the valid format word when this fires.
+	-- during rte3's bus cycle. Latch from data_read (assembled read datapath) rather
+	-- than raw data_in to avoid bus-edge timing sensitivity on hardware.
+	-- Use clkena_lw (read completion cadence) instead of clkena_in to avoid sampling
+	-- before the word read is finalized on hardware wait-state paths.
 	PROCESS (clk)
 	BEGIN
 		IF rising_edge(clk) THEN
 			IF Reset='1' THEN
 				rte_format_word <= (others => '0');
-			ELSIF clkena_in='1' THEN
+			ELSIF clkena_lw='1' THEN
 				IF micro_state = rte3 AND next_micro_state = rte4 THEN
-					rte_format_word <= data_in;
+					rte_format_word <= data_read(15 downto 0);
 				END IF;
 			END IF;
 		END IF;
@@ -1492,11 +1495,24 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 					-- Block directSR M-bit swap during RTE: exec(directSR) always fires at
 				-- micro_state=rte1, but A7 swap must be deferred until frame is consumed.
 				-- The deferred swap happens in rte4 (Format $0/$3) or rte5 (larger formats).
-				IF exec(directSR)='1' AND format1_chain_active='0' AND micro_state /= rte1 AND data_read(13)='1' AND data_read(12) /= FlagsSR(4) THEN
+					IF exec(directSR)='1' AND format1_chain_active='0' AND micro_state /= rte1 AND data_read(13)='1' AND data_read(12) /= FlagsSR(4) THEN
 						IF data_read(12) = '1' THEN
 							regfile(15) <= MSP;  -- M 0->1: load MSP into A7
 						ELSE
 							regfile(15) <= ISP;  -- M 1->0: load ISP into A7
+						END IF;
+					END IF;
+					-- MC68020/030: MOVEC Dn,MSP/ISP must update A7 when writing the ACTIVE
+					-- supervisor stack alias. Without this, shadow MSP/ISP updates but A7
+					-- remains stale, causing RTE to read frame data from the wrong stack.
+					-- Active stack selection matches MOVEC readback behavior below:
+					--   MSP active: S=1, M=1, interrupt_mode=0
+					--   ISP active: S=1 and (M=0 or interrupt_mode=1)
+					IF exec(movec_wr)='1' AND FlagsSR(5)='1' THEN
+						IF brief(11 downto 0)=X"803" AND FlagsSR(4)='1' AND interrupt_mode='0' THEN
+							regfile(15) <= reg_QA;
+						ELSIF brief(11 downto 0)=X"804" AND (FlagsSR(4)='0' OR interrupt_mode='1') THEN
+							regfile(15) <= reg_QA;
 						END IF;
 					END IF;
 				END IF;
@@ -6306,9 +6322,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							datatype <= "01";
 							next_micro_state <= nop;
 							IF format1_chain_active='1' THEN
-								-- Swap back after dual-frame: save A7 to MSP, load ISP
+								-- Swap back after dual-frame: save A7 to MSP
 								set(to_MSP) <= '1';
-								set(from_ISP) <= '1';
+								-- BUG #388 FIX: Only load ISP if restored SR has M=0.
+								-- When M=1 (FlagsSR(4)='1'), A7 should stay as MSP.
+								IF FlagsSR(4)='0' THEN
+									set(from_ISP) <= '1';
+								END IF;
 								set(Regwrena) <= '1';
 								setstackaddr <= '1';
 								setstate <= "01";
@@ -6386,7 +6406,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- MC68030: Swap back after dual-frame if needed
 						IF format1_chain_active='1' THEN
 							set(to_MSP) <= '1';
-							set(from_ISP) <= '1';
+							-- BUG #388 FIX: Only load ISP if restored SR has M=0.
+							-- When M=1 (FlagsSR(4)='1'), A7 should stay as MSP.
+							IF FlagsSR(4)='0' THEN
+								set(from_ISP) <= '1';
+							END IF;
 							set(Regwrena) <= '1';
 							setstackaddr <= '1';
 							setstate <= "01";
