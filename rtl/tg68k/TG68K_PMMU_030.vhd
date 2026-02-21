@@ -212,7 +212,7 @@ architecture rtl of TG68K_PMMU_030 is
   -- Added W_INDIRECT states for indirect descriptor support (MC68030 spec section 9.5.3.2)
   -- BUG #164 FIX: Added W_INDIRECT_LOW for long-format indirect descriptor targets
   -- Added W_PTR4, W_PTR4_LOW for 5-level table walks when FCL=1 and all TI fields used
-  type walk_state_t is (W_IDLE, W_ROOT, W_ROOT_LOW, W_PTR1, W_PTR1_LOW, W_PTR2, W_PTR2_LOW, W_PTR3, W_PTR3_LOW, W_PTR4, W_PTR4_LOW, W_INDIRECT, W_INDIRECT_LOW, W_PAGE, W_UPDATE_DESC, W_FILL, W_COMPLETE, W_FAULT);
+  type walk_state_t is (W_IDLE, W_ROOT, W_ROOT_LOW, W_PTR1, W_PTR1_LOW, W_PTR2, W_PTR2_LOW, W_PTR3, W_PTR3_LOW, W_PTR4, W_PTR4_LOW, W_INDIRECT, W_INDIRECT_LOW, W_PAGE, W_TABLE_UPDATE, W_UPDATE_DESC, W_FILL, W_COMPLETE, W_FAULT);
   signal wstate    : walk_state_t := W_IDLE;
   
   -- Walker bookkeeping
@@ -297,6 +297,7 @@ architecture rtl of TG68K_PMMU_030 is
   -- M (Modified) bit 4: Set when page is written
   signal desc_update_needed : std_logic := '0';  -- Need to write back descriptor with U/M
   signal desc_update_data   : std_logic_vector(31 downto 0) := (others => '0'); -- Updated descriptor
+  signal walk_next_state    : walk_state_t := W_IDLE;  -- Continuation state after TABLE U-bit writeback
 
   -- Debug helper functions commented out for synthesis (Quartus doesn't respect translate_off)
   -- synthesis translate_off
@@ -2343,8 +2344,18 @@ begin
               wstate <= W_PAGE;
             else
               -- Table pointer (short format, DT=10) - continue to next level
+              -- TABLE descriptor U-bit writeback: set U before continuing
+              if ptest_walk_no_update = '0' and mem_rdat(3) = '0' then
+                desc_update_data <= mem_rdat(31 downto 4) & '1' & mem_rdat(2 downto 0);
+                walk_next_state <= W_PTR1;
+                walk_desc_is_long <= '0';
+                walk_addr <= mem_rdat(31 downto 4) & "0000";
+                walk_level <= walk_level + 1;
+                walk_limit_valid <= '0';
+                walk_parent_dt_long <= '0';
+                wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop: stop after ptest_level descriptors read
-              if instr_walk_pending = '1' and
+              elsif instr_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -2399,8 +2410,20 @@ begin
               wstate <= W_PAGE;
             else
               -- Table descriptor - extract address from LOW word and continue
+              -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
+              if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' then
+                desc_update_data <= walk_desc_high(31 downto 4) & '1' & walk_desc_high(2 downto 0);
+                walk_next_state <= W_PTR1;
+                walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
+                walk_level <= walk_level + 1;
+                walk_limit_valid <= '1';
+                walk_limit_lu    <= walk_desc_high(31);
+                walk_limit_value <= unsigned(walk_desc_high(30 downto 16));
+                walk_supervisor <= walk_supervisor or walk_desc_high(8);
+                walk_parent_dt_long <= '1';
+                wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              if instr_walk_pending = '1' and
+              elsif instr_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -2544,8 +2567,18 @@ begin
               wstate <= W_INDIRECT;
             else
               -- Continue to next level (short format table descriptor)
+              -- TABLE descriptor U-bit writeback
+              if ptest_walk_no_update = '0' and mem_rdat(3) = '0' then
+                desc_update_data <= mem_rdat(31 downto 4) & '1' & mem_rdat(2 downto 0);
+                walk_next_state <= W_PTR2;
+                walk_desc_is_long <= '0';
+                walk_addr <= mem_rdat(31 downto 4) & "0000";
+                walk_level <= walk_level + 1;
+                walk_limit_valid <= '0';
+                walk_parent_dt_long <= '0';
+                wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              if instr_walk_pending = '1' and
+              elsif instr_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -2604,8 +2637,20 @@ begin
               wstate <= W_INDIRECT;
             else
               -- Table descriptor - extract address from LOW word and continue
+              -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
+              if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' then
+                desc_update_data <= walk_desc_high(31 downto 4) & '1' & walk_desc_high(2 downto 0);
+                walk_next_state <= W_PTR2;
+                walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
+                walk_level <= walk_level + 1;
+                walk_limit_valid <= '1';
+                walk_limit_lu    <= walk_desc_high(31);
+                walk_limit_value <= unsigned(walk_desc_high(30 downto 16));
+                walk_supervisor <= walk_supervisor or walk_desc_high(8);
+                walk_parent_dt_long <= '1';
+                wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              if instr_walk_pending = '1' and
+              elsif instr_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -2756,8 +2801,18 @@ begin
               wstate <= W_INDIRECT;
             else
               -- Short format table descriptor
+              -- TABLE descriptor U-bit writeback
+              if ptest_walk_no_update = '0' and mem_rdat(3) = '0' then
+                desc_update_data <= mem_rdat(31 downto 4) & '1' & mem_rdat(2 downto 0);
+                walk_next_state <= W_PTR3;
+                walk_desc_is_long <= '0';
+                walk_addr <= mem_rdat(31 downto 4) & "0000";
+                walk_level <= walk_level + 1;
+                walk_limit_valid <= '0';
+                walk_parent_dt_long <= '0';
+                wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              if instr_walk_pending = '1' and
+              elsif instr_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -2816,8 +2871,20 @@ begin
               wstate <= W_INDIRECT;
             else
               -- Table descriptor - extract address from LOW word and continue
+              -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
+              if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' then
+                desc_update_data <= walk_desc_high(31 downto 4) & '1' & walk_desc_high(2 downto 0);
+                walk_next_state <= W_PTR3;
+                walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
+                walk_level <= walk_level + 1;
+                walk_limit_valid <= '1';
+                walk_limit_lu    <= walk_desc_high(31);
+                walk_limit_value <= unsigned(walk_desc_high(30 downto 16));
+                walk_supervisor <= walk_supervisor or walk_desc_high(8);
+                walk_parent_dt_long <= '1';
+                wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              if instr_walk_pending = '1' and
+              elsif instr_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -2942,8 +3009,18 @@ begin
               wstate <= W_INDIRECT;
             else
               -- FCL=1 and TID!=0: Continue to W_PTR4 (5th level)
+              -- TABLE descriptor U-bit writeback
+              if ptest_walk_no_update = '0' and mem_rdat(3) = '0' then
+                desc_update_data <= mem_rdat(31 downto 4) & '1' & mem_rdat(2 downto 0);
+                walk_next_state <= W_PTR4;
+                walk_desc_is_long <= '0';
+                walk_addr <= mem_rdat(31 downto 4) & "0000";
+                walk_level <= walk_level + 1;
+                walk_limit_valid <= '0';
+                walk_parent_dt_long <= '0';
+                wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              if instr_walk_pending = '1' and
+              elsif instr_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -3001,8 +3078,20 @@ begin
               wstate <= W_INDIRECT;
             else
               -- FCL=1 and TID!=0: Continue to W_PTR4 (5th level)
+              -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
+              if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' then
+                desc_update_data <= walk_desc_high(31 downto 4) & '1' & walk_desc_high(2 downto 0);
+                walk_next_state <= W_PTR4;
+                walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
+                walk_level <= walk_level + 1;
+                walk_limit_valid <= '1';
+                walk_limit_lu    <= walk_desc_high(31);
+                walk_limit_value <= unsigned(walk_desc_high(30 downto 16));
+                walk_supervisor <= walk_supervisor or walk_desc_high(8);
+                walk_parent_dt_long <= '1';
+                wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              if instr_walk_pending = '1' and
+              elsif instr_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -3366,6 +3455,47 @@ begin
             else
               -- U and M bits already set appropriately, go straight to fill
               wstate <= W_FILL;
+            end if;
+          end if;
+
+        when W_TABLE_UPDATE =>
+          -- Write back TABLE descriptor HIGH word with U bit set
+          -- desc_addr_reg holds HIGH word address (set when descriptor was read)
+          -- desc_update_data holds updated HIGH word with U=1
+          -- walk_next_state holds continuation state (W_PTR1..W_PTR4)
+          if mem_req = '0' then
+            mem_req <= '1';
+            mem_we <= '1';
+            mem_addr <= desc_addr_reg;
+            mem_wdat <= desc_update_data;
+          elsif mem_berr = '1' then
+            -- Bus error during TABLE U-bit writeback
+            mem_req <= '0';
+            mem_we <= '0';
+            walker_fault <= '1';
+            walker_fault_status <= encode_mmusr_fault(
+              bus_error => '1', limit_violation => '0', supervisor_violation => '0',
+              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              level => std_logic_vector(to_unsigned(walk_level, 3))
+            );
+            wstate <= W_FAULT;
+          elsif mem_ack = '1' then
+            mem_req <= '0';
+            mem_we <= '0';
+            -- Check PTEST early-stop after TABLE U-bit writeback
+            -- walk_level was already incremented before entering this state
+            if instr_walk_pending = '1' and
+               to_unsigned(walk_level, 3) >= unsigned(ptest_level) then
+              walker_fault <= '1';
+              walker_fault_status <= encode_mmusr_success(
+                write_protect => desc_update_data(2),
+                modified => '0',
+                transparent => '0',
+                level => std_logic_vector(to_unsigned(walk_level, 3))
+              );
+              wstate <= W_FAULT;
+            else
+              wstate <= walk_next_state;
             end if;
           end if;
 
