@@ -7058,7 +7058,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- Control alterable modes only: Dn/An/(An)+/-(An)/PC-rel/imm are illegal
                         IF pmmu_opcode(5 downto 3)="000" OR pmmu_opcode(5 downto 3)="001" OR
                            pmmu_opcode(5 downto 3)="011" OR pmmu_opcode(5 downto 3)="100" OR
-                           (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') THEN
+                           (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') OR
+                           (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 1)="01") THEN
                              trap_illegal <= '1';
                              trapmake <= '1';
                         ELSE
@@ -7101,9 +7102,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         set_exec(pmmu_pflush) <= '1';
                         IF pmmu_brief(12 downto 10) = "110" THEN
                              -- PFLUSH with EA: same mode-specific dispatch as PLOAD (BUG #393)
+                             -- Control alterable modes only: PC-relative (d16,PC)/(d8,PC,Xn) are illegal
                              IF pmmu_opcode(5 downto 3)="000" OR pmmu_opcode(5 downto 3)="001" OR
                                 pmmu_opcode(5 downto 3)="011" OR pmmu_opcode(5 downto 3)="100" OR
-                                (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') THEN
+                                (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') OR
+                                (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 1)="01") THEN
                                  trap_illegal <= '1';
                                  trapmake <= '1';
                              ELSE
@@ -7141,10 +7144,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     ELSIF pmmu_brief(15 downto 13) = "100" THEN
                         -- PTEST
                         -- BUG #393 FIX: Mode-specific dispatch (same as PLOAD fix)
-                        -- Control modes: Dn/An/(An)+/-(An)/imm are illegal (PC-rel allowed but not yet supported)
+                        -- Control alterable modes only: Dn/An/(An)+/-(An)/PC-rel/imm are illegal
                         IF pmmu_opcode(5 downto 3)="000" OR pmmu_opcode(5 downto 3)="001" OR
                            pmmu_opcode(5 downto 3)="011" OR pmmu_opcode(5 downto 3)="100" OR
-                           (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') THEN
+                           (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') OR
+                           (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 1)="01") THEN
                              trap_illegal <= '1';
                              trapmake <= '1';
                         ELSE
