@@ -854,6 +854,14 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						walker_timeout_cnt <= walker_timeout_cnt + 1;
 					end
 				end
+
+				default: begin
+					// Safety: recover from corrupted walker_state (e.g. timing violations)
+					walker_state <= WALKER_IDLE;
+					walker_active <= 0;
+					pmmu_walker_ack_p <= 0;
+					pmmu_walker_berr_p <= 0;
+				end
 			endcase
 		end
 	end

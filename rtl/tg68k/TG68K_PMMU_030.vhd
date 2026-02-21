@@ -170,7 +170,7 @@ architecture rtl of TG68K_PMMU_030 is
   type atc_isn_t  is array(0 to ATC_ENTRIES-1) of std_logic;
   -- ATC shift stores the effective page shift for the translation that populated the entry.
   -- This can exceed TC.PS when a page descriptor terminates the walk early (large pages).
-  type atc_shift_t is array(0 to ATC_ENTRIES-1) of integer range 0 to 31;
+  type atc_shift_t is array(0 to ATC_ENTRIES-1) of integer range 0 to 32;
   type atc_page_size_t is array(0 to ATC_ENTRIES-1) of integer range 0 to 15; -- MC68030 PS field value (8-15)
   type atc_level_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(2 downto 0); -- BUG #412: walk level for MMUSR N field
 
@@ -219,7 +219,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal walk_log_base  : std_logic_vector(31 downto 0) := (others => '0');
   signal walk_phys_base : std_logic_vector(31 downto 0) := (others => '0');
   -- Effective page shift for the current translation (may exceed TC.PS for large pages).
-  signal walk_page_shift: integer range 0 to 31 := 12;
+  signal walk_page_shift: integer range 0 to 32 := 12;
   signal walk_page_size : integer range 0 to 15 := 12;  -- MC68030: PS values 8-15
   
   -- PMMU instruction communication flags (to avoid multiple drivers)
@@ -1513,7 +1513,11 @@ begin
             -- No TTR match - check ATC and potentially start walker
           hit := '0';
           for i in 0 to ATC_ENTRIES-1 loop
-            if atc_valid(i) = '1' then
+            -- BUG #415: Skip ATC lookup when flush is pending (1-cycle race window)
+            -- atc_flush_req is set in register write process on edge N, but ATC entries
+            -- aren't cleared until edge N+1 (walker process). Without this guard, the
+            -- translation process could match a stale entry during that 1-cycle window.
+            if atc_valid(i) = '1' and atc_flush_req = '0' then
               aligned_addr := align_addr(addr_log, atc_shift(i));
               -- Debug: Log ATC check details for failing test addresses
               if addr_log = x"12343000" or addr_log = x"12344000" then
