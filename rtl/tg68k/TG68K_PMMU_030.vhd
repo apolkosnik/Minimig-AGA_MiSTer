@@ -1782,7 +1782,7 @@ begin
             walk_req <= '1';
             translation_pending <= '1';
             instr_walk_pending <= '1';  -- BUG #396: Mark walk as PTEST-initiated
-            ptest_walk_no_update <= '1';  -- BUG #411: PTEST walk should not write back U/M
+            ptest_walk_no_update <= not pmmu_brief(8);  -- BUG #411: A-bit=0: skip U/M; A-bit=1: allow U update
             ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after triggering walker
             -- report "PTEST: Triggered walker for addr=0x" & slv_to_hstring(ptest_addr) &
                   --  -- " fc=" & slv_to_string(ptest_fc) severity note;
@@ -3359,7 +3359,7 @@ begin
               desc_update_needed <= '1';
               -- Prepare updated descriptor: set U bit, and M bit if write
               desc_update_data <= walk_desc_high(31 downto 5) &
-                                  (walk_desc_high(4) or (not saved_rw)) &  -- M bit: set if write (saved_rw='0')
+                                  (walk_desc_high(4) or ((not saved_rw) and (not instr_walk_pending))) &  -- M bit: set if write, but not for PTEST/PLOAD
                                   '1' &  -- U bit: always set
                                   walk_desc_high(2 downto 0);
               wstate <= W_UPDATE_DESC;

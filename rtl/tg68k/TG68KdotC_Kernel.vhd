@@ -2923,16 +2923,20 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									berr_ssw(6) <= pmmu_fault_rw_out;
 									-- Pipeline bits based on instruction vs data fault
 									if pmmu_fault_is_insn_out = '1' then
-										-- Instruction fetch fault: FB=1, RB=1, SIZE=word
-										berr_ssw(14) <= '1';  -- FB
-										berr_ssw(12) <= '1';  -- RB
-										berr_ssw(8) <= '0';   -- DF=0
+										-- Instruction fetch fault: stage B (prefetch)
+										berr_ssw(15) <= '0';  -- FC=0: not stage C
+										berr_ssw(14) <= '1';  -- FB=1: stage B (prefetch) fault
+										berr_ssw(13) <= '0';  -- RC=0: not stage C
+										berr_ssw(12) <= '1';  -- RB=1: prefetch will be rerun
+										berr_ssw(8) <= '0';   -- DF=0 (instruction, not data)
 										berr_ssw(9) <= '0';
 										berr_ssw(5 downto 4) <= "10";  -- SIZE=word (instruction fetches are 16-bit)
 									else
-										-- Data access fault: DF=1, bit9=1
-										berr_ssw(14) <= '0';  -- FB=0
-										berr_ssw(12) <= '0';  -- RB=0
+										-- Data access fault: stage C (executing instruction)
+										berr_ssw(15) <= '1';  -- FC=1: stage C fault
+										berr_ssw(14) <= '0';  -- FB=0: not stage B
+										berr_ssw(13) <= '1';  -- RC=1: stage C bus cycle will be rerun
+										berr_ssw(12) <= '0';  -- RB=0: not stage B
 										berr_ssw(8) <= '1';   -- DF=1
 										berr_ssw(9) <= '1';   -- DF<<1
 										-- SIZE from current datatype: "00"=byte->"01", "01"=word->"10", "10"=long->"00"
@@ -2942,9 +2946,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 											when others => berr_ssw(5 downto 4) <= "00";  -- Long
 										end case;
 									end if;
-									-- Clear unused bits
-									berr_ssw(15) <= '0';  -- FC class
-									berr_ssw(13) <= '0';  -- RC
 									berr_ssw(11 downto 10) <= "00";  -- Reserved
 									berr_ssw(7) <= exec_tas;  -- RM: read-modify-write (TAS instruction)
 									berr_ssw(3) <= '0';   -- Reserved
@@ -2953,9 +2954,11 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									berr_fault_addr <= addr;
 									berr_ssw(2 downto 0) <= fc_internal;
 									berr_ssw(6) <= pmmu_rw;  -- 1=read, 0=write
-									-- External bus errors are typically data faults
-									berr_ssw(14) <= '0';  -- FB=0
-									berr_ssw(12) <= '0';  -- RB=0
+									-- External bus errors are typically data faults (stage C)
+									berr_ssw(15) <= '1';  -- FC=1: stage C data fault
+									berr_ssw(14) <= '0';  -- FB=0: not stage B
+									berr_ssw(13) <= '1';  -- RC=1: stage C bus cycle will be rerun
+									berr_ssw(12) <= '0';  -- RB=0: not stage B
 									berr_ssw(8) <= '1';   -- DF=1
 									berr_ssw(9) <= '1';   -- DF<<1
 									case datatype is
@@ -2963,8 +2966,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 										when "01" => berr_ssw(5 downto 4) <= "10";
 										when others => berr_ssw(5 downto 4) <= "00";
 									end case;
-									berr_ssw(15) <= '0';
-									berr_ssw(13) <= '0';
 									berr_ssw(11 downto 10) <= "00";
 									berr_ssw(7) <= exec_tas;  -- RM: read-modify-write (TAS instruction)
 									berr_ssw(3) <= '0';
@@ -2983,11 +2984,22 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								-- Address error frame data for berr1-berr8
 								berr_fault_addr <= TG68_PC;  -- The odd address
 								berr_data_out_saved <= (others => '0');
-								-- SSW: instruction fetch, read, word-size
+								-- SSW: address error - distinguish instruction fetch vs data access
 								berr_ssw <= (others => '0');
 								berr_ssw(6) <= '1';           -- RW=1 (read)
 								berr_ssw(5 downto 4) <= "10"; -- SIZE=word
 								berr_ssw(2 downto 0) <= fc_internal;  -- FC
+								if fc_internal(1) = '1' then
+									-- Instruction fetch address error (program space FC)
+									berr_ssw(14) <= '1';  -- FB=1: stage B (prefetch) fault
+									berr_ssw(12) <= '1';  -- RB=1: prefetch will be rerun
+								else
+									-- Data access address error
+									berr_ssw(15) <= '1';  -- FC=1: stage C fault
+									berr_ssw(13) <= '1';  -- RC=1: rerunnable
+									berr_ssw(8) <= '1';   -- DF=1: data fault
+									berr_ssw(9) <= '1';   -- DF mirror
+								end if;
 							END IF;
 						ELSIF make_trace='1' OR (make_trace_t0='1' AND v_is_cof='1') THEN
 							-- Trace (Group 1): lower priority than address error/bus error
