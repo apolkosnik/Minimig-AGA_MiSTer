@@ -2457,7 +2457,7 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 -- PC Calc + fetch opcode
 -----------------------------------------------------------------------------
 PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data, next_micro_state, stop, make_trace, make_trace_t0, make_berr, IPL_nr, FlagsSR, set_rot_cnt, opcode, writePCbig, set_exec, exec,
-        PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, trap_trapv, interrupt, tmp_TG68_PC, TG68_PC, use_VBR_Stackframe, writePCnext, pmove_dn_mode, cpu_halted)
+        PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, trap_trapv, interrupt, tmp_TG68_PC, TG68_PC, use_VBR_Stackframe, writePCnext, pmove_dn_mode, cpu_halted, exe_condition)
 	variable v_is_cof : std_logic;  -- T0 trace: change-of-flow instruction
 	BEGIN
 	
@@ -2523,13 +2523,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			IF opcode(15 downto 12) = "0110" AND opcode(11 downto 8) = "0001" THEN
 				v_is_cof := '1';
 			END IF;
-			-- Bcc (0110 cccc, cc /= 0000/0001): conditional branch
+			-- Bcc (0110 cccc, cc /= 0000/0001): conditional branch - only COF when taken
 			IF opcode(15 downto 12) = "0110" AND opcode(11 downto 8) /= "0000"
-			   AND opcode(11 downto 8) /= "0001" THEN
+			   AND opcode(11 downto 8) /= "0001" AND exe_condition = '1' THEN
 				v_is_cof := '1';
 			END IF;
-			-- DBcc (0101 cccc 11001 rrr)
-			IF opcode(15 downto 12) = "0101" AND opcode(7 downto 3) = "11001" THEN
+			-- DBcc (0101 cccc 11001 rrr): only COF when branch taken (condition false)
+			IF opcode(15 downto 12) = "0101" AND opcode(7 downto 3) = "11001"
+			   AND exe_condition = '0' THEN
 				v_is_cof := '1';
 			END IF;
 			-- JMP (0100 1110 11xx xxxx)
@@ -2556,26 +2557,9 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			IF opcode = x"4E74" THEN
 				v_is_cof := '1';
 			END IF;
-			-- TRAP #n (4E4x)
-			IF opcode(15 downto 4) = x"4E4" THEN
-				v_is_cof := '1';
-			END IF;
-			-- TRAPV (4E76)
-			IF opcode = x"4E76" THEN
-				v_is_cof := '1';
-			END IF;
-			-- TRAPcc (0101 cccc 1111 1xxx)
-			IF opcode(15 downto 12) = "0101" AND opcode(7 downto 3) = "11111" THEN
-				v_is_cof := '1';
-			END IF;
-			-- STOP (4E72)
-			IF opcode = x"4E72" THEN
-				v_is_cof := '1';
-			END IF;
-			-- MOVEC (4E7A/4E7B)
-			IF opcode(15 downto 1) = "010011100111101" THEN
-				v_is_cof := '1';
-			END IF;
+			-- Note: TRAP #n, TRAPV, TRAPcc, STOP, MOVEC, CHK, DIV are NOT T0-traced
+			-- per WinUAE behavior. Exception-generating instructions handle trace
+			-- separately via T1 pending mechanism. STOP explicitly disables T0.
 			-- MOVE to SR (0100 0110 11xx xxxx)
 			IF opcode(15 downto 6) = "0100011011" THEN
 				v_is_cof := '1';
@@ -2590,22 +2574,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			END IF;
 			-- EORI to SR (0A7C)
 			IF opcode = x"0A7C" THEN
-				v_is_cof := '1';
-			END IF;
-			-- CHK.W (0100 xxx 110 xxxxxx)
-			IF opcode(15 downto 12) = "0100" AND opcode(8 downto 6) = "110" THEN
-				v_is_cof := '1';
-			END IF;
-			-- CHK.L (0100 xxx 100 xxxxxx, 020+)
-			IF opcode(15 downto 12) = "0100" AND opcode(8 downto 6) = "100" THEN
-				v_is_cof := '1';
-			END IF;
-			-- DIVS.W/DIVU.W (1000 xxx x11 xxxxxx)
-			IF opcode(15 downto 12) = "1000" AND opcode(7 downto 6) = "11" THEN
-				v_is_cof := '1';
-			END IF;
-			-- DIVS.L/DIVU.L (0100 1100 01xx xxxx, 020+)
-			IF opcode(15 downto 6) = "0100110001" THEN
 				v_is_cof := '1';
 			END IF;
 		END IF;
