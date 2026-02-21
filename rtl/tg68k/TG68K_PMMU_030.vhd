@@ -3702,7 +3702,7 @@ begin
   end process;
 
   -- Walker busy indication - not busy if MMU disabled or TTR hit
-  process(wstate, addr_log, fc, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc)
+  process(wstate, addr_log, fc, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, req)
     variable tmatch0, tmatch1 : std_logic;
   begin
     -- Not busy if MMU is disabled
@@ -3714,12 +3714,16 @@ begin
       ttr_match(TT1, addr_log, fc, is_insn, tmatch1);
 
       -- Not busy if TTR hit or (walker idle with no pending walker work AND
-      -- addr_phys_reg is fresh -- i.e. it was computed from the current addr_log/fc).
+      -- either no translation is active, or addr_phys_reg is fresh).
       -- BUG #416: Without the translated_addr/fc check, ATC hits leave busy='0'
       -- for one cycle while addr_phys_reg still holds the OLD translation. The bus
       -- starts an access with a stale physical address, causing data corruption and
       -- cascading failures leading to double bus fault and total CPU lockup.
-      if (tmatch0 = '1' or tmatch1 = '1' or (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and translated_addr = addr_log and translated_fc = fc)) then
+      -- The check is only applied when req='1' (active bus access needing translation).
+      -- When req='0' (e.g. execute state), no bus access happens so stale addr is harmless;
+      -- checking it when req='0' would deadlock because the translation process only
+      -- updates translated_addr when req='1'.
+      if (tmatch0 = '1' or tmatch1 = '1' or (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and (req = '0' or (translated_addr = addr_log and translated_fc = fc)))) then
         busy <= '0';
       else
         busy <= '1';
