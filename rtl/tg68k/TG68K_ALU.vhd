@@ -69,6 +69,10 @@ generic(
 		bf_ffo_offset			: in std_logic_vector(31 downto 0);
 		bf_loffset				: in std_logic_vector(4 downto 0);
 
+		-- BUG #397: Restore CCR on RTE format error
+		restore_ccr				: in std_logic := '0';
+		restored_ccr_value		: in std_logic_vector(7 downto 0) := "00000000";
+
 		set_V_Flag				: buffer bit;
 		Flags						: buffer std_logic_vector(7 downto 0);
 		c_out						: buffer std_logic_vector(2 downto 0);
@@ -1015,6 +1019,12 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 				IF exec(directCCR)='1' THEN
 					Flags(7 downto 0) <= data_read(7 downto 0);
 				END IF;	
+				-- BUG #397 FIX: Restore pre-RTE CCR on format error.
+				-- directSR loaded frame CCR which is now invalid.
+				-- Last-assignment-wins ensures this overrides directSR above.
+				IF restore_ccr='1' THEN
+					Flags(7 downto 0) <= restored_ccr_value;
+				END IF;
 				
 				IF exec(opcROT)='1' AND decodeOPC='0' THEN
 					asl_VFlag <= ((set_flags(3) XOR rot_rot) OR asl_VFlag);	

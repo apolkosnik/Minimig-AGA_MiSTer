@@ -455,6 +455,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_format_error : bit; -- BUG #211: MC68030 Format Error during RTE (vector 14)
 	signal rte_format_word  : std_logic_vector(15 downto 0);
 	signal rte_saved_mbit   : std_logic;  -- M bit before RTE directSR updates it
+	signal rte_saved_ccr    : std_logic_vector(7 downto 0);  -- BUG #397: CCR before RTE directSR
+	signal restore_ccr_sig  : std_logic;  -- BUG #397: Pulse to restore CCR on format error
 	-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not used on MC68030
 	signal trapmake			: bit;
 	signal trapd				: bit;
@@ -949,6 +951,11 @@ BEGIN
   pmmu_mem_rdat    <= pmmu_walker_data;
   pmmu_mem_berr    <= pmmu_walker_berr;  -- MC68030: Bus error from external memory
 
+-- BUG #397: Drive CCR restore signal to ALU when format error detected.
+-- trap_format_error is combinational (active during rte4), same cycle as
+-- the FlagsSR restore at line 3266. No interrupt guard needed.
+restore_ccr_sig <= '1' when trap_format_error='1' else '0';
+
 ALU: TG68K_ALU   
 	generic map(
 		MUL_Mode => MUL_Mode,				--0=>16Bit,	1=>32Bit,	2=>switchable with CPU(1),		3=>no MUL,
@@ -997,7 +1004,11 @@ ALU: TG68K_ALU
 		Flags => Flags,					 	--: buffer std_logic_vector(8 downto 0);
 		c_out => c_out,					 	--: buffer std_logic_vector(2 downto 0);
 		addsub_q => addsub_q,				--: buffer std_logic_vector(31 downto 0);
-		ALUout => ALUout						--: buffer std_logic_vector(31 downto 0)
+		ALUout => ALUout,						--: buffer std_logic_vector(31 downto 0)
+
+		-- BUG #397: Restore CCR on RTE format error
+		restore_ccr => restore_ccr_sig,
+		restored_ccr_value => rte_saved_ccr
 	);
 
 	-- AMR - let the parent module know this is a longword access.  (Easy way to enable burst writes.)
@@ -1353,6 +1364,7 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 				-- For MOVE to SR: captured at exec(to_SR) (before to_SR updates FlagsSR).
 				IF next_micro_state = rte1 THEN
 					rte_saved_mbit <= FlagsSR(4);
+					rte_saved_ccr <= Flags;  -- BUG #397: Save CCR before directSR
 				END IF;
 				IF exec(to_SR)='1' THEN
 					rte_saved_mbit <= FlagsSR(4);
