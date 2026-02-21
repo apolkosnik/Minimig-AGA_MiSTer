@@ -102,23 +102,34 @@ assign ramshared    = sel_dd;
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
 
-wire sel_z3ram0 = (cpu_addr[31:27] == z3ram_base0) && z3ram_ena0;
-wire sel_z3ram1 = (cpu_addr[31:28] == z3ram_base1) && z3ram_ena1;
-wire sel_z2ram  = !cpu_addr[31:24] && (cpu_addr[23] ^ |cpu_addr[22:21]) && z2ram_ena; // addr[23:21] = 1..4
+// BUG #417 FIX: Use PMMU physical address for bus routing in 68030 mode
+// When MMU translates logical->physical addresses, bus region selection (chipram, zram,
+// kickram, etc.) and SDRAM address encoding must use the PHYSICAL address, not the
+// logical address the CPU outputs. Without this, MMU-remapped accesses (e.g. WhichAmiga
+// mapping $D0xxxxxx -> $00xxxxxx) hit the wrong bus path (chip bus instead of SDRAM),
+// causing lockups when chip_dtack never arrives for non-chipset addresses.
+// For non-68030 modes, pmmu_addr_phys_p = cpu_addr_p (identity, no MMU).
+// For 68030 with TC.E=0 (MMU disabled), PMMU outputs addr_phys = addr_log (identity).
+// pmmu_suppress_bus ensures bus_addr is only sampled after translation completes.
+wire [31:0] bus_addr = cpucfg[1] ? pmmu_addr_phys_p : cpu_addr;
+
+wire sel_z3ram0 = (bus_addr[31:27] == z3ram_base0) && z3ram_ena0;
+wire sel_z3ram1 = (bus_addr[31:28] == z3ram_base1) && z3ram_ena1;
+wire sel_z2ram  = !bus_addr[31:24] && (bus_addr[23] ^ |bus_addr[22:21]) && z2ram_ena; // addr[23:21] = 1..4
 // Motherboard Fast RAM mapping DISABLED - caused issues
 
 wire sel_zram   = sel_z3ram0 | sel_z3ram1 | sel_z2ram;
-wire sel_dd     = (cpu_addr[31:16] == 16'h00DD) && (cpu_addr[15:13] == 'b010);
-wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
+wire sel_dd     = (bus_addr[31:16] == 16'h00DD) && (bus_addr[15:13] == 'b010);
+wire sel_rtg    = (bus_addr[31:24] == 8'h02);
 
 // don't sel_kickram when writing
-wire sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx
-wire sel_kicklower = !cpu_addr[31:24] && (cpu_addr[23:18] == 6'b111110);
-wire sel_chipram   = !cpu_addr[31:21] && cchip; 		             //$000000 - $1FFFFF
+wire sel_kickram   = !bus_addr[31:24] && (&bus_addr[23:19] || (bus_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx
+wire sel_kicklower = !bus_addr[31:24] && (bus_addr[23:18] == 6'b111110);
+wire sel_chipram   = !bus_addr[31:21] && cchip; 		             //$000000 - $1FFFFF
 
 // we route everything hrtmon related through cart.v (needs a couple of signals to
-// decide what to do, would not be good style to replicate that here). 
-wire sel_nmi_vector = (cpu_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
+// decide what to do, would not be good style to replicate that here).
+wire sel_nmi_vector = (bus_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
 
 wire [15:0] ramdat;
 
@@ -145,13 +156,14 @@ assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 // 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v
 // All Zorro RAM goes to DDR3
 // BUG #136 FIX: Use walker_ramaddr when walker is accessing Fast RAM
+// BUG #417 FIX: Use bus_addr (physical address) for SDRAM address encoding
 assign ramaddr[28]    = walker_fast_ram ? walker_ramaddr[28] : (sel_zram & ~sel_z3ram0);
-assign ramaddr[27]    = walker_fast_ram ? walker_ramaddr[27] : (sel_zram & (~sel_z3ram1 | cpu_addr[27]));
-assign ramaddr[26:23] = walker_fast_ram ? walker_ramaddr[26:23] : ((sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}}));
-assign ramaddr[22:19] = walker_fast_ram ? walker_ramaddr[22:19] : ({4{sel_dd}} | cpu_addr[22:19]);
-assign ramaddr[18]    = walker_fast_ram ? walker_ramaddr[18] : (sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18]);
-assign ramaddr[17:16] = walker_fast_ram ? walker_ramaddr[17:16] : ({2{sel_dd}} | cpu_addr[17:16]);
-assign ramaddr[15:1]  = walker_fast_ram ? walker_ramaddr[15:1] : cpu_addr[15:1];
+assign ramaddr[27]    = walker_fast_ram ? walker_ramaddr[27] : (sel_zram & (~sel_z3ram1 | bus_addr[27]));
+assign ramaddr[26:23] = walker_fast_ram ? walker_ramaddr[26:23] : ((sel_z3ram0 | sel_z3ram1) ? bus_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}}));
+assign ramaddr[22:19] = walker_fast_ram ? walker_ramaddr[22:19] : ({4{sel_dd}} | bus_addr[22:19]);
+assign ramaddr[18]    = walker_fast_ram ? walker_ramaddr[18] : (sel_dd   | (sel_kicklower & bootrom) | bus_addr[18]);
+assign ramaddr[17:16] = walker_fast_ram ? walker_ramaddr[17:16] : ({2{sel_dd}} | bus_addr[17:16]);
+assign ramaddr[15:1]  = walker_fast_ram ? walker_ramaddr[15:1] : bus_addr[15:1];
 
 // BUG #128 FIX: Compute properly encoded ramaddr for cache fill addresses
 // Cache fills use cache_addr (physical address from PMMU) instead of cpu_addr
@@ -286,7 +298,10 @@ always @* begin
 			chip_lds     = c_lds;
 			chip_din     = cpu_dout_p;
 		end else begin
-			chip_addr    = cpu_addr_p[23:1];
+			// BUG #417 FIX: Use physical address for chip bus routing
+			// When MMU remaps addresses, chip_addr must reflect the physical address
+			// so the chip bus accesses the correct memory location
+			chip_addr    = pmmu_addr_phys_p[23:1];
 			chip_as      = c_as;
 			chip_rw      = c_rw;
 			chip_uds     = c_uds;
@@ -294,7 +309,8 @@ always @* begin
 			chip_din     = cpu_dout_p;
 		end
 		chip_data    = chipdout_i;
-		fastchip_sel = cpu_req & !cpu_addr_p[31:24];
+		// BUG #417 FIX: Use physical address for fast chip select
+		fastchip_sel = cpu_req & !pmmu_addr_phys_p[31:24];
 		fastchip_lw  = longword;
 	end
 	else begin
