@@ -446,6 +446,16 @@ test-movec-illegal: setup
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 20us; quit" tb_movec_illegal
 #2>&1 | grep -E "(Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*true|Note:.*false|Note:.*SUCCESS)"
 
+# ABCD/SBCD BCD Arithmetic Test
+test-abcd: setup
+	@echo "Running ABCD/SBCD BCD arithmetic test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_abcd.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 200us; quit" tb_abcd
+
 # MMU.library Style PMMU Detection Test
 test-mmu-library-detect: setup
 	@echo "Running mmu.library style PMMU detection test..."
@@ -750,4 +760,23 @@ test-exceptions: $(BUILD_DIR)/tg68k.o
 	$(GHDL) -a $(GHDL_FLAGS) tb_exceptions.vhd
 	$(GHDL) -e $(GHDL_FLAGS) tb_exceptions
 	$(GHDL) -r $(GHDL_FLAGS) tb_exceptions --vcd=$(BUILD_DIR)/tb_exceptions.vcd --stop-time=10us
+
+# T0 Change-of-Flow Trace Mode Test
+test-t0-trace: setup
+	@echo "Running T0 change-of-flow trace mode tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_t0_trace.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2ms; quit -f" tb_t0_trace
+
+test-t1-trace: setup
+	@echo "Running T1 single-step trace mode tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_t1_trace.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2ms; quit -f" tb_t1_trace
 
