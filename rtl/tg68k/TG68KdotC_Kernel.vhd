@@ -462,6 +462,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal trapd				: bit;
 	signal trap_SR				: std_logic_vector(7 downto 0);
 	signal make_trace			: std_logic;
+	signal make_trace_t0		: std_logic;  -- T0 change-of-flow trace mode active for current instruction
 	signal make_berr			: std_logic;
 	signal make_mmu_berr     : std_logic;  -- BUG #159: Distinguish MMU bus error from normal BERR
 	signal berr_exception_active : std_logic;  -- MC68030: Bus error exception processing window
@@ -2445,8 +2446,9 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 -----------------------------------------------------------------------------
 -- PC Calc + fetch opcode
 -----------------------------------------------------------------------------
-PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data, next_micro_state, stop, make_trace, make_berr, IPL_nr, FlagsSR, set_rot_cnt, opcode, writePCbig, set_exec, exec,
+PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data, next_micro_state, stop, make_trace, make_trace_t0, make_berr, IPL_nr, FlagsSR, set_rot_cnt, opcode, writePCbig, set_exec, exec,
         PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, trap_trapv, interrupt, tmp_TG68_PC, TG68_PC, use_VBR_Stackframe, writePCnext, pmove_dn_mode, cpu_halted)
+	variable v_is_cof : std_logic;  -- T0 trace: change-of-flow instruction
 	BEGIN
 	
 		PC_dataa <= TG68_PC;
@@ -2499,6 +2501,104 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 		setopcode <= '0';
 		setendOPC <= '0';
 		setinterrupt <= '0';
+
+		-- T0 trace: combinational change-of-flow detection from opcode
+		v_is_cof := '0';
+		IF cpu(1) = '1' THEN
+			-- BRA (0110 0000): always COF
+			IF opcode(15 downto 12) = "0110" AND opcode(11 downto 8) = "0000" THEN
+				v_is_cof := '1';
+			END IF;
+			-- BSR (0110 0001): always COF
+			IF opcode(15 downto 12) = "0110" AND opcode(11 downto 8) = "0001" THEN
+				v_is_cof := '1';
+			END IF;
+			-- Bcc (0110 cccc, cc /= 0000/0001): conditional branch
+			IF opcode(15 downto 12) = "0110" AND opcode(11 downto 8) /= "0000"
+			   AND opcode(11 downto 8) /= "0001" THEN
+				v_is_cof := '1';
+			END IF;
+			-- DBcc (0101 cccc 11001 rrr)
+			IF opcode(15 downto 12) = "0101" AND opcode(7 downto 3) = "11001" THEN
+				v_is_cof := '1';
+			END IF;
+			-- JMP (0100 1110 11xx xxxx)
+			IF opcode(15 downto 6) = "0100111011" THEN
+				v_is_cof := '1';
+			END IF;
+			-- JSR (0100 1110 10xx xxxx)
+			IF opcode(15 downto 6) = "0100111010" THEN
+				v_is_cof := '1';
+			END IF;
+			-- RTS (4E75)
+			IF opcode = x"4E75" THEN
+				v_is_cof := '1';
+			END IF;
+			-- RTE (4E73)
+			IF opcode = x"4E73" THEN
+				v_is_cof := '1';
+			END IF;
+			-- RTR (4E77)
+			IF opcode = x"4E77" THEN
+				v_is_cof := '1';
+			END IF;
+			-- RTD (4E74)
+			IF opcode = x"4E74" THEN
+				v_is_cof := '1';
+			END IF;
+			-- TRAP #n (4E4x)
+			IF opcode(15 downto 4) = x"4E4" THEN
+				v_is_cof := '1';
+			END IF;
+			-- TRAPV (4E76)
+			IF opcode = x"4E76" THEN
+				v_is_cof := '1';
+			END IF;
+			-- TRAPcc (0101 cccc 1111 1xxx)
+			IF opcode(15 downto 12) = "0101" AND opcode(7 downto 3) = "11111" THEN
+				v_is_cof := '1';
+			END IF;
+			-- STOP (4E72)
+			IF opcode = x"4E72" THEN
+				v_is_cof := '1';
+			END IF;
+			-- MOVEC (4E7A/4E7B)
+			IF opcode(15 downto 1) = "010011100111101" THEN
+				v_is_cof := '1';
+			END IF;
+			-- MOVE to SR (0100 0110 11xx xxxx)
+			IF opcode(15 downto 6) = "0100011011" THEN
+				v_is_cof := '1';
+			END IF;
+			-- ANDI to SR (027C)
+			IF opcode = x"027C" THEN
+				v_is_cof := '1';
+			END IF;
+			-- ORI to SR (007C)
+			IF opcode = x"007C" THEN
+				v_is_cof := '1';
+			END IF;
+			-- EORI to SR (0A7C)
+			IF opcode = x"0A7C" THEN
+				v_is_cof := '1';
+			END IF;
+			-- CHK.W (0100 xxx 110 xxxxxx)
+			IF opcode(15 downto 12) = "0100" AND opcode(8 downto 6) = "110" THEN
+				v_is_cof := '1';
+			END IF;
+			-- CHK.L (0100 xxx 100 xxxxxx, 020+)
+			IF opcode(15 downto 12) = "0100" AND opcode(8 downto 6) = "100" THEN
+				v_is_cof := '1';
+			END IF;
+			-- DIVS.W/DIVU.W (1000 xxx x11 xxxxxx)
+			IF opcode(15 downto 12) = "1000" AND opcode(7 downto 6) = "11" THEN
+				v_is_cof := '1';
+			END IF;
+			-- DIVS.L/DIVU.L (0100 1100 01xx xxxx, 020+)
+			IF opcode(15 downto 6) = "0100110001" THEN
+				v_is_cof := '1';
+			END IF;
+		END IF;
 		-- BUG #340 FIX: PMOVE/FPU completes with next_micro_state=nop (not idle), must set setendOPC
 		-- to clear fline_context_valid, allowing subsequent F-line opcodes to latch
 		-- Only applies when fline_context_valid='1' to avoid affecting non-F-line nop transitions
@@ -2519,7 +2619,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			-- the NEXT clkena_lw edge, allowing the CPU to advance past the faulting instruction.
 			-- By checking pmmu_fault combinationally, the bus error is caught at the same edge
 			-- where the faulting memory write completes (state="11"->"00").
-			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR make_berr='1'
+			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR (make_trace_t0='1' AND v_is_cof='1') OR make_berr='1'
 			   OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0')
 			   OR TG68_PC(0)='1' THEN
 				setinterrupt <= '1';
@@ -2879,7 +2979,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								berr_ssw(5 downto 4) <= "10"; -- SIZE=word
 								berr_ssw(2 downto 0) <= fc_internal;  -- FC
 							END IF;
-						ELSIF make_trace='1' THEN
+						ELSIF make_trace='1' OR (make_trace_t0='1' AND v_is_cof='1') THEN
 							-- Trace (Group 1): lower priority than address error/bus error
 							trap_trace <= '1';
 						ELSE
@@ -3204,9 +3304,12 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				preSVmode <= '1';
 				FlagsSR <= "00100111";
 				make_trace <= '0';
+				make_trace_t0 <= '0';
 			ELSIF clkena_lw = '1' THEN
 				IF setopcode='1' THEN
 					make_trace <= FlagsSR(7);
+					-- T0 mode: active when T0=1, T1=0 (T1=1 traces everything via make_trace)
+					make_trace_t0 <= FlagsSR(6) AND NOT FlagsSR(7);
 					IF set(changeMode)='1' THEN
 						SVmode <= NOT SVmode; 
 					ELSE
@@ -3215,6 +3318,7 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;
 				IF trap_berr='1' OR trap_illegal='1' OR trap_addr_error='1' OR trap_priv='1' OR trap_1010='1' OR trap_1111='1' OR trap_mmu_config='1' OR trap_mmu_berr='1' OR trap_format_error='1' THEN
 					make_trace <= '0';
+					make_trace_t0 <= '0';
 					FlagsSR(7) <= '0';
 				END IF;
 				IF set(changeMode)='1' THEN
@@ -3231,6 +3335,7 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;
 				IF trap_trace='1' AND state="10" THEN
 					make_trace <= '0';
+					make_trace_t0 <= '0';
 				END IF;
 				IF exec(directSR)='1' OR set_stop='1' THEN
 					FlagsSR <= data_read(15 downto 8);
