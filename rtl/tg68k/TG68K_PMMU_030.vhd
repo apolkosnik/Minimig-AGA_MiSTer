@@ -1060,7 +1060,7 @@ begin
             -- 31-24: Logical Address Base, 23-16: Logical Address Mask
             -- 15: E (Enable), 14-11: Reserved, 10: CI (Cache Inhibit), 9: RW, 8: RWM
             -- 7: Reserved, 6-4: FC Base, 3: Reserved, 2-0: FC Mask
-            TT0 <= reg_wdat;  -- TEMP: masks disabled for debugging -- and TTR_WRITE_MASK;
+            TT0 <= reg_wdat and TTR_WRITE_MASK;
             -- TT0 changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
               atc_flush_req <= '1';
@@ -1073,7 +1073,7 @@ begin
             -- 31-24: Logical Address Base, 23-16: Logical Address Mask
             -- 15: E (Enable), 14-11: Reserved, 10: CI (Cache Inhibit), 9: RW, 8: RWM
             -- 7: Reserved, 6-4: FC Base, 3: Reserved, 2-0: FC Mask
-            TT1 <= reg_wdat;  -- TEMP: masks disabled for debugging -- and TTR_WRITE_MASK;
+            TT1 <= reg_wdat and TTR_WRITE_MASK;
             -- TT1 changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
               atc_flush_req <= '1';
@@ -1088,7 +1088,7 @@ begin
             -- BUG #48 FIX: Validate configuration BEFORE writing TC to prevent lockup
             -- If configuration is invalid and E=1, clear E bit to prevent MMU activation
             -- This prevents system lockup from invalid MMU config while still taking exception
-            tc_write_val := reg_wdat;  -- TEMP: masks disabled for debugging -- and TC_WRITE_MASK;
+            tc_write_val := reg_wdat and TC_WRITE_MASK;
             tc_e := reg_wdat(31);
 
             if tc_e = '1' then
@@ -1148,7 +1148,7 @@ begin
               -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
               report "PMMU_REG_WRITE: SRP_H reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              SRP_H <= reg_wdat;  -- TEMP: masks disabled for debugging -- and CRP_HIGH_MASK;
+              SRP_H <= reg_wdat and CRP_HIGH_MASK;
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
               -- Per spec: Register is loaded BEFORE exception is taken
@@ -1165,7 +1165,7 @@ begin
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
               report "PMMU_REG_WRITE: SRP_L reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              SRP_L <= reg_wdat;  -- TEMP: masks disabled for debugging -- and CRP_LOW_MASK;
+              SRP_L <= reg_wdat and CRP_LOW_MASK;
             end if;
             if reg_fd = '0' then  -- Only flush if NOT PMOVEFD
               atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
@@ -1177,7 +1177,7 @@ begin
               -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
               report "PMMU_REG_WRITE: CRP_H reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              CRP_H <= reg_wdat;  -- TEMP: masks disabled for debugging -- and CRP_HIGH_MASK;
+              CRP_H <= reg_wdat and CRP_HIGH_MASK;
 
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
               -- Per spec: Register is loaded BEFORE exception is taken
@@ -1194,7 +1194,7 @@ begin
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
               report "PMMU_REG_WRITE: CRP_L reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              CRP_L <= reg_wdat;  -- TEMP: masks disabled for debugging -- and CRP_LOW_MASK;
+              CRP_L <= reg_wdat and CRP_LOW_MASK;
             end if;
             -- CRP changes invalidate ATC unless PMOVEFD (flush disable)
             if reg_fd = '0' then
@@ -2343,16 +2343,26 @@ begin
               wstate <= W_PAGE;
             else
               -- Table pointer (short format, DT=10) - continue to next level
-              if saved_addr_log = x"12345000" then
-               --  -- report "DEBUG_TABLE: descriptor is table pointer (DT=10), continuing to W_PTR1" severity note;
+              -- PTEST level early-stop: stop after ptest_level descriptors read
+              if instr_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_success(
+                  write_protect => mem_rdat(2),
+                  modified => '0',
+                  transparent => '0',
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_desc_is_long <= '0';  -- Short format
+                walk_addr <= mem_rdat(31 downto 4) & "0000";
+                walk_level <= walk_level + 1;
+                -- BUG #155 FIX: Short format has NO limit field
+                walk_limit_valid <= '0';
+                walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
+                wstate <= W_PTR1;
               end if;
-              walk_desc_is_long <= '0';  -- Short format
-              walk_addr <= mem_rdat(31 downto 4) & "0000";
-              walk_level <= walk_level + 1;
-              -- BUG #155 FIX: Short format has NO limit field
-              walk_limit_valid <= '0';
-              walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
-              wstate <= W_PTR1;
             end if;
           end if;
 
@@ -2389,18 +2399,29 @@ begin
               wstate <= W_PAGE;
             else
               -- Table descriptor - extract address from LOW word and continue
-              walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
-              walk_level <= walk_level + 1;
-              -- BUG #155 FIX: Save limit from long-format table descriptor for next level
-              walk_limit_valid <= '1';  -- Long format always has limit
-              walk_limit_lu    <= walk_desc_high(31);  -- L/U flag
-              walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
-              -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
-              -- Per MC68030 spec, S bit only exists in TABLE descriptors, not PAGE descriptors
-              walk_supervisor <= walk_supervisor or walk_desc_high(8);
-              walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
-             --  -- report "W_ROOT_LOW: Long-format table descriptor, continuing to W_PTR1" severity note;
-              wstate <= W_PTR1;
+              -- PTEST level early-stop
+              if instr_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_success(
+                  write_protect => walk_desc_high(2),
+                  modified => '0',
+                  transparent => '0',
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
+                walk_level <= walk_level + 1;
+                -- BUG #155 FIX: Save limit from long-format table descriptor for next level
+                walk_limit_valid <= '1';  -- Long format always has limit
+                walk_limit_lu    <= walk_desc_high(31);  -- L/U flag
+                walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
+                -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
+                walk_supervisor <= walk_supervisor or walk_desc_high(8);
+                walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
+                wstate <= W_PTR1;
+              end if;
             end if;
           end if;
 
@@ -2523,13 +2544,26 @@ begin
               wstate <= W_INDIRECT;
             else
               -- Continue to next level (short format table descriptor)
-              walk_desc_is_long <= '0';  -- Short format
-              walk_addr <= mem_rdat(31 downto 4) & "0000";
-              walk_level <= walk_level + 1;
-              -- BUG #155 FIX: Short format has NO limit field
-              walk_limit_valid <= '0';
-              walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
-              wstate <= W_PTR2;
+              -- PTEST level early-stop
+              if instr_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_success(
+                  write_protect => mem_rdat(2),
+                  modified => '0',
+                  transparent => '0',
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_desc_is_long <= '0';  -- Short format
+                walk_addr <= mem_rdat(31 downto 4) & "0000";
+                walk_level <= walk_level + 1;
+                -- BUG #155 FIX: Short format has NO limit field
+                walk_limit_valid <= '0';
+                walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
+                wstate <= W_PTR2;
+              end if;
             end if;
           end if;
 
@@ -2570,17 +2604,29 @@ begin
               wstate <= W_INDIRECT;
             else
               -- Table descriptor - extract address from LOW word and continue
-              walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
-              walk_level <= walk_level + 1;
-              -- BUG #155 FIX: Save limit from long-format table descriptor for next level
-              walk_limit_valid <= '1';  -- Long format always has limit
-              walk_limit_lu    <= walk_desc_high(31);  -- L/U flag
-              walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
-              -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
-              walk_supervisor <= walk_supervisor or walk_desc_high(8);
-              walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
-             --  -- report "W_PTR1_LOW: Long-format table descriptor, continuing to W_PTR2" severity note;
-              wstate <= W_PTR2;
+              -- PTEST level early-stop
+              if instr_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_success(
+                  write_protect => walk_desc_high(2),
+                  modified => '0',
+                  transparent => '0',
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
+                walk_level <= walk_level + 1;
+                -- BUG #155 FIX: Save limit from long-format table descriptor for next level
+                walk_limit_valid <= '1';  -- Long format always has limit
+                walk_limit_lu    <= walk_desc_high(31);  -- L/U flag
+                walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
+                -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
+                walk_supervisor <= walk_supervisor or walk_desc_high(8);
+                walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
+                wstate <= W_PTR2;
+              end if;
             end if;
           end if;
 
@@ -2710,13 +2756,26 @@ begin
               wstate <= W_INDIRECT;
             else
               -- Short format table descriptor
-              walk_desc_is_long <= '0';  -- Short format
-              walk_addr <= mem_rdat(31 downto 4) & "0000";
-              walk_level <= walk_level + 1;
-              -- BUG #155 FIX: Short format has NO limit field
-              walk_limit_valid <= '0';
-              walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
-              wstate <= W_PTR3;
+              -- PTEST level early-stop
+              if instr_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_success(
+                  write_protect => mem_rdat(2),
+                  modified => '0',
+                  transparent => '0',
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_desc_is_long <= '0';  -- Short format
+                walk_addr <= mem_rdat(31 downto 4) & "0000";
+                walk_level <= walk_level + 1;
+                -- BUG #155 FIX: Short format has NO limit field
+                walk_limit_valid <= '0';
+                walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
+                wstate <= W_PTR3;
+              end if;
             end if;
           end if;
 
@@ -2757,17 +2816,29 @@ begin
               wstate <= W_INDIRECT;
             else
               -- Table descriptor - extract address from LOW word and continue
-              walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
-              walk_level <= walk_level + 1;
-              -- BUG #155 FIX: Save limit from long-format table descriptor for next level
-              walk_limit_valid <= '1';  -- Long format always has limit
-              walk_limit_lu    <= walk_desc_high(31);  -- L/U flag
-              walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
-              -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
-              walk_supervisor <= walk_supervisor or walk_desc_high(8);
-              walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
-             --  -- report "W_PTR2_LOW: Long-format table descriptor, continuing to W_PTR3" severity note;
-              wstate <= W_PTR3;
+              -- PTEST level early-stop
+              if instr_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_success(
+                  write_protect => walk_desc_high(2),
+                  modified => '0',
+                  transparent => '0',
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
+                walk_level <= walk_level + 1;
+                -- BUG #155 FIX: Save limit from long-format table descriptor for next level
+                walk_limit_valid <= '1';  -- Long format always has limit
+                walk_limit_lu    <= walk_desc_high(31);  -- L/U flag
+                walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
+                -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
+                walk_supervisor <= walk_supervisor or walk_desc_high(8);
+                walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
+                wstate <= W_PTR3;
+              end if;
             end if;
           end if;
 
@@ -2871,12 +2942,25 @@ begin
               wstate <= W_INDIRECT;
             else
               -- FCL=1 and TID!=0: Continue to W_PTR4 (5th level)
-              walk_desc_is_long <= '0';  -- Short format table descriptor
-              walk_addr <= mem_rdat(31 downto 4) & "0000";
-              walk_level <= walk_level + 1;
-              walk_limit_valid <= '0';  -- Short format has no limit
-              walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
-              wstate <= W_PTR4;
+              -- PTEST level early-stop
+              if instr_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_success(
+                  write_protect => mem_rdat(2),
+                  modified => '0',
+                  transparent => '0',
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_desc_is_long <= '0';  -- Short format table descriptor
+                walk_addr <= mem_rdat(31 downto 4) & "0000";
+                walk_level <= walk_level + 1;
+                walk_limit_valid <= '0';  -- Short format has no limit
+                walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
+                wstate <= W_PTR4;
+              end if;
             end if;
           end if;
 
@@ -2917,17 +3001,29 @@ begin
               wstate <= W_INDIRECT;
             else
               -- FCL=1 and TID!=0: Continue to W_PTR4 (5th level)
-              walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
-              walk_level <= walk_level + 1;
-              -- Save limit from long-format table descriptor for next level
-              walk_limit_valid <= '1';  -- Long format always has limit
-              walk_limit_lu    <= walk_desc_high(31);  -- L/U flag
-              walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
-              -- Accumulate S bit from long-format TABLE descriptor
-              walk_supervisor <= walk_supervisor or walk_desc_high(8);
-              walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
-             --  -- report "W_PTR3_LOW: Long-format table descriptor, continuing to W_PTR4" severity note;
-              wstate <= W_PTR4;
+              -- PTEST level early-stop
+              if instr_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_success(
+                  write_protect => walk_desc_high(2),
+                  modified => '0',
+                  transparent => '0',
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
+                walk_level <= walk_level + 1;
+                -- Save limit from long-format table descriptor for next level
+                walk_limit_valid <= '1';  -- Long format always has limit
+                walk_limit_lu    <= walk_desc_high(31);  -- L/U flag
+                walk_limit_value <= unsigned(walk_desc_high(30 downto 16));  -- 15-bit limit
+                -- Accumulate S bit from long-format TABLE descriptor
+                walk_supervisor <= walk_supervisor or walk_desc_high(8);
+                walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
+                wstate <= W_PTR4;
+              end if;
             end if;
           end if;
 

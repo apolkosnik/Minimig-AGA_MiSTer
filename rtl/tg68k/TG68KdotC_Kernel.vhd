@@ -860,18 +860,28 @@ BEGIN
   cache_inv_req  <= '1' when (CACR(2) = '1' or CACR(3) = '1' or CACR(10) = '1' or CACR(11) = '1') else '0';
 
   -- Cache operation scope and cache selection for 68030 CACR bits
+  -- MC68030: CI/CD clear entire cache; CEI/CED clear specific entry addressed by CAAR
   process(CACR)
   begin
-    -- CACR self-clearing bits: determine operation type
-    cache_op_scope_int <= "10";  -- All caches (global invalidation)
     if CACR(3) = '1' then
-      cache_op_cache_int <= "10";  -- CI (bit 3): Clear Instruction Cache only
+      -- CI: Clear entire Instruction Cache
+      cache_op_scope_int <= "10";
+      cache_op_cache_int <= "10";
     elsif CACR(11) = '1' then
-      cache_op_cache_int <= "01";  -- CD (bit 11): Clear Data Cache only
-    elsif CACR(2) = '1' or CACR(10) = '1' then
-      cache_op_cache_int <= "11";  -- CEI (bit 2) or CED (bit 10): Clear Entry operations
+      -- CD: Clear entire Data Cache
+      cache_op_scope_int <= "10";
+      cache_op_cache_int <= "01";
+    elsif CACR(2) = '1' then
+      -- CEI: Clear Entry in I-Cache addressed by CAAR
+      cache_op_scope_int <= "00";
+      cache_op_cache_int <= "10";
+    elsif CACR(10) = '1' then
+      -- CED: Clear Entry in D-Cache addressed by CAAR
+      cache_op_scope_int <= "00";
+      cache_op_cache_int <= "01";
     else
-      cache_op_cache_int <= "00";  -- Default: no operation
+      cache_op_scope_int <= "10";
+      cache_op_cache_int <= "00";
     end if;
   end process;
 
@@ -879,8 +889,8 @@ BEGIN
   cache_op_scope <= cache_op_scope_int;
   cache_op_cache <= cache_op_cache_int;
 
-  -- Cache operation address: use physical address from PMMU
-  cache_op_addr <= pmmu_addr_phys_int;
+  -- CEI/CED use CAAR for the target address; CI/CD don't need an address
+  cache_op_addr <= CAAR when (CACR(2) = '1' or CACR(10) = '1') else pmmu_addr_phys_int;
 
   -- Cache inhibit from PMMU
   pmmu_cache_inhibit <= pmmu_ch_inhibit;
@@ -2936,7 +2946,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									berr_ssw(15) <= '0';  -- FC class
 									berr_ssw(13) <= '0';  -- RC
 									berr_ssw(11 downto 10) <= "00";  -- Reserved
-									berr_ssw(7) <= '0';   -- RM (read-modify-write not tracked)
+									berr_ssw(7) <= exec_tas;  -- RM: read-modify-write (TAS instruction)
 									berr_ssw(3) <= '0';   -- Reserved
 								else
 									-- External BERR: use kernel's current state
@@ -2956,7 +2966,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									berr_ssw(15) <= '0';
 									berr_ssw(13) <= '0';
 									berr_ssw(11 downto 10) <= "00";
-									berr_ssw(7) <= '0';
+									berr_ssw(7) <= exec_tas;  -- RM: read-modify-write (TAS instruction)
 									berr_ssw(3) <= '0';
 								end if;
 							END IF;
