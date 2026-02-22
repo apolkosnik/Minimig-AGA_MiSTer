@@ -143,6 +143,7 @@ architecture rtl of TG68K_PMMU_030 is
   -- addr_log/fc to suppress bus access during the stale window.
   signal translated_addr    : std_logic_vector(31 downto 0) := (others => '0');
   signal translated_fc      : std_logic_vector(2 downto 0) := (others => '0');
+  signal translated_rw      : std_logic := '1';
 
   -- Translation result latches
   signal addr_phys_reg      : std_logic_vector(31 downto 0) := (others => '0');
@@ -1402,6 +1403,7 @@ begin
       addr_phys_reg <= x"00000000";
       translated_addr <= (others => '0');  -- BUG #416
       translated_fc <= (others => '0');    -- BUG #416
+      translated_rw <= '1';
       cache_inhibit_reg <= '0';
       write_protect_reg <= '0';
       fault_reg <= '0';
@@ -1466,6 +1468,7 @@ begin
           addr_phys_reg     <= addr_log;
           translated_addr   <= addr_log;  -- BUG #416
           translated_fc     <= fc;        -- BUG #416
+          translated_rw     <= rw;
           cache_inhibit_reg <= '0';
           write_protect_reg <= '0';
           fault_reg         <= '0';
@@ -1496,6 +1499,7 @@ begin
             addr_phys_reg <= addr_log;  -- Identity mapping
             translated_addr <= addr_log;  -- BUG #416
             translated_fc   <= fc;        -- BUG #416
+            translated_rw   <= rw;
             cache_inhibit_reg <= tci0;
             write_protect_reg <= twp0;
             fault_reg <= '0';
@@ -1516,6 +1520,7 @@ begin
             addr_phys_reg <= addr_log;  -- Identity mapping
             translated_addr <= addr_log;  -- BUG #416
             translated_fc   <= fc;        -- BUG #416
+            translated_rw   <= rw;
             cache_inhibit_reg <= tci1;
             write_protect_reg <= twp1;
             fault_reg <= '0';
@@ -1602,6 +1607,7 @@ begin
               addr_phys_reg <= std_logic_vector(phys_result);  -- Provide faulting address
               translated_addr <= addr_log;  -- BUG #416
               translated_fc   <= fc;        -- BUG #416
+              translated_rw   <= rw;
               cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= '1';  -- Mark as write-protected
             elsif fc(2) = '0' and atc_attr(hit_idx)(3) = '0' then
@@ -1632,6 +1638,7 @@ begin
               addr_phys_reg <= std_logic_vector(phys_result);
               translated_addr <= addr_log;  -- BUG #416
               translated_fc   <= fc;        -- BUG #416
+              translated_rw   <= rw;
               cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= atc_attr(hit_idx)(0);
               -- report "SUPERVISOR_FAULT_ATC: Setting fault_reg=1 for supervisor violation, addr=0x" & slv_to_hstring(addr_log) &
@@ -1658,6 +1665,7 @@ begin
                 addr_phys_reg <= std_logic_vector(phys_result);
                 translated_addr <= addr_log;  -- BUG #416
                 translated_fc   <= fc;        -- BUG #416
+                translated_rw   <= rw;
                 cache_inhibit_reg <= atc_attr(hit_idx)(2);
                 write_protect_reg <= atc_attr(hit_idx)(0);
                 fault_reg <= '0';
@@ -1886,6 +1894,7 @@ begin
           addr_phys_reg <= saved_addr_log;  -- Pass through faulting address
           translated_addr <= saved_addr_log;  -- BUG #416
           translated_fc   <= saved_fc;        -- BUG #416
+          translated_rw   <= saved_rw;
           cache_inhibit_reg <= '1';  -- Inhibit cache on faults
           write_protect_reg <= '1';  -- Protect on faults
         end if;
@@ -1957,6 +1966,7 @@ begin
                 addr_phys_reg <= std_logic_vector(phys_result);
                 translated_addr <= saved_addr_log;  -- BUG #416
                 translated_fc   <= saved_fc;        -- BUG #416
+                translated_rw   <= saved_rw;
                 cache_inhibit_reg <= atc_attr(hit_idx)(2);
                 write_protect_reg <= '1';
               end if;
@@ -1989,6 +1999,7 @@ begin
                 addr_phys_reg <= std_logic_vector(phys_result);
                 translated_addr <= saved_addr_log;  -- BUG #416
                 translated_fc   <= saved_fc;        -- BUG #416
+                translated_rw   <= saved_rw;
                 cache_inhibit_reg <= atc_attr(hit_idx)(2);
                 write_protect_reg <= atc_attr(hit_idx)(0);
               end if;
@@ -2005,6 +2016,7 @@ begin
                 addr_phys_reg <= std_logic_vector(phys_result);
                 translated_addr <= saved_addr_log;  -- BUG #416
                 translated_fc   <= saved_fc;        -- BUG #416
+                translated_rw   <= saved_rw;
                 cache_inhibit_reg <= atc_attr(hit_idx)(2);
                 write_protect_reg <= atc_attr(hit_idx)(0);
                 fault_reg <= '0';
@@ -2030,6 +2042,7 @@ begin
               addr_phys_reg <= saved_addr_log;  -- Pass through logical address as fallback
               translated_addr <= saved_addr_log;  -- BUG #416
               translated_fc   <= saved_fc;        -- BUG #416
+              translated_rw   <= saved_rw;
               cache_inhibit_reg <= '1';  -- Inhibit cache when walker fails to populate ATC
               write_protect_reg <= '0';  -- No protection info available
               -- BUG #142 FIX: Do NOT clear fault_reg if walker just faulted!
@@ -3702,7 +3715,7 @@ begin
   end process;
 
   -- Walker busy indication - not busy if MMU disabled or TTR hit
-  process(wstate, addr_log, fc, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, req)
+  process(wstate, addr_log, fc, rw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, req)
     variable tmatch0, tmatch1 : std_logic;
   begin
     -- Not busy if MMU is disabled
@@ -3723,7 +3736,7 @@ begin
       -- When req='0' (e.g. execute state), no bus access happens so stale addr is harmless;
       -- checking it when req='0' would deadlock because the translation process only
       -- updates translated_addr when req='1'.
-      if (tmatch0 = '1' or tmatch1 = '1' or (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and (req = '0' or (translated_addr = addr_log and translated_fc = fc)))) then
+      if (tmatch0 = '1' or tmatch1 = '1' or (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and (req = '0' or (translated_addr = addr_log and translated_fc = fc and translated_rw = rw)))) then
         busy <= '0';
       else
         busy <= '1';
