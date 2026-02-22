@@ -378,6 +378,15 @@ test-moves-validation: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_validation.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_moves_validation
 
+test-stack-frame-push: setup
+	@echo "Running stack frame push validation tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_stack_frame_push.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_stack_frame_push
+
 test-rte-formats: setup
 	@echo "Running RTE stack frame format validation tests..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
