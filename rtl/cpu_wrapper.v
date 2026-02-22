@@ -95,7 +95,7 @@ module cpu_wrapper
 // MC68030 bus fault suppression: When PMMU is translating (busy) or has faulted, suppress
 // CPU bus accesses. On real 68030, faulting bus cycles are aborted before data reaches memory.
 // The busy->fault transition is glitch-free (at least one is always high during handshake).
-wire pmmu_suppress_bus = cpucfg[1] & (pmmu_busy_p | pmmu_fault_p);
+wire pmmu_suppress_bus = cpucfg[1] & (pmmu_busy_p | pmmu_fault_p | walker_timeout_error);
 assign ramsel       = (cpu_req & ~sel_nmi_vector & ~walker_active & ~pmmu_suppress_bus & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)) | walker_fast_ram;
 assign ramshared    = sel_dd;
 
@@ -366,6 +366,7 @@ reg         pmmu_walker_berr_p;  // BUG #156 FIX: Bus error during table walk (s
 reg         walker_active;
 reg   [3:0] walker_state;  // BUG #124 FIX: Walker state visible for bus mux (4-bit for write states)
 reg  [31:0] walker_wdata_latch;  // MC68030 U/M bit: Latch write data from PMMU
+reg         walker_timeout_error; // BUG #138: Walker timeout error flag
 wire [23:1] walker_chip_addr;  // For Chip RAM only (inherently <2MB)
 wire        walker_reading;  // BUG #124 FIX: Walker actively reading memory
 wire        walker_writing;  // MC68030 U/M bit: Walker actively writing memory
@@ -429,7 +430,7 @@ cpu_inst_p
   // MC68030 bus fault: pmmu_fault_p bypasses pmmu_busy_p stall so the kernel can
   // advance to process the fault (accumulate make_berr, detect double bus fault).
   // Bus accesses are suppressed by pmmu_suppress_bus, so no stray writes occur.
-  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit) | pmmu_fault_p | ~reset) & (~pmmu_walker_req_p | ~reset | walker_timeout_error) & (~pmmu_busy_p | pmmu_fault_p | ~reset)),
+  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit) | pmmu_fault_p | walker_timeout_error | ~reset) & (~pmmu_walker_req_p | ~reset | walker_timeout_error) & (~pmmu_busy_p | pmmu_fault_p | walker_timeout_error | ~reset)),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -675,7 +676,6 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// On timeout, returns invalid descriptor (0xDEADDEA0, DT=00) to trigger PMMU fault
 	// The walker_timeout_error signal also unblocks clkena_in to allow CPU recovery
 	reg [11:0] walker_timeout_cnt;  // 12-bit counter = 4096 cycles max (~36us @ 114MHz)
-	reg walker_timeout_error /* synthesis preserve */;  // Set when walker times out
 
 	// BUG #408 FIX: Walker must wait for the correct ready signal based on memory region.
 	// Chip RAM reads wait for chipready; Fast RAM reads wait for ramready.
@@ -902,10 +902,12 @@ end else begin : gen_no_68030_cache
 			walker_state <= 4'd0;  // BUG #124: Keep state at 0
 			pmmu_walker_data_p <= 0;
 			walker_wdata_latch <= 0;  // MC68030 U/M bit
+			walker_timeout_error <= 0;
 		end else begin
 			pmmu_walker_ack_p <= 0;
 			pmmu_walker_berr_p <= 0;  // BUG #156 FIX: No BERR when cache disabled
 			pmmu_walker_data_p <= 0;
+			walker_timeout_error <= 0;
 		end
 	end
 	assign cache_hit = 1'b0;

@@ -2809,10 +2809,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 
 					if(trap_berr='0' and trap_mmu_berr='0') then
 						if pmmu_tc_en = '1' then
-							make_berr <= (berr OR make_berr OR pmmu_fault);  -- Include PMMU faults when MMU enabled
+							make_berr <= (berr OR make_berr OR pmmu_fault OR pmmu_walker_berr);  -- Include PMMU faults and walker timeouts
 							-- BUG #159 FIX: Track if PMMU fault is a bus error (B bit = pmmu_fault_stat(15))
 							-- This determines whether to use vector 2 (normal BERR) or vector 61 (MMU BERR)
-							if pmmu_fault = '1' and pmmu_fault_stat(15) = '1' then
+							if (pmmu_fault = '1' and pmmu_fault_stat(15) = '1') or pmmu_walker_berr = '1' then
 								make_mmu_berr <= '1';
 							else
 								make_mmu_berr <= make_mmu_berr;  -- Keep previous value
