@@ -962,10 +962,11 @@ BEGIN
   pmmu_mem_rdat    <= pmmu_walker_data;
   pmmu_mem_berr    <= pmmu_walker_berr;  -- MC68030: Bus error from external memory
 
--- BUG #397: Drive CCR restore signal to ALU when format error detected.
--- trap_format_error is combinational (active during rte4), same cycle as
--- the FlagsSR restore at line 3266. No interrupt guard needed.
-restore_ccr_sig <= '1' when trap_format_error='1' else '0';
+-- BUG #418 FIX: CCR restore disabled. MC68030 UM 6.4.2 says format error
+-- exception frame must contain the SR loaded from the RTE stack frame,
+-- including the CCR low byte. Former BUG #397 incorrectly restored the
+-- pre-RTE CCR, overwriting the valid directSR-loaded value.
+restore_ccr_sig <= '0';
 
 ALU: TG68K_ALU   
 	generic map(
@@ -2831,12 +2832,22 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						-- pmmu_fault_was_cleared: detects new faults during stall. When pmmu_fault
 						-- drops to '0' during stall (new translation started) then returns to '1'
 						-- (new fault), this flag proves it's a fresh fault, not the stale original.
-						if cpu(1) = '1' and (berr = '1' or (pmmu_tc_en = '1' and pmmu_fault = '1' and (pmmu_fault_dispatched = '0' or pmmu_fault_was_cleared = '1'))) then
-							cpu_halted <= '1';
-							-- synthesis translate_off
-							report "DOUBLE BUS FAULT: fault during bus error exception processing - CPU HALTED" severity warning;
-							-- synthesis translate_on
-						end if;
+							if cpu(1) = '1' and (berr = '1' or (pmmu_tc_en = '1' and pmmu_fault = '1' and (pmmu_fault_dispatched = '0' or pmmu_fault_was_cleared = '1'))) then
+								cpu_halted <= '1';
+								-- synthesis translate_off
+								report "DOUBLE BUS FAULT: fault during bus error exception processing - CPU HALTED" severity warning;
+								report "HALT_CTX_A: cpu(1)=" & std_logic'image(cpu(1)) &
+								       " berr=" & std_logic'image(berr) &
+								       " pmmu_tc_en=" & std_logic'image(pmmu_tc_en) &
+								       " pmmu_fault=" & std_logic'image(pmmu_fault) &
+								       " pmmu_fault_dispatched=" & std_logic'image(pmmu_fault_dispatched) &
+								       " pmmu_fault_was_cleared=" & std_logic'image(pmmu_fault_was_cleared) &
+								       " trap_berr=" & bit'image(trap_berr) &
+								       " trap_mmu_berr=" & bit'image(trap_mmu_berr) &
+								       " berr_exception_active=" & std_logic'image(berr_exception_active)
+								       severity warning;
+								-- synthesis translate_on
+							end if;
 						make_berr <= '0';
 						make_mmu_berr <= '0';
 					end if;
@@ -2856,15 +2867,25 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						-- Group 1: Trace, Interrupt, Illegal, Privilege
 						-- Address error and bus error must be checked BEFORE trace.
 						-- BUG #400 FIX: Also check pmmu_fault directly for same-cycle dispatch
-						IF make_berr='1' OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0') THEN
-							-- MC68030 Double bus fault detection: bus error while still in berr exception window
-							-- This catches the case where the handler instruction fetch faults
-							IF cpu(1) = '1' AND berr_exception_active = '1' THEN
-								cpu_halted <= '1';
-								-- synthesis translate_off
-								report "DOUBLE BUS FAULT: bus error at handler dispatch - CPU HALTED" severity warning;
-								-- synthesis translate_on
-							ELSE
+							IF make_berr='1' OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0') THEN
+								-- MC68030 Double bus fault detection: bus error while still in berr exception window
+								-- This catches the case where the handler instruction fetch faults
+								IF cpu(1) = '1' AND berr_exception_active = '1' THEN
+									cpu_halted <= '1';
+									-- synthesis translate_off
+									report "DOUBLE BUS FAULT: bus error at handler dispatch - CPU HALTED" severity warning;
+									report "HALT_CTX_B: cpu(1)=" & std_logic'image(cpu(1)) &
+									       " make_berr=" & std_logic'image(make_berr) &
+									       " berr=" & std_logic'image(berr) &
+									       " pmmu_tc_en=" & std_logic'image(pmmu_tc_en) &
+									       " pmmu_fault=" & std_logic'image(pmmu_fault) &
+									       " pmmu_fault_Bbit=" & std_logic'image(pmmu_fault_stat(15)) &
+									       " trap_berr=" & bit'image(trap_berr) &
+									       " trap_mmu_berr=" & bit'image(trap_mmu_berr) &
+									       " berr_exception_active=" & std_logic'image(berr_exception_active)
+									       severity warning;
+									-- synthesis translate_on
+								ELSE
 								-- BUG #159 FIX: Distinguish MMU bus error (vector 61) from normal BERR (vector 2)
 								-- BUG #400 FIX: Also check pmmu_fault_stat directly for same-cycle dispatch
 								IF make_mmu_berr='1' OR (pmmu_fault='1' AND pmmu_fault_stat(15)='1') THEN
@@ -2939,14 +2960,21 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									berr_ssw(3) <= '0';
 								end if;
 							END IF;
-						ELSIF TG68_PC(0)='1' THEN
-							-- Address Error (Group 0): odd instruction fetch address
-							IF cpu(1) = '1' AND berr_exception_active = '1' THEN
-								cpu_halted <= '1';  -- Double fault: halt CPU
-								-- synthesis translate_off
-								report "DOUBLE FAULT: address error during exception - CPU HALTED" severity warning;
-								-- synthesis translate_on
-							ELSE
+							ELSIF TG68_PC(0)='1' THEN
+								-- Address Error (Group 0): odd instruction fetch address
+								IF cpu(1) = '1' AND berr_exception_active = '1' THEN
+									cpu_halted <= '1';  -- Double fault: halt CPU
+									-- synthesis translate_off
+									report "DOUBLE FAULT: address error during exception - CPU HALTED" severity warning;
+									report "HALT_CTX_C: cpu(1)=" & std_logic'image(cpu(1)) &
+									       " TG68_PC(0)=" & std_logic'image(TG68_PC(0)) &
+									       " berr_exception_active=" & std_logic'image(berr_exception_active) &
+									       " trap_berr=" & bit'image(trap_berr) &
+									       " trap_mmu_berr=" & bit'image(trap_mmu_berr) &
+									       " make_berr=" & std_logic'image(make_berr)
+									       severity warning;
+									-- synthesis translate_on
+								ELSE
 								trap_addr_error <= '1';
 								berr_exception_active <= '1';
 								-- Address error frame data for berr1-berr8
@@ -3148,6 +3176,15 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 
 					IF decodeOPC='1' OR interrupt='1' THEN
 						trap_SR <= FlagsSR;
+					END IF;
+					-- BUG #418 FIX: Keep trap_SR in sync with directSR-loaded value.
+					-- For RTE format error, the exception frame must contain the SR
+					-- loaded from the RTE stack frame (MC68030 UM 6.4.2), not the
+					-- pre-RTE SR captured at decodeOPC time. Must be in THIS process
+					-- (same as trap_SR <= FlagsSR above) to avoid multiple drivers.
+					-- Placed AFTER decodeOPC block for last-assignment-wins priority.
+					IF exec(directSR)='1' THEN
+						trap_SR <= data_read(15 downto 8);
 					END IF;
 				ELSE
 					-- MC68030 double bus fault: Monitor pmmu_fault during CPU stall.
@@ -3354,16 +3391,18 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF interrupt='1' THEN
 					fc_internal(2) <= '1';
 				END IF;
-				-- Format Error during RTE: directSR already loaded frame SR (which may
-				-- have S=0). Since the format is invalid, restore the pre-RTE SR so
-				-- the exception handler runs in supervisor mode. trap_SR was captured
-				-- at decodeOPC before directSR changed FlagsSR.
+				-- BUG #418 FIX: Format Error during RTE - force supervisor mode only.
+				-- MC68030 UM 6.4.2: The format error exception frame must contain
+				-- the SR loaded from the RTE stack frame, NOT the pre-RTE SR.
+				-- trap_SR is now updated at directSR time (above), so writeSR will
+				-- push the correct value. Only force S=1 here so the exception
+				-- handler runs in supervisor mode. preSVmode stays '1' (RTE is
+				-- supervisor-only, so it was already '1' before RTE).
 				-- MUST come AFTER exec(directSR)/exec(to_SR)/changeMode/interrupt
 				-- to have highest priority (VHDL last-assignment-wins).
 				IF trap_format_error='1' THEN
-					FlagsSR <= trap_SR;
-					fc_internal(2) <= trap_SR(5);
-					preSVmode <= trap_SR(5);
+					FlagsSR(5) <= '1';
+					fc_internal(2) <= '1';
 				END IF;
 				IF cpu(1)='0' THEN
 					FlagsSR(4) <= '0';

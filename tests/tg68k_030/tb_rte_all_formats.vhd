@@ -104,6 +104,12 @@ begin
         if rising_edge(clk) then
             if busstate = "11" and nWr = '0' then
                 if to_integer(unsigned(addr_out(15 downto 1))) <= 8191 then
+                    -- Debug: monitor writes to stack area $07C0-$07C8
+                    if addr_out(15 downto 0) >= x"07C0" and addr_out(15 downto 0) <= x"07C8" then
+                        report "DBG_WRITE addr=$" & integer'image(to_integer(unsigned(addr_out(15 downto 0)))) &
+                               " data=$" & integer'image(to_integer(unsigned(data_write))) &
+                               " UDS=" & std_logic'image(nUDS) & " LDS=" & std_logic'image(nLDS) severity note;
+                    end if;
                     if nUDS = '0' then
                         mem(to_integer(unsigned(addr_out(15 downto 1))))(15 downto 8) := data_write(15 downto 8);
                     end if;
@@ -509,6 +515,147 @@ begin
                 test_failed <= test_failed + 1;
             else
                 report "PASS: $4205 regression - Format Error taken, SR stayed supervisor, MSP preserved" severity note;
+                test_passed <= test_passed + 1;
+            end if;
+
+            wait for 1 us;
+        end procedure;
+
+        -- BUG #418: Format Error exception frame must contain the SR loaded from
+        -- the RTE stack frame, not the pre-RTE SR. MC68030 UM Section 6.4.2:
+        -- "The saved value of the status register is the value read from the
+        -- original exception stack frame by the RTE instruction."
+        --
+        -- Test: Pre-RTE SR=$2700 (S=1, IPL=7), frame SR=$2100 (S=1, IPL=1).
+        -- Format error frame must show SR=$2100, not $2700.
+        -- Uses different IPL fields to distinguish pre-RTE from frame SR.
+        -- Avoids T0/T1 trace bits to keep the test focused on SR preservation.
+        procedure test_format_error_preserves_frame_sr is
+            constant test_name : string := "BUG#418 FmtErr preserves frame SR";
+            variable reached_stop : boolean;
+            variable local_fail : boolean;
+            variable frame_sr : std_logic_vector(15 downto 0);
+            variable sp_val_hi : std_logic_vector(15 downto 0);
+            variable sp_val_lo : std_logic_vector(15 downto 0);
+        begin
+            current_test <= test_name & (test_name'length + 1 to 40 => ' ');
+            report "Testing BUG#418: Format Error exception frame must contain RTE-loaded SR..." severity note;
+
+            -- Reset memory
+            for i in 0 to 8191 loop
+                mem(i) := x"4E71";
+            end loop;
+
+            -- Reset vectors: SSP=$2000, PC=$1000
+            mem(0) := x"0000";
+            mem(1) := x"2000";
+            mem(2) := x"0000";
+            mem(3) := x"1000";
+
+            -- Format Error vector (14, offset $38) -> $1300
+            mem(16#38#/2) := x"0000";
+            mem(16#38#/2 + 1) := x"1300";
+
+            -- Trace vector (9, offset $24) -> $1200 (safety: STOP if trace fires)
+            mem(16#24#/2) := x"0000";
+            mem(16#24#/2 + 1) := x"1200";
+            mem(16#1200#/2) := x"4E72"; mem(16#1202#/2) := x"2700";  -- STOP #$2700
+
+            -- ===== Code at $1000 =====
+            -- Set ISP = $07C0, make A7 point there
+            mem(16#1000#/2) := x"203C"; mem(16#1002#/2) := x"0000"; mem(16#1004#/2) := x"07C0";  -- MOVE.L #$000007C0,D0
+            mem(16#1006#/2) := x"4E7B"; mem(16#1008#/2) := x"0804";                               -- MOVEC D0,ISP
+            mem(16#100A#/2) := x"2E7C"; mem(16#100C#/2) := x"0000"; mem(16#100E#/2) := x"07C0";  -- MOVEA.L #$000007C0,A7
+            -- Set SR=$2700 (S=1, IPL=7, no trace) - this is the pre-RTE SR
+            mem(16#1010#/2) := x"46FC"; mem(16#1012#/2) := x"2700";                               -- MOVE.W #$2700,SR
+            -- Execute RTE - should load SR=$2100 from frame, detect invalid format
+            mem(16#1014#/2) := x"4E73";                                                            -- RTE
+
+            -- ===== RTE Frame at ISP ($07C0) =====
+            -- SR=$2100 (S=1, IPL=1) - differs from pre-RTE by IPL field
+            mem(16#07C0#/2) := x"2100";  -- Frame SR: S=1, IPL=1
+            mem(16#07C2#/2) := x"0000";  -- PC high
+            mem(16#07C4#/2) := x"1580";  -- PC low (should not be reached)
+            mem(16#07C6#/2) := x"4205";  -- Invalid format word (Format $4)
+
+            -- ===== Format Error handler at $1300 =====
+            -- Read the exception frame from the stack to verify SR value
+            -- Format $0 frame layout at (A7): SR(16) | PC(32) | FmtVec(16)
+            -- Also save A7 for debug (stack pointer check)
+            mem(16#1300#/2) := x"3017";                                                            -- MOVE.W (A7),D0  -- read frame SR
+            mem(16#1302#/2) := x"33C0"; mem(16#1304#/2) := x"0000"; mem(16#1306#/2) := x"3000";  -- MOVE.W D0,($3000).L
+            mem(16#1308#/2) := x"23CF"; mem(16#130A#/2) := x"0000"; mem(16#130C#/2) := x"3002";  -- MOVE.L A7,($3002).L
+            mem(16#130E#/2) := x"4E72"; mem(16#1310#/2) := x"2700";                               -- STOP #$2700
+
+            -- Clear verification area
+            mem(16#3000#/2) := x"DEAD";
+            mem(16#3002#/2) := x"DEAD";
+            mem(16#3004#/2) := x"DEAD";
+
+            -- ===== Execute =====
+            nReset <= '0';
+            wait for 100 ns;
+            nReset <= '1';
+
+            reached_stop := false;
+            for i in 0 to 30000 loop
+                wait until rising_edge(clk);
+                -- Detect STOP at $130E
+                if addr_out(15 downto 0) = x"130E" then
+                    reached_stop := true;
+                    for j in 0 to 100 loop
+                        wait until rising_edge(clk);
+                    end loop;
+                    exit;
+                end if;
+                -- Safety: detect trace handler STOP at $1200
+                if addr_out(15 downto 0) = x"1200" then
+                    report "FAIL: " & test_name & " - T0/T1 trace fired unexpectedly!" severity error;
+                    test_failed <= test_failed + 1;
+                    wait for 1 us;
+                    return;
+                end if;
+            end loop;
+
+            if not reached_stop then
+                report "FAIL: " & test_name & " - timeout, format error handler not reached" severity error;
+                test_failed <= test_failed + 1;
+                wait for 1 us;
+                return;
+            end if;
+
+            -- ===== Verify: Format Error frame must contain RTE-loaded SR ($2100) =====
+            local_fail := false;
+            frame_sr := mem(16#3000#/2);
+            sp_val_hi := mem(16#3002#/2);
+            sp_val_lo := mem(16#3004#/2);
+
+            report "  DEBUG: frame_sr=$" & integer'image(to_integer(unsigned(frame_sr))) &
+                   " A7=$" & integer'image(to_integer(unsigned(sp_val_hi))) &
+                   ":" & integer'image(to_integer(unsigned(sp_val_lo))) severity note;
+            -- Raw memory dump of stack area for debug
+            report "  RAW MEM: $07C0=" & integer'image(to_integer(unsigned(mem(16#07C0#/2)))) &
+                   " $07C2=" & integer'image(to_integer(unsigned(mem(16#07C2#/2)))) &
+                   " $07C4=" & integer'image(to_integer(unsigned(mem(16#07C4#/2)))) &
+                   " $07C6=" & integer'image(to_integer(unsigned(mem(16#07C6#/2)))) severity note;
+
+            -- The critical check: frame SR must be $2100 (from RTE stack frame),
+            -- NOT $2700 (pre-RTE SR). The IPL field is the key difference.
+            if frame_sr /= x"2100" then
+                report "  FAIL: Format Error frame SR = $" &
+                       integer'image(to_integer(unsigned(frame_sr))) &
+                       ", expected $2100 (IPL=1, loaded from RTE frame)" severity error;
+                if frame_sr = x"2700" then
+                    report "  (Got $2700 = pre-RTE SR -- trap_SR not updated at directSR)" severity error;
+                end if;
+                local_fail := true;
+            end if;
+
+            if local_fail then
+                report "FAIL: " & test_name severity error;
+                test_failed <= test_failed + 1;
+            else
+                report "PASS: " & test_name severity note;
                 test_passed <= test_passed + 1;
             end if;
 
@@ -1641,6 +1788,8 @@ begin
         test_rte_format_word(x"A605", "Format word $A605 (Format A)", true);
         -- Targeted regression: invalid $4205 frame with SR=$0000 must not drop S or corrupt MSP
         test_rte_format4205_s_to_u_msp_preserve;
+        -- BUG #418: Format Error frame must contain RTE-loaded SR, not pre-RTE SR
+        test_format_error_preserves_frame_sr;
 
         -- Edge case tests for SVmode tracking and timing
         report "---------------------------------------------------------" severity note;
