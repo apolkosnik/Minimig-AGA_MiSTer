@@ -673,7 +673,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	reg [15:0] walker_data_low;
 
 	// BUG #138: Walker timeout counter - abort if no memory response
-	// On timeout, returns invalid descriptor (0xDEADDEA0, DT=00) to trigger PMMU fault
+	// On timeout, returns zeroed data with BERR to trigger PMMU bus error fault
 	// The walker_timeout_error signal also unblocks clkena_in to allow CPU recovery
 	reg [11:0] walker_timeout_cnt;  // 12-bit counter = 4096 cycles max (~36us @ 114MHz)
 
@@ -771,8 +771,18 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				end
 
 				WALKER_WAIT_LOW: begin
-					// BUG #138: Check for timeout first
-					if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+					// BUG #419 FIX: Detect PMMU internal timeout (mem_req dropped).
+					// PMMU's 500-cycle timeout drops pmmu_walker_req_p while wrapper
+					// is still counting to 2048. Without this, walker_active blocks
+					// ALL CPU SDRAM access for ~1548 cycles. Bus error frame writes
+					// can't reach Fast RAM, freezing the CPU. If the stack page needs
+					// a walk too, the second PMMU timeout triggers false double bus
+					// fault -> permanent hang.
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
+					// BUG #138: Check for wrapper-level timeout
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
 						// BUG #156 FIX: Timeout is a bus error - assert BERR signal
 						// MC68030 spec: Bus errors during table walk set MMUSR B bit
 						walker_timeout_error <= 1;
@@ -797,8 +807,12 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				end
 
 				WALKER_WAIT_HIGH: begin
-					// BUG #138: Check for timeout first
-					if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+					// BUG #419 FIX: Detect PMMU internal timeout (see WALKER_WAIT_LOW)
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
+					// BUG #138: Check for wrapper-level timeout
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
 						// BUG #156 FIX: Timeout is a bus error - assert BERR signal
 						walker_timeout_error <= 1;
 						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
@@ -835,8 +849,12 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				end
 
 				WALKER_WAIT_WR_LOW: begin
+					// BUG #419 FIX: Detect PMMU internal timeout (see WALKER_WAIT_LOW)
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
 					// Wait for write to complete
-					if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
 						// BUG #156 FIX: Timeout is a bus error
 						walker_timeout_error <= 1;
 						pmmu_walker_berr_p <= 1;
@@ -857,8 +875,12 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				end
 
 				WALKER_WAIT_WR_HIGH: begin
+					// BUG #419 FIX: Detect PMMU internal timeout (see WALKER_WAIT_LOW)
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
 					// Wait for write to complete
-					if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
 						// BUG #156 FIX: Timeout is a bus error
 						walker_timeout_error <= 1;
 						pmmu_walker_berr_p <= 1;
