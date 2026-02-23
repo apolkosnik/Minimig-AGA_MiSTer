@@ -273,7 +273,15 @@ always @* begin
 		// This was causing WhichAmiga and cputest lockups when page tables were in Fast RAM
 		if (walker_chip_ram && walker_reading) begin
 			chip_addr    = walker_chip_addr;
-			chip_as      = 0;  // Address strobe active (low)
+			// BUG #423 FIX: Let chip bus SM control AS timing via c_as.
+			// Forcing chip_as=0 permanently prevents the bridge (_ta_n in
+			// minimig_m68k_bridge.v) from recycling dtack between bus cycles.
+			// The bridge's async reset (posedge _as_and_cs) only fires when
+			// chip_as transitions LOW->HIGH. With chip_as stuck low, dtack
+			// stays asserted after the first cycle -> chip bus SM races through
+			// subsequent cycles capturing stale data -> corrupted descriptors
+			// -> PMMU fault -> double bus fault -> permanent lockup.
+			chip_as      = c_as;  // SM cycles AS: assert at stage 0, deassert at stage 2
 			chip_rw      = 1;  // Read operation
 			chip_uds     = 0;  // Upper byte strobe active (low)
 			chip_lds     = 0;  // Lower byte strobe active (low)
@@ -281,7 +289,8 @@ always @* begin
 		end else if (walker_chip_ram && walker_writing) begin
 			// MC68030 U/M bit: Walker writing descriptor update
 			chip_addr    = walker_chip_addr;
-			chip_as      = 0;  // Address strobe active (low)
+			// BUG #423 FIX: Same AS cycling fix as read path (see above)
+			chip_as      = c_as;  // SM cycles AS properly for dtack recycling
 			chip_rw      = 0;  // Write operation
 			chip_uds     = 0;  // Upper byte strobe active (low)
 			chip_lds     = 0;  // Lower byte strobe active (low)
@@ -310,7 +319,11 @@ always @* begin
 		end
 		chip_data    = chipdout_i;
 		// BUG #417 FIX: Use physical address for fast chip select
-		fastchip_sel = cpu_req & !pmmu_addr_phys_p[31:24];
+		// BUG #425 FIX: Suppress fastchip_sel during walker activity.
+		// walker_active blocks pmmu_suppress_bus from gating cpu_req, and
+		// addr_phys may hold a stale walker address. Without this gate,
+		// fastchip could spuriously respond to walker descriptor addresses.
+		fastchip_sel = cpu_req & !pmmu_addr_phys_p[31:24] & ~walker_active;
 		fastchip_lw  = longword;
 	end
 	else begin
@@ -783,9 +796,21 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 
 				WALKER_READ_LOW: begin
 					// Drive walker address with LSB=0 for low word via walker_chip_addr mux
-					// Memory controller sees our address
-					// BUG #138: Reset timeout counter when entering wait state
-					walker_timeout_cnt <= 0;
+					// BUG #424 FIX: Increment timeout instead of resetting to 0.
+					// Previously reset every cycle, so timeout never fired if stuck here
+					// (e.g. chip bus SM hung, or stale_ram_pending never cleared).
+					walker_timeout_cnt <= walker_timeout_cnt + 1;
+					// BUG #419 FIX: Detect PMMU internal timeout (mem_req dropped)
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
+					// BUG #424 FIX: Wrapper-level timeout escape
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						walker_timeout_error <= 1;
+						pmmu_walker_berr_p <= 1;
+						pmmu_walker_data_p <= 32'h0;
+						walker_state <= WALKER_DONE;
+					end
 					// BUG #422 FIX: Wait for any stale CPU bus cycle to complete before
 					// entering WAIT_LOW. When PMOVE-to-TC activates MMU, the CPU may
 					// have a bus cycle in-flight (started before pmmu_suppress_bus or
@@ -793,7 +818,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// cycle is running, we capture its ready signal with wrong data.
 					// Chip RAM walks: wait for chip bus SM idle (chip_stage==0).
 					// SDRAM walks: wait for stale_ram_pending to clear (ramready fires).
-					if (walker_addr_is_chipram) begin
+					else if (walker_addr_is_chipram) begin
 						if (chip_stage == 2'b00)
 							walker_state <= WALKER_WAIT_LOW;
 					end else begin
@@ -891,9 +916,18 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				WALKER_WRITE_LOW: begin
 					// Drive walker address with LSB=0 for low word
 					// Write data (walker_wdata_latch[15:0]) is driven via chip_din mux
-					walker_timeout_cnt <= 0;
+					// BUG #424 FIX: Same escape hatches as WALKER_READ_LOW
+					walker_timeout_cnt <= walker_timeout_cnt + 1;
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						walker_timeout_error <= 1;
+						pmmu_walker_berr_p <= 1;
+						walker_state <= WALKER_DONE;
+					end
 					// BUG #422 FIX: Same stale-cycle guard as WALKER_READ_LOW (see above)
-					if (walker_addr_is_chipram) begin
+					else if (walker_addr_is_chipram) begin
 						if (chip_stage == 2'b00)
 							walker_state <= WALKER_WAIT_WR_LOW;
 					end else begin
