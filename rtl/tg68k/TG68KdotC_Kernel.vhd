@@ -455,6 +455,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_format_error : bit; -- BUG #211: MC68030 Format Error during RTE (vector 14)
 	signal rte_format_word  : std_logic_vector(15 downto 0);
 	signal rte_saved_mbit   : std_logic;  -- M bit before RTE directSR updates it
+	signal a7_is_msp        : std_logic;  -- Tracks which supervisor shadow A7 corresponds to (1=MSP, 0=ISP)
 	signal rte_saved_ccr    : std_logic_vector(7 downto 0);  -- BUG #397: CCR before RTE directSR
 	signal restore_ccr_sig  : std_logic;  -- BUG #397: Pulse to restore CCR on format error
 	-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not used on MC68030
@@ -1265,12 +1266,13 @@ ALU: TG68K_ALU
 	busstate <= "01" WHEN state="00" AND TG68_PC(0)='1' ELSE state;
 	nResetOut <= '0' WHEN exec(opcRESET)='1' ELSE '1';
 	
+
 	-- does shift for byte access. note active low me
 	-- should produce address error on 68000
 	memmaskmux <= memmask when addr(0) = '1' else memmask(4 downto 0) & '1';
 	nUDS <= memmaskmux(5);
 	nLDS <= memmaskmux(4);
-	clkena_lw <= '1' WHEN clkena_in='1' AND memmaskmux(3)='1' ELSE '0';  -- Remove pmmu_busy deadlock condition
+	clkena_lw <= '1' WHEN clkena_in='1' AND memmaskmux(3)='1' AND pmmu_busy='0' ELSE '0';
 	clr_berr <= '1' WHEN setopcode='1' AND trap_berr='1' ELSE '0';
 	
 	PROCESS (clk, nReset)
@@ -1337,18 +1339,18 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 	-- RTE format word latch: Capture the format/vector word during rte3->rte4 transition.
 	-- Bus cycle pipeline: setstate/memmask from micro_state N execute during micro_state N+1.
 	-- rte2 sets up the format word read (setstate="10", datatype="01"), which executes
-	-- during rte3's bus cycle. Latch from data_read (assembled read datapath) rather
-	-- than raw data_in to avoid bus-edge timing sensitivity on hardware.
-	-- Use clkena_lw (read completion cadence) instead of clkena_in to avoid sampling
-	-- before the word read is finalized on hardware wait-state paths.
+	-- during rte3's bus cycle. Use clkena_in (not clkena_lw) so the latch captures
+	-- data_in on every bus clock while in rte3 - this ensures the format word is
+	-- captured even if memmaskmux(3) gates clkena_lw on certain hardware paths.
+	-- Use raw data_in (16-bit bus input) which is guaranteed valid at clkena_in time.
 	PROCESS (clk)
 	BEGIN
 		IF rising_edge(clk) THEN
 			IF Reset='1' THEN
 				rte_format_word <= (others => '0');
-			ELSIF clkena_lw='1' THEN
+			ELSIF clkena_in='1' THEN
 				IF micro_state = rte3 AND next_micro_state = rte4 THEN
-					rte_format_word <= data_read(15 downto 0);
+					rte_format_word <= data_in;
 				END IF;
 			END IF;
 		END IF;
@@ -1365,21 +1367,31 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 			IF Reset='1' THEN
 				format1_chain_active <= '0';
 				rte_saved_mbit <= '0';
+				a7_is_msp <= '0';  -- ISP active after reset (M=0)
 			ELSIF clkena_lw='1' THEN
 				-- Save M bit before any SR modification that could change it.
 				-- Used by changeMode S->U to save A7 to the correct shadow.
-				-- For RTE: captured on transition to rte1.
-				-- In the current flow, SR is loaded in rte6, then control moves to rte1.
-				-- Sampling FlagsSR here still sees the pre-directSR M bit, which is
-				-- required to choose the correct ISP/MSP shadow during deferred S->U
-				-- changeMode handling.
+				-- For RTE: captured on first transition to rte1 (from decode, NOT from rte6).
+				-- rte6 is the Format $1 dual-frame second SR read; by that point FlagsSR(4)
+				-- already has the first frame's M bit, which would overwrite the original
+				-- pre-RTE M bit we need for the deferred S->U changeMode shadow save.
 				-- For MOVE to SR: captured at exec(to_SR) (before to_SR updates FlagsSR).
-				IF next_micro_state = rte1 THEN
+				IF next_micro_state = rte1 AND micro_state /= rte6 THEN
 					rte_saved_mbit <= FlagsSR(4);
 					rte_saved_ccr <= Flags;  -- BUG #397: Save CCR before directSR
 				END IF;
 				IF exec(to_SR)='1' THEN
 					rte_saved_mbit <= FlagsSR(4);
+				END IF;
+				-- Track which supervisor shadow A7 corresponds to
+				IF exec(from_MSP)='1' AND exec(from_USP)='0' THEN
+					a7_is_msp <= '1';
+				ELSIF exec(from_ISP)='1' AND exec(from_USP)='0' THEN
+					a7_is_msp <= '0';
+				END IF;
+				-- Track M-bit swaps via exec(to_SR) (MOVE to SR, ANDI/ORI/EORI to SR)
+				IF exec(to_SR)='1' AND cpu(1)='1' AND FlagsSR(5)='1' AND SRin(5)='1' AND SRin(4) /= FlagsSR(4) THEN
+					a7_is_msp <= SRin(4);
 				END IF;
 				IF setopcode='1' THEN
 					format1_chain_active <= '0';
@@ -1504,45 +1516,32 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 							regfile(conv_integer(moves_reg)) <= data_read;
 					END CASE;
 				END IF;
-				-- MC68030: MSP/ISP swap when M bit changes within supervisor mode.
-				-- When MOVE to SR (or ANDI/ORI/EORI to SR) or RTE restores SR with
-				-- a different M bit while staying in supervisor mode, swap A7 between
-				-- MSP and ISP. The companion save of old A7 to the shadow register
-				-- is in the movec process (which owns MSP/ISP signals).
-				IF cpu(1)='1' AND preSVmode='1' THEN
-					IF exec(to_SR)='1' AND SRin(5)='1' AND SRin(4) /= FlagsSR(4) THEN
-						-- M-bit swap for MOVE to SR / ANDI to SR / ORI to SR / EORI to SR.
-						-- SRin(5)='1' ensures we're STAYING in supervisor mode.
-						-- When going to user mode (SRin(5)='0'), changeMode handles the
-						-- USP/SSP switch; the M-bit swap would corrupt ISP with MSP.
-						IF SRin(4) = '1' THEN
-							regfile(15) <= MSP;  -- M 0->1: load MSP into A7
-						ELSE
-							regfile(15) <= ISP;  -- M 1->0: load ISP into A7
-						END IF;
+				-- MC68030: M-bit swap for MOVE to SR / ANDI to SR / ORI to SR / EORI to SR.
+				-- exec(to_SR) fires exactly once per instruction; SRin is the new SR value.
+				-- When M bit changes while staying in supervisor mode, swap A7 between
+				-- MSP and ISP. SRin(5)='1' ensures we're STAYING in supervisor (when going
+				-- to user mode, changeMode handles the USP/SSP switch instead).
+				-- NOTE: exec(directSR) is NOT handled here — it persists through rte1-rte5
+				-- and data_read contains garbage at rte2+. RTE M-bit changes use the
+				-- deferred swap in rte4/rte5 via set(from_MSP)/set(from_ISP).
+				IF cpu(1)='1' AND preSVmode='1' AND exec(to_SR)='1' AND SRin(5)='1' AND SRin(4) /= FlagsSR(4) THEN
+					IF SRin(4) = '1' THEN
+						regfile(15) <= MSP;  -- M 0->1: load MSP into A7
+					ELSE
+						regfile(15) <= ISP;  -- M 1->0: load ISP into A7
 					END IF;
-					-- Block directSR M-bit swap during RTE: exec(directSR) always fires at
-				-- micro_state=rte1, but A7 swap must be deferred until frame is consumed.
-				-- The deferred swap happens in rte4 (Format $0/$3) or rte5 (larger formats).
-					IF exec(directSR)='1' AND format1_chain_active='0' AND micro_state /= rte1 AND data_read(13)='1' AND data_read(12) /= FlagsSR(4) THEN
-						IF data_read(12) = '1' THEN
-							regfile(15) <= MSP;  -- M 0->1: load MSP into A7
-						ELSE
-							regfile(15) <= ISP;  -- M 1->0: load ISP into A7
-						END IF;
-					END IF;
-					-- MC68020/030: MOVEC Dn,MSP/ISP must update A7 when writing the ACTIVE
-					-- supervisor stack alias. Without this, shadow MSP/ISP updates but A7
-					-- remains stale, causing RTE to read frame data from the wrong stack.
-					-- Active stack selection matches MOVEC readback behavior below:
-					--   MSP active: S=1, M=1, interrupt_mode=0
-					--   ISP active: S=1 and (M=0 or interrupt_mode=1)
-					IF exec(movec_wr)='1' AND FlagsSR(5)='1' THEN
-						IF brief(11 downto 0)=X"803" AND FlagsSR(4)='1' AND interrupt_mode='0' THEN
-							regfile(15) <= reg_QA;
-						ELSIF brief(11 downto 0)=X"804" AND (FlagsSR(4)='0' OR interrupt_mode='1') THEN
-							regfile(15) <= reg_QA;
-						END IF;
+				END IF;
+				-- MC68020/030: MOVEC Dn,MSP/ISP must update A7 when writing the ACTIVE
+				-- supervisor stack alias. Without this, shadow MSP/ISP updates but A7
+				-- remains stale, causing RTE to read frame data from the wrong stack.
+				-- Active stack selection uses a7_is_msp (tracks which shadow A7 is):
+				--   MSP active (a7_is_msp='1'): MOVEC Dn,$803 updates A7
+				--   ISP active (a7_is_msp='0'): MOVEC Dn,$804 updates A7
+				IF exec(movec_wr)='1' AND FlagsSR(5)='1' THEN
+					IF brief(11 downto 0)=X"803" AND a7_is_msp='1' THEN
+						regfile(15) <= reg_QA;
+					ELSIF brief(11 downto 0)=X"804" AND a7_is_msp='0' THEN
+						regfile(15) <= reg_QA;
 					END IF;
 				END IF;
 			END IF;
@@ -6560,24 +6559,22 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								setstackaddr <= '1';
 								setstate <= "01";
 								-- format1_chain_active cleared by registered process
-							ELSIF cpu(1)='1' AND preSVmode='1' AND FlagsSR(5)='1' AND rte_saved_mbit /= FlagsSR(4) THEN
-								-- Deferred M-bit swap: directSR loaded new M into FlagsSR,
-								-- but A7 swap was deferred until frame fully consumed.
-								-- FlagsSR(5)='1' ensures we're STAYING in supervisor mode.
-								-- When going to user mode (S=0), changeMode handles the
-								-- USP/SSP switch; the M-bit swap is irrelevant.
+							ELSIF cpu(1)='1' AND FlagsSR(5)='1' AND FlagsSR(4) /= rte_saved_mbit THEN
+								-- MC68030: Deferred M-bit swap for RTE.
+								-- FlagsSR(4) has the NEW M bit (loaded by exec(directSR)).
+								-- rte_saved_mbit has the OLD M bit (captured before RTE).
+								-- Swap A7 between MSP and ISP using set signals.
+								setstackaddr <= '1';
+								set(Regwrena) <= '1';
 								IF FlagsSR(4) = '1' THEN
-									-- M 0->1: save ISP (current A7), load MSP
+									-- M 0->1: save A7 (ISP) to ISP shadow, load MSP
 									set(to_ISP) <= '1';
 									set(from_MSP) <= '1';
 								ELSE
-									-- M 1->0: save MSP (current A7), load ISP
+									-- M 1->0: save A7 (MSP) to MSP shadow, load ISP
 									set(to_MSP) <= '1';
 									set(from_ISP) <= '1';
 								END IF;
-								set(Regwrena) <= '1';
-								setstackaddr <= '1';
-								setstate <= "01";
 							END IF;
 							-- Clear interrupt mode when returning to user mode
 							IF FlagsSR(5)='0' THEN
@@ -6642,9 +6639,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							setstackaddr <= '1';
 							setstate <= "01";
 							-- format1_chain_active cleared by registered process
-						ELSIF cpu(1)='1' AND preSVmode='1' AND FlagsSR(5)='1' AND rte_saved_mbit /= FlagsSR(4) THEN
-							-- Deferred M-bit swap for Format $2/$9/$A/$B frames
-							-- FlagsSR(5)='1' ensures we're STAYING in supervisor mode.
+						ELSIF cpu(1)='1' AND FlagsSR(5)='1' AND FlagsSR(4) /= rte_saved_mbit THEN
+							-- MC68030: Deferred M-bit swap for RTE (formats 2/9/A/B).
+							-- Same logic as Format $0 case above, but fires after all
+							-- frame data has been read (preserves stack reads).
+							setstackaddr <= '1';
+							set(Regwrena) <= '1';
 							IF FlagsSR(4) = '1' THEN
 								set(to_ISP) <= '1';
 								set(from_MSP) <= '1';
@@ -6652,9 +6652,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								set(to_MSP) <= '1';
 								set(from_ISP) <= '1';
 							END IF;
-							set(Regwrena) <= '1';
-							setstackaddr <= '1';
-							setstate <= "01";
 						END IF;
 						-- BUG #18: Clear interrupt mode only when returning to user mode (MC68030)
 						IF FlagsSR(5)='0' THEN
@@ -7810,30 +7807,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
     if exec(to_ISP) = '1' then
       ISP <= reg_QA;
     end if;
-    -- MC68030: MSP/ISP swap - save old A7 to shadow register.
+    -- MC68030: M-bit swap shadow save for MOVE to SR.
     -- Companion to regfile(15) load in the regfile process.
-    -- When M bit changes within supervisor mode (via MOVE to SR or RTE),
-    -- save current A7 to the appropriate shadow register before the
-    -- regfile process loads the new value.
-    -- VHDL last-assignment-wins: this overrides exec(to_ISP)/exec(to_MSP)
-    -- above if both fire, but they shouldn't (different instructions).
-    if cpu(1)='1' and preSVmode='1' then
-      if exec(to_SR)='1' and SRin(5)='1' and SRin(4) /= FlagsSR(4) then
-        -- M-bit swap shadow save for MOVE to SR.
-        -- SRin(5)='1' ensures we're STAYING in supervisor mode.
-        if SRin(4) = '1' then
-          ISP <= regfile(15);  -- M 0->1: save old A7 (was ISP) to ISP shadow
-        else
-          MSP <= regfile(15);  -- M 1->0: save old A7 (was MSP) to MSP shadow
-        end if;
-      end if;
-      -- Block directSR M-bit swap during RTE (deferred to frame completion)
-      if exec(directSR)='1' and format1_chain_active='0' and micro_state /= rte1 and data_read(13)='1' and data_read(12) /= FlagsSR(4) then
-        if data_read(12) = '1' then
-          ISP <= regfile(15);  -- M 0->1: save old A7 (was ISP) to ISP shadow
-        else
-          MSP <= regfile(15);  -- M 1->0: save old A7 (was MSP) to MSP shadow
-        end if;
+    if cpu(1)='1' and preSVmode='1' and exec(to_SR)='1' and SRin(5)='1' and SRin(4) /= FlagsSR(4) then
+      if SRin(4) = '1' then
+        ISP <= regfile(15);  -- M 0->1: save old A7 (was ISP) to ISP shadow
+      else
+        MSP <= regfile(15);  -- M 1->0: save old A7 (was MSP) to MSP shadow
       end if;
     end if;
     -- Auto-clear self-clearing command bits after they've been set
