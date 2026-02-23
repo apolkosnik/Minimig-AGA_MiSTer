@@ -767,7 +767,18 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// Memory controller sees our address
 					// BUG #138: Reset timeout counter when entering wait state
 					walker_timeout_cnt <= 0;
-					walker_state <= WALKER_WAIT_LOW;
+					// BUG #422 FIX: For chip RAM walks, wait for chip bus SM to be idle
+					// before entering WAIT_LOW. When PMOVE-to-TC activates MMU,
+					// chipreq is registered (1-cycle delay) so a stale CPU bus cycle
+					// can start before pmmu_suppress_bus takes effect. If we enter
+					// WAIT_LOW while this stale cycle is in-flight, we capture its
+					// chipready with wrong data (CPU's address, not descriptor address).
+					// Staying in READ_LOW until chip_stage==0 ensures the stale cycle
+					// completes harmlessly (its chipready fires while we're not looking).
+					// For Fast RAM walks, ramsel is gated by ~walker_active (combinational),
+					// so no stale CPU cycle is possible.
+					if (!walker_addr_is_chipram || chip_stage == 2'b00)
+						walker_state <= WALKER_WAIT_LOW;
 				end
 
 				WALKER_WAIT_LOW: begin
@@ -860,7 +871,9 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// Drive walker address with LSB=0 for low word
 					// Write data (walker_wdata_latch[15:0]) is driven via chip_din mux
 					walker_timeout_cnt <= 0;
-					walker_state <= WALKER_WAIT_WR_LOW;
+					// BUG #422 FIX: Same stale-cycle guard as WALKER_READ_LOW (see above)
+					if (!walker_addr_is_chipram || chip_stage == 2'b00)
+						walker_state <= WALKER_WAIT_WR_LOW;
 				end
 
 				WALKER_WAIT_WR_LOW: begin
@@ -1033,13 +1046,16 @@ reg        chipready;
 reg [15:0] chipdout_i;
 reg  [2:0] ipl_i;
 reg        c_as,c_rw,c_uds,c_lds;
+// BUG #422 FIX: Expose chip bus SM stage for walker stale-cycle detection.
+// Previously local to the negedge block, now module-level so the walker
+// can wait for chip_stage==0 (bus idle) before accepting chipready.
+reg  [1:0] chip_stage;
 always @(negedge clk, negedge reset) begin
-	reg [1:0] stage;
 	reg waitm;
 	reg ready;
 
 	if(~reset) begin
-		stage <= 0;
+		chip_stage <= 0;
 		c_as <= 1;
 		c_rw <= 1;
 		c_uds <= 1;
@@ -1049,22 +1065,22 @@ always @(negedge clk, negedge reset) begin
 	else begin
 		if (ph2n) begin
 			waitm <= chip_dtack;
-			if(~stage[0]) ipl_i <= chip_ipl;
+			if(~chip_stage[0]) ipl_i <= chip_ipl;
 		end
 
 		chipready <= 0;
 		if (ph1n) begin
 			chipready <= ready;
 			ready <= 0;
-			case (stage)
+			case (chip_stage)
 				0: if (chipreq) begin
 						c_as <= 0;
 						c_rw <= wr;
 						c_uds <= uds_in;
 						c_lds <= lds_in;
-						stage <= 1;
+						chip_stage <= 1;
 					end
-				1: stage <= 2;
+				1: chip_stage <= 2;
 				2: begin
 						chipdout_i <= chip_dout;
 						if (~waitm) begin
@@ -1073,10 +1089,10 @@ always @(negedge clk, negedge reset) begin
 							c_uds <= 1;
 							c_lds <= 1;
 							ready <= 1;
-							stage <= 3;
+							chip_stage <= 3;
 						end
 					end
-				3: stage <= 0;
+				3: chip_stage <= 0;
 			endcase
 		end
 	end
