@@ -272,7 +272,13 @@ entity TG68KdotC_Kernel is
 		debug_pmmu_reg_part : out std_logic;
 		debug_pmmu_reg_rdat : out std_logic_vector(31 downto 0);
 		debug_make_berr : out std_logic;
-		debug_pmmu_fault : out std_logic
+		debug_pmmu_fault : out std_logic;
+		-- Format Error debug latch: captures key state when trap_format_error fires
+		debug_trap_format_error : out std_logic;
+		debug_format_error_rte_word : out std_logic_vector(15 downto 0);
+		debug_format_error_pc : out std_logic_vector(31 downto 0);
+		debug_format_error_addr : out std_logic_vector(31 downto 0);
+		debug_format_error_sr : out std_logic_vector(7 downto 0)
 		);
 end TG68KdotC_Kernel;
 
@@ -382,6 +388,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal Flags				: std_logic_vector(7 downto 0);	-- ...XNZVC
 	signal FlagsSR				: std_logic_vector(7 downto 0);	-- T.S.0III
 	signal SRin					: std_logic_vector(7 downto 0);
+	constant SR_trace_mask : std_logic_vector(7 downto 0) := "00111111";
 	signal exec_DIRECT		: bit;
 	signal exec_tas			: std_logic;
 	signal set_exec_tas		: std_logic;
@@ -460,6 +467,12 @@ architecture logic of TG68KdotC_Kernel is
 	signal rte_saved_ccr    : std_logic_vector(7 downto 0);  -- BUG #397: CCR before RTE directSR
 	signal restore_ccr_sig  : std_logic;  -- BUG #397: Pulse to restore CCR on format error
 	-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not used on MC68030
+	-- Format Error debug latch signals
+	signal fmt_err_latched       : std_logic;
+	signal fmt_err_rte_word      : std_logic_vector(15 downto 0);
+	signal fmt_err_pc            : std_logic_vector(31 downto 0);
+	signal fmt_err_addr          : std_logic_vector(31 downto 0);
+	signal fmt_err_sr            : std_logic_vector(7 downto 0);
 	signal trapmake			: bit;
 	signal trapd				: bit;
 	signal trap_SR				: std_logic_vector(7 downto 0);
@@ -964,15 +977,18 @@ BEGIN
   pmmu_mem_rdat    <= pmmu_walker_data;
   pmmu_mem_berr    <= pmmu_walker_berr;  -- MC68030: Bus error from external memory
 
--- BUG #418 FIX: CCR restore disabled. MC68030 UM 6.4.2 says format error
--- exception frame must contain the SR loaded from the RTE stack frame,
--- including the CCR low byte. Former BUG #397 incorrectly restored the
--- pre-RTE CCR, overwriting the valid directSR-loaded value.
---
--- UPDATE: Restore CCR on Format Error to revert to pre-instruction state.
--- This ensures the exception frame contains the SR from before the RTE
--- instruction started, rather than the value loaded from the invalid frame.
-restore_ccr_sig <= '1' WHEN trap_format_error='1' ELSE '0';
+	-- BUG #418 FIX: CCR restore disabled. MC68030 UM 6.4.2 says format error
+	-- exception frame must contain the SR loaded from the RTE stack frame,
+	-- including the CCR low byte. Former BUG #397 incorrectly restored the
+	-- pre-RTE CCR, overwriting the valid directSR-loaded value.
+
+	-- UPDATE: Restore CCR on Format Error to revert to pre-instruction state.
+	-- This ensures the exception frame contains the SR from before the RTE
+	-- instruction started, rather than the value loaded from the invalid frame.
+	-- MC68030 UM 8.2.2: The status register value in the format error exception
+	-- stack frame is the value in the status register before the RTE instruction
+	-- was executed.
+  restore_ccr_sig <= '1' WHEN trap_format_error='1' ELSE '0';
 
 ALU: TG68K_ALU   
 	generic map(
@@ -1265,18 +1281,18 @@ ALU: TG68K_ALU
    regin_out <= regin;
 
 
-	nWr <= '0' WHEN state="11" ELSE '1';
+	nWr <= '0' WHEN state="11" AND pmmu_busy='0' ELSE '1';
 	-- Suppress instruction fetch bus cycle when PC is odd (address error).
 	-- On real MC68030, the misalignment is detected before AS* assertion.
-	busstate <= "01" WHEN state="00" AND TG68_PC(0)='1' ELSE state;
+	busstate <= "01" WHEN (state="00" AND TG68_PC(0)='1') OR pmmu_busy='1' ELSE state;
 	nResetOut <= '0' WHEN exec(opcRESET)='1' ELSE '1';
 	
 
 	-- does shift for byte access. note active low me
 	-- should produce address error on 68000
 	memmaskmux <= memmask when addr(0) = '1' else memmask(4 downto 0) & '1';
-	nUDS <= memmaskmux(5);
-	nLDS <= memmaskmux(4);
+	nUDS <= memmaskmux(5) OR pmmu_busy;
+	nLDS <= memmaskmux(4) OR pmmu_busy;
 	clkena_lw <= '1' WHEN clkena_in='1' AND memmaskmux(3)='1' AND pmmu_busy='0' ELSE '0';
 	clr_berr <= '1' WHEN setopcode='1' AND trap_berr='1' ELSE '0';
 	
@@ -2564,9 +2580,40 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			IF opcode = x"4E74" THEN
 				v_is_cof := '1';
 			END IF;
-			-- Note: TRAP #n, TRAPV, TRAPcc, STOP, MOVEC, CHK, DIV are NOT T0-traced
-			-- per WinUAE behavior. Exception-generating instructions handle trace
-			-- separately via T1 pending mechanism. STOP explicitly disables T0.
+			-- MC68030 UM 8.1.2 Table 8-3: CHK, CHK2, DIV, TRAP, TRAPcc, TRAPV
+			-- are change-of-flow instructions for T0 trace purposes.
+			-- CHK.W (0100 ddd 110 mmm rrr)
+			IF opcode(15 downto 12) = "0100" AND opcode(8 downto 6) = "110" THEN
+				v_is_cof := '1';
+			END IF;
+			-- CHK.L (0100 ddd 100 mmm rrr) - 68020+
+			IF opcode(15 downto 12) = "0100" AND opcode(8 downto 6) = "100" THEN
+				v_is_cof := '1';
+			END IF;
+			-- DIVU.W (1000 ddd 011 mmm rrr)
+			IF opcode(15 downto 12) = "1000" AND opcode(8 downto 6) = "011" THEN
+				v_is_cof := '1';
+			END IF;
+			-- DIVS.W (1000 ddd 111 mmm rrr)
+			IF opcode(15 downto 12) = "1000" AND opcode(8 downto 6) = "111" THEN
+				v_is_cof := '1';
+			END IF;
+			-- DIVS.L/DIVU.L (0100 1100 01mm mrrr)
+			IF opcode(15 downto 6) = "0100110001" THEN
+				v_is_cof := '1';
+			END IF;
+			-- TRAP #n (0100 1110 0100 vvvv)
+			IF opcode(15 downto 4) = x"4E4" THEN
+				v_is_cof := '1';
+			END IF;
+			-- TRAPV (4E76)
+			IF opcode = x"4E76" THEN
+				v_is_cof := '1';
+			END IF;
+			-- TRAPcc (0101 cccc 1111 1xxx)
+			IF opcode(15 downto 12) = "0101" AND opcode(7 downto 3) = "11111" THEN
+				v_is_cof := '1';
+			END IF;
 			-- MOVE to SR (0100 0110 11xx xxxx)
 			IF opcode(15 downto 6) = "0100011011" THEN
 				v_is_cof := '1';
@@ -3183,13 +3230,24 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					IF decodeOPC='1' OR interrupt='1' THEN
 						trap_SR <= FlagsSR;
 					END IF;
+					-- BUG #418 FIX: Keep trap_SR in sync with directSR-loaded value.
+					-- For RTE format error, the exception frame must contain the SR
+					-- loaded from the RTE stack frame (MC68030 UM 6.4.2), not the
+					-- pre-RTE SR captured at decodeOPC time. Must be in THIS process
+					-- (same as trap_SR <= FlagsSR above) to avoid multiple drivers.
+					-- Placed AFTER decodeOPC block for last-assignment-wins priority.
 					IF exec(directSR)='1' THEN
 						trap_SR <= data_read(15 downto 8);
 					END IF;
-					-- BUG FIX: Revert SR high byte on RTE format error
+					-- BUG FIX: Revert trap_SR on format error to pre-RTE value.
+					-- exec(directSR) overwrote trap_SR with the frame's SR at rte1;
+					-- MC68030 UM 6.4.2 says the format error frame must contain
+					-- the SR from before the RTE instruction was executed.
 					IF trap_format_error='1' THEN
-						trap_SR <= rte_saved_sr_high;
+						trap_SR <= rte_saved_sr_high AND SR_trace_mask;
 					END IF;
+					-- FlagsSR format error revert is handled in SR op process (line ~3413)
+					-- Do NOT assign FlagsSR here - would create multiple drivers
 				ELSE
 					-- MC68030 double bus fault: Monitor pmmu_fault during CPU stall.
 					-- When clkena_lw='0', the CPU is stalled (waiting for bus or PMMU).
@@ -3350,7 +3408,11 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF trap_berr='1' OR trap_illegal='1' OR trap_addr_error='1' OR trap_priv='1' OR trap_1010='1' OR trap_1111='1' OR trap_mmu_config='1' OR trap_mmu_berr='1' OR trap_format_error='1' THEN
 					make_trace <= '0';
 					make_trace_t0 <= '0';
+					-- MC68030: Clear T1 and T0 on exception commit
+					-- MUST use partial assignments to avoid clobbering
+					-- set(changeMode)'s FlagsSR(5) update below.
 					FlagsSR(7) <= '0';
+					FlagsSR(6) <= '0';
 				END IF;
 				IF set(changeMode)='1' THEN
 					preSVmode <= NOT preSVmode;
@@ -3358,11 +3420,12 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 					fc_internal(2) <= NOT preSVmode;
 				END IF;
 				IF micro_state=trap3 THEN
+					-- MC68030 UM 8.1: Clear T1 and T0 on exception entry
+					-- MUST use partial assignments here, NOT full FlagsSR <=
+					-- because set(changeMode) may have set FlagsSR(5) above
+					-- and a full assignment would clobber that S-bit update.
 					FlagsSR(7) <= '0';
-					-- BUG #390 FIX: MC68030 UM 8.1 - clear both T1 and T0 on exception entry
-					IF cpu(1)='1' THEN
-						FlagsSR(6) <= '0';
-					END IF;
+					FlagsSR(6) <= '0';
 				END IF;
 				IF trap_trace='1' AND state="10" THEN
 					make_trace <= '0';
@@ -3397,10 +3460,11 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				END IF;
 				-- BUG FIX: Revert SR high byte on RTE format error.
 				-- MC68030 UM 6.4.2: The status register value in the format error
+				-- MC68030 UM 8.2.2: The status register value in the format error
 				-- exception stack frame is the value in the status register before
 				-- the RTE instruction was executed.
 				IF trap_format_error='1' THEN
-					FlagsSR <= rte_saved_sr_high;
+					FlagsSR <= rte_saved_sr_high AND SR_trace_mask;
 					fc_internal(2) <= '1';
 				END IF;
 				IF cpu(1)='0' THEN
@@ -8153,6 +8217,33 @@ PROCESS (sndOPC, movem_mux)
 
 -- MC68030 address routing: direct when MMU disabled, translated when enabled
 addr_out <= pmmu_addr_log_int when pmmu_tc_en = '0' else pmmu_addr_phys_int;
+
+-- Format Error debug latch: captures key state when trap_format_error fires
+-- Once latched, holds until reset so hardware debug can read it
+process(clk)
+begin
+	if rising_edge(clk) then
+		if Reset='1' then
+			fmt_err_latched <= '0';
+			fmt_err_rte_word <= (others => '0');
+			fmt_err_pc <= (others => '0');
+			fmt_err_addr <= (others => '0');
+			fmt_err_sr <= (others => '0');
+		elsif trap_format_error='1' and fmt_err_latched='0' then
+			fmt_err_latched <= '1';
+			fmt_err_rte_word <= rte_format_word;
+			fmt_err_pc <= TG68_PC;
+			fmt_err_addr <= memaddr_reg;
+			fmt_err_sr <= FlagsSR;
+		end if;
+	end if;
+end process;
+
+debug_trap_format_error <= fmt_err_latched;
+debug_format_error_rte_word <= fmt_err_rte_word;
+debug_format_error_pc <= fmt_err_pc;
+debug_format_error_addr <= fmt_err_addr;
+debug_format_error_sr <= fmt_err_sr;
 
 -- DEBUG: Output supervisor mode tracking signals for analysis
 -- Convert bit type to std_logic for output

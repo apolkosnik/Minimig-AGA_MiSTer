@@ -562,7 +562,8 @@ cpu_wrapper
 	.cache_ack      (cpu_cache_ack      ),
 	.cache_burst    (cpu_cache_burst    ),     // Burst mode enable (IBE/DBE)
 	.cache_burst_len(cpu_cache_burst_len),     // Burst length
-	.cache_ramaddr  (cpu_cache_ramaddr  )      // BUG #128: Properly encoded ramaddr for cache fills
+	.cache_ramaddr  (cpu_cache_ramaddr  ),     // BUG #128: Properly encoded ramaddr for cache fills
+	.debug_fmt_err  (                   )      // Format Error debug (not connected)
 );
 
 wire [15:0] ram_dout1;

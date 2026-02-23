@@ -83,7 +83,9 @@ module cpu_wrapper
 	input             cache_ack,
 	output            cache_burst,      // Burst mode request
 	output      [2:0] cache_burst_len,  // Burst length (number of words)
-	output     [28:1] cache_ramaddr     // Properly encoded ramaddr for cache fill
+	output     [28:1] cache_ramaddr,    // Properly encoded ramaddr for cache fill
+	// Format Error debug: [6]=latched, [5:2]=format code, [1]=SR.S, [0]=SR.M
+	output      [6:0] debug_fmt_err
 );
 
 // BUG #136 FIX: Include walker Fast RAM access in ramsel
@@ -367,6 +369,10 @@ wire [31:0] pmmu_walker_addr_p;
 wire [31:0] pmmu_walker_wdat_p;  // MC68030 U/M bit: write data
 wire        pmmu_busy_p;         // BUG #407: PMMU busy (translation pending, not yet in walker)
 wire        pmmu_fault_p;        // PMMU translation fault (suppress bus access)
+// Format Error debug latch signals from Kernel
+wire        fmt_err_latched_p;
+wire [15:0] fmt_err_rte_word_p;
+wire  [7:0] fmt_err_sr_p;
 reg         pmmu_walker_ack_p;
 reg  [31:0] pmmu_walker_data_p;
 reg         pmmu_walker_berr_p;  // BUG #156 FIX: Bus error during table walk (sets MMUSR B bit)
@@ -487,6 +493,12 @@ cpu_inst_p
   .debug_pmmu_busy(pmmu_busy_p),
   // MC68030 bus fault: PMMU fault signal for bus access suppression
   .debug_pmmu_fault(pmmu_fault_p),
+  // Format Error debug latch
+  .debug_trap_format_error(fmt_err_latched_p),
+  .debug_format_error_rte_word(fmt_err_rte_word_p),
+  .debug_format_error_sr(fmt_err_sr_p),
+  .debug_format_error_pc(),   // not routed to save pins
+  .debug_format_error_addr(), // not routed to save pins
   // Cache operation address
   .cache_op_addr(cache_op_addr)
 );
@@ -1049,6 +1061,9 @@ end else begin : gen_no_68030_cache
 
 end
 endgenerate
+
+// Format Error debug output: [6]=latched, [5:2]=format code from rte_format_word, [1]=SR.S, [0]=SR.M
+assign debug_fmt_err = {fmt_err_latched_p, fmt_err_rte_word_p[15:12], fmt_err_sr_p[5], fmt_err_sr_p[4]};
 
 wire cpu_req = (cpustate != 1);
 

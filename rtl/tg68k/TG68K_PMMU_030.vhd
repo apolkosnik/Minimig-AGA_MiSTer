@@ -387,8 +387,11 @@ architecture rtl of TG68K_PMMU_030 is
     variable result : std_logic_vector(31 downto 0) := addr;
     variable mask : std_logic_vector(31 downto 0) := (others => '1');
   begin
-    if shift <= 0 or shift >= 32 then
+    if shift <= 0 then
       return addr; -- No alignment needed
+    end if;
+    if shift >= 32 then
+      return x"00000000"; -- Aligned to >= 4GB boundary (all bits masked)
     end if;
     
     -- Create alignment mask by shifting (synthesis-friendly)
