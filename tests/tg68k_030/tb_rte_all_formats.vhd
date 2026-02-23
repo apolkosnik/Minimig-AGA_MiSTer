@@ -521,17 +521,16 @@ begin
             wait for 1 us;
         end procedure;
 
-        -- BUG #418: Format Error exception frame must contain the SR loaded from
-        -- the RTE stack frame, not the pre-RTE SR. MC68030 UM Section 6.4.2:
-        -- "The saved value of the status register is the value read from the
-        -- original exception stack frame by the RTE instruction."
+        -- Format Error: SR should NOT be restored from the invalid frame.
+        -- When RTE detects an invalid format, it triggers Format Error (vector 14).
+        -- The exception frame must contain the ORIGINAL pre-RTE SR, because the
+        -- frame format was invalid and thus the SR from it is suspect.
         --
         -- Test: Pre-RTE SR=$2700 (S=1, IPL=7), frame SR=$2100 (S=1, IPL=1).
-        -- Format error frame must show SR=$2100, not $2700.
+        -- Format error frame must show SR=$2700 (original), not $2100 (from bad frame).
         -- Uses different IPL fields to distinguish pre-RTE from frame SR.
-        -- Avoids T0/T1 trace bits to keep the test focused on SR preservation.
         procedure test_format_error_preserves_frame_sr is
-            constant test_name : string := "BUG#418 FmtErr preserves frame SR";
+            constant test_name : string := "FmtErr restores original pre-RTE SR";
             variable reached_stop : boolean;
             variable local_fail : boolean;
             variable frame_sr : std_logic_vector(15 downto 0);
@@ -539,7 +538,7 @@ begin
             variable sp_val_lo : std_logic_vector(15 downto 0);
         begin
             current_test <= test_name & (test_name'length + 1 to 40 => ' ');
-            report "Testing BUG#418: Format Error exception frame must contain RTE-loaded SR..." severity note;
+            report "Testing: Format Error exception frame must contain original pre-RTE SR..." severity note;
 
             -- Reset memory
             for i in 0 to 8191 loop
@@ -639,14 +638,14 @@ begin
                    " $07C4=" & integer'image(to_integer(unsigned(mem(16#07C4#/2)))) &
                    " $07C6=" & integer'image(to_integer(unsigned(mem(16#07C6#/2)))) severity note;
 
-            -- The critical check: frame SR must be $2100 (from RTE stack frame),
-            -- NOT $2700 (pre-RTE SR). The IPL field is the key difference.
-            if frame_sr /= x"2100" then
+            -- The critical check: frame SR must be $2700 (original pre-RTE SR),
+            -- NOT $2100 (from the invalid RTE frame). The IPL field is the key difference.
+            if frame_sr /= x"2700" then
                 report "  FAIL: Format Error frame SR = $" &
                        integer'image(to_integer(unsigned(frame_sr))) &
-                       ", expected $2100 (IPL=1, loaded from RTE frame)" severity error;
-                if frame_sr = x"2700" then
-                    report "  (Got $2700 = pre-RTE SR -- trap_SR not updated at directSR)" severity error;
+                       ", expected $2700 (original pre-RTE SR)" severity error;
+                if frame_sr = x"2100" then
+                    report "  (Got $2100 = SR from invalid frame -- should not be used)" severity error;
                 end if;
                 local_fail := true;
             end if;

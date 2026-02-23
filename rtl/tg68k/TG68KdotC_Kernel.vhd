@@ -455,6 +455,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_format_error : bit; -- BUG #211: MC68030 Format Error during RTE (vector 14)
 	signal rte_format_word  : std_logic_vector(15 downto 0);
 	signal rte_saved_mbit   : std_logic;  -- M bit before RTE directSR updates it
+	signal rte_saved_sr_high : std_logic_vector(7 downto 0); -- SR high byte before RTE
 	signal a7_is_msp        : std_logic;  -- Tracks which supervisor shadow A7 corresponds to (1=MSP, 0=ISP)
 	signal rte_saved_ccr    : std_logic_vector(7 downto 0);  -- BUG #397: CCR before RTE directSR
 	signal restore_ccr_sig  : std_logic;  -- BUG #397: Pulse to restore CCR on format error
@@ -967,7 +968,11 @@ BEGIN
 -- exception frame must contain the SR loaded from the RTE stack frame,
 -- including the CCR low byte. Former BUG #397 incorrectly restored the
 -- pre-RTE CCR, overwriting the valid directSR-loaded value.
-restore_ccr_sig <= '0';
+--
+-- UPDATE: Restore CCR on Format Error to revert to pre-instruction state.
+-- This ensures the exception frame contains the SR from before the RTE
+-- instruction started, rather than the value loaded from the invalid frame.
+restore_ccr_sig <= '1' WHEN trap_format_error='1' ELSE '0';
 
 ALU: TG68K_ALU   
 	generic map(
@@ -1367,6 +1372,7 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 			IF Reset='1' THEN
 				format1_chain_active <= '0';
 				rte_saved_mbit <= '0';
+				rte_saved_sr_high <= x"27";
 				a7_is_msp <= '0';  -- ISP active after reset (M=0)
 			ELSIF clkena_lw='1' THEN
 				-- Save M bit before any SR modification that could change it.
@@ -1378,6 +1384,7 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 				-- For MOVE to SR: captured at exec(to_SR) (before to_SR updates FlagsSR).
 				IF next_micro_state = rte1 AND micro_state /= rte6 THEN
 					rte_saved_mbit <= FlagsSR(4);
+					rte_saved_sr_high <= FlagsSR; -- Save full high byte (T, S, M, I)
 					rte_saved_ccr <= Flags;  -- BUG #397: Save CCR before directSR
 				END IF;
 				IF exec(to_SR)='1' THEN
@@ -3176,14 +3183,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					IF decodeOPC='1' OR interrupt='1' THEN
 						trap_SR <= FlagsSR;
 					END IF;
-					-- BUG #418 FIX: Keep trap_SR in sync with directSR-loaded value.
-					-- For RTE format error, the exception frame must contain the SR
-					-- loaded from the RTE stack frame (MC68030 UM 6.4.2), not the
-					-- pre-RTE SR captured at decodeOPC time. Must be in THIS process
-					-- (same as trap_SR <= FlagsSR above) to avoid multiple drivers.
-					-- Placed AFTER decodeOPC block for last-assignment-wins priority.
 					IF exec(directSR)='1' THEN
 						trap_SR <= data_read(15 downto 8);
+					END IF;
+					-- BUG FIX: Revert SR high byte on RTE format error
+					IF trap_format_error='1' THEN
+						trap_SR <= rte_saved_sr_high;
 					END IF;
 				ELSE
 					-- MC68030 double bus fault: Monitor pmmu_fault during CPU stall.
@@ -3390,17 +3395,12 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF interrupt='1' THEN
 					fc_internal(2) <= '1';
 				END IF;
-				-- BUG #418 FIX: Format Error during RTE - force supervisor mode only.
-				-- MC68030 UM 6.4.2: The format error exception frame must contain
-				-- the SR loaded from the RTE stack frame, NOT the pre-RTE SR.
-				-- trap_SR is now updated at directSR time (above), so writeSR will
-				-- push the correct value. Only force S=1 here so the exception
-				-- handler runs in supervisor mode. preSVmode stays '1' (RTE is
-				-- supervisor-only, so it was already '1' before RTE).
-				-- MUST come AFTER exec(directSR)/exec(to_SR)/changeMode/interrupt
-				-- to have highest priority (VHDL last-assignment-wins).
+				-- BUG FIX: Revert SR high byte on RTE format error.
+				-- MC68030 UM 6.4.2: The status register value in the format error
+				-- exception stack frame is the value in the status register before
+				-- the RTE instruction was executed.
 				IF trap_format_error='1' THEN
-					FlagsSR(5) <= '1';
+					FlagsSR <= rte_saved_sr_high;
 					fc_internal(2) <= '1';
 				END IF;
 				IF cpu(1)='0' THEN
