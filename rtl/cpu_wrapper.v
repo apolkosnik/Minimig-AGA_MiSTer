@@ -831,12 +831,27 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				end
 
 				WALKER_DONE: begin
-					// Acknowledge completion to PMMU
-					pmmu_walker_ack_p <= 1;
+					// BUG #420 FIX: Stale ack race during multi-level page walks.
+					// Previously, pmmu_walker_ack_p was unconditionally set to 1 every
+					// cycle in WALKER_DONE. On the cycle when ~pmmu_walker_req_p triggers
+					// the transition to WALKER_IDLE, the ack was STILL asserted (last
+					// assignment wins). The PMMU, having already consumed the ack and
+					// transitioned to the next walk level (e.g., W_PTR1), issues a new
+					// mem_req on that same cycle. On the NEXT cycle, the PMMU sees
+					// mem_req=1 AND mem_ack=1 (stale!) and immediately processes the
+					// old data as if it were the new response. This corrupts every
+					// multi-level page walk, producing wrong ATC entries -> wrong
+					// physical addresses -> crashes -> double bus fault -> CPU halt.
+					// Fix: Only assert ack while the PMMU still has its request active.
+					// Clear ack on the transition cycle so the PMMU doesn't see a stale ack.
 					walker_active <= 0;  // Release bus
 					if (~pmmu_walker_req_p) begin
-						// PMMU has deasserted request, return to idle
+						// PMMU has deasserted request - clear ack and return to idle
+						pmmu_walker_ack_p <= 0;
 						walker_state <= WALKER_IDLE;
+					end else begin
+						// PMMU still has request active - keep acknowledging
+						pmmu_walker_ack_p <= 1;
 					end
 				end
 

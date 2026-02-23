@@ -3717,14 +3717,19 @@ begin
   -- Walker busy indication - not busy if MMU disabled or TTR hit
   process(wstate, addr_log, fc, rw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, req)
     variable tmatch0, tmatch1 : std_logic;
+    variable dummy_ci, dummy_wp : std_logic;
   begin
     -- Not busy if MMU is disabled
     if tc_en = '0' then
       busy <= '0';
     else
-      -- Check for TTR hits combinationally
-      ttr_match(TT0, addr_log, fc, is_insn, tmatch0);
-      ttr_match(TT1, addr_log, fc, is_insn, tmatch1);
+      -- BUG #421 FIX: Use ttr_check with actual rw signal instead of ttr_match which
+      -- hardcodes rw='1'. With RWM=0 TTRs, ttr_match would report a match for writes
+      -- when the TTR only matches reads. This caused busy='0' (TTR handles it) while
+      -- the translation process started a walker (TTR doesn't match writes), allowing
+      -- the CPU to proceed with a stale physical address.
+      ttr_check(TT0, addr_log, fc, is_insn, rw, tmatch0, dummy_ci, dummy_wp);
+      ttr_check(TT1, addr_log, fc, is_insn, rw, tmatch1, dummy_ci, dummy_wp);
 
       -- Not busy if TTR hit or (walker idle with no pending walker work AND
       -- either no translation is active, or addr_phys_reg is fresh).
