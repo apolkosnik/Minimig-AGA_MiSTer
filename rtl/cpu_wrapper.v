@@ -684,6 +684,25 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	wire walker_mem_ready = walker_chip_ram ? chipready : (walker_fast_ram ? ramready : (chipready | ramready | fastchip_ready));
 	localparam WALKER_TIMEOUT_LIMIT = 12'd2048;  // Timeout after 2048 cycles (~18us)
 
+	// BUG #422 FIX: Track in-flight CPU SDRAM cycles for stale-ready detection.
+	// When PMMU activates (busy='1'), ramsel drops the CPU component via ~pmmu_suppress_bus.
+	// But the SDRAM controller may have already started a cycle from the previous posedge.
+	// This stale SDRAM cycle generates ramready with data from the CPU's address, not the
+	// walker's descriptor address. If the walker enters WAIT_LOW before this stale ramready
+	// clears, it captures wrong data -> corrupted page walk -> lockup.
+	// stale_ram_pending is set when the CPU has an active SDRAM request (ramsel with CPU
+	// component). Cleared when ramready fires (stale cycle completed). The walker waits
+	// in READ_LOW until this flag is clear before accepting ramready.
+	reg stale_ram_pending;
+	always @(posedge clk) begin
+		if (~reset)
+			stale_ram_pending <= 0;
+		else if (ramready)
+			stale_ram_pending <= 0;  // SDRAM cycle completed
+		else if (!walker_active && !pmmu_suppress_bus && ramsel)
+			stale_ram_pending <= 1;  // CPU has SDRAM cycle in-flight
+	end
+
 	localparam WALKER_IDLE       = 4'd0;
 	localparam WALKER_START      = 4'd1;
 	localparam WALKER_READ_LOW   = 4'd2;
@@ -767,18 +786,20 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// Memory controller sees our address
 					// BUG #138: Reset timeout counter when entering wait state
 					walker_timeout_cnt <= 0;
-					// BUG #422 FIX: For chip RAM walks, wait for chip bus SM to be idle
-					// before entering WAIT_LOW. When PMOVE-to-TC activates MMU,
-					// chipreq is registered (1-cycle delay) so a stale CPU bus cycle
-					// can start before pmmu_suppress_bus takes effect. If we enter
-					// WAIT_LOW while this stale cycle is in-flight, we capture its
-					// chipready with wrong data (CPU's address, not descriptor address).
-					// Staying in READ_LOW until chip_stage==0 ensures the stale cycle
-					// completes harmlessly (its chipready fires while we're not looking).
-					// For Fast RAM walks, ramsel is gated by ~walker_active (combinational),
-					// so no stale CPU cycle is possible.
-					if (!walker_addr_is_chipram || chip_stage == 2'b00)
-						walker_state <= WALKER_WAIT_LOW;
+					// BUG #422 FIX: Wait for any stale CPU bus cycle to complete before
+					// entering WAIT_LOW. When PMOVE-to-TC activates MMU, the CPU may
+					// have a bus cycle in-flight (started before pmmu_suppress_bus or
+					// walker_active took effect). If we enter WAIT_LOW while this stale
+					// cycle is running, we capture its ready signal with wrong data.
+					// Chip RAM walks: wait for chip bus SM idle (chip_stage==0).
+					// SDRAM walks: wait for stale_ram_pending to clear (ramready fires).
+					if (walker_addr_is_chipram) begin
+						if (chip_stage == 2'b00)
+							walker_state <= WALKER_WAIT_LOW;
+					end else begin
+						if (!stale_ram_pending)
+							walker_state <= WALKER_WAIT_LOW;
+					end
 				end
 
 				WALKER_WAIT_LOW: begin
@@ -872,8 +893,13 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// Write data (walker_wdata_latch[15:0]) is driven via chip_din mux
 					walker_timeout_cnt <= 0;
 					// BUG #422 FIX: Same stale-cycle guard as WALKER_READ_LOW (see above)
-					if (!walker_addr_is_chipram || chip_stage == 2'b00)
-						walker_state <= WALKER_WAIT_WR_LOW;
+					if (walker_addr_is_chipram) begin
+						if (chip_stage == 2'b00)
+							walker_state <= WALKER_WAIT_WR_LOW;
+					end else begin
+						if (!stale_ram_pending)
+							walker_state <= WALKER_WAIT_WR_LOW;
+					end
 				end
 
 				WALKER_WAIT_WR_LOW: begin
