@@ -404,7 +404,15 @@ always @(posedge clk_114) begin
 		end
 	end
 
-	ram_cs <= ~(ram_ready & cyc & cpu_type) & ram_sel;
+	// BUG #426 FIX: When walker is active, bypass cyc gating for ram_cs deassert.
+	// cpu_cache_new's CPU_SM_WAIT state needs !cpu_cs to return to IDLE.
+	// cpu_cs comes from ram_cs via sdram_ctrl's internal ramsel.
+	// For normal CPU reads, ram_sel drops when cpu_req deasserts, so ram_cs drops.
+	// For walker reads, walker_fast_ram keeps ram_sel high continuously.
+	// Without this fix, ram_cs can only deassert via ram_ready&cyc alignment,
+	// but cyc only pulses 1-in-4 clk_114 cycles, causing unreliable deassert
+	// that deadlocks cpu_cache_new in CPU_SM_WAIT.
+	ram_cs <= ~(ram_ready & (cyc | walker_active_cpu) & cpu_type) & ram_sel;
 end
 
 wire  [1:0] cpu_state;
@@ -443,6 +451,7 @@ wire        ramshared;
 
 wire [7:0] toccata_base;
 wire toccata_ena;
+wire       walker_active_cpu;  // BUG #426: Walker active flag from cpu_wrapper
 
 // 68030 Cache interface signals
 wire        cpu_cache_req;
@@ -563,7 +572,8 @@ cpu_wrapper
 	.cache_burst    (cpu_cache_burst    ),     // Burst mode enable (IBE/DBE)
 	.cache_burst_len(cpu_cache_burst_len),     // Burst length
 	.cache_ramaddr  (cpu_cache_ramaddr  ),     // BUG #128: Properly encoded ramaddr for cache fills
-	.debug_fmt_err  (                   )      // Format Error debug (not connected)
+	.debug_fmt_err  (                   ),     // Format Error debug (not connected)
+	.walker_active_out(walker_active_cpu)      // BUG #426: Walker active for SDRAM cache deassert
 );
 
 wire [15:0] ram_dout1;

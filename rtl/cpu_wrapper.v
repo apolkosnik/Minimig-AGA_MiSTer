@@ -85,7 +85,10 @@ module cpu_wrapper
 	output      [2:0] cache_burst_len,  // Burst length (number of words)
 	output     [28:1] cache_ramaddr,    // Properly encoded ramaddr for cache fill
 	// Format Error debug: [6]=latched, [5:2]=format code, [1]=SR.S, [0]=SR.M
-	output      [6:0] debug_fmt_err
+	output      [6:0] debug_fmt_err,
+
+	// BUG #426: Walker active flag for SDRAM cache SM deassert
+	output            walker_active_out
 );
 
 // BUG #136 FIX: Include walker Fast RAM access in ramsel
@@ -100,6 +103,7 @@ module cpu_wrapper
 wire pmmu_suppress_bus = cpucfg[1] & (pmmu_busy_p | pmmu_fault_p | walker_timeout_error);
 assign ramsel       = (cpu_req & ~sel_nmi_vector & ~walker_active & ~pmmu_suppress_bus & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)) | walker_fast_ram;
 assign ramshared    = sel_dd;
+assign walker_active_out = walker_active;
 
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
