@@ -452,6 +452,18 @@ wire        ramshared;
 wire [7:0] toccata_base;
 wire toccata_ena;
 wire       walker_active_cpu;  // BUG #426: Walker active flag from cpu_wrapper
+wire       walker_writing_cpu; // BUG #427: Walker writing flag from cpu_wrapper
+
+// BUG #427 FIX: Override cpustate when walker owns the SDRAM bus.
+// The SDRAM controllers use cpustate==3 to trigger the write buffer. When the
+// walker is reading descriptors from Z2/Z3 Fast RAM, the CPU is frozen, but
+// its cpustate may still be "11" (write) from the pre-freeze bus cycle. This
+// causes the write buffer to spuriously latch CPU data at the walker's
+// descriptor address, corrupting page table entries in SDRAM.
+// Fix: Force cpustate to "10" (data read) during walker reads, and "11"
+// (write) during walker writes, so the SDRAM controller sees the walker's
+// actual intent instead of the CPU's frozen state.
+wire [1:0] cpu_state_ram = walker_active_cpu ? (walker_writing_cpu ? 2'b11 : 2'b10) : cpu_state;
 
 // 68030 Cache interface signals
 wire        cpu_cache_req;
@@ -573,7 +585,8 @@ cpu_wrapper
 	.cache_burst_len(cpu_cache_burst_len),     // Burst length
 	.cache_ramaddr  (cpu_cache_ramaddr  ),     // BUG #128: Properly encoded ramaddr for cache fills
 	.debug_fmt_err  (                   ),     // Format Error debug (not connected)
-	.walker_active_out(walker_active_cpu)      // BUG #426: Walker active for SDRAM cache deassert
+	.walker_active_out(walker_active_cpu),     // BUG #426: Walker active for SDRAM cache deassert
+	.walker_writing_out(walker_writing_cpu)    // BUG #427: Walker writing for SDRAM cpustate override
 );
 
 wire [15:0] ram_dout1;
@@ -603,7 +616,7 @@ sdram_ctrl ram1
 	.cpuAddr      (ram_addr[22:1]  ),
 	.cpuU         (ram_uds         ),
 	.cpuL         (ram_lds         ),
-	.cpustate     (cpu_state       ),
+	.cpustate     (cpu_state_ram   ),  // BUG #427: Use walker-aware cpustate
 	.cpuCS        (~zram_sel&ram_cs),
 	.cpuRD        (ram_dout1       ),
 	.ramready     (ram_ready1      ),
@@ -645,7 +658,7 @@ ddram_ctrl ram2
 	.cpuAddr      (ram_addr        ),
 	.cpuU         (ram_uds         ),
 	.cpuL         (ram_lds         ),
-	.cpustate     (cpu_state       ),
+	.cpustate     (cpu_state_ram   ),  // BUG #427: Use walker-aware cpustate
 	.cpuCS        (zram_sel&ram_cs ),
 	.cpuRD        (ram_dout2       ),
 	.ramshared    (ramshared       ),

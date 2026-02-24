@@ -88,7 +88,9 @@ module cpu_wrapper
 	output      [6:0] debug_fmt_err,
 
 	// BUG #426: Walker active flag for SDRAM cache SM deassert
-	output            walker_active_out
+	output            walker_active_out,
+	// BUG #427: Walker writing flag for SDRAM cpustate override
+	output            walker_writing_out
 );
 
 // BUG #136 FIX: Include walker Fast RAM access in ramsel
@@ -104,6 +106,7 @@ wire pmmu_suppress_bus = cpucfg[1] & (pmmu_busy_p | pmmu_fault_p | walker_timeou
 assign ramsel       = (cpu_req & ~sel_nmi_vector & ~walker_active & ~pmmu_suppress_bus & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)) | walker_fast_ram;
 assign ramshared    = sel_dd;
 assign walker_active_out = walker_active;
+assign walker_writing_out = walker_writing;
 
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
