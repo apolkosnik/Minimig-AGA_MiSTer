@@ -312,7 +312,10 @@ PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype,
 		addsub_b <= OP2out;
 		IF exec(opcUNPACK)='1' THEN
 			addsub_b(15 downto 0) <= "0000" & OP2out(7 downto 4) & "0000" & OP2out(3 downto 0);
-		ELSIF execOPC='0' AND exec(OP2out_one)='0' AND exec(get_bfoffset)='0'THEN
+		-- PMMU doubleword (CRP/SRP) postadd/presub writeback must use fixed
+		-- increment/decrement sizing even if execOPC is still asserted.
+		ELSIF (execOPC='0' OR (exec(pmmu_dbl)='1' AND (exec(presub) OR exec(postadd) OR movem_presub)='1')) AND
+		      exec(OP2out_one)='0' AND exec(get_bfoffset)='0'THEN
 			IF long_start='0' AND exe_datatype="00" AND exec(use_SP)='0' THEN
 				addsub_b <= "00000000000000000000000000000001";
 				-- BUG #144 FIX: Added exec(pmmu_addr_inc) for PMOVE CRP/SRP 64-bit +4 address increment
@@ -321,13 +324,13 @@ PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype,
 				-- pmmu_addr_inc is for address calculation only, pmmu_dbl is for register write-back.
 				-- The priority must be: pmmu_dbl (when postadd) > pmmu_addr_inc (address only).
 				ELSIF long_start='0' AND exe_datatype="10" AND (exec(presub) OR exec(postadd) OR movem_presub OR exec(pmmu_addr_inc))='1' THEN
-					IF exec(movem_action)='1' THEN
-						addsub_b <= "00000000000000000000000000000110";
-					-- BUG #291 FIX: Check pmmu_dbl BEFORE pmmu_addr_inc!
+					-- BUG #291 FIX: Check pmmu_dbl BEFORE movem_action/pmmu_addr_inc!
 					-- When postadd=1 (register update), pmmu_dbl gives +8 for CRP/SRP.
 					-- When postadd=0 (address calc only), pmmu_addr_inc gives +4.
-					ELSIF exec(pmmu_dbl)='1' AND (exec(presub) OR exec(postadd) OR movem_presub)='1' THEN
+					IF exec(pmmu_dbl)='1' AND (exec(presub) OR exec(postadd) OR movem_presub)='1' THEN
 						addsub_b <= "00000000000000000000000000001000";
+					ELSIF exec(movem_action)='1' THEN
+						addsub_b <= "00000000000000000000000000000110";
 					ELSIF exec(pmmu_addr_inc)='1' THEN
 						addsub_b <= "00000000000000000000000000000100";
 					ELSE

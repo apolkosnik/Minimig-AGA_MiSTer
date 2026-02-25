@@ -1830,7 +1830,8 @@ PROCESS (reg_QA, store_in_tmp, ea_data, long_start, addr, exec, memmaskmux, micr
 		-- This must be checked BEFORE ea_data_OP1 which has conflicting priority.
 		-- Without this, PMOVE (An)+,TC corrupts An with (ea_data + increment) instead
 		-- of (An + increment) because set(ea_data_OP1) and set(postadd) are both set.
-		ELSIF (exec(postadd)='1' OR exec(presub)='1') AND memmaskmux(3)='1' THEN
+		ELSIF (exec(postadd)='1' OR exec(presub)='1') AND
+		      (memmaskmux(3)='1' OR micro_state = pmove_mem_to_mmu_lo) THEN
 			-- Register update mode: OP1out stays as reg_QA (default)
 			NULL;
 		ELSIF exec(ea_data_OP1)='1' AND store_in_tmp='1' THEN
@@ -7636,12 +7637,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     -- BUG #388 FIX: Check set_exec(pmmu_rd) because set_exec doesn't propagate
                     -- to exec during micro-state transitions (setexecOPC='0'), and set(pmmu_rd)
                     -- doesn't persist across cycles.
-                    IF exec(pmmu_rd)='1' OR set(pmmu_rd)='1' OR set_exec(pmmu_rd)='1' THEN
-                        set_exec(pmmu_rd) <= '1';  -- Persist to idle
-                        set_exec(Regwrena) <= '1';
-                        -- Handle MMUSR (16-bit) vs TC/TT0/TT1 (32-bit)
-                        IF pmmu_brief(14 downto 10) = "11000" THEN
-                            datatype <= "01";
+	                    IF exec(pmmu_rd)='1' OR set(pmmu_rd)='1' OR set_exec(pmmu_rd)='1' THEN
+	                        set_exec(pmmu_rd) <= '1';  -- Persist to idle
+	                        -- PMMU readback writeback is valid only for Dn-mode PMOVE.
+	                        -- Memory-EA PMOVE retires through this state too; writing Regwrena
+	                        -- there corrupts An/A7 with pmmu_reg_rdat.
+	                        IF pmmu_opcode(5 downto 3) = "000" THEN
+	                            set_exec(Regwrena) <= '1';
+	                        END IF;
+	                        -- Handle MMUSR (16-bit) vs TC/TT0/TT1 (32-bit)
+	                        IF pmmu_brief(14 downto 10) = "11000" THEN
+	                            datatype <= "01";
                             set_datatype <= "01";
                         ELSE
                             datatype <= "10";
