@@ -62,6 +62,14 @@ architecture behavioral of tb_berr_frame is
     signal pmmu_addr_log    : std_logic_vector(31 downto 0);
     signal pmmu_busy : std_logic;
 
+    -- BUG #428 debug signals
+    signal debug_state       : std_logic_vector(1 downto 0);
+    signal debug_clkena_lw   : std_logic;
+    signal debug_memmask     : std_logic_vector(5 downto 0);
+    signal debug_memmaskmux  : std_logic_vector(5 downto 0);
+    signal debug_micro_state : integer range 0 to 255;
+    signal fault_trace_active : boolean := false;
+
     signal mem_wait : std_logic := '0';
     signal stall_cooldown : integer range 0 to 3 := 0;
     signal walker_req_prev : std_logic := '0';
@@ -337,7 +345,12 @@ begin
             debug_trap_berr  => debug_trap_berr,
             debug_make_berr  => debug_make_berr,
             debug_pmmu_fault => debug_pmmu_fault,
-            debug_regfile_a7 => debug_regfile_a7
+            debug_regfile_a7 => debug_regfile_a7,
+            debug_state      => debug_state,
+            debug_clkena_lw  => debug_clkena_lw,
+            debug_memmask    => debug_memmask,
+            debug_memmaskmux => debug_memmaskmux,
+            debug_micro_state => debug_micro_state
         );
 
     -- Memory read
@@ -461,6 +474,40 @@ begin
                 report "TRAP_BERR changed to " & std_logic'image(debug_trap_berr) &
                        " at PC=$" & slv_to_hex(debug_TG68_PC);
                 prev_berr := debug_trap_berr;
+            end if;
+        end if;
+    end process;
+
+    -- BUG #428 debug: per-cycle trace around fault time
+    fault_trace: process(clk)
+        variable cycle_count : integer := 0;
+    begin
+        if rising_edge(clk) then
+            -- Activate trace when fault detected or when addr_log is WP page
+            if not is_x(debug_pmmu_fault) then
+                if debug_pmmu_fault = '1' and not fault_trace_active then
+                    fault_trace_active <= true;
+                    cycle_count := 0;
+                end if;
+                if fault_trace_active then
+                    cycle_count := cycle_count + 1;
+                    report "TRACE[" & integer'image(cycle_count) & "]:" &
+                           " st=" & slv_to_hex("000000" & debug_state) &
+                           " clw=" & std_logic'image(debug_clkena_lw) &
+                           " cin=" & std_logic'image(clkena_in) &
+                           " mw=" & std_logic'image(mem_wait) &
+                           " fault=" & std_logic'image(debug_pmmu_fault) &
+                           " mberr=" & std_logic'image(debug_make_berr) &
+                           " tberr=" & std_logic'image(debug_trap_berr) &
+                           " busy=" & std_logic'image(pmmu_busy) &
+                           " mm=" & slv_to_hex("00" & debug_memmask) &
+                           " mmx=" & slv_to_hex("00" & debug_memmaskmux) &
+                           " alog=$" & slv_to_hex(pmmu_addr_log) &
+                           " A7=$" & slv_to_hex(debug_regfile_a7);
+                    if cycle_count > 30 then
+                        fault_trace_active <= false;
+                    end if;
+                end if;
             end if;
         end if;
     end process;

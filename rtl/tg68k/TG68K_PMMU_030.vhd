@@ -3718,7 +3718,7 @@ begin
   end process;
 
   -- Walker busy indication - not busy if MMU disabled or TTR hit
-  process(wstate, addr_log, fc, rw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, req)
+  process(wstate, addr_log, fc, rw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, req, fault_reg)
     variable tmatch0, tmatch1 : std_logic;
     variable dummy_ci, dummy_wp : std_logic;
   begin
@@ -3744,7 +3744,16 @@ begin
       -- When req='0' (e.g. execute state), no bus access happens so stale addr is harmless;
       -- checking it when req='0' would deadlock because the translation process only
       -- updates translated_addr when req='1'.
-      if (tmatch0 = '1' or tmatch1 = '1' or (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and (req = '0' or (translated_addr = addr_log and translated_fc = fc and translated_rw = rw)))) then
+      --
+      -- BUG #428 FIX: When fault_reg='1', the translation is "done" (it faulted).
+      -- Report busy='0' so clkena_lw can fire and make_berr captures the fault.
+      -- Without this, the walker_fault handshake (3-4 cycles) holds busy='1'.
+      -- During that window, clkena_in fires (cpu_wrapper releases for faults) but
+      -- clkena_lw stays '0' (busy blocks it). The memmask shift at clkena_in changes
+      -- addr_log combinationally, breaking translated_addr match. When the handshake
+      -- completes, busy='1' persists (addr mismatch) and fault_reg clears (new
+      -- translation for new addr) -> permanent deadlock, berr never dispatched.
+      if (tmatch0 = '1' or tmatch1 = '1' or fault_reg = '1' or (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and (req = '0' or (translated_addr = addr_log and translated_fc = fc and translated_rw = rw)))) then
         busy <= '0';
       else
         busy <= '1';

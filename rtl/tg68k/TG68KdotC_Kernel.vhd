@@ -1291,8 +1291,11 @@ ALU: TG68K_ALU
 	-- does shift for byte access. note active low me
 	-- should produce address error on 68000
 	memmaskmux <= memmask when addr(0) = '1' else memmask(4 downto 0) & '1';
-	nUDS <= memmaskmux(5) OR pmmu_busy;
-	nLDS <= memmaskmux(4) OR pmmu_busy;
+	-- BUG #428 FIX: Gate bus strobes with pmmu_fault to prevent faulting writes from
+	-- reaching the bus. With the busy='0' override during fault (PMMU fix), UDS/LDS
+	-- would otherwise assert for one cycle before the CPU transitions to berr handling.
+	nUDS <= memmaskmux(5) OR pmmu_busy OR pmmu_fault;
+	nLDS <= memmaskmux(4) OR pmmu_busy OR pmmu_fault;
 	clkena_lw <= '1' WHEN clkena_in='1' AND memmaskmux(3)='1' AND pmmu_busy='0' ELSE '0';
 	clr_berr <= '1' WHEN setopcode='1' AND trap_berr='1' ELSE '0';
 	
