@@ -392,6 +392,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal exec_DIRECT		: bit;
 	signal exec_tas			: std_logic;
 	signal set_exec_tas		: std_logic;
+	signal exec_cas			: std_logic;
+	signal set_exec_cas		: std_logic;
 
 	signal exe_condition		: std_logic;
 	signal ea_only				: bit;
@@ -2267,6 +2269,24 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 						       " mmux3=" & std_logic'image(memmaskmux(3)) severity note;
 						-- synthesis translate_on
 					
+					-- BUG FIX: PMOVE -(An) pre-decrement - use registered signals only.
+					-- setstate/memaddr_a are combinatorial from DECODE process; they update
+					-- in delta-1, AFTER this rising_edge block fires at delta-0.
+					-- Compute decrement directly from registered pmmu_brief/fline_opcode_latch.
+					ELSIF micro_state = pmove_decode AND
+					      fline_opcode_latch(15 downto 12) = "1111" AND
+					      fline_opcode_latch(5 downto 3) = "100" AND
+					      (pmmu_brief(15 downto 13) = "000" OR pmmu_brief(15 downto 13) = "010" OR
+					       pmmu_brief(15 downto 13) = "011") THEN
+						IF pmmu_brief(14 downto 10) = "10010" OR pmmu_brief(14 downto 10) = "10011" THEN
+							memaddr_delta_rega <= x"FFFFFFF8";  -- -8: CRP/SRP 64-bit
+						ELSIF pmmu_brief(14 downto 10) = "11000" THEN
+							memaddr_delta_rega <= x"FFFFFFFE";  -- -2: MMUSR 16-bit
+						ELSE
+							memaddr_delta_rega <= x"FFFFFFFC";  -- -4: TC/TT0/TT1 32-bit
+						END IF;
+						use_base <= '1';
+					
 					-- BUG #302 FIX: Special case for (An)+ mode CRP/SRP LOW word reads
 					-- BUG #339 FIX: pmove_decode handling - memmaskmux not reliable during decode
 					-- BUG #355 FIX: Guard with setstate /= "00" to prevent fetch address corruption!
@@ -2274,25 +2294,13 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					ELSIF micro_state = pmove_decode AND setstate /= "00" AND
 					      fline_opcode_latch(15 downto 12)="1111" AND
 					      (pmmu_brief(15 downto 13)="000" OR pmmu_brief(15 downto 13)="010" OR pmmu_brief(15 downto 13)="011") AND
-					      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" OR fline_opcode_latch(5 downto 3)="100") THEN
+					      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011") THEN
 						-- synthesis translate_off
 						report "DBG_DECODE_ELSIF: micro=pmove_decode mode=" & integer'image(conv_integer(fline_opcode_latch(5 downto 3))) &
 						       " setstate=" & integer'image(conv_integer(setstate)) severity note;
 						-- synthesis translate_on
-						-- Modes 010/011: Simple (An)/(An)+ - no delta
-						IF fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" THEN
 						memaddr_delta_rega <= (others => '0');
 						use_base <= '1';
-						
-						-- Mode 100: -(An) - Latch presub decrement during decode
-						-- addsub_q is STALE here because exec(presub) won't be active
-						-- until next cycle (set(presub) was just assigned combinationally).
-						-- Use memaddr_a which has the correct -4/-8 from the combinational
-						-- presub path (lines 1873-1883) that uses set(presub) directly.
-						ELSE  -- Must be 100 based on outer condition
-							memaddr_delta_rega <= memaddr_a;  -- Correct -4/-8 from combinational presub
-							use_base <= '1';
-						END IF;
 					
 					-- BUG #339 FIX: PMOVE execution states with memmaskmux guard
 					-- NOTE: For LO states, the ELSIF at line 1953 fires FIRST (earlier in chain)
@@ -2975,7 +2983,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 										berr_ssw(13) <= '0';  -- RC=0: not stage C
 										berr_ssw(12) <= '1';  -- RB=1: prefetch will be rerun
 										berr_ssw(8) <= '0';   -- DF=0 (instruction, not data)
-										berr_ssw(9) <= '0';
 										berr_ssw(5 downto 4) <= "10";  -- SIZE=word (instruction fetches are 16-bit)
 									else
 										-- Data access fault: stage C (executing instruction)
@@ -2984,7 +2991,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 										berr_ssw(13) <= '1';  -- RC=1: stage C bus cycle will be rerun
 										berr_ssw(12) <= '0';  -- RB=0: not stage B
 										berr_ssw(8) <= '1';   -- DF=1
-										berr_ssw(9) <= '1';   -- DF<<1
 										-- SIZE from current datatype: "00"=byte->"01", "01"=word->"10", "10"=long->"00"
 										case datatype is
 											when "00" => berr_ssw(5 downto 4) <= "01";  -- Byte
@@ -2992,8 +2998,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 											when others => berr_ssw(5 downto 4) <= "00";  -- Long
 										end case;
 									end if;
-									berr_ssw(11 downto 10) <= "00";  -- Reserved
-									berr_ssw(7) <= exec_tas;  -- RM: read-modify-write (TAS instruction)
+									berr_ssw(11 downto 9) <= "000";  -- Reserved
+									berr_ssw(7) <= exec_tas OR exec_cas;  -- RM: read-modify-write (TAS/CAS/CAS2)
 									berr_ssw(3) <= '0';   -- Reserved
 								else
 									-- External BERR: use kernel's current state
@@ -3006,14 +3012,13 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									berr_ssw(13) <= '1';  -- RC=1: stage C bus cycle will be rerun
 									berr_ssw(12) <= '0';  -- RB=0: not stage B
 									berr_ssw(8) <= '1';   -- DF=1
-									berr_ssw(9) <= '1';   -- DF<<1
 									case datatype is
 										when "00" => berr_ssw(5 downto 4) <= "01";
 										when "01" => berr_ssw(5 downto 4) <= "10";
 										when others => berr_ssw(5 downto 4) <= "00";
 									end case;
-									berr_ssw(11 downto 10) <= "00";
-									berr_ssw(7) <= exec_tas;  -- RM: read-modify-write (TAS instruction)
+									berr_ssw(11 downto 9) <= "000"; -- Reserved
+									berr_ssw(7) <= exec_tas OR exec_cas;  -- RM: read-modify-write (TAS/CAS/CAS2)
 									berr_ssw(3) <= '0';
 								end if;
 							END IF;
@@ -3051,7 +3056,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									berr_ssw(15) <= '1';  -- FC=1: stage C fault
 									berr_ssw(13) <= '1';  -- RC=1: rerunnable
 									berr_ssw(8) <= '1';   -- DF=1: data fault
-									berr_ssw(9) <= '1';   -- DF mirror
 								end if;
 							END IF;
 						ELSIF make_trace='1' OR (make_trace_t0='1' AND v_is_cof='1') THEN
@@ -3287,6 +3291,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					exec(alu_move) <= set_exec(opcMOVE) OR set(opcMOVE) OR set(alu_move);
 					exec(alu_setFlags) <= set_exec(opcADD) OR set(opcADD) OR set(alu_setFlags);
 					exec_tas <= set_exec_tas;
+				exec_cas <= set_exec_cas;
 					-- BUG #70 SIMPLIFICATION: Clear pmove_dn_mode when instruction completes
 					-- BUG #81 FIX: Don't clear during PMOVE Dn read - register write happens NEXT cycle!
 					-- BUG #106 FIX: Keep pmove_dn_mode alive while exec(pmmu_rd) OR exec(Regwrena) active!
@@ -3526,6 +3531,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		ea_only <= '0';
 		set_direct_data <= '0';
 		set_exec_tas <= '0';
+		set_exec_cas <= '0';
 		trap_illegal <='0';
 		-- trap_addr_error: moved to process 2375 (registered, like trap_berr)
 		trap_priv <='0';
@@ -3919,6 +3925,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									WHEN "10" => datatype <= "01";		--Word
 									WHEN OTHERS => datatype <= "10";	--Long
 								END CASE;
+								set_exec_cas <= '1';	-- CAS/CAS2 RMW: set RM bit in SSW on bus error
 								IF opcode(10)='1' AND opcode(5 downto 0)="111100" THEN --CAS2
 									IF decodeOPC='1' THEN
 										set(get_2ndOPC) <= '1';

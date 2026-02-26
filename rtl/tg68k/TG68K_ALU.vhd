@@ -312,9 +312,17 @@ PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype,
 		addsub_b <= OP2out;
 		IF exec(opcUNPACK)='1' THEN
 			addsub_b(15 downto 0) <= "0000" & OP2out(7 downto 4) & "0000" & OP2out(3 downto 0);
-		-- PMMU doubleword (CRP/SRP) postadd/presub writeback must use fixed
-		-- increment/decrement sizing even if execOPC is still asserted.
-		ELSIF (execOPC='0' OR (exec(pmmu_dbl)='1' AND (exec(presub) OR exec(postadd) OR movem_presub)='1')) AND
+		-- PMMU postadd/presub writeback must use fixed increment/decrement sizing
+		-- even if execOPC is still asserted.  Two cases:
+		--   CRP/SRP (pmmu_dbl): 64-bit, +8 increment, sets pmmu_dbl flag
+		--   TC/TT0/TT1 (pmmu_wr/rd): 32-bit, +4 increment, identified by pmmu_wr/rd
+		-- Normal instructions (ADD, SUB, etc.) with (An)+/-(An) must NOT be caught
+		-- here -- for those, execOPC='1' AND exec(pmmu_wr/rd)='0', so only the
+		-- execOPC='0' branch applies (which fires during the EA/address cycle, not
+		-- the execute cycle).
+		ELSIF (execOPC='0' OR
+		       (exec(pmmu_dbl)='1' AND (exec(presub) OR exec(postadd) OR movem_presub)='1') OR
+		       ((exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') AND (exec(presub) OR exec(postadd))='1')) AND
 		      exec(OP2out_one)='0' AND exec(get_bfoffset)='0'THEN
 			IF long_start='0' AND exe_datatype="00" AND exec(use_SP)='0' THEN
 				addsub_b <= "00000000000000000000000000000001";
