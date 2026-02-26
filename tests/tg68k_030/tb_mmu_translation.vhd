@@ -1162,6 +1162,26 @@ begin
         end if;
         check_test(20, "TTR CI bypass: cache_inhibit correct on TTR match", pass);
 
+        -- Test 21: TABLE U-bit writeback - root descriptor at $6000
+        -- Initial value: $00006202 (DT=10, U=0). After first walk: U=1 -> $0000620A.
+        -- mem indices: $6000/2 = 12288 (high word), 12289 (low word)
+        val32 := mem(12288) & mem(12289);
+        pass := (val32 = x"0000620A");
+        if not pass then
+            report "  Root TABLE@$6000: expected $0000620A (U=1), got $" & slv_to_hex(val32);
+        end if;
+        check_test(21, "TABLE U-bit writeback: root descriptor ($6000) U=1", pass);
+
+        -- Test 22: TABLE U-bit writeback - L1 descriptor at $6200
+        -- Initial value: $00006402 (DT=10, U=0). After first walk: U=1 -> $0000640A.
+        -- mem indices: $6200/2 = 12544 (high word), 12545 (low word)
+        val32 := mem(12544) & mem(12545);
+        pass := (val32 = x"0000640A");
+        if not pass then
+            report "  L1 TABLE@$6200: expected $0000640A (U=1), got $" & slv_to_hex(val32);
+        end if;
+        check_test(22, "TABLE U-bit writeback: L1 descriptor ($6200) U=1", pass);
+
         -- Summary
         report "=========================================================";
         report "TOTAL: " & integer'image(tests_passed + tests_failed) &
