@@ -172,8 +172,9 @@ architecture rtl of TG68K_PMMU_030 is
   signal saved_rw           : std_logic := '0';
   signal translation_pending : std_logic := '0';
 
-  -- Simple ATC (Address Translation Cache), 8 entries, dynamic page sizes
-  constant ATC_ENTRIES : integer := 8;
+  -- ATC (Address Translation Cache), 22 entries per MC68030 hardware
+  -- Uses pseudo-LRU replacement: MRU bit per entry, reset all when full
+  constant ATC_ENTRIES : integer := 22;
   type atc_attr_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(3 downto 0);  -- {U_ACC, CI, M, WP} where U_ACC=NOT(S)=user accessible
   type atc_val_t  is array(0 to ATC_ENTRIES-1) of std_logic;
   type atc_base_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(31 downto 0);
@@ -195,7 +196,9 @@ architecture rtl of TG68K_PMMU_030 is
   signal atc_page_size : atc_page_size_t;
   signal atc_global : atc_val_t;  -- G bit: global page (survives PFLUSHAN)
   signal atc_level : atc_level_t;  -- BUG #412: walk level count for MMUSR N field
-  signal atc_rr    : integer range 0 to ATC_ENTRIES-1 := 0; -- simple round-robin
+  signal atc_mru   : atc_val_t;  -- Pseudo-LRU: MRU bit per entry (1=recently used)
+  signal atc_mru_update_req : std_logic := '0';  -- Request MRU update from translation process
+  signal atc_mru_update_idx : integer range 0 to ATC_ENTRIES-1 := 0;  -- Index to update
   signal walk_req  : std_logic;
   signal walker_completed : std_logic := '0';
 
@@ -223,7 +226,7 @@ architecture rtl of TG68K_PMMU_030 is
   -- Added W_INDIRECT states for indirect descriptor support (MC68030 spec section 9.5.3.2)
   -- BUG #164 FIX: Added W_INDIRECT_LOW for long-format indirect descriptor targets
   -- Added W_PTR4, W_PTR4_LOW for 5-level table walks when FCL=1 and all TI fields used
-  type walk_state_t is (W_IDLE, W_ROOT, W_ROOT_LOW, W_PTR1, W_PTR1_LOW, W_PTR2, W_PTR2_LOW, W_PTR3, W_PTR3_LOW, W_PTR4, W_PTR4_LOW, W_INDIRECT, W_INDIRECT_LOW, W_PAGE, W_TABLE_UPDATE, W_UPDATE_DESC, W_FILL, W_COMPLETE, W_FAULT);
+  type walk_state_t is (W_IDLE, W_ROOT, W_ROOT_LOW, W_PTR1, W_PTR1_LOW, W_PTR2, W_PTR2_LOW, W_PTR3, W_PTR3_LOW, W_PTR4, W_PTR4_LOW, W_INDIRECT, W_INDIRECT_LOW, W_PAGE, W_TABLE_UPDATE, W_UPDATE_DESC, W_PLOAD_FLUSH, W_FILL, W_COMPLETE, W_FAULT);
   signal wstate    : walk_state_t := W_IDLE;
   
   -- Walker bookkeeping
@@ -265,6 +268,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal pload_addr : std_logic_vector(31 downto 0) := (others => '0');
   signal pload_fc : std_logic_vector(2 downto 0) := (others => '0');
   signal pload_rw : std_logic := '1';  -- '1'=PLOADR (read), '0'=PLOADW (write), from brief(9)
+  signal pload_flush_pending : std_logic := '0';  -- PLOAD flush-before-walk: flush existing ATC entry
 
   -- PFLUSH operation state
   signal pflush_active : std_logic := '0';
@@ -1429,11 +1433,16 @@ begin
       ptest_done <= '0';
       instr_walk_pending <= '0';
       ptest_walk_no_update <= '0';
+      atc_mru_update_req <= '0';
+      atc_mru_update_idx <= 0;
+      pload_flush_pending <= '0';
     elsif rising_edge(clk) then
       status_tmp := fault_status_reg;
 
       -- Clear ptest_done pulse (it's only set for one cycle)
       ptest_done <= '0';
+      -- Clear MRU update request pulse
+      atc_mru_update_req <= '0';
 
       if mmusr_update_ack = '1' then
         mmusr_update_req <= '0';
@@ -1578,7 +1587,10 @@ begin
           end loop;
           -- (BUG #410 M-bit check is integrated into ATC match condition above)
           if hit = '1' then
-            -- ATC hit - use cached translation but check access violations
+            -- ATC hit - request pseudo-LRU history bit update (handled in walker process)
+            atc_mru_update_idx <= hit_idx;
+            atc_mru_update_req <= '1';
+            -- Use cached translation but check access violations
             -- But don't overwrite walker faults that are still pending
             if walker_fault = '1' and walker_fault_ack_pending = '1' then
               -- Walker fault is pending - don't overwrite with ATC results
@@ -1830,49 +1842,21 @@ begin
         end if;
       end if;
 
-      -- Handle PLOAD requests - trigger translation to pre-load ATC
+      -- Handle PLOAD requests - flush existing ATC entry then walk to fill ATC
+      -- Per MC68030 spec and WinUAE: PLOAD always flushes the page from ATC first,
+      -- then unconditionally performs a table walk to (re)fill the ATC entry.
       if pload_active = '1' then
-        -- PLOAD request active - perform translation to fill ATC
         if tc_en = '1' and translation_pending = '0' then
-          -- Check Transparent Translation first
-          ttr_check(TT0, pload_addr, pload_fc, '0', pload_rw, tmatch0, tci0, twp0);  -- Use PLOAD R/W from brief(9)
-          ttr_check(TT1, pload_addr, pload_fc, '0', pload_rw, tmatch1, tci1, twp1);  -- Use PLOAD R/W from brief(9)
-          
-          if tmatch0 = '0' and tmatch1 = '0' then
-            -- No TTR match - check ATC
-            hit := '0';
-            for i in 0 to ATC_ENTRIES-1 loop
-              if atc_valid(i) = '1' then
-                aligned_addr := align_addr(pload_addr, atc_shift(i));
-                if atc_fc(i) = pload_fc and
-                   atc_is_insn(i) = '0' and
-                   aligned_addr = atc_log_base(i) then
-                  hit := '1';
-                  hit_idx := i;
-                end if;
-              end if;
-            end loop;
-            
-            if hit = '0' then
-              -- ATC miss - trigger walker to load translation
-              saved_addr_log <= pload_addr;
-              saved_fc <= pload_fc;
-              saved_is_insn <= '0';
-              saved_rw <= pload_rw;  -- BUG #17 FIX: PLOAD R/W from brief(9): 0=PLOADW(write), 1=PLOADR(read)
-              walk_req <= '1';
-              translation_pending <= '1';
-              instr_walk_pending <= '1';  -- BUG #396: Mark walk as PLOAD-initiated
-              -- report "PLOAD: Triggered walker for addr=0x" & slv_to_hstring(pload_addr) &
-                    --  -- " fc=" & slv_to_string(pload_fc) severity note;
-            else
-              -- ATC hit - PLOAD complete (translation already cached)
-              -- report "PLOAD: ATC hit for addr=0x" & slv_to_hstring(pload_addr) &
-                    --  -- " hit_idx=" & integer'image(hit_idx) severity note;
-            end if;
-          else
-            -- TTR match - PLOAD complete (no need to cache transparent translations)
-           --  -- report "PLOAD: TTR match for addr=0x" & slv_to_hstring(pload_addr) severity note;
-          end if;
+          -- Always trigger walker to load fresh translation
+          -- The walker process handles flushing the old ATC entry via pload_flush_pending
+          saved_addr_log <= pload_addr;
+          saved_fc <= pload_fc;
+          saved_is_insn <= '0';
+          saved_rw <= pload_rw;
+          walk_req <= '1';
+          translation_pending <= '1';
+          instr_walk_pending <= '1';
+          pload_flush_pending <= '1';  -- Tell walker to flush page before filling ATC
         end if;
       end if;
       
@@ -1906,10 +1890,13 @@ begin
         translation_pending <= '0';
         instr_walk_pending <= '0';  -- Clear PTEST/PLOAD flag on walker fault too
         ptest_walk_no_update <= '0';  -- Clear PTEST U/M skip flag
+        pload_flush_pending <= '0';  -- Clear PLOAD flush flag on fault
         -- Acknowledge the fault and track pending state
         walker_fault_ack <= '1';
         walker_fault_ack_pending <= '1';
       elsif walker_completed = '1' then
+        -- Walker completed - clear PLOAD flush flag if set
+        pload_flush_pending <= '0';
         -- Walker completed successfully - clear any previous fault status
         -- A successful walker completion means this specific translation succeeded
 
@@ -2094,6 +2081,14 @@ begin
     variable lu_flag : std_logic;
     variable limit_value : unsigned(14 downto 0);
     variable rp_high : std_logic_vector(31 downto 0);
+    -- Pseudo-LRU ATC replacement
+    variable replace_idx : integer range 0 to ATC_ENTRIES-1;
+    variable found_invalid : boolean;
+    variable all_mru_set : boolean;
+    -- Early termination offset calculation
+    variable early_term_desc_addr : std_logic_vector(31 downto 0);
+    variable early_term_page_addr : std_logic_vector(31 downto 0);
+    variable early_term_offset    : std_logic_vector(31 downto 0);
   begin
     if nreset = '0' then
       for i in 0 to ATC_ENTRIES-1 loop
@@ -2107,7 +2102,9 @@ begin
         atc_attr(i)      <= (others => '0');
         atc_level(i)     <= (others => '0');  -- BUG #412: walk level for MMUSR
       end loop;
-      atc_rr      <= 0;
+      for i in 0 to ATC_ENTRIES-1 loop
+        atc_mru(i)   <= '0';
+      end loop;
       wstate      <= W_IDLE;
       walk_level  <= 0;
       walk_desc   <= (others => '0');
@@ -3447,21 +3444,32 @@ begin
             wstate <= W_FAULT;
            --  -- report "WP_FAULT_WALKER: Write to WP page detected during walk, addr=0x" & slv_to_hstring(saved_addr_log) severity note;
           else
-            -- MC68030: Early termination page size calculation
-            -- When page descriptor found before final level, remaining index bits become offset
-            -- This creates "super pages" larger than TC.PS specifies
-            -- Example: TC.PS=13 (8KB), early term at level 0 with TIB=7,TIC=8,TID=0
-            --          -> effective shift = 13+0+8+7 = 28 bits = 256MB page
-            walk_page_shift <= calc_effective_page_shift(tc_page_shift, walk_level, tc_idx_bits, tc_fcl);
-            walk_page_size  <= tc_page_size;  -- Keep original for compatibility
-            walk_log_base   <= align_addr(saved_addr_log, calc_effective_page_shift(tc_page_shift, walk_level, tc_idx_bits, tc_fcl));
-            -- Extract physical address based on descriptor format
+            -- MC68030 Early termination: ATC always operates at TC.PS page granularity.
+            -- Per MC68030 spec and WinUAE: when a page descriptor terminates the walk
+            -- early, the remaining unused table index bits from the logical address are
+            -- folded into the physical address. The ATC entry covers one TC.PS-sized page.
+            -- This means a large early-terminated region generates separate ATC entries
+            -- for each TC.PS-sized chunk as they are accessed.
+            walk_page_shift <= tc_page_shift;  -- Always TC.PS granularity
+            walk_page_size  <= tc_page_size;
+            walk_log_base   <= align_addr(saved_addr_log, tc_page_shift);  -- TC.PS aligned
+            -- Physical address = descriptor base + unused logical address bits
+            -- unused_offset = addr AND (effective_mask XOR page_mask)
+            -- effective_mask zeros bits below effective_shift, page_mask zeros bits below page_shift
+            -- XOR gives bits BETWEEN page_shift and effective_shift (the skipped index fields)
+            early_term_desc_addr := align_addr(saved_addr_log, calc_effective_page_shift(tc_page_shift, walk_level, tc_idx_bits, tc_fcl));
+            early_term_page_addr := align_addr(saved_addr_log, tc_page_shift);
+            -- The offset to add = page-aligned addr - effective-aligned addr
+            -- This extracts exactly the bits between tc_page_shift and effective_shift
+            early_term_offset := std_logic_vector(unsigned(early_term_page_addr) - unsigned(early_term_desc_addr));
             if walk_desc_is_long = '1' then
-              -- Long format: page address from LOW word bits 31-8
-              walk_phys_base <= walk_desc_low(31 downto 8) & x"00";
+              early_term_desc_addr := walk_desc_low(31 downto 8) & x"00";
+              walk_phys_base <= std_logic_vector(
+                unsigned(early_term_desc_addr) + unsigned(early_term_offset));
             else
-              -- Short format: page address from HIGH word bits 31-8
-              walk_phys_base <= walk_desc_high(31 downto 8) & x"00";
+              early_term_desc_addr := walk_desc_high(31 downto 8) & x"00";
+              walk_phys_base <= std_logic_vector(
+                unsigned(early_term_desc_addr) + unsigned(early_term_offset));
             end if;
             -- Extract attributes - bit positions are same in both formats
             -- BUG #157 FIX: U_ACC uses cumulative S bit from TABLE descriptors, not page descriptor
@@ -3496,7 +3504,11 @@ begin
             -- translations) write back U/M. PTEST is diagnostic and must not modify descriptors.
             if ptest_walk_no_update = '1' then
               -- BUG #411: PTEST walk - skip U/M writeback, go straight to fill
-              wstate <= W_FILL;
+              if pload_flush_pending = '1' then
+                wstate <= W_PLOAD_FLUSH;
+              else
+                wstate <= W_FILL;
+              end if;
             elsif walk_desc_high(3) = '0' or (saved_rw = '0' and walk_desc_high(4) = '0') then
               -- Need to update descriptor with U/M bits
               desc_update_needed <= '1';
@@ -3508,7 +3520,11 @@ begin
               wstate <= W_UPDATE_DESC;
             else
               -- U and M bits already set appropriately, go straight to fill
-              wstate <= W_FILL;
+              if pload_flush_pending = '1' then
+                wstate <= W_PLOAD_FLUSH;
+              else
+                wstate <= W_FILL;
+              end if;
             end if;
           end if;
 
@@ -3582,36 +3598,76 @@ begin
             -- Update walk_desc_high with the written values for ATC fill
             -- This ensures the M bit is reflected in the ATC entry
             walk_attr(1) <= desc_update_data(4);  -- Update M bit in walk_attr
-            wstate <= W_FILL;
+            if pload_flush_pending = '1' then
+              wstate <= W_PLOAD_FLUSH;
+            else
+              wstate <= W_FILL;
+            end if;
           end if;
 
+        when W_PLOAD_FLUSH =>
+          -- PLOAD flush-before-fill: invalidate existing ATC entries for this page
+          -- Per MC68030 spec and WinUAE: PLOAD always flushes old entry before filling
+          for i in 0 to ATC_ENTRIES-1 loop
+            if atc_valid(i) = '1' then
+              if align_addr(saved_addr_log, atc_shift(i)) = atc_log_base(i) then
+                atc_valid(i) <= '0';
+                atc_mru(i) <= '0';
+              end if;
+            end if;
+          end loop;
+          wstate <= W_FILL;  -- Next cycle: fill with updated atc_valid
+
         when W_FILL =>
-          -- Fill ATC with translation result
-          atc_log_base(atc_rr)  <= walk_log_base;
-          atc_phys_base(atc_rr) <= walk_phys_base;
-          atc_shift(atc_rr)     <= walk_page_shift;
-          atc_page_size(atc_rr) <= walk_page_size;
-          atc_attr(atc_rr)      <= walk_attr(3 downto 0);
-          atc_fc(atc_rr)        <= saved_fc;
-          atc_is_insn(atc_rr)   <= saved_is_insn;
-          atc_global(atc_rr)    <= walk_global;  -- G bit for PFLUSHAN semantics
-          atc_level(atc_rr)     <= std_logic_vector(to_unsigned(walk_level + 1, 3));  -- BUG #412: store walk level for MMUSR
-          atc_valid(atc_rr)     <= '1';
-          -- Debug: Log ATC fill for large page test
-          if saved_addr_log = x"00400000" then
-            -- report "DEBUG_ATC_FILL: addr=0x" & slv_to_hstring(saved_addr_log) &
-                   -- " filling ATC[" & integer'image(atc_rr) & "]" &
-                   -- " shift=" & integer'image(walk_page_shift) &
-                   -- " page_size=" & integer'image(walk_page_size)
-             --  severity note;
+          -- Fill ATC with translation result using pseudo-LRU replacement
+          -- Per MC68030 spec: first try invalid entry, then first entry with MRU=0
+          found_invalid := false;
+          replace_idx := 0;
+          -- Step 1: Search for an invalid (empty) entry
+          for i in 0 to ATC_ENTRIES-1 loop
+            if atc_valid(i) = '0' and not found_invalid then
+              replace_idx := i;
+              found_invalid := true;
+            end if;
+          end loop;
+          -- Step 2: If no invalid entry, find first entry with MRU=0
+          if not found_invalid then
+            for i in 0 to ATC_ENTRIES-1 loop
+              if atc_mru(i) = '0' then
+                replace_idx := i;
+                exit;
+              end if;
+            end loop;
+          end if;
+          -- Fill the selected entry
+          atc_log_base(replace_idx)  <= walk_log_base;
+          atc_phys_base(replace_idx) <= walk_phys_base;
+          atc_shift(replace_idx)     <= walk_page_shift;
+          atc_page_size(replace_idx) <= walk_page_size;
+          atc_attr(replace_idx)      <= walk_attr(3 downto 0);
+          atc_fc(replace_idx)        <= saved_fc;
+          atc_is_insn(replace_idx)   <= saved_is_insn;
+          atc_global(replace_idx)    <= walk_global;
+          atc_level(replace_idx)     <= std_logic_vector(to_unsigned(walk_level + 1, 3));
+          atc_valid(replace_idx)     <= '1';
+          -- Pseudo-LRU: set MRU bit, reset all if all become set
+          atc_mru(replace_idx) <= '1';
+          all_mru_set := true;
+          for i in 0 to ATC_ENTRIES-1 loop
+            if i /= replace_idx and atc_mru(i) = '0' then
+              all_mru_set := false;
+            end if;
+          end loop;
+          if all_mru_set then
+            -- All MRU bits now set - reset all except current entry
+            for i in 0 to ATC_ENTRIES-1 loop
+              if i /= replace_idx then
+                atc_mru(i) <= '0';
+              end if;
+            end loop;
           end if;
           -- Delay completion signal by one cycle to ensure ATC write is visible
-          wstate <= W_COMPLETE;  -- New state to delay completion
-          if atc_rr = ATC_ENTRIES-1 then
-            atc_rr <= 0;
-          else
-            atc_rr <= atc_rr + 1;
-          end if;
+          wstate <= W_COMPLETE;
           
           
         when W_COMPLETE =>
@@ -3642,10 +3698,30 @@ begin
         end case;
       end if;  -- End timeout vs normal state machine conditional
 
+      -- Handle ATC MRU update requests from translation process (ATC hits)
+      if atc_mru_update_req = '1' then
+        atc_mru(atc_mru_update_idx) <= '1';
+        -- Check if all MRU bits are now set - if so, reset all except current
+        all_mru_set := true;
+        for i in 0 to ATC_ENTRIES-1 loop
+          if i /= atc_mru_update_idx and atc_mru(i) = '0' then
+            all_mru_set := false;
+          end if;
+        end loop;
+        if all_mru_set then
+          for i in 0 to ATC_ENTRIES-1 loop
+            if i /= atc_mru_update_idx then
+              atc_mru(i) <= '0';
+            end if;
+          end loop;
+        end if;
+      end if;
+
       -- PFLUSH instruction: Clear ATC when flag is set and walker is idle
       if atc_flush_req = '1' then
         for i in 0 to ATC_ENTRIES-1 loop
           atc_valid(i) <= '0';
+          atc_mru(i) <= '0';
         end loop;
       end if;
 
@@ -3663,6 +3739,7 @@ begin
           -- PFLUSHA - flush all ATC entries (MODE=001, A=0)
           for i in 0 to ATC_ENTRIES-1 loop
             atc_valid(i) <= '0';
+            atc_mru(i) <= '0';
           end loop;
         elsif pflush_mode(12 downto 10) = "001" and pflush_mode(9) = '1' then
           -- PFLUSHAN - flush all non-global entries per MC68030 spec (MODE=001, A=1)
@@ -3670,6 +3747,7 @@ begin
           for i in 0 to ATC_ENTRIES-1 loop
             if atc_global(i) = '0' then
               atc_valid(i) <= '0';  -- Only flush non-global entries
+              atc_mru(i) <= '0';
             end if;
           end loop;
         elsif pflush_mode(12 downto 10) = "100" then
@@ -3683,6 +3761,7 @@ begin
               if ((atc_fc(i) xor pflush_fc) and pflush_mask) = "000" then
                 if pflush_mode(9) = '0' or atc_global(i) = '0' then
                   atc_valid(i) <= '0';
+                  atc_mru(i) <= '0';
                 end if;
               end if;
             end if;
@@ -3697,6 +3776,7 @@ begin
                  align_addr(pflush_addr, atc_shift(i)) = atc_log_base(i) then
                 if pflush_mode(9) = '0' or atc_global(i) = '0' then
                   atc_valid(i) <= '0';
+                  atc_mru(i) <= '0';
                 end if;
               end if;
             end if;

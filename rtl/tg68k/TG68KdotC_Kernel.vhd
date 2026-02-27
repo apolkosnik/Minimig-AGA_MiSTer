@@ -6992,10 +6992,18 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         (pmmu_brief(15 downto 13) = "011" AND pmmu_brief(14 downto 10) = "11000" ) THEN  --MMUSR
                         
                         -- PMOVE
+                        -- Extension word validation per MC68030 UM:
+                        -- Bits 7:0 must be zero (reserved). FD+Read is illegal (PMOVEFD is write-only).
+                        -- MMUSR: FD must always be zero (both read and write).
+                        IF pmmu_brief(7 downto 0) /= "00000000" OR
+                           (pmmu_brief(9) = '1' AND pmmu_brief(8) = '1') OR
+                           (pmmu_brief(14 downto 10) = "11000" AND pmmu_brief(8) = '1') THEN
+                             trap_illegal <= '1';
+                             trapmake <= '1';
                         -- BUG #377 FIX: Use pmmu_opcode (latched F-line opcode) instead of opcode!
                         -- By pmove_decode time, opcode may have been overwritten by prefetch.
                         -- fline_opcode_latch preserves the original F-line opcode EA mode bits.
-                        IF pmmu_opcode(5 downto 3)="001" OR (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') OR (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 1)="01") THEN
+                        ELSIF pmmu_opcode(5 downto 3)="001" OR (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') OR (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 1)="01") THEN
                              trap_illegal <= '1';
                              trapmake <= '1';
                         ELSE
