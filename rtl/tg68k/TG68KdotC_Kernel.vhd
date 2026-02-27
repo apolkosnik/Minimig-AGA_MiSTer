@@ -490,6 +490,10 @@ architecture logic of TG68KdotC_Kernel is
 	signal berr_fault_addr   : std_logic_vector(31 downto 0);  -- Faulting logical address
 	signal berr_ssw          : std_logic_vector(15 downto 0);  -- Special Status Word
 	signal berr_data_out_saved : std_logic_vector(31 downto 0);  -- Data output buffer saved at berr dispatch
+	signal berr_external_rw       : std_logic;                       -- BUG #431 FIX: RW latched at external BERR first-fire (state="11")
+	signal berr_external_fc       : std_logic_vector(2 downto 0);   -- BUG #431 FIX: FC latched at external BERR first-fire
+	signal berr_external_datatype : std_logic_vector(1 downto 0);   -- BUG #433b FIX: datatype latched at external BERR first-fire for SSW.SIZE
+	signal berr_external_addr    : std_logic_vector(31 downto 0);  -- BUG #434 FIX: fault addr latched at external BERR first-fire (addr at state="00" is PC-based)
 	signal useStackframe2	: std_logic;
 	
 	signal set_stop			: bit;
@@ -2722,6 +2726,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					berr_fault_addr <= (others => '0');
 					berr_ssw <= (others => '0');
 					berr_data_out_saved <= (others => '0');
+					berr_external_rw <= '1';
+					berr_external_fc <= (others => '0');
+					berr_external_datatype <= "10";
+					berr_external_addr <= (others => '0');
 					memmask <= "111111";
 					exec_write_back <= '0';
 					-- BUG #70 SIMPLIFICATION: Simple 2-signal initialization
@@ -2886,6 +2894,17 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 							make_berr <= (berr OR make_berr);  -- No PMMU faults when MMU disabled
 							make_mmu_berr <= '0';
 						end if;
+						-- BUG #431 FIX: Latch RW and FC at the first cycle external BERR fires.
+						-- make_berr is registered (one-cycle delay): setinterrupt fires at state="00"
+						-- where pmmu_rw='1' and fc_internal has updated to instruction-fetch FC,
+						-- losing the data-cycle values from state="11" (when BERR actually arrived).
+						-- Capture them here while state is still "11" and values are correct.
+						if berr='1' and make_berr='0' then
+							berr_external_rw <= pmmu_rw;
+							berr_external_fc <= fc_internal;
+							berr_external_datatype <= datatype;  -- BUG #433b FIX: latch at BERR first-fire
+							berr_external_addr <= addr;          -- BUG #434 FIX: latch fault addr at BERR first-fire (state="11")
+						end if;
 					else
 						-- MC68030 Double bus fault detection: bus error/fault during bus error processing
 						-- Per MC68030UM Section 8.4: "If a bus error is detected during exception
@@ -3002,17 +3021,17 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									berr_ssw(7) <= exec_tas OR exec_cas;  -- RM: read-modify-write (TAS/CAS/CAS2)
 									berr_ssw(3) <= '0';   -- Reserved
 								else
-									-- External BERR: use kernel's current state
-									berr_fault_addr <= addr;
-									berr_ssw(2 downto 0) <= fc_internal;
-									berr_ssw(6) <= pmmu_rw;  -- 1=read, 0=write
+									-- External BERR: use fault-time latched state
+									berr_fault_addr <= berr_external_addr;  -- BUG #434 FIX: use addr latched at first-fire, not PC-based addr at state="00"
+									berr_ssw(2 downto 0) <= berr_external_fc;  -- BUG #431 FIX: FC latched at BERR first-fire
+									berr_ssw(6) <= berr_external_rw;           -- BUG #431 FIX: RW latched at BERR first-fire (not stale state="00" value)
 									-- External bus errors are typically data faults (stage C)
 									berr_ssw(15) <= '1';  -- FC=1: stage C data fault
 									berr_ssw(14) <= '0';  -- FB=0: not stage B
 									berr_ssw(13) <= '1';  -- RC=1: stage C bus cycle will be rerun
 									berr_ssw(12) <= '0';  -- RB=0: not stage B
 									berr_ssw(8) <= '1';   -- DF=1
-									case datatype is
+									case berr_external_datatype is  -- BUG #433b FIX: use value latched at BERR first-fire
 										when "00" => berr_ssw(5 downto 4) <= "01";
 										when "01" => berr_ssw(5 downto 4) <= "10";
 										when others => berr_ssw(5 downto 4) <= "00";
