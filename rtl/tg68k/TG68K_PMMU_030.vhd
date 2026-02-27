@@ -179,6 +179,8 @@ architecture rtl of TG68K_PMMU_030 is
   signal atc_buserr : atc_val_t;  -- Bus error cached: invalid/supervisor-violation (per WinUAE)
   signal atc_mru_update_req : std_logic := '0';  -- Request MRU update from translation process
   signal atc_mru_update_idx : integer range 0 to ATC_ENTRIES-1 := 0;  -- Index to update
+  signal atc_mbit_inval_req : std_logic := '0';  -- Request ATC invalidation for M-bit miss (per WinUAE)
+  signal atc_mbit_inval_idx : integer range 0 to ATC_ENTRIES-1 := 0;  -- Index to invalidate
   signal walk_req  : std_logic;
   signal walker_completed : std_logic := '0';
   -- Translation control decoding (TC register fields)
@@ -266,6 +268,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal walk_global    : std_logic := '0'; -- G bit from long-format descriptor (bit 10)
   signal walk_supervisor : std_logic := '0'; -- BUG #157 FIX: Cumulative S bit from TABLE descriptors
   signal walk_write_protect : std_logic := '0'; -- Cumulative WP bit from TABLE descriptors (per MC68030 spec 9.5.2)
+  signal walk_is_root_pointer : std_logic := '0'; -- Root pointer DT=01 early termination (no S/WP/U/M checks)
   signal indirect_addr  : std_logic_vector(31 downto 0) := (others => '0'); -- Target address for indirect descriptor
   signal indirect_target_long : std_logic := '0'; -- BUG #164 FIX: DT=11 indirect -> long-format target
   -- BUG #155 FIX: MC68030 table descriptor limit checking (applies to next level index)
@@ -1340,6 +1343,8 @@ begin
       ptest_walk_no_update <= '0';
       atc_mru_update_req <= '0';
       atc_mru_update_idx <= 0;
+      atc_mbit_inval_req <= '0';
+      atc_mbit_inval_idx <= 0;
       pload_flush_pending <= '0';
     elsif rising_edge(clk) then
       status_tmp := fault_status_reg;
@@ -1347,6 +1352,7 @@ begin
       ptest_done <= '0';
       -- Clear MRU update request pulse
       atc_mru_update_req <= '0';
+      atc_mbit_inval_req <= '0';
       if mmusr_update_ack = '1' then
         mmusr_update_req <= '0';
       end if;
@@ -1469,18 +1475,15 @@ begin
               -- This forces a re-walk that sets M in the physical page descriptor
               -- Per MC68030 spec and WinUAE cpummu30.cpp line 2078
               if atc_fc(i) = fc and
-                 aligned_addr = atc_log_base(i) and
-                 (rw = '1' or atc_attr(i)(1) = '1' or atc_attr(i)(0) = '1' or atc_buserr(i) = '1') then
-                hit := '1';
-                hit_idx := i;
-                -- Debug: Log ATC hit for failing test addresses
-                if addr_log = x"12343000" or addr_log = x"12344000" then
-                  -- report "DEBUG_ATC_HIT: addr=0x" & slv_to_hstring(addr_log) &
-                         -- " hit ATC[" & integer'image(i) & "] base=0x" & slv_to_hstring(atc_log_base(i)) &
-                         -- " shift=" & integer'image(atc_shift(i)) &
-                         -- " aligned_addr=0x" & slv_to_hstring(aligned_addr) &
-                         -- " fc=" & slv_to_string(fc) & " vs atc_fc=" & slv_to_string(atc_fc(i))
-                   --  -- severity note;
+                 aligned_addr = atc_log_base(i) then
+                if rw = '1' or atc_attr(i)(1) = '1' or atc_attr(i)(0) = '1' or atc_buserr(i) = '1' then
+                  hit := '1';
+                  hit_idx := i;
+                else
+                  -- Write with M=0, WP=0, no buserr: invalidate entry (per WinUAE line 2086)
+                  -- This prevents repeated scanning of stale entries on subsequent accesses
+                  atc_mbit_inval_req <= '1';
+                  atc_mbit_inval_idx <= i;
                 end if;
               end if;
             end if;
@@ -1859,9 +1862,31 @@ begin
             end if;
           end loop;
           if hit = '1' then
+            -- BUG #435: Check if this is a bus error ATC entry (cached fault from W_FAULT)
+            -- W_FAULT caches buserr entries AND sets walker_completed. The walker_fault
+            -- handler runs first (higher priority), but walker_completed fires on the next
+            -- cycle. Without this check, buserr entries are treated as valid translations,
+            -- clearing fault_reg and setting addr_phys_reg to garbage (0x00000000).
+            if atc_buserr(hit_idx) = '1' then
+              -- Bus error entry - do NOT treat as valid translation
+              -- fault_reg was already set by the walker_fault handler, preserve it
+              -- addr_phys_reg was already set to saved_addr_log by fault handler
+              -- Just update MMUSR for PTEST visibility
+              status_tmp := encode_mmusr_fault(
+                bus_error => '1',
+                limit_violation => '0',
+                supervisor_violation => '0',
+                write_protect => '0',
+                invalid => '1',
+                modified => '0',
+                transparent => '0',
+                level => atc_level(hit_idx)
+              );
+              mmusr_update_value <= status_tmp;
+              mmusr_update_req <= '1';
             -- Walker filled ATC successfully - check access violations for the original request
             -- BUG #17 FIX: saved_rw='0' is WRITE, saved_rw='1' is READ
-            if saved_rw = '0' and atc_attr(hit_idx)(0) = '1' then
+            elsif saved_rw = '0' and atc_attr(hit_idx)(0) = '1' then
               -- Write to write-protected page - generate fault
               status_tmp := encode_mmusr_fault(
                 bus_error => '0',
@@ -2014,6 +2039,7 @@ begin
     variable tci0, twp0, tci1, twp1 : std_logic;
     -- For CRP/SRP limit checking
     variable lu_flag : std_logic;
+    variable limit_fault : boolean;  -- BUG FIX: Track limit violations within same process cycle
     variable limit_value : unsigned(14 downto 0);
     variable rp_high : std_logic_vector(31 downto 0);
     -- Pseudo-LRU ATC replacement
@@ -2035,6 +2061,7 @@ begin
         atc_page_size(i) <= 12;  -- MC68030: PS=12 (4KB pages)
         atc_attr(i)      <= (others => '0');
         atc_level(i)     <= (others => '0');  -- BUG #412: walk level for MMUSR
+        atc_buserr(i)    <= '0';  -- BUG #436: Initialize bus error flag
       end loop;
       for i in 0 to ATC_ENTRIES-1 loop
         atc_mru(i)   <= '0';
@@ -2062,6 +2089,7 @@ begin
       walk_limit_valid <= '0';  -- BUG #155: Reset limit tracking
       walk_limit_lu    <= '0';
       walk_limit_value <= (others => '0');
+      walk_is_root_pointer <= '0';  -- Root pointer DT=01 flag
       walker_timeout_counter <= 0;  -- BUG #387: Reset timeout counter
     elsif rising_edge(clk) then
       -- BUG #387 FIX: Timeout mechanism to prevent walker deadlocks
@@ -2123,6 +2151,7 @@ begin
             walk_limit_valid <= '0';  -- BUG #155: Clear limit tracking at walk start
             walk_supervisor <= '0';  -- BUG #157: Clear cumulative S bit at walk start
             walk_write_protect <= '0';  -- Clear cumulative WP bit at walk start
+            walk_is_root_pointer <= '0';  -- Not a root pointer early termination by default
             -- Initialize with TC default, will be updated from descriptor
             walk_page_shift <= tc_page_shift;
             walk_page_size  <= tc_page_size;
@@ -2152,7 +2181,18 @@ begin
                   level => "000"
                 );
                 wstate <= W_FAULT;
+              elsif SRP_H(1 downto 0) = "01" then
+                -- MC68030: Root pointer DT=01 is early termination page descriptor.
+                -- The root pointer itself IS the page descriptor - no memory read needed.
+                -- Per WinUAE cpummu30.cpp line 1278-1281 and MC68030 spec.
+                walk_desc_high <= SRP_H;
+                walk_desc_low <= SRP_L;
+                walk_desc <= SRP_L;
+                walk_desc_is_long <= '1';  -- Root pointers are always 64-bit (long format)
+                walk_is_root_pointer <= '1';  -- Skip S/WP/U/M checks at root level
+                wstate <= W_PAGE;
               else
+                walk_is_root_pointer <= '0';
                 wstate <= W_ROOT;
               end if;
             else -- User or supervisor without SRE
@@ -2173,7 +2213,16 @@ begin
                   level => "000"
                 );
                 wstate <= W_FAULT;
+              elsif CRP_H(1 downto 0) = "01" then
+                -- MC68030: Root pointer DT=01 is early termination page descriptor.
+                walk_desc_high <= CRP_H;
+                walk_desc_low <= CRP_L;
+                walk_desc <= CRP_L;
+                walk_desc_is_long <= '1';
+                walk_is_root_pointer <= '1';
+                wstate <= W_PAGE;
               else
+                walk_is_root_pointer <= '0';
                 wstate <= W_ROOT;
               end if;
             end if;
@@ -2181,6 +2230,7 @@ begin
           
         when W_ROOT =>
           -- Read root table descriptor - deadlock-proof design
+          limit_fault := false;  -- BUG FIX: Reset limit fault tracker
           table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           -- MC68030 Root Pointer Limit Check (only for root level)
           -- CRP_H/SRP_H format: L/U[31], Limit[30:16], Reserved[15:1], DT[0]
@@ -2213,6 +2263,7 @@ begin
                      -- " limit(lower)=" & integer'image(to_integer(limit_value)) &
                      -- " (L/U=1, must be >= limit)" severity note;
               wstate <= W_FAULT;
+              limit_fault := true;  -- BUG FIX: Prevent mem_req assertion
             end if;
           else
             -- Upper limit: table_index must be <= limit
@@ -2233,6 +2284,7 @@ begin
                      -- " limit(upper)=" & integer'image(to_integer(limit_value)) &
                      -- " (L/U=0, must be <= limit)" severity note;
               wstate <= W_FAULT;
+              limit_fault := true;  -- BUG FIX: Prevent mem_req assertion
             end if;
           end if;
           desc_addr_v := walk_addr(31 downto 4) & "0000"; -- Align to table boundary
@@ -2251,7 +2303,7 @@ begin
              --  -- severity note;
           end if;
           -- Simple memory request - always deassert req after ack
-          if mem_req = '0' then
+          if mem_req = '0' and not limit_fault then
             mem_req <= '1';
             mem_addr <= desc_addr_v;
             desc_addr_reg <= desc_addr_v;  -- BUG #151 FIX: Save for W_ROOT_LOW to read LOW word at +4
@@ -2426,6 +2478,7 @@ begin
           end if;
         when W_PTR1 =>
           -- Read level 1 table descriptor - deadlock-proof design
+          limit_fault := false;  -- BUG FIX: Reset limit fault tracker
           table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
           -- BUG #409: Stride depends on parent descriptor DT (4 bytes for DT=10, 8 bytes for DT=11)
@@ -2448,6 +2501,7 @@ begin
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
+                  limit_fault := true;  -- BUG FIX: Track limit violation
                 end if;
               else
                 -- Upper limit: table_index must be <= limit
@@ -2459,11 +2513,12 @@ begin
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
+                  limit_fault := true;  -- BUG FIX: Track limit violation
                 end if;
               end if;
             end if;
-            -- Only proceed if no limit violation (wstate unchanged means OK)
-            if wstate = W_PTR1 then
+            -- Only proceed if no limit violation
+            if not limit_fault then
               if saved_addr_log = x"00400000" or saved_addr_log = x"12345000" then
                 -- report "W_PTR1: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr_v)
                  --  -- severity note;
@@ -2651,6 +2706,7 @@ begin
           end if;
         when W_PTR2 =>
           -- Read level 2 table descriptor - deadlock-proof design
+          limit_fault := false;  -- BUG FIX: Reset limit fault tracker
           table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
           -- BUG #409: Stride depends on parent descriptor DT (4 bytes for DT=10, 8 bytes for DT=11)
@@ -2673,6 +2729,7 @@ begin
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
+                  limit_fault := true;  -- BUG FIX: Track limit violation
                 end if;
               else
                 -- Upper limit: table_index must be <= limit
@@ -2684,11 +2741,12 @@ begin
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
+                  limit_fault := true;  -- BUG FIX: Track limit violation
                 end if;
               end if;
             end if;
-            -- Only proceed if no limit violation (wstate unchanged means OK)
-            if wstate = W_PTR2 then
+            -- Only proceed if no limit violation
+            if not limit_fault then
               if saved_addr_log = x"00400000" then
                 -- report "W_PTR2: idx=" & integer'image(table_index) & " addr=0x" & slv_to_hstring(desc_addr_v)
                  --  severity note;
@@ -2882,6 +2940,7 @@ begin
             end if;
           end if;
         when W_PTR3 =>
+          limit_fault := false;  -- BUG FIX: Reset limit fault tracker
           -- Final level - must be page descriptor - deadlock-proof design
           table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
@@ -2905,6 +2964,7 @@ begin
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
+                  limit_fault := true;  -- BUG FIX: Track limit violation
                 end if;
               else
                 -- Upper limit: table_index must be <= limit
@@ -2916,11 +2976,12 @@ begin
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
+                  limit_fault := true;  -- BUG FIX: Track limit violation
                 end if;
               end if;
             end if;
             -- Only proceed if no limit violation (wstate unchanged means OK)
-            if wstate = W_PTR3 then
+            if not limit_fault then
               mem_req <= '1';
               mem_addr <= desc_addr_v;
               desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR3_LOW state
@@ -3087,6 +3148,7 @@ begin
             end if;
           end if;
         when W_PTR4 =>
+          limit_fault := false;  -- BUG FIX: Reset limit fault tracker
           -- Level 4 (TID when FCL=1) - always final level before page descriptor
           table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
           desc_addr_v := walk_addr(31 downto 4) & "0000";
@@ -3110,6 +3172,7 @@ begin
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
+                  limit_fault := true;  -- BUG FIX: Track limit violation
                 end if;
               else
                 -- Upper limit: table_index must be <= limit
@@ -3121,11 +3184,12 @@ begin
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
+                  limit_fault := true;  -- BUG FIX: Track limit violation
                 end if;
               end if;
             end if;
             -- Only proceed if no limit violation (wstate unchanged means OK)
-            if wstate = W_PTR4 then
+            if not limit_fault then
               mem_req <= '1';
               mem_addr <= desc_addr_v;
               desc_addr_reg <= desc_addr_v;  -- Save for use in W_PTR4_LOW state
@@ -3323,7 +3387,7 @@ begin
                    -- " addr=0x" & slv_to_hstring(saved_addr_log) &
                   --  -- " desc=0x" & slv_to_hstring(walk_desc) severity note;
             wstate <= W_FAULT;
-          elsif saved_fc(2) = '0' and walk_supervisor = '1' then
+          elsif saved_fc(2) = '0' and walk_supervisor = '1' and walk_is_root_pointer = '0' then
             -- BUG #157 FIX: Supervisor violation check uses cumulative S bit from TABLE descriptors
             -- Per MC68030 spec: S bit only exists in TABLE descriptors, not PAGE descriptors
             -- User code (FC2=0) cannot access pages reached through supervisor-only tables
@@ -3339,7 +3403,7 @@ begin
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
-          elsif saved_rw = '0' and (walk_desc_high(2) = '1' or walk_write_protect = '1') then
+          elsif saved_rw = '0' and (walk_desc_high(2) = '1' or walk_write_protect = '1') and walk_is_root_pointer = '0' then
             -- Write protection violation - write to write-protected page (saved_rw='0' is WRITE)
             -- WP is at bit 2 in both short and long formats
             walker_fault <= '1';
@@ -3385,6 +3449,7 @@ begin
             end if;
             -- MC68030 early termination limit check (per WinUAE lines 1530-1554)
             -- Check next table level's index against this descriptor's limit field
+            limit_fault := false;  -- BUG FIX: Track early termination limit violation
             if walk_desc_is_long = '1' and walk_level < 4 then
               table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level + 1, tc_initial_shift, tc_page_size, tc_idx_bits);
               if walk_desc_high(31) = '1' and to_unsigned(table_index, 15) < unsigned(walk_desc_high(30 downto 16)) then
@@ -3395,6 +3460,7 @@ begin
                   write_protect => '0', invalid => '1', modified => '0',
                   transparent => '0', level => std_logic_vector(to_unsigned(walk_level, 3)));
                 wstate <= W_FAULT;
+                limit_fault := true;  -- BUG FIX: Prevent U/M logic from overwriting fault
               elsif walk_desc_high(31) = '0' and to_unsigned(table_index, 15) > unsigned(walk_desc_high(30 downto 16)) then
                 -- Upper limit violation: index > limit
                 walker_fault <= '1';
@@ -3403,6 +3469,7 @@ begin
                   write_protect => '0', invalid => '1', modified => '0',
                   transparent => '0', level => std_logic_vector(to_unsigned(walk_level, 3)));
                 wstate <= W_FAULT;
+                limit_fault := true;  -- BUG FIX: Prevent U/M logic from overwriting fault
               end if;
             end if;
             -- Extract attributes - bit positions are same in both formats
@@ -3434,8 +3501,11 @@ begin
             -- BUG #411: PTEST/PLOAD walks must NOT write back U/M bits.
             -- Per MC68030 spec and WinUAE cpummu30.cpp line 1500: only level=0 (normal
             -- translations) write back U/M. PTEST is diagnostic and must not modify descriptors.
-            if ptest_walk_no_update = '1' then
+            if limit_fault then
+              null;  -- BUG FIX: Limit violation already set wstate <= W_FAULT, don't overwrite
+            elsif ptest_walk_no_update = '1' or walk_is_root_pointer = '1' then
               -- BUG #411: PTEST walk - skip U/M writeback, go straight to fill
+              -- Root pointer DT=01: skip U/M writeback (register, not memory-resident)
               if pload_flush_pending = '1' then
                 wstate <= W_PLOAD_FLUSH;
               else
@@ -3578,6 +3648,7 @@ begin
           atc_global(replace_idx)    <= walk_global;
           atc_level(replace_idx)     <= std_logic_vector(to_unsigned(walk_level + 1, 3));
           atc_valid(replace_idx)     <= '1';
+          atc_buserr(replace_idx)    <= '0';  -- BUG #436: Clear bus error flag for successful walk
           -- Pseudo-LRU: set MRU bit, reset all if all become set
           atc_mru(replace_idx) <= '1';
           all_mru_set := true;
@@ -3617,6 +3688,7 @@ begin
           -- Page fault occurred - fault status already set in previous state
           -- Hold walker_fault signal until main process acknowledges it
           -- Don't clear walker_fault here - let main process clear it when consumed
+          mem_req <= '0';  -- BUG FIX: Clear any outstanding memory request to prevent leak
          --  -- report "W_FAULT: Setting walker_completed=1 with fault status=0x" & slv_to_hstring(walker_fault_status) severity note;
           -- Cache fault in ATC (per WinUAE: invalid/supervisor-violation cached with bus_error=true)
           -- This avoids re-walking on repeated accesses to invalid pages
@@ -3671,6 +3743,14 @@ begin
             end if;
           end loop;
         end if;
+      end if;
+      -- Handle ATC M-bit invalidation requests from translation process
+      -- Per WinUAE cpummu30.cpp line 2086: on write with M=0, invalidate the entry
+      -- to avoid repeated scanning of stale entries
+      if atc_mbit_inval_req = '1' then
+        atc_valid(atc_mbit_inval_idx) <= '0';
+        atc_mru(atc_mbit_inval_idx) <= '0';
+        atc_buserr(atc_mbit_inval_idx) <= '0';
       end if;
       -- PFLUSH instruction: Clear ATC when flag is set and walker is idle
       if atc_flush_req = '1' then
