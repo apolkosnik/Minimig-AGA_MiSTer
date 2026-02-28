@@ -285,11 +285,16 @@ entity TG68KdotC_Kernel is
 		debug_pmmu_tt1 : out std_logic_vector(31 downto 0);
 		debug_pmmu_crp_hi : out std_logic_vector(31 downto 0);
 		debug_pmmu_crp_lo : out std_logic_vector(31 downto 0);
+		debug_pmmu_srp_hi : out std_logic_vector(31 downto 0);
+		debug_pmmu_srp_lo : out std_logic_vector(31 downto 0);
 		debug_pmmu_wstate : out std_logic_vector(4 downto 0);
 		debug_pmmu_atc_buserr : out std_logic_vector(21 downto 0);
 		debug_pmmu_atc_valid  : out std_logic_vector(21 downto 0);
 		debug_pmmu_fault_status : out std_logic_vector(15 downto 0);
-		debug_pmmu_saved_addr   : out std_logic_vector(31 downto 0)
+		debug_pmmu_saved_addr   : out std_logic_vector(31 downto 0);
+		debug_pmmu_walk_desc_addr : out std_logic_vector(31 downto 0);
+		debug_pmmu_walk_desc_data : out std_logic_vector(31 downto 0);
+		debug_pmmu_saved_fc       : out std_logic_vector(2 downto 0)
 		);
 end TG68KdotC_Kernel;
 
@@ -756,11 +761,16 @@ BEGIN
       debug_tt1   => debug_pmmu_tt1,
       debug_crp_hi => debug_pmmu_crp_hi,
       debug_crp_lo => debug_pmmu_crp_lo,
+      debug_srp_hi => debug_pmmu_srp_hi,
+      debug_srp_lo => debug_pmmu_srp_lo,
       debug_wstate => debug_pmmu_wstate,
       debug_atc_buserr => debug_pmmu_atc_buserr,
       debug_atc_valid  => debug_pmmu_atc_valid,
       debug_fault_status => debug_pmmu_fault_status,
-      debug_saved_addr   => debug_pmmu_saved_addr
+      debug_saved_addr   => debug_pmmu_saved_addr,
+      debug_walk_desc_addr => debug_pmmu_walk_desc_addr,
+      debug_walk_desc_data => debug_pmmu_walk_desc_data,
+      debug_saved_fc       => debug_pmmu_saved_fc
     );
 
 --   -- PMMU register interface connected (enabled for 68030)

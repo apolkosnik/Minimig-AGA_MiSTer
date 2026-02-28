@@ -1,26 +1,31 @@
-# Poll PMMU debug state via ISSP v4 - with fault MMUSR and saved_addr
+# Poll PMMU debug state via ISSP v6 - CRP+SRP+descriptor+FC debug
 # Usage: quartus_stp -t issp_poll.tcl
 #
-# 374-bit probe layout (MSB first):
-#   [373:342] TC[31:0]
-#   [341:310] TT0[31:0]
-#   [309:278] TT1[31:0]
-#   [277:246] CRP_HI[31:0]
-#   [245:214] CRP_LO[31:0]
-#   [213:209] WSTATE[4:0]
-#   [208]     FAULT
-#   [207]     BUSY
-#   [206:185] ATC_BUSERR[21:0]
-#   [184:163] ATC_VALID[21:0]
-#   [162]     FAULT_LATCHED (sticky)
-#   [161]     WALKER_TIMEOUT_LATCHED (sticky)
-#   [160:129] FAULT_TC[31:0]
-#   [128:97]  FAULT_ADDR[31:0]
-#   [96:92]   FAULT_WSTATE[4:0]
-#   [91:70]   FAULT_ATC_BUSERR[21:0]
-#   [69:48]   FAULT_ATC_VALID[21:0]
-#   [47:32]   FAULT_MMUSR[15:0]
-#   [31:0]    FAULT_SAVED_ADDR[31:0]
+# 505-bit probe layout (MSB first, string index in parens):
+#   [504:473] (0-31)    TC[31:0]
+#   [472:441] (32-63)   TT0[31:0]
+#   [440:409] (64-95)   TT1[31:0]
+#   [408:377] (96-127)  CRP_HI[31:0]
+#   [376:345] (128-159) CRP_LO[31:0]
+#   [344:313] (160-191) SRP_HI[31:0]
+#   [312:281] (192-223) SRP_LO[31:0]
+#   [280:276] (224-228) WSTATE[4:0]
+#   [275]     (229)     FAULT
+#   [274]     (230)     BUSY
+#   [273:252] (231-252) ATC_BUSERR[21:0]
+#   [251:230] (253-274) ATC_VALID[21:0]
+#   [229]     (275)     FAULT_LATCHED (sticky)
+#   [228]     (276)     WALKER_TIMEOUT_LATCHED (sticky)
+#   [227:196] (277-308) FAULT_TC[31:0]
+#   [195:164] (309-340) FAULT_ADDR[31:0]
+#   [163:159] (341-345) FAULT_WSTATE[4:0]
+#   [158:137] (346-367) FAULT_ATC_BUSERR[21:0]
+#   [136:115] (368-389) FAULT_ATC_VALID[21:0]
+#   [114:99]  (390-405) FAULT_MMUSR[15:0]
+#   [98:67]   (406-437) FAULT_SAVED_ADDR[31:0]
+#   [66:35]   (438-469) FAULT_DESC_ADDR[31:0]
+#   [34:3]    (470-501) FAULT_DESC_DATA[31:0]
+#   [2:0]     (502-504) FAULT_FC[2:0]
 
 package require ::quartus::stp
 
@@ -57,14 +62,29 @@ proc wstate_name {val} {
     return "UNK($val)"
 }
 
-# Decode MMUSR bits per MC68030 spec
+# Decode FC value to human-readable name
+proc fc_name {val} {
+    switch $val {
+        0 { return "USR_DATA(0)" }
+        1 { return "USR_DATA(1)" }
+        2 { return "USR_PROG(2)" }
+        3 { return "USR_PROG(3)" }
+        4 { return "SV_DATA(4)" }
+        5 { return "SV_DATA(5)" }
+        6 { return "SV_PROG(6)" }
+        7 { return "CPU_SPACE(7)" }
+        default { return "UNK($val)" }
+    }
+}
+
+# Decode MMUSR bits per MC68030 spec (section 9.2.7)
 proc decode_mmusr {val} {
     set b    [expr {($val >> 15) & 1}]
     set l    [expr {($val >> 14) & 1}]
     set s    [expr {($val >> 13) & 1}]
-    set wp   [expr {($val >> 12) & 1}]
-    set inv  [expr {($val >> 11) & 1}]
-    set m    [expr {($val >> 10) & 1}]
+    set wp   [expr {($val >> 11) & 1}]
+    set inv  [expr {($val >> 10) & 1}]
+    set m    [expr {($val >> 9) & 1}]
     set t    [expr {($val >> 6) & 1}]
     set lvl  [expr {$val & 7}]
     set parts {}
@@ -73,13 +93,27 @@ proc decode_mmusr {val} {
     if {$s}   {lappend parts "S"}
     if {$wp}  {lappend parts "WP"}
     if {$inv} {lappend parts "I"}
-    if {$m}   {lappend parts "M"}
     if {$t}   {lappend parts "T"}
     lappend parts "LVL=$lvl"
     return [join $parts ","]
 }
 
-puts "=== PMMU Debug Poller v4 (fault MMUSR + saved_addr) ==="
+# Decode TC register fields
+proc decode_tc {hex} {
+    scan $hex %x val
+    set e   [expr {($val >> 31) & 1}]
+    set sre [expr {($val >> 25) & 1}]
+    set fcl [expr {($val >> 24) & 1}]
+    set ps  [expr {($val >> 20) & 0xF}]
+    set is  [expr {($val >> 16) & 0xF}]
+    set tia [expr {($val >> 12) & 0xF}]
+    set tib [expr {($val >> 8) & 0xF}]
+    set tic [expr {($val >> 4) & 0xF}]
+    set tid [expr {$val & 0xF}]
+    return "E=$e,SRE=$sre,FCL=$fcl,PS=$ps,IS=$is,TIA=$tia,TIB=$tib,TIC=$tic,TID=$tid"
+}
+
+puts "=== PMMU Debug Poller v6 (CRP+SRP+descriptor+FC) ==="
 puts "Polling every 500ms. Ctrl+C to stop."
 puts ""
 
@@ -88,7 +122,7 @@ start_insystem_source_probe -hardware_name $hw_name -device_name $dev_name
 set prev_bin ""
 set poll_count 0
 set log_file [open "issp_log.txt" w]
-puts $log_file "# PMMU ISSP Poll Log v4 - [clock format [clock seconds]]"
+puts $log_file "# PMMU ISSP Poll Log v6 - [clock format [clock seconds]]"
 flush $log_file
 
 while {1} {
@@ -99,8 +133,8 @@ while {1} {
         set len [string length $probe_bin]
         set ts [clock format [clock seconds] -format "%H:%M:%S"]
 
-        if {$len < 374} {
-            set line [format "%5d  %s  ERROR: probe too short (%d bits)" $poll_count $ts $len]
+        if {$len < 505} {
+            set line [format "%5d  %s  ERROR: probe too short (%d bits, need 505)" $poll_count $ts $len]
             puts $line
             puts $log_file $line
             flush $log_file
@@ -109,30 +143,35 @@ while {1} {
             continue
         }
 
-        # Parse live state (offsets from MSB-first 374-bit string)
-        set tc_hex  [bin2hex [string range $probe_bin 0 31]]
-        set tt0_hex [bin2hex [string range $probe_bin 32 63]]
-        set tt1_hex [bin2hex [string range $probe_bin 64 95]]
+        # Parse live state
+        set tc_hex    [bin2hex [string range $probe_bin 0 31]]
+        set tt0_hex   [bin2hex [string range $probe_bin 32 63]]
+        set tt1_hex   [bin2hex [string range $probe_bin 64 95]]
         set crphi_hex [bin2hex [string range $probe_bin 96 127]]
         set crplo_hex [bin2hex [string range $probe_bin 128 159]]
-        set wstate [wstate_name [bin2dec [string range $probe_bin 160 164]]]
-        set fault [string index $probe_bin 165]
-        set busy  [string index $probe_bin 166]
-        set atc_buserr [string range $probe_bin 167 188]
-        set atc_valid  [string range $probe_bin 189 210]
+        set srphi_hex [bin2hex [string range $probe_bin 160 191]]
+        set srplo_hex [bin2hex [string range $probe_bin 192 223]]
+        set wstate    [wstate_name [bin2dec [string range $probe_bin 224 228]]]
+        set fault     [string index $probe_bin 229]
+        set busy      [string index $probe_bin 230]
+        set atc_buserr [string range $probe_bin 231 252]
+        set atc_valid  [string range $probe_bin 253 274]
 
         # Parse sticky state
-        set fl  [string index $probe_bin 211]
-        set wtl [string index $probe_bin 212]
-        set fault_tc_hex   [bin2hex [string range $probe_bin 213 244]]
-        set fault_addr_hex [bin2hex [string range $probe_bin 245 276]]
-        set fault_wstate   [wstate_name [bin2dec [string range $probe_bin 277 281]]]
-        set fault_atc_buserr [string range $probe_bin 282 303]
-        set fault_atc_valid  [string range $probe_bin 304 325]
-        set fault_mmusr_bin  [string range $probe_bin 326 341]
+        set fl  [string index $probe_bin 275]
+        set wtl [string index $probe_bin 276]
+        set fault_tc_hex     [bin2hex [string range $probe_bin 277 308]]
+        set fault_addr_hex   [bin2hex [string range $probe_bin 309 340]]
+        set fault_wstate     [wstate_name [bin2dec [string range $probe_bin 341 345]]]
+        set fault_atc_buserr [string range $probe_bin 346 367]
+        set fault_atc_valid  [string range $probe_bin 368 389]
+        set fault_mmusr_bin  [string range $probe_bin 390 405]
         set fault_mmusr_val  [bin2dec $fault_mmusr_bin]
         set fault_mmusr_hex  [bin2hex $fault_mmusr_bin]
-        set fault_saved_addr [bin2hex [string range $probe_bin 342 373]]
+        set fault_saved_addr [bin2hex [string range $probe_bin 406 437]]
+        set fault_desc_addr  [bin2hex [string range $probe_bin 438 469]]
+        set fault_desc_data  [bin2hex [string range $probe_bin 470 501]]
+        set fault_fc_val     [bin2dec [string range $probe_bin 502 504]]
 
         # Count buserr entries
         set be_count 0
@@ -140,8 +179,10 @@ while {1} {
             if {[string index $atc_buserr $i] eq "1"} { incr be_count }
         }
 
-        set line [format "%5d  %s  TC=%s TT0=%s CRP=%s:%s W=%-12s F=%s B=%s BE=%d/%s V=%s FL=%s WTL=%s" \
-            $poll_count $ts $tc_hex $tt0_hex $crphi_hex $crplo_hex $wstate $fault $busy \
+        set line [format "%5d  %s  TC=%s TT0=%s TT1=%s CRP=%s:%s SRP=%s:%s W=%-12s F=%s B=%s BE=%d/%s V=%s FL=%s WTL=%s" \
+            $poll_count $ts $tc_hex $tt0_hex $tt1_hex \
+            $crphi_hex $crplo_hex $srphi_hex $srplo_hex \
+            $wstate $fault $busy \
             $be_count $atc_buserr $atc_valid $fl $wtl]
 
         puts $line
@@ -156,9 +197,14 @@ while {1} {
                 if {[string index $fault_atc_buserr $i] eq "1"} { incr fbe_count }
             }
             set mmusr_decode [decode_mmusr $fault_mmusr_val]
-            set alert [format "*** FAULT *** ADDR=%s SAVED_ADDR=%s TC=%s W=%s MMUSR=%s(%s) ATC_BUSERR=%d/%s ATC_VALID=%s" \
-                $fault_addr_hex $fault_saved_addr $fault_tc_hex $fault_wstate \
+            set tc_decode [decode_tc $fault_tc_hex]
+            set fc_decode [fc_name $fault_fc_val]
+            set alert [format "*** FAULT *** ADDR=%s SAVED_ADDR=%s FC=%s TC=%s(%s) W=%s MMUSR=%s(%s) DESC_ADDR=%s DESC_DATA=%s ATC_BUSERR=%d/%s ATC_VALID=%s" \
+                $fault_addr_hex $fault_saved_addr \
+                $fc_decode \
+                $fault_tc_hex $tc_decode $fault_wstate \
                 $fault_mmusr_hex $mmusr_decode \
+                $fault_desc_addr $fault_desc_data \
                 $fbe_count $fault_atc_buserr $fault_atc_valid]
             puts $alert
             puts $log_file $alert

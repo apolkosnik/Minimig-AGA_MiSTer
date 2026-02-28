@@ -384,20 +384,33 @@ reg         pmmu_walker_ack_p;
 reg  [31:0] pmmu_walker_data_p;
 reg         pmmu_walker_berr_p;  // BUG #156 FIX: Bus error during table walk (sets MMUSR B bit)
 
+// Chip bus timeout BERR mechanism
+// When chip SM is stuck at stage 2 (waiting for DTACK) for too long, generate a bus error
+// instead of hanging forever. This happens when MMU maps to unmapped physical addresses.
+reg  [8:0]  chip_bus_timeout_cnt;  // 512 cycles timeout (~4.5us at 114MHz)
+reg         cpu_bus_berr;          // Bus error signal to kernel (16-cycle pulse)
+reg  [3:0]  berr_pulse_cnt;       // BERR pulse duration counter
+reg         chip_abort_latch;     // One-shot: prevent re-firing during BERR pulse
+
 // SignalTap debug registers (from PMMU via Kernel)
 // noprune prevents Quartus from removing undriven-output registers
 // preserve keeps the signal name for Node Finder
 wire [31:0] stp_pmmu_tc_w, stp_pmmu_tt0_w, stp_pmmu_tt1_w;
 wire [31:0] stp_pmmu_crp_hi_w, stp_pmmu_crp_lo_w;
+wire [31:0] stp_pmmu_srp_hi_w, stp_pmmu_srp_lo_w;
 wire  [4:0] stp_pmmu_wstate_w;
 wire [21:0] stp_atc_buserr_w, stp_atc_valid_w;
 wire [15:0] stp_fault_status_w;
 wire [31:0] stp_saved_addr_w;
+wire [31:0] stp_walk_desc_addr_w, stp_walk_desc_data_w;
+wire  [2:0] stp_saved_fc_w;
 (* noprune, preserve *) reg [31:0] stp_pmmu_tc;
 (* noprune, preserve *) reg [31:0] stp_pmmu_tt0;
 (* noprune, preserve *) reg [31:0] stp_pmmu_tt1;
 (* noprune, preserve *) reg [31:0] stp_pmmu_crp_hi;
 (* noprune, preserve *) reg [31:0] stp_pmmu_crp_lo;
+(* noprune, preserve *) reg [31:0] stp_pmmu_srp_hi;
+(* noprune, preserve *) reg [31:0] stp_pmmu_srp_lo;
 (* noprune, preserve *) reg  [4:0] stp_pmmu_wstate;
 (* noprune, preserve *) reg        stp_pmmu_fault;
 (* noprune, preserve *) reg        stp_pmmu_busy;
@@ -416,12 +429,17 @@ wire [31:0] stp_saved_addr_w;
 // Sticky: latch fault status (MMUSR format) and walker's saved_addr at fault time
 (* noprune, preserve *) reg [15:0] stp_fault_mmusr;
 (* noprune, preserve *) reg [31:0] stp_fault_saved_addr;
+(* noprune, preserve *) reg [31:0] stp_fault_desc_addr;
+(* noprune, preserve *) reg [31:0] stp_fault_desc_data;
+(* noprune, preserve *) reg  [2:0] stp_fault_fc;
 always @(posedge clk) begin
 	stp_pmmu_tc     <= stp_pmmu_tc_w;
 	stp_pmmu_tt0    <= stp_pmmu_tt0_w;
 	stp_pmmu_tt1    <= stp_pmmu_tt1_w;
 	stp_pmmu_crp_hi <= stp_pmmu_crp_hi_w;
 	stp_pmmu_crp_lo <= stp_pmmu_crp_lo_w;
+	stp_pmmu_srp_hi <= stp_pmmu_srp_hi_w;
+	stp_pmmu_srp_lo <= stp_pmmu_srp_lo_w;
 	stp_pmmu_wstate <= stp_pmmu_wstate_w;
 	stp_pmmu_fault  <= pmmu_fault_p;
 	stp_pmmu_busy   <= pmmu_busy_p;
@@ -438,6 +456,9 @@ always @(posedge clk) begin
 		stp_fault_atc_valid <= 0;
 		stp_fault_mmusr <= 0;
 		stp_fault_saved_addr <= 0;
+		stp_fault_desc_addr <= 0;
+		stp_fault_desc_data <= 0;
+		stp_fault_fc <= 0;
 	end else begin
 		if (pmmu_fault_p && !stp_fault_latched) begin
 			stp_fault_latched <= 1;
@@ -448,6 +469,9 @@ always @(posedge clk) begin
 			stp_fault_atc_valid  <= stp_atc_valid_w;
 			stp_fault_mmusr <= stp_fault_status_w;
 			stp_fault_saved_addr <= stp_saved_addr_w;
+			stp_fault_desc_addr <= stp_walk_desc_addr_w;
+			stp_fault_desc_data <= stp_walk_desc_data_w;
+			stp_fault_fc <= stp_saved_fc_w;
 		end
 		if (walker_timeout_error && !stp_walker_timeout_latched) begin
 			stp_walker_timeout_latched <= 1;
@@ -459,6 +483,9 @@ always @(posedge clk) begin
 				stp_fault_atc_valid  <= stp_atc_valid_w;
 				stp_fault_mmusr <= stp_fault_status_w;
 				stp_fault_saved_addr <= stp_saved_addr_w;
+				stp_fault_desc_addr <= stp_walk_desc_addr_w;
+				stp_fault_desc_data <= stp_walk_desc_data_w;
+				stp_fault_fc <= stp_saved_fc_w;
 			end
 		end
 	end
@@ -466,29 +493,35 @@ end
 
 // In-System Sources and Probes (ISSP) for JTAG readback of PMMU debug state
 // Probe layout (MSB first):
-//   TC[31:0] + TT0[31:0] + TT1[31:0] + CRP_HI[31:0] + CRP_LO[31:0] = 160
+//   TC[31:0] + TT0[31:0] + TT1[31:0] = 96
+//   + CRP_HI[31:0] + CRP_LO[31:0] + SRP_HI[31:0] + SRP_LO[31:0] = 128
 //   + WSTATE[4:0] + FAULT + BUSY = 7
 //   + ATC_BUSERR[21:0] + ATC_VALID[21:0] = 44
 //   + FAULT_LATCHED + WALKER_TIMEOUT_LATCHED = 2
 //   + FAULT_TC[31:0] + FAULT_ADDR[31:0] + FAULT_WSTATE[4:0] = 69
 //   + FAULT_ATC_BUSERR[21:0] + FAULT_ATC_VALID[21:0] = 44
 //   + FAULT_MMUSR[15:0] + FAULT_SAVED_ADDR[31:0] = 48
-//   Total = 374
+//   + FAULT_DESC_ADDR[31:0] + FAULT_DESC_DATA[31:0] = 64
+//   + FAULT_FC[2:0] = 3
+//   Total = 505
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (0),
 	.instance_id             ("PMMU"),
-	.probe_width             (374),
+	.probe_width             (505),
 	.source_width            (0),
 	.enable_metastability    ("YES")
 ) pmmu_issp (
-	.probe ({stp_pmmu_tc, stp_pmmu_tt0, stp_pmmu_tt1, stp_pmmu_crp_hi, stp_pmmu_crp_lo,
+	.probe ({stp_pmmu_tc, stp_pmmu_tt0, stp_pmmu_tt1,
+	         stp_pmmu_crp_hi, stp_pmmu_crp_lo, stp_pmmu_srp_hi, stp_pmmu_srp_lo,
 	         stp_pmmu_wstate, stp_pmmu_fault, stp_pmmu_busy,
 	         stp_atc_buserr, stp_atc_valid,
 	         stp_fault_latched, stp_walker_timeout_latched,
 	         stp_fault_tc, stp_fault_addr, stp_fault_wstate,
 	         stp_fault_atc_buserr, stp_fault_atc_valid,
-	         stp_fault_mmusr, stp_fault_saved_addr})
+	         stp_fault_mmusr, stp_fault_saved_addr,
+	         stp_fault_desc_addr, stp_fault_desc_data,
+	         stp_fault_fc})
 );
 
 // PMMU walker address mux signals (for bus arbitration)
@@ -563,7 +596,9 @@ cpu_inst_p
   // MC68030 bus fault: pmmu_fault_p bypasses pmmu_busy_p stall so the kernel can
   // advance to process the fault (accumulate make_berr, detect double bus fault).
   // Bus accesses are suppressed by pmmu_suppress_bus, so no stray writes occur.
-  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit) | pmmu_fault_p | walker_timeout_error | ~reset) & (~pmmu_walker_req_p | ~reset | walker_timeout_error) & (~pmmu_busy_p | pmmu_fault_p | walker_timeout_error | ~reset)),
+  // cpu_bus_berr: chip bus timeout unblocks CPU to process bus error exception
+  .clkena_in((~cpu_req | chipready | ramready | fastchip_ready | (USE_68030_CACHE & cache_hit) | pmmu_fault_p | cpu_bus_berr | walker_timeout_error | ~reset) & (~pmmu_walker_req_p | ~reset | walker_timeout_error) & (~pmmu_busy_p | pmmu_fault_p | walker_timeout_error | ~reset)),
+  .berr(cpu_bus_berr),  // Chip bus timeout -> bus error exception
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -625,7 +660,12 @@ cpu_inst_p
   .debug_pmmu_atc_buserr(stp_atc_buserr_w),
   .debug_pmmu_atc_valid(stp_atc_valid_w),
   .debug_pmmu_fault_status(stp_fault_status_w),
-  .debug_pmmu_saved_addr(stp_saved_addr_w)
+  .debug_pmmu_saved_addr(stp_saved_addr_w),
+  .debug_pmmu_srp_hi(stp_pmmu_srp_hi_w),
+  .debug_pmmu_srp_lo(stp_pmmu_srp_lo_w),
+  .debug_pmmu_walk_desc_addr(stp_walk_desc_addr_w),
+  .debug_pmmu_walk_desc_data(stp_walk_desc_data_w),
+  .debug_pmmu_saved_fc(stp_saved_fc_w)
 );
 
 wire [15:0] cpu_dout_o;
@@ -1232,7 +1272,8 @@ wire walker_chip_cycle_active = USE_68030_CACHE && walker_active && walker_addr_
 always @(posedge clk) begin
 	// BUG #135 FIX: Include walker chip RAM access in chipreq
 	// MC68030 bus fault: suppress chip bus when PMMU is translating or faulted
-	chipreq <= (cpu_req & ~ramsel & ~fastchip_selack & ~pmmu_suppress_bus) | walker_chip_ram;
+	// cpu_bus_berr: suppress chipreq during BERR pulse to prevent re-issuing the timed-out access
+	chipreq <= (cpu_req & ~ramsel & ~fastchip_selack & ~pmmu_suppress_bus & ~cpu_bus_berr) | walker_chip_ram;
 	cpu_ipl <= ipl_i;
 end
 
@@ -1290,10 +1331,55 @@ always @(negedge clk, negedge reset) begin
 							c_lds <= 1;
 							ready <= 1;
 							chip_stage <= 3;
+						end else if (cpu_bus_berr) begin
+							// Bus timeout: abort cycle without claiming success.
+							// CPU is unblocked via cpu_bus_berr in clkena_in.
+							// Do NOT set ready=1 - no fake chipready.
+							c_as <= 1;
+							c_rw <= 1;
+							c_uds <= 1;
+							c_lds <= 1;
+							chip_stage <= 3;
 						end
 					end
 				3: chip_stage <= 0;
 			endcase
+		end
+	end
+end
+
+// Chip bus timeout BERR: detect hung chip bus accesses
+// When chip SM is stuck at stage 2 for 512 cycles (~4.5us at 114MHz),
+// generate a bus error to recover the CPU instead of hanging forever.
+// This happens when MMU remaps to unmapped physical addresses.
+always @(posedge clk or negedge reset) begin
+	if (~reset) begin
+		chip_bus_timeout_cnt <= 0;
+		cpu_bus_berr <= 0;
+		berr_pulse_cnt <= 0;
+		chip_abort_latch <= 0;
+	end else begin
+		// Count while chip SM is at stage 2 (waiting for DTACK)
+		// Only fire once per hung cycle (chip_abort_latch prevents re-fire)
+		if (chip_stage == 2 && !chip_abort_latch && !cpu_bus_berr) begin
+			if (chip_bus_timeout_cnt == 9'd511) begin
+				cpu_bus_berr <= 1;
+				berr_pulse_cnt <= 4'd15;  // 16-cycle BERR pulse
+				chip_abort_latch <= 1;
+			end else begin
+				chip_bus_timeout_cnt <= chip_bus_timeout_cnt + 1;
+			end
+		end else if (chip_stage != 2) begin
+			chip_bus_timeout_cnt <= 0;
+			chip_abort_latch <= 0;
+		end
+
+		// BERR pulse countdown
+		if (cpu_bus_berr) begin
+			if (berr_pulse_cnt == 0)
+				cpu_bus_berr <= 0;
+			else
+				berr_pulse_cnt <= berr_pulse_cnt - 1;
 		end
 	end
 end

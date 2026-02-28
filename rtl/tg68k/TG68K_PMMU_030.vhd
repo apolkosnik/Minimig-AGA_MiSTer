@@ -65,11 +65,16 @@ entity TG68K_PMMU_030 is
     debug_tt1 : out std_logic_vector(31 downto 0);
     debug_crp_hi : out std_logic_vector(31 downto 0);
     debug_crp_lo : out std_logic_vector(31 downto 0);
+    debug_srp_hi : out std_logic_vector(31 downto 0);
+    debug_srp_lo : out std_logic_vector(31 downto 0);
     debug_wstate : out std_logic_vector(4 downto 0);
     debug_atc_buserr : out std_logic_vector(21 downto 0);
     debug_atc_valid  : out std_logic_vector(21 downto 0);
     debug_fault_status : out std_logic_vector(15 downto 0);
-    debug_saved_addr   : out std_logic_vector(31 downto 0)
+    debug_saved_addr   : out std_logic_vector(31 downto 0);
+    debug_walk_desc_addr : out std_logic_vector(31 downto 0);
+    debug_walk_desc_data : out std_logic_vector(31 downto 0);
+    debug_saved_fc       : out std_logic_vector(2 downto 0)
   );
 end TG68K_PMMU_030;
 architecture rtl of TG68K_PMMU_030 is
@@ -1200,7 +1205,11 @@ begin
   debug_tt1 <= TT1;
   debug_crp_hi <= CRP_H;
   debug_crp_lo <= CRP_L;
+  debug_srp_hi <= SRP_H;
+  debug_srp_lo <= SRP_L;
   debug_wstate <= std_logic_vector(to_unsigned(walk_state_t'pos(wstate), 5));
+  debug_walk_desc_addr <= desc_addr_reg;
+  debug_walk_desc_data <= walk_desc;
   -- ATC debug: expose buserr and valid flags for all 22 entries
   gen_atc_debug: for i in 0 to ATC_ENTRIES-1 generate
     debug_atc_buserr(i) <= atc_buserr(i);
@@ -1208,6 +1217,7 @@ begin
   end generate;
   debug_fault_status <= debug_fault_status_latch;
   debug_saved_addr   <= saved_addr_log;
+  debug_saved_fc     <= saved_fc;
   -- DEBUG: Monitor all PMMU register reads (disabled for simulation speed)
   -- process(reg_sel, reg_part, TC, TT0, TT1, SRP_H, SRP_L, CRP_H, CRP_L, MMUSR)
   -- begin ... end process;
