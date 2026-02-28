@@ -58,7 +58,18 @@ entity TG68K_PMMU_030 is
     -- PTEST Support
     ptest_desc_addr : out std_logic_vector(31 downto 0); -- Physical address of last descriptor (for A-bit)
     -- Debug
-    debug_mmusr : out std_logic_vector(15 downto 0)
+    debug_mmusr : out std_logic_vector(15 downto 0);
+    -- SignalTap debug ports
+    debug_tc  : out std_logic_vector(31 downto 0);
+    debug_tt0 : out std_logic_vector(31 downto 0);
+    debug_tt1 : out std_logic_vector(31 downto 0);
+    debug_crp_hi : out std_logic_vector(31 downto 0);
+    debug_crp_lo : out std_logic_vector(31 downto 0);
+    debug_wstate : out std_logic_vector(4 downto 0);
+    debug_atc_buserr : out std_logic_vector(21 downto 0);
+    debug_atc_valid  : out std_logic_vector(21 downto 0);
+    debug_fault_status : out std_logic_vector(15 downto 0);
+    debug_saved_addr   : out std_logic_vector(31 downto 0)
   );
 end TG68K_PMMU_030;
 architecture rtl of TG68K_PMMU_030 is
@@ -137,6 +148,10 @@ architecture rtl of TG68K_PMMU_030 is
   signal fault_rw_reg       : std_logic := '1';                                   -- BUG #414: RW at fault time
   signal fault_is_insn_reg  : std_logic := '0';                                   -- BUG #414: Instruction fetch flag
   
+  -- Debug: sticky fault status latch (captures MMUSR at exact moment of fault)
+  signal debug_fault_status_latch : std_logic_vector(15 downto 0) := (others => '0');
+  signal debug_fault_status_valid : std_logic := '0';  -- Set once, never cleared (sticky)
+
   -- Walker fault signals (driven only by walker)
   signal walker_fault       : std_logic := '0';
   signal walker_fault_status : std_logic_vector(31 downto 0) := (others => '0');
@@ -1179,6 +1194,20 @@ begin
               X"0000" & MMUSR(15 downto 0) when reg_sel = "11000" else
               (others => '0');
   debug_mmusr <= MMUSR(15 downto 0);
+  -- SignalTap debug outputs
+  debug_tc  <= TC;
+  debug_tt0 <= TT0;
+  debug_tt1 <= TT1;
+  debug_crp_hi <= CRP_H;
+  debug_crp_lo <= CRP_L;
+  debug_wstate <= std_logic_vector(to_unsigned(walk_state_t'pos(wstate), 5));
+  -- ATC debug: expose buserr and valid flags for all 22 entries
+  gen_atc_debug: for i in 0 to ATC_ENTRIES-1 generate
+    debug_atc_buserr(i) <= atc_buserr(i);
+    debug_atc_valid(i)  <= atc_valid(i);
+  end generate;
+  debug_fault_status <= debug_fault_status_latch;
+  debug_saved_addr   <= saved_addr_log;
   -- DEBUG: Monitor all PMMU register reads (disabled for simulation speed)
   -- process(reg_sel, reg_part, TC, TT0, TT1, SRP_H, SRP_L, CRP_H, CRP_L, MMUSR)
   -- begin ... end process;
@@ -1326,6 +1355,8 @@ begin
       fault_addr_reg <= (others => '0');
       fault_fc_reg <= (others => '0');
       fault_rw_reg <= '1';
+      debug_fault_status_latch <= (others => '0');
+      debug_fault_status_valid <= '0';
       fault_is_insn_reg <= '0';
       saved_addr_log <= (others => '0');
       saved_fc <= (others => '0');
@@ -1513,6 +1544,11 @@ begin
               );
               fault_reg <= '1';
               fault_status_reg <= status_tmp;
+              -- Debug: capture fault status in sticky latch
+              if debug_fault_status_valid = '0' then
+                debug_fault_status_latch <= status_tmp(15 downto 0);
+                debug_fault_status_valid <= '1';
+              end if;
               fault_addr_reg <= addr_log;
               fault_fc_reg <= fc;
               fault_rw_reg <= rw;
@@ -1548,6 +1584,11 @@ begin
               fault_is_insn_reg <= is_insn;     -- BUG #414: Latch instruction fetch flag
               mmusr_update_value <= status_tmp;
               mmusr_update_req <= '1';
+              -- Debug: capture fault status in sticky latch
+              if debug_fault_status_valid = '0' then
+                debug_fault_status_latch <= status_tmp(15 downto 0);
+                debug_fault_status_valid <= '1';
+              end if;
               -- CRITICAL FIX: Output address even on fault
               phys_base := unsigned(atc_phys_base(hit_idx));
               offset    := unsigned(addr_log) - unsigned(atc_log_base(hit_idx));
@@ -1579,6 +1620,11 @@ begin
               fault_is_insn_reg <= is_insn;     -- BUG #414: Latch instruction fetch flag
               mmusr_update_value <= status_tmp;
               mmusr_update_req <= '1';
+              -- Debug: capture fault status in sticky latch
+              if debug_fault_status_valid = '0' then
+                debug_fault_status_latch <= status_tmp(15 downto 0);
+                debug_fault_status_valid <= '1';
+              end if;
               -- CRITICAL FIX: Output address even on supervisor fault
               phys_base := unsigned(atc_phys_base(hit_idx));
               offset    := unsigned(addr_log) - unsigned(atc_log_base(hit_idx));
@@ -1815,6 +1861,11 @@ begin
         if instr_walk_pending = '0' and (req = '0' or addr_log = saved_addr_log) then
           fault_reg <= '1';
           fault_status_reg <= status_tmp;
+          -- Debug: capture fault status in sticky latch
+          if debug_fault_status_valid = '0' then
+            debug_fault_status_latch <= status_tmp(15 downto 0);
+            debug_fault_status_valid <= '1';
+          end if;
           fault_addr_reg <= saved_addr_log;     -- BUG #415: Latch faulting logical address
           fault_fc_reg <= saved_fc;             -- BUG #414: Latch FC at fault time
           fault_rw_reg <= saved_rw;             -- BUG #414: Latch RW at fault time
@@ -2027,6 +2078,7 @@ begin
       if wstate /= W_IDLE then
         walk_req <= '0';
       end if;
+      -- Debug sticky latch: captured at fault sites above (alongside fault_reg <= '1')
     end if;
   end process;
   -- Walker request generation integrated into main translation process

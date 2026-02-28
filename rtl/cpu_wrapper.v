@@ -384,6 +384,113 @@ reg         pmmu_walker_ack_p;
 reg  [31:0] pmmu_walker_data_p;
 reg         pmmu_walker_berr_p;  // BUG #156 FIX: Bus error during table walk (sets MMUSR B bit)
 
+// SignalTap debug registers (from PMMU via Kernel)
+// noprune prevents Quartus from removing undriven-output registers
+// preserve keeps the signal name for Node Finder
+wire [31:0] stp_pmmu_tc_w, stp_pmmu_tt0_w, stp_pmmu_tt1_w;
+wire [31:0] stp_pmmu_crp_hi_w, stp_pmmu_crp_lo_w;
+wire  [4:0] stp_pmmu_wstate_w;
+wire [21:0] stp_atc_buserr_w, stp_atc_valid_w;
+wire [15:0] stp_fault_status_w;
+wire [31:0] stp_saved_addr_w;
+(* noprune, preserve *) reg [31:0] stp_pmmu_tc;
+(* noprune, preserve *) reg [31:0] stp_pmmu_tt0;
+(* noprune, preserve *) reg [31:0] stp_pmmu_tt1;
+(* noprune, preserve *) reg [31:0] stp_pmmu_crp_hi;
+(* noprune, preserve *) reg [31:0] stp_pmmu_crp_lo;
+(* noprune, preserve *) reg  [4:0] stp_pmmu_wstate;
+(* noprune, preserve *) reg        stp_pmmu_fault;
+(* noprune, preserve *) reg        stp_pmmu_busy;
+// Sticky fault latch: captures fault and holds until JTAG reads new build
+(* noprune, preserve *) reg        stp_fault_latched;
+(* noprune, preserve *) reg        stp_walker_timeout_latched;
+// Latch PMMU state at moment of fault
+(* noprune, preserve *) reg [31:0] stp_fault_tc;
+(* noprune, preserve *) reg [31:0] stp_fault_addr;
+(* noprune, preserve *) reg  [4:0] stp_fault_wstate;
+(* noprune, preserve *) reg [21:0] stp_atc_buserr;
+(* noprune, preserve *) reg [21:0] stp_atc_valid;
+// Sticky: latch ATC buserr state at fault time
+(* noprune, preserve *) reg [21:0] stp_fault_atc_buserr;
+(* noprune, preserve *) reg [21:0] stp_fault_atc_valid;
+// Sticky: latch fault status (MMUSR format) and walker's saved_addr at fault time
+(* noprune, preserve *) reg [15:0] stp_fault_mmusr;
+(* noprune, preserve *) reg [31:0] stp_fault_saved_addr;
+always @(posedge clk) begin
+	stp_pmmu_tc     <= stp_pmmu_tc_w;
+	stp_pmmu_tt0    <= stp_pmmu_tt0_w;
+	stp_pmmu_tt1    <= stp_pmmu_tt1_w;
+	stp_pmmu_crp_hi <= stp_pmmu_crp_hi_w;
+	stp_pmmu_crp_lo <= stp_pmmu_crp_lo_w;
+	stp_pmmu_wstate <= stp_pmmu_wstate_w;
+	stp_pmmu_fault  <= pmmu_fault_p;
+	stp_pmmu_busy   <= pmmu_busy_p;
+	stp_atc_buserr  <= stp_atc_buserr_w;
+	stp_atc_valid   <= stp_atc_valid_w;
+	// Sticky latches - once set, stay set forever
+	if (~reset) begin
+		stp_fault_latched <= 0;
+		stp_walker_timeout_latched <= 0;
+		stp_fault_tc <= 0;
+		stp_fault_addr <= 0;
+		stp_fault_wstate <= 0;
+		stp_fault_atc_buserr <= 0;
+		stp_fault_atc_valid <= 0;
+		stp_fault_mmusr <= 0;
+		stp_fault_saved_addr <= 0;
+	end else begin
+		if (pmmu_fault_p && !stp_fault_latched) begin
+			stp_fault_latched <= 1;
+			stp_fault_tc <= stp_pmmu_tc_w;
+			stp_fault_addr <= cpu_addr_p;
+			stp_fault_wstate <= stp_pmmu_wstate_w;
+			stp_fault_atc_buserr <= stp_atc_buserr_w;
+			stp_fault_atc_valid  <= stp_atc_valid_w;
+			stp_fault_mmusr <= stp_fault_status_w;
+			stp_fault_saved_addr <= stp_saved_addr_w;
+		end
+		if (walker_timeout_error && !stp_walker_timeout_latched) begin
+			stp_walker_timeout_latched <= 1;
+			if (!stp_fault_latched) begin
+				stp_fault_tc <= stp_pmmu_tc_w;
+				stp_fault_addr <= cpu_addr_p;
+				stp_fault_wstate <= stp_pmmu_wstate_w;
+				stp_fault_atc_buserr <= stp_atc_buserr_w;
+				stp_fault_atc_valid  <= stp_atc_valid_w;
+				stp_fault_mmusr <= stp_fault_status_w;
+				stp_fault_saved_addr <= stp_saved_addr_w;
+			end
+		end
+	end
+end
+
+// In-System Sources and Probes (ISSP) for JTAG readback of PMMU debug state
+// Probe layout (MSB first):
+//   TC[31:0] + TT0[31:0] + TT1[31:0] + CRP_HI[31:0] + CRP_LO[31:0] = 160
+//   + WSTATE[4:0] + FAULT + BUSY = 7
+//   + ATC_BUSERR[21:0] + ATC_VALID[21:0] = 44
+//   + FAULT_LATCHED + WALKER_TIMEOUT_LATCHED = 2
+//   + FAULT_TC[31:0] + FAULT_ADDR[31:0] + FAULT_WSTATE[4:0] = 69
+//   + FAULT_ATC_BUSERR[21:0] + FAULT_ATC_VALID[21:0] = 44
+//   + FAULT_MMUSR[15:0] + FAULT_SAVED_ADDR[31:0] = 48
+//   Total = 374
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (0),
+	.instance_id             ("PMMU"),
+	.probe_width             (374),
+	.source_width            (0),
+	.enable_metastability    ("YES")
+) pmmu_issp (
+	.probe ({stp_pmmu_tc, stp_pmmu_tt0, stp_pmmu_tt1, stp_pmmu_crp_hi, stp_pmmu_crp_lo,
+	         stp_pmmu_wstate, stp_pmmu_fault, stp_pmmu_busy,
+	         stp_atc_buserr, stp_atc_valid,
+	         stp_fault_latched, stp_walker_timeout_latched,
+	         stp_fault_tc, stp_fault_addr, stp_fault_wstate,
+	         stp_fault_atc_buserr, stp_fault_atc_valid,
+	         stp_fault_mmusr, stp_fault_saved_addr})
+);
+
 // PMMU walker address mux signals (for bus arbitration)
 // NOTE: Walker supports full 32-bit addressing:
 //   - Chip RAM (<2MB): uses walker_chip_addr[23:1] -> chip_addr bus
@@ -507,7 +614,18 @@ cpu_inst_p
   .debug_format_error_pc(),   // not routed to save pins
   .debug_format_error_addr(), // not routed to save pins
   // Cache operation address
-  .cache_op_addr(cache_op_addr)
+  .cache_op_addr(cache_op_addr),
+  // SignalTap debug ports (from PMMU)
+  .debug_pmmu_tc(stp_pmmu_tc_w),
+  .debug_pmmu_tt0(stp_pmmu_tt0_w),
+  .debug_pmmu_tt1(stp_pmmu_tt1_w),
+  .debug_pmmu_crp_hi(stp_pmmu_crp_hi_w),
+  .debug_pmmu_crp_lo(stp_pmmu_crp_lo_w),
+  .debug_pmmu_wstate(stp_pmmu_wstate_w),
+  .debug_pmmu_atc_buserr(stp_atc_buserr_w),
+  .debug_pmmu_atc_valid(stp_atc_valid_w),
+  .debug_pmmu_fault_status(stp_fault_status_w),
+  .debug_pmmu_saved_addr(stp_saved_addr_w)
 );
 
 wire [15:0] cpu_dout_o;

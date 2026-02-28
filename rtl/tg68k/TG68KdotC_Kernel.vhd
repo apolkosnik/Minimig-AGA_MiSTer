@@ -278,7 +278,18 @@ entity TG68KdotC_Kernel is
 		debug_format_error_rte_word : out std_logic_vector(15 downto 0);
 		debug_format_error_pc : out std_logic_vector(31 downto 0);
 		debug_format_error_addr : out std_logic_vector(31 downto 0);
-		debug_format_error_sr : out std_logic_vector(7 downto 0)
+		debug_format_error_sr : out std_logic_vector(7 downto 0);
+		-- SignalTap debug ports (from PMMU)
+		debug_pmmu_tc  : out std_logic_vector(31 downto 0);
+		debug_pmmu_tt0 : out std_logic_vector(31 downto 0);
+		debug_pmmu_tt1 : out std_logic_vector(31 downto 0);
+		debug_pmmu_crp_hi : out std_logic_vector(31 downto 0);
+		debug_pmmu_crp_lo : out std_logic_vector(31 downto 0);
+		debug_pmmu_wstate : out std_logic_vector(4 downto 0);
+		debug_pmmu_atc_buserr : out std_logic_vector(21 downto 0);
+		debug_pmmu_atc_valid  : out std_logic_vector(21 downto 0);
+		debug_pmmu_fault_status : out std_logic_vector(15 downto 0);
+		debug_pmmu_saved_addr   : out std_logic_vector(31 downto 0)
 		);
 end TG68KdotC_Kernel;
 
@@ -739,7 +750,17 @@ BEGIN
       mmu_config_err => pmmu_config_err,
       mmu_config_ack => pmmu_config_ack, -- BUG #154: Acknowledge to clear error
       ptest_desc_addr => pmmu_desc_addr, -- Physical address of last descriptor
-      debug_mmusr => pmmu_debug_mmusr
+      debug_mmusr => pmmu_debug_mmusr,
+      debug_tc    => debug_pmmu_tc,
+      debug_tt0   => debug_pmmu_tt0,
+      debug_tt1   => debug_pmmu_tt1,
+      debug_crp_hi => debug_pmmu_crp_hi,
+      debug_crp_lo => debug_pmmu_crp_lo,
+      debug_wstate => debug_pmmu_wstate,
+      debug_atc_buserr => debug_pmmu_atc_buserr,
+      debug_atc_valid  => debug_pmmu_atc_valid,
+      debug_fault_status => debug_pmmu_fault_status,
+      debug_saved_addr   => debug_pmmu_saved_addr
     );
 
 --   -- PMMU register interface connected (enabled for 68030)
@@ -2144,7 +2165,12 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 					trap_vector(9 downto 0) <= "00" & X"08";
 				END IF;
 				IF trap_mmu_berr='1' THEN
-					trap_vector(9 downto 0) <= "00" & X"F4";  -- Vector 61 (0xF4) - MC68030 MMU Bus Error
+					-- BUG #435 FIX: MC68030 internal PMMU uses vector 2 for ALL bus errors,
+					-- including ATC buserr hits. Vector 61 ($F4) was MC68851-only (external
+					-- coprocessor on MC68020). Using vector 61 caused crashes when OS had
+					-- no handler there (e.g., second access to page with invalid descriptor
+					-- hit ATC buserr entry, dispatched to uninitialized vector 61).
+					trap_vector(9 downto 0) <= "00" & X"08";  -- Vector 2 (0x08) - Bus Error
 				END IF;
 				IF trap_format_error='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"38";  -- Vector 14 (0x38) - Format Error
