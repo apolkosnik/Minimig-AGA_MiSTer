@@ -2382,6 +2382,7 @@ begin
                 walk_level <= walk_level + 1;
                 walk_limit_valid <= '0';
                 walk_parent_dt_long <= '0';
+                walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop: stop after ptest_level descriptors read
               elsif instr_walk_pending = '1' and
@@ -2397,6 +2398,7 @@ begin
               else
                 walk_desc_is_long <= '0';  -- Short format
                 walk_addr <= mem_rdat(31 downto 4) & "0000";
+                walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 walk_level <= walk_level + 1;
                 -- BUG #155 FIX: Short format has NO limit field
                 walk_limit_valid <= '0';
@@ -2606,6 +2608,7 @@ begin
                 walk_level <= walk_level + 1;
                 walk_limit_valid <= '0';
                 walk_parent_dt_long <= '0';
+                walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
               elsif instr_walk_pending = '1' and
@@ -2625,6 +2628,7 @@ begin
                 -- BUG #155 FIX: Short format has NO limit field
                 walk_limit_valid <= '0';
                 walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
+                walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_PTR2;
               end if;
             end if;
@@ -2841,6 +2845,7 @@ begin
                 walk_level <= walk_level + 1;
                 walk_limit_valid <= '0';
                 walk_parent_dt_long <= '0';
+                walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
               elsif instr_walk_pending = '1' and
@@ -2860,6 +2865,7 @@ begin
                 -- BUG #155 FIX: Short format has NO limit field
                 walk_limit_valid <= '0';
                 walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
+                walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_PTR3;
               end if;
             end if;
@@ -3050,6 +3056,7 @@ begin
                 walk_level <= walk_level + 1;
                 walk_limit_valid <= '0';
                 walk_parent_dt_long <= '0';
+                walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
               elsif instr_walk_pending = '1' and
@@ -3068,6 +3075,7 @@ begin
                 walk_level <= walk_level + 1;
                 walk_limit_valid <= '0';  -- Short format has no limit
                 walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
+                walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_PTR4;
               end if;
             end if;
@@ -3403,22 +3411,13 @@ begin
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
-          elsif saved_rw = '0' and (walk_desc_high(2) = '1' or walk_write_protect = '1') and walk_is_root_pointer = '0' then
-            -- Write protection violation - write to write-protected page (saved_rw='0' is WRITE)
-            -- WP is at bit 2 in both short and long formats
-            walker_fault <= '1';
-            walker_fault_status <= encode_mmusr_fault(
-              bus_error => '0',
-              limit_violation => '0',
-              supervisor_violation => '0',
-              write_protect => '1',            -- This is a write protection fault
-              invalid => '0',                  -- Descriptor is valid
-              modified => '0',
-              transparent => '0',
-              level => std_logic_vector(to_unsigned(walk_level, 3))
-            );
-            wstate <= W_FAULT;
-           --  -- report "WP_FAULT_WALKER: Write to WP page detected during walk, addr=0x" & slv_to_hstring(saved_addr_log) severity note;
+          -- BUG #437 FIX: Per WinUAE cpummu30.cpp line 1496-1497 + 1643-1647:
+          -- WP violations do NOT abort the walk. The walk completes normally,
+          -- creating an ATC entry with WP=1 and bus_error=false. The ATC-level
+          -- WP check (line 1531) then produces vector 2 for writes.
+          -- Previously, we aborted the walk and cached buserr=1, which caused:
+          -- 1. Walker WP faults to route through pmmu_walker_berr -> vector 61 (wrong, should be vector 2)
+          -- 2. Subsequent reads to the same page to also fault (buserr ATC entry blocks all accesses)
           else
             -- MC68030 Early termination: ATC always operates at TC.PS page granularity.
             -- Per MC68030 spec and WinUAE: when a page descriptor terminates the walk
@@ -3511,12 +3510,15 @@ begin
               else
                 wstate <= W_FILL;
               end if;
-            elsif walk_desc_high(3) = '0' or (saved_rw = '0' and walk_desc_high(4) = '0') then
+            -- BUG #437: M-bit update requires WP check (per WinUAE line 1502: !write_protected)
+            -- U-bit: always set if not already set (no WP check needed)
+            -- M-bit: only set for writes to non-write-protected pages
+            elsif walk_desc_high(3) = '0' or (saved_rw = '0' and walk_desc_high(4) = '0' and walk_desc_high(2) = '0' and walk_write_protect = '0') then
               -- Need to update descriptor with U/M bits
               desc_update_needed <= '1';
-              -- Prepare updated descriptor: set U bit, and M bit if write
+              -- Prepare updated descriptor: set U bit, and M bit if write AND not WP
               desc_update_data <= walk_desc_high(31 downto 5) &
-                                  (walk_desc_high(4) or ((not saved_rw) and (not instr_walk_pending))) &  -- M bit: set if write, but not for PTEST/PLOAD
+                                  (walk_desc_high(4) or ((not saved_rw) and (not instr_walk_pending) and (not walk_desc_high(2)) and (not walk_write_protect))) &  -- M bit: set if write, not WP, not PTEST/PLOAD
                                   '1' &  -- U bit: always set
                                   walk_desc_high(2 downto 0);
               wstate <= W_UPDATE_DESC;
