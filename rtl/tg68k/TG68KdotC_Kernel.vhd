@@ -261,6 +261,11 @@ entity TG68KdotC_Kernel is
 		debug_pc_dataa : out std_logic_vector(31 downto 0);
 		debug_pc_datab : out std_logic_vector(31 downto 0);
 		debug_pmmu_busy : out std_logic;
+		debug_cpu_halted : out std_logic;
+		debug_stop : out std_logic;
+		debug_interrupt : out std_logic;
+		debug_setendOPC : out std_logic;
+		debug_IPL_nr : out std_logic_vector(2 downto 0);
 		debug_micro_state : out integer range 0 to 255;
 		debug_next_micro_state : out integer range 0 to 255;
 		debug_memmask : out std_logic_vector(5 downto 0);
@@ -290,12 +295,18 @@ entity TG68KdotC_Kernel is
 		debug_pmmu_wstate : out std_logic_vector(4 downto 0);
 		debug_pmmu_atc_buserr : out std_logic_vector(21 downto 0);
 		debug_pmmu_atc_valid  : out std_logic_vector(21 downto 0);
-		debug_pmmu_fault_status : out std_logic_vector(15 downto 0);
-		debug_pmmu_saved_addr   : out std_logic_vector(31 downto 0);
-		debug_pmmu_walk_desc_addr : out std_logic_vector(31 downto 0);
-		debug_pmmu_walk_desc_data : out std_logic_vector(31 downto 0);
-		debug_pmmu_saved_fc       : out std_logic_vector(2 downto 0)
-		);
+			debug_pmmu_fault_status : out std_logic_vector(15 downto 0);
+			debug_pmmu_saved_addr   : out std_logic_vector(31 downto 0);
+			debug_pmmu_walk_desc_addr : out std_logic_vector(31 downto 0);
+			debug_pmmu_walk_desc_data : out std_logic_vector(31 downto 0);
+			debug_pmmu_ptr1_desc_addr : out std_logic_vector(31 downto 0);
+			debug_pmmu_ptr1_desc_data : out std_logic_vector(31 downto 0);
+			debug_pmmu_ptr2_desc_addr : out std_logic_vector(31 downto 0);
+			debug_pmmu_ptr2_desc_data : out std_logic_vector(31 downto 0);
+			debug_pmmu_ptr3_desc_addr : out std_logic_vector(31 downto 0);
+			debug_pmmu_ptr3_desc_data : out std_logic_vector(31 downto 0);
+			debug_pmmu_saved_fc       : out std_logic_vector(2 downto 0)
+			);
 end TG68KdotC_Kernel;
 
 architecture logic of TG68KdotC_Kernel is
@@ -496,6 +507,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_SR				: std_logic_vector(7 downto 0);
 	signal make_trace			: std_logic;
 	signal make_trace_t0		: std_logic;  -- T0 change-of-flow trace mode active for current instruction
+	signal trace_pending_group2	: std_logic;  -- Stacked trace pending after Group 2 exception dispatch
 	signal make_berr			: std_logic;
 	signal make_mmu_berr     : std_logic;  -- BUG #159: Distinguish MMU bus error from normal BERR
 	signal berr_exception_active : std_logic;  -- MC68030: Bus error exception processing window
@@ -770,6 +782,12 @@ BEGIN
       debug_saved_addr   => debug_pmmu_saved_addr,
       debug_walk_desc_addr => debug_pmmu_walk_desc_addr,
       debug_walk_desc_data => debug_pmmu_walk_desc_data,
+      debug_ptr1_desc_addr => debug_pmmu_ptr1_desc_addr,
+      debug_ptr1_desc_data => debug_pmmu_ptr1_desc_data,
+      debug_ptr2_desc_addr => debug_pmmu_ptr2_desc_addr,
+      debug_ptr2_desc_data => debug_pmmu_ptr2_desc_data,
+      debug_ptr3_desc_addr => debug_pmmu_ptr3_desc_addr,
+      debug_ptr3_desc_data => debug_pmmu_ptr3_desc_data,
       debug_saved_fc       => debug_pmmu_saved_fc
     );
 
@@ -2130,6 +2148,19 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				IF trap_illegal='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"10";
 				END IF;
+				IF trap_priv='1' THEN
+					trap_vector(9 downto 0) <= "00" & X"20";
+				END IF;
+				IF trap_trace='1' THEN
+					trap_vector(9 downto 0) <= "00" & X"24";
+				END IF;
+				-- BUG #436 FIX: Group 2 exceptions (CHK, TRAPV, Divide-by-zero) must
+				-- override trap_trace in the vector priority chain. Per MC68030 UM 8.2.4:
+				-- "If the traced instruction is a TRAP, CHK, CHK2, TRAPV, or cpTRAPcc
+				-- instruction that traps, the instruction-related exception processing
+				-- occurs BEFORE the trace exception processing."
+				-- When both trap_trace and exec(trap_chk) are active, the CHK frame must
+				-- use CHK vector ($18), not trace vector ($24).
 				IF set_Z_error='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"14";
 				END IF;
@@ -2138,12 +2169,6 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				END IF;
 				IF trap_trapv='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"1C";
-				END IF;
-				IF trap_priv='1' THEN
-					trap_vector(9 downto 0) <= "00" & X"20";
-				END IF;
-				IF trap_trace='1' THEN
-					trap_vector(9 downto 0) <= "00" & X"24";
 				END IF;
 				IF trap_1010='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"28";
@@ -2184,6 +2209,10 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				END IF;
 				IF trap_format_error='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"38";  -- Vector 14 (0x38) - Format Error
+				END IF;
+				-- MC68030 UM 8.2.4: Override vector for stacked trace after Group 2 exception
+				IF micro_state = trace_stk_grp2 THEN
+					trap_vector(9 downto 0) <= "00" & X"24";  -- Vector 9 (0x24) - Trace
 				END IF;
 				-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not MC68030
 
@@ -2779,6 +2808,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					fline_is_fpu <= '0';
 					fline_has_brief <= '0';
 					pmmu_ea_mode_latched <= (others => '0');  -- BUG #302: Initialize EA mode latch
+					trace_pending_group2 <= '0';
 			ELSE
 --				IPL_nr <= NOT IPL;
 				IF clkena_in='1' THEN
@@ -3290,6 +3320,22 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						END IF;
 					END IF;
 
+					-- MC68030 UM 8.2.4: Group 2 exceptions with T1 active require stacked trace
+					-- Capture trace-pending when Group 2 trap dispatches
+					IF trapmake='1' AND trapd='0' AND cpu(1)='1' AND make_trace='1' AND
+					   (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR trap_trap='1') THEN
+						trace_pending_group2 <= '1';
+					END IF;
+					-- Configure stacked trace frame after Group 2 handler vector loaded
+					-- exe_pc = handler entry (for trap00), trap_vector = trace ($24),
+					-- trap_trace = 1 (for format logic), trap_SR = current SR
+					IF micro_state = trace_stk_grp2 THEN
+						exe_pc <= TG68_PC;
+						trap_trace <= '1';
+						trap_SR <= FlagsSR;
+						trace_pending_group2 <= '0';
+					END IF;
+
 					IF decodeOPC='1' OR interrupt='1' THEN
 						trap_SR <= FlagsSR;
 					END IF;
@@ -3710,7 +3756,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				next_micro_state <= berr1;
 				-- BUG #401 FIX: Set setstackaddr at dispatch (see interrupt path above)
 				setstackaddr <= '1';
-			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR trap_mmu_config='1') THEN
+			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR trap_trap='1' OR trap_mmu_config='1') THEN
 				next_micro_state <= trap00;  -- Format $2 (6-word) per MC68030 UM Table 8-4
 				-- Note: trap_format_error uses Format $0 (UM 6.4.3), falls through to trap0
 			else
@@ -6411,7 +6457,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				WHEN unlink2 =>		-- unlink
 					set(ea_data_OP2) <= '1';
 					
--- paste and copy form TH	---------	
+-- MC68030 UM 8.2.4: Setup stacked trace frame after Group 2 exception
+				WHEN trace_stk_grp2 =>
+					next_micro_state <= trap00;
+					setstate <= "01";  -- Setup cycle, no memory access
+
+-- paste and copy form TH	---------
 				WHEN trap00 =>          -- TRAP format #2
 					next_micro_state <= trap0;
 					set(presub) <= '1';
@@ -6500,7 +6551,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					set(direct_delta) <= '1';
 					set(directPC) <= '1';
 					setstate <= "10";
-					next_micro_state <= nopnop;
+					-- MC68030 UM 8.2.4: If Group 2 exception had trace pending, push stacked trace frame
+					IF trace_pending_group2 = '1' THEN
+						next_micro_state <= trace_stk_grp2;
+					ELSE
+						next_micro_state <= nopnop;
+					END IF;
 
                 -- MC68030 Bus Error Stack Frame Generation (Format $A/$B)
                 -- Bus errors: 16 words (Format $A). Address errors: 46 words (Format $B, with berr_fill prefix).
@@ -8424,6 +8480,11 @@ debug_pc_add <= TG68_PC_add;
 debug_pc_dataa <= PC_dataa;
 debug_pc_datab <= PC_datab;
 debug_pmmu_busy <= pmmu_busy;
+debug_cpu_halted <= cpu_halted;
+debug_stop <= '1' WHEN stop='1' ELSE '0';
+debug_interrupt <= '1' WHEN interrupt='1' ELSE '0';
+debug_setendOPC <= '1' WHEN setendOPC='1' ELSE '0';
+debug_IPL_nr <= IPL_nr;
 debug_micro_state <= micro_states'pos(micro_state);
 debug_next_micro_state <= micro_states'pos(next_micro_state);
 debug_memmask <= memmask;

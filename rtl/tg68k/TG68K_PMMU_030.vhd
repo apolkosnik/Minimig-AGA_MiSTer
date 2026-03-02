@@ -74,6 +74,13 @@ entity TG68K_PMMU_030 is
     debug_saved_addr   : out std_logic_vector(31 downto 0);
     debug_walk_desc_addr : out std_logic_vector(31 downto 0);
     debug_walk_desc_data : out std_logic_vector(31 downto 0);
+    -- Sticky per-level descriptor captures (HIGH word + descriptor address)
+    debug_ptr1_desc_addr : out std_logic_vector(31 downto 0);
+    debug_ptr1_desc_data : out std_logic_vector(31 downto 0);
+    debug_ptr2_desc_addr : out std_logic_vector(31 downto 0);
+    debug_ptr2_desc_data : out std_logic_vector(31 downto 0);
+    debug_ptr3_desc_addr : out std_logic_vector(31 downto 0);
+    debug_ptr3_desc_data : out std_logic_vector(31 downto 0);
     debug_saved_fc       : out std_logic_vector(2 downto 0)
   );
 end TG68K_PMMU_030;
@@ -142,6 +149,10 @@ architecture rtl of TG68K_PMMU_030 is
   signal translated_addr    : std_logic_vector(31 downto 0) := (others => '0');
   signal translated_fc      : std_logic_vector(2 downto 0) := (others => '0');
   signal translated_rw      : std_logic := '1';
+  -- Translation context generation. Incremented on MMU register writes that can
+  -- change address translation even when addr_log/fc/rw are unchanged.
+  signal xlat_cfg_seq       : unsigned(7 downto 0) := (others => '0');
+  signal translated_cfg_seq : unsigned(7 downto 0) := (others => '0');
   -- Translation result latches
   signal addr_phys_reg      : std_logic_vector(31 downto 0) := (others => '0');
   signal cache_inhibit_reg  : std_logic := '0';
@@ -276,6 +287,13 @@ architecture rtl of TG68K_PMMU_030 is
   signal walk_desc      : std_logic_vector(31 downto 0) := (others => '0'); -- Current descriptor (short format or HIGH word)
   signal walk_desc_high : std_logic_vector(31 downto 0) := (others => '0'); -- HIGH word (all formats)
   signal walk_desc_low  : std_logic_vector(31 downto 0) := (others => '0'); -- LOW word (long format only)
+  -- Sticky per-level descriptor captures for fault forensics
+  signal ptr1_desc_addr_reg : std_logic_vector(31 downto 0) := (others => '0');
+  signal ptr1_desc_data_reg : std_logic_vector(31 downto 0) := (others => '0');
+  signal ptr2_desc_addr_reg : std_logic_vector(31 downto 0) := (others => '0');
+  signal ptr2_desc_data_reg : std_logic_vector(31 downto 0) := (others => '0');
+  signal ptr3_desc_addr_reg : std_logic_vector(31 downto 0) := (others => '0');
+  signal ptr3_desc_data_reg : std_logic_vector(31 downto 0) := (others => '0');
   signal walk_desc_is_long : std_logic := '0'; -- 1=long format (DT=11), 0=short format (DT=10/01)
   signal walk_parent_dt_long : std_logic := '0'; -- BUG #409: 1=parent DT=11, entries are 8 bytes (stride 8)
   -- BUG #387 FIX: Walker timeout counter to detect stuck memory requests
@@ -966,6 +984,7 @@ begin
       atc_flush_req <= '0';
       mmusr_update_ack <= '0';
       ptest_active <= '0';
+      xlat_cfg_seq <= (others => '0');
       -- ptest_addr, ptest_fc, ptest_rw now driven by edge detection process (BUG #397)
       mmu_config_error <= '0';
     elsif rising_edge(clk) then
@@ -1013,6 +1032,11 @@ begin
         -- MC68030 Specification: MMU register access requires supervisor mode
         -- Privilege check is performed by TG68KdotC_Kernel before asserting reg_we,
         -- so no additional FC check is needed here
+        -- Invalidate "fresh translation" key when translation context changes.
+        if reg_sel = "00010" or reg_sel = "00011" or reg_sel = "10000" or
+           reg_sel = "10010" or reg_sel = "10011" then
+          xlat_cfg_seq <= xlat_cfg_seq + 1;
+        end if;
         -- synthesis translate_off
         report "PMMU_REG_WRITE: sel=" & integer'image(to_integer(unsigned(reg_sel))) &
                " wdat_hi=" & integer'image(to_integer(unsigned(reg_wdat(31 downto 16)))) &
@@ -1218,6 +1242,12 @@ begin
   debug_fault_status <= debug_fault_status_latch;
   debug_saved_addr   <= saved_addr_log;
   debug_saved_fc     <= saved_fc;
+  debug_ptr1_desc_addr <= ptr1_desc_addr_reg;
+  debug_ptr1_desc_data <= ptr1_desc_data_reg;
+  debug_ptr2_desc_addr <= ptr2_desc_addr_reg;
+  debug_ptr2_desc_data <= ptr2_desc_data_reg;
+  debug_ptr3_desc_addr <= ptr3_desc_addr_reg;
+  debug_ptr3_desc_data <= ptr3_desc_data_reg;
   -- DEBUG: Monitor all PMMU register reads (disabled for simulation speed)
   -- process(reg_sel, reg_part, TC, TT0, TT1, SRP_H, SRP_L, CRP_H, CRP_L, MMUSR)
   -- begin ... end process;
@@ -1317,7 +1347,9 @@ begin
   -- When MMU is enabled, use registered translation result (allows for page table walks)
   -- BUG #371 FIX: Also bypass for TTR transparent translations (phys=log identity mapping)
   -- Without this, the first fetch after MMU enable gets a stale addr_phys_reg
+  -- MC68030 UM Figure 9-32: FC=7 (CPU space) is always unmapped (identity)
   addr_phys     <= addr_log when tc_en = '0'
+                   else addr_log when fc = "111"
                    else addr_log when (ttr0_match_comb = '1' or ttr1_match_comb = '1')
                    else addr_phys_reg;
   -- BUG #126 V2 FIX: Combinational bypass for cache_inhibit when MMU disabled
@@ -1327,14 +1359,16 @@ begin
   -- the correct I/O address but stale CI=0 from the previous RAM access and
   -- incorrectly caches I/O data.
   cache_inhibit <= '0' when tc_en = '0'
+                   else '1' when fc = "111"  -- CPU space always cache-inhibited
                    else ttr0_ci_comb when ttr0_match_comb = '1'
                    else ttr1_ci_comb when ttr1_match_comb = '1'
                    else cache_inhibit_reg;
   write_protect <= '0' when tc_en = '0'
+                   else '0' when fc = "111"  -- CPU space never write-protected
                    else ttr0_wp_comb when ttr0_match_comb = '1'
                    else ttr1_wp_comb when ttr1_match_comb = '1'
                    else write_protect_reg;
-  fault         <= fault_reg;
+  fault         <= '0' when fc = "111" else fault_reg;  -- CPU space never faults
   fault_status  <= fault_status_reg;
   fault_addr    <= fault_addr_reg;     -- BUG #415: Faulting logical address
   fault_fc      <= fault_fc_reg;       -- BUG #414: FC at fault time
@@ -1358,6 +1392,7 @@ begin
       translated_addr <= (others => '0');  -- BUG #416
       translated_fc <= (others => '0');    -- BUG #416
       translated_rw <= '1';
+      translated_cfg_seq <= (others => '0');
       cache_inhibit_reg <= '0';
       write_protect_reg <= '0';
       fault_reg <= '0';
@@ -1429,6 +1464,7 @@ begin
           translated_addr   <= addr_log;  -- BUG #416
           translated_fc     <= fc;        -- BUG #416
           translated_rw     <= rw;
+          translated_cfg_seq <= xlat_cfg_seq;
           cache_inhibit_reg <= '0';
           write_protect_reg <= '0';
           fault_reg         <= '0';
@@ -1439,6 +1475,21 @@ begin
             transparent => '0',          -- Not transparent (MMU disabled)
             level => "000"               -- No table walk for identity translation
           );
+          translation_pending <= '0';
+        elsif fc = "111" then
+          -- MC68030 UM 9.5.5.1, Figure 9-32: FC=7 (CPU space) is UNMAPPED.
+          -- CPU space accesses (interrupt acknowledge, breakpoint, etc.) are
+          -- never translated by the MMU, even when translation is enabled.
+          -- Use identity translation with cache inhibit (CPU space is I/O).
+          addr_phys_reg     <= addr_log;
+          translated_addr   <= addr_log;
+          translated_fc     <= fc;
+          translated_rw     <= rw;
+          translated_cfg_seq <= xlat_cfg_seq;
+          cache_inhibit_reg <= '1';  -- CPU space is always cache-inhibited
+          write_protect_reg <= '0';
+          fault_reg         <= '0';
+          fault_status_reg  <= (others => '0');
           translation_pending <= '0';
         else
           -- MMU enabled - do full translation
@@ -1460,6 +1511,7 @@ begin
             translated_addr <= addr_log;  -- BUG #416
             translated_fc   <= fc;        -- BUG #416
             translated_rw   <= rw;
+            translated_cfg_seq <= xlat_cfg_seq;
             cache_inhibit_reg <= tci0;
             write_protect_reg <= twp0;
             fault_reg <= '0';
@@ -1481,6 +1533,7 @@ begin
             translated_addr <= addr_log;  -- BUG #416
             translated_fc   <= fc;        -- BUG #416
             translated_rw   <= rw;
+            translated_cfg_seq <= xlat_cfg_seq;
             cache_inhibit_reg <= tci1;
             write_protect_reg <= twp1;
             fault_reg <= '0';
@@ -1572,6 +1625,7 @@ begin
               translated_addr <= addr_log;
               translated_fc   <= fc;
               translated_rw   <= rw;
+              translated_cfg_seq <= xlat_cfg_seq;
               cache_inhibit_reg <= atc_attr(hit_idx)(2);
               write_protect_reg <= atc_attr(hit_idx)(0);
             elsif rw = '0' and atc_attr(hit_idx)(0) = '1' then
@@ -1607,6 +1661,7 @@ begin
               translated_addr <= addr_log;  -- BUG #416
               translated_fc   <= fc;        -- BUG #416
               translated_rw   <= rw;
+              translated_cfg_seq <= xlat_cfg_seq;
               cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= '1';  -- Mark as write-protected
             elsif fc(2) = '0' and atc_attr(hit_idx)(3) = '0' then
@@ -1643,6 +1698,7 @@ begin
               translated_addr <= addr_log;  -- BUG #416
               translated_fc   <= fc;        -- BUG #416
               translated_rw   <= rw;
+              translated_cfg_seq <= xlat_cfg_seq;
               cache_inhibit_reg <= atc_attr(hit_idx)(2);  -- BUG FIX: bit 2 is CI, not bit 1 (M)
               write_protect_reg <= atc_attr(hit_idx)(0);
               -- report "SUPERVISOR_FAULT_ATC: Setting fault_reg=1 for supervisor violation, addr=0x" & slv_to_hstring(addr_log) &
@@ -1670,6 +1726,7 @@ begin
                 translated_addr <= addr_log;  -- BUG #416
                 translated_fc   <= fc;        -- BUG #416
                 translated_rw   <= rw;
+                translated_cfg_seq <= xlat_cfg_seq;
                 cache_inhibit_reg <= atc_attr(hit_idx)(2);
                 write_protect_reg <= atc_attr(hit_idx)(0);
                 fault_reg <= '0';
@@ -1886,6 +1943,7 @@ begin
           translated_addr <= saved_addr_log;  -- BUG #416
           translated_fc   <= saved_fc;        -- BUG #416
           translated_rw   <= saved_rw;
+          translated_cfg_seq <= xlat_cfg_seq;
           cache_inhibit_reg <= '1';  -- Inhibit cache on faults
           write_protect_reg <= '1';  -- Protect on faults
         end if;
@@ -1980,6 +2038,7 @@ begin
                 translated_addr <= saved_addr_log;  -- BUG #416
                 translated_fc   <= saved_fc;        -- BUG #416
                 translated_rw   <= saved_rw;
+                translated_cfg_seq <= xlat_cfg_seq;
                 cache_inhibit_reg <= atc_attr(hit_idx)(2);
                 write_protect_reg <= '1';
               end if;
@@ -2013,6 +2072,7 @@ begin
                 translated_addr <= saved_addr_log;  -- BUG #416
                 translated_fc   <= saved_fc;        -- BUG #416
                 translated_rw   <= saved_rw;
+                translated_cfg_seq <= xlat_cfg_seq;
                 cache_inhibit_reg <= atc_attr(hit_idx)(2);
                 write_protect_reg <= atc_attr(hit_idx)(0);
               end if;
@@ -2030,6 +2090,7 @@ begin
                 translated_addr <= saved_addr_log;  -- BUG #416
                 translated_fc   <= saved_fc;        -- BUG #416
                 translated_rw   <= saved_rw;
+                translated_cfg_seq <= xlat_cfg_seq;
                 cache_inhibit_reg <= atc_attr(hit_idx)(2);
                 write_protect_reg <= atc_attr(hit_idx)(0);
                 fault_reg <= '0';
@@ -2056,6 +2117,7 @@ begin
               translated_addr <= saved_addr_log;  -- BUG #416
               translated_fc   <= saved_fc;        -- BUG #416
               translated_rw   <= saved_rw;
+              translated_cfg_seq <= xlat_cfg_seq;
               cache_inhibit_reg <= '1';  -- Inhibit cache when walker fails to populate ATC
               write_protect_reg <= '0';  -- No protection info available
               -- BUG #142 FIX: Do NOT clear fault_reg if walker just faulted!
@@ -2153,6 +2215,12 @@ begin
       walk_limit_value <= (others => '0');
       walk_is_root_pointer <= '0';  -- Root pointer DT=01 flag
       walker_timeout_counter <= 0;  -- BUG #387: Reset timeout counter
+      ptr1_desc_addr_reg <= (others => '0');
+      ptr1_desc_data_reg <= (others => '0');
+      ptr2_desc_addr_reg <= (others => '0');
+      ptr2_desc_data_reg <= (others => '0');
+      ptr3_desc_addr_reg <= (others => '0');
+      ptr3_desc_data_reg <= (others => '0');
     elsif rising_edge(clk) then
       -- BUG #387 FIX: Timeout mechanism to prevent walker deadlocks
       -- Monitor mem_req without mem_ack and force fault after timeout
@@ -2389,6 +2457,8 @@ begin
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
             walk_desc_high <= mem_rdat;  -- Save HIGH word for long format
+            ptr1_desc_addr_reg <= desc_addr_reg;
+            ptr1_desc_data_reg <= mem_rdat;
             mem_req <= '0';
             -- Debug: Log descriptor read for failing test addresses
             if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" or saved_addr_log = x"12345000" then
@@ -2606,6 +2676,8 @@ begin
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
             walk_desc_high <= mem_rdat;  -- Save HIGH word for long format
+            ptr2_desc_addr_reg <= desc_addr_reg;
+            ptr2_desc_data_reg <= mem_rdat;
             mem_req <= '0';
             -- Debug: Log descriptor read for Large Page Translation
             if saved_addr_log = x"00400000" or saved_addr_log = x"12345000" then
@@ -2843,6 +2915,8 @@ begin
             -- Got response - process HIGH word of descriptor
             walk_desc <= mem_rdat;
             walk_desc_high <= mem_rdat;  -- Save HIGH word for long format
+            ptr3_desc_addr_reg <= desc_addr_reg;
+            ptr3_desc_data_reg <= mem_rdat;
             mem_req <= '0';
             -- Debug: Log descriptor read for failing test addresses
             if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" then
@@ -3899,7 +3973,7 @@ begin
     end if;
   end process;
   -- Walker busy indication - not busy if MMU disabled or TTR hit
-  process(wstate, addr_log, fc, rw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, req, fault_reg)
+  process(wstate, addr_log, fc, rw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg)
     variable tmatch0, tmatch1 : std_logic;
     variable dummy_ci, dummy_wp : std_logic;
   begin
@@ -3933,7 +4007,7 @@ begin
       -- addr_log combinationally, breaking translated_addr match. When the handshake
       -- completes, busy='1' persists (addr mismatch) and fault_reg clears (new
       -- translation for new addr) -> permanent deadlock, berr never dispatched.
-      if (tmatch0 = '1' or tmatch1 = '1' or fault_reg = '1' or (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and (req = '0' or (translated_addr = addr_log and translated_fc = fc and translated_rw = rw)))) then
+      if (tmatch0 = '1' or tmatch1 = '1' or fault_reg = '1' or (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and (req = '0' or (translated_addr = addr_log and translated_fc = fc and translated_rw = rw and translated_cfg_seq = xlat_cfg_seq)))) then
         busy <= '0';
       else
         busy <= '1';

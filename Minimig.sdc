@@ -1,13 +1,25 @@
 derive_pll_clocks
 derive_clock_uncertainty
 
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -setup 2
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -hold 1
+# Cross-clock domain: CPU/system (28MHz, counter[1]) <-> SDRAM (113MHz, counter[0])
+# Both clocks come from the same PLL. All cross-domain signals use handshaking
+# (ramready/chipready gating clkena_in) so data is stable for multiple destination
+# clock periods before sampling.
 
-set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -setup 2
-set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -hold 1
-set_multicycle_path -from {emu|minimig|*} -to {emu|ram1|*} -setup 2
-set_multicycle_path -from {emu|minimig|*} -to {emu|ram1|*} -hold 1
+# 28MHz -> 113MHz: Source data stable for full 28MHz period (~35ns = ~4 SDRAM cycles).
+# Allow 3 SDRAM cycles for combinational routing (26.55ns).
+set_multicycle_path -from [get_clocks { *|pll|pll_inst|altera_pll_i|*[1].*|divclk}] \
+                    -to   [get_clocks { *|pll|pll_inst|altera_pll_i|*[0].*|divclk}] -setup 3
+set_multicycle_path -from [get_clocks { *|pll|pll_inst|altera_pll_i|*[1].*|divclk}] \
+                    -to   [get_clocks { *|pll|pll_inst|altera_pll_i|*[0].*|divclk}] -hold 2
+
+# 113MHz -> 28MHz: SDRAM outputs (cpu_dat_r, write_ena, ramready) stay stable for
+# 2+ CPU clock periods (cpu_ack holds until ram_cs clears on a 28MHz edge).
+# Allow 2 CPU clock periods (70.4ns) for combinational routing through PMMU.
+set_multicycle_path -from [get_clocks { *|pll|pll_inst|altera_pll_i|*[0].*|divclk}] \
+                    -to   [get_clocks { *|pll|pll_inst|altera_pll_i|*[1].*|divclk}] -setup 2
+set_multicycle_path -from [get_clocks { *|pll|pll_inst|altera_pll_i|*[0].*|divclk}] \
+                    -to   [get_clocks { *|pll|pll_inst|altera_pll_i|*[1].*|divclk}] -hold 1
 
 set_false_path -from {emu|cpu_wrapper|z3ram_*}
 set_false_path -from {emu|cpu_wrapper|z2ram_*}

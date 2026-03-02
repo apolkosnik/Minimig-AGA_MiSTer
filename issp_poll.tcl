@@ -1,4 +1,4 @@
-# Poll PMMU debug state via ISSP v6 - CRP+SRP+descriptor+FC debug
+# Poll PMMU debug state via ISSP v7 - adds PMM2 per-level descriptor probe
 # Usage: quartus_stp -t issp_poll.tcl
 #
 # 505-bit probe layout (MSB first, string index in parens):
@@ -113,24 +113,44 @@ proc decode_tc {hex} {
     return "E=$e,SRE=$sre,FCL=$fcl,PS=$ps,IS=$is,TIA=$tia,TIB=$tib,TIC=$tic,TID=$tid"
 }
 
-puts "=== PMMU Debug Poller v6 (CRP+SRP+descriptor+FC) ==="
+proc decode_desc {hex} {
+    scan $hex %x val
+    set dt [expr {$val & 0x3}]
+    set u  [expr {($val >> 3) & 1}]
+    set m  [expr {($val >> 4) & 1}]
+    set ci [expr {($val >> 6) & 1}]
+    set wp [expr {($val >> 2) & 1}]
+    switch $dt {
+        0 { set dt_name "INVALID(00)" }
+        1 { set dt_name "PAGE(01)" }
+        2 { set dt_name "SHORT(10)" }
+        3 { set dt_name "LONG(11)" }
+        default { set dt_name "UNK" }
+    }
+    return "DT=$dt_name,U=$u,M=$m,CI=$ci,WP=$wp"
+}
+
+puts "=== PMMU Debug Poller v7 (CRP+SRP+descriptor+FC+PMM2) ==="
 puts "Polling every 500ms. Ctrl+C to stop."
 puts ""
 
 start_insystem_source_probe -hardware_name $hw_name -device_name $dev_name
 
 set prev_bin ""
+set prev2_bin ""
 set poll_count 0
 set log_file [open "issp_log.txt" w]
-puts $log_file "# PMMU ISSP Poll Log v6 - [clock format [clock seconds]]"
+puts $log_file "# PMMU ISSP Poll Log v7 - [clock format [clock seconds]]"
 flush $log_file
 
 while {1} {
     set probe_bin [read_probe_data -instance_index 0]
+    set probe2_bin [read_probe_data -instance_index 1]
     incr poll_count
 
-    if {$probe_bin ne $prev_bin} {
+    if {$probe_bin ne $prev_bin || $probe2_bin ne $prev2_bin} {
         set len [string length $probe_bin]
+        set len2 [string length $probe2_bin]
         set ts [clock format [clock seconds] -format "%H:%M:%S"]
 
         if {$len < 505} {
@@ -139,6 +159,16 @@ while {1} {
             puts $log_file $line
             flush $log_file
             set prev_bin $probe_bin
+            after 500
+            continue
+        }
+        if {$len2 < 194} {
+            set line [format "%5d  %s  ERROR: probe2 too short (%d bits, need 194)" $poll_count $ts $len2]
+            puts $line
+            puts $log_file $line
+            flush $log_file
+            set prev_bin $probe_bin
+            set prev2_bin $probe2_bin
             after 500
             continue
         }
@@ -173,17 +203,27 @@ while {1} {
         set fault_desc_data  [bin2hex [string range $probe_bin 470 501]]
         set fault_fc_val     [bin2dec [string range $probe_bin 502 504]]
 
+        # Parse PMM2 sticky per-level descriptors (194 bits)
+        set pm2_fl           [string index $probe2_bin 0]
+        set pm2_wtl          [string index $probe2_bin 1]
+        set ptr1_addr_hex    [bin2hex [string range $probe2_bin 2 33]]
+        set ptr1_data_hex    [bin2hex [string range $probe2_bin 34 65]]
+        set ptr2_addr_hex    [bin2hex [string range $probe2_bin 66 97]]
+        set ptr2_data_hex    [bin2hex [string range $probe2_bin 98 129]]
+        set ptr3_addr_hex    [bin2hex [string range $probe2_bin 130 161]]
+        set ptr3_data_hex    [bin2hex [string range $probe2_bin 162 193]]
+
         # Count buserr entries
         set be_count 0
         for {set i 0} {$i < 22} {incr i} {
             if {[string index $atc_buserr $i] eq "1"} { incr be_count }
         }
 
-        set line [format "%5d  %s  TC=%s TT0=%s TT1=%s CRP=%s:%s SRP=%s:%s W=%-12s F=%s B=%s BE=%d/%s V=%s FL=%s WTL=%s" \
+        set line [format "%5d  %s  TC=%s TT0=%s TT1=%s CRP=%s:%s SRP=%s:%s W=%-12s F=%s B=%s BE=%d/%s V=%s FL=%s WTL=%s PM2_FL=%s PM2_WTL=%s" \
             $poll_count $ts $tc_hex $tt0_hex $tt1_hex \
             $crphi_hex $crplo_hex $srphi_hex $srplo_hex \
             $wstate $fault $busy \
-            $be_count $atc_buserr $atc_valid $fl $wtl]
+            $be_count $atc_buserr $atc_valid $fl $wtl $pm2_fl $pm2_wtl]
 
         puts $line
         puts $log_file $line
@@ -210,6 +250,15 @@ while {1} {
             puts $log_file $alert
             flush $log_file
         }
+        if {$pm2_fl eq "1" || $pm2_wtl eq "1"} {
+            set ptr_line [format "*** PMM2 *** PTR1=%s:%s(%s) PTR2=%s:%s(%s) PTR3=%s:%s(%s)" \
+                $ptr1_addr_hex $ptr1_data_hex [decode_desc $ptr1_data_hex] \
+                $ptr2_addr_hex $ptr2_data_hex [decode_desc $ptr2_data_hex] \
+                $ptr3_addr_hex $ptr3_data_hex [decode_desc $ptr3_data_hex]]
+            puts $ptr_line
+            puts $log_file $ptr_line
+            flush $log_file
+        }
         if {$wtl eq "1"} {
             set alert "*** WALKER TIMEOUT ***"
             puts $alert
@@ -218,6 +267,7 @@ while {1} {
         }
 
         set prev_bin $probe_bin
+        set prev2_bin $probe2_bin
     }
 
     after 500
