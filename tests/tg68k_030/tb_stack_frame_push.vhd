@@ -175,15 +175,22 @@ begin
         variable v_frame_size : integer;
 
         -- Wait for CPU to reach a STOP instruction or timeout
+        -- STOP puts the CPU in busstate="01" (no bus access) indefinitely.
+        -- Detect by waiting for sustained bus inactivity (10+ consecutive cycles).
+        -- Brief busstate="01" gaps occur between instructions so we need multiple cycles.
         procedure wait_for_stop(timeout_cycles : integer := 5000) is
+            variable idle_count : integer;
         begin
+            idle_count := 0;
             for i in 0 to timeout_cycles loop
                 wait until rising_edge(clk);
-                -- Detect STOP by checking for bus idle after supervisor fetch of STOP opcode
-                if busstate = "00" then
-                    -- Check if we're stopped (no more bus activity for a few cycles)
-                    wait for 200 ns;
-                    return;
+                if busstate = "01" then
+                    idle_count := idle_count + 1;
+                    if idle_count >= 10 then
+                        return;
+                    end if;
+                else
+                    idle_count := 0;
                 end if;
             end loop;
             report "TIMEOUT waiting for STOP" severity error;
