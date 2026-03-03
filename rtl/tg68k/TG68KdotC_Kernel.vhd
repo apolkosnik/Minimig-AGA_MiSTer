@@ -505,7 +505,6 @@ architecture logic of TG68KdotC_Kernel is
 	signal trapmake			: bit;
 	signal trapd				: bit;
 	signal trap_SR				: std_logic_vector(7 downto 0);
-	signal trap_flags			: std_logic_vector(7 downto 0);
 	signal make_trace			: std_logic;
 	signal make_trace_t0		: std_logic;  -- T0 change-of-flow trace mode active for current instruction
 	signal trace_pending_group2	: std_logic;  -- Stacked trace pending after Group 2 exception dispatch
@@ -2072,7 +2071,7 @@ PROCESS (clk)
 						data_write_tmp <= TG68_PC(15 downto 0) & "1010" & trap_vector(11 downto 0);  -- Format $A/PC_lo ($04)
 					END IF;
 				ELSIF micro_state = berr8 THEN
-					data_write_tmp <= (trap_SR & trap_flags) & TG68_PC(31 downto 16);  -- SR/PC_hi ($00)
+					data_write_tmp <= (trap_SR & Flags) & TG68_PC(31 downto 16);  -- SR/PC_hi ($00)
 				-- BUG #391 FIX: Bypass hold_dwr at the CRP/SRP HI/LO write boundary.
 				-- At clkena_lw with micro_state=pmove_mmu_to_mem_lo, the HI longword bus
 				-- write is completing and we need data_write_tmp to be refreshed with CRP_L
@@ -2102,7 +2101,7 @@ PROCESS (clk)
                 ELSIF direct_data='1' THEN
                     data_write_tmp <= last_data_read;
                 ELSIF writeSR='1'THEN
-                    data_write_tmp(15 downto 0) <= trap_SR(7 downto 0)& trap_flags(7 downto 0);
+                    data_write_tmp(15 downto 0) <= trap_SR(7 downto 0)& Flags(7 downto 0);
                 ELSE
                     -- Default path: includes PMOVE MMU->memory via pmove_mmu_read_active routing through OP2out
                     data_write_tmp <= OP2out;
@@ -2783,7 +2782,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 --				IPL_nr <= "000";
 				trap_trace <= '0';
 				trap_SR <= (others => '0');
-				trap_flags <= (others => '0');
 					trap_berr <= '0';
 					trap_addr_error <= '0';
 					writePCbig <= '0';
@@ -3334,18 +3332,16 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					END IF;
 					-- Configure stacked trace frame after Group 2 handler vector loaded
 					-- exe_pc = handler entry (for trap00), trap_vector = trace ($24),
-					-- trap_trace = 1 (for format logic), trap_SR/trap_flags = current SR
+					-- trap_trace = 1 (for format logic), trap_SR = current SR
 					IF micro_state = trace_stk_grp2 THEN
 						exe_pc <= TG68_PC;
 						trap_trace <= '1';
 						trap_SR <= FlagsSR;
-						trap_flags <= Flags(7 downto 0);
 						trace_pending_group2 <= '0';
 					END IF;
 
 					IF decodeOPC='1' OR interrupt='1' THEN
 						trap_SR <= FlagsSR;
-						trap_flags <= Flags(7 downto 0);
 					END IF;
 					-- BUG #418 FIX: Keep trap_SR in sync with directSR-loaded value.
 					-- For RTE format error, the exception frame must contain the SR
@@ -3355,7 +3351,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- Placed AFTER decodeOPC block for last-assignment-wins priority.
 					IF exec(directSR)='1' THEN
 						trap_SR <= data_read(15 downto 8);
-						trap_flags <= data_read(7 downto 0);
 					END IF;
 					-- BUG FIX: Revert trap_SR on format error to pre-RTE value.
 					-- exec(directSR) overwrote trap_SR with the frame's SR at rte1;
@@ -3363,7 +3358,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- the SR from before the RTE instruction was executed.
 					IF trap_format_error='1' THEN
 						trap_SR <= rte_saved_sr_high AND SR_trace_mask;
-						trap_flags <= rte_saved_ccr;
 					END IF;
 					-- FlagsSR format error revert is handled in SR op process (line ~3413)
 					-- Do NOT assign FlagsSR here - would create multiple drivers
