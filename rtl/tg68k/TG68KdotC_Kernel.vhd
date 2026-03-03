@@ -2154,21 +2154,20 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				IF trap_priv='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"20";
 				END IF;
-				IF trap_trace='1' THEN
-					trap_vector(9 downto 0) <= "00" & X"24";
-				END IF;
-				-- BUG #436 FIX: Group 2 exceptions (CHK, TRAPV, Divide-by-zero) must
-				-- override trap_trace in the vector priority chain. Per MC68030 UM 8.2.4:
-				-- "If the traced instruction is a TRAP, CHK, CHK2, TRAPV, or cpTRAPcc
-				-- instruction that traps, the instruction-related exception processing
-				-- occurs BEFORE the trace exception processing."
-				-- When both trap_trace and exec(trap_chk) are active, the CHK frame must
-				-- use CHK vector ($18), not trace vector ($24).
+				-- BUG #436 / #439 FIX: Group 2 exceptions (CHK, TRAPV, DIV0) must override
+				-- trap_trace for the CHK/TRAPV/DIV0 frame, but trap_trace must win for the
+				-- stacked trace frame. set(trap_chk) is combinatorial from the stale opcode
+				-- and fires throughout the stacked trace frame. Fix: put trap_trace AFTER
+				-- exec/set(trap_chk) so trace wins when trap_trace='1' (stacked trace frame).
+				-- During CHK frame: trap_trace='0', so CHK ($18) still wins correctly.
 				IF set_Z_error='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"14";
 				END IF;
 				IF exec(trap_chk)='1' OR set(trap_chk)='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"18";
+				END IF;
+				IF trap_trace='1' THEN
+					trap_vector(9 downto 0) <= "00" & X"24";  -- After CHK: trace wins during stacked trace frame
 				END IF;
 				IF trap_trapv='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"1C";
@@ -3334,8 +3333,13 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- Configure stacked trace frame after Group 2 handler vector loaded
 					-- exe_pc = handler entry (for trap00), trap_vector = trace ($24),
 					-- trap_trace = 1 (for format logic), trap_SR = current SR
+					-- BUG #439 FIX: exe_pc must be the Group 2 handler address (loaded from
+					-- vector table by trap3 exec(directPC)). At trace_stk_grp2, exec(directPC)=1
+					-- updates TG68_PC and data_read simultaneously. VHDL sequential reads use
+					-- OLD signal values, so TG68_PC still has the pre-handler fetch-ahead address.
+					-- data_read IS the handler address (from the just-completed vector table read).
 					IF micro_state = trace_stk_grp2 THEN
-						exe_pc <= TG68_PC;
+						exe_pc <= data_read;  -- BUG #439: use data_read (handler addr), not stale TG68_PC
 						trap_trace <= '1';
 						trap_SR <= FlagsSR;
 						trace_pending_group2 <= '0';
