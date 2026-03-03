@@ -2005,7 +2005,7 @@ PROCESS (clk)
 				elsif micro_state=trap00 THEN
 					data_write_tmp <= exe_pc; --TH
 					useStackframe2<='1';
-					writePCnext <= trap_trap OR trap_trapv OR exec(trap_chk) OR Z_error;
+					writePCnext <= trap_trap OR trap_trapv OR exec(trap_chk) OR set(trap_chk) OR Z_error;
 				ELSIF exec(writePC_add)='1' THEN
 					-- BUG #387 FIX: Use exe_pc for exceptions that occur during instruction decode
 					-- (illegal instruction vector=0x10, privilege violation vector=0x20).
@@ -2025,7 +2025,7 @@ PROCESS (clk)
 						data_write_tmp(15 downto 0) <= "0010" & trap_vector(11 downto 0); --TH
 					else
 						data_write_tmp(15 downto 0) <= "0000" & trap_vector(11 downto 0);
-						writePCnext <= trap_trap OR trap_trapv OR exec(trap_chk) OR Z_error;
+						writePCnext <= trap_trap OR trap_trapv OR exec(trap_chk) OR set(trap_chk) OR Z_error;
 					end if;
 				elsif micro_state = int3 then
 					-- MC68030: Format $1 throwaway frame format/vector word
@@ -2167,7 +2167,7 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				IF set_Z_error='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"14";
 				END IF;
-				IF exec(trap_chk)='1' THEN
+				IF exec(trap_chk)='1' OR set(trap_chk)='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"18";
 				END IF;
 				IF trap_trapv='1' THEN
@@ -2599,7 +2599,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			ELSE	
 				PC_datab(2) <= '1'; -- +4 (Default)
 			END IF;
-			IF (use_VBR_Stackframe='0' AND (trap_trap='1' OR trap_trapv='1' OR exec(trap_chk)='1' OR Z_error='1')) OR writePCnext='1' THEN
+			IF (use_VBR_Stackframe='0' AND (trap_trap='1' OR trap_trapv='1' OR exec(trap_chk)='1' OR set(trap_chk)='1' OR Z_error='1')) OR writePCnext='1' THEN
 				PC_datab(1) <= '1';
 			END IF;
 		ELSIF state="00" THEN
@@ -3324,10 +3324,11 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						END IF;
 					END IF;
 
-					-- MC68030 UM 8.2.4: Group 2 exceptions with T1 active require stacked trace
-					-- Capture trace-pending when Group 2 trap dispatches
+					-- MC68030 UM 8.1.12/8.2.4: Group 2 exceptions with T1 active require stacked trace.
+					-- Covers both Format $2 (CHK/TRAPV/DIV0 -> trap00) and Format $0 (TRAP #n -> trap0).
+					-- TRAP #n is Group 2 per Table 8-5, needs stacked trace even though it uses Format $0.
 					IF trapmake='1' AND trapd='0' AND cpu(1)='1' AND make_trace='1' AND
-					   (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR trap_trap='1') THEN
+					   (next_micro_state = trap00 OR trap_trap='1') AND trap_mmu_config='0' THEN
 						trace_pending_group2 <= '1';
 					END IF;
 					-- Configure stacked trace frame after Group 2 handler vector loaded
@@ -3760,7 +3761,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				next_micro_state <= berr1;
 				-- BUG #401 FIX: Set setstackaddr at dispatch (see interrupt path above)
 				setstackaddr <= '1';
-			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR trap_mmu_config='1') THEN
+			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR set(trap_chk)='1' OR trap_mmu_config='1') THEN
 				next_micro_state <= trap00;  -- Format $2 (6-word) per MC68030 UM Table 8-4
 				-- Note: trap_trap (TRAP #n) uses Format $0 per Table 8-4 - handled by else branch
 				-- Note: trap_format_error uses Format $0 (UM 6.4.3), falls through to trap0
