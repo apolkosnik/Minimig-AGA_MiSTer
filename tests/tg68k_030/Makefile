@@ -290,7 +290,7 @@ test-68030-library: compile
 
 test-whichamiga: compile
 	@echo "Running WhichAmiga MMU instruction test..."
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_whichamiga_mmu
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 20us; quit" tb_whichamiga_mmu
 
 # Enhanced comprehensive tests
 test-advanced: compile-advanced

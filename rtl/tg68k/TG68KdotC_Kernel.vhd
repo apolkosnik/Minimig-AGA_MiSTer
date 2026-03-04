@@ -3724,9 +3724,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			set(restore_ADDR) <= '1';
 		END IF;
 		
-		IF interrupt='1' AND trap_berr='1' THEN
+		IF interrupt='1' AND (trap_berr='1' OR trap_mmu_berr='1') THEN
 			-- MC68030 bus errors MUST use berr1-berr8 to push Format $A (16-word) frame.
 			-- Format $0 from trap0 path would crash any handler expecting Format $A.
+			-- trap_mmu_berr (MMU B-bit faults, vector 61) also requires Format $A.
 			IF cpu(1)='1' THEN
 				next_micro_state <= berr1;
 			ELSE
@@ -3771,9 +3772,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			-- Format #2 (6-word): TRAPV, CHK, CHK2, Divide by Zero, Trace, cpTRAPcc, Format Error
 			-- Format #0 (4-word): All others including privilege violation, F-line, illegal
 			-- Format #A (16-word): Bus Error (MC68030)
-			IF cpu(1)='1' AND trap_berr='1' THEN
+			IF cpu(1)='1' AND (trap_berr='1' OR trap_mmu_berr='1') THEN
 				next_micro_state <= berr1;
 				-- BUG #401 FIX: Set setstackaddr at dispatch (see interrupt path above)
+				-- Both trap_berr and trap_mmu_berr require Format $A (berr1-berr8).
 				setstackaddr <= '1';
 			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR set(trap_chk)='1' OR trap_mmu_config='1') THEN
 				next_micro_state <= trap00;  -- Format $2 (6-word) per MC68030 UM Table 8-4

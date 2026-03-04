@@ -129,14 +129,23 @@ architecture behavioral of tb_whichamiga_mmu is
         m(122) := x"0000"; m(123) := x"0080";
 
         ---------------------------------------------------------------
-        -- BUS ERROR HANDLER at $0080
+        -- BUS ERROR HANDLER at $0080 (checks SSW.DF for PMMU data fault)
+        -- Frame layout from SP: $00=SR, $02=PC_hi, $04=PC_lo, $06=Format/Vec,
+        --   $08=$0000(stub), $0A=berr_ssw (SSW), $0C=InstrPipe, $10=FaultAddr...
+        -- berr_ssw[8] = DF bit = bit 0 of byte at SP+$0A
         ---------------------------------------------------------------
-        -- $0080: MOVE.L #$BE000000,D7
-        m(64) := x"2E3C"; m(65) := x"BE00"; m(66) := x"0000";
-        -- $0086: MOVE.L D7,$1F00.L
-        m(67) := x"23C7"; m(68) := x"0000"; m(69) := x"1F00";
-        -- $008C: STOP #$2700
-        m(70) := x"4E72"; m(71) := x"2700";
+        -- $0080: BTST #0, ($0A,SP)  ; Test SSW.DF (bit 0 of byte at SP+$0A = berr_ssw[8])
+        --   $082F = BTST #n,(d16,A7) opcode; $0000 = bit#0; $000A = disp $0A
+        m(64) := x"082F"; m(65) := x"0000"; m(66) := x"000A";
+        -- $0086: BEQ.B $0094         ; Z=1 if DF=0 (bit was 0) -> branch to plain RTE
+        m(67) := x"670C";
+        -- $0088: MOVE.L #$AA550001,$1F20.L  ; DF=1 confirmed: write success marker
+        m(68) := x"23FC"; m(69) := x"AA55"; m(70) := x"0001";
+        m(71) := x"0000"; m(72) := x"1F20";
+        -- $0092: RTE                 ; Return (DF=1 success path, resumes at saved PC)
+        m(73) := x"4E73";
+        -- $0094: RTE                 ; Return (DF=0 path, not a data fault)
+        m(74) := x"4E73";
 
         ---------------------------------------------------------------
         -- UNEXPECTED TRAP HANDLER at $00A0
@@ -210,18 +219,32 @@ architecture behavioral of tb_whichamiga_mmu is
         -- MOVE.L D3,$1F18.L
         m(180) := x"23C3"; m(181) := x"0000"; m(182) := x"1F18";
 
-        -- Phase 4: Disable MMU and check results
-        -- MOVEQ #0,D0
-        m(183) := x"7000";
-        -- PMOVE D0,TC  ; Disable MMU
-        m(184) := x"F000"; m(185) := x"4000";
+        -- Phase 3.5: Bus Fault Detection Test ($016E)
+        -- Make entry 13 INVALID: write $D0000060 to $6034 (DT=00 = not allocated)
+        -- MOVE.L #$D0000060, $6034.L
+        m(183) := x"23FC"; m(184) := x"D000"; m(185) := x"0060";
+        m(186) := x"0000"; m(187) := x"6034";
+        -- PFLUSHA  ; Flush ATC so invalidated entry is not cached
+        m(188) := x"F000"; m(189) := x"2400";
+        -- NOP
+        m(190) := x"4E71";
+        -- MOVE.L ($DFFFFFFC),D0  ; Trigger PMMU bus fault (entry 13 = invalid DT=00)
+        --   $2039=MOVE.L (xxx).L,D0; extension words: $DFFFFFFC
+        --   Walker reads $6034=$D0000060 (DT=00=invalid) -> PMMU fault -> trap_berr
+        --   berr_ssw[8]=1 (DF=1, data access fault); handler at $0080 checks DF
+        --   Handler writes $AA550001 to $1F20, RTE returns to saved TG68_PC=$0184
+        m(191) := x"2039"; m(192) := x"D000"; m(193) := x"FFFC";
 
-        -- Final: Write success marker and stop
+        -- Phase 4: Disable MMU and write final marker ($0184)
+        -- MOVEQ #0,D0
+        m(194) := x"7000";
+        -- PMOVE D0,TC  ; Disable MMU (TC=0, E=0)
+        m(195) := x"F000"; m(196) := x"4000";
         -- MOVE.L #$AA550000,$1F00.L
-        m(186) := x"23FC"; m(187) := x"AA55"; m(188) := x"0000";
-        m(189) := x"0000"; m(190) := x"1F00";
+        m(197) := x"23FC"; m(198) := x"AA55"; m(199) := x"0000";
+        m(200) := x"0000"; m(201) := x"1F00";
         -- STOP #$2700
-        m(191) := x"4E72"; m(192) := x"2700";
+        m(202) := x"4E72"; m(203) := x"2700";
 
         ---------------------------------------------------------------
         -- DATA SECTION at $1080
@@ -558,10 +581,26 @@ begin
                     report "PC_TRACE[" & integer'image(cycle_count) & "]: Reached $0148 (D0 alias read)" severity note;
                 elsif debug_TG68_PC = x"00000156" then
                     report "PC_TRACE[" & integer'image(cycle_count) & "]: Reached $0156 (D0 alias write)" severity note;
-                elsif debug_TG68_PC = x"00000170" then
-                    report "PC_TRACE[" & integer'image(cycle_count) & "]: Reached $0170 (disable MMU)" severity note;
+                elsif debug_TG68_PC = x"0000016E" then
+                    report "PC_TRACE[" & integer'image(cycle_count) & "]: Reached $016E (Phase 3.5: make entry 13 INVALID)" severity note;
+                elsif debug_TG68_PC = x"0000017E" then
+                    report "PC_TRACE[" & integer'image(cycle_count) & "]: Reached $017E (bus fault trigger: MOVE.L ($DFFFFFFC),D0)" severity note;
+                elsif debug_TG68_PC = x"00000184" then
+                    report "PC_TRACE[" & integer'image(cycle_count) & "]: Reached $0184 (Phase 4)" &
+                           " log=0x" & slv_to_hex(pmmu_addr_log) &
+                           " phys=0x" & slv_to_hex(pmmu_addr_phys) &
+                           " fault=" & std_logic'image(debug_pmmu_fault) &
+                           " busy=" & std_logic'image(pmmu_busy) &
+                           " berr=" & std_logic'image(debug_trap_berr) &
+                           " mask=" & slv_to_hex(debug_memmask)
+                    severity note;
                 elsif debug_TG68_PC = x"00000080" then
-                    report "PC_TRACE[" & integer'image(cycle_count) & "]: BUS ERROR HANDLER at $0080!" severity note;
+                    report "PC_TRACE[" & integer'image(cycle_count) & "]: BUS ERROR HANDLER at $0080!" &
+                           " A7=0x" & slv_to_hex(debug_regfile_a7) &
+                           " fault=" & std_logic'image(debug_pmmu_fault) &
+                           " berr=" & std_logic'image(debug_trap_berr) &
+                           " mmuberr=" & std_logic'image(debug_trap_mmu_berr)
+                    severity note;
                 elsif debug_TG68_PC = x"000000A0" then
                     report "PC_TRACE[" & integer'image(cycle_count) & "]: UNEXPECTED TRAP at $00A0!" severity note;
                 end if;
@@ -585,6 +624,31 @@ begin
                            " data=0x" & slv_to_hex(pmmu_walker_data) severity note;
                 end if;
             end if;
+        end if;
+    end process;
+
+    ---------------------------------------------------------------
+    -- BERR FAULT TRACE (report logical address when trap_berr fires)
+    ---------------------------------------------------------------
+    berr_trace: process(clk)
+        variable prev_trap_berr : std_logic := '0';
+        variable berr_count : integer := 0;
+        variable cycle_count : integer := 0;
+    begin
+        if rising_edge(clk) then
+            cycle_count := cycle_count + 1;
+            if debug_trap_berr = '1' and prev_trap_berr = '0' then
+                berr_count := berr_count + 1;
+                report "TRAP_BERR[" & integer'image(berr_count) & "] cyc=" & integer'image(cycle_count) &
+                       " PC=0x" & slv_to_hex(debug_TG68_PC) &
+                       " log=0x" & slv_to_hex(pmmu_addr_log) &
+                       " phys=0x" & slv_to_hex(pmmu_addr_phys) &
+                       " fault=" & std_logic'image(debug_pmmu_fault) &
+                       " busy=" & std_logic'image(pmmu_busy) &
+                       " memmask=" & slv_to_hex(debug_memmask)
+                severity note;
+            end if;
+            prev_trap_berr := debug_trap_berr;
         end if;
     end process;
 
@@ -698,6 +762,18 @@ begin
             pass_count := pass_count + 1;
         else
             report "FAIL: Test 5 - D0 alias write-through = $" & slv_to_hex(result) & " (expected $DEADBEEF)" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        -- Test 6: Bus fault SSW.DF=1 confirmed ($1F20 = $AA550001)
+        -- Handler at $0080 checks bit 0 of byte at SP+$0A = berr_ssw[8] = DF
+        result := mem(to_integer(unsigned'(x"0F90"))) & mem(to_integer(unsigned'(x"0F91")));
+        if result = x"AA550001" then
+            report "PASS: Test 6 - Bus fault SSW.DF=1 confirmed ($AA550001 at $1F20)" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: Test 6 - Bus fault test: $1F20=$" & slv_to_hex(result) &
+                   " (expected $AA550001; DF=1 check)" severity error;
             fail_count := fail_count + 1;
         end if;
 
