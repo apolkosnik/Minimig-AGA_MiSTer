@@ -534,6 +534,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal MSP					: std_logic_vector(31 downto 0);  -- BUG #18: Master Stack Pointer (68020+)
 	signal ISP					: std_logic_vector(31 downto 0);  -- BUG #18: Interrupt Stack Pointer (68020+)
 	signal interrupt_mode		: std_logic := '0';  -- BUG #18: 0=normal supervisor, 1=interrupt processing
+	signal interrupt_mode_set_req : std_logic := '0';
+	signal interrupt_mode_clr_req : std_logic := '0';
 	signal format1_chain_active : std_logic := '0';  -- MC68030: Set during Format $1 RTE dual-frame chain
 --	signal illegal_write_mode	: bit;
 --	signal illegal_read_mode	: bit;
@@ -3506,14 +3508,15 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 		END IF;	
 		
 		IF rising_edge(clk) THEN
-			IF Reset='1' THEN
-				fc_internal(2) <= '1';
-				SVmode <= '1';
-				preSVmode <= '1';
-				FlagsSR <= "00100111";
-				make_trace <= '0';
-				make_trace_t0 <= '0';
-			ELSIF clkena_lw = '1' THEN
+				IF Reset='1' THEN
+					fc_internal(2) <= '1';
+					SVmode <= '1';
+					preSVmode <= '1';
+					FlagsSR <= "00100111";
+					make_trace <= '0';
+					make_trace_t0 <= '0';
+					interrupt_mode <= '0';
+				ELSIF clkena_lw = '1' THEN
 				IF setopcode='1' THEN
 					make_trace <= FlagsSR(7);
 					-- T0 mode: active when T0=1, T1=0 (T1=1 traces everything via make_trace)
@@ -3582,14 +3585,19 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				-- MC68030 UM 8.2.2: The status register value in the format error
 				-- exception stack frame is the value in the status register before
 				-- the RTE instruction was executed.
-				IF trap_format_error='1' THEN
-					FlagsSR <= rte_saved_sr_high AND SR_trace_mask;
-					fc_internal(2) <= '1';
-				END IF;
-				IF cpu(1)='0' THEN
-					FlagsSR(4) <= '0';
-					FlagsSR(6) <= '0';
-				END IF;
+					IF trap_format_error='1' THEN
+						FlagsSR <= rte_saved_sr_high AND SR_trace_mask;
+						fc_internal(2) <= '1';
+					END IF;
+					IF interrupt_mode_set_req='1' THEN
+						interrupt_mode <= '1';
+					ELSIF interrupt_mode_clr_req='1' THEN
+						interrupt_mode <= '0';
+					END IF;
+					IF cpu(1)='0' THEN
+						FlagsSR(4) <= '0';
+						FlagsSR(6) <= '0';
+					END IF;
 				FlagsSR(3) <= '0';
 			END IF;
 		END IF;	
@@ -3639,11 +3647,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		dest_2ndHbits <= '0';
 		dest_2ndLbits <= '0';
 		ea_only <= '0';
-		set_direct_data <= '0';
-		set_exec_tas <= '0';
-		set_exec_cas <= '0';
-		trap_illegal <='0';
-		-- trap_addr_error: moved to process 2375 (registered, like trap_berr)
+			set_direct_data <= '0';
+			set_exec_tas <= '0';
+			set_exec_cas <= '0';
+			interrupt_mode_set_req <= '0';
+			interrupt_mode_clr_req <= '0';
+			trap_illegal <='0';
+			-- trap_addr_error: moved to process 2375 (registered, like trap_berr)
 		trap_priv <='0';
 		trap_1010 <='0';
 		trap_1111 <='0';
@@ -3806,14 +3816,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			set(changeMode) <= '1';
 		END IF;
 
-		IF interrupt='1' AND trap_interrupt='1'THEN
+			IF interrupt='1' AND trap_interrupt='1'THEN
 --			skipFetch <= '1';
-			next_micro_state <= int1;
-			set(update_ld) <= '1';
-			setstate <= "10";
-			-- BUG #18: Set interrupt mode for proper ISP selection (68020+)
-			interrupt_mode <= '1';
-		END IF;
+				next_micro_state <= int1;
+				set(update_ld) <= '1';
+				setstate <= "10";
+				-- BUG #18: Set interrupt mode for proper ISP selection (68020+)
+				interrupt_mode_set_req <= '1';
+			END IF;
 			
 		-- BUG #18: Stack pointer switching on mode changes (68020/68030)
 		IF set(changeMode)='1' THEN
@@ -6771,11 +6781,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									set(to_MSP) <= '1';
 									set(from_ISP) <= '1';
 								END IF;
-							END IF;
-							-- Clear interrupt mode when returning to user mode
-							IF FlagsSR(5)='0' THEN
-								interrupt_mode <= '0';
-							END IF;
+								END IF;
+								-- Clear interrupt mode when returning to user mode
+								IF FlagsSR(5)='0' THEN
+									interrupt_mode_clr_req <= '1';
+								END IF;
 						WHEN "0010" =>
 							-- Format 2: 6-word frame - read 1 more longword (4 bytes)
 							setstate <= "10"; -- read
@@ -6848,11 +6858,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								set(to_MSP) <= '1';
 								set(from_ISP) <= '1';
 							END IF;
-						END IF;
-						-- BUG #18: Clear interrupt mode only when returning to user mode (MC68030)
-						IF FlagsSR(5)='0' THEN
-							interrupt_mode <= '0';
-						END IF;
+							END IF;
+							-- BUG #18: Clear interrupt mode only when returning to user mode (MC68030)
+							IF FlagsSR(5)='0' THEN
+								interrupt_mode_clr_req <= '1';
+							END IF;
 					ELSE
 						-- More longwords to read
 						setstate <= "10"; -- read
