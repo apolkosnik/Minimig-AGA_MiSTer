@@ -24,6 +24,20 @@ set_multicycle_path -from [get_clocks { *|pll|pll_inst|altera_pll_i|*[0].*|divcl
 set_false_path -from {emu|cpu_wrapper|z3ram_*}
 set_false_path -from {emu|cpu_wrapper|z2ram_*}
 
+# ISSP debug probes: these are observability-only paths sampled by JTAG at low speed.
+# Exclude from timing analysis to prevent them from affecting critical-path placement.
+set_false_path -to   {emu|cpu_wrapper|stp_*}
+set_false_path -from {emu|cpu_wrapper|stp_*}
+set_false_path -to   {emu|cpu_wrapper|excf_*}
+set_false_path -from {emu|cpu_wrapper|excf_*}
+set_false_path -to   {emu|cpu_wrapper|hang_*}
+set_false_path -from {emu|cpu_wrapper|hang_*}
+set_false_path -to   {*|excf_issp|*}
+set_false_path -to   {*|pmmu_issp|*}
+set_false_path -to   {*|pmmu_issp_desc|*}
+set_false_path -to   {*|cpus_issp|*}
+set_false_path -to   {*|regs_issp|*}
+
 set_false_path -from {emu|minimig|USERIO1|cpu_config*}
 set_false_path -from {emu|minimig|USERIO1|ide_config*}
 set_false_path -from {emu|minimig|USERIO1|bootrom}

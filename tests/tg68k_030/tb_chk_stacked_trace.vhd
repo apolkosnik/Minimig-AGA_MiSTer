@@ -415,6 +415,129 @@ begin
         check_ia("CHK.L frame IA=CHK.L_addr=$100E", x"0000100E");
 
         -- ================================================================
+        -- TEST 3: CHK2.B (A0),D0 with T1=1
+        --
+        -- CHK2 uses a different execution path (chk20-chk24 micro-states)
+        -- than regular CHK. This tests that stacked trace works for CHK2.
+        --
+        -- Code at $1000:
+        --   $1000: MOVE.L #$3000,A0  (207C 0000 3000) A0 = bounds address
+        --   $1006: MOVE.L #$FF,D0    (203C 0000 00FF) D0 = 255 (out of range)
+        --   $100C: MOVE #$A700,SR    (46FC A700) T1=1 S=1 IPL=7 (NOT traced)
+        --   $1010: CHK2.B (A0),D0    (00D0 0800) D0=$FF > $20, trap fires
+        --   $1014: NOP               (4E71) CHK frame stacked PC points here
+        --
+        -- Bounds at $3000: lower=$10, upper=$20 (bytes)
+        -- CHK handler at $2000, Trace handler at $2100
+        --
+        -- Expected:
+        --   CHK frame at $3FF4: format=$2, vector=$018, PC=$1014, IA=$1010
+        --   Trace frame at $3FE8: format=$2, vector=$024, PC=$2000, IA=$2000
+        -- ================================================================
+        report "" severity note;
+        report "TEST 3: CHK2.B (A0),D0 with T1=1 (stacked trace)" severity note;
+        report "  Tests CHK2 micro-state path (chk20-chk24) with trace pending" severity note;
+
+        init_memory;
+        setup_vector(16#18#, 16#2000#);  -- CHK exception vector -> $2000
+        setup_vector(16#24#, 16#2100#);  -- Trace exception vector -> $2100
+        setup_handler(16#2000#);
+        setup_handler(16#2100#);
+
+        -- Bounds at $3000: lower=$10, upper=$20
+        mem(16#3000# / 2) := x"1020";   -- lower=$10, upper=$20
+
+        mem(16#1000# / 2) := x"207C";   -- MOVE.L #imm,A0
+        mem(16#1002# / 2) := x"0000";   -- high word
+        mem(16#1004# / 2) := x"3000";   -- A0 = $3000 (bounds)
+        mem(16#1006# / 2) := x"203C";   -- MOVE.L #imm,D0
+        mem(16#1008# / 2) := x"0000";   -- high word
+        mem(16#100A# / 2) := x"00FF";   -- D0 = $FF (out of range: $FF > $20)
+        mem(16#100C# / 2) := x"46FC";   -- MOVE #imm,SR
+        mem(16#100E# / 2) := x"A700";   -- SR = $A700: T1=1 S=1 IPL=7
+        mem(16#1010# / 2) := x"00D0";   -- CHK2.B (A0),D0 opcode
+        mem(16#1012# / 2) := x"0800";   -- extension: D0, CHK2 (bit 11=1)
+        mem(16#1014# / 2) := x"4E71";   -- NOP (CHK frame stacked PC)
+
+        for i in 16#3F00# / 2 to 16#4000# / 2 - 1 loop
+            mem(i) := x"DEAD";
+        end loop;
+
+        do_reset;
+        wait_for_stop;
+
+        report "  -- Trace frame (SP=$3FE8, pushed second):" severity note;
+        read_frame(x"00003FE8");
+        check_format("CHK2.B trace frame", "0010");
+        check_vector("CHK2.B trace vector=$024", x"024");
+        check_pc("CHK2.B trace PC=CHK_handler=$2000", x"00002000");
+        check_ia("CHK2.B trace IA=CHK_handler=$2000", x"00002000");
+
+        report "  -- CHK frame (SP=$3FF4, pushed first):" severity note;
+        read_frame(x"00003FF4");
+        check_format("CHK2.B CHK frame", "0010");
+        check_vector("CHK2.B CHK frame vector=$018", x"018");
+        check_pc("CHK2.B CHK frame PC=next_instr=$1014", x"00001014");
+        check_ia("CHK2.B CHK frame IA=CHK2_addr=$1010", x"00001010");
+
+        -- ================================================================
+        -- TEST 4: CHK2.B (A0),D0 with T1=1, value IN BOUNDS (no CHK trap)
+        --
+        -- When CHK2 doesn't trap but T1 is active, a NORMAL trace exception
+        -- should fire after the CHK2 instruction completes.
+        --
+        -- Code at $1000:
+        --   $1000: MOVE.L #$3000,A0  (207C 0000 3000) A0 = bounds address
+        --   $1006: MOVE.L #$15,D0    (203C 0000 0015) D0 = $15 (in range $10-$20)
+        --   $100C: MOVE #$A700,SR    (46FC A700) T1=1 S=1 IPL=7 (NOT traced)
+        --   $1010: CHK2.B (A0),D0    (00D0 0800) D0=$15, in range -> no trap
+        --   $1014: NOP               (4E71) trace frame PC points here
+        --
+        -- Bounds at $3000: lower=$10, upper=$20
+        -- Trace handler at $2100
+        --
+        -- Expected: Single trace frame at $3FF4 (no CHK frame)
+        --   Format $2, vector $024, PC=$1014 (next instr after CHK2)
+        -- ================================================================
+        report "" severity note;
+        report "TEST 4: CHK2.B (A0),D0 with T1=1, IN BOUNDS (normal trace)" severity note;
+        report "  Tests that normal T1 trace fires after CHK2 that does NOT trap" severity note;
+
+        init_memory;
+        setup_vector(16#18#, 16#2000#);  -- CHK exception vector (not used)
+        setup_vector(16#24#, 16#2100#);  -- Trace exception vector
+        setup_handler(16#2100#);         -- Trace handler
+
+        -- Bounds at $3000: lower=$10, upper=$20
+        mem(16#3000# / 2) := x"1020";   -- lower=$10, upper=$20
+
+        mem(16#1000# / 2) := x"207C";   -- MOVE.L #imm,A0
+        mem(16#1002# / 2) := x"0000";
+        mem(16#1004# / 2) := x"3000";   -- A0 = $3000 (bounds)
+        mem(16#1006# / 2) := x"203C";   -- MOVE.L #imm,D0
+        mem(16#1008# / 2) := x"0000";
+        mem(16#100A# / 2) := x"0015";   -- D0 = $15 (in range $10-$20)
+        mem(16#100C# / 2) := x"46FC";   -- MOVE #imm,SR
+        mem(16#100E# / 2) := x"A700";   -- SR = $A700: T1=1 S=1 IPL=7
+        mem(16#1010# / 2) := x"00D0";   -- CHK2.B (A0),D0 opcode
+        mem(16#1012# / 2) := x"0800";   -- extension: D0, CHK2 (bit 11=1)
+        mem(16#1014# / 2) := x"4E71";   -- NOP (trace frame PC points here)
+
+        for i in 16#3F00# / 2 to 16#4000# / 2 - 1 loop
+            mem(i) := x"DEAD";
+        end loop;
+
+        do_reset;
+        wait_for_stop;
+
+        -- Normal trace: single Format $2 frame at $3FF4 (SSP=$4000, 12 bytes)
+        report "  -- Trace frame (SP=$3FF4):" severity note;
+        read_frame(x"00003FF4");
+        check_format("CHK2.B normal trace frame", "0010");
+        check_vector("CHK2.B normal trace vector=$024", x"024");
+        check_pc("CHK2.B normal trace PC=next_instr=$1014", x"00001014");
+
+        -- ================================================================
         -- SUMMARY
         -- ================================================================
         report "" severity note;

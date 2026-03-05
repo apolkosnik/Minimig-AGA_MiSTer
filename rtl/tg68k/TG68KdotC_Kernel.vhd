@@ -305,7 +305,15 @@ entity TG68KdotC_Kernel is
 			debug_pmmu_ptr2_desc_data : out std_logic_vector(31 downto 0);
 			debug_pmmu_ptr3_desc_addr : out std_logic_vector(31 downto 0);
 			debug_pmmu_ptr3_desc_data : out std_logic_vector(31 downto 0);
-			debug_pmmu_saved_fc       : out std_logic_vector(2 downto 0)
+			debug_pmmu_saved_fc       : out std_logic_vector(2 downto 0);
+		-- DEBUG: CHK/Group2 exception frame probes (for ISSP trap event latch)
+		debug_make_trace         : out std_logic;
+		debug_trace_pending_grp2 : out std_logic;
+		debug_useStackframe2     : out std_logic;
+		debug_exec_trap_chk      : out std_logic;
+		debug_set_trap_chk       : out std_logic;
+		debug_data_write_tmp     : out std_logic_vector(31 downto 0);
+		debug_FlagsSR            : out std_logic_vector(7 downto 0)
 			);
 end TG68KdotC_Kernel;
 
@@ -2007,7 +2015,13 @@ PROCESS (clk)
 				elsif micro_state=trap00 THEN
 					data_write_tmp <= exe_pc; --TH
 					useStackframe2<='1';
-					writePCnext <= trap_trap OR trap_trapv OR exec(trap_chk) OR set(trap_chk) OR Z_error;
+					-- BUG #443 FIX: Gate with trap_trace='0'. During stacked trace frames,
+					-- set(trap_chk)/trap_trap/trap_trapv are combinationally active from the
+					-- stale CHK/TRAP/TRAPV opcode. writePCnext must be '0' for trace frames
+					-- because trace PC = handler entry (no +2 adjustment needed).
+					IF trap_trace='0' THEN
+						writePCnext <= trap_trap OR trap_trapv OR exec(trap_chk) OR set(trap_chk) OR Z_error;
+					END IF;
 				ELSIF exec(writePC_add)='1' THEN
 					-- BUG #387 FIX: Use exe_pc for exceptions that occur during instruction decode
 					-- (illegal instruction vector=0x10, privilege violation vector=0x20).
@@ -2027,7 +2041,10 @@ PROCESS (clk)
 						data_write_tmp(15 downto 0) <= "0010" & trap_vector(11 downto 0); --TH
 					else
 						data_write_tmp(15 downto 0) <= "0000" & trap_vector(11 downto 0);
-						writePCnext <= trap_trap OR trap_trapv OR exec(trap_chk) OR set(trap_chk) OR Z_error;
+						-- BUG #443: Gate with trap_trace='0' (same reason as trap00 above)
+						IF trap_trace='0' THEN
+							writePCnext <= trap_trap OR trap_trapv OR exec(trap_chk) OR set(trap_chk) OR Z_error;
+						END IF;
 					end if;
 				elsif micro_state = int3 then
 					-- MC68030: Format $1 throwaway frame format/vector word
@@ -2156,23 +2173,24 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				IF trap_priv='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"20";
 				END IF;
-				-- BUG #436 / #439 FIX: Group 2 exceptions (CHK, TRAPV, DIV0) must override
-				-- trap_trace for the CHK/TRAPV/DIV0 frame, but trap_trace must win for the
-				-- stacked trace frame. set(trap_chk) is combinatorial from the stale opcode
-				-- and fires throughout the stacked trace frame. Fix: put trap_trace AFTER
-				-- exec/set(trap_chk) so trace wins when trap_trace='1' (stacked trace frame).
-				-- During CHK frame: trap_trace='0', so CHK ($18) still wins correctly.
+				-- BUG #436 / #439 / #441 FIX: Priority chain for trap_vector.
+				-- Group 2 signals (set_Z_error, trap_chk, trap_trapv) come first,
+				-- then trap_trace overrides them for stacked trace frames.
+				-- trap_trapv and trap_trap are gated with AND trap_trace='0' because
+				-- they persist from the stale opcode/registered state during stacked
+				-- trace frames. set_Z_error and exec/set(trap_chk) are combinational
+				-- so they're overridden by trap_trace position (VHDL last-assign wins).
 				IF set_Z_error='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"14";
 				END IF;
 				IF exec(trap_chk)='1' OR set(trap_chk)='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"18";
 				END IF;
-				IF trap_trace='1' THEN
-					trap_vector(9 downto 0) <= "00" & X"24";  -- After CHK: trace wins during stacked trace frame
-				END IF;
-				IF trap_trapv='1' THEN
+				IF trap_trapv='1' AND trap_trace='0' THEN
 					trap_vector(9 downto 0) <= "00" & X"1C";
+				END IF;
+				IF trap_trace='1' THEN
+					trap_vector(9 downto 0) <= "00" & X"24";
 				END IF;
 				IF trap_1010='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"28";
@@ -2180,7 +2198,7 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 				IF trap_1111='1' THEN
 					trap_vector(9 downto 0) <= "00" & X"2C";
 				END IF;
-				IF trap_trap='1' THEN
+				IF trap_trap='1' AND trap_trace='0' THEN
 					trap_vector(9 downto 0) <= "0010" & opcode(3 downto 0) & "00";
 				END IF;
 					-- set_vectoraddr is asserted in trap3 for all exception classes, but
@@ -2673,6 +2691,11 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			END IF;
 			-- CHK.L (0100 ddd 100 mmm rrr) - 68020+
 			IF opcode(15 downto 12) = "0100" AND opcode(8 downto 6) = "100" THEN
+				v_is_cof := '1';
+			END IF;
+			-- CHK2/CMP2 (00ss 0xxx 011 mmm rrr) - 68020+
+			-- Opcode: bits 15:14="00", 11=0, 8:6="011"
+			IF opcode(15 downto 14) = "00" AND opcode(11) = '0' AND opcode(8 downto 6) = "011" THEN
 				v_is_cof := '1';
 			END IF;
 			-- DIVU.W (1000 ddd 011 mmm rrr)
@@ -3325,10 +3348,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						END IF;
 					END IF;
 
-					-- MC68030 UM 8.1.12/8.2.4: Group 2 exceptions with T1 active require stacked trace.
+					-- MC68030 UM 8.1.12/8.2.4: Group 2 exceptions with trace active require stacked trace.
 					-- Covers both Format $2 (CHK/TRAPV/DIV0 -> trap00) and Format $0 (TRAP #n -> trap0).
 					-- TRAP #n is Group 2 per Table 8-5, needs stacked trace even though it uses Format $0.
-					IF trapmake='1' AND trapd='0' AND cpu(1)='1' AND make_trace='1' AND
+					-- T0 (change-of-flow) trace also applies: Group 2 exceptions vector to a handler,
+					-- which IS a change of flow (MC68030 UM 8.1.7: "instruction traps" are traced in T0).
+					IF trapmake='1' AND trapd='0' AND cpu(1)='1' AND (make_trace='1' OR make_trace_t0='1') AND
 					   (next_micro_state = trap00 OR trap_trap='1') AND trap_mmu_config='0' THEN
 						trace_pending_group2 <= '1';
 					END IF;
@@ -8519,5 +8544,14 @@ debug_pmmu_reg_part <= pmmu_reg_part_d;
 debug_pmmu_reg_rdat <= x"0000" & pmmu_debug_mmusr;
 debug_make_berr <= make_berr;
 debug_pmmu_fault <= pmmu_fault;
+
+-- DEBUG: CHK/Group2 exception frame probes
+debug_make_trace         <= make_trace;
+debug_trace_pending_grp2 <= trace_pending_group2;
+debug_useStackframe2     <= useStackframe2;
+debug_exec_trap_chk      <= '1' WHEN exec(trap_chk)='1' ELSE '0';
+debug_set_trap_chk       <= '1' WHEN set(trap_chk)='1' ELSE '0';
+debug_data_write_tmp     <= data_write_tmp;
+debug_FlagsSR            <= FlagsSR;
 
 END;

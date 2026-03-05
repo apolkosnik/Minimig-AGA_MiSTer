@@ -388,6 +388,44 @@ wire        kernel_interrupt_p;  // Kernel interrupt pending
 wire        kernel_setendOPC_p;  // setendOPC combinational
 wire  [2:0] kernel_IPL_nr_p;    // IPL level (inverted)
 wire        pmmu_fault_p;        // PMMU translation fault (suppress bus access)
+// CHK/Group2 exception frame debug signals (for EXCF ISSP probe)
+wire        kernel_make_trace_p;
+wire        kernel_trace_pending_grp2_p;
+wire        kernel_useStackframe2_p;
+wire        kernel_exec_trap_chk_p;
+wire        kernel_set_trap_chk_p;
+wire [31:0] kernel_data_write_tmp_p;
+wire  [7:0] kernel_FlagsSR_p;
+wire [31:0] kernel_trap_vector_p;
+wire [31:0] kernel_micro_state_p;    // VHDL integer 0-255 maps to 32-bit
+wire [31:0] kernel_next_ms_p;        // VHDL integer 0-255 maps to 32-bit
+wire        kernel_trapmake_p;
+// CPU Core debug signals (for CPUS ISSP probe)
+wire [31:0] kernel_TG68_PC_p;
+wire [15:0] kernel_opcode_p;
+wire [15:0] kernel_last_opc_read_p;
+wire [15:0] kernel_brief_p;
+wire [31:0] kernel_memaddr_reg_p;
+wire  [5:0] kernel_memmask_p;
+wire        kernel_decodeOPC_p;
+wire        kernel_setnextpass_p;
+wire        kernel_SVmode_p;
+wire [31:0] kernel_exe_PC_p;
+wire        kernel_trap_illegal_p;
+wire        kernel_trap_priv_p;
+wire        kernel_trap_addr_error_p;
+wire        kernel_trap_berr_p;
+wire        kernel_trap_mmu_berr_p;
+wire        kernel_make_berr_p;
+wire        kernel_trap_1111_p;
+// T0 trace investigation signals
+wire        kernel_exec_directSR_p;
+wire        kernel_exec_to_SR_p;
+// Register file debug (for REGS ISSP probe)
+wire [31:0] kernel_regfile_d0_p, kernel_regfile_d1_p, kernel_regfile_d2_p, kernel_regfile_d3_p;
+wire [31:0] kernel_regfile_d4_p, kernel_regfile_d5_p, kernel_regfile_d6_p, kernel_regfile_d7_p;
+wire [31:0] kernel_regfile_a0_p, kernel_regfile_a1_p, kernel_regfile_a2_p, kernel_regfile_a3_p;
+wire [31:0] kernel_regfile_a4_p, kernel_regfile_a5_p, kernel_regfile_a6_p, kernel_regfile_a7_p;
 // Format Error debug latch signals from Kernel
 wire        fmt_err_latched_p;
 wire [15:0] fmt_err_rte_word_p;
@@ -549,6 +587,111 @@ always @(posedge clk) begin
 	end
 end
 
+// EXCF ISSP: Sticky trap-event latch for CHK/Group2 exception frame debugging
+// micro_state integer encoding (trap0=53, trap00=52, trace_stk_grp2=114)
+// Probe layout (128 bits, MSB first):
+//   [127]     chk_dispatch_latched
+//   [126]     make_trace_at_dispatch
+//   [125]     exec_trap_chk_at_dispatch
+//   [124]     set_trap_chk_at_dispatch
+//   [123:116] FlagsSR_at_dispatch (8 bits)
+//   [115:104] trap_vector_at_dispatch (12 bits)
+//   [103:96]  next_micro_state_at_dispatch (8 bits, 52=trap00 53=trap0)
+//   [95]      fmt1_latched (first trap0 format word)
+//   [94]      useStackframe2_at_fmt1
+//   [93:78]   format_word_1 (16 bits)
+//   [77]      fmt2_latched (second trap0 format word, stacked trace)
+//   [76]      useStackframe2_at_fmt2
+//   [75:60]   format_word_2 (16 bits)
+//   [59]      trace_stk_grp2_entered
+//   [58:0]    unused
+
+(* noprune, preserve *) reg        excf_chk_dispatch_latched;
+(* noprune, preserve *) reg        excf_make_trace_cap;
+(* noprune, preserve *) reg        excf_exec_trap_chk_cap;
+(* noprune, preserve *) reg        excf_set_trap_chk_cap;
+(* noprune, preserve *) reg  [7:0] excf_flagsSR_cap;
+(* noprune, preserve *) reg [11:0] excf_trap_vector_cap;
+(* noprune, preserve *) reg  [7:0] excf_next_ms_cap;
+(* noprune, preserve *) reg        excf_fmt1_latched;
+(* noprune, preserve *) reg        excf_useStackframe2_1;
+(* noprune, preserve *) reg [15:0] excf_format_word_1;
+(* noprune, preserve *) reg        excf_fmt2_latched;
+(* noprune, preserve *) reg        excf_useStackframe2_2;
+(* noprune, preserve *) reg [15:0] excf_format_word_2;
+(* noprune, preserve *) reg        excf_trace_stk_grp2_entered;
+
+wire [0:0] excf_issp_source;
+
+always @(posedge clk or negedge reset) begin
+	if (!reset) begin
+		excf_chk_dispatch_latched  <= 0;
+		excf_make_trace_cap        <= 0;
+		excf_exec_trap_chk_cap     <= 0;
+		excf_set_trap_chk_cap      <= 0;
+		excf_flagsSR_cap           <= 0;
+		excf_trap_vector_cap       <= 0;
+		excf_next_ms_cap           <= 0;
+		excf_fmt1_latched          <= 0;
+		excf_useStackframe2_1      <= 0;
+		excf_format_word_1         <= 0;
+		excf_fmt2_latched          <= 0;
+		excf_useStackframe2_2      <= 0;
+		excf_format_word_2         <= 0;
+		excf_trace_stk_grp2_entered <= 0;
+	end else if (excf_issp_source[0]) begin
+		// Synchronous clear via ISSP source bit
+		excf_chk_dispatch_latched  <= 0;
+		excf_make_trace_cap        <= 0;
+		excf_exec_trap_chk_cap     <= 0;
+		excf_set_trap_chk_cap      <= 0;
+		excf_flagsSR_cap           <= 0;
+		excf_trap_vector_cap       <= 0;
+		excf_next_ms_cap           <= 0;
+		excf_fmt1_latched          <= 0;
+		excf_useStackframe2_1      <= 0;
+		excf_format_word_1         <= 0;
+		excf_fmt2_latched          <= 0;
+		excf_useStackframe2_2      <= 0;
+		excf_format_word_2         <= 0;
+		excf_trace_stk_grp2_entered <= 0;
+	end else if (kernel_clkena_lw_p) begin
+		// Group A: capture at CHK trap dispatch (trapmake with exec or set trap_chk)
+		// Only capture when make_trace is active (T1 trace) so we see the
+		// stacked trace path, not a normal non-traced CHK dispatch.
+		if (kernel_trapmake_p && (kernel_exec_trap_chk_p || kernel_set_trap_chk_p)
+		    && kernel_make_trace_p
+		    && !excf_chk_dispatch_latched) begin
+			excf_chk_dispatch_latched <= 1;
+			excf_make_trace_cap       <= kernel_make_trace_p;
+			excf_exec_trap_chk_cap    <= kernel_exec_trap_chk_p;
+			excf_set_trap_chk_cap     <= kernel_set_trap_chk_p;
+			excf_flagsSR_cap          <= kernel_FlagsSR_p;
+			excf_trap_vector_cap      <= kernel_trap_vector_p[11:0];
+			excf_next_ms_cap          <= kernel_next_ms_p[7:0];
+		end
+		// Group B: capture format word at trap1 (micro_state==54).
+		// GATED on excf_chk_dispatch_latched so we only capture the CHK frame,
+		// not format words from earlier unrelated exceptions (F-line, priv, etc.).
+		// data_write_tmp is SET by the kernel clocked process at the trap0 edge,
+		// so its new value is only visible on the following cycle (trap1).
+		if (excf_chk_dispatch_latched && kernel_micro_state_p == 32'd54 && !excf_fmt1_latched) begin
+			excf_fmt1_latched      <= 1;
+			excf_useStackframe2_1  <= kernel_useStackframe2_p;
+			excf_format_word_1     <= kernel_data_write_tmp_p[15:0];
+		end else if (excf_chk_dispatch_latched && kernel_micro_state_p == 32'd54 && excf_fmt1_latched && !excf_fmt2_latched) begin
+			excf_fmt2_latched      <= 1;
+			excf_useStackframe2_2  <= kernel_useStackframe2_p;
+			excf_format_word_2     <= kernel_data_write_tmp_p[15:0];
+		end
+		// Group C: trace_stk_grp2 entered (micro_state==114)
+		// Also gated on CHK dispatch to avoid capturing unrelated trace entries
+		if (excf_chk_dispatch_latched && kernel_micro_state_p == 32'd114) begin
+			excf_trace_stk_grp2_entered <= 1;
+		end
+	end
+end
+
 // In-System Sources and Probes (ISSP) for JTAG readback of PMMU debug state
 // Probe layout (MSB first):
 //   TC[31:0] + TT0[31:0] + TT1[31:0] = 96
@@ -598,6 +741,323 @@ altsource_probe #(
 	         stp_fault_ptr1_desc_addr, stp_fault_ptr1_desc_data,
 	         stp_fault_ptr2_desc_addr, stp_fault_ptr2_desc_data,
 	         stp_fault_ptr3_desc_addr, stp_fault_ptr3_desc_data})
+);
+
+// Tertiary ISSP: CHK/Group2 exception frame trap-event latch (instance 2)
+// Probe width = 128 bits; source width = 1 (bit [0] clears the latch)
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (2),
+	.instance_id             ("EXCF"),
+	.probe_width             (128),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) excf_issp (
+	.probe ({excf_chk_dispatch_latched,
+	         excf_make_trace_cap,
+	         excf_exec_trap_chk_cap,
+	         excf_set_trap_chk_cap,
+	         excf_flagsSR_cap,
+	         excf_trap_vector_cap,
+	         excf_next_ms_cap,
+	         excf_fmt1_latched,
+	         excf_useStackframe2_1,
+	         excf_format_word_1,
+	         excf_fmt2_latched,
+	         excf_useStackframe2_2,
+	         excf_format_word_2,
+	         excf_trace_stk_grp2_entered,
+	         59'b0}),
+	.source (excf_issp_source)
+);
+
+// ============================================================================
+// ISSP Instance 3: CPUS - CPU Core State (live + sticky hang capture)
+// ============================================================================
+// Live probe (256 bits):
+//   PC[31:0]=32, opcode[15:0]=16, state[1:0]=2, micro_state[7:0]=8,
+//   next_micro_state[7:0]=8, memmask[5:0]=6, FlagsSR[7:0]=8, SVmode=1,
+//   memaddr_reg[31:0]=32, exe_PC[31:0]=32, last_opc_read[15:0]=16,
+//   brief[15:0]=16, trap_vector[31:0]=32,
+//   trap_illegal=1, trap_priv=1, trap_addr_error=1, trap_berr=1,
+//   trap_mmu_berr=1, make_berr=1, trap_1111=1, trapmake=1,
+//   decodeOPC=1, setnextpass=1, setendOPC=1, stop=1, clkena_lw=1,
+//   cpu_halted=1, pmmu_fault=1, interrupt=1
+//   = 32+16+2+8+8+6+8+1+32+32+16+16+32+8+1+1+1+1+1+1 = 223
+// Sticky hang capture (223 bits, same layout):
+//   hang_latched=1, hang_counter_overflow=1, + same fields = 224
+// Source: 1 bit (clear sticky latch)
+// Total probe = 223 + 224 = 447
+
+(* noprune, preserve *) reg [31:0] stp_cpu_pc;
+(* noprune, preserve *) reg [15:0] stp_cpu_opcode;
+(* noprune, preserve *) reg  [1:0] stp_cpu_state;
+(* noprune, preserve *) reg  [7:0] stp_cpu_micro_state;
+(* noprune, preserve *) reg  [7:0] stp_cpu_next_micro_state;
+(* noprune, preserve *) reg  [5:0] stp_cpu_memmask;
+(* noprune, preserve *) reg  [7:0] stp_cpu_flagsSR;
+(* noprune, preserve *) reg        stp_cpu_SVmode;
+(* noprune, preserve *) reg [31:0] stp_cpu_memaddr;
+(* noprune, preserve *) reg [31:0] stp_cpu_exe_pc;
+(* noprune, preserve *) reg [15:0] stp_cpu_last_opc_read;
+(* noprune, preserve *) reg [15:0] stp_cpu_brief;
+(* noprune, preserve *) reg [31:0] stp_cpu_trap_vector;
+(* noprune, preserve *) reg        stp_cpu_trap_illegal;
+(* noprune, preserve *) reg        stp_cpu_trap_priv;
+(* noprune, preserve *) reg        stp_cpu_trap_addr_error;
+(* noprune, preserve *) reg        stp_cpu_trap_berr;
+(* noprune, preserve *) reg        stp_cpu_trap_mmu_berr;
+(* noprune, preserve *) reg        stp_cpu_make_berr;
+(* noprune, preserve *) reg        stp_cpu_trap_1111;
+(* noprune, preserve *) reg        stp_cpu_trapmake;
+(* noprune, preserve *) reg        stp_cpu_decodeOPC;
+(* noprune, preserve *) reg        stp_cpu_setnextpass;
+
+// Sticky hang capture: latches CPU state when CPU stops advancing
+// Detection: if micro_state and PC don't change for 2^16 cycles (~580us at 114MHz)
+(* noprune, preserve *) reg        stp_hang_latched;
+(* noprune, preserve *) reg        stp_hang_overflow;  // counter saturated
+(* noprune, preserve *) reg [31:0] stp_hang_pc;
+(* noprune, preserve *) reg [15:0] stp_hang_opcode;
+(* noprune, preserve *) reg  [1:0] stp_hang_state;
+(* noprune, preserve *) reg  [7:0] stp_hang_micro_state;
+(* noprune, preserve *) reg  [7:0] stp_hang_next_micro_state;
+(* noprune, preserve *) reg  [5:0] stp_hang_memmask;
+(* noprune, preserve *) reg  [7:0] stp_hang_flagsSR;
+(* noprune, preserve *) reg        stp_hang_SVmode;
+(* noprune, preserve *) reg [31:0] stp_hang_memaddr;
+(* noprune, preserve *) reg [31:0] stp_hang_exe_pc;
+(* noprune, preserve *) reg [31:0] stp_hang_trap_vector;
+(* noprune, preserve *) reg        stp_hang_trapmake;
+(* noprune, preserve *) reg        stp_hang_pmmu_fault;
+(* noprune, preserve *) reg        stp_hang_cpu_halted;
+
+reg [15:0] hang_detect_counter;
+reg [31:0] hang_prev_pc;
+reg  [7:0] hang_prev_micro;
+wire [0:0] cpus_issp_source;  // JTAG clear for hang latch and T0 latch
+
+// T0 edge detector: captures state when FlagsSR(6) transitions 0->1
+(* noprune, preserve *) reg        stp_t0_latched;         // sticky: T0 rising edge seen
+(* noprune, preserve *) reg        stp_t0_cause_directSR;  // exec(directSR) was active (RTE)
+(* noprune, preserve *) reg        stp_t0_cause_to_SR;     // exec(to_SR) was active (MOVE/ORI/EORI to SR)
+(* noprune, preserve *) reg [31:0] stp_t0_pc;              // PC when T0 was set
+(* noprune, preserve *) reg [15:0] stp_t0_opcode;          // opcode when T0 was set
+reg        prev_flagsSR_6;  // previous value of FlagsSR(6) for edge detection
+
+always @(posedge clk) begin
+	// Live state capture
+	stp_cpu_pc              <= kernel_TG68_PC_p;
+	stp_cpu_opcode          <= kernel_opcode_p;
+	stp_cpu_state           <= kernel_state_p;
+	stp_cpu_micro_state     <= kernel_micro_state_p[7:0];
+	stp_cpu_next_micro_state <= kernel_next_ms_p[7:0];
+	stp_cpu_memmask         <= kernel_memmask_p;
+	stp_cpu_flagsSR         <= kernel_FlagsSR_p;
+	stp_cpu_SVmode          <= kernel_SVmode_p;
+	stp_cpu_memaddr         <= kernel_memaddr_reg_p;
+	stp_cpu_exe_pc          <= kernel_exe_PC_p;
+	stp_cpu_last_opc_read   <= kernel_last_opc_read_p;
+	stp_cpu_brief           <= kernel_brief_p;
+	stp_cpu_trap_vector     <= kernel_trap_vector_p;
+	stp_cpu_trap_illegal    <= kernel_trap_illegal_p;
+	stp_cpu_trap_priv       <= kernel_trap_priv_p;
+	stp_cpu_trap_addr_error <= kernel_trap_addr_error_p;
+	stp_cpu_trap_berr       <= kernel_trap_berr_p;
+	stp_cpu_trap_mmu_berr   <= kernel_trap_mmu_berr_p;
+	stp_cpu_make_berr       <= kernel_make_berr_p;
+	stp_cpu_trap_1111       <= kernel_trap_1111_p;
+	stp_cpu_trapmake        <= kernel_trapmake_p;
+	stp_cpu_decodeOPC       <= kernel_decodeOPC_p;
+	stp_cpu_setnextpass     <= kernel_setnextpass_p;
+
+	// Hang detection: PC and micro_state unchanged for 2^16 cycles
+	if (~reset) begin
+		hang_detect_counter <= 0;
+		hang_prev_pc <= 0;
+		hang_prev_micro <= 0;
+		stp_hang_latched <= 0;
+		stp_hang_overflow <= 0;
+	end else if (cpus_issp_source[0]) begin
+		// JTAG clear
+		stp_hang_latched <= 0;
+		stp_hang_overflow <= 0;
+		hang_detect_counter <= 0;
+	end else begin
+		if (kernel_TG68_PC_p != hang_prev_pc || kernel_micro_state_p[7:0] != hang_prev_micro) begin
+			// State changed - reset counter
+			hang_detect_counter <= 0;
+			hang_prev_pc <= kernel_TG68_PC_p;
+			hang_prev_micro <= kernel_micro_state_p[7:0];
+		end else if (!stp_hang_latched) begin
+			if (hang_detect_counter == 16'hFFFF) begin
+				// Hung! Capture state
+				stp_hang_latched         <= 1;
+				stp_hang_overflow        <= 1;
+				stp_hang_pc              <= kernel_TG68_PC_p;
+				stp_hang_opcode          <= kernel_opcode_p;
+				stp_hang_state           <= kernel_state_p;
+				stp_hang_micro_state     <= kernel_micro_state_p[7:0];
+				stp_hang_next_micro_state <= kernel_next_ms_p[7:0];
+				stp_hang_memmask         <= kernel_memmask_p;
+				stp_hang_flagsSR         <= kernel_FlagsSR_p;
+				stp_hang_SVmode          <= kernel_SVmode_p;
+				stp_hang_memaddr         <= kernel_memaddr_reg_p;
+				stp_hang_exe_pc          <= kernel_exe_PC_p;
+				stp_hang_trap_vector     <= kernel_trap_vector_p;
+				stp_hang_trapmake        <= kernel_trapmake_p;
+				stp_hang_pmmu_fault      <= pmmu_fault_p;
+				stp_hang_cpu_halted      <= cpu_halted_p;
+			end else begin
+				hang_detect_counter <= hang_detect_counter + 1;
+			end
+		end
+	end
+
+	// T0 edge detector: capture when FlagsSR(6) transitions 0->1
+	prev_flagsSR_6 <= kernel_FlagsSR_p[6];
+	if (~reset) begin
+		stp_t0_latched        <= 0;
+		stp_t0_cause_directSR <= 0;
+		stp_t0_cause_to_SR    <= 0;
+		stp_t0_pc             <= 0;
+		stp_t0_opcode         <= 0;
+		prev_flagsSR_6        <= 0;
+	end else if (cpus_issp_source[0]) begin
+		stp_t0_latched        <= 0;
+		stp_t0_cause_directSR <= 0;
+		stp_t0_cause_to_SR    <= 0;
+		stp_t0_pc             <= 0;
+		stp_t0_opcode         <= 0;
+	end else if (kernel_FlagsSR_p[6] && !prev_flagsSR_6 && !stp_t0_latched) begin
+		// Rising edge of T0 - capture cause
+		stp_t0_latched        <= 1;
+		stp_t0_cause_directSR <= kernel_exec_directSR_p;
+		stp_t0_cause_to_SR    <= kernel_exec_to_SR_p;
+		stp_t0_pc             <= kernel_TG68_PC_p;
+		stp_t0_opcode         <= kernel_opcode_p;
+	end
+end
+
+// CPUS ISSP probe layout (458 bits):
+// Live[222:0] + Hang[181:0] + T0[53:0]
+// Live = PC[31:0] opcode[15:0] state[1:0] micro[7:0] next_micro[7:0]
+//        memmask[5:0] flagsSR[7:0] SVmode memaddr[31:0] exe_pc[31:0]
+//        last_opc_read[15:0] brief[15:0] trap_vector[31:0]
+//        trap_illegal trap_priv trap_addr_error trap_berr trap_mmu_berr
+//        make_berr trap_1111 trapmake decodeOPC setnextpass
+//        setendOPC stop clkena_lw cpu_halted pmmu_fault interrupt
+// Hang = hang_latched hang_overflow + captured fields
+// T0 = t0_latched cause_directSR cause_to_SR t0_pc[31:0] t0_opcode[15:0] pad[2:0]
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (3),
+	.instance_id             ("CPUS"),
+	.probe_width             (458),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) cpus_issp (
+	.probe ({
+		// Live state (223 bits)
+		stp_cpu_pc,                    // [457:426] 32
+		stp_cpu_opcode,                // [425:410] 16
+		stp_cpu_state,                 // [409:408] 2
+		stp_cpu_micro_state,           // [407:400] 8
+		stp_cpu_next_micro_state,      // [399:392] 8
+		stp_cpu_memmask,               // [391:386] 6
+		stp_cpu_flagsSR,               // [385:378] 8
+		stp_cpu_SVmode,                // [377]     1
+		stp_cpu_memaddr,               // [376:345] 32
+		stp_cpu_exe_pc,                // [344:313] 32
+		stp_cpu_last_opc_read,         // [312:297] 16
+		stp_cpu_brief,                 // [296:281] 16
+		stp_cpu_trap_vector,           // [280:249] 32
+		stp_cpu_trap_illegal,          // [248]
+		stp_cpu_trap_priv,             // [247]
+		stp_cpu_trap_addr_error,       // [246]
+		stp_cpu_trap_berr,             // [245]
+		stp_cpu_trap_mmu_berr,         // [244]
+		stp_cpu_make_berr,             // [243]
+		stp_cpu_trap_1111,             // [242]
+		stp_cpu_trapmake,              // [241]
+		stp_cpu_decodeOPC,             // [240]
+		stp_cpu_setnextpass,           // [239]
+		stp_setendOPC,                 // [238]
+		stp_stop,                      // [237]
+		kernel_clkena_lw_p,            // [236]
+		cpu_halted_p,                  // [235]
+		// Sticky hang capture (181 bits)
+		stp_hang_latched,              // [234]
+		stp_hang_overflow,             // [233]
+		stp_hang_pc,                   // [232:201] 32
+		stp_hang_opcode,               // [200:185] 16
+		stp_hang_state,                // [184:183] 2
+		stp_hang_micro_state,          // [182:175] 8
+		stp_hang_next_micro_state,     // [174:167] 8
+		stp_hang_memmask,              // [166:161] 6
+		stp_hang_flagsSR,              // [160:153] 8
+		stp_hang_SVmode,               // [152]
+		stp_hang_memaddr,              // [151:120] 32
+		stp_hang_exe_pc,               // [119:88]  32
+		stp_hang_trap_vector,          // [87:56]   32
+		stp_hang_trapmake,             // [55]
+		stp_hang_pmmu_fault,           // [54]
+		stp_hang_cpu_halted,           // [53]
+		pmmu_fault_p,                  // [52]      live pmmu_fault
+		kernel_interrupt_p,            // [51]      live interrupt
+		// T0 edge capture (51 bits + 1 pad = 52)
+		stp_t0_latched,                // [50]
+		stp_t0_cause_directSR,         // [49]
+		stp_t0_cause_to_SR,            // [48]
+		stp_t0_pc,                     // [47:16]   32
+		stp_t0_opcode,                 // [15:0]    16
+	}),
+	.source (cpus_issp_source)
+);
+
+// ============================================================================
+// ISSP Instance 4: REGS - Register File Snapshot (D0-D7, A0-A7)
+// ============================================================================
+// 512 bits = 16 registers x 32 bits (max probe width)
+(* noprune, preserve *) reg [31:0] stp_reg_d0, stp_reg_d1, stp_reg_d2, stp_reg_d3;
+(* noprune, preserve *) reg [31:0] stp_reg_d4, stp_reg_d5, stp_reg_d6, stp_reg_d7;
+(* noprune, preserve *) reg [31:0] stp_reg_a0, stp_reg_a1, stp_reg_a2, stp_reg_a3;
+(* noprune, preserve *) reg [31:0] stp_reg_a4, stp_reg_a5, stp_reg_a6, stp_reg_a7;
+
+always @(posedge clk) begin
+	stp_reg_d0 <= kernel_regfile_d0_p;
+	stp_reg_d1 <= kernel_regfile_d1_p;
+	stp_reg_d2 <= kernel_regfile_d2_p;
+	stp_reg_d3 <= kernel_regfile_d3_p;
+	stp_reg_d4 <= kernel_regfile_d4_p;
+	stp_reg_d5 <= kernel_regfile_d5_p;
+	stp_reg_d6 <= kernel_regfile_d6_p;
+	stp_reg_d7 <= kernel_regfile_d7_p;
+	stp_reg_a0 <= kernel_regfile_a0_p;
+	stp_reg_a1 <= kernel_regfile_a1_p;
+	stp_reg_a2 <= kernel_regfile_a2_p;
+	stp_reg_a3 <= kernel_regfile_a3_p;
+	stp_reg_a4 <= kernel_regfile_a4_p;
+	stp_reg_a5 <= kernel_regfile_a5_p;
+	stp_reg_a6 <= kernel_regfile_a6_p;
+	stp_reg_a7 <= kernel_regfile_a7_p;
+end
+
+// 511 bits max: 15 regs x 32 = 480 + A7[31:1] = 31 = 511
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (4),
+	.instance_id             ("REGS"),
+	.probe_width             (511),
+	.source_width            (0),
+	.enable_metastability    ("YES")
+) regs_issp (
+	.probe ({
+		stp_reg_d0, stp_reg_d1, stp_reg_d2, stp_reg_d3,
+		stp_reg_d4, stp_reg_d5, stp_reg_d6, stp_reg_d7,
+		stp_reg_a0, stp_reg_a1, stp_reg_a2, stp_reg_a3,
+		stp_reg_a4, stp_reg_a5, stp_reg_a6, stp_reg_a7[31:1]
+	})
 );
 
 // PMMU walker address mux signals (for bus arbitration)
@@ -760,7 +1220,56 @@ cpu_inst_p
   .debug_pmmu_ptr2_desc_data(stp_ptr2_desc_data_w),
   .debug_pmmu_ptr3_desc_addr(stp_ptr3_desc_addr_w),
   .debug_pmmu_ptr3_desc_data(stp_ptr3_desc_data_w),
-  .debug_pmmu_saved_fc(stp_saved_fc_w)
+  .debug_pmmu_saved_fc(stp_saved_fc_w),
+  // CHK/Group2 exception frame ISSP probes
+  .debug_make_trace(kernel_make_trace_p),
+  .debug_trace_pending_grp2(kernel_trace_pending_grp2_p),
+  .debug_useStackframe2(kernel_useStackframe2_p),
+  .debug_exec_trap_chk(kernel_exec_trap_chk_p),
+  .debug_set_trap_chk(kernel_set_trap_chk_p),
+  .debug_data_write_tmp(kernel_data_write_tmp_p),
+  .debug_FlagsSR(kernel_FlagsSR_p),
+  .debug_trap_vector(kernel_trap_vector_p),
+  .debug_micro_state(kernel_micro_state_p),
+  .debug_next_micro_state(kernel_next_ms_p),
+  .debug_trapmake(kernel_trapmake_p),
+  // CPU Core debug (CPUS ISSP)
+  .debug_TG68_PC(kernel_TG68_PC_p),
+  .debug_opcode(kernel_opcode_p),
+  .debug_last_opc_read(kernel_last_opc_read_p),
+  .debug_brief(kernel_brief_p),
+  .debug_memaddr_reg(kernel_memaddr_reg_p),
+  .debug_memmask(kernel_memmask_p),
+  .debug_decodeOPC(kernel_decodeOPC_p),
+  .debug_setnextpass(kernel_setnextpass_p),
+  .debug_SVmode(kernel_SVmode_p),
+  .debug_exe_PC(kernel_exe_PC_p),
+  .debug_trap_illegal(kernel_trap_illegal_p),
+  .debug_trap_priv(kernel_trap_priv_p),
+  .debug_trap_addr_error(kernel_trap_addr_error_p),
+  .debug_trap_berr(kernel_trap_berr_p),
+  .debug_trap_mmu_berr(kernel_trap_mmu_berr_p),
+  .debug_make_berr(kernel_make_berr_p),
+  .debug_trap_1111(kernel_trap_1111_p),
+  .debug_exec_directSR(kernel_exec_directSR_p),
+  .debug_exec_to_SR(kernel_exec_to_SR_p),
+  // Register file debug (REGS ISSP)
+  .debug_regfile_d0(kernel_regfile_d0_p),
+  .debug_regfile_d1(kernel_regfile_d1_p),
+  .debug_regfile_d2(kernel_regfile_d2_p),
+  .debug_regfile_d3(kernel_regfile_d3_p),
+  .debug_regfile_d4(kernel_regfile_d4_p),
+  .debug_regfile_d5(kernel_regfile_d5_p),
+  .debug_regfile_d6(kernel_regfile_d6_p),
+  .debug_regfile_d7(kernel_regfile_d7_p),
+  .debug_regfile_a0(kernel_regfile_a0_p),
+  .debug_regfile_a1(kernel_regfile_a1_p),
+  .debug_regfile_a2(kernel_regfile_a2_p),
+  .debug_regfile_a3(kernel_regfile_a3_p),
+  .debug_regfile_a4(kernel_regfile_a4_p),
+  .debug_regfile_a5(kernel_regfile_a5_p),
+  .debug_regfile_a6(kernel_regfile_a6_p),
+  .debug_regfile_a7(kernel_regfile_a7_p)
 );
 
 wire [15:0] cpu_dout_o;
