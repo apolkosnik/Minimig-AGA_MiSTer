@@ -74,6 +74,14 @@ wire  [7:0] ethernet_base;  // Base address set during autoconfig
 //wire        eth_irq;   // Ethernet interrupt signal
 wire        sel_ethernet;   // Ethernet address space selection from Gary
 wire        sel_ethernet_shm;   // Ethernet shared memory selection from cpu_wrapper
+wire        eth_dma_req;
+wire        eth_dma_write;
+wire  [15:1] eth_dma_addr;
+wire  [15:0] eth_dma_wdata;
+wire        eth_dma_uds;
+wire        eth_dma_lds;
+wire        eth_dma_ready;
+wire [15:0] eth_dma_rdata;
 
 
 hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
@@ -288,9 +296,20 @@ wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
 wire        zram_sel  = |ram_addr[28:26];
 wire        ramshared;
+wire [15:0] eth_dma_ddr_wdata = {eth_dma_wdata[7:0], eth_dma_wdata[15:8]};
+wire        eth_dma_ddr_u = eth_dma_lds;
+wire        eth_dma_ddr_l = eth_dma_uds;
+wire        eth_dma_grant = eth_dma_req & ~ram_sel;
+wire [28:1] eth_dma_ddr_addr;
 
 wire [7:0] toccata_base;
 wire toccata_ena;
+
+eth_dma_addr_map eth_dma_addr_map_inst
+(
+	.local_word_addr(eth_dma_addr),
+	.ddr_word_addr(eth_dma_ddr_addr)
+);
 
 cpu_wrapper cpu_wrapper
 (
@@ -392,12 +411,17 @@ sdram_ctrl ram1
 	.chip48       (chip48          )
 );
 
-wire [15:0] ram_dout2;
-wire        ram_ready2;
+wire [15:0] ram_dout2_raw;
+wire        ram_ready2_raw;
+wire [15:0] ram_dout2 = eth_dma_grant ? 16'h0000 : ram_dout2_raw;
+wire        ram_ready2 = eth_dma_grant ? 1'b0 : ram_ready2_raw;
 wire  [7:0] DDRAM_BE_S;
+
+assign eth_dma_rdata = {ram_dout2_raw[7:0], ram_dout2_raw[15:8]};
+assign eth_dma_ready = eth_dma_grant ? ram_ready2_raw : 1'b0;
    
-ddram_ctrl ram2
-(
+	ddram_ctrl ram2
+	(
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
 
@@ -415,16 +439,16 @@ ddram_ctrl ram2
 	.DDRAM_BE     (DDRAM_BE        ),
 	.DDRAM_WE     (DDRAM_WE        ),
 
-	.cpuWR        (ram_din         ),
-	.cpuAddr      (ram_addr        ),
-	.cpuU         (ram_uds         ),
-	.cpuL         (ram_lds         ),
-	.cpustate     (cpu_state       ),
-	.cpuCS        (zram_sel&ram_cs ),
-	.cpuRD        (ram_dout2       ),
-	.ramshared    (ramshared       ),
-	.ramready     (ram_ready2      )
-);
+		.cpuWR        (eth_dma_grant ? eth_dma_ddr_wdata : ram_din          ),
+		.cpuAddr      (eth_dma_grant ? eth_dma_ddr_addr  : ram_addr         ),
+		.cpuU         (eth_dma_grant ? eth_dma_ddr_u     : ram_uds          ),
+		.cpuL         (eth_dma_grant ? eth_dma_ddr_l     : ram_lds          ),
+		.cpustate     (eth_dma_grant ? (eth_dma_write ? 2'b11 : 2'b10) : cpu_state),
+		.cpuCS        (eth_dma_grant ? 1'b1 : (zram_sel&ram_cs)),
+		.cpuRD        (ram_dout2_raw  ),
+		.ramshared    (eth_dma_grant ? 1'b1 : ramshared ),
+		.ramready     (ram_ready2_raw )
+	);
 
 wire [15:0] fastchip_dout;
 wire        fastchip_sel;
@@ -634,13 +658,22 @@ minimig minimig
 	.toccata_aud_left (toccata_aud_left),
 	.toccata_aud_right(toccata_aud_right),
 
-	// Ethernet card configuration
-	.ethernet_ena(ethernet_ena),
-	.ethernet_base(ethernet_base),
-	.sel_ethernet(sel_ethernet),
+		// Ethernet card configuration
+		.ethernet_ena(ethernet_ena),
+		.ethernet_base(ethernet_base),
+		.sel_ethernet_shm(sel_ethernet_shm),
+		.sel_ethernet(sel_ethernet),
+		.eth_dma_req(eth_dma_req),
+		.eth_dma_write(eth_dma_write),
+		.eth_dma_addr(eth_dma_addr),
+		.eth_dma_wdata(eth_dma_wdata),
+		.eth_dma_uds(eth_dma_uds),
+		.eth_dma_lds(eth_dma_lds),
+		.eth_dma_ready(eth_dma_ready),
+		.eth_dma_rdata(eth_dma_rdata),
 
-	//user i/o
-	.cpucfg       (cpucfg           ), // CPU config
+		//user i/o
+		.cpucfg       (cpucfg           ), // CPU config
 	.cachecfg     (cachecfg         ), // Cache config
 	.memcfg       (memcfg           ), // memory config
 	.bootrom      (bootrom          ), // bootrom mode. Needed here to tell tg68k to also mirror the 256k Kickstart 

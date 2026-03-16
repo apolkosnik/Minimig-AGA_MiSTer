@@ -223,6 +223,14 @@ module minimig
 	input	   [7:0] ethernet_base,
 	input	   sel_ethernet_shm,
 	output	   sel_ethernet,
+	output	   eth_dma_req,
+	output	   eth_dma_write,
+	output	   [15:1] eth_dma_addr,
+	output	   [15:0] eth_dma_wdata,
+	output	   eth_dma_uds,
+	output	   eth_dma_lds,
+	input	   eth_dma_ready,
+	input	   [15:0] eth_dma_rdata,
 
 	//video
 	output 	     _hsync,      // horizontal sync
@@ -886,6 +894,7 @@ always @(posedge clk) begin
 	end
 end
 
+
 // Toccata soundcard
 
 wire [15:0] toccata_out;
@@ -911,7 +920,7 @@ toccata #(
 ethernet_interface eth_if (
     .clk(clk),
     .reset(reset),
-    .cpu_addr(cpu_address_out[23:1]),    // Full 23-bit address bus
+    .cpu_addr(cpu_address_out[15:1]),    // Local ethernet aperture offset
     .cpu_data_in(cpu_data_out),          // CPU data output goes to ethernet input
     .cpu_data_out(ethernet_data_out),    // Ethernet data output
     .cpu_rd(cpu_rd),                     // CPU read signal
@@ -926,11 +935,15 @@ ethernet_interface eth_if (
     // Chip select for ethernet register space
     .sel_ethernet(sel_ethernet),
 
-    // Ethernet base address (Amiga address space)
-    .ethernet_base(ethernet_base),
-
-    // RAM data input for shared memory reads
-    .ram_data_in(ram_data_in),
+    // External shared-memory DMA path
+    .eth_dma_ready(eth_dma_ready),
+    .eth_dma_rdata(eth_dma_rdata),
+    .eth_dma_req(eth_dma_req),
+    .eth_dma_write(eth_dma_write),
+    .eth_dma_addr(eth_dma_addr),
+    .eth_dma_wdata(eth_dma_wdata),
+    .eth_dma_uds(eth_dma_uds),
+    .eth_dma_lds(eth_dma_lds),
 
     // Data acknowledge for bus cycle control
     .dtack_eth(dtack_eth),
@@ -939,9 +952,10 @@ ethernet_interface eth_if (
     .eth_irq(eth_irq)
 );
 
+
 // Multiplex DTACK signals - ethernet takes priority for register/data port access only
 // Direct shared memory access uses normal memory timing
-assign _cpu_dtack = sel_ethernet ? dtack_eth : _cpu_dtack_internal;
+assign _cpu_dtack = (sel_ethernet && !sel_ethernet_shm) ? dtack_eth : _cpu_dtack_internal;
 
 //-------------------------------------------------------------------------------------
 
@@ -977,4 +991,3 @@ assign rst_out = reset;
 
 
 endmodule
-

@@ -4,13 +4,14 @@
 
 `timescale 1ns / 1ps
 
+/* verilator lint_off DECLFILENAME */
 module ethernet_interface
 (
     input wire clk,
     input wire reset,
 
     // CPU bus interface (Amiga side)  
-    input  wire [23:1] cpu_addr,
+    input  wire [15:1] cpu_addr,
     input  wire [15:0] cpu_data_in,
     output reg  [15:0] cpu_data_out,
     input  wire        cpu_rd,
@@ -25,17 +26,21 @@ module ethernet_interface
     // Chip select for ethernet register space
     input  wire        sel_ethernet,
 
-    // Ethernet base address (dynamic based on autoconfig)
-    input  wire [7:0] ethernet_base,
+    // External shared-memory DMA path
+    input  wire        eth_dma_ready,
+    input  wire [15:0] eth_dma_rdata,
+    output reg         eth_dma_req,
+    output reg         eth_dma_write,
+    output reg  [15:1] eth_dma_addr,
+    output reg  [15:0] eth_dma_wdata,
+    output reg         eth_dma_uds,
+    output reg         eth_dma_lds,
 
     // Interrupt output to Amiga
     output reg         eth_irq,
     
     // Data acknowledge - prevents bus cycle completion during shared memory access
-    output reg         dtack_eth,
-    
-    // RAM data input for shared memory reads
-    input  wire [15:0] ram_data_in
+    output reg         dtack_eth
 );
 
 //   Ethernet Controller Memory Map
@@ -117,173 +122,78 @@ module ethernet_interface
 //   This provides a complete 64KB address space with clear separation between register I/O and shared memory regions.
 
 
-// Use ethernet_base + ETH_SHM_* offsets for direct mapped shared memory access
-// This eliminates the huge 64KB internal memory array and saves FPGA resources
-// Memory access is done through direct address mapping instead of array storage
+// The direct shared-memory window is handled by cpu_wrapper/ddram_ctrl.
+// This module only owns the local register window and the remote-DMA data port.
 
-// Calculate shared memory base address from ethernet_base
-wire [15:0] shared_mem_base = {ethernet_base, 8'h00}; // ethernet_base << 8
+parameter [15:0] ETH_SHM_CTRL_FLAGS  = 16'h1000;
+parameter [15:0] ETH_SHM_CTRL_REGS   = 16'h1004;
+parameter [15:0] ETH_SHM_CTRL_MAC    = 16'h104C;
+parameter [15:0] ETH_RTL8019_STATE   = 16'h1100;
+parameter [15:0] ETH_SHM_RX_BUFFER   = 16'h2600;
+parameter [15:0] ETH_SHM_PACKET_INFO = 16'h2C00;
+parameter [15:0] ETH_SHM_NE_MEMORY   = 16'h3000;
+parameter [15:0] ETH_FLAG_TX_REQ     = 16'h0002;
+parameter [15:0] ETH_FLAG_RX_AVAIL   = 16'h0004;
+parameter [15:0] ETH_FLAG_IRQ        = 16'h0008;
+parameter [15:0] ETH_FLAG_ENABLED    = 16'h0020;
+parameter [7:0]  NE_PAGE_BASE = 8'h40;
+parameter [7:0]  BG_POLL_RELOAD = 8'd63;
 
-// Helper function to calculate actual memory addresses
-function [15:0] calc_mem_addr;
-    input [15:0] offset;
-    calc_mem_addr = shared_mem_base + offset;
-endfunction
-
-// Direct memory access - use address calculations instead of internal array
-// For direct mapped shared memory, we calculate addresses but don't store data internally
-// This eliminates the 64KB array while maintaining the same functional interface
-
-// Memory access is now done through direct address mapping
-// The actual storage is handled by the external system's memory mapping
-
-// Address mapping constants (kept for autoconfig compatibility)
-parameter ETH_REG_OFFSET   = 16'h0C00;    // Register offset
-parameter ETH_DATA_OFFSET  = 16'h0C40;    // Data port offset (4 * 0x10 from base)  
-
-// State machine states - simplified
-parameter [1:0] IDLE     = 2'b00;
-parameter [1:0] ACCESS   = 2'b01;
-parameter [1:0] COMPLETE = 2'b10;
-
-reg [1:0] state;
-
-// Full RTL8019AS register set stored in shared memory
-// All NE2000 registers (72 bytes for all pages + extra space) are maintained in shared memory at ETH_CTRL_REGS offset
-// Only cache essential values locally for performance and identification
-
-// Shared memory layout offsets - starting at 0x1004 (maps to 0xEA1004)
-parameter [15:0] ETH_SHM_CTRL_FLAGS    = 16'h1000;  // 4 bytes - control flags  
-parameter [15:0] ETH_SHM_CTRL_REGS     = 16'h1004;  // 72 bytes - NE2000 registers (all pages + extra) - START HERE
-parameter [15:0] ETH_SHM_CTRL_MAC      = 16'h104C;  // 6 bytes - MAC address
-parameter [15:0] ETH_SHM_CTRL_STATUS   = 16'h1052;  // 2 bytes - status  
-parameter [15:0] ETH_SHM_CTRL_STATS    = 16'h1054;  // 52 bytes - packet statistics
-parameter [15:0] ETH_SHM_HPS_HEARTBEAT = 16'h1088;  // 4 bytes - HPS heartbeat
-parameter [15:0] ETH_SHM_HPS_SIGNATURE = 16'h108C;  // 4 bytes - signature (0xCAFEBABE)
-parameter [15:0] ETH_SHM_TX_BUFFER     = 16'h2000;  // 1500 bytes - TX buffer  
-parameter [15:0] ETH_SHM_RX_BUFFER     = 16'h2600;  // 1500 bytes - RX buffer
-parameter [15:0] ETH_SHM_PACKET_INFO   = 16'h2C00;  // 512 bytes - packet metadata
-parameter [15:0] ETH_SHM_NE_MEMORY     = 16'h3000;  // 16KB - NE2000 memory space
-parameter [15:0] ETH_SHM_DEBUG_INFO    = 16'h7000;  // 4KB - debug info
-parameter [15:0] ETH_SHM_FUTURE_USE    = 16'h8000;  // 24KB - future expansion (reduced by 4KB)
-
-// Direct memory access using ethernet_base + ETH_SHM_* offsets - no internal array needed
-
-// Current page from shared memory CR register
-// All registers stored in shared memory at ETH_SHM_CTRL_REGS (0xEA1004)
-reg [7:0] cr_register;  // CR register value cached locally for immediate page calculation
+reg [7:0]  cr_register;
 wire [1:0] current_page = cr_register[7:6];
 
-// All other NE2000 registers stored in shared memory starting at 0xEA1004
-// ETH_SHM_CTRL_REGS layout (72 bytes total, starts at 0xEA1004):
-// +0x00: CR, +0x01: CLDA0, +0x02: CLDA1, +0x03: BNRY
-// +0x04: TSR, +0x05: NCR, +0x06: FIFO, +0x07: ISR  
-// +0x08: CRDA0, +0x09: CRDA1, +0x0A: RBCR0, +0x0B: RBCR1
-// ... (continues for all pages)
+wire       cpu_wr = cpu_lwr | cpu_hwr;
+wire       is_data_port_access;
+wire       is_register_access;
 
-// Derive cpu_wr signal for new ethernet module (active when either byte is being written)
-wire        cpu_wr;
-assign      cpu_wr = cpu_lwr | cpu_hwr;
-
-
-// Data port access state (using shared memory, no local buffer)
-wire       is_data_port_access; // True if accessing data port (0x10)
-wire       is_memory_access;    // True if accessing NE2000 memory (0x3000-0x7FFF)
-wire       is_control_access;   // True if accessing control structure (0x0000-0x1000)
-// Direct buffer access removed - all packet data goes through data port with Remote DMA
-reg [15:0] remote_dma_addr;     // Current remote DMA address
-reg [15:0] remote_byte_count;   // Remaining byte count for DMA
-reg        data_port_read_pending;  // Data port read from shared memory pending
-reg        data_port_write_pending; // Data port write to shared memory pending
-reg [15:0] data_port_read_data;     // Data read from shared memory for data port
-reg        register_read_pending;   // Register read from shared memory pending
-reg        register_write_pending;  // Register write to shared memory pending
-reg [15:0] register_read_data;      // Data read from shared memory for register access
-reg        memory_read_pending;     // Memory read from shared memory pending
-reg [15:0] memory_read_data;        // Data read from shared memory for memory access
-reg        control_read_pending;    // Control read from shared memory pending
-reg [15:0] control_read_data;       // Data read from shared memory for control access
-// Buffer access variables removed - use data port with Remote DMA instead
-
-// State machine for memory access coordination (expanded to 5 bits for more states)
-parameter [4:0] MEM_IDLE             = 5'b00000;  // Idle state
-parameter [4:0] MEM_REG_READ         = 5'b00001;  // Reading register from shared memory
-parameter [4:0] MEM_REG_WRITE        = 5'b00010;  // Writing register to shared memory
-parameter [4:0] MEM_READ_FLAGS       = 5'b00011;  // Reading control flags
-parameter [4:0] MEM_WRITE_FLAGS      = 5'b00100;  // Writing control flags back to shared memory
-parameter [4:0] MEM_READ_HEARTBEAT   = 5'b00101;  // Reading heartbeat + interrupt status
-parameter [4:0] MEM_PACKET_STATUS    = 5'b00110;  // Check packet status
-parameter [4:0] MEM_DATA_PORT_READ   = 5'b00111;  // Reading data from RX buffer for data port
-parameter [4:0] MEM_DATA_PORT_WRITE  = 5'b01000;  // Writing data to NE2000 memory via data port
-parameter [4:0] MEM_RX_BUFFER_READ   = 5'b01001;  // Reading data from RX buffer  
-parameter [4:0] MEM_RX_BUFFER_WRITE  = 5'b01010;  // Writing data to RX buffer
-parameter [4:0] MEM_TX_BUFFER_READ   = 5'b01011;  // Reading data from TX buffer
-parameter [4:0] MEM_TX_BUFFER_WRITE  = 5'b01100;  // Writing data to TX buffer
-parameter [4:0] MEM_WRITE_PACKET_INFO = 5'b01101; // Writing packet info to shared memory
-parameter [4:0] MEM_READ_MAC_ADDR    = 5'b01110;  // Reading MAC address from shared memory
-parameter [4:0] MEM_WRITE_STATS      = 5'b01111;  // Writing statistics to shared memory
-parameter [4:0] MEM_READ_SIGNATURE   = 5'b10000;  // Reading HPS signature for validation
-parameter [4:0] MEM_WAIT_COMPLETE    = 5'b10001;  // Wait for memory operation to complete
-parameter [4:0] MEM_ERROR            = 5'b10010;  // Error state
-parameter [4:0] MEM_RESET_PENDING    = 5'b10011;  // Reset operation pending
-parameter [4:0] MEM_IRQ_PROCESS      = 5'b10100;  // Process interrupt request
-parameter [4:0] MEM_CONFIG_UPDATE    = 5'b10101;  // Update configuration registers
-parameter [4:0] MEM_STATUS_CHECK     = 5'b10110;  // Check overall status
-parameter [4:0] MEM_BUFFER_FLUSH     = 5'b10111;  // Flush buffers
-parameter [4:0] MEM_LINK_CHECK       = 5'b11000;  // Check link status
-parameter [4:0] MEM_STATS_UPDATE     = 5'b11001;  // Update packet statistics
-parameter [4:0] MEM_DEBUG_LOG        = 5'b11010;  // Log debug information
-parameter [4:0] MEM_CLEANUP          = 5'b11011;  // Cleanup operations
-
-reg [4:0]  mem_state;
-reg [15:0] eth_shared_base;    // Ethernet shared memory base address
-reg        flags_write_pending; // Flag to trigger control flags write to shared memory
-
-// Memory transaction control
-reg [15:0] mem_transaction_addr;  // Address for current memory transaction
-reg [15:0] mem_transaction_data;  // Data for current memory transaction
-reg        mem_transaction_rd;    // Memory read transaction active
-reg        mem_transaction_wr;    // Memory write transaction active
-reg        mem_transaction_busy;  // Transaction in progress
-reg [15:0] mem_transaction_timeout; // Timeout counter for stuck transactions
-
-// RX/TX buffer control (used by internal memory state machine only)
-reg [15:0] rx_buffer_addr;        // Current RX buffer address  
-reg [15:0] tx_buffer_addr;        // Current TX buffer address
-reg [15:0] rx_packet_length;      // Length of current RX packet
-reg [15:0] tx_packet_length;      // Length of current TX packet
-// Direct buffer access removed - CPU uses data port with Remote DMA
-
-// Register modification variables
-reg [7:0] original_cr;            // Original CR register value
-reg [7:0] modified_cr;            // Modified CR register value
-reg [7:0] clear_mask;             // ISR clear mask
-reg [7:0] modified_mask;          // Modified ISR clear mask
-reg [7:0] modified_isr;           // Modified ISR register value
-reg [7:0] original_imr;           // Original IMR register value
-reg [7:0] modified_imr;           // Modified IMR register value
-reg [7:0] original_data;          // Original register data
-reg [7:0] modified_data;          // Modified register data
-reg [15:0] read_addr;             // Read address for memory transactions
-reg [15:0] info_addr;             // Info address for packet info
-reg [15:0] mac_addr;              // MAC address for MAC read
-reg [15:0] stats_addr;            // Stats address for statistics
-reg [15:0] sig_addr;              // Signature address for HPS validation
-reg [15:0] ne_offset;             // NE2000 memory offset
-reg [15:0] rx_offset;             // RX buffer offset
-reg [15:0] tx_offset;             // TX buffer offset
-
-// Packet processing state
-reg [15:0] packet_length;     // Current packet length
-reg [15:0] packet_count_rx;   // Number of received packets
-reg [15:0] packet_count_tx;   // Number of transmitted packets
-reg        link_status;       // Link up/down status
-reg [31:0] status_flags;      // Status and control flags
+reg [15:0] remote_dma_addr;
+reg [15:0] remote_byte_count;
+reg        data_port_read_pending;
+reg        data_port_write_pending;
+reg        data_port_transfer_done;
+reg [15:0] data_port_read_data;
+reg [15:0] data_port_byte_addr;
+reg        data_port_word_mode;
+reg        tx_complete_pending;
 
 // NE2000 Interrupt handling - proper implementation
 reg [7:0]  isr_register;       // Interrupt Status Register (0x07)
 reg [7:0]  imr_register;       // Interrupt Mask Register (0x0F)
-reg [7:0]  dcr_register;       // Data Configuration Register (0x0E)
+reg [7:0]  dcr_register;
+reg [7:0]  pstart_register;
+reg [7:0]  pstop_register;
+reg [7:0]  bnry_register;
+reg [7:0]  tpsr_register;
+reg [15:0] tbcr_register;
+reg [7:0]  tsr_register;
+reg [7:0]  rsr_register;
+reg [7:0]  curr_register;
+reg [7:0]  tcr_register;
+reg [7:0]  rcr_register;
+reg        rx_poll_enabled;
+reg        shm_sync_enabled;
+reg        tx_request_pending;
+reg [15:0] mirrored_fpga_flags;
+reg [7:0]  par_registers [0:5];
+reg [7:0]  mar_registers [0:7];
+reg [4:0]  bg_state;
+reg [7:0]  bg_poll_counter;
+reg        bg_dma_inflight;
+reg [15:0] bg_flags_word;
+reg [15:0] bg_rx_total_length;
+reg [15:0] bg_rx_src_offset;
+reg [15:0] bg_rx_dst_offset;
+reg [15:0] bg_rx_bytes_remaining;
+reg [7:0]  bg_rx_next_page;
+reg [15:0] bg_source_word;
+reg [5:0]  bg_sync_slot;
+reg        bg_polling_rx_flags;
+reg        bg_clear_rx_avail;
+reg [15:0] debug_heartbeat;
+reg [15:0] debug_local_wait_cycles;
+reg [15:0] debug_dma_wait_cycles;
+reg [15:0] debug_sticky_flags;
+integer    i;
 
 // NE2000 DCR bit definitions
 // Bit 0: WTS (Word Transfer Select) - 0=byte DMA, 1=word DMA
@@ -296,1053 +206,933 @@ reg [7:0]  dcr_register;       // Data Configuration Register (0x0E)
 // Bit 7: Reserved
 
 // NE2000 ISR bit definitions
-parameter ISR_PRX = 8'h01;     // Bit 0: Packet Received
-parameter ISR_PTX = 8'h02;     // Bit 1: Packet Transmitted
-parameter ISR_RXE = 8'h04;     // Bit 2: Receive Error
-parameter ISR_TXE = 8'h08;     // Bit 3: Transmit Error
-parameter ISR_OVW = 8'h10;     // Bit 4: Overwrite Warning
-parameter ISR_CNT = 8'h20;     // Bit 5: Counter Overflow
+parameter ISR_PRX = 8'h01;     // Bit 0: Packet received
+parameter ISR_PTX = 8'h02;     // Bit 1: Packet transmitted
+parameter ISR_OVW = 8'h10;     // Bit 4: Receive ring overrun
 parameter ISR_RDC = 8'h40;     // Bit 6: Remote DMA Complete
-parameter ISR_RST = 8'h80;     // Bit 7: Reset Status
+parameter TSR_PTX = 8'h01;     // Bit 0: Packet transmitted without error
+parameter RSR_PRX = 8'h01;     // Bit 0: Packet received without error
+
+localparam [4:0] BG_IDLE             = 5'd0;
+localparam [4:0] BG_READ_FLAGS_REQ   = 5'd1;
+localparam [4:0] BG_READ_FLAGS_WAIT  = 5'd2;
+localparam [4:0] BG_READ_RX_LEN_REQ  = 5'd3;
+localparam [4:0] BG_READ_RX_LEN_WAIT = 5'd4;
+localparam [4:0] BG_WRITE_HDR0_REQ   = 5'd5;
+localparam [4:0] BG_WRITE_HDR0_WAIT  = 5'd6;
+localparam [4:0] BG_WRITE_HDR1_REQ   = 5'd7;
+localparam [4:0] BG_WRITE_HDR1_WAIT  = 5'd8;
+localparam [4:0] BG_READ_PAYLOAD_REQ = 5'd9;
+localparam [4:0] BG_READ_PAYLOAD_WAIT= 5'd10;
+localparam [4:0] BG_WRITE_PAYLOAD_REQ= 5'd11;
+localparam [4:0] BG_WRITE_PAYLOAD_WAIT=5'd12;
+localparam [4:0] BG_CLEAR_FLAG_REQ   = 5'd13;
+localparam [4:0] BG_CLEAR_FLAG_WAIT  = 5'd14;
+localparam [4:0] BG_SYNC_WORD_REQ    = 5'd15;
+localparam [4:0] BG_SYNC_WORD_WAIT   = 5'd16;
+
+wire [7:0] cr_write_value = cpu_data_in[15:8] | (cpu_data_in[8] ? 8'h00 : 8'h02);
+
+/* verilator lint_off UNUSEDSIGNAL */
+function [14:0] ne_dma_word_offset;
+    input [15:0] addr;
+    reg [15:0] normalized_addr;
+    begin
+        if (addr >= 16'h4000) begin
+            normalized_addr = addr - 16'h4000;
+        end else begin
+            normalized_addr = addr;
+        end
+        ne_dma_word_offset = normalized_addr[15:1];
+    end
+endfunction
+
+function [7:0] sanitize_ring_page;
+    input [7:0] page;
+    input [7:0] pstart;
+    input [7:0] pstop;
+    begin
+        if ((page < pstart) || (page >= pstop)) begin
+            sanitize_ring_page = pstart;
+        end else begin
+            sanitize_ring_page = page;
+        end
+    end
+endfunction
+
+function [7:0] wrap_ring_page_add;
+    input [7:0] page;
+    input [7:0] pages;
+    input [7:0] pstart;
+    input [7:0] pstop;
+    reg [8:0] next_page;
+    reg [7:0] wrapped_page;
+    begin
+        next_page = {1'b0, page} + {1'b0, pages};
+        if (next_page >= {1'b0, pstop}) begin
+            wrapped_page = pstart + next_page[7:0] - pstop;
+            wrap_ring_page_add = wrapped_page;
+        end else begin
+            wrap_ring_page_add = next_page[7:0];
+        end
+    end
+endfunction
+
+function [15:0] ring_page_byte_offset;
+    input [7:0] page;
+    begin
+        ring_page_byte_offset = {page - NE_PAGE_BASE, 8'h00};
+    end
+endfunction
+
+function [15:0] hps_u16_from_dma;
+    input [15:0] data;
+    begin
+        hps_u16_from_dma = {data[7:0], data[15:8]};
+    end
+endfunction
+
+function [7:0] rx_page_count_for_length;
+    input [15:0] length;
+    reg [15:0] rounded_length;
+    begin
+        rounded_length = length + 16'h0103;
+        rx_page_count_for_length = rounded_length[15:8];
+    end
+endfunction
+/* verilator lint_on UNUSEDSIGNAL */
+
+localparam [15:0] ETH_FPGA_FLAG_MASK = ETH_FLAG_TX_REQ | ETH_FLAG_IRQ | ETH_FLAG_ENABLED;
+
+function [7:0] shm_ctrl_reg_value;
+    input [4:0] slot;
+    begin
+        case (slot)
+            5'h00: shm_ctrl_reg_value = cr_register;
+            5'h01: shm_ctrl_reg_value = pstart_register;
+            5'h02: shm_ctrl_reg_value = pstop_register;
+            5'h03: shm_ctrl_reg_value = bnry_register;
+            5'h04: shm_ctrl_reg_value = tpsr_register;
+            5'h05: shm_ctrl_reg_value = tbcr_register[7:0];
+            5'h06: shm_ctrl_reg_value = tbcr_register[15:8];
+            5'h07: shm_ctrl_reg_value = isr_register;
+            5'h08: shm_ctrl_reg_value = remote_dma_addr[7:0];
+            5'h09: shm_ctrl_reg_value = remote_dma_addr[15:8];
+            5'h0A: shm_ctrl_reg_value = remote_byte_count[7:0];
+            5'h0B: shm_ctrl_reg_value = remote_byte_count[15:8];
+            5'h0C: shm_ctrl_reg_value = rcr_register;
+            5'h0D: shm_ctrl_reg_value = tcr_register;
+            5'h0E: shm_ctrl_reg_value = dcr_register;
+            5'h0F: shm_ctrl_reg_value = imr_register;
+            5'h11: shm_ctrl_reg_value = par_registers[0];
+            5'h12: shm_ctrl_reg_value = par_registers[1];
+            5'h13: shm_ctrl_reg_value = par_registers[2];
+            5'h14: shm_ctrl_reg_value = par_registers[3];
+            5'h15: shm_ctrl_reg_value = par_registers[4];
+            5'h16: shm_ctrl_reg_value = par_registers[5];
+            5'h17: shm_ctrl_reg_value = curr_register;
+            5'h18: shm_ctrl_reg_value = mar_registers[0];
+            5'h19: shm_ctrl_reg_value = mar_registers[1];
+            5'h1A: shm_ctrl_reg_value = mar_registers[2];
+            5'h1B: shm_ctrl_reg_value = mar_registers[3];
+            5'h1C: shm_ctrl_reg_value = mar_registers[4];
+            5'h1D: shm_ctrl_reg_value = mar_registers[5];
+            5'h1E: shm_ctrl_reg_value = mar_registers[6];
+            5'h1F: shm_ctrl_reg_value = mar_registers[7];
+            default: shm_ctrl_reg_value = 8'h00;
+        endcase
+    end
+endfunction
+
+/* verilator lint_off UNUSEDSIGNAL */
+function [14:0] sync_slot_word_addr;
+    input [5:0] slot;
+    reg [15:0] byte_addr;
+    begin
+        case (slot)
+            6'd0, 6'd1, 6'd2, 6'd3, 6'd4, 6'd5, 6'd6, 6'd7,
+            6'd8, 6'd9, 6'd10, 6'd11, 6'd12, 6'd13, 6'd14, 6'd15,
+            6'd16, 6'd17, 6'd18, 6'd19, 6'd20, 6'd21, 6'd22, 6'd23,
+            6'd24, 6'd25, 6'd26, 6'd27, 6'd28, 6'd29, 6'd30, 6'd31:
+                byte_addr = ETH_SHM_CTRL_REGS + {9'b000000000, slot[4:0], 2'b00};
+            6'd32: byte_addr = ETH_SHM_CTRL_MAC + 16'h0000;
+            6'd33: byte_addr = ETH_SHM_CTRL_MAC + 16'h0002;
+            6'd34: byte_addr = ETH_SHM_CTRL_MAC + 16'h0004;
+            6'd35: byte_addr = ETH_RTL8019_STATE + 16'h0000;
+            6'd36: byte_addr = ETH_RTL8019_STATE + 16'h0002;
+            6'd37: byte_addr = ETH_RTL8019_STATE + 16'h0004;
+            6'd38: byte_addr = ETH_RTL8019_STATE + 16'h0006;
+            6'd39: byte_addr = ETH_RTL8019_STATE + 16'h0008;
+            6'd40: byte_addr = ETH_RTL8019_STATE + 16'h000A;
+            default: byte_addr = ETH_SHM_CTRL_REGS;
+        endcase
+        sync_slot_word_addr = byte_addr[15:1];
+    end
+endfunction
+/* verilator lint_on UNUSEDSIGNAL */
+
+function [15:0] sync_slot_wdata;
+    input [5:0] slot;
+    reg [7:0] state_page_byte;
+    reg [7:0] state_enabled_byte;
+    begin
+        state_page_byte = {6'b000000, current_page};
+        state_enabled_byte = cr_register[1] ? 8'h01 : 8'h00;
+        case (slot)
+            6'd0, 6'd1, 6'd2, 6'd3, 6'd4, 6'd5, 6'd6, 6'd7,
+            6'd8, 6'd9, 6'd10, 6'd11, 6'd12, 6'd13, 6'd14, 6'd15,
+            6'd16, 6'd17, 6'd18, 6'd19, 6'd20, 6'd21, 6'd22, 6'd23,
+            6'd24, 6'd25, 6'd26, 6'd27, 6'd28, 6'd29, 6'd30, 6'd31:
+                sync_slot_wdata = {shm_ctrl_reg_value(slot[4:0]), 8'h00};
+            6'd32: sync_slot_wdata = {par_registers[0], par_registers[1]};
+            6'd33: sync_slot_wdata = {par_registers[2], par_registers[3]};
+            6'd34: sync_slot_wdata = {par_registers[4], par_registers[5]};
+            6'd35: sync_slot_wdata = {state_page_byte, par_registers[0]};
+            6'd36: sync_slot_wdata = {par_registers[1], par_registers[2]};
+            6'd37: sync_slot_wdata = {par_registers[3], par_registers[4]};
+            6'd38: sync_slot_wdata = {par_registers[5], 8'h01};
+            6'd39: sync_slot_wdata = {state_enabled_byte, 8'h00};
+            6'd40: sync_slot_wdata = 16'h0000;
+            default: sync_slot_wdata = 16'h0000;
+        endcase
+    end
+endfunction
+
+wire [14:0] remote_dma_local_word_offset = ne_dma_word_offset(remote_dma_addr);
+wire [1:0]  tcr_loopback_mode = tcr_register[2:1];
+wire        rcr_monitor_mode = rcr_register[5];
+wire        dcr_word_mode = dcr_register[0];
+wire        irq_pending = |(isr_register & imr_register);
+wire [15:0] fpga_owned_flags =
+    (tx_request_pending ? ETH_FLAG_TX_REQ : 16'h0000) |
+    (irq_pending ? ETH_FLAG_IRQ : 16'h0000) |
+    (cr_register[1] ? ETH_FLAG_ENABLED : 16'h0000);
+wire        receiver_active = rx_poll_enabled && cr_register[1] && !rcr_monitor_mode;
+// ISSP source bits:
+//   [0] inhibit background Ethernet DMA/sync engine
+//   [1] synchronous clear for debug counters and sticky flags
+wire [1:0]  debug_source;
+wire        debug_bg_disable = debug_source[0];
+wire        debug_clear = debug_source[1];
+wire [15:0] bg_flags_write_word =
+    (bg_flags_word & ~(ETH_FPGA_FLAG_MASK | (bg_clear_rx_avail ? ETH_FLAG_RX_AVAIL : 16'h0000))) |
+    fpga_owned_flags;
+wire [15:0] bg_rx_length_from_dma = hps_u16_from_dma(eth_dma_rdata);
+wire [7:0]  bg_rx_page_start_calc =
+    sanitize_ring_page(curr_register, pstart_register, pstop_register);
+wire [15:0] bg_rx_dst_offset_calc = ring_page_byte_offset(bg_rx_page_start_calc);
+wire [7:0]  bg_rx_page_count_calc = rx_page_count_for_length(bg_rx_length_from_dma);
+wire [7:0]  bg_rx_next_page_calc =
+    wrap_ring_page_add(bg_rx_page_start_calc, bg_rx_page_count_calc, pstart_register, pstop_register);
+/* verilator lint_off UNUSEDSIGNAL */
+wire [15:0] bg_rx_len_byte_addr = ETH_SHM_PACKET_INFO + 16'h0002;
+wire [15:0] bg_hdr0_byte_addr = ETH_SHM_NE_MEMORY + bg_rx_dst_offset;
+wire [15:0] bg_hdr1_byte_addr = ETH_SHM_NE_MEMORY + bg_rx_dst_offset + 16'h0002;
+wire [15:0] bg_payload_src_byte_addr = ETH_SHM_RX_BUFFER + bg_rx_src_offset;
+wire [15:0] bg_payload_dst_byte_addr =
+    ETH_SHM_NE_MEMORY + bg_rx_dst_offset + 16'h0004 + bg_rx_src_offset;
+/* verilator lint_on UNUSEDSIGNAL */
+wire [14:0] bg_flags_word_addr = ETH_SHM_CTRL_FLAGS[15:1];
+wire [14:0] bg_rx_len_word_addr = bg_rx_len_byte_addr[15:1];
+wire [14:0] bg_hdr0_word_addr = bg_hdr0_byte_addr[15:1];
+wire [14:0] bg_hdr1_word_addr = bg_hdr1_byte_addr[15:1];
+wire [14:0] bg_payload_src_word_addr = bg_payload_src_byte_addr[15:1];
+wire [14:0] bg_payload_dst_word_addr = bg_payload_dst_byte_addr[15:1];
+
+// ISSP probe map:
+// [127:112] heartbeat, [111:96] local wait cycles, [95:80] dma wait cycles,
+// [79:64] sticky flags, [63:49] cpu_addr, [48:31] live control/status bits,
+// [30:26] bg_state, [25:18] CR, [17:10] ISR, [9:2] IMR, [1:0] current_page
+wire [127:0] debug_probe = {
+    debug_heartbeat,
+    debug_local_wait_cycles,
+    debug_dma_wait_cycles,
+    debug_sticky_flags,
+    cpu_addr,
+    cpu_rd,
+    cpu_wr,
+    sel_ethernet,
+    sel_ethernet_shm,
+    is_register_access,
+    is_data_port_access,
+    dtack_eth,
+    eth_irq,
+    eth_dma_req,
+    eth_dma_ready,
+    eth_dma_write,
+    bg_dma_inflight,
+    data_port_read_pending,
+    data_port_write_pending,
+    data_port_transfer_done,
+    rx_poll_enabled,
+    shm_sync_enabled,
+    tx_request_pending,
+    bg_state,
+    cr_register,
+    isr_register,
+    imr_register,
+    current_page
+};
+
+ethernet_issp #(
+    .PROBE_WIDTH(128),
+    .SOURCE_WIDTH(2),
+    .INSTANCE_ID("ETHDBG"),
+    .SLD_INSTANCE_INDEX(17)
+) eth_debug_issp (
+    .clk(clk),
+    .probe(debug_probe),
+    .source(debug_source)
+);
+
+always @(posedge clk) begin
+    if (reset || debug_clear) begin
+        debug_heartbeat <= 16'h0000;
+        debug_local_wait_cycles <= 16'h0000;
+        debug_dma_wait_cycles <= 16'h0000;
+        debug_sticky_flags <= 16'h0000;
+    end else begin
+        debug_heartbeat <= debug_heartbeat + 16'h0001;
+
+        if (sel_ethernet && !sel_ethernet_shm && (cpu_rd || cpu_wr) && dtack_eth &&
+            (debug_local_wait_cycles != 16'hFFFF)) begin
+            debug_local_wait_cycles <= debug_local_wait_cycles + 16'h0001;
+        end
+
+        if (eth_dma_req && !eth_dma_ready && (debug_dma_wait_cycles != 16'hFFFF)) begin
+            debug_dma_wait_cycles <= debug_dma_wait_cycles + 16'h0001;
+        end
+
+        if (sel_ethernet && !sel_ethernet_shm && (cpu_rd || cpu_wr) && dtack_eth) begin
+            debug_sticky_flags[0] <= 1'b1;
+        end
+        if (eth_dma_req && !eth_dma_ready) begin
+            debug_sticky_flags[1] <= 1'b1;
+        end
+        if (sel_ethernet && sel_ethernet_shm) begin
+            debug_sticky_flags[2] <= 1'b1;
+        end
+        if (sel_ethernet && cpu_wr && is_register_access) begin
+            debug_sticky_flags[3] <= 1'b1;
+        end
+        if (sel_ethernet && (cpu_rd || cpu_wr) && is_data_port_access) begin
+            debug_sticky_flags[4] <= 1'b1;
+        end
+        if (eth_dma_req && sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr)) begin
+            debug_sticky_flags[5] <= 1'b1;
+        end
+        if (bg_polling_rx_flags) begin
+            debug_sticky_flags[6] <= 1'b1;
+        end
+        if (shm_sync_enabled) begin
+            debug_sticky_flags[7] <= 1'b1;
+        end
+        if (tx_request_pending) begin
+            debug_sticky_flags[8] <= 1'b1;
+        end
+        if (eth_irq) begin
+            debug_sticky_flags[9] <= 1'b1;
+        end
+        if (isr_register[6]) begin
+            debug_sticky_flags[10] <= 1'b1;
+        end
+        if (isr_register[4]) begin
+            debug_sticky_flags[11] <= 1'b1;
+        end
+        if (isr_register[0]) begin
+            debug_sticky_flags[12] <= 1'b1;
+        end
+        if (isr_register[1]) begin
+            debug_sticky_flags[13] <= 1'b1;
+        end
+        if (debug_bg_disable) begin
+            debug_sticky_flags[14] <= 1'b1;
+        end
+        if (receiver_active) begin
+            debug_sticky_flags[15] <= 1'b1;
+        end
+    end
+end
 
 // Address decode
 wire [4:0]  register_select;
-wire        is_register_access;
-// byte_addr now declared as reg in address decode section
-
-// Register write capture for high-priority processing
-reg reg_write_pending;
-reg [4:0] reg_write_select;
-reg [15:0] reg_write_data;
-reg reg_write_uds;
-
-// Simplified sequential logic - all HPS transactions replaced with direct memory access
 always @(posedge clk) begin
-    // Capture register write signals at the beginning for high-priority processing at the end
-    reg_write_pending <= sel_ethernet && cpu_wr && is_register_access;
-    reg_write_select <= register_select[4:0];
-    reg_write_data <= cpu_data_in;
-    reg_write_uds <= cpu_uds;
-    
-    // Debug register write capture
-    if (sel_ethernet && cpu_wr && is_register_access) begin
-        $display("REGISTER WRITE CAPTURED: sel=%b, wr=%b, is_reg=%b, reg_sel=0x%02x, data=0x%04x, uds=%b", 
-                sel_ethernet, cpu_wr, is_register_access, register_select[4:0], cpu_data_in, cpu_uds);
-                
-        // High-priority register writes for critical registers (CR, RSAR) - immediate processing
-        if (cpu_uds == 1'b0) begin
-            $display("HIGH-PRIORITY REGISTER WRITE EXECUTING! reg_select=%d", register_select[4:0]);
-            case (register_select[4:0])
-                5'h00: begin  // Command Register (CR)
-                    cr_register <= cpu_data_in[15:8]; // Non-blocking assignment for register update
-                    $display("  CR WRITE: data=0x%04x, cr=0x%02x, page_bits=%b=%d", 
-                             cpu_data_in, cpu_data_in[15:8], cpu_data_in[15:14], cpu_data_in[15:14]);
-                end
-                5'h08: begin  // CRDA0/RSAR0 (Current/Remote DMA Address 0)
-                    // Use current page state (for currently set page) since this is separate from CR write
-                    if (current_page != 2'b00) begin  // Page 1+: RSAR0 write
-                        remote_dma_addr[7:0] <= cpu_data_in[15:8]; // Non-blocking assignment for register update
-                        $display("  HIGH-PRIORITY RSAR0 WRITE: 0x%02x -> remote_dma_addr[7:0], current_page=%d", cpu_data_in[15:8], current_page);
-                    end else begin
-                        $display("  RSAR0 WRITE IGNORED: current_page = %d (must be != 0)", current_page);
-                    end
-                end
-                5'h09: begin  // CRDA1/RSAR1 (Current/Remote DMA Address 1) 
-                    if (current_page != 2'b00) begin  // Page 1+: RSAR1 write
-                        remote_dma_addr[15:8] <= cpu_data_in[15:8]; // Non-blocking assignment for register update
-                        $display("  HIGH-PRIORITY RSAR1 WRITE: 0x%02x -> remote_dma_addr[15:8], current_page=%d", cpu_data_in[15:8], current_page);
-                    end else begin
-                        $display("  RSAR1 WRITE IGNORED: current_page = %d (must be != 0)", current_page);
-                    end
-                end
-            endcase
-        end
-    end
-    
     if (reset) begin
-        state <= IDLE;
-
-        // Initialize CR register copy for page decoding
-        cr_register <= 8'h21;      // CR: Stop state, page 0, no DMA
-
-        // Initialize data port state
-        remote_dma_addr <= 16'h0000;      // Default DMA start address
+        cr_register <= 8'h21;
+        remote_dma_addr <= 16'h0000;
         remote_byte_count <= 16'h0000;
         data_port_read_pending <= 1'b0;
         data_port_write_pending <= 1'b0;
+        data_port_transfer_done <= 1'b0;
         data_port_read_data <= 16'h0000;
-        register_read_pending <= 1'b0;
-        register_write_pending <= 1'b0;
-        register_read_data <= 16'h0000;
-        memory_read_pending <= 1'b0;
-        memory_read_data <= 16'h0000;
-        control_read_pending <= 1'b0;
-        control_read_data <= 16'h0000;
-
-        // Initialize memory state machine
-        mem_state <= MEM_IDLE;
-        eth_shared_base <= {ethernet_base, 16'h0000};  // Store Amiga base address (e.g., 0xEA0000)
-        flags_write_pending <= 1'b0;
-        
-        // Initialize memory transactions
-        mem_transaction_addr <= 16'h0000;
-        mem_transaction_data <= 16'h0000;
-        mem_transaction_rd <= 1'b0;
-        mem_transaction_wr <= 1'b0;
-        mem_transaction_busy <= 1'b0;
-        
-        // Initialize RX/TX buffer control
-        rx_buffer_addr <= 16'h0000;
-        tx_buffer_addr <= 16'h0000;
-        rx_packet_length <= 16'h0000;
-        tx_packet_length <= 16'h0000;
-
-        // Initialize packet processing state
-        packet_length <= 16'h0000;
-        packet_count_rx <= 16'h0000;
-        packet_count_tx <= 16'h0000;
-        link_status <= 1'b0;           // Link down initially
-        status_flags <= 32'h00000000;
-
-        // Initialize NE2000 interrupt registers
-        isr_register <= 8'h00;           // Clear all interrupt status bits
-        imr_register <= 8'h00;           // Mask all interrupts initially
-        dcr_register <= 8'h00;           // DCR: Byte DMA, Normal mode, 8-bit transfers
-
-        // Note: Remote DMA registers now stored in shared memory at ETH_SHM_CTRL_REGS
-        // No local register initialization needed
-
-        
-        // Initialize DTACK signal (active low, so 1 = not ready, 0 = ready)
+        data_port_byte_addr <= 16'h0000;
+        data_port_word_mode <= 1'b0;
+        tx_complete_pending <= 1'b0;
+        isr_register <= 8'h00;
+        imr_register <= 8'h00;
+        dcr_register <= 8'h00;
+        pstart_register <= 8'h40;
+        pstop_register <= 8'h80;
+        bnry_register <= 8'h40;
+        tpsr_register <= 8'h40;
+        tbcr_register <= 16'h0000;
+        tsr_register <= 8'h00;
+        rsr_register <= 8'h00;
+        curr_register <= 8'h41;
+        tcr_register <= 8'h00;
+        rcr_register <= 8'h00;
+        rx_poll_enabled <= 1'b0;
+        shm_sync_enabled <= 1'b0;
+        tx_request_pending <= 1'b0;
+        mirrored_fpga_flags <= 16'h0000;
+        bg_state <= BG_IDLE;
+        bg_poll_counter <= 8'h00;
+        bg_dma_inflight <= 1'b0;
+        bg_flags_word <= 16'h0000;
+        bg_rx_total_length <= 16'h0000;
+        bg_rx_src_offset <= 16'h0000;
+        bg_rx_dst_offset <= 16'h0000;
+        bg_rx_bytes_remaining <= 16'h0000;
+        bg_rx_next_page <= 8'h00;
+        bg_source_word <= 16'h0000;
+        bg_sync_slot <= 6'd0;
+        bg_polling_rx_flags <= 1'b0;
+        bg_clear_rx_avail <= 1'b0;
+        for (i = 0; i < 6; i = i + 1) begin
+            par_registers[i] <= 8'h00;
+        end
+        for (i = 0; i < 8; i = i + 1) begin
+            mar_registers[i] <= 8'h00;
+        end
+        eth_dma_req <= 1'b0;
+        eth_dma_write <= 1'b0;
+        eth_dma_addr <= 15'h0000;
+        eth_dma_wdata <= 16'h0000;
+        eth_dma_uds <= 1'b1;
+        eth_dma_lds <= 1'b1;
         dtack_eth <= 1'b1;
-
-        // Initialize memory state machine and transaction control
-        mem_state <= MEM_IDLE;
-        mem_transaction_addr <= 16'h0000;
-        mem_transaction_data <= 16'h0000;
-        mem_transaction_rd <= 1'b0;
-        mem_transaction_wr <= 1'b0;
-        mem_transaction_busy <= 1'b0;
-        mem_transaction_timeout <= 16'h0000;
-        flags_write_pending <= 1'b0;
-
-        // Initialize register modification variables
-        original_cr <= 8'h00;
-        modified_cr <= 8'h00;
-        clear_mask <= 8'h00;
-        modified_mask <= 8'h00;
-        modified_isr <= 8'h00;
-        original_imr <= 8'h00;
-        modified_imr <= 8'h00;
-        original_data <= 8'h00;
-        modified_data <= 8'h00;
-
-        // Initialize address calculation variables
-        read_addr <= 16'h0000;
-        info_addr <= 16'h0000;
-        mac_addr <= 16'h0000;
-        stats_addr <= 16'h0000;
-        sig_addr <= 16'h0000;
-        ne_offset <= 16'h0000;
-        rx_offset <= 16'h0000;
-        tx_offset <= 16'h0000;
-
-        // Direct mapped memory - initialization handled by external memory mapping
-        // Control flags at: calc_mem_addr(ETH_SHM_CTRL_FLAGS) = 0x00000000
-        // Signature at: calc_mem_addr(ETH_SHM_HPS_SIGNATURE) = 0xCAFEBABE
-        // Heartbeat at: calc_mem_addr(ETH_SHM_HPS_HEARTBEAT) = 0x00000000
-
+        eth_irq <= 1'b0;
     end else begin
-        // Note: Registers 0x0A and 0x0B implement transparent writes on page 0
-        // - Writes are accepted and stored in RBCR0/RBCR1 but reads still return fixed values 0x50/0x70
-        
-        // DTACK control for ethernet register and data port access only
-        // Direct shared memory access uses normal memory timing
         if (sel_ethernet && (cpu_rd || cpu_wr)) begin
-            // Ethernet register/data port access in progress
-            if (is_register_access) begin
-                // Register access that may need shared memory read/write
-                if ((cpu_rd && register_read_pending) || (cpu_wr && register_write_pending)) begin
-                    dtack_eth <= 1'b1;  // Not ready - waiting for shared memory operation
-                end else begin
-                    // Check if we need to start a shared memory operation for this register
-                    case (register_select[4:0])
-                        5'h0A: begin // RBCR0 - may need shared memory access
-                            if (cpu_rd && current_page == 2'b01) begin
-                                dtack_eth <= 1'b1;  // Not ready - need to read from shared memory
-                            end else begin
-                                dtack_eth <= 1'b0;  // Ready - immediate response (8019ID0 or transparent write)
-                            end
-                        end
-                        5'h0B: begin // RBCR1 - may need shared memory access
-                            if (cpu_rd && current_page == 2'b01) begin
-                                dtack_eth <= 1'b1;  // Not ready - need to read from shared memory
-                            end else begin
-                                dtack_eth <= 1'b0;  // Ready - immediate response (8019ID1 or transparent write)
-                            end
-                        end
+            if (sel_ethernet_shm) begin
+                dtack_eth <= 1'b1;
+            end else if (is_data_port_access) begin
+                dtack_eth <= data_port_transfer_done ? 1'b0 : 1'b1;
+            end else begin
+                dtack_eth <= 1'b0;
+            end
+        end else begin
+            dtack_eth <= 1'b1;
+        end
+
+        if (sel_ethernet && cpu_wr && is_register_access && !cpu_uds) begin
+            case (register_select[4:0])
+                5'h00: begin
+                    cr_register <= cr_write_value;
+                    if (cr_write_value[2] &&
+                        (tbcr_register != 16'h0000) &&
+                        (tpsr_register >= pstart_register) &&
+                        (tpsr_register < pstop_register)) begin
+                        tx_complete_pending <= 1'b1;
+                        tsr_register <= 8'h00;
+                        tx_request_pending <= 1'b1;
+                        shm_sync_enabled <= 1'b1;
+                        bg_sync_slot <= 6'd0;
+                    end
+                end
+                5'h01: begin
+                    case (current_page)
+                        2'b00: pstart_register <= cpu_data_in[15:8];
+                        2'b01: par_registers[0] <= cpu_data_in[15:8];
                         default: begin
-                            // Other registers - immediate response
-                            dtack_eth <= 1'b0;  // Ready
                         end
                     endcase
                 end
-            end else if (is_data_port_access) begin
-                // Data port access - may need shared memory coordination
-                if ((cpu_rd && data_port_read_pending) || (cpu_wr && data_port_write_pending)) begin
-                    dtack_eth <= 1'b1;  // Not ready - waiting for shared memory
-                end else begin
-                    dtack_eth <= 1'b0;  // Ready
+                5'h02: begin
+                    case (current_page)
+                        2'b00: pstop_register <= cpu_data_in[15:8];
+                        2'b01: par_registers[1] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
                 end
+                5'h03: begin
+                    case (current_page)
+                        2'b00: bnry_register <= cpu_data_in[15:8];
+                        2'b01: par_registers[2] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                5'h04: begin
+                    case (current_page)
+                        2'b00: tpsr_register <= cpu_data_in[15:8];
+                        2'b01: par_registers[3] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                5'h05: begin
+                    case (current_page)
+                        2'b00: tbcr_register[7:0] <= cpu_data_in[15:8];
+                        2'b01: par_registers[4] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                5'h06: begin
+                    case (current_page)
+                        2'b00: tbcr_register[15:8] <= cpu_data_in[15:8];
+                        2'b01: par_registers[5] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                5'h07: begin
+                    case (current_page)
+                        2'b00: isr_register <= isr_register & ~cpu_data_in[15:8];
+                        2'b01: curr_register <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                5'h08: begin
+                    case (current_page)
+                        2'b00: remote_dma_addr[7:0] <= cpu_data_in[15:8];
+                        2'b01: mar_registers[0] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                5'h09: begin
+                    case (current_page)
+                        2'b00: remote_dma_addr[15:8] <= cpu_data_in[15:8];
+                        2'b01: mar_registers[1] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                5'h0A: begin
+                    case (current_page)
+                        2'b00: remote_byte_count[7:0] <= cpu_data_in[15:8];
+                        2'b01: mar_registers[2] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                5'h0B: begin
+                    case (current_page)
+                        2'b00: remote_byte_count[15:8] <= cpu_data_in[15:8];
+                        2'b01: mar_registers[3] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                5'h0C: begin
+                    case (current_page)
+                        2'b00: begin
+                            rcr_register <= cpu_data_in[15:8];
+                            rx_poll_enabled <= 1'b1;
+                            bg_poll_counter <= 8'h00;
+                            shm_sync_enabled <= 1'b1;
+                            bg_sync_slot <= 6'd0;
+                        end
+                        2'b01: mar_registers[4] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                5'h0D: begin
+                    case (current_page)
+                        2'b00: tcr_register <= cpu_data_in[15:8];
+                        2'b01: mar_registers[5] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                5'h0E: begin
+                    case (current_page)
+                        2'b00: dcr_register <= cpu_data_in[15:8];
+                        2'b01: mar_registers[6] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                5'h0F: begin
+                    case (current_page)
+                        2'b00: imr_register <= cpu_data_in[15:8];
+                        2'b01: mar_registers[7] <= cpu_data_in[15:8];
+                        default: begin
+                        end
+                    endcase
+                end
+                default: begin
+                end
+            endcase
+
+            if (rx_poll_enabled || shm_sync_enabled || tx_request_pending) begin
+                shm_sync_enabled <= 1'b1;
+                bg_sync_slot <= 6'd0;
+            end
+        end
+
+        if (tx_complete_pending) begin
+            tx_complete_pending <= 1'b0;
+            cr_register <= {cr_register[7:3], 1'b0, cr_register[1:0]};
+            tsr_register <= TSR_PTX;
+            if ((tcr_loopback_mode != 2'b00) && receiver_active) begin
+                rsr_register <= RSR_PRX;
+                bnry_register <= curr_register;
+                if ((curr_register + 8'h01) >= pstop_register) begin
+                    curr_register <= pstart_register;
+                end else begin
+                    curr_register <= curr_register + 8'h01;
+                end
+                isr_register <= isr_register | ISR_PTX | ISR_PRX;
             end else begin
-                // Other ethernet register access - complete immediately
-                dtack_eth <= 1'b0;  // Ready
+                isr_register <= isr_register | ISR_PTX;
             end
-        end else begin
-            // No ethernet register/data port access - don't affect DTACK  
-            dtack_eth <= 1'b1;  // Not ready (inactive)
+            shm_sync_enabled <= 1'b1;
+            bg_sync_slot <= 6'd0;
         end
 
-        // Simple state machine
-        case (state)
-            IDLE: begin
-                if (sel_ethernet_shm && (cpu_rd || cpu_wr)) begin
-                    state <= ACCESS;
-                end
-            end
+        if (eth_dma_req && eth_dma_ready) begin
+            if (bg_dma_inflight) begin
+                bg_dma_inflight <= 1'b0;
+                eth_dma_req <= 1'b0;
 
-            ACCESS: begin
-                // Stay in ACCESS until the bus cycle ends (chip select goes away)
-                if (!sel_ethernet_shm) begin
-                    state <= IDLE;
-                end
-            end
-
-            COMPLETE: begin
-                state <= IDLE;
-            end
-
-            default: begin
-                state <= IDLE;
-            end
-        endcase
-
-        // Handle data port writes (packet data) - translate address to NE2000 memory region
-        if (sel_ethernet && cpu_wr && is_data_port_access) begin
-            if (~cpu_uds || ~cpu_lds) begin  // Check data strobes
-                // Set write pending flag for DTACK control
-                data_port_write_pending <= 1'b1;
-                
-                
-                // Check WTS bit (bit 0 of DCR) for word/byte transfer mode
-                if (dcr_register[0]) begin
-                    // WTS=1: Word transfer mode (16-bit)
-                    // Update remote DMA address by 2 bytes
-                    remote_dma_addr <= remote_dma_addr + 16'h2;
-                    // Decrement byte counter by 2
-                    if (remote_byte_count > 16'h0001) begin
-                        remote_byte_count <= remote_byte_count - 16'h2;
-                    end else begin
-                        remote_byte_count <= 16'h0000;
-                        // Set RDC (Remote DMA Complete) interrupt
-                        isr_register <= isr_register | ISR_RDC;
-                    end
-                    $display("Data port word write: 0x%04x to 0x%06x", 
-                            cpu_data_in, {ethernet_base, 8'h40, remote_dma_addr[15:0]});
-                end else begin
-                    // WTS=0: Byte transfer mode (8-bit)
-                    // Update remote DMA address by 1 byte
-                    remote_dma_addr <= remote_dma_addr + 16'h1;
-                    // Decrement byte counter by 1
-                    if (remote_byte_count > 16'h0000) begin
-                        remote_byte_count <= remote_byte_count - 16'h1;
-                    end else begin
-                        remote_byte_count <= 16'h0000;
-                        // Set RDC (Remote DMA Complete) interrupt
-                        isr_register <= isr_register | ISR_RDC;
-                    end
-                    $display("Data port byte write: 0x%02x to 0x%06x", 
-                            cpu_data_in[7:0], {ethernet_base, 8'h40, remote_dma_addr[15:0]});
-                end
-            end
-        end
-        // Handle data port reads (packet data) - trigger memory state machine
-        else if (sel_ethernet && cpu_rd && is_data_port_access && !data_port_read_pending) begin
-            // Don't start a new read if one is already pending
-            if (mem_state == MEM_IDLE) begin
-                // Trigger the data port read state machine
-                mem_state <= MEM_DATA_PORT_READ;
-                data_port_read_pending <= 1'b1;
-                
-                $display("Data port read started: DMA addr=0x%04x", remote_dma_addr);
-                        
-                // Update remote DMA address and byte count immediately
-                // Check WTS bit (bit 0 of DCR) for word/byte transfer mode
-                if (dcr_register[0]) begin
-                    // WTS=1: Word transfer mode (16-bit)
-                    remote_dma_addr <= remote_dma_addr + 16'h2;
-                    if (remote_byte_count > 16'h0001) begin
-                        remote_byte_count <= remote_byte_count - 16'h2;
-                    end else begin
-                        remote_byte_count <= 16'h0000;
-                        isr_register <= isr_register | ISR_RDC;
-                    end
-                end else begin
-                    // WTS=0: Byte transfer mode (8-bit)
-                    remote_dma_addr <= remote_dma_addr + 16'h1;
-                    if (remote_byte_count > 16'h0000) begin
-                        remote_byte_count <= remote_byte_count - 16'h1;
-                    end else begin
-                        remote_byte_count <= 16'h0000;
-                        isr_register <= isr_register | ISR_RDC;
-                    end
-                end
-            end
-        end
-        
-        // Handle NE2000 memory writes (direct memory access) - write directly to shared memory
-        if (cpu_wr && is_memory_access) begin
-            if (~cpu_uds || ~cpu_lds) begin  // Check data strobes for 16-bit write access
-                // Calculate memory offset from 0x4000 base (cpu_addr 0x4000-0x7FFF maps to memory offset 0x0000-0x3FFF)
-                // Direct mapped NE2000 memory write
-                // Target address: calc_mem_addr(ETH_SHM_NE_MEMORY + {15'h0000, (cpu_addr[15:1] - 15'h2000), 1'b0})
-                // System memory controller handles write at: shared_mem_base + ETH_SHM_NE_MEMORY + (byte_addr - 0x4000)
-            end
-        end
-        // Handle NE2000 memory reads (direct memory access) - read from shared memory
-        if (cpu_rd && is_memory_access && !memory_read_pending) begin
-            // Calculate memory offset from 0x4000 base (cpu_addr 0x4000-0x7FFF maps to memory offset 0x0000-0x3FFF)
-            // Direct mapped NE2000 memory read
-            // Source address: calc_mem_addr(ETH_SHM_NE_MEMORY + {15'h0000, (cpu_addr[15:1] - 15'h2000), 1'b0})
-            // System memory controller provides NE2000 memory data at: shared_mem_base + ETH_SHM_NE_MEMORY + (byte_addr - 0x4000)
-            //memory_read_data <= 16'h5678; // Test pattern - system memory overrides this - gets written to 0xEA4000 - 0xEA7FFF
-            memory_read_pending <= 1'b1;
-        end
-        // Handle control writes (direct control access) - write directly to shared memory
-        if (cpu_wr && is_control_access) begin
-            if (~cpu_uds || ~cpu_lds) begin  // Check data strobes for 16-bit write access
-                // Direct access to control structure
-                // Direct mapped control memory write
-                // Target address: eth_shared_base + {15'h0000, cpu_addr[15:1], 1'b0}
-            end
-        end
-        // Handle control reads (direct control access) - read from shared memory
-        if (cpu_rd && is_control_access && !control_read_pending) begin
-            // Direct access to control structure
-            // Direct mapped control memory read
-            // Source address: eth_shared_base + {15'h1000, cpu_addr[15:1], 1'b0}
-            // System memory controller provides control data at the calculated address
-            //control_read_data <= 16'h9ABC; // Test pattern - system memory overrides this
-            control_read_pending <= 1'b1;
-        end
-        // Direct buffer access removed - all packet data flows through data port with Remote DMA
-        // Software must:
-        // 1. Set RSAR0/RSAR1 registers to specify buffer address
-        // 2. Set RBCR0/RBCR1 registers to specify byte count  
-        // 3. Write CR register to start Remote DMA
-        // 4. Read/write packet data through data port (0xEA0C40)
-        // Handle register reads that require shared memory access
-        if (sel_ethernet && cpu_rd && is_register_access && !register_read_pending) begin
-            case (register_select[4:0])
-                5'h0A: begin // RBCR0 - need to read from shared memory on page 1
-                    if (current_page == 2'b01 && mem_state == MEM_IDLE) begin
-                        // Trigger shared memory read for RBCR0
-                        mem_state <= MEM_REG_READ;
-                        register_read_pending <= 1'b1;
-                        $display("Triggering RBCR0 read from shared memory at 0xEA100A");
-                    end
-                end
-                5'h0B: begin // RBCR1 - need to read from shared memory on page 1
-                    if (current_page == 2'b01 && mem_state == MEM_IDLE) begin
-                        // Trigger shared memory read for RBCR1
-                        mem_state <= MEM_REG_READ;
-                        register_read_pending <= 1'b1;
-                        $display("Triggering RBCR1 read from shared memory at 0xEA100B");
-                    end
-                end
-                default: begin
-                    // Other registers don't need shared memory reads
-                end
-            endcase
-        end
-
-        // Handle register writes that require shared memory access
-        if (sel_ethernet && cpu_wr && is_register_access && !register_write_pending) begin
-            case (register_select[4:0])
-                5'h0A, 5'h0B: begin // RBCR0/RBCR1 - always write to shared memory
-                    if (mem_state == MEM_IDLE) begin
-                        // Trigger shared memory write for register
-                        mem_state <= MEM_REG_WRITE;
-                        register_write_pending <= 1'b1;
-                        $display("Triggering register 0x%02x write to shared memory", register_select[4:0]);
-                    end
-                end
-                default: begin
-                    // Other registers handled by existing logic
-                end
-            endcase
-        end
-
-        // NOTE: Register writes handled via shared memory at 0xEA0000
-        // This section handles shared memory writes - now ENABLED for shared memory register storage
-        if (sel_ethernet && cpu_wr && is_register_access) begin
-            if (~cpu_uds) begin  // Check upper data strobe for high byte access
-
-                // Always write to shared memory for full register set
-                // All NE2000 registers stored at ETH_SHM_CTRL_REGS (0xEA1004) 
-                // Register offset added to base address: 0xEA1004 + register_select
-                
-                // Calculate target address in shared memory: ETH_SHM_CTRL_REGS + register_offset
-                // ETH_SHM_CTRL_REGS = 0x1004, so target = 0xEA1004 + register_select
-                
-                case (register_select[4:0])
-                    5'h00: begin // CR register - intercept and modify
-                        // Original data from CPU
-                        original_cr <= cpu_data_in[15:8];
-                        // Modify: Force STA bit (bit 1) to 1 if STP bit (bit 0) is 0
-                        if (~cpu_data_in[8]) begin // If STP is not set (bit 0 of high byte = bit 8 overall)
-                            modified_cr <= cpu_data_in[15:8] | 8'h02;  // Force STA bit (bit 1)
+                case (bg_state)
+                    BG_READ_FLAGS_WAIT: begin
+                        bg_flags_word <= hps_u16_from_dma(eth_dma_rdata);
+                        if (bg_polling_rx_flags &&
+                            ((hps_u16_from_dma(eth_dma_rdata) & ETH_FLAG_RX_AVAIL) != 16'h0000)) begin
+                            bg_state <= BG_READ_RX_LEN_REQ;
+                        end else if (tx_request_pending &&
+                                     ((mirrored_fpga_flags & ETH_FLAG_TX_REQ) != 16'h0000) &&
+                                     ((hps_u16_from_dma(eth_dma_rdata) & ETH_FLAG_TX_REQ) == 16'h0000)) begin
+                            tx_request_pending <= 1'b0;
+                            mirrored_fpga_flags <= hps_u16_from_dma(eth_dma_rdata) & ETH_FPGA_FLAG_MASK;
+                            bg_state <= BG_IDLE;
+                            bg_poll_counter <= BG_POLL_RELOAD;
+                        end else if ((hps_u16_from_dma(eth_dma_rdata) & ETH_FPGA_FLAG_MASK) != fpga_owned_flags) begin
+                            bg_clear_rx_avail <= 1'b0;
+                            bg_state <= BG_CLEAR_FLAG_REQ;
                         end else begin
-                            modified_cr <= cpu_data_in[15:8];
-                        end
-                        // Update local cache for immediate page calculation
-                        cr_register <= modified_cr;
-                        $display("CR write intercepted: 0x%02x -> 0x%02x, translating to 0xEA0000", original_cr, modified_cr);
-                    end
-                    
-                    5'h07: begin // ISR register - intercept and modify  
-                        // Original ISR clear request from CPU
-                        clear_mask <= cpu_data_in[15:8];
-                        // Modify: Prevent clearing of RDC bit (bit 6) 
-                        modified_mask <= cpu_data_in[15:8] & 8'hBF; // Clear bit 6 in mask
-                        // Apply modified clear to local ISR
-                        // Write modified ISR to shared memory at 0xEA1004 + 0x07
-                        // Target address: calc_mem_addr(ETH_SHM_CTRL_REGS + 32'h00000007)
-                        // Data: {isr_register, 24'h000000}
-                        $display("ISR clear intercepted: mask 0x%02x -> 0x%02x", clear_mask, modified_mask);
-                    end
-                    
-                    5'h0F: begin // IMR register - intercept and modify
-                        // Original IMR data from CPU
-                        original_imr <= cpu_data_in[15:8];
-                        // Modify: Always enable RDC interrupt (bit 6)
-                        modified_imr <= cpu_data_in[15:8] | 8'h40; // Set bit 6
-                        // Update local copy with modified value
-                        imr_register <= cpu_data_in[15:8] | 8'h40;
-                        // Write modified IMR to shared memory at 0xEA1004 + 0x0F
-                        // Target address: calc_mem_addr(ETH_SHM_CTRL_REGS + 32'h0000000F)
-                        // Data: {modified_imr, 24'h000000}
-                        $display("IMR write intercepted: 0x%02x -> 0x%02x", original_imr, modified_imr);
-                    end
-                    
-                    5'h08: begin // RSAR0/CRDA0 - Remote Start Address 0 or Current Remote DMA Address 0
-                        if (current_page == 2'b00) begin
-                            // Page 0: Read-only CRDA0 - ignore writes
-                            $display("Ignored write to read-only CRDA0: 0x%02x", cpu_data_in[15:8]);
-                        end else begin
-                            // Other pages: RSAR0 write to shared memory at ETH_SHM_CTRL_REGS + 0x08
-                            $display("RSAR0 write to shared memory: 0x%02x at address 0xEA100C", cpu_data_in[15:8]);
-                            // Write to shared memory: ETH_SHM_CTRL_REGS + 0x08 (address 0xEA100C)
-                        end
-                    end
-                    
-                    5'h09: begin // RSAR1/CRDA1 - Remote Start Address 1 or Current Remote DMA Address 1
-                        if (current_page == 2'b00) begin
-                            // Page 0: Read-only CRDA1 - ignore writes
-                            $display("Ignored write to read-only CRDA1: 0x%02x", cpu_data_in[15:8]);
-                        end else begin
-                            // Other pages: RSAR1 write to shared memory at ETH_SHM_CTRL_REGS + 0x09
-                            $display("RSAR1 write to shared memory: 0x%02x at address 0xEA100D", cpu_data_in[15:8]);
-                            // Write to shared memory: ETH_SHM_CTRL_REGS + 0x09 (address 0xEA100D)
+                            mirrored_fpga_flags <= hps_u16_from_dma(eth_dma_rdata) & ETH_FPGA_FLAG_MASK;
+                            bg_state <= BG_IDLE;
+                            bg_poll_counter <= BG_POLL_RELOAD;
                         end
                     end
 
-                    5'h0A: begin // RBCR0/8019ID0 - Remote Byte Count 0 or RTL8019AS ID0
-                        if (current_page == 2'b01) begin
-                            // Page 1: Normal RBCR0 write
-                            $display("RBCR0 write: 0x%02x translating to shared memory at 0xEA100A", cpu_data_in[15:8]);
+                    BG_READ_RX_LEN_WAIT: begin
+                        bg_rx_total_length <= bg_rx_length_from_dma + 16'h0004;
+                        bg_rx_src_offset <= 16'h0000;
+                        bg_rx_bytes_remaining <= bg_rx_length_from_dma;
+                        bg_rx_dst_offset <= bg_rx_dst_offset_calc;
+                        bg_rx_next_page <= bg_rx_next_page_calc;
+                        bg_clear_rx_avail <= 1'b1;
+
+                        if (bg_rx_length_from_dma == 16'h0000) begin
+                            bg_state <= BG_CLEAR_FLAG_REQ;
+                        end else if (bg_rx_next_page_calc == bnry_register) begin
+                            isr_register <= isr_register | ISR_OVW;
+                            shm_sync_enabled <= 1'b1;
+                            bg_sync_slot <= 6'd0;
+                            bg_state <= BG_CLEAR_FLAG_REQ;
                         end else begin
-                            // Page 0: Transparent write - stored in RBCR0 but reads return 0x50
-                            $display("Transparent write to 8019ID0: page=%d, value=0x%02x stored at 0xEA100A, reads still return 0x50", current_page, cpu_data_in[15:8]);
+                            bg_state <= BG_WRITE_HDR0_REQ;
                         end
                     end
-                    5'h0B: begin // RBCR1/8019ID1 - intercept writes (read-only in Page 0)
-                        if (current_page == 2'b01) begin
-                            // Page 1: Normal RBCR1 write
-                            $display("RBCR1 write: 0x%02x translating to shared memory at 0xEA100B", cpu_data_in[15:8]);
+
+                    BG_WRITE_HDR0_WAIT: begin
+                        bg_state <= BG_WRITE_HDR1_REQ;
+                    end
+
+                    BG_WRITE_HDR1_WAIT: begin
+                        if (bg_rx_bytes_remaining != 16'h0000) begin
+                            bg_state <= BG_READ_PAYLOAD_REQ;
                         end else begin
-                            // Page 0: Transparent write - stored in RBCR1 but reads return 0x70
-                            $display("Transparent write to 8019ID1: page=%d, value=0x%02x stored at 0xEA100B, reads still return 0x70", current_page, cpu_data_in[15:8]);
+                            rsr_register <= RSR_PRX;
+                            isr_register <= isr_register | ISR_PRX;
+                            curr_register <= bg_rx_next_page;
+                            bg_state <= BG_CLEAR_FLAG_REQ;
                         end
+                    end
+
+                    BG_READ_PAYLOAD_WAIT: begin
+                        bg_source_word <= eth_dma_rdata;
+                        bg_state <= BG_WRITE_PAYLOAD_REQ;
+                    end
+
+                    BG_WRITE_PAYLOAD_WAIT: begin
+                        if (bg_rx_bytes_remaining > 16'h0002) begin
+                            bg_rx_src_offset <= bg_rx_src_offset + 16'h0002;
+                            bg_rx_bytes_remaining <= bg_rx_bytes_remaining - 16'h0002;
+                            bg_state <= BG_READ_PAYLOAD_REQ;
+                        end else begin
+                            bg_rx_src_offset <= bg_rx_src_offset + bg_rx_bytes_remaining;
+                            bg_rx_bytes_remaining <= 16'h0000;
+                            rsr_register <= RSR_PRX;
+                            isr_register <= isr_register | ISR_PRX;
+                            curr_register <= bg_rx_next_page;
+                            shm_sync_enabled <= 1'b1;
+                            bg_sync_slot <= 6'd0;
+                            bg_state <= BG_CLEAR_FLAG_REQ;
+                        end
+                    end
+
+                    BG_CLEAR_FLAG_WAIT: begin
+                        mirrored_fpga_flags <= fpga_owned_flags;
+                        bg_clear_rx_avail <= 1'b0;
+                        bg_state <= BG_IDLE;
+                        bg_poll_counter <= BG_POLL_RELOAD;
+                    end
+
+                    BG_SYNC_WORD_WAIT: begin
+                        if (bg_sync_slot == 6'd40) begin
+                            bg_sync_slot <= 6'd0;
+                            shm_sync_enabled <= 1'b0;
+                        end else begin
+                            bg_sync_slot <= bg_sync_slot + 6'd1;
+                        end
+                        bg_state <= BG_IDLE;
                     end
 
                     default: begin
-                        // General register write - translate to shared memory
-                        // Calculate target address: ETH_SHM_CTRL_REGS + register_select
-                        $display("Register 0x%02x write: 0x%02x translating to shared memory at 0xEA%04X", 
-                               register_select[4:0], cpu_data_in[15:8], 16'h1000 + {11'h000, register_select[4:0]});
+                        bg_state <= BG_IDLE;
+                        bg_poll_counter <= BG_POLL_RELOAD;
                     end
                 endcase
-
-                // Set dirty flag in shared memory so HPS knows registers were updated
-                // Write ETH_FLAG_REG_DIRTY (bit 4 = 0x10) to ETH_SHM_CTRL_FLAGS at 0xEA1000
-                status_flags <= status_flags | 32'h00000010;  // Set ETH_FLAG_REG_DIRTY bit locally
-                flags_write_pending <= 1'b1;  // Trigger write to shared memory
-                
-                // The memory state machine will handle the actual write to 0xEA1000
-                // Target address: eth_shared_base + ETH_SHM_CTRL_FLAGS (0xEA1000)  
-                // Data: status_flags with ETH_FLAG_REG_DIRTY bit set
-            end
-        end
-
-        // Memory State Machine for packet handling (replaces HPS state machine)
-        case (mem_state)
-            MEM_IDLE: begin
-                // Check if flags write is pending first (highest priority)
-                if (flags_write_pending) begin
-                    mem_state <= MEM_WRITE_FLAGS;
-                // Check if data port read is pending (second priority)
-                end else if (data_port_read_pending && sel_ethernet && cpu_rd && is_data_port_access) begin
-                    mem_state <= MEM_DATA_PORT_READ;
-                end else begin
-                    // Cycle between reading control flags, heartbeat, signature, and packet status
-                    case (packet_count_rx[1:0])  // Use 2 LSBs for 4-way rotation
-                    2'b00: begin
-                        // Read control flags for reset/TX requests
-                        mem_state <= MEM_READ_FLAGS;
-                        // Direct mapped control flags read from: calc_mem_addr(ETH_SHM_CTRL_FLAGS)
-                        // System memory controller provides control flags at the calculated address
-                        status_flags <= 32'h00000020; // Test pattern - system memory overrides this
-                    end
-                    2'b01: begin
-                        // Read heartbeat counter
-                        mem_state <= MEM_READ_HEARTBEAT;
-                        // Heartbeat from memory
-                    end
-                    2'b10: begin
-                        // Read signature for validation
-                        mem_state <= MEM_READ_HEARTBEAT;  // Reuse same handler
-                        // Direct mapped signature at: ethernet_base + ETH_SHM_HPS_SIGNATURE (0xEA108C)
-                        // HPS side initializes this memory location with 0xCAFEBABE
-                        // System memory mapping makes it accessible to CPU
-                        link_status <= 1'b1;  // Assume HPS memory is valid and responding
-                    end
-                    2'b11: begin
-                        // Read packet status and statistics
-                        mem_state <= MEM_PACKET_STATUS;
-                        // Direct mapped status read from: calc_mem_addr(ETH_SHM_CTRL_STATUS)
-                        // System memory controller provides packet status at the calculated address
-                        status_flags <= 32'h01000002; // Test pattern - system memory overrides this
-                    end
-                endcase
-                end
-            end
-
-            MEM_READ_FLAGS: begin
-                // Handle control flags from memory
-                // Check for reset request (ETH_SHM_FLAG_RESET = 0x0001)
-                // Only reset if no register write is happening
-                if (status_flags[0] && !(sel_ethernet && cpu_wr && is_register_access)) begin
-                    // Reset requested - trigger local reset
-                    cr_register <= 8'h21;      // Reset to stop state
-                    remote_dma_addr <= 16'h0000;
-                    remote_byte_count <= 16'h0000;
-                    isr_register <= 8'h00;         // Clear all interrupt status bits
-                end
-
-                // Check for TX request (ETH_SHM_FLAG_TX_REQ = 0x0002)
-                if (status_flags[1]) begin
-                    // TX request - set PTX interrupt
-                    isr_register <= isr_register | ISR_PTX;  // Set Packet Transmitted bit
-                end
-
-                // Check for RX available (ETH_SHM_FLAG_RX_AVAIL = 0x0004)
-                if (status_flags[2]) begin
-                    // RX packet available - set PRX interrupt
-                    isr_register <= isr_register | ISR_PRX;  // Set Packet Received bit
-                end
-
-                // Check for IRQ flag (ETH_SHM_FLAG_IRQ = 0x0008)
-                if (status_flags[3]) begin
-                    // Generic IRQ - could be error or other condition
-                    isr_register <= isr_register | ISR_RXE;  // Set as receive error for now
-                end
-
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_REG_READ: begin
-                // Read register value from shared memory
-                if (!mem_transaction_busy) begin
-                    // Setup memory read transaction for register
-                    mem_transaction_addr <= eth_shared_base + ETH_SHM_CTRL_REGS + {11'h000, register_select[4:0]};
-                    mem_transaction_rd <= 1'b1;
-                    mem_transaction_busy <= 1'b1;
-                    
-                    $display("MEM_REG_READ: Reading register 0x%02x from shared memory at 0x%08x", 
-                            register_select[4:0], eth_shared_base + ETH_SHM_CTRL_REGS + {11'h000, register_select[4:0]});
-                    
-                    // Move to wait state
-                    mem_state <= MEM_WAIT_COMPLETE;
-                end
-            end
-
-            MEM_REG_WRITE: begin
-                // Write register value to shared memory
-                if (!mem_transaction_busy) begin
-                    // Setup memory write transaction for register
-                    mem_transaction_addr <= eth_shared_base + ETH_SHM_CTRL_REGS + {11'h000, register_select[4:0]};
-                    mem_transaction_data <= cpu_data_in;  // Data to write
-                    mem_transaction_wr <= 1'b1;
-                    mem_transaction_busy <= 1'b1;
-                    
-                    $display("MEM_REG_WRITE: Writing register 0x%02x = 0x%04x to shared memory at 0x%08x", 
-                            register_select[4:0], cpu_data_in, eth_shared_base + ETH_SHM_CTRL_REGS + {11'h000, register_select[4:0]});
-                    
-                    // Move to wait state
-                    mem_state <= MEM_WAIT_COMPLETE;
-                end
-            end
-
-            MEM_READ_HEARTBEAT: begin
-                // Update heartbeat and check signature
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_PACKET_STATUS: begin
-                // Read packet status and statistics from shared memory
-
-                // Update packet counters
-                packet_count_rx <= status_flags[15:0];
-                packet_count_tx <= status_flags[31:16];
-
-                // Update link status
-                link_status <= status_flags[24];
-
-                // Check for new packets or status changes
-                if (status_flags[25]) begin  // New RX packet available
-                    isr_register <= isr_register | ISR_PRX;  // Set Packet Received bit
-                end
-                if (status_flags[26]) begin  // TX completed
-                    isr_register <= isr_register | ISR_PTX;  // Set Packet Transmitted bit
-                end
-
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_WRITE_FLAGS: begin
-                // Write updated control flags back to shared memory using transaction
-                if (!mem_transaction_busy) begin
-                    // Setup memory write transaction for control flags
-                    mem_transaction_addr <= eth_shared_base + ETH_SHM_CTRL_FLAGS;  // 0xEA1000
-                    mem_transaction_data <= status_flags[15:0];  // Lower 16 bits first
-                    mem_transaction_wr <= 1'b1;
-                    mem_transaction_busy <= 1'b1;
-                    
-                    $display("Starting memory write transaction for control flags: 0x%04x at address 0x%08x", 
-                            status_flags[15:0], eth_shared_base + ETH_SHM_CTRL_FLAGS);
-                    
-                    // Clear the write pending flag
-                    flags_write_pending <= 1'b0;
-                    
-                    // Move to wait state
-                    mem_state <= MEM_WAIT_COMPLETE;
-                end
-            end
-
-            MEM_DATA_PORT_READ: begin
-                // Read packet data from NE2000 memory using transaction
-                if (!mem_transaction_busy) begin
-                    // Setup memory read transaction
-                    read_addr <= remote_dma_addr - 16'd2;  // Use previous DMA address
-                    mem_transaction_addr <= eth_shared_base + ETH_SHM_NE_MEMORY + (remote_dma_addr - 16'd2);
-                    mem_transaction_rd <= 1'b1;
-                    mem_transaction_busy <= 1'b1;
-                    
-                    $display("Starting memory read transaction from NE2000 memory at offset 0x%04x", 
-                            read_addr);
-                    
-                    // Move to wait state
-                    mem_state <= MEM_WAIT_COMPLETE;
-                end
-            end
-
-            MEM_DATA_PORT_WRITE: begin
-                // Write data to NE2000 memory via data port using transaction
-                if (!mem_transaction_busy) begin
-                    // Setup memory write transaction
-                    mem_transaction_addr <= eth_shared_base + ETH_SHM_NE_MEMORY + remote_dma_addr;
-                    mem_transaction_data <= cpu_data_in;  // Data to write
-                    mem_transaction_wr <= 1'b1;
-                    mem_transaction_busy <= 1'b1;
-                    
-                    $display("Starting memory write transaction to NE2000 memory at offset 0x%04x", 
-                            remote_dma_addr);
-                    
-                    // Move to wait state
-                    mem_state <= MEM_WAIT_COMPLETE;
-                end
-            end
-
-            MEM_RX_BUFFER_READ: begin
-                // Read data from RX buffer using transaction
-                if (!mem_transaction_busy) begin
-                    // Setup memory read transaction for RX buffer
-                    mem_transaction_addr <= eth_shared_base + ETH_SHM_RX_BUFFER + rx_buffer_addr;
-                    mem_transaction_rd <= 1'b1;
-                    mem_transaction_busy <= 1'b1;
-                    
-                    $display("MEM_RX_BUFFER_READ: Reading from RX buffer at offset 0x%04x", 
-                            rx_buffer_addr);
-                    
-                    // Move to wait state
-                    mem_state <= MEM_WAIT_COMPLETE;
-                end
-            end
-
-            MEM_RX_BUFFER_WRITE: begin
-                // Write data to RX buffer using transaction
-                if (!mem_transaction_busy) begin
-                    // Setup memory write transaction for RX buffer
-                    mem_transaction_addr <= eth_shared_base + ETH_SHM_RX_BUFFER + rx_buffer_addr;
-                    mem_transaction_data <= mem_transaction_data; // Data set by caller
-                    mem_transaction_wr <= 1'b1;
-                    mem_transaction_busy <= 1'b1;
-                    
-                    $display("MEM_RX_BUFFER_WRITE: Writing 0x%04x to RX buffer at offset 0x%04x", 
-                            mem_transaction_data, rx_buffer_addr);
-                    
-                    // Move to wait state
-                    mem_state <= MEM_WAIT_COMPLETE;
-                end
-            end
-
-            MEM_TX_BUFFER_READ: begin
-                // Read data from TX buffer using transaction
-                if (!mem_transaction_busy) begin
-                    // Setup memory read transaction for TX buffer
-                    mem_transaction_addr <= eth_shared_base + ETH_SHM_TX_BUFFER + tx_buffer_addr;
-                    mem_transaction_rd <= 1'b1;
-                    mem_transaction_busy <= 1'b1;
-                    
-                    $display("MEM_TX_BUFFER_READ: Reading from TX buffer at offset 0x%04x", 
-                            tx_buffer_addr);
-                    
-                    // Move to wait state
-                    mem_state <= MEM_WAIT_COMPLETE;
-                end
-            end
-
-            MEM_TX_BUFFER_WRITE: begin
-                // Write data to TX buffer using transaction
-                if (!mem_transaction_busy) begin
-                    // Setup memory write transaction for TX buffer
-                    mem_transaction_addr <= eth_shared_base + ETH_SHM_TX_BUFFER + tx_buffer_addr;
-                    mem_transaction_data <= mem_transaction_data; // Data set by caller
-                    mem_transaction_wr <= 1'b1;
-                    mem_transaction_busy <= 1'b1;
-                    
-                    $display("MEM_TX_BUFFER_WRITE: Writing 0x%04x to TX buffer at offset 0x%04x", 
-                            mem_transaction_data, tx_buffer_addr);
-                    
-                    // Move to wait state
-                    mem_state <= MEM_WAIT_COMPLETE;
-                end
-            end
-
-            MEM_READ_SIGNATURE: begin
-                // Read HPS signature (0xCAFEBABE) for validation
-                // Address: eth_shared_base + ETH_SHM_HPS_SIGNATURE (0xEA108C)
-                sig_addr <= eth_shared_base + ETH_SHM_HPS_SIGNATURE;
-                
-                // Read signature from shared memory
-                // In real implementation, this would validate HPS is responding
-                $display("MEM_READ_SIGNATURE: Reading signature from 0x%08x", sig_addr);
-                
-                // Set link status based on signature validation
-                link_status <= 1'b1;  // Assume signature is valid
-                
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_WRITE_PACKET_INFO: begin
-                // Write packet metadata to shared memory
-                // Address: eth_shared_base + ETH_SHM_PACKET_INFO
-                info_addr <= eth_shared_base + ETH_SHM_PACKET_INFO;
-                
-                $display("MEM_WRITE_PACKET_INFO: Writing packet info to 0x%08x", info_addr);
-                // Write packet length, count, status to shared memory
-                
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_READ_MAC_ADDR: begin
-                // Read MAC address from shared memory
-                // Address: eth_shared_base + ETH_SHM_CTRL_MAC (0xEA1024)
-                mac_addr <= eth_shared_base + ETH_SHM_CTRL_MAC;
-                
-                $display("MEM_READ_MAC_ADDR: Reading MAC address from 0x%08x", mac_addr);
-                // Read 6-byte MAC address from shared memory
-                
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_WRITE_STATS: begin
-                // Write statistics to shared memory
-                // Address: eth_shared_base + ETH_SHM_CTRL_STATS (0xEA102C)
-                stats_addr <= eth_shared_base + ETH_SHM_CTRL_STATS;
-                
-                $display("MEM_WRITE_STATS: Writing statistics to 0x%08x", stats_addr);
-                // Write packet counts, error counts to shared memory
-                
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_WAIT_COMPLETE: begin
-                // Wait for memory operation to complete with timeout
-                $display("MEM_WAIT_COMPLETE: Waiting for memory operation at 0x%08x (timeout=%d)", 
-                        mem_transaction_addr, mem_transaction_timeout);
-                
-                // Increment timeout counter
-                mem_transaction_timeout <= mem_transaction_timeout + 1;
-                
-                // Check for timeout (1000 cycles = ~20µs at 50MHz)
-                if (mem_transaction_timeout > 16'd1000) begin
-                    $display("WARNING: Memory transaction timeout at address 0x%08x", mem_transaction_addr);
-                    // Force transaction completion and return to idle
-                    mem_transaction_rd <= 1'b0;
-                    mem_transaction_wr <= 1'b0;
-                    mem_transaction_busy <= 1'b0;
-                    mem_transaction_timeout <= 16'h0000;
-                    mem_state <= MEM_ERROR;
-                end else if (mem_transaction_rd) begin
-                    // Complete read transaction - capture data from ram_data_in
-                    if (register_read_pending) begin
-                        register_read_data <= ram_data_in;
-                        $display("Register read completed: captured data = 0x%04x from address 0x%08x", 
-                                ram_data_in, mem_transaction_addr);
+            end else begin
+                if (!eth_dma_write) begin
+                    if (data_port_word_mode) begin
+                        data_port_read_data <= eth_dma_rdata;
+                    end else if (data_port_byte_addr[0]) begin
+                        data_port_read_data <= {eth_dma_rdata[7:0], 8'h00};
                     end else begin
-                        data_port_read_data <= ram_data_in;
-                        $display("Data port read completed: captured data = 0x%04x from address 0x%08x", 
-                                ram_data_in, mem_transaction_addr);
+                        data_port_read_data <= {eth_dma_rdata[15:8], 8'h00};
                     end
-                end else if (mem_transaction_wr) begin
-                    // Complete write transaction
-                    $display("Memory write completed: data = 0x%04x to address 0x%08x", 
-                            mem_transaction_data, mem_transaction_addr);
                 end
-                
-                // Clear transaction flags and return to idle
-                mem_transaction_rd <= 1'b0;
-                mem_transaction_wr <= 1'b0;
-                mem_transaction_busy <= 1'b0;
-                mem_transaction_timeout <= 16'h0000;  // Reset timeout counter
-                mem_state <= MEM_IDLE;
-            end
 
-            MEM_ERROR: begin
-                // Error state - something went wrong with memory access
-                $display("MEM_ERROR: Memory access error occurred");
-                
-                // Reset to idle and clear error conditions
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_RESET_PENDING: begin
-                // Handle ethernet controller reset
-                $display("MEM_RESET_PENDING: Processing ethernet reset");
-                
-                // Reset all ethernet registers to default values
-                // Only reset if no register write is happening
-                if (!(sel_ethernet && cpu_wr && is_register_access)) begin
-                    cr_register <= 8'h21;              // Reset to stop state
-                    remote_dma_addr <= 16'h0000;
-                    remote_byte_count <= 16'h0000;
-                    isr_register <= 8'h80;             // Set reset status bit
-                    imr_register <= 8'h00;             // Disable all interrupts
-                    
-                    // Clear packet counters
-                    packet_count_rx <= 16'h0000;
-                    packet_count_tx <= 16'h0000;
-                    
-                    // Reset buffer addresses
-                    rx_buffer_addr <= 16'h0000;
-                    tx_buffer_addr <= 16'h0000;
-                end
-                
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_IRQ_PROCESS: begin
-                // Process interrupt request logic
-                $display("MEM_IRQ_PROCESS: Processing interrupt logic");
-                
-                // Update interrupt status based on current conditions
-                if (packet_count_rx > 0) begin
-                    isr_register <= isr_register | ISR_PRX;  // Packet received
-                end
-                if (remote_byte_count == 0 && remote_dma_addr > 0) begin
-                    isr_register <= isr_register | ISR_RDC;  // Remote DMA complete
-                end
-                
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_CONFIG_UPDATE: begin
-                // Update configuration registers from shared memory
-                $display("MEM_CONFIG_UPDATE: Updating configuration from shared memory");
-                
-                // Read configuration from shared memory and update local registers
-                // This would involve reading from ETH_SHM_CTRL_REGS area
-                
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_STATUS_CHECK: begin
-                // Check overall ethernet status
-                $display("MEM_STATUS_CHECK: Checking ethernet status");
-                
-                // Update link status based on heartbeat
-                if (packet_count_rx[3:0] == 4'hF) begin  // Use counter as heartbeat indicator
-                    link_status <= 1'b1;
-                end else if (packet_count_rx[3:0] == 4'h0) begin
-                    link_status <= 1'b0;
-                end
-                
-                // Update status flags
-                status_flags[24] <= link_status;        // Link status bit
-                status_flags[23:16] <= isr_register;    // Interrupt status
-                
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_BUFFER_FLUSH: begin
-                // Flush TX/RX buffers
-                $display("MEM_BUFFER_FLUSH: Flushing ethernet buffers");
-                
-                // Reset buffer pointers and clear pending data
-                rx_buffer_addr <= 16'h0000;
-                tx_buffer_addr <= 16'h0000;
-                rx_packet_length <= 16'h0000;
-                tx_packet_length <= 16'h0000;
-                
-                // Buffer operations handled by memory state machine
-                
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_LINK_CHECK: begin
-                // Check ethernet link status
-                $display("MEM_LINK_CHECK: Checking ethernet link");
-                
-                // Simulate link check by reading heartbeat counter
-                // In real implementation, this would check PHY status
-                if (status_flags[31:28] == 4'hC) begin  // Magic pattern indicates HPS alive
-                    link_status <= 1'b1;
+                if (data_port_word_mode) begin
+                    remote_dma_addr <= data_port_byte_addr + 16'h0002;
+                    if (remote_byte_count > 16'h0002) begin
+                        remote_byte_count <= remote_byte_count - 16'h0002;
+                    end else begin
+                        remote_byte_count <= 16'h0000;
+                        isr_register <= isr_register | ISR_RDC;
+                        if (rx_poll_enabled || shm_sync_enabled || tx_request_pending) begin
+                            shm_sync_enabled <= 1'b1;
+                            bg_sync_slot <= 6'd0;
+                        end
+                    end
                 end else begin
-                    link_status <= 1'b0;
+                    remote_dma_addr <= data_port_byte_addr + 16'h0001;
+                    if (remote_byte_count > 16'h0001) begin
+                        remote_byte_count <= remote_byte_count - 16'h0001;
+                    end else begin
+                        remote_byte_count <= 16'h0000;
+                        isr_register <= isr_register | ISR_RDC;
+                        if (rx_poll_enabled || shm_sync_enabled || tx_request_pending) begin
+                            shm_sync_enabled <= 1'b1;
+                            bg_sync_slot <= 6'd0;
+                        end
+                    end
                 end
-                
-                mem_state <= MEM_IDLE;
+
+                eth_dma_req <= 1'b0;
+                data_port_transfer_done <= 1'b1;
             end
+        end
 
-            MEM_STATS_UPDATE: begin
-                // Update packet statistics
-                $display("MEM_STATS_UPDATE: Updating packet statistics");
-                
-                // Update counters based on current activity
-                if (|(isr_register & ISR_PTX)) begin
-                    packet_count_tx <= packet_count_tx + 1;
+        if (sel_ethernet && cpu_wr && is_data_port_access &&
+            !data_port_write_pending && !data_port_read_pending && !eth_dma_req) begin
+            if (~cpu_uds || ~cpu_lds) begin
+                data_port_write_pending <= 1'b1;
+                data_port_transfer_done <= 1'b0;
+                data_port_word_mode <= dcr_word_mode;
+                data_port_byte_addr <= remote_dma_addr;
+                eth_dma_req <= 1'b1;
+                eth_dma_write <= 1'b1;
+                eth_dma_addr <= ETH_SHM_NE_MEMORY[15:1] + remote_dma_local_word_offset;
+
+                if (dcr_word_mode) begin
+                    eth_dma_wdata <= cpu_data_in;
+                    eth_dma_uds <= 1'b0;
+                    eth_dma_lds <= 1'b0;
+                end else begin
+                    eth_dma_wdata <= remote_dma_addr[0] ? {8'h00, (~cpu_uds ? cpu_data_in[15:8] : cpu_data_in[7:0])}
+                                                       : {(~cpu_uds ? cpu_data_in[15:8] : cpu_data_in[7:0]), 8'h00};
+                    eth_dma_uds <= remote_dma_addr[0] ? 1'b1 : 1'b0;
+                    eth_dma_lds <= remote_dma_addr[0] ? 1'b0 : 1'b1;
                 end
-                if (|(isr_register & ISR_PRX)) begin
-                    packet_count_rx <= packet_count_rx + 1;
-                end
-                
-                mem_state <= MEM_IDLE;
             end
+        end else if (sel_ethernet && cpu_rd && is_data_port_access &&
+                     !data_port_read_pending && !data_port_write_pending && !eth_dma_req) begin
+            data_port_read_pending <= 1'b1;
+            data_port_transfer_done <= 1'b0;
+            data_port_word_mode <= dcr_word_mode;
+            data_port_byte_addr <= remote_dma_addr;
+            eth_dma_req <= 1'b1;
+            eth_dma_write <= 1'b0;
+            eth_dma_addr <= ETH_SHM_NE_MEMORY[15:1] + remote_dma_local_word_offset;
+            eth_dma_wdata <= 16'h0000;
+            eth_dma_uds <= remote_dma_addr[0] ? 1'b1 : 1'b0;
+            eth_dma_lds <= remote_dma_addr[0] ? 1'b0 : 1'b1;
+        end
 
-            MEM_DEBUG_LOG: begin
-                // Log debug information
-                $display("MEM_DEBUG_LOG: CR=0x%02x ISR=0x%02x IMR=0x%02x", 
-                        cr_register, isr_register, imr_register);
-                $display("  RX_COUNT=%d TX_COUNT=%d LINK=%b", 
-                        packet_count_rx, packet_count_tx, link_status);
-                $display("  DMA_ADDR=0x%04x DMA_COUNT=%d", 
-                        remote_dma_addr, remote_byte_count);
-                
-                mem_state <= MEM_IDLE;
-            end
-
-            MEM_CLEANUP: begin
-                // Cleanup operations
-                $display("MEM_CLEANUP: Performing cleanup operations");
-                
-                // Clear completed interrupt status bits
-                if (|(isr_register & ISR_RDC)) begin
-                    isr_register <= isr_register & ~ISR_RDC;  // Clear RDC bit
-                end
-                if (|(isr_register & ISR_PTX)) begin
-                    isr_register <= isr_register & ~ISR_PTX;  // Clear PTX bit  
-                end
-                
-                // Clear transaction busy flags if stuck
-                if (mem_transaction_busy && !mem_transaction_rd && !mem_transaction_wr) begin
-                    mem_transaction_busy <= 1'b0;
-                end
-                
-                mem_state <= MEM_IDLE;
-            end
-
-            default: mem_state <= MEM_IDLE;
-        endcase
-
-        // Clear pending flags when bus cycles complete
-        if (!sel_ethernet_shm || !cpu_rd) begin
+        if (!sel_ethernet || !is_data_port_access || !cpu_rd) begin
             data_port_read_pending <= 1'b0;
-            memory_read_pending <= 1'b0;
-            control_read_pending <= 1'b0;
+            if (!cpu_rd) begin
+                data_port_transfer_done <= 1'b0;
+            end
         end
-        
-        if (!sel_ethernet || !cpu_rd) begin
-            register_read_pending <= 1'b0;
-        end
-        
-        if (!sel_ethernet || !cpu_wr) begin
+
+        if (!sel_ethernet || !is_data_port_access || !cpu_wr) begin
             data_port_write_pending <= 1'b0;
-        end
-        
-        if (!sel_ethernet || !cpu_wr) begin
-            register_write_pending <= 1'b0;
+            if (!cpu_wr) begin
+                data_port_transfer_done <= 1'b0;
+            end
         end
 
-        // Handle register writes - HIGHEST PRIORITY (executes last to override any conflicts)
-        // Force evaluation using blocking assignments to avoid race conditions
-        $display("REACHED END OF ALWAYS BLOCK: time=%0t", $time);
-        $display("  Input signals: sel=%b, wr=%b, uds=%b", sel_ethernet_shm, cpu_wr, cpu_uds);
-        $display("  Derived: is_reg=%b, addr=0x%06x", is_register_access, cpu_addr);
-        $display("  Direct inputs: cpu_wr=%b, sel_ethernet_shm=%b", cpu_wr, sel_ethernet_shm);
-        
+        if (bg_state == BG_IDLE) begin
+            if (!debug_bg_disable && receiver_active && (bg_poll_counter != 8'h00)) begin
+                bg_poll_counter <= bg_poll_counter - 8'h01;
+            end
+            if (!debug_bg_disable &&
+                !eth_dma_req &&
+                !(sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr))) begin
+                if (((shm_sync_enabled || tx_request_pending) &&
+                     (mirrored_fpga_flags != fpga_owned_flags)) ||
+                    (tx_request_pending &&
+                     ((mirrored_fpga_flags & ETH_FLAG_TX_REQ) != 16'h0000)) ||
+                    (receiver_active && (bg_poll_counter == 8'h00))) begin
+                    bg_polling_rx_flags <= receiver_active && (bg_poll_counter == 8'h00);
+                    bg_clear_rx_avail <= 1'b0;
+                    bg_state <= BG_READ_FLAGS_REQ;
+                end else if (shm_sync_enabled) begin
+                    bg_state <= BG_SYNC_WORD_REQ;
+                end
+            end
+        end else if (debug_bg_disable && !eth_dma_req && !bg_dma_inflight &&
+                     !(sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr))) begin
+            bg_state <= BG_IDLE;
+            bg_polling_rx_flags <= 1'b0;
+            bg_clear_rx_avail <= 1'b0;
+            bg_poll_counter <= BG_POLL_RELOAD;
+        end else if (!eth_dma_req && !bg_dma_inflight &&
+                     !(sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr))) begin
+            case (bg_state)
+                BG_READ_FLAGS_REQ: begin
+                    eth_dma_req <= 1'b1;
+                    eth_dma_write <= 1'b0;
+                    eth_dma_addr <= bg_flags_word_addr;
+                    eth_dma_wdata <= 16'h0000;
+                    eth_dma_uds <= 1'b0;
+                    eth_dma_lds <= 1'b0;
+                    bg_dma_inflight <= 1'b1;
+                    bg_state <= BG_READ_FLAGS_WAIT;
+                end
 
+                BG_READ_RX_LEN_REQ: begin
+                    eth_dma_req <= 1'b1;
+                    eth_dma_write <= 1'b0;
+                    eth_dma_addr <= bg_rx_len_word_addr;
+                    eth_dma_wdata <= 16'h0000;
+                    eth_dma_uds <= 1'b0;
+                    eth_dma_lds <= 1'b0;
+                    bg_dma_inflight <= 1'b1;
+                    bg_state <= BG_READ_RX_LEN_WAIT;
+                end
+
+                BG_WRITE_HDR0_REQ: begin
+                    eth_dma_req <= 1'b1;
+                    eth_dma_write <= 1'b1;
+                    eth_dma_addr <= bg_hdr0_word_addr;
+                    eth_dma_wdata <= {RSR_PRX, bg_rx_next_page};
+                    eth_dma_uds <= 1'b0;
+                    eth_dma_lds <= 1'b0;
+                    bg_dma_inflight <= 1'b1;
+                    bg_state <= BG_WRITE_HDR0_WAIT;
+                end
+
+                BG_WRITE_HDR1_REQ: begin
+                    eth_dma_req <= 1'b1;
+                    eth_dma_write <= 1'b1;
+                    eth_dma_addr <= bg_hdr1_word_addr;
+                    eth_dma_wdata <= {bg_rx_total_length[7:0], bg_rx_total_length[15:8]};
+                    eth_dma_uds <= 1'b0;
+                    eth_dma_lds <= 1'b0;
+                    bg_dma_inflight <= 1'b1;
+                    bg_state <= BG_WRITE_HDR1_WAIT;
+                end
+
+                BG_READ_PAYLOAD_REQ: begin
+                    eth_dma_req <= 1'b1;
+                    eth_dma_write <= 1'b0;
+                    eth_dma_addr <= bg_payload_src_word_addr;
+                    eth_dma_wdata <= 16'h0000;
+                    eth_dma_uds <= 1'b0;
+                    eth_dma_lds <= 1'b0;
+                    bg_dma_inflight <= 1'b1;
+                    bg_state <= BG_READ_PAYLOAD_WAIT;
+                end
+
+                BG_WRITE_PAYLOAD_REQ: begin
+                    eth_dma_req <= 1'b1;
+                    eth_dma_write <= 1'b1;
+                    eth_dma_addr <= bg_payload_dst_word_addr;
+                    if (bg_rx_bytes_remaining > 16'h0001) begin
+                        eth_dma_wdata <= bg_source_word;
+                        eth_dma_uds <= 1'b0;
+                        eth_dma_lds <= 1'b0;
+                    end else begin
+                        eth_dma_wdata <= {bg_source_word[15:8], 8'h00};
+                        eth_dma_uds <= 1'b0;
+                        eth_dma_lds <= 1'b1;
+                    end
+                    bg_dma_inflight <= 1'b1;
+                    bg_state <= BG_WRITE_PAYLOAD_WAIT;
+                end
+
+                BG_CLEAR_FLAG_REQ: begin
+                    eth_dma_req <= 1'b1;
+                    eth_dma_write <= 1'b1;
+                    eth_dma_addr <= bg_flags_word_addr;
+                    eth_dma_wdata <= {bg_flags_write_word[7:0], bg_flags_write_word[15:8]};
+                    eth_dma_uds <= 1'b0;
+                    eth_dma_lds <= 1'b0;
+                    bg_dma_inflight <= 1'b1;
+                    bg_state <= BG_CLEAR_FLAG_WAIT;
+                end
+
+                BG_SYNC_WORD_REQ: begin
+                    eth_dma_req <= 1'b1;
+                    eth_dma_write <= 1'b1;
+                    eth_dma_addr <= sync_slot_word_addr(bg_sync_slot);
+                    eth_dma_wdata <= sync_slot_wdata(bg_sync_slot);
+                    eth_dma_uds <= 1'b0;
+                    eth_dma_lds <= 1'b0;
+                    bg_dma_inflight <= 1'b1;
+                    bg_state <= BG_SYNC_WORD_WAIT;
+                end
+
+                default: begin
+                    bg_state <= BG_IDLE;
+                    bg_poll_counter <= BG_POLL_RELOAD;
+                end
+            endcase
+        end
+
+        eth_irq <= |(isr_register & imr_register);
     end
-
-    // Generate eth_irq based on ISR and IMR (proper NE2000 behavior)
-    // eth_irq is asserted when any enabled interrupt is pending
-    // This handles both reset (when ISR/IMR are 0) and normal operation
-    eth_irq <= |(isr_register & imr_register);
 end
 
-// Address decode logic - use [23:1] word address format  
-// Address decode logic for ethernet interface
+// Address decode logic for the local 64KB ethernet aperture.
 wire [15:0] effective_addr;
 wire [15:0] byte_addr;
 
-// Extract offset within ethernet address space  
-// cpu_addr is [23:1] word addressing
-// For ethernet space, we need to calculate the offset from ethernet base
-// cpu_addr contains the full word address, we need to subtract the ethernet base word address
-wire [23:1] ethernet_base_word = {ethernet_base, 15'h0000}; 
-wire [15:0] word_offset = cpu_addr - ethernet_base_word;
-assign effective_addr = word_offset;  // Word offset within 64KB space
+assign effective_addr = {1'b0, cpu_addr};
 assign byte_addr = effective_addr << 1;  // Convert to byte address
 
 
@@ -1354,38 +1144,11 @@ assign is_data_port_access = (byte_addr == 16'h0C40);
 // Removed 0xEA1600 range for simplification
 assign is_register_access = ((byte_addr >= 16'h0C00) && (byte_addr <= 16'h0C3F));
 
-// Memory ranges using byte addresses - only active when sel_ethernet_shm is true
-assign is_memory_access = sel_ethernet_shm && (byte_addr >= 16'h3000) && (byte_addr <= 16'h6FFF);
-assign is_control_access = sel_ethernet_shm && (byte_addr >= 16'h1000) && (byte_addr <= 16'h1FFF);
-// Buffer access removed - use data port with Remote DMA instead
-
-// Create word_addr for backward compatibility
-wire [15:0] word_addr;
-assign word_addr = effective_addr;
-
 // Convert word offset to register number for 0xC00 range only
-// Use always block to avoid bit slicing issues in Verilator
-reg [15:0] reg_offset_0c00;
 reg [4:0] reg_index_0c00;
 
 always @(*) begin
-    reg_offset_0c00 = byte_addr - 16'h0C00;
-    
-    // Calculate register index with masking instead of bit slicing
-    // For 0xC00 range: 4-byte spacing (divide by 4)
-    reg_index_0c00 = (reg_offset_0c00 >> 2) & 5'h1F;
-    
-    // Debug output for address calculation
-    if (sel_ethernet && cpu_rd && is_register_access) begin
-        $display("Addr calc: cpu_addr=0x%06x, byte_addr=0x%04x, offset=0x%04x, reg_idx=%d", 
-                {cpu_addr, 1'b0}, byte_addr, reg_offset_0c00, reg_index_0c00);
-    end
-    
-    // Debug signal states for troubleshooting when registers read as 0x00
-    if (cpu_rd && (byte_addr >= 16'h0C00) && (byte_addr <= 16'h0C3F)) begin
-        $display("Register read debug: addr=0x%06x, sel_eth=%b, cpu_rd=%b, is_reg=%b, byte_addr=0x%04x", 
-                {cpu_addr, 1'b0}, sel_ethernet, cpu_rd, is_register_access, byte_addr);
-    end
+    reg_index_0c00 = byte_addr[6:2];
 end
 
 assign register_select = is_data_port_access ? 5'd16 :          // Data port
@@ -1397,13 +1160,10 @@ always @(*) begin
     // Default outputs
     cpu_data_out = 16'h0000;
 
-    // Handle ethernet register and data port access
-    if (sel_ethernet && cpu_rd) begin
+    // Handle ethernet register and data port access - ONLY if handled locally by FPGA
+    if (sel_ethernet && cpu_rd && !sel_ethernet_shm) begin
         if (is_data_port_access) begin
-            // Data port reads - return data from shared memory
-            // Only return valid data after the second cycle when data has been captured
             cpu_data_out = data_port_read_data;
-            $display("Data port read: returning 0x%04x (pending=%b)", data_port_read_data, data_port_read_pending);
         end
         else if (is_register_access) begin
             // Register reads - always handle register reads regardless of address translation
@@ -1413,60 +1173,59 @@ always @(*) begin
                     // Register 0x00: CR - Command Register
                     5'h00: begin
                         cpu_data_out = {cr_register, 8'h00};
-                        $display("CR Read: cr_reg=0x%02x, page=%d, output=0x%04x", cr_register, current_page, cpu_data_out);
                     end
 
                     // Register 0x01: CLDA0/PAR0 - Current Local DMA Address 0 or Physical Address Register 0
                     5'h01: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {8'h40, 8'h00};            // CLDA0
-                            2'b01: cpu_data_out = {8'h00, 8'h00};            // PAR0
-                            default: cpu_data_out = {8'h00, 8'h00};
+                            2'b00: cpu_data_out = {pstart_register, 8'h00};  // Simplified CLDA0/PSTART view
+                            2'b01: cpu_data_out = {par_registers[0], 8'h00}; // PAR0
+                            default: cpu_data_out = {pstart_register, 8'h00};
                         endcase
                     end
 
                     // Register 0x02: CLDA1/PAR1 - Current Local DMA Address 1 or Physical Address Register 1
                     5'h02: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {8'h00, 8'h00};            // CLDA1
-                            2'b01: cpu_data_out = {8'h00, 8'h00};            // PAR1
-                            default: cpu_data_out = {8'h00, 8'h00};
+                            2'b00: cpu_data_out = {pstop_register, 8'h00};   // Simplified CLDA1/PSTOP view
+                            2'b01: cpu_data_out = {par_registers[1], 8'h00}; // PAR1
+                            default: cpu_data_out = {pstop_register, 8'h00};
                         endcase
                     end
 
                     // Register 0x03: BNRY/PAR2 - Boundary Pointer or Physical Address Register 2
                     5'h03: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {8'h40, 8'h00};            // BNRY
-                            2'b01: cpu_data_out = {8'h00, 8'h00};            // PAR2
-                            default: cpu_data_out = {8'h40, 8'h00};
+                            2'b00: cpu_data_out = {bnry_register, 8'h00};    // BNRY
+                            2'b01: cpu_data_out = {par_registers[2], 8'h00}; // PAR2
+                            default: cpu_data_out = {bnry_register, 8'h00};
                         endcase
                     end
 
                     // Register 0x04: TSR/PAR3 - Transmit Status Register or Physical Address Register 3
                     5'h04: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {8'h00, 8'h00};            // TSR
-                            2'b01: cpu_data_out = {8'h00, 8'h00};            // PAR3
-                            default: cpu_data_out = {8'h00, 8'h00};
+                            2'b00: cpu_data_out = {tsr_register, 8'h00};     // TSR
+                            2'b01: cpu_data_out = {par_registers[3], 8'h00}; // PAR3
+                            default: cpu_data_out = {tsr_register, 8'h00};
                         endcase
                     end
 
                     // Register 0x05: NCR/PAR4 - Number of Collisions Register or Physical Address Register 4
                     5'h05: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {8'h00, 8'h00};            // NCR
-                            2'b01: cpu_data_out = {8'h00, 8'h00};            // PAR4
-                            default: cpu_data_out = {8'h00, 8'h00};
+                            2'b00: cpu_data_out = {tbcr_register[7:0], 8'h00};   // Simplified TBCR0 view
+                            2'b01: cpu_data_out = {par_registers[4], 8'h00};     // PAR4
+                            default: cpu_data_out = {tbcr_register[7:0], 8'h00};
                         endcase
                     end
 
                     // Register 0x06: FIFO/PAR5 - FIFO Register or Physical Address Register 5
                     5'h06: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {8'h00, 8'h00};            // FIFO
-                            2'b01: cpu_data_out = {8'h00, 8'h00};            // PAR5
-                            default: cpu_data_out = {8'h00, 8'h00};
+                            2'b00: cpu_data_out = {tbcr_register[15:8], 8'h00};  // Simplified TBCR1 view
+                            2'b01: cpu_data_out = {par_registers[5], 8'h00};     // PAR5
+                            default: cpu_data_out = {tbcr_register[15:8], 8'h00};
                         endcase
                     end
 
@@ -1474,99 +1233,79 @@ always @(*) begin
                     5'h07: begin
                         case (current_page)
                             2'b00: cpu_data_out = {isr_register, 8'h00};     // ISR - return actual interrupt status
-                            2'b01: cpu_data_out = {8'h40, 8'h00};            // CURR
+                            2'b01: cpu_data_out = {curr_register, 8'h00};    // CURR
                             default: cpu_data_out = {isr_register, 8'h00};
                         endcase
                     end
 
-                    // Register 0x08: CRDA0/TPSR - Current Remote DMA Address 0 or Transmit Page Start Register
+                    // Register 0x08: CRDA0/MAR0 - Current Remote DMA Address 0 or Multicast Address Register 0
                     5'h08: begin
                         case (current_page)
                             2'b00: cpu_data_out = {remote_dma_addr[7:0], 8'h00};  // CRDA0
-                            2'b01: cpu_data_out = {8'h40, 8'h00};                 // TPSR
+                            2'b01: cpu_data_out = {mar_registers[0], 8'h00};      // MAR0
                             default: cpu_data_out = {remote_dma_addr[7:0], 8'h00};
                         endcase
                     end
 
-                    // Register 0x09: CRDA1/MAR0 - Current Remote DMA Address 1 or Multicast Address Register 0
+                    // Register 0x09: CRDA1/MAR1 - Current Remote DMA Address 1 or Multicast Address Register 1
                     5'h09: begin
                         case (current_page)
                             2'b00: cpu_data_out = {remote_dma_addr[15:8], 8'h00}; // CRDA1
-                            2'b01: cpu_data_out = {8'h00, 8'h00};                 // MAR0
+                            2'b01: cpu_data_out = {mar_registers[1], 8'h00};      // MAR1
                             default: cpu_data_out = {remote_dma_addr[15:8], 8'h00};
                         endcase
                     end
 
-                    // Register 0x0A: 8019ID0/RBCR0/MAR1 - RTL8019AS ID0, Remote Byte Count Register 0, or Multicast Address Register 1
+                    // Register 0x0A: 8019ID0/MAR2 - RTL8019AS ID0 or Multicast Address Register 2
                     5'h0A: begin
                         case (current_page)
-                            2'b00: begin
-                                cpu_data_out = {8'h50, 8'h00};                    // RTL8019AS ID0 (read-only)
-                                $display("8019ID0 Read: page=%d, returning 0x50", current_page);
-                            end
-                            2'b01: begin
-                                // RBCR0 (read from shared memory at ETH_SHM_CTRL_REGS + 0x0A)
-                                cpu_data_out = {register_read_data[15:8], 8'h00};   // Use shared memory data
-                                $display("RBCR0 Read: page=%d, returning 0x%02x from shared memory", current_page, register_read_data[15:8]);
-                            end
-                            default: begin
-                                cpu_data_out = {8'h00, 8'h00};                   // MAR1
-                                $display("MAR1 Read: page=%d, returning 0x00", current_page);
-                            end
-                        endcase
-                    end
-
-                    // Register 0x0B: 8019ID1/RBCR1/MAR2 - RTL8019AS ID1, Remote Byte Count Register 1, or Multicast Address Register 2
-                    5'h0B: begin
-                        case (current_page)
-                            2'b00: begin
-                                cpu_data_out = {8'h70, 8'h00};                      // RTL8019AS ID1 (read-only)
-                                $display("8019ID1 Read: page=%d, returning 0x70", current_page);
-                            end
-                            2'b01: begin
-                                // RBCR1 (read from shared memory at ETH_SHM_CTRL_REGS + 0x0B)
-                                cpu_data_out = {register_read_data[15:8], 8'h00};    // Use shared memory data
-                                $display("RBCR1 Read: page=%d, returning 0x%02x from shared memory", current_page, register_read_data[15:8]);
-                            end
-                            default: begin
-                                cpu_data_out = {8'h00, 8'h00};                     // MAR2
-                                $display("MAR2 Read: page=%d, returning 0x00", current_page);
-                            end
-                        endcase
-                    end
-
-                    // Register 0x0C: RSR/MAR3 - Receive Status Register or Multicast Address Register 3
-                    5'h0C: begin
-                        case (current_page)
-                            2'b00: cpu_data_out = {8'h00, 8'h00};                 // RSR
-                            2'b01: cpu_data_out = {8'h00, 8'h00};                 // MAR3
+                            2'b00: cpu_data_out = {8'h50, 8'h00};                // RTL8019AS ID0 (read-only)
+                            2'b01: cpu_data_out = {mar_registers[2], 8'h00};     // MAR2
                             default: cpu_data_out = {8'h00, 8'h00};
                         endcase
                     end
 
-                    // Register 0x0D: CNTR0/MAR4 - Tally Counter 0 or Multicast Address Register 4
+                    // Register 0x0B: 8019ID1/MAR3 - RTL8019AS ID1 or Multicast Address Register 3
+                    5'h0B: begin
+                        case (current_page)
+                            2'b00: cpu_data_out = {8'h70, 8'h00};                 // RTL8019AS ID1 (read-only)
+                            2'b01: cpu_data_out = {mar_registers[3], 8'h00};      // MAR3
+                            default: cpu_data_out = {8'h00, 8'h00};
+                        endcase
+                    end
+
+                    // Register 0x0C: RSR/MAR4 - Receive Status Register or Multicast Address Register 4
+                    5'h0C: begin
+                        case (current_page)
+                            2'b00: cpu_data_out = {rsr_register, 8'h00};          // RSR
+                            2'b01: cpu_data_out = {mar_registers[4], 8'h00};      // MAR4
+                            default: cpu_data_out = {rsr_register, 8'h00};
+                        endcase
+                    end
+
+                    // Register 0x0D: CNTR0/MAR5 - Tally Counter 0 or Multicast Address Register 5
                     5'h0D: begin
                         case (current_page)
                             2'b00: cpu_data_out = {8'h00, 8'h00};                 // CNTR0
-                            2'b01: cpu_data_out = {8'h00, 8'h00};                 // MAR4
+                            2'b01: cpu_data_out = {mar_registers[5], 8'h00};      // MAR5
                             default: cpu_data_out = {8'h00, 8'h00};
                         endcase
                     end
 
-                    // Register 0x0E: DCR/MAR5/CNTR1 - Data Config Register (page 0 write), MAR5 (page 1), or CNTR1 (page 0 read)
+                    // Register 0x0E: CNTR1/MAR6 - Tally Counter 1 or Multicast Address Register 6
                     5'h0E: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {8'h00, 8'h00}; // CNTR1 (read-only in page 0)
-                            2'b01: cpu_data_out = {8'h00, 8'h00}; // MAR5
+                            2'b00: cpu_data_out = {8'h00, 8'h00}; // CNTR1
+                            2'b01: cpu_data_out = {mar_registers[6], 8'h00}; // MAR6
                             default: cpu_data_out = {8'h00, 8'h00};
                         endcase
                     end
 
-                    // Register 0x0F: IMR/MAR6 - Interrupt Mask Register or Multicast Address Register 6
+                    // Register 0x0F: IMR/MAR7 - Interrupt Mask Register or Multicast Address Register 7
                     5'h0F: begin
                         case (current_page)
                             2'b00: cpu_data_out = {imr_register, 8'h00}; // IMR - return actual interrupt mask
-                            2'b01: cpu_data_out = {8'h00, 8'h00};        // MAR6
+                            2'b01: cpu_data_out = {mar_registers[7], 8'h00}; // MAR7
                             default: cpu_data_out = {imr_register, 8'h00};
                         endcase
                     end
@@ -1575,18 +1314,96 @@ always @(*) begin
                 endcase
             end
         end
-    
-    // Handle shared memory space access (0xEA1000-0xEAFFFF and 0xEA3000-0xEA6FFF) - only when not register access
-    // Handle memory and control access reads
-    else if (cpu_rd && (is_memory_access || is_control_access)) begin
-        if (is_memory_access) begin
-            // NE2000 memory read - return data from shared memory
-            cpu_data_out = memory_read_data;
-        end else if (is_control_access) begin
-            // Control read - return data from shared memory
-            cpu_data_out = control_read_data;
-        end
-    end
 end
 
 endmodule
+/* verilator lint_on DECLFILENAME */
+
+/* verilator lint_off UNUSEDPARAM */
+/* verilator lint_off UNUSEDSIGNAL */
+module ethernet_issp
+#(
+    parameter PROBE_WIDTH = 128,
+    parameter SOURCE_WIDTH = 2,
+    parameter INSTANCE_ID = "ETHDBG",
+    parameter SLD_INSTANCE_INDEX = 17
+)
+(
+    input  wire                    clk,
+    input  wire [PROBE_WIDTH-1:0]  probe,
+    output wire [SOURCE_WIDTH-1:0] source
+);
+
+`ifdef ALTERA_RESERVED_QIS
+    altsource_probe altsource_probe_component (
+        .probe(probe),
+        .source(source),
+        .source_clk(clk),
+        .source_ena(1'b1)
+        // synopsys translate_off
+        ,
+        .clr(),
+        .ena(),
+        .ir_in(),
+        .ir_out(),
+        .jtag_state_cdr(),
+        .jtag_state_cir(),
+        .jtag_state_e1dr(),
+        .jtag_state_sdr(),
+        .jtag_state_tlr(),
+        .jtag_state_udr(),
+        .jtag_state_uir(),
+        .raw_tck(),
+        .tdi(),
+        .tdo(),
+        .usr1()
+        // synopsys translate_on
+    );
+    defparam
+        altsource_probe_component.enable_metastability = "NO",
+        altsource_probe_component.instance_id = INSTANCE_ID,
+        altsource_probe_component.probe_width = PROBE_WIDTH,
+        altsource_probe_component.sld_auto_instance_index = "NO",
+        altsource_probe_component.sld_instance_index = SLD_INSTANCE_INDEX,
+        altsource_probe_component.source_initial_value = "0",
+        altsource_probe_component.source_width = SOURCE_WIDTH;
+`elsif SYNTHESIS
+    altsource_probe altsource_probe_component (
+        .probe(probe),
+        .source(source),
+        .source_clk(clk),
+        .source_ena(1'b1)
+        // synopsys translate_off
+        ,
+        .clr(),
+        .ena(),
+        .ir_in(),
+        .ir_out(),
+        .jtag_state_cdr(),
+        .jtag_state_cir(),
+        .jtag_state_e1dr(),
+        .jtag_state_sdr(),
+        .jtag_state_tlr(),
+        .jtag_state_udr(),
+        .jtag_state_uir(),
+        .raw_tck(),
+        .tdi(),
+        .tdo(),
+        .usr1()
+        // synopsys translate_on
+    );
+    defparam
+        altsource_probe_component.enable_metastability = "NO",
+        altsource_probe_component.instance_id = INSTANCE_ID,
+        altsource_probe_component.probe_width = PROBE_WIDTH,
+        altsource_probe_component.sld_auto_instance_index = "NO",
+        altsource_probe_component.sld_instance_index = SLD_INSTANCE_INDEX,
+        altsource_probe_component.source_initial_value = "0",
+        altsource_probe_component.source_width = SOURCE_WIDTH;
+`else
+    assign source = {SOURCE_WIDTH{1'b0}};
+`endif
+
+endmodule
+/* verilator lint_on UNUSEDSIGNAL */
+/* verilator lint_on UNUSEDPARAM */

@@ -88,6 +88,8 @@ assign ramshared    = sel_dd | sel_ethernet_shm;
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
 
 wire sel_z3ram0 = (cpu_addr[31:27] == z3ram_base0) && z3ram_ena0;
+//wire sel_ethernet_shm = (cpu_addr[31:16] == {8'h00, ethernet_base}) && ethernet_ena && 
+//                         (eth_reg_range || eth_data_range || eth_shm_range);
 wire sel_z3ram1 = (cpu_addr[31:28] == z3ram_base1) && z3ram_ena1;
 wire sel_z2ram  = !cpu_addr[31:24] && (cpu_addr[23] ^ |cpu_addr[22:21]) && z2ram_ena; // addr[23:21] = 1..4
 wire sel_zram   = sel_z3ram0 | sel_z3ram1 | sel_z2ram;
@@ -96,10 +98,11 @@ wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
 
 //   Address Decoding:
 
-//   - Register space (0xEA0000-0xEA0FFF): Only sel_ethernet triggers
-//   - Shared memory (0xEA1000-0xEAFFFF): Only sel_ethernet_shm triggers
+// Ethernet uses a 64KB Zorro II I/O aperture:
+//   - Register space (0xEA0000-0xEA0FFF): handled locally by the FPGA
+//   - Shared memory (0xEA1000-0xEAFFFF): routed to DDR-backed shared memory
 //
-//   Note: HPS sees shared memory at 0x28EA1000+, but Amiga side sees 0xEA1000+
+//   HPS sees that same 64KB window at 0x28EA0000-0x28EAFFFF.
 
 //   This aligns with the ethernet module's shared memory layout:
 //   - ETH_SHM_CTRL_FLAGS = 0x1000 (at Amiga 0xEA1000, HPS 0x28EA1000)
@@ -107,10 +110,21 @@ wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
 //   - ETH_SHM_RX_BUFFER = 0x2600 (at Amiga 0xEA2600, HPS 0x28EA2600)
 //   - ETH_SHM_NE_MEMORY = 0x3000 (at Amiga 0xEA3000, HPS 0x28EA3000)
 
-// Ethernet shared memory: excludes only register/data port area (0xEA0C00-0xEA0C41), includes everything else  
-// Covers: 0xEA1000-0xEAFFFF (control structure, buffers, NE2000 memory, etc.)
-assign sel_ethernet_shm = (cpu_addr[31:16] == {8'h00,ethernet_base}) && ethernet_ena && 
-                         !((cpu_addr[15:6] == 10'b0000110000) || (cpu_addr[15:1] == 15'b000011000010000)); // Exclude 0x0C00-0x0C3F and 0x0C40-0x0C41
+wire eth_shm_range = (cpu_addr[15:12] >= 4'h1); // Only 0x1000+ addresses (normal shared memory)
+
+// Ethernet shared memory excludes the local register/data-port window and starts at 0xEA1000.
+assign sel_ethernet_shm = !cpu_addr[31:24] &&
+                          (cpu_addr[23:16] == ethernet_base) && ethernet_ena &&
+                          eth_shm_range;
+
+wire [28:1] eth_shm_ddr_word_addr;
+
+eth_dma_addr_map eth_shm_addr_map
+(
+	.local_word_addr(cpu_addr[15:1]),
+	.ddr_word_addr(eth_shm_ddr_word_addr)
+);
+
 
 // don't sel_kickram when writing
 wire sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx
@@ -123,31 +137,36 @@ wire sel_nmi_vector = (cpu_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
 
 wire [15:0] ramdat;
 
-assign ramlds = sel_rtg ? uds_in : lds_in;
-assign ramuds = sel_rtg ? lds_in : uds_in;
-assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
-assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
+// assign ramlds = sel_rtg ? uds_in : lds_in;
+// assign ramuds = sel_rtg ? lds_in : uds_in;
+// assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
+// assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
-//       Main  DDx  RTG  8M  128M  256M
-//       ----  ---  ---  --  ----  ----
-//        SDR  DDR  RTG  Z2  Z3_0  Z3_1
-// 28      0    0    0   1    0     1
-// 27      0    0    0   1    1     X
-// 26      0    1    1   0    X     X
-// 25-23   0   111  110  0    X     X
+assign ramlds = (sel_rtg | sel_ethernet_shm) ? uds_in : lds_in;
+assign ramuds = (sel_rtg | sel_ethernet_shm) ? lds_in : uds_in;
+assign ramdin = (sel_rtg | sel_ethernet_shm) ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
+assign ramdat = (sel_rtg | sel_ethernet_shm) ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
+
+//       Main  DDx  RTG  ETH  8M  128M  256M
+//       ----  ---  ---  ---  --  ----  ----
+//        SDR  DDR  RTG  DDR  Z2  Z3_0  Z3_1
+// 28      0    0    0    0   1    0     1
+// 27      0    0    0    1   1    1     X
+// 26      0    1    1    0   0    X     X
+// 25-23   0   111  110   0   0    X     X
 // supported configs: SDR + (Z2, Z3_1, Z3_0+Z3_1)
 
 // This is the mapping to the sram
 // map 00-1f to 00-1f (chipram), a0-ff to 20-7f. All non-fastram goes into the first
 // 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v 
 // All Zorro RAM goes to DDR3
-assign ramaddr[28]    = sel_zram & ~sel_z3ram0;
-assign ramaddr[27]    = (sel_zram | sel_ethernet_shm)  & (~sel_z3ram1 | cpu_addr[27]);
-assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1 | sel_ethernet_shm) ? cpu_addr[26:23] : (sel_rtg ? 4'b1110 : {4{sel_dd}});
-assign ramaddr[22:19] = {4{sel_dd}} | cpu_addr[22:19];
-assign ramaddr[18]    =    sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18];
-assign ramaddr[17:16] = {2{sel_dd}} | cpu_addr[17:16];
-assign ramaddr[15:1]  = cpu_addr[15:1];
+assign ramaddr[28]    = sel_ethernet_shm ? eth_shm_ddr_word_addr[28]    : (sel_zram & ~sel_z3ram0);
+assign ramaddr[27]    = sel_ethernet_shm ? eth_shm_ddr_word_addr[27]    : ((sel_zram) & (~sel_z3ram1 | cpu_addr[27]));
+assign ramaddr[26:23] = sel_ethernet_shm ? eth_shm_ddr_word_addr[26:23] : ((sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23] : (sel_rtg ? 4'b1110 : {4{sel_dd}}));
+assign ramaddr[22:19] = sel_ethernet_shm ? eth_shm_ddr_word_addr[22:19] : ({4{sel_dd}} | cpu_addr[22:19]);
+assign ramaddr[18]    = sel_ethernet_shm ? eth_shm_ddr_word_addr[18]    : (sel_dd | (sel_kicklower & bootrom) | cpu_addr[18]);
+assign ramaddr[17:16] = sel_ethernet_shm ? eth_shm_ddr_word_addr[17:16] : ({2{sel_dd}} | cpu_addr[17:16]);
+assign ramaddr[15:1]  = sel_ethernet_shm ? eth_shm_ddr_word_addr[15:1]  : cpu_addr[15:1];
 
 assign fastchip_lds = lds_in;
 assign fastchip_uds = uds_in;
@@ -420,30 +439,14 @@ always @(*) begin
 			default: ;
 		endcase
 	end
-	// Ethernet card (Ariadne II  or X-Surf 100  ne2000 compatible)
+	// Ethernet card in Zorro II I/O space
 	else if(ac_ethernet) begin
 		case (chip_addr[6:1])
-			6'h0: autocfg_data = 4'b1100; // Zorro-II card, no link, no ROM  
-			//6'h0: autocfg_data = 4'b1000;	// Zorro-III card, no mem, no ROM
+			6'h0: autocfg_data = 4'b1100; // Zorro-II card, no link, no ROM
 			6'h1: autocfg_data = 4'b0001; // Next board not related, size 64k
-			// Product ID: 0xCA or 202 decimal (inverted)
-			// 6'h2: autocfg_data = 4'b0011; // 0xc - Product number high nibble (inverted) - 0xC
-			// 6'h3: autocfg_data = 4'b0101; // 0xa - Product number low nibble (inverted) - Product 0xA
-			// //6'h5: autocfg_data = 4'b1101; // logical size 64k
-			// // below Manufacturer ID: 0x0877 or 2167 decimal (inverted)
-			// 6'h8: autocfg_data = 4'b1111; // 0x0
-			// 6'h9: autocfg_data = 4'b0111; // 0x8
-			// 6'ha: autocfg_data = 4'b1000; // 0x7
-			// 6'hb: autocfg_data = 4'b1000; // 0x7
-
-			// X-Surf 100
+			// X-Surf 100 Product ID
 			6'h2: autocfg_data = 4'b1001; //  !6 Upper byte of 0x64
 			6'h3: autocfg_data = 4'b1011; // !4 Lower byte product number
-
-			// X-Surf or X-Surf 2 or X-Surf 3
-			// 6'h2: autocfg_data = 4'b1110; // 0x17
-			// 6'h3: autocfg_data = 4'b1000; // Lower byte product number
-			//6'h5: autocfg_data = 4'b1101; // logical size 64k -- commented out -> logical size == physical size. Issue with KS1.3?
 			6'h5: autocfg_data = 4'b1111; // No size extension
 			6'h8: autocfg_data = 4'b1110; // Manufacturer ID: 0x1212 or 4626
 			6'h9: autocfg_data = 4'b1101;
@@ -467,12 +470,29 @@ always @(*) begin
 			6'b001010: autocfg_data = 4'b0110;
 			6'b001011: autocfg_data = 4'b0011;
 			6'b010011: autocfg_data = {2'b11, ~ac_memcard[1], ac_memcard[1]};	// serial=1/2
+			default: ;
+		endcase
+	end
+	// Zorro III RAM 256MB
+	else if(ac_memcard[1]) begin
+		case (chip_addr[6:1])
+			6'b000000: autocfg_data = 4'b1010;	// Zorro-III card, add mem, no ROM
+			//6'b000001: autocfg_data = ac_memcard[1] ? 4'b0011 : 4'b0100; // 128MB or 256MB, extended
+			6'b000001: autocfg_data = 4'b0100;	// 256MB, extended
+			6'b000010: autocfg_data = 4'b1110;	// ProductID=0x10 (only setting upper nibble)
+			6'b000100: autocfg_data = 4'b0000;	// Memory card, not silenceable, Extended size, reserved.
+			6'b000101: autocfg_data = 4'b1111;	// 0000 - logical size matches physical size TODO change this to 0001, so it is autosized by the OS, WHEN it will be 24MB.
+			6'b001000: autocfg_data = 4'b1110;	// Manufacturer ID: 0x139c
+			6'b001001: autocfg_data = 4'b1100;
+			6'b001010: autocfg_data = 4'b0110;
+			6'b001011: autocfg_data = 4'b0011;
+			6'b010011: autocfg_data = {2'b11, ~ac_memcard[1], ac_memcard[1]};	// serial=1/2
 			  default:;
 		endcase
 	end
 end
 
-// Add ethernet card to autoconfig chain after Toccata - addresses for the ethernet are hardcoded to 0xEA0000 range for now
+// Add Ethernet to the autoconfig chain after Toccata as a Zorro II I/O card.
 wire sel_autoconfig = (chip_addr[23:16] == 8'b11101000) && (ac_memcard || ac_toccata || ac_ethernet); //$E80000 - $E8FFFF
 
 reg       z2ram_ena;
@@ -485,14 +505,15 @@ always @(posedge clk) begin
 	old_uds <= chip_uds;
 
 	if (~reset | ~reset_out) begin
-		ac_memcard  <= cpucfg[1] ? fastramcfg : fastramcfg[2] ? 3'd3 : {1'b0, fastramcfg[1:0]};
+		ac_memcard  <= cpucfg[1] ? fastramcfg : fastramcfg[2] ? 3'd3 : {fastramcfg[2], fastramcfg[1:0]}; // Use original fastramcfg logic
 		ac_toccata  <= 1;
-		ac_ethernet <= 1;  // enable ethernet autoconfig
+		ac_ethernet <= 1;
 		z2ram_ena   <= 0;
 		z3ram_ena0  <= 0;
 		z3ram_ena1  <= 0;
 		z3ram_base0 <= 1;
 		z3ram_base1 <= 1;
+		ethernet_base <= 8'hEA;
 	end
 	else if (sel_autoconfig && ~chip_rw && ~chip_uds && old_uds) begin
 		if(~ac_memcard[2] && ac_memcard[1:0]) begin
@@ -507,9 +528,8 @@ always @(posedge clk) begin
 				ac_toccata<=0;
 			end
 		end
-		// Ethernet with ZII support
+		// Ethernet uses Zorro II I/O autoconfig.
 		else if(ac_ethernet) begin
-			//if(chip_addr[6:1] == 6'b100010) begin // Register 0x44, assign base address to ZIII.
 			if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, Ethernet card in ZII io space ($EA0000)
 				ethernet_base <= cpu_dout[7:0];
 				ac_ethernet <= 0;
@@ -529,6 +549,15 @@ always @(posedge clk) begin
 				end
 			end
 		end
+		else if(ac_memcard[1]) begin
+			if(chip_addr[6:1] == 6'b100010) begin // Register 0x44, assign base address to ZIII RAM.
+				if(~ac_memcard[1]) begin
+					z3ram_base1 <= cpu_dout[15:12]; //256MB chunk
+					z3ram_ena1 <= 1;
+					ac_memcard <= {ac_memcard[0], ac_memcard[0], 1'b0};
+				end
+			end
+		end
 	end
 end
 
@@ -536,6 +565,6 @@ assign toccata_ena = ~ac_toccata;
 assign ethernet_ena = ~ac_ethernet;
 
 // Ethernet interrupt is handled by the ethernet module in minimig.v
-// assign eth_irq = 1'b0;  // Removed - eth_irq is driven by ethernet_interface module
+assign eth_irq = 1'b0;  // Default assignment - actual interrupt is driven externally
 
 endmodule
