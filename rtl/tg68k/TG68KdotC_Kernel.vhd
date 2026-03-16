@@ -403,6 +403,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal TG68_PC_brw		: bit;
 	signal TG68_PC_word		: bit;
 	signal getbrief			: bit;
+	signal movec_regsel     : std_logic_vector(11 downto 0);
 	signal brief				: std_logic_vector(15 downto 0);
 	signal data_is_source	: bit;
 	signal store_in_tmp		: bit;
@@ -1629,9 +1630,9 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 				--   MSP active (a7_is_msp='1'): MOVEC Dn,$803 updates A7
 				--   ISP active (a7_is_msp='0'): MOVEC Dn,$804 updates A7
 				IF exec(movec_wr)='1' AND FlagsSR(5)='1' THEN
-					IF brief(11 downto 0)=X"803" AND a7_is_msp='1' THEN
+					IF movec_regsel=X"803" AND a7_is_msp='1' THEN
 						regfile(15) <= reg_QA;
-					ELSIF brief(11 downto 0)=X"804" AND a7_is_msp='0' THEN
+					ELSIF movec_regsel=X"804" AND a7_is_msp='0' THEN
 						regfile(15) <= reg_QA;
 					END IF;
 				END IF;
@@ -2831,12 +2832,13 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- F-Line context latch initialization
 					fline_opcode_latch <= (others => '0');
 					fline_brief_latch <= (others => '0');
-					fline_context_valid <= '0';
-					fline_is_pmmu <= '0';
-					fline_is_fpu <= '0';
-					fline_has_brief <= '0';
-					pmmu_ea_mode_latched <= (others => '0');  -- BUG #302: Initialize EA mode latch
-					trace_pending_group2 <= '0';
+						fline_context_valid <= '0';
+						fline_is_pmmu <= '0';
+						fline_is_fpu <= '0';
+						fline_has_brief <= '0';
+						movec_regsel <= (others => '0');
+						pmmu_ea_mode_latched <= (others => '0');  -- BUG #302: Initialize EA mode latch
+						trace_pending_group2 <= '0';
 			ELSE
 --				IPL_nr <= NOT IPL;
 				IF clkena_in='1' THEN
@@ -2862,6 +2864,16 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 							brief <= last_opc_read(15 downto 0);
 						ELSE
 							brief <= data_read(15 downto 0);
+						END IF;
+						-- MOVEC is especially sensitive to extension-word timing on real
+						-- hardware. Latch the control-register selector alongside the
+						-- extension word so movec1 never decodes a transient/stale brief.
+						IF next_micro_state = movec1 THEN
+							IF state(1)='1' THEN
+								movec_regsel <= last_opc_read(11 downto 0);
+							ELSE
+								movec_regsel <= data_read(11 downto 0);
+							END IF;
 						END IF;
 					END IF;
 
@@ -6921,14 +6933,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					set_writePCbig <='1';
 					-- BUG #193 FIX: Decode stack pointer registers using brief (now valid after getbrief)
 					-- This was incorrectly done during decode using last_data_read
-					IF brief(11 downto 0)=X"800" THEN
+					IF movec_regsel=X"800" THEN
 						set(from_USP) <= '1';
 						IF opcode(0)='1' THEN
 							set(to_USP) <= '1';
 						END IF;
 					ELSIF cpu(1)='1' THEN
 						-- 68020+: MSP/ISP are separate control registers
-						CASE brief(11 downto 0) IS
+						CASE movec_regsel IS
 							WHEN X"803" =>  -- MSP (Master Stack Pointer)
 								IF opcode(0)='1' THEN
 									set(to_MSP) <= '1';
@@ -6945,8 +6957,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- 68000: SFC(000), DFC(001), USP(800), VBR(801)
 					-- 68020+: Add CACR(002), CAAR(802), MSP(803), ISP(804)
 					-- NOTE: All PMMU registers (TC, TT0, TT1, CRP, SRP, MMUSR) are PMOVE-only!
-					IF (brief(11 downto 0)=X"000" OR brief(11 downto 0)=X"001" OR brief(11 downto 0)=X"800" OR brief(11 downto 0)=X"801") OR
-					   (cpu(1)='1' AND (brief(11 downto 0)=X"002" OR brief(11 downto 0)=X"802" OR brief(11 downto 0)=X"803" OR brief(11 downto 0)=X"804")) THEN
+					IF (movec_regsel=X"000" OR movec_regsel=X"001" OR movec_regsel=X"800" OR movec_regsel=X"801") OR
+					   (cpu(1)='1' AND (movec_regsel=X"002" OR movec_regsel=X"802" OR movec_regsel=X"803" OR movec_regsel=X"804")) THEN
 						IF opcode(0)='0' THEN
 							set(Regwrena) <= '1';
 						END IF;
@@ -7999,17 +8011,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
            regfile, FlagsSR, interrupt_mode)
   begin
 	-- all other hexa codes should give illegal isntruction exception
-	if rising_edge(clk) then
-	  if Reset = '1' then
-		VBR <= (others => '0');
-		CACR <= (others => '0');
-		CAAR <= (others => '0');
-		USP <= (others => '0');   -- BUG #18: Initialize USP
-		SSP <= (others => '0');   -- BUG #18: Initialize SSP
-		MSP <= (others => '0');   -- BUG #18: Initialize MSP
-		ISP <= (others => '0');   -- BUG #18: Initialize ISP
-	  elsif clkena_lw = '1' and exec(movec_wr) = '1' then
-		case brief(11 downto 0) is
+		if rising_edge(clk) then
+		  if Reset = '1' then
+			VBR <= (others => '0');
+			CACR <= (others => '0');
+			CAAR <= (others => '0');
+			USP <= (others => '0');   -- BUG #18: Initialize USP
+			SSP <= (others => '0');   -- BUG #18: Initialize SSP
+			MSP <= (others => '0');   -- BUG #18: Initialize MSP
+			ISP <= (others => '0');   -- BUG #18: Initialize ISP
+		  elsif clkena_lw = '1' and exec(movec_wr) = '1' then
+		case movec_regsel is
 		  when X"000" => SFC <= reg_QA(2 downto 0); -- SFC -- 68010+
 		  when X"001" => DFC <= reg_QA(2 downto 0); -- DFC -- 68010+
 		  when X"002" =>
@@ -8074,7 +8086,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 	end if;
 
 	movec_data <= (others => '0');
-	case brief(11 downto 0) is
+	case movec_regsel is
 		when X"000" => movec_data <= "00000000000000000000000000000" & SFC;
 		when X"001" => movec_data <= "00000000000000000000000000000" & DFC;
 	  when X"002" => movec_data <= CACR; -- CACR full 32-bit read

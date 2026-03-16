@@ -384,6 +384,81 @@ begin
             end if;
         end procedure;
 
+        procedure translate_and_check_rw(
+            log_addr : std_logic_vector(31 downto 0);
+            rw_val : std_logic;
+            expect_fault : boolean
+        ) is
+            variable timeout : integer;
+        begin
+            addr_log <= log_addr;
+            fc <= "101";
+            rw <= rw_val;
+            req <= '1';
+            wait_cycles(1);
+
+            timeout := 0;
+            while busy = '0' and fault = '0' and timeout < 10 loop
+                wait_cycles(1);
+                timeout := timeout + 1;
+            end loop;
+
+            timeout := 0;
+            while busy = '1' and timeout < 100 loop
+                wait_cycles(1);
+                timeout := timeout + 1;
+            end loop;
+
+            req <= '0';
+            wait_cycles(2);
+
+            if expect_fault then
+                if fault = '1' then
+                    report "  Translation faulted as expected";
+                    test_pass <= test_pass + 1;
+                else
+                    report "  Expected fault but got translation" severity error;
+                    test_fail <= test_fail + 1;
+                end if;
+            else
+                if fault = '0' and timeout < 100 then
+                    report "  Translation succeeded: phys=0x" & slv_to_hex(addr_phys);
+                    test_pass <= test_pass + 1;
+                else
+                    report "  Translation failed unexpectedly" severity error;
+                    test_fail <= test_fail + 1;
+                end if;
+            end if;
+        end procedure;
+
+        procedure translate_no_check_rw(
+            log_addr : std_logic_vector(31 downto 0);
+            rw_val : std_logic
+        ) is
+            variable timeout : integer;
+        begin
+            addr_log <= log_addr;
+            fc <= "101";
+            rw <= rw_val;
+            req <= '1';
+            wait_cycles(1);
+
+            timeout := 0;
+            while busy = '0' and fault = '0' and timeout < 10 loop
+                wait_cycles(1);
+                timeout := timeout + 1;
+            end loop;
+
+            timeout := 0;
+            while busy = '1' and timeout < 100 loop
+                wait_cycles(1);
+                timeout := timeout + 1;
+            end loop;
+
+            req <= '0';
+            wait_cycles(2);
+        end procedure;
+
     begin
         report "========================================" severity note;
         report "PFLUSH, PTEST, PLOAD Comprehensive Test" severity note;
@@ -406,6 +481,8 @@ begin
         page_table(16#401#) <= x"00200001";  -- L1[1]: Page at 0x00200000, DT=01
         page_table(16#402#) <= x"00300001";  -- L1[2]: Page at 0x00300000, DT=01
         page_table(16#403#) <= x"00400001";  -- L1[3]: Page at 0x00400000, DT=01
+        page_table(16#404#) <= x"00500005";  -- L1[4]: Page at 0x00500000, WP=1, DT=01
+        page_table(16#405#) <= x"00000000";  -- L1[5]: Invalid descriptor
 
         -- Configure MMU
         write_reg(SEL_CRP, x"80000002", '1');
@@ -488,6 +565,31 @@ begin
         read_reg(SEL_MMUSR, '0');
         report "MMUSR after PTEST (write): 0x" & slv_to_hex(reg_rdat(15 downto 0));
         test_pass <= test_pass + 1;
+
+        -- Cached fault replay must preserve original MMUSR class.
+        report "Creating cached ATC fault entry for WP page...";
+        translate_and_check_rw(x"00004000", '0', true);  -- first fault populates ATC
+        report "Replaying cached ATC fault entry for WP page...";
+        translate_and_check_rw(x"00004000", '0', true);  -- second fault should hit cached entry
+        report "Fault status after cached WP replay: 0x" & slv_to_hex(fault_status(15 downto 0));
+        if fault_status(11) = '1' and fault_status(15) = '0' and fault_status(10) = '0' then
+            test_pass <= test_pass + 1;
+        else
+            report "  Expected cached WP fault to keep W=1, B=0, I=0" severity error;
+            test_fail <= test_fail + 1;
+        end if;
+
+        report "Creating cached ATC fault entry for invalid page...";
+        translate_no_check_rw(x"00005000", '1');  -- populate cache; replay check below is the real assertion
+        report "Replaying cached ATC fault entry for invalid page...";
+        translate_and_check_rw(x"00005000", '1', true);  -- second fault should hit cached entry
+        report "Fault status after cached invalid replay: 0x" & slv_to_hex(fault_status(15 downto 0));
+        if fault_status(10) = '1' and fault_status(15) = '0' and fault_status(11) = '0' then
+            test_pass <= test_pass + 1;
+        else
+            report "  Expected cached invalid fault to keep I=1, B=0, W=0" severity error;
+            test_fail <= test_fail + 1;
+        end if;
 
         -- ============================================
         -- SECTION 5: PLOAD Tests
