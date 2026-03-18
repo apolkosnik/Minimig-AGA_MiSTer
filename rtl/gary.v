@@ -183,8 +183,10 @@ assign sel_rtg   = cpu_address_in[23:16]==8'hB8; // $B8xxxxx
 assign sel_bank_1 = cpu_address_in[23:21]==3'b001;
 
 assign sel_toccata = toccata_ena && cpu_address_in[23:16]==toccata_base; // Nominally $e9xxxx
-assign sel_ethernet = ethernet_ena && cpu_address_in[23:16]==ethernet_base && 
-                     ((cpu_address_in[15:6] == 10'b0000110000) || (cpu_address_in[15:1] == 15'b000011000100000)); // Only 0x0C00-0x0C3F (registers) and 0x0C40-0x0C41 (data port)
+assign sel_ethernet = ethernet_ena && cpu_address_in[23:16]==ethernet_base &&
+                     ((cpu_address_in[15:6] == 10'b0000110000) ||
+                      (cpu_address_in[15:4] == 12'b000001100010) ||
+                      (cpu_address_in[15:4] == 12'b000001100011)); // word-addressed 0x0600-0x061F, 0x0620-0x062F, and 0x0630-0x063F -> byte 0x0C00-0x0C3F, 0x0C40-0x0C5F, and 0x0C60-0x0C7F
 
 //data bus slow down
 assign dbs = cpu_address_in[23:21]==3'b000 || cpu_address_in[23:20]==4'b1100 || cpu_address_in[23:19]==5'b1101_0 || cpu_address_in[23:16]==8'b1101_1111;

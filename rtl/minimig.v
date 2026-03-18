@@ -926,6 +926,7 @@ ethernet_interface eth_if (
     .cpu_rd(cpu_rd),                     // CPU read signal
     .cpu_lwr(cpu_lwr),                     // CPU lower byte write signal
     .cpu_hwr(cpu_hwr),                     // CPU higher byte write signal
+    .cpu_as(_cpu_as),                    // Address strobe, active low
     .cpu_uds(_cpu_uds),                  // Upper data strobe
     .cpu_lds(_cpu_lds),                  // Lower data strobe
 

@@ -17,6 +17,7 @@ module ethernet_interface
     input  wire        cpu_rd,
     input  wire        cpu_hwr,
     input  wire        cpu_lwr,
+    input  wire        cpu_as,
     input  wire        cpu_uds,
     input  wire        cpu_lds,
 
@@ -92,16 +93,17 @@ module ethernet_interface
 //   - 0xEA2600: ETH_SHM_RX_BUFFER (1500 bytes) - RX packet buffer
 //   - 0xEA2C00: ETH_SHM_PACKET_INFO (512 bytes) - Packet metadata
 
-//   NE2000 Memory Space (0xEA3000 - 0xEA6FFF)
+//   NE2000 Memory Space (0xEA3000 - 0xEAAFFF)
 
-//   - 0xEA3000: ETH_SHM_NE_MEMORY (16KB) - NE2000 packet memory
-//     - Used for packet storage in NE2000 ring buffer format
-//     - Accessed via Remote DMA operations
+//   - 0xEA3000: ETH_SHM_NE_MEMORY (32KB) - compact backing store for RTL8019
+//     packet RAM at NE addresses 0x4000-0xBFFF.
+//     - Remote DMA addresses below 0x0020 are handled locally as PROM/shadow RAM.
+//     - Remote DMA addresses 0x0020-0x3FFF are unmapped and read as 0xFF.
 
-//   Debug/Future Use (0xEA7000 - 0xEEFFFF) 
+//   Debug/Future Use (0xEAB000 - 0xEAFFFF)
 
-//   - 0xEA7000: ETH_SHM_DEBUG_INFO (4KB) - Debug information
-//   - 0xEA8000: ETH_SHM_FUTURE_USE (24KB) - Reserved for expansion (reduced by 4KB)
+//   - 0xEAB000: ETH_SHM_DEBUG_INFO (4KB) - Debug information
+//   - 0xEAC000: ETH_SHM_FUTURE_USE (16KB) - Reserved for expansion
 
 //   Access Methods
 
@@ -136,21 +138,34 @@ parameter [15:0] ETH_FLAG_TX_REQ     = 16'h0002;
 parameter [15:0] ETH_FLAG_RX_AVAIL   = 16'h0004;
 parameter [15:0] ETH_FLAG_IRQ        = 16'h0008;
 parameter [15:0] ETH_FLAG_ENABLED    = 16'h0020;
+parameter [15:0] NE_PMEM_START       = 16'h4000;
+parameter [15:0] NE_PMEM_END         = 16'hC000;
 parameter [7:0]  NE_PAGE_BASE = 8'h40;
 parameter [7:0]  BG_POLL_RELOAD = 8'd63;
+parameter [9:0]  ETH_DMA_TIMEOUT_CYCLES = 10'd511;
+parameter [7:0]  DEFAULT_MAC0 = 8'h52;
+parameter [7:0]  DEFAULT_MAC1 = 8'h54;
+parameter [7:0]  DEFAULT_MAC2 = 8'h05;
+parameter [7:0]  DEFAULT_MAC3 = 8'h04;
+parameter [7:0]  DEFAULT_MAC4 = 8'h03;
+parameter [7:0]  DEFAULT_MAC5 = 8'h02;
 
 reg [7:0]  cr_register;
 wire [1:0] current_page = cr_register[7:6];
 
 wire       cpu_wr = cpu_lwr | cpu_hwr;
+wire [7:0] cpu_write_byte = ~cpu_uds ? cpu_data_in[15:8] : cpu_data_in[7:0];
 wire       is_data_port_access;
 wire       is_register_access;
+wire       is_reset_port_access;
 
 reg [15:0] remote_dma_addr;
 reg [15:0] remote_byte_count;
 reg        data_port_read_pending;
 reg        data_port_write_pending;
 reg        data_port_transfer_done;
+reg        data_port_cycle_active;
+reg        data_port_bus_active_prev;
 reg [15:0] data_port_read_data;
 reg [15:0] data_port_byte_addr;
 reg        data_port_word_mode;
@@ -170,12 +185,18 @@ reg [7:0]  rsr_register;
 reg [7:0]  curr_register;
 reg [7:0]  tcr_register;
 reg [7:0]  rcr_register;
+reg [7:0]  rtl8019_config0;
+reg [7:0]  rtl8019_config1;
+reg [7:0]  rtl8019_config2;
+reg [7:0]  rtl8019_config3;
+reg [7:0]  rtl8019_e9346cr;
 reg        rx_poll_enabled;
 reg        shm_sync_enabled;
 reg        tx_request_pending;
 reg [15:0] mirrored_fpga_flags;
 reg [7:0]  par_registers [0:5];
 reg [7:0]  mar_registers [0:7];
+reg [7:0]  reset_port_latch;
 reg [4:0]  bg_state;
 reg [7:0]  bg_poll_counter;
 reg        bg_dma_inflight;
@@ -189,10 +210,13 @@ reg [15:0] bg_source_word;
 reg [5:0]  bg_sync_slot;
 reg        bg_polling_rx_flags;
 reg        bg_clear_rx_avail;
+reg [7:0]  prom_shadow [0:31];
 reg [15:0] debug_heartbeat;
 reg [15:0] debug_local_wait_cycles;
 reg [15:0] debug_dma_wait_cycles;
-reg [15:0] debug_sticky_flags;
+reg [14:0] debug_sticky_flags_lo;
+reg        debug_dma_timeout_sticky;
+reg [9:0]  eth_dma_wait_counter;
 integer    i;
 
 // NE2000 DCR bit definitions
@@ -210,6 +234,7 @@ parameter ISR_PRX = 8'h01;     // Bit 0: Packet received
 parameter ISR_PTX = 8'h02;     // Bit 1: Packet transmitted
 parameter ISR_OVW = 8'h10;     // Bit 4: Receive ring overrun
 parameter ISR_RDC = 8'h40;     // Bit 6: Remote DMA Complete
+parameter ISR_RST = 8'h80;     // Bit 7: Reset status
 parameter TSR_PTX = 8'h01;     // Bit 0: Packet transmitted without error
 parameter RSR_PRX = 8'h01;     // Bit 0: Packet received without error
 
@@ -231,19 +256,167 @@ localparam [4:0] BG_CLEAR_FLAG_WAIT  = 5'd14;
 localparam [4:0] BG_SYNC_WORD_REQ    = 5'd15;
 localparam [4:0] BG_SYNC_WORD_WAIT   = 5'd16;
 
-wire [7:0] cr_write_value = cpu_data_in[15:8] | (cpu_data_in[8] ? 8'h00 : 8'h02);
+wire [7:0] cr_write_value = cpu_write_byte;
+wire       rtl8019_config_write_enable = (rtl8019_e9346cr[7:6] == 2'b11);
+
+task automatic apply_nic_reset;
+    begin
+        cr_register <= 8'h21;
+        remote_dma_addr <= 16'h0000;
+        remote_byte_count <= 16'h0000;
+        data_port_read_pending <= 1'b0;
+        data_port_write_pending <= 1'b0;
+        data_port_transfer_done <= 1'b0;
+        data_port_cycle_active <= 1'b0;
+        data_port_bus_active_prev <= 1'b0;
+        data_port_read_data <= 16'h0000;
+        data_port_byte_addr <= 16'h0000;
+        data_port_word_mode <= 1'b0;
+        tx_complete_pending <= 1'b0;
+        isr_register <= ISR_RST;
+        imr_register <= 8'h00;
+        dcr_register <= 8'h80;
+        pstart_register <= 8'h40;
+        pstop_register <= 8'h80;
+        bnry_register <= 8'h40;
+        tpsr_register <= 8'h40;
+        tbcr_register <= 16'h0000;
+        tsr_register <= 8'h00;
+        rsr_register <= 8'h00;
+        curr_register <= 8'h41;
+        tcr_register <= 8'h00;
+        rcr_register <= 8'h00;
+        rtl8019_config0 <= 8'h00;
+        rtl8019_config1 <= 8'h80;
+        rtl8019_config2 <= 8'h40;
+        rtl8019_config3 <= 8'h40;
+        rtl8019_e9346cr <= 8'h00;
+        rx_poll_enabled <= 1'b0;
+        shm_sync_enabled <= 1'b0;
+        tx_request_pending <= 1'b0;
+        mirrored_fpga_flags <= 16'h0000;
+        bg_state <= BG_IDLE;
+        bg_poll_counter <= 8'h00;
+        bg_dma_inflight <= 1'b0;
+        bg_flags_word <= 16'h0000;
+        bg_rx_total_length <= 16'h0000;
+        bg_rx_src_offset <= 16'h0000;
+        bg_rx_dst_offset <= 16'h0000;
+        bg_rx_bytes_remaining <= 16'h0000;
+        bg_rx_next_page <= 8'h00;
+        bg_source_word <= 16'h0000;
+        bg_sync_slot <= 6'd0;
+        bg_polling_rx_flags <= 1'b0;
+        bg_clear_rx_avail <= 1'b0;
+        eth_dma_req <= 1'b0;
+        eth_dma_write <= 1'b0;
+        eth_dma_addr <= 15'h0000;
+        eth_dma_wdata <= 16'h0000;
+        eth_dma_uds <= 1'b1;
+        eth_dma_lds <= 1'b1;
+        eth_irq <= 1'b0;
+        eth_dma_wait_counter <= 10'd0;
+        par_registers[0] <= DEFAULT_MAC0;
+        par_registers[1] <= DEFAULT_MAC1;
+        par_registers[2] <= DEFAULT_MAC2;
+        par_registers[3] <= DEFAULT_MAC3;
+        par_registers[4] <= DEFAULT_MAC4;
+        par_registers[5] <= DEFAULT_MAC5;
+        for (i = 0; i < 8; i = i + 1) begin
+            mar_registers[i] <= 8'h00;
+        end
+        prom_shadow[0] <= DEFAULT_MAC0;
+        prom_shadow[1] <= DEFAULT_MAC0;
+        prom_shadow[2] <= DEFAULT_MAC1;
+        prom_shadow[3] <= DEFAULT_MAC1;
+        prom_shadow[4] <= DEFAULT_MAC2;
+        prom_shadow[5] <= DEFAULT_MAC2;
+        prom_shadow[6] <= DEFAULT_MAC3;
+        prom_shadow[7] <= DEFAULT_MAC3;
+        prom_shadow[8] <= DEFAULT_MAC4;
+        prom_shadow[9] <= DEFAULT_MAC4;
+        prom_shadow[10] <= DEFAULT_MAC5;
+        prom_shadow[11] <= DEFAULT_MAC5;
+        prom_shadow[12] <= 8'h00;
+        prom_shadow[13] <= 8'h00;
+        prom_shadow[14] <= 8'h00;
+        prom_shadow[15] <= 8'h00;
+        prom_shadow[16] <= 8'h00;
+        prom_shadow[17] <= 8'h00;
+        prom_shadow[18] <= 8'h00;
+        prom_shadow[19] <= 8'h00;
+        prom_shadow[20] <= 8'h00;
+        prom_shadow[21] <= 8'h00;
+        prom_shadow[22] <= 8'h00;
+        prom_shadow[23] <= 8'h00;
+        prom_shadow[24] <= 8'h00;
+        prom_shadow[25] <= 8'h00;
+        prom_shadow[26] <= 8'h00;
+        prom_shadow[27] <= 8'h00;
+        prom_shadow[28] <= 8'h57;
+        prom_shadow[29] <= 8'h57;
+        prom_shadow[30] <= 8'h57;
+        prom_shadow[31] <= 8'h57;
+    end
+endtask
+
+task automatic complete_data_port_transfer;
+    input [15:0] dma_read_word;
+    reg [15:0] read_word;
+    begin
+        read_word = maybe_swap_word(dma_read_word, dcr_register[1]);
+
+        if (!eth_dma_write) begin
+            if (data_port_word_mode) begin
+                data_port_read_data <= read_word;
+            end else begin
+                // Mirror byte reads onto both lanes so either UDS or LDS byte access works.
+                data_port_read_data <= data_port_byte_addr[0] ?
+                    {read_word[7:0], read_word[7:0]} :
+                    {read_word[15:8], read_word[15:8]};
+            end
+        end
+
+        if (data_port_word_mode) begin
+            remote_dma_addr <= data_port_byte_addr + 16'h0002;
+            if (remote_byte_count > 16'h0002) begin
+                remote_byte_count <= remote_byte_count - 16'h0002;
+            end else begin
+                remote_byte_count <= 16'h0000;
+                isr_register <= isr_register | ISR_RDC;
+                if (shm_sync_enabled || tx_request_pending) begin
+                    shm_sync_enabled <= 1'b1;
+                    bg_sync_slot <= 6'd0;
+                end
+            end
+        end else begin
+            remote_dma_addr <= data_port_byte_addr + 16'h0001;
+            if (remote_byte_count > 16'h0001) begin
+                remote_byte_count <= remote_byte_count - 16'h0001;
+            end else begin
+                remote_byte_count <= 16'h0000;
+                isr_register <= isr_register | ISR_RDC;
+                if (shm_sync_enabled || tx_request_pending) begin
+                    shm_sync_enabled <= 1'b1;
+                    bg_sync_slot <= 6'd0;
+                end
+            end
+        end
+
+        eth_dma_req <= 1'b0;
+        data_port_read_pending <= 1'b0;
+        data_port_write_pending <= 1'b0;
+        data_port_transfer_done <= 1'b1;
+    end
+endtask
 
 /* verilator lint_off UNUSEDSIGNAL */
-function [14:0] ne_dma_word_offset;
+function [14:0] ne_pmem_word_offset;
     input [15:0] addr;
     reg [15:0] normalized_addr;
     begin
-        if (addr >= 16'h4000) begin
-            normalized_addr = addr - 16'h4000;
-        end else begin
-            normalized_addr = addr;
-        end
-        ne_dma_word_offset = normalized_addr[15:1];
+        normalized_addr = addr - NE_PMEM_START;
+        ne_pmem_word_offset = normalized_addr[15:1];
     end
 endfunction
 
@@ -257,6 +430,14 @@ function [7:0] sanitize_ring_page;
         end else begin
             sanitize_ring_page = page;
         end
+    end
+endfunction
+
+function [15:0] maybe_swap_word;
+    input [15:0] word_value;
+    input        swap_bytes;
+    begin
+        maybe_swap_word = swap_bytes ? {word_value[7:0], word_value[15:8]} : word_value;
     end
 endfunction
 
@@ -292,6 +473,23 @@ function [15:0] hps_u16_from_dma;
     end
 endfunction
 
+function [15:0] format_reg_read_data;
+    input [7:0] value;
+    input       uds_n;
+    input       lds_n;
+    begin
+        if (!uds_n && lds_n) begin
+            format_reg_read_data = {value, 8'h00};
+        end else if (uds_n && !lds_n) begin
+            format_reg_read_data = {8'h00, value};
+        end else begin
+            // Mirror register bytes on word/unspecified reads so monitor and
+            // driver code that samples either lane still sees the value.
+            format_reg_read_data = {value, value};
+        end
+    end
+endfunction
+
 function [7:0] rx_page_count_for_length;
     input [15:0] length;
     reg [15:0] rounded_length;
@@ -303,6 +501,7 @@ endfunction
 /* verilator lint_on UNUSEDSIGNAL */
 
 localparam [15:0] ETH_FPGA_FLAG_MASK = ETH_FLAG_TX_REQ | ETH_FLAG_IRQ | ETH_FLAG_ENABLED;
+localparam [15:0] ETH_HPS_FLAG_MASK = ETH_FLAG_RX_AVAIL;
 
 function [7:0] shm_ctrl_reg_value;
     input [4:0] slot;
@@ -383,31 +582,36 @@ function [15:0] sync_slot_wdata;
             6'd8, 6'd9, 6'd10, 6'd11, 6'd12, 6'd13, 6'd14, 6'd15,
             6'd16, 6'd17, 6'd18, 6'd19, 6'd20, 6'd21, 6'd22, 6'd23,
             6'd24, 6'd25, 6'd26, 6'd27, 6'd28, 6'd29, 6'd30, 6'd31:
-                sync_slot_wdata = {shm_ctrl_reg_value(slot[4:0]), 8'h00};
-            6'd32: sync_slot_wdata = {par_registers[0], par_registers[1]};
-            6'd33: sync_slot_wdata = {par_registers[2], par_registers[3]};
-            6'd34: sync_slot_wdata = {par_registers[4], par_registers[5]};
-            6'd35: sync_slot_wdata = {state_page_byte, par_registers[0]};
-            6'd36: sync_slot_wdata = {par_registers[1], par_registers[2]};
-            6'd37: sync_slot_wdata = {par_registers[3], par_registers[4]};
-            6'd38: sync_slot_wdata = {par_registers[5], 8'h01};
-            6'd39: sync_slot_wdata = {state_enabled_byte, 8'h00};
+                sync_slot_wdata = {8'h00, shm_ctrl_reg_value(slot[4:0])};
+            6'd32: sync_slot_wdata = {par_registers[1], par_registers[0]};
+            6'd33: sync_slot_wdata = {par_registers[3], par_registers[2]};
+            6'd34: sync_slot_wdata = {par_registers[5], par_registers[4]};
+            6'd35: sync_slot_wdata = {par_registers[0], state_page_byte};
+            6'd36: sync_slot_wdata = {par_registers[2], par_registers[1]};
+            6'd37: sync_slot_wdata = {par_registers[4], par_registers[3]};
+            6'd38: sync_slot_wdata = {8'h01, par_registers[5]};
+            6'd39: sync_slot_wdata = {8'h00, state_enabled_byte};
             6'd40: sync_slot_wdata = 16'h0000;
             default: sync_slot_wdata = 16'h0000;
         endcase
     end
 endfunction
 
-wire [14:0] remote_dma_local_word_offset = ne_dma_word_offset(remote_dma_addr);
+wire [14:0] remote_dma_pmem_word_offset = ne_pmem_word_offset(remote_dma_addr);
 wire [1:0]  tcr_loopback_mode = tcr_register[2:1];
 wire        rcr_monitor_mode = rcr_register[5];
 wire        dcr_word_mode = dcr_register[0];
+wire        dcr_byte_swap = dcr_register[1];
+wire        remote_dma_prom_region = (remote_dma_addr < 16'h0020);
+wire        remote_dma_pmem_region = (remote_dma_addr >= NE_PMEM_START) && (remote_dma_addr < NE_PMEM_END);
 wire        irq_pending = |(isr_register & imr_register);
 wire [15:0] fpga_owned_flags =
     (tx_request_pending ? ETH_FLAG_TX_REQ : 16'h0000) |
     (irq_pending ? ETH_FLAG_IRQ : 16'h0000) |
     (cr_register[1] ? ETH_FLAG_ENABLED : 16'h0000);
 wire        receiver_active = rx_poll_enabled && cr_register[1] && !rcr_monitor_mode;
+localparam USE_DEBUG_ISSP = 1'b1;
+
 // ISSP source bits:
 //   [0] inhibit background Ethernet DMA/sync engine
 //   [1] synchronous clear for debug counters and sticky flags
@@ -415,9 +619,22 @@ wire [1:0]  debug_source;
 wire        debug_bg_disable = debug_source[0];
 wire        debug_clear = debug_source[1];
 wire [15:0] bg_flags_write_word =
-    (bg_flags_word & ~(ETH_FPGA_FLAG_MASK | (bg_clear_rx_avail ? ETH_FLAG_RX_AVAIL : 16'h0000))) |
+    (bg_flags_word & (bg_clear_rx_avail ? 16'h0000 : ETH_HPS_FLAG_MASK)) |
     fpga_owned_flags;
+wire        data_port_dma_complete_now = eth_dma_req && eth_dma_ready && !bg_dma_inflight;
+wire        data_port_dma_timeout_now =
+    eth_dma_req && !eth_dma_ready &&
+    (eth_dma_wait_counter == ETH_DMA_TIMEOUT_CYCLES) &&
+    (data_port_read_pending || data_port_write_pending ||
+     (sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr)));
+wire        local_remote_dma_active =
+    ((cr_register[4:3] != 2'b00) && (remote_byte_count != 16'h0000)) ||
+    data_port_read_pending || data_port_write_pending;
 wire [15:0] bg_rx_length_from_dma = hps_u16_from_dma(eth_dma_rdata);
+wire [4:0]  prom_byte_index = remote_dma_addr[4:0];
+wire [4:0]  prom_word_index = {remote_dma_addr[4:1], 1'b0};
+wire [15:0] prom_read_word = {prom_shadow[prom_word_index], prom_shadow[prom_word_index + 5'd1]};
+wire [7:0]  prom_read_byte = prom_shadow[prom_byte_index];
 wire [7:0]  bg_rx_page_start_calc =
     sanitize_ring_page(curr_register, pstart_register, pstop_register);
 wire [15:0] bg_rx_dst_offset_calc = ring_page_byte_offset(bg_rx_page_start_calc);
@@ -438,22 +655,42 @@ wire [14:0] bg_hdr0_word_addr = bg_hdr0_byte_addr[15:1];
 wire [14:0] bg_hdr1_word_addr = bg_hdr1_byte_addr[15:1];
 wire [14:0] bg_payload_src_word_addr = bg_payload_src_byte_addr[15:1];
 wire [14:0] bg_payload_dst_word_addr = bg_payload_dst_byte_addr[15:1];
+wire        data_port_bus_active =
+    sel_ethernet && !sel_ethernet_shm && is_data_port_access &&
+    !cpu_as && (cpu_rd || cpu_wr);
+wire        data_port_cycle_start = data_port_bus_active && !data_port_bus_active_prev;
+wire        data_port_cycle_end = !data_port_bus_active && data_port_bus_active_prev;
 
 // ISSP probe map:
-// [127:112] heartbeat, [111:96] local wait cycles, [95:80] dma wait cycles,
-// [79:64] sticky flags, [63:49] cpu_addr, [48:31] live control/status bits,
-// [30:26] bg_state, [25:18] CR, [17:10] ISR, [9:2] IMR, [1:0] current_page
+// [127:112] remote_dma_addr
+// [111:96]  remote_byte_count
+// [95:80]   sticky flags
+// [79:65]   eth_dma_addr
+// [64:50]   cpu_addr
+// [49:42]   CR
+// [41:34]   ISR
+// [33:26]   IMR
+// [25:18]   CURR
+// [17:13]   bg_state
+// [12:0]    live flags
+wire [15:0] debug_sticky_flags = {debug_dma_timeout_sticky, debug_sticky_flags_lo};
+
+/* verilator lint_off UNUSEDSIGNAL */
 wire [127:0] debug_probe = {
-    debug_heartbeat,
-    debug_local_wait_cycles,
-    debug_dma_wait_cycles,
+    remote_dma_addr,
+    remote_byte_count,
     debug_sticky_flags,
+    eth_dma_addr,
     cpu_addr,
+    cr_register,
+    isr_register,
+    imr_register,
+    curr_register,
+    bg_state,
     cpu_rd,
     cpu_wr,
     sel_ethernet,
     sel_ethernet_shm,
-    is_register_access,
     is_data_port_access,
     dtack_eth,
     eth_irq,
@@ -462,35 +699,32 @@ wire [127:0] debug_probe = {
     eth_dma_write,
     bg_dma_inflight,
     data_port_read_pending,
-    data_port_write_pending,
-    data_port_transfer_done,
-    rx_poll_enabled,
-    shm_sync_enabled,
-    tx_request_pending,
-    bg_state,
-    cr_register,
-    isr_register,
-    imr_register,
-    current_page
+    data_port_write_pending
 };
+/* verilator lint_on UNUSEDSIGNAL */
 
-ethernet_issp #(
-    .PROBE_WIDTH(128),
-    .SOURCE_WIDTH(2),
-    .INSTANCE_ID("ETHDBG"),
-    .SLD_INSTANCE_INDEX(17)
-) eth_debug_issp (
-    .clk(clk),
-    .probe(debug_probe),
-    .source(debug_source)
-);
+generate
+if (USE_DEBUG_ISSP) begin : gen_eth_debug_issp
+    ethernet_issp #(
+        .PROBE_WIDTH(128),
+        .SOURCE_WIDTH(2),
+        .INSTANCE_ID("ETHDBG")
+    ) eth_debug_issp (
+        .clk(clk),
+        .probe(debug_probe),
+        .source(debug_source)
+    );
+end else begin : gen_eth_debug_issp_tieoff
+    assign debug_source = 2'b00;
+end
+endgenerate
 
 always @(posedge clk) begin
     if (reset || debug_clear) begin
         debug_heartbeat <= 16'h0000;
         debug_local_wait_cycles <= 16'h0000;
         debug_dma_wait_cycles <= 16'h0000;
-        debug_sticky_flags <= 16'h0000;
+        debug_sticky_flags_lo <= 15'h0000;
     end else begin
         debug_heartbeat <= debug_heartbeat + 16'h0001;
 
@@ -504,52 +738,49 @@ always @(posedge clk) begin
         end
 
         if (sel_ethernet && !sel_ethernet_shm && (cpu_rd || cpu_wr) && dtack_eth) begin
-            debug_sticky_flags[0] <= 1'b1;
+            debug_sticky_flags_lo[0] <= 1'b1;
         end
         if (eth_dma_req && !eth_dma_ready) begin
-            debug_sticky_flags[1] <= 1'b1;
+            debug_sticky_flags_lo[1] <= 1'b1;
         end
         if (sel_ethernet && sel_ethernet_shm) begin
-            debug_sticky_flags[2] <= 1'b1;
+            debug_sticky_flags_lo[2] <= 1'b1;
         end
         if (sel_ethernet && cpu_wr && is_register_access) begin
-            debug_sticky_flags[3] <= 1'b1;
+            debug_sticky_flags_lo[3] <= 1'b1;
         end
         if (sel_ethernet && (cpu_rd || cpu_wr) && is_data_port_access) begin
-            debug_sticky_flags[4] <= 1'b1;
+            debug_sticky_flags_lo[4] <= 1'b1;
         end
         if (eth_dma_req && sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr)) begin
-            debug_sticky_flags[5] <= 1'b1;
+            debug_sticky_flags_lo[5] <= 1'b1;
         end
         if (bg_polling_rx_flags) begin
-            debug_sticky_flags[6] <= 1'b1;
+            debug_sticky_flags_lo[6] <= 1'b1;
         end
         if (shm_sync_enabled) begin
-            debug_sticky_flags[7] <= 1'b1;
+            debug_sticky_flags_lo[7] <= 1'b1;
         end
         if (tx_request_pending) begin
-            debug_sticky_flags[8] <= 1'b1;
+            debug_sticky_flags_lo[8] <= 1'b1;
         end
         if (eth_irq) begin
-            debug_sticky_flags[9] <= 1'b1;
+            debug_sticky_flags_lo[9] <= 1'b1;
         end
         if (isr_register[6]) begin
-            debug_sticky_flags[10] <= 1'b1;
+            debug_sticky_flags_lo[10] <= 1'b1;
         end
         if (isr_register[4]) begin
-            debug_sticky_flags[11] <= 1'b1;
+            debug_sticky_flags_lo[11] <= 1'b1;
         end
         if (isr_register[0]) begin
-            debug_sticky_flags[12] <= 1'b1;
+            debug_sticky_flags_lo[12] <= 1'b1;
         end
         if (isr_register[1]) begin
-            debug_sticky_flags[13] <= 1'b1;
+            debug_sticky_flags_lo[13] <= 1'b1;
         end
         if (debug_bg_disable) begin
-            debug_sticky_flags[14] <= 1'b1;
-        end
-        if (receiver_active) begin
-            debug_sticky_flags[15] <= 1'b1;
+            debug_sticky_flags_lo[14] <= 1'b1;
         end
     end
 end
@@ -558,66 +789,22 @@ end
 wire [4:0]  register_select;
 always @(posedge clk) begin
     if (reset) begin
-        cr_register <= 8'h21;
-        remote_dma_addr <= 16'h0000;
-        remote_byte_count <= 16'h0000;
-        data_port_read_pending <= 1'b0;
-        data_port_write_pending <= 1'b0;
-        data_port_transfer_done <= 1'b0;
-        data_port_read_data <= 16'h0000;
-        data_port_byte_addr <= 16'h0000;
-        data_port_word_mode <= 1'b0;
-        tx_complete_pending <= 1'b0;
-        isr_register <= 8'h00;
-        imr_register <= 8'h00;
-        dcr_register <= 8'h00;
-        pstart_register <= 8'h40;
-        pstop_register <= 8'h80;
-        bnry_register <= 8'h40;
-        tpsr_register <= 8'h40;
-        tbcr_register <= 16'h0000;
-        tsr_register <= 8'h00;
-        rsr_register <= 8'h00;
-        curr_register <= 8'h41;
-        tcr_register <= 8'h00;
-        rcr_register <= 8'h00;
-        rx_poll_enabled <= 1'b0;
-        shm_sync_enabled <= 1'b0;
-        tx_request_pending <= 1'b0;
-        mirrored_fpga_flags <= 16'h0000;
-        bg_state <= BG_IDLE;
-        bg_poll_counter <= 8'h00;
-        bg_dma_inflight <= 1'b0;
-        bg_flags_word <= 16'h0000;
-        bg_rx_total_length <= 16'h0000;
-        bg_rx_src_offset <= 16'h0000;
-        bg_rx_dst_offset <= 16'h0000;
-        bg_rx_bytes_remaining <= 16'h0000;
-        bg_rx_next_page <= 8'h00;
-        bg_source_word <= 16'h0000;
-        bg_sync_slot <= 6'd0;
-        bg_polling_rx_flags <= 1'b0;
-        bg_clear_rx_avail <= 1'b0;
-        for (i = 0; i < 6; i = i + 1) begin
-            par_registers[i] <= 8'h00;
-        end
-        for (i = 0; i < 8; i = i + 1) begin
-            mar_registers[i] <= 8'h00;
-        end
-        eth_dma_req <= 1'b0;
-        eth_dma_write <= 1'b0;
-        eth_dma_addr <= 15'h0000;
-        eth_dma_wdata <= 16'h0000;
-        eth_dma_uds <= 1'b1;
-        eth_dma_lds <= 1'b1;
+        apply_nic_reset();
+        reset_port_latch <= 8'h00;
+        debug_dma_timeout_sticky <= 1'b0;
         dtack_eth <= 1'b1;
-        eth_irq <= 1'b0;
     end else begin
+        data_port_bus_active_prev <= data_port_bus_active;
+
+        if (debug_clear) begin
+            debug_dma_timeout_sticky <= 1'b0;
+        end
+
         if (sel_ethernet && (cpu_rd || cpu_wr)) begin
             if (sel_ethernet_shm) begin
                 dtack_eth <= 1'b1;
             end else if (is_data_port_access) begin
-                dtack_eth <= data_port_transfer_done ? 1'b0 : 1'b1;
+                dtack_eth <= (data_port_cycle_active && data_port_transfer_done) ? 1'b0 : 1'b1;
             end else begin
                 dtack_eth <= 1'b0;
             end
@@ -625,10 +812,32 @@ always @(posedge clk) begin
             dtack_eth <= 1'b1;
         end
 
-        if (sel_ethernet && cpu_wr && is_register_access && !cpu_uds) begin
+        if (data_port_cycle_start) begin
+            data_port_cycle_active <= 1'b1;
+            data_port_transfer_done <= 1'b0;
+        end else if (data_port_cycle_end ||
+                     (data_port_cycle_active &&
+                      (!sel_ethernet || sel_ethernet_shm || !is_data_port_access))) begin
+            data_port_cycle_active <= 1'b0;
+            data_port_transfer_done <= 1'b0;
+        end
+
+        if (sel_ethernet && cpu_wr && is_reset_port_access && (!cpu_uds || !cpu_lds)) begin
+            reset_port_latch <= cpu_write_byte;
+        end else if (sel_ethernet && cpu_wr && is_register_access &&
+                     (!cpu_uds || !cpu_lds)) begin
             case (register_select[4:0])
                 5'h00: begin
                     cr_register <= cr_write_value;
+                    if (cr_write_value[0]) begin
+                        isr_register <= isr_register | ISR_RST;
+                    end else begin
+                        isr_register <= isr_register & ~ISR_RST;
+                    end
+                    if ((cr_write_value[4:3] != 2'b00) && (remote_byte_count == 16'h0000)) begin
+                        isr_register <= (cr_write_value[0] ? (isr_register | ISR_RST)
+                                                          : (isr_register & ~ISR_RST)) | ISR_RDC;
+                    end
                     if (cr_write_value[2] &&
                         (tbcr_register != 16'h0000) &&
                         (tpsr_register >= pstart_register) &&
@@ -642,88 +851,101 @@ always @(posedge clk) begin
                 end
                 5'h01: begin
                     case (current_page)
-                        2'b00: pstart_register <= cpu_data_in[15:8];
-                        2'b01: par_registers[0] <= cpu_data_in[15:8];
+                        2'b00: pstart_register <= cpu_write_byte;
+                        2'b01: par_registers[0] <= cpu_write_byte;
+                        2'b11: rtl8019_e9346cr <= {cpu_write_byte[7:1], rtl8019_e9346cr[0]};
                         default: begin
                         end
                     endcase
                 end
                 5'h02: begin
                     case (current_page)
-                        2'b00: pstop_register <= cpu_data_in[15:8];
-                        2'b01: par_registers[1] <= cpu_data_in[15:8];
+                        2'b00: pstop_register <= cpu_write_byte;
+                        2'b01: par_registers[1] <= cpu_write_byte;
                         default: begin
                         end
                     endcase
                 end
                 5'h03: begin
                     case (current_page)
-                        2'b00: bnry_register <= cpu_data_in[15:8];
-                        2'b01: par_registers[2] <= cpu_data_in[15:8];
+                        2'b00: bnry_register <= cpu_write_byte;
+                        2'b01: par_registers[2] <= cpu_write_byte;
+                        2'b11: if (rtl8019_config_write_enable) begin
+                            rtl8019_config0 <= {cpu_write_byte[7:6], rtl8019_config0[5:0]};
+                        end
                         default: begin
                         end
                     endcase
                 end
                 5'h04: begin
                     case (current_page)
-                        2'b00: tpsr_register <= cpu_data_in[15:8];
-                        2'b01: par_registers[3] <= cpu_data_in[15:8];
+                        2'b00: tpsr_register <= cpu_write_byte;
+                        2'b01: par_registers[3] <= cpu_write_byte;
+                        2'b11: if (rtl8019_config_write_enable) begin
+                            rtl8019_config1 <= {cpu_write_byte[7], rtl8019_config1[6:0]};
+                        end
                         default: begin
                         end
                     endcase
                 end
                 5'h05: begin
                     case (current_page)
-                        2'b00: tbcr_register[7:0] <= cpu_data_in[15:8];
-                        2'b01: par_registers[4] <= cpu_data_in[15:8];
+                        2'b00: tbcr_register[7:0] <= cpu_write_byte;
+                        2'b01: par_registers[4] <= cpu_write_byte;
+                        2'b11: if (rtl8019_config_write_enable) begin
+                            rtl8019_config2 <= {cpu_write_byte[7:5], rtl8019_config2[4:0]};
+                        end
                         default: begin
                         end
                     endcase
                 end
                 5'h06: begin
                     case (current_page)
-                        2'b00: tbcr_register[15:8] <= cpu_data_in[15:8];
-                        2'b01: par_registers[5] <= cpu_data_in[15:8];
+                        2'b00: tbcr_register[15:8] <= cpu_write_byte;
+                        2'b01: par_registers[5] <= cpu_write_byte;
+                        2'b11: if (rtl8019_config_write_enable) begin
+                            rtl8019_config3 <= {rtl8019_config3[7:3], cpu_write_byte[2:1], rtl8019_config3[0]};
+                        end
                         default: begin
                         end
                     endcase
                 end
                 5'h07: begin
                     case (current_page)
-                        2'b00: isr_register <= isr_register & ~cpu_data_in[15:8];
-                        2'b01: curr_register <= cpu_data_in[15:8];
+                        2'b00: isr_register <= isr_register & ~cpu_write_byte;
+                        2'b01: curr_register <= cpu_write_byte;
                         default: begin
                         end
                     endcase
                 end
                 5'h08: begin
                     case (current_page)
-                        2'b00: remote_dma_addr[7:0] <= cpu_data_in[15:8];
-                        2'b01: mar_registers[0] <= cpu_data_in[15:8];
+                        2'b00: remote_dma_addr[7:0] <= cpu_write_byte;
+                        2'b01: mar_registers[0] <= cpu_write_byte;
                         default: begin
                         end
                     endcase
                 end
                 5'h09: begin
                     case (current_page)
-                        2'b00: remote_dma_addr[15:8] <= cpu_data_in[15:8];
-                        2'b01: mar_registers[1] <= cpu_data_in[15:8];
+                        2'b00: remote_dma_addr[15:8] <= cpu_write_byte;
+                        2'b01: mar_registers[1] <= cpu_write_byte;
                         default: begin
                         end
                     endcase
                 end
                 5'h0A: begin
                     case (current_page)
-                        2'b00: remote_byte_count[7:0] <= cpu_data_in[15:8];
-                        2'b01: mar_registers[2] <= cpu_data_in[15:8];
+                        2'b00: remote_byte_count[7:0] <= cpu_write_byte;
+                        2'b01: mar_registers[2] <= cpu_write_byte;
                         default: begin
                         end
                     endcase
                 end
                 5'h0B: begin
                     case (current_page)
-                        2'b00: remote_byte_count[15:8] <= cpu_data_in[15:8];
-                        2'b01: mar_registers[3] <= cpu_data_in[15:8];
+                        2'b00: remote_byte_count[15:8] <= cpu_write_byte;
+                        2'b01: mar_registers[3] <= cpu_write_byte;
                         default: begin
                         end
                     endcase
@@ -731,37 +953,34 @@ always @(posedge clk) begin
                 5'h0C: begin
                     case (current_page)
                         2'b00: begin
-                            rcr_register <= cpu_data_in[15:8];
+                            rcr_register <= cpu_write_byte;
                             rx_poll_enabled <= 1'b1;
-                            bg_poll_counter <= 8'h00;
-                            shm_sync_enabled <= 1'b1;
-                            bg_sync_slot <= 6'd0;
                         end
-                        2'b01: mar_registers[4] <= cpu_data_in[15:8];
+                        2'b01: mar_registers[4] <= cpu_write_byte;
                         default: begin
                         end
                     endcase
                 end
                 5'h0D: begin
                     case (current_page)
-                        2'b00: tcr_register <= cpu_data_in[15:8];
-                        2'b01: mar_registers[5] <= cpu_data_in[15:8];
+                        2'b00: tcr_register <= cpu_write_byte;
+                        2'b01: mar_registers[5] <= cpu_write_byte;
                         default: begin
                         end
                     endcase
                 end
                 5'h0E: begin
                     case (current_page)
-                        2'b00: dcr_register <= cpu_data_in[15:8];
-                        2'b01: mar_registers[6] <= cpu_data_in[15:8];
+                        2'b00: dcr_register <= {1'b1, cpu_write_byte[6:0]};
+                        2'b01: mar_registers[6] <= cpu_write_byte;
                         default: begin
                         end
                     endcase
                 end
                 5'h0F: begin
                     case (current_page)
-                        2'b00: imr_register <= cpu_data_in[15:8];
-                        2'b01: mar_registers[7] <= cpu_data_in[15:8];
+                        2'b00: imr_register <= cpu_write_byte;
+                        2'b01: mar_registers[7] <= cpu_write_byte;
                         default: begin
                         end
                     endcase
@@ -770,10 +989,14 @@ always @(posedge clk) begin
                 end
             endcase
 
-            if (rx_poll_enabled || shm_sync_enabled || tx_request_pending) begin
+            if (shm_sync_enabled || tx_request_pending) begin
                 shm_sync_enabled <= 1'b1;
                 bg_sync_slot <= 6'd0;
             end
+        end
+
+        if (sel_ethernet && cpu_rd && is_reset_port_access && !sel_ethernet_shm) begin
+            apply_nic_reset();
         end
 
         if (tx_complete_pending) begin
@@ -794,6 +1017,38 @@ always @(posedge clk) begin
             end
             shm_sync_enabled <= 1'b1;
             bg_sync_slot <= 6'd0;
+        end
+
+        if (eth_dma_req && !eth_dma_ready) begin
+            if (eth_dma_wait_counter != ETH_DMA_TIMEOUT_CYCLES) begin
+                eth_dma_wait_counter <= eth_dma_wait_counter + 10'd1;
+            end else begin
+                eth_dma_wait_counter <= 10'd0;
+                debug_dma_timeout_sticky <= 1'b1;
+
+                if (data_port_read_pending || data_port_write_pending ||
+                    (sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr))) begin
+                    if (bg_dma_inflight) begin
+                        bg_dma_inflight <= 1'b0;
+                        bg_state <= BG_IDLE;
+                        bg_polling_rx_flags <= 1'b0;
+                        bg_clear_rx_avail <= 1'b0;
+                        bg_poll_counter <= BG_POLL_RELOAD;
+                    end
+                    complete_data_port_transfer(16'hFFFF);
+                end else if (bg_dma_inflight) begin
+                    eth_dma_req <= 1'b0;
+                    bg_dma_inflight <= 1'b0;
+                    bg_state <= BG_IDLE;
+                    bg_polling_rx_flags <= 1'b0;
+                    bg_clear_rx_avail <= 1'b0;
+                    bg_poll_counter <= BG_POLL_RELOAD;
+                end else begin
+                    eth_dma_req <= 1'b0;
+                end
+            end
+        end else begin
+            eth_dma_wait_counter <= 10'd0;
         end
 
         if (eth_dma_req && eth_dma_ready) begin
@@ -904,96 +1159,179 @@ always @(posedge clk) begin
                     end
                 endcase
             end else begin
-                if (!eth_dma_write) begin
-                    if (data_port_word_mode) begin
-                        data_port_read_data <= eth_dma_rdata;
-                    end else if (data_port_byte_addr[0]) begin
-                        data_port_read_data <= {eth_dma_rdata[7:0], 8'h00};
+                complete_data_port_transfer(eth_dma_rdata);
+            end
+        end
+
+        if (data_port_cycle_start && cpu_wr &&
+            !data_port_transfer_done &&
+            !data_port_dma_complete_now && !data_port_dma_timeout_now &&
+            !data_port_write_pending && !data_port_read_pending && !eth_dma_req) begin
+            if (~cpu_uds || ~cpu_lds) begin
+                if (remote_dma_prom_region) begin
+                    data_port_transfer_done <= 1'b1;
+                    if (dcr_word_mode) begin
+                        if (dcr_byte_swap) begin
+                            if (!cpu_uds) prom_shadow[{remote_dma_addr[4:1], 1'b0}] <= cpu_data_in[7:0];
+                            if (!cpu_lds) prom_shadow[{remote_dma_addr[4:1], 1'b1}] <= cpu_data_in[15:8];
+                        end else begin
+                            if (!cpu_uds) prom_shadow[{remote_dma_addr[4:1], 1'b0}] <= cpu_data_in[15:8];
+                            if (!cpu_lds) prom_shadow[{remote_dma_addr[4:1], 1'b1}] <= cpu_data_in[7:0];
+                        end
+                    end else if (!remote_dma_addr[0]) begin
+                        prom_shadow[remote_dma_addr[4:0]] <= cpu_write_byte;
                     end else begin
-                        data_port_read_data <= {eth_dma_rdata[15:8], 8'h00};
+                        prom_shadow[remote_dma_addr[4:0]] <= cpu_write_byte;
+                    end
+                    data_port_word_mode <= dcr_word_mode;
+                    data_port_byte_addr <= remote_dma_addr;
+                    eth_dma_req <= 1'b0;
+                    eth_dma_write <= 1'b0;
+                    eth_dma_uds <= 1'b1;
+                    eth_dma_lds <= 1'b1;
+                    if (dcr_word_mode) begin
+                        remote_dma_addr <= remote_dma_addr + 16'h0002;
+                        if (remote_byte_count > 16'h0002) begin
+                            remote_byte_count <= remote_byte_count - 16'h0002;
+                        end else begin
+                            remote_byte_count <= 16'h0000;
+                            isr_register <= isr_register | ISR_RDC;
+                            if (shm_sync_enabled || tx_request_pending) begin
+                                shm_sync_enabled <= 1'b1;
+                                bg_sync_slot <= 6'd0;
+                            end
+                        end
+                    end else begin
+                        remote_dma_addr <= remote_dma_addr + 16'h0001;
+                        if (remote_byte_count > 16'h0001) begin
+                            remote_byte_count <= remote_byte_count - 16'h0001;
+                        end else begin
+                            remote_byte_count <= 16'h0000;
+                            isr_register <= isr_register | ISR_RDC;
+                            if (shm_sync_enabled || tx_request_pending) begin
+                                shm_sync_enabled <= 1'b1;
+                                bg_sync_slot <= 6'd0;
+                            end
+                        end
+                    end
+                end else if (remote_dma_pmem_region) begin
+                    data_port_write_pending <= 1'b1;
+                    data_port_transfer_done <= 1'b0;
+                    data_port_word_mode <= dcr_word_mode;
+                    data_port_byte_addr <= remote_dma_addr;
+                    eth_dma_req <= 1'b1;
+                    eth_dma_write <= 1'b1;
+                    eth_dma_addr <= ETH_SHM_NE_MEMORY[15:1] + remote_dma_pmem_word_offset;
+
+                    if (dcr_word_mode) begin
+                        eth_dma_wdata <= dcr_byte_swap ? {cpu_data_in[7:0], cpu_data_in[15:8]}
+                                                       : cpu_data_in;
+                        eth_dma_uds <= 1'b0;
+                        eth_dma_lds <= 1'b0;
+                    end else begin
+                        eth_dma_wdata <= remote_dma_addr[0] ? {8'h00, (~cpu_uds ? cpu_data_in[15:8] : cpu_data_in[7:0])}
+                                                           : {(~cpu_uds ? cpu_data_in[15:8] : cpu_data_in[7:0]), 8'h00};
+                        eth_dma_uds <= remote_dma_addr[0] ? 1'b1 : 1'b0;
+                        eth_dma_lds <= remote_dma_addr[0] ? 1'b0 : 1'b1;
+                    end
+                end else begin
+                    data_port_transfer_done <= 1'b1;
+                    data_port_word_mode <= dcr_word_mode;
+                    data_port_byte_addr <= remote_dma_addr;
+                    eth_dma_req <= 1'b0;
+                    eth_dma_write <= 1'b0;
+                    eth_dma_uds <= 1'b1;
+                    eth_dma_lds <= 1'b1;
+                    if (dcr_word_mode) begin
+                        remote_dma_addr <= remote_dma_addr + 16'h0002;
+                        if (remote_byte_count > 16'h0002) begin
+                            remote_byte_count <= remote_byte_count - 16'h0002;
+                        end else begin
+                            remote_byte_count <= 16'h0000;
+                            isr_register <= isr_register | ISR_RDC;
+                            if (shm_sync_enabled || tx_request_pending) begin
+                                shm_sync_enabled <= 1'b1;
+                                bg_sync_slot <= 6'd0;
+                            end
+                        end
+                    end else begin
+                        remote_dma_addr <= remote_dma_addr + 16'h0001;
+                        if (remote_byte_count > 16'h0001) begin
+                            remote_byte_count <= remote_byte_count - 16'h0001;
+                        end else begin
+                            remote_byte_count <= 16'h0000;
+                            isr_register <= isr_register | ISR_RDC;
+                            if (shm_sync_enabled || tx_request_pending) begin
+                                shm_sync_enabled <= 1'b1;
+                                bg_sync_slot <= 6'd0;
+                            end
+                        end
                     end
                 end
-
-                if (data_port_word_mode) begin
-                    remote_dma_addr <= data_port_byte_addr + 16'h0002;
+            end
+        end else if (data_port_cycle_start && cpu_rd &&
+                     !data_port_transfer_done &&
+                     !data_port_dma_complete_now && !data_port_dma_timeout_now &&
+                     !data_port_read_pending && !data_port_write_pending && !eth_dma_req) begin
+            if (remote_dma_prom_region) begin
+                data_port_transfer_done <= 1'b1;
+                if (dcr_word_mode) begin
+                    data_port_read_data <= maybe_swap_word(prom_read_word, dcr_byte_swap);
+                    remote_dma_addr <= remote_dma_addr + 16'h0002;
                     if (remote_byte_count > 16'h0002) begin
                         remote_byte_count <= remote_byte_count - 16'h0002;
                     end else begin
                         remote_byte_count <= 16'h0000;
                         isr_register <= isr_register | ISR_RDC;
-                        if (rx_poll_enabled || shm_sync_enabled || tx_request_pending) begin
-                            shm_sync_enabled <= 1'b1;
-                            bg_sync_slot <= 6'd0;
-                        end
                     end
                 end else begin
-                    remote_dma_addr <= data_port_byte_addr + 16'h0001;
+                    data_port_read_data <= {prom_read_byte, prom_read_byte};
+                    remote_dma_addr <= remote_dma_addr + 16'h0001;
                     if (remote_byte_count > 16'h0001) begin
                         remote_byte_count <= remote_byte_count - 16'h0001;
                     end else begin
                         remote_byte_count <= 16'h0000;
                         isr_register <= isr_register | ISR_RDC;
-                        if (rx_poll_enabled || shm_sync_enabled || tx_request_pending) begin
-                            shm_sync_enabled <= 1'b1;
-                            bg_sync_slot <= 6'd0;
-                        end
                     end
                 end
-
-                eth_dma_req <= 1'b0;
-                data_port_transfer_done <= 1'b1;
-            end
-        end
-
-        if (sel_ethernet && cpu_wr && is_data_port_access &&
-            !data_port_write_pending && !data_port_read_pending && !eth_dma_req) begin
-            if (~cpu_uds || ~cpu_lds) begin
-                data_port_write_pending <= 1'b1;
+            end else if (remote_dma_pmem_region) begin
+                data_port_read_pending <= 1'b1;
                 data_port_transfer_done <= 1'b0;
                 data_port_word_mode <= dcr_word_mode;
                 data_port_byte_addr <= remote_dma_addr;
                 eth_dma_req <= 1'b1;
-                eth_dma_write <= 1'b1;
-                eth_dma_addr <= ETH_SHM_NE_MEMORY[15:1] + remote_dma_local_word_offset;
-
+                eth_dma_write <= 1'b0;
+                eth_dma_addr <= ETH_SHM_NE_MEMORY[15:1] + remote_dma_pmem_word_offset;
+                eth_dma_wdata <= 16'h0000;
+                eth_dma_uds <= remote_dma_addr[0] ? 1'b1 : 1'b0;
+                eth_dma_lds <= remote_dma_addr[0] ? 1'b0 : 1'b1;
+            end else begin
+                data_port_transfer_done <= 1'b1;
                 if (dcr_word_mode) begin
-                    eth_dma_wdata <= cpu_data_in;
-                    eth_dma_uds <= 1'b0;
-                    eth_dma_lds <= 1'b0;
+                    data_port_read_data <= 16'hFFFF;
+                    remote_dma_addr <= remote_dma_addr + 16'h0002;
+                    if (remote_byte_count > 16'h0002) begin
+                        remote_byte_count <= remote_byte_count - 16'h0002;
+                    end else begin
+                        remote_byte_count <= 16'h0000;
+                        isr_register <= isr_register | ISR_RDC;
+                    end
                 end else begin
-                    eth_dma_wdata <= remote_dma_addr[0] ? {8'h00, (~cpu_uds ? cpu_data_in[15:8] : cpu_data_in[7:0])}
-                                                       : {(~cpu_uds ? cpu_data_in[15:8] : cpu_data_in[7:0]), 8'h00};
-                    eth_dma_uds <= remote_dma_addr[0] ? 1'b1 : 1'b0;
-                    eth_dma_lds <= remote_dma_addr[0] ? 1'b0 : 1'b1;
+                    data_port_read_data <= 16'hFFFF;
+                    remote_dma_addr <= remote_dma_addr + 16'h0001;
+                    if (remote_byte_count > 16'h0001) begin
+                        remote_byte_count <= remote_byte_count - 16'h0001;
+                    end else begin
+                        remote_byte_count <= 16'h0000;
+                        isr_register <= isr_register | ISR_RDC;
+                    end
                 end
             end
-        end else if (sel_ethernet && cpu_rd && is_data_port_access &&
-                     !data_port_read_pending && !data_port_write_pending && !eth_dma_req) begin
-            data_port_read_pending <= 1'b1;
-            data_port_transfer_done <= 1'b0;
-            data_port_word_mode <= dcr_word_mode;
-            data_port_byte_addr <= remote_dma_addr;
-            eth_dma_req <= 1'b1;
-            eth_dma_write <= 1'b0;
-            eth_dma_addr <= ETH_SHM_NE_MEMORY[15:1] + remote_dma_local_word_offset;
-            eth_dma_wdata <= 16'h0000;
-            eth_dma_uds <= remote_dma_addr[0] ? 1'b1 : 1'b0;
-            eth_dma_lds <= remote_dma_addr[0] ? 1'b0 : 1'b1;
         end
 
-        if (!sel_ethernet || !is_data_port_access || !cpu_rd) begin
-            data_port_read_pending <= 1'b0;
-            if (!cpu_rd) begin
-                data_port_transfer_done <= 1'b0;
-            end
-        end
-
-        if (!sel_ethernet || !is_data_port_access || !cpu_wr) begin
-            data_port_write_pending <= 1'b0;
-            if (!cpu_wr) begin
-                data_port_transfer_done <= 1'b0;
-            end
-        end
+        // Keep data-port pending state alive until the DMA side completes or
+        // times out. Real bus strobes can drop before the async memory path
+        // answers, and clearing these flags early loses RDC completion.
 
         if (bg_state == BG_IDLE) begin
             if (!debug_bg_disable && receiver_active && (bg_poll_counter != 8'h00)) begin
@@ -1001,6 +1339,7 @@ always @(posedge clk) begin
             end
             if (!debug_bg_disable &&
                 !eth_dma_req &&
+                !local_remote_dma_active &&
                 !(sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr))) begin
                 if (((shm_sync_enabled || tx_request_pending) &&
                      (mirrored_fpga_flags != fpga_owned_flags)) ||
@@ -1015,12 +1354,14 @@ always @(posedge clk) begin
                 end
             end
         end else if (debug_bg_disable && !eth_dma_req && !bg_dma_inflight &&
+                     !local_remote_dma_active &&
                      !(sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr))) begin
             bg_state <= BG_IDLE;
             bg_polling_rx_flags <= 1'b0;
             bg_clear_rx_avail <= 1'b0;
             bg_poll_counter <= BG_POLL_RELOAD;
         end else if (!eth_dma_req && !bg_dma_inflight &&
+                     !local_remote_dma_active &&
                      !(sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr))) begin
             case (bg_state)
                 BG_READ_FLAGS_REQ: begin
@@ -1136,9 +1477,11 @@ assign effective_addr = {1'b0, cpu_addr};
 assign byte_addr = effective_addr << 1;  // Convert to byte address
 
 
-// Dataport detection: Only 0xEA1C40 -> byte_addr 0x0C40 -> effective_addr 0x0620
-// Note: Simplified to use only the 0xC00 range data port
-assign is_data_port_access = (byte_addr == 16'h0C40);
+// The RTL8019 data and reset ports alias over full register blocks.
+// Longword monitor reads can hit the second word within those blocks, so
+// decode the entire windows instead of only the first entry.
+assign is_data_port_access = (byte_addr >= 16'h0C40) && (byte_addr <= 16'h0C5F);
+assign is_reset_port_access = (byte_addr >= 16'h0C60) && (byte_addr <= 16'h0C7F);
 
 // Register access detection: Only 0xEA1C00-0xEA1C3F range (byte addresses)
 // Removed 0xEA1600 range for simplification
@@ -1151,8 +1494,8 @@ always @(*) begin
     reg_index_0c00 = byte_addr[6:2];
 end
 
-assign register_select = is_data_port_access ? 5'd16 :          // Data port
-                         is_register_access ? reg_index_0c00 :  // Register index
+assign register_select = is_data_port_access ? 5'd16 :                // Data port
+                         (is_register_access || is_reset_port_access) ? reg_index_0c00 :  // Register/reset index
                          5'd31;  // Invalid
 
 // Output logic - immediate response with full register set support
@@ -1165,149 +1508,168 @@ always @(*) begin
         if (is_data_port_access) begin
             cpu_data_out = data_port_read_data;
         end
-        else if (is_register_access) begin
+        else if (is_register_access || is_reset_port_access) begin
             // Register reads - always handle register reads regardless of address translation
                 // Return register data - each register gets individual 4-byte space
                 // Register values in MSB (high byte) for Amiga bus compatibility
                 case (register_select[4:0])
                     // Register 0x00: CR - Command Register
                     5'h00: begin
-                        cpu_data_out = {cr_register, 8'h00};
+                        cpu_data_out = format_reg_read_data(cr_register, cpu_uds, cpu_lds);
                     end
 
                     // Register 0x01: CLDA0/PAR0 - Current Local DMA Address 0 or Physical Address Register 0
                     5'h01: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {pstart_register, 8'h00};  // Simplified CLDA0/PSTART view
-                            2'b01: cpu_data_out = {par_registers[0], 8'h00}; // PAR0
-                            default: cpu_data_out = {pstart_register, 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(8'h00, cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(par_registers[0], cpu_uds, cpu_lds);
+                            2'b10: cpu_data_out = format_reg_read_data(pstart_register, cpu_uds, cpu_lds);
+                            2'b11: cpu_data_out = format_reg_read_data(rtl8019_e9346cr, cpu_uds, cpu_lds);
+                            default: cpu_data_out = format_reg_read_data(8'h00, cpu_uds, cpu_lds);
                         endcase
                     end
 
                     // Register 0x02: CLDA1/PAR1 - Current Local DMA Address 1 or Physical Address Register 1
                     5'h02: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {pstop_register, 8'h00};   // Simplified CLDA1/PSTOP view
-                            2'b01: cpu_data_out = {par_registers[1], 8'h00}; // PAR1
-                            default: cpu_data_out = {pstop_register, 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(8'h00, cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(par_registers[1], cpu_uds, cpu_lds);
+                            2'b10: cpu_data_out = format_reg_read_data(pstop_register, cpu_uds, cpu_lds);
+                            default: cpu_data_out = format_reg_read_data(8'h00, cpu_uds, cpu_lds);
                         endcase
                     end
 
                     // Register 0x03: BNRY/PAR2 - Boundary Pointer or Physical Address Register 2
                     5'h03: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {bnry_register, 8'h00};    // BNRY
-                            2'b01: cpu_data_out = {par_registers[2], 8'h00}; // PAR2
-                            default: cpu_data_out = {bnry_register, 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(bnry_register, cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(par_registers[2], cpu_uds, cpu_lds);
+                            2'b11: cpu_data_out = format_reg_read_data(rtl8019_config0, cpu_uds, cpu_lds);
+                            default: cpu_data_out = format_reg_read_data(bnry_register, cpu_uds, cpu_lds);
                         endcase
                     end
 
                     // Register 0x04: TSR/PAR3 - Transmit Status Register or Physical Address Register 3
                     5'h04: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {tsr_register, 8'h00};     // TSR
-                            2'b01: cpu_data_out = {par_registers[3], 8'h00}; // PAR3
-                            default: cpu_data_out = {tsr_register, 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(tsr_register, cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(par_registers[3], cpu_uds, cpu_lds);
+                            2'b10: cpu_data_out = format_reg_read_data(tpsr_register, cpu_uds, cpu_lds);
+                            2'b11: cpu_data_out = format_reg_read_data(rtl8019_config1, cpu_uds, cpu_lds);
+                            default: cpu_data_out = format_reg_read_data(tsr_register, cpu_uds, cpu_lds);
                         endcase
                     end
 
                     // Register 0x05: NCR/PAR4 - Number of Collisions Register or Physical Address Register 4
                     5'h05: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {tbcr_register[7:0], 8'h00};   // Simplified TBCR0 view
-                            2'b01: cpu_data_out = {par_registers[4], 8'h00};     // PAR4
-                            default: cpu_data_out = {tbcr_register[7:0], 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(8'h00, cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(par_registers[4], cpu_uds, cpu_lds);
+                            2'b11: cpu_data_out = format_reg_read_data(rtl8019_config2, cpu_uds, cpu_lds);
+                            default: cpu_data_out = format_reg_read_data(8'h00, cpu_uds, cpu_lds);
                         endcase
                     end
 
                     // Register 0x06: FIFO/PAR5 - FIFO Register or Physical Address Register 5
                     5'h06: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {tbcr_register[15:8], 8'h00};  // Simplified TBCR1 view
-                            2'b01: cpu_data_out = {par_registers[5], 8'h00};     // PAR5
-                            default: cpu_data_out = {tbcr_register[15:8], 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(8'h00, cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(par_registers[5], cpu_uds, cpu_lds);
+                            2'b11: cpu_data_out = format_reg_read_data(rtl8019_config3, cpu_uds, cpu_lds);
+                            default: cpu_data_out = format_reg_read_data(8'h00, cpu_uds, cpu_lds);
                         endcase
                     end
 
                     // Register 0x07: ISR/CURR - Interrupt Status Register or Current Page Register
                     5'h07: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {isr_register, 8'h00};     // ISR - return actual interrupt status
-                            2'b01: cpu_data_out = {curr_register, 8'h00};    // CURR
-                            default: cpu_data_out = {isr_register, 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(isr_register, cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(curr_register, cpu_uds, cpu_lds);
+                            default: cpu_data_out = format_reg_read_data(isr_register, cpu_uds, cpu_lds);
                         endcase
                     end
 
                     // Register 0x08: CRDA0/MAR0 - Current Remote DMA Address 0 or Multicast Address Register 0
                     5'h08: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {remote_dma_addr[7:0], 8'h00};  // CRDA0
-                            2'b01: cpu_data_out = {mar_registers[0], 8'h00};      // MAR0
-                            default: cpu_data_out = {remote_dma_addr[7:0], 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(remote_dma_addr[7:0], cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(mar_registers[0], cpu_uds, cpu_lds);
+                            default: cpu_data_out = format_reg_read_data(remote_dma_addr[7:0], cpu_uds, cpu_lds);
                         endcase
                     end
 
                     // Register 0x09: CRDA1/MAR1 - Current Remote DMA Address 1 or Multicast Address Register 1
                     5'h09: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {remote_dma_addr[15:8], 8'h00}; // CRDA1
-                            2'b01: cpu_data_out = {mar_registers[1], 8'h00};      // MAR1
-                            default: cpu_data_out = {remote_dma_addr[15:8], 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(remote_dma_addr[15:8], cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(mar_registers[1], cpu_uds, cpu_lds);
+                            default: cpu_data_out = format_reg_read_data(remote_dma_addr[15:8], cpu_uds, cpu_lds);
                         endcase
                     end
 
                     // Register 0x0A: 8019ID0/MAR2 - RTL8019AS ID0 or Multicast Address Register 2
                     5'h0A: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {8'h50, 8'h00};                // RTL8019AS ID0 (read-only)
-                            2'b01: cpu_data_out = {mar_registers[2], 8'h00};     // MAR2
-                            default: cpu_data_out = {8'h00, 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(8'h50, cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(mar_registers[2], cpu_uds, cpu_lds);
+                            2'b11: cpu_data_out = format_reg_read_data(8'h50, cpu_uds, cpu_lds);
+                            default: cpu_data_out = 16'h0000;
                         endcase
                     end
 
                     // Register 0x0B: 8019ID1/MAR3 - RTL8019AS ID1 or Multicast Address Register 3
                     5'h0B: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {8'h70, 8'h00};                 // RTL8019AS ID1 (read-only)
-                            2'b01: cpu_data_out = {mar_registers[3], 8'h00};      // MAR3
-                            default: cpu_data_out = {8'h00, 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(8'h70, cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(mar_registers[3], cpu_uds, cpu_lds);
+                            2'b11: cpu_data_out = format_reg_read_data(8'h70, cpu_uds, cpu_lds);
+                            default: cpu_data_out = 16'h0000;
                         endcase
                     end
 
                     // Register 0x0C: RSR/MAR4 - Receive Status Register or Multicast Address Register 4
                     5'h0C: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {rsr_register, 8'h00};          // RSR
-                            2'b01: cpu_data_out = {mar_registers[4], 8'h00};      // MAR4
-                            default: cpu_data_out = {rsr_register, 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(rsr_register, cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(mar_registers[4], cpu_uds, cpu_lds);
+                            2'b10: cpu_data_out = format_reg_read_data(rcr_register, cpu_uds, cpu_lds);
+                            default: cpu_data_out = format_reg_read_data(rsr_register, cpu_uds, cpu_lds);
                         endcase
                     end
 
                     // Register 0x0D: CNTR0/MAR5 - Tally Counter 0 or Multicast Address Register 5
                     5'h0D: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {8'h00, 8'h00};                 // CNTR0
-                            2'b01: cpu_data_out = {mar_registers[5], 8'h00};      // MAR5
-                            default: cpu_data_out = {8'h00, 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(8'h00, cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(mar_registers[5], cpu_uds, cpu_lds);
+                            2'b10: cpu_data_out = format_reg_read_data(tcr_register, cpu_uds, cpu_lds);
+                            default: cpu_data_out = format_reg_read_data(8'h00, cpu_uds, cpu_lds);
                         endcase
                     end
 
                     // Register 0x0E: CNTR1/MAR6 - Tally Counter 1 or Multicast Address Register 6
                     5'h0E: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {8'h00, 8'h00}; // CNTR1
-                            2'b01: cpu_data_out = {mar_registers[6], 8'h00}; // MAR6
-                            default: cpu_data_out = {8'h00, 8'h00};
+                            2'b00: cpu_data_out = 16'h0000;
+                            2'b01: cpu_data_out = format_reg_read_data(mar_registers[6], cpu_uds, cpu_lds);
+                            2'b10: cpu_data_out = format_reg_read_data(dcr_register, cpu_uds, cpu_lds);
+                            2'b11: cpu_data_out = format_reg_read_data(8'h50, cpu_uds, cpu_lds);
+                            default: cpu_data_out = 16'h0000;
                         endcase
                     end
 
                     // Register 0x0F: IMR/MAR7 - Interrupt Mask Register or Multicast Address Register 7
                     5'h0F: begin
                         case (current_page)
-                            2'b00: cpu_data_out = {imr_register, 8'h00}; // IMR - return actual interrupt mask
-                            2'b01: cpu_data_out = {mar_registers[7], 8'h00}; // MAR7
-                            default: cpu_data_out = {imr_register, 8'h00};
+                            2'b00: cpu_data_out = format_reg_read_data(8'h00, cpu_uds, cpu_lds);
+                            2'b01: cpu_data_out = format_reg_read_data(mar_registers[7], cpu_uds, cpu_lds);
+                            2'b10: cpu_data_out = format_reg_read_data(imr_register, cpu_uds, cpu_lds);
+                            2'b11: cpu_data_out = format_reg_read_data(8'h70, cpu_uds, cpu_lds);
+                            default: cpu_data_out = format_reg_read_data(8'h00, cpu_uds, cpu_lds);
                         endcase
+                    end
+                    5'h1F: begin
+                        cpu_data_out = format_reg_read_data(reset_port_latch, cpu_uds, cpu_lds);
                     end
 
                     default: cpu_data_out = 16'h0000;  // Invalid register
@@ -1325,8 +1687,7 @@ module ethernet_issp
 #(
     parameter PROBE_WIDTH = 128,
     parameter SOURCE_WIDTH = 2,
-    parameter INSTANCE_ID = "ETHDBG",
-    parameter SLD_INSTANCE_INDEX = 17
+    parameter INSTANCE_ID = "ETHDBG"
 )
 (
     input  wire                    clk,
@@ -1363,8 +1724,7 @@ module ethernet_issp
         altsource_probe_component.enable_metastability = "NO",
         altsource_probe_component.instance_id = INSTANCE_ID,
         altsource_probe_component.probe_width = PROBE_WIDTH,
-        altsource_probe_component.sld_auto_instance_index = "NO",
-        altsource_probe_component.sld_instance_index = SLD_INSTANCE_INDEX,
+        altsource_probe_component.sld_auto_instance_index = "YES",
         altsource_probe_component.source_initial_value = "0",
         altsource_probe_component.source_width = SOURCE_WIDTH;
 `elsif SYNTHESIS
@@ -1396,8 +1756,7 @@ module ethernet_issp
         altsource_probe_component.enable_metastability = "NO",
         altsource_probe_component.instance_id = INSTANCE_ID,
         altsource_probe_component.probe_width = PROBE_WIDTH,
-        altsource_probe_component.sld_auto_instance_index = "NO",
-        altsource_probe_component.sld_instance_index = SLD_INSTANCE_INDEX,
+        altsource_probe_component.sld_auto_instance_index = "YES",
         altsource_probe_component.source_initial_value = "0",
         altsource_probe_component.source_width = SOURCE_WIDTH;
 `else

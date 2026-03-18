@@ -71,6 +71,7 @@ module cpu_wrapper
 
 	// Ethernet signals
 	input             sel_ethernet,    // From Gary module
+	input             ethernet_cfg_ena,
 	output            ethernet_ena,
 	output reg  [7:0] ethernet_base,
 	output            sel_ethernet_shm,  // Shared memory selection for ethernet module
@@ -400,6 +401,7 @@ end
 
 reg       ac_toccata;
 reg       ac_ethernet;
+reg       ethernet_cfg_ena_d;
 reg [2:0] ac_memcard;
 reg [3:0] autocfg_data;
 
@@ -440,7 +442,7 @@ always @(*) begin
 		endcase
 	end
 	// Ethernet card in Zorro II I/O space
-	else if(ac_ethernet) begin
+	else if(ethernet_cfg_ena && ac_ethernet) begin
 		case (chip_addr[6:1])
 			6'h0: autocfg_data = 4'b1100; // Zorro-II card, no link, no ROM
 			6'h1: autocfg_data = 4'b0001; // Next board not related, size 64k
@@ -493,7 +495,8 @@ always @(*) begin
 end
 
 // Add Ethernet to the autoconfig chain after Toccata as a Zorro II I/O card.
-wire sel_autoconfig = (chip_addr[23:16] == 8'b11101000) && (ac_memcard || ac_toccata || ac_ethernet); //$E80000 - $E8FFFF
+wire sel_autoconfig = (chip_addr[23:16] == 8'b11101000) &&
+					  (ac_memcard || ac_toccata || (ethernet_cfg_ena && ac_ethernet)); //$E80000 - $E8FFFF
 
 reg       z2ram_ena;
 reg [4:0] z3ram_base0;
@@ -507,7 +510,8 @@ always @(posedge clk) begin
 	if (~reset | ~reset_out) begin
 		ac_memcard  <= cpucfg[1] ? fastramcfg : fastramcfg[2] ? 3'd3 : {fastramcfg[2], fastramcfg[1:0]}; // Use original fastramcfg logic
 		ac_toccata  <= 1;
-		ac_ethernet <= 1;
+		ac_ethernet <= ethernet_cfg_ena;
+		ethernet_cfg_ena_d <= ethernet_cfg_ena;
 		z2ram_ena   <= 0;
 		z3ram_ena0  <= 0;
 		z3ram_ena1  <= 0;
@@ -515,46 +519,58 @@ always @(posedge clk) begin
 		z3ram_base1 <= 1;
 		ethernet_base <= 8'hEA;
 	end
-	else if (sel_autoconfig && ~chip_rw && ~chip_uds && old_uds) begin
-		if(~ac_memcard[2] && ac_memcard[1:0]) begin
-			if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, ZII RAM
-				z2ram_ena <= 1;
-				ac_memcard <= 0;
-			end
+	else begin
+		ethernet_cfg_ena_d <= ethernet_cfg_ena;
+
+		if (ethernet_cfg_ena_d && !ethernet_cfg_ena) begin
+			ac_ethernet <= 0;
+			ethernet_base <= 8'hEA;
 		end
-		else if(ac_toccata) begin
-			if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, Toccata card in ZII io space ($E90000)
-				toccata_base <= cpu_dout[7:0];
-				ac_toccata<=0;
-			end
+		else if (!ethernet_cfg_ena_d && ethernet_cfg_ena) begin
+			ac_ethernet <= 1;
+			ethernet_base <= 8'hEA;
 		end
-		// Ethernet uses Zorro II I/O autoconfig.
-		else if(ac_ethernet) begin
-			if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, Ethernet card in ZII io space ($EA0000)
-				ethernet_base <= cpu_dout[7:0];
-				ac_ethernet <= 0;
-			end
-		end
-		else if(ac_memcard[2]) begin
-			if(chip_addr[6:1] == 6'b100010) begin // Register 0x44, assign base address to ZIII RAM.
-				if(~ac_memcard[1]) begin
-					z3ram_base1 <= cpu_dout[15:12]; //256MB chunk
-					z3ram_ena1 <= 1;
-					ac_memcard <= {ac_memcard[0], ac_memcard[0], 1'b0};
-				end
-				else begin
-					z3ram_base0 <= cpu_dout[15:11]; //128MB chunk
-					z3ram_ena0 <= 1;
+		else if (sel_autoconfig && ~chip_rw && ~chip_uds && old_uds) begin
+			if(~ac_memcard[2] && ac_memcard[1:0]) begin
+				if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, ZII RAM
+					z2ram_ena <= 1;
 					ac_memcard <= 0;
 				end
 			end
-		end
-		else if(ac_memcard[1]) begin
-			if(chip_addr[6:1] == 6'b100010) begin // Register 0x44, assign base address to ZIII RAM.
-				if(~ac_memcard[1]) begin
-					z3ram_base1 <= cpu_dout[15:12]; //256MB chunk
-					z3ram_ena1 <= 1;
-					ac_memcard <= {ac_memcard[0], ac_memcard[0], 1'b0};
+			else if(ac_toccata) begin
+				if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, Toccata card in ZII io space ($E90000)
+					toccata_base <= cpu_dout[7:0];
+					ac_toccata<=0;
+				end
+			end
+			// Ethernet uses Zorro II I/O autoconfig.
+			else if(ethernet_cfg_ena && ac_ethernet) begin
+				if (chip_addr[6:1] == 6'b100100) begin // Register 0x48 - config, Ethernet card in ZII io space ($EA0000)
+					ethernet_base <= cpu_dout[7:0];
+					ac_ethernet <= 0;
+				end
+			end
+			else if(ac_memcard[2]) begin
+				if(chip_addr[6:1] == 6'b100010) begin // Register 0x44, assign base address to ZIII RAM.
+					if(~ac_memcard[1]) begin
+						z3ram_base1 <= cpu_dout[15:12]; //256MB chunk
+						z3ram_ena1 <= 1;
+						ac_memcard <= {ac_memcard[0], ac_memcard[0], 1'b0};
+					end
+					else begin
+						z3ram_base0 <= cpu_dout[15:11]; //128MB chunk
+						z3ram_ena0 <= 1;
+						ac_memcard <= 0;
+					end
+				end
+			end
+			else if(ac_memcard[1]) begin
+				if(chip_addr[6:1] == 6'b100010) begin // Register 0x44, assign base address to ZIII RAM.
+					if(~ac_memcard[1]) begin
+						z3ram_base1 <= cpu_dout[15:12]; //256MB chunk
+						z3ram_ena1 <= 1;
+						ac_memcard <= {ac_memcard[0], ac_memcard[0], 1'b0};
+					end
 				end
 			end
 		end
@@ -562,7 +578,7 @@ always @(posedge clk) begin
 end
 
 assign toccata_ena = ~ac_toccata;
-assign ethernet_ena = ~ac_ethernet;
+assign ethernet_ena = ethernet_cfg_ena && ~ac_ethernet;
 
 // Ethernet interrupt is handled by the ethernet module in minimig.v
 assign eth_irq = 1'b0;  // Default assignment - actual interrupt is driven externally

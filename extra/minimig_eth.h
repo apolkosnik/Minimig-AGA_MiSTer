@@ -144,7 +144,11 @@
 #define NE_DCR_FT01       0x40      // FIFO Threshold Select
 
 // Memory layout
-#define NE_MEM_SIZE       0x8000    // 32KB memory
+#define NE_PROM_SIZE      0x0020    // 32-byte station PROM / low memory shadow
+#define NE_PMEM_START     0x4000    // Packet memory starts at NE address 0x4000
+#define NE_PMEM_SIZE      0x8000    // 32KB packet RAM
+#define NE_PMEM_END       (NE_PMEM_START + NE_PMEM_SIZE)
+#define NE_MEM_SIZE       NE_PMEM_END
 #define NE_PAGE_SIZE      0x100     // 256 bytes per page
 #define NE_RX_START       0x40      // RX buffer start page
 #define NE_RX_STOP        0x80      // RX buffer stop page
@@ -174,9 +178,9 @@
 #define ETH_TX_BUFFER     0x2000    // 1500 bytes - TX buffer
 #define ETH_RX_BUFFER     0x2600    // 1500 bytes - RX buffer  
 #define ETH_PACKET_INFO   0x2C00    // 512 bytes - packet info and metadata
-#define ETH_NE_MEMORY     0x3000    // 16KB - full NE2000 memory space
-#define ETH_DEBUG_INFO    0x7000    // 8KB - extensive debug info, logs, and statistics
-#define ETH_FUTURE_USE    0x9000    // 32KB - reserved for future expansion
+#define ETH_NE_MEMORY     0x3000    // 32KB compact backing store for NE packet RAM 0x4000-0xBFFF
+#define ETH_DEBUG_INFO    0xB000    // 4KB - extensive debug info, logs, and statistics
+#define ETH_FUTURE_USE    0xC000    // 16KB - reserved for future expansion
 
 // Control flags for FPGA<->HPS communication
 #define ETH_FLAG_RESET      0x0001  // Legacy HPS-side reset request/ack

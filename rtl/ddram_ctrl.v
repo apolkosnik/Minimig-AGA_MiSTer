@@ -51,7 +51,8 @@ module ddram_ctrl
 	input      [15:0] cpuWR,
 	output     [15:0] cpuRD,
 	input             ramshared,
-	output            ramready
+	output            ramready,
+	output            writeaccepted
 );
 
 wire ramsel = cpuCS & (~&cpustate | ~cpuU | ~cpuL);
@@ -124,6 +125,7 @@ always @ (posedge sysclk) begin
 end
 
 assign ramready = cache_hit || write_ena;
+assign writeaccepted = write_ack;
 
 assign DDRAM_CLK = sysclk;
 assign DDRAM_BURSTCNT = 1;

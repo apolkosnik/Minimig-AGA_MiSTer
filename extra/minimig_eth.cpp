@@ -60,6 +60,7 @@ static uint8_t *eth_shmem = 0;
 static uint32_t hps_heartbeat_counter = 0;
 static struct sockaddr_ll sock_addr;
 static char bridge_interface[16] = "eth0";
+static const uint8_t rtl8019_default_mac[6] = {0x52, 0x54, 0x05, 0x04, 0x03, 0x02};
 
 // Access ethernet shared memory through mapped region
 static void eth_write_shared_mem(uint32_t offset, const void *data, uint32_t size)
@@ -124,42 +125,79 @@ static uint32_t eth_read_shared_u32(uint32_t offset)
 
 static uint32_t eth_update_shared_flags(uint32_t clear_mask, uint32_t set_mask)
 {
-    uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS);
+    uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS) & 0xFFFFu;
+    flags &= (ETH_FLAG_FPGA_MIRROR_MASK | ETH_FLAG_HPS_OWNED_MASK);
     flags = (flags & ~clear_mask) | set_mask;
     eth_write_shared_u32(ETH_CTRL_FLAGS, flags);
     return flags;
 }
 
+static bool translate_ne_packet_addr(uint16_t addr, uint32_t* shared_offset)
+{
+    if (addr >= NE_PMEM_START && addr < NE_PMEM_END) {
+        *shared_offset = ETH_NE_MEMORY + (uint32_t)(addr - NE_PMEM_START);
+        return true;
+    }
+
+    return false;
+}
+
+static uint8_t synthetic_prom_byte(uint16_t addr)
+{
+    uint8_t mac_addr[6];
+    uint8_t prom[16] = {0};
+
+    eth_read_shared_mem(ETH_CTRL_MAC, mac_addr, sizeof(mac_addr));
+    memcpy(prom, mac_addr, 6);
+    prom[14] = 0x57;
+    prom[15] = 0x57;
+
+    return prom[(addr >> 1) & 0x0F];
+}
+
 // Helper functions to access NE2000 memory directly from shared memory
 static uint8_t read_ne_memory(uint16_t addr)
 {
-    if (addr >= NE_MEM_SIZE) {
-        eth_debug("NE2000 memory read beyond bounds: addr=0x%04X\n", addr);
-        return 0;
+    uint32_t shared_offset;
+
+    if (addr < NE_PROM_SIZE) {
+        return synthetic_prom_byte(addr);
     }
+
+    if (!translate_ne_packet_addr(addr, &shared_offset)) {
+        eth_debug("NE2000 memory read from unmapped addr=0x%04X\n", addr);
+        return 0xFF;
+    }
+
     uint8_t value;
-    eth_read_shared_mem(ETH_NE_MEMORY + addr, &value, 1);
+    eth_read_shared_mem(shared_offset, &value, 1);
     return value;
 }
 
 static void write_ne_memory(uint16_t addr, uint8_t value)
 {
-    if (addr >= NE_MEM_SIZE) {
-        eth_debug("NE2000 memory write beyond bounds: addr=0x%04X\n", addr);
+    uint32_t shared_offset;
+
+    if (!translate_ne_packet_addr(addr, &shared_offset)) {
+        eth_debug("NE2000 memory write to unmapped addr=0x%04X\n", addr);
         return;
     }
-    eth_write_shared_mem(ETH_NE_MEMORY + addr, &value, 1);
+
+    eth_write_shared_mem(shared_offset, &value, 1);
 }
 
 // read_ne_memory_block removed - unused after optimizations
 
 static void write_ne_memory_block(uint16_t addr, const void* data, uint16_t size)
 {
-    if (addr + size > NE_MEM_SIZE) {
+    uint32_t shared_offset;
+
+    if ((addr < NE_PMEM_START) || ((uint32_t)addr + size > NE_PMEM_END) ||
+        !translate_ne_packet_addr(addr, &shared_offset)) {
         eth_debug("NE2000 memory block write beyond bounds: addr=0x%04X, size=%d\n", addr, size);
         return;
     }
-    eth_write_shared_mem(ETH_NE_MEMORY + addr, data, size);
+    eth_write_shared_mem(shared_offset, data, size);
 }
 
 // Helper functions to access NE2000 registers directly from shared memory
@@ -214,6 +252,26 @@ static void read_eth_state(struct rtl8019_state* state) {
 static void read_shared_mac(uint8_t mac_addr[6])
 {
     eth_read_shared_mem(ETH_CTRL_MAC, mac_addr, 6);
+}
+
+static bool read_interface_mac(uint8_t mac_addr[6])
+{
+    struct ifreq ifr;
+
+    if (raw_socket < 0) {
+        return false;
+    }
+
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, bridge_interface, IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+
+    if (ioctl(raw_socket, SIOCGIFHWADDR, &ifr) < 0) {
+        return false;
+    }
+
+    memcpy(mac_addr, ifr.ifr_hwaddr.sa_data, 6);
+    return true;
 }
 
 // Initialize ethernet emulation
@@ -304,16 +362,30 @@ void minimig_eth_init()
     eth_debug("ETH: Socket bound to interface successfully\n");
     
     // Print summary of ethernet initialization
+    uint8_t host_mac[6];
     uint8_t shared_mac[6];
+    bool have_host_mac = read_interface_mac(host_mac);
+
     read_shared_mac(shared_mac);
 
     eth_debug("===============================================\n");
     eth_debug("ETH: X-Surf 100 Ethernet Initialized!\n");
     eth_debug("ETH: Amiga Address: 0x%06X\n", ETH_BOARD_ADDR);
     eth_debug("ETH: HPS Memory:    0x%08X\n", ETH_SHMEM_ADDR);
-    eth_debug("ETH: MAC Address:   %02X:%02X:%02X:%02X:%02X:%02X\n",
-           shared_mac[0], shared_mac[1], shared_mac[2],
-           shared_mac[3], shared_mac[4], shared_mac[5]);
+    if (have_host_mac) {
+        eth_debug("ETH: Host MAC:      %02X:%02X:%02X:%02X:%02X:%02X\n",
+               host_mac[0], host_mac[1], host_mac[2],
+               host_mac[3], host_mac[4], host_mac[5]);
+    } else {
+        eth_debug("ETH: Host MAC:      unavailable\n");
+    }
+    if (!memcmp(shared_mac, rtl8019_default_mac, sizeof(shared_mac))) {
+        eth_debug("ETH: RTL8019 MAC:   %02X:%02X:%02X:%02X:%02X:%02X\n",
+               shared_mac[0], shared_mac[1], shared_mac[2],
+               shared_mac[3], shared_mac[4], shared_mac[5]);
+    } else {
+        eth_debug("ETH: RTL8019 MAC:   pending shared mirror sync\n");
+    }
     eth_debug("ETH: Interface:     %s\n", bridge_interface);
     eth_debug("===============================================\n");
     
@@ -342,7 +414,8 @@ void minimig_eth_reset()
     memset(eth_shmem + ETH_PACKET_INFO, 0, 4);
 
     write_eth_state_stats(&state);
-    eth_update_shared_flags(ETH_FLAG_HPS_OWNED_MASK, 0);
+    eth_write_shared_u32(ETH_CTRL_FLAGS,
+                         eth_read_shared_u32(ETH_CTRL_FLAGS) & ETH_FLAG_FPGA_MIRROR_MASK);
     eth_write_shared_u32(ETH_HPS_SIGNATURE, 0xCAFEBABE);
     hps_heartbeat_counter = 0;
     eth_write_shared_u32(ETH_HPS_HEARTBEAT, hps_heartbeat_counter);
@@ -440,11 +513,11 @@ uint16_t minimig_eth_read_data()
     uint16_t data = 0;
     
     // Read from NE2000 memory
-    if (addr < NE_MEM_SIZE) {
+    if ((addr < NE_PROM_SIZE) || (addr >= NE_PMEM_START && addr < NE_PMEM_END)) {
         data = read_ne_memory(addr);
         if (read_ne_register(0, 0x0E) & NE_DCR_WTS) {  // DCR register
             // 16-bit mode
-            if (addr + 1 < NE_MEM_SIZE) {
+            if ((addr + 1 < NE_PROM_SIZE) || ((addr + 1) >= NE_PMEM_START && (addr + 1) < NE_PMEM_END)) {
                 data |= (read_ne_memory(addr + 1) << 8);
             }
             // FPGA automatically handles DMA address increment and byte count decrement
@@ -504,7 +577,7 @@ void transmit_packet()
     }
     
     uint16_t offset = page * NE_PAGE_SIZE;
-    if (offset + length > NE_MEM_SIZE) {
+    if ((offset < NE_PMEM_START) || ((uint32_t)offset + length > NE_PMEM_END)) {
         eth_debug("Packet exceeds memory bounds\n");
         state.tx_errors++;
         write_eth_state_stats(&state);
@@ -527,7 +600,7 @@ void transmit_packet()
     eth_debug("\n");
     
     // Send packet via raw socket - read directly from shared memory
-    uint8_t* packet_data = eth_shmem + ETH_NE_MEMORY + offset;
+    uint8_t* packet_data = eth_shmem + ETH_NE_MEMORY + (offset - NE_PMEM_START);
     if (send(raw_socket, packet_data, length, 0) < 0) {
         eth_debug("ETH: Failed to send packet: %s\n", strerror(errno));
         state.tx_errors++;
@@ -542,7 +615,7 @@ void transmit_packet()
 // Receive packet from host ethernet
 void receive_packet()
 {
-    uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS);
+    uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS) & 0xFFFFu;
     struct rtl8019_state state;
     read_eth_state(&state);
     if (raw_socket < 0 || !(flags & ETH_FLAG_ENABLED)) return;
@@ -620,7 +693,7 @@ void minimig_eth_poll()
 	else if(eth_shmem != (uint8_t *)-1)
 	{
         // Check for control flags from FPGA via shared memory
-        uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS);
+        uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS) & 0xFFFFu;
         
         // Update heartbeat counter every poll
         hps_heartbeat_counter++;
@@ -641,13 +714,15 @@ void minimig_eth_poll()
         // Debug output every 10000 polls (reduced frequency)
         if (++poll_count % 10000 == 0) {
             struct rtl8019_state state;
+            uint8_t cr_reg = read_ne_register(0, 0x00);
+            uint8_t curr_reg = read_ne_register(1, 0x07);
             read_eth_state(&state);
 
             // Read enabled status from shared memory
             bool enabled = (flags & ETH_FLAG_ENABLED) != 0;
             
-            eth_debug("ETH: Poll #%d, flags=0x%08X, enabled=%d, TX:%d, RX:%d, HB:%d\n", 
-                   poll_count, flags, enabled, 
+            eth_debug("ETH: Poll #%d, flags=0x%08X, enabled=%d, CR=0x%02X, CURR=0x%02X, P=%u, TX:%d, RX:%d, HB:%d\n",
+                   poll_count, flags, enabled, cr_reg, curr_reg, state.current_page,
                    state.tx_packets, state.rx_packets, hps_heartbeat_counter);
             //minimig_eth_test();
         }
@@ -663,7 +738,7 @@ void minimig_eth_poll()
         // Handle reset request
         if (flags & ETH_FLAG_RESET) {
             minimig_eth_reset();
-            flags = eth_read_shared_u32(ETH_CTRL_FLAGS);
+            flags = eth_read_shared_u32(ETH_CTRL_FLAGS) & 0xFFFFu;
         }
         
         // Check for incoming packets

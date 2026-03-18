@@ -20,6 +20,7 @@ assign HDMI_BOB_DEINT = 0;
 `include "build_id.v" 
 localparam CONF_STR = {
 	"Minimig;UART115200:230400,MIDI;",
+	"O8,Ethernet,Enabled,Disabled;",
 	"J,Red(Fire),Blue,Yellow,Green,RT,LT,Pause;",
 	"jn,A,B,X,Y,R,L,Start;",
 	"jp,B,A,X,Y,R,L,Start;",
@@ -67,6 +68,7 @@ wire [15:0] fpga_dout;
 wire [21:0] gamma_bus;
 
 wire  [7:0] uart_mode;
+wire        ethernet_cfg_ena = ~status[8];
 
 // Ethernet autoconfig signals (these come from cpu_wrapper)
 wire        ethernet_ena;   // Enabled after autoconfig completes
@@ -296,11 +298,40 @@ wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
 wire        zram_sel  = |ram_addr[28:26];
 wire        ramshared;
-wire [15:0] eth_dma_ddr_wdata = {eth_dma_wdata[7:0], eth_dma_wdata[15:8]};
-wire        eth_dma_ddr_u = eth_dma_lds;
-wire        eth_dma_ddr_l = eth_dma_uds;
-wire        eth_dma_grant = eth_dma_req & ~ram_sel;
+// ddram_ctrl already converts shared-memory accesses between the Amiga-facing
+// byte lanes and the raw DDR layout. Keep Ethernet DMA in the same Amiga-side
+// lane convention here so the write path is swapped exactly once.
+wire [15:0] eth_dma_ddr_wdata = eth_dma_wdata;
+wire        eth_dma_ddr_u = eth_dma_uds;
+wire        eth_dma_ddr_l = eth_dma_lds;
 wire [28:1] eth_dma_ddr_addr;
+reg         eth_dma_req_sys_d = 1'b0;
+reg         eth_dma_req_toggle_sys = 1'b0;
+reg  [28:1] eth_dma_addr_sys_hold = 28'h0000000;
+reg  [15:0] eth_dma_wdata_sys_hold = 16'h0000;
+reg         eth_dma_write_sys_hold = 1'b0;
+reg         eth_dma_u_sys_hold = 1'b1;
+reg         eth_dma_l_sys_hold = 1'b1;
+reg         eth_dma_req_toggle_114_meta = 1'b0;
+reg         eth_dma_req_toggle_114_sync = 1'b0;
+reg         eth_dma_req_toggle_114_sync_d = 1'b0;
+reg         eth_dma_active_114 = 1'b0;
+reg         eth_dma_done_toggle_114 = 1'b0;
+reg  [15:0] eth_dma_rdata_114 = 16'h0000;
+reg         eth_dma_write_114 = 1'b0;
+reg  [28:1] eth_dma_addr_114 = 28'h0000000;
+reg  [15:0] eth_dma_wdata_114 = 16'h0000;
+reg         eth_dma_u_114 = 1'b0;
+reg         eth_dma_l_114 = 1'b0;
+reg         eth_dma_done_toggle_sys_meta = 1'b0;
+reg         eth_dma_done_toggle_sys_sync = 1'b0;
+reg         eth_dma_done_toggle_sys_sync_d = 1'b0;
+reg  [15:0] eth_dma_rdata_sys = 16'h0000;
+wire        ram_writeaccepted2_raw;
+// Give Ethernet DMA priority on the shared DDR port. Tight CPU polling loops
+// can otherwise starve remote-DMA completion forever, leaving ISR.RDC stuck low.
+wire        eth_dma_grant_114 = eth_dma_active_114;
+wire        eth_dma_done_sys_pulse = eth_dma_done_toggle_sys_sync ^ eth_dma_done_toggle_sys_sync_d;
 
 wire [7:0] toccata_base;
 wire toccata_ena;
@@ -310,6 +341,75 @@ eth_dma_addr_map eth_dma_addr_map_inst
 	.local_word_addr(eth_dma_addr),
 	.ddr_word_addr(eth_dma_ddr_addr)
 );
+
+always @(posedge clk_sys) begin
+	if (reset_d) begin
+		eth_dma_req_sys_d <= 1'b0;
+		eth_dma_req_toggle_sys <= 1'b0;
+		eth_dma_addr_sys_hold <= 28'h0000000;
+		eth_dma_wdata_sys_hold <= 16'h0000;
+		eth_dma_write_sys_hold <= 1'b0;
+		eth_dma_u_sys_hold <= 1'b1;
+		eth_dma_l_sys_hold <= 1'b1;
+		eth_dma_done_toggle_sys_meta <= 1'b0;
+		eth_dma_done_toggle_sys_sync <= 1'b0;
+		eth_dma_done_toggle_sys_sync_d <= 1'b0;
+		eth_dma_rdata_sys <= 16'h0000;
+	end else begin
+		eth_dma_req_sys_d <= eth_dma_req;
+		if (eth_dma_req && !eth_dma_req_sys_d) begin
+			eth_dma_addr_sys_hold <= eth_dma_ddr_addr;
+			eth_dma_wdata_sys_hold <= eth_dma_ddr_wdata;
+			eth_dma_write_sys_hold <= eth_dma_write;
+			eth_dma_u_sys_hold <= eth_dma_ddr_u;
+			eth_dma_l_sys_hold <= eth_dma_ddr_l;
+			eth_dma_req_toggle_sys <= ~eth_dma_req_toggle_sys;
+		end
+
+		eth_dma_done_toggle_sys_meta <= eth_dma_done_toggle_114;
+		eth_dma_done_toggle_sys_sync <= eth_dma_done_toggle_sys_meta;
+		eth_dma_done_toggle_sys_sync_d <= eth_dma_done_toggle_sys_sync;
+		if (eth_dma_done_sys_pulse) begin
+			eth_dma_rdata_sys <= eth_dma_rdata_114;
+		end
+	end
+end
+
+always @(posedge clk_114) begin
+	if (reset_d) begin
+		eth_dma_req_toggle_114_meta <= 1'b0;
+		eth_dma_req_toggle_114_sync <= 1'b0;
+		eth_dma_req_toggle_114_sync_d <= 1'b0;
+		eth_dma_active_114     <= 1'b0;
+		eth_dma_done_toggle_114 <= 1'b0;
+		eth_dma_rdata_114      <= 16'h0000;
+		eth_dma_write_114      <= 1'b0;
+		eth_dma_addr_114       <= 28'h0000000;
+		eth_dma_wdata_114      <= 16'h0000;
+		eth_dma_u_114          <= 1'b0;
+		eth_dma_l_114          <= 1'b0;
+	end else begin
+		eth_dma_req_toggle_114_meta <= eth_dma_req_toggle_sys;
+		eth_dma_req_toggle_114_sync <= eth_dma_req_toggle_114_meta;
+		eth_dma_req_toggle_114_sync_d <= eth_dma_req_toggle_114_sync;
+
+		if (eth_dma_req_toggle_114_sync != eth_dma_req_toggle_114_sync_d) begin
+			eth_dma_active_114 <= 1'b1;
+			eth_dma_write_114 <= eth_dma_write_sys_hold;
+			eth_dma_addr_114  <= eth_dma_addr_sys_hold;
+			eth_dma_wdata_114 <= eth_dma_wdata_sys_hold;
+			eth_dma_u_114     <= eth_dma_u_sys_hold;
+			eth_dma_l_114     <= eth_dma_l_sys_hold;
+		end
+
+		if (eth_dma_active_114 &&
+		    (eth_dma_write_114 ? ram_writeaccepted2_raw : ram_ready2_raw)) begin
+			eth_dma_active_114 <= 1'b0;
+			eth_dma_done_toggle_114 <= ~eth_dma_done_toggle_114;
+			eth_dma_rdata_114 <= {ram_dout2_raw[7:0], ram_dout2_raw[15:8]};
+		end
+	end
+end
 
 cpu_wrapper cpu_wrapper
 (
@@ -349,6 +449,7 @@ cpu_wrapper cpu_wrapper
 
 	// Ethernet connections
 	.sel_ethernet (sel_ethernet    ),  // From Gary module via minimig
+	.ethernet_cfg_ena(ethernet_cfg_ena),
 	.ethernet_ena (ethernet_ena    ),
 	.ethernet_base(ethernet_base   ),
 	.sel_ethernet_shm (sel_ethernet_shm),  // Shared memory selection input
@@ -413,12 +514,12 @@ sdram_ctrl ram1
 
 wire [15:0] ram_dout2_raw;
 wire        ram_ready2_raw;
-wire [15:0] ram_dout2 = eth_dma_grant ? 16'h0000 : ram_dout2_raw;
-wire        ram_ready2 = eth_dma_grant ? 1'b0 : ram_ready2_raw;
+wire [15:0] ram_dout2 = eth_dma_grant_114 ? 16'h0000 : ram_dout2_raw;
+wire        ram_ready2 = eth_dma_grant_114 ? 1'b0 : ram_ready2_raw;
 wire  [7:0] DDRAM_BE_S;
 
-assign eth_dma_rdata = {ram_dout2_raw[7:0], ram_dout2_raw[15:8]};
-assign eth_dma_ready = eth_dma_grant ? ram_ready2_raw : 1'b0;
+assign eth_dma_rdata = eth_dma_rdata_sys;
+assign eth_dma_ready = eth_dma_done_sys_pulse;
    
 	ddram_ctrl ram2
 	(
@@ -439,15 +540,16 @@ assign eth_dma_ready = eth_dma_grant ? ram_ready2_raw : 1'b0;
 	.DDRAM_BE     (DDRAM_BE        ),
 	.DDRAM_WE     (DDRAM_WE        ),
 
-		.cpuWR        (eth_dma_grant ? eth_dma_ddr_wdata : ram_din          ),
-		.cpuAddr      (eth_dma_grant ? eth_dma_ddr_addr  : ram_addr         ),
-		.cpuU         (eth_dma_grant ? eth_dma_ddr_u     : ram_uds          ),
-		.cpuL         (eth_dma_grant ? eth_dma_ddr_l     : ram_lds          ),
-		.cpustate     (eth_dma_grant ? (eth_dma_write ? 2'b11 : 2'b10) : cpu_state),
-		.cpuCS        (eth_dma_grant ? 1'b1 : (zram_sel&ram_cs)),
+		.cpuWR        (eth_dma_grant_114 ? eth_dma_wdata_114 : ram_din          ),
+		.cpuAddr      (eth_dma_grant_114 ? eth_dma_addr_114  : ram_addr         ),
+		.cpuU         (eth_dma_grant_114 ? eth_dma_u_114     : ram_uds          ),
+		.cpuL         (eth_dma_grant_114 ? eth_dma_l_114     : ram_lds          ),
+		.cpustate     (eth_dma_grant_114 ? (eth_dma_write_114 ? 2'b11 : 2'b10) : cpu_state),
+		.cpuCS        (eth_dma_grant_114 ? 1'b1 : (zram_sel&ram_cs)),
 		.cpuRD        (ram_dout2_raw  ),
-		.ramshared    (eth_dma_grant ? 1'b1 : ramshared ),
-		.ramready     (ram_ready2_raw )
+		.ramshared    (eth_dma_grant_114 ? 1'b1 : ramshared ),
+		.ramready     (ram_ready2_raw ),
+		.writeaccepted(ram_writeaccepted2_raw)
 	);
 
 wire [15:0] fastchip_dout;

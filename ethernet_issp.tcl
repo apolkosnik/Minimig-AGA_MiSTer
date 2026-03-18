@@ -40,7 +40,7 @@ proc decode_sticky_flags {sticky} {
         {12 isr_prx}
         {13 isr_ptx}
         {14 bg_disable}
-        {15 receiver_active}
+        {15 dma_timeout}
     }
     set out {}
     foreach entry $names {
@@ -74,29 +74,45 @@ if {$hardware_name eq ""} {
     error "no JTAG hardware found"
 }
 
-set device_name [lindex [get_device_names -hardware_name $hardware_name] 0]
-if {$device_name eq ""} {
+set device_names [get_device_names -hardware_name $hardware_name]
+if {[llength $device_names] == 0} {
     error "no JTAG device found on $hardware_name"
 }
 
+set device_name ""
 set eth_index -1
 set eth_source_width -1
 set eth_probe_width -1
-foreach inst [get_insystem_source_probe_instance_info -hardware_name $hardware_name -device_name $device_name] {
-    set index [lindex $inst 0]
-    set source_width [lindex $inst 1]
-    set probe_width [lindex $inst 2]
-    set name [lindex $inst 3]
-    if {[string equal $name "ETHDBG"]} {
-        set eth_index $index
-        set eth_source_width $source_width
-        set eth_probe_width $probe_width
+foreach candidate_device $device_names {
+    if {[catch {start_insystem_source_probe -hardware_name $hardware_name -device_name $candidate_device}]} {
+        continue
+    }
+    if {[catch {get_insystem_source_probe_instance_info -hardware_name $hardware_name -device_name $candidate_device} candidate_insts]} {
+        catch {end_insystem_source_probe}
+        continue
+    }
+    foreach inst $candidate_insts {
+        set index [lindex $inst 0]
+        set source_width [lindex $inst 1]
+        set probe_width [lindex $inst 2]
+        set name [lindex $inst 3]
+        if {[string equal $name "ETHDBG"]} {
+            set device_name $candidate_device
+            set eth_index $index
+            set eth_source_width $source_width
+            set eth_probe_width $probe_width
+            break
+        }
+    }
+    if {$eth_index >= 0} {
+        catch {end_insystem_source_probe}
         break
     }
+    catch {end_insystem_source_probe}
 }
 
 if {$eth_index < 0} {
-    error "ETHDBG ISSP instance not found on $device_name"
+    error "ETHDBG ISSP instance not found on any device in $hardware_name"
 }
 
 puts "hardware: $hardware_name"
@@ -117,44 +133,38 @@ end_insystem_source_probe
 
 set probe_value [parse_probe_value $raw_probe]
 
-set heartbeat         [bits $probe_value 127 112]
-set local_wait_cycles [bits $probe_value 111 96]
-set dma_wait_cycles   [bits $probe_value 95 80]
-set sticky_flags      [bits $probe_value 79 64]
-set cpu_word_addr     [bits $probe_value 63 49]
+set remote_dma_addr   [bits $probe_value 127 112]
+set remote_byte_count [bits $probe_value 111 96]
+set sticky_flags      [bits $probe_value 95 80]
+set eth_dma_addr      [bits $probe_value 79 65]
+set cpu_word_addr     [bits $probe_value 64 50]
 set cpu_byte_addr     [expr {$cpu_word_addr << 1}]
-set bg_state          [bits $probe_value 30 26]
-set cr_register       [bits $probe_value 25 18]
-set isr_register      [bits $probe_value 17 10]
-set imr_register      [bits $probe_value 9 2]
-set current_page      [bits $probe_value 1 0]
+set cr_register       [bits $probe_value 49 42]
+set isr_register      [bits $probe_value 41 34]
+set imr_register      [bits $probe_value 33 26]
+set curr_register     [bits $probe_value 25 18]
+set bg_state          [bits $probe_value 17 13]
 
 puts [format "raw:                %s" $raw_probe]
-puts [format "heartbeat:          0x%04X" $heartbeat]
-puts [format "local_wait_cycles:  0x%04X" $local_wait_cycles]
-puts [format "dma_wait_cycles:    0x%04X" $dma_wait_cycles]
+puts [format "remote_dma_addr:    0x%04X" $remote_dma_addr]
+puts [format "remote_byte_count:  0x%04X" $remote_byte_count]
 puts [format "sticky_flags:       0x%04X (%s)" $sticky_flags [decode_sticky_flags $sticky_flags]]
+puts [format "eth_dma_addr:       0x%04X" $eth_dma_addr]
 puts [format "cpu_byte_addr:      0x%04X" $cpu_byte_addr]
 puts [format "bg_state:           0x%02X" $bg_state]
-puts [format "cr/isr/imr:         0x%02X / 0x%02X / 0x%02X" $cr_register $isr_register $imr_register]
-puts [format "current_page:       %d" $current_page]
+puts [format "cr/isr/imr/curr:    0x%02X / 0x%02X / 0x%02X / 0x%02X" $cr_register $isr_register $imr_register $curr_register]
 puts [format "controls:           bg_disable=%d clear_pulsed=%d" $bg_disable $do_clear]
-puts [format "live:               rd=%d wr=%d sel=%d shm=%d reg=%d data=%d dtack=%d irq=%d dma_req=%d dma_ready=%d dma_wr=%d bg_inflight=%d rd_pend=%d wr_pend=%d done=%d rx_poll=%d shm_sync=%d tx_req=%d" \
-    [bits $probe_value 48] \
-    [bits $probe_value 47] \
-    [bits $probe_value 46] \
-    [bits $probe_value 45] \
-    [bits $probe_value 44] \
-    [bits $probe_value 43] \
-    [bits $probe_value 42] \
-    [bits $probe_value 41] \
-    [bits $probe_value 40] \
-    [bits $probe_value 39] \
-    [bits $probe_value 38] \
-    [bits $probe_value 37] \
-    [bits $probe_value 36] \
-    [bits $probe_value 35] \
-    [bits $probe_value 34] \
-    [bits $probe_value 33] \
-    [bits $probe_value 32] \
-    [bits $probe_value 31]]
+puts [format "live:               rd=%d wr=%d sel=%d shm=%d data=%d dtack=%d irq=%d dma_req=%d dma_ready=%d dma_wr=%d bg_inflight=%d rd_pend=%d wr_pend=%d" \
+    [bits $probe_value 12] \
+    [bits $probe_value 11] \
+    [bits $probe_value 10] \
+    [bits $probe_value 9] \
+    [bits $probe_value 8] \
+    [bits $probe_value 7] \
+    [bits $probe_value 6] \
+    [bits $probe_value 5] \
+    [bits $probe_value 4] \
+    [bits $probe_value 3] \
+    [bits $probe_value 2] \
+    [bits $probe_value 1] \
+    [bits $probe_value 0]]
