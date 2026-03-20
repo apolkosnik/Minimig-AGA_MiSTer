@@ -65,6 +65,7 @@ module cpu_wrapper
 	output            ramlds,
 	output            ramuds,
 	output            ramshared,
+	output            rambyteswap,
 
 	output            toccata_ena,
 	output reg  [7:0] toccata_base,
@@ -74,6 +75,15 @@ module cpu_wrapper
 	output            ethernet_ena,
 	output reg  [7:0] ethernet_base,
 	output            sel_ethernet_shm,  // Shared memory selection for ethernet module
+	input             eth_xlate_enable,
+	input      [23:1] eth_xlate_addr,
+	input             eth_shm_req,
+	input             eth_shm_wr,
+	input      [23:1] eth_shm_addr,
+	input      [15:0] eth_shm_wdata,
+	input       [1:0] eth_shm_be,
+	output reg [15:0] eth_shm_rdata,
+	output reg        eth_shm_ack,
 	output            eth_irq,
 
 	output reg  [1:0] cpustate,
@@ -81,8 +91,27 @@ module cpu_wrapper
 	output reg [31:0] nmi_addr
 );
 
-assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg | sel_ethernet_shm);
-assign ramshared    = sel_dd | sel_ethernet_shm;
+wire        cpu_sel_ethernet_shm;
+wire        cpu_ramsel;
+wire        cpu_ramshared;
+wire        eth_ramsel;
+wire [31:0] ram_addr_src;
+wire [15:0] ram_din_src;
+wire        ram_uds_src;
+wire        ram_lds_src;
+wire        ramshared_src;
+wire        rambyteswap_src;
+
+reg         eth_shm_active;
+reg         eth_shm_wr_latched;
+reg  [23:1] eth_shm_addr_latched;
+reg  [15:0] eth_shm_wdata_latched;
+reg   [1:0] eth_shm_be_latched;
+
+assign eth_ramsel    = eth_shm_active;
+assign ramsel        = cpu_ramsel | eth_ramsel;
+assign ramshared     = cpu_ramsel ? cpu_ramshared : ramshared_src;
+assign rambyteswap   = cpu_ramsel ? cpu_ramshared : rambyteswap_src;
 
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
@@ -106,7 +135,8 @@ wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
 //   - ETH_SHM_TX_BUFFER = 0x2000 (at Amiga 0xEA2000, HPS 0x28EA2000)
 //   - ETH_SHM_RX_BUFFER = 0x2600 (at Amiga 0xEA2600, HPS 0x28EA2600)
 //   - ETH_SHM_NE_MEMORY = 0x3000 (at Amiga 0xEA3000, HPS 0x28EA3000)
-assign sel_ethernet_shm = (cpu_addr[31:16] == {8'h00,ethernet_base}) && ethernet_ena;
+assign cpu_sel_ethernet_shm = sel_ethernet && (cpu_addr[15:12] != 4'h0);
+assign sel_ethernet_shm = cpu_sel_ethernet_shm;
 
 // don't sel_kickram when writing
 wire sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx
@@ -115,14 +145,14 @@ wire sel_chipram   = !cpu_addr[31:21] && cchip; 		             //$000000 - $1FFF
 
 // we route everything hrtmon related through cart.v (needs a couple of signals to
 // decide what to do, would not be good style to replicate that here). 
-wire sel_nmi_vector = (cpu_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
+wire sel_nmi_vector = (cpu_addr[31:2] == nmi_addr[31:2]) && (cpu_cpustate == 2);
 
 wire [15:0] ramdat;
 
-assign ramlds = sel_rtg ? uds_in : lds_in;
-assign ramuds = sel_rtg ? lds_in : uds_in;
-assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
-assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
+assign ramlds = ((cpu_ramsel && sel_rtg) ? ram_uds_src : ram_lds_src);
+assign ramuds = ((cpu_ramsel && sel_rtg) ? ram_lds_src : ram_uds_src);
+assign ramdin = ((cpu_ramsel && sel_rtg) ? {ram_din_src[7:0],ram_din_src[15:8]} : ram_din_src);
+assign ramdat = (cpu_ramsel && sel_rtg) ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
 //       Main  DDx  RTG  8M  128M  256M
 //       ----  ---  ---  --  ----  ----
@@ -137,13 +167,24 @@ assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 // map 00-1f to 00-1f (chipram), a0-ff to 20-7f. All non-fastram goes into the first
 // 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v 
 // All Zorro RAM goes to DDR3
-assign ramaddr[28]    = sel_zram & ~sel_z3ram0;
-assign ramaddr[27]    = (sel_zram | sel_ethernet_shm)  & (~sel_z3ram1 | cpu_addr[27]);
-assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1 | sel_ethernet_shm) ? cpu_addr[26:23] : (sel_rtg ? 4'b1110 : {4{sel_dd}});
-assign ramaddr[22:19] = {4{sel_dd}} | cpu_addr[22:19];
-assign ramaddr[18]    =    sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18];
-assign ramaddr[17:16] = {2{sel_dd}} | cpu_addr[17:16];
-assign ramaddr[15:1]  = cpu_addr[15:1];
+assign ramaddr[28]    = eth_shm_active ? 1'b0 : (sel_zram & ~sel_z3ram0);
+assign ramaddr[27]    = ((eth_shm_active ? 1'b0 : sel_zram) | ramshared_src) & (~(eth_shm_active ? 1'b0 : sel_z3ram1) | ram_addr_src[27]);
+assign ramaddr[26:23] = ((eth_shm_active ? 1'b0 : sel_z3ram0) | (eth_shm_active ? 1'b0 : sel_z3ram1) | ramshared_src) ? ram_addr_src[26:23] : ((cpu_ramsel && sel_rtg) ? 4'b1110 : {4{eth_shm_active ? 1'b0 : sel_dd}});
+assign ramaddr[22:19] = {4{eth_shm_active ? 1'b0 : sel_dd}} | ram_addr_src[22:19];
+assign ramaddr[18]    = (eth_shm_active ? 1'b0 : sel_dd) | ((eth_shm_active ? 1'b0 : sel_kicklower) & bootrom) | ram_addr_src[18];
+assign ramaddr[17:16] = {2{eth_shm_active ? 1'b0 : sel_dd}} | ram_addr_src[17:16];
+assign ramaddr[15:1]  = ram_addr_src[15:1];
+
+assign cpu_ramsel     = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg | cpu_sel_ethernet_shm | eth_xlate_enable);
+assign cpu_ramshared  = sel_dd | cpu_sel_ethernet_shm | eth_xlate_enable;
+assign ram_addr_src   = eth_shm_active ? {8'h00, eth_shm_addr_latched, 1'b0} :
+                        eth_xlate_enable ? {8'h00, eth_xlate_addr, 1'b0} :
+                        cpu_addr;
+assign ram_din_src    = eth_shm_active ? eth_shm_wdata_latched : cpu_dout;
+assign ram_uds_src    = eth_shm_active ? ~eth_shm_be_latched[1] : uds_in;
+assign ram_lds_src    = eth_shm_active ? ~eth_shm_be_latched[0] : lds_in;
+assign ramshared_src  = eth_shm_active | cpu_ramshared;
+assign rambyteswap_src = 1'b0;
 
 assign fastchip_lds = lds_in;
 assign fastchip_uds = uds_in;
@@ -151,7 +192,8 @@ assign fastchip_rnw = wr;
 
 reg  [31:0] cpu_addr;
 reg  [15:0] cpu_dout;
-wire [15:0] cpu_din = ramsel ? ramdat : fastchip_selack ? fastchip_dout : {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
+reg   [1:0] cpu_cpustate;
+wire [15:0] cpu_din = cpu_ramsel ? ramdat : fastchip_selack ? fastchip_dout : {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
 reg         wr;
 reg         uds_in;
 reg         lds_in;
@@ -162,7 +204,7 @@ always @* begin
 	if(cpucfg[1:0]) begin
 		cpu_dout     = cpu_dout_p;
 		cpu_addr     = cpu_addr_p;
-		cpustate     = cpustate_p;
+		cpu_cpustate = cpustate_p;
 		cacr         = cacr_p;
 		vbr          = vbr_p;
 		wr           = wr_p;
@@ -182,14 +224,14 @@ always @* begin
 	else begin
 		cpu_dout     = cpu_dout_o;
 		cpu_addr     = {cpu_addr_o,1'b0};
-		cpustate     = as_o ? 2'b01 : ~{wr_o,wr_o};
+		cpu_cpustate = as_o ? 2'b01 : ~{wr_o,wr_o};
 		cacr         = 1;
 		vbr          = 0;
 		wr           = wr_o;
 		uds_in       = uds_o;
 		lds_in       = lds_o;
 		reset_out    = reset_out_o;
-		chip_as      = ramsel | as_o;
+		chip_as      = (cpu_ramsel & ~eth_xlate_enable) | as_o;
 		chip_rw      = wr_o;
 		chip_uds     = uds_o;
 		chip_lds     = lds_o;
@@ -199,6 +241,8 @@ always @* begin
 		fastchip_sel = 0;
 		fastchip_lw  = 0;
 	end
+
+	cpustate = eth_shm_active ? (eth_shm_wr_latched ? 2'b11 : 2'b10) : cpu_cpustate;
 end
 
 wire [15:0] cpu_dout_p;
@@ -225,7 +269,7 @@ cpu_inst_p
 (
   .clk(clk),
   .nreset(reset),
-  .clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
+  .clkena_in(~cpu_req | chipready | (cpu_ramsel & ramready) | fastchip_ready),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -268,7 +312,7 @@ fx68k cpu_inst_o
 	.ASn(as_o),
 	.LDSn(lds_o),
 	.UDSn(uds_o),
-	.DTACKn(ramsel ? ~ramready : chip_dtack),
+		.DTACKn(cpu_ramsel ? ~ramready : chip_dtack),
 
 	.FC0(fc_o[0]),
 	.FC1(fc_o[1]),
@@ -286,10 +330,10 @@ fx68k cpu_inst_o
 	.eab(cpu_addr_o)
 );
 
-wire cpu_req = (cpustate != 1);
+wire cpu_req = (cpu_cpustate != 1);
 
-wire cchip = turbochip_d & (!cpustate | dcache_d);
-wire ckick = turbokick_d & (!cpustate | dcache_d);
+wire cchip = turbochip_d & (!cpu_cpustate | dcache_d);
+wire ckick = turbokick_d & (!cpu_cpustate | dcache_d);
 
 reg turbochip_d;
 reg turbokick_d;
@@ -310,7 +354,33 @@ end
 reg       chipreq;
 reg [2:0] cpu_ipl;
 always @(posedge clk) begin
-	chipreq <= cpu_req & ~ramsel & ~fastchip_selack;
+	if (!reset) begin
+		eth_shm_active <= 1'b0;
+		eth_shm_wr_latched <= 1'b0;
+		eth_shm_addr_latched <= 23'd0;
+		eth_shm_wdata_latched <= 16'd0;
+		eth_shm_be_latched <= 2'b00;
+		eth_shm_rdata <= 16'd0;
+		eth_shm_ack <= 1'b0;
+	end else begin
+		eth_shm_ack <= 1'b0;
+
+		if (!eth_shm_active) begin
+			if (eth_shm_req && !cpu_req) begin
+				eth_shm_active <= 1'b1;
+				eth_shm_wr_latched <= eth_shm_wr;
+				eth_shm_addr_latched <= eth_shm_addr;
+				eth_shm_wdata_latched <= eth_shm_wdata;
+				eth_shm_be_latched <= eth_shm_be;
+			end
+		end else if (ramready) begin
+			eth_shm_rdata <= ramdout;
+			eth_shm_ack <= 1'b1;
+			eth_shm_active <= 1'b0;
+		end
+	end
+
+	chipreq <= cpu_req & ~(cpu_ramsel & ~eth_xlate_enable) & ~fastchip_selack;
 	cpu_ipl <= ipl_i;
 end
 

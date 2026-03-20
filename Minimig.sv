@@ -222,6 +222,15 @@ wire  [7:0] ethernet_base;  // Base address set during autoconfig
 //wire        eth_irq;   // Ethernet interrupt signal
 wire        sel_ethernet;   // Ethernet address space selection from Gary
 wire        sel_ethernet_shm;   // Ethernet shared memory selection from cpu_wrapper
+wire        eth_xlate_enable;
+wire [23:1] eth_xlate_addr;
+wire        eth_shm_req;
+wire        eth_shm_wr;
+wire [23:1] eth_shm_addr;
+wire [15:0] eth_shm_wdata;
+wire  [1:0] eth_shm_be;
+wire [15:0] eth_shm_rdata;
+wire        eth_shm_ack;
 
 hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 (
@@ -435,6 +444,7 @@ wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
 wire        zram_sel  = |ram_addr[28:26];
 wire        ramshared;
+wire        rambyteswap;
 
 wire [7:0] toccata_base;
 wire toccata_ena;
@@ -476,20 +486,30 @@ cpu_wrapper cpu_wrapper
 	.toccata_base (toccata_base    ),
 
 	// Ethernet connections
-	.sel_ethernet (sel_ethernet    ),  // From Gary module via minimig
-	.ethernet_ena (ethernet_ena    ),
-	.ethernet_base(ethernet_base   ),
-	.sel_ethernet_shm (sel_ethernet_shm),  // Shared memory selection input
-	//.eth_irq (eth_irq              ),
+		.sel_ethernet (sel_ethernet    ),  // From Gary module via minimig
+		.ethernet_ena (ethernet_ena    ),
+		.ethernet_base(ethernet_base   ),
+		.sel_ethernet_shm (sel_ethernet_shm),  // Shared memory selection input
+		.eth_xlate_enable (eth_xlate_enable),
+		.eth_xlate_addr   (eth_xlate_addr),
+		.eth_shm_req      (eth_shm_req),
+		.eth_shm_wr       (eth_shm_wr),
+		.eth_shm_addr     (eth_shm_addr),
+		.eth_shm_wdata    (eth_shm_wdata),
+		.eth_shm_be       (eth_shm_be),
+		.eth_shm_rdata    (eth_shm_rdata),
+		.eth_shm_ack      (eth_shm_ack),
+		//.eth_irq (eth_irq              ),
 
-	.ramsel       (ram_sel         ),
+		.ramsel       (ram_sel         ),
 	.ramaddr      (ram_addr        ),
 	.ramlds       (ram_lds         ),
 	.ramuds       (ram_uds         ),
 	.ramdout      (ram_dout        ),
-	.ramdin       (ram_din         ),
-	.ramready     (ram_ready       ),
-	.ramshared    (ramshared       ),
+		.ramdin       (ram_din         ),
+		.ramready     (ram_ready       ),
+		.ramshared    (ramshared       ),
+		.rambyteswap  (rambyteswap     ),
 
 	//custom CPU signals
 	.cpustate     (cpu_state       ),
@@ -568,10 +588,11 @@ ddram_ctrl ram2
 	.cpuL         (ram_lds         ),
 	.cpustate     (cpu_state       ),
 	.cpuCS        (zram_sel&ram_cs ),
-	.cpuRD        (ram_dout2       ),
-	.ramshared    (ramshared       ),
-	.ramready     (ram_ready2      )
-);
+		.cpuRD        (ram_dout2       ),
+		.ramshared    (ramshared       ),
+		.rambyteswap  (rambyteswap     ),
+		.ramready     (ram_ready2      )
+	);
 
 wire [15:0] fastchip_dout;
 wire        fastchip_sel;
@@ -751,10 +772,20 @@ minimig minimig
 	.IO_DIN       (io_din           ),
 	.IO_DOUT      (fpga_dout        ),
     
-    // Ethernet card configuration
-    .ethernet_ena(ethernet_ena),
-    .ethernet_base(ethernet_base),
-    .sel_ethernet(sel_ethernet),
+	    // Ethernet card configuration
+	    .ethernet_ena(ethernet_ena),
+	    .ethernet_base(ethernet_base),
+	    .sel_ethernet_shm(sel_ethernet_shm),
+	    .sel_ethernet(sel_ethernet),
+	    .eth_xlate_enable(eth_xlate_enable),
+	    .eth_xlate_addr(eth_xlate_addr),
+	    .eth_shm_req(eth_shm_req),
+	    .eth_shm_wr(eth_shm_wr),
+	    .eth_shm_addr(eth_shm_addr),
+	    .eth_shm_wdata(eth_shm_wdata),
+	    .eth_shm_be(eth_shm_be),
+	    .eth_shm_rdata(eth_shm_rdata),
+	    .eth_shm_ack(eth_shm_ack),
 
 	//video
 	._hsync       (hs               ), // horizontal sync

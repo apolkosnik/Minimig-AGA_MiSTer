@@ -51,6 +51,7 @@ module ddram_ctrl
 	input      [15:0] cpuWR,
 	output     [15:0] cpuRD,
 	input             ramshared,
+	input             rambyteswap,
 	output            ramready
 );
 
@@ -102,8 +103,8 @@ always @ (posedge sysclk) begin
 			default:
 				if(ramsel && cpustate == 3) begin
 					writeAddr <= cpuAddr;
-					writeDat  <= ramshared ? {cpuWR[7:0],cpuWR[15:8]} : cpuWR;
-					writeBE   <= ramshared ? ~{cpuL, cpuU} : ~{cpuU, cpuL};
+						writeDat  <= rambyteswap ? {cpuWR[7:0],cpuWR[15:8]} : cpuWR;
+						writeBE   <= rambyteswap ? ~{cpuL, cpuU} : ~{cpuU, cpuL};
 					write_req <= 1;
 					if(cache_ack) begin
 						write_ena   <= 1;
@@ -164,7 +165,7 @@ always @ (posedge sysclk) begin
 						DDRAM_RD   <= 1;
 						ba         <= cpuAddr[2:1];
 						state      <= 1;
-						ddr_swap   <= ramshared;
+						ddr_swap   <= rambyteswap;
 					end
 				end
 			1: if(~DDRAM_BUSY & DDRAM_DOUT_READY) begin
