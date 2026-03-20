@@ -61,6 +61,18 @@ static uint32_t hps_heartbeat_counter = 0;
 static struct sockaddr_ll sock_addr;
 static char bridge_interface[16] = "eth0";
 
+#define ETH_HOST_RX_QUEUE_DEPTH 8
+
+struct host_rx_packet {
+    uint16_t len;
+    uint8_t data[ETH_PACKET_BUFFER_SIZE];
+};
+
+static struct host_rx_packet host_rx_queue[ETH_HOST_RX_QUEUE_DEPTH];
+static uint8_t host_rx_queue_head = 0;
+static uint8_t host_rx_queue_tail = 0;
+static uint8_t host_rx_queue_count = 0;
+
 // Access ethernet shared memory through mapped region
 static void eth_write_shared_mem(uint32_t offset, const void *data, uint32_t size)
 {
@@ -316,6 +328,104 @@ static void read_shared_mac(uint8_t mac_addr[6])
     eth_read_shared_mem(ETH_CTRL_MAC, mac_addr, 6);
 }
 
+static void clear_host_rx_queue()
+{
+    host_rx_queue_head = 0;
+    host_rx_queue_tail = 0;
+    host_rx_queue_count = 0;
+}
+
+static uint16_t next_shared_rx_slot(uint16_t slot)
+{
+    return (slot + 1) % ETH_RX_QUEUE_SLOTS;
+}
+
+static uint32_t shared_rx_slot_data_offset(uint16_t slot)
+{
+    return ETH_RX_QUEUE_DATA + slot * ETH_PACKET_BUFFER_SIZE;
+}
+
+static uint32_t shared_rx_slot_len_offset(uint16_t slot)
+{
+    return ETH_RX_QUEUE_LEN + slot * sizeof(uint16_t);
+}
+
+static uint16_t read_shared_rx_queue_head()
+{
+    return eth_read_shared_u16(ETH_RX_QUEUE_HEAD) & 0x00FF;
+}
+
+static uint16_t read_shared_rx_queue_tail()
+{
+    return eth_read_shared_u16(ETH_RX_QUEUE_TAIL) & 0x00FF;
+}
+
+static void write_shared_rx_queue_head(uint16_t head)
+{
+    eth_write_shared_u16(ETH_RX_QUEUE_HEAD, head & 0x00FF);
+}
+
+static void write_shared_rx_queue_tail(uint16_t tail)
+{
+    eth_write_shared_u16(ETH_RX_QUEUE_TAIL, tail & 0x00FF);
+}
+
+static bool enqueue_host_rx_packet(const uint8_t* data, uint16_t len)
+{
+    if (len > ETH_PACKET_BUFFER_SIZE || host_rx_queue_count >= ETH_HOST_RX_QUEUE_DEPTH) {
+        return false;
+    }
+
+    memcpy(host_rx_queue[host_rx_queue_tail].data, data, len);
+    host_rx_queue[host_rx_queue_tail].len = len;
+    host_rx_queue_tail = (host_rx_queue_tail + 1) % ETH_HOST_RX_QUEUE_DEPTH;
+    host_rx_queue_count++;
+    return true;
+}
+
+static bool enqueue_shared_rx_packet(const uint8_t* data, uint16_t len, uint32_t* flags,
+                                     struct rtl8019_state* state)
+{
+    uint16_t head = read_shared_rx_queue_head();
+    uint16_t tail = read_shared_rx_queue_tail();
+    uint16_t next_tail = next_shared_rx_slot(tail);
+
+    if (next_tail == head) {
+        return false;
+    }
+
+    eth_write_shared_mem(shared_rx_slot_data_offset(tail), data, len);
+    eth_write_shared_u16(shared_rx_slot_len_offset(tail), len);
+    eth_write_shared_u16(ETH_PACKET_INFO + 2, len);
+    write_shared_rx_queue_tail(next_tail);
+    *flags = eth_update_shared_flags(0, ETH_FLAG_RX_AVAIL);
+
+    eth_debug("ETH: Enqueued shared RX packet slot=%u len=%u head=%u tail->%u\n",
+              tail, len, head, next_tail);
+
+    if (state) {
+        state->rx_packets++;
+        write_eth_state_stats(state);
+    }
+    return true;
+}
+
+static bool pump_host_rx_queue(uint32_t* flags, struct rtl8019_state* state)
+{
+    if (host_rx_queue_count == 0) {
+        return false;
+    }
+
+    struct host_rx_packet packet = host_rx_queue[host_rx_queue_head];
+    if (!enqueue_shared_rx_packet(packet.data, packet.len, flags, state)) {
+        return false;
+    }
+
+    host_rx_queue_head = (host_rx_queue_head + 1) % ETH_HOST_RX_QUEUE_DEPTH;
+    host_rx_queue_count--;
+    return true;
+}
+
 // Initialize ethernet emulation
 void minimig_eth_init()
 {
@@ -446,12 +556,16 @@ void minimig_eth_reset()
     state.tx_errors = 0;
     state.rx_errors = 0;
 
-    memset(eth_shmem + ETH_RX_BUFFER, 0, 1500);
-    memset(eth_shmem + ETH_PACKET_INFO, 0, 4);
+    clear_host_rx_queue();
+    memset(eth_shmem + ETH_RX_BUFFER, 0, ETH_PACKET_BUFFER_SIZE);
+    memset(eth_shmem + ETH_RX_QUEUE_DATA, 0, ETH_RX_QUEUE_SLOTS * ETH_PACKET_BUFFER_SIZE);
+    memset(eth_shmem + ETH_PACKET_INFO, 0, 0x40);
+    write_shared_rx_queue_head(0);
+    write_shared_rx_queue_tail(0);
 
     write_eth_state_stats(&state);
     eth_update_shared_status(0xFFFF, 0);
-    eth_update_shared_flags(ETH_FLAG_HPS_OWNED_MASK, 0);
+    eth_update_shared_flags(ETH_FLAG_RESET | ETH_FLAG_RX_AVAIL, 0);
     eth_write_shared_u32(ETH_HPS_SIGNATURE, 0xCAFEBABE);
     hps_heartbeat_counter = 0;
     eth_write_shared_u32(ETH_HPS_HEARTBEAT, hps_heartbeat_counter);
@@ -609,7 +723,7 @@ static bool transmit_packet()
     uint16_t length = read_ne_register(0, 0x05) |     // TBCR0
                      (read_ne_register(0, 0x06) << 8);   // TBCR1
     
-    if (length == 0 || length > 1500) {
+    if (length == 0 || length > ETH_PACKET_BUFFER_SIZE) {
         eth_debug("Invalid packet length: %d\n", length);
         state.tx_errors++;
         write_eth_state_stats(&state);
@@ -667,70 +781,83 @@ void receive_packet()
     uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS);
     struct rtl8019_state state;
     uint8_t rcr;
+    uint8_t mac_addr[6];
     read_eth_state(&state);
     if (raw_socket < 0 || !(flags & ETH_FLAG_ENABLED)) return;
-    if (flags & ETH_FLAG_RX_AVAIL) return;
-    
-    uint8_t buffer[1600];
-    ssize_t len = recv(raw_socket, buffer, sizeof(buffer), 0);
-    
-    if (len <= 0) return;
-    
-    // Filter out our own transmitted packets and non-ethernet frames
-    if (len < 14) return;
-    
-    if (len > 1500) {
-        eth_debug("ETH: Dropping oversized RX packet (%zd bytes)\n", len);
-        state.rx_errors++;
-        write_eth_state_stats(&state);
-        return;
-    }
 
-    uint8_t mac_addr[6];
-    read_shared_mac(mac_addr);
     rcr = read_ne_register(0, 0x0C);
+    read_shared_mac(mac_addr);
 
-    if (rcr & NE_RCR_MON) {
-        return;
-    }
-
-    // Check if packet is for us (broadcast, multicast, or our MAC)
-    bool accept = false;
-
-    if (rcr & NE_RCR_PRO) {
-        accept = true;
-    }
-    // Broadcast
-    else if (memcmp(buffer, "\xFF\xFF\xFF\xFF\xFF\xFF", 6) == 0) {
-        accept = (rcr & NE_RCR_AB) != 0;
-    }
-    // Multicast
-    else if (buffer[0] & 0x01) {
-        accept = (rcr & NE_RCR_AM) && multicast_hash_match(buffer);
-    }
-    // Unicast to our MAC
-    else if (memcmp(buffer, mac_addr, 6) == 0) {
-        accept = true;
+    while (pump_host_rx_queue(&flags, &state)) {
     }
 
-    if (!accept) return;
-    
-    uint16_t packet_len = (uint16_t)len;
-    eth_write_shared_mem(ETH_RX_BUFFER, buffer, packet_len);
-    eth_write_shared_mem(ETH_PACKET_INFO + 2, &packet_len, 2);
-    eth_update_shared_flags(0, ETH_FLAG_RX_AVAIL);
-    
-    eth_debug("ETH: Received packet of %zd bytes (total RX: %d)\n", len, state.rx_packets + 1);
-    
-    // Debug: Show first 32 bytes of received packet
-    eth_debug("ETH: RX Data: ");
-    for (int i = 0; i < 32 && i < len; i++) {
-        eth_debug("%02X ", buffer[i]);
-        if ((i + 1) % 16 == 0) eth_debug("\nETH: RX Data: ");
+    for (;;) {
+        uint8_t buffer[ETH_PACKET_BUFFER_SIZE];
+        ssize_t len = recv(raw_socket, buffer, sizeof(buffer), 0);
+
+        if (len <= 0) {
+            break;
+        }
+
+        // Filter out non-ethernet frames.
+        if (len < 14) {
+            continue;
+        }
+
+        if (len > ETH_PACKET_BUFFER_SIZE) {
+            eth_debug("ETH: Dropping oversized RX packet (%zd bytes)\n", len);
+            state.rx_errors++;
+            continue;
+        }
+
+        if (rcr & NE_RCR_MON) {
+            continue;
+        }
+
+        if ((len < 60) && !(rcr & NE_RCR_AR)) {
+            continue;
+        }
+
+        // Check if packet is for us (broadcast, multicast, or our MAC)
+        bool accept = false;
+
+        if (rcr & NE_RCR_PRO) {
+            accept = true;
+        }
+        else if (memcmp(buffer, "\xFF\xFF\xFF\xFF\xFF\xFF", 6) == 0) {
+            accept = (rcr & NE_RCR_AB) != 0;
+        }
+        else if (buffer[0] & 0x01) {
+            accept = (rcr & NE_RCR_AM) && multicast_hash_match(buffer);
+        }
+        else if (memcmp(buffer, mac_addr, 6) == 0) {
+            accept = true;
+        }
+
+        if (!accept) {
+            continue;
+        }
+
+        uint16_t packet_len = (uint16_t)len;
+
+        if (enqueue_shared_rx_packet(buffer, packet_len, &flags, &state)) {
+        } else if (!enqueue_host_rx_packet(buffer, packet_len)) {
+            eth_debug("ETH: RX software queue full, dropping packet of %u bytes\n", packet_len);
+            state.rx_errors++;
+        } else {
+            eth_debug("ETH: Deferred RX packet of %u bytes in host queue (depth: %u)\n",
+                      packet_len, host_rx_queue_count);
+        }
+
+        // Debug: Show first 32 bytes of received packet
+        eth_debug("ETH: RX Data: ");
+        for (int i = 0; i < 32 && i < len; i++) {
+            eth_debug("%02X ", buffer[i]);
+            if ((i + 1) % 16 == 0) eth_debug("\nETH: RX Data: ");
+        }
+        eth_debug("\n");
     }
-    eth_debug("\n");
-    
-    state.rx_packets++;
+
     write_eth_state_stats(&state);
 }
 

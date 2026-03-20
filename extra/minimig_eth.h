@@ -175,9 +175,15 @@
 // - Memory buffer coordination
 
 #define ETH_RTL8019_STATE 0x1100    // sizeof(rtl8019_state) bytes - full RTL8019 state structure (for compatibility)
-#define ETH_TX_BUFFER     0x2000    // 1500 bytes - TX buffer
-#define ETH_RX_BUFFER     0x2600    // 1500 bytes - RX buffer  
+#define ETH_PACKET_BUFFER_SIZE 0x0600 // 1536 bytes per staged packet buffer
+#define ETH_TX_BUFFER     0x2000    // ETH_PACKET_BUFFER_SIZE bytes - TX buffer
+#define ETH_RX_BUFFER     0x2600    // ETH_PACKET_BUFFER_SIZE bytes - RX buffer
 #define ETH_PACKET_INFO   0x2C00    // 512 bytes - packet info and metadata
+#define ETH_RX_QUEUE_HEAD (ETH_PACKET_INFO + 0x04) // low byte: FPGA-consumed head slot
+#define ETH_RX_QUEUE_TAIL (ETH_PACKET_INFO + 0x06) // low byte: HPS-produced tail slot
+#define ETH_RX_QUEUE_LEN  (ETH_PACKET_INFO + 0x20) // uint16_t lengths for shared RX slots
+#define ETH_RX_QUEUE_SLOTS 4
+#define ETH_RX_QUEUE_DATA ETH_FUTURE_USE
 #define ETH_NE_MEMORY     0x3000    // 16KB compact backing store for NE packet RAM 0x4000-0x7FFF
 #define ETH_DEBUG_INFO    0x7000    // 8KB - extensive debug info, logs, and statistics
 #define ETH_FUTURE_USE    0x9000    // reserved for future expansion
@@ -185,12 +191,12 @@
 // Control flags for FPGA<->HPS communication
 #define ETH_FLAG_RESET      0x0001  // Legacy HPS-side reset request/ack
 #define ETH_FLAG_TX_REQ     0x0002  // FPGA requests HPS transmit service, HPS clears to acknowledge
-#define ETH_FLAG_RX_AVAIL   0x0004  // HPS has staged an RX packet for FPGA consumption
+#define ETH_FLAG_RX_AVAIL   0x0004  // Shared RX queue is non-empty
 #define ETH_FLAG_IRQ        0x0008  // FPGA interrupt state mirror
 #define ETH_FLAG_REG_DIRTY  0x0010  // DEPRECATED - FPGA handles registers directly
 #define ETH_FLAG_ENABLED    0x0020  // FPGA reports Ethernet enabled state
 
-#define ETH_FLAG_HPS_OWNED_MASK   (ETH_FLAG_RESET | ETH_FLAG_RX_AVAIL)
+#define ETH_FLAG_HPS_OWNED_MASK   (ETH_FLAG_RESET)
 #define ETH_FLAG_HPS_ACK_MASK     (ETH_FLAG_TX_REQ)
 #define ETH_FLAG_FPGA_MIRROR_MASK (ETH_FLAG_TX_REQ | ETH_FLAG_IRQ | ETH_FLAG_ENABLED)
 

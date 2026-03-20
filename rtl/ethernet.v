@@ -95,8 +95,8 @@ module ethernet_interface
 
 //   Packet Buffers (0xEA2000 - 0xEA2FFF)
 
-//   - 0xEA2000: ETH_SHM_TX_BUFFER (1500 bytes) - TX packet buffer
-//   - 0xEA2600: ETH_SHM_RX_BUFFER (1500 bytes) - RX packet buffer
+//   - 0xEA2000: ETH_SHM_TX_BUFFER (0x600 bytes) - TX packet buffer
+//   - 0xEA2600: ETH_SHM_RX_BUFFER (0x600 bytes) - RX packet buffer
 //   - 0xEA2C00: ETH_SHM_PACKET_INFO (512 bytes) - Packet metadata
 
 //   NE2000 Memory Space (0xEA3000 - 0xEA6FFF)
@@ -173,12 +173,18 @@ parameter [15:0] ETH_SHM_CTRL_STATUS   = 16'h1052;  // 2 bytes - status
 parameter [15:0] ETH_SHM_CTRL_STATS    = 16'h1054;  // 52 bytes - packet statistics
 parameter [15:0] ETH_SHM_HPS_HEARTBEAT = 16'h1088;  // 4 bytes - HPS heartbeat
 parameter [15:0] ETH_SHM_HPS_SIGNATURE = 16'h108C;  // 4 bytes - signature (0xCAFEBABE)
-parameter [15:0] ETH_SHM_TX_BUFFER     = 16'h2000;  // 1500 bytes - TX buffer
-parameter [15:0] ETH_SHM_RX_BUFFER     = 16'h2600;  // 1500 bytes - RX buffer
+parameter [15:0] ETH_SHM_TX_BUFFER     = 16'h2000;  // 0x600 bytes - TX buffer
+parameter [15:0] ETH_SHM_RX_BUFFER     = 16'h2600;  // 0x600 bytes - RX buffer
 parameter [15:0] ETH_SHM_PACKET_INFO   = 16'h2C00;  // 512 bytes - packet metadata
+parameter [15:0] ETH_SHM_RX_QUEUE_HEAD = 16'h2C04;  // low byte: FPGA-consumed shared RX queue head
+parameter [15:0] ETH_SHM_RX_QUEUE_TAIL = 16'h2C06;  // low byte: HPS-produced shared RX queue tail
+parameter [15:0] ETH_SHM_RX_QUEUE_LEN  = 16'h2C20;  // 16-bit staged packet lengths by slot
 parameter [15:0] ETH_SHM_NE_MEMORY     = 16'h3000;  // 16KB compact backing store for NE packet RAM
 parameter [15:0] ETH_SHM_DEBUG_INFO    = 16'h7000;  // 8KB - debug info
 parameter [15:0] ETH_SHM_FUTURE_USE    = 16'h9000;  // Reserved for future expansion
+parameter [15:0] ETH_PACKET_BUFFER_BYTES = 16'h0600; // 1536-byte staged frame capacity
+parameter [15:0] ETH_SHM_RX_QUEUE_DATA = 16'h9000;  // shared RX queue slot payloads
+parameter [7:0]  ETH_RX_QUEUE_SLOTS    = 8'd4;
 
 // NE visible memory layout based on the RTL8019AS 16KB on-chip SRAM.
 parameter [15:0] NE_PROM_SIZE          = 16'h0020;  // 32-byte station PROM / low memory shadow
@@ -326,8 +332,13 @@ reg [15:0] shared_status_word;
 reg [15:0] rx_copy_src_offset;
 reg [15:0] rx_copy_dst_addr;
 reg [15:0] rx_copy_remaining;
+reg [15:0] rx_copy_buffer_base;
 reg  [7:0] rx_next_page;
 reg  [1:0] rx_copy_phase;
+reg  [1:0] rx_packet_meta_phase;
+reg  [7:0] rx_queue_head_slot;
+reg  [7:0] rx_queue_tail_slot;
+reg  [7:0] rx_queue_next_head;
 reg [31:0] reg_mirror_dirty;
 reg  [2:0] mac_word_dirty;
 
@@ -363,6 +374,10 @@ parameter ISR_RST = 8'h80;     // Bit 7: Reset Status
 parameter TSR_PTX = 8'h01;     // Packet transmitted
 parameter TSR_ABT = 8'h08;     // Transmission aborted / generic transmit failure
 parameter RSR_PRX = 8'h01;     // Packet received intact
+parameter RSR_FO  = 8'h08;     // FIFO overrun / overwrite indication
+parameter RSR_MPA = 8'h10;     // Missed packet
+parameter RSR_DIS = 8'h40;     // Receiver disabled
+parameter RCR_MON = 8'h20;     // Monitor mode
 
 parameter [15:0] ETH_FLAG_RESET      = 16'h0001;
 parameter [15:0] ETH_FLAG_TX_REQ     = 16'h0002;
@@ -370,12 +385,128 @@ parameter [15:0] ETH_FLAG_RX_AVAIL   = 16'h0004;
 parameter [15:0] ETH_FLAG_IRQ        = 16'h0008;
 parameter [15:0] ETH_FLAG_REG_DIRTY  = 16'h0010;
 parameter [15:0] ETH_FLAG_ENABLED    = 16'h0020;
-parameter [15:0] ETH_FLAG_HPS_OWNED_MASK   = ETH_FLAG_RESET | ETH_FLAG_RX_AVAIL;
+parameter [15:0] ETH_FLAG_HPS_OWNED_MASK   = ETH_FLAG_RESET;
 parameter [15:0] ETH_FLAG_HPS_ACK_MASK     = ETH_FLAG_TX_REQ;
 parameter [15:0] ETH_FLAG_FPGA_MIRROR_MASK = ETH_FLAG_TX_REQ | ETH_FLAG_IRQ | ETH_FLAG_ENABLED | ETH_FLAG_REG_DIRTY;
 parameter [15:0] ETH_STATUS_TX_OK    = 16'h0001;
 parameter [15:0] ETH_STATUS_TX_ERR   = 16'h0002;
 parameter [15:0] ETH_STATUS_LINK_UP  = 16'h0004;
+
+function [7:0] next_rx_page;
+    input [7:0] start_page;
+    input [7:0] stop_page;
+    input [7:0] current_page;
+    begin
+        if ((stop_page <= start_page + 8'd1) || (current_page >= (stop_page - 8'd1))) begin
+            next_rx_page = start_page;
+        end else begin
+            next_rx_page = current_page + 8'd1;
+        end
+    end
+endfunction
+
+function [8:0] rx_ring_total_pages;
+    input [7:0] start_page;
+    input [7:0] stop_page;
+    begin
+        if (stop_page > start_page) begin
+            rx_ring_total_pages = {1'b0, stop_page} - {1'b0, start_page};
+        end else begin
+            rx_ring_total_pages = 9'd0;
+        end
+    end
+endfunction
+
+function [8:0] rx_packet_pages;
+    input [15:0] packet_bytes;
+    begin
+        rx_packet_pages = (packet_bytes + 16'd4 + 16'd255) >> 8;
+    end
+endfunction
+
+function [8:0] rx_ring_used_pages;
+    input [7:0] start_page;
+    input [7:0] stop_page;
+    input [7:0] curr_page;
+    input [7:0] bnry_page;
+    reg [7:0] first_unread_page;
+    begin
+        first_unread_page = start_page;
+        if (rx_ring_total_pages(start_page, stop_page) <= 9'd1) begin
+            rx_ring_used_pages = 9'd0;
+        end else begin
+            first_unread_page = next_rx_page(start_page, stop_page, bnry_page);
+            if (curr_page == first_unread_page) begin
+                rx_ring_used_pages = 9'd0;
+            end else if (curr_page > first_unread_page) begin
+                rx_ring_used_pages = {1'b0, curr_page} - {1'b0, first_unread_page};
+            end else begin
+                rx_ring_used_pages = ({1'b0, stop_page} - {1'b0, first_unread_page}) +
+                                     ({1'b0, curr_page} - {1'b0, start_page});
+            end
+        end
+    end
+endfunction
+
+function [8:0] rx_ring_free_pages;
+    input [7:0] start_page;
+    input [7:0] stop_page;
+    input [7:0] curr_page;
+    input [7:0] bnry_page;
+    reg [8:0] total_pages;
+    reg [8:0] used_pages;
+    begin
+        total_pages = rx_ring_total_pages(start_page, stop_page);
+        used_pages = rx_ring_used_pages(start_page, stop_page, curr_page, bnry_page);
+        if ((total_pages <= 9'd1) || (used_pages >= (total_pages - 9'd1))) begin
+            rx_ring_free_pages = 9'd0;
+        end else begin
+            rx_ring_free_pages = total_pages - used_pages - 9'd1;
+        end
+    end
+endfunction
+
+function [7:0] next_shared_rx_slot;
+    input [7:0] slot_index;
+    begin
+        if (slot_index >= (ETH_RX_QUEUE_SLOTS - 1)) begin
+            next_shared_rx_slot = 8'h00;
+        end else begin
+            next_shared_rx_slot = slot_index + 8'h01;
+        end
+    end
+endfunction
+
+function [15:0] shared_rx_slot_base;
+    input [7:0] slot_index;
+    begin
+        shared_rx_slot_base = ETH_SHM_RX_QUEUE_DATA +
+                              ({8'h00, slot_index} * ETH_PACKET_BUFFER_BYTES);
+    end
+endfunction
+
+function [15:0] update_cr_flags;
+    input [15:0] current_flags;
+    input [7:0] cr_value;
+    reg [15:0] next_flags;
+    begin
+        next_flags = current_flags;
+
+        if (cr_value[2]) begin
+            next_flags = next_flags | ETH_FLAG_TX_REQ;
+        end
+
+        if (cr_value[0]) begin
+            next_flags = next_flags & ~(ETH_FLAG_ENABLED | ETH_FLAG_TX_REQ);
+        end
+
+        if (cr_value[1]) begin
+            next_flags = next_flags | ETH_FLAG_ENABLED;
+        end
+
+        update_cr_flags = next_flags;
+    end
+endfunction
 
 function [7:0] wrap_rx_page;
     input [7:0] start_page;
@@ -460,13 +591,15 @@ reg [15:0] reg_mirror_word;
 reg        mac_word_valid;
 reg  [1:0] mac_word_index;
 reg [15:0] mac_mirror_word;
-reg [15:0] updated_flags;
 integer    dirty_scan;
 
 wire        irq_active = |(isr_register & imr_register);
 wire [15:0] local_flag_word = (status_flags[15:0] & ~ETH_FLAG_IRQ) | (irq_active ? ETH_FLAG_IRQ : 16'h0000);
 wire [15:0] flags_word_to_write = (shared_flags_word & ETH_FLAG_HPS_OWNED_MASK) |
                                   (local_flag_word & ~ETH_FLAG_HPS_OWNED_MASK);
+wire        receiver_accepting_packets = (status_flags[15:0] & ETH_FLAG_ENABLED) &&
+                                         !cr_register[0] &&
+                                         !(rcr_register & RCR_MON);
 
 always @(*) begin
     reg_mirror_valid = 1'b0;
@@ -597,8 +730,13 @@ always @(posedge clk) begin
         rx_copy_src_offset <= 16'h0000;
         rx_copy_dst_addr <= 16'h0000;
         rx_copy_remaining <= 16'h0000;
+        rx_copy_buffer_base <= ETH_SHM_RX_BUFFER;
         rx_next_page <= 8'h00;
         rx_copy_phase <= 2'b00;
+        rx_packet_meta_phase <= 2'b00;
+        rx_queue_head_slot <= 8'h00;
+        rx_queue_tail_slot <= 8'h00;
+        rx_queue_next_head <= 8'h00;
         reg_mirror_dirty <= 32'hFFFF_FFFF;
         mac_word_dirty <= 3'b111;
 
@@ -853,18 +991,16 @@ always @(posedge clk) begin
         // Handle register writes and keep the HPS mirror coherent.
         if (reg_window_selected && cpu_wr && is_register_access) begin
             if (~cpu_uds) begin
-                updated_flags = status_flags[15:0];
-
                 case (register_select[4:0])
                     5'h00: begin
                         cr_register <= cpu_data_in[15:8];
+                        status_flags[15:0] <= update_cr_flags(status_flags[15:0], cpu_data_in[15:8]);
                         reg_mirror_dirty[0] <= 1'b1;
                         reg_mirror_dirty[16] <= 1'b1;
 
                         if (cpu_data_in[10]) begin
                             tx_packet_length <= transmit_byte_count;
                             tsr_register <= 8'h00;
-                            updated_flags = updated_flags | ETH_FLAG_TX_REQ;
                             flags_write_pending <= 1'b1;
                         end
 
@@ -875,12 +1011,10 @@ always @(posedge clk) begin
                             reg_mirror_dirty[9] <= 1'b1;
                             reg_mirror_dirty[10] <= 1'b1;
                             reg_mirror_dirty[11] <= 1'b1;
-                            updated_flags = updated_flags & ~(ETH_FLAG_ENABLED | ETH_FLAG_TX_REQ);
                             flags_write_pending <= 1'b1;
                         end
 
                         if (cpu_data_in[9]) begin
-                            updated_flags = updated_flags | ETH_FLAG_ENABLED;
                             flags_write_pending <= 1'b1;
                         end
                     end
@@ -1050,8 +1184,6 @@ always @(posedge clk) begin
                     default: begin
                     end
                 endcase
-
-                status_flags[15:0] <= updated_flags;
             end
         end
 
@@ -1153,35 +1285,80 @@ always @(posedge clk) begin
                 if (!mem_transaction_busy) begin
                     mem_transaction_busy <= 1'b1;
                     mem_transaction_rd <= 1'b1;
-                    mem_transaction_addr <= eth_shared_base + ETH_SHM_PACKET_INFO + 16'h0002;
                     eth_mem_req <= 1'b1;
                     eth_mem_wr <= 1'b0;
-                    eth_mem_addr <= (eth_shared_base + ETH_SHM_PACKET_INFO + 16'h0002) >> 1;
                     eth_mem_be <= 2'b11;
+                    if (rx_packet_meta_phase == 2'b00) begin
+                        mem_transaction_addr <= eth_shared_base + ETH_SHM_RX_QUEUE_HEAD;
+                        eth_mem_addr <= (eth_shared_base + ETH_SHM_RX_QUEUE_HEAD) >> 1;
+                    end else if (rx_packet_meta_phase == 2'b01) begin
+                        mem_transaction_addr <= eth_shared_base + ETH_SHM_RX_QUEUE_TAIL;
+                        eth_mem_addr <= (eth_shared_base + ETH_SHM_RX_QUEUE_TAIL) >> 1;
+                    end else begin
+                        mem_transaction_addr <= eth_shared_base + ETH_SHM_RX_QUEUE_LEN +
+                                                {7'h00, rx_queue_head_slot, 1'b0};
+                        eth_mem_addr <= (eth_shared_base + ETH_SHM_RX_QUEUE_LEN +
+                                         {7'h00, rx_queue_head_slot, 1'b0}) >> 1;
+                    end
                 end else if (eth_mem_ack) begin
                     eth_mem_req <= 1'b0;
                     mem_transaction_busy <= 1'b0;
                     mem_transaction_rd <= 1'b0;
-                    rx_packet_length <= eth_mem_rdata;
 
-                    rx_next_page <= wrap_rx_page(pstart_register, pstop_register, curr_register, eth_mem_rdata);
+                    if (rx_packet_meta_phase == 2'b00) begin
+                        if (eth_mem_rdata[7:0] < ETH_RX_QUEUE_SLOTS) begin
+                            rx_queue_head_slot <= eth_mem_rdata[7:0];
+                        end else begin
+                            rx_queue_head_slot <= 8'h00;
+                        end
+                        rx_packet_meta_phase <= 2'b01;
+                    end else if (rx_packet_meta_phase == 2'b01) begin
+                        if (eth_mem_rdata[7:0] < ETH_RX_QUEUE_SLOTS) begin
+                            rx_queue_tail_slot <= eth_mem_rdata[7:0];
+                        end else begin
+                            rx_queue_tail_slot <= 8'h00;
+                        end
 
-                    if ((eth_mem_rdata == 16'h0000) || (eth_mem_rdata > 16'd1500)) begin
-                        status_flags[15:0] <= status_flags[15:0] & ~ETH_FLAG_RX_AVAIL;
-                        flags_write_pending <= 1'b1;
-                        mem_state <= MEM_IDLE;
-                    end else if (wrap_rx_page(pstart_register, pstop_register, curr_register, eth_mem_rdata) == bnry_register) begin
-                        isr_register <= isr_register | ISR_OVW;
-                        reg_mirror_dirty[7] <= 1'b1;
-                        status_flags[15:0] <= status_flags[15:0] & ~ETH_FLAG_RX_AVAIL;
-                        flags_write_pending <= 1'b1;
-                        mem_state <= MEM_IDLE;
+                        if (rx_queue_head_slot == ((eth_mem_rdata[7:0] < ETH_RX_QUEUE_SLOTS) ? eth_mem_rdata[7:0] : 8'h00)) begin
+                            rx_packet_meta_phase <= 2'b00;
+                            status_flags[15:0] <= status_flags[15:0] & ~ETH_FLAG_RX_AVAIL;
+                            flags_write_pending <= 1'b1;
+                            mem_state <= MEM_IDLE;
+                        end else begin
+                            rx_packet_meta_phase <= 2'b10;
+                        end
                     end else begin
-                        rx_copy_src_offset <= 16'h0000;
-                        rx_copy_dst_addr <= {curr_register, 8'h00};
-                        rx_copy_remaining <= eth_mem_rdata;
-                        rx_copy_phase <= 2'b00;
-                        mem_state <= MEM_RX_BUFFER_WRITE;
+                        rx_packet_length <= eth_mem_rdata;
+                        rx_next_page <= wrap_rx_page(pstart_register, pstop_register, curr_register, eth_mem_rdata);
+                        rx_queue_next_head <= next_shared_rx_slot(rx_queue_head_slot);
+                        rx_packet_meta_phase <= 2'b00;
+
+                        if (!receiver_accepting_packets) begin
+                            rsr_register <= RSR_DIS;
+                            reg_mirror_dirty[12] <= 1'b1;
+                            mem_state <= MEM_WRITE_PACKET_INFO;
+                        end else if ((eth_mem_rdata == 16'h0000) || (eth_mem_rdata > ETH_PACKET_BUFFER_BYTES)) begin
+                            rsr_register <= 8'h00;
+                            isr_register <= isr_register | ISR_RXE;
+                            reg_mirror_dirty[7] <= 1'b1;
+                            reg_mirror_dirty[12] <= 1'b1;
+                            mem_state <= MEM_WRITE_PACKET_INFO;
+                        end else if (rx_packet_pages(eth_mem_rdata) >
+                                     rx_ring_free_pages(pstart_register, pstop_register,
+                                                        curr_register, bnry_register)) begin
+                            rsr_register <= RSR_FO | RSR_MPA;
+                            isr_register <= isr_register | ISR_OVW;
+                            reg_mirror_dirty[7] <= 1'b1;
+                            reg_mirror_dirty[12] <= 1'b1;
+                            mem_state <= MEM_WRITE_PACKET_INFO;
+                        end else begin
+                            rx_copy_buffer_base <= shared_rx_slot_base(rx_queue_head_slot);
+                            rx_copy_src_offset <= 16'h0000;
+                            rx_copy_dst_addr <= {curr_register, 8'h00};
+                            rx_copy_remaining <= eth_mem_rdata;
+                            rx_copy_phase <= 2'b00;
+                            mem_state <= MEM_RX_BUFFER_WRITE;
+                        end
                     end
                 end
             end
@@ -1219,10 +1396,10 @@ always @(posedge clk) begin
                 if (!mem_transaction_busy) begin
                     mem_transaction_busy <= 1'b1;
                     mem_transaction_rd <= 1'b1;
-                    mem_transaction_addr <= eth_shared_base + ETH_SHM_RX_BUFFER + rx_copy_src_offset;
+                    mem_transaction_addr <= eth_shared_base + rx_copy_buffer_base + rx_copy_src_offset;
                     eth_mem_req <= 1'b1;
                     eth_mem_wr <= 1'b0;
-                    eth_mem_addr <= (eth_shared_base + ETH_SHM_RX_BUFFER + rx_copy_src_offset) >> 1;
+                    eth_mem_addr <= (eth_shared_base + rx_copy_buffer_base + rx_copy_src_offset) >> 1;
                     eth_mem_be <= (rx_copy_remaining == 16'd1) ? 2'b01 : 2'b11;
                 end else if (eth_mem_ack) begin
                     buffer_read_data <= eth_mem_rdata;
@@ -1262,10 +1439,9 @@ always @(posedge clk) begin
                             rsr_register <= RSR_PRX;
                             isr_register <= isr_register | ISR_PRX;
                             reg_mirror_dirty[7] <= 1'b1;
+                            reg_mirror_dirty[12] <= 1'b1;
                             reg_mirror_dirty[23] <= 1'b1;
-                            status_flags[15:0] <= status_flags[15:0] & ~ETH_FLAG_RX_AVAIL;
-                            flags_write_pending <= 1'b1;
-                            mem_state <= MEM_IDLE;
+                            mem_state <= MEM_WRITE_PACKET_INFO;
                         end
                     end else begin
                         mem_transaction_busy <= 1'b1;
@@ -1315,7 +1491,28 @@ always @(posedge clk) begin
             end
 
             MEM_WRITE_PACKET_INFO: begin
-                mem_state <= MEM_IDLE;
+                if (!mem_transaction_busy) begin
+                    mem_transaction_busy <= 1'b1;
+                    mem_transaction_wr <= 1'b1;
+                    mem_transaction_addr <= eth_shared_base + ETH_SHM_RX_QUEUE_HEAD;
+                    mem_transaction_data <= {8'h00, rx_queue_next_head};
+                    eth_mem_req <= 1'b1;
+                    eth_mem_wr <= 1'b1;
+                    eth_mem_addr <= (eth_shared_base + ETH_SHM_RX_QUEUE_HEAD) >> 1;
+                    eth_mem_wdata <= {8'h00, rx_queue_next_head};
+                    eth_mem_be <= 2'b11;
+                end else if (eth_mem_ack) begin
+                    eth_mem_req <= 1'b0;
+                    mem_transaction_busy <= 1'b0;
+                    mem_transaction_wr <= 1'b0;
+
+                    if (rx_queue_next_head == rx_queue_tail_slot) begin
+                        status_flags[15:0] <= status_flags[15:0] & ~ETH_FLAG_RX_AVAIL;
+                        flags_write_pending <= 1'b1;
+                    end
+
+                    mem_state <= MEM_IDLE;
+                end
             end
 
             MEM_READ_MAC_ADDR: begin
@@ -1428,7 +1625,12 @@ always @(posedge clk) begin
                 rx_copy_src_offset <= 16'h0000;
                 rx_copy_dst_addr <= 16'h0000;
                 rx_copy_remaining <= 16'h0000;
+                rx_copy_buffer_base <= ETH_SHM_RX_BUFFER;
                 rx_copy_phase <= 2'b00;
+                rx_packet_meta_phase <= 2'b00;
+                rx_queue_head_slot <= 8'h00;
+                rx_queue_tail_slot <= 8'h00;
+                rx_queue_next_head <= 8'h00;
                 shared_flags_word <= shared_flags_word & ETH_FLAG_HPS_OWNED_MASK;
                 status_flags[15:0] <= status_flags[15:0] & ~(ETH_FLAG_ENABLED | ETH_FLAG_TX_REQ | ETH_FLAG_RX_AVAIL);
                 reg_mirror_dirty <= 32'hFFFF_FFFF;
