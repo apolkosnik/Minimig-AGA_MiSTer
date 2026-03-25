@@ -160,7 +160,7 @@ always @* begin
 	end
 	else begin
 		cpu_dout     = cpu_dout_o;
-		cpu_addr     = {cpu_addr_o,1'b0};
+		cpu_addr     = {8'h00, cpu_addr_o, 1'b0};
 		cpustate     = as_o ? 2'b01 : ~{wr_o,wr_o};
 		cacr         = 1;
 		vbr          = 0;
@@ -172,7 +172,7 @@ always @* begin
 		chip_rw      = wr_o;
 		chip_uds     = uds_o;
 		chip_lds     = lds_o;
-		chip_addr    = cpu_addr_o[23:1];
+		chip_addr    = cpu_addr[23:1];
 		chip_din     = cpu_dout_o;
 		chip_data    = chip_dout;
 		fastchip_sel = 0;
@@ -224,45 +224,54 @@ cpu_inst_p
 );
 
 wire [15:0] cpu_dout_o;
-wire [23:1] cpu_addr_o;
+wire [22:0] cpu_addr_o;
 wire  [2:0] fc_o;
 wire        wr_o;
 wire        as_o;
 wire        uds_o;
 wire        lds_o;
-wire        reset_out_o;
+wire        reset_pull_o;
+wire        halt_pull_o;
+wire        reset_out_o = ~reset_pull_o & reset;
+wire        halt_in_o = ~halt_pull_o & reset_out_o;
 
-fx68k cpu_inst_o
+reg nuked_phase;
+// Reconstruct Nuked's phase input from the existing phi1/phi2 pulses.
+always @(posedge clk or negedge reset) begin
+	if (!reset) nuked_phase <= 1'b0;
+	else if (ph2) nuked_phase <= 1'b1;
+	else if (ph1) nuked_phase <= 1'b0;
+end
+
+m68kcpu cpu_inst_o
 (
-	.clk(clk),
-	.enPhi1(ph1),
-	.enPhi2(ph2),
-
-	.extReset(~reset),
-	.pwrUp(~reset),
-	.oRESETn(reset_out_o),
-	.HALTn(1),
-
-	.eRWn(wr_o),
-	.ASn(as_o),
-	.LDSn(lds_o),
-	.UDSn(uds_o),
-	.DTACKn(ramsel ? ~ramready : chip_dtack),
-
-	.FC0(fc_o[0]),
-	.FC1(fc_o[1]),
-	.FC2(fc_o[2]), 
-
-	.VPAn(~&fc_o),
-	.BERRn(1),
-	.BRn(1),
-	.BGACKn(1),
-	.IPL0n(chip_ipl[0]),
-	.IPL1n(chip_ipl[1]),
-	.IPL2n(chip_ipl[2]),
-	.iEdb(cpu_din),
-	.oEdb(cpu_dout_o),
-	.eab(cpu_addr_o)
+	.MCLK(clk),
+	.CLK(nuked_phase),
+	.VPA(~&fc_o),
+	.BR(1'b1),
+	.BGACK(1'b1),
+	.DTACK(ramsel ? ~ramready : chip_dtack),
+	.IPL(chip_ipl),
+	.BERR(1'b1),
+	.RESET_i(reset_out_o),
+	.RESET_pull(reset_pull_o),
+	.HALT_i(halt_in_o),
+	.HALT_pull(halt_pull_o),
+	.DATA_i(cpu_din),
+	.DATA_o(cpu_dout_o),
+	.DATA_z(),
+	.E_CLK(),
+	.BG(),
+	.FC(fc_o),
+	.FC_z(),
+	.RW(wr_o),
+	.RW_z(),
+	.ADDRESS(cpu_addr_o),
+	.ADDRESS_z(),
+	.AS(as_o),
+	.LDS(lds_o),
+	.UDS(uds_o),
+	.strobe_z()
 );
 
 wire cpu_req = (cpustate != 1);
