@@ -137,6 +137,13 @@ Real-suite follow-up:
 - Follow-up verification:
   - `make -C tests/tg68k_030 test-real`: completes successfully through the maintained OS- and ROM-facing benches listed above
 
+T1-trace follow-up:
+- The recovered `old_junk` T1 bench is mostly sound against the current cleaned core: 13 legal tests passed unchanged, including the Format `$2` trace-frame checks and the legal CCR-flag preservation cases.
+- Skip decision: do not import old Test 13b. It writes `SR=$EB48`, which uses reserved `T1:T0=11` and then expects reserved low-byte bits outside `XNZVC` to be preserved. That is not a stable 68030 compliance check.
+- Fix decision: add a maintained local [tb_t1_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_t1_trace.vhd) that keeps the legal T1 cases only: trace-on-any-instruction behavior, exception-entry clearing, Format `$2` frame layout, jump-target frame contents, and legal CCR flag preservation.
+- Follow-up verification:
+  - isolated ModelSim run of `tb_t1_trace`: all tests passed
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.
