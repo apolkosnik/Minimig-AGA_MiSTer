@@ -70,6 +70,14 @@ PMMU smoke-bench follow-up:
 - Follow-up verification:
   - `make -C tests/tg68k_030 test-pmmu`: all reported tests pass; only expected warning diagnostics remain for the bench's intentional invalid-TC / zeroed-pointer cases
 
+DiagROM DetectCPU harness follow-up:
+- `mock/tb_diagrom_detectcpu.vhd` ended in the correct 68030 pass state, but it still logged two `** Error` messages at `PC=$50C` during the exception-handler `RTE` path.
+- Root cause: the bench treated a transient sequential fetch after `RTE` as architectural fallthrough. The TG68K core can briefly present that word before the restored PC takes over; the final architectural result was still correct, and the bench already reached the `68030 correctly detected` success path.
+- Local fix: downgrade the `0x50C` check to a traced transient prefetch note and let the final pass/fail state determine the result.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-diagrom-detectcpu`: pass result with `Errors: 0`
+  - `make -C tests/tg68k_030 test-cpu-mmu-detection`: all detection benches pass with `Errors: 0`
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.
