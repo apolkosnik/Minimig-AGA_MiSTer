@@ -40,6 +40,17 @@ Post-import follow-up fix:
   - `make -C tests/tg68k_030 test-mmu-translation`: 21 passed, 0 failed
   - `make -C tests/tg68k_030 test-lockup-all`: completed without reported failures
 
+Regression-harness follow-up:
+- The imported `tb_moves_all_modes.vhd` initially reported five A7/SP failures in tests 44-48, but the RTL bus trace showed the MOVES accesses were already landing on the correct stack addresses with the expected FC values.
+- Root causes in the testbench:
+  - the RAM model only covered `$1000-$1FFF`, so stack-area accesses at `$2100/$2202/$2310` were initially unmapped;
+  - the late A7 tests still expected `D2=$12345678` even though tests 36-43 had intentionally reloaded `D2` with `$AAAA7F7F`;
+  - test 47 expected a predecrement read from `$2202`, while the prior `(A7)+` case had been writing `$2200`.
+- Local fix: extend the RAM model through `$2FFF`, reload `D2` before the A7 block, and make the `(A7)+` / `-(A7)` pair use a consistent `$2202/$2204` stack-pointer sequence.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-moves-all-modes`: 48 passed, 0 failed
+  - `make -C tests/tg68k_030 test-regression`: 8 passed, 0 failed
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.
