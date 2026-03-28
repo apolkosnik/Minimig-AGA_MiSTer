@@ -755,6 +755,7 @@ begin
         -- ================================================================
         -- SUMMARY
         -- ================================================================
+        wait for 0 ns;
         report "" severity note;
         report "========================================" severity note;
         report "RESULTS: " & integer'image(test_passed) & " passed, " &

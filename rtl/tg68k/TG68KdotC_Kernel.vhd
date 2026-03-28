@@ -2210,7 +2210,7 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 						trap_vector(9 downto 0) <= IPL_vec & "00";      --TH
 					END IF;
 				IF trap_mmu_config='1' THEN
-					trap_vector(9 downto 0) <= "11" & X"80";  -- Vector 56 (0xE0) - MMU Configuration Error
+					trap_vector(9 downto 0) <= "00" & X"E0";  -- Vector 56 (0xE0) - MMU Configuration Error
 				END IF;
 				-- BUG #402 FIX: trap_berr, trap_mmu_berr, and trap_addr_error must come AFTER
 				-- set_vectoraddr to have higher priority (VHDL last-assignment-wins).
