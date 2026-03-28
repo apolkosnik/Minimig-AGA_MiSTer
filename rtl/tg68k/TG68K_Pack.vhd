@@ -28,11 +28,15 @@ package TG68K_Pack is
 	type micro_states is (idle, nop, ld_nn, st_nn, ld_dAn1, ld_AnXn1, ld_AnXn2, st_dAn1, ld_AnXnbd1, ld_AnXnbd2, ld_AnXnbd3,
 						  ld_229_1, ld_229_2, ld_229_3, ld_229_4, st_229_1, st_229_2, st_229_3, st_229_4,   
 						  st_AnXn1, st_AnXn2, bra1, bsr1, bsr2, nopnop, dbcc1, movem1, movem2, movem3, 
-						  andi, pack1, pack2, pack3, op_AxAy, cmpm, link1, link2, unlink1, unlink2, int1, int2, int3, int4, rte1, rte2, rte3, 
-						  rte4, rte5, rtd1, rtd2, trap00, trap0, trap1, trap2, trap3, cas1, cas2, cas21, cas22, cas23, cas24,
+						  andi, pack1, pack2, pack3, op_AxAy, cmpm, link1, link2, unlink1, unlink2, int1, int2, int3, int4, int5, rte1, rte2, rte3,
+						  rte4, rte5, rte6, rtd1, rtd2, trap00, trap0, trap1, trap2, trap3, cas1, cas2, cas21, cas22, cas23, cas24,
 						  cas25, cas26, cas27, cas28, chk20, chk21, chk22, chk23, chk24,
-						  trap4, trap5, trap6, movec1, movep1, movep2, movep3, movep4, movep5, rota1, bf1, 
-						  mul1, mul2, mul_end1,  mul_end2, div1, div2, div3, div4, div_end1, div_end2);
+                          trap4, trap5, trap6, movec1, moves0, moves1, movep1, movep2, movep3, movep4, movep5, rota1, bf1,
+                          pmove_decode, pmove_mem_to_mmu_hi, pmove_mmu_to_mem_hi, pmove_mem_to_mmu_lo, pmove_mmu_to_mem_lo, ptest1, ptest2, pflush1, pload1,
+                          pmove_dn_hi, pmove_dn_lo, pmmu_dn_read_wait,
+                          pmmu_ld_nn, pmmu_ld_dAn1, pmmu_ld_AnXn1, pmmu_ld_AnXn2, pmmu_ld_229_1, pmmu_ld_229_2, pmmu_ld_229_3, pmmu_ld_229_4,
+                          berr1, berr2, berr3, berr4, berr5, berr6, berr7, berr8, berr_fill, trace_stk_grp2,
+                          mul1, mul2, mul_end1,  mul_end2, div1, div2, div3, div4, div_end1, div_end2);
 	
 	constant opcMOVE				: integer := 0; --
 	constant opcMOVEQ				: integer := 1; --
@@ -124,7 +128,23 @@ package TG68K_Pack is
 	constant opcCHK2				: integer := 87; --
 	constant opcEXTB				: integer := 88; --
 
-	constant lastOpcBit			: integer := 88;
+    constant pmmu_rd				: integer := 89; -- PMOVE <MMU>,Dn
+    constant pmmu_wr				: integer := 90; -- PMOVE Dn,<MMU>
+    constant pmmu_ptest			: integer := 91; -- PTEST
+    constant pmmu_pflush			: integer := 92; -- PFLUSH
+    constant pmmu_pload			: integer := 93; -- PLOAD
+    constant to_SSP				: integer := 94; -- Save A7 to SSP (68000/68010)
+    constant from_SSP				: integer := 95; -- Load A7 from SSP (68000/68010)
+    constant to_MSP				: integer := 96; -- Save A7 to MSP (68020/68030)
+    constant from_MSP				: integer := 97; -- Load A7 from MSP (68020/68030)
+    constant to_ISP				: integer := 98; -- Save A7 to ISP (68020/68030)
+    constant from_ISP				: integer := 99; -- Load A7 from ISP (68020/68030)
+    constant use_sfc_dfc			: integer := 100; -- MOVES: Use SFC/DFC for FC
+    constant sfc_not_dfc			: integer := 101; -- MOVES: 1=SFC (read), 0=DFC (write)
+    constant pmmu_addr_inc        : integer := 102; -- PMMU: +4 address increment for 64-bit CRP/SRP second transfer (no reg write-back)
+    constant pmmu_dbl             : integer := 103; -- PMMU: CRP/SRP doubleword size for (An)+/-(An) (updates An by 8)
+
+    constant lastOpcBit			: integer := 103;
 
 	component TG68K_ALU
 	generic(
@@ -136,7 +156,7 @@ package TG68K_Pack is
 	port(
 		clk						: in std_logic;
 		Reset						: in std_logic;
-		CPU						: in std_logic_vector(1 downto 0):="00";  -- 00->68000  01->68010  11->68020(only some parts - yet)
+		CPU						: in std_logic_vector(1 downto 0):="10";  -- 00->68000  01->68010  10->68030
 		clkena_lw				: in std_logic:='1';
 		execOPC					: in bit;
 		decodeOPC				: in bit;
@@ -169,6 +189,10 @@ package TG68K_Pack is
 		bf_width					: in std_logic_vector(5 downto 0);
 		bf_ffo_offset			: in std_logic_vector(31 downto 0);
 		bf_loffset				: in std_logic_vector(4 downto 0);
+
+		-- BUG #397: Restore CCR on RTE format error
+		restore_ccr				: in std_logic := '0';
+		restored_ccr_value		: in std_logic_vector(7 downto 0) := "00000000";
 
 		set_V_Flag				: buffer bit;
 		Flags						: buffer std_logic_vector(7 downto 0);

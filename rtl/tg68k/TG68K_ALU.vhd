@@ -37,7 +37,7 @@ generic(
 	port(clk						: in std_logic;
 		Reset						: in std_logic;
 		clkena_lw				: in std_logic:='1';
-		CPU						: in std_logic_vector(1 downto 0):="00";  -- 00->68000  01->68010  11->68020(only some parts - yet)
+		CPU						: in std_logic_vector(1 downto 0):="10";  -- 00->68000  01->68010  10->68030
 		execOPC					: in bit;
 		decodeOPC				: in bit;
 		exe_condition			: in std_logic;
@@ -68,6 +68,10 @@ generic(
 		bf_width					: in std_logic_vector(5 downto 0);
 		bf_ffo_offset			: in std_logic_vector(31 downto 0);
 		bf_loffset				: in std_logic_vector(4 downto 0);
+
+		-- BUG #397: Restore CCR on RTE format error
+		restore_ccr				: in std_logic := '0';
+		restored_ccr_value		: in std_logic_vector(7 downto 0) := "00000000";
 
 		set_V_Flag				: buffer bit;
 		Flags						: buffer std_logic_vector(7 downto 0);
@@ -308,16 +312,39 @@ PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype,
 		addsub_b <= OP2out;
 		IF exec(opcUNPACK)='1' THEN
 			addsub_b(15 downto 0) <= "0000" & OP2out(7 downto 4) & "0000" & OP2out(3 downto 0);
-		ELSIF execOPC='0' AND exec(OP2out_one)='0' AND exec(get_bfoffset)='0'THEN
+		-- PMMU postadd/presub writeback must use fixed increment/decrement sizing
+		-- even if execOPC is still asserted.  Two cases:
+		--   CRP/SRP (pmmu_dbl): 64-bit, +8 increment, sets pmmu_dbl flag
+		--   TC/TT0/TT1 (pmmu_wr/rd): 32-bit, +4 increment, identified by pmmu_wr/rd
+		-- Normal instructions (ADD, SUB, etc.) with (An)+/-(An) must NOT be caught
+		-- here -- for those, execOPC='1' AND exec(pmmu_wr/rd)='0', so only the
+		-- execOPC='0' branch applies (which fires during the EA/address cycle, not
+		-- the execute cycle).
+		ELSIF (execOPC='0' OR
+		       (exec(pmmu_dbl)='1' AND (exec(presub) OR exec(postadd) OR movem_presub)='1') OR
+		       ((exec(pmmu_wr)='1' OR exec(pmmu_rd)='1') AND (exec(presub) OR exec(postadd))='1')) AND
+		      exec(OP2out_one)='0' AND exec(get_bfoffset)='0'THEN
 			IF long_start='0' AND exe_datatype="00" AND exec(use_SP)='0' THEN
 				addsub_b <= "00000000000000000000000000000001";
-			ELSIF long_start='0' AND exe_datatype="10" AND (exec(presub) OR exec(postadd) OR movem_presub)='1' THEN
-				IF exec(movem_action)='1' THEN
-					addsub_b <= "00000000000000000000000000000110";
-				ELSE
-					addsub_b <= "00000000000000000000000000000100";
-				END IF;
-			ELSE 
+				-- BUG #144 FIX: Added exec(pmmu_addr_inc) for PMOVE CRP/SRP 64-bit +4 address increment
+				-- pmmu_addr_inc avoids register write-back side effect that postadd would cause
+				-- BUG #291 FIX: When postadd AND pmmu_dbl are set, use +8 for register update!
+				-- pmmu_addr_inc is for address calculation only, pmmu_dbl is for register write-back.
+				-- The priority must be: pmmu_dbl (when postadd) > pmmu_addr_inc (address only).
+				ELSIF long_start='0' AND exe_datatype="10" AND (exec(presub) OR exec(postadd) OR movem_presub OR exec(pmmu_addr_inc))='1' THEN
+					-- BUG #291 FIX: Check pmmu_dbl BEFORE movem_action/pmmu_addr_inc!
+					-- When postadd=1 (register update), pmmu_dbl gives +8 for CRP/SRP.
+					-- When postadd=0 (address calc only), pmmu_addr_inc gives +4.
+					IF exec(pmmu_dbl)='1' AND (exec(presub) OR exec(postadd) OR movem_presub)='1' THEN
+						addsub_b <= "00000000000000000000000000001000";
+					ELSIF exec(movem_action)='1' THEN
+						addsub_b <= "00000000000000000000000000000110";
+					ELSIF exec(pmmu_addr_inc)='1' THEN
+						addsub_b <= "00000000000000000000000000000100";
+					ELSE
+						addsub_b <= "00000000000000000000000000000100";
+					END IF;
+			ELSE
 				addsub_b <= "00000000000000000000000000000010";
 			END IF;
 		ELSE	
@@ -1003,6 +1030,12 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 				IF exec(directCCR)='1' THEN
 					Flags(7 downto 0) <= data_read(7 downto 0);
 				END IF;	
+				-- BUG #397 FIX: Restore pre-RTE CCR on format error.
+				-- directSR loaded frame CCR which is now invalid.
+				-- Last-assignment-wins ensures this overrides directSR above.
+				IF restore_ccr='1' THEN
+					Flags(7 downto 0) <= restored_ccr_value;
+				END IF;
 				
 				IF exec(opcROT)='1' AND decodeOPC='0' THEN
 					asl_VFlag <= ((set_flags(3) XOR rot_rot) OR asl_VFlag);	
