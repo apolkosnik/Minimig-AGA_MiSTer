@@ -115,6 +115,13 @@ MMU-configuration vector follow-up:
   - `make -C tests/tg68k_030 test-ptest-all-modes`: 14 passed, 0 failed
   - `make -C tests/tg68k_030 test-whichamiga`: passed with the internal PMMU path still using only real 68030 vectors
 
+Comprehensive-suite follow-up:
+- The older `test-comprehensive` wrapper in `tests/tg68k_030/Makefile` still tried to run `tb_pmmu_advanced`, `tb_mmu_fault_comprehensive`, and `tb_page_walker_stress`.
+- Root cause: those bench names never existed in the imported tree. `old_junk` only preserved stale backup Makefile entries and failed build logs for them, not recoverable VHDL sources, so the target could never succeed as written.
+- Local fix: rewire `test-comprehensive` to call the maintained suite targets (`test-advanced`, `test-fault`, `test-lockup-all`, `test-all`) instead of dead bench names.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-comprehensive`: completes successfully through the maintained walker, ATC, translation, fault, lockup, and basic-suite coverage
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.

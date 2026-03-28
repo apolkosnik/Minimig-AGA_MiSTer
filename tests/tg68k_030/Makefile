@@ -701,30 +701,21 @@ test-all: compile
 	@ls -la $(TEST_DIR)/*.wlf 2>/dev/null || echo "No waveform files generated"
 
 # Enhanced comprehensive test suite
-test-comprehensive: compile-advanced
+test-comprehensive:
 	@echo "=========================================================="
 	@echo "Running TG68K 68030 Enhanced Comprehensive Test Suite"
 	@echo "=========================================================="
-	@echo "Running PMMU page table walker tests..."
-	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_pmmu_walker_comprehensive; run 100us; quit -sim"
+	@echo "Running maintained PMMU functional suite..."
+	@$(MAKE) --no-print-directory test-advanced
 	@echo ""
-	@echo "Running PMMU ATC (translation cache) tests..."
-	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_pmmu_atc_comprehensive; run 150us; quit -sim"
+	@echo "Running maintained fault-handling suite..."
+	@$(MAKE) --no-print-directory test-fault
 	@echo ""
-	@echo "Running advanced PMMU functionality tests..."
-	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_pmmu_advanced; run 200us; quit -sim"
-	@echo ""
-	@echo "Running comprehensive fault handling tests..."
-	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_mmu_fault_comprehensive; run 150us; quit -sim"
-	@echo ""
-	@echo "Running page walker stress tests..."
-	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_page_walker_stress; run 300us; quit -sim"
-	@echo ""
-	@echo "Running MMU translation comprehensive tests..."
-	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_mmu_translation; run 250us; quit -sim"
+	@echo "Running maintained lockup/race suite..."
+	@$(MAKE) --no-print-directory test-lockup-all
 	@echo ""
 	@echo "Running basic test suite..."
-	@cd $(TEST_DIR) && $(VSIM) -batch -do run_tests.do
+	@$(MAKE) --no-print-directory test-all
 	@echo ""
 	@echo "=========================================================="
 	@echo "ALL ENHANCED COMPREHENSIVE TESTS COMPLETED!"
