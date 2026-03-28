@@ -25,6 +25,9 @@
 //--------------------------------------------------------------------------//
 
 module cpu_wrapper
+#(
+	parameter USE_68030_CACHE = 1  // 0=use existing cache, 1=use new 68030 cache
+)
 (
 	input             reset,
 	output reg        reset_out,
@@ -70,37 +73,82 @@ module cpu_wrapper
 	output reg  [7:0] toccata_base,
 
 	output reg  [1:0] cpustate,
-	output reg  [3:0] cacr,
-	output reg [31:0] nmi_addr
+	output reg [31:0] cacr,
+	output reg [31:0] nmi_addr,
+
+	// 68030 Cache interface (when USE_68030_CACHE=1)
+	output            cache_req,
+	output     [31:0] cache_addr,
+	input      [15:0] cache_data,
+	input             cache_ack,
+	output            cache_burst,      // Burst mode request
+	output      [2:0] cache_burst_len,  // Burst length (number of words)
+	output     [28:1] cache_ramaddr,    // Properly encoded ramaddr for cache fill
+	// Format Error debug: [6]=latched, [5:2]=format code, [1]=SR.S, [0]=SR.M
+	output      [6:0] debug_fmt_err,
+
+	// BUG #426: Walker active flag for SDRAM cache SM deassert
+	output            walker_active_out,
+	// BUG #427: Walker writing flag for SDRAM cpustate override
+	output            walker_writing_out
 );
 
-assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
+// BUG #136 FIX: Include walker Fast RAM access in ramsel
+// When walker is reading/writing page tables in Fast RAM (Z2, Z3), it needs to trigger RAM controller
+// BUG #408 FIX: Suppress CPU's ramsel when walker is active. Without this, CPU's frozen address
+// (e.g., turbo-cached chip RAM or Kickstart ROM) triggers a spurious SDRAM read that races with
+// the walker's chip bus read. The spurious ramready can cause the walker to advance prematurely
+// or leave stale SDRAM state that interferes when the CPU resumes after the walk.
+// MC68030 bus fault suppression: When PMMU is translating (busy) or has faulted, suppress
+// CPU bus accesses. On real 68030, faulting bus cycles are aborted before data reaches memory.
+// The busy->fault transition is glitch-free (at least one is always high during handshake).
+wire pmmu_suppress_bus = cpucfg[1] & (pmmu_busy_p | pmmu_fault_p | walker_timeout_error);
+assign ramsel       = (cpu_req & ~sel_nmi_vector & ~walker_active & ~pmmu_suppress_bus & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)) | walker_fast_ram;
 assign ramshared    = sel_dd;
+assign walker_active_out = walker_active;
+assign walker_writing_out = walker_writing;
 
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
 
-wire sel_z3ram0 = (cpu_addr[31:27] == z3ram_base0) && z3ram_ena0;
-wire sel_z3ram1 = (cpu_addr[31:28] == z3ram_base1) && z3ram_ena1;
-wire sel_z2ram  = !cpu_addr[31:24] && (cpu_addr[23] ^ |cpu_addr[22:21]) && z2ram_ena; // addr[23:21] = 1..4
+// BUG #417 FIX: Use PMMU physical address for bus routing in 68030 mode
+// When MMU translates logical->physical addresses, bus region selection (chipram, zram,
+// kickram, etc.) and SDRAM address encoding must use the PHYSICAL address, not the
+// logical address the CPU outputs. Without this, MMU-remapped accesses (e.g. WhichAmiga
+// mapping $D0xxxxxx -> $00xxxxxx) hit the wrong bus path (chip bus instead of SDRAM),
+// causing lockups when chip_dtack never arrives for non-chipset addresses.
+// For non-68030 modes, pmmu_addr_phys_p = cpu_addr_p (identity, no MMU).
+// For 68030 with TC.E=0 (MMU disabled), PMMU outputs addr_phys = addr_log (identity).
+// pmmu_suppress_bus ensures bus_addr is only sampled after translation completes.
+wire [31:0] bus_addr = cpucfg[1] ? pmmu_addr_phys_p : cpu_addr;
+
+wire sel_z3ram0 = (bus_addr[31:27] == z3ram_base0) && z3ram_ena0;
+wire sel_z3ram1 = (bus_addr[31:28] == z3ram_base1) && z3ram_ena1;
+wire sel_z2ram  = !bus_addr[31:24] && (bus_addr[23] ^ |bus_addr[22:21]) && z2ram_ena; // addr[23:21] = 1..4
+// Motherboard Fast RAM mapping DISABLED - caused issues
+
 wire sel_zram   = sel_z3ram0 | sel_z3ram1 | sel_z2ram;
-wire sel_dd     = (cpu_addr[31:16] == 16'h00DD) && (cpu_addr[15:13] == 'b010);
-wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
+wire sel_dd     = (bus_addr[31:16] == 16'h00DD) && (bus_addr[15:13] == 'b010);
+wire sel_rtg    = (bus_addr[31:24] == 8'h02);
 
 // don't sel_kickram when writing
-wire sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx
-wire sel_kicklower = !cpu_addr[31:24] && (cpu_addr[23:18] == 6'b111110);
-wire sel_chipram   = !cpu_addr[31:21] && cchip; 		             //$000000 - $1FFFFF
+wire sel_kickram   = !bus_addr[31:24] && (&bus_addr[23:19] || (bus_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx
+wire sel_kicklower = !bus_addr[31:24] && (bus_addr[23:18] == 6'b111110);
+wire sel_chipram   = !bus_addr[31:21] && cchip; 		             //$000000 - $1FFFFF
 
 // we route everything hrtmon related through cart.v (needs a couple of signals to
-// decide what to do, would not be good style to replicate that here). 
-wire sel_nmi_vector = (cpu_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
+// decide what to do, would not be good style to replicate that here).
+wire sel_nmi_vector = (bus_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
 
 wire [15:0] ramdat;
 
-assign ramlds = sel_rtg ? uds_in : lds_in;
-assign ramuds = sel_rtg ? lds_in : uds_in;
-assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
+// BUG #137 FIX: Walker Fast RAM cycles need data strobes active (0 = active)
+// When walker_fast_ram is true, force both bytes active for 16-bit reads/writes
+assign ramlds = walker_fast_ram ? 1'b0 : (sel_rtg ? uds_in : lds_in);
+assign ramuds = walker_fast_ram ? 1'b0 : (sel_rtg ? lds_in : uds_in);
+// BUG #405 FIX: Write high word [31:16] to low address, low word [15:0] to high address (big-endian)
+assign ramdin = (walker_fast_ram && walker_writing) ? (walker_write_low_phase ? walker_wdata_latch[31:16] : walker_wdata_latch[15:0]) :
+                 sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
 assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
 //       Main  DDx  RTG  8M  128M  256M
@@ -114,15 +162,67 @@ assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
 // This is the mapping to the sram
 // map 00-1f to 00-1f (chipram), a0-ff to 20-7f. All non-fastram goes into the first
-// 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v 
+// 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v
 // All Zorro RAM goes to DDR3
-assign ramaddr[28]    = sel_zram & ~sel_z3ram0;
-assign ramaddr[27]    = sel_zram & (~sel_z3ram1 | cpu_addr[27]);
-assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}});
-assign ramaddr[22:19] = {4{sel_dd}} | cpu_addr[22:19];
-assign ramaddr[18]    =    sel_dd   | (sel_kicklower & bootrom) | cpu_addr[18];
-assign ramaddr[17:16] = {2{sel_dd}} | cpu_addr[17:16];
-assign ramaddr[15:1]  = cpu_addr[15:1];
+// BUG #136 FIX: Use walker_ramaddr when walker is accessing Fast RAM
+// BUG #417 FIX: Use bus_addr (physical address) for SDRAM address encoding
+assign ramaddr[28]    = walker_fast_ram ? walker_ramaddr[28] : (sel_zram & ~sel_z3ram0);
+assign ramaddr[27]    = walker_fast_ram ? walker_ramaddr[27] : (sel_zram & (~sel_z3ram1 | bus_addr[27]));
+assign ramaddr[26:23] = walker_fast_ram ? walker_ramaddr[26:23] : ((sel_z3ram0 | sel_z3ram1) ? bus_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}}));
+assign ramaddr[22:19] = walker_fast_ram ? walker_ramaddr[22:19] : ({4{sel_dd}} | bus_addr[22:19]);
+assign ramaddr[18]    = walker_fast_ram ? walker_ramaddr[18] : (sel_dd   | (sel_kicklower & bootrom) | bus_addr[18]);
+assign ramaddr[17:16] = walker_fast_ram ? walker_ramaddr[17:16] : ({2{sel_dd}} | bus_addr[17:16]);
+assign ramaddr[15:1]  = walker_fast_ram ? walker_ramaddr[15:1] : bus_addr[15:1];
+
+// BUG #128 FIX: Compute properly encoded ramaddr for cache fill addresses
+// Cache fills use cache_addr (physical address from PMMU) instead of cpu_addr
+// This encoding is needed so DDR3 controller gets correct Z3 RAM addresses
+wire sel_z3ram0_cache = (cache_addr[31:27] == z3ram_base0) && z3ram_ena0;
+wire sel_z3ram1_cache = (cache_addr[31:28] == z3ram_base1) && z3ram_ena1;
+wire sel_z2ram_cache  = !cache_addr[31:24] && (cache_addr[23] ^ |cache_addr[22:21]) && z2ram_ena;
+wire sel_zram_cache   = sel_z3ram0_cache | sel_z3ram1_cache | sel_z2ram_cache;
+
+assign cache_ramaddr[28]    = sel_zram_cache & ~sel_z3ram0_cache;
+assign cache_ramaddr[27]    = sel_zram_cache & (~sel_z3ram1_cache | cache_addr[27]);
+assign cache_ramaddr[26:23] = (sel_z3ram0_cache | sel_z3ram1_cache) ? cache_addr[26:23] : 4'b0000;
+assign cache_ramaddr[22:1]  = cache_addr[22:1];
+
+// BUG #136 FIX: Walker Fast RAM path support
+// When page tables are in Fast RAM (Z2, Z3), walker needs to drive RAM controller
+// walker_addr_latch is declared outside generate block, contains 32-bit physical address
+// Walker state phases (computed from walker_state which is outside generate block)
+// WALKER_READ_LOW=2, WALKER_WAIT_LOW=3, WALKER_READ_HIGH=4, WALKER_WAIT_HIGH=5
+// WALKER_WRITE_LOW=7, WALKER_WAIT_WR_LOW=8, WALKER_WRITE_HIGH=9, WALKER_WAIT_WR_HIGH=10
+wire walker_read_low_phase_global  = (walker_state == 4'd2) | (walker_state == 4'd3);
+wire walker_write_low_phase_global = (walker_state == 4'd7) | (walker_state == 4'd8);
+// Compute walker address for low word (bits 23:1) and high word (+1)
+wire walker_low_phase_global = walker_read_low_phase_global | walker_write_low_phase_global;
+wire [31:1] walker_addr_word = walker_low_phase_global ? {walker_addr_latch[31:2], 1'b0} :
+                                                            {walker_addr_latch[31:2], 1'b1};
+
+// Walker RAM selection (uses same logic as cpu_addr but with walker address)
+wire sel_z3ram0_walker = (walker_addr_word[31:27] == z3ram_base0) && z3ram_ena0;
+wire sel_z3ram1_walker = (walker_addr_word[31:28] == z3ram_base1) && z3ram_ena1;
+wire sel_z2ram_walker  = !walker_addr_word[31:24] && (walker_addr_word[23] ^ |walker_addr_word[22:21]) && z2ram_ena;
+wire sel_zram_walker   = sel_z3ram0_walker | sel_z3ram1_walker | sel_z2ram_walker;
+
+// BUG #192 FIX: Use walker_active instead of (walker_reading | walker_writing)
+// walker_reading/walker_writing go to 0 combinationally when entering WALKER_DONE,
+// causing ramsel/ramaddr/ramdin to glitch mid-write before CPU is ungated.
+// walker_active stays high during WALKER_DONE, ensuring clean bus handoff.
+// BUG #439 FIX: Suppress walker_fast_ram during WALKER_RAM_GAP to deassert cpu_cs
+// for the SDRAM/DDR3 cache, allowing it to complete one transaction before starting
+// the next. Without this, cpu_ack stays latched high and the high word read gets
+// stale data from the low word read.
+wire walker_fast_ram = USE_68030_CACHE && walker_active && sel_zram_walker
+                       && (walker_state != 4'd11);  // != WALKER_RAM_GAP
+
+// Walker encoded RAM address (same encoding as cpu->ramaddr)
+wire [28:1] walker_ramaddr;
+assign walker_ramaddr[28]    = sel_zram_walker & ~sel_z3ram0_walker;
+assign walker_ramaddr[27]    = sel_zram_walker & (~sel_z3ram1_walker | walker_addr_word[27]);
+assign walker_ramaddr[26:23] = (sel_z3ram0_walker | sel_z3ram1_walker) ? walker_addr_word[26:23] : 4'b0000;
+assign walker_ramaddr[22:1]  = walker_addr_word[22:1];
 
 assign fastchip_lds = lds_in;
 assign fastchip_uds = uds_in;
@@ -130,7 +230,40 @@ assign fastchip_rnw = wr;
 
 reg  [31:0] cpu_addr;
 reg  [15:0] cpu_dout;
-wire [15:0] cpu_din = ramsel ? ramdat : fastchip_selack ? fastchip_dout : {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
+// CPU data input mux with cache support
+reg [15:0] cache_data_out_16;
+always @(*) begin
+	// Select appropriate 16-bit data from 32-bit cache output based on address
+	case (pmmu_addr_log_p[1:0])
+		2'b00: begin
+			// Instruction cache (always 16-bit aligned) or data cache lower word
+			if (cpustate_p == 2'b00) 
+				cache_data_out_16 = i_cache_data[15:0];   // Instruction fetch
+			else
+				cache_data_out_16 = d_cache_data_out[15:0];   // Data lower word
+		end
+		2'b10: begin
+			// Upper word or instruction at +2
+			if (cpustate_p == 2'b00)
+				cache_data_out_16 = i_cache_data[31:16];  // Instruction at +2  
+			else
+				cache_data_out_16 = d_cache_data_out[31:16];  // Data upper word
+		end
+		2'b01: cache_data_out_16 = {8'h0, d_cache_data_out[15:8]};   // Byte at +1
+		2'b11: cache_data_out_16 = {8'h0, d_cache_data_out[31:24]};  // Byte at +3
+	endcase
+end
+
+// BUG #406 FIX: Don't let cache_hit intercept cpu_din during walker reads.
+// When walker is active and reading from memory, cpu_din must reflect the actual
+// memory bus data (chip_data/ramdat), not stale cache data from the CPU's frozen address.
+// BUG #408 FIX: When walker reads from chip RAM, force cpu_din to chip_data.
+// Without this, CPU's frozen address can set ramsel=1 (turbochip/kickstart), causing
+// cpu_din to select ramdat (SDRAM data at CPU address) instead of chip_data (page table).
+wire [15:0] cpu_din = (USE_68030_CACHE & cache_hit & ~walker_active) ? cache_data_out_16 :
+                      walker_chip_ram ? chip_data :
+                      ramsel ? ramdat : fastchip_selack ? fastchip_dout :
+                      {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
 reg         wr;
 reg         uds_in;
 reg         lds_in;
@@ -148,14 +281,63 @@ always @* begin
 		uds_in       = uds_p;
 		lds_in       = lds_p;
 		reset_out    = reset_out_p;
-		chip_as      = c_as;
-		chip_rw      = c_rw;
-		chip_uds     = c_uds;
-		chip_lds     = c_lds;
-		chip_addr    = cpu_addr_p[23:1];
-		chip_din     = cpu_dout_p;
+		// BUG #194 FIX: Walker must ONLY drive chip bus when accessing CHIP RAM ($000000-$1FFFFF)
+		// When walker reads from Fast RAM (Z2/Z3), it uses ramdata bus, NOT chip bus!
+		// Driving chip_as during Fast RAM access causes bus conflicts with CPU instruction fetch
+		// This was causing WhichAmiga and cputest lockups when page tables were in Fast RAM
+		if (walker_chip_ram && walker_reading) begin
+			chip_addr    = walker_chip_addr;
+			// BUG #423 FIX: Let chip bus SM control AS timing via c_as.
+			// Forcing chip_as=0 permanently prevents the bridge (_ta_n in
+			// minimig_m68k_bridge.v) from recycling dtack between bus cycles.
+			// The bridge's async reset (posedge _as_and_cs) only fires when
+			// chip_as transitions LOW->HIGH. With chip_as stuck low, dtack
+			// stays asserted after the first cycle -> chip bus SM races through
+			// subsequent cycles capturing stale data -> corrupted descriptors
+			// -> PMMU fault -> double bus fault -> permanent lockup.
+			chip_as      = c_as;  // SM cycles AS: assert at stage 0, deassert at stage 2
+			chip_rw      = 1;  // Read operation
+			chip_uds     = 0;  // Upper byte strobe active (low)
+			chip_lds     = 0;  // Lower byte strobe active (low)
+			chip_din     = cpu_dout_p;  // Not used for reads
+		end else if (walker_chip_ram && walker_writing) begin
+			// MC68030 U/M bit: Walker writing descriptor update
+			chip_addr    = walker_chip_addr;
+			// BUG #423 FIX: Same AS cycling fix as read path (see above)
+			chip_as      = c_as;  // SM cycles AS properly for dtack recycling
+			chip_rw      = 0;  // Write operation
+			chip_uds     = 0;  // Upper byte strobe active (low)
+			chip_lds     = 0;  // Lower byte strobe active (low)
+			// BUG #405 FIX: Write high word [31:16] to low address, low word [15:0] to high address (big-endian)
+			chip_din     = walker_write_low_phase ? walker_wdata_latch[31:16] : walker_wdata_latch[15:0];
+		end else if (USE_68030_CACHE && walker_chip_cycle_active) begin
+			// BUG #408 FIX: Only hold walker address on chip bus when the walk target is Chip RAM.
+			// For Fast RAM walks, driving walker_chip_addr with CPU strobes can corrupt chip accesses.
+			// Keep walker address only for Chip-RAM transitional states (e.g. WALKER_DONE).
+			chip_addr    = walker_chip_addr;
+			chip_as      = c_as;
+			chip_rw      = c_rw;
+			chip_uds     = c_uds;
+			chip_lds     = c_lds;
+			chip_din     = cpu_dout_p;
+		end else begin
+			// BUG #417 FIX: Use physical address for chip bus routing
+			// When MMU remaps addresses, chip_addr must reflect the physical address
+			// so the chip bus accesses the correct memory location
+			chip_addr    = pmmu_addr_phys_p[23:1];
+			chip_as      = c_as;
+			chip_rw      = c_rw;
+			chip_uds     = c_uds;
+			chip_lds     = c_lds;
+			chip_din     = cpu_dout_p;
+		end
 		chip_data    = chipdout_i;
-		fastchip_sel = cpu_req & !cpu_addr_p[31:24];
+		// BUG #417 FIX: Use physical address for fast chip select
+		// BUG #425 FIX: Suppress fastchip_sel during walker activity.
+		// walker_active blocks pmmu_suppress_bus from gating cpu_req, and
+		// addr_phys may hold a stale walker address. Without this gate,
+		// fastchip could spuriously respond to walker descriptor addresses.
+		fastchip_sel = cpu_req & !pmmu_addr_phys_p[31:24] & ~walker_active;
 		fastchip_lw  = longword;
 	end
 	else begin
@@ -183,13 +365,757 @@ end
 wire [15:0] cpu_dout_p;
 wire [31:0] cpu_addr_p;
 wire  [1:0] cpustate_p;
-wire  [3:0] cacr_p;
+wire [31:0] cacr_p;
 wire [31:0] vbr_p;
 wire        wr_p;
 wire        uds_p;
 wire        lds_p;
 wire        reset_out_p;
 wire        longword;
+wire [31:0] pmmu_addr_log_p;
+wire [31:0] pmmu_addr_phys_p;
+wire        pmmu_cache_inhibit_p;  // BUG #126 FIX: Cache inhibit from PMMU (was unconnected)
+wire        pmmu_walker_req_p;
+wire        pmmu_walker_we_p;    // MC68030 U/M bit: write enable for descriptor updates
+wire [31:0] pmmu_walker_addr_p;
+wire [31:0] pmmu_walker_wdat_p;  // MC68030 U/M bit: write data
+wire        pmmu_busy_p;         // BUG #407: PMMU busy (translation pending, not yet in walker)
+wire        cpu_halted_p;        // Double bus fault halt
+wire  [1:0] kernel_state_p;      // Kernel main state machine
+wire        kernel_clkena_lw_p;  // Kernel clock enable (internal)
+wire        kernel_stop_p;       // Kernel STOP instruction state
+wire        kernel_interrupt_p;  // Kernel interrupt pending
+wire        kernel_setendOPC_p;  // setendOPC combinational
+wire  [2:0] kernel_IPL_nr_p;    // IPL level (inverted)
+wire        pmmu_fault_p;        // PMMU translation fault (suppress bus access)
+// CHK/Group2 exception frame debug signals (for EXCF ISSP probe)
+wire        kernel_make_trace_p;
+wire        kernel_trace_pending_grp2_p;
+wire        kernel_useStackframe2_p;
+wire        kernel_exec_trap_chk_p;
+wire        kernel_set_trap_chk_p;
+wire [31:0] kernel_data_write_tmp_p;
+wire  [7:0] kernel_FlagsSR_p;
+wire [31:0] kernel_trap_vector_p;
+wire [31:0] kernel_micro_state_p;    // VHDL integer 0-255 maps to 32-bit
+wire [31:0] kernel_next_ms_p;        // VHDL integer 0-255 maps to 32-bit
+wire        kernel_trapmake_p;
+// CPU Core debug signals (for CPUS ISSP probe)
+wire [31:0] kernel_TG68_PC_p;
+wire [15:0] kernel_opcode_p;
+wire [15:0] kernel_last_opc_read_p;
+wire [15:0] kernel_brief_p;
+wire [31:0] kernel_memaddr_reg_p;
+wire  [5:0] kernel_memmask_p;
+wire        kernel_decodeOPC_p;
+wire        kernel_setnextpass_p;
+wire        kernel_SVmode_p;
+wire [31:0] kernel_exe_PC_p;
+wire        kernel_trap_illegal_p;
+wire        kernel_trap_priv_p;
+wire        kernel_trap_addr_error_p;
+wire        kernel_trap_berr_p;
+wire        kernel_trap_mmu_berr_p;
+wire        kernel_make_berr_p;
+wire        kernel_trap_1111_p;
+// T0 trace investigation signals
+wire        kernel_exec_directSR_p;
+wire        kernel_exec_to_SR_p;
+// Register file debug (for REGS ISSP probe)
+wire [31:0] kernel_regfile_d0_p, kernel_regfile_d1_p, kernel_regfile_d2_p, kernel_regfile_d3_p;
+wire [31:0] kernel_regfile_d4_p, kernel_regfile_d5_p, kernel_regfile_d6_p, kernel_regfile_d7_p;
+wire [31:0] kernel_regfile_a0_p, kernel_regfile_a1_p, kernel_regfile_a2_p, kernel_regfile_a3_p;
+wire [31:0] kernel_regfile_a4_p, kernel_regfile_a5_p, kernel_regfile_a6_p, kernel_regfile_a7_p;
+// Format Error debug latch signals from Kernel
+wire        fmt_err_latched_p;
+wire [15:0] fmt_err_rte_word_p;
+wire  [7:0] fmt_err_sr_p;
+reg         pmmu_walker_ack_p;
+reg  [31:0] pmmu_walker_data_p;
+reg         pmmu_walker_berr_p;  // BUG #156 FIX: Bus error during table walk (sets MMUSR B bit)
+
+// Chip bus timeout BERR mechanism
+// When chip SM is stuck at stage 2 (waiting for DTACK) for too long, generate a bus error
+// instead of hanging forever. This happens when MMU maps to unmapped physical addresses.
+reg  [13:0] chip_bus_timeout_cnt;  // 16384 cycles timeout (~144us at 114MHz)
+reg         cpu_bus_berr;          // Bus error signal to kernel (16-cycle pulse)
+reg  [3:0]  berr_pulse_cnt;       // BERR pulse duration counter
+reg         chip_abort_latch;     // One-shot: prevent re-firing during BERR pulse
+
+// SignalTap debug registers (from PMMU via Kernel)
+// noprune prevents Quartus from removing undriven-output registers
+// preserve keeps the signal name for Node Finder
+wire [31:0] stp_pmmu_tc_w, stp_pmmu_tt0_w, stp_pmmu_tt1_w;
+wire [31:0] stp_pmmu_crp_hi_w, stp_pmmu_crp_lo_w;
+wire [31:0] stp_pmmu_srp_hi_w, stp_pmmu_srp_lo_w;
+wire  [4:0] stp_pmmu_wstate_w;
+wire [21:0] stp_atc_buserr_w, stp_atc_valid_w;
+wire [15:0] stp_fault_status_w;
+wire [31:0] stp_saved_addr_w;
+wire [31:0] stp_walk_desc_addr_w, stp_walk_desc_data_w;
+wire [31:0] stp_ptr1_desc_addr_w, stp_ptr1_desc_data_w;
+wire [31:0] stp_ptr2_desc_addr_w, stp_ptr2_desc_data_w;
+wire [31:0] stp_ptr3_desc_addr_w, stp_ptr3_desc_data_w;
+wire  [2:0] stp_saved_fc_w;
+(* noprune, preserve *) reg [31:0] stp_pmmu_tc;
+(* noprune, preserve *) reg [31:0] stp_pmmu_tt0;
+(* noprune, preserve *) reg [31:0] stp_pmmu_tt1;
+(* noprune, preserve *) reg [31:0] stp_pmmu_crp_hi;
+(* noprune, preserve *) reg [31:0] stp_pmmu_crp_lo;
+(* noprune, preserve *) reg [31:0] stp_pmmu_srp_hi;
+(* noprune, preserve *) reg [31:0] stp_pmmu_srp_lo;
+(* noprune, preserve *) reg  [4:0] stp_pmmu_wstate;
+(* noprune, preserve *) reg        stp_pmmu_fault;
+(* noprune, preserve *) reg        stp_pmmu_busy;
+// Sticky fault latch: captures fault and holds until JTAG reads new build
+(* noprune, preserve *) reg        stp_fault_latched;
+(* noprune, preserve *) reg        stp_walker_timeout_latched;
+// Latch PMMU state at moment of fault
+(* noprune, preserve *) reg [31:0] stp_fault_tc;
+(* noprune, preserve *) reg [31:0] stp_fault_addr;
+(* noprune, preserve *) reg  [4:0] stp_fault_wstate;
+(* noprune, preserve *) reg [21:0] stp_atc_buserr;
+(* noprune, preserve *) reg [21:0] stp_atc_valid;
+// Sticky: latch ATC buserr state at fault time
+(* noprune, preserve *) reg [21:0] stp_fault_atc_buserr;
+(* noprune, preserve *) reg [21:0] stp_fault_atc_valid;
+// Sticky: latch fault status (MMUSR format) and walker's saved_addr at fault time
+(* noprune, preserve *) reg [15:0] stp_fault_mmusr;
+(* noprune, preserve *) reg [31:0] stp_fault_saved_addr;
+(* noprune, preserve *) reg [31:0] stp_fault_desc_addr;
+(* noprune, preserve *) reg [31:0] stp_fault_desc_data;
+(* noprune, preserve *) reg [31:0] stp_fault_ptr1_desc_addr;
+(* noprune, preserve *) reg [31:0] stp_fault_ptr1_desc_data;
+(* noprune, preserve *) reg [31:0] stp_fault_ptr2_desc_addr;
+(* noprune, preserve *) reg [31:0] stp_fault_ptr2_desc_data;
+(* noprune, preserve *) reg [31:0] stp_fault_ptr3_desc_addr;
+(* noprune, preserve *) reg [31:0] stp_fault_ptr3_desc_data;
+(* noprune, preserve *) reg  [2:0] stp_fault_fc;
+// Kernel internal state debug (6 bits, probe limit=511)
+(* noprune, preserve *) reg  [2:0] stp_ipl_nr;
+(* noprune, preserve *) reg        stp_setendOPC;
+(* noprune, preserve *) reg        stp_stop;
+(* noprune, preserve *) reg        stp_cpu_bus_berr;
+always @(posedge clk) begin
+	stp_pmmu_tc     <= stp_pmmu_tc_w;
+	stp_pmmu_tt0    <= stp_pmmu_tt0_w;
+	stp_pmmu_tt1    <= stp_pmmu_tt1_w;
+	stp_pmmu_crp_hi <= stp_pmmu_crp_hi_w;
+	stp_pmmu_crp_lo <= stp_pmmu_crp_lo_w;
+	stp_pmmu_srp_hi <= stp_pmmu_srp_hi_w;
+	stp_pmmu_srp_lo <= stp_pmmu_srp_lo_w;
+	stp_pmmu_wstate <= stp_pmmu_wstate_w;
+	stp_pmmu_fault  <= pmmu_fault_p;
+	stp_pmmu_busy   <= pmmu_busy_p;
+	stp_atc_buserr  <= stp_atc_buserr_w;
+	stp_atc_valid   <= stp_atc_valid_w;
+	// Kernel internal state debug
+	stp_ipl_nr         <= kernel_IPL_nr_p;
+	stp_setendOPC      <= kernel_setendOPC_p;
+	stp_stop           <= kernel_stop_p;
+	// cpu_bus_berr sticky latch + capture fault info if no other fault has priority
+	if (cpu_bus_berr && !stp_cpu_bus_berr) begin
+		stp_cpu_bus_berr <= 1'b1;
+		if (!stp_fault_latched && !stp_walker_timeout_latched) begin
+			stp_fault_addr <= cpu_addr_p;
+			stp_fault_fc <= stp_saved_fc_w;
+			stp_fault_wstate <= stp_pmmu_wstate_w;
+		end
+	end
+	// Sticky latches - once set, stay set forever
+	if (~reset) begin
+		stp_fault_latched <= 0;
+		stp_walker_timeout_latched <= 0;
+		stp_cpu_bus_berr <= 0;
+		stp_fault_tc <= 0;
+		stp_fault_addr <= 0;
+		stp_fault_wstate <= 0;
+		stp_fault_atc_buserr <= 0;
+		stp_fault_atc_valid <= 0;
+		stp_fault_mmusr <= 0;
+		stp_fault_saved_addr <= 0;
+		stp_fault_desc_addr <= 0;
+		stp_fault_desc_data <= 0;
+		stp_fault_ptr1_desc_addr <= 0;
+		stp_fault_ptr1_desc_data <= 0;
+		stp_fault_ptr2_desc_addr <= 0;
+		stp_fault_ptr2_desc_data <= 0;
+		stp_fault_ptr3_desc_addr <= 0;
+		stp_fault_ptr3_desc_data <= 0;
+		stp_fault_fc <= 0;
+	end else begin
+		if (pmmu_fault_p && !stp_fault_latched) begin
+			stp_fault_latched <= 1;
+			stp_fault_tc <= stp_pmmu_tc_w;
+			stp_fault_addr <= cpu_addr_p;
+			stp_fault_wstate <= stp_pmmu_wstate_w;
+			stp_fault_atc_buserr <= stp_atc_buserr_w;
+			stp_fault_atc_valid  <= stp_atc_valid_w;
+			stp_fault_mmusr <= stp_fault_status_w;
+			stp_fault_saved_addr <= stp_saved_addr_w;
+			stp_fault_desc_addr <= stp_walk_desc_addr_w;
+			stp_fault_desc_data <= stp_walk_desc_data_w;
+			stp_fault_ptr1_desc_addr <= stp_ptr1_desc_addr_w;
+			stp_fault_ptr1_desc_data <= stp_ptr1_desc_data_w;
+			stp_fault_ptr2_desc_addr <= stp_ptr2_desc_addr_w;
+			stp_fault_ptr2_desc_data <= stp_ptr2_desc_data_w;
+			stp_fault_ptr3_desc_addr <= stp_ptr3_desc_addr_w;
+			stp_fault_ptr3_desc_data <= stp_ptr3_desc_data_w;
+			stp_fault_fc <= stp_saved_fc_w;
+		end
+		if (walker_timeout_error && !stp_walker_timeout_latched) begin
+			stp_walker_timeout_latched <= 1;
+			if (!stp_fault_latched) begin
+				stp_fault_tc <= stp_pmmu_tc_w;
+				stp_fault_addr <= cpu_addr_p;
+				stp_fault_wstate <= stp_pmmu_wstate_w;
+				stp_fault_atc_buserr <= stp_atc_buserr_w;
+				stp_fault_atc_valid  <= stp_atc_valid_w;
+				stp_fault_mmusr <= stp_fault_status_w;
+				stp_fault_saved_addr <= stp_saved_addr_w;
+				stp_fault_desc_addr <= stp_walk_desc_addr_w;
+				stp_fault_desc_data <= stp_walk_desc_data_w;
+				stp_fault_ptr1_desc_addr <= stp_ptr1_desc_addr_w;
+				stp_fault_ptr1_desc_data <= stp_ptr1_desc_data_w;
+				stp_fault_ptr2_desc_addr <= stp_ptr2_desc_addr_w;
+				stp_fault_ptr2_desc_data <= stp_ptr2_desc_data_w;
+				stp_fault_ptr3_desc_addr <= stp_ptr3_desc_addr_w;
+				stp_fault_ptr3_desc_data <= stp_ptr3_desc_data_w;
+				stp_fault_fc <= stp_saved_fc_w;
+			end
+		end
+	end
+end
+
+// EXCF ISSP: Sticky trap-event latch for CHK/Group2 exception frame debugging
+// micro_state integer encoding (trap0=53, trap00=52, trace_stk_grp2=114)
+// Probe layout (128 bits, MSB first):
+//   [127]     chk_dispatch_latched
+//   [126]     make_trace_at_dispatch
+//   [125]     exec_trap_chk_at_dispatch
+//   [124]     set_trap_chk_at_dispatch
+//   [123:116] FlagsSR_at_dispatch (8 bits)
+//   [115:104] trap_vector_at_dispatch (12 bits)
+//   [103:96]  next_micro_state_at_dispatch (8 bits, 52=trap00 53=trap0)
+//   [95]      fmt1_latched (first trap0 format word)
+//   [94]      useStackframe2_at_fmt1
+//   [93:78]   format_word_1 (16 bits)
+//   [77]      fmt2_latched (second trap0 format word, stacked trace)
+//   [76]      useStackframe2_at_fmt2
+//   [75:60]   format_word_2 (16 bits)
+//   [59]      trace_stk_grp2_entered
+//   [58:0]    unused
+
+(* noprune, preserve *) reg        excf_chk_dispatch_latched;
+(* noprune, preserve *) reg        excf_make_trace_cap;
+(* noprune, preserve *) reg        excf_exec_trap_chk_cap;
+(* noprune, preserve *) reg        excf_set_trap_chk_cap;
+(* noprune, preserve *) reg  [7:0] excf_flagsSR_cap;
+(* noprune, preserve *) reg [11:0] excf_trap_vector_cap;
+(* noprune, preserve *) reg  [7:0] excf_next_ms_cap;
+(* noprune, preserve *) reg        excf_fmt1_latched;
+(* noprune, preserve *) reg        excf_useStackframe2_1;
+(* noprune, preserve *) reg [15:0] excf_format_word_1;
+(* noprune, preserve *) reg        excf_fmt2_latched;
+(* noprune, preserve *) reg        excf_useStackframe2_2;
+(* noprune, preserve *) reg [15:0] excf_format_word_2;
+(* noprune, preserve *) reg        excf_trace_stk_grp2_entered;
+
+wire [0:0] excf_issp_source;
+
+always @(posedge clk or negedge reset) begin
+	if (!reset) begin
+		excf_chk_dispatch_latched  <= 0;
+		excf_make_trace_cap        <= 0;
+		excf_exec_trap_chk_cap     <= 0;
+		excf_set_trap_chk_cap      <= 0;
+		excf_flagsSR_cap           <= 0;
+		excf_trap_vector_cap       <= 0;
+		excf_next_ms_cap           <= 0;
+		excf_fmt1_latched          <= 0;
+		excf_useStackframe2_1      <= 0;
+		excf_format_word_1         <= 0;
+		excf_fmt2_latched          <= 0;
+		excf_useStackframe2_2      <= 0;
+		excf_format_word_2         <= 0;
+		excf_trace_stk_grp2_entered <= 0;
+	end else if (excf_issp_source[0]) begin
+		// Synchronous clear via ISSP source bit
+		excf_chk_dispatch_latched  <= 0;
+		excf_make_trace_cap        <= 0;
+		excf_exec_trap_chk_cap     <= 0;
+		excf_set_trap_chk_cap      <= 0;
+		excf_flagsSR_cap           <= 0;
+		excf_trap_vector_cap       <= 0;
+		excf_next_ms_cap           <= 0;
+		excf_fmt1_latched          <= 0;
+		excf_useStackframe2_1      <= 0;
+		excf_format_word_1         <= 0;
+		excf_fmt2_latched          <= 0;
+		excf_useStackframe2_2      <= 0;
+		excf_format_word_2         <= 0;
+		excf_trace_stk_grp2_entered <= 0;
+	end else if (kernel_clkena_lw_p) begin
+		// Group A: capture at CHK trap dispatch (trapmake with exec or set trap_chk)
+		// Only capture when make_trace is active (T1 trace) so we see the
+		// stacked trace path, not a normal non-traced CHK dispatch.
+		if (kernel_trapmake_p && (kernel_exec_trap_chk_p || kernel_set_trap_chk_p)
+		    && kernel_make_trace_p
+		    && !excf_chk_dispatch_latched) begin
+			excf_chk_dispatch_latched <= 1;
+			excf_make_trace_cap       <= kernel_make_trace_p;
+			excf_exec_trap_chk_cap    <= kernel_exec_trap_chk_p;
+			excf_set_trap_chk_cap     <= kernel_set_trap_chk_p;
+			excf_flagsSR_cap          <= kernel_FlagsSR_p;
+			excf_trap_vector_cap      <= kernel_trap_vector_p[11:0];
+			excf_next_ms_cap          <= kernel_next_ms_p[7:0];
+		end
+		// Group B: capture format word at trap1 (micro_state==54).
+		// GATED on excf_chk_dispatch_latched so we only capture the CHK frame,
+		// not format words from earlier unrelated exceptions (F-line, priv, etc.).
+		// data_write_tmp is SET by the kernel clocked process at the trap0 edge,
+		// so its new value is only visible on the following cycle (trap1).
+		if (excf_chk_dispatch_latched && kernel_micro_state_p == 32'd54 && !excf_fmt1_latched) begin
+			excf_fmt1_latched      <= 1;
+			excf_useStackframe2_1  <= kernel_useStackframe2_p;
+			excf_format_word_1     <= kernel_data_write_tmp_p[15:0];
+		end else if (excf_chk_dispatch_latched && kernel_micro_state_p == 32'd54 && excf_fmt1_latched && !excf_fmt2_latched) begin
+			excf_fmt2_latched      <= 1;
+			excf_useStackframe2_2  <= kernel_useStackframe2_p;
+			excf_format_word_2     <= kernel_data_write_tmp_p[15:0];
+		end
+		// Group C: trace_stk_grp2 entered (micro_state==114)
+		// Also gated on CHK dispatch to avoid capturing unrelated trace entries
+		if (excf_chk_dispatch_latched && kernel_micro_state_p == 32'd114) begin
+			excf_trace_stk_grp2_entered <= 1;
+		end
+	end
+end
+
+// In-System Sources and Probes (ISSP) for JTAG readback of PMMU debug state
+// Probe layout (MSB first):
+//   TC[31:0] + TT0[31:0] + TT1[31:0] = 96
+//   + CRP_HI[31:0] + CRP_LO[31:0] + SRP_HI[31:0] + SRP_LO[31:0] = 128
+//   + WSTATE[4:0] + FAULT + BUSY = 7
+//   + ATC_BUSERR[21:0] + ATC_VALID[21:0] = 44
+//   + FAULT_LATCHED + WALKER_TIMEOUT_LATCHED = 2
+//   + FAULT_TC[31:0] + FAULT_ADDR[31:0] + FAULT_WSTATE[4:0] = 69
+//   + FAULT_ATC_BUSERR[21:0] + FAULT_ATC_VALID[21:0] = 44
+//   + FAULT_MMUSR[15:0] + FAULT_SAVED_ADDR[31:0] = 48
+//   + FAULT_DESC_ADDR[31:0] + FAULT_DESC_DATA[31:0] = 64
+//   + FAULT_FC[2:0] = 3
+//   + IPL_NR[2:0] + setendOPC + STOP + CPU_BUS_BERR = 6
+//   Total = 511 (max for altsource_probe)
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (0),
+	.instance_id             ("PMMU"),
+	.probe_width             (511),
+	.source_width            (0),
+	.enable_metastability    ("YES")
+) pmmu_issp (
+	.probe ({stp_pmmu_tc, stp_pmmu_tt0, stp_pmmu_tt1,
+	         stp_pmmu_crp_hi, stp_pmmu_crp_lo, stp_pmmu_srp_hi, stp_pmmu_srp_lo,
+	         stp_pmmu_wstate, stp_pmmu_fault, stp_pmmu_busy,
+	         stp_atc_buserr, stp_atc_valid,
+	         stp_fault_latched, stp_walker_timeout_latched,
+	         stp_fault_tc, stp_fault_addr, stp_fault_wstate,
+	         stp_fault_atc_buserr, stp_fault_atc_valid,
+	         stp_fault_mmusr, stp_fault_saved_addr,
+	         stp_fault_desc_addr, stp_fault_desc_data,
+	         stp_fault_fc,
+	         stp_ipl_nr, stp_setendOPC, stp_stop,
+	         cpu_halted_p})
+);
+
+// Secondary PMMU sticky probe: per-level descriptor snapshots (A/B/C)
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (1),
+	.instance_id             ("PMM2"),
+	.probe_width             (194),
+	.source_width            (0),
+	.enable_metastability    ("YES")
+) pmmu_issp_desc (
+	.probe ({stp_fault_latched, stp_walker_timeout_latched,
+	         stp_fault_ptr1_desc_addr, stp_fault_ptr1_desc_data,
+	         stp_fault_ptr2_desc_addr, stp_fault_ptr2_desc_data,
+	         stp_fault_ptr3_desc_addr, stp_fault_ptr3_desc_data})
+);
+
+// Tertiary ISSP: CHK/Group2 exception frame trap-event latch (instance 2)
+// Probe width = 128 bits; source width = 1 (bit [0] clears the latch)
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (2),
+	.instance_id             ("EXCF"),
+	.probe_width             (128),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) excf_issp (
+	.probe ({excf_chk_dispatch_latched,
+	         excf_make_trace_cap,
+	         excf_exec_trap_chk_cap,
+	         excf_set_trap_chk_cap,
+	         excf_flagsSR_cap,
+	         excf_trap_vector_cap,
+	         excf_next_ms_cap,
+	         excf_fmt1_latched,
+	         excf_useStackframe2_1,
+	         excf_format_word_1,
+	         excf_fmt2_latched,
+	         excf_useStackframe2_2,
+	         excf_format_word_2,
+	         excf_trace_stk_grp2_entered,
+	         59'b0}),
+	.source (excf_issp_source)
+);
+
+// ============================================================================
+// ISSP Instance 3: CPUS - CPU Core State (live + sticky hang capture)
+// ============================================================================
+// Live probe (256 bits):
+//   PC[31:0]=32, opcode[15:0]=16, state[1:0]=2, micro_state[7:0]=8,
+//   next_micro_state[7:0]=8, memmask[5:0]=6, FlagsSR[7:0]=8, SVmode=1,
+//   memaddr_reg[31:0]=32, exe_PC[31:0]=32, last_opc_read[15:0]=16,
+//   brief[15:0]=16, trap_vector[31:0]=32,
+//   trap_illegal=1, trap_priv=1, trap_addr_error=1, trap_berr=1,
+//   trap_mmu_berr=1, make_berr=1, trap_1111=1, trapmake=1,
+//   decodeOPC=1, setnextpass=1, setendOPC=1, stop=1, clkena_lw=1,
+//   cpu_halted=1, pmmu_fault=1, interrupt=1
+//   = 32+16+2+8+8+6+8+1+32+32+16+16+32+8+1+1+1+1+1+1 = 223
+// Sticky hang capture (223 bits, same layout):
+//   hang_latched=1, hang_counter_overflow=1, + same fields = 224
+// Source: 1 bit (clear sticky latch)
+// Total probe = 223 + 224 = 447
+
+(* noprune, preserve *) reg [31:0] stp_cpu_pc;
+(* noprune, preserve *) reg [15:0] stp_cpu_opcode;
+(* noprune, preserve *) reg  [1:0] stp_cpu_state;
+(* noprune, preserve *) reg  [7:0] stp_cpu_micro_state;
+(* noprune, preserve *) reg  [7:0] stp_cpu_next_micro_state;
+(* noprune, preserve *) reg  [5:0] stp_cpu_memmask;
+(* noprune, preserve *) reg  [7:0] stp_cpu_flagsSR;
+(* noprune, preserve *) reg        stp_cpu_SVmode;
+(* noprune, preserve *) reg [31:0] stp_cpu_memaddr;
+(* noprune, preserve *) reg [31:0] stp_cpu_exe_pc;
+(* noprune, preserve *) reg [15:0] stp_cpu_last_opc_read;
+(* noprune, preserve *) reg [15:0] stp_cpu_brief;
+(* noprune, preserve *) reg [31:0] stp_cpu_trap_vector;
+(* noprune, preserve *) reg        stp_cpu_trap_illegal;
+(* noprune, preserve *) reg        stp_cpu_trap_priv;
+(* noprune, preserve *) reg        stp_cpu_trap_addr_error;
+(* noprune, preserve *) reg        stp_cpu_trap_berr;
+(* noprune, preserve *) reg        stp_cpu_trap_mmu_berr;
+(* noprune, preserve *) reg        stp_cpu_make_berr;
+(* noprune, preserve *) reg        stp_cpu_trap_1111;
+(* noprune, preserve *) reg        stp_cpu_trapmake;
+(* noprune, preserve *) reg        stp_cpu_decodeOPC;
+(* noprune, preserve *) reg        stp_cpu_setnextpass;
+
+// Sticky hang capture: latches CPU state when CPU stops advancing
+// Detection: if micro_state and PC don't change for 2^16 cycles (~580us at 114MHz)
+(* noprune, preserve *) reg        stp_hang_latched;
+(* noprune, preserve *) reg        stp_hang_overflow;  // counter saturated
+(* noprune, preserve *) reg [31:0] stp_hang_pc;
+(* noprune, preserve *) reg [15:0] stp_hang_opcode;
+(* noprune, preserve *) reg  [1:0] stp_hang_state;
+(* noprune, preserve *) reg  [7:0] stp_hang_micro_state;
+(* noprune, preserve *) reg  [7:0] stp_hang_next_micro_state;
+(* noprune, preserve *) reg  [5:0] stp_hang_memmask;
+(* noprune, preserve *) reg  [7:0] stp_hang_flagsSR;
+(* noprune, preserve *) reg        stp_hang_SVmode;
+(* noprune, preserve *) reg [31:0] stp_hang_memaddr;
+(* noprune, preserve *) reg [31:0] stp_hang_exe_pc;
+(* noprune, preserve *) reg [31:0] stp_hang_trap_vector;
+(* noprune, preserve *) reg        stp_hang_trapmake;
+(* noprune, preserve *) reg        stp_hang_pmmu_fault;
+(* noprune, preserve *) reg        stp_hang_cpu_halted;
+
+reg [15:0] hang_detect_counter;
+reg [31:0] hang_prev_pc;
+reg  [7:0] hang_prev_micro;
+wire [0:0] cpus_issp_source;  // JTAG clear for hang latch and T0 latch
+
+// T0 edge detector: captures state when FlagsSR(6) transitions 0->1
+(* noprune, preserve *) reg        stp_t0_latched;         // sticky: T0 rising edge seen
+(* noprune, preserve *) reg        stp_t0_cause_directSR;  // exec(directSR) was active (RTE)
+(* noprune, preserve *) reg        stp_t0_cause_to_SR;     // exec(to_SR) was active (MOVE/ORI/EORI to SR)
+(* noprune, preserve *) reg [31:0] stp_t0_pc;              // PC when T0 was set
+(* noprune, preserve *) reg [15:0] stp_t0_opcode;          // opcode when T0 was set
+reg        prev_flagsSR_6;  // previous value of FlagsSR(6) for edge detection
+
+always @(posedge clk) begin
+	// Live state capture
+	stp_cpu_pc              <= kernel_TG68_PC_p;
+	stp_cpu_opcode          <= kernel_opcode_p;
+	stp_cpu_state           <= kernel_state_p;
+	stp_cpu_micro_state     <= kernel_micro_state_p[7:0];
+	stp_cpu_next_micro_state <= kernel_next_ms_p[7:0];
+	stp_cpu_memmask         <= kernel_memmask_p;
+	stp_cpu_flagsSR         <= kernel_FlagsSR_p;
+	stp_cpu_SVmode          <= kernel_SVmode_p;
+	stp_cpu_memaddr         <= kernel_memaddr_reg_p;
+	stp_cpu_exe_pc          <= kernel_exe_PC_p;
+	stp_cpu_last_opc_read   <= kernel_last_opc_read_p;
+	stp_cpu_brief           <= kernel_brief_p;
+	stp_cpu_trap_vector     <= kernel_trap_vector_p;
+	stp_cpu_trap_illegal    <= kernel_trap_illegal_p;
+	stp_cpu_trap_priv       <= kernel_trap_priv_p;
+	stp_cpu_trap_addr_error <= kernel_trap_addr_error_p;
+	stp_cpu_trap_berr       <= kernel_trap_berr_p;
+	stp_cpu_trap_mmu_berr   <= kernel_trap_mmu_berr_p;
+	stp_cpu_make_berr       <= kernel_make_berr_p;
+	stp_cpu_trap_1111       <= kernel_trap_1111_p;
+	stp_cpu_trapmake        <= kernel_trapmake_p;
+	stp_cpu_decodeOPC       <= kernel_decodeOPC_p;
+	stp_cpu_setnextpass     <= kernel_setnextpass_p;
+
+	// Hang detection: PC and micro_state unchanged for 2^16 cycles
+	if (~reset) begin
+		hang_detect_counter <= 0;
+		hang_prev_pc <= 0;
+		hang_prev_micro <= 0;
+		stp_hang_latched <= 0;
+		stp_hang_overflow <= 0;
+	end else if (cpus_issp_source[0]) begin
+		// JTAG clear
+		stp_hang_latched <= 0;
+		stp_hang_overflow <= 0;
+		hang_detect_counter <= 0;
+	end else begin
+		if (kernel_TG68_PC_p != hang_prev_pc || kernel_micro_state_p[7:0] != hang_prev_micro) begin
+			// State changed - reset counter
+			hang_detect_counter <= 0;
+			hang_prev_pc <= kernel_TG68_PC_p;
+			hang_prev_micro <= kernel_micro_state_p[7:0];
+		end else if (!stp_hang_latched) begin
+			if (hang_detect_counter == 16'hFFFF) begin
+				// Hung! Capture state
+				stp_hang_latched         <= 1;
+				stp_hang_overflow        <= 1;
+				stp_hang_pc              <= kernel_TG68_PC_p;
+				stp_hang_opcode          <= kernel_opcode_p;
+				stp_hang_state           <= kernel_state_p;
+				stp_hang_micro_state     <= kernel_micro_state_p[7:0];
+				stp_hang_next_micro_state <= kernel_next_ms_p[7:0];
+				stp_hang_memmask         <= kernel_memmask_p;
+				stp_hang_flagsSR         <= kernel_FlagsSR_p;
+				stp_hang_SVmode          <= kernel_SVmode_p;
+				stp_hang_memaddr         <= kernel_memaddr_reg_p;
+				stp_hang_exe_pc          <= kernel_exe_PC_p;
+				stp_hang_trap_vector     <= kernel_trap_vector_p;
+				stp_hang_trapmake        <= kernel_trapmake_p;
+				stp_hang_pmmu_fault      <= pmmu_fault_p;
+				stp_hang_cpu_halted      <= cpu_halted_p;
+			end else begin
+				hang_detect_counter <= hang_detect_counter + 1;
+			end
+		end
+	end
+
+	// T0 edge detector: capture when FlagsSR(6) transitions 0->1
+	prev_flagsSR_6 <= kernel_FlagsSR_p[6];
+	if (~reset) begin
+		stp_t0_latched        <= 0;
+		stp_t0_cause_directSR <= 0;
+		stp_t0_cause_to_SR    <= 0;
+		stp_t0_pc             <= 0;
+		stp_t0_opcode         <= 0;
+		prev_flagsSR_6        <= 0;
+	end else if (cpus_issp_source[0]) begin
+		stp_t0_latched        <= 0;
+		stp_t0_cause_directSR <= 0;
+		stp_t0_cause_to_SR    <= 0;
+		stp_t0_pc             <= 0;
+		stp_t0_opcode         <= 0;
+	end else if (kernel_FlagsSR_p[6] && !prev_flagsSR_6 && !stp_t0_latched) begin
+		// Rising edge of T0 - capture cause
+		stp_t0_latched        <= 1;
+		stp_t0_cause_directSR <= kernel_exec_directSR_p;
+		stp_t0_cause_to_SR    <= kernel_exec_to_SR_p;
+		stp_t0_pc             <= kernel_TG68_PC_p;
+		stp_t0_opcode         <= kernel_opcode_p;
+	end
+end
+
+// CPUS ISSP probe layout (458 bits):
+// Live[222:0] + Hang[181:0] + T0[53:0]
+// Live = PC[31:0] opcode[15:0] state[1:0] micro[7:0] next_micro[7:0]
+//        memmask[5:0] flagsSR[7:0] SVmode memaddr[31:0] exe_pc[31:0]
+//        last_opc_read[15:0] brief[15:0] trap_vector[31:0]
+//        trap_illegal trap_priv trap_addr_error trap_berr trap_mmu_berr
+//        make_berr trap_1111 trapmake decodeOPC setnextpass
+//        setendOPC stop clkena_lw cpu_halted pmmu_fault interrupt
+// Hang = hang_latched hang_overflow + captured fields
+// T0 = t0_latched cause_directSR cause_to_SR t0_pc[31:0] t0_opcode[15:0] pad[2:0]
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (3),
+	.instance_id             ("CPUS"),
+	.probe_width             (458),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) cpus_issp (
+	.probe ({
+		// Live state (223 bits)
+		stp_cpu_pc,                    // [457:426] 32
+		stp_cpu_opcode,                // [425:410] 16
+		stp_cpu_state,                 // [409:408] 2
+		stp_cpu_micro_state,           // [407:400] 8
+		stp_cpu_next_micro_state,      // [399:392] 8
+		stp_cpu_memmask,               // [391:386] 6
+		stp_cpu_flagsSR,               // [385:378] 8
+		stp_cpu_SVmode,                // [377]     1
+		stp_cpu_memaddr,               // [376:345] 32
+		stp_cpu_exe_pc,                // [344:313] 32
+		stp_cpu_last_opc_read,         // [312:297] 16
+		stp_cpu_brief,                 // [296:281] 16
+		stp_cpu_trap_vector,           // [280:249] 32
+		stp_cpu_trap_illegal,          // [248]
+		stp_cpu_trap_priv,             // [247]
+		stp_cpu_trap_addr_error,       // [246]
+		stp_cpu_trap_berr,             // [245]
+		stp_cpu_trap_mmu_berr,         // [244]
+		stp_cpu_make_berr,             // [243]
+		stp_cpu_trap_1111,             // [242]
+		stp_cpu_trapmake,              // [241]
+		stp_cpu_decodeOPC,             // [240]
+		stp_cpu_setnextpass,           // [239]
+		stp_setendOPC,                 // [238]
+		stp_stop,                      // [237]
+		kernel_clkena_lw_p,            // [236]
+		cpu_halted_p,                  // [235]
+		// Sticky hang capture (181 bits)
+		stp_hang_latched,              // [234]
+		stp_hang_overflow,             // [233]
+		stp_hang_pc,                   // [232:201] 32
+		stp_hang_opcode,               // [200:185] 16
+		stp_hang_state,                // [184:183] 2
+		stp_hang_micro_state,          // [182:175] 8
+		stp_hang_next_micro_state,     // [174:167] 8
+		stp_hang_memmask,              // [166:161] 6
+		stp_hang_flagsSR,              // [160:153] 8
+		stp_hang_SVmode,               // [152]
+		stp_hang_memaddr,              // [151:120] 32
+		stp_hang_exe_pc,               // [119:88]  32
+		stp_hang_trap_vector,          // [87:56]   32
+		stp_hang_trapmake,             // [55]
+		stp_hang_pmmu_fault,           // [54]
+		stp_hang_cpu_halted,           // [53]
+		pmmu_fault_p,                  // [52]      live pmmu_fault
+		kernel_interrupt_p,            // [51]      live interrupt
+		// T0 edge capture (51 bits + 1 pad = 52)
+		stp_t0_latched,                // [50]
+		stp_t0_cause_directSR,         // [49]
+		stp_t0_cause_to_SR,            // [48]
+		stp_t0_pc,                     // [47:16]   32
+		stp_t0_opcode,                 // [15:0]    16
+	}),
+	.source (cpus_issp_source)
+);
+
+// ============================================================================
+// ISSP Instance 4: REGS - Register File Snapshot (D0-D7, A0-A7)
+// ============================================================================
+// 512 bits = 16 registers x 32 bits (max probe width)
+(* noprune, preserve *) reg [31:0] stp_reg_d0, stp_reg_d1, stp_reg_d2, stp_reg_d3;
+(* noprune, preserve *) reg [31:0] stp_reg_d4, stp_reg_d5, stp_reg_d6, stp_reg_d7;
+(* noprune, preserve *) reg [31:0] stp_reg_a0, stp_reg_a1, stp_reg_a2, stp_reg_a3;
+(* noprune, preserve *) reg [31:0] stp_reg_a4, stp_reg_a5, stp_reg_a6, stp_reg_a7;
+
+always @(posedge clk) begin
+	stp_reg_d0 <= kernel_regfile_d0_p;
+	stp_reg_d1 <= kernel_regfile_d1_p;
+	stp_reg_d2 <= kernel_regfile_d2_p;
+	stp_reg_d3 <= kernel_regfile_d3_p;
+	stp_reg_d4 <= kernel_regfile_d4_p;
+	stp_reg_d5 <= kernel_regfile_d5_p;
+	stp_reg_d6 <= kernel_regfile_d6_p;
+	stp_reg_d7 <= kernel_regfile_d7_p;
+	stp_reg_a0 <= kernel_regfile_a0_p;
+	stp_reg_a1 <= kernel_regfile_a1_p;
+	stp_reg_a2 <= kernel_regfile_a2_p;
+	stp_reg_a3 <= kernel_regfile_a3_p;
+	stp_reg_a4 <= kernel_regfile_a4_p;
+	stp_reg_a5 <= kernel_regfile_a5_p;
+	stp_reg_a6 <= kernel_regfile_a6_p;
+	stp_reg_a7 <= kernel_regfile_a7_p;
+end
+
+// 511 bits max: 15 regs x 32 = 480 + A7[31:1] = 31 = 511
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (4),
+	.instance_id             ("REGS"),
+	.probe_width             (511),
+	.source_width            (0),
+	.enable_metastability    ("YES")
+) regs_issp (
+	.probe ({
+		stp_reg_d0, stp_reg_d1, stp_reg_d2, stp_reg_d3,
+		stp_reg_d4, stp_reg_d5, stp_reg_d6, stp_reg_d7,
+		stp_reg_a0, stp_reg_a1, stp_reg_a2, stp_reg_a3,
+		stp_reg_a4, stp_reg_a5, stp_reg_a6, stp_reg_a7[31:1]
+	})
+);
+
+// PMMU walker address mux signals (for bus arbitration)
+// NOTE: Walker supports full 32-bit addressing:
+//   - Chip RAM (<2MB): uses walker_chip_addr[23:1] -> chip_addr bus
+//   - Z3/Z2 Fast RAM: uses walker_addr_word[31:1] -> walker_ramaddr -> ramsel path
+// Page tables in Z3 RAM above 16MB are fully supported via the ramaddr path.
+reg         walker_active;
+reg   [3:0] walker_state;  // BUG #124 FIX: Walker state visible for bus mux (4-bit for write states)
+reg  [31:0] walker_wdata_latch;  // MC68030 U/M bit: Latch write data from PMMU
+reg         walker_timeout_error; // BUG #138: Walker timeout error flag
+wire [23:1] walker_chip_addr;  // For Chip RAM only (inherently <2MB)
+wire        walker_reading;  // BUG #124 FIX: Walker actively reading memory
+wire        walker_writing;  // MC68030 U/M bit: Walker actively writing memory
+wire        walker_write_low_phase;  // MC68030 U/M bit: Writing low word
+reg  [31:1] walker_addr_latch;  // BUG #135 FIX: Declare outside generate for chipreq logic
+
+// Cache interface signals (68030 only)
+wire        i_cache_enabled;
+wire        d_cache_enabled;
+wire        cache_hit;
+wire        cache_miss;
+wire        cache_inv_req;
+wire  [1:0] cache_op_scope;
+wire  [1:0] cache_op_cache;
+wire [31:0] cache_op_addr;
+wire        cacr_ie;
+wire        cacr_de;
+wire        cacr_ifreeze;
+wire        cacr_dfreeze;
+wire        cacr_ibe;  // Instruction Burst Enable
+wire        cacr_dbe;  // Data Burst Enable
+wire        cacr_wa;   // Write Allocate
+wire        i_cache_req;
+wire [31:0] i_cache_addr;
+wire [31:0] i_cache_data;
+wire        i_cache_hit;
+wire        i_fill_req;
+wire [31:0] i_fill_addr;
+wire[127:0] i_fill_data;
+wire        i_fill_valid;
+wire        d_cache_req;
+wire [31:0] d_cache_addr;
+wire        d_cache_we;
+wire [31:0] d_cache_data_in;
+wire [31:0] d_cache_data_out;
+wire        d_cache_hit;
+wire  [3:0] d_cache_be;
+wire        d_fill_req;
+wire [31:0] d_fill_addr;
+wire[127:0] d_fill_data;
+wire        d_fill_valid;
+// Qualify CPU completion on the bus that is currently selected.
+// This blocks stale ready pulses (e.g. delayed SDRAM ramready from a stale
+// physical address) from completing an unrelated chip/fast cycle.
+wire        cpu_ready_qualified = (ramsel & ramready) |
+                                  (fastchip_selack & fastchip_ready) |
+                                  (~ramsel & ~fastchip_selack & chipready);
 
 TG68KdotC_Kernel
 #(
@@ -204,7 +1130,17 @@ cpu_inst_p
 (
   .clk(clk),
   .nreset(reset),
-  .clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
+  // BUG #139: Reset must bypass walker stall - allow clkena_in during reset recovery
+  // so CPU internal reset can propagate even if walker is stuck
+  // BUG #407: Also stall on pmmu_busy_p - catches the 1-cycle gap between ATC miss
+  // detection (translation_pending='1') and walker mem_req assertion. Without this,
+  // the CPU can advance with a stale physical address before the walker starts.
+  // MC68030 bus fault: pmmu_fault_p bypasses pmmu_busy_p stall so the kernel can
+  // advance to process the fault (accumulate make_berr, detect double bus fault).
+  // Bus accesses are suppressed by pmmu_suppress_bus, so no stray writes occur.
+  // cpu_bus_berr: chip bus timeout unblocks CPU to process bus error exception
+  .clkena_in((~cpu_req | cpu_ready_qualified | (USE_68030_CACHE & cache_hit) | pmmu_fault_p | cpu_bus_berr | walker_timeout_error | ~reset) & (~pmmu_walker_req_p | ~reset | walker_timeout_error) & (~pmmu_busy_p | pmmu_fault_p | walker_timeout_error | ~reset)),
+  .berr(cpu_bus_berr),  // Chip bus timeout -> bus error exception
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -220,7 +1156,120 @@ cpu_inst_p
   .cpu(cpucfg),
   .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
   .cacr_out(cacr_p),
-  .vbr_out(vbr_p)
+  .vbr_out(vbr_p),
+  // Cache control interface (68030)
+  .cache_inv_req(cache_inv_req),
+  .cache_op_scope(cache_op_scope),
+  .cache_op_cache(cache_op_cache),
+  .cacr_ie(cacr_ie),
+  .cacr_de(cacr_de),
+  .cacr_ifreeze(cacr_ifreeze),
+  .cacr_dfreeze(cacr_dfreeze),
+  .cacr_ibe(cacr_ibe),
+  .cacr_dbe(cacr_dbe),
+  .cacr_wa(cacr_wa),
+  // PMMU address interface
+  .pmmu_addr_log(pmmu_addr_log_p),
+  .pmmu_addr_phys(pmmu_addr_phys_p),
+  .pmmu_cache_inhibit(pmmu_cache_inhibit_p),  // BUG #126 FIX: Cache inhibit from PMMU
+  // PMMU walker memory interface
+  .pmmu_walker_req(pmmu_walker_req_p),
+  .pmmu_walker_we(pmmu_walker_we_p),    // MC68030 U/M bit: write enable
+  .pmmu_walker_addr(pmmu_walker_addr_p),
+  .pmmu_walker_wdat(pmmu_walker_wdat_p),  // MC68030 U/M bit: write data
+  .pmmu_walker_ack(pmmu_walker_ack_p),
+  .pmmu_walker_data(pmmu_walker_data_p),
+  .pmmu_walker_berr(pmmu_walker_berr_p),  // MC68030: Bus error (sets MMUSR B bit)
+  // BUG #407: PMMU busy signal for clkena_in gating
+  .debug_pmmu_busy(pmmu_busy_p),
+  .debug_cpu_halted(cpu_halted_p),
+  .debug_stop(kernel_stop_p),
+  .debug_state(kernel_state_p),
+  .debug_clkena_lw(kernel_clkena_lw_p),
+  .debug_interrupt(kernel_interrupt_p),
+  .debug_setendOPC(kernel_setendOPC_p),
+  .debug_IPL_nr(kernel_IPL_nr_p),
+  // MC68030 bus fault: PMMU fault signal for bus access suppression
+  .debug_pmmu_fault(pmmu_fault_p),
+  // Format Error debug latch
+  .debug_trap_format_error(fmt_err_latched_p),
+  .debug_format_error_rte_word(fmt_err_rte_word_p),
+  .debug_format_error_sr(fmt_err_sr_p),
+  .debug_format_error_pc(),   // not routed to save pins
+  .debug_format_error_addr(), // not routed to save pins
+  // Cache operation address
+  .cache_op_addr(cache_op_addr),
+  // SignalTap debug ports (from PMMU)
+  .debug_pmmu_tc(stp_pmmu_tc_w),
+  .debug_pmmu_tt0(stp_pmmu_tt0_w),
+  .debug_pmmu_tt1(stp_pmmu_tt1_w),
+  .debug_pmmu_crp_hi(stp_pmmu_crp_hi_w),
+  .debug_pmmu_crp_lo(stp_pmmu_crp_lo_w),
+  .debug_pmmu_wstate(stp_pmmu_wstate_w),
+  .debug_pmmu_atc_buserr(stp_atc_buserr_w),
+  .debug_pmmu_atc_valid(stp_atc_valid_w),
+  .debug_pmmu_fault_status(stp_fault_status_w),
+  .debug_pmmu_saved_addr(stp_saved_addr_w),
+  .debug_pmmu_srp_hi(stp_pmmu_srp_hi_w),
+  .debug_pmmu_srp_lo(stp_pmmu_srp_lo_w),
+  .debug_pmmu_walk_desc_addr(stp_walk_desc_addr_w),
+  .debug_pmmu_walk_desc_data(stp_walk_desc_data_w),
+  .debug_pmmu_ptr1_desc_addr(stp_ptr1_desc_addr_w),
+  .debug_pmmu_ptr1_desc_data(stp_ptr1_desc_data_w),
+  .debug_pmmu_ptr2_desc_addr(stp_ptr2_desc_addr_w),
+  .debug_pmmu_ptr2_desc_data(stp_ptr2_desc_data_w),
+  .debug_pmmu_ptr3_desc_addr(stp_ptr3_desc_addr_w),
+  .debug_pmmu_ptr3_desc_data(stp_ptr3_desc_data_w),
+  .debug_pmmu_saved_fc(stp_saved_fc_w),
+  // CHK/Group2 exception frame ISSP probes
+  .debug_make_trace(kernel_make_trace_p),
+  .debug_trace_pending_grp2(kernel_trace_pending_grp2_p),
+  .debug_useStackframe2(kernel_useStackframe2_p),
+  .debug_exec_trap_chk(kernel_exec_trap_chk_p),
+  .debug_set_trap_chk(kernel_set_trap_chk_p),
+  .debug_data_write_tmp(kernel_data_write_tmp_p),
+  .debug_FlagsSR(kernel_FlagsSR_p),
+  .debug_trap_vector(kernel_trap_vector_p),
+  .debug_micro_state(kernel_micro_state_p),
+  .debug_next_micro_state(kernel_next_ms_p),
+  .debug_trapmake(kernel_trapmake_p),
+  // CPU Core debug (CPUS ISSP)
+  .debug_TG68_PC(kernel_TG68_PC_p),
+  .debug_opcode(kernel_opcode_p),
+  .debug_last_opc_read(kernel_last_opc_read_p),
+  .debug_brief(kernel_brief_p),
+  .debug_memaddr_reg(kernel_memaddr_reg_p),
+  .debug_memmask(kernel_memmask_p),
+  .debug_decodeOPC(kernel_decodeOPC_p),
+  .debug_setnextpass(kernel_setnextpass_p),
+  .debug_SVmode(kernel_SVmode_p),
+  .debug_exe_PC(kernel_exe_PC_p),
+  .debug_trap_illegal(kernel_trap_illegal_p),
+  .debug_trap_priv(kernel_trap_priv_p),
+  .debug_trap_addr_error(kernel_trap_addr_error_p),
+  .debug_trap_berr(kernel_trap_berr_p),
+  .debug_trap_mmu_berr(kernel_trap_mmu_berr_p),
+  .debug_make_berr(kernel_make_berr_p),
+  .debug_trap_1111(kernel_trap_1111_p),
+  .debug_exec_directSR(kernel_exec_directSR_p),
+  .debug_exec_to_SR(kernel_exec_to_SR_p),
+  // Register file debug (REGS ISSP)
+  .debug_regfile_d0(kernel_regfile_d0_p),
+  .debug_regfile_d1(kernel_regfile_d1_p),
+  .debug_regfile_d2(kernel_regfile_d2_p),
+  .debug_regfile_d3(kernel_regfile_d3_p),
+  .debug_regfile_d4(kernel_regfile_d4_p),
+  .debug_regfile_d5(kernel_regfile_d5_p),
+  .debug_regfile_d6(kernel_regfile_d6_p),
+  .debug_regfile_d7(kernel_regfile_d7_p),
+  .debug_regfile_a0(kernel_regfile_a0_p),
+  .debug_regfile_a1(kernel_regfile_a1_p),
+  .debug_regfile_a2(kernel_regfile_a2_p),
+  .debug_regfile_a3(kernel_regfile_a3_p),
+  .debug_regfile_a4(kernel_regfile_a4_p),
+  .debug_regfile_a5(kernel_regfile_a5_p),
+  .debug_regfile_a6(kernel_regfile_a6_p),
+  .debug_regfile_a7(kernel_regfile_a7_p)
 );
 
 wire [15:0] cpu_dout_o;
@@ -265,6 +1314,548 @@ fx68k cpu_inst_o
 	.eab(cpu_addr_o)
 );
 
+// 68030 Cache implementation (conditional instantiation)
+generate
+if (USE_68030_CACHE) begin : gen_68030_cache
+
+	// Cache enable logic - independent control for instruction and data caches.
+	// The existing OSD slot with cpucfg=10 is reused for 68030; the logic keys off cpucfg[1].
+	assign i_cache_enabled = cpucfg[1] & cacr_ie; // 68030 slot active and instruction cache enabled
+	assign d_cache_enabled = cpucfg[1] & cacr_de; // 68030 slot active and data cache enabled
+
+	// 68030 Cache instantiation
+	TG68K_Cache_030 cache_inst
+	(
+		.clk(clk),
+		.nreset(reset),
+		// Cache Control (from CACR register)
+		.cacr_ie(cacr_ie),
+		.cacr_de(cacr_de),
+		.cacr_ifreeze(cacr_ifreeze),
+		.cacr_dfreeze(cacr_dfreeze),
+		.cacr_wa(cacr_wa),
+		// Cache invalidation (68030 via CACR bits)
+		.inv_req(cache_inv_req),
+		.cache_op_scope(cache_op_scope),
+		.cache_op_cache(cache_op_cache),
+		.cache_op_addr(cache_op_addr),
+		// Instruction Cache Interface
+		.i_addr(i_cache_addr),
+		.i_addr_phys(pmmu_addr_phys_p),  // Physical address from PMMU
+		.i_req(i_cache_req),
+		.i_cache_inhibit(pmmu_cache_inhibit_p),  // Cache inhibit from PMMU
+		.i_data(i_cache_data),
+		.i_hit(i_cache_hit),
+		.i_fill_req(i_fill_req),
+		.i_fill_addr(i_fill_addr),
+		.i_fill_data(i_fill_data),
+		.i_fill_valid(i_fill_valid),
+		// Data Cache Interface
+		.d_addr(d_cache_addr),
+		.d_addr_phys(pmmu_addr_phys_p),  // Physical address from PMMU
+		.d_req(d_cache_req),
+		.d_we(d_cache_we),
+		.d_cache_inhibit(pmmu_cache_inhibit_p),  // Cache inhibit from PMMU
+		.d_data_in(d_cache_data_in),
+		.d_data_out(d_cache_data_out),
+		.d_be(d_cache_be),
+		.d_hit(d_cache_hit),
+		.d_fill_req(d_fill_req),
+		.d_fill_addr(d_fill_addr),
+		.d_fill_data(d_fill_data),
+		.d_fill_valid(d_fill_valid)
+	);
+
+	// Cache interface logic
+	assign i_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
+	assign i_cache_req = i_cache_enabled & (cpustate_p == 2'b00); // Instruction fetch
+	assign d_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
+	assign d_cache_req = d_cache_enabled & (cpustate_p == 2'b10 | cpustate_p == 2'b11); // Data read/write
+	assign d_cache_we = (cpustate_p == 2'b11); // Write enable for data cache
+	
+	// Generate 32-bit data and byte enables from 16-bit CPU interface
+	// CPU provides 16-bit data with UDS/LDS strobes
+	// Convert to 32-bit aligned data with proper byte enables
+	wire [1:0] addr_low = pmmu_addr_log_p[1:0];
+	
+	// Data positioning based on address alignment
+	assign d_cache_data_in = (addr_low == 2'b00) ? {16'h0, cpu_dout_p} :
+	                         (addr_low == 2'b01) ? {24'h0, cpu_dout_p[7:0]} :
+	                         (addr_low == 2'b10) ? {cpu_dout_p, 16'h0} :
+	                                               {cpu_dout_p[7:0], 24'h0};
+	
+	// Byte enable generation
+	assign d_cache_be = (addr_low == 2'b00) ? {2'b00, ~uds_p, ~lds_p} :
+	                    (addr_low == 2'b01) ? {3'b000, ~lds_p} :
+	                    (addr_low == 2'b10) ? {~uds_p, ~lds_p, 2'b00} :
+	                                          {~uds_p, 3'b000};
+
+	// Cache hit/miss logic
+	// BUG #412 FIX: Data cache hits on WRITES must NOT bypass bus wait in clkena_in.
+	// MC68030 data cache is write-through: writes must go to BOTH cache AND memory.
+	// If cache_hit gates clkena_in during writes, the CPU advances before the actual
+	// bus write completes. For chip bus: chipreq is registered one clock late, so by the
+	// time the chip bus state machine starts, wr has changed to READ and chip_addr points
+	// to the new fetch address - the write becomes a read to the wrong address.
+	// For SDRAM: ramsel drops when cpu_req goes low, potentially losing the write.
+	// Fix: Exclude write cycles (d_cache_we) from cache_hit used for clkena_in gating.
+	// Reads can still be served entirely from cache; writes must wait for bus completion.
+	assign cache_hit = (i_cache_hit & i_cache_req) | (d_cache_hit & d_cache_req & ~d_cache_we);
+	assign cache_miss = ((i_cache_enabled & ~i_cache_hit & i_cache_req) | (d_cache_enabled & ~d_cache_hit & d_cache_req));
+
+	// Connect cache fill interface to external memory controller
+	// IBE/DBE bits control whether cache fills are allowed (not burst mode itself)
+	// When IBE=0, instruction cache fills are disabled (all I-fetches bypass cache)
+	// When DBE=0, data cache fills are disabled (all D-accesses bypass cache)
+	// SDRAM burst mode is always BURST=4 (hardcoded in sdram_ctrl.v line 291)
+	assign cache_req = (i_fill_req & cacr_ibe) | (d_fill_req & cacr_dbe);
+	assign cache_addr = i_fill_req ? i_fill_addr : d_fill_addr;
+
+	// Burst control - unused (SDRAM permanently in BURST=4 mode)
+	assign cache_burst = ((i_fill_req & cacr_ibe) | (d_fill_req & cacr_dbe));
+	assign cache_burst_len = 3'd7;  // Always 8 words for 128-bit cache line
+
+	// Cache fill logic - accumulate 16-bit reads into 128-bit cache lines
+	reg [2:0] fill_count;
+	reg [127:0] fill_buffer;
+	reg fill_active;
+
+	always @(posedge clk) begin
+		if (~reset) begin
+			fill_count <= 0;
+			fill_buffer <= 0;
+			fill_active <= 0;
+		end else begin
+			if (cache_req & cache_ack) begin
+				if (~fill_active) begin
+					fill_active <= 1;
+					fill_count <= 0;
+				end
+				
+				// Accumulate 16-bit words into 128-bit cache line
+				case (fill_count)
+					3'd0: fill_buffer[15:0]    <= cache_data;
+					3'd1: fill_buffer[31:16]   <= cache_data;
+					3'd2: fill_buffer[47:32]   <= cache_data;
+					3'd3: fill_buffer[63:48]   <= cache_data;
+					3'd4: fill_buffer[79:64]   <= cache_data;
+					3'd5: fill_buffer[95:80]   <= cache_data;
+					3'd6: fill_buffer[111:96]  <= cache_data;
+					3'd7: begin
+						fill_buffer[127:112] <= cache_data;
+						fill_active <= 0;  // Complete cache line
+					end
+				endcase
+				
+				if (fill_count < 7) fill_count <= fill_count + 1;
+			end
+		end
+	end
+
+	// Provide filled cache line to cache module
+	assign i_fill_data = fill_buffer;
+	assign i_fill_valid = fill_active & (fill_count == 7);
+	assign d_fill_data = fill_buffer;
+	assign d_fill_valid = fill_active & (fill_count == 7);
+
+	// PMMU Walker Memory Arbiter (Stall-Based Approach)
+	// The walker needs 32-bit descriptors from memory via two sequential 16-bit reads.
+	// Strategy: When walker requests, stall CPU (via clkena_in gate), drive walker address
+	// onto bus, perform reads, and acknowledge when complete.
+
+	// walker_state and walker_addr_latch declared outside generate block for bus mux visibility
+	reg [15:0] walker_data_low;
+
+	// BUG #138: Walker timeout counter - abort if no memory response
+	// On timeout, returns zeroed data with BERR to trigger PMMU bus error fault
+	// The walker_timeout_error signal also unblocks clkena_in to allow CPU recovery
+	reg [11:0] walker_timeout_cnt;  // 12-bit counter = 4096 cycles max (~36us @ 114MHz)
+
+	// BUG #408 FIX: Walker must wait for the correct ready signal based on memory region.
+	// Chip RAM reads wait for chipready; Fast RAM reads wait for ramready.
+	// Without this, a spurious SDRAM read (from CPU's frozen address) produces ramready
+	// before chipready, causing the walker to advance with stale/wrong chip_data.
+	wire walker_mem_ready = walker_chip_ram ? chipready : (walker_fast_ram ? ramready : (chipready | ramready | fastchip_ready));
+	localparam WALKER_TIMEOUT_LIMIT = 12'd2048;  // Timeout after 2048 cycles (~18us)
+
+	// BUG #422 FIX: Track in-flight CPU SDRAM cycles for stale-ready detection.
+	// When PMMU activates (busy='1'), ramsel drops the CPU component via ~pmmu_suppress_bus.
+	// But the SDRAM controller may have already started a cycle from the previous posedge.
+	// This stale SDRAM cycle generates ramready with data from the CPU's address, not the
+	// walker's descriptor address. If the walker enters WAIT_LOW before this stale ramready
+	// clears, it captures wrong data -> corrupted page walk -> lockup.
+	// stale_ram_pending is set when the CPU has an active SDRAM request (ramsel with CPU
+	// component). Cleared when ramready fires (stale cycle completed). The walker waits
+	// in READ_LOW until this flag is clear before accepting ramready.
+	reg stale_ram_pending;
+	always @(posedge clk) begin
+		if (~reset)
+			stale_ram_pending <= 0;
+		else if (ramready)
+			stale_ram_pending <= 0;  // SDRAM cycle completed
+		else if (!walker_active && !pmmu_suppress_bus && ramsel)
+			stale_ram_pending <= 1;  // CPU has SDRAM cycle in-flight
+	end
+
+	localparam WALKER_IDLE       = 4'd0;
+	localparam WALKER_START      = 4'd1;
+	localparam WALKER_READ_LOW   = 4'd2;
+	localparam WALKER_WAIT_LOW   = 4'd3;
+	localparam WALKER_READ_HIGH  = 4'd4;
+	localparam WALKER_WAIT_HIGH  = 4'd5;
+	localparam WALKER_DONE       = 4'd6;
+	// MC68030 U/M bit: Write states for descriptor updates
+	localparam WALKER_WRITE_LOW  = 4'd7;
+	localparam WALKER_WAIT_WR_LOW  = 4'd8;
+	localparam WALKER_WRITE_HIGH = 4'd9;
+	localparam WALKER_WAIT_WR_HIGH = 4'd10;
+	// BUG #439 FIX: Gap cycle between low and high word reads for SDRAM/DDR3.
+	// The SDRAM/DDR3 cache (cpu_cache_new) uses cpu_cs level to detect requests.
+	// cpu_ack (=ramready) stays latched high as long as cpu_cs stays high.
+	// Without a gap, the high word read sees stale ramready and captures the
+	// same data as the low word read, corrupting every 32-bit descriptor.
+	localparam WALKER_RAM_GAP   = 4'd11;
+
+	// Address multiplexing: Walker overrides CPU address during active states
+	// Walker addresses are byte addresses, chip_addr is word address (23:1)
+	// To read 32-bit descriptor: read word at addr[23:1], then addr[23:1]+1
+	wire walker_read_low_phase = (walker_state == WALKER_READ_LOW) | (walker_state == WALKER_WAIT_LOW);
+	wire walker_read_high_phase = (walker_state == WALKER_READ_HIGH) | (walker_state == WALKER_WAIT_HIGH);
+	// MC68030 U/M bit: Write phase detection
+	wire walker_write_low_phase_i = (walker_state == WALKER_WRITE_LOW) | (walker_state == WALKER_WAIT_WR_LOW);
+	wire walker_write_high_phase_i = (walker_state == WALKER_WRITE_HIGH) | (walker_state == WALKER_WAIT_WR_HIGH);
+	wire walker_writing_i = walker_write_low_phase_i | walker_write_high_phase_i;
+	// Assign to outer wires for bus mux visibility
+	assign walker_writing = walker_writing_i;
+	assign walker_write_low_phase = walker_write_low_phase_i;
+	// BUG #124 FIX: Walker must also drive address strobe and data strobes during read phases
+	// walker_reading declared outside generate block, assigned here
+	assign walker_reading = walker_read_low_phase | walker_read_high_phase;
+	// Chip RAM path only - Z3 RAM uses walker_ramaddr with full 32-bit walker_addr_word
+	wire [23:1] walker_base_addr = walker_addr_latch[23:1];  // Lower 23 bits for chip_addr bus
+	// Address mux for read/write operations
+	wire walker_low_phase = walker_read_low_phase | walker_write_low_phase_i;
+	assign walker_chip_addr = walker_low_phase ?
+	                          walker_base_addr :           // Low word at base address
+	                          (walker_base_addr + 1'b1);   // High word at base+1
+
+	always @(posedge clk) begin
+		if (~reset) begin
+			walker_state <= WALKER_IDLE;
+			pmmu_walker_ack_p <= 0;
+			pmmu_walker_data_p <= 0;
+			pmmu_walker_berr_p <= 0;  // BUG #156 FIX: Reset BERR signal
+			walker_data_low <= 0;
+			walker_addr_latch <= 0;
+			walker_active <= 0;
+			walker_wdata_latch <= 0;  // MC68030 U/M bit: Reset write data latch
+			// BUG #138: Reset timeout counter and error flag
+			walker_timeout_cnt <= 0;
+			walker_timeout_error <= 0;
+		end else begin
+			case (walker_state)
+				WALKER_IDLE: begin
+					pmmu_walker_ack_p <= 0;
+					pmmu_walker_berr_p <= 0;  // BUG #156 FIX: Clear BERR at start of new walk
+					walker_active <= 0;
+					// BUG #138: Reset timeout counter and error flag when idle
+					walker_timeout_cnt <= 0;
+					walker_timeout_error <= 0;
+					if (pmmu_walker_req_p) begin
+						// Latch walker address and start read sequence
+						walker_addr_latch <= pmmu_walker_addr_p[31:1];
+						walker_state <= WALKER_START;
+					end
+				end
+
+				WALKER_START: begin
+					// Wait one cycle for CPU to stall (clkena_in gated low)
+					walker_active <= 1;  // Walker now owns the bus
+					// MC68030 U/M bit: Check if this is a write operation
+					if (pmmu_walker_we_p) begin
+						// Write operation - latch data and start write sequence
+						walker_wdata_latch <= pmmu_walker_wdat_p;
+						walker_state <= WALKER_WRITE_LOW;
+					end else begin
+						walker_state <= WALKER_READ_LOW;
+					end
+				end
+
+				WALKER_READ_LOW: begin
+					// Drive walker address with LSB=0 for low word via walker_chip_addr mux
+					// BUG #424 FIX: Increment timeout instead of resetting to 0.
+					// Previously reset every cycle, so timeout never fired if stuck here
+					// (e.g. chip bus SM hung, or stale_ram_pending never cleared).
+					walker_timeout_cnt <= walker_timeout_cnt + 1;
+					// BUG #419 FIX: Detect PMMU internal timeout (mem_req dropped)
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
+					// BUG #424 FIX: Wrapper-level timeout escape
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						walker_timeout_error <= 1;
+						pmmu_walker_berr_p <= 1;
+						pmmu_walker_data_p <= 32'h0;
+						walker_state <= WALKER_DONE;
+					end
+					// BUG #422 FIX: Wait for any stale CPU bus cycle to complete before
+					// entering WAIT_LOW. When PMOVE-to-TC activates MMU, the CPU may
+					// have a bus cycle in-flight (started before pmmu_suppress_bus or
+					// walker_active took effect). If we enter WAIT_LOW while this stale
+					// cycle is running, we capture its ready signal with wrong data.
+					// Chip RAM walks: wait for chip bus SM idle (chip_stage==0).
+					// SDRAM walks: wait for stale_ram_pending to clear (ramready fires).
+					else if (walker_addr_is_chipram) begin
+						if (chip_stage == 2'b00)
+							walker_state <= WALKER_WAIT_LOW;
+					end else begin
+						if (!stale_ram_pending)
+							walker_state <= WALKER_WAIT_LOW;
+					end
+				end
+
+				WALKER_WAIT_LOW: begin
+					// BUG #419 FIX: Detect PMMU internal timeout (mem_req dropped).
+					// PMMU's 500-cycle timeout drops pmmu_walker_req_p while wrapper
+					// is still counting to 2048. Without this, walker_active blocks
+					// ALL CPU SDRAM access for ~1548 cycles. Bus error frame writes
+					// can't reach Fast RAM, freezing the CPU. If the stack page needs
+					// a walk too, the second PMMU timeout triggers false double bus
+					// fault -> permanent hang.
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
+					// BUG #138: Check for wrapper-level timeout
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						// BUG #156 FIX: Timeout is a bus error - assert BERR signal
+						// MC68030 spec: Bus errors during table walk set MMUSR B bit
+						walker_timeout_error <= 1;
+						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
+						pmmu_walker_data_p <= 32'h0;  // Data doesn't matter when BERR is set
+						walker_state <= WALKER_DONE;
+					end else if (walker_mem_ready) begin
+						// Capture low 16 bits
+						walker_data_low <= cpu_din;
+						// BUG #439 FIX: For SDRAM/DDR3 reads, insert a gap cycle to
+						// deassert cpu_cs and clear cpu_ack before the high word read.
+						// Chip RAM uses chipready (not cache), so no gap needed.
+						if (walker_addr_is_chipram)
+							walker_state <= WALKER_READ_HIGH;
+						else
+							walker_state <= WALKER_RAM_GAP;
+					end else begin
+						// BUG #138: Increment timeout counter while waiting
+						walker_timeout_cnt <= walker_timeout_cnt + 1;
+					end
+				end
+
+				// BUG #439 FIX: Gap cycle for SDRAM/DDR3 cache between low and high word reads.
+				// During this state, walker_fast_ram is suppressed (walker_state == WALKER_RAM_GAP
+				// excluded). This deasserts ramsel -> cpuCS -> cpu_cs for the cache, clearing
+				// cpu_ack and resetting the cache SM to IDLE. The next cycle (WALKER_READ_HIGH)
+				// reasserts walker_fast_ram, starting a fresh cache transaction for the high word.
+				WALKER_RAM_GAP: begin
+					walker_timeout_cnt <= 0;
+					walker_state <= WALKER_READ_HIGH;
+				end
+
+				WALKER_READ_HIGH: begin
+					// Drive walker address with LSB=1 for high word via walker_chip_addr mux
+					// BUG #138: Reset timeout counter when entering wait state
+					walker_timeout_cnt <= 0;
+					walker_state <= WALKER_WAIT_HIGH;
+				end
+
+				WALKER_WAIT_HIGH: begin
+					// BUG #419 FIX: Detect PMMU internal timeout (see WALKER_WAIT_LOW)
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
+					// BUG #138: Check for wrapper-level timeout
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						// BUG #156 FIX: Timeout is a bus error - assert BERR signal
+						walker_timeout_error <= 1;
+						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
+						pmmu_walker_data_p <= 32'h0;
+						walker_state <= WALKER_DONE;
+					end else if (walker_mem_ready) begin
+						// BUG #405 FIX: Assemble 32-bit descriptor in big-endian order
+						// walker_data_low was read from low address (= high word in big-endian)
+						// cpu_din was read from high address (= low word in big-endian)
+						pmmu_walker_data_p <= {walker_data_low, cpu_din};
+						walker_state <= WALKER_DONE;
+					end else begin
+						// BUG #138: Increment timeout counter while waiting
+						walker_timeout_cnt <= walker_timeout_cnt + 1;
+					end
+				end
+
+				WALKER_DONE: begin
+					// BUG #420 FIX: Stale ack race during multi-level page walks.
+					// Previously, pmmu_walker_ack_p was unconditionally set to 1 every
+					// cycle in WALKER_DONE. On the cycle when ~pmmu_walker_req_p triggers
+					// the transition to WALKER_IDLE, the ack was STILL asserted (last
+					// assignment wins). The PMMU, having already consumed the ack and
+					// transitioned to the next walk level (e.g., W_PTR1), issues a new
+					// mem_req on that same cycle. On the NEXT cycle, the PMMU sees
+					// mem_req=1 AND mem_ack=1 (stale!) and immediately processes the
+					// old data as if it were the new response. This corrupts every
+					// multi-level page walk, producing wrong ATC entries -> wrong
+					// physical addresses -> crashes -> double bus fault -> CPU halt.
+					// Fix: Only assert ack while the PMMU still has its request active.
+					// Clear ack on the transition cycle so the PMMU doesn't see a stale ack.
+					walker_active <= 0;  // Release bus
+					if (~pmmu_walker_req_p) begin
+						// PMMU has deasserted request - clear ack and return to idle
+						pmmu_walker_ack_p <= 0;
+						walker_state <= WALKER_IDLE;
+					end else begin
+						// PMMU still has request active - keep acknowledging
+						pmmu_walker_ack_p <= 1;
+					end
+				end
+
+				// MC68030 U/M bit: Write states for descriptor updates
+				WALKER_WRITE_LOW: begin
+					// Drive walker address with LSB=0 for low word
+					// Write data (walker_wdata_latch[15:0]) is driven via chip_din mux
+					// BUG #424 FIX: Same escape hatches as WALKER_READ_LOW
+					walker_timeout_cnt <= walker_timeout_cnt + 1;
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						walker_timeout_error <= 1;
+						pmmu_walker_berr_p <= 1;
+						walker_state <= WALKER_DONE;
+					end
+					// BUG #422 FIX: Same stale-cycle guard as WALKER_READ_LOW (see above)
+					else if (walker_addr_is_chipram) begin
+						if (chip_stage == 2'b00)
+							walker_state <= WALKER_WAIT_WR_LOW;
+					end else begin
+						if (!stale_ram_pending)
+							walker_state <= WALKER_WAIT_WR_LOW;
+					end
+				end
+
+				WALKER_WAIT_WR_LOW: begin
+					// BUG #419 FIX: Detect PMMU internal timeout (see WALKER_WAIT_LOW)
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
+					// Wait for write to complete
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						// BUG #156 FIX: Timeout is a bus error
+						walker_timeout_error <= 1;
+						pmmu_walker_berr_p <= 1;
+						walker_state <= WALKER_DONE;
+					end else if (walker_mem_ready) begin
+						// Low word written, now write high word
+						walker_state <= WALKER_WRITE_HIGH;
+					end else begin
+						walker_timeout_cnt <= walker_timeout_cnt + 1;
+					end
+				end
+
+				WALKER_WRITE_HIGH: begin
+					// Drive walker address with LSB=1 for high word
+					// Write data (walker_wdata_latch[31:16]) is driven via chip_din mux
+					walker_timeout_cnt <= 0;
+					walker_state <= WALKER_WAIT_WR_HIGH;
+				end
+
+				WALKER_WAIT_WR_HIGH: begin
+					// BUG #419 FIX: Detect PMMU internal timeout (see WALKER_WAIT_LOW)
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
+					// Wait for write to complete
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						// BUG #156 FIX: Timeout is a bus error
+						walker_timeout_error <= 1;
+						pmmu_walker_berr_p <= 1;
+						walker_state <= WALKER_DONE;
+					end else if (walker_mem_ready) begin
+						// Write complete
+						walker_state <= WALKER_DONE;
+					end else begin
+						walker_timeout_cnt <= walker_timeout_cnt + 1;
+					end
+				end
+
+				default: begin
+					// Safety: recover from corrupted walker_state (e.g. timing violations)
+					walker_state <= WALKER_IDLE;
+					walker_active <= 0;
+					pmmu_walker_ack_p <= 0;
+					pmmu_walker_berr_p <= 0;
+				end
+			endcase
+		end
+	end
+
+end else begin : gen_no_68030_cache
+
+	// Disable 68030 cache when not using it
+	assign i_cache_enabled = 1'b0;
+	assign d_cache_enabled = 1'b0;
+
+	// No walker arbiter when cache disabled
+	assign walker_chip_addr = 23'b0;  // Unused
+	assign walker_reading = 1'b0;     // BUG #124: No walker when cache disabled
+	assign walker_writing = 1'b0;     // MC68030 U/M bit: No walker when cache disabled
+	assign walker_write_low_phase = 1'b0;
+
+	always @(posedge clk) begin
+		if (~reset) begin
+			pmmu_walker_ack_p <= 0;
+			pmmu_walker_berr_p <= 0;  // BUG #156 FIX: Reset BERR signal
+			walker_active <= 0;
+			walker_state <= 4'd0;  // BUG #124: Keep state at 0
+			pmmu_walker_data_p <= 0;
+			walker_wdata_latch <= 0;  // MC68030 U/M bit
+			walker_timeout_error <= 0;
+		end else begin
+			pmmu_walker_ack_p <= 0;
+			pmmu_walker_berr_p <= 0;  // BUG #156 FIX: No BERR when cache disabled
+			pmmu_walker_data_p <= 0;
+			walker_timeout_error <= 0;
+		end
+	end
+	assign cache_hit = 1'b0;
+	assign cache_miss = 1'b0;
+	assign i_cache_req = 1'b0;
+	assign i_cache_addr = 32'h0;
+	assign i_cache_data = 32'h0;
+	assign i_cache_hit = 1'b0;
+	assign i_fill_req = 1'b0;
+	assign i_fill_addr = 32'h0;
+	assign i_fill_data = 128'h0;
+	assign i_fill_valid = 1'b0;
+	assign d_cache_req = 1'b0;
+	assign d_cache_addr = 32'h0;
+	assign d_cache_we = 1'b0;
+	assign d_cache_data_in = 32'h0;
+	assign d_cache_data_out = 32'h0;
+	assign d_cache_hit = 1'b0;
+	assign d_fill_req = 1'b0;
+	assign d_fill_addr = 32'h0;
+	assign d_fill_data = 128'h0;
+	assign d_fill_valid = 1'b0;
+
+	// Disable cache interface
+	assign cache_req = 1'b0;
+	assign cache_addr = 32'h0;
+	assign cache_burst = 1'b0;
+	assign cache_burst_len = 3'b0;
+
+end
+endgenerate
+
+// Format Error debug output: [6]=latched, [5:2]=format code from rte_format_word, [1]=SR.S, [0]=SR.M
+assign debug_fmt_err = {fmt_err_latched_p, fmt_err_rte_word_p[15:12], fmt_err_sr_p[5], fmt_err_sr_p[4]};
+
 wire cpu_req = (cpustate != 1);
 
 wire cchip = turbochip_d & (!cpustate | dcache_d);
@@ -288,8 +1879,27 @@ end
 
 reg       chipreq;
 reg [2:0] cpu_ipl;
+
+// BUG #135 FIX: Walker chip RAM access detection
+// When walker is reading from or writing to chip RAM (address below 2MB), it needs to trigger
+// the chipset state machine. Otherwise chipready never goes high and walker hangs.
+// Chip RAM is $000000-$1FFFFF = bits 31:21 all zero
+wire walker_addr_is_chipram = !walker_addr_latch[31] && !walker_addr_latch[30] &&
+                              !walker_addr_latch[29] && !walker_addr_latch[28] &&
+                              !walker_addr_latch[27] && !walker_addr_latch[26] &&
+                              !walker_addr_latch[25] && !walker_addr_latch[24] &&
+                              !walker_addr_latch[23] && !walker_addr_latch[22] &&
+                              !walker_addr_latch[21];
+
+// MC68030 U/M bit: Include walker writes for descriptor updates
+wire walker_chip_ram = USE_68030_CACHE && (walker_reading | walker_writing) && walker_addr_is_chipram;
+wire walker_chip_cycle_active = USE_68030_CACHE && walker_active && walker_addr_is_chipram;
+
 always @(posedge clk) begin
-	chipreq <= cpu_req & ~ramsel & ~fastchip_selack;
+	// BUG #135 FIX: Include walker chip RAM access in chipreq
+	// MC68030 bus fault: suppress chip bus when PMMU is translating or faulted
+	// cpu_bus_berr: suppress chipreq during BERR pulse to prevent re-issuing the timed-out access
+	chipreq <= (cpu_req & ~ramsel & ~fastchip_selack & ~pmmu_suppress_bus & ~cpu_bus_berr) | walker_chip_ram;
 	cpu_ipl <= ipl_i;
 end
 
@@ -303,13 +1913,16 @@ reg        chipready;
 reg [15:0] chipdout_i;
 reg  [2:0] ipl_i;
 reg        c_as,c_rw,c_uds,c_lds;
+// BUG #422 FIX: Expose chip bus SM stage for walker stale-cycle detection.
+// Previously local to the negedge block, now module-level so the walker
+// can wait for chip_stage==0 (bus idle) before accepting chipready.
+reg  [1:0] chip_stage;
 always @(negedge clk, negedge reset) begin
-	reg [1:0] stage;
 	reg waitm;
 	reg ready;
 
 	if(~reset) begin
-		stage <= 0;
+		chip_stage <= 0;
 		c_as <= 1;
 		c_rw <= 1;
 		c_uds <= 1;
@@ -319,22 +1932,22 @@ always @(negedge clk, negedge reset) begin
 	else begin
 		if (ph2n) begin
 			waitm <= chip_dtack;
-			if(~stage[0]) ipl_i <= chip_ipl;
+			if(~chip_stage[0]) ipl_i <= chip_ipl;
 		end
 
 		chipready <= 0;
 		if (ph1n) begin
 			chipready <= ready;
 			ready <= 0;
-			case (stage)
+			case (chip_stage)
 				0: if (chipreq) begin
 						c_as <= 0;
 						c_rw <= wr;
 						c_uds <= uds_in;
 						c_lds <= lds_in;
-						stage <= 1;
+						chip_stage <= 1;
 					end
-				1: stage <= 2;
+				1: chip_stage <= 2;
 				2: begin
 						chipdout_i <= chip_dout;
 						if (~waitm) begin
@@ -343,11 +1956,56 @@ always @(negedge clk, negedge reset) begin
 							c_uds <= 1;
 							c_lds <= 1;
 							ready <= 1;
-							stage <= 3;
+							chip_stage <= 3;
+						end else if (cpu_bus_berr) begin
+							// Bus timeout: abort cycle without claiming success.
+							// CPU is unblocked via cpu_bus_berr in clkena_in.
+							// Do NOT set ready=1 - no fake chipready.
+							c_as <= 1;
+							c_rw <= 1;
+							c_uds <= 1;
+							c_lds <= 1;
+							chip_stage <= 3;
 						end
 					end
-				3: stage <= 0;
+				3: chip_stage <= 0;
 			endcase
+		end
+	end
+end
+
+// Chip bus timeout BERR: detect hung chip bus accesses
+// When chip SM is stuck at stage 2 for 512 cycles (~4.5us at 114MHz),
+// generate a bus error to recover the CPU instead of hanging forever.
+// This happens when MMU remaps to unmapped physical addresses.
+always @(posedge clk or negedge reset) begin
+	if (~reset) begin
+		chip_bus_timeout_cnt <= 0;
+		cpu_bus_berr <= 0;
+		berr_pulse_cnt <= 0;
+		chip_abort_latch <= 0;
+	end else begin
+		// Count while chip SM is at stage 2 (waiting for DTACK)
+		// Only fire once per hung cycle (chip_abort_latch prevents re-fire)
+		if (chip_stage == 2 && !chip_abort_latch && !cpu_bus_berr) begin
+			if (chip_bus_timeout_cnt == 14'd16383) begin
+				cpu_bus_berr <= 1;
+				berr_pulse_cnt <= 4'd15;  // 16-cycle BERR pulse
+				chip_abort_latch <= 1;
+			end else begin
+				chip_bus_timeout_cnt <= chip_bus_timeout_cnt + 1;
+			end
+		end else if (chip_stage != 2) begin
+			chip_bus_timeout_cnt <= 0;
+			chip_abort_latch <= 0;
+		end
+
+		// BERR pulse countdown
+		if (cpu_bus_berr) begin
+			if (berr_pulse_cnt == 0)
+				cpu_bus_berr <= 0;
+			else
+				berr_pulse_cnt <= berr_pulse_cnt - 1;
 		end
 	end
 end

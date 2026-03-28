@@ -404,7 +404,15 @@ always @(posedge clk_114) begin
 		end
 	end
 
-	ram_cs <= ~(ram_ready & cyc & cpu_type) & ram_sel;
+	// BUG #426 FIX: When walker is active, bypass cyc gating for ram_cs deassert.
+	// cpu_cache_new's CPU_SM_WAIT state needs !cpu_cs to return to IDLE.
+	// cpu_cs comes from ram_cs via sdram_ctrl's internal ramsel.
+	// For normal CPU reads, ram_sel drops when cpu_req deasserts, so ram_cs drops.
+	// For walker reads, walker_fast_ram keeps ram_sel high continuously.
+	// Without this fix, ram_cs can only deassert via ram_ready&cyc alignment,
+	// but cyc only pulses 1-in-4 clk_114 cycles, causing unreliable deassert
+	// that deadlocks cpu_cache_new in CPU_SM_WAIT.
+	ram_cs <= ~(ram_ready & (cyc | walker_active_cpu) & cpu_type) & ram_sel;
 end
 
 wire  [1:0] cpu_state;
@@ -423,10 +431,18 @@ wire [15:0] chip_dout;
 wire [15:0] chip_din;
 wire [23:1] chip_addr;
 
-wire [28:1] ram_addr;
-wire        ram_sel;
-wire        ram_lds;
-wire        ram_uds;
+wire [28:1] ram_addr_cpu;
+// BUG #128 FIX: Use properly encoded ramaddr for cache fills
+// BUG #130 FIX: Use latched high bits (from fill start) to ensure stable Z3 RAM encoding throughout fill
+// High bits from cache_fill_ramaddr_hi (latched), low bits from cache_fill_addr (incrementing)
+wire [28:1] cache_fill_ramaddr = {cache_fill_ramaddr_hi, cache_fill_addr[22:1]};
+wire [28:1] ram_addr = cache_fill_active ? cache_fill_ramaddr : ram_addr_cpu;
+wire        ram_sel_cpu;
+wire        ram_sel = cache_fill_active ? 1'b1 : ram_sel_cpu;
+wire        ram_lds_cpu;
+wire        ram_uds_cpu;
+wire        ram_lds = cache_fill_active ? 1'b0 : ram_lds_cpu;  // Active low - enable both bytes for cache
+wire        ram_uds = cache_fill_active ? 1'b0 : ram_uds_cpu;  // Active low - enable both bytes for cache
 wire [15:0] ram_din;
 wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
@@ -435,8 +451,82 @@ wire        ramshared;
 
 wire [7:0] toccata_base;
 wire toccata_ena;
+wire       walker_active_cpu;  // BUG #426: Walker active flag from cpu_wrapper
+wire       walker_writing_cpu; // BUG #427: Walker writing flag from cpu_wrapper
 
-cpu_wrapper cpu_wrapper
+// BUG #427 FIX: Override cpustate when walker owns the SDRAM bus.
+// The SDRAM controllers use cpustate==3 to trigger the write buffer. When the
+// walker is reading descriptors from Z2/Z3 Fast RAM, the CPU is frozen, but
+// its cpustate may still be "11" (write) from the pre-freeze bus cycle. This
+// causes the write buffer to spuriously latch CPU data at the walker's
+// descriptor address, corrupting page table entries in SDRAM.
+// Fix: Force cpustate to "10" (data read) during walker reads, and "11"
+// (write) during walker writes, so the SDRAM controller sees the walker's
+// actual intent instead of the CPU's frozen state.
+wire [1:0] cpu_state_ram = walker_active_cpu ? (walker_writing_cpu ? 2'b11 : 2'b10) : cpu_state;
+
+// 68030 Cache interface signals
+wire        cpu_cache_req;
+wire [31:0] cpu_cache_addr;
+wire [15:0] cpu_cache_data;
+wire        cpu_cache_ack;
+wire        cpu_cache_burst;     // Burst mode request (IBE/DBE from CACR)
+wire [2:0]  cpu_cache_burst_len; // Burst length (always 7 for 8-word cache line)
+wire [28:1] cpu_cache_ramaddr;   // BUG #128: Properly encoded ramaddr for cache fills
+
+// Cache fill state machine - handles 8 consecutive reads for 128-bit cache line
+// IBE/DBE CONTROL: CACR bits 4 (IBE) and 12 (DBE) control whether cache fills occur:
+//   - IBE=0: Instruction cache fills disabled, all I-fetches bypass cache
+//   - DBE=0: Data cache fills disabled, all D-accesses bypass cache
+//   - IBE/DBE=1: Cache fills enabled (current behavior)
+// SDRAM is permanently configured for BURST=4 (sdram_ctrl.v line 291).
+// Cache fills always use burst transfers; IBE/DBE just enable/disable fills entirely.
+reg  [2:0]  cache_fill_cnt;
+reg         cache_fill_active;
+reg  [31:0] cache_fill_addr;
+reg  [28:23] cache_fill_ramaddr_hi;  // BUG #130: Latch encoded high bits at fill start
+reg         cache_fill_burst;        // Latch burst mode at start of fill
+wire        cache_fill_done = cache_fill_active & (cache_fill_cnt == 3'd7) & ram_ready;
+
+always @(posedge clk_sys) begin
+	if (cpu_rst) begin
+		cache_fill_cnt <= 3'd0;
+		cache_fill_active <= 1'b0;
+		cache_fill_addr <= 32'd0;
+		cache_fill_ramaddr_hi <= 6'd0;
+		cache_fill_burst <= 1'b0;
+	end else begin
+		if (cpu_cache_req & !cache_fill_active) begin
+			// Start new cache fill sequence
+			cache_fill_active <= 1'b1;
+			cache_fill_cnt <= 3'd0;
+			cache_fill_addr <= cpu_cache_addr;
+			cache_fill_ramaddr_hi <= cpu_cache_ramaddr[28:23];  // BUG #130: Latch Z3 RAM encoding
+			cache_fill_burst <= cpu_cache_burst;  // Latch burst mode flag
+		end else if (cache_fill_active & ram_ready) begin
+			if (cache_fill_cnt == 3'd7) begin
+				// Cache fill complete
+				cache_fill_active <= 1'b0;
+				cache_fill_cnt <= 3'd0;
+				cache_fill_burst <= 1'b0;
+			end else begin
+				// Continue filling cache line
+				cache_fill_cnt <= cache_fill_cnt + 3'd1;
+				cache_fill_addr <= cache_fill_addr + 32'd2; // Next word (16-bit increment)
+			end
+		end
+	end
+end
+
+// Cache fill interface - connect cache requests to RAM with proper sequencing
+assign cpu_cache_data = ram_dout;
+assign cpu_cache_ack = cache_fill_active & ram_ready;
+
+cpu_wrapper
+#(
+	.USE_68030_CACHE(1)  // Enable new 68030 cache implementation
+)
+cpu_wrapper
 (
 	.reset        (cpu_rst         ),
 	.reset_out    (cpu_nrst_out    ),
@@ -472,19 +562,31 @@ cpu_wrapper cpu_wrapper
 	.toccata_ena  (toccata_ena     ),
 	.toccata_base (toccata_base    ),
 	
-	.ramsel       (ram_sel         ),
-	.ramaddr      (ram_addr        ),
-	.ramlds       (ram_lds         ),
-	.ramuds       (ram_uds         ),
+	.ramsel       (ram_sel_cpu     ),
+	.ramaddr      (ram_addr_cpu    ),
+	.ramlds       (ram_lds_cpu     ),
+	.ramuds       (ram_uds_cpu     ),
 	.ramdout      (ram_dout        ),
 	.ramdin       (ram_din         ),
-	.ramready     (ram_ready       ),
+	.ramready     (ram_ready & ~cache_fill_active),  // Block ramready during cache fills
 	.ramshared    (ramshared       ),
 
 	//custom CPU signals
 	.cpustate     (cpu_state       ),
 	.cacr         (cpu_cacr        ),
-	.nmi_addr     (cpu_nmi_addr    )
+	.nmi_addr     (cpu_nmi_addr    ),
+
+	// 68030 Cache interface
+	.cache_req      (cpu_cache_req      ),
+	.cache_addr     (cpu_cache_addr     ),
+	.cache_data     (cpu_cache_data     ),
+	.cache_ack      (cpu_cache_ack      ),
+	.cache_burst    (cpu_cache_burst    ),     // Burst mode enable (IBE/DBE)
+	.cache_burst_len(cpu_cache_burst_len),     // Burst length
+	.cache_ramaddr  (cpu_cache_ramaddr  ),     // BUG #128: Properly encoded ramaddr for cache fills
+	.debug_fmt_err  (                   ),     // Format Error debug (not connected)
+	.walker_active_out(walker_active_cpu),     // BUG #426: Walker active for SDRAM cache deassert
+	.walker_writing_out(walker_writing_cpu)    // BUG #427: Walker writing for SDRAM cpustate override
 );
 
 wire [15:0] ram_dout1;
@@ -514,7 +616,7 @@ sdram_ctrl ram1
 	.cpuAddr      (ram_addr[22:1]  ),
 	.cpuU         (ram_uds         ),
 	.cpuL         (ram_lds         ),
-	.cpustate     (cpu_state       ),
+	.cpustate     (cpu_state_ram   ),  // BUG #427: Use walker-aware cpustate
 	.cpuCS        (~zram_sel&ram_cs),
 	.cpuRD        (ram_dout1       ),
 	.ramready     (ram_ready1      ),
@@ -556,7 +658,7 @@ ddram_ctrl ram2
 	.cpuAddr      (ram_addr        ),
 	.cpuU         (ram_uds         ),
 	.cpuL         (ram_lds         ),
-	.cpustate     (cpu_state       ),
+	.cpustate     (cpu_state_ram   ),  // BUG #427: Use walker-aware cpustate
 	.cpuCS        (zram_sel&ram_cs ),
 	.cpuRD        (ram_dout2       ),
 	.ramshared    (ramshared       ),
