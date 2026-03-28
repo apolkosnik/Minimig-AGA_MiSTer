@@ -29,6 +29,17 @@ Verification run after import:
 - `make -C tests/tg68k_030 test-rte-formats`: 30 passed, 0 failed
 - `make -C tests/tg68k_030 test-mmu-translation`: 21 passed, 0 failed
 
+Post-import follow-up fix:
+- A remaining Format `$A` bus-error-frame bug was found after the initial port commits: a longword write-protect fault on `$00003000` was stacking fault address `$00003002`.
+- Root cause: the PMMU kept reprocessing an asserted request after the first fault, allowing the second longword sub-cycle to overwrite the latched fault address.
+- Local fix: hold the first latched PMMU fault metadata until the request drops.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-berr-frame`: 13 passed, 0 failed
+  - `make -C tests/tg68k_030 test-regression`: 8 passed, 0 failed
+  - `make -C tests/tg68k_030 test-pflush-ptest-pload`: 18 passed, 0 failed
+  - `make -C tests/tg68k_030 test-mmu-translation`: 21 passed, 0 failed
+  - `make -C tests/tg68k_030 test-lockup-all`: completed without reported failures
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.

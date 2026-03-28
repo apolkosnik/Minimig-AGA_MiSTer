@@ -182,6 +182,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal saved_fc           : std_logic_vector(2 downto 0) := (others => '0');
   signal saved_is_insn      : std_logic := '0';
   signal saved_rw           : std_logic := '0';
+  signal req_prev           : std_logic := '0';
   signal translation_pending : std_logic := '0';
   -- ATC (Address Translation Cache), 22 entries per MC68030 hardware
   -- Uses pseudo-LRU replacement: MRU bit per entry, reset all when full
@@ -1407,6 +1408,7 @@ begin
       saved_fc <= (others => '0');
       saved_is_insn <= '0';
       saved_rw <= '0';
+      req_prev <= '0';
       translation_pending <= '0';
       walk_req <= '0';
       walker_fault_ack <= '0';
@@ -1424,6 +1426,7 @@ begin
       pload_flush_pending <= '0';
     elsif rising_edge(clk) then
       status_tmp := fault_status_reg;
+      req_prev <= req;
       -- Clear ptest_done pulse (it's only set for one cycle)
       ptest_done <= '0';
       -- Clear MRU update request pulse
@@ -1437,28 +1440,36 @@ begin
       -- Faults are only set if the current translation fails
       -- Process translation requests first
       if req = '1' then
-        -- Clear previous fault state for new translation request ONLY if not from walker
-        -- Don't clear walker faults that are still pending acknowledgment
-        if walker_fault = '0' and walker_fault_ack_pending = '0' then
-          fault_reg <= '0';
-          fault_status_reg <= (others => '0');
-        end if;
-        -- (debug XLAT_REQ report removed for sim speed)
-        -- Initialize variables to clean values
-        hit := '0';
-        hit_idx := 0;
-        tmatch0 := '0'; tmatch1 := '0';
-        tci0 := '0';
-        twp0 := '0';
-        tci1 := '0';
-        twp1 := '0';
-        
-        -- Don't clear faults on new requests - faults persist until explicitly cleared
-        -- This allows tests to sample fault status after translation completes
-        
-        -- Translation logic with proper precedence (no conflicting assignments)
-        -- Only do identity translation when MMU is disabled
-        if tc_en = '0' then
+        -- Hold the first latched fault for the duration of an asserted request.
+        -- Longword accesses can advance addr_log to the second word (+2) while req
+        -- remains high. Without this guard, repeated fault processing overwrites
+        -- fault_addr_reg with the later sub-cycle address before the kernel turns it
+        -- into a 68030 bus error frame.
+        if fault_reg = '1' and req_prev = '1' then
+          null;
+        else
+          -- Clear previous fault state for a NEW translation request ONLY if not from walker
+          -- Don't clear walker faults that are still pending acknowledgment
+          if walker_fault = '0' and walker_fault_ack_pending = '0' then
+            fault_reg <= '0';
+            fault_status_reg <= (others => '0');
+          end if;
+          -- (debug XLAT_REQ report removed for sim speed)
+          -- Initialize variables to clean values
+          hit := '0';
+          hit_idx := 0;
+          tmatch0 := '0'; tmatch1 := '0';
+          tci0 := '0';
+          twp0 := '0';
+          tci1 := '0';
+          twp1 := '0';
+          
+          -- Don't clear faults on new requests - faults persist until explicitly cleared
+          -- This allows tests to sample fault status after translation completes
+          
+          -- Translation logic with proper precedence (no conflicting assignments)
+          -- Only do identity translation when MMU is disabled
+          if tc_en = '0' then
           -- MMU disabled - identity translation (always successful, no faults possible)
           addr_phys_reg     <= addr_log;
           translated_addr   <= addr_log;  -- BUG #416
@@ -1476,7 +1487,7 @@ begin
             level => "000"               -- No table walk for identity translation
           );
           translation_pending <= '0';
-        elsif fc = "111" then
+          elsif fc = "111" then
           -- MC68030 UM 9.5.5.1, Figure 9-32: FC=7 (CPU space) is UNMAPPED.
           -- CPU space accesses (interrupt acknowledge, breakpoint, etc.) are
           -- never translated by the MMU, even when translation is enabled.
@@ -1491,7 +1502,7 @@ begin
           fault_reg         <= '0';
           fault_status_reg  <= (others => '0');
           translation_pending <= '0';
-        else
+          else
           -- MMU enabled - do full translation
           -- Check Transparent Translation first (highest priority)
           ttr_check(TT0, addr_log, fc, is_insn, rw, tmatch0, tci0, twp0);
@@ -1768,7 +1779,8 @@ begin
             end if;
           end if;
           end if; -- TTR check
-        end if; -- tc_en = '0' vs '1'
+          end if; -- tc_en = '0' vs '1'
+        end if; -- fault hold vs new translation
         
       end if; -- req = '1'
       -- Handle PTEST requests - perform translation and update MMUSR
