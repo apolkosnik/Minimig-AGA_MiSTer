@@ -78,6 +78,15 @@ DiagROM DetectCPU harness follow-up:
   - `make -C tests/tg68k_030 test-diagrom-detectcpu`: pass result with `Errors: 0`
   - `make -C tests/tg68k_030 test-cpu-mmu-detection`: all detection benches pass with `Errors: 0`
 
+Suite-target drift follow-up:
+- The `tests/tg68k_030/Makefile` targets `test-advanced`, `test-fault`, and `test-stress` were still wired to `tb_pmmu_advanced.vhd`, `tb_mmu_fault_comprehensive.vhd`, and `tb_page_walker_stress.vhd`.
+- Root cause: those filenames do not exist in this branch or on `origin/030_mmu`. The `old_junk` tree only contained stale references to them in a backup Makefile and failed build logs, plus older benches such as `tb_mmu_comprehensive.vhd` and `tb_pmmu_pattern_test.vhd` that target an older PMMU interface (`reg_sel(4 downto 0)`, `mem_we`, `mem_wdat`, `mem_berr`, `mmu_config_*`) and are not drop-in matches for the cleaned core in this branch.
+- Local fix: repoint the suite targets to the real maintained benches already in-tree, and add a dedicated `test-fault-recovery` wrapper around `tb_mmu_fault_recovery.vhd`.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-advanced`: completes and covers walker, ATC, and MMU translation benches successfully
+  - `make -C tests/tg68k_030 test-fault`: completes and covers fault recovery, Format `$A` bus-error frames, and PMMU address-error handling successfully
+  - `make -C tests/tg68k_030 test-stress`: completes and covers MMU translation plus the full lockup/race suite successfully
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.
