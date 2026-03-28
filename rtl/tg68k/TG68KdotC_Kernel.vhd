@@ -516,6 +516,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_SR				: std_logic_vector(7 downto 0);
 	signal make_trace			: std_logic;
 	signal make_trace_t0		: std_logic;  -- T0 change-of-flow trace mode active for current instruction
+	signal dbcc_t0_suppress	: std_logic := '0';  -- DBcc expired without branching, so no T0 trace
 	signal trace_pending_group2	: std_logic;  -- Stacked trace pending after Group 2 exception dispatch
 	signal make_berr			: std_logic;
 	signal make_mmu_berr     : std_logic;  -- BUG #159: Distinguish MMU bus error from normal BERR
@@ -2583,8 +2584,8 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 -----------------------------------------------------------------------------
 -- PC Calc + fetch opcode
 -----------------------------------------------------------------------------
-PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data, next_micro_state, stop, make_trace, make_trace_t0, make_berr, IPL_nr, FlagsSR, set_rot_cnt, opcode, writePCbig, set_exec, exec,
-        PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, trap_trapv, interrupt, tmp_TG68_PC, TG68_PC, use_VBR_Stackframe, writePCnext, pmove_dn_mode, cpu_halted, exe_condition)
+PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data, next_micro_state, micro_state, stop, make_trace, make_trace_t0, make_berr, IPL_nr, FlagsSR, set_rot_cnt, opcode, writePCbig, set_exec, exec,
+        PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, trap_trapv, interrupt, tmp_TG68_PC, TG68_PC, use_VBR_Stackframe, writePCnext, pmove_dn_mode, cpu_halted, exe_condition, dbcc_t0_suppress, c_out)
 	variable v_is_cof : std_logic;  -- T0 trace: change-of-flow instruction
 	BEGIN
 	
@@ -2655,10 +2656,18 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			   AND opcode(11 downto 8) /= "0001" AND exe_condition = '1' THEN
 				v_is_cof := '1';
 			END IF;
-			-- DBcc (0101 cccc 11001 rrr): only COF when branch taken (condition false)
+			-- DBcc (0101 cccc 11001 rrr): keep the historical "condition false"
+			-- trace classification, but suppress the expired/no-branch case via the
+			-- latched dbcc_t0_suppress flag captured in dbcc1.
 			IF opcode(15 downto 12) = "0101" AND opcode(7 downto 3) = "11001"
 			   AND exe_condition = '0' THEN
-				v_is_cof := '1';
+				IF micro_state = dbcc1 THEN
+					IF c_out(1) = '1' OR last_data_read(0) = '1' THEN
+						v_is_cof := '1';
+					END IF;
+				ELSIF dbcc_t0_suppress = '0' THEN
+					v_is_cof := '1';
+				END IF;
 			END IF;
 			-- JMP (0100 1110 11xx xxxx)
 			IF opcode(15 downto 6) = "0100111011" THEN
@@ -2684,45 +2693,9 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			IF opcode = x"4E74" THEN
 				v_is_cof := '1';
 			END IF;
-			-- MC68030 UM 8.1.2 Table 8-3: CHK, CHK2, DIV, TRAP, TRAPcc, TRAPV
-			-- are change-of-flow instructions for T0 trace purposes.
-			-- CHK.W (0100 ddd 110 mmm rrr)
-			IF opcode(15 downto 12) = "0100" AND opcode(8 downto 6) = "110" THEN
-				v_is_cof := '1';
-			END IF;
-			-- CHK.L (0100 ddd 100 mmm rrr) - 68020+
-			IF opcode(15 downto 12) = "0100" AND opcode(8 downto 6) = "100" THEN
-				v_is_cof := '1';
-			END IF;
-			-- CHK2/CMP2 (00ss 0xxx 011 mmm rrr) - 68020+
-			-- Opcode: bits 15:14="00", 11=0, 8:6="011"
-			IF opcode(15 downto 14) = "00" AND opcode(11) = '0' AND opcode(8 downto 6) = "011" THEN
-				v_is_cof := '1';
-			END IF;
-			-- DIVU.W (1000 ddd 011 mmm rrr)
-			IF opcode(15 downto 12) = "1000" AND opcode(8 downto 6) = "011" THEN
-				v_is_cof := '1';
-			END IF;
-			-- DIVS.W (1000 ddd 111 mmm rrr)
-			IF opcode(15 downto 12) = "1000" AND opcode(8 downto 6) = "111" THEN
-				v_is_cof := '1';
-			END IF;
-			-- DIVS.L/DIVU.L (0100 1100 01mm mrrr)
-			IF opcode(15 downto 6) = "0100110001" THEN
-				v_is_cof := '1';
-			END IF;
-			-- TRAP #n (0100 1110 0100 vvvv)
-			IF opcode(15 downto 4) = x"4E4" THEN
-				v_is_cof := '1';
-			END IF;
-			-- TRAPV (4E76)
-			IF opcode = x"4E76" THEN
-				v_is_cof := '1';
-			END IF;
-			-- TRAPcc (0101 cccc 1111 1xxx)
-			IF opcode(15 downto 12) = "0101" AND opcode(7 downto 3) = "11111" THEN
-				v_is_cof := '1';
-			END IF;
+			-- Instruction traps (TRAP/CHK/TRAPV/TRAPcc/divide-by-zero) are handled
+			-- through the Group 2 trace path only when they actually trap. The
+			-- non-trapping forms are not T0 change-of-flow instructions.
 			-- MOVE to SR (0100 0110 11xx xxxx)
 			IF opcode(15 downto 6) = "0100011011" THEN
 				v_is_cof := '1';
@@ -3556,17 +3529,24 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 					FlagsSR <= "00100111";
 					make_trace <= '0';
 					make_trace_t0 <= '0';
+					dbcc_t0_suppress <= '0';
 					interrupt_mode <= '0';
 				ELSIF clkena_lw = '1' THEN
 				IF setopcode='1' THEN
 					make_trace <= FlagsSR(7);
 					-- T0 mode: active when T0=1, T1=0 (T1=1 traces everything via make_trace)
 					make_trace_t0 <= FlagsSR(6) AND NOT FlagsSR(7);
+					IF NOT (opcode(15 downto 12) = "0101" AND opcode(7 downto 3) = "11001") THEN
+						dbcc_t0_suppress <= '0';
+					END IF;
 					IF set(changeMode)='1' THEN
 						SVmode <= NOT SVmode; 
 					ELSE
 						SVmode <= preSVmode;
 					END IF;	
+				END IF;
+				IF micro_state = dbcc1 AND exe_condition = '0' AND c_out(1) = '0' AND last_data_read(0) = '0' THEN
+					dbcc_t0_suppress <= '1';
 				END IF;
 				IF trap_berr='1' OR trap_illegal='1' OR trap_addr_error='1' OR trap_priv='1' OR trap_1010='1' OR trap_1111='1' OR trap_mmu_config='1' OR trap_mmu_berr='1' OR trap_format_error='1' THEN
 					make_trace <= '0';

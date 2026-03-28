@@ -122,6 +122,15 @@ Comprehensive-suite follow-up:
 - Follow-up verification:
   - `make -C tests/tg68k_030 test-comprehensive`: completes successfully through the maintained walker, ATC, translation, fault, lockup, and basic-suite coverage
 
+T0-trace follow-up:
+- The recovered `old_junk` T0 trace bench exposed a real 68030 mismatch in the cleaned core: non-trapping `DIVU`/`DIVS` and expired `DBcc` cases were being treated as unconditional T0 change-of-flow.
+- Root cause: `v_is_cof` in `TG68KdotC_Kernel.vhd` classified `CHK*`, `DIV*`, `TRAP*`, and `DBcc` too broadly from opcode shape alone. That was enough to trace non-trapping divide instructions and every `DBcc` with a false condition, even when the decrement expired and execution fell through.
+- Local fix: narrow the direct T0 change-of-flow classifier to real branch/jump/return/SR-update paths, leave actual instruction traps to the existing Group 2 trace path, and add an explicit `dbcc_t0_suppress` latch so expired `DBcc` no-branch cases do not trace. A new local [tb_t0_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_t0_trace.vhd) now covers the settled T0 cases in-tree.
+- Follow-up verification:
+  - isolated ModelSim run of `tb_t0_trace`: 9 passed, 0 failed
+  - rerun of the older `old_junk` T0 bench now leaves only two failures, both in the still-disputed `TRAP #0` / `TRAPcc` T0-expectation area
+- Skip decision: do not import the old `tb_t0_trace.vhd` verbatim. Its remaining `TRAP #n` / `TRAPcc` T0 expectations need a separate manual/WinUAE revalidation pass before they should gate the tree.
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.
