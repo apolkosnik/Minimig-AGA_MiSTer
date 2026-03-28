@@ -153,6 +153,10 @@ Group-2 trace follow-up:
   - `make -C tests/tg68k_030 test-group2-t0-trace`: 55 passed, 0 failed
   - `make -C tests/tg68k_030 test-group2-stacked-trace`: completes successfully via the maintained CHK/CHK2 plus Group 2 T0/T1 coverage
 
+Validation-wrapper follow-up:
+- After the maintained trace benches were added, the top-level `validate` and `test-comprehensive` wrappers still did not call them, so those commands could report success without exercising the newer T0/T1/Group 2 trace coverage.
+- Local fix: add a maintained `test-trace-suite` wrapper for [tb_t0_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_t0_trace.vhd), [tb_t1_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_t1_trace.vhd), and `test-group2-stacked-trace`, then route both `validate` and `test-comprehensive` through it.
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.
