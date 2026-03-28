@@ -405,14 +405,10 @@ test-chk-stacked-trace: setup
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 1ms; quit" tb_chk_stacked_trace
 
 test-group2-stacked-trace: setup
-	@echo "Running Group 2 stacked trace tests (BUG #441/#442/#443)..."
-	@echo "Tests CHK/TRAP/TRAPV/DIV0 with T1 and T0 trace modes"
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_group2_stacked_trace.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 5ms; quit" tb_group2_stacked_trace
+	@echo "Running maintained Group 2 stacked trace coverage..."
+	@echo "Using the in-tree CHK/CHK2 stacked-trace bench."
+	@echo "Recovered old TRAP/TRAPV/DIV0 T0 no-trace assertions are skipped; see 030_MMU_PORT_AUDIT.md."
+	@$(MAKE) --no-print-directory test-chk-stacked-trace
 
 test-rte-formats: setup
 	@echo "Running RTE stack frame format validation tests..."

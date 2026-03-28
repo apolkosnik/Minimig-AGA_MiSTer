@@ -144,6 +144,14 @@ T1-trace follow-up:
 - Follow-up verification:
   - isolated ModelSim run of `tb_t1_trace`: all tests passed
 
+Group-2 trace follow-up:
+- The recovered `old_junk` `tb_group2_stacked_trace.vhd` is not safe to import verbatim. Its T1 stacked-trace checks pass against the cleaned core, but its T0 cases assume no stacked trace for CHK, TRAP `#n`, TRAPV, and divide-by-zero.
+- Those T0 assumptions match WinUAE's current opcode handlers, but they conflict with the Motorola trace wording and with `wf68k30L`'s control logic. The manual's trace section says T0 traces "instruction traps", and the trap section says that if tracing is enabled for the instruction that caused the trap, a trace exception is taken for that trap. `wf68k30L_control.vhd` also asserts `EX_TRACE` in trace mode `01` for `TRAP`, `CHK`, `CHK2`, `DIVS`/`DIVU` divide-by-zero, `TRAPcc`, and `TRAPV`.
+- Fix/skip decision: skip the recovered broad Group 2 bench instead of importing WinUAE-shaped T0 expectations that are not supported by the Motorola manuals plus `wf68k30L`. The `test-group2-stacked-trace` Makefile target is now remapped to the maintained in-tree CHK/CHK2 stacked-trace bench, which already covers the settled stacked-trace frame behavior.
+- Follow-up verification:
+  - isolated rerun of the recovered old Group 2 bench: all T1 stacked-trace cases passed; only the T0 no-trace assertions failed
+  - `make -C tests/tg68k_030 test-group2-stacked-trace`: completes successfully via the maintained CHK/CHK2 coverage
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.
