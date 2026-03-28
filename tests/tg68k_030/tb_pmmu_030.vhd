@@ -342,9 +342,11 @@ begin
     write_register(REG_TC, x"00000000"); -- Disable translation first
     wait_cycles(5);
     -- Flush all caches and ATC
+    pmmu_brief <= x"2400"; -- PFLUSHA
     pflush_req <= '1';
     wait_cycles(1);
     pflush_req <= '0';
+    pmmu_brief <= (others => '0');
     wait_cycles(5);
     -- Now enable and configure
     write_register(REG_TC, x"80000001"); -- Enable translation
@@ -382,9 +384,11 @@ begin
 
     -- Test PFLUSH
     test_name <= "PFLUSH Instruction                      ";
+    pmmu_brief <= x"2400"; -- PFLUSHA
     pflush_req <= '1';
     wait_cycles(1);
     pflush_req <= '0';
+    pmmu_brief <= (others => '0');
     wait_cycles(5);
     report_test("PFLUSH Instruction", true); -- Just check it doesn't crash
 

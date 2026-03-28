@@ -51,6 +51,15 @@ Regression-harness follow-up:
   - `make -C tests/tg68k_030 test-moves-all-modes`: 48 passed, 0 failed
   - `make -C tests/tg68k_030 test-regression`: 8 passed, 0 failed
 
+Direct-PFLUSH harness follow-up:
+- `tb_lockup_walker_timeout.vhd` later reported a deadlock in its "unresponsive memory" case, but the PMMU logs showed tests 2 and 4 were completing in `0` cycles, which is only possible on an ATC hit.
+- Root cause: the imported direct PMMU harnesses pulsed `pflush_req` with `pmmu_brief=$0000`. In the cleaned PMMU this is not `PFLUSHA`; it decodes as the EA form and only flushes address/FC-matched entries captured from `pmmu_addr`/`pmmu_fc`. The `00012340` translation therefore stayed cached and the timeout test never started a new walk.
+- Local fix: update the affected direct testbenches to drive `pmmu_brief=$2400` for `PFLUSHA` before asserting `pflush_req`.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-lockup-walker-timeout`: 4 passed, 0 failed; slow-memory walk took 113 cycles, timeout faulted after 503 busy cycles with `fault_status=$00008000`
+  - `make -C tests/tg68k_030 test-lockup-all`: walker-timeout sub-bench now reports 4 passed, 0 failed; aggregate lockup suite completes without failures
+  - `make -C tests/tg68k_030 test-regression`: 8 passed, 0 failed
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.

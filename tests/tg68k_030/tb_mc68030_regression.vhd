@@ -269,11 +269,13 @@ begin
     report_test("PTEST Execution", fault = '0');
     wait for clk_period;
 
+    pmmu_brief <= x"2400";  -- PFLUSHA
     pflush_req <= '1';
     pmmu_fc <= "101";
     pmmu_addr <= x"BBBB6666";
     wait for clk_period * 2;
     pflush_req <= '0';
+    pmmu_brief <= (others => '0');
     report_test("PFLUSH Execution", fault = '0');
     wait for clk_period;
 

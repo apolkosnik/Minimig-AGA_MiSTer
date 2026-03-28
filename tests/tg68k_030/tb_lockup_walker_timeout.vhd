@@ -323,10 +323,13 @@ begin
         write(l, string'("TEST 2: Walker with Slow Memory"));
         writeline(output, l);
 
-        -- Flush ATC to force a new walk
+        -- Flush ATC to force a new walk. This PMMU interface expects an
+        -- explicit PFLUSHA encoding on pmmu_brief, not a bare pflush_req pulse.
+        pmmu_brief <= x"2400";
         pflush_req <= '1';
         wait for clk_period;
         pflush_req <= '0';
+        pmmu_brief <= (others => '0');
         wait for clk_period * 3;
 
         simulate_unresponsive_memory <= false;
@@ -366,10 +369,13 @@ begin
         write(l, string'("TEST 3: Completely Unresponsive Memory (Internal 500-cycle Timeout)"));
         writeline(output, l);
 
-        -- Flush ATC to force a new walk
+        -- Flush ATC to force a new walk. Use PFLUSHA so the matching ATC entry
+        -- from the previous translation is actually discarded.
+        pmmu_brief <= x"2400";
         pflush_req <= '1';
         wait for clk_period;
         pflush_req <= '0';
+        pmmu_brief <= (others => '0');
         wait for clk_period * 3;
 
         simulate_unresponsive_memory <= true;  -- Memory will NEVER respond
@@ -441,10 +447,12 @@ begin
         simulate_unresponsive_memory <= false;
         memory_response_delay <= 0;
 
-        -- Flush ATC to clear any stale fault entries
+        -- Flush ATC to clear any stale fault entries.
+        pmmu_brief <= x"2400";
         pflush_req <= '1';
         wait for clk_period;
         pflush_req <= '0';
+        pmmu_brief <= (others => '0');
         wait for clk_period * 3;
 
         write(l, string'("  Requesting new translation after timeout recovery..."));
