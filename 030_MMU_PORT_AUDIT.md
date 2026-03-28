@@ -147,10 +147,10 @@ T1-trace follow-up:
 Group-2 trace follow-up:
 - The recovered `old_junk` `tb_group2_stacked_trace.vhd` is not safe to import verbatim. Its T1 stacked-trace checks pass against the cleaned core, but its T0 cases assume no stacked trace for CHK, TRAP `#n`, TRAPV, and divide-by-zero.
 - Those T0 assumptions match WinUAE's current opcode handlers, but they conflict with the Motorola trace wording and with `wf68k30L`'s control logic. The manual's trace section says T0 traces "instruction traps", and the trap section says that if tracing is enabled for the instruction that caused the trap, a trace exception is taken for that trap. `wf68k30L_control.vhd` also asserts `EX_TRACE` in trace mode `01` for `TRAP`, `CHK`, `CHK2`, `DIVS`/`DIVU` divide-by-zero, `TRAPcc`, and `TRAPV`.
-- Fix/skip decision: skip the recovered broad Group 2 bench instead of importing WinUAE-shaped T0 expectations that are not supported by the Motorola manuals plus `wf68k30L`. The `test-group2-stacked-trace` Makefile target is now remapped to the maintained in-tree CHK/CHK2 stacked-trace bench, which already covers the settled stacked-trace frame behavior.
+- Fix/skip decision: skip only the disputed T0 portion of the recovered broad Group 2 bench. The maintained coverage is now split in-tree: [tb_chk_stacked_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_chk_stacked_trace.vhd) covers CHK/CHK2, and new [tb_group2_t1_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_group2_t1_trace.vhd) covers the settled T1 TRAP `#n`, TRAPV, divide-by-zero, TRAPcc, and non-trapping TRAPV cases. `test-group2-stacked-trace` now runs those maintained benches together.
 - Follow-up verification:
   - isolated rerun of the recovered old Group 2 bench: all T1 stacked-trace cases passed; only the T0 no-trace assertions failed
-  - `make -C tests/tg68k_030 test-group2-stacked-trace`: completes successfully via the maintained CHK/CHK2 coverage
+  - `make -C tests/tg68k_030 test-group2-stacked-trace`: completes successfully via the maintained CHK/CHK2 plus Group 2 T1 coverage
 
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
