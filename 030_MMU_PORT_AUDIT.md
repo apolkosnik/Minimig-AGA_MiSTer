@@ -125,11 +125,11 @@ Comprehensive-suite follow-up:
 T0-trace follow-up:
 - The recovered `old_junk` T0 trace bench exposed a real 68030 mismatch in the cleaned core: non-trapping `DIVU`/`DIVS` and expired `DBcc` cases were being treated as unconditional T0 change-of-flow.
 - Root cause: `v_is_cof` in `TG68KdotC_Kernel.vhd` classified `CHK*`, `DIV*`, `TRAP*`, and `DBcc` too broadly from opcode shape alone. That was enough to trace non-trapping divide instructions and every `DBcc` with a false condition, even when the decrement expired and execution fell through.
-- Local fix: narrow the direct T0 change-of-flow classifier to real branch/jump/return/SR-update paths, leave actual instruction traps to the existing Group 2 trace path, and add an explicit `dbcc_t0_suppress` latch so expired `DBcc` no-branch cases do not trace. A new local [tb_t0_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_t0_trace.vhd) now covers the settled T0 cases in-tree.
+- Local fix: narrow the direct T0 change-of-flow classifier to real branch/jump/return/SR-update paths, leave actual instruction traps to the existing Group 2 trace path, and add an explicit `dbcc_t0_suppress` latch so expired `DBcc` no-branch cases do not trace. The maintained local [tb_t0_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_t0_trace.vhd) now covers those settled T0 cases plus the manual/wf68k30L-aligned taken `TRAP #0` / `TRAPcc` behavior and a not-taken `TRAPcc` control case.
 - Follow-up verification:
-  - isolated ModelSim run of `tb_t0_trace`: 9 passed, 0 failed
-  - rerun of the older `old_junk` T0 bench now leaves only two failures, both in the still-disputed `TRAP #0` / `TRAPcc` T0-expectation area
-- Skip decision: do not import the old `tb_t0_trace.vhd` verbatim. Its remaining `TRAP #n` / `TRAPcc` T0 expectations need a separate manual/WinUAE revalidation pass before they should gate the tree.
+  - `make -C tests/tg68k_030 test-t0-trace`: 12 passed, 0 failed
+  - rerun of the older `old_junk` T0 bench still leaves only two failures, both from its WinUAE-shaped no-trace expectations for taken `TRAP #0` / `TRAPcc`
+- Skip decision: do not import the old `tb_t0_trace.vhd` verbatim. Its remaining `TRAP #n` / `TRAPcc` no-trace expectations match WinUAE's current opcode handlers, but the Motorola manuals say T0 traces "instruction traps", and `wf68k30L_control.vhd` asserts `EX_TRACE` in trace mode `01` for `TRAP`, `TRAPcc`, `TRAPV`, `CHK`, `CHK2`, and divide-by-zero. The maintained local bench now gates the manual/wf68k30L-aligned `TRAP #n` / `TRAPcc` cases instead.
 
 Real-suite follow-up:
 - `test-real` still pointed at `tb_pmmu_real_validation.vhd`, but that bench does not exist in this tree or in `/home/adam/030_mmu/Minimig-AGA_MiSTer/old_junk`. The only surviving hits are the stale Makefile recipe itself and an unrelated comment in `old_junk/tests/tg68k_030/to_fix2/tb_bug33_write_data_timing.vhd`.

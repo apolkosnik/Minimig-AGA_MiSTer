@@ -2,6 +2,7 @@
 -- MC68030 T0 (trace on change of flow) regression bench.
 -- Covers settled T0 behavior:
 --   - real control-flow changes trace
+--   - instruction traps trace when they actually trap
 --   - non-trapping DIV instructions do not trace
 --   - DBcc traces only when the branch is actually taken
 
@@ -115,6 +116,7 @@ begin
         variable pass_count : integer := 0;
         variable fail_count : integer := 0;
         variable trace_fired : boolean;
+        variable trap_seen   : boolean;
         variable result_seen : boolean;
         variable result_val  : std_logic_vector(15 downto 0);
 
@@ -177,6 +179,56 @@ begin
             end loop;
 
             saw_trace := v_saw_trace;
+            saw_result := v_saw_result;
+            result_word := v_result_word;
+        end procedure;
+
+        procedure run_test_with_trap(
+            constant max_cycles : in integer;
+            variable saw_trace  : out boolean;
+            variable saw_trap   : out boolean;
+            variable saw_result : out boolean;
+            variable result_word : out std_logic_vector(15 downto 0)
+        ) is
+            variable v_saw_trace  : boolean := false;
+            variable v_saw_trap   : boolean := false;
+            variable v_saw_result : boolean := false;
+            variable v_result_word : std_logic_vector(15 downto 0) := (others => '0');
+        begin
+            nReset <= '0';
+            wait for 100 ns;
+            nReset <= '1';
+
+            for i in 0 to max_cycles loop
+                wait until rising_edge(clk);
+                if busstate = "11" and nWr = '0' then
+                    if addr_out(15 downto 0) = x"7000" then
+                        v_saw_trace := true;
+                    elsif addr_out(15 downto 0) = x"7200" then
+                        v_saw_trap := true;
+                    elsif addr_out(15 downto 0) = x"5000" then
+                        v_saw_result := true;
+                        v_result_word := data_write;
+                    end if;
+                end if;
+
+                if v_saw_result then
+                    for j in 0 to 50 loop
+                        wait until rising_edge(clk);
+                        if busstate = "11" and nWr = '0' then
+                            if addr_out(15 downto 0) = x"7000" then
+                                v_saw_trace := true;
+                            elsif addr_out(15 downto 0) = x"7200" then
+                                v_saw_trap := true;
+                            end if;
+                        end if;
+                    end loop;
+                    exit;
+                end if;
+            end loop;
+
+            saw_trace := v_saw_trace;
+            saw_trap := v_saw_trap;
             saw_result := v_saw_result;
             result_word := v_result_word;
         end procedure;
@@ -396,6 +448,103 @@ begin
             pass_count := pass_count + 1;
         else
             report "FAIL: Test 9 - DIVS.L trace/result mismatch" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        report "=== Test 10: T0 + TRAP #0 -> expect trace ===" severity note;
+        init_common;
+        setup_trace_handler;
+        mem(16#0080#/2) := x"0000";
+        mem(16#0082#/2) := x"3200";
+        mem(16#3200#/2) := x"33FC";
+        mem(16#3202#/2) := x"CAFE";
+        mem(16#3204#/2) := x"0000";
+        mem(16#3206#/2) := x"7200";
+        mem(16#3208#/2) := x"4E73";
+        mem(16#1000#/2) := x"46FC";
+        mem(16#1002#/2) := x"6000";
+        mem(16#1004#/2) := x"4E71";
+        mem(16#1006#/2) := x"4E40";
+        mem(16#1008#/2) := x"33FC";
+        mem(16#100A#/2) := x"BBBB";
+        mem(16#100C#/2) := x"0000";
+        mem(16#100E#/2) := x"5000";
+        run_test_with_trap(15000, trace_fired, trap_seen, result_seen, result_val);
+        if trace_fired and trap_seen and result_seen and result_val = x"BBBB" then
+            report "PASS: Test 10 - trace fired on TRAP #0 with T0=1" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: Test 10 - TRAP #0 trace/result mismatch (trace=" &
+                   boolean'image(trace_fired) & ", trap_seen=" &
+                   boolean'image(trap_seen) & ", result_seen=" &
+                   boolean'image(result_seen) & ", result=$" &
+                   integer'image(to_integer(unsigned(result_val))) & ")" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        report "=== Test 11: T0 + TRAPLT taken -> expect trace ===" severity note;
+        init_common;
+        setup_trace_handler;
+        mem(16#001C#/2) := x"0000";
+        mem(16#001E#/2) := x"3200";
+        mem(16#3200#/2) := x"33FC";
+        mem(16#3202#/2) := x"21A1";
+        mem(16#3204#/2) := x"0000";
+        mem(16#3206#/2) := x"7200";
+        mem(16#3208#/2) := x"4E73";
+        mem(16#1000#/2) := x"46FC";
+        mem(16#1002#/2) := x"6000";
+        mem(16#1004#/2) := x"4E71";
+        mem(16#1006#/2) := x"70FF";
+        mem(16#1008#/2) := x"5DFA";
+        mem(16#100A#/2) := x"0000";
+        mem(16#100C#/2) := x"33FC";
+        mem(16#100E#/2) := x"2121";
+        mem(16#1010#/2) := x"0000";
+        mem(16#1012#/2) := x"5000";
+        run_test_with_trap(15000, trace_fired, trap_seen, result_seen, result_val);
+        if trace_fired and trap_seen and result_seen and result_val = x"2121" then
+            report "PASS: Test 11 - trace fired on taken TRAPcc with T0=1" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: Test 11 - taken TRAPcc trace/result mismatch (trace=" &
+                   boolean'image(trace_fired) & ", trap_seen=" &
+                   boolean'image(trap_seen) & ", result_seen=" &
+                   boolean'image(result_seen) & ", result=$" &
+                   integer'image(to_integer(unsigned(result_val))) & ")" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        report "=== Test 12: T0 + TRAPLT not-taken -> expect NO trace ===" severity note;
+        init_common;
+        setup_trace_handler;
+        mem(16#001C#/2) := x"0000";
+        mem(16#001E#/2) := x"3200";
+        mem(16#3200#/2) := x"33FC";
+        mem(16#3202#/2) := x"21A1";
+        mem(16#3204#/2) := x"0000";
+        mem(16#3206#/2) := x"7200";
+        mem(16#3208#/2) := x"4E73";
+        mem(16#1000#/2) := x"46FC";
+        mem(16#1002#/2) := x"6000";
+        mem(16#1004#/2) := x"4E71";
+        mem(16#1006#/2) := x"7001";
+        mem(16#1008#/2) := x"5DFA";
+        mem(16#100A#/2) := x"0000";
+        mem(16#100C#/2) := x"33FC";
+        mem(16#100E#/2) := x"2424";
+        mem(16#1010#/2) := x"0000";
+        mem(16#1012#/2) := x"5000";
+        run_test_with_trap(15000, trace_fired, trap_seen, result_seen, result_val);
+        if (not trace_fired) and (not trap_seen) and result_seen and result_val = x"2424" then
+            report "PASS: Test 12 - no trace on not-taken TRAPcc with T0=1" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: Test 12 - not-taken TRAPcc trace/result mismatch (trace=" &
+                   boolean'image(trace_fired) & ", trap_seen=" &
+                   boolean'image(trap_seen) & ", result_seen=" &
+                   boolean'image(result_seen) & ", result=$" &
+                   integer'image(to_integer(unsigned(result_val))) & ")" severity error;
             fail_count := fail_count + 1;
         end if;
 
