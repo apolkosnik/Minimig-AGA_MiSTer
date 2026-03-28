@@ -104,6 +104,17 @@ MMU-configuration vector follow-up:
 - Follow-up verification:
   - `make -C tests/tg68k_030 test-fault-recovery`: still passes after the vector-offset fix; the PMMU recovery path reaches the bus-error handler and completes without a double fault
 
+68851-only vector-stub follow-up:
+- Several imported PMMU mode benches still populated vector 57 (`$E4`) and vector 58 (`$E8`) handlers as "MMU Illegal" / "MMU Access" compatibility stubs.
+- Root cause: those exception vectors belong to the external MC68851, not the integrated MC68030 PMMU. Leaving them installed would silently tolerate a regression that dispatches 68030 PMMU activity to 68851-only vectors instead of failing the bench.
+- Local fix: remove the vector-57/vector-58 handlers from the affected 68030 benches so only real MC68030 vectors remain wired.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-pmove-all-modes`: 68 passed, 0 failed
+  - `make -C tests/tg68k_030 test-pload-all-modes`: 11 passed, 0 failed
+  - `make -C tests/tg68k_030 test-pflush-all-modes`: 11 passed, 0 failed
+  - `make -C tests/tg68k_030 test-ptest-all-modes`: 14 passed, 0 failed
+  - `make -C tests/tg68k_030 test-whichamiga`: passed with the internal PMMU path still using only real 68030 vectors
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.

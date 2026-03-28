@@ -1723,8 +1723,6 @@ begin
         memory(16) := x"0000"; memory(17):= x"0140"; -- Privilege Violation (Vec 8 @ $20) -> $140
         memory(28) := x"0000"; memory(29):= x"0150"; -- Format Error (Vec 14 @ $38) -> $150
         memory(112):= x"0000"; memory(113):= x"0160"; -- Vector 56 (MMU Config) @ $E0 -> $160
-        memory(114):= x"0000"; memory(115):= x"0170"; -- Vector 57 (MMU Illegal) @ $E4 -> $170
-        memory(116):= x"0000"; memory(117):= x"0180"; -- Vector 58 (MMU Access) @ $E8 -> $180
 
         -- Handlers (STOP #$2700 + ID)
         memory(16#100#/2) := x"4E72"; memory(16#102#/2) := x"2700"; -- Bus Error
@@ -1734,8 +1732,6 @@ begin
         memory(16#140#/2) := x"4E72"; memory(16#142#/2) := x"2704"; -- Priv
         memory(16#150#/2) := x"4E72"; memory(16#152#/2) := x"2705"; -- Format
         memory(16#160#/2) := x"4E72"; memory(16#162#/2) := x"2706"; -- MMU Config
-        memory(16#170#/2) := x"4E72"; memory(16#172#/2) := x"2707"; -- MMU Illegal
-        memory(16#180#/2) := x"4E72"; memory(16#182#/2) := x"2708"; -- MMU Access
 
         -- Clear code + source data area
         for i in 16#1000# to 16#27FF# loop

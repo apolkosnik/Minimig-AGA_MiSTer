@@ -500,18 +500,12 @@ begin
         memory(16#2E#/2) := x"5200";
         memory(16#E0#/2) := x"0000";
         memory(16#E2#/2) := x"5300";
-        memory(16#E4#/2) := x"0000";
-        memory(16#E6#/2) := x"5400";
-        memory(16#E8#/2) := x"0000";
-        memory(16#EA#/2) := x"5500";
 
         -- Exception handlers (just RTE)
         memory(16#5000#/2) := x"4E73"; -- Bus Error: RTE
         memory(16#5100#/2) := x"4E73"; -- Illegal: RTE
         memory(16#5200#/2) := x"4E73"; -- F-Line: RTE
         memory(16#5300#/2) := x"4E73"; -- MMU Config: RTE
-        memory(16#5400#/2) := x"4E73"; -- MMU Illegal: RTE
-        memory(16#5500#/2) := x"4E73"; -- MMU Access: RTE
 
         -- Build test program at 0x4000
         pc := 16#40#;  -- Start at 0x0040 (byte address 64)

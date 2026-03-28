@@ -1113,8 +1113,6 @@ begin
         memory(22) := x"0000"; memory(23):= x"0190";  -- F-line ($2C)
         memory(28) := x"0000"; memory(29):= x"0150";  -- Format Error
         memory(112):= x"0000"; memory(113):= x"0160"; -- MMU Config
-        memory(114):= x"0000"; memory(115):= x"0170"; -- MMU Illegal
-        memory(116):= x"0000"; memory(117):= x"0180"; -- MMU Access
 
         -- Exception handlers (STOP #$27xx)
         memory(16#100#/2) := x"4E72"; memory(16#102#/2) := x"2700"; -- Bus Error
@@ -1124,8 +1122,6 @@ begin
         memory(16#140#/2) := x"4E72"; memory(16#142#/2) := x"2704"; -- Priv
         memory(16#150#/2) := x"4E72"; memory(16#152#/2) := x"2705"; -- Format
         memory(16#160#/2) := x"4E72"; memory(16#162#/2) := x"2706"; -- MMU Config
-        memory(16#170#/2) := x"4E72"; memory(16#172#/2) := x"2707"; -- MMU Illegal
-        memory(16#180#/2) := x"4E72"; memory(16#182#/2) := x"2708"; -- MMU Access
         memory(16#190#/2) := x"4E72"; memory(16#192#/2) := x"2709"; -- F-line
 
         -- Clear code area
