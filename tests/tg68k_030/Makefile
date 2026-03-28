@@ -12,7 +12,7 @@ PROJECT_ROOT := $(abspath $(TEST_DIR)/../..)
 RTL_DIR := $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-movec-active-stack test-lockup-all test-chk-stacked-trace test-group2-t1-trace test-group2-stacked-trace test-real validate setup help
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-movec-active-stack test-lockup-all test-chk-stacked-trace test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-real validate setup help
 
 # Default target
 all: test-comprehensive
@@ -73,6 +73,7 @@ help:
 	@echo "  test-abcd-mbit - Test ABCD behavior with M-bit stack mode switching"
 	@echo "  test-rte-abcd-suite - Run all RTE/ABCD regression benches"
 	@echo "  test-chk-stacked-trace - Verify CHK/CHK2 stacked trace frames"
+	@echo "  test-group2-t0-trace - Verify settled T0 Group 2 stacked trace cases"
 	@echo "  test-group2-t1-trace - Verify settled T1 Group 2 stacked trace cases"
 	@echo "  test-group2-stacked-trace - Run maintained Group 2 stacked trace coverage"
 	@echo "  test-branch-odd-addr - Odd-address branches & ISP/MSP integrity during mode transitions"
@@ -409,10 +410,20 @@ test-chk-stacked-trace: setup
 
 test-group2-stacked-trace: setup
 	@echo "Running maintained Group 2 stacked trace coverage..."
-	@echo "Using the in-tree CHK/CHK2 bench plus maintained T1 Group 2 coverage."
-	@echo "Recovered old TRAP/TRAPV/DIV0 T0 no-trace assertions are skipped; see 030_MMU_PORT_AUDIT.md."
+	@echo "Using the in-tree CHK/CHK2 bench plus maintained T0/T1 Group 2 coverage."
+	@echo "Recovered old WinUAE-shaped T0 no-trace assertions are replaced by maintained 68030 trace checks; see 030_MMU_PORT_AUDIT.md."
 	@$(MAKE) --no-print-directory test-chk-stacked-trace
+	@$(MAKE) --no-print-directory test-group2-t0-trace
 	@$(MAKE) --no-print-directory test-group2-t1-trace
+
+test-group2-t0-trace: setup
+	@echo "Running maintained T0 Group 2 stacked trace tests..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_group2_t0_trace.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 5ms; quit -f" tb_group2_t0_trace
 
 test-group2-t1-trace: setup
 	@echo "Running maintained T1 Group 2 stacked trace tests..."
