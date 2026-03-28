@@ -6,7 +6,7 @@
 -- - PTEST with MMUSR verification
 -- - PFLUSHA with ATC re-fill verification
 -- - TT0 transparent translation
--- - Bus error on write-protected page (vector 61)
+-- - Bus error on write-protected page (vector 2)
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -144,9 +144,6 @@ architecture behavioral of tb_mmu_translation is
             m(i*2)   := x"0000";
             m(i*2+1) := x"00A0";
         end loop;
-        -- Override vector 61 (MMU bus error) -> $0080 (bus error handler)
-        m(122) := x"0000"; m(123) := x"0080";
-
         ---------------------------------------------------------------
         -- BUS ERROR HANDLER at $0080 (indices 64-72)
         ---------------------------------------------------------------
@@ -276,7 +273,7 @@ architecture behavioral of tb_mmu_translation is
         m(224) := x"23C3"; m(225) := x"0000"; m(226) := x"1F18";
 
         -- Phase 7: Write-Protected Fault Test (starts at index 227 = byte $01C6)
-        -- Test 12: Write to WP page -> MMU bus error (vector 61)
+        -- Test 12: Write to WP page -> internal PMMU bus error (vector 2)
         -- MOVEQ #$0C,D6          (test number marker for handler)
         m(227) := x"7C0C";
         -- MOVE.L #$DEADBEEF,$3000  (WP page -> bus error)

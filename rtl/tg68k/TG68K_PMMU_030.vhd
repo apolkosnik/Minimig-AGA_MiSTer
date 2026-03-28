@@ -3564,7 +3564,7 @@ begin
           -- creating an ATC entry with WP=1 and bus_error=false. The ATC-level
           -- WP check (line 1531) then produces vector 2 for writes.
           -- Previously, we aborted the walk and cached buserr=1, which caused:
-          -- 1. Walker WP faults to route through pmmu_walker_berr -> vector 61 (wrong, should be vector 2)
+          -- 1. Walker WP faults to take the internal PMMU bus-fault path instead of the 68030 vector-2 path
           -- 2. Subsequent reads to the same page to also fault (buserr ATC entry blocks all accesses)
           else
             -- MC68030 Early termination: ATC always operates at TC.PS page granularity.

@@ -496,7 +496,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_trapv			: bit;
 	signal trap_interrupt	: bit;
 	signal trap_mmu_config	: bit;  -- MC68030 MMU Configuration Exception (vector 56)
-	signal trap_mmu_berr    : bit;  -- BUG #159: MC68030 MMU Bus Error (vector 61)
+	signal trap_mmu_berr    : bit;  -- MC68030 internal PMMU bus fault (vector 2 via Format $A path)
 	signal trap_format_error : bit; -- BUG #211: MC68030 Format Error during RTE (vector 14)
 	signal rte_format_word  : std_logic_vector(15 downto 0);
 	signal rte_saved_mbit   : std_logic;  -- M bit before RTE directSR updates it
@@ -2990,7 +2990,9 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						if pmmu_tc_en = '1' then
 							make_berr <= (berr OR make_berr OR pmmu_fault OR pmmu_walker_berr);  -- Include PMMU faults and walker timeouts
 							-- BUG #159 FIX: Track if PMMU fault is a bus error (B bit = pmmu_fault_stat(15))
-							-- This determines whether to use vector 2 (normal BERR) or vector 61 (MMU BERR)
+							-- Track whether the fault originated in the PMMU path or the external
+							-- bus path. On MC68030 both dispatch to vector 2, but the PMMU path
+							-- still needs its own status/stack-frame handling.
 							if (pmmu_fault = '1' and pmmu_fault_stat(15) = '1') or pmmu_walker_berr = '1' then
 								make_mmu_berr <= '1';
 							else
@@ -3076,10 +3078,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									       severity warning;
 									-- synthesis translate_on
 								ELSE
-								-- BUG #159 FIX: Distinguish MMU bus error (vector 61) from normal BERR (vector 2)
+								-- Distinguish internal PMMU-originated bus faults from external
+								-- BERRs so the 68030 can build the right fault metadata. Both
+								-- still dispatch through vector 2 in trap_vector.
 								-- BUG #400 FIX: Also check pmmu_fault_stat directly for same-cycle dispatch
 								IF make_mmu_berr='1' OR (pmmu_fault='1' AND pmmu_fault_stat(15)='1') THEN
-									trap_mmu_berr <= '1';  -- Use vector 61 for MMU bus error
+									trap_mmu_berr <= '1';
 								ELSE
 									trap_berr <= '1';  -- Use vector 2 for normal bus error
 								END IF;
@@ -3764,7 +3768,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		IF interrupt='1' AND (trap_berr='1' OR trap_mmu_berr='1') THEN
 			-- MC68030 bus errors MUST use berr1-berr8 to push Format $A (16-word) frame.
 			-- Format $0 from trap0 path would crash any handler expecting Format $A.
-			-- trap_mmu_berr (MMU B-bit faults, vector 61) also requires Format $A.
+			-- trap_mmu_berr (MMU B-bit faults) also requires Format $A.
 			IF cpu(1)='1' THEN
 				next_micro_state <= berr1;
 			ELSE

@@ -87,6 +87,15 @@ Suite-target drift follow-up:
   - `make -C tests/tg68k_030 test-fault`: completes and covers fault recovery, Format `$A` bus-error frames, and PMMU address-error handling successfully
   - `make -C tests/tg68k_030 test-stress`: completes and covers MMU translation plus the full lockup/race suite successfully
 
+Vector-61 terminology follow-up:
+- The late upstream fixes correctly routed internal PMMU faults to vector 2, but `tb_mmu_translation.vhd`, `tb_whichamiga_mmu.vhd`, and several RTL comments still described or silently tolerated the old MC68851-style vector-61 path.
+- Root cause: the benches still preinstalled vector 61 to the same handler as vector 2, which would let a regression back to vector 61 pass unnoticed even though the 68030 manuals and WinUAE both require vector 2.
+- Local fix: remove the redundant vector-61 handler wiring from the 68030 benches and update the stale RTL/test comments so the only passing path is the real 68030 vector-2 bus-error route.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-mmu-translation`: passes with vector 61 left unmapped in the bench
+  - `make -C tests/tg68k_030 test-whichamiga`: passes with the internal PMMU data-fault path still landing in the vector-2 bus-error handler
+  - `make -C tests/tg68k_030 test-stack-frame-push`: all stack-frame checks still pass
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.

@@ -125,9 +125,6 @@ architecture behavioral of tb_whichamiga_mmu is
             m(i*2)   := x"0000";
             m(i*2+1) := x"00A0";
         end loop;
-        -- Override vector 61 (MMU bus error) -> $0080
-        m(122) := x"0000"; m(123) := x"0080";
-
         ---------------------------------------------------------------
         -- BUS ERROR HANDLER at $0080 (checks SSW.DF for PMMU data fault)
         -- Frame layout from SP: $00=SR, $02=PC_hi, $04=PC_lo, $06=Format/Vec,
