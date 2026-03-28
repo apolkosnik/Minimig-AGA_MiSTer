@@ -12,7 +12,7 @@ PROJECT_ROOT := $(abspath $(TEST_DIR)/../..)
 RTL_DIR := $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-movec-active-stack test-lockup-all test-chk-stacked-trace test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-real validate setup help
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-movec-active-stack test-lockup-all test-chk-stacked-trace test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-real validate setup help
 
 # Default target
 all: test-comprehensive
@@ -72,6 +72,7 @@ help:
 	@echo "  test-rte-mbit-abcd - Test RTE M-bit/S-bit transitions + ABCD interaction"
 	@echo "  test-abcd-mbit - Test ABCD behavior with M-bit stack mode switching"
 	@echo "  test-rte-abcd-suite - Run all RTE/ABCD regression benches"
+	@echo "  test-arch-suite - Run maintained architecture/edge-case regression coverage"
 	@echo "  test-chk-stacked-trace - Verify CHK/CHK2 stacked trace frames"
 	@echo "  test-trace-suite - Run maintained T0/T1/Group 2 trace regression coverage"
 	@echo "  test-group2-t0-trace - Verify settled T0 Group 2 stacked trace cases"
@@ -471,6 +472,9 @@ test-abcd-mbit: setup
 test-rte-abcd-suite: test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-movec-active-stack
 	@echo "RTE/ABCD regression suite complete."
 
+test-arch-suite: test-rte-abcd-suite test-abcd test-stack-frame-push test-branch-odd-addr test-movec-illegal test-moves-all-modes
+	@echo "Maintained architecture/edge-case suite complete."
+
 test-branch-odd-addr: setup
 	@echo "Running odd-address branch & ISP/MSP integrity tests..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
@@ -707,9 +711,15 @@ validate:
 	@echo "Running maintained trace suite..."
 	@$(MAKE) --no-print-directory test-trace-suite
 	@echo ""
+	@echo "Running maintained architecture suite..."
+	@$(MAKE) --no-print-directory test-arch-suite
+	@echo ""
+	@echo "Running maintained real software suite..."
+	@$(MAKE) --no-print-directory test-real
+	@echo ""
 	@echo "=========================================================="
 	@echo "MC68030 COMPLIANCE VALIDATION COMPLETE"
-	@echo "Maintained regression and trace suites passed."
+	@echo "Maintained regression, trace, architecture, and software suites passed."
 	@echo "Full regression log: mc68030_regression_results.log"
 	@echo "=========================================================="
 
@@ -740,6 +750,12 @@ test-comprehensive:
 	@echo ""
 	@echo "Running maintained trace suite..."
 	@$(MAKE) --no-print-directory test-trace-suite
+	@echo ""
+	@echo "Running maintained architecture suite..."
+	@$(MAKE) --no-print-directory test-arch-suite
+	@echo ""
+	@echo "Running maintained real software suite..."
+	@$(MAKE) --no-print-directory test-real
 	@echo ""
 	@echo "Running basic test suite..."
 	@$(MAKE) --no-print-directory test-all
