@@ -12,7 +12,7 @@ PROJECT_ROOT := $(abspath $(TEST_DIR)/../..)
 RTL_DIR := $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-movec-active-stack test-lockup-all test-chk-stacked-trace test-group2-stacked-trace validate setup help
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-movec-active-stack test-lockup-all test-chk-stacked-trace test-group2-stacked-trace test-real validate setup help
 
 # Default target
 all: test-comprehensive
@@ -56,6 +56,7 @@ help:
 	@echo "  test-advanced    - Run walker + ATC + translation PMMU suite"
 	@echo "  test-fault       - Run fault recovery + frame/address fault suite"
 	@echo "  test-stress      - Run translation and lockup/race stress suite"
+	@echo "  test-real        - Run maintained real software-sequence validation suite"
 	@echo "  test-regression  - Run MC68030 regression test suite (RECOMMENDED)"
 	@echo "  test-pmove-addressing - Test PMOVE with all legal addressing modes"
 	@echo "  test-pflush-ptest-pload - Test PFLUSH/PTEST/PLOAD instructions"
@@ -278,19 +279,19 @@ test-diagrom: compile
 
 test-diagrom-detectcpu: compile
 	@echo "Running DiagROM DetectCPU tests (MOVEC ITT0 should trap on 68030)..."
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_diagrom_detectcpu
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 10us; quit -f" tb_diagrom_detectcpu
 
 test-cpu-mmu-detection: compile
 	@echo "Running CPU/MMU detection tests (DiagROM PMOVE sequence)..."
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_mmu_detection_test
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 50us; quit -f" tb_mmu_detection_test
 
 test-68030-library: compile
 	@echo "Running 68030.library PMOVE initialization test..."
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_68030_library_init
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 10us; quit -f" tb_68030_library_init
 
 test-whichamiga: compile
 	@echo "Running WhichAmiga MMU instruction test..."
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 20us; quit" tb_whichamiga_mmu
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 20us; quit -f" tb_whichamiga_mmu
 
 # Enhanced comprehensive tests
 test-advanced: test-pmmu-walker test-pmmu-atc test-mmu-translation
@@ -365,7 +366,7 @@ test-amiga-sequence: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_amiga_mmu_sequence.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_amiga_mmu_sequence
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 30us; quit -f" tb_amiga_mmu_sequence
 
 test-moves: setup
 	@echo "Running MOVES instruction FC handling test..."
@@ -498,7 +499,7 @@ test-mmu-library-detect: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_library_detect.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_mmu_library_detect
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 30us; quit -f" tb_mmu_library_detect
 #2>&1 | grep -E "(Note:.*PASS|Note:.*FAIL|Note:.*Results|Note:.*true|Note:.*false|Note:.*PMMU)"
 
 # MOVES All Addressing Modes Test
@@ -723,14 +724,32 @@ test-comprehensive:
 	@echo "Check the following files for results:"
 	@ls -la $(TEST_DIR)/*.wlf 2>/dev/null || echo "No waveform files generated"
 
-# Real validation test for actual implementation
-test-real: compile
-	@echo "========================================"
-	@echo "Running REAL PMMU Implementation Tests"
-	@echo "========================================"
-	@cd $(TEST_DIR) && $(VCOM) -93 tb_pmmu_real_validation.vhd
-	@cd $(TEST_DIR) && $(VSIM) -batch -do "vsim tb_pmmu_real_validation; run 100us; quit -sim"
-	@echo "Real validation tests completed!"
+# Real software-sequence validation suite
+test-real:
+	@echo "=========================================================="
+	@echo "Running maintained real software-sequence validation suite"
+	@echo "=========================================================="
+	@echo "Running DiagROM DetectCPU sequence..."
+	@$(MAKE) --no-print-directory test-diagrom-detectcpu
+	@echo ""
+	@echo "Running DiagROM MMU detection sequence..."
+	@$(MAKE) --no-print-directory test-cpu-mmu-detection
+	@echo ""
+	@echo "Running mmu.library detection sequence..."
+	@$(MAKE) --no-print-directory test-mmu-library-detect
+	@echo ""
+	@echo "Running 68030.library initialization sequence..."
+	@$(MAKE) --no-print-directory test-68030-library
+	@echo ""
+	@echo "Running WhichAmiga MMU sequence..."
+	@$(MAKE) --no-print-directory test-whichamiga
+	@echo ""
+	@echo "Running Amiga ROM MMU initialization sequence..."
+	@$(MAKE) --no-print-directory test-amiga-sequence
+	@echo ""
+	@echo "=========================================================="
+	@echo "Real software-sequence validation suite complete."
+	@echo "=========================================================="
 
 # GUI mode for interactive debugging
 test-gui: compile

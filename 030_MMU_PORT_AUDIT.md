@@ -131,6 +131,12 @@ T0-trace follow-up:
   - rerun of the older `old_junk` T0 bench now leaves only two failures, both in the still-disputed `TRAP #0` / `TRAPcc` T0-expectation area
 - Skip decision: do not import the old `tb_t0_trace.vhd` verbatim. Its remaining `TRAP #n` / `TRAPcc` T0 expectations need a separate manual/WinUAE revalidation pass before they should gate the tree.
 
+Real-suite follow-up:
+- `test-real` still pointed at `tb_pmmu_real_validation.vhd`, but that bench does not exist in this tree or in `/home/adam/030_mmu/Minimig-AGA_MiSTer/old_junk`. The only surviving hits are the stale Makefile recipe itself and an unrelated comment in `old_junk/tests/tg68k_030/to_fix2/tb_bug33_write_data_timing.vhd`.
+- Fix decision: skip the nonexistent one-off bench and repurpose `test-real` as a maintained real software-sequence suite. It now runs the DiagROM DetectCPU path, DiagROM MMU detection, `mmu.library` detection, `68030.library` initialization, WhichAmiga MMU setup, and the Amiga ROM MMU initialization sequence.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-real`: completes successfully through the maintained OS- and ROM-facing benches listed above
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.
