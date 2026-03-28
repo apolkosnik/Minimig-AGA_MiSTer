@@ -306,11 +306,11 @@ begin
     read_register(REG_CRP, '0');
     report_test("CRP-L Register Write/Read", reg_rdat = x"00001000");
 
-    -- Test CRP register (high part)
+    -- Test CRP register (high part) with a valid DT field
     test_name <= "CRP-H Register Write/Read               ";
-    write_register(REG_CRP, x"12345678", '1'); -- CRP high
+    write_register(REG_CRP, x"12340002", '1'); -- CRP high: limit=$1234, DT=10
     read_register(REG_CRP, '1');
-    report_test("CRP-H Register Write/Read", reg_rdat = x"12345678");
+    report_test("CRP-H Register Write/Read", reg_rdat = x"12340002");
     
     -- Test SRP register
     test_name <= "SRP-L Register Write/Read               ";
@@ -408,9 +408,11 @@ begin
     -- Reset and enable MMU for fault testing
     write_register(REG_TC, x"00000000"); -- Disable translation first
     wait_cycles(5);
+    pmmu_brief <= x"2400"; -- PFLUSHA
     pflush_req <= '1'; -- Flush ATC
     wait_cycles(1);
     pflush_req <= '0';
+    pmmu_brief <= (others => '0');
     wait_cycles(5);
     write_register(REG_TC, x"80000001"); -- Enable translation
     write_register(REG_TT0, x"00000000"); -- Disable TTR
@@ -461,11 +463,11 @@ begin
 
     -- Test TC: Write non-zero, verify, write zero, verify
     test_name <= "TC: Write non-zero value                ";
-    write_register(REG_TC, x"12345678");  -- Write test pattern to TC
+    write_register(REG_TC, x"12345678");  -- Reserved bits 30-26 should read back as zero
     wait_cycles(2);
     read_register(REG_TC);
     wait_cycles(2);
-    report_test("TC Write Non-Zero", reg_rdat = x"12345678");
+    report_test("TC Write Non-Zero", reg_rdat = x"02345678");
 
     test_name <= "TC: Clear to zero                       ";
     write_register(REG_TC, x"00000000");  -- Clear TC to zero
@@ -491,11 +493,11 @@ begin
 
     -- Test TT1: Write non-zero, verify, write zero, verify
     test_name <= "TT1: Write non-zero value               ";
-    write_register(REG_TT1, x"FEDCBA98");  -- Write test pattern to TT1
+    write_register(REG_TT1, x"FEDCBA98");  -- Reserved bits should be masked by TTR_WRITE_MASK
     wait_cycles(2);
     read_register(REG_TT1);
     wait_cycles(2);
-    report_test("TT1 Write Non-Zero", reg_rdat = x"FEDCBA98");
+    report_test("TT1 Write Non-Zero", reg_rdat = x"FEDC8210");
 
     test_name <= "TT1: Clear to zero                      ";
     write_register(REG_TT1, x"00000000");  -- Clear TT1 to zero
@@ -506,11 +508,11 @@ begin
 
     -- Test CRP: Write non-zero to both parts, verify, clear, verify
     test_name <= "CRP_H: Write non-zero value             ";
-    write_register(REG_CRP, x"11111110", '1');  -- Write to CRP HIGH (part='1')
+    write_register(REG_CRP, x"11110002", '1');  -- Write valid CRP HIGH (part='1')
     wait_cycles(2);
     read_register(REG_CRP, '1');
     wait_cycles(2);
-    report_test("CRP_H Write Non-Zero", reg_rdat = x"11111110");
+    report_test("CRP_H Write Non-Zero", reg_rdat = x"11110002");
 
     test_name <= "CRP_L: Write non-zero value             ";
     write_register(REG_CRP, x"22222200", '0');  -- Write to CRP LOW (part='0')
@@ -535,11 +537,11 @@ begin
 
     -- Test SRP: Write non-zero to both parts, verify, clear, verify
     test_name <= "SRP_H: Write non-zero value             ";
-    write_register(REG_SRP, x"33333330", '1');  -- Write to SRP HIGH (part='1')
+    write_register(REG_SRP, x"33330002", '1');  -- Write valid SRP HIGH (part='1')
     wait_cycles(2);
     read_register(REG_SRP, '1');
     wait_cycles(2);
-    report_test("SRP_H Write Non-Zero", reg_rdat = x"33333330");
+    report_test("SRP_H Write Non-Zero", reg_rdat = x"33330002");
 
     test_name <= "SRP_L: Write non-zero value             ";
     write_register(REG_SRP, x"44444400", '0');  -- Write to SRP LOW (part='0')

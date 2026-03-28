@@ -60,6 +60,16 @@ Direct-PFLUSH harness follow-up:
   - `make -C tests/tg68k_030 test-lockup-all`: walker-timeout sub-bench now reports 4 passed, 0 failed; aggregate lockup suite completes without failures
   - `make -C tests/tg68k_030 test-regression`: 8 passed, 0 failed
 
+PMMU smoke-bench follow-up:
+- The older direct `tb_pmmu_030.vhd` smoke bench still had several FAILs after the port even though the cleaned PMMU behavior matched the 68030 register layouts already enforced in RTL.
+- Root causes in the bench:
+  - `TC` write/read assumed reserved bits `30:26` echoed back instead of being masked;
+  - `TT1` write/read assumed reserved TTR bits echoed back instead of respecting `TTR_WRITE_MASK`;
+  - `CRP_H`/`SRP_H` cases wrote invalid `DT=00` high words or compared against unmasked reserved bits.
+- Local fix: update the smoke-bench vectors/expectations to use valid root-pointer high words and spec-compliant masked readback values, and convert its remaining direct flush pulse to explicit `PFLUSHA`.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-pmmu`: all reported tests pass; only expected warning diagnostics remain for the bench's intentional invalid-TC / zeroed-pointer cases
+
 wf68k30L comparison note:
 - `wf68k30L_top.vhd` explicitly states that `PFLUSH`, `PLOAD`, `PMOVE`, and `PTEST` are missing there, so it was only used here as a 68030 control/exception reference.
 - PMMU correctness decisions were therefore taken from the Motorola manuals plus WinUAE, not from wf68k30L.
