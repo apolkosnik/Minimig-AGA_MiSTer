@@ -134,15 +134,17 @@ architecture behavioral of tb_whichamiga_mmu is
         -- $0080: BTST #0, ($0A,SP)  ; Test SSW.DF (bit 0 of byte at SP+$0A = berr_ssw[8])
         --   $082F = BTST #n,(d16,A7) opcode; $0000 = bit#0; $000A = disp $0A
         m(64) := x"082F"; m(65) := x"0000"; m(66) := x"000A";
-        -- $0086: BEQ.B $0094         ; Z=1 if DF=0 (bit was 0) -> branch to plain RTE
-        m(67) := x"670C";
+        -- $0086: BEQ.B $009A         ; Z=1 if DF=0 (bit was 0) -> branch to plain RTE
+        m(67) := x"6712";
         -- $0088: MOVE.L #$AA550001,$1F20.L  ; DF=1 confirmed: write success marker
         m(68) := x"23FC"; m(69) := x"AA55"; m(70) := x"0001";
         m(71) := x"0000"; m(72) := x"1F20";
-        -- $0092: RTE                 ; Return (DF=1 success path, resumes at saved PC)
-        m(73) := x"4E73";
-        -- $0094: RTE                 ; Return (DF=0 path, not a data fault)
-        m(74) := x"4E73";
+        -- $0092: MOVE.L A7,$1F24.L   ; Save stack-frame base for format-size checks
+        m(73) := x"23CF"; m(74) := x"0000"; m(75) := x"1F24";
+        -- $0098: RTE                 ; Return (DF=1 success path, resumes at saved PC)
+        m(76) := x"4E73";
+        -- $009A: RTE                 ; Return (DF=0 path, not a data fault)
+        m(77) := x"4E73";
 
         ---------------------------------------------------------------
         -- UNEXPECTED TRAP HANDLER at $00A0
@@ -771,6 +773,29 @@ begin
         else
             report "FAIL: Test 6 - Bus fault test: $1F20=$" & slv_to_hex(result) &
                    " (expected $AA550001; DF=1 check)" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        -- Test 7: PMMU data read fault must use a long Format $B frame.
+        -- Handler saves the active frame base at $1F24. For this fixed test case
+        -- the long frame starts at $1FA4, so the format/vector word is at $1FAA.
+        result := mem(to_integer(unsigned'(x"0F92"))) & mem(to_integer(unsigned'(x"0F93")));
+        if result = x"00001FA4" then
+            report "PASS: Test 7 - PMMU read fault stacked long frame at $1FA4" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: Test 7 - handler saved A7=$" & slv_to_hex(result) &
+                   " (expected $00001FA4 for long Format $B frame)" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        result := x"0000" & mem(to_integer(unsigned'(x"0FD5")));
+        if result(15 downto 12) = x"B" then
+            report "PASS: Test 8 - PMMU read fault format/vector word uses Format $B" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: Test 8 - format/vector word at $1FAA = $" & slv_to_hex(result(15 downto 0)) &
+                   " (expected format nibble $B)" severity error;
             fail_count := fail_count + 1;
         end if;
 

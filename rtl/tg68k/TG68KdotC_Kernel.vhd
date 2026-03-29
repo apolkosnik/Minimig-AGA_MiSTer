@@ -528,6 +528,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal berr_fault_addr   : std_logic_vector(31 downto 0);  -- Faulting logical address
 	signal berr_ssw          : std_logic_vector(15 downto 0);  -- Special Status Word
 	signal berr_data_out_saved : std_logic_vector(31 downto 0);  -- Data output buffer saved at berr dispatch
+	signal berr_long_frame   : std_logic;  -- MC68030 bus fault frame choice: 0=Format $A, 1=Format $B
 	signal berr_external_rw       : std_logic;                       -- BUG #431 FIX: RW latched at external BERR first-fire (state="11")
 	signal berr_external_fc       : std_logic_vector(2 downto 0);   -- BUG #431 FIX: FC latched at external BERR first-fire
 	signal berr_external_datatype : std_logic_vector(1 downto 0);   -- BUG #433b FIX: datatype latched at external BERR first-fire for SSW.SIZE
@@ -2084,9 +2085,8 @@ PROCESS (clk)
 					-- SSW Special Status Word ($0A-$0B, real data: FC/RW/SIZE/DF/FB/RB)
 					data_write_tmp <= x"0000" & berr_ssw;
 				ELSIF micro_state = berr7 THEN
-					-- Address errors use Format $B (MC68030 UM 8.4); bus errors use Format $A.
-					-- trap_addr_error persists through berr states (cleared at setinterrupt/setopcode).
-					IF trap_addr_error='1' THEN
+					-- Address errors and long data-read bus faults use Format $B.
+					IF trap_addr_error='1' OR berr_long_frame='1' THEN
 						data_write_tmp <= TG68_PC(15 downto 0) & "1011" & trap_vector(11 downto 0);  -- Format $B/PC_lo ($04)
 					ELSE
 						data_write_tmp <= TG68_PC(15 downto 0) & "1010" & trap_vector(11 downto 0);  -- Format $A/PC_lo ($04)
@@ -2793,6 +2793,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					berr_fault_addr <= (others => '0');
 					berr_ssw <= (others => '0');
 					berr_data_out_saved <= (others => '0');
+					berr_long_frame <= '0';
 					berr_external_rw <= '1';
 					berr_external_fc <= (others => '0');
 					berr_external_datatype <= "10";
@@ -3027,6 +3028,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						trap_berr <= '0';
 						trap_mmu_berr <= '0';  -- BUG #159: Clear MMU BERR trap
 						trap_addr_error <= '0';  -- Clear by default
+						berr_long_frame <= '0';
 						-- BUG #393 FIX: MC68030 UM 8.1 exception priority:
 						-- Group 0 (highest): Reset, Address Error, Bus Error
 						-- Group 1: Trace, Interrupt, Illegal, Privilege
@@ -3057,8 +3059,26 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								-- BUG #400 FIX: Also check pmmu_fault_stat directly for same-cycle dispatch
 								IF make_mmu_berr='1' OR (pmmu_fault='1' AND pmmu_fault_stat(15)='1') THEN
 									trap_mmu_berr <= '1';
+									if pmmu_fault_is_insn_out = '0' and pmmu_fault_rw_out = '1' then
+										berr_long_frame <= '1';
+									else
+										berr_long_frame <= '0';
+									end if;
 								ELSE
 									trap_berr <= '1';  -- Use vector 2 for normal bus error
+									if pmmu_fault = '1' then
+										if pmmu_fault_is_insn_out = '0' and pmmu_fault_rw_out = '1' then
+											berr_long_frame <= '1';
+										else
+											berr_long_frame <= '0';
+										end if;
+									else
+										if berr_external_fc(1) = '0' and berr_external_rw = '1' then
+											berr_long_frame <= '1';
+										else
+											berr_long_frame <= '0';
+										end if;
+									end if;
 								END IF;
 								-- BUG #400 FIX: Mark pmmu_fault as dispatched to prevent false
 								-- double bus fault from stale fault_reg before new translation clears it
@@ -3141,6 +3161,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								ELSE
 								trap_addr_error <= '1';
 								berr_exception_active <= '1';
+								berr_long_frame <= '1';
 								-- Address error frame data for berr1-berr8
 								berr_fault_addr <= TG68_PC;  -- The odd address
 								berr_data_out_saved <= (others => '0');
@@ -3298,8 +3319,9 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					IF micro_state = rte4 AND set_rot_cnt /= "000001" THEN
 						rot_cnt <= set_rot_cnt;
 					END IF;
-					-- Format $B fill: initialize rot_cnt when address error dispatches to berr_fill
-					IF interrupt='1' AND trap_addr_error='1' AND cpu(1)='1' THEN
+					-- Format $B fill: initialize rot_cnt when a long bus fault frame dispatches.
+					IF interrupt='1' AND cpu(1)='1' AND
+					   (trap_addr_error='1' OR ((trap_berr='1' OR trap_mmu_berr='1') AND berr_long_frame='1')) THEN
 						rot_cnt <= "001111";  -- 15 extra longwords for Format $B padding
 					END IF;
 
@@ -3746,16 +3768,19 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		END IF;
 		
 		IF interrupt='1' AND (trap_berr='1' OR trap_mmu_berr='1') THEN
-			-- MC68030 bus errors MUST use berr1-berr8 to push Format $A (16-word) frame.
-			-- Format $0 from trap0 path would crash any handler expecting Format $A.
-			-- trap_mmu_berr (MMU B-bit faults) also requires Format $A.
+			-- MC68030 bus faults use the short frame only for the instruction-boundary
+			-- cases. Data read faults need the long Format $B frame.
 			IF cpu(1)='1' THEN
-				next_micro_state <= berr1;
+				IF berr_long_frame='1' THEN
+					next_micro_state <= berr_fill;
+				ELSE
+					next_micro_state <= berr1;
+				END IF;
 			ELSE
 				next_micro_state <= trap0;
 			END IF;
-			-- BUG #401 FIX: Set setstackaddr at dispatch so RDindex_A latches A7 ("1111")
-			-- ONE CYCLE BEFORE berr1's first memory write.
+			-- BUG #401 FIX: Set setstackaddr at dispatch so RDindex_A latches A7
+			-- one cycle before the first stack write.
 			setstackaddr <= '1';
 			-- Only need stack swap if A7 currently has user stack (preSVmode='0')
 			-- If preSVmode='1', A7 already has supervisor stack, no swap needed
@@ -3792,11 +3817,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			-- Stack frame format selection (MC68030 User's Manual 6.4.3, Table 8-4):
 			-- Format #2 (6-word): TRAPV, CHK, CHK2, Divide by Zero, Trace, cpTRAPcc, Format Error
 			-- Format #0 (4-word): All others including privilege violation, F-line, illegal
-			-- Format #A (16-word): Bus Error (MC68030)
+			-- Format #A/$B: Bus fault (MC68030), selected from the latched fault type
 			IF cpu(1)='1' AND (trap_berr='1' OR trap_mmu_berr='1') THEN
-				next_micro_state <= berr1;
+				IF berr_long_frame='1' THEN
+					next_micro_state <= berr_fill;
+				ELSE
+					next_micro_state <= berr1;
+				END IF;
 				-- BUG #401 FIX: Set setstackaddr at dispatch (see interrupt path above)
-				-- Both trap_berr and trap_mmu_berr require Format $A (berr1-berr8).
 				setstackaddr <= '1';
 			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR set(trap_chk)='1' OR trap_mmu_config='1') THEN
 				next_micro_state <= trap00;  -- Format $2 (6-word) per MC68030 UM Table 8-4
@@ -6602,10 +6630,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					END IF;
 
                 -- MC68030 Bus Error Stack Frame Generation (Format $A/$B)
-                -- Bus errors: 16 words (Format $A). Address errors: 46 words (Format $B, with berr_fill prefix).
+                -- Short/instruction-boundary faults use 16 words (Format $A).
+                -- Address errors and data read bus faults use 46 words (Format $B, with berr_fill prefix).
                 -- Order: Internal($1E/1C) -> DataOut($1A/18) -> Internal($16/14) -> FaultAddr($12/10)
                 --        -> InstrPipe($0E/0C) -> SSW($0A/08) -> Format/PC_Lo($06/04) -> SR/PC_Hi($02/00)
-                -- MC68030 Format $B extra fields (address errors only)
+                -- MC68030 Format $B extra fields
                 -- Pushes 15 zero longwords for offsets $58-$20 (internal state stubs).
                 -- After loop completes (rot_cnt=1), falls through to berr1-berr8
                 -- for the standard bus fault frame fields (offsets $1C-$00).

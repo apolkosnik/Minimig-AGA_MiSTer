@@ -40,6 +40,20 @@ Post-import follow-up fix:
   - `make -C tests/tg68k_030 test-mmu-translation`: 21 passed, 0 failed
   - `make -C tests/tg68k_030 test-lockup-all`: completed without reported failures
 
+PMMU read-fault frame follow-up:
+- The cleaned core still forced all `trap_mmu_berr` paths through `berr1-berr8`, which always builds the short Format `$A` frame. A maintained `WhichAmiga` MMU read-fault run showed the handler entering with `A7=$1FE0`, i.e. a 32-byte short frame, for `MOVE.L ($DFFFFFFC),D0` after the page descriptor had been invalidated.
+- The references disagreed with that behavior:
+  - the Motorola manuals say the MC68030 chooses short vs long bus-fault frames based on whether the fault occurs at an instruction boundary, and explicitly state that data read faults only generate the long bus-fault frame;
+  - `wf68k30L_exception_handler.vhd` uses `IBOUND` to choose Format `$A` vs `$B` and routes non-boundary bus faults to Format `$B`;
+  - WinUAE's `cpummu30.cpp` treats short MMU bus faults as the last-write/write-fault case and flags read faults as long bus faults.
+- Local fix: latch whether the current bus fault needs the long frame, drive PMMU and external data-read faults through `berr_fill`, and use that same latch when writing the Format/Vector word in `berr7`.
+- Local regression update: extend [tb_whichamiga_mmu.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_whichamiga_mmu.vhd) so the handler saves the frame base and the bench now asserts the PMMU data-read case lands on the expected long Format `$B` frame.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-whichamiga`: 6 passed, 0 failed; the PMMU read-fault case now stacks at `$1FA4` with a Format `$B` word at `$1FAA`
+  - `make -C tests/tg68k_030 test-berr-frame`: 13 passed, 0 failed; the existing PMMU write-fault cases still use short Format `$A`
+  - `make -C tests/tg68k_030 test-fault`: fault-handling suite complete
+  - `make -C tests/tg68k_030 test-real`: real software-sequence suite complete
+
 Regression-harness follow-up:
 - The imported `tb_moves_all_modes.vhd` initially reported five A7/SP failures in tests 44-48, but the RTL bus trace showed the MOVES accesses were already landing on the correct stack addresses with the expected FC values.
 - Root causes in the testbench:
