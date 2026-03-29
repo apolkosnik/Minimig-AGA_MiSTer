@@ -341,3 +341,12 @@ movec selector focused follow-up:
   - `make -C tests/tg68k_030 test-fault`: fault-handling suite completed successfully with the selector-normalized PMMU benches
   - `make -C tests/tg68k_030 test-real`: maintained real software-sequence validation suite completed successfully
   - `make -C tests/tg68k_030 test-pmove-crp-mem-to-mmu-postinc`: completed successfully with the selector-normalized PMOVE postincrement bench
+
+PMMU instruction-fault frame follow-up:
+- The late local `BUG #440` source commit was only the first step: it forced all `trap_mmu_berr` cases through the short-frame path, but the maintained tree later corrected the real MC68030 rule to short-at-instruction-boundary and long-for-data-read faults. What was still missing here was a focused maintained regression for the short-frame side of that rule.
+- Maintained coverage added: new [tb_mmu_fetch_fault_frame.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_mmu_fetch_fault_frame.vhd) enables the MMU with an invalid root entry for `$F0xxxxxx`, executes `JMP $F0001000`, and has the vector-2 bus-error handler save the active `A7`, format/vector word, and fault address. Vector 61 is left pointed at the unexpected handler so the stale MC68851-style route cannot pass silently.
+- Spec/reference basis: this matches the Motorola manuals' short-vs-long bus-fault split, `wf68k30L`'s instruction-boundary gating for Format `$A` vs `$B`, and the maintained WinUAE behavior that reserves the short PMMU bus-fault frame for instruction-boundary / write-fault-style cases instead of data reads.
+- Fix/skip decision: no RTL change needed. [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd) already dispatches `trap_mmu_berr` through `berr1` or `berr_fill` from the latched `berr_long_frame` state; the missing piece was a maintained regression and wrapper coverage for the instruction-fetch case.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-mmu-fetch-fault-frame`: 6 passed, 0 failed; handler saved `A7=$00001FE0`, `format/vector=$A008`, and `fault address=$F0001000`
+  - `make -C tests/tg68k_030 test-fault`: fault-handling suite completed successfully with the new instruction-fetch frame regression included
