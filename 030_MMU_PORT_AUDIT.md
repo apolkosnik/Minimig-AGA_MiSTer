@@ -339,10 +339,15 @@ Patch-file export follow-up:
   - Fix/skip decision: partially missing in the cleaned tree and ported locally as described above under `82993c3`.
 - `0004-disabled-RTE-restoring-bus-MMU-internal-frame-state-.patch`
   - Fix/skip decision: skip. This is the "disable the hidden retry-state restore again" half of the same experimental cluster and is not a Motorola-architectural requirement.
+- `0001-5e89616-chk-l-odd-address-error.patch`
+  - Fix/skip decision: skip the exported RTL hunk, port the maintained coverage. The cleaned kernel already retires the real MC68020/030 case correctly: `CHK.L (A1)+,D0` with `A1=$2001` reaches vector 6 instead of vector 3, so the extra `odd_prog_fetch` / `eff_busstate` RTL split is not needed here.
+  - Maintained follow-up: add [tb_chk_long_odd_addr.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_chk_long_odd_addr.vhd) for the direct odd-source regression, add the odd-source stacked-trace case to [tb_chk_stacked_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_chk_stacked_trace.vhd), and wire the standalone reproducer into [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) via `test-chk-long-odd-addr` and `test-arch-suite`.
 - Patch-file follow-up verification:
   - `make -C tests/tg68k_030 test-pflush-ptest-pload`: 21 passed, 0 failed
   - `make -C tests/tg68k_030 test-berr-frame`: 15 passed, 0 failed
   - `make -C tests/tg68k_030 test-fault`: fault-handling suite completed successfully
+  - `make -C tests/tg68k_030 test-chk-long-odd-addr`: pass; direct odd-source reproducer reports `PASS: CHK.L odd source address raised vector 6 (CHK)`
+  - `make -C tests/tg68k_030 test-chk-stacked-trace`: pass; the added `CHK.L (A1)+,D0` stacked-trace case records pass markers for both the trace frame (`$2024`, `PC/IA=$2000`) and the CHK frame (`$2018`, `PC=$1012`, `IA=$1010`)
 
 interrupt_mode focused follow-up:
 - The late local `interrupt_mode_clocked_fix` source commit (`9973f15`) was already present in RTL, but the maintained tree still lacked a focused in-tree regression for the interrupt-to-`RTE` stack-selection area.

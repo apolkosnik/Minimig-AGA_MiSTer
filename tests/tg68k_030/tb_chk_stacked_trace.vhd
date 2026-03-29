@@ -19,6 +19,7 @@
 -- Tests:
 --   1. CHK.W D1,D0 with T1=1 (D0.W = -1, below zero -> CHK trap + stacked trace)
 --   2. CHK.L D1,D0 with T1=1 (D0.L = -1, below zero -> CHK trap + stacked trace)
+--   3. CHK.L (A1)+,D0 with T1=1 (odd source address, CHK trap + stacked trace)
 --
 -- Stack layout after both tests (SSP=$4000):
 --   CHK frame at $3FF4 (pushed first):
@@ -413,6 +414,71 @@ begin
         check_vector("CHK.L frame vector=$018", x"018");
         check_pc("CHK.L frame PC=next_instr=$1010", x"00001010");
         check_ia("CHK.L frame IA=CHK.L_addr=$100E", x"0000100E");
+
+        -- ================================================================
+        -- TEST 2B: CHK.L (A1)+,D0 with T1=1
+        --
+        -- Reproduces the memory-source CHK.L case with an odd source address.
+        -- The source access must still retire as a CHK exception with stacked
+        -- trace, not as an address error.
+        --
+        -- Code at $1000:
+        --   $1000: MOVEA.L #$3001,A1  (227C 0000 3001)
+        --   $1006: MOVE.L  #$01C0,D0  (203C 0000 01C0)
+        --   $100C: MOVE    #$A700,SR  (46FC A700)
+        --   $1010: CHK.L   (A1)+,D0   (4119)
+        --   $1012: NOP                (4E71)
+        --
+        -- Unaligned source bytes at $3001..$3004 are 00 00 00 79.
+        -- Expected after STOP in trace handler:
+        --   Trace frame at $3FE8: format=$2, vector=$024, PC=$2000, IA=$2000
+        --   CHK frame  at $3FF4: format=$2, vector=$018, PC=$1012, IA=$1010
+        -- ================================================================
+        report "" severity note;
+        report "TEST 2B: CHK.L (A1)+,D0 with T1=1 (stacked trace)" severity note;
+        report "  Verifies odd source addresses still stack CHK + trace frames" severity note;
+
+        init_memory;
+        setup_vector(16#18#, 16#2000#);
+        setup_vector(16#24#, 16#2100#);
+        setup_handler(16#2000#);
+        setup_handler(16#2100#);
+
+        mem(16#1000# / 2) := x"227C";
+        mem(16#1002# / 2) := x"0000";
+        mem(16#1004# / 2) := x"3001";
+        mem(16#1006# / 2) := x"203C";
+        mem(16#1008# / 2) := x"0000";
+        mem(16#100A# / 2) := x"01C0";
+        mem(16#100C# / 2) := x"46FC";
+        mem(16#100E# / 2) := x"A700";
+        mem(16#1010# / 2) := x"4119";
+        mem(16#1012# / 2) := x"4E71";
+
+        mem(16#3000# / 2) := x"AA00";
+        mem(16#3002# / 2) := x"0000";
+        mem(16#3004# / 2) := x"7900";
+
+        for i in 16#3F00# / 2 to 16#4000# / 2 - 1 loop
+            mem(i) := x"DEAD";
+        end loop;
+
+        do_reset;
+        wait_for_stop;
+
+        report "  -- Trace frame (SP=$3FE8, pushed second):" severity note;
+        read_frame(x"00003FE8");
+        check_format("CHK.L (A1)+ trace frame", "0010");
+        check_vector("CHK.L (A1)+ trace frame vector=$024", x"024");
+        check_pc("CHK.L (A1)+ trace PC=CHK_handler=$2000", x"00002000");
+        check_ia("CHK.L (A1)+ trace IA=CHK_handler=$2000", x"00002000");
+
+        report "  -- CHK.L frame (SP=$3FF4, pushed first):" severity note;
+        read_frame(x"00003FF4");
+        check_format("CHK.L (A1)+ frame", "0010");
+        check_vector("CHK.L (A1)+ frame vector=$018", x"018");
+        check_pc("CHK.L (A1)+ frame PC=next_instr=$1012", x"00001012");
+        check_ia("CHK.L (A1)+ frame IA=CHK_addr=$1010", x"00001010");
 
         -- ================================================================
         -- TEST 3: CHK2.B (A0),D0 with T1=1
