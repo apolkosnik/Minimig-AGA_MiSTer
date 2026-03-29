@@ -269,7 +269,8 @@ architecture rtl of TG68K_PMMU_030 is
   -- ptest_active/pload_active are cleared after 1 cycle (before walker_completed).
   -- This flag persists through the entire walk so walker_completed can skip addr_phys_reg.
   signal instr_walk_pending : std_logic := '0';
-  signal ptest_walk_no_update : std_logic := '0';  -- BUG #411: PTEST walk should not write back U/M bits
+  signal ptest_walk_pending : std_logic := '0';  -- Table-search PTEST active: update MMUSR only, never alter the ATC
+  signal ptest_walk_no_update : std_logic := '0';  -- Kept for non-mutating walks; MC68030 PTEST table searches leave this deasserted
   -- PLOAD operation state
   signal pload_active : std_logic := '0';
   signal pload_addr : std_logic_vector(31 downto 0) := (others => '0');
@@ -1418,6 +1419,7 @@ begin
       mmusr_update_value <= (others => '0');
       ptest_done <= '0';
       instr_walk_pending <= '0';
+      ptest_walk_pending <= '0';
       ptest_walk_no_update <= '0';
       atc_mru_update_req <= '0';
       atc_mru_update_idx <= 0;
@@ -1903,7 +1905,8 @@ begin
             walk_req <= '1';
             translation_pending <= '1';
             instr_walk_pending <= '1';  -- BUG #396: Mark walk as PTEST-initiated
-            ptest_walk_no_update <= not pmmu_brief(8);  -- BUG #411: A-bit=0: skip U/M; A-bit=1: allow U update
+            ptest_walk_pending <= '1';
+            ptest_walk_no_update <= '0';  -- MC68030 table searches update descriptor history bits regardless of A-bit
             ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after triggering walker
             -- report "PTEST: Triggered walker for addr=0x" & slv_to_hstring(ptest_addr) &
                   --  -- " fc=" & slv_to_string(ptest_fc) severity note;
@@ -1963,7 +1966,8 @@ begin
         mmusr_update_req <= '1';
         translation_pending <= '0';
         instr_walk_pending <= '0';  -- Clear PTEST/PLOAD flag on walker fault too
-        ptest_walk_no_update <= '0';  -- Clear PTEST U/M skip flag
+        ptest_walk_pending <= '0';
+        ptest_walk_no_update <= '0';  -- Clear any non-mutating-walk override
         pload_flush_pending <= '0';  -- Clear PLOAD flush flag on fault
         -- Acknowledge the fault and track pending state
         walker_fault_ack <= '1';
@@ -2143,7 +2147,8 @@ begin
         end if; -- else tmatch0
         -- BUG #396: Clear instr_walk_pending on walker completion
         instr_walk_pending <= '0';
-        ptest_walk_no_update <= '0';  -- BUG #411: Clear PTEST U/M skip flag
+        ptest_walk_pending <= '0';
+        ptest_walk_no_update <= '0';  -- Clear any non-mutating-walk override
         -- Acknowledge walker completion
         walker_completed_ack <= '1';
       else
@@ -2529,7 +2534,7 @@ begin
                 walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop: stop after ptest_level descriptors read
-              elsif instr_walk_pending = '1' and
+              elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -2597,7 +2602,7 @@ begin
                 walk_parent_dt_long <= '1';
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              elsif instr_walk_pending = '1' and
+              elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -2757,7 +2762,7 @@ begin
                 walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              elsif instr_walk_pending = '1' and
+              elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -2829,7 +2834,7 @@ begin
                 walk_parent_dt_long <= '1';
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              elsif instr_walk_pending = '1' and
+              elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -2996,7 +3001,7 @@ begin
                 walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              elsif instr_walk_pending = '1' and
+              elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -3068,7 +3073,7 @@ begin
                 walk_parent_dt_long <= '1';
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              elsif instr_walk_pending = '1' and
+              elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -3207,7 +3212,7 @@ begin
                 walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              elsif instr_walk_pending = '1' and
+              elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -3278,7 +3283,7 @@ begin
                 walk_parent_dt_long <= '1';
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
-              elsif instr_walk_pending = '1' and
+              elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
@@ -3645,15 +3650,23 @@ begin
             -- U bit (bit 3): Set on any page access if not already set
             -- M bit (bit 4): Set on write access if not already set
             -- Note: These bits are in walk_desc_high for both short and long formats
-            -- BUG #411: PTEST/PLOAD walks must NOT write back U/M bits.
-            -- Per MC68030 spec and WinUAE cpummu30.cpp line 1500: only level=0 (normal
-            -- translations) write back U/M. PTEST is diagnostic and must not modify descriptors.
+            -- Root-pointer early termination uses a register-resident descriptor, so there is
+            -- no memory-resident U/M bit to write back. Other table-search walks use the
+            -- normal descriptor history-bit update path.
             if limit_fault then
               null;  -- BUG FIX: Limit violation already set wstate <= W_FAULT, don't overwrite
             elsif ptest_walk_no_update = '1' or walk_is_root_pointer = '1' then
-              -- BUG #411: PTEST walk - skip U/M writeback, go straight to fill
-              -- Root pointer DT=01: skip U/M writeback (register, not memory-resident)
-              if pload_flush_pending = '1' then
+              -- Skip history-bit writeback only for non-mutating walks or register-only root pointers.
+              if ptest_walk_pending = '1' then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_success(
+                  write_protect => walk_attr(0),
+                  modified => walk_attr(1),
+                  transparent => '0',
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              elsif pload_flush_pending = '1' then
                 wstate <= W_PLOAD_FLUSH;
               else
                 wstate <= W_FILL;
@@ -3672,7 +3685,16 @@ begin
               wstate <= W_UPDATE_DESC;
             else
               -- U and M bits already set appropriately, go straight to fill
-              if pload_flush_pending = '1' then
+              if ptest_walk_pending = '1' then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_success(
+                  write_protect => walk_attr(0),
+                  modified => walk_attr(1),
+                  transparent => '0',
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              elsif pload_flush_pending = '1' then
                 wstate <= W_PLOAD_FLUSH;
               else
                 wstate <= W_FILL;
@@ -3705,7 +3727,7 @@ begin
             mem_we <= '0';
             -- Check PTEST early-stop after TABLE U-bit writeback
             -- walk_level was already incremented before entering this state
-            if instr_walk_pending = '1' and
+            if ptest_walk_pending = '1' and
                to_unsigned(walk_level, 3) >= unsigned(ptest_level) then
               walker_fault <= '1';
               walker_fault_status <= encode_mmusr_success(
@@ -3748,7 +3770,16 @@ begin
             -- Update walk_desc_high with the written values for ATC fill
             -- This ensures the M bit is reflected in the ATC entry
             walk_attr(1) <= desc_update_data(4);  -- Update M bit in walk_attr
-            if pload_flush_pending = '1' then
+            if ptest_walk_pending = '1' then
+              walker_fault <= '1';
+              walker_fault_status <= encode_mmusr_success(
+                write_protect => desc_update_data(2) or walk_write_protect,
+                modified => desc_update_data(4),
+                transparent => '0',
+                level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+              );
+              wstate <= W_FAULT;
+            elsif pload_flush_pending = '1' then
               wstate <= W_PLOAD_FLUSH;
             else
               wstate <= W_FILL;
@@ -3840,37 +3871,42 @@ begin
           -- Don't clear walker_fault here - let main process clear it when consumed
           mem_req <= '0';  -- BUG FIX: Clear any outstanding memory request to prevent leak
          --  -- report "W_FAULT: Setting walker_completed=1 with fault status=0x" & slv_to_hstring(walker_fault_status) severity note;
-          -- Cache fault in ATC (per WinUAE: invalid/supervisor-violation cached with bus_error=true)
-          -- This avoids re-walking on repeated accesses to invalid pages
-          found_invalid := false;
-          replace_idx := 0;
-          for i in 0 to ATC_ENTRIES-1 loop
-            if atc_valid(i) = '0' and not found_invalid then
-              replace_idx := i;
-              found_invalid := true;
-            end if;
-          end loop;
-          if not found_invalid then
+          if ptest_walk_pending = '1' then
+            -- PTEST updates MMUSR only; it must not populate the ATC on success or failure.
+            wstate <= W_IDLE;
+          else
+            -- Cache fault in ATC (per WinUAE: invalid/supervisor-violation cached with bus_error=true)
+            -- This avoids re-walking on repeated accesses to invalid pages
+            found_invalid := false;
+            replace_idx := 0;
             for i in 0 to ATC_ENTRIES-1 loop
-              if atc_mru(i) = '0' then
+              if atc_valid(i) = '0' and not found_invalid then
                 replace_idx := i;
-                exit;
+                found_invalid := true;
               end if;
             end loop;
+            if not found_invalid then
+              for i in 0 to ATC_ENTRIES-1 loop
+                if atc_mru(i) = '0' then
+                  replace_idx := i;
+                  exit;
+                end if;
+              end loop;
+            end if;
+            atc_log_base(replace_idx)  <= walk_log_base;
+            atc_phys_base(replace_idx) <= (others => '0');  -- No valid physical address
+            atc_shift(replace_idx)     <= walk_page_shift;
+            atc_page_size(replace_idx) <= walk_page_size;
+            atc_attr(replace_idx)      <= (others => '0');  -- No valid attributes
+            atc_fc(replace_idx)        <= saved_fc;
+            atc_global(replace_idx)    <= '0';
+            atc_level(replace_idx)     <= std_logic_vector(to_unsigned(walk_level, 3));
+            atc_valid(replace_idx)     <= '1';
+            atc_buserr(replace_idx)    <= '1';  -- Mark as bus error entry
+            atc_mru(replace_idx) <= '1';
+            walker_completed <= '1';  -- Signal that walker completed (with fault)
+            wstate <= W_IDLE;
           end if;
-          atc_log_base(replace_idx)  <= walk_log_base;
-          atc_phys_base(replace_idx) <= (others => '0');  -- No valid physical address
-          atc_shift(replace_idx)     <= walk_page_shift;
-          atc_page_size(replace_idx) <= walk_page_size;
-          atc_attr(replace_idx)      <= (others => '0');  -- No valid attributes
-          atc_fc(replace_idx)        <= saved_fc;
-          atc_global(replace_idx)    <= '0';
-          atc_level(replace_idx)     <= std_logic_vector(to_unsigned(walk_level, 3));
-          atc_valid(replace_idx)     <= '1';
-          atc_buserr(replace_idx)    <= '1';  -- Mark as bus error entry
-          atc_mru(replace_idx) <= '1';
-          walker_completed <= '1';  -- Signal that walker completed (with fault)
-          wstate <= W_IDLE;
           
         when others =>
           wstate <= W_IDLE;

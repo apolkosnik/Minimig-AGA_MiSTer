@@ -139,6 +139,17 @@ PTEST level-0 A-bit follow-up:
   - `make -C tests/tg68k_030 test-ptest-all-modes`: 15 passed, 0 failed
   - `make -C tests/tg68k_030 test-stack-frame-push`: 10 passed, 0 failed
 
+PTEST descriptor-history / no-ATC follow-up:
+- The Motorola manuals say that during a table search "the U bit in each descriptor that is encountered is checked and set if it is not already set", and they separately state that `PTEST` "does not alter the ATC". That combination makes leveled table-search `PTEST` architecturally different from an ATC-only `PTEST`, but still mutating for descriptor history.
+- Root causes in the cleaned PMMU:
+  - it still derived `ptest_walk_no_update` from the A bit, so leveled `PTEST` with `A=0` suppressed the descriptor-history updates entirely;
+  - it completed leveled `PTEST` by reusing the generic walker fault / fill machinery, which either cached a fault-class ATC entry on early stop (`MMUSR` was overwritten to `$8401`) or fell through the normal `W_FILL` path on full walks, both of which violate the manual's "does not alter the ATC" rule.
+- WinUAE comparison: current `mmu030_table_search()` only writes descriptor U/M bits when `level==0`, so this is a manuals-over-WinUAE compliance decision. The direct maintained regression now enforces the Motorola behavior explicitly.
+- Local fix: keep `ptest_walk_no_update` deasserted for table-search `PTEST`, add a persistent PTEST-walk flag in [rtl/tg68k/TG68K_PMMU_030.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68K_PMMU_030.vhd), route all PTEST table-search completions through MMUSR-only completion instead of ATC fill / ATC fault caching, and add maintained direct coverage in [tb_ptest_history_bits.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_ptest_history_bits.vhd). The suite wrapper in [Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now exposes that bench as `test-ptest-history-bits` and includes it in `test-arch-suite`.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-ptest-history-bits`: 10 checks passed, 0 failed
+  - `make -C tests/tg68k_030 test-ptest-all-modes`: 15 passed, 0 failed
+
 Comprehensive-suite follow-up:
 - The older `test-comprehensive` wrapper in `tests/tg68k_030/Makefile` still tried to run `tb_pmmu_advanced`, `tb_mmu_fault_comprehensive`, and `tb_page_walker_stress`.
 - Root cause: those bench names never existed in the imported tree. `old_junk` only preserved stale backup Makefile entries and failed build logs for them, not recoverable VHDL sources, so the target could never succeed as written.
