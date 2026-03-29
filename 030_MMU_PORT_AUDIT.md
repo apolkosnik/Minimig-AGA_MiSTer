@@ -2,6 +2,7 @@
 
 Scope:
 - Upstream range reviewed: `237537169ad1f561b198c639c95b38da7bcb126f..5e89616e7c72fff4dd6afac3970484294fd15fc1` from `origin/030_mmu`.
+- Late-range cross-check also repeated against the user's local `030_mmu` branch at `/home/adam/030_mmu/Minimig-AGA_MiSTer`, since that is the working source branch for the final fixes.
 - Local port commits created on this branch:
   - `957ced4` `tg68k: add cleaned MC68030 core, PMMU and cache support`
   - `ca87226` `minimig: wire the MC68030 core into the existing CPU slot`
@@ -237,3 +238,25 @@ Final stabilization, ported into the cleaned local commits:
 - `bbfaefe`, `3b1a940`, `a0a8316`, `fe48414`, `58ebabd`, `9dcc9c1`, `9767f4a`, `3ae1faa`, `5db6dd3`, `d865eed`, `221323a`, `131082b`, `e32bf38`, `2025ec1`, `1d805a7`, `c646069`, `0f1556c`, `f546c70`, `a4348f8`, `c0ee187`, `eb5bd26`, `9973f15`, `34e9543`, `de1bd23`, `5e89616`
 - Summary: final ATC-size/pseudo-LRU work, PLOAD flush-before-walk, early-termination granularity, WP accumulation, bus-timeout BERR, wrapper-side walker integration, TRAP/RTE stack-frame cleanup, and the final latched MOVEC selector fix.
 - Fix/skip decision: ported. `de1bd23` was validation evidence (`WhichAmiga works`) rather than a distinct new architectural change, so its useful behavior is represented by the surrounding fixes, not by a separate local commit.
+
+Late local-branch-only review:
+- The local `030_mmu` branch was checked commit-by-commit again after the user clarified the source path. That second pass found no remaining architectural fixes that still needed to be replayed into this cleaned branch.
+- `f546c70`, `a4348f8`, `c0ee187`, `eb5bd26`, `9973f15`, `34e9543`, `de1bd23`, `5e89616`
+- Summary: TRAP/stack-frame cleanup, stacked-trace priority fixes, clocked interrupt-mode handling, PMMU bus-fault routing, WhichAmiga validation, and the latched `MOVEC` control-register selector.
+- Fix/skip decision: no new local port commit needed. The cleaned tree already carries those behaviors directly or via the maintained replacements added during this audit:
+  - `movec_regsel` is present in [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd), matching the source branch's late `MOVEC` fix;
+  - the maintained trace and Group 2 benches already cover the `TRAP`/`CHK` stacked-frame area;
+  - the WhichAmiga PMMU path is covered by the maintained long-read-fault regression rather than the source branch's intermediate short-frame bugfix.
+- `694499b`, `29b914e`, `eb63ffb`
+- Summary: source-branch experimentation around restoring hidden Format `$A/$B` internal bus-fault retry state from an `RTE` frame back into the live core, then partially constraining it, then disabling it again.
+- Fix/skip decision: skip the whole cluster. The Motorola manuals define the software-visible frame contents, but they do not require restoring invisible internal retry state into the live machine after `RTE`; WinUAE and `wf68k30L` do not rely on equivalent live restore machinery either. The cleaned branch never adopted that path, and it still passes the maintained architectural regressions, so replaying that experimental logic would add risk without a compliance win.
+- `82993c3`
+- Summary: cached ATC-fault replay classification cleanup plus direct-PMMU testbench additions.
+- Fix/skip decision: behavior already covered; no literal replay needed. The maintained [tb_pflush_ptest_pload.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_pflush_ptest_pload.vhd) in this branch already includes the cached WP/invalid replay checks from that late source work and passes against the cleaned PMMU.
+
+Late local-branch verification:
+- `make -C tests/tg68k_030 test-chk-stacked-trace`: 27 passed, 0 failed
+- `make -C tests/tg68k_030 test-movec-active-stack`: pass; both active ISP/MSP `MOVEC` alias checks completed successfully
+- `make -C tests/tg68k_030 test-pflush-ptest-pload`: 18 passed, 0 failed
+- `make -C tests/tg68k_030 test-rte-formats`: 30 passed, 0 failed
+- `make -C tests/tg68k_030 test-stack-frame-push`: completed successfully
