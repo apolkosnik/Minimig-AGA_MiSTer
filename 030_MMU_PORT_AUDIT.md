@@ -455,3 +455,19 @@ MOVES `(d16,An)` retire follow-up:
 - The old side patch [`old_junk/tests/tg68k_030/MOVES_BUG_FIX.patch`](/home/adam/030_mmu/Minimig-AGA_MiSTer/old_junk/tests/tg68k_030/MOVES_BUG_FIX.patch) was checked directly. Its keepable point is that `MOVES (d16,An)` must clear `setnextpass` after the displacement word so the instruction retires into `moves1` instead of over-incrementing the PC and skipping the next opcode.
 - Fix/skip decision: no new RTL port commit needed. The cleaned kernel already carries that end-state in [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd) for the relevant `MOVES` EA microstates; the missing piece was maintained direct regression coverage.
 - Maintained coverage added: new [tb_moves_d16an_pc.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_moves_d16an_pc.vhd) checks both `MOVES.L D2,($10,A0)` and `MOVES.L ($10,A0),D7`. The store case verifies the longword write plus fall-through; the load case verifies both SFC reads and that the immediately following `CMPI/BEQ` pair sees the loaded longword. That keeps the regression focused on retire/next-instruction behavior instead of a second store path. The maintained wrapper in [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now includes this under `test-moves-validation`.
+
+cpSAVE/cpRESTORE old-patch follow-up:
+- The stale side patch [`old_junk/patches/BUG302_cpSAVE_cpRESTORE_fline.patch`](/home/adam/030_mmu/Minimig-AGA_MiSTer/old_junk/patches/BUG302_cpSAVE_cpRESTORE_fline.patch) was checked directly. Its "always F-line" change was rejected.
+- Spec/reference basis:
+  - the Motorola manuals' instruction summary says `cpSAVE/cpRESTORE` execute only "if supervisor state, else TRAP";
+  - the coprocessor chapter also says valid `cpSAVE/cpRESTORE` attempts in user mode take privilege violation before any coprocessor communication, while invalid effective-address encodings for those instructions take F-line;
+  - WinUAE matches that split by treating valid user-mode `cpSAVE/cpRESTORE` as vector 8 and invalid-EA forms as F-line.
+- Fix/skip decision: no RTL change needed. The cleaned kernel in [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd) already implements the correct split:
+  - valid `cpSAVE` / `cpRESTORE` in user mode raise privilege violation;
+  - invalid `cpSAVE` / `cpRESTORE` EA forms stay F-line.
+- Maintained coverage added: new [tb_cpsave_cprestore_exceptions.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_cpsave_cprestore_exceptions.vhd) checks all four user-mode cases directly:
+  - `cpSAVE -(A0)` -> vector 8;
+  - `cpSAVE (A0)+` -> vector 11;
+  - `cpRESTORE (A0)+` -> vector 8;
+  - `cpRESTORE -(A0)` -> vector 11.
+  Each case also proves the stacked PC points at the faulting opcode and that `A0` stays at `$00001400`, so no predecrement/postincrement side effect leaks through the trap path. The maintained wrapper in [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now includes this under `test-cpsave-cprestore` and `test-arch-suite`.
