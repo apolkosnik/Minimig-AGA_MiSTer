@@ -95,9 +95,6 @@ architecture behavioral of tb_berr_frame is
             m(i*2)   := x"0000";
             m(i*2+1) := x"00B0";
         end loop;
-        -- Vector 61 (MMU bus error) -> $0080
-        m(122) := x"0000"; m(123) := x"0080";
-
         ---------------------------------------------------------------
         -- BUS ERROR HANDLER at $0080 (index 64)
         -- Reads Format $A frame fields and saves to result area
@@ -602,8 +599,8 @@ begin
 
         -- Format/vector at $1E02 (idx 3841)
         val16 := mem(3841);
-        pass := (val16(15 downto 12) = "1010");  -- Format $A
-        check_test(5, "Format = $A (short bus fault)", pass);
+        pass := (val16 = x"A008");
+        check_test(5, "Format/vector = $A008 (short bus fault, vector 2)", pass);
         if not pass then
             report "  Got format/vector=$" & slv_to_hex(val16);
         end if;
@@ -634,10 +631,17 @@ begin
         pass := (val16(2 downto 0) = "101");  -- FC=5
         check_test(9, "SSW FC=5 (byte write, supervisor data)", pass);
 
+        val16 := mem(3849);  -- FmtVec at $1E12
+        pass := (val16 = x"A008");
+        check_test(10, "Format/vector = $A008 for byte write fault", pass);
+        if not pass then
+            report "  Got format/vector=$" & slv_to_hex(val16);
+        end if;
+
         -- Fault address at $1E14 (idx 3850-3851)
         val32 := mem(3850) & mem(3851);
         pass := (val32 = x"00003002");
-        check_test(10, "Fault address = $00003002 (byte)", pass);
+        check_test(11, "Fault address = $00003002 (byte)", pass);
         if not pass then
             report "  Got fault_addr=$" & slv_to_hex(val32);
         end if;
@@ -649,15 +653,22 @@ begin
         val16 := mem(3856);  -- SSW at $1E20
         report "  Test3 SSW=$" & slv_to_hex(val16);
         pass := (val16(5 downto 4) = "10");  -- SIZE=10 (word)
-        check_test(11, "SSW SIZE=10 (word access)", pass);
+        check_test(12, "SSW SIZE=10 (word access)", pass);
         if not pass then
             report "  Got SSW=$" & slv_to_hex(val16) & " SIZE=" & integer'image(to_integer(unsigned(val16(5 downto 4))));
+        end if;
+
+        val16 := mem(3857);  -- FmtVec at $1E22
+        pass := (val16 = x"A008");
+        check_test(13, "Format/vector = $A008 for word write fault", pass);
+        if not pass then
+            report "  Got format/vector=$" & slv_to_hex(val16);
         end if;
 
         -- Fault address at $1E24 (idx 3858-3859)
         val32 := mem(3858) & mem(3859);
         pass := (val32 = x"00003004");
-        check_test(12, "Fault address = $00003004 (word)", pass);
+        check_test(14, "Fault address = $00003004 (word)", pass);
         if not pass then
             report "  Got fault_addr=$" & slv_to_hex(val32);
         end if;
@@ -667,7 +678,7 @@ begin
         ---------------------------------------------------------------
         val32 := mem(3968) & mem(3969);
         pass := (val32 /= x"FF000000");
-        check_test(13, "No unexpected trap during test", pass);
+        check_test(15, "No unexpected trap during test", pass);
 
         ---------------------------------------------------------------
         -- Summary

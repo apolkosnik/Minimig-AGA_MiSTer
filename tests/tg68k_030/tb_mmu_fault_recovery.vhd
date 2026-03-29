@@ -102,9 +102,6 @@ architecture behavioral of tb_mmu_fault_recovery is
             m(i*2)   := x"0000";
             m(i*2+1) := x"00A0";
         end loop;
-        -- Vector 61 (MMU bus error) -> $0080
-        m(122) := x"0000"; m(123) := x"0080";
-
         -- BUS ERROR HANDLER at $0080
         -- $0080: MOVE.L #$CAFE0001,D7
         m(64) := x"2E3C"; m(65) := x"CAFE"; m(66) := x"0001";

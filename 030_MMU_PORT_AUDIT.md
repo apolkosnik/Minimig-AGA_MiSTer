@@ -350,3 +350,12 @@ PMMU instruction-fault frame follow-up:
 - Follow-up verification:
   - `make -C tests/tg68k_030 test-mmu-fetch-fault-frame`: 6 passed, 0 failed; handler saved `A7=$00001FE0`, `format/vector=$A008`, and `fault address=$F0001000`
   - `make -C tests/tg68k_030 test-fault`: fault-handling suite completed successfully with the new instruction-fetch frame regression included
+
+Strict vector-2 PMMU fault harness follow-up:
+- After adding the focused fetch-fault regression, two older maintained benches still had a weaker loophole: [tb_berr_frame.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_berr_frame.vhd) and [tb_mmu_fault_recovery.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_mmu_fault_recovery.vhd) still preinstalled vector 61 to the same handler as vector 2, so an MC68851-style regression could be partially masked.
+- Local fix: remove the vector-61 stub from those maintained benches, and tighten [tb_berr_frame.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_berr_frame.vhd) to require exact `format/vector=$A008` for the long, byte, and word PMMU write-protect faults instead of checking only the format nibble.
+- Fix/skip decision: no RTL change needed. This is harness hardening so the maintained PMMU bus-fault benches enforce vector 2 directly rather than tolerating a stale external-68851 route.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-berr-frame`: 15 passed, 0 failed; all three PMMU write-protect cases saved exact `format/vector=$A008`
+  - `make -C tests/tg68k_030 test-fault-recovery`: scenario passed; handler reached and STOP executed with no double fault after removing the vector-61 stub
+  - `make -C tests/tg68k_030 test-fault`: fault-handling suite completed successfully with the hardened vector-2 benches
