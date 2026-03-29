@@ -321,3 +321,13 @@ interrupt_mode focused follow-up:
   - `make -C tests/tg68k_030 test-interrupt-mode-stack`: pass; the nested supervisor-`M=1` return switched active stack back to MSP and the second `RTE` reached `$1400`
   - `make -C tests/tg68k_030 test-rte-abcd-suite`: completed successfully with the new interrupt-mode regression in the wrapper
   - `make -C tests/tg68k_030 test-arch-suite`: maintained architecture/edge-case suite completed successfully
+
+movec selector focused follow-up:
+- The late local `MOVEC` selector-latch source commit (`5e89616`) was already present in RTL via `movec_regsel`, but the maintained tree still lacked a direct CPU-level regression that would fail if `MOVEC` went back to decoding a live `brief`.
+- Maintained coverage added: new [tb_movec_selector_latch.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_movec_selector_latch.vhd) runs two real instruction-stream cases around the exact stale-immediate hazard called out in the source comments:
+  - `MOVEC D0,CACR` followed by `BSET #3,D0` with immediate word `$0003`, then a store proving `CACR=$00000101` and `D0=$00000109`;
+  - `MOVEC CACR,D1` followed by the same `BSET #3,D0`, then a store proving `D1` still read back `$00000101`.
+- Fix/skip decision: no new RTL port commit needed. The cleaned kernel already latches the selector at `getbrief` time in [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd); the missing piece was maintained regression coverage and wrapper integration.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-movec-selector-latch`: pass; both write-side and read-side stale-immediate cases completed successfully
+  - `make -C tests/tg68k_030 test-arch-suite`: maintained architecture/edge-case suite completed successfully with the new MOVEC selector regression enabled
