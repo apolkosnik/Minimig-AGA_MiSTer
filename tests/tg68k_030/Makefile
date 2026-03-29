@@ -68,7 +68,7 @@ help:
 	@echo "  test-indirect-descriptor - Test indirect descriptors"
 	@echo "  test-mmu-instruction-suite - Run complete MMU instruction test suite"
 	@echo "  test-amiga-sequence - Test Amiga ROM MMU initialization sequence"
-	@echo "  test-moves       - Test MOVES instruction FC handling"
+	@echo "  test-moves       - Run maintained MOVES regression coverage"
 	@echo "  test-moves-validation - Run maintained MOVES FC/privilege regression coverage"
 	@echo "  test-moves-privilege - Verify MOVES traps with vector 8 in user mode"
 	@echo "  test-rte-formats - Test all RTE stack frame formats (0,1,2,9,A,B + invalid)"
@@ -395,13 +395,8 @@ test-amiga-sequence: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_amiga_mmu_sequence.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 30us; quit -f" tb_amiga_mmu_sequence
 
-test-moves: setup
-	@echo "Running MOVES instruction FC handling test..."
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_instruction.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_moves_instruction
+test-moves: test-moves-validation
+	@echo "Maintained MOVES regression wrapper complete."
 
 test-moves-validation: test-moves-all-modes test-moves-privilege
 	@echo "Maintained MOVES validation suite complete."
