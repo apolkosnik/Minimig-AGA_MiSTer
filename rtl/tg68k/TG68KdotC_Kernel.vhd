@@ -7415,11 +7415,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- PTEST
                         -- BUG #393 FIX: Mode-specific dispatch (same as PLOAD fix)
                         -- Control alterable modes only: Dn/An/(An)+/-(An)/PC-rel/imm are illegal
+                        -- MC68030 PTEST A-bit returns the last descriptor fetched.
+                        -- LEVEL=0 is an ATC-only search, so A=1 is an invalid F-line form.
                         IF pmmu_opcode(5 downto 3)="000" OR pmmu_opcode(5 downto 3)="001" OR
                            pmmu_opcode(5 downto 3)="011" OR pmmu_opcode(5 downto 3)="100" OR
                            (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') OR
                            (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 1)="01") THEN
                              trap_illegal <= '1';
+                             trapmake <= '1';
+                        ELSIF pmmu_brief(12 downto 10) = "000" AND pmmu_brief(8) = '1' THEN
+                             trap_1111 <= '1';
                              trapmake <= '1';
                         ELSE
                              set_exec(pmmu_ptest) <= '1';

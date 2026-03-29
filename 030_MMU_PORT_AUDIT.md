@@ -127,8 +127,17 @@ MMU-configuration vector follow-up:
   - `make -C tests/tg68k_030 test-pmove-all-modes`: 68 passed, 0 failed
   - `make -C tests/tg68k_030 test-pload-all-modes`: 11 passed, 0 failed
   - `make -C tests/tg68k_030 test-pflush-all-modes`: 11 passed, 0 failed
-  - `make -C tests/tg68k_030 test-ptest-all-modes`: 14 passed, 0 failed
+  - `make -C tests/tg68k_030 test-ptest-all-modes`: 15 passed, 0 failed
   - `make -C tests/tg68k_030 test-whichamiga`: passed with the internal PMMU path still using only real 68030 vectors
+
+PTEST level-0 A-bit follow-up:
+- The maintained `tb_ptest_all_modes.vhd` originally covered `PTEST level=0` and `PTEST A=1` separately, but not the combined `PTEST level=0, A=1` form.
+- Root cause: the cleaned kernel accepted that form, launched an ATC-only `PTEST`, and then retired the A-bit writeback path even though a level-0 search does not fetch a descriptor to return. In the transparent-translation setup used by the bench, that retired as a silent zero write into the selected address register.
+- Compliance decision: reject `PTEST` with `LEVEL=0` and `A=1` as an F-line exception. The Motorola manuals describe the A-bit as returning "the physical address of the last descriptor fetched", which does not exist for a level-0 ATC search, and WinUAE's `mmu_op30_ptest()` explicitly treats `!level && a` as a bad instruction causing an F-line exception.
+- Local fix: add a decode-time guard in [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd) so `LEVEL=0/A=1` traps through vector 11 before `ptest1` can retire A-register writeback. Extend [tb_ptest_all_modes.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_ptest_all_modes.vhd) with a maintained vector-11 regression that proves the trap was taken and that `A3` stayed at `$DEADBEEF`.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-ptest-all-modes`: 15 passed, 0 failed
+  - `make -C tests/tg68k_030 test-stack-frame-push`: 10 passed, 0 failed
 
 Comprehensive-suite follow-up:
 - The older `test-comprehensive` wrapper in `tests/tg68k_030/Makefile` still tried to run `tb_pmmu_advanced`, `tb_mmu_fault_comprehensive`, and `tb_page_walker_stress`.

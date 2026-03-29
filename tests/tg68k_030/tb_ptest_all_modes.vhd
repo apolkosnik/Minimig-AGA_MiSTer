@@ -155,6 +155,9 @@ architecture behavioral of tb_ptest_all_modes is
 
     -- Expected MMUSR after PTEST with TT0 match: T=1 (bit 6) = $0040
     constant VAL_MMUSR_EXPECTED : std_logic_vector(15 downto 0) := x"0040";
+    constant VAL_A3_SENTINEL    : std_logic_vector(31 downto 0) := x"DEADBEEF";
+    constant FLINE_A3_DST_ADDR  : integer := 16#2FF8#;
+    constant FLINE_TAG_DST_ADDR : integer := 16#2FFC#;
 
     -- Helper types for test records
     type word_array is array (0 to 3) of std_logic_vector(15 downto 0);
@@ -955,6 +958,7 @@ begin
         variable tc_addr : integer;
         variable zero_addr : integer;
         variable dst_addr_tmp : integer;
+        variable handler_pc : integer;
         variable exp_words_tmp : word_array := (others => (others => '0'));
         variable desc_str_tmp : string(1 to 80);
 
@@ -967,6 +971,7 @@ begin
         memory(8) := x"0000"; memory(9) := x"0120";   -- Illegal Instruction
         memory(10) := x"0000"; memory(11):= x"0130";  -- Div-by-Zero
         memory(16) := x"0000"; memory(17):= x"0140";  -- Privilege Violation
+        memory(22) := x"0000"; memory(23):= x"0170";  -- F-line
         memory(28) := x"0000"; memory(29):= x"0150";  -- Format Error
         memory(112):= x"0000"; memory(113):= x"0160"; -- MMU Config
 
@@ -987,6 +992,16 @@ begin
         for i in 16#2800# to 16#2FFF# loop
             memory(i) := x"DEAD";
         end loop;
+
+        -- F-line handler for the illegal PTEST level=0/A=1 form. It records
+        -- whether A3 was preserved, then stops the CPU so the testbench can
+        -- verify that vector 11 was actually taken.
+        handler_pc := 16#0170#;
+        emit_move_l_an_to_abs(handler_pc, 3, std_logic_vector(to_unsigned(FLINE_A3_DST_ADDR, 32)));
+        emit_moveq(handler_pc, 3, 11);
+        emit_move_w_dn_to_abs(handler_pc, 3, std_logic_vector(to_unsigned(FLINE_TAG_DST_ADDR, 32)));
+        emit_word(handler_pc, x"4E72");
+        emit_word(handler_pc, x"2707");
 
         -- Allocate memory for TT0, TC, and zero values
         tt0_addr := 16#2400#;
@@ -1015,13 +1030,13 @@ begin
         -- A0 = scratch (for address register pre-loads during tests)
         -- A1 = zero_addr (for disabling MMU later)
         -- A2 = PTEST address ($1000)
-        -- A3, A4 = $DEADBEEF (for A-bit verification - should be overwritten)
+        -- A3, A4 = $DEADBEEF (for A-bit verification / trap-preserve checks)
         -- A5 = zero_addr (stable backup for disable)
         -- D0 = 5 (for FC-from-Dn test)
         emit_movea(pc, 1, std_logic_vector(to_unsigned(zero_addr, 32)));
         emit_movea(pc, 2, PTEST_ADDR);
-        emit_movea(pc, 3, x"DEADBEEF");
-        emit_movea(pc, 4, x"DEADBEEF");
+        emit_movea(pc, 3, VAL_A3_SENTINEL);
+        emit_movea(pc, 4, VAL_A3_SENTINEL);
         emit_movea(pc, 5, std_logic_vector(to_unsigned(zero_addr, 32)));
         emit_moveq(pc, 0, 5);  -- D0 = 5 (supervisor data FC)
 
@@ -1156,16 +1171,19 @@ begin
             "010", "111", "111", '0', '0', "000", "10101", x"0000", x"0000",
             VAL_MMUSR_EXPECTED);
 
-        -- =====================================================
-        -- Phase 3: Disable MMU
-        -- =====================================================
-        -- Use A5 (stable, never modified by PTEST EA modes) pointing to zero
-        emit_pmove(pc, REG_TC, DIR_MEM_TO_MMU, "010", "101", x"0000", x"0000");   -- PMOVE (A5),TC (zero)
-        emit_pmove(pc, REG_TT0, DIR_MEM_TO_MMU, "010", "101", x"0000", x"0000");  -- PMOVE (A5),TT0 (zero)
-
-        -- STOP
-        emit_word(pc, x"4E72");
-        emit_word(pc, x"2700");
+        -- Test 15: PTESTR (A2), level=0, A=1, A3
+        -- MC68030/WinUAE treat this form as an unimplemented F-line instruction.
+        -- The handler records A3 so the testbench can verify the trap was taken
+        -- before any A-bit writeback retired.
+        emit_movea(pc, 2, PTEST_ADDR);
+        emit_movea(pc, 3, VAL_A3_SENTINEL);
+        emit_ptest(pc, "010", "010", "000", '1', '1', "011", "10101", x"0000", x"0000");
+        exp_words_tmp := (others => (others => '0'));
+        exp_words_tmp(0) := VAL_A3_SENTINEL(31 downto 16);
+        exp_words_tmp(1) := VAL_A3_SENTINEL(15 downto 0);
+        exp_words_tmp(2) := x"000B";
+        set_desc(desc_str_tmp, "PTESTR (A2), level=0, A=1 A3 traps via vector 11");
+        record_test(desc_str_tmp, FLINE_A3_DST_ADDR, 3, exp_words_tmp);
 
         -- Print ROM decode
         write(l, string'("=============================================="));
@@ -1174,7 +1192,7 @@ begin
         writeline(output, l);
         write(l, string'("Tests: (A2), (d16,A2), (d8,A2,D6), (xxx).W, (xxx).L, PTESTW, levels, FC, A-bit"));
         writeline(output, l);
-        write(l, string'("Also: PTESTW, level=0/3, FC=D0, A-bit=A3/A4"));
+        write(l, string'("Also: PTESTW, level=0/3, FC=D0, A-bit=A3/A4, level=0+A trap"));
         writeline(output, l);
         write(l, string'("Expected MMUSR=$0040 (T=1, transparent TT0 match)"));
         writeline(output, l);
