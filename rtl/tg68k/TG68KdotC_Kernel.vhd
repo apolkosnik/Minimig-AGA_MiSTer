@@ -3567,9 +3567,20 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 					interrupt_mode <= '0';
 				ELSIF clkena_lw = '1' THEN
 				IF setopcode='1' THEN
-					make_trace <= FlagsSR(7);
-					-- T0 mode: active when T0=1, T1=0 (T1=1 traces everything via make_trace)
-					make_trace_t0 <= FlagsSR(6) AND NOT FlagsSR(7);
+					-- The first instruction after RTE/STOP or a direct write to SR must
+					-- inherit the SR value being committed in this same cycle, not the
+					-- stale pre-write trace bits.
+					IF exec(directSR)='1' OR set_stop='1' THEN
+						make_trace <= data_read(15);
+						make_trace_t0 <= data_read(14) AND NOT data_read(15);
+					ELSIF exec(to_SR)='1' THEN
+						make_trace <= SRin(7);
+						make_trace_t0 <= SRin(6) AND NOT SRin(7);
+					ELSE
+						make_trace <= FlagsSR(7);
+						-- T0 mode: active when T0=1, T1=0 (T1=1 traces everything via make_trace)
+						make_trace_t0 <= FlagsSR(6) AND NOT FlagsSR(7);
+					END IF;
 					IF NOT (opcode(15 downto 12) = "0101" AND opcode(7 downto 3) = "11001") THEN
 						dbcc_t0_suppress <= '0';
 					END IF;

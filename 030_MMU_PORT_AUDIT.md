@@ -418,3 +418,16 @@ Address-error PMMU stale-vector follow-up:
 - Follow-up verification:
   - `make -C tests/tg68k_030 test-addr-error-pmmu`: 2 passed, 0 failed
   - `make -C tests/tg68k_030 test-fault`: fault-handling suite completed successfully with the address-error bench using the dedicated vector-61 failure handler
+
+Post-RTE JMP trace follow-up:
+- Real hardware `cputest basic/all` reported missing trace exceptions on `JMP` cases entered through an `RTE` frame. The cleaned core was still deriving `make_trace` and `make_trace_t0` only from the live `FlagsSR` image at `setopcode`, which misses the just-restored trace bits on the first instruction after `RTE` and can likewise lag `MOVE/ANDI/ORI/EORI to SR`.
+- Local fix: update [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd) so the next trace mode comes from the SR value being committed in the same cycle:
+  - `exec(directSR)` / `set_stop` use `data_read(15:14)`;
+  - `exec(to_SR)` uses `SRin(7:6)`;
+  - otherwise the kernel falls back to the settled `FlagsSR` value.
+- Maintained coverage added: new [tb_jmp_65b2_trace_regression.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_jmp_65b2_trace_regression.vhd) returns through a real Format `$0` `RTE` frame into `JMP (d8,PC,Xn)` full-format extension `$65B2`, then checks both T1 and T0 trace cases. The maintained wrapper in [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) wires it into `test-jmp-65b2-trace` and `test-trace-suite`.
+- Fix/skip decision: keep. This matches the Motorola-defined first-instruction trace behavior after an SR restore, matches WinUAE's immediate `MakeFromSR_T0()` after `RTE`, and fixes the observed hardware `JMP` failures without changing unrelated trace arbitration.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-jmp-65b2-trace`: 8 passed, 0 failed; both T1 and T0 cases stacked the correct SR, target PC `$2000`, vector `$2024`, and instruction address `$1100`
+  - `make -C tests/tg68k_030 test-t1-trace`: 10 passed, 0 failed
+  - `make -C tests/tg68k_030 test-trace-suite`: maintained T0/T1/JMP/Group 2 trace coverage completed successfully
