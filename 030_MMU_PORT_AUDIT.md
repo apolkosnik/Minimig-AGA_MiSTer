@@ -450,3 +450,8 @@ Hardware `cputest basic` trace follow-up:
   - `make -C tests/tg68k_030 test-chk-stacked-trace`: 44 passed, 0 failed
   - `make -C tests/tg68k_030 test-t1-trace`: 11 passed, 0 failed
   - `make -C tests/tg68k_030 test-trace-suite`: completed successfully with maintained T0/T1/JMP/CHK/CHK2/Group 2 coverage
+
+MOVES `(d16,An)` retire follow-up:
+- The old side patch [`old_junk/tests/tg68k_030/MOVES_BUG_FIX.patch`](/home/adam/030_mmu/Minimig-AGA_MiSTer/old_junk/tests/tg68k_030/MOVES_BUG_FIX.patch) was checked directly. Its keepable point is that `MOVES (d16,An)` must clear `setnextpass` after the displacement word so the instruction retires into `moves1` instead of over-incrementing the PC and skipping the next opcode.
+- Fix/skip decision: no new RTL port commit needed. The cleaned kernel already carries that end-state in [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd) for the relevant `MOVES` EA microstates; the missing piece was maintained direct regression coverage.
+- Maintained coverage added: new [tb_moves_d16an_pc.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_moves_d16an_pc.vhd) checks both `MOVES.L D2,($10,A0)` and `MOVES.L ($10,A0),D7`. The store case verifies the longword write plus fall-through; the load case verifies both SFC reads and that the immediately following `CMPI/BEQ` pair sees the loaded longword. That keeps the regression focused on retire/next-instruction behavior instead of a second store path. The maintained wrapper in [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now includes this under `test-moves-validation`.
