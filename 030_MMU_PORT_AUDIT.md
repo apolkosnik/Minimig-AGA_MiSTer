@@ -331,6 +331,7 @@ Patch-file export follow-up:
 - After the user pointed directly at the loose `0001-0004*.patch` exports under `/home/adam/030_mmu/Minimig-AGA_MiSTer`, those patch files were audited separately instead of relying only on commit history.
 - `0001-pmmu_dn_read_wait-wrongly-allowed-PMMU-readback-writ.patch`
   - Fix/skip decision: no new local commit needed. The cleaned tree already had the same end-state: Dn-only register write-enable in `pmmu_dn_read_wait`, correct PMOVE mem-to-MMU low-word operand hold, and the fixed ALU increment behavior used by PMMU auto-modify paths.
+  - Maintained follow-up: add [tb_pmove_readback_guard.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_pmove_readback_guard.vhd) so the kept end-state is gated directly in-tree. The bench writes a valid TT0 image from `D0`, executes `PMOVE TT0,(A7)+`, then reads TT0 back to `D1` and stores the final `A7` image. It fails if MMU->mem retirement reasserts `Regwrena` and clobbers `A7`, or if the Dn readback path stops writing `D1`.
 - `0001-BUG430-bus-timeout-BERR-fix-no-fake-chipready.patch`
   - Fix/skip decision: no new local commit needed. The current wrapper already holds `clkena_in` open on bus-error release and suppresses fake `chipready` during the BERR path.
 - `0002-berr_retry_active-was-being-set-by-RTE-restore-and-o.patch`
@@ -352,6 +353,7 @@ Patch-file export follow-up:
     - fix [rtl/tg68k/TG68K_PMMU_030.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68K_PMMU_030.vhd) so current-entry long/short selection follows the parent descriptor format, next-level stride and indirect-target format follow the current descriptor `DT`, and long-format page `S` bits participate in supervisor-only faulting and `U_ACC` generation;
     - correct the maintained supervisor-violation walker case so it sets `S=1` in the long child page descriptor, not in the short parent descriptor.
 - Patch-file follow-up verification:
+  - `make -C tests/tg68k_030 test-pmove-readback-guard`: focused Dn-readback / no-An-clobber PMOVE regression passes
   - `make -C tests/tg68k_030 test-pflush-ptest-pload`: 21 passed, 0 failed
   - `make -C tests/tg68k_030 test-berr-frame`: 15 passed, 0 failed
   - `make -C tests/tg68k_030 test-fault`: fault-handling suite completed successfully

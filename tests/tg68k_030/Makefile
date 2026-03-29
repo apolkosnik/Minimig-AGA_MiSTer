@@ -12,7 +12,7 @@ PROJECT_ROOT := $(abspath $(TEST_DIR)/../..)
 RTL_DIR := $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-movec-selector-latch test-cpsave-cprestore test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-mmu-fetch-fault-frame test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-history-bits test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-privilege test-moves-d16an-pc test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-chk-long-odd-addr test-movec-active-stack test-interrupt-mode-stack test-lockup-all test-chk-stacked-trace test-basic-chk-trace test-basic-div-jmp-trace test-basic-chk2-cputest-entry test-basic-jmp-cputest-entry test-basic-cputest-entry test-basic-exception-flags test-basic-group2-user-trace test-basic-cputest test-odd-exc-flags test-odd-irq-regwrite test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-jmp-65b2-trace test-real validate setup help
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-movec-selector-latch test-cpsave-cprestore test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-readback-guard test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-mmu-fetch-fault-frame test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-history-bits test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-privilege test-moves-d16an-pc test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-chk-long-odd-addr test-movec-active-stack test-interrupt-mode-stack test-lockup-all test-chk-stacked-trace test-basic-chk-trace test-basic-div-jmp-trace test-basic-chk2-cputest-entry test-basic-jmp-cputest-entry test-basic-cputest-entry test-basic-exception-flags test-basic-group2-user-trace test-basic-cputest test-odd-exc-flags test-odd-irq-regwrite test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-jmp-65b2-trace test-real validate setup help
 
 # Default target
 all: test-comprehensive
@@ -39,6 +39,7 @@ help:
 	@echo "  test-pmove-tt0-read - Test PMOVE TT0,Dx (read) corner cases"
 	@echo "  test-pmove-tt0-mem-read - Test PMOVE.L (d16,An),TT0 memory read (NEW)"
 	@echo "  test-pmove-tt1-mem - Test PMOVE.L TT1,(d16,An) memory write"
+	@echo "  test-pmove-readback-guard - Verify MMU->mem PMOVE does not clobber An while Dn readback still works"
 	@echo "  test-pmove-crp-a7-postinc - Test PMOVE.Q CRP,(A7)+ stack update"
 	@echo "  test-pmove-crp-mem-to-mmu-postinc - Test PMOVE.Q (A7)+,CRP memory-to-MMU read"
 	@echo "  test-pmove-comprehensive - PMOVE encoding + d16,An regression"
@@ -259,6 +260,11 @@ test-pmove-tt1-mem: compile
 	@echo "Running PMOVE.L TT1,(d16,An) memory write tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_pmove_tt1_mem
 
+test-pmove-readback-guard: compile
+	@echo "Running PMOVE readback-guard regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_readback_guard.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2ms; quit -f" tb_pmove_readback_guard
+
 test-pmove-d16an-pc: compile
 	@echo "Running PMOVE (d16,An) PC increment + data value tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_d16an_pc
@@ -289,6 +295,7 @@ test-pmove-crp-mem-to-mmu-postinc: compile
 test-pmove-comprehensive: compile
 	@echo "Running PMOVE comprehensive regression..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_pmove_comprehensive
+	@$(MAKE) --no-print-directory test-pmove-readback-guard
 
 test-pmove-multiple-regs: compile
 	@echo "Running PMOVE multiple registers from (A7) test (OP1addr conflict validation)..."
