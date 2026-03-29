@@ -359,3 +359,11 @@ Strict vector-2 PMMU fault harness follow-up:
   - `make -C tests/tg68k_030 test-berr-frame`: 15 passed, 0 failed; all three PMMU write-protect cases saved exact `format/vector=$A008`
   - `make -C tests/tg68k_030 test-fault-recovery`: scenario passed; handler reached and STOP executed with no double fault after removing the vector-61 stub
   - `make -C tests/tg68k_030 test-fault`: fault-handling suite completed successfully with the hardened vector-2 benches
+
+Address-error PMMU stale-vector follow-up:
+- [tb_addr_error_pmmu.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_addr_error_pmmu.vhd) already failed if it observed a vector-61 fetch, but it still routed vector 61 to the normal bus-error handler at `$3100`. That was weaker than the newer benches because a stale MC68851-only path could still blend into the regular bus-error failure route.
+- Local fix: repoint vector 61 to a dedicated failure handler at `$3200` that writes marker `$0061` to `$1F00`, and treat reaching that handler as an explicit stale-vector failure in both mapped and unmapped odd-PC cases.
+- Fix/skip decision: no RTL change needed. This is deterministic harness hardening only; the maintained kernel should never fetch vector 61 for integrated MC68030 PMMU faults.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-addr-error-pmmu`: 2 passed, 0 failed
+  - `make -C tests/tg68k_030 test-fault`: fault-handling suite completed successfully with the address-error bench using the dedicated vector-61 failure handler

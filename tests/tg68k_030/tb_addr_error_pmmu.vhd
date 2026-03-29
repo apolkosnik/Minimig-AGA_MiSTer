@@ -5,11 +5,12 @@
 -- still asserts pmmu_req='1' (because state="00", only busstate is overridden to "01").
 -- If the odd address is in an unmapped page, the walker faults, pmmu_fault='1',
 -- make_berr='1', and at setinterrupt time make_berr has HIGHER priority than
--- TG68_PC(0)='1'. Result: bus error (vector 2/61) fires instead of address error
+-- TG68_PC(0)='1'. Result: bus error fires instead of address error
 -- (vector 3).
 --
 -- Test A: JMP to odd address in MAPPED page   -> expect vector 3 (address error)
--- Test B: JMP to odd address in UNMAPPED page -> expect vector 3, BUG gives vector 2/61
+-- Test B: JMP to odd address in UNMAPPED page -> expect vector 3, BUG gives vector 2
+-- or, on older stale MC68851-style paths, vector 61.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -116,9 +117,9 @@ architecture behavioral of tb_addr_error_pmmu is
         m(4) := x"0000"; m(5) := x"3100";
         -- Vector 3: Address Error ($0C) -> handler at $3000
         m(6) := x"0000"; m(7) := x"3000";
-        -- Vector 61: MMU Bus Error ($F4) -> handler at $3100
+        -- Vector 61: stale MC68851-only MMU Bus Error ($F4) -> explicit failure handler
         m(16#F4#/2)     := x"0000";
-        m(16#F4#/2 + 1) := x"3100";
+        m(16#F4#/2 + 1) := x"3200";
 
         -----------------------------------------------------------
         -- ADDRESS ERROR HANDLER at $3000
@@ -127,6 +128,18 @@ architecture behavioral of tb_addr_error_pmmu is
         idx := 16#3000#/2;
         -- MOVE.W #$0003,$1F00.L
         m(idx) := x"33FC"; m(idx+1) := x"0003";
+        m(idx+2) := x"0000"; m(idx+3) := x"1F00";
+        idx := idx + 4;
+        -- STOP #$2700
+        m(idx) := x"4E72"; m(idx+1) := x"2700";
+
+        -----------------------------------------------------------
+        -- STALE VECTOR-61 HANDLER at $3200
+        -- Writes $0061 to $1F00 (unexpected vector 61 marker), then STOP
+        -----------------------------------------------------------
+        idx := 16#3200#/2;
+        -- MOVE.W #$0061,$1F00.L
+        m(idx) := x"33FC"; m(idx+1) := x"0061";
         m(idx+2) := x"0000"; m(idx+3) := x"1F00";
         idx := idx + 4;
         -- STOP #$2700
@@ -508,6 +521,7 @@ begin
         variable saw_vec61_read : boolean;
         variable saw_handler_3000 : boolean;
         variable saw_handler_3100 : boolean;
+        variable saw_handler_3200 : boolean;
     begin
         report "==========================================================";
         report "Address Error with PMMU Enabled - cpu_wrapper clkena_in gating";
@@ -531,6 +545,7 @@ begin
         saw_vec61_read := false;
         saw_handler_3000 := false;
         saw_handler_3100 := false;
+        saw_handler_3200 := false;
 
         for i in 1 to 20000 loop
             wait until rising_edge(clk);
@@ -563,17 +578,24 @@ begin
                     report "  [cycle " & integer'image(i) & "] Bus error handler at $3100 reached";
                     exit;
                 end if;
+                if to_integer(unsigned(addr_out)) = 16#3200# then
+                    saw_handler_3200 := true;
+                    report "  [cycle " & integer'image(i) & "] Stale vector-61 handler at $3200 reached";
+                    exit;
+                end if;
             end if;
         end loop;
 
         if saw_vec3_read and saw_handler_3000 then
             report "PASS: Test A - address error (vector 3) for odd addr in mapped page" severity note;
             test_passed <= test_passed + 1;
-        elsif saw_vec2_read or saw_vec61_read then
+        elsif saw_vec2_read or saw_vec61_read or saw_handler_3100 or saw_handler_3200 then
             report "FAIL: Test A - got BUS ERROR instead of address error for mapped page" severity error;
             report "  saw_vec2=" & boolean'image(saw_vec2_read) &
                    " saw_vec61=" & boolean'image(saw_vec61_read) &
-                   " saw_vec3=" & boolean'image(saw_vec3_read);
+                   " saw_vec3=" & boolean'image(saw_vec3_read) &
+                   " handler3100=" & boolean'image(saw_handler_3100) &
+                   " handler3200=" & boolean'image(saw_handler_3200);
             test_failed <= test_failed + 1;
         else
             report "FAIL: Test A - timeout, no exception detected" severity error;
@@ -587,7 +609,7 @@ begin
         -- Page $4000 is INVALID in page table (L2 entry 4, DT=00).
         -- Walker will fault. BUG: make_berr overrides trap_addr_error.
         -- Expected: vector 3 (address error)
-        -- Actual (BUG): vector 2 or 61 (bus error)
+        -- Actual (BUG): vector 2 bus error, or on older stale MMU-vector paths vector 61
         -- ==========================================================
         report "";
         report "--- Test B: JMP to odd addr in UNMAPPED page ($4001) ---";
@@ -605,6 +627,7 @@ begin
         saw_vec61_read := false;
         saw_handler_3000 := false;
         saw_handler_3100 := false;
+        saw_handler_3200 := false;
 
         for i in 1 to 20000 loop
             wait until rising_edge(clk);
@@ -635,6 +658,11 @@ begin
                     report "  [cycle " & integer'image(i) & "] Bus error handler at $3100 reached";
                     exit;
                 end if;
+                if to_integer(unsigned(addr_out)) = 16#3200# then
+                    saw_handler_3200 := true;
+                    report "  [cycle " & integer'image(i) & "] Stale vector-61 handler at $3200 reached";
+                    exit;
+                end if;
             end if;
 
             -- Also detect CPU halt (double fault)
@@ -647,11 +675,13 @@ begin
         if saw_vec3_read and saw_handler_3000 then
             report "PASS: Test B - address error (vector 3) for odd addr in unmapped page" severity note;
             test_passed <= test_passed + 1;
-        elsif saw_vec2_read or saw_vec61_read then
+        elsif saw_vec2_read or saw_vec61_read or saw_handler_3100 or saw_handler_3200 then
             report "FAIL: Test B - got BUS ERROR instead of address error for unmapped page" severity error;
             report "  saw_vec2=" & boolean'image(saw_vec2_read) &
                    " saw_vec61=" & boolean'image(saw_vec61_read) &
-                   " saw_vec3=" & boolean'image(saw_vec3_read);
+                   " saw_vec3=" & boolean'image(saw_vec3_read) &
+                   " handler3100=" & boolean'image(saw_handler_3100) &
+                   " handler3200=" & boolean'image(saw_handler_3200);
             report "  ROOT CAUSE: pmmu_req='1' when state='00' with odd PC causes";
             report "  unnecessary PMMU translation. Walker faults on unmapped page,";
             report "  make_berr overrides trap_addr_error at setinterrupt priority chain.";
