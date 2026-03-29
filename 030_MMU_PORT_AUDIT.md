@@ -66,6 +66,22 @@ Regression-harness follow-up:
   - `make -C tests/tg68k_030 test-moves-all-modes`: 48 passed, 0 failed
   - `make -C tests/tg68k_030 test-regression`: 8 passed, 0 failed
 
+MOVES validation follow-up:
+- The older `mock/tb_moves_validation.vhd` bench is not a maintained oracle for the cleaned core. A fresh rerun timed out with all six tests "not observed" because it still relies on stale reset/vector sequencing and a pre-cleanup standalone harness structure, not the maintained memory/wait-state model now used elsewhere in this tree.
+- Unique architectural coverage in that stale bench:
+  - the `MOVEC Dn,SFC/DFC` setup path used by later MOVES FC-override cases;
+  - a user-mode `MOVES` privilege-violation check.
+- Fix/skip decision:
+  - skip the stale mock harness itself instead of trying to promote it;
+  - keep the `MOVEC Dn,SFC/DFC` path covered through maintained [tb_moves_all_modes.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_moves_all_modes.vhd), which begins by executing `MOVEC D0,SFC` and `MOVEC D1,DFC` and remains part of the maintained architecture suite;
+  - add maintained [tb_moves_privilege.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_moves_privilege.vhd) so `MOVES` privilege handling is still covered in-tree with the Motorola-manual expectation that vector 8 stacks the vector offset `$20` and the logical address of the first word of the faulting instruction.
+- Local fix:
+  - repoint `test-moves-validation` to the maintained MOVES wrapper (`test-moves-all-modes` + `test-moves-privilege`) and route `test-arch-suite` through that wrapper instead of the stale mock bench.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-moves-privilege`: passes; stacked PC is `$0000100C`, format/vector word is `$0020`, and target memory remains unchanged
+  - `make -C tests/tg68k_030 test-moves-validation`: maintained MOVES wrapper completes successfully
+  - `make -C tests/tg68k_030 test-arch-suite`: maintained architecture suite completes successfully with the MOVES privilege case included
+
 Direct-PFLUSH harness follow-up:
 - `tb_lockup_walker_timeout.vhd` later reported a deadlock in its "unresponsive memory" case, but the PMMU logs showed tests 2 and 4 were completing in `0` cycles, which is only possible on an ATC hit.
 - Root cause: the imported direct PMMU harnesses pulsed `pflush_req` with `pmmu_brief=$0000`. In the cleaned PMMU this is not `PFLUSHA`; it decodes as the EA form and only flushes address/FC-matched entries captured from `pmmu_addr`/`pmmu_fc`. The `00012340` translation therefore stayed cached and the timeout test never started a new walk.

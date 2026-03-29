@@ -12,7 +12,7 @@ PROJECT_ROOT := $(abspath $(TEST_DIR)/../..)
 RTL_DIR := $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-history-bits test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-movec-active-stack test-lockup-all test-chk-stacked-trace test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-real validate setup help
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-mmu-library-detect test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-history-bits test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-privilege test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-movec-active-stack test-lockup-all test-chk-stacked-trace test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-real validate setup help
 
 # Default target
 all: test-comprehensive
@@ -68,7 +68,8 @@ help:
 	@echo "  test-mmu-instruction-suite - Run complete MMU instruction test suite"
 	@echo "  test-amiga-sequence - Test Amiga ROM MMU initialization sequence"
 	@echo "  test-moves       - Test MOVES instruction FC handling"
-	@echo "  test-moves-validation - Run MOVES validation testbench"
+	@echo "  test-moves-validation - Run maintained MOVES FC/privilege regression coverage"
+	@echo "  test-moves-privilege - Verify MOVES traps with vector 8 in user mode"
 	@echo "  test-rte-formats - Test all RTE stack frame formats (0,1,2,9,A,B + invalid)"
 	@echo "  test-rte-mbit-abcd - Test RTE M-bit/S-bit transitions + ABCD interaction"
 	@echo "  test-abcd-mbit - Test ABCD behavior with M-bit stack mode switching"
@@ -390,14 +391,17 @@ test-moves: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_instruction.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_moves_instruction
 
-test-moves-validation: setup
-	@echo "Running MOVES validation testbench..."
+test-moves-validation: test-moves-all-modes test-moves-privilege
+	@echo "Maintained MOVES validation suite complete."
+
+test-moves-privilege: setup
+	@echo "Running MOVES privilege trap regression..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
-	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_moves_validation.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_moves_validation
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_moves_privilege.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 20us; quit -f" tb_moves_privilege
 
 test-stack-frame-push: setup
 	@echo "Running stack frame push validation tests..."
@@ -480,7 +484,7 @@ test-abcd-mbit: setup
 test-rte-abcd-suite: test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-movec-active-stack
 	@echo "RTE/ABCD regression suite complete."
 
-test-arch-suite: test-rte-abcd-suite test-abcd test-stack-frame-push test-branch-odd-addr test-movec-illegal test-moves-all-modes test-ptest-history-bits
+test-arch-suite: test-rte-abcd-suite test-abcd test-stack-frame-push test-branch-odd-addr test-movec-illegal test-moves-validation test-ptest-history-bits
 	@echo "Maintained architecture/edge-case suite complete."
 
 test-branch-odd-addr: setup
