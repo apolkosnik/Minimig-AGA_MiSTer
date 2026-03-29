@@ -471,3 +471,18 @@ cpSAVE/cpRESTORE old-patch follow-up:
   - `cpRESTORE (A0)+` -> vector 8;
   - `cpRESTORE -(A0)` -> vector 11.
   Each case also proves the stacked PC points at the faulting opcode and that `A0` stays at `$00001400`, so no predecrement/postincrement side effect leaks through the trap path. The maintained wrapper in [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now includes this under `test-cpsave-cprestore` and `test-arch-suite`.
+
+Old-junk trace/exception patch sweep:
+- The loose trace patches [`old_junk/stacked_trace_v2_trap_n_fix.patch`](/home/adam/030_mmu/Minimig-AGA_MiSTer/old_junk/stacked_trace_v2_trap_n_fix.patch) and [`old_junk/stacked_trace_bug439_walker_gap.patch`](/home/adam/030_mmu/Minimig-AGA_MiSTer/old_junk/stacked_trace_bug439_walker_gap.patch) were checked directly.
+- Fix/skip decision:
+  - no new RTL port commit needed for either trace patch. Their keepable points are already present in the cleaned kernel:
+    - `set(trap_chk)` is included in the saved-PC/trace-vector path so late `CHK` resolution does not lose stacked trace state in [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd);
+    - Group 2 stacked trace is latched from resolved dispatch (`next_micro_state = trap00`) and also covers `TRAP #n` in the current trace-pending logic, which is the maintained superset of those old patches.
+  - [`old_junk/traps_exceptions.patch`](/home/adam/030_mmu/Minimig-AGA_MiSTer/old_junk/traps_exceptions.patch) was rejected entirely. It is an obsolete pre-cleanup stub that adds placeholder `berr1..berr8` states and routes 68030 bus faults through incomplete trap logic instead of the current maintained Format `$A/$B` bus-fault path.
+  - [`old_junk/full.patch`](/home/adam/030_mmu/Minimig-AGA_MiSTer/old_junk/full.patch) was also skipped as a historical aggregate export, not a clean incremental source for porting.
+- Spec/reference basis:
+  - the Motorola manual's trace chapter says T0 traces instructions that force program-flow change, explicitly including instruction traps;
+  - the multiple-exception rules require Group 2 forced exceptions to complete before trace, which is why the stacked-trace latch must follow the resolved Group 2 dispatch instead of transient cause bits;
+  - the bus-error chapter requires vector 2 with MC68030 Format `$A/$B` fault frames, so the old stubbed `traps_exceptions.patch` path is not a valid 68030 end-state.
+- Maintained coverage already in tree:
+  - [tb_t0_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_t0_trace.vhd), [tb_t1_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_t1_trace.vhd), [tb_group2_t0_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_group2_t0_trace.vhd), and [tb_chk_stacked_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_chk_stacked_trace.vhd) already cover the kept stacked-trace behavior.
