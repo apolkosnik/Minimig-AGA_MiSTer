@@ -331,3 +331,13 @@ movec selector focused follow-up:
 - Follow-up verification:
   - `make -C tests/tg68k_030 test-movec-selector-latch`: pass; both write-side and read-side stale-immediate cases completed successfully
   - `make -C tests/tg68k_030 test-arch-suite`: maintained architecture/edge-case suite completed successfully with the new MOVEC selector regression enabled
+
+68030 selector harness follow-up:
+- The cleaned RTL and top-level integration deliberately reuse the existing `10` slot for 68030, and the in-tree comments document `10` as the 68030 selector. Several maintained testbenches had still been instantiating the core with `CPU => "11"`, which only worked because the current implementation mostly keys off `CPU(1)`.
+- Local fix: normalize the maintained MMU/real-software benches to `CPU => "10"` in [tests/tg68k_030/tb_mmu_translation.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_mmu_translation.vhd), [tests/tg68k_030/tb_mmu_fault_recovery.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_mmu_fault_recovery.vhd), [tests/tg68k_030/tb_addr_error_pmmu.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_addr_error_pmmu.vhd), [tests/tg68k_030/tb_whichamiga_mmu.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_whichamiga_mmu.vhd), [tests/tg68k_030/tb_68030_library_init.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_68030_library_init.vhd), and [tests/tg68k_030/tb_pmove_crp_mem_to_mmu_postinc.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_pmove_crp_mem_to_mmu_postinc.vhd).
+- Fix/skip decision: no RTL change needed. This is a harness-alignment cleanup so the maintained benches actually exercise the documented 68030 selector instead of a stale out-of-tree encoding.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-mmu-translation`: completed successfully with `CPU => "10"` in the maintained MMU translation bench
+  - `make -C tests/tg68k_030 test-fault`: fault-handling suite completed successfully with the selector-normalized PMMU benches
+  - `make -C tests/tg68k_030 test-real`: maintained real software-sequence validation suite completed successfully
+  - `make -C tests/tg68k_030 test-pmove-crp-mem-to-mmu-postinc`: completed successfully with the selector-normalized PMOVE postincrement bench

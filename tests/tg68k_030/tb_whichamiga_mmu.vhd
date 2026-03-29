@@ -335,7 +335,7 @@ begin
             IPL              => "111",
             IPL_autovector   => '1',
             berr             => '0',
-            CPU              => "11",
+            CPU              => "10",
             addr_out         => addr_out,
             data_write       => data_write,
             nWr              => nWr,

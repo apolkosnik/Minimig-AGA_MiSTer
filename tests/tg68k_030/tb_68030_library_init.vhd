@@ -190,7 +190,7 @@ begin
             IPL            => "111",
             IPL_autovector => '1',
             berr           => '0',
-            CPU            => "11",  -- 68030 mode
+            CPU            => "10",  -- 68030 mode
             addr_out       => addr_out,
             data_write     => data_write,
             nWr            => nWr,
