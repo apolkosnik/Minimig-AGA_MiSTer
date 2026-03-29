@@ -1,7 +1,8 @@
 -- tb_basic_chk_trace.vhd
 -- Maintained MC68030 BASIC-style CHK/CHK2 trace coverage.
--- Focuses on the user-mode T1 no-trap path that cputest BASIC exercises
--- for CHK.W, CHK.L, CHK2.B, CHK2.W, and CHK2.L.
+-- Covers the legal trace-relevant BASIC SR combinations for the CHK2 no-trap
+-- path using distinct USP/ISP/MSP shadows so user/supervisor and M-bit stack
+-- selection stay observable.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -189,12 +190,13 @@ begin
 
         procedure check_trace_frame(
             test_name    : string;
+            sp_addr      : integer;
             expected_sr  : std_logic_vector(15 downto 0);
             expected_pc  : std_logic_vector(31 downto 0);
             expected_ia  : std_logic_vector(31 downto 0)
         ) is
         begin
-            load_frame(16#07F4#);
+            load_frame(sp_addr);
 
             if frame_sr = expected_sr then
                 report "PASS: " & test_name & " saved SR" severity note;
@@ -229,6 +231,34 @@ begin
             end if;
         end procedure;
 
+        procedure program_chk2_case(
+            sr_word     : std_logic_vector(15 downto 0);
+            opcode_word : std_logic_vector(15 downto 0)
+        ) is
+        begin
+            mem(16#1000# / 2) := x"207C";
+            mem(16#1002# / 2) := x"0000";
+            mem(16#1004# / 2) := x"3000";
+            mem(16#1006# / 2) := x"203C";
+            mem(16#1008# / 2) := x"0000";
+            mem(16#100A# / 2) := x"0015";
+            mem(16#100C# / 2) := x"223C";
+            mem(16#100E# / 2) := x"0000";
+            mem(16#1010# / 2) := x"0A00";
+            mem(16#1012# / 2) := x"4E7B";
+            mem(16#1014# / 2) := x"1803";
+            mem(16#1016# / 2) := x"223C";
+            mem(16#1018# / 2) := x"0000";
+            mem(16#101A# / 2) := x"0C00";
+            mem(16#101C# / 2) := x"4E7B";
+            mem(16#101E# / 2) := x"1800";
+            mem(16#1020# / 2) := x"46FC";
+            mem(16#1022# / 2) := sr_word;
+            mem(16#1024# / 2) := opcode_word;
+            mem(16#1026# / 2) := x"0800";
+            mem(16#1028# / 2) := x"4E71";
+        end procedure;
+
     begin
         report "=== MC68030 BASIC CHK/CHK2 Trace Coverage ===" severity note;
 
@@ -243,7 +273,7 @@ begin
         mem(16#100C# / 2) := x"4181";
         mem(16#100E# / 2) := x"4E71";
         run_case;
-        check_trace_frame("CHK.W user T1", x"8000", x"0000100E", x"0000100C");
+        check_trace_frame("CHK.W user T1", 16#07F4#, x"8000", x"0000100E", x"0000100C");
 
         report "=== Test 2: CHK.L in-range with SR=$8000 ===" severity note;
         init_common;
@@ -258,42 +288,22 @@ begin
         mem(16#1010# / 2) := x"4101";
         mem(16#1012# / 2) := x"4E71";
         run_case;
-        check_trace_frame("CHK.L user T1", x"8000", x"00001012", x"00001010");
+        check_trace_frame("CHK.L user T1", 16#07F4#, x"8000", x"00001012", x"00001010");
 
         report "=== Test 3: CHK2.B in-range with SR=$8000 ===" severity note;
         init_common;
-        mem(16#1000# / 2) := x"207C";
-        mem(16#1002# / 2) := x"0000";
-        mem(16#1004# / 2) := x"3000";
-        mem(16#1006# / 2) := x"203C";
-        mem(16#1008# / 2) := x"0000";
-        mem(16#100A# / 2) := x"0015";
-        mem(16#100C# / 2) := x"46FC";
-        mem(16#100E# / 2) := x"8000";
-        mem(16#1010# / 2) := x"00D0";
-        mem(16#1012# / 2) := x"0800";
-        mem(16#1014# / 2) := x"4E71";
         mem(16#3000# / 2) := x"1020";
+        program_chk2_case(x"8000", x"00D0");
         run_case;
-        check_trace_frame("CHK2.B user T1", x"8000", x"00001014", x"00001010");
+        check_trace_frame("CHK2.B user T1 M=0", 16#07F4#, x"8000", x"00001028", x"00001024");
 
         report "=== Test 4: CHK2.W in-range with SR=$8000 ===" severity note;
         init_common;
         mem(16#3000# / 2) := x"0010";
         mem(16#3002# / 2) := x"0020";
-        mem(16#1000# / 2) := x"207C";
-        mem(16#1002# / 2) := x"0000";
-        mem(16#1004# / 2) := x"3000";
-        mem(16#1006# / 2) := x"203C";
-        mem(16#1008# / 2) := x"0000";
-        mem(16#100A# / 2) := x"0015";
-        mem(16#100C# / 2) := x"46FC";
-        mem(16#100E# / 2) := x"8000";
-        mem(16#1010# / 2) := x"02D0";
-        mem(16#1012# / 2) := x"0800";
-        mem(16#1014# / 2) := x"4E71";
+        program_chk2_case(x"8000", x"02D0");
         run_case;
-        check_trace_frame("CHK2.W user T1", x"8000", x"00001014", x"00001010");
+        check_trace_frame("CHK2.W user T1 M=0", 16#07F4#, x"8000", x"00001028", x"00001024");
 
         report "=== Test 5: CHK2.L in-range with SR=$8000 ===" severity note;
         init_common;
@@ -301,19 +311,84 @@ begin
         mem(16#3002# / 2) := x"0010";
         mem(16#3004# / 2) := x"0000";
         mem(16#3006# / 2) := x"0020";
-        mem(16#1000# / 2) := x"207C";
-        mem(16#1002# / 2) := x"0000";
-        mem(16#1004# / 2) := x"3000";
-        mem(16#1006# / 2) := x"203C";
-        mem(16#1008# / 2) := x"0000";
-        mem(16#100A# / 2) := x"0015";
-        mem(16#100C# / 2) := x"46FC";
-        mem(16#100E# / 2) := x"8000";
-        mem(16#1010# / 2) := x"04D0";
-        mem(16#1012# / 2) := x"0800";
-        mem(16#1014# / 2) := x"4E71";
+        program_chk2_case(x"8000", x"04D0");
         run_case;
-        check_trace_frame("CHK2.L user T1", x"8000", x"00001014", x"00001010");
+        check_trace_frame("CHK2.L user T1 M=0", 16#07F4#, x"8000", x"00001028", x"00001024");
+
+        report "=== Test 6: CHK2.B in-range with SR=$9000 ===" severity note;
+        init_common;
+        mem(16#3000# / 2) := x"1020";
+        program_chk2_case(x"9000", x"00D0");
+        run_case;
+        check_trace_frame("CHK2.B user T1 M=1", 16#09F4#, x"9000", x"00001028", x"00001024");
+
+        report "=== Test 7: CHK2.W in-range with SR=$9000 ===" severity note;
+        init_common;
+        mem(16#3000# / 2) := x"0010";
+        mem(16#3002# / 2) := x"0020";
+        program_chk2_case(x"9000", x"02D0");
+        run_case;
+        check_trace_frame("CHK2.W user T1 M=1", 16#09F4#, x"9000", x"00001028", x"00001024");
+
+        report "=== Test 8: CHK2.L in-range with SR=$9000 ===" severity note;
+        init_common;
+        mem(16#3000# / 2) := x"0000";
+        mem(16#3002# / 2) := x"0010";
+        mem(16#3004# / 2) := x"0000";
+        mem(16#3006# / 2) := x"0020";
+        program_chk2_case(x"9000", x"04D0");
+        run_case;
+        check_trace_frame("CHK2.L user T1 M=1", 16#09F4#, x"9000", x"00001028", x"00001024");
+
+        report "=== Test 9: CHK2.B in-range with SR=$A000 ===" severity note;
+        init_common;
+        mem(16#3000# / 2) := x"1020";
+        program_chk2_case(x"A000", x"00D0");
+        run_case;
+        check_trace_frame("CHK2.B supervisor T1 M=0", 16#07F4#, x"A000", x"00001028", x"00001024");
+
+        report "=== Test 10: CHK2.W in-range with SR=$A000 ===" severity note;
+        init_common;
+        mem(16#3000# / 2) := x"0010";
+        mem(16#3002# / 2) := x"0020";
+        program_chk2_case(x"A000", x"02D0");
+        run_case;
+        check_trace_frame("CHK2.W supervisor T1 M=0", 16#07F4#, x"A000", x"00001028", x"00001024");
+
+        report "=== Test 11: CHK2.L in-range with SR=$A000 ===" severity note;
+        init_common;
+        mem(16#3000# / 2) := x"0000";
+        mem(16#3002# / 2) := x"0010";
+        mem(16#3004# / 2) := x"0000";
+        mem(16#3006# / 2) := x"0020";
+        program_chk2_case(x"A000", x"04D0");
+        run_case;
+        check_trace_frame("CHK2.L supervisor T1 M=0", 16#07F4#, x"A000", x"00001028", x"00001024");
+
+        report "=== Test 12: CHK2.B in-range with SR=$B000 ===" severity note;
+        init_common;
+        mem(16#3000# / 2) := x"1020";
+        program_chk2_case(x"B000", x"00D0");
+        run_case;
+        check_trace_frame("CHK2.B supervisor T1 M=1", 16#09F4#, x"B000", x"00001028", x"00001024");
+
+        report "=== Test 13: CHK2.W in-range with SR=$B000 ===" severity note;
+        init_common;
+        mem(16#3000# / 2) := x"0010";
+        mem(16#3002# / 2) := x"0020";
+        program_chk2_case(x"B000", x"02D0");
+        run_case;
+        check_trace_frame("CHK2.W supervisor T1 M=1", 16#09F4#, x"B000", x"00001028", x"00001024");
+
+        report "=== Test 14: CHK2.L in-range with SR=$B000 ===" severity note;
+        init_common;
+        mem(16#3000# / 2) := x"0000";
+        mem(16#3002# / 2) := x"0010";
+        mem(16#3004# / 2) := x"0000";
+        mem(16#3006# / 2) := x"0020";
+        program_chk2_case(x"B000", x"04D0");
+        run_case;
+        check_trace_frame("CHK2.L supervisor T1 M=1", 16#09F4#, x"B000", x"00001028", x"00001024");
 
         report "BASIC CHK trace tests: " & integer'image(pass_count) & " PASSED, " &
                integer'image(fail_count) & " FAILED" severity note;

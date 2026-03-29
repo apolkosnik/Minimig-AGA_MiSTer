@@ -1,7 +1,7 @@
 -- tb_basic_div_jmp_trace.vhd
 -- Maintained MC68030 BASIC-style divide and JMP trace coverage.
--- Covers successful DIVU.W, DIVS.W, DIVL.L bucket behavior and JMP trace
--- entry using user-mode T1/T0 combinations.
+-- Covers successful DIVU.W, DIVS.W, DIVL.L bucket behavior and sweeps the
+-- legal BASIC trace SR combinations for JMP with distinct USP/ISP/MSP shadows.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -239,6 +239,26 @@ begin
             end if;
         end procedure;
 
+        procedure program_jmp_case(sr_word : std_logic_vector(15 downto 0)) is
+        begin
+            mem(16#1000# / 2) := x"223C";
+            mem(16#1002# / 2) := x"0000";
+            mem(16#1004# / 2) := x"0A00";
+            mem(16#1006# / 2) := x"4E7B";
+            mem(16#1008# / 2) := x"1803";
+            mem(16#100A# / 2) := x"223C";
+            mem(16#100C# / 2) := x"0000";
+            mem(16#100E# / 2) := x"0C00";
+            mem(16#1010# / 2) := x"4E7B";
+            mem(16#1012# / 2) := x"1800";
+            mem(16#1014# / 2) := x"46FC";
+            mem(16#1016# / 2) := sr_word;
+            mem(16#1018# / 2) := x"4EF9";
+            mem(16#101A# / 2) := x"0000";
+            mem(16#101C# / 2) := x"2000";
+            mem(16#2000# / 2) := x"4E71";
+        end procedure;
+
     begin
         report "=== MC68030 BASIC DIV/JMP Trace Coverage ===" severity note;
 
@@ -306,25 +326,51 @@ begin
 
         report "=== Test 5: JMP with SR=$8000 ===" severity note;
         init_common;
-        mem(16#1000# / 2) := x"46FC";
-        mem(16#1002# / 2) := x"8000";
-        mem(16#1004# / 2) := x"4EF9";
-        mem(16#1006# / 2) := x"0000";
-        mem(16#1008# / 2) := x"2000";
-        mem(16#2000# / 2) := x"4E71";
+        program_jmp_case(x"8000");
         run_case;
-        check_trace_frame("JMP user T1", 16#07F4#, x"8000", x"00002000", x"00001004");
+        check_trace_frame("JMP user T1 M=0", 16#07F4#, x"8000", x"00002000", x"00001018");
 
         report "=== Test 6: JMP with SR=$4000 ===" severity note;
         init_common;
-        mem(16#1000# / 2) := x"46FC";
-        mem(16#1002# / 2) := x"4000";
-        mem(16#1004# / 2) := x"4EF9";
-        mem(16#1006# / 2) := x"0000";
-        mem(16#1008# / 2) := x"2000";
-        mem(16#2000# / 2) := x"4E71";
+        program_jmp_case(x"4000");
         run_case;
-        check_trace_frame("JMP user T0", 16#07F4#, x"4000", x"00002000", x"00001004");
+        check_trace_frame("JMP user T0 M=0", 16#07F4#, x"4000", x"00002000", x"00001018");
+
+        report "=== Test 7: JMP with SR=$9000 ===" severity note;
+        init_common;
+        program_jmp_case(x"9000");
+        run_case;
+        check_trace_frame("JMP user T1 M=1", 16#09F4#, x"9000", x"00002000", x"00001018");
+
+        report "=== Test 8: JMP with SR=$5000 ===" severity note;
+        init_common;
+        program_jmp_case(x"5000");
+        run_case;
+        check_trace_frame("JMP user T0 M=1", 16#09F4#, x"5000", x"00002000", x"00001018");
+
+        report "=== Test 9: JMP with SR=$A000 ===" severity note;
+        init_common;
+        program_jmp_case(x"A000");
+        run_case;
+        check_trace_frame("JMP supervisor T1 M=0", 16#07F4#, x"A000", x"00002000", x"00001018");
+
+        report "=== Test 10: JMP with SR=$6000 ===" severity note;
+        init_common;
+        program_jmp_case(x"6000");
+        run_case;
+        check_trace_frame("JMP supervisor T0 M=0", 16#07F4#, x"6000", x"00002000", x"00001018");
+
+        report "=== Test 11: JMP with SR=$B000 ===" severity note;
+        init_common;
+        program_jmp_case(x"B000");
+        run_case;
+        check_trace_frame("JMP supervisor T1 M=1", 16#09F4#, x"B000", x"00002000", x"00001018");
+
+        report "=== Test 12: JMP with SR=$7000 ===" severity note;
+        init_common;
+        program_jmp_case(x"7000");
+        run_case;
+        check_trace_frame("JMP supervisor T0 M=1", 16#09F4#, x"7000", x"00002000", x"00001018");
 
         report "BASIC DIV/JMP tests: " & integer'image(pass_count) & " PASSED, " &
                integer'image(fail_count) & " FAILED" severity note;
