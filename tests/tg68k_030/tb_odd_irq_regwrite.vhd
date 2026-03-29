@@ -1,8 +1,9 @@
 -- tb_odd_irq_regwrite.vhd
--- Reproducer for cputest ODD_IRQ retire-before-interrupt behavior on
--- internal register-writeback instructions. This bench intentionally keeps
--- the odd-vector interrupt path standalone instead of folding it into the
--- top-level passing wrappers.
+-- Reproducer for WinUAE cputest ODD_IRQ retire-before-interrupt behavior on
+-- internal register-writeback instructions. Unlike the earlier fetch-trigger
+-- reproducer, this bench mirrors execute_test020(): a level-1 interrupt is
+-- already pending, reset/setup run with IPL=7, and RTE restores the test SR/PC
+-- immediately before the instruction under test.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -123,7 +124,11 @@ begin
             return mem(byte_addr / 2) & mem(byte_addr / 2 + 1);
         end function;
 
-        procedure init_common(init_d4 : std_logic_vector(31 downto 0); opcode : std_logic_vector(15 downto 0)) is
+        procedure init_common(
+            init_d4 : std_logic_vector(31 downto 0);
+            opcode  : std_logic_vector(15 downto 0);
+            test_sr : std_logic_vector(15 downto 0)
+        ) is
         begin
             for i in 0 to 16383 loop
                 mem(i) := x"4E71";
@@ -148,15 +153,22 @@ begin
             mem(16#1000# / 2) := x"283C";
             mem(16#1002# / 2) := init_d4(31 downto 16);
             mem(16#1004# / 2) := init_d4(15 downto 0);
-            mem(16#1006# / 2) := x"46FC";
-            mem(16#1008# / 2) := x"2000";
-            mem(16#100A# / 2) := opcode;
-            mem(16#100C# / 2) := x"4E72";
-            mem(16#100E# / 2) := x"2700";
+            mem(16#1006# / 2) := x"2E7C";
+            mem(16#1008# / 2) := x"0000";
+            mem(16#100A# / 2) := x"07F8";
+            mem(16#100C# / 2) := x"4E73";
+
+            mem(16#07F8# / 2) := test_sr;
+            mem(16#07FA# / 2) := x"0000";
+            mem(16#07FC# / 2) := x"2000";
+            mem(16#07FE# / 2) := x"0000";
+
+            mem(16#2000# / 2) := opcode;
+            mem(16#2002# / 2) := x"6000";
 
             mem(16#7000# / 2) := x"0000";
             mem(16#7002# / 2) := x"0000";
-            IPL_sig <= "111";
+            IPL_sig <= "110";
         end procedure;
 
         procedure do_reset is
@@ -164,19 +176,6 @@ begin
             nReset <= '0';
             wait for 100 ns;
             nReset <= '1';
-        end procedure;
-
-        procedure arm_irq_on_fetch(target_addr : integer) is
-        begin
-            for i in 0 to 8000 loop
-                wait until rising_edge(clk);
-                if busstate = "00" and addr_out(15 downto 0) = std_logic_vector(to_unsigned(target_addr, 16)) then
-                    IPL_sig <= "110";
-                    return;
-                end if;
-            end loop;
-            report "FAIL: timeout waiting to arm IRQ" severity error;
-            fail_count := fail_count + 1;
         end procedure;
 
         procedure wait_for_stop_and_monitor(max_cycles : integer := 12000) is
@@ -248,30 +247,26 @@ begin
         report "=== MC68030 ODD_IRQ Register-Write Coverage ===" severity note;
 
         report "=== Test 1: EXT.W D4 ===" severity note;
-        init_common(x"00000080", x"4884");
+        init_common(x"00000080", x"4884", x"0000");
         do_reset;
-        arm_irq_on_fetch(16#100A#);
         wait_for_stop_and_monitor;
         check_case("EXT.W", x"0000FF80");
 
         report "=== Test 2: EXT.L D4 ===" severity note;
-        init_common(x"00008000", x"48C4");
+        init_common(x"00008000", x"48C4", x"0000");
         do_reset;
-        arm_irq_on_fetch(16#100A#);
         wait_for_stop_and_monitor;
         check_case("EXT.L", x"FFFF8000");
 
         report "=== Test 3: EXTB.L D4 ===" severity note;
-        init_common(x"00000080", x"49C4");
+        init_common(x"00000080", x"49C4", x"0000");
         do_reset;
-        arm_irq_on_fetch(16#100A#);
         wait_for_stop_and_monitor;
         check_case("EXTB.L", x"FFFFFF80");
 
         report "=== Test 4: SWAP D4 ===" severity note;
-        init_common(x"12345678", x"4844");
+        init_common(x"12345678", x"4844", x"0000");
         do_reset;
-        arm_irq_on_fetch(16#100A#);
         wait_for_stop_and_monitor;
         check_case("SWAP", x"56781234");
 

@@ -2588,6 +2588,7 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data, next_micro_state, micro_state, stop, make_trace, make_trace_t0, make_berr, IPL_nr, FlagsSR, set_rot_cnt, opcode, writePCbig, set_exec, exec,
         PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, trap_trapv, interrupt, tmp_TG68_PC, TG68_PC, use_VBR_Stackframe, writePCnext, pmove_dn_mode, cpu_halted, exe_condition, dbcc_t0_suppress, c_out)
 	variable v_is_cof : std_logic;  -- T0 trace: change-of-flow instruction
+	variable v_irq_pending : std_logic;
 	variable v_pmmu_datatype : std_logic_vector(1 downto 0);
 	BEGIN
 	
@@ -2715,6 +2716,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				v_is_cof := '1';
 			END IF;
 		END IF;
+		v_irq_pending := '0';
+		IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111" THEN
+			v_irq_pending := '1';
+		END IF;
 		-- BUG #340 FIX: PMOVE/FPU completes with next_micro_state=nop (not idle), must set setendOPC
 		-- to clear fline_context_valid, allowing subsequent F-line opcodes to latch
 		-- Only applies when fline_context_valid='1' to avoid affecting non-F-line nop transitions
@@ -2735,7 +2740,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			-- the NEXT clkena_lw edge, allowing the CPU to advance past the faulting instruction.
 			-- By checking pmmu_fault combinationally, the bus error is caught at the same edge
 			-- where the faulting memory write completes (state="11"->"00").
-			IF FlagsSR(2 downto 0)<IPL_nr OR IPL_nr="111"  OR make_trace='1' OR (make_trace_t0='1' AND v_is_cof='1') OR make_berr='1'
+			-- WinUAE cputest ODD_IRQ enters the test instruction via RTE with the
+			-- external interrupt already pending. The returned-to instruction must
+			-- retire before the interrupt is serviced, so defer only the external
+			-- IRQ term across successful RTE retirement. Immediate fault/trace
+			-- cases still keep priority on the same edge.
+			IF ((v_irq_pending = '1') AND opcode /= x"4E73") OR make_trace='1' OR (make_trace_t0='1' AND v_is_cof='1') OR make_berr='1'
 			   OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0')
 			   OR TG68_PC(0)='1' THEN
 				setinterrupt <= '1';

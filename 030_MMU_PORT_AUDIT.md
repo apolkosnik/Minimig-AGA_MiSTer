@@ -523,4 +523,17 @@ Packaged cputest BASIC / ODD_IRQ follow-up:
   - direct ModelSim run of `tb_basic_chk_trace`: 20 passed, 0 failed
   - direct ModelSim run of `tb_basic_div_jmp_trace`: 28 passed, 0 failed
   - direct ModelSim run of `tb_basic_group2_user_trace`: 13 passed, 0 failed
-  - direct ModelSim run of `tb_odd_irq_regwrite`: 8 passed, 4 failed (`EXT.W`, `EXT.L`, `EXTB.L`, `SWAP` retire checks)
+  - initial direct ModelSim run of `tb_odd_irq_regwrite`: 8 passed, 4 failed (`EXT.W`, `EXT.L`, `EXTB.L`, `SWAP` retire checks)
+
+ODD_IRQ RTE-entry follow-up:
+- I re-checked the WinUAE `cputest` path directly instead of assuming the earlier reproducer shape. On 68020+, `execute_test020()` enters the instruction under test via `RTE`, with the interrupt request already pending before the test body starts.
+- Fix/keep decision: keep, but not as a register-writeback latch. The real bug was that [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd) was still eligible to service an external interrupt on the same retire edge that a successful `RTE` restored SR/PC, so the returned-to `EXT*`/`SWAP` instruction never got its execution slot. The maintained fix defers only the external-IRQ term across successful `RTE` retirement; same-edge trace, bus/MMU fault, and odd return-address exceptions still keep priority.
+- Maintained bench update: [tb_odd_irq_regwrite.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_odd_irq_regwrite.vhd) now mirrors the WinUAE trampoline:
+  - reset/setup execute with IPL masked after reset;
+  - level-1 autovector is already pending;
+  - `RTE` restores the test SR/PC into the `EXT.W` / `EXT.L` / `EXTB.L` / `SWAP` instruction;
+  - the odd-vector path still lands through vector 25 to odd PC `$0123`, then vector 3.
+- Focused verification after the fix:
+  - `make -C tests/tg68k_030 test-odd-irq-regwrite`: 12 passed, 0 failed
+  - `make -C tests/tg68k_030 test-interrupt-mode-stack`: passed
+  - `make -C tests/tg68k_030 test-rte-formats`: passed; `ALL RTE FORMAT TESTS PASSED!`
