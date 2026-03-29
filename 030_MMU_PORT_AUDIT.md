@@ -499,3 +499,27 @@ Old-junk PMOVE patch sweep:
   - [`old_junk/patches/BUG301_V5_BUG302_targeted_fix.patch`](/home/adam/030_mmu/Minimig-AGA_MiSTer/old_junk/patches/BUG301_V5_BUG302_targeted_fix.patch) is also skipped as a direct replay. Its `BUG302` `cpSAVE/cpRESTORE` part is already dispositioned above, while its `BUG301` PMOVE side is another debug-heavy iteration of the same PMOVE family rather than a separate architectural delta.
 - Maintained coverage already in tree:
   - [tb_pmove_crp_a7_postinc.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_pmove_crp_a7_postinc.vhd), [tb_pmove_crp_mem_to_mmu_postinc.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_pmove_crp_mem_to_mmu_postinc.vhd), [tb_pmove_all_modes.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_pmove_all_modes.vhd), [tb_pmove_d16an_pc.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_pmove_d16an_pc.vhd), and [tb_pmove_d8anxn_pc.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_pmove_d8anxn_pc.vhd) cover the maintained PMOVE end-state.
+
+Packaged cputest BASIC / ODD_IRQ follow-up:
+- I checked the local packaged data under [/home/adam/Downloads/data_030/68030_Basic](/home/adam/Downloads/data_030/68030_Basic) and [/home/adam/Downloads/data_030/68030_ODD_IRQ](/home/adam/Downloads/data_030/68030_ODD_IRQ) instead of relying only on the WinUAE generator presets.
+- New maintained benches:
+  - [tb_basic_chk_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_basic_chk_trace.vhd): direct BASIC-style user-mode T1 no-trap coverage for `CHK.W`, `CHK.L`, `CHK2.B`, `CHK2.W`, and `CHK2.L`
+  - [tb_basic_div_jmp_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_basic_div_jmp_trace.vhd): direct BASIC-style user trace coverage for `DIVU.W`, `DIVS.W`, the `DIVL.L` bucket via both `DIVU.L` and `DIVS.L`, and `JMP` under both user T1 and user T0
+  - [tb_basic_group2_user_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_basic_group2_user_trace.vhd): direct BASIC-style user stacked-trace coverage for `TRAP` and taken `TRAPcc`
+  - [tb_odd_irq_regwrite.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_odd_irq_regwrite.vhd): standalone reproducer for the `ODD_IRQ` `EXT.W` / `EXT.L` / `EXTB.L` / `SWAP` retire-before-odd-vector path
+- Makefile wiring:
+  - [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now has `test-basic-chk-trace`, `test-basic-div-jmp-trace`, `test-basic-group2-user-trace`, `test-basic-cputest`, and `test-odd-irq-regwrite`
+  - `test-basic-cputest` is kept diagnostic and is not folded into `test-trace-suite` yet, because the new benches intentionally expose still-open core issues rather than only already-fixed behavior
+- Current disposition from those benches:
+  - `tb_basic_div_jmp_trace`: all `DIV*` and `JMP` cases pass in the current tree
+  - `tb_basic_group2_user_trace`: `TRAP` and `TRAPcc` user stacked-trace cases pass; only the trap frame's saved SR is asserted, not the stacked trace frame's supervisor-side SR image
+  - `tb_basic_chk_trace`: `CHK.W`, `CHK.L`, `CHK2.B`, and `CHK2.W` pass; `CHK2.L` currently fails because the core stacks `SR=$8008` on the in-range user T1 no-trap path instead of the expected `SR=$8000`
+  - `tb_odd_irq_regwrite`: all four cases reproduce the live hardware issue; the interrupt autovector fetch and odd-vector address error both occur, but `D4` is still stale when the address-error handler runs
+- Spec/reference basis:
+  - the WinUAE `CHK2.L` path still runs `setchk2undefinedflags(..., size=2)`, and for the in-range `lower=$10 upper=$20 value=$15` case it keeps `N=0`, so the `CHK2.L` saved-SR expectation remains `SR=$8000`
+  - the `ODD_IRQ` packaged directory only contains `EXT.B`, `EXT.L`, `EXT.W`, and `SWAP.W`, which matches the hardware failures and confirms that the reproducer should stay focused on internal register-writeback retire before the interrupt/odd-vector chain
+- Focused verification:
+  - direct ModelSim run of `tb_basic_chk_trace`: 19 passed, 1 failed (`CHK2.L` saved SR)
+  - direct ModelSim run of `tb_basic_div_jmp_trace`: 28 passed, 0 failed
+  - direct ModelSim run of `tb_basic_group2_user_trace`: 13 passed, 0 failed
+  - direct ModelSim run of `tb_odd_irq_regwrite`: 8 passed, 4 failed (`EXT.W`, `EXT.L`, `EXTB.L`, `SWAP` retire checks)
