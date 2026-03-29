@@ -1116,7 +1116,23 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 						END IF;
 						Flags(1) <= '0';
 						Flags(2) <= Flags(2) OR set_flags(2);
-						Flags(3) <= NOT last_Flags1(0); 
+						IF exe_datatype="00" THEN
+							IF unsigned(OP2out(7 downto 0)) < unsigned(OP2out(15 downto 8)) AND
+							   signed(OP2out(7 downto 0)) < signed(OP2out(15 downto 8)) THEN
+								Flags(3) <= '1';
+							ELSE
+								Flags(3) <= '0';
+							END IF;
+						ELSIF exe_datatype="01" THEN
+							IF unsigned(OP2out(15 downto 0)) < unsigned(OP2out(31 downto 16)) AND
+							   signed(OP2out(15 downto 0)) < signed(OP2out(31 downto 16)) THEN
+								Flags(3) <= '1';
+							ELSE
+								Flags(3) <= '0';
+							END IF;
+						ELSE
+							Flags(3) <= NOT last_Flags1(0);
+						END IF;
 					ELSIF exec(opcCHK)='1' THEN
 						IF exe_datatype="01" THEN 						--Word
 							Flags(3) <= OP1out(15);
@@ -1133,7 +1149,8 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 					END IF;
 				END IF;	
 			END IF;	
-			Flags(7 downto 5) <= "000";
+			-- Preserve written-but-unused CCR bits 7:5. Real 68020+/68030
+			-- hardware keeps them in the stacked SR/CCR image and WinUAE does too.
 		END IF;	
 	END PROCESS;
 	

@@ -3664,7 +3664,8 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 						FlagsSR(4) <= '0';
 						FlagsSR(6) <= '0';
 					END IF;
-				FlagsSR(3) <= '0';
+				-- Preserve written-but-unused SR bit 11 in the internal stacked
+				-- image. Real 68020+/68030 hardware keeps it observable there.
 			END IF;
 		END IF;	
 	END PROCESS;

@@ -431,3 +431,22 @@ Post-RTE JMP trace follow-up:
   - `make -C tests/tg68k_030 test-jmp-65b2-trace`: 8 passed, 0 failed; both T1 and T0 cases stacked the correct SR, target PC `$2000`, vector `$2024`, and instruction address `$1100`
   - `make -C tests/tg68k_030 test-t1-trace`: 10 passed, 0 failed
   - `make -C tests/tg68k_030 test-trace-suite`: maintained T0/T1/JMP/Group 2 trace coverage completed successfully
+
+Hardware `cputest basic` trace follow-up:
+- Real hardware still reported two basic-trace mismatches after the post-`RTE` `JMP` fix:
+  - normal trace frames lost written-but-unused SR/CCR bits (`SR=$8000` was stacking as `$0000` or `$0008`);
+  - non-trapping `CHK2` paths were forcing `N=1`, producing `$8008` instead of `$8000` in the saved SR image.
+- Local fix:
+  - preserve written-but-unused CCR bits 7:5 in [rtl/tg68k/TG68K_ALU.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68K_ALU.vhd) and SR bit 11 in [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd) so the internal stacked SR image matches 68020+/68030 behavior;
+  - fix `CHK2` `N` synthesis in [rtl/tg68k/TG68K_ALU.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68K_ALU.vhd) for byte and word bounds so non-trapping `CHK2` no longer fabricates `N=1` on normal trace exit.
+- Spec/reference disposition:
+  - preserving the written-but-unused SR/CCR image matches real 68020+/68030 behavior and WinUAE's visible stacked SR image;
+  - the `CHK2` `N` fix matches `wf68k30L`'s rule that `N` is only asserted for reversed bounds, not for ordinary in-range completion.
+- Maintained coverage:
+  - [tb_t1_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_t1_trace.vhd) now checks that `MOVE #$A8E0,SR` preserves the full stacked SR image on the following T1 trace;
+  - [tb_chk_stacked_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_chk_stacked_trace.vhd) now checks user-mode non-trapping `CHK2.B` and `CHK2.W` saved SR images at `$8000`.
+- Fix/skip decision: keep. These are architectural trace-frame correctness fixes, not testbench-only adjustments.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-chk-stacked-trace`: 44 passed, 0 failed
+  - `make -C tests/tg68k_030 test-t1-trace`: 11 passed, 0 failed
+  - `make -C tests/tg68k_030 test-trace-suite`: completed successfully with maintained T0/T1/JMP/CHK/CHK2/Group 2 coverage

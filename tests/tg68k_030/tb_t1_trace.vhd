@@ -432,6 +432,22 @@ begin
             fail_count := fail_count + 1;
         end if;
 
+        report "=== Test 11: reserved SR/CCR bits preserved in trace frame ===" severity note;
+        init_common;
+        setup_stop_handler;
+        mem(16#1000# / 2) := x"46FC";
+        mem(16#1002# / 2) := x"A8E0";
+        mem(16#1004# / 2) := x"4E71";
+        mem(16#1006# / 2) := x"4E71";
+        run_cycles(10000);
+        if mem_read(16#07F4#) = x"A8E0" then
+            report "PASS: Test 11 - Stacked SR preserves unused SR/CCR bits" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: Test 11 - Stacked SR lost unused SR/CCR bits" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
         report "============================================" severity note;
         report "T1 Trace Tests: " & integer'image(pass_count) & " PASSED, " &
                integer'image(fail_count) & " FAILED" severity note;

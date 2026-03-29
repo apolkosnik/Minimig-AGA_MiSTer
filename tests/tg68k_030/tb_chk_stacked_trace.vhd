@@ -240,6 +240,20 @@ begin
             end if;
         end procedure;
 
+        procedure check_sr(test_name : string; expected : std_logic_vector(15 downto 0)) is
+        begin
+            if v_stacked_sr = expected then
+                report "  PASS: " & test_name & " SR=$" &
+                       integer'image(to_integer(unsigned(expected))) severity note;
+                v_pass_count := v_pass_count + 1;
+            else
+                report "  FAIL: " & test_name & " SR: expected=$" &
+                       integer'image(to_integer(unsigned(expected))) &
+                       " got=$" & integer'image(to_integer(unsigned(v_stacked_sr))) severity error;
+                v_fail_count := v_fail_count + 1;
+            end if;
+        end procedure;
+
         procedure check_ia(test_name : string; expected : std_logic_vector(31 downto 0)) is
         begin
             if v_stacked_ia = expected then
@@ -599,9 +613,95 @@ begin
         -- Normal trace: single Format $2 frame at $3FF4 (SSP=$4000, 12 bytes)
         report "  -- Trace frame (SP=$3FF4):" severity note;
         read_frame(x"00003FF4");
+        check_sr("CHK2.B normal trace SR=$A700", x"A700");
         check_format("CHK2.B normal trace frame", "0010");
         check_vector("CHK2.B normal trace vector=$024", x"024");
         check_pc("CHK2.B normal trace PC=next_instr=$1014", x"00001014");
+
+        -- ================================================================
+        -- TEST 5: CHK2.B (A0),D0 with T1=1 in user mode (normal trace)
+        --
+        -- This matches the cputest-style "SR=$8000 then CHK2 trace" shape:
+        -- the normal trace frame must preserve the user-mode T1 SR image.
+        -- ================================================================
+        report "" severity note;
+        report "TEST 5: CHK2.B (A0),D0 with SR=$8000 (normal trace)" severity note;
+        report "  Tests user-mode T1 saved SR image on the CHK2 no-trap path" severity note;
+
+        init_memory;
+        setup_vector(16#24#, 16#2100#);
+        setup_handler(16#2100#);
+
+        mem(16#3000# / 2) := x"1020";
+
+        mem(16#1000# / 2) := x"207C";
+        mem(16#1002# / 2) := x"0000";
+        mem(16#1004# / 2) := x"3000";
+        mem(16#1006# / 2) := x"203C";
+        mem(16#1008# / 2) := x"0000";
+        mem(16#100A# / 2) := x"0015";
+        mem(16#100C# / 2) := x"46FC";
+        mem(16#100E# / 2) := x"8000";
+        mem(16#1010# / 2) := x"00D0";
+        mem(16#1012# / 2) := x"0800";
+        mem(16#1014# / 2) := x"4E71";
+
+        for i in 16#3F00# / 2 to 16#4000# / 2 - 1 loop
+            mem(i) := x"DEAD";
+        end loop;
+
+        do_reset;
+        wait_for_stop;
+
+        report "  -- Trace frame (SP=$3FF4):" severity note;
+        read_frame(x"00003FF4");
+        check_sr("CHK2.B user normal trace SR=$8000", x"8000");
+        check_format("CHK2.B user normal trace frame", "0010");
+        check_vector("CHK2.B user normal trace vector=$024", x"024");
+        check_pc("CHK2.B user normal trace PC=next_instr=$1014", x"00001014");
+
+        -- ================================================================
+        -- TEST 6: CHK2.W (A0),D0 with T1=1 in user mode (normal trace)
+        --
+        -- Mirrors the hardware cputest/basic CHK2.W shape: saved SR must
+        -- preserve the user-mode T1 image on the no-trap CHK2 path.
+        -- ================================================================
+        report "" severity note;
+        report "TEST 6: CHK2.W (A0),D0 with SR=$8000 (normal trace)" severity note;
+        report "  Tests user-mode T1 saved SR image on the CHK2.W no-trap path" severity note;
+
+        init_memory;
+        setup_vector(16#24#, 16#2100#);
+        setup_handler(16#2100#);
+
+        mem(16#3000# / 2) := x"0010";
+        mem(16#3002# / 2) := x"0020";
+
+        mem(16#1000# / 2) := x"207C";
+        mem(16#1002# / 2) := x"0000";
+        mem(16#1004# / 2) := x"3000";
+        mem(16#1006# / 2) := x"203C";
+        mem(16#1008# / 2) := x"0000";
+        mem(16#100A# / 2) := x"0015";
+        mem(16#100C# / 2) := x"46FC";
+        mem(16#100E# / 2) := x"8000";
+        mem(16#1010# / 2) := x"02D0";
+        mem(16#1012# / 2) := x"0800";
+        mem(16#1014# / 2) := x"4E71";
+
+        for i in 16#3F00# / 2 to 16#4000# / 2 - 1 loop
+            mem(i) := x"DEAD";
+        end loop;
+
+        do_reset;
+        wait_for_stop;
+
+        report "  -- Trace frame (SP=$3FF4):" severity note;
+        read_frame(x"00003FF4");
+        check_sr("CHK2.W user normal trace SR=$8000", x"8000");
+        check_format("CHK2.W user normal trace frame", "0010");
+        check_vector("CHK2.W user normal trace vector=$024", x"024");
+        check_pc("CHK2.W user normal trace PC=next_instr=$1014", x"00001014");
 
         -- ================================================================
         -- SUMMARY
