@@ -411,17 +411,25 @@ begin
         wait for 50 ns;
 
         -- ================================================================
-        -- TEST 5: Long format descriptor (64-bit)
+        -- TEST 5: Mixed format walk (short parent, long child entries)
         -- ================================================================
         test_number <= 5;
-        report "TEST 5: Long format descriptor" severity note;
+        report "TEST 5: Mixed format walk (short parent, long child entries)" severity note;
 
-        -- Set root entry 3 to long-format table descriptor (DT=11)
-        page_table_mem(1027) <= x"00000003"; -- Entry 3 at 0x1000+12 HIGH word, DT=11
-        page_table_mem(1028) <= x"00003000"; -- Entry 3 LOW word, table addr=0x3000
+        -- CRP_H remains DT=10, so root-table entries are 4 bytes.
+        -- Entry 3 itself is therefore a single 32-bit descriptor. Its DT=11 selects
+        -- LONG (8-byte) descriptors in the child table at 0x3000.
+        page_table_mem(1027) <= x"00003003"; -- Entry 3 at 0x1000+12, child table at 0x3000, DT=11
+        page_table_mem(1028) <= x"00000000"; -- Entry 4 (unused); must not be consumed as descriptor LOW word
 
-        -- Set level1 table entry 0 at 0x3000 to page
-        page_table_mem(3072) <= x"00200001"; -- 0x3000/4 = 3072, page at 0x00200000
+        -- Child table at 0x3000 uses 8-byte entries because parent DT=11.
+        -- Entry 0 is a long-format page descriptor mapping to physical 0x00200000.
+        page_table_mem(3072) <= x"00000001"; -- 0x3000 HIGH word: DT=01 page descriptor
+        page_table_mem(3073) <= x"00200000"; -- 0x3004 LOW word: physical page base
+        -- Entry 1 is another long-format page descriptor. It must be 8 bytes later
+        -- at 0x3008/0x300C, not 0x3004.
+        page_table_mem(3074) <= x"00000001"; -- 0x3008 HIGH word
+        page_table_mem(3075) <= x"00210000"; -- 0x300C LOW word
 
         -- Request translation using entry 3
         -- Entry 3 starts at (3 << (12+10)) = 0x00C00000
@@ -433,10 +441,10 @@ begin
         wait for 50 ns;
         if fault = '0' then
             assert addr_phys = x"00200100"
-                report "TEST 5 FAIL: Long format descriptor walk failed" severity error;
-            report "TEST 5 PASS: Long format descriptor walk successful" severity note;
+                report "TEST 5 FAIL: Mixed format walk produced wrong physical address" severity error;
+            report "TEST 5 PASS: Mixed format walk successful" severity note;
         else
-            report "TEST 5 FAIL: Fault during long format walk" severity error;
+            report "TEST 5 FAIL: Fault during mixed format walk" severity error;
         end if;
 
         wait for 200 ns;
@@ -449,13 +457,47 @@ begin
         wait for 50 ns;
 
         -- ================================================================
-        -- TEST 6: Supervisor violation
+        -- TEST 6: Long child-table stride (entry 1 at +8 bytes)
         -- ================================================================
         test_number <= 6;
-        report "TEST 6: Supervisor violation" severity note;
+        report "TEST 6: Long child-table stride (entry 1 at +8 bytes)" severity note;
 
-        -- Set long-format descriptor with S bit (bit 8 in HIGH word)
-        page_table_mem(1027) <= x"00000103"; -- Entry 3 at 0x1000+12, S bit set (bit 8), DT=11
+        -- Same mixed-format setup as TEST 5. Address 0x00C01100 selects child entry 1,
+        -- which must come from 0x3008/0x300C because the child table entries are 8 bytes.
+        fc <= "010"; -- User program
+        addr_log <= x"00C01100";
+        req <= '1';
+        wait until busy = '0' or fault = '1';
+        req <= '0';
+
+        wait for 50 ns;
+        if fault = '0' then
+            assert addr_phys = x"00210100"
+                report "TEST 6 FAIL: Long child-table stride used wrong entry spacing" severity error;
+            report "TEST 6 PASS: Long child-table stride handled correctly" severity note;
+        else
+            report "TEST 6 FAIL: Unexpected fault, fault=" &
+                   std_logic'image(fault) & " fault_status=0x" &
+                   integer'image(to_integer(unsigned(fault_status))) severity error;
+        end if;
+
+        wait for 200 ns;
+
+        -- Flush ATC before next test
+        pmmu_brief <= x"2400";
+        pflush_req <= '1';
+        wait until rising_edge(clk);
+        pflush_req <= '0';
+        wait for 50 ns;
+
+        -- ================================================================
+        -- TEST 7: Supervisor violation
+        -- ================================================================
+        test_number <= 7;
+        report "TEST 7: Supervisor violation" severity note;
+
+        -- Set S=1 in the long-format child page descriptor HIGH word.
+        page_table_mem(3072) <= x"00000101"; -- 0x3000 HIGH word: long page descriptor, S=1
 
         -- User mode access (FC=010)
         fc <= "010"; -- User program
@@ -466,15 +508,15 @@ begin
 
         wait for 50 ns;
         if fault = '1' and fault_status(13) = '1' then
-            report "TEST 6 PASS: Supervisor violation detected" severity note;
+            report "TEST 7 PASS: Supervisor violation detected" severity note;
         else
-            report "TEST 6 FAIL: Expected supervisor violation, fault=" &
+            report "TEST 7 FAIL: Expected supervisor violation, fault=" &
                    std_logic'image(fault) & " fault_status=0x" &
                    integer'image(to_integer(unsigned(fault_status))) severity error;
         end if;
 
         -- Clear S bit for next tests
-        page_table_mem(1027) <= x"00000003"; -- Entry 3 at 0x1000+12
+        page_table_mem(3072) <= x"00000001"; -- 0x3000 HIGH word: long page descriptor, S=0
         fc <= "101"; -- Supervisor program
 
         wait for 200 ns;
@@ -487,10 +529,10 @@ begin
         wait for 50 ns;
 
         -- ================================================================
-        -- TEST 7: FCL (Function Code Lookup) mode
+        -- TEST 8: FCL (Function Code Lookup) mode
         -- ================================================================
-        test_number <= 7;
-        report "TEST 7: FCL mode" severity note;
+        test_number <= 8;
+        report "TEST 8: FCL mode" severity note;
 
         -- Initialize TC with FCL=1: PS=12, IS=0, TIA=8, TIB=12, TIC=0, TID=0
         -- Field sum: 12 + 0 + 8 + 12 + 0 + 0 = 32 (valid)
@@ -520,10 +562,10 @@ begin
         wait for 50 ns;
         if fault = '0' then
             assert addr_phys = x"00300800"
-                report "TEST 7 FAIL: FCL mode walk failed" severity error;
-            report "TEST 7 PASS: FCL mode successful" severity note;
+                report "TEST 8 FAIL: FCL mode walk failed" severity error;
+            report "TEST 8 PASS: FCL mode successful" severity note;
         else
-            report "TEST 7 FAIL: Fault during FCL walk" severity error;
+            report "TEST 8 FAIL: Fault during FCL walk" severity error;
         end if;
 
         wait for 200 ns;
@@ -536,11 +578,11 @@ begin
         wait for 50 ns;
 
         -- ================================================================
-        -- TEST 8: Invalid root pointer (CRP_H DT=00) - walker must fault
+        -- TEST 9: Invalid root pointer (CRP_H DT=00) - walker must fault
         --         immediately without issuing any memory read
         -- ================================================================
-        test_number <= 8;
-        report "TEST 8: Invalid root pointer (CRP_H DT=00)" severity note;
+        test_number <= 9;
+        report "TEST 9: Invalid root pointer (CRP_H DT=00)" severity note;
 
         -- Write CRP with DT=00 (invalid root pointer)
         -- CRP_H: L/U=0, Limit=0, DT=00
@@ -569,9 +611,9 @@ begin
 
         wait for 50 ns;
         if fault = '1' and fault_status(10) = '1' then
-            report "TEST 8 PASS: Invalid root pointer (DT=00) fault detected" severity note;
+            report "TEST 9 PASS: Invalid root pointer (DT=00) fault detected" severity note;
         else
-            report "TEST 8 FAIL: Expected invalid root pointer fault, fault=" &
+            report "TEST 9 FAIL: Expected invalid root pointer fault, fault=" &
                    std_logic'image(fault) & " fault_status=0x" &
                    integer'image(to_integer(unsigned(fault_status))) severity error;
         end if;
@@ -586,10 +628,10 @@ begin
         wait for 50 ns;
 
         -- ================================================================
-        -- TEST 9: CRP_H DT=00 write fires mmu_config_err (Exception 56)
+        -- TEST 10: CRP_H DT=00 write fires mmu_config_err (Exception 56)
         -- ================================================================
-        test_number <= 9;
-        report "TEST 9: CRP_H DT=00 triggers MMU config exception" severity note;
+        test_number <= 10;
+        report "TEST 10: CRP_H DT=00 triggers MMU config exception" severity note;
 
         -- First restore valid CRP so we start from a known state
         write_pmmu_reg("10011", x"7FFFC002", '1'); -- CRP_H: valid DT=10
@@ -601,14 +643,14 @@ begin
         wait for 20 ns;
 
         if mmu_config_err = '1' then
-            report "TEST 9 PASS: mmu_config_err asserted on CRP_H DT=00 write" severity note;
+            report "TEST 10 PASS: mmu_config_err asserted on CRP_H DT=00 write" severity note;
             -- Acknowledge the config exception
             mmu_config_ack <= '1';
             wait until rising_edge(clk);
             mmu_config_ack <= '0';
             wait for 50 ns;
         else
-            report "TEST 9 FAIL: mmu_config_err NOT asserted on CRP_H DT=00 write" severity error;
+            report "TEST 10 FAIL: mmu_config_err NOT asserted on CRP_H DT=00 write" severity error;
         end if;
 
         wait for 200 ns;

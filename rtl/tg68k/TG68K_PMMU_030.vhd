@@ -2483,8 +2483,8 @@ begin
                      -- " addr=0x" & slv_to_hstring(saved_addr_log) &
                     --  -- " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
-            elsif desc_is_long(mem_rdat) then
-              -- Long format (DT=11) - need to read LOW word at addr+4
+            elsif walk_parent_dt_long = '1' then
+              -- Current entry is long because the parent selected 8-byte descriptors.
              --  -- report "W_ROOT: Long-format descriptor detected (DT=11), reading LOW word" severity note;
               walk_desc_is_long <= '1';
               wstate <= W_ROOT_LOW;
@@ -2496,7 +2496,7 @@ begin
               walk_desc_is_long <= '0';  -- Short format
               wstate <= W_PAGE;
             else
-              -- Table pointer (short format, DT=10) - continue to next level
+              -- Short-format table descriptor; DT selects the next table format.
               -- TABLE descriptor U-bit writeback: set U before continuing
               if ptest_walk_no_update = '0' and mem_rdat(3) = '0' then
                 desc_update_data <= mem_rdat(31 downto 4) & '1' & mem_rdat(2 downto 0);
@@ -2505,7 +2505,7 @@ begin
                 walk_addr <= mem_rdat(31 downto 4) & "0000";
                 walk_level <= walk_level + 1;
                 walk_limit_valid <= '0';
-                walk_parent_dt_long <= '0';
+                walk_parent_dt_long <= mem_rdat(1) and mem_rdat(0);
                 walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop: stop after ptest_level descriptors read
@@ -2526,7 +2526,7 @@ begin
                 walk_level <= walk_level + 1;
                 -- BUG #155 FIX: Short format has NO limit field
                 walk_limit_valid <= '0';
-                walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
+                walk_parent_dt_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects 8-byte descriptors in the next table
                 wstate <= W_PTR1;
               end if;
             end if;
@@ -2574,7 +2574,7 @@ begin
                 walk_limit_value <= unsigned(walk_desc_high(30 downto 16));
                 walk_supervisor <= walk_supervisor or walk_desc_high(8);
                 walk_write_protect <= walk_write_protect or walk_desc_high(2);  -- Accumulate WP from table descriptors
-                walk_parent_dt_long <= '1';
+                walk_parent_dt_long <= walk_desc_high(1) and walk_desc_high(0);
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
               elsif ptest_walk_pending = '1' and
@@ -2597,7 +2597,7 @@ begin
                 -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
                 walk_supervisor <= walk_supervisor or walk_desc_high(8);
                 walk_write_protect <= walk_write_protect or walk_desc_high(2);  -- Accumulate WP from table descriptors
-                walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
+                walk_parent_dt_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT=11 selects 8-byte descriptors in the next table
                 wstate <= W_PTR1;
               end if;
             end if;
@@ -2706,8 +2706,8 @@ begin
                        -- " at level=" & integer'image(walk_level)
                  --  -- severity note;
               end if;
-            elsif desc_is_long(mem_rdat) then
-              -- Long format (DT=11) - need to read LOW word at addr+4
+            elsif walk_parent_dt_long = '1' then
+              -- Current entry is long because the parent selected 8-byte descriptors.
              --  -- report "W_PTR1: Long-format descriptor detected (DT=11), reading LOW word" severity note;
               walk_desc_is_long <= '1';
               wstate <= W_PTR1_LOW;
@@ -2720,7 +2720,7 @@ begin
               -- DT=10 at final level = short-format indirect descriptor
               walk_desc_is_long <= '0';  -- Short format indirect
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
-              indirect_target_long <= '0';  -- BUG #164 FIX: DT=10 -> short-format target
+              indirect_target_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects a long-format indirect target
              --  -- report "W_PTR1: Short indirect descriptor detected (DT=10, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
@@ -2733,7 +2733,7 @@ begin
                 walk_addr <= mem_rdat(31 downto 4) & "0000";
                 walk_level <= walk_level + 1;
                 walk_limit_valid <= '0';
-                walk_parent_dt_long <= '0';
+                walk_parent_dt_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects 8-byte descriptors in the next table
                 walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
@@ -2753,7 +2753,7 @@ begin
                 walk_level <= walk_level + 1;
                 -- BUG #155 FIX: Short format has NO limit field
                 walk_limit_valid <= '0';
-                walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
+                walk_parent_dt_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects 8-byte descriptors in the next table
                 walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_PTR2;
               end if;
@@ -2790,7 +2790,7 @@ begin
               -- DT=11 at final level = long-format indirect descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
-              indirect_target_long <= '1';  -- BUG #164 FIX: DT=11 -> long-format target
+              indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT selects indirect target format
              --  -- report "W_PTR1_LOW: Long indirect descriptor (DT=11, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
@@ -2806,7 +2806,7 @@ begin
                 walk_limit_value <= unsigned(walk_desc_high(30 downto 16));
                 walk_supervisor <= walk_supervisor or walk_desc_high(8);
                 walk_write_protect <= walk_write_protect or walk_desc_high(2);  -- Accumulate WP from table descriptors
-                walk_parent_dt_long <= '1';
+                walk_parent_dt_long <= walk_desc_high(1) and walk_desc_high(0);
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
               elsif ptest_walk_pending = '1' and
@@ -2829,7 +2829,7 @@ begin
                 -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
                 walk_supervisor <= walk_supervisor or walk_desc_high(8);
                 walk_write_protect <= walk_write_protect or walk_desc_high(2);  -- Accumulate WP from table descriptors
-                walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
+                walk_parent_dt_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT=11 selects 8-byte descriptors in the next table
                 wstate <= W_PTR2;
               end if;
             end if;
@@ -2945,8 +2945,8 @@ begin
                        -- " at level=" & integer'image(walk_level)
                  --  severity note;
               end if;
-            elsif desc_is_long(mem_rdat) then
-              -- Long format (DT=11) - need to read LOW word at addr+4
+            elsif walk_parent_dt_long = '1' then
+              -- Current entry is long because the parent selected 8-byte descriptors.
              --  -- report "W_PTR2: Long-format descriptor detected (DT=11), reading LOW word" severity note;
               walk_desc_is_long <= '1';
               wstate <= W_PTR2_LOW;
@@ -2959,7 +2959,7 @@ begin
               -- DT=10 at final level = short-format indirect descriptor
               walk_desc_is_long <= '0';  -- Short format indirect
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
-              indirect_target_long <= '0';  -- BUG #164 FIX: DT=10 -> short-format target
+              indirect_target_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects a long-format indirect target
              --  -- report "W_PTR2: Short indirect descriptor detected (DT=10, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
@@ -2972,7 +2972,7 @@ begin
                 walk_addr <= mem_rdat(31 downto 4) & "0000";
                 walk_level <= walk_level + 1;
                 walk_limit_valid <= '0';
-                walk_parent_dt_long <= '0';
+                walk_parent_dt_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects 8-byte descriptors in the next table
                 walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
@@ -2992,7 +2992,7 @@ begin
                 walk_level <= walk_level + 1;
                 -- BUG #155 FIX: Short format has NO limit field
                 walk_limit_valid <= '0';
-                walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
+                walk_parent_dt_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects 8-byte descriptors in the next table
                 walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_PTR3;
               end if;
@@ -3029,7 +3029,7 @@ begin
               -- DT=11 at final level = long-format indirect descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
-              indirect_target_long <= '1';  -- BUG #164 FIX: DT=11 -> long-format target
+              indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT selects indirect target format
              --  -- report "W_PTR2_LOW: Long indirect descriptor (DT=11, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
@@ -3045,7 +3045,7 @@ begin
                 walk_limit_value <= unsigned(walk_desc_high(30 downto 16));
                 walk_supervisor <= walk_supervisor or walk_desc_high(8);
                 walk_write_protect <= walk_write_protect or walk_desc_high(2);  -- Accumulate WP from table descriptors
-                walk_parent_dt_long <= '1';
+                walk_parent_dt_long <= walk_desc_high(1) and walk_desc_high(0);
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
               elsif ptest_walk_pending = '1' and
@@ -3068,7 +3068,7 @@ begin
                 -- BUG #157 FIX: Accumulate S bit from long-format TABLE descriptor
                 walk_supervisor <= walk_supervisor or walk_desc_high(8);
                 walk_write_protect <= walk_write_protect or walk_desc_high(2);  -- Accumulate WP from table descriptors
-                walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
+                walk_parent_dt_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT=11 selects 8-byte descriptors in the next table
                 wstate <= W_PTR3;
               end if;
             end if;
@@ -3155,8 +3155,8 @@ begin
                      -- " addr=0x" & slv_to_hstring(saved_addr_log) &
                     --  -- " desc=0x" & slv_to_hstring(mem_rdat) severity note;
               wstate <= W_FAULT;
-            elsif desc_is_long(mem_rdat) then
-              -- Long format (DT=11) - need to read LOW word at addr+4
+            elsif walk_parent_dt_long = '1' then
+              -- Current entry is long because the parent selected 8-byte descriptors.
              --  -- report "W_PTR3: Long-format descriptor detected (DT=11), reading LOW word" severity note;
               walk_desc_is_long <= '1';
               wstate <= W_PTR3_LOW;
@@ -3170,7 +3170,7 @@ begin
               -- Target address is in bits 31:2 (must be 4-byte aligned)
               walk_desc_is_long <= '0';  -- Short format indirect
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
-              indirect_target_long <= '0';  -- BUG #164 FIX: DT=10 -> short-format target
+              indirect_target_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects a long-format indirect target
              --  -- report "W_PTR3: Short indirect descriptor detected (DT=10, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
@@ -3183,7 +3183,7 @@ begin
                 walk_addr <= mem_rdat(31 downto 4) & "0000";
                 walk_level <= walk_level + 1;
                 walk_limit_valid <= '0';
-                walk_parent_dt_long <= '0';
+                walk_parent_dt_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects 8-byte descriptors in the next table
                 walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
@@ -3202,7 +3202,7 @@ begin
                 walk_addr <= mem_rdat(31 downto 4) & "0000";
                 walk_level <= walk_level + 1;
                 walk_limit_valid <= '0';  -- Short format has no limit
-                walk_parent_dt_long <= '0';  -- BUG #409: DT=10 parent -> 4-byte entries in next table
+                walk_parent_dt_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects 8-byte descriptors in the next table
                 walk_write_protect <= walk_write_protect or mem_rdat(2);  -- BUG #438: Accumulate WP from short-format table descriptors
                 wstate <= W_PTR4;
               end if;
@@ -3239,7 +3239,7 @@ begin
               -- At final level with DT=11, this is a LONG INDIRECT descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
               indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
-              indirect_target_long <= '1';  -- BUG #164 FIX: DT=11 -> long-format target
+              indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT selects indirect target format
              --  -- report "W_PTR3_LOW: Long indirect descriptor (final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
               wstate <= W_INDIRECT;
             else
@@ -3255,7 +3255,7 @@ begin
                 walk_limit_value <= unsigned(walk_desc_high(30 downto 16));
                 walk_supervisor <= walk_supervisor or walk_desc_high(8);
                 walk_write_protect <= walk_write_protect or walk_desc_high(2);  -- Accumulate WP from table descriptors
-                walk_parent_dt_long <= '1';
+                walk_parent_dt_long <= walk_desc_high(1) and walk_desc_high(0);
                 wstate <= W_TABLE_UPDATE;
               -- PTEST level early-stop
               elsif ptest_walk_pending = '1' and
@@ -3278,7 +3278,7 @@ begin
                 -- Accumulate S bit from long-format TABLE descriptor
                 walk_supervisor <= walk_supervisor or walk_desc_high(8);
                 walk_write_protect <= walk_write_protect or walk_desc_high(2);  -- Accumulate WP from table descriptors
-                walk_parent_dt_long <= '1';  -- BUG #409: DT=11 parent -> 8-byte entries in next table
+                walk_parent_dt_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT=11 selects 8-byte descriptors in the next table
                 wstate <= W_PTR4;
               end if;
             end if;
@@ -3361,8 +3361,8 @@ begin
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
               wstate <= W_FAULT;
-            elsif desc_is_long(mem_rdat) then
-              -- Long format (DT=11) - need to read LOW word at addr+4
+            elsif walk_parent_dt_long = '1' then
+              -- Current entry is long because the parent selected 8-byte descriptors.
               walk_desc_is_long <= '1';
               wstate <= W_PTR4_LOW;
             elsif desc_is_page(mem_rdat) then
@@ -3374,7 +3374,7 @@ begin
               -- W_PTR4 is always final level (TID is last TI field)
               walk_desc_is_long <= '0';
               indirect_addr <= mem_rdat(31 downto 2) & "00";
-              indirect_target_long <= '0';
+              indirect_target_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects a long-format indirect target
               wstate <= W_INDIRECT;
             end if;
           end if;
@@ -3406,7 +3406,7 @@ begin
               -- DT=11 at final level = long-format indirect descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
               indirect_addr <= mem_rdat(31 downto 2) & "00";
-              indirect_target_long <= '1';
+              indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT selects indirect target format
               wstate <= W_INDIRECT;
             end if;
           end if;
@@ -3523,10 +3523,10 @@ begin
                    -- " addr=0x" & slv_to_hstring(saved_addr_log) &
                   --  -- " desc=0x" & slv_to_hstring(walk_desc) severity note;
             wstate <= W_FAULT;
-          elsif saved_fc(2) = '0' and walk_supervisor = '1' and walk_is_root_pointer = '0' then
-            -- BUG #157 FIX: Supervisor violation check uses cumulative S bit from TABLE descriptors
-            -- Per MC68030 spec: S bit only exists in TABLE descriptors, not PAGE descriptors
-            -- User code (FC2=0) cannot access pages reached through supervisor-only tables
+          elsif saved_fc(2) = '0' and
+                (walk_supervisor = '1' or get_supervisor_bit(walk_desc_high, walk_desc_is_long) = '1') and
+                walk_is_root_pointer = '0' then
+            -- User accesses fault if any long table or long page descriptor marked the mapping supervisor-only.
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '0',
@@ -3600,8 +3600,8 @@ begin
               end if;
             end if;
             -- Extract attributes - bit positions are same in both formats
-            -- BUG #157 FIX: U_ACC uses cumulative S bit from TABLE descriptors, not page descriptor
-            walk_attr(3) <= NOT walk_supervisor; -- U_ACC = NOT(S): 1=user accessible, 0=supervisor-only
+            -- U_ACC must reflect supervisor-only protection from long table and long page descriptors.
+            walk_attr(3) <= not (walk_supervisor or get_supervisor_bit(walk_desc_high, walk_desc_is_long)); -- U_ACC = NOT(S): 1=user accessible, 0=supervisor-only
             walk_attr(2) <= walk_desc_high(6); -- Cache inhibit (CI)
             walk_attr(1) <= walk_desc_high(4); -- Modified (M)
             walk_attr(0) <= walk_desc_high(2) or walk_write_protect; -- WP from page + accumulated table WP

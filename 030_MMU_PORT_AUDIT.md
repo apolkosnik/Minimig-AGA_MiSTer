@@ -342,12 +342,23 @@ Patch-file export follow-up:
 - `0001-5e89616-chk-l-odd-address-error.patch`
   - Fix/skip decision: skip the exported RTL hunk, port the maintained coverage. The cleaned kernel already retires the real MC68020/030 case correctly: `CHK.L (A1)+,D0` with `A1=$2001` reaches vector 6 instead of vector 3, so the extra `odd_prog_fetch` / `eff_busstate` RTL split is not needed here.
   - Maintained follow-up: add [tb_chk_long_odd_addr.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_chk_long_odd_addr.vhd) for the direct odd-source regression, add the odd-source stacked-trace case to [tb_chk_stacked_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_chk_stacked_trace.vhd), and wire the standalone reproducer into [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) via `test-chk-long-odd-addr` and `test-arch-suite`.
+- `0001-FORMAT-A-and-B-stubs-fixes.patch`
+  - Fix/skip decision: split the patch. The hidden Format `$A/$B` retry-state restore pieces remain skipped with the same rationale as `694499b` / `29b914e` / `eb63ffb`, and its invalid-TC "keep `E=1` and just raise `mmu_config_err`" expectation was rejected because the Motorola manual says an MMU-configuration fault clears `TC.E`.
+  - Real missing behavior found and fixed:
+    - the cleaned walker was still using the current descriptor's `DT` to decide whether the current entry was long, instead of using the parent descriptor format for current-entry size and the current descriptor `DT` only for the next table / indirect-target format. That broke short-parent to long-child walks and 8-byte child-table stride;
+    - the cleaned PMMU was also ignoring the `S` bit in long-format page descriptors, even though the manual states that long-format page descriptors as well as long-format table descriptors can mark mappings supervisor-only.
+  - Maintained follow-up:
+    - keep the mixed-format and 8-byte child-stride coverage in [tests/tg68k_030/tb_pmmu_walker_comprehensive.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_pmmu_walker_comprehensive.vhd);
+    - fix [rtl/tg68k/TG68K_PMMU_030.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68K_PMMU_030.vhd) so current-entry long/short selection follows the parent descriptor format, next-level stride and indirect-target format follow the current descriptor `DT`, and long-format page `S` bits participate in supervisor-only faulting and `U_ACC` generation;
+    - correct the maintained supervisor-violation walker case so it sets `S=1` in the long child page descriptor, not in the short parent descriptor.
 - Patch-file follow-up verification:
   - `make -C tests/tg68k_030 test-pflush-ptest-pload`: 21 passed, 0 failed
   - `make -C tests/tg68k_030 test-berr-frame`: 15 passed, 0 failed
   - `make -C tests/tg68k_030 test-fault`: fault-handling suite completed successfully
   - `make -C tests/tg68k_030 test-chk-long-odd-addr`: pass; direct odd-source reproducer reports `PASS: CHK.L odd source address raised vector 6 (CHK)`
   - `make -C tests/tg68k_030 test-chk-stacked-trace`: pass; the added `CHK.L (A1)+,D0` stacked-trace case records pass markers for both the trace frame (`$2024`, `PC/IA=$2000`) and the CHK frame (`$2018`, `PC=$1012`, `IA=$1010`)
+  - `make -C tests/tg68k_030 test-pmmu-walker`: pass; all 10 maintained walker cases now pass, including the mixed-format child-table walk, the 8-byte child stride case, and the long-page supervisor-only case
+  - `make -C tests/tg68k_030 test-advanced`: maintained advanced PMMU suite completed successfully with the walker fixes in place
 
 interrupt_mode focused follow-up:
 - The late local `interrupt_mode_clocked_fix` source commit (`9973f15`) was already present in RTL, but the maintained tree still lacked a focused in-tree regression for the interrupt-to-`RTE` stack-selection area.
