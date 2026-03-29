@@ -308,3 +308,16 @@ Late local-branch verification:
 - `make -C tests/tg68k_030 test-pflush-ptest-pload`: 18 passed, 0 failed
 - `make -C tests/tg68k_030 test-rte-formats`: 30 passed, 0 failed
 - `make -C tests/tg68k_030 test-stack-frame-push`: completed successfully
+
+interrupt_mode focused follow-up:
+- The late local `interrupt_mode_clocked_fix` source commit (`9973f15`) was already present in RTL, but the maintained tree still lacked a focused in-tree regression for the interrupt-to-`RTE` stack-selection area.
+- First-draft triage result: a focused bench disproved the older source-branch assumption that interrupt context should stay on ISP after `RTE` restores supervisor `M=1`. The core returned through MSP, and the reference cross-check showed that was correct:
+  - the Motorola manual says the active supervisor stack is selected by the live `S` and `M` bits, and explicitly states that when `S=1` and `M=1`, MSP is active while `S=1` and `M=0` uses ISP;
+  - WinUAE's [`MakeFromSR_x()`](/home/adam/Downloads/WinUAE-master/newcpu.cpp) swaps `A7` purely on `S/M` transitions, with no hidden interrupt-context override, so a supervisor `M=1` restore lands on `regs.msp`;
+  - `wf68k30L_address_registers.vhd` likewise muxes the active supervisor stack from `SBIT`/`MBIT` alone (`MBIT='1'` -> `MSP_REG`, `MBIT='0'` -> `ISP_REG`).
+- Maintained coverage added: new [tb_interrupt_mode_stack.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_interrupt_mode_stack.vhd) takes a real level-7 autovector interrupt after setting `MSP=$0A00` and active `ISP/A7=$0900`, builds a nested Format `$0` frame that `RTE`s to supervisor `SR=$3000`, and then immediately executes another `RTE`. The second `RTE` must now return through the MSP frame at `$1400`, not through the older interrupt-context ISP frame patched to `$1300`. The maintained wrapper in [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) also wires this into `test-rte-abcd-suite`.
+- Fix/skip decision: no new RTL port commit needed. The cleaned kernel already carries the late source-branch `interrupt_mode_set_req` / `interrupt_mode_clr_req` implementation in [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd); the follow-up here is maintained regression coverage and explicit rejection of the earlier non-spec ISP-retention assumption.
+- Follow-up verification:
+  - `make -C tests/tg68k_030 test-interrupt-mode-stack`: pass; the nested supervisor-`M=1` return switched active stack back to MSP and the second `RTE` reached `$1400`
+  - `make -C tests/tg68k_030 test-rte-abcd-suite`: completed successfully with the new interrupt-mode regression in the wrapper
+  - `make -C tests/tg68k_030 test-arch-suite`: maintained architecture/edge-case suite completed successfully
