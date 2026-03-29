@@ -563,3 +563,20 @@ Hardware `ODD_EXC` / BASIC CHK-DIV flag follow-up:
   - [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now wires those in as `test-odd-exc-flags` and `test-basic-exception-flags`, with the BASIC bench included under `test-basic-cputest`
 - Fix/keep decision: keep. This is architectural flag-image correction for the 68020/030 CHK and unsigned divide-by-zero paths, not a cputest-only workaround.
 - Wrapper follow-up: after the CHK/divide flag fix and the earlier `ODD_IRQ` `RTE` fix, the packaged cputest benches are no longer diagnostic-only. [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now routes `test-basic-cputest`, `test-odd-exc-flags`, and `test-odd-irq-regwrite` through `test-arch-suite`, so both `validate` and `test-comprehensive` gate the packaged BASIC / `ODD_EXC` / `ODD_IRQ` coverage.
+
+mmu.library photographed access-fault follow-up:
+- After the user provided an HRTMon capture showing `Debug Mode: Bus error`, `$B000 Access Fault`, and `PC=$4031D72C`, I checked the matching block in [mmu.library_V4.asm](/home/adam/Downloads/mmu.library_V4.asm). The photographed code is the sentinel/failure path:
+  - `MOVE.L (A0),D0`
+  - `CMP.L #$DEADF00D,D0`
+  - `BNE.B ...`
+  - `ADDQ.L #1,(SP)`
+  - `MOVEA.L (8,SP),A1`
+  - `JSR (-$C6,A6)`
+- Maintained follow-up: add [tb_mmu_library_failure_path.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_mmu_library_failure_path.vhd) and wire [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) with `test-mmu-library-failure-path`. The bench models that exact block with:
+  - a sentinel mismatch case (`D0=$FFFFFFFF`) that takes the `BNE` cleanup path;
+  - a sentinel match case (`D0=$DEADF00D`) that executes the `ADDQ.L #1,(SP)` side first;
+  - a fake library vector at `A6-$C6` that records the incoming `A1` and call-entry `A7`;
+  - vector-2 / vector-3 / vector-11 handlers that write `BAD00002` / `BAD00003` / `BAD0000B` if any unexpected bus/address/F-line exception occurs.
+- Current disposition: this isolated reproducer is meant to answer whether the photographed short block itself is sufficient to trigger the access fault. If it passes, the photographed `$B000` fault likely depends on surrounding real-library state or the callee reached via `-C6(A6)`, not just the local `CMP/BNE/JSR` sequence. That is an inference from the focused bench, not a direct proof about the full `mmu.library` runtime.
+- Focused verification:
+  - `make -C tests/tg68k_030 test-mmu-library-failure-path`: 12 passed, 0 failed; both the sentinel-mismatch cleanup call and the sentinel-match `ADDQ.L #1,(SP)` path reach the fake `-C6(A6)` vector without vector-2/vector-3/vector-11 exceptions in isolation
