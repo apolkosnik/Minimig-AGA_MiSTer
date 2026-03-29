@@ -96,6 +96,11 @@ signal clk           : std_logic := '0';
     -- Test counters
     signal test_pass     : integer := 0;
     signal test_fail     : integer := 0;
+    signal mem_read_count : integer := 0;
+    signal mem_read_count_clear : std_logic := '0';
+    signal mem_stall_cycles : integer range 0 to 31 := 0;
+    signal mem_wait_count : integer range 0 to 31 := 0;
+    signal mem_req_prev : std_logic := '0';
 
     -- Page table memory
     type mem_array_t is array (0 to 4095) of std_logic_vector(31 downto 0);
@@ -158,26 +163,73 @@ begin
     begin
         if rising_edge(clk) then
             mem_ack <= '0';
-            if mem_req = '1' then
-                idx := to_integer(unsigned(mem_addr(13 downto 2)));
-                if idx < 4096 then
-                    mem_rdat <= page_table(idx);
+            mem_req_prev <= mem_req;
+            if mem_read_count_clear = '1' then
+                mem_read_count <= 0;
+                mem_wait_count <= 0;
+            elsif mem_req = '1' then
+                if mem_req_prev = '0' then
+                    if mem_stall_cycles > 0 then
+                        mem_wait_count <= mem_stall_cycles - 1;
+                    else
+                        mem_wait_count <= 0;
+                        idx := to_integer(unsigned(mem_addr(13 downto 2)));
+                        if idx < 4096 then
+                            mem_rdat <= page_table(idx);
+                        else
+                            mem_rdat <= x"00000000";
+                        end if;
+                        mem_ack <= '1';
+                        mem_read_count <= mem_read_count + 1;
+                        report "MEM_READ: addr=0x" & slv_to_hex(mem_addr) &
+                               " data=0x" & slv_to_hex(page_table(idx));
+                    end if;
+                elsif mem_wait_count > 0 then
+                    mem_wait_count <= mem_wait_count - 1;
                 else
-                    mem_rdat <= x"00000000";
+                    idx := to_integer(unsigned(mem_addr(13 downto 2)));
+                    if idx < 4096 then
+                        mem_rdat <= page_table(idx);
+                    else
+                        mem_rdat <= x"00000000";
+                    end if;
+                    mem_ack <= '1';
+                    mem_read_count <= mem_read_count + 1;
+                    report "MEM_READ: addr=0x" & slv_to_hex(mem_addr) &
+                           " data=0x" & slv_to_hex(page_table(idx));
                 end if;
-                mem_ack <= '1';
-                report "MEM_READ: addr=0x" & slv_to_hex(mem_addr) &
-                       " data=0x" & slv_to_hex(page_table(idx));
+            else
+                mem_wait_count <= 0;
             end if;
         end if;
     end process;
 
     test_process: process
+        variable timeout : integer;
         procedure wait_cycles(n : integer) is
         begin
             for i in 1 to n loop
                 wait until rising_edge(clk);
             end loop;
+        end procedure;
+
+        procedure clear_mem_read_count is
+        begin
+            mem_read_count_clear <= '1';
+            wait_cycles(1);
+            mem_read_count_clear <= '0';
+            wait_cycles(1);
+        end procedure;
+
+        procedure settle_fault_state is
+            variable timeout : integer;
+        begin
+            timeout := 0;
+            while (busy = '1' or mem_req = '1') and timeout < 20 loop
+                wait_cycles(1);
+                timeout := timeout + 1;
+            end loop;
+            wait_cycles(4);
         end procedure;
 
         procedure write_reg(sel : std_logic_vector(4 downto 0);
@@ -517,6 +569,65 @@ begin
         report "Verifying translation still works after flush...";
         translate_and_check(x"00000000", false);
 
+        report "" severity note;
+        report "=== SECTION 1B: PFLUSHA While Walker Busy ===" severity note;
+
+        -- Repopulate ATC, then issue PFLUSHA while a stalled walk is active.
+        translate_and_check(x"00000000", false);
+        mem_stall_cycles <= 6;
+        wait_cycles(1);
+
+        addr_log <= x"00002000";
+        fc <= "101";
+        rw <= '1';
+        req <= '1';
+        wait_cycles(1);
+
+        timeout := 0;
+        while busy = '0' and timeout < 20 loop
+            wait_cycles(1);
+            timeout := timeout + 1;
+        end loop;
+
+        if timeout >= 20 then
+            report "FAIL: Timed out waiting for stalled walker before busy PFLUSHA" severity error;
+            test_fail <= test_fail + 1;
+            req <= '0';
+            mem_stall_cycles <= 0;
+            wait_cycles(2);
+        else
+            report "Issuing PFLUSHA while walker busy...";
+            pmmu_brief <= x"2400";
+            pflush_req <= '1';
+            wait_cycles(1);
+            pflush_req <= '0';
+
+            timeout := 0;
+            while busy = '1' and timeout < 120 loop
+                wait_cycles(1);
+                timeout := timeout + 1;
+            end loop;
+
+            req <= '0';
+            mem_stall_cycles <= 0;
+            wait_cycles(2);
+
+            if timeout >= 120 then
+                report "FAIL: Timed out waiting for walker completion after busy PFLUSHA" severity error;
+                test_fail <= test_fail + 1;
+            else
+                clear_mem_read_count;
+                translate_and_check(x"00000000", false);
+                if mem_read_count > 0 then
+                    report "  Busy-time PFLUSHA cleared the cached entry after walker completion";
+                    test_pass <= test_pass + 1;
+                else
+                    report "  Busy-time PFLUSHA was lost; cached translation survived without any table reads" severity error;
+                    test_fail <= test_fail + 1;
+                end if;
+            end if;
+        end if;
+
         -- ============================================
         -- SECTION 2: PFLUSH FC,mask Tests
         -- ============================================
@@ -568,10 +679,25 @@ begin
 
         -- Cached fault replay must preserve original MMUSR class.
         report "Creating cached ATC fault entry for WP page...";
+        clear_mem_read_count;
         translate_and_check_rw(x"00004000", '0', true);  -- first fault populates ATC
+        if mem_read_count > 0 then
+            test_pass <= test_pass + 1;
+        else
+            report "  Expected initial WP fault to perform a table walk" severity error;
+            test_fail <= test_fail + 1;
+        end if;
+        settle_fault_state;
         report "Replaying cached ATC fault entry for WP page...";
+        clear_mem_read_count;
         translate_and_check_rw(x"00004000", '0', true);  -- second fault should hit cached entry
         report "Fault status after cached WP replay: 0x" & slv_to_hex(fault_status(15 downto 0));
+        if mem_read_count = 0 then
+            test_pass <= test_pass + 1;
+        else
+            report "  Expected cached WP replay to avoid a second table walk" severity error;
+            test_fail <= test_fail + 1;
+        end if;
         if fault_status(11) = '1' and fault_status(15) = '0' and fault_status(10) = '0' then
             test_pass <= test_pass + 1;
         else
@@ -580,10 +706,25 @@ begin
         end if;
 
         report "Creating cached ATC fault entry for invalid page...";
+        clear_mem_read_count;
         translate_no_check_rw(x"00005000", '1');  -- populate cache; replay check below is the real assertion
+        settle_fault_state;
+        if mem_read_count > 0 then
+            test_pass <= test_pass + 1;
+        else
+            report "  Expected initial invalid fault to perform a table walk" severity error;
+            test_fail <= test_fail + 1;
+        end if;
         report "Replaying cached ATC fault entry for invalid page...";
+        clear_mem_read_count;
         translate_and_check_rw(x"00005000", '1', true);  -- second fault should hit cached entry
         report "Fault status after cached invalid replay: 0x" & slv_to_hex(fault_status(15 downto 0));
+        if mem_read_count = 0 then
+            test_pass <= test_pass + 1;
+        else
+            report "  Expected cached invalid replay to avoid a second table walk" severity error;
+            test_fail <= test_fail + 1;
+        end if;
         if fault_status(10) = '1' and fault_status(15) = '0' and fault_status(11) = '0' then
             test_pass <= test_pass + 1;
         else

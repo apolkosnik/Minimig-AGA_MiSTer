@@ -197,6 +197,7 @@ architecture rtl of TG68K_PMMU_030 is
   type atc_shift_t is array(0 to ATC_ENTRIES-1) of integer range 0 to 32;
   type atc_page_size_t is array(0 to ATC_ENTRIES-1) of integer range 0 to 15; -- MC68030 PS field value (8-15)
   type atc_level_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(2 downto 0); -- BUG #412: walk level for MMUSR N field
+  type atc_fault_status_t is array(0 to ATC_ENTRIES-1) of std_logic_vector(15 downto 0); -- Cached MMUSR fault class for ATC fault entries
   signal atc_log_base : atc_base_t;
   signal atc_phys_base: atc_base_t;
   signal atc_attr  : atc_attr_t;
@@ -208,7 +209,8 @@ architecture rtl of TG68K_PMMU_030 is
   signal atc_global : atc_val_t;  -- G bit: global page (survives PFLUSHAN)
   signal atc_level : atc_level_t;  -- BUG #412: walk level count for MMUSR N field
   signal atc_mru   : atc_val_t;  -- Pseudo-LRU: MRU bit per entry (1=recently used)
-  signal atc_buserr : atc_val_t;  -- Bus error cached: invalid/supervisor-violation (per WinUAE)
+  signal atc_buserr : atc_val_t;  -- Cached fault entry present in ATC; fault class comes from atc_fault_status
+  signal atc_fault_status : atc_fault_status_t;
   signal atc_mru_update_req : std_logic := '0';  -- Request MRU update from translation process
   signal atc_mru_update_idx : integer range 0 to ATC_ENTRIES-1 := 0;  -- Index to update
   signal atc_mbit_inval_req : std_logic := '0';  -- Request ATC invalidation for M-bit miss (per WinUAE)
@@ -1606,18 +1608,8 @@ begin
               -- Walker fault is pending - don't overwrite with ATC results
              --  -- report "ATC_SKIP: Skipping ATC processing due to pending walker fault, addr=0x" & slv_to_hstring(addr_log) severity note;
             elsif atc_buserr(hit_idx) = '1' then
-              -- ATC bus_error cached: invalid or supervisor-violation descriptor
-              -- Per WinUAE: generate immediate fault without re-walking
-              status_tmp := encode_mmusr_fault(
-                bus_error => '1',
-                limit_violation => '0',
-                supervisor_violation => '0',
-                write_protect => '0',
-                invalid => '1',
-                modified => '0',
-                transparent => '0',
-                level => atc_level(hit_idx)
-              );
+              -- Cached ATC fault entry: replay the original MMUSR fault class.
+              status_tmp := x"0000" & atc_fault_status(hit_idx);
               fault_reg <= '1';
               fault_status_reg <= status_tmp;
               -- Debug: capture fault status in sticky latch
@@ -1856,17 +1848,8 @@ begin
             if hit = '1' then
               -- ATC hit - report entry status in MMUSR
               if atc_buserr(hit_idx) = '1' then
-                -- Bus error cached in ATC - report B and I bits
-                mmusr_update_value <= encode_mmusr_fault(
-                  bus_error => '1',
-                  limit_violation => '0',
-                  supervisor_violation => '0',
-                  write_protect => '0',
-                  invalid => '1',
-                  modified => '0',
-                  transparent => '0',
-                  level => atc_level(hit_idx)
-                );
+                -- Cached fault entry: report the original MMUSR fault class.
+                mmusr_update_value <= x"0000" & atc_fault_status(hit_idx);
               else
                 -- Normal ATC hit - report WP and M from ATC attributes
                 mmusr_update_value <= encode_mmusr_success(
@@ -2006,17 +1989,8 @@ begin
               -- Bus error entry - do NOT treat as valid translation
               -- fault_reg was already set by the walker_fault handler, preserve it
               -- addr_phys_reg was already set to saved_addr_log by fault handler
-              -- Just update MMUSR for PTEST visibility
-              status_tmp := encode_mmusr_fault(
-                bus_error => '1',
-                limit_violation => '0',
-                supervisor_violation => '0',
-                write_protect => '0',
-                invalid => '1',
-                modified => '0',
-                transparent => '0',
-                level => atc_level(hit_idx)
-              );
+              -- Just update MMUSR for PTEST visibility using the cached original status.
+              status_tmp := x"0000" & atc_fault_status(hit_idx);
               mmusr_update_value <= status_tmp;
               mmusr_update_req <= '1';
             -- Walker filled ATC successfully - check access violations for the original request
@@ -2203,6 +2177,7 @@ begin
         atc_attr(i)      <= (others => '0');
         atc_level(i)     <= (others => '0');  -- BUG #412: walk level for MMUSR
         atc_buserr(i)    <= '0';  -- BUG #436: Initialize bus error flag
+        atc_fault_status(i) <= (others => '0');
       end loop;
       for i in 0 to ATC_ENTRIES-1 loop
         atc_mru(i)   <= '0';
@@ -3830,6 +3805,7 @@ begin
           atc_level(replace_idx)     <= std_logic_vector(to_unsigned(walk_level + 1, 3));
           atc_valid(replace_idx)     <= '1';
           atc_buserr(replace_idx)    <= '0';  -- BUG #436: Clear bus error flag for successful walk
+          atc_fault_status(replace_idx) <= (others => '0');
           -- Pseudo-LRU: set MRU bit, reset all if all become set
           atc_mru(replace_idx) <= '1';
           all_mru_set := true;
@@ -3875,8 +3851,8 @@ begin
             -- PTEST updates MMUSR only; it must not populate the ATC on success or failure.
             wstate <= W_IDLE;
           else
-            -- Cache fault in ATC (per WinUAE: invalid/supervisor-violation cached with bus_error=true)
-            -- This avoids re-walking on repeated accesses to invalid pages
+            -- Cache the original MMUSR fault class in the ATC so repeated hits
+            -- replay the same B/L/S/W/I combination without re-walking.
             found_invalid := false;
             replace_idx := 0;
             for i in 0 to ATC_ENTRIES-1 loop
@@ -3900,9 +3876,10 @@ begin
             atc_attr(replace_idx)      <= (others => '0');  -- No valid attributes
             atc_fc(replace_idx)        <= saved_fc;
             atc_global(replace_idx)    <= '0';
-            atc_level(replace_idx)     <= std_logic_vector(to_unsigned(walk_level, 3));
+            atc_level(replace_idx)     <= walker_fault_status(2 downto 0);
             atc_valid(replace_idx)     <= '1';
-            atc_buserr(replace_idx)    <= '1';  -- Mark as bus error entry
+            atc_buserr(replace_idx)    <= '1';  -- Mark as cached fault entry
+            atc_fault_status(replace_idx) <= walker_fault_status(15 downto 0);
             atc_mru(replace_idx) <= '1';
             walker_completed <= '1';  -- Signal that walker completed (with fault)
             wstate <= W_IDLE;
@@ -3937,6 +3914,7 @@ begin
         atc_valid(atc_mbit_inval_idx) <= '0';
         atc_mru(atc_mbit_inval_idx) <= '0';
         atc_buserr(atc_mbit_inval_idx) <= '0';
+        atc_fault_status(atc_mbit_inval_idx) <= (others => '0');
       end if;
       -- PFLUSH instruction: Clear ATC when flag is set and walker is idle
       if atc_flush_req = '1' then
@@ -3944,6 +3922,7 @@ begin
           atc_valid(i) <= '0';
           atc_mru(i) <= '0';
           atc_buserr(i) <= '0';
+          atc_fault_status(i) <= (others => '0');
         end loop;
       end if;
       if pflush_clear_atc = '1' and wstate = W_IDLE then
@@ -3961,6 +3940,7 @@ begin
             atc_valid(i) <= '0';
             atc_mru(i) <= '0';
             atc_buserr(i) <= '0';
+            atc_fault_status(i) <= (others => '0');
           end loop;
         elsif pflush_mode(12 downto 10) = "001" and pflush_mode(9) = '1' then
           -- PFLUSHAN - flush all non-global entries per MC68030 spec (MODE=001, A=1)
@@ -3970,6 +3950,7 @@ begin
               atc_valid(i) <= '0';  -- Only flush non-global entries
               atc_mru(i) <= '0';
               atc_buserr(i) <= '0';
+              atc_fault_status(i) <= (others => '0');
             end if;
           end loop;
         elsif pflush_mode(12 downto 10) = "100" then
@@ -3985,6 +3966,7 @@ begin
                   atc_valid(i) <= '0';
                   atc_mru(i) <= '0';
                   atc_buserr(i) <= '0';
+                  atc_fault_status(i) <= (others => '0');
                 end if;
               end if;
             end if;
@@ -4001,6 +3983,7 @@ begin
                   atc_valid(i) <= '0';
                   atc_mru(i) <= '0';
                   atc_buserr(i) <= '0';
+                  atc_fault_status(i) <= (others => '0');
                 end if;
               end if;
             end if;
@@ -4068,6 +4051,7 @@ begin
   begin
     if nreset = '0' then
       ptest_update_mmusr <= '0';
+      pflush_active <= '0';
       pflush_clear_atc <= '0';
       ptest_req_prev <= '0';
       pflush_req_prev <= '0';
@@ -4109,9 +4093,14 @@ begin
         pflush_mask <= pmmu_brief(7 downto 5);  -- BUG E FIX: Capture FC comparison mask
         pflush_clear_atc <= '1';
       elsif pflush_active = '1' then
-        -- PFLUSH operation active - clear after one cycle
-        pflush_active <= '0';
-        pflush_clear_atc <= '0';
+        -- Keep the clear request live until the flush logic can service it.
+        -- A one-cycle pulse is lost if a walker is still active when PFLUSH fires.
+        if wstate = W_IDLE then
+          pflush_active <= '0';
+          pflush_clear_atc <= '0';
+        else
+          pflush_clear_atc <= '1';
+        end if;
       else
         pflush_clear_atc <= '0';
       end if;

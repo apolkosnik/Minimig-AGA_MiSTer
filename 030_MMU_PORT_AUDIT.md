@@ -309,7 +309,15 @@ Late local-branch-only review:
 - Fix/skip decision: skip the whole cluster. The Motorola manuals define the software-visible frame contents, but they do not require restoring invisible internal retry state into the live machine after `RTE`; WinUAE and `wf68k30L` do not rely on equivalent live restore machinery either. The cleaned branch never adopted that path, and it still passes the maintained architectural regressions, so replaying that experimental logic would add risk without a compliance win.
 - `82993c3`
 - Summary: cached ATC-fault replay classification cleanup plus direct-PMMU testbench additions.
-- Fix/skip decision: behavior already covered; no literal replay needed. The maintained [tb_pflush_ptest_pload.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_pflush_ptest_pload.vhd) in this branch already includes the cached WP/invalid replay checks from that late source work and passes against the cleaned PMMU.
+- Fix/skip decision: the earlier commit-level audit was too broad here. A direct pass over the exported mail-format patch [0003-PFLUSH-ATC-clear-gated-by-walker-state.patch](/home/adam/030_mmu/Minimig-AGA_MiSTer/0003-PFLUSH-ATC-clear-gated-by-walker-state.patch) showed the cleaned tree still lacked several real pieces of that end-state:
+  - `pflush_clear_atc` was still a one-cycle pulse and could be lost while the walker was busy;
+  - cached ATC fault entries stored `atc_buserr` but not the original MMUSR class end-to-end, so one ATC-fault replay path still synthesized a generic B/I fault instead of reusing the recorded status;
+  - cached ATC fault entries still recorded `walk_level` instead of the actual latched MMUSR level bits;
+  - PMMU Format `$A` SSW `SIZE` still came from live `datatype` instead of a first-fire PMMU datatype latch in the kernel.
+- Local fix: port those missing behaviors into [rtl/tg68k/TG68K_PMMU_030.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68K_PMMU_030.vhd) and [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd), and strengthen the maintained direct PMMU regression in [tests/tg68k_030/tb_pflush_ptest_pload.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_pflush_ptest_pload.vhd) so it now proves:
+  - `PFLUSHA` asserted during a live walk still clears the ATC once the walker returns idle;
+  - cached WP and invalid fault replays keep the original MMUSR class (`W=1,B=0,I=0` and `I=1,B=0,W=0`);
+  - the replay access itself returns without any new PMMU table reads once the prior fault handshake has drained.
 
 Late local-branch verification:
 - `make -C tests/tg68k_030 test-pmove-crp-mem-to-mmu-postinc`: pass; maintained `(A7)+,CRP` mem-to-MMU regression still reads `$2000/$2002/$2004/$2006` and then continues at `$2008/$200A`
@@ -318,6 +326,23 @@ Late local-branch verification:
 - `make -C tests/tg68k_030 test-pflush-ptest-pload`: 18 passed, 0 failed
 - `make -C tests/tg68k_030 test-rte-formats`: 30 passed, 0 failed
 - `make -C tests/tg68k_030 test-stack-frame-push`: completed successfully
+
+Patch-file export follow-up:
+- After the user pointed directly at the loose `0001-0004*.patch` exports under `/home/adam/030_mmu/Minimig-AGA_MiSTer`, those patch files were audited separately instead of relying only on commit history.
+- `0001-pmmu_dn_read_wait-wrongly-allowed-PMMU-readback-writ.patch`
+  - Fix/skip decision: no new local commit needed. The cleaned tree already had the same end-state: Dn-only register write-enable in `pmmu_dn_read_wait`, correct PMOVE mem-to-MMU low-word operand hold, and the fixed ALU increment behavior used by PMMU auto-modify paths.
+- `0001-BUG430-bus-timeout-BERR-fix-no-fake-chipready.patch`
+  - Fix/skip decision: no new local commit needed. The current wrapper already holds `clkena_in` open on bus-error release and suppresses fake `chipready` during the BERR path.
+- `0002-berr_retry_active-was-being-set-by-RTE-restore-and-o.patch`
+  - Fix/skip decision: skip. This is part of the experimental hidden retry-state restore cluster already rejected above on manuals/WinUAE/wf68k30L grounds.
+- `0003-PFLUSH-ATC-clear-gated-by-walker-state.patch`
+  - Fix/skip decision: partially missing in the cleaned tree and ported locally as described above under `82993c3`.
+- `0004-disabled-RTE-restoring-bus-MMU-internal-frame-state-.patch`
+  - Fix/skip decision: skip. This is the "disable the hidden retry-state restore again" half of the same experimental cluster and is not a Motorola-architectural requirement.
+- Patch-file follow-up verification:
+  - `make -C tests/tg68k_030 test-pflush-ptest-pload`: 21 passed, 0 failed
+  - `make -C tests/tg68k_030 test-berr-frame`: 15 passed, 0 failed
+  - `make -C tests/tg68k_030 test-fault`: fault-handling suite completed successfully
 
 interrupt_mode focused follow-up:
 - The late local `interrupt_mode_clocked_fix` source commit (`9973f15`) was already present in RTL, but the maintained tree still lacked a focused in-tree regression for the interrupt-to-`RTE` stack-selection area.

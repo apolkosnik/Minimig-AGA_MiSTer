@@ -532,6 +532,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal berr_external_rw       : std_logic;                       -- BUG #431 FIX: RW latched at external BERR first-fire (state="11")
 	signal berr_external_fc       : std_logic_vector(2 downto 0);   -- BUG #431 FIX: FC latched at external BERR first-fire
 	signal berr_external_datatype : std_logic_vector(1 downto 0);   -- BUG #433b FIX: datatype latched at external BERR first-fire for SSW.SIZE
+	signal berr_pmmu_datatype     : std_logic_vector(1 downto 0);   -- PMMU datatype latched at first-fire for SSW.SIZE
 	signal berr_external_addr    : std_logic_vector(31 downto 0);  -- BUG #434 FIX: fault addr latched at external BERR first-fire (addr at state="00" is PC-based)
 	signal useStackframe2	: std_logic;
 	
@@ -2587,6 +2588,7 @@ PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatyp
 PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data, next_micro_state, micro_state, stop, make_trace, make_trace_t0, make_berr, IPL_nr, FlagsSR, set_rot_cnt, opcode, writePCbig, set_exec, exec,
         PC_dataa, PC_datab, setnextpass, last_data_read, TG68_PC_brw, TG68_PC_word, Z_error, trap_trap, trap_trapv, interrupt, tmp_TG68_PC, TG68_PC, use_VBR_Stackframe, writePCnext, pmove_dn_mode, cpu_halted, exe_condition, dbcc_t0_suppress, c_out)
 	variable v_is_cof : std_logic;  -- T0 trace: change-of-flow instruction
+	variable v_pmmu_datatype : std_logic_vector(1 downto 0);
 	BEGIN
 	
 		PC_dataa <= TG68_PC;
@@ -2797,6 +2799,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					berr_external_rw <= '1';
 					berr_external_fc <= (others => '0');
 					berr_external_datatype <= "10";
+					berr_pmmu_datatype <= "10";
 					berr_external_addr <= (others => '0');
 					memmask <= "111111";
 					exec_write_back <= '0';
@@ -2942,6 +2945,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				IF clkena_lw='1' THEN
 					-- MC68030 double bus fault: Reset stall-monitor flag each active cycle
 					pmmu_fault_was_cleared <= '0';
+					v_pmmu_datatype := berr_pmmu_datatype;
 					interrupt <= setinterrupt;
 					decodeOPC <= setopcode;
 					endOPC <= setendOPC;
@@ -3016,6 +3020,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 							end if;
 						make_berr <= '0';
 						make_mmu_berr <= '0';
+					end if;
+					-- Latch PMMU access size at first-fire so later micro-state activity
+					-- cannot corrupt SSW.SIZE for the eventual bus/MMU frame.
+					if pmmu_fault='0' and make_berr='0' and trap_berr='0' and trap_mmu_berr='0' then
+						berr_pmmu_datatype <= "10";
+					elsif pmmu_fault='1' and make_berr='0' and trap_berr='0' and trap_mmu_berr='0' then
+						berr_pmmu_datatype <= datatype;
+						v_pmmu_datatype := datatype;
 					end if;
 
 					stop <= set_stop OR (stop AND NOT setinterrupt);
@@ -3113,8 +3125,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 										berr_ssw(13) <= '1';  -- RC=1: stage C bus cycle will be rerun
 										berr_ssw(12) <= '0';  -- RB=0: not stage B
 										berr_ssw(8) <= '1';   -- DF=1
-										-- SIZE from current datatype: "00"=byte->"01", "01"=word->"10", "10"=long->"00"
-										case datatype is
+										-- SIZE from datatype latched at PMMU fault first-fire
+										case v_pmmu_datatype is
 											when "00" => berr_ssw(5 downto 4) <= "01";  -- Byte
 											when "01" => berr_ssw(5 downto 4) <= "10";  -- Word
 											when others => berr_ssw(5 downto 4) <= "00";  -- Long
