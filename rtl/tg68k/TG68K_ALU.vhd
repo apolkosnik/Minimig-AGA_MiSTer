@@ -99,6 +99,7 @@ architecture logic of TG68K_ALU is
 	signal set_Flags			: std_logic_vector(3 downto 0);	--NZVC
 	signal CCRin				: std_logic_vector(7 downto 0);
 	signal last_Flags1		: std_logic_vector(3 downto 0);	--NZVC
+	signal chk2_lower_bound	: std_logic_vector(31 downto 0);
     
 --BCD
 	signal bcd_pur				: std_logic_vector(9 downto 0);
@@ -979,7 +980,7 @@ process (OP1out, OP2out, opcode, bit_nr, bit_msb, bs_shift, bs_shift_mod, ring, 
 --CCR op
 ------------------------------------------------------------------------------		
 PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, flag_z, OP1IN, c_out, addsub_ofl,
-	     bcd_a, bcd_a_carry, Vflag_a, exec)
+	     bcd_a, bcd_a_carry, Vflag_a, exec, micro_state)
 	BEGIN
 		IF exec(andiSR)='1' THEN
 			CCRin <= Flags AND last_data_read(7 downto 0);
@@ -1023,7 +1024,13 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 		IF rising_edge(clk) THEN		
 			IF Reset='1' THEN
 				Flags(7 downto 0) <= "00000000"; 
+				chk2_lower_bound <= (OTHERS => '0');
 			ELSIF clkena_lw = '1' THEN
+				IF micro_state = chk21 THEN
+					-- CHK2.L reaches chk23 with only the upper bound on OP2out.
+					-- Keep the lower bound from chk21 so long N matches byte/word.
+					chk2_lower_bound <= OP2out;
+				END IF;
 				IF exec(directSR)='1' OR set_stop='1' THEN
 					Flags(7 downto 0) <= data_read(7 downto 0);
 				END IF;	
@@ -1131,7 +1138,12 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 								Flags(3) <= '0';
 							END IF;
 						ELSE
-							Flags(3) <= NOT last_Flags1(0);
+							IF unsigned(OP2out) < unsigned(chk2_lower_bound) AND
+							   signed(OP2out) < signed(chk2_lower_bound) THEN
+								Flags(3) <= '1';
+							ELSE
+								Flags(3) <= '0';
+							END IF;
 						END IF;
 					ELSIF exec(opcCHK)='1' THEN
 						IF exe_datatype="01" THEN 						--Word

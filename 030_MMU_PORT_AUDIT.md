@@ -513,13 +513,14 @@ Packaged cputest BASIC / ODD_IRQ follow-up:
 - Current disposition from those benches:
   - `tb_basic_div_jmp_trace`: all `DIV*` and `JMP` cases pass in the current tree
   - `tb_basic_group2_user_trace`: `TRAP` and `TRAPcc` user stacked-trace cases pass; only the trap frame's saved SR is asserted, not the stacked trace frame's supervisor-side SR image
-  - `tb_basic_chk_trace`: `CHK.W`, `CHK.L`, `CHK2.B`, and `CHK2.W` pass; `CHK2.L` currently fails because the core stacks `SR=$8008` on the in-range user T1 no-trap path instead of the expected `SR=$8000`
+  - `tb_basic_chk_trace`: all maintained `CHK.W`, `CHK.L`, `CHK2.B`, `CHK2.W`, and `CHK2.L` BASIC user T1 no-trap cases now pass
   - `tb_odd_irq_regwrite`: all four cases reproduce the live hardware issue; the interrupt autovector fetch and odd-vector address error both occur, but `D4` is still stale when the address-error handler runs
 - Spec/reference basis:
   - the WinUAE `CHK2.L` path still runs `setchk2undefinedflags(..., size=2)`, and for the in-range `lower=$10 upper=$20 value=$15` case it keeps `N=0`, so the `CHK2.L` saved-SR expectation remains `SR=$8000`
+  - the maintained fix in [rtl/tg68k/TG68K_ALU.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68K_ALU.vhd) latches the long lower bound in `chk21` and then computes long `CHK2` `N` in `chk23` the same way byte and word already do, which matches both WinUAE and `wf68k30L`
   - the `ODD_IRQ` packaged directory only contains `EXT.B`, `EXT.L`, `EXT.W`, and `SWAP.W`, which matches the hardware failures and confirms that the reproducer should stay focused on internal register-writeback retire before the interrupt/odd-vector chain
 - Focused verification:
-  - direct ModelSim run of `tb_basic_chk_trace`: 19 passed, 1 failed (`CHK2.L` saved SR)
+  - direct ModelSim run of `tb_basic_chk_trace`: 20 passed, 0 failed
   - direct ModelSim run of `tb_basic_div_jmp_trace`: 28 passed, 0 failed
   - direct ModelSim run of `tb_basic_group2_user_trace`: 13 passed, 0 failed
   - direct ModelSim run of `tb_odd_irq_regwrite`: 8 passed, 4 failed (`EXT.W`, `EXT.L`, `EXTB.L`, `SWAP` retire checks)
