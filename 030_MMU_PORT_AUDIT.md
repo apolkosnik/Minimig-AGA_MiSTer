@@ -537,3 +537,20 @@ ODD_IRQ RTE-entry follow-up:
   - `make -C tests/tg68k_030 test-odd-irq-regwrite`: 12 passed, 0 failed
   - `make -C tests/tg68k_030 test-interrupt-mode-stack`: passed
   - `make -C tests/tg68k_030 test-rte-formats`: passed; `ALL RTE FORMAT TESTS PASSED!`
+
+Hardware `ODD_EXC` / BASIC CHK-DIV flag follow-up:
+- Real hardware still reports saved-flag mismatches in the CHK/divide exception family:
+  - `ODD_EXC`: `CHK.W`, `CHK.L`, `DIVU.W`, `DIVUL.L`
+  - `BASIC`: the corresponding exception-taking CHK/DIV paths were not covered by the earlier maintained BASIC benches, which only exercised the benign no-trap cases
+- Root cause in the cleaned tree:
+  - [rtl/tg68k/TG68K_ALU.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68K_ALU.vhd) still used a legacy CHK flag rule that always forced `V=0` and `C=0`
+  - the same ALU still used a legacy unsigned divide-by-zero rule under `Z_error`, based only on `reg_QA(31)` and with `V=0`, which does not match 68020/030 `DIVU.W` or `DIVUL.L`
+- Reference basis:
+  - WinUAE `setchkundefinedflags()` for 68020/030 computes `Z=dst==0`, `N=dst<0`, `V` from signed `src-dst` overflow on trap, and `C` from the negative/upper-bound trap form
+  - WinUAE `divbyzero_special()` for `DIVU.W` on 68020/030 clears `CZNV`, sets `V=1`, and derives `N/Z` from the high word of the 32-bit dividend
+  - WinUAE `divul_divbyzero()` for `DIVUL.L` on 68020/030 sets `V=1`, `C=0`, and derives `N/Z` from the low 32-bit dividend image
+- Maintained coverage added:
+  - [tb_odd_exc_flags.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_odd_exc_flags.vhd): direct exception-frame checks for `CHK.W`, `CHK.L`, `DIVU.W`, and `DIVUL.L`
+  - [tb_basic_exception_flags.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_basic_exception_flags.vhd): BASIC-style user `T1` reproducer for the same CHK/DIV exception flag images
+  - [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now wires those in as `test-odd-exc-flags` and `test-basic-exception-flags`, with the BASIC bench included under `test-basic-cputest`
+- Fix/keep decision: keep. This is architectural flag-image correction for the 68020/030 CHK and unsigned divide-by-zero paths, not a cputest-only workaround.

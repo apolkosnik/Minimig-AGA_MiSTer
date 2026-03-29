@@ -207,6 +207,110 @@ architecture logic of TG68K_ALU is
 	signal bs_C					: std_logic;  
 	signal bs_X					: std_logic;  
 
+	function chk_flags_68020(
+		src : std_logic_vector(31 downto 0);
+		dst : std_logic_vector(31 downto 0);
+		is_word : boolean
+	) return std_logic_vector is
+		variable flags : std_logic_vector(3 downto 0) := (others => '0');
+		variable src_w : signed(15 downto 0);
+		variable dst_w : signed(15 downto 0);
+		variable val_w : signed(15 downto 0);
+		variable src_l : signed(31 downto 0);
+		variable dst_l : signed(31 downto 0);
+		variable val_l : signed(31 downto 0);
+		variable src_neg : boolean;
+		variable dst_neg : boolean;
+		variable val_neg : boolean;
+	begin
+		if is_word then
+			src_w := signed(src(15 downto 0));
+			dst_w := signed(dst(15 downto 0));
+			dst_neg := dst_w(15) = '1';
+			src_neg := src_w(15) = '1';
+
+			if dst(15 downto 0) = x"0000" then
+				flags(2) := '1';
+			end if;
+			if dst_neg then
+				flags(3) := '1';
+			end if;
+
+			if dst_neg or (dst_w > src_w) then
+				val_w := src_w - dst_w;
+				val_neg := val_w(15) = '1';
+
+				if (dst_neg /= src_neg) and (val_neg /= src_neg) then
+					flags(1) := '1';
+				end if;
+
+				if dst_neg then
+					if (dst_w > src_w) or (not src_neg) then
+						flags(0) := '1';
+					end if;
+				elsif not src_neg then
+					flags(0) := '1';
+				end if;
+			end if;
+		else
+			src_l := signed(src);
+			dst_l := signed(dst);
+			dst_neg := dst_l(31) = '1';
+			src_neg := src_l(31) = '1';
+
+			if dst = x"00000000" then
+				flags(2) := '1';
+			end if;
+			if dst_neg then
+				flags(3) := '1';
+			end if;
+
+			if dst_neg or (dst_l > src_l) then
+				val_l := src_l - dst_l;
+				val_neg := val_l(31) = '1';
+
+				if (dst_neg /= src_neg) and (val_neg /= src_neg) then
+					flags(1) := '1';
+				end if;
+
+				if dst_neg then
+					if (dst_l > src_l) or (not src_neg) then
+						flags(0) := '1';
+					end if;
+				elsif not src_neg then
+					flags(0) := '1';
+				end if;
+			end if;
+		end if;
+
+		return flags;
+	end function;
+
+	function divu_divzero_flags_68020(
+		dst : std_logic_vector(31 downto 0);
+		is_word : boolean
+	) return std_logic_vector is
+		variable flags : std_logic_vector(3 downto 0) := (others => '0');
+	begin
+		flags(1) := '1';
+
+		if is_word then
+			if dst(31) = '1' then
+				flags(3) := '1';
+			elsif dst(31 downto 16) = x"0000" then
+				flags(2) := '1';
+			end if;
+		else
+			if dst(31) = '1' then
+				flags(3) := '1';
+			elsif dst = x"00000000" then
+				flags(2) := '1';
+			end if;
+		end if;
+
+		return flags;
+	end function;
+
 
 BEGIN
 -----------------------------------------------------------------------------
@@ -1053,12 +1157,25 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 					Flags(7 downto 0) <= CCRin(7 downto 0);			--CCR
 				ELSIF Z_error='1' THEN
 					IF micro_state = trap0 THEN
-						-- Undocumented behavior (flags when div by zero)
-						IF exe_opcode(8)='0' THEN
---						Flags(3 downto 0) <= reg_QA(31)&"000";
-							Flags(3 downto 0) <= '0'&NOT reg_QA(31)&"00";
+						IF CPU(1)='1' THEN
+							IF exe_opcode(15)='1' OR DIV_Mode=0 THEN
+								IF exe_opcode(8)='0' THEN
+									Flags(3 downto 0) <= divu_divzero_flags_68020(reg_QA, true);
+								ELSE
+									Flags(3 downto 0) <= "0100";
+								END IF;
+							ELSIF sndOPC(11)='0' THEN
+								Flags(3 downto 0) <= divu_divzero_flags_68020(reg_QA, false);
+							ELSE
+								Flags(3 downto 0) <= "0100";
+							END IF;
 						ELSE
-							Flags(3 downto 0) <= "0100";
+							-- Legacy 68000/010 path.
+							IF exe_opcode(8)='0' THEN
+								Flags(3 downto 0) <= '0'&NOT reg_QA(31)&"00";
+							ELSE
+								Flags(3 downto 0) <= "0100";
+							END IF;
 						END IF;
 					END IF;
 				ELSIF exec(no_Flags)='0' THEN
@@ -1146,18 +1263,26 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 							END IF;
 						END IF;
 					ELSIF exec(opcCHK)='1' THEN
-						IF exe_datatype="01" THEN 						--Word
-							Flags(3) <= OP1out(15);
+						IF CPU(1)='1' THEN
+							IF exe_datatype="01" THEN
+								Flags(3 downto 0) <= chk_flags_68020(OP2out, OP1out, true);
+							ELSE
+								Flags(3 downto 0) <= chk_flags_68020(OP2out, OP1out, false);
+							END IF;
 						ELSE	
-							Flags(3) <= OP1out(31);
-						END IF;	
-						IF OP1out(15 downto 0)=X"0000" AND (exe_datatype="01" OR OP1out(31 downto 16)=X"0000") THEN
-							Flags(2) <='1';
-						ELSE	
-							Flags(2) <='0';
-						END IF;	
-						Flags(1) <= '0';
-						Flags(0) <= '0';
+							IF exe_datatype="01" THEN 						--Word
+								Flags(3) <= OP1out(15);
+							ELSE	
+								Flags(3) <= OP1out(31);
+							END IF;	
+							IF OP1out(15 downto 0)=X"0000" AND (exe_datatype="01" OR OP1out(31 downto 16)=X"0000") THEN
+								Flags(2) <='1';
+							ELSE	
+								Flags(2) <='0';
+							END IF;	
+							Flags(1) <= '0';
+							Flags(0) <= '0';
+						END IF;
 					END IF;
 				END IF;	
 			END IF;	
