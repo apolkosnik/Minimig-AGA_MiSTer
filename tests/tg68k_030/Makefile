@@ -83,7 +83,7 @@ help:
 	@echo "  test-basic-div-jmp-trace - Verify BASIC-style DIV/JMP user trace cases"
 	@echo "  test-basic-exception-flags - Verify BASIC-style CHK/DIV exception flag images"
 	@echo "  test-basic-group2-user-trace - Verify BASIC-style TRAP/TRAPcc user stacked trace cases"
-	@echo "  test-basic-cputest - Run diagnostic BASIC opcode coverage for CHK/DIV/JMP/TRAP/TRAPcc"
+	@echo "  test-basic-cputest - Run maintained packaged BASIC opcode coverage for CHK/DIV/JMP/TRAP/TRAPcc"
 	@echo "  test-odd-exc-flags - Verify direct CHK/DIV exception flag images behind ODD_EXC"
 	@echo "  test-chk-long-odd-addr - Verify CHK.L odd data-source addresses still raise vector 6"
 	@echo "  test-trace-suite - Run maintained T0/T1/Group 2 trace regression coverage"
@@ -591,7 +591,7 @@ test-abcd-mbit: setup
 test-rte-abcd-suite: test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-movec-active-stack test-interrupt-mode-stack
 	@echo "RTE/ABCD regression suite complete."
 
-test-arch-suite: test-rte-abcd-suite test-abcd test-stack-frame-push test-branch-odd-addr test-chk-long-odd-addr test-movec-illegal test-movec-selector-latch test-cpsave-cprestore test-moves-validation test-ptest-history-bits
+test-arch-suite: test-rte-abcd-suite test-abcd test-stack-frame-push test-branch-odd-addr test-chk-long-odd-addr test-odd-irq-regwrite test-odd-exc-flags test-basic-cputest test-movec-illegal test-movec-selector-latch test-cpsave-cprestore test-moves-validation test-ptest-history-bits
 	@echo "Maintained architecture/edge-case suite complete."
 
 test-branch-odd-addr: setup

@@ -509,7 +509,7 @@ Packaged cputest BASIC / ODD_IRQ follow-up:
   - [tb_odd_irq_regwrite.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_odd_irq_regwrite.vhd): standalone reproducer for the `ODD_IRQ` `EXT.W` / `EXT.L` / `EXTB.L` / `SWAP` retire-before-odd-vector path
 - Makefile wiring:
   - [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now has `test-basic-chk-trace`, `test-basic-div-jmp-trace`, `test-basic-group2-user-trace`, `test-basic-cputest`, and `test-odd-irq-regwrite`
-  - `test-basic-cputest` is kept diagnostic and is not folded into `test-trace-suite` yet, because the new benches intentionally expose still-open core issues rather than only already-fixed behavior
+  - `test-basic-cputest` stays outside `test-trace-suite` because it mixes trace, exception-flag, and packaged cputest reproducer coverage, but it is now part of `test-arch-suite` after the remaining BASIC / `ODD_EXC` / `ODD_IRQ` issues were fixed
 - Current disposition from those benches:
   - `tb_basic_div_jmp_trace`: all `DIV*` and `JMP` cases pass in the current tree
   - `tb_basic_group2_user_trace`: `TRAP` and `TRAPcc` user stacked-trace cases pass; only the trap frame's saved SR is asserted, not the stacked trace frame's supervisor-side SR image
@@ -554,3 +554,4 @@ Hardware `ODD_EXC` / BASIC CHK-DIV flag follow-up:
   - [tb_basic_exception_flags.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_basic_exception_flags.vhd): BASIC-style user `T1` reproducer for the same CHK/DIV exception flag images
   - [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now wires those in as `test-odd-exc-flags` and `test-basic-exception-flags`, with the BASIC bench included under `test-basic-cputest`
 - Fix/keep decision: keep. This is architectural flag-image correction for the 68020/030 CHK and unsigned divide-by-zero paths, not a cputest-only workaround.
+- Wrapper follow-up: after the CHK/divide flag fix and the earlier `ODD_IRQ` `RTE` fix, the packaged cputest benches are no longer diagnostic-only. [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now routes `test-basic-cputest`, `test-odd-exc-flags`, and `test-odd-irq-regwrite` through `test-arch-suite`, so both `validate` and `test-comprehensive` gate the packaged BASIC / `ODD_EXC` / `ODD_IRQ` coverage.
