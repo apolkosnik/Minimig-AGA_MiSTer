@@ -239,6 +239,17 @@ Final stabilization, ported into the cleaned local commits:
 - Summary: final ATC-size/pseudo-LRU work, PLOAD flush-before-walk, early-termination granularity, WP accumulation, bus-timeout BERR, wrapper-side walker integration, TRAP/RTE stack-frame cleanup, and the final latched MOVEC selector fix.
 - Fix/skip decision: ported. `de1bd23` was validation evidence (`WhichAmiga works`) rather than a distinct new architectural change, so its useful behavior is represented by the surrounding fixes, not by a separate local commit.
 
+Previously unlisted source commits, now explicitly triaged:
+- `696f7e1`
+- Summary: fixes the PMOVE mem-to-MMU `(An)+` CRP/SRP low-word address path so the second longword read lands at `EA+4`/`EA+6` and the register postincrement still completes as `+8`.
+- Fix/skip decision: no new local port commit needed. The cleaned tree already carries the same end-state in [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd) through `pmmu_ea_mode_latched`, the combinational `(An)+` CRP/SRP low-word override, and the `exec_write_back` retirement handling that prevents the follow-on lockup.
+- `ffd4bb6`
+- Summary: mixed source commit that paired the PMOVE retirement/writeback clear with top-level cache-burst signal hookup.
+- Fix/skip decision: no new local port commit needed. The PMOVE retirement clear is already present in [rtl/tg68k/TG68KdotC_Kernel.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68KdotC_Kernel.vhd), and the cache-burst path is already wired through [rtl/tg68k/TG68K.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/tg68k/TG68K.vhd), [rtl/cpu_wrapper.v](/home/adam/030_mmu2/Minimig-AGA_MiSTer/rtl/cpu_wrapper.v), and [Minimig.sv](/home/adam/030_mmu2/Minimig-AGA_MiSTer/Minimig.sv). This area is platform integration, not a distinct Motorola-architectural delta, and the current tree already reflects the intended end-state.
+- `3ab91cd`
+- Summary: release packaging only (`releases/Minimig_20260220.rbf`).
+- Fix/skip decision: skip entirely. Binary release artifacts are intentionally not ported into this cleaned branch.
+
 Late local-branch-only review:
 - The local `030_mmu` branch was checked commit-by-commit again after the user clarified the source path. That second pass found no remaining architectural fixes that still needed to be replayed into this cleaned branch.
 - `f546c70`, `a4348f8`, `c0ee187`, `eb5bd26`, `9973f15`, `34e9543`, `de1bd23`, `5e89616`
@@ -255,6 +266,7 @@ Late local-branch-only review:
 - Fix/skip decision: behavior already covered; no literal replay needed. The maintained [tb_pflush_ptest_pload.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_pflush_ptest_pload.vhd) in this branch already includes the cached WP/invalid replay checks from that late source work and passes against the cleaned PMMU.
 
 Late local-branch verification:
+- `make -C tests/tg68k_030 test-pmove-crp-mem-to-mmu-postinc`: pass; maintained `(A7)+,CRP` mem-to-MMU regression still reads `$2000/$2002/$2004/$2006` and then continues at `$2008/$200A`
 - `make -C tests/tg68k_030 test-chk-stacked-trace`: 27 passed, 0 failed
 - `make -C tests/tg68k_030 test-movec-active-stack`: pass; both active ISP/MSP `MOVEC` alias checks completed successfully
 - `make -C tests/tg68k_030 test-pflush-ptest-pload`: 18 passed, 0 failed
