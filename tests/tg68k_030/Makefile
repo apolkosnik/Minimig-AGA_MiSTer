@@ -555,7 +555,9 @@ test-basic-chk2-cputest-highaddr: setup
 test-basic-cputest-entry: setup
 	@echo "Running exact-form BASIC first-post-RTE reproducers..."
 	@$(MAKE) --no-print-directory test-basic-chk2-cputest-entry
+	@$(MAKE) --no-print-directory test-basic-chk2-cputest-highaddr
 	@$(MAKE) --no-print-directory test-basic-jmp-cputest-entry
+	@$(MAKE) --no-print-directory test-basic-jmp-sp-disp-highaddr
 
 test-basic-exception-flags: setup
 	@echo "Running BASIC-style CHK/DIV exception flag tests..."

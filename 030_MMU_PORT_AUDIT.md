@@ -516,6 +516,7 @@ Packaged cputest BASIC / ODD_IRQ follow-up:
   - [tb_odd_irq_regwrite.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_odd_irq_regwrite.vhd): standalone reproducer for the `ODD_IRQ` `EXT.W` / `EXT.L` / `EXTB.L` / `SWAP` retire-before-odd-vector path
 - Makefile wiring:
   - [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now has `test-basic-chk-trace`, `test-basic-div-jmp-trace`, `test-basic-cputest-entry`, `test-basic-chk2-cputest-highaddr`, `test-basic-jmp-sp-disp-entry`, `test-basic-jmp-sp-disp-highaddr`, `test-basic-group2-user-trace`, `test-basic-cputest`, and `test-odd-irq-regwrite`
+  - wrapper follow-up: `test-basic-cputest-entry` now includes both full-address reproducers as well, so the maintained BASIC wrapper gates low-address and real-header-address `CHK2 *FB` / `JMP ($65B2,SP)` paths together instead of leaving the `0x420xxxxx` variants standalone
   - `test-basic-cputest` stays outside `test-trace-suite` because it mixes trace, exception-flag, and packaged cputest reproducer coverage, but it is now part of `test-arch-suite` after the remaining BASIC / `ODD_EXC` / `ODD_IRQ` issues were fixed
 - Current disposition from those benches:
   - `tb_basic_div_jmp_trace`: all `DIV*` and `JMP` cases pass in the current tree
@@ -541,6 +542,7 @@ Packaged cputest BASIC / ODD_IRQ follow-up:
   - direct ModelSim run of `tb_basic_jmp_cputest_entry`: 2560 passed, 0 failed
   - direct ModelSim run of `tb_basic_jmp_sp_disp_highaddr`: 1280 passed, 0 failed
   - direct ModelSim run of `tb_basic_jmp_sp_disp_entry`: 1280 passed, 0 failed
+  - `make -C tests/tg68k_030 test-basic-cputest-entry`: maintained wrapper completed successfully after wiring in the full-address `CHK2` and `JMP ($65B2,SP)` reproducers
   - direct ModelSim run of `tb_basic_group2_user_trace`: 13 passed, 0 failed
   - initial direct ModelSim run of `tb_odd_irq_regwrite`: 8 passed, 4 failed (`EXT.W`, `EXT.L`, `EXTB.L`, `SWAP` retire checks)
 
