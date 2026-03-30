@@ -37,6 +37,7 @@ architecture behavior of tb_basic_chk2_cputest_highaddr is
     constant USP_VALUE    : integer := 16#42000400#;
     constant FRAME_START  : integer := ISP_VALUE - 8;
     constant RTE_PC       : integer := 16#42050000#;
+    constant CACR_VALUE   : integer := 16#00002111#;
 
     constant MARK_TRACE       : std_logic_vector(15 downto 0) := x"1111";
     constant MARK_FALLTHROUGH : std_logic_vector(15 downto 0) := x"2222";
@@ -216,8 +217,9 @@ begin
             low_mem(base_addr / 2 + 5) := x"2700";
         end procedure;
 
-        procedure init_case(sr_value    : std_logic_vector(15 downto 0);
-                            opcode_word : std_logic_vector(15 downto 0)) is
+        procedure init_case(sr_value     : std_logic_vector(15 downto 0);
+                            opcode_word  : std_logic_vector(15 downto 0);
+                            cache_enable : boolean) is
             variable d0_value : std_logic_vector(31 downto 0);
             variable idx      : integer;
         begin
@@ -261,6 +263,15 @@ begin
             high_mem(idx + 4) := x"7803";
 
             idx := (16#42001014# - HIGH_BASE) / 2;
+            if cache_enable then
+                high_mem(idx) := x"2E3C";
+                high_mem(idx + 1) := std_logic_vector(to_unsigned(CACR_VALUE / 16#10000#, 16));
+                high_mem(idx + 2) := std_logic_vector(to_unsigned(CACR_VALUE mod 16#10000#, 16));
+                high_mem(idx + 3) := x"4E7B";
+                high_mem(idx + 4) := x"7002";
+                idx := idx + 5;
+            end if;
+
             high_mem(idx) := x"2A7C";
             high_mem(idx + 1) := x"0000";
             high_mem(idx + 2) := x"001C";
@@ -377,12 +388,13 @@ begin
             fail_count := fail_count + 1;
         end procedure;
 
-        procedure check_trace_case(case_name   : string;
-                                   sr_value    : std_logic_vector(15 downto 0);
-                                   opcode_word : std_logic_vector(15 downto 0)) is
+        procedure check_trace_case(case_name    : string;
+                                   sr_value     : std_logic_vector(15 downto 0);
+                                   opcode_word  : std_logic_vector(15 downto 0);
+                                   cache_enable : boolean) is
             variable marker : std_logic_vector(15 downto 0);
         begin
-            init_case(sr_value, opcode_word);
+            init_case(sr_value, opcode_word, cache_enable);
             program_bounds(opcode_word);
             run_case;
 
@@ -432,12 +444,13 @@ begin
             end if;
         end procedure;
 
-        procedure check_no_trace_case(case_name   : string;
-                                      sr_value    : std_logic_vector(15 downto 0);
-                                      opcode_word : std_logic_vector(15 downto 0)) is
+        procedure check_no_trace_case(case_name    : string;
+                                      sr_value     : std_logic_vector(15 downto 0);
+                                      opcode_word  : std_logic_vector(15 downto 0);
+                                      cache_enable : boolean) is
             variable marker : std_logic_vector(15 downto 0);
         begin
-            init_case(sr_value, opcode_word);
+            init_case(sr_value, opcode_word, cache_enable);
             program_bounds(opcode_word);
             run_case;
 
@@ -463,39 +476,44 @@ begin
             end if;
         end procedure;
 
-        procedure run_size(opcode_word : std_logic_vector(15 downto 0);
-                           size_name   : string) is
+        procedure run_size(opcode_word  : std_logic_vector(15 downto 0);
+                           size_name    : string;
+                           cache_enable : boolean) is
         begin
             report "=== " & size_name & " T1 cases ===" severity note;
             for ccr in 0 to 31 loop
                 check_trace_case(size_name & " user T1 CCR=" & integer'image(ccr),
-                                 sr_with_ccr(x"8000", ccr), opcode_word);
+                                 sr_with_ccr(x"8000", ccr), opcode_word, cache_enable);
                 check_trace_case(size_name & " user M1 T1 CCR=" & integer'image(ccr),
-                                 sr_with_ccr(x"9000", ccr), opcode_word);
+                                 sr_with_ccr(x"9000", ccr), opcode_word, cache_enable);
                 check_trace_case(size_name & " supervisor T1 CCR=" & integer'image(ccr),
-                                 sr_with_ccr(x"A000", ccr), opcode_word);
+                                 sr_with_ccr(x"A000", ccr), opcode_word, cache_enable);
                 check_trace_case(size_name & " supervisor M1 T1 CCR=" & integer'image(ccr),
-                                 sr_with_ccr(x"B000", ccr), opcode_word);
+                                 sr_with_ccr(x"B000", ccr), opcode_word, cache_enable);
             end loop;
 
             report "=== " & size_name & " T0 controls ===" severity note;
             for ccr in 0 to 31 loop
                 check_no_trace_case(size_name & " user T0 CCR=" & integer'image(ccr),
-                                    sr_with_ccr(x"4000", ccr), opcode_word);
+                                    sr_with_ccr(x"4000", ccr), opcode_word, cache_enable);
                 check_no_trace_case(size_name & " user M1 T0 CCR=" & integer'image(ccr),
-                                    sr_with_ccr(x"5000", ccr), opcode_word);
+                                    sr_with_ccr(x"5000", ccr), opcode_word, cache_enable);
                 check_no_trace_case(size_name & " supervisor T0 CCR=" & integer'image(ccr),
-                                    sr_with_ccr(x"6000", ccr), opcode_word);
+                                    sr_with_ccr(x"6000", ccr), opcode_word, cache_enable);
                 check_no_trace_case(size_name & " supervisor M1 T0 CCR=" & integer'image(ccr),
-                                    sr_with_ccr(x"7000", ccr), opcode_word);
+                                    sr_with_ccr(x"7000", ccr), opcode_word, cache_enable);
             end loop;
         end procedure;
     begin
         report "=== MC68030 BASIC CHK2 full-address split-2 coverage ===" severity note;
 
-        run_size(x"00FB", "CHK2.B (d8,PC,Xn)");
-        run_size(x"02FB", "CHK2.W (d8,PC,Xn)");
-        run_size(x"04FB", "CHK2.L (d8,PC,Xn)");
+        run_size(x"00FB", "cache off CHK2.B (d8,PC,Xn)", false);
+        run_size(x"02FB", "cache off CHK2.W (d8,PC,Xn)", false);
+        run_size(x"04FB", "cache off CHK2.L (d8,PC,Xn)", false);
+
+        run_size(x"00FB", "cache on CHK2.B (d8,PC,Xn)", true);
+        run_size(x"02FB", "cache on CHK2.W (d8,PC,Xn)", true);
+        run_size(x"04FB", "cache on CHK2.L (d8,PC,Xn)", true);
 
         report "BASIC CHK2 full-address split-2 tests: " & integer'image(pass_count) &
                " PASSED, " & integer'image(fail_count) & " FAILED" severity note;

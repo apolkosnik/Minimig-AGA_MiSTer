@@ -524,10 +524,12 @@ Packaged cputest BASIC / ODD_IRQ follow-up:
   - photographed hardware follow-up: the `S 420069b0 ...` block in the failing photo is the cputest `srcaddr` dump, not a raw exception-stack dump. The specific photographed split is consistent with `JMP ($65B2,SP)` into the low-memory scaffold at `$420069B0`, so the dedicated [tb_basic_jmp_sp_disp_entry.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_basic_jmp_sp_disp_entry.vhd) now covers that exact first-post-`RTE` form.
   - `tb_basic_jmp_sp_disp_entry`: all `JMP ($65B2,SP)` cases pass in isolation across the full preserved-CCR sweep, so the remaining real-hardware BASIC `JMP` failure depends on broader cputest harness state than the first-post-`RTE` core path alone. That is an inference from the focused reproducer, not proof about the full packaged run.
   - `tb_basic_jmp_sp_disp_highaddr`: the same `JMP ($65B2,SP)` matrix also passes when the real BASIC header addresses are preserved (`opcode_memory=$42050000`, `USP=$42000400`, `ISP=$420007C0`, `MSP=$42000840`). The only failure seen while building that bench was a testbench bug: the synthetic `RTE` frame had the PC and format words in the wrong order, which falsely reconstructed `$42050000` as `$00004205`.
+  - cache-enabled follow-up: `tb_basic_jmp_sp_disp_highaddr` now also sweeps `CACR=$00002111` before `RTE`, matching the photographed BASIC setup more closely. The full-address `JMP ($65B2,SP)` matrix still passes, so cache-enable state alone does not explain the remaining real-hardware BASIC `JMP` failure.
   - `tb_basic_group2_user_trace`: `TRAP` and `TRAPcc` user stacked-trace cases pass; only the trap frame's saved SR is asserted, not the stacked trace frame's supervisor-side SR image
   - `tb_basic_chk_trace`: all maintained `CHK.W`, `CHK.L`, `CHK2.B`, `CHK2.W`, and `CHK2.L` BASIC user T1 no-trap cases now pass
   - the packaged `CHK2.* /0002.dat.gz` split is the `*FB` PC-indexed family, and the maintained exact-form `CHK2` entry reproducer now covers both split-1 `(A0)` and split-2 PC-indexed cases across the full preserved-CCR sweep, with final `CCR` readback used for the no-trace cases instead of privileged `MOVE SR`
   - `tb_basic_chk2_cputest_highaddr`: the same split-2 `CHK2 *FB` matrix also passes when the real BASIC header addresses are preserved (`opcode_memory=$42050000`, `USP=$42000400`, `ISP=$420007C0`, `MSP=$42000840`), so the remaining real-hardware BASIC `CHK2.*` failures are still not reproduced by the isolated first-post-`RTE` core path alone. That is an inference from the focused reproducer, not proof about the full packaged run.
+  - cache-enabled follow-up: `tb_basic_chk2_cputest_highaddr` now also sweeps `CACR=$00002111` before `RTE`, matching the photographed BASIC setup more closely. The split-2 `CHK2 *FB` matrix still passes, so cache-enable state alone does not explain the remaining real-hardware BASIC `CHK2.*` failures.
   - bench cleanup: both `tb_basic_chk2_cputest_entry` and `tb_basic_chk2_cputest_highaddr` originally ended their no-trace paths with a user-visible `STOP`, which generated misleading privilege-trap and double-fault warning floods after the pass marker had already been written. Those benches now terminate the fallthrough path with a local branch loop and use marker-based completion detection instead, so the diagnostic signal stays readable without changing the observed `CHK2` instruction behavior.
   - `tb_odd_irq_regwrite`: all four cases reproduce the live hardware issue; the interrupt autovector fetch and odd-vector address error both occur, but `D4` is still stale when the address-error handler runs
 - Spec/reference basis:
@@ -538,9 +540,9 @@ Packaged cputest BASIC / ODD_IRQ follow-up:
   - direct ModelSim run of `tb_basic_chk_trace`: 20 passed, 0 failed
   - direct ModelSim run of `tb_basic_div_jmp_trace`: 28 passed, 0 failed
   - direct ModelSim run of `tb_basic_chk2_cputest_entry`: 5376 passed, 0 failed
-  - direct ModelSim run of `tb_basic_chk2_cputest_highaddr`: 2688 passed, 0 failed
+  - direct ModelSim run of `tb_basic_chk2_cputest_highaddr`: 5376 passed, 0 failed
   - direct ModelSim run of `tb_basic_jmp_cputest_entry`: 2560 passed, 0 failed
-  - direct ModelSim run of `tb_basic_jmp_sp_disp_highaddr`: 1280 passed, 0 failed
+  - direct ModelSim run of `tb_basic_jmp_sp_disp_highaddr`: 2560 passed, 0 failed
   - direct ModelSim run of `tb_basic_jmp_sp_disp_entry`: 1280 passed, 0 failed
   - `make -C tests/tg68k_030 test-basic-cputest-entry`: maintained wrapper completed successfully after wiring in the full-address `CHK2` and `JMP ($65B2,SP)` reproducers
   - direct ModelSim run of `tb_basic_group2_user_trace`: 13 passed, 0 failed

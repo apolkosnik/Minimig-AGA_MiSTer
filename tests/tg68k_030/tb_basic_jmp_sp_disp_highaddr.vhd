@@ -37,6 +37,7 @@ architecture behavior of tb_basic_jmp_sp_disp_highaddr is
     constant USP_VALUE    : integer := 16#420003FE#;
     constant FRAME_START  : integer := ISP_VALUE - 8;
     constant RTE_PC       : integer := 16#42050000#;
+    constant CACR_VALUE   : integer := 16#00002111#;
 
     constant MARK_TRACE   : std_logic_vector(15 downto 0) := x"1111";
     constant MARK_ILLEGAL : std_logic_vector(15 downto 0) := x"3333";
@@ -204,7 +205,9 @@ begin
             high_mem(word_idx + 1) := x"4AFC"; -- ILLEGAL
         end procedure;
 
-        procedure init_case(sr_value : std_logic_vector(15 downto 0)) is
+        procedure init_case(sr_value      : std_logic_vector(15 downto 0);
+                            cache_enable  : boolean) is
+            variable idx : integer;
         begin
             for i in low_mem'range loop
                 low_mem(i) := x"4E71";
@@ -244,22 +247,34 @@ begin
             write_target_stub(ISP_VALUE + JMP_SP_DISP);
             write_target_stub(MSP_VALUE + JMP_SP_DISP);
 
-            high_mem((16#42001000# - HIGH_BASE) / 2) := x"2E3C";
-            high_mem((16#42001002# - HIGH_BASE) / 2) := std_logic_vector(to_unsigned(USP_VALUE / 16#10000#, 16));
-            high_mem((16#42001004# - HIGH_BASE) / 2) := std_logic_vector(to_unsigned(USP_VALUE mod 16#10000#, 16));
-            high_mem((16#42001006# - HIGH_BASE) / 2) := x"4E7B";
-            high_mem((16#42001008# - HIGH_BASE) / 2) := x"7800";
+            idx := (16#42001000# - HIGH_BASE) / 2;
+            high_mem(idx) := x"2E3C";
+            high_mem(idx + 1) := std_logic_vector(to_unsigned(USP_VALUE / 16#10000#, 16));
+            high_mem(idx + 2) := std_logic_vector(to_unsigned(USP_VALUE mod 16#10000#, 16));
+            high_mem(idx + 3) := x"4E7B";
+            high_mem(idx + 4) := x"7800";
 
-            high_mem((16#4200100A# - HIGH_BASE) / 2) := x"2E3C";
-            high_mem((16#4200100C# - HIGH_BASE) / 2) := std_logic_vector(to_unsigned(MSP_VALUE / 16#10000#, 16));
-            high_mem((16#4200100E# - HIGH_BASE) / 2) := std_logic_vector(to_unsigned(MSP_VALUE mod 16#10000#, 16));
-            high_mem((16#42001010# - HIGH_BASE) / 2) := x"4E7B";
-            high_mem((16#42001012# - HIGH_BASE) / 2) := x"7803";
+            idx := idx + 5;
+            high_mem(idx) := x"2E3C";
+            high_mem(idx + 1) := std_logic_vector(to_unsigned(MSP_VALUE / 16#10000#, 16));
+            high_mem(idx + 2) := std_logic_vector(to_unsigned(MSP_VALUE mod 16#10000#, 16));
+            high_mem(idx + 3) := x"4E7B";
+            high_mem(idx + 4) := x"7803";
 
-            high_mem((16#42001014# - HIGH_BASE) / 2) := x"2E7C";
-            high_mem((16#42001016# - HIGH_BASE) / 2) := std_logic_vector(to_unsigned(FRAME_START / 16#10000#, 16));
-            high_mem((16#42001018# - HIGH_BASE) / 2) := std_logic_vector(to_unsigned(FRAME_START mod 16#10000#, 16));
-            high_mem((16#4200101A# - HIGH_BASE) / 2) := x"4E73";
+            idx := idx + 5;
+            if cache_enable then
+                high_mem(idx) := x"2E3C";
+                high_mem(idx + 1) := std_logic_vector(to_unsigned(CACR_VALUE / 16#10000#, 16));
+                high_mem(idx + 2) := std_logic_vector(to_unsigned(CACR_VALUE mod 16#10000#, 16));
+                high_mem(idx + 3) := x"4E7B";
+                high_mem(idx + 4) := x"7002";
+                idx := idx + 5;
+            end if;
+
+            high_mem(idx) := x"2E7C";
+            high_mem(idx + 1) := std_logic_vector(to_unsigned(FRAME_START / 16#10000#, 16));
+            high_mem(idx + 2) := std_logic_vector(to_unsigned(FRAME_START mod 16#10000#, 16));
+            high_mem(idx + 3) := x"4E73";
 
             high_mem((FRAME_START - HIGH_BASE) / 2) := sr_value;
             high_mem((FRAME_START - HIGH_BASE) / 2 + 1) := std_logic_vector(to_unsigned(RTE_PC / 16#10000#, 16));
@@ -316,12 +331,13 @@ begin
             fail_count := fail_count + 1;
         end procedure;
 
-        procedure check_case(case_name : string;
-                             sr_value  : std_logic_vector(15 downto 0)) is
+        procedure check_case(case_name    : string;
+                             sr_value     : std_logic_vector(15 downto 0);
+                             cache_enable : boolean) is
             variable marker          : std_logic_vector(15 downto 0);
             variable expected_target : integer;
         begin
-            init_case(sr_value);
+            init_case(sr_value, cache_enable);
             run_case;
             marker := mem_read(RESULT_ADDR);
             expected_target := target_addr(sr_value);
@@ -374,25 +390,36 @@ begin
             end if;
         end procedure;
 
-        procedure run_variant(prefix : string;
-                              sr_high : std_logic_vector(15 downto 0)) is
+        procedure run_variant(prefix      : string;
+                              sr_high     : std_logic_vector(15 downto 0);
+                              cache_enable : boolean) is
         begin
             for ccr in 0 to 31 loop
                 check_case(prefix & " CCR=" & integer'image(ccr),
-                           sr_with_ccr(sr_high, ccr));
+                           sr_with_ccr(sr_high, ccr),
+                           cache_enable);
             end loop;
         end procedure;
     begin
         report "=== MC68030 BASIC JMP (d16,SP) full-address coverage ===" severity note;
 
-        run_variant("user T1", x"8000");
-        run_variant("user T0", x"4000");
-        run_variant("user M1 T1", x"9000");
-        run_variant("user M1 T0", x"5000");
-        run_variant("supervisor T1", x"A000");
-        run_variant("supervisor T0", x"6000");
-        run_variant("supervisor M1 T1", x"B000");
-        run_variant("supervisor M1 T0", x"7000");
+        run_variant("cache off user T1", x"8000", false);
+        run_variant("cache off user T0", x"4000", false);
+        run_variant("cache off user M1 T1", x"9000", false);
+        run_variant("cache off user M1 T0", x"5000", false);
+        run_variant("cache off supervisor T1", x"A000", false);
+        run_variant("cache off supervisor T0", x"6000", false);
+        run_variant("cache off supervisor M1 T1", x"B000", false);
+        run_variant("cache off supervisor M1 T0", x"7000", false);
+
+        run_variant("cache on user T1", x"8000", true);
+        run_variant("cache on user T0", x"4000", true);
+        run_variant("cache on user M1 T1", x"9000", true);
+        run_variant("cache on user M1 T0", x"5000", true);
+        run_variant("cache on supervisor T1", x"A000", true);
+        run_variant("cache on supervisor T0", x"6000", true);
+        run_variant("cache on supervisor M1 T1", x"B000", true);
+        run_variant("cache on supervisor M1 T0", x"7000", true);
 
         report "BASIC JMP (d16,SP) full-address tests: " &
                integer'image(pass_count) & " PASSED, " &
