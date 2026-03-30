@@ -1,16 +1,16 @@
--- tb_basic_chk2_cputest_entry.vhd
--- Reproduces the packaged WinUAE cputest/basic CHK2 no-trap trace split more
--- closely: both the simple (A0) form and the split-2 PC-indexed form are the
--- first instruction after an RTE frame.
+-- tb_basic_chk2_cputest_highaddr.vhd
+-- Full-address reproducer for the packaged BASIC CHK2 split-2 family. This
+-- keeps the real 0x420xxxxx code and stack addresses from the BASIC header
+-- while exercising the PC-indexed CHK2.B/W/L first-post-RTE path.
 
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
-entity tb_basic_chk2_cputest_entry is
+entity tb_basic_chk2_cputest_highaddr is
 end entity;
 
-architecture behavior of tb_basic_chk2_cputest_entry is
+architecture behavior of tb_basic_chk2_cputest_highaddr is
     signal clk        : std_logic := '0';
     signal nReset     : std_logic := '0';
     signal clkena_in  : std_logic := '1';
@@ -23,23 +23,28 @@ architecture behavior of tb_basic_chk2_cputest_entry is
     signal busstate   : std_logic_vector(1 downto 0);
     signal FC         : std_logic_vector(2 downto 0);
 
-    constant CLK_PERIOD  : time := 10 ns;
-    constant TRACE_VEC   : integer := 16#3000#;
-    constant CHK_VEC     : integer := 16#3200#;
-    constant BOUNDS_ADDR : integer := 16#3400#;
-    constant RESULT_ADDR : integer := 16#6000#;
-    constant ISP_VALUE   : integer := 16#0800#;
-    constant MSP_VALUE   : integer := 16#0A00#;
-    constant USP_VALUE   : integer := 16#0400#;
-    constant FRAME_START : integer := 16#07F8#;
-    constant RTE_PC      : integer := 16#1200#;
+    constant CLK_PERIOD   : time := 10 ns;
+    constant LOW_BASE     : integer := 16#00000000#;
+    constant LOW_BYTES    : integer := 16#00010000#;
+    constant HIGH_BASE    : integer := 16#42000000#;
+    constant HIGH_BYTES   : integer := 16#00100000#;
+    constant TRACE_VEC    : integer := 16#00003000#;
+    constant CHK_VEC      : integer := 16#00003200#;
+    constant BOUNDS_ADDR  : integer := 16#42003400#;
+    constant RESULT_ADDR  : integer := 16#00006000#;
+    constant ISP_VALUE    : integer := 16#420007C0#;
+    constant MSP_VALUE    : integer := 16#42000840#;
+    constant USP_VALUE    : integer := 16#42000400#;
+    constant FRAME_START  : integer := ISP_VALUE - 8;
+    constant RTE_PC       : integer := 16#42050000#;
 
-    constant MARK_TRACE  : std_logic_vector(15 downto 0) := x"1111";
+    constant MARK_TRACE       : std_logic_vector(15 downto 0) := x"1111";
     constant MARK_FALLTHROUGH : std_logic_vector(15 downto 0) := x"2222";
-    constant MARK_CHK    : std_logic_vector(15 downto 0) := x"3333";
+    constant MARK_CHK         : std_logic_vector(15 downto 0) := x"3333";
 
-    type mem_array_t is array(0 to 16383) of std_logic_vector(15 downto 0);
-    shared variable mem : mem_array_t;
+    type mem_array_t is array(natural range <>) of std_logic_vector(15 downto 0);
+    shared variable low_mem  : mem_array_t(0 to LOW_BYTES / 2 - 1);
+    shared variable high_mem : mem_array_t(0 to HIGH_BYTES / 2 - 1);
     signal test_done : boolean := false;
 begin
     clk <= not clk after CLK_PERIOD / 2 when not test_done;
@@ -105,19 +110,29 @@ begin
             debug_pmove_dn_regnum => open
         );
 
-    data_in <= mem(to_integer(unsigned(addr_out(15 downto 1))))
-               when to_integer(unsigned(addr_out(15 downto 1))) <= 16383 else x"4E71";
+    data_in <= low_mem(to_integer(unsigned(addr_out(15 downto 1))))
+               when addr_out(31 downto 16) = x"0000" else
+               high_mem(to_integer(unsigned(addr_out(19 downto 1))))
+               when addr_out(31 downto 20) = x"420" else
+               x"4E71";
 
     mem_write: process(clk)
     begin
         if rising_edge(clk) then
             if busstate = "11" and nWr = '0' then
-                if to_integer(unsigned(addr_out(15 downto 1))) <= 16383 then
+                if addr_out(31 downto 16) = x"0000" then
                     if nUDS = '0' then
-                        mem(to_integer(unsigned(addr_out(15 downto 1))))(15 downto 8) := data_write(15 downto 8);
+                        low_mem(to_integer(unsigned(addr_out(15 downto 1))))(15 downto 8) := data_write(15 downto 8);
                     end if;
                     if nLDS = '0' then
-                        mem(to_integer(unsigned(addr_out(15 downto 1))))(7 downto 0) := data_write(7 downto 0);
+                        low_mem(to_integer(unsigned(addr_out(15 downto 1))))(7 downto 0) := data_write(7 downto 0);
+                    end if;
+                elsif addr_out(31 downto 20) = x"420" then
+                    if nUDS = '0' then
+                        high_mem(to_integer(unsigned(addr_out(19 downto 1))))(15 downto 8) := data_write(15 downto 8);
+                    end if;
+                    if nLDS = '0' then
+                        high_mem(to_integer(unsigned(addr_out(19 downto 1))))(7 downto 0) := data_write(7 downto 0);
                     end if;
                 end if;
             end if;
@@ -139,7 +154,12 @@ begin
 
         impure function mem_read(byte_addr : integer) return std_logic_vector is
         begin
-            return mem(byte_addr / 2);
+            if byte_addr >= LOW_BASE and byte_addr < LOW_BASE + LOW_BYTES then
+                return low_mem((byte_addr - LOW_BASE) / 2);
+            elsif byte_addr >= HIGH_BASE and byte_addr < HIGH_BASE + HIGH_BYTES then
+                return high_mem((byte_addr - HIGH_BASE) / 2);
+            end if;
+            return x"4E71";
         end function;
 
         impure function sr_with_ccr(sr_high : std_logic_vector(15 downto 0);
@@ -152,9 +172,6 @@ begin
             return std_logic_vector is
             variable result : std_logic_vector(15 downto 0);
         begin
-            -- These maintained CHK2 entry cases all use in-range, non-equal
-            -- bounds/value pairs. WinUAE's 68020/030 path clears C/Z first,
-            -- recomputes them to 0 here, and leaves only X preserved.
             result := sr_value;
             result(3 downto 0) := "0000";
             return result;
@@ -191,128 +208,124 @@ begin
         procedure write_result_handler(base_addr : integer;
                                        marker    : std_logic_vector(15 downto 0)) is
         begin
-            mem(base_addr / 2) := x"33FC";
-            mem(base_addr / 2 + 1) := marker;
-            mem(base_addr / 2 + 2) := x"0000";
-            mem(base_addr / 2 + 3) := std_logic_vector(to_unsigned(RESULT_ADDR, 16));
-            mem(base_addr / 2 + 4) := x"4E72";
-            mem(base_addr / 2 + 5) := x"2700";
+            low_mem(base_addr / 2) := x"33FC";
+            low_mem(base_addr / 2 + 1) := marker;
+            low_mem(base_addr / 2 + 2) := x"0000";
+            low_mem(base_addr / 2 + 3) := std_logic_vector(to_unsigned(RESULT_ADDR, 16));
+            low_mem(base_addr / 2 + 4) := x"4E72";
+            low_mem(base_addr / 2 + 5) := x"2700";
         end procedure;
 
         procedure init_case(sr_value    : std_logic_vector(15 downto 0);
                             opcode_word : std_logic_vector(15 downto 0)) is
             variable d0_value : std_logic_vector(31 downto 0);
+            variable idx      : integer;
         begin
-            for i in 0 to 16383 loop
-                mem(i) := x"4E71";
+            for i in low_mem'range loop
+                low_mem(i) := x"4E71";
+            end loop;
+            for i in high_mem'range loop
+                high_mem(i) := x"4E71";
             end loop;
 
             d0_value := compare_value(opcode_word);
 
-            mem(0) := x"0000";
-            mem(1) := x"0800";
-            mem(2) := x"0000";
-            mem(3) := x"1000";
+            low_mem(0) := x"4200";
+            low_mem(1) := x"0800";
+            low_mem(2) := x"4200";
+            low_mem(3) := x"1000";
 
-            mem(16#0024# / 2) := x"0000";
-            mem(16#0026# / 2) := std_logic_vector(to_unsigned(TRACE_VEC, 16));
-            mem(16#0018# / 2) := x"0000";
-            mem(16#001A# / 2) := std_logic_vector(to_unsigned(CHK_VEC, 16));
+            low_mem(16#0024# / 2) := x"0000";
+            low_mem(16#0026# / 2) := std_logic_vector(to_unsigned(TRACE_VEC, 16));
+            low_mem(16#0018# / 2) := x"0000";
+            low_mem(16#001A# / 2) := std_logic_vector(to_unsigned(CHK_VEC, 16));
 
-            mem(RESULT_ADDR / 2) := x"0000";
-            mem(RESULT_ADDR / 2 + 1) := x"0000";
+            low_mem(RESULT_ADDR / 2) := x"0000";
+            low_mem(RESULT_ADDR / 2 + 1) := x"0000";
 
             write_result_handler(TRACE_VEC, MARK_TRACE);
             write_result_handler(CHK_VEC, MARK_CHK);
 
-            mem(16#1000# / 2) := x"2E3C";
-            mem(16#1002# / 2) := x"0000";
-            mem(16#1004# / 2) := std_logic_vector(to_unsigned(USP_VALUE, 16));
-            mem(16#1006# / 2) := x"4E7B";
-            mem(16#1008# / 2) := x"7800";
+            idx := (16#42001000# - HIGH_BASE) / 2;
+            high_mem(idx) := x"2E3C";
+            high_mem(idx + 1) := std_logic_vector(to_unsigned(USP_VALUE / 16#10000#, 16));
+            high_mem(idx + 2) := std_logic_vector(to_unsigned(USP_VALUE mod 16#10000#, 16));
+            high_mem(idx + 3) := x"4E7B";
+            high_mem(idx + 4) := x"7800";
 
-            mem(16#100A# / 2) := x"2E3C";
-            mem(16#100C# / 2) := x"0000";
-            mem(16#100E# / 2) := std_logic_vector(to_unsigned(MSP_VALUE, 16));
-            mem(16#1010# / 2) := x"4E7B";
-            mem(16#1012# / 2) := x"7803";
+            idx := (16#4200100A# - HIGH_BASE) / 2;
+            high_mem(idx) := x"2E3C";
+            high_mem(idx + 1) := std_logic_vector(to_unsigned(MSP_VALUE / 16#10000#, 16));
+            high_mem(idx + 2) := std_logic_vector(to_unsigned(MSP_VALUE mod 16#10000#, 16));
+            high_mem(idx + 3) := x"4E7B";
+            high_mem(idx + 4) := x"7803";
 
-            mem(16#1014# / 2) := x"2A7C";
-            mem(16#1016# / 2) := x"0000";
-            mem(16#1018# / 2) := x"001C";
+            idx := (16#42001014# - HIGH_BASE) / 2;
+            high_mem(idx) := x"2A7C";
+            high_mem(idx + 1) := x"0000";
+            high_mem(idx + 2) := x"001C";
 
-            mem(16#101A# / 2) := x"247C";
-            mem(16#101C# / 2) := x"0000";
-            mem(16#101E# / 2) := x"001C";
+            idx := (16#4200101A# - HIGH_BASE) / 2;
+            high_mem(idx) := x"247C";
+            high_mem(idx + 1) := x"0000";
+            high_mem(idx + 2) := x"001C";
 
-            mem(16#1020# / 2) := x"207C";
-            mem(16#1022# / 2) := x"0000";
-            mem(16#1024# / 2) := std_logic_vector(to_unsigned(BOUNDS_ADDR, 16));
+            idx := (16#42001020# - HIGH_BASE) / 2;
+            high_mem(idx) := x"207C";
+            high_mem(idx + 1) := std_logic_vector(to_unsigned(BOUNDS_ADDR / 16#10000#, 16));
+            high_mem(idx + 2) := std_logic_vector(to_unsigned(BOUNDS_ADDR mod 16#10000#, 16));
 
-            mem(16#1026# / 2) := x"203C";
-            mem(16#1028# / 2) := d0_value(31 downto 16);
-            mem(16#102A# / 2) := d0_value(15 downto 0);
+            idx := (16#42001026# - HIGH_BASE) / 2;
+            high_mem(idx) := x"203C";
+            high_mem(idx + 1) := d0_value(31 downto 16);
+            high_mem(idx + 2) := d0_value(15 downto 0);
 
-            mem(16#102C# / 2) := x"2E7C";
-            mem(16#102E# / 2) := x"0000";
-            mem(16#1030# / 2) := std_logic_vector(to_unsigned(FRAME_START, 16));
-            mem(16#1032# / 2) := x"4E73";
+            idx := (16#4200102C# - HIGH_BASE) / 2;
+            high_mem(idx) := x"2E7C";
+            high_mem(idx + 1) := std_logic_vector(to_unsigned(FRAME_START / 16#10000#, 16));
+            high_mem(idx + 2) := std_logic_vector(to_unsigned(FRAME_START mod 16#10000#, 16));
+            high_mem(idx + 3) := x"4E73";
 
-            mem(FRAME_START / 2) := sr_value;
-            mem(FRAME_START / 2 + 1) := x"0000";
-            mem(FRAME_START / 2 + 2) := std_logic_vector(to_unsigned(RTE_PC, 16));
-            mem(FRAME_START / 2 + 3) := x"0000";
+            idx := (FRAME_START - HIGH_BASE) / 2;
+            high_mem(idx) := sr_value;
+            high_mem(idx + 1) := std_logic_vector(to_unsigned(RTE_PC / 16#10000#, 16));
+            high_mem(idx + 2) := std_logic_vector(to_unsigned(RTE_PC mod 16#10000#, 16));
+            high_mem(idx + 3) := x"0000";
 
-            mem(RTE_PC / 2) := opcode_word;
-            mem(RTE_PC / 2 + 1) := x"0800";
-            if opcode_word(5 downto 0) = "111011" then
-                mem(RTE_PC / 2 + 2) := pc_index_ext(opcode_word);
-                mem(RTE_PC / 2 + 3) := x"33FC"; -- MOVE.W #MARK_FALLTHROUGH,$RESULT
-                mem(RTE_PC / 2 + 4) := MARK_FALLTHROUGH;
-                mem(RTE_PC / 2 + 5) := x"0000";
-                mem(RTE_PC / 2 + 6) := std_logic_vector(to_unsigned(RESULT_ADDR, 16));
-                mem(RTE_PC / 2 + 7) := x"42F9"; -- MOVE CCR,$RESULT+2
-                mem(RTE_PC / 2 + 8) := x"0000";
-                mem(RTE_PC / 2 + 9) := std_logic_vector(to_unsigned(RESULT_ADDR + 2, 16));
-                mem(RTE_PC / 2 + 10) := x"60FE";
-            else
-                mem(RTE_PC / 2 + 2) := x"33FC"; -- MOVE.W #MARK_FALLTHROUGH,$RESULT
-                mem(RTE_PC / 2 + 3) := MARK_FALLTHROUGH;
-                mem(RTE_PC / 2 + 4) := x"0000";
-                mem(RTE_PC / 2 + 5) := std_logic_vector(to_unsigned(RESULT_ADDR, 16));
-                mem(RTE_PC / 2 + 6) := x"42F9"; -- MOVE CCR,$RESULT+2
-                mem(RTE_PC / 2 + 7) := x"0000";
-                mem(RTE_PC / 2 + 8) := std_logic_vector(to_unsigned(RESULT_ADDR + 2, 16));
-                mem(RTE_PC / 2 + 9) := x"60FE";
-            end if;
+            idx := (RTE_PC - HIGH_BASE) / 2;
+            high_mem(idx) := opcode_word;
+            high_mem(idx + 1) := x"0800";
+            high_mem(idx + 2) := pc_index_ext(opcode_word);
+            high_mem(idx + 3) := x"33FC";
+            high_mem(idx + 4) := MARK_FALLTHROUGH;
+            high_mem(idx + 5) := x"0000";
+            high_mem(idx + 6) := std_logic_vector(to_unsigned(RESULT_ADDR, 16));
+            high_mem(idx + 7) := x"42F9";
+            high_mem(idx + 8) := x"0000";
+            high_mem(idx + 9) := std_logic_vector(to_unsigned(RESULT_ADDR + 2, 16));
+            high_mem(idx + 10) := x"60FE";
         end procedure;
 
         procedure program_bounds(opcode_word : std_logic_vector(15 downto 0)) is
+            variable idx : integer;
         begin
             case opcode_word is
-                when x"00D0" =>
-                    mem(BOUNDS_ADDR / 2) := x"1020";
-                when x"02D0" =>
-                    mem(BOUNDS_ADDR / 2) := x"0010";
-                    mem(BOUNDS_ADDR / 2 + 1) := x"0020";
-                when x"04D0" =>
-                    mem(BOUNDS_ADDR / 2) := x"0000";
-                    mem(BOUNDS_ADDR / 2 + 1) := x"0010";
-                    mem(BOUNDS_ADDR / 2 + 2) := x"0000";
-                    mem(BOUNDS_ADDR / 2 + 3) := x"0020";
                 when x"00FB" =>
-                    mem(16#1216# / 2) := x"0010";
-                    mem(16#1218# / 2) := x"2010";
-                    mem(16#121A# / 2) := x"2010";
-                    mem(16#121C# / 2) := x"2000";
+                    idx := (RTE_PC + 16#16# - HIGH_BASE) / 2;
+                    high_mem(idx) := x"0010";
+                    high_mem(idx + 1) := x"2010";
+                    high_mem(idx + 2) := x"2010";
+                    high_mem(idx + 3) := x"2000";
                 when x"02FB" =>
-                    mem(16#1220# / 2) := x"0010";
-                    mem(16#1222# / 2) := x"0020";
+                    idx := (RTE_PC + 16#20# - HIGH_BASE) / 2;
+                    high_mem(idx) := x"0010";
+                    high_mem(idx + 1) := x"0020";
                 when others =>
-                    mem(16#1220# / 2) := x"0000";
-                    mem(16#1222# / 2) := x"0010";
-                    mem(16#1224# / 2) := x"0000";
-                    mem(16#1226# / 2) := x"0020";
+                    idx := (RTE_PC + 16#20# - HIGH_BASE) / 2;
+                    high_mem(idx) := x"0000";
+                    high_mem(idx + 1) := x"0010";
+                    high_mem(idx + 2) := x"0000";
+                    high_mem(idx + 3) := x"0020";
             end case;
         end procedure;
 
@@ -378,8 +391,8 @@ begin
                 report "PASS: " & case_name & " took trace" severity note;
                 pass_count := pass_count + 1;
             else
-                report "FAIL: " & case_name & " unexpected result marker while expecting trace"
-                    severity error;
+                report "FAIL: " & case_name &
+                       " unexpected result marker while expecting trace" severity error;
                 fail_count := fail_count + 1;
                 return;
             end if;
@@ -445,8 +458,7 @@ begin
                 fail_count := fail_count + 1;
             else
                 report "FAIL: " & case_name &
-                       " unexpected result marker while expecting fallthrough"
-                    severity error;
+                       " unexpected result marker while expecting fallthrough" severity error;
                 fail_count := fail_count + 1;
             end if;
         end procedure;
@@ -479,19 +491,13 @@ begin
             end loop;
         end procedure;
     begin
-        report "=== MC68030 BASIC CHK2 cputest-entry coverage ===" severity note;
+        report "=== MC68030 BASIC CHK2 full-address split-2 coverage ===" severity note;
 
-        report "=== Split 0001: CHK2 (A0) after RTE ===" severity note;
-        run_size(x"00D0", "CHK2.B (A0)");
-        run_size(x"02D0", "CHK2.W (A0)");
-        run_size(x"04D0", "CHK2.L (A0)");
-
-        report "=== Split 0002: CHK2 PC-index after RTE ===" severity note;
         run_size(x"00FB", "CHK2.B (d8,PC,Xn)");
         run_size(x"02FB", "CHK2.W (d8,PC,Xn)");
         run_size(x"04FB", "CHK2.L (d8,PC,Xn)");
 
-        report "BASIC CHK2 cputest-entry tests: " & integer'image(pass_count) &
+        report "BASIC CHK2 full-address split-2 tests: " & integer'image(pass_count) &
                " PASSED, " & integer'image(fail_count) & " FAILED" severity note;
         if fail_count = 0 then
             report "OVERALL: ALL TESTS PASSED" severity note;
