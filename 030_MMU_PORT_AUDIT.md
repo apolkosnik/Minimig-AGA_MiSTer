@@ -510,16 +510,18 @@ Packaged cputest BASIC / ODD_IRQ follow-up:
   - [tb_basic_chk2_cputest_entry.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_basic_chk2_cputest_entry.vhd): exact-form first-post-`RTE` CHK2 reproducer that now covers both packaged BASIC splits, `(A0)` plus the split-2 `*FB` PC-indexed family, across the full preserved-CCR sweep
   - [tb_basic_jmp_cputest_entry.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_basic_jmp_cputest_entry.vhd): exact-form first-post-`RTE` JMP reproducer for the maintained `JMP (A0)` plus `JMP 4EFB/65B2` paths, across the full preserved-CCR sweep
   - [tb_basic_jmp_sp_disp_entry.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_basic_jmp_sp_disp_entry.vhd): focused reproducer for the photographed packaged split using `JMP ($65B2,SP)` with distinct `USP`/`ISP`/`MSP` target shadows
+  - [tb_basic_jmp_sp_disp_highaddr.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_basic_jmp_sp_disp_highaddr.vhd): full-address version of the packaged `JMP ($65B2,SP)` split that keeps the real `0x420xxxxx` code and stack addresses from the BASIC header
   - [tb_basic_group2_user_trace.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_basic_group2_user_trace.vhd): direct BASIC-style user stacked-trace coverage for `TRAP` and taken `TRAPcc`
   - [tb_odd_irq_regwrite.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_odd_irq_regwrite.vhd): standalone reproducer for the `ODD_IRQ` `EXT.W` / `EXT.L` / `EXTB.L` / `SWAP` retire-before-odd-vector path
 - Makefile wiring:
-  - [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now has `test-basic-chk-trace`, `test-basic-div-jmp-trace`, `test-basic-cputest-entry`, `test-basic-jmp-sp-disp-entry`, `test-basic-group2-user-trace`, `test-basic-cputest`, and `test-odd-irq-regwrite`
+  - [tests/tg68k_030/Makefile](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/Makefile) now has `test-basic-chk-trace`, `test-basic-div-jmp-trace`, `test-basic-cputest-entry`, `test-basic-jmp-sp-disp-entry`, `test-basic-jmp-sp-disp-highaddr`, `test-basic-group2-user-trace`, `test-basic-cputest`, and `test-odd-irq-regwrite`
   - `test-basic-cputest` stays outside `test-trace-suite` because it mixes trace, exception-flag, and packaged cputest reproducer coverage, but it is now part of `test-arch-suite` after the remaining BASIC / `ODD_EXC` / `ODD_IRQ` issues were fixed
 - Current disposition from those benches:
   - `tb_basic_div_jmp_trace`: all `DIV*` and `JMP` cases pass in the current tree
   - the packaged `JMP/0002.dat.gz` split is the `4EFB` path, and the maintained exact-form `JMP 4EFB/65B2` entry reproducer now passes for all BASIC `SR & $F000` combinations in isolation
   - photographed hardware follow-up: the `S 420069b0 ...` block in the failing photo is the cputest `srcaddr` dump, not a raw exception-stack dump. The specific photographed split is consistent with `JMP ($65B2,SP)` into the low-memory scaffold at `$420069B0`, so the dedicated [tb_basic_jmp_sp_disp_entry.vhd](/home/adam/030_mmu2/Minimig-AGA_MiSTer/tests/tg68k_030/tb_basic_jmp_sp_disp_entry.vhd) now covers that exact first-post-`RTE` form.
   - `tb_basic_jmp_sp_disp_entry`: all `JMP ($65B2,SP)` cases pass in isolation across the full preserved-CCR sweep, so the remaining real-hardware BASIC `JMP` failure depends on broader cputest harness state than the first-post-`RTE` core path alone. That is an inference from the focused reproducer, not proof about the full packaged run.
+  - `tb_basic_jmp_sp_disp_highaddr`: the same `JMP ($65B2,SP)` matrix also passes when the real BASIC header addresses are preserved (`opcode_memory=$42050000`, `USP=$42000400`, `ISP=$420007C0`, `MSP=$42000840`). The only failure seen while building that bench was a testbench bug: the synthetic `RTE` frame had the PC and format words in the wrong order, which falsely reconstructed `$42050000` as `$00004205`.
   - `tb_basic_group2_user_trace`: `TRAP` and `TRAPcc` user stacked-trace cases pass; only the trap frame's saved SR is asserted, not the stacked trace frame's supervisor-side SR image
   - `tb_basic_chk_trace`: all maintained `CHK.W`, `CHK.L`, `CHK2.B`, `CHK2.W`, and `CHK2.L` BASIC user T1 no-trap cases now pass
   - the packaged `CHK2.* /0002.dat.gz` split is the `*FB` PC-indexed family, and the maintained exact-form `CHK2` entry reproducer now covers both split-1 `(A0)` and split-2 PC-indexed cases across the full preserved-CCR sweep, with final `CCR` readback used for the no-trace cases instead of privileged `MOVE SR`
@@ -533,6 +535,7 @@ Packaged cputest BASIC / ODD_IRQ follow-up:
   - direct ModelSim run of `tb_basic_div_jmp_trace`: 28 passed, 0 failed
   - direct ModelSim run of `tb_basic_chk2_cputest_entry`: 5376 passed, 0 failed
   - direct ModelSim run of `tb_basic_jmp_cputest_entry`: 2560 passed, 0 failed
+  - direct ModelSim run of `tb_basic_jmp_sp_disp_highaddr`: 1280 passed, 0 failed
   - direct ModelSim run of `tb_basic_jmp_sp_disp_entry`: 1280 passed, 0 failed
   - direct ModelSim run of `tb_basic_group2_user_trace`: 13 passed, 0 failed
   - initial direct ModelSim run of `tb_odd_irq_regwrite`: 8 passed, 4 failed (`EXT.W`, `EXT.L`, `EXTB.L`, `SWAP` retire checks)
