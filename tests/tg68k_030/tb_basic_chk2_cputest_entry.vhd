@@ -142,6 +142,24 @@ begin
             return mem(byte_addr / 2);
         end function;
 
+        impure function sr_with_ccr(sr_high : std_logic_vector(15 downto 0);
+                                    ccr     : integer) return std_logic_vector is
+        begin
+            return sr_high or std_logic_vector(to_unsigned(ccr, 16));
+        end function;
+
+        impure function expected_chk2_sr(sr_value : std_logic_vector(15 downto 0))
+            return std_logic_vector is
+            variable result : std_logic_vector(15 downto 0);
+        begin
+            -- These maintained CHK2 entry cases all use in-range, non-equal
+            -- bounds/value pairs. WinUAE's 68020/030 path clears C/Z first,
+            -- recomputes them to 0 here, and leaves only X preserved.
+            result := sr_value;
+            result(3 downto 0) := "0000";
+            return result;
+        end function;
+
         impure function compare_value(opcode_word : std_logic_vector(15 downto 0))
             return std_logic_vector is
         begin
@@ -249,19 +267,25 @@ begin
             mem(RTE_PC / 2 + 1) := x"0800";
             if opcode_word(5 downto 0) = "111011" then
                 mem(RTE_PC / 2 + 2) := pc_index_ext(opcode_word);
-                mem(RTE_PC / 2 + 3) := x"33FC";
+                mem(RTE_PC / 2 + 3) := x"33FC"; -- MOVE.W #MARK_FALLTHROUGH,$RESULT
                 mem(RTE_PC / 2 + 4) := MARK_FALLTHROUGH;
                 mem(RTE_PC / 2 + 5) := x"0000";
                 mem(RTE_PC / 2 + 6) := std_logic_vector(to_unsigned(RESULT_ADDR, 16));
-                mem(RTE_PC / 2 + 7) := x"4E72";
-                mem(RTE_PC / 2 + 8) := x"2700";
+                mem(RTE_PC / 2 + 7) := x"42F9"; -- MOVE CCR,$RESULT+2
+                mem(RTE_PC / 2 + 8) := x"0000";
+                mem(RTE_PC / 2 + 9) := std_logic_vector(to_unsigned(RESULT_ADDR + 2, 16));
+                mem(RTE_PC / 2 + 10) := x"4E72";
+                mem(RTE_PC / 2 + 11) := x"2700";
             else
-                mem(RTE_PC / 2 + 2) := x"33FC";
+                mem(RTE_PC / 2 + 2) := x"33FC"; -- MOVE.W #MARK_FALLTHROUGH,$RESULT
                 mem(RTE_PC / 2 + 3) := MARK_FALLTHROUGH;
                 mem(RTE_PC / 2 + 4) := x"0000";
                 mem(RTE_PC / 2 + 5) := std_logic_vector(to_unsigned(RESULT_ADDR, 16));
-                mem(RTE_PC / 2 + 6) := x"4E72";
-                mem(RTE_PC / 2 + 7) := x"2700";
+                mem(RTE_PC / 2 + 6) := x"42F9"; -- MOVE CCR,$RESULT+2
+                mem(RTE_PC / 2 + 7) := x"0000";
+                mem(RTE_PC / 2 + 8) := std_logic_vector(to_unsigned(RESULT_ADDR + 2, 16));
+                mem(RTE_PC / 2 + 9) := x"4E72";
+                mem(RTE_PC / 2 + 10) := x"2700";
             end if;
         end procedure;
 
@@ -362,7 +386,7 @@ begin
 
             load_frame(frame_addr(sr_value));
 
-            if frame_sr = sr_value then
+            if frame_sr = expected_chk2_sr(sr_value) then
                 report "PASS: " & case_name & " saved SR" severity note;
                 pass_count := pass_count + 1;
             else
@@ -408,6 +432,14 @@ begin
             if marker = MARK_FALLTHROUGH then
                 report "PASS: " & case_name & " completed without trace" severity note;
                 pass_count := pass_count + 1;
+                if mem_read(RESULT_ADDR + 2)(7 downto 0) =
+                   expected_chk2_sr(sr_value)(7 downto 0) then
+                    report "PASS: " & case_name & " final SR" severity note;
+                    pass_count := pass_count + 1;
+                else
+                    report "FAIL: " & case_name & " final SR mismatch" severity error;
+                    fail_count := fail_count + 1;
+                end if;
             elsif marker = MARK_CHK then
                 report "FAIL: " & case_name & " took unexpected CHK trap" severity error;
                 fail_count := fail_count + 1;
@@ -423,16 +455,28 @@ begin
                            size_name   : string) is
         begin
             report "=== " & size_name & " T1 cases ===" severity note;
-            check_trace_case(size_name & " user T1", x"8000", opcode_word);
-            check_trace_case(size_name & " user M1 T1", x"9000", opcode_word);
-            check_trace_case(size_name & " supervisor T1", x"A000", opcode_word);
-            check_trace_case(size_name & " supervisor M1 T1", x"B000", opcode_word);
+            for ccr in 0 to 31 loop
+                check_trace_case(size_name & " user T1 CCR=" & integer'image(ccr),
+                                 sr_with_ccr(x"8000", ccr), opcode_word);
+                check_trace_case(size_name & " user M1 T1 CCR=" & integer'image(ccr),
+                                 sr_with_ccr(x"9000", ccr), opcode_word);
+                check_trace_case(size_name & " supervisor T1 CCR=" & integer'image(ccr),
+                                 sr_with_ccr(x"A000", ccr), opcode_word);
+                check_trace_case(size_name & " supervisor M1 T1 CCR=" & integer'image(ccr),
+                                 sr_with_ccr(x"B000", ccr), opcode_word);
+            end loop;
 
             report "=== " & size_name & " T0 controls ===" severity note;
-            check_no_trace_case(size_name & " user T0", x"4000", opcode_word);
-            check_no_trace_case(size_name & " user M1 T0", x"5000", opcode_word);
-            check_no_trace_case(size_name & " supervisor T0", x"6000", opcode_word);
-            check_no_trace_case(size_name & " supervisor M1 T0", x"7000", opcode_word);
+            for ccr in 0 to 31 loop
+                check_no_trace_case(size_name & " user T0 CCR=" & integer'image(ccr),
+                                    sr_with_ccr(x"4000", ccr), opcode_word);
+                check_no_trace_case(size_name & " user M1 T0 CCR=" & integer'image(ccr),
+                                    sr_with_ccr(x"5000", ccr), opcode_word);
+                check_no_trace_case(size_name & " supervisor T0 CCR=" & integer'image(ccr),
+                                    sr_with_ccr(x"6000", ccr), opcode_word);
+                check_no_trace_case(size_name & " supervisor M1 T0 CCR=" & integer'image(ccr),
+                                    sr_with_ccr(x"7000", ccr), opcode_word);
+            end loop;
         end procedure;
     begin
         report "=== MC68030 BASIC CHK2 cputest-entry coverage ===" severity note;

@@ -1,16 +1,16 @@
--- tb_basic_jmp_cputest_entry.vhd
--- Reproduces the packaged WinUAE cputest/basic JMP trace split more closely:
--- both the simple JMP (A0) form and the split-2 JMP 4EFB/65B2 form are the
--- first instruction after an RTE frame.
+-- tb_basic_jmp_sp_disp_entry.vhd
+-- Focused reproducer for the packaged BASIC/JMP split-2 form seen on
+-- hardware: the first post-RTE instruction is JMP ($65B2,SP), with distinct
+-- USP/ISP/MSP shadows so the active stack selection stays visible.
 
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
-entity tb_basic_jmp_cputest_entry is
+entity tb_basic_jmp_sp_disp_entry is
 end entity;
 
-architecture behavior of tb_basic_jmp_cputest_entry is
+architecture behavior of tb_basic_jmp_sp_disp_entry is
     signal clk        : std_logic := '0';
     signal nReset     : std_logic := '0';
     signal clkena_in  : std_logic := '1';
@@ -25,17 +25,17 @@ architecture behavior of tb_basic_jmp_cputest_entry is
 
     constant CLK_PERIOD  : time := 10 ns;
     constant TRACE_VEC   : integer := 16#3000#;
+    constant ILL_VEC     : integer := 16#3100#;
     constant RESULT_ADDR : integer := 16#6000#;
-    constant TARGET_ADDR : integer := 16#2000#;
-    constant PTR_ADDR    : integer := 16#1E80#;
-    constant ISP_VALUE   : integer := 16#0800#;
-    constant MSP_VALUE   : integer := 16#0A00#;
-    constant USP_VALUE   : integer := 16#0400#;
-    constant FRAME_START : integer := 16#07F8#;
+    constant JMP_SP_DISP : integer := 16#65B2#;
+    constant ISP_VALUE   : integer := 16#07C0#;
+    constant MSP_VALUE   : integer := 16#0840#;
+    constant USP_VALUE   : integer := 16#03FE#;
+    constant FRAME_START : integer := ISP_VALUE - 8;
     constant RTE_PC      : integer := 16#1200#;
 
-    constant MARK_TRACE  : std_logic_vector(15 downto 0) := x"1111";
-    constant MARK_TARGET : std_logic_vector(15 downto 0) := x"2222";
+    constant MARK_TRACE   : std_logic_vector(15 downto 0) := x"1111";
+    constant MARK_ILLEGAL : std_logic_vector(15 downto 0) := x"3333";
 
     type mem_array_t is array(0 to 16383) of std_logic_vector(15 downto 0);
     shared variable mem : mem_array_t;
@@ -147,6 +147,24 @@ begin
             return sr_high or std_logic_vector(to_unsigned(ccr, 16));
         end function;
 
+        impure function active_stack_value(sr_value : std_logic_vector(15 downto 0))
+            return integer is
+        begin
+            if sr_value(13) = '0' then
+                return USP_VALUE;
+            elsif sr_value(12) = '1' then
+                return MSP_VALUE;
+            else
+                return ISP_VALUE;
+            end if;
+        end function;
+
+        impure function target_addr(sr_value : std_logic_vector(15 downto 0))
+            return integer is
+        begin
+            return active_stack_value(sr_value) + JMP_SP_DISP;
+        end function;
+
         procedure write_result_handler(base_addr : integer;
                                        marker    : std_logic_vector(15 downto 0)) is
         begin
@@ -158,8 +176,13 @@ begin
             mem(base_addr / 2 + 5) := x"2700";
         end procedure;
 
-        procedure init_case(sr_value : std_logic_vector(15 downto 0);
-                            use_65b2 : boolean) is
+        procedure write_target_stub(base_addr : integer) is
+        begin
+            mem(base_addr / 2) := x"2048"; -- MOVEA.L A0,A0
+            mem(base_addr / 2 + 1) := x"4AFC"; -- ILLEGAL
+        end procedure;
+
+        procedure init_case(sr_value : std_logic_vector(15 downto 0)) is
         begin
             for i in 0 to 16383 loop
                 mem(i) := x"4E71";
@@ -170,6 +193,8 @@ begin
             mem(2) := x"0000";
             mem(3) := x"1000";
 
+            mem(16#0010# / 2) := x"0000";
+            mem(16#0012# / 2) := std_logic_vector(to_unsigned(ILL_VEC, 16));
             mem(16#0024# / 2) := x"0000";
             mem(16#0026# / 2) := std_logic_vector(to_unsigned(TRACE_VEC, 16));
 
@@ -177,7 +202,11 @@ begin
             mem(RESULT_ADDR / 2 + 1) := x"0000";
 
             write_result_handler(TRACE_VEC, MARK_TRACE);
-            write_result_handler(TARGET_ADDR, MARK_TARGET);
+            write_result_handler(ILL_VEC, MARK_ILLEGAL);
+
+            write_target_stub(USP_VALUE + JMP_SP_DISP);
+            write_target_stub(ISP_VALUE + JMP_SP_DISP);
+            write_target_stub(MSP_VALUE + JMP_SP_DISP);
 
             mem(16#1000# / 2) := x"2E3C";
             mem(16#1002# / 2) := x"0000";
@@ -191,32 +220,18 @@ begin
             mem(16#1010# / 2) := x"4E7B";
             mem(16#1012# / 2) := x"7803";
 
-            mem(16#1014# / 2) := x"207C";
+            mem(16#1014# / 2) := x"2E7C";
             mem(16#1016# / 2) := x"0000";
-            mem(16#1018# / 2) := std_logic_vector(to_unsigned(TARGET_ADDR, 16));
-
-            mem(16#101A# / 2) := x"2E7C";
-            mem(16#101C# / 2) := x"0000";
-            mem(16#101E# / 2) := std_logic_vector(to_unsigned(FRAME_START, 16));
-            mem(16#1020# / 2) := x"4E73";
+            mem(16#1018# / 2) := std_logic_vector(to_unsigned(FRAME_START, 16));
+            mem(16#101A# / 2) := x"4E73";
 
             mem(FRAME_START / 2) := sr_value;
             mem(FRAME_START / 2 + 1) := x"0000";
             mem(FRAME_START / 2 + 2) := std_logic_vector(to_unsigned(RTE_PC, 16));
             mem(FRAME_START / 2 + 3) := x"0000";
 
-            mem(PTR_ADDR / 2) := x"0000";
-            mem(PTR_ADDR / 2 + 1) := x"1FFC";
-
-            if use_65b2 then
-                mem(RTE_PC / 2) := x"4EFB";
-                mem(RTE_PC / 2 + 1) := x"65B2";
-                mem(RTE_PC / 2 + 2) := x"0000";
-                mem(RTE_PC / 2 + 3) := std_logic_vector(to_unsigned(PTR_ADDR, 16));
-                mem(RTE_PC / 2 + 4) := x"0004";
-            else
-                mem(RTE_PC / 2) := x"4ED0";
-            end if;
+            mem(RTE_PC / 2) := x"4EEF";
+            mem(RTE_PC / 2 + 1) := x"65B2";
         end procedure;
 
         impure function frame_addr(sr_value : std_logic_vector(15 downto 0)) return integer is
@@ -265,21 +280,25 @@ begin
             fail_count := fail_count + 1;
         end procedure;
 
-        procedure check_trace_case(case_name : string;
-                                   sr_value  : std_logic_vector(15 downto 0);
-                                   use_65b2 : boolean) is
-            variable marker : std_logic_vector(15 downto 0);
+        procedure check_case(case_name : string;
+                             sr_value  : std_logic_vector(15 downto 0)) is
+            variable marker          : std_logic_vector(15 downto 0);
+            variable expected_target : integer;
         begin
-            init_case(sr_value, use_65b2);
+            init_case(sr_value);
             run_case;
-
             marker := mem_read(RESULT_ADDR);
+            expected_target := target_addr(sr_value);
+
             if marker = MARK_TRACE then
                 report "PASS: " & case_name & " took trace" severity note;
                 pass_count := pass_count + 1;
+            elsif marker = MARK_ILLEGAL then
+                report "FAIL: " & case_name & " reached target ILLEGAL before trace" severity error;
+                fail_count := fail_count + 1;
+                return;
             else
-                report "FAIL: " & case_name & " unexpected result marker while expecting trace"
-                    severity error;
+                report "FAIL: " & case_name & " produced no recognized result marker" severity error;
                 fail_count := fail_count + 1;
                 return;
             end if;
@@ -302,8 +321,8 @@ begin
                 fail_count := fail_count + 1;
             end if;
 
-            if frame_pc = std_logic_vector(to_unsigned(TARGET_ADDR, 32)) then
-                report "PASS: " & case_name & " stacked PC" severity note;
+            if frame_pc = std_logic_vector(to_unsigned(expected_target, 32)) then
+                report "PASS: " & case_name & " stacked PC target" severity note;
                 pass_count := pass_count + 1;
             else
                 report "FAIL: " & case_name & " stacked PC mismatch" severity error;
@@ -320,38 +339,28 @@ begin
         end procedure;
 
         procedure run_variant(prefix : string;
-                              use_65b2 : boolean) is
+                              sr_high : std_logic_vector(15 downto 0)) is
         begin
             for ccr in 0 to 31 loop
-                check_trace_case(prefix & " user T1 CCR=" & integer'image(ccr),
-                                 sr_with_ccr(x"8000", ccr), use_65b2);
-                check_trace_case(prefix & " user T0 CCR=" & integer'image(ccr),
-                                 sr_with_ccr(x"4000", ccr), use_65b2);
-                check_trace_case(prefix & " user M1 T1 CCR=" & integer'image(ccr),
-                                 sr_with_ccr(x"9000", ccr), use_65b2);
-                check_trace_case(prefix & " user M1 T0 CCR=" & integer'image(ccr),
-                                 sr_with_ccr(x"5000", ccr), use_65b2);
-                check_trace_case(prefix & " supervisor T1 CCR=" & integer'image(ccr),
-                                 sr_with_ccr(x"A000", ccr), use_65b2);
-                check_trace_case(prefix & " supervisor T0 CCR=" & integer'image(ccr),
-                                 sr_with_ccr(x"6000", ccr), use_65b2);
-                check_trace_case(prefix & " supervisor M1 T1 CCR=" & integer'image(ccr),
-                                 sr_with_ccr(x"B000", ccr), use_65b2);
-                check_trace_case(prefix & " supervisor M1 T0 CCR=" & integer'image(ccr),
-                                 sr_with_ccr(x"7000", ccr), use_65b2);
+                check_case(prefix & " CCR=" & integer'image(ccr),
+                           sr_with_ccr(sr_high, ccr));
             end loop;
         end procedure;
     begin
-        report "=== MC68030 BASIC JMP cputest-entry coverage ===" severity note;
+        report "=== MC68030 BASIC JMP (d16,SP) cputest-entry coverage ===" severity note;
 
-        report "=== Split 0001: JMP (A0) after RTE ===" severity note;
-        run_variant("JMP (A0)", false);
+        run_variant("user T1", x"8000");
+        run_variant("user T0", x"4000");
+        run_variant("user M1 T1", x"9000");
+        run_variant("user M1 T0", x"5000");
+        run_variant("supervisor T1", x"A000");
+        run_variant("supervisor T0", x"6000");
+        run_variant("supervisor M1 T1", x"B000");
+        run_variant("supervisor M1 T0", x"7000");
 
-        report "=== Split 0002: JMP 4EFB/65B2 after RTE ===" severity note;
-        run_variant("JMP 4EFB/65B2", true);
-
-        report "BASIC JMP cputest-entry tests: " & integer'image(pass_count) &
-               " PASSED, " & integer'image(fail_count) & " FAILED" severity note;
+        report "BASIC JMP (d16,SP) cputest-entry tests: " &
+               integer'image(pass_count) & " PASSED, " &
+               integer'image(fail_count) & " FAILED" severity note;
         if fail_count = 0 then
             report "OVERALL: ALL TESTS PASSED" severity note;
         else
