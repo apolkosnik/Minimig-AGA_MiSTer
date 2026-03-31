@@ -106,6 +106,12 @@ class MemWrite:
 
 
 @dataclass
+class BytePatch:
+    addr: int
+    data: bytes
+
+
+@dataclass
 class Subcase:
     record_index: int
     group_index: int
@@ -121,6 +127,8 @@ class Subcase:
     extra_trace: int = 0
     extra_trace_standalone: bool = False
     group2_with_1: int = -1
+    init_memwrites: List[MemWrite] = field(default_factory=list)
+    init_bytepatches: List[BytePatch] = field(default_factory=list)
 
 
 class Parser:
@@ -138,6 +146,8 @@ class Parser:
             "FPIAR": 0xFFFFFFFF,
             "FPCSR": 0,
         }
+        self.current_init_memwrites: List[MemWrite] = []
+        self.current_init_bytepatches: List[BytePatch] = []
 
     def restore_value(self, off: int, cur: int = 0) -> Tuple[int, int, int]:
         tag = self.data[off]
@@ -195,22 +205,44 @@ class Parser:
             return off + 2, (self.header.opcode_memory_addr + rel) & 0xFFFFFFFF
         raise ValueError(f"unexpected memory address size {size_sel:02x} at {off - 1:04x}")
 
+    def parse_memwrite(self, off: int) -> Tuple[int, MemWrite]:
+        off, addr = self.parse_mem_addr(off)
+        off, oldv, size = self.restore_value(off, 0)
+        off, newv, _size = self.restore_value(off, 0)
+        return off, MemWrite(addr, size, oldv, newv)
+
+    def parse_memwrites_block(self, off: int) -> Tuple[int, BytePatch]:
+        tag = self.data[off]
+        off += 1
+        size_sel = tag & CT_SIZE_MASK
+        if size_sel != CT_PC_BYTES:
+            raise ValueError(f"unexpected CT_MEMWRITES size {size_sel:02x} at {off - 1:04x}")
+
+        if self.data[off] == 0xFF:
+            offset = self.data[off + 1]
+            length = self.data[off + 2] or 256
+            data = bytes(self.data[off + 3:off + 3 + length])
+            off += 3 + length
+        else:
+            lead = self.data[off]
+            offset = lead >> 5
+            length = lead & 31 or 32
+            data = bytes(self.data[off + 1:off + 1 + length])
+            off += 1 + length
+
+        return off, BytePatch(self.header.opcode_memory_addr + offset, data)
+
     def apply_init_item(self, off: int) -> int:
         tag = self.data[off]
         mode = tag & CT_DATA_MASK
         if mode == CT_MEMWRITE:
-            off, _addr = self.parse_mem_addr(off)
-            off, _oldv, _size = self.restore_value(off, 0)
-            off, _newv, _size = self.restore_value(off, 0)
+            off, memwrite = self.parse_memwrite(off)
+            self.current_init_memwrites.append(memwrite)
             return off
         if mode == CT_MEMWRITES:
-            off += 1
-            lead = self.data[off]
-            if lead == 0xFF:
-                length = self.data[off + 2] or 256
-                return off + 3 + length
-            length = lead & 31 or 32
-            return off + 1 + length
+            off, bytepatch = self.parse_memwrites_block(off)
+            self.current_init_bytepatches.append(bytepatch)
+            return off
         if mode == CT_EDATA:
             return off + 3 if self.data[off + 1] == 1 else off + 2
         if tag == CT_OVERRIDE_REG:
@@ -310,6 +342,8 @@ class Parser:
         off = 0
         record_index = 0
         while off < len(self.data):
+            self.current_init_memwrites = []
+            self.current_init_bytepatches = []
             while self.data[off] not in (CT_END_INIT, CT_END_SKIP, CT_END_FINISH):
                 off = self.apply_init_item(off)
 
@@ -344,7 +378,9 @@ class Parser:
                                     ccrmode=ccrmode,
                                     ccr=ccrcnt & (maxccr - 1),
                                     overrides=overrides,
-                                    end_marker=CT_END_SKIP,
+                                end_marker=CT_END_SKIP,
+                                    init_memwrites=list(self.current_init_memwrites),
+                                    init_bytepatches=list(self.current_init_bytepatches),
                                 ),
                                 dict(self.state),
                             )
@@ -370,6 +406,8 @@ class Parser:
                                 extra_trace=extra_trace,
                                 extra_trace_standalone=extra_trace_standalone,
                                 group2_with_1=group2_with_1,
+                                init_memwrites=list(self.current_init_memwrites),
+                                init_bytepatches=list(self.current_init_bytepatches),
                             ),
                             dict(self.state),
                         )
@@ -439,6 +477,19 @@ def summarize_state(state: Dict[str, int]) -> str:
     return " ".join(parts)
 
 
+def sr_mask_from_extraccr(extraccr: int) -> int:
+    sr_mask = 0
+    if extraccr & 1:
+        sr_mask |= 0x2000
+    if extraccr & 2:
+        sr_mask |= 0x4000
+    if extraccr & 4:
+        sr_mask |= 0x8000
+    if extraccr & 8:
+        sr_mask |= 0x1000
+    return sr_mask
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("case_file", type=Path, help="Packed testcase file, e.g. .../JMP/0002.dat.gz")
@@ -447,6 +498,7 @@ def main() -> None:
     ap.add_argument("--exc", type=int, default=None, help="Only show subcases with this expected exception number")
     ap.add_argument("--extra-trace", action="store_true", help="Only show subcases that encode an additional trace exception in the exception payload")
     ap.add_argument("--srcaddr", type=lambda s: int(s, 0), default=None, help="Only show subcases whose cumulative SRCADDR matches this value")
+    ap.add_argument("--show-init", action="store_true", help="Show init-record memory patches that build the matched subcase")
     ap.add_argument("--max-hits", type=int, default=20, help="Maximum matching subcases to print")
     args = ap.parse_args()
 
@@ -476,6 +528,9 @@ def main() -> None:
             f"extra_trace={subcase.extra_trace} standalone={int(subcase.extra_trace_standalone)}"
         )
         print(f"state: {summarize_state(state)}")
+        if subcase.extraccr:
+            effective_sr = state.get("SR", 0) | sr_mask_from_extraccr(subcase.extraccr)
+            print(f"effective SR high bits from extraccr: {fmt_hex(effective_sr, 4)}")
         if subcase.overrides:
             print("overrides:")
             for name, value in subcase.overrides:
@@ -488,6 +543,19 @@ def main() -> None:
                     f"  {size_name} {fmt_hex(mw.addr)}: "
                     f"{fmt_hex(mw.old, (1, 2, 4)[mw.size] * 2)} -> {fmt_hex(mw.new, (1, 2, 4)[mw.size] * 2)}"
                 )
+        if args.show_init:
+            if subcase.init_memwrites:
+                print("init memwrites:")
+                for mw in subcase.init_memwrites:
+                    size_name = ("byte", "word", "long")[mw.size]
+                    print(
+                        f"  {size_name} {fmt_hex(mw.addr)}: "
+                        f"{fmt_hex(mw.old, (1, 2, 4)[mw.size] * 2)} -> {fmt_hex(mw.new, (1, 2, 4)[mw.size] * 2)}"
+                    )
+            if subcase.init_bytepatches:
+                print("init bytepatches:")
+                for patch in subcase.init_bytepatches:
+                    print(f"  {fmt_hex(patch.addr)}: {' '.join(f'{b:02X}' for b in patch.data)}")
         if hits >= args.max_hits:
             break
 
