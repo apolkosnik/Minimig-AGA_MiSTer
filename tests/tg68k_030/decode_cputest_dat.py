@@ -112,6 +112,14 @@ class BytePatch:
 
 
 @dataclass
+class ExceptionSummary:
+    frame_word: int | None = None
+    pc: int | None = None
+    instruction_addr: int | None = None
+    second_addr: int | None = None
+
+
+@dataclass
 class Subcase:
     record_index: int
     group_index: int
@@ -129,6 +137,10 @@ class Subcase:
     group2_with_1: int = -1
     init_memwrites: List[MemWrite] = field(default_factory=list)
     init_bytepatches: List[BytePatch] = field(default_factory=list)
+    exception_payload_raw: bytes = b""
+    trace_expected_sr: int | None = None
+    trace_expected_pc: int | None = None
+    exception_summary: ExceptionSummary | None = None
 
 
 class Parser:
@@ -274,10 +286,14 @@ class Parser:
         self.state[name] = value
         return off + 6, (name, value)
 
-    def skip_exception_payload(self, off: int, exc: int) -> Tuple[int, int, bool, int]:
+    def skip_exception_payload(self, off: int, exc: int) -> Tuple[int, bytes, int, bool, int]:
         if exc == 0:
-            return off, 0, False, -1
+            return off, b"", 0, False, -1
         excdatalen = self.data[off]
+        if excdatalen == 0xFF:
+            payload_raw = bytes(self.data[off:off + 1])
+        else:
+            payload_raw = bytes(self.data[off:off + 1 + excdatalen])
         off += 1
         extra_trace = 0
         extra_trace_standalone = False
@@ -290,20 +306,105 @@ class Parser:
             if (extra & 0x3F) == 9:
                 extra_trace = 9
                 extra_trace_standalone = bool(extra & 0x80)
+
         if excdatalen not in (0, 0xFF):
             off += excdatalen
-        return off, extra_trace, extra_trace_standalone, group2_with_1
+        return off, payload_raw, extra_trace, extra_trace_standalone, group2_with_1
 
-    def parse_expected_items(self, off: int) -> Tuple[int, List[MemWrite], int, int, bool, int, bool, int]:
+    def decode_exception_payload(
+        self, payload_raw: bytes, exc: int
+    ) -> Tuple[int | None, int | None, ExceptionSummary | None]:
+        if exc == 0 or not payload_raw:
+            return None, None, None
+
+        excdatalen = payload_raw[0]
+        if excdatalen == 0 or excdatalen == 0xFF:
+            return None, None, None
+
+        pos = 1
+        payload_end = 1 + excdatalen
+        trace_expected_sr = None
+        trace_expected_pc = None
+        exception_summary = None
+
+        extra = payload_raw[pos]
+        pos += 1
+        if extra & 0x40 and pos < payload_end:
+            pos += 1
+            extra &= ~0x40
+
+        if (extra & 0x3F) == 9 and (extra & 0x80):
+            if pos + 2 <= payload_end:
+                trace_expected_sr = int.from_bytes(payload_raw[pos:pos + 2], "big")
+                pos += 2
+            if pos < payload_end:
+                pos, trace_expected_pc = self.decode_rel_from_bytes(payload_raw, pos, self.header.opcode_memory_addr)
+
+        if exc != 1 and pos < payload_end:
+            summary = ExceptionSummary()
+            pos, summary.pc = self.decode_rel_from_bytes(payload_raw, pos, self.header.opcode_memory_addr)
+            if pos + 2 <= payload_end:
+                summary.frame_word = int.from_bytes(payload_raw[pos:pos + 2], "big")
+                pos += 2
+                frame_fmt = summary.frame_word >> 12
+                if frame_fmt in (2, 3) and pos < payload_end:
+                    pos, summary.instruction_addr = self.decode_rel_from_bytes(payload_raw, pos, self.header.opcode_memory_addr)
+                elif frame_fmt == 4 and pos < payload_end:
+                    pos, summary.instruction_addr = self.decode_rel_from_bytes(payload_raw, pos, self.header.opcode_memory_addr)
+                    if pos < payload_end:
+                        pos, summary.second_addr = self.decode_rel_from_bytes(payload_raw, pos, self.header.opcode_memory_addr)
+            exception_summary = summary
+
+        return trace_expected_sr, trace_expected_pc, exception_summary
+
+    @staticmethod
+    def decode_rel_from_bytes(buf: bytes, off: int, cur: int = 0) -> Tuple[int, int]:
+        tag = buf[off]
+        off += 1
+        size_sel = tag & CT_SIZE_MASK
+        if size_sel == CT_RELATIVE_START_BYTE:
+            delta = int.from_bytes(buf[off:off + 1], "big", signed=True)
+            return off + 1, (cur + delta) & 0xFFFFFFFF
+        if size_sel == CT_RELATIVE_START_WORD:
+            delta = int.from_bytes(buf[off:off + 2], "big", signed=True)
+            return off + 2, (cur + delta) & 0xFFFFFFFF
+        if size_sel == CT_ABSOLUTE_WORD:
+            return off + 2, int.from_bytes(buf[off:off + 2], "big", signed=True) & 0xFFFFFFFF
+        if size_sel == CT_ABSOLUTE_LONG:
+            return off + 4, int.from_bytes(buf[off:off + 4], "big")
+        raise ValueError(f"unexpected decode_rel size {size_sel:02x} at {off - 1:04x}")
+
+    def parse_expected_items(
+        self, off: int
+    ) -> Tuple[
+        int,
+        List[MemWrite],
+        int,
+        int,
+        bool,
+        int,
+        bool,
+        int,
+        bytes,
+    ]:
         memwrites: List[MemWrite] = []
         while True:
             tag = self.data[off]
             if tag & CT_END:
                 end_marker = tag
-                off += 1
                 exc = end_marker & CT_EXCEPTION_MASK
-                off, extra_trace, extra_trace_standalone, group2_with_1 = self.skip_exception_payload(off, exc)
-                return off, memwrites, end_marker, exc, bool(end_marker & 0x40), extra_trace, extra_trace_standalone, group2_with_1
+                off, payload_raw, extra_trace, extra_trace_standalone, group2_with_1 = self.skip_exception_payload(off + 1, exc)
+                return (
+                    off,
+                    memwrites,
+                    end_marker,
+                    exc,
+                    bool(end_marker & 0x40),
+                    extra_trace,
+                    extra_trace_standalone,
+                    group2_with_1,
+                    payload_raw,
+                )
 
             mode = tag & CT_DATA_MASK
             if mode == CT_MEMWRITE:
@@ -388,7 +489,18 @@ class Parser:
                         off += 1
                         continue
 
-                    off, memwrites, end_marker, exc, branched, extra_trace, extra_trace_standalone, group2_with_1 = self.parse_expected_items(off)
+                    (
+                        off,
+                        memwrites,
+                        end_marker,
+                        exc,
+                        branched,
+                        extra_trace,
+                        extra_trace_standalone,
+                        group2_with_1,
+                        exception_payload_raw,
+                    ) = self.parse_expected_items(off)
+                    trace_expected_sr, trace_expected_pc, exception_summary = self.decode_exception_payload(exception_payload_raw, exc)
                     out.append(
                         (
                             Subcase(
@@ -408,6 +520,10 @@ class Parser:
                                 group2_with_1=group2_with_1,
                                 init_memwrites=list(self.current_init_memwrites),
                                 init_bytepatches=list(self.current_init_bytepatches),
+                                exception_payload_raw=exception_payload_raw,
+                                trace_expected_sr=trace_expected_sr,
+                                trace_expected_pc=trace_expected_pc,
+                                exception_summary=exception_summary,
                             ),
                             dict(self.state),
                         )

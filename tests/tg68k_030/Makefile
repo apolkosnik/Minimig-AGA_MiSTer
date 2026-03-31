@@ -582,6 +582,15 @@ test-basic-cputest-entry: setup
 	@$(MAKE) --no-print-directory test-basic-jmp-cputest-entry
 	@$(MAKE) --no-print-directory test-basic-jmp-sp-disp-highaddr
 
+test-basic-cputest-exact: setup
+	@echo "Running exact packed BASIC CHK2/JMP reproducer (expected to fail until fixed)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -2008 $(TEST_DIR)/tb_basic_cputest_exact.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 4ms; quit -f" tb_basic_cputest_exact
+
 test-basic-exception-flags: setup
 	@echo "Running BASIC-style CHK/DIV exception flag tests..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
