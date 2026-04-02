@@ -302,14 +302,10 @@ begin
         procedure install_trace_stub is
         begin
             write_long(16#24#, x"00001900");
-            write_word(TRACE_VEC_ADDR, x"6100");
-            write_word(TRACE_VEC_ADDR + 2, x"0004");
-            write_word(TRACE_VEC_ADDR + 4, x"4E71");
-            write_word(TRACE_VEC_ADDR + 8, x"23CF");
-            write_word(TRACE_VEC_ADDR + 10, x"4200");
-            write_word(TRACE_VEC_ADDR + 12, x"0F00");
-            write_word(TRACE_VEC_ADDR + 14, x"588F");
-            write_word(TRACE_VEC_ADDR + 16, x"4E73");
+            write_word(TRACE_VEC_ADDR, x"23CF");
+            write_word(TRACE_VEC_ADDR + 2, x"4200");
+            write_word(TRACE_VEC_ADDR + 4, x"0F00");
+            write_word(TRACE_VEC_ADDR + 6, x"4E73");
         end procedure;
 
         procedure install_exc_stub(vector_num : integer; stub_addr : integer) is
@@ -317,14 +313,11 @@ begin
         begin
             vector_addr := vector_num * 4;
             write_long(vector_addr, std_logic_vector(to_unsigned(stub_addr, 32)));
-            write_word(stub_addr, x"6100");
-            write_word(stub_addr + 2, x"0004");
-            write_word(stub_addr + 4, x"4E71");
-            write_word(stub_addr + 8, x"23CF");
-            write_word(stub_addr + 10, x"4200");
-            write_word(stub_addr + 12, x"0F04");
-            write_word(stub_addr + 14, x"4E72");
-            write_word(stub_addr + 16, x"2700");
+            write_word(stub_addr, x"23CF");
+            write_word(stub_addr + 2, x"4200");
+            write_word(stub_addr + 4, x"0F04");
+            write_word(stub_addr + 6, x"4E72");
+            write_word(stub_addr + 8, x"2700");
         end procedure;
 
         procedure set_reset_vectors is
@@ -543,8 +536,8 @@ begin
                 return;
             end if;
 
-            trace_sr := read_word(trace_sp + 4);
-            trace_pc := read_long(trace_sp + 6);
+            trace_sr := read_word(trace_sp);
+            trace_pc := read_long(trace_sp + 2);
 
             if trace_pc = x"000018C0" then
                 report "PASS: " & case_name & " stacked trace PC matched cputest vector address" severity note;
@@ -556,7 +549,7 @@ begin
             end if;
 
             if exc_sp /= 0 then
-                exc_sr := read_word(exc_sp + 4);
+                exc_sr := read_word(exc_sp);
                 if trace_sr(13) = '1' and
                    ((unsigned(trace_sr) or to_unsigned(16#E000#, 16)) =
                     (unsigned(exc_sr) or to_unsigned(16#E000#, 16))) then
@@ -589,8 +582,8 @@ begin
                 return;
             end if;
 
-            trace_sr := read_word(trace_sp + 4);
-            trace_pc := read_long(trace_sp + 6);
+            trace_sr := read_word(trace_sp);
+            trace_pc := read_long(trace_sp + 2);
 
             if trace_sr = x"8000" then
                 report "PASS: CHK2.W standalone trace SR matched cputest" severity note;
@@ -647,8 +640,8 @@ begin
             high_b := read_byte(16#4204FEFF#);
 
             if trace_sp /= 0 then
-                trace_sr := read_word(trace_sp + 4);
-                trace_pc := read_long(trace_sp + 6);
+                trace_sr := read_word(trace_sp);
+                trace_pc := read_long(trace_sp + 2);
 
                 if trace_sr = x"6000" then
                     report "PASS: JMP standalone trace SR matched cputest" severity note;
