@@ -27,6 +27,8 @@ architecture behavior of tb_basic_cputest_exact is
     constant LOW_BYTES       : integer := 16#00002000#;
     constant HIGH0_BASE      : integer := 16#42000000#;
     constant HIGH0_BYTES     : integer := 16#00001000#;
+    constant OPC_BASE        : integer := 16#42050000#;
+    constant OPC_BYTES       : integer := 16#00001000#;
     constant HIGH1_BASE      : integer := 16#4204FE00#;
     constant HIGH1_BYTES     : integer := 16#00000280#;
     constant HIGH2_BASE      : integer := 16#42006900#;
@@ -46,11 +48,13 @@ architecture behavior of tb_basic_cputest_exact is
 
     type low_mem_t is array (0 to LOW_BYTES / 2 - 1) of std_logic_vector(15 downto 0);
     type high0_mem_t is array (0 to HIGH0_BYTES / 2 - 1) of std_logic_vector(15 downto 0);
+    type opc_mem_t is array (0 to OPC_BYTES / 2 - 1) of std_logic_vector(15 downto 0);
     type high1_mem_t is array (0 to HIGH1_BYTES / 2 - 1) of std_logic_vector(15 downto 0);
     type high2_mem_t is array (0 to HIGH2_BYTES / 2 - 1) of std_logic_vector(15 downto 0);
 
     shared variable low_mem   : low_mem_t;
     shared variable high0_mem : high0_mem_t;
+    shared variable opc_mem   : opc_mem_t;
     shared variable high1_mem : high1_mem_t;
     shared variable high2_mem : high2_mem_t;
 begin
@@ -121,6 +125,8 @@ begin
                when addr_out(31 downto 0) < x"00002000" else
                high0_mem(to_integer(unsigned(addr_out(11 downto 1))))
                when addr_out(31 downto 12) = x"42000" else
+               opc_mem(to_integer(unsigned(addr_out(11 downto 1))))
+               when addr_out(31 downto 12) = x"42050" else
                high1_mem(to_integer(unsigned(addr_out(8 downto 1))))
                when addr_out(31 downto 9) = std_logic_vector(to_unsigned(HIGH1_BASE / 16#200#, 23)) else
                high2_mem(to_integer(unsigned(addr_out(10 downto 1))))
@@ -149,6 +155,14 @@ begin
                     end if;
                     if nLDS = '0' then
                         high0_mem(idx)(7 downto 0) := data_write(7 downto 0);
+                    end if;
+                elsif addr_i >= OPC_BASE and addr_i < OPC_BASE + OPC_BYTES then
+                    idx := (addr_i - OPC_BASE) / 2;
+                    if nUDS = '0' then
+                        opc_mem(idx)(15 downto 8) := data_write(15 downto 8);
+                    end if;
+                    if nLDS = '0' then
+                        opc_mem(idx)(7 downto 0) := data_write(7 downto 0);
                     end if;
                 elsif addr_i >= HIGH1_BASE and addr_i < HIGH1_BASE + HIGH1_BYTES then
                     idx := (addr_i - HIGH1_BASE) / 2;
@@ -198,6 +212,9 @@ begin
             elsif addr >= HIGH0_BASE and addr < HIGH0_BASE + HIGH0_BYTES then
                 idx := (addr - HIGH0_BASE) / 2;
                 high0_mem(idx) := value;
+            elsif addr >= OPC_BASE and addr < OPC_BASE + OPC_BYTES then
+                idx := (addr - OPC_BASE) / 2;
+                opc_mem(idx) := value;
             elsif addr >= HIGH1_BASE and addr < HIGH1_BASE + HIGH1_BYTES then
                 idx := (addr - HIGH1_BASE) / 2;
                 high1_mem(idx) := value;
@@ -222,6 +239,9 @@ begin
             elsif addr >= HIGH0_BASE and addr < HIGH0_BASE + HIGH0_BYTES then
                 idx := (addr - HIGH0_BASE) / 2;
                 return high0_mem(idx);
+            elsif addr >= OPC_BASE and addr < OPC_BASE + OPC_BYTES then
+                idx := (addr - OPC_BASE) / 2;
+                return opc_mem(idx);
             elsif addr >= HIGH1_BASE and addr < HIGH1_BASE + HIGH1_BYTES then
                 idx := (addr - HIGH1_BASE) / 2;
                 return high1_mem(idx);
@@ -252,6 +272,9 @@ begin
             end loop;
             for i in high0_mem'range loop
                 high0_mem(i) := x"0000";
+            end loop;
+            for i in opc_mem'range loop
+                opc_mem(i) := x"0000";
             end loop;
             for i in high1_mem'range loop
                 high1_mem(i) := x"0000";
@@ -285,7 +308,8 @@ begin
             write_word(TRACE_VEC_ADDR + 8, x"23CF");
             write_word(TRACE_VEC_ADDR + 10, x"4200");
             write_word(TRACE_VEC_ADDR + 12, x"0F00");
-            write_word(TRACE_VEC_ADDR + 14, x"4E73");
+            write_word(TRACE_VEC_ADDR + 14, x"588F");
+            write_word(TRACE_VEC_ADDR + 16, x"4E73");
         end procedure;
 
         procedure install_exc_stub(vector_num : integer; stub_addr : integer) is
@@ -439,10 +463,14 @@ begin
             write_long(RESULT_EXC_SP, x"00000000");
         end procedure;
 
-        procedure run_case(max_cycles : integer := 40000) is
+        procedure run_case(expect_trace : boolean;
+                           expect_exc   : boolean;
+                           max_cycles   : integer := 40000) is
             variable started    : boolean := false;
             variable idle_count : integer := 0;
             variable done_count : integer := 0;
+            variable saw_trace  : boolean := false;
+            variable saw_exc    : boolean := false;
         begin
             nReset <= '0';
             wait for 100 ns;
@@ -450,8 +478,12 @@ begin
 
             for i in 0 to max_cycles loop
                 wait until rising_edge(clk);
-                if read_long(RESULT_TRACE_SP) /= x"00000000" or
-                   read_long(RESULT_EXC_SP) /= x"00000000" then
+
+                saw_trace := saw_trace or (read_long(RESULT_TRACE_SP) /= x"00000000");
+                saw_exc := saw_exc or (read_long(RESULT_EXC_SP) /= x"00000000");
+
+                if (not expect_trace or saw_trace) and
+                   (not expect_exc or saw_exc) then
                     done_count := done_count + 1;
                     if done_count >= 8 then
                         return;
@@ -483,7 +515,7 @@ begin
         begin
             init_common;
             install_chk2_boot(opcode_word, x"4000");
-            run_case;
+            run_case(true, true);
 
             trace_sp := to_integer(unsigned(read_long(RESULT_TRACE_SP)));
             exc_sp := to_integer(unsigned(read_long(RESULT_EXC_SP)));
@@ -502,15 +534,17 @@ begin
             else
                 report "FAIL: " & case_name & " did not enter exception 6 handler" severity error;
                 fail_count := fail_count + 1;
+                if trace_sp = 0 then
+                    return;
+                end if;
             end if;
 
-            if trace_sp = 0 or exc_sp = 0 then
+            if trace_sp = 0 then
                 return;
             end if;
 
             trace_sr := read_word(trace_sp + 4);
             trace_pc := read_long(trace_sp + 6);
-            exc_sr := read_word(exc_sp + 4);
 
             if trace_pc = x"000018C0" then
                 report "PASS: " & case_name & " stacked trace PC matched cputest vector address" severity note;
@@ -521,15 +555,18 @@ begin
                 fail_count := fail_count + 1;
             end if;
 
-            if trace_sr(13) = '1' and
-               ((unsigned(trace_sr) or to_unsigned(16#E000#, 16)) =
-                (unsigned(exc_sr) or to_unsigned(16#E000#, 16))) then
-                report "PASS: " & case_name & " stacked trace SR matched cputest relation" severity note;
-                pass_count := pass_count + 1;
-            else
-                report "FAIL: " & case_name & " stacked trace SR=$" & slv_to_hex(trace_sr) &
-                       " exc SR=$" & slv_to_hex(exc_sr) severity error;
-                fail_count := fail_count + 1;
+            if exc_sp /= 0 then
+                exc_sr := read_word(exc_sp + 4);
+                if trace_sr(13) = '1' and
+                   ((unsigned(trace_sr) or to_unsigned(16#E000#, 16)) =
+                    (unsigned(exc_sr) or to_unsigned(16#E000#, 16))) then
+                    report "PASS: " & case_name & " stacked trace SR matched cputest relation" severity note;
+                    pass_count := pass_count + 1;
+                else
+                    report "FAIL: " & case_name & " stacked trace SR=$" & slv_to_hex(trace_sr) &
+                           " exc SR=$" & slv_to_hex(exc_sr) severity error;
+                    fail_count := fail_count + 1;
+                end if;
             end if;
         end procedure;
 
@@ -540,7 +577,7 @@ begin
         begin
             init_common;
             install_chk2_boot(x"02D0", x"8000");
-            run_case;
+            run_case(true, false);
 
             trace_sp := to_integer(unsigned(read_long(RESULT_TRACE_SP)));
             if trace_sp /= 0 then
@@ -585,7 +622,7 @@ begin
         begin
             init_common;
             install_jmp_boot;
-            run_case(80000);
+            run_case(true, true, 80000);
 
             trace_sp := to_integer(unsigned(read_long(RESULT_TRACE_SP)));
             exc_sp := to_integer(unsigned(read_long(RESULT_EXC_SP)));
