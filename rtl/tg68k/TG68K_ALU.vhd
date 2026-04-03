@@ -1740,13 +1740,21 @@ PROCESS (clk)
 					V_Flag <= set_V_Flag;
 				END IF;
 				signedOP <= divs;
-				IF micro_state=div1 THEN
-					div_src_latched <= OP2out;
-					div_dividend_latched <= dividend;
-					div_signed_latched <= divs;
-					div_word_latched <= '1' when (exe_opcode(15)='1' OR DIV_Mode=0) else '0';
-					div_64bit_latched <= '1' when (exe_opcode(15)='0' AND exe_opcode(14)='1' AND sndOPC(10)='1') else '0';
-					nozero <= '0';
+					IF micro_state=div1 THEN
+						div_src_latched <= OP2out;
+						div_dividend_latched <= dividend;
+						div_signed_latched <= divs;
+						IF exe_opcode(15)='1' OR DIV_Mode=0 THEN
+							div_word_latched <= '1';
+						ELSE
+							div_word_latched <= '0';
+						END IF;
+						IF exe_opcode(15)='0' AND exe_opcode(14)='1' AND sndOPC(10)='1' THEN
+							div_64bit_latched <= '1';
+						ELSE
+							div_64bit_latched <= '0';
+						END IF;
+						nozero <= '0';
 					IF divs='1' AND dividend(63)='1' THEN				-- Neg dividend
 						OP1_sign <= '1';
 						div_reg <= 0-dividend;
