@@ -151,6 +151,11 @@ architecture logic of TG68K_ALU is
 	signal OP1_sign			: std_logic;
 	signal OP2_sign			: std_logic;
 	signal OP2outext			: std_logic_vector(15 downto 0);
+	signal div_src_latched	: std_logic_vector(31 downto 0) := (others => '0');
+	signal div_dividend_latched : std_logic_vector(63 downto 0) := (others => '0');
+	signal div_signed_latched : std_logic := '0';
+	signal div_word_latched  : std_logic := '0';
+	signal div_64bit_latched : std_logic := '0';
 
 	signal in_offset			: std_logic_vector(5 downto 0);
 	signal datareg				: std_logic_vector(31 downto 0);
@@ -306,6 +311,119 @@ architecture logic of TG68K_ALU is
 			elsif dst = x"00000000" then
 				flags(2) := '1';
 			end if;
+		end if;
+
+		return flags;
+	end function;
+
+	function abs_u16(val : std_logic_vector(15 downto 0)) return unsigned is
+	begin
+		if val(15) = '1' then
+			return unsigned(not val) + 1;
+		end if;
+		return unsigned(val);
+	end function;
+
+	function abs_u32(val : std_logic_vector(31 downto 0)) return unsigned is
+	begin
+		if val(31) = '1' then
+			return unsigned(not val) + 1;
+		end if;
+		return unsigned(val);
+	end function;
+
+	function divu_overflow_flags_68020(
+		dividend : std_logic_vector(31 downto 0);
+		is_word  : boolean
+	) return std_logic_vector is
+		variable flags : std_logic_vector(3 downto 0) := (others => '0');
+	begin
+		flags(1) := '1';
+
+		if dividend(31) = '1' then
+			flags(3) := '1';
+		elsif (not is_word) and dividend = x"00000000" then
+			flags(2) := '1';
+		end if;
+
+		return flags;
+	end function;
+
+	function divs_overflow_flags_68020(
+		dividend : std_logic_vector(31 downto 0);
+		divisor  : std_logic_vector(15 downto 0)
+	) return std_logic_vector is
+		variable flags        : std_logic_vector(3 downto 0) := (others => '0');
+		variable dividend_abs : unsigned(31 downto 0);
+		variable divisor_abs  : unsigned(15 downto 0);
+		variable aquot        : unsigned(31 downto 0);
+	begin
+		flags(1) := '1';
+		dividend_abs := abs_u32(dividend);
+		divisor_abs := abs_u16(divisor);
+
+		if divisor_abs = 0 then
+			return flags;
+		end if;
+
+		-- 68020/030 signed word DIV overflow keeps V=1,C=0 and derives NZ
+		-- from the internal 8-bit overflow quotient unless this is absolute overflow.
+		if dividend_abs(31 downto 16) >= divisor_abs then
+			return flags;
+		end if;
+
+		aquot := dividend_abs / resize(divisor_abs, 32);
+
+		if aquot(7 downto 0) = x"00" then
+			flags(2) := '1';
+		end if;
+		if aquot(7) = '1' then
+			flags(3) := '1';
+		end if;
+
+		return flags;
+	end function;
+
+	function divsl_overflow_flags_68020(
+		dividend_lo : std_logic_vector(31 downto 0);
+		dividend_hi : std_logic_vector(31 downto 0);
+		divisor     : std_logic_vector(31 downto 0);
+		is_64bit    : boolean
+	) return std_logic_vector is
+		variable flags     : std_logic_vector(3 downto 0) := (others => '0');
+		variable a64       : signed(63 downto 0);
+		variable a32       : signed(31 downto 0);
+		variable ahigh     : signed(31 downto 0);
+		variable divider_s : signed(31 downto 0);
+	begin
+		flags(1) := '1';
+		a32 := signed(dividend_lo);
+		divider_s := signed(divisor);
+
+		if is_64bit then
+			a64 := signed(dividend_hi & dividend_lo);
+			ahigh := signed(dividend_hi);
+
+			if ahigh = to_signed(0, 32) then
+				flags(2) := '1';
+				return flags;
+			elsif ahigh < to_signed(0, 32) and divider_s < to_signed(0, 32) and ahigh > divider_s then
+				return flags;
+			elsif dividend_lo = x"00000000" then
+				flags(2) := '1';
+				return flags;
+			elsif a32(31) /= a64(63) then
+				flags(3) := '1';
+				return flags;
+			end if;
+
+			return flags;
+		end if;
+
+		if dividend_lo = x"00000000" then
+			flags(2) := '1';
+		elsif a32(31) = '1' then
+			flags(3) := '1';
 		end if;
 
 		return flags;
@@ -1289,7 +1407,26 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 						Flags(3 downto 0) <= set_flags;
 					ELSIF exec(opcDIVU)='1' AND DIV_Mode/=3 THEN
 						IF V_Flag='1' THEN	
-							Flags(3 downto 0) <= "1010";
+							IF CPU(1)='1' THEN
+								IF div_word_latched='1' THEN
+									IF div_signed_latched='0' THEN
+										Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(47 downto 16), true);
+									ELSE
+										Flags(3 downto 0) <= divs_overflow_flags_68020(div_dividend_latched(47 downto 16), div_src_latched(15 downto 0));
+									END IF;
+								ELSIF div_signed_latched='0' THEN
+									Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(31 downto 0), false);
+								ELSE
+									Flags(3 downto 0) <= divsl_overflow_flags_68020(
+										div_dividend_latched(31 downto 0),
+										div_dividend_latched(63 downto 32),
+										div_src_latched,
+										div_64bit_latched='1'
+									);
+								END IF;
+							ELSE
+								Flags(3 downto 0) <= "1010";
+							END IF;
 						ELSIF exe_opcode(15)='1' OR DIV_Mode=0 THEN
 							Flags(3 downto 0) <= OP1IN(15)&flag_z(1)&"00";
 						ELSE
@@ -1604,6 +1741,11 @@ PROCESS (clk)
 				END IF;
 				signedOP <= divs;
 				IF micro_state=div1 THEN
+					div_src_latched <= OP2out;
+					div_dividend_latched <= dividend;
+					div_signed_latched <= divs;
+					div_word_latched <= '1' when (exe_opcode(15)='1' OR DIV_Mode=0) else '0';
+					div_64bit_latched <= '1' when (exe_opcode(15)='0' AND exe_opcode(14)='1' AND sndOPC(10)='1') else '0';
 					nozero <= '0';
 					IF divs='1' AND dividend(63)='1' THEN				-- Neg dividend
 						OP1_sign <= '1';
