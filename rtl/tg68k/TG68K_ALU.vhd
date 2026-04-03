@@ -1362,13 +1362,22 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 						END CASE;
 						chk2_nv := chk2_nv_flags_68020(chk2_lower, chk2_upper, chk2_val);
 
-						IF last_Flags1(0)='0' THEN			--unsigned OP
-							Flags(0) <= Flags(0) OR (NOT set_flags(0) AND NOT set_flags(2));
-						ELSE										--signed OP
-							Flags(0) <= (Flags(0) XOR set_flags(0)) AND  NOT Flags(2) AND NOT set_flags(2);
+						-- 68020/030 CHK2/CMP2 sets N/V from the range topology, but C/Z come
+						-- from the final in-range/equality test, not from the internal compare
+						-- microstates. This matches WinUAE's setchk2undefinedflags() + the
+						-- surrounding C/Z logic used by the generated CHK2 handlers.
+						Flags(0) <= '0';
+						Flags(2) <= '0';
+						IF chk2_val = chk2_lower OR chk2_val = chk2_upper THEN
+							Flags(2) <= '1';
+						ELSIF signed(chk2_lower) <= signed(chk2_upper) THEN
+							IF signed(chk2_val) < signed(chk2_lower) OR signed(chk2_val) > signed(chk2_upper) THEN
+								Flags(0) <= '1';
+							END IF;
+						ELSIF signed(chk2_val) > signed(chk2_upper) AND signed(chk2_val) < signed(chk2_lower) THEN
+							Flags(0) <= '1';
 						END IF;
 						Flags(1) <= chk2_nv(0);
-						Flags(2) <= Flags(2) OR set_flags(2);
 						Flags(3) <= chk2_nv(1);
 					ELSIF exec(opcCHK)='1' THEN
 						IF CPU(1)='1' THEN
