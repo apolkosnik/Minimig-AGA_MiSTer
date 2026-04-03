@@ -3684,8 +3684,11 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 						FlagsSR(4) <= '0';
 						FlagsSR(6) <= '0';
 					END IF;
-				-- Preserve written-but-unused SR bit 11 in the internal stacked
-				-- image. Real 68020+/68030 hardware keeps it observable there.
+					-- Live writes to SR must clear reserved bit 11 on 68020/030, but
+					-- stack-driven directSR restores keep the stacked image.
+					IF exec(to_SR)='1' THEN
+						FlagsSR(3) <= '0';
+					END IF;
 			END IF;
 		END IF;	
 	END PROCESS;

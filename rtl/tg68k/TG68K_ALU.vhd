@@ -1403,8 +1403,12 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 					END IF;
 				END IF;	
 			END IF;	
-			-- Preserve written-but-unused CCR bits 7:5. Real 68020+/68030
-			-- hardware keeps them in the stacked SR/CCR image and WinUAE does too.
+				-- Live writes to CCR/SR must clear the unused low-byte bits on
+				-- 68020/030. Stack-driven restores (RTR/RTE/directSR) keep the
+				-- stacked image, so do not mask them here unconditionally.
+				IF exec(to_CCR)='1' THEN
+					Flags(7 downto 5) <= "000";
+				END IF;
 		END IF;	
 	END PROCESS;
 	
