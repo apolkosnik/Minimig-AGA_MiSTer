@@ -1373,13 +1373,13 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 				ELSIF Z_error='1' THEN
 					IF micro_state = trap0 THEN
 						IF CPU(1)='1' THEN
-							IF exe_opcode(15)='1' OR DIV_Mode=0 THEN
-								IF exe_opcode(8)='0' THEN
+							IF div_word_latched='1' THEN
+								IF div_signed_latched='0' THEN
 									Flags(3 downto 0) <= divu_divzero_flags_68020(div_dividend_latched(47 downto 16), true);
 								ELSE
 									Flags(3 downto 0) <= "0100";
 								END IF;
-							ELSIF sndOPC(11)='0' THEN
+							ELSIF div_signed_latched='0' THEN
 								Flags(3 downto 0) <= divu_divzero_flags_68020(div_dividend_latched(31 downto 0), false);
 							ELSE
 								Flags(3 downto 0) <= "0100";
@@ -1427,7 +1427,7 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 							ELSE
 								Flags(3 downto 0) <= "1010";
 							END IF;
-						ELSIF exe_opcode(15)='1' OR DIV_Mode=0 THEN
+						ELSIF div_word_latched='1' THEN
 							Flags(3 downto 0) <= OP1IN(15)&flag_z(1)&"00";
 						ELSE
 							Flags(3 downto 0) <= OP1IN(31)&flag_z(2)&"00";
