@@ -311,6 +311,98 @@ architecture logic of TG68K_ALU is
 		return flags;
 	end function;
 
+	function chk2_nv_flags_68020(
+		lower : std_logic_vector(31 downto 0);
+		upper : std_logic_vector(31 downto 0);
+		val   : std_logic_vector(31 downto 0)
+	) return std_logic_vector is
+		variable nv      : std_logic_vector(1 downto 0) := "00"; -- N,V
+		variable lower_s : signed(31 downto 0);
+		variable upper_s : signed(31 downto 0);
+		variable val_s   : signed(31 downto 0);
+		constant zero32  : signed(31 downto 0) := (others => '0');
+	begin
+		lower_s := signed(lower);
+		upper_s := signed(upper);
+		val_s   := signed(val);
+
+		if val = lower or val = upper then
+			return nv;
+		end if;
+
+		if lower_s < zero32 and upper_s >= zero32 then
+			if val_s < lower_s then
+				nv(1) := '1';
+			end if;
+			if val_s >= zero32 and val_s < upper_s then
+				nv(1) := '1';
+			end if;
+			if val_s >= zero32 and (lower_s - val_s) >= zero32 then
+				nv(0) := '1';
+				nv(1) := '0';
+				if val_s > upper_s then
+					nv(1) := '1';
+				end if;
+			end if;
+		elsif lower_s >= zero32 and upper_s < zero32 then
+			if val_s >= zero32 then
+				nv(1) := '1';
+			end if;
+			if val_s > upper_s then
+				nv(1) := '1';
+			end if;
+			if val_s > lower_s and (upper_s - val_s) >= zero32 then
+				nv(0) := '1';
+				nv(1) := '0';
+			end if;
+		elsif lower_s >= zero32 and upper_s >= zero32 and lower_s > upper_s then
+			if val_s > upper_s and val_s < lower_s then
+				nv(1) := '1';
+			end if;
+			if val_s < zero32 and (lower_s - val_s) < zero32 then
+				nv(0) := '1';
+			end if;
+			if val_s < zero32 and (lower_s - val_s) >= zero32 then
+				nv(1) := '1';
+			end if;
+		elsif lower_s >= zero32 and upper_s >= zero32 and lower_s <= upper_s then
+			if val_s >= zero32 and val_s < lower_s then
+				nv(1) := '1';
+			end if;
+			if val_s > upper_s then
+				nv(1) := '1';
+			end if;
+			if val_s < zero32 and (upper_s - val_s) < zero32 then
+				nv(0) := '1';
+				nv(1) := '1';
+			end if;
+		elsif lower_s < zero32 and upper_s < zero32 and lower_s > upper_s then
+			if val_s >= zero32 then
+				nv(1) := '1';
+			end if;
+			if val_s > upper_s and val_s < lower_s then
+				nv(1) := '1';
+			end if;
+			if val_s >= zero32 and (val_s - lower_s) < zero32 then
+				nv(1) := '0';
+				nv(0) := '1';
+			end if;
+		elsif lower_s < zero32 and upper_s < zero32 and lower_s <= upper_s then
+			if val_s < lower_s then
+				nv(1) := '1';
+			end if;
+			if val_s < zero32 and val_s > upper_s then
+				nv(1) := '1';
+			end if;
+			if val_s >= zero32 and (val_s - lower_s) < zero32 then
+				nv(1) := '1';
+				nv(0) := '1';
+			end if;
+		end if;
+
+		return nv;
+	end function;
+
 
 BEGIN
 -----------------------------------------------------------------------------
@@ -1083,8 +1175,12 @@ process (OP1out, OP2out, opcode, bit_nr, bit_msb, bs_shift, bs_shift_mod, ring, 
 ------------------------------------------------------------------------------
 --CCR op
 ------------------------------------------------------------------------------		
-PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, flag_z, OP1IN, c_out, addsub_ofl,
+PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP1out, chk2_lower_bound, flag_z, OP1IN, c_out, addsub_ofl,
 	     bcd_a, bcd_a_carry, Vflag_a, exec, micro_state)
+		variable chk2_lower : std_logic_vector(31 downto 0);
+		variable chk2_upper : std_logic_vector(31 downto 0);
+		variable chk2_val   : std_logic_vector(31 downto 0);
+		variable chk2_nv    : std_logic_vector(1 downto 0);
 	BEGIN
 		IF exec(andiSR)='1' THEN
 			CCRin <= Flags AND last_data_read(7 downto 0);
@@ -1233,35 +1329,40 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 --OP1out      		UB		R			R
 --OP2out				LB		LB			UB					
 ----lower bound first
+						IF last_Flags1(0)='0' THEN
+							chk2_val := OP1out;
+						ELSE
+							CASE exe_datatype IS
+								WHEN "00" =>
+									chk2_val := std_logic_vector(resize(signed(OP1out(7 downto 0)), 32));
+								WHEN "01" =>
+									chk2_val := std_logic_vector(resize(signed(OP1out(15 downto 0)), 32));
+								WHEN OTHERS =>
+									chk2_val := OP1out;
+							END CASE;
+						END IF;
+
+						CASE exe_datatype IS
+							WHEN "00" =>
+								chk2_lower := std_logic_vector(resize(signed(OP2out(15 downto 8)), 32));
+								chk2_upper := std_logic_vector(resize(signed(OP2out(7 downto 0)), 32));
+							WHEN "01" =>
+								chk2_lower := std_logic_vector(resize(signed(chk2_lower_bound(15 downto 0)), 32));
+								chk2_upper := std_logic_vector(resize(signed(OP2out(15 downto 0)), 32));
+							WHEN OTHERS =>
+								chk2_lower := chk2_lower_bound;
+								chk2_upper := OP2out;
+						END CASE;
+						chk2_nv := chk2_nv_flags_68020(chk2_lower, chk2_upper, chk2_val);
+
 						IF last_Flags1(0)='0' THEN			--unsigned OP
 							Flags(0) <= Flags(0) OR (NOT set_flags(0) AND NOT set_flags(2));
 						ELSE										--signed OP
 							Flags(0) <= (Flags(0) XOR set_flags(0)) AND  NOT Flags(2) AND NOT set_flags(2);
 						END IF;
-						Flags(1) <= '0';
+						Flags(1) <= chk2_nv(0);
 						Flags(2) <= Flags(2) OR set_flags(2);
-						IF exe_datatype="00" THEN
-							IF unsigned(OP2out(7 downto 0)) < unsigned(OP2out(15 downto 8)) AND
-							   signed(OP2out(7 downto 0)) < signed(OP2out(15 downto 8)) THEN
-								Flags(3) <= '1';
-							ELSE
-								Flags(3) <= '0';
-							END IF;
-						ELSIF exe_datatype="01" THEN
-							IF unsigned(OP2out(15 downto 0)) < unsigned(OP2out(31 downto 16)) AND
-							   signed(OP2out(15 downto 0)) < signed(OP2out(31 downto 16)) THEN
-								Flags(3) <= '1';
-							ELSE
-								Flags(3) <= '0';
-							END IF;
-						ELSE
-							IF unsigned(OP2out) < unsigned(chk2_lower_bound) AND
-							   signed(OP2out) < signed(chk2_lower_bound) THEN
-								Flags(3) <= '1';
-							ELSE
-								Flags(3) <= '0';
-							END IF;
-						END IF;
+						Flags(3) <= chk2_nv(1);
 					ELSIF exec(opcCHK)='1' THEN
 						IF CPU(1)='1' THEN
 							IF exe_datatype="01" THEN
