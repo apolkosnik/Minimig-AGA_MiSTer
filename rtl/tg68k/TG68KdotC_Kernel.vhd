@@ -1921,7 +1921,7 @@ PROCESS (reg_QA, store_in_tmp, ea_data, long_start, addr, exec, memmaskmux, micr
 -- set OP2out
 -----------------------------------------------------------------------------
 PROCESS (OP2out, reg_QB, exe_opcode, exe_datatype, execOPC, exec, use_direct_data,
-	     store_in_tmp, data_write_tmp, ea_data, pmove_mmu_read_active, pmmu_reg_rdat)
+	     store_in_tmp, data_write_tmp, ea_data, pmove_mmu_read_active, pmmu_reg_rdat, micro_state)
 	BEGIN
 		OP2out(15 downto 0) <= reg_QB(15 downto 0);
 		OP2out(31 downto 16) <= (OTHERS => OP2out(15));
@@ -1933,6 +1933,16 @@ PROCESS (OP2out, reg_QB, exe_opcode, exe_datatype, execOPC, exec, use_direct_dat
 			-- Guard: exclude postadd/presub phases - during address register writeback
 			-- OP2out must carry the normal increment value, not the PMMU register data
 			OP2out <= pmmu_reg_rdat;
+		ELSIF micro_state = chk22 AND exe_opcode(10 downto 9)="00" AND exec(opcEXTB)='1' THEN
+			-- CHK2.B A-reg compares keep the active bound byte in opcEXTB's low byte.
+			-- During chk22 the upper bound is already packed in ea_data, but the stale
+			-- direct-data path still points at the lower bound. Force ea_data here so
+			-- opcEXTB sign-extends the upper byte for the second compare.
+			OP2out <= ea_data;
+		ELSIF exec(opcCHK2)='1' AND exe_opcode(10 downto 9)="00" THEN
+			-- Final CHK2.B N/V evaluation needs the latched byte pair, not the direct
+			-- source-fetch path.
+			OP2out <= ea_data;
 		ELSIF use_direct_data='1' OR (exec(exg)='1' AND execOPC='1') OR exec(get_bfoffset)='1' THEN
 			OP2out <= data_write_tmp;
 		ELSIF (exec(ea_data_OP1)='0' AND store_in_tmp='1') OR exec(ea_data_OP2)='1' THEN
@@ -6365,7 +6375,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					set(addsub) <= '1';
 					set(alu_exec) <= '1';
 					set(opcCHK2) <= '1';
-					set(opcEXTB) <= exec(opcEXTB);
 					IF sndOPC(11)='1' THEN
 						setstate <="01";
 						next_micro_state <= chk23;
