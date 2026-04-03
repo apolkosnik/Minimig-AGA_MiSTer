@@ -1375,12 +1375,12 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 						IF CPU(1)='1' THEN
 							IF exe_opcode(15)='1' OR DIV_Mode=0 THEN
 								IF exe_opcode(8)='0' THEN
-									Flags(3 downto 0) <= divu_divzero_flags_68020(reg_QA, true);
+									Flags(3 downto 0) <= divu_divzero_flags_68020(div_dividend_latched(47 downto 16), true);
 								ELSE
 									Flags(3 downto 0) <= "0100";
 								END IF;
 							ELSIF sndOPC(11)='0' THEN
-								Flags(3 downto 0) <= divu_divzero_flags_68020(reg_QA, false);
+								Flags(3 downto 0) <= divu_divzero_flags_68020(div_dividend_latched(31 downto 0), false);
 							ELSE
 								Flags(3 downto 0) <= "0100";
 							END IF;
