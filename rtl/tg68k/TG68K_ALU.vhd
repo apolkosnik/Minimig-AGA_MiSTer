@@ -1181,6 +1181,7 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 		variable chk2_upper : std_logic_vector(31 downto 0);
 		variable chk2_val   : std_logic_vector(31 downto 0);
 		variable chk2_nv    : std_logic_vector(1 downto 0);
+		variable chk2_size  : std_logic_vector(1 downto 0);
 	BEGIN
 		IF exec(andiSR)='1' THEN
 			CCRin <= Flags AND last_data_read(7 downto 0);
@@ -1327,12 +1328,18 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 					ELSIF exec(opcCHK2)='1' THEN		--micro_state = chk23
 --micro_state	 chk21   chk22   chk23
 --OP1out      		UB		R			R
---OP2out				LB		LB			UB					
+--OP2out				LB		LB			UB
 ----lower bound first
-						IF last_Flags1(0)='0' THEN
+						-- BUG #444 FIX: For CHK2/CMP2 with bit 15 set, the compared
+						-- register is treated as a full longword, but the bounds still
+						-- use the instruction size encoded in the opcode. The previous
+						-- code reused exe_datatype for both, which broke CHK2.B A-reg
+						-- compares seen in cputest BASIC.
+						chk2_size := exe_opcode(10 downto 9);
+						IF sndOPC(15)='1' THEN
 							chk2_val := OP1out;
 						ELSE
-							CASE exe_datatype IS
+							CASE chk2_size IS
 								WHEN "00" =>
 									chk2_val := std_logic_vector(resize(signed(OP1out(7 downto 0)), 32));
 								WHEN "01" =>
@@ -1342,7 +1349,7 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 							END CASE;
 						END IF;
 
-						CASE exe_datatype IS
+						CASE chk2_size IS
 							WHEN "00" =>
 								chk2_lower := std_logic_vector(resize(signed(OP2out(15 downto 8)), 32));
 								chk2_upper := std_logic_vector(resize(signed(OP2out(7 downto 0)), 32));
