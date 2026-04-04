@@ -695,6 +695,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_busy      : std_logic;
 	signal pmmu_config_err : std_logic;
 	signal pmmu_config_ack : std_logic;  -- BUG #154: Acknowledge MMU config exception to clear error
+	signal pmmu_cpu_reset : std_logic;
 
 	-- Internal FC signal (VHDL-93 compatibility)
 	signal fc_internal    : std_logic_vector(2 downto 0);
@@ -726,6 +727,10 @@ architecture logic of TG68KdotC_Kernel is
 
 
 BEGIN  
+
+  -- The RESET instruction must clear the PMMU enable bits on the same core step
+  -- that asserts the external reset pulse, not one stalled cycle later.
+  pmmu_cpu_reset <= '1' when set(opcRESET)='1' and clkena_lw='1' else '0';
 
   -- PMMU (68030) instance (identity translation for now)
   PMMU_030: entity work.TG68K_PMMU_030
@@ -802,7 +807,8 @@ BEGIN
       debug_ptr2_desc_data => debug_pmmu_ptr2_desc_data,
       debug_ptr3_desc_addr => debug_pmmu_ptr3_desc_addr,
       debug_ptr3_desc_data => debug_pmmu_ptr3_desc_data,
-      debug_saved_fc       => debug_pmmu_saved_fc
+      debug_saved_fc       => debug_pmmu_saved_fc,
+      cpu_reset            => pmmu_cpu_reset
     );
 
 --   -- PMMU register interface connected (enabled for 68030)

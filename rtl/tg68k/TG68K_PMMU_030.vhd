@@ -81,7 +81,8 @@ entity TG68K_PMMU_030 is
     debug_ptr2_desc_data : out std_logic_vector(31 downto 0);
     debug_ptr3_desc_addr : out std_logic_vector(31 downto 0);
     debug_ptr3_desc_data : out std_logic_vector(31 downto 0);
-    debug_saved_fc       : out std_logic_vector(2 downto 0)
+    debug_saved_fc       : out std_logic_vector(2 downto 0);
+    cpu_reset           : in  std_logic := '0'
   );
 end TG68K_PMMU_030;
 architecture rtl of TG68K_PMMU_030 is
@@ -1000,7 +1001,16 @@ begin
       end if;
       -- Handle MMUSR updates with MC68030-compliant priority (MMUSR register only)
       -- IMPORTANT: These only affect MMUSR, not other registers!
-      if ptest_update_mmusr = '1' then
+      if cpu_reset = '1' then
+        -- MC68030 RESET clears the translation enable bit in TC and the enable
+        -- bits in both TTRs. Preserve the remaining register contents.
+        TC(31) <= '0';
+        TT0(15) <= '0';
+        TT1(15) <= '0';
+        atc_flush_req <= '1';
+        ptest_active <= '0';
+        xlat_cfg_seq <= xlat_cfg_seq + 1;
+      elsif ptest_update_mmusr = '1' then
         -- Highest priority: PTEST instruction (MC68030 specification)
         -- BUG #397: addr/fc/rw captured in edge detection process (not here)
         ptest_active <= '1';
