@@ -41,8 +41,10 @@ architecture behavior of tb_reset_clears_pmmu_enables is
     signal test_done    : boolean := false;
 
     constant TT0_INIT      : std_logic_vector(31 downto 0) := x"00FF8707";
+    constant TT1_INIT      : std_logic_vector(31 downto 0) := x"00FF8707";
     constant TC_INIT       : std_logic_vector(31 downto 0) := x"81F09800";
     constant TT0_EXPECTED  : std_logic_vector(31 downto 0) := x"00FF0707";
+    constant TT1_EXPECTED  : std_logic_vector(31 downto 0) := x"00FF0707";
     constant TC_EXPECTED   : std_logic_vector(31 downto 0) := x"01F09800";
     constant RESULT_ADDR   : integer := 16#3010#;
 
@@ -65,36 +67,52 @@ architecture behavior of tb_reset_clears_pmmu_enables is
         16#206# => x"0000",
         16#207# => x"3004",
 
-        -- $0410: PMOVE.L (A7),TC
+        -- $0410: PMOVE.L (A7),TT1
         16#208# => x"F017",
-        16#209# => x"4000",
+        16#209# => x"0C00",
 
-        -- $0414: RESET
-        16#20A# => x"4E70",
+        -- $0414: MOVEA.L #$3008,A7
+        16#20A# => x"2E7C",
+        16#20B# => x"0000",
+        16#20C# => x"3008",
 
-        -- $0416: MOVEA.L #$3010,A0
-        16#20B# => x"207C",
-        16#20C# => x"0000",
-        16#20D# => x"3010",
+        -- $041A: PMOVE.L (A7),TC
+        16#20D# => x"F017",
+        16#20E# => x"4000",
 
-        -- $041C: PMOVE.L TT0,(A0)
-        16#20E# => x"F010",
-        16#20F# => x"0A00",
+        -- $041E: RESET
+        16#20F# => x"4E70",
 
-        -- $0420: PMOVE.L TC,(4,A0)
-        16#210# => x"F028",
-        16#211# => x"4200",
-        16#212# => x"0004",
+        -- $0420: MOVEA.L #$3010,A0
+        16#210# => x"207C",
+        16#211# => x"0000",
+        16#212# => x"3010",
 
-        -- $0426: STOP #$2700
-        16#213# => x"4E72",
-        16#214# => x"2700",
+        -- $0426: PMOVE.L TT0,(A0)
+        16#213# => x"F010",
+        16#214# => x"0A00",
+
+        -- $042A: PMOVE.L TT1,(4,A0)
+        16#215# => x"F028",
+        16#216# => x"0E00",
+        16#217# => x"0004",
+
+        -- $0430: PMOVE.L TC,(8,A0)
+        16#218# => x"F028",
+        16#219# => x"4200",
+        16#21A# => x"0008",
+
+        -- $0436: STOP #$2700
+        16#21B# => x"4E72",
+        16#21C# => x"2700",
 
         -- Data block at $3000
         16#1800# => x"00FF",
         16#1801# => x"8707",
-        16#1802# => x"81F0",
-        16#1803# => x"9800",
+        16#1802# => x"00FF",
+        16#1803# => x"8707",
+        16#1804# => x"81F0",
+        16#1805# => x"9800",
 
         others => x"4E71"
     );
@@ -192,6 +210,7 @@ begin
 
     test: process
         variable tt0_actual : std_logic_vector(31 downto 0);
+        variable tt1_actual : std_logic_vector(31 downto 0);
         variable tc_actual  : std_logic_vector(31 downto 0);
         variable pass_count : integer := 0;
         variable fail_count : integer := 0;
@@ -203,7 +222,8 @@ begin
         wait for 20 us;
 
         tt0_actual := read_long(RESULT_ADDR);
-        tc_actual := read_long(RESULT_ADDR + 4);
+        tt1_actual := read_long(RESULT_ADDR + 4);
+        tc_actual := read_long(RESULT_ADDR + 8);
 
         if tt0_actual = TT0_EXPECTED then
             report "PASS: RESET cleared TT0.E only" severity note;
@@ -211,6 +231,15 @@ begin
         else
             report "FAIL: RESET TT0 readback expected=$" & slv_to_hex(TT0_EXPECTED) &
                    " got=$" & slv_to_hex(tt0_actual) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if tt1_actual = TT1_EXPECTED then
+            report "PASS: RESET cleared TT1.E only" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: RESET TT1 readback expected=$" & slv_to_hex(TT1_EXPECTED) &
+                   " got=$" & slv_to_hex(tt1_actual) severity error;
             fail_count := fail_count + 1;
         end if;
 
