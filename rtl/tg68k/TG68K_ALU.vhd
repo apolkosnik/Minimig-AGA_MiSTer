@@ -1355,7 +1355,8 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 				END IF;	
 				IF exec(directCCR)='1' THEN
 					Flags(7 downto 0) <= data_read(7 downto 0);
-				END IF;	
+					Flags(7 downto 5) <= "000";  -- Reserved CCR bits must always be zero (MC68030 UM)
+				END IF;
 				-- BUG #397 FIX: Restore pre-RTE CCR on format error.
 				-- directSR loaded frame CCR which is now invalid.
 				-- Last-assignment-wins ensures this overrides directSR above.
