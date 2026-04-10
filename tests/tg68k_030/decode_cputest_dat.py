@@ -141,6 +141,8 @@ class Subcase:
     trace_expected_sr: int | None = None
     trace_expected_pc: int | None = None
     exception_summary: ExceptionSummary | None = None
+    expected_values: Dict[str, int] = field(default_factory=dict)
+    expected_sr_ignore_mask: int | None = None
 
 
 class Parser:
@@ -375,10 +377,12 @@ class Parser:
         raise ValueError(f"unexpected decode_rel size {size_sel:02x} at {off - 1:04x}")
 
     def parse_expected_items(
-        self, off: int
+        self, off: int, expected_state: Dict[str, int]
     ) -> Tuple[
         int,
         List[MemWrite],
+        Dict[str, int],
+        int | None,
         int,
         int,
         bool,
@@ -388,6 +392,9 @@ class Parser:
         bytes,
     ]:
         memwrites: List[MemWrite] = []
+        expected_values: Dict[str, int] = {}
+        expected_sr_ignore_mask: int | None = None
+        cur_state = dict(expected_state)
         while True:
             tag = self.data[off]
             if tag & CT_END:
@@ -397,6 +404,8 @@ class Parser:
                 return (
                     off,
                     memwrites,
+                    expected_values,
+                    expected_sr_ignore_mask,
                     end_marker,
                     exc,
                     bool(end_marker & 0x40),
@@ -424,11 +433,29 @@ class Parser:
                     off += 1 + length
                 continue
             if mode == CT_PC:
-                off, _value = self.restore_rel(off, self.header.opcode_memory_addr)
+                cur_pc = cur_state.get("PC", self.header.opcode_memory_addr)
+                off, value = self.restore_rel(off, cur_pc)
+                cur_state["PC"] = value
+                expected_values["PC"] = value
                 continue
             if mode == CT_BRANCHTARGET:
-                off, _value = self.restore_rel(off, self.state.get("BRANCHTARGET", 0xFFFFFFFF))
+                cur_bt = cur_state.get("BRANCHTARGET", 0xFFFFFFFF)
+                off, value = self.restore_rel(off, cur_bt)
+                cur_state["BRANCHTARGET"] = value
+                expected_values["BRANCHTARGET"] = value
                 off += 1
+                continue
+            if mode == CT_SRCADDR:
+                cur_src = cur_state.get("SRCADDR", 0)
+                off, value = self.restore_rel(off, cur_src)
+                cur_state["SRCADDR"] = value
+                expected_values["SRCADDR"] = value
+                continue
+            if mode == CT_DSTADDR:
+                cur_dst = cur_state.get("DSTADDR", 0)
+                off, value = self.restore_rel(off, cur_dst)
+                cur_state["DSTADDR"] = value
+                expected_values["DSTADDR"] = value
                 continue
             if mode == CT_EDATA:
                 off += 3 if self.data[off + 1] == 1 else 2
@@ -436,7 +463,15 @@ class Parser:
             if mode < CT_AREG + 8 and (tag & CT_SIZE_MASK) == CT_SIZE_FPU:
                 off = self.parse_fpvalue(off)
                 continue
-            off, _value, _size = self.restore_value(off, 0)
+            name = REG_NAMES.get(mode)
+            cur_value = cur_state.get(name, 0) if name is not None else 0
+            off, value, _size = self.restore_value(off, cur_value)
+            if name is None:
+                continue
+            cur_state[name] = value
+            expected_values[name] = value
+            if mode == CT_SR:
+                expected_sr_ignore_mask = (~(value >> 16)) & 0xFFFF
 
     def iter_subcases(self) -> Sequence[Tuple[Subcase, Dict[str, int]]]:
         out: List[Tuple[Subcase, Dict[str, int]]] = []
@@ -492,6 +527,8 @@ class Parser:
                     (
                         off,
                         memwrites,
+                        expected_values,
+                        expected_sr_ignore_mask,
                         end_marker,
                         exc,
                         branched,
@@ -499,7 +536,7 @@ class Parser:
                         extra_trace_standalone,
                         group2_with_1,
                         exception_payload_raw,
-                    ) = self.parse_expected_items(off)
+                    ) = self.parse_expected_items(off, self.state)
                     trace_expected_sr, trace_expected_pc, exception_summary = self.decode_exception_payload(exception_payload_raw, exc)
                     out.append(
                         (
@@ -524,6 +561,8 @@ class Parser:
                                 trace_expected_sr=trace_expected_sr,
                                 trace_expected_pc=trace_expected_pc,
                                 exception_summary=exception_summary,
+                                expected_values=expected_values,
+                                expected_sr_ignore_mask=expected_sr_ignore_mask,
                             ),
                             dict(self.state),
                         )

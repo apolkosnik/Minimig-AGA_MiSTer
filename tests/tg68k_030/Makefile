@@ -12,7 +12,7 @@ PROJECT_ROOT := $(abspath $(TEST_DIR)/../..)
 RTL_DIR := $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-movec-selector-latch test-cpsave-cprestore test-mmu-library-detect test-mmu-library-failure-path test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-readback-guard test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-mmu-fetch-fault-frame test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-history-bits test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-privilege test-moves-d16an-pc test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-chk-long-odd-addr test-movec-active-stack test-interrupt-mode-stack test-lockup-all test-chk-stacked-trace test-basic-chk-trace test-basic-div-jmp-trace test-basic-chk2-cputest-entry test-basic-chk2-cputest-highaddr test-basic-chk2-packed-state test-basic-chk2-packed-group2 test-basic-jmp-cputest-entry test-basic-jmp-sp-disp-entry test-basic-jmp-sp-disp-highaddr test-basic-cputest-entry test-basic-exception-flags test-basic-group2-user-trace test-basic-cputest test-odd-exc-flags test-odd-irq-regwrite test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-jmp-65b2-trace test-jmp-65b2-index-target test-real validate setup help
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-movec-selector-latch test-cpsave-cprestore test-mmu-library-detect test-mmu-library-failure-path test-mmu-library-root-probe test-mmu-library-enable-probe test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-readback-guard test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-mmu-fetch-fault-frame test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-history-bits test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-privilege test-moves-d16an-pc test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-chk-long-odd-addr test-movec-active-stack test-interrupt-mode-stack test-lockup-all test-chk-stacked-trace test-basic-chk-trace test-basic-div-jmp-trace test-basic-chk2-cputest-entry test-basic-chk2-cputest-highaddr test-basic-chk2-packed-state test-basic-chk2-packed-group2 test-basic-jmp-cputest-entry test-basic-jmp-sp-disp-entry test-basic-jmp-sp-disp-highaddr test-basic-cputest-entry test-basic-exception-flags test-basic-group2-user-trace test-basic-cputest test-basic-cputest-exact test-basic-cputest-exact-chk2bl test-basic-cputest-exact-chk2w test-basic-cputest-exact-jmp test-basic-cputest-runtime020 test-odd-exc-flags test-odd-irq-regwrite test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-jmp-65b2-trace test-jmp-65b2-index-target test-jmp-record37-ori-tail test-real validate setup help prepare-basic-cputest-data
 
 # Default target
 all: test-comprehensive
@@ -35,6 +35,8 @@ help:
 	@echo "  test-movec-illegal - Test MOVEC to invalid register triggers trap"
 	@echo "  test-mmu-library-detect - Test mmu.library style PMMU detection"
 	@echo "  test-mmu-library-failure-path - Reproduce the photographed mmu.library CMP/BNE/JSR failure block"
+	@echo "  test-mmu-library-root-probe - Test mmu.library CRP/SRP save/restore roundtrip"
+	@echo "  test-mmu-library-enable-probe - Test mmu.library TC enable/MOVES probe/restore"
 	@echo "  test-pmove-tc    - Test PMOVE Dx,TC (write) corner cases"
 	@echo "  test-pmove-tc-read - Test PMOVE TC,Dx (read) corner cases"
 	@echo "  test-pmove-tt0-read - Test PMOVE TT0,Dx (read) corner cases"
@@ -91,6 +93,10 @@ help:
 	@echo "  test-basic-jmp-sp-disp-entry - Reproduce the packaged BASIC JMP (d16,SP) split-2 form"
 	@echo "  test-basic-jmp-sp-disp-highaddr - Reproduce the packaged BASIC JMP (d16,SP) split with full 0x420xxxxx addresses"
 	@echo "  test-basic-cputest-entry - Run the exact-form BASIC first-post-RTE CHK2/JMP reproducers"
+	@echo "  test-basic-cputest-exact-chk2bl - Run exact packed BASIC CHK2.B/L group sweeps"
+	@echo "  test-basic-cputest-exact-chk2w - Run exact packed BASIC CHK2.W group sweep"
+	@echo "  test-basic-cputest-exact-jmp - Run exact packed BASIC JMP reproducer"
+	@echo "  test-basic-cputest-runtime020 - Run focused BASIC CHK2/JMP cases through a WinUAE-style 020/030 exception harness"
 	@echo "  test-basic-exception-flags - Verify BASIC-style CHK/DIV exception flag images"
 	@echo "  test-basic-group2-user-trace - Verify BASIC-style TRAP/TRAPcc user stacked trace cases"
 	@echo "  test-basic-cputest - Run maintained packaged BASIC opcode coverage for CHK/DIV/JMP/TRAP/TRAPcc"
@@ -99,6 +105,7 @@ help:
 	@echo "  test-trace-suite - Run maintained T0/T1/Group 2 trace regression coverage"
 	@echo "  test-jmp-65b2-trace - Verify the first post-RTE JMP 4EFB/65B2 still traces"
 	@echo "  test-jmp-65b2-index-target - Verify the packaged JMP 4EFB/65B2 target and trace-side-effect shape"
+	@echo "  test-jmp-record37-ori-tail - Reproduce the remaining ORI immediate-to-memory corruption from BASIC JMP/0002 record 37"
 	@echo "  test-group2-t0-trace - Verify settled T0 Group 2 stacked trace cases"
 	@echo "  test-group2-t1-trace - Verify settled T1 Group 2 stacked trace cases"
 	@echo "  test-group2-stacked-trace - Run maintained Group 2 stacked trace coverage"
@@ -175,6 +182,7 @@ compile: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_moves_all_modes.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/mock/tb_diagrom_detectcpu.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_68030_library_init.vhd || true
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_ttr_tc_disabled.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_whichamiga_mmu.vhd || true
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_movec_active_stack.vhd || true
 	@echo "Basic compilation completed (errors ignored for initial testing)"
@@ -327,6 +335,12 @@ test-cpu-mmu-detection: compile
 test-68030-library: compile
 	@echo "Running 68030.library PMOVE initialization test..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 10us; quit -f" tb_68030_library_init
+
+test-ttr-tc-disabled: setup
+	@echo "Running TC=0 transparent translation regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_ttr_tc_disabled.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 20us; quit -f" tb_ttr_tc_disabled
 
 test-whichamiga: compile
 	@echo "Running WhichAmiga MMU instruction test..."
@@ -582,7 +596,11 @@ test-basic-cputest-entry: setup
 	@$(MAKE) --no-print-directory test-basic-jmp-cputest-entry
 	@$(MAKE) --no-print-directory test-basic-jmp-sp-disp-highaddr
 
-test-basic-cputest-exact: setup
+prepare-basic-cputest-data:
+	@echo "Preparing BASIC cputest low-memory image..."
+	@python3 $(TEST_DIR)/build_cputest_mem.py --out $(TEST_DIR)/data/cputest_basic_lmem.mem
+
+test-basic-cputest-exact: setup prepare-basic-cputest-data
 	@echo "Running exact packed BASIC CHK2/JMP reproducer (expected to fail until fixed)..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
@@ -590,6 +608,42 @@ test-basic-cputest-exact: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -2008 $(TEST_DIR)/tb_basic_cputest_exact.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 4ms; quit -f" tb_basic_cputest_exact
+
+test-basic-cputest-exact-chk2bl: setup prepare-basic-cputest-data
+	@echo "Running exact packed BASIC CHK2.B/L group sweep..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -2008 $(TEST_DIR)/tb_basic_cputest_exact.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -gsuite_select=1 -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2ms; quit -f" tb_basic_cputest_exact
+
+test-basic-cputest-exact-chk2w: setup prepare-basic-cputest-data
+	@echo "Running exact packed BASIC CHK2.W group sweep..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -2008 $(TEST_DIR)/tb_basic_cputest_exact.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -gsuite_select=2 -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2ms; quit -f" tb_basic_cputest_exact
+
+test-basic-cputest-exact-jmp: setup prepare-basic-cputest-data
+	@echo "Running exact packed BASIC JMP reproducer..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -2008 $(TEST_DIR)/tb_basic_cputest_exact.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -gsuite_select=3 -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 4ms; quit -f" tb_basic_cputest_exact
+
+test-basic-cputest-runtime020: setup prepare-basic-cputest-data
+	@echo "Running focused BASIC CHK2/JMP runtime020 harness reproducer..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -2008 $(TEST_DIR)/tb_basic_cputest_exact.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -gsuite_select=7 -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 8ms; quit -f" tb_basic_cputest_exact
 
 test-basic-exception-flags: setup
 	@echo "Running BASIC-style CHK/DIV exception flag tests..."
@@ -777,6 +831,24 @@ test-mmu-library-failure-path: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_library_failure_path.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 30us; quit -f" tb_mmu_library_failure_path
+
+test-mmu-library-root-probe: setup
+	@echo "Running mmu.library root pointer probe regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_library_root_probe.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 50us; quit -f" tb_mmu_library_root_probe
+
+test-mmu-library-enable-probe: setup
+	@echo "Running mmu.library TC enable/MOVES probe/restore test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_library_enable_probe.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 50us; quit -f" tb_mmu_library_enable_probe
 
 # MOVES All Addressing Modes Test
 test-moves-all-modes: setup
@@ -1025,8 +1097,17 @@ test-real:
 	@echo "Running mmu.library detection sequence..."
 	@$(MAKE) --no-print-directory test-mmu-library-detect
 	@echo ""
+	@echo "Running mmu.library root pointer probe..."
+	@$(MAKE) --no-print-directory test-mmu-library-root-probe
+	@echo ""
+	@echo "Running mmu.library enable/probe/restore..."
+	@$(MAKE) --no-print-directory test-mmu-library-enable-probe
+	@echo ""
 	@echo "Running 68030.library initialization sequence..."
 	@$(MAKE) --no-print-directory test-68030-library
+	@echo ""
+	@echo "Running TC=0 transparent translation sequence..."
+	@$(MAKE) --no-print-directory test-ttr-tc-disabled
 	@echo ""
 	@echo "Running WhichAmiga MMU sequence..."
 	@$(MAKE) --no-print-directory test-whichamiga
@@ -1129,4 +1210,13 @@ test-jmp-65b2-index-target: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_jmp_65b2_index_target.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 3ms; quit -f" tb_jmp_65b2_index_target
+
+test-jmp-record37-ori-tail: setup
+	@echo "Running focused BASIC JMP/0002 record 37 ORI tail reproducer..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_jmp_record37_ori_tail.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 40us; quit -f" tb_jmp_record37_ori_tail
 
