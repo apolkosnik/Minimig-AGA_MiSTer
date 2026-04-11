@@ -544,6 +544,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal trap_berr			: bit;
 	signal trap_illegal		: bit;
 	signal trap_addr_error	: bit;
+	signal set_trap_addr_error_fpu : bit;  -- combinational helper from FRESTORE alignment check
 	signal trap_priv			: bit;
 	signal trap_trace			: bit;
 	signal trap_1010			: bit;
@@ -3421,8 +3422,13 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						-- pmove_dn_mode is now cleared ONLY when queue becomes empty (lines 1765-1766)
 					ELSIF opcode(7 downto 0)="00000000" OR opcode(7 downto 0)="11111111" OR data_is_source='1' THEN
 						TG68_PC_word <= '1';
-					END IF;	
-					
+					END IF;
+
+					-- FRESTORE alignment trap latch (combinational helper from decode opcode process)
+					IF set_trap_addr_error_fpu='1' THEN
+						trap_addr_error <= '1';
+					END IF;
+
 					IF exec(get_bfoffset)='1' THEN
 						alu_width <= bf_width;
 						alu_bf_shift <= bf_shift;
@@ -3930,6 +3936,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			interrupt_mode_clr_req <= '0';
 			trap_illegal <='0';
 			-- trap_addr_error: moved to process 2375 (registered, like trap_berr)
+			set_trap_addr_error_fpu <= '0';
 		trap_priv <='0';
 		trap_1010 <='0';
 		trap_1111 <='0';
@@ -8426,7 +8433,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- FRESTORE requires longword transfers, so addresses must be aligned on 4-byte boundary
 						IF memaddr_a(1 downto 0) /= "00" THEN
 							-- Address error: Memory address is misaligned for longword access
-							trap_addr_error <= '1';
+							-- trap_addr_error is registered in clocked process; use combinational helper
+							set_trap_addr_error_fpu <= '1';
 							trapmake <= '1';
 							setstate <= "00";  -- Abort FRESTORE operation
 							next_micro_state <= idle;
