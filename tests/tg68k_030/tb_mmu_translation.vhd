@@ -111,6 +111,8 @@ architecture behavioral of tb_mmu_translation is
     -- Verifies cache_inhibit is correct in the same cycle as addr_phys for TTR matches
     signal ttr_ci_seen : boolean := false;  -- CI=1 observed during TTR access
     signal ttr_ci_bug  : boolean := false;  -- CI=0 observed during TTR access (stale!)
+    signal atc_hit_seen : boolean := false; -- ATC hit observed with same-cycle phys output
+    signal atc_hit_bug  : boolean := false; -- ATC hit still showed busy/stale phys
 
     -- Memory model: 16384 x 16-bit words = 32KB ($0000-$7FFF)
     type mem_type is array(0 to 16383) of std_logic_vector(15 downto 0);
@@ -810,6 +812,32 @@ begin
         end if;
     end process;
 
+    ---------------------------------------------------------------
+    -- ATC HIT BYPASS OBSERVATION (Test 21)
+    -- Observe a later hot-page read from $1100, after the initial fill path has completed.
+    -- This avoids the pipelined overlap around the very first post-write read and checks the
+    -- steady-state ATC hit path directly.
+    ---------------------------------------------------------------
+    atc_hit_observe: process(clk)
+    begin
+        if rising_edge(clk) then
+            if not atc_hit_seen and not atc_hit_bug and
+               busstate /= "00" and nWr = '1' and FC = "101" and pmmu_addr_log = x"00001100" and
+               unsigned(debug_TG68_PC) >= x"00000138" then
+                if pmmu_busy = '0' and pmmu_addr_phys = x"00001100" then
+                    atc_hit_seen <= true;
+                else
+                    report "ATC_HIT_OBSERVED_BAD: phys=$" & slv_to_hex(pmmu_addr_phys) &
+                           " busy=" & std_logic'image(pmmu_busy) &
+                           " fc=" & slv_to_hex("0" & FC) &
+                           " log=$" & slv_to_hex(pmmu_addr_log)
+                    severity note;
+                    atc_hit_bug <= true;
+                end if;
+            end if;
+        end if;
+    end process;
+
     -- DEBUG: Monitor PMMU addr_phys during CRP_L read at $1094-$1096
     ---------------------------------------------------------------
     phys_monitor: process(clk)
@@ -1159,7 +1187,19 @@ begin
         end if;
         check_test(20, "TTR CI bypass: cache_inhibit correct on TTR match", pass);
 
-        -- Test 21: TABLE U-bit writeback - root descriptor at $6000
+        -- Test 21: ATC hit bypass timing
+        pass := atc_hit_seen and not atc_hit_bug;
+        if not pass then
+            if atc_hit_bug then
+                report "  Test 21: ATC-hit read of $1100 still had busy=1 or stale phys output";
+            end if;
+            if not atc_hit_seen then
+                report "  Test 21: never observed same-cycle ATC-hit read of $1100";
+            end if;
+        end if;
+        check_test(21, "ATC hit bypass: addr_phys/busy correct on cached read", pass);
+
+        -- Test 22: TABLE U-bit writeback - root descriptor at $6000
         -- Initial value: $00006202 (DT=10, U=0). After first walk: U=1 -> $0000620A.
         -- mem indices: $6000/2 = 12288 (high word), 12289 (low word)
         val32 := mem(12288) & mem(12289);
@@ -1167,9 +1207,9 @@ begin
         if not pass then
             report "  Root TABLE@$6000: expected $0000620A (U=1), got $" & slv_to_hex(val32);
         end if;
-        check_test(21, "TABLE U-bit writeback: root descriptor ($6000) U=1", pass);
+        check_test(22, "TABLE U-bit writeback: root descriptor ($6000) U=1", pass);
 
-        -- Test 22: TABLE U-bit writeback - L1 descriptor at $6200
+        -- Test 23: TABLE U-bit writeback - L1 descriptor at $6200
         -- Initial value: $00006402 (DT=10, U=0). After first walk: U=1 -> $0000640A.
         -- mem indices: $6200/2 = 12544 (high word), 12545 (low word)
         val32 := mem(12544) & mem(12545);
@@ -1177,7 +1217,7 @@ begin
         if not pass then
             report "  L1 TABLE@$6200: expected $0000640A (U=1), got $" & slv_to_hex(val32);
         end if;
-        check_test(22, "TABLE U-bit writeback: L1 descriptor ($6200) U=1", pass);
+        check_test(23, "TABLE U-bit writeback: L1 descriptor ($6200) U=1", pass);
 
         -- Summary
         report "=========================================================";

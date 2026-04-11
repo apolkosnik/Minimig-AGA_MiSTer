@@ -70,12 +70,19 @@ architecture behavior of tb_mmu_library_enable_probe is
     signal dbg_moves_bus_pending      : std_logic;
     signal dbg_moves_writeback_pending : std_logic;
     signal dbg_pmmu_saved_fc          : std_logic_vector(2 downto 0);
+    signal dbg_svmode                : std_logic;
+    signal dbg_presvmode             : std_logic;
+    signal dbg_flagssr_s             : std_logic;
+    signal dbg_changemode            : std_logic;
     signal dbg_pmmu_tc                : std_logic_vector(31 downto 0);
+    signal dbg_pmmu_crp_hi            : std_logic_vector(31 downto 0);
+    signal dbg_pmmu_crp_lo            : std_logic_vector(31 downto 0);
     signal dbg_pmmu_brief             : std_logic_vector(15 downto 0);
     signal dbg_pmmu_reg_sel           : std_logic_vector(4 downto 0);
     signal dbg_pmmu_reg_we            : std_logic;
     signal dbg_pmmu_reg_part          : std_logic;
     signal dbg_pmmu_busy              : std_logic;
+    signal dbg_pmmu_fault             : std_logic;
     signal dbg_pmmu_wstate            : std_logic_vector(4 downto 0);
     signal dbg_setnextpass            : std_logic;
     signal dbg_setendopc              : std_logic;
@@ -103,6 +110,7 @@ architecture behavior of tb_mmu_library_enable_probe is
     signal dbg_trap_priv             : std_logic;
     signal dbg_trap_addr_error       : std_logic;
     signal dbg_trap_berr             : std_logic;
+    signal dbg_stop                  : std_logic;
     signal dbg_regfile_d4            : std_logic_vector(31 downto 0);
     signal dbg_regfile_a0            : std_logic_vector(31 downto 0);
     signal dbg_regfile_a7            : std_logic_vector(31 downto 0);
@@ -115,22 +123,52 @@ architecture behavior of tb_mmu_library_enable_probe is
     signal pmmu_wdat    : std_logic_vector(31 downto 0);
     signal pmmu_ack     : std_logic := '0';
     signal pmmu_rdat    : std_logic_vector(31 downto 0) := (others => '0');
+    signal clear_monitors : std_logic := '0';
+    signal mem_wait     : std_logic := '0';
+    signal walker_req_prev : std_logic := '0';
+    signal stall_cooldown : integer range 0 to 3 := 0;
 
     constant CLK_PERIOD : time := 10 ns;
     signal test_done    : boolean := false;
     signal stop_reached : boolean := false;
+    signal remapped_fetch_seen : boolean := false;
+    signal probe_window_active : boolean := false;
+    signal expected_ud1_low_seen : boolean := false;
+    signal expected_ud1_high_seen : boolean := false;
+    signal unexpected_ud1_seen : boolean := false;
+    signal unexpected_ud1_addr : std_logic_vector(31 downto 0) := (others => '0');
+    signal rtc_supv_phys_seen : boolean := false;
+    signal rtc_supv_wrong_phys_seen : boolean := false;
+    signal rtc_supv_phys_addr : std_logic_vector(31 downto 0) := (others => '0');
 
     constant STACK_ADDR      : integer := 16#1100#;
+    constant INVALID_TC_ADDR : integer := 16#1120#;
     constant DISABLE_TC_ADDR : integer := 16#1110#;
     constant ROOT_ADDR       : integer := 16#3000#;
     constant RESULT_ADDR     : integer := 16#3040#;
+    constant INVALID_RESULT_ADDR : integer := 16#3050#;
+    constant SUPV_PROG_PHYS_BASE : integer := 16#8000#;
     constant USER_PAGE_ADDR  : integer := 16#F80000#;
     constant EXPECTED_DATA   : std_logic_vector(31 downto 0) := x"DEADF00D";
+    constant INVALID_TC_VALUE : std_logic_vector(31 downto 0) := x"810F9800";
+    constant INVALID_TC_STORED : std_logic_vector(31 downto 0) := x"018F9800";
+    constant INVALID_MARKER  : std_logic_vector(31 downto 0) := x"1BADB002";
+    constant RTC_SRE_TC_ADDR : integer := 16#1130#;
+    constant RTC_CRP_ADDR    : integer := 16#1140#;
+    constant RTC_SRP_ADDR    : integer := 16#1150#;
+    constant RTC_DISABLE_TC_ADDR : integer := 16#1160#;
+    constant RTC_RESULT_ADDR : integer := 16#3060#;
+    constant RTC_CRP_ROOT_ADDR : integer := 16#3100#;
+    constant RTC_SRP_ROOT_ADDR : integer := 16#3200#;
+    constant RTC_EXPECTED_DATA : std_logic_vector(31 downto 0) := x"1234ABCD";
+    constant RTC_WRONG_DATA  : std_logic_vector(31 downto 0) := x"89ABCDEF";
+    constant RTC_SRE_TC_VALUE : std_logic_vector(31 downto 0) := x"82A08680";
 
     type low_mem_array_t  is array (0 to 32767) of std_logic_vector(15 downto 0);
     type page_mem_array_t is array (0 to 16383) of std_logic_vector(15 downto 0);
     shared variable mem    : low_mem_array_t;
     shared variable f8_mem : page_mem_array_t;
+    shared variable dc_mem : low_mem_array_t;
 
     procedure emit_word(variable pc : inout integer; w : std_logic_vector(15 downto 0)) is
     begin
@@ -142,6 +180,17 @@ architecture behavior of tb_mmu_library_enable_probe is
     begin
         emit_word(pc, v(31 downto 16));
         emit_word(pc, v(15 downto 0));
+    end procedure;
+
+    procedure emit_word_at(addr : integer; w : std_logic_vector(15 downto 0)) is
+    begin
+        mem(addr / 2) := w;
+    end procedure;
+
+    procedure emit_long_at(addr : integer; v : std_logic_vector(31 downto 0)) is
+    begin
+        emit_word_at(addr, v(31 downto 16));
+        emit_word_at(addr + 2, v(15 downto 0));
     end procedure;
 
     impure function read_long(addr : integer) return std_logic_vector is
@@ -210,10 +259,10 @@ begin
             pmmu_walker_ack  => pmmu_ack,
             pmmu_walker_data => pmmu_rdat,
             pmmu_walker_berr => '0',
-            debug_SVmode   => open,
-            debug_preSVmode => open,
-            debug_FlagsSR_S => open,
-            debug_changeMode => open,
+            debug_SVmode   => dbg_svmode,
+            debug_preSVmode => dbg_presvmode,
+            debug_FlagsSR_S => dbg_flagssr_s,
+            debug_changeMode => dbg_changemode,
             debug_setopcode => dbg_setopcode,
             debug_exec_directSR => open,
             debug_exec_to_SR => open,
@@ -293,7 +342,7 @@ begin
             debug_pc_datab => open,
             debug_pmmu_busy => dbg_pmmu_busy,
             debug_cpu_halted => open,
-            debug_stop => open,
+            debug_stop => dbg_stop,
             debug_interrupt => open,
             debug_setendOPC => dbg_setendopc,
             debug_IPL_nr => open,
@@ -308,7 +357,7 @@ begin
             debug_pmmu_reg_part => dbg_pmmu_reg_part,
             debug_pmmu_reg_rdat => open,
             debug_make_berr => open,
-            debug_pmmu_fault => open,
+            debug_pmmu_fault => dbg_pmmu_fault,
             debug_trap_format_error => open,
             debug_format_error_rte_word => open,
             debug_format_error_pc => open,
@@ -317,8 +366,8 @@ begin
             debug_pmmu_tc => dbg_pmmu_tc,
             debug_pmmu_tt0 => open,
             debug_pmmu_tt1 => open,
-            debug_pmmu_crp_hi => open,
-            debug_pmmu_crp_lo => open,
+            debug_pmmu_crp_hi => dbg_pmmu_crp_hi,
+            debug_pmmu_crp_lo => dbg_pmmu_crp_lo,
             debug_pmmu_srp_hi => open,
             debug_pmmu_srp_lo => open,
             debug_pmmu_wstate => dbg_pmmu_wstate,
@@ -339,14 +388,54 @@ begin
 
     data_in <= f8_mem(to_integer(unsigned(addr_out(14 downto 1))))
                when addr_out(23 downto 16) = x"F8" and to_integer(unsigned(addr_out(14 downto 1))) <= f8_mem'high else
+               dc_mem(to_integer(unsigned(addr_out(15 downto 1))))
+               when addr_out(23 downto 16) = x"DC" and to_integer(unsigned(addr_out(15 downto 1))) <= dc_mem'high else
                mem(to_integer(unsigned(addr_out(15 downto 1))))
                when to_integer(unsigned(addr_out(15 downto 1))) <= mem'high else x"4E71";
+
+    -- Approximate wrapper timing with a minimum one-cycle memory delay plus
+    -- PMMU walker stall/cooldown so PMOVE retirement sees non-zero-wait-state behavior.
+    mem_wait_gen: process(clk)
+    begin
+        if rising_edge(clk) then
+            if nReset = '0' then
+                mem_wait <= '0';
+            elsif clkena_in = '1' then
+                mem_wait <= '1';
+            else
+                mem_wait <= '0';
+            end if;
+        end if;
+    end process;
+
+    stall_control: process(clk)
+    begin
+        if rising_edge(clk) then
+            if nReset = '0' then
+                walker_req_prev <= '0';
+                stall_cooldown <= 0;
+            else
+                walker_req_prev <= pmmu_req;
+                if walker_req_prev = '1' and pmmu_req = '0' then
+                    stall_cooldown <= 2;
+                elsif stall_cooldown > 0 then
+                    stall_cooldown <= stall_cooldown - 1;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    clkena_in <= '0' when (pmmu_req = '1'
+                           or (dbg_pmmu_busy = '1' and dbg_pmmu_fault = '0')
+                           or stall_cooldown > 0
+                           or mem_wait = '1')
+                 else '1';
 
     cpu_mem_write: process(clk)
         variable idx : integer;
     begin
         if rising_edge(clk) then
-            if busstate = "11" and nWr = '0' then
+            if busstate = "11" and nWr = '0' and clkena_in = '1' then
                 if addr_out(23 downto 16) = x"F8" then
                     idx := to_integer(unsigned(addr_out(14 downto 1)));
                     if idx <= f8_mem'high then
@@ -368,8 +457,53 @@ begin
                         end if;
                     end if;
                 end if;
-            elsif busstate = "00" and addr_out = x"00000442" then
-                stop_reached <= true;
+            end if;
+
+            if clear_monitors = '1' then
+                stop_reached <= false;
+                remapped_fetch_seen <= false;
+                probe_window_active <= false;
+                expected_ud1_low_seen <= false;
+                expected_ud1_high_seen <= false;
+                unexpected_ud1_seen <= false;
+                unexpected_ud1_addr <= (others => '0');
+                rtc_supv_phys_seen <= false;
+                rtc_supv_wrong_phys_seen <= false;
+                rtc_supv_phys_addr <= (others => '0');
+            else
+                if dbg_pmmu_tc = x"81F09800" then
+                    probe_window_active <= true;
+                elsif dbg_pmmu_tc(31) = '0' then
+                    probe_window_active <= false;
+                end if;
+
+                if busstate = "00" and dbg_tg68_pc = x"00000442" then
+                    stop_reached <= true;
+                end if;
+
+                if busstate = "00" and dbg_tg68_pc = x"0000041A" and addr_out = x"0000841A" then
+                    remapped_fetch_seen <= true;
+                end if;
+
+                if probe_window_active and busstate = "10" and fc_out = "001" then
+                    if pmmu_addr_log_out = x"00000004" and pmmu_addr_phys_out = x"00F80004" then
+                        expected_ud1_low_seen <= true;
+                    elsif pmmu_addr_log_out = x"00000006" and pmmu_addr_phys_out = x"00F80006" then
+                        expected_ud1_high_seen <= true;
+                    elsif not unexpected_ud1_seen then
+                        unexpected_ud1_seen <= true;
+                        unexpected_ud1_addr <= pmmu_addr_log_out;
+                    end if;
+                end if;
+
+                if busstate = "10" and fc_out = "101" and pmmu_addr_log_out = x"00DC0000" then
+                    rtc_supv_phys_addr <= pmmu_addr_phys_out;
+                    if pmmu_addr_phys_out = x"00DC0000" then
+                        rtc_supv_phys_seen <= true;
+                    elsif pmmu_addr_phys_out = x"00F80000" then
+                        rtc_supv_wrong_phys_seen <= true;
+                    end if;
+                end if;
             end if;
         end if;
     end process;
@@ -381,14 +515,19 @@ begin
         variable reg_count   : integer := 0;
     begin
         if rising_edge(clk) then
-            if now > 800 ns and cpu_count < 200 then
+            if now > 2800 ns and now < 3200 ns and cpu_count < 80 then
                 report "CPU: t=" & time'image(now) &
                        " bs=" & slv_to_bits(busstate) &
                        " fc=" & slv_to_bits(fc_out) &
+                       " sfc=" & slv_to_bits(dbg_pmmu_saved_fc) &
                        " st=" & integer'image(to_integer(unsigned(dbg_state_internal))) &
                        " ss=" & integer'image(to_integer(unsigned(dbg_setstate))) &
                        " ms=" & integer'image(dbg_micro_state) &
                        " nms=" & integer'image(dbg_next_micro_state) &
+                       " sv=" & std_logic'image(dbg_svmode) &
+                       " psv=" & std_logic'image(dbg_presvmode) &
+                       " fs=" & std_logic'image(dbg_flagssr_s) &
+                       " cm=" & std_logic'image(dbg_changemode) &
                        " so=" & std_logic'image(dbg_setopcode) &
                        " dec=" & std_logic'image(dbg_decodeOPC) &
                        " clw=" & std_logic'image(dbg_clkena_lw) &
@@ -491,21 +630,139 @@ begin
 
     test: process
         variable pc         : integer;
+        variable phys_pc    : integer;
         variable pass_count : integer := 0;
         variable fail_count : integer := 0;
         variable actual     : std_logic_vector(31 downto 0);
+        procedure init_mem_defaults is
+        begin
+            for i in mem'range loop
+                mem(i) := x"4E71";
+            end loop;
+            for i in f8_mem'range loop
+                f8_mem(i) := x"0000";
+            end loop;
+            for i in dc_mem'range loop
+                dc_mem(i) := x"0000";
+            end loop;
+
+            mem(0) := x"0000";
+            mem(1) := x"2000"; -- SSP
+            mem(2) := x"0000";
+            mem(3) := x"0400"; -- PC
+        end procedure;
     begin
-        for i in mem'range loop
-            mem(i) := x"4E71";
-        end loop;
-        for i in f8_mem'range loop
-            f8_mem(i) := x"0000";
+        init_mem_defaults;
+
+        write_long(INVALID_TC_ADDR, INVALID_TC_VALUE);
+        write_long(INVALID_RESULT_ADDR, x"BAADF00D");
+
+        pc := 16#0400#;
+        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(INVALID_TC_ADDR, 32))); -- MOVEA.L #invalid_tc,A7
+        emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
+        emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
+        emit_word(pc, x"23FC"); emit_long(pc, INVALID_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32))); -- marker
+        emit_word(pc, x"60FE");                              -- BRA.S * (stay alive if we get here)
+
+        report "=== invalid TC reject control ===" severity note;
+
+        clear_monitors <= '1';
+        nReset <= '0';
+        wait for 100 ns;
+        clear_monitors <= '0';
+        nReset <= '1';
+
+        for i in 0 to 12000 loop
+            wait until rising_edge(clk);
+            exit when read_long(INVALID_RESULT_ADDR) = INVALID_MARKER;
         end loop;
 
-        mem(0) := x"0000";
-        mem(1) := x"2000"; -- SSP
-        mem(2) := x"0000";
-        mem(3) := x"0400"; -- PC
+        actual := read_long(INVALID_RESULT_ADDR);
+        if actual = INVALID_MARKER then
+            report "PASS: invalid TC did not lock execution after PMOVE/PFLUSHA" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: invalid TC path did not reach marker, got=$" & slv_to_hex(actual) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if dbg_pmmu_tc = INVALID_TC_STORED then
+            report "PASS: invalid TC stored as rejected value $" & slv_to_hex(INVALID_TC_STORED) severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: invalid TC stored as $" & slv_to_hex(dbg_pmmu_tc) &
+                   " expected $" & slv_to_hex(INVALID_TC_STORED) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if dbg_pmmu_tc(31) = '0' then
+            report "PASS: invalid TC kept MMU disabled" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: invalid TC left MMU enabled" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        clear_monitors <= '1';
+        nReset <= '0';
+        wait for 100 ns;
+        clear_monitors <= '0';
+        init_mem_defaults;
+
+        write_long(STACK_ADDR + 0, x"80000002");
+        write_long(STACK_ADDR + 4, std_logic_vector(to_unsigned(ROOT_ADDR, 32)));
+        write_long(INVALID_TC_ADDR, INVALID_TC_VALUE);
+        write_long(INVALID_RESULT_ADDR, x"BAADF00D");
+
+        pc := 16#0400#;
+        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(STACK_ADDR, 32))); -- MOVEA.L #stack,A7
+        emit_word(pc, x"F017"); emit_word(pc, x"4C00");     -- PMOVE.Q (A7),CRP
+        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(INVALID_TC_ADDR, 32))); -- MOVEA.L #invalid_tc,A7
+        emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
+        emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
+        emit_word(pc, x"23FC"); emit_long(pc, INVALID_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32))); -- marker
+        emit_word(pc, x"60FE");                              -- BRA.S * (stay alive if we get here)
+
+        report "=== invalid TC after CRP load control ===" severity note;
+
+        nReset <= '1';
+
+        for i in 0 to 12000 loop
+            wait until rising_edge(clk);
+            exit when read_long(INVALID_RESULT_ADDR) = INVALID_MARKER;
+        end loop;
+
+        actual := read_long(INVALID_RESULT_ADDR);
+        if actual = INVALID_MARKER then
+            report "PASS: invalid TC after CRP did not lock execution" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: invalid TC after CRP path did not reach marker, got=$" & slv_to_hex(actual) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if dbg_pmmu_crp_hi = x"80000002" and dbg_pmmu_crp_lo = std_logic_vector(to_unsigned(ROOT_ADDR, 32)) then
+            report "PASS: PMOVE.Q (A7),CRP loaded expected root pointer under wait states" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: CRP loaded as hi=$" & slv_to_hex(dbg_pmmu_crp_hi) &
+                   " lo=$" & slv_to_hex(dbg_pmmu_crp_lo) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if dbg_pmmu_tc = INVALID_TC_STORED and dbg_pmmu_tc(31) = '0' then
+            report "PASS: invalid TC remained rejected after CRP load" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: invalid TC after CRP stored as $" & slv_to_hex(dbg_pmmu_tc) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        clear_monitors <= '1';
+        nReset <= '0';
+        wait for 100 ns;
+        clear_monitors <= '0';
+        init_mem_defaults;
 
         write_long(STACK_ADDR + 0, x"80000002");
         write_long(STACK_ADDR + 4, std_logic_vector(to_unsigned(ROOT_ADDR, 32)));
@@ -519,13 +776,13 @@ begin
         --   FC=1 (user data)        -> $00F80059 so MOVES via SFC=1 reads from $00F80004
         --   FC=2 (user program)     -> $00000059
         --   FC=5 (supervisor data)  -> $00000059
-        --   FC=6 (supervisor prog.) -> $00000059
-        -- The supervisor entries must exist or the CPU faults immediately after MMU enable
-        -- while still fetching the following instructions from low memory.
+        --   FC=6 (supervisor prog.) -> $00008059
+        -- FC=6 intentionally remaps the first post-enable supervisor fetches to
+        -- physical $8000 so this bench catches stale or untranslated fetches.
         write_long(ROOT_ADDR + 4,  x"00F80059");
         write_long(ROOT_ADDR + 8,  x"00000059");
         write_long(ROOT_ADDR + 20, x"00000059");
-        write_long(ROOT_ADDR + 24, x"00000059");
+        write_long(ROOT_ADDR + 24, x"00008059");
 
         pc := 16#0400#;
         emit_word(pc, x"2E7C"); emit_long(pc, x"00001100"); -- MOVEA.L #$1100,A7
@@ -534,23 +791,23 @@ begin
         emit_word(pc, x"4E7B"); emit_word(pc, x"0000");     -- MOVEC D0,SFC
         emit_word(pc, x"2E7C"); emit_long(pc, x"00001108"); -- MOVEA.L #$1108,A7
         emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
-        emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
-        emit_word(pc, x"207C"); emit_long(pc, x"00000000"); -- MOVEA.L #0,A0
-        emit_word(pc, x"0EA8"); emit_word(pc, x"4000"); emit_word(pc, x"0004"); -- MOVES.L (4,A0),D4
-        emit_word(pc, x"2E7C"); emit_long(pc, x"00003044"); -- MOVEA.L #$3044,A7
-        emit_word(pc, x"2F04");                              -- MOVE.L D4,-(A7)
-        emit_word(pc, x"2E7C"); emit_long(pc, x"00001110"); -- MOVEA.L #$1110,A7
-        emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
-        emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
-        emit_word(pc, x"4E72"); emit_word(pc, x"2700");     -- STOP #$2700
+        emit_word(pc, x"4AFC");                              -- ILLEGAL if FC=6 fetch does not remap
+        phys_pc := SUPV_PROG_PHYS_BASE + 16#041A#;
+        emit_word_at(phys_pc + 16#00#, x"F000"); emit_word_at(phys_pc + 16#02#, x"2400"); -- PFLUSHA
+        emit_word_at(phys_pc + 16#04#, x"207C"); emit_long_at(phys_pc + 16#06#, x"00000000"); -- MOVEA.L #0,A0
+        emit_word_at(phys_pc + 16#0A#, x"0EA8"); emit_word_at(phys_pc + 16#0C#, x"4000"); emit_word_at(phys_pc + 16#0E#, x"0004"); -- MOVES.L (4,A0),D4
+        emit_word_at(phys_pc + 16#10#, x"2E7C"); emit_long_at(phys_pc + 16#12#, x"00003044"); -- MOVEA.L #$3044,A7
+        emit_word_at(phys_pc + 16#16#, x"2F04"); -- MOVE.L D4,-(A7)
+        emit_word_at(phys_pc + 16#18#, x"2E7C"); emit_long_at(phys_pc + 16#1A#, x"00001110"); -- MOVEA.L #$1110,A7
+        emit_word_at(phys_pc + 16#1E#, x"F017"); emit_word_at(phys_pc + 16#20#, x"4000"); -- PMOVE.L (A7),TC
+        emit_word_at(phys_pc + 16#22#, x"F000"); emit_word_at(phys_pc + 16#24#, x"2400"); -- PFLUSHA
+        emit_word_at(phys_pc + 16#26#, x"4E72"); emit_word_at(phys_pc + 16#28#, x"2700"); -- STOP #$2700
 
         report "=== mmu.library enable probe regression ===" severity note;
 
-        nReset <= '0';
-        wait for 100 ns;
         nReset <= '1';
 
-        for i in 0 to 40000 loop
+        for i in 0 to 80000 loop
             wait until rising_edge(clk);
             exit when stop_reached;
         end loop;
@@ -567,6 +824,102 @@ begin
         else
             report "FAIL: MOVES.L probe expected=$" & slv_to_hex(EXPECTED_DATA) &
                    " got=$" & slv_to_hex(actual) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if remapped_fetch_seen then
+            report "PASS: first post-enable supervisor fetch used remapped physical address" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: supervisor fetch after MMU enable did not hit remapped FC=6 page" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if expected_ud1_low_seen and expected_ud1_high_seen then
+            report "PASS: probe window saw intended FC=1 MOVES accesses at logical $00000004/$00000006" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: probe window missed intended FC=1 MOVES beat(s) at logical $00000004/$00000006" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if not unexpected_ud1_seen then
+            report "PASS: no stray FC=1 translations occurred during probe window" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: stray FC=1 translation observed during probe window at logical $" &
+                   slv_to_hex(unexpected_ud1_addr) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        clear_monitors <= '1';
+        nReset <= '0';
+        wait for 100 ns;
+        clear_monitors <= '0';
+        init_mem_defaults;
+
+        write_long(RTC_CRP_ADDR + 0, x"80000002");
+        write_long(RTC_CRP_ADDR + 4, std_logic_vector(to_unsigned(RTC_CRP_ROOT_ADDR, 32)));
+        write_long(RTC_SRP_ADDR + 0, x"80000002");
+        write_long(RTC_SRP_ADDR + 4, std_logic_vector(to_unsigned(RTC_SRP_ROOT_ADDR, 32)));
+        write_long(RTC_SRE_TC_ADDR, RTC_SRE_TC_VALUE);
+        write_long(RTC_DISABLE_TC_ADDR, x"00000000");
+        write_long(RTC_RESULT_ADDR, x"BAADF00D");
+        write_long(RTC_CRP_ROOT_ADDR + 0, x"001C0061"); -- 00DC0000 -> 00F80000 via CRP
+        write_long(RTC_SRP_ROOT_ADDR + 0, x"00000061"); -- 00DC0000 -> 00DC0000 via SRP
+        f8_mem(0) := RTC_WRONG_DATA(31 downto 16);
+        f8_mem(1) := RTC_WRONG_DATA(15 downto 0);
+        dc_mem(0) := RTC_EXPECTED_DATA(31 downto 16);
+        dc_mem(1) := RTC_EXPECTED_DATA(15 downto 0);
+
+        pc := 16#0400#;
+        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(RTC_CRP_ADDR, 32))); -- MOVEA.L #crp,A7
+        emit_word(pc, x"F017"); emit_word(pc, x"4C00");     -- PMOVE.Q (A7),CRP
+        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(RTC_SRP_ADDR, 32))); -- MOVEA.L #srp,A7
+        emit_word(pc, x"F017"); emit_word(pc, x"4800");     -- PMOVE.Q (A7),SRP
+        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(RTC_SRE_TC_ADDR, 32))); -- MOVEA.L #tc,A7
+        emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
+        emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
+        emit_word(pc, x"2839"); emit_long(pc, x"00DC0000"); -- MOVE.L $00DC0000,D4
+        emit_word(pc, x"23C4"); emit_long(pc, std_logic_vector(to_unsigned(RTC_RESULT_ADDR, 32))); -- MOVE.L D4,result
+        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(RTC_DISABLE_TC_ADDR, 32))); -- MOVEA.L #tc0,A7
+        emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
+        emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
+        emit_word(pc, x"4E72"); emit_word(pc, x"2700");     -- STOP #$2700
+
+        report "=== supervisor RTC via SRP regression ===" severity note;
+
+        nReset <= '1';
+
+        for i in 0 to 50000 loop
+            wait until rising_edge(clk);
+            exit when dbg_stop = '1';
+        end loop;
+
+        actual := read_long(RTC_RESULT_ADDR);
+        if actual = RTC_EXPECTED_DATA then
+            report "PASS: supervisor data read at logical $00DC0000 used SRP mapping" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: supervisor data read at logical $00DC0000 expected=$" &
+                   slv_to_hex(RTC_EXPECTED_DATA) & " got=$" & slv_to_hex(actual) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if rtc_supv_phys_seen then
+            report "PASS: supervisor data translation reached physical $00DC0000" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: supervisor data translation did not hit physical $00DC0000, last=$" &
+                   slv_to_hex(rtc_supv_phys_addr) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if not rtc_supv_wrong_phys_seen then
+            report "PASS: supervisor data translation avoided CRP's $00F80000 mapping" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: supervisor data translation incorrectly used CRP-style physical $00F80000" severity error;
             fail_count := fail_count + 1;
         end if;
 

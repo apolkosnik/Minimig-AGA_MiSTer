@@ -2233,9 +2233,18 @@ begin
             end if;
         end procedure;
 
-        procedure check_jmp_exact_case(case_name    : string;
-                                       sr_value     : std_logic_vector(15 downto 0);
-                                       expect_trace : boolean) is
+        procedure prime_jmp_record37_expected_old_values is
+        begin
+            write_byte(16#0000008B#, x"FC");
+            write_word(16#0000008C#, x"2048");
+            write_byte(16#4204FEFF#, x"54");
+        end procedure;
+
+        procedure check_jmp_exact_case(case_name      : string;
+                                       sr_value       : std_logic_vector(15 downto 0);
+                                       expect_trace   : boolean;
+                                       preload_record18_lowmem : boolean := false;
+                                       prime_expected_old_values : boolean := false) is
             variable trace_sp : integer;
             variable exc_sp   : integer;
             variable trace_sr : std_logic_vector(15 downto 0);
@@ -2249,7 +2258,14 @@ begin
             variable high_b   : std_logic_vector(7 downto 0);
         begin
             init_common;
+            if preload_record18_lowmem then
+                write_word(16#0000008A#, x"4AFC");
+                write_word(16#0000008C#, x"2048");
+            end if;
             install_jmp_boot(sr_value);
+            if prime_expected_old_values then
+                prime_jmp_record37_expected_old_values;
+            end if;
             run_case(expect_trace, true, 120000);
 
             trace_sp := to_integer(unsigned(read_long(RESULT_TRACE_SP)));
@@ -2415,6 +2431,28 @@ begin
             check_jmp_exact_case("JMP/0002 record=37 group=3", sr_from_extraccr(3), true);
             check_jmp_exact_case("JMP/0002 record=37 group=5", sr_from_extraccr(5), true);
             check_jmp_exact_case("JMP/0002 record=37 group=7", sr_from_extraccr(7), true);
+            check_jmp_exact_case(
+                "JMP/0002 record18-lowmem -> group=1",
+                sr_from_extraccr(1),
+                false,
+                true);
+            check_jmp_exact_case(
+                "JMP/0002 record18-lowmem -> group=3",
+                sr_from_extraccr(3),
+                true,
+                true);
+            check_jmp_exact_case(
+                "JMP/0002 memwrite-old-values -> group=1",
+                sr_from_extraccr(1),
+                false,
+                false,
+                true);
+            check_jmp_exact_case(
+                "JMP/0002 memwrite-old-values -> group=3",
+                sr_from_extraccr(3),
+                true,
+                false,
+                true);
             check_jmp_literal_a7_case(
                 "JMP/0002 literal active A7=$420003FE",
                 sr_from_extraccr(1),
@@ -2837,8 +2875,10 @@ begin
             end if;
         end procedure;
 
-        procedure check_jmp_cputest020_case(case_name : string;
-                                            sr_value  : std_logic_vector(15 downto 0)) is
+        procedure check_jmp_cputest020_case(case_name    : string;
+                                            sr_value     : std_logic_vector(15 downto 0);
+                                            expect_trace : boolean;
+                                            prime_expected_old_values : boolean := false) is
             variable trace_sp : integer;
             variable exc_sp   : integer;
             variable trace_sr : std_logic_vector(15 downto 0);
@@ -2849,7 +2889,10 @@ begin
         begin
             init_common_cputest020;
             install_jmp_cputest020_boot(sr_value);
-            run_case(true, true, 200000);
+            if prime_expected_old_values then
+                prime_jmp_record37_expected_old_values;
+            end if;
+            run_case(expect_trace, true, 200000);
 
             trace_sp := to_integer(unsigned(read_long(RESULT_TRACE_SP)));
             exc_sp := to_integer(unsigned(read_long(RESULT_EXC11_SP)));
@@ -2866,11 +2909,196 @@ begin
                 return;
             end if;
 
-            if trace_sp /= 0 then
-                report "PASS: " & case_name & " hit standalone trace handler" severity note;
+            if expect_trace then
+                if trace_sp /= 0 then
+                    report "PASS: " & case_name & " hit standalone trace handler" severity note;
+                    pass_count := pass_count + 1;
+                else
+                    report "FAIL: " & case_name & " missed standalone trace handler" severity error;
+                    fail_count := fail_count + 1;
+                    return;
+                end if;
+
+                if first_trace_frame_valid = '1' then
+                    trace_sr := first_trace_frame_sr;
+                    trace_pc := first_trace_frame_pc;
+                else
+                    trace_sr := read_word(trace_sp);
+                    trace_pc := read_long(trace_sp + 2);
+                end if;
+
+                if trace_sr = sr_value then
+                    report "PASS: " & case_name & " standalone trace SR matched cputest" severity note;
+                    pass_count := pass_count + 1;
+                else
+                    report "FAIL: " & case_name & " standalone trace SR=$" & slv_to_hex(trace_sr) &
+                           " expected $" & slv_to_hex(sr_value) severity error;
+                    fail_count := fail_count + 1;
+                end if;
+
+                if trace_pc = x"42006D72" then
+                    report "PASS: " & case_name & " standalone trace PC matched cputest" severity note;
+                    pass_count := pass_count + 1;
+                else
+                    report "FAIL: " & case_name & " standalone trace PC=$" & slv_to_hex(trace_pc) &
+                           " expected $42006D72" severity error;
+                    fail_count := fail_count + 1;
+                end if;
+            else
+                if trace_sp = 0 then
+                    report "PASS: " & case_name & " stayed out of the trace handler" severity note;
+                    pass_count := pass_count + 1;
+                else
+                    report "FAIL: " & case_name & " unexpectedly entered the trace handler" severity error;
+                    fail_count := fail_count + 1;
+                end if;
+            end if;
+
+            if low_b = x"FD" and low_w = x"EB48" and high_b = x"75" then
+                report "PASS: " & case_name & " memory side effects matched cputest" severity note;
                 pass_count := pass_count + 1;
             else
-                report "FAIL: " & case_name & " missed standalone trace handler" severity error;
+                report "FAIL: " & case_name & " memory side effects low_b=$" & slv_to_hex(low_b) &
+                       " low_w=$" & slv_to_hex(low_w) &
+                       " high_b=$" & slv_to_hex(high_b) severity error;
+                fail_count := fail_count + 1;
+            end if;
+        end procedure;
+
+        procedure check_jmp_cputest020_group1_after_record18 is
+            variable trace_sp : integer;
+            variable exc11_sp : integer;
+            variable low_b    : std_logic_vector(7 downto 0);
+            variable low_w    : std_logic_vector(15 downto 0);
+            variable high_b   : std_logic_vector(7 downto 0);
+        begin
+            init_common_cputest020;
+
+            install_jmp_cputest020_record18_boot(sr_from_extraccr(1));
+            run_case(false, false, 200000);
+
+            rearm_cputest020;
+            install_jmp_cputest020_boot(sr_from_extraccr(1));
+            run_case(false, true, 200000);
+
+            trace_sp := to_integer(unsigned(read_long(RESULT_TRACE_SP)));
+            exc11_sp := to_integer(unsigned(read_long(RESULT_EXC11_SP)));
+            low_b := read_byte(16#0000008B#);
+            low_w := read_word(16#0000008C#);
+            high_b := read_byte(16#4204FEFF#);
+
+            if exc11_sp /= 0 then
+                report "PASS: JMP record18 -> group1 runtime020 reached exception 11 handler" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP record18 -> group1 runtime020 missed exception 11 handler" severity error;
+                fail_count := fail_count + 1;
+                return;
+            end if;
+
+            if trace_sp = 0 then
+                report "PASS: JMP record18 -> group1 runtime020 stayed out of the trace handler" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP record18 -> group1 runtime020 unexpectedly entered the trace handler" severity error;
+                fail_count := fail_count + 1;
+            end if;
+
+            if low_b = x"FD" and low_w = x"EB48" and high_b = x"75" then
+                report "PASS: JMP record18 -> group1 runtime020 memory side effects matched cputest" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP record18 -> group1 runtime020 memory side effects low_b=$" & slv_to_hex(low_b) &
+                       " low_w=$" & slv_to_hex(low_w) &
+                       " high_b=$" & slv_to_hex(high_b) severity error;
+                fail_count := fail_count + 1;
+            end if;
+        end procedure;
+
+        procedure check_jmp_cputest020_group1_oldvalue_preload is
+            variable trace_sp : integer;
+            variable exc11_sp : integer;
+            variable low_b    : std_logic_vector(7 downto 0);
+            variable low_w    : std_logic_vector(15 downto 0);
+            variable high_b   : std_logic_vector(7 downto 0);
+        begin
+            init_common_cputest020;
+            install_jmp_cputest020_boot(sr_from_extraccr(1));
+            prime_jmp_record37_expected_old_values;
+            run_case(false, true, 200000);
+
+            trace_sp := to_integer(unsigned(read_long(RESULT_TRACE_SP)));
+            exc11_sp := to_integer(unsigned(read_long(RESULT_EXC11_SP)));
+            low_b := read_byte(16#0000008B#);
+            low_w := read_word(16#0000008C#);
+            high_b := read_byte(16#4204FEFF#);
+
+            if exc11_sp /= 0 then
+                report "PASS: JMP old-value preload -> group1 runtime020 reached exception 11 handler" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP old-value preload -> group1 runtime020 missed exception 11 handler" severity error;
+                fail_count := fail_count + 1;
+                return;
+            end if;
+
+            if trace_sp = 0 then
+                report "PASS: JMP old-value preload -> group1 runtime020 stayed out of the trace handler" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP old-value preload -> group1 runtime020 unexpectedly entered the trace handler" severity error;
+                fail_count := fail_count + 1;
+            end if;
+
+            if low_b = x"FD" and low_w = x"EB48" and high_b = x"75" then
+                report "PASS: JMP old-value preload -> group1 runtime020 memory side effects matched cputest" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP old-value preload -> group1 runtime020 memory side effects low_b=$" & slv_to_hex(low_b) &
+                       " low_w=$" & slv_to_hex(low_w) &
+                       " high_b=$" & slv_to_hex(high_b) severity error;
+                fail_count := fail_count + 1;
+            end if;
+        end procedure;
+
+        procedure check_jmp_cputest020_group3_after_record18 is
+            variable trace_sp : integer;
+            variable exc11_sp : integer;
+            variable trace_sr : std_logic_vector(15 downto 0);
+            variable trace_pc : std_logic_vector(31 downto 0);
+            variable low_b    : std_logic_vector(7 downto 0);
+            variable low_w    : std_logic_vector(15 downto 0);
+            variable high_b   : std_logic_vector(7 downto 0);
+        begin
+            init_common_cputest020;
+
+            install_jmp_cputest020_record18_boot(sr_from_extraccr(3));
+            run_case(false, false, 200000);
+
+            rearm_cputest020;
+            install_jmp_cputest020_boot(sr_from_extraccr(3));
+            run_case(true, true, 200000);
+
+            trace_sp := to_integer(unsigned(read_long(RESULT_TRACE_SP)));
+            exc11_sp := to_integer(unsigned(read_long(RESULT_EXC11_SP)));
+            low_b := read_byte(16#0000008B#);
+            low_w := read_word(16#0000008C#);
+            high_b := read_byte(16#4204FEFF#);
+
+            if exc11_sp /= 0 then
+                report "PASS: JMP record18 -> group3 runtime020 reached exception 11 handler" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP record18 -> group3 runtime020 missed exception 11 handler" severity error;
+                fail_count := fail_count + 1;
+                return;
+            end if;
+
+            if trace_sp /= 0 then
+                report "PASS: JMP record18 -> group3 runtime020 hit standalone trace handler" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP record18 -> group3 runtime020 missed standalone trace handler" severity error;
                 fail_count := fail_count + 1;
                 return;
             end if;
@@ -2883,29 +3111,104 @@ begin
                 trace_pc := read_long(trace_sp + 2);
             end if;
 
-            if trace_sr = sr_value then
-                report "PASS: " & case_name & " standalone trace SR matched cputest" severity note;
+            if trace_sr = x"6000" then
+                report "PASS: JMP record18 -> group3 runtime020 standalone trace SR matched cputest" severity note;
                 pass_count := pass_count + 1;
             else
-                report "FAIL: " & case_name & " standalone trace SR=$" & slv_to_hex(trace_sr) &
-                       " expected $" & slv_to_hex(sr_value) severity error;
+                report "FAIL: JMP record18 -> group3 runtime020 standalone trace SR=$" & slv_to_hex(trace_sr) &
+                       " expected $6000" severity error;
                 fail_count := fail_count + 1;
             end if;
 
             if trace_pc = x"42006D72" then
-                report "PASS: " & case_name & " standalone trace PC matched cputest" severity note;
+                report "PASS: JMP record18 -> group3 runtime020 standalone trace PC matched cputest" severity note;
                 pass_count := pass_count + 1;
             else
-                report "FAIL: " & case_name & " standalone trace PC=$" & slv_to_hex(trace_pc) &
+                report "FAIL: JMP record18 -> group3 runtime020 standalone trace PC=$" & slv_to_hex(trace_pc) &
                        " expected $42006D72" severity error;
                 fail_count := fail_count + 1;
             end if;
 
             if low_b = x"FD" and low_w = x"EB48" and high_b = x"75" then
-                report "PASS: " & case_name & " memory side effects matched cputest" severity note;
+                report "PASS: JMP record18 -> group3 runtime020 memory side effects matched cputest" severity note;
                 pass_count := pass_count + 1;
             else
-                report "FAIL: " & case_name & " memory side effects low_b=$" & slv_to_hex(low_b) &
+                report "FAIL: JMP record18 -> group3 runtime020 memory side effects low_b=$" & slv_to_hex(low_b) &
+                       " low_w=$" & slv_to_hex(low_w) &
+                       " high_b=$" & slv_to_hex(high_b) severity error;
+                fail_count := fail_count + 1;
+            end if;
+        end procedure;
+
+        procedure check_jmp_cputest020_group3_oldvalue_preload is
+            variable trace_sp : integer;
+            variable exc11_sp : integer;
+            variable trace_sr : std_logic_vector(15 downto 0);
+            variable trace_pc : std_logic_vector(31 downto 0);
+            variable low_b    : std_logic_vector(7 downto 0);
+            variable low_w    : std_logic_vector(15 downto 0);
+            variable high_b   : std_logic_vector(7 downto 0);
+        begin
+            init_common_cputest020;
+            install_jmp_cputest020_boot(sr_from_extraccr(3));
+            prime_jmp_record37_expected_old_values;
+            run_case(true, true, 200000);
+
+            trace_sp := to_integer(unsigned(read_long(RESULT_TRACE_SP)));
+            exc11_sp := to_integer(unsigned(read_long(RESULT_EXC11_SP)));
+            low_b := read_byte(16#0000008B#);
+            low_w := read_word(16#0000008C#);
+            high_b := read_byte(16#4204FEFF#);
+
+            if exc11_sp /= 0 then
+                report "PASS: JMP old-value preload -> group3 runtime020 reached exception 11 handler" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP old-value preload -> group3 runtime020 missed exception 11 handler" severity error;
+                fail_count := fail_count + 1;
+                return;
+            end if;
+
+            if trace_sp /= 0 then
+                report "PASS: JMP old-value preload -> group3 runtime020 hit standalone trace handler" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP old-value preload -> group3 runtime020 missed standalone trace handler" severity error;
+                fail_count := fail_count + 1;
+                return;
+            end if;
+
+            if first_trace_frame_valid = '1' then
+                trace_sr := first_trace_frame_sr;
+                trace_pc := first_trace_frame_pc;
+            else
+                trace_sr := read_word(trace_sp);
+                trace_pc := read_long(trace_sp + 2);
+            end if;
+
+            if trace_sr = x"6000" then
+                report "PASS: JMP old-value preload -> group3 runtime020 standalone trace SR matched cputest" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP old-value preload -> group3 runtime020 standalone trace SR=$" & slv_to_hex(trace_sr) &
+                       " expected $6000" severity error;
+                fail_count := fail_count + 1;
+            end if;
+
+            if trace_pc = x"42006D72" then
+                report "PASS: JMP old-value preload -> group3 runtime020 standalone trace PC matched cputest" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP old-value preload -> group3 runtime020 standalone trace PC=$" & slv_to_hex(trace_pc) &
+                       " expected $42006D72" severity error;
+                fail_count := fail_count + 1;
+            end if;
+
+            if low_b = x"FD" and low_w = x"EB48" and high_b = x"75" then
+                report "PASS: JMP old-value preload -> group3 runtime020 memory side effects matched cputest" severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: JMP old-value preload -> group3 runtime020 memory side effects low_b=$" & slv_to_hex(low_b) &
                        " low_w=$" & slv_to_hex(low_w) &
                        " high_b=$" & slv_to_hex(high_b) severity error;
                 fail_count := fail_count + 1;
@@ -3525,10 +3828,16 @@ begin
                 16#02E8#, 16#0800#, 16#42CF#, check_pc => false);
             check_jmp_cputest020_case(
                 "JMP/0002 record=37 group=1 runtime020",
-                sr_from_extraccr(1));
+                sr_from_extraccr(1),
+                false);
             check_jmp_cputest020_case(
                 "JMP/0002 record=37 group=3 runtime020",
-                sr_from_extraccr(3));
+                sr_from_extraccr(3),
+                true);
+            check_jmp_cputest020_group1_after_record18;
+            check_jmp_cputest020_group3_after_record18;
+            check_jmp_cputest020_group1_oldvalue_preload;
+            check_jmp_cputest020_group3_oldvalue_preload;
             check_jmp_cputest020_same_record_1_3;
             check_jmp_cputest020_cumulative34_37;
             check_jmp_cputest020_precursor_sequence;
@@ -3542,10 +3851,16 @@ begin
             check_jmp_cputest020_group0_precursor;
             check_jmp_cputest020_case(
                 "JMP/0002 record=37 group=1 runtime020",
-                sr_from_extraccr(1));
+                sr_from_extraccr(1),
+                false);
             check_jmp_cputest020_case(
                 "JMP/0002 record=37 group=3 runtime020",
-                sr_from_extraccr(3));
+                sr_from_extraccr(3),
+                true);
+            check_jmp_cputest020_group1_after_record18;
+            check_jmp_cputest020_group3_after_record18;
+            check_jmp_cputest020_group1_oldvalue_preload;
+            check_jmp_cputest020_group3_oldvalue_preload;
             check_jmp_cputest020_same_record_1_3;
             check_jmp_cputest020_cumulative34_37;
             check_jmp_cputest020_precursor_sequence;
