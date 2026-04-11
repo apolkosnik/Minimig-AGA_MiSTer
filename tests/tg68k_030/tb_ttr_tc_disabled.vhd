@@ -97,10 +97,18 @@ architecture behavior of tb_ttr_tc_disabled is
     signal debug_saved_fc       : std_logic_vector(2 downto 0);
 
     constant CLK_PERIOD : time := 10 ns;
-    constant REG_TT0    : std_logic_vector(4 downto 0) := "00010";
-    constant REG_TC     : std_logic_vector(4 downto 0) := "10000";
-    constant TTR_ALL_CI : std_logic_vector(31 downto 0) := x"00FF8707";
-    constant TEST_ADDR  : std_logic_vector(31 downto 0) := x"01000000";
+    constant REG_TT0          : std_logic_vector(4 downto 0) := "00010";
+    constant REG_TC           : std_logic_vector(4 downto 0) := "10000";
+    constant TTR_ALL_CI       : std_logic_vector(31 downto 0) := x"00FF8707";
+    constant TTR_LOW16M_DATA  : std_logic_vector(31 downto 0) := x"00008514";
+    constant TEST_ADDR        : std_logic_vector(31 downto 0) := x"01000000";
+    constant CHIP_BF_ADDR     : std_logic_vector(31 downto 0) := x"00BFD000";
+    constant CHIP_DC_ADDR     : std_logic_vector(31 downto 0) := x"00DC0000";
+    constant CHIP_DF_ADDR     : std_logic_vector(31 downto 0) := x"00DF0000";
+    constant CHIP_DA_ADDR     : std_logic_vector(31 downto 0) := x"00DA0000";
+    constant CHIP_DE_ADDR     : std_logic_vector(31 downto 0) := x"00DE1000";
+    constant CHIP_E8_ADDR     : std_logic_vector(31 downto 0) := x"00E80000";
+    constant CHIP_F8_ADDR     : std_logic_vector(31 downto 0) := x"00F80000";
 
     procedure wait_cycles(count : positive) is
     begin
@@ -196,9 +204,38 @@ begin
             debug_saved_fc => debug_saved_fc
         );
 
-    test: process
+  test: process
         variable pass_count : integer := 0;
         variable fail_count : integer := 0;
+        procedure check_access(
+            constant name_v      : in string;
+            constant addr_v      : in std_logic_vector(31 downto 0);
+            constant fc_v        : in std_logic_vector(2 downto 0);
+            constant is_insn_v   : in std_logic;
+            constant expect_ci_v : in std_logic
+        ) is
+        begin
+            addr_log <= addr_v;
+            fc <= fc_v;
+            rw <= '1';
+            is_insn <= is_insn_v;
+            req <= '1';
+            wait for 1 ns;
+
+            if addr_phys = addr_v and cache_inhibit = expect_ci_v and fault = '0' then
+                report "PASS: " & name_v severity note;
+                pass_count := pass_count + 1;
+            else
+                report "FAIL: " & name_v
+                       & " addr_phys=$" & slv_to_hex(addr_phys)
+                       & " ci=" & std_logic'image(cache_inhibit)
+                       & " fault=" & std_logic'image(fault) severity error;
+                fail_count := fail_count + 1;
+            end if;
+
+            req <= '0';
+            wait until rising_edge(clk);
+        end procedure;
     begin
         nreset <= '0';
         wait_cycles(4);
@@ -286,6 +323,47 @@ begin
             pass_count := pass_count + 1;
         else
             report "FAIL: PTEST lost transparent MMUSR.T with TC=0" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        -- 68030.library also programs TT0=$00008514 for low-16MB data accesses.
+        -- This should cover the classic Amiga low-memory I/O space ($00xxxxxx)
+        -- for both user-data (FC=1) and supervisor-data (FC=5), but not program
+        -- fetches (FC=2/6) and not addresses outside the low 16MB.
+        write_reg(reg_sel, reg_wdat, reg_part, reg_we, REG_TT0, TTR_LOW16M_DATA);
+        write_reg(reg_sel, reg_wdat, reg_part, reg_we, REG_TC, x"00000000");
+        wait_cycles(2);
+
+        if debug_tt0 = TTR_LOW16M_DATA and tc_enable = '0' then
+            report "PASS: low-16MB TT0 value loaded with TC still disabled" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: low-16MB TT0 value did not load as expected" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        check_access("TT0=$00008514 matches BFxxxx user-data", CHIP_BF_ADDR, "001", '0', '1');
+        check_access("TT0=$00008514 matches DCxxxx supervisor-data", CHIP_DC_ADDR, "101", '0', '1');
+        check_access("TT0=$00008514 matches DFxxxx user-data", CHIP_DF_ADDR, "001", '0', '1');
+        check_access("TT0=$00008514 matches DAxxxx supervisor-data", CHIP_DA_ADDR, "101", '0', '1');
+        check_access("TT0=$00008514 matches DExxxx user-data", CHIP_DE_ADDR, "001", '0', '1');
+        check_access("TT0=$00008514 matches E8xxxx supervisor-data", CHIP_E8_ADDR, "101", '0', '1');
+        check_access("TT0=$00008514 matches F8xxxx supervisor-data", CHIP_F8_ADDR, "101", '0', '1');
+        check_access("TT0=$00008514 does not match low-16MB supervisor program fetch", CHIP_DC_ADDR, "110", '1', '0');
+        check_access("TT0=$00008514 does not match addresses above low 16MB", TEST_ADDR, "101", '0', '0');
+
+        pmmu_addr <= CHIP_DF_ADDR;
+        pmmu_fc <= "101";
+        pmmu_brief <= x"0200"; -- PTESTR, level 0
+        ptest_req <= '1';
+        wait until rising_edge(clk);
+        ptest_req <= '0';
+        wait_cycles(6);
+        if debug_mmusr(6) = '1' and debug_mmusr(7 downto 0) = x"40" then
+            report "PASS: PTEST reports transparent hit for low-16MB TT0 data range" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: PTEST missed transparent hit for low-16MB TT0 data range" severity error;
             fail_count := fail_count + 1;
         end if;
 

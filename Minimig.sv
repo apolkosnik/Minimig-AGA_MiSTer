@@ -436,23 +436,24 @@ wire [28:1] ram_addr_cpu;
 // BUG #130 FIX: Use latched high bits (from fill start) to ensure stable Z3 RAM encoding throughout fill
 // High bits from cache_fill_ramaddr_hi (latched), low bits from cache_fill_addr (incrementing)
 wire [28:1] cache_fill_ramaddr = {cache_fill_ramaddr_hi, cache_fill_addr[22:1]};
-wire [28:1] ram_addr = cache_fill_active ? cache_fill_ramaddr : ram_addr_cpu;
 wire        ram_sel_cpu;
-wire        ram_sel = cache_fill_active ? 1'b1 : ram_sel_cpu;
 wire        ram_lds_cpu;
 wire        ram_uds_cpu;
-wire        ram_lds = cache_fill_active ? 1'b0 : ram_lds_cpu;  // Active low - enable both bytes for cache
-wire        ram_uds = cache_fill_active ? 1'b0 : ram_uds_cpu;  // Active low - enable both bytes for cache
 wire [15:0] ram_din;
 wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
-wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
-wire        zram_sel  = |ram_addr[28:26];
 wire        ramshared;
 
 wire [7:0] toccata_base;
 wire toccata_ena;
 wire       walker_active_cpu;  // BUG #426: Walker active flag from cpu_wrapper
 wire       walker_writing_cpu; // BUG #427: Walker writing flag from cpu_wrapper
+wire       cache_fill_owns_ram = cache_fill_active & ~walker_active_cpu;
+wire [28:1] ram_addr = cache_fill_owns_ram ? cache_fill_ramaddr : ram_addr_cpu;
+wire        ram_sel = cache_fill_owns_ram ? 1'b1 : ram_sel_cpu;
+wire        ram_lds = cache_fill_owns_ram ? 1'b0 : ram_lds_cpu;  // Active low - enable both bytes for cache
+wire        ram_uds = cache_fill_owns_ram ? 1'b0 : ram_uds_cpu;  // Active low - enable both bytes for cache
+wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
+wire        zram_sel  = |ram_addr[28:26];
 
 // BUG #427 FIX: Override cpustate when walker owns the SDRAM bus.
 // The SDRAM controllers use cpustate==3 to trigger the write buffer. When the
@@ -486,7 +487,7 @@ reg         cache_fill_active;
 reg  [31:0] cache_fill_addr;
 reg  [28:23] cache_fill_ramaddr_hi;  // BUG #130: Latch encoded high bits at fill start
 reg         cache_fill_burst;        // Latch burst mode at start of fill
-wire        cache_fill_done = cache_fill_active & (cache_fill_cnt == 3'd7) & ram_ready;
+wire        cache_fill_done = cache_fill_owns_ram & (cache_fill_cnt == 3'd7) & ram_ready;
 
 always @(posedge clk_sys) begin
 	if (cpu_rst) begin
@@ -496,14 +497,14 @@ always @(posedge clk_sys) begin
 		cache_fill_ramaddr_hi <= 6'd0;
 		cache_fill_burst <= 1'b0;
 	end else begin
-		if (cpu_cache_req & !cache_fill_active) begin
+		if (cpu_cache_req & !cache_fill_active & !walker_active_cpu) begin
 			// Start new cache fill sequence
 			cache_fill_active <= 1'b1;
 			cache_fill_cnt <= 3'd0;
 			cache_fill_addr <= cpu_cache_addr;
 			cache_fill_ramaddr_hi <= cpu_cache_ramaddr[28:23];  // BUG #130: Latch Z3 RAM encoding
 			cache_fill_burst <= cpu_cache_burst;  // Latch burst mode flag
-		end else if (cache_fill_active & ram_ready) begin
+		end else if (cache_fill_owns_ram & ram_ready) begin
 			if (cache_fill_cnt == 3'd7) begin
 				// Cache fill complete
 				cache_fill_active <= 1'b0;
@@ -520,7 +521,7 @@ end
 
 // Cache fill interface - connect cache requests to RAM with proper sequencing
 assign cpu_cache_data = ram_dout;
-assign cpu_cache_ack = cache_fill_active & ram_ready;
+assign cpu_cache_ack = cache_fill_owns_ram & ram_ready;
 
 cpu_wrapper
 #(
@@ -568,7 +569,7 @@ cpu_wrapper
 	.ramuds       (ram_uds_cpu     ),
 	.ramdout      (ram_dout        ),
 	.ramdin       (ram_din         ),
-	.ramready     (ram_ready & ~cache_fill_active),  // Block ramready during cache fills
+	.ramready     (ram_ready & (~cache_fill_active | walker_active_cpu)),  // Block paused cache fills, but never hide walker completions
 	.ramshared    (ramshared       ),
 
 	//custom CPU signals

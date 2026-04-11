@@ -8,6 +8,9 @@ current 68030 BASIC investigation:
 - init `CT_MEMWRITE` changes are rolled back at end-of-record.
 - runtime expected memwrites persist only if cputest does not restore the
   backing region before the next record.
+- target subcases can be viewed with their own `CT_MEMWRITE.old` values
+  preloaded, to mirror the validate/restore behavior the exact bench now
+  depends on.
 - `tmem.dat` always persists across records inside one mnemonic directory.
 
 It does not emulate the CPU. It only reconstructs the live memory image that a
@@ -161,6 +164,23 @@ def expand_windows(windows: List[Tuple[int, int]]) -> List[int]:
     return addrs
 
 
+def build_target_view_mem(
+    record_mem: Dict[int, int],
+    subcase: Subcase,
+    hdr: FullHeader,
+    stage: str,
+    prime_target_old_values: bool,
+) -> Dict[int, int]:
+    view_mem = dict(record_mem)
+    if prime_target_old_values:
+        apply_memwrites(view_mem, subcase.memwrites, use_new=False)
+    if stage == "after":
+        for mw in subcase.memwrites:
+            if persistent_runtime_write(mw.addr, hdr):
+                apply_memwrite(view_mem, mw, use_new=True)
+    return view_mem
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("mnemonic_dir", type=Path, help="Directory like .../68030_Basic/JMP")
@@ -185,6 +205,11 @@ def main() -> None:
         action="append",
         default=[],
         help="Memory window addr:length to dump, for example 0x42050000:16",
+    )
+    ap.add_argument(
+        "--prime-target-old-values",
+        action="store_true",
+        help="Preload the chosen subcase's CT_MEMWRITE old values before dumping it",
     )
     args = ap.parse_args()
 
@@ -216,11 +241,22 @@ def main() -> None:
                 break_out = False
                 for sub, _state in items:
                     if sub.group_index == args.group and sub.subcase_index == args.subcase:
-                        print(f"TARGET {packed_path.name} record={record_index} group={sub.group_index} subcase={sub.subcase_index} stage=before")
+                        view_mem = build_target_view_mem(
+                            record_mem,
+                            sub,
+                            full_header,
+                            "before",
+                            args.prime_target_old_values,
+                        )
+                        print(
+                            f"TARGET {packed_path.name} record={record_index} "
+                            f"group={sub.group_index} subcase={sub.subcase_index} stage=before"
+                        )
                         print(f"  extraccr={sub.extraccr} exc={sub.exc} extra_trace={sub.extra_trace} standalone={sub.extra_trace_standalone}")
+                        print(f"  prime_target_old_values={args.prime_target_old_values}")
                         for addr, length in default_windows:
-                            print(f"  window {addr:08X}:{length}  {mem_window(record_mem, addr, length)}")
-                        diff = mem_diff(base_mem, record_mem, expand_windows(default_windows))
+                            print(f"  window {addr:08X}:{length}  {mem_window(view_mem, addr, length)}")
+                        diff = mem_diff(base_mem, view_mem, expand_windows(default_windows))
                         if diff:
                             print("  diff  " + " ".join(diff))
                         else:
@@ -232,12 +268,19 @@ def main() -> None:
 
             for sub, _state in items:
                 if packed_path.name == args.file and record_index == args.record and args.stage == "after" and sub.group_index == args.group and sub.subcase_index == args.subcase:
-                    view_mem = dict(record_mem)
-                    for mw in sub.memwrites:
-                        if persistent_runtime_write(mw.addr, full_header):
-                            apply_memwrite(view_mem, mw, use_new=True)
-                    print(f"TARGET {packed_path.name} record={record_index} group={sub.group_index} subcase={sub.subcase_index} stage=after")
+                    view_mem = build_target_view_mem(
+                        record_mem,
+                        sub,
+                        full_header,
+                        "after",
+                        args.prime_target_old_values,
+                    )
+                    print(
+                        f"TARGET {packed_path.name} record={record_index} "
+                        f"group={sub.group_index} subcase={sub.subcase_index} stage=after"
+                    )
                     print(f"  extraccr={sub.extraccr} exc={sub.exc} extra_trace={sub.extra_trace} standalone={sub.extra_trace_standalone}")
+                    print(f"  prime_target_old_values={args.prime_target_old_values}")
                     for addr, length in default_windows:
                         print(f"  window {addr:08X}:{length}  {mem_window(view_mem, addr, length)}")
                     diff = mem_diff(base_mem, view_mem, expand_windows(default_windows))
