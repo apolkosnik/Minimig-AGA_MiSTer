@@ -985,6 +985,97 @@ BEGIN
         cir_data_out         => cir_data_out,
         cir_data_valid       => cir_data_valid
       );
+
+    -- FSAVE -(An) predecrement state machine driver
+    -- Adapted from origin/claude/fpu-fsave-frestore-bugs (signal names match HEAD's FPU port).
+    -- The kernel reads fsave_predecr_state in fpu1/fpu2 to gate -(An) handling but never
+    -- transitions it; this process owns the transitions and frame-size latching.
+    process(clk, nReset)
+    begin
+      if nReset = '0' then
+        fsave_predecr_state            <= FSAVE_PREDECR_IDLE;
+        fsave_new_sp                   <= (others => '0');
+        fsave_original_sp              <= (others => '0');
+        fsave_frame_size_latched       <= 60;
+        fsave_frame_size_latched_lw    <= 15;
+        fsave_frame_size_latched_lw_stable <= 15;
+        fsave_frame_size_valid_latched <= '0';
+      elsif rising_edge(clk) then
+        if clkena_lw = '1' then
+          -- Stable copy used by combinational FSAVE consumers; one-cycle delayed
+          -- so consumers see a value held across the latch update.
+          fsave_frame_size_latched_lw_stable <= fsave_frame_size_latched_lw;
+
+          -- Drop the valid latch when we leave FSAVE so the next instance re-latches.
+          if not (opcode(15 downto 12) = "1111" and opcode(11 downto 9) = "001"
+                  and opcode(8 downto 6) = "100") then
+            fsave_frame_size_valid_latched <= '0';
+          end if;
+
+          case fsave_predecr_state is
+            when FSAVE_PREDECR_IDLE =>
+              -- Activate when fpu2 is processing FSAVE -(An) and SP is aligned.
+              if (opcode(15 downto 12) = "1111" and opcode(11 downto 9) = "001"
+                  and opcode(8 downto 6) = "100" and opcode(5 downto 3) = "100")
+                 and (micro_state = fpu2)
+                 and reg_QA(0) = '0' then
+                fsave_original_sp              <= reg_QA;  -- BERR recovery snapshot
+                fsave_frame_size_valid_latched <= '0';
+                fsave_predecr_state            <= FSAVE_PREDECR_WAIT;
+              end if;
+
+            when FSAVE_PREDECR_WAIT =>
+              -- Latch frame size from FPU; only accept canonical MC68882 values.
+              if fsave_frame_size_valid_latched = '0' and fsave_size_valid = '1' then
+                if fsave_frame_size = 4 or fsave_frame_size = 60 or fsave_frame_size = 216 then
+                  fsave_frame_size_latched    <= fsave_frame_size;
+                  fsave_frame_size_latched_lw <= fsave_frame_size / 4;
+                else
+                  -- Fall back to safe default IDLE frame
+                  fsave_frame_size_latched    <= 60;
+                  fsave_frame_size_latched_lw <= 15;
+                end if;
+                fsave_frame_size_valid_latched <= '1';
+              end if;
+              if fsave_frame_size_valid_latched = '1' then
+                fsave_predecr_state <= FSAVE_PREDECR_CALC;
+              end if;
+
+            when FSAVE_PREDECR_SETUP =>
+              -- Vestigial state from prior design; pass through.
+              fsave_predecr_state <= FSAVE_PREDECR_CALC;
+
+            when FSAVE_PREDECR_CALC =>
+              -- Compute new SP = SP - frame_size; consumed by regfile writeback in
+              -- fpu2/FSAVE_PREDECR_WRITE.
+              case fsave_frame_size_latched is
+                when 4   => fsave_new_sp <= reg_QA - X"00000004";
+                when 60  => fsave_new_sp <= reg_QA - X"0000003C";
+                when 216 => fsave_new_sp <= reg_QA - X"000000D8";
+                when others => fsave_new_sp <= reg_QA - X"00000004";
+              end case;
+              fsave_predecr_state <= FSAVE_PREDECR_WRITE;
+
+            when FSAVE_PREDECR_WRITE =>
+              -- Hand off to register writeback in main process; advance once
+              -- the bus is back to idle (state="00").
+              if state = "00" then
+                fsave_predecr_state <= FSAVE_PREDECR_DONE;
+              end if;
+
+            when FSAVE_PREDECR_DONE =>
+              -- Stay here while the memory writes drain. Reset on bus error
+              -- (BERR recovery is a follow-up commit) or instruction completion.
+              if not (opcode(15 downto 12) = "1111" and opcode(11 downto 9) = "001"
+                      and opcode(8 downto 6) = "100" and opcode(5 downto 3) = "100")
+                 or next_micro_state = idle then
+                fsave_predecr_state <= FSAVE_PREDECR_IDLE;
+              end if;
+          end case;
+        end if;
+      end if;
+    end process;
+
   end generate FPU_GEN;
 
 --   -- PMMU register interface connected (enabled for 68030)
