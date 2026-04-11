@@ -9007,21 +9007,33 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- Decode response primitive from data_read (Response CIR content)
 						-- Complete MC68020/68881 CIR primitive loop implementation
 						CASE data_read(7 downto 0) IS
+						-- MC68020 Response Primitive Format (Per MC68020 UM Section 7.4.2):
+						-- Bit 15 (CA): Comes Again - 1=CPU services then reads again, 0=CPU can proceed
+						-- Bits 12-0: Primitive type and parameters
 							WHEN X"00" =>
-								-- NULL response primitive - instruction complete
-								setstate <= "00";  -- Clear state to allow proper endOPC generation
-								setnextpass <= '0';  -- Clear nextpass to prevent instruction pipeline issues
-								set_rot_cnt <= "000001";  -- Reset rotation counter
-								-- Clear FPU-specific execution flags
-								set_exec(get_ea_now) <= '0';
-								set_exec(save_memaddr) <= '0';
-								set(presub) <= '0';
-								set(subidx) <= '0';
-								write_back <= '0';
-								skipFetch_next <= '0';  -- Clear skipFetch to ensure next instruction fetch
-								-- CRITICAL FIX: Ensure no spurious opcode fetch happens
-								set(get_2ndOPC) <= '0';  -- Explicitly clear to prevent extra fetch
-								next_micro_state <= fpu_done;  -- Complete the cpGEN instruction
+								-- NULL response primitive
+								-- Check CA bit (bit 15) for concurrent execution support
+								IF data_read(15) = '0' THEN
+									-- CA=0: FPU complete, CPU proceeds (CONCURRENT EXECUTION)
+									setstate <= "00";  -- Clear state to allow proper endOPC generation
+									setnextpass <= '0';  -- Clear nextpass to prevent instruction pipeline issues
+									set_rot_cnt <= "000001";  -- Reset rotation counter
+									-- Clear FPU-specific execution flags
+									set_exec(get_ea_now) <= '0';
+									set_exec(save_memaddr) <= '0';
+									set(presub) <= '0';
+									set(subidx) <= '0';
+									write_back <= '0';
+									skipFetch_next <= '0';  -- Clear skipFetch to ensure next instruction fetch
+									-- CRITICAL FIX: Ensure no spurious opcode fetch happens
+									set(get_2ndOPC) <= '0';  -- Explicitly clear to prevent extra fetch
+									next_micro_state <= fpu_done;  -- Complete the cpGEN instruction
+								ELSE
+									-- CA=1: FPU still needs CPU service, read Response CIR again
+									setstate <= "10";  -- Read cycle from Response CIR
+									next_micro_state <= fpu_wait;  -- Continue primitive loop
+									skipFetch_next <= '1';
+								END IF;
 								
 							WHEN X"01" =>
 								-- CA response primitive - Transfer Single Main Processor Register
