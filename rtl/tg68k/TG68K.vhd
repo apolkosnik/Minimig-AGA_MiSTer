@@ -28,7 +28,8 @@ use ieee.std_logic_unsigned.all;
 
 entity TG68K is
    generic(
-      CPU           : std_logic_vector(1 downto 0):="01"  -- 00->68000  01->68010  10->68030
+      CPU           : std_logic_vector(1 downto 0):="01";  -- 00->68000  01->68010  10->68030
+      FPU_Enable    : integer := 1  -- 0=>no FPU, 1=>FPU enabled
    );
    port(        
       CLK           : in std_logic;
@@ -78,8 +79,9 @@ COMPONENT TG68KdotC_Kernel
       DIV_Mode : integer := 2;         --0=>16Bit,    1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,  
       BitField : integer := 2;         --0=>no,       1=>yes,           2=>switchable with CPU(1) 
       
-      BarrelShifter : integer := 2;    --0=>no,       1=>yes,           2=>switchable with CPU(1)  
-      MUL_Hardware : integer := 1      --0=>no,       1=>yes,  
+      BarrelShifter : integer := 2;    --0=>no,       1=>yes,           2=>switchable with CPU(1)
+      MUL_Hardware : integer := 1;     --0=>no,       1=>yes,
+      FPU_Enable : integer := 1        --0=>no FPU,   1=>FPU enabled
    );
    port(
       CPU            : in std_logic_vector(1 downto 0):="10";  -- 00->68000  01->68010  10->68030
@@ -381,8 +383,9 @@ cpu1: TG68KdotC_Kernel
       DIV_Mode => 2,             --0=>16Bit,    1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,  
       BitField => 2,             --0=>no,       1=>yes,           2=>switchable with CPU(1) 
 
-      BarrelShifter => 2,        --0=>no,       1=>yes,           2=>switchable with CPU(1)  
-      MUL_Hardware => 1          --0=>no,       1=>yes,  
+      BarrelShifter => 2,        --0=>no,       1=>yes,           2=>switchable with CPU(1)
+      MUL_Hardware => 1,         --0=>no,       1=>yes,
+      FPU_Enable => FPU_Enable   --0=>no FPU,   1=>FPU enabled
    )
    PORT MAP(
       CPU => CPU,                -- : in std_logic_vector(1 downto 0):="01";  -- 00->68000  01->68010  10->68030
