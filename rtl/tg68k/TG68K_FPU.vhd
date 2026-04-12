@@ -1316,7 +1316,9 @@ begin
 						
 						-- Only proceed if command validation passes
 						if command_valid = '1' then
-						
+
+						fpsr(15 downto 8) <= (others => '0');
+
 						-- FIX ITEM 55: Enhanced FPIAR tracking - update at instruction start
 						-- FPIAR should contain the PC of the F-line instruction causing exception
 						-- Only update FPIAR for instructions that can cause exceptions
@@ -2832,26 +2834,37 @@ begin
 							-- Update FPSR condition codes based on result using proper function
 							set_fpsr_condition_codes(fpsr, result_data);
 							
-							-- Update exception status if any ALU flags are set
+							-- Update exception status bits (cleared per-instruction at command_valid)
 							if alu_overflow = '1' then
-								fpsr(12) <= '1';  -- Overflow exception
-								fpsr(6) <= '1';  -- Accrued overflow
+								fpsr(12) <= '1';  -- OVFL exception status
 							end if;
 							if alu_underflow = '1' then
-								fpsr(11) <= '1';  -- Underflow exception
-								fpsr(5) <= '1';  -- Accrued underflow
+								fpsr(11) <= '1';  -- UNFL exception status
 							end if;
 							if alu_inexact = '1' then
-								fpsr(9) <= '1';  -- Inexact exception
-								fpsr(3) <= '1';  -- Accrued inexact
+								fpsr(9) <= '1';  -- INEX2 exception status
 							end if;
 							if alu_invalid = '1' then
-								fpsr(14) <= '1';  -- Invalid operation exception
-								fpsr(7) <= '1';  -- Accrued invalid operation
+								fpsr(14) <= '1';  -- SNAN exception status
 							end if;
 							if alu_divide_by_zero = '1' then
-								fpsr(10) <= '1';  -- Divide by zero exception
-								fpsr(4) <= '1';  -- Accrued divide by zero
+								fpsr(10) <= '1';  -- DZ exception status
+							end if;
+							-- Accrued exceptions per MC68882/WinUAE rules (OR into existing)
+							if alu_invalid = '1' then
+								fpsr(7) <= '1';  -- AE_IOP: SNAN|OPERR|BSUN
+							end if;
+							if alu_overflow = '1' then
+								fpsr(6) <= '1';  -- AE_OVFL: OVFL
+							end if;
+							if alu_underflow = '1' and alu_inexact = '1' then
+								fpsr(5) <= '1';  -- AE_UNFL: UNFL AND INEX2
+							end if;
+							if alu_divide_by_zero = '1' then
+								fpsr(4) <= '1';  -- AE_DZ: DZ
+							end if;
+							if alu_overflow = '1' or alu_inexact = '1' then
+								fpsr(3) <= '1';  -- AE_INEX: OVFL|INEX2|INEX1
 							end if;
 							
 							if fpu_operation = OP_FMOD or fpu_operation = OP_FREM then
@@ -2889,34 +2902,35 @@ begin
 						-- Bit 15: BSUN, Bit 14: SNAN, Bit 13: OPERR, Bit 12: OVFL
 						-- Bit 11: UNFL, Bit 10: DZ, Bit 9: INEX2, Bit 8: INEX1
 						
-						-- Update FPSR exception status bits based on exception_code
+						-- Update FPSR exception status and accrued per MC68882/WinUAE rules
 						case exception_code_internal is
-							when x"02" =>  -- Bus error
-								fpsr(15) <= '1';  -- BSUN exception bit
+							when x"02" =>  -- BSUN
+								fpsr(15) <= '1';  -- BSUN exception status
+								fpsr(7) <= '1';  -- AE_IOP (BSUN|SNAN|OPERR -> IOP)
 							when x"05" =>  -- Division by zero
-								fpsr(10) <= '1';  -- DZ exception bit
-								fpsr(4) <= '1';  -- DZ accrued exception bit
-							when x"0A" =>  -- Format error  
-								fpsr(14) <= '1';  -- Invalid operation bit
-								fpsr(7) <= '1';  -- Invalid operation accrued bit
+								fpsr(10) <= '1';  -- DZ exception status
+								fpsr(4) <= '1';  -- AE_DZ
+							when x"0A" =>  -- Operand error
+								fpsr(13) <= '1';  -- OPERR exception status
+								fpsr(7) <= '1';  -- AE_IOP (BSUN|SNAN|OPERR -> IOP)
 							when x"0B" =>  -- Unimplemented instruction
-								fpsr(15) <= '1';  -- BSUN exception bit
-								fpsr(7) <= '1';  -- BSUN accrued exception bit
-							when x"0C" =>  -- Invalid operation
-								fpsr(14) <= '1';  -- Invalid operation bit
-								fpsr(7) <= '1';  -- Invalid operation accrued bit
+								fpsr(13) <= '1';  -- OPERR exception status
+								fpsr(7) <= '1';  -- AE_IOP
+							when x"0C" =>  -- SNAN
+								fpsr(14) <= '1';  -- SNAN exception status
+								fpsr(7) <= '1';  -- AE_IOP (BSUN|SNAN|OPERR -> IOP)
 							when x"0D" =>  -- Overflow
-								fpsr(12) <= '1';  -- Overflow exception bit
-								fpsr(6) <= '1';  -- Overflow accrued exception bit
-							when x"0E" =>  -- Underflow
-								fpsr(11) <= '1';  -- Underflow exception bit
-								fpsr(5) <= '1';  -- Underflow accrued exception bit
+								fpsr(12) <= '1';  -- OVFL exception status
+								fpsr(6) <= '1';  -- AE_OVFL
+								fpsr(3) <= '1';  -- AE_INEX (OVFL -> INEX)
+							when x"0E" =>  -- Underflow (AE_UNFL not set without INEX2)
+								fpsr(11) <= '1';  -- UNFL exception status
 							when x"0F" =>  -- Inexact result
-								fpsr(9) <= '1';  -- Inexact exception bit
-								fpsr(3) <= '1';  -- Inexact accrued exception bit
+								fpsr(9) <= '1';  -- INEX2 exception status
+								fpsr(3) <= '1';  -- AE_INEX
 							when others =>
-								-- Unknown exception
-								fpsr(14) <= '1';  -- Mark as invalid operation
+								fpsr(14) <= '1';  -- SNAN exception status
+								fpsr(7) <= '1';  -- AE_IOP
 						end case;
 						
 						-- Check FPCR enable bits and generate trap if enabled
