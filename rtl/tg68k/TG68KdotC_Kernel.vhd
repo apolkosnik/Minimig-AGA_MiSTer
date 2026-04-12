@@ -766,6 +766,9 @@ architecture logic of TG68KdotC_Kernel is
 	signal fpu_data_out         : std_logic_vector(31 downto 0) := (others => '0');
 	signal fpu_cpu_data_in      : std_logic_vector(31 downto 0) := (others => '0');
 	signal fpu_condition_result : std_logic := '0';
+	-- FPU CIR protocol handshake signals (driven from micro_state in FPU_GEN)
+	signal cir_write_sig        : std_logic := '0';
+	signal cir_read_sig         : std_logic := '0';
 
 	-- FPU trap signals
 	signal trap_fpu_bsun        : bit := '0';
@@ -979,8 +982,8 @@ BEGIN
         fsave_frame_size     => fsave_frame_size,
         fsave_size_valid     => fsave_size_valid,
         cir_address          => addr(4 downto 0),
-        cir_write            => '0',
-        cir_read             => '0',
+        cir_write            => cir_write_sig,
+        cir_read             => cir_read_sig,
         cir_data_in          => data_read(15 downto 0),
         cir_data_out         => cir_data_out,
         cir_data_valid       => cir_data_valid
@@ -1075,6 +1078,26 @@ BEGIN
         end if;
       end if;
     end process;
+
+    -- FPU integration wiring: the four signals below were dead-ended before,
+    -- making every F-line instruction fall through to a vector-11 exception.
+    --
+    -- 1. fpu_enable_sig: static '1' whenever the FPU_GEN generate expanded.
+    fpu_enable_sig <= '1';
+
+    -- 2. fpu_cpu_data_in: operand source mux. For register-direct EA (Dn/An)
+    --    route reg_QB (the register-file source-B read port); for every other
+    --    EA mode the operand arrives via the normal bus path in data_read.
+    fpu_cpu_data_in <= reg_QB when (opcode(5 downto 3) = "000" or opcode(5 downto 3) = "001")
+                       else data_read;
+
+    -- 3. cir_write / cir_read: CIR handshake driven from micro_state.
+    --    fpu1 = command phase (kernel writes Command CIR with opcode/extword);
+    --    fpu2/fpu_wait = response phase (kernel polls Response CIR for
+    --    primitive dialogue). The FPU side does rising-edge detection on
+    --    these, so level-during-state is correct.
+    cir_write_sig <= '1' when micro_state = fpu1 else '0';
+    cir_read_sig  <= '1' when (micro_state = fpu2 or micro_state = fpu_wait) else '0';
 
   end generate FPU_GEN;
 
@@ -5968,7 +5991,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							trap_1111 <= '1';
 							trapmake <= '1';
 							-- Override: route to FPU FRESTORE handler if FPU enabled
-							IF opcode(11 downto 9)="000" AND fline_is_fpu='1' AND FPU_Enable=1 THEN
+							-- cpid=000 identifies coprocessor 1 (FPU) in this kernel's convention
+							IF opcode(11 downto 9)="000" AND FPU_Enable=1 THEN
 								trap_1111 <= '0';
 								trapmake <= '0';
 								set(get_2ndOPC) <= '1';
@@ -5986,8 +6010,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					END IF;
 				ELSE
 					-- Unrecognized F-line instruction (cpGEN, cpBcc, etc.)
-					-- Check if this is an FPU instruction
-					IF fline_is_fpu='1' AND FPU_Enable=1 THEN
+					-- Check if this is an FPU instruction (cpid=000 = coprocessor 1 / FPU)
+					IF opcode(11 downto 9)="000" AND FPU_Enable=1 THEN
 						-- Route to FPU handler
 						IF decodeOPC='1' THEN
 							set(get_2ndOPC) <= '1';
