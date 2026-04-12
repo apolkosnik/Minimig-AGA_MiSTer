@@ -6029,7 +6029,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							trap_1111 <= '1';
 							trapmake <= '1';
 							-- Override: route to FPU FSAVE handler if FPU enabled
-							IF opcode(11 downto 9)="000" AND FPU_Enable=1 THEN
+							-- cpid=001 identifies coprocessor 1 (MC68882 FPU), standard assignment
+							IF opcode(11 downto 9)="001" AND FPU_Enable=1 THEN
 								trap_1111 <= '0';
 								trapmake <= '0';
 								set(get_2ndOPC) <= '1';
@@ -6059,8 +6060,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							trap_1111 <= '1';
 							trapmake <= '1';
 							-- Override: route to FPU FRESTORE handler if FPU enabled
-							-- cpid=000 identifies coprocessor 1 (FPU) in this kernel's convention
-							IF opcode(11 downto 9)="000" AND FPU_Enable=1 THEN
+							-- cpid=001 identifies coprocessor 1 (MC68882 FPU), standard assignment
+							IF opcode(11 downto 9)="001" AND FPU_Enable=1 THEN
 								trap_1111 <= '0';
 								trapmake <= '0';
 								set(get_2ndOPC) <= '1';
@@ -6078,8 +6079,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					END IF;
 				ELSE
 					-- Unrecognized F-line instruction (cpGEN, cpBcc, etc.)
-					-- Check if this is an FPU instruction (cpid=000 = coprocessor 1 / FPU)
-					IF opcode(11 downto 9)="000" AND FPU_Enable=1 THEN
+					-- Check if this is an FPU instruction (cpid=001 = MC68882 FPU)
+					IF opcode(11 downto 9)="001" AND FPU_Enable=1 THEN
 						-- Route to FPU handler
 						IF decodeOPC='1' THEN
 							set(get_2ndOPC) <= '1';
