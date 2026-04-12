@@ -1108,6 +1108,23 @@ BEGIN
     cir_write_sig <= '1' when micro_state = fpu1 else '0';
     cir_read_sig  <= '1' when (micro_state = fpu2 or micro_state = fpu_wait) else '0';
 
+    process(clk, nReset)
+    begin
+      if nReset = '0' then
+        timeout_counter <= 0;
+      elsif rising_edge(clk) then
+        if clkena_lw = '1' then
+          if micro_state = fpu_wait then
+            if timeout_counter < 255 then
+              timeout_counter <= timeout_counter + 1;
+            end if;
+          elsif micro_state = fpu1 or micro_state = idle then
+            timeout_counter <= 0;
+          end if;
+        end if;
+      end if;
+    end process;
+
   end generate FPU_GEN;
 
 --   -- PMMU register interface connected (enabled for 68030)
@@ -9135,10 +9152,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- For cpGEN instructions, analyze response from Response CIR
 					-- For other instructions, wait for FPU completion
 					
-					IF opcode(8 downto 6) = "000" THEN
+					IF timeout_counter > TIMEOUT_LIMIT_CPU THEN
+						next_micro_state <= fpu_done;
+					ELSIF opcode(8 downto 6) = "000" THEN
 						-- cpGEN instruction - decode response primitives from Response CIR
 						-- Follow MC68020/MC68881 Section 7.4-7.5 coprocessor dialog
-						
+
 						-- Decode response primitive from data_read (Response CIR content)
 						-- Complete MC68020/68881 CIR primitive loop implementation
 						CASE data_read(7 downto 0) IS
@@ -9373,12 +9392,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								next_micro_state <= fpu_done;
 						END CASE;
 					ELSE
-						-- Non-cpGEN instructions - wait for FPU to complete operation with timeout protection
-						-- Add timeout to prevent hanging on FPU operations
-						IF timeout_counter > TIMEOUT_LIMIT_CPU THEN
-							-- Timeout - force completion to prevent hang
-							next_micro_state <= fpu_done;
-						ELSIF fpu_complete = '1' THEN
+						IF fpu_complete = '1' THEN
 						IF fpu_exception = '1' THEN
 							-- FPU generated an exception - use proper MC68881/68882 exception vectors
 							-- Map exception codes to proper FPU exception vectors (48-54)
@@ -9406,8 +9420,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							setstate <= "00";  -- Ensure proper endOPC condition for normal completion
 							next_micro_state <= fpu_done;
 						END IF;
-					END IF;  -- End of fpu_complete check
-					END IF;  -- End of cpGEN vs non-cpGEN check in fpu_wait
+					END IF;
+					END IF;
 					
 				WHEN fpu_done =>
 					-- FPU operation completed successfully
