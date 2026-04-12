@@ -6025,9 +6025,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					   (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN
 						-- Valid EA mode for cpSAVE - this is a PRIVILEGED instruction
 						IF SVmode='1' THEN
-							-- Supervisor mode without FPU: F-line exception
+							-- Default: F-line exception (no FPU or non-FPU coprocessor)
 							trap_1111 <= '1';
 							trapmake <= '1';
+							-- Override: route to FPU FSAVE handler if FPU enabled
+							IF opcode(11 downto 9)="000" AND FPU_Enable=1 THEN
+								trap_1111 <= '0';
+								trapmake <= '0';
+								set(get_2ndOPC) <= '1';
+								next_micro_state <= fpu1;
+							END IF;
 						ELSE
 							-- User mode: privilege violation (cpSAVE is privileged)
 							trap_priv <= '1';
