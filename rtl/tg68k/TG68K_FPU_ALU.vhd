@@ -1103,20 +1103,16 @@ begin
 										
 										-- Calculate integer quotient bits
 										if unsigned(exp_a) - unsigned(exp_b) < 7 then
-											-- Quotient fits in 7 bits
-											fmod_quotient <= "0" & std_logic_vector(to_unsigned(
+											fmod_quotient <= (sign_a xor sign_b) & std_logic_vector(to_unsigned(
 												to_integer(unsigned(exp_a) - unsigned(exp_b)), 7));
 											exp_result <= exp_b;
-											-- Simple modular approximation on mantissas
 											mant_result <= std_logic_vector(unsigned(mant_a) mod (unsigned(mant_b) + 1));
 										elsif unsigned(exp_a) - unsigned(exp_b) < 64 then
-											-- Large quotient - saturate at 7Fh
-											fmod_quotient <= "01111111";
+											fmod_quotient <= (sign_a xor sign_b) & "1111111";
 											exp_result <= exp_b;
 											mant_result <= std_logic_vector(unsigned(mant_a) mod (unsigned(mant_b) + 1));
 										else
-											-- Very large difference: quotient > 127
-											fmod_quotient <= "01111111";  -- Saturate
+											fmod_quotient <= (sign_a xor sign_b) & "1111111";
 											exp_result <= exp_b;
 											mant_result <= mant_b;
 										end if;
@@ -1151,23 +1147,18 @@ begin
 										-- |x| >= |y|: compute IEEE remainder and quotient
 										-- Calculate quotient for FPSR quotient byte
 										if unsigned(exp_a) - unsigned(exp_b) < 7 then
-											-- Quotient fits in 7 bits - use round-to-nearest
-											fmod_quotient <= "0" & std_logic_vector(to_unsigned(
+											fmod_quotient <= (sign_a xor sign_b) & std_logic_vector(to_unsigned(
 												to_integer(unsigned(exp_a) - unsigned(exp_b)), 7));
 											exp_result <= exp_b;
-											-- IEEE remainder: magnitude is <= |y|/2
 											mant_result <= std_logic_vector(shift_right(unsigned(mant_b), 1));
-											-- Sign determination (simplified): alternate based on mantissa bits
 											sign_result <= mant_a(0) xor mant_b(0);
 										elsif unsigned(exp_a) - unsigned(exp_b) < 32 then
-											-- Large quotient - saturate
-											fmod_quotient <= "01111111";
+											fmod_quotient <= (sign_a xor sign_b) & "1111111";
 											exp_result <= exp_b;
 											mant_result <= std_logic_vector(shift_right(unsigned(mant_b), 1));
 											sign_result <= mant_a(0) xor mant_b(0);
 										else
-											-- Very large difference: quotient > 127
-											fmod_quotient <= "01111111";  -- Saturate
+											fmod_quotient <= (sign_a xor sign_b) & "1111111";
 											exp_result <= std_logic_vector(unsigned(exp_b) - 1);  -- /2
 											mant_result <= mant_b;
 											sign_result <= sign_a xor sign_b;  -- IEEE remainder sign rules

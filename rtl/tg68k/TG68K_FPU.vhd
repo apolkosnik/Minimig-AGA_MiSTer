@@ -2854,12 +2854,8 @@ begin
 								fpsr(14) <= '1';  -- Accrued divide by zero
 							end if;
 							
-							-- Update quotient byte for FMOD and FREM operations (FPSR bits 23-16)
-							-- MC68882 stores 7 bits of quotient from modulo/remainder operations
 							if fpu_operation = OP_FMOD or fpu_operation = OP_FREM then
-								-- Extract 7 bits of quotient from ALU result
-								-- Assuming ALU provides quotient in upper bits of result
-								fpsr(23 downto 17) <= result_data(6 downto 0);  -- Store 7-bit quotient
+								fpsr(23 downto 16) <= alu_quotient_byte;
 							end if;
 							
 							-- Set output data based on format
