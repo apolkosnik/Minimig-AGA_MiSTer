@@ -1320,7 +1320,7 @@ begin
 						-- FIX ITEM 55: Enhanced FPIAR tracking - update at instruction start
 						-- FPIAR should contain the PC of the F-line instruction causing exception
 						-- Only update FPIAR for instructions that can cause exceptions
-						if decoder_instruction_type /= INST_FBCC and decoder_instruction_type /= INST_FDBCC then
+						if decoder_instruction_type /= INST_FBCC and decoder_instruction_type /= INST_FTRAP and decoder_instruction_type /= INST_FSAVE and decoder_instruction_type /= INST_FRESTORE then
 							fpiar <= cpu_address_in;  -- Store instruction address for exception handling
 						end if;
 						
