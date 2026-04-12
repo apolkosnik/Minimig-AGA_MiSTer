@@ -767,6 +767,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal fpu_cpu_data_in      : std_logic_vector(31 downto 0) := (others => '0');
 	signal fpu_condition_result : std_logic := '0';
 	signal fpu_cond_predicate  : std_logic_vector(4 downto 0) := (others => '0');
+	signal fpu_bsun            : std_logic := '0';
 	-- FPU CIR protocol handshake signals (driven from micro_state in FPU_GEN)
 	signal cir_write_sig        : std_logic := '0';
 	signal cir_read_sig         : std_logic := '0';
@@ -1154,6 +1155,7 @@ BEGIN
     fpu_cond_predicate <= sndOPC(4 downto 0) when opcode(8 downto 6) = "001"
                           else opcode(4 downto 0);
     fpu_condition_result <= eval_fpcc(fpsr_out(31 downto 28), fpu_cond_predicate);
+    fpu_bsun <= fpu_cond_predicate(4) and fpsr_out(28);
 
   end generate FPU_GEN;
 
@@ -9283,6 +9285,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								skipFetch_next <= '1';
 						END CASE;
 					ELSIF opcode(8 downto 6) = "001" OR opcode(8 downto 6) = "010" OR opcode(8 downto 6) = "011" THEN
+						IF fpu_bsun = '1' AND fpcr_out(15) = '1' THEN
+							trap_fpu_bsun <= '1';
+							trapmake <= '1';
+							next_micro_state <= idle;
+						ELSE
 						CASE opcode(8 downto 6) IS
 							WHEN "001" =>
 								IF opcode(5 downto 3) = "001" THEN
@@ -9385,31 +9392,41 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							WHEN OTHERS =>
 								next_micro_state <= fpu_done;
 						END CASE;
+						END IF;
 					ELSE
 						IF fpu_complete = '1' THEN
 						IF fpu_exception = '1' THEN
-							-- FPU generated an exception - use proper MC68881/68882 exception vectors
-							-- Map exception codes to proper FPU exception vectors (48-54)
 							CASE fpu_exception_code IS
-								WHEN X"05" =>  -- Divide by zero
+								WHEN X"05" =>
 									trap_fpu_divzero <= '1';
-								WHEN X"0C" =>  -- Invalid operation / Operand error
+									IF fpcr_out(10) = '1' THEN trapmake <= '1'; END IF;
+								WHEN X"0C" =>
 									trap_fpu_operr <= '1';
-								WHEN X"0D" =>  -- Overflow
+									IF fpcr_out(13) = '1' THEN trapmake <= '1'; END IF;
+								WHEN X"0D" =>
 									trap_fpu_ovfl <= '1';
-								WHEN X"0E" =>  -- Underflow
+									IF fpcr_out(12) = '1' THEN trapmake <= '1'; END IF;
+								WHEN X"0E" =>
 									trap_fpu_unfl <= '1';
-								WHEN X"0F" =>  -- Inexact result
+									IF fpcr_out(11) = '1' THEN trapmake <= '1'; END IF;
+								WHEN X"0F" =>
 									trap_fpu_inexact <= '1';
-								WHEN X"10" =>  -- Signaling NaN
+									IF fpcr_out(9) = '1' THEN trapmake <= '1'; END IF;
+								WHEN X"10" =>
 									trap_fpu_snan <= '1';
-								WHEN OTHERS =>  -- Unknown exception, use operand error
+									IF fpcr_out(14) = '1' THEN trapmake <= '1'; END IF;
+								WHEN OTHERS =>
 									trap_fpu_operr <= '1';
+									IF fpcr_out(13) = '1' THEN trapmake <= '1'; END IF;
 							END CASE;
-							trapmake <= '1';
-							setstate <= "00";  -- Ensure proper endOPC condition
-							skipFetch_next <= '0';  -- Clear skipFetch when transitioning to idle
-							next_micro_state <= idle;
+							IF trapmake = '1' THEN
+								setstate <= "00";
+								skipFetch_next <= '0';
+								next_micro_state <= idle;
+							ELSE
+								setstate <= "00";
+								next_micro_state <= fpu_done;
+							END IF;
 						ELSE
 							setstate <= "00";  -- Ensure proper endOPC condition for normal completion
 							next_micro_state <= fpu_done;
