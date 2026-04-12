@@ -287,7 +287,7 @@ architecture rtl of TG68K_FPU is
 	signal alu_underflow : std_logic;
 	signal alu_inexact : std_logic;
 	-- ACTUAL IMPLEMENTATION: FPCR control signals for ALU
-	-- CLEANUP: Removed alu_rounding_mode - ALU uses fpcr(15 downto 14) directly, saves 2 register bits
+	-- CLEANUP: Removed alu_rounding_mode - ALU uses fpcr(5 downto 4) directly, saves 2 register bits
 	-- CLEANUP: Removed alu_precision_control - redundant buffering not needed, saves 2 register bits
 	
 	-- Temporary signals for exception handler connections
@@ -2480,7 +2480,7 @@ begin
 										fpu_state <= FPU_EXECUTE;
 									else
 										-- Invalid FPCR - force default mode or trigger exception
-										if fpcr(11) = '1' then  -- OPERR exception enable bit
+										if fpcr(13) = '1' then  -- OPERR exception enable bit
 											fpu_exception <= '1';
 											exception_code_internal <= X"13";  -- OPERR exception code
 											fpu_state <= FPU_EXCEPTION_STATE;
@@ -2505,7 +2505,7 @@ begin
 									-- CLEANUP: Removed alu_rounding_mode/alu_precision_control assignments - signals removed
 									
 									-- If FPCR exception enable is set, trigger an OPERR exception
-									if fpcr(11) = '1' then  -- OPERR exception enable bit
+									if fpcr(13) = '1' then  -- OPERR exception enable bit
 										fpu_exception <= '1';
 										exception_code_internal <= X"13";  -- OPERR exception code
 										fpu_state <= FPU_EXCEPTION_STATE;
@@ -2531,12 +2531,12 @@ begin
 						-- Validate rounding mode during arithmetic operations
 						if fpcr_rounding_mode_valid = '0' then
 							-- Invalid rounding mode - force default and potentially trigger exception
-							fpcr(15 downto 14) <= "00";  -- Force Round to Nearest
+							fpcr(5 downto 4) <= "00";  -- Force Round to Nearest
 							fpcr_rounding_mode_valid <= '1';
 							-- Set FPCR write pending to indicate forced correction
 							fpcr_write_pending <= '1';
 							-- If FPCR exception enable is set, trigger an OPERR exception
-							if fpcr(11) = '1' then  -- OPERR exception enable bit
+							if fpcr(13) = '1' then  -- OPERR exception enable bit
 								fpu_exception <= '1';
 								exception_code_internal <= X"13";  -- OPERR exception code
 								fpu_state <= FPU_EXCEPTION_STATE;
@@ -2551,7 +2551,7 @@ begin
 							-- Set FPCR write pending to indicate forced correction
 							fpcr_write_pending <= '1';
 							-- If FPCR exception enable is set, trigger an OPERR exception
-							if fpcr(11) = '1' then  -- OPERR exception enable bit
+							if fpcr(13) = '1' then  -- OPERR exception enable bit
 								fpu_exception <= '1';
 								exception_code_internal <= X"13";  -- OPERR exception code
 								fpu_state <= FPU_EXCEPTION_STATE;
