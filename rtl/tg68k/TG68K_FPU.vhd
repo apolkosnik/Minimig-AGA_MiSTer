@@ -485,26 +485,26 @@ architecture rtl of TG68K_FPU is
 		mantissa := fp_value(63 downto 0);
 		
 		-- Clear all condition codes first
-		fpsr_reg(31 downto 28) <= "0000";
+		fpsr_reg(27 downto 24) <= "0000";
 		
 		-- Check special values in priority order per MC68882 spec
 		if exponent = "111111111111111" then
 			-- Maximum exponent - could be NaN or Infinity
 			if mantissa(63) = '0' or mantissa(62 downto 0) /= (62 downto 0 => '0') then
 				-- NaN (explicit integer bit 0 OR non-zero fraction)
-				fpsr_reg(28) <= '1';  -- Set NaN bit
+				fpsr_reg(24) <= '1';  -- Set NaN bit
 			else
 				-- Infinity (explicit integer bit 1 AND zero fraction)
-				fpsr_reg(29) <= '1';  -- Set Infinity bit
-				fpsr_reg(31) <= sign; -- Set sign for infinity
+				fpsr_reg(25) <= '1';  -- Set Infinity bit
+				fpsr_reg(27) <= sign; -- Set sign for infinity
 			end if;
 		elsif exponent = (14 downto 0 => '0') and mantissa = (63 downto 0 => '0') then
 			-- Zero (exponent and mantissa both zero)
-			fpsr_reg(30) <= '1';  -- Set Zero bit
-			fpsr_reg(31) <= sign; -- Preserve sign of zero
+			fpsr_reg(26) <= '1';  -- Set Zero bit
+			fpsr_reg(27) <= sign; -- Preserve sign of zero
 		else
 			-- Normal number or denormalized number
-			fpsr_reg(31) <= sign; -- Set sign bit
+			fpsr_reg(27) <= sign; -- Set sign bit
 		end if;
 	end procedure;
 	
@@ -1353,7 +1353,7 @@ begin
 						-- FIXED: Simplified condition evaluation without declare blocks
 						-- FDBcc condition evaluation based on FPSR condition codes (simplified)
 						-- Condition true for EQ (000001) when Z=1, false otherwise for now
-						if opcode(5 downto 0) = "000001" and fpsr(30) = '1' then
+						if opcode(5 downto 0) = "000001" and fpsr(26) = '1' then
 							-- Equal condition true: don't branch, don't decrement
 							fpu_data_out <= X"00000001";  -- Signal: take branch = false
 						else
@@ -1369,7 +1369,7 @@ begin
 						-- FIXED: Simplified condition evaluation without declare blocks
 						-- FBcc condition evaluation based on FPSR condition codes (simplified)
 						-- Condition true for EQ (000001) when Z=1, false otherwise for now
-						if opcode(5 downto 0) = "000001" and fpsr(30) = '1' then
+						if opcode(5 downto 0) = "000001" and fpsr(26) = '1' then
 							fpu_data_out <= X"00000001";  -- Signal: take branch = true
 						else
 							fpu_data_out <= X"00000000";  -- Signal: take branch = false
@@ -1382,7 +1382,7 @@ begin
 						-- FIXED: Simplified condition evaluation without declare blocks
 						-- FTRAPcc condition evaluation based on FPSR condition codes (simplified)
 						-- Condition true for EQ (000001) when Z=1, false otherwise for now
-						if opcode(5 downto 0) = "000001" and fpsr(30) = '1' then
+						if opcode(5 downto 0) = "000001" and fpsr(26) = '1' then
 							-- Condition true: trigger FP trap
 							fpu_state <= FPU_EXCEPTION_STATE;
 							fpu_exception <= '1';
@@ -1405,33 +1405,33 @@ begin
 								-- Sign-extend 8-bit integer from cpu_data_in(7:0) to extended precision
 								-- For simplicity, treat as zero for now (implement proper conversion later)
 								if cpu_data_in(7 downto 0) = "00000000" then
-									fpsr(31 downto 28) <= "0100";  -- Zero
+									fpsr(27 downto 24) <= "0100";  -- Zero
 								elsif cpu_data_in(7) = '1' then
-									fpsr(31 downto 28) <= "1000";  -- Negative
+									fpsr(27 downto 24) <= "1000";  -- Negative
 								else
-									fpsr(31 downto 28) <= "0000";  -- Positive
+									fpsr(27 downto 24) <= "0000";  -- Positive
 								end if;
 							when FORMAT_WORD =>
 								-- 16-bit integer from cpu_data_in(15:0)
 								if cpu_data_in(15 downto 0) = "0000000000000000" then
-									fpsr(31 downto 28) <= "0100";  -- Zero
+									fpsr(27 downto 24) <= "0100";  -- Zero
 								elsif cpu_data_in(15) = '1' then
-									fpsr(31 downto 28) <= "1000";  -- Negative
+									fpsr(27 downto 24) <= "1000";  -- Negative
 								else
-									fpsr(31 downto 28) <= "0000";  -- Positive
+									fpsr(27 downto 24) <= "0000";  -- Positive
 								end if;
 							when FORMAT_LONG =>
 								-- 32-bit integer from cpu_data_in
 								if cpu_data_in = "00000000000000000000000000000000" then
-									fpsr(31 downto 28) <= "0100";  -- Zero
+									fpsr(27 downto 24) <= "0100";  -- Zero
 								elsif cpu_data_in(31) = '1' then
-									fpsr(31 downto 28) <= "1000";  -- Negative
+									fpsr(27 downto 24) <= "1000";  -- Negative
 								else
-									fpsr(31 downto 28) <= "0000";  -- Positive
+									fpsr(27 downto 24) <= "0000";  -- Positive
 								end if;
 							when others =>
 								-- Other formats (shouldn't happen for register-direct)
-								fpsr(31 downto 28) <= "0001";  -- NaN
+								fpsr(27 downto 24) <= "0001";  -- NaN
 						end case;
 						-- CRITICAL FIX: Follow CIR protocol - go to FPU_EXECUTE to complete dialog properly
 						-- The FPU_DECODE state already returns NULL response for register-direct operations
@@ -1497,12 +1497,12 @@ begin
 							when OP_FSCC =>
 								-- CRITICAL FIX: FScc implementation - Set byte on condition
 								-- Inline condition evaluation (function was removed to avoid scope issues)
-								if ((opcode(5 downto 0) = "000001" and fpsr(29) = '1') or  -- OEQ: Ordered Equal
-								    (opcode(5 downto 0) = "001110" and fpsr(29) = '0') or  -- ONE: Ordered Not Equal
-								    (opcode(5 downto 0) = "010010" and fpsr(28) = '1') or  -- OGT: Ordered Greater Than
-								    (opcode(5 downto 0) = "010011" and fpsr(29) = '1') or  -- OGE: Ordered Greater or Equal
-								    (opcode(5 downto 0) = "010100" and fpsr(30) = '1') or  -- OLT: Ordered Less Than
-								    (opcode(5 downto 0) = "010101" and (fpsr(30) = '1' or fpsr(29) = '1'))) then  -- OLE: Ordered Less or Equal
+								if ((opcode(5 downto 0) = "000001" and fpsr(25) = '1') or  -- OEQ: Ordered Equal
+								    (opcode(5 downto 0) = "001110" and fpsr(25) = '0') or  -- ONE: Ordered Not Equal
+								    (opcode(5 downto 0) = "010010" and fpsr(24) = '1') or  -- OGT: Ordered Greater Than
+								    (opcode(5 downto 0) = "010011" and fpsr(25) = '1') or  -- OGE: Ordered Greater or Equal
+								    (opcode(5 downto 0) = "010100" and fpsr(26) = '1') or  -- OLT: Ordered Less Than
+								    (opcode(5 downto 0) = "010101" and (fpsr(26) = '1' or fpsr(25) = '1'))) then  -- OLE: Ordered Less or Equal
 									fpu_data_out <= X"000000FF";  -- Set byte to all 1s
 								else
 									fpu_data_out <= X"00000000";  -- Clear byte to all 0s
@@ -2834,24 +2834,24 @@ begin
 							
 							-- Update exception status if any ALU flags are set
 							if alu_overflow = '1' then
-								fpsr(25) <= '1';  -- Overflow exception
-								fpsr(17) <= '1';  -- Accrued overflow
+								fpsr(12) <= '1';  -- Overflow exception
+								fpsr(6) <= '1';  -- Accrued overflow
 							end if;
 							if alu_underflow = '1' then
-								fpsr(24) <= '1';  -- Underflow exception
-								fpsr(16) <= '1';  -- Accrued underflow
+								fpsr(11) <= '1';  -- Underflow exception
+								fpsr(5) <= '1';  -- Accrued underflow
 							end if;
 							if alu_inexact = '1' then
-								fpsr(23) <= '1';  -- Inexact exception
-								fpsr(15) <= '1';  -- Accrued inexact
+								fpsr(9) <= '1';  -- Inexact exception
+								fpsr(3) <= '1';  -- Accrued inexact
 							end if;
 							if alu_invalid = '1' then
-								fpsr(26) <= '1';  -- Invalid operation exception
-								fpsr(18) <= '1';  -- Accrued invalid operation
+								fpsr(14) <= '1';  -- Invalid operation exception
+								fpsr(7) <= '1';  -- Accrued invalid operation
 							end if;
 							if alu_divide_by_zero = '1' then
-								fpsr(22) <= '1';  -- Divide by zero exception
-								fpsr(14) <= '1';  -- Accrued divide by zero
+								fpsr(10) <= '1';  -- Divide by zero exception
+								fpsr(4) <= '1';  -- Accrued divide by zero
 							end if;
 							
 							if fpu_operation = OP_FMOD or fpu_operation = OP_FREM then
@@ -2892,31 +2892,31 @@ begin
 						-- Update FPSR exception status bits based on exception_code
 						case exception_code_internal is
 							when x"02" =>  -- Bus error
-								fpsr(21) <= '1';  -- BSUN exception bit
+								fpsr(15) <= '1';  -- BSUN exception bit
 							when x"05" =>  -- Division by zero
-								fpsr(22) <= '1';  -- DZ exception bit
-								fpsr(14) <= '1';  -- DZ accrued exception bit
+								fpsr(10) <= '1';  -- DZ exception bit
+								fpsr(4) <= '1';  -- DZ accrued exception bit
 							when x"0A" =>  -- Format error  
-								fpsr(26) <= '1';  -- Invalid operation bit
-								fpsr(18) <= '1';  -- Invalid operation accrued bit
+								fpsr(14) <= '1';  -- Invalid operation bit
+								fpsr(7) <= '1';  -- Invalid operation accrued bit
 							when x"0B" =>  -- Unimplemented instruction
-								fpsr(21) <= '1';  -- BSUN exception bit
-								fpsr(13) <= '1';  -- BSUN accrued exception bit
+								fpsr(15) <= '1';  -- BSUN exception bit
+								fpsr(7) <= '1';  -- BSUN accrued exception bit
 							when x"0C" =>  -- Invalid operation
-								fpsr(26) <= '1';  -- Invalid operation bit
-								fpsr(18) <= '1';  -- Invalid operation accrued bit
+								fpsr(14) <= '1';  -- Invalid operation bit
+								fpsr(7) <= '1';  -- Invalid operation accrued bit
 							when x"0D" =>  -- Overflow
-								fpsr(25) <= '1';  -- Overflow exception bit
-								fpsr(17) <= '1';  -- Overflow accrued exception bit
+								fpsr(12) <= '1';  -- Overflow exception bit
+								fpsr(6) <= '1';  -- Overflow accrued exception bit
 							when x"0E" =>  -- Underflow
-								fpsr(24) <= '1';  -- Underflow exception bit
-								fpsr(16) <= '1';  -- Underflow accrued exception bit
+								fpsr(11) <= '1';  -- Underflow exception bit
+								fpsr(5) <= '1';  -- Underflow accrued exception bit
 							when x"0F" =>  -- Inexact result
-								fpsr(23) <= '1';  -- Inexact exception bit
-								fpsr(15) <= '1';  -- Inexact accrued exception bit
+								fpsr(9) <= '1';  -- Inexact exception bit
+								fpsr(3) <= '1';  -- Inexact accrued exception bit
 							when others =>
 								-- Unknown exception
-								fpsr(26) <= '1';  -- Mark as invalid operation
+								fpsr(14) <= '1';  -- Mark as invalid operation
 						end case;
 						
 						-- Check FPCR enable bits and generate trap if enabled
@@ -3972,10 +3972,10 @@ begin
 				-- Update Condition CIR with FPU condition codes for conditional instructions
 				-- Map FPSR condition codes to condition word for FBcc/FDBcc/FScc instructions
 				condition_cir <= (others => '0');  -- Clear all bits first
-				condition_cir(3) <= fpsr(31);  -- N (Negative)
-				condition_cir(2) <= fpsr(30);  -- Z (Zero)  
-				condition_cir(1) <= fpsr(29);  -- I (Infinity)
-				condition_cir(0) <= fpsr(28);  -- NaN (Not a Number)
+				condition_cir(3) <= fpsr(27);  -- N (Negative)
+				condition_cir(2) <= fpsr(26);  -- Z (Zero)  
+				condition_cir(1) <= fpsr(25);  -- I (Infinity)
+				condition_cir(0) <= fpsr(24);  -- NaN (Not a Number)
 				
 				-- Update Save CIR with frame format word for cpSAVE instruction
 				-- Per MC68030 spec: Upper byte = format code, Lower byte = state data size in bytes

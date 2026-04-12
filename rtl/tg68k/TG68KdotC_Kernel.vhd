@@ -1154,8 +1154,8 @@ BEGIN
 
     fpu_cond_predicate <= sndOPC(4 downto 0) when opcode(8 downto 6) = "001"
                           else opcode(4 downto 0);
-    fpu_condition_result <= eval_fpcc(fpsr_out(31 downto 28), fpu_cond_predicate);
-    fpu_bsun <= fpu_cond_predicate(4) and fpsr_out(28);
+    fpu_condition_result <= eval_fpcc(fpsr_out(27 downto 24), fpu_cond_predicate);
+    fpu_bsun <= fpu_cond_predicate(4) and fpsr_out(24);
 
   end generate FPU_GEN;
 

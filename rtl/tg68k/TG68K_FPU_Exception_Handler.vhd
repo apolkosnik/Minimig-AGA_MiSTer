@@ -78,10 +78,10 @@ architecture rtl of TG68K_FPU_Exception_Handler is
     constant FPSR_INEX_A   : integer := 3;   -- Inexact (accrued)
     
     -- MC68881/68882 FPSR Condition Code bits (bits 31:24)
-    constant FPSR_N        : integer := 31;  -- Negative
-    constant FPSR_Z        : integer := 30;  -- Zero
-    constant FPSR_I        : integer := 29;  -- Infinity
-    constant FPSR_NAN      : integer := 28;  -- Not a Number
+    constant FPSR_N        : integer := 27;  -- Negative
+    constant FPSR_Z        : integer := 26;  -- Zero
+    constant FPSR_I        : integer := 25;  -- Infinity
+    constant FPSR_NAN      : integer := 24;  -- Not a Number
     
     -- MC68881/68882 FPCR Exception Enable bits (bits 15:8)
     constant FPCR_BSUN_EN  : integer := 15;  -- BSUN enable
