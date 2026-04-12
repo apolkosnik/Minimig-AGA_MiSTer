@@ -766,6 +766,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal fpu_data_out         : std_logic_vector(31 downto 0) := (others => '0');
 	signal fpu_cpu_data_in      : std_logic_vector(31 downto 0) := (others => '0');
 	signal fpu_condition_result : std_logic := '0';
+	signal fpu_cond_predicate  : std_logic_vector(4 downto 0) := (others => '0');
 	-- FPU CIR protocol handshake signals (driven from micro_state in FPU_GEN)
 	signal cir_write_sig        : std_logic := '0';
 	signal cir_read_sig         : std_logic := '0';
@@ -863,8 +864,33 @@ architecture logic of TG68KdotC_Kernel is
 --     return s;
 --   end function;
 
+  function eval_fpcc(cc : std_logic_vector(3 downto 0);
+                     cond : std_logic_vector(4 downto 0)) return std_logic is
+    variable N, Z, I, A : std_logic;
+  begin
+    N := cc(3); Z := cc(2); I := cc(1); A := cc(0);
+    case cond(3 downto 0) is
+      when "0000" => return '0';
+      when "0001" => return Z;
+      when "0010" => return (not A) and (not Z) and (not N);
+      when "0011" => return Z or ((not A) and (not N));
+      when "0100" => return N and (not A) and (not Z);
+      when "0101" => return Z or (N and (not A));
+      when "0110" => return (not A) and (not Z);
+      when "0111" => return not A;
+      when "1000" => return A;
+      when "1001" => return A or Z;
+      when "1010" => return A or ((not N) and (not Z));
+      when "1011" => return A or Z or (not N);
+      when "1100" => return A or (N and (not Z));
+      when "1101" => return A or Z or N;
+      when "1110" => return not Z;
+      when "1111" => return '1';
+      when others => return '0';
+    end case;
+  end function;
 
-BEGIN  
+BEGIN
 
   -- The RESET instruction must clear the PMMU enable bits on the same core step
   -- that asserts the external reset pulse, not one stalled cycle later.
@@ -1124,6 +1150,10 @@ BEGIN
         end if;
       end if;
     end process;
+
+    fpu_cond_predicate <= sndOPC(4 downto 0) when opcode(8 downto 6) = "001"
+                          else opcode(4 downto 0);
+    fpu_condition_result <= eval_fpcc(fpsr_out(31 downto 28), fpu_cond_predicate);
 
   end generate FPU_GEN;
 
@@ -9253,141 +9283,105 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 								skipFetch_next <= '1';
 						END CASE;
 					ELSIF opcode(8 downto 6) = "001" OR opcode(8 downto 6) = "010" OR opcode(8 downto 6) = "011" THEN
-						-- Conditional instruction - process true/false result from Response CIR
-						-- data_read contains the condition result from coprocessor
-						-- CPU completes the instruction based on this result
-						
-						-- Use actual condition result from FPU condition evaluation
-						-- Complete the appropriate action based on condition result
-						
 						CASE opcode(8 downto 6) IS
-							WHEN "001" =>  -- FBcc or FDBcc
-								-- Check addressing mode to distinguish FBcc from FDBcc
-								IF opcode(5 downto 3) = "111" AND (opcode(2 downto 0) = "010" OR opcode(2 downto 0) = "011") THEN
-									-- FBcc - Branch conditionally (mode 111, reg 010=word or 011=long)
-									-- Check condition result and perform branch if true
+							WHEN "001" =>
+								IF opcode(5 downto 3) = "001" THEN
+									-- FDBcc Dn,<label>
 									IF fpu_condition_result = '1' THEN
-										-- Condition true - take the branch
-										IF opcode(2 downto 0) = "011" THEN
-											-- Long displacement (32-bit)
-											set_datatype <= "10";  -- Longword displacement
-										ELSE
-											-- Word displacement (16-bit) 
-											set_datatype <= "01";  -- Word displacement
-										END IF;
-										-- Use existing branch logic
-										next_micro_state <= bra1;
-										TG68_PC_brw <= '1';  -- Enable PC branch calculation
-									ELSE
-										-- Condition false - continue to next instruction
-										next_micro_state <= fpu_done;
-									END IF;
-								ELSE
-									-- FDBcc - Decrement and branch conditionally
-									-- MC68881/68882 FDBcc semantics:
-									-- If condition TRUE: fall through to next instruction
-									-- If condition FALSE: decrement Dn, branch if Dn != -1
-									IF fpu_condition_result = '1' THEN
-										-- Condition true - fall through to next instruction
 										next_micro_state <= fpu_done;
 									ELSE
-										-- Condition false - decrement data register and check for branch
-										-- Set up ALU operation to decrement register (similar to DBcc)
-										set_datatype <= "01";  -- Word operation for register decrement
-										set(subidx) <= '1';  -- Enable ALU subtraction
-										set(OP2out_one) <= '1';  -- Subtract 1 from register
-										
-										-- Target register is Dn (bits 2:0 of opcode)  
-										-- Register selection handled by existing register file logic
-										-- Just set data_is_source and let the decoder handle reg selection
-										data_is_source <= '1';  -- Register is source for ALU
-										
-										-- Continue to FDBcc evaluation state
+										set_datatype <= "01";
+										set(subidx) <= '1';
+										set(OP2out_one) <= '1';
+										data_is_source <= '1';
 										next_micro_state <= fpu_fdbcc;
 									END IF;
-								END IF;
-								
-							WHEN "010" =>  -- FScc - Set byte conditionally  
-								-- Set destination byte: $FF if condition true, $00 if false
-								-- Destination addressing mode in opcode bits 5:0
-								set_datatype <= "00";  -- Byte operation
-								
-								-- FScc sets the byte value based on condition result
-								-- Use the ALU mechanism similar to regular Scc
-								write_back <= '1';
-								set_exec(opcScc) <= '1';
-								-- The condition result will be checked by the ALU
-								
-								-- Handle destination EA
-								CASE opcode(5 downto 3) IS
-									WHEN "000" =>  -- Dn
-										dest_hbits <= '1';
-										dest_areg <= '0';
-										set_exec(Regwrena) <= '1';
-										-- Don't use write_reg for FScc; handled via regin
-										next_micro_state <= fpu_done;
-									WHEN "010" =>  -- (An)
-										set(no_Flags) <= '1';
-										setstate <= "11";  -- Write cycle
-										next_micro_state <= fpu_done;
-									WHEN "011" =>  -- (An)+
-										set(no_Flags) <= '1';
-										set(postadd) <= '1';
-										set_exec(Regwrena) <= '1';
-										setstate <= "11";  -- Write cycle
-										next_micro_state <= fpu_done;
-									WHEN "100" =>  -- -(An)
-										set(no_Flags) <= '1';
-										set(presub) <= '1';
-										set_exec(Regwrena) <= '1';
-										setstate <= "11";  -- Write cycle
-										next_micro_state <= fpu_done;
-									WHEN "101" =>  -- d16(An)
-										-- Need to fetch displacement
-										set(get_ea_now) <= '1';
-										set(ea_build) <= '1';
-										next_micro_state <= fpu_done;
-									WHEN "110" =>  -- d8(An,Xn)
-										-- Need to fetch extension word
-										set(get_ea_now) <= '1';
-										set(ea_build) <= '1';
-										next_micro_state <= fpu_done;
-									WHEN "111" =>
-										CASE opcode(2 downto 0) IS
-											WHEN "000" =>  -- xxx.W
-												set(get_ea_now) <= '1';
-												set(ea_build) <= '1';
-												next_micro_state <= fpu_done;
-											WHEN "001" =>  -- xxx.L
-												set(get_ea_now) <= '1';
-												set(ea_build) <= '1';
-												set(longaktion) <= '1';
-												next_micro_state <= fpu_done;
-											WHEN OTHERS =>
-												-- Invalid EA for FScc
-												trap_illegal <= '1';
-												trapmake <= '1';
-												next_micro_state <= idle;
-										END CASE;
-									WHEN OTHERS =>
-										-- An direct not allowed
-										trap_illegal <= '1';
+								ELSIF opcode(5 downto 3) = "111" AND
+								      (opcode(2 downto 0) = "010" OR opcode(2 downto 0) = "011" OR opcode(2 downto 0) = "100") THEN
+									-- FTRAPcc
+									IF fpu_condition_result = '1' THEN
+										trap_fpu_trap <= '1';
 										trapmake <= '1';
-										next_micro_state <= idle;
-								END CASE;
-								
-							WHEN "011" =>  -- FTRAPcc - Trap conditionally
-								-- Generate FTRAP exception if condition is true
-								IF fpu_condition_result = '1' THEN
-									-- Condition true - generate FTRAP exception
-									trap_fpu_trap <= '1';
-									trapmake <= '1';
+									END IF;
 									next_micro_state <= fpu_done;
 								ELSE
-									-- Condition false - continue to next instruction
+									-- FScc <ea>
+									set_datatype <= "00";
+									write_back <= '1';
+									set_exec(opcScc) <= '1';
+									CASE opcode(5 downto 3) IS
+										WHEN "000" =>
+											dest_hbits <= '1';
+											dest_areg <= '0';
+											set_exec(Regwrena) <= '1';
+											next_micro_state <= fpu_done;
+										WHEN "010" =>
+											set(no_Flags) <= '1';
+											setstate <= "11";
+											next_micro_state <= fpu_done;
+										WHEN "011" =>
+											set(no_Flags) <= '1';
+											set(postadd) <= '1';
+											set_exec(Regwrena) <= '1';
+											setstate <= "11";
+											next_micro_state <= fpu_done;
+										WHEN "100" =>
+											set(no_Flags) <= '1';
+											set(presub) <= '1';
+											set_exec(Regwrena) <= '1';
+											setstate <= "11";
+											next_micro_state <= fpu_done;
+										WHEN "101" =>
+											set(get_ea_now) <= '1';
+											set(ea_build) <= '1';
+											next_micro_state <= fpu_done;
+										WHEN "110" =>
+											set(get_ea_now) <= '1';
+											set(ea_build) <= '1';
+											next_micro_state <= fpu_done;
+										WHEN "111" =>
+											CASE opcode(2 downto 0) IS
+												WHEN "000" =>
+													set(get_ea_now) <= '1';
+													set(ea_build) <= '1';
+													next_micro_state <= fpu_done;
+												WHEN "001" =>
+													set(get_ea_now) <= '1';
+													set(ea_build) <= '1';
+													set(longaktion) <= '1';
+													next_micro_state <= fpu_done;
+												WHEN OTHERS =>
+													trap_illegal <= '1';
+													trapmake <= '1';
+													next_micro_state <= idle;
+											END CASE;
+										WHEN OTHERS =>
+											trap_illegal <= '1';
+											trapmake <= '1';
+											next_micro_state <= idle;
+									END CASE;
+								END IF;
+
+							WHEN "010" =>
+								-- FBcc.W
+								IF fpu_condition_result = '1' THEN
+									set_datatype <= "01";
+									next_micro_state <= bra1;
+									TG68_PC_brw <= '1';
+								ELSE
 									next_micro_state <= fpu_done;
 								END IF;
-								
+
+							WHEN "011" =>
+								-- FBcc.L
+								IF fpu_condition_result = '1' THEN
+									set_datatype <= "10";
+									next_micro_state <= bra1;
+									TG68_PC_brw <= '1';
+								ELSE
+									next_micro_state <= fpu_done;
+								END IF;
+
 							WHEN OTHERS =>
 								next_micro_state <= fpu_done;
 						END CASE;
