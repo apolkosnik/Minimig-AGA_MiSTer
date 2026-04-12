@@ -559,9 +559,9 @@ architecture rtl of TG68K_FPU is
 	-- ACTUAL IMPLEMENTATION: Extract and validate FPCR rounding mode
 	function get_fpcr_rounding_mode(fpcr_val : std_logic_vector(31 downto 0)) return std_logic_vector is
 	begin
-		-- Return rounding mode bits (15:14) if valid
+		-- Return rounding mode bits (5:4) per MC68882 spec
 		if is_fpcr_valid(fpcr_val) then
-			return fpcr_val(15 downto 14);
+			return fpcr_val(5 downto 4);
 		else
 			return "00";  -- Default to Round to Nearest if invalid
 		end if;
@@ -723,7 +723,7 @@ begin
 		-- Operation control
 		start_operation => alu_start_operation,
 		operation_code => alu_operation_code,
-		rounding_mode => fpcr(15 downto 14),
+		rounding_mode => fpcr(5 downto 4),
 		
 		-- Operands
 		operand_a => alu_operand_a,
@@ -1115,6 +1115,12 @@ begin
 	
 	-- Main FPU state machine
 	state_machine: process(clk, nReset)
+		variable v_prec_result : std_logic_vector(79 downto 0);
+		variable v_prec_mant : std_logic_vector(63 downto 0);
+		variable v_prec_guard : std_logic;
+		variable v_prec_sticky : std_logic;
+		variable v_prec_round_up : boolean;
+		variable v_prec_inexact : std_logic;
 	begin
 		if nReset = '0' then
 			fpu_state <= FPU_IDLE;
@@ -2573,6 +2579,7 @@ begin
 						elsif (alu_operation_done = '1' or alu_result_valid = '1') or (trans_operation_done = '1' or trans_result_valid = '1') then
 							-- Reset timeout counter on successful completion
 							timeout_counter <= 0;
+							v_prec_inexact := '0';
 							
 							-- Select result from appropriate unit
 							if trans_operation_done = '1' or trans_result_valid = '1' then
@@ -2817,22 +2824,77 @@ begin
 									end if;
 								end if;
 							elsif fpu_operation /= OP_FTST and fpu_operation /= OP_FCMP then
-								-- Normal result - Store result to destination register (except for FTST/FCMP)
-								-- Bounds check for destination register
+								-- Apply FPCR precision control before register write
+								v_prec_result := result_data;
+								v_prec_inexact := '0';
+								if fpcr(7 downto 6) = "01" then
+									-- Single precision: keep 24-bit mantissa (bits 63:40)
+									v_prec_mant := result_data(63 downto 0);
+									v_prec_guard := v_prec_mant(39);
+									if v_prec_mant(38 downto 0) /= (38 downto 0 => '0') then
+										v_prec_sticky := '1';
+									else
+										v_prec_sticky := '0';
+									end if;
+									if v_prec_guard = '1' or v_prec_sticky = '1' then
+										v_prec_inexact := '1';
+									end if;
+									v_prec_round_up := false;
+									case fpcr(5 downto 4) is
+										when "00" => v_prec_round_up := v_prec_guard = '1' and (v_prec_sticky = '1' or v_prec_mant(40) = '1');
+										when "01" => v_prec_round_up := false;
+										when "10" => v_prec_round_up := result_data(79) = '0' and (v_prec_guard = '1' or v_prec_sticky = '1');
+										when "11" => v_prec_round_up := result_data(79) = '1' and (v_prec_guard = '1' or v_prec_sticky = '1');
+										when others => null;
+									end case;
+									v_prec_mant(39 downto 0) := (others => '0');
+									if v_prec_round_up then
+										v_prec_mant(63 downto 40) := std_logic_vector(unsigned(v_prec_mant(63 downto 40)) + 1);
+									end if;
+									v_prec_result(63 downto 0) := v_prec_mant;
+								elsif fpcr(7 downto 6) = "10" then
+									-- Double precision: keep 53-bit mantissa (bits 63:11)
+									v_prec_mant := result_data(63 downto 0);
+									v_prec_guard := v_prec_mant(10);
+									if v_prec_mant(9 downto 0) /= (9 downto 0 => '0') then
+										v_prec_sticky := '1';
+									else
+										v_prec_sticky := '0';
+									end if;
+									if v_prec_guard = '1' or v_prec_sticky = '1' then
+										v_prec_inexact := '1';
+									end if;
+									v_prec_round_up := false;
+									case fpcr(5 downto 4) is
+										when "00" => v_prec_round_up := v_prec_guard = '1' and (v_prec_sticky = '1' or v_prec_mant(11) = '1');
+										when "01" => v_prec_round_up := false;
+										when "10" => v_prec_round_up := result_data(79) = '0' and (v_prec_guard = '1' or v_prec_sticky = '1');
+										when "11" => v_prec_round_up := result_data(79) = '1' and (v_prec_guard = '1' or v_prec_sticky = '1');
+										when others => null;
+									end case;
+									v_prec_mant(10 downto 0) := (others => '0');
+									if v_prec_round_up then
+										v_prec_mant(63 downto 11) := std_logic_vector(unsigned(v_prec_mant(63 downto 11)) + 1);
+									end if;
+									v_prec_result(63 downto 0) := v_prec_mant;
+								end if;
+								-- Store precision-rounded result to destination register
 								if to_integer(unsigned(dest_reg)) <= 7 then
-									-- Use register file manager interface
 									fp_reg_write_addr <= dest_reg;
-									fp_reg_write_data <= result_data;
+									fp_reg_write_data <= v_prec_result;
 									fp_reg_write_enable <= '1';
 									fp_reg_access_valid <= '1';
-									-- ACTUAL IMPLEMENTATION: Track register allocation
 									fp_reg_allocated(to_integer(unsigned(dest_reg))) <= '1';
 									fp_reg_last_write <= dest_reg;
 								end if;
 							end if;
 							
-							-- Update FPSR condition codes based on result using proper function
-							set_fpsr_condition_codes(fpsr, result_data);
+							-- Update FPSR condition codes based on (possibly precision-rounded) result
+							if fpu_operation /= OP_FTST and fpu_operation /= OP_FCMP and fpcr(7 downto 6) /= "00" and fpcr(7 downto 6) /= "11" then
+								set_fpsr_condition_codes(fpsr, v_prec_result);
+							else
+								set_fpsr_condition_codes(fpsr, result_data);
+							end if;
 							
 							-- Update exception status bits (cleared per-instruction at command_valid)
 							if alu_overflow = '1' then
@@ -2841,7 +2903,7 @@ begin
 							if alu_underflow = '1' then
 								fpsr(11) <= '1';  -- UNFL exception status
 							end if;
-							if alu_inexact = '1' then
+							if alu_inexact = '1' or v_prec_inexact = '1' then
 								fpsr(9) <= '1';  -- INEX2 exception status
 							end if;
 							if alu_invalid = '1' then
@@ -2857,13 +2919,13 @@ begin
 							if alu_overflow = '1' then
 								fpsr(6) <= '1';  -- AE_OVFL: OVFL
 							end if;
-							if alu_underflow = '1' and alu_inexact = '1' then
+							if alu_underflow = '1' and (alu_inexact = '1' or v_prec_inexact = '1') then
 								fpsr(5) <= '1';  -- AE_UNFL: UNFL AND INEX2
 							end if;
 							if alu_divide_by_zero = '1' then
 								fpsr(4) <= '1';  -- AE_DZ: DZ
 							end if;
-							if alu_overflow = '1' or alu_inexact = '1' then
+							if alu_overflow = '1' or alu_inexact = '1' or v_prec_inexact = '1' then
 								fpsr(3) <= '1';  -- AE_INEX: OVFL|INEX2|INEX1
 							end if;
 							
