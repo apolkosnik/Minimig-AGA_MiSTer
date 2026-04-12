@@ -1015,6 +1015,15 @@ BEGIN
             fsave_frame_size_valid_latched <= '0';
           end if;
 
+          -- BERR recovery: abort FSAVE on bus error to prevent further
+          -- frame writes into a faulted address range. The Format $A
+          -- exception frame captures the fault context for the handler.
+          if (make_berr = '1' or trap_berr = '1') and
+             fsave_predecr_state /= FSAVE_PREDECR_IDLE then
+            fsave_predecr_state <= FSAVE_PREDECR_IDLE;
+            fsave_frame_size_valid_latched <= '0';
+          end if;
+
           case fsave_predecr_state is
             when FSAVE_PREDECR_IDLE =>
               -- Activate when fpu2 is processing FSAVE -(An) and SP is aligned.
@@ -1884,6 +1893,9 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 					RDindex_B <= conv_integer(rf_source_addr(3 downto 0));
 					IF Wwrena='1' THEN
 						regfile(RDindex_A) <= regin;
+					END IF;
+					IF fsave_predecr_state = FSAVE_PREDECR_WRITE AND Wwrena='1' THEN
+						regfile(RDindex_A) <= fsave_new_sp;
 					END IF;
 				-- BUG #323 FIX: Direct MOVES mem->CPU register write.
 				-- Writes data_read directly to the destination register during the
