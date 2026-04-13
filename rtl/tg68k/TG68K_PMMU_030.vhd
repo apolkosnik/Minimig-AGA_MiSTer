@@ -1339,9 +1339,10 @@ begin
   -- BUG #371 FIX: Also bypass for TTR transparent translations (phys=log identity mapping)
   -- Without this, the first fetch after MMU enable gets a stale addr_phys_reg
   -- MC68030 UM Figure 9-32: FC=7 (CPU space) is always unmapped (identity)
+  -- MC68030 UM 9.5: TTRs operate independently of TC.E (translation enable)
   addr_phys     <= addr_log when fc = "111"
-                   else addr_log when tc_en = '0'
                    else addr_log when (ttr0_match_comb = '1' or ttr1_match_comb = '1')
+                   else addr_log when tc_en = '0'
                    else addr_phys_reg;
   -- BUG #126 V2 FIX: Combinational bypass for cache_inhibit when MMU disabled
   -- Without this, cache_inhibit_reg retains stale value (pmmu_req='0' when MMU off)
@@ -1350,14 +1351,14 @@ begin
   -- the correct I/O address but stale CI=0 from the previous RAM access and
   -- incorrectly caches I/O data.
   cache_inhibit <= '1' when fc = "111"  -- CPU space always cache-inhibited
-                   else '0' when tc_en = '0'
                    else ttr0_ci_comb when ttr0_match_comb = '1'
                    else ttr1_ci_comb when ttr1_match_comb = '1'
+                   else '0' when tc_en = '0'
                    else cache_inhibit_reg;
   write_protect <= '0' when fc = "111"  -- CPU space never write-protected
-                   else '0' when tc_en = '0'
                    else ttr0_wp_comb when ttr0_match_comb = '1'
                    else ttr1_wp_comb when ttr1_match_comb = '1'
+                   else '0' when tc_en = '0'
                    else write_protect_reg;
   fault         <= '0' when fc = "111" else fault_reg;  -- CPU space never faults
   fault_status  <= fault_status_reg;
@@ -1476,37 +1477,11 @@ begin
             fault_reg          <= '0';
             fault_status_reg   <= (others => '0');
             translation_pending <= '0';
-          elsif tc_en = '0' then
-            -- When page translation is disabled, normal accesses fall back to plain identity.
-            -- TT registers do not continue influencing address/CI/WP on the access path.
-            addr_phys_reg      <= addr_log;
-            translated_addr    <= addr_log;  -- BUG #416
-            translated_fc      <= fc;        -- BUG #416
-            translated_rw      <= rw;
-            translated_cfg_seq <= xlat_cfg_seq;
-            cache_inhibit_reg  <= '0';
-            write_protect_reg  <= '0';
-            fault_reg          <= '0';
-            fault_status_reg   <= encode_mmusr_success(
-              write_protect => '0',
-              modified => '0',
-              transparent => '0',
-              level => "000"
-            );
-            translation_pending <= '0';
           else
-            -- Check Transparent Translation first (highest priority while translation is enabled)
+            -- MC68030 UM 9.5: TTRs operate independently of TC.E (translation enable).
+            -- Check Transparent Translation first (highest priority for all accesses).
             ttr_check(TT0, addr_log, fc, is_insn, rw, tmatch0, tci0, twp0);
             ttr_check(TT1, addr_log, fc, is_insn, rw, tmatch1, tci1, twp1);
-            -- Debug: Log TTR check results for write protection test address
-            if addr_log = x"00002000" then
-              -- report "DEBUG_TTR_WP: addr=0x" & slv_to_hstring(addr_log) &
-                     -- " TT0=0x" & slv_to_hstring(TT0) &
-                     -- " TT1=0x" & slv_to_hstring(TT1) &
-                     -- " tmatch0=" & std_logic'image(tmatch0) &
-                     -- " tmatch1=" & std_logic'image(tmatch1)
-               --  -- severity note;
-            end if;
             if tmatch0 = '1' then
               -- TTR0 match - use identity translation with TTR attributes (always successful, no faults)
               addr_phys_reg      <= addr_log;  -- Identity mapping
@@ -1549,8 +1524,25 @@ begin
               );
               translation_pending <= '0';
               -- No walker needed for TTR
+            elsif tc_en = '0' then
+              -- No TTR match and page translation disabled: plain identity
+              addr_phys_reg      <= addr_log;
+              translated_addr    <= addr_log;
+              translated_fc      <= fc;
+              translated_rw      <= rw;
+              translated_cfg_seq <= xlat_cfg_seq;
+              cache_inhibit_reg  <= '0';
+              write_protect_reg  <= '0';
+              fault_reg          <= '0';
+              fault_status_reg   <= encode_mmusr_success(
+                write_protect => '0',
+                modified => '0',
+                transparent => '0',
+                level => "000"
+              );
+              translation_pending <= '0';
             else
-              -- No TTR match - check ATC and potentially start walker
+              -- No TTR match, tc_en='1' - check ATC and potentially start walker
               hit := '0';
               for i in 0 to ATC_ENTRIES-1 loop
             -- BUG #415: Skip ATC lookup when flush is pending (1-cycle race window)
@@ -2240,7 +2232,7 @@ begin
           limit_violation => '0',
           supervisor_violation => '0',
           write_protect => '0',
-          invalid => '0',
+          invalid => '1',                  -- No valid translation available
           modified => '0',
           transparent => '0',
           level => std_logic_vector(to_unsigned(walk_level, 3))
@@ -2455,7 +2447,7 @@ begin
               limit_violation => '0',
               supervisor_violation => '0',
               write_protect => '0',
-              invalid => '0',                  -- Not invalid - actual bus error
+              invalid => '1',                  -- No valid translation available
               modified => '0',
               transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
@@ -2562,7 +2554,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
@@ -2678,7 +2670,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
@@ -2789,7 +2781,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
@@ -2919,7 +2911,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
@@ -3030,7 +3022,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
@@ -3148,7 +3140,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
@@ -3243,7 +3235,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
@@ -3360,7 +3352,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
@@ -3414,7 +3406,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
@@ -3449,7 +3441,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
@@ -3516,7 +3508,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
@@ -3718,7 +3710,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;
@@ -3758,7 +3750,7 @@ begin
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
-              write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+              write_protect => '0', invalid => '1', modified => '0', transparent => '0',
               level => std_logic_vector(to_unsigned(walk_level, 3))
             );
             wstate <= W_FAULT;

@@ -3178,13 +3178,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						-- before any MMU/bus dispatch for the same instruction.
 						IF TG68_PC(0)='1' THEN
 								-- Address Error (Group 0): odd instruction fetch
-								IF cpu(1) = '1' AND berr_exception_active = '1' THEN
+								IF (cpu(1) = '1' AND berr_exception_active = '1') OR regfile(15)(0) = '1' THEN
 									cpu_halted <= '1';  -- Double fault: halt CPU
 									-- synthesis translate_off
-									report "DOUBLE FAULT: address error during exception - CPU HALTED" severity warning;
+									report "DOUBLE FAULT: address error during exception or odd A7 - CPU HALTED" severity warning;
 									report "HALT_CTX_C: cpu(1)=" & std_logic'image(cpu(1)) &
 									       " TG68_PC(0)=" & std_logic'image(TG68_PC(0)) &
 									       " berr_exception_active=" & std_logic'image(berr_exception_active) &
+									       " A7(0)=" & std_logic'image(regfile(15)(0)) &
 									       " trap_berr=" & bit'image(trap_berr) &
 									       " trap_mmu_berr=" & bit'image(trap_mmu_berr) &
 									       " make_berr=" & std_logic'image(make_berr)
@@ -3209,10 +3210,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						ELSIF make_berr='1' OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0') THEN
 								-- MC68030 Double bus fault detection: bus error while still in berr exception window
 								-- This catches the case where the handler instruction fetch faults
-								IF cpu(1) = '1' AND berr_exception_active = '1' THEN
+								IF (cpu(1) = '1' AND berr_exception_active = '1') OR regfile(15)(0) = '1' THEN
 									cpu_halted <= '1';
 									-- synthesis translate_off
-									report "DOUBLE BUS FAULT: bus error at handler dispatch - CPU HALTED" severity warning;
+									report "DOUBLE BUS FAULT: bus error at handler dispatch or odd A7 - CPU HALTED" severity warning;
 									report "HALT_CTX_B: cpu(1)=" & std_logic'image(cpu(1)) &
 									       " make_berr=" & std_logic'image(make_berr) &
 									       " berr=" & std_logic'image(berr) &
@@ -3221,6 +3222,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									       " pmmu_fault_Bbit=" & std_logic'image(pmmu_fault_stat(15)) &
 									       " trap_berr=" & bit'image(trap_berr) &
 									       " trap_mmu_berr=" & bit'image(trap_mmu_berr) &
+									       " A7(0)=" & std_logic'image(regfile(15)(0)) &
 									       " berr_exception_active=" & std_logic'image(berr_exception_active)
 									       severity warning;
 									-- synthesis translate_on
