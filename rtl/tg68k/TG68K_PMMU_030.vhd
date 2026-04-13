@@ -116,6 +116,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal tc_en  : std_logic; -- translation enable bit (TC[31] in some docs; keep flexible here)
   -- Walker descriptor address register (must persist across clock cycles for W_*_LOW states)
   signal desc_addr_reg : std_logic_vector(31 downto 0) := (others => '0');
+  signal last_mem_rdat : std_logic_vector(31 downto 0) := (others => '0');
   -- MC68030 register write masks (ENABLED for spec compliance)
   -- TC register mask: preserve E(31), SRE(25), FCL(24), and all field bits (23-0), clear reserved bits 30-26
   -- Note: Bit 23 (PS MSB) is forced to 1 in write logic since all valid PS values (8-15) have MSB=1
@@ -1073,54 +1074,40 @@ begin
               atc_flush_req <= '1';
             end if;
           when "10000" =>  -- TC: P-reg 0x10
-            -- MC68030 TC Register Write - exact specification compliance
+            -- MC68030 TC Register Write - compatibility behavior
             -- MC68030 TC bit layout per User's Manual section 9.2.1:
             -- 31: E (Enable), 30-26: Reserved, 25: SRE, 24: FCL
             -- 23-20: PS (Page Size), 19-16: IS (Initial Shift), 15-12: TIA, 11-8: TIB, 7-4: TIC, 3-0: TID
             -- Reserved bits: 30-26 only (all other bits are valid control fields)
-            -- BUG #48 FIX: Validate configuration BEFORE writing TC to prevent lockup
-            -- If configuration is invalid and E=1, clear E bit to prevent MMU activation
-            -- This prevents system lockup from invalid MMU config while still taking exception
             tc_write_val := reg_wdat and TC_WRITE_MASK;
             tc_e := reg_wdat(31);
             if tc_e = '1' then
-              -- Only validate when MMU is being enabled
-              -- MC68030: PS field bit 23 must be 1 for valid page sizes (PS=8-15 all have MSB=1)
-              tc_write_val(23) := '1';
               ps_val := to_integer(unsigned(reg_wdat(23 downto 20)));
               -- Check 1: PS field must be 8-15 (values 0-7 are reserved)
               if ps_val < 8 then
-                -- Invalid PS - clear E bit to prevent MMU activation
+                mmu_config_error <= '0';
                 tc_write_val(31) := '0';
-                -- BUG #405 FIX: Do NOT fire mmu_config_error exception.
-                -- The E-bit clear already prevents lockup. Firing vector 56
-                -- crashes systems without a handler (e.g. AmigaOS).
-                -- The old code (pre-157efce) had a spurious double-write via
-                -- exec(pmmu_wr) that accidentally cleared mmu_config_error
-                -- before the kernel could dispatch the trap, masking this path.
                 -- synthesis translate_off
-                report "MMU_CONFIG: Invalid PS field=" & integer'image(ps_val) & " (must be 8-15), E bit cleared" severity warning;
+                report "MMU_CONFIG: Invalid PS field=" & integer'image(ps_val) &
+                       " (must be 8-15), disabling TC.E for compatibility" severity warning;
                 -- synthesis translate_on
               else
                 -- Check 2: Field sum must equal 32 per MC68030 spec (stop adding TIx at first zero)
                 total_bits := tc_total_bits(reg_wdat);
                 if total_bits /= 32 then
-                  -- Invalid field sum - clear E bit to prevent MMU activation
+                  mmu_config_error <= '0';
                   tc_write_val(31) := '0';
-                  -- BUG #405 FIX: Silent reject (see above)
                   -- synthesis translate_off
-                  report "MMU_CONFIG: Field sum=" & integer'image(total_bits) & " (must be 32), E bit cleared" severity warning;
+                  report "MMU_CONFIG: Field sum=" & integer'image(total_bits) &
+                         " (must be 32), disabling TC.E for compatibility" severity warning;
                   -- synthesis translate_on
                 else
                   mmu_config_error <= '0';
                 end if;
               end if;
             else
-              -- BUG #148 FIX: TC write with E=0 (MMU disabled) clears any previous config error
-              -- This allows exception handlers to acknowledge the error by disabling the MMU
               mmu_config_error <= '0';
             end if;
-            -- Write TC with potentially cleared E bit (prevents lockup on invalid config)
             TC <= tc_write_val;
             report "BUG387_TC_WRITE: tc_val=0x" &
                    integer'image(to_integer(unsigned(tc_write_val(31 downto 16)))) & "_" &
@@ -1237,7 +1224,7 @@ begin
   debug_srp_lo <= SRP_L;
   debug_wstate <= std_logic_vector(to_unsigned(walk_state_t'pos(wstate), 5));
   debug_walk_desc_addr <= desc_addr_reg;
-  debug_walk_desc_data <= walk_desc;
+  debug_walk_desc_data <= last_mem_rdat;
   -- ATC debug: expose buserr and valid flags for all 22 entries
   gen_atc_debug: for i in 0 to ATC_ENTRIES-1 generate
     debug_atc_buserr(i) <= atc_buserr(i);
@@ -1353,8 +1340,8 @@ begin
   -- Without this, the first fetch after MMU enable gets a stale addr_phys_reg
   -- MC68030 UM Figure 9-32: FC=7 (CPU space) is always unmapped (identity)
   addr_phys     <= addr_log when fc = "111"
-                   else addr_log when (ttr0_match_comb = '1' or ttr1_match_comb = '1')
                    else addr_log when tc_en = '0'
+                   else addr_log when (ttr0_match_comb = '1' or ttr1_match_comb = '1')
                    else addr_phys_reg;
   -- BUG #126 V2 FIX: Combinational bypass for cache_inhibit when MMU disabled
   -- Without this, cache_inhibit_reg retains stale value (pmmu_req='0' when MMU off)
@@ -1363,14 +1350,14 @@ begin
   -- the correct I/O address but stale CI=0 from the previous RAM access and
   -- incorrectly caches I/O data.
   cache_inhibit <= '1' when fc = "111"  -- CPU space always cache-inhibited
+                   else '0' when tc_en = '0'
                    else ttr0_ci_comb when ttr0_match_comb = '1'
                    else ttr1_ci_comb when ttr1_match_comb = '1'
-                   else '0' when tc_en = '0'
                    else cache_inhibit_reg;
   write_protect <= '0' when fc = "111"  -- CPU space never write-protected
+                   else '0' when tc_en = '0'
                    else ttr0_wp_comb when ttr0_match_comb = '1'
                    else ttr1_wp_comb when ttr1_match_comb = '1'
-                   else '0' when tc_en = '0'
                    else write_protect_reg;
   fault         <= '0' when fc = "111" else fault_reg;  -- CPU space never faults
   fault_status  <= fault_status_reg;
@@ -1475,87 +1462,32 @@ begin
           -- FC=7 is always unmapped, TTRs operate independently of TC.E, then
           -- fall back to table translation or plain identity when TC.E=0.
           if fc = "111" then
-          -- MC68030 UM 9.5.5.1, Figure 9-32: FC=7 (CPU space) is UNMAPPED.
-          -- CPU space accesses (interrupt acknowledge, breakpoint, etc.) are
-          -- never translated by the MMU, even when translation is enabled.
-          -- Use identity translation with cache inhibit (CPU space is I/O).
-          addr_phys_reg     <= addr_log;
-          translated_addr   <= addr_log;
-          translated_fc     <= fc;
-          translated_rw     <= rw;
-          translated_cfg_seq <= xlat_cfg_seq;
-          cache_inhibit_reg <= '1';  -- CPU space is always cache-inhibited
-          write_protect_reg <= '0';
-          fault_reg         <= '0';
-          fault_status_reg  <= (others => '0');
-          translation_pending <= '0';
-          else
-          -- Check Transparent Translation first (highest priority)
-          ttr_check(TT0, addr_log, fc, is_insn, rw, tmatch0, tci0, twp0);
-          ttr_check(TT1, addr_log, fc, is_insn, rw, tmatch1, tci1, twp1);
-          -- Debug: Log TTR check results for write protection test address
-          if addr_log = x"00002000" then
-            -- report "DEBUG_TTR_WP: addr=0x" & slv_to_hstring(addr_log) &
-                   -- " TT0=0x" & slv_to_hstring(TT0) &
-                   -- " TT1=0x" & slv_to_hstring(TT1) &
-                   -- " tmatch0=" & std_logic'image(tmatch0) &
-                   -- " tmatch1=" & std_logic'image(tmatch1)
-             --  -- severity note;
-          end if;
-          if tmatch0 = '1' then
-            -- TTR0 match - use identity translation with TTR attributes (always successful, no faults)
-            addr_phys_reg <= addr_log;  -- Identity mapping
-            translated_addr <= addr_log;  -- BUG #416
-            translated_fc   <= fc;        -- BUG #416
-            translated_rw   <= rw;
+            -- MC68030 UM 9.5.5.1, Figure 9-32: FC=7 (CPU space) is UNMAPPED.
+            -- CPU space accesses (interrupt acknowledge, breakpoint, etc.) are
+            -- never translated by the MMU, even when translation is enabled.
+            -- Use identity translation with cache inhibit (CPU space is I/O).
+            addr_phys_reg      <= addr_log;
+            translated_addr    <= addr_log;
+            translated_fc      <= fc;
+            translated_rw      <= rw;
             translated_cfg_seq <= xlat_cfg_seq;
-            cache_inhibit_reg <= tci0;
-            write_protect_reg <= twp0;
-            fault_reg <= '0';
-            -- Set successful transparent translation MMUSR with MC68030 format
-            fault_status_reg <= encode_mmusr_success(
-              write_protect => twp0,     -- WP bit from TTR attributes
-              modified => '0',           -- No descriptor access for TTR
-              transparent => '1',        -- This IS a transparent translation
-              level => "000"             -- No table walk for TTR
-            );
-            if addr_log = x"00002000" then
-             --  -- report "TTR0_STATUS: Setting transparent status for addr=0x" & slv_to_hstring(addr_log) severity note;
-            end if;
+            cache_inhibit_reg  <= '1';  -- CPU space is always cache-inhibited
+            write_protect_reg  <= '0';
+            fault_reg          <= '0';
+            fault_status_reg   <= (others => '0');
             translation_pending <= '0';
-            -- No walker needed for TTR
-          elsif tmatch1 = '1' then
-            -- TTR1 match - use identity translation with TTR attributes (always successful, no faults)
-           --  -- assert false report "TTR1 HIT: Setting addr_phys to 0x" & slv_to_hstring(addr_log) severity note;
-            addr_phys_reg <= addr_log;  -- Identity mapping
-            translated_addr <= addr_log;  -- BUG #416
-            translated_fc   <= fc;        -- BUG #416
-            translated_rw   <= rw;
-            translated_cfg_seq <= xlat_cfg_seq;
-            cache_inhibit_reg <= tci1;
-            write_protect_reg <= twp1;
-            fault_reg <= '0';
-            -- Set successful transparent translation MMUSR with MC68030 format
-            fault_status_reg <= encode_mmusr_success(
-              write_protect => twp1,     -- WP bit from TTR attributes
-              modified => '0',           -- No descriptor access for TTR
-              transparent => '1',        -- This IS a transparent translation
-              level => "000"             -- No table walk for TTR
-            );
-            translation_pending <= '0';
-            -- No walker needed for TTR
           elsif tc_en = '0' then
-            -- Table translation disabled and no TTR matched: plain identity
-            -- access, but TTR-independent FC=7 handling already happened above.
-            addr_phys_reg     <= addr_log;
-            translated_addr   <= addr_log;  -- BUG #416
-            translated_fc     <= fc;        -- BUG #416
-            translated_rw     <= rw;
+            -- When page translation is disabled, normal accesses fall back to plain identity.
+            -- TT registers do not continue influencing address/CI/WP on the access path.
+            addr_phys_reg      <= addr_log;
+            translated_addr    <= addr_log;  -- BUG #416
+            translated_fc      <= fc;        -- BUG #416
+            translated_rw      <= rw;
             translated_cfg_seq <= xlat_cfg_seq;
-            cache_inhibit_reg <= '0';
-            write_protect_reg <= '0';
-            fault_reg         <= '0';
-            fault_status_reg <= encode_mmusr_success(
+            cache_inhibit_reg  <= '0';
+            write_protect_reg  <= '0';
+            fault_reg          <= '0';
+            fault_status_reg   <= encode_mmusr_success(
               write_protect => '0',
               modified => '0',
               transparent => '0',
@@ -1563,9 +1495,64 @@ begin
             );
             translation_pending <= '0';
           else
-            -- No TTR match - check ATC and potentially start walker
-          hit := '0';
-          for i in 0 to ATC_ENTRIES-1 loop
+            -- Check Transparent Translation first (highest priority while translation is enabled)
+            ttr_check(TT0, addr_log, fc, is_insn, rw, tmatch0, tci0, twp0);
+            ttr_check(TT1, addr_log, fc, is_insn, rw, tmatch1, tci1, twp1);
+            -- Debug: Log TTR check results for write protection test address
+            if addr_log = x"00002000" then
+              -- report "DEBUG_TTR_WP: addr=0x" & slv_to_hstring(addr_log) &
+                     -- " TT0=0x" & slv_to_hstring(TT0) &
+                     -- " TT1=0x" & slv_to_hstring(TT1) &
+                     -- " tmatch0=" & std_logic'image(tmatch0) &
+                     -- " tmatch1=" & std_logic'image(tmatch1)
+               --  -- severity note;
+            end if;
+            if tmatch0 = '1' then
+              -- TTR0 match - use identity translation with TTR attributes (always successful, no faults)
+              addr_phys_reg      <= addr_log;  -- Identity mapping
+              translated_addr    <= addr_log;  -- BUG #416
+              translated_fc      <= fc;        -- BUG #416
+              translated_rw      <= rw;
+              translated_cfg_seq <= xlat_cfg_seq;
+              cache_inhibit_reg  <= tci0;
+              write_protect_reg  <= twp0;
+              fault_reg          <= '0';
+              -- Set successful transparent translation MMUSR with MC68030 format
+              fault_status_reg <= encode_mmusr_success(
+                write_protect => twp0,     -- WP bit from TTR attributes
+                modified => '0',           -- No descriptor access for TTR
+                transparent => '1',        -- This IS a transparent translation
+                level => "000"             -- No table walk for TTR
+              );
+              if addr_log = x"00002000" then
+               --  -- report "TTR0_STATUS: Setting transparent status for addr=0x" & slv_to_hstring(addr_log) severity note;
+              end if;
+              translation_pending <= '0';
+              -- No walker needed for TTR
+            elsif tmatch1 = '1' then
+              -- TTR1 match - use identity translation with TTR attributes (always successful, no faults)
+             --  -- assert false report "TTR1 HIT: Setting addr_phys to 0x" & slv_to_hstring(addr_log) severity note;
+              addr_phys_reg      <= addr_log;  -- Identity mapping
+              translated_addr    <= addr_log;  -- BUG #416
+              translated_fc      <= fc;        -- BUG #416
+              translated_rw      <= rw;
+              translated_cfg_seq <= xlat_cfg_seq;
+              cache_inhibit_reg  <= tci1;
+              write_protect_reg  <= twp1;
+              fault_reg          <= '0';
+              -- Set successful transparent translation MMUSR with MC68030 format
+              fault_status_reg <= encode_mmusr_success(
+                write_protect => twp1,     -- WP bit from TTR attributes
+                modified => '0',           -- No descriptor access for TTR
+                transparent => '1',        -- This IS a transparent translation
+                level => "000"             -- No table walk for TTR
+              );
+              translation_pending <= '0';
+              -- No walker needed for TTR
+            else
+              -- No TTR match - check ATC and potentially start walker
+              hit := '0';
+              for i in 0 to ATC_ENTRIES-1 loop
             -- BUG #415: Skip ATC lookup when flush is pending (1-cycle race window)
             -- atc_flush_req is set in register write process on edge N, but ATC entries
             -- aren't cleared until edge N+1 (walker process). Without this guard, the
@@ -1773,9 +1760,9 @@ begin
                  --  -- severity note;
               end if;
             end if;
-          end if;
+            end if;
           end if; -- TTR check
-          end if; -- tc_en = '0' vs '1'
+          end if; -- tc_en = '0' vs enabled translation path
         end if; -- fault hold vs new translation
         
       end if; -- req = '1'
@@ -2225,7 +2212,11 @@ begin
       ptr2_desc_data_reg <= (others => '0');
       ptr3_desc_addr_reg <= (others => '0');
       ptr3_desc_data_reg <= (others => '0');
+      last_mem_rdat <= (others => '0');
     elsif rising_edge(clk) then
+      if mem_ack = '1' then
+        last_mem_rdat <= mem_rdat;
+      end if;
       -- BUG #387 FIX: Timeout mechanism to prevent walker deadlocks
       -- Monitor mem_req without mem_ack and force fault after timeout
       if wstate = W_IDLE then
@@ -2282,10 +2273,23 @@ begin
             walk_attr <= (others => '0');
             mem_we <= '0';  -- Clear write enable at start of walk
             desc_update_needed <= '0';  -- Clear descriptor update flag
+            desc_addr_reg <= (others => '0');
+            walk_desc <= (others => '0');
+            walk_desc_high <= (others => '0');
+            walk_desc_low <= (others => '0');
+            walk_desc_is_long <= '0';
+            indirect_addr <= (others => '0');
+            indirect_target_long <= '0';
             walk_limit_valid <= '0';  -- BUG #155: Clear limit tracking at walk start
             walk_supervisor <= '0';  -- BUG #157: Clear cumulative S bit at walk start
             walk_write_protect <= '0';  -- Clear cumulative WP bit at walk start
             walk_is_root_pointer <= '0';  -- Not a root pointer early termination by default
+            ptr1_desc_addr_reg <= (others => '0');
+            ptr1_desc_data_reg <= (others => '0');
+            ptr2_desc_addr_reg <= (others => '0');
+            ptr2_desc_data_reg <= (others => '0');
+            ptr3_desc_addr_reg <= (others => '0');
+            ptr3_desc_data_reg <= (others => '0');
             -- Initialize with TC default, will be updated from descriptor
             walk_page_shift <= tc_page_shift;
             walk_page_size  <= tc_page_size;
@@ -2388,7 +2392,7 @@ begin
                 limit_violation => '1',  -- This is a limit violation
                 supervisor_violation => '0',
                 write_protect => '0',
-                invalid => '0',
+                invalid => '1',
                 modified => '0',
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
@@ -2409,7 +2413,7 @@ begin
                 limit_violation => '1',  -- This is a limit violation
                 supervisor_violation => '0',
                 write_protect => '0',
-                invalid => '0',
+                invalid => '1',
                 modified => '0',
                 transparent => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
@@ -2565,6 +2569,7 @@ begin
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
+            walk_desc <= mem_rdat;
             mem_req <= '0';
            --  -- report "W_ROOT_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
             -- Now we have both HIGH (walk_desc_high) and LOW (walk_desc_low) words
@@ -2576,7 +2581,8 @@ begin
             else
               -- Table descriptor - extract address from LOW word and continue
               -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
-              if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' then
+              if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' and
+                 not (saved_fc(2) = '0' and walk_desc_high(8) = '1') then
                 desc_update_data <= walk_desc_high(31 downto 4) & '1' & walk_desc_high(2 downto 0);
                 walk_next_state <= W_PTR1;
                 walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
@@ -2635,7 +2641,7 @@ begin
                   walker_fault <= '1';
                   walker_fault_status <= encode_mmusr_fault(
                     bus_error => '0', limit_violation => '1', supervisor_violation => '0',
-                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    write_protect => '0', invalid => '1', modified => '0', transparent => '0',
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
@@ -2647,7 +2653,7 @@ begin
                   walker_fault <= '1';
                   walker_fault_status <= encode_mmusr_fault(
                     bus_error => '0', limit_violation => '1', supervisor_violation => '0',
-                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    write_protect => '0', invalid => '1', modified => '0', transparent => '0',
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
@@ -2790,6 +2796,7 @@ begin
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
+            walk_desc <= mem_rdat;
             mem_req <= '0';
            --  -- report "W_PTR1_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
             -- Determine next state based on descriptor type
@@ -2808,7 +2815,8 @@ begin
             else
               -- Table descriptor - extract address from LOW word and continue
               -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
-              if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' then
+              if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' and
+                 not (saved_fc(2) = '0' and walk_desc_high(8) = '1') then
                 desc_update_data <= walk_desc_high(31 downto 4) & '1' & walk_desc_high(2 downto 0);
                 walk_next_state <= W_PTR2;
                 walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
@@ -2867,7 +2875,7 @@ begin
                   walker_fault <= '1';
                   walker_fault_status <= encode_mmusr_fault(
                     bus_error => '0', limit_violation => '1', supervisor_violation => '0',
-                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    write_protect => '0', invalid => '1', modified => '0', transparent => '0',
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
@@ -2879,7 +2887,7 @@ begin
                   walker_fault <= '1';
                   walker_fault_status <= encode_mmusr_fault(
                     bus_error => '0', limit_violation => '1', supervisor_violation => '0',
-                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    write_protect => '0', invalid => '1', modified => '0', transparent => '0',
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
@@ -3029,6 +3037,7 @@ begin
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
+            walk_desc <= mem_rdat;
             mem_req <= '0';
            --  -- report "W_PTR2_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
             -- Determine next state based on descriptor type
@@ -3047,7 +3056,8 @@ begin
             else
               -- Table descriptor - extract address from LOW word and continue
               -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
-              if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' then
+              if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' and
+                 not (saved_fc(2) = '0' and walk_desc_high(8) = '1') then
                 desc_update_data <= walk_desc_high(31 downto 4) & '1' & walk_desc_high(2 downto 0);
                 walk_next_state <= W_PTR3;
                 walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
@@ -3106,7 +3116,7 @@ begin
                   walker_fault <= '1';
                   walker_fault_status <= encode_mmusr_fault(
                     bus_error => '0', limit_violation => '1', supervisor_violation => '0',
-                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    write_protect => '0', invalid => '1', modified => '0', transparent => '0',
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
@@ -3118,7 +3128,7 @@ begin
                   walker_fault <= '1';
                   walker_fault_status <= encode_mmusr_fault(
                     bus_error => '0', limit_violation => '1', supervisor_violation => '0',
-                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    write_protect => '0', invalid => '1', modified => '0', transparent => '0',
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
@@ -3240,6 +3250,7 @@ begin
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete long-format descriptor
             walk_desc_low <= mem_rdat;
+            walk_desc <= mem_rdat;
             mem_req <= '0';
            --  -- report "W_PTR3_LOW: Got LOW word=0x" & slv_to_hstring(mem_rdat) severity note;
             -- Determine next state based on descriptor type
@@ -3257,7 +3268,8 @@ begin
             else
               -- FCL=1 and TID!=0: Continue to W_PTR4 (5th level)
               -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
-              if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' then
+              if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' and
+                 not (saved_fc(2) = '0' and walk_desc_high(8) = '1') then
                 desc_update_data <= walk_desc_high(31 downto 4) & '1' & walk_desc_high(2 downto 0);
                 walk_next_state <= W_PTR4;
                 walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
@@ -3316,7 +3328,7 @@ begin
                   walker_fault <= '1';
                   walker_fault_status <= encode_mmusr_fault(
                     bus_error => '0', limit_violation => '1', supervisor_violation => '0',
-                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    write_protect => '0', invalid => '1', modified => '0', transparent => '0',
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
@@ -3328,7 +3340,7 @@ begin
                   walker_fault <= '1';
                   walker_fault_status <= encode_mmusr_fault(
                     bus_error => '0', limit_violation => '1', supervisor_violation => '0',
-                    write_protect => '0', invalid => '0', modified => '0', transparent => '0',
+                    write_protect => '0', invalid => '1', modified => '0', transparent => '0',
                     level => std_logic_vector(to_unsigned(walk_level, 3))
                   );
                   wstate <= W_FAULT;
@@ -3409,6 +3421,7 @@ begin
           elsif mem_ack = '1' then
             -- Got LOW word - save it and process complete descriptor
             walk_desc_low <= mem_rdat;
+            walk_desc <= mem_rdat;
             mem_req <= '0';
             -- Determine next state based on descriptor type
             if desc_is_page(walk_desc_high) then
@@ -3544,7 +3557,7 @@ begin
               bus_error => '0',
               limit_violation => '0',
               supervisor_violation => '1',     -- This is a supervisor violation
-              write_protect => walk_desc_high(2),   -- Include WP from page descriptor (same position in both formats)
+              write_protect => walk_desc_high(2) or walk_write_protect,
               invalid => '0',                  -- Descriptor is valid
               modified => '0',
               transparent => '0',

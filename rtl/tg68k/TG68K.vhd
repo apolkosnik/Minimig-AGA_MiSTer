@@ -338,6 +338,12 @@ COMPONENT TG68K_Cache_030
    SIGNAL cache_fill_count  : std_logic_vector(2 downto 0);  -- Changed from 1 downto 0 to support 8-word fills
    SIGNAL cache_fill_buffer : std_logic_vector(127 downto 0);
    SIGNAL cache_fill_complete : std_logic;  -- One-cycle pulse when fill is complete
+   SIGNAL cache_fill_owner_i : std_logic;
+   SIGNAL cache_fill_addr_latched : std_logic_vector(31 downto 0);
+   SIGNAL fill_pending_i : std_logic;
+   SIGNAL fill_pending_d : std_logic;
+   SIGNAL cache_fill_start : std_logic;
+   SIGNAL cache_fill_accept : std_logic;
    SIGNAL byte_enables      : std_logic_vector(3 downto 0);  -- Dynamic byte enables based on UDS/LDS
 
    type sync_state_t is (sync0, sync1, sync2, sync3, sync4, sync5, sync6, sync7, sync8, sync9);
@@ -693,8 +699,8 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
    --i_cache_req <= '1' when (state="00" and CPU(1)='1' and cacr_ie='1') else '0';
    i_cache_req <= '1' when (state="00" and CPU(1)='1' and cacr_ie='1') else '0';
    i_fill_data <= cache_fill_buffer;
-   -- Use registered completion signal to ensure buffer is fully filled before asserting valid
-   i_fill_valid <= cache_fill_complete;
+   -- Route fill completion only to the cache that owns the outstanding burst.
+   i_fill_valid <= cache_fill_complete and cache_fill_owner_i;
 
    d_cache_addr <= ADDR;
    -- Data cache request only when CPU is 68030 AND cacr_de is enabled
@@ -703,8 +709,7 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
    d_cache_we <= not wr;
    d_cache_data_in <= data_write & data_write;  -- Replicate 16-bit data to 32-bit
    d_fill_data <= cache_fill_buffer;
-   -- Use registered completion signal to ensure buffer is fully filled before asserting valid
-   d_fill_valid <= cache_fill_complete;
+   d_fill_valid <= cache_fill_complete and not cache_fill_owner_i;
 
    -- Calculate byte enables from UDS/LDS
    -- For 68030, the cache module needs to know which bytes are being written
@@ -719,17 +724,25 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
    cache_hit <= (i_cache_hit and i_cache_req) or (d_cache_hit and d_cache_req);
    cache_miss <= ((not i_cache_hit and i_cache_req) or (not d_cache_hit and d_cache_req)) when cache_enabled='1' else '0';
 
+   fill_pending_i <= i_fill_req and cacr_ibe;
+   fill_pending_d <= d_fill_req and cacr_dbe;
+
    -- Cache memory interface - connect to SDRAM controller
-   cache_req <= (i_fill_req or d_fill_req) when cache_enabled='1' else '0';
-   cache_addr <= i_fill_addr when i_fill_req='1' else d_fill_addr;
+   cache_req <= (cache_fill_active or (fill_pending_i or fill_pending_d)) when cache_enabled='1' else '0';
+   cache_addr <= cache_fill_addr_latched when cache_fill_active='1' else
+                 i_fill_addr when fill_pending_i='1' else
+                 d_fill_addr;
 
    -- Burst mode control
    -- When IBE=1 (instruction) or DBE=1 (data), request burst transfer of 8 words
    -- Otherwise, request individual word transfers
    cache_burst <= '1' when (cache_enabled='1' and
-                            ((i_fill_req='1' and cacr_ibe='1') or
-                             (d_fill_req='1' and cacr_dbe='1'))) else '0';
+                            (cache_fill_active='1' or fill_pending_i='1' or fill_pending_d='1')) else '0';
    cache_burst_len <= "111";  -- Always request 8 words (128-bit cache line)
+
+   cache_fill_start <= '1' when (cache_fill_active='0' and cache_enabled='1' and
+                                 (fill_pending_i='1' or fill_pending_d='1') and cache_ack='1') else '0';
+   cache_fill_accept <= '1' when (cache_fill_active='1' and cache_ack='1') else '0';
 
    -- Cache fill process - accumulate 8 words into 128-bit cache line
    -- MC68030 cache lines are 16 bytes (128 bits) = 8 words of 16 bits each
@@ -740,29 +753,32 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
          cache_fill_count <= "000";
          cache_fill_buffer <= (others => '0');
          cache_fill_complete <= '0';
+         cache_fill_owner_i <= '0';
+         cache_fill_addr_latched <= (others => '0');
       ELSIF rising_edge(CLK) THEN
          -- Default: clear completion pulse
          cache_fill_complete <= '0';
 
-         IF cache_req='1' and cache_ack='1' THEN
-            -- Start cache fill sequence
-            IF cache_fill_active='0' THEN
-               cache_fill_active <= '1';
-               cache_fill_count <= "000";
+         IF cache_fill_start='1' THEN
+            cache_fill_active <= '1';
+            cache_fill_count <= "000";
+            cache_fill_owner_i <= fill_pending_i;
+            IF fill_pending_i='1' THEN
+               cache_fill_addr_latched <= i_fill_addr;
+            ELSE
+               cache_fill_addr_latched <= d_fill_addr;
             END IF;
-         END IF;
-
-         IF cache_fill_active='1' and cache_ack='1' THEN
+            cache_fill_buffer(15 downto 0) <= cache_data;
+         ELSIF cache_fill_accept='1' THEN
             -- Accumulate 16-bit words into 128-bit cache line (8 words total)
             CASE cache_fill_count IS
-               WHEN "000" => cache_fill_buffer(15 downto 0)    <= cache_data;
-               WHEN "001" => cache_fill_buffer(31 downto 16)   <= cache_data;
-               WHEN "010" => cache_fill_buffer(47 downto 32)   <= cache_data;
-               WHEN "011" => cache_fill_buffer(63 downto 48)   <= cache_data;
-               WHEN "100" => cache_fill_buffer(79 downto 64)   <= cache_data;
-               WHEN "101" => cache_fill_buffer(95 downto 80)   <= cache_data;
-               WHEN "110" => cache_fill_buffer(111 downto 96)  <= cache_data;
-               WHEN "111" => cache_fill_buffer(127 downto 112) <= cache_data;
+               WHEN "000" => cache_fill_buffer(31 downto 16)   <= cache_data;
+               WHEN "001" => cache_fill_buffer(47 downto 32)   <= cache_data;
+               WHEN "010" => cache_fill_buffer(63 downto 48)   <= cache_data;
+               WHEN "011" => cache_fill_buffer(79 downto 64)   <= cache_data;
+               WHEN "100" => cache_fill_buffer(95 downto 80)   <= cache_data;
+               WHEN "101" => cache_fill_buffer(111 downto 96)  <= cache_data;
+               WHEN "110" => cache_fill_buffer(127 downto 112) <= cache_data;
                              cache_fill_active <= '0';
                              -- Generate completion pulse AFTER last word is stored
                              cache_fill_complete <= '1';

@@ -506,6 +506,15 @@ architecture logic of TG68KdotC_Kernel is
 	signal rte_saved_sr_high : std_logic_vector(7 downto 0); -- SR high byte before RTE
 	signal a7_is_msp        : std_logic;  -- Tracks which supervisor shadow A7 corresponds to (1=MSP, 0=ISP)
 	signal rte_saved_ccr    : std_logic_vector(7 downto 0);  -- BUG #397: CCR before RTE directSR
+	signal rte_mmu_fix_capture_active : std_logic := '0';
+	signal rte_mmu_fix_armed : std_logic := '0';
+	signal rte_mmu_fix_long_index : integer range 0 to 31 := 0;
+	signal rte_mmu_fix_ssw : std_logic_vector(15 downto 0) := (others => '0');
+	signal rte_mmu_fix_opcode : std_logic_vector(15 downto 0) := (others => '0');
+	signal rte_mmu_fix_input_buffer : std_logic_vector(31 downto 0) := (others => '0');
+	signal rte_mmu_fix_write : std_logic := '0';
+	signal rte_mmu_fix_dest : std_logic_vector(2 downto 0) := (others => '0');
+	signal rte_mmu_fix_size : std_logic_vector(1 downto 0) := (others => '0');
 	signal restore_ccr_sig  : std_logic;  -- BUG #397: Pulse to restore CCR on format error
 	-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not used on MC68030
 	-- Format Error debug latch signals
@@ -1034,10 +1043,8 @@ BEGIN
                      pmmu_dn_data;
 
   -- Drive PMMU request metadata
-  -- Suppress pmmu_req when bus cycle is suppressed due to odd PC (address alignment error).
-  -- busstate is overridden to "01" when state="00" AND TG68_PC(0)='1', but internal state stays "00",
-  -- so without this guard pmmu_req fires and the walker may fault on unmapped pages, causing
-  -- make_berr to override trap_addr_error in the setinterrupt priority chain.
+  -- Suppress pmmu_req for odd instruction fetches, because vector 3 must win
+  -- before the MMU or external bus sees the cycle.
   pmmu_req      <= '1' when (state /= "01" and pmmu_tc_en = '1'
                              and not (state = "00" and TG68_PC(0) = '1')) else '0';
   pmmu_is_insn  <= '1' when state = "00" else '0';
@@ -1368,8 +1375,7 @@ ALU: TG68K_ALU
 
 
 	nWr <= '0' WHEN state="11" AND pmmu_busy='0' ELSE '1';
-	-- Suppress instruction fetch bus cycle when PC is odd (address error).
-	-- On real MC68030, the misalignment is detected before AS* assertion.
+	-- Suppress bus cycles only for odd instruction fetch address errors before AS* assertion.
 	busstate <= "01" WHEN (state="00" AND TG68_PC(0)='1') OR pmmu_busy='1' ELSE state;
 	nResetOut <= '0' WHEN exec(opcRESET)='1' ELSE '1';
 	
@@ -1407,6 +1413,30 @@ ALU: TG68K_ALU
 			END IF;
 		END IF;
 	END PROCESS;
+
+	rte_mmu_fix_dest <= rte_mmu_fix_opcode(11 downto 9);
+	rte_mmu_fix_size <= "00" when rte_mmu_fix_opcode(15 downto 12) = "0001" else
+	                   "10" when rte_mmu_fix_opcode(15 downto 12) = "0010" else
+	                   "01";
+	rte_mmu_fix_write <= '1' when
+		rte_mmu_fix_armed = '1' AND
+		micro_state = rte5 AND
+		rot_cnt = "000001" AND
+		rte_format_word(15 downto 12) = "1011" AND
+		rte_mmu_fix_ssw(9) = '1' AND
+		rte_mmu_fix_ssw(8) = '0' AND
+		rte_mmu_fix_ssw(7) = '0' AND
+		rte_mmu_fix_ssw(6) = '1' AND
+		-- MOVE.{B,W,L} to Dn (mode 000)
+		((rte_mmu_fix_opcode(8 downto 6) = "000" AND
+		  (rte_mmu_fix_opcode(15 downto 12) = "0001" OR
+		   rte_mmu_fix_opcode(15 downto 12) = "0010" OR
+		   rte_mmu_fix_opcode(15 downto 12) = "0011")) OR
+		-- MOVEA.{W,L} to An (mode 001, no byte form)
+		 (rte_mmu_fix_opcode(8 downto 6) = "001" AND
+		  (rte_mmu_fix_opcode(15 downto 12) = "0010" OR
+		   rte_mmu_fix_opcode(15 downto 12) = "0011")))
+		else '0';
 			
 PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, memread, memmask, data_read)
 	BEGIN
@@ -1520,6 +1550,64 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 		END IF;
 	END PROCESS;
 
+	-- Capture the frame words that MMU software-fix handlers modify before RTE.
+	-- WinUAE uses the stacked long Format $B frame to complete software-fixed
+	-- data faults after the handler clears DF and stores repaired input data.
+	PROCESS (clk)
+	BEGIN
+		IF rising_edge(clk) THEN
+			IF Reset='1' THEN
+				rte_mmu_fix_capture_active <= '0';
+				rte_mmu_fix_armed <= '0';
+				rte_mmu_fix_long_index <= 0;
+				rte_mmu_fix_ssw <= (others => '0');
+				rte_mmu_fix_opcode <= (others => '0');
+				rte_mmu_fix_input_buffer <= (others => '0');
+			ELSIF clkena_lw='1' THEN
+				IF trapmake='1' THEN
+					rte_mmu_fix_capture_active <= '0';
+					rte_mmu_fix_long_index <= 0;
+					IF trap_mmu_berr='1' AND berr_ssw(8)='1' AND berr_ssw(9)='1' AND berr_ssw(6)='1' THEN
+						rte_mmu_fix_armed <= '1';
+					ELSE
+						rte_mmu_fix_armed <= '0';
+					END IF;
+				ELSIF setopcode='1' THEN
+					rte_mmu_fix_capture_active <= '0';
+					rte_mmu_fix_long_index <= 0;
+				ELSIF micro_state = rte4 THEN
+					IF rte_mmu_fix_armed = '1' AND rte_format_word(15 downto 12) = "1011" THEN
+						rte_mmu_fix_capture_active <= '1';
+						rte_mmu_fix_long_index <= 0;
+						rte_mmu_fix_ssw <= (others => '0');
+						rte_mmu_fix_opcode <= (others => '0');
+						rte_mmu_fix_input_buffer <= (others => '0');
+					ELSE
+						rte_mmu_fix_capture_active <= '0';
+						rte_mmu_fix_long_index <= 0;
+					END IF;
+				ELSIF micro_state = rte5 AND rte_mmu_fix_capture_active = '1' THEN
+					CASE rte_mmu_fix_long_index IS
+						WHEN 0 =>
+							rte_mmu_fix_ssw <= data_read(15 downto 0);      -- SP+$0A after unwind starts at $08 longword
+						WHEN 3 =>
+							rte_mmu_fix_opcode <= data_read(15 downto 0);   -- SP+$14 low word
+						WHEN 9 =>
+							rte_mmu_fix_input_buffer <= data_read;           -- SP+$2C data input buffer
+						WHEN OTHERS =>
+							NULL;
+					END CASE;
+					IF rot_cnt = "000001" THEN
+						rte_mmu_fix_capture_active <= '0';
+						rte_mmu_fix_armed <= '0';
+					ELSE
+						rte_mmu_fix_long_index <= rte_mmu_fix_long_index + 1;
+					END IF;
+				END IF;
+			END IF;
+		END IF;
+	END PROCESS;
+
 PROCESS (long_start, reg_QB, data_write_tmp, exec, data_read, data_write_mux, memmaskmux, bf_ext_out,
 		 data_write_muxin, memmask, oddout, addr,
 		 moves_bus_pending, moves_direction, moves_reg, addsub_q, opcode)
@@ -1585,7 +1673,7 @@ PROCESS (long_start, reg_QB, data_write_tmp, exec, data_read, data_write_mux, me
 -----------------------------------------------------------------------------
 -- Registerfile
 -----------------------------------------------------------------------------
-PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
+PROCESS (clk, regfile, RDindex_A, RDindex_B, exec, rte_mmu_fix_write, rte_mmu_fix_dest, rte_mmu_fix_size, rte_mmu_fix_input_buffer, rte_mmu_fix_opcode)
 	BEGIN
 		reg_QA <= regfile(RDindex_A);
 		reg_QB <= regfile(RDindex_B);
@@ -1627,6 +1715,26 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec)
 						WHEN OTHERS =>  -- Long: write full 32 bits
 							regfile(conv_integer(moves_reg)) <= data_read;
 					END CASE;
+				END IF;
+				IF rte_mmu_fix_write = '1' THEN
+					IF rte_mmu_fix_opcode(8 downto 6) = "001" THEN
+						-- MOVEA to An: always 32-bit write, sign-extend for word
+						IF rte_mmu_fix_size = "01" THEN  -- MOVEA.W: sign-extend 16->32
+							regfile(conv_integer('1' & rte_mmu_fix_dest)) <= (31 downto 16 => rte_mmu_fix_input_buffer(15)) & rte_mmu_fix_input_buffer(15 downto 0);
+						ELSE  -- MOVEA.L
+							regfile(conv_integer('1' & rte_mmu_fix_dest)) <= rte_mmu_fix_input_buffer;
+						END IF;
+					ELSE
+						-- MOVE to Dn: size-dependent partial write
+						CASE rte_mmu_fix_size IS
+							WHEN "00" =>  -- Byte
+								regfile(conv_integer('0' & rte_mmu_fix_dest))(7 downto 0) <= rte_mmu_fix_input_buffer(7 downto 0);
+							WHEN "01" =>  -- Word
+								regfile(conv_integer('0' & rte_mmu_fix_dest))(15 downto 0) <= rte_mmu_fix_input_buffer(15 downto 0);
+							WHEN OTHERS =>  -- Long
+								regfile(conv_integer('0' & rte_mmu_fix_dest)) <= rte_mmu_fix_input_buffer;
+						END CASE;
+					END IF;
 				END IF;
 				-- MC68030: M-bit swap for MOVE to SR / ANDI to SR / ORI to SR / EORI to SR.
 				-- exec(to_SR) fires exactly once per instruction; SRin is the new SR value.
@@ -3066,9 +3174,39 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						-- BUG #393 FIX: MC68030 UM 8.1 exception priority:
 						-- Group 0 (highest): Reset, Address Error, Bus Error
 						-- Group 1: Trace, Interrupt, Illegal, Privilege
-						-- Address error and bus error must be checked BEFORE trace.
+						-- Odd instruction fetch address errors are Group 0 and must win
+						-- before any MMU/bus dispatch for the same instruction.
+						IF TG68_PC(0)='1' THEN
+								-- Address Error (Group 0): odd instruction fetch
+								IF cpu(1) = '1' AND berr_exception_active = '1' THEN
+									cpu_halted <= '1';  -- Double fault: halt CPU
+									-- synthesis translate_off
+									report "DOUBLE FAULT: address error during exception - CPU HALTED" severity warning;
+									report "HALT_CTX_C: cpu(1)=" & std_logic'image(cpu(1)) &
+									       " TG68_PC(0)=" & std_logic'image(TG68_PC(0)) &
+									       " berr_exception_active=" & std_logic'image(berr_exception_active) &
+									       " trap_berr=" & bit'image(trap_berr) &
+									       " trap_mmu_berr=" & bit'image(trap_mmu_berr) &
+									       " make_berr=" & std_logic'image(make_berr)
+									       severity warning;
+									-- synthesis translate_on
+								ELSE
+								trap_addr_error <= '1';
+								berr_exception_active <= '1';
+								berr_long_frame <= '1';
+								-- Address error frame data for berr1-berr8
+								berr_fault_addr <= TG68_PC;  -- Odd instruction fetch address
+								berr_data_out_saved <= (others => '0');
+								-- SSW for odd instruction fetch address error
+								berr_ssw <= (others => '0');
+								berr_ssw(2 downto 0) <= fc_internal;  -- FC
+								berr_ssw(6) <= '1';           -- RW=1 (read)
+								berr_ssw(5 downto 4) <= "10"; -- SIZE=word
+								berr_ssw(14) <= '1';  -- FB=1: stage B (prefetch) fault
+								berr_ssw(12) <= '1';  -- RB=1: prefetch will be rerun
+								END IF;
 						-- BUG #400 FIX: Also check pmmu_fault directly for same-cycle dispatch
-							IF make_berr='1' OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0') THEN
+						ELSIF make_berr='1' OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0') THEN
 								-- MC68030 Double bus fault detection: bus error while still in berr exception window
 								-- This catches the case where the handler instruction fetch faults
 								IF cpu(1) = '1' AND berr_exception_active = '1' THEN
@@ -3147,6 +3285,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 										berr_ssw(13) <= '1';  -- RC=1: stage C bus cycle will be rerun
 										berr_ssw(12) <= '0';  -- RB=0: not stage B
 										berr_ssw(8) <= '1';   -- DF=1
+										berr_ssw(9) <= '1';   -- Software-fix handshake bit for MMU data faults
 										-- SIZE from datatype latched at PMMU fault first-fire
 										case v_pmmu_datatype is
 											when "00" => berr_ssw(5 downto 4) <= "01";  -- Byte
@@ -3176,43 +3315,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									berr_ssw(11 downto 9) <= "000"; -- Reserved
 									berr_ssw(7) <= exec_tas OR exec_cas;  -- RM: read-modify-write (TAS/CAS/CAS2)
 									berr_ssw(3) <= '0';
-								end if;
-							END IF;
-							ELSIF TG68_PC(0)='1' THEN
-								-- Address Error (Group 0): odd instruction fetch address
-								IF cpu(1) = '1' AND berr_exception_active = '1' THEN
-									cpu_halted <= '1';  -- Double fault: halt CPU
-									-- synthesis translate_off
-									report "DOUBLE FAULT: address error during exception - CPU HALTED" severity warning;
-									report "HALT_CTX_C: cpu(1)=" & std_logic'image(cpu(1)) &
-									       " TG68_PC(0)=" & std_logic'image(TG68_PC(0)) &
-									       " berr_exception_active=" & std_logic'image(berr_exception_active) &
-									       " trap_berr=" & bit'image(trap_berr) &
-									       " trap_mmu_berr=" & bit'image(trap_mmu_berr) &
-									       " make_berr=" & std_logic'image(make_berr)
-									       severity warning;
-									-- synthesis translate_on
-								ELSE
-								trap_addr_error <= '1';
-								berr_exception_active <= '1';
-								berr_long_frame <= '1';
-								-- Address error frame data for berr1-berr8
-								berr_fault_addr <= TG68_PC;  -- The odd address
-								berr_data_out_saved <= (others => '0');
-								-- SSW: address error - distinguish instruction fetch vs data access
-								berr_ssw <= (others => '0');
-								berr_ssw(6) <= '1';           -- RW=1 (read)
-								berr_ssw(5 downto 4) <= "10"; -- SIZE=word
-								berr_ssw(2 downto 0) <= fc_internal;  -- FC
-								if fc_internal(1) = '1' then
-									-- Instruction fetch address error (program space FC)
-									berr_ssw(14) <= '1';  -- FB=1: stage B (prefetch) fault
-									berr_ssw(12) <= '1';  -- RB=1: prefetch will be rerun
-								else
-									-- Data access address error
-									berr_ssw(15) <= '1';  -- FC=1: stage C fault
-									berr_ssw(13) <= '1';  -- RC=1: rerunnable
-									berr_ssw(8) <= '1';   -- DF=1: data fault
 								end if;
 							END IF;
 						ELSIF make_trace='1' OR (make_trace_t0='1' AND v_is_cof='1') THEN
@@ -7284,7 +7386,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                         datatype <= "10"; -- Longword
                                         next_micro_state <= pmove_dn_hi;
                                     ELSE
-                                        -- BUG #361 FIX: Use setstate=01 + idle with fline_context_valid
                                         setstate <= "00";
                                         next_micro_state <= idle;
                                     END IF;
@@ -7561,10 +7662,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         next_micro_state <= pmove_mem_to_mmu_lo;
                     ELSE
                         -- 32-bit register (TC, TT0, TT1, MMUSR) - single transfer complete
-                        -- Retire through one nop stage, not straight to idle.
-                        -- With the translated-fetch memmask hold in place, a single nop keeps
-                        -- setendOPC aligned to the opcode beat ($F000) rather than the
-                        -- following brief word ($2400) of the first post-enable PFLUSHA.
                         -- BUG #389 FIX: exec_write_back is cleared in clocked process (line 2684-2694).
                         -- exec_write_back was set when transitioning to pmove_mem_to_mmu_hi (line 2687).
                         -- setendOPC requires (exec_write_back='0' OR state="11"), but state="10" from EA read.
@@ -7794,7 +7891,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                     set(pmmu_pflush) <= '1';
                     set(OP1addr) <= '1';  -- BUG #393 FIX: Route addr to OP1out for pmmu_cmd_addr
                     setstate <= "01";  -- No fetch cycle - prevents PC over-increment
-                    IF pmmu_busy = '1' THEN
+                    -- Match the ptest/pload guard: keep the live issue state until the
+                    -- request has actually reached exec(), otherwise the PMMU can see the
+                    -- retired fetch path instead of the command EA/FC inputs.
+                    IF exec(pmmu_pflush) = '0' OR pmmu_busy = '1' THEN
                         next_micro_state <= pflush1;
                     ELSE
                         -- BUG #370 FIX: Use two-phase retirement (same as ptest1)

@@ -352,6 +352,30 @@ begin
             test_fail_count <= test_fail_count + 1;
         end if;
 
+        -- Step 14B: With TC disabled, TT registers must not keep low-memory accesses cache-inhibited.
+        report "Step 14B: TT must not affect accesses when TC.E=0" severity note;
+        write_reg(SEL_TT0, x"00008514", '0');  -- enabled low-16MB transparent window, CI=1
+        wait_cycles(2);
+        addr_log <= x"00DC0000";
+        fc <= "101";  -- supervisor data
+        rw <= '1';
+        req <= '1';
+        wait_cycles(1);
+        req <= '0';
+        wait_cycles(4);
+        if addr_phys = x"00DC0000" and cache_inhibit = '0' and write_protect = '0' and fault = '0' then
+            report "  -> TC disabled correctly bypassed TT for $00DC0000" severity note;
+            test_pass_count <= test_pass_count + 1;
+        else
+            report "  -> TC disabled still showed TT behavior: phys=0x" & slv_to_hex(addr_phys) &
+                   " CI=" & std_logic'image(cache_inhibit) &
+                   " WP=" & std_logic'image(write_protect) &
+                   " fault=" & std_logic'image(fault) severity error;
+            test_fail_count <= test_fail_count + 1;
+        end if;
+        write_reg(SEL_TT0, x"00000000", '0');
+        wait_cycles(2);
+
         -- Step 15: PFLUSHA final
         report "Step 15: PFLUSHA - Final flush" severity note;
         do_pflush;

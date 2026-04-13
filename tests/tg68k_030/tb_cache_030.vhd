@@ -368,9 +368,42 @@ begin
     
     test_i_access(x"00001000"); -- Should miss after invalidate
     report_test("CINV Invalidate", i_hit = '0');
-    
-    -- TEST 7: Cache Freeze
-    write(l, string'("TEST 7: Cache Freeze Testing"));
+    i_req <= '0';
+    wait_cycles(1);
+
+    -- TEST 7: Simultaneous I/D Misses
+    write(l, string'("TEST 7: Simultaneous I/D Miss Ownership"));
+    writeline(output, l);
+    wait_cycles(10); -- Let the post-invalidate refill settle before overlap testing
+
+    i_addr <= x"00004000";
+    i_addr_phys <= x"00004000";
+    d_addr <= x"00005000";
+    d_addr_phys <= x"00005000";
+    i_req <= '1';
+    d_req <= '1';
+    d_we <= '0';
+    wait until rising_edge(clk);
+    wait until rising_edge(clk);
+    report_test("I/D Fill Requests Overlap", i_fill_req = '1' and d_fill_req = '1');
+    report_test("I/D Fill Addresses Stay Distinct",
+      i_fill_addr = x"00004000" and d_fill_addr = x"00005000");
+    i_req <= '0';
+    d_req <= '0';
+    wait_cycles(20);
+
+    test_i_access(x"00004000");
+    report_test("I-Fill Completes After Overlap", i_hit = '1');
+    i_req <= '0';
+    wait_cycles(1);
+
+    test_d_read(x"00005000");
+    report_test("D-Fill Completes After Overlap", d_hit = '1');
+    d_req <= '0';
+    wait_cycles(1);
+
+    -- TEST 8: Cache Freeze
+    write(l, string'("TEST 8: Cache Freeze Testing"));
     writeline(output, l);
     
     cacr_ifreeze <= '1';

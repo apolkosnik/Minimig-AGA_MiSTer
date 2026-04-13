@@ -147,12 +147,14 @@ architecture behavior of tb_mmu_library_enable_probe is
     constant ROOT_ADDR       : integer := 16#3000#;
     constant RESULT_ADDR     : integer := 16#3040#;
     constant INVALID_RESULT_ADDR : integer := 16#3050#;
+    constant INVALID_HANDLER_ADDR : integer := 16#0500#;
     constant SUPV_PROG_PHYS_BASE : integer := 16#8000#;
     constant USER_PAGE_ADDR  : integer := 16#F80000#;
     constant EXPECTED_DATA   : std_logic_vector(31 downto 0) := x"DEADF00D";
     constant INVALID_TC_VALUE : std_logic_vector(31 downto 0) := x"810F9800";
-    constant INVALID_TC_STORED : std_logic_vector(31 downto 0) := x"018F9800";
+    constant INVALID_TC_STORED : std_logic_vector(31 downto 0) := x"010F9800";
     constant INVALID_MARKER  : std_logic_vector(31 downto 0) := x"1BADB002";
+    constant INVALID_FALLTHRU_MARKER : std_logic_vector(31 downto 0) := x"BAD0EC00";
     constant RTC_SRE_TC_ADDR : integer := 16#1130#;
     constant RTC_CRP_ADDR    : integer := 16#1140#;
     constant RTC_SRP_ADDR    : integer := 16#1150#;
@@ -661,10 +663,10 @@ begin
         emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(INVALID_TC_ADDR, 32))); -- MOVEA.L #invalid_tc,A7
         emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
         emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
-        emit_word(pc, x"23FC"); emit_long(pc, INVALID_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32))); -- marker
+        emit_word(pc, x"23FC"); emit_long(pc, INVALID_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32)));
         emit_word(pc, x"60FE");                              -- BRA.S * (stay alive if we get here)
 
-        report "=== invalid TC reject control ===" severity note;
+        report "=== invalid TC config exception control ===" severity note;
 
         clear_monitors <= '1';
         nReset <= '0';
@@ -679,15 +681,15 @@ begin
 
         actual := read_long(INVALID_RESULT_ADDR);
         if actual = INVALID_MARKER then
-            report "PASS: invalid TC did not lock execution after PMOVE/PFLUSHA" severity note;
+            report "PASS: invalid TC stayed rejected and MMU remained disabled" severity note;
             pass_count := pass_count + 1;
         else
-            report "FAIL: invalid TC path did not reach marker, got=$" & slv_to_hex(actual) severity error;
+            report "FAIL: invalid TC path did not complete, got=$" & slv_to_hex(actual) severity error;
             fail_count := fail_count + 1;
         end if;
 
         if dbg_pmmu_tc = INVALID_TC_STORED then
-            report "PASS: invalid TC stored as rejected value $" & slv_to_hex(INVALID_TC_STORED) severity note;
+            report "PASS: invalid TC stored with E cleared $" & slv_to_hex(INVALID_TC_STORED) severity note;
             pass_count := pass_count + 1;
         else
             report "FAIL: invalid TC stored as $" & slv_to_hex(dbg_pmmu_tc) &
@@ -696,10 +698,10 @@ begin
         end if;
 
         if dbg_pmmu_tc(31) = '0' then
-            report "PASS: invalid TC kept MMU disabled" severity note;
+            report "PASS: invalid TC cleared E bit in register image" severity note;
             pass_count := pass_count + 1;
         else
-            report "FAIL: invalid TC left MMU enabled" severity error;
+            report "FAIL: invalid TC did not clear TC.E in register image" severity error;
             fail_count := fail_count + 1;
         end if;
 
@@ -720,10 +722,10 @@ begin
         emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(INVALID_TC_ADDR, 32))); -- MOVEA.L #invalid_tc,A7
         emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
         emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
-        emit_word(pc, x"23FC"); emit_long(pc, INVALID_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32))); -- marker
+        emit_word(pc, x"23FC"); emit_long(pc, INVALID_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32)));
         emit_word(pc, x"60FE");                              -- BRA.S * (stay alive if we get here)
 
-        report "=== invalid TC after CRP load control ===" severity note;
+        report "=== invalid TC after CRP load config exception control ===" severity note;
 
         nReset <= '1';
 
@@ -734,10 +736,10 @@ begin
 
         actual := read_long(INVALID_RESULT_ADDR);
         if actual = INVALID_MARKER then
-            report "PASS: invalid TC after CRP did not lock execution" severity note;
+            report "PASS: invalid TC after CRP stayed rejected and MMU remained disabled" severity note;
             pass_count := pass_count + 1;
         else
-            report "FAIL: invalid TC after CRP path did not reach marker, got=$" & slv_to_hex(actual) severity error;
+            report "FAIL: invalid TC after CRP path did not complete, got=$" & slv_to_hex(actual) severity error;
             fail_count := fail_count + 1;
         end if;
 

@@ -501,6 +501,8 @@ wire  [2:0] stp_saved_fc_w;
 (* noprune, preserve *) reg [31:0] stp_fault_ptr3_desc_addr;
 (* noprune, preserve *) reg [31:0] stp_fault_ptr3_desc_data;
 (* noprune, preserve *) reg  [2:0] stp_fault_fc;
+wire [0:0] pmmu_issp_source;
+wire [0:0] pmm2_issp_source;
 // Kernel internal state debug (6 bits, probe limit=511)
 (* noprune, preserve *) reg  [2:0] stp_ipl_nr;
 (* noprune, preserve *) reg        stp_setendOPC;
@@ -534,6 +536,26 @@ always @(posedge clk) begin
 	end
 	// Sticky latches - once set, stay set forever
 	if (~reset) begin
+		stp_fault_latched <= 0;
+		stp_walker_timeout_latched <= 0;
+		stp_cpu_bus_berr <= 0;
+		stp_fault_tc <= 0;
+		stp_fault_addr <= 0;
+		stp_fault_wstate <= 0;
+		stp_fault_atc_buserr <= 0;
+		stp_fault_atc_valid <= 0;
+		stp_fault_mmusr <= 0;
+		stp_fault_saved_addr <= 0;
+		stp_fault_desc_addr <= 0;
+		stp_fault_desc_data <= 0;
+		stp_fault_ptr1_desc_addr <= 0;
+		stp_fault_ptr1_desc_data <= 0;
+		stp_fault_ptr2_desc_addr <= 0;
+		stp_fault_ptr2_desc_data <= 0;
+		stp_fault_ptr3_desc_addr <= 0;
+		stp_fault_ptr3_desc_data <= 0;
+		stp_fault_fc <= 0;
+	end else if (pmmu_issp_source[0] || pmm2_issp_source[0]) begin
 		stp_fault_latched <= 0;
 		stp_walker_timeout_latched <= 0;
 		stp_cpu_bus_berr <= 0;
@@ -721,7 +743,7 @@ altsource_probe #(
 	.sld_instance_index      (0),
 	.instance_id             ("PMMU"),
 	.probe_width             (511),
-	.source_width            (0),
+	.source_width            (1),
 	.enable_metastability    ("YES")
 ) pmmu_issp (
 	.probe ({stp_pmmu_tc, stp_pmmu_tt0, stp_pmmu_tt1,
@@ -735,7 +757,8 @@ altsource_probe #(
 	         stp_fault_desc_addr, stp_fault_desc_data,
 	         stp_fault_fc,
 	         stp_ipl_nr, stp_setendOPC, stp_stop,
-	         cpu_halted_p})
+	         cpu_halted_p}),
+	.source (pmmu_issp_source)
 );
 
 // Secondary PMMU sticky probe: per-level descriptor snapshots (A/B/C)
@@ -744,13 +767,14 @@ altsource_probe #(
 	.sld_instance_index      (1),
 	.instance_id             ("PMM2"),
 	.probe_width             (194),
-	.source_width            (0),
+	.source_width            (1),
 	.enable_metastability    ("YES")
 ) pmmu_issp_desc (
 	.probe ({stp_fault_latched, stp_walker_timeout_latched,
 	         stp_fault_ptr1_desc_addr, stp_fault_ptr1_desc_data,
 	         stp_fault_ptr2_desc_addr, stp_fault_ptr2_desc_data,
-	         stp_fault_ptr3_desc_addr, stp_fault_ptr3_desc_data})
+	         stp_fault_ptr3_desc_addr, stp_fault_ptr3_desc_data}),
+	.source (pmm2_issp_source)
 );
 
 // Tertiary ISSP: CHK/Group2 exception frame trap-event latch (instance 2)
@@ -1079,6 +1103,8 @@ reg         walker_active;
 reg   [3:0] walker_state;  // BUG #124 FIX: Walker state visible for bus mux (4-bit for write states)
 reg  [31:0] walker_wdata_latch;  // MC68030 U/M bit: Latch write data from PMMU
 reg         walker_timeout_error; // BUG #138: Walker timeout error flag
+reg         walker_write_ready_armed; // Require a fresh ready pulse for descriptor writes
+reg         walker_read_ready_armed;  // Require a fresh ready pulse for descriptor reads
 wire [23:1] walker_chip_addr;  // For Chip RAM only (inherently <2MB)
 wire        walker_reading;  // BUG #124 FIX: Walker actively reading memory
 wire        walker_writing;  // MC68030 U/M bit: Walker actively writing memory
@@ -1423,47 +1449,56 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// while the walker owns Fast RAM. The cache fill request stays asserted until
 	// serviced, so deferring it here is enough to prevent overlap with descriptor
 	// reads without losing the miss.
-	assign cache_req = ((i_fill_req & cacr_ibe) | (d_fill_req & cacr_dbe)) &
-	                   ~pmmu_busy_p & ~pmmu_walker_req_p & ~walker_active;
-	assign cache_addr = i_fill_req ? i_fill_addr : d_fill_addr;
+	assign cache_req = fill_active | ((fill_pending_i | fill_pending_d) &
+	                   ~pmmu_busy_p & ~pmmu_walker_req_p & ~walker_active);
+	assign cache_addr = fill_active ? fill_addr_latched : (fill_pending_i ? i_fill_addr : d_fill_addr);
 
 	// Burst control - unused (SDRAM permanently in BURST=4 mode)
-	assign cache_burst = ((i_fill_req & cacr_ibe) | (d_fill_req & cacr_dbe)) &
-	                    ~pmmu_busy_p & ~pmmu_walker_req_p & ~walker_active;
+	assign cache_burst = cache_req;
 	assign cache_burst_len = 3'd7;  // Always 8 words for 128-bit cache line
 
 	// Cache fill logic - accumulate 16-bit reads into 128-bit cache lines
 	reg [2:0] fill_count;
 	reg [127:0] fill_buffer;
 	reg fill_active;
+	reg fill_owner_i;
+	reg [31:0] fill_addr_latched;
+
+	wire fill_pending_i = i_fill_req & cacr_ibe;
+	wire fill_pending_d = d_fill_req & cacr_dbe;
+	wire fill_start = ~fill_active & ~pmmu_busy_p & ~pmmu_walker_req_p & ~walker_active &
+	                  (fill_pending_i | fill_pending_d) & cache_ack;
+	wire fill_accept = fill_active & cache_ack;
 
 	always @(posedge clk) begin
 		if (~reset) begin
 			fill_count <= 0;
 			fill_buffer <= 0;
 			fill_active <= 0;
+			fill_owner_i <= 0;
+			fill_addr_latched <= 0;
 		end else begin
-			if (cache_req & cache_ack) begin
-				if (~fill_active) begin
-					fill_active <= 1;
-					fill_count <= 0;
-				end
-				
+			if (fill_start) begin
+				fill_active <= 1;
+				fill_count <= 0;
+				fill_owner_i <= fill_pending_i;
+				fill_addr_latched <= fill_pending_i ? i_fill_addr : d_fill_addr;
+				fill_buffer[15:0] <= cache_data;
+			end else if (fill_accept) begin
 				// Accumulate 16-bit words into 128-bit cache line
 				case (fill_count)
-					3'd0: fill_buffer[15:0]    <= cache_data;
-					3'd1: fill_buffer[31:16]   <= cache_data;
-					3'd2: fill_buffer[47:32]   <= cache_data;
-					3'd3: fill_buffer[63:48]   <= cache_data;
-					3'd4: fill_buffer[79:64]   <= cache_data;
-					3'd5: fill_buffer[95:80]   <= cache_data;
-					3'd6: fill_buffer[111:96]  <= cache_data;
-					3'd7: begin
+					3'd0: fill_buffer[31:16]   <= cache_data;
+					3'd1: fill_buffer[47:32]   <= cache_data;
+					3'd2: fill_buffer[63:48]   <= cache_data;
+					3'd3: fill_buffer[79:64]   <= cache_data;
+					3'd4: fill_buffer[95:80]   <= cache_data;
+					3'd5: fill_buffer[111:96]  <= cache_data;
+					3'd6: begin
 						fill_buffer[127:112] <= cache_data;
 						fill_active <= 0;  // Complete cache line
 					end
+					default: ;
 				endcase
-				
 				if (fill_count < 7) fill_count <= fill_count + 1;
 			end
 		end
@@ -1471,9 +1506,9 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 
 	// Provide filled cache line to cache module
 	assign i_fill_data = fill_buffer;
-	assign i_fill_valid = fill_active & (fill_count == 7);
+	assign i_fill_valid = fill_accept & (fill_count == 6) & fill_owner_i;
 	assign d_fill_data = fill_buffer;
-	assign d_fill_valid = fill_active & (fill_count == 7);
+	assign d_fill_valid = fill_accept & (fill_count == 6) & ~fill_owner_i;
 
 	// PMMU Walker Memory Arbiter (Stall-Based Approach)
 	// The walker needs 32-bit descriptors from memory via two sequential 16-bit reads.
@@ -1569,6 +1604,8 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 			// BUG #138: Reset timeout counter and error flag
 			walker_timeout_cnt <= 0;
 			walker_timeout_error <= 0;
+			walker_write_ready_armed <= 0;
+			walker_read_ready_armed <= 0;
 		end else begin
 			case (walker_state)
 				WALKER_IDLE: begin
@@ -1578,6 +1615,8 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// BUG #138: Reset timeout counter and error flag when idle
 					walker_timeout_cnt <= 0;
 					walker_timeout_error <= 0;
+					walker_write_ready_armed <= 0;
+					walker_read_ready_armed <= 0;
 					if (pmmu_walker_req_p) begin
 						// Latch walker address and start read sequence
 						walker_addr_latch <= pmmu_walker_addr_p[31:1];
@@ -1604,6 +1643,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// Previously reset every cycle, so timeout never fired if stuck here
 					// (e.g. chip bus SM hung, or stale_ram_pending never cleared).
 					walker_timeout_cnt <= walker_timeout_cnt + 1;
+					walker_read_ready_armed <= 0;
 					// BUG #419 FIX: Detect PMMU internal timeout (mem_req dropped)
 					if (~pmmu_walker_req_p) begin
 						walker_state <= WALKER_DONE;
@@ -1650,8 +1690,12 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
 						pmmu_walker_data_p <= 32'h0;  // Data doesn't matter when BERR is set
 						walker_state <= WALKER_DONE;
-					end else if (walker_mem_ready) begin
+					end else if (~walker_mem_ready) begin
+						walker_read_ready_armed <= 1;
+						walker_timeout_cnt <= walker_timeout_cnt + 1;
+					end else if (walker_read_ready_armed) begin
 						// Capture low 16 bits
+						walker_read_ready_armed <= 0;
 						walker_data_low <= cpu_din;
 						// BUG #439 FIX: For SDRAM/DDR3 reads, insert a gap cycle to
 						// deassert cpu_cs and clear cpu_ack before the high word read.
@@ -1673,6 +1717,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				// reasserts walker_fast_ram, starting a fresh cache transaction for the high word.
 				WALKER_RAM_GAP: begin
 					walker_timeout_cnt <= 0;
+					walker_read_ready_armed <= 0;
 					walker_state <= WALKER_READ_HIGH;
 				end
 
@@ -1680,10 +1725,11 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// Drive walker address with LSB=1 for high word via walker_chip_addr mux
 					// BUG #138: Reset timeout counter when entering wait state
 					walker_timeout_cnt <= 0;
+					walker_read_ready_armed <= 0;
 					walker_state <= WALKER_WAIT_HIGH;
 				end
 
-				WALKER_WAIT_HIGH: begin
+					WALKER_WAIT_HIGH: begin
 					// BUG #419 FIX: Detect PMMU internal timeout (see WALKER_WAIT_LOW)
 					if (~pmmu_walker_req_p) begin
 						walker_state <= WALKER_DONE;
@@ -1695,50 +1741,42 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
 						pmmu_walker_data_p <= 32'h0;
 						walker_state <= WALKER_DONE;
-					end else if (walker_mem_ready) begin
-						// BUG #405 FIX: Assemble 32-bit descriptor in big-endian order
-						// walker_data_low was read from low address (= high word in big-endian)
-						// cpu_din was read from high address (= low word in big-endian)
-						pmmu_walker_data_p <= {walker_data_low, cpu_din};
-						walker_state <= WALKER_DONE;
-					end else begin
-						// BUG #138: Increment timeout counter while waiting
-						walker_timeout_cnt <= walker_timeout_cnt + 1;
-					end
+						end else if (~walker_mem_ready) begin
+							walker_read_ready_armed <= 1;
+							walker_timeout_cnt <= walker_timeout_cnt + 1;
+						end else if (walker_read_ready_armed) begin
+							// BUG #405 FIX: Assemble 32-bit descriptor in big-endian order
+							// walker_data_low was read from low address (= high word in big-endian)
+							// cpu_din was read from high address (= low word in big-endian)
+							walker_read_ready_armed <= 0;
+							pmmu_walker_data_p <= {walker_data_low, cpu_din};
+							pmmu_walker_ack_p <= 1;
+							walker_state <= WALKER_DONE;
+						end else begin
+							// BUG #138: Increment timeout counter while waiting
+							walker_timeout_cnt <= walker_timeout_cnt + 1;
+						end
 				end
 
-				WALKER_DONE: begin
-					// BUG #420 FIX: Stale ack race during multi-level page walks.
-					// Previously, pmmu_walker_ack_p was unconditionally set to 1 every
-					// cycle in WALKER_DONE. On the cycle when ~pmmu_walker_req_p triggers
-					// the transition to WALKER_IDLE, the ack was STILL asserted (last
-					// assignment wins). The PMMU, having already consumed the ack and
-					// transitioned to the next walk level (e.g., W_PTR1), issues a new
-					// mem_req on that same cycle. On the NEXT cycle, the PMMU sees
-					// mem_req=1 AND mem_ack=1 (stale!) and immediately processes the
-					// old data as if it were the new response. This corrupts every
-					// multi-level page walk, producing wrong ATC entries -> wrong
-					// physical addresses -> crashes -> double bus fault -> CPU halt.
-					// Fix: Only assert ack while the PMMU still has its request active.
-					// Clear ack on the transition cycle so the PMMU doesn't see a stale ack.
-					walker_active <= 0;  // Release bus
-					if (~pmmu_walker_req_p) begin
-						// PMMU has deasserted request - clear ack and return to idle
+					WALKER_DONE: begin
+						// Completion pulse cleanup. ACK/BERR are asserted in the WAIT states
+						// that actually complete the transfer, then cleared here so the next
+						// descriptor read cannot observe a stale response.
+						walker_active <= 0;  // Release bus
+						walker_read_ready_armed <= 0;
 						pmmu_walker_ack_p <= 0;
+						pmmu_walker_berr_p <= 0;
 						walker_state <= WALKER_IDLE;
-					end else begin
-						// PMMU still has request active - keep acknowledging
-						pmmu_walker_ack_p <= 1;
 					end
-				end
 
 				// MC68030 U/M bit: Write states for descriptor updates
-				WALKER_WRITE_LOW: begin
+					WALKER_WRITE_LOW: begin
 					// Drive walker address with LSB=0 for low word
 					// Write data (walker_wdata_latch[15:0]) is driven via chip_din mux
-					// BUG #424 FIX: Same escape hatches as WALKER_READ_LOW
-					walker_timeout_cnt <= walker_timeout_cnt + 1;
-					if (~pmmu_walker_req_p) begin
+						// BUG #424 FIX: Same escape hatches as WALKER_READ_LOW
+						walker_timeout_cnt <= walker_timeout_cnt + 1;
+						walker_write_ready_armed <= 0;
+						if (~pmmu_walker_req_p) begin
 						walker_state <= WALKER_DONE;
 					end
 					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
@@ -1756,7 +1794,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					end
 				end
 
-				WALKER_WAIT_WR_LOW: begin
+					WALKER_WAIT_WR_LOW: begin
 					// BUG #419 FIX: Detect PMMU internal timeout (see WALKER_WAIT_LOW)
 					if (~pmmu_walker_req_p) begin
 						walker_state <= WALKER_DONE;
@@ -1767,44 +1805,56 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						walker_timeout_error <= 1;
 						pmmu_walker_berr_p <= 1;
 						walker_state <= WALKER_DONE;
-					end else if (walker_mem_ready) begin
-						// Low word written, now write high word
-						walker_state <= WALKER_WRITE_HIGH;
-					end else begin
-						walker_timeout_cnt <= walker_timeout_cnt + 1;
+						end else if (~walker_mem_ready) begin
+							walker_write_ready_armed <= 1;
+							walker_timeout_cnt <= walker_timeout_cnt + 1;
+						end else if (walker_write_ready_armed) begin
+							// Low word written, now write high word
+							walker_write_ready_armed <= 0;
+							walker_state <= WALKER_WRITE_HIGH;
+						end else begin
+							walker_timeout_cnt <= walker_timeout_cnt + 1;
+						end
 					end
-				end
 
-				WALKER_WRITE_HIGH: begin
+					WALKER_WRITE_HIGH: begin
 					// Drive walker address with LSB=1 for high word
-					// Write data (walker_wdata_latch[31:16]) is driven via chip_din mux
-					walker_timeout_cnt <= 0;
-					walker_state <= WALKER_WAIT_WR_HIGH;
-				end
+						// Write data (walker_wdata_latch[31:16]) is driven via chip_din mux
+						walker_timeout_cnt <= 0;
+						walker_write_ready_armed <= 0;
+						walker_state <= WALKER_WAIT_WR_HIGH;
+					end
 
-				WALKER_WAIT_WR_HIGH: begin
+					WALKER_WAIT_WR_HIGH: begin
 					// BUG #419 FIX: Detect PMMU internal timeout (see WALKER_WAIT_LOW)
 					if (~pmmu_walker_req_p) begin
 						walker_state <= WALKER_DONE;
 					end
 					// Wait for write to complete
-					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
-						// BUG #156 FIX: Timeout is a bus error
-						walker_timeout_error <= 1;
-						pmmu_walker_berr_p <= 1;
-						walker_state <= WALKER_DONE;
-					end else if (walker_mem_ready) begin
-						// Write complete
-						walker_state <= WALKER_DONE;
-					end else begin
-						walker_timeout_cnt <= walker_timeout_cnt + 1;
+						else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+							// BUG #156 FIX: Timeout is a bus error
+							walker_timeout_error <= 1;
+							pmmu_walker_berr_p <= 1;
+							walker_state <= WALKER_DONE;
+							end else if (~walker_mem_ready) begin
+								walker_write_ready_armed <= 1;
+								walker_timeout_cnt <= walker_timeout_cnt + 1;
+							end else if (walker_write_ready_armed) begin
+								// Write complete
+								walker_write_ready_armed <= 0;
+								pmmu_walker_ack_p <= 1;
+								walker_state <= WALKER_DONE;
+							end else begin
+								walker_timeout_cnt <= walker_timeout_cnt + 1;
+							end
 					end
-				end
 
-				default: begin
-					// Safety: recover from corrupted walker_state (e.g. timing violations)
-					walker_state <= WALKER_IDLE;
-					walker_active <= 0;
+					default: begin
+						// Safety: recover from corrupted walker_state (e.g. timing violations)
+						walker_state <= WALKER_IDLE;
+						walker_active <= 0;
+						walker_read_ready_armed <= 0;
+						walker_write_ready_armed <= 0;
 					pmmu_walker_ack_p <= 0;
 					pmmu_walker_berr_p <= 0;
 				end

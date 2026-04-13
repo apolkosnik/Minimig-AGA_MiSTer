@@ -89,7 +89,7 @@ signal clk           : std_logic := '0';
     constant SEL_TT0     : std_logic_vector(4 downto 0) := "00010";
     constant SEL_TT1     : std_logic_vector(4 downto 0) := "00011";
     constant SEL_TC      : std_logic_vector(4 downto 0) := "10000";
-    constant SEL_MMUSR   : std_logic_vector(4 downto 0) := "10001";
+    constant SEL_MMUSR   : std_logic_vector(4 downto 0) := "11000";
     constant SEL_SRP     : std_logic_vector(4 downto 0) := "10010";
     constant SEL_CRP     : std_logic_vector(4 downto 0) := "10011";
 
@@ -310,8 +310,8 @@ begin
         end procedure;
 
         -- PTEST: Test translation
-        -- Brief word: 100r_wlll_0aa_fffff
-        -- r=1: write result to An, w=R/W, lll=level, aa=An, fffff=FC
+        -- This bench drives FC via the dedicated pmmu_fc port, so the brief word only
+        -- needs the level in bits 12:10 and the direction in bit 9.
         procedure do_ptest(
             ea : std_logic_vector(31 downto 0);
             fc_val : std_logic_vector(2 downto 0);
@@ -320,13 +320,15 @@ begin
         ) is
             variable brief : std_logic_vector(15 downto 0);
             variable timeout : integer;
+            variable ptest_rw_bit : std_logic;
         begin
             report "Executing PTEST EA=0x" & slv_to_hex(ea) &
                    " FC=" & integer'image(to_integer(unsigned(fc_val))) &
                    " W=" & std_logic'image(is_write) &
                    " level=" & integer'image(to_integer(unsigned(level)));
-            -- Format: 100 0 w lll 0 00 0 0 fc fc fc
-            brief := "100" & "0" & is_write & level & "0" & "00" & "00" & fc_val;
+            -- PMMU expects bit 9 = 1 for PTESTR, 0 for PTESTW.
+            ptest_rw_bit := not is_write;
+            brief := "100" & level & ptest_rw_bit & "000000000";
             pmmu_brief <= brief;
             pmmu_addr <= ea;
             pmmu_fc <= fc_val;
@@ -334,7 +336,12 @@ begin
             wait_cycles(1);
             ptest_req <= '0';
 
-            -- Wait for completion
+            timeout := 0;
+            while busy = '0' and timeout < 20 loop
+                wait_cycles(1);
+                timeout := timeout + 1;
+            end loop;
+
             timeout := 0;
             while busy = '1' and timeout < 100 loop
                 wait_cycles(1);
@@ -345,7 +352,9 @@ begin
                 report "  PTEST timed out!" severity error;
             end if;
 
-            wait_cycles(2);
+            -- MMUSR is updated through a separate handshake after the walk/fault path completes.
+            -- Early faults can retire before the register file reflects the new status.
+            wait_cycles(5);
         end procedure;
 
         -- PLOAD: Preload ATC entry
@@ -770,6 +779,65 @@ begin
         do_pflusha;
         do_ptest(x"00000000", "101", '0', "111");
         test_pass <= test_pass + 1;
+
+        -- ============================================
+        -- SECTION 7: Fault Semantics vs WinUAE
+        -- ============================================
+        report "" severity note;
+        report "=== SECTION 7: Fault Semantics vs WinUAE ===" severity note;
+
+        -- 7A: Root-pointer limit violation must report both L and I.
+        do_pflusha;
+        write_reg(SEL_TC, x"00000000", '0');
+        write_reg(SEL_CRP, x"80010002", '1');  -- lower limit=1, DT=10
+        write_reg(SEL_CRP, x"00000000", '0');
+        write_reg(SEL_TC, x"80C0AA00", '0');
+        wait_cycles(5);
+        do_ptest(x"00000000", "101", '0', "111");
+        read_reg(SEL_MMUSR, '0');
+        if reg_rdat(14) = '1' and reg_rdat(10) = '1' and reg_rdat(13) = '0' and reg_rdat(11) = '0' then
+            test_pass <= test_pass + 1;
+        else
+            report "  Root limit MMUSR expected L=1,I=1,S=0,W=0, got 0x" & slv_to_hex(reg_rdat(15 downto 0)) severity error;
+            test_fail <= test_fail + 1;
+        end if;
+
+        -- 7B: Table-descriptor limit violation must also report both L and I.
+        page_table(0) <= x"80010002";      -- long table descriptor: lower limit=1, DT=10
+        page_table(1) <= x"00002000";      -- next table base
+        do_pflusha;
+        write_reg(SEL_TC, x"00000000", '0');
+        write_reg(SEL_CRP, x"7FFF0003", '1');  -- DT=11, max upper limit, root table at 0
+        write_reg(SEL_CRP, x"00000000", '0');
+        write_reg(SEL_TC, x"80C0AA00", '0');
+        wait_cycles(5);
+        do_ptest(x"00000000", "101", '0', "111");
+        read_reg(SEL_MMUSR, '0');
+        if reg_rdat(14) = '1' and reg_rdat(10) = '1' and reg_rdat(13) = '0' and reg_rdat(11) = '0' then
+            test_pass <= test_pass + 1;
+        else
+            report "  Table limit MMUSR expected L=1,I=1,S=0,W=0, got 0x" & slv_to_hex(reg_rdat(15 downto 0)) severity error;
+            test_fail <= test_fail + 1;
+        end if;
+
+        -- 7C: Supervisor-only page reached through a WP table must preserve table WP in MMUSR.W.
+        page_table(0) <= x"00000106";      -- long table descriptor: S=1, WP=1, DT=10
+        page_table(1) <= x"00002000";      -- next table base
+        page_table(16#800#) <= x"00300001"; -- short page descriptor
+        do_pflusha;
+        write_reg(SEL_TC, x"00000000", '0');
+        write_reg(SEL_CRP, x"7FFF0003", '1');  -- DT=11, root table at 0
+        write_reg(SEL_CRP, x"00000000", '0');
+        write_reg(SEL_TC, x"80C0AA00", '0');
+        wait_cycles(5);
+        do_ptest(x"00000000", "001", '0', "111");  -- user data access
+        read_reg(SEL_MMUSR, '0');
+        if reg_rdat(13) = '1' and reg_rdat(11) = '1' and reg_rdat(10) = '0' and reg_rdat(14) = '0' then
+            test_pass <= test_pass + 1;
+        else
+            report "  Supervisor/WP MMUSR expected S=1,W=1,I=0,L=0, got 0x" & slv_to_hex(reg_rdat(15 downto 0)) severity error;
+            test_fail <= test_fail + 1;
+        end if;
 
         -- ============================================
         -- Final Summary
