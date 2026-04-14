@@ -3178,14 +3178,13 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						-- before any MMU/bus dispatch for the same instruction.
 						IF TG68_PC(0)='1' THEN
 								-- Address Error (Group 0): odd instruction fetch
-								IF (cpu(1) = '1' AND berr_exception_active = '1') OR regfile(15)(0) = '1' THEN
+								IF (cpu(1) = '1' AND berr_exception_active = '1') THEN
 									cpu_halted <= '1';  -- Double fault: halt CPU
 									-- synthesis translate_off
-									report "DOUBLE FAULT: address error during exception or odd A7 - CPU HALTED" severity warning;
+									report "DOUBLE FAULT: address error during exception - CPU HALTED" severity warning;
 									report "HALT_CTX_C: cpu(1)=" & std_logic'image(cpu(1)) &
 									       " TG68_PC(0)=" & std_logic'image(TG68_PC(0)) &
 									       " berr_exception_active=" & std_logic'image(berr_exception_active) &
-									       " A7(0)=" & std_logic'image(regfile(15)(0)) &
 									       " trap_berr=" & bit'image(trap_berr) &
 									       " trap_mmu_berr=" & bit'image(trap_mmu_berr) &
 									       " make_berr=" & std_logic'image(make_berr)
@@ -3199,21 +3198,20 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								berr_fault_addr <= TG68_PC;  -- Odd instruction fetch address
 								berr_data_out_saved <= (others => '0');
 								-- SSW for odd instruction fetch address error
+								-- Per MC68030 spec/WinUAE: no pipeline bits (no bus cycle occurred)
 								berr_ssw <= (others => '0');
 								berr_ssw(2 downto 0) <= fc_internal;  -- FC
 								berr_ssw(6) <= '1';           -- RW=1 (read)
 								berr_ssw(5 downto 4) <= "10"; -- SIZE=word
-								berr_ssw(14) <= '1';  -- FB=1: stage B (prefetch) fault
-								berr_ssw(12) <= '1';  -- RB=1: prefetch will be rerun
 								END IF;
 						-- BUG #400 FIX: Also check pmmu_fault directly for same-cycle dispatch
 						ELSIF make_berr='1' OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0') THEN
 								-- MC68030 Double bus fault detection: bus error while still in berr exception window
 								-- This catches the case where the handler instruction fetch faults
-								IF (cpu(1) = '1' AND berr_exception_active = '1') OR regfile(15)(0) = '1' THEN
+								IF (cpu(1) = '1' AND berr_exception_active = '1') THEN
 									cpu_halted <= '1';
 									-- synthesis translate_off
-									report "DOUBLE BUS FAULT: bus error at handler dispatch or odd A7 - CPU HALTED" severity warning;
+									report "DOUBLE BUS FAULT: bus error at handler dispatch - CPU HALTED" severity warning;
 									report "HALT_CTX_B: cpu(1)=" & std_logic'image(cpu(1)) &
 									       " make_berr=" & std_logic'image(make_berr) &
 									       " berr=" & std_logic'image(berr) &
@@ -3222,7 +3220,6 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									       " pmmu_fault_Bbit=" & std_logic'image(pmmu_fault_stat(15)) &
 									       " trap_berr=" & bit'image(trap_berr) &
 									       " trap_mmu_berr=" & bit'image(trap_mmu_berr) &
-									       " A7(0)=" & std_logic'image(regfile(15)(0)) &
 									       " berr_exception_active=" & std_logic'image(berr_exception_active)
 									       severity warning;
 									-- synthesis translate_on
@@ -3233,7 +3230,9 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								-- BUG #400 FIX: Also check pmmu_fault_stat directly for same-cycle dispatch
 								IF make_mmu_berr='1' OR (pmmu_fault='1' AND pmmu_fault_stat(15)='1') THEN
 									trap_mmu_berr <= '1';
-									if pmmu_fault_is_insn_out = '0' and pmmu_fault_rw_out = '1' then
+									-- MC68030 UM: Format $B (long) for ALL read faults (instruction + data)
+									-- Format $A (short) only for mid-instruction write faults
+									if pmmu_fault_rw_out = '1' then
 										berr_long_frame <= '1';
 									else
 										berr_long_frame <= '0';
@@ -3241,13 +3240,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								ELSE
 									trap_berr <= '1';  -- Use vector 2 for normal bus error
 									if pmmu_fault = '1' then
-										if pmmu_fault_is_insn_out = '0' and pmmu_fault_rw_out = '1' then
+										if pmmu_fault_rw_out = '1' then
 											berr_long_frame <= '1';
 										else
 											berr_long_frame <= '0';
 										end if;
 									else
-										if berr_external_fc(1) = '0' and berr_external_rw = '1' then
+										-- MC68030 UM: Format $B for ALL read faults (instruction + data)
+										if berr_external_rw = '1' then
 											berr_long_frame <= '1';
 										else
 											berr_long_frame <= '0';
@@ -3295,7 +3295,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 											when others => berr_ssw(5 downto 4) <= "00";  -- Long
 										end case;
 									end if;
-									berr_ssw(11 downto 9) <= "000";  -- Reserved
+									berr_ssw(11 downto 10) <= "00";  -- Reserved (bit 9 preserved for software-fix)
 									berr_ssw(7) <= exec_tas OR exec_cas;  -- RM: read-modify-write (TAS/CAS/CAS2)
 									berr_ssw(3) <= '0';   -- Reserved
 								else
@@ -3303,18 +3303,32 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									berr_fault_addr <= berr_external_addr;  -- BUG #434 FIX: use addr latched at first-fire, not PC-based addr at state="00"
 									berr_ssw(2 downto 0) <= berr_external_fc;  -- BUG #431 FIX: FC latched at BERR first-fire
 									berr_ssw(6) <= berr_external_rw;           -- BUG #431 FIX: RW latched at BERR first-fire (not stale state="00" value)
-									-- External bus errors are typically data faults (stage C)
-									berr_ssw(15) <= '1';  -- FC=1: stage C data fault
-									berr_ssw(14) <= '0';  -- FB=0: not stage B
-									berr_ssw(13) <= '1';  -- RC=1: stage C bus cycle will be rerun
-									berr_ssw(12) <= '0';  -- RB=0: not stage B
-									berr_ssw(8) <= '1';   -- DF=1
+									-- Distinguish instruction fetch vs data fault using FC
+									-- FC bit 0 = data space (FC=1 user data, FC=5 super data)
+									-- FC bit 1 = program space (FC=2 user program, FC=6 super program)
+									if berr_external_fc(0) = '1' then
+										-- Data fault (stage C)
+										berr_ssw(15) <= '1';  -- FC=1: stage C data fault
+										berr_ssw(14) <= '0';  -- FB=0: not stage B
+										berr_ssw(13) <= '1';  -- RC=1: stage C bus cycle will be rerun
+										berr_ssw(12) <= '0';  -- RB=0: not stage B
+										berr_ssw(8) <= '1';   -- DF=1: data fault
+										berr_ssw(9) <= '1';   -- Software-fix handshake bit
+									else
+										-- Instruction fetch fault (stage B)
+										berr_ssw(15) <= '0';  -- FC=0: not stage C
+										berr_ssw(14) <= '1';  -- FB=1: stage B (prefetch) fault
+										berr_ssw(13) <= '0';  -- RC=0: not stage C
+										berr_ssw(12) <= '1';  -- RB=1: prefetch will be rerun
+										berr_ssw(8) <= '0';   -- DF=0: not data fault
+										berr_ssw(9) <= '0';   -- No software-fix for instruction faults
+									end if;
 									case berr_external_datatype is  -- BUG #433b FIX: use value latched at BERR first-fire
 										when "00" => berr_ssw(5 downto 4) <= "01";
 										when "01" => berr_ssw(5 downto 4) <= "10";
 										when others => berr_ssw(5 downto 4) <= "00";
 									end case;
-									berr_ssw(11 downto 9) <= "000"; -- Reserved
+									berr_ssw(11 downto 10) <= "00"; -- Reserved (bit 9 preserved for software-fix)
 									berr_ssw(7) <= exec_tas OR exec_cas;  -- RM: read-modify-write (TAS/CAS/CAS2)
 									berr_ssw(3) <= '0';
 								end if;

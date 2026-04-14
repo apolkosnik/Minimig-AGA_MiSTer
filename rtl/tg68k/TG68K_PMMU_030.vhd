@@ -1074,7 +1074,7 @@ begin
               atc_flush_req <= '1';
             end if;
           when "10000" =>  -- TC: P-reg 0x10
-            -- MC68030 TC Register Write - compatibility behavior
+            -- MC68030 TC Register Write
             -- MC68030 TC bit layout per User's Manual section 9.2.1:
             -- 31: E (Enable), 30-26: Reserved, 25: SRE, 24: FCL
             -- 23-20: PS (Page Size), 19-16: IS (Initial Shift), 15-12: TIA, 11-8: TIB, 7-4: TIC, 3-0: TID
@@ -1085,21 +1085,19 @@ begin
               ps_val := to_integer(unsigned(reg_wdat(23 downto 20)));
               -- Check 1: PS field must be 8-15 (values 0-7 are reserved)
               if ps_val < 8 then
-                mmu_config_error <= '0';
-                tc_write_val(31) := '0';
+                mmu_config_error <= '1';
                 -- synthesis translate_off
                 report "MMU_CONFIG: Invalid PS field=" & integer'image(ps_val) &
-                       " (must be 8-15), disabling TC.E for compatibility" severity warning;
+                       " (must be 8-15), raising configuration exception" severity warning;
                 -- synthesis translate_on
               else
                 -- Check 2: Field sum must equal 32 per MC68030 spec (stop adding TIx at first zero)
                 total_bits := tc_total_bits(reg_wdat);
                 if total_bits /= 32 then
-                  mmu_config_error <= '0';
-                  tc_write_val(31) := '0';
+                  mmu_config_error <= '1';
                   -- synthesis translate_off
                   report "MMU_CONFIG: Field sum=" & integer'image(total_bits) &
-                         " (must be 32), disabling TC.E for compatibility" severity warning;
+                         " (must be 32), raising configuration exception" severity warning;
                   -- synthesis translate_on
                 else
                   mmu_config_error <= '0';
@@ -1174,24 +1172,9 @@ begin
               atc_flush_req <= '1';
             end if;
           when "11000" =>
-            -- BUG #15 FIX: MMUSR register - MC68030 MMUSR write-1-to-clear semantics
-            -- MC68030 spec: MMUSR is 16-bit (upper 16 bits always read as zero)
-            -- Writing '1' to bits 15:13 (fault status bits) and bit 9 (Modified) clears them
-            -- Bits 15:13 = Bus Error, Limit Violation, Supervisor Violation
-            -- Bit 9 = Modified (also write-1-to-clear per MC68030 spec)
-            -- All other bits are read-only and ignore writes
-            if reg_wdat(15) = '1' then
-              MMUSR(15) <= '0';  -- Clear Bus Error bit
-            end if;
-            if reg_wdat(14) = '1' then
-              MMUSR(14) <= '0';  -- Clear Limit Violation bit
-            end if;
-            if reg_wdat(13) = '1' then
-              MMUSR(13) <= '0';  -- Clear Supervisor Violation bit
-            end if;
-            if reg_wdat(9) = '1' then
-              MMUSR(9) <= '0';  -- Clear Modified bit
-            end if;
+            -- MC68030 UM 9.6.3.4: PMOVE to MMUSR is a direct 16-bit store
+            -- MMUSR is fully read-write via PMOVE (software clears before PTEST)
+            MMUSR(15 downto 0) <= reg_wdat(15 downto 0);
           when others => null;
           end case;
       end if;
@@ -1253,7 +1236,7 @@ begin
   -- Bits 11-8: TIB (Table B Index)
   -- Bits 7-4: TIC (Table C Index)  
   -- Bits 3-0: TID (Table D Index)
-  tc_en <= TC(31);
+  tc_en <= TC(31) and not mmu_config_error;
   tc_sre <= TC(25);
   tc_fcl <= TC(24);
   tc_enable <= tc_en;
@@ -1339,10 +1322,11 @@ begin
   -- BUG #371 FIX: Also bypass for TTR transparent translations (phys=log identity mapping)
   -- Without this, the first fetch after MMU enable gets a stale addr_phys_reg
   -- MC68030 UM Figure 9-32: FC=7 (CPU space) is always unmapped (identity)
-  -- MC68030 UM 9.5: TTRs operate independently of TC.E (translation enable)
+  -- Keep TT disabled for normal accesses when TC.E=0 so MMU disable returns to
+  -- plain identity+CI=0 behavior instead of preserving stale transparent policy.
   addr_phys     <= addr_log when fc = "111"
-                   else addr_log when (ttr0_match_comb = '1' or ttr1_match_comb = '1')
                    else addr_log when tc_en = '0'
+                   else addr_log when (ttr0_match_comb = '1' or ttr1_match_comb = '1')
                    else addr_phys_reg;
   -- BUG #126 V2 FIX: Combinational bypass for cache_inhibit when MMU disabled
   -- Without this, cache_inhibit_reg retains stale value (pmmu_req='0' when MMU off)
@@ -1351,14 +1335,14 @@ begin
   -- the correct I/O address but stale CI=0 from the previous RAM access and
   -- incorrectly caches I/O data.
   cache_inhibit <= '1' when fc = "111"  -- CPU space always cache-inhibited
+                   else '0' when tc_en = '0'
                    else ttr0_ci_comb when ttr0_match_comb = '1'
                    else ttr1_ci_comb when ttr1_match_comb = '1'
-                   else '0' when tc_en = '0'
                    else cache_inhibit_reg;
   write_protect <= '0' when fc = "111"  -- CPU space never write-protected
+                   else '0' when tc_en = '0'
                    else ttr0_wp_comb when ttr0_match_comb = '1'
                    else ttr1_wp_comb when ttr1_match_comb = '1'
-                   else '0' when tc_en = '0'
                    else write_protect_reg;
   fault         <= '0' when fc = "111" else fault_reg;  -- CPU space never faults
   fault_status  <= fault_status_reg;
@@ -1478,11 +1462,27 @@ begin
             fault_status_reg   <= (others => '0');
             translation_pending <= '0';
           else
-            -- MC68030 UM 9.5: TTRs operate independently of TC.E (translation enable).
-            -- Check Transparent Translation first (highest priority for all accesses).
             ttr_check(TT0, addr_log, fc, is_insn, rw, tmatch0, tci0, twp0);
             ttr_check(TT1, addr_log, fc, is_insn, rw, tmatch1, tci1, twp1);
-            if tmatch0 = '1' then
+            if tc_en = '0' then
+              -- Disabling MMU must also disable transparent-translation effects
+              -- on normal accesses, otherwise TT policy survives after TC.E=0.
+              addr_phys_reg      <= addr_log;
+              translated_addr    <= addr_log;
+              translated_fc      <= fc;
+              translated_rw      <= rw;
+              translated_cfg_seq <= xlat_cfg_seq;
+              cache_inhibit_reg  <= '0';
+              write_protect_reg  <= '0';
+              fault_reg          <= '0';
+              fault_status_reg   <= encode_mmusr_success(
+                write_protect => '0',
+                modified => '0',
+                transparent => '0',
+                level => "000"
+              );
+              translation_pending <= '0';
+            elsif tmatch0 = '1' then
               -- TTR0 match - use identity translation with TTR attributes (always successful, no faults)
               addr_phys_reg      <= addr_log;  -- Identity mapping
               translated_addr    <= addr_log;  -- BUG #416
@@ -1504,9 +1504,9 @@ begin
               end if;
               translation_pending <= '0';
               -- No walker needed for TTR
-            elsif tmatch1 = '1' then
-              -- TTR1 match - use identity translation with TTR attributes (always successful, no faults)
-             --  -- assert false report "TTR1 HIT: Setting addr_phys to 0x" & slv_to_hstring(addr_log) severity note;
+	            elsif tmatch1 = '1' then
+	              -- TTR1 match - use identity translation with TTR attributes (always successful, no faults)
+	             --  -- assert false report "TTR1 HIT: Setting addr_phys to 0x" & slv_to_hstring(addr_log) severity note;
               addr_phys_reg      <= addr_log;  -- Identity mapping
               translated_addr    <= addr_log;  -- BUG #416
               translated_fc      <= fc;        -- BUG #416
@@ -1524,23 +1524,6 @@ begin
               );
               translation_pending <= '0';
               -- No walker needed for TTR
-            elsif tc_en = '0' then
-              -- No TTR match and page translation disabled: plain identity
-              addr_phys_reg      <= addr_log;
-              translated_addr    <= addr_log;
-              translated_fc      <= fc;
-              translated_rw      <= rw;
-              translated_cfg_seq <= xlat_cfg_seq;
-              cache_inhibit_reg  <= '0';
-              write_protect_reg  <= '0';
-              fault_reg          <= '0';
-              fault_status_reg   <= encode_mmusr_success(
-                write_protect => '0',
-                modified => '0',
-                transparent => '0',
-                level => "000"
-              );
-              translation_pending <= '0';
             else
               -- No TTR match, tc_en='1' - check ATC and potentially start walker
               hit := '0';
@@ -1936,8 +1919,11 @@ begin
           cache_inhibit_reg <= '1';  -- Inhibit cache on faults
           write_protect_reg <= '1';  -- Protect on faults
         end if;
-        mmusr_update_value <= status_tmp;  -- Always update MMUSR (PTEST needs this)
-        mmusr_update_req <= '1';
+        mmusr_update_value <= status_tmp;
+        -- MC68030 UM 9.7.3: PLOAD does not alter MMUSR; only PTEST updates it
+        if ptest_walk_pending = '1' then
+          mmusr_update_req <= '1';
+        end if;
         translation_pending <= '0';
         instr_walk_pending <= '0';  -- Clear PTEST/PLOAD flag on walker fault too
         ptest_walk_pending <= '0';
@@ -1983,7 +1969,10 @@ begin
               -- Just update MMUSR for PTEST visibility using the cached original status.
               status_tmp := x"0000" & atc_fault_status(hit_idx);
               mmusr_update_value <= status_tmp;
-              mmusr_update_req <= '1';
+              -- MC68030 UM 9.7.3: PLOAD does not alter MMUSR
+              if ptest_walk_pending = '1' then
+                mmusr_update_req <= '1';
+              end if;
             -- Walker filled ATC successfully - check access violations for the original request
             -- BUG #17 FIX: saved_rw='0' is WRITE, saved_rw='1' is READ
             elsif saved_rw = '0' and atc_attr(hit_idx)(0) = '1' then
@@ -2024,7 +2013,10 @@ begin
                 write_protect_reg <= '1';
               end if;
               mmusr_update_value <= status_tmp;
-              mmusr_update_req <= '1';
+              -- MC68030 UM 9.7.3: PLOAD does not alter MMUSR
+              if ptest_walk_pending = '1' then
+                mmusr_update_req <= '1';
+              end if;
             elsif saved_fc(2) = '0' and atc_attr(hit_idx)(3) = '0' then
               -- User trying to access supervisor-only page - generate fault
               status_tmp := encode_mmusr_fault(
@@ -2058,7 +2050,10 @@ begin
                 write_protect_reg <= atc_attr(hit_idx)(0);
               end if;
               mmusr_update_value <= status_tmp;
-              mmusr_update_req <= '1';
+              -- MC68030 UM 9.7.3: PLOAD does not alter MMUSR
+              if ptest_walk_pending = '1' then
+                mmusr_update_req <= '1';
+              end if;
             else
               -- Valid access - update outputs and clear faults for successful translation
               -- BUG #396: Skip addr_phys_reg update for PTEST/PLOAD walks
@@ -2086,7 +2081,10 @@ begin
               fault_status_reg <= status_tmp;
               -- BUG #374 FIX: Update MMUSR on successful walker completion
               mmusr_update_value <= status_tmp;
-              mmusr_update_req <= '1';
+              -- MC68030 UM 9.7.3: PLOAD does not alter MMUSR
+              if ptest_walk_pending = '1' then
+                mmusr_update_req <= '1';
+              end if;
             end if;
           else
             -- No ATC hit found after walker completion - this shouldn't happen normally

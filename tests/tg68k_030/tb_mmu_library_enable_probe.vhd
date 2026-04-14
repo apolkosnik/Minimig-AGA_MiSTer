@@ -152,7 +152,7 @@ architecture behavior of tb_mmu_library_enable_probe is
     constant USER_PAGE_ADDR  : integer := 16#F80000#;
     constant EXPECTED_DATA   : std_logic_vector(31 downto 0) := x"DEADF00D";
     constant INVALID_TC_VALUE : std_logic_vector(31 downto 0) := x"810F9800";
-    constant INVALID_TC_STORED : std_logic_vector(31 downto 0) := x"010F9800";
+    constant INVALID_TC_STORED : std_logic_vector(31 downto 0) := x"810F9800";
     constant INVALID_MARKER  : std_logic_vector(31 downto 0) := x"1BADB002";
     constant INVALID_FALLTHRU_MARKER : std_logic_vector(31 downto 0) := x"BAD0EC00";
     constant RTC_SRE_TC_ADDR : integer := 16#1130#;
@@ -656,6 +656,11 @@ begin
     begin
         init_mem_defaults;
 
+        write_long(16#00E0#, std_logic_vector(to_unsigned(INVALID_HANDLER_ADDR, 32)));
+        pc := INVALID_HANDLER_ADDR;
+        emit_word(pc, x"23FC"); emit_long(pc, INVALID_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32)));
+        emit_word(pc, x"60FE");
+
         write_long(INVALID_TC_ADDR, INVALID_TC_VALUE);
         write_long(INVALID_RESULT_ADDR, x"BAADF00D");
 
@@ -663,7 +668,7 @@ begin
         emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(INVALID_TC_ADDR, 32))); -- MOVEA.L #invalid_tc,A7
         emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
         emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
-        emit_word(pc, x"23FC"); emit_long(pc, INVALID_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32)));
+        emit_word(pc, x"23FC"); emit_long(pc, INVALID_FALLTHRU_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32)));
         emit_word(pc, x"60FE");                              -- BRA.S * (stay alive if we get here)
 
         report "=== invalid TC config exception control ===" severity note;
@@ -674,14 +679,15 @@ begin
         clear_monitors <= '0';
         nReset <= '1';
 
-        for i in 0 to 12000 loop
+        for i in 0 to 4000 loop
             wait until rising_edge(clk);
-            exit when read_long(INVALID_RESULT_ADDR) = INVALID_MARKER;
+            actual := read_long(INVALID_RESULT_ADDR);
+            exit when actual = INVALID_MARKER or actual = INVALID_FALLTHRU_MARKER;
         end loop;
 
         actual := read_long(INVALID_RESULT_ADDR);
         if actual = INVALID_MARKER then
-            report "PASS: invalid TC stayed rejected and MMU remained disabled" severity note;
+            report "PASS: invalid TC raised config exception handler" severity note;
             pass_count := pass_count + 1;
         else
             report "FAIL: invalid TC path did not complete, got=$" & slv_to_hex(actual) severity error;
@@ -689,7 +695,7 @@ begin
         end if;
 
         if dbg_pmmu_tc = INVALID_TC_STORED then
-            report "PASS: invalid TC stored with E cleared $" & slv_to_hex(INVALID_TC_STORED) severity note;
+            report "PASS: invalid TC preserved raw register image $" & slv_to_hex(INVALID_TC_STORED) severity note;
             pass_count := pass_count + 1;
         else
             report "FAIL: invalid TC stored as $" & slv_to_hex(dbg_pmmu_tc) &
@@ -697,11 +703,11 @@ begin
             fail_count := fail_count + 1;
         end if;
 
-        if dbg_pmmu_tc(31) = '0' then
-            report "PASS: invalid TC cleared E bit in register image" severity note;
+        if dbg_pmmu_tc(31) = '1' then
+            report "PASS: invalid TC preserved TC.E in register image" severity note;
             pass_count := pass_count + 1;
         else
-            report "FAIL: invalid TC did not clear TC.E in register image" severity error;
+            report "FAIL: invalid TC did not preserve TC.E in register image" severity error;
             fail_count := fail_count + 1;
         end if;
 
@@ -710,6 +716,11 @@ begin
         wait for 100 ns;
         clear_monitors <= '0';
         init_mem_defaults;
+
+        write_long(16#00E0#, std_logic_vector(to_unsigned(INVALID_HANDLER_ADDR, 32)));
+        pc := INVALID_HANDLER_ADDR;
+        emit_word(pc, x"23FC"); emit_long(pc, INVALID_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32)));
+        emit_word(pc, x"60FE");
 
         write_long(STACK_ADDR + 0, x"80000002");
         write_long(STACK_ADDR + 4, std_logic_vector(to_unsigned(ROOT_ADDR, 32)));
@@ -722,21 +733,22 @@ begin
         emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(INVALID_TC_ADDR, 32))); -- MOVEA.L #invalid_tc,A7
         emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
         emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
-        emit_word(pc, x"23FC"); emit_long(pc, INVALID_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32)));
+        emit_word(pc, x"23FC"); emit_long(pc, INVALID_FALLTHRU_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32)));
         emit_word(pc, x"60FE");                              -- BRA.S * (stay alive if we get here)
 
         report "=== invalid TC after CRP load config exception control ===" severity note;
 
         nReset <= '1';
 
-        for i in 0 to 12000 loop
+        for i in 0 to 4000 loop
             wait until rising_edge(clk);
-            exit when read_long(INVALID_RESULT_ADDR) = INVALID_MARKER;
+            actual := read_long(INVALID_RESULT_ADDR);
+            exit when actual = INVALID_MARKER or actual = INVALID_FALLTHRU_MARKER;
         end loop;
 
         actual := read_long(INVALID_RESULT_ADDR);
         if actual = INVALID_MARKER then
-            report "PASS: invalid TC after CRP stayed rejected and MMU remained disabled" severity note;
+            report "PASS: invalid TC after CRP raised config exception handler" severity note;
             pass_count := pass_count + 1;
         else
             report "FAIL: invalid TC after CRP path did not complete, got=$" & slv_to_hex(actual) severity error;
@@ -752,8 +764,8 @@ begin
             fail_count := fail_count + 1;
         end if;
 
-        if dbg_pmmu_tc = INVALID_TC_STORED and dbg_pmmu_tc(31) = '0' then
-            report "PASS: invalid TC remained rejected after CRP load" severity note;
+        if dbg_pmmu_tc = INVALID_TC_STORED and dbg_pmmu_tc(31) = '1' then
+            report "PASS: invalid TC remained preserved after CRP load" severity note;
             pass_count := pass_count + 1;
         else
             report "FAIL: invalid TC after CRP stored as $" & slv_to_hex(dbg_pmmu_tc) severity error;
