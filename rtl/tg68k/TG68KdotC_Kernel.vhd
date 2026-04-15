@@ -2146,14 +2146,39 @@ PROCESS (clk)
 					ea_data <= last_data_read;
 				END IF;	
 				
+				-- PC-write / frame-format-word priority mux.
+				-- The chain below is deliberately a priority-encoded register assignment:
+				-- earlier conditions override later ones. Two distinct roles are multiplexed
+				-- onto data_write_tmp:
+				--
+				--   (A) Full-32-bit PC field push (writePC / trap00 / writePC_add branches).
+				--       Source selected from TG68_PC, exe_pc, or TG68_PC_add per priority.
+				--   (B) Low-16-bit format/vector word push (trap0 / int3 branches).
+				--       Only data_write_tmp(15:0) is assigned; high bits retain prior value
+				--       from the previous longword write (expected MC68030 frame behaviour).
+				--
+				-- The writePCnext side-effect (used by the PC-increment logic, not this mux)
+				-- is preserved in its original locations; gated by trap_trace='0' per
+				-- BUG #443 to prevent stacked-trace frames from getting a +2 adjustment.
+				--
+				-- Priority order (highest first):
+				--   1. writePC='1'                         -> TG68_PC         (role A)
+				--   2. micro_state=trap00                  -> exe_pc          (role A, Fmt$2 instr addr)
+				--   3. exec(writePC_add)='1', vec=$10|$20  -> exe_pc          (role A, BUG #387)
+				--   4. exec(writePC_add)='1' (else)        -> TG68_PC_add     (role A)
+				--   5. micro_state=trap0, useStackframe2=1 -> $2xxx fmt/vec   (role B)
+				--   6. micro_state=trap0 (else)            -> $0xxx fmt/vec   (role B)
+				--   7. micro_state=int3                    -> $1xxx fmt/vec   (role B, Fmt$1 throwaway)
 				IF writePC='1' THEN
+					-- Priority 1: explicit PC push (trap0/1 68000-style, int4 Fmt$1 PC,
+					-- JSR/BSR target, DIV0 return PC, etc.)
 					data_write_tmp <= TG68_PC;
-				-- Format $2 instruction address longword must come from exe_pc.
-				-- Keep this branch BEFORE exec(writePC_add), otherwise a stale
-				-- writePC_add can overwrite trap00 with TG68_PC_add.
-				elsif micro_state=trap00 THEN
+				ELSIF micro_state=trap00 THEN
+					-- Priority 2: Format $2 instruction address longword must come from
+					-- exe_pc. Keep this branch BEFORE exec(writePC_add), otherwise a stale
+					-- writePC_add can overwrite trap00 with TG68_PC_add.
 					data_write_tmp <= exe_pc; --TH
-					useStackframe2<='1';
+					useStackframe2 <= '1';
 					-- BUG #443 FIX: Gate with trap_trace='0'. During stacked trace frames,
 					-- set(trap_chk)/trap_trap/trap_trapv are combinationally active from the
 					-- stale CHK/TRAP/TRAPV opcode. writePCnext must be '0' for trace frames
@@ -2162,35 +2187,32 @@ PROCESS (clk)
 						writePCnext <= trap_trap OR trap_trapv OR exec(trap_chk) OR set(trap_chk) OR Z_error;
 					END IF;
 				ELSIF exec(writePC_add)='1' THEN
-					-- BUG #387 FIX: Use exe_pc for exceptions that occur during instruction decode
-					-- (illegal instruction vector=0x10, privilege violation vector=0x20).
-					-- These exceptions fire after extension words are fetched, so TG68_PC_add is over-incremented.
+					-- Priorities 3 & 4: post-instruction PC push (Format $0 PC field).
+					-- BUG #387 FIX: illegal (vector $10) and privilege violation ($20)
+					-- exceptions fire after extension words are fetched, so TG68_PC_add is
+					-- over-incremented; use exe_pc (the instruction-entry PC) instead.
 					IF trap_vector(9 downto 0) = "00" & X"10" OR trap_vector(9 downto 0) = "00" & X"20" THEN
 						data_write_tmp <= exe_pc;
 					ELSE
 						data_write_tmp <= TG68_PC_add;
 					END IF;
--- paste and copy form TH	---------
-				elsif micro_state = trap0 then
-		  -- this is only active for 010+ since in 000 writePC is
-		  -- true in state trap0
---					if trap_trace='1' or set_exec(opcTRAPV)='1' or Z_error='1' then
-					IF	useStackframe2='1' THEN
-						-- stack frame format #2
+				ELSIF micro_state = trap0 THEN
+					-- Priorities 5 & 6: Format $0/$2 format-and-vector word (16 bits only).
+					-- Only active for 010+; on 68000, writePC is asserted in trap0 instead.
+					IF useStackframe2='1' THEN
+						-- Format $2 (6-word frame)
 						data_write_tmp(15 downto 0) <= "0010" & trap_vector(11 downto 0); --TH
-					else
+					ELSE
+						-- Format $0 (4-word frame)
 						data_write_tmp(15 downto 0) <= "0000" & trap_vector(11 downto 0);
 						-- BUG #443: Gate with trap_trace='0' (same reason as trap00 above)
 						IF trap_trace='0' THEN
 							writePCnext <= trap_trap OR trap_trapv OR exec(trap_chk) OR set(trap_chk) OR Z_error;
 						END IF;
-					end if;
-				elsif micro_state = int3 then
-					-- MC68030: Format $1 throwaway frame format/vector word
+					END IF;
+				ELSIF micro_state = int3 THEN
+					-- Priority 7: MC68030 Format $1 throwaway frame format/vector word
 					data_write_tmp(15 downto 0) <= "0001" & trap_vector(11 downto 0);
-------------------------------------
---				ELSIF micro_state=trap0 THEN
---					data_write_tmp(15 downto 0) <= trap_vector(15 downto 0);
 				-- MC68030 Bus Error Frame: Register frame data for each berr state.
 				-- data_write_muxin is combinational and reads micro_state, but micro_state
 				-- advances at the SAME clkena_lw edge that starts the longaktion write.
@@ -5056,10 +5078,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 									IF micro_state=ld_AnXn1 AND brief(8)='0'THEN			--JMP/JSR n(Ax,Dn)
 										skipFetch <= '1';
 									END IF;
+									IF micro_state=ld_dAn1 THEN				--JMP/JSR d(An), d(PC)
+										skipFetch <= '1';
+									END IF;
 									IF state="00" THEN
 										writePC <= '1';
 									END IF;
 									set(hold_dwr) <= '1';
+									set(no_Flags) <= '1';
 									IF set(get_ea_now)='1' THEN					--jsr
 										IF exec(longaktion)='0' OR long_done='1' THEN
 											skipFetch <= '1';
@@ -5905,6 +5931,40 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			ELSIF clkena_lw='1' THEN
 				trapd <= trapmake;
 				micro_state <= next_micro_state;
+				-- synthesis translate_off
+				-- Micro-state machine invariants (simulation-only; stripped from synthesis).
+				-- See CPU_AUDIT.md / plan sleepy-moseying-pike for rationale.
+
+				-- Invariant 5: mutually-exclusive exec() bits must not both be set.
+				-- Catches BUG #12 / #13 / #149 class (conflicting PC or RW direction).
+				-- This invariant is tight: both bits being set in the same cycle would be
+				-- a genuine bug (PC destination conflict, RW direction conflict).
+				assert NOT (exec(directPC) = '1' AND exec(ea_to_pc) = '1')
+					report "INV5a: exec(directPC) and exec(ea_to_pc) both asserted"
+					severity error;
+				assert NOT (exec(pmmu_rd) = '1' AND exec(pmmu_wr) = '1')
+					report "INV5b: exec(pmmu_rd) and exec(pmmu_wr) both asserted"
+					severity error;
+
+				-- Invariants 1-4 from the original plan draft were removed after empirical
+				-- triage: they fire hundreds of times in the currently-passing test suite,
+				-- meaning they reflected a simplistic model of the state machine, not actual
+				-- design intent. Specifically:
+				--   INV1 (setnextpass→idle): intentional on instruction retirement — the EA
+				--     result was already consumed; setnextpass sticking into idle is harmless.
+				--   INV2 (EA-load without get_ea_now): first pass of multi-pass loads
+				--     legitimately skips get_ea_now (BUG #387 pattern is by design).
+				--   INV3 (store without setstate=write): setstate is combinational and the
+				--     state machine routinely stages intermediate setstate values during
+				--     multi-phase store sequences.
+				--   INV4 (setstackaddr scope): setstackaddr fires speculatively in decode
+				--     before the actual dispatched state is known. Not a bug.
+				-- These would need much more careful per-state modeling to be useful. Left
+				-- the tight mutex invariants (INV5) which ARE clean-fire in the current
+				-- suite. Future refinements to INV1-4 should wait on the prefetch-queue
+				-- refactor (Phase 3), which will naturally eliminate several of the
+				-- confounding timing interactions.
+				-- synthesis translate_on
 				-- BUG #228: Flag management moved to clkena_in block (see above line ~1953)
 				-- BUG #154 FIX: Acknowledge MMU config error when trap is taken
 				-- This clears mmu_config_error in PMMU to prevent infinite exception loop
