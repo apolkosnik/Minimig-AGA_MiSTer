@@ -1,30 +1,37 @@
 # TG68K PMMU (MC68030) Deep Audit
 
-_Generated 2026-04-16. All citations into [TG68K_PMMU_030.vhd](rtl/tg68k/TG68K_PMMU_030.vhd) (4141 lines, **170** `BUG #` comments), [TG68KdotC_Kernel.vhd](rtl/tg68k/TG68KdotC_Kernel.vhd), [TG68K_Pack.vhd](rtl/tg68k/TG68K_Pack.vhd), and [cpu_wrapper.v](rtl/cpu_wrapper.v)._
+_Last refresh 2026-04-17. All citations into [TG68K_PMMU_030.vhd](rtl/tg68k/TG68K_PMMU_030.vhd) (4202 lines, **179** `BUG #` comments), [TG68KdotC_Kernel.vhd](rtl/tg68k/TG68KdotC_Kernel.vhd), [TG68K_Pack.vhd](rtl/tg68k/TG68K_Pack.vhd), and [cpu_wrapper.v](rtl/cpu_wrapper.v)._
 
 ## Executive summary
 
 The MMU is a mostly-functional MC68030 PMMU built around:
 
 - a 6-register control-surface (`TC`, `CRP`, `SRP`, `TT0`, `TT1`, `MMUSR`) with strict write-masks;
-- a **22-entry** address translation cache (ATC, pseudo-LRU) — note the header comment still says "8-entry";
+- a **22-entry** address translation cache (ATC, pseudo-LRU);
 - a multi-level walker with dedicated states for short (4-byte) and long (8-byte) descriptors, early-termination page descriptors, indirect descriptors, limit checking, U/M bit write-back, and a 500-cycle walker watchdog;
 - combinational TTR bypass to sidestep stale `addr_phys_reg`;
 - a fault pipeline that feeds the kernel with logical address, FC, RW, and insn-flag latched _at fault time_ (BUG #414/#415);
-- an MMU-Configuration-Exception path (vector 56) for illegal TC / DT=00 root pointers, distinct from the bus-error (vector 2) path.
+- an MMU-Configuration-Exception path (vector 56) for illegal TC / DT=00 root pointers, distinct from the bus-error (vector 2) path — with a **sticky** `mmu_config_error` latch (BUG #445) that cannot be silently cleared by a subsequent valid write;
+- **observable + trapped** illegal-PMOVE-reg_sel behavior (BUG #446) — previously silent ignores now raise a sim assertion, set a sticky `debug_illegal_reg_sel` port, **and** raise a vector-56 hardware trap via the existing `mmu_config_error` path.
 
-The `CAL`, `VAL`, `SCC`, `AC` registers are deliberately not implemented. PMOVE is the sole PMMU-register access path; the kernel's MOVEC whitelist does **not** include MMU registers (so software using MOVEC for TC/TT0/TT1/MMUSR traps as privilege violation in this tree).
+The `CAL`, `VAL`, `SCC`, `AC` registers are deliberately not implemented. PMOVE is the sole PMMU-register access path; the kernel's MOVEC whitelist does **not** include MMU registers (so software using MOVEC for TC/TT0/TT1/MMUSR traps as privilege violation in this tree). This deviation from the spec is documented in the updated file header ([PMMU:100-106](rtl/tg68k/TG68K_PMMU_030.vhd#L100-L106)).
+
+New since prior refresh (2026-04-16):
+- Header comment fixed: "22-entry ATC" and PMOVE-only access note ([PMMU:3, 100-106](rtl/tg68k/TG68K_PMMU_030.vhd#L3)).
+- `mmu_config_error` is a true sticky latch (BUG #445) — no more race against repeated TC writes.
+- Illegal PMOVE reg_sel is observable (BUG #446) — sim asserts + sticky latch + debug port.
+- New wrapper-level bench [tests/tg68k_030/tb_cpu_wrapper_pmmu.v](tests/tg68k_030/tb_cpu_wrapper_pmmu.v) (+ `test-cpu-wrapper-pmmu` Makefile target) exercises walker ownership, BUG #422 stale-ready, BUG #439 RAM-gap, BUG #424 watchdog escape, BUG #417 physical-address routing.
 
 ## 1. Register surface
 
-All register signals are declared at [PMMU:105-112](rtl/tg68k/TG68K_PMMU_030.vhd#L105-L112). Write masks are at [PMMU:123-133](rtl/tg68k/TG68K_PMMU_030.vhd#L123-L133). Writes happen in the `case reg_sel` block at [PMMU:1051-1179](rtl/tg68k/TG68K_PMMU_030.vhd#L1051-L1179); reads are combinational at [PMMU:1190-1198](rtl/tg68k/TG68K_PMMU_030.vhd#L1190-L1198).
+All register signals are declared at [PMMU:105-112](rtl/tg68k/TG68K_PMMU_030.vhd#L105-L112). Write masks are at [PMMU:123-133](rtl/tg68k/TG68K_PMMU_030.vhd#L123-L133). Writes happen in the `case reg_sel` block at [PMMU:1061-1207](rtl/tg68k/TG68K_PMMU_030.vhd#L1061-L1207); reads are combinational at [PMMU:1226-1234](rtl/tg68k/TG68K_PMMU_030.vhd#L1226-L1234).
 
 ### TC — Translation Control ([PMMU:105](rtl/tg68k/TG68K_PMMU_030.vhd#L105))
 32-bit. Write mask `TC_WRITE_MASK = 0x83FFFFFF` ([PMMU:123](rtl/tg68k/TG68K_PMMU_030.vhd#L123)) — preserves E, SRE, FCL, all PS/IS/TI fields, forces reserved bits 30:26 to zero (bit 23 is the PS MSB; all valid PS values 8–15 have it set).
 
 | Bits | Field | Notes |
 |---|---|---|
-| 31 | E | Enable — gated by `mmu_config_error` at [PMMU:1239](rtl/tg68k/TG68K_PMMU_030.vhd#L1239) |
+| 31 | E | Enable — gated by `mmu_config_error` (`tc_en <= TC(31) and not mmu_config_error`, [PMMU:1275](rtl/tg68k/TG68K_PMMU_030.vhd#L1275)) — MMU stays disabled as long as the sticky BUG #445 latch is held |
 | 30:26 | Reserved | Forced 0 |
 | 25 | SRE | Supervisor Root Enable |
 | 24 | FCL | Function Code Lookup (adds one walk level) |
@@ -35,15 +42,15 @@ All register signals are declared at [PMMU:105-112](rtl/tg68k/TG68K_PMMU_030.vhd
 | 7:4 | TIC | Table Index C |
 | 3:0 | TID | Table Index D |
 
-Field-sum check `tc_total_bits(reg_wdat) /= 32` raises `mmu_config_error` ([PMMU:1094-1104](rtl/tg68k/TG68K_PMMU_030.vhd#L1094-L1104)).
+Field-sum check `tc_total_bits(reg_wdat) /= 32` raises `mmu_config_error` ([PMMU:1101-1120](rtl/tg68k/TG68K_PMMU_030.vhd#L1101-L1120)). **BUG #445** ([PMMU:1094-1099](rtl/tg68k/TG68K_PMMU_030.vhd#L1094-L1099)): a valid TC write does not clear the latch — only `mmu_config_ack` (the kernel acknowledging vector 56) or async reset does. This closes the race where `pmmu_config_err` could drop before `trap_mmu_config` was registered.
 
 ### CRP / SRP — CPU / Supervisor Root Pointers ([PMMU:106-109](rtl/tg68k/TG68K_PMMU_030.vhd#L106-L109))
 Each is a 64-bit register stored as two 32-bit halves (`*_H`, `*_L`). Accessed via PMOVE with `reg_part='1'` for HIGH and `'0'` for LOW.
 
 - HIGH mask `CRP_HIGH_MASK = 0xFFFF0003` ([PMMU:130](rtl/tg68k/TG68K_PMMU_030.vhd#L130)): preserves `L/U[31]`, `LIMIT[30:16]`, `DT[1:0]`; zeros reserved [15:2].
 - LOW mask `CRP_LOW_MASK = 0xFFFFFFF0` ([PMMU:133](rtl/tg68k/TG68K_PMMU_030.vhd#L133)): preserves table address [31:4]; zeros reserved [3:0].
-- Writing HIGH with `DT=00` raises `mmu_config_error` ([PMMU:1127-1134, 1155-1162](rtl/tg68k/TG68K_PMMU_030.vhd#L1127-L1134)). The register is still loaded first, per spec.
-- Any write (unless `reg_fd='1'` = PMOVEFD) raises `atc_flush_req` to invalidate cached translations ([PMMU:1142-1144, 1171-1173](rtl/tg68k/TG68K_PMMU_030.vhd#L1142-L1144)).
+- Writing HIGH with `DT=00` raises `mmu_config_error` ([PMMU:1132-1141, 1158-1167](rtl/tg68k/TG68K_PMMU_030.vhd#L1132-L1141)). The register is still loaded first, per spec. BUG #445 applies here too — a subsequent valid CRP/SRP write does not clear the latch.
+- Any write (unless `reg_fd='1'` = PMOVEFD) raises `atc_flush_req` to invalidate cached translations ([PMMU:1148-1150, 1177-1179](rtl/tg68k/TG68K_PMMU_030.vhd#L1148-L1150)).
 
 ### TT0 / TT1 — Transparent Translation ([PMMU:110-111](rtl/tg68k/TG68K_PMMU_030.vhd#L110-L111))
 Write mask `TTR_WRITE_MASK = 0xFFFF8777` ([PMMU:127](rtl/tg68k/TG68K_PMMU_030.vhd#L127)):
@@ -65,7 +72,7 @@ Write mask `TTR_WRITE_MASK = 0xFFFF8777` ([PMMU:127](rtl/tg68k/TG68K_PMMU_030.vh
 Match logic is `ttr_check()` ([PMMU:472-583](rtl/tg68k/TG68K_PMMU_030.vhd#L472-L583)); **BUG #421** ([PMMU:4030](rtl/tg68k/TG68K_PMMU_030.vhd#L4030)) notes the caller must pass the actual `rw` signal, not the hard-coded read case, so RWM=0 writes get properly rejected.
 
 ### MMUSR — MMU Status Register ([PMMU:112](rtl/tg68k/TG68K_PMMU_030.vhd#L112))
-32-bit storage, but only the low 16 bits are meaningful. PMOVE to MMUSR is a **direct 16-bit store** ([PMMU:1174-1177](rtl/tg68k/TG68K_PMMU_030.vhd#L1174-L1177), MC68030UM §9.6.3.4). PMOVE read returns `X"0000" & MMUSR(15 downto 0)` ([PMMU:1197](rtl/tg68k/TG68K_PMMU_030.vhd#L1197)).
+32-bit storage, but only the low 16 bits are meaningful. PMOVE to MMUSR is a **direct 16-bit store** ([PMMU:1185-1188](rtl/tg68k/TG68K_PMMU_030.vhd#L1185-L1188), MC68030UM §9.6.3.4). PMOVE read returns `X"0000" & MMUSR(15 downto 0)` ([PMMU:1233](rtl/tg68k/TG68K_PMMU_030.vhd#L1233)).
 
 As-implemented bit layout ([PMMU:825-836, 852-862, 882-888](rtl/tg68k/TG68K_PMMU_030.vhd#L825-L836)):
 
@@ -86,12 +93,12 @@ As-implemented bit layout ([PMMU:825-836, 852-862, 882-888](rtl/tg68k/TG68K_PMMU
 The layout above matches MC68030 UM §9.7.1 Table 9-1 (B[15], L[14], S[13], W[11], I[10], M[9], T[6], N[2:0]). Encoder/decoder functions `encode_mmusr_fault` / `encode_mmusr_success` ([PMMU:837-890](rtl/tg68k/TG68K_PMMU_030.vhd#L837-L890)) are consistent with the spec.
 
 ### CAL / VAL / SCC / AC — deliberately absent
-[PMMU:113-114](rtl/tg68k/TG68K_PMMU_030.vhd#L113-L114): "defined in MC68030 but not implemented … removed as unused signals." No signal declarations; any PMOVE targeting a reg_sel outside the six encodings falls through `when others => null` ([PMMU:1178](rtl/tg68k/TG68K_PMMU_030.vhd#L1178)).
+[PMMU:113-114](rtl/tg68k/TG68K_PMMU_030.vhd#L113-L114): "defined in MC68030 but not implemented … removed as unused signals." No signal declarations; any PMOVE targeting a reg_sel outside the six encodings enters the `when others` arm at [PMMU:1189-1206](rtl/tg68k/TG68K_PMMU_030.vhd#L1189-L1206), which now (BUG #446) raises a sim `assert … severity error` and sets the sticky `pmmu_illegal_reg_sel_seen` latch exposed on port `debug_illegal_reg_sel`.
 
 ## 2. Access paths
 
 ### reg_sel → register map
-`reg_sel` is `brief[14:10]` ([PMMU:17](rtl/tg68k/TG68K_PMMU_030.vhd#L17)). Verified via the write `case` at [PMMU:1051-1178](rtl/tg68k/TG68K_PMMU_030.vhd#L1051-L1178) and read mux at [PMMU:1190-1198](rtl/tg68k/TG68K_PMMU_030.vhd#L1190-L1198). **BUG #178** ([PMMU:1187](rtl/tg68k/TG68K_PMMU_030.vhd#L1187)) explicitly calls out that these are the correct extension-word selectors:
+`reg_sel` is `brief[14:10]` ([PMMU:17](rtl/tg68k/TG68K_PMMU_030.vhd#L17)). Verified via the write `case` at [PMMU:1061-1207](rtl/tg68k/TG68K_PMMU_030.vhd#L1061-L1207) and read mux at [PMMU:1226-1234](rtl/tg68k/TG68K_PMMU_030.vhd#L1226-L1234). **BUG #178** ([PMMU:1223-1225](rtl/tg68k/TG68K_PMMU_030.vhd#L1223-L1225)) explicitly calls out that these are the correct extension-word selectors:
 
 | reg_sel | P-reg | Register |
 |---|---|---|
@@ -101,10 +108,10 @@ The layout above matches MC68030 UM §9.7.1 Table 9-1 (B[15], L[14], S[13], W[11
 | `10010` | 0x12 | SRP (with reg_part) |
 | `10011` | 0x13 | CRP (with reg_part) |
 | `11000` | 0x18 | MMUSR |
-| any other | — | silently ignored on write; reads `(others => '0')` |
+| any other | — | **observable + trapped** (BUG #446): sim assert + sticky `pmmu_illegal_reg_sel_seen` latch + vector-56 trap via `mmu_config_error`; read mux still returns `(others => '0')` |
 
 ### PMOVE vs MOVEC
-The file header ([PMMU:101-102](rtl/tg68k/TG68K_PMMU_030.vhd#L101-L102)) claims `TC/TT0/TT1/MMUSR` are MOVEC-accessible, matching MC68030 documentation. **In this tree that claim is stale** — the kernel's `movec1` whitelist is SFC/DFC/CACR/CAAR/USP/VBR/MSP/ISP only; MOVEC to any PMMU register traps as privilege violation. PMOVE is the sole access path in practice. (See [CPU_AUDIT.md §Instructions](CPU_AUDIT.md), which documents the kernel whitelist.)
+The file header ([PMMU:100-106](rtl/tg68k/TG68K_PMMU_030.vhd#L100-L106)) now correctly documents that all PMMU registers are **PMOVE-only in this tree**. The kernel's `movec1` whitelist is SFC/DFC/CACR/CAAR/USP/VBR/MSP/ISP only; MOVEC to any PMMU register traps as privilege violation. MC68030 spec lists TC/TT0/TT1/MMUSR as MOVEC-accessible, but that path is deliberately not wired here. (See [CPU_AUDIT.md §Instructions](CPU_AUDIT.md), which documents the kernel whitelist.)
 
 ### 64-bit CRP/SRP sequencing
 Two PMOVE cycles per transfer, driven by kernel micro-states `pmove_mem_to_mmu_hi/lo` and `pmove_mmu_to_mem_hi/lo` ([Pack:35](rtl/tg68k/TG68K_Pack.vhd#L35)), plus `pmove_dn_hi/lo` for Dn operand ([Pack:36](rtl/tg68k/TG68K_Pack.vhd#L36)). Address auto-increment in memory modes via `pmmu_addr_inc`; the 64-bit flag is `pmmu_dbl` ([Pack:144-145](rtl/tg68k/TG68K_Pack.vhd#L144-L145)). **BUG #70** ([PMMU:181](rtl/tg68k/TG68K_PMMU_030.vhd#L181)) simplified Dn capture to two signals (`pmove_dn_mode`, `pmove_dn_regnum`). **BUG #53** ([PMMU:650](rtl/tg68k/TG68K_PMMU_030.vhd#L650)) retired a prior 2-stage pipeline in favor of single-stage brief capture.
@@ -112,10 +119,11 @@ Two PMOVE cycles per transfer, driven by kernel micro-states `pmove_mem_to_mmu_h
 ## 3. PMMU instructions
 
 ### PMOVE (opcodes `pmmu_rd`, `pmmu_wr` — [Pack:131-132](rtl/tg68k/TG68K_Pack.vhd#L131-L132))
-- Write: kernel asserts `reg_we`; PMMU handles the `case reg_sel` in the clocked process starting at [PMMU:1036](rtl/tg68k/TG68K_PMMU_030.vhd#L1036).
-- Read: `reg_re` → combinational `reg_rdat` mux at [PMMU:1190](rtl/tg68k/TG68K_PMMU_030.vhd#L1190). **BUG #83** ([PMMU:1183-1186](rtl/tg68k/TG68K_PMMU_030.vhd#L1183-L1186)) captures that the read path must be combinational — a prior registered version returned zero on the first read.
-- PMOVEFD distinguishes itself via `reg_fd='1'`, which suppresses the `atc_flush_req` pulse ([PMMU:1060, 1073, 1114, 1142, 1171](rtl/tg68k/TG68K_PMMU_030.vhd#L1060)).
-- Register-write context bump (`xlat_cfg_seq`) fires on any of TT0/TT1/TC/SRP/CRP writes ([PMMU:1041-1044](rtl/tg68k/TG68K_PMMU_030.vhd#L1041-L1044)) so the translation pipeline can detect stale results.
+- Write: kernel asserts `reg_we`; PMMU handles the `case reg_sel` in the clocked process at [PMMU:1044](rtl/tg68k/TG68K_PMMU_030.vhd#L1044).
+- Read: `reg_re` → combinational `reg_rdat` mux at [PMMU:1226](rtl/tg68k/TG68K_PMMU_030.vhd#L1226). **BUG #83** captures that the read path must be combinational — a prior registered version returned zero on the first read.
+- PMOVEFD distinguishes itself via `reg_fd='1'`, which suppresses the `atc_flush_req` pulse (sites in the TT0/TT1/TC/SRP/CRP write arms).
+- Register-write context bump (`xlat_cfg_seq`) fires on any of TT0/TT1/TC/SRP/CRP writes ([PMMU:1049-1054](rtl/tg68k/TG68K_PMMU_030.vhd#L1049-L1054)) so the translation pipeline can detect stale results.
+- **BUG #446** illegal-reg_sel observability + hardware trap: the `when others` arm latches `pmmu_illegal_reg_sel_seen`, raises a sim `severity error`, **and** sets `mmu_config_error <= '1'` for both writes ([PMMU:1189-1207](rtl/tg68k/TG68K_PMMU_030.vhd#L1189-L1207)) and reads ([PMMU:1208-1219](rtl/tg68k/TG68K_PMMU_030.vhd#L1208-L1219)); the translate-off read-side assertion is at [PMMU:1242-1261](rtl/tg68k/TG68K_PMMU_030.vhd#L1242-L1261). The sticky flag is exposed on port `debug_illegal_reg_sel` ([PMMU:85-88, 1240](rtl/tg68k/TG68K_PMMU_030.vhd#L85-L88)); the vector-56 trap uses the existing `mmu_config_err`/`mmu_config_ack` handshake.
 
 ### PTEST ([Pack:133](rtl/tg68k/TG68K_Pack.vhd#L133); pmmu state `ptest1`)
 - Brief fields: `brief[9]` = R/W (0=PTESTW, 1=PTESTR); `brief[12:10]` = level (BUG #413 [PMMU:271](rtl/tg68k/TG68K_PMMU_030.vhd#L271)).
@@ -202,7 +210,7 @@ Handled within `W_ROOT` and `W_PTR*` when the fetched descriptor has `DT=01` (pa
 ## 6. ATC
 
 ### Geometry
-- `ATC_ENTRIES = 22` ([PMMU:191](rtl/tg68k/TG68K_PMMU_030.vhd#L191)). _The file header ([PMMU:3](rtl/tg68k/TG68K_PMMU_030.vhd#L3)) still says "8-entry" — stale._
+- `ATC_ENTRIES = 22` ([PMMU:191](rtl/tg68k/TG68K_PMMU_030.vhd#L191)). The header comment at [PMMU:3](rtl/tg68k/TG68K_PMMU_030.vhd#L3) now correctly says "22-entry ATC".
 - Per-entry storage ([PMMU:192-215](rtl/tg68k/TG68K_PMMU_030.vhd#L192-L215)):
 
 | Array | Purpose |
@@ -248,6 +256,7 @@ Pseudo-LRU ([PMMU:3803-3839, 3908-3923](rtl/tg68k/TG68K_PMMU_030.vhd#L3803-L3839
 | External BERR during walk | `mem_berr='1'` at any descriptor fetch; enters W_FAULT ([PMMU:2438, 2548+](rtl/tg68k/TG68K_PMMU_030.vhd#L2438)) | B (per BUG #153 [PMMU:2478](rtl/tg68k/TG68K_PMMU_030.vhd#L2478), **only** external BERR sets B) |
 | Walker timeout | `walker_timeout_counter >= 500` (BUG #387) | B |
 | Illegal TC (PS<8 or field-sum≠32) | Register write ([PMMU:1087-1104](rtl/tg68k/TG68K_PMMU_030.vhd#L1087-L1104)) | `mmu_config_error` (vector 56) |
+| Illegal PMOVE reg_sel (BUG #446) | Write or read with undecoded `brief[14:10]` ([PMMU:1189-1219](rtl/tg68k/TG68K_PMMU_030.vhd#L1189-L1219)) | `mmu_config_error` (vector 56) + sticky `pmmu_illegal_reg_sel_seen` |
 
 ### Fault context latching (BUG #414/#415)
 On fault entry, these latch exactly once ([PMMU:164-167, 1614-1617, 1651-1654, and other walker fault sites](rtl/tg68k/TG68K_PMMU_030.vhd#L164-L167)):
@@ -259,6 +268,7 @@ These feed the kernel's exception-frame builder, which selects Format $B (long, 
 ### Vector routing
 - **Vector 2** (Access Fault): normal translation faults. Kernel latches `berr_external_rw/fc` at first BERR fire (BUG #431/#433b/#434); note **BUG #435** ([PMMU:2385](rtl/tg68k/TG68K_PMMU_030.vhd#L2385)) emits vector 2 for internal PMMU BERRs too — the differentiation is Format $A vs $B, not the vector number.
 - **Vector 56** (MMU Configuration Error): `mmu_config_err` port ([PMMU:55-57](rtl/tg68k/TG68K_PMMU_030.vhd#L55-L57)) with `mmu_config_ack` handshake. Raised on illegal TC.PS, TC field-sum mismatch, and CRP/SRP HIGH write with DT=00. Register is still loaded before the trap.
+- **BUG #445 sticky latch semantics**: `mmu_config_error` is cleared only by `mmu_config_ack` or async reset — a subsequent valid TC/CRP/SRP write does **not** silently clear it. The kernel acknowledges via `pmmu_config_ack` on the first cycle of `trap_mmu_config` ([TG68KdotC_Kernel.vhd:5971-5975](rtl/tg68k/TG68KdotC_Kernel.vhd#L5971-L5975)). MMU translation stays disabled (`tc_en` clamps to 0) until the ack clears the latch, guaranteeing one trap per illegal config.
 
 ## 8. Descriptors and U/M writeback
 
@@ -316,6 +326,8 @@ Across every descriptor level the walker ORs descriptor bit 2 into `walk_write_p
 
 | # | Lines | One-liner |
 |---|---|---|
+| 446 | [85-88, 245-246, 1003, 1189-1216, 1237, 1239-1258](rtl/tg68k/TG68K_PMMU_030.vhd#L85-L88) | Illegal PMOVE reg_sel: sim assert + sticky latch + debug port |
+| 445 | [1094-1099, 1138-1141, 1164-1168](rtl/tg68k/TG68K_PMMU_030.vhd#L1094-L1099) | `mmu_config_error` is sticky — only `mmu_config_ack`/reset clears it |
 | 438 | [2515, 2531, 2745, 2765, 2986, 3006, 3199, 3218, 3305](rtl/tg68k/TG68K_PMMU_030.vhd#L2515) | WP OR-accumulates across all descriptor levels |
 | 437 | [3557, 3664](rtl/tg68k/TG68K_PMMU_030.vhd#L3557) | M-bit writeback requires WP=0 (WinUAE parity) |
 | 436 | [214, 3822](rtl/tg68k/TG68K_PMMU_030.vhd#L3822) | Clear sticky-fault ATC flag on successful walk |
@@ -488,19 +500,19 @@ Phase encoding ([cpu_wrapper.v:196-201](rtl/cpu_wrapper.v#L196-L201)): low-phase
 - **No identity-mapped MMU bypass regions**: there is no "RTC is always identity" carve-out. If software maps RTC through the MMU, the wrapper routes via `pmmu_addr_phys_p` like everything else. This is consistent with the commit-log observation that RTC visibility depends on OS-driven MMU mappings rather than hardware hard-coding.
 - **No independent PMMU reset**: the PMMU relies on the kernel's `nreset`. A partial reset that leaves PMMU state but clears the walker (or vice versa) is not possible from the wrapper.
 - **No MMU-config-error specific wire**: vector-56 is surfaced inside the kernel only. The wrapper's bus-suppression logic still keeps the bus idle while it is being dispatched.
-- **No maintained testbench** wraps `cpu_wrapper.v`. Walker arbitration, BUG #422 stale-ready, BUG #439 RAM gap, BUG #424 watchdog escape, and BUG #417 physical-address routing are structurally unverified in sim.
+- **Wrapper-level testbench now exists** (2026-04-16): [tests/tg68k_030/tb_cpu_wrapper_pmmu.v](tests/tg68k_030/tb_cpu_wrapper_pmmu.v), Makefile target `test-cpu-wrapper-pmmu`. Instantiates `cpu_wrapper.v` (mixed-language via ModelSim), forces Zorro-config regs, runs a pre-loaded 68030 program that enables the MMU then accesses remapped and Fast-RAM-backed pages. Self-checks walker ownership (via `walker_active`/`ramsel` invariant), BUG #417 (`bus_addr` never shows logical $D0xxxxxx while walker active), BUG #422 (stale-ready injection), BUG #439 (RAM-gap state count), BUG #424 (never-ready → walker_timeout_error). The bench is pragmatic rather than exhaustive — it validates the architectural invariants but does not enumerate every corner.
 
 ## 11. Gaps, stubs, dead code
 
 ### Deliberately absent
 - **CAL / VAL / SCC / AC** registers ([PMMU:113-114](rtl/tg68k/TG68K_PMMU_030.vhd#L113-L114)).
-- **MOVEC access to PMMU registers** (kernel whitelist excludes them — stale header comment [PMMU:101-102](rtl/tg68k/TG68K_PMMU_030.vhd#L101-L102)).
+- **MOVEC access to PMMU registers** (kernel whitelist excludes them — header now correctly documents this, [PMMU:100-106](rtl/tg68k/TG68K_PMMU_030.vhd#L100-L106)).
 - **PFLUSHN / PFLUSHR / PFLUSHS variants** not decoded.
-- **Illegal PMOVE reg_sel**: silently falls into `when others => null` ([PMMU:1178](rtl/tg68k/TG68K_PMMU_030.vhd#L1178)); reads return zero. No privilege/illegal-instruction trap generated here (privilege check is upstream in the kernel).
+- **Illegal PMOVE reg_sel**: no hardware trap (privilege check is upstream in the kernel), but BUG #446 now makes it observable via sim assertion + sticky `debug_illegal_reg_sel` latch.
 
 ### Stale or contradictory documentation in the RTL
-- File header still advertises an **8-entry ATC** ([PMMU:3](rtl/tg68k/TG68K_PMMU_030.vhd#L3)); constant `ATC_ENTRIES := 22` ([PMMU:191](rtl/tg68k/TG68K_PMMU_030.vhd#L191)).
-- Header claims MOVEC access to `TC/TT0/TT1/MMUSR`; kernel whitelist does not expose these.
+- ~~File header advertises 8-entry ATC~~ — fixed, now reads "22-entry" ([PMMU:3](rtl/tg68k/TG68K_PMMU_030.vhd#L3)).
+- ~~Header claims MOVEC access to TC/TT0/TT1/MMUSR~~ — fixed, replaced with a PMOVE-only note that calls out the deliberate spec deviation ([PMMU:100-106](rtl/tg68k/TG68K_PMMU_030.vhd#L100-L106)).
 - `tests/tg68k_030/tb_movec_pmmu.vhd` still drives MOVEC-to-PMMU and even uses `cpu_mode="11"` (outside the encoded 00/01/10). Bench is not wired into maintained Makefile targets — audit candidate for removal.
 - Several inline debug comments tag "BUG E FIX" / "BUG F FIX" ([PMMU:3972-3977](rtl/tg68k/TG68K_PMMU_030.vhd#L3972-L3977)) without corresponding `BUG #` numbers.
 
@@ -511,18 +523,24 @@ Phase encoding ([cpu_wrapper.v:196-201](rtl/cpu_wrapper.v#L196-L201)): low-phase
 - Commented-out `slv_to_hstring` / `report` scaffolding throughout (e.g. [PMMU:334-390, 1045-1050, 1063-1064, 2427-2431](rtl/tg68k/TG68K_PMMU_030.vhd#L334-L390)) — disabled for Quartus / sim speed.
 
 ### Verification gaps
-- No guard for **PTEST level > actual walk depth**: the walker reports success with `N=level` instead of flagging a spec violation ([PMMU:3657](rtl/tg68k/TG68K_PMMU_030.vhd#L3657)).
-- **No fault path for illegal PMOVE reg_sel** — silently ignored (see above).
-- No maintained bench wraps `cpu_wrapper.v`, so walker-arbitration corner cases (stale-ready suppression, Fast RAM vs chip RAM, timeout recovery mid-fill) remain structurally unverified.
+- ~~No guard for PTEST level > actual walk depth~~ — **false positive, retracted 2026-04-17**. Re-inspection shows every MMUSR-success site in a PTEST path reports `walk_level + 1` (the level actually reached), not `ptest_level` (the level requested). See e.g. [PMMU:2586](rtl/tg68k/TG68K_PMMU_030.vhd#L2586), [PMMU:3717](rtl/tg68k/TG68K_PMMU_030.vhd#L3717), [PMMU:3745](rtl/tg68k/TG68K_PMMU_030.vhd#L3745). Per MC68030 UM §9.7.2 the walker terminates at either a page descriptor _or_ the requested level, whichever is earlier, and reports the level reached — which is what this code does. Behavior is spec-compliant.
+- ~~Illegal PMOVE reg_sel does not raise a hardware trap~~ — **closed 2026-04-17**. BUG #446 now also routes to `mmu_config_error` ([PMMU:1207, 1217](rtl/tg68k/TG68K_PMMU_030.vhd#L1207)), so an undecoded P-register selector raises vector 56 alongside the sim assertion and the sticky `debug_illegal_reg_sel` latch. Kernel processes via the existing `pmmu_config_err` / `pmmu_config_ack` handshake.
+- The new wrapper bench is count/invariant-based, not exhaustive. Edge cases not covered:
+  - walker U/M write-back while a CPU SDRAM cycle is in flight (race between `WALKER_WRITE_LOW` and `stale_ram_pending`);
+  - repeated back-to-back walks across the `WALKER_DONE → WALKER_IDLE → WALKER_START` boundary;
+  - PMMU-internal 500-cycle timeout firing _before_ the wrapper's 2048-cycle timeout (BUG #419 path).
 
 ## 12. Highest-leverage follow-ups (MMU-specific)
 
-1. **Fix the header comment** (8-entry → 22-entry) and the MOVEC whitelist claim; both mislead future readers.
-2. ~~Add a wrapper-level PMMU bench~~ — **done 2026-04-16**. New Verilog bench `tests/tg68k_030/tb_cpu_wrapper_pmmu.v` + Makefile target `test-cpu-wrapper-pmmu` instantiate `cpu_wrapper.v` (mixed-language via ModelSim) and exercise: walker ownership, walker-vs-cache-fill gating, BUG #422 stale-ready injection, BUG #439 RAM-gap observation, BUG #424 watchdog escape, BUG #417 physical-address routing.
-3. ~~Make illegal PMOVE reg_sel observable~~ — **done 2026-04-16 (BUG #446)**. PMMU now:
-   - raises a sim assertion (`severity error`) on any PMOVE read or write with an undecoded `reg_sel`;
-   - latches a sticky flag `pmmu_illegal_reg_sel_seen`, exposed on new debug port `debug_illegal_reg_sel` (tied off in kernel; wire to SignalTap as needed).
-4. **Remove or mark `tb_movec_pmmu.vhd` as stale** — it exercises a path that no longer exists.
-5. **Retire or wire up `cache_op_scope="01"`** in the cache block (page-invalidate) — currently dead logic.
-6. ~~Consider exposing `mmu_config_error` as a maskable latched signal~~ — **done 2026-04-16 (BUG #445)**. `mmu_config_error` is now a sticky latch: valid TC/CRP/SRP writes no longer clear it; only `mmu_config_ack` from vector-56 dispatch or async reset do. Closes the race where a bad→good TC sequence dropped `pmmu_config_err` before the kernel latched `trap_mmu_config`.
-7. **Document the walker timeout hierarchy**: 500-cycle PMMU internal (sets MMUSR.B from the walker's view) vs 2048-cycle wrapper escape (BUG #138) vs PMMU-timeout-detection (BUG #419). Three watchdogs with overlapping conditions; easy to confuse which one fires first.
+Items completed since the 2026-04-15 audit:
+- ~~Fix the header comment (8-entry → 22-entry) and the MOVEC whitelist claim~~ — done 2026-04-16 ([PMMU:3, 100-106](rtl/tg68k/TG68K_PMMU_030.vhd#L3)).
+- ~~Add a wrapper-level PMMU bench~~ — done 2026-04-16 ([tests/tg68k_030/tb_cpu_wrapper_pmmu.v](tests/tg68k_030/tb_cpu_wrapper_pmmu.v), Makefile target `test-cpu-wrapper-pmmu`). Exercises walker ownership, BUG #422 stale-ready, BUG #439 RAM-gap, BUG #424 watchdog escape, BUG #417 physical-address routing.
+- ~~Make illegal PMOVE reg_sel observable~~ — done 2026-04-16, extended 2026-04-17 (BUG #446). Sim assertions + sticky `pmmu_illegal_reg_sel_seen` latch on port `debug_illegal_reg_sel` + **hardware trap via `mmu_config_error` → vector 56** (reuses BUG #445 ack handshake).
+- ~~Expose `mmu_config_error` as a latched signal that doesn't race on repeated TC writes~~ — done 2026-04-16 (BUG #445). Sticky until `mmu_config_ack` or async reset.
+
+Still open:
+
+1. **Remove or mark `tb_movec_pmmu.vhd` as stale** — it exercises a MOVEC-to-PMMU path that the kernel now traps. Bench is not in the maintained Makefile targets.
+2. **Retire or wire up `cache_op_scope="01"`** in the cache block (page-invalidate) — currently dead logic from the kernel's command path (see [CPU_AUDIT.md](CPU_AUDIT.md)).
+3. **Document the walker timeout hierarchy**: 500-cycle PMMU internal (sets MMUSR.B from the walker's view) vs 2048-cycle wrapper escape (BUG #138) vs PMMU-timeout-detection (BUG #419). Three watchdogs with overlapping conditions; easy to confuse which one fires first.
+4. **Broaden wrapper-level bench**: add cases for walker U/M write-back race with CPU SDRAM cycle, back-to-back walks, and the BUG #419 PMMU-internal-timeout path (currently only the BUG #424 wrapper watchdog is exercised).

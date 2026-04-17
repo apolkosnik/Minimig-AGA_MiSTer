@@ -1195,6 +1195,11 @@ begin
             -- Make the event observable:
             --  - a simulation-only assertion (catches unit tests)
             --  - a sticky latch pmmu_illegal_reg_sel_seen (SignalTap / debug)
+            --  - a hardware trap via mmu_config_error (vector 56): an undecoded
+            --    P-register selector is semantically a PMMU configuration
+            --    error; reusing the existing sticky mmu_config_error path
+            --    (BUG #445) inherits the one-shot ack handshake and keeps
+            --    tc_en clamped until the kernel processes the trap.
             -- synthesis translate_off
             assert false
               report "PMMU: illegal PMOVE reg_sel = " &
@@ -1203,15 +1208,18 @@ begin
               severity error;
             -- synthesis translate_on
             pmmu_illegal_reg_sel_seen <= '1';
+            mmu_config_error <= '1';  -- BUG #446: raise vector 56
           end case;
       end if;
-      -- BUG #446: also latch on illegal reg_sel during reads.
+      -- BUG #446: also latch on illegal reg_sel during reads, and raise the
+      -- vector-56 hardware trap on the same criterion as writes.
       if reg_re = '1' then
         case reg_sel is
           when "00010" | "00011" | "10000" | "10010" | "10011" | "11000" =>
             null;
           when others =>
             pmmu_illegal_reg_sel_seen <= '1';
+            mmu_config_error <= '1';
         end case;
       end if;
     end if;
