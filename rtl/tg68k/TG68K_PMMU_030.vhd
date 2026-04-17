@@ -1,6 +1,6 @@
 -- TG68K_PMMU_030.vhd
 -- MC68030 PMMU Implementation with full page table walker connected to real memory
--- Features: TC/CRP/SRP/TT0/TT1/MMUSR registers, 8-entry ATC, multi-level page tables,
+-- Features: TC/CRP/SRP/TT0/TT1/MMUSR registers, 22-entry ATC, multi-level page tables,
 --           transparent translation, fault detection, PMOVE/PTEST/PFLUSH/PLOAD instructions,
 --           real page table walking via memory arbiter in cpu_wrapper.v
 -- The walker now reads actual descriptors from memory for non-identity address translation.
@@ -82,6 +82,10 @@ entity TG68K_PMMU_030 is
     debug_ptr3_desc_addr : out std_logic_vector(31 downto 0);
     debug_ptr3_desc_data : out std_logic_vector(31 downto 0);
     debug_saved_fc       : out std_logic_vector(2 downto 0);
+    -- BUG #446: sticky latch — set on any PMOVE with an undecoded reg_sel.
+    -- Useful for SignalTap / post-run forensics: real MC68030 ignores such
+    -- writes, and silent ignore hid software bugs in prior triage.
+    debug_illegal_reg_sel : out std_logic;
     cpu_reset           : in  std_logic := '0'
   );
 end TG68K_PMMU_030;
@@ -97,10 +101,13 @@ architecture rtl of TG68K_PMMU_030 is
     end loop;
     return result;
   end function;
-  -- MC68030 PMMU Control Registers (complete set)
-  -- MOVEC accessible: TC (0x003), TT0 (0x004), TT1 (0x005), MMUSR (0x805)
-  -- PMOVE only: CRP, SRP, CAL, VAL, SCC, AC
-  -- Register sizes: CRP/SRP are 64-bit, all others are 32-bit
+  -- MC68030 PMMU Control Registers
+  -- All registers are PMOVE-only in this tree (the kernel MOVEC whitelist does
+  -- not include PMMU registers; MOVEC to TC/TT0/TT1/MMUSR traps as privilege
+  -- violation). MC68030 spec lists TC/TT0/TT1/MMUSR as MOVEC-accessible, but
+  -- that path is deliberately not wired here.
+  -- Implemented: TC, TT0, TT1, CRP (64-bit), SRP (64-bit), MMUSR
+  -- Not implemented: CAL, VAL, SCC, AC (removed — unused by Amiga software)
   
   signal TC     : std_logic_vector(31 downto 0); -- Translation Control (EN, PS, IS, TIA-TID)
   signal CRP_H  : std_logic_vector(31 downto 0); -- CPU Root Pointer high 32 bits
@@ -235,6 +242,8 @@ architecture rtl of TG68K_PMMU_030 is
   signal mmusr_update_value : std_logic_vector(31 downto 0) := (others => '0');
   -- MMU Configuration Exception tracking
   signal mmu_config_error   : std_logic := '0';
+  -- BUG #446: sticky latch for illegal-reg_sel observations (see port).
+  signal pmmu_illegal_reg_sel_seen : std_logic := '0';
   -- MC68030 page table walker FSM
   -- Added W_*_LOW states for reading LOW word of long-format (64-bit) descriptors
   -- Added W_INDIRECT states for indirect descriptor support (MC68030 spec section 9.5.3.2)
@@ -991,6 +1000,7 @@ begin
       xlat_cfg_seq <= (others => '0');
       -- ptest_addr, ptest_fc, ptest_rw now driven by edge detection process (BUG #397)
       mmu_config_error <= '0';
+      pmmu_illegal_reg_sel_seen <= '0';
     elsif rising_edge(clk) then
       atc_flush_req <= '0';
       mmusr_update_ack <= '0';
@@ -1081,6 +1091,13 @@ begin
             -- Reserved bits: 30-26 only (all other bits are valid control fields)
             tc_write_val := reg_wdat and TC_WRITE_MASK;
             tc_e := reg_wdat(31);
+            -- BUG #445: mmu_config_error is a sticky latch.
+            -- A valid TC write (or TC.E=0) does NOT clear it; only mmu_config_ack
+            -- (from the kernel taking vector 56) or reset clears the latch. Without
+            -- stickiness, software that writes a bad TC followed by a good TC
+            -- before the kernel dispatches the trap would silently lose the
+            -- exception, because pmmu_config_err would drop to 0 combinationally
+            -- via the decode-process default before trap_mmu_config is latched.
             if tc_e = '1' then
               ps_val := to_integer(unsigned(reg_wdat(23 downto 20)));
               -- Check 1: PS field must be 8-15 (values 0-7 are reserved)
@@ -1099,12 +1116,8 @@ begin
                   report "MMU_CONFIG: Field sum=" & integer'image(total_bits) &
                          " (must be 32), raising configuration exception" severity warning;
                   -- synthesis translate_on
-                else
-                  mmu_config_error <= '0';
                 end if;
               end if;
-            else
-              mmu_config_error <= '0';
             end if;
             TC <= tc_write_val;
             report "BUG387_TC_WRITE: tc_val=0x" &
@@ -1123,14 +1136,13 @@ begin
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
               SRP_H <= reg_wdat and CRP_HIGH_MASK;
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
-              -- Per spec: Register is loaded BEFORE exception is taken
+              -- Per spec: Register is loaded BEFORE exception is taken.
+              -- BUG #445: sticky latch — valid DT does not clear it (see TC write).
               if reg_wdat(1 downto 0) = "00" then
                 mmu_config_error <= '1';
                 -- synthesis translate_off
                 report "MMU_CONFIG: SRP_H DT=00 (invalid descriptor type)" severity warning;
                 -- synthesis translate_on
-              else
-                mmu_config_error <= '0';
               end if;
             else
               -- SRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
@@ -1151,14 +1163,13 @@ begin
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
               CRP_H <= reg_wdat and CRP_HIGH_MASK;
               -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
-              -- Per spec: Register is loaded BEFORE exception is taken
+              -- Per spec: Register is loaded BEFORE exception is taken.
+              -- BUG #445: sticky latch — valid DT does not clear it (see TC write).
               if reg_wdat(1 downto 0) = "00" then
                 mmu_config_error <= '1';
                 -- synthesis translate_off
                 report "MMU_CONFIG: CRP_H DT=00 (invalid descriptor type)" severity warning;
                 -- synthesis translate_on
-              else
-                mmu_config_error <= '0';
               end if;
             else
               -- CRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
@@ -1175,8 +1186,33 @@ begin
             -- MC68030 UM 9.6.3.4: PMOVE to MMUSR is a direct 16-bit store
             -- MMUSR is fully read-write via PMOVE (software clears before PTEST)
             MMUSR(15 downto 0) <= reg_wdat(15 downto 0);
-          when others => null;
+          when others =>
+            -- BUG #446: Observable warning on illegal PMOVE reg_sel.
+            -- Real MC68030 treats undecoded P-register selectors as undefined;
+            -- this tree historically silently ignored them. That hid software
+            -- bugs (e.g. kernels walking the wrong extension-word bit field)
+            -- because register writes would simply fall into this null arm.
+            -- Make the event observable:
+            --  - a simulation-only assertion (catches unit tests)
+            --  - a sticky latch pmmu_illegal_reg_sel_seen (SignalTap / debug)
+            -- synthesis translate_off
+            assert false
+              report "PMMU: illegal PMOVE reg_sel = " &
+                     integer'image(to_integer(unsigned(reg_sel))) &
+                     " on write (reg_wdat=0x" & slv_to_hex(reg_wdat) & ")"
+              severity error;
+            -- synthesis translate_on
+            pmmu_illegal_reg_sel_seen <= '1';
           end case;
+      end if;
+      -- BUG #446: also latch on illegal reg_sel during reads.
+      if reg_re = '1' then
+        case reg_sel is
+          when "00010" | "00011" | "10000" | "10010" | "10011" | "11000" =>
+            null;
+          when others =>
+            pmmu_illegal_reg_sel_seen <= '1';
+        end case;
       end if;
     end if;
   end process;
@@ -1197,6 +1233,31 @@ begin
               X"0000" & MMUSR(15 downto 0) when reg_sel = "11000" else
               (others => '0');
   debug_mmusr <= MMUSR(15 downto 0);
+  -- BUG #446: Expose the sticky illegal-reg_sel latch.
+  debug_illegal_reg_sel <= pmmu_illegal_reg_sel_seen;
+
+  -- BUG #446: Read-side observability. Undecoded reg_sel on a PMOVE read
+  -- returns zero (see mux above) — catch it in simulation so unit tests fail
+  -- loudly rather than silently consuming garbage.
+  -- synthesis translate_off
+  process(clk)
+  begin
+    if rising_edge(clk) then
+      if reg_re = '1' then
+        case reg_sel is
+          when "00010" | "00011" | "10000" | "10010" | "10011" | "11000" =>
+            null; -- legal
+          when others =>
+            assert false
+              report "PMMU: illegal PMOVE reg_sel = " &
+                     integer'image(to_integer(unsigned(reg_sel))) &
+                     " on read"
+              severity error;
+        end case;
+      end if;
+    end if;
+  end process;
+  -- synthesis translate_on
   -- SignalTap debug outputs
   debug_tc  <= TC;
   debug_tt0 <= TT0;

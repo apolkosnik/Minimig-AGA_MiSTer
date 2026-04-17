@@ -347,6 +347,17 @@ test-whichamiga: compile
 	@echo "Running WhichAmiga MMU instruction test..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 20us; quit -f" tb_whichamiga_mmu
 
+# Wrapper-level PMMU/walker bench — instantiates cpu_wrapper.v (Verilog) to
+# exercise integration paths the kernel-only benches cannot reach:
+# walker ownership, walker-vs-cache-fill, BUG #422 stale-ready, BUG #439 RAM gap,
+# BUG #424 watchdog escape, BUG #417 physical-address routing.
+test-cpu-wrapper-pmmu: compile
+	@echo "Compiling cpu_wrapper.v and wrapper-level PMMU bench..."
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(PROJECT_ROOT)/rtl/cpu_wrapper.v
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(TEST_DIR)/tb_cpu_wrapper_pmmu.v
+	@echo "Running wrapper-level PMMU test..."
+	@cd $(TEST_DIR) && $(VSIM) -c -L work -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 5ms; quit -f" tb_cpu_wrapper_pmmu
+
 # Enhanced comprehensive tests
 test-advanced: test-pmmu-walker test-pmmu-atc test-mmu-translation
 	@echo "Advanced PMMU functionality suite complete."

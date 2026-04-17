@@ -820,6 +820,7 @@ BEGIN
       debug_ptr3_desc_addr => debug_pmmu_ptr3_desc_addr,
       debug_ptr3_desc_data => debug_pmmu_ptr3_desc_data,
       debug_saved_fc       => debug_pmmu_saved_fc,
+      debug_illegal_reg_sel => open,  -- BUG #446: sticky latch, SignalTap-only
       cpu_reset            => pmmu_cpu_reset
     );
 
