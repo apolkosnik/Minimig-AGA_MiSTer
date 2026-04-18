@@ -69,156 +69,202 @@ end TG68K;
 ARCHITECTURE logic OF TG68K IS
 
 
-COMPONENT TG68KdotC_Kernel 
+-- Synced with TG68KdotC_Kernel entity in TG68KdotC_Kernel.vhd (Apr 2026).
+-- If you add or remove ports in the kernel entity, mirror them here; default
+-- binding requires the component and entity port lists to match.
+COMPONENT TG68KdotC_Kernel
    generic(
-      SR_Read : integer:= 2;           --0=>user,     1=>privileged,    2=>switchable with CPU(0)
-      VBR_Stackframe : integer:= 2;    --0=>no,       1=>yes/extended,  2=>switchable with CPU(0)
-      extAddr_Mode : integer:= 2;      --0=>no,       1=>yes,           2=>switchable with CPU(1)
-      MUL_Mode : integer := 2;         --0=>16Bit,    1=>32Bit,         2=>switchable with CPU(1),  3=>no MUL,  
-      DIV_Mode : integer := 2;         --0=>16Bit,    1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,  
-      BitField : integer := 2;         --0=>no,       1=>yes,           2=>switchable with CPU(1) 
-      
-      BarrelShifter : integer := 2;    --0=>no,       1=>yes,           2=>switchable with CPU(1)  
-      MUL_Hardware : integer := 1      --0=>no,       1=>yes,  
+      SR_Read : integer:= 2;            --0=>user,    1=>privileged,    2=>switchable with CPU(0)
+      VBR_Stackframe : integer:= 2;     --0=>no,      1=>yes/extended,  2=>switchable with CPU(0)
+      extAddr_Mode : integer:= 2;       --0=>no,      1=>yes,           2=>switchable with CPU(1)
+      MUL_Mode : integer := 2;          --0=>16Bit,   1=>32Bit,         2=>switchable with CPU(1), 3=>no MUL
+      DIV_Mode : integer := 2;          --0=>16Bit,   1=>32Bit,         2=>switchable with CPU(1), 3=>no DIV
+      BitField : integer := 2;          --0=>no,      1=>yes,           2=>switchable with CPU(1)
+
+      BarrelShifter : integer := 1;     --0=>no,      1=>yes,           2=>switchable with CPU(1)
+      MUL_Hardware : integer := 1       --0=>no,      1=>yes
    );
    port(
-      CPU            : in std_logic_vector(1 downto 0):="10";  -- 00->68000  01->68010  10->68030
-      clk            : in std_logic;
-      nReset         : in std_logic:='1';    --low active
-      clkena_in      : in std_logic:='1';
-      data_in        : in std_logic_vector(15 downto 0);
-      IPL            : in std_logic_vector(2 downto 0):="111";
-      IPL_autovector : in std_logic:='0';
-      berr           : in std_logic:='0';     -- only 68000 Stackpointer dummy for Atari ST core
-      addr_out       : out std_logic_vector(31 downto 0);
-      data_write     : out std_logic_vector(15 downto 0);
-      nWr            : out std_logic;
-      nUDS, nLDS     : out std_logic;
-      busstate       : out std_logic_vector(1 downto 0);	
-      longword       : out std_logic;
-      nResetOut      : out std_logic;
-      FC             : out std_logic_vector(2 downto 0);
-      clr_berr       : out std_logic;
--- for debug
-      skipFetch      : out std_logic;
-      regin_out      : out std_logic_vector(31 downto 0);
-      CACR_out       : out std_logic_vector(31 downto 0);
-      VBR_out        : out std_logic_vector(31 downto 0);
--- Cache control interface (68030)		
-      cache_inv_req  : out std_logic;  -- Cache invalidation request (from CACR bits)
-      cache_op_scope  : out std_logic_vector(1 downto 0);
-      cache_op_cache  : out std_logic_vector(1 downto 0);
-      cacr_ie         : out std_logic;
-      cacr_de         : out std_logic;
-      cacr_ifreeze     : out std_logic;
-      cacr_dfreeze     : out std_logic;
-      cacr_ibe        : out std_logic;  -- Instruction Burst Enable
-      cacr_dbe        : out std_logic;  -- Data Burst Enable
-      cacr_wa         : out std_logic;  -- Write Allocate
--- PMMU register interface (68030)
-      pmmu_reg_we    : out std_logic;
-      pmmu_reg_re    : out std_logic;
-      pmmu_reg_sel   : out std_logic_vector(4 downto 0);
-      pmmu_reg_wdat  : out std_logic_vector(31 downto 0);
-      pmmu_reg_part  : out std_logic;
--- PMMU address interface (68030)
-      pmmu_addr_log   : out std_logic_vector(31 downto 0);
-      pmmu_addr_phys  : out std_logic_vector(31 downto 0);
-      pmmu_cache_inhibit : out std_logic;
--- Cache operation address (68030)
-      cache_op_addr   : out std_logic_vector(31 downto 0);
--- PMMU walker memory interface (68030)
-      pmmu_walker_req  : out std_logic;
-      pmmu_walker_we   : out std_logic;
-      pmmu_walker_addr : out std_logic_vector(31 downto 0);
-      pmmu_walker_wdat : out std_logic_vector(31 downto 0);
-      pmmu_walker_ack  : in  std_logic;
-      pmmu_walker_data : in  std_logic_vector(31 downto 0);
-      pmmu_walker_berr : in  std_logic;
--- DEBUG: Supervisor mode tracking signals
-      debug_SVmode        : out std_logic;
-      debug_preSVmode     : out std_logic;
-      debug_FlagsSR_S     : out std_logic;
-      debug_changeMode    : out std_logic;
-      debug_setopcode     : out std_logic;
-      debug_exec_directSR : out std_logic;
-      debug_exec_to_SR    : out std_logic;
--- DEBUG: PMOVE Dn simplified mechanism
-      debug_pmove_dn_mode : out std_logic;
-      debug_pmove_dn_regnum : out std_logic_vector(2 downto 0);
--- DEBUG: Pipeline debugging
-      debug_opcode : out std_logic_vector(15 downto 0);
-      debug_state : out std_logic_vector(1 downto 0);
-      debug_setstate : out std_logic_vector(1 downto 0);
-      debug_last_opc_read : out std_logic_vector(15 downto 0);
-      debug_data_read : out std_logic_vector(31 downto 0);
-      debug_direct_data : out std_logic;
-      debug_setnextpass : out std_logic;
--- DEBUG: Address generation and opcode capture
-      debug_TG68_PC : out std_logic_vector(31 downto 0);
-      debug_memaddr_reg : out std_logic_vector(31 downto 0);
-      debug_memaddr_delta : out std_logic_vector(31 downto 0);
-      debug_memaddr_delta_rega : out std_logic_vector(31 downto 0);
-      debug_memaddr_delta_regb : out std_logic_vector(31 downto 0);
-      debug_addsub_q : out std_logic_vector(31 downto 0);
-      debug_memmaskmux : out std_logic_vector(5 downto 0);
-      debug_fline_opcode_latch : out std_logic_vector(15 downto 0);
-      debug_pmmu_ea_mode_latched : out std_logic_vector(5 downto 0);
-      debug_exec_direct_delta : out std_logic;
-      debug_exec_directPC : out std_logic;
-      debug_exec_mem_addsub : out std_logic;
-      debug_set_addrlong : out std_logic;
-      debug_mdelta_src : out std_logic_vector(7 downto 0);
-      debug_pc_brw : out std_logic;
-      debug_pc_word : out std_logic;
-      debug_oddout : out std_logic;
-      debug_decodeOPC : out std_logic;
--- DEBUG: MOVES instruction trace signals
-      debug_brief : out std_logic_vector(15 downto 0);
-      debug_moves_bus_pending : out std_logic;
-      debug_moves_writeback_pending : out std_logic;
-      debug_clkena_lw : out std_logic;
-      debug_regfile_d0 : out std_logic_vector(31 downto 0);
-      debug_regfile_d1 : out std_logic_vector(31 downto 0);
-      debug_regfile_d2 : out std_logic_vector(31 downto 0);
-      debug_regfile_d3 : out std_logic_vector(31 downto 0);
-      debug_regfile_d4 : out std_logic_vector(31 downto 0);
-      debug_regfile_d5 : out std_logic_vector(31 downto 0);
-      debug_regfile_d6 : out std_logic_vector(31 downto 0);
-      debug_regfile_d7 : out std_logic_vector(31 downto 0);
-      debug_regfile_a0 : out std_logic_vector(31 downto 0);
-      debug_regfile_a1 : out std_logic_vector(31 downto 0);
-      debug_regfile_a2 : out std_logic_vector(31 downto 0);
-      debug_regfile_a3 : out std_logic_vector(31 downto 0);
-      debug_regfile_a4 : out std_logic_vector(31 downto 0);
-      debug_regfile_a5 : out std_logic_vector(31 downto 0);
-      debug_regfile_a6 : out std_logic_vector(31 downto 0);
-      debug_regfile_a7 : out std_logic_vector(31 downto 0);
-      debug_regfile_we : out std_logic;
-      debug_regfile_waddr : out std_logic_vector(3 downto 0);
-      debug_regfile_wdata : out std_logic_vector(31 downto 0);
-      debug_fline_context_valid : out std_logic;
-      debug_trap_1111 : out std_logic;
-      debug_trapmake : out std_logic;
-      debug_trap_illegal : out std_logic;
-      debug_trap_priv : out std_logic;
-      debug_trap_addr_error : out std_logic;
-      debug_trap_berr : out std_logic;
-      debug_trap_mmu_berr : out std_logic;
-      debug_trap_vector : out std_logic_vector(31 downto 0);
-      debug_pc_add : out std_logic_vector(31 downto 0);
-      debug_pc_dataa : out std_logic_vector(31 downto 0);
-      debug_pc_datab : out std_logic_vector(31 downto 0);
-      debug_pmmu_brief : out std_logic_vector(15 downto 0);
-      debug_use_base : out std_logic;
-      debug_rf_source_addr : out std_logic_vector(3 downto 0);
-      debug_pmove_ea_latched : out std_logic_vector(31 downto 0);
-      debug_reg_QA : out std_logic_vector(31 downto 0);
-      debug_pmmu_busy : out std_logic;
-      debug_micro_state : out integer range 0 to 255;
-      debug_next_micro_state : out integer range 0 to 255;
-      debug_memmask : out std_logic_vector(5 downto 0);
-      debug_sndOPC : out std_logic_vector(15 downto 0)
+      clk                              : in std_logic;
+      nReset                           : in std_logic;            --low active
+      clkena_in                        : in std_logic:='1';
+      data_in                          : in std_logic_vector(15 downto 0);
+      IPL                              : in std_logic_vector(2 downto 0):="111";
+      IPL_autovector                   : in std_logic:='0';
+      berr                             : in std_logic:='0';       -- only 68000 Stackpointer dummy
+      CPU                              : in std_logic_vector(1 downto 0);
+      addr_out                         : out std_logic_vector(31 downto 0);
+      data_write                       : out std_logic_vector(15 downto 0);
+      nWr                              : out std_logic;
+      nUDS                             : out std_logic;
+      nLDS                             : out std_logic;
+      busstate                         : out std_logic_vector(1 downto 0);
+      longword                         : out std_logic;
+      nResetOut                        : out std_logic;
+      FC                               : out std_logic_vector(2 downto 0);
+      clr_berr                         : out std_logic;
+      skipFetch                        : out std_logic;
+      regin_out                        : out std_logic_vector(31 downto 0);
+      CACR_out                         : out std_logic_vector(31 downto 0);
+      VBR_out                          : out std_logic_vector(31 downto 0);
+      cache_inv_req                    : out std_logic;
+      cache_op_scope                   : out std_logic_vector(1 downto 0);
+      cache_op_cache                   : out std_logic_vector(1 downto 0);
+      cacr_ie                          : out std_logic;
+      cacr_de                          : out std_logic;
+      cacr_ifreeze                     : out std_logic;
+      cacr_dfreeze                     : out std_logic;
+      cacr_ibe                         : out std_logic;
+      cacr_dbe                         : out std_logic;
+      cacr_wa                          : out std_logic;
+      pmmu_reg_we                      : out std_logic;
+      pmmu_reg_re                      : out std_logic;
+      pmmu_reg_sel                     : out std_logic_vector(4 downto 0);
+      pmmu_reg_wdat                    : out std_logic_vector(31 downto 0);
+      pmmu_reg_part                    : out std_logic;
+      pmmu_addr_log                    : out std_logic_vector(31 downto 0);
+      pmmu_addr_phys                   : out std_logic_vector(31 downto 0);
+      pmmu_cache_inhibit               : out std_logic;
+      cache_op_addr                    : out std_logic_vector(31 downto 0);
+      pmmu_walker_req                  : out std_logic;
+      pmmu_walker_we                   : out std_logic;
+      pmmu_walker_addr                 : out std_logic_vector(31 downto 0);
+      pmmu_walker_wdat                 : out std_logic_vector(31 downto 0);
+      pmmu_walker_ack                  : in  std_logic;
+      pmmu_walker_data                 : in  std_logic_vector(31 downto 0);
+      pmmu_walker_berr                 : in  std_logic;
+      debug_SVmode                     : out std_logic;
+      debug_preSVmode                  : out std_logic;
+      debug_FlagsSR_S                  : out std_logic;
+      debug_changeMode                 : out std_logic;
+      debug_setopcode                  : out std_logic;
+      debug_exec_directSR              : out std_logic;
+      debug_exec_to_SR                 : out std_logic;
+      debug_pmove_dn_mode              : out std_logic;
+      debug_pmove_dn_regnum            : out std_logic_vector(2 downto 0);
+      debug_opcode                     : out std_logic_vector(15 downto 0);
+      debug_state                      : out std_logic_vector(1 downto 0);
+      debug_setstate                   : out std_logic_vector(1 downto 0);
+      debug_last_opc_read              : out std_logic_vector(15 downto 0);
+      debug_data_read                  : out std_logic_vector(31 downto 0);
+      debug_direct_data                : out std_logic;
+      debug_setnextpass                : out std_logic;
+      debug_TG68_PC                    : out std_logic_vector(31 downto 0);
+      debug_memaddr_reg                : out std_logic_vector(31 downto 0);
+      debug_memaddr_delta              : out std_logic_vector(31 downto 0);
+      debug_oddout                     : out std_logic;
+      debug_decodeOPC                  : out std_logic;
+      debug_brief                      : out std_logic_vector(15 downto 0);
+      debug_moves_bus_pending          : out std_logic;
+      debug_moves_writeback_pending    : out std_logic;
+      debug_clkena_lw                  : out std_logic;
+      debug_regfile_d0                 : out std_logic_vector(31 downto 0);
+      debug_regfile_a0                 : out std_logic_vector(31 downto 0);
+      debug_fline_context_valid        : out std_logic;
+      debug_trap_1111                  : out std_logic;
+      debug_trapmake                   : out std_logic;
+      debug_pmmu_brief                 : out std_logic_vector(15 downto 0);
+      debug_use_base                   : out std_logic;
+      debug_rf_source_addr             : out std_logic_vector(3 downto 0);
+      debug_pmove_ea_latched           : out std_logic_vector(31 downto 0);
+      debug_reg_QA                     : out std_logic_vector(31 downto 0);
+      debug_last_data_read             : out std_logic_vector(31 downto 0);
+      debug_last_opc_pc                : out std_logic_vector(31 downto 0);
+      debug_getbrief                   : out std_logic;
+      debug_get_2ndopc                 : out std_logic;
+      debug_fline_brief_pending        : out std_logic;
+      debug_fline_opcode_pc            : out std_logic_vector(31 downto 0);
+      debug_exe_PC                     : out std_logic_vector(31 downto 0);
+      debug_memaddr_delta_rega         : out std_logic_vector(31 downto 0);
+      debug_memaddr_delta_regb         : out std_logic_vector(31 downto 0);
+      debug_addsub_q                   : out std_logic_vector(31 downto 0);
+      debug_memmaskmux                 : out std_logic_vector(5 downto 0);
+      debug_fline_opcode_latch         : out std_logic_vector(15 downto 0);
+      debug_pmmu_ea_mode_latched       : out std_logic_vector(5 downto 0);
+      debug_exec_direct_delta          : out std_logic;
+      debug_exec_directPC              : out std_logic;
+      debug_exec_mem_addsub            : out std_logic;
+      debug_set_addrlong               : out std_logic;
+      debug_mdelta_src                 : out std_logic_vector(7 downto 0);
+      debug_pc_brw                     : out std_logic;
+      debug_pc_word                    : out std_logic;
+      debug_regfile_d1                 : out std_logic_vector(31 downto 0);
+      debug_regfile_d2                 : out std_logic_vector(31 downto 0);
+      debug_regfile_d3                 : out std_logic_vector(31 downto 0);
+      debug_regfile_d4                 : out std_logic_vector(31 downto 0);
+      debug_regfile_d5                 : out std_logic_vector(31 downto 0);
+      debug_regfile_d6                 : out std_logic_vector(31 downto 0);
+      debug_regfile_d7                 : out std_logic_vector(31 downto 0);
+      debug_regfile_a1                 : out std_logic_vector(31 downto 0);
+      debug_regfile_a2                 : out std_logic_vector(31 downto 0);
+      debug_regfile_a3                 : out std_logic_vector(31 downto 0);
+      debug_regfile_a4                 : out std_logic_vector(31 downto 0);
+      debug_regfile_a5                 : out std_logic_vector(31 downto 0);
+      debug_regfile_a6                 : out std_logic_vector(31 downto 0);
+      debug_regfile_a7                 : out std_logic_vector(31 downto 0);
+      debug_regfile_we                 : out std_logic;
+      debug_regfile_waddr              : out std_logic_vector(3 downto 0);
+      debug_regfile_wdata              : out std_logic_vector(31 downto 0);
+      debug_trap_illegal               : out std_logic;
+      debug_trap_priv                  : out std_logic;
+      debug_trap_addr_error            : out std_logic;
+      debug_trap_berr                  : out std_logic;
+      debug_trap_mmu_berr              : out std_logic;
+      debug_trap_vector                : out std_logic_vector(31 downto 0);
+      debug_pc_add                     : out std_logic_vector(31 downto 0);
+      debug_pc_dataa                   : out std_logic_vector(31 downto 0);
+      debug_pc_datab                   : out std_logic_vector(31 downto 0);
+      debug_pmmu_busy                  : out std_logic;
+      debug_cpu_halted                 : out std_logic;
+      debug_stop                       : out std_logic;
+      debug_interrupt                  : out std_logic;
+      debug_setendOPC                  : out std_logic;
+      debug_IPL_nr                     : out std_logic_vector(2 downto 0);
+      debug_micro_state                : out integer range 0 to 255;
+      debug_next_micro_state           : out integer range 0 to 255;
+      debug_memmask                    : out std_logic_vector(5 downto 0);
+      debug_sndOPC                     : out std_logic_vector(15 downto 0);
+      debug_pmmu_reg_we                : out std_logic;
+      debug_pmmu_reg_re                : out std_logic;
+      debug_pmmu_reg_sel               : out std_logic_vector(4 downto 0);
+      debug_pmmu_reg_wdat              : out std_logic_vector(31 downto 0);
+      debug_pmmu_reg_part              : out std_logic;
+      debug_pmmu_reg_rdat              : out std_logic_vector(31 downto 0);
+      debug_make_berr                  : out std_logic;
+      debug_pmmu_fault                 : out std_logic;
+      debug_trap_format_error          : out std_logic;
+      debug_format_error_rte_word      : out std_logic_vector(15 downto 0);
+      debug_format_error_pc            : out std_logic_vector(31 downto 0);
+      debug_format_error_addr          : out std_logic_vector(31 downto 0);
+      debug_format_error_sr            : out std_logic_vector(7 downto 0);
+      debug_pmmu_tc                    : out std_logic_vector(31 downto 0);
+      debug_pmmu_tt0                   : out std_logic_vector(31 downto 0);
+      debug_pmmu_tt1                   : out std_logic_vector(31 downto 0);
+      debug_pmmu_crp_hi                : out std_logic_vector(31 downto 0);
+      debug_pmmu_crp_lo                : out std_logic_vector(31 downto 0);
+      debug_pmmu_srp_hi                : out std_logic_vector(31 downto 0);
+      debug_pmmu_srp_lo                : out std_logic_vector(31 downto 0);
+      debug_pmmu_wstate                : out std_logic_vector(4 downto 0);
+      debug_pmmu_atc_buserr            : out std_logic_vector(21 downto 0);
+      debug_pmmu_atc_valid             : out std_logic_vector(21 downto 0);
+      debug_pmmu_fault_status          : out std_logic_vector(15 downto 0);
+      debug_pmmu_saved_addr            : out std_logic_vector(31 downto 0);
+      debug_pmmu_walk_desc_addr        : out std_logic_vector(31 downto 0);
+      debug_pmmu_walk_desc_data        : out std_logic_vector(31 downto 0);
+      debug_pmmu_ptr1_desc_addr        : out std_logic_vector(31 downto 0);
+      debug_pmmu_ptr1_desc_data        : out std_logic_vector(31 downto 0);
+      debug_pmmu_ptr2_desc_addr        : out std_logic_vector(31 downto 0);
+      debug_pmmu_ptr2_desc_data        : out std_logic_vector(31 downto 0);
+      debug_pmmu_ptr3_desc_addr        : out std_logic_vector(31 downto 0);
+      debug_pmmu_ptr3_desc_data        : out std_logic_vector(31 downto 0);
+      debug_pmmu_saved_fc              : out std_logic_vector(2 downto 0);
+      debug_make_trace                 : out std_logic;
+      debug_trace_pending_grp2         : out std_logic;
+      debug_useStackframe2             : out std_logic;
+      debug_exec_trap_chk              : out std_logic;
+      debug_set_trap_chk               : out std_logic;
+      debug_data_write_tmp             : out std_logic_vector(31 downto 0);
+      debug_FlagsSR                    : out std_logic_vector(7 downto 0)
    );
    END COMPONENT;
 
