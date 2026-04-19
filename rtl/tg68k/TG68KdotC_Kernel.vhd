@@ -3593,6 +3593,9 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 				IF exec(directSR)='1' OR set_stop='1' THEN
 					FlagsSR <= data_read(15 downto 8);
 				END IF;
+				IF set_stop='1' THEN
+					FlagsSR(3) <= '0';  -- STOP loads SR but reserved bit 11 must remain zero
+				END IF;
 				IF interrupt='1' AND trap_interrupt='1' THEN
 					FlagsSR(2 downto 0) <=rIPL_nr;
 					-- MC68030: Clear M bit on interrupt entry (handler uses ISP)
