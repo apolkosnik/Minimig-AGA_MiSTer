@@ -99,6 +99,7 @@ architecture logic of TG68K_ALU is
 	signal set_Flags			: std_logic_vector(3 downto 0);	--NZVC
 	signal CCRin				: std_logic_vector(7 downto 0);
 	signal last_Flags1		: std_logic_vector(3 downto 0);	--NZVC
+	signal chk2_lower_bound	: std_logic_vector(31 downto 0);
     
 --BCD
 	signal bcd_pur				: std_logic_vector(9 downto 0);
@@ -150,6 +151,11 @@ architecture logic of TG68K_ALU is
 	signal OP1_sign			: std_logic;
 	signal OP2_sign			: std_logic;
 	signal OP2outext			: std_logic_vector(15 downto 0);
+	signal div_src_latched	: std_logic_vector(31 downto 0) := (others => '0');
+	signal div_dividend_latched : std_logic_vector(63 downto 0) := (others => '0');
+	signal div_signed_latched : std_logic := '0';
+	signal div_word_latched  : std_logic := '0';
+	signal div_64bit_latched : std_logic := '0';
 
 	signal in_offset			: std_logic_vector(5 downto 0);
 	signal datareg				: std_logic_vector(31 downto 0);
@@ -205,6 +211,341 @@ architecture logic of TG68K_ALU is
 	signal bs_V					: std_logic;  
 	signal bs_C					: std_logic;  
 	signal bs_X					: std_logic;  
+
+	function chk_flags_68020(
+		src : std_logic_vector(31 downto 0);
+		dst : std_logic_vector(31 downto 0);
+		is_word : boolean
+	) return std_logic_vector is
+		variable flags : std_logic_vector(3 downto 0) := (others => '0');
+		variable src_w : signed(15 downto 0);
+		variable dst_w : signed(15 downto 0);
+		variable val_w : signed(15 downto 0);
+		variable src_l : signed(31 downto 0);
+		variable dst_l : signed(31 downto 0);
+		variable val_l : signed(31 downto 0);
+		variable src_neg : boolean;
+		variable dst_neg : boolean;
+		variable val_neg : boolean;
+	begin
+		if is_word then
+			src_w := signed(src(15 downto 0));
+			dst_w := signed(dst(15 downto 0));
+			dst_neg := dst_w(15) = '1';
+			src_neg := src_w(15) = '1';
+
+			if dst(15 downto 0) = x"0000" then
+				flags(2) := '1';
+			end if;
+			if dst_neg then
+				flags(3) := '1';
+			end if;
+
+			if dst_neg or (dst_w > src_w) then
+				val_w := src_w - dst_w;
+				val_neg := val_w(15) = '1';
+
+				if (dst_neg /= src_neg) and (val_neg /= src_neg) then
+					flags(1) := '1';
+				end if;
+
+				if dst_neg then
+					if (dst_w > src_w) or (not src_neg) then
+						flags(0) := '1';
+					end if;
+				elsif not src_neg then
+					flags(0) := '1';
+				end if;
+			end if;
+		else
+			src_l := signed(src);
+			dst_l := signed(dst);
+			dst_neg := dst_l(31) = '1';
+			src_neg := src_l(31) = '1';
+
+			if dst = x"00000000" then
+				flags(2) := '1';
+			end if;
+			if dst_neg then
+				flags(3) := '1';
+			end if;
+
+			if dst_neg or (dst_l > src_l) then
+				val_l := src_l - dst_l;
+				val_neg := val_l(31) = '1';
+
+				if (dst_neg /= src_neg) and (val_neg /= src_neg) then
+					flags(1) := '1';
+				end if;
+
+				if dst_neg then
+					if (dst_l > src_l) or (not src_neg) then
+						flags(0) := '1';
+					end if;
+				elsif not src_neg then
+					flags(0) := '1';
+				end if;
+			end if;
+		end if;
+
+		return flags;
+	end function;
+
+	function divu_divzero_flags_68020(
+		dst : std_logic_vector(31 downto 0);
+		is_word : boolean
+	) return std_logic_vector is
+		variable flags : std_logic_vector(3 downto 0) := (others => '0');
+	begin
+		if is_word then
+			flags(1) := '1';
+			if dst(31) = '1' then
+				flags(3) := '1';
+			elsif dst(31 downto 16) = x"0000" then
+				flags(2) := '1';
+			end if;
+		else
+			flags(0) := '0';
+			flags(1) := '1';
+			if dst(31) = '1' then
+				flags(3) := '1';
+			elsif dst = x"00000000" then
+				flags(2) := '1';
+			end if;
+		end if;
+
+		return flags;
+	end function;
+
+	function abs_u16(val : std_logic_vector(15 downto 0)) return unsigned is
+	begin
+		if val(15) = '1' then
+			return unsigned(not val) + 1;
+		end if;
+		return unsigned(val);
+	end function;
+
+	function abs_u32(val : std_logic_vector(31 downto 0)) return unsigned is
+	begin
+		if val(31) = '1' then
+			return unsigned(not val) + 1;
+		end if;
+		return unsigned(val);
+	end function;
+
+	function divu_overflow_flags_68020(
+		dividend      : std_logic_vector(31 downto 0);
+		current_flags : std_logic_vector(3 downto 0);
+		is_word       : boolean
+	) return std_logic_vector is
+		variable flags : std_logic_vector(3 downto 0) := current_flags;
+	begin
+		if is_word then
+			-- WinUAE/68020+: DIVU.W overflow forces V. Z/C are left unchanged. N is
+			-- forced only if the signed 32-bit dividend is negative, otherwise it is
+			-- left unchanged.
+			flags(1) := '1';
+			if dividend(31) = '1' then
+				flags(3) := '1';
+			end if;
+		else
+			-- WinUAE divul_overflow(): V=1, C=0, Z=(low32==0), N=sign(low32).
+			flags(0) := '0';
+			flags(1) := '1';
+			flags(2) := '0';
+			flags(3) := dividend(31);
+			if dividend = x"00000000" then
+				flags(2) := '1';
+				flags(3) := '0';
+			end if;
+		end if;
+		return flags;
+	end function;
+
+	function divs_divzero_flags_68020(
+		current_flags : std_logic_vector(3 downto 0)
+	) return std_logic_vector is
+		variable flags : std_logic_vector(3 downto 0) := current_flags;
+	begin
+		-- WinUAE/68020+: signed divide-by-zero forces N=0, Z=1, C=0 and
+		-- leaves V unchanged.
+		flags(3) := '0';
+		flags(2) := '1';
+		flags(0) := '0';
+		return flags;
+	end function;
+
+	function divs_overflow_flags_68020(
+		dividend : std_logic_vector(31 downto 0);
+		divisor  : std_logic_vector(15 downto 0)
+	) return std_logic_vector is
+		variable flags        : std_logic_vector(3 downto 0) := (others => '0');
+		variable dividend_abs : unsigned(31 downto 0);
+		variable divisor_abs  : unsigned(15 downto 0);
+		variable aquot        : unsigned(31 downto 0);
+	begin
+		flags(1) := '1';
+		dividend_abs := abs_u32(dividend);
+		divisor_abs := abs_u16(divisor);
+
+		if divisor_abs = 0 then
+			return flags;
+		end if;
+
+		-- 68020/030 signed word DIV overflow keeps V=1,C=0 and derives NZ
+		-- from the internal 8-bit overflow quotient unless this is absolute overflow.
+		if dividend_abs(31 downto 16) >= divisor_abs then
+			return flags;
+		end if;
+
+		aquot := dividend_abs / resize(divisor_abs, 32);
+
+		if aquot(7 downto 0) = x"00" then
+			flags(2) := '1';
+		end if;
+		if aquot(7) = '1' then
+			flags(3) := '1';
+		end if;
+
+		return flags;
+	end function;
+
+	function divsl_overflow_flags_68020(
+		dividend_lo : std_logic_vector(31 downto 0);
+		dividend_hi : std_logic_vector(31 downto 0);
+		divisor     : std_logic_vector(31 downto 0);
+		is_64bit    : boolean
+	) return std_logic_vector is
+		variable flags     : std_logic_vector(3 downto 0) := (others => '0');
+		variable a64       : signed(63 downto 0);
+		variable a32       : signed(31 downto 0);
+		variable ahigh     : signed(31 downto 0);
+		variable divider_s : signed(31 downto 0);
+	begin
+		flags(1) := '1';
+		a32 := signed(dividend_lo);
+		divider_s := signed(divisor);
+
+		if is_64bit then
+			a64 := signed(dividend_hi & dividend_lo);
+			ahigh := signed(dividend_hi);
+
+			if ahigh = to_signed(0, 32) then
+				flags(2) := '1';
+				return flags;
+			elsif ahigh < to_signed(0, 32) and divider_s < to_signed(0, 32) and ahigh > divider_s then
+				return flags;
+			elsif dividend_lo = x"00000000" then
+				flags(2) := '1';
+				return flags;
+			elsif a32(31) /= a64(63) then
+				flags(3) := '1';
+				return flags;
+			end if;
+
+			return flags;
+		end if;
+
+		if dividend_lo = x"00000000" then
+			flags(2) := '1';
+		elsif a32(31) = '1' then
+			flags(3) := '1';
+		end if;
+
+		return flags;
+	end function;
+
+	function chk2_nv_flags_68020(
+		lower : std_logic_vector(31 downto 0);
+		upper : std_logic_vector(31 downto 0);
+		val   : std_logic_vector(31 downto 0)
+	) return std_logic_vector is
+		variable nv      : std_logic_vector(1 downto 0) := "00"; -- N,V
+		variable lower_s : signed(31 downto 0);
+		variable upper_s : signed(31 downto 0);
+		variable val_s   : signed(31 downto 0);
+		constant zero32  : signed(31 downto 0) := (others => '0');
+	begin
+		lower_s := signed(lower);
+		upper_s := signed(upper);
+		val_s   := signed(val);
+
+		if val = lower or val = upper then
+			return nv;
+		end if;
+
+		if lower_s < zero32 and upper_s >= zero32 then
+			if val_s < lower_s then
+				nv(1) := '1';
+			end if;
+			if val_s >= zero32 and val_s < upper_s then
+				nv(1) := '1';
+			end if;
+			if val_s >= zero32 and (lower_s - val_s) >= zero32 then
+				nv(0) := '1';
+				nv(1) := '0';
+				if val_s > upper_s then
+					nv(1) := '1';
+				end if;
+			end if;
+		elsif lower_s >= zero32 and upper_s < zero32 then
+			if val_s >= zero32 then
+				nv(1) := '1';
+			end if;
+			if val_s > upper_s then
+				nv(1) := '1';
+			end if;
+			if val_s > lower_s and (upper_s - val_s) >= zero32 then
+				nv(0) := '1';
+				nv(1) := '0';
+			end if;
+		elsif lower_s >= zero32 and upper_s >= zero32 and lower_s > upper_s then
+			if val_s > upper_s and val_s < lower_s then
+				nv(1) := '1';
+			end if;
+			if val_s < zero32 and (lower_s - val_s) < zero32 then
+				nv(0) := '1';
+			end if;
+			if val_s < zero32 and (lower_s - val_s) >= zero32 then
+				nv(1) := '1';
+			end if;
+		elsif lower_s >= zero32 and upper_s >= zero32 and lower_s <= upper_s then
+			if val_s >= zero32 and val_s < lower_s then
+				nv(1) := '1';
+			end if;
+			if val_s > upper_s then
+				nv(1) := '1';
+			end if;
+			if val_s < zero32 and (upper_s - val_s) < zero32 then
+				nv(0) := '1';
+				nv(1) := '1';
+			end if;
+		elsif lower_s < zero32 and upper_s < zero32 and lower_s > upper_s then
+			if val_s >= zero32 then
+				nv(1) := '1';
+			end if;
+			if val_s > upper_s and val_s < lower_s then
+				nv(1) := '1';
+			end if;
+			if val_s >= zero32 and (val_s - lower_s) < zero32 then
+				nv(1) := '0';
+				nv(0) := '1';
+			end if;
+		elsif lower_s < zero32 and upper_s < zero32 and lower_s <= upper_s then
+			if val_s < lower_s then
+				nv(1) := '1';
+			end if;
+			if val_s < zero32 and val_s > upper_s then
+				nv(1) := '1';
+			end if;
+			if val_s >= zero32 and (val_s - lower_s) < zero32 then
+				nv(1) := '1';
+				nv(0) := '1';
+			end if;
+		end if;
+
+		return nv;
+	end function;
 
 
 BEGIN
@@ -978,8 +1319,13 @@ process (OP1out, OP2out, opcode, bit_nr, bit_msb, bs_shift, bs_shift_mod, ring, 
 ------------------------------------------------------------------------------
 --CCR op
 ------------------------------------------------------------------------------		
-PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, flag_z, OP1IN, c_out, addsub_ofl,
-	     bcd_a, bcd_a_carry, Vflag_a, exec)
+PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP1out, chk2_lower_bound, flag_z, OP1IN, c_out, addsub_ofl,
+	     bcd_a, bcd_a_carry, Vflag_a, exec, micro_state)
+		variable chk2_lower : std_logic_vector(31 downto 0);
+		variable chk2_upper : std_logic_vector(31 downto 0);
+		variable chk2_val   : std_logic_vector(31 downto 0);
+		variable chk2_nv    : std_logic_vector(1 downto 0);
+		variable chk2_size  : std_logic_vector(1 downto 0);
 	BEGIN
 		IF exec(andiSR)='1' THEN
 			CCRin <= Flags AND last_data_read(7 downto 0);
@@ -1023,13 +1369,24 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 		IF rising_edge(clk) THEN		
 			IF Reset='1' THEN
 				Flags(7 downto 0) <= "00000000"; 
+				chk2_lower_bound <= (OTHERS => '0');
 			ELSIF clkena_lw = '1' THEN
-				IF exec(directSR)='1' OR set_stop='1' THEN
+				IF micro_state = chk21 THEN
+					-- CHK2.L reaches chk23 with only the upper bound on OP2out.
+					-- Keep the lower bound from chk21 so long N matches byte/word.
+					chk2_lower_bound <= OP2out;
+				END IF;
+				IF exec(directSR)='1' THEN
 					Flags(7 downto 0) <= data_read(7 downto 0);
-				END IF;	
+				END IF;
+				IF set_stop='1' THEN
+					Flags(7 downto 0) <= data_read(7 downto 0);
+					Flags(7 downto 5) <= "000";  -- STOP loads SR but reserved CCR bits remain zero
+				END IF;
 				IF exec(directCCR)='1' THEN
 					Flags(7 downto 0) <= data_read(7 downto 0);
-				END IF;	
+					Flags(7 downto 5) <= "000";  -- Reserved CCR bits must always be zero (MC68030 UM)
+				END IF;
 				-- BUG #397 FIX: Restore pre-RTE CCR on format error.
 				-- directSR loaded frame CCR which is now invalid.
 				-- Last-assignment-wins ensures this overrides directSR above.
@@ -1046,12 +1403,25 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 					Flags(7 downto 0) <= CCRin(7 downto 0);			--CCR
 				ELSIF Z_error='1' THEN
 					IF micro_state = trap0 THEN
-						-- Undocumented behavior (flags when div by zero)
-						IF exe_opcode(8)='0' THEN
---						Flags(3 downto 0) <= reg_QA(31)&"000";
-							Flags(3 downto 0) <= '0'&NOT reg_QA(31)&"00";
+						IF CPU(1)='1' THEN
+							IF div_word_latched='1' THEN
+								IF div_signed_latched='0' THEN
+									Flags(3 downto 0) <= divu_divzero_flags_68020(div_dividend_latched(47 downto 16), true);
+								ELSE
+									Flags(3 downto 0) <= divs_divzero_flags_68020(Flags(3 downto 0));
+								END IF;
+							ELSIF div_signed_latched='0' THEN
+								Flags(3 downto 0) <= divu_divzero_flags_68020(div_dividend_latched(31 downto 0), false);
+							ELSE
+								Flags(3 downto 0) <= divs_divzero_flags_68020(Flags(3 downto 0));
+							END IF;
 						ELSE
-							Flags(3 downto 0) <= "0100";
+							-- Legacy 68000/010 path.
+							IF exe_opcode(8)='0' THEN
+								Flags(3 downto 0) <= '0'&NOT reg_QA(31)&"00";
+							ELSE
+								Flags(3 downto 0) <= "0100";
+							END IF;
 						END IF;
 					END IF;
 				ELSIF exec(no_Flags)='0' THEN
@@ -1068,8 +1438,27 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 						Flags(3 downto 0) <= set_flags;
 					ELSIF exec(opcDIVU)='1' AND DIV_Mode/=3 THEN
 						IF V_Flag='1' THEN	
-							Flags(3 downto 0) <= "1010";
-						ELSIF exe_opcode(15)='1' OR DIV_Mode=0 THEN
+							IF CPU(1)='1' THEN
+								IF div_word_latched='1' THEN
+									IF div_signed_latched='0' THEN
+										Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(47 downto 16), Flags(3 downto 0), true);
+									ELSE
+										Flags(3 downto 0) <= divs_overflow_flags_68020(div_dividend_latched(47 downto 16), div_src_latched(15 downto 0));
+									END IF;
+								ELSIF div_signed_latched='0' THEN
+									Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(31 downto 0), Flags(3 downto 0), false);
+								ELSE
+									Flags(3 downto 0) <= divsl_overflow_flags_68020(
+										div_dividend_latched(31 downto 0),
+										div_dividend_latched(63 downto 32),
+										div_src_latched,
+										div_64bit_latched='1'
+									);
+								END IF;
+							ELSE
+								Flags(3 downto 0) <= "1010";
+							END IF;
+						ELSIF div_word_latched='1' THEN
 							Flags(3 downto 0) <= OP1IN(15)&flag_z(1)&"00";
 						ELSE
 							Flags(3 downto 0) <= OP1IN(31)&flag_z(2)&"00";
@@ -1107,33 +1496,87 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 					ELSIF exec(opcCHK2)='1' THEN		--micro_state = chk23
 --micro_state	 chk21   chk22   chk23
 --OP1out      		UB		R			R
---OP2out				LB		LB			UB					
+--OP2out				LB		LB			UB
 ----lower bound first
-						IF last_Flags1(0)='0' THEN			--unsigned OP
-							Flags(0) <= Flags(0) OR (NOT set_flags(0) AND NOT set_flags(2));
-						ELSE										--signed OP
-							Flags(0) <= (Flags(0) XOR set_flags(0)) AND  NOT Flags(2) AND NOT set_flags(2);
+						-- BUG #444 FIX: For CHK2/CMP2 with bit 15 set, the compared
+						-- register is treated as a full longword, but the bounds still
+						-- use the instruction size encoded in the opcode. The previous
+						-- code reused exe_datatype for both, which broke CHK2.B A-reg
+						-- compares seen in cputest BASIC.
+						chk2_size := exe_opcode(10 downto 9);
+						IF sndOPC(15)='1' THEN
+							chk2_val := OP1out;
+						ELSE
+							CASE chk2_size IS
+								WHEN "00" =>
+									chk2_val := std_logic_vector(resize(signed(OP1out(7 downto 0)), 32));
+								WHEN "01" =>
+									chk2_val := std_logic_vector(resize(signed(OP1out(15 downto 0)), 32));
+								WHEN OTHERS =>
+									chk2_val := OP1out;
+							END CASE;
 						END IF;
-						Flags(1) <= '0';
-						Flags(2) <= Flags(2) OR set_flags(2);
-						Flags(3) <= NOT last_Flags1(0); 
-					ELSIF exec(opcCHK)='1' THEN
-						IF exe_datatype="01" THEN 						--Word
-							Flags(3) <= OP1out(15);
-						ELSE	
-							Flags(3) <= OP1out(31);
-						END IF;	
-						IF OP1out(15 downto 0)=X"0000" AND (exe_datatype="01" OR OP1out(31 downto 16)=X"0000") THEN
-							Flags(2) <='1';
-						ELSE	
-							Flags(2) <='0';
-						END IF;	
-						Flags(1) <= '0';
+
+						CASE chk2_size IS
+							WHEN "00" =>
+								chk2_lower := std_logic_vector(resize(signed(OP2out(15 downto 8)), 32));
+								chk2_upper := std_logic_vector(resize(signed(OP2out(7 downto 0)), 32));
+							WHEN "01" =>
+								chk2_lower := std_logic_vector(resize(signed(chk2_lower_bound(15 downto 0)), 32));
+								chk2_upper := std_logic_vector(resize(signed(OP2out(15 downto 0)), 32));
+							WHEN OTHERS =>
+								chk2_lower := chk2_lower_bound;
+								chk2_upper := OP2out;
+						END CASE;
+						chk2_nv := chk2_nv_flags_68020(chk2_lower, chk2_upper, chk2_val);
+
+						-- 68020/030 CHK2/CMP2 sets N/V from the range topology, but C/Z come
+						-- from the final in-range/equality test, not from the internal compare
+						-- microstates. This matches WinUAE's setchk2undefinedflags() + the
+						-- surrounding C/Z logic used by the generated CHK2 handlers.
 						Flags(0) <= '0';
+						Flags(2) <= '0';
+						IF chk2_val = chk2_lower OR chk2_val = chk2_upper THEN
+							Flags(2) <= '1';
+						ELSIF signed(chk2_lower) <= signed(chk2_upper) THEN
+							IF signed(chk2_val) < signed(chk2_lower) OR signed(chk2_val) > signed(chk2_upper) THEN
+								Flags(0) <= '1';
+							END IF;
+						ELSIF signed(chk2_val) > signed(chk2_upper) AND signed(chk2_val) < signed(chk2_lower) THEN
+							Flags(0) <= '1';
+						END IF;
+						Flags(1) <= chk2_nv(0);
+						Flags(3) <= chk2_nv(1);
+					ELSIF exec(opcCHK)='1' THEN
+						IF CPU(1)='1' THEN
+							IF exe_datatype="01" THEN
+								Flags(3 downto 0) <= chk_flags_68020(OP2out, OP1out, true);
+							ELSE
+								Flags(3 downto 0) <= chk_flags_68020(OP2out, OP1out, false);
+							END IF;
+						ELSE	
+							IF exe_datatype="01" THEN 						--Word
+								Flags(3) <= OP1out(15);
+							ELSE	
+								Flags(3) <= OP1out(31);
+							END IF;	
+							IF OP1out(15 downto 0)=X"0000" AND (exe_datatype="01" OR OP1out(31 downto 16)=X"0000") THEN
+								Flags(2) <='1';
+							ELSE	
+								Flags(2) <='0';
+							END IF;	
+							Flags(1) <= '0';
+							Flags(0) <= '0';
+						END IF;
 					END IF;
 				END IF;	
 			END IF;	
-			Flags(7 downto 5) <= "000";
+				-- Live writes to CCR/SR must clear the unused low-byte bits on
+				-- 68020/030. Stack-driven restores (RTR/RTE/directSR) keep the
+				-- stacked image, so do not mask them here unconditionally.
+				IF exec(to_CCR)='1' THEN
+					Flags(7 downto 5) <= "000";
+				END IF;
 		END IF;	
 	END PROCESS;
 	
@@ -1328,8 +1771,20 @@ PROCESS (clk)
 					V_Flag <= set_V_Flag;
 				END IF;
 				signedOP <= divs;
-				IF micro_state=div1 THEN
-					nozero <= '0';
+					IF micro_state=div1 THEN
+						div_dividend_latched <= dividend;
+						div_signed_latched <= divs;
+						IF exe_opcode(15)='1' OR DIV_Mode=0 THEN
+							div_word_latched <= '1';
+						ELSE
+							div_word_latched <= '0';
+						END IF;
+						IF exe_opcode(15)='0' AND exe_opcode(14)='1' AND sndOPC(10)='1' THEN
+							div_64bit_latched <= '1';
+						ELSE
+							div_64bit_latched <= '0';
+						END IF;
+						nozero <= '0';
 					IF divs='1' AND dividend(63)='1' THEN				-- Neg dividend
 						OP1_sign <= '1';
 						div_reg <= 0-dividend;
@@ -1342,6 +1797,7 @@ PROCESS (clk)
 					nozero <= NOT div_bit OR nozero;
 				END IF;
 				IF micro_state=div2 THEN
+					div_src_latched <= OP2out;
 					div_neg <= signedOP AND (OP2out(31) XOR OP1_sign);
 					IF DIV_Mode=0 THEN
 						div_over(32 downto 16) <= ('0'&div_reg(47 downto 32))-('0'&OP2out(15 downto 0));
