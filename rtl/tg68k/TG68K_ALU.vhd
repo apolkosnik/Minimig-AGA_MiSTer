@@ -333,19 +333,18 @@ architecture logic of TG68K_ALU is
 	end function;
 
 	function divu_overflow_flags_68020(
-		dividend : std_logic_vector(31 downto 0);
-		is_word  : boolean
+		dividend      : std_logic_vector(31 downto 0);
+		current_flags : std_logic_vector(3 downto 0)
 	) return std_logic_vector is
-		variable flags : std_logic_vector(3 downto 0) := (others => '0');
+		variable flags : std_logic_vector(3 downto 0) := current_flags;
 	begin
+		-- WinUAE/68020+: DIVU overflow forces V. Z/C are left unchanged. N is
+		-- forced only if the signed 32-bit dividend is negative, otherwise it is
+		-- left unchanged.
 		flags(1) := '1';
-
 		if dividend(31) = '1' then
 			flags(3) := '1';
-		elsif (not is_word) and dividend = x"00000000" then
-			flags(2) := '1';
 		end if;
-
 		return flags;
 	end function;
 
@@ -1411,12 +1410,12 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 							IF CPU(1)='1' THEN
 								IF div_word_latched='1' THEN
 									IF div_signed_latched='0' THEN
-										Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(47 downto 16), true);
+									Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(47 downto 16), Flags(3 downto 0));
 									ELSE
 										Flags(3 downto 0) <= divs_overflow_flags_68020(div_dividend_latched(47 downto 16), div_src_latched(15 downto 0));
 									END IF;
 								ELSIF div_signed_latched='0' THEN
-									Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(31 downto 0), false);
+									Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(31 downto 0), Flags(3 downto 0));
 								ELSE
 									Flags(3 downto 0) <= divsl_overflow_flags_68020(
 										div_dividend_latched(31 downto 0),
@@ -1742,7 +1741,6 @@ PROCESS (clk)
 				END IF;
 				signedOP <= divs;
 					IF micro_state=div1 THEN
-						div_src_latched <= OP2out;
 						div_dividend_latched <= dividend;
 						div_signed_latched <= divs;
 						IF exe_opcode(15)='1' OR DIV_Mode=0 THEN
@@ -1768,6 +1766,7 @@ PROCESS (clk)
 					nozero <= NOT div_bit OR nozero;
 				END IF;
 				IF micro_state=div2 THEN
+					div_src_latched <= OP2out;
 					div_neg <= signedOP AND (OP2out(31) XOR OP1_sign);
 					IF DIV_Mode=0 THEN
 						div_over(32 downto 16) <= ('0'&div_reg(47 downto 32))-('0'&OP2out(15 downto 0));
