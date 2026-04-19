@@ -297,15 +297,16 @@ architecture logic of TG68K_ALU is
 	) return std_logic_vector is
 		variable flags : std_logic_vector(3 downto 0) := (others => '0');
 	begin
-		flags(1) := '1';
-
 		if is_word then
+			flags(1) := '1';
 			if dst(31) = '1' then
 				flags(3) := '1';
 			elsif dst(31 downto 16) = x"0000" then
 				flags(2) := '1';
 			end if;
 		else
+			flags(0) := '0';
+			flags(1) := '1';
 			if dst(31) = '1' then
 				flags(3) := '1';
 			elsif dst = x"00000000" then
@@ -334,17 +335,43 @@ architecture logic of TG68K_ALU is
 
 	function divu_overflow_flags_68020(
 		dividend      : std_logic_vector(31 downto 0);
+		current_flags : std_logic_vector(3 downto 0);
+		is_word       : boolean
+	) return std_logic_vector is
+		variable flags : std_logic_vector(3 downto 0) := current_flags;
+	begin
+		if is_word then
+			-- WinUAE/68020+: DIVU.W overflow forces V. Z/C are left unchanged. N is
+			-- forced only if the signed 32-bit dividend is negative, otherwise it is
+			-- left unchanged.
+			flags(1) := '1';
+			if dividend(31) = '1' then
+				flags(3) := '1';
+			end if;
+		else
+			-- WinUAE divul_overflow(): V=1, C=0, Z=(low32==0), N=sign(low32).
+			flags(0) := '0';
+			flags(1) := '1';
+			flags(2) := '0';
+			flags(3) := dividend(31);
+			if dividend = x"00000000" then
+				flags(2) := '1';
+				flags(3) := '0';
+			end if;
+		end if;
+		return flags;
+	end function;
+
+	function divs_divzero_flags_68020(
 		current_flags : std_logic_vector(3 downto 0)
 	) return std_logic_vector is
 		variable flags : std_logic_vector(3 downto 0) := current_flags;
 	begin
-		-- WinUAE/68020+: DIVU overflow forces V. Z/C are left unchanged. N is
-		-- forced only if the signed 32-bit dividend is negative, otherwise it is
-		-- left unchanged.
-		flags(1) := '1';
-		if dividend(31) = '1' then
-			flags(3) := '1';
-		end if;
+		-- WinUAE/68020+: signed divide-by-zero forces N=0, Z=1, C=0 and
+		-- leaves V unchanged.
+		flags(3) := '0';
+		flags(2) := '1';
+		flags(0) := '0';
 		return flags;
 	end function;
 
@@ -1377,12 +1404,12 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 								IF div_signed_latched='0' THEN
 									Flags(3 downto 0) <= divu_divzero_flags_68020(div_dividend_latched(47 downto 16), true);
 								ELSE
-									Flags(3 downto 0) <= "0100";
+									Flags(3 downto 0) <= divs_divzero_flags_68020(Flags(3 downto 0));
 								END IF;
 							ELSIF div_signed_latched='0' THEN
 								Flags(3 downto 0) <= divu_divzero_flags_68020(div_dividend_latched(31 downto 0), false);
 							ELSE
-								Flags(3 downto 0) <= "0100";
+								Flags(3 downto 0) <= divs_divzero_flags_68020(Flags(3 downto 0));
 							END IF;
 						ELSE
 							-- Legacy 68000/010 path.
@@ -1410,12 +1437,12 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 							IF CPU(1)='1' THEN
 								IF div_word_latched='1' THEN
 									IF div_signed_latched='0' THEN
-									Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(47 downto 16), Flags(3 downto 0));
+										Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(47 downto 16), Flags(3 downto 0), true);
 									ELSE
 										Flags(3 downto 0) <= divs_overflow_flags_68020(div_dividend_latched(47 downto 16), div_src_latched(15 downto 0));
 									END IF;
 								ELSIF div_signed_latched='0' THEN
-									Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(31 downto 0), Flags(3 downto 0));
+									Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(31 downto 0), Flags(3 downto 0), false);
 								ELSE
 									Flags(3 downto 0) <= divsl_overflow_flags_68020(
 										div_dividend_latched(31 downto 0),
