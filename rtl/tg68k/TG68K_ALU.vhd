@@ -1376,9 +1376,13 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 					-- Keep the lower bound from chk21 so long N matches byte/word.
 					chk2_lower_bound <= OP2out;
 				END IF;
-				IF exec(directSR)='1' OR set_stop='1' THEN
+				IF exec(directSR)='1' THEN
 					Flags(7 downto 0) <= data_read(7 downto 0);
-				END IF;	
+				END IF;
+				IF set_stop='1' THEN
+					Flags(7 downto 0) <= data_read(7 downto 0);
+					Flags(7 downto 5) <= "000";  -- STOP loads SR but reserved CCR bits remain zero
+				END IF;
 				IF exec(directCCR)='1' THEN
 					Flags(7 downto 0) <= data_read(7 downto 0);
 					Flags(7 downto 5) <= "000";  -- Reserved CCR bits must always be zero (MC68030 UM)
