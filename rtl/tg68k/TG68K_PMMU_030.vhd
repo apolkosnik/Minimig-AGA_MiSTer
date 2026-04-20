@@ -4,6 +4,19 @@
 --           transparent translation, fault detection, PMOVE/PTEST/PFLUSH/PLOAD instructions,
 --           real page table walking via memory arbiter in cpu_wrapper.v
 -- The walker now reads actual descriptors from memory for non-identity address translation.
+--
+-- RMC / atomic table-search deviation from MC68030 UM 9.5.2:
+--   The spec requires RMC asserted for the entire duration of a table search so
+--   that no other bus master can interleave. This implementation does not drive
+--   a bus-wide RMC lock. The CPU side is handled: while 'walker_active' is high
+--   in cpu_wrapper.v, CPU memory access is suppressed (ramsel gated by
+--   ~walker_active, line 106). Other Amiga chip-bus masters (Agnus/Paula/
+--   Blitter) can still use their normal DMA slots against chip RAM between
+--   consecutive walker descriptor reads. In practice, AmigaOS places page
+--   tables in fast RAM, which the chipset masters do not access, so the walker
+--   has de-facto exclusive access to page-table memory across the walk. This
+--   deviation is known and latent; fixing it would require stalling chipset
+--   DMA during any table walk, which would corrupt display/audio output.
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -86,6 +99,12 @@ entity TG68K_PMMU_030 is
     -- Useful for SignalTap / post-run forensics: real MC68030 ignores such
     -- writes, and silent ignore hid software bugs in prior triage.
     debug_illegal_reg_sel : out std_logic;
+    -- MC68030 UM 9.2.3 MMUDIS: when asserted, the MMU is prevented from searching
+    -- the ATC and the execution unit from performing table searches. Logical
+    -- addresses pass through as physical addresses. TTRs continue to operate
+    -- (MMUDIS does not affect transparent translation). Defaulted to '0' because
+    -- the Amiga platform has no MMUDIS source.
+    mmudis              : in  std_logic := '0';
     cpu_reset           : in  std_logic := '0'
   );
 end TG68K_PMMU_030;
@@ -116,7 +135,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal SRP_L  : std_logic_vector(31 downto 0); -- Supervisor Root Pointer low 32 bits (64-bit total)
   signal TT0    : std_logic_vector(31 downto 0); -- Transparent Translation Register 0
   signal TT1    : std_logic_vector(31 downto 0); -- Transparent Translation Register 1
-  signal MMUSR  : std_logic_vector(31 downto 0); -- MMU Status Register
+  signal MMUSR  : std_logic_vector(15 downto 0); -- MMU Status Register (MC68030 UM 9.7.4: architecturally 16 bits)
   -- NOTE: CAL, VAL, SCC, AC registers are defined in MC68030 but not implemented
   -- They were removed as unused signals to avoid synthesis warnings
   -- Internal
@@ -295,7 +314,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal pflush_addr : std_logic_vector(31 downto 0) := (others => '0');
   signal pflush_fc : std_logic_vector(2 downto 0) := (others => '0');
   signal pflush_mode : std_logic_vector(12 downto 8) := (others => '0');  -- From brief word
-  signal pflush_mask : std_logic_vector(2 downto 0) := (others => '0');  -- FC comparison mask from brief(7:5)
+  signal pflush_mask : std_logic_vector(3 downto 0) := (others => '0');  -- FC comparison mask from brief(8:5)
   
   -- Page table walking state
   signal walk_level     : integer range 0 to 5 := 0; -- Current level being walked (0-4 for FCL=0, 0-5 for FCL=1)
@@ -1031,7 +1050,7 @@ begin
         null;
       elsif mmusr_update_req = '1' then
         -- Medium priority: Translation engine update (automatic updates)
-        MMUSR <= mmusr_update_value;
+        MMUSR <= mmusr_update_value(15 downto 0);
         mmusr_update_ack <= '1';
       end if;
       -- BUG FIX: Clear ptest_active when translation process signals completion
@@ -1185,7 +1204,7 @@ begin
           when "11000" =>
             -- MC68030 UM 9.6.3.4: PMOVE to MMUSR is a direct 16-bit store
             -- MMUSR is fully read-write via PMOVE (software clears before PTEST)
-            MMUSR(15 downto 0) <= reg_wdat(15 downto 0);
+            MMUSR <= reg_wdat(15 downto 0);
           when others =>
             -- BUG #446: Observable warning on illegal PMOVE reg_sel.
             -- Real MC68030 treats undecoded P-register selectors as undefined;
@@ -1238,9 +1257,9 @@ begin
               SRP_L                        when reg_sel = "10010" and reg_part = '0' else
               CRP_H                        when reg_sel = "10011" and reg_part = '1' else
               CRP_L                        when reg_sel = "10011" and reg_part = '0' else
-              X"0000" & MMUSR(15 downto 0) when reg_sel = "11000" else
+              X"0000" & MMUSR when reg_sel = "11000" else
               (others => '0');
-  debug_mmusr <= MMUSR(15 downto 0);
+  debug_mmusr <= MMUSR;
   -- BUG #446: Expose the sticky illegal-reg_sel latch.
   debug_illegal_reg_sel <= pmmu_illegal_reg_sel_seen;
 
@@ -1396,6 +1415,7 @@ begin
   addr_phys     <= addr_log when fc = "111"
                    else addr_log when tc_en = '0'
                    else addr_log when (ttr0_match_comb = '1' or ttr1_match_comb = '1')
+                   else addr_log when mmudis = '1'  -- MC68030 UM 9.2.3
                    else addr_phys_reg;
   -- BUG #126 V2 FIX: Combinational bypass for cache_inhibit when MMU disabled
   -- Without this, cache_inhibit_reg retains stale value (pmmu_req='0' when MMU off)
@@ -1407,11 +1427,13 @@ begin
                    else '0' when tc_en = '0'
                    else ttr0_ci_comb when ttr0_match_comb = '1'
                    else ttr1_ci_comb when ttr1_match_comb = '1'
+                   else '0' when mmudis = '1'  -- MC68030 UM 9.2.3
                    else cache_inhibit_reg;
   write_protect <= '0' when fc = "111"  -- CPU space never write-protected
                    else '0' when tc_en = '0'
                    else ttr0_wp_comb when ttr0_match_comb = '1'
                    else ttr1_wp_comb when ttr1_match_comb = '1'
+                   else '0' when mmudis = '1'  -- MC68030 UM 9.2.3
                    else write_protect_reg;
   fault         <= '0' when fc = "111" else fault_reg;  -- CPU space never faults
   fault_status  <= fault_status_reg;
@@ -1593,8 +1615,26 @@ begin
               );
               translation_pending <= '0';
               -- No walker needed for TTR
+            elsif mmudis = '1' then
+              -- MC68030 UM 9.2.3: MMUDIS asserted and no TTR match → identity
+              -- translation; ATC searches and table searches are suppressed.
+              addr_phys_reg      <= addr_log;
+              translated_addr    <= addr_log;
+              translated_fc      <= fc;
+              translated_rw      <= rw;
+              translated_cfg_seq <= xlat_cfg_seq;
+              cache_inhibit_reg  <= '0';
+              write_protect_reg  <= '0';
+              fault_reg          <= '0';
+              fault_status_reg   <= encode_mmusr_success(
+                write_protect => '0',
+                modified => '0',
+                transparent => '0',
+                level => "000"
+              );
+              translation_pending <= '0';
             else
-              -- No TTR match, tc_en='1' - check ATC and potentially start walker
+              -- No TTR match, tc_en='1', MMUDIS='0' - check ATC and potentially start walker
               hit := '0';
               for i in 0 to ATC_ENTRIES-1 loop
             -- BUG #415: Skip ATC lookup when flush is pending (1-cycle race window)
@@ -3658,10 +3698,15 @@ begin
               walk_phys_base <= std_logic_vector(
                 unsigned(early_term_desc_addr) + unsigned(early_term_offset));
             end if;
-            -- MC68030 early termination limit check (per WinUAE lines 1530-1554)
-            -- Check next table level's index against this descriptor's limit field
-            limit_fault := false;  -- BUG FIX: Track early termination limit violation
-            if walk_desc_is_long = '1' and walk_level < 4 then
+            -- MC68030 early termination limit check (MC68030 UM 9.5.1 LIMIT / 9.5.3.1):
+            -- "If an early termination page descriptor is a long format, the limit
+            --  field is applied to the next index field of the logical address."
+            -- If there is no next index field (current level is the deepest, or the
+            -- next TI field is zero), the check is undefined and must be skipped.
+            -- is_final_table_level() encodes this for both FCL=0 and FCL=1.
+            limit_fault := false;
+            if walk_desc_is_long = '1'
+               and not is_final_table_level(tc_fcl, walk_level, tc_idx_bits) then
               table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level + 1, tc_initial_shift, tc_page_size, tc_idx_bits);
               if walk_desc_high(31) = '1' and to_unsigned(table_index, 15) < unsigned(walk_desc_high(30 downto 16)) then
                 -- Lower limit violation: index < limit
@@ -4045,7 +4090,7 @@ begin
             if atc_valid(i) = '1' then
               -- BUG E FIX: Apply FC mask - XOR finds differences, AND with mask selects
               -- relevant bits, "000" means all masked bits match (mask=0 matches any FC)
-              if ((atc_fc(i) xor pflush_fc) and pflush_mask) = "000" then
+              if ((('0' & atc_fc(i)) xor ('0' & pflush_fc)) and pflush_mask) = "0000" then
                 if pflush_mode(9) = '0' or atc_global(i) = '0' then
                   atc_valid(i) <= '0';
                   atc_mru(i) <= '0';
@@ -4061,7 +4106,7 @@ begin
           for i in 0 to ATC_ENTRIES-1 loop
             if atc_valid(i) = '1' then
               -- BUG E FIX: Apply FC mask (same as mode=100 above)
-              if ((atc_fc(i) xor pflush_fc) and pflush_mask) = "000" and
+              if ((('0' & atc_fc(i)) xor ('0' & pflush_fc)) and pflush_mask) = "0000" and
                  align_addr(pflush_addr, atc_shift(i)) = atc_log_base(i) then
                 if pflush_mode(9) = '0' or atc_global(i) = '0' then
                   atc_valid(i) <= '0';
@@ -4174,7 +4219,7 @@ begin
         pflush_addr <= pmmu_addr;
         pflush_fc <= pmmu_fc;
         pflush_mode <= pmmu_brief(12 downto 8);  -- Capture PFLUSH mode from brief word
-        pflush_mask <= pmmu_brief(7 downto 5);  -- BUG E FIX: Capture FC comparison mask
+        pflush_mask <= pmmu_brief(8 downto 5);  -- BUG E FIX: Capture FC comparison mask
         pflush_clear_atc <= '1';
       elsif pflush_active = '1' then
         -- Keep the clear request live until the flush logic can service it.
