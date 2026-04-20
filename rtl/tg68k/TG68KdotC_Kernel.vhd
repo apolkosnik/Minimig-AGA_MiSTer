@@ -938,16 +938,16 @@ BEGIN
   -- Check bits 4-3 to determine FC source, then extract value accordingly
   -- F-Line Context: pmmu_brief uses latched values when context valid
   pmmu_cmd_fc     <= pmmu_brief(2 downto 0) when ((set(pmmu_ptest) = '1' or set(pmmu_pload) = '1' or
-                                              (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 8) /= "00000" and pmmu_brief(12 downto 8) /= "00100" and pmmu_brief(12 downto 8) /= "01000"))
+                                              (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 10) /= "000" and pmmu_brief(12 downto 10) /= "001" and pmmu_brief(12 downto 10) /= "010"))
                                               and pmmu_brief(4 downto 3) = "10")  -- Immediate FC (3-bit value in bits 2-0)
                      else pmmu_fc_from_dn when ((set(pmmu_ptest) = '1' or set(pmmu_pload) = '1' or
-                                    (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 8) /= "00000" and pmmu_brief(12 downto 8) /= "00100" and pmmu_brief(12 downto 8) /= "01000"))
+                                    (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 10) /= "000" and pmmu_brief(12 downto 10) /= "001" and pmmu_brief(12 downto 10) /= "010"))
                                     and pmmu_brief(4 downto 3) = "01")  -- FC from Dn register (Dn specified by pmmu_brief(2:0))
                      else SFC when ((set(pmmu_ptest) = '1' or set(pmmu_pload) = '1' or
-                                    (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 8) /= "00000" and pmmu_brief(12 downto 8) /= "00100" and pmmu_brief(12 downto 8) /= "01000"))
+                                    (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 10) /= "000" and pmmu_brief(12 downto 10) /= "001" and pmmu_brief(12 downto 10) /= "010"))
                                     and pmmu_brief(4 downto 0) = "00000")  -- FC from SFC
                      else DFC when ((set(pmmu_ptest) = '1' or set(pmmu_pload) = '1' or
-                                    (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 8) /= "00000" and pmmu_brief(12 downto 8) /= "00100" and pmmu_brief(12 downto 8) /= "01000"))
+                                    (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 10) /= "000" and pmmu_brief(12 downto 10) /= "001" and pmmu_brief(12 downto 10) /= "010"))
                                     and pmmu_brief(4 downto 0) = "00001")  -- FC from DFC
                      else fc_internal;
 

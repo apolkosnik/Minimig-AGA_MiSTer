@@ -234,7 +234,6 @@ architecture rtl of TG68K_PMMU_030 is
   -- atc_is_insn removed: FC already encodes instruction vs data (FC=2/6 vs FC=1/5)
   signal atc_shift : atc_shift_t;
   signal atc_page_size : atc_page_size_t;
-  signal atc_global : atc_val_t;  -- G bit: global page (survives PFLUSHAN)
   signal atc_level : atc_level_t;  -- BUG #412: walk level count for MMUSR N field
   signal atc_mru   : atc_val_t;  -- Pseudo-LRU: MRU bit per entry (1=recently used)
   signal atc_buserr : atc_val_t;  -- Cached fault entry present in ATC; fault class comes from atc_fault_status
@@ -313,7 +312,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal pflush_active : std_logic := '0';
   signal pflush_addr : std_logic_vector(31 downto 0) := (others => '0');
   signal pflush_fc : std_logic_vector(2 downto 0) := (others => '0');
-  signal pflush_mode : std_logic_vector(12 downto 8) := (others => '0');  -- From brief word
+  signal pflush_mode : std_logic_vector(2 downto 0) := (others => '0');  -- MODE field from brief(12:10)
   signal pflush_mask : std_logic_vector(3 downto 0) := (others => '0');  -- FC comparison mask from brief(8:5)
   
   -- Page table walking state
@@ -337,7 +336,6 @@ architecture rtl of TG68K_PMMU_030 is
   signal walk_vpn       : std_logic_vector(31 downto 0) := (others => '0'); -- Virtual page being walked
   signal walk_fault     : std_logic := '0'; -- Page fault flag
   signal walk_attr      : std_logic_vector(7 downto 0) := (others => '0'); -- Page attributes
-  signal walk_global    : std_logic := '0'; -- G bit from long-format descriptor (bit 10)
   signal walk_supervisor : std_logic := '0'; -- BUG #157 FIX: Cumulative S bit from TABLE descriptors
   signal walk_write_protect : std_logic := '0'; -- Cumulative WP bit from TABLE descriptors (per MC68030 spec 9.5.2)
   signal walk_is_root_pointer : std_logic := '0'; -- Root pointer DT=01 early termination (no S/WP/U/M checks)
@@ -3734,13 +3732,11 @@ begin
             walk_attr(2) <= walk_desc_high(6); -- Cache inhibit (CI)
             walk_attr(1) <= walk_desc_high(4); -- Modified (M)
             walk_attr(0) <= walk_desc_high(2) or walk_write_protect; -- WP from page + accumulated table WP
-            -- G bit (Global) is at bit 10 in long-format descriptors only
-            -- Short-format has no G bit, so non-global by default
-            if walk_desc_is_long = '1' then
-              walk_global <= walk_desc_high(10);  -- G bit for PFLUSHAN semantics
-            else
-              walk_global <= '0';  -- Short format = non-global
-            end if;
+            -- MC68030 UM 9.6 (PDF line 15292): "ATC Entries Defined as Shared
+            -- Globally" is a MC68851 feature NOT available on MC68030. No G bit
+            -- exists in any MC68030 descriptor (see 9.5.1 field enumeration,
+            -- PDF 14523-14647). PFLUSHA.N / PFLUSH.N therefore behave identically
+            -- to PFLUSHA / PFLUSH — no global-entry filter is applied.
             walk_fault <= '0';
             -- Debug: Log attribute extraction for long-format descriptors
             if walk_desc_is_long = '1' then
@@ -3930,7 +3926,6 @@ begin
           atc_page_size(replace_idx) <= walk_page_size;
           atc_attr(replace_idx)      <= walk_attr(3 downto 0);
           atc_fc(replace_idx)        <= saved_fc;
-          atc_global(replace_idx)    <= walk_global;
           atc_level(replace_idx)     <= std_logic_vector(to_unsigned(walk_level + 1, 3));
           atc_valid(replace_idx)     <= '1';
           atc_buserr(replace_idx)    <= '0';  -- BUG #436: Clear bus error flag for successful walk
@@ -4004,7 +3999,6 @@ begin
             atc_page_size(replace_idx) <= walk_page_size;
             atc_attr(replace_idx)      <= (others => '0');  -- No valid attributes
             atc_fc(replace_idx)        <= saved_fc;
-            atc_global(replace_idx)    <= '0';
             atc_level(replace_idx)     <= walker_fault_status(2 downto 0);
             atc_valid(replace_idx)     <= '1';
             atc_buserr(replace_idx)    <= '1';  -- Mark as cached fault entry
@@ -4055,65 +4049,44 @@ begin
         end loop;
       end if;
       if pflush_clear_atc = '1' and wstate = W_IDLE then
-        -- MC68030 PFLUSH variants:
-        -- pflush_mode(12:8) = pmmu_brief(12:8) determines flush type:
-        -- Bits 12-10 = MODE:
-        --   001 = PFLUSHA/PFLUSHAN (flush all, A bit in bit 9)
-        --   100 = PFLUSH FC,MASK (flush by FC, no EA)
-        --   110 = PFLUSH FC,MASK,<ea> (flush by FC with EA)
-        -- Bit 9 = A/N: 0=flush all, 1=flush all except global (for MODE=001)
-        -- Bit 8 = reserved (0)
-        if pflush_mode(12 downto 10) = "001" and pflush_mode(9) = '0' then
-          -- PFLUSHA - flush all ATC entries (MODE=001, A=0)
+        -- MC68030 PFLUSH variants (pflush_mode is brief(12:10)):
+        --   001 = PFLUSHA / PFLUSHA.N  (flush all — see note below)
+        --   100 = PFLUSH  FC,MASK      (flush by FC, no EA)
+        --   110 = PFLUSH  FC,MASK,<ea> (flush by FC with EA)
+        -- MC68030 UM 9.6 (PDF 15292): no ATC entry is ever "global" on MC68030,
+        -- so PFLUSHA.N and PFLUSH.N are equivalent to PFLUSHA / PFLUSH here;
+        -- there is no N-bit filter.
+        if pflush_mode = "001" then
+          -- PFLUSHA: flush all ATC entries
           for i in 0 to ATC_ENTRIES-1 loop
             atc_valid(i) <= '0';
             atc_mru(i) <= '0';
             atc_buserr(i) <= '0';
             atc_fault_status(i) <= (others => '0');
           end loop;
-        elsif pflush_mode(12 downto 10) = "001" and pflush_mode(9) = '1' then
-          -- PFLUSHAN - flush all non-global entries per MC68030 spec (MODE=001, A=1)
-          -- Global pages (G bit = 1) survive PFLUSHAN
-          for i in 0 to ATC_ENTRIES-1 loop
-            if atc_global(i) = '0' then
-              atc_valid(i) <= '0';  -- Only flush non-global entries
-              atc_mru(i) <= '0';
-              atc_buserr(i) <= '0';
-              atc_fault_status(i) <= (others => '0');
-            end if;
-          end loop;
-        elsif pflush_mode(12 downto 10) = "100" then
-          -- BUG F FIX: PFLUSH FC,MASK (mode=100, no EA) - flush ALL entries matching FC/mask
-          -- MC68030 spec: No address comparison when no EA is provided
-          -- pflush_mode(9) = N bit: 0=flush all matching, 1=flush only non-global matching
+        elsif pflush_mode = "100" then
+          -- PFLUSH FC,MASK: flush entries matching FC under mask, regardless of address.
+          -- mask=0 matches any FC.
           for i in 0 to ATC_ENTRIES-1 loop
             if atc_valid(i) = '1' then
-              -- BUG E FIX: Apply FC mask - XOR finds differences, AND with mask selects
-              -- relevant bits, "000" means all masked bits match (mask=0 matches any FC)
               if ((('0' & atc_fc(i)) xor ('0' & pflush_fc)) and pflush_mask) = "0000" then
-                if pflush_mode(9) = '0' or atc_global(i) = '0' then
-                  atc_valid(i) <= '0';
-                  atc_mru(i) <= '0';
-                  atc_buserr(i) <= '0';
-                  atc_fault_status(i) <= (others => '0');
-                end if;
+                atc_valid(i) <= '0';
+                atc_mru(i) <= '0';
+                atc_buserr(i) <= '0';
+                atc_fault_status(i) <= (others => '0');
               end if;
             end if;
           end loop;
         else
-          -- PFLUSH FC,MASK,<ea> (mode=110) - flush entries matching FC/mask AND address
-          -- pflush_mode(9) = N bit: 0=flush all matching, 1=flush only non-global matching
+          -- PFLUSH FC,MASK,<ea> (mode=110): FC match AND address match.
           for i in 0 to ATC_ENTRIES-1 loop
             if atc_valid(i) = '1' then
-              -- BUG E FIX: Apply FC mask (same as mode=100 above)
               if ((('0' & atc_fc(i)) xor ('0' & pflush_fc)) and pflush_mask) = "0000" and
                  align_addr(pflush_addr, atc_shift(i)) = atc_log_base(i) then
-                if pflush_mode(9) = '0' or atc_global(i) = '0' then
-                  atc_valid(i) <= '0';
-                  atc_mru(i) <= '0';
-                  atc_buserr(i) <= '0';
-                  atc_fault_status(i) <= (others => '0');
-                end if;
+                atc_valid(i) <= '0';
+                atc_mru(i) <= '0';
+                atc_buserr(i) <= '0';
+                atc_fault_status(i) <= (others => '0');
               end if;
             end if;
           end loop;
@@ -4218,7 +4191,7 @@ begin
         pflush_active <= '1';
         pflush_addr <= pmmu_addr;
         pflush_fc <= pmmu_fc;
-        pflush_mode <= pmmu_brief(12 downto 8);  -- Capture PFLUSH mode from brief word
+        pflush_mode <= pmmu_brief(12 downto 10);  -- Capture PFLUSH MODE field from brief word
         pflush_mask <= pmmu_brief(8 downto 5);  -- BUG E FIX: Capture FC comparison mask
         pflush_clear_atc <= '1';
       elsif pflush_active = '1' then
