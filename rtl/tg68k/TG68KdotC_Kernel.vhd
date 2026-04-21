@@ -625,12 +625,13 @@ architecture logic of TG68KdotC_Kernel is
 		-- PMMU register signals (now declared as output ports)
 	signal pmmu_reg_rdat    : std_logic_vector(31 downto 0);
 	signal pmmu_src_data    : std_logic_vector(31 downto 0);
-	signal pmmu_dn_data     : std_logic_vector(31 downto 0);  -- BUG #39: Direct register file read for Dn mode
+	signal pmmu_dn_data     : std_logic_vector(31 downto 0);  -- Direct register file read for PMOVE CPU-register mode (Dn/An)
 	-- BUG #70 SIMPLIFICATION (per BUILD_238): Simple 2-signal mechanism
 	-- BUILD_238 showed complex queue (for DESTINATION) was broken, simple mechanism (for SOURCE) worked
 	-- Unify both SOURCE and DESTINATION to use same simple capture/clear mechanism
-	signal pmove_dn_regnum  : std_logic_vector(2 downto 0);   -- Data register selector (D0-D7) captured in pmove_decode state
-	signal pmove_dn_mode    : std_logic;                      -- Flag: '1' when PMOVE uses Dn mode (set in pmove_decode, cleared in setexecOPC)
+	signal pmove_dn_regnum  : std_logic_vector(2 downto 0);   -- PMOVE CPU register selector (0-7) captured in pmove_decode state
+	signal pmove_dn_areg    : std_logic;                      -- '1' when PMOVE CPU-register operand is An, '0' when Dn
+	signal pmove_dn_mode    : std_logic;                      -- Flag: '1' when PMOVE uses CPU-register mode (Dn/An)
 	signal pmove_mmu_read_active : std_logic;                 -- Flag: '1' when PMOVE MMU->memory is active
 	-- F-Line instruction context latch (captures at decode time for stable values)
 	signal fline_opcode_latch  : std_logic_vector(15 downto 0) := (others => '0');
@@ -1026,16 +1027,12 @@ BEGIN
   cacr_dfreeze <= CACR(9);  -- DCache Freeze
   cacr_dbe    <= CACR(12); -- Data Burst Enable
   cacr_wa     <= CACR(13); -- Write Allocate
-  -- PMOVE Dn source selects live register file using the latched selector
-  -- BUG #112 V3 FIX: During pmove_decode, use opcode(2:0) DIRECTLY instead of pmove_dn_regnum!
-  -- pmove_dn_regnum is registered - it only updates at END of clock cycle.
-  -- But pmmu_dn_data is combinational - it reads the OLD pmove_dn_regnum during pmove_decode,
-  -- causing the write to use the wrong Dn (from the previous instruction).
-  -- This explains why first run works (pmove_dn_regnum=0 from reset) but second run fails
-  -- (pmove_dn_regnum still has D1 from previous PMOVE TT0,D1).
-  -- F-Line Context: Use pmmu_opcode for stable values
-  pmmu_dn_data <= regfile(conv_integer(pmmu_opcode(2 downto 0))) when (micro_state = pmove_decode AND pmmu_opcode(5 downto 3) = "000")
-                  else regfile(conv_integer(pmove_dn_regnum));
+  -- PMOVE CPU-register source selects the live register file using the latched selector.
+  -- During pmove_decode, use pmmu_opcode DIRECTLY because pmove_dn_regnum/areg are registered
+  -- and only update at the end of the cycle.
+  pmmu_dn_data <= regfile(conv_integer('0' & pmmu_opcode(2 downto 0))) when (micro_state = pmove_decode AND pmmu_opcode(5 downto 3) = "000") else
+                  regfile(conv_integer('1' & pmmu_opcode(2 downto 0))) when (micro_state = pmove_decode AND pmmu_opcode(5 downto 3) = "001") else
+                  regfile(conv_integer(pmove_dn_areg & pmove_dn_regnum));
 
   -- Source data for PMMU register writes: from Dn normally, or from memory read in pmove_mem_to_mmu_hi
   -- PMOVE <ea>,<MMU reg>: use data_read (combinational) so the freshly returned bus data is written immediately
@@ -1837,7 +1834,7 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 -----------------------------------------------------------------------------
 -- set dest regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, next_micro_state, pmove_dn_regnum, pmove_dn_mode, fline_context_valid, fline_opcode_latch, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
+	PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, next_micro_state, pmove_dn_regnum, pmove_dn_areg, pmove_dn_mode, fline_context_valid, fline_opcode_latch, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
 	BEGIN
 		IF exec(movem_action) ='1' THEN
 			rf_dest_addr <= rf_source_addrd;
@@ -1891,13 +1888,11 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 			-- rf_dest_addr ONE CYCLE EARLY. RDindex_A is registered, so the
 			-- register file write uses the PREVIOUS cycle's rf_dest_addr.
 			-- Without this, both HI and LO word writes target Dn instead of Dn/Dn+1.
-			rf_dest_addr <= dest_areg&(pmove_dn_regnum + "001");
-		ELSIF micro_state = pmove_decode AND fline_context_valid = '1' AND fline_opcode_latch(5 downto 3) = "000" THEN
-			-- BUG #376 FIX: During pmove_decode, pmove_dn_mode is not yet set
-			-- (it's registered, set at the NEXT clock edge). And opcode may have been
-			-- overwritten by prefetch. Use fline_opcode_latch for correct Dn register.
-			-- This ensures rf_dest_addr is correct ONE CYCLE BEFORE the HI word write fires.
-			rf_dest_addr <= '0' & fline_opcode_latch(2 downto 0);
+			rf_dest_addr <= pmove_dn_areg&(pmove_dn_regnum + "001");
+		ELSIF micro_state = pmove_decode AND fline_context_valid = '1' AND
+		      (fline_opcode_latch(5 downto 3) = "000" OR fline_opcode_latch(5 downto 3) = "001") THEN
+			-- PMOVE CPU-register mode (Dn/An): prime rf_dest_addr one cycle early.
+			rf_dest_addr <= fline_opcode_latch(3) & fline_opcode_latch(2 downto 0);
 		ELSIF micro_state = pmove_decode AND fline_context_valid = '1' AND
 		      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" OR fline_opcode_latch(5 downto 3)="100") THEN
 			-- BUG #397 FIX: During pmove_decode, set rf_dest_addr for (An)/(An)+/-(An)
@@ -1910,7 +1905,7 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 			-- overriding rf_dest_addr for subsequent non-PMMU instructions. pmove_dn_mode is
 			-- cleared at setexecOPC but exec(pmmu_wr) OLD value delays clearing by one cycle,
 			-- causing MOVEA.L after PMOVE D0,TT0 to write to A0 instead of A1.
-			rf_dest_addr <= dest_areg&pmove_dn_regnum;
+			rf_dest_addr <= pmove_dn_areg&pmove_dn_regnum;
 		-- BUG #384 FIX: PMOVE memory mode states need EA register from fline_opcode_latch,
 		-- not opcode! By pmove_mmu_to_mem/mem_to_mmu time, opcode has been overwritten by
 		-- prefetch. Without this, set(postadd)/set(presub) write-back targets the wrong
@@ -1939,7 +1934,7 @@ PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, de
 -----------------------------------------------------------------------------
 -- set source regaddr
 -----------------------------------------------------------------------------
-PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, last_opc_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_mode, fline_context_valid, fline_opcode_latch, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
+	PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source_areg, sndOPC, exec, set, source_2ndLbits, source_2ndHbits, 	source_LDRLbits, source_LDRMbits, last_data_read, last_opc_read, source_2ndMbits, micro_state, pmove_dn_regnum, pmove_dn_areg, pmove_dn_mode, fline_context_valid, fline_opcode_latch, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
 	BEGIN
 		IF exec(movem_action)='1' OR set(movem_action) ='1' THEN
 			IF movem_presub='1' THEN
@@ -1995,10 +1990,10 @@ PROCESS (opcode, exe_opcode, movem_presub, movem_regaddr, source_lowbits, source
 			rf_source_addr <= "1111";
 		ELSIF micro_state = pmove_dn_lo THEN
 			-- PMOVE Dn→MMU 64-bit: LOW word source is Dn+1 (increment register number)
-			rf_source_addr <= source_areg&(pmove_dn_regnum + "001");
+			rf_source_addr <= pmove_dn_areg&(pmove_dn_regnum + "001");
 		ELSIF pmove_dn_mode = '1' AND fline_context_valid = '1' THEN
 			-- BUG #398 FIX: Guard with fline_context_valid (same as rf_dest_addr fix)
-			rf_source_addr <= source_areg&pmove_dn_regnum;
+			rf_source_addr <= pmove_dn_areg&pmove_dn_regnum;
 		-- BUG #289 FIX: PMOVE MMU states need EA register from opcode(2:0), not opcode(11:9)
 		-- For PMOVE CRP,(A7)+, opcode(2:0)="111" (A7) but opcode(11:9)="000" (wrong!)
 		-- BUG #377 FIX: Use fline_opcode_latch instead of opcode! By pmove_mmu_to_mem/mem_to_mmu
@@ -2947,6 +2942,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					exec_write_back <= '0';
 					-- BUG #70 SIMPLIFICATION: Simple 2-signal initialization
 					pmove_dn_regnum <= (others => '0');
+					pmove_dn_areg <= '0';
 					pmove_dn_mode <= '0';
 					-- F-Line context latch initialization
 					fline_opcode_latch <= (others => '0');
@@ -3052,16 +3048,28 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					IF micro_state = pmove_decode THEN
 						IF fline_context_valid = '1' THEN
 							-- Use latched opcode for stable values during execution
-							IF fline_opcode_latch(5 downto 3) = "000" THEN
+							IF fline_opcode_latch(5 downto 3) = "000" OR fline_opcode_latch(5 downto 3) = "001" THEN
 								pmove_dn_regnum <= fline_opcode_latch(2 downto 0);
+								IF fline_opcode_latch(5 downto 3) = "001" THEN
+									pmove_dn_areg <= '1';
+								ELSE
+									pmove_dn_areg <= '0';
+								END IF;
 								pmove_dn_mode <= '1';
 							ELSE
+								pmove_dn_areg <= '0';
 								pmove_dn_mode <= '0';
 							END IF;
-						ELSIF opcode(5 downto 3) = "000" THEN
-							pmove_dn_regnum <= opcode(2 downto 0);  -- Dn from opcode EA
+						ELSIF opcode(5 downto 3) = "000" OR opcode(5 downto 3) = "001" THEN
+							pmove_dn_regnum <= opcode(2 downto 0);  -- Dn/An from opcode EA
+							IF opcode(5 downto 3) = "001" THEN
+								pmove_dn_areg <= '1';
+							ELSE
+								pmove_dn_areg <= '0';
+							END IF;
 							pmove_dn_mode <= '1';
 						ELSE
+							pmove_dn_areg <= '0';
 							pmove_dn_mode <= '0';  -- Clear for non-Dn modes
 						END IF;
 					-- BUG #198 FIX: Increment pmove_dn_regnum for second half of 64-bit PMOVE
@@ -3626,11 +3634,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- VHDL signal timing: exec is being assigned from set_exec OR set on line 1702, but signal
 					-- assignments don't take effect until end of process. So exec(pmmu_wr) shows the OLD value,
 					-- not the NEW value being set up. Must check ALL THREE layers to prevent early clear!
-					IF set(pmmu_rd)='0' AND exec(pmmu_rd)='0' AND
-					   set_exec(pmmu_wr)='0' AND set(pmmu_wr)='0' AND exec(pmmu_wr)='0' AND
-					   exec(Regwrena)='0' THEN
-						pmove_dn_mode <= '0';
-					END IF;
+						IF set(pmmu_rd)='0' AND exec(pmmu_rd)='0' AND
+						   set_exec(pmmu_wr)='0' AND set(pmmu_wr)='0' AND exec(pmmu_wr)='0' AND
+						   exec(Regwrena)='0' THEN
+							pmove_dn_areg <= '0';
+							pmove_dn_mode <= '0';
+						END IF;
 					END IF;	
 				exec(get_2ndOPC) <= set(get_2ndOPC) OR setopcode;
 
@@ -7415,13 +7424,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- BUG #377 FIX: Use pmmu_opcode (latched F-line opcode) instead of opcode!
                         -- By pmove_decode time, opcode may have been overwritten by prefetch.
                         -- fline_opcode_latch preserves the original F-line opcode EA mode bits.
-                        ELSIF pmmu_opcode(5 downto 3)="001" OR (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') OR (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 1)="01") THEN
+                        ELSIF ((pmmu_opcode(5 downto 3)="000" OR pmmu_opcode(5 downto 3)="001") AND
+                               (pmmu_brief(14 downto 10) = "10010" OR pmmu_brief(14 downto 10) = "10011")) OR
+                              (pmmu_brief(9) = '1' and pmmu_opcode(5 downto 3)="111" and pmmu_opcode(2)='1') OR
+                              (pmmu_brief(9) = '1' and pmmu_opcode(5 downto 3)="111" and pmmu_opcode(2 downto 1)="01") THEN
                              trap_illegal <= '1';
                              trapmake <= '1';
                         ELSE
                              -- Valid EA
-                             IF pmmu_opcode(5 downto 3)="000" THEN
-                                -- Dn mode: 4 bytes (Opcode + Extension).
+                             IF pmmu_opcode(5 downto 3)="000" OR pmmu_opcode(5 downto 3)="001" THEN
+                                -- Dn/An mode: 4 bytes (Opcode + Extension).
                                 -- PC increment handled by standard prefetch cycle (already at +4).
                                 IF pmmu_brief(9)='1' THEN
                                     -- Read from MMU
