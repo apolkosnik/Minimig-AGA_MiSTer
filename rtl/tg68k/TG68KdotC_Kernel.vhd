@@ -938,16 +938,16 @@ BEGIN
   -- Check bits 4-3 to determine FC source, then extract value accordingly
   -- F-Line Context: pmmu_brief uses latched values when context valid
   pmmu_cmd_fc     <= pmmu_brief(2 downto 0) when ((set(pmmu_ptest) = '1' or set(pmmu_pload) = '1' or
-                                              (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 10) /= "000" and pmmu_brief(12 downto 10) /= "001" and pmmu_brief(12 downto 10) /= "010"))
+                                              (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 10) /= "001"))
                                               and pmmu_brief(4 downto 3) = "10")  -- Immediate FC (3-bit value in bits 2-0)
                      else pmmu_fc_from_dn when ((set(pmmu_ptest) = '1' or set(pmmu_pload) = '1' or
-                                    (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 10) /= "000" and pmmu_brief(12 downto 10) /= "001" and pmmu_brief(12 downto 10) /= "010"))
+                                    (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 10) /= "001"))
                                     and pmmu_brief(4 downto 3) = "01")  -- FC from Dn register (Dn specified by pmmu_brief(2:0))
                      else SFC when ((set(pmmu_ptest) = '1' or set(pmmu_pload) = '1' or
-                                    (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 10) /= "000" and pmmu_brief(12 downto 10) /= "001" and pmmu_brief(12 downto 10) /= "010"))
+                                    (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 10) /= "001"))
                                     and pmmu_brief(4 downto 0) = "00000")  -- FC from SFC
                      else DFC when ((set(pmmu_ptest) = '1' or set(pmmu_pload) = '1' or
-                                    (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 10) /= "000" and pmmu_brief(12 downto 10) /= "001" and pmmu_brief(12 downto 10) /= "010"))
+                                    (set(pmmu_pflush) = '1' and pmmu_brief(12 downto 10) /= "001"))
                                     and pmmu_brief(4 downto 0) = "00001")  -- FC from DFC
                      else fc_internal;
 
@@ -7616,14 +7616,26 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         END IF;
                     ELSIF pmmu_brief(15 downto 13) = "001" AND (pmmu_brief(12 downto 10) = "001" OR pmmu_brief(12 downto 10) = "100" OR pmmu_brief(12 downto 10) = "110") THEN
                         -- PFLUSH
-                        set_exec(pmmu_pflush) <= '1';
-                        IF pmmu_brief(12 downto 10) = "110" THEN
+                        -- MC68030 implements only PFLUSHA, PFLUSH <fc>,#mask and
+                        -- PFLUSH <fc>,#mask,<ea>. Shared-entry forms (mode 101/111)
+                        -- are 68851-only. FC3/mask bit 8 is also not implemented on
+                        -- MC68030, so brief(8) must be zero for all legal PFLUSH forms.
+                        -- For PFLUSHA (mode 001), the mask field must be 0000 and
+                        -- the FC selector must be 00000.
+                        IF (pmmu_brief(12 downto 10) = "001" AND pmmu_brief(9 downto 0) /= "0000000000") OR
+                           pmmu_brief(8) = '1' THEN
+                             trap_1111 <= '1';
+                             trapmake <= '1';
+                        ELSE
+                             set_exec(pmmu_pflush) <= '1';
+                             IF pmmu_brief(12 downto 10) = "110" THEN
                              -- PFLUSH with EA: same mode-specific dispatch as PLOAD (BUG #393)
-                             -- Control alterable modes only: PC-relative (d16,PC)/(d8,PC,Xn) are illegal
+                             -- 68030 valid modes include alterable memory, absolute, and
+                             -- PC-relative modes. Dn/An/(An)+/-(An)/immediate remain illegal.
                              IF pmmu_opcode(5 downto 3)="000" OR pmmu_opcode(5 downto 3)="001" OR
                                 pmmu_opcode(5 downto 3)="011" OR pmmu_opcode(5 downto 3)="100" OR
-                                (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2)='1') OR
-                                (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 1)="01") THEN
+                                (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 0)="100") OR
+                                (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 0)>"100") THEN
                                  trap_illegal <= '1';
                                  trapmake <= '1';
                              ELSE
@@ -7645,6 +7657,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                          ELSIF pmmu_opcode(2 downto 0) = "001" THEN
                                              setstate <= "00";
                                              next_micro_state <= pmmu_ld_nn;
+                                         ELSIF pmmu_opcode(2 downto 0) = "010" THEN
+                                             setstate <= "01";
+                                             next_micro_state <= pmmu_ld_dAn1;
+                                         ELSIF pmmu_opcode(2 downto 0) = "011" THEN
+                                             setstate <= "01";
+                                             next_micro_state <= pmmu_ld_AnXn1;
                                          ELSE
                                              trap_illegal <= '1';
                                              trapmake <= '1';
@@ -7654,9 +7672,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                          trapmake <= '1';
                                  END CASE;
                              END IF;
-                        ELSE
+                         ELSE
                              setstate <= "01";
                              next_micro_state <= pflush1;
+                         END IF;
                         END IF;
                     ELSIF pmmu_brief(15 downto 13) = "100" THEN
                         -- PTEST
@@ -7959,14 +7978,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
                 WHEN pflush1 =>
                     -- PFLUSH: Flush pages from ATC (EA built in pmove_decode if needed)
-                    -- MC68030 PFLUSH MODE (brief bits 12:10) — decoded in pmove_decode
-                    -- and dispatched by the PMMU at pflush_clear_atc time:
-                    --   001 = PFLUSHA                (flush all entries)
-                    --   100 = PFLUSH <fc>,#mask       (flush by FC under mask)
-                    --   110 = PFLUSH <fc>,#mask,<ea>  (flush by FC + logical address)
-                    -- Modes 101/111 (PFLUSHS) are 68851-only and F-line trap per
-                    -- MC68030 UM 9.6 (PDF:15302); MC68030 has no globally-shared
-                    -- ATC entries (UM 9.6 PDF:15292), so no .N/non-global variant.
+                    -- MC68030 PFLUSH variants already decoded in pmove_decode:
+                    -- - brief(12:10)="001": PFLUSHA
+                    -- - brief(12:10)="100": PFLUSH <fc>,#mask
+                    -- - brief(12:10)="110": PFLUSH <fc>,#mask,<ea>
+                    -- Shared-entry forms (mode 101/111) and FC3 mask usage (brief(8))
+                    -- are 68851-only and are rejected before reaching this state.
+                    -- PMMU module handles the actual ATC flush operation.
                     -- BUG #147 FIX: setstate="01" prevents extra PC increment when exiting pflush1
                     -- Without this, setstate defaults to "00" (fetch), causing PC+2 over-increment
                     -- BUG #372 FIX: Propagate pflush request to exec via set layer

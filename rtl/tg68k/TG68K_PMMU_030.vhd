@@ -313,7 +313,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal pflush_addr : std_logic_vector(31 downto 0) := (others => '0');
   signal pflush_fc : std_logic_vector(2 downto 0) := (others => '0');
   signal pflush_mode : std_logic_vector(2 downto 0) := (others => '0');  -- MODE field from brief(12:10)
-  signal pflush_mask : std_logic_vector(3 downto 0) := (others => '0');  -- FC comparison mask from brief(8:5)
+  signal pflush_mask : std_logic_vector(2 downto 0) := (others => '0');  -- FC0-FC2 comparison mask from brief(7:5); FC3 is unsupported on MC68030
   
   -- Page table walking state
   signal walk_level     : integer range 0 to 5 := 0; -- Current level being walked (0-4 for FCL=0, 0-5 for FCL=1)
@@ -2474,59 +2474,61 @@ begin
           -- Read root table descriptor - deadlock-proof design
           limit_fault := false;  -- BUG FIX: Reset limit fault tracker
           table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level, tc_initial_shift, tc_page_size, tc_idx_bits);
-          -- MC68030 Root Pointer Limit Check (only for root level)
-          -- CRP_H/SRP_H format: L/U[31], Limit[30:16], Reserved[15:1], DT[0]
-          -- Select appropriate root pointer HIGH word based on FC and SRE
-          if saved_fc(2) = '1' and tc_sre = '1' then
-            rp_high := SRP_H;  -- Supervisor Root Pointer
-          else
-            rp_high := CRP_H;  -- CPU Root Pointer
-          end if;
-          -- Extract L/U flag and limit value from HIGH word
-          lu_flag := rp_high(31);           -- L/U semantics: 1=lower limit, 0=upper limit
-          limit_value := unsigned(rp_high(30 downto 16));  -- Bits 62-48 (LIMIT)
-          -- Check if table_index is within bounds based on L/U flag
-          if lu_flag = '1' then
-            -- Lower limit: table_index must be >= limit
-            if to_unsigned(table_index, 15) < limit_value then
-              -- Limit violation - generate fault
-              walker_fault <= '1';
-              walker_fault_status <= encode_mmusr_fault(
-                bus_error => '0',
-                limit_violation => '1',  -- This is a limit violation
-                supervisor_violation => '0',
-                write_protect => '0',
-                invalid => '1',
-                modified => '0',
-                transparent => '0',
-                level => std_logic_vector(to_unsigned(walk_level, 3))
-              );
-              -- report "LIMIT_VIOLATION: table_index=" & integer'image(table_index) &
-                     -- " limit(lower)=" & integer'image(to_integer(limit_value)) &
-                     -- " (L/U=1, must be >= limit)" severity note;
-              wstate <= W_FAULT;
-              limit_fault := true;  -- BUG FIX: Prevent mem_req assertion
+          -- MC68030 Root Pointer Limit Check
+          -- CRP_H/SRP_H HIGH-word layout: L/U[31], Limit[30:16], Reserved[15:2], DT[1:0]
+          -- MC68030 UM 9.5.2 line 14877-14879 and 9.5.1.2 line 14654-14656:
+          -- "The root pointer includes a limit field that applies when the
+          --  function code lookup is not used (the FCL bit of the TC register
+          --  is zero)." / "when the FCL field of the TC register is set, the
+          --  L/U and LIMIT fields of the root pointer registers are unused."
+          -- Skip the check entirely under FCL=1; the root table is indexed by
+          -- the 3-bit FC (0..7), which is always within bounds.
+          if tc_fcl = '0' then
+            -- Select appropriate root pointer HIGH word based on FC and SRE
+            if saved_fc(2) = '1' and tc_sre = '1' then
+              rp_high := SRP_H;  -- Supervisor Root Pointer
+            else
+              rp_high := CRP_H;  -- CPU Root Pointer
             end if;
-          else
-            -- Upper limit: table_index must be <= limit
-            if to_unsigned(table_index, 15) > limit_value then
-              -- Limit violation - generate fault
-              walker_fault <= '1';
-              walker_fault_status <= encode_mmusr_fault(
-                bus_error => '0',
-                limit_violation => '1',  -- This is a limit violation
-                supervisor_violation => '0',
-                write_protect => '0',
-                invalid => '1',
-                modified => '0',
-                transparent => '0',
-                level => std_logic_vector(to_unsigned(walk_level, 3))
-              );
-              -- report "LIMIT_VIOLATION: table_index=" & integer'image(table_index) &
-                     -- " limit(upper)=" & integer'image(to_integer(limit_value)) &
-                     -- " (L/U=0, must be <= limit)" severity note;
-              wstate <= W_FAULT;
-              limit_fault := true;  -- BUG FIX: Prevent mem_req assertion
+            lu_flag := rp_high(31);           -- L/U: 1=lower limit, 0=upper limit
+            limit_value := unsigned(rp_high(30 downto 16));  -- 15-bit LIMIT
+            if lu_flag = '1' then
+              -- Lower limit: table_index must be >= limit.
+              -- Edge case: L/U=1 and LIMIT=0 effectively disables the check
+              -- (to_unsigned(x,15) < 0 is always false).
+              if to_unsigned(table_index, 15) < limit_value then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_fault(
+                  bus_error => '0',
+                  limit_violation => '1',
+                  supervisor_violation => '0',
+                  write_protect => '0',
+                  invalid => '1',
+                  modified => '0',
+                  transparent => '0',
+                  level => std_logic_vector(to_unsigned(walk_level, 3))
+                );
+                wstate <= W_FAULT;
+                limit_fault := true;
+              end if;
+            else
+              -- Upper limit: table_index must be <= limit.
+              -- Edge case: L/U=0 and LIMIT=$7FFF effectively disables the check.
+              if to_unsigned(table_index, 15) > limit_value then
+                walker_fault <= '1';
+                walker_fault_status <= encode_mmusr_fault(
+                  bus_error => '0',
+                  limit_violation => '1',
+                  supervisor_violation => '0',
+                  write_protect => '0',
+                  invalid => '1',
+                  modified => '0',
+                  transparent => '0',
+                  level => std_logic_vector(to_unsigned(walk_level, 3))
+                );
+                wstate <= W_FAULT;
+                limit_fault := true;
+              end if;
             end if;
           end if;
           desc_addr_v := walk_addr(31 downto 4) & "0000"; -- Align to table boundary
@@ -3739,11 +3741,10 @@ begin
             walk_attr(2) <= walk_desc_high(6); -- Cache inhibit (CI)
             walk_attr(1) <= walk_desc_high(4); -- Modified (M)
             walk_attr(0) <= walk_desc_high(2) or walk_write_protect; -- WP from page + accumulated table WP
-            -- MC68030 UM 9.6 (PDF line 15292): "ATC Entries Defined as Shared
-            -- Globally" is a MC68851 feature NOT available on MC68030. No G bit
-            -- exists in any MC68030 descriptor (see 9.5.1 field enumeration,
-            -- PDF 14523-14647). PFLUSHA.N / PFLUSH.N therefore behave identically
-            -- to PFLUSHA / PFLUSH — no global-entry filter is applied.
+            -- MC68030 UM 9.6 (PDF line 15292): shared/global ATC entries are a
+            -- MC68851 feature, not an MC68030 feature. The MC68030 therefore
+            -- has only PFLUSHA and PFLUSH forms; no per-entry global attribute
+            -- participates in attribute extraction or flush filtering.
             walk_fault <= '0';
             -- Debug: Log attribute extraction for long-format descriptors
             if walk_desc_is_long = '1' then
@@ -4077,13 +4078,11 @@ begin
         end loop;
       end if;
       if pflush_clear_atc = '1' and wstate = W_IDLE then
-        -- MC68030 PFLUSH variants (pflush_mode is brief(12:10)):
-        --   001 = PFLUSHA / PFLUSHA.N  (flush all — see note below)
-        --   100 = PFLUSH  FC,MASK      (flush by FC, no EA)
-        --   110 = PFLUSH  FC,MASK,<ea> (flush by FC with EA)
-        -- MC68030 UM 9.6 (PDF 15292): no ATC entry is ever "global" on MC68030,
-        -- so PFLUSHA.N and PFLUSH.N are equivalent to PFLUSHA / PFLUSH here;
-        -- there is no N-bit filter.
+        -- MC68030 PFLUSH variants (brief word bits 12:10):
+        --   001 = PFLUSHA
+        --   100 = PFLUSH  <fc>,#mask
+        --   110 = PFLUSH  <fc>,#mask,<ea>
+        -- MC68030 UM 9.6: the 68851 shared-entry derivatives are not supported.
         if pflush_mode = "001" then
           -- PFLUSHA: flush all ATC entries
           for i in 0 to ATC_ENTRIES-1 loop
@@ -4094,10 +4093,11 @@ begin
           end loop;
         elsif pflush_mode = "100" then
           -- PFLUSH FC,MASK: flush entries matching FC under mask, regardless of address.
-          -- mask=0 matches any FC.
+          -- mask=0 matches any FC. FC3 is not implemented on MC68030; decode rejects
+          -- brief(8)='1', so only the real 3-bit FC participates here.
           for i in 0 to ATC_ENTRIES-1 loop
             if atc_valid(i) = '1' then
-              if ((('0' & atc_fc(i)) xor ('0' & pflush_fc)) and pflush_mask) = "0000" then
+              if ((atc_fc(i) xor pflush_fc) and pflush_mask) = "000" then
                 atc_valid(i) <= '0';
                 atc_mru(i) <= '0';
                 atc_buserr(i) <= '0';
@@ -4109,7 +4109,7 @@ begin
           -- PFLUSH FC,MASK,<ea> (mode=110): FC match AND address match.
           for i in 0 to ATC_ENTRIES-1 loop
             if atc_valid(i) = '1' then
-              if ((('0' & atc_fc(i)) xor ('0' & pflush_fc)) and pflush_mask) = "0000" and
+              if ((atc_fc(i) xor pflush_fc) and pflush_mask) = "000" and
                  align_addr(pflush_addr, atc_shift(i)) = atc_log_base(i) then
                 atc_valid(i) <= '0';
                 atc_mru(i) <= '0';
@@ -4220,7 +4220,7 @@ begin
         pflush_addr <= pmmu_addr;
         pflush_fc <= pmmu_fc;
         pflush_mode <= pmmu_brief(12 downto 10);  -- Capture PFLUSH MODE field from brief word
-        pflush_mask <= pmmu_brief(8 downto 5);  -- BUG E FIX: Capture FC comparison mask
+        pflush_mask <= pmmu_brief(7 downto 5);  -- Capture FC0-FC2 comparison mask; FC3/bit8 is unsupported on MC68030
         pflush_clear_atc <= '1';
       elsif pflush_active = '1' then
         -- Keep the clear request live until the flush logic can service it.
