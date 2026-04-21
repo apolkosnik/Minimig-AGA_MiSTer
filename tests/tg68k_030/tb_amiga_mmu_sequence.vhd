@@ -188,6 +188,16 @@ begin
             wait_cycles(1);
         end procedure;
 
+        procedure ack_mmu_config_error_if_set is
+        begin
+            if mmu_config_err = '1' then
+                mmu_config_ack <= '1';
+                wait_cycles(1);
+                mmu_config_ack <= '0';
+                wait_cycles(1);
+            end if;
+        end procedure;
+
         procedure do_pflush is
         begin
             pmmu_brief <= x"2400";  -- PFLUSHA encoding
@@ -254,6 +264,7 @@ begin
             report "  -> tc_enable should be 0!" severity error;
             test_fail_count <= test_fail_count + 1;
         end if;
+        ack_mmu_config_error_if_set;
 
         -- Step 4: PFLUSHA again
         report "Step 4: PFLUSHA - Flush ATC again" severity note;
@@ -351,9 +362,12 @@ begin
             report "  -> tc_enable should be 0!" severity error;
             test_fail_count <= test_fail_count + 1;
         end if;
+        ack_mmu_config_error_if_set;
 
-        -- Step 14B: With TC disabled, TT registers must not keep low-memory accesses cache-inhibited.
-        report "Step 14B: TT must not affect accesses when TC.E=0" severity note;
+        -- Step 14B: MC68030 TT registers operate independently of TC.E, so a
+        -- matching transparent window must remain active even after table
+        -- translation is disabled.
+        report "Step 14B: TT remains active when TC.E=0" severity note;
         write_reg(SEL_TT0, x"00008514", '0');  -- enabled low-16MB transparent window, CI=1
         wait_cycles(2);
         addr_log <= x"00DC0000";
@@ -363,11 +377,11 @@ begin
         wait_cycles(1);
         req <= '0';
         wait_cycles(4);
-        if addr_phys = x"00DC0000" and cache_inhibit = '0' and write_protect = '0' and fault = '0' then
-            report "  -> TC disabled correctly bypassed TT for $00DC0000" severity note;
+        if addr_phys = x"00DC0000" and cache_inhibit = '1' and write_protect = '0' and fault = '0' then
+            report "  -> TC disabled kept TT active for $00DC0000" severity note;
             test_pass_count <= test_pass_count + 1;
         else
-            report "  -> TC disabled still showed TT behavior: phys=0x" & slv_to_hex(addr_phys) &
+            report "  -> TC disabled lost TT behavior: phys=0x" & slv_to_hex(addr_phys) &
                    " CI=" & std_logic'image(cache_inhibit) &
                    " WP=" & std_logic'image(write_protect) &
                    " fault=" & std_logic'image(fault) severity error;

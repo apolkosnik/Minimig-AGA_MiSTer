@@ -797,6 +797,18 @@ architecture rtl of TG68K_PMMU_030 is
     end if;
     return total_bits;
   end function;
+  function tc_config_invalid(tc : std_logic_vector(31 downto 0)) return boolean is
+    variable ps_val : integer;
+  begin
+    ps_val := to_integer(unsigned(tc(23 downto 20)));
+    if ps_val < 8 then
+      return true;
+    end if;
+    if tc(31) = '1' and tc_total_bits(tc) /= 32 then
+      return true;
+    end if;
+    return false;
+  end function;
   -- Check if descriptor is short format (DT=10, 32-bit)
   function desc_is_short(desc : std_logic_vector(31 downto 0)) return boolean is
   begin
@@ -1323,7 +1335,11 @@ begin
   -- Bits 11-8: TIB (Table B Index)
   -- Bits 7-4: TIC (Table C Index)  
   -- Bits 3-0: TID (Table D Index)
-  tc_en <= TC(31) and not mmu_config_error;
+  -- Keep translation disabled while the stored TC image itself is invalid.
+  -- The raw TC contents are still preserved for PMOVE readback and vector-56
+  -- forensics, but the handler must run under identity/TTR semantics instead
+  -- of briefly re-enabling an illegal translation context after ack.
+  tc_en <= '1' when TC(31) = '1' and mmu_config_error = '0' and not tc_config_invalid(TC) else '0';
   tc_sre <= TC(25);
   tc_fcl <= TC(24);
   tc_enable <= tc_en;
@@ -1402,18 +1418,15 @@ begin
   end process;
   
   -- Output the latched results
-  -- BUG #129 FIX: Add combinational bypass for identity translation when MMU disabled
-  -- This eliminates the 1-cycle lag that caused cache to sample stale physical address
-  -- When MMU is disabled (tc_en='0'), use logical address directly (same cycle)
-  -- When MMU is enabled, use registered translation result (allows for page table walks)
-  -- BUG #371 FIX: Also bypass for TTR transparent translations (phys=log identity mapping)
-  -- Without this, the first fetch after MMU enable gets a stale addr_phys_reg
-  -- MC68030 UM Figure 9-32: FC=7 (CPU space) is always unmapped (identity)
-  -- Keep TT disabled for normal accesses when TC.E=0 so MMU disable returns to
-  -- plain identity+CI=0 behavior instead of preserving stale transparent policy.
+  -- BUG #129 FIX: Add combinational bypass for identity translation when table
+  -- translation is disabled so cache-facing outputs stay in sync with the logical
+  -- address in the same cycle.
+  -- BUG #371 FIX: Also bypass for TTR transparent translations (phys=log identity
+  -- mapping); TT0/TT1 operate independently of TC.E and MMUDIS on MC68030.
+  -- MC68030 UM Figure 9-32: FC=7 (CPU space) is always unmapped (identity).
   addr_phys     <= addr_log when fc = "111"
-                   else addr_log when tc_en = '0'
                    else addr_log when (ttr0_match_comb = '1' or ttr1_match_comb = '1')
+                   else addr_log when tc_en = '0'
                    else addr_log when mmudis = '1'  -- MC68030 UM 9.2.3
                    else addr_phys_reg;
   -- BUG #126 V2 FIX: Combinational bypass for cache_inhibit when MMU disabled
@@ -1423,15 +1436,15 @@ begin
   -- the correct I/O address but stale CI=0 from the previous RAM access and
   -- incorrectly caches I/O data.
   cache_inhibit <= '1' when fc = "111"  -- CPU space always cache-inhibited
-                   else '0' when tc_en = '0'
                    else ttr0_ci_comb when ttr0_match_comb = '1'
                    else ttr1_ci_comb when ttr1_match_comb = '1'
+                   else '0' when tc_en = '0'
                    else '0' when mmudis = '1'  -- MC68030 UM 9.2.3
                    else cache_inhibit_reg;
   write_protect <= '0' when fc = "111"  -- CPU space never write-protected
-                   else '0' when tc_en = '0'
                    else ttr0_wp_comb when ttr0_match_comb = '1'
                    else ttr1_wp_comb when ttr1_match_comb = '1'
+                   else '0' when tc_en = '0'
                    else '0' when mmudis = '1'  -- MC68030 UM 9.2.3
                    else write_protect_reg;
   fault         <= '0' when fc = "111" else fault_reg;  -- CPU space never faults
@@ -1533,9 +1546,9 @@ begin
           -- Don't clear faults on new requests - faults persist until explicitly cleared
           -- This allows tests to sample fault status after translation completes
           
-          -- Translation logic with proper precedence (no conflicting assignments)
-          -- FC=7 is always unmapped, TTRs operate independently of TC.E, then
-          -- fall back to table translation or plain identity when TC.E=0.
+          -- Translation logic with proper precedence (no conflicting assignments):
+          -- FC=7 is always unmapped, then TT0/TT1, then table-disabled/MMUDIS
+          -- identity handling, then ATC/walker translation.
           if fc = "111" then
             -- MC68030 UM 9.5.5.1, Figure 9-32: FC=7 (CPU space) is UNMAPPED.
             -- CPU space accesses (interrupt acknowledge, breakpoint, etc.) are
@@ -1554,25 +1567,7 @@ begin
           else
             ttr_check(TT0, addr_log, fc, is_insn, rw, tmatch0, tci0, twp0);
             ttr_check(TT1, addr_log, fc, is_insn, rw, tmatch1, tci1, twp1);
-            if tc_en = '0' then
-              -- Disabling MMU must also disable transparent-translation effects
-              -- on normal accesses, otherwise TT policy survives after TC.E=0.
-              addr_phys_reg      <= addr_log;
-              translated_addr    <= addr_log;
-              translated_fc      <= fc;
-              translated_rw      <= rw;
-              translated_cfg_seq <= xlat_cfg_seq;
-              cache_inhibit_reg  <= '0';
-              write_protect_reg  <= '0';
-              fault_reg          <= '0';
-              fault_status_reg   <= encode_mmusr_success(
-                write_protect => '0',
-                modified => '0',
-                transparent => '0',
-                level => "000"
-              );
-              translation_pending <= '0';
-            elsif tmatch0 = '1' then
+            if tmatch0 = '1' then
               -- TTR0 match - use identity translation with TTR attributes (always successful, no faults)
               addr_phys_reg      <= addr_log;  -- Identity mapping
               translated_addr    <= addr_log;  -- BUG #416
@@ -1594,9 +1589,9 @@ begin
               end if;
               translation_pending <= '0';
               -- No walker needed for TTR
-	            elsif tmatch1 = '1' then
-	              -- TTR1 match - use identity translation with TTR attributes (always successful, no faults)
-	             --  -- assert false report "TTR1 HIT: Setting addr_phys to 0x" & slv_to_hstring(addr_log) severity note;
+            elsif tmatch1 = '1' then
+              -- TTR1 match - use identity translation with TTR attributes (always successful, no faults)
+             --  -- assert false report "TTR1 HIT: Setting addr_phys to 0x" & slv_to_hstring(addr_log) severity note;
               addr_phys_reg      <= addr_log;  -- Identity mapping
               translated_addr    <= addr_log;  -- BUG #416
               translated_fc      <= fc;        -- BUG #416
@@ -1614,6 +1609,23 @@ begin
               );
               translation_pending <= '0';
               -- No walker needed for TTR
+            elsif tc_en = '0' then
+              -- Table translation disabled and no TTR matched: plain identity mapping.
+              addr_phys_reg      <= addr_log;
+              translated_addr    <= addr_log;
+              translated_fc      <= fc;
+              translated_rw      <= rw;
+              translated_cfg_seq <= xlat_cfg_seq;
+              cache_inhibit_reg  <= '0';
+              write_protect_reg  <= '0';
+              fault_reg          <= '0';
+              fault_status_reg   <= encode_mmusr_success(
+                write_protect => '0',
+                modified => '0',
+                transparent => '0',
+                level => "000"
+              );
+              translation_pending <= '0';
             elsif mmudis = '1' then
               -- MC68030 UM 9.2.3: MMUDIS asserted and no TTR match → identity
               -- translation; ATC searches and table searches are suppressed.

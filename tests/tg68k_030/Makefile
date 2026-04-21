@@ -12,7 +12,7 @@ PROJECT_ROOT := $(abspath $(TEST_DIR)/../..)
 RTL_DIR := $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-movec-selector-latch test-cpsave-cprestore test-mmu-library-detect test-mmu-library-failure-path test-mmu-library-root-probe test-mmu-library-enable-probe test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-readback-guard test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-mmu-fetch-fault-frame test-mmu-user-data-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-history-bits test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-privilege test-moves-d16an-pc test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-chk-long-odd-addr test-movec-active-stack test-interrupt-mode-stack test-lockup-all test-chk-stacked-trace test-basic-chk-trace test-basic-div-jmp-trace test-basic-chk2-cputest-entry test-basic-chk2-cputest-highaddr test-basic-chk2-packed-state test-basic-chk2-packed-group2 test-basic-jmp-cputest-entry test-basic-jmp-sp-disp-entry test-basic-jmp-sp-disp-highaddr test-basic-cputest-entry test-basic-exception-flags test-basic-group2-user-trace test-basic-cputest test-basic-cputest-exact test-basic-cputest-exact-chk2bl test-basic-cputest-exact-chk2w test-basic-cputest-exact-jmp test-basic-cputest-runtime020 test-odd-exc-flags test-odd-irq-regwrite test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-jmp-65b2-trace test-jmp-65b2-index-target test-jmp-record37-ori-tail test-real validate setup help prepare-basic-cputest-data
+.PHONY: all clean test-pmmu test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-movec-selector-latch test-cpsave-cprestore test-mmu-library-detect test-mmu-library-failure-path test-mmu-library-root-probe test-mmu-library-enable-probe test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-readback-guard test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-mmu-fetch-fault-frame test-mmu-user-data-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-history-bits test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-pflush-illegal-pc-relative test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-privilege test-moves-d16an-pc test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-chk-long-odd-addr test-movec-active-stack test-interrupt-mode-stack test-lockup-all test-chk-stacked-trace test-basic-chk-trace test-basic-div-jmp-trace test-basic-chk2-cputest-entry test-basic-chk2-cputest-highaddr test-basic-chk2-packed-state test-basic-chk2-packed-group2 test-basic-jmp-cputest-entry test-basic-jmp-sp-disp-entry test-basic-jmp-sp-disp-highaddr test-basic-cputest-entry test-basic-exception-flags test-basic-group2-user-trace test-basic-cputest test-basic-cputest-exact test-basic-cputest-exact-chk2bl test-basic-cputest-exact-chk2w test-basic-cputest-exact-jmp test-basic-cputest-runtime020 test-odd-exc-flags test-odd-irq-regwrite test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-jmp-65b2-trace test-jmp-65b2-index-target test-jmp-record37-ori-tail test-real validate setup help prepare-basic-cputest-data
 
 # Default target
 all: test-comprehensive
@@ -69,7 +69,8 @@ help:
 	@echo "  test-ptest-history-bits - Check leveled PTEST descriptor history updates"
 	@echo "  test-ptest-all-modes - Test PTEST with all EA modes and page table walks"
 	@echo "  test-pload-all-modes - Test PLOAD with all EA modes and page table walks"
-	@echo "  test-pflush-all-modes - Test PFLUSH with all EA modes and variants (PFLUSHA/PFLUSHAN)"
+	@echo "  test-pflush-all-modes - Test 68030 PFLUSH forms (PFLUSHA/FC-mask/EA)"
+	@echo "  test-pflush-illegal-pc-relative - Verify PC-relative PFLUSH traps as illegal"
 	@echo "  test-indirect-descriptor - Test indirect descriptors"
 	@echo "  test-mmu-instruction-suite - Run complete MMU instruction test suite"
 	@echo "  test-amiga-sequence - Test Amiga ROM MMU initialization sequence"
@@ -347,6 +348,21 @@ test-whichamiga: compile
 	@echo "Running WhichAmiga MMU instruction test..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 20us; quit -f" tb_whichamiga_mmu
 
+# Early-termination PFA reproducer — verifies PS-sized ATC entries and
+# PFA = TA + unused_LPA_bits for non-identity remaps and TA != 0 cases.
+test-pmmu-early-term-remap: compile
+	@echo "Compiling and running PMMU early-termination remap reproducer..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_early_term_remap.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 50us; quit -f" tb_pmmu_early_term_remap
+
+# Early-termination PFA reproducer - confirms PFA = TA + unused_LPA_bits for
+# identity ($A0), remap-to-zero ($D0 -> $00), TA!=0 remap ($E0 -> $50) super-pages,
+# and documents the degenerate TIA=0 case (blocked by MC68030 field-sum rule).
+test-early-term-remap: compile
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_early_term_remap.vhd
+	@echo "Running PMMU early-termination remap reproducer..."
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 20us; quit -f" tb_pmmu_early_term_remap
+
 # Wrapper-level PMMU/walker bench — instantiates cpu_wrapper.v (Verilog) to
 # exercise integration paths the kernel-only benches cannot reach:
 # walker ownership, walker-vs-cache-fill, BUG #422 stale-ready, BUG #439 RAM gap,
@@ -443,6 +459,15 @@ test-pflush-all-modes: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pflush_all_modes.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_pflush_all_modes
+
+test-pflush-illegal-pc-relative: setup
+	@echo "Running illegal PC-relative PFLUSH regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pflush_illegal_pc_relative.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit -f" tb_pflush_illegal_pc_relative
 
 test-indirect-descriptor: setup
 	@echo "Running indirect descriptor tests..."

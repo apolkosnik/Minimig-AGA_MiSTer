@@ -58,7 +58,7 @@ signal clk           : std_logic := '0';
     signal mem_rdat      : std_logic_vector(31 downto 0) := (others => '0');
     signal busy          : std_logic;
     signal mmu_config_err : std_logic;
-    signal mmu_config_ack : std_logic;
+    signal mmu_config_ack : std_logic := '0';
 
     -- PFLUSH/PTEST interface
     signal pflush_req    : std_logic := '0';
@@ -75,7 +75,7 @@ signal clk           : std_logic := '0';
     constant SEL_TT0     : std_logic_vector(4 downto 0) := "00010";  -- 2
     constant SEL_TT1     : std_logic_vector(4 downto 0) := "00011";  -- 3
     constant SEL_TC      : std_logic_vector(4 downto 0) := "10000";  -- 16
-    constant SEL_MMUSR   : std_logic_vector(4 downto 0) := "10001";  -- 17
+    constant SEL_MMUSR   : std_logic_vector(4 downto 0) := "11000";  -- 24
     constant SEL_SRP     : std_logic_vector(4 downto 0) := "10010";  -- 18
     constant SEL_CRP     : std_logic_vector(4 downto 0) := "10011";  -- 19
 
@@ -177,6 +177,16 @@ begin
             wait_cycles(1);
         end procedure;
 
+        procedure ack_mmu_config_error_if_set is
+        begin
+            if mmu_config_err = '1' then
+                mmu_config_ack <= '1';
+                wait_cycles(1);
+                mmu_config_ack <= '0';
+                wait_cycles(1);
+            end if;
+        end procedure;
+
         procedure test_write_read(
             sel : std_logic_vector(4 downto 0);
             test_val : std_logic_vector(31 downto 0);
@@ -266,6 +276,7 @@ begin
         report "--- TC Register (32-bit) ---" severity note;
         test_write_read(SEL_TC, x"01F09800", '0', "TC (MMU disabled)");
         test_write_read(SEL_TC, x"00000000", '0', "TC (clear)");
+        ack_mmu_config_error_if_set;
 
         -- TT0 Register (32-bit)
         report "" severity note;
@@ -297,6 +308,7 @@ begin
         test_64bit_write_read(SEL_CRP, x"80000003", x"00020000", "CRP (long table)");
         -- Clear
         test_64bit_write_read(SEL_CRP, x"00000000", x"00000000", "CRP (clear)");
+        ack_mmu_config_error_if_set;
 
         -- SRP Register (64-bit)
         report "" severity note;
@@ -304,6 +316,7 @@ begin
         test_64bit_write_read(SEL_SRP, x"80000002", x"00030000", "SRP");
         test_64bit_write_read(SEL_SRP, x"80000003", x"00040000", "SRP (long table)");
         test_64bit_write_read(SEL_SRP, x"00000000", x"00000000", "SRP (clear)");
+        ack_mmu_config_error_if_set;
 
         -- ============================================
         -- SECTION 3: MMUSR Register (16-bit)
@@ -426,6 +439,7 @@ begin
             report "FAIL: MMU not disabled" severity error;
             test_fail <= test_fail + 1;
         end if;
+        ack_mmu_config_error_if_set;
 
         -- ============================================
         -- Final Summary

@@ -6,7 +6,6 @@
 --   PFLUSHA              - Flush all ATC entries
 --   PFLUSH FC,#mask      - Flush entries matching FC with mask
 --   PFLUSH FC,#mask,EA   - Flush entry for specific EA
---   PFLUSHS (supervisor only additional modes)
 --
 -- PTEST modes:
 --   PTEST FC,EA,#level           - Test translation
@@ -256,7 +255,8 @@ begin
         end procedure;
 
         -- PFLUSHA: Flush all ATC entries
-        -- Brief word encoding: 001x_x1xx_xxxx_xxxx (mode=0, mask=$F, FC from brief)
+        -- The PMMU block samples PFLUSH mode from brief(12:10) and mask from
+        -- brief(7:5); FC is driven separately via pmmu_fc in this bench.
         procedure do_pflusha is
         begin
             report "Executing PFLUSHA";
@@ -268,9 +268,7 @@ begin
         end procedure;
 
         -- PFLUSH with FC and mask
-        -- Brief word: 001a_amm_mfff_ffff
-        -- a=0: FC from brief bits[4:2], a=1: FC from DFC/SFC
-        -- mmm = mask, fff_ffff = FC or register
+        -- Use 68030 mode 100 in brief(12:10); mask lives in brief(7:5).
         procedure do_pflush_fc_mask(
             fc_val : std_logic_vector(2 downto 0);
             mask : std_logic_vector(2 downto 0)
@@ -279,8 +277,7 @@ begin
         begin
             report "Executing PFLUSH FC=" & integer'image(to_integer(unsigned(fc_val))) &
                    " mask=" & integer'image(to_integer(unsigned(mask)));
-            -- Format: 001 0 0 mmm 0 00 fc fc fc 0 0
-            brief := "001" & "0" & "0" & mask & "0" & "00" & fc_val & "00";
+            brief := "001" & "100" & "00" & mask & "00000";
             pmmu_brief <= brief;
             pflush_req <= '1';
             wait_cycles(1);
@@ -289,6 +286,7 @@ begin
         end procedure;
 
         -- PFLUSH with FC, mask, and EA
+        -- Use 68030 mode 110 in brief(12:10); FC still comes from pmmu_fc.
         procedure do_pflush_fc_mask_ea(
             fc_val : std_logic_vector(2 downto 0);
             mask : std_logic_vector(2 downto 0);
@@ -299,8 +297,7 @@ begin
             report "Executing PFLUSH FC=" & integer'image(to_integer(unsigned(fc_val))) &
                    " mask=" & integer'image(to_integer(unsigned(mask))) &
                    " EA=0x" & slv_to_hex(ea);
-            -- Format: 001 1 0 mmm 0 00 fc fc fc 0 0 (bit 12 = 1 for EA mode)
-            brief := "001" & "1" & "0" & mask & "0" & "00" & fc_val & "00";
+            brief := "001" & "110" & "00" & mask & "00000";
             pmmu_brief <= brief;
             pmmu_addr <= ea;
             pflush_req <= '1';
@@ -788,7 +785,7 @@ begin
 
         -- 7A: Root-pointer limit violation must report both L and I.
         do_pflusha;
-        write_reg(SEL_TC, x"00000000", '0');
+        write_reg(SEL_TC, x"00C0AA00", '0');  -- Disable MMU with valid PS/TI fields; avoid sticky config error
         write_reg(SEL_CRP, x"80010002", '1');  -- lower limit=1, DT=10
         write_reg(SEL_CRP, x"00000000", '0');
         write_reg(SEL_TC, x"80C0AA00", '0');
@@ -806,7 +803,7 @@ begin
         page_table(0) <= x"80010002";      -- long table descriptor: lower limit=1, DT=10
         page_table(1) <= x"00002000";      -- next table base
         do_pflusha;
-        write_reg(SEL_TC, x"00000000", '0');
+        write_reg(SEL_TC, x"00C0AA00", '0');  -- Disable MMU with valid PS/TI fields; avoid sticky config error
         write_reg(SEL_CRP, x"7FFF0003", '1');  -- DT=11, max upper limit, root table at 0
         write_reg(SEL_CRP, x"00000000", '0');
         write_reg(SEL_TC, x"80C0AA00", '0');
@@ -825,7 +822,7 @@ begin
         page_table(1) <= x"00002000";      -- next table base
         page_table(16#800#) <= x"00300001"; -- short page descriptor
         do_pflusha;
-        write_reg(SEL_TC, x"00000000", '0');
+        write_reg(SEL_TC, x"00C0AA00", '0');  -- Disable MMU with valid PS/TI fields; avoid sticky config error
         write_reg(SEL_CRP, x"7FFF0003", '1');  -- DT=11, root table at 0
         write_reg(SEL_CRP, x"00000000", '0');
         write_reg(SEL_TC, x"80C0AA00", '0');

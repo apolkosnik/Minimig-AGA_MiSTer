@@ -165,6 +165,8 @@ architecture behavior of tb_mmu_library_enable_probe is
     constant RTC_EXPECTED_DATA : std_logic_vector(31 downto 0) := x"1234ABCD";
     constant RTC_WRONG_DATA  : std_logic_vector(31 downto 0) := x"89ABCDEF";
     constant RTC_SRE_TC_VALUE : std_logic_vector(31 downto 0) := x"82A08680";
+    constant ENABLE_PROBE_DISABLE_TC_VALUE : std_logic_vector(31 downto 0) := x"01F09800";
+    constant RTC_DISABLE_TC_VALUE : std_logic_vector(31 downto 0) := x"02A08680";
 
     type low_mem_array_t  is array (0 to 32767) of std_logic_vector(15 downto 0);
     type page_mem_array_t is array (0 to 16383) of std_logic_vector(15 downto 0);
@@ -781,7 +783,7 @@ begin
         write_long(STACK_ADDR + 0, x"80000002");
         write_long(STACK_ADDR + 4, std_logic_vector(to_unsigned(ROOT_ADDR, 32)));
         write_long(STACK_ADDR + 8, x"81F09800");
-        write_long(DISABLE_TC_ADDR, x"00000000");
+        write_long(DISABLE_TC_ADDR, ENABLE_PROBE_DISABLE_TC_VALUE);
         write_long(RESULT_ADDR, x"BAADF00D");
         f8_mem(2) := EXPECTED_DATA(31 downto 16);
         f8_mem(3) := EXPECTED_DATA(15 downto 0);
@@ -877,7 +879,7 @@ begin
         write_long(RTC_SRP_ADDR + 0, x"80000002");
         write_long(RTC_SRP_ADDR + 4, std_logic_vector(to_unsigned(RTC_SRP_ROOT_ADDR, 32)));
         write_long(RTC_SRE_TC_ADDR, RTC_SRE_TC_VALUE);
-        write_long(RTC_DISABLE_TC_ADDR, x"00000000");
+        write_long(RTC_DISABLE_TC_ADDR, RTC_DISABLE_TC_VALUE);
         write_long(RTC_RESULT_ADDR, x"BAADF00D");
         write_long(RTC_CRP_ROOT_ADDR + 0, x"001C0061"); -- 00DC0000 -> 00F80000 via CRP
         write_long(RTC_SRP_ROOT_ADDR + 0, x"00000061"); -- 00DC0000 -> 00DC0000 via SRP
@@ -896,7 +898,7 @@ begin
         emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
         emit_word(pc, x"2839"); emit_long(pc, x"00DC0000"); -- MOVE.L $00DC0000,D4
         emit_word(pc, x"23C4"); emit_long(pc, std_logic_vector(to_unsigned(RTC_RESULT_ADDR, 32))); -- MOVE.L D4,result
-        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(RTC_DISABLE_TC_ADDR, 32))); -- MOVEA.L #tc0,A7
+        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(RTC_DISABLE_TC_ADDR, 32))); -- MOVEA.L #tc_disable,A7
         emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
         emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
         emit_word(pc, x"4E72"); emit_word(pc, x"2700");     -- STOP #$2700

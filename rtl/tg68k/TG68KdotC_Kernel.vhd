@@ -7641,13 +7641,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         ELSE
                              set_exec(pmmu_pflush) <= '1';
                              IF pmmu_brief(12 downto 10) = "110" THEN
-                             -- PFLUSH with EA: same mode-specific dispatch as PLOAD (BUG #393)
-                             -- 68030 valid modes include alterable memory, absolute, and
-                             -- PC-relative modes. Dn/An/(An)+/-(An)/immediate remain illegal.
+                             -- PFLUSH with EA: MC68030 MMU instructions are limited to
+                             -- control-alterable addressing modes. That permits
+                             -- (An), (d16,An), (d8,An,Xn), (xxx).W, and (xxx).L only.
+                             -- Dn/An/(An)+/-(An)/PC-relative/immediate remain illegal.
                              IF pmmu_opcode(5 downto 3)="000" OR pmmu_opcode(5 downto 3)="001" OR
                                 pmmu_opcode(5 downto 3)="011" OR pmmu_opcode(5 downto 3)="100" OR
-                                (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 0)="100") OR
-                                (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 0)>"100") THEN
+                                (pmmu_opcode(5 downto 3)="111" AND pmmu_opcode(2 downto 0)>"001") THEN
                                  trap_illegal <= '1';
                                  trapmake <= '1';
                              ELSE
@@ -7669,12 +7669,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                          ELSIF pmmu_opcode(2 downto 0) = "001" THEN
                                              setstate <= "00";
                                              next_micro_state <= pmmu_ld_nn;
-                                         ELSIF pmmu_opcode(2 downto 0) = "010" THEN
-                                             setstate <= "01";
-                                             next_micro_state <= pmmu_ld_dAn1;
-                                         ELSIF pmmu_opcode(2 downto 0) = "011" THEN
-                                             setstate <= "01";
-                                             next_micro_state <= pmmu_ld_AnXn1;
                                          ELSE
                                              trap_illegal <= '1';
                                              trapmake <= '1';

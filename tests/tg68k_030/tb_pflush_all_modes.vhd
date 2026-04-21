@@ -1,6 +1,6 @@
 -- tb_pflush_all_modes.vhd
 -- Comprehensive PFLUSH testbench (all EA modes, FC specs, variants)
--- Tests PFLUSHA, PFLUSHAN, PFLUSH FC/mask/EA with verification
+-- Tests MC68030 PFLUSHA, PFLUSH FC/mask, and PFLUSH FC/mask/EA
 -- Uses PTEST to verify ATC state after PFLUSH operations
 
 library ieee;
@@ -267,12 +267,14 @@ architecture behavioral of tb_pflush_all_modes is
             end if;
             -- PFLUSH
             if ext(15 downto 13) = "001" and ext(12 downto 10) /= "000" then
-                if ext(12 downto 8) = "00000" then
+                if ext(12 downto 10) = "001" and ext(9 downto 0) = "0000000000" then
                     return "PFLUSHA ext=$" & slv16_to_hex(ext);
-                elsif ext(12 downto 8) = "01000" then
-                    return "PFLUSHAN ext=$" & slv16_to_hex(ext);
-                else
+                elsif ext(12 downto 10) = "100" then
+                    return "PFLUSH FC/mask ext=$" & slv16_to_hex(ext);
+                elsif ext(12 downto 10) = "110" then
                     return "PFLUSH EA=(" & integer'image(mode_i) & "," & integer'image(reg_i) & ") ext=$" & slv16_to_hex(ext);
+                else
+                    return "PFLUSH ILLEGAL ext=$" & slv16_to_hex(ext);
                 end if;
             end if;
             -- PMOVE
@@ -549,9 +551,15 @@ architecture behavioral of tb_pflush_all_modes is
     end procedure;
 
     -- Emit PFLUSH instruction
-    -- Extension word format: 001 MMMMM FFFFF (15:13=001, 12:8=mode, 7:3=FC spec, 2:0=FC mask)
-    -- Special cases: MMMMM=00000 PFLUSHA, MMMMM=01000 PFLUSHAN
-    -- Normal PFLUSH: MMMMM=0xxxx (bits 12:10 determine sub-variant)
+    -- Extension word format: 001 MMMMM MMM FFFFF
+    --   15:13 = 001
+    --   12:8  = mode
+    --   7:5   = FC mask
+    --   4:0   = FC selector/specifier
+    -- MC68030 forms:
+    --   MMMMM=00100 PFLUSHA
+    --   MMMMM=10000 PFLUSH <fc>,#mask
+    --   MMMMM=11000 PFLUSH <fc>,#mask,<ea>
     procedure emit_pflush(
         variable pc : inOut integer;
         ea_mode : std_logic_vector(2 downto 0);
@@ -566,7 +574,7 @@ architecture behavioral of tb_pflush_all_modes is
         variable extension : std_logic_vector(15 downto 0);
     begin
         opcode := "1111000000" & ea_mode & ea_reg;
-        extension := "001" & mode_bits & fc_spec & fc_mask;
+        extension := "001" & mode_bits & fc_mask & fc_spec;
         emit_word(pc, opcode);
         emit_word(pc, extension);
         case ea_mode is
@@ -1082,20 +1090,19 @@ begin
             "010", "010", "00100", "00000", "000", x"0000", x"0000",
             VAL_MMUSR_EXPECTED);
 
-        -- Test 2: PFLUSHAN (flush all non-global)
-        -- Extension: 001 10000 00000 000 -> $4000 BUT this conflicts with TC!
-        -- Use mode_bits="10001" instead: 001 10001 00000 000 -> $4400
+        -- Test 2: PFLUSH FC=5, mask=111 (no EA)
+        -- Extension: 001 10000 111 10101 -> $30F5
         emit_pflush_verify_mmusr(
-            "PFLUSHAN (flush all non-global)",
-            "010", "010", "10001", "00000", "000", x"0000", x"0000",
+            "PFLUSH FC=5, mask=111 (no EA)",
+            "010", "010", "10000", "10101", "111", x"0000", x"0000",
             VAL_MMUSR_EXPECTED);
 
         -- Test 3: PFLUSH (A2), FC=imm 5, mask=111
-        -- Extension: 001 00110 10101 111 -> $0D57 (mode_bits=00110)
+        -- Extension: 001 11000 111 10101 -> $38F5 (mode_bits=11000)
         emit_movea(pc, 2, PFLUSH_ADDR);
         emit_pflush_verify_mmusr(
             "PFLUSH (A2), FC=5, mask=111",
-            "010", "010", "00110", "10101", "111", x"0000", x"0000",
+            "010", "010", "11000", "10101", "111", x"0000", x"0000",
             VAL_MMUSR_EXPECTED);
 
         -- Test 4: PFLUSH (d16,A2), FC=imm 5, mask=111
@@ -1103,7 +1110,7 @@ begin
         emit_movea(pc, 2, std_logic_vector(unsigned(PFLUSH_ADDR) - 16));
         emit_pflush_verify_mmusr(
             "PFLUSH (d16,A2), FC=5, mask=111",
-            "101", "010", "00110", "10101", "111", x"0010", x"0000",
+            "101", "010", "11000", "10101", "111", x"0010", x"0000",
             VAL_MMUSR_EXPECTED);
 
         -- Test 5: PFLUSH (d8,A2,D6.W), FC=imm 5, mask=111
@@ -1112,20 +1119,20 @@ begin
         emit_movea(pc, 2, std_logic_vector(unsigned(PFLUSH_ADDR) - 6));
         emit_pflush_verify_mmusr(
             "PFLUSH (d8,A2,D6), FC=5, mask=111",
-            "110", "010", "00110", "10101", "111", x"6002", x"0000",
+            "110", "010", "11000", "10101", "111", x"6002", x"0000",
             VAL_MMUSR_EXPECTED);
 
         -- Test 6: PFLUSH (xxx).W, FC=imm 5, mask=111
         emit_pflush_verify_mmusr(
             "PFLUSH (xxx).W=$1000, FC=5, mask=111",
-            "111", "000", "00110", "10101", "111",
+            "111", "000", "11000", "10101", "111",
             PFLUSH_ADDR(15 downto 0), x"0000",
             VAL_MMUSR_EXPECTED);
 
         -- Test 7: PFLUSH (xxx).L, FC=imm 5, mask=111
         emit_pflush_verify_mmusr(
             "PFLUSH (xxx).L=$00001000, FC=5, mask=111",
-            "111", "001", "00110", "10101", "111",
+            "111", "001", "11000", "10101", "111",
             PFLUSH_ADDR(15 downto 0), PFLUSH_ADDR(31 downto 16),
             VAL_MMUSR_EXPECTED);
 
@@ -1134,14 +1141,14 @@ begin
         emit_movea(pc, 2, PFLUSH_ADDR);
         emit_pflush_verify_mmusr(
             "PFLUSH (A2), FC=D0 (D0=5), mask=111",
-            "010", "010", "00110", "01000", "111", x"0000", x"0000",
+            "010", "010", "11000", "01000", "111", x"0000", x"0000",
             VAL_MMUSR_EXPECTED);
 
         -- Test 9: PFLUSH (A2), FC=imm 5, mask=000 (match exact FC)
         emit_movea(pc, 2, PFLUSH_ADDR);
         emit_pflush_verify_mmusr(
             "PFLUSH (A2), FC=5, mask=000",
-            "010", "010", "00110", "10101", "000", x"0000", x"0000",
+            "010", "010", "11000", "10101", "000", x"0000", x"0000",
             VAL_MMUSR_EXPECTED);
 
         -- =====================================================
@@ -1152,14 +1159,14 @@ begin
         emit_movea(pc, 7, PFLUSH_ADDR);
         emit_pflush_verify_mmusr(
             "PFLUSH (A7), FC=5, mask=111",
-            "010", "111", "00110", "10101", "111", x"0000", x"0000",
+            "010", "111", "11000", "10101", "111", x"0000", x"0000",
             VAL_MMUSR_EXPECTED);
 
         -- Test 11: PFLUSH (d16,A7), FC=imm 5, mask=111
         emit_movea(pc, 7, std_logic_vector(unsigned(PFLUSH_ADDR) - 16));
         emit_pflush_verify_mmusr(
             "PFLUSH (d16,A7), FC=5, mask=111",
-            "101", "111", "00110", "10101", "111", x"0010", x"0000",
+            "101", "111", "11000", "10101", "111", x"0010", x"0000",
             VAL_MMUSR_EXPECTED);
 
         -- =====================================================
@@ -1178,7 +1185,7 @@ begin
         writeline(output, l);
         write(l, string'("PFLUSH ALL MODES TEST"));
         writeline(output, l);
-        write(l, string'("Tests: PFLUSHA, PFLUSHAN, (A2), (d16,A2), (d8,A2,D6), (xxx).W, (xxx).L"));
+        write(l, string'("Tests: PFLUSHA, PFLUSH FC/mask, (A2), (d16,A2), (d8,A2,D6), (xxx).W, (xxx).L"));
         writeline(output, l);
         write(l, string'("Also: FC=D0, mask variants, A7/SP modes"));
         writeline(output, l);
