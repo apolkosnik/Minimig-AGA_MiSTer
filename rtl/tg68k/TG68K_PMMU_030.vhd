@@ -121,10 +121,10 @@ architecture rtl of TG68K_PMMU_030 is
     return result;
   end function;
   -- MC68030 PMMU Control Registers
-  -- All registers are PMOVE-only in this tree (the kernel MOVEC whitelist does
-  -- not include PMMU registers; MOVEC to TC/TT0/TT1/MMUSR traps as privilege
-  -- violation). MC68030 spec lists TC/TT0/TT1/MMUSR as MOVEC-accessible, but
-  -- that path is deliberately not wired here.
+  -- All registers are PMOVE-only per the MC68030 User's Manual (sections 9.7
+  -- and 9.8). MOVEC access to these registers is NOT defined on MC68030; the
+  -- kernel MOVEC whitelist correctly excludes them, and MOVEC to TC/TT0/TT1/
+  -- MMUSR traps as privilege violation.
   -- Implemented: TC, TT0, TT1, CRP (64-bit), SRP (64-bit), MMUSR
   -- Not implemented: CAL, VAL, SCC, AC (removed — unused by Amiga software)
   
@@ -1115,25 +1115,26 @@ begin
             -- before the kernel dispatches the trap would silently lose the
             -- exception, because pmmu_config_err would drop to 0 combinationally
             -- via the decode-process default before trap_mmu_config is latched.
-            if tc_e = '1' then
-              ps_val := to_integer(unsigned(reg_wdat(23 downto 20)));
-              -- Check 1: PS field must be 8-15 (values 0-7 are reserved)
-              if ps_val < 8 then
+            -- MC68030 UM 9.7.2 line 15473-15474 and 9.7.5.3 line 15698-15699:
+            -- PS = $0..$7 is reserved; any TC write with such a value raises an
+            -- MMU configuration exception UNCONDITIONALLY (not gated by E).
+            ps_val := to_integer(unsigned(reg_wdat(23 downto 20)));
+            if ps_val < 8 then
+              mmu_config_error <= '1';
+              -- synthesis translate_off
+              report "MMU_CONFIG: Invalid PS field=" & integer'image(ps_val) &
+                     " (must be 8-15), raising configuration exception" severity warning;
+              -- synthesis translate_on
+            elsif tc_e = '1' then
+              -- Field-sum consistency check (PS+IS+TIx summed to first zero TIx)
+              -- is performed only when E=1 per MC68030 UM 9.7.2 line 15409-15413.
+              total_bits := tc_total_bits(reg_wdat);
+              if total_bits /= 32 then
                 mmu_config_error <= '1';
                 -- synthesis translate_off
-                report "MMU_CONFIG: Invalid PS field=" & integer'image(ps_val) &
-                       " (must be 8-15), raising configuration exception" severity warning;
+                report "MMU_CONFIG: Field sum=" & integer'image(total_bits) &
+                       " (must be 32), raising configuration exception" severity warning;
                 -- synthesis translate_on
-              else
-                -- Check 2: Field sum must equal 32 per MC68030 spec (stop adding TIx at first zero)
-                total_bits := tc_total_bits(reg_wdat);
-                if total_bits /= 32 then
-                  mmu_config_error <= '1';
-                  -- synthesis translate_off
-                  report "MMU_CONFIG: Field sum=" & integer'image(total_bits) &
-                         " (must be 32), raising configuration exception" severity warning;
-                  -- synthesis translate_on
-                end if;
               end if;
             end if;
             TC <= tc_write_val;
@@ -1147,8 +1148,8 @@ begin
           when "10010" =>  -- SRP: P-reg 0x12
             -- SRP register write - MC68030 Long-Format Root Pointer (same format as CRP)
             if reg_part = '1' then
-              -- SRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
-              -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
+              -- SRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:34] + DT[33:32]
+              -- MC68030 UM 9.5.1.1: DT is a 2-bit field (codes $0..$3), reserved bits 47-34
               report "PMMU_REG_WRITE: SRP_H reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
               SRP_H <= reg_wdat and CRP_HIGH_MASK;
@@ -1174,8 +1175,8 @@ begin
           when "10011" =>  -- CRP: P-reg 0x13
             -- CRP register write - MC68030 Long-Format Root Pointer per User's Manual section 9.2.2
             if reg_part = '1' then
-              -- CRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:33] + DT[32]
-              -- MC68030 spec: L/U bit 63, Limit bits 62-48, reserved bits 47-33 (zero), DT bit 32
+              -- CRP HIGH WORD (bits 63-32): L/U[63] + Limit[62:48] + Reserved[47:34] + DT[33:32]
+              -- MC68030 UM 9.5.1.1: DT is a 2-bit field (codes $0..$3), reserved bits 47-34
               report "PMMU_REG_WRITE: CRP_H reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
               CRP_H <= reg_wdat and CRP_HIGH_MASK;
@@ -1932,12 +1933,15 @@ begin
                 -- Cached fault entry: report the original MMUSR fault class.
                 mmusr_update_value <= x"0000" & atc_fault_status(hit_idx);
               else
-                -- Normal ATC hit - report WP and M from ATC attributes
+                -- Normal ATC hit - report WP and M from ATC attributes.
+                -- MC68030 UM 9.7.4 Table 9-3 (line 15636): for PTEST Level 0
+                -- the N field is always cleared to zero; it does NOT report the
+                -- level of the walk that originally populated this ATC entry.
                 mmusr_update_value <= encode_mmusr_success(
                   write_protect => atc_attr(hit_idx)(0),   -- WP
                   modified => atc_attr(hit_idx)(1),        -- M
                   transparent => '0',
-                  level => atc_level(hit_idx)              -- Level from ATC
+                  level => "000"                            -- N=0 for PTEST Level 0
                 );
               end if;
             else
@@ -1970,7 +1974,10 @@ begin
             translation_pending <= '1';
             instr_walk_pending <= '1';  -- BUG #396: Mark walk as PTEST-initiated
             ptest_walk_pending <= '1';
-            ptest_walk_no_update <= '0';  -- MC68030 table searches update descriptor history bits regardless of A-bit
+            -- M68000 PRM p.603 (PTEST description): "No descriptor bits are
+            -- modified by this instruction." PTEST must leave U and M bits
+            -- untouched on both table and page descriptors.
+            ptest_walk_no_update <= '1';
             ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after triggering walker
             -- report "PTEST: Triggered walker for addr=0x" & slv_to_hstring(ptest_addr) &
                   --  -- " fc=" & slv_to_string(ptest_fc) severity note;
@@ -3759,12 +3766,26 @@ begin
               -- Skip history-bit writeback only for non-mutating walks or register-only root pointers.
               if ptest_walk_pending = '1' then
                 walker_fault <= '1';
-                walker_fault_status <= encode_mmusr_success(
-                  write_protect => walk_attr(0),
-                  modified => walk_attr(1),
-                  transparent => '0',
-                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
-                );
+                -- MC68030 UM 9.7.4 line 15636-15638: MMUSR N = "actual number of
+                -- tables accessed during the search". A root-pointer DT=01 early
+                -- termination reads no memory-resident table (the descriptor is
+                -- the CRP/SRP register itself, UM 9.5.1.2 line 14649-14656), so
+                -- N must be 0 in that case rather than walk_level+1.
+                if walk_is_root_pointer = '1' then
+                  walker_fault_status <= encode_mmusr_success(
+                    write_protect => walk_attr(0),
+                    modified => walk_attr(1),
+                    transparent => '0',
+                    level => "000"
+                  );
+                else
+                  walker_fault_status <= encode_mmusr_success(
+                    write_protect => walk_attr(0),
+                    modified => walk_attr(1),
+                    transparent => '0',
+                    level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                  );
+                end if;
                 wstate <= W_FAULT;
               elsif pload_flush_pending = '1' then
                 wstate <= W_PLOAD_FLUSH;
@@ -3778,8 +3799,15 @@ begin
               -- Need to update descriptor with U/M bits
               desc_update_needed <= '1';
               -- Prepare updated descriptor: set U bit, and M bit if write AND not WP
+              -- MC68030 UM 9.8 line 15744-15746: PLOADW "updates all history
+              -- information in the translation tables (used and modified bits)
+              -- as if a write operation to that address had occurred." Allow M
+              -- update for PLOADW; suppress only for PTEST (ptest_walk_pending).
+              -- PTEST never reaches this line because ptest_walk_no_update='1'
+              -- routes it through the earlier no-update branch, but guarding on
+              -- ptest_walk_pending here documents the intent for readers.
               desc_update_data <= walk_desc_high(31 downto 5) &
-                                  (walk_desc_high(4) or ((not saved_rw) and (not instr_walk_pending) and (not walk_desc_high(2)) and (not walk_write_protect))) &  -- M bit: set if write, not WP, not PTEST/PLOAD
+                                  (walk_desc_high(4) or ((not saved_rw) and (not ptest_walk_pending) and (not walk_desc_high(2)) and (not walk_write_protect))) &  -- M bit: set if write, not WP, not PTEST
                                   '1' &  -- U bit: always set
                                   walk_desc_high(2 downto 0);
               wstate <= W_UPDATE_DESC;

@@ -7959,12 +7959,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
                 WHEN pflush1 =>
                     -- PFLUSH: Flush pages from ATC (EA built in pmove_decode if needed)
-                    -- MC68030 PFLUSH variants already decoded in pmove_decode:
-                    -- - PFLUSHA:   brief(12:8)="00000" - flush all
-                    -- - PFLUSHAN:  brief(12:8)="01000" - flush all non-global
-                    -- - PFLUSH:    brief(12)='0', brief(11)='0' - flush with FC/EA
-                    -- - PFLUSHN:   brief(12)='0', brief(11)='1' - flush non-global with FC/EA
-                    -- PMMU module handles actual flush operation
+                    -- MC68030 PFLUSH MODE (brief bits 12:10) — decoded in pmove_decode
+                    -- and dispatched by the PMMU at pflush_clear_atc time:
+                    --   001 = PFLUSHA                (flush all entries)
+                    --   100 = PFLUSH <fc>,#mask       (flush by FC under mask)
+                    --   110 = PFLUSH <fc>,#mask,<ea>  (flush by FC + logical address)
+                    -- Modes 101/111 (PFLUSHS) are 68851-only and F-line trap per
+                    -- MC68030 UM 9.6 (PDF:15302); MC68030 has no globally-shared
+                    -- ATC entries (UM 9.6 PDF:15292), so no .N/non-global variant.
                     -- BUG #147 FIX: setstate="01" prevents extra PC increment when exiting pflush1
                     -- Without this, setstate defaults to "00" (fetch), causing PC+2 over-increment
                     -- BUG #372 FIX: Propagate pflush request to exec via set layer
