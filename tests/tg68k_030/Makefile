@@ -59,7 +59,7 @@ help:
 	@echo "  test-whichamiga  - Test WhichAmiga PMOVE TC/CRP and PTEST instructions"
 	@echo "  test-advanced    - Run walker + ATC + translation PMMU suite"
 	@echo "  test-fault       - Run fault recovery + frame/address fault suite"
-	@echo "  test-mmu-fetch-fault-frame - Verify PMMU instruction fetch faults use short Format $$A at vector 2"
+	@echo "  test-mmu-fetch-fault-frame - Verify PMMU instruction fetch faults use long Format $$B at vector 2"
 	@echo "  test-mmu-user-data-fault-recovery - Verify user-mode MMU data faults recover via vector 2 long frame + RTE"
 	@echo "  test-stress      - Run translation and lockup/race stress suite"
 	@echo "  test-real        - Run maintained real software-sequence validation suite"
@@ -362,6 +362,14 @@ test-early-term-remap: compile
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_early_term_remap.vhd
 	@echo "Running PMMU early-termination remap reproducer..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 20us; quit -f" tb_pmmu_early_term_remap
+
+# Comprehensive PMMU end-to-end coverage: fault MMUSR encoding, long-format
+# (DT=11) descriptors, limit checking boundaries, TTR matching nuances, and
+# attribute accumulation (WP across levels).
+test-pmmu-comprehensive: compile
+	@echo "Compiling and running PMMU comprehensive coverage test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_comprehensive.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 500us; quit -f" tb_pmmu_comprehensive
 
 # Wrapper-level PMMU/walker bench — instantiates cpu_wrapper.v (Verilog) to
 # exercise integration paths the kernel-only benches cannot reach:

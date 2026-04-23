@@ -815,25 +815,25 @@ begin
     ---------------------------------------------------------------
     -- ATC HIT BYPASS OBSERVATION (Test 21)
     -- Observe a later hot-page read from $1100, after the initial fill path has completed.
-    -- This avoids the pipelined overlap around the very first post-write read and checks the
-    -- steady-state ATC hit path directly.
+    -- Sample shortly after the clock edge so the PMMU's registered ATC-hit outputs have
+    -- time to settle for the current access instead of reading the previous cycle's values.
     ---------------------------------------------------------------
-    atc_hit_observe: process(clk)
+    atc_hit_observe: process
     begin
-        if rising_edge(clk) then
-            if not atc_hit_seen and not atc_hit_bug and
-               busstate /= "00" and nWr = '1' and FC = "101" and pmmu_addr_log = x"00001100" and
-               unsigned(debug_TG68_PC) >= x"00000138" then
-                if pmmu_busy = '0' and pmmu_addr_phys = x"00001100" then
-                    atc_hit_seen <= true;
-                else
-                    report "ATC_HIT_OBSERVED_BAD: phys=$" & slv_to_hex(pmmu_addr_phys) &
-                           " busy=" & std_logic'image(pmmu_busy) &
-                           " fc=" & slv_to_hex("0" & FC) &
-                           " log=$" & slv_to_hex(pmmu_addr_log)
-                    severity note;
-                    atc_hit_bug <= true;
-                end if;
+        wait until rising_edge(clk);
+        wait for 1 ns;
+        if not atc_hit_seen and not atc_hit_bug and
+           busstate /= "00" and nWr = '1' and FC = "101" and pmmu_addr_log = x"00001100" and
+           unsigned(debug_TG68_PC) >= x"00000138" then
+            if pmmu_busy = '0' and pmmu_addr_phys = x"00001100" then
+                atc_hit_seen <= true;
+            else
+                report "ATC_HIT_OBSERVED_BAD: phys=$" & slv_to_hex(pmmu_addr_phys) &
+                       " busy=" & std_logic'image(pmmu_busy) &
+                       " fc=" & slv_to_hex("0" & FC) &
+                       " log=$" & slv_to_hex(pmmu_addr_log)
+                severity note;
+                atc_hit_bug <= true;
             end if;
         end if;
     end process;

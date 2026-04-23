@@ -167,6 +167,10 @@ architecture rtl of TG68K_PMMU_030 is
   signal ttr0_wp_comb    : std_logic;
   signal ttr1_ci_comb    : std_logic;
   signal ttr1_wp_comb    : std_logic;
+  signal atc_success_comb : std_logic;
+  signal atc_phys_comb    : std_logic_vector(31 downto 0);
+  signal atc_ci_comb      : std_logic;
+  signal atc_wp_comb      : std_logic;
   -- BUG #416: Track which addr_log/fc produced the current addr_phys_reg.
   -- ATC translations update addr_phys_reg on rising_edge, but addr_log changes
   -- combinationally after the Kernel's assignment in the same edge. This creates
@@ -800,11 +804,14 @@ architecture rtl of TG68K_PMMU_030 is
   function tc_config_invalid(tc : std_logic_vector(31 downto 0)) return boolean is
     variable ps_val : integer;
   begin
+    if tc(31) = '0' then
+      return false;
+    end if;
     ps_val := to_integer(unsigned(tc(23 downto 20)));
     if ps_val < 8 then
       return true;
     end if;
-    if tc(31) = '1' and tc_total_bits(tc) /= 32 then
+    if tc_total_bits(tc) /= 32 then
       return true;
     end if;
     return false;
@@ -1001,6 +1008,47 @@ begin
     ttr1_ci_comb <= ci1;
     ttr1_wp_comb <= wp1;
   end process;
+  -- Successful ATC hits can also bypass the registered translation result.
+  -- This keeps addr_phys/cache attributes aligned with the current request and
+  -- avoids stalling a clean cached access behind the previous cycle's output.
+  process(addr_log, fc, rw, tc_en, mmudis, atc_valid, atc_flush_req, atc_fc,
+          atc_shift, atc_log_base, atc_phys_base, atc_attr, atc_buserr)
+    variable aligned_addr : std_logic_vector(31 downto 0);
+    variable phys_base    : unsigned(31 downto 0);
+    variable offset       : unsigned(31 downto 0);
+    variable phys_result  : unsigned(31 downto 0);
+  begin
+    atc_success_comb <= '0';
+    atc_phys_comb    <= (others => '0');
+    atc_ci_comb      <= '0';
+    atc_wp_comb      <= '0';
+
+    if tc_en = '1' and mmudis = '0' then
+      for i in 0 to ATC_ENTRIES-1 loop
+        if atc_valid(i) = '1' and atc_flush_req = '0' then
+          aligned_addr := align_addr(addr_log, atc_shift(i));
+          if atc_fc(i) = fc and aligned_addr = atc_log_base(i) then
+            if rw = '1' or atc_attr(i)(1) = '1' or atc_attr(i)(0) = '1' or atc_buserr(i) = '1' then
+              -- Only bypass successful cached translations. Faulting ATC entries
+              -- still go through the registered path so the fault handshake can
+              -- latch MMUSR/fault state before the CPU is released.
+              if atc_buserr(i) = '0' and
+                 not (rw = '0' and atc_attr(i)(0) = '1') and
+                 not (fc(2) = '0' and atc_attr(i)(3) = '0') then
+                phys_base := unsigned(atc_phys_base(i));
+                offset    := unsigned(addr_log) - unsigned(atc_log_base(i));
+                phys_result := phys_base + offset;
+                atc_success_comb <= '1';
+                atc_phys_comb    <= std_logic_vector(phys_result);
+                atc_ci_comb      <= atc_attr(i)(2);
+                atc_wp_comb      <= atc_attr(i)(0);
+              end if;
+            end if;
+          end if;
+        end if;
+      end loop;
+    end if;
+  end process;
   -- Reset and register writes
   process(clk, nreset)
     -- Variables for TC validation (MMU configuration exception detection)
@@ -1127,11 +1175,13 @@ begin
             -- before the kernel dispatches the trap would silently lose the
             -- exception, because pmmu_config_err would drop to 0 combinationally
             -- via the decode-process default before trap_mmu_config is latched.
-            -- MC68030 UM 9.7.2 line 15473-15474 and 9.7.5.3 line 15698-15699:
-            -- PS = $0..$7 is reserved; any TC write with such a value raises an
-            -- MMU configuration exception UNCONDITIONALLY (not gated by E).
+            -- MC68030 UM 9.7.2 / 9.7.5.3: TC consistency checks are only
+            -- performed when the new value has E=1. With E=0, translation is
+            -- disabled and software is allowed to load TC images like $00000000
+            -- without taking vector 56. WinUAE follows the same rule by
+            -- returning early when translation is disabled.
             ps_val := to_integer(unsigned(reg_wdat(23 downto 20)));
-            if ps_val < 8 then
+            if tc_e = '1' and ps_val < 8 then
               mmu_config_error <= '1';
               -- synthesis translate_off
               report "MMU_CONFIG: Invalid PS field=" & integer'image(ps_val) &
@@ -1417,17 +1467,20 @@ begin
     -- No need to re-check here
   end process;
   
-  -- Output the latched results
+  -- Output the current translation result.
   -- BUG #129 FIX: Add combinational bypass for identity translation when table
   -- translation is disabled so cache-facing outputs stay in sync with the logical
   -- address in the same cycle.
   -- BUG #371 FIX: Also bypass for TTR transparent translations (phys=log identity
   -- mapping); TT0/TT1 operate independently of TC.E and MMUDIS on MC68030.
+  -- Successful ATC hits also bypass the registered path so cached accesses do not
+  -- spend an extra cycle exposing the previous translation result.
   -- MC68030 UM Figure 9-32: FC=7 (CPU space) is always unmapped (identity).
   addr_phys     <= addr_log when fc = "111"
                    else addr_log when (ttr0_match_comb = '1' or ttr1_match_comb = '1')
                    else addr_log when tc_en = '0'
                    else addr_log when mmudis = '1'  -- MC68030 UM 9.2.3
+                   else atc_phys_comb when atc_success_comb = '1'
                    else addr_phys_reg;
   -- BUG #126 V2 FIX: Combinational bypass for cache_inhibit when MMU disabled
   -- Without this, cache_inhibit_reg retains stale value (pmmu_req='0' when MMU off)
@@ -1440,12 +1493,14 @@ begin
                    else ttr1_ci_comb when ttr1_match_comb = '1'
                    else '0' when tc_en = '0'
                    else '0' when mmudis = '1'  -- MC68030 UM 9.2.3
+                   else atc_ci_comb when atc_success_comb = '1'
                    else cache_inhibit_reg;
   write_protect <= '0' when fc = "111"  -- CPU space never write-protected
                    else ttr0_wp_comb when ttr0_match_comb = '1'
                    else ttr1_wp_comb when ttr1_match_comb = '1'
                    else '0' when tc_en = '0'
                    else '0' when mmudis = '1'  -- MC68030 UM 9.2.3
+                   else atc_wp_comb when atc_success_comb = '1'
                    else write_protect_reg;
   fault         <= '0' when fc = "111" else fault_reg;  -- CPU space never faults
   fault_status  <= fault_status_reg;
@@ -2280,6 +2335,13 @@ begin
     variable early_term_desc_addr : std_logic_vector(31 downto 0);
     variable early_term_page_addr : std_logic_vector(31 downto 0);
     variable early_term_offset    : std_logic_vector(31 downto 0);
+    -- Decode page attributes into variables before reusing them in this cycle.
+    -- Using the walk_attr signal directly in W_PAGE would read the previous page's
+    -- latched value because signal assignments don't take effect until the process suspends.
+    variable page_user_access     : std_logic;
+    variable page_cache_inhibit   : std_logic;
+    variable page_modified        : std_logic;
+    variable page_write_protect   : std_logic;
   begin
     if nreset = '0' then
       for i in 0 to ATC_ENTRIES-1 loop
@@ -3647,8 +3709,12 @@ begin
             wstate <= W_PAGE;
           end if;
         when W_PAGE =>
-          -- Process page descriptor and validate completely
-          if not desc_valid(walk_desc) then
+          -- Process page descriptor and validate completely.
+          -- Long-format descriptors carry DT/S/WP/etc. in HIGH and the
+          -- physical page base in LOW. Validating LOW would misread aligned
+          -- page bases ending in ...00 as DT=00 invalid descriptors.
+          if (walk_desc_is_long = '1' and not desc_valid(walk_desc_high)) or
+             (walk_desc_is_long = '0' and not desc_valid(walk_desc)) then
             -- Invalid page descriptor (DT=00)
             walker_fault <= '1';
             walker_fault_status <= encode_mmusr_fault(
@@ -3747,12 +3813,18 @@ begin
                 limit_fault := true;  -- BUG FIX: Prevent U/M logic from overwriting fault
               end if;
             end if;
-            -- Extract attributes - bit positions are same in both formats
+            -- Extract attributes - bit positions are same in both formats.
+            -- Decode them into variables first so same-cycle MMUSR/PTEST decisions
+            -- see the current page instead of the previous walk_attr latch contents.
             -- U_ACC must reflect supervisor-only protection from long table and long page descriptors.
-            walk_attr(3) <= not (walk_supervisor or get_supervisor_bit(walk_desc_high, walk_desc_is_long)); -- U_ACC = NOT(S): 1=user accessible, 0=supervisor-only
-            walk_attr(2) <= walk_desc_high(6); -- Cache inhibit (CI)
-            walk_attr(1) <= walk_desc_high(4); -- Modified (M)
-            walk_attr(0) <= walk_desc_high(2) or walk_write_protect; -- WP from page + accumulated table WP
+            page_user_access   := not (walk_supervisor or get_supervisor_bit(walk_desc_high, walk_desc_is_long));
+            page_cache_inhibit := walk_desc_high(6);
+            page_modified      := walk_desc_high(4);
+            page_write_protect := walk_desc_high(2) or walk_write_protect;
+            walk_attr(3) <= page_user_access;   -- U_ACC = NOT(S): 1=user accessible, 0=supervisor-only
+            walk_attr(2) <= page_cache_inhibit; -- Cache inhibit (CI)
+            walk_attr(1) <= page_modified;      -- Modified (M)
+            walk_attr(0) <= page_write_protect; -- WP from page + accumulated table WP
             -- MC68030 UM 9.6 (PDF line 15292): shared/global ATC entries are a
             -- MC68851 feature, not an MC68030 feature. The MC68030 therefore
             -- has only PFLUSHA and PFLUSH forms; no per-entry global attribute
@@ -3786,15 +3858,15 @@ begin
                 -- N must be 0 in that case rather than walk_level+1.
                 if walk_is_root_pointer = '1' then
                   walker_fault_status <= encode_mmusr_success(
-                    write_protect => walk_attr(0),
-                    modified => walk_attr(1),
+                    write_protect => page_write_protect,
+                    modified => page_modified,
                     transparent => '0',
                     level => "000"
                   );
                 else
                   walker_fault_status <= encode_mmusr_success(
-                    write_protect => walk_attr(0),
-                    modified => walk_attr(1),
+                    write_protect => page_write_protect,
+                    modified => page_modified,
                     transparent => '0',
                     level => std_logic_vector(to_unsigned(walk_level + 1, 3))
                   );
@@ -3829,8 +3901,8 @@ begin
               if ptest_walk_pending = '1' then
                 walker_fault <= '1';
                 walker_fault_status <= encode_mmusr_success(
-                  write_protect => walk_attr(0),
-                  modified => walk_attr(1),
+                  write_protect => page_write_protect,
+                  modified => page_modified,
                   transparent => '0',
                   level => std_logic_vector(to_unsigned(walk_level + 1, 3))
                 );
@@ -4146,7 +4218,7 @@ begin
     end if;
   end process;
   -- Walker busy indication - not busy if MMU disabled or TTR hit
-  process(wstate, addr_log, fc, rw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg)
+  process(wstate, addr_log, fc, rw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg, atc_success_comb)
     variable tmatch0, tmatch1 : std_logic;
     variable dummy_ci, dummy_wp : std_logic;
   begin
@@ -4161,7 +4233,7 @@ begin
       -- the CPU to proceed with a stale physical address.
       ttr_check(TT0, addr_log, fc, is_insn, rw, tmatch0, dummy_ci, dummy_wp);
       ttr_check(TT1, addr_log, fc, is_insn, rw, tmatch1, dummy_ci, dummy_wp);
-      -- Not busy if TTR hit or (walker idle with no pending walker work AND
+      -- Not busy if TTR hit, successful ATC hit, or (walker idle with no pending walker work AND
       -- either no translation is active, or addr_phys_reg is fresh).
       -- BUG #416: Without the translated_addr/fc check, ATC hits leave busy='0'
       -- for one cycle while addr_phys_reg still holds the OLD translation. The bus
@@ -4180,7 +4252,7 @@ begin
       -- addr_log combinationally, breaking translated_addr match. When the handshake
       -- completes, busy='1' persists (addr mismatch) and fault_reg clears (new
       -- translation for new addr) -> permanent deadlock, berr never dispatched.
-      if (tmatch0 = '1' or tmatch1 = '1' or fault_reg = '1' or (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and (req = '0' or (translated_addr = addr_log and translated_fc = fc and translated_rw = rw and translated_cfg_seq = xlat_cfg_seq)))) then
+      if (tmatch0 = '1' or tmatch1 = '1' or atc_success_comb = '1' or fault_reg = '1' or (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and (req = '0' or (translated_addr = addr_log and translated_fc = fc and translated_rw = rw and translated_cfg_seq = xlat_cfg_seq)))) then
         busy <= '0';
       else
         busy <= '1';

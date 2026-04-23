@@ -1,6 +1,6 @@
 -- tb_mmu_fetch_fault_frame.vhd
--- Verifies that an MC68030 internal PMMU fault taken at an instruction boundary
--- uses the short Format $A bus-fault frame at vector 2, not the long data-read
+-- Verifies that an MC68030 internal PMMU instruction fetch fault
+-- uses the long Format $B bus-fault frame at vector 2, not the short write
 -- frame and not the old MC68851-only vector 61 path.
 
 library ieee;
@@ -83,7 +83,7 @@ architecture behavioral of tb_mmu_fetch_fault_frame is
         end loop;
 
         -- Bus error handler: save frame base, format/vector, and fault address, then STOP.
-        -- Frame layout from SP:
+        -- Format $B layout still keeps:
         --   SP+$06 = format/vector, SP+$10 = fault address.
         m(64) := x"23CF"; m(65) := x"0000"; m(66) := x"1F10";  -- MOVE.L A7,$1F10.L
         m(67) := x"302F"; m(68) := x"0006";                    -- MOVE.W ($0006,SP),D0
@@ -441,7 +441,7 @@ begin
         variable result16       : std_logic_vector(15 downto 0);
     begin
         report "=== MMU INSTRUCTION FETCH FAULT FRAME TEST ===" severity note;
-        report "Target: PMMU instruction-boundary fault must use vector 2 with short Format $A frame" severity note;
+        report "Target: PMMU instruction fetch fault must use vector 2 with long Format $B frame" severity note;
         report "Setup: root entry 15 invalid, JMP $F0001000 after enabling MMU" severity note;
 
         wait for 100 ns;
@@ -500,22 +500,22 @@ begin
         end if;
 
         result32 := mem(to_integer(unsigned'(x"0F88"))) & mem(to_integer(unsigned'(x"0F89")));
-        if result32 = x"00001FE0" then
-            report "PASS: short bus-fault frame base saved as $00001FE0" severity note;
+        if result32 = x"00001FA4" then
+            report "PASS: long bus-fault frame base saved as $00001FA4" severity note;
             pass_count := pass_count + 1;
         else
             report "FAIL: saved A7/frame base = $" & slv_to_hex(result32) &
-                   " (expected $00001FE0 for short Format $A frame)" severity error;
+                   " (expected $00001FA4 for long Format $B frame)" severity error;
             fail_count := fail_count + 1;
         end if;
 
         result16 := mem(to_integer(unsigned'(x"0F8A")));
-        if result16 = x"A008" then
-            report "PASS: format/vector word = $A008 (Format $A, vector 2)" severity note;
+        if result16 = x"B008" then
+            report "PASS: format/vector word = $B008 (Format $B, vector 2)" severity note;
             pass_count := pass_count + 1;
         else
             report "FAIL: format/vector word = $" & slv_to_hex(result16) &
-                   " (expected $A008)" severity error;
+                   " (expected $B008)" severity error;
             fail_count := fail_count + 1;
         end if;
 

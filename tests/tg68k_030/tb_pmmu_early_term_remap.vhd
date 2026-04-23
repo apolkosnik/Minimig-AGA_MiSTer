@@ -185,12 +185,15 @@ begin
       rw       <= '1';
       req      <= '1';
       wait until rising_edge(clk);
+      wait for 1 ns;
       -- wait for the translation to settle (busy goes low or fault fires)
       for i in 0 to 200 loop
         exit when busy = '0' or fault = '1';
         wait until rising_edge(clk);
+        wait for 1 ns;
       end loop;
       wait until rising_edge(clk);
+      wait for 1 ns;
       req <= '0';
       if fault = '1' then
         errors <= errors + 1;
@@ -448,6 +451,165 @@ begin
     -- TA (not a super-page base).  Logical $0000A000..$0000AFFF → $00800xxx.
     translate_and_check("2-lvl remap   @ $0000A000", x"0000A000", x"00800000");
     translate_and_check("2-lvl remap   @ $0000A5A5", x"0000A5A5", x"008005A5");
+
+    -- ------------------------------------------------------------
+    -- Phase I: Linux m68k SRE=1 routing.  Real Linux arch/m68k/kernel/head.S
+    -- programs TC=$82C07760 (E=1, SRE=1, PS=12, TIA=7, TIB=7, TIC=6) so that
+    -- supervisor fetches use SRP and user fetches use CRP.  This phase points
+    -- SRP and CRP at DIFFERENT root tables so the two paths produce different
+    -- PFAs for the same logical address, proving the SRE-driven selection
+    -- works in the walker.
+    --
+    --   CRP -> root table at $00006000 (reused): identity-map $00xxxxxx -> $00xxxxxx
+    --   SRP -> root table at $00008000 (new):    remap     $00xxxxxx -> $70xxxxxx
+    --
+    -- User access (FC=001 = user data):        should follow CRP -> identity
+    -- Supervisor access (FC=101 = super data): should follow SRP -> remap
+    -- Each root uses short-format early-term DT=01 at entry 0 (32 MB super-page
+    -- per TIA=7 entry).
+    -- ------------------------------------------------------------
+
+    -- CRP root table: reuse idx 0 with identity early-term descriptor
+    page_table(6144 + 0) <= x"00000061";   -- identity $00xxxxxx
+
+    -- SRP root table at $00008000 → page_table index $8000/4 = 8192... but our
+    -- array is size 8192, so index 8192 is out of range. Use $00005000 instead
+    -- (idx 5120) — still in chip-RAM space, just different from $6000.
+    -- Correction: put SRP root at $00004000 (idx 4096).
+    page_table(4096 + 0) <= x"70000061";   -- SRP entry 0: $00xxxxxx -> $70xxxxxx
+    wait for 20 ns;
+
+    -- Program TC with SRE=1 (Linux's exact value)
+    write_reg("10000", x"82C07760", '0');
+
+    -- Point CRP at $00006000 (user root) and SRP at $00004000 (supervisor root)
+    write_reg("10011", x"7FFF0002", '1');   -- CRP_H
+    write_reg("10011", x"00006000", '0');   -- CRP_L = $6000
+    write_reg("10010", x"7FFF0002", '1');   -- SRP_H
+    write_reg("10010", x"00004000", '0');   -- SRP_L = $4000
+    wait for 100 ns;
+
+    -- Test: user FC=001 should go through CRP (identity)
+    --       supervisor FC=101 should go through SRP (remap)
+    --
+    -- Addresses MUST land inside root entry 0 (bits[31:25]=0, i.e. the 32 MB
+    -- window $00000000..$01FFFFFF).  Earlier draft used $0FFFE000 which is
+    -- in entry 7 — unconfigured in both roots, so it faulted.
+    --
+    -- The translate_and_check helper hardcodes fc<="101" (supervisor data), so
+    -- we inline a user-FC case below by setting fc before calling req.
+    translate_and_check("SRE sup-data @ $01234000", x"01234000", x"71234000");
+    translate_and_check("SRE sup-data @ $01FFE000", x"01FFE000", x"71FFE000");
+
+    -- User-FC variant: drive fc="001" directly and repeat the probe.
+    wait until rising_edge(clk);
+    fc <= "001"; is_insn <= '0'; rw <= '1';
+    addr_log <= x"01234000"; req <= '1';
+    wait until rising_edge(clk);
+    for i in 0 to 200 loop
+      exit when busy = '0' or fault = '1';
+      wait until rising_edge(clk);
+    end loop;
+    wait until rising_edge(clk);
+    req <= '0';
+    if fault = '1' then
+      errors <= errors + 1;
+      report "[FAIL] SRE user-data @ $01234000 -- fault" severity error;
+    elsif addr_phys /= x"01234000" then
+      errors <= errors + 1;
+      report "[FAIL] SRE user-data @ $01234000 -- want=0x01234000 got=0x" &
+             integer'image(to_integer(unsigned(addr_phys))) severity error;
+    else
+      report "[PASS] SRE user-data @ $01234000 -- phys=0x" &
+             integer'image(to_integer(unsigned(addr_phys))) severity note;
+    end if;
+    for i in 0 to 4 loop wait until rising_edge(clk); end loop;
+    -- restore fc for subsequent helper calls
+    fc <= "101";
+
+    -- ------------------------------------------------------------
+    -- Phase J: Linux 32 MB early-term geometry (effective_shift=25).
+    -- Still using TC=$82C07760 from Phase I.  Root TIA=7 means 128 entries,
+    -- each covering 2^(12+6+7) = 2^25 = 32 MB.  Multiple PS-sized accesses
+    -- inside a single super-page must create separate 4 KB ATC entries with
+    -- correct PFAs.
+    --
+    -- Set CRP root entry 1 = $50000061  → $02000000–$03FFFFFF logical maps to
+    -- $50000000–$51FFFFFF physical.
+    -- ------------------------------------------------------------
+    -- Because TC has SRE=1 and our helper uses FC=101 (supervisor data),
+    -- translations route through SRP, so we must also populate the SRP root.
+    page_table(6144 + 1) <= x"50000061";   -- CRP root entry 1 (user view)
+    page_table(4096 + 1) <= x"50000061";   -- SRP root entry 1 (supervisor view)
+    wait for 20 ns;
+
+    translate_and_check("Linux32M @ $02000000", x"02000000", x"50000000"); -- base
+    translate_and_check("Linux32M @ $02000FFF", x"02000FFF", x"50000FFF"); -- end of first 4KB page
+    translate_and_check("Linux32M @ $02001000", x"02001000", x"50001000"); -- next 4KB page
+    translate_and_check("Linux32M @ $02100000", x"02100000", x"50100000"); -- 1 MB in
+    translate_and_check("Linux32M @ $03FFE000", x"03FFE000", x"51FFE000"); -- upper end
+    translate_and_check("Linux32M @ $03FFF000", x"03FFF000", x"51FFF000"); -- top of 32 MB
+
+    -- ------------------------------------------------------------
+    -- Phase K: explicit PFLUSHA via the pflush_req port.  Verify the ATC
+    -- flush actually invalidates entries so a subsequent translation re-walks
+    -- the (now-modified) page tables.  This is what Linux's `pflusha`
+    -- instruction after TC/SRP changes relies on.
+    --
+    -- Procedure:
+    --   1. Translate $02123000 — produces $50123000 (filled into ATC).
+    --   2. Modify CRP root entry 1 in memory: $50000061 -> $60000061.
+    --      Without a flush the ATC still has the old translation.
+    --   3. Translate $02123000 again WITHOUT flushing — should still give
+    --      $50123000 (stale ATC hit — this is the expected behaviour).
+    --   4. Issue PFLUSHA via pflush_req with pflush_mode="00100".
+    --   5. Translate $02123000 — walker re-reads the descriptor and now
+    --      yields $60123000.
+    -- ------------------------------------------------------------
+
+    -- Step 1: prime the ATC
+    translate_and_check("PFLUSHA pre     @ $02123000", x"02123000", x"50123000");
+
+    -- Step 2: mutate the descriptor without PFLUSH (ATC still has old PFA).
+    -- Update SRP root (where supervisor-FC walks go) since helper uses FC=101.
+    page_table(6144 + 1) <= x"60000061";   -- user view (CRP)
+    page_table(4096 + 1) <= x"60000061";   -- supervisor view (SRP)
+    wait for 40 ns;
+
+    -- Step 3: re-translate without flush — must hit the stale ATC entry
+    translate_and_check("PFLUSHA stale   @ $02123000", x"02123000", x"50123000");
+
+    -- Step 4: issue PFLUSHA.  Brief-word encoding (per PMMU at line ~4098):
+    --   pflush_mode = brief[12:10] = "001"  -> PFLUSHA variant
+    -- Brief $2400 has bit 10 set and bit 13 set — bit 13 is ignored by the
+    -- PMMU decode, so brief[12:10]="001" matches the PFLUSHA arm.
+    wait until rising_edge(clk);
+    pmmu_brief <= x"2400";  -- same encoding as kernel PFLUSHA opcode F000/2400
+    pmmu_addr  <= (others => '0');
+    pmmu_fc    <= "000";
+    pflush_req <= '1';
+    wait until rising_edge(clk);  -- cycle 1: PMMU captures, sets pflush_clear_atc
+    wait until rising_edge(clk);  -- cycle 2: flush dispatches when wstate=IDLE
+    pflush_req <= '0';
+    pmmu_brief <= x"0000";
+    wait for 300 ns;  -- let flush settle
+
+    report "[DEBUG] pre-post: page_table(6145)=0x" & hex8(page_table(6145)) &
+           " page_table(4097)=0x" & hex8(page_table(4097)) severity note;
+    translate_and_check("PFLUSHA post    @ $02123000", x"02123000", x"60123000");
+
+    -- Secondary verification: force an ATC flush via TC rewrite.  Use $20000061
+    -- (small TA) to avoid signed-integer overflow when helpers format it.
+    page_table(6144 + 1) <= x"20000061";
+    page_table(4096 + 1) <= x"20000061";
+    wait for 40 ns;
+    report "[DEBUG] pre-TC-rewrite: page_table(6145)=0x" & hex8(page_table(6145)) &
+           " page_table(4097)=0x" & hex8(page_table(4097)) severity note;
+    write_reg("10000", x"82C07760", '0');
+    wait for 200 ns;
+    report "[DEBUG] pre-TC-flush-post: page_table(6145)=0x" & hex8(page_table(6145)) &
+           " page_table(4097)=0x" & hex8(page_table(4097)) severity note;
+    translate_and_check("TC-flush post   @ $02123000", x"02123000", x"20123000");
 
     -- ------------------------------------------------------------
     -- Phase E: Attempt the degenerate TIA=0 config that would, in theory,
