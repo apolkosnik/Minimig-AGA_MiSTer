@@ -69,11 +69,21 @@ architecture tb of tb_pmmu_comprehensive is
   signal ptest_desc_addr : std_logic_vector(31 downto 0);
 
   type mem_t is array(0 to 16383) of std_logic_vector(31 downto 0);
-  signal pt : mem_t := (others => (others => '0'));
+  -- pt must be a shared variable (not a signal): both mem_sim (for walker
+  -- U/M-bit writebacks) and test_proc (for descriptor setup) need to write
+  -- to it.  A signal with two drivers resolves per-bit and produces 'X' on
+  -- any differing-bit overlap, which makes descriptors look invalid (DT='X').
+  shared variable pt : mem_t := (others => (others => '0'));
 
   -- Injectable bus-error: fire BERR on the Nth walker access.  -1 = disabled.
   signal berr_on_nth : integer := -1;
   signal berr_seen   : integer := 0;
+
+  -- Writeback capture: record the walker's U/M-bit descriptor writebacks so
+  -- tests can assert the exact bits the walker set.
+  signal wb_count   : integer := 0;
+  signal wb_last_addr : std_logic_vector(31 downto 0) := (others => '0');
+  signal wb_last_data : std_logic_vector(31 downto 0) := (others => '0');
 
   signal errors : integer := 0;
   signal checks : integer := 0;
@@ -151,10 +161,20 @@ begin
             mem_rdat <= (others => '0');
           else
             idx := to_integer(unsigned(mem_addr(15 downto 2)));
-            if idx < 16384 then
-              mem_rdat <= pt(idx);
+            if mem_we = '1' then
+              -- Walker descriptor writeback (U / M bit update).
+              if idx < 16384 then
+                pt(idx) := mem_wdat;
+              end if;
+              wb_count     <= wb_count + 1;
+              wb_last_addr <= mem_addr;
+              wb_last_data <= mem_wdat;
             else
-              mem_rdat <= (others => '0');
+              if idx < 16384 then
+                mem_rdat <= pt(idx);
+              else
+                mem_rdat <= (others => '0');
+              end if;
             end if;
             mem_ack <= '1';
           end if;
@@ -279,6 +299,8 @@ begin
     variable walks_after  : integer;
     variable log_addr     : std_logic_vector(31 downto 0);
     variable want_phys    : std_logic_vector(31 downto 0);
+    variable wb_snap      : integer;
+    variable wb_snap_data : std_logic_vector(31 downto 0);
 
   begin
     nreset <= '0';
@@ -322,7 +344,7 @@ begin
     -- F2: mid-walk DT=00 at level 1.  Root entry 8 points to a level-1 table
     --     at $00002000, but that table's entry 3 is zero (DT=00).
     --     Logical $02003000 has TIA=8, TIB=3 -> hits the zero entry.
-    pt(1024 + 8) <= x"00002002";   -- root[8]: table ptr to $2000, DT=10
+    pt(1024 + 8) := x"00002002";   -- root[8]: table ptr to $2000, DT=10
     -- level-1 entry 3 stays zero (default DT=00)
     wait for 20 ns;
     pflusha;
@@ -332,7 +354,7 @@ begin
     -- F3: write to write-protected (WP=1) page.  Install identity page with WP bit set.
     --     Descriptor = $04000065  (TA=$04000000, CI=1, rsvd=1, WP=1 bit2, DT=01)
     --     Actually $65 = 0110 0101: bit6 CI=1, bit5 rsvd=1, bit4 M=0, bit3 U=0, bit2 WP=1, bits1:0 DT=01
-    pt(1024 + 16) <= x"04000065";   -- root[16], logical $04xxxxxx->$04xxxxxx WP=1
+    pt(1024 + 16) := x"04000065";   -- root[16], logical $04xxxxxx->$04xxxxxx WP=1
     wait for 20 ns;
     pflusha;
     -- Read should succeed (WP doesn't block reads)
@@ -364,10 +386,10 @@ begin
     -- (which we'll inject BERR on).  This removes ambiguity: the walker has
     -- valid descriptor data for the root and only the second mem access
     -- returns BERR.
-    pt(1024 + 8) <= x"00002002";  -- root[8] valid table ptr @ $2000 (reuse from F2)
+    pt(1024 + 8) := x"00002002";  -- root[8] valid table ptr @ $2000 (reuse from F2)
     -- level-1 entry 0 at $2000+0*4: we'd like it to be a valid page but the
     -- BERR injection short-circuits the fetch before the data matters.
-    pt(2048 + 0) <= x"0A000061";  -- valid short-format page if BERR weren't firing
+    pt(2048 + 0) := x"0A000061";  -- valid short-format page if BERR weren't firing
     wait for 20 ns;
     pflusha;
     wait until rising_edge(clk);
@@ -416,7 +438,7 @@ begin
     --            zero and faults for any non-zero TIB.
     --     LOW  = physical base = $30000000
     pt(3072 + 2*2)     <= x"7FFF0041";  -- entry 2 HIGH at $3010
-    pt(3072 + 2*2 + 1) <= x"30000000";  -- entry 2 LOW  at $3014
+    pt(3072 + 2*2 + 1) := x"30000000";  -- entry 2 LOW  at $3014
     wait for 20 ns;
     pflusha;
     -- Effective shift at root for this config: PS+TIB+TIC+TID = 12+10+0+0 = 22
@@ -447,14 +469,14 @@ begin
     --     children)...  Actually with parent DT=11, children are 8-byte long.
     --     So the second level must also be long-format.
     pt(3072 + 3*2)     <= x"7FFF0003";  -- entry 3 HIGH: long table, no limit
-    pt(3072 + 3*2 + 1) <= x"00004000";  -- entry 3 LOW:  table at $4000
+    pt(3072 + 3*2 + 1) := x"00004000";  -- entry 3 LOW:  table at $4000
 
     -- Level-1 long-format table at $4000, 1024 entries × 8 bytes each.
     -- Logical $00C02000 -> TIA=3 (bits[31:22]=3), TIB=2 (bits[21:12]=2).
     -- Level-1 entry 2 at $4000 + 2*8 = $4010.  pt index = $4010/4 = 4100.
     -- Install a long-format early-term page: HIGH=DT=01, LOW=TA=$40000000.
     pt(4096 + 2*2)     <= x"00000001";  -- HIGH: DT=01, no attrs
-    pt(4096 + 2*2 + 1) <= x"40000000";  -- LOW: phys base
+    pt(4096 + 2*2 + 1) := x"40000000";  -- LOW: phys base
     wait for 20 ns;
     pflusha;
     probe("L2 long->long page @ $00C02000", x"00C02000", "101", '1',
@@ -466,7 +488,7 @@ begin
     --     Root entry 4 HIGH: DT=01 early-term long page with S bit (bit 8) set
     --     S-violation: user (FC=001) access should fault with MMUSR.S=1
     pt(3072 + 4*2)     <= x"7FFF0101";  -- L/U=0 LIMIT=$7FFF, S=1 (bit 8), DT=01
-    pt(3072 + 4*2 + 1) <= x"50000000";  -- TA=$50000000
+    pt(3072 + 4*2 + 1) := x"50000000";  -- TA=$50000000
     wait for 20 ns;
     pflusha;
     -- Supervisor (FC=101) should still succeed
@@ -485,12 +507,12 @@ begin
     -- Install entry 5 HIGH with L/U=0, LIMIT=3.
     --   HIGH = $0003_0003   (L/U=0, LIMIT=3, rsvd=0, DT=11)
     pt(3072 + 5*2)     <= x"00030003";
-    pt(3072 + 5*2 + 1) <= x"00005000";   -- level-1 table at $5000
+    pt(3072 + 5*2 + 1) := x"00005000";   -- level-1 table at $5000
     -- Populate level-1 table entries 0..3 with valid long early-term pages.
     -- Each entry is 8 bytes. Entry i at $5000 + i*8.
     for i in 0 to 3 loop
       pt(5120 + i*2)     <= x"00000001";                              -- HIGH DT=01
-      pt(5120 + i*2 + 1) <= std_logic_vector(to_unsigned(16#60000000# + i*16#100000#, 32));  -- TA=$60000000+i*1MB
+      pt(5120 + i*2 + 1) := std_logic_vector(to_unsigned(16#60000000# + i*16#100000#, 32));  -- TA=$60000000+i*1MB
     end loop;
     wait for 20 ns;
     pflusha;
@@ -513,7 +535,7 @@ begin
     -- L/U=1 LOWER limit: index >= LIMIT is valid, index < LIMIT faults.
     --   HIGH = $80030003  (L/U=1, LIMIT=3, DT=11)
     pt(3072 + 6*2)     <= x"80030003";
-    pt(3072 + 6*2 + 1) <= x"00005000";   -- reuse same level-1 table
+    pt(3072 + 6*2 + 1) := x"00005000";   -- reuse same level-1 table
     wait for 20 ns;
     pflusha;
     -- TIA=6 super-page base = (6 << 22) = $01800000.
@@ -608,10 +630,10 @@ begin
     --   $7FFF_0007
     ---------------------------------------------------------------
     pt(3072 + 7*2)     <= x"7FFF0007";   -- long table with WP=1
-    pt(3072 + 7*2 + 1) <= x"00007000";   -- table at $7000
+    pt(3072 + 7*2 + 1) := x"00007000";   -- table at $7000
     -- Level-1 entry 0: long early-term page at TA=$70000000, WP=0 (clean page)
     pt(7168 + 0*2)     <= x"00000001";   -- HIGH DT=01, no attrs
-    pt(7168 + 0*2 + 1) <= x"70000000";   -- LOW TA
+    pt(7168 + 0*2 + 1) := x"70000000";   -- LOW TA
     wait for 20 ns;
     pflusha;
     -- Logical $01C00000 -> TIA=7, TIB=0.  Read OK.
@@ -656,7 +678,7 @@ begin
 
     -- Root entry 25 = early-term page at $40000000 (remap super-page).
     -- Covers logical $06400000..$067FFFFF (4 MB) to physical $40000000..$403FFFFF.
-    pt(1024 + 25) <= x"40000061";
+    pt(1024 + 25) := x"40000061";
     wait for 20 ns;
     pflusha;
 
@@ -757,9 +779,9 @@ begin
     -- (TAs stay below $80000000 to avoid VHDL signed-integer overflow in
     -- test arithmetic.)  Clear residual entries from earlier phases.
     for i in 0 to 7 loop
-      pt(1024 + i) <= (others => '0');
+      pt(1024 + i) := (others => '0');
     end loop;
-    pt(1024 + 5) <= x"40000061";   -- FC=101 root entry, TA=$40000000
+    pt(1024 + 5) := x"40000061";   -- FC=101 root entry, TA=$40000000
     wait for 20 ns;
     pflusha;
 
@@ -784,11 +806,186 @@ begin
 
     -- Populate root[6] (sup prog) with a different remap to prove FC separately
     -- selects the entry.  Use TA=$30000000 so PFA = $30000000 + $12345000 = $42345000.
-    pt(1024 + 6) <= x"30000061";
+    pt(1024 + 6) := x"30000061";
     wait for 20 ns;
     pflusha;
     probe("X FCL=1 FC=sup-prog @ $12345678", x"12345678", "110", '1',
           x"42345678", false);
+
+    ---------------------------------------------------------------
+    -- PHASE U: verify the walker actually writes U=1 (bit 3) back into
+    -- descriptors that had U=0 before the walk.  Matches WinUAE behavior
+    -- in cpummu30.cpp:  descr[0] |= DESCR_U; desc_put_long(addr, descr);
+    ---------------------------------------------------------------
+    pflusha;
+    wait for 40 ns;
+
+    -- Fresh 2-level setup: CRP (short) at $1000 -> TC $80C0AA00 (PS=12 TIA=10 TIB=10)
+    write_reg("10011", x"7FFF0002", '1');
+    write_reg("10011", x"00001000", '0');
+    write_reg("10010", x"7FFF0002", '1');
+    write_reg("10010", x"00001000", '0');
+    write_reg("10000", x"80C0AA00", '0');
+    wait for 100 ns;
+    pflusha;
+
+    -- Root entry 40: table descriptor at $00005000, DT=10, U=0, WP=0.
+    -- Descriptor format: [31:4]=addr=$00005000 >>4 = $00000500, [3]=U=0,
+    -- [2]=WP=0, [1:0]=DT=10  ->  $00005002.
+    pt(1024 + 40) := x"00005002";
+
+    -- Level-2 table at $00005000; one page descriptor with M=0, U=0, WP=0.
+    -- Short-format page: [31:8]=phys, [7:4]=rsvd=0, [3]=U, [2]=WP, [1:0]=DT=01.
+    -- Use phys base $45678000 -> descriptor $45678001.
+    pt(1280 + 0) := x"45678001";   -- $5000/4 = 1280
+    wait for 40 ns;
+    pflusha;
+    wait for 40 ns;
+
+    -- Access logical $0A000000 -> TIA=40 (bits[31:22]=40=$28 => $0A000000),
+    -- TIB=0 (bits[21:12]=0), offset=0  ->  walks root[40] then level-2 entry 0.
+    -- Expected PFA: $45678000.
+    wb_snap := wb_count;
+    probe("U walk w/ U=0 tables @ $0A000000", x"0A000000", "101", '1',
+          x"45678000", false);
+    wait for 100 ns;
+
+    -- Verify at least one writeback was issued during the walk, and the last
+    -- writeback descriptor has bit 3 (U) set.  Walker writes U for the root
+    -- table descriptor (level 0) and also U for the leaf page (level 1) on read.
+    checks <= checks + 1;
+    if (wb_count - wb_snap) = 0 then
+      errors <= errors + 1;
+      report "[FAIL] U1 expected >=1 descriptor writeback, got 0"
+        severity error;
+    elsif wb_last_data(3) /= '1' then
+      errors <= errors + 1;
+      report "[FAIL] U1 last writeback data=0x" & hex8(wb_last_data) &
+             " -- U bit (3) not set"
+        severity error;
+    else
+      report "[PASS] U1 walker wrote U=1 back (" &
+             integer'image(wb_count - wb_snap) & " writebacks, last data=0x" &
+             hex8(wb_last_data) & ")"
+        severity note;
+    end if;
+
+    -- Re-access same page: U is now already set in both descriptors, so no
+    -- further writeback should occur.
+    pflusha;   -- ATC only; descriptors in memory stay as written
+    wait for 40 ns;
+    wb_snap := wb_count;
+    probe("U walk w/ U=1 tables @ $0A000000", x"0A000000", "101", '1',
+          x"45678000", false);
+    wait for 100 ns;
+    checks <= checks + 1;
+    if (wb_count - wb_snap) /= 0 then
+      errors <= errors + 1;
+      report "[FAIL] U2 expected 0 writebacks when U already set, got " &
+             integer'image(wb_count - wb_snap)
+        severity error;
+    else
+      report "[PASS] U2 no writeback when U already set (walker skipped update)"
+        severity note;
+    end if;
+
+    ---------------------------------------------------------------
+    -- PHASE V: M-bit writeback matrix.
+    --   V1. Write access to WP=0 page  -> M=1 (bit 4) written back
+    --   V2. Read  access to WP=0 page  -> M stays 0, no M-bit writeback
+    --   V3. Write access to WP=1 page  -> WP fault, no M=1 writeback
+    -- Table already set up from Phase U.  Use separate TIB indices so each
+    -- case operates on a fresh page descriptor.
+    ---------------------------------------------------------------
+
+    -- V1: page descriptor at TIB=1 (logical $0A001000), M=0, U=0, WP=0
+    pt(1280 + 1) := x"12341001";   -- phys=$12341000, DT=01
+    wait for 40 ns;
+    pflusha;
+    wait for 40 ns;
+
+    -- Write access — expect PFA and writeback with both U and M set.
+    wb_snap := wb_count;
+    probe("V1 write WP=0 @ $0A001000", x"0A001000", "101", '0',
+          x"12341000", false);
+    wait for 100 ns;
+
+    checks <= checks + 1;
+    if (wb_count - wb_snap) = 0 then
+      errors <= errors + 1;
+      report "[FAIL] V1 write to WP=0 produced no descriptor writeback"
+        severity error;
+    elsif wb_last_data(4) /= '1' or wb_last_data(3) /= '1' then
+      errors <= errors + 1;
+      report "[FAIL] V1 writeback data=0x" & hex8(wb_last_data) &
+             " -- expected both M(4) and U(3) set"
+        severity error;
+    else
+      report "[PASS] V1 write writes M=1 U=1 (" & integer'image(wb_count - wb_snap) &
+             " writebacks, last=0x" & hex8(wb_last_data) & ")"
+        severity note;
+    end if;
+
+    -- V2: page descriptor at TIB=2, fresh M=0, U=0, WP=0.
+    pt(1280 + 2) := x"23452001";   -- phys=$23452000
+    wait for 40 ns;
+    pflusha;
+    wait for 40 ns;
+
+    -- READ access — walker should write U=1 but NOT M=1.
+    wb_snap := wb_count;
+    probe("V2 read  WP=0 @ $0A002000", x"0A002000", "101", '1',
+          x"23452000", false);
+    wait for 100 ns;
+
+    checks <= checks + 1;
+    if (wb_count - wb_snap) = 0 then
+      errors <= errors + 1;
+      report "[FAIL] V2 read produced no writeback (expected U=1)"
+        severity error;
+    elsif wb_last_data(4) = '1' then
+      errors <= errors + 1;
+      report "[FAIL] V2 read wrote back M=1 (data=0x" & hex8(wb_last_data) &
+             ") -- M must only be set on writes"
+        severity error;
+    elsif wb_last_data(3) /= '1' then
+      errors <= errors + 1;
+      report "[FAIL] V2 read writeback data=0x" & hex8(wb_last_data) &
+             " -- U bit should be set"
+        severity error;
+    else
+      report "[PASS] V2 read writes U=1 M=0 (data=0x" &
+             hex8(wb_last_data) & ")"
+        severity note;
+    end if;
+
+    -- V3: page descriptor at TIB=3, M=0, U=0, WP=1.
+    -- $7X... with WP bit set (bit 2) -> $34563005.
+    pt(1280 + 3) := x"34563005";   -- phys=$34563000, WP=1, DT=01
+    wait for 40 ns;
+    pflusha;
+    wait for 40 ns;
+
+    -- Write to WP page — expect fault (MMUSR.W=1) and NO M-bit writeback.
+    wb_snap := wb_count;
+    probe("V3 write WP=1 @ $0A003000", x"0A003000", "101", '0',
+          (others => '0'), true, MMUSR_W, MMUSR_W);
+    wait for 100 ns;
+
+    -- Walker *may* still have written U (access happened) but MUST NOT
+    -- have written M=1.  Check the last writeback for M=0.
+    checks <= checks + 1;
+    if (wb_count - wb_snap) /= 0 and wb_last_data(4) = '1' then
+      errors <= errors + 1;
+      report "[FAIL] V3 write-to-WP set M=1 (data=0x" & hex8(wb_last_data) &
+             ") -- violates BUG #437 / WinUAE parity"
+        severity error;
+    else
+      report "[PASS] V3 write-to-WP did not set M (" &
+             integer'image(wb_count - wb_snap) & " writebacks, last=0x" &
+             hex8(wb_last_data) & ")"
+        severity note;
+    end if;
 
     ---------------------------------------------------------------
     -- Summary

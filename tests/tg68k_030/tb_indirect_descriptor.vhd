@@ -1,6 +1,7 @@
 -- tb_indirect_descriptor.vhd
 -- Testbench for MC68030 PMMU Indirect Descriptor Support
--- Tests: Short indirect (DT=10), Long indirect (DT=11), Nested indirect fault
+-- Tests: Short indirect (DT=10), Long indirect (DT=11), nested indirect fault,
+--        and root-final indirect descriptors
 -- Reference: MC68030 User Manual Section 9.5.3.2
 
 library ieee;
@@ -189,6 +190,13 @@ begin
       variable fault_detected : boolean := false;
       variable phys_captured : std_logic_vector(31 downto 0);
     begin
+      -- Let any previous fault response retire before starting the next request.
+      timeout := 0;
+      while fault = '1' and timeout < 10 loop
+        wait_cycles(1);
+        timeout := timeout + 1;
+      end loop;
+
       report "TEST: " & test_name;
       addr_log <= log_addr;
       fc <= "101";
@@ -196,15 +204,16 @@ begin
       req <= '1';
       wait_cycles(1);
 
-      -- Wait for walker to start (busy goes HIGH) or fault or translation to complete immediately
+      -- Wait for walker to start (busy goes HIGH). Ignore any stale fault state
+      -- until the new request has had a chance to launch its own walk.
       timeout := 0;
-      while busy = '0' and fault = '0' and timeout < 10 loop
+      while busy = '0' and timeout < 10 loop
         wait_cycles(1);
         timeout := timeout + 1;
       end loop;
 
-      -- Capture fault immediately if detected during startup
-      if fault = '1' then
+      if busy = '0' then
+        -- Walk never launched. Treat the settled fault state as the result.
         fault_detected := true;
         phys_captured := addr_phys;
         req <= '0';  -- Immediately deassert req on fault
@@ -344,6 +353,42 @@ begin
     report "=== TEST 4: Indirect to invalid descriptor (should fault) ===" severity note;
     -- Address with TIA=0, TIB=3 -> L1 entry 3 -> indirect -> invalid -> FAULT
     translate_addr(x"00003000", x"00000000", true, "Indirect to invalid (should fault)");
+
+    do_pflush;
+
+    report "" severity note;
+    report "=== TEST 5: Root-final short indirect descriptor ===" severity note;
+    -- Valid one-level table geometry using IS=5, TIA=15, PS=12.
+    -- Root table is final, so DT=10 must be treated as indirect, not another table.
+    page_table <= (others => (others => '0'));
+    wait_cycles(2);
+    page_table(0) <= x"00002002";        -- Root[0]: short indirect -> target at $2000
+    page_table(16#800#) <= x"CAFE0001";  -- Target page descriptor
+    write_reg(SEL_CRP, x"80000002", '1');
+    write_reg(SEL_CRP, x"00000000", '0');
+    write_reg(SEL_TC, x"80C5F000", '0');
+    wait_cycles(5);
+    do_pflush;
+    translate_addr(x"00000000", x"CAFE0000", false, "Root-final short indirect -> valid page");
+
+    do_pflush;
+
+    report "" severity note;
+    report "=== TEST 6: Root-final long indirect descriptor ===" severity note;
+    -- Same one-level geometry, but root entries are long-format and the final
+    -- DT=11 descriptor must be treated as long indirect.
+    page_table <= (others => (others => '0'));
+    wait_cycles(2);
+    page_table(0) <= x"00000003";        -- Root[0] high: long indirect descriptor
+    page_table(1) <= x"00002400";        -- Root[0] low : target descriptor at $2400
+    page_table(16#900#) <= x"00000001";  -- Target page descriptor high (DT=01)
+    page_table(16#901#) <= x"BEEF0000";  -- Target page descriptor low (page base)
+    write_reg(SEL_CRP, x"80000003", '1');
+    write_reg(SEL_CRP, x"00000000", '0');
+    write_reg(SEL_TC, x"80C5F000", '0');
+    wait_cycles(5);
+    do_pflush;
+    translate_addr(x"00000000", x"BEEF0000", false, "Root-final long indirect -> valid page");
 
     report "" severity note;
     report "========================================" severity note;

@@ -1,7 +1,9 @@
 -- tb_ptest_history_bits.vhd
--- Focused regression for MC68030 leveled PTEST table-search side effects.
--- Verifies that table-search PTEST updates encountered descriptor U bits,
--- returns the last descriptor address, and leaves the ATC unchanged.
+-- Focused regression for MC68030 leveled PTEST table-search behavior.
+-- Verifies that leveled PTEST:
+--   * returns the last descriptor address
+--   * reports cumulative S/W status like WinUAE
+--   * leaves descriptor history bits and the ATC unchanged
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -314,7 +316,7 @@ begin
         nreset <= '1';
         wait_cycles(3);
 
-        report "=== PTEST Descriptor History Regression ===" severity note;
+        report "=== PTEST Leveled Status Regression ===" severity note;
 
         write_reg(SEL_TC, x"80C0AA00", '0');
         write_reg(SEL_CRP, x"7FFFC002", '1');
@@ -329,7 +331,7 @@ begin
         read_reg(SEL_MMUSR, '0');
         check_equal("PTEST level 1 MMUSR", reg_rdat(15 downto 0), x"0001");
         check_equal("PTEST level 1 descriptor address", ptest_desc_addr, x"00001000");
-        check_equal("PTEST level 1 root U-bit", page_table_mem(16#400#), x"0000200A");
+        check_equal("PTEST level 1 root unchanged", page_table_mem(16#400#), x"00002002");
         check_equal("PTEST level 1 page unchanged", page_table_mem(16#800#), x"00100001");
 
         run_ptest("PTEST level 0 after leveled PTEST", x"8200", x"00000500", "101", false);
@@ -345,19 +347,64 @@ begin
         read_reg(SEL_MMUSR, '0');
         check_equal("PTEST level 2 MMUSR", reg_rdat(15 downto 0), x"0002");
         check_equal("PTEST level 2 descriptor address", ptest_desc_addr, x"00002000");
-        check_equal("PTEST level 2 root U-bit", page_table_mem(16#400#), x"0000200A");
-        check_equal("PTEST level 2 page U-bit", page_table_mem(16#800#), x"00100009");
+        check_equal("PTEST level 2 root unchanged", page_table_mem(16#400#), x"00002002");
+        check_equal("PTEST level 2 page unchanged", page_table_mem(16#800#), x"00100001");
 
         run_ptest("PTEST level 0 after full-walk PTEST", x"8200", x"00000500", "101", false);
         read_reg(SEL_MMUSR, '0');
         check_equal("PTEST level 0 after full walk keeps ATC empty", reg_rdat(15 downto 0), x"0400");
 
-        report "PTEST Descriptor History Summary: passed=" & integer'image(passed) &
+        run_pflusha;
+        write_reg(SEL_TC, x"80808880", '0');
+        write_reg(SEL_CRP, x"7FFF0003", '1');
+        write_reg(SEL_CRP, x"00001000", '0');
+
+        page_table_mem := (others => (others => '0'));
+        page_table_mem(16#400#) := x"7FFF0007";  -- Root entry high: WP=1, DT=11, U=0
+        page_table_mem(16#401#) := x"00002000";  -- Root entry low: table base $2000
+        page_table_mem(16#802#) := x"7FFF0102";  -- Level-2 entry high: S=1, DT=10, U=0
+        page_table_mem(16#803#) := x"00003000";  -- Level-2 entry low: table base $3000
+        page_table_mem(16#C02#) := x"00A50001";  -- Final page descriptor
+        wait_cycles(2);
+
+        run_ptest("PTEST level 1 WP accumulation", x"8600", x"00010234", "001", true);
+        read_reg(SEL_MMUSR, '0');
+        check_equal("PTEST level 1 WP MMUSR", reg_rdat(15 downto 0), x"0801");
+        check_equal("PTEST level 1 WP descriptor address", ptest_desc_addr, x"00001000");
+        check_equal("PTEST level 1 root long unchanged", page_table_mem(16#400#), x"7FFF0007");
+        check_equal("PTEST level 1 level-2 unchanged", page_table_mem(16#802#), x"7FFF0102");
+        check_equal("PTEST level 1 page unchanged", page_table_mem(16#C02#), x"00A50001");
+
+        run_ptest("PTEST level 0 after WP stop", x"8200", x"00010234", "001", false);
+        read_reg(SEL_MMUSR, '0');
+        check_equal("PTEST level 0 after WP stop keeps ATC empty", reg_rdat(15 downto 0), x"0400");
+
+        run_pflusha;
+        page_table_mem(16#400#) := x"7FFF0007";
+        page_table_mem(16#401#) := x"00002000";
+        page_table_mem(16#802#) := x"7FFF0102";
+        page_table_mem(16#803#) := x"00003000";
+        page_table_mem(16#C02#) := x"00A50001";
+        wait_cycles(2);
+
+        run_ptest("PTEST level 2 S/W accumulation", x"8A00", x"00010234", "001", true);
+        read_reg(SEL_MMUSR, '0');
+        check_equal("PTEST level 2 S/W MMUSR", reg_rdat(15 downto 0), x"2802");
+        check_equal("PTEST level 2 S/W descriptor address", ptest_desc_addr, x"00002008");
+        check_equal("PTEST level 2 root long unchanged", page_table_mem(16#400#), x"7FFF0007");
+        check_equal("PTEST level 2 level-2 unchanged", page_table_mem(16#802#), x"7FFF0102");
+        check_equal("PTEST level 2 page unchanged", page_table_mem(16#C02#), x"00A50001");
+
+        run_ptest("PTEST level 0 after S/W stop", x"8200", x"00010234", "001", false);
+        read_reg(SEL_MMUSR, '0');
+        check_equal("PTEST level 0 after S/W stop keeps ATC empty", reg_rdat(15 downto 0), x"0400");
+
+        report "PTEST leveled status summary: passed=" & integer'image(passed) &
                " failed=" & integer'image(failed) severity note;
 
         test_done <= true;
         assert failed = 0
-            report "PTEST descriptor history regression failed" severity failure;
+            report "PTEST leveled status regression failed" severity failure;
         wait;
     end process;
 

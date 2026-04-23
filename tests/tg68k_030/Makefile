@@ -66,7 +66,7 @@ help:
 	@echo "  test-regression  - Run MC68030 regression test suite (RECOMMENDED)"
 	@echo "  test-pmove-addressing - Test PMOVE with all legal addressing modes"
 	@echo "  test-pflush-ptest-pload - Test PFLUSH/PTEST/PLOAD instructions"
-	@echo "  test-ptest-history-bits - Check leveled PTEST descriptor history updates"
+	@echo "  test-ptest-history-bits - Check leveled PTEST status and no-history behavior"
 	@echo "  test-ptest-all-modes - Test PTEST with all EA modes and page table walks"
 	@echo "  test-pload-all-modes - Test PLOAD with all EA modes and page table walks"
 	@echo "  test-pflush-all-modes - Test 68030 PFLUSH forms (PFLUSHA/FC-mask/EA)"
@@ -435,7 +435,7 @@ test-pflush-ptest-pload: setup
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_pflush_ptest_pload
 
 test-ptest-history-bits: setup
-	@echo "Running PTEST descriptor history regression..."
+	@echo "Running PTEST leveled status regression..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_ptest_history_bits.vhd

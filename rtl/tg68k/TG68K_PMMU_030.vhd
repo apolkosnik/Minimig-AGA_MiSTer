@@ -746,6 +746,35 @@ architecture rtl of TG68K_PMMU_030 is
       return idx_bits(check_idx) = 0;
     end if;
   end function;
+  -- Early-termination limit checking uses the NEXT logical-address index field.
+  -- Root-pointer DT=01 is special:
+  --   * with FCL=0 the limit applies to TIA
+  --   * with FCL=1 the root-pointer limit is unused
+  function early_term_limit_applies(
+    is_root_pointer : std_logic;
+    fcl             : std_logic;
+    level           : integer;
+    idx_bits        : tc_bits_array_t
+  ) return boolean is
+  begin
+    if is_root_pointer = '1' then
+      if fcl = '1' then
+        return false;
+      end if;
+      return idx_bits(0) /= 0;
+    end if;
+    return not is_final_table_level(fcl, level, idx_bits);
+  end function;
+  function early_term_limit_level(
+    is_root_pointer : std_logic;
+    level           : integer
+  ) return integer is
+  begin
+    if is_root_pointer = '1' then
+      return 0;
+    end if;
+    return level + 1;
+  end function;
   -- Check if descriptor is a page descriptor (not table pointer)
   -- MC68030 descriptor format: bits 1:0 determine type
   -- 00 = Invalid, 01 = Page descriptor, 10/11 = Table pointer
@@ -932,6 +961,46 @@ architecture rtl of TG68K_PMMU_030 is
     -- Bits 5-3: Reserved (already 0)
     result(2 downto 0) := level;  -- Bits 2-0: N (Number of Levels for page walk)
     return result;
+  end function;
+  -- Leveled PTEST can stop on a table descriptor with S/W accumulated, but with
+  -- no B/L/I fault classification. This matches WinUAE's MMUSR stop-search state.
+  function encode_mmusr_ptest(
+    supervisor_violation : std_logic;
+    write_protect : std_logic;
+    modified : std_logic;
+    transparent : std_logic;
+    level : std_logic_vector(2 downto 0)
+  ) return std_logic_vector is
+    variable result : std_logic_vector(31 downto 0);
+  begin
+    result := (others => '0');
+    result(13) := supervisor_violation;   -- Bit 13: S
+    result(11) := write_protect;          -- Bit 11: W
+    result(9)  := modified;               -- Bit 9: M
+    result(6)  := transparent;            -- Bit 6: T
+    result(2 downto 0) := level;          -- Bits 2-0: N
+    return result;
+  end function;
+  function encode_ptest_table_status(
+    fc : std_logic_vector(2 downto 0);
+    accum_supervisor : std_logic;
+    current_supervisor : std_logic;
+    accum_write_protect : std_logic;
+    current_write_protect : std_logic;
+    level : std_logic_vector(2 downto 0)
+  ) return std_logic_vector is
+    variable supervisor_violation : std_logic := '0';
+  begin
+    if fc(2) = '0' and (accum_supervisor = '1' or current_supervisor = '1') then
+      supervisor_violation := '1';
+    end if;
+    return encode_mmusr_ptest(
+      supervisor_violation => supervisor_violation,
+      write_protect => accum_write_protect or current_write_protect,
+      modified => '0',
+      transparent => '0',
+      level => level
+    );
   end function;
   -- Calculate effective page shift for early termination
   -- MC68030 spec: When a page descriptor (DT=01) is found before the final table level,
@@ -2691,6 +2760,26 @@ begin
               end if;
               walk_desc_is_long <= '0';  -- Short format
               wstate <= W_PAGE;
+            elsif is_final_table_level(tc_fcl, 0, tc_idx_bits) then
+              -- DT=10 at the final level is a short-format indirect descriptor.
+              if ptest_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => '0',
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => mem_rdat(2),
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_desc_is_long <= '0';
+                indirect_addr <= mem_rdat(31 downto 2) & "00";
+                indirect_target_long <= mem_rdat(1) and mem_rdat(0);
+                wstate <= W_INDIRECT;
+              end if;
             else
               -- Short-format table descriptor; DT selects the next table format.
               -- TABLE descriptor U-bit writeback: set U before continuing
@@ -2708,10 +2797,12 @@ begin
               elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
-                walker_fault_status <= encode_mmusr_success(
-                  write_protect => mem_rdat(2),
-                  modified => '0',
-                  transparent => '0',
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => '0',
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => mem_rdat(2),
                   level => std_logic_vector(to_unsigned(walk_level + 1, 3))
                 );
                 wstate <= W_FAULT;
@@ -2758,6 +2849,25 @@ begin
               -- Page descriptor - go to W_PAGE for processing
              --  -- report "W_ROOT_LOW: Long-format page descriptor, continuing to W_PAGE" severity note;
               wstate <= W_PAGE;
+            elsif is_final_table_level(tc_fcl, 0, tc_idx_bits) then
+              -- DT=11 at the final level is a long-format indirect descriptor.
+              if ptest_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => walk_desc_high(8),
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => walk_desc_high(2),
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                indirect_addr <= mem_rdat(31 downto 2) & "00";
+                indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);
+                wstate <= W_INDIRECT;
+              end if;
             else
               -- Table descriptor - extract address from LOW word and continue
               -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
@@ -2778,10 +2888,12 @@ begin
               elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
-                walker_fault_status <= encode_mmusr_success(
-                  write_protect => walk_desc_high(2),
-                  modified => '0',
-                  transparent => '0',
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => walk_desc_high(8),
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => walk_desc_high(2),
                   level => std_logic_vector(to_unsigned(walk_level + 1, 3))
                 );
                 wstate <= W_FAULT;
@@ -2916,11 +3028,25 @@ begin
             elsif is_final_table_level(tc_fcl, 1, tc_idx_bits) then
               -- No more TI levels after this (FCL-aware check)
               -- DT=10 at final level = short-format indirect descriptor
-              walk_desc_is_long <= '0';  -- Short format indirect
-              indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
-              indirect_target_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects a long-format indirect target
-             --  -- report "W_PTR1: Short indirect descriptor detected (DT=10, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
-              wstate <= W_INDIRECT;
+              if ptest_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => '0',
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => mem_rdat(2),
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_desc_is_long <= '0';  -- Short format indirect
+                indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
+                indirect_target_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects a long-format indirect target
+               --  -- report "W_PTR1: Short indirect descriptor detected (DT=10, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+                wstate <= W_INDIRECT;
+              end if;
             else
               -- Continue to next level (short format table descriptor)
               -- TABLE descriptor U-bit writeback
@@ -2938,10 +3064,12 @@ begin
               elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
-                walker_fault_status <= encode_mmusr_success(
-                  write_protect => mem_rdat(2),
-                  modified => '0',
-                  transparent => '0',
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => '0',
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => mem_rdat(2),
                   level => std_logic_vector(to_unsigned(walk_level + 1, 3))
                 );
                 wstate <= W_FAULT;
@@ -2988,10 +3116,24 @@ begin
               -- No more TI levels after this (FCL-aware check)
               -- DT=11 at final level = long-format indirect descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
-              indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
-              indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT selects indirect target format
-             --  -- report "W_PTR1_LOW: Long indirect descriptor (DT=11, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
-              wstate <= W_INDIRECT;
+              if ptest_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => walk_desc_high(8),
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => walk_desc_high(2),
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
+                indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT selects indirect target format
+               --  -- report "W_PTR1_LOW: Long indirect descriptor (DT=11, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+                wstate <= W_INDIRECT;
+              end if;
             else
               -- Table descriptor - extract address from LOW word and continue
               -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
@@ -3012,10 +3154,12 @@ begin
               elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
-                walker_fault_status <= encode_mmusr_success(
-                  write_protect => walk_desc_high(2),
-                  modified => '0',
-                  transparent => '0',
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => walk_desc_high(8),
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => walk_desc_high(2),
                   level => std_logic_vector(to_unsigned(walk_level + 1, 3))
                 );
                 wstate <= W_FAULT;
@@ -3157,11 +3301,25 @@ begin
             elsif is_final_table_level(tc_fcl, 2, tc_idx_bits) then
               -- No more TI levels after this (FCL-aware check)
               -- DT=10 at final level = short-format indirect descriptor
-              walk_desc_is_long <= '0';  -- Short format indirect
-              indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
-              indirect_target_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects a long-format indirect target
-             --  -- report "W_PTR2: Short indirect descriptor detected (DT=10, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
-              wstate <= W_INDIRECT;
+              if ptest_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => '0',
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => mem_rdat(2),
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_desc_is_long <= '0';  -- Short format indirect
+                indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
+                indirect_target_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects a long-format indirect target
+               --  -- report "W_PTR2: Short indirect descriptor detected (DT=10, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+                wstate <= W_INDIRECT;
+              end if;
             else
               -- Short format table descriptor
               -- TABLE descriptor U-bit writeback
@@ -3179,10 +3337,12 @@ begin
               elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
-                walker_fault_status <= encode_mmusr_success(
-                  write_protect => mem_rdat(2),
-                  modified => '0',
-                  transparent => '0',
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => '0',
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => mem_rdat(2),
                   level => std_logic_vector(to_unsigned(walk_level + 1, 3))
                 );
                 wstate <= W_FAULT;
@@ -3229,10 +3389,24 @@ begin
               -- No more TI levels after this (FCL-aware check)
               -- DT=11 at final level = long-format indirect descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
-              indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
-              indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT selects indirect target format
-             --  -- report "W_PTR2_LOW: Long indirect descriptor (DT=11, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
-              wstate <= W_INDIRECT;
+              if ptest_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => walk_desc_high(8),
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => walk_desc_high(2),
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
+                indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT selects indirect target format
+               --  -- report "W_PTR2_LOW: Long indirect descriptor (DT=11, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+                wstate <= W_INDIRECT;
+              end if;
             else
               -- Table descriptor - extract address from LOW word and continue
               -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
@@ -3253,10 +3427,12 @@ begin
               elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
-                walker_fault_status <= encode_mmusr_success(
-                  write_protect => walk_desc_high(2),
-                  modified => '0',
-                  transparent => '0',
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => walk_desc_high(8),
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => walk_desc_high(2),
                   level => std_logic_vector(to_unsigned(walk_level + 1, 3))
                 );
                 wstate <= W_FAULT;
@@ -3370,11 +3546,25 @@ begin
               -- DT=10 at final level = short-format indirect descriptor (MC68030 spec section 9.5.3.2)
               -- The descriptor points to another descriptor (the target) that will be used
               -- Target address is in bits 31:2 (must be 4-byte aligned)
-              walk_desc_is_long <= '0';  -- Short format indirect
-              indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
-              indirect_target_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects a long-format indirect target
-             --  -- report "W_PTR3: Short indirect descriptor detected (DT=10, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
-              wstate <= W_INDIRECT;
+              if ptest_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => '0',
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => mem_rdat(2),
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_desc_is_long <= '0';  -- Short format indirect
+                indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address (4-byte aligned)
+                indirect_target_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects a long-format indirect target
+               --  -- report "W_PTR3: Short indirect descriptor detected (DT=10, final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+                wstate <= W_INDIRECT;
+              end if;
             else
               -- FCL=1 and TID!=0: Continue to W_PTR4 (5th level)
               -- TABLE descriptor U-bit writeback
@@ -3392,10 +3582,12 @@ begin
               elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
-                walker_fault_status <= encode_mmusr_success(
-                  write_protect => mem_rdat(2),
-                  modified => '0',
-                  transparent => '0',
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => '0',
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => mem_rdat(2),
                   level => std_logic_vector(to_unsigned(walk_level + 1, 3))
                 );
                 wstate <= W_FAULT;
@@ -3441,10 +3633,24 @@ begin
             elsif is_final_table_level(tc_fcl, 3, tc_idx_bits) then
               -- At final level with DT=11, this is a LONG INDIRECT descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
-              indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
-              indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT selects indirect target format
-             --  -- report "W_PTR3_LOW: Long indirect descriptor (final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
-              wstate <= W_INDIRECT;
+              if ptest_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => walk_desc_high(8),
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => walk_desc_high(2),
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                indirect_addr <= mem_rdat(31 downto 2) & "00";  -- Extract target address
+                indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT selects indirect target format
+               --  -- report "W_PTR3_LOW: Long indirect descriptor (final level), target addr=0x" & slv_to_hstring(mem_rdat(31 downto 2) & "00") severity note;
+                wstate <= W_INDIRECT;
+              end if;
             else
               -- FCL=1 and TID!=0: Continue to W_PTR4 (5th level)
               -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
@@ -3465,10 +3671,12 @@ begin
               elsif ptest_walk_pending = '1' and
                  to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
                 walker_fault <= '1';
-                walker_fault_status <= encode_mmusr_success(
-                  write_protect => walk_desc_high(2),
-                  modified => '0',
-                  transparent => '0',
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => walk_desc_high(8),
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => walk_desc_high(2),
                   level => std_logic_vector(to_unsigned(walk_level + 1, 3))
                 );
                 wstate <= W_FAULT;
@@ -3576,10 +3784,24 @@ begin
             else
               -- DT=10 at final level = short-format indirect descriptor
               -- W_PTR4 is always final level (TID is last TI field)
-              walk_desc_is_long <= '0';
-              indirect_addr <= mem_rdat(31 downto 2) & "00";
-              indirect_target_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects a long-format indirect target
-              wstate <= W_INDIRECT;
+              if ptest_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => '0',
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => mem_rdat(2),
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                walk_desc_is_long <= '0';
+                indirect_addr <= mem_rdat(31 downto 2) & "00";
+                indirect_target_long <= mem_rdat(1) and mem_rdat(0);  -- DT=11 selects a long-format indirect target
+                wstate <= W_INDIRECT;
+              end if;
             end if;
           end if;
         when W_PTR4_LOW =>
@@ -3610,9 +3832,23 @@ begin
             else
               -- DT=11 at final level = long-format indirect descriptor
               -- Target address is in LOW word bits 31:2 (longword aligned)
-              indirect_addr <= mem_rdat(31 downto 2) & "00";
-              indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT selects indirect target format
-              wstate <= W_INDIRECT;
+              if ptest_walk_pending = '1' and
+                 to_unsigned(walk_level + 1, 3) >= unsigned(ptest_level) then
+                walker_fault <= '1';
+                walker_fault_status <= encode_ptest_table_status(
+                  fc => saved_fc,
+                  accum_supervisor => walk_supervisor,
+                  current_supervisor => walk_desc_high(8),
+                  accum_write_protect => walk_write_protect,
+                  current_write_protect => walk_desc_high(2),
+                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                );
+                wstate <= W_FAULT;
+              else
+                indirect_addr <= mem_rdat(31 downto 2) & "00";
+                indirect_target_long <= walk_desc_high(1) and walk_desc_high(0);  -- DT selects indirect target format
+                wstate <= W_INDIRECT;
+              end if;
             end if;
           end if;
         when W_INDIRECT =>
@@ -3791,8 +4027,16 @@ begin
             -- is_final_table_level() encodes this for both FCL=0 and FCL=1.
             limit_fault := false;
             if walk_desc_is_long = '1'
-               and not is_final_table_level(tc_fcl, walk_level, tc_idx_bits) then
-              table_index := get_fcl_table_index(walk_vpn, saved_fc, tc_fcl, walk_level + 1, tc_initial_shift, tc_page_size, tc_idx_bits);
+               and early_term_limit_applies(walk_is_root_pointer, tc_fcl, walk_level, tc_idx_bits) then
+              table_index := get_fcl_table_index(
+                walk_vpn,
+                saved_fc,
+                tc_fcl,
+                early_term_limit_level(walk_is_root_pointer, walk_level),
+                tc_initial_shift,
+                tc_page_size,
+                tc_idx_bits
+              );
               if walk_desc_high(31) = '1' and to_unsigned(table_index, 15) < unsigned(walk_desc_high(30 downto 16)) then
                 -- Lower limit violation: index < limit
                 walker_fault <= '1';
@@ -3943,10 +4187,12 @@ begin
             if ptest_walk_pending = '1' and
                to_unsigned(walk_level, 3) >= unsigned(ptest_level) then
               walker_fault <= '1';
-              walker_fault_status <= encode_mmusr_success(
-                write_protect => desc_update_data(2),
-                modified => '0',
-                transparent => '0',
+              walker_fault_status <= encode_ptest_table_status(
+                fc => saved_fc,
+                accum_supervisor => walk_supervisor,
+                current_supervisor => '0',
+                accum_write_protect => walk_write_protect,
+                current_write_protect => '0',
                 level => std_logic_vector(to_unsigned(walk_level, 3))
               );
               wstate <= W_FAULT;
