@@ -23,6 +23,18 @@ end tb_pmmu_atc_comprehensive;
 
 architecture tb of tb_pmmu_atc_comprehensive is
 
+    function slv_to_hex(value : std_logic_vector) return string is
+        constant hex_chars : string := "0123456789ABCDEF";
+        variable result : string(1 to value'length / 4);
+        variable nibble : std_logic_vector(3 downto 0);
+    begin
+        for i in 0 to (value'length / 4) - 1 loop
+            nibble := value(value'length - 1 - i * 4 downto value'length - 4 - i * 4);
+            result(i + 1) := hex_chars(to_integer(unsigned(nibble)) + 1);
+        end loop;
+        return result;
+    end function;
+
     -- Clock and reset
     signal clk : std_logic := '0';
     signal nreset : std_logic := '0';
@@ -72,12 +84,15 @@ architecture tb of tb_pmmu_atc_comprehensive is
     -- MMU Configuration Exception
     signal mmu_config_err : std_logic;
     signal mmu_config_ack : std_logic := '0';
+    signal cpu_reset : std_logic := '0';
 
     -- PTEST Support
     signal ptest_desc_addr : std_logic_vector(31 downto 0);
 
     -- Test control
     signal test_number : integer := 0;
+
+    constant SEL_MMUSR : std_logic_vector(4 downto 0) := "11000";
 
     -- Page table memory simulation
     type mem_array_t is array (0 to 4095) of std_logic_vector(31 downto 0);
@@ -124,7 +139,8 @@ begin
         busy => busy,
         mmu_config_err => mmu_config_err,
         mmu_config_ack => mmu_config_ack,
-        ptest_desc_addr => ptest_desc_addr
+        ptest_desc_addr => ptest_desc_addr,
+        cpu_reset => cpu_reset
     );
 
     -- Clock generation
@@ -216,6 +232,36 @@ begin
             wait until rising_edge(clk);
         end procedure;
 
+        procedure read_pmmu_reg(
+            constant sel : in std_logic_vector(4 downto 0);
+            constant part : in std_logic
+        ) is
+        begin
+            wait until rising_edge(clk);
+            reg_sel <= sel;
+            reg_part <= part;
+            reg_re <= '1';
+            wait until rising_edge(clk);
+            reg_re <= '0';
+            wait for 1 ns;
+        end procedure;
+
+        procedure run_ptest_level0(
+            constant address : in std_logic_vector(31 downto 0);
+            constant func_code : in std_logic_vector(2 downto 0)
+        ) is
+        begin
+            pmmu_brief <= x"8200"; -- PTEST level 0 (ATC-only)
+            pmmu_addr <= address;
+            pmmu_fc <= func_code;
+            ptest_req <= '1';
+            wait until rising_edge(clk);
+            ptest_req <= '0';
+            wait until rising_edge(clk);
+            wait until rising_edge(clk);
+            read_pmmu_reg(SEL_MMUSR, '0');
+        end procedure;
+
     begin
         -- Reset
         nreset <= '0';
@@ -272,6 +318,33 @@ begin
             report "TEST 1 FAIL: Second access faulted" severity error;
         else
             report "TEST 1b PASS: Second access completed (ATC hit expected)" severity note;
+        end if;
+
+        -- PTEST level 0 should hit the ATC entry that was just populated.
+        run_ptest_level0(x"00011000", "101");
+        if reg_rdat(15 downto 0) = x"0000" then
+            report "TEST 1c PASS: PTEST level 0 sees ATC hit before reset" severity note;
+        else
+            report "TEST 1c FAIL: PTEST level 0 missed populated ATC before reset, MMUSR=$" &
+                   slv_to_hex(reg_rdat(15 downto 0)) severity error;
+        end if;
+
+        -- MC68030 RESET clears TC.E but must not invalidate the ATC. Re-enable
+        -- translation with PMOVEFD so the ATC contents remain observable.
+        cpu_reset <= '1';
+        wait until rising_edge(clk);
+        cpu_reset <= '0';
+        wait until rising_edge(clk);
+        reg_fd <= '1';
+        write_pmmu_reg("10000", x"80FAA000", '0');
+        reg_fd <= '0';
+
+        run_ptest_level0(x"00011000", "101");
+        if reg_rdat(15 downto 0) = x"0000" then
+            report "TEST 1d PASS: RESET preserved ATC entry across PMOVEFD re-enable" severity note;
+        else
+            report "TEST 1d FAIL: RESET lost ATC entry, MMUSR=$" &
+                   slv_to_hex(reg_rdat(15 downto 0)) severity error;
         end if;
 
         wait for 50 ns;

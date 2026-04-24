@@ -151,8 +151,11 @@ architecture behavior of tb_mmu_library_enable_probe is
     constant SUPV_PROG_PHYS_BASE : integer := 16#8000#;
     constant USER_PAGE_ADDR  : integer := 16#F80000#;
     constant EXPECTED_DATA   : std_logic_vector(31 downto 0) := x"DEADF00D";
+    constant DISABLED_INVALID_TC_VALUE : std_logic_vector(31 downto 0) := x"010F9800";
+    constant DISABLED_INVALID_TC_STORED : std_logic_vector(31 downto 0) := x"010F9800";
     constant INVALID_TC_VALUE : std_logic_vector(31 downto 0) := x"810F9800";
     constant INVALID_TC_STORED : std_logic_vector(31 downto 0) := x"810F9800";
+    constant DISABLED_INVALID_FALLTHRU_MARKER : std_logic_vector(31 downto 0) := x"D15AB1ED";
     constant INVALID_MARKER  : std_logic_vector(31 downto 0) := x"1BADB002";
     constant INVALID_FALLTHRU_MARKER : std_logic_vector(31 downto 0) := x"BAD0EC00";
     constant RTC_SRE_TC_ADDR : integer := 16#1130#;
@@ -656,6 +659,58 @@ begin
             mem(3) := x"0400"; -- PC
         end procedure;
     begin
+        init_mem_defaults;
+
+        write_long(16#00E0#, std_logic_vector(to_unsigned(INVALID_HANDLER_ADDR, 32)));
+        pc := INVALID_HANDLER_ADDR;
+        emit_word(pc, x"23FC"); emit_long(pc, INVALID_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32)));
+        emit_word(pc, x"60FE");
+
+        write_long(INVALID_TC_ADDR, DISABLED_INVALID_TC_VALUE);
+        write_long(INVALID_RESULT_ADDR, x"BAADF00D");
+
+        pc := 16#0400#;
+        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(INVALID_TC_ADDR, 32))); -- MOVEA.L #disabled-invalid-tc,A7
+        emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
+        emit_word(pc, x"23FC"); emit_long(pc, DISABLED_INVALID_FALLTHRU_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32)));
+        emit_word(pc, x"60FE");                              -- BRA.S * (stay alive if we get here)
+
+        report "=== disabled invalid TC does not trap ===" severity note;
+
+        clear_monitors <= '1';
+        nReset <= '0';
+        wait for 100 ns;
+        clear_monitors <= '0';
+        nReset <= '1';
+
+        for i in 0 to 4000 loop
+            wait until rising_edge(clk);
+            actual := read_long(INVALID_RESULT_ADDR);
+            exit when actual = INVALID_MARKER or actual = DISABLED_INVALID_FALLTHRU_MARKER;
+        end loop;
+
+        actual := read_long(INVALID_RESULT_ADDR);
+        if actual = DISABLED_INVALID_FALLTHRU_MARKER then
+            report "PASS: disabled invalid TC fell through without config exception" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: disabled invalid TC trapped or stalled, got=$" & slv_to_hex(actual) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if dbg_pmmu_tc = DISABLED_INVALID_TC_STORED and dbg_pmmu_tc(31) = '0' then
+            report "PASS: disabled invalid TC preserved raw register image" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: disabled invalid TC stored as $" & slv_to_hex(dbg_pmmu_tc) &
+                   " expected $" & slv_to_hex(DISABLED_INVALID_TC_STORED) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        clear_monitors <= '1';
+        nReset <= '0';
+        wait for 100 ns;
+        clear_monitors <= '0';
         init_mem_defaults;
 
         write_long(16#00E0#, std_logic_vector(to_unsigned(INVALID_HANDLER_ADDR, 32)));

@@ -98,7 +98,9 @@ architecture behavior of tb_ttr_tc_disabled is
 
     constant CLK_PERIOD : time := 10 ns;
     constant REG_TT0          : std_logic_vector(4 downto 0) := "00010";
+    constant REG_TT1          : std_logic_vector(4 downto 0) := "00011";
     constant REG_TC           : std_logic_vector(4 downto 0) := "10000";
+    constant TTR_ALL_ANY      : std_logic_vector(31 downto 0) := x"00FF8307";
     constant TTR_ALL_CI       : std_logic_vector(31 downto 0) := x"00FF8707";
     constant TTR_LOW16M_DATA  : std_logic_vector(31 downto 0) := x"00008514";
     constant TEST_ADDR        : std_logic_vector(31 downto 0) := x"01000000";
@@ -325,6 +327,50 @@ begin
             report "FAIL: PTEST lost transparent MMUSR.T with TC=0" severity error;
             fail_count := fail_count + 1;
         end if;
+
+        -- When both TTRs match, CI must be ORed across both registers.
+        write_reg(reg_sel, reg_wdat, reg_part, reg_we, REG_TT0, TTR_ALL_ANY);
+        write_reg(reg_sel, reg_wdat, reg_part, reg_we, REG_TT1, TTR_ALL_CI);
+        write_reg(reg_sel, reg_wdat, reg_part, reg_we, REG_TC, x"00000000");
+        wait_cycles(2);
+
+        addr_log <= TEST_ADDR;
+        fc <= "101";
+        rw <= '1';
+        is_insn <= '0';
+        req <= '1';
+        wait for 1 ns;
+        if addr_phys = TEST_ADDR and cache_inhibit = '1' and write_protect = '0' and fault = '0' then
+            report "PASS: dual TT0/TT1 match ORs cache inhibit" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: dual TT0/TT1 match did not OR cache inhibit"
+                   & " addr_phys=$" & slv_to_hex(addr_phys)
+                   & " ci=" & std_logic'image(cache_inhibit)
+                   & " wp=" & std_logic'image(write_protect)
+                   & " fault=" & std_logic'image(fault) severity error;
+            fail_count := fail_count + 1;
+        end if;
+        req <= '0';
+
+        pmmu_addr <= TEST_ADDR;
+        pmmu_fc <= "101";
+        pmmu_brief <= x"0200"; -- PTESTR, level 0
+        ptest_req <= '1';
+        wait until rising_edge(clk);
+        ptest_req <= '0';
+        wait_cycles(6);
+        if debug_mmusr(11) = '0' and debug_mmusr(6) = '1' and debug_mmusr(7 downto 0) = x"40" then
+            report "PASS: dual TT0/TT1 match keeps transparent MMUSR state coherent" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: dual TT0/TT1 PTEST MMUSR mismatch"
+                   & " mmusr=$" & slv_to_hex(debug_mmusr) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        -- Restore the single-TTR setup expected by the remaining low-16MB checks.
+        write_reg(reg_sel, reg_wdat, reg_part, reg_we, REG_TT1, x"00000000");
 
         -- 68030.library also programs TT0=$00008514 for low-16MB data accesses.
         -- This should cover the classic Amiga low-memory I/O space ($00xxxxxx)

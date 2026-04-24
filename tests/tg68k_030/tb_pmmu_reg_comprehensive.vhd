@@ -220,6 +220,16 @@ begin
       check_reg(sel, part, expected, x"FFFFFFFF", name);
     end procedure;
 
+    procedure ack_mmu_config_error_if_set is
+    begin
+      if mmu_config_err = '1' then
+        mmu_config_ack <= '1';
+        wait for CLK_PERIOD;
+        mmu_config_ack <= '0';
+        wait for CLK_PERIOD;
+      end if;
+    end procedure;
+
   begin
     nReset <= '0';
     wait for 5*CLK_PERIOD;
@@ -271,10 +281,11 @@ begin
     -- 1e: Reserved bits 30-26 must be cleared even with E=1
     -- Write 0xFFFFFFFF: E=1, but PS=15 (valid), IS=15, TIA=15, TIB=15, TIC=15, TID=15
     -- Field sum = 15+15+15+15+15+15 = 90 != 32 -> E cleared!
-    -- After mask: 0xFFFFFFFF & 0x83FFFFFF = 0x83FFFFFF, then E cleared = 0x03FFFFFF
-    -- But PS bit 23 is forced to 1 only when E=1, E gets cleared so no force
-    write_and_check(SEL_TC, '0', x"FFFFFFFF", x"03FFFFFF",
-      "TC all-1s - E cleared (invalid field sum), reserved cleared");
+    -- The TC register stores the masked value, but tc_enable remains low while
+    -- mmu_config_err stays asserted for the invalid field sum.
+    write_and_check(SEL_TC, '0', x"FFFFFFFF", x"83FFFFFF",
+      "TC all-1s - register stores masked value, tc_enable clamps low");
+    ack_mmu_config_error_if_set;
 
     -- 1f: Valid E=1 with FCL=1: PS=15, IS=0, TIA=9, TIB=8 (030.library config)
     -- 0x81F09800 & 0x83FFFFFF = 0x81F09800 (bits 30-26 already 0)
@@ -371,6 +382,7 @@ begin
     -- Result lower 16 bits      = 0000 0000 0000 0000 = 0x0000
     write_and_check(SEL_CRP, '1', x"ABCD5678", x"ABCD0000",
       "CRP_H reserved bits 15-2 verified cleared");
+    ack_mmu_config_error_if_set;
 
     -- 4g: CRP LOW with reserved bits set in 3-0 range
     -- 0x1234000F & 0xFFFFFFF0 = 0x12340000
@@ -426,10 +438,10 @@ begin
     check_reg(SEL_MMUSR, '0', x"00000000", x"0000FFFF",
       "MMUSR zero after reset");
 
-    -- 6b: Writing should not change read-only bits (no fault/translation active)
+    -- 6b: PMOVE to MMUSR is a direct 16-bit store on MC68030.
     write_reg(SEL_MMUSR, '0', x"0000FFFF");
-    check_reg(SEL_MMUSR, '0', x"00000000", x"0000FFFF",
-      "MMUSR write-1-to-clear has no effect when bits already 0");
+    check_reg(SEL_MMUSR, '0', x"0000FFFF", x"0000FFFF",
+      "MMUSR direct PMOVE store updates low 16 bits");
 
     -- 6c: Upper 16 bits always zero
     check_reg(SEL_MMUSR, '0', x"00000000", x"FFFF0000",
@@ -549,6 +561,7 @@ begin
              std_logic'image(tc_enable) severity error;
       errors <= errors + 1;
     end if;
+    ack_mmu_config_error_if_set;
 
     -- 11b: Invalid field sum (PS=8, IS=0, TIA=1, TIB=0 -> sum=9 != 32)
     -- 0x80801000: E=1, PS=8, IS=0, TIA=1, rest=0
@@ -561,6 +574,7 @@ begin
              std_logic'image(tc_enable) severity error;
       errors <= errors + 1;
     end if;
+    ack_mmu_config_error_if_set;
 
     -- =============================================
     -- TEST 12: PMOVEFD (Flush Disable)

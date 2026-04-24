@@ -260,7 +260,7 @@ end
 // BUG #408 FIX: When walker reads from chip RAM, force cpu_din to chip_data.
 // Without this, CPU's frozen address can set ramsel=1 (turbochip/kickstart), causing
 // cpu_din to select ramdat (SDRAM data at CPU address) instead of chip_data (page table).
-wire [15:0] cpu_din = (USE_68030_CACHE & cache_hit & ~walker_active) ? cache_data_out_16 :
+wire [15:0] cpu_din = (USE_68030_CACHE & cache_hit & ~walker_active & ~pmmu_fault_p) ? cache_data_out_16 :
                       walker_chip_ram ? chip_data :
                       ramsel ? ramdat : fastchip_selack ? fastchip_dout :
                       {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
@@ -1383,9 +1383,9 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 
 	// Cache interface logic
 	assign i_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
-	assign i_cache_req = i_cache_enabled & (cpustate_p == 2'b00); // Instruction fetch
+	assign i_cache_req = i_cache_enabled & (cpustate_p == 2'b00) & ~pmmu_fault_p; // Instruction fetch
 	assign d_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
-	assign d_cache_req = d_cache_enabled & (cpustate_p == 2'b10 | cpustate_p == 2'b11); // Data read/write
+	assign d_cache_req = d_cache_enabled & (cpustate_p == 2'b10 | cpustate_p == 2'b11) & ~pmmu_fault_p; // Data read/write
 	assign d_cache_we = (cpustate_p == 2'b11); // Write enable for data cache
 	
 	// Generate 32-bit data and byte enables from 16-bit CPU interface
@@ -1415,7 +1415,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// For SDRAM: ramsel drops when cpu_req goes low, potentially losing the write.
 	// Fix: Exclude write cycles (d_cache_we) from cache_hit used for clkena_in gating.
 	// Reads can still be served entirely from cache; writes must wait for bus completion.
-	assign cache_hit = (i_cache_hit & i_cache_req) | (d_cache_hit & d_cache_req & ~d_cache_we);
+	assign cache_hit = ((i_cache_hit & i_cache_req) | (d_cache_hit & d_cache_req & ~d_cache_we)) & ~pmmu_fault_p;
 	assign cache_miss = ((i_cache_enabled & ~i_cache_hit & i_cache_req) | (d_cache_enabled & ~d_cache_hit & d_cache_req));
 
 	// Connect cache fill interface to external memory controller

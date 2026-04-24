@@ -1161,6 +1161,10 @@ begin
       if cpu_reset = '1' then
         -- MC68030 RESET clears the translation enable bit in TC and the enable
         -- bits in both TTRs. Preserve the remaining register contents.
+        -- NOTE: spec 9.2.2 (PDF 14324-14326) states reset does not invalidate
+        -- ATC entries, but this implementation intentionally flushes on soft
+        -- reset to avoid stale translations surviving boot paths that the
+        -- Amiga firmware does not explicitly PFLUSHA. Keep the flush.
         TC(31) <= '0';
         TT0(15) <= '0';
         TT1(15) <= '0';
@@ -1336,19 +1340,16 @@ begin
             -- MMUSR is fully read-write via PMOVE (software clears before PTEST)
             MMUSR <= reg_wdat(15 downto 0);
           when others =>
-            -- BUG #446: Observable warning on illegal PMOVE reg_sel.
-            -- Real MC68030 treats undecoded P-register selectors as undefined;
-            -- this tree historically silently ignored them. That hid software
-            -- bugs (e.g. kernels walking the wrong extension-word bit field)
-            -- because register writes would simply fall into this null arm.
-            -- Make the event observable:
-            --  - a simulation-only assertion (catches unit tests)
-            --  - a sticky latch pmmu_illegal_reg_sel_seen (SignalTap / debug)
-            --  - a hardware trap via mmu_config_error (vector 56): an undecoded
-            --    P-register selector is semantically a PMMU configuration
-            --    error; reusing the existing sticky mmu_config_error path
-            --    (BUG #445) inherits the one-shot ack handshake and keeps
-            --    tc_en clamped until the kernel processes the trap.
+            -- MC68030 UM 9.6 (PDF line 15301-15303): "PMOVE for unsupported
+            -- registers (CAL, VAL, SCC, BAD, BACx, DRP, and AC)" is on the list
+            -- of instructions that "must be avoided or emulated in the
+            -- exception routine for F-line unimplemented instructions."
+            -- The kernel's PMOVE decode already F-line traps any reg_sel
+            -- outside the MC68030 set at TG68KdotC_Kernel.vhd (before the PMMU
+            -- sees reg_we). The "when others" branch here should therefore be
+            -- unreachable in real use; keep the sticky debug latch for
+            -- SignalTap but do NOT raise mmu_config_error (vector 56) — that
+            -- would be the wrong exception vector per the spec.
             -- synthesis translate_off
             assert false
               report "PMMU: illegal PMOVE reg_sel = " &
@@ -1357,18 +1358,16 @@ begin
               severity error;
             -- synthesis translate_on
             pmmu_illegal_reg_sel_seen <= '1';
-            mmu_config_error <= '1';  -- BUG #446: raise vector 56
           end case;
       end if;
-      -- BUG #446: also latch on illegal reg_sel during reads, and raise the
-      -- vector-56 hardware trap on the same criterion as writes.
+      -- Sticky debug latch on illegal reg_sel during reads; no trap raised
+      -- here (kernel F-line trap already handles it).
       if reg_re = '1' then
         case reg_sel is
           when "00010" | "00011" | "10000" | "10010" | "10011" | "11000" =>
             null;
           when others =>
             pmmu_illegal_reg_sel_seen <= '1';
-            mmu_config_error <= '1';
         end case;
       end if;
     end if;
@@ -1557,7 +1556,12 @@ begin
   -- must be consistent with addr_phys in the same cycle, otherwise the cache sees
   -- the correct I/O address but stale CI=0 from the previous RAM access and
   -- incorrectly caches I/O data.
+  -- MC68030 UM 9.3 (PDF line 14399): "If both registers match, the CI bits are
+  -- ORed together to generate the CIOUT signal." OR the WP bits on dual match
+  -- for consistency (spec is silent on WP for TTRs but UM 9.5.1.1 line 14571
+  -- prescribes OR for WP bits encountered during a table search).
   cache_inhibit <= '1' when fc = "111"  -- CPU space always cache-inhibited
+                   else (ttr0_ci_comb or ttr1_ci_comb) when (ttr0_match_comb = '1' and ttr1_match_comb = '1')
                    else ttr0_ci_comb when ttr0_match_comb = '1'
                    else ttr1_ci_comb when ttr1_match_comb = '1'
                    else '0' when tc_en = '0'
@@ -1565,6 +1569,7 @@ begin
                    else atc_ci_comb when atc_success_comb = '1'
                    else cache_inhibit_reg;
   write_protect <= '0' when fc = "111"  -- CPU space never write-protected
+                   else (ttr0_wp_comb or ttr1_wp_comb) when (ttr0_match_comb = '1' and ttr1_match_comb = '1')
                    else ttr0_wp_comb when ttr0_match_comb = '1'
                    else ttr1_wp_comb when ttr1_match_comb = '1'
                    else '0' when tc_en = '0'
@@ -1691,7 +1696,26 @@ begin
           else
             ttr_check(TT0, addr_log, fc, is_insn, rw, tmatch0, tci0, twp0);
             ttr_check(TT1, addr_log, fc, is_insn, rw, tmatch1, tci1, twp1);
-            if tmatch0 = '1' then
+            if tmatch0 = '1' and tmatch1 = '1' then
+              -- Dual transparent-translation hit: combine the attributes so the
+              -- registered state and MMUSR agree with the combinational outputs.
+              addr_phys_reg      <= addr_log;  -- Identity mapping
+              translated_addr    <= addr_log;  -- BUG #416
+              translated_fc      <= fc;        -- BUG #416
+              translated_rw      <= rw;
+              translated_cfg_seq <= xlat_cfg_seq;
+              cache_inhibit_reg  <= (tci0 or tci1);
+              write_protect_reg  <= (twp0 or twp1);
+              fault_reg          <= '0';
+              fault_status_reg <= encode_mmusr_success(
+                write_protect => (twp0 or twp1),
+                modified => '0',
+                transparent => '1',
+                level => "000"
+              );
+              translation_pending <= '0';
+              -- No walker needed for TTR
+            elsif tmatch0 = '1' then
               -- TTR0 match - use identity translation with TTR attributes (always successful, no faults)
               addr_phys_reg      <= addr_log;  -- Identity mapping
               translated_addr    <= addr_log;  -- BUG #416
@@ -1831,16 +1855,16 @@ begin
               fault_is_insn_reg <= is_insn;
               mmusr_update_value <= status_tmp;
               mmusr_update_req <= '1';
-              phys_base := unsigned(atc_phys_base(hit_idx));
-              offset    := unsigned(addr_log) - unsigned(atc_log_base(hit_idx));
-              phys_result := phys_base + offset;
-              addr_phys_reg <= std_logic_vector(phys_result);
+              -- Fault ATC entries intentionally do not preserve a usable physical
+              -- address or final page attributes. Mirror the direct walker fault
+              -- path so replay cannot probe/fill the cache via stale zeroed data.
+              addr_phys_reg <= addr_log;
               translated_addr <= addr_log;
               translated_fc   <= fc;
               translated_rw   <= rw;
               translated_cfg_seq <= xlat_cfg_seq;
-              cache_inhibit_reg <= atc_attr(hit_idx)(2);
-              write_protect_reg <= atc_attr(hit_idx)(0);
+              cache_inhibit_reg <= '1';
+              write_protect_reg <= '1';
             elsif rw = '0' and atc_attr(hit_idx)(0) = '1' then
               -- Write to write-protected page - generate fault (rw='0' is WRITE)
               status_tmp := encode_mmusr_fault(
@@ -2014,7 +2038,18 @@ begin
           --        " TT0_fcm=" & std_logic'image(TT0(2)) & std_logic'image(TT0(1)) & std_logic'image(TT0(0))
           --        severity note;
           -- synthesis translate_on
-          if tmatch0 = '1' then
+          if tmatch0 = '1' and tmatch1 = '1' then
+            -- Dual transparent-translation hit: combine attributes so PTEST
+            -- observes the same result as the live transparent path.
+            mmusr_update_value <= encode_mmusr_success(
+              write_protect => (twp0 or twp1),
+              modified => '0',
+              transparent => '1',
+              level => "000"
+            );
+            mmusr_update_req <= '1';
+            ptest_done <= '1';
+          elsif tmatch0 = '1' then
             -- synthesis translate_off
             report "PTEST_TTR0_HIT: ptest_addr=" & slv_to_hex(ptest_addr) & " fc=" &
                    std_logic'image(ptest_fc(2)) & std_logic'image(ptest_fc(1)) & std_logic'image(ptest_fc(0)) severity note;
