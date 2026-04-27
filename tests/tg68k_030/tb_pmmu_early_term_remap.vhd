@@ -359,6 +359,15 @@ begin
     translate_and_check("PS=10 @ $00000400", x"00000400", x"90000400");
     translate_and_check("PS=10 @ $00ABCDEF", x"00ABCDEF", x"90ABCDEF");
 
+    page_table(6144 + 0) <= x"90000361";
+    wait for 20 ns;
+    write_reg("10000", x"80A04882", '0');
+    wait for 100 ns;
+    translate_and_check("PS=10 masks PD low bits @ $00000000", x"00000000", x"90000000");
+    translate_and_check("PS=10 masks PD low bits @ $00000340", x"00000340", x"90000340");
+    page_table(6144 + 0) <= x"90000061";
+    wait for 20 ns;
+
     write_reg("10000", x"80B04881", '0');
     wait for 100 ns;
     translate_and_check("PS=11 @ $00000000", x"00000000", x"90000000");

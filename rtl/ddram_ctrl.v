@@ -60,6 +60,13 @@ wire cache_hit;
 wire cache_req;
 reg  cache_fill;
 wire cache_ack;
+reg        ddr_swap;
+reg [15:0] ddr_data;
+
+reg  [1:0] write_state;
+reg  [2:0] state;
+reg  [1:0] ba;
+reg [63:0] dout;
 
 cpu_cache_new cpu_cache
 (
@@ -79,7 +86,11 @@ cpu_cache_new cpu_cache
 	.wb_en            (cache_ack),              // write enable
 	.sdr_dat_r        (ddr_swap ? {ddr_data[7:0], ddr_data[15:8]} : ddr_data), // sdram read data
 	.sdr_read_req     (cache_req),              // sdram read request from cache
-	.sdr_read_ack     (cache_fill)              // sdram read acknowledge to cache
+	.sdr_read_ack     (cache_fill),             // sdram read acknowledge to cache
+	.snoop_act        (1'b0),
+	.snoop_adr        (28'h0),
+	.snoop_dat_w      (16'h0),
+	.snoop_bs         (2'b00)
 );
 
 // write buffer, enables CPU to continue while a write is in progress
@@ -90,36 +101,36 @@ reg  [1:0] writeBE;
 reg [28:1] writeAddr;
 reg [15:0] writeDat;
 
-always @ (posedge sysclk) begin
-	reg  [1:0] write_state;
-
-	if(~reset_n) begin
-		write_req   <= 0;
-		write_ena   <= 0;
-		write_state <= 0;
-	end else begin
-		case(write_state)
-			default:
-				if(ramsel && cpustate == 3) begin
-					writeAddr <= cpuAddr;
-					writeDat  <= ramshared ? {cpuWR[7:0],cpuWR[15:8]} : cpuWR;
-					writeBE   <= ramshared ? ~{cpuL, cpuU} : ~{cpuU, cpuL};
-					write_req <= 1;
-					if(cache_ack) begin
-						write_ena   <= 1;
-						write_state <= 1;
+	always @ (posedge sysclk) begin
+		if(~reset_n) begin
+			write_req   <= 0;
+			write_ena   <= 0;
+			write_state <= 0;
+		end else begin
+			write_ena <= 0;
+			case(write_state)
+				default:
+					if(ramsel && cpustate == 3) begin
+						writeAddr <= cpuAddr;
+						writeDat  <= ramshared ? {cpuWR[7:0],cpuWR[15:8]} : cpuWR;
+						writeBE   <= ramshared ? ~{cpuL, cpuU} : ~{cpuU, cpuL};
+						write_req <= 1;
+						if(cache_ack) begin
+							write_state <= 1;
+						end
 					end
-				end
 
-			1: if(write_ack) begin
-					// The SDRAM controller has picked up the request
-					write_req   <= 0;
-					write_state <= 2;
-				end
+				1: if(write_ack) begin
+						// The DDR controller has picked up the request; only now
+						// acknowledge the CPU so back-to-back writes cannot
+						// outrun the single-entry write buffer.
+						write_ena   <= 1;
+						write_req   <= 0;
+						write_state <= 2;
+					end
 
 			2: if(!write_ack) write_state <= 0;
 		endcase
-		if(~ramsel) write_ena <= 0;
 	end
 end
 
@@ -128,14 +139,7 @@ assign ramready = cache_hit || write_ena;
 assign DDRAM_CLK = sysclk;
 assign DDRAM_BURSTCNT = 1;
 
-reg        ddr_swap;
-reg [15:0] ddr_data;
-
 always @ (posedge sysclk) begin
-	reg  [2:0] state = 0;
-	reg  [1:0] ba;
-	reg [63:0] dout;
-
 	cache_fill <= 0;
 	ddr_data <= dout[{ba, 4'b0000} +:16];
 
@@ -147,6 +151,10 @@ always @ (posedge sysclk) begin
 	if(~reset_n) begin
 		state     <= 0;
 		write_ack <= 0;
+		ba        <= 0;
+		dout      <= 0;
+		ddr_swap  <= 0;
+		ddr_data  <= 0;
 	end
 	else begin
 		case(state)

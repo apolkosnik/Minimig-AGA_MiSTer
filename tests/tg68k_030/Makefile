@@ -12,7 +12,7 @@ PROJECT_ROOT := $(abspath $(TEST_DIR)/../..)
 RTL_DIR := $(PROJECT_ROOT)/rtl/tg68k
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-reg test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-movec-selector-latch test-cpsave-cprestore test-mmu-library-detect test-mmu-library-failure-path test-mmu-library-root-probe test-mmu-library-enable-probe test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-readback-guard test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-mmu-fetch-fault-frame test-mmu-user-data-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-history-bits test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-pflush-illegal-pc-relative test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-privilege test-moves-d16an-pc test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-chk-long-odd-addr test-movec-active-stack test-interrupt-mode-stack test-lockup-all test-chk-stacked-trace test-basic-chk-trace test-basic-div-jmp-trace test-basic-chk2-cputest-entry test-basic-chk2-cputest-highaddr test-basic-chk2-packed-state test-basic-chk2-packed-group2 test-basic-jmp-cputest-entry test-basic-jmp-sp-disp-entry test-basic-jmp-sp-disp-highaddr test-basic-cputest-entry test-basic-exception-flags test-basic-group2-user-trace test-basic-cputest test-basic-cputest-exact test-basic-cputest-exact-chk2bl test-basic-cputest-exact-chk2w test-basic-cputest-exact-jmp test-basic-cputest-runtime020 test-odd-exc-flags test-odd-irq-regwrite test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-jmp-65b2-trace test-jmp-65b2-index-target test-jmp-record37-ori-tail test-real validate setup help prepare-basic-cputest-data
+.PHONY: all clean test-pmmu test-pmmu-reg test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-movec-selector-latch test-cpsave-cprestore test-mmu-library-detect test-mmu-library-failure-path test-mmu-library-root-probe test-mmu-library-enable-probe test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-readback-guard test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-mmu-fetch-fault-frame test-mmu-user-data-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-history-bits test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-pflush-illegal-pc-relative test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-privilege test-moves-d16an-pc test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-chk-long-odd-addr test-movec-active-stack test-interrupt-mode-stack test-lockup-all test-chk-stacked-trace test-basic-chk-trace test-basic-div-jmp-trace test-divs-word-overflow test-basic-chk2-cputest-entry test-basic-chk2-cputest-highaddr test-basic-chk2-packed-state test-basic-chk2-packed-group2 test-basic-jmp-cputest-entry test-basic-jmp-sp-disp-entry test-basic-jmp-sp-disp-highaddr test-basic-cputest-entry test-basic-exception-flags test-basic-group2-user-trace test-basic-cputest test-basic-cputest-exact test-basic-cputest-exact-chk2bl test-basic-cputest-exact-chk2w test-basic-cputest-exact-jmp test-basic-cputest-runtime020 test-odd-exc-flags test-odd-irq-regwrite test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-jmp-65b2-trace test-jmp-65b2-index-target test-jmp-record37-ori-tail test-real validate setup help prepare-basic-cputest-data
 
 # Default target
 all: test-comprehensive
@@ -29,6 +29,7 @@ help:
 	@echo "  test-pmmu-reg    - Test PMMU register access, masks, and PMOVEFD behavior"
 	@echo "  test-pmmu-walker - Test PMMU page table walker (7 comprehensive tests)"
 	@echo "  test-pmmu-atc    - Test PMMU Address Translation Cache (10 comprehensive tests)"
+	@echo "  test-pmmu-fault-req-change - Test PMMU stale-fault clear on changed transfer"
 	@echo "  test-diagnostic  - Run PMMU diagnostic tests (RECOMMENDED FIRST)"
 	@echo "  test-cache       - Test Cache component only"
 	@echo "  test-cacr        - Test CACR register only"
@@ -88,6 +89,7 @@ help:
 	@echo "  test-chk-stacked-trace - Verify CHK/CHK2 stacked trace frames"
 	@echo "  test-basic-chk-trace - Verify BASIC-style CHK/CHK2 user trace cases"
 	@echo "  test-basic-div-jmp-trace - Verify BASIC-style DIV/JMP user trace cases"
+	@echo "  test-divs-word-overflow - Verify DIVS.W register-direct overflow CCR"
 	@echo "  test-basic-chk2-cputest-entry - Verify BASIC CHK2 first-post-RTE trace behavior"
 	@echo "  test-basic-chk2-cputest-highaddr - Verify BASIC CHK2 split-2 behavior with full 0x420xxxxx addresses"
 	@echo "  test-basic-chk2-packed-state - Reproduce the exact packed BASIC CHK2.W standalone-trace subcase"
@@ -126,6 +128,7 @@ help:
 	@echo "  test-lockup-cache-fill     - Test cache fill starving walker (ISSUE #5)"
 	@echo "  test-lockup-atc-handshake  - Test ATC completion handshake deadlock (ISSUE #4)"
 	@echo "  test-lockup-mem-ack-race   - Test memory request ack race conditions (ISSUE #6)"
+	@echo "  test-ddram-write-gap       - Test continuous two-word DDR write acknowledgement"
 	@echo "  test-lockup-all            - Run ALL lockup/deadlock tests"
 	@echo ""
 	@echo "  test-all         - Run original test suite"
@@ -261,6 +264,11 @@ test-cache: compile
 	@echo "Running Cache tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 30us; quit" tb_cache_030
 
+test-ddram-write-gap: setup
+	@echo "Running DDR write-buffer continuous write test..."
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(PROJECT_ROOT)/rtl/cpu_cache_new.v $(PROJECT_ROOT)/rtl/ddram_ctrl.v $(TEST_DIR)/tb_ddram_write_gap.v
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run -all; quit" tb_ddram_write_gap
+
 test-cacr: compile
 	@echo "Running CACR tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_cacr_test
@@ -367,6 +375,12 @@ test-pmmu-early-term-remap: compile
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_early_term_remap.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 50us; quit -f" tb_pmmu_early_term_remap
 
+test-pmmu-fault-req-change: setup
+	@echo "Running PMMU fault/request-change regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_fault_req_change.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 20us; quit -f" tb_pmmu_fault_req_change
+
 # Early-termination PFA reproducer - confirms PFA = TA + unused_LPA_bits for
 # identity ($A0), remap-to-zero ($D0 -> $00), TA!=0 remap ($E0 -> $50) super-pages,
 # and documents the degenerate TIA=0 case (blocked by MC68030 field-sum rule).
@@ -389,6 +403,7 @@ test-pmmu-comprehensive: compile
 # BUG #424 watchdog escape, BUG #417 physical-address routing.
 test-cpu-wrapper-pmmu: compile
 	@echo "Compiling cpu_wrapper.v and wrapper-level PMMU bench..."
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(TEST_DIR)/altsource_probe_stub.v
 	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(PROJECT_ROOT)/rtl/cpu_wrapper.v
 	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(TEST_DIR)/tb_cpu_wrapper_pmmu.v
 	@echo "Running wrapper-level PMMU test..."
@@ -590,6 +605,15 @@ test-basic-div-jmp-trace: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_basic_div_jmp_trace.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2ms; quit -f" tb_basic_div_jmp_trace
 
+test-divs-word-overflow: setup
+	@echo "Running DIVS.W word-overflow flag regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_divs_word_overflow_flags.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2ms; quit -f" tb_divs_word_overflow_flags
+
 test-basic-chk2-cputest-entry: setup
 	@echo "Running BASIC CHK2 cputest-entry trace tests..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
@@ -733,6 +757,7 @@ test-basic-cputest: setup
 	@echo "Running maintained BASIC opcode coverage..."
 	@$(MAKE) --no-print-directory test-basic-chk-trace
 	@$(MAKE) --no-print-directory test-basic-div-jmp-trace
+	@$(MAKE) --no-print-directory test-divs-word-overflow
 	@$(MAKE) --no-print-directory test-basic-cputest-entry
 	@$(MAKE) --no-print-directory test-basic-exception-flags
 	@$(MAKE) --no-print-directory test-basic-group2-user-trace

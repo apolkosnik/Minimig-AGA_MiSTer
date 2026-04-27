@@ -377,12 +377,12 @@ architecture logic of TG68K_ALU is
 
 	function divs_overflow_flags_68020(
 		dividend : std_logic_vector(31 downto 0);
-		divisor  : std_logic_vector(15 downto 0)
+		divisor  : std_logic_vector(15 downto 0);
+		quotient_abs_low8 : std_logic_vector(7 downto 0)
 	) return std_logic_vector is
 		variable flags        : std_logic_vector(3 downto 0) := (others => '0');
 		variable dividend_abs : unsigned(31 downto 0);
 		variable divisor_abs  : unsigned(15 downto 0);
-		variable aquot        : unsigned(31 downto 0);
 	begin
 		flags(1) := '1';
 		dividend_abs := abs_u32(dividend);
@@ -393,17 +393,17 @@ architecture logic of TG68K_ALU is
 		end if;
 
 		-- 68020/030 signed word DIV overflow keeps V=1,C=0 and derives NZ
-		-- from the internal 8-bit overflow quotient unless this is absolute overflow.
+		-- from the low byte of the absolute trial quotient unless this is
+		-- absolute overflow. The final sign-adjusted quotient byte gives the
+		-- wrong N state for negative divisors.
 		if dividend_abs(31 downto 16) >= divisor_abs then
 			return flags;
 		end if;
 
-		aquot := dividend_abs / resize(divisor_abs, 32);
-
-		if aquot(7 downto 0) = x"00" then
+		if quotient_abs_low8 = x"00" then
 			flags(2) := '1';
 		end if;
-		if aquot(7) = '1' then
+		if quotient_abs_low8(7) = '1' then
 			flags(3) := '1';
 		end if;
 
@@ -1443,7 +1443,7 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, OP
 									IF div_signed_latched='0' THEN
 										Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(47 downto 16), Flags(3 downto 0), true);
 									ELSE
-										Flags(3 downto 0) <= divs_overflow_flags_68020(div_dividend_latched(47 downto 16), div_src_latched(15 downto 0));
+										Flags(3 downto 0) <= divs_overflow_flags_68020(div_dividend_latched(47 downto 16), div_src_latched(15 downto 0), div_reg(7 downto 0));
 									END IF;
 								ELSIF div_signed_latched='0' THEN
 									Flags(3 downto 0) <= divu_overflow_flags_68020(div_dividend_latched(31 downto 0), Flags(3 downto 0), false);

@@ -170,6 +170,11 @@ architecture behavior of tb_mmu_library_enable_probe is
     constant RTC_SRE_TC_VALUE : std_logic_vector(31 downto 0) := x"82A08680";
     constant ENABLE_PROBE_DISABLE_TC_VALUE : std_logic_vector(31 downto 0) := x"01F09800";
     constant RTC_DISABLE_TC_VALUE : std_logic_vector(31 downto 0) := x"02A08680";
+    constant RTE_CRP_ADDR    : integer := 16#1170#;
+    constant RTE_STACK_ADDR  : integer := 16#1180#;
+    constant RTE_TC_ADDR     : integer := 16#1190#;
+    constant RTE_ROOT_ADDR   : integer := 16#3300#;
+    constant RTE_RETURN_ADDR : integer := 16#0600#;
 
     type low_mem_array_t  is array (0 to 32767) of std_logic_vector(15 downto 0);
     type page_mem_array_t is array (0 to 16383) of std_logic_vector(15 downto 0);
@@ -641,6 +646,9 @@ begin
         variable pass_count : integer := 0;
         variable fail_count : integer := 0;
         variable actual     : std_logic_vector(31 downto 0);
+        variable rte_return_seen : boolean;
+        variable rte_stack_wrong_phys : boolean;
+        variable rte_stack_user_fc_seen : boolean;
         procedure init_mem_defaults is
         begin
             for i in mem'range loop
@@ -920,6 +928,90 @@ begin
         else
             report "FAIL: stray FC=1 translation observed during probe window at logical $" &
                    slv_to_hex(unexpected_ud1_addr) severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        clear_monitors <= '1';
+        nReset <= '0';
+        wait for 100 ns;
+        clear_monitors <= '0';
+        init_mem_defaults;
+
+        write_long(RTE_CRP_ADDR + 0, x"80000002");
+        write_long(RTE_CRP_ADDR + 4, std_logic_vector(to_unsigned(RTE_ROOT_ADDR, 32)));
+        write_long(RTE_TC_ADDR, x"81F09800");
+
+        -- FCL root layout: FC1 intentionally remaps user-data through $00F80000,
+        -- while FC5 keeps supervisor stack reads identity. RTE must keep using
+        -- FC5 after popping a user SR and before all PC/format words are read.
+        write_long(RTE_ROOT_ADDR + 4,  x"00F80059"); -- FC=1 user data, wrong for RTE stack
+        write_long(RTE_ROOT_ADDR + 8,  x"00000059"); -- FC=2 user program
+        write_long(RTE_ROOT_ADDR + 20, x"00000059"); -- FC=5 supervisor data
+        write_long(RTE_ROOT_ADDR + 24, x"00000059"); -- FC=6 supervisor program
+
+        mem(RTE_STACK_ADDR / 2 + 0) := x"0000"; -- user SR
+        mem(RTE_STACK_ADDR / 2 + 1) := std_logic_vector(to_unsigned(RTE_RETURN_ADDR / 16#10000#, 16));
+        mem(RTE_STACK_ADDR / 2 + 2) := std_logic_vector(to_unsigned(RTE_RETURN_ADDR mod 16#10000#, 16));
+        mem(RTE_STACK_ADDR / 2 + 3) := x"0000"; -- format/vector
+
+        pc := 16#0400#;
+        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(RTE_CRP_ADDR, 32))); -- MOVEA.L #crp,A7
+        emit_word(pc, x"F017"); emit_word(pc, x"4C00");     -- PMOVE.Q (A7),CRP
+        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(RTE_TC_ADDR, 32))); -- MOVEA.L #tc,A7
+        emit_word(pc, x"F017"); emit_word(pc, x"4000");     -- PMOVE.L (A7),TC
+        emit_word(pc, x"F000"); emit_word(pc, x"2400");     -- PFLUSHA
+        emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(RTE_STACK_ADDR, 32))); -- MOVEA.L #frame,A7
+        emit_word(pc, x"4E73");                              -- RTE to user SR/PC
+        emit_word(pc, x"4AFC");                              -- ILLEGAL if RTE falls through
+        emit_word_at(RTE_RETURN_ADDR, x"60FE");              -- BRA.S * at user return PC
+
+        report "=== RTE stack FC remains supervisor under MMU ===" severity note;
+
+        nReset <= '1';
+        rte_return_seen := false;
+        rte_stack_wrong_phys := false;
+        rte_stack_user_fc_seen := false;
+
+        for i in 0 to 60000 loop
+            wait until rising_edge(clk);
+            if unsigned(dbg_tg68_pc) >= to_unsigned(RTE_RETURN_ADDR, 32) and
+               unsigned(dbg_tg68_pc) < to_unsigned(RTE_RETURN_ADDR + 4, 32) then
+                rte_return_seen := true;
+            end if;
+            if busstate = "10" and
+               unsigned(pmmu_addr_log_out) >= to_unsigned(RTE_STACK_ADDR, 32) and
+               unsigned(pmmu_addr_log_out) < to_unsigned(RTE_STACK_ADDR + 8, 32) then
+                if pmmu_addr_phys_out /= pmmu_addr_log_out then
+                    rte_stack_wrong_phys := true;
+                end if;
+                if fc_out = "001" then
+                    rte_stack_user_fc_seen := true;
+                end if;
+            end if;
+            exit when rte_return_seen;
+        end loop;
+
+        if rte_return_seen then
+            report "PASS: RTE reached the stacked user PC with MMU enabled" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: RTE did not reach stacked user PC" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if not rte_stack_wrong_phys then
+            report "PASS: RTE stack frame reads stayed identity-mapped through FC5" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: RTE stack frame read used remapped physical address" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        if not rte_stack_user_fc_seen then
+            report "PASS: RTE stack frame reads did not switch to FC1 after SR pop" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: RTE stack frame read switched to user-data FC1 before frame completion" severity error;
             fail_count := fail_count + 1;
         end if;
 

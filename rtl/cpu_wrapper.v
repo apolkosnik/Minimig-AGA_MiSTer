@@ -148,7 +148,7 @@ assign ramlds = walker_fast_ram ? 1'b0 : (sel_rtg ? uds_in : lds_in);
 assign ramuds = walker_fast_ram ? 1'b0 : (sel_rtg ? lds_in : uds_in);
 // BUG #405 FIX: Write high word [31:16] to low address, low word [15:0] to high address (big-endian)
 assign ramdin = (walker_fast_ram && walker_writing) ? (walker_write_low_phase ? walker_wdata_latch[31:16] : walker_wdata_latch[15:0]) :
-                 sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
+                sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
 assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
 //       Main  DDx  RTG  8M  128M  256M
@@ -166,26 +166,36 @@ assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 // All Zorro RAM goes to DDR3
 // BUG #136 FIX: Use walker_ramaddr when walker is accessing Fast RAM
 // BUG #417 FIX: Use bus_addr (physical address) for SDRAM address encoding
-assign ramaddr[28]    = walker_fast_ram ? walker_ramaddr[28] : (sel_zram & ~sel_z3ram0);
-assign ramaddr[27]    = walker_fast_ram ? walker_ramaddr[27] : (sel_zram & (~sel_z3ram1 | bus_addr[27]));
-assign ramaddr[26:23] = walker_fast_ram ? walker_ramaddr[26:23] : ((sel_z3ram0 | sel_z3ram1) ? bus_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}}));
-assign ramaddr[22:19] = walker_fast_ram ? walker_ramaddr[22:19] : ({4{sel_dd}} | bus_addr[22:19]);
-assign ramaddr[18]    = walker_fast_ram ? walker_ramaddr[18] : (sel_dd   | (sel_kicklower & bootrom) | bus_addr[18]);
-assign ramaddr[17:16] = walker_fast_ram ? walker_ramaddr[17:16] : ({2{sel_dd}} | bus_addr[17:16]);
-assign ramaddr[15:1]  = walker_fast_ram ? walker_ramaddr[15:1] : bus_addr[15:1];
+wire [28:1] ramaddr_comb;
+assign ramaddr_comb[28]    = walker_fast_ram ? walker_ramaddr[28] : (sel_zram & ~sel_z3ram0);
+assign ramaddr_comb[27]    = walker_fast_ram ? walker_ramaddr[27] : (sel_zram & (~sel_z3ram1 | bus_addr[27]));
+assign ramaddr_comb[26:23] = walker_fast_ram ? walker_ramaddr[26:23] : ((sel_z3ram0 | sel_z3ram1) ? bus_addr[26:23]: (sel_rtg ? 4'b1110 : {4{sel_dd}}));
+assign ramaddr_comb[22:19] = walker_fast_ram ? walker_ramaddr[22:19] : ({4{sel_dd}} | bus_addr[22:19]);
+assign ramaddr_comb[18]    = walker_fast_ram ? walker_ramaddr[18] : (sel_dd   | (sel_kicklower & bootrom) | bus_addr[18]);
+assign ramaddr_comb[17:16] = walker_fast_ram ? walker_ramaddr[17:16] : ({2{sel_dd}} | bus_addr[17:16]);
+assign ramaddr_comb[15:1]  = walker_fast_ram ? walker_ramaddr[15:1] : bus_addr[15:1];
+assign ramaddr = ramaddr_comb;
 
 // BUG #128 FIX: Compute properly encoded ramaddr for cache fill addresses
 // Cache fills use cache_addr (physical address from PMMU) instead of cpu_addr
-// This encoding is needed so DDR3 controller gets correct Z3 RAM addresses
+// This encoding must match the non-walker ramaddr_comb mapping. Otherwise cached
+// fills from Kickstart/bootrom aliases read a different SDRAM location than
+// uncached CPU cycles.
 wire sel_z3ram0_cache = (cache_addr[31:27] == z3ram_base0) && z3ram_ena0;
 wire sel_z3ram1_cache = (cache_addr[31:28] == z3ram_base1) && z3ram_ena1;
 wire sel_z2ram_cache  = !cache_addr[31:24] && (cache_addr[23] ^ |cache_addr[22:21]) && z2ram_ena;
 wire sel_zram_cache   = sel_z3ram0_cache | sel_z3ram1_cache | sel_z2ram_cache;
+wire sel_dd_cache     = (cache_addr[31:16] == 16'h00DD) && (cache_addr[15:13] == 'b010);
+wire sel_rtg_cache    = cache_addr[31:24] == 8'h02;
+wire sel_kicklower_cache = !cache_addr[31:24] && (cache_addr[23:18] == 6'b111110);
 
 assign cache_ramaddr[28]    = sel_zram_cache & ~sel_z3ram0_cache;
 assign cache_ramaddr[27]    = sel_zram_cache & (~sel_z3ram1_cache | cache_addr[27]);
-assign cache_ramaddr[26:23] = (sel_z3ram0_cache | sel_z3ram1_cache) ? cache_addr[26:23] : 4'b0000;
-assign cache_ramaddr[22:1]  = cache_addr[22:1];
+assign cache_ramaddr[26:23] = (sel_z3ram0_cache | sel_z3ram1_cache) ? cache_addr[26:23] : (sel_rtg_cache ? 4'b1110 : {4{sel_dd_cache}});
+assign cache_ramaddr[22:19] = {4{sel_dd_cache}} | cache_addr[22:19];
+assign cache_ramaddr[18]    = sel_dd_cache | (sel_kicklower_cache & bootrom) | cache_addr[18];
+assign cache_ramaddr[17:16] = {2{sel_dd_cache}} | cache_addr[17:16];
+assign cache_ramaddr[15:1]  = cache_addr[15:1];
 
 // BUG #136 FIX: Walker Fast RAM path support
 // When page tables are in Fast RAM (Z2, Z3), walker needs to drive RAM controller
@@ -414,6 +424,7 @@ wire        kernel_trapmake_p;
 wire [31:0] kernel_TG68_PC_p;
 wire [15:0] kernel_opcode_p;
 wire [15:0] kernel_last_opc_read_p;
+wire [31:0] kernel_data_read_p;
 wire [15:0] kernel_brief_p;
 wire [31:0] kernel_memaddr_reg_p;
 wire  [5:0] kernel_memmask_p;
@@ -427,10 +438,22 @@ wire        kernel_trap_addr_error_p;
 wire        kernel_trap_berr_p;
 wire        kernel_trap_mmu_berr_p;
 wire        kernel_make_berr_p;
+wire        kernel_berr_exception_active_p;
+wire        kernel_pmmu_fault_dispatched_p;
+wire        kernel_pmmu_fault_was_cleared_p;
+wire        kernel_pmmu_fault_rw_p;
+wire        kernel_pmmu_fault_is_insn_p;
+wire  [2:0] kernel_pmmu_fault_fc_p;
 wire        kernel_trap_1111_p;
 // T0 trace investigation signals
 wire        kernel_exec_directSR_p;
 wire        kernel_exec_to_SR_p;
+wire [31:0] kernel_usp_p;
+wire [31:0] kernel_msp_p;
+wire [31:0] kernel_isp_p;
+wire        kernel_a7_is_msp_p;
+wire        kernel_interrupt_mode_p;
+wire        kernel_rte_saved_mbit_p;
 // Register file debug (for REGS ISSP probe)
 wire [31:0] kernel_regfile_d0_p, kernel_regfile_d1_p, kernel_regfile_d2_p, kernel_regfile_d3_p;
 wire [31:0] kernel_regfile_d4_p, kernel_regfile_d5_p, kernel_regfile_d6_p, kernel_regfile_d7_p;
@@ -440,13 +463,21 @@ wire [31:0] kernel_regfile_a4_p, kernel_regfile_a5_p, kernel_regfile_a6_p, kerne
 wire        fmt_err_latched_p;
 wire [15:0] fmt_err_rte_word_p;
 wire  [7:0] fmt_err_sr_p;
+wire [31:0] fmt_err_pc_p;
+wire [31:0] fmt_err_addr_p;
 reg         pmmu_walker_ack_p;
 reg  [31:0] pmmu_walker_data_p;
 reg         pmmu_walker_berr_p;  // BUG #156 FIX: Bus error during table walk (sets MMUSR B bit)
 
+// SignalTap/ISSP debug is intentionally opt-in. Leaving these probes preserved in
+// normal builds adds very wide fanout on already timing-critical CPU/MMU paths.
+`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`define CPUWRAP_DEBUG_KEEP (* noprune, preserve *)
+`else
+`define CPUWRAP_DEBUG_KEEP
+`endif
+
 // SignalTap debug registers (from PMMU via Kernel)
-// noprune prevents Quartus from removing undriven-output registers
-// preserve keeps the signal name for Node Finder
 wire [31:0] stp_pmmu_tc_w, stp_pmmu_tt0_w, stp_pmmu_tt1_w;
 wire [31:0] stp_pmmu_crp_hi_w, stp_pmmu_crp_lo_w;
 wire [31:0] stp_pmmu_srp_hi_w, stp_pmmu_srp_lo_w;
@@ -459,46 +490,51 @@ wire [31:0] stp_ptr1_desc_addr_w, stp_ptr1_desc_data_w;
 wire [31:0] stp_ptr2_desc_addr_w, stp_ptr2_desc_data_w;
 wire [31:0] stp_ptr3_desc_addr_w, stp_ptr3_desc_data_w;
 wire  [2:0] stp_saved_fc_w;
-(* noprune, preserve *) reg [31:0] stp_pmmu_tc;
-(* noprune, preserve *) reg [31:0] stp_pmmu_tt0;
-(* noprune, preserve *) reg [31:0] stp_pmmu_tt1;
-(* noprune, preserve *) reg [31:0] stp_pmmu_crp_hi;
-(* noprune, preserve *) reg [31:0] stp_pmmu_crp_lo;
-(* noprune, preserve *) reg [31:0] stp_pmmu_srp_hi;
-(* noprune, preserve *) reg [31:0] stp_pmmu_srp_lo;
-(* noprune, preserve *) reg  [4:0] stp_pmmu_wstate;
-(* noprune, preserve *) reg        stp_pmmu_fault;
-(* noprune, preserve *) reg        stp_pmmu_busy;
+wire [15:0] kernel_pmmu_pending_flags_p;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_pmmu_tc;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_pmmu_tt0;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_pmmu_tt1;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_pmmu_crp_hi;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_pmmu_crp_lo;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_pmmu_srp_hi;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_pmmu_srp_lo;
+`CPUWRAP_DEBUG_KEEP reg  [4:0] stp_pmmu_wstate;
+`CPUWRAP_DEBUG_KEEP reg        stp_pmmu_fault;
+`CPUWRAP_DEBUG_KEEP reg        stp_pmmu_busy;
 // Sticky fault latch: captures fault and holds until JTAG reads new build
-(* noprune, preserve *) reg        stp_fault_latched;
-(* noprune, preserve *) reg        stp_walker_timeout_latched;
+`CPUWRAP_DEBUG_KEEP reg        stp_fault_latched;
+`CPUWRAP_DEBUG_KEEP reg        stp_walker_timeout_latched;
 // Latch PMMU state at moment of fault
-(* noprune, preserve *) reg [31:0] stp_fault_tc;
-(* noprune, preserve *) reg [31:0] stp_fault_addr;
-(* noprune, preserve *) reg  [4:0] stp_fault_wstate;
-(* noprune, preserve *) reg [21:0] stp_atc_buserr;
-(* noprune, preserve *) reg [21:0] stp_atc_valid;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_fault_tc;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_fault_addr;
+`CPUWRAP_DEBUG_KEEP reg  [4:0] stp_fault_wstate;
+`CPUWRAP_DEBUG_KEEP reg [21:0] stp_atc_buserr;
+`CPUWRAP_DEBUG_KEEP reg [21:0] stp_atc_valid;
 // Sticky: latch ATC buserr state at fault time
-(* noprune, preserve *) reg [21:0] stp_fault_atc_buserr;
-(* noprune, preserve *) reg [21:0] stp_fault_atc_valid;
+`CPUWRAP_DEBUG_KEEP reg [21:0] stp_fault_atc_buserr;
+`CPUWRAP_DEBUG_KEEP reg [21:0] stp_fault_atc_valid;
 // Sticky: latch fault status (MMUSR format) and walker's saved_addr at fault time
-(* noprune, preserve *) reg [15:0] stp_fault_mmusr;
-(* noprune, preserve *) reg [31:0] stp_fault_saved_addr;
-(* noprune, preserve *) reg [31:0] stp_fault_desc_addr;
-(* noprune, preserve *) reg [31:0] stp_fault_desc_data;
-(* noprune, preserve *) reg [31:0] stp_fault_ptr1_desc_addr;
-(* noprune, preserve *) reg [31:0] stp_fault_ptr1_desc_data;
-(* noprune, preserve *) reg [31:0] stp_fault_ptr2_desc_addr;
-(* noprune, preserve *) reg [31:0] stp_fault_ptr2_desc_data;
-(* noprune, preserve *) reg [31:0] stp_fault_ptr3_desc_addr;
-(* noprune, preserve *) reg [31:0] stp_fault_ptr3_desc_data;
-(* noprune, preserve *) reg  [2:0] stp_fault_fc;
+`CPUWRAP_DEBUG_KEEP reg [15:0] stp_fault_mmusr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_fault_saved_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_fault_desc_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_fault_desc_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_fault_ptr1_desc_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_fault_ptr1_desc_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_fault_ptr2_desc_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_fault_ptr2_desc_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_fault_ptr3_desc_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_fault_ptr3_desc_data;
+`CPUWRAP_DEBUG_KEEP reg  [2:0] stp_fault_fc;
 wire [0:0] pmmu_issp_source;
 wire [0:0] pmm2_issp_source;
+`ifndef ENABLE_CPUWRAP_DEBUG_ISSP
+assign pmmu_issp_source = 1'b0;
+assign pmm2_issp_source = 1'b0;
+`endif
 // Kernel internal state debug (6 bits, probe limit=511)
-(* noprune, preserve *) reg  [2:0] stp_ipl_nr;
-(* noprune, preserve *) reg        stp_setendOPC;
-(* noprune, preserve *) reg        stp_stop;
+`CPUWRAP_DEBUG_KEEP reg  [2:0] stp_ipl_nr;
+`CPUWRAP_DEBUG_KEEP reg        stp_setendOPC;
+`CPUWRAP_DEBUG_KEEP reg        stp_stop;
 always @(posedge clk) begin
 	stp_pmmu_tc     <= stp_pmmu_tc_w;
 	stp_pmmu_tt0    <= stp_pmmu_tt0_w;
@@ -618,22 +654,25 @@ end
 //   [59]      trace_stk_grp2_entered
 //   [58:0]    unused
 
-(* noprune, preserve *) reg        excf_chk_dispatch_latched;
-(* noprune, preserve *) reg        excf_make_trace_cap;
-(* noprune, preserve *) reg        excf_exec_trap_chk_cap;
-(* noprune, preserve *) reg        excf_set_trap_chk_cap;
-(* noprune, preserve *) reg  [7:0] excf_flagsSR_cap;
-(* noprune, preserve *) reg [11:0] excf_trap_vector_cap;
-(* noprune, preserve *) reg  [7:0] excf_next_ms_cap;
-(* noprune, preserve *) reg        excf_fmt1_latched;
-(* noprune, preserve *) reg        excf_useStackframe2_1;
-(* noprune, preserve *) reg [15:0] excf_format_word_1;
-(* noprune, preserve *) reg        excf_fmt2_latched;
-(* noprune, preserve *) reg        excf_useStackframe2_2;
-(* noprune, preserve *) reg [15:0] excf_format_word_2;
-(* noprune, preserve *) reg        excf_trace_stk_grp2_entered;
+`CPUWRAP_DEBUG_KEEP reg        excf_chk_dispatch_latched;
+`CPUWRAP_DEBUG_KEEP reg        excf_make_trace_cap;
+`CPUWRAP_DEBUG_KEEP reg        excf_exec_trap_chk_cap;
+`CPUWRAP_DEBUG_KEEP reg        excf_set_trap_chk_cap;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] excf_flagsSR_cap;
+`CPUWRAP_DEBUG_KEEP reg [11:0] excf_trap_vector_cap;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] excf_next_ms_cap;
+`CPUWRAP_DEBUG_KEEP reg        excf_fmt1_latched;
+`CPUWRAP_DEBUG_KEEP reg        excf_useStackframe2_1;
+`CPUWRAP_DEBUG_KEEP reg [15:0] excf_format_word_1;
+`CPUWRAP_DEBUG_KEEP reg        excf_fmt2_latched;
+`CPUWRAP_DEBUG_KEEP reg        excf_useStackframe2_2;
+`CPUWRAP_DEBUG_KEEP reg [15:0] excf_format_word_2;
+`CPUWRAP_DEBUG_KEEP reg        excf_trace_stk_grp2_entered;
 
 wire [0:0] excf_issp_source;
+`ifndef ENABLE_CPUWRAP_DEBUG_ISSP
+assign excf_issp_source = 1'b0;
+`endif
 
 always @(posedge clk or negedge reset) begin
 	if (!reset) begin
@@ -718,6 +757,7 @@ end
 //   + FAULT_FC[2:0] = 3
 //   + IPL_NR[2:0] + setendOPC + STOP = 5
 //   Total = 511 (max for altsource_probe)
+`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (0),
@@ -740,8 +780,10 @@ altsource_probe #(
 	         cpu_halted_p}),
 	.source (pmmu_issp_source)
 );
+`endif
 
 // Secondary PMMU sticky probe: per-level descriptor snapshots (A/B/C)
+`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (1),
@@ -756,9 +798,11 @@ altsource_probe #(
 	         stp_fault_ptr3_desc_addr, stp_fault_ptr3_desc_data}),
 	.source (pmm2_issp_source)
 );
+`endif
 
 // Tertiary ISSP: CHK/Group2 exception frame trap-event latch (instance 2)
 // Probe width = 128 bits; source width = 1 (bit [0] clears the latch)
+`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (2),
@@ -784,6 +828,7 @@ altsource_probe #(
 	         59'b0}),
 	.source (excf_issp_source)
 );
+`endif
 
 // ============================================================================
 // ISSP Instance 3: CPUS - CPU Core State (live + sticky hang capture)
@@ -803,60 +848,215 @@ altsource_probe #(
 // Source: 1 bit (clear sticky latch)
 // Total probe = 223 + 224 = 447
 
-(* noprune, preserve *) reg [31:0] stp_cpu_pc;
-(* noprune, preserve *) reg [15:0] stp_cpu_opcode;
-(* noprune, preserve *) reg  [1:0] stp_cpu_state;
-(* noprune, preserve *) reg  [7:0] stp_cpu_micro_state;
-(* noprune, preserve *) reg  [7:0] stp_cpu_next_micro_state;
-(* noprune, preserve *) reg  [5:0] stp_cpu_memmask;
-(* noprune, preserve *) reg  [7:0] stp_cpu_flagsSR;
-(* noprune, preserve *) reg        stp_cpu_SVmode;
-(* noprune, preserve *) reg [31:0] stp_cpu_memaddr;
-(* noprune, preserve *) reg [31:0] stp_cpu_exe_pc;
-(* noprune, preserve *) reg [15:0] stp_cpu_last_opc_read;
-(* noprune, preserve *) reg [15:0] stp_cpu_brief;
-(* noprune, preserve *) reg [31:0] stp_cpu_trap_vector;
-(* noprune, preserve *) reg        stp_cpu_trap_illegal;
-(* noprune, preserve *) reg        stp_cpu_trap_priv;
-(* noprune, preserve *) reg        stp_cpu_trap_addr_error;
-(* noprune, preserve *) reg        stp_cpu_trap_berr;
-(* noprune, preserve *) reg        stp_cpu_trap_mmu_berr;
-(* noprune, preserve *) reg        stp_cpu_make_berr;
-(* noprune, preserve *) reg        stp_cpu_trap_1111;
-(* noprune, preserve *) reg        stp_cpu_trapmake;
-(* noprune, preserve *) reg        stp_cpu_decodeOPC;
-(* noprune, preserve *) reg        stp_cpu_setnextpass;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_cpu_pc;
+`CPUWRAP_DEBUG_KEEP reg [15:0] stp_cpu_opcode;
+`CPUWRAP_DEBUG_KEEP reg  [1:0] stp_cpu_state;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] stp_cpu_micro_state;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] stp_cpu_next_micro_state;
+`CPUWRAP_DEBUG_KEEP reg  [5:0] stp_cpu_memmask;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] stp_cpu_flagsSR;
+`CPUWRAP_DEBUG_KEEP reg        stp_cpu_SVmode;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_cpu_memaddr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_cpu_exe_pc;
+`CPUWRAP_DEBUG_KEEP reg [15:0] stp_cpu_last_opc_read;
+`CPUWRAP_DEBUG_KEEP reg [15:0] stp_cpu_brief;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_cpu_trap_vector;
+`CPUWRAP_DEBUG_KEEP reg        stp_cpu_trap_illegal;
+`CPUWRAP_DEBUG_KEEP reg        stp_cpu_trap_priv;
+`CPUWRAP_DEBUG_KEEP reg        stp_cpu_trap_addr_error;
+`CPUWRAP_DEBUG_KEEP reg        stp_cpu_trap_berr;
+`CPUWRAP_DEBUG_KEEP reg        stp_cpu_trap_mmu_berr;
+`CPUWRAP_DEBUG_KEEP reg        stp_cpu_make_berr;
+`CPUWRAP_DEBUG_KEEP reg        stp_cpu_trap_1111;
+`CPUWRAP_DEBUG_KEEP reg        stp_cpu_trapmake;
+`CPUWRAP_DEBUG_KEEP reg        stp_cpu_decodeOPC;
+`CPUWRAP_DEBUG_KEEP reg        stp_cpu_setnextpass;
 
 // Sticky hang capture: latches CPU state when CPU stops advancing
 // Detection: if micro_state and PC don't change for 2^16 cycles (~580us at 114MHz)
-(* noprune, preserve *) reg        stp_hang_latched;
-(* noprune, preserve *) reg        stp_hang_overflow;  // counter saturated
-(* noprune, preserve *) reg [31:0] stp_hang_pc;
-(* noprune, preserve *) reg [15:0] stp_hang_opcode;
-(* noprune, preserve *) reg  [1:0] stp_hang_state;
-(* noprune, preserve *) reg  [7:0] stp_hang_micro_state;
-(* noprune, preserve *) reg  [7:0] stp_hang_next_micro_state;
-(* noprune, preserve *) reg  [5:0] stp_hang_memmask;
-(* noprune, preserve *) reg  [7:0] stp_hang_flagsSR;
-(* noprune, preserve *) reg        stp_hang_SVmode;
-(* noprune, preserve *) reg [31:0] stp_hang_memaddr;
-(* noprune, preserve *) reg [31:0] stp_hang_exe_pc;
-(* noprune, preserve *) reg [31:0] stp_hang_trap_vector;
-(* noprune, preserve *) reg        stp_hang_trapmake;
-(* noprune, preserve *) reg        stp_hang_pmmu_fault;
-(* noprune, preserve *) reg        stp_hang_cpu_halted;
+`CPUWRAP_DEBUG_KEEP reg        stp_hang_latched;
+`CPUWRAP_DEBUG_KEEP reg        stp_hang_overflow;  // counter saturated
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_hang_pc;
+`CPUWRAP_DEBUG_KEEP reg [15:0] stp_hang_opcode;
+`CPUWRAP_DEBUG_KEEP reg  [1:0] stp_hang_state;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] stp_hang_micro_state;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] stp_hang_next_micro_state;
+`CPUWRAP_DEBUG_KEEP reg  [5:0] stp_hang_memmask;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] stp_hang_flagsSR;
+`CPUWRAP_DEBUG_KEEP reg        stp_hang_SVmode;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_hang_memaddr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_hang_exe_pc;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_hang_trap_vector;
+`CPUWRAP_DEBUG_KEEP reg        stp_hang_trapmake;
+`CPUWRAP_DEBUG_KEEP reg        stp_hang_pmmu_fault;
+`CPUWRAP_DEBUG_KEEP reg        stp_hang_cpu_halted;
 
 reg [15:0] hang_detect_counter;
 reg [31:0] hang_prev_pc;
 reg  [7:0] hang_prev_micro;
 wire [0:0] cpus_issp_source;  // JTAG clear for hang latch and T0 latch
+`ifndef ENABLE_CPUWRAP_DEBUG_ISSP
+assign cpus_issp_source = 1'b0;
+`endif
+wire [0:0] fmtd_issp_source;
+wire [0:0] rted_issp_source;
+wire [0:0] trpd_issp_source;
+wire [0:0] haltd_issp_source;
+wire [0:0] stkd_issp_source;
+
+// RTE microstate encoding from TG68K_Pack.vhd.
+localparam [7:0] MS_RTE1 = 8'd44;
+localparam [7:0] MS_RTE2 = 8'd45;
+localparam [7:0] MS_RTE3 = 8'd46;
+localparam [7:0] MS_RTE4 = 8'd47;
+localparam [7:0] MS_RTE6 = 8'd49;
+localparam [7:0] MS_TRAP0 = 8'd53;
+
+`CPUWRAP_DEBUG_KEEP reg        rted_seen;
+`CPUWRAP_DEBUG_KEEP reg        rted_active;
+`CPUWRAP_DEBUG_KEEP reg        rted_done;
+`CPUWRAP_DEBUG_KEEP reg  [2:0] rted_read_count;
+`CPUWRAP_DEBUG_KEEP reg  [3:0] rted_seq_count;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rted_entry_pc;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rted_entry_a7;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] rted_entry_flags;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rted_after_pc;
+
+`CPUWRAP_DEBUG_KEEP reg [31:0] rted_r0_log;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rted_r0_phys;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rted_r0_din;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] rted_r0_micro;
+`CPUWRAP_DEBUG_KEEP reg  [1:0] rted_r0_state;
+`CPUWRAP_DEBUG_KEEP reg        rted_r0_lw;
+
+`CPUWRAP_DEBUG_KEEP reg [31:0] rted_r1_log;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rted_r1_phys;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rted_r1_din;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] rted_r1_micro;
+`CPUWRAP_DEBUG_KEEP reg  [1:0] rted_r1_state;
+`CPUWRAP_DEBUG_KEEP reg        rted_r1_lw;
+
+`CPUWRAP_DEBUG_KEEP reg [31:0] rted_r2_log;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rted_r2_phys;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rted_r2_din;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] rted_r2_micro;
+`CPUWRAP_DEBUG_KEEP reg  [1:0] rted_r2_state;
+`CPUWRAP_DEBUG_KEEP reg        rted_r2_lw;
+
+`CPUWRAP_DEBUG_KEEP reg [31:0] rted_r3_log;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rted_r3_phys;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rted_r3_din;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] rted_r3_micro;
+`CPUWRAP_DEBUG_KEEP reg  [1:0] rted_r3_state;
+`CPUWRAP_DEBUG_KEEP reg        rted_r3_lw;
+
+`CPUWRAP_DEBUG_KEEP reg        trpd_seen;
+`CPUWRAP_DEBUG_KEEP reg        trpd_active;
+`CPUWRAP_DEBUG_KEEP reg        trpd_done;
+`CPUWRAP_DEBUG_KEEP reg  [2:0] trpd_write_count;
+`CPUWRAP_DEBUG_KEEP reg  [3:0] trpd_seq_count;
+`CPUWRAP_DEBUG_KEEP reg [31:0] trpd_start_pc;
+`CPUWRAP_DEBUG_KEEP reg [31:0] trpd_start_exe_pc;
+`CPUWRAP_DEBUG_KEEP reg [15:0] trpd_start_opcode;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] trpd_start_flags;
+`CPUWRAP_DEBUG_KEEP reg [15:0] trpd_start_vector;
+`CPUWRAP_DEBUG_KEEP reg [31:0] trpd_start_a7;
+
+`CPUWRAP_DEBUG_KEEP reg [31:0] trpd_w0_log;
+`CPUWRAP_DEBUG_KEEP reg [15:0] trpd_w0_dout;
+`CPUWRAP_DEBUG_KEEP reg [31:0] trpd_w0_tmp;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] trpd_w0_micro;
+`CPUWRAP_DEBUG_KEEP reg        trpd_w0_lw;
+
+`CPUWRAP_DEBUG_KEEP reg [31:0] trpd_w1_log;
+`CPUWRAP_DEBUG_KEEP reg [15:0] trpd_w1_dout;
+`CPUWRAP_DEBUG_KEEP reg [31:0] trpd_w1_tmp;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] trpd_w1_micro;
+`CPUWRAP_DEBUG_KEEP reg        trpd_w1_lw;
+
+`CPUWRAP_DEBUG_KEEP reg [31:0] trpd_w2_log;
+`CPUWRAP_DEBUG_KEEP reg [15:0] trpd_w2_dout;
+`CPUWRAP_DEBUG_KEEP reg [31:0] trpd_w2_tmp;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] trpd_w2_micro;
+`CPUWRAP_DEBUG_KEEP reg        trpd_w2_lw;
+
+`CPUWRAP_DEBUG_KEEP reg [31:0] trpd_w3_log;
+`CPUWRAP_DEBUG_KEEP reg [15:0] trpd_w3_dout;
+`CPUWRAP_DEBUG_KEEP reg [31:0] trpd_w3_tmp;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] trpd_w3_micro;
+`CPUWRAP_DEBUG_KEEP reg        trpd_w3_lw;
+
+`CPUWRAP_DEBUG_KEEP reg        haltd_seen;
+`CPUWRAP_DEBUG_KEEP reg        haltd_prev_cpu_halted;
+`CPUWRAP_DEBUG_KEEP reg  [3:0] haltd_seq_count;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_pc;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_exe_pc;
+`CPUWRAP_DEBUG_KEEP reg [15:0] haltd_opcode;
+`CPUWRAP_DEBUG_KEEP reg  [1:0] haltd_state;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] haltd_micro_state;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] haltd_next_micro_state;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] haltd_flags;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_a7;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_trap_vector;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_memaddr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_log_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_phys_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_cpu_addr;
+`CPUWRAP_DEBUG_KEEP reg [15:0] haltd_mmusr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_saved_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_desc_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_desc_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_tc;
+`CPUWRAP_DEBUG_KEEP reg [31:0] haltd_crp_lo;
+`CPUWRAP_DEBUG_KEEP reg  [4:0] haltd_wstate;
+`CPUWRAP_DEBUG_KEEP reg        haltd_pmmu_fault;
+`CPUWRAP_DEBUG_KEEP reg        haltd_pmmu_busy;
+`CPUWRAP_DEBUG_KEEP reg        haltd_cpu_halted;
+`CPUWRAP_DEBUG_KEEP reg        haltd_interrupt;
+`CPUWRAP_DEBUG_KEEP reg        haltd_trapmake;
+`CPUWRAP_DEBUG_KEEP reg        haltd_trap_addr_error;
+`CPUWRAP_DEBUG_KEEP reg        haltd_trap_berr;
+`CPUWRAP_DEBUG_KEEP reg        haltd_trap_mmu_berr;
+`CPUWRAP_DEBUG_KEEP reg        haltd_make_berr;
+`CPUWRAP_DEBUG_KEEP reg        haltd_berr_exception_active;
+`CPUWRAP_DEBUG_KEEP reg        haltd_pmmu_fault_dispatched;
+`CPUWRAP_DEBUG_KEEP reg        haltd_pmmu_fault_was_cleared;
+`CPUWRAP_DEBUG_KEEP reg        haltd_pmmu_fault_rw;
+`CPUWRAP_DEBUG_KEEP reg        haltd_pmmu_fault_is_insn;
+`CPUWRAP_DEBUG_KEEP reg  [2:0] haltd_pmmu_fault_fc;
+`CPUWRAP_DEBUG_KEEP reg        haltd_clkena_lw;
+`CPUWRAP_DEBUG_KEEP reg        haltd_walker_berr;
+`CPUWRAP_DEBUG_KEEP reg        haltd_walker_timeout;
+`CPUWRAP_DEBUG_KEEP reg        haltd_cpu_clkena_in;
+`CPUWRAP_DEBUG_KEEP reg        haltd_fault_latched;
+
+`CPUWRAP_DEBUG_KEEP reg        stkd_seen;
+`CPUWRAP_DEBUG_KEEP reg  [3:0] stkd_seq_count;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stkd_entry_pc;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stkd_entry_a7;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] stkd_entry_flags;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stkd_entry_usp;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stkd_entry_msp;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stkd_entry_isp;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] stkd_entry_mode;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stkd_tt0;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stkd_tt1;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stkd_crp_hi;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stkw0_log, stkw1_log, stkw2_log, stkw3_log;
+`CPUWRAP_DEBUG_KEEP reg [15:0] stkw0_dout, stkw1_dout, stkw2_dout, stkw3_dout;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] stkw0_micro, stkw1_micro, stkw2_micro, stkw3_micro;
+`CPUWRAP_DEBUG_KEEP reg        stkw0_lw, stkw1_lw, stkw2_lw, stkw3_lw;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stkd_w0_log, stkd_w1_log, stkd_w2_log, stkd_w3_log;
+`CPUWRAP_DEBUG_KEEP reg [15:0] stkd_w0_dout, stkd_w1_dout, stkd_w2_dout, stkd_w3_dout;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] stkd_w0_micro, stkd_w1_micro, stkd_w2_micro, stkd_w3_micro;
+`CPUWRAP_DEBUG_KEEP reg        stkd_w0_lw, stkd_w1_lw, stkd_w2_lw, stkd_w3_lw;
 
 // T0 edge detector: captures state when FlagsSR(6) transitions 0->1
-(* noprune, preserve *) reg        stp_t0_latched;         // sticky: T0 rising edge seen
-(* noprune, preserve *) reg        stp_t0_cause_directSR;  // exec(directSR) was active (RTE)
-(* noprune, preserve *) reg        stp_t0_cause_to_SR;     // exec(to_SR) was active (MOVE/ORI/EORI to SR)
-(* noprune, preserve *) reg [31:0] stp_t0_pc;              // PC when T0 was set
-(* noprune, preserve *) reg [15:0] stp_t0_opcode;          // opcode when T0 was set
+`CPUWRAP_DEBUG_KEEP reg        stp_t0_latched;         // sticky: T0 rising edge seen
+`CPUWRAP_DEBUG_KEEP reg        stp_t0_cause_directSR;  // exec(directSR) was active (RTE)
+`CPUWRAP_DEBUG_KEEP reg        stp_t0_cause_to_SR;     // exec(to_SR) was active (MOVE/ORI/EORI to SR)
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_t0_pc;              // PC when T0 was set
+`CPUWRAP_DEBUG_KEEP reg [15:0] stp_t0_opcode;          // opcode when T0 was set
 reg        prev_flagsSR_6;  // previous value of FlagsSR(6) for edge detection
 
 always @(posedge clk) begin
@@ -963,6 +1163,7 @@ end
 //        setendOPC stop clkena_lw cpu_halted pmmu_fault interrupt
 // Hang = hang_latched hang_overflow + captured fields
 // T0 = t0_latched cause_directSR cause_to_SR t0_pc[31:0] t0_opcode[15:0] pad[2:0]
+`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (3),
@@ -1027,16 +1228,17 @@ altsource_probe #(
 		stp_t0_opcode,                 // [15:0]    16
 	}),
 	.source (cpus_issp_source)
-);
+	);
+	`endif
 
 // ============================================================================
 // ISSP Instance 4: REGS - Register File Snapshot (D0-D7, A0-A7)
 // ============================================================================
 // 512 bits = 16 registers x 32 bits (max probe width)
-(* noprune, preserve *) reg [31:0] stp_reg_d0, stp_reg_d1, stp_reg_d2, stp_reg_d3;
-(* noprune, preserve *) reg [31:0] stp_reg_d4, stp_reg_d5, stp_reg_d6, stp_reg_d7;
-(* noprune, preserve *) reg [31:0] stp_reg_a0, stp_reg_a1, stp_reg_a2, stp_reg_a3;
-(* noprune, preserve *) reg [31:0] stp_reg_a4, stp_reg_a5, stp_reg_a6, stp_reg_a7;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_reg_d0, stp_reg_d1, stp_reg_d2, stp_reg_d3;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_reg_d4, stp_reg_d5, stp_reg_d6, stp_reg_d7;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_reg_a0, stp_reg_a1, stp_reg_a2, stp_reg_a3;
+`CPUWRAP_DEBUG_KEEP reg [31:0] stp_reg_a4, stp_reg_a5, stp_reg_a6, stp_reg_a7;
 
 always @(posedge clk) begin
 	stp_reg_d0 <= kernel_regfile_d0_p;
@@ -1057,7 +1259,64 @@ always @(posedge clk) begin
 	stp_reg_a7 <= kernel_regfile_a7_p;
 end
 
+// Minimal always-on format-error debug probe.
+// This is intentionally much narrower than ENABLE_CPUWRAP_DEBUG_ISSP: it captures
+// only the state needed to diagnose vector-14 RTE failures after MMU activation.
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (5),
+	.instance_id             ("FMTD"),
+	.probe_width             (511),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) fmtd_issp (
+	.probe ({
+		kernel_pmmu_pending_flags_p,   // [510:495]
+		fmt_err_latched_p,            // [494]
+		fmt_err_rte_word_p,           // [493:478]
+		fmt_err_pc_p,                 // [477:446]
+		fmt_err_addr_p,               // [445:414]
+		fmt_err_sr_p,                 // [413:406]
+		stp_cpu_pc,                   // [405:374]
+		stp_cpu_opcode,               // [373:358]
+		stp_cpu_state,                // [357:356]
+		stp_cpu_micro_state,          // [355:348]
+		stp_cpu_next_micro_state,     // [347:340]
+		stp_cpu_memaddr,              // [339:308]
+		stp_cpu_flagsSR,              // [307:300]
+		pmmu_fault_p,                 // [299]
+		cpu_halted_p,                 // [298]
+		kernel_interrupt_p,           // [297]
+		kernel_clkena_lw_p,           // [296]
+		kernel_trapmake_p,            // [295]
+		stp_reg_a7,                   // [294:263]
+		stp_hang_latched,             // [262]
+		stp_hang_overflow,            // [261]
+		stp_hang_pc,                  // [260:229]
+		stp_hang_opcode,              // [228:213]
+		stp_hang_state,               // [212:211]
+		stp_hang_micro_state,         // [210:203]
+		stp_hang_next_micro_state,    // [202:195]
+		stp_hang_memaddr,             // [194:163]
+		stp_hang_flagsSR,             // [162:155]
+		stp_hang_pmmu_fault,          // [154]
+		stp_hang_cpu_halted,          // [153]
+		stp_pmmu_tc,                  // [152:121]
+		stp_pmmu_crp_lo,              // [120:89]
+		stp_pmmu_wstate,              // [88:84]
+		stp_pmmu_fault,               // [83]
+		stp_pmmu_busy,                // [82]
+		stp_fault_latched,            // [81]
+		stp_walker_timeout_latched,   // [80]
+		stp_fault_mmusr,              // [79:64]
+		stp_fault_saved_addr,         // [63:32]
+		stp_fault_addr                // [31:0]
+	}),
+	.source (fmtd_issp_source)
+);
+
 // 511 bits max: 15 regs x 32 = 480 + A7[31:1] = 31 = 511
+`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (4),
@@ -1073,6 +1332,7 @@ altsource_probe #(
 		stp_reg_a4, stp_reg_a5, stp_reg_a6, stp_reg_a7[31:1]
 	})
 );
+`endif
 
 // PMMU walker address mux signals (for bus arbitration)
 // NOTE: Walker supports full 32-bit addressing:
@@ -1133,6 +1393,624 @@ wire        d_fill_valid;
 wire        cpu_ready_qualified = (ramsel & ramready) |
                                   (fastchip_selack & fastchip_ready) |
                                   (~ramsel & ~fastchip_selack & chipready);
+wire        cpu_clkena_in = (~cpu_req | cpu_ready_qualified | (USE_68030_CACHE & cache_hit) |
+                             pmmu_fault_p | walker_timeout_error | ~reset) &
+                            (~pmmu_walker_req_p | ~reset | walker_timeout_error) &
+                            (~pmmu_busy_p | pmmu_fault_p | walker_timeout_error | ~reset);
+
+wire rted_rte_opcode = (kernel_opcode_p == 16'h4E73);
+wire rted_start = cpu_clkena_in && rted_rte_opcode &&
+                  (kernel_next_ms_p[7:0] == MS_RTE1) &&
+                  (kernel_micro_state_p[7:0] != MS_RTE6);
+wire rted_read_complete = rted_active && cpu_clkena_in &&
+                          (kernel_state_p == 2'b10);
+
+always @(posedge clk) begin
+	if (~reset || rted_issp_source[0] || fmtd_issp_source[0]) begin
+		rted_seen        <= 0;
+		rted_active      <= 0;
+		rted_done        <= 0;
+		rted_read_count  <= 0;
+		rted_seq_count   <= 0;
+		rted_entry_pc    <= 0;
+		rted_entry_a7    <= 0;
+		rted_entry_flags <= 0;
+		rted_after_pc    <= 0;
+		rted_r0_log      <= 0;
+		rted_r0_phys     <= 0;
+		rted_r0_din      <= 0;
+		rted_r0_micro    <= 0;
+		rted_r0_state    <= 0;
+		rted_r0_lw       <= 0;
+		rted_r1_log      <= 0;
+		rted_r1_phys     <= 0;
+		rted_r1_din      <= 0;
+		rted_r1_micro    <= 0;
+		rted_r1_state    <= 0;
+		rted_r1_lw       <= 0;
+		rted_r2_log      <= 0;
+		rted_r2_phys     <= 0;
+		rted_r2_din      <= 0;
+		rted_r2_micro    <= 0;
+		rted_r2_state    <= 0;
+		rted_r2_lw       <= 0;
+		rted_r3_log      <= 0;
+		rted_r3_phys     <= 0;
+		rted_r3_din      <= 0;
+		rted_r3_micro    <= 0;
+		rted_r3_state    <= 0;
+		rted_r3_lw       <= 0;
+	end else if (!fmt_err_latched_p) begin
+		if (rted_start) begin
+			rted_seen        <= 1;
+			rted_active      <= 1;
+			rted_done        <= 0;
+			rted_read_count  <= 0;
+			rted_seq_count   <= rted_seq_count + 1'b1;
+			rted_entry_pc    <= kernel_TG68_PC_p;
+			rted_entry_a7    <= kernel_regfile_a7_p;
+			rted_entry_flags <= kernel_FlagsSR_p;
+			rted_after_pc    <= 0;
+			rted_r0_log      <= 0;
+			rted_r0_phys     <= 0;
+			rted_r0_din      <= 0;
+			rted_r0_micro    <= 0;
+			rted_r0_state    <= 0;
+			rted_r0_lw       <= 0;
+			rted_r1_log      <= 0;
+			rted_r1_phys     <= 0;
+			rted_r1_din      <= 0;
+			rted_r1_micro    <= 0;
+			rted_r1_state    <= 0;
+			rted_r1_lw       <= 0;
+			rted_r2_log      <= 0;
+			rted_r2_phys     <= 0;
+			rted_r2_din      <= 0;
+			rted_r2_micro    <= 0;
+			rted_r2_state    <= 0;
+			rted_r2_lw       <= 0;
+			rted_r3_log      <= 0;
+			rted_r3_phys     <= 0;
+			rted_r3_din      <= 0;
+			rted_r3_micro    <= 0;
+			rted_r3_state    <= 0;
+			rted_r3_lw       <= 0;
+		end
+		if (rted_seen && (kernel_micro_state_p[7:0] == MS_RTE4)) begin
+			rted_after_pc <= kernel_TG68_PC_p;
+			rted_done     <= 1;
+		end
+		if (rted_read_complete) begin
+			case (rted_read_count)
+				3'd0: begin
+					rted_r0_log   <= pmmu_addr_log_p;
+					rted_r0_phys  <= pmmu_addr_phys_p;
+					rted_r0_din   <= cpu_din;
+					rted_r0_micro <= kernel_micro_state_p[7:0];
+					rted_r0_state <= kernel_state_p;
+					rted_r0_lw    <= kernel_clkena_lw_p;
+				end
+				3'd1: begin
+					rted_r1_log   <= pmmu_addr_log_p;
+					rted_r1_phys  <= pmmu_addr_phys_p;
+					rted_r1_din   <= cpu_din;
+					rted_r1_micro <= kernel_micro_state_p[7:0];
+					rted_r1_state <= kernel_state_p;
+					rted_r1_lw    <= kernel_clkena_lw_p;
+				end
+				3'd2: begin
+					rted_r2_log   <= pmmu_addr_log_p;
+					rted_r2_phys  <= pmmu_addr_phys_p;
+					rted_r2_din   <= cpu_din;
+					rted_r2_micro <= kernel_micro_state_p[7:0];
+					rted_r2_state <= kernel_state_p;
+					rted_r2_lw    <= kernel_clkena_lw_p;
+				end
+				3'd3: begin
+					rted_r3_log   <= pmmu_addr_log_p;
+					rted_r3_phys  <= pmmu_addr_phys_p;
+					rted_r3_din   <= cpu_din;
+					rted_r3_micro <= kernel_micro_state_p[7:0];
+					rted_r3_state <= kernel_state_p;
+					rted_r3_lw    <= kernel_clkena_lw_p;
+					rted_active   <= 0;
+					rted_done     <= 1;
+				end
+				default: ;
+			endcase
+			if (rted_read_count != 3'd4) begin
+				rted_read_count <= rted_read_count + 1'b1;
+			end
+		end
+	end
+end
+
+wire trpd_write_complete = cpu_clkena_in && (kernel_state_p == 2'b11);
+wire trpd_fline_format_write = trpd_write_complete &&
+                               (kernel_micro_state_p[7:0] == MS_TRAP0) &&
+                               (kernel_data_write_tmp_p[15:0] == 16'h002C);
+
+always @(posedge clk) begin
+	if (~reset || stkd_issp_source[0] || fmtd_issp_source[0]) begin
+		stkd_seen        <= 0;
+		stkd_seq_count   <= 0;
+		stkd_entry_pc    <= 0;
+		stkd_entry_a7    <= 0;
+		stkd_entry_flags <= 0;
+		stkd_entry_usp   <= 0;
+		stkd_entry_msp   <= 0;
+		stkd_entry_isp   <= 0;
+		stkd_entry_mode  <= 0;
+		stkd_tt0         <= 0;
+		stkd_tt1         <= 0;
+		stkd_crp_hi      <= 0;
+		stkw0_log        <= 0;
+		stkw1_log        <= 0;
+		stkw2_log        <= 0;
+		stkw3_log        <= 0;
+		stkw0_dout       <= 0;
+		stkw1_dout       <= 0;
+		stkw2_dout       <= 0;
+		stkw3_dout       <= 0;
+		stkw0_micro      <= 0;
+		stkw1_micro      <= 0;
+		stkw2_micro      <= 0;
+		stkw3_micro      <= 0;
+		stkw0_lw         <= 0;
+		stkw1_lw         <= 0;
+		stkw2_lw         <= 0;
+		stkw3_lw         <= 0;
+		stkd_w0_log      <= 0;
+		stkd_w1_log      <= 0;
+		stkd_w2_log      <= 0;
+		stkd_w3_log      <= 0;
+		stkd_w0_dout     <= 0;
+		stkd_w1_dout     <= 0;
+		stkd_w2_dout     <= 0;
+		stkd_w3_dout     <= 0;
+		stkd_w0_micro    <= 0;
+		stkd_w1_micro    <= 0;
+		stkd_w2_micro    <= 0;
+		stkd_w3_micro    <= 0;
+		stkd_w0_lw       <= 0;
+		stkd_w1_lw       <= 0;
+		stkd_w2_lw       <= 0;
+		stkd_w3_lw       <= 0;
+	end else begin
+		if (trpd_write_complete) begin
+			stkw3_log   <= stkw2_log;
+			stkw3_dout  <= stkw2_dout;
+			stkw3_micro <= stkw2_micro;
+			stkw3_lw    <= stkw2_lw;
+			stkw2_log   <= stkw1_log;
+			stkw2_dout  <= stkw1_dout;
+			stkw2_micro <= stkw1_micro;
+			stkw2_lw    <= stkw1_lw;
+			stkw1_log   <= stkw0_log;
+			stkw1_dout  <= stkw0_dout;
+			stkw1_micro <= stkw0_micro;
+			stkw1_lw    <= stkw0_lw;
+			stkw0_log   <= pmmu_addr_log_p;
+			stkw0_dout  <= cpu_dout_p;
+			stkw0_micro <= kernel_micro_state_p[7:0];
+			stkw0_lw    <= kernel_clkena_lw_p;
+		end
+		if (rted_start) begin
+			stkd_seen        <= 1;
+			stkd_seq_count   <= stkd_seq_count + 1'b1;
+			stkd_entry_pc    <= kernel_TG68_PC_p;
+			stkd_entry_a7    <= kernel_regfile_a7_p;
+			stkd_entry_flags <= kernel_FlagsSR_p;
+			stkd_entry_usp   <= kernel_usp_p;
+			stkd_entry_msp   <= kernel_msp_p;
+			stkd_entry_isp   <= kernel_isp_p;
+			stkd_entry_mode  <= {kernel_SVmode_p, kernel_FlagsSR_p[5], kernel_a7_is_msp_p,
+			                     kernel_interrupt_mode_p, kernel_rte_saved_mbit_p,
+			                     kernel_exec_directSR_p, kernel_exec_to_SR_p, pmmu_fault_p};
+			stkd_tt0         <= stp_pmmu_tt0_w;
+			stkd_tt1         <= stp_pmmu_tt1_w;
+			stkd_crp_hi      <= stp_pmmu_crp_hi_w;
+			stkd_w0_log      <= stkw0_log;
+			stkd_w0_dout     <= stkw0_dout;
+			stkd_w0_micro    <= stkw0_micro;
+			stkd_w0_lw       <= stkw0_lw;
+			stkd_w1_log      <= stkw1_log;
+			stkd_w1_dout     <= stkw1_dout;
+			stkd_w1_micro    <= stkw1_micro;
+			stkd_w1_lw       <= stkw1_lw;
+			stkd_w2_log      <= stkw2_log;
+			stkd_w2_dout     <= stkw2_dout;
+			stkd_w2_micro    <= stkw2_micro;
+			stkd_w2_lw       <= stkw2_lw;
+			stkd_w3_log      <= stkw3_log;
+			stkd_w3_dout     <= stkw3_dout;
+			stkd_w3_micro    <= stkw3_micro;
+			stkd_w3_lw       <= stkw3_lw;
+		end
+	end
+end
+
+always @(posedge clk) begin
+	if (~reset || trpd_issp_source[0] || fmtd_issp_source[0]) begin
+		trpd_seen         <= 0;
+		trpd_active       <= 0;
+		trpd_done         <= 0;
+		trpd_write_count  <= 0;
+		trpd_seq_count    <= 0;
+		trpd_start_pc     <= 0;
+		trpd_start_exe_pc <= 0;
+		trpd_start_opcode <= 0;
+		trpd_start_flags  <= 0;
+		trpd_start_vector <= 0;
+		trpd_start_a7     <= 0;
+		trpd_w0_log       <= 0;
+		trpd_w0_dout      <= 0;
+		trpd_w0_tmp       <= 0;
+		trpd_w0_micro     <= 0;
+		trpd_w0_lw        <= 0;
+		trpd_w1_log       <= 0;
+		trpd_w1_dout      <= 0;
+		trpd_w1_tmp       <= 0;
+		trpd_w1_micro     <= 0;
+		trpd_w1_lw        <= 0;
+		trpd_w2_log       <= 0;
+		trpd_w2_dout      <= 0;
+		trpd_w2_tmp       <= 0;
+		trpd_w2_micro     <= 0;
+		trpd_w2_lw        <= 0;
+		trpd_w3_log       <= 0;
+		trpd_w3_dout      <= 0;
+		trpd_w3_tmp       <= 0;
+		trpd_w3_micro     <= 0;
+		trpd_w3_lw        <= 0;
+	end else if (trpd_fline_format_write && !trpd_active && !trpd_done) begin
+		trpd_seen         <= 1;
+		trpd_active       <= 1;
+		trpd_done         <= 0;
+		trpd_write_count  <= 1;
+		trpd_seq_count    <= trpd_seq_count + 1'b1;
+		trpd_start_pc     <= kernel_TG68_PC_p;
+		trpd_start_exe_pc <= kernel_exe_PC_p;
+		trpd_start_opcode <= kernel_opcode_p;
+		trpd_start_flags  <= kernel_FlagsSR_p;
+		trpd_start_vector <= kernel_trap_vector_p[15:0];
+		trpd_start_a7     <= kernel_regfile_a7_p;
+		trpd_w0_log       <= pmmu_addr_log_p;
+		trpd_w0_dout      <= cpu_dout_p;
+		trpd_w0_tmp       <= kernel_data_write_tmp_p;
+		trpd_w0_micro     <= kernel_micro_state_p[7:0];
+		trpd_w0_lw        <= kernel_clkena_lw_p;
+	end else if (trpd_active && trpd_write_complete) begin
+		case (trpd_write_count)
+			3'd1: begin
+				trpd_w1_log   <= pmmu_addr_log_p;
+				trpd_w1_dout  <= cpu_dout_p;
+				trpd_w1_tmp   <= kernel_data_write_tmp_p;
+				trpd_w1_micro <= kernel_micro_state_p[7:0];
+				trpd_w1_lw    <= kernel_clkena_lw_p;
+			end
+			3'd2: begin
+				trpd_w2_log   <= pmmu_addr_log_p;
+				trpd_w2_dout  <= cpu_dout_p;
+				trpd_w2_tmp   <= kernel_data_write_tmp_p;
+				trpd_w2_micro <= kernel_micro_state_p[7:0];
+				trpd_w2_lw    <= kernel_clkena_lw_p;
+			end
+			3'd3: begin
+				trpd_w3_log   <= pmmu_addr_log_p;
+				trpd_w3_dout  <= cpu_dout_p;
+				trpd_w3_tmp   <= kernel_data_write_tmp_p;
+				trpd_w3_micro <= kernel_micro_state_p[7:0];
+				trpd_w3_lw    <= kernel_clkena_lw_p;
+				trpd_active   <= 0;
+				trpd_done     <= 1;
+			end
+			default: ;
+		endcase
+		if (trpd_write_count != 3'd4) begin
+			trpd_write_count <= trpd_write_count + 1'b1;
+		end
+	end
+end
+
+always @(posedge clk) begin
+	if (~reset) begin
+		haltd_seen                   <= 0;
+		haltd_prev_cpu_halted        <= 0;
+		haltd_seq_count              <= 0;
+		haltd_pc                     <= 0;
+		haltd_exe_pc                 <= 0;
+		haltd_opcode                 <= 0;
+		haltd_state                  <= 0;
+		haltd_micro_state            <= 0;
+		haltd_next_micro_state       <= 0;
+		haltd_flags                  <= 0;
+		haltd_a7                     <= 0;
+		haltd_trap_vector            <= 0;
+		haltd_memaddr                <= 0;
+		haltd_log_addr               <= 0;
+		haltd_phys_addr              <= 0;
+		haltd_cpu_addr               <= 0;
+		haltd_mmusr                  <= 0;
+		haltd_saved_addr             <= 0;
+		haltd_desc_addr              <= 0;
+		haltd_desc_data              <= 0;
+		haltd_tc                     <= 0;
+		haltd_crp_lo                 <= 0;
+		haltd_wstate                 <= 0;
+		haltd_pmmu_fault             <= 0;
+		haltd_pmmu_busy              <= 0;
+		haltd_cpu_halted             <= 0;
+		haltd_interrupt              <= 0;
+		haltd_trapmake               <= 0;
+		haltd_trap_addr_error        <= 0;
+		haltd_trap_berr              <= 0;
+		haltd_trap_mmu_berr          <= 0;
+		haltd_make_berr              <= 0;
+		haltd_berr_exception_active  <= 0;
+		haltd_pmmu_fault_dispatched  <= 0;
+		haltd_pmmu_fault_was_cleared <= 0;
+		haltd_pmmu_fault_rw          <= 0;
+		haltd_pmmu_fault_is_insn     <= 0;
+		haltd_pmmu_fault_fc          <= 0;
+		haltd_clkena_lw              <= 0;
+		haltd_walker_berr            <= 0;
+		haltd_walker_timeout         <= 0;
+		haltd_cpu_clkena_in          <= 0;
+		haltd_fault_latched          <= 0;
+	end else if (haltd_issp_source[0] || fmtd_issp_source[0]) begin
+		haltd_seen            <= 0;
+		haltd_prev_cpu_halted <= cpu_halted_p;
+	end else begin
+		if (cpu_halted_p && !haltd_prev_cpu_halted && !haltd_seen) begin
+			haltd_seen                   <= 1;
+			haltd_seq_count              <= haltd_seq_count + 1'b1;
+			haltd_pc                     <= kernel_TG68_PC_p;
+			haltd_exe_pc                 <= kernel_exe_PC_p;
+			haltd_opcode                 <= kernel_opcode_p;
+			haltd_state                  <= kernel_state_p;
+			haltd_micro_state            <= kernel_micro_state_p[7:0];
+			haltd_next_micro_state       <= kernel_next_ms_p[7:0];
+			haltd_flags                  <= kernel_FlagsSR_p;
+			haltd_a7                     <= kernel_regfile_a7_p;
+			haltd_trap_vector            <= kernel_trap_vector_p;
+			haltd_memaddr                <= kernel_memaddr_reg_p;
+			haltd_log_addr               <= pmmu_addr_log_p;
+			haltd_phys_addr              <= pmmu_addr_phys_p;
+			haltd_cpu_addr               <= cpu_addr_p;
+			haltd_mmusr                  <= stp_fault_status_w;
+			haltd_saved_addr             <= stp_saved_addr_w;
+			haltd_desc_addr              <= stp_walk_desc_addr_w;
+			haltd_desc_data              <= stp_walk_desc_data_w;
+			haltd_tc                     <= stp_pmmu_tc_w;
+			haltd_crp_lo                 <= stp_pmmu_crp_lo_w;
+			haltd_wstate                 <= stp_pmmu_wstate_w;
+			haltd_pmmu_fault             <= pmmu_fault_p;
+			haltd_pmmu_busy              <= pmmu_busy_p;
+			haltd_cpu_halted             <= cpu_halted_p;
+			haltd_interrupt              <= kernel_interrupt_p;
+			haltd_trapmake               <= kernel_trapmake_p;
+			haltd_trap_addr_error        <= kernel_trap_addr_error_p;
+			haltd_trap_berr              <= kernel_trap_berr_p;
+			haltd_trap_mmu_berr          <= kernel_trap_mmu_berr_p;
+			haltd_make_berr              <= kernel_make_berr_p;
+			haltd_berr_exception_active  <= kernel_berr_exception_active_p;
+			haltd_pmmu_fault_dispatched  <= kernel_pmmu_fault_dispatched_p;
+			haltd_pmmu_fault_was_cleared <= kernel_pmmu_fault_was_cleared_p;
+			haltd_pmmu_fault_rw          <= kernel_pmmu_fault_rw_p;
+			haltd_pmmu_fault_is_insn     <= kernel_pmmu_fault_is_insn_p;
+			haltd_pmmu_fault_fc          <= kernel_pmmu_fault_fc_p;
+			haltd_clkena_lw              <= kernel_clkena_lw_p;
+			haltd_walker_berr            <= pmmu_walker_berr_p;
+			haltd_walker_timeout         <= walker_timeout_error;
+			haltd_cpu_clkena_in          <= cpu_clkena_in;
+			haltd_fault_latched          <= stp_fault_latched;
+		end
+		haltd_prev_cpu_halted <= cpu_halted_p;
+	end
+end
+
+// RTE return-frame trace probe. Captures the first four RTE data-read bus
+// completions: SR, PC high, PC low, and format/vector word for short frames.
+// freezes once the core's sticky format-error latch is set.
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (6),
+	.instance_id             ("RTED"),
+	.probe_width             (483),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) rted_issp (
+	.probe ({
+		rted_seen,              // [482]
+		rted_active,            // [481]
+		rted_done,              // [480]
+		fmt_err_latched_p,      // [479]
+		pmmu_fault_p,           // [478]
+		pmmu_busy_p,            // [477]
+		cpu_halted_p,           // [476]
+		kernel_trapmake_p,      // [475]
+		rted_read_count,        // [474:472]
+		rted_seq_count,         // [471:468]
+		rted_entry_pc,          // [467:436]
+		rted_entry_a7,          // [435:404]
+		rted_entry_flags,       // [403:396]
+		rted_after_pc,          // [395:364]
+		rted_r0_log,            // [363:332]
+		rted_r0_phys,           // [331:300]
+		rted_r0_din,            // [299:284]
+		rted_r0_micro,          // [283:276]
+		rted_r0_state,          // [275:274]
+		rted_r0_lw,             // [273]
+		rted_r1_log,            // [272:241]
+		rted_r1_phys,           // [240:209]
+		rted_r1_din,            // [208:193]
+		rted_r1_micro,          // [192:185]
+		rted_r1_state,          // [184:183]
+		rted_r1_lw,             // [182]
+		rted_r2_log,            // [181:150]
+		rted_r2_phys,           // [149:118]
+		rted_r2_din,            // [117:102]
+		rted_r2_micro,          // [101:94]
+		rted_r2_state,          // [93:92]
+		rted_r2_lw,             // [91]
+		rted_r3_log,            // [90:59]
+		rted_r3_phys,           // [58:27]
+		rted_r3_din,            // [26:11]
+		rted_r3_micro,          // [10:3]
+		rted_r3_state,          // [2:1]
+		rted_r3_lw              // [0]
+	}),
+	.source (rted_issp_source)
+);
+
+// Trap-frame write trace probe. It arms on the short F-line format/vector word
+// ($002C) and captures the four bus writes that build the frame:
+// format/vector, PC high, PC low, SR.
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (7),
+	.instance_id             ("TRPD"),
+	.probe_width             (505),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) trpd_issp (
+	.probe ({
+		trpd_seen,          // [504]
+		trpd_active,        // [503]
+		trpd_done,          // [502]
+		trpd_write_count,   // [501:499]
+		trpd_seq_count,     // [498:495]
+		trpd_start_pc,      // [494:463]
+		trpd_start_exe_pc,  // [462:431]
+		trpd_start_opcode,  // [430:415]
+		trpd_start_flags,   // [414:407]
+		trpd_start_vector,  // [406:391]
+		trpd_start_a7,      // [390:359]
+		trpd_w0_log,        // [358:327]
+		trpd_w0_dout,       // [326:311]
+		trpd_w0_tmp,        // [310:279]
+		trpd_w0_micro,      // [278:271]
+		trpd_w0_lw,         // [270]
+		trpd_w1_log,        // [269:238]
+		trpd_w1_dout,       // [237:222]
+		trpd_w1_tmp,        // [221:190]
+		trpd_w1_micro,      // [189:182]
+		trpd_w1_lw,         // [181]
+		trpd_w2_log,        // [180:149]
+		trpd_w2_dout,       // [148:133]
+		trpd_w2_tmp,        // [132:101]
+		trpd_w2_micro,      // [100:93]
+		trpd_w2_lw,         // [92]
+		trpd_w3_log,        // [91:60]
+		trpd_w3_dout,       // [59:44]
+		trpd_w3_tmp,        // [43:12]
+		trpd_w3_micro,      // [11:4]
+		trpd_w3_lw,         // [3]
+		3'b000              // [2:0]
+	}),
+	.source (trpd_issp_source)
+);
+
+// Halt-edge context probe. This latches the exact cycle where the core enters
+// the MC68030 double-bus-fault halted state, including PMMU and exception state.
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (8),
+	.instance_id             ("HALT"),
+	.probe_width             (506),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) halt_issp (
+	.probe ({
+		haltd_seen,                   // [505]
+		haltd_seq_count,              // [504:501]
+		haltd_pc,                     // [500:469]
+		haltd_exe_pc,                 // [468:437]
+		haltd_opcode,                 // [436:421]
+		haltd_state,                  // [420:419]
+		haltd_micro_state,            // [418:411]
+		haltd_next_micro_state,       // [410:403]
+		haltd_flags,                  // [402:395]
+		haltd_a7,                     // [394:363]
+		haltd_trap_vector,            // [362:331]
+		haltd_memaddr,                // [330:299]
+		haltd_log_addr,               // [298:267]
+		haltd_phys_addr,              // [266:235]
+		haltd_cpu_addr,               // [234:203]
+		haltd_mmusr,                  // [202:187]
+		haltd_saved_addr,             // [186:155]
+		haltd_desc_addr,              // [154:123]
+		haltd_desc_data,              // [122:91]
+		haltd_tc,                     // [90:59]
+		haltd_crp_lo,                 // [58:27]
+		haltd_wstate,                 // [26:22]
+		haltd_pmmu_fault,             // [21]
+		haltd_pmmu_busy,              // [20]
+		haltd_cpu_halted,             // [19]
+		haltd_interrupt,              // [18]
+		haltd_trapmake,               // [17]
+		haltd_trap_addr_error,        // [16]
+		haltd_trap_berr,              // [15]
+		haltd_trap_mmu_berr,          // [14]
+		haltd_make_berr,              // [13]
+		haltd_berr_exception_active,  // [12]
+		haltd_pmmu_fault_dispatched,  // [11]
+		haltd_pmmu_fault_was_cleared, // [10]
+		haltd_pmmu_fault_rw,          // [9]
+		haltd_pmmu_fault_is_insn,     // [8]
+		haltd_pmmu_fault_fc,          // [7:5]
+		haltd_clkena_lw,              // [4]
+		haltd_walker_berr,            // [3]
+		haltd_walker_timeout,         // [2]
+		haltd_cpu_clkena_in,          // [1]
+		haltd_fault_latched           // [0]
+	}),
+	.source (haltd_issp_source)
+);
+
+// RTE stack context probe. Captures the four most recent CPU write cycles before
+// each RTE begins, plus stack-shadow and MMU transparent/root context.
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (9),
+	.instance_id             ("STKD"),
+	.probe_width             (505),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) stkd_issp (
+	.probe ({
+		stkd_seen,         // [504]
+		stkd_seq_count,    // [503:500]
+		stkd_entry_pc,     // [499:468]
+		stkd_entry_a7,     // [467:436]
+		stkd_entry_flags,  // [435:428]
+		stkd_entry_usp,    // [427:396]
+		stkd_entry_msp,    // [395:364]
+		stkd_entry_isp,    // [363:332]
+		stkd_entry_mode,   // [331:324]
+		stkd_tt0,          // [323:292]
+		stkd_tt1,          // [291:260]
+		stkd_crp_hi,       // [259:228]
+		stkd_w3_log,       // [227:196] oldest captured write
+		stkd_w3_dout,      // [195:180]
+		stkd_w3_micro,     // [179:172]
+		stkd_w3_lw,        // [171]
+		stkd_w2_log,       // [170:139]
+		stkd_w2_dout,      // [138:123]
+		stkd_w2_micro,     // [122:115]
+		stkd_w2_lw,        // [114]
+		stkd_w1_log,       // [113:82]
+		stkd_w1_dout,      // [81:66]
+		stkd_w1_micro,     // [65:58]
+		stkd_w1_lw,        // [57]
+		stkd_w0_log,       // [56:25] newest captured write
+		stkd_w0_dout,      // [24:9]
+		stkd_w0_micro,     // [8:1]
+		stkd_w0_lw         // [0]
+	}),
+	.source (stkd_issp_source)
+);
 
 TG68KdotC_Kernel
 #(
@@ -1155,7 +2033,7 @@ cpu_inst_p
   // MC68030 bus fault: pmmu_fault_p bypasses pmmu_busy_p stall so the kernel can
   // advance to process the fault (accumulate make_berr, detect double bus fault).
   // Bus accesses are suppressed by pmmu_suppress_bus, so no stray writes occur.
-  .clkena_in((~cpu_req | cpu_ready_qualified | (USE_68030_CACHE & cache_hit) | pmmu_fault_p | walker_timeout_error | ~reset) & (~pmmu_walker_req_p | ~reset | walker_timeout_error) & (~pmmu_busy_p | pmmu_fault_p | walker_timeout_error | ~reset)),
+  .clkena_in(cpu_clkena_in),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -1210,8 +2088,8 @@ cpu_inst_p
   .debug_trap_format_error(fmt_err_latched_p),
   .debug_format_error_rte_word(fmt_err_rte_word_p),
   .debug_format_error_sr(fmt_err_sr_p),
-  .debug_format_error_pc(),   // not routed to save pins
-  .debug_format_error_addr(), // not routed to save pins
+  .debug_format_error_pc(fmt_err_pc_p),
+  .debug_format_error_addr(fmt_err_addr_p),
   // Cache operation address
   .cache_op_addr(cache_op_addr),
   // SignalTap debug ports (from PMMU)
@@ -1223,6 +2101,7 @@ cpu_inst_p
   .debug_pmmu_wstate(stp_pmmu_wstate_w),
   .debug_pmmu_atc_buserr(stp_atc_buserr_w),
   .debug_pmmu_atc_valid(stp_atc_valid_w),
+  .debug_pmmu_pending_flags(kernel_pmmu_pending_flags_p),
   .debug_pmmu_fault_status(stp_fault_status_w),
   .debug_pmmu_saved_addr(stp_saved_addr_w),
   .debug_pmmu_srp_hi(stp_pmmu_srp_hi_w),
@@ -1244,6 +2123,12 @@ cpu_inst_p
   .debug_set_trap_chk(kernel_set_trap_chk_p),
   .debug_data_write_tmp(kernel_data_write_tmp_p),
   .debug_FlagsSR(kernel_FlagsSR_p),
+  .debug_USP(kernel_usp_p),
+  .debug_MSP(kernel_msp_p),
+  .debug_ISP(kernel_isp_p),
+  .debug_a7_is_msp(kernel_a7_is_msp_p),
+  .debug_interrupt_mode(kernel_interrupt_mode_p),
+  .debug_rte_saved_mbit(kernel_rte_saved_mbit_p),
   .debug_trap_vector(kernel_trap_vector_p),
   .debug_micro_state(kernel_micro_state_p),
   .debug_next_micro_state(kernel_next_ms_p),
@@ -1252,6 +2137,7 @@ cpu_inst_p
   .debug_TG68_PC(kernel_TG68_PC_p),
   .debug_opcode(kernel_opcode_p),
   .debug_last_opc_read(kernel_last_opc_read_p),
+  .debug_data_read(kernel_data_read_p),
   .debug_brief(kernel_brief_p),
   .debug_memaddr_reg(kernel_memaddr_reg_p),
   .debug_memmask(kernel_memmask_p),
@@ -1265,6 +2151,12 @@ cpu_inst_p
   .debug_trap_berr(kernel_trap_berr_p),
   .debug_trap_mmu_berr(kernel_trap_mmu_berr_p),
   .debug_make_berr(kernel_make_berr_p),
+  .debug_berr_exception_active(kernel_berr_exception_active_p),
+  .debug_pmmu_fault_dispatched(kernel_pmmu_fault_dispatched_p),
+  .debug_pmmu_fault_was_cleared(kernel_pmmu_fault_was_cleared_p),
+  .debug_pmmu_fault_rw(kernel_pmmu_fault_rw_p),
+  .debug_pmmu_fault_is_insn(kernel_pmmu_fault_is_insn_p),
+  .debug_pmmu_fault_fc(kernel_pmmu_fault_fc_p),
   .debug_trap_1111(kernel_trap_1111_p),
   .debug_exec_directSR(kernel_exec_directSR_p),
   .debug_exec_to_SR(kernel_exec_to_SR_p),
@@ -1333,10 +2225,12 @@ fx68k cpu_inst_o
 generate
 if (USE_68030_CACHE) begin : gen_68030_cache
 
+	localparam DIAG_DISABLE_030_CACHE = 1'b1;
+
 	// Cache enable logic - independent control for instruction and data caches.
 	// The existing OSD slot with cpucfg=10 is reused for 68030; the logic keys off cpucfg[1].
-	assign i_cache_enabled = cpucfg[1] & cacr_ie; // 68030 slot active and instruction cache enabled
-	assign d_cache_enabled = cpucfg[1] & cacr_de; // 68030 slot active and data cache enabled
+	assign i_cache_enabled = cpucfg[1] & cacr_ie & ~DIAG_DISABLE_030_CACHE; // 68030 slot active and instruction cache enabled
+	assign d_cache_enabled = cpucfg[1] & cacr_de & ~DIAG_DISABLE_030_CACHE; // 68030 slot active and data cache enabled
 
 	// 68030 Cache instantiation
 	TG68K_Cache_030 cache_inst
@@ -1441,6 +2335,9 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	reg fill_active;
 	reg fill_owner_i;
 	reg [31:0] fill_addr_latched;
+	reg fill_valid_r;
+	reg fill_owner_r;
+	reg [127:0] fill_data_r;
 
 	wire fill_pending_i = i_fill_req & cacr_ibe;
 	wire fill_pending_d = d_fill_req & cacr_dbe;
@@ -1455,7 +2352,11 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 			fill_active <= 0;
 			fill_owner_i <= 0;
 			fill_addr_latched <= 0;
+			fill_valid_r <= 0;
+			fill_owner_r <= 0;
+			fill_data_r <= 0;
 		end else begin
+			fill_valid_r <= 0;
 			if (fill_start) begin
 				fill_active <= 1;
 				fill_count <= 0;
@@ -1473,6 +2374,9 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					3'd5: fill_buffer[111:96]  <= cache_data;
 					3'd6: begin
 						fill_buffer[127:112] <= cache_data;
+						fill_data_r <= {cache_data, fill_buffer[111:0]};
+						fill_owner_r <= fill_owner_i;
+						fill_valid_r <= 1;
 						fill_active <= 0;  // Complete cache line
 					end
 					default: ;
@@ -1483,10 +2387,10 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	end
 
 	// Provide filled cache line to cache module
-	assign i_fill_data = fill_buffer;
-	assign i_fill_valid = fill_accept & (fill_count == 6) & fill_owner_i;
-	assign d_fill_data = fill_buffer;
-	assign d_fill_valid = fill_accept & (fill_count == 6) & ~fill_owner_i;
+	assign i_fill_data = fill_data_r;
+	assign i_fill_valid = fill_valid_r & fill_owner_r;
+	assign d_fill_data = fill_data_r;
+	assign d_fill_valid = fill_valid_r & ~fill_owner_r;
 
 	// PMMU Walker Memory Arbiter (Stall-Based Approach)
 	// The walker needs 32-bit descriptors from memory via two sequential 16-bit reads.

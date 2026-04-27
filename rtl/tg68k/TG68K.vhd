@@ -232,6 +232,12 @@ COMPONENT TG68KdotC_Kernel
       debug_pmmu_reg_rdat              : out std_logic_vector(31 downto 0);
       debug_make_berr                  : out std_logic;
       debug_pmmu_fault                 : out std_logic;
+      debug_berr_exception_active      : out std_logic;
+      debug_pmmu_fault_dispatched      : out std_logic;
+      debug_pmmu_fault_was_cleared     : out std_logic;
+      debug_pmmu_fault_rw              : out std_logic;
+      debug_pmmu_fault_is_insn         : out std_logic;
+      debug_pmmu_fault_fc              : out std_logic_vector(2 downto 0);
       debug_trap_format_error          : out std_logic;
       debug_format_error_rte_word      : out std_logic_vector(15 downto 0);
       debug_format_error_pc            : out std_logic_vector(31 downto 0);
@@ -247,6 +253,7 @@ COMPONENT TG68KdotC_Kernel
       debug_pmmu_wstate                : out std_logic_vector(4 downto 0);
       debug_pmmu_atc_buserr            : out std_logic_vector(21 downto 0);
       debug_pmmu_atc_valid             : out std_logic_vector(21 downto 0);
+      debug_pmmu_pending_flags         : out std_logic_vector(15 downto 0);
       debug_pmmu_fault_status          : out std_logic_vector(15 downto 0);
       debug_pmmu_saved_addr            : out std_logic_vector(31 downto 0);
       debug_pmmu_walk_desc_addr        : out std_logic_vector(31 downto 0);
@@ -264,7 +271,13 @@ COMPONENT TG68KdotC_Kernel
       debug_exec_trap_chk              : out std_logic;
       debug_set_trap_chk               : out std_logic;
       debug_data_write_tmp             : out std_logic_vector(31 downto 0);
-      debug_FlagsSR                    : out std_logic_vector(7 downto 0)
+      debug_FlagsSR                    : out std_logic_vector(7 downto 0);
+      debug_USP                        : out std_logic_vector(31 downto 0);
+      debug_MSP                        : out std_logic_vector(31 downto 0);
+      debug_ISP                        : out std_logic_vector(31 downto 0);
+      debug_a7_is_msp                  : out std_logic;
+      debug_interrupt_mode             : out std_logic;
+      debug_rte_saved_mbit             : out std_logic
    );
    END COMPONENT;
 
@@ -565,11 +578,18 @@ cpu1: TG68KdotC_Kernel
       debug_rf_source_addr => open,
       debug_pmove_ea_latched => open,
       debug_reg_QA => open,
+      debug_pmmu_pending_flags => open,
       debug_pmmu_busy => open,
       debug_micro_state => open,
       debug_next_micro_state => open,
       debug_memmask => open,
-      debug_sndOPC => open
+      debug_sndOPC => open,
+      debug_USP => open,
+      debug_MSP => open,
+      debug_ISP => open,
+      debug_a7_is_msp => open,
+      debug_interrupt_mode => open,
+      debug_rte_saved_mbit => open
    );
  
    PROCESS (CLK)

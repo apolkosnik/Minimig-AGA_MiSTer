@@ -433,9 +433,11 @@ wire [23:1] chip_addr;
 
 wire [28:1] ram_addr_cpu;
 // BUG #128 FIX: Use properly encoded ramaddr for cache fills
-// BUG #130 FIX: Use latched high bits (from fill start) to ensure stable Z3 RAM encoding throughout fill
-// High bits from cache_fill_ramaddr_hi (latched), low bits from cache_fill_addr (incrementing)
-wire [28:1] cache_fill_ramaddr = {cache_fill_ramaddr_hi, cache_fill_addr[22:1]};
+// BUG #130 FIX: Latch the encoded RAM address at fill start so Z3/alias
+// mapping stays stable throughout the line fill.
+// BUG #451 FIX: Keep the full encoded address. Rebuilding low bits from the
+// raw physical address loses bootrom/Kickstart alias bits such as $F80000.
+reg  [28:1] cache_fill_ramaddr;
 wire        ram_sel_cpu;
 wire        ram_lds_cpu;
 wire        ram_uds_cpu;
@@ -484,8 +486,6 @@ wire [28:1] cpu_cache_ramaddr;   // BUG #128: Properly encoded ramaddr for cache
 // Cache fills always use burst transfers; IBE/DBE just enable/disable fills entirely.
 reg  [2:0]  cache_fill_cnt;
 reg         cache_fill_active;
-reg  [31:0] cache_fill_addr;
-reg  [28:23] cache_fill_ramaddr_hi;  // BUG #130: Latch encoded high bits at fill start
 reg         cache_fill_burst;        // Latch burst mode at start of fill
 wire        cache_fill_done = cache_fill_owns_ram & (cache_fill_cnt == 3'd7) & ram_ready;
 
@@ -493,16 +493,14 @@ always @(posedge clk_sys) begin
 	if (cpu_rst) begin
 		cache_fill_cnt <= 3'd0;
 		cache_fill_active <= 1'b0;
-		cache_fill_addr <= 32'd0;
-		cache_fill_ramaddr_hi <= 6'd0;
+		cache_fill_ramaddr <= 28'd0;
 		cache_fill_burst <= 1'b0;
 	end else begin
 		if (cpu_cache_req & !cache_fill_active & !walker_active_cpu) begin
 			// Start new cache fill sequence
 			cache_fill_active <= 1'b1;
 			cache_fill_cnt <= 3'd0;
-			cache_fill_addr <= cpu_cache_addr;
-			cache_fill_ramaddr_hi <= cpu_cache_ramaddr[28:23];  // BUG #130: Latch Z3 RAM encoding
+			cache_fill_ramaddr <= cpu_cache_ramaddr;
 			cache_fill_burst <= cpu_cache_burst;  // Latch burst mode flag
 		end else if (cache_fill_owns_ram & ram_ready) begin
 			if (cache_fill_cnt == 3'd7) begin
@@ -513,7 +511,7 @@ always @(posedge clk_sys) begin
 			end else begin
 				// Continue filling cache line
 				cache_fill_cnt <= cache_fill_cnt + 3'd1;
-				cache_fill_addr <= cache_fill_addr + 32'd2; // Next word (16-bit increment)
+				cache_fill_ramaddr <= cache_fill_ramaddr + 28'd1; // Next 16-bit word
 			end
 		end
 	end
@@ -600,6 +598,7 @@ sdram_ctrl ram1
 	.c_7m         (c1              ),
 
 	.cache_rst    (cpu_rst         ),
+	.cache_inhibit(walker_active_cpu),
 	.cpu_cache_ctrl(cpu_cacr       ),
 
 	.sd_data      (SDRAM_DQ        ),
@@ -642,6 +641,7 @@ ddram_ctrl ram2
 	.reset_n      (~reset_d        ),
 
 	.cache_rst    (cpu_rst         ),
+	.cache_inhibit(walker_active_cpu),
 	.cpu_cache_ctrl(cpu_cacr       ),
 
 	.DDRAM_CLK    (DDRAM_CLK       ),

@@ -278,6 +278,12 @@ entity TG68KdotC_Kernel is
 		debug_pmmu_reg_rdat : out std_logic_vector(31 downto 0);
 		debug_make_berr : out std_logic;
 		debug_pmmu_fault : out std_logic;
+		debug_berr_exception_active : out std_logic;
+		debug_pmmu_fault_dispatched : out std_logic;
+		debug_pmmu_fault_was_cleared : out std_logic;
+		debug_pmmu_fault_rw : out std_logic;
+		debug_pmmu_fault_is_insn : out std_logic;
+		debug_pmmu_fault_fc : out std_logic_vector(2 downto 0);
 		-- Format Error debug latch: captures key state when trap_format_error fires
 		debug_trap_format_error : out std_logic;
 		debug_format_error_rte_word : out std_logic_vector(15 downto 0);
@@ -295,6 +301,7 @@ entity TG68KdotC_Kernel is
 		debug_pmmu_wstate : out std_logic_vector(4 downto 0);
 		debug_pmmu_atc_buserr : out std_logic_vector(21 downto 0);
 		debug_pmmu_atc_valid  : out std_logic_vector(21 downto 0);
+			debug_pmmu_pending_flags : out std_logic_vector(15 downto 0);
 			debug_pmmu_fault_status : out std_logic_vector(15 downto 0);
 			debug_pmmu_saved_addr   : out std_logic_vector(31 downto 0);
 			debug_pmmu_walk_desc_addr : out std_logic_vector(31 downto 0);
@@ -313,7 +320,13 @@ entity TG68KdotC_Kernel is
 		debug_exec_trap_chk      : out std_logic;
 		debug_set_trap_chk       : out std_logic;
 		debug_data_write_tmp     : out std_logic_vector(31 downto 0);
-		debug_FlagsSR            : out std_logic_vector(7 downto 0)
+		debug_FlagsSR            : out std_logic_vector(7 downto 0);
+		debug_USP                : out std_logic_vector(31 downto 0);
+		debug_MSP                : out std_logic_vector(31 downto 0);
+		debug_ISP                : out std_logic_vector(31 downto 0);
+		debug_a7_is_msp          : out std_logic;
+		debug_interrupt_mode     : out std_logic;
+		debug_rte_saved_mbit     : out std_logic
 			);
 end TG68KdotC_Kernel;
 
@@ -684,6 +697,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_fault_fc_out   : std_logic_vector(2 downto 0);   -- BUG #414: FC at fault time from PMMU
 	signal pmmu_fault_rw_out   : std_logic;                       -- BUG #414: RW at fault time from PMMU
 	signal pmmu_fault_is_insn_out : std_logic;                    -- BUG #414: Instruction fetch flag from PMMU
+	signal pmmu_pending_flags : std_logic_vector(15 downto 0);
 	signal pmmu_tc_en       : std_logic;
 	
 	-- PMMU instruction control signals
@@ -810,6 +824,7 @@ BEGIN
       debug_wstate => debug_pmmu_wstate,
       debug_atc_buserr => debug_pmmu_atc_buserr,
       debug_atc_valid  => debug_pmmu_atc_valid,
+      debug_pending_flags => pmmu_pending_flags,
       debug_fault_status => debug_pmmu_fault_status,
       debug_saved_addr   => debug_pmmu_saved_addr,
       debug_walk_desc_addr => debug_pmmu_walk_desc_addr,
@@ -824,6 +839,8 @@ BEGIN
       debug_illegal_reg_sel => open,  -- BUG #446: sticky latch, SignalTap-only
       cpu_reset            => pmmu_cpu_reset
     );
+
+  debug_pmmu_pending_flags <= pmmu_pending_flags;
 
 --   -- PMMU register interface connected (enabled for 68030)
 --   pmmu_reg_we   <= pmmu_reg_we_d when CPU = "11" else '0';
@@ -3830,6 +3847,16 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 						fc_internal(2) <= DFC(2);  -- Use DFC(2) for supervisor bit
 					END IF;
 				END IF;
+				-- RTE restores the stacked SR before it has finished reading the
+				-- frame. Those remaining stack reads are still supervisor-data
+				-- cycles; only the following instruction/data cycles use the
+				-- restored user/supervisor mode.
+				IF cpu(1)='1' AND (
+				   next_micro_state = rte1 OR next_micro_state = rte2 OR
+				   next_micro_state = rte3 OR next_micro_state = rte4 OR
+				   next_micro_state = rte5 OR next_micro_state = rte6) THEN
+					fc_internal(2) <= '1';
+				END IF;
 				IF interrupt='1' THEN
 					fc_internal(2) <= '1';
 				END IF;
@@ -5784,27 +5811,21 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF SVmode='1' THEN
 						-- Fetch extension word to determine PMMU instruction type
 						IF decodeOPC='1' THEN
-							-- When PMMU translation resumes a stalled fetch, the first post-enable
-							-- F-line opcode can be visible before the extension word has completed
-							-- its clkena_lw edge. Hold decode in idle until that edge arrives, then
-							-- dispatch pmove_decode with a valid brief word.
-							IF clkena_lw='0' THEN
-								setstate <= "00";
-								next_micro_state <= idle;
+							-- Keep the PMMU dispatch asserted through wrapper wait states.
+							-- If this drops to idle while the extension word is completing,
+							-- the F-line brief ($2400/$4000/...) can retire as a normal opcode.
+							set(get_2ndOPC) <= '1';
+							-- BUG #366 FIX: For complex EA modes (d16, d8Xn, abs), keep setstate="00"
+							-- so pmove_decode runs with bus active (state="00"), fetching the
+							-- displacement/brief/address word. For simple modes (Dn, An, (An), (An)+,
+							-- -(An)), set "01" to suppress fetch (PC already at +4).
+							IF opcode(5 downto 3) = "101" OR opcode(5 downto 3) = "110" OR opcode(5 downto 3) = "111" THEN
+								null;  -- setstate stays "00" (default): fetch displacement/brief/address
 							ELSE
-								set(get_2ndOPC) <= '1';
-								-- BUG #366 FIX: For complex EA modes (d16, d8Xn, abs), keep setstate="00"
-								-- so pmove_decode runs with bus active (state="00"), fetching the
-								-- displacement/brief/address word. For simple modes (Dn, An, (An), (An)+,
-								-- -(An)), set "01" to suppress fetch (PC already at +4).
-								IF opcode(5 downto 3) = "101" OR opcode(5 downto 3) = "110" OR opcode(5 downto 3) = "111" THEN
-									null;  -- setstate stays "00" (default): fetch displacement/brief/address
-								ELSE
-									setstate <= "01";  -- Simple modes: suppress fetch (PC already at +4)
-								END IF;
-								getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
-								next_micro_state <= pmove_decode;
+								setstate <= "01";  -- Simple modes: suppress fetch (PC already at +4)
 							END IF;
+							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
+							next_micro_state <= pmove_decode;
 						-- BUG #150 FIX: Removed setstate <= "01" that was added for BUG #147.
 						-- That fix broke PMOVE by preventing extension word fetch from completing.
 						-- The extension word is fetched via get_2ndOPC and getbrief during
@@ -8834,6 +8855,12 @@ debug_pmmu_reg_part <= pmmu_reg_part_d;
 debug_pmmu_reg_rdat <= x"0000" & pmmu_debug_mmusr;
 debug_make_berr <= make_berr;
 debug_pmmu_fault <= pmmu_fault;
+debug_berr_exception_active <= berr_exception_active;
+debug_pmmu_fault_dispatched <= pmmu_fault_dispatched;
+debug_pmmu_fault_was_cleared <= pmmu_fault_was_cleared;
+debug_pmmu_fault_rw <= pmmu_fault_rw_out;
+debug_pmmu_fault_is_insn <= pmmu_fault_is_insn_out;
+debug_pmmu_fault_fc <= pmmu_fault_fc_out;
 
 -- DEBUG: CHK/Group2 exception frame probes
 debug_make_trace         <= make_trace;
@@ -8843,5 +8870,11 @@ debug_exec_trap_chk      <= '1' WHEN exec(trap_chk)='1' ELSE '0';
 debug_set_trap_chk       <= '1' WHEN set(trap_chk)='1' ELSE '0';
 debug_data_write_tmp     <= data_write_tmp;
 debug_FlagsSR            <= FlagsSR;
+debug_USP                <= USP;
+debug_MSP                <= MSP;
+debug_ISP                <= ISP;
+debug_a7_is_msp          <= a7_is_msp;
+debug_interrupt_mode     <= interrupt_mode;
+debug_rte_saved_mbit     <= rte_saved_mbit;
 
 END;

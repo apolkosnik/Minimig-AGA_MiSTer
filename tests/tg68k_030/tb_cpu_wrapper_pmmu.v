@@ -391,6 +391,29 @@ module tb_cpu_wrapper_pmmu;
     end
   endtask
 
+  task check_cache_kickstart_alias_mapping;
+    begin
+      bootrom = 1'b1;
+
+      force uut.cache_addr = 32'h00F80000;
+      #1;
+      if (cache_ramaddr !== 28'h3E0000)
+        fail("cache fill $00F80000 bootrom alias maps wrong RAM address");
+      else
+        pass("cache fill $00F80000 bootrom alias maps to Kickstart backing RAM");
+
+      force uut.cache_addr = 32'h00FC0000;
+      #1;
+      if (cache_ramaddr !== 28'h3E0000)
+        fail("cache fill $00FC0000 bootrom alias maps wrong RAM address");
+      else
+        pass("cache fill $00FC0000 bootrom alias maps to Kickstart backing RAM");
+
+      release uut.cache_addr;
+      bootrom = 1'b0;
+    end
+  endtask
+
   // ============================================================
   // Hierarchical probes (into the generate block)
   // ============================================================
@@ -466,6 +489,8 @@ module tb_cpu_wrapper_pmmu;
   initial begin
     $display("==== tb_cpu_wrapper_pmmu starting ====");
     preload_memory;
+    #5;
+    check_cache_kickstart_alias_mapping;
 
     // Reset
     reset = 1'b0;

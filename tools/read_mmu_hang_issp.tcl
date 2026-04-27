@@ -194,7 +194,7 @@ proc show_pmmu {bin} {
         [bin_to_hex [bit_slice $bin 142 121]] \
         [bin_to_hex [bit_slice $bin 120 105]] \
         [bin_to_hex [bit_slice $bin 104 73]]]
-    puts [format "       desc_addr=%08s desc_data=%08s fc=%s(%u) ipl=%u setendOPC=%u stop=%u cpu_bus_berr=%u" \
+    puts [format "       desc_addr=%08s desc_data=%08s fc=%s(%u) ipl=%u setendOPC=%u stop=%u cpu_halted=%u" \
         [bin_to_hex [bit_slice $bin 72 41]] \
         [bin_to_hex [bit_slice $bin 40 9]] \
         [decode_fc [bin_to_uint [bit_slice $bin 8 6]]] \
@@ -209,39 +209,17 @@ proc show_pmm2 {bin} {
     puts "== PMM2 =="
     set fault_latched [bin_to_uint [bit_slice $bin 193 193]]
     set timeout_latched [bin_to_uint [bit_slice $bin 192 192]]
-    set walkcap_latched [bin_to_uint [bit_slice $bin 191 191]]
-    set walkcap_phase_high [bin_to_uint [bit_slice $bin 190 190]]
-    set walkcap_write [bin_to_uint [bit_slice $bin 189 189]]
-    set walkcap_addr_word [bin_to_hex [bit_slice $bin 188 157]]
-    set walkcap_cpu_din [bin_to_hex [bit_slice $bin 156 141]]
-    set walkcap_pmmu_addr [bin_to_hex [bit_slice $bin 140 109]]
-    set walkcap_cpu_addr [bin_to_hex [bit_slice $bin 108 77]]
-    set walkcap_phys_addr [bin_to_hex [bit_slice $bin 76 45]]
-    set walkcap_flags [bit_slice $bin 44 32]
-    set walkcap_chip_stage [bin_to_uint [bit_slice $bin 31 30]]
-    set walkcap_cpustate [bin_to_uint [bit_slice $bin 29 28]]
-    set walkcap_ramaddr [bin_to_hex [bit_slice $bin 27 0]]
+    set ptr1_addr [bin_to_hex [bit_slice $bin 191 160]]
+    set ptr1_data [bin_to_hex [bit_slice $bin 159 128]]
+    set ptr2_addr [bin_to_hex [bit_slice $bin 127 96]]
+    set ptr2_data [bin_to_hex [bit_slice $bin 95 64]]
+    set ptr3_addr [bin_to_hex [bit_slice $bin 63 32]]
+    set ptr3_data [bin_to_hex [bit_slice $bin 31 0]]
 
-    puts [format "fault_latched=%u timeout=%u walkcap=%u phase_high=%u write=%u" \
-        $fault_latched $timeout_latched $walkcap_latched $walkcap_phase_high $walkcap_write]
-    puts [format "walk: addr_word=%08s pmmu_addr=%08s cpu_addr=%08s phys_addr=%08s cpu_din=%04s" \
-        $walkcap_addr_word $walkcap_pmmu_addr $walkcap_cpu_addr $walkcap_phys_addr $walkcap_cpu_din]
-    puts [format {      cpustate=%s(%u) chip_stage=%u ramaddr[28:1]=%07s} \
-        [decode_cpustate $walkcap_cpustate] $walkcap_cpustate $walkcap_chip_stage $walkcap_ramaddr]
-    puts [format "      flags: req=%u active=%u fast=%u chip=%u dfill=%u ifill=%u fill_active=%u cache_ack=%u cache_req=%u ramready=%u chipready=%u fastsel=%u ramsel=%u" \
-        [bin_to_uint [string index $walkcap_flags 0]] \
-        [bin_to_uint [string index $walkcap_flags 1]] \
-        [bin_to_uint [string index $walkcap_flags 2]] \
-        [bin_to_uint [string index $walkcap_flags 3]] \
-        [bin_to_uint [string index $walkcap_flags 4]] \
-        [bin_to_uint [string index $walkcap_flags 5]] \
-        [bin_to_uint [string index $walkcap_flags 6]] \
-        [bin_to_uint [string index $walkcap_flags 7]] \
-        [bin_to_uint [string index $walkcap_flags 8]] \
-        [bin_to_uint [string index $walkcap_flags 9]] \
-        [bin_to_uint [string index $walkcap_flags 10]] \
-        [bin_to_uint [string index $walkcap_flags 11]] \
-        [bin_to_uint [string index $walkcap_flags 12]]]
+    puts [format "fault_latched=%u timeout=%u" $fault_latched $timeout_latched]
+    puts [format "ptr1: addr=%08s data=%08s" $ptr1_addr $ptr1_data]
+    puts [format "ptr2: addr=%08s data=%08s" $ptr2_addr $ptr2_data]
+    puts [format "ptr3: addr=%08s data=%08s" $ptr3_addr $ptr3_data]
 }
 
 proc show_excf {bin} {
