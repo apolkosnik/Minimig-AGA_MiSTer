@@ -154,7 +154,8 @@ architecture behavior of tb_mmu_library_enable_probe is
     constant DISABLED_INVALID_TC_VALUE : std_logic_vector(31 downto 0) := x"010F9800";
     constant DISABLED_INVALID_TC_STORED : std_logic_vector(31 downto 0) := x"010F9800";
     constant INVALID_TC_VALUE : std_logic_vector(31 downto 0) := x"810F9800";
-    constant INVALID_TC_STORED : std_logic_vector(31 downto 0) := x"810F9800";
+    -- On MC68030 MMU configuration exception, the TC image is loaded with E cleared.
+    constant INVALID_TC_STORED : std_logic_vector(31 downto 0) := x"010F9800";
     constant DISABLED_INVALID_FALLTHRU_MARKER : std_logic_vector(31 downto 0) := x"D15AB1ED";
     constant INVALID_MARKER  : std_logic_vector(31 downto 0) := x"1BADB002";
     constant INVALID_FALLTHRU_MARKER : std_logic_vector(31 downto 0) := x"BAD0EC00";
@@ -760,7 +761,7 @@ begin
         end if;
 
         if dbg_pmmu_tc = INVALID_TC_STORED then
-            report "PASS: invalid TC preserved raw register image $" & slv_to_hex(INVALID_TC_STORED) severity note;
+            report "PASS: invalid TC stored with TC.E cleared $" & slv_to_hex(INVALID_TC_STORED) severity note;
             pass_count := pass_count + 1;
         else
             report "FAIL: invalid TC stored as $" & slv_to_hex(dbg_pmmu_tc) &
@@ -768,11 +769,11 @@ begin
             fail_count := fail_count + 1;
         end if;
 
-        if dbg_pmmu_tc(31) = '1' then
-            report "PASS: invalid TC preserved TC.E in register image" severity note;
+        if dbg_pmmu_tc(31) = '0' then
+            report "PASS: invalid TC cleared TC.E in register image" severity note;
             pass_count := pass_count + 1;
         else
-            report "FAIL: invalid TC did not preserve TC.E in register image" severity error;
+            report "FAIL: invalid TC left TC.E set in register image" severity error;
             fail_count := fail_count + 1;
         end if;
 
@@ -829,8 +830,8 @@ begin
             fail_count := fail_count + 1;
         end if;
 
-        if dbg_pmmu_tc = INVALID_TC_STORED and dbg_pmmu_tc(31) = '1' then
-            report "PASS: invalid TC remained preserved after CRP load" severity note;
+        if dbg_pmmu_tc = INVALID_TC_STORED and dbg_pmmu_tc(31) = '0' then
+            report "PASS: invalid TC remained stored with TC.E cleared after CRP load" severity note;
             pass_count := pass_count + 1;
         else
             report "FAIL: invalid TC after CRP stored as $" & slv_to_hex(dbg_pmmu_tc) severity error;

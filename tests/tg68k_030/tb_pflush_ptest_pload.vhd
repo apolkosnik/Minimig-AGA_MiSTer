@@ -685,6 +685,9 @@ begin
 
         -- Cached fault replay must preserve original MMUSR class.
         report "Creating cached ATC fault entry for WP page...";
+        -- Normal CPU faults and cached-fault replays must not alter the
+        -- architectural MMUSR register; WinUAE only changes it for PTEST/PMOVE.
+        write_reg(SEL_MMUSR, x"00000000", '0');
         clear_mem_read_count;
         translate_and_check_rw(x"00004000", '0', true);  -- first fault populates ATC
         if mem_read_count > 0 then
@@ -698,6 +701,15 @@ begin
         clear_mem_read_count;
         translate_and_check_rw(x"00004000", '0', true);  -- second fault should hit cached entry
         report "Fault status after cached WP replay: 0x" & slv_to_hex(fault_status(15 downto 0));
+        settle_fault_state;
+        read_reg(SEL_MMUSR, '0');
+        if reg_rdat(15 downto 0) = x"0000" then
+            test_pass <= test_pass + 1;
+        else
+            report "  Expected CPU cached fault replay to leave architectural MMUSR at 0, got 0x" &
+                   slv_to_hex(reg_rdat(15 downto 0)) severity error;
+            test_fail <= test_fail + 1;
+        end if;
         if mem_read_count = 0 then
             test_pass <= test_pass + 1;
         else

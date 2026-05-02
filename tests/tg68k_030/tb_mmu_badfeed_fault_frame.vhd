@@ -390,6 +390,26 @@ begin
                    & " desc_addr=$" & slv_to_hex(debug_pmmu_walk_desc_addr)
                    & " desc_data=$" & slv_to_hex(debug_pmmu_walk_desc_data)
             severity failure;
+        elsif frame_pc /= x"0000012C" then
+            report "FAIL: BADFEED frame PC=$" & slv_to_hex(frame_pc)
+                   & " expected faulting instruction PC $0000012C"
+                   & " SSW=$" & slv_to_hex(frame_ssw)
+                   & " MMUSR=$" & slv_to_hex(debug_pmmu_fault_status)
+            severity failure;
+        elsif frame_ssw /= x"0341" then
+            report "FAIL: BADFEED data fault SSW=$" & slv_to_hex(frame_ssw)
+                   & " expected $0341"
+                   & " MMUSR=$" & slv_to_hex(debug_pmmu_fault_status)
+                   & " FA=$" & slv_to_hex(frame_fa)
+                   & " DESC=$" & slv_to_hex(debug_pmmu_walk_desc_data)
+            severity failure;
+        elsif debug_pmmu_fault_status /= x"0400" then
+            report "FAIL: BADFEED data fault MMUSR=$" & slv_to_hex(debug_pmmu_fault_status)
+                   & " expected $0400"
+                   & " SSW=$" & slv_to_hex(frame_ssw)
+                   & " FA=$" & slv_to_hex(frame_fa)
+                   & " DESC=$" & slv_to_hex(debug_pmmu_walk_desc_data)
+            severity failure;
         else
             report "PASS: vector2 marker caught"
                    & " A7=$" & slv_to_hex(frame_a7)

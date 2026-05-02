@@ -110,9 +110,10 @@ architecture behavioral of tb_mmu_badfeed_softfix_recovery is
         m(64) := x"23FC"; m(65) := x"0000"; m(66) := x"0002"; m(67) := x"0000"; m(68) := x"1F00";
         m(69) := x"23CF"; m(70) := x"0000"; m(71) := x"1F24"; -- MOVE.L A7,$1F24.L
         m(72) := x"08AF"; m(73) := x"0000"; m(74) := x"000A"; -- BCLR #0,($0A,SP)
-        m(75) := x"203C"; m(76) := x"BADF"; m(77) := x"EED0"; -- MOVE.L #BADFEED0,D0
-        m(78) := x"2F40"; m(79) := x"002C";                   -- MOVE.L D0,($2C,SP)
-        m(80) := x"4E73";                                     -- RTE
+        m(75) := x"223C"; m(76) := x"BADF"; m(77) := x"EED0"; -- MOVE.L #BADFEED0,D1
+        m(78) := x"2F41"; m(79) := x"002C";                   -- MOVE.L D1,($2C,SP)
+        m(80) := x"7000";                                     -- MOVEQ #0,D0
+        m(81) := x"4E73";                                     -- RTE
 
         -- Unexpected trap handler
         m(96) := x"23FC"; m(97) := x"00FF"; m(98) := x"0000";
@@ -257,7 +258,12 @@ begin
             if busstate = "11" and nWr = '0' and clkena_in = '1' then
                 if not is_x(pmmu_addr_phys) and unsigned(pmmu_addr_phys) < x"00008000" then
                     phys_word := to_integer(unsigned(pmmu_addr_phys(14 downto 1)));
-                    mem(phys_word) <= data_write;
+                    if nUDS = '0' then
+                        mem(phys_word)(15 downto 8) <= data_write(15 downto 8);
+                    end if;
+                    if nLDS = '0' then
+                        mem(phys_word)(7 downto 0) <= data_write(7 downto 0);
+                    end if;
                 end if;
             end if;
 
@@ -328,6 +334,10 @@ begin
     main_test: process
         variable frame_a7 : std_logic_vector(31 downto 0);
         variable marker   : std_logic_vector(31 downto 0);
+        variable frame_word : integer;
+        variable frame_ssw : std_logic_vector(15 downto 0);
+        variable frame_opcode_long : std_logic_vector(31 downto 0);
+        variable frame_input_buffer : std_logic_vector(31 downto 0);
     begin
         report "=== MMU BADFEED SOFTWARE-FIX RECOVERY TEST ===" severity note;
         wait for 100 ns;
@@ -342,6 +352,10 @@ begin
 
         frame_a7 := mem(16#0F92#) & mem(16#0F93#); -- $1F24
         marker   := mem(16#0F80#) & mem(16#0F81#); -- $1F00
+        frame_word := to_integer(unsigned(frame_a7(15 downto 1)));
+        frame_ssw := mem(frame_word + 5);
+        frame_opcode_long := mem(frame_word + 10) & mem(frame_word + 11);
+        frame_input_buffer := mem(frame_word + 22) & mem(frame_word + 23);
 
         if debug_cpu_halted = '1' then
             report "FAIL: cpu_halted asserted"
@@ -362,6 +376,9 @@ begin
                    & " A0=$" & slv_to_hex(debug_regfile_a0)
                    & " A7=$" & slv_to_hex(frame_a7)
                    & " marker=$" & slv_to_hex(marker)
+                   & " frame_ssw=$" & slv_to_hex(frame_ssw)
+                   & " frame_opcode=$" & slv_to_hex(frame_opcode_long)
+                   & " frame_input=$" & slv_to_hex(frame_input_buffer)
                    severity failure;
         elsif debug_regfile_d0 /= x"BADFEED0" then
             report "FAIL: software-fixed RTE did not complete MOVE.L (A0),D0"
@@ -369,6 +386,9 @@ begin
                    & " A0=$" & slv_to_hex(debug_regfile_a0)
                    & " A7=$" & slv_to_hex(frame_a7)
                    & " marker=$" & slv_to_hex(marker)
+                   & " frame_ssw=$" & slv_to_hex(frame_ssw)
+                   & " frame_opcode=$" & slv_to_hex(frame_opcode_long)
+                   & " frame_input=$" & slv_to_hex(frame_input_buffer)
                    & " saw_handler=" & boolean'image(saw_handler_pc)
                    & " saw_stop=" & boolean'image(saw_stop_pc)
                    & " trapvec=$" & slv_to_hex(debug_trap_vector)

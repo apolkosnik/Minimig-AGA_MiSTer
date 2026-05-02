@@ -11,6 +11,16 @@ proc find_instance {hw_name dev_name wanted_name} {
     error "ISSP instance $wanted_name not found"
 }
 
+proc find_instance_optional {hw_name dev_name wanted_name} {
+    set insts [get_insystem_source_probe_instance_info -hardware_name $hw_name -device_name $dev_name]
+    foreach inst $insts {
+        if {[lindex $inst 3] eq $wanted_name} {
+            return $inst
+        }
+    }
+    return {}
+}
+
 proc get_hw {} {
     set hw_names [get_hardware_names]
     if {[llength $hw_names] == 0} {
@@ -207,6 +217,20 @@ proc show_pmmu {bin} {
 
 proc show_pmm2 {bin} {
     puts "== PMM2 =="
+    set first_pc [bin_to_hex [bit_slice $bin 432 401]]
+    set first_exe_pc [bin_to_hex [bit_slice $bin 400 369]]
+    set first_opcode [bin_to_hex [bit_slice $bin 368 353]]
+    set first_state [bin_to_uint [bit_slice $bin 352 351]]
+    set first_micro [bin_to_uint [bit_slice $bin 350 343]]
+    set first_next [bin_to_uint [bit_slice $bin 342 335]]
+    set first_memaddr [bin_to_hex [bit_slice $bin 334 303]]
+    set first_log_addr [bin_to_hex [bit_slice $bin 302 271]]
+    set first_phys_addr [bin_to_hex [bit_slice $bin 270 239]]
+    set first_flags [bin_to_hex [bit_slice $bin 238 231]]
+    set first_rw [bin_to_uint [bit_slice $bin 230 230]]
+    set first_is_insn [bin_to_uint [bit_slice $bin 229 229]]
+    set first_fc [bin_to_uint [bit_slice $bin 228 226]]
+    set first_a7 [bin_to_hex [bit_slice $bin 225 194]]
     set fault_latched [bin_to_uint [bit_slice $bin 193 193]]
     set timeout_latched [bin_to_uint [bit_slice $bin 192 192]]
     set ptr1_addr [bin_to_hex [bit_slice $bin 191 160]]
@@ -217,6 +241,12 @@ proc show_pmm2 {bin} {
     set ptr3_data [bin_to_hex [bit_slice $bin 31 0]]
 
     puts [format "fault_latched=%u timeout=%u" $fault_latched $timeout_latched]
+    puts [format "first: pc=%08s exe_pc=%08s opcode=%04s state=%s(%u) micro=%u next=%u flags=%02s" \
+        $first_pc $first_exe_pc $first_opcode [decode_cpustate $first_state] $first_state \
+        $first_micro $first_next $first_flags]
+    puts [format "       memaddr=%08s log=%08s phys=%08s a7=%08s rw=%u insn=%u fc=%s(%u)" \
+        $first_memaddr $first_log_addr $first_phys_addr $first_a7 $first_rw $first_is_insn \
+        [decode_fc $first_fc] $first_fc]
     puts [format "ptr1: addr=%08s data=%08s" $ptr1_addr $ptr1_data]
     puts [format "ptr2: addr=%08s data=%08s" $ptr2_addr $ptr2_data]
     puts [format "ptr3: addr=%08s data=%08s" $ptr3_addr $ptr3_data]
@@ -241,6 +271,42 @@ proc show_excf {bin} {
         [bin_to_hex [bit_slice $bin 7 0]]]
 }
 
+proc show_tcwr {bin} {
+    puts "== TCWR =="
+    set seen [bin_to_uint [bit_slice $bin 411 411]]
+    set count [bin_to_uint [bit_slice $bin 410 403]]
+    set last_value [bin_to_hex [bit_slice $bin 402 371]]
+    set last_pc [bin_to_hex [bit_slice $bin 370 339]]
+    set last_exe_pc [bin_to_hex [bit_slice $bin 338 307]]
+    set last_opcode [bin_to_hex [bit_slice $bin 306 291]]
+    set last_brief [bin_to_hex [bit_slice $bin 290 275]]
+    set last_flags [bin_to_hex [bit_slice $bin 274 267]]
+    set last_micro [bin_to_uint [bit_slice $bin 266 259]]
+    set last_next [bin_to_uint [bit_slice $bin 258 251]]
+    set last_part [bin_to_uint [bit_slice $bin 250 250]]
+    set enable_seen [bin_to_uint [bit_slice $bin 249 249]]
+    set enable_value [bin_to_hex [bit_slice $bin 248 217]]
+    set enable_pc [bin_to_hex [bit_slice $bin 216 185]]
+    set enable_opcode [bin_to_hex [bit_slice $bin 184 169]]
+    set enable_brief [bin_to_hex [bit_slice $bin 168 153]]
+    set disable_seen [bin_to_uint [bit_slice $bin 152 152]]
+    set disable_value [bin_to_hex [bit_slice $bin 151 120]]
+    set disable_pc [bin_to_hex [bit_slice $bin 119 88]]
+    set disable_opcode [bin_to_hex [bit_slice $bin 87 72]]
+    set disable_brief [bin_to_hex [bit_slice $bin 71 56]]
+    set disable_flags [bin_to_hex [bit_slice $bin 55 48]]
+    set live_tc [bin_to_hex [bit_slice $bin 47 16]]
+    set pending [bin_to_hex [bit_slice $bin 15 0]]
+
+    puts [format "seen=%u count=%u live_tc=%08s pending=%04s" $seen $count $live_tc $pending]
+    puts [format "last: value=%08s pc=%08s exe_pc=%08s opcode=%04s brief=%04s flags=%02s micro=%u next=%u part=%u" \
+        $last_value $last_pc $last_exe_pc $last_opcode $last_brief $last_flags $last_micro $last_next $last_part]
+    puts [format "first_enable: seen=%u value=%08s pc=%08s opcode=%04s brief=%04s" \
+        $enable_seen $enable_value $enable_pc $enable_opcode $enable_brief]
+    puts [format "first_disable_after_enable: seen=%u value=%08s pc=%08s opcode=%04s brief=%04s flags=%02s" \
+        $disable_seen $disable_value $disable_pc $disable_opcode $disable_brief $disable_flags]
+}
+
 set clear_cpus 0
 foreach arg $::argv {
     switch -- $arg {
@@ -257,10 +323,15 @@ lassign [find_instance $hw_name $dev_name "PMMU"] pmmu_idx _ _ _
 lassign [find_instance $hw_name $dev_name "PMM2"] pmm2_idx _ _ _
 lassign [find_instance $hw_name $dev_name "EXCF"] excf_idx _ _ _
 lassign [find_instance $hw_name $dev_name "REGS"] regs_idx _ _ _
+set tcwr_inst [find_instance_optional $hw_name $dev_name "TCWR"]
+set tcwr_idx -1
+if {[llength $tcwr_inst] != 0} {
+    set tcwr_idx [lindex $tcwr_inst 0]
+}
 
 puts "hardware: $hw_name"
 puts "device:   $dev_name"
-puts "instances: PMMU=$pmmu_idx PMM2=$pmm2_idx EXCF=$excf_idx CPUS=$cpus_idx REGS=$regs_idx"
+puts "instances: PMMU=$pmmu_idx PMM2=$pmm2_idx EXCF=$excf_idx CPUS=$cpus_idx REGS=$regs_idx TCWR=$tcwr_idx"
 
 start_insystem_source_probe -hardware_name $hw_name -device_name $dev_name
 if {$clear_cpus} {
@@ -276,12 +347,21 @@ if {$clear_cpus} {
     after 20
     write_source_data -instance_index $excf_idx -value 0 -value_in_hex
     after 20
+    if {$tcwr_idx >= 0} {
+        write_source_data -instance_index $tcwr_idx -value 1 -value_in_hex
+        after 20
+        write_source_data -instance_index $tcwr_idx -value 0 -value_in_hex
+        after 20
+    }
 }
 set cpus_bin [read_probe_data -instance_index $cpus_idx]
 set pmmu_bin [read_probe_data -instance_index $pmmu_idx]
 set pmm2_bin [read_probe_data -instance_index $pmm2_idx]
 set excf_bin [read_probe_data -instance_index $excf_idx]
 set regs_bin [read_probe_data -instance_index $regs_idx]
+if {$tcwr_idx >= 0} {
+    set tcwr_bin [read_probe_data -instance_index $tcwr_idx]
+}
 end_insystem_source_probe
 
 show_cpustate $cpus_bin
@@ -289,3 +369,6 @@ show_regs $regs_bin
 show_pmmu $pmmu_bin
 show_pmm2 $pmm2_bin
 show_excf $excf_bin
+if {$tcwr_idx >= 0} {
+    show_tcwr $tcwr_bin
+}

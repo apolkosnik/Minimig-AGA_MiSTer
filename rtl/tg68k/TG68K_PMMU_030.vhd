@@ -268,6 +268,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal mmu_config_error   : std_logic := '0';
   signal tc_config_check_pending : std_logic := '0';
   signal tc_config_check_value   : std_logic_vector(31 downto 0) := (others => '0');
+  signal tc_config_valid         : std_logic := '1';
   -- BUG #446: sticky latch for illegal-reg_sel observations (see port).
   signal pmmu_illegal_reg_sel_seen : std_logic := '0';
   -- MC68030 page table walker FSM
@@ -1134,9 +1135,9 @@ begin
     variable page_offset_bits : integer;
   begin
     if nreset = '0' then
-      -- MC68030: Initialize TC with E=0 (disabled) but PS=8 (minimum valid)
-      -- Bit 23 must be 1 for valid PS values (8-15), so initialize to x"00800000"
-      TC    <= x"00800000";
+      -- MC68030 hard reset clears TC. Disabled TC images are not configuration
+      -- checked, so PS=0 is legal while E=0 and must read back as zero.
+      TC    <= (others => '0');
       CRP_H <= (others => '0');
       CRP_L <= (others => '0');
       SRP_H <= (others => '0');
@@ -1152,6 +1153,7 @@ begin
       mmu_config_error <= '0';
       tc_config_check_pending <= '0';
       tc_config_check_value <= (others => '0');
+      tc_config_valid <= '1';
       pmmu_illegal_reg_sel_seen <= '0';
     elsif rising_edge(clk) then
       atc_flush_req <= '0';
@@ -1168,20 +1170,32 @@ begin
         tc_config_check_pending <= '0';
         tc_e := tc_config_check_value(31);
         ps_val := to_integer(unsigned(tc_config_check_value(23 downto 20)));
-        if tc_e = '1' and ps_val < 8 then
+        if tc_e = '0' then
+          tc_config_valid <= '1';
+        elsif ps_val < 8 then
+          -- MC68030 UM 9.7.2: on MMU configuration exception the TC image is
+          -- loaded, but the E bit is cleared.
+          tc_config_valid <= '1';
           mmu_config_error <= '1';
+          TC(31) <= '0';
           -- synthesis translate_off
           report "MMU_CONFIG: Invalid PS field=" & integer'image(ps_val) &
                  " (must be 8-15), raising configuration exception" severity warning;
           -- synthesis translate_on
-        elsif tc_e = '1' then
+        else
           total_bits := tc_total_bits(tc_config_check_value);
           if total_bits /= 32 then
+            -- MC68030 UM 9.7.2: on MMU configuration exception the TC image is
+            -- loaded, but the E bit is cleared.
+            tc_config_valid <= '1';
             mmu_config_error <= '1';
+            TC(31) <= '0';
             -- synthesis translate_off
             report "MMU_CONFIG: Field sum=" & integer'image(total_bits) &
                    " (must be 32), raising configuration exception" severity warning;
             -- synthesis translate_on
+          else
+            tc_config_valid <= '1';
           end if;
         end if;
       end if;
@@ -1195,6 +1209,7 @@ begin
         -- reset to avoid stale translations surviving boot paths that the
         -- Amiga firmware does not explicitly PFLUSHA. Keep the flush.
         TC(31) <= '0';
+        tc_config_valid <= '1';
         TT0(15) <= '0';
         TT1(15) <= '0';
         atc_flush_req <= '1';
@@ -1279,6 +1294,7 @@ begin
             -- returning early when translation is disabled.
             tc_config_check_value <= tc_write_val;
             tc_config_check_pending <= '1';
+            tc_config_valid <= not tc_write_val(31);
             TC <= tc_write_val;
             report "BUG387_TC_WRITE: tc_val=0x" &
                    integer'image(to_integer(unsigned(tc_write_val(31 downto 16)))) & "_" &
@@ -1464,7 +1480,7 @@ begin
   -- The raw TC contents are still preserved for PMOVE readback and vector-56
   -- forensics, but the handler must run under identity/TTR semantics instead
   -- of briefly re-enabling an illegal translation context after ack.
-  tc_en <= '1' when TC(31) = '1' and mmu_config_error = '0' and not tc_config_invalid(TC) else '0';
+  tc_en <= '1' when TC(31) = '1' and mmu_config_error = '0' and tc_config_valid = '1' else '0';
   tc_sre <= TC(25);
   tc_fcl <= TC(24);
   tc_enable <= tc_en;
@@ -1879,8 +1895,9 @@ begin
               fault_fc_reg <= fc;
               fault_rw_reg <= rw;
               fault_is_insn_reg <= is_insn;
-              mmusr_update_value <= status_tmp;
-              mmusr_update_req <= '1';
+              -- Normal CPU translations use this status for the exception
+              -- frame/debug path only.  Like WinUAE, the architectural MMUSR
+              -- register is only changed by PTEST or PMOVE MMUSR.
               -- Fault ATC entries intentionally do not preserve a usable physical
               -- address or final page attributes. Mirror the direct walker fault
               -- path so replay cannot probe/fill the cache via stale zeroed data.
@@ -1901,7 +1918,7 @@ begin
                 invalid => '0',                         -- Descriptor was valid
                 modified => '0',
                 transparent => '0',
-                level => atc_level(hit_idx)             -- BUG #412: actual walk level from ATC
+                level => "000"                         -- N is only defined for PTEST table searches
               );
               fault_reg <= '1';
               fault_status_reg <= status_tmp;
@@ -1909,8 +1926,7 @@ begin
               fault_fc_reg <= fc;               -- BUG #414: Latch FC at fault time
               fault_rw_reg <= rw;               -- BUG #414: Latch RW at fault time
               fault_is_insn_reg <= is_insn;     -- BUG #414: Latch instruction fetch flag
-              mmusr_update_value <= status_tmp;
-              mmusr_update_req <= '1';
+              -- Do not update architectural MMUSR for ordinary CPU faults.
               -- Debug: capture fault status in sticky latch
               if debug_fault_status_valid = '0' then
                 debug_fault_status_latch <= status_tmp(15 downto 0);
@@ -1938,7 +1954,7 @@ begin
                 invalid => '0',                         -- Descriptor was valid
                 modified => '0',
                 transparent => '0',
-                level => atc_level(hit_idx)             -- BUG #412: actual walk level from ATC
+                level => "000"                         -- N is only defined for PTEST table searches
               );
               fault_reg <= '1';
               fault_status_reg <= status_tmp;
@@ -1946,8 +1962,7 @@ begin
               fault_fc_reg <= fc;               -- BUG #414: Latch FC at fault time
               fault_rw_reg <= rw;               -- BUG #414: Latch RW at fault time
               fault_is_insn_reg <= is_insn;     -- BUG #414: Latch instruction fetch flag
-              mmusr_update_value <= status_tmp;
-              mmusr_update_req <= '1';
+              -- Do not update architectural MMUSR for ordinary CPU faults.
               -- Debug: capture fault status in sticky latch
               if debug_fault_status_valid = '0' then
                 debug_fault_status_latch <= status_tmp(15 downto 0);
@@ -1998,7 +2013,7 @@ begin
                   write_protect => atc_attr(hit_idx)(0),   -- WP bit from page attributes
                   modified => atc_attr(hit_idx)(1),        -- M bit from page descriptor
                   transparent => '0',                      -- Not a transparent translation
-                  level => atc_level(hit_idx)              -- BUG #412: actual walk level from ATC
+                  level => "000"                          -- N is only defined for PTEST table searches
                 );
                --  -- report "ATC_HIT: successful translation, phys=0x" & slv_to_hstring(std_logic_vector(phys_result)) severity note;
               end if;
@@ -2203,6 +2218,11 @@ begin
       if walker_fault = '1' and walker_fault_ack = '0' then
         -- Walker faulted - process immediately regardless of req state
         status_tmp := walker_fault_status;
+        if ptest_walk_pending = '0' then
+          -- WinUAE only stamps MMUSR.N for PTEST/table-search requests.
+          -- Ordinary translation faults, including cached BADFEED entries, keep N=0.
+          status_tmp(2 downto 0) := "000";
+        end if;
         -- BUG #396b: PTEST/PLOAD walks must NOT set fault_reg or corrupt addr_phys_reg.
         -- Walker faults during PTEST/PLOAD should only update MMUSR, not trigger CPU bus error.
         -- Without this guard, PTEST W on a WP page causes walker_fault -> fault_reg=1 ->
@@ -2299,7 +2319,7 @@ begin
                 invalid => '0',                         -- Descriptor was valid
                 modified => '0',
                 transparent => '0',
-                level => atc_level(hit_idx)             -- BUG #412: actual walk level from ATC
+                level => "000"                         -- N is only defined for PTEST table searches
               );
               -- BUG #396: PTEST/PLOAD walks must NOT update addr_phys_reg or fault_reg.
               -- These are instruction-initiated walks that only test/preload the ATC.
@@ -2341,7 +2361,7 @@ begin
                 invalid => '0',                         -- Descriptor was valid
                 modified => '0',
                 transparent => '0',
-                level => atc_level(hit_idx)             -- BUG #412: actual walk level from ATC
+                level => "000"                         -- N is only defined for PTEST table searches
               );
               -- BUG #396: Skip addr_phys_reg update for PTEST/PLOAD walks
               -- BUG #404: Skip when addr_log has moved past saved_addr_log
@@ -2390,7 +2410,7 @@ begin
                 write_protect => atc_attr(hit_idx)(0),   -- WP bit from page attributes
                 modified => atc_attr(hit_idx)(1),        -- M bit from page descriptor
                 transparent => '0',                      -- Not a transparent translation
-                level => atc_level(hit_idx)              -- BUG #412: actual walk level from ATC
+                level => "000"                          -- N is only defined for PTEST table searches
               );
               fault_status_reg <= status_tmp;
               -- BUG #374 FIX: Update MMUSR on successful walker completion
@@ -4437,10 +4457,10 @@ begin
             atc_page_size(replace_idx) <= walk_page_size;
             atc_attr(replace_idx)      <= (others => '0');  -- No valid attributes
             atc_fc(replace_idx)        <= saved_fc;
-            atc_level(replace_idx)     <= walker_fault_status(2 downto 0);
+            atc_level(replace_idx)     <= (others => '0');
             atc_valid(replace_idx)     <= '1';
             atc_buserr(replace_idx)    <= '1';  -- Mark as cached fault entry
-            atc_fault_status(replace_idx) <= walker_fault_status(15 downto 0);
+            atc_fault_status(replace_idx) <= walker_fault_status(15 downto 3) & "000";
             atc_mru(replace_idx) <= '1';
             walker_completed <= '1';  -- Signal that walker completed (with fault)
             wstate <= W_IDLE;

@@ -281,10 +281,10 @@ begin
     -- 1e: Reserved bits 30-26 must be cleared even with E=1
     -- Write 0xFFFFFFFF: E=1, but PS=15 (valid), IS=15, TIA=15, TIB=15, TIC=15, TID=15
     -- Field sum = 15+15+15+15+15+15 = 90 != 32 -> E cleared!
-    -- The TC register stores the masked value, but tc_enable remains low while
-    -- mmu_config_err stays asserted for the invalid field sum.
-    write_and_check(SEL_TC, '0', x"FFFFFFFF", x"83FFFFFF",
-      "TC all-1s - register stores masked value, tc_enable clamps low");
+    -- The TC register stores the masked value, then clears E on the invalid
+    -- field sum per MC68030 MMU configuration exception behavior.
+    write_and_check(SEL_TC, '0', x"FFFFFFFF", x"03FFFFFF",
+      "TC all-1s - invalid field sum clears E");
     ack_mmu_config_error_if_set;
 
     -- 1f: Valid E=1 with FCL=1: PS=15, IS=0, TIA=9, TIB=8 (030.library config)
@@ -561,6 +561,7 @@ begin
              std_logic'image(tc_enable) severity error;
       errors <= errors + 1;
     end if;
+    check_reg(SEL_TC, '0', x"00000000", x"FFFFFFFF", "TC invalid PS=0 readback clears E");
     ack_mmu_config_error_if_set;
 
     -- 11b: Invalid field sum (PS=8, IS=0, TIA=1, TIB=0 -> sum=9 != 32)
@@ -574,6 +575,7 @@ begin
              std_logic'image(tc_enable) severity error;
       errors <= errors + 1;
     end if;
+    check_reg(SEL_TC, '0', x"00801000", x"FFFFFFFF", "TC invalid field sum readback clears E");
     ack_mmu_config_error_if_set;
 
     -- =============================================

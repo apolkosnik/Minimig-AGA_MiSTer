@@ -1,10 +1,9 @@
 -- tb_reset_clears_pmmu_enables.vhd
--- Verifies that the RESET instruction clears MC68030 PMMU enable bits.
+-- Verifies that the RESET instruction preserves MC68030 PMMU enable bits.
 --
 -- Expected architectural behavior:
---   TT0.E/TT1.E are cleared
---   TC.E is cleared
--- Remaining register fields stay otherwise intact.
+--   RESET asserts external reset only.
+--   TC/TT0/TT1 remain intact until a real CPU reset.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -43,9 +42,9 @@ architecture behavior of tb_reset_clears_pmmu_enables is
     constant TT0_INIT      : std_logic_vector(31 downto 0) := x"00FF8707";
     constant TT1_INIT      : std_logic_vector(31 downto 0) := x"00FF8707";
     constant TC_INIT       : std_logic_vector(31 downto 0) := x"81F09800";
-    constant TT0_EXPECTED  : std_logic_vector(31 downto 0) := x"00FF0707";
-    constant TT1_EXPECTED  : std_logic_vector(31 downto 0) := x"00FF0707";
-    constant TC_EXPECTED   : std_logic_vector(31 downto 0) := x"01F09800";
+    constant TT0_EXPECTED  : std_logic_vector(31 downto 0) := TT0_INIT;
+    constant TT1_EXPECTED  : std_logic_vector(31 downto 0) := TT1_INIT;
+    constant TC_EXPECTED   : std_logic_vector(31 downto 0) := TC_INIT;
     constant RESULT_ADDR   : integer := 16#3010#;
 
     type mem_array_t is array (0 to 32767) of std_logic_vector(15 downto 0);
@@ -226,7 +225,7 @@ begin
         tc_actual := read_long(RESULT_ADDR + 8);
 
         if tt0_actual = TT0_EXPECTED then
-            report "PASS: RESET cleared TT0.E only" severity note;
+            report "PASS: RESET preserved TT0" severity note;
             pass_count := pass_count + 1;
         else
             report "FAIL: RESET TT0 readback expected=$" & slv_to_hex(TT0_EXPECTED) &
@@ -235,7 +234,7 @@ begin
         end if;
 
         if tt1_actual = TT1_EXPECTED then
-            report "PASS: RESET cleared TT1.E only" severity note;
+            report "PASS: RESET preserved TT1" severity note;
             pass_count := pass_count + 1;
         else
             report "FAIL: RESET TT1 readback expected=$" & slv_to_hex(TT1_EXPECTED) &
@@ -244,7 +243,7 @@ begin
         end if;
 
         if tc_actual = TC_EXPECTED then
-            report "PASS: RESET cleared TC.E only" severity note;
+            report "PASS: RESET preserved TC" severity note;
             pass_count := pass_count + 1;
         else
             report "FAIL: RESET TC readback expected=$" & slv_to_hex(TC_EXPECTED) &

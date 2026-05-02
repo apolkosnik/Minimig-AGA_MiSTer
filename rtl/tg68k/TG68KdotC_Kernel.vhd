@@ -551,6 +551,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_fault_was_cleared : std_logic;  -- MC68030: Detects new PMMU fault during stall (for double bus fault)
 	-- BUG #414/#415: Latched fault info for Format $A bus error frame
 	signal berr_fault_addr   : std_logic_vector(31 downto 0);  -- Faulting logical address
+	signal berr_frame_pc     : std_logic_vector(31 downto 0);  -- PC stacked in the 68030 bus-fault frame
+	signal berr_opcode_saved : std_logic_vector(15 downto 0);  -- Faulted instruction opcode for Format $B replay state
 	signal berr_ssw          : std_logic_vector(15 downto 0);  -- Special Status Word
 	signal berr_data_out_saved : std_logic_vector(31 downto 0);  -- Data output buffer saved at berr dispatch
 	signal berr_long_frame   : std_logic;  -- MC68030 bus fault frame choice: 0=Format $A, 1=Format $B
@@ -755,9 +757,9 @@ architecture logic of TG68KdotC_Kernel is
 
 BEGIN  
 
-  -- The RESET instruction must clear the PMMU enable bits on the same core step
-  -- that asserts the external reset pulse, not one stalled cycle later.
-  pmmu_cpu_reset <= '1' when set(opcRESET)='1' and clkena_lw='1' else '0';
+  -- The RESET instruction asserts the external reset output only. It must not
+  -- clear internal 68030 PMMU registers; those are reset by nReset below.
+  pmmu_cpu_reset <= '0';
 
   -- PMMU (68030) instance (identity translation for now)
   PMMU_030: entity work.TG68K_PMMU_030
@@ -1442,6 +1444,9 @@ ALU: TG68K_ALU
 		rte_mmu_fix_ssw(8) = '0' AND
 		rte_mmu_fix_ssw(7) = '0' AND
 		rte_mmu_fix_ssw(6) = '1' AND
+		-- Only complete the no-extension source form for now. Other modes need
+		-- effective-address side effects and extension-word replay state.
+		rte_mmu_fix_opcode(5 downto 3) = "010" AND
 		-- MOVE.{B,W,L} to Dn (mode 000)
 		((rte_mmu_fix_opcode(8 downto 6) = "000" AND
 		  (rte_mmu_fix_opcode(15 downto 12) = "0001" OR
@@ -1582,7 +1587,9 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 				IF trapmake='1' THEN
 					rte_mmu_fix_capture_active <= '0';
 					rte_mmu_fix_long_index <= 0;
-					IF trap_mmu_berr='1' AND berr_ssw(8)='1' AND berr_ssw(9)='1' AND berr_ssw(6)='1' THEN
+					IF (trap_berr='1' OR trap_mmu_berr='1') AND
+					   berr_long_frame='1' AND
+					   berr_ssw(8)='1' AND berr_ssw(9)='1' AND berr_ssw(6)='1' THEN
 						rte_mmu_fix_armed <= '1';
 					ELSE
 						rte_mmu_fix_armed <= '0';
@@ -1591,8 +1598,9 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 					rte_mmu_fix_capture_active <= '0';
 					rte_mmu_fix_long_index <= 0;
 				ELSIF micro_state = rte4 THEN
-					IF rte_mmu_fix_armed = '1' AND rte_format_word(15 downto 12) = "1011" THEN
+					IF rte_format_word(15 downto 12) = "1011" THEN
 						rte_mmu_fix_capture_active <= '1';
+						rte_mmu_fix_armed <= '1';
 						rte_mmu_fix_long_index <= 0;
 						rte_mmu_fix_ssw <= (others => '0');
 						rte_mmu_fix_opcode <= (others => '0');
@@ -2245,7 +2253,7 @@ PROCESS (clk)
 				ELSIF micro_state = berr3 THEN
 					-- $14: Current instruction opcode in high word (matches real 68030
 					-- "internal register, opcode of faulted bus cycle" field)
-					data_write_tmp <= last_opc_read(15 downto 0) & opcode;
+					data_write_tmp <= last_opc_read(15 downto 0) & berr_opcode_saved;
 				ELSIF micro_state = berr4 THEN
 					data_write_tmp <= berr_fault_addr;  -- Data cycle fault address ($10)
 				ELSIF micro_state = berr5 THEN
@@ -2258,12 +2266,12 @@ PROCESS (clk)
 				ELSIF micro_state = berr7 THEN
 					-- Address errors and long data-read bus faults use Format $B.
 					IF trap_addr_error='1' OR berr_long_frame='1' THEN
-						data_write_tmp <= TG68_PC(15 downto 0) & "1011" & trap_vector(11 downto 0);  -- Format $B/PC_lo ($04)
+						data_write_tmp <= berr_frame_pc(15 downto 0) & "1011" & trap_vector(11 downto 0);  -- Format $B/PC_lo ($04)
 					ELSE
-						data_write_tmp <= TG68_PC(15 downto 0) & "1010" & trap_vector(11 downto 0);  -- Format $A/PC_lo ($04)
+						data_write_tmp <= berr_frame_pc(15 downto 0) & "1010" & trap_vector(11 downto 0);  -- Format $A/PC_lo ($04)
 					END IF;
 				ELSIF micro_state = berr8 THEN
-					data_write_tmp <= (trap_SR & Flags) & TG68_PC(31 downto 16);  -- SR/PC_hi ($00)
+					data_write_tmp <= (trap_SR & Flags) & berr_frame_pc(31 downto 16);  -- SR/PC_hi ($00)
 				-- BUG #391 FIX: Bypass hold_dwr at the CRP/SRP HI/LO write boundary.
 				-- At clkena_lw with micro_state=pmove_mmu_to_mem_lo, the HI longword bus
 				-- write is completing and we need data_write_tmp to be refreshed with CRP_L
@@ -2947,6 +2955,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					pmmu_fault_dispatched <= '0';
 					pmmu_fault_was_cleared <= '0';
 					berr_fault_addr <= (others => '0');
+					berr_frame_pc <= (others => '0');
+					berr_opcode_saved <= (others => '0');
 					berr_ssw <= (others => '0');
 					berr_data_out_saved <= (others => '0');
 					berr_long_frame <= '0';
@@ -2981,7 +2991,9 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 --					IF wbmemmask(5 downto 4)="11" THEN
 --						wbmemmask <= memmask;
 --					END IF;
-					IF exec(directPC)='1' THEN
+					IF rte_mmu_fix_write='1' THEN
+						TG68_PC <= TG68_PC + 2;
+					ELSIF exec(directPC)='1' THEN
 						TG68_PC <= data_read;
 					ELSIF exec(ea_to_pc)='1' THEN
 						TG68_PC <= addr;
@@ -3244,6 +3256,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								berr_long_frame <= '1';
 								-- Address error frame data for berr1-berr8
 								berr_fault_addr <= TG68_PC;  -- Odd instruction fetch address
+								berr_frame_pc <= TG68_PC;
+								berr_opcode_saved <= opcode;
 								berr_data_out_saved <= (others => '0');
 								-- SSW for odd instruction fetch address error
 								-- Per MC68030 spec/WinUAE: no pipeline bits (no bus cycle occurred)
@@ -3308,8 +3322,11 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									pmmu_fault_dispatched <= '1';
 								end if;
 								berr_exception_active <= '1';
+								berr_frame_pc <= exe_pc;
+								berr_opcode_saved <= exe_opcode;
 								-- Save data output buffer for berr2 (data being written at fault time)
 								berr_data_out_saved <= data_write_tmp;
+								berr_ssw <= (others => '0');
 								-- BUG #414/#415: Latch fault address and construct SSW
 								-- SSW layout: FC(15) FB(14) RC(13) RB(12) [11:9] DF(8) RM(7) RW(6) SIZE(5:4) [3] FC(2:0)
 								if pmmu_fault = '1' then
@@ -3329,13 +3346,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 										berr_ssw(8) <= '0';   -- DF=0 (instruction, not data)
 										berr_ssw(5 downto 4) <= "10";  -- SIZE=word (instruction fetches are 16-bit)
 									else
-										-- Data access fault: stage C (executing instruction)
-										berr_ssw(15) <= '1';  -- FC=1: stage C fault
-										berr_ssw(14) <= '0';  -- FB=0: not stage B
-										berr_ssw(13) <= '1';  -- RC=1: stage C bus cycle will be rerun
-										berr_ssw(12) <= '0';  -- RB=0: not stage B
+										-- Data access fault: WinUAE/68030 use DF plus access metadata here.
+										-- Pipeline FC/RC bits are not set for data faults.
+										berr_ssw(15) <= '0';
+										berr_ssw(14) <= '0';
+										berr_ssw(13) <= '0';
+										berr_ssw(12) <= '0';
 										berr_ssw(8) <= '1';   -- DF=1
-										berr_ssw(9) <= '1';   -- Software-fix handshake bit for MMU data faults
+										berr_ssw(9) <= '1';   -- DF shadow bit used by 68030 software-fix handlers
 										-- SIZE from datatype latched at PMMU fault first-fire
 										case v_pmmu_datatype is
 											when "00" => berr_ssw(5 downto 4) <= "01";  -- Byte
@@ -3355,13 +3373,13 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									-- FC bit 0 = data space (FC=1 user data, FC=5 super data)
 									-- FC bit 1 = program space (FC=2 user program, FC=6 super program)
 									if berr_external_fc(0) = '1' then
-										-- Data fault (stage C)
-										berr_ssw(15) <= '1';  -- FC=1: stage C data fault
-										berr_ssw(14) <= '0';  -- FB=0: not stage B
-										berr_ssw(13) <= '1';  -- RC=1: stage C bus cycle will be rerun
-										berr_ssw(12) <= '0';  -- RB=0: not stage B
+										-- Data fault: no pipeline FC/RC bits.
+										berr_ssw(15) <= '0';
+										berr_ssw(14) <= '0';
+										berr_ssw(13) <= '0';
+										berr_ssw(12) <= '0';
 										berr_ssw(8) <= '1';   -- DF=1: data fault
-										berr_ssw(9) <= '1';   -- Software-fix handshake bit
+										berr_ssw(9) <= '1';   -- DF shadow bit used by 68030 software-fix handlers
 									else
 										-- Instruction fetch fault (stage B)
 										berr_ssw(15) <= '0';  -- FC=0: not stage C
@@ -5811,21 +5829,26 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					IF SVmode='1' THEN
 						-- Fetch extension word to determine PMMU instruction type
 						IF decodeOPC='1' THEN
-							-- Keep the PMMU dispatch asserted through wrapper wait states.
-							-- If this drops to idle while the extension word is completing,
-							-- the F-line brief ($2400/$4000/...) can retire as a normal opcode.
-							set(get_2ndOPC) <= '1';
-							-- BUG #366 FIX: For complex EA modes (d16, d8Xn, abs), keep setstate="00"
-							-- so pmove_decode runs with bus active (state="00"), fetching the
-							-- displacement/brief/address word. For simple modes (Dn, An, (An), (An)+,
-							-- -(An)), set "01" to suppress fetch (PC already at +4).
-							IF opcode(5 downto 3) = "101" OR opcode(5 downto 3) = "110" OR opcode(5 downto 3) = "111" THEN
-								null;  -- setstate stays "00" (default): fetch displacement/brief/address
+							-- Wait until the extension-word fetch has completed. Dispatching
+							-- pmove_decode while clkena_lw is still blocked can latch stale
+							-- opcode/data as the PMMU brief word on real hardware.
+							IF clkena_lw='0' THEN
+								setstate <= "00";
+								next_micro_state <= idle;
 							ELSE
-								setstate <= "01";  -- Simple modes: suppress fetch (PC already at +4)
+								set(get_2ndOPC) <= '1';
+								-- BUG #366 FIX: For complex EA modes (d16, d8Xn, abs), keep setstate="00"
+								-- so pmove_decode runs with bus active (state="00"), fetching the
+								-- displacement/brief/address word. For simple modes (Dn, An, (An), (An)+,
+								-- -(An)), set "01" to suppress fetch (PC already at +4).
+								IF opcode(5 downto 3) = "101" OR opcode(5 downto 3) = "110" OR opcode(5 downto 3) = "111" THEN
+									null;  -- setstate stays "00" (default): fetch displacement/brief/address
+								ELSE
+									setstate <= "01";  -- Simple modes: suppress fetch (PC already at +4)
+								END IF;
+								getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
+								next_micro_state <= pmove_decode;
 							END IF;
-							getbrief <= '1';  -- FIX: Must load brief for PMMU instruction dispatch
-							next_micro_state <= pmove_decode;
 						-- BUG #150 FIX: Removed setstate <= "01" that was added for BUG #147.
 						-- That fix broke PMOVE by preventing extension word fetch from completing.
 						-- The extension word is fetched via get_2ndOPC and getbrief during
@@ -8850,7 +8873,9 @@ debug_sndOPC <= sndOPC;
 debug_pmmu_reg_we <= pmmu_reg_we_d;
 debug_pmmu_reg_re <= pmmu_reg_re_d;
 debug_pmmu_reg_sel <= pmmu_reg_sel_int;
-debug_pmmu_reg_wdat <= pmmu_reg_wdat_d;
+-- Expose the actual value driven into the PMMU register port.  The registered
+-- latch can still hold the previous PMOVE value on the write-enable edge.
+debug_pmmu_reg_wdat <= pmmu_src_data;
 debug_pmmu_reg_part <= pmmu_reg_part_d;
 debug_pmmu_reg_rdat <= x"0000" & pmmu_debug_mmusr;
 debug_make_berr <= make_berr;

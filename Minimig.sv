@@ -598,7 +598,7 @@ sdram_ctrl ram1
 	.c_7m         (c1              ),
 
 	.cache_rst    (cpu_rst         ),
-	.cache_inhibit(walker_active_cpu),
+	.cache_inhibit(1'b0),
 	.cpu_cache_ctrl(cpu_cacr       ),
 
 	.sd_data      (SDRAM_DQ        ),
@@ -641,7 +641,7 @@ ddram_ctrl ram2
 	.reset_n      (~reset_d        ),
 
 	.cache_rst    (cpu_rst         ),
-	.cache_inhibit(walker_active_cpu),
+	.cache_inhibit(1'b0),
 	.cpu_cache_ctrl(cpu_cacr       ),
 
 	.DDRAM_CLK    (DDRAM_CLK       ),
