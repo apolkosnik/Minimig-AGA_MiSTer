@@ -2240,9 +2240,19 @@ PROCESS (clk)
 				-- By the time the bus write happens, micro_state has already moved to the
 				-- next berr state. Loading data_write_tmp here (sequential) captures the
 				-- correct data because sequential reads see the OLD micro_state value.
-				ELSIF micro_state = berr_fill THEN
-					-- Format $B extra fields (offsets $58-$20): internal state not tracked by TG68K
-					data_write_tmp <= (others => '0');
+					ELSIF micro_state = berr_fill THEN
+						-- Format $B extra fields (offsets $58-$20). 68030 MMU
+						-- handlers use the stage-B address at $24 to re-run PTEST
+						-- against the faulting access; WinUAE stores the logical
+						-- fault address there and in the data input buffer at $2C.
+						CASE rot_cnt IS
+							WHEN "000100" =>  -- $2C: data input buffer
+								data_write_tmp <= berr_fault_addr;
+							WHEN "000010" =>  -- $24: stage B address
+								data_write_tmp <= berr_fault_addr;
+							WHEN OTHERS =>
+								data_write_tmp <= (others => '0');
+						END CASE;
 				ELSIF micro_state = berr1 THEN
 					-- MC68030 Format $A frame offset $1C: Internal registers (pipeline
 					-- prefetch validity/position on real 68030). TG68K doesn't track

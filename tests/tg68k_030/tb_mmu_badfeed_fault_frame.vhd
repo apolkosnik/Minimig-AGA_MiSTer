@@ -98,7 +98,7 @@ architecture behavioral of tb_mmu_badfeed_fault_frame is
         m(4) := x"0000"; m(5) := x"0080"; -- vector 2
         for i in 3 to 63 loop
             m(i*2)   := x"0000";
-            m(i*2+1) := x"00C0";
+            m(i*2+1) := x"00E0";
         end loop;
 
         -- Vector 2 handler: capture frame, stop
@@ -110,12 +110,14 @@ architecture behavioral of tb_mmu_badfeed_fault_frame is
         m(79) := x"33EF"; m(80) := x"0006"; m(81) := x"0000"; m(82) := x"1F10"; -- fmt/vec
         m(83) := x"33EF"; m(84) := x"000A"; m(85) := x"0000"; m(86) := x"1F12"; -- SSW
         m(87) := x"23EF"; m(88) := x"0010"; m(89) := x"0000"; m(90) := x"1F14"; -- fault addr
-        m(91) := x"4E72"; m(92) := x"2700";
+        m(91) := x"23EF"; m(92) := x"0024"; m(93) := x"0000"; m(94) := x"1F1C"; -- stage B address
+        m(95) := x"23EF"; m(96) := x"002C"; m(97) := x"0000"; m(98) := x"1F20"; -- data input buffer
+        m(99) := x"4E72"; m(100) := x"2700";
 
         -- Unexpected trap handler
-        m(96) := x"23FC"; m(97) := x"00FF"; m(98) := x"0000";
-        m(99) := x"0000"; m(100) := x"1F00";
-        m(101) := x"4E72"; m(102) := x"2700";
+        m(112) := x"23FC"; m(113) := x"00FF"; m(114) := x"0000";
+        m(115) := x"0000"; m(116) := x"1F00";
+        m(117) := x"4E72"; m(118) := x"2700";
 
         -- Program: load CRP/SRP, enable MMU, go user, perform aligned read
         m(128) := x"2E7C"; m(129) := x"0000"; m(130) := x"1080";
@@ -317,6 +319,8 @@ begin
         variable frame_fmt : std_logic_vector(15 downto 0);
         variable frame_ssw : std_logic_vector(15 downto 0);
         variable frame_fa  : std_logic_vector(31 downto 0);
+        variable frame_stageb : std_logic_vector(31 downto 0);
+        variable frame_input  : std_logic_vector(31 downto 0);
         variable fail_mark : std_logic_vector(31 downto 0);
         variable marker_seen : boolean := false;
         variable settle_cycles : integer := 0;
@@ -352,6 +356,8 @@ begin
         frame_fmt := mem(16#0F88#);
         frame_ssw := mem(16#0F89#);
         frame_fa  := mem(16#0F8A#) & mem(16#0F8B#);
+        frame_stageb := mem(16#0F8E#) & mem(16#0F8F#);
+        frame_input  := mem(16#0F90#) & mem(16#0F91#);
 
         if debug_cpu_halted = '1' then
             report "FAIL: cpu_halted asserted"
@@ -410,6 +416,18 @@ begin
                    & " FA=$" & slv_to_hex(frame_fa)
                    & " DESC=$" & slv_to_hex(debug_pmmu_walk_desc_data)
             severity failure;
+        elsif frame_stageb /= x"00011C00" then
+            report "FAIL: BADFEED format-B stage-B address=$" & slv_to_hex(frame_stageb)
+                   & " expected fault address $00011C00"
+                   & " FA=$" & slv_to_hex(frame_fa)
+                   & " SSW=$" & slv_to_hex(frame_ssw)
+            severity failure;
+        elsif frame_input /= x"00011C00" then
+            report "FAIL: BADFEED format-B data input buffer=$" & slv_to_hex(frame_input)
+                   & " expected initial fault address $00011C00"
+                   & " FA=$" & slv_to_hex(frame_fa)
+                   & " SSW=$" & slv_to_hex(frame_ssw)
+            severity failure;
         else
             report "PASS: vector2 marker caught"
                    & " A7=$" & slv_to_hex(frame_a7)
@@ -418,6 +436,8 @@ begin
                    & " FMT=$" & slv_to_hex(frame_fmt)
                    & " SSW=$" & slv_to_hex(frame_ssw)
                    & " FA=$" & slv_to_hex(frame_fa)
+                   & " STGB=$" & slv_to_hex(frame_stageb)
+                   & " IN=$" & slv_to_hex(frame_input)
                    & " MMUSR=$" & slv_to_hex(debug_pmmu_fault_status)
                    & " DESC=$" & slv_to_hex(debug_pmmu_walk_desc_data)
             severity note;

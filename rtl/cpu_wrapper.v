@@ -539,10 +539,12 @@ wire [15:0] kernel_pmmu_pending_flags_p;
 wire [0:0] pmmu_issp_source;
 wire [0:0] pmm2_issp_source;
 wire [0:0] tcwr_issp_source;
+wire [0:0] pmwr_issp_source;
 `ifndef ENABLE_CPUWRAP_DEBUG_ISSP
 assign pmmu_issp_source = 1'b0;
 assign pmm2_issp_source = 1'b0;
 assign tcwr_issp_source = 1'b0;
+assign pmwr_issp_source = 1'b0;
 `endif
 // Kernel internal state debug (6 bits, probe limit=511)
 `CPUWRAP_DEBUG_KEEP reg  [2:0] stp_ipl_nr;
@@ -575,6 +577,25 @@ assign tcwr_issp_source = 1'b0;
 `CPUWRAP_DEBUG_KEEP reg [15:0] tcwr_first_disable_brief;
 `CPUWRAP_DEBUG_KEEP reg  [7:0] tcwr_first_disable_flags;
 `CPUWRAP_DEBUG_KEEP reg        tcwr_tc_we_prev;
+
+// PMMU walker descriptor writeback trace.  This is intentionally sampled at
+// the wrapper boundary so it captures every descriptor write the PMMU asked
+// the external memory system to perform, including fast-RAM table updates.
+`CPUWRAP_DEBUG_KEEP reg        pmwr_seen;
+`CPUWRAP_DEBUG_KEEP reg [15:0] pmwr_count;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_last_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_last_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_w0_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_w0_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_w1_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_w1_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_w2_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_w2_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_w3_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_w3_data;
+`CPUWRAP_DEBUG_KEEP reg        pmwr_400a_seen;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_400a_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_400a_data;
 
 wire tcwr_tc_we = kernel_pmmu_reg_we_p && (kernel_pmmu_reg_sel_p == 5'b10000);
 
@@ -998,6 +1019,42 @@ altsource_probe #(
 		kernel_pmmu_pending_flags_p // [15:0]
 	}),
 	.source (tcwr_issp_source)
+);
+`endif
+
+// PMMU walker descriptor writeback trace. Source bit 0 clears the sticky history.
+// Probe layout (MSB first, 404 bits):
+//   seen[403], count[402:387], last addr/data, first four addr/data,
+//   last write in $400Axxxx, then fault/timeout sticky bits.
+`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (11),
+	.instance_id             ("PMWR"),
+	.probe_width             (404),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) pmwr_issp (
+	.probe ({
+		pmwr_seen,                  // [403]
+		pmwr_count,                 // [402:387]
+		pmwr_last_addr,             // [386:355]
+		pmwr_last_data,             // [354:323]
+		pmwr_w0_addr,               // [322:291]
+		pmwr_w0_data,               // [290:259]
+		pmwr_w1_addr,               // [258:227]
+		pmwr_w1_data,               // [226:195]
+		pmwr_w2_addr,               // [194:163]
+		pmwr_w2_data,               // [162:131]
+		pmwr_w3_addr,               // [130:99]
+		pmwr_w3_data,               // [98:67]
+		pmwr_400a_seen,             // [66]
+		pmwr_400a_addr,             // [65:34]
+		pmwr_400a_data,             // [33:2]
+		stp_fault_latched,          // [1]
+		stp_walker_timeout_latched  // [0]
+	}),
+	.source (pmwr_issp_source)
 );
 `endif
 
@@ -2712,6 +2769,37 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 			walker_timeout_error <= 0;
 			walker_write_ready_armed <= 0;
 			walker_read_ready_armed <= 0;
+			pmwr_seen <= 0;
+			pmwr_count <= 0;
+			pmwr_last_addr <= 0;
+			pmwr_last_data <= 0;
+			pmwr_w0_addr <= 0;
+			pmwr_w0_data <= 0;
+			pmwr_w1_addr <= 0;
+			pmwr_w1_data <= 0;
+			pmwr_w2_addr <= 0;
+			pmwr_w2_data <= 0;
+			pmwr_w3_addr <= 0;
+			pmwr_w3_data <= 0;
+			pmwr_400a_seen <= 0;
+			pmwr_400a_addr <= 0;
+			pmwr_400a_data <= 0;
+		end else if (pmwr_issp_source[0]) begin
+			pmwr_seen <= 0;
+			pmwr_count <= 0;
+			pmwr_last_addr <= 0;
+			pmwr_last_data <= 0;
+			pmwr_w0_addr <= 0;
+			pmwr_w0_data <= 0;
+			pmwr_w1_addr <= 0;
+			pmwr_w1_data <= 0;
+			pmwr_w2_addr <= 0;
+			pmwr_w2_data <= 0;
+			pmwr_w3_addr <= 0;
+			pmwr_w3_data <= 0;
+			pmwr_400a_seen <= 0;
+			pmwr_400a_addr <= 0;
+			pmwr_400a_data <= 0;
 		end else begin
 			case (walker_state)
 				WALKER_IDLE: begin
@@ -2737,6 +2825,35 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					if (pmmu_walker_we_p) begin
 						// Write operation - latch data and start write sequence
 						walker_wdata_latch <= pmmu_walker_wdat_p;
+						pmwr_seen <= 1;
+						pmwr_last_addr <= pmmu_walker_addr_p;
+						pmwr_last_data <= pmmu_walker_wdat_p;
+						if (pmwr_count != 16'hFFFF) begin
+							pmwr_count <= pmwr_count + 16'd1;
+						end
+						case (pmwr_count)
+							16'd0: begin
+								pmwr_w0_addr <= pmmu_walker_addr_p;
+								pmwr_w0_data <= pmmu_walker_wdat_p;
+							end
+							16'd1: begin
+								pmwr_w1_addr <= pmmu_walker_addr_p;
+								pmwr_w1_data <= pmmu_walker_wdat_p;
+							end
+							16'd2: begin
+								pmwr_w2_addr <= pmmu_walker_addr_p;
+								pmwr_w2_data <= pmmu_walker_wdat_p;
+							end
+							16'd3: begin
+								pmwr_w3_addr <= pmmu_walker_addr_p;
+								pmwr_w3_data <= pmmu_walker_wdat_p;
+							end
+						endcase
+						if (pmmu_walker_addr_p[31:16] == 16'h400A) begin
+							pmwr_400a_seen <= 1;
+							pmwr_400a_addr <= pmmu_walker_addr_p;
+							pmwr_400a_data <= pmmu_walker_wdat_p;
+						end
 						walker_state <= WALKER_WRITE_LOW;
 					end else begin
 						walker_state <= WALKER_READ_LOW;

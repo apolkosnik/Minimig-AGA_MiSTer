@@ -437,7 +437,7 @@ begin
     --            check) -- without this the walker checks TIB index against
     --            zero and faults for any non-zero TIB.
     --     LOW  = physical base = $30000000
-    pt(3072 + 2*2)     <= x"7FFF0041";  -- entry 2 HIGH at $3010
+    pt(3072 + 2*2)     := x"7FFF0041";  -- entry 2 HIGH at $3010
     pt(3072 + 2*2 + 1) := x"30000000";  -- entry 2 LOW  at $3014
     wait for 20 ns;
     pflusha;
@@ -468,14 +468,14 @@ begin
     --     Second-level table has short-format entries (DT=10 parent means short
     --     children)...  Actually with parent DT=11, children are 8-byte long.
     --     So the second level must also be long-format.
-    pt(3072 + 3*2)     <= x"7FFF0003";  -- entry 3 HIGH: long table, no limit
+    pt(3072 + 3*2)     := x"7FFF0003";  -- entry 3 HIGH: long table, no limit
     pt(3072 + 3*2 + 1) := x"00004000";  -- entry 3 LOW:  table at $4000
 
     -- Level-1 long-format table at $4000, 1024 entries × 8 bytes each.
     -- Logical $00C02000 -> TIA=3 (bits[31:22]=3), TIB=2 (bits[21:12]=2).
     -- Level-1 entry 2 at $4000 + 2*8 = $4010.  pt index = $4010/4 = 4100.
     -- Install a long-format early-term page: HIGH=DT=01, LOW=TA=$40000000.
-    pt(4096 + 2*2)     <= x"00000001";  -- HIGH: DT=01, no attrs
+    pt(4096 + 2*2)     := x"00000001";  -- HIGH: DT=01, no attrs
     pt(4096 + 2*2 + 1) := x"40000000";  -- LOW: phys base
     wait for 20 ns;
     pflusha;
@@ -487,7 +487,7 @@ begin
     -- L3: long-format with S bit (supervisor-only violation).
     --     Root entry 4 HIGH: DT=01 early-term long page with S bit (bit 8) set
     --     S-violation: user (FC=001) access should fault with MMUSR.S=1
-    pt(3072 + 4*2)     <= x"7FFF0101";  -- L/U=0 LIMIT=$7FFF, S=1 (bit 8), DT=01
+    pt(3072 + 4*2)     := x"7FFF0101";  -- L/U=0 LIMIT=$7FFF, S=1 (bit 8), DT=01
     pt(3072 + 4*2 + 1) := x"50000000";  -- TA=$50000000
     wait for 20 ns;
     pflusha;
@@ -506,12 +506,12 @@ begin
     -- L/U=0 UPPER limit: index <= LIMIT is valid, index > LIMIT faults.
     -- Install entry 5 HIGH with L/U=0, LIMIT=3.
     --   HIGH = $0003_0003   (L/U=0, LIMIT=3, rsvd=0, DT=11)
-    pt(3072 + 5*2)     <= x"00030003";
+    pt(3072 + 5*2)     := x"00030003";
     pt(3072 + 5*2 + 1) := x"00005000";   -- level-1 table at $5000
     -- Populate level-1 table entries 0..3 with valid long early-term pages.
     -- Each entry is 8 bytes. Entry i at $5000 + i*8.
     for i in 0 to 3 loop
-      pt(5120 + i*2)     <= x"00000001";                              -- HIGH DT=01
+      pt(5120 + i*2)     := x"00000001";                              -- HIGH DT=01
       pt(5120 + i*2 + 1) := std_logic_vector(to_unsigned(16#60000000# + i*16#100000#, 32));  -- TA=$60000000+i*1MB
     end loop;
     wait for 20 ns;
@@ -534,7 +534,7 @@ begin
 
     -- L/U=1 LOWER limit: index >= LIMIT is valid, index < LIMIT faults.
     --   HIGH = $80030003  (L/U=1, LIMIT=3, DT=11)
-    pt(3072 + 6*2)     <= x"80030003";
+    pt(3072 + 6*2)     := x"80030003";
     pt(3072 + 6*2 + 1) := x"00005000";   -- reuse same level-1 table
     wait for 20 ns;
     pflusha;
@@ -629,10 +629,10 @@ begin
     --   L/U=0, LIMIT=7FFF, rsvd=0, WP=1 (bit 2), DT=11
     --   $7FFF_0007
     ---------------------------------------------------------------
-    pt(3072 + 7*2)     <= x"7FFF0007";   -- long table with WP=1
+    pt(3072 + 7*2)     := x"7FFF0007";   -- long table with WP=1
     pt(3072 + 7*2 + 1) := x"00007000";   -- table at $7000
     -- Level-1 entry 0: long early-term page at TA=$70000000, WP=0 (clean page)
-    pt(7168 + 0*2)     <= x"00000001";   -- HIGH DT=01, no attrs
+    pt(7168 + 0*2)     := x"00000001";   -- HIGH DT=01, no attrs
     pt(7168 + 0*2 + 1) := x"70000000";   -- LOW TA
     wait for 20 ns;
     pflusha;
@@ -655,6 +655,35 @@ begin
     else
       checks <= checks + 1;
       report "[PASS] A2a write_protect asserted from accumulated parent WP" severity note;
+    end if;
+
+    -- A3: Once a supervisor violation has been detected at an earlier
+    -- long-format table descriptor, WinUAE keeps walking but suppresses U-bit
+    -- writeback for later descriptors too.  This uses a 3-level long tree so
+    -- the second table descriptor is reached after the parent S violation.
+    write_reg("10000", x"80C0A910", '0');      -- PS=12, TIA=10, TIB=9, TIC=1
+    wait for 50 ns;
+    pt(3072 + 8*2)      := x"7FFF0103";  -- root[8]: long table, S=1, U=0
+    pt(3072 + 8*2 + 1)  := x"00008000";  -- -> L1 table
+    pt(8192 + 0*2)      := x"7FFF0003";  -- L1[0]: long table, S=0, U=0
+    pt(8192 + 0*2 + 1)  := x"00009000";  -- -> L2 table
+    pt(9216 + 0*2)      := x"00000001";  -- L2[0]: page
+    pt(9216 + 0*2 + 1)  := x"80000000";  -- TA=$80000000
+    wait for 40 ns;
+    pflusha;
+    wb_snap := wb_count;
+    probe("A3 accumulated S suppresses later U writeback", x"02000000", "001", '1',
+          (others => '0'), true, MMUSR_S, MMUSR_S);
+    wait for 100 ns;
+    checks <= checks + 1;
+    if (wb_count - wb_snap) /= 0 then
+      errors <= errors + 1;
+      report "[FAIL] A3 expected 0 U writebacks after accumulated S violation, got " &
+             integer'image(wb_count - wb_snap) & " last=0x" & hex8(wb_last_data)
+        severity error;
+    else
+      report "[PASS] A3 accumulated supervisor violation suppressed descriptor U writeback"
+        severity note;
     end if;
 
     ---------------------------------------------------------------
@@ -837,7 +866,7 @@ begin
     -- Level-2 table at $00005000; one page descriptor with M=0, U=0, WP=0.
     -- Short-format page: [31:8]=phys, [7:4]=rsvd=0, [3]=U, [2]=WP, [1:0]=DT=01.
     -- Use phys base $45678000 -> descriptor $45678001.
-    pt(1280 + 0) := x"45678001";   -- $5000/4 = 1280
+    pt(5120 + 0) := x"45678001";   -- $5000/4 = 5120
     wait for 40 ns;
     pflusha;
     wait for 40 ns;
@@ -899,7 +928,7 @@ begin
     ---------------------------------------------------------------
 
     -- V1: page descriptor at TIB=1 (logical $0A001000), M=0, U=0, WP=0
-    pt(1280 + 1) := x"12341001";   -- phys=$12341000, DT=01
+    pt(5120 + 1) := x"12341001";   -- phys=$12341000, DT=01
     wait for 40 ns;
     pflusha;
     wait for 40 ns;
@@ -927,7 +956,7 @@ begin
     end if;
 
     -- V2: page descriptor at TIB=2, fresh M=0, U=0, WP=0.
-    pt(1280 + 2) := x"23452001";   -- phys=$23452000
+    pt(5120 + 2) := x"23452001";   -- phys=$23452000
     wait for 40 ns;
     pflusha;
     wait for 40 ns;
@@ -961,7 +990,7 @@ begin
 
     -- V3: page descriptor at TIB=3, M=0, U=0, WP=1.
     -- $7X... with WP bit set (bit 2) -> $34563005.
-    pt(1280 + 3) := x"34563005";   -- phys=$34563000, WP=1, DT=01
+    pt(5120 + 3) := x"34563005";   -- phys=$34563000, WP=1, DT=01
     wait for 40 ns;
     pflusha;
     wait for 40 ns;

@@ -337,6 +337,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal ptr3_desc_addr_reg : std_logic_vector(31 downto 0) := (others => '0');
   signal ptr3_desc_data_reg : std_logic_vector(31 downto 0) := (others => '0');
   signal walk_desc_is_long : std_logic := '0'; -- 1=long format (DT=11), 0=short format (DT=10/01)
+  signal walk_page_from_indirect : std_logic := '0'; -- Page descriptor was reached through one indirect descriptor
   signal walk_parent_dt_long : std_logic := '0'; -- BUG #409: 1=parent DT=11, entries are 8 bytes (stride 8)
   -- BUG #387 FIX: Walker timeout counter to detect stuck memory requests
   signal walker_timeout_counter : integer range 0 to 1023 := 0;
@@ -1006,6 +1007,23 @@ architecture rtl of TG68K_PMMU_030 is
       transparent => '0',
       level => level
     );
+  end function;
+  function page_descriptor_count(
+    level : integer;
+    from_indirect : std_logic;
+    root_pointer : std_logic
+  ) return std_logic_vector is
+    variable count : integer;
+  begin
+    if root_pointer = '1' then
+      count := 0;
+    else
+      count := level + 1;
+      if from_indirect = '1' then
+        count := count + 1;
+      end if;
+    end if;
+    return std_logic_vector(to_unsigned(count, 3));
   end function;
   -- Calculate effective page shift for early termination
   -- MC68030 spec: When a page descriptor (DT=01) is found before the final table level,
@@ -2559,6 +2577,7 @@ begin
       ptr3_desc_addr_reg <= (others => '0');
       ptr3_desc_data_reg <= (others => '0');
       last_mem_rdat <= (others => '0');
+      walk_page_from_indirect <= '0';
     elsif rising_edge(clk) then
       if mem_ack = '1' then
         last_mem_rdat <= mem_rdat;
@@ -2607,6 +2626,21 @@ begin
           end if;
           -- Start page table walk on ATC miss using saved request parameters
           if walk_req = '1' then
+            -- WinUAE flushes the target page before the PLOAD table search.
+            -- Do this at walk start so cached fault entries are removed even
+            -- if the following table walk faults before reaching W_PAGE.
+            if pload_flush_pending = '1' then
+              for i in 0 to ATC_ENTRIES-1 loop
+                if atc_valid(i) = '1' then
+                  if align_addr(saved_addr_log, atc_shift(i)) = atc_log_base(i) then
+                    atc_valid(i) <= '0';
+                    atc_mru(i) <= '0';
+                    atc_buserr(i) <= '0';
+                    atc_fault_status(i) <= (others => '0');
+                  end if;
+                end if;
+              end loop;
+            end if;
             -- Debug: Log walker startup for failing test addresses
             if saved_addr_log = x"12343000" or saved_addr_log = x"12344000" or saved_addr_log = x"12345000" then
               -- report "DEBUG_WALKER_START: addr=0x" & slv_to_hstring(saved_addr_log) &
@@ -2624,6 +2658,7 @@ begin
             walk_desc_high <= (others => '0');
             walk_desc_low <= (others => '0');
             walk_desc_is_long <= '0';
+            walk_page_from_indirect <= '0';
             indirect_addr <= (others => '0');
             indirect_target_long <= '0';
             walk_limit_valid <= '0';  -- BUG #155: Clear limit tracking at walk start
@@ -2840,7 +2875,7 @@ begin
                 invalid => '1',                  -- DT=00: Only I bit should be set per MC68030 spec
                 modified => '0',
                 transparent => '0',
-                level => std_logic_vector(to_unsigned(walk_level, 3))
+                level => std_logic_vector(to_unsigned(walk_level + 1, 3))
               );
               -- Debug: Track invalid descriptor
               -- report "INVALID_DESC_ROOT: Invalid descriptor at level=" & integer'image(walk_level) &
@@ -2971,7 +3006,7 @@ begin
               -- Table descriptor - extract address from LOW word and continue
               -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
               if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' and
-                 not (saved_fc(2) = '0' and walk_desc_high(8) = '1') then
+                 not (saved_fc(2) = '0' and (walk_supervisor = '1' or walk_desc_high(8) = '1')) then
                 desc_update_data <= walk_desc_high(31 downto 4) & '1' & walk_desc_high(2 downto 0);
                 walk_next_state <= W_PTR1;
                 walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
@@ -3101,7 +3136,7 @@ begin
                 invalid => '1',                  -- DT=00: Only I bit should be set per MC68030 spec
                 modified => '0',
                 transparent => '0',
-                level => std_logic_vector(to_unsigned(walk_level, 3))
+                level => std_logic_vector(to_unsigned(walk_level + 1, 3))
               );
               -- Debug: Track invalid descriptor
               -- report "INVALID_DESC_PTR1: Invalid descriptor at level=" & integer'image(walk_level) &
@@ -3237,7 +3272,7 @@ begin
               -- Table descriptor - extract address from LOW word and continue
               -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
               if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' and
-                 not (saved_fc(2) = '0' and walk_desc_high(8) = '1') then
+                 not (saved_fc(2) = '0' and (walk_supervisor = '1' or walk_desc_high(8) = '1')) then
                 desc_update_data <= walk_desc_high(31 downto 4) & '1' & walk_desc_high(2 downto 0);
                 walk_next_state <= W_PTR2;
                 walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
@@ -3374,7 +3409,7 @@ begin
                 invalid => '1',                  -- DT=00: Only I bit should be set per MC68030 spec
                 modified => '0',
                 transparent => '0',
-                level => std_logic_vector(to_unsigned(walk_level, 3))
+                level => std_logic_vector(to_unsigned(walk_level + 1, 3))
               );
               -- Debug: Track invalid descriptor
               -- report "INVALID_DESC_PTR2: Invalid descriptor at level=" & integer'image(walk_level) &
@@ -3510,7 +3545,7 @@ begin
               -- Table descriptor - extract address from LOW word and continue
               -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
               if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' and
-                 not (saved_fc(2) = '0' and walk_desc_high(8) = '1') then
+                 not (saved_fc(2) = '0' and (walk_supervisor = '1' or walk_desc_high(8) = '1')) then
                 desc_update_data <= walk_desc_high(31 downto 4) & '1' & walk_desc_high(2 downto 0);
                 walk_next_state <= W_PTR3;
                 walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
@@ -3625,7 +3660,7 @@ begin
                 invalid => '1',                  -- DT=00: Only I bit should be set per MC68030 spec
                 modified => '0',
                 transparent => '0',
-                level => std_logic_vector(to_unsigned(walk_level, 3))
+                level => std_logic_vector(to_unsigned(walk_level + 1, 3))
               );
               -- Debug: Track invalid descriptor
               -- report "INVALID_DESC_PTR3: Invalid descriptor at level=" & integer'image(walk_level) &
@@ -3754,7 +3789,7 @@ begin
               -- FCL=1 and TID!=0: Continue to W_PTR4 (5th level)
               -- TABLE descriptor U-bit writeback (U is bit 3 of HIGH word)
               if ptest_walk_no_update = '0' and walk_desc_high(3) = '0' and
-                 not (saved_fc(2) = '0' and walk_desc_high(8) = '1') then
+                 not (saved_fc(2) = '0' and (walk_supervisor = '1' or walk_desc_high(8) = '1')) then
                 desc_update_data <= walk_desc_high(31 downto 4) & '1' & walk_desc_high(2 downto 0);
                 walk_next_state <= W_PTR4;
                 walk_addr <= get_desc_address(walk_desc_high, mem_rdat, '1');
@@ -3869,7 +3904,7 @@ begin
                 invalid => '1',
                 modified => '0',
                 transparent => '0',
-                level => std_logic_vector(to_unsigned(walk_level, 3))
+                level => std_logic_vector(to_unsigned(walk_level + 1, 3))
               );
               wstate <= W_FAULT;
             elsif walk_parent_dt_long = '1' then
@@ -3965,7 +4000,7 @@ begin
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
               write_protect => '0', invalid => '1', modified => '0', transparent => '0',
-              level => std_logic_vector(to_unsigned(walk_level, 3))
+              level => page_descriptor_count(walk_level, walk_page_from_indirect, walk_is_root_pointer)
             );
             wstate <= W_FAULT;
           elsif mem_ack = '1' then
@@ -3977,6 +4012,7 @@ begin
             if mem_rdat(1 downto 0) = "01" then
               -- Valid page descriptor - check if short or long format target
               walk_desc_high <= mem_rdat;
+              walk_page_from_indirect <= '1';
               if indirect_target_long = '0' then
                 -- BUG #164: Short-format target - done, proceed to W_PAGE
                 walk_desc <= mem_rdat;
@@ -3998,7 +4034,7 @@ begin
                 invalid => '1',                  -- DT=00: Only I bit should be set
                 modified => '0',
                 transparent => '0',
-                level => std_logic_vector(to_unsigned(walk_level, 3))
+                level => std_logic_vector(to_unsigned(walk_level + 2, 3))
               );
              --  -- report "W_INDIRECT: Invalid target descriptor (DT=00)" severity note;
               wstate <= W_FAULT;
@@ -4013,7 +4049,7 @@ begin
                 invalid => '1',                  -- Nested indirect sets I bit per MC68030 spec
                 modified => '0',
                 transparent => '0',
-                level => std_logic_vector(to_unsigned(walk_level, 3))
+                level => std_logic_vector(to_unsigned(walk_level + 2, 3))
               );
              --  -- report "W_INDIRECT: Nested indirect descriptor - invalid" severity note;
               wstate <= W_FAULT;
@@ -4032,7 +4068,7 @@ begin
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
               write_protect => '0', invalid => '1', modified => '0', transparent => '0',
-              level => std_logic_vector(to_unsigned(walk_level, 3))
+              level => std_logic_vector(to_unsigned(walk_level + 1, 3))
             );
             wstate <= W_FAULT;
           elsif mem_ack = '1' then
@@ -4060,7 +4096,7 @@ begin
               invalid => '1',                  -- DT=00: Only I bit should be set per MC68030 spec
               modified => '0',
               transparent => '0',
-              level => std_logic_vector(to_unsigned(walk_level, 3))
+              level => page_descriptor_count(walk_level, walk_page_from_indirect, walk_is_root_pointer)
             );
             -- Debug: Track invalid descriptor
             -- report "INVALID_DESC_PAGE: Invalid page descriptor at level=" & integer'image(walk_level) &
@@ -4080,7 +4116,7 @@ begin
               invalid => '0',                  -- Descriptor is valid
               modified => '0',
               transparent => '0',
-              level => std_logic_vector(to_unsigned(walk_level, 3))
+              level => page_descriptor_count(walk_level, walk_page_from_indirect, walk_is_root_pointer)
             );
             wstate <= W_FAULT;
           -- BUG #437 FIX: Per WinUAE cpummu30.cpp line 1496-1497 + 1643-1647:
@@ -4142,7 +4178,7 @@ begin
                 walker_fault_status <= encode_mmusr_fault(
                   bus_error => '0', limit_violation => '1', supervisor_violation => '0',
                   write_protect => '0', invalid => '1', modified => '0',
-                  transparent => '0', level => std_logic_vector(to_unsigned(walk_level, 3)));
+                  transparent => '0', level => page_descriptor_count(walk_level, walk_page_from_indirect, walk_is_root_pointer));
                 wstate <= W_FAULT;
                 limit_fault := true;  -- BUG FIX: Prevent U/M logic from overwriting fault
               elsif walk_desc_high(31) = '0' and to_unsigned(table_index, 15) > unsigned(walk_desc_high(30 downto 16)) then
@@ -4151,7 +4187,7 @@ begin
                 walker_fault_status <= encode_mmusr_fault(
                   bus_error => '0', limit_violation => '1', supervisor_violation => '0',
                   write_protect => '0', invalid => '1', modified => '0',
-                  transparent => '0', level => std_logic_vector(to_unsigned(walk_level, 3)));
+                  transparent => '0', level => page_descriptor_count(walk_level, walk_page_from_indirect, walk_is_root_pointer));
                 wstate <= W_FAULT;
                 limit_fault := true;  -- BUG FIX: Prevent U/M logic from overwriting fault
               end if;
@@ -4211,7 +4247,7 @@ begin
                     write_protect => page_write_protect,
                     modified => page_modified,
                     transparent => '0',
-                    level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                    level => page_descriptor_count(walk_level, walk_page_from_indirect, walk_is_root_pointer)
                   );
                 end if;
                 wstate <= W_FAULT;
@@ -4247,7 +4283,7 @@ begin
                   write_protect => page_write_protect,
                   modified => page_modified,
                   transparent => '0',
-                  level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                  level => page_descriptor_count(walk_level, walk_page_from_indirect, walk_is_root_pointer)
                 );
                 wstate <= W_FAULT;
               elsif pload_flush_pending = '1' then
@@ -4317,7 +4353,7 @@ begin
             walker_fault_status <= encode_mmusr_fault(
               bus_error => '1', limit_violation => '0', supervisor_violation => '0',
               write_protect => '0', invalid => '1', modified => '0', transparent => '0',
-              level => std_logic_vector(to_unsigned(walk_level, 3))
+              level => page_descriptor_count(walk_level, walk_page_from_indirect, walk_is_root_pointer)
             );
             wstate <= W_FAULT;
           elsif mem_ack = '1' then
@@ -4334,7 +4370,7 @@ begin
                 write_protect => desc_update_data(2) or walk_write_protect,
                 modified => desc_update_data(4),
                 transparent => '0',
-                level => std_logic_vector(to_unsigned(walk_level + 1, 3))
+                level => page_descriptor_count(walk_level, walk_page_from_indirect, walk_is_root_pointer)
               );
               wstate <= W_FAULT;
             elsif pload_flush_pending = '1' then
@@ -4384,7 +4420,7 @@ begin
           atc_page_size(replace_idx) <= walk_page_size;
           atc_attr(replace_idx)      <= walk_attr(3 downto 0);
           atc_fc(replace_idx)        <= saved_fc;
-          atc_level(replace_idx)     <= std_logic_vector(to_unsigned(walk_level + 1, 3));
+          atc_level(replace_idx)     <= page_descriptor_count(walk_level, walk_page_from_indirect, walk_is_root_pointer);
           atc_valid(replace_idx)     <= '1';
           atc_buserr(replace_idx)    <= '0';  -- BUG #436: Clear bus error flag for successful walk
           atc_fault_status(replace_idx) <= (others => '0');

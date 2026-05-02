@@ -307,6 +307,40 @@ proc show_tcwr {bin} {
         $disable_seen $disable_value $disable_pc $disable_opcode $disable_brief $disable_flags]
 }
 
+proc show_pmwr_write {idx addr data} {
+    puts [format "w%u: addr=%08s data=%08s" $idx $addr $data]
+}
+
+proc show_pmwr {bin} {
+    puts "== PMWR =="
+    set seen [bin_to_uint [bit_slice $bin 403 403]]
+    set count [bin_to_uint [bit_slice $bin 402 387]]
+    set last_addr [bin_to_hex [bit_slice $bin 386 355]]
+    set last_data [bin_to_hex [bit_slice $bin 354 323]]
+    set w0_addr [bin_to_hex [bit_slice $bin 322 291]]
+    set w0_data [bin_to_hex [bit_slice $bin 290 259]]
+    set w1_addr [bin_to_hex [bit_slice $bin 258 227]]
+    set w1_data [bin_to_hex [bit_slice $bin 226 195]]
+    set w2_addr [bin_to_hex [bit_slice $bin 194 163]]
+    set w2_data [bin_to_hex [bit_slice $bin 162 131]]
+    set w3_addr [bin_to_hex [bit_slice $bin 130 99]]
+    set w3_data [bin_to_hex [bit_slice $bin 98 67]]
+    set hit_400a [bin_to_uint [bit_slice $bin 66 66]]
+    set hit_400a_addr [bin_to_hex [bit_slice $bin 65 34]]
+    set hit_400a_data [bin_to_hex [bit_slice $bin 33 2]]
+    set fault_latched [bin_to_uint [bit_slice $bin 1 1]]
+    set timeout_latched [bin_to_uint [bit_slice $bin 0 0]]
+
+    puts [format "seen=%u count=%u last_addr=%08s last_data=%08s fault_latched=%u timeout=%u" \
+        $seen $count $last_addr $last_data $fault_latched $timeout_latched]
+    show_pmwr_write 0 $w0_addr $w0_data
+    show_pmwr_write 1 $w1_addr $w1_data
+    show_pmwr_write 2 $w2_addr $w2_data
+    show_pmwr_write 3 $w3_addr $w3_data
+    puts [format "hit_400a: seen=%u addr=%08s data=%08s" \
+        $hit_400a $hit_400a_addr $hit_400a_data]
+}
+
 set clear_cpus 0
 foreach arg $::argv {
     switch -- $arg {
@@ -328,10 +362,15 @@ set tcwr_idx -1
 if {[llength $tcwr_inst] != 0} {
     set tcwr_idx [lindex $tcwr_inst 0]
 }
+set pmwr_inst [find_instance_optional $hw_name $dev_name "PMWR"]
+set pmwr_idx -1
+if {[llength $pmwr_inst] != 0} {
+    set pmwr_idx [lindex $pmwr_inst 0]
+}
 
 puts "hardware: $hw_name"
 puts "device:   $dev_name"
-puts "instances: PMMU=$pmmu_idx PMM2=$pmm2_idx EXCF=$excf_idx CPUS=$cpus_idx REGS=$regs_idx TCWR=$tcwr_idx"
+puts "instances: PMMU=$pmmu_idx PMM2=$pmm2_idx EXCF=$excf_idx CPUS=$cpus_idx REGS=$regs_idx TCWR=$tcwr_idx PMWR=$pmwr_idx"
 
 start_insystem_source_probe -hardware_name $hw_name -device_name $dev_name
 if {$clear_cpus} {
@@ -353,6 +392,12 @@ if {$clear_cpus} {
         write_source_data -instance_index $tcwr_idx -value 0 -value_in_hex
         after 20
     }
+    if {$pmwr_idx >= 0} {
+        write_source_data -instance_index $pmwr_idx -value 1 -value_in_hex
+        after 20
+        write_source_data -instance_index $pmwr_idx -value 0 -value_in_hex
+        after 20
+    }
 }
 set cpus_bin [read_probe_data -instance_index $cpus_idx]
 set pmmu_bin [read_probe_data -instance_index $pmmu_idx]
@@ -361,6 +406,9 @@ set excf_bin [read_probe_data -instance_index $excf_idx]
 set regs_bin [read_probe_data -instance_index $regs_idx]
 if {$tcwr_idx >= 0} {
     set tcwr_bin [read_probe_data -instance_index $tcwr_idx]
+}
+if {$pmwr_idx >= 0} {
+    set pmwr_bin [read_probe_data -instance_index $pmwr_idx]
 }
 end_insystem_source_probe
 
@@ -371,4 +419,7 @@ show_pmm2 $pmm2_bin
 show_excf $excf_bin
 if {$tcwr_idx >= 0} {
     show_tcwr $tcwr_bin
+}
+if {$pmwr_idx >= 0} {
+    show_pmwr $pmwr_bin
 }

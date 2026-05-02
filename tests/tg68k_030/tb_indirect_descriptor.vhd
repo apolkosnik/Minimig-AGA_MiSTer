@@ -46,6 +46,8 @@ architecture behavioral of tb_indirect_descriptor is
   signal mem_ack       : std_logic := '0';
   signal mem_rdat      : std_logic_vector(31 downto 0) := (others => '0');
   signal mem_berr      : std_logic := '0';
+  signal berr_enable   : std_logic := '0';
+  signal berr_addr     : std_logic_vector(31 downto 0) := (others => '0');
   signal busy          : std_logic;
   signal mmu_config_err : std_logic;
   signal mmu_config_ack : std_logic := '0';
@@ -67,6 +69,7 @@ architecture behavioral of tb_indirect_descriptor is
   constant SEL_TT1     : std_logic_vector(4 downto 0) := "00011";
   constant SEL_TC      : std_logic_vector(4 downto 0) := "10000";
   constant SEL_CRP     : std_logic_vector(4 downto 0) := "10011";
+  constant SEL_MMUSR   : std_logic_vector(4 downto 0) := "11000";
 
   -- Test counters
   signal test_pass     : integer := 0;
@@ -136,16 +139,22 @@ begin
   begin
     if rising_edge(clk) then
       mem_ack <= '0';
+      mem_berr <= '0';
       if mem_req = '1' then
-        idx := to_integer(unsigned(mem_addr(14 downto 2)));  -- 15 bits for 8192 entries
-        if idx < 8192 then
-          mem_rdat <= page_table(idx);
+        if berr_enable = '1' and mem_addr = berr_addr then
+          mem_berr <= '1';
+          report "MEM_BERR: addr=" & integer'image(to_integer(unsigned(mem_addr)));
         else
-          mem_rdat <= x"00000000";  -- Return invalid for out-of-range
+          idx := to_integer(unsigned(mem_addr(14 downto 2)));  -- 15 bits for 8192 entries
+          if idx < 8192 then
+            mem_rdat <= page_table(idx);
+          else
+            mem_rdat <= x"00000000";  -- Return invalid for out-of-range
+          end if;
+          mem_ack <= '1';
+          report "MEM_READ: addr=" & integer'image(to_integer(unsigned(mem_addr))) &
+                 " (idx=" & integer'image(idx) & " data=" & integer'image(to_integer(unsigned(page_table(idx)))) & ")";
         end if;
-        mem_ack <= '1';
-        report "MEM_READ: addr=" & integer'image(to_integer(unsigned(mem_addr))) &
-               " (idx=" & integer'image(idx) & " data=" & integer'image(to_integer(unsigned(page_table(idx)))) & ")";
       end if;
     end if;
   end process;
@@ -171,6 +180,17 @@ begin
       wait_cycles(1);
     end procedure;
 
+    procedure read_reg(sel : std_logic_vector(4 downto 0);
+                       part : std_logic) is
+    begin
+      reg_sel <= sel;
+      reg_part <= part;
+      reg_re <= '1';
+      wait_cycles(1);
+      reg_re <= '0';
+      wait_cycles(1);
+    end procedure;
+
     procedure do_pflush is
     begin
       pmmu_brief <= x"2400";
@@ -178,6 +198,68 @@ begin
       wait_cycles(1);
       pflush_req <= '0';
       wait_cycles(2);
+    end procedure;
+
+    procedure do_ptestr_fc(
+      log_addr : std_logic_vector(31 downto 0);
+      level : std_logic_vector(2 downto 0);
+      fc_value : std_logic_vector(2 downto 0);
+      test_name : string
+    ) is
+      variable timeout : integer;
+    begin
+      report "PTESTR: " & test_name;
+      pmmu_brief <= "100" & level & '1' & "000000000";
+      pmmu_addr <= log_addr;
+      pmmu_fc <= fc_value;
+      ptest_req <= '1';
+      wait_cycles(1);
+      ptest_req <= '0';
+
+      timeout := 0;
+      while busy = '0' and timeout < 20 loop
+        wait_cycles(1);
+        timeout := timeout + 1;
+      end loop;
+
+      timeout := 0;
+      while busy = '1' and timeout < 100 loop
+        wait_cycles(1);
+        timeout := timeout + 1;
+      end loop;
+
+      if timeout >= 100 then
+        report "  FAIL: PTESTR timeout" severity error;
+        test_fail <= test_fail + 1;
+      end if;
+
+      wait_cycles(5);
+    end procedure;
+
+    procedure do_ptestr(
+      log_addr : std_logic_vector(31 downto 0);
+      level : std_logic_vector(2 downto 0);
+      test_name : string
+    ) is
+    begin
+      do_ptestr_fc(log_addr, level, "101", test_name);
+    end procedure;
+
+    procedure expect_mmusr(
+      expected : std_logic_vector(15 downto 0);
+      test_name : string
+    ) is
+    begin
+      read_reg(SEL_MMUSR, '0');
+      if reg_rdat(15 downto 0) = expected then
+        report "  PASS: " & test_name;
+        test_pass <= test_pass + 1;
+      else
+        report "  FAIL: " & test_name & " expected " &
+               integer'image(to_integer(unsigned(expected))) & " got " &
+               integer'image(to_integer(unsigned(reg_rdat(15 downto 0)))) severity error;
+        test_fail <= test_fail + 1;
+      end if;
     end procedure;
 
     procedure translate_addr(
@@ -296,6 +378,9 @@ begin
     -- Entry 3: SHORT INDIRECT (DT=10) pointing to invalid descriptor (DT=00)
     page_table(16#403#) <= x"00002802";  -- L1[3]: Short indirect -> invalid at 0x2800
 
+    -- Entry 4: Direct invalid descriptor
+    page_table(16#404#) <= x"00000000";  -- L1[4]: Invalid descriptor, DT=00
+
     -- Target descriptors:
     -- 0x2000: Valid page descriptor (target for entry 0)
     page_table(16#800#) <= x"DEAF0001";  -- Target page: phys=0xDEAF0000, DT=01
@@ -343,6 +428,20 @@ begin
     do_pflush;
 
     report "" severity note;
+    report "=== TEST 2B: PTEST #7 follows short indirect and counts target ===" severity note;
+    write_reg(SEL_MMUSR, x"00000000", '0');
+    do_ptestr(x"00000000", "111", "PTEST short indirect target");
+    read_reg(SEL_MMUSR, '0');
+    if reg_rdat(15 downto 0) = x"0003" then
+      report "  PASS: PTEST short indirect MMUSR.N includes target descriptor";
+      test_pass <= test_pass + 1;
+    else
+      report "  FAIL: PTEST short indirect expected MMUSR=$0003 but got " &
+             integer'image(to_integer(unsigned(reg_rdat(15 downto 0)))) severity error;
+      test_fail <= test_fail + 1;
+    end if;
+
+    report "" severity note;
     report "=== TEST 3: Nested indirect (should fault) ===" severity note;
     -- Address with TIA=0, TIB=2 -> L1 entry 2 -> indirect -> nested indirect -> FAULT
     translate_addr(x"00002000", x"00000000", true, "Nested indirect (should fault)");
@@ -355,6 +454,75 @@ begin
     translate_addr(x"00003000", x"00000000", true, "Indirect to invalid (should fault)");
 
     do_pflush;
+
+    report "" severity note;
+    report "=== TEST 4B: PTEST #7 invalid indirect target counts target ===" severity note;
+    write_reg(SEL_MMUSR, x"00000000", '0');
+    do_ptestr(x"00003000", "111", "PTEST indirect invalid target");
+    read_reg(SEL_MMUSR, '0');
+    if reg_rdat(15 downto 0) = x"0403" then
+      report "  PASS: PTEST invalid target MMUSR.I and N match WinUAE";
+      test_pass <= test_pass + 1;
+    else
+      report "  FAIL: PTEST invalid target expected MMUSR=$0403 but got " &
+             integer'image(to_integer(unsigned(reg_rdat(15 downto 0)))) severity error;
+      test_fail <= test_fail + 1;
+    end if;
+
+    do_pflush;
+
+    report "" severity note;
+    report "=== TEST 4C: PTEST direct invalid descriptor counts read descriptor ===" severity note;
+    write_reg(SEL_MMUSR, x"00000000", '0');
+    do_ptestr(x"00004000", "111", "PTEST direct invalid final descriptor");
+    expect_mmusr(x"0402", "PTEST direct invalid MMUSR.I and N match WinUAE");
+
+    do_pflush;
+
+    report "" severity note;
+    report "=== TEST 4D: PTEST indirect target read bus error counts previous descriptors ===" severity note;
+    berr_addr <= x"00002400";
+    berr_enable <= '1';
+    write_reg(SEL_MMUSR, x"00000000", '0');
+    do_ptestr(x"00002000", "111", "PTEST indirect target read BERR");
+    berr_enable <= '0';
+    expect_mmusr(x"8402", "PTEST indirect-target BERR MMUSR.B/I/N match WinUAE");
+
+    do_pflush;
+
+    report "" severity note;
+    report "=== TEST 4E: PTEST supervisor-only long page reports page descriptor count ===" severity note;
+    page_table <= (others => (others => '0'));
+    wait_cycles(2);
+    page_table(0) <= x"7FFF0003";        -- Root[0] high: long table, upper limit max, DT=11
+    page_table(1) <= x"00001000";        -- Root[0] low : L1 table at $1000
+    page_table(16#400#) <= x"00000101";  -- L1[0] high: long page, S=1, DT=01
+    page_table(16#401#) <= x"FACE0000";  -- L1[0] low : page base
+    write_reg(SEL_CRP, x"7FFF0003", '1');
+    write_reg(SEL_CRP, x"00000000", '0');
+    write_reg(SEL_TC, x"80C0AA00", '0');
+    wait_cycles(5);
+    do_pflush;
+    write_reg(SEL_MMUSR, x"00000000", '0');
+    do_ptestr_fc(x"00000000", "111", "001", "PTEST user access to supervisor-only long page");
+    expect_mmusr(x"2002", "PTEST supervisor violation MMUSR.S and N match WinUAE");
+
+    do_pflush;
+
+    report "" severity note;
+    report "=== TEST 4F: PTEST long early-termination limit violation counts page descriptor ===" severity note;
+    page_table <= (others => (others => '0'));
+    wait_cycles(2);
+    page_table(0) <= x"80010001";        -- Root[0] high: long page, lower limit=1, DT=01
+    page_table(1) <= x"12340000";        -- Root[0] low : page base
+    write_reg(SEL_CRP, x"7FFF0003", '1');
+    write_reg(SEL_CRP, x"00000000", '0');
+    write_reg(SEL_TC, x"80C0AA00", '0');
+    wait_cycles(5);
+    do_pflush;
+    write_reg(SEL_MMUSR, x"00000000", '0');
+    do_ptestr(x"00000000", "111", "PTEST long early-termination lower-limit fault");
+    expect_mmusr(x"4401", "PTEST early-termination limit MMUSR.L/I/N match WinUAE");
 
     report "" severity note;
     report "=== TEST 5: Root-final short indirect descriptor ===" severity note;
