@@ -217,7 +217,8 @@ wire sel_zram_walker   = sel_z3ram0_walker | sel_z3ram1_walker | sel_z2ram_walke
 // the next. Without this, cpu_ack stays latched high and the high word read gets
 // stale data from the low word read.
 wire walker_fast_ram = USE_68030_CACHE && walker_active && sel_zram_walker
-                       && (walker_state != 4'd11);  // != WALKER_RAM_GAP
+                       && (walker_state != 4'd11)   // != WALKER_RAM_GAP
+                       && (walker_state != 4'd12);  // != WALKER_WRITE_RAM_GAP
 
 // Walker encoded RAM address (same encoding as cpu->ramaddr)
 wire [28:1] walker_ramaddr;
@@ -259,7 +260,7 @@ end
 // BUG #406 FIX: Don't let cache_hit intercept cpu_din during walker reads.
 // When walker is active and reading from memory, cpu_din must reflect the actual
 // memory bus data (chip_data/ramdat), not stale cache data from the CPU's frozen address.
-// BUG #408 FIX: When walker reads from chip RAM, force cpu_din to chip_data.
+// BUG #408 FIX: When walker reads from legacy chip/Gary bus RAM, force cpu_din to chip_data.
 // Without this, CPU's frozen address can set ramsel=1 (turbochip/kickstart), causing
 // cpu_din to select ramdat (SDRAM data at CPU address) instead of chip_data (page table).
 wire [15:0] cpu_din = (USE_68030_CACHE & cache_hit & ~walker_active & ~pmmu_fault_p) ? cache_data_out_16 :
@@ -289,8 +290,8 @@ always @* begin
 		uds_in       = uds_p;
 		lds_in       = lds_p;
 		reset_out    = reset_out_p;
-		// BUG #194 FIX: Walker must ONLY drive chip bus when accessing CHIP RAM ($000000-$1FFFFF)
-		// When walker reads from Fast RAM (Z2/Z3), it uses ramdata bus, NOT chip bus!
+		// BUG #194 FIX: Walker must only drive the legacy chip/Gary bus for RAM
+		// that lives behind that bus. Z2/Z3 Fast RAM uses ramdata, not chip bus.
 		// Driving chip_as during Fast RAM access causes bus conflicts with CPU instruction fetch
 		// This was causing WhichAmiga and cputest lockups when page tables were in Fast RAM
 		if (walker_chip_ram && walker_reading) begin
@@ -1544,7 +1545,7 @@ altsource_probe #(
 
 // PMMU walker address mux signals (for bus arbitration)
 // NOTE: Walker supports full 32-bit addressing:
-//   - Chip RAM (<2MB): uses walker_chip_addr[23:1] -> chip_addr bus
+//   - Legacy chip/Gary bus RAM (chip + slow): uses walker_chip_addr[23:1] -> chip_addr bus
 //   - Z3/Z2 Fast RAM: uses walker_addr_word[31:1] -> walker_ramaddr -> ramsel path
 // Page tables in Z3 RAM above 16MB are fully supported via the ramaddr path.
 reg         walker_active;
@@ -1553,7 +1554,7 @@ reg  [31:0] walker_wdata_latch;  // MC68030 U/M bit: Latch write data from PMMU
 reg         walker_timeout_error; // BUG #138: Walker timeout error flag
 reg         walker_write_ready_armed; // Require a fresh ready pulse for descriptor writes
 reg         walker_read_ready_armed;  // Require a fresh ready pulse for descriptor reads
-wire [23:1] walker_chip_addr;  // For Chip RAM only (inherently <2MB)
+wire [23:1] walker_chip_addr;  // For legacy chip/Gary bus RAM
 wire        walker_reading;  // BUG #124 FIX: Walker actively reading memory
 wire        walker_writing;  // MC68030 U/M bit: Walker actively writing memory
 wire        walker_write_low_phase;  // MC68030 U/M bit: Writing low word
@@ -2671,6 +2672,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// Without a gap, the high word read sees stale ramready and captures the
 	// same data as the low word read, corrupting every 32-bit descriptor.
 	localparam WALKER_RAM_GAP   = 4'd11;
+	localparam WALKER_WRITE_RAM_GAP = 4'd12;
 
 	// Address multiplexing: Walker overrides CPU address during active states
 	// Walker addresses are byte addresses, chip_addr is word address (23:1)
@@ -2764,9 +2766,9 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// have a bus cycle in-flight (started before pmmu_suppress_bus or
 					// walker_active took effect). If we enter WAIT_LOW while this stale
 					// cycle is running, we capture its ready signal with wrong data.
-					// Chip RAM walks: wait for chip bus SM idle (chip_stage==0).
+					// Legacy chip/Gary bus walks: wait for chip bus SM idle (chip_stage==0).
 					// SDRAM walks: wait for stale_ram_pending to clear (ramready fires).
-					else if (walker_addr_is_chipram) begin
+					else if (walker_chip_ram) begin
 						if (chip_stage == 2'b00)
 							walker_state <= WALKER_WAIT_LOW;
 					end else begin
@@ -2803,8 +2805,8 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						walker_data_low <= cpu_din;
 						// BUG #439 FIX: For SDRAM/DDR3 reads, insert a gap cycle to
 						// deassert cpu_cs and clear cpu_ack before the high word read.
-						// Chip RAM uses chipready (not cache), so no gap needed.
-						if (walker_addr_is_chipram)
+						// Legacy chip/Gary bus uses chipready (not cache), so no gap needed.
+						if (walker_chip_ram)
 							walker_state <= WALKER_READ_HIGH;
 						else
 							walker_state <= WALKER_RAM_GAP;
@@ -2889,7 +2891,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						walker_state <= WALKER_DONE;
 					end
 					// BUG #422 FIX: Same stale-cycle guard as WALKER_READ_LOW (see above)
-					else if (walker_addr_is_chipram) begin
+					else if (walker_chip_ram) begin
 						if (chip_stage == 2'b00)
 							walker_state <= WALKER_WAIT_WR_LOW;
 					end else begin
@@ -2913,12 +2915,24 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 							walker_write_ready_armed <= 1;
 							walker_timeout_cnt <= walker_timeout_cnt + 1;
 						end else if (walker_write_ready_armed) begin
-							// Low word written, now write high word
+							// Low word written, now write high word.
+							// Fast RAM uses cpu_cache_new/write-buffer logic behind a level-sensitive
+							// cpu_cs. Drop walker_fast_ram for a cycle so the write path can return
+							// to idle before the second 16-bit descriptor write.
 							walker_write_ready_armed <= 0;
-							walker_state <= WALKER_WRITE_HIGH;
+							if (walker_chip_ram)
+								walker_state <= WALKER_WRITE_HIGH;
+							else
+								walker_state <= WALKER_WRITE_RAM_GAP;
 						end else begin
 							walker_timeout_cnt <= walker_timeout_cnt + 1;
 						end
+					end
+
+					WALKER_WRITE_RAM_GAP: begin
+						walker_timeout_cnt <= 0;
+						walker_write_ready_armed <= 0;
+						walker_state <= WALKER_WRITE_HIGH;
 					end
 
 					WALKER_WRITE_HIGH: begin
@@ -3051,20 +3065,28 @@ end
 reg       chipreq;
 reg [2:0] cpu_ipl;
 
-// BUG #135 FIX: Walker chip RAM access detection
-// When walker is reading from or writing to chip RAM (address below 2MB), it needs to trigger
-// the chipset state machine. Otherwise chipready never goes high and walker hangs.
-// Chip RAM is $000000-$1FFFFF = bits 31:21 all zero
+// BUG #135 FIX: Walker legacy RAM access detection
+// When walker is reading from or writing to RAM behind Gary's legacy bus, it must trigger
+// the chip bus state machine. Otherwise chipready never goes high and walker hangs.
+// Chip RAM is $000000-$1FFFFF. Slow RAM is $C00000-$D7FFFF in 512 KiB banks.
 wire walker_addr_is_chipram = !walker_addr_latch[31] && !walker_addr_latch[30] &&
                               !walker_addr_latch[29] && !walker_addr_latch[28] &&
                               !walker_addr_latch[27] && !walker_addr_latch[26] &&
                               !walker_addr_latch[25] && !walker_addr_latch[24] &&
                               !walker_addr_latch[23] && !walker_addr_latch[22] &&
                               !walker_addr_latch[21];
+wire walker_addr_is_slowram = !walker_addr_latch[31] && !walker_addr_latch[30] &&
+                              !walker_addr_latch[29] && !walker_addr_latch[28] &&
+                              !walker_addr_latch[27] && !walker_addr_latch[26] &&
+                              !walker_addr_latch[25] && !walker_addr_latch[24] &&
+                              ((walker_addr_latch[23:19] == 5'b11000) ||
+                               (walker_addr_latch[23:19] == 5'b11001) ||
+                               (walker_addr_latch[23:19] == 5'b11010));
+wire walker_addr_uses_chip_bus = walker_addr_is_chipram | walker_addr_is_slowram;
 
 // MC68030 U/M bit: Include walker writes for descriptor updates
-wire walker_chip_ram = USE_68030_CACHE && (walker_reading | walker_writing) && walker_addr_is_chipram;
-wire walker_chip_cycle_active = USE_68030_CACHE && walker_active && walker_addr_is_chipram;
+wire walker_chip_ram = USE_68030_CACHE && (walker_reading | walker_writing) && walker_addr_uses_chip_bus;
+wire walker_chip_cycle_active = USE_68030_CACHE && walker_active && walker_addr_uses_chip_bus;
 
 always @(posedge clk) begin
 	// BUG #135 FIX: Include walker chip RAM access in chipreq
