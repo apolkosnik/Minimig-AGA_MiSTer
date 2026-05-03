@@ -484,10 +484,10 @@ begin
     translate_and_check("RootPtr limit pass (TIA=0,TIB=3)", x"00003000", x"90003000");
     translate_and_expect_fault("RootPtr limit fault (TIA=2,TIB=0)", x"00008000");
 
-    -- With FCL=1, root-pointer L/U and LIMIT are unused and must be ignored.
+    -- MC68030 UM root-pointer DT=01: limit check applies regardless of FCL.
     write_reg("10000", x"81C8A200", '0');
     wait for 100 ns;
-    translate_and_check("RootPtr FCL ignores limit", x"00008000", x"90008000");
+    translate_and_expect_fault("RootPtr FCL still checks limit", x"00008000");
 
     -- Phase M: invalid TIA=0 image is rejected and falls back to identity
     page_table(6144 + 0) <= x"00000061";

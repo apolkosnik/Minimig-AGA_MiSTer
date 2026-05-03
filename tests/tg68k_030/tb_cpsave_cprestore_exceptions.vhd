@@ -269,6 +269,11 @@ begin
         wait until rising_edge(clk);
 
         run_case("cpRESTORE -(A0) in user mode", x"F360", x"000B", x"002C");
+        nReset <= '0';
+        wait until rising_edge(clk);
+        wait until rising_edge(clk);
+
+        run_case("unimplemented CpID0 F-line in user mode", x"F180", x"0008", x"0020");
 
         test_done <= true;
         wait;

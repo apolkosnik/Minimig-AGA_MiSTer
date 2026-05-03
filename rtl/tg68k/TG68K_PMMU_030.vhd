@@ -44,6 +44,7 @@ entity TG68K_PMMU_030 is
     req            : in  std_logic;
     is_insn        : in  std_logic;
     rw             : in  std_logic; -- '1' read, '0' write
+    rmw            : in  std_logic := '0'; -- read-modify-write bus sequence (TAS/CAS/CAS2)
     fc             : in  std_logic_vector(2 downto 0);
     addr_log       : in  std_logic_vector(31 downto 0);
     addr_phys      : out std_logic_vector(31 downto 0);
@@ -141,6 +142,7 @@ architecture rtl of TG68K_PMMU_030 is
   -- They were removed as unused signals to avoid synthesis warnings
   -- Internal
   signal tc_en  : std_logic; -- translation enable bit (TC[31] in some docs; keep flexible here)
+  signal tc_table_config_valid : std_logic; -- Valid TC fields for PMMU table-search instructions, independent of TC.E
   -- Walker descriptor address register (must persist across clock cycles for W_*_LOW states)
   signal desc_addr_reg : std_logic_vector(31 downto 0) := (others => '0');
   signal last_mem_rdat : std_logic_vector(31 downto 0) := (others => '0');
@@ -306,7 +308,8 @@ architecture rtl of TG68K_PMMU_030 is
   signal ptest_rw : std_logic := '1';  -- '1'=PTESTR (read), '0'=PTESTW (write), from brief(9)
   signal ptest_level : std_logic_vector(2 downto 0) := "000";  -- BUG #413: PTEST level from brief(12:10)
   -- BUG #396: PTEST/PLOAD walk must NOT update addr_phys_reg.
-  -- ptest_active/pload_active are cleared after 1 cycle (before walker_completed).
+  -- ptest_active clears after the command is accepted; pload_active is held until
+  -- the translation process can start or discard the preload request.
   -- This flag persists through the entire walk so walker_completed can skip addr_phys_reg.
   signal instr_walk_pending : std_logic := '0';
   signal ptest_walk_pending : std_logic := '0';  -- Table-search PTEST active: update MMUSR only, never alter the ATC
@@ -511,6 +514,7 @@ architecture rtl of TG68K_PMMU_030 is
       fc        : in  std_logic_vector(2 downto 0);
       is_insn   : in  std_logic;
       rw        : in  std_logic;  -- '1'=read, '0'=write
+      rmw       : in  std_logic;  -- read-modify-write sequence; requires TTR RWM=1
       matched   : out std_logic;
       ci        : out std_logic;
       wp        : out std_logic) is
@@ -585,14 +589,21 @@ architecture rtl of TG68K_PMMU_030 is
       -- Bit 8 (RWM): 0 = R/W field used, 1 = R/W field ignored
       -- Bit 9 (R/W): 0 = write accesses transparent, 1 = read accesses transparent
       -- When RWM=1, both read and write accesses are transparently translated
-      if tt(8) = '0' then  -- RWM=0: R/W field is USED (check access type)
+      if rmw = '1' and tt(8) = '0' then
+        -- MC68030 UM 9.2.6: RMW cycles are transparent only when RWM=1.
+        matched := '0';
+        ci := '0';
+        wp := '0';
+      elsif tt(8) = '0' then  -- RWM=0: R/W field is USED (check access type)
         if tt(9) = '1' and rw = '0' then
           -- R/W=1 (read-only transparent) but this is a write - no match
           matched := '0';
+          ci := '0';
           wp := '0';
         elsif tt(9) = '0' and rw = '1' then
           -- R/W=0 (write-only transparent) but this is a read - no match
           matched := '0';
+          ci := '0';
           wp := '0';
         else
           wp := '0';  -- Access type matches
@@ -626,7 +637,7 @@ architecture rtl of TG68K_PMMU_030 is
     variable dummy_ci : std_logic;
     variable dummy_wp : std_logic;
   begin
-    ttr_check(tt, addr, fc, is_insn, '1', matched, dummy_ci, dummy_wp);  -- Default to read for simple match check
+    ttr_check(tt, addr, fc, is_insn, '1', '0', matched, dummy_ci, dummy_wp);  -- Default to read for simple match check
   end procedure;
   
   -- Extract table index from virtual address (MC68030 compliant)
@@ -754,8 +765,8 @@ architecture rtl of TG68K_PMMU_030 is
   end function;
   -- Early-termination limit checking uses the NEXT logical-address index field.
   -- Root-pointer DT=01 is special:
-  --   * with FCL=0 the limit applies to TIA
-  --   * with FCL=1 the root-pointer limit is unused
+  --   * the MC68030 UM requires the limit check regardless of FCL
+  --     (WinUAE skips the FCL=1 case, but this path follows the manual)
   function early_term_limit_applies(
     is_root_pointer : std_logic;
     fcl             : std_logic;
@@ -764,9 +775,6 @@ architecture rtl of TG68K_PMMU_030 is
   ) return boolean is
   begin
     if is_root_pointer = '1' then
-      if fcl = '1' then
-        return false;
-      end if;
       return idx_bits(0) /= 0;
     end if;
     return not is_final_table_level(fcl, level, idx_bits);
@@ -1084,15 +1092,15 @@ begin
   -- When MMU is first enabled, addr_phys_reg is stale (from previous cycle).
   -- TTR transparent translations always produce phys=log (identity mapping),
   -- so we can compute the match combinationally and bypass the registered result.
-  process(TT0, TT1, addr_log, fc, is_insn, rw)
+  process(TT0, TT1, addr_log, fc, is_insn, rw, rmw)
     variable m0, m1 : std_logic;
     variable ci0, wp0, ci1, wp1 : std_logic;
   begin
     m0 := '0'; m1 := '0';
     ci0 := '0'; wp0 := '0';
     ci1 := '0'; wp1 := '0';
-    ttr_check(TT0, addr_log, fc, is_insn, rw, m0, ci0, wp0);
-    ttr_check(TT1, addr_log, fc, is_insn, rw, m1, ci1, wp1);
+    ttr_check(TT0, addr_log, fc, is_insn, rw, rmw, m0, ci0, wp0);
+    ttr_check(TT1, addr_log, fc, is_insn, rw, rmw, m1, ci1, wp1);
     ttr0_match_comb <= m0;
     ttr1_match_comb <= m1;
     ttr0_ci_comb <= ci0;
@@ -1499,6 +1507,9 @@ begin
   -- forensics, but the handler must run under identity/TTR semantics instead
   -- of briefly re-enabling an illegal translation context after ack.
   tc_en <= '1' when TC(31) = '1' and mmu_config_error = '0' and tc_config_valid = '1' else '0';
+  -- PMMU instructions can perform table searches regardless of TC.E; keep only
+  -- the configuration-error/validation gate separate from normal translation enable.
+  tc_table_config_valid <= '1' when mmu_config_error = '0' and tc_config_valid = '1' else '0';
   tc_sre <= TC(25);
   tc_fcl <= TC(24);
   tc_enable <= tc_en;
@@ -1746,8 +1757,8 @@ begin
             fault_status_reg   <= (others => '0');
             translation_pending <= '0';
           else
-            ttr_check(TT0, addr_log, fc, is_insn, rw, tmatch0, tci0, twp0);
-            ttr_check(TT1, addr_log, fc, is_insn, rw, tmatch1, tci1, twp1);
+            ttr_check(TT0, addr_log, fc, is_insn, rw, rmw, tmatch0, tci0, twp0);
+            ttr_check(TT1, addr_log, fc, is_insn, rw, rmw, tmatch1, tci1, twp1);
             if tmatch0 = '1' and tmatch1 = '1' then
               -- Dual transparent-translation hit: combine the attributes so the
               -- registered state and MMUSR agree with the combinational outputs.
@@ -2079,8 +2090,8 @@ begin
         -- synthesis translate_on
         if translation_pending = '0' then
           -- Check Transparent Translation first
-          ttr_check(TT0, ptest_addr, ptest_fc, '0', ptest_rw, tmatch0, tci0, twp0);  -- Use PTEST R/W from brief(9)
-          ttr_check(TT1, ptest_addr, ptest_fc, '0', ptest_rw, tmatch1, tci1, twp1);  -- Use PTEST R/W from brief(9)
+          ttr_check(TT0, ptest_addr, ptest_fc, '0', ptest_rw, '0', tmatch0, tci0, twp0);  -- Use PTEST R/W from brief(9)
+          ttr_check(TT1, ptest_addr, ptest_fc, '0', ptest_rw, '0', tmatch1, tci1, twp1);  -- Use PTEST R/W from brief(9)
           -- synthesis translate_off
           -- report "PTEST_TTR: tmatch0=" & std_logic'image(tmatch0) &
           --        " tmatch1=" & std_logic'image(tmatch1) &
@@ -2132,16 +2143,6 @@ begin
             );
             mmusr_update_req <= '1';
             ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after TTR1 match
-          elsif tc_en = '0' then
-            -- Table translation disabled and no TTR matched: identity success.
-            mmusr_update_value <= encode_mmusr_success(
-              write_protect => '0',
-              modified => '0',
-              transparent => '0',
-              level => "000"
-            );
-            mmusr_update_req <= '1';
-            ptest_done <= '1';
           elsif ptest_level = "000" then
             -- BUG #413: PTEST level=0 - ATC-only search (no table walk)
             -- Per MC68030 spec and WinUAE mmu030_ptest_atc_search():
@@ -2189,7 +2190,7 @@ begin
             end if;
             mmusr_update_req <= '1';
             ptest_done <= '1';
-          else
+          elsif tc_table_config_valid = '1' then
             -- No TTR match, level>0 - trigger walker to test translation
             -- synthesis translate_off
             report "PTEST_WALK: ptest_addr=" & slv_to_hex(ptest_addr) &
@@ -2211,6 +2212,21 @@ begin
             ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after triggering walker
             -- report "PTEST: Triggered walker for addr=0x" & slv_to_hstring(ptest_addr) &
                   --  -- " fc=" & slv_to_string(ptest_fc) severity note;
+          else
+            -- TC validation is still pending or a configuration exception is active.
+            -- Complete the PMMU instruction without starting a malformed walk.
+            mmusr_update_value <= encode_mmusr_fault(
+              bus_error => '0',
+              limit_violation => '0',
+              supervisor_violation => '0',
+              write_protect => '0',
+              invalid => '1',
+              modified => '0',
+              transparent => '0',
+              level => "000"
+            );
+            mmusr_update_req <= '1';
+            ptest_done <= '1';
           end if;
         end if;
       end if;
@@ -2218,7 +2234,7 @@ begin
       -- Per MC68030 spec and WinUAE: PLOAD always flushes the page from ATC first,
       -- then unconditionally performs a table walk to (re)fill the ATC entry.
       if pload_active = '1' then
-        if tc_en = '1' and translation_pending = '0' then
+        if tc_table_config_valid = '1' and translation_pending = '0' then
           -- Always trigger walker to load fresh translation
           -- The walker process handles flushing the old ATC entry via pload_flush_pending
           saved_addr_log <= pload_addr;
@@ -2287,8 +2303,8 @@ begin
         -- Walker completed successfully - clear any previous fault status
         -- A successful walker completion means this specific translation succeeded
         -- First check if the completed request would have been handled by TTR
-        ttr_check(TT0, saved_addr_log, saved_fc, saved_is_insn, saved_rw, tmatch0, tci0, twp0);
-        ttr_check(TT1, saved_addr_log, saved_fc, saved_is_insn, saved_rw, tmatch1, tci1, twp1);
+        ttr_check(TT0, saved_addr_log, saved_fc, saved_is_insn, saved_rw, '0', tmatch0, tci0, twp0);
+        ttr_check(TT1, saved_addr_log, saved_fc, saved_is_insn, saved_rw, '0', tmatch1, tci1, twp1);
         if tmatch0 = '1' or tmatch1 = '1' then
           -- This request hits TTR - don't override TTR results that are already set
           -- TTR results already handled in main translation logic. The walker
@@ -2917,7 +2933,8 @@ begin
             else
               -- Short-format table descriptor; DT selects the next table format.
               -- TABLE descriptor U-bit writeback: set U before continuing
-              if ptest_walk_no_update = '0' and mem_rdat(3) = '0' then
+              if ptest_walk_no_update = '0' and mem_rdat(3) = '0'
+                 and not (saved_fc(2) = '0' and walk_supervisor = '1') then
                 desc_update_data <= mem_rdat(31 downto 4) & '1' & mem_rdat(2 downto 0);
                 walk_next_state <= W_PTR1;
                 walk_desc_is_long <= '0';
@@ -3184,7 +3201,8 @@ begin
             else
               -- Continue to next level (short format table descriptor)
               -- TABLE descriptor U-bit writeback
-              if ptest_walk_no_update = '0' and mem_rdat(3) = '0' then
+              if ptest_walk_no_update = '0' and mem_rdat(3) = '0'
+                 and not (saved_fc(2) = '0' and walk_supervisor = '1') then
                 desc_update_data <= mem_rdat(31 downto 4) & '1' & mem_rdat(2 downto 0);
                 walk_next_state <= W_PTR2;
                 walk_desc_is_long <= '0';
@@ -3457,7 +3475,8 @@ begin
             else
               -- Short format table descriptor
               -- TABLE descriptor U-bit writeback
-              if ptest_walk_no_update = '0' and mem_rdat(3) = '0' then
+              if ptest_walk_no_update = '0' and mem_rdat(3) = '0'
+                 and not (saved_fc(2) = '0' and walk_supervisor = '1') then
                 desc_update_data <= mem_rdat(31 downto 4) & '1' & mem_rdat(2 downto 0);
                 walk_next_state <= W_PTR3;
                 walk_desc_is_long <= '0';
@@ -3702,7 +3721,8 @@ begin
             else
               -- FCL=1 and TID!=0: Continue to W_PTR4 (5th level)
               -- TABLE descriptor U-bit writeback
-              if ptest_walk_no_update = '0' and mem_rdat(3) = '0' then
+              if ptest_walk_no_update = '0' and mem_rdat(3) = '0'
+                 and not (saved_fc(2) = '0' and walk_supervisor = '1') then
                 desc_update_data <= mem_rdat(31 downto 4) & '1' & mem_rdat(2 downto 0);
                 walk_next_state <= W_PTR4;
                 walk_desc_is_long <= '0';
@@ -4599,12 +4619,14 @@ begin
     end if;
   end process;
   -- Walker busy indication - not busy if MMU disabled or TTR hit
-  process(wstate, addr_log, fc, rw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg)
+  process(wstate, addr_log, fc, rw, rmw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg, pload_active, ptest_walk_pending)
     variable tmatch0, tmatch1 : std_logic;
     variable dummy_ci, dummy_wp : std_logic;
   begin
-    -- Not busy if MMU is disabled
-    if tc_en = '0' then
+    -- Normal CPU translation is idle when TC.E is clear, but PTEST/PLOAD can
+    -- still perform manual table searches with TC.E=0.
+    if tc_en = '0' and pload_active = '0' and ptest_walk_pending = '0'
+       and translation_pending = '0' and wstate = W_IDLE then
       busy <= '0';
     else
       -- BUG #421 FIX: Use ttr_check with actual rw signal instead of ttr_match which
@@ -4612,8 +4634,8 @@ begin
       -- when the TTR only matches reads. This caused busy='0' (TTR handles it) while
       -- the translation process started a walker (TTR doesn't match writes), allowing
       -- the CPU to proceed with a stale physical address.
-      ttr_check(TT0, addr_log, fc, is_insn, rw, tmatch0, dummy_ci, dummy_wp);
-      ttr_check(TT1, addr_log, fc, is_insn, rw, tmatch1, dummy_ci, dummy_wp);
+      ttr_check(TT0, addr_log, fc, is_insn, rw, rmw, tmatch0, dummy_ci, dummy_wp);
+      ttr_check(TT1, addr_log, fc, is_insn, rw, rmw, tmatch1, dummy_ci, dummy_wp);
       -- Not busy if TTR hit, fault is ready to report, or (walker idle with no pending walker work AND
       -- either no translation is active, or addr_phys_reg is fresh).
       -- BUG #416: Without the translated_addr/fc check, ATC hits leave busy='0'
@@ -4633,9 +4655,10 @@ begin
       -- addr_log combinationally, breaking translated_addr match. When the handshake
       -- completes, busy='1' persists (addr mismatch) and fault_reg clears (new
       -- translation for new addr) -> permanent deadlock, berr never dispatched.
-      if (tmatch0 = '1' or tmatch1 = '1' or fault_reg = '1' or
+      if (pload_active = '0' and
+          (tmatch0 = '1' or tmatch1 = '1' or fault_reg = '1' or
           (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and
-           (req = '0' or (translated_addr = addr_log and translated_fc = fc and translated_rw = rw and translated_cfg_seq = xlat_cfg_seq)))) then
+           (req = '0' or (translated_addr = addr_log and translated_fc = fc and translated_rw = rw and translated_cfg_seq = xlat_cfg_seq))))) then
         busy <= '0';
       else
         busy <= '1';
@@ -4659,6 +4682,10 @@ begin
       ptest_fc <= (others => '0');    -- BUG #397: driven from this process
       ptest_rw <= '1';               -- BUG #397: driven from this process
       ptest_level <= "000";          -- BUG #413: driven from this process
+      pload_active <= '0';
+      pload_addr <= (others => '0');
+      pload_fc <= (others => '0');
+      pload_rw <= '1';
     elsif rising_edge(clk) then
       -- Update previous values for edge detection
       ptest_req_prev <= ptest_req;
@@ -4713,8 +4740,12 @@ begin
         pload_rw <= pmmu_brief(9);
         -- PLOADR vs PLOADW affects access permissions tested during load
       elsif pload_active = '1' then
-        -- PLOAD operation active - clear after one cycle
-        pload_active <= '0';
+        -- Keep the request live while a previous translation is still draining.
+        -- WinUAE flushes the ATC page and immediately performs the table search;
+        -- losing this edge leaves a cached fault entry live across RTE.
+        if translation_pending = '0' then
+          pload_active <= '0';
+        end if;
       end if;
     end if;
   end process;

@@ -680,6 +680,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_req         : std_logic;
 	signal pmmu_is_insn     : std_logic;
 	signal pmmu_rw          : std_logic;
+	signal pmmu_rmw         : std_logic;
 	signal pmmu_fc          : std_logic_vector(2 downto 0);
 	signal pmmu_fc_from_dn  : std_logic_vector(2 downto 0);  -- FC value from Dn register for PTEST/PLOAD/PFLUSH
 	signal pmmu_addr_log_int : std_logic_vector(31 downto 0);
@@ -757,8 +758,9 @@ architecture logic of TG68KdotC_Kernel is
 
 BEGIN  
 
-  -- The RESET instruction asserts the external reset output only. It must not
-  -- clear internal 68030 PMMU registers; those are reset by nReset below.
+  -- The RESET instruction asserts the external reset output only. In this
+  -- integration, routing it into the PMMU reset path can strand the board
+  -- reset/autoconfig flow while ROM executes RESET; JMP (A0).
   pmmu_cpu_reset <= '0';
 
   -- PMMU (68030) instance (identity translation for now)
@@ -792,6 +794,7 @@ BEGIN
       req           => pmmu_req,
       is_insn       => pmmu_is_insn,
       rw            => pmmu_rw,
+      rmw           => pmmu_rmw,
       fc            => pmmu_fc,
       addr_log      => pmmu_addr_log_int,
       addr_phys     => pmmu_addr_phys_int,
@@ -1066,6 +1069,7 @@ BEGIN
                              and not (state = "00" and TG68_PC(0) = '1')) else '0';
   pmmu_is_insn  <= '1' when state = "00" else '0';
   pmmu_rw       <= '0' when state = "11" else '1';
+  pmmu_rmw      <= exec_tas OR exec_cas;
   pmmu_fc       <= fc_internal;
 
   -- FC from Dn for PTEST/PLOAD/PFLUSH: Read Dn register specified by brief(2:0), extract FC from bits [2:0]
@@ -2185,7 +2189,7 @@ PROCESS (clk)
 				-- Priority order (highest first):
 				--   1. writePC='1'                         -> TG68_PC         (role A)
 				--   2. micro_state=trap00                  -> exe_pc          (role A, Fmt$2 instr addr)
-				--   3. exec(writePC_add)='1', vec=$10|$20  -> exe_pc          (role A, BUG #387)
+				--   3. exec(writePC_add)='1', vec=$10|$20|$38 -> exe_pc        (role A)
 				--   4. exec(writePC_add)='1' (else)        -> TG68_PC_add     (role A)
 				--   5. micro_state=trap0, useStackframe2=1 -> $2xxx fmt/vec   (role B)
 				--   6. micro_state=trap0 (else)            -> $0xxx fmt/vec   (role B)
@@ -2212,7 +2216,10 @@ PROCESS (clk)
 					-- BUG #387 FIX: illegal (vector $10) and privilege violation ($20)
 					-- exceptions fire after extension words are fetched, so TG68_PC_add is
 					-- over-incremented; use exe_pc (the instruction-entry PC) instead.
-					IF trap_vector(9 downto 0) = "00" & X"10" OR trap_vector(9 downto 0) = "00" & X"20" THEN
+					-- RTE Format Error (vector $38) also stacks the RTE instruction PC.
+					IF trap_vector(9 downto 0) = "00" & X"10" OR
+					   trap_vector(9 downto 0) = "00" & X"20" OR
+					   trap_vector(9 downto 0) = "00" & X"38" THEN
 						data_write_tmp <= exe_pc;
 					ELSE
 						data_write_tmp <= TG68_PC_add;
@@ -2270,9 +2277,14 @@ PROCESS (clk)
 					-- $0C: Instruction pipe stage C (low word) and stage B (high word)
 					data_write_tmp <= opcode & last_opc_read(15 downto 0);
 				ELSIF micro_state = berr6 THEN
-					-- $08: Internal transfer count register ($08-$09, zero stub) and
-					-- SSW Special Status Word ($0A-$0B, real data: FC/RW/SIZE/DF/FB/RB)
-					data_write_tmp <= x"0000" & berr_ssw;
+					-- $08: WinUAE stores mmu030_state[1] here.  Format $A is the
+					-- 68030 last-write short bus fault, so preserve LASTWRITE for RTE.
+					-- $0A: SSW Special Status Word (FC/RW/SIZE/DF/FB/RB).
+					IF berr_long_frame='0' THEN
+						data_write_tmp <= x"0100" & berr_ssw;
+					ELSE
+						data_write_tmp <= x"0000" & berr_ssw;
+					END IF;
 				ELSIF micro_state = berr7 THEN
 					-- Address errors and long data-read bus faults use Format $B.
 					IF trap_addr_error='1' OR berr_long_frame='1' THEN
@@ -2310,6 +2322,10 @@ PROCESS (clk)
                     data_write_tmp(15 downto 0) <= reg_QB(31 downto 16);
                 ELSIF direct_data='1' THEN
                     data_write_tmp <= last_data_read;
+                ELSIF micro_state=int5 THEN
+                    -- MC68030 M=1 interrupt dual-frame: WinUAE/68030 clear M
+                    -- before stacking the Format $1 throwaway frame SR.
+                    data_write_tmp(15 downto 0) <= (trap_SR(7 downto 5) & '0' & trap_SR(3 downto 0)) & Flags(7 downto 0);
                 ELSIF writeSR='1'THEN
                     data_write_tmp(15 downto 0) <= trap_SR(7 downto 0)& Flags(7 downto 0);
                 ELSE
@@ -3269,12 +3285,15 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								berr_frame_pc <= TG68_PC;
 								berr_opcode_saved <= opcode;
 								berr_data_out_saved <= (others => '0');
-								-- SSW for odd instruction fetch address error
-								-- Per MC68030 spec/WinUAE: no pipeline bits (no bus cycle occurred)
+								-- SSW for odd instruction fetch address error.
+								-- MC68030 UM 8.2.1: address errors do not set fault bits;
+								-- rerun bits indicate the instruction pipeline state.
 								berr_ssw <= (others => '0');
 								berr_ssw(2 downto 0) <= fc_internal;  -- FC
 								berr_ssw(6) <= '1';           -- RW=1 (read)
 								berr_ssw(5 downto 4) <= "10"; -- SIZE=word
+								berr_ssw(13) <= '1';          -- RC=1
+								berr_ssw(12) <= '1';          -- RB=1
 								END IF;
 						-- BUG #400 FIX: Also check pmmu_fault directly for same-cycle dispatch
 						ELSIF make_berr='1' OR (pmmu_tc_en='1' AND pmmu_fault='1' AND trap_berr='0' AND trap_mmu_berr='0') THEN
@@ -5919,11 +5938,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						trapmake <= '1';
 					END IF;
 				ELSE
-					-- Unrecognized F-line instruction (cpGEN, cpBcc, etc.)
-					-- FPU/coprocessor instructions without hardware support
-					-- MC68030: F-line exception (vector 11) regardless of supervisor/user mode
-					-- FPU general instructions like FADD, FMUL are NOT privileged
-					trap_1111 <= '1';
+					-- Unrecognized F-line instruction (cpGEN, cpBcc, etc.).
+					-- On 68020/030, unimplemented CpID=0 coprocessor instructions
+					-- attempted in user mode raise privilege violation; other missing
+					-- coprocessor/FPU forms remain F-line exceptions.
+					IF SVmode='0' AND opcode(11 downto 9)="000" THEN
+						trap_priv <= '1';
+					ELSE
+						trap_1111 <= '1';
+					END IF;
 					trapmake <= '1';
 				END IF;
 --							

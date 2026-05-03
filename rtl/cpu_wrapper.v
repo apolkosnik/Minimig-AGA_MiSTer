@@ -1176,6 +1176,7 @@ localparam [7:0] MS_RTE3 = 8'd46;
 localparam [7:0] MS_RTE4 = 8'd47;
 localparam [7:0] MS_RTE6 = 8'd49;
 localparam [7:0] MS_TRAP0 = 8'd53;
+localparam [7:0] MS_TRAP3 = 8'd56;
 
 `CPUWRAP_DEBUG_KEEP reg        rted_seen;
 `CPUWRAP_DEBUG_KEEP reg        rted_active;
@@ -1792,6 +1793,14 @@ always @(posedge clk) begin
 end
 
 wire trpd_write_complete = cpu_clkena_in && (kernel_state_p == 2'b11);
+// data_write_tmp for a bus-error microstate is loaded on the cycle that
+// starts the write; the completion is visible under the following state.
+// Latch on the second half of the final longword so SR/PC_hi and the prior
+// PC_lo/format-vector halfwords are all present in the rolling write log.
+wire trpd_bus_frame_write = trpd_write_complete &&
+                             (kernel_micro_state_p[7:0] == MS_TRAP3) &&
+                             (kernel_trap_vector_p[15:0] == 16'h0008) &&
+                             kernel_clkena_lw_p;
 wire trpd_fline_format_write = trpd_write_complete &&
                                (kernel_micro_state_p[7:0] == MS_TRAP0) &&
                                (kernel_data_write_tmp_p[15:0] == 16'h002C);
@@ -1929,6 +1938,38 @@ always @(posedge clk) begin
 		trpd_w3_tmp       <= 0;
 		trpd_w3_micro     <= 0;
 		trpd_w3_lw        <= 0;
+	end else if (trpd_bus_frame_write && !trpd_active && !trpd_done) begin
+		trpd_seen         <= 1;
+		trpd_active       <= 0;
+		trpd_done         <= 1;
+		trpd_write_count  <= 3'd4;
+		trpd_seq_count    <= trpd_seq_count + 1'b1;
+		trpd_start_pc     <= kernel_TG68_PC_p;
+		trpd_start_exe_pc <= kernel_exe_PC_p;
+		trpd_start_opcode <= kernel_opcode_p;
+		trpd_start_flags  <= kernel_FlagsSR_p;
+		trpd_start_vector <= kernel_trap_vector_p[15:0];
+		trpd_start_a7     <= kernel_regfile_a7_p;
+		trpd_w0_log       <= pmmu_addr_log_p;
+		trpd_w0_dout      <= cpu_dout_p;
+		trpd_w0_tmp       <= kernel_data_write_tmp_p;
+		trpd_w0_micro     <= kernel_micro_state_p[7:0];
+		trpd_w0_lw        <= kernel_clkena_lw_p;
+		trpd_w1_log       <= stkw0_log;
+		trpd_w1_dout      <= stkw0_dout;
+		trpd_w1_tmp       <= {16'h0000, stkw0_dout};
+		trpd_w1_micro     <= stkw0_micro;
+		trpd_w1_lw        <= stkw0_lw;
+		trpd_w2_log       <= stkw1_log;
+		trpd_w2_dout      <= stkw1_dout;
+		trpd_w2_tmp       <= {16'h0000, stkw1_dout};
+		trpd_w2_micro     <= stkw1_micro;
+		trpd_w2_lw        <= stkw1_lw;
+		trpd_w3_log       <= stkw2_log;
+		trpd_w3_dout      <= stkw2_dout;
+		trpd_w3_tmp       <= {16'h0000, stkw2_dout};
+		trpd_w3_micro     <= stkw2_micro;
+		trpd_w3_lw        <= stkw2_lw;
 	end else if (trpd_fline_format_write && !trpd_active && !trpd_done) begin
 		trpd_seen         <= 1;
 		trpd_active       <= 1;

@@ -534,6 +534,7 @@ begin
             variable reached_stop : boolean;
             variable local_fail : boolean;
             variable frame_sr : std_logic_vector(15 downto 0);
+            variable frame_pc : std_logic_vector(31 downto 0);
             variable sp_val_hi : std_logic_vector(15 downto 0);
             variable sp_val_lo : std_logic_vector(15 downto 0);
         begin
@@ -580,16 +581,20 @@ begin
             -- ===== Format Error handler at $1300 =====
             -- Read the exception frame from the stack to verify SR value
             -- Format $0 frame layout at (A7): SR(16) | PC(32) | FmtVec(16)
-            -- Also save A7 for debug (stack pointer check)
+            -- Also save A7 for debug (stack pointer check) and the stacked PC.
             mem(16#1300#/2) := x"3017";                                                            -- MOVE.W (A7),D0  -- read frame SR
             mem(16#1302#/2) := x"33C0"; mem(16#1304#/2) := x"0000"; mem(16#1306#/2) := x"3000";  -- MOVE.W D0,($3000).L
-            mem(16#1308#/2) := x"23CF"; mem(16#130A#/2) := x"0000"; mem(16#130C#/2) := x"3002";  -- MOVE.L A7,($3002).L
-            mem(16#130E#/2) := x"4E72"; mem(16#1310#/2) := x"2700";                               -- STOP #$2700
+            mem(16#1308#/2) := x"222F"; mem(16#130A#/2) := x"0002";                               -- MOVE.L 2(A7),D1 -- read frame PC
+            mem(16#130C#/2) := x"23C1"; mem(16#130E#/2) := x"0000"; mem(16#1310#/2) := x"3006";  -- MOVE.L D1,($3006).L
+            mem(16#1312#/2) := x"23CF"; mem(16#1314#/2) := x"0000"; mem(16#1316#/2) := x"3002";  -- MOVE.L A7,($3002).L
+            mem(16#1318#/2) := x"4E72"; mem(16#131A#/2) := x"2700";                               -- STOP #$2700
 
             -- Clear verification area
             mem(16#3000#/2) := x"DEAD";
             mem(16#3002#/2) := x"DEAD";
             mem(16#3004#/2) := x"DEAD";
+            mem(16#3006#/2) := x"DEAD";
+            mem(16#3008#/2) := x"DEAD";
 
             -- ===== Execute =====
             nReset <= '0';
@@ -599,8 +604,8 @@ begin
             reached_stop := false;
             for i in 0 to 30000 loop
                 wait until rising_edge(clk);
-                -- Detect STOP at $130E
-                if addr_out(15 downto 0) = x"130E" then
+                -- Detect STOP at $1318
+                if addr_out(15 downto 0) = x"1318" then
                     reached_stop := true;
                     for j in 0 to 100 loop
                         wait until rising_edge(clk);
@@ -628,10 +633,12 @@ begin
             frame_sr := mem(16#3000#/2);
             sp_val_hi := mem(16#3002#/2);
             sp_val_lo := mem(16#3004#/2);
+            frame_pc := mem(16#3006#/2) & mem(16#3008#/2);
 
             report "  DEBUG: frame_sr=$" & integer'image(to_integer(unsigned(frame_sr))) &
                    " A7=$" & integer'image(to_integer(unsigned(sp_val_hi))) &
-                   ":" & integer'image(to_integer(unsigned(sp_val_lo))) severity note;
+                   ":" & integer'image(to_integer(unsigned(sp_val_lo))) &
+                   " PC=$" & integer'image(to_integer(unsigned(frame_pc))) severity note;
             -- Raw memory dump of stack area for debug
             report "  RAW MEM: $07C0=" & integer'image(to_integer(unsigned(mem(16#07C0#/2)))) &
                    " $07C2=" & integer'image(to_integer(unsigned(mem(16#07C2#/2)))) &
@@ -647,6 +654,12 @@ begin
                 if frame_sr = x"2100" then
                     report "  (Got $2100 = SR from invalid frame -- should not be used)" severity error;
                 end if;
+                local_fail := true;
+            end if;
+            if frame_pc /= x"00001014" then
+                report "  FAIL: Format Error frame PC = $" &
+                       integer'image(to_integer(unsigned(frame_pc))) &
+                       ", expected $00001014 (faulting RTE instruction)" severity error;
                 local_fail := true;
             end if;
 

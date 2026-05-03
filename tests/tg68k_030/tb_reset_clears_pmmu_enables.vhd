@@ -1,9 +1,10 @@
 -- tb_reset_clears_pmmu_enables.vhd
--- Verifies that the RESET instruction preserves MC68030 PMMU enable bits.
+-- Verifies that the RESET instruction preserves PMMU enable bits in this
+-- board integration.
 --
--- Expected architectural behavior:
---   RESET asserts external reset only.
---   TC/TT0/TT1 remain intact until a real CPU reset.
+-- The core-local PMMU reset pulse is intentionally not driven by the RESET
+-- instruction here because the board-level reset/autoconfig path relies on
+-- the ROM RESET; JMP (A0) sequence not disturbing active PMMU state.
 
 library ieee;
 use ieee.std_logic_1164.all;

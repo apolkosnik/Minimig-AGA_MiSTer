@@ -47,6 +47,7 @@ architecture behavior of tb_ttr_tc_disabled is
     signal req           : std_logic := '0';
     signal is_insn       : std_logic := '0';
     signal rw            : std_logic := '1';
+    signal rmw           : std_logic := '0';
     signal fc            : std_logic_vector(2 downto 0) := (others => '0');
     signal addr_log      : std_logic_vector(31 downto 0) := (others => '0');
     signal addr_phys     : std_logic_vector(31 downto 0);
@@ -102,6 +103,7 @@ architecture behavior of tb_ttr_tc_disabled is
     constant REG_TC           : std_logic_vector(4 downto 0) := "10000";
     constant TTR_ALL_ANY      : std_logic_vector(31 downto 0) := x"00FF8307";
     constant TTR_ALL_CI       : std_logic_vector(31 downto 0) := x"00FF8707";
+    constant TTR_ALL_READ_CI  : std_logic_vector(31 downto 0) := x"00FF8607";
     constant TTR_LOW16M_DATA  : std_logic_vector(31 downto 0) := x"00008514";
     constant TEST_ADDR        : std_logic_vector(31 downto 0) := x"01000000";
     constant CHIP_BF_ADDR     : std_logic_vector(31 downto 0) := x"00BFD000";
@@ -159,6 +161,7 @@ begin
             req => req,
             is_insn => is_insn,
             rw => rw,
+            rmw => rmw,
             fc => fc,
             addr_log => addr_log,
             addr_phys => addr_phys,
@@ -220,6 +223,7 @@ begin
             addr_log <= addr_v;
             fc <= fc_v;
             rw <= '1';
+            rmw <= '0';
             is_insn <= is_insn_v;
             req <= '1';
             wait for 1 ns;
@@ -248,6 +252,7 @@ begin
         addr_log <= TEST_ADDR;
         fc <= "101";
         rw <= '1';
+        rmw <= '0';
         is_insn <= '0';
         req <= '1';
         wait for 1 ns;
@@ -277,6 +282,7 @@ begin
         addr_log <= TEST_ADDR;
         fc <= "101";
         rw <= '1';
+        rmw <= '0';
         is_insn <= '0';
         req <= '1';
         wait for 1 ns;
@@ -297,6 +303,7 @@ begin
         addr_log <= TEST_ADDR;
         fc <= "110";
         rw <= '1';
+        rmw <= '0';
         is_insn <= '1';
         req <= '1';
         wait for 1 ns;
@@ -337,6 +344,7 @@ begin
         addr_log <= TEST_ADDR;
         fc <= "101";
         rw <= '1';
+        rmw <= '0';
         is_insn <= '0';
         req <= '1';
         wait for 1 ns;
@@ -368,6 +376,55 @@ begin
                    & " mmusr=$" & slv_to_hex(debug_mmusr) severity error;
             fail_count := fail_count + 1;
         end if;
+
+        -- RMW cycles are transparent only when the TTR RWM bit is set.  With
+        -- RWM=0 this read-only TTR should match a plain read, but not a TAS/CAS
+        -- read-modify-write sequence.
+        write_reg(reg_sel, reg_wdat, reg_part, reg_we, REG_TT0, TTR_ALL_READ_CI);
+        write_reg(reg_sel, reg_wdat, reg_part, reg_we, REG_TT1, x"00000000");
+        write_reg(reg_sel, reg_wdat, reg_part, reg_we, REG_TC, x"00000000");
+        wait_cycles(2);
+
+        addr_log <= TEST_ADDR;
+        fc <= "101";
+        rw <= '1';
+        rmw <= '0';
+        is_insn <= '0';
+        req <= '1';
+        wait for 1 ns;
+        if addr_phys = TEST_ADDR and cache_inhibit = '1' and fault = '0' then
+            report "PASS: RWM=0 read-only TTR matches plain read" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: RWM=0 read-only TTR missed plain read"
+                   & " addr_phys=$" & slv_to_hex(addr_phys)
+                   & " ci=" & std_logic'image(cache_inhibit)
+                   & " fault=" & std_logic'image(fault) severity error;
+            fail_count := fail_count + 1;
+        end if;
+        req <= '0';
+        wait until rising_edge(clk);
+
+        addr_log <= TEST_ADDR;
+        fc <= "101";
+        rw <= '1';
+        rmw <= '1';
+        is_insn <= '0';
+        req <= '1';
+        wait for 1 ns;
+        if addr_phys = TEST_ADDR and cache_inhibit = '0' and fault = '0' then
+            report "PASS: RMW bypasses RWM=0 TTR" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: RMW incorrectly matched RWM=0 TTR"
+                   & " addr_phys=$" & slv_to_hex(addr_phys)
+                   & " ci=" & std_logic'image(cache_inhibit)
+                   & " fault=" & std_logic'image(fault) severity error;
+            fail_count := fail_count + 1;
+        end if;
+        req <= '0';
+        rmw <= '0';
+        wait until rising_edge(clk);
 
         -- Restore the single-TTR setup expected by the remaining low-16MB checks.
         write_reg(reg_sel, reg_wdat, reg_part, reg_we, REG_TT1, x"00000000");

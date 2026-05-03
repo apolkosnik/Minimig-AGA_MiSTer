@@ -205,6 +205,7 @@ begin
 
     test_process: process
         variable timeout : integer;
+        variable stable : integer;
         procedure wait_cycles(n : integer) is
         begin
             for i in 1 to n loop
@@ -770,6 +771,73 @@ begin
         -- Verify preloaded entries work
         translate_and_check(x"00002000", false);
         translate_and_check(x"00003000", false);
+
+        report "Testing PLOAD while a previous table walk is busy...";
+        do_pflusha;
+        mem_stall_cycles <= 6;
+        wait_cycles(1);
+
+        addr_log <= x"00001000";
+        fc <= "101";
+        rw <= '1';
+        req <= '1';
+        wait_cycles(1);
+
+        timeout := 0;
+        while busy = '0' and timeout < 20 loop
+            wait_cycles(1);
+            timeout := timeout + 1;
+        end loop;
+
+        if timeout >= 20 then
+            report "FAIL: Timed out waiting for stalled walker before busy PLOAD" severity error;
+            test_fail <= test_fail + 1;
+            req <= '0';
+            mem_stall_cycles <= 0;
+            wait_cycles(2);
+        else
+            pmmu_brief <= x"2205";  -- PLOADR FC=5
+            pmmu_addr <= x"00003000";
+            pmmu_fc <= "101";
+            pload_req <= '1';
+            wait_cycles(1);
+            pload_req <= '0';
+            req <= '0';
+            mem_stall_cycles <= 0;
+
+            timeout := 0;
+            while busy = '1' and timeout < 160 loop
+                wait_cycles(1);
+                timeout := timeout + 1;
+            end loop;
+
+            stable := 0;
+            while stable < 8 and timeout < 220 loop
+                wait_cycles(1);
+                timeout := timeout + 1;
+                if busy = '0' and mem_req = '0' then
+                    stable := stable + 1;
+                else
+                    stable := 0;
+                end if;
+            end loop;
+
+            wait_cycles(2);
+            if timeout >= 220 then
+                report "FAIL: Timed out waiting for busy-time PLOAD completion" severity error;
+                test_fail <= test_fail + 1;
+            else
+                clear_mem_read_count;
+                translate_and_check(x"00003000", false);
+                if mem_read_count = 0 then
+                    report "  Busy-time PLOAD populated the ATC entry";
+                    test_pass <= test_pass + 1;
+                else
+                    report "  Busy-time PLOAD was lost; translation performed a later table walk" severity error;
+                    test_fail <= test_fail + 1;
+                end if;
+            end if;
+        end if;
 
         -- ============================================
         -- SECTION 6: Sequential Operations
