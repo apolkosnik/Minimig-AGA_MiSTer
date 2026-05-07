@@ -841,6 +841,22 @@ begin
     probe("X FCL=1 FC=sup-prog @ $12345678", x"12345678", "110", '1',
           x"42345678", false);
 
+    -- PHASE X2: WinUAE parity for root-pointer early termination with FCL=1.
+    -- In cpummu30.cpp, early-termination limit checks are skipped when the
+    -- descriptor is the root pointer itself and TC.FCL is enabled:
+    --   if (descr_num || !(tc_030&TC_ENABLE_FCL)) { limit check ... }
+    -- The upper limit below is intentionally zero.  Without the WinUAE guard,
+    -- FC=101 would be treated as index 5 and would fault with L/I instead of
+    -- translating through the root-pointer page descriptor.
+    pflusha;
+    write_reg("10011", x"00000001", '1');   -- CRP_H: root DT=01, upper limit 0
+    write_reg("10011", x"10000000", '0');   -- CRP_L: long page descriptor TA
+    write_reg("10000", x"81C04880", '0');   -- TC with FCL=1
+    wait for 100 ns;
+    pflusha;
+    probe("X2 FCL root early-term skips limit", x"12345678", "101", '1',
+          x"22345678", false);
+
     ---------------------------------------------------------------
     -- PHASE U: verify the walker actually writes U=1 (bit 3) back into
     -- descriptors that had U=0 before the walk.  Matches WinUAE behavior
