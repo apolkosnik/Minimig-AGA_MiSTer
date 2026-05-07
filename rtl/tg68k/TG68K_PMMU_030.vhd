@@ -765,8 +765,8 @@ architecture rtl of TG68K_PMMU_030 is
   end function;
   -- Early-termination limit checking uses the NEXT logical-address index field.
   -- Root-pointer DT=01 is special:
-  --   * the MC68030 UM requires the limit check regardless of FCL
-  --     (WinUAE skips the FCL=1 case, but this path follows the manual)
+  --   * WinUAE skips the root-pointer limit check when TC.FCL is set because
+  --     there is no memory-resident FC-table descriptor to apply the limit to.
   function early_term_limit_applies(
     is_root_pointer : std_logic;
     fcl             : std_logic;
@@ -775,6 +775,9 @@ architecture rtl of TG68K_PMMU_030 is
   ) return boolean is
   begin
     if is_root_pointer = '1' then
+      if fcl = '1' then
+        return false;
+      end if;
       return idx_bits(0) /= 0;
     end if;
     return not is_final_table_level(fcl, level, idx_bits);
