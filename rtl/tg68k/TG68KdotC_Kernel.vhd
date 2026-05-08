@@ -7574,7 +7574,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- BUG #377 FIX: Use pmmu_opcode (latched F-line opcode) instead of opcode!
                         -- By pmove_decode time, opcode may have been overwritten by prefetch.
                         -- fline_opcode_latch preserves the original F-line opcode EA mode bits.
-                        ELSIF ((pmmu_opcode(5 downto 3)="000" OR pmmu_opcode(5 downto 3)="001") AND
+                        ELSIF (pmmu_opcode(5 downto 3)="001" AND
                                (pmmu_brief(14 downto 10) = "10010" OR pmmu_brief(14 downto 10) = "10011")) OR
                               (pmmu_brief(9) = '1' and pmmu_opcode(5 downto 3)="111" and pmmu_opcode(2)='1') OR
                               (pmmu_brief(9) = '1' and pmmu_opcode(5 downto 3)="111" and pmmu_opcode(2 downto 1)="01") THEN
