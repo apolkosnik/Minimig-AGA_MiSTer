@@ -203,6 +203,9 @@ begin
             for i in 4 to (frame_size/2 - 1) loop
                 mem(stack_base/2 + i) := x"DEAD";
             end loop;
+            if format_code = "1011" then
+                mem(stack_base/2 + 16#36#/2) := x"0EAD";  -- Format $B internal state word used by MMU RTE replay
+            end if;
 
             -- MC68030 Format $1 (throwaway): place a second Format $0 frame after it
             -- RTE chains from Format $1 to a second frame on the same stack (M=0 in SR)
@@ -1933,6 +1936,9 @@ begin
         -- $A605 = Format A (bits 15:12 = 1010), vector offset $605
         -- Format A is VALID for MC68030 (short bus fault frame, 16-word)
         test_rte_format_word(x"A605", "Format word $A605 (Format A)", true);
+        -- $B605 = Format B (long bus fault frame). WinUAE restores SP+$36 as
+        -- MMU internal state, so compatibility requires accepting this frame.
+        test_rte_format_word(x"B605", "Format word $B605 (Format B)", true);
         -- Targeted regression: invalid $4205 frame with SR=$0000 must not drop S or corrupt MSP
         test_rte_format4205_s_to_u_msp_preserve;
         -- Format Error frame must contain pre-RTE SR, not frame SR

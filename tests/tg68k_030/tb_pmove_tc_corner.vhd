@@ -322,15 +322,13 @@ begin
     report_test("E=1, SRE=1, FCL=1", reg_rdat(31) = '1' and reg_rdat(25) = '1' and reg_rdat(24) = '1');
 
     -- TEST 9: Reserved bits behavior (bits 30-26)
-    -- Note: Current implementation does not mask reserved bits (stored as-is)
-    -- MC68030 spec says reserved bits should read as 0, but this is not enforced
-    write(l, string'("TEST 9: Reserved Bits Stored"));
+    -- MC68030 TC reserved bits read back as zero.
+    write(l, string'("TEST 9: Reserved Bits Masked"));
     writeline(output, l);
     -- Write all 1s but with valid PS=12 config
     pmove_write_tc(x"FFC44444");  -- All reserved bits set, PS=12, valid field sum
     pmove_read_tc;
-    -- Reserved bits are stored as-is (implementation choice)
-    report_test("Reserved bits stored as-is", reg_rdat = x"FFC44444");
+    report_test("Reserved bits masked to zero", reg_rdat = x"83C44444");
 
     -- TEST 10: IS field verification
     write(l, string'("TEST 10: IS Field (Initial Shift)"));

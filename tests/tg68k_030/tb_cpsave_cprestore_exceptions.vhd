@@ -1,7 +1,7 @@
 -- tb_cpsave_cprestore_exceptions.vhd
 -- Maintained regression for the old BUG302 cpSAVE/cpRESTORE side patch:
 -- valid user-mode cpSAVE/cpRESTORE must raise vector 8, while invalid-EA
--- forms remain F-line exceptions.
+-- and generic missing-coprocessor F-line forms remain vector 11.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -114,7 +114,13 @@ begin
     end process;
 
     test: process
-        procedure init_case(fault_opcode : std_logic_vector(15 downto 0)) is
+        procedure init_case(
+            fault_opcode : std_logic_vector(15 downto 0);
+            fault_ext    : std_logic_vector(15 downto 0);
+            has_ext      : boolean;
+            user_mode    : boolean
+        ) is
+            variable cont_addr : integer;
         begin
             for i in 0 to 8191 loop
                 mem(i) := x"4E71";
@@ -134,25 +140,37 @@ begin
             mem(22) := x"0000";
             mem(23) := x"1180";
 
-            -- Common user-mode program:
+            -- Common program:
             --   MOVEA.L #$1400,A0
-            --   MOVE    #$0000,SR
+            --   MOVE    #$0000,SR     ; user-mode cases only
             --   <fault opcode>
+            --   <fault extension>     ; optional
             --   MOVEQ   #$7E,D0
             --   MOVE.W  D0,($130C).L
             --   STOP    #$2700
             mem(16#1000# / 2) := x"207C";
             mem(16#1002# / 2) := x"0000";
             mem(16#1004# / 2) := x"1400";
-            mem(16#1006# / 2) := x"46FC";
-            mem(16#1008# / 2) := x"0000";
+            if user_mode then
+                mem(16#1006# / 2) := x"46FC";
+                mem(16#1008# / 2) := x"0000";
+            else
+                mem(16#1006# / 2) := x"4E71";
+                mem(16#1008# / 2) := x"4E71";
+            end if;
             mem(16#100A# / 2) := fault_opcode;
-            mem(16#100C# / 2) := x"707E";
-            mem(16#100E# / 2) := x"33C0";
-            mem(16#1010# / 2) := x"0000";
-            mem(16#1012# / 2) := x"130C";
-            mem(16#1014# / 2) := x"4E72";
-            mem(16#1016# / 2) := x"2700";
+            if has_ext then
+                mem(16#100C# / 2) := fault_ext;
+                cont_addr := 16#100E#;
+            else
+                cont_addr := 16#100C#;
+            end if;
+            mem(cont_addr / 2) := x"707E";
+            mem((cont_addr + 2) / 2) := x"33C0";
+            mem((cont_addr + 4) / 2) := x"0000";
+            mem((cont_addr + 6) / 2) := x"130C";
+            mem((cont_addr + 8) / 2) := x"4E72";
+            mem((cont_addr + 10) / 2) := x"2700";
 
             -- Privilege handler at $1100:
             --   save stacked PC, format/vector, and A0; write marker $0008; STOP
@@ -202,6 +220,9 @@ begin
         procedure run_case(
             constant case_name        : in string;
             constant fault_opcode     : in std_logic_vector(15 downto 0);
+            constant fault_ext        : in std_logic_vector(15 downto 0);
+            constant has_ext          : in boolean;
+            constant user_mode        : in boolean;
             constant expected_marker  : in std_logic_vector(15 downto 0);
             constant expected_vector  : in std_logic_vector(15 downto 0)
         ) is
@@ -211,7 +232,7 @@ begin
             variable format_vector  : std_logic_vector(15 downto 0);
             variable saved_a0       : std_logic_vector(31 downto 0);
         begin
-            init_case(fault_opcode);
+            init_case(fault_opcode, fault_ext, has_ext, user_mode);
             report "=== " & case_name & " ===" severity note;
 
             nReset <= '0';
@@ -253,29 +274,37 @@ begin
             end if;
         end procedure;
     begin
-        run_case("cpSAVE -(A0) in user mode", x"F320", x"0008", x"0020");
-        nReset <= '0';
-        wait until rising_edge(clk);
-        wait until rising_edge(clk);
+        run_case("cpSAVE -(A0) in user mode", x"F320", x"4E71", false, true, x"0008", x"0020");
+		nReset <= '0';
+		wait until rising_edge(clk);
+		wait until rising_edge(clk);
 
-        run_case("cpSAVE (A0)+ in user mode", x"F318", x"000B", x"002C");
-        nReset <= '0';
-        wait until rising_edge(clk);
-        wait until rising_edge(clk);
+        run_case("cpSAVE (A0)+ in user mode", x"F318", x"4E71", false, true, x"000B", x"002C");
+		nReset <= '0';
+		wait until rising_edge(clk);
+		wait until rising_edge(clk);
 
-        run_case("cpRESTORE (A0)+ in user mode", x"F358", x"0008", x"0020");
-        nReset <= '0';
-        wait until rising_edge(clk);
-        wait until rising_edge(clk);
+        run_case("cpRESTORE (A0)+ in user mode", x"F358", x"4E71", false, true, x"0008", x"0020");
+		nReset <= '0';
+		wait until rising_edge(clk);
+		wait until rising_edge(clk);
 
-        run_case("cpRESTORE -(A0) in user mode", x"F360", x"000B", x"002C");
-        nReset <= '0';
-        wait until rising_edge(clk);
-        wait until rising_edge(clk);
+        run_case("cpRESTORE -(A0) in user mode", x"F360", x"4E71", false, true, x"000B", x"002C");
+		nReset <= '0';
+		wait until rising_edge(clk);
+		wait until rising_edge(clk);
 
-        run_case("unimplemented CpID0 F-line in user mode", x"F180", x"0008", x"0020");
+        run_case("unimplemented CpID0 F-line in user mode", x"F180", x"4E71", false, true, x"000B", x"002C");
+		nReset <= '0';
+		wait until rising_edge(clk);
+		wait until rising_edge(clk);
 
-        test_done <= true;
+        run_case("unimplemented CpID0 F-line in supervisor mode", x"F180", x"4E71", false, false, x"000B", x"002C");
+		nReset <= '0';
+		wait until rising_edge(clk);
+		wait until rising_edge(clk);
+
+		test_done <= true;
         wait;
     end process;
 end architecture;

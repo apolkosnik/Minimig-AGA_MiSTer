@@ -271,8 +271,20 @@ proc show_excf {bin} {
         [bin_to_hex [bit_slice $bin 7 0]]]
 }
 
-proc show_tcwr {bin} {
-    puts "== TCWR =="
+proc decode_pmmu_reg {sel} {
+    switch -- $sel {
+        16 { return "TC" }
+        17 { return "DRP" }
+        18 { return "SRP" }
+        19 { return "CRP" }
+        24 { return "MMUSR" }
+        25 { return "URP" }
+        26 { return "SRP_ALT" }
+        default { return "reg" }
+    }
+}
+
+proc show_tcwr_old {bin} {
     set seen [bin_to_uint [bit_slice $bin 411 411]]
     set count [bin_to_uint [bit_slice $bin 410 403]]
     set last_value [bin_to_hex [bit_slice $bin 402 371]]
@@ -307,12 +319,122 @@ proc show_tcwr {bin} {
         $disable_seen $disable_value $disable_pc $disable_opcode $disable_brief $disable_flags]
 }
 
+proc show_tcwr {bin} {
+    puts "== TCWR =="
+    if {[string length $bin] < 511} {
+        show_tcwr_old $bin
+        return
+    }
+
+    set seen [bin_to_uint [bit_slice $bin 510 510]]
+    set count [bin_to_uint [bit_slice $bin 509 502]]
+    set last_sel [bin_to_uint [bit_slice $bin 501 497]]
+    set last_part [bin_to_uint [bit_slice $bin 496 496]]
+    set last_value [bin_to_hex [bit_slice $bin 495 464]]
+    set last_pc [bin_to_hex [bit_slice $bin 463 432]]
+    set last_exe_pc [bin_to_hex [bit_slice $bin 431 400]]
+    set last_opcode [bin_to_hex [bit_slice $bin 399 384]]
+    set last_brief [bin_to_hex [bit_slice $bin 383 368]]
+    set last_flags [bin_to_hex [bit_slice $bin 367 360]]
+    set last_micro [bin_to_uint [bit_slice $bin 359 352]]
+    set last_next [bin_to_uint [bit_slice $bin 351 344]]
+    set last_memaddr [bin_to_hex [bit_slice $bin 343 312]]
+    set last_a7 [bin_to_hex [bit_slice $bin 311 280]]
+    set enable_seen [bin_to_uint [bit_slice $bin 279 279]]
+    set enable_value [bin_to_hex [bit_slice $bin 278 247]]
+    set enable_pc [bin_to_hex [bit_slice $bin 246 215]]
+    set enable_opcode [bin_to_hex [bit_slice $bin 214 199]]
+    set enable_brief [bin_to_hex [bit_slice $bin 198 183]]
+    set disable_seen [bin_to_uint [bit_slice $bin 182 182]]
+    set disable_value [bin_to_hex [bit_slice $bin 181 150]]
+    set disable_flags [bin_to_hex [bit_slice $bin 149 142]]
+    set crp_hi_seen [bin_to_uint [bit_slice $bin 141 141]]
+    set crp_lo_seen [bin_to_uint [bit_slice $bin 140 140]]
+    set srp_hi_seen [bin_to_uint [bit_slice $bin 139 139]]
+    set srp_lo_seen [bin_to_uint [bit_slice $bin 138 138]]
+    set crp_hi_value [bin_to_hex [bit_slice $bin 137 106]]
+    set crp_lo_value [bin_to_hex [bit_slice $bin 105 74]]
+    set srp_hi_value [bin_to_hex [bit_slice $bin 73 42]]
+    set srp_lo_value [bin_to_hex [bit_slice $bin 41 10]]
+
+    puts [format "seen=%u count=%u last=%s(%u) part=%u value=%08s pc=%08s exe_pc=%08s opcode=%04s brief=%04s flags=%02s" \
+        $seen $count [decode_pmmu_reg $last_sel] $last_sel $last_part $last_value \
+        $last_pc $last_exe_pc $last_opcode $last_brief $last_flags]
+    puts [format "      micro=%u next=%u memaddr=%08s a7=%08s" \
+        $last_micro $last_next $last_memaddr $last_a7]
+    puts [format "tc_enable: seen=%u value=%08s pc=%08s opcode=%04s brief=%04s" \
+        $enable_seen $enable_value $enable_pc $enable_opcode $enable_brief]
+    puts [format "tc_disable_after_enable: seen=%u value=%08s flags=%02s" \
+        $disable_seen $disable_value $disable_flags]
+    puts [format "root_writes: CRP_H seen=%u value=%08s CRP_L seen=%u value=%08s" \
+        $crp_hi_seen $crp_hi_value $crp_lo_seen $crp_lo_value]
+    puts [format "             SRP_H seen=%u value=%08s SRP_L seen=%u value=%08s" \
+        $srp_hi_seen $srp_hi_value $srp_lo_seen $srp_lo_value]
+}
+
 proc show_pmwr_write {idx addr data} {
     puts [format "w%u: addr=%08s data=%08s" $idx $addr $data]
 }
 
+proc walker_state_name {state} {
+    switch -- $state {
+        0 { return "IDLE" }
+        1 { return "START" }
+        2 { return "READ_LOW" }
+        3 { return "WAIT_LOW" }
+        4 { return "READ_HIGH" }
+        5 { return "WAIT_HIGH" }
+        6 { return "DONE" }
+        7 { return "WRITE_LOW" }
+        8 { return "WAIT_WR_LOW" }
+        9 { return "WRITE_HIGH" }
+        10 { return "WAIT_WR_HIGH" }
+        11 { return "RAM_GAP" }
+        12 { return "WRITE_RAM_GAP" }
+        13 { return "READ_PRE_GAP" }
+        14 { return "WRITE_PRE_GAP" }
+        default { return "UNKNOWN" }
+    }
+}
+
 proc show_pmwr {bin} {
     puts "== PMWR =="
+    if {[string length $bin] >= 509} {
+        set timeout_seen [bin_to_uint [bit_slice $bin 508 508]]
+        set timeout_state [bin_to_uint [bit_slice $bin 507 504]]
+        set timeout_cnt [bin_to_uint [bit_slice $bin 503 492]]
+        set timeout_addr [bin_to_hex [bit_slice $bin 491 460]]
+        set timeout_ramaddr [bin_to_hex [bit_slice $bin 459 432]]
+        set timeout_flags [bin_to_hex [bit_slice $bin 431 416]]
+        set write_ack_count [bin_to_uint [bit_slice $bin 415 408]]
+        set write_berr_count [bin_to_uint [bit_slice $bin 407 404]]
+        set t_mem_ready [bin_to_uint [bit_slice $bin 431 431]]
+        set t_ramready [bin_to_uint [bit_slice $bin 430 430]]
+        set t_chipready [bin_to_uint [bit_slice $bin 429 429]]
+        set t_fastchip_ready [bin_to_uint [bit_slice $bin 428 428]]
+        set t_stale_ram [bin_to_uint [bit_slice $bin 427 427]]
+        set t_walker_fast [bin_to_uint [bit_slice $bin 426 426]]
+        set t_walker_chip [bin_to_uint [bit_slice $bin 425 425]]
+        set t_z3ram0 [bin_to_uint [bit_slice $bin 424 424]]
+        set t_z3ram1 [bin_to_uint [bit_slice $bin 423 423]]
+        set t_z2ram [bin_to_uint [bit_slice $bin 422 422]]
+        set t_zram [bin_to_uint [bit_slice $bin 421 421]]
+        set t_read_arm [bin_to_uint [bit_slice $bin 420 420]]
+        set t_write_arm [bin_to_uint [bit_slice $bin 419 419]]
+        set t_req [bin_to_uint [bit_slice $bin 418 418]]
+        set t_we [bin_to_uint [bit_slice $bin 417 417]]
+        set t_ramsel [bin_to_uint [bit_slice $bin 416 416]]
+
+        puts [format "timeout_detail: seen=%u state=%u(%s) cnt=%u addr=%08s ramaddr=%07s flags=%04s write_ack_count=%u write_berr_count=%u" \
+            $timeout_seen $timeout_state [walker_state_name $timeout_state] $timeout_cnt \
+            $timeout_addr $timeout_ramaddr $timeout_flags $write_ack_count $write_berr_count]
+        puts [format "timeout_flags: mem_ready=%u ramready=%u chipready=%u fastchip_ready=%u stale_ram=%u walker_fast=%u walker_chip=%u z3ram0=%u z3ram1=%u z2ram=%u zram=%u read_arm=%u write_arm=%u req=%u we=%u ramsel=%u" \
+            $t_mem_ready $t_ramready $t_chipready $t_fastchip_ready $t_stale_ram \
+            $t_walker_fast $t_walker_chip $t_z3ram0 $t_z3ram1 $t_z2ram $t_zram \
+            $t_read_arm $t_write_arm $t_req $t_we $t_ramsel]
+    } else {
+        puts [format "timeout_detail: unavailable, PMWR probe width is %u bits" [string length $bin]]
+    }
     set seen [bin_to_uint [bit_slice $bin 403 403]]
     set count [bin_to_uint [bit_slice $bin 402 387]]
     set last_addr [bin_to_hex [bit_slice $bin 386 355]]
@@ -341,6 +463,56 @@ proc show_pmwr {bin} {
         $hit_400a $hit_400a_addr $hit_400a_data]
 }
 
+proc show_rtwr {bin} {
+    puts "== RTWR =="
+    if {[string length $bin] < 511} {
+        puts [format "root-table write detail unavailable, RTWR probe width is %u bits" [string length $bin]]
+        return
+    }
+
+    set page_seen [bin_to_uint [bit_slice $bin 510 510]]
+    set page_count [bin_to_uint [bit_slice $bin 509 494]]
+    set exact_seen [bin_to_uint [bit_slice $bin 493 493]]
+    set exact_hits [bin_to_uint [bit_slice $bin 492 489]]
+    set exact_hi [bin_to_hex [bit_slice $bin 488 473]]
+    set exact_lo [bin_to_hex [bit_slice $bin 472 457]]
+    set exact_addr [bin_to_hex [bit_slice $bin 456 425]]
+    set exact_pc [bin_to_hex [bit_slice $bin 424 393]]
+    set exact_micro [bin_to_uint [bit_slice $bin 392 385]]
+    set fc6_seen [bin_to_uint [bit_slice $bin 384 384]]
+    set fc6_hits [bin_to_uint [bit_slice $bin 383 380]]
+    set fc6_hi [bin_to_hex [bit_slice $bin 379 364]]
+    set fc6_lo [bin_to_hex [bit_slice $bin 363 348]]
+    set fc6_addr_last [bin_to_hex [bit_slice $bin 347 316]]
+    set fc6_pc [bin_to_hex [bit_slice $bin 315 284]]
+    set fc6_micro [bin_to_uint [bit_slice $bin 283 276]]
+    set crp_l [bin_to_hex [bit_slice $bin 275 244]]
+    set fc6_addr [bin_to_hex [bit_slice $bin 243 212]]
+    set last0_addr [bin_to_hex [bit_slice $bin 211 180]]
+    set last0_data [bin_to_hex [bit_slice $bin 179 164]]
+    set last1_addr [bin_to_hex [bit_slice $bin 163 132]]
+    set last1_data [bin_to_hex [bit_slice $bin 131 116]]
+    set last2_addr [bin_to_hex [bit_slice $bin 115 84]]
+    set last2_data [bin_to_hex [bit_slice $bin 83 68]]
+    set last3_addr [bin_to_hex [bit_slice $bin 67 36]]
+    set last3_data [bin_to_hex [bit_slice $bin 35 20]]
+    set last_flags [bin_to_hex [bit_slice $bin 19 12]]
+    set last_micro [bin_to_uint [bit_slice $bin 11 4]]
+    set last_uds [bin_to_uint [bit_slice $bin 3 3]]
+    set last_lds [bin_to_uint [bit_slice $bin 2 2]]
+    set last_ready [bin_to_uint [bit_slice $bin 1 1]]
+    set last_mmu [bin_to_uint [bit_slice $bin 0 0]]
+
+    puts [format "page_40002xxx: seen=%u count=%u newest_flags=%02s newest_micro=%u uds=%u lds=%u ramready=%u mmu_e=%u" \
+        $page_seen $page_count $last_flags $last_micro $last_uds $last_lds $last_ready $last_mmu]
+    puts [format "exact_400022e8: seen=%u hits=%u data=%04s%04s last_addr=%08s pc=%08s micro=%u" \
+        $exact_seen $exact_hits $exact_hi $exact_lo $exact_addr $exact_pc $exact_micro]
+    puts [format "crp_fc6_slot:  crp_l=%08s slot=%08s seen=%u hits=%u data=%04s%04s last_addr=%08s pc=%08s micro=%u" \
+        $crp_l $fc6_addr $fc6_seen $fc6_hits $fc6_hi $fc6_lo $fc6_addr_last $fc6_pc $fc6_micro]
+    puts [format "last page writes: 0=%08s:%04s 1=%08s:%04s 2=%08s:%04s 3=%08s:%04s" \
+        $last0_addr $last0_data $last1_addr $last1_data $last2_addr $last2_data $last3_addr $last3_data]
+}
+
 set clear_cpus 0
 foreach arg $::argv {
     switch -- $arg {
@@ -367,10 +539,15 @@ set pmwr_idx -1
 if {[llength $pmwr_inst] != 0} {
     set pmwr_idx [lindex $pmwr_inst 0]
 }
+set rtwr_inst [find_instance_optional $hw_name $dev_name "RTWR"]
+set rtwr_idx -1
+if {[llength $rtwr_inst] != 0} {
+    set rtwr_idx [lindex $rtwr_inst 0]
+}
 
 puts "hardware: $hw_name"
 puts "device:   $dev_name"
-puts "instances: PMMU=$pmmu_idx PMM2=$pmm2_idx EXCF=$excf_idx CPUS=$cpus_idx REGS=$regs_idx TCWR=$tcwr_idx PMWR=$pmwr_idx"
+puts "instances: PMMU=$pmmu_idx PMM2=$pmm2_idx EXCF=$excf_idx CPUS=$cpus_idx REGS=$regs_idx TCWR=$tcwr_idx PMWR=$pmwr_idx RTWR=$rtwr_idx"
 
 start_insystem_source_probe -hardware_name $hw_name -device_name $dev_name
 if {$clear_cpus} {
@@ -398,6 +575,12 @@ if {$clear_cpus} {
         write_source_data -instance_index $pmwr_idx -value 0 -value_in_hex
         after 20
     }
+    if {$rtwr_idx >= 0} {
+        write_source_data -instance_index $rtwr_idx -value 1 -value_in_hex
+        after 20
+        write_source_data -instance_index $rtwr_idx -value 0 -value_in_hex
+        after 20
+    }
 }
 set cpus_bin [read_probe_data -instance_index $cpus_idx]
 set pmmu_bin [read_probe_data -instance_index $pmmu_idx]
@@ -409,6 +592,9 @@ if {$tcwr_idx >= 0} {
 }
 if {$pmwr_idx >= 0} {
     set pmwr_bin [read_probe_data -instance_index $pmwr_idx]
+}
+if {$rtwr_idx >= 0} {
+    set rtwr_bin [read_probe_data -instance_index $rtwr_idx]
 }
 end_insystem_source_probe
 
@@ -422,4 +608,7 @@ if {$tcwr_idx >= 0} {
 }
 if {$pmwr_idx >= 0} {
     show_pmwr $pmwr_bin
+}
+if {$rtwr_idx >= 0} {
+    show_rtwr $rtwr_bin
 }

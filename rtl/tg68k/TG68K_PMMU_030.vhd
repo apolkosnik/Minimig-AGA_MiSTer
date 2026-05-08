@@ -188,6 +188,8 @@ architecture rtl of TG68K_PMMU_030 is
   -- change address translation even when addr_log/fc/rw are unchanged.
   signal xlat_cfg_seq       : unsigned(7 downto 0) := (others => '0');
   signal translated_cfg_seq : unsigned(7 downto 0) := (others => '0');
+  signal xlat_cfg_seq_seen  : unsigned(7 downto 0) := (others => '0');
+  signal xlat_cfg_seq_walk_seen : unsigned(7 downto 0) := (others => '0');
   -- Translation result latches
   signal addr_phys_reg      : std_logic_vector(31 downto 0) := (others => '0');
   signal cache_inhibit_reg  : std_logic := '0';
@@ -1630,7 +1632,9 @@ begin
                    else '0' when tc_en = '0'
                    else '0' when mmudis = '1'  -- MC68030 UM 9.2.3
                    else write_protect_reg;
-  fault         <= '0' when fc = "111" else fault_reg;  -- CPU space never faults
+  fault         <= '0' when fc = "111" else
+                   fault_reg when translated_cfg_seq = xlat_cfg_seq else
+                   '0';  -- CPU space never faults; stale-context faults are ignored
   fault_status  <= fault_status_reg;
   fault_addr    <= fault_addr_reg;     -- BUG #415: Faulting logical address
   fault_fc      <= fault_fc_reg;       -- BUG #414: FC at fault time
@@ -1683,6 +1687,7 @@ begin
       walker_fault_ack <= '0';
       walker_completed_ack <= '0';
       walker_fault_ack_pending <= '0';
+      xlat_cfg_seq_seen <= (others => '0');
       mmusr_update_req <= '0';
       mmusr_update_value <= (others => '0');
       ptest_done <= '0';
@@ -1705,11 +1710,35 @@ begin
       if mmusr_update_ack = '1' then
         mmusr_update_req <= '0';
       end if;
+      -- A PMOVE to TC/CRP/SRP/TTx changes the translation context. Drop any
+      -- fault/completion bookkeeping left from the old context so it cannot be
+      -- replayed against the first access after MMU enable or root-pointer change.
+      if xlat_cfg_seq_seen /= xlat_cfg_seq then
+        xlat_cfg_seq_seen <= xlat_cfg_seq;
+        fault_reg <= '0';
+        fault_status_reg <= (others => '0');
+        fault_addr_reg <= (others => '0');
+        fault_fc_reg <= (others => '0');
+        fault_rw_reg <= '1';
+        fault_is_insn_reg <= '0';
+        translation_pending <= '0';
+        walk_req <= '0';
+        instr_walk_pending <= '0';
+        ptest_walk_pending <= '0';
+        ptest_walk_no_update <= '0';
+        pload_flush_pending <= '0';
+        -- The walker process aborts and clears its own fault/completion state
+        -- on the same context sequence change. Do not leave an acknowledge
+        -- asserted here: a stuck ack masks the next real walker fault, which
+        -- makes PTEST fault results disappear before MMUSR can be updated.
+        walker_fault_ack <= '0';
+        walker_fault_ack_pending <= '0';
+        walker_completed_ack <= '0';
       -- Clear faults at start of each new translation request (MC68030 behavior)
       -- Each translation request starts with clean fault state
       -- Faults are only set if the current translation fails
       -- Process translation requests first
-      if req = '1' then
+      elsif req = '1' then
         -- Hold the first latched fault only while the CPU is still presenting
         -- the same bus transfer. Longword accesses can advance addr_log to the
         -- second word (+2) while req remains high, but exception-entry stack
@@ -2535,6 +2564,7 @@ begin
     -- Pseudo-LRU ATC replacement
     variable replace_idx : integer range 0 to ATC_ENTRIES-1;
     variable found_invalid : boolean;
+    variable found_match : boolean;
     variable all_mru_set : boolean;
     -- Early termination offset calculation
     variable early_term_desc_addr : std_logic_vector(31 downto 0);
@@ -2589,6 +2619,7 @@ begin
       walk_limit_value <= (others => '0');
       walk_is_root_pointer <= '0';  -- Root pointer DT=01 flag
       walker_timeout_counter <= 0;  -- BUG #387: Reset timeout counter
+      xlat_cfg_seq_walk_seen <= (others => '0');
       ptr1_desc_addr_reg <= (others => '0');
       ptr1_desc_data_reg <= (others => '0');
       ptr2_desc_addr_reg <= (others => '0');
@@ -2598,43 +2629,60 @@ begin
       last_mem_rdat <= (others => '0');
       walk_page_from_indirect <= '0';
     elsif rising_edge(clk) then
-      if mem_ack = '1' then
-        last_mem_rdat <= mem_rdat;
-      end if;
-      -- BUG #387 FIX: Timeout mechanism to prevent walker deadlocks
-      -- Monitor mem_req without mem_ack and force fault after timeout
-      if wstate = W_IDLE then
-        walker_timeout_counter <= 0;  -- Reset counter when idle
-      elsif mem_req = '1' and mem_ack = '0' and mem_berr = '0' then
-        -- Waiting for memory response - increment timeout counter
-        if walker_timeout_counter < 1023 then
-          walker_timeout_counter <= walker_timeout_counter + 1;
-        end if;
-      elsif mem_ack = '1' or mem_berr = '1' then
-        -- Got response - reset timeout counter
+      if xlat_cfg_seq_walk_seen /= xlat_cfg_seq then
+        xlat_cfg_seq_walk_seen <= xlat_cfg_seq;
+        -- A register write changed the translation context. Any in-flight walk
+        -- was based on the old TC/root/TTR state, so abort it before it can fill
+        -- a stale ATC entry after the flush.
+        wstate <= W_IDLE;
+        mem_req <= '0';
+        mem_we <= '0';
+        mem_addr <= (others => '0');
+        mem_wdat <= (others => '0');
+        walk_fault <= '0';
+        walker_fault <= '0';
+        walker_fault_status <= (others => '0');
+        walker_completed <= '0';
         walker_timeout_counter <= 0;
-      end if;
-      -- Check for timeout condition BEFORE case statement to prevent override
-      if walker_timeout_counter >= WALKER_TIMEOUT_CYCLES and mem_req = '1' then
-        -- Timeout exceeded - force bus error fault and transition to W_FAULT
-        walk_fault <= '1';
-        walker_fault <= '1';
-        walker_fault_status <= encode_mmusr_fault(
-          bus_error => '1',                -- B bit: timeout is a bus error
-          limit_violation => '0',
-          supervisor_violation => '0',
-          write_protect => '0',
-          invalid => '1',                  -- No valid translation available
-          modified => '0',
-          transparent => '0',
-          level => std_logic_vector(to_unsigned(walk_level, 3))
-        );
-        mem_req <= '0';  -- Stop requesting memory
-        walker_timeout_counter <= 0;  -- Reset counter
-        wstate <= W_FAULT;  -- Transition to fault state (which will set walker_completed)
+        desc_update_needed <= '0';
       else
-        -- Normal walker state machine (only runs if not in timeout)
-        case wstate is
+        if mem_ack = '1' then
+          last_mem_rdat <= mem_rdat;
+        end if;
+        -- BUG #387 FIX: Timeout mechanism to prevent walker deadlocks
+        -- Monitor mem_req without mem_ack and force fault after timeout
+        if wstate = W_IDLE then
+          walker_timeout_counter <= 0;  -- Reset counter when idle
+        elsif mem_req = '1' and mem_ack = '0' and mem_berr = '0' then
+          -- Waiting for memory response - increment timeout counter
+          if walker_timeout_counter < 1023 then
+            walker_timeout_counter <= walker_timeout_counter + 1;
+          end if;
+        elsif mem_ack = '1' or mem_berr = '1' then
+          -- Got response - reset timeout counter
+          walker_timeout_counter <= 0;
+        end if;
+        -- Check for timeout condition BEFORE case statement to prevent override
+        if walker_timeout_counter >= WALKER_TIMEOUT_CYCLES and mem_req = '1' then
+          -- Timeout exceeded - force bus error fault and transition to W_FAULT
+          walk_fault <= '1';
+          walker_fault <= '1';
+          walker_fault_status <= encode_mmusr_fault(
+            bus_error => '1',                -- B bit: timeout is a bus error
+            limit_violation => '0',
+            supervisor_violation => '0',
+            write_protect => '0',
+            invalid => '1',                  -- No valid translation available
+            modified => '0',
+            transparent => '0',
+            level => std_logic_vector(to_unsigned(walk_level, 3))
+          );
+          mem_req <= '0';  -- Stop requesting memory
+          walker_timeout_counter <= 0;  -- Reset counter
+          wstate <= W_FAULT;  -- Transition to fault state (which will set walker_completed)
+        else
+          -- Normal walker state machine (only runs if not in timeout)
+          case wstate is
         when W_IDLE =>
           -- Don't auto-clear walker_completed here - let translation handler clear it
           -- BUG #149 FIX: Clear walker_fault when acknowledged to prevent pmmu_busy deadlock
@@ -4417,18 +4465,32 @@ begin
           wstate <= W_FILL;  -- Next cycle: fill with updated atc_valid
         when W_FILL =>
           -- Fill ATC with translation result using pseudo-LRU replacement
-          -- Per MC68030 spec: first try invalid entry, then first entry with MRU=0
+          -- Keep the ATC associative state canonical: if this page/FC is already
+          -- resident, replace that entry before using the normal invalid/MRU
+          -- replacement path. This prevents stale cached faults from coexisting
+          -- with a fresh successful walk after history-bit writeback.
+          found_match := false;
           found_invalid := false;
           replace_idx := 0;
-          -- Step 1: Search for an invalid (empty) entry
+          -- Step 1: Search for an existing entry covering this logical page/FC.
           for i in 0 to ATC_ENTRIES-1 loop
-            if atc_valid(i) = '0' and not found_invalid then
+            if atc_valid(i) = '1' and not found_match and atc_fc(i) = saved_fc and
+               align_addr(saved_addr_log, atc_shift(i)) = atc_log_base(i) then
               replace_idx := i;
-              found_invalid := true;
+              found_match := true;
             end if;
           end loop;
-          -- Step 2: If no invalid entry, find first entry with MRU=0
-          if not found_invalid then
+          -- Step 2: Search for an invalid (empty) entry
+          if not found_match then
+            for i in 0 to ATC_ENTRIES-1 loop
+              if atc_valid(i) = '0' and not found_invalid then
+                replace_idx := i;
+                found_invalid := true;
+              end if;
+            end loop;
+          end if;
+          -- Step 3: If no invalid entry, find first entry with MRU=0
+          if not found_match and not found_invalid then
             for i in 0 to ATC_ENTRIES-1 loop
               if atc_mru(i) = '0' then
                 replace_idx := i;
@@ -4436,6 +4498,16 @@ begin
               end if;
             end loop;
           end if;
+          -- Invalidate any duplicate entries for the same page/FC.
+          for i in 0 to ATC_ENTRIES-1 loop
+            if i /= replace_idx and atc_valid(i) = '1' and atc_fc(i) = saved_fc and
+               align_addr(saved_addr_log, atc_shift(i)) = atc_log_base(i) then
+              atc_valid(i) <= '0';
+              atc_mru(i) <= '0';
+              atc_buserr(i) <= '0';
+              atc_fault_status(i) <= (others => '0');
+            end if;
+          end loop;
           -- Fill the selected entry
           atc_log_base(replace_idx)  <= walk_log_base;
           atc_phys_base(replace_idx) <= align_addr(walk_phys_base, walk_page_shift);
@@ -4494,15 +4566,25 @@ begin
           else
             -- Cache the original MMUSR fault class in the ATC so repeated hits
             -- replay the same B/L/S/W/I combination without re-walking.
+            found_match := false;
             found_invalid := false;
             replace_idx := 0;
             for i in 0 to ATC_ENTRIES-1 loop
-              if atc_valid(i) = '0' and not found_invalid then
+              if atc_valid(i) = '1' and not found_match and atc_fc(i) = saved_fc and
+                 align_addr(saved_addr_log, atc_shift(i)) = atc_log_base(i) then
                 replace_idx := i;
-                found_invalid := true;
+                found_match := true;
               end if;
             end loop;
-            if not found_invalid then
+            if not found_match then
+              for i in 0 to ATC_ENTRIES-1 loop
+                if atc_valid(i) = '0' and not found_invalid then
+                  replace_idx := i;
+                  found_invalid := true;
+                end if;
+              end loop;
+            end if;
+            if not found_match and not found_invalid then
               for i in 0 to ATC_ENTRIES-1 loop
                 if atc_mru(i) = '0' then
                   replace_idx := i;
@@ -4510,6 +4592,15 @@ begin
                 end if;
               end loop;
             end if;
+            for i in 0 to ATC_ENTRIES-1 loop
+              if i /= replace_idx and atc_valid(i) = '1' and atc_fc(i) = saved_fc and
+                 align_addr(saved_addr_log, atc_shift(i)) = atc_log_base(i) then
+                atc_valid(i) <= '0';
+                atc_mru(i) <= '0';
+                atc_buserr(i) <= '0';
+                atc_fault_status(i) <= (others => '0');
+              end if;
+            end loop;
             atc_log_base(replace_idx)  <= walk_log_base;
             atc_phys_base(replace_idx) <= (others => '0');  -- No valid physical address
             atc_shift(replace_idx)     <= walk_page_shift;
@@ -4528,7 +4619,8 @@ begin
         when others =>
           wstate <= W_IDLE;
         end case;
-      end if;  -- End timeout vs normal state machine conditional
+        end if;  -- End timeout vs normal state machine conditional
+      end if;  -- End context-change abort vs normal walker state machine
       -- Handle ATC MRU update requests from translation process (ATC hits)
       if atc_mru_update_req = '1' then
         atc_mru(atc_mru_update_idx) <= '1';
@@ -4622,13 +4714,19 @@ begin
     end if;
   end process;
   -- Walker busy indication - not busy if MMU disabled or TTR hit
-  process(wstate, addr_log, fc, rw, rmw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg, pload_active, ptest_walk_pending)
+  process(wstate, addr_log, fc, rw, rmw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg, pload_active, ptest_update_mmusr, ptest_active, ptest_walk_pending, mmusr_update_req)
     variable tmatch0, tmatch1 : std_logic;
     variable dummy_ci, dummy_wp : std_logic;
   begin
     -- Normal CPU translation is idle when TC.E is clear, but PTEST/PLOAD can
     -- still perform manual table searches with TC.E=0.
-    if tc_en = '0' and pload_active = '0' and ptest_walk_pending = '0'
+    if ptest_update_mmusr = '1' or ptest_active = '1' or mmusr_update_req = '1' then
+      -- Hold the CPU while a PTEST command is being accepted/processed. Without
+      -- this, the A-bit writeback can sample stale desc_addr_reg before the
+      -- table search starts. Also hold until the resulting MMUSR update has
+      -- been committed so a following PMOVE MMUSR cannot read the old value.
+      busy <= '1';
+    elsif tc_en = '0' and pload_active = '0' and ptest_walk_pending = '0'
        and translation_pending = '0' and wstate = W_IDLE then
       busy <= '0';
     else
@@ -4659,7 +4757,8 @@ begin
       -- completes, busy='1' persists (addr mismatch) and fault_reg clears (new
       -- translation for new addr) -> permanent deadlock, berr never dispatched.
       if (pload_active = '0' and
-          (tmatch0 = '1' or tmatch1 = '1' or fault_reg = '1' or
+          (tmatch0 = '1' or tmatch1 = '1' or
+          (fault_reg = '1' and translated_cfg_seq = xlat_cfg_seq) or
           (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and
            (req = '0' or (translated_addr = addr_log and translated_fc = fc and translated_rw = rw and translated_cfg_seq = xlat_cfg_seq))))) then
         busy <= '0';

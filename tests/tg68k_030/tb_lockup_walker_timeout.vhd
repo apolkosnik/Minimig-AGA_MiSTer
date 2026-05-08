@@ -1,7 +1,7 @@
 -- tb_lockup_walker_timeout.vhd
 -- Testbench for walker timeout recovery
 -- Tests that PMMU walker properly recovers when memory is unresponsive
--- The PMMU has an internal 500-cycle timeout (WALKER_TIMEOUT_CYCLES) that
+-- The PMMU has an internal timeout (WALKER_TIMEOUT_CYCLES) that
 -- forces a bus error fault when mem_ack is not received.
 
 library ieee;
@@ -366,7 +366,7 @@ begin
         -- TEST 3: Walker timeout with completely unresponsive memory
         write(l, string'(""));
         writeline(output, l);
-        write(l, string'("TEST 3: Completely Unresponsive Memory (Internal 500-cycle Timeout)"));
+        write(l, string'("TEST 3: Completely Unresponsive Memory (Internal 3072-cycle Timeout)"));
         writeline(output, l);
 
         -- Flush ATC to force a new walk. Use PFLUSHA so the matching ATC entry
@@ -380,7 +380,7 @@ begin
 
         simulate_unresponsive_memory <= true;  -- Memory will NEVER respond
 
-        write(l, string'("  Waiting for PMMU internal timeout (500 cycles)..."));
+        write(l, string'("  Waiting for PMMU internal timeout (3072 cycles)..."));
         writeline(output, l);
 
         addr_log <= x"00012340";
@@ -390,12 +390,12 @@ begin
         wait for clk_period;
         req <= '0';
 
-        -- Monitor busy signal - PMMU's internal timeout fires after 500 cycles
+        -- Monitor busy signal - PMMU's internal timeout fires after 3072 cycles
         cycle_count := 0;
         busy_start_cycle := 0;
         test_passed := false;
 
-        while cycle_count < 700 loop
+        while cycle_count < 3800 loop
             if busy = '1' and busy_start_cycle = 0 then
                 busy_start_cycle := cycle_count;
             end if;

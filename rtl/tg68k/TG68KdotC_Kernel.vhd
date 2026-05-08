@@ -326,7 +326,12 @@ entity TG68KdotC_Kernel is
 		debug_ISP                : out std_logic_vector(31 downto 0);
 		debug_a7_is_msp          : out std_logic;
 		debug_interrupt_mode     : out std_logic;
-		debug_rte_saved_mbit     : out std_logic
+		debug_rte_saved_mbit     : out std_logic;
+		debug_rte_format_word    : out std_logic_vector(15 downto 0);
+		debug_rte_mmu_fix_ssw    : out std_logic_vector(15 downto 0);
+		debug_rte_mmu_fix_opcode : out std_logic_vector(15 downto 0);
+		debug_rte_mmu_fix_write  : out std_logic;
+		debug_rte_format_b_version_error : out std_logic
 			);
 end TG68KdotC_Kernel;
 
@@ -357,6 +362,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal sndOPC				: std_logic_vector(15 downto 0);
 
 	signal exe_pc				: std_logic_vector(31 downto 0);--TH
+	signal opcode_pc			: std_logic_vector(31 downto 0);
 	signal last_opc_pc		: std_logic_vector(31 downto 0);--TH
 	signal last_opc_read		: std_logic_vector(15 downto 0);
 	signal registerin			: std_logic_vector(31 downto 0);
@@ -438,6 +444,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal FlagsSR				: std_logic_vector(7 downto 0);	-- T.S.0III
 	signal SRin					: std_logic_vector(7 downto 0);
 	constant SR_trace_mask : std_logic_vector(7 downto 0) := "00111111";
+	constant RTE_030_FORMAT_B_VERSION : std_logic_vector(3 downto 0) := "0000";
 	signal exec_DIRECT		: bit;
 	signal exec_tas			: std_logic;
 	signal set_exec_tas		: std_logic;
@@ -526,9 +533,14 @@ architecture logic of TG68KdotC_Kernel is
 	signal rte_mmu_fix_opcode : std_logic_vector(15 downto 0) := (others => '0');
 	signal rte_mmu_fix_input_buffer : std_logic_vector(31 downto 0) := (others => '0');
 	signal rte_mmu_fix_write : std_logic := '0';
+	signal rte_mmu_fix_commit : std_logic := '0';
+	signal rte_mmu_fix_ccr_update : std_logic := '0';
+	signal rte_mmu_fix_ccr_value : std_logic_vector(7 downto 0) := (others => '0');
 	signal rte_mmu_fix_dest : std_logic_vector(2 downto 0) := (others => '0');
 	signal rte_mmu_fix_size : std_logic_vector(1 downto 0) := (others => '0');
+	signal rte_format_b_version_error : std_logic := '0';
 	signal restore_ccr_sig  : std_logic;  -- BUG #397: Pulse to restore CCR on format error
+	signal restore_ccr_value_mux : std_logic_vector(7 downto 0);
 	-- Note: Vectors 57 ($E4) and 58 ($E8) are 68851-only, not used on MC68030
 	-- Format Error debug latch signals
 	signal fmt_err_latched       : std_logic;
@@ -543,6 +555,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal make_trace_t0		: std_logic;  -- T0 change-of-flow trace mode active for current instruction
 	signal dbcc_t0_suppress	: std_logic := '0';  -- DBcc expired without branching, so no T0 trace
 	signal trace_pending_group2	: std_logic;  -- Stacked trace pending after Group 2 exception dispatch
+	signal trace_group2_pc		: std_logic_vector(31 downto 0) := (others => '0');
+	signal trace_group2_sr		: std_logic_vector(7 downto 0) := (others => '0');
 	signal make_berr			: std_logic;
 	signal make_mmu_berr     : std_logic;  -- BUG #159: Distinguish MMU bus error from normal BERR
 	signal berr_exception_active : std_logic;  -- MC68030: Bus error exception processing window
@@ -1098,7 +1112,8 @@ BEGIN
 	-- MC68030 UM 8.2.2: The status register value in the format error exception
 	-- stack frame is the value in the status register before the RTE instruction
 	-- was executed.
-  restore_ccr_sig <= '1' WHEN trap_format_error='1' ELSE '0';
+  restore_ccr_sig <= '1' WHEN trap_format_error='1' OR rte_mmu_fix_ccr_update='1' ELSE '0';
+  restore_ccr_value_mux <= rte_mmu_fix_ccr_value WHEN rte_mmu_fix_ccr_update='1' ELSE rte_saved_ccr;
 
 ALU: TG68K_ALU   
 	generic map(
@@ -1152,7 +1167,7 @@ ALU: TG68K_ALU
 
 		-- BUG #397: Restore CCR on RTE format error
 		restore_ccr => restore_ccr_sig,
-		restored_ccr_value => rte_saved_ccr
+		restored_ccr_value => restore_ccr_value_mux
 	);
 
 	-- AMR - let the parent module know this is a longword access.  (Easy way to enable burst writes.)
@@ -1461,7 +1476,33 @@ ALU: TG68K_ALU
 		  (rte_mmu_fix_opcode(15 downto 12) = "0010" OR
 		   rte_mmu_fix_opcode(15 downto 12) = "0011")))
 		else '0';
-			
+	rte_mmu_fix_commit <= rte_mmu_fix_write AND clkena_lw;
+	rte_mmu_fix_ccr_update <= '1' when rte_mmu_fix_commit = '1' AND
+		rte_mmu_fix_opcode(8 downto 6) = "000" else '0';
+
+	PROCESS (Flags, rte_mmu_fix_size, rte_mmu_fix_input_buffer)
+	BEGIN
+		rte_mmu_fix_ccr_value <= (others => '0');
+		rte_mmu_fix_ccr_value(4) <= Flags(4); -- MOVE preserves X and clears V/C.
+		CASE rte_mmu_fix_size IS
+			WHEN "00" =>
+				rte_mmu_fix_ccr_value(3) <= rte_mmu_fix_input_buffer(7);
+				IF rte_mmu_fix_input_buffer(7 downto 0) = x"00" THEN
+					rte_mmu_fix_ccr_value(2) <= '1';
+				END IF;
+			WHEN "01" =>
+				rte_mmu_fix_ccr_value(3) <= rte_mmu_fix_input_buffer(15);
+				IF rte_mmu_fix_input_buffer(15 downto 0) = x"0000" THEN
+					rte_mmu_fix_ccr_value(2) <= '1';
+				END IF;
+			WHEN OTHERS =>
+				rte_mmu_fix_ccr_value(3) <= rte_mmu_fix_input_buffer(31);
+				IF rte_mmu_fix_input_buffer = x"00000000" THEN
+					rte_mmu_fix_ccr_value(2) <= '1';
+				END IF;
+		END CASE;
+	END PROCESS;
+
 PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, memread, memmask, data_read)
 	BEGIN
 		IF memmaskmux(4)='0' THEN
@@ -1587,21 +1628,28 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 				rte_mmu_fix_ssw <= (others => '0');
 				rte_mmu_fix_opcode <= (others => '0');
 				rte_mmu_fix_input_buffer <= (others => '0');
+				rte_format_b_version_error <= '0';
 			ELSIF clkena_lw='1' THEN
 				IF trapmake='1' THEN
 					rte_mmu_fix_capture_active <= '0';
 					rte_mmu_fix_long_index <= 0;
-					IF (trap_berr='1' OR trap_mmu_berr='1') AND
-					   berr_long_frame='1' AND
-					   berr_ssw(8)='1' AND berr_ssw(9)='1' AND berr_ssw(6)='1' THEN
+					rte_format_b_version_error <= '0';
+					IF trap_mmu_berr='1' AND berr_long_frame='1' THEN
 						rte_mmu_fix_armed <= '1';
 					ELSE
 						rte_mmu_fix_armed <= '0';
 					END IF;
+				ELSIF micro_state = berr8 AND trap_mmu_berr='1' AND berr_long_frame='1' THEN
+					-- Arm from the frame type, not from the transient pre-stack SSW.
+					-- Handlers may clear DF in the stacked frame before RTE; the actual
+					-- RTE-side decision is made from the captured stacked SSW below.
+					rte_mmu_fix_armed <= '1';
 				ELSIF setopcode='1' THEN
 					rte_mmu_fix_capture_active <= '0';
 					rte_mmu_fix_long_index <= 0;
+					rte_format_b_version_error <= '0';
 				ELSIF micro_state = rte4 THEN
+					rte_format_b_version_error <= '0';
 					IF rte_format_word(15 downto 12) = "1011" THEN
 						rte_mmu_fix_capture_active <= '1';
 						rte_mmu_fix_armed <= '1';
@@ -1624,6 +1672,10 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 						WHEN OTHERS =>
 							NULL;
 					END CASE;
+					IF rte_mmu_fix_long_index = 11 AND
+					   data_read(15 downto 12) /= RTE_030_FORMAT_B_VERSION THEN
+						rte_format_b_version_error <= '1';
+					END IF;
 					IF rot_cnt = "000001" THEN
 						rte_mmu_fix_capture_active <= '0';
 						rte_mmu_fix_armed <= '0';
@@ -1700,7 +1752,7 @@ PROCESS (long_start, reg_QB, data_write_tmp, exec, data_read, data_write_mux, me
 -----------------------------------------------------------------------------
 -- Registerfile
 -----------------------------------------------------------------------------
-PROCESS (clk, regfile, RDindex_A, RDindex_B, exec, rte_mmu_fix_write, rte_mmu_fix_dest, rte_mmu_fix_size, rte_mmu_fix_input_buffer, rte_mmu_fix_opcode)
+PROCESS (clk, regfile, RDindex_A, RDindex_B, exec, rte_mmu_fix_commit, rte_mmu_fix_dest, rte_mmu_fix_size, rte_mmu_fix_input_buffer, rte_mmu_fix_opcode)
 	BEGIN
 		reg_QA <= regfile(RDindex_A);
 		reg_QB <= regfile(RDindex_B);
@@ -1743,7 +1795,7 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec, rte_mmu_fix_write, rte_mmu_fi
 							regfile(conv_integer(moves_reg)) <= data_read;
 					END CASE;
 				END IF;
-				IF rte_mmu_fix_write = '1' THEN
+				IF rte_mmu_fix_commit = '1' THEN
 					IF rte_mmu_fix_opcode(8 downto 6) = "001" THEN
 						-- MOVEA to An: always 32-bit write, sign-extend for word
 						IF rte_mmu_fix_size = "01" THEN  -- MOVEA.W: sign-extend 16->32
@@ -1865,9 +1917,13 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 -----------------------------------------------------------------------------
 	PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, next_micro_state, pmove_dn_regnum, pmove_dn_areg, pmove_dn_mode, fline_context_valid, fline_opcode_latch, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode)
 	BEGIN
-		IF exec(movem_action) ='1' THEN
-			rf_dest_addr <= rf_source_addrd;
-		ELSIF pmmu_ptest_a='1' THEN
+			IF exec(movem_action) ='1' THEN
+				rf_dest_addr <= rf_source_addrd;
+			ELSIF setstackaddr='1' THEN
+				-- Exception entry must prime A7 even if stale MOVES/PMOVE decode
+				-- context is still live from the interrupted instruction.
+				rf_dest_addr <= "1111";
+			ELSIF pmmu_ptest_a='1' THEN
 			-- PTEST/PLOAD A-bit: Destination Address Register from bits 7-5
 			rf_dest_addr <= '1' & pmmu_brief(7 downto 5);
 		-- BUG #323 FIX: During MOVES bus access, rf_dest_addr must point to the EA
@@ -1908,9 +1964,7 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 			rf_dest_addr <= '0'&last_data_read(2 downto 0);
 		ELSIF dest_2ndLbits='1' THEN
 			rf_dest_addr <= '0'&sndOPC(2 downto 0);
-		ELSIF setstackaddr='1' THEN
-			rf_dest_addr <= "1111";
-		ELSIF micro_state = pmove_dn_lo OR next_micro_state = pmove_dn_lo THEN
+			ELSIF micro_state = pmove_dn_lo OR next_micro_state = pmove_dn_lo THEN
 			-- BUG #59 FIX: PMOVE checks must come BEFORE dest_hbits!
 			-- PMOVE 64-bit: LOW word goes to Dn+1 (increment register number)
 			-- BUG #376 FIX: Also check next_micro_state = pmove_dn_lo to set
@@ -2189,7 +2243,8 @@ PROCESS (clk)
 				-- Priority order (highest first):
 				--   1. writePC='1'                         -> TG68_PC         (role A)
 				--   2. micro_state=trap00                  -> exe_pc          (role A, Fmt$2 instr addr)
-				--   3. exec(writePC_add)='1', vec=$10|$20|$38 -> exe_pc        (role A)
+				--   3. exec(writePC_add)='1', vec=$10|$20|$28|$2C -> opcode_pc (role A)
+				--      exec(writePC_add)='1', vec=$38           -> exe_pc       (role A)
 				--   4. exec(writePC_add)='1' (else)        -> TG68_PC_add     (role A)
 				--   5. micro_state=trap0, useStackframe2=1 -> $2xxx fmt/vec   (role B)
 				--   6. micro_state=trap0 (else)            -> $0xxx fmt/vec   (role B)
@@ -2213,13 +2268,18 @@ PROCESS (clk)
 					END IF;
 				ELSIF exec(writePC_add)='1' THEN
 					-- Priorities 3 & 4: post-instruction PC push (Format $0 PC field).
-					-- BUG #387 FIX: illegal (vector $10) and privilege violation ($20)
-					-- exceptions fire after extension words are fetched, so TG68_PC_add is
-					-- over-incremented; use exe_pc (the instruction-entry PC) instead.
-					-- RTE Format Error (vector $38) also stacks the RTE instruction PC.
+					-- BUG #387 FIX: illegal (vector $10), privilege violation ($20),
+					-- A-line ($28), and F-line ($2C) exceptions must stack the
+					-- faulting opcode PC. TG68_PC_add can already have moved through
+					-- extension-word fetch or handler/RTE sequencing by the time the
+					-- frame PC longword is written. RTE Format Error (vector $38)
+					-- stacks the RTE instruction PC.
 					IF trap_vector(9 downto 0) = "00" & X"10" OR
 					   trap_vector(9 downto 0) = "00" & X"20" OR
-					   trap_vector(9 downto 0) = "00" & X"38" THEN
+					   trap_vector(9 downto 0) = "00" & X"28" OR
+					   trap_vector(9 downto 0) = "00" & X"2C" THEN
+						data_write_tmp <= opcode_pc;
+					ELSIF trap_vector(9 downto 0) = "00" & X"38" THEN
 						data_write_tmp <= exe_pc;
 					ELSE
 						data_write_tmp <= TG68_PC_add;
@@ -2955,6 +3015,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 				state <= "01";
 				addrvalue <= '0';
 				opcode <= X"2E79"; 					--move $0,a7
+				opcode_pc <= (others => '0');
 				trap_interrupt <= '0';
 				interrupt <= '0';
 				last_opc_read  <= X"4EF9";			--jmp nn.l
@@ -3017,7 +3078,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 --					IF wbmemmask(5 downto 4)="11" THEN
 --						wbmemmask <= memmask;
 --					END IF;
-					IF rte_mmu_fix_write='1' THEN
+					IF rte_mmu_fix_commit='1' THEN
 						TG68_PC <= TG68_PC + 2;
 					ELSIF exec(directPC)='1' THEN
 						TG68_PC <= data_read;
@@ -3591,14 +3652,16 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- 	END IF;
 					-- END IF;
 
-					IF setopcode='1' AND berr='0' THEN
-						IF state="00" THEN
-							opcode <= data_read(15 downto 0);
-							exe_pc <= tg68_pc;--TH
-						ELSE
-							opcode <= last_opc_read(15 downto 0);
-							exe_pc <= last_opc_pc;--TH
-						END IF;
+						IF setopcode='1' AND berr='0' THEN
+							IF state="00" THEN
+								opcode <= data_read(15 downto 0);
+								exe_pc <= tg68_pc;--TH
+								opcode_pc <= tg68_pc;
+							ELSE
+								opcode <= last_opc_read(15 downto 0);
+								exe_pc <= last_opc_pc;--TH
+								opcode_pc <= last_opc_pc;
+							END IF;
 						nextpass <= '0';
 					ELSIF setinterrupt='1' OR setopcode='1' THEN
 						opcode <= X"4E71";		--nop
@@ -3618,24 +3681,31 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					IF trapmake='1' AND trapd='0' AND cpu(1)='1' AND (make_trace='1' OR make_trace_t0='1') AND
 					   (next_micro_state = trap00 OR trap_trap='1') AND trap_mmu_config='0' THEN
 						trace_pending_group2 <= '1';
+						trace_group2_pc <= exe_pc;
+						trace_group2_sr <= FlagsSR;
 					END IF;
 					-- Configure stacked trace frame after Group 2 handler vector loaded
-					-- exe_pc = handler entry (for trap00), trap_vector = trace ($24),
-					-- trap_trace = 1 (for format logic), trap_SR = current SR
-					-- BUG #439 FIX: exe_pc must be the Group 2 handler address (loaded from
-					-- vector table by trap3 exec(directPC)). At trace_stk_grp2, exec(directPC)=1
-					-- updates TG68_PC and data_read simultaneously. VHDL sequential reads use
-					-- OLD signal values, so TG68_PC still has the pre-handler fetch-ahead address.
-					-- data_read IS the handler address (from the just-completed vector table read).
+					-- WinUAE uses regs.trace_pc for the Format $2 instruction-PC
+					-- field. Preserve the original Group 2 instruction PC/SR instead
+					-- of overwriting them with the handler vector address.
 					IF micro_state = trace_stk_grp2 THEN
-						exe_pc <= data_read;  -- BUG #439: use data_read (handler addr), not stale TG68_PC
+						exe_pc <= trace_group2_pc;
 						trap_trace <= '1';
-						trap_SR <= FlagsSR;
+						trap_SR <= trace_group2_sr;
 						trace_pending_group2 <= '0';
 					END IF;
 
 					IF decodeOPC='1' OR interrupt='1' THEN
 						trap_SR <= FlagsSR;
+					END IF;
+					-- Once the bus-error handler reaches RTE/RTR, bus-error exception
+					-- stacking is no longer active. Leaving this sticky until a later
+					-- successful opcode fetch makes the next ordinary PMMU fault look
+					-- like a double bus fault and halts the CPU.
+					IF decodeOPC='1' AND (opcode = x"4E73" OR opcode = x"4E77") THEN
+						berr_exception_active <= '0';
+						pmmu_fault_dispatched <= '0';
+						pmmu_fault_was_cleared <= '0';
 					END IF;
 					-- BUG #418 FIX: Keep trap_SR in sync with directSR-loaded value.
 					-- For RTE format error, the exception frame must contain the SR
@@ -3652,6 +3722,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- the SR from before the RTE instruction was executed.
 					IF trap_format_error='1' THEN
 						trap_SR <= rte_saved_sr_high AND SR_trace_mask;
+					END IF;
+					IF (micro_state = rte4 AND rte_format_word(15 downto 12) = "0000") OR
+					   (micro_state = rte5 AND rot_cnt = "000001") THEN
+						berr_exception_active <= '0';
+						pmmu_fault_dispatched <= '0';
+						pmmu_fault_was_cleared <= '0';
 					END IF;
 					-- FlagsSR format error revert is handled in SR op process (line ~3413)
 					-- Do NOT assign FlagsSR here - would create multiple drivers
@@ -3942,7 +4018,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		 SVmode, preSVmode, stop, long_done, ea_only, setstate, addrvalue, execOPC, exec_write_back, exe_datatype,
 		 datatype, interrupt, c_out, trapmake, rot_cnt, brief, addr, trap_trapv, last_data_in, use_VBR_Stackframe,
 		 long_start, set_datatype, sndOPC, set_exec, exec, ea_build_now, reg_QA, reg_QB, make_berr, trap_berr, last_opc_read,
-		 moves_writeback_pending, moves_active, pmmu_opcode, pmmu_brief, rte_format_word)
+		 moves_writeback_pending, moves_active, pmmu_opcode, pmmu_brief, rte_format_word, rte_format_b_version_error)
 	variable v_rte_format_valid : std_logic;
 	BEGIN
 		TG68_PC_brw <= '0';
@@ -4193,11 +4269,14 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					-- Use rte_saved_mbit (pre-SR-change M bit) instead of FlagsSR(4),
 					-- because FlagsSR(4) has already been updated by directSR/to_SR
 					-- by the time the deferred changeMode fires at setexecOPC.
-					IF interrupt_mode='1' OR rte_saved_mbit='0' THEN
-						set(to_ISP) <= '1';   -- Active stack is ISP
-					ELSE
-						set(to_MSP) <= '1';   -- Active stack is MSP
-					END IF;
+						-- In this core interrupt_mode means the active supervisor A7 is on
+						-- the ISP path even if the saved M bit is stale or was changed by
+						-- handler code. Save that active A7 back to ISP before loading USP.
+						IF interrupt_mode='1' OR rte_saved_mbit='0' THEN
+							set(to_ISP) <= '1';   -- Active stack is ISP
+						ELSE
+							set(to_MSP) <= '1';   -- Active stack is MSP
+						END IF;
 					set(from_USP) <= '1';
 				END IF;
 			ELSE
@@ -5938,15 +6017,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						trapmake <= '1';
 					END IF;
 				ELSE
-					-- Unrecognized F-line instruction (cpGEN, cpBcc, etc.).
-					-- On 68020/030, unimplemented CpID=0 coprocessor instructions
-					-- attempted in user mode raise privilege violation; other missing
-					-- coprocessor/FPU forms remain F-line exceptions.
-					IF SVmode='0' AND opcode(11 downto 9)="000" THEN
-						trap_priv <= '1';
-					ELSE
-						trap_1111 <= '1';
-					END IF;
+					-- Generic missing-coprocessor F-line forms use vector 11.
+					-- cpSAVE/cpRESTORE and real PMMU instructions above keep privilege handling.
+					trap_1111 <= '1';
 					trapmake <= '1';
 				END IF;
 --							
@@ -8934,5 +9007,10 @@ debug_ISP                <= ISP;
 debug_a7_is_msp          <= a7_is_msp;
 debug_interrupt_mode     <= interrupt_mode;
 debug_rte_saved_mbit     <= rte_saved_mbit;
+debug_rte_format_word    <= rte_format_word;
+debug_rte_mmu_fix_ssw    <= rte_mmu_fix_ssw;
+debug_rte_mmu_fix_opcode <= rte_mmu_fix_opcode;
+debug_rte_mmu_fix_write  <= rte_mmu_fix_commit;
+debug_rte_format_b_version_error <= rte_format_b_version_error;
 
 END;

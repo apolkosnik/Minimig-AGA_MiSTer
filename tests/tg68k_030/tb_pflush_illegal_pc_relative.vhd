@@ -1,5 +1,5 @@
 -- tb_pflush_illegal_pc_relative.vhd
--- Verify that MC68030-illegal PC-relative PFLUSH EA modes trap as illegal.
+-- Verify that MC68030-illegal PC-relative PFLUSH EA modes trap as F-line.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -47,7 +47,7 @@ architecture behavioral of tb_pflush_illegal_pc_relative is
     signal pmmu_walker_berr : std_logic := '0';
 
     signal debug_TG68_PC     : std_logic_vector(31 downto 0);
-    signal debug_trap_illegal : std_logic;
+    signal debug_trap_1111    : std_logic;
     signal debug_trap_vector : std_logic_vector(31 downto 0);
     signal debug_regfile_d0  : std_logic_vector(31 downto 0);
     signal debug_cpu_halted  : std_logic;
@@ -58,10 +58,10 @@ architecture behavioral of tb_pflush_illegal_pc_relative is
         0 => x"0000", 1 => x"2000",  -- SSP = $00002000
         2 => x"0000", 3 => x"0040",  -- PC  = $00000040
 
-        8 => x"0000", 9 => x"0080",  -- Illegal instruction vector -> $80
+        22 => x"0000", 23 => x"0080",  -- F-line vector -> $80
 
         -- Program at $40:
-        --   PFLUSH <fc>,#mask,(d16,PC) ; illegal on MC68030
+        --   PFLUSH <fc>,#mask,(d16,PC) ; invalid F-line form on MC68030
         --   MOVEQ #1,D0                ; fail marker if execution falls through
         --   STOP   #$2700
         32 => x"F07A",
@@ -71,7 +71,7 @@ architecture behavioral of tb_pflush_illegal_pc_relative is
         36 => x"4E72",
         37 => x"2700",
 
-        -- Illegal instruction handler at $80:
+        -- F-line handler at $80:
         --   MOVEQ #2,D0
         --   STOP   #$2702
         64 => x"7002",
@@ -87,7 +87,7 @@ architecture behavioral of tb_pflush_illegal_pc_relative is
     signal saw_handler_fetch : boolean := false;
     signal saw_fail_path     : boolean := false;
     signal saw_stop          : boolean := false;
-    signal saw_illegal_trap  : boolean := false;
+    signal saw_fline_trap    : boolean := false;
 
 begin
 
@@ -190,7 +190,7 @@ begin
             debug_regfile_d0 => debug_regfile_d0,
             debug_regfile_a0 => open,
             debug_fline_context_valid => open,
-            debug_trap_1111 => open,
+            debug_trap_1111 => debug_trap_1111,
             debug_trapmake => open,
             debug_pmmu_brief => open,
             debug_use_base => open,
@@ -234,7 +234,7 @@ begin
             debug_regfile_we => open,
             debug_regfile_waddr => open,
             debug_regfile_wdata => open,
-            debug_trap_illegal => debug_trap_illegal,
+            debug_trap_illegal => open,
             debug_trap_priv => open,
             debug_trap_addr_error => open,
             debug_trap_berr => open,
@@ -332,8 +332,8 @@ begin
     begin
         if rising_edge(clk) then
             if nReset = '1' then
-                if debug_trap_illegal = '1' then
-                    saw_illegal_trap <= true;
+                if debug_trap_1111 = '1' then
+                    saw_fline_trap <= true;
                 end if;
 
                 if debug_regfile_d0 = x"00000001" then
@@ -347,7 +347,7 @@ begin
                 if busstate = "00" then
                     if addr_out = x"00000080" then
                         saw_handler_fetch <= true;
-                        report "Reached illegal instruction handler at $80";
+                        report "Reached F-line handler at $80";
                     elsif addr_out = x"00000046" then
                         report "Observed fall-through fetch at $46";
                     end if;
@@ -360,7 +360,7 @@ begin
     begin
         report "=== PFLUSH ILLEGAL PC-RELATIVE TEST ===";
         report "Testing: PFLUSH <fc>,#mask,(d16,PC)";
-        report "Expected: illegal instruction trap -> handler at $80 -> D0=$00000002";
+        report "Expected: F-line trap -> handler at $80 -> D0=$00000002";
 
         wait for 100 ns;
         nReset <= '1';
@@ -374,7 +374,7 @@ begin
 
         report "=======================================";
         report "Handler fetched:  " & boolean'image(saw_handler_fetch);
-        report "Illegal trap seen: " & boolean'image(saw_illegal_trap);
+        report "F-line trap seen:  " & boolean'image(saw_fline_trap);
         report "Fail path seen:    " & boolean'image(saw_fail_path);
         report "STOP seen:         " & boolean'image(saw_stop);
         report "Final PC:          $" & slv_to_hex(debug_TG68_PC);
@@ -390,7 +390,7 @@ begin
             report "Expected handler to set D0=$00000002, got D0=$" & slv_to_hex(debug_regfile_d0) severity error;
         elsif not saw_handler_fetch then
             report "*** PFLUSH ILLEGAL PC-RELATIVE TEST FAILED ***" severity error;
-            report "Illegal instruction handler was never fetched" severity error;
+            report "F-line handler was never fetched" severity error;
         elsif saw_fail_path then
             report "*** PFLUSH ILLEGAL PC-RELATIVE TEST FAILED ***" severity error;
             report "Execution fell through to the post-PFLUSH failure marker" severity error;

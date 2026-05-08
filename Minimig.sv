@@ -463,10 +463,11 @@ wire        zram_sel  = |ram_addr[28:26];
 // its cpustate may still be "11" (write) from the pre-freeze bus cycle. This
 // causes the write buffer to spuriously latch CPU data at the walker's
 // descriptor address, corrupting page table entries in SDRAM.
-// Fix: Force cpustate to "10" (data read) during walker reads, and "11"
-// (write) during walker writes, so the SDRAM controller sees the walker's
-// actual intent instead of the CPU's frozen state.
-wire [1:0] cpu_state_ram = walker_active_cpu ? (walker_writing_cpu ? 2'b11 : 2'b10) : cpu_state;
+// Cache fills also own the RAM bus independently of the frozen CPU state; force
+// them to data reads so a stalled CPU write cannot turn a fill into a DDR write.
+wire [1:0] cpu_state_ram = walker_active_cpu ? (walker_writing_cpu ? 2'b11 : 2'b10) :
+                           cache_fill_owns_ram ? 2'b10 :
+                           cpu_state;
 
 // 68030 Cache interface signals
 wire        cpu_cache_req;

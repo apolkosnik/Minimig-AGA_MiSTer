@@ -451,6 +451,11 @@ wire [31:0] kernel_isp_p;
 wire        kernel_a7_is_msp_p;
 wire        kernel_interrupt_mode_p;
 wire        kernel_rte_saved_mbit_p;
+wire [15:0] kernel_rte_format_word_p;
+wire [15:0] kernel_rte_mmu_fix_ssw_p;
+wire [15:0] kernel_rte_mmu_fix_opcode_p;
+wire        kernel_rte_mmu_fix_write_p;
+wire        kernel_rte_format_b_version_error_p;
 // Register file debug (for REGS ISSP probe)
 wire [31:0] kernel_regfile_d0_p, kernel_regfile_d1_p, kernel_regfile_d2_p, kernel_regfile_d3_p;
 wire [31:0] kernel_regfile_d4_p, kernel_regfile_d5_p, kernel_regfile_d6_p, kernel_regfile_d7_p;
@@ -540,22 +545,26 @@ wire [0:0] pmmu_issp_source;
 wire [0:0] pmm2_issp_source;
 wire [0:0] tcwr_issp_source;
 wire [0:0] pmwr_issp_source;
+wire [0:0] rtwr_issp_source;
 `ifndef ENABLE_CPUWRAP_DEBUG_ISSP
 assign pmmu_issp_source = 1'b0;
 assign pmm2_issp_source = 1'b0;
 assign tcwr_issp_source = 1'b0;
 assign pmwr_issp_source = 1'b0;
+assign rtwr_issp_source = 1'b0;
 `endif
 // Kernel internal state debug (6 bits, probe limit=511)
 `CPUWRAP_DEBUG_KEEP reg  [2:0] stp_ipl_nr;
 `CPUWRAP_DEBUG_KEEP reg        stp_setendOPC;
 `CPUWRAP_DEBUG_KEEP reg        stp_stop;
 
-// TC write trace.  The sticky PMMU fault latch can show that TC was enabled,
-// but live TC may later be zero after the OS falls back.  Capture the PMOVE
-// writes that changed TC so the failure path is attributable.
+// PMMU register write trace.  The sticky PMMU fault latch can show that TC was
+// enabled, but live TC/CRP/SRP may later change after the OS falls back. Capture
+// PMOVE writes to the root pointers so a bad descriptor chain can be tied to
+// the register load that created it.
 `CPUWRAP_DEBUG_KEEP reg        tcwr_seen;
 `CPUWRAP_DEBUG_KEEP reg  [7:0] tcwr_count;
+`CPUWRAP_DEBUG_KEEP reg  [4:0] tcwr_last_sel;
 `CPUWRAP_DEBUG_KEEP reg [31:0] tcwr_last_value;
 `CPUWRAP_DEBUG_KEEP reg [31:0] tcwr_last_pc;
 `CPUWRAP_DEBUG_KEEP reg [31:0] tcwr_last_exe_pc;
@@ -565,6 +574,8 @@ assign pmwr_issp_source = 1'b0;
 `CPUWRAP_DEBUG_KEEP reg  [7:0] tcwr_last_micro_state;
 `CPUWRAP_DEBUG_KEEP reg  [7:0] tcwr_last_next_micro_state;
 `CPUWRAP_DEBUG_KEEP reg        tcwr_last_part;
+`CPUWRAP_DEBUG_KEEP reg [31:0] tcwr_last_memaddr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] tcwr_last_a7;
 `CPUWRAP_DEBUG_KEEP reg        tcwr_enable_seen;
 `CPUWRAP_DEBUG_KEEP reg [31:0] tcwr_first_enable_value;
 `CPUWRAP_DEBUG_KEEP reg [31:0] tcwr_first_enable_pc;
@@ -576,7 +587,14 @@ assign pmwr_issp_source = 1'b0;
 `CPUWRAP_DEBUG_KEEP reg [15:0] tcwr_first_disable_opcode;
 `CPUWRAP_DEBUG_KEEP reg [15:0] tcwr_first_disable_brief;
 `CPUWRAP_DEBUG_KEEP reg  [7:0] tcwr_first_disable_flags;
-`CPUWRAP_DEBUG_KEEP reg        tcwr_tc_we_prev;
+`CPUWRAP_DEBUG_KEEP reg        tcwr_crp_hi_seen;
+`CPUWRAP_DEBUG_KEEP reg        tcwr_crp_lo_seen;
+`CPUWRAP_DEBUG_KEEP reg        tcwr_srp_hi_seen;
+`CPUWRAP_DEBUG_KEEP reg        tcwr_srp_lo_seen;
+`CPUWRAP_DEBUG_KEEP reg [31:0] tcwr_crp_hi_value;
+`CPUWRAP_DEBUG_KEEP reg [31:0] tcwr_crp_lo_value;
+`CPUWRAP_DEBUG_KEEP reg [31:0] tcwr_srp_hi_value;
+`CPUWRAP_DEBUG_KEEP reg [31:0] tcwr_srp_lo_value;
 
 // PMMU walker descriptor writeback trace.  This is intentionally sampled at
 // the wrapper boundary so it captures every descriptor write the PMMU asked
@@ -596,13 +614,65 @@ assign pmwr_issp_source = 1'b0;
 `CPUWRAP_DEBUG_KEEP reg        pmwr_400a_seen;
 `CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_400a_addr;
 `CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_400a_data;
+`CPUWRAP_DEBUG_KEEP reg        pmwr_timeout_seen;
+`CPUWRAP_DEBUG_KEEP reg  [3:0] pmwr_timeout_state;
+`CPUWRAP_DEBUG_KEEP reg [11:0] pmwr_timeout_cnt;
+`CPUWRAP_DEBUG_KEEP reg [31:0] pmwr_timeout_addr;
+`CPUWRAP_DEBUG_KEEP reg [28:1] pmwr_timeout_ramaddr;
+`CPUWRAP_DEBUG_KEEP reg [15:0] pmwr_timeout_flags;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] pmwr_write_ack_count;
+`CPUWRAP_DEBUG_KEEP reg  [3:0] pmwr_write_berr_count;
 
-wire tcwr_tc_we = kernel_pmmu_reg_we_p && (kernel_pmmu_reg_sel_p == 5'b10000);
+// Root-table CPU write trace.  The live fast-RAM failure has TC.FCL=1 and FC=6,
+// so the first descriptor read is CRP_L + 6*4.  This probe records writes to
+// the observed page-table slab and to the exact FC6 root descriptor longword.
+`CPUWRAP_DEBUG_KEEP reg        rtwr_page_seen;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_page_count;
+`CPUWRAP_DEBUG_KEEP reg        rtwr_exact_seen;
+`CPUWRAP_DEBUG_KEEP reg  [3:0] rtwr_exact_hits;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_exact_hi_data;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_exact_lo_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_exact_last_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_exact_pc;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] rtwr_exact_micro;
+`CPUWRAP_DEBUG_KEEP reg        rtwr_fc6_seen;
+`CPUWRAP_DEBUG_KEEP reg  [3:0] rtwr_fc6_hits;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_fc6_hi_data;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_fc6_lo_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_fc6_last_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_fc6_pc;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] rtwr_fc6_micro;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_last0_addr;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_last0_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_last1_addr;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_last1_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_last2_addr;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_last2_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_last3_addr;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_last3_data;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] rtwr_last_flags;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] rtwr_last_micro;
+`CPUWRAP_DEBUG_KEEP reg        rtwr_last_uds;
+`CPUWRAP_DEBUG_KEEP reg        rtwr_last_lds;
+`CPUWRAP_DEBUG_KEEP reg        rtwr_last_ramready;
+`CPUWRAP_DEBUG_KEEP reg        rtwr_last_mmu_enabled;
+
+wire tcwr_any_we = kernel_pmmu_reg_we_p;
+wire tcwr_tc_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10000);
+wire tcwr_srp_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10010);
+wire tcwr_crp_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10011);
+wire [31:0] rtwr_fc6_addr = {stp_pmmu_crp_lo_w[31:2], 2'b00} + 32'd24;
+wire rtwr_cpu_write_done = cpucfg[1] && cpu_req && (cpustate_p == 2'b11) &&
+                           ramsel && ramready && !walker_active && !pmmu_suppress_bus;
+wire rtwr_page_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:12] == 20'h40002);
+wire rtwr_exact_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == 30'h100008BA);
+wire rtwr_fc6_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == rtwr_fc6_addr[31:2]);
 
 always @(posedge clk) begin
 	if (~reset || tcwr_issp_source[0]) begin
 		tcwr_seen <= 0;
 		tcwr_count <= 0;
+		tcwr_last_sel <= 0;
 		tcwr_last_value <= 0;
 		tcwr_last_pc <= 0;
 		tcwr_last_exe_pc <= 0;
@@ -612,6 +682,8 @@ always @(posedge clk) begin
 		tcwr_last_micro_state <= 0;
 		tcwr_last_next_micro_state <= 0;
 		tcwr_last_part <= 0;
+		tcwr_last_memaddr <= 0;
+		tcwr_last_a7 <= 0;
 		tcwr_enable_seen <= 0;
 		tcwr_first_enable_value <= 0;
 		tcwr_first_enable_pc <= 0;
@@ -623,12 +695,19 @@ always @(posedge clk) begin
 		tcwr_first_disable_opcode <= 0;
 		tcwr_first_disable_brief <= 0;
 		tcwr_first_disable_flags <= 0;
-		tcwr_tc_we_prev <= 0;
+		tcwr_crp_hi_seen <= 0;
+		tcwr_crp_lo_seen <= 0;
+		tcwr_srp_hi_seen <= 0;
+		tcwr_srp_lo_seen <= 0;
+		tcwr_crp_hi_value <= 0;
+		tcwr_crp_lo_value <= 0;
+		tcwr_srp_hi_value <= 0;
+		tcwr_srp_lo_value <= 0;
 	end else begin
-		tcwr_tc_we_prev <= tcwr_tc_we;
-		if (tcwr_tc_we && !tcwr_tc_we_prev) begin
+		if (tcwr_any_we) begin
 			tcwr_seen <= 1;
 			tcwr_count <= tcwr_count + 8'd1;
+			tcwr_last_sel <= kernel_pmmu_reg_sel_p;
 			tcwr_last_value <= kernel_pmmu_reg_wdat_p;
 			tcwr_last_pc <= kernel_TG68_PC_p;
 			tcwr_last_exe_pc <= kernel_exe_PC_p;
@@ -638,14 +717,32 @@ always @(posedge clk) begin
 			tcwr_last_micro_state <= kernel_micro_state_p[7:0];
 			tcwr_last_next_micro_state <= kernel_next_ms_p[7:0];
 			tcwr_last_part <= kernel_pmmu_reg_part_p;
-			if (kernel_pmmu_reg_wdat_p[31] && !tcwr_enable_seen) begin
+			tcwr_last_memaddr <= kernel_memaddr_reg_p;
+			tcwr_last_a7 <= kernel_regfile_a7_p;
+			if (tcwr_crp_we && kernel_pmmu_reg_part_p) begin
+				tcwr_crp_hi_seen <= 1;
+				tcwr_crp_hi_value <= kernel_pmmu_reg_wdat_p;
+			end
+			if (tcwr_crp_we && !kernel_pmmu_reg_part_p) begin
+				tcwr_crp_lo_seen <= 1;
+				tcwr_crp_lo_value <= kernel_pmmu_reg_wdat_p;
+			end
+			if (tcwr_srp_we && kernel_pmmu_reg_part_p) begin
+				tcwr_srp_hi_seen <= 1;
+				tcwr_srp_hi_value <= kernel_pmmu_reg_wdat_p;
+			end
+			if (tcwr_srp_we && !kernel_pmmu_reg_part_p) begin
+				tcwr_srp_lo_seen <= 1;
+				tcwr_srp_lo_value <= kernel_pmmu_reg_wdat_p;
+			end
+			if (tcwr_tc_we && kernel_pmmu_reg_wdat_p[31] && !tcwr_enable_seen) begin
 				tcwr_enable_seen <= 1;
 				tcwr_first_enable_value <= kernel_pmmu_reg_wdat_p;
 				tcwr_first_enable_pc <= kernel_TG68_PC_p;
 				tcwr_first_enable_opcode <= kernel_opcode_p;
 				tcwr_first_enable_brief <= kernel_brief_p;
 			end
-			if (!kernel_pmmu_reg_wdat_p[31] && tcwr_enable_seen && !tcwr_disable_seen) begin
+			if (tcwr_tc_we && !kernel_pmmu_reg_wdat_p[31] && tcwr_enable_seen && !tcwr_disable_seen) begin
 				tcwr_disable_seen <= 1;
 				tcwr_first_disable_value <= kernel_pmmu_reg_wdat_p;
 				tcwr_first_disable_pc <= kernel_TG68_PC_p;
@@ -656,6 +753,87 @@ always @(posedge clk) begin
 		end
 	end
 end
+
+always @(posedge clk) begin
+	if (~reset || rtwr_issp_source[0]) begin
+		rtwr_page_seen <= 0;
+		rtwr_page_count <= 0;
+		rtwr_exact_seen <= 0;
+		rtwr_exact_hits <= 0;
+		rtwr_exact_hi_data <= 0;
+		rtwr_exact_lo_data <= 0;
+		rtwr_exact_last_addr <= 0;
+		rtwr_exact_pc <= 0;
+		rtwr_exact_micro <= 0;
+		rtwr_fc6_seen <= 0;
+		rtwr_fc6_hits <= 0;
+		rtwr_fc6_hi_data <= 0;
+		rtwr_fc6_lo_data <= 0;
+		rtwr_fc6_last_addr <= 0;
+		rtwr_fc6_pc <= 0;
+		rtwr_fc6_micro <= 0;
+		rtwr_last0_addr <= 0;
+		rtwr_last0_data <= 0;
+		rtwr_last1_addr <= 0;
+		rtwr_last1_data <= 0;
+		rtwr_last2_addr <= 0;
+		rtwr_last2_data <= 0;
+		rtwr_last3_addr <= 0;
+		rtwr_last3_data <= 0;
+		rtwr_last_flags <= 0;
+		rtwr_last_micro <= 0;
+		rtwr_last_uds <= 0;
+		rtwr_last_lds <= 0;
+		rtwr_last_ramready <= 0;
+		rtwr_last_mmu_enabled <= 0;
+	end else if (rtwr_page_hit) begin
+		rtwr_page_seen <= 1;
+		if (rtwr_page_count != 16'hFFFF)
+			rtwr_page_count <= rtwr_page_count + 16'd1;
+
+		rtwr_last3_addr <= rtwr_last2_addr;
+		rtwr_last3_data <= rtwr_last2_data;
+		rtwr_last2_addr <= rtwr_last1_addr;
+		rtwr_last2_data <= rtwr_last1_data;
+		rtwr_last1_addr <= rtwr_last0_addr;
+		rtwr_last1_data <= rtwr_last0_data;
+		rtwr_last0_addr <= pmmu_addr_phys_p;
+		rtwr_last0_data <= cpu_dout_p;
+		rtwr_last_flags <= kernel_FlagsSR_p;
+		rtwr_last_micro <= kernel_micro_state_p[7:0];
+		rtwr_last_uds <= uds_p;
+		rtwr_last_lds <= lds_p;
+		rtwr_last_ramready <= ramready;
+		rtwr_last_mmu_enabled <= stp_pmmu_tc_w[31];
+
+		if (rtwr_exact_hit) begin
+			rtwr_exact_seen <= 1;
+			if (rtwr_exact_hits != 4'hF)
+				rtwr_exact_hits <= rtwr_exact_hits + 4'd1;
+			rtwr_exact_last_addr <= pmmu_addr_phys_p;
+			rtwr_exact_pc <= kernel_TG68_PC_p;
+			rtwr_exact_micro <= kernel_micro_state_p[7:0];
+			if (pmmu_addr_phys_p[1])
+				rtwr_exact_lo_data <= cpu_dout_p;
+			else
+				rtwr_exact_hi_data <= cpu_dout_p;
+		end
+
+		if (rtwr_fc6_hit) begin
+			rtwr_fc6_seen <= 1;
+			if (rtwr_fc6_hits != 4'hF)
+				rtwr_fc6_hits <= rtwr_fc6_hits + 4'd1;
+			rtwr_fc6_last_addr <= pmmu_addr_phys_p;
+			rtwr_fc6_pc <= kernel_TG68_PC_p;
+			rtwr_fc6_micro <= kernel_micro_state_p[7:0];
+			if (pmmu_addr_phys_p[1])
+				rtwr_fc6_lo_data <= cpu_dout_p;
+			else
+				rtwr_fc6_hi_data <= cpu_dout_p;
+		end
+	end
+end
+
 always @(posedge clk) begin
 	stp_pmmu_tc     <= stp_pmmu_tc_w;
 	stp_pmmu_tt0    <= stp_pmmu_tt0_w;
@@ -982,60 +1160,74 @@ altsource_probe #(
 );
 `endif
 
-// TC write trace probe.  Source bit 0 clears the sticky history.
+// PMMU register write trace probe.  Source bit 0 clears the sticky history.
 `ifdef ENABLE_CPUWRAP_DEBUG_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (10),
 	.instance_id             ("TCWR"),
-	.probe_width             (412),
+	.probe_width             (511),
 	.source_width            (1),
 	.enable_metastability    ("YES")
 ) tcwr_issp (
 	.probe ({
-		tcwr_seen,                  // [411]
-		tcwr_count,                 // [410:403]
-		tcwr_last_value,            // [402:371]
-		tcwr_last_pc,               // [370:339]
-		tcwr_last_exe_pc,           // [338:307]
-		tcwr_last_opcode,           // [306:291]
-		tcwr_last_brief,            // [290:275]
-		tcwr_last_flags,            // [274:267]
-		tcwr_last_micro_state,      // [266:259]
-		tcwr_last_next_micro_state, // [258:251]
-		tcwr_last_part,             // [250]
-		tcwr_enable_seen,           // [249]
-		tcwr_first_enable_value,    // [248:217]
-		tcwr_first_enable_pc,       // [216:185]
-		tcwr_first_enable_opcode,   // [184:169]
-		tcwr_first_enable_brief,    // [168:153]
-		tcwr_disable_seen,          // [152]
-		tcwr_first_disable_value,   // [151:120]
-		tcwr_first_disable_pc,      // [119:88]
-		tcwr_first_disable_opcode,  // [87:72]
-		tcwr_first_disable_brief,   // [71:56]
-		tcwr_first_disable_flags,   // [55:48]
-		stp_pmmu_tc,                // [47:16]
-		kernel_pmmu_pending_flags_p // [15:0]
+		tcwr_seen,                  // [510]
+		tcwr_count,                 // [509:502]
+		tcwr_last_sel,              // [501:497]
+		tcwr_last_part,             // [496]
+		tcwr_last_value,            // [495:464]
+		tcwr_last_pc,               // [463:432]
+		tcwr_last_exe_pc,           // [431:400]
+		tcwr_last_opcode,           // [399:384]
+		tcwr_last_brief,            // [383:368]
+		tcwr_last_flags,            // [367:360]
+		tcwr_last_micro_state,      // [359:352]
+		tcwr_last_next_micro_state, // [351:344]
+		tcwr_last_memaddr,          // [343:312]
+		tcwr_last_a7,               // [311:280]
+		tcwr_enable_seen,           // [279]
+		tcwr_first_enable_value,    // [278:247]
+		tcwr_first_enable_pc,       // [246:215]
+		tcwr_first_enable_opcode,   // [214:199]
+		tcwr_first_enable_brief,    // [198:183]
+		tcwr_disable_seen,          // [182]
+		tcwr_first_disable_value,   // [181:150]
+		tcwr_first_disable_flags,   // [149:142]
+		tcwr_crp_hi_seen,           // [141]
+		tcwr_crp_lo_seen,           // [140]
+		tcwr_srp_hi_seen,           // [139]
+		tcwr_srp_lo_seen,           // [138]
+		tcwr_crp_hi_value,          // [137:106]
+		tcwr_crp_lo_value,          // [105:74]
+		tcwr_srp_hi_value,          // [73:42]
+		tcwr_srp_lo_value,          // [41:10]
+		10'b0                       // [9:0]
 	}),
 	.source (tcwr_issp_source)
 );
 `endif
 
 // PMMU walker descriptor writeback trace. Source bit 0 clears the sticky history.
-// Probe layout (MSB first, 404 bits):
-//   seen[403], count[402:387], last addr/data, first four addr/data,
-//   last write in $400Axxxx, then fault/timeout sticky bits.
+// Probe layout (MSB first, 509 bits):
+//   timeout snapshot/counters [508:404], then legacy PMWR fields [403:0].
 `ifdef ENABLE_CPUWRAP_DEBUG_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (11),
 	.instance_id             ("PMWR"),
-	.probe_width             (404),
+	.probe_width             (509),
 	.source_width            (1),
 	.enable_metastability    ("YES")
 ) pmwr_issp (
 	.probe ({
+		pmwr_timeout_seen,         // [508]
+		pmwr_timeout_state,        // [507:504]
+		pmwr_timeout_cnt,          // [503:492]
+		pmwr_timeout_addr,         // [491:460]
+		pmwr_timeout_ramaddr,      // [459:432]
+		pmwr_timeout_flags,        // [431:416]
+		pmwr_write_ack_count,      // [415:408]
+		pmwr_write_berr_count,     // [407:404]
 		pmwr_seen,                  // [403]
 		pmwr_count,                 // [402:387]
 		pmwr_last_addr,             // [386:355]
@@ -1055,6 +1247,58 @@ altsource_probe #(
 		stp_walker_timeout_latched  // [0]
 	}),
 	.source (pmwr_issp_source)
+);
+`endif
+
+// Root-table CPU write trace. Source bit 0 clears the sticky history.
+// Probe layout (MSB first, 511 bits):
+//   [510:493] page-write summary, [492:385] exact 400022E8 longword,
+//   [384:276] current CRP+FC6 longword, [275:212] current CRP/slot,
+//   [211:20] four newest writes in 40002xxx, [19:0] newest write context.
+`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (13),
+	.instance_id             ("RTWR"),
+	.probe_width             (511),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) rtwr_issp (
+	.probe ({
+		rtwr_page_seen,            // [510]
+		rtwr_page_count,           // [509:494]
+		rtwr_exact_seen,           // [493]
+		rtwr_exact_hits,           // [492:489]
+		rtwr_exact_hi_data,        // [488:473]
+		rtwr_exact_lo_data,        // [472:457]
+		rtwr_exact_last_addr,      // [456:425]
+		rtwr_exact_pc,             // [424:393]
+		rtwr_exact_micro,          // [392:385]
+		rtwr_fc6_seen,             // [384]
+		rtwr_fc6_hits,             // [383:380]
+		rtwr_fc6_hi_data,          // [379:364]
+		rtwr_fc6_lo_data,          // [363:348]
+		rtwr_fc6_last_addr,        // [347:316]
+		rtwr_fc6_pc,               // [315:284]
+		rtwr_fc6_micro,            // [283:276]
+		stp_pmmu_crp_lo,           // [275:244]
+		rtwr_fc6_addr,             // [243:212]
+		rtwr_last0_addr,           // [211:180]
+		rtwr_last0_data,           // [179:164]
+		rtwr_last1_addr,           // [163:132]
+		rtwr_last1_data,           // [131:116]
+		rtwr_last2_addr,           // [115:84]
+		rtwr_last2_data,           // [83:68]
+		rtwr_last3_addr,           // [67:36]
+		rtwr_last3_data,           // [35:20]
+		rtwr_last_flags,           // [19:12]
+		rtwr_last_micro,           // [11:4]
+		rtwr_last_uds,             // [3]
+		rtwr_last_lds,             // [2]
+		rtwr_last_ramready,        // [1]
+		rtwr_last_mmu_enabled      // [0]
+	}),
+	.source (rtwr_issp_source)
 );
 `endif
 
@@ -1161,12 +1405,14 @@ wire [0:0] rted_issp_source;
 wire [0:0] trpd_issp_source;
 wire [0:0] haltd_issp_source;
 wire [0:0] stkd_issp_source;
+wire [0:0] fbrd_issp_source;
 `ifndef ENABLE_CPUWRAP_DEBUG_ISSP
 assign fmtd_issp_source = 1'b0;
 assign rted_issp_source = 1'b0;
 assign trpd_issp_source = 1'b0;
 assign haltd_issp_source = 1'b0;
 assign stkd_issp_source = 1'b0;
+assign fbrd_issp_source = 1'b0;
 `endif
 
 // RTE microstate encoding from TG68K_Pack.vhd.
@@ -1174,6 +1420,7 @@ localparam [7:0] MS_RTE1 = 8'd44;
 localparam [7:0] MS_RTE2 = 8'd45;
 localparam [7:0] MS_RTE3 = 8'd46;
 localparam [7:0] MS_RTE4 = 8'd47;
+localparam [7:0] MS_RTE5 = 8'd48;
 localparam [7:0] MS_RTE6 = 8'd49;
 localparam [7:0] MS_TRAP0 = 8'd53;
 localparam [7:0] MS_TRAP3 = 8'd56;
@@ -1215,6 +1462,32 @@ localparam [7:0] MS_TRAP3 = 8'd56;
 `CPUWRAP_DEBUG_KEEP reg  [7:0] rted_r3_micro;
 `CPUWRAP_DEBUG_KEEP reg  [1:0] rted_r3_state;
 `CPUWRAP_DEBUG_KEEP reg        rted_r3_lw;
+
+`CPUWRAP_DEBUG_KEEP reg        fbrd_seen;
+`CPUWRAP_DEBUG_KEEP reg        fbrd_active;
+`CPUWRAP_DEBUG_KEEP reg        fbrd_done;
+`CPUWRAP_DEBUG_KEEP reg        fbrd_fix_write_seen;
+`CPUWRAP_DEBUG_KEEP reg        fbrd_version_error_seen;
+`CPUWRAP_DEBUG_KEEP reg  [4:0] fbrd_read_count;
+`CPUWRAP_DEBUG_KEEP reg  [3:0] fbrd_seq_count;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_entry_pc;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_entry_a7;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] fbrd_entry_flags;
+`CPUWRAP_DEBUG_KEEP reg [15:0] fbrd_format_word;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_l0_state_ssw;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_fault_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_opcode_long;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_dob;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_stageb_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_dib;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_state01;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_state2_version;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_final_pc;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_final_a7;
+`CPUWRAP_DEBUG_KEEP reg [15:0] fbrd_fix_ssw;
+`CPUWRAP_DEBUG_KEEP reg [15:0] fbrd_fix_opcode;
+`CPUWRAP_DEBUG_KEEP reg [15:0] fbrd_mmusr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] fbrd_saved_addr;
 
 `CPUWRAP_DEBUG_KEEP reg        trpd_seen;
 `CPUWRAP_DEBUG_KEEP reg        trpd_active;
@@ -1490,8 +1763,8 @@ altsource_probe #(
 		stp_t0_latched,                // [50]
 		stp_t0_cause_directSR,         // [49]
 		stp_t0_cause_to_SR,            // [48]
-		stp_t0_pc,                     // [47:16]   32
-		stp_t0_opcode,                 // [15:0]    16
+			stp_t0_pc,                     // [47:16]   32
+			stp_t0_opcode                  // [15:0]    16
 	}),
 	.source (cpus_issp_source)
 	);
@@ -1708,11 +1981,11 @@ always @(posedge clk) begin
 		rted_r3_state    <= 0;
 		rted_r3_lw       <= 0;
 	end else if (!fmt_err_latched_p) begin
-		if (rted_start) begin
-			rted_seen        <= 1;
-			rted_active      <= 1;
-			rted_done        <= 0;
-			rted_read_count  <= 0;
+			if (rted_start) begin
+				rted_seen        <= 1;
+				rted_active      <= 1;
+				rted_done        <= 0;
+				rted_read_count  <= 0;
 			rted_seq_count   <= rted_seq_count + 1'b1;
 			rted_entry_pc    <= kernel_TG68_PC_p;
 			rted_entry_a7    <= kernel_regfile_a7_p;
@@ -1739,10 +2012,22 @@ always @(posedge clk) begin
 			rted_r3_log      <= 0;
 			rted_r3_phys     <= 0;
 			rted_r3_din      <= 0;
-			rted_r3_micro    <= 0;
-			rted_r3_state    <= 0;
-			rted_r3_lw       <= 0;
-		end
+				rted_r3_micro    <= 0;
+				rted_r3_state    <= 0;
+				rted_r3_lw       <= 0;
+				// RTE decode completes the SR stack read on the same edge that
+				// advances to RTE1. Capture it here; waiting for rted_active
+				// would miss the first word and shift the whole trace.
+				if (kernel_state_p == 2'b10) begin
+					rted_read_count <= 3'd1;
+					rted_r0_log     <= pmmu_addr_log_p;
+					rted_r0_phys    <= pmmu_addr_phys_p;
+					rted_r0_din     <= cpu_din;
+					rted_r0_micro   <= kernel_micro_state_p[7:0];
+					rted_r0_state   <= kernel_state_p;
+					rted_r0_lw      <= kernel_clkena_lw_p;
+				end
+			end
 		if (rted_seen && (kernel_micro_state_p[7:0] == MS_RTE4)) begin
 			rted_after_pc <= kernel_TG68_PC_p;
 			rted_done     <= 1;
@@ -1787,6 +2072,103 @@ always @(posedge clk) begin
 			endcase
 			if (rted_read_count != 3'd4) begin
 				rted_read_count <= rted_read_count + 1'b1;
+			end
+		end
+	end
+end
+
+wire fbrd_start = cpu_clkena_in &&
+                  (kernel_micro_state_p[7:0] == MS_RTE4) &&
+                  (kernel_rte_format_word_p[15:12] == 4'hB) &&
+                  !fbrd_seen;
+wire fbrd_read_complete = fbrd_active && cpu_clkena_in &&
+                          kernel_clkena_lw_p &&
+                          (kernel_micro_state_p[7:0] == MS_RTE5);
+
+always @(posedge clk) begin
+	if (~reset || fbrd_issp_source[0] || fmtd_issp_source[0]) begin
+		fbrd_seen               <= 0;
+		fbrd_active             <= 0;
+		fbrd_done               <= 0;
+		fbrd_fix_write_seen     <= 0;
+		fbrd_version_error_seen <= 0;
+		fbrd_read_count         <= 0;
+		fbrd_seq_count          <= 0;
+		fbrd_entry_pc           <= 0;
+		fbrd_entry_a7           <= 0;
+		fbrd_entry_flags        <= 0;
+		fbrd_format_word        <= 0;
+		fbrd_l0_state_ssw       <= 0;
+		fbrd_fault_addr         <= 0;
+		fbrd_opcode_long        <= 0;
+		fbrd_dob                <= 0;
+		fbrd_stageb_addr        <= 0;
+		fbrd_dib                <= 0;
+		fbrd_state01            <= 0;
+		fbrd_state2_version     <= 0;
+		fbrd_final_pc           <= 0;
+		fbrd_final_a7           <= 0;
+		fbrd_fix_ssw            <= 0;
+		fbrd_fix_opcode         <= 0;
+		fbrd_mmusr              <= 0;
+		fbrd_saved_addr         <= 0;
+	end else begin
+		if (fbrd_start) begin
+			fbrd_seen               <= 1;
+			fbrd_active             <= 1;
+			fbrd_done               <= 0;
+			fbrd_fix_write_seen     <= 0;
+			fbrd_version_error_seen <= 0;
+			fbrd_read_count         <= 0;
+			fbrd_seq_count          <= fbrd_seq_count + 1'b1;
+			fbrd_entry_pc           <= kernel_TG68_PC_p;
+			fbrd_entry_a7           <= kernel_regfile_a7_p;
+			fbrd_entry_flags        <= kernel_FlagsSR_p;
+			fbrd_format_word        <= kernel_rte_format_word_p;
+			fbrd_l0_state_ssw       <= 0;
+			fbrd_fault_addr         <= 0;
+			fbrd_opcode_long        <= 0;
+			fbrd_dob                <= 0;
+			fbrd_stageb_addr        <= 0;
+			fbrd_dib                <= 0;
+			fbrd_state01            <= 0;
+			fbrd_state2_version     <= 0;
+			fbrd_final_pc           <= 0;
+			fbrd_final_a7           <= 0;
+			fbrd_fix_ssw            <= 0;
+			fbrd_fix_opcode         <= 0;
+			fbrd_mmusr              <= 0;
+			fbrd_saved_addr         <= 0;
+		end
+		if (fbrd_active && kernel_rte_mmu_fix_write_p) begin
+			fbrd_fix_write_seen <= 1;
+		end
+		if (fbrd_active && kernel_rte_format_b_version_error_p) begin
+			fbrd_version_error_seen <= 1;
+		end
+		if (fbrd_read_complete) begin
+			case (fbrd_read_count)
+				5'd0:  fbrd_l0_state_ssw   <= kernel_data_read_p; // SP+$08: state/SSW
+				5'd2:  fbrd_fault_addr     <= kernel_data_read_p; // SP+$10
+				5'd3:  fbrd_opcode_long    <= kernel_data_read_p; // SP+$14
+				5'd4:  fbrd_dob            <= kernel_data_read_p; // SP+$18
+				5'd7:  fbrd_stageb_addr    <= kernel_data_read_p; // SP+$24
+				5'd9:  fbrd_dib            <= kernel_data_read_p; // SP+$2C
+				5'd10: fbrd_state01        <= kernel_data_read_p; // SP+$30
+				5'd11: fbrd_state2_version <= kernel_data_read_p; // SP+$34/$36
+				default: ;
+			endcase
+			if (fbrd_read_count == 5'd20) begin
+				fbrd_active     <= 0;
+				fbrd_done       <= 1;
+				fbrd_final_pc   <= kernel_TG68_PC_p;
+				fbrd_final_a7   <= kernel_regfile_a7_p;
+				fbrd_fix_ssw    <= kernel_rte_mmu_fix_ssw_p;
+				fbrd_fix_opcode <= kernel_rte_mmu_fix_opcode_p;
+				fbrd_mmusr      <= stp_fault_status_w;
+				fbrd_saved_addr <= stp_saved_addr_w;
+			end else begin
+				fbrd_read_count <= fbrd_read_count + 1'b1;
 			end
 		end
 	end
@@ -2173,6 +2555,50 @@ altsource_probe #(
 );
 `endif
 
+// Format-B RTE trace probe. Captures the first long bus-fault frame restored
+// by RTE, including the fields mmu.library/WinUAE use to complete or rerun
+// the faulted MMU data access.
+`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (12),
+	.instance_id             ("FBRD"),
+	.probe_width             (511),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) fbrd_issp (
+	.probe ({
+		fbrd_seen,               // [510]
+		fbrd_active,             // [509]
+		fbrd_done,               // [508]
+		fbrd_fix_write_seen,     // [507]
+		fbrd_version_error_seen, // [506]
+		fbrd_read_count,         // [505:501]
+		fbrd_seq_count,          // [500:497]
+		fbrd_entry_pc,           // [496:465]
+		fbrd_entry_a7,           // [464:433]
+		fbrd_entry_flags,        // [432:425]
+		fbrd_format_word,        // [424:409]
+		fbrd_l0_state_ssw,       // [408:377]
+		fbrd_fault_addr,         // [376:345]
+		fbrd_opcode_long,        // [344:313]
+		fbrd_dob,                // [312:281]
+		fbrd_stageb_addr,        // [280:249]
+		fbrd_dib,                // [248:217]
+		fbrd_state01,            // [216:185]
+		fbrd_state2_version,     // [184:153]
+		fbrd_final_pc,           // [152:121]
+		fbrd_final_a7,           // [120:89]
+		fbrd_fix_ssw,            // [88:73]
+		fbrd_fix_opcode,         // [72:57]
+		fbrd_mmusr,              // [56:41]
+		fbrd_saved_addr,         // [40:9]
+		9'b0                     // [8:0]
+	}),
+	.source (fbrd_issp_source)
+);
+`endif
+
 // Trap-frame write trace probe. It arms on the short F-line format/vector word
 // ($002C) and captures the four bus writes that build the frame:
 // format/vector, PC high, PC low, SR.
@@ -2450,6 +2876,11 @@ cpu_inst_p
   .debug_a7_is_msp(kernel_a7_is_msp_p),
   .debug_interrupt_mode(kernel_interrupt_mode_p),
   .debug_rte_saved_mbit(kernel_rte_saved_mbit_p),
+  .debug_rte_format_word(kernel_rte_format_word_p),
+  .debug_rte_mmu_fix_ssw(kernel_rte_mmu_fix_ssw_p),
+  .debug_rte_mmu_fix_opcode(kernel_rte_mmu_fix_opcode_p),
+  .debug_rte_mmu_fix_write(kernel_rte_mmu_fix_write_p),
+  .debug_rte_format_b_version_error(kernel_rte_format_b_version_error_p),
   .debug_trap_vector(kernel_trap_vector_p),
   .debug_micro_state(kernel_micro_state_p),
   .debug_next_micro_state(kernel_next_ms_p),
@@ -2546,7 +2977,7 @@ fx68k cpu_inst_o
 generate
 if (USE_68030_CACHE) begin : gen_68030_cache
 
-	localparam DIAG_DISABLE_030_CACHE = 1'b1;
+	localparam DIAG_DISABLE_030_CACHE = 1'b0;
 
 	// Cache enable logic - independent control for instruction and data caches.
 	// The existing OSD slot with cpucfg=10 is reused for 68030; the logic keys off cpucfg[1].
@@ -2751,6 +3182,24 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 		else if (!walker_active && !pmmu_suppress_bus && ramsel)
 			stale_ram_pending <= 1;  // CPU has SDRAM cycle in-flight
 	end
+	wire [15:0] pmwr_timeout_flags_next = {
+		walker_mem_ready,
+		ramready,
+		chipready,
+		fastchip_ready,
+		stale_ram_pending,
+		walker_fast_ram,
+		walker_chip_ram,
+		sel_z3ram0_walker,
+		sel_z3ram1_walker,
+		sel_z2ram_walker,
+		sel_zram_walker,
+		walker_read_ready_armed,
+		walker_write_ready_armed,
+		pmmu_walker_req_p,
+		pmmu_walker_we_p,
+		ramsel
+	};
 
 	localparam WALKER_IDLE       = 4'd0;
 	localparam WALKER_START      = 4'd1;
@@ -2825,6 +3274,14 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 			pmwr_400a_seen <= 0;
 			pmwr_400a_addr <= 0;
 			pmwr_400a_data <= 0;
+			pmwr_timeout_seen <= 0;
+			pmwr_timeout_state <= 0;
+			pmwr_timeout_cnt <= 0;
+			pmwr_timeout_addr <= 0;
+			pmwr_timeout_ramaddr <= 0;
+			pmwr_timeout_flags <= 0;
+			pmwr_write_ack_count <= 0;
+			pmwr_write_berr_count <= 0;
 		end else if (pmwr_issp_source[0]) begin
 			pmwr_seen <= 0;
 			pmwr_count <= 0;
@@ -2841,6 +3298,14 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 			pmwr_400a_seen <= 0;
 			pmwr_400a_addr <= 0;
 			pmwr_400a_data <= 0;
+			pmwr_timeout_seen <= 0;
+			pmwr_timeout_state <= 0;
+			pmwr_timeout_cnt <= 0;
+			pmwr_timeout_addr <= 0;
+			pmwr_timeout_ramaddr <= 0;
+			pmwr_timeout_flags <= 0;
+			pmwr_write_ack_count <= 0;
+			pmwr_write_berr_count <= 0;
 		end else begin
 			case (walker_state)
 				WALKER_IDLE: begin
@@ -2914,6 +3379,14 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					end
 					// BUG #424 FIX: Wrapper-level timeout escape
 					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						if (!pmwr_timeout_seen) begin
+							pmwr_timeout_seen <= 1;
+							pmwr_timeout_state <= walker_state;
+							pmwr_timeout_cnt <= walker_timeout_cnt;
+							pmwr_timeout_addr <= {walker_addr_word, 1'b0};
+							pmwr_timeout_ramaddr <= walker_ramaddr;
+							pmwr_timeout_flags <= pmwr_timeout_flags_next;
+						end
 						walker_timeout_error <= 1;
 						pmmu_walker_berr_p <= 1;
 						pmmu_walker_data_p <= 32'h0;
@@ -2950,6 +3423,14 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
 						// BUG #156 FIX: Timeout is a bus error - assert BERR signal
 						// MC68030 spec: Bus errors during table walk set MMUSR B bit
+						if (!pmwr_timeout_seen) begin
+							pmwr_timeout_seen <= 1;
+							pmwr_timeout_state <= walker_state;
+							pmwr_timeout_cnt <= walker_timeout_cnt;
+							pmwr_timeout_addr <= {walker_addr_word, 1'b0};
+							pmwr_timeout_ramaddr <= walker_ramaddr;
+							pmwr_timeout_flags <= pmwr_timeout_flags_next;
+						end
 						walker_timeout_error <= 1;
 						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
 						pmmu_walker_data_p <= 32'h0;  // Data doesn't matter when BERR is set
@@ -3001,6 +3482,14 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// BUG #138: Check for wrapper-level timeout
 					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
 						// BUG #156 FIX: Timeout is a bus error - assert BERR signal
+						if (!pmwr_timeout_seen) begin
+							pmwr_timeout_seen <= 1;
+							pmwr_timeout_state <= walker_state;
+							pmwr_timeout_cnt <= walker_timeout_cnt;
+							pmwr_timeout_addr <= {walker_addr_word, 1'b0};
+							pmwr_timeout_ramaddr <= walker_ramaddr;
+							pmwr_timeout_flags <= pmwr_timeout_flags_next;
+						end
 						walker_timeout_error <= 1;
 						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
 						pmmu_walker_data_p <= 32'h0;
@@ -3044,6 +3533,16 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						walker_state <= WALKER_DONE;
 					end
 					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						if (!pmwr_timeout_seen) begin
+							pmwr_timeout_seen <= 1;
+							pmwr_timeout_state <= walker_state;
+							pmwr_timeout_cnt <= walker_timeout_cnt;
+							pmwr_timeout_addr <= {walker_addr_word, 1'b0};
+							pmwr_timeout_ramaddr <= walker_ramaddr;
+							pmwr_timeout_flags <= pmwr_timeout_flags_next;
+						end
+						if (pmwr_write_berr_count != 4'hF)
+							pmwr_write_berr_count <= pmwr_write_berr_count + 1'b1;
 						walker_timeout_error <= 1;
 						pmmu_walker_berr_p <= 1;
 						walker_state <= WALKER_DONE;
@@ -3066,6 +3565,16 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// Wait for write to complete
 					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
 						// BUG #156 FIX: Timeout is a bus error
+						if (!pmwr_timeout_seen) begin
+							pmwr_timeout_seen <= 1;
+							pmwr_timeout_state <= walker_state;
+							pmwr_timeout_cnt <= walker_timeout_cnt;
+							pmwr_timeout_addr <= {walker_addr_word, 1'b0};
+							pmwr_timeout_ramaddr <= walker_ramaddr;
+							pmwr_timeout_flags <= pmwr_timeout_flags_next;
+						end
+						if (pmwr_write_berr_count != 4'hF)
+							pmwr_write_berr_count <= pmwr_write_berr_count + 1'b1;
 						walker_timeout_error <= 1;
 						pmmu_walker_berr_p <= 1;
 						walker_state <= WALKER_DONE;
@@ -3109,6 +3618,16 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// Wait for write to complete
 						else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
 							// BUG #156 FIX: Timeout is a bus error
+							if (!pmwr_timeout_seen) begin
+								pmwr_timeout_seen <= 1;
+								pmwr_timeout_state <= walker_state;
+								pmwr_timeout_cnt <= walker_timeout_cnt;
+								pmwr_timeout_addr <= {walker_addr_word, 1'b0};
+								pmwr_timeout_ramaddr <= walker_ramaddr;
+								pmwr_timeout_flags <= pmwr_timeout_flags_next;
+							end
+							if (pmwr_write_berr_count != 4'hF)
+								pmwr_write_berr_count <= pmwr_write_berr_count + 1'b1;
 							walker_timeout_error <= 1;
 							pmmu_walker_berr_p <= 1;
 							walker_state <= WALKER_DONE;
@@ -3118,6 +3637,8 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 							end else if (walker_write_ready_armed) begin
 								// Write complete
 								walker_write_ready_armed <= 0;
+								if (pmwr_write_ack_count != 8'hFF)
+									pmwr_write_ack_count <= pmwr_write_ack_count + 1'b1;
 								pmmu_walker_ack_p <= 1;
 								walker_state <= WALKER_DONE;
 							end else begin

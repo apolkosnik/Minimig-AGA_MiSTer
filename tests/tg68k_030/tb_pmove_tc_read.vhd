@@ -5,7 +5,7 @@
 --
 -- MC68030 TC Register format (32 bits):
 --   Bit 31: E (Enable)
---   Bits 30-26: Reserved (implementation stores as-is)
+--   Bits 30-26: Reserved (must be 0)
 --   Bit 25: SRE (Supervisor Root Enable)
 --   Bit 24: FCL (Function Code Lookup)
 --   Bits 23-20: PS (Page Size) - MUST be 8-15 for valid config when E=1
@@ -241,6 +241,14 @@ begin
       wait_cycles(1);
     end procedure;
 
+    procedure ack_mmu_config_error is
+    begin
+      mmu_config_ack <= '1';
+      wait_cycles(1);
+      mmu_config_ack <= '0';
+      wait_cycles(1);
+    end procedure;
+
     procedure test_write_read(
       write_val : std_logic_vector(31 downto 0);
       expect_val : std_logic_vector(31 downto 0);
@@ -336,13 +344,13 @@ begin
     pmove_read_tc;
     report_test("After modify (8KB)", reg_rdat = TC_8KB_VALID);
 
-    -- TEST 12: Reserved bits stored as-is (implementation behavior)
-    write(l, string'("TEST 12: Reserved Bits Stored"));
+    -- TEST 12: Reserved bits masked to zero
+    write(l, string'("TEST 12: Reserved Bits Masked"));
     writeline(output, l);
     -- Write with reserved bits set but valid PS=12
     pmove_write_tc(x"FFC44444");
     pmove_read_tc;
-    report_test("Reserved bits stored as-is", reg_rdat = x"FFC44444");
+    report_test("Reserved bits masked to zero", reg_rdat = x"83C44444");
 
     -- TEST 13: Disable after enable
     write(l, string'("TEST 13: Disable After Enable"));
@@ -378,6 +386,9 @@ begin
     pmove_write_tc(x"80000000");  -- PS=0 is invalid
     pmove_read_tc;
     report_test("E cleared for invalid PS", reg_rdat(31) = '0');
+    report_test("MMU configuration exception latched", mmu_config_err = '1');
+    ack_mmu_config_error;
+    report_test("MMU configuration exception acknowledged", mmu_config_err = '0');
 
     -- TEST 17: Field isolation - verify PS field
     write(l, string'("TEST 17: PS Field Verification"));
@@ -410,8 +421,10 @@ begin
     write(l, string'("TEST 20: tc_enable Output"));
     writeline(output, l);
     pmove_write_tc(TC_4KB_VALID);
+    wait_cycles(1);
     report_test("tc_enable=1 when E=1", tc_enable = '1');
     pmove_write_tc(x"00000000");
+    wait_cycles(1);
     report_test("tc_enable=0 when E=0", tc_enable = '0');
 
     -- Summary
