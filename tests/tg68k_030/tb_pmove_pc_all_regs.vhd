@@ -2,7 +2,7 @@
 -- Comprehensive PMOVE PC increment test for all 68030 PMMU registers
 -- Tests: TC, TT0, TT1, CRP, SRP, MMUSR
 -- Directions: MMU->memory, memory->MMU
--- Addressing modes: Dn, (An), (An)+, -(An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
+-- Addressing modes: (An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
 -- Uses actual instruction decode and execution through TG68KdotC_Kernel
 -- CPU="10" (68020 mode with PMMU enabled)
 
@@ -189,13 +189,13 @@ architecture behavioral of tb_pmove_pc_all_regs is
 
         -- Add displacement/address words based on EA mode
         case ea_mode is
-            when "000" =>  -- Dn - no extra words
+            when "000" =>  -- Invalid for MC68030 PMOVE - no extra words
                 null;
             when "010" =>  -- (An) - no extra words
                 null;
-            when "011" =>  -- (An)+ - no extra words
+            when "011" =>  -- Invalid for MC68030 PMOVE - no extra words
                 null;
-            when "100" =>  -- -(An) - no extra words
+            when "100" =>  -- Invalid for MC68030 PMOVE - no extra words
                 null;
             when "101" =>  -- (d16,An) - 1 displacement word
                 emit_word(pc, disp_or_addr);
@@ -424,11 +424,11 @@ begin
     begin
         write(l, string'("=============================================="));
         writeline(output, l);
-        write(l, string'("PMOVE PC INCREMENT TEST - ALL REGISTERS"));
+        write(l, string'("PMOVE PC INCREMENT TEST - WINUAE MC68030 EAS"));
         writeline(output, l);
         write(l, string'("Registers: TC, TT0, TT1, CRP, SRP, MMUSR"));
         writeline(output, l);
-        write(l, string'("Modes: Dn, (An), (An)+, -(An), (d16,An),"));
+        write(l, string'("Modes: (An), (d16,An),"));
         writeline(output, l);
         write(l, string'("       (d8,An,Xn), (xxx).W, (xxx).L"));
         writeline(output, l);
@@ -496,8 +496,6 @@ begin
 
         -- TC: MMU->mem with various EA modes
         emit_and_record(pc, REG_TC, "TC   ", DIR_MMU_TO_MEM, "MMU>mem", "010", "000", "(An)      ", x"0000", x"0000");
-        emit_and_record(pc, REG_TC, "TC   ", DIR_MMU_TO_MEM, "MMU>mem", "011", "000", "(An)+     ", x"0000", x"0000");
-        emit_and_record(pc, REG_TC, "TC   ", DIR_MMU_TO_MEM, "MMU>mem", "100", "000", "-(An)     ", x"0000", x"0000");
         emit_and_record(pc, REG_TC, "TC   ", DIR_MMU_TO_MEM, "MMU>mem", "101", "000", "(d16,An)  ", x"0010", x"0000");
         emit_and_record(pc, REG_TC, "TC   ", DIR_MMU_TO_MEM, "MMU>mem", "110", "000", "(d8,An,Xn)", x"0008", x"0000");
         emit_and_record(pc, REG_TC, "TC   ", DIR_MMU_TO_MEM, "MMU>mem", "111", "000", "(xxx).W   ", x"2000", x"0000");
@@ -505,8 +503,6 @@ begin
 
         -- TC: mem->MMU with various EA modes
         emit_and_record(pc, REG_TC, "TC   ", DIR_MEM_TO_MMU, "mem>MMU", "010", "001", "(An)      ", x"0000", x"0000");
-        emit_and_record(pc, REG_TC, "TC   ", DIR_MEM_TO_MMU, "mem>MMU", "011", "001", "(An)+     ", x"0000", x"0000");
-        emit_and_record(pc, REG_TC, "TC   ", DIR_MEM_TO_MMU, "mem>MMU", "100", "001", "-(An)     ", x"0000", x"0000");
         emit_and_record(pc, REG_TC, "TC   ", DIR_MEM_TO_MMU, "mem>MMU", "101", "001", "(d16,An)  ", x"0020", x"0000");
         emit_and_record(pc, REG_TC, "TC   ", DIR_MEM_TO_MMU, "mem>MMU", "110", "001", "(d8,An,Xn)", x"0010", x"0000");
         emit_and_record(pc, REG_TC, "TC   ", DIR_MEM_TO_MMU, "mem>MMU", "111", "000", "(xxx).W   ", x"2000", x"0000");
@@ -545,16 +541,12 @@ begin
         writeline(output, l);
 
         emit_and_record(pc, REG_CRP, "CRP  ", DIR_MMU_TO_MEM, "MMU>mem", "010", "000", "(An)      ", x"0000", x"0000");
-        emit_and_record(pc, REG_CRP, "CRP  ", DIR_MMU_TO_MEM, "MMU>mem", "011", "000", "(An)+     ", x"0000", x"0000");
-        emit_and_record(pc, REG_CRP, "CRP  ", DIR_MMU_TO_MEM, "MMU>mem", "100", "000", "-(An)     ", x"0000", x"0000");
         emit_and_record(pc, REG_CRP, "CRP  ", DIR_MMU_TO_MEM, "MMU>mem", "101", "000", "(d16,An)  ", x"0070", x"0000");
         emit_and_record(pc, REG_CRP, "CRP  ", DIR_MMU_TO_MEM, "MMU>mem", "110", "000", "(d8,An,Xn)", x"0008", x"0000");
         emit_and_record(pc, REG_CRP, "CRP  ", DIR_MMU_TO_MEM, "MMU>mem", "111", "000", "(xxx).W   ", x"2000", x"0000");
         emit_and_record(pc, REG_CRP, "CRP  ", DIR_MMU_TO_MEM, "MMU>mem", "111", "001", "(xxx).L   ", x"2000", x"0000");
 
         emit_and_record(pc, REG_CRP, "CRP  ", DIR_MEM_TO_MMU, "mem>MMU", "010", "001", "(An)      ", x"0000", x"0000");
-        emit_and_record(pc, REG_CRP, "CRP  ", DIR_MEM_TO_MMU, "mem>MMU", "011", "001", "(An)+     ", x"0000", x"0000");
-        emit_and_record(pc, REG_CRP, "CRP  ", DIR_MEM_TO_MMU, "mem>MMU", "100", "001", "-(An)     ", x"0000", x"0000");
         emit_and_record(pc, REG_CRP, "CRP  ", DIR_MEM_TO_MMU, "mem>MMU", "101", "001", "(d16,An)  ", x"0080", x"0000");
         emit_and_record(pc, REG_CRP, "CRP  ", DIR_MEM_TO_MMU, "mem>MMU", "110", "001", "(d8,An,Xn)", x"0010", x"0000");
         emit_and_record(pc, REG_CRP, "CRP  ", DIR_MEM_TO_MMU, "mem>MMU", "111", "000", "(xxx).W   ", x"2000", x"0000");
@@ -567,16 +559,12 @@ begin
         writeline(output, l);
 
         emit_and_record(pc, REG_SRP, "SRP  ", DIR_MMU_TO_MEM, "MMU>mem", "010", "000", "(An)      ", x"0000", x"0000");
-        emit_and_record(pc, REG_SRP, "SRP  ", DIR_MMU_TO_MEM, "MMU>mem", "011", "000", "(An)+     ", x"0000", x"0000");
-        emit_and_record(pc, REG_SRP, "SRP  ", DIR_MMU_TO_MEM, "MMU>mem", "100", "000", "-(An)     ", x"0000", x"0000");
         emit_and_record(pc, REG_SRP, "SRP  ", DIR_MMU_TO_MEM, "MMU>mem", "101", "000", "(d16,An)  ", x"0090", x"0000");
         emit_and_record(pc, REG_SRP, "SRP  ", DIR_MMU_TO_MEM, "MMU>mem", "110", "000", "(d8,An,Xn)", x"0008", x"0000");
         emit_and_record(pc, REG_SRP, "SRP  ", DIR_MMU_TO_MEM, "MMU>mem", "111", "000", "(xxx).W   ", x"2000", x"0000");
         emit_and_record(pc, REG_SRP, "SRP  ", DIR_MMU_TO_MEM, "MMU>mem", "111", "001", "(xxx).L   ", x"2000", x"0000");
 
         emit_and_record(pc, REG_SRP, "SRP  ", DIR_MEM_TO_MMU, "mem>MMU", "010", "001", "(An)      ", x"0000", x"0000");
-        emit_and_record(pc, REG_SRP, "SRP  ", DIR_MEM_TO_MMU, "mem>MMU", "011", "001", "(An)+     ", x"0000", x"0000");
-        emit_and_record(pc, REG_SRP, "SRP  ", DIR_MEM_TO_MMU, "mem>MMU", "100", "001", "-(An)     ", x"0000", x"0000");
         emit_and_record(pc, REG_SRP, "SRP  ", DIR_MEM_TO_MMU, "mem>MMU", "101", "001", "(d16,An)  ", x"00A0", x"0000");
         emit_and_record(pc, REG_SRP, "SRP  ", DIR_MEM_TO_MMU, "mem>MMU", "110", "001", "(d8,An,Xn)", x"0010", x"0000");
         emit_and_record(pc, REG_SRP, "SRP  ", DIR_MEM_TO_MMU, "mem>MMU", "111", "000", "(xxx).W   ", x"2000", x"0000");
@@ -590,43 +578,10 @@ begin
         writeline(output, l);
 
         emit_and_record(pc, REG_MMUSR, "MMUSR", DIR_MMU_TO_MEM, "MMU>mem", "010", "000", "(An)      ", x"0000", x"0000");
-        emit_and_record(pc, REG_MMUSR, "MMUSR", DIR_MMU_TO_MEM, "MMU>mem", "011", "000", "(An)+     ", x"0000", x"0000");
-        emit_and_record(pc, REG_MMUSR, "MMUSR", DIR_MMU_TO_MEM, "MMU>mem", "100", "000", "-(An)     ", x"0000", x"0000");
         emit_and_record(pc, REG_MMUSR, "MMUSR", DIR_MMU_TO_MEM, "MMU>mem", "101", "000", "(d16,An)  ", x"00B0", x"0000");
         emit_and_record(pc, REG_MMUSR, "MMUSR", DIR_MMU_TO_MEM, "MMU>mem", "110", "000", "(d8,An,Xn)", x"0008", x"0000");
         emit_and_record(pc, REG_MMUSR, "MMUSR", DIR_MMU_TO_MEM, "MMU>mem", "111", "000", "(xxx).W   ", x"2000", x"0000");
         emit_and_record(pc, REG_MMUSR, "MMUSR", DIR_MMU_TO_MEM, "MMU>mem", "111", "001", "(xxx).L   ", x"2000", x"0000");
-
-        -- ============================================================
-        -- Dn MODE TESTS (Special - uses data register)
-        -- Only for TC, TT0, TT1 (32-bit) and MMUSR (16-bit)
-        -- CRP/SRP Dn mode uses Dn:Dn+1 pair
-        -- ============================================================
-        write(l, string'("Dn Mode Tests:"));
-        writeline(output, l);
-
-        -- TC Dn modes
-        emit_and_record(pc, REG_TC, "TC   ", DIR_MMU_TO_MEM, "MMU>mem", "000", "000", "D0        ", x"0000", x"0000");
-        emit_and_record(pc, REG_TC, "TC   ", DIR_MEM_TO_MMU, "mem>MMU", "000", "000", "D0        ", x"0000", x"0000");
-
-        -- TT0 Dn modes
-        emit_and_record(pc, REG_TT0, "TT0  ", DIR_MMU_TO_MEM, "MMU>mem", "000", "001", "D1        ", x"0000", x"0000");
-        emit_and_record(pc, REG_TT0, "TT0  ", DIR_MEM_TO_MMU, "mem>MMU", "000", "001", "D1        ", x"0000", x"0000");
-
-        -- TT1 Dn modes
-        emit_and_record(pc, REG_TT1, "TT1  ", DIR_MMU_TO_MEM, "MMU>mem", "000", "010", "D2        ", x"0000", x"0000");
-        emit_and_record(pc, REG_TT1, "TT1  ", DIR_MEM_TO_MMU, "mem>MMU", "000", "010", "D2        ", x"0000", x"0000");
-
-        -- CRP Dn modes (uses D0:D1 pair)
-        emit_and_record(pc, REG_CRP, "CRP  ", DIR_MMU_TO_MEM, "MMU>mem", "000", "000", "D0:D1     ", x"0000", x"0000");
-        emit_and_record(pc, REG_CRP, "CRP  ", DIR_MEM_TO_MMU, "mem>MMU", "000", "000", "D0:D1     ", x"0000", x"0000");
-
-        -- SRP Dn modes (uses D2:D3 pair)
-        emit_and_record(pc, REG_SRP, "SRP  ", DIR_MMU_TO_MEM, "MMU>mem", "000", "010", "D2:D3     ", x"0000", x"0000");
-        emit_and_record(pc, REG_SRP, "SRP  ", DIR_MEM_TO_MMU, "mem>MMU", "000", "010", "D2:D3     ", x"0000", x"0000");
-
-        -- MMUSR Dn mode
-        emit_and_record(pc, REG_MMUSR, "MMUSR", DIR_MMU_TO_MEM, "MMU>mem", "000", "100", "D4        ", x"0000", x"0000");
 
         -- End program with STOP
         emit_word(pc, x"4E72");  -- STOP #imm

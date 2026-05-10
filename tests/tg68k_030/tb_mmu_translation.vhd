@@ -181,13 +181,12 @@ architecture behavioral of tb_mmu_translation is
         m(128) := x"F038"; m(129) := x"4C00"; m(130) := x"1080";
         -- NOP padding to maintain instruction indices for subsequent code
         m(131) := x"4E71"; m(132) := x"4E71";
-        -- MOVE.L #$80C07760,D0     ; TC: E=1, PS=12, IS=0, TIA=7, TIB=7, TIC=6, TID=0
-        m(133) := x"203C"; m(134) := x"80C0"; m(135) := x"7760";
         -- PFLUSHA                   ; Clear ATC before enabling MMU
-        m(136) := x"F000"; m(137) := x"2400";
-        -- PMOVE D0,TC              ; Enable MMU! Identity maps code+stack.
-        -- Opcode: F000 (EA=D0), Extension: 4000 (TC, write Dn->MMU, 32-bit)
-        m(138) := x"F000"; m(139) := x"4000";
+        m(133) := x"F000"; m(134) := x"2400";
+        -- PMOVE ($1088).W,TC        ; Enable MMU! Identity maps code+stack.
+        -- WinUAE rejects Dn as an MC68030 MMU EA, so load TC from memory.
+        m(135) := x"F038"; m(136) := x"4000"; m(137) := x"1088";
+        m(138) := x"4E71"; m(139) := x"4E71";
 
         -- Phase 2: Basic Translation Verification (starts at index 140 = byte $0118)
         -- Test 1: MOVE.L #$12345678,$1100   (identity: log $1100 -> phys $1100)
@@ -211,30 +210,27 @@ architecture behavioral of tb_mmu_translation is
         -- Ext: 100_111_0_0_000_10_101 = $9C15
         -- (15:13=PTEST, 12:10=level7, 9=0=write, 4:3=10=immFC, 2:0=101=FC5)
         m(162) := x"F011"; m(163) := x"9C15";
-        -- PMOVE MMUSR,D4   (Opcode=F004, Ext=$6200)
-        m(164) := x"F004"; m(165) := x"6200";
-        -- MOVE.L D4,$1F20.L
-        m(166) := x"23C4"; m(167) := x"0000"; m(168) := x"1F20";
+        -- PMOVE MMUSR,($1F20).W
+        m(164) := x"F038"; m(165) := x"6200"; m(166) := x"1F20";
+        m(167) := x"4E71"; m(168) := x"4E71";
 
         -- Test 7: PTEST W on write-protected page ($3000)
         -- MOVEA.L #$3000,A1
         m(169) := x"227C"; m(170) := x"0000"; m(171) := x"3000";
         -- PTEST W,(A1),#7,FC=5
         m(172) := x"F011"; m(173) := x"9C15";
-        -- PMOVE MMUSR,D4
-        m(174) := x"F004"; m(175) := x"6200";
-        -- MOVE.L D4,$1F24.L
-        m(176) := x"23C4"; m(177) := x"0000"; m(178) := x"1F24";
+        -- PMOVE MMUSR,($1F24).W
+        m(174) := x"F038"; m(175) := x"6200"; m(176) := x"1F24";
+        m(177) := x"4E71"; m(178) := x"4E71";
 
         -- Test 8: PTEST R on invalid page ($5000)
         -- MOVEA.L #$5000,A1
         m(179) := x"227C"; m(180) := x"0000"; m(181) := x"5000";
         -- PTEST R,(A1),#7,FC=5   (Ext=$9E15, bit 9=1=read)
         m(182) := x"F011"; m(183) := x"9E15";
-        -- PMOVE MMUSR,D4
-        m(184) := x"F004"; m(185) := x"6200";
-        -- MOVE.L D4,$1F28.L
-        m(186) := x"23C4"; m(187) := x"0000"; m(188) := x"1F28";
+        -- PMOVE MMUSR,($1F28).W
+        m(184) := x"F038"; m(185) := x"6200"; m(186) := x"1F28";
+        m(187) := x"4E71"; m(188) := x"4E71";
 
         -- Phase 4: PFLUSH + ATC Re-fill (starts at index 189 = byte $017A)
         -- Test 9: PFLUSHA then re-access (forces fresh table walk)
@@ -247,19 +243,17 @@ architecture behavioral of tb_mmu_translation is
 
         -- Phase 5: TT0 Transparent Translation (starts at index 197 = byte $018A)
         -- Test 10: Set TT0 and verify via PTEST
-        -- MOVE.L #$FF008150,D0
+        -- PMOVE ($108C).W,TT0
         -- TT0: base=$FF, mask=$00, E=1, CI=0, RWM=1, FC_Base=101, FC_Mask=000
-        m(197) := x"203C"; m(198) := x"FF00"; m(199) := x"8150";
-        -- PMOVE D0,TT0           (Opcode=F000, Ext=$0800 = TT0 write)
-        m(200) := x"F000"; m(201) := x"0800";
+        m(197) := x"F038"; m(198) := x"0800"; m(199) := x"108C";
+        m(200) := x"4E71"; m(201) := x"4E71";
         -- MOVEA.L #$FF000100,A1
         m(202) := x"227C"; m(203) := x"FF00"; m(204) := x"0100";
         -- PTEST R,(A1),#7,FC=5   (should match TT0 -> MMUSR.T set)
         m(205) := x"F011"; m(206) := x"9E15";
-        -- PMOVE MMUSR,D4
-        m(207) := x"F004"; m(208) := x"6200";
-        -- MOVE.L D4,$1F30.L
-        m(209) := x"23C4"; m(210) := x"0000"; m(211) := x"1F30";
+        -- PMOVE MMUSR,($1F30).W
+        m(207) := x"F038"; m(208) := x"6200"; m(209) := x"1F30";
+        m(210) := x"4E71"; m(211) := x"4E71";
 
         -- Phase 6: Cache Inhibit page access (starts at index 212 = byte $01A8)
         -- Test 11: MOVE.L $4000,D5  (CI page - observe pmmu_cache_inhibit)
@@ -293,10 +287,9 @@ architecture behavioral of tb_mmu_translation is
         -- Test 13: Switch to 32K pages (TC=$80F09800)
         -- PMOVE ($1090).W,CRP
         m(240) := x"F038"; m(241) := x"4C00"; m(242) := x"1090";
-        -- MOVE.L #$80F09800,D0  (PS=15/32K, TIA=9, TIB=8)
-        m(243) := x"203C"; m(244) := x"80F0"; m(245) := x"9800";
-        -- PMOVE D0,TC
-        m(246) := x"F000"; m(247) := x"4000";
+        -- PMOVE ($1098).W,TC
+        m(243) := x"F038"; m(244) := x"4000"; m(245) := x"1098";
+        m(246) := x"4E71"; m(247) := x"4E71";
         -- NOP (flush pipeline)
         m(248) := x"4E71";
         -- MOVE.L $0,D1 (Read from 0 - should map to 0)
@@ -305,7 +298,7 @@ architecture behavioral of tb_mmu_translation is
         m(252) := x"23C1"; m(253) := x"0000"; m(254) := x"1F40";
         ---------------------------------------------------------------
         -- Phase 9: All Page Size Tests (Tests 14-19)
-        -- Each test: PMOVEFD CRP, MOVE.L #TC,D0, PMOVE D0,TC,
+        -- Each test: PMOVEFD CRP, PMOVE (abs.W),TC,
         --            NOP, MOVE.L $0,D1, MOVE.L D1,$1Fxx
         -- CRP data placed at $02B6-$02E5 (within code page 2 for PS=8)
         ---------------------------------------------------------------
@@ -314,48 +307,48 @@ architecture behavioral of tb_mmu_translation is
         -- No PFLUSHA: stale ATC entries from previous test cover code page
         -- (identity mapping = stale entries always correct)
         m(255) := x"F038"; m(256) := x"4D00"; m(257) := x"02B6";  -- PMOVEFD ($02B6).W,CRP
-        m(258) := x"203C"; m(259) := x"8080"; m(260) := x"CC00";  -- MOVE.L #$8080CC00,D0
-        m(261) := x"F000"; m(262) := x"4000";                      -- PMOVE D0,TC
+        m(258) := x"F038"; m(259) := x"4000"; m(260) := x"109C";  -- PMOVE ($109C).W,TC
+        m(261) := x"4E71"; m(262) := x"4E71";
         m(263) := x"4E71";                                          -- NOP
         m(264) := x"2239"; m(265) := x"0000"; m(266) := x"0000";  -- MOVE.L $0.L,D1
         m(267) := x"23C1"; m(268) := x"0000"; m(269) := x"1F44";  -- MOVE.L D1,$1F44.L
 
         -- Test 15: PS=9 (512B pages), TC=$8090CB00, CRP at $02BE
         m(270) := x"F038"; m(271) := x"4D00"; m(272) := x"02BE";
-        m(273) := x"203C"; m(274) := x"8090"; m(275) := x"CB00";
-        m(276) := x"F000"; m(277) := x"4000";
+        m(273) := x"F038"; m(274) := x"4000"; m(275) := x"10A0";
+        m(276) := x"4E71"; m(277) := x"4E71";
         m(278) := x"4E71";
         m(279) := x"2239"; m(280) := x"0000"; m(281) := x"0000";
         m(282) := x"23C1"; m(283) := x"0000"; m(284) := x"1F48";
 
         -- Test 16: PS=10 (1KB pages), TC=$80A0BB00, CRP at $02C6
         m(285) := x"F038"; m(286) := x"4D00"; m(287) := x"02C6";
-        m(288) := x"203C"; m(289) := x"80A0"; m(290) := x"BB00";
-        m(291) := x"F000"; m(292) := x"4000";
+        m(288) := x"F038"; m(289) := x"4000"; m(290) := x"10A4";
+        m(291) := x"4E71"; m(292) := x"4E71";
         m(293) := x"4E71";
         m(294) := x"2239"; m(295) := x"0000"; m(296) := x"0000";
         m(297) := x"23C1"; m(298) := x"0000"; m(299) := x"1F4C";
 
         -- Test 17: PS=11 (2KB pages), TC=$80B0BA00, CRP at $02CE
         m(300) := x"F038"; m(301) := x"4D00"; m(302) := x"02CE";
-        m(303) := x"203C"; m(304) := x"80B0"; m(305) := x"BA00";
-        m(306) := x"F000"; m(307) := x"4000";
+        m(303) := x"F038"; m(304) := x"4000"; m(305) := x"10A8";
+        m(306) := x"4E71"; m(307) := x"4E71";
         m(308) := x"4E71";
         m(309) := x"2239"; m(310) := x"0000"; m(311) := x"0000";
         m(312) := x"23C1"; m(313) := x"0000"; m(314) := x"1F50";
 
         -- Test 18: PS=13 (8KB pages), TC=$80D0A900, CRP at $02D6
         m(315) := x"F038"; m(316) := x"4D00"; m(317) := x"02D6";
-        m(318) := x"203C"; m(319) := x"80D0"; m(320) := x"A900";
-        m(321) := x"F000"; m(322) := x"4000";
+        m(318) := x"F038"; m(319) := x"4000"; m(320) := x"10AC";
+        m(321) := x"4E71"; m(322) := x"4E71";
         m(323) := x"4E71";
         m(324) := x"2239"; m(325) := x"0000"; m(326) := x"0000";
         m(327) := x"23C1"; m(328) := x"0000"; m(329) := x"1F54";
 
         -- Test 19: PS=14 (16KB pages), TC=$80E09900, CRP at $02DE
         m(330) := x"F038"; m(331) := x"4D00"; m(332) := x"02DE";
-        m(333) := x"203C"; m(334) := x"80E0"; m(335) := x"9900";
-        m(336) := x"F000"; m(337) := x"4000";
+        m(333) := x"F038"; m(334) := x"4000"; m(335) := x"10B0";
+        m(336) := x"4E71"; m(337) := x"4E71";
         m(338) := x"4E71";
         m(339) := x"2239"; m(340) := x"0000"; m(341) := x"0000";
         m(342) := x"23C1"; m(343) := x"0000"; m(344) := x"1F58";
@@ -389,8 +382,8 @@ architecture behavioral of tb_mmu_translation is
         -- stale cache_inhibit_reg from the previous translation.
         ---------------------------------------------------------------
         -- Set TT1=$FE008507: base=$FE, mask=$00, E=1, CI=1, RWM=1, FC=any
-        m(371) := x"203C"; m(372) := x"FE00"; m(373) := x"8507";  -- MOVE.L #$FE008507,D0
-        m(374) := x"F000"; m(375) := x"0C00";                      -- PMOVE D0,TT1
+        m(371) := x"F038"; m(372) := x"0C00"; m(373) := x"10B4";  -- PMOVE ($10B4).W,TT1
+        m(374) := x"4E71"; m(375) := x"4E71";
         m(376) := x"4E71";                                          -- NOP (pipeline settle)
         -- Read from normal page to ensure cache_inhibit_reg=0
         m(377) := x"2239"; m(378) := x"0000"; m(379) := x"0000";  -- MOVE.L $0,D1
@@ -486,12 +479,23 @@ architecture behavioral of tb_mmu_translation is
 
         ---------------------------------------------------------------
         -- CRP DATA at $1080 (index $1080/2 = 2112)
-        -- Used by PMOVE (A0)+,CRP in Phase 1
+        -- Used by PMOVE ($1080).W,CRP in Phase 1
         ---------------------------------------------------------------
         -- CRP_H = $00000002 (DT=10: valid table descriptor)
         m(2112) := x"0000"; m(2113) := x"0002";
         -- CRP_L = $00006000 (root table at physical $6000)
         m(2114) := x"0000"; m(2115) := x"6000";
+        -- TC/TTR data used by legal PMOVE memory EAs.
+        m(2116) := x"80C0"; m(2117) := x"7760";
+        m(2118) := x"FF00"; m(2119) := x"8150";
+        m(2124) := x"80F0"; m(2125) := x"9800";
+        m(2126) := x"8080"; m(2127) := x"CC00";
+        m(2128) := x"8090"; m(2129) := x"CB00";
+        m(2130) := x"80A0"; m(2131) := x"BB00";
+        m(2132) := x"80B0"; m(2133) := x"BA00";
+        m(2134) := x"80D0"; m(2135) := x"A900";
+        m(2136) := x"80E0"; m(2137) := x"9900";
+        m(2138) := x"FE00"; m(2139) := x"8507";
 
         return m;
     end function;

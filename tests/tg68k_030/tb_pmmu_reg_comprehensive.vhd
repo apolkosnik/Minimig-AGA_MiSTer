@@ -298,15 +298,19 @@ begin
 
     -- =============================================
     -- TEST 2: TT0 Register (sel="00010")
-    -- Mask: 0xFFFF8777 - reserved bits 14-11, 7, 3 cleared
+    -- Per WinUAE convention (cpummu30.cpp:436), TT0 stores the full 32-bit
+    -- value as written. Reserved bits 14-11, 7, 3 are documented as "must be
+    -- programmed as 0" (UM 9.2.6) but the hardware preserves them; only the
+    -- decode path consults the documented fields. Real software writes 0
+    -- to reserved bits per spec, so the read-back is the same in either
+    -- model for legitimate code.
     -- =============================================
     report "" severity note;
     report "===== TEST 2: TT0 Register =====" severity note;
 
-    -- 2a: Write all fields, check reserved bits cleared
-    -- 0xFFFF FFFF & 0xFFFF8777 = 0xFFFF8777
-    write_and_check(SEL_TT0, '0', x"FFFFFFFF", x"FFFF8777",
-      "TT0 all-1s - reserved bits 14-11,7,3 cleared");
+    -- 2a: Write all fields, expect all bits preserved (WinUAE behavior)
+    write_and_check(SEL_TT0, '0', x"FFFFFFFF", x"FFFFFFFF",
+      "TT0 all-1s - all bits preserved (WinUAE convention)");
 
     -- 2b: Write with only valid bits set
     -- Base=0xFF, Mask=0x00, E=1, CI=1, RW=1, RWM=1, FC_Base=111, FC_Mask=111
@@ -324,14 +328,14 @@ begin
 
     -- =============================================
     -- TEST 3: TT1 Register (sel="00011")
-    -- Mask: 0xFFFF8777 (same as TT0)
+    -- Same WinUAE convention as TT0: all 32 bits preserved on write.
     -- =============================================
     report "" severity note;
     report "===== TEST 3: TT1 Register =====" severity note;
 
-    -- 3a: All bits set
-    write_and_check(SEL_TT1, '0', x"FFFFFFFF", x"FFFF8777",
-      "TT1 all-1s - reserved bits cleared");
+    -- 3a: All bits set, all preserved
+    write_and_check(SEL_TT1, '0', x"FFFFFFFF", x"FFFFFFFF",
+      "TT1 all-1s - all bits preserved (WinUAE convention)");
 
     -- 3b: Typical supervisor instruction fetch config
     -- Base=0x00, Mask=0xFF, E=1, FC_Base=110 (FC=6), FC_Mask=000

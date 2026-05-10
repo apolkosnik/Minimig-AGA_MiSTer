@@ -164,12 +164,11 @@ architecture behavioral of tb_whichamiga_mmu is
         m(128) := x"F038"; m(129) := x"4C00"; m(130) := x"1080";
         -- NOP padding
         m(131) := x"4E71"; m(132) := x"4E71";
-        -- MOVE.L #$80D04780,D0  ; TC value: PS=13, TIA=4, TIB=7, TIC=8, TID=0
-        m(133) := x"203C"; m(134) := x"80D0"; m(135) := x"4780";
         -- PFLUSHA               ; Clear ATC before enabling
-        m(136) := x"F000"; m(137) := x"2400";
-        -- PMOVE D0,TC           ; Enable MMU!
-        m(138) := x"F000"; m(139) := x"4000";
+        m(133) := x"F000"; m(134) := x"2400";
+        -- PMOVE ($1088).W,TC    ; Enable MMU!
+        m(135) := x"F038"; m(136) := x"4000"; m(137) := x"1088";
+        m(138) := x"4E71"; m(139) := x"4E71";
 
         -- Phase 2: Test basic operation after MMU enable
         -- If we get past the PMOVE TC without lockup, MMU translation is working.
@@ -235,10 +234,8 @@ architecture behavioral of tb_whichamiga_mmu is
         m(191) := x"2039"; m(192) := x"D000"; m(193) := x"FFFC";
 
         -- Phase 4: Disable MMU and write final marker ($0184)
-        -- MOVEQ #0,D0
-        m(194) := x"7000";
-        -- PMOVE D0,TC  ; Disable MMU (TC=0, E=0)
-        m(195) := x"F000"; m(196) := x"4000";
+        -- PMOVE ($108C).W,TC  ; Disable MMU (TC=0, E=0)
+        m(194) := x"F038"; m(195) := x"4000"; m(196) := x"108C";
         -- MOVE.L #$AA550000,$1F00.L
         m(197) := x"23FC"; m(198) := x"AA55"; m(199) := x"0000";
         m(200) := x"0000"; m(201) := x"1F00";
@@ -253,6 +250,9 @@ architecture behavioral of tb_whichamiga_mmu is
         m(2112) := x"8000"; m(2113) := x"0002";
         -- CRP_L = $00006000 (root table at $6000)
         m(2114) := x"0000"; m(2115) := x"6000";
+        -- TC enable/disable data
+        m(2116) := x"80D0"; m(2117) := x"4780";
+        m(2118) := x"0000"; m(2119) := x"0000";
 
         ---------------------------------------------------------------
         -- ROOT PAGE TABLE at $6000 (16 entries, 4 bytes each)

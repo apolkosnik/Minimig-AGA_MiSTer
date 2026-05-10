@@ -186,6 +186,10 @@ architecture behavior of tb_mmu_library_enable_probe is
     constant DPAIR_SRP_MEM_READBACK_ADDR : integer := 16#30C0#;
     constant DPAIR_SRP_DN_READBACK_ADDR : integer := 16#30C8#;
     constant DPAIR_ROOT_HI_ADDR : integer := 16#30D0#;
+    constant CLR_TC_PRELOAD_ADDR : integer := 16#30E0#;
+    constant CLR_TT0_PRELOAD_ADDR : integer := 16#30E4#;
+    constant CLR_TT1_PRELOAD_ADDR : integer := 16#30E8#;
+    constant CLR_MMUSR_PRELOAD_ADDR : integer := 16#30EC#;
     constant DPAIR_ROOT_HI : std_logic_vector(31 downto 0) := x"80000002";
     constant DPAIR_ROOT_LO : std_logic_vector(31 downto 0) := x"00000000";
     constant PMREG_TT0 : std_logic_vector(4 downto 0) := "00010";
@@ -927,10 +931,10 @@ begin
         wait for 100 ns;
         clear_monitors <= '0';
         init_mem_defaults;
+        write_long(CLR_TC_PRELOAD_ADDR, CLR_TC_PRELOAD_VALUE);
 
         pc := 16#0400#;
-        emit_word(pc, x"203C"); emit_long(pc, CLR_TC_PRELOAD_VALUE); -- MOVE.L #nonzero,D0
-        emit_word(pc, x"F000"); emit_word(pc, x"4000");             -- PMOVE.L D0,TC
+        emit_pmove_abs_l(pc, PMREG_TC, PMDIR_MEM_TO_MMU, CLR_TC_PRELOAD_ADDR); -- PMOVE.L (abs).L,TC
         emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(CLR_TC_STACK_TOP, 32))); -- MOVEA.L #stack,A7
         emit_word(pc, x"42A7");                                      -- CLR.L -(SP)
         emit_word(pc, x"F017"); emit_word(pc, x"4000");             -- PMOVE.L (SP),TC
@@ -987,12 +991,15 @@ begin
         clear_monitors <= '0';
         init_mem_defaults;
         write_long(DPAIR_ROOT_HI_ADDR, DPAIR_ROOT_HI);
+        write_long(DPAIR_ROOT_HI_ADDR + 4, DPAIR_ROOT_LO);
+        write_long(CLR_TT0_PRELOAD_ADDR, CLR_TC_PRELOAD_VALUE);
+        write_long(CLR_TT1_PRELOAD_ADDR, CLR_TC_PRELOAD_VALUE);
+        write_long(CLR_MMUSR_PRELOAD_ADDR, x"A5A50000");
 
         pc := 16#0400#;
-        emit_word(pc, x"203C"); emit_long(pc, CLR_TC_PRELOAD_VALUE); -- MOVE.L #nonzero,D0
-        emit_word(pc, x"F000"); emit_word(pc, x"0800");             -- PMOVE.L D0,TT0
-        emit_word(pc, x"F000"); emit_word(pc, x"0C00");             -- PMOVE.L D0,TT1
-        emit_word(pc, x"F000"); emit_word(pc, x"6000");             -- PMOVE.W D0,MMUSR
+        emit_pmove_abs_l(pc, PMREG_TT0, PMDIR_MEM_TO_MMU, CLR_TT0_PRELOAD_ADDR); -- PMOVE.L (abs).L,TT0
+        emit_pmove_abs_l(pc, PMREG_TT1, PMDIR_MEM_TO_MMU, CLR_TT1_PRELOAD_ADDR); -- PMOVE.L (abs).L,TT1
+        emit_pmove_abs_l(pc, PMREG_MMUSR, PMDIR_MEM_TO_MMU, CLR_MMUSR_PRELOAD_ADDR); -- PMOVE.W (abs).L,MMUSR
         emit_word(pc, x"2E7C"); emit_long(pc, std_logic_vector(to_unsigned(CLR_OTHER_STACK_TOP, 32))); -- MOVEA.L #stack,A7
         emit_word(pc, x"42A7");                                      -- CLR.L -(SP)
         emit_word(pc, x"F017"); emit_word(pc, x"0800");             -- PMOVE.L (SP),TT0
@@ -1003,25 +1010,13 @@ begin
         emit_pmove_abs_l(pc, PMREG_TT0, PMDIR_MMU_TO_MEM, CLR_TT0_READBACK_ADDR); -- PMOVE.L TT0,(abs).L
         emit_pmove_abs_l(pc, PMREG_TT1, PMDIR_MMU_TO_MEM, CLR_TT1_READBACK_ADDR); -- PMOVE.L TT1,(abs).L
         emit_pmove_abs_l(pc, PMREG_MMUSR, PMDIR_MMU_TO_MEM, CLR_MMUSR_READBACK_ADDR); -- PMOVE.W MMUSR,(abs).L
-        emit_move_l_abs_to_dn(pc, 0, std_logic_vector(to_unsigned(DPAIR_ROOT_HI_ADDR, 32))); -- MOVE.L root_hi,D0
-        emit_moveq(pc, 1, 0);                                  -- MOVEQ #0,D1
-        emit_pmove(pc, PMREG_CRP, PMDIR_MEM_TO_MMU, "000", "000", x"0000", x"0000"); -- PMOVE.Q D0:D1,CRP
-        emit_pmove(pc, PMREG_SRP, PMDIR_MEM_TO_MMU, "000", "000", x"0000", x"0000"); -- PMOVE.Q D0:D1,SRP
+        emit_pmove_abs_l(pc, PMREG_CRP, PMDIR_MEM_TO_MMU, DPAIR_ROOT_HI_ADDR); -- PMOVE.Q (abs).L,CRP
+        emit_pmove_abs_l(pc, PMREG_SRP, PMDIR_MEM_TO_MMU, DPAIR_ROOT_HI_ADDR); -- PMOVE.Q (abs).L,SRP
         emit_pmove_abs_l(pc, PMREG_CRP, PMDIR_MMU_TO_MEM, DPAIR_CRP_MEM_READBACK_ADDR); -- PMOVE.Q CRP,(abs).L
         emit_pmove_abs_l(pc, PMREG_SRP, PMDIR_MMU_TO_MEM, DPAIR_SRP_MEM_READBACK_ADDR); -- PMOVE.Q SRP,(abs).L
-        emit_moveq(pc, 0, 0);                                  -- Clear D0 before CRP readback
-        emit_moveq(pc, 1, 0);                                  -- Clear D1 before CRP readback
-        emit_pmove(pc, PMREG_CRP, PMDIR_MMU_TO_MEM, "000", "000", x"0000", x"0000"); -- PMOVE.Q CRP,D0:D1
-        emit_move_l_dn_to_abs(pc, 0, std_logic_vector(to_unsigned(DPAIR_CRP_DN_READBACK_ADDR, 32)));
-        emit_move_l_dn_to_abs(pc, 1, std_logic_vector(to_unsigned(DPAIR_CRP_DN_READBACK_ADDR + 4, 32)));
-        emit_moveq(pc, 0, 0);                                  -- Clear D0 before SRP readback
-        emit_moveq(pc, 1, 0);                                  -- Clear D1 before SRP readback
-        emit_pmove(pc, PMREG_SRP, PMDIR_MMU_TO_MEM, "000", "000", x"0000", x"0000"); -- PMOVE.Q SRP,D0:D1
-        emit_move_l_dn_to_abs(pc, 0, std_logic_vector(to_unsigned(DPAIR_SRP_DN_READBACK_ADDR, 32)));
-        emit_move_l_dn_to_abs(pc, 1, std_logic_vector(to_unsigned(DPAIR_SRP_DN_READBACK_ADDR + 4, 32)));
         emit_word(pc, x"4E72"); emit_word(pc, x"2700");             -- STOP #$2700
 
-        report "=== stack-source PMOVE regressions for TT0/TT1/MMUSR and D0:D1 CRP/SRP ===" severity note;
+        report "=== stack-source PMOVE regressions for TT0/TT1/MMUSR and memory CRP/SRP ===" severity note;
 
         nReset <= '1';
 
@@ -1104,19 +1099,19 @@ begin
         end if;
 
         if dbg_pmmu_crp_hi = DPAIR_ROOT_HI and dbg_pmmu_crp_lo = DPAIR_ROOT_LO then
-            report "PASS: PMOVE.Q D0:D1,CRP loaded expected pair" severity note;
+            report "PASS: PMOVE.Q (abs).L,CRP loaded expected pair" severity note;
             pass_count := pass_count + 1;
         else
-            report "FAIL: PMOVE.Q D0:D1,CRP got hi=$" & slv_to_hex(dbg_pmmu_crp_hi) &
+            report "FAIL: PMOVE.Q (abs).L,CRP got hi=$" & slv_to_hex(dbg_pmmu_crp_hi) &
                    " lo=$" & slv_to_hex(dbg_pmmu_crp_lo) severity error;
             fail_count := fail_count + 1;
         end if;
 
         if dbg_pmmu_srp_hi = DPAIR_ROOT_HI and dbg_pmmu_srp_lo = DPAIR_ROOT_LO then
-            report "PASS: PMOVE.Q D0:D1,SRP loaded expected pair" severity note;
+            report "PASS: PMOVE.Q (abs).L,SRP loaded expected pair" severity note;
             pass_count := pass_count + 1;
         else
-            report "FAIL: PMOVE.Q D0:D1,SRP got hi=$" & slv_to_hex(dbg_pmmu_srp_hi) &
+            report "FAIL: PMOVE.Q (abs).L,SRP got hi=$" & slv_to_hex(dbg_pmmu_srp_hi) &
                    " lo=$" & slv_to_hex(dbg_pmmu_srp_lo) severity error;
             fail_count := fail_count + 1;
         end if;
@@ -1132,17 +1127,6 @@ begin
             fail_count := fail_count + 1;
         end if;
 
-        if read_long(DPAIR_CRP_DN_READBACK_ADDR) = DPAIR_ROOT_HI and
-           read_long(DPAIR_CRP_DN_READBACK_ADDR + 4) = DPAIR_ROOT_LO then
-            report "PASS: PMOVE.Q CRP,D0:D1 read back expected pair" severity note;
-            pass_count := pass_count + 1;
-        else
-            report "FAIL: PMOVE.Q CRP,D0:D1 readback hi=$" &
-                   slv_to_hex(read_long(DPAIR_CRP_DN_READBACK_ADDR)) &
-                   " lo=$" & slv_to_hex(read_long(DPAIR_CRP_DN_READBACK_ADDR + 4)) severity error;
-            fail_count := fail_count + 1;
-        end if;
-
         if read_long(DPAIR_SRP_MEM_READBACK_ADDR) = DPAIR_ROOT_HI and
            read_long(DPAIR_SRP_MEM_READBACK_ADDR + 4) = DPAIR_ROOT_LO then
             report "PASS: PMOVE.Q SRP,(abs).L read back expected pair" severity note;
@@ -1154,24 +1138,13 @@ begin
             fail_count := fail_count + 1;
         end if;
 
-        if read_long(DPAIR_SRP_DN_READBACK_ADDR) = DPAIR_ROOT_HI and
-           read_long(DPAIR_SRP_DN_READBACK_ADDR + 4) = DPAIR_ROOT_LO then
-            report "PASS: PMOVE.Q SRP,D0:D1 read back expected pair" severity note;
-            pass_count := pass_count + 1;
-        else
-            report "FAIL: PMOVE.Q SRP,D0:D1 readback hi=$" &
-                   slv_to_hex(read_long(DPAIR_SRP_DN_READBACK_ADDR)) &
-                   " lo=$" & slv_to_hex(read_long(DPAIR_SRP_DN_READBACK_ADDR + 4)) severity error;
-            fail_count := fail_count + 1;
-        end if;
-
         clear_monitors <= '1';
         nReset <= '0';
         wait for 100 ns;
         clear_monitors <= '0';
         init_mem_defaults;
 
-        write_long(16#0010#, std_logic_vector(to_unsigned(INVALID_HANDLER_ADDR, 32))); -- illegal instruction vector
+        write_long(16#002C#, std_logic_vector(to_unsigned(INVALID_HANDLER_ADDR, 32))); -- F-line vector
         pc := INVALID_HANDLER_ADDR;
         emit_word(pc, x"23FC"); emit_long(pc, INVALID_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32)));
         emit_word(pc, x"60FE");
@@ -1179,12 +1152,12 @@ begin
         write_long(INVALID_RESULT_ADDR, x"BAADF00D");
 
         pc := 16#0400#;
-        emit_word(pc, x"207C"); emit_long(pc, x"12345678"); -- MOVEA.L #value,A0
-        emit_pmove(pc, PMREG_CRP, PMDIR_MEM_TO_MMU, "001", "000", x"0000", x"0000"); -- PMOVE.Q A0,CRP must be illegal
+        emit_word(pc, x"203C"); emit_long(pc, x"12345678"); -- MOVE.L #value,D0
+        emit_pmove(pc, PMREG_TC, PMDIR_MEM_TO_MMU, "000", "000", x"0000", x"0000"); -- PMOVE.L D0,TC must be F-line
         emit_word(pc, x"23FC"); emit_long(pc, INVALID_FALLTHRU_MARKER); emit_long(pc, std_logic_vector(to_unsigned(INVALID_RESULT_ADDR, 32)));
         emit_word(pc, x"60FE");
 
-        report "=== PMOVE.Q An,CRP remains illegal while Dn:Dn+1 is valid ===" severity note;
+        report "=== PMOVE.L D0,TC is invalid on MC68030 like WinUAE ===" severity note;
 
         nReset <= '1';
 
@@ -1196,10 +1169,10 @@ begin
 
         actual := read_long(INVALID_RESULT_ADDR);
         if actual = INVALID_MARKER then
-            report "PASS: PMOVE.Q A0,CRP trapped as illegal" severity note;
+            report "PASS: PMOVE.L D0,TC trapped as F-line" severity note;
             pass_count := pass_count + 1;
         else
-            report "FAIL: PMOVE.Q A0,CRP did not trap, got=$" & slv_to_hex(actual) severity error;
+            report "FAIL: PMOVE.L D0,TC did not trap, got=$" & slv_to_hex(actual) severity error;
             fail_count := fail_count + 1;
         end if;
 

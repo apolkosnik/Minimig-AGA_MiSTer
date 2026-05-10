@@ -287,10 +287,12 @@ begin
         tc_value := pmmu_reg_rdat;
         pmmu_reg_re <= '0';
 
-        if tc_value = X"00001111" then  -- TC masks bits 30-26
-            report "  TC = 0x00001111 (masked) - PASS";
+        -- TC mask 0x83FFFFFF clears reserved bits 30:26 only.
+        -- Writing 0x11111111 yields 0x11111111 & 0x83FFFFFF = 0x01111111.
+        if tc_value = X"01111111" then
+            report "  TC = 0x01111111 (mask 0x83FFFFFF clears bits 30:26) - PASS";
         else
-            report "  TC = 0x" & slv_to_hexstring(tc_value) & " (expected 0x00001111) - FAIL";
+            report "  TC = 0x" & slv_to_hexstring(tc_value) & " (expected 0x01111111) - FAIL";
         end if;
 
         wait for CLOCK_PERIOD * 5;

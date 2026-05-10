@@ -275,21 +275,29 @@ begin
         -- Setup: Initialize MMU with simple page tables
         -- ================================================================
 
-        -- TC: PS=15 (32KB), IS=0, TIA=10, TIB=10, TIC=0, TID=0
-        write_pmmu_reg("10000", x"80FAA000", '0');
+        -- TC: PS=15 (32KB pages), IS=0, TIA=10, TIB=7, TIC=0, TID=0
+        -- Per MC68030 UM 9.2.2 the field sum must equal 32: 15+0+10+7 = 32.
+        write_pmmu_reg("10000", x"80F0A700", '0');
 
-        -- CRP: Points to 0x1000
-        write_pmmu_reg("10011", x"00000003", '1');
-        write_pmmu_reg("10011", x"00001000", '0');
+        -- CRP: Short-format root table (DT=10) at memory 0x400.
+        -- DT=10 because root entries below are 4-byte short descriptors.
+        -- The mem simulator maps mem_addr to page_table_mem index = addr/4,
+        -- so memory 0x400 = page_table_mem index 256 (matches the loop).
+        write_pmmu_reg("10011", x"00000002", '1');
+        write_pmmu_reg("10011", x"00000400", '0');
 
-        -- Build simple identity-mapped page tables
-        -- Root at 0x1000, Level1 at 0x2000
+        -- Build simple identity-mapped page tables.
+        -- Root table at memory 0x400 (index 256): 1024 entries (TIA=10),
+        --   filled here only for entries 0..31 (test addresses use index 0).
+        -- Level1 table at memory 0x800 (index 512): 128 entries (TIB=7).
         for i in 0 to 31 loop
-            page_table_mem(256 + i) <= x"00002002"; -- All entries point to level1
+            -- Each entry: address=0x800 (level1 base), DT=10 (short table).
+            page_table_mem(256 + i) <= x"00000802";
         end loop;
 
-        -- Level1: Identity map (each entry covers 32KB)
-        for i in 0 to 255 loop
+        -- Level1: Identity map (each entry covers 32KB).
+        -- Entry value: 24-bit page address << 8 | 0x01 (DT=01 page descriptor).
+        for i in 0 to 127 loop
             page_table_mem(512 + i) <= std_logic_vector(to_unsigned(i * 32768, 24)) & x"01";
         end loop;
 
@@ -336,7 +344,7 @@ begin
         cpu_reset <= '0';
         wait until rising_edge(clk);
         reg_fd <= '1';
-        write_pmmu_reg("10000", x"80FAA000", '0');
+        write_pmmu_reg("10000", x"80F0A700", '0');
         reg_fd <= '0';
 
         run_ptest_level0(x"00011000", "101");
@@ -416,10 +424,11 @@ begin
         -- Flush first
         do_pflusha;
 
-        -- Change to 8KB pages: PS=8
-        write_pmmu_reg("10000", x"808AA000", '0');
+        -- Change to 8KB pages: PS=13, IS=0, TIA=10, TIB=9 (sum = 13+0+10+9 = 32).
+        -- (Earlier value 0x808AA000 had PS=8 = 256-byte pages and sum=28.)
+        write_pmmu_reg("10000", x"80D0A900", '0');
 
-        -- Rebuild page tables for 8KB pages
+        -- Rebuild level1 for 8KB pages. 512 entries (TIB=9).
         for i in 0 to 511 loop
             page_table_mem(512 + i) <= std_logic_vector(to_unsigned(i * 8192, 24)) & x"01";
         end loop;

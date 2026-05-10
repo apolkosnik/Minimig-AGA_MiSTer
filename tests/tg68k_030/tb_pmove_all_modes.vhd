@@ -141,7 +141,7 @@ architecture behavioral of tb_pmove_all_modes is
     constant DIR_MEM_TO_MMU : std_logic := '0';
     constant DIR_MMU_TO_MEM : std_logic := '1';
 
-    -- Unique test values for Dn mode tests
+    -- Unique test values for SP/legal-memory EA tests
     -- TC: bit 31 (E) must be 0 to avoid enabling MMU, bits 30-26 RESERVED (must be 0)
     -- TC write mask: $83FFFFFF - bits 30-26 forced to 0 by hardware
     -- TT0/TT1 write mask: $FFFF8777 - bits 14-11, 7, 3 reserved (forced to 0)
@@ -1438,88 +1438,6 @@ begin
             record_test(desc_str, dst_addr, words, exp_words);
         end procedure;
 
-        -- Dn round-trip: write from src_dn, clear dst_dn, read into dst_dn
-        -- src_dn and dst_dn MUST be different to avoid false positives
-        procedure emit_pmove_dn_pair(
-            reg_sel : std_logic_vector(4 downto 0);
-            reg_name : string;
-            src_dn : integer;
-            dst_dn : integer;
-            words : integer;
-            val_hi : std_logic_vector(31 downto 0);
-            val_lo : std_logic_vector(31 downto 0)
-        ) is
-            variable dst_addr : integer;
-            variable src_addr : integer;
-            variable exp_words : word_array := (others => (others => '0'));
-            variable desc_str : string(1 to 80);
-        begin
-            if words = 1 then
-                -- MMUSR: 16-bit, use word operations
-                alloc_src(1, src_addr);
-                write_word(src_addr, val_lo(15 downto 0));
-                emit_move_l_abs_to_dn(pc, src_dn, std_logic_vector(to_unsigned(src_addr, 32)));
-                emit_moveq(pc, dst_dn, 0);  -- Clear destination register
-                emit_pmove(pc, reg_sel, DIR_MEM_TO_MMU, "000", std_logic_vector(to_unsigned(src_dn, 3)), x"0000", x"0000");
-                emit_pmove(pc, reg_sel, DIR_MMU_TO_MEM, "000", std_logic_vector(to_unsigned(dst_dn, 3)), x"0000", x"0000");
-                alloc_dst(1, dst_addr);
-                emit_move_w_dn_to_abs(pc, dst_dn, std_logic_vector(to_unsigned(dst_addr, 32)));
-                exp_words(0) := val_lo(15 downto 0);
-                set_desc(desc_str, "PMOVE D" & integer'image(src_dn) & "," & reg_name & " then " & reg_name & ",D" & integer'image(dst_dn));
-                record_test(desc_str, dst_addr, 1, exp_words);
-            elsif words = 2 then
-                -- 32-bit register (TC, TT0, TT1)
-                alloc_src(2, src_addr);
-                write_long(src_addr, val_hi);
-                emit_move_l_abs_to_dn(pc, src_dn, std_logic_vector(to_unsigned(src_addr, 32)));
-                emit_moveq(pc, dst_dn, 0);  -- Clear destination register
-                emit_pmove(pc, reg_sel, DIR_MEM_TO_MMU, "000", std_logic_vector(to_unsigned(src_dn, 3)), x"0000", x"0000");
-                emit_pmove(pc, reg_sel, DIR_MMU_TO_MEM, "000", std_logic_vector(to_unsigned(dst_dn, 3)), x"0000", x"0000");
-                alloc_dst(2, dst_addr);
-                emit_move_l_dn_to_abs(pc, dst_dn, std_logic_vector(to_unsigned(dst_addr, 32)));
-                exp_words(0) := val_hi(31 downto 16);
-                exp_words(1) := val_hi(15 downto 0);
-                set_desc(desc_str, "PMOVE D" & integer'image(src_dn) & "," & reg_name & " then " & reg_name & ",D" & integer'image(dst_dn));
-                record_test(desc_str, dst_addr, 2, exp_words);
-            else
-                -- 64-bit register (CRP, SRP): use src_dn:src_dn+1 and dst_dn:dst_dn+1
-                alloc_src(4, src_addr);
-                write_long(src_addr, val_hi);
-                write_long(src_addr + 4, val_lo);
-                emit_move_l_abs_to_dn(pc, src_dn, std_logic_vector(to_unsigned(src_addr, 32)));
-                emit_move_l_abs_to_dn(pc, src_dn + 1, std_logic_vector(to_unsigned(src_addr + 4, 32)));
-                emit_moveq(pc, dst_dn, 0);      -- Clear destination HI
-                emit_moveq(pc, dst_dn + 1, 0);  -- Clear destination LO
-                emit_pmove(pc, reg_sel, DIR_MEM_TO_MMU, "000", std_logic_vector(to_unsigned(src_dn, 3)), x"0000", x"0000");
-                emit_pmove(pc, reg_sel, DIR_MMU_TO_MEM, "000", std_logic_vector(to_unsigned(dst_dn, 3)), x"0000", x"0000");
-                alloc_dst(4, dst_addr);
-                emit_move_l_dn_to_abs(pc, dst_dn, std_logic_vector(to_unsigned(dst_addr, 32)));
-                emit_move_l_dn_to_abs(pc, dst_dn + 1, std_logic_vector(to_unsigned(dst_addr + 4, 32)));
-                exp_words(0) := val_hi(31 downto 16);
-                exp_words(1) := val_hi(15 downto 0);
-                exp_words(2) := val_lo(31 downto 16);
-                exp_words(3) := val_lo(15 downto 0);
-                set_desc(desc_str, "PMOVE D" & integer'image(src_dn) & ":D" & integer'image(src_dn+1) & "," & reg_name & " then " & reg_name & ",D" & integer'image(dst_dn) & ":D" & integer'image(dst_dn+1));
-                record_test(desc_str, dst_addr, 4, exp_words);
-            end if;
-        end procedure;
-
-        procedure emit_mmusr_dn_read(dn : integer) is
-            variable dst_addr : integer;
-            variable exp_words : word_array := (others => (others => '0'));
-            variable desc_str : string(1 to 80);
-        begin
-            -- MMUSR populated by PTEST with T=1 (transparent TT0 match) = $0040
-            -- Pre-fill Dn with $FF to detect no-op reads
-            alloc_dst(1, dst_addr);
-            emit_moveq(pc, dn, 16#FF#);  -- Pre-fill Dn with $FF to detect no-op reads
-            emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "000", std_logic_vector(to_unsigned(dn, 3)), x"0000", x"0000");
-            emit_move_w_dn_to_abs(pc, dn, std_logic_vector(to_unsigned(dst_addr, 32)));
-            exp_words(0) := VAL_MMUSR_EXPECTED;
-            set_desc(desc_str, "PMOVE MMUSR,D" & integer'image(dn) & " then MOVE.W D" & integer'image(dn) & ",(abs)");
-            record_test(desc_str, dst_addr, 1, exp_words);
-        end procedure;
-
         -- Emit PTEST instruction: PTESTR (A2), immediate FC=5, level=7
         -- Extension word: 100 111 1 0 000 10 101 = $9E15
         procedure emit_ptest_a2 is
@@ -1587,16 +1505,6 @@ begin
             alloc_dst(words, dst_addr);
             emit_pmove_mem_pair(reg_sel, reg_name, val_hi, val_lo, words, "(A1)/(A0)", "010", "001", "000", x"0000", x"0000", x"0000", x"0000", src_addr, dst_addr);
 
-            -- (A1)+ src, (A0)+ dst
-            alloc_src(words, src_addr);
-            alloc_dst(words, dst_addr);
-            emit_pmove_mem_pair(reg_sel, reg_name, val_hi, val_lo, words, "(A1)+/(A0)+", "011", "001", "000", x"0000", x"0000", x"0000", x"0000", src_addr, dst_addr);
-
-            -- -(A1) src, -(A0) dst
-            alloc_src(words, src_addr);
-            alloc_dst(words, dst_addr);
-            emit_pmove_mem_pair(reg_sel, reg_name, val_hi, val_lo, words, "-(A1)/-(A0)", "100", "001", "000", x"0000", x"0000", x"0000", x"0000", src_addr, dst_addr);
-
             -- (d16,A1) src, (d16,A0) dst
             alloc_src(words, src_addr);
             alloc_dst(words, dst_addr);
@@ -1636,20 +1544,6 @@ begin
             emit_movea(pc, 0, std_logic_vector(to_unsigned(dst_addr, 32)));
             emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "010", "000", x"0000", x"0000");
             set_desc(desc_str, "PMOVE MMUSR,(A0)");
-            record_test(desc_str, dst_addr, 1, exp_words);
-
-            -- (A0)+
-            alloc_dst(1, dst_addr);
-            emit_movea(pc, 0, std_logic_vector(to_unsigned(dst_addr, 32)));
-            emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "011", "000", x"0000", x"0000");
-            set_desc(desc_str, "PMOVE MMUSR,(A0)+");
-            record_test(desc_str, dst_addr, 1, exp_words);
-
-            -- -(A0)
-            alloc_dst(1, dst_addr);
-            emit_movea(pc, 0, std_logic_vector(to_unsigned(dst_addr + 2, 32)));
-            emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "100", "000", x"0000", x"0000");
-            set_desc(desc_str, "PMOVE MMUSR,-(A0)");
             record_test(desc_str, dst_addr, 1, exp_words);
 
             -- (d16,A0)
@@ -1696,16 +1590,6 @@ begin
             alloc_dst(words, dst_addr);
             emit_pmove_mem_pair(reg_sel, reg_name, val_hi, val_lo, words, "(A7)/(A7)", "010", "111", "111", x"0000", x"0000", x"0000", x"0000", src_addr, dst_addr);
 
-            -- (A7)+ src, (A7)+ dst
-            alloc_src(words, src_addr);
-            alloc_dst(words, dst_addr);
-            emit_pmove_mem_pair(reg_sel, reg_name, val_hi, val_lo, words, "(A7)+/(A7)+", "011", "111", "111", x"0000", x"0000", x"0000", x"0000", src_addr, dst_addr);
-
-            -- -(A7) src, -(A7) dst - Critical for 64-bit CRP/SRP with pmmu_dbl flag
-            alloc_src(words, src_addr);
-            alloc_dst(words, dst_addr);
-            emit_pmove_mem_pair(reg_sel, reg_name, val_hi, val_lo, words, "-(A7)/-(A7)", "100", "111", "111", x"0000", x"0000", x"0000", x"0000", src_addr, dst_addr);
-
             -- (d16,A7) src, (d16,A7) dst
             alloc_src(words, src_addr);
             alloc_dst(words, dst_addr);
@@ -1749,24 +1633,15 @@ begin
         -- Set D6 index for (d8,An,Xn)
         emit_moveq(pc, 6, 4);
 
-        -- =====================
-        -- Dn mode tests (src_dn /= dst_dn to avoid false positives)
-        -- =====================
-        emit_pmove_dn_pair(REG_TC,   "TC",   0, 1, 2, VAL_TC, (others => '0'));       -- D0->TC, TC->D1
-        emit_pmove_dn_pair(REG_TT0,  "TT0",  1, 2, 2, VAL_TT0, (others => '0'));     -- D1->TT0, TT0->D2
-        emit_pmove_dn_pair(REG_TT1,  "TT1",  2, 3, 2, VAL_TT1, (others => '0'));     -- D2->TT1, TT1->D3
-        emit_pmove_dn_pair(REG_CRP,  "CRP",  0, 2, 4, VAL_CRP_HI, VAL_CRP_LO);      -- D0:D1->CRP, CRP->D2:D3
-        emit_pmove_dn_pair(REG_SRP,  "SRP",  2, 0, 4, VAL_SRP_HI, VAL_SRP_LO);      -- D2:D3->SRP, SRP->D0:D1
         -- Set up PTEST to populate MMUSR with non-zero value ($0040 = T bit)
         -- Uses TT0 match-all + TC enable + PTESTR + TC disable sequence
         emit_ptest_mmusr_setup;
         -- MMUSR now has $0040 (T=1 from transparent translation match)
-        emit_mmusr_dn_read(3);
 
         -- =====================
-        -- Memory mode tests (use DIFFERENT values from Dn tests to avoid false positives)
-        -- If the mem->MMU write fails, the register still has the Dn value, not the memory value,
-        -- so the MMU->mem read will produce the wrong (Dn) value, correctly failing the test.
+        -- Memory mode tests for WinUAE-valid MC68030 MMU effective addresses.
+        -- Dn, An, (An)+, -(An), PC-relative, and immediate are invalid F-line
+        -- forms for PMOVE/PLOAD/PTEST/PFLUSH-with-EA.
         -- =====================
         emit_all_mem_modes(REG_TC,   "TC",   VAL_TC_MEM,   (others => '0'), 2);
         emit_all_mem_modes(REG_TT0,  "TT0",  VAL_TT0_MEM,  (others => '0'), 2);
@@ -1779,7 +1654,7 @@ begin
         -- =====================
         -- BUG #395 FIX VALIDATION: (A7)/SP mode tests
         -- WhichAmiga uses PMOVE.L (SP),TC which triggers the (A7) path
-        -- Test all MMU registers with (A7), (A7)+, -(A7), (d16,A7) modes
+        -- Test all MMU registers with valid A7 forms: (A7), (d16,A7)
         -- =====================
         emit_all_a7_modes(REG_TC,   "TC",   VAL_TC,   (others => '0'), 2);
         emit_all_a7_modes(REG_TT0,  "TT0",  VAL_TT0,  (others => '0'), 2);
@@ -1793,11 +1668,11 @@ begin
 
         write(l, string'("=============================================="));
         writeline(output, l);
-        write(l, string'("PMOVE ALL MODES TEST (including BUG #395 A7/SP validation)"));
+        write(l, string'("PMOVE LEGAL EA MODES TEST (WinUAE MC68030 EA validation)"));
         writeline(output, l);
-        write(l, string'("Tests: Dn, (A1)/(A0), (A1)+/(A0)+, -(A1)/-(A0), (d16,A1/A0), (d8,A1/A0,D6), (xxx).W, (xxx).L"));
+        write(l, string'("Tests: (A1)/(A0), (d16,A1/A0), (d8,A1/A0,D6), (xxx).W, (xxx).L"));
         writeline(output, l);
-        write(l, string'("SP modes: (A7), (A7)+, -(A7), (d16,A7) - validates WhichAmiga PMOVE.L (SP),TC"));
+        write(l, string'("SP modes: (A7), (d16,A7) - validates WhichAmiga PMOVE.L (SP),TC"));
         writeline(output, l);
         write(l, string'("Regs: TC, TT0, TT1, CRP, SRP, MMUSR ($0040 via PTEST T-bit)"));
         writeline(output, l);

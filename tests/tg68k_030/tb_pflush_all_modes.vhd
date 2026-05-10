@@ -967,7 +967,7 @@ begin
             dst_ptr := dst_ptr + (words * 2);
         end procedure;
 
-        -- Emit PFLUSH + PTEST + read MMUSR into D3 + store D3 to verification memory
+        -- Emit PFLUSH + PTEST + read MMUSR directly to verification memory
         -- Records the test with expected MMUSR value
         -- NOTE: Since we're using TT0 for transparent translation, PFLUSH won't
         -- affect the translation result. MMUSR should still show T=1.
@@ -986,15 +986,15 @@ begin
             variable exp_words : word_array := (others => (others => '0'));
             variable desc_str : string(1 to 80);
         begin
+            alloc_dst(1, dst_addr);
             -- Emit PFLUSH
             emit_pflush(pc, pflush_ea_mode, pflush_ea_reg, mode_bits, fc_spec, fc_mask, disp_or_addr, addr_hi);
             -- Verify with PTEST (A2) - test the same address
             emit_ptest(pc, "010", "010", "111", '1', '0', "000", "10101", x"0000", x"0000");
-            -- Read MMUSR into D3
-            emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "000", "011", x"0000", x"0000");
-            -- Store D3 (word) to verification memory
-            alloc_dst(1, dst_addr);
-            emit_move_w_dn_to_abs(pc, 3, std_logic_vector(to_unsigned(dst_addr, 32)));
+            -- Read MMUSR through a WinUAE-valid MC68030 MMU EA.
+            emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "111", "001",
+                       std_logic_vector(to_unsigned(dst_addr, 16)),
+                       std_logic_vector(to_unsigned(dst_addr / 65536, 16)));
             -- Record expected
             exp_words(0) := expected_mmusr;
             set_desc(desc_str, desc);

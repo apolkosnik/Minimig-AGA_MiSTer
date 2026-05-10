@@ -486,8 +486,8 @@ proc show_rtwr {bin} {
     set fc6_addr_last [bin_to_hex [bit_slice $bin 347 316]]
     set fc6_pc [bin_to_hex [bit_slice $bin 315 284]]
     set fc6_micro [bin_to_uint [bit_slice $bin 283 276]]
-    set crp_l [bin_to_hex [bit_slice $bin 275 244]]
-    set fc6_addr [bin_to_hex [bit_slice $bin 243 212]]
+    set srp_l [bin_to_hex [bit_slice $bin 275 244]]
+    set srp40_addr [bin_to_hex [bit_slice $bin 243 212]]
     set last0_addr [bin_to_hex [bit_slice $bin 211 180]]
     set last0_data [bin_to_hex [bit_slice $bin 179 164]]
     set last1_addr [bin_to_hex [bit_slice $bin 163 132]]
@@ -507,8 +507,8 @@ proc show_rtwr {bin} {
         $page_seen $page_count $last_flags $last_micro $last_uds $last_lds $last_ready $last_mmu]
     puts [format "exact_400022e8: seen=%u hits=%u data=%04s%04s last_addr=%08s pc=%08s micro=%u" \
         $exact_seen $exact_hits $exact_hi $exact_lo $exact_addr $exact_pc $exact_micro]
-    puts [format "crp_fc6_slot:  crp_l=%08s slot=%08s seen=%u hits=%u data=%04s%04s last_addr=%08s pc=%08s micro=%u" \
-        $crp_l $fc6_addr $fc6_seen $fc6_hits $fc6_hi $fc6_lo $fc6_addr_last $fc6_pc $fc6_micro]
+    puts [format "srp_4000_slot: srp_l=%08s slot=%08s seen=%u hits=%u data=%04s%04s last_addr=%08s pc=%08s micro=%u" \
+        $srp_l $srp40_addr $fc6_seen $fc6_hits $fc6_hi $fc6_lo $fc6_addr_last $fc6_pc $fc6_micro]
     puts [format "last page writes: 0=%08s:%04s 1=%08s:%04s 2=%08s:%04s 3=%08s:%04s" \
         $last0_addr $last0_data $last1_addr $last1_data $last2_addr $last2_data $last3_addr $last3_data]
 }

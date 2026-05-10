@@ -170,6 +170,10 @@ architecture behavioral of tb_pload_all_modes is
     -- Page table addresses
     constant ROOT_TABLE : integer := 16#4000#;
     constant L2_TABLE   : integer := 16#5000#;
+    constant PTEST_A_DESC_ADDR : std_logic_vector(31 downto 0) :=
+        std_logic_vector(to_unsigned(L2_TABLE + 4, 32));
+    constant PTEST_A_RESULT_ADDR : integer := 16#28E0#;
+    constant FLINE_RESERVED_RESULT_ADDR : integer := 16#28F0#;
 
     -- Helper types for test records
     type word_array is array (0 to 3) of std_logic_vector(15 downto 0);
@@ -182,7 +186,7 @@ architecture behavioral of tb_pload_all_modes is
 
     constant MAX_TESTS : integer := 64;
     constant VERBOSE : boolean := true;
-    constant TRACE_FETCH : boolean := true;
+    constant TRACE_FETCH : boolean := false;
     type test_array is array (0 to MAX_TESTS-1) of test_record;
 
     function slv16_to_hex(v : std_logic_vector(15 downto 0)) return string is
@@ -589,6 +593,38 @@ architecture behavioral of tb_pload_all_modes is
         end case;
     end procedure;
 
+    -- Emit PLOAD with reserved bits 8:5 explicitly set for negative tests.
+    procedure emit_pload_reserved(
+        variable pc : inOut integer;
+        ea_mode : std_logic_vector(2 downto 0);
+        ea_reg : std_logic_vector(2 downto 0);
+        rw : std_logic;             -- 1=PLOADR, 0=PLOADW
+        reserved_bits : std_logic_vector(3 downto 0);
+        fc_spec : std_logic_vector(4 downto 0);
+        disp_or_addr : std_logic_vector(15 downto 0);
+        addr_hi : std_logic_vector(15 downto 0)
+    ) is
+        variable opcode : std_logic_vector(15 downto 0);
+        variable extension : std_logic_vector(15 downto 0);
+    begin
+        opcode := "1111000000" & ea_mode & ea_reg;
+        extension := "001" & "000" & rw & reserved_bits & fc_spec;
+        emit_word(pc, opcode);
+        emit_word(pc, extension);
+        case ea_mode is
+            when "101" => emit_word(pc, disp_or_addr);
+            when "110" => emit_word(pc, disp_or_addr);
+            when "111" =>
+                if ea_reg = "000" then
+                    emit_word(pc, disp_or_addr);
+                elsif ea_reg = "001" then
+                    emit_word(pc, addr_hi);
+                    emit_word(pc, disp_or_addr);
+                end if;
+            when others => null;
+        end case;
+    end procedure;
+
     -- Emit PFLUSHA (flush all ATC entries)
     -- Extension word: 001_001_00_0000_0000 = $2400
     procedure emit_pflusha(variable pc : inOut integer) is
@@ -921,6 +957,11 @@ begin
                 writeline(output, l);
             end if;
 
+            if dbg_regfile_we = '1' and dbg_regfile_waddr = "1011" and dbg_pmmu_brief = x"9F75" then
+                memory(PTEST_A_RESULT_ADDR / 2) := dbg_regfile_wdata(31 downto 16);
+                memory(PTEST_A_RESULT_ADDR / 2 + 1) := dbg_regfile_wdata(15 downto 0);
+            end if;
+
             if TRACE_FETCH and busstate = "00" then
                 write(l, string'("FETCH PC=$") & slv32_to_hex(addr));
                 write(l, string'(" OPC=$") & slv16_to_hex(data_in));
@@ -998,6 +1039,10 @@ begin
         variable fail_count : integer := 0;
         variable actual : word_array := (others => (others => '0'));
         variable ok : boolean := true;
+        variable handler_pc : integer;
+        variable dst_addr_tmp : integer;
+        variable exp_words_tmp : word_array := (others => (others => '0'));
+        variable desc_str_tmp : string(1 to 80);
 
         variable dst_ptr : integer := 16#2800#;
 
@@ -1122,7 +1167,11 @@ begin
         memory(16#140#/2) := x"4E72"; memory(16#142#/2) := x"2704"; -- Priv
         memory(16#150#/2) := x"4E72"; memory(16#152#/2) := x"2705"; -- Format
         memory(16#160#/2) := x"4E72"; memory(16#162#/2) := x"2706"; -- MMU Config
-        memory(16#190#/2) := x"4E72"; memory(16#192#/2) := x"2709"; -- F-line
+        handler_pc := 16#0190#;
+        emit_move_l_an_to_abs(handler_pc, 3, std_logic_vector(to_unsigned(FLINE_RESERVED_RESULT_ADDR, 32)));
+        emit_moveq(handler_pc, 3, 11);
+        emit_move_w_dn_to_abs(handler_pc, 3, std_logic_vector(to_unsigned(FLINE_RESERVED_RESULT_ADDR + 4, 32)));
+        emit_word(handler_pc, x"4E72"); emit_word(handler_pc, x"2709"); -- F-line
 
         -- Clear code area
         for i in 16#1000# to 16#27FF# loop
@@ -1209,10 +1258,10 @@ begin
         -- Phase 1: Configure CRP and enable TC
         -- =====================================================
 
-        -- PMOVE (A0)+,CRP - load CRP (64-bit: reads 8 bytes from (A0)+)
-        -- NOTE: Using (An)+ mode because (An) has a memaddr_delta bug for 64-bit regs
+        -- PMOVE (A0),CRP - load CRP (64-bit). WinUAE rejects (An)+ for
+        -- MC68030 MMU effective addresses, so the setup path must use (An).
         emit_movea(pc, 0, std_logic_vector(to_unsigned(crp_addr, 32)));
-        emit_pmove(pc, REG_CRP, DIR_MEM_TO_MMU, "011", "000", x"0000", x"0000");
+        emit_pmove(pc, REG_CRP, DIR_MEM_TO_MMU, "010", "000", x"0000", x"0000");
 
         -- Enable TT0: transparent for FC=6 (supervisor program fetches)
         -- This prevents instruction fetches from triggering page table walks
@@ -1273,7 +1322,7 @@ begin
         emit_movea(pc, 2, PLOAD_ADDR);
         emit_pload_verify_mmusr(
             "PLOADW (A2), FC=imm5",
-            "010", "010", '0', "10101", x"0000", x"0000", x"0002");
+            "010", "010", '0', "10101", x"0000", x"0000", x"0202");
 
         -- Test 7: PLOADR (A2), FC=SFC (SFC=5)
         emit_movea(pc, 2, PLOAD_ADDR);
@@ -1308,7 +1357,32 @@ begin
         emit_movea(pc, 7, PLOAD_ADDR);
         emit_pload_verify_mmusr(
             "PLOADW (A7), FC=imm5",
-            "010", "111", '0', "10101", x"0000", x"0000", x"0002");
+            "010", "111", '0', "10101", x"0000", x"0000", x"0202");
+
+        -- Test 12: PTESTR with A=1 returns the final descriptor address in A3.
+        emit_movea(pc, 2, PLOAD_ADDR);
+        emit_ptest(pc, "010", "010", "111", '1', '1', "011", "10101", x"0000", x"0000");
+        -- Store/handler checks below are ordinary physical-memory checks. Disable
+        -- translation after the PTEST result has been written to A3 so verification
+        -- is not hidden behind a second translated data write.
+        emit_pmove(pc, REG_TC, DIR_MEM_TO_MMU, "010", "101", x"0000", x"0000");
+        exp_words_tmp := (others => (others => '0'));
+        exp_words_tmp(0) := PTEST_A_DESC_ADDR(31 downto 16);
+        exp_words_tmp(1) := PTEST_A_DESC_ADDR(15 downto 0);
+        set_desc(desc_str_tmp, "PTESTR (A2), A=1 A3 returns final descriptor address");
+        record_test(desc_str_tmp, PTEST_A_RESULT_ADDR, 2, exp_words_tmp);
+
+        -- Test 13: PLOAD has no A/register-return field. Bits 8:5 are reserved
+        -- and must take vector 11 without corrupting the would-be A-register.
+        emit_movea(pc, 2, PLOAD_ADDR);
+        emit_movea(pc, 3, x"DEADBEEF");
+        emit_pload_reserved(pc, "010", "010", '1', "1011", "10101", x"0000", x"0000");
+        exp_words_tmp := (others => (others => '0'));
+        exp_words_tmp(0) := x"DEAD";
+        exp_words_tmp(1) := x"BEEF";
+        exp_words_tmp(2) := x"000B";
+        set_desc(desc_str_tmp, "PLOADR reserved bits 8:5 trap via vector 11 and preserve A3");
+        record_test(desc_str_tmp, FLINE_RESERVED_RESULT_ADDR, 3, exp_words_tmp);
 
         -- =====================================================
         -- Phase 3: Disable MMU
@@ -1356,8 +1430,8 @@ begin
         wait for 100 ns;
         nReset <= '1';
 
-        -- Run simulation (longer time for page table walks)
-        wait for 15 us;
+        -- Run simulation (longer time for page table walks and end-of-program trap tests)
+        wait for 30 us;
         if exec_seen = '0' then
             write(l, string'("FAIL: No EXEC observed"));
             writeline(output, l);

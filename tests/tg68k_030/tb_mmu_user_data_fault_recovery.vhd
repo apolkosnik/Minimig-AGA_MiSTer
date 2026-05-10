@@ -97,10 +97,10 @@ architecture behavioral of tb_mmu_user_data_fault_recovery is
         -- Vector 2: Bus error -> $0080
         m(4) := x"0000"; m(5) := x"0080";
 
-        -- Other vectors -> unexpected trap handler $00C0
+        -- Other vectors -> unexpected trap handler $00C8
         for i in 3 to 63 loop
             m(i*2)   := x"0000";
-            m(i*2+1) := x"00C0";
+            m(i*2+1) := x"00C8";
         end loop;
 
         -- Bus error handler at $0080.
@@ -124,13 +124,19 @@ architecture behavioral of tb_mmu_user_data_fault_recovery is
         m(87) := x"33EF"; m(88) := x"000A"; m(89) := x"0000"; m(90) := x"1F32";
         -- MOVE.L $10(A7),$1F34.L   ; fault address
         m(91) := x"23EF"; m(92) := x"0010"; m(93) := x"0000"; m(94) := x"1F34";
+        -- ADDQ.L #6,$02(SP) - advance stacked PC past the 6-byte faulting
+        -- MOVE.L abs.L,Dn instruction. The page tables still mark entry 13
+        -- invalid, so without this RTE would return to the same instruction
+        -- and re-fault forever. Real bus-error handlers must either fix the
+        -- underlying issue or skip the access.
+        m(95) := x"5CAF"; m(96) := x"0002";
         -- RTE
-        m(95) := x"4E73";
+        m(97) := x"4E73";
 
-        -- Unexpected trap handler at $00C0
-        m(96) := x"2E3C"; m(97) := x"FF00"; m(98) := x"0000";
-        m(99) := x"23C7"; m(100) := x"0000"; m(101) := x"1F00";
-        m(102) := x"4E72"; m(103) := x"2700";
+        -- Unexpected trap handler at $00C8
+        m(100) := x"2E3C"; m(101) := x"FF00"; m(102) := x"0000";
+        m(103) := x"23C7"; m(104) := x"0000"; m(105) := x"1F00";
+        m(106) := x"4E72"; m(107) := x"2700";
 
         -- Main program at $0100
         -- PMOVE ($1080).W,CRP
@@ -463,7 +469,7 @@ begin
         wait for 100 ns;
         nReset <= '1';
 
-        for i in 0 to 10000 loop
+        for i in 0 to 50000 loop
             wait until rising_edge(clk);
             marker := mem(16#0F80#) & mem(16#0F81#);
             if marker = x"55AA0001" or debug_cpu_halted = '1' then
@@ -480,24 +486,36 @@ begin
         ssw := mem(16#0F99#);
         fault_addr := mem(16#0F9A#) & mem(16#0F9B#);
 
+        report "DIAG: marker=$" & slv_to_hex(marker) &
+               " df=$" & slv_to_hex(df_marker) &
+               " A7=$" & slv_to_hex(frame_base) severity note;
+        report "DIAG: PC=$" & slv_to_hex(stacked_pc) &
+               " SR=$" & slv_to_hex(stacked_sr) &
+               " fmtvec=$" & slv_to_hex(fmtvec) severity note;
+        report "DIAG: SSW=$" & slv_to_hex(ssw) &
+               " fault_addr=$" & slv_to_hex(fault_addr) severity note;
         if debug_cpu_halted = '1' then
-            report "FAIL: cpu_halted asserted on user-mode MMU data fault" severity failure;
+            report "FAIL: cpu_halted asserted on user-mode MMU data fault" severity error;
         elsif df_marker /= x"AA550001" then
-            report "FAIL: handler did not confirm DF=1, got $" & slv_to_hex(df_marker) severity failure;
+            report "FAIL: handler did not confirm DF=1, got $" & slv_to_hex(df_marker) severity error;
         elsif marker /= x"55AA0001" then
-            report "FAIL: user code after RTE did not execute, marker=$" & slv_to_hex(marker) severity failure;
+            report "FAIL: user code after RTE did not execute, marker=$" & slv_to_hex(marker) severity error;
         elsif stacked_sr(13) /= '0' then
-            report "FAIL: stacked SR S-bit was not user mode, SR=$" & slv_to_hex(stacked_sr) severity failure;
-        elsif stacked_pc /= x"0000011E" then
-            report "FAIL: stacked PC=$" & slv_to_hex(stacked_pc) & " expected $0000011E" severity failure;
+            report "FAIL: stacked SR S-bit was not user mode, SR=$" & slv_to_hex(stacked_sr) severity error;
+        elsif stacked_pc /= x"00000118" then
+            -- Per WinUAE exception_pc() in newcpu_common.cpp:1399, vector 2
+            -- stacks regs.instruction_pc (the faulting instruction's PC),
+            -- not the post-instruction PC. The handler skips past it via
+            -- ADDQ.L #6,2(SP) above.
+            report "FAIL: stacked PC=$" & slv_to_hex(stacked_pc) & " expected $00000118" severity error;
         elsif frame_base /= x"00001FA4" then
-            report "FAIL: handler saved A7=$" & slv_to_hex(frame_base) & " expected $00001FA4" severity failure;
+            report "FAIL: handler saved A7=$" & slv_to_hex(frame_base) & " expected $00001FA4" severity error;
         elsif fmtvec(15 downto 12) /= x"B" then
-            report "FAIL: format/vector word=$" & slv_to_hex(fmtvec) & " expected Format $B" severity failure;
+            report "FAIL: format/vector word=$" & slv_to_hex(fmtvec) & " expected Format $B" severity error;
         elsif ssw(8) /= '1' or ssw(6) /= '1' or ssw(5 downto 4) /= "00" then
-            report "FAIL: SSW=$" & slv_to_hex(ssw) & " expected DF=1 RW=1 SIZE=long" severity failure;
+            report "FAIL: SSW=$" & slv_to_hex(ssw) & " expected DF=1 RW=1 SIZE=long" severity error;
         elsif fault_addr /= x"DFFFFFFC" then
-            report "FAIL: fault address=$" & slv_to_hex(fault_addr) & " expected $DFFFFFFC" severity failure;
+            report "FAIL: fault address=$" & slv_to_hex(fault_addr) & " expected $DFFFFFFC" severity error;
         else
             report "PASS: user-mode MMU data fault recovered via vector 2 long frame and RTE" severity note;
         end if;

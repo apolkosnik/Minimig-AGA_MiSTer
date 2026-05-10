@@ -921,7 +921,7 @@ begin
             dst_ptr := dst_ptr + (words * 2);
         end procedure;
 
-        -- Emit PTEST + read MMUSR into D3 + store D3 to verification memory
+        -- Emit PTEST + read MMUSR directly to verification memory
         -- Records the test with expected MMUSR value
         procedure emit_ptest_verify_mmusr(
             desc : string;
@@ -940,13 +940,13 @@ begin
             variable exp_words : word_array := (others => (others => '0'));
             variable desc_str : string(1 to 80);
         begin
+            alloc_dst(1, dst_addr);
             -- Emit PTEST
             emit_ptest(pc, ea_mode, ea_reg, level, rw, a_bit, a_reg, fc_spec, disp_or_addr, addr_hi);
-            -- Read MMUSR into D3
-            emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "000", "011", x"0000", x"0000");
-            -- Store D3 (word) to verification memory
-            alloc_dst(1, dst_addr);
-            emit_move_w_dn_to_abs(pc, 3, std_logic_vector(to_unsigned(dst_addr, 32)));
+            -- Read MMUSR through a WinUAE-valid MC68030 MMU EA.
+            emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "111", "001",
+                       std_logic_vector(to_unsigned(dst_addr, 16)),
+                       std_logic_vector(to_unsigned(dst_addr / 65536, 16)));
             -- Record expected
             exp_words(0) := expected_mmusr;
             set_desc(desc_str, desc);
@@ -1124,9 +1124,10 @@ begin
         -- in the kernel. Only verifying MMUSR here.
         emit_movea(pc, 2, PTEST_ADDR);
         emit_ptest(pc, "010", "010", "111", '1', '1', "011", "10101", x"0000", x"0000");
-        emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "000", "011", x"0000", x"0000");
         alloc_dst(1, dst_addr_tmp);
-        emit_move_w_dn_to_abs(pc, 3, std_logic_vector(to_unsigned(dst_addr_tmp, 32)));
+        emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "111", "001",
+                   std_logic_vector(to_unsigned(dst_addr_tmp, 16)),
+                   std_logic_vector(to_unsigned(dst_addr_tmp / 65536, 16)));
         exp_words_tmp := (others => (others => '0'));
         exp_words_tmp(0) := VAL_MMUSR_EXPECTED;
         set_desc(desc_str_tmp, "PTESTR (A2), A=1 A3, MMUSR");
@@ -1136,9 +1137,10 @@ begin
         -- Same as above but with different A-register
         emit_movea(pc, 2, PTEST_ADDR);
         emit_ptest(pc, "010", "010", "111", '1', '1', "100", "10101", x"0000", x"0000");
-        emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "000", "011", x"0000", x"0000");
         alloc_dst(1, dst_addr_tmp);
-        emit_move_w_dn_to_abs(pc, 3, std_logic_vector(to_unsigned(dst_addr_tmp, 32)));
+        emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "111", "001",
+                   std_logic_vector(to_unsigned(dst_addr_tmp, 16)),
+                   std_logic_vector(to_unsigned(dst_addr_tmp / 65536, 16)));
         exp_words_tmp := (others => (others => '0'));
         exp_words_tmp(0) := VAL_MMUSR_EXPECTED;
         set_desc(desc_str_tmp, "PTESTR (A2), A=1 A4, MMUSR");

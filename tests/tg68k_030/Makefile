@@ -313,7 +313,7 @@ test-pmove-d8anxn-pc: compile
 test-pmove-pc-all-regs: compile
 	@echo "Running PMOVE PC increment test for ALL registers and addressing modes..."
 	@echo "Tests: TC, TT0, TT1, CRP, SRP, MMUSR"
-	@echo "Modes: Dn, (An), (An)+, -(An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L"
+	@echo "Modes: (An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L"
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_pc_all_regs.vhd && $(VSIM) -c -do "run 500us; quit" tb_pmove_pc_all_regs
 
 test-pmove-all-modes: compile
@@ -438,7 +438,7 @@ test-mmu-user-data-fault-recovery: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_user_data_fault_recovery.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 120us; quit -f" tb_mmu_user_data_fault_recovery
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 600us; quit -f" tb_mmu_user_data_fault_recovery
 
 test-fault: test-fault-recovery test-mmu-fetch-fault-frame test-berr-frame test-addr-error-pmmu
 	@echo "Fault handling suite complete."

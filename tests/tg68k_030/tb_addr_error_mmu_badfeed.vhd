@@ -120,9 +120,9 @@ architecture behavioral of tb_addr_error_mmu_badfeed is
         m(131) := x"F017"; m(132) := x"4C00";                     -- PMOVE.Q (A7),CRP
         m(133) := x"2E7C"; m(134) := x"0000"; m(135) := x"1088"; -- MOVEA.L #$00001088,A7
         m(136) := x"F017"; m(137) := x"4800";                     -- PMOVE.Q (A7),SRP
-        m(138) := x"203C"; m(139) := x"82A0"; m(140) := x"8680"; -- MOVE.L #$82A08680,D0
-        m(141) := x"F000"; m(142) := x"2400";                     -- PFLUSHA
-        m(143) := x"F000"; m(144) := x"4000";                     -- PMOVE D0,TC
+        m(138) := x"F000"; m(139) := x"2400";                     -- PFLUSHA
+        m(140) := x"F038"; m(141) := x"4000"; m(142) := x"1090"; -- PMOVE.L ($1090).W,TC
+        m(143) := x"4E71"; m(144) := x"4E71";
         m(145) := x"46FC"; m(146) := x"0000";                     -- MOVE #0,SR
         m(147) := x"207C"; m(148) := x"0001"; m(149) := x"1C09"; -- MOVEA.L #$00011C09,A0
         m(150) := x"2010";                                         -- MOVE.L (A0),D0
@@ -137,6 +137,8 @@ architecture behavioral of tb_addr_error_mmu_badfeed is
         -- SRP
         m(2116) := x"8000"; m(2117) := x"0002";
         m(2118) := x"0000"; m(2119) := x"6000";
+        -- TC
+        m(2120) := x"82A0"; m(2121) := x"8680";
 
         -- Root slot index 0 -> table at $6800
         m(12288) := x"0000"; m(12289) := x"6802";

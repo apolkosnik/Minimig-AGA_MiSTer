@@ -145,15 +145,22 @@ architecture rtl of TG68K_PMMU_030 is
   signal tc_table_config_valid : std_logic; -- Valid TC fields for PMMU table-search instructions, independent of TC.E
   -- Walker descriptor address register (must persist across clock cycles for W_*_LOW states)
   signal desc_addr_reg : std_logic_vector(31 downto 0) := (others => '0');
+  signal ptest_desc_addr_reg : std_logic_vector(31 downto 0) := (others => '0');
+  signal ptest_desc_return_pending : std_logic := '0';
   signal last_mem_rdat : std_logic_vector(31 downto 0) := (others => '0');
   -- MC68030 register write masks (ENABLED for spec compliance)
   -- TC register mask: preserve E(31), SRE(25), FCL(24), and all field bits (23-0), clear reserved bits 30-26
   -- Note: Bit 23 (PS MSB) is forced to 1 in write logic since all valid PS values (8-15) have MSB=1
   constant TC_WRITE_MASK : std_logic_vector(31 downto 0) := "10000011111111111111111111111111";
   -- TTR register mask (MC68030 User's Manual section 9.2.6):
-  -- Preserve: Address(31:16), E(15), CI(10), RW(9), RWM(8), FC_Base(6:4), FC_Mask(2:0)
-  -- Clear reserved: bits 14-11, 7, 3
-  constant TTR_WRITE_MASK : std_logic_vector(31 downto 0) := "11111111111111111000011101110111"; -- 0xFFFF8777
+  -- Reserved bits 14-11, 7, 3 are "must be programmed as 0" by spec, but the
+  -- hardware preserves whatever software writes and reads it back unchanged.
+  -- WinUAE follows the same convention: cpummu30.cpp:436 stores the raw
+  -- longword; only mmu030_decode_tt() extracts the documented fields. Our
+  -- ttr_check() procedure also consults only the documented bits, so storing
+  -- the full 32-bit value is functionally equivalent and matches WinUAE /
+  -- real-hardware behavior.
+  constant TTR_WRITE_MASK : std_logic_vector(31 downto 0) := (others => '1');
   -- CRP/SRP HIGH mask: preserve L/U (31), Limit (30-16), DT (1:0); clear reserved (15-2)
   -- HIGH word format: L/U[63] + Limit[62:48] + Reserved[47:34] + DT[33:32]
   constant CRP_HIGH_MASK : std_logic_vector(31 downto 0) := "11111111111111110000000000000011"; -- 0xFFFF0003
@@ -1092,7 +1099,7 @@ architecture rtl of TG68K_PMMU_030 is
   end function;
 begin
   -- Connect internal register to output port
-  ptest_desc_addr <= desc_addr_reg;
+  ptest_desc_addr <= ptest_desc_addr_reg;
   -- BUG #371 FIX: Combinational TTR match for zero-latency addr_phys bypass
   -- When MMU is first enabled, addr_phys_reg is stale (from previous cycle).
   -- TTR transparent translations always produce phys=log (identity mapping),
@@ -1233,17 +1240,17 @@ begin
       -- Handle MMUSR updates with MC68030-compliant priority (MMUSR register only)
       -- IMPORTANT: These only affect MMUSR, not other registers!
       if cpu_reset = '1' then
-        -- MC68030 RESET clears the translation enable bit in TC and the enable
-        -- bits in both TTRs. Preserve the remaining register contents.
-        -- NOTE: spec 9.2.2 (PDF 14324-14326) states reset does not invalidate
-        -- ATC entries, but this implementation intentionally flushes on soft
-        -- reset to avoid stale translations surviving boot paths that the
-        -- Amiga firmware does not explicitly PFLUSHA. Keep the flush.
+        -- MC68030 RESET (soft reset / RESET instruction) clears the translation
+        -- enable bit in TC and the enable bits in both TTRs. Preserve the rest
+        -- of the register contents. Per MC68030 UM 9.2.2 (PDF 14324-14326)
+        -- and WinUAE cpummu30.cpp L2690-2700, soft reset does NOT invalidate
+        -- ATC entries; only a hard reset (nreset='0') flushes the ATC.
+        -- Software that re-enables translation after RESET is expected to
+        -- issue PFLUSHA explicitly if it cannot reuse the existing ATC entries.
         TC(31) <= '0';
         tc_config_valid <= '1';
         TT0(15) <= '0';
         TT1(15) <= '0';
-        atc_flush_req <= '1';
         ptest_active <= '0';
         xlat_cfg_seq <= xlat_cfg_seq + 1;
       elsif ptest_update_mmusr = '1' then
@@ -1694,6 +1701,8 @@ begin
       instr_walk_pending <= '0';
       ptest_walk_pending <= '0';
       ptest_walk_no_update <= '0';
+      ptest_desc_addr_reg <= (others => '0');
+      ptest_desc_return_pending <= '0';
       atc_mru_update_req <= '0';
       atc_mru_update_idx <= 0;
       atc_mbit_inval_req <= '0';
@@ -1709,6 +1718,10 @@ begin
       atc_mbit_inval_req <= '0';
       if mmusr_update_ack = '1' then
         mmusr_update_req <= '0';
+      end if;
+      if ptest_update_mmusr = '1' then
+        ptest_desc_addr_reg <= (others => '0');
+        ptest_desc_return_pending <= '0';
       end if;
       -- A PMOVE to TC/CRP/SRP/TTx changes the translation context. Drop any
       -- fault/completion bookkeeping left from the old context so it cannot be
@@ -1726,6 +1739,7 @@ begin
         instr_walk_pending <= '0';
         ptest_walk_pending <= '0';
         ptest_walk_no_update <= '0';
+        ptest_desc_return_pending <= '0';
         pload_flush_pending <= '0';
         -- The walker process aborts and clears its own fault/completion state
         -- on the same context sequence change. Do not leave an acknowledge
@@ -2237,6 +2251,7 @@ begin
             translation_pending <= '1';
             instr_walk_pending <= '1';  -- BUG #396: Mark walk as PTEST-initiated
             ptest_walk_pending <= '1';
+            ptest_desc_return_pending <= '1';
             -- M68000 PRM p.603 (PTEST description): "No descriptor bits are
             -- modified by this instruction." PTEST must leave U and M bits
             -- untouched on both table and page descriptors.
@@ -2319,6 +2334,10 @@ begin
         mmusr_update_value <= status_tmp;
         -- MC68030 UM 9.7.3: PLOAD does not alter MMUSR; only PTEST updates it
         if ptest_walk_pending = '1' then
+          if ptest_desc_return_pending = '1' then
+            ptest_desc_addr_reg <= desc_addr_reg;
+            ptest_desc_return_pending <= '0';
+          end if;
           mmusr_update_req <= '1';
         end if;
         translation_pending <= '0';
@@ -2330,6 +2349,10 @@ begin
         walker_fault_ack <= '1';
         walker_fault_ack_pending <= '1';
       elsif walker_completed = '1' then
+        if ptest_desc_return_pending = '1' then
+          ptest_desc_addr_reg <= desc_addr_reg;
+          ptest_desc_return_pending <= '0';
+        end if;
         -- Walker completed - clear PLOAD flush flag if set
         pload_flush_pending <= '0';
         -- Walker completed successfully - clear any previous fault status
@@ -2538,6 +2561,7 @@ begin
         instr_walk_pending <= '0';
         ptest_walk_pending <= '0';
         ptest_walk_no_update <= '0';
+        ptest_desc_return_pending <= '0';
         pload_flush_pending <= '0';
       end if;
       
@@ -4714,13 +4738,13 @@ begin
     end if;
   end process;
   -- Walker busy indication - not busy if MMU disabled or TTR hit
-  process(wstate, addr_log, fc, rw, rmw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg, pload_active, ptest_update_mmusr, ptest_active, ptest_walk_pending, mmusr_update_req)
+  process(wstate, addr_log, fc, rw, rmw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg, pload_active, ptest_update_mmusr, ptest_active, ptest_walk_pending, ptest_desc_return_pending, mmusr_update_req)
     variable tmatch0, tmatch1 : std_logic;
     variable dummy_ci, dummy_wp : std_logic;
   begin
     -- Normal CPU translation is idle when TC.E is clear, but PTEST/PLOAD can
     -- still perform manual table searches with TC.E=0.
-    if ptest_update_mmusr = '1' or ptest_active = '1' or mmusr_update_req = '1' then
+    if ptest_update_mmusr = '1' or ptest_active = '1' or ptest_desc_return_pending = '1' or mmusr_update_req = '1' then
       -- Hold the CPU while a PTEST command is being accepted/processed. Without
       -- this, the A-bit writeback can sample stale desc_addr_reg before the
       -- table search starts. Also hold until the resulting MMUSR update has

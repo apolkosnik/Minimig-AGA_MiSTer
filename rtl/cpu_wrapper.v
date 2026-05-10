@@ -623,9 +623,10 @@ assign rtwr_issp_source = 1'b0;
 `CPUWRAP_DEBUG_KEEP reg  [7:0] pmwr_write_ack_count;
 `CPUWRAP_DEBUG_KEEP reg  [3:0] pmwr_write_berr_count;
 
-// Root-table CPU write trace.  The live fast-RAM failure has TC.FCL=1 and FC=6,
-// so the first descriptor read is CRP_L + 6*4.  This probe records writes to
-// the observed page-table slab and to the exact FC6 root descriptor longword.
+// Root-table CPU write trace. The current fast-RAM halt faults on supervisor
+// data at $40001ffc with TC=$82a08680, so the first descriptor read is
+// SRP_L + $40*4 = SRP_L + $100. This probe records writes to the observed
+// stack page and to that exact SRP root descriptor longword.
 `CPUWRAP_DEBUG_KEEP reg        rtwr_page_seen;
 `CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_page_count;
 `CPUWRAP_DEBUG_KEEP reg        rtwr_exact_seen;
@@ -661,12 +662,12 @@ wire tcwr_any_we = kernel_pmmu_reg_we_p;
 wire tcwr_tc_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10000);
 wire tcwr_srp_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10010);
 wire tcwr_crp_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10011);
-wire [31:0] rtwr_fc6_addr = {stp_pmmu_crp_lo_w[31:2], 2'b00} + 32'd24;
+wire [31:0] rtwr_srp40_addr = {stp_pmmu_srp_lo_w[31:2], 2'b00} + 32'h00000100;
 wire rtwr_cpu_write_done = cpucfg[1] && cpu_req && (cpustate_p == 2'b11) &&
                            ramsel && ramready && !walker_active && !pmmu_suppress_bus;
 wire rtwr_page_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:12] == 20'h40002);
 wire rtwr_exact_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == 30'h100008BA);
-wire rtwr_fc6_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == rtwr_fc6_addr[31:2]);
+wire rtwr_fc6_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == rtwr_srp40_addr[31:2]);
 
 always @(posedge clk) begin
 	if (~reset || tcwr_issp_source[0]) begin
@@ -1253,7 +1254,7 @@ altsource_probe #(
 // Root-table CPU write trace. Source bit 0 clears the sticky history.
 // Probe layout (MSB first, 511 bits):
 //   [510:493] page-write summary, [492:385] exact 400022E8 longword,
-//   [384:276] current CRP+FC6 longword, [275:212] current CRP/slot,
+//   [384:276] current SRP+$100 longword, [275:212] current SRP/slot,
 //   [211:20] four newest writes in 40002xxx, [19:0] newest write context.
 `ifdef ENABLE_CPUWRAP_DEBUG_ISSP
 altsource_probe #(
@@ -1281,8 +1282,8 @@ altsource_probe #(
 		rtwr_fc6_last_addr,        // [347:316]
 		rtwr_fc6_pc,               // [315:284]
 		rtwr_fc6_micro,            // [283:276]
-		stp_pmmu_crp_lo,           // [275:244]
-		rtwr_fc6_addr,             // [243:212]
+		stp_pmmu_srp_lo,           // [275:244]
+		rtwr_srp40_addr,           // [243:212]
 		rtwr_last0_addr,           // [211:180]
 		rtwr_last0_data,           // [179:164]
 		rtwr_last1_addr,           // [163:132]
