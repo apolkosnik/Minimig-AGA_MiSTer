@@ -555,7 +555,6 @@ architecture logic of TG68KdotC_Kernel is
 	signal make_trace_t0		: std_logic;  -- T0 change-of-flow trace mode active for current instruction
 	signal dbcc_t0_suppress	: std_logic := '0';  -- DBcc expired without branching, so no T0 trace
 	signal trace_pending_group2	: std_logic;  -- Stacked trace pending after Group 2 exception dispatch
-	signal trace_group2_pc		: std_logic_vector(31 downto 0) := (others => '0');
 	signal trace_group2_sr		: std_logic_vector(7 downto 0) := (others => '0');
 	signal make_berr			: std_logic;
 	signal make_mmu_berr     : std_logic;  -- BUG #159: Distinguish MMU bus error from normal BERR
@@ -2975,7 +2974,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 		-- BUG #369 FIX: Also exclude ptest1/pflush1/pload1 - same stale opcode problem.
 		-- When these states retire with setstate="00", state is still "01" from the stall cycle,
 		-- causing opcode <= last_opc_read (stale extension word) instead of data_read (next instr).
-		IF (setstate="00" OR (setstate="01" AND fline_context_valid='1')) AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0' AND micro_state /= pmmu_dn_read_wait AND micro_state /= pmove_decode AND micro_state /= pmove_mem_to_mmu_hi AND micro_state /= pmove_mem_to_mmu_lo AND micro_state /= pmove_mmu_to_mem_hi AND micro_state /= pmove_mmu_to_mem_lo AND micro_state /= ptest1 AND micro_state /= pflush1 AND micro_state /= pload1 AND cpu_halted='0' THEN
+		IF (setstate="00" OR (setstate="01" AND fline_context_valid='1')) AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0' AND (micro_state /= pmmu_dn_read_wait OR state="00") AND micro_state /= pmove_decode AND micro_state /= pmove_mem_to_mmu_hi AND micro_state /= pmove_mem_to_mmu_lo AND micro_state /= pmove_mmu_to_mem_hi AND micro_state /= pmove_mmu_to_mem_lo AND micro_state /= ptest1 AND micro_state /= pflush1 AND micro_state /= pload1 AND cpu_halted='0' THEN
 			setendOPC <= '1';
 			-- BUG #400 FIX: Also check pmmu_fault directly (not just make_berr) for immediate
 			-- bus error dispatch. make_berr is registered and won't reflect pmmu_fault until
@@ -3218,7 +3217,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					   micro_state /= ptest1 AND
 					   micro_state /= pflush1 AND
 					   micro_state /= pload1 AND
-					   micro_state /= pmmu_dn_read_wait AND
+					   (micro_state /= pmmu_dn_read_wait OR state="00") AND
 					   micro_state /= pmmu_ld_nn AND
 					   micro_state /= pmmu_ld_dAn1 AND
 					   micro_state /= pmmu_ld_AnXn1 AND
@@ -3716,15 +3715,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					IF trapmake='1' AND trapd='0' AND cpu(1)='1' AND (make_trace='1' OR make_trace_t0='1') AND
 					   (next_micro_state = trap00 OR trap_trap='1') AND trap_mmu_config='0' THEN
 						trace_pending_group2 <= '1';
-						trace_group2_pc <= exe_pc;
 						trace_group2_sr <= FlagsSR;
 					END IF;
-					-- Configure stacked trace frame after Group 2 handler vector loaded
-					-- WinUAE uses regs.trace_pc for the Format $2 instruction-PC
-					-- field. Preserve the original Group 2 instruction PC/SR instead
-					-- of overwriting them with the handler vector address.
+					-- Configure stacked trace frame after Group 2 handler vector loaded.
+					-- WinUAE do_trace() captures regs.trace_pc from the current PC, so a
+					-- trace stacked after a Group 2 exception uses the handler entry as the
+					-- Format $2 instruction-address longword.
 					IF micro_state = trace_stk_grp2 THEN
-						exe_pc <= trace_group2_pc;
+						exe_pc <= data_read;
 						trap_trace <= '1';
 						trap_SR <= trace_group2_sr;
 						trace_pending_group2 <= '0';
@@ -4223,10 +4221,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				END IF;
 				-- BUG #401 FIX: Set setstackaddr at dispatch (see interrupt path above)
 				setstackaddr <= '1';
-			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR set(trap_chk)='1' OR trap_mmu_config='1') THEN
+			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR set(trap_chk)='1') THEN
 				next_micro_state <= trap00;  -- Format $2 (6-word) per MC68030 UM Table 8-4
 				-- Note: trap_trap (TRAP #n) uses Format $0 per Table 8-4 - handled by else branch
-				-- Note: trap_format_error uses Format $0 (UM 6.4.3), falls through to trap0
+				-- Note: trap_mmu_config and trap_format_error use Format $0, matching WinUAE's
+				-- common exception frame selection for vector 56 and format-error dispatch.
 			else
 				next_micro_state <= trap0;
 			end if;
@@ -5973,10 +5972,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							-- Wait until the extension-word fetch has completed. Dispatching
 							-- pmove_decode while clkena_lw is still blocked can latch stale
 							-- opcode/data as the PMMU brief word on real hardware.
-							IF clkena_lw='0' THEN
-								setstate <= "00";
-								next_micro_state <= idle;
-							ELSE
+								IF clkena_lw='0' THEN
+									set(get_2ndOPC) <= '1';
+									setstate <= "00";
+									next_micro_state <= pmove_decode;
+								ELSE
 								set(get_2ndOPC) <= '1';
 								-- BUG #366 FIX: For complex EA modes (d16, d8Xn, abs), keep setstate="00"
 								-- so pmove_decode runs with bus active (state="00"), fetching the
@@ -7608,25 +7608,22 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- BUG #377 FIX: Use pmmu_opcode (latched F-line opcode) instead of opcode!
                         -- By pmove_decode time, opcode may have been overwritten by prefetch.
                         -- fline_opcode_latch preserves the original F-line opcode EA mode bits.
-                        -- Per MC68030 PRM p.591-593, valid PMOVE EAs:
-                        --   * TC/TT0/TT1/MMUSR: Dn + control alterable.
-                        --   * SRP/CRP (64-bit): control alterable only (Dn rejected).
-                        --   * An: never valid (not in any allowed list).
-                        --   * Read direction (PMOVE Mreg,EA): EA must be writable;
-                        --     PC-relative and immediate forms are rejected.
-                        -- WinUAE's mmu_op30_invea() additionally rejects Dn, which
-                        -- breaks mmu.library detection (uses PMOVE TC,D0); we follow
-                        -- the PRM rather than that simplification.
-                        ELSIF (pmmu_opcode(5 downto 3)="001") OR
-                              ((pmmu_brief(14 downto 10) = "10010" OR pmmu_brief(14 downto 10) = "10011") AND
-                               pmmu_opcode(5 downto 3)="000") OR
-                              (pmmu_brief(9) = '1' and pmmu_opcode(5 downto 3)="111" and pmmu_opcode(2)='1') OR
-                              (pmmu_brief(9) = '1' and pmmu_opcode(5 downto 3)="111" and pmmu_opcode(2 downto 1)="01") THEN
+                        -- Match WinUAE mmu_op30_invea(): PMOVE accepts control
+                        -- alterable memory EAs only.  Dn, An, (An)+, -(An),
+                        -- PC-relative, and immediate forms are F-line.
+                        ELSIF (pmmu_opcode(5 downto 3)="000") OR
+                              (pmmu_opcode(5 downto 3)="001") OR
+                              (pmmu_opcode(5 downto 3)="011") OR
+                              (pmmu_opcode(5 downto 3)="100") OR
+                              (pmmu_opcode(5 downto 3)="111" and pmmu_opcode(2)='1') OR
+                              (pmmu_opcode(5 downto 3)="111" and pmmu_opcode(2 downto 1)="01") THEN
                              -- Invalid PMOVE EA mode: F-line per WinUAE op_illg.
                              trap_1111 <= '1';
                              trapmake <= '1';
                         ELSE
-                             -- Valid EA. Dn handling per MC68030 PRM p.591-593.
+                             -- Valid memory EA.  The Dn branch below is unreachable after the
+                             -- WinUAE-compatible EA gate above; it is retained for the existing
+                             -- PMOVE debug/writeback plumbing.
                              IF pmmu_opcode(5 downto 3)="000" THEN
                                 -- Dn mode: 4 bytes (Opcode + Extension).
                                 IF pmmu_brief(9)='1' THEN
@@ -7658,7 +7655,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                                         next_micro_state <= pmove_dn_hi;
                                     ELSE
                                         setstate <= "00";
-                                        next_micro_state <= idle;
+                                        next_micro_state <= pmmu_dn_read_wait;
                                     END IF;
                                 END IF;
                              ELSE

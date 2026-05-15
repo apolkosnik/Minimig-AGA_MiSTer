@@ -71,10 +71,10 @@ architecture behavioral of tb_mmu_library_detect is
     -- MOVE.L #$DEAD0000,D6 (detection result, high word = tested, low = detected)
     39 => x"2C3C", 40 => x"DEAD", 41 => x"0000",  -- MOVE.L #$DEAD0000,D6 at $4E
 
-    -- Step 4: Test PMMU presence with PMOVE TC,D0
+    -- Step 4: Test PMMU presence with PMOVE TC,(A7)
     -- If PMMU present, this works. If not, F-line exception
-    -- PMOVE TC,D0 = $F000 $4200 (ext word: bits 15:13=010, preg=TC($10), RW=1=read)
-    42 => x"F000", 43 => x"4200",  -- PMOVE TC,D0 at $54 (if CPU has PMMU)
+    -- PMOVE TC,(A7) = $F017 $4200 (ext word: bits 15:13=010, preg=TC($10), RW=1=read)
+    42 => x"F017", 43 => x"4200",  -- PMOVE TC,(A7) at $54 (if CPU has PMMU)
 
     -- Step 5: If we get here, PMMU is present
     -- MOVE.L #$00010001,D6 (PMMU detected)
@@ -254,7 +254,7 @@ begin
             when 16#4E# | 16#50# | 16#52# =>
               report "  --> MOVE.L #$DEAD0000,D6";
             when 16#54# =>
-              report "  --> PMOVE TC,D0 (test PMMU presence)";
+              report "  --> PMOVE TC,(A7) (test PMMU presence)";
               saw_pmove_attempt <= '1';
             when 16#58# | 16#5A# | 16#5C# =>
               report "  --> PMMU DETECTED: MOVE.L #$00010001,D6";
@@ -303,7 +303,7 @@ begin
     report "========================================";
 
     if saw_pmmu_success = '1' and saw_fline_handler = '0' and saw_stop = '1' then
-      report "*** PHASE 1 PASSED: 68030 PMMU detected (PMOVE TC,D0 succeeded) ***";
+      report "*** PHASE 1 PASSED: 68030 PMMU detected (PMOVE TC,(A7) succeeded) ***";
     else
       report "*** PHASE 1 FAILED ***" severity error;
     end if;
@@ -339,7 +339,7 @@ begin
     report "========================================";
 
     if saw_pmmu_success = '1' and saw_fline_handler = '0' and saw_stop = '1' then
-      report "*** PHASE 2 PASSED: 68020 PMMU detected on re-run (PMOVE TC,D0 succeeded) ***";
+      report "*** PHASE 2 PASSED: 68020 PMMU detected on re-run (PMOVE TC,(A7) succeeded) ***";
     else
       report "*** PHASE 2 FAILED ***" severity error;
     end if;

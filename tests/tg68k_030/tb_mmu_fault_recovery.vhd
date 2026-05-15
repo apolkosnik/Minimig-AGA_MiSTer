@@ -120,10 +120,10 @@ architecture behavioral of tb_mmu_fault_recovery is
         m(128) := x"F038"; m(129) := x"4C00"; m(130) := x"1080";
         -- PFLUSHA               ; 4 bytes
         m(131) := x"F000"; m(132) := x"2400";
-        -- MOVE.L #$80D04780,D0  ; 6 bytes (TC value)
-        m(133) := x"203C"; m(134) := x"80D0"; m(135) := x"4780";
-        -- PMOVE D0,TC           ; 4 bytes (enable MMU)
-        m(136) := x"F000"; m(137) := x"4000";
+        -- PMOVE ($1088).W,TC    ; 6 bytes (enable MMU from memory)
+        m(133) := x"F038"; m(134) := x"4000"; m(135) := x"1088";
+        -- NOP padding keeps the faulting access at the same PC.
+        m(136) := x"4E71"; m(137) := x"4E71";
         -- MOVE.L $F0001000.L,D1 ; 6 bytes (access invalid entry 15)
         m(138) := x"2239"; m(139) := x"F000"; m(140) := x"1000";
         -- If RTE returns here:
@@ -133,9 +133,10 @@ architecture behavioral of tb_mmu_fault_recovery is
         -- STOP #$2700
         m(146) := x"4E72"; m(147) := x"2700";
 
-        -- CRP data at $1080 (word index 2112 = $840)
+        -- CRP data at $1080; TC data at $1088.
         m(2112) := x"8000"; m(2113) := x"0002";  -- CRP_H = $80000002
         m(2114) := x"0000"; m(2115) := x"6000";  -- CRP_L = $00006000
+        m(2116) := x"80D0"; m(2117) := x"4780";
 
         -- Root page table at $6000 (word index 12288 = $3000)
         -- 16 entries, each 4 bytes (short format), covering 256MB each

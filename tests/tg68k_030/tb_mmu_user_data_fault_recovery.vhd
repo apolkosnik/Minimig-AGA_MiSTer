@@ -141,12 +141,12 @@ architecture behavioral of tb_mmu_user_data_fault_recovery is
         -- Main program at $0100
         -- PMOVE ($1080).W,CRP
         m(128) := x"F038"; m(129) := x"4C00"; m(130) := x"1080";
-        -- MOVE.L #$80D04780,D0
-        m(131) := x"203C"; m(132) := x"80D0"; m(133) := x"4780";
         -- PFLUSHA
-        m(134) := x"F000"; m(135) := x"2400";
-        -- PMOVE D0,TC
-        m(136) := x"F000"; m(137) := x"4000";
+        m(131) := x"F000"; m(132) := x"2400";
+        -- PMOVE ($1088).W,TC
+        m(133) := x"F038"; m(134) := x"4000"; m(135) := x"1088";
+        -- NOP padding keeps user-mode transition at the same PC.
+        m(136) := x"4E71"; m(137) := x"4E71";
         -- MOVE #$0000,SR   ; enter user mode
         m(138) := x"46FC"; m(139) := x"0000";
         -- MOVE.L $DFFFFFFC,D0 ; user-data MMU access fault
@@ -157,9 +157,10 @@ architecture behavioral of tb_mmu_user_data_fault_recovery is
         -- BRA.S *-2
         m(148) := x"60FE";
 
-        -- CRP at $1080
+        -- CRP at $1080; TC at $1088.
         m(2112) := x"8000"; m(2113) := x"0002";
         m(2114) := x"0000"; m(2115) := x"6000";
+        m(2116) := x"80D0"; m(2117) := x"4780";
 
         -- Root table at $6000, 16 entries. Entry 13 invalid.
         m(12288) := x"0000"; m(12289) := x"0061";

@@ -287,6 +287,8 @@ module tb_cpu_wrapper_pmmu;
       chipmem[16'h1082 >> 1] = 16'h0002;
       chipmem[16'h1084 >> 1] = 16'h0000;
       chipmem[16'h1086 >> 1] = 16'h6000;
+      chipmem[16'h1088 >> 1] = 16'h80D0;
+      chipmem[16'h108A >> 1] = 16'h4780;
 
       // -------- Root table at $006000 (16 entries × 4 bytes, DT=01 identity) --------
       // Entry format: $xx000061 where xx<<24 = physical base upper byte,
@@ -326,20 +328,18 @@ module tb_cpu_wrapper_pmmu;
       chipmem[16'h0408 >> 1] = 16'h4C00;
       chipmem[16'h040A >> 1] = 16'h1080;
 
-      // $040C: MOVE.L #$80D04780,D0 →  $203C $80D0 $4780
-      chipmem[16'h040C >> 1] = 16'h203C;
-      chipmem[16'h040E >> 1] = 16'h80D0;
-      chipmem[16'h0410 >> 1] = 16'h4780;
+      // $040C: PFLUSHA  →  $F000 $2400
+      chipmem[16'h040C >> 1] = 16'hF000;
+      chipmem[16'h040E >> 1] = 16'h2400;
 
-      // $0412: PFLUSHA  →  $F000 $2400
-      chipmem[16'h0412 >> 1] = 16'hF000;
-      chipmem[16'h0414 >> 1] = 16'h2400;
+      // $0410: PMOVE ($1088).W,TC  →  $F038 $4000 $1088  (ENABLES MMU)
+      chipmem[16'h0410 >> 1] = 16'hF038;
+      chipmem[16'h0412 >> 1] = 16'h4000;
+      chipmem[16'h0414 >> 1] = 16'h1088;
 
-      // $0416: PMOVE D0,TC  →  $F000 $4000  (ENABLES MMU)
-      chipmem[16'h0416 >> 1] = 16'hF000;
-      chipmem[16'h0418 >> 1] = 16'h4000;
-
-      // $041A: a few NOPs for pipeline
+      // $0416: a few NOPs for pipeline and PC preservation
+      chipmem[16'h0416 >> 1] = 16'h4E71;
+      chipmem[16'h0418 >> 1] = 16'h4E71;
       chipmem[16'h041A >> 1] = 16'h4E71;
       chipmem[16'h041C >> 1] = 16'h4E71;
       chipmem[16'h041E >> 1] = 16'h4E71;

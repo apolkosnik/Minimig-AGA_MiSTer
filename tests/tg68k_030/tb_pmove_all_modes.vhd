@@ -1447,7 +1447,7 @@ begin
         end procedure;
 
         -- Set up PTEST to populate MMUSR with non-zero value ($0040 = T bit)
-        -- Uses memory-mode PMOVE (An) since Dn mode has known bugs
+        -- Uses memory-mode PMOVE (An) because Dn is not a WinUAE-valid PMOVE EA.
         -- Pre-loads ALL address registers BEFORE enabling MMU to minimize
         -- instructions executed during MMU-active period
         procedure emit_ptest_mmusr_setup is

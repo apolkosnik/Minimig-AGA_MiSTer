@@ -544,3 +544,111 @@ Still open:
 2. **Retire or wire up `cache_op_scope="01"`** in the cache block (page-invalidate) — currently dead logic from the kernel's command path (see [CPU_AUDIT.md](CPU_AUDIT.md)).
 3. **Document the walker timeout hierarchy**: 500-cycle PMMU internal (sets MMUSR.B from the walker's view) vs 2048-cycle wrapper escape (BUG #138) vs PMMU-timeout-detection (BUG #419). Three watchdogs with overlapping conditions; easy to confuse which one fires first.
 4. **Broaden wrapper-level bench**: add cases for walker U/M write-back race with CPU SDRAM cycle, back-to-back walks, and the BUG #419 PMMU-internal-timeout path (currently only the BUG #424 wrapper watchdog is exercised).
+
+## 13. WinUAE cross-check (2026-05-14)
+
+Source compared against `/home/adam/WinUAE/cpummu30.cpp` (PMMU model), `/home/adam/WinUAE/newcpu_common.cpp` (frame builder), `/home/adam/WinUAE/newcpu.cpp` (dispatch), `/home/adam/WinUAE/include/cpummu030.h` (MMU030_STATEFLAG*), and `/home/adam/WinUAE/include/mmu_common.h` (SSW bit defines). Re-checks every aspect that the prior audit claimed parity on.
+
+### 13.1 Matches confirmed against current WinUAE
+
+| Aspect | VHDL site | WinUAE site | Status |
+|---|---|---|---|
+| MMUSR bit layout (B15 L14 S13 W11 I10 M9 T6 N2:0) | `encode_mmusr_fault/success/ptest` ([PMMU:937-1008](rtl/tg68k/TG68K_PMMU_030.vhd#L937-L1008)) | `MMUSR_*` defines (`cpummu30.cpp:209-216`) | Identical bit layout |
+| TTR field decode (LAB/LAM/E/CI/RW/RWM/FCB/FCM) | `ttr_check` ([PMMU:520-639](rtl/tg68k/TG68K_PMMU_030.vhd#L520-L639)) | `mmu030_decode_tt` / `mmu030_do_match_ttr` (`cpummu30.cpp:626-702`) | Identical decode |
+| TC field-sum check raises vector 56 | TC write arm ([PMMU:1101-1120](rtl/tg68k/TG68K_PMMU_030.vhd#L1101-L1120)) | `mmu030_decode_tc` (`cpummu30.cpp:931-935`) | Both raise on `shift-page.size ≠ 0` |
+| TC PS<8 raises vector 56 | TC write arm ([PMMU:1087-1092](rtl/tg68k/TG68K_PMMU_030.vhd#L1087-L1092)) | `mmu030_decode_tc` (`cpummu30.cpp:881-885`) | Both raise on PS field < 8 |
+| CRP/SRP DT=00 raises vector 56 | HIGH write arms ([PMMU:1132-1141, 1158-1167](rtl/tg68k/TG68K_PMMU_030.vhd#L1132-L1141)) | `mmu030_decode_rp` (`cpummu30.cpp:992-998`) | Match — both load register first, then trap |
+| WP accumulation across all descriptor levels (BUG #438) | `walk_write_protect` OR at every level ([PMMU:2515, 2531, 2745, 2765, 2986, 3006, 3199, 3218, 3305](rtl/tg68k/TG68K_PMMU_030.vhd#L2515)) | Local `write_protected = true` accumulator (`cpummu30.cpp:1353-1355, 1496-1498`) | Identical accumulation semantics |
+| Supervisor accumulation across 8-byte tables (BUG #157) | `walk_supervisor` accumulator ([PMMU:313](rtl/tg68k/TG68K_PMMU_030.vhd#L313)) | Local `super_violation = true` on `(descr_size==8) && (descr[0]&DESCR_S) && !super` (`cpummu30.cpp:1350-1352, 1493-1495`) | Match (8-byte-only check) |
+| M-bit writeback requires WP=0 (BUG #437) | `walk_write_protect=0` guard on `W_UPDATE_DESC` ([PMMU:3557, 3664](rtl/tg68k/TG68K_PMMU_030.vhd#L3557)) | `if (!(descr[0]&DESCR_M) && write && !write_protected)` (`cpummu30.cpp:1502`) | Match — VHDL also guards on `!is_ptest` and `!super_violation`, same as WinUAE outer `if (!level && !super_violation)` (`cpummu30.cpp:1500`) |
+| ATC write-hit invalidation when M=0,WP=0,!buserr (BUG #410) | ATC lookup logic ([PMMU:1547-1560](rtl/tg68k/TG68K_PMMU_030.vhd#L1547-L1560)) | `if (!write \|\| modified \|\| write_protect \|\| bus_error) keep; else invalidate` (`cpummu30.cpp:2078-2087`) | Match — both invalidate on a *first* write to a clean unmapped-mod entry so the walker writes M back |
+| Short-format tables have no LIMIT (BUG #155) | `walk_limit_valid='0'` when DT=10 ([PMMU:318-321](rtl/tg68k/TG68K_PMMU_030.vhd#L318-L321)) | LIMIT check gated by `descr_size==8` (`cpummu30.cpp:1384`) | Match |
+| L/U LIMIT semantics: bit=1 → lower bound (`idx<limit` faults); bit=0 → upper bound (`idx>limit` faults) | `W_PTR*` bounds check ([PMMU:2375-2416](rtl/tg68k/TG68K_PMMU_030.vhd#L2375-L2416)) | `(descr[0]&DESCR_LOWER_MASK) && (table_index<limit)` (`cpummu30.cpp:1386, 1393`) | Match |
+| PTEST level=0 = ATC probe; level>0 = walk capped at level | `ptest_level="000"` gating in walker, MMUSR success uses *level reached* not *level requested* | `mmu030_ptest_atc_search` (`cpummu30.cpp:1669-1695`); `mmu030_table_search(..., level)` returns at `level==descr_num` (`cpummu30.cpp:1370-1372, 1452-1454`) | Match — VHDL reports `walk_level+1` for MMUSR.N, same as WinUAE's `descr_num` |
+| PMOVE register encodings: 0x02 TT0, 0x03 TT1, 0x10 TC, 0x12 SRP, 0x13 CRP, 0x18 MMUSR | reg_sel case at [PMMU:1061-1207](rtl/tg68k/TG68K_PMMU_030.vhd#L1061-L1207) | `cpummu30.cpp:337-458` (preg switch) | Identical |
+| PMOVEFD suppresses ATC flush | `reg_fd='1'` path; no `atc_flush_req` pulse | `(next>>8)&1` parsed but flushing skipped on `fd=1` (cpummu30.cpp:341) | Match in spirit |
+| MMUSR.B only on external/walk BERR (BUG #153/#435) | [PMMU:2385, 2478](rtl/tg68k/TG68K_PMMU_030.vhd#L2385) | `mmu030.status \|= MMUSR_BUS_ERROR \| MMUSR_INVALID` on descriptor fetch fault only (`cpummu30.cpp:1584`) | Match |
+| Indirect descriptor: single chase, page-DT required, no nesting | `W_INDIRECT`/`W_INDIRECT_LOW` ([PMMU:3428, 3497](rtl/tg68k/TG68K_PMMU_030.vhd#L3428)) | `cpummu30.cpp:1450-1487` — single fetch, rejects non-page DT | Match (BUG #164's LOW variant covers DT=11 indirect targets) |
+| Format $A vs $B selection: read → $B, write → $A | `if pmmu_fault_rw_out='1' then berr_long_frame<='1';` ([Kernel:3422-3441](rtl/tg68k/TG68KdotC_Kernel.vhd#L3422-L3441)) | `format = (mmu030_state[1]&LASTWRITE) ? 0xA : 0xB` (newcpu.cpp:2977-2980) | Match (RW=1 means read on 68030, selects long frame) |
+| SSW instruction-fetch encoding: FB=1, RB=1, DF=0 | [Kernel:3466-3472, 3510-3515](rtl/tg68k/TG68KdotC_Kernel.vhd#L3466-L3472) | `regs.mmu_ssw = MMU030_SSW_FB \| MMU030_SSW_RB` on `!(fc&1)` (`cpummu30.cpp:1849, 1851`) | Match — same FB+RB stage-B encoding |
+| SSW data-fault encoding: DF=1, DF-shadow=1, no FB/RB | [Kernel:3480-3481, 3505-3507](rtl/tg68k/TG68KdotC_Kernel.vhd#L3480-L3481) | `regs.mmu_ssw = MMU030_SSW_DF \| (MMU030_SSW_DF<<1)` on `fc&1` (`cpummu30.cpp:1826`) | Match — both set bit 8 and bit 9 |
+| SSW.RW: 1=read, 0=write | [Kernel:3463, 3496](rtl/tg68k/TG68KdotC_Kernel.vhd#L3463) | `regs.mmu_ssw \|= read ? MMU030_SSW_RW : 0` (`cpummu30.cpp:1854`) | Match |
+| SSW.RM: set on TAS/CAS read-modify-write | `berr_ssw(7) <= exec_tas OR exec_cas` ([Kernel:3490, 3523](rtl/tg68k/TG68KdotC_Kernel.vhd#L3490)) | `islrmw030 ? MMU030_SSW_RM : 0` (`cpummu30.cpp:1857`) | Match |
+| Format $A at offset $08: LASTWRITE bit (0x0100) | `data_write_tmp <= x"0100" & berr_ssw` when `berr_long_frame='0'` ([Kernel:2347-2348](rtl/tg68k/TG68KdotC_Kernel.vhd#L2347-L2348)) | `wb2_address = mmu030_state[1]`, which has `MMU030_STATEFLAG1_LASTWRITE=0x0100` set (cpummu030.h:54) | Match for LASTWRITE; VHDL lacks FMOVEM/MOVEM1/MOVEM2/SUBACCESS bits — see §13.2 |
+| Format $A vs $B common-portion offsets ($00-$1F) | berr1-berr8 push order ([Kernel:7094-7151](rtl/tg68k/TG68KdotC_Kernel.vhd#L7094-L7151)) | newcpu_common.cpp:1567-1600 (fall-through case 0xA) | Same offsets, same field ordering |
+| Format $B size = 92 bytes (46 words) | 15 longs in `berr_fill` (rot_cnt=15) + 8 longs in berr1-berr8 = 23 longs = 92 bytes | 23 longs pushed in case 0xB+0xA fall-through (newcpu_common.cpp:1497-1600) | Total frame size matches |
+| RTE Format $B detection by `1011` in format word | rte4 check `rte_format_word(15:12)="1011"` ([Kernel:1657](rtl/tg68k/TG68KdotC_Kernel.vhd#L1657)) | RTE in standard m68k dispatch | Match — VHDL specifically captures SSW/opcode/input-buffer for software-fix replay |
+| Vector 2 for both PMMU-internal and external BERR | `trap_mmu_berr` and `trap_berr` both route vector 2 | Both raise `THROW(2)` from `mmu030_page_fault` (`cpummu30.cpp:1886`) | Match — frame format ($A vs $B) is the discriminant, not vector |
+| MOVEC excludes PMMU registers | kernel `movec1` whitelist (Kernel:movec1) | WinUAE's m68k_move2c on 030 does not enumerate TC/TT0/TT1/MMUSR | Match — both treat MOVEC-to-PMMU as privilege/illegal |
+
+### 13.2 Real differences from WinUAE
+
+These are behaviors where the VHDL diverges from WinUAE. None is incorrect for Amiga workloads, but each is a place where a future regression could hide.
+
+**1. PFLUSH MODE field is truncated to 3 bits.**
+[PMMU:336, 4842](rtl/tg68k/TG68K_PMMU_030.vhd#L336): `pflush_mode <= pmmu_brief(12 downto 10)`. WinUAE reads the full 5-bit `(next>>8)&31` field (`cpummu30.cpp:536`). For all *valid* PFLUSH modes (0x04, 0x10, 0x18) the top-3 bits are sufficient (001, 100, 110), so spec-compliant software is unaffected. But VHDL silently accepts undefined encodings that WinUAE rejects:
+
+| brief[12:8] | WinUAE | VHDL (top 3 bits) | Behavior |
+|---|---|---|---|
+| 00100 (0x04) | PFLUSH all | "001" → PFLUSH all | Match |
+| 00101 / 00110 / 00111 | bad mode → returns true | "001" → PFLUSH all | **VHDL accepts**, WinUAE errors |
+| 10000 (0x10) | PFLUSH FC | "100" | Match |
+| 10001-10111 | bad mode | "100" | **VHDL accepts**, WinUAE errors |
+| 11000 (0x18) | PFLUSH FC+EA | "110" | Match |
+| 11001-11111 | bad mode | "110" | **VHDL accepts**, WinUAE errors |
+
+Action: low priority — no known Amiga software emits these encodings. If hardware-trapping invalid PFLUSH modes is desired, route the `(brief[9:8]/="00")` case to `mmu_config_error` similar to BUG #446.
+
+**2. MMU_AUDIT.md previously claimed PFLUSHAN; the live code does not implement it.**
+The audit table at §3 lists `001` A=1 as "PFLUSHAN — keep `atc_global(i)='1'`". The actual code at [PMMU:4690-4697](rtl/tg68k/TG68K_PMMU_030.vhd#L4690-L4697) unconditionally flushes every entry when `pflush_mode="001"` with no `A`-bit check and no `atc_global` exemption. **PFLUSHAN is a 68040 instruction**, not 68030 — WinUAE does not decode it either. The audit table is misleading; the doc should be corrected. The `atc_global` array is still maintained (so it would survive a future correctness fix), but is not currently consulted by PFLUSH.
+
+**3. Format $A offset $08 stores only the LASTWRITE bit (0x0100), not the rest of `mmu030_state[1]`.**
+[Kernel:2347-2351](rtl/tg68k/TG68KdotC_Kernel.vhd#L2347-L2351). WinUAE stores `regs.wb2_address = mmu030_state[1]` which can also carry MOVEM1/MOVEM2/FMOVEM/SUBACCESS* flags (cpummu030.h:47-61). Real 68030 hardware encodes equivalent pipeline state in this word. Most exception handlers only look at LASTWRITE, so this is acceptable for Amiga MMU drivers, but software inspecting the upper bits will see zeros where WinUAE/real-hw would show MOVEM/FMOVEM in-progress markers.
+
+Action: low priority. The TG68K micro-engine does not pipeline MOVEM/FMOVEM the way real 030 hardware does, so faithful encoding would require synthesizing values that don't exist in the engine. Document the limitation rather than fix.
+
+**4. Format $B "internal state" longwords are mostly zero.**
+`berr_fill` writes the fault address at logical offsets $24 (stage-B address) and $2C (data input buffer), and zeros at every other offset in $20-$5C ([Kernel:2319-2326](rtl/tg68k/TG68KdotC_Kernel.vhd#L2319-L2326)). WinUAE populates this region with:
+  - `mmu030_ad[i].val` (5 longs of access record, newcpu_common.cpp:1513-1516);
+  - `mmu030_idx | mmu030_idx_done<<4 | wb2_status<<8` packed word;
+  - `mmu030_state[0]` and `mmu030_state[2] | wb3_status<<8`;
+  - pipeline-state packed long (`prefetch020_valid`, `pipeline_r8`, `pipeline_pos`, `pipeline_stop`);
+  - `mmu030_disp_store[0..1]`.
+
+Software-fix handlers that re-run a faulting access via PTEST against the stage-B address ([Kernel:2316-2318](rtl/tg68k/TG68KdotC_Kernel.vhd#L2316-L2318) explains the intent) will work, since stage-B address and data input buffer are populated. But any handler that walks the access-record array (`mmu030_ad[]`) will see zeros — this is the same limitation as #3 and stems from the same root cause (TG68K does not track per-cycle access records).
+
+Action: medium priority — write a bench that uses PTEST to re-resolve a fault address from the stacked Format $B frame, confirming the existing $24/$2C population is sufficient. Document the `mmu030_ad[]` gap explicitly.
+
+**5. RMW transparent-translation: VHDL is stricter than WinUAE.**
+[PMMU:601-605](rtl/tg68k/TG68K_PMMU_030.vhd#L601-L605) explicitly bypasses TTR matching for RMW cycles when `RWM=0`. WinUAE has a long-standing FIXME comment at `cpummu30.cpp:677-678`: "If !(tt&TT_RMW) neither the read nor the write portion of a read-modify-write cycle is transparently translated!" — i.e., WinUAE matches each half of an RMW separately and does not enforce the spec'd "RWM=1 required for RMW transparency" rule. **VHDL is correct per MC68030UM §9.2.6**; WinUAE is permissive. Both work for typical Amiga workloads; theoretically a TAS/CAS instruction crossing a TTR-RWM=0 region behaves differently on VHDL (faults / walks) vs WinUAE (transparent).
+
+**6. MMUSR.T (transparent) bit setting context.**
+WinUAE sets `MMUSR_TRANSP_ACCESS` only inside `mmu030_ptest_atc_search` (`cpummu30.cpp:1674`) — i.e., only on PTEST when the TTR matches. The VHDL encode_mmusr_success/fault functions take a `transparent` parameter and set bit 6 unconditionally when that signal is asserted ([PMMU:960, 986](rtl/tg68k/TG68K_PMMU_030.vhd#L960)). Need to verify (not yet done in this pass) that the VHDL only asserts the `transparent` argument on PTEST sites and not on every translation success. If it leaks to non-PTEST MMUSR updates, software polling MMUSR after a non-PTEST event would see T=1 spuriously. **Open follow-up: audit every `encode_mmusr_success/_fault` call site for `transparent` polarity.**
+
+**7. CRP/SRP HIGH word: WinUAE does not enforce reserved-bit masking.**
+WinUAE stores the raw 32-bit value with only a debug warning (`cpummu30.cpp:1263, 1267`). VHDL masks `CRP_HIGH_MASK = 0xFFFF0003` ([PMMU:130](rtl/tg68k/TG68K_PMMU_030.vhd#L130)), forcing reserved bits [15:2] to 0. This is a *stricter* implementation than WinUAE; both pass when software writes sensible values. A real 68030 strips the reserved bits per UM §9.2.4.
+
+**8. TC reserved-bit masking.**
+Same pattern. VHDL `TC_WRITE_MASK = 0x83FFFFFF` ([PMMU:123](rtl/tg68k/TG68K_PMMU_030.vhd#L123)) forces bits 30:24 of TC to canonical values. WinUAE writes TC raw. VHDL is again stricter and closer to spec.
+
+**9. Illegal PMOVE reg_sel.**
+VHDL traps via `mmu_config_error` (BUG #446), sets `pmmu_illegal_reg_sel_seen`, and emits a sim assertion. WinUAE just logs a write_log and returns. VHDL is more defensive; both honor the legal reg_sel set.
+
+**10. Double-bus-fault handling.**
+VHDL has multiple `cpu_halted <= '1'` sites with `HALT_CTX_*` reports ([Kernel:3359, 3396](rtl/tg68k/TG68KdotC_Kernel.vhd#L3359)) covering: address error during exception, bus error during exception, MMU fault during exception. WinUAE calls `cpu_halt(CPU_HALT_DOUBLE_FAULT)` on stack-write failure or odd PC at exception dispatch (`newcpu.cpp:2993, 3064`). Coverage is equivalent; VHDL's predicates are richer because they have to handle the mid-exception walker race. CPU_AUDIT.md §"Architectural risks" notes "Three HALT_CTX branches with overlapping conditions — historical uncertainty about double-fault trigger path" — this remains an audit gap, not a known divergence.
+
+### 13.3 Items that the prior audit didn't explicitly verify against WinUAE, but should
+
+1. **Cache-inhibit precedence.** When TTR.CI=1 *and* the same address would otherwise hit an ATC entry with CI=0 (or vice versa), which wins? WinUAE: TTR is checked first (`mmu030_match_ttr_access` at `cpummu30.cpp:2114`), so TTR.CI overrides. VHDL: TTR bypass is combinational ([PMMU:946-965](rtl/tg68k/TG68K_PMMU_030.vhd#L946-L965)) and gates the ATC lookup ([PMMU:1327-1330](rtl/tg68k/TG68K_PMMU_030.vhd#L1327-L1330)) — same effective precedence. **Match.** (Not previously verified explicitly.)
+2. **`bus_error` field in ATC entries.** WinUAE retains the `bus_error` flag and uses it both for ATC-write-hit gating (`cpummu30.cpp:2080`) and for sticky-fault replay. VHDL has `atc_buserr` array ([PMMU:226](rtl/tg68k/TG68K_PMMU_030.vhd#L226)) used identically — BUG #436 clears it on successful re-walk, BUG #410 keeps the entry alive on a write hit. **Match.**
+3. **ATC replacement policy.** WinUAE: pseudo-LRU via `mru` history bit, resets all-but-one when all are set (`cpummu30.cpp:1033-1050`). VHDL: same algorithm at [PMMU:3803-3839](rtl/tg68k/TG68K_PMMU_030.vhd#L3803-L3839). **Match.**
+4. **PTEST `a` bit (return descriptor address in An).** WinUAE checks `a` bit and writes the descriptor address back to An; an `a=1` with `level=0` is illegal (`cpummu30.cpp:466, 476-478`). VHDL exposes `ptest_desc_addr` ([PMMU:59](rtl/tg68k/TG68K_PMMU_030.vhd#L59)) but the kernel side that wires it back to An has not been spot-verified in this pass — **open follow-up**.
+5. **Vector 56 stack frame format.** WinUAE pushes a Format $0 4-word frame for Exception(56) (newcpu_common.cpp:1647 default). VHDL `mmu_config_err`/`mmu_config_ack` handshake routes to `trap_mmu_config` which uses the standard trap dispatch — assumed to produce Format $0 but **not explicitly verified** this pass.
+
+### 13.4 New highest-leverage follow-ups from this cross-check
+
+1. **§13.2 #6 (T-bit polarity audit):** confirm every `encode_mmusr_*` call site only asserts `transparent` when the originating event was a TTR-bypass PTEST. Walker fault and success sites should pass `transparent='0'`.
+2. **§13.2 #2 (MMU_AUDIT.md doc fix):** the PFLUSHAN row in §3 is wrong — remove it or rewrite as "001 (A bit ignored): unconditionally flush all entries; the 68040 PFLUSHAN semantics are not implemented and would require an `atc_global` exemption."
+3. **§13.2 #4 (Format $B internal-state bench):** add a bench that runs a software-fix handler against a stacked Format $B frame, exercises PTEST from the stage-B address, and confirms the existing $24/$2C fields are sufficient. Document that `mmu030_ad[]` is not modeled.
+4. **§13.3 #4 (PTEST `a` bit):** trace the PTEST `a=1` write-back path from the brief word through to An write-back, and add a targeted bench.
+5. **§13.3 #5 (Vector 56 frame format):** confirm `trap_mmu_config` produces a 4-word Format $0 frame; add an assertion bench if not.

@@ -168,16 +168,16 @@ architecture behavioral of tb_addr_error_pmmu is
         m(idx) := x"F038"; m(idx+1) := x"4C00"; m(idx+2) := x"1080";
         idx := idx + 3;
 
-        -- MOVE.L #$80C07760,D0  ; TC value
-        m(idx) := x"203C"; m(idx+1) := x"80C0"; m(idx+2) := x"7760";
-        idx := idx + 3;
-
         -- PFLUSHA               ; Clear ATC before enabling
         m(idx) := x"F000"; m(idx+1) := x"2400";
         idx := idx + 2;
 
-        -- PMOVE D0,TC           ; Enable MMU
-        m(idx) := x"F000"; m(idx+1) := x"4000";
+        -- PMOVE ($1088).W,TC    ; Enable MMU from memory
+        m(idx) := x"F038"; m(idx+1) := x"4000"; m(idx+2) := x"1088";
+        idx := idx + 3;
+
+        -- NOP padding keeps the odd JMP at the original PC.
+        m(idx) := x"4E71"; m(idx+1) := x"4E71";
         idx := idx + 2;
 
         -- Phase 2: JMP to odd address in MAPPED page ($2001)
@@ -188,12 +188,13 @@ architecture behavioral of tb_addr_error_pmmu is
         idx := idx + 3;
 
         -----------------------------------------------------------
-        -- CRP DATA at $1080 (word address $1080/2 = 2112)
+        -- CRP DATA at $1080; TC data at $1088.
         -----------------------------------------------------------
         -- CRP_H = $00000002 (DT=10: valid short table)
         m(2112) := x"0000"; m(2113) := x"0002";
         -- CRP_L = $00006000 (root table at $6000)
         m(2114) := x"0000"; m(2115) := x"6000";
+        m(2116) := x"80C0"; m(2117) := x"7760";
 
         -----------------------------------------------------------
         -- PAGE TABLES

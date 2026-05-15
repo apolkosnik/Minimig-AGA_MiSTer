@@ -100,13 +100,14 @@ architecture behavioral of tb_mmu_fetch_fault_frame is
         -- Main program.
         m(128) := x"F038"; m(129) := x"4C00"; m(130) := x"1080";  -- PMOVE ($1080).W,CRP
         m(131) := x"F000"; m(132) := x"2400";                      -- PFLUSHA
-        m(133) := x"203C"; m(134) := x"80D0"; m(135) := x"4780";  -- MOVE.L #$80D04780,D0
-        m(136) := x"F000"; m(137) := x"4000";                      -- PMOVE D0,TC
+        m(133) := x"F038"; m(134) := x"4000"; m(135) := x"1088";  -- PMOVE ($1088).W,TC
+        m(136) := x"4E71"; m(137) := x"4E71";                    -- Preserve following PC
         m(138) := x"4EF9"; m(139) := x"F000"; m(140) := x"1000";  -- JMP $F0001000
 
-        -- CRP data at $1080.
+        -- CRP data at $1080; TC data at $1088.
         m(2112) := x"8000"; m(2113) := x"0002";
         m(2114) := x"0000"; m(2115) := x"6000";
+        m(2116) := x"80D0"; m(2117) := x"4780";
 
         -- Root table at $6000: entries 0-14 valid identity maps, entry 15 invalid.
         m(12288) := x"0000"; m(12289) := x"0061";

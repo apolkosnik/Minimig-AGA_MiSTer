@@ -159,12 +159,12 @@ architecture behavioral of tb_berr_frame is
         m(128) := x"F038"; m(129) := x"4C00"; m(130) := x"1080";
         -- NOP padding
         m(131) := x"4E71"; m(132) := x"4E71";
-        -- MOVE.L #$80C07760,D0  ; TC value
-        m(133) := x"203C"; m(134) := x"80C0"; m(135) := x"7760";
         -- PFLUSHA
-        m(136) := x"F000"; m(137) := x"2400";
-        -- PMOVE D0,TC
-        m(138) := x"F000"; m(139) := x"4000";
+        m(133) := x"F000"; m(134) := x"2400";
+        -- PMOVE ($1088).W,TC
+        m(135) := x"F038"; m(136) := x"4000"; m(137) := x"1088";
+        -- NOP padding to preserve test PCs
+        m(138) := x"4E71"; m(139) := x"4E71";
         -- NOP (pipeline settle after TC enable)
         m(140) := x"4E71";
 
@@ -272,10 +272,11 @@ architecture behavioral of tb_berr_frame is
         m(184) := x"4E72"; m(185) := x"2700";
 
         ---------------------------------------------------------------
-        -- CRP DATA at $1080 (index 2112)
+        -- CRP DATA at $1080; TC data at $1088.
         ---------------------------------------------------------------
         m(2112) := x"0000"; m(2113) := x"0002";  -- CRP_H: DT=10
         m(2114) := x"0000"; m(2115) := x"6000";  -- CRP_L: root at $6000
+        m(2116) := x"80C0"; m(2117) := x"7760";  -- TC
 
         ---------------------------------------------------------------
         -- PAGE TABLES ($6000-$6FFF)

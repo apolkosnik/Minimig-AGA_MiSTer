@@ -16,11 +16,11 @@
 --   SP+6: Format/Vector Word (16 bits) = format(15:12) & vector_offset(11:0)
 --   SP+8: [Format $2 only] Instruction Address (32 bits)
 --
--- Per MC68030 UM Table 8-6:
+-- Per WinUAE's 68030 exception frame selection:
 --   Format $0 (8 bytes): Interrupt, Format Error, TRAP #n, Illegal,
---                         A-line, F-line, Privilege Violation
+--                         A-line, F-line, Privilege Violation, MMU Configuration
 --   Format $2 (12 bytes): CHK, TRAPcc, TRAPV, Trace, Zero Divide,
---                          MMU Configuration
+--                          cpTRAPcc
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -751,6 +751,38 @@ begin
         check_vector("F-line", x"02C");
         -- PC should point to the F-line instruction
         check_pc("F-line PC=faulting_instr", x"00001004");
+
+        -- ================================================================
+        -- TEST 11: MMU Configuration Exception - Format $0, Vector 56 ($E0)
+        -- WinUAE's common 68020+ frame selection leaves vector 56 in Format $0.
+        -- ================================================================
+        report "" severity note;
+        report "TEST 11: MMU Configuration (Format $0, Vector $E0)" severity note;
+
+        init_memory;
+        setup_handler(16#E0#, 16#2000#);
+
+        -- PMOVE.L (A0),TC with TC.E=1 and PS=0 (reserved) raises vector 56.
+        mem(16#1000# / 2) := x"41F9";  -- LEA $3000,A0
+        mem(16#1002# / 2) := x"0000";
+        mem(16#1004# / 2) := x"3000";
+        mem(16#1006# / 2) := x"F010";  -- PMOVE.L (A0),TC
+        mem(16#1008# / 2) := x"4000";
+        mem(16#100A# / 2) := x"4E71";
+        mem(16#3000# / 2) := x"8000";  -- Invalid TC: E=1, PS=0
+        mem(16#3002# / 2) := x"0000";
+
+        for i in 16#3F00#/2 to 16#4000#/2 - 1 loop
+            mem(i) := x"DEAD";
+        end loop;
+
+        do_reset;
+        wait_for_stop;
+
+        v_sp_final := x"00003FF8";
+        read_frame(v_sp_final, "0000");
+        check_format("MMU Configuration", "0000");
+        check_vector("MMU Configuration", x"0E0");
 
         -- ================================================================
         -- SUMMARY

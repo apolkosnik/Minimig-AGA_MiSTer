@@ -117,9 +117,9 @@ architecture behavioral of tb_addr_error_pmmu_data is
 
         -- Program at $0100
         m(128) := x"F038"; m(129) := x"4C00"; m(130) := x"1080"; -- PMOVE ($1080),CRP
-        m(131) := x"203C"; m(132) := x"80D0"; m(133) := x"4780"; -- MOVE.L #TC,D0
-        m(134) := x"F000"; m(135) := x"2400";                     -- PFLUSHA
-        m(136) := x"F000"; m(137) := x"4000";                     -- PMOVE D0,TC
+        m(131) := x"F000"; m(132) := x"2400";                     -- PFLUSHA
+        m(133) := x"F038"; m(134) := x"4000"; m(135) := x"1088"; -- PMOVE ($1088).W,TC
+        m(136) := x"4E71"; m(137) := x"4E71";                     -- NOP padding
         m(138) := x"46FC"; m(139) := x"0000";                     -- MOVE #0,SR (user)
         m(140) := x"2039"; m(141) := x"DFFF"; m(142) := x"FFFD"; -- MOVE.L $DFFFFFFD,D0
         m(143) := x"23FC"; m(144) := x"DEAD"; m(145) := x"BEEF"; -- failure marker
@@ -129,6 +129,7 @@ architecture behavioral of tb_addr_error_pmmu_data is
         -- CRP data
         m(2112) := x"8000"; m(2113) := x"0002";
         m(2114) := x"0000"; m(2115) := x"6000";
+        m(2116) := x"80D0"; m(2117) := x"4780";
 
         -- Root table, entry 13 invalid.
         m(12288) := x"0000"; m(12289) := x"0061";
