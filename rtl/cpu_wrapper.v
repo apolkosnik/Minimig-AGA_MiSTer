@@ -471,10 +471,28 @@ reg         pmmu_walker_ack_p;
 reg  [31:0] pmmu_walker_data_p;
 reg         pmmu_walker_berr_p;  // BUG #156 FIX: Bus error during table walk (sets MMUSR B bit)
 
-// SignalTap/ISSP debug is intentionally opt-in. Leaving these probes preserved in
-// normal builds adds very wide fanout on already timing-critical CPU/MMU paths.
+// SignalTap/ISSP debug is intentionally opt-in.  The default debug build keeps
+// only the probes used by tools/read_extra_issp.tcl.  The older full probe set
+// is large enough to perturb CPU placement/timing and can prevent booting, so it
+// is behind ENABLE_CPUWRAP_DEBUG_FULL_ISSP.
 `ifdef ENABLE_CPUWRAP_DEBUG_ISSP
-`define CPUWRAP_DEBUG_KEEP (* noprune, preserve *)
+`define CPUWRAP_DEBUG_KEEP
+`define ENABLE_CPUWRAP_DEBUG_FMTD_ISSP
+`define ENABLE_CPUWRAP_DEBUG_RTED_ISSP
+`define ENABLE_CPUWRAP_DEBUG_TRPD_ISSP
+`define ENABLE_CPUWRAP_DEBUG_HALTD_ISSP
+`define ENABLE_CPUWRAP_DEBUG_STKD_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_FULL_ISSP
+`define ENABLE_CPUWRAP_DEBUG_PMMU_ISSP
+`define ENABLE_CPUWRAP_DEBUG_PMM2_ISSP
+`define ENABLE_CPUWRAP_DEBUG_TCWR_ISSP
+`define ENABLE_CPUWRAP_DEBUG_PMWR_ISSP
+`define ENABLE_CPUWRAP_DEBUG_RTWR_ISSP
+`define ENABLE_CPUWRAP_DEBUG_EXCF_ISSP
+`define ENABLE_CPUWRAP_DEBUG_CPUS_ISSP
+`define ENABLE_CPUWRAP_DEBUG_REGS_ISSP
+`define ENABLE_CPUWRAP_DEBUG_FBRD_ISSP
+`endif
 `else
 `define CPUWRAP_DEBUG_KEEP
 `endif
@@ -546,11 +564,19 @@ wire [0:0] pmm2_issp_source;
 wire [0:0] tcwr_issp_source;
 wire [0:0] pmwr_issp_source;
 wire [0:0] rtwr_issp_source;
-`ifndef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifndef ENABLE_CPUWRAP_DEBUG_PMMU_ISSP
 assign pmmu_issp_source = 1'b0;
+`endif
+`ifndef ENABLE_CPUWRAP_DEBUG_PMM2_ISSP
 assign pmm2_issp_source = 1'b0;
+`endif
+`ifndef ENABLE_CPUWRAP_DEBUG_TCWR_ISSP
 assign tcwr_issp_source = 1'b0;
+`endif
+`ifndef ENABLE_CPUWRAP_DEBUG_PMWR_ISSP
 assign pmwr_issp_source = 1'b0;
+`endif
+`ifndef ENABLE_CPUWRAP_DEBUG_RTWR_ISSP
 assign rtwr_issp_source = 1'b0;
 `endif
 // Kernel internal state debug (6 bits, probe limit=511)
@@ -1026,7 +1052,7 @@ end
 `CPUWRAP_DEBUG_KEEP reg        excf_trace_stk_grp2_entered;
 
 wire [0:0] excf_issp_source;
-`ifndef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifndef ENABLE_CPUWRAP_DEBUG_EXCF_ISSP
 assign excf_issp_source = 1'b0;
 `endif
 
@@ -1113,7 +1139,7 @@ end
 //   + FAULT_FC[2:0] = 3
 //   + IPL_NR[2:0] + setendOPC + STOP = 5
 //   Total = 511 (max for altsource_probe)
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_PMMU_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (0),
@@ -1139,7 +1165,7 @@ altsource_probe #(
 `endif
 
 // Secondary PMMU sticky probe: per-level descriptor snapshots (A/B/C)
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_PMM2_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (1),
@@ -1162,7 +1188,7 @@ altsource_probe #(
 `endif
 
 // PMMU register write trace probe.  Source bit 0 clears the sticky history.
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_TCWR_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (10),
@@ -1211,7 +1237,7 @@ altsource_probe #(
 // PMMU walker descriptor writeback trace. Source bit 0 clears the sticky history.
 // Probe layout (MSB first, 509 bits):
 //   timeout snapshot/counters [508:404], then legacy PMWR fields [403:0].
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_PMWR_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (11),
@@ -1256,7 +1282,7 @@ altsource_probe #(
 //   [510:493] page-write summary, [492:385] exact 400022E8 longword,
 //   [384:276] current SRP+$100 longword, [275:212] current SRP/slot,
 //   [211:20] four newest writes in 40002xxx, [19:0] newest write context.
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_RTWR_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (13),
@@ -1305,7 +1331,7 @@ altsource_probe #(
 
 // Tertiary ISSP: CHK/Group2 exception frame trap-event latch (instance 2)
 // Probe width = 128 bits; source width = 1 (bit [0] clears the latch)
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_EXCF_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (2),
@@ -1398,7 +1424,7 @@ reg [15:0] hang_detect_counter;
 reg [31:0] hang_prev_pc;
 reg  [7:0] hang_prev_micro;
 wire [0:0] cpus_issp_source;  // JTAG clear for hang latch and T0 latch
-`ifndef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifndef ENABLE_CPUWRAP_DEBUG_CPUS_ISSP
 assign cpus_issp_source = 1'b0;
 `endif
 wire [0:0] fmtd_issp_source;
@@ -1407,12 +1433,22 @@ wire [0:0] trpd_issp_source;
 wire [0:0] haltd_issp_source;
 wire [0:0] stkd_issp_source;
 wire [0:0] fbrd_issp_source;
-`ifndef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifndef ENABLE_CPUWRAP_DEBUG_FMTD_ISSP
 assign fmtd_issp_source = 1'b0;
+`endif
+`ifndef ENABLE_CPUWRAP_DEBUG_RTED_ISSP
 assign rted_issp_source = 1'b0;
+`endif
+`ifndef ENABLE_CPUWRAP_DEBUG_TRPD_ISSP
 assign trpd_issp_source = 1'b0;
+`endif
+`ifndef ENABLE_CPUWRAP_DEBUG_HALTD_ISSP
 assign haltd_issp_source = 1'b0;
+`endif
+`ifndef ENABLE_CPUWRAP_DEBUG_STKD_ISSP
 assign stkd_issp_source = 1'b0;
+`endif
+`ifndef ENABLE_CPUWRAP_DEBUG_FBRD_ISSP
 assign fbrd_issp_source = 1'b0;
 `endif
 
@@ -1703,7 +1739,7 @@ end
 //        setendOPC stop clkena_lw cpu_halted pmmu_fault interrupt
 // Hang = hang_latched hang_overflow + captured fields
 // T0 = t0_latched cause_directSR cause_to_SR t0_pc[31:0] t0_opcode[15:0] pad[2:0]
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_CPUS_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (3),
@@ -1801,7 +1837,7 @@ end
 
 // Format-error debug probe. Keep it with the rest of the optional debug fabric;
 // this is a 511-bit path into the CPU/MMU state and is not free in hardware.
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_FMTD_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (5),
@@ -1857,7 +1893,7 @@ altsource_probe #(
 `endif
 
 // 511 bits max: 15 regs x 32 = 480 + A7[31:1] = 31 = 511
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_REGS_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (4),
@@ -2503,7 +2539,7 @@ end
 // RTE return-frame trace probe. Captures the first four RTE data-read bus
 // completions: SR, PC high, PC low, and format/vector word for short frames.
 // freezes once the core's sticky format-error latch is set.
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_RTED_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (6),
@@ -2559,7 +2595,7 @@ altsource_probe #(
 // Format-B RTE trace probe. Captures the first long bus-fault frame restored
 // by RTE, including the fields mmu.library/WinUAE use to complete or rerun
 // the faulted MMU data access.
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_FBRD_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (12),
@@ -2603,7 +2639,7 @@ altsource_probe #(
 // Trap-frame write trace probe. It arms on the short F-line format/vector word
 // ($002C) and captures the four bus writes that build the frame:
 // format/vector, PC high, PC low, SR.
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_TRPD_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (7),
@@ -2652,7 +2688,7 @@ altsource_probe #(
 
 // Halt-edge context probe. This latches the exact cycle where the core enters
 // the MC68030 double-bus-fault halted state, including PMMU and exception state.
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_HALTD_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (8),
@@ -2711,7 +2747,7 @@ altsource_probe #(
 
 // RTE stack context probe. Captures the four most recent CPU write cycles before
 // each RTE begins, plus stack-shadow and MMU transparent/root context.
-`ifdef ENABLE_CPUWRAP_DEBUG_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_STKD_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (9),
@@ -3029,10 +3065,14 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	);
 
 	// Cache interface logic
-	assign i_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
-	assign i_cache_req = i_cache_enabled & (cpustate_p == 2'b00) & ~pmmu_fault_p; // Instruction fetch
-	assign d_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
-	assign d_cache_req = d_cache_enabled & (cpustate_p == 2'b10 | cpustate_p == 2'b11) & ~pmmu_fault_p; // Data read/write
+	assign i_cache_addr = pmmu_addr_log_p;  // Cache module tags/indexes with PMMU physical address
+	// Do not let the cache observe a request while the PMMU is still resolving it.
+	// The CPU bus is stalled by pmmu_busy_p, but the cache can otherwise latch a
+	// fill request using stale pmmu_addr_phys_p/cache-inhibit from the previous
+	// translation and later fill the line after the real walk completes.
+	assign i_cache_req = i_cache_enabled & (cpustate_p == 2'b00) & ~pmmu_busy_p & ~pmmu_fault_p; // Instruction fetch
+	assign d_cache_addr = pmmu_addr_log_p;  // Cache module tags/indexes with PMMU physical address
+	assign d_cache_req = d_cache_enabled & ((cpustate_p == 2'b10) | (cpustate_p == 2'b11)) & ~pmmu_busy_p & ~pmmu_fault_p; // Data read/write
 	assign d_cache_we = (cpustate_p == 2'b11); // Write enable for data cache
 	
 	// Generate 32-bit data and byte enables from 16-bit CPU interface

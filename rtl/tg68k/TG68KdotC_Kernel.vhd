@@ -524,6 +524,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal rte_format_word  : std_logic_vector(15 downto 0);
 	signal rte_saved_mbit   : std_logic;  -- M bit before RTE directSR updates it
 	signal rte_saved_sr_high : std_logic_vector(7 downto 0); -- SR high byte before RTE
+	signal rte_saved_a7     : std_logic_vector(31 downto 0); -- A7 before RTE frame validation
 	signal a7_is_msp        : std_logic;  -- Tracks which supervisor shadow A7 corresponds to (1=MSP, 0=ISP)
 	signal rte_saved_ccr    : std_logic_vector(7 downto 0);  -- BUG #397: CCR before RTE directSR
 	signal rte_mmu_fix_capture_active : std_logic := '0';
@@ -1576,6 +1577,7 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 				format1_chain_active <= '0';
 				rte_saved_mbit <= '0';
 				rte_saved_sr_high <= x"27";
+				rte_saved_a7 <= (others => '0');
 				a7_is_msp <= '0';  -- ISP active after reset (M=0)
 			ELSIF clkena_lw='1' THEN
 				-- Save M bit before any SR modification that could change it.
@@ -1588,6 +1590,7 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 				IF next_micro_state = rte1 AND micro_state /= rte6 THEN
 					rte_saved_mbit <= FlagsSR(4);
 					rte_saved_sr_high <= FlagsSR; -- Save full high byte (T, S, M, I)
+					rte_saved_a7 <= regfile(15);
 					rte_saved_ccr <= Flags;  -- BUG #397: Save CCR before directSR
 				END IF;
 				IF exec(to_SR)='1' THEN
@@ -1845,6 +1848,12 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec, rte_mmu_fix_commit, rte_mmu_f
 					ELSIF movec_regsel=X"804" AND a7_is_msp='0' THEN
 						regfile(15) <= reg_QA;
 					END IF;
+				END IF;
+				-- WinUAE leaves A7 unchanged when RTE finds an invalid frame
+				-- format. The candidate SR/PC/format words are probed, but the
+				-- frame is not consumed; vector 14 stacks below the original A7.
+				IF trap_format_error='1' THEN
+					regfile(15) <= rte_saved_a7;
 				END IF;
 			END IF;
 		END IF;
@@ -3716,11 +3725,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					   (next_micro_state = trap00 OR trap_trap='1') AND trap_mmu_config='0' THEN
 						trace_pending_group2 <= '1';
 						trace_group2_sr <= FlagsSR;
+						trace_group2_sr(7 downto 6) <= "00";
+						trace_group2_sr(5) <= '1';
 					END IF;
 					-- Configure stacked trace frame after Group 2 handler vector loaded.
-					-- WinUAE do_trace() captures regs.trace_pc from the current PC, so a
-					-- trace stacked after a Group 2 exception uses the handler entry as the
-					-- Format $2 instruction-address longword.
+					-- The saved trace frame PC/IA is the pending handler entry. RTE from
+					-- the trace handler must resume in the original Group 2 handler.
 					IF micro_state = trace_stk_grp2 THEN
 						exe_pc <= data_read;
 						trap_trace <= '1';
@@ -4200,15 +4210,6 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 			setstate <= "01";
 		END IF;
 		IF trapmake='1' AND trapd='0' THEN
-			-- synthesis translate_off
-			report "TRAP_TAKEN: mmu_cfg=" & bit'image(trap_mmu_config) &
-			       " illegal=" & bit'image(trap_illegal) &
-			       " priv=" & bit'image(trap_priv) &
-			       " f1111=" & bit'image(trap_1111) &
-			       " berr=" & bit'image(trap_berr) &
-			       " ms=" & micro_states'image(micro_state) &
-			       " opc=" & integer'image(conv_integer(opcode)) severity warning;
-			-- synthesis translate_on
 			-- Stack frame format selection (MC68030 User's Manual 6.4.3, Table 8-4):
 			-- Format #2 (6-word): TRAPV, CHK, CHK2, Divide by Zero, Trace, cpTRAPcc, Format Error
 			-- Format #0 (4-word): All others including privilege violation, F-line, illegal
@@ -6975,27 +6976,43 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 
 -- paste and copy form TH	---------
 				WHEN trap00 =>          -- TRAP format #2
-					next_micro_state <= trap0;
-					set(presub) <= '1';
-					setstackaddr <='1';
-					setstate <= "11";
-					datatype <= "10";
+					IF exec(changeMode)='1' THEN
+						-- User->supervisor exception entry has just loaded A7 from
+						-- ISP/MSP.  Give the register-file read side one cycle before
+						-- the first stack predecrement, otherwise the first frame word
+						-- is pushed on the old user stack.
+						next_micro_state <= trap00;
+						setstackaddr <= '1';
+						setstate <= "01";
+					ELSE
+						next_micro_state <= trap0;
+						set(presub) <= '1';
+						setstackaddr <='1';
+						setstate <= "11";
+						datatype <= "10";
+					END IF;
 ------------------------------------
 				WHEN trap0 =>		-- TRAP
-					set(presub) <= '1';
-					setstackaddr <='1';
-					setstate <= "11";
-					IF use_VBR_Stackframe='1' THEN	--68010
-						set(writePC_add) <= '1';
-						datatype <= "01";
---						set_datatype <= "10";
-						next_micro_state <= trap1;
+					IF exec(changeMode)='1' THEN
+						next_micro_state <= trap0;
+						setstackaddr <= '1';
+						setstate <= "01";
 					ELSE
-						IF trap_interrupt='1' OR trap_trace='1' OR trap_berr='1' THEN
-							writePC <= '1';
+						set(presub) <= '1';
+						setstackaddr <='1';
+						setstate <= "11";
+						IF use_VBR_Stackframe='1' THEN	--68010
+							set(writePC_add) <= '1';
+							datatype <= "01";
+--						set_datatype <= "10";
+							next_micro_state <= trap1;
+						ELSE
+							IF trap_interrupt='1' OR trap_trace='1' OR trap_berr='1' THEN
+								writePC <= '1';
+							END IF;
+							datatype <= "10";
+							next_micro_state <= trap2;
 						END IF;
-						datatype <= "10";
-						next_micro_state <= trap2;
 					END IF;
 
 				WHEN trap1 =>		-- TRAP
@@ -7079,24 +7096,36 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                 -- After loop completes (rot_cnt=1), falls through to berr1-berr8
                 -- for the standard bus fault frame fields (offsets $1C-$00).
                 WHEN berr_fill =>
-                    setstate <= "11";
-                    set(presub) <= '1';
-                    set(longaktion) <= '1';
-                    setstackaddr <= '1';
-                    datatype <= "10";
-                    IF rot_cnt = "000001" THEN
-                        next_micro_state <= berr1;  -- Done filling, push standard frame
+                    IF exec(changeMode)='1' THEN
+                        setstate <= "01";
+                        setstackaddr <= '1';
+                        next_micro_state <= berr_fill;
                     ELSE
-                        next_micro_state <= berr_fill;  -- More zero longwords to push
+                        setstate <= "11";
+                        set(presub) <= '1';
+                        set(longaktion) <= '1';
+                        setstackaddr <= '1';
+                        datatype <= "10";
+                        IF rot_cnt = "000001" THEN
+                            next_micro_state <= berr1;  -- Done filling, push standard frame
+                        ELSE
+                            next_micro_state <= berr_fill;  -- More zero longwords to push
+                        END IF;
                     END IF;
 
                 WHEN berr1 => -- Push Internal Regs ($1C-$1F) - Stub
-                    setstate <= "11";
-                    set(presub) <= '1';
-                    set(longaktion) <= '1';
-                    setstackaddr <= '1';
-                    datatype <= "10";
-                    next_micro_state <= berr2;
+                    IF exec(changeMode)='1' THEN
+                        setstate <= "01";
+                        setstackaddr <= '1';
+                        next_micro_state <= berr1;
+                    ELSE
+                        setstate <= "11";
+                        set(presub) <= '1';
+                        set(longaktion) <= '1';
+                        setstackaddr <= '1';
+                        datatype <= "10";
+                        next_micro_state <= berr2;
+                    END IF;
                 WHEN berr2 => -- Push Data Output Buffer ($18-$1B)
                     setstate <= "11";
                     set(presub) <= '1';

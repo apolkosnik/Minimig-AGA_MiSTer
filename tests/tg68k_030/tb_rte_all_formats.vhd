@@ -677,6 +677,116 @@ begin
             wait for 1 us;
         end procedure;
 
+        -- WinUAE-compatible invalid RTE handling:
+        -- RTE may read the candidate frame words to validate the format, but if the
+        -- format is invalid it must not commit the stacked SR/PC or advance A7.
+        -- Vector 14 is then stacked below the original RTE frame, leaving the bad
+        -- frame intact. This reproduces the live SysSpeed capture shape:
+        --   SR=$4032, PC=$64DE2004, format=$4042.
+        procedure test_format_error_restores_a7_before_stack is
+            constant test_name : string := "FmtErr restores pre-RTE A7";
+            variable reached_stop : boolean;
+            variable local_fail : boolean;
+            variable a7_val : std_logic_vector(31 downto 0);
+            variable frame_pc : std_logic_vector(31 downto 0);
+        begin
+            current_test <= test_name & (test_name'length + 1 to 40 => ' ');
+            report "Testing: invalid RTE must stack vector 14 below original A7..." severity note;
+
+            for i in 0 to 8191 loop
+                mem(i) := x"4E71";
+            end loop;
+
+            -- Reset vectors: SSP=$2000, PC=$1000
+            mem(0) := x"0000";
+            mem(1) := x"2000";
+            mem(2) := x"0000";
+            mem(3) := x"1000";
+
+            -- Format Error vector (14, offset $38) -> $1300
+            mem(16#38#/2) := x"0000";
+            mem(16#38#/2 + 1) := x"1300";
+
+            -- Clear verification area
+            for i in 16#3000#/2 to 16#3008#/2 loop
+                mem(i) := x"DEAD";
+            end loop;
+
+            -- ===== Code at $1000 =====
+            -- MSP deliberately zeroed; invalid RTE must not switch to it.
+            mem(16#1000#/2) := x"203C"; mem(16#1002#/2) := x"0000"; mem(16#1004#/2) := x"0000";  -- MOVE.L #$00000000,D0
+            mem(16#1006#/2) := x"4E7B"; mem(16#1008#/2) := x"0803";                               -- MOVEC D0,MSP
+            -- Active supervisor stack is ISP at $07C0.
+            mem(16#100A#/2) := x"203C"; mem(16#100C#/2) := x"0000"; mem(16#100E#/2) := x"07C0";  -- MOVE.L #$000007C0,D0
+            mem(16#1010#/2) := x"4E7B"; mem(16#1012#/2) := x"0804";                               -- MOVEC D0,ISP
+            mem(16#1014#/2) := x"2E7C"; mem(16#1016#/2) := x"0000"; mem(16#1018#/2) := x"07C0";  -- MOVEA.L #$000007C0,A7
+            mem(16#101A#/2) := x"46FC"; mem(16#101C#/2) := x"2700";                               -- MOVE.W #$2700,SR
+            mem(16#101E#/2) := x"4E73";                                                            -- RTE
+
+            -- ===== Invalid RTE frame at original A7 ($07C0) =====
+            mem(16#07C0#/2) := x"4032";  -- Stacked SR from live capture shape
+            mem(16#07C2#/2) := x"64DE";  -- PC high
+            mem(16#07C4#/2) := x"2004";  -- PC low
+            mem(16#07C6#/2) := x"4042";  -- Invalid format word
+
+            -- ===== Format Error handler at $1300 =====
+            mem(16#1300#/2) := x"23CF"; mem(16#1302#/2) := x"0000"; mem(16#1304#/2) := x"3000";  -- MOVE.L A7,($3000).L
+            mem(16#1306#/2) := x"4E72"; mem(16#1308#/2) := x"2700";                               -- STOP #$2700
+
+            nReset <= '0';
+            wait for 100 ns;
+            nReset <= '1';
+
+            reached_stop := false;
+            for i in 0 to 30000 loop
+                wait until rising_edge(clk);
+                if addr_out(15 downto 0) = x"1306" then
+                    reached_stop := true;
+                    for j in 0 to 100 loop
+                        wait until rising_edge(clk);
+                    end loop;
+                    exit;
+                end if;
+            end loop;
+
+            if not reached_stop then
+                report "FAIL: " & test_name & " - timeout, format error handler not reached" severity error;
+                test_failed <= test_failed + 1;
+                wait for 1 us;
+                return;
+            end if;
+
+            local_fail := false;
+            a7_val := mem(16#3000#/2) & mem(16#3002#/2);
+            frame_pc := mem(16#07BA#/2) & mem(16#07BC#/2);
+
+            if a7_val /= x"000007B8" then
+                report "  FAIL: format-error handler A7 = $" &
+                       integer'image(to_integer(unsigned(a7_val))) &
+                       ", expected $000007B8 (original A7 - 8)" severity error;
+                local_fail := true;
+            end if;
+            if mem(16#07B8#/2) /= x"2700" or frame_pc /= x"0000101E" or mem(16#07BE#/2) /= x"0038" then
+                report "  FAIL: vector-14 frame at $07B8 is not SR=$2700 PC=$0000101E FMT=$0038" severity error;
+                local_fail := true;
+            end if;
+            if mem(16#07C0#/2) /= x"4032" or mem(16#07C2#/2) /= x"64DE" or
+               mem(16#07C4#/2) /= x"2004" or mem(16#07C6#/2) /= x"4042" then
+                report "  FAIL: invalid RTE frame at original A7 was modified" severity error;
+                local_fail := true;
+            end if;
+
+            if local_fail then
+                report "FAIL: " & test_name severity error;
+                test_failed <= test_failed + 1;
+            else
+                report "PASS: " & test_name severity note;
+                test_passed <= test_passed + 1;
+            end if;
+
+            wait for 1 us;
+        end procedure;
+
         -- Test: Format error with T0=1 must clear T0 in exception handler SR.
         -- MC68030 UM 8.1: exception processing sets S=1 and clears T1,T0.
         -- Pre-RTE SR=$6000 (T0=1, S=1), frame SR=$2000 (S=1), invalid format.
@@ -1943,6 +2053,8 @@ begin
         test_rte_format4205_s_to_u_msp_preserve;
         -- Format Error frame must contain pre-RTE SR, not frame SR
         test_format_error_preserves_frame_sr;
+        -- Invalid RTE must leave A7 unadvanced before stacking Format Error
+        test_format_error_restores_a7_before_stack;
 
         -- Edge case tests for SVmode tracking and timing
         report "---------------------------------------------------------" severity note;
