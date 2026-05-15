@@ -3065,14 +3065,10 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	);
 
 	// Cache interface logic
-	assign i_cache_addr = pmmu_addr_log_p;  // Cache module tags/indexes with PMMU physical address
-	// Do not let the cache observe a request while the PMMU is still resolving it.
-	// The CPU bus is stalled by pmmu_busy_p, but the cache can otherwise latch a
-	// fill request using stale pmmu_addr_phys_p/cache-inhibit from the previous
-	// translation and later fill the line after the real walk completes.
-	assign i_cache_req = i_cache_enabled & (cpustate_p == 2'b00) & ~pmmu_busy_p & ~pmmu_fault_p; // Instruction fetch
-	assign d_cache_addr = pmmu_addr_log_p;  // Cache module tags/indexes with PMMU physical address
-	assign d_cache_req = d_cache_enabled & ((cpustate_p == 2'b10) | (cpustate_p == 2'b11)) & ~pmmu_busy_p & ~pmmu_fault_p; // Data read/write
+	assign i_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
+	assign i_cache_req = i_cache_enabled & (cpustate_p == 2'b00) & ~pmmu_fault_p; // Instruction fetch
+	assign d_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
+	assign d_cache_req = d_cache_enabled & (cpustate_p == 2'b10 | cpustate_p == 2'b11) & ~pmmu_fault_p; // Data read/write
 	assign d_cache_we = (cpustate_p == 2'b11); // Write enable for data cache
 	
 	// Generate 32-bit data and byte enables from 16-bit CPU interface
