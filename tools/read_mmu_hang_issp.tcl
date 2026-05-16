@@ -217,6 +217,12 @@ proc show_pmmu {bin} {
 
 proc show_pmm2 {bin} {
     puts "== PMM2 =="
+    set fault_desc_addr ""
+    set fault_desc_data ""
+    if {[string length $bin] >= 497} {
+        set fault_desc_addr [bin_to_hex [bit_slice $bin 496 465]]
+        set fault_desc_data [bin_to_hex [bit_slice $bin 464 433]]
+    }
     set first_pc [bin_to_hex [bit_slice $bin 432 401]]
     set first_exe_pc [bin_to_hex [bit_slice $bin 400 369]]
     set first_opcode [bin_to_hex [bit_slice $bin 368 353]]
@@ -250,6 +256,9 @@ proc show_pmm2 {bin} {
     puts [format "ptr1: addr=%08s data=%08s" $ptr1_addr $ptr1_data]
     puts [format "ptr2: addr=%08s data=%08s" $ptr2_addr $ptr2_data]
     puts [format "ptr3: addr=%08s data=%08s" $ptr3_addr $ptr3_data]
+    if {$fault_desc_addr ne ""} {
+        puts [format "fault_desc: addr=%08s data=%08s" $fault_desc_addr $fault_desc_data]
+    }
 }
 
 proc show_excf {bin} {

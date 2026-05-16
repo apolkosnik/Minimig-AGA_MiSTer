@@ -1104,8 +1104,13 @@ BEGIN
   -- Drive PMMU request metadata
   -- Suppress pmmu_req for odd instruction fetches, because vector 3 must win
   -- before the MMU or external bus sees the cycle.
+  -- $00DD4000-$00DD5FFF is the MiSTer shared-memory trapdoor used by
+  -- extra/MiSTerFileSystem.c. It is board-private I/O rather than Amiga RAM,
+  -- so it must remain reachable even when the guest page tables do not map it.
   pmmu_req      <= '1' when (state /= "01" and pmmu_tc_en = '1'
-                             and not (state = "00" and TG68_PC(0) = '1')) else '0';
+                             and not (state = "00" and TG68_PC(0) = '1')
+                             and not (pmmu_addr_log_int(31 downto 16) = x"00DD" and
+                                      pmmu_addr_log_int(15 downto 13) = "010")) else '0';
   pmmu_is_insn  <= '1' when state = "00" else '0';
   pmmu_rw       <= '0' when state = "11" else '1';
   pmmu_rmw      <= exec_tas OR exec_cas;

@@ -102,7 +102,11 @@ module cpu_wrapper
 // MC68030 bus fault suppression: When PMMU is translating (busy) or has faulted, suppress
 // CPU bus accesses. On real 68030, faulting bus cycles are aborted before data reaches memory.
 // The busy->fault transition is glitch-free (at least one is always high during handshake).
-wire pmmu_suppress_bus = cpucfg[1] & (pmmu_busy_p | pmmu_fault_p | walker_timeout_error);
+wire pmmu_shared_io_log = cpucfg[1] &&
+                          (pmmu_addr_log_p[31:16] == 16'h00DD) &&
+                          (pmmu_addr_log_p[15:13] == 3'b010);
+wire pmmu_suppress_bus = cpucfg[1] & ~pmmu_shared_io_log &
+                         (pmmu_busy_p | pmmu_fault_p | walker_timeout_error);
 assign ramsel       = (cpu_req & ~sel_nmi_vector & ~walker_active & ~pmmu_suppress_bus & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)) | walker_fast_ram;
 assign ramshared    = sel_dd;
 assign walker_active_out = walker_active;
@@ -120,7 +124,12 @@ always @(posedge clk) nmi_addr <= vbr + 32'h7c;
 // For non-68030 modes, pmmu_addr_phys_p = cpu_addr_p (identity, no MMU).
 // For 68030 with TC.E=0 (MMU disabled), PMMU outputs addr_phys = addr_log (identity).
 // pmmu_suppress_bus ensures bus_addr is only sampled after translation completes.
-wire [31:0] bus_addr = cpucfg[1] ? pmmu_addr_phys_p : cpu_addr;
+// $00DD4000-$00DD5FFF is a MiSTer shared-memory trapdoor used by
+// extra/MiSTerFileSystem.c. It is platform I/O, not real Amiga RAM, so let
+// that window bypass the PMMU tables while still using the existing sel_dd
+// DDR remap, byte-lane swap, and cache-inhibit path.
+wire [31:0] bus_addr = pmmu_shared_io_log ? pmmu_addr_log_p :
+                       (cpucfg[1] ? pmmu_addr_phys_p : cpu_addr);
 
 wire sel_z3ram0 = (bus_addr[31:27] == z3ram_base0) && z3ram_ena0;
 wire sel_z3ram1 = (bus_addr[31:28] == z3ram_base1) && z3ram_ena1;
@@ -1177,11 +1186,12 @@ altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (1),
 	.instance_id             ("PMM2"),
-	.probe_width             (433),
+	.probe_width             (497),
 	.source_width            (1),
 	.enable_metastability    ("YES")
 ) pmmu_issp_desc (
-	.probe ({stp_fault_pc, stp_fault_exe_pc, stp_fault_opcode,
+	.probe ({stp_fault_desc_addr, stp_fault_desc_data,
+	         stp_fault_pc, stp_fault_exe_pc, stp_fault_opcode,
 	         stp_fault_state, stp_fault_micro_state, stp_fault_next_micro_state,
 	         stp_fault_memaddr, stp_fault_log_addr, stp_fault_phys_addr,
 	         stp_fault_flags, stp_fault_rw, stp_fault_is_insn, stp_fault_fault_fc,
