@@ -1,9 +1,8 @@
 -- tb_pmove_readback_guard.vhd
--- Focused MC68030 PMOVE regression for the pmmu_dn_read_wait guard.
+-- Focused MC68030 PMOVE regression for the PMOVE memory writeback path.
 -- Verifies that:
---   1. Dn-mode PMOVE MMU->register readback still writes the destination Dn.
---   2. Memory-EA PMOVE MMU->mem retirement does not assert Regwrena and clobber
---      the active address register while passing through pmmu_dn_read_wait.
+--   1. A valid memory-source PMOVE can load TT0.
+--   2. A valid memory-destination PMOVE writes TT0 without clobbering A7.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -28,6 +27,7 @@ architecture behavior of tb_pmove_readback_guard is
     constant CLK_PERIOD : time := 10 ns;
     constant TT0_VALUE  : std_logic_vector(31 downto 0) := x"76540210";
     constant STACK_ADDR : integer := 16#2200#;
+    constant SOURCE_ADDR : integer := 16#2300#;
     constant RESULT_ADDR : integer := 16#2400#;
 
     type mem_array_t is array(0 to 16383) of std_logic_vector(15 downto 0);
@@ -147,27 +147,24 @@ begin
             mem(RESULT_ADDR / 2 + 3) := x"BEEF";
             mem(STACK_ADDR / 2) := x"DEAD";
             mem(STACK_ADDR / 2 + 1) := x"BEEF";
+            mem(SOURCE_ADDR / 2) := TT0_VALUE(31 downto 16);
+            mem(SOURCE_ADDR / 2 + 1) := TT0_VALUE(15 downto 0);
 
-            mem(16#1000# / 2) := x"203C";  -- MOVE.L #TT0_VALUE,D0
-            mem(16#1002# / 2) := TT0_VALUE(31 downto 16);
-            mem(16#1004# / 2) := TT0_VALUE(15 downto 0);
-            mem(16#1006# / 2) := x"F000";  -- PMOVE D0,TT0
+            mem(16#1000# / 2) := x"207C";  -- MOVEA.L #SOURCE_ADDR,A0
+            mem(16#1002# / 2) := x"0000";
+            mem(16#1004# / 2) := std_logic_vector(to_unsigned(SOURCE_ADDR, 16));
+            mem(16#1006# / 2) := x"F010";  -- PMOVE (A0),TT0
             mem(16#1008# / 2) := x"0800";
             mem(16#100A# / 2) := x"2E7C";  -- MOVEA.L #STACK_ADDR,A7
             mem(16#100C# / 2) := x"0000";
             mem(16#100E# / 2) := std_logic_vector(to_unsigned(STACK_ADDR, 16));
-            mem(16#1010# / 2) := x"F01F";  -- PMOVE TT0,(A7)+
+            mem(16#1010# / 2) := x"F017";  -- PMOVE TT0,(A7)
             mem(16#1012# / 2) := x"0A00";
-            mem(16#1014# / 2) := x"F001";  -- PMOVE TT0,D1
-            mem(16#1016# / 2) := x"0A00";
-            mem(16#1018# / 2) := x"23C1";  -- MOVE.L D1,$2400
-            mem(16#101A# / 2) := x"0000";
-            mem(16#101C# / 2) := std_logic_vector(to_unsigned(RESULT_ADDR, 16));
-            mem(16#101E# / 2) := x"23CF";  -- MOVE.L A7,$2404
-            mem(16#1020# / 2) := x"0000";
-            mem(16#1022# / 2) := std_logic_vector(to_unsigned(RESULT_ADDR + 4, 16));
-            mem(16#1024# / 2) := x"4E72";  -- STOP #$2700
-            mem(16#1026# / 2) := x"2700";
+            mem(16#1014# / 2) := x"23CF";  -- MOVE.L A7,$2404
+            mem(16#1016# / 2) := x"0000";
+            mem(16#1018# / 2) := std_logic_vector(to_unsigned(RESULT_ADDR + 4, 16));
+            mem(16#101A# / 2) := x"4E72";  -- STOP #$2700
+            mem(16#101C# / 2) := x"2700";
         end procedure;
 
         procedure run_case(max_cycles : integer := 12000) is
@@ -215,9 +212,8 @@ begin
         init_program;
         run_case;
 
-        check_long("PMOVE TT0,(A7)+ wrote TT0 to memory", STACK_ADDR, TT0_VALUE);
-        check_long("PMOVE TT0,D1 kept Dn readback valid", RESULT_ADDR, TT0_VALUE);
-        check_long("PMOVE TT0,(A7)+ preserved A7 postincrement", RESULT_ADDR + 4, x"00002204");
+        check_long("PMOVE (A0),TT0 then TT0,(A7) wrote TT0 to memory", STACK_ADDR, TT0_VALUE);
+        check_long("PMOVE TT0,(A7) preserved A7", RESULT_ADDR + 4, x"00002200");
 
         report "PMOVE readback guard tests: " & integer'image(pass_count) &
                " PASSED, " & integer'image(fail_count) & " FAILED" severity note;

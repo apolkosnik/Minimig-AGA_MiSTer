@@ -158,20 +158,24 @@ always @ (posedge sysclk) begin
 		write_ena   <= 0;
 		write_state <= 0;
 	end else begin
+		write_ena <= 0;
 		case(write_state)
 			default:
-				if(~write_ena && ramsel && cpustate == 3) begin
+				if(ramsel && cpustate == 3) begin
 					writeAddr <= cpuAddr;
 					writeDat  <= cpuWR;
 					write_dqm <= {cpuU, cpuL};
 					write_req <= 1;
 					if(cache_wr_ack) begin
-						write_ena   <= 1;
 						write_state <= 1;
 					end
 				end
 
 			1: if(write_ack) begin
+					// The SDRAM controller has accepted the write. Only now
+					// acknowledge the CPU so PMMU walker reads cannot observe
+					// stale page-table data after a completed CPU write.
+					write_ena   <= 1;
 					write_req   <= 0;
 					write_state <= 2;
 				end
@@ -180,8 +184,6 @@ always @ (posedge sysclk) begin
 					write_state <= 0;
 				end
 		endcase
-
-		if(~ramsel) write_ena <= 0;
 	end
 end
 

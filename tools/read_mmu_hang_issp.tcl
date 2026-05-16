@@ -503,11 +503,11 @@ proc show_rtwr {bin} {
     set last_ready [bin_to_uint [bit_slice $bin 1 1]]
     set last_mmu [bin_to_uint [bit_slice $bin 0 0]]
 
-    puts [format "page_40002xxx: seen=%u count=%u newest_flags=%02s newest_micro=%u uds=%u lds=%u ramready=%u mmu_e=%u" \
+    puts [format "root_page_writes: seen=%u count=%u newest_flags=%02s newest_micro=%u uds=%u lds=%u ramready=%u mmu_e=%u" \
         $page_seen $page_count $last_flags $last_micro $last_uds $last_lds $last_ready $last_mmu]
-    puts [format "exact_400022e8: seen=%u hits=%u data=%04s%04s last_addr=%08s pc=%08s micro=%u" \
+    puts [format "srp_slot_000: seen=%u hits=%u data=%04s%04s last_addr=%08s pc=%08s micro=%u" \
         $exact_seen $exact_hits $exact_hi $exact_lo $exact_addr $exact_pc $exact_micro]
-    puts [format "srp_4000_slot: srp_l=%08s slot=%08s seen=%u hits=%u data=%04s%04s last_addr=%08s pc=%08s micro=%u" \
+    puts [format "srp_slot_0f8: srp_l=%08s slot=%08s seen=%u hits=%u data=%04s%04s last_addr=%08s pc=%08s micro=%u" \
         $srp_l $srp40_addr $fc6_seen $fc6_hits $fc6_hi $fc6_lo $fc6_addr_last $fc6_pc $fc6_micro]
     puts [format "last page writes: 0=%08s:%04s 1=%08s:%04s 2=%08s:%04s 3=%08s:%04s" \
         $last0_addr $last0_data $last1_addr $last1_data $last2_addr $last2_data $last3_addr $last3_data]

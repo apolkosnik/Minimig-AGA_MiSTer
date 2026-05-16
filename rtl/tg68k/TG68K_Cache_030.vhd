@@ -28,6 +28,7 @@ entity TG68K_Cache_030 is
     -- Instruction Cache Interface
     i_addr         : in  std_logic_vector(31 downto 0);     -- Logical address from CPU
     i_addr_phys    : in  std_logic_vector(31 downto 0);     -- Physical address from PMMU
+    i_fc           : in  std_logic_vector(2 downto 0);      -- Function code for logical cache tag
     i_req          : in  std_logic;
     i_cache_inhibit : in  std_logic;                         -- Cache inhibit from PMMU
     i_data         : out std_logic_vector(31 downto 0);
@@ -40,6 +41,7 @@ entity TG68K_Cache_030 is
     -- Data Cache Interface
     d_addr         : in  std_logic_vector(31 downto 0);     -- Logical address from CPU
     d_addr_phys    : in  std_logic_vector(31 downto 0);     -- Physical address from PMMU
+    d_fc           : in  std_logic_vector(2 downto 0);      -- Function code for logical cache tag
     d_req          : in  std_logic;
     d_we           : in  std_logic;
     d_cache_inhibit : in  std_logic;                         -- Cache inhibit from PMMU
@@ -62,20 +64,22 @@ architecture rtl of TG68K_Cache_030 is
   constant NUM_LINES       : integer := CACHE_SIZE / LINE_SIZE; -- 16 lines
   constant ADDR_BITS       : integer := 4;     -- log2(16) = 4 bits for line index
   constant OFFSET_BITS     : integer := 4;     -- log2(16) = 4 bits for byte offset
-  constant TAG_BITS        : integer := 32 - ADDR_BITS - OFFSET_BITS; -- 24 bits
+  constant ADDR_TAG_BITS   : integer := 32 - ADDR_BITS - OFFSET_BITS; -- 24 logical address bits
+  constant I_TAG_BITS      : integer := ADDR_TAG_BITS + 1; -- FC2 + address tag
+  constant D_TAG_BITS      : integer := ADDR_TAG_BITS + 3; -- FC0-FC2 + address tag
 
   -- Instruction Cache Arrays
   type i_data_array_t is array(0 to NUM_LINES-1) of std_logic_vector(127 downto 0);
-  type i_tag_array_t is array(0 to NUM_LINES-1) of std_logic_vector(TAG_BITS-1 downto 0);
+  type i_tag_array_t is array(0 to NUM_LINES-1) of std_logic_vector(I_TAG_BITS-1 downto 0);
   type i_valid_array_t is array(0 to NUM_LINES-1) of std_logic;
 
   signal i_data_array  : i_data_array_t;
   signal i_tag_array   : i_tag_array_t;
   signal i_valid_array : i_valid_array_t;
 
-  -- Data Cache Arrays  
+  -- Data Cache Arrays
   type d_data_array_t is array(0 to NUM_LINES-1) of std_logic_vector(127 downto 0);
-  type d_tag_array_t is array(0 to NUM_LINES-1) of std_logic_vector(TAG_BITS-1 downto 0);
+  type d_tag_array_t is array(0 to NUM_LINES-1) of std_logic_vector(D_TAG_BITS-1 downto 0);
   type d_valid_array_t is array(0 to NUM_LINES-1) of std_logic;
 
   signal d_data_array  : d_data_array_t;
@@ -84,11 +88,11 @@ architecture rtl of TG68K_Cache_030 is
 
   -- Cache line parsing
   signal i_line_idx    : integer range 0 to NUM_LINES-1;
-  signal i_tag         : std_logic_vector(TAG_BITS-1 downto 0);
+  signal i_tag         : std_logic_vector(I_TAG_BITS-1 downto 0);
   signal i_offset      : integer range 0 to LINE_SIZE-1;
-  
+
   signal d_line_idx    : integer range 0 to NUM_LINES-1;
-  signal d_tag         : std_logic_vector(TAG_BITS-1 downto 0);
+  signal d_tag         : std_logic_vector(D_TAG_BITS-1 downto 0);
   signal d_offset      : integer range 0 to LINE_SIZE-1;
   
   -- Internal signals to track fill request state (VHDL-93 compatibility)
@@ -98,29 +102,30 @@ architecture rtl of TG68K_Cache_030 is
   -- BUG #131 FIX: Latch line index and tag when fill is requested
   -- Must use latched values at fill completion, not current values which may have changed
   signal i_fill_line_idx : integer range 0 to NUM_LINES-1 := 0;
-  signal i_fill_tag      : std_logic_vector(TAG_BITS-1 downto 0) := (others => '0');
+  signal i_fill_tag      : std_logic_vector(I_TAG_BITS-1 downto 0) := (others => '0');
   signal d_fill_line_idx : integer range 0 to NUM_LINES-1 := 0;
-  signal d_fill_tag      : std_logic_vector(TAG_BITS-1 downto 0) := (others => '0');
-  
+  signal d_fill_tag      : std_logic_vector(D_TAG_BITS-1 downto 0) := (others => '0');
+
   -- Cache operation address parsing
   signal cache_op_line_idx : integer range 0 to NUM_LINES-1;
-  signal cache_op_tag      : std_logic_vector(TAG_BITS-1 downto 0);
-  signal cache_op_page_mask : std_logic_vector(TAG_BITS-1 downto 0);
+  signal cache_op_tag      : std_logic_vector(ADDR_TAG_BITS-1 downto 0);
+  signal cache_op_page_mask : std_logic_vector(ADDR_TAG_BITS-1 downto 0);
 
 begin
 
   -- Address parsing for instruction cache
-  -- Use physical address for both index and tag (cache is physically indexed, physically tagged)
-  i_line_idx <= to_integer(unsigned(i_addr_phys(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
-  i_tag      <= i_addr_phys(31 downto ADDR_BITS+OFFSET_BITS);
-  i_offset   <= to_integer(unsigned(i_addr_phys(OFFSET_BITS-1 downto 2))) * 4; -- Word-aligned
+  -- MC68030 internal caches are logical caches. Use translated physical
+  -- addresses only for external fills, not for lookup state.
+  i_line_idx <= to_integer(unsigned(i_addr(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
+  i_tag      <= i_fc(2) & i_addr(31 downto ADDR_BITS+OFFSET_BITS);
+  i_offset   <= to_integer(unsigned(i_addr(OFFSET_BITS-1 downto 2))) * 4; -- Word-aligned
 
   -- Address parsing for data cache
-  -- Use physical address for both index and tag (cache is physically indexed, physically tagged)
-  d_line_idx <= to_integer(unsigned(d_addr_phys(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
-  d_tag      <= d_addr_phys(31 downto ADDR_BITS+OFFSET_BITS);
-  d_offset   <= to_integer(unsigned(d_addr_phys(OFFSET_BITS-1 downto 2))) * 4; -- Word-aligned
-  
+  -- Data cache tags include all three function-code bits.
+  d_line_idx <= to_integer(unsigned(d_addr(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
+  d_tag      <= d_fc & d_addr(31 downto ADDR_BITS+OFFSET_BITS);
+  d_offset   <= to_integer(unsigned(d_addr(OFFSET_BITS-1 downto 2))) * 4; -- Word-aligned
+
   -- Cache operation address parsing
   cache_op_line_idx <= to_integer(unsigned(cache_op_addr(ADDR_BITS+OFFSET_BITS-1 downto OFFSET_BITS)));
   cache_op_tag      <= cache_op_addr(31 downto ADDR_BITS+OFFSET_BITS);
@@ -160,17 +165,15 @@ begin
             for i in 0 to NUM_LINES-1 loop
               -- Check if cache line tag matches the page
               if i_valid_array(i) = '1' and
-                 (i_tag_array(i)(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) =
-                  cache_op_page_mask(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS)) then
+                 (i_tag_array(i)(ADDR_TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) =
+                  cache_op_page_mask(ADDR_TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS)) then
                 i_valid_array(i) <= '0';
               end if;
             end loop;
           when "00" => -- Invalidate specific line
-            -- Invalidate line if tag matches
-            if i_valid_array(cache_op_line_idx) = '1' and
-               i_tag_array(cache_op_line_idx) = cache_op_tag then
-              i_valid_array(cache_op_line_idx) <= '0';
-            end if;
+            -- 68030 CACR CEI selects a cache entry by CAAR index. WinUAE clears
+            -- the selected valid slot without comparing the stored tag.
+            i_valid_array(cache_op_line_idx) <= '0';
           when others =>
             null;
         end case;
@@ -204,9 +207,9 @@ begin
   end process;
 
   -- Instruction cache hit/miss detection and data output
-  -- When cache inhibited, bypass cache (miss) to prevent CPU lockup
-  -- Freeze only prevents new fills, but existing cache lines can still hit
-  i_hit <= '1' when (cacr_ie = '1' and i_req = '1' and i_cache_inhibit = '0' and
+  -- Cache-inhibit prevents new allocation but does not invalidate existing lines.
+  -- WinUAE's 030 model checks I-cache tags before fetching/deriving CI state.
+  i_hit <= '1' when (cacr_ie = '1' and i_req = '1' and
                      i_valid_array(i_line_idx) = '1' and i_tag_array(i_line_idx) = i_tag)
                      else '0';
   i_fill_req <= i_fill_req_int;
@@ -250,24 +253,23 @@ begin
             for i in 0 to NUM_LINES-1 loop
               -- Check if cache line tag matches the page
               if d_valid_array(i) = '1' and
-                 (d_tag_array(i)(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) =
-                  cache_op_page_mask(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS)) then
+                 (d_tag_array(i)(ADDR_TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) =
+                  cache_op_page_mask(ADDR_TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS)) then
                 d_valid_array(i) <= '0';
               end if;
             end loop;
           when "00" => -- Invalidate specific line
-            -- Invalidate line if tag matches
-            if d_valid_array(cache_op_line_idx) = '1' and
-               d_tag_array(cache_op_line_idx) = cache_op_tag then
-              d_valid_array(cache_op_line_idx) <= '0';
-            end if;
+            -- 68030 CACR CED selects a cache entry by CAAR index. WinUAE clears
+            -- the selected valid slot without comparing the stored tag.
+            d_valid_array(cache_op_line_idx) <= '0';
           when others =>
             null;
         end case;
       end if;
       
-      -- Cache access handling
-      if d_req = '1' and cacr_de = '1' and d_cache_inhibit = '0' then
+      -- Cache access handling. Cache-inhibit prevents new read allocation but
+      -- existing data-cache hits can still be used/updated, matching WinUAE.
+      if d_req = '1' and cacr_de = '1' then
         -- Handle write (write-through for now)
         if d_we = '1' and d_valid_array(d_line_idx) = '1' and d_tag_array(d_line_idx) = d_tag then
           -- Update cache line on write hit with byte enable support
@@ -294,7 +296,7 @@ begin
               if d_be(3) = '1' then d_data_array(d_line_idx)(127 downto 120) <= d_data_in(31 downto 24); end if;
             when others => null;
           end case;
-        elsif d_we = '0' then
+        elsif d_we = '0' and d_cache_inhibit = '0' then
           -- Check for read cache miss
           -- BUG #132 FIX: Only start new fill if no fill is already in progress
           if d_fill_req_int = '0' and (d_valid_array(d_line_idx) = '0' or d_tag_array(d_line_idx) /= d_tag) then
@@ -309,20 +311,10 @@ begin
             end if;
           end if;
         else
-          -- Write miss: check if write allocate is enabled
-          -- BUG #132 FIX: Only start new fill if no fill is already in progress
-          if d_fill_req_int = '0' and cacr_wa = '1' and (d_valid_array(d_line_idx) = '0' or d_tag_array(d_line_idx) /= d_tag) then
-            -- Write allocate: request cache line fill before writing
-            -- Only request fill if not frozen
-            if cacr_dfreeze = '0' then
-              d_fill_req_int <= '1';
-              -- BUG #131 FIX: Latch line index and tag NOW for use at fill completion
-              d_fill_line_idx <= d_line_idx;
-              d_fill_tag <= d_tag;
-              -- Use physical address for memory fill
-              d_fill_addr <= d_addr_phys(31 downto OFFSET_BITS) & (OFFSET_BITS-1 downto 0 => '0');
-            end if;
-          end if;
+          -- WinUAE writes memory first and updates/allocates cache state locally.
+          -- Do not start an external line fill on a write miss; it competes with
+          -- the write-through bus cycle and can steal Fast RAM ownership.
+          null;
         end if;
       end if;
       
@@ -336,8 +328,8 @@ begin
           for i in 0 to NUM_LINES-1 loop
             if d_valid_array(i) = '1' and i /= d_line_idx then
               -- Check if this line is from the same 4KB page
-              if d_tag_array(i)(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) = 
-                 d_tag(TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) then
+              if d_tag_array(i)(ADDR_TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) =
+                 d_tag(ADDR_TAG_BITS-1 downto 12-ADDR_BITS-OFFSET_BITS) then
                 -- Potential alias - invalidate for safety
                 d_valid_array(i) <= '0';
               end if;
@@ -356,9 +348,8 @@ begin
   end process;
 
   -- Data cache hit/miss detection and data output
-  -- When cache inhibited, bypass cache (miss) to prevent CPU lockup
-  -- Freeze only prevents new fills, but existing cache lines can still hit
-  d_hit <= '1' when (cacr_de = '1' and d_req = '1' and d_cache_inhibit = '0' and
+  -- Cache-inhibit prevents allocation but does not suppress existing hits.
+  d_hit <= '1' when (cacr_de = '1' and d_req = '1' and
                      d_valid_array(d_line_idx) = '1' and d_tag_array(d_line_idx) = d_tag)
                      else '0';
   d_fill_req <= d_fill_req_int;

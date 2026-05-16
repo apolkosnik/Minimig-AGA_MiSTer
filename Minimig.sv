@@ -418,6 +418,13 @@ end
 wire  [1:0] cpu_state;
 wire        cpu_nrst_out;
 wire  [3:0] cpu_cacr;
+// The 68030 core has its own on-chip cache model. Do not feed MC68030 CACR
+// enable bits into cpu_cache_new inside the SDRAM/DDR controllers, or fast RAM
+// gets cached twice with different tag/address semantics. cpu_cache_new also
+// continues line-fill sequencing when cc_en=0 unless cache_inhibit is asserted,
+// so force inhibit in 68030 mode and keep it as a one-word RAM adapter.
+wire  [3:0] ram_cache_ctrl = cpucfg[1] ? 4'b0000 : cpu_cacr;
+wire        ram_cache_inhibit = cpucfg[1];
 wire [31:0] cpu_nmi_addr;
 wire        cpu_rst;
 
@@ -449,11 +456,12 @@ wire [7:0] toccata_base;
 wire toccata_ena;
 wire       walker_active_cpu;  // BUG #426: Walker active flag from cpu_wrapper
 wire       walker_writing_cpu; // BUG #427: Walker writing flag from cpu_wrapper
-wire       cache_fill_owns_ram = cache_fill_active & ~walker_active_cpu;
-wire [28:1] ram_addr = cache_fill_owns_ram ? cache_fill_ramaddr : ram_addr_cpu;
-wire        ram_sel = cache_fill_owns_ram ? 1'b1 : ram_sel_cpu;
-wire        ram_lds = cache_fill_owns_ram ? 1'b0 : ram_lds_cpu;  // Active low - enable both bytes for cache
-wire        ram_uds = cache_fill_owns_ram ? 1'b0 : ram_uds_cpu;  // Active low - enable both bytes for cache
+wire       cache_fill_blocks_cpu = cache_fill_active & ~walker_active_cpu;
+wire       cache_fill_owns_ram = cache_fill_blocks_cpu & ~cache_fill_gap;
+wire [28:1] ram_addr = cache_fill_blocks_cpu ? cache_fill_ramaddr : ram_addr_cpu;
+wire        ram_sel = cache_fill_blocks_cpu ? ~cache_fill_gap : ram_sel_cpu;
+wire        ram_lds = cache_fill_blocks_cpu ? (cache_fill_gap ? 1'b1 : 1'b0) : ram_lds_cpu;  // Active low - enable both bytes for cache
+wire        ram_uds = cache_fill_blocks_cpu ? (cache_fill_gap ? 1'b1 : 1'b0) : ram_uds_cpu;  // Active low - enable both bytes for cache
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
 wire        zram_sel  = |ram_addr[28:26];
 
@@ -479,16 +487,16 @@ wire [2:0]  cpu_cache_burst_len; // Burst length (always 7 for 8-word cache line
 wire [28:1] cpu_cache_ramaddr;   // BUG #128: Properly encoded ramaddr for cache fills
 
 // Cache fill state machine - handles 8 consecutive reads for 128-bit cache line
-// IBE/DBE CONTROL: CACR bits 4 (IBE) and 12 (DBE) control whether cache fills occur:
-//   - IBE=0: Instruction cache fills disabled, all I-fetches bypass cache
-//   - DBE=0: Data cache fills disabled, all D-accesses bypass cache
-//   - IBE/DBE=1: Cache fills enabled (current behavior)
-// SDRAM is permanently configured for BURST=4 (sdram_ctrl.v line 291).
-// Cache fills always use burst transfers; IBE/DBE just enable/disable fills entirely.
+// IBE/DBE are burst-enable bits on a real 68030. The current transport always
+// fetches the complete 16-byte line with eight inhibited 16-bit reads, so those
+// bits are not used to mask allocation here.
 reg  [2:0]  cache_fill_cnt;
 reg         cache_fill_active;
 reg         cache_fill_burst;        // Latch burst mode at start of fill
-wire        cache_fill_done = cache_fill_owns_ram & (cache_fill_cnt == 3'd7) & ram_ready;
+reg         cache_fill_gap;          // Drop cpu_cs between words; cpu_cache_new acks are level-held
+reg         cache_fill_ready_armed;  // Accept ram_ready only after observing it low for this word
+wire        cache_fill_accept = cache_fill_owns_ram & ram_ready & cache_fill_ready_armed;
+wire        cache_fill_done = cache_fill_accept & (cache_fill_cnt == 3'd7);
 
 always @(posedge clk_sys) begin
 	if (cpu_rst) begin
@@ -496,23 +504,44 @@ always @(posedge clk_sys) begin
 		cache_fill_active <= 1'b0;
 		cache_fill_ramaddr <= 28'd0;
 		cache_fill_burst <= 1'b0;
+		cache_fill_gap <= 1'b0;
+		cache_fill_ready_armed <= 1'b0;
 	end else begin
-		if (cpu_cache_req & !cache_fill_active & !walker_active_cpu) begin
-			// Start new cache fill sequence
+		if (cpu_cache_req & !cache_fill_active & !walker_active_cpu & !ram_sel_cpu) begin
+			// Start a deferred cache fill sequence.
+			// WinUAE/030 behavior completes the demand access first, then updates
+			// cache state. Do not let the external line-fill transport steal the
+			// Fast RAM bus while the CPU read/write that caused the miss is still
+			// active; page-table setup in Fast RAM depends on write/read ordering.
 			cache_fill_active <= 1'b1;
 			cache_fill_cnt <= 3'd0;
 			cache_fill_ramaddr <= cpu_cache_ramaddr;
 			cache_fill_burst <= cpu_cache_burst;  // Latch burst mode flag
-		end else if (cache_fill_owns_ram & ram_ready) begin
-			if (cache_fill_cnt == 3'd7) begin
-				// Cache fill complete
-				cache_fill_active <= 1'b0;
-				cache_fill_cnt <= 3'd0;
-				cache_fill_burst <= 1'b0;
-			end else begin
-				// Continue filling cache line
-				cache_fill_cnt <= cache_fill_cnt + 3'd1;
-				cache_fill_ramaddr <= cache_fill_ramaddr + 28'd1; // Next 16-bit word
+			cache_fill_gap <= 1'b0;
+			cache_fill_ready_armed <= 1'b0;
+		end else if (cache_fill_gap) begin
+			// cpu_cache_new holds cpu_ack high until cpu_cs drops. Insert a
+			// one-cycle gap between 16-bit words so each cache-line word is a
+			// distinct inhibited read rather than the same latched CPU word.
+			cache_fill_gap <= 1'b0;
+			cache_fill_ready_armed <= 1'b0;
+		end else if (cache_fill_owns_ram) begin
+			if (!ram_ready) begin
+				cache_fill_ready_armed <= 1'b1;
+			end else if (cache_fill_ready_armed) begin
+				cache_fill_ready_armed <= 1'b0;
+				if (cache_fill_cnt == 3'd7) begin
+					// Cache fill complete
+					cache_fill_active <= 1'b0;
+					cache_fill_cnt <= 3'd0;
+					cache_fill_burst <= 1'b0;
+					cache_fill_gap <= 1'b0;
+				end else begin
+					// Continue filling cache line
+					cache_fill_cnt <= cache_fill_cnt + 3'd1;
+					cache_fill_ramaddr <= cache_fill_ramaddr + 28'd1; // Next 16-bit word
+					cache_fill_gap <= 1'b1;
+				end
 			end
 		end
 	end
@@ -520,7 +549,7 @@ end
 
 // Cache fill interface - connect cache requests to RAM with proper sequencing
 assign cpu_cache_data = ram_dout;
-assign cpu_cache_ack = cache_fill_owns_ram & ram_ready;
+assign cpu_cache_ack = cache_fill_accept;
 
 cpu_wrapper
 #(
@@ -599,8 +628,8 @@ sdram_ctrl ram1
 	.c_7m         (c1              ),
 
 	.cache_rst    (cpu_rst         ),
-	.cache_inhibit(1'b0),
-	.cpu_cache_ctrl(cpu_cacr       ),
+	.cache_inhibit(ram_cache_inhibit),
+	.cpu_cache_ctrl(ram_cache_ctrl ),
 
 	.sd_data      (SDRAM_DQ        ),
 	.sd_addr      (SDRAM_A         ),
@@ -642,8 +671,8 @@ ddram_ctrl ram2
 	.reset_n      (~reset_d        ),
 
 	.cache_rst    (cpu_rst         ),
-	.cache_inhibit(1'b0),
-	.cpu_cache_ctrl(cpu_cacr       ),
+	.cache_inhibit(ram_cache_inhibit),
+	.cpu_cache_ctrl(ram_cache_ctrl ),
 
 	.DDRAM_CLK    (DDRAM_CLK       ),
 	.DDRAM_BUSY   (DDRAM_BUSY      ),

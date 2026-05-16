@@ -342,8 +342,16 @@ always @ (posedge clk) begin
         if (!cpu_cs) cpu_sm_state <= CPU_SM_IDLE;
       end
       CPU_SM_FILL1 : begin
+        if (!cpu_cs) begin
+          // The upstream bus can abort a pending CPU read when the 68030 PMMU
+          // takes over the RAM port for a table walk.  Do not let a later SDRAM
+          // acknowledge from that abandoned request be reported to the walker as
+          // a fresh descriptor read.
+          sdr_read_req <= 1'b0;
+          cpu_sm_state <= CPU_SM_IDLE;
+        end else begin
         fill <= 1'b1;
-        cpu_sm_adr <= cpu_adr[10:1]; 
+        cpu_sm_adr <= cpu_adr[10:1];
         if (!sdr_read_ack) begin
           sdr_read_req <= 1'b1;
         end else begin
@@ -382,6 +390,7 @@ always @ (posedge clk) begin
             cpu_sm_dram1_we <= !dtag_lru && !cpu_ir;
             cpu_sm_state <= CPU_SM_FILL2;
           end
+        end
         end
       end
       CPU_SM_FILL2 : begin

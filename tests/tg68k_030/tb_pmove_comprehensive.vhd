@@ -154,9 +154,9 @@ architecture behavioral of tb_pmove_comprehensive is
   type rom_type is array (0 to 2047) of std_logic_vector(15 downto 0);
   type ram_type is array (0 to 2047) of std_logic_vector(15 downto 0);
   signal ram : ram_type := (
-    -- Test 19: Pre-initialize memory that PMOVE will read into CRP and TC
-    -- TC at $1040: ram(32-33) = $80000804 (E=1, IS=1, TIA=4)
-    32 => x"8000", 33 => x"0804",
+    -- Test 19: Pre-initialize memory that PMOVE will read into CRP and TC.
+    -- Use a TC image with reserved bits already clear; the 68030 masks those bits on write.
+    32 => x"0234", 33 => x"5678",
     -- CRP at $1044: ram(34-37) = $00000002_00100000 (limit=2, root=$100000)
     34 => x"0000", 35 => x"0002", 36 => x"0010", 37 => x"0000",
     -- Test 18: Pre-initialize CRP write target at $1016 with non-zero pattern
@@ -166,6 +166,10 @@ architecture behavioral of tb_pmove_comprehensive is
     -- A3=$1060, disp=$168 => CRP target=$11C8. disp=$170 => SRP target=$11D0.
     228 => x"DEAD", 229 => x"BEEF", 230 => x"DEAD", 231 => x"BEEF",
     232 => x"DEAD", 233 => x"BEEF", 234 => x"DEAD", 235 => x"BEEF",
+    -- Test 22 reads TC back from $1104 via (A2)+.
+    130 => x"0234", 131 => x"5678",
+    -- Test 26 reads CRP from $1148 via (A3)+ after Test 25 increments A3.
+    164 => x"0000", 165 => x"0002", 166 => x"0010", 167 => x"0000",
     others => (others => '0')
   );
   signal mem_data : std_logic_vector(15 downto 0);
@@ -183,7 +187,7 @@ architecture behavioral of tb_pmove_comprehensive is
   signal test_results : test_results_array := (others => TEST_PENDING);
   
   -- Expected test values (from initialized D0-D3 registers)
-  constant EXPECTED_D0 : std_logic_vector(31 downto 0) := x"12345678";
+  constant EXPECTED_D0 : std_logic_vector(31 downto 0) := x"02345678";
   constant EXPECTED_D1 : std_logic_vector(31 downto 0) := x"AABBCCDD";
   constant EXPECTED_D2 : std_logic_vector(31 downto 0) := x"DEADBEEF";
   constant EXPECTED_D3 : std_logic_vector(31 downto 0) := x"CAFEBABE";
@@ -233,8 +237,8 @@ architecture behavioral of tb_pmove_comprehensive is
     -- ========================================
     
     -- Initialize test data registers
-    -- MOVE.L #$12345678,D0
-    128 => x"203C", 129 => x"1234", 130 => x"5678",
+    -- MOVE.L #$02345678,D0
+    128 => x"203C", 129 => x"0234", 130 => x"5678",
     -- MOVE.L #$AABBCCDD,D1
     131 => x"223C", 132 => x"AABB", 133 => x"CCDD",
     -- MOVE.L #$DEADBEEF,D2
@@ -256,8 +260,8 @@ architecture behavioral of tb_pmove_comprehensive is
     146 => x"F000", 147 => x"4000",
     
     -- TEST 1.2: PMOVE TC,D4 (Read TC to D4 - use D4 to preserve D1 for TT0 test)
-    -- Extension: 010 10000 1 0000100 = $4204 (TC, read to D4)
-    148 => x"F004", 149 => x"4204",
+    -- D4 is encoded in the opcode EA register field; extension bits 7:0 are reserved zero.
+    148 => x"F004", 149 => x"4200",
     
     -- TEST 1.3: PMOVE TC,(A0) (Write TC to memory)
     -- Opcode: F010 ((An) mode)
@@ -336,15 +340,13 @@ architecture behavioral of tb_pmove_comprehensive is
     -- TEST GROUP 6: SRP Register (64-bit)
     -- ========================================
     
-    -- Reset A0 to different RAM location
-    183 => x"207C", 184 => x"0000", 185 => x"1080",
-    
-    -- TEST 6.1: PMOVE SRP,(A0) (Read SRP to memory)
-    -- Opcode: F010, Ext: 4A00
-    186 => x"F010", 187 => x"4A00",
-    -- TEST 6.2: PMOVE (A0),SRP (Write SRP from memory)
-    -- Opcode: F010, Ext: 4800
-    188 => x"F010", 189 => x"4800",
+    -- A0 still points at $1044, which contains a valid root pointer.
+    -- Prime SRP before readback so the test does not write default-zero SRP
+    -- back into the PMMU and raise a configuration exception.
+    183 => x"F010", 184 => x"4800",  -- PMOVE (A0),SRP
+    185 => x"F010", 186 => x"4A00",  -- PMOVE SRP,(A0)
+    187 => x"F010", 188 => x"4800",  -- PMOVE (A0),SRP
+    189 => x"4E71",
 
     
     -- ========================================
@@ -877,6 +879,7 @@ begin
     -- A3=$1140. Write 64-bit CRP to $1140. A3 -> $1148.
     -- CRP initialized by Test 5.1/5.2 to $00000002_00100000.
     -- RAM at $1140 ($A0 = 160)
+    pass := true;
     ram_val_32 := ram(160) & ram(161); -- Hi
     if ram_val_32 /= x"00000002" then
         pass := false;

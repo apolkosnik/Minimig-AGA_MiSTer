@@ -207,6 +207,7 @@ architecture rtl of TG68K_PMMU_030 is
   signal fault_fc_reg       : std_logic_vector(2 downto 0) := (others => '0');   -- BUG #414: FC at fault time
   signal fault_rw_reg       : std_logic := '1';                                   -- BUG #414: RW at fault time
   signal fault_is_insn_reg  : std_logic := '0';                                   -- BUG #414: Instruction fetch flag
+  signal fault_current_req_match : std_logic := '0';
   
   -- Debug: sticky fault status latch (captures MMUSR at exact moment of fault)
   signal debug_fault_status_latch : std_logic_vector(15 downto 0) := (others => '0');
@@ -1639,8 +1640,18 @@ begin
                    else '0' when tc_en = '0'
                    else '0' when mmudis = '1'  -- MC68030 UM 9.2.3
                    else write_protect_reg;
+  -- A latched fault describes one bus transfer. Once the CPU starts exception
+  -- stacking, the logical address/FC/RW tuple changes and the old fault must
+  -- not keep the wrapper unstalled or look like a fresh double-bus-fault.
+  fault_current_req_match <= '1' when fault_fc_reg = fc and
+                                      fault_rw_reg = rw and
+                                      fault_is_insn_reg = is_insn and
+                                      (addr_log = fault_addr_reg or
+                                       addr_log = std_logic_vector(unsigned(fault_addr_reg) + 2)) else
+                             '0';
   fault         <= '0' when fc = "111" else
-                   fault_reg when translated_cfg_seq = xlat_cfg_seq else
+                   fault_reg when translated_cfg_seq = xlat_cfg_seq and
+                                  fault_current_req_match = '1' else
                    '0';  -- CPU space never faults; stale-context faults are ignored
   fault_status  <= fault_status_reg;
   fault_addr    <= fault_addr_reg;     -- BUG #415: Faulting logical address
@@ -4738,7 +4749,7 @@ begin
     end if;
   end process;
   -- Walker busy indication - not busy if MMU disabled or TTR hit
-  process(wstate, addr_log, fc, rw, rmw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg, pload_active, ptest_update_mmusr, ptest_active, ptest_walk_pending, ptest_desc_return_pending, mmusr_update_req)
+  process(wstate, addr_log, fc, rw, rmw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg, fault_current_req_match, pload_active, ptest_update_mmusr, ptest_active, ptest_walk_pending, ptest_desc_return_pending, mmusr_update_req)
     variable tmatch0, tmatch1 : std_logic;
     variable dummy_ci, dummy_wp : std_logic;
   begin
@@ -4772,7 +4783,8 @@ begin
       -- checking it when req='0' would deadlock because the translation process only
       -- updates translated_addr when req='1'.
       --
-      -- BUG #428 FIX: When fault_reg='1', the translation is "done" (it faulted).
+      -- BUG #428 FIX: When fault_reg='1' for the current request, the translation
+      -- is "done" (it faulted).
       -- Report busy='0' so clkena_lw can fire and make_berr captures the fault.
       -- Without this, the walker_fault handshake (3-4 cycles) holds busy='1'.
       -- During that window, clkena_in fires (cpu_wrapper releases for faults) but
@@ -4782,7 +4794,7 @@ begin
       -- translation for new addr) -> permanent deadlock, berr never dispatched.
       if (pload_active = '0' and
           (tmatch0 = '1' or tmatch1 = '1' or
-          (fault_reg = '1' and translated_cfg_seq = xlat_cfg_seq) or
+          (fault_reg = '1' and translated_cfg_seq = xlat_cfg_seq and fault_current_req_match = '1') or
           (translation_pending = '0' and wstate = W_IDLE and walker_fault = '0' and walker_fault_ack_pending = '0' and
            (req = '0' or (translated_addr = addr_log and translated_fc = fc and translated_rw = rw and translated_cfg_seq = xlat_cfg_seq))))) then
         busy <= '0';

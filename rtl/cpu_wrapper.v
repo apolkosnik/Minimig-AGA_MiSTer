@@ -212,13 +212,17 @@ wire sel_zram_walker   = sel_z3ram0_walker | sel_z3ram1_walker | sel_z2ram_walke
 // walker_reading/walker_writing go to 0 combinationally when entering WALKER_DONE,
 // causing ramsel/ramaddr/ramdin to glitch mid-write before CPU is ungated.
 // walker_active stays high during WALKER_DONE, ensuring clean bus handoff.
-// BUG #439 FIX: Suppress walker_fast_ram during WALKER_RAM_GAP to deassert cpu_cs
-// for the SDRAM/DDR3 cache, allowing it to complete one transaction before starting
-// the next. Without this, cpu_ack stays latched high and the high word read gets
-// stale data from the low word read.
-wire walker_fast_ram = USE_68030_CACHE && walker_active && sel_zram_walker
-                       && (walker_state != 4'd11)   // != WALKER_RAM_GAP
-                       && (walker_state != 4'd12);  // != WALKER_WRITE_RAM_GAP
+// BUG #439/#447 FIX: Only assert the Fast RAM request during the transfer wait
+// states.  The setup/gap states are true bus-idle cycles used to let the
+// SDRAM/DDR3 controller drop its level-held ready before the next descriptor
+// word starts.  The target wire is separate so the state machine can still wait
+// for ramready to deassert before asserting walker_fast_ram.
+wire walker_fast_ram_target = USE_68030_CACHE && walker_active && sel_zram_walker;
+wire walker_fast_ram = walker_fast_ram_target &&
+                       ((walker_state == 4'd3) ||   // WALKER_WAIT_LOW
+                        (walker_state == 4'd5) ||   // WALKER_WAIT_HIGH
+                        (walker_state == 4'd8) ||   // WALKER_WAIT_WR_LOW
+                        (walker_state == 4'd10));   // WALKER_WAIT_WR_HIGH
 
 // Walker encoded RAM address (same encoding as cpu->ramaddr)
 wire [28:1] walker_ramaddr;
@@ -482,12 +486,12 @@ reg         pmmu_walker_berr_p;  // BUG #156 FIX: Bus error during table walk (s
 `define ENABLE_CPUWRAP_DEBUG_TRPD_ISSP
 `define ENABLE_CPUWRAP_DEBUG_HALTD_ISSP
 `define ENABLE_CPUWRAP_DEBUG_STKD_ISSP
-`ifdef ENABLE_CPUWRAP_DEBUG_FULL_ISSP
-`define ENABLE_CPUWRAP_DEBUG_PMMU_ISSP
 `define ENABLE_CPUWRAP_DEBUG_PMM2_ISSP
 `define ENABLE_CPUWRAP_DEBUG_TCWR_ISSP
-`define ENABLE_CPUWRAP_DEBUG_PMWR_ISSP
 `define ENABLE_CPUWRAP_DEBUG_RTWR_ISSP
+`ifdef ENABLE_CPUWRAP_DEBUG_FULL_ISSP
+`define ENABLE_CPUWRAP_DEBUG_PMMU_ISSP
+`define ENABLE_CPUWRAP_DEBUG_PMWR_ISSP
 `define ENABLE_CPUWRAP_DEBUG_EXCF_ISSP
 `define ENABLE_CPUWRAP_DEBUG_CPUS_ISSP
 `define ENABLE_CPUWRAP_DEBUG_REGS_ISSP
@@ -649,10 +653,10 @@ assign rtwr_issp_source = 1'b0;
 `CPUWRAP_DEBUG_KEEP reg  [7:0] pmwr_write_ack_count;
 `CPUWRAP_DEBUG_KEEP reg  [3:0] pmwr_write_berr_count;
 
-// Root-table CPU write trace. The current fast-RAM halt faults on supervisor
-// data at $40001ffc with TC=$82a08680, so the first descriptor read is
-// SRP_L + $40*4 = SRP_L + $100. This probe records writes to the observed
-// stack page and to that exact SRP root descriptor longword.
+// Root-table CPU write trace.  The current fast-RAM halt reads SRP[0] as
+// $00F8000D with TC=$82A08680; that value looks like the ROM-region descriptor
+// that should live at SRP[$F8], not the root slot for logical $00xxxxxx.  Trace
+// CPU writes to the live SRP/CRP root pages plus SRP[0] and SRP[$F8].
 `CPUWRAP_DEBUG_KEEP reg        rtwr_page_seen;
 `CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_page_count;
 `CPUWRAP_DEBUG_KEEP reg        rtwr_exact_seen;
@@ -688,12 +692,15 @@ wire tcwr_any_we = kernel_pmmu_reg_we_p;
 wire tcwr_tc_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10000);
 wire tcwr_srp_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10010);
 wire tcwr_crp_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10011);
-wire [31:0] rtwr_srp40_addr = {stp_pmmu_srp_lo_w[31:2], 2'b00} + 32'h00000100;
+wire [31:0] rtwr_srp0_addr = {stp_pmmu_srp_lo_w[31:2], 2'b00};
+wire [31:0] rtwr_srpf8_addr = {stp_pmmu_srp_lo_w[31:2], 2'b00} + 32'h000003E0;
 wire rtwr_cpu_write_done = cpucfg[1] && cpu_req && (cpustate_p == 2'b11) &&
                            ramsel && ramready && !walker_active && !pmmu_suppress_bus;
-wire rtwr_page_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:12] == 20'h40002);
-wire rtwr_exact_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == 30'h100008BA);
-wire rtwr_fc6_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == rtwr_srp40_addr[31:2]);
+wire rtwr_page_hit = rtwr_cpu_write_done &&
+                     ((pmmu_addr_phys_p[31:12] == stp_pmmu_srp_lo_w[31:12]) ||
+                      (pmmu_addr_phys_p[31:12] == stp_pmmu_crp_lo_w[31:12]));
+wire rtwr_exact_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == rtwr_srp0_addr[31:2]);
+wire rtwr_fc6_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == rtwr_srpf8_addr[31:2]);
 
 always @(posedge clk) begin
 	if (~reset || tcwr_issp_source[0]) begin
@@ -1279,9 +1286,9 @@ altsource_probe #(
 
 // Root-table CPU write trace. Source bit 0 clears the sticky history.
 // Probe layout (MSB first, 511 bits):
-//   [510:493] page-write summary, [492:385] exact 400022E8 longword,
-//   [384:276] current SRP+$100 longword, [275:212] current SRP/slot,
-//   [211:20] four newest writes in 40002xxx, [19:0] newest write context.
+//   [510:493] page-write summary, [492:385] current SRP[0] longword,
+//   [384:276] current SRP[$F8] longword, [275:212] current SRP/slot,
+//   [211:20] four newest root-page writes, [19:0] newest write context.
 `ifdef ENABLE_CPUWRAP_DEBUG_RTWR_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
@@ -1309,7 +1316,7 @@ altsource_probe #(
 		rtwr_fc6_pc,               // [315:284]
 		rtwr_fc6_micro,            // [283:276]
 		stp_pmmu_srp_lo,           // [275:244]
-		rtwr_srp40_addr,           // [243:212]
+		rtwr_srpf8_addr,           // [243:212]
 		rtwr_last0_addr,           // [211:180]
 		rtwr_last0_data,           // [179:164]
 		rtwr_last1_addr,           // [163:132]
@@ -1964,6 +1971,11 @@ wire        d_fill_req;
 wire [31:0] d_fill_addr;
 wire[127:0] d_fill_data;
 wire        d_fill_valid;
+wire        pmmu_phys_z3ram0_cache;
+wire        pmmu_phys_z3ram1_cache;
+wire        pmmu_phys_z2ram_cache;
+wire        pmmu_phys_fast_cacheable;
+wire        pmmu_cache_inhibit_fill;
 // Qualify CPU completion on the bus that is currently selected.
 // This blocks stale ready pulses (e.g. delayed SDRAM ramready from a stale
 // physical address) from completing an unrelated chip/fast cycle.
@@ -3015,6 +3027,12 @@ generate
 if (USE_68030_CACHE) begin : gen_68030_cache
 
 	localparam DIAG_DISABLE_030_CACHE = 1'b0;
+	// Diagnostic fastmem cache-off build.  The SDRAM/DDR cpu_cache_new path is
+	// already inhibited in 68030 mode; this also bypasses the internal 030
+	// cache for Z2/Z3 Fast RAM after PMMU translation.  It keeps chip/custom/ROM
+	// behavior unchanged and lets hardware testing isolate fastmem cache
+	// coherency from PMMU table-walk/exception behavior.
+	localparam DIAG_DISABLE_030_FASTMEM_CACHE = 1'b1;
 
 	// Cache enable logic - independent control for instruction and data caches.
 	// The existing OSD slot with cpucfg=10 is reused for 68030; the logic keys off cpucfg[1].
@@ -3040,8 +3058,9 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 		// Instruction Cache Interface
 		.i_addr(i_cache_addr),
 		.i_addr_phys(pmmu_addr_phys_p),  // Physical address from PMMU
+		.i_fc(fc_o),
 		.i_req(i_cache_req),
-		.i_cache_inhibit(pmmu_cache_inhibit_p),  // Cache inhibit from PMMU
+		.i_cache_inhibit(pmmu_cache_inhibit_fill),  // PMMU CI or unsupported physical fill target
 		.i_data(i_cache_data),
 		.i_hit(i_cache_hit),
 		.i_fill_req(i_fill_req),
@@ -3051,9 +3070,10 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 		// Data Cache Interface
 		.d_addr(d_cache_addr),
 		.d_addr_phys(pmmu_addr_phys_p),  // Physical address from PMMU
+		.d_fc(fc_o),
 		.d_req(d_cache_req),
 		.d_we(d_cache_we),
-		.d_cache_inhibit(pmmu_cache_inhibit_p),  // Cache inhibit from PMMU
+		.d_cache_inhibit(pmmu_cache_inhibit_fill),  // PMMU CI or unsupported physical fill target
 		.d_data_in(d_cache_data_in),
 		.d_data_out(d_cache_data_out),
 		.d_be(d_cache_be),
@@ -3066,9 +3086,25 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 
 	// Cache interface logic
 	assign i_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
-	assign i_cache_req = i_cache_enabled & (cpustate_p == 2'b00) & ~pmmu_fault_p; // Instruction fetch
 	assign d_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
-	assign d_cache_req = d_cache_enabled & (cpustate_p == 2'b10 | cpustate_p == 2'b11) & ~pmmu_fault_p; // Data read/write
+	// WinUAE translates first, then populates/updates the 68030 caches from the
+	// translated physical address.  Do not let the cache latch a miss while the
+	// PMMU is still walking or after it has reported a fault; the physical fill
+	// address is not valid in either case.
+	wire cache_xlate_ready = ~pmmu_busy_p & ~pmmu_fault_p;
+	// This fill transport is physically wired to the Fast RAM SDRAM/DDR path.
+	// Match WinUAE's 030 burst behavior: after translation, only perform full
+	// cache-line fills for Fast32 memory. Non-Fast targets are treated as CI for
+	// allocation so a chip/custom/ROM miss cannot be fetched from the Fast RAM bus.
+	assign pmmu_phys_z3ram0_cache = (pmmu_addr_phys_p[31:27] == z3ram_base0) && z3ram_ena0;
+	assign pmmu_phys_z3ram1_cache = (pmmu_addr_phys_p[31:28] == z3ram_base1) && z3ram_ena1;
+		assign pmmu_phys_z2ram_cache  = !pmmu_addr_phys_p[31:24] && (pmmu_addr_phys_p[23] ^ |pmmu_addr_phys_p[22:21]) && z2ram_ena;
+		assign pmmu_phys_fast_cacheable = pmmu_phys_z3ram0_cache | pmmu_phys_z3ram1_cache | pmmu_phys_z2ram_cache;
+		assign pmmu_cache_inhibit_fill = pmmu_cache_inhibit_p |
+		                                 ~pmmu_phys_fast_cacheable |
+		                                 (DIAG_DISABLE_030_FASTMEM_CACHE & pmmu_phys_fast_cacheable);
+		assign i_cache_req = i_cache_enabled & (cpustate_p == 2'b00) & cache_xlate_ready & ~pmmu_cache_inhibit_fill; // Instruction fetch
+		assign d_cache_req = d_cache_enabled & (cpustate_p == 2'b10 | cpustate_p == 2'b11) & cache_xlate_ready & ~pmmu_cache_inhibit_fill; // Data read/write
 	assign d_cache_we = (cpustate_p == 2'b11); // Write enable for data cache
 	
 	// Generate 32-bit data and byte enables from 16-bit CPU interface
@@ -3099,19 +3135,17 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// Fix: Exclude write cycles (d_cache_we) from cache_hit used for clkena_in gating.
 	// Reads can still be served entirely from cache; writes must wait for bus completion.
 	assign cache_hit = ((i_cache_hit & i_cache_req) | (d_cache_hit & d_cache_req & ~d_cache_we)) & ~pmmu_fault_p;
-	assign cache_miss = ((i_cache_enabled & ~i_cache_hit & i_cache_req) | (d_cache_enabled & ~d_cache_hit & d_cache_req));
+		assign cache_miss = ((i_cache_enabled & ~i_cache_hit & i_cache_req) | (d_cache_enabled & ~d_cache_hit & d_cache_req)) &
+		                    ~pmmu_cache_inhibit_fill;
 
-	// Connect cache fill interface to external memory controller
-	// IBE/DBE bits control whether cache fills are allowed (not burst mode itself)
-	// When IBE=0, instruction cache fills are disabled (all I-fetches bypass cache)
-	// When DBE=0, data cache fills are disabled (all D-accesses bypass cache)
-	// SDRAM burst mode is always BURST=4 (hardcoded in sdram_ctrl.v line 291)
+	// Connect cache fill interface to external memory controller.
+	// This transport currently fetches a full 16-byte cache line for each miss.
 	// Do not launch cache-line fills while PMMU translation is still unresolved or
 	// while the walker owns Fast RAM. The cache fill request stays asserted until
 	// serviced, so deferring it here is enough to prevent overlap with descriptor
 	// reads without losing the miss.
 	assign cache_req = fill_active | ((fill_pending_i | fill_pending_d) &
-	                   ~pmmu_busy_p & ~pmmu_walker_req_p & ~walker_active);
+	                   ~pmmu_busy_p & ~pmmu_fault_p & ~pmmu_walker_req_p & ~walker_active & sel_zram_cache);
 	assign cache_addr = fill_active ? fill_addr_latched : (fill_pending_i ? i_fill_addr : d_fill_addr);
 
 	// Burst control - unused (SDRAM permanently in BURST=4 mode)
@@ -3128,8 +3162,12 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	reg fill_owner_r;
 	reg [127:0] fill_data_r;
 
-	wire fill_pending_i = i_fill_req & cacr_ibe;
-	wire fill_pending_d = d_fill_req & cacr_dbe;
+	// WinUAE/MC68030 behavior: IBE/DBE control burst fill behavior, not whether
+	// the missed longword may be cached at all. This cache currently transports a
+	// complete 16-byte line for every fill, so do not let IBE/DBE mask the request
+	// and leave the cache module stuck with a pending miss.
+	wire fill_pending_i = i_fill_req;
+	wire fill_pending_d = d_fill_req;
 	wire fill_start = ~fill_active & ~pmmu_busy_p & ~pmmu_walker_req_p & ~walker_active &
 	                  (fill_pending_i | fill_pending_d) & cache_ack;
 	wire fill_accept = fill_active & cache_ack;
@@ -3198,7 +3236,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 		// Chip RAM reads wait for chipready; Fast RAM reads wait for ramready.
 		// Without this, a spurious SDRAM read (from CPU's frozen address) produces ramready
 		// before chipready, causing the walker to advance with stale/wrong chip_data.
-		assign walker_mem_ready = walker_chip_ram ? chipready : (walker_fast_ram ? ramready : (chipready | ramready | fastchip_ready));
+		assign walker_mem_ready = walker_chip_ram ? chipready : (walker_fast_ram_target ? ramready : (chipready | ramready | fastchip_ready));
 		localparam WALKER_TIMEOUT_LIMIT = 12'd2048;  // Timeout after 2048 cycles (~18us)
 
 	// BUG #422 FIX: Track in-flight CPU SDRAM cycles for stale-ready detection.
@@ -3210,13 +3248,18 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	// stale_ram_pending is set when the CPU has an active SDRAM request (ramsel with CPU
 	// component). Cleared when ramready fires (stale cycle completed). The walker waits
 	// in READ_LOW until this flag is clear before accepting ramready.
+	wire cpu_ram_request_active = cpu_req & ~sel_nmi_vector & ~walker_active &
+	                              ~pmmu_suppress_bus &
+	                              (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
 	reg stale_ram_pending;
 	always @(posedge clk) begin
 		if (~reset)
 			stale_ram_pending <= 0;
 		else if (ramready)
 			stale_ram_pending <= 0;  // SDRAM cycle completed
-		else if (!walker_active && !pmmu_suppress_bus && ramsel)
+		else if (stale_ram_pending && !cpu_ram_request_active)
+			stale_ram_pending <= 0;  // CPU cycle was aborted before the cache acked it
+		else if (cpu_ram_request_active)
 			stale_ram_pending <= 1;  // CPU has SDRAM cycle in-flight
 	end
 	wire [15:0] pmwr_timeout_flags_next = {
@@ -3437,11 +3480,15 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					// Legacy chip/Gary bus walks: wait for chip bus SM idle (chip_stage==0).
 					// SDRAM walks: wait for stale_ram_pending to clear (ramready fires).
 					else if (walker_chip_ram) begin
-						if (chip_stage == 2'b00)
+						if (chip_stage == 2'b00 && !walker_mem_ready) begin
+							walker_read_ready_armed <= 1;
 							walker_state <= WALKER_WAIT_LOW;
+						end
 					end else begin
-						if (!stale_ram_pending)
+						if (!stale_ram_pending && !walker_mem_ready) begin
+							walker_read_ready_armed <= 1;
 							walker_state <= WALKER_WAIT_LOW;
+						end
 					end
 				end
 
@@ -3472,20 +3519,21 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
 						pmmu_walker_data_p <= 32'h0;  // Data doesn't matter when BERR is set
 						walker_state <= WALKER_DONE;
-					end else if (~walker_mem_ready) begin
-						walker_read_ready_armed <= 1;
-						walker_timeout_cnt <= walker_timeout_cnt + 1;
 					end else if (walker_read_ready_armed) begin
-						// Capture low 16 bits
-						walker_read_ready_armed <= 0;
-						walker_data_low <= cpu_din;
-						// BUG #439 FIX: For SDRAM/DDR3 reads, insert a gap cycle to
-						// deassert cpu_cs and clear cpu_ack before the high word read.
-						// Legacy chip/Gary bus uses chipready (not cache), so no gap needed.
-						if (walker_chip_ram)
-							walker_state <= WALKER_READ_HIGH;
-						else
-							walker_state <= WALKER_RAM_GAP;
+						if (walker_mem_ready) begin
+							// Capture low 16 bits
+							walker_read_ready_armed <= 0;
+							walker_data_low <= cpu_din;
+							// BUG #439 FIX: For SDRAM/DDR3 reads, insert a gap cycle to
+							// deassert cpu_cs and clear cpu_ack before the high word read.
+							// Legacy chip/Gary bus uses chipready (not cache), so no gap needed.
+							if (walker_chip_ram)
+								walker_state <= WALKER_READ_HIGH;
+							else
+								walker_state <= WALKER_RAM_GAP;
+						end else begin
+							walker_timeout_cnt <= walker_timeout_cnt + 1;
+						end
 					end else begin
 						// BUG #138: Increment timeout counter while waiting
 						walker_timeout_cnt <= walker_timeout_cnt + 1;
@@ -3505,10 +3553,13 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 
 				WALKER_READ_HIGH: begin
 					// Drive walker address with LSB=1 for high word via walker_chip_addr mux
-					// BUG #138: Reset timeout counter when entering wait state
-					walker_timeout_cnt <= 0;
-					walker_read_ready_armed <= 0;
-					walker_state <= WALKER_WAIT_HIGH;
+					if (!walker_mem_ready) begin
+						walker_read_ready_armed <= 1;
+						walker_state <= WALKER_WAIT_HIGH;
+					end else begin
+						walker_read_ready_armed <= 0;
+						walker_timeout_cnt <= walker_timeout_cnt + 1;
+					end
 				end
 
 					WALKER_WAIT_HIGH: begin
@@ -3531,17 +3582,18 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						pmmu_walker_berr_p <= 1;  // Signal bus error to PMMU
 						pmmu_walker_data_p <= 32'h0;
 						walker_state <= WALKER_DONE;
-						end else if (~walker_mem_ready) begin
-							walker_read_ready_armed <= 1;
-							walker_timeout_cnt <= walker_timeout_cnt + 1;
 						end else if (walker_read_ready_armed) begin
-							// BUG #405 FIX: Assemble 32-bit descriptor in big-endian order
-							// walker_data_low was read from low address (= high word in big-endian)
-							// cpu_din was read from high address (= low word in big-endian)
-							walker_read_ready_armed <= 0;
-							pmmu_walker_data_p <= {walker_data_low, cpu_din};
-							pmmu_walker_ack_p <= 1;
-							walker_state <= WALKER_DONE;
+							if (walker_mem_ready) begin
+								// BUG #405 FIX: Assemble 32-bit descriptor in big-endian order
+								// walker_data_low was read from low address (= high word in big-endian)
+								// cpu_din was read from high address (= low word in big-endian)
+								walker_read_ready_armed <= 0;
+								pmmu_walker_data_p <= {walker_data_low, cpu_din};
+								pmmu_walker_ack_p <= 1;
+								walker_state <= WALKER_DONE;
+							end else begin
+								walker_timeout_cnt <= walker_timeout_cnt + 1;
+							end
 						end else begin
 							// BUG #138: Increment timeout counter while waiting
 							walker_timeout_cnt <= walker_timeout_cnt + 1;
@@ -3586,11 +3638,15 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					end
 					// BUG #422 FIX: Same stale-cycle guard as WALKER_READ_LOW (see above)
 					else if (walker_chip_ram) begin
-						if (chip_stage == 2'b00)
+						if (chip_stage == 2'b00 && !walker_mem_ready) begin
+							walker_write_ready_armed <= 1;
 							walker_state <= WALKER_WAIT_WR_LOW;
+						end
 					end else begin
-						if (!stale_ram_pending)
+						if (!stale_ram_pending && !walker_mem_ready) begin
+							walker_write_ready_armed <= 1;
 							walker_state <= WALKER_WAIT_WR_LOW;
+						end
 					end
 				end
 
@@ -3615,19 +3671,20 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 						walker_timeout_error <= 1;
 						pmmu_walker_berr_p <= 1;
 						walker_state <= WALKER_DONE;
-						end else if (~walker_mem_ready) begin
-							walker_write_ready_armed <= 1;
-							walker_timeout_cnt <= walker_timeout_cnt + 1;
 						end else if (walker_write_ready_armed) begin
-							// Low word written, now write high word.
-							// Fast RAM uses cpu_cache_new/write-buffer logic behind a level-sensitive
-							// cpu_cs. Drop walker_fast_ram for a cycle so the write path can return
-							// to idle before the second 16-bit descriptor write.
-							walker_write_ready_armed <= 0;
-							if (walker_chip_ram)
-								walker_state <= WALKER_WRITE_HIGH;
-							else
-								walker_state <= WALKER_WRITE_RAM_GAP;
+							if (walker_mem_ready) begin
+								// Low word written, now write high word.
+								// Fast RAM uses cpu_cache_new/write-buffer logic behind a level-sensitive
+								// cpu_cs. Drop walker_fast_ram for a cycle so the write path can return
+								// to idle before the second 16-bit descriptor write.
+								walker_write_ready_armed <= 0;
+								if (walker_chip_ram)
+									walker_state <= WALKER_WRITE_HIGH;
+								else
+									walker_state <= WALKER_WRITE_RAM_GAP;
+							end else begin
+								walker_timeout_cnt <= walker_timeout_cnt + 1;
+							end
 						end else begin
 							walker_timeout_cnt <= walker_timeout_cnt + 1;
 						end
@@ -3642,9 +3699,13 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					WALKER_WRITE_HIGH: begin
 					// Drive walker address with LSB=1 for high word
 						// Write data (walker_wdata_latch[31:16]) is driven via chip_din mux
-						walker_timeout_cnt <= 0;
-						walker_write_ready_armed <= 0;
-						walker_state <= WALKER_WAIT_WR_HIGH;
+						if (!walker_mem_ready) begin
+							walker_write_ready_armed <= 1;
+							walker_state <= WALKER_WAIT_WR_HIGH;
+						end else begin
+							walker_write_ready_armed <= 0;
+							walker_timeout_cnt <= walker_timeout_cnt + 1;
+						end
 					end
 
 					WALKER_WAIT_WR_HIGH: begin
@@ -3668,16 +3729,17 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 							walker_timeout_error <= 1;
 							pmmu_walker_berr_p <= 1;
 							walker_state <= WALKER_DONE;
-							end else if (~walker_mem_ready) begin
-								walker_write_ready_armed <= 1;
-								walker_timeout_cnt <= walker_timeout_cnt + 1;
 							end else if (walker_write_ready_armed) begin
-								// Write complete
-								walker_write_ready_armed <= 0;
-								if (pmwr_write_ack_count != 8'hFF)
-									pmwr_write_ack_count <= pmwr_write_ack_count + 1'b1;
-								pmmu_walker_ack_p <= 1;
-								walker_state <= WALKER_DONE;
+								if (walker_mem_ready) begin
+									// Write complete
+									walker_write_ready_armed <= 0;
+									if (pmwr_write_ack_count != 8'hFF)
+										pmwr_write_ack_count <= pmwr_write_ack_count + 1'b1;
+									pmmu_walker_ack_p <= 1;
+									walker_state <= WALKER_DONE;
+								end else begin
+									walker_timeout_cnt <= walker_timeout_cnt + 1;
+								end
 							end else begin
 								walker_timeout_cnt <= walker_timeout_cnt + 1;
 							end

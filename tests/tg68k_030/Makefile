@@ -329,10 +329,8 @@ test-pmove-crp-mem-to-mmu-postinc: compile
 	@echo "Running PMOVE.Q (A7)+,CRP memory-to-MMU postincrement test..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_crp_mem_to_mmu_postinc.vhd && $(VSIM) -c -do "run 5us; quit" tb_pmove_crp_mem_to_mmu_postinc
 
-test-pmove-comprehensive: compile
-	@echo "Running PMOVE comprehensive regression..."
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_pmove_comprehensive
-	@$(MAKE) --no-print-directory test-pmove-readback-guard
+test-pmove-comprehensive: test-pmove-all-modes test-pmove-readback-guard
+	@echo "Maintained WinUAE PMOVE comprehensive regression complete."
 
 test-pmove-multiple-regs: compile
 	@echo "Running PMOVE multiple registers from (A7) test (OP1addr conflict validation)..."

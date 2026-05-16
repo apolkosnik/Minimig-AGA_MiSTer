@@ -31,6 +31,7 @@ architecture behavior of tb_cache_030 is
       -- Instruction Cache Interface
       i_addr         : in  std_logic_vector(31 downto 0);
       i_addr_phys    : in  std_logic_vector(31 downto 0);
+      i_fc           : in  std_logic_vector(2 downto 0);
       i_req          : in  std_logic;
       i_cache_inhibit : in  std_logic;
       i_data         : out std_logic_vector(31 downto 0);
@@ -42,6 +43,7 @@ architecture behavior of tb_cache_030 is
       -- Data Cache Interface
       d_addr         : in  std_logic_vector(31 downto 0);
       d_addr_phys    : in  std_logic_vector(31 downto 0);
+      d_fc           : in  std_logic_vector(2 downto 0);
       d_req          : in  std_logic;
       d_we           : in  std_logic;
       d_cache_inhibit : in  std_logic;
@@ -79,6 +81,7 @@ architecture behavior of tb_cache_030 is
   -- Instruction cache
   signal i_addr : std_logic_vector(31 downto 0) := (others => '0');
   signal i_addr_phys : std_logic_vector(31 downto 0) := (others => '0');
+  signal i_fc : std_logic_vector(2 downto 0) := "010";
   signal i_req : std_logic := '0';
   signal i_cache_inhibit : std_logic := '0';
   signal i_data : std_logic_vector(31 downto 0);
@@ -91,6 +94,7 @@ architecture behavior of tb_cache_030 is
   -- Data cache
   signal d_addr : std_logic_vector(31 downto 0) := (others => '0');
   signal d_addr_phys : std_logic_vector(31 downto 0) := (others => '0');
+  signal d_fc : std_logic_vector(2 downto 0) := "001";
   signal d_req : std_logic := '0';
   signal d_we : std_logic := '0';
   signal d_cache_inhibit : std_logic := '0';
@@ -123,6 +127,7 @@ begin
     cache_op_addr => cache_op_addr,
     i_addr => i_addr,
     i_addr_phys => i_addr_phys,
+    i_fc => i_fc,
     i_req => i_req,
     i_cache_inhibit => i_cache_inhibit,
     i_data => i_data,
@@ -133,6 +138,7 @@ begin
     i_fill_valid => i_fill_valid,
     d_addr => d_addr,
     d_addr_phys => d_addr_phys,
+    d_fc => d_fc,
     d_req => d_req,
     d_we => d_we,
     d_cache_inhibit => d_cache_inhibit,
@@ -430,6 +436,150 @@ begin
     test_d_read(x"00003000"); -- Same address without freeze
     report_test("dCache Unfreeze", d_fill_req = '1'); -- Should request fill
     d_req <= '0';
+    wait_cycles(1);
+
+    -- TEST 9: 68030 Logical Cache Tags
+    write(l, string'("TEST 9: Logical Address and FC Tagging"));
+    writeline(output, l);
+
+    inv_req <= '1';
+    cache_op_scope <= "10"; -- All
+    cache_op_cache <= "00"; -- Both caches
+    wait_cycles(1);
+    inv_req <= '0';
+    wait_cycles(5);
+
+    i_fc <= "010"; -- user program
+    i_addr <= x"00006000";
+    i_addr_phys <= x"10006000";
+    i_req <= '1';
+    wait until rising_edge(clk);
+    wait until rising_edge(clk);
+    report_test("I-Cache Logical Cold Miss", i_hit = '0' and i_fill_addr = x"10006000");
+    i_req <= '0';
+    wait_cycles(20);
+
+    i_addr <= x"00006000";
+    i_addr_phys <= x"20006000";
+    i_req <= '1';
+    wait until rising_edge(clk);
+    wait until rising_edge(clk);
+    report_test("I-Cache Same Logical Different Physical Hit", i_hit = '1');
+    i_req <= '0';
+    wait_cycles(1);
+
+    i_fc <= "110"; -- supervisor program must not hit user-program tag
+    i_req <= '1';
+    wait until rising_edge(clk);
+    wait until rising_edge(clk);
+    report_test("I-Cache FC2 Tag Miss", i_hit = '0');
+    i_req <= '0';
+    wait_cycles(1);
+
+    inv_req <= '1';
+    cache_op_scope <= "10";
+    cache_op_cache <= "00";
+    wait_cycles(1);
+    inv_req <= '0';
+    wait_cycles(5);
+
+    d_fc <= "001"; -- user data
+    d_addr <= x"00007000";
+    d_addr_phys <= x"10007000";
+    d_req <= '1';
+    d_we <= '0';
+    wait until rising_edge(clk);
+    wait until rising_edge(clk);
+    report_test("D-Cache Logical Cold Miss", d_hit = '0' and d_fill_addr = x"10007000");
+    d_req <= '0';
+    wait_cycles(20);
+
+    d_addr <= x"00007000";
+    d_addr_phys <= x"20007000";
+    d_req <= '1';
+    wait until rising_edge(clk);
+    wait until rising_edge(clk);
+    report_test("D-Cache Same Logical Different Physical Hit", d_hit = '1');
+    d_req <= '0';
+    wait_cycles(1);
+
+    d_fc <= "101"; -- supervisor data must not hit user-data tag
+    d_req <= '1';
+    wait until rising_edge(clk);
+    wait until rising_edge(clk);
+    report_test("D-Cache FC Tag Miss", d_hit = '0');
+    d_req <= '0';
+    wait_cycles(1);
+
+    -- TEST 10: WinUAE-compatible write-miss behavior
+    write(l, string'("TEST 10: Data Write Miss Does Not Launch Fill"));
+    writeline(output, l);
+
+    inv_req <= '1';
+    cache_op_scope <= "10";
+    cache_op_cache <= "00";
+    wait_cycles(1);
+    inv_req <= '0';
+    wait_cycles(5);
+
+    cacr_wa <= '1';
+    d_fc <= "001";
+    d_addr <= x"00008000";
+    d_addr_phys <= x"10008000";
+    d_data_in <= x"A5A55A5A";
+    d_req <= '1';
+    d_we <= '1';
+    wait until rising_edge(clk);
+    wait until rising_edge(clk);
+    report_test("D-Cache WA Write Miss No Fill", d_hit = '0' and d_fill_req = '0');
+    d_req <= '0';
+    d_we <= '0';
+    cacr_wa <= '0';
+    wait_cycles(5);
+
+    -- TEST 11: Cache-inhibit blocks new allocation, not existing hits
+    write(l, string'("TEST 11: Cache-Inhibit Allows Existing Hits"));
+    writeline(output, l);
+
+    i_fc <= "010";
+    i_cache_inhibit <= '0';
+    i_addr <= x"00009000";
+    i_addr_phys <= x"10009000";
+    i_req <= '1';
+    wait until rising_edge(clk);
+    wait until rising_edge(clk);
+    report_test("I-Cache CI Prime Miss", i_hit = '0' and i_fill_req = '1');
+    i_req <= '0';
+    wait_cycles(20);
+
+    i_cache_inhibit <= '1';
+    i_req <= '1';
+    wait until rising_edge(clk);
+    wait until rising_edge(clk);
+    report_test("I-Cache CI Existing Hit", i_hit = '1');
+    i_req <= '0';
+    i_cache_inhibit <= '0';
+    wait_cycles(1);
+
+    d_fc <= "001";
+    d_cache_inhibit <= '0';
+    d_addr <= x"0000A000";
+    d_addr_phys <= x"1000A000";
+    d_req <= '1';
+    d_we <= '0';
+    wait until rising_edge(clk);
+    wait until rising_edge(clk);
+    report_test("D-Cache CI Prime Miss", d_hit = '0' and d_fill_req = '1');
+    d_req <= '0';
+    wait_cycles(20);
+
+    d_cache_inhibit <= '1';
+    d_req <= '1';
+    wait until rising_edge(clk);
+    wait until rising_edge(clk);
+    report_test("D-Cache CI Existing Hit", d_hit = '1');
+    d_req <= '0';
+    d_cache_inhibit <= '0';
     wait_cycles(1);
 
 

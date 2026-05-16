@@ -299,6 +299,7 @@ COMPONENT TG68K_Cache_030
       -- Instruction Cache Interface
       i_addr         : in  std_logic_vector(31 downto 0);
       i_addr_phys    : in  std_logic_vector(31 downto 0);
+      i_fc           : in  std_logic_vector(2 downto 0);
       i_req          : in  std_logic;
       i_cache_inhibit : in  std_logic;
       i_data         : out std_logic_vector(31 downto 0);
@@ -310,6 +311,7 @@ COMPONENT TG68K_Cache_030
       -- Data Cache Interface
       d_addr         : in  std_logic_vector(31 downto 0);
       d_addr_phys    : in  std_logic_vector(31 downto 0);
+      d_fc           : in  std_logic_vector(2 downto 0);
       d_req          : in  std_logic;
       d_we           : in  std_logic;
       d_cache_inhibit : in  std_logic;
@@ -351,6 +353,7 @@ COMPONENT TG68K_Cache_030
    SIGNAL nResetOut   : std_logic;
    SIGNAL autovector  : std_logic;
    SIGNAL cpu1reset   : std_logic;
+   SIGNAL FC_int      : std_logic_vector(2 downto 0);
 
    -- Cache control signals
    SIGNAL cache_enabled   : std_logic;
@@ -426,6 +429,7 @@ BEGIN
    
    RESET <= '0' WHEN nResetOut='0' ELSE 'Z';
    HALT <=  '0' WHEN nResetOut='0' ELSE 'Z';
+   FC <= FC_int;
    cpu1reset <= RESET OR HALT;
 
    -- Cache is only available when CPU(1)='1' (the 68030 slot in this tree) and either cache is enabled
@@ -459,7 +463,7 @@ cpu1: TG68KdotC_Kernel
       IPL_autovector => autovector, -- : in std_logic:='0';
       addr_out => ADDR,          -- : buffer std_logic_vector(31 downto 0);
       berr => BERR,              -- : in std_logic:='0';     -- only 68000 Stackpointer dummy for Atari ST core
-      FC => FC,                  -- : out std_logic_vector(2 downto 0);
+      FC => FC_int,              -- : out std_logic_vector(2 downto 0);
       data_write => data_write,  -- : out std_logic_vector(15 downto 0);
       busstate => state,         -- : buffer std_logic_vector(1 downto 0);	
       nWr => wr,                 -- : out std_logic;
@@ -735,6 +739,7 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
       -- Instruction Cache Interface
       i_addr         => i_cache_addr,
       i_addr_phys    => pmmu_addr_phys,   -- Physical address from PMMU
+      i_fc           => FC_int,
       i_req          => i_cache_req,
       i_cache_inhibit => pmmu_ch_inhibit,  -- Cache inhibit from PMMU
       i_data         => i_cache_data,
@@ -746,6 +751,7 @@ PROCESS (CLK, RESET, state, as_s, as_e, rw_s, rw_e, uds_s, uds_e, lds_s, lds_e)
       -- Data Cache Interface
       d_addr         => d_cache_addr,
       d_addr_phys    => pmmu_addr_phys,   -- Physical address from PMMU
+      d_fc           => FC_int,
       d_req          => d_cache_req,
       d_we           => d_cache_we,
       d_cache_inhibit => pmmu_ch_inhibit,  -- Cache inhibit from PMMU
