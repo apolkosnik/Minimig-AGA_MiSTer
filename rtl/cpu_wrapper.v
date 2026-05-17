@@ -185,18 +185,8 @@ assign ramaddr_comb[17:16] = walker_fast_ram ? walker_ramaddr[17:16] : ({2{sel_d
 assign ramaddr_comb[15:1]  = walker_fast_ram ? walker_ramaddr[15:1] : bus_addr[15:1];
 assign ramaddr = ramaddr_comb;
 
-// BUG #128 FIX: Compute properly encoded ramaddr for cache fill addresses
-// Cache fills use cache_addr (physical address from PMMU) instead of cpu_addr
-// This encoding is needed so DDR3 controller gets correct Z3 RAM addresses
-wire sel_z3ram0_cache = (cache_addr[31:27] == z3ram_base0) && z3ram_ena0;
-wire sel_z3ram1_cache = (cache_addr[31:28] == z3ram_base1) && z3ram_ena1;
-wire sel_z2ram_cache  = !cache_addr[31:24] && (cache_addr[23] ^ |cache_addr[22:21]) && z2ram_ena;
-wire sel_zram_cache   = sel_z3ram0_cache | sel_z3ram1_cache | sel_z2ram_cache;
-
-assign cache_ramaddr[28]    = sel_zram_cache & ~sel_z3ram0_cache;
-assign cache_ramaddr[27]    = sel_zram_cache & (~sel_z3ram1_cache | cache_addr[27]);
-assign cache_ramaddr[26:23] = (sel_z3ram0_cache | sel_z3ram1_cache) ? cache_addr[26:23] : 4'b0000;
-assign cache_ramaddr[22:1]  = cache_addr[22:1];
+// The 68030 cache controller in rtl/tg68k owns physical fill-address encoding
+// and drives cache_ramaddr.  cpu_wrapper only arbitrates that external fill bus.
 
 // BUG #136 FIX: Walker Fast RAM path support
 // When page tables are in Fast RAM (Z2, Z3), walker needs to drive RAM controller
@@ -246,29 +236,7 @@ assign fastchip_rnw = wr;
 
 reg  [31:0] cpu_addr;
 reg  [15:0] cpu_dout;
-// CPU data input mux with cache support
-reg [15:0] cache_data_out_16;
-always @(*) begin
-	// Select appropriate 16-bit data from 32-bit cache output based on address
-	case (pmmu_addr_log_p[1:0])
-		2'b00: begin
-			// Instruction cache (always 16-bit aligned) or data cache lower word
-			if (cpustate_p == 2'b00) 
-				cache_data_out_16 = i_cache_data[15:0];   // Instruction fetch
-			else
-				cache_data_out_16 = d_cache_data_out[15:0];   // Data lower word
-		end
-		2'b10: begin
-			// Upper word or instruction at +2
-			if (cpustate_p == 2'b00)
-				cache_data_out_16 = i_cache_data[31:16];  // Instruction at +2  
-			else
-				cache_data_out_16 = d_cache_data_out[31:16];  // Data upper word
-		end
-		2'b01: cache_data_out_16 = {8'h0, d_cache_data_out[15:8]};   // Byte at +1
-		2'b11: cache_data_out_16 = {8'h0, d_cache_data_out[31:24]};  // Byte at +3
-	endcase
-end
+wire [15:0] cache_data_out_16;
 
 // BUG #406 FIX: Don't let cache_hit intercept cpu_din during walker reads.
 // When walker is active and reading from memory, cpu_din must reflect the actual
@@ -426,6 +394,7 @@ wire [31:0] kernel_trap_vector_p;
 wire [31:0] kernel_micro_state_p;    // VHDL integer 0-255 maps to 32-bit
 wire [31:0] kernel_next_ms_p;        // VHDL integer 0-255 maps to 32-bit
 wire        kernel_trapmake_p;
+wire  [2:0] kernel_fc_p;
 // CPU Core debug signals (for CPUS ISSP probe)
 wire [31:0] kernel_TG68_PC_p;
 wire [15:0] kernel_opcode_p;
@@ -498,6 +467,7 @@ reg         pmmu_walker_berr_p;  // BUG #156 FIX: Bus error during table walk (s
 `define ENABLE_CPUWRAP_DEBUG_PMM2_ISSP
 `define ENABLE_CPUWRAP_DEBUG_TCWR_ISSP
 `define ENABLE_CPUWRAP_DEBUG_RTWR_ISSP
+`define ENABLE_CPUWRAP_DEBUG_WALK_ISSP
 `ifdef ENABLE_CPUWRAP_DEBUG_FULL_ISSP
 `define ENABLE_CPUWRAP_DEBUG_PMMU_ISSP
 `define ENABLE_CPUWRAP_DEBUG_PMWR_ISSP
@@ -577,6 +547,7 @@ wire [0:0] pmm2_issp_source;
 wire [0:0] tcwr_issp_source;
 wire [0:0] pmwr_issp_source;
 wire [0:0] rtwr_issp_source;
+wire [0:0] walkr_issp_source;
 `ifndef ENABLE_CPUWRAP_DEBUG_PMMU_ISSP
 assign pmmu_issp_source = 1'b0;
 `endif
@@ -591,6 +562,9 @@ assign pmwr_issp_source = 1'b0;
 `endif
 `ifndef ENABLE_CPUWRAP_DEBUG_RTWR_ISSP
 assign rtwr_issp_source = 1'b0;
+`endif
+`ifndef ENABLE_CPUWRAP_DEBUG_WALK_ISSP
+assign walkr_issp_source = 1'b0;
 `endif
 // Kernel internal state debug (6 bits, probe limit=511)
 `CPUWRAP_DEBUG_KEEP reg  [2:0] stp_ipl_nr;
@@ -697,19 +671,42 @@ assign rtwr_issp_source = 1'b0;
 `CPUWRAP_DEBUG_KEEP reg        rtwr_last_ramready;
 `CPUWRAP_DEBUG_KEEP reg        rtwr_last_mmu_enabled;
 
+// Wrapper-side PMMU walker read trace. PMM2 exposes the PMMU's final view; this
+// captures the descriptor longwords returned by the external memory wrapper.
+`CPUWRAP_DEBUG_KEEP reg        walkr_seen;
+`CPUWRAP_DEBUG_KEEP reg  [2:0] walkr_count;
+`CPUWRAP_DEBUG_KEEP reg        walkr_fault_seen;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_fault_saved_addr;
+`CPUWRAP_DEBUG_KEEP reg [15:0] walkr_fault_mmusr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_fault_tc;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_fault_crp_lo;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e0_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e0_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e1_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e1_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e2_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e2_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e3_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e3_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e4_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e4_data;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e5_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e5_data;
+
 wire tcwr_any_we = kernel_pmmu_reg_we_p;
 wire tcwr_tc_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10000);
 wire tcwr_srp_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10010);
 wire tcwr_crp_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10011);
-wire [31:0] rtwr_srp0_addr = {stp_pmmu_srp_lo_w[31:2], 2'b00};
-wire [31:0] rtwr_srpf8_addr = {stp_pmmu_srp_lo_w[31:2], 2'b00} + 32'h000003E0;
+localparam [31:0] RTWR_NETBSD_FAULT_PAGE_ADDR = 32'h4FFF6000;
+localparam [31:0] RTWR_NETBSD_FAULT_SLOT_ADDR = 32'h4FFF6074;
+wire [31:0] rtwr_crp_slot74_addr = {stp_pmmu_crp_lo_w[31:2], 2'b00} + 32'h00000074;
 wire rtwr_cpu_write_done = cpucfg[1] && cpu_req && (cpustate_p == 2'b11) &&
                            ramsel && ramready && !walker_active && !pmmu_suppress_bus;
 wire rtwr_page_hit = rtwr_cpu_write_done &&
-                     ((pmmu_addr_phys_p[31:12] == stp_pmmu_srp_lo_w[31:12]) ||
+                     ((pmmu_addr_phys_p[31:12] == RTWR_NETBSD_FAULT_PAGE_ADDR[31:12]) ||
                       (pmmu_addr_phys_p[31:12] == stp_pmmu_crp_lo_w[31:12]));
-wire rtwr_exact_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == rtwr_srp0_addr[31:2]);
-wire rtwr_fc6_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == rtwr_srpf8_addr[31:2]);
+wire rtwr_exact_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == RTWR_NETBSD_FAULT_SLOT_ADDR[31:2]);
+wire rtwr_fc6_hit = rtwr_exact_hit && (cpu_dout_p != 16'h0000);
 
 always @(posedge clk) begin
 	if (~reset || tcwr_issp_source[0]) begin
@@ -853,7 +850,7 @@ always @(posedge clk) begin
 			rtwr_exact_seen <= 1;
 			if (rtwr_exact_hits != 4'hF)
 				rtwr_exact_hits <= rtwr_exact_hits + 4'd1;
-			rtwr_exact_last_addr <= pmmu_addr_phys_p;
+			rtwr_exact_last_addr <= pmmu_addr_log_p;
 			rtwr_exact_pc <= kernel_TG68_PC_p;
 			rtwr_exact_micro <= kernel_micro_state_p[7:0];
 			if (pmmu_addr_phys_p[1])
@@ -866,7 +863,7 @@ always @(posedge clk) begin
 			rtwr_fc6_seen <= 1;
 			if (rtwr_fc6_hits != 4'hF)
 				rtwr_fc6_hits <= rtwr_fc6_hits + 4'd1;
-			rtwr_fc6_last_addr <= pmmu_addr_phys_p;
+			rtwr_fc6_last_addr <= pmmu_addr_log_p;
 			rtwr_fc6_pc <= kernel_TG68_PC_p;
 			rtwr_fc6_micro <= kernel_micro_state_p[7:0];
 			if (pmmu_addr_phys_p[1])
@@ -1204,6 +1201,41 @@ altsource_probe #(
 );
 `endif
 
+// Wrapper-side PMMU walker read trace. Source bit 0 clears the sticky history.
+`ifdef ENABLE_CPUWRAP_DEBUG_WALK_ISSP
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (14),
+	.instance_id             ("WALK"),
+	.probe_width             (501),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) walkr_issp (
+	.probe ({
+		walkr_seen,              // [500]
+		walkr_count,             // [499:497]
+		walkr_fault_seen,        // [496]
+		walkr_fault_saved_addr,  // [495:464]
+		walkr_fault_mmusr,       // [463:448]
+		walkr_fault_tc,          // [447:416]
+		walkr_fault_crp_lo,      // [415:384]
+		walkr_e0_addr,           // [383:352]
+		walkr_e0_data,           // [351:320]
+		walkr_e1_addr,           // [319:288]
+		walkr_e1_data,           // [287:256]
+		walkr_e2_addr,           // [255:224]
+		walkr_e2_data,           // [223:192]
+		walkr_e3_addr,           // [191:160]
+		walkr_e3_data,           // [159:128]
+		walkr_e4_addr,           // [127:96]
+		walkr_e4_data,           // [95:64]
+		walkr_e5_addr,           // [63:32]
+		walkr_e5_data            // [31:0]
+	}),
+	.source (walkr_issp_source)
+);
+`endif
+
 // PMMU register write trace probe.  Source bit 0 clears the sticky history.
 `ifdef ENABLE_CPUWRAP_DEBUG_TCWR_ISSP
 altsource_probe #(
@@ -1296,8 +1328,8 @@ altsource_probe #(
 
 // Root-table CPU write trace. Source bit 0 clears the sticky history.
 // Probe layout (MSB first, 511 bits):
-//   [510:493] page-write summary, [492:385] current SRP[0] longword,
-//   [384:276] current SRP[$F8] longword, [275:212] current SRP/slot,
+//   [510:493] page-write summary, [492:385] NetBSD fixed slot longword,
+//   [384:276] nonzero writes to same slot, [275:212] target/live slot addresses,
 //   [211:20] four newest root-page writes, [19:0] newest write context.
 `ifdef ENABLE_CPUWRAP_DEBUG_RTWR_ISSP
 altsource_probe #(
@@ -1325,8 +1357,8 @@ altsource_probe #(
 		rtwr_fc6_last_addr,        // [347:316]
 		rtwr_fc6_pc,               // [315:284]
 		rtwr_fc6_micro,            // [283:276]
-		stp_pmmu_srp_lo,           // [275:244]
-		rtwr_srpf8_addr,           // [243:212]
+		RTWR_NETBSD_FAULT_SLOT_ADDR, // [275:244]
+		rtwr_crp_slot74_addr,      // [243:212]
 		rtwr_last0_addr,           // [211:180]
 		rtwr_last0_data,           // [179:164]
 		rtwr_last1_addr,           // [163:132]
@@ -1947,8 +1979,6 @@ wire        walker_mem_ready;
 reg  [31:1] walker_addr_latch;  // BUG #135 FIX: Declare outside generate for chipreq logic
 
 // Cache interface signals (68030 only)
-wire        i_cache_enabled;
-wire        d_cache_enabled;
 wire        cache_hit;
 wire        cache_miss;
 wire        cache_inv_req;
@@ -1962,30 +1992,6 @@ wire        cacr_dfreeze;
 wire        cacr_ibe;  // Instruction Burst Enable
 wire        cacr_dbe;  // Data Burst Enable
 wire        cacr_wa;   // Write Allocate
-wire        i_cache_req;
-wire [31:0] i_cache_addr;
-wire [31:0] i_cache_data;
-wire        i_cache_hit;
-wire        i_fill_req;
-wire [31:0] i_fill_addr;
-wire[127:0] i_fill_data;
-wire        i_fill_valid;
-wire        d_cache_req;
-wire [31:0] d_cache_addr;
-wire        d_cache_we;
-wire [31:0] d_cache_data_in;
-wire [31:0] d_cache_data_out;
-wire        d_cache_hit;
-wire  [3:0] d_cache_be;
-wire        d_fill_req;
-wire [31:0] d_fill_addr;
-wire[127:0] d_fill_data;
-wire        d_fill_valid;
-wire        pmmu_phys_z3ram0_cache;
-wire        pmmu_phys_z3ram1_cache;
-wire        pmmu_phys_z2ram_cache;
-wire        pmmu_phys_fast_cacheable;
-wire        pmmu_cache_inhibit_fill;
 // Qualify CPU completion on the bus that is currently selected.
 // This blocks stale ready pulses (e.g. delayed SDRAM ramready from a stale
 // physical address) from completing an unrelated chip/fast cycle.
@@ -2845,6 +2851,7 @@ cpu_inst_p
   .nlds(lds_p),
   .nresetout(reset_out_p),
   .longword(longword),
+  .fc(kernel_fc_p),
   
   .cpu(cpucfg),
   .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
@@ -3036,198 +3043,51 @@ fx68k cpu_inst_o
 generate
 if (USE_68030_CACHE) begin : gen_68030_cache
 
-	localparam DIAG_DISABLE_030_CACHE = 1'b0;
-	// Diagnostic fastmem cache-off build.  The SDRAM/DDR cpu_cache_new path is
-	// already inhibited in 68030 mode; this also bypasses the internal 030
-	// cache for Z2/Z3 Fast RAM after PMMU translation.  It keeps chip/custom/ROM
-	// behavior unchanged and lets hardware testing isolate fastmem cache
-	// coherency from PMMU table-walk/exception behavior.
-	localparam DIAG_DISABLE_030_FASTMEM_CACHE = 1'b1;
-
-	// Cache enable logic - independent control for instruction and data caches.
-	// The existing OSD slot with cpucfg=10 is reused for 68030; the logic keys off cpucfg[1].
-	assign i_cache_enabled = cpucfg[1] & cacr_ie & ~DIAG_DISABLE_030_CACHE; // 68030 slot active and instruction cache enabled
-	assign d_cache_enabled = cpucfg[1] & cacr_de & ~DIAG_DISABLE_030_CACHE; // 68030 slot active and data cache enabled
-
-	// 68030 Cache instantiation
-	TG68K_Cache_030 cache_inst
+	// The 68030 cache implementation is contained in rtl/tg68k.  This wrapper
+	// only exposes the external line-fill bus and uses cache_hit to qualify CPU
+	// wait-state release.
+	TG68K_CacheCtrl_030 cache_ctrl_inst
 	(
 		.clk(clk),
 		.nreset(reset),
-		// Cache Control (from CACR register)
+		.cpu_030(cpucfg[1]),
+		.busstate(cpustate_p),
+		.fc(kernel_fc_p),
+		.uds_n(uds_p),
+		.lds_n(lds_p),
+		.cpu_data_write(cpu_dout_p),
+		.pmmu_addr_log(pmmu_addr_log_p),
+		.pmmu_addr_phys(pmmu_addr_phys_p),
+		.pmmu_cache_inhibit(pmmu_cache_inhibit_p),
+		.pmmu_busy(pmmu_busy_p),
+		.pmmu_fault(pmmu_fault_p),
+		.pmmu_walker_req(pmmu_walker_req_p),
+		.walker_active(walker_active),
+		.z3ram_base0(z3ram_base0),
+		.z3ram_base1(z3ram_base1),
+		.z3ram_ena0(z3ram_ena0),
+		.z3ram_ena1(z3ram_ena1),
+		.z2ram_ena(z2ram_ena),
 		.cacr_ie(cacr_ie),
 		.cacr_de(cacr_de),
 		.cacr_ifreeze(cacr_ifreeze),
 		.cacr_dfreeze(cacr_dfreeze),
 		.cacr_wa(cacr_wa),
-		// Cache invalidation (68030 via CACR bits)
-		.inv_req(cache_inv_req),
+		.cache_inv_req(cache_inv_req),
 		.cache_op_scope(cache_op_scope),
 		.cache_op_cache(cache_op_cache),
 		.cache_op_addr(cache_op_addr),
-		// Instruction Cache Interface
-		.i_addr(i_cache_addr),
-		.i_addr_phys(pmmu_addr_phys_p),  // Physical address from PMMU
-		.i_fc(fc_o),
-		.i_req(i_cache_req),
-		.i_cache_inhibit(pmmu_cache_inhibit_fill),  // PMMU CI or unsupported physical fill target
-		.i_data(i_cache_data),
-		.i_hit(i_cache_hit),
-		.i_fill_req(i_fill_req),
-		.i_fill_addr(i_fill_addr),
-		.i_fill_data(i_fill_data),
-		.i_fill_valid(i_fill_valid),
-		// Data Cache Interface
-		.d_addr(d_cache_addr),
-		.d_addr_phys(pmmu_addr_phys_p),  // Physical address from PMMU
-		.d_fc(fc_o),
-		.d_req(d_cache_req),
-		.d_we(d_cache_we),
-		.d_cache_inhibit(pmmu_cache_inhibit_fill),  // PMMU CI or unsupported physical fill target
-		.d_data_in(d_cache_data_in),
-		.d_data_out(d_cache_data_out),
-		.d_be(d_cache_be),
-		.d_hit(d_cache_hit),
-		.d_fill_req(d_fill_req),
-		.d_fill_addr(d_fill_addr),
-		.d_fill_data(d_fill_data),
-		.d_fill_valid(d_fill_valid)
+		.cache_data(cache_data),
+		.cache_ack(cache_ack),
+		.cache_req(cache_req),
+		.cache_addr(cache_addr),
+		.cache_burst(cache_burst),
+		.cache_burst_len(cache_burst_len),
+		.cache_ramaddr(cache_ramaddr),
+		.cache_hit(cache_hit),
+		.cache_miss(cache_miss),
+		.cache_data_out_16(cache_data_out_16)
 	);
-
-	// Cache interface logic
-	assign i_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
-	assign d_cache_addr = pmmu_addr_log_p;  // Use logical address for cache indexing
-	// WinUAE translates first, then populates/updates the 68030 caches from the
-	// translated physical address.  Do not let the cache latch a miss while the
-	// PMMU is still walking or after it has reported a fault; the physical fill
-	// address is not valid in either case.
-	wire cache_xlate_ready = ~pmmu_busy_p & ~pmmu_fault_p;
-	// This fill transport is physically wired to the Fast RAM SDRAM/DDR path.
-	// Match WinUAE's 030 burst behavior: after translation, only perform full
-	// cache-line fills for Fast32 memory. Non-Fast targets are treated as CI for
-	// allocation so a chip/custom/ROM miss cannot be fetched from the Fast RAM bus.
-	assign pmmu_phys_z3ram0_cache = (pmmu_addr_phys_p[31:27] == z3ram_base0) && z3ram_ena0;
-	assign pmmu_phys_z3ram1_cache = (pmmu_addr_phys_p[31:28] == z3ram_base1) && z3ram_ena1;
-		assign pmmu_phys_z2ram_cache  = !pmmu_addr_phys_p[31:24] && (pmmu_addr_phys_p[23] ^ |pmmu_addr_phys_p[22:21]) && z2ram_ena;
-		assign pmmu_phys_fast_cacheable = pmmu_phys_z3ram0_cache | pmmu_phys_z3ram1_cache | pmmu_phys_z2ram_cache;
-		assign pmmu_cache_inhibit_fill = pmmu_cache_inhibit_p |
-		                                 ~pmmu_phys_fast_cacheable |
-		                                 (DIAG_DISABLE_030_FASTMEM_CACHE & pmmu_phys_fast_cacheable);
-		assign i_cache_req = i_cache_enabled & (cpustate_p == 2'b00) & cache_xlate_ready & ~pmmu_cache_inhibit_fill; // Instruction fetch
-		assign d_cache_req = d_cache_enabled & (cpustate_p == 2'b10 | cpustate_p == 2'b11) & cache_xlate_ready & ~pmmu_cache_inhibit_fill; // Data read/write
-	assign d_cache_we = (cpustate_p == 2'b11); // Write enable for data cache
-	
-	// Generate 32-bit data and byte enables from 16-bit CPU interface
-	// CPU provides 16-bit data with UDS/LDS strobes
-	// Convert to 32-bit aligned data with proper byte enables
-	wire [1:0] addr_low = pmmu_addr_log_p[1:0];
-	
-	// Data positioning based on address alignment
-	assign d_cache_data_in = (addr_low == 2'b00) ? {16'h0, cpu_dout_p} :
-	                         (addr_low == 2'b01) ? {24'h0, cpu_dout_p[7:0]} :
-	                         (addr_low == 2'b10) ? {cpu_dout_p, 16'h0} :
-	                                               {cpu_dout_p[7:0], 24'h0};
-	
-	// Byte enable generation
-	assign d_cache_be = (addr_low == 2'b00) ? {2'b00, ~uds_p, ~lds_p} :
-	                    (addr_low == 2'b01) ? {3'b000, ~lds_p} :
-	                    (addr_low == 2'b10) ? {~uds_p, ~lds_p, 2'b00} :
-	                                          {~uds_p, 3'b000};
-
-	// Cache hit/miss logic
-	// BUG #412 FIX: Data cache hits on WRITES must NOT bypass bus wait in clkena_in.
-	// MC68030 data cache is write-through: writes must go to BOTH cache AND memory.
-	// If cache_hit gates clkena_in during writes, the CPU advances before the actual
-	// bus write completes. For chip bus: chipreq is registered one clock late, so by the
-	// time the chip bus state machine starts, wr has changed to READ and chip_addr points
-	// to the new fetch address - the write becomes a read to the wrong address.
-	// For SDRAM: ramsel drops when cpu_req goes low, potentially losing the write.
-	// Fix: Exclude write cycles (d_cache_we) from cache_hit used for clkena_in gating.
-	// Reads can still be served entirely from cache; writes must wait for bus completion.
-	assign cache_hit = ((i_cache_hit & i_cache_req) | (d_cache_hit & d_cache_req & ~d_cache_we)) & ~pmmu_fault_p;
-		assign cache_miss = ((i_cache_enabled & ~i_cache_hit & i_cache_req) | (d_cache_enabled & ~d_cache_hit & d_cache_req)) &
-		                    ~pmmu_cache_inhibit_fill;
-
-	// Connect cache fill interface to external memory controller.
-	// This transport currently fetches a full 16-byte cache line for each miss.
-	// Do not launch cache-line fills while PMMU translation is still unresolved or
-	// while the walker owns Fast RAM. The cache fill request stays asserted until
-	// serviced, so deferring it here is enough to prevent overlap with descriptor
-	// reads without losing the miss.
-	assign cache_req = fill_active | ((fill_pending_i | fill_pending_d) &
-	                   ~pmmu_busy_p & ~pmmu_fault_p & ~pmmu_walker_req_p & ~walker_active & sel_zram_cache);
-	assign cache_addr = fill_active ? fill_addr_latched : (fill_pending_i ? i_fill_addr : d_fill_addr);
-
-	// Burst control - unused (SDRAM permanently in BURST=4 mode)
-	assign cache_burst = cache_req;
-	assign cache_burst_len = 3'd7;  // Always 8 words for 128-bit cache line
-
-	// Cache fill logic - accumulate 16-bit reads into 128-bit cache lines
-	reg [2:0] fill_count;
-	reg [127:0] fill_buffer;
-	reg fill_active;
-	reg fill_owner_i;
-	reg [31:0] fill_addr_latched;
-	reg fill_valid_r;
-	reg fill_owner_r;
-	reg [127:0] fill_data_r;
-
-	// WinUAE/MC68030 behavior: IBE/DBE control burst fill behavior, not whether
-	// the missed longword may be cached at all. This cache currently transports a
-	// complete 16-byte line for every fill, so do not let IBE/DBE mask the request
-	// and leave the cache module stuck with a pending miss.
-	wire fill_pending_i = i_fill_req;
-	wire fill_pending_d = d_fill_req;
-	wire fill_start = ~fill_active & ~pmmu_busy_p & ~pmmu_walker_req_p & ~walker_active &
-	                  (fill_pending_i | fill_pending_d) & cache_ack;
-	wire fill_accept = fill_active & cache_ack;
-
-	always @(posedge clk) begin
-		if (~reset) begin
-			fill_count <= 0;
-			fill_buffer <= 0;
-			fill_active <= 0;
-			fill_owner_i <= 0;
-			fill_addr_latched <= 0;
-			fill_valid_r <= 0;
-			fill_owner_r <= 0;
-			fill_data_r <= 0;
-		end else begin
-			fill_valid_r <= 0;
-			if (fill_start) begin
-				fill_active <= 1;
-				fill_count <= 0;
-				fill_owner_i <= fill_pending_i;
-				fill_addr_latched <= fill_pending_i ? i_fill_addr : d_fill_addr;
-				fill_buffer[15:0] <= cache_data;
-			end else if (fill_accept) begin
-				// Accumulate 16-bit words into 128-bit cache line
-				case (fill_count)
-					3'd0: fill_buffer[31:16]   <= cache_data;
-					3'd1: fill_buffer[47:32]   <= cache_data;
-					3'd2: fill_buffer[63:48]   <= cache_data;
-					3'd3: fill_buffer[79:64]   <= cache_data;
-					3'd4: fill_buffer[95:80]   <= cache_data;
-					3'd5: fill_buffer[111:96]  <= cache_data;
-					3'd6: begin
-						fill_buffer[127:112] <= cache_data;
-						fill_data_r <= {cache_data, fill_buffer[111:0]};
-						fill_owner_r <= fill_owner_i;
-						fill_valid_r <= 1;
-						fill_active <= 0;  // Complete cache line
-					end
-					default: ;
-				endcase
-				if (fill_count < 7) fill_count <= fill_count + 1;
-			end
-		end
-	end
-
-	// Provide filled cache line to cache module
-	assign i_fill_data = fill_data_r;
-	assign i_fill_valid = fill_valid_r & fill_owner_r;
-	assign d_fill_data = fill_data_r;
-	assign d_fill_valid = fill_valid_r & ~fill_owner_r;
 
 	// PMMU Walker Memory Arbiter (Stall-Based Approach)
 	// The walker needs 32-bit descriptors from memory via two sequential 16-bit reads.
@@ -3333,6 +3193,63 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 	assign walker_chip_addr = walker_low_phase ?
 	                          walker_base_addr :           // Low word at base address
 	                          (walker_base_addr + 1'b1);   // High word at base+1
+
+	wire walker_read_complete = (walker_state == WALKER_WAIT_HIGH) &&
+	                            walker_read_ready_armed &&
+	                            walker_mem_ready &&
+	                            pmmu_walker_req_p &&
+	                            !pmmu_walker_we_p;
+	wire [31:0] walker_read_complete_addr = {walker_addr_latch, 1'b0};
+	wire [31:0] walker_read_complete_data = {walker_data_low, cpu_din};
+
+	always @(posedge clk) begin
+		if (~reset || walkr_issp_source[0]) begin
+			walkr_seen <= 0;
+			walkr_count <= 0;
+			walkr_fault_seen <= 0;
+			walkr_fault_saved_addr <= 0;
+			walkr_fault_mmusr <= 0;
+			walkr_fault_tc <= 0;
+			walkr_fault_crp_lo <= 0;
+			walkr_e0_addr <= 0;
+			walkr_e0_data <= 0;
+			walkr_e1_addr <= 0;
+			walkr_e1_data <= 0;
+			walkr_e2_addr <= 0;
+			walkr_e2_data <= 0;
+			walkr_e3_addr <= 0;
+			walkr_e3_data <= 0;
+			walkr_e4_addr <= 0;
+			walkr_e4_data <= 0;
+			walkr_e5_addr <= 0;
+			walkr_e5_data <= 0;
+		end else begin
+			if (walker_read_complete && !walkr_fault_seen) begin
+				walkr_seen <= 1;
+				if (walkr_count != 3'd6)
+					walkr_count <= walkr_count + 3'd1;
+				walkr_e0_addr <= walkr_e1_addr;
+				walkr_e0_data <= walkr_e1_data;
+				walkr_e1_addr <= walkr_e2_addr;
+				walkr_e1_data <= walkr_e2_data;
+				walkr_e2_addr <= walkr_e3_addr;
+				walkr_e2_data <= walkr_e3_data;
+				walkr_e3_addr <= walkr_e4_addr;
+				walkr_e3_data <= walkr_e4_data;
+				walkr_e4_addr <= walkr_e5_addr;
+				walkr_e4_data <= walkr_e5_data;
+				walkr_e5_addr <= walker_read_complete_addr;
+				walkr_e5_data <= walker_read_complete_data;
+			end
+			if (pmmu_fault_p && !walkr_fault_seen) begin
+				walkr_fault_seen <= 1;
+				walkr_fault_saved_addr <= stp_saved_addr_w;
+				walkr_fault_mmusr <= stp_fault_status_w;
+				walkr_fault_tc <= stp_pmmu_tc_w;
+				walkr_fault_crp_lo <= stp_pmmu_crp_lo_w;
+			end
+		end
+	end
 
 	always @(posedge clk) begin
 		if (~reset) begin
@@ -3770,10 +3687,6 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 
 end else begin : gen_no_68030_cache
 
-	// Disable 68030 cache when not using it
-	assign i_cache_enabled = 1'b0;
-	assign d_cache_enabled = 1'b0;
-
 	// No walker arbiter when cache disabled
 	assign walker_chip_addr = 23'b0;  // Unused
 	assign walker_reading = 1'b0;     // BUG #124: No walker when cache disabled
@@ -3798,30 +3711,14 @@ end else begin : gen_no_68030_cache
 	end
 	assign cache_hit = 1'b0;
 	assign cache_miss = 1'b0;
-	assign i_cache_req = 1'b0;
-	assign i_cache_addr = 32'h0;
-	assign i_cache_data = 32'h0;
-	assign i_cache_hit = 1'b0;
-	assign i_fill_req = 1'b0;
-	assign i_fill_addr = 32'h0;
-	assign i_fill_data = 128'h0;
-	assign i_fill_valid = 1'b0;
-	assign d_cache_req = 1'b0;
-	assign d_cache_addr = 32'h0;
-	assign d_cache_we = 1'b0;
-	assign d_cache_data_in = 32'h0;
-	assign d_cache_data_out = 32'h0;
-	assign d_cache_hit = 1'b0;
-	assign d_fill_req = 1'b0;
-	assign d_fill_addr = 32'h0;
-	assign d_fill_data = 128'h0;
-	assign d_fill_valid = 1'b0;
+	assign cache_data_out_16 = 16'h0;
 
 	// Disable cache interface
 	assign cache_req = 1'b0;
 	assign cache_addr = 32'h0;
 	assign cache_burst = 1'b0;
 	assign cache_burst_len = 3'b0;
+	assign cache_ramaddr = 28'h0;
 
 end
 endgenerate

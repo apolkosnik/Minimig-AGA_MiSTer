@@ -556,7 +556,7 @@ test-stack-frame-push: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_stack_frame_push.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_stack_frame_push
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 500us; quit -f" tb_stack_frame_push
 
 test-chk-stacked-trace: setup
 	@echo "Running CHK + stacked trace frame tests (BUG #439)..."
@@ -821,6 +821,15 @@ test-rte-formats: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_rte_all_formats.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_rte_all_formats
+
+test-rte-format-a-replay: setup
+	@echo "Running RTE Format A LASTWRITE replay regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_rte_format_a_replay.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 80us; quit -f" tb_rte_format_a_replay
 
 test-rte-mbit-abcd: setup
 	@echo "Running RTE M-bit/ABCD regression tests..."
