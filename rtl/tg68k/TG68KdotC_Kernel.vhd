@@ -1217,16 +1217,15 @@ ALU: TG68K_ALU
 	
 	long_start_alu <= to_bit(NOT memmaskmux(3));
 	execOPC_ALU <= execOPC OR exec(alu_exec);
-	moves_fc_override <= '1' when micro_state = moves1 or moves_bus_pending = '1' else '0';
+	moves_fc_override <= '1' when micro_state = moves1 or
+	                     (moves_bus_pending = '1' and
+	                      not (memmaskmux(3) = '1' and (state = "10" or state = "11")))
+	                     else '0';
 	
 		-- Drive FC output from internal signal (VHDL-93 compatibility)
 		-- BUG #149 FIX: Add combinational override for MOVES instruction FC.
 		-- Also apply during the actual bus access (moves_bus_pending='1') so MOVES uses
 		-- SFC/DFC even if the micro_state advances while the bus cycle is in progress.
-		-- Do not depend combinationally on clkena_lw here. Cache-hit generation feeds
-		-- clkena_lw, and the cache tag compare uses FC; tying FC back to clkena_lw
-		-- creates a real cache_hit -> clkena -> FC -> cache_hit loop. The registered
-		-- moves_bus_pending clear already drops the override on the completing clock edge.
 		-- BUG #318 FIX: Use latched moves_direction instead of brief(11).
 		-- For indexed/absolute EA modes, brief gets overwritten with the EA extension
 		-- word before moves1 executes, so brief(11) is no longer the MOVES direction bit.

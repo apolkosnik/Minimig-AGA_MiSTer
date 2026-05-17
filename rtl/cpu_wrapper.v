@@ -90,7 +90,9 @@ module cpu_wrapper
 	// BUG #426: Walker active flag for SDRAM cache SM deassert
 	output            walker_active_out,
 	// BUG #427: Walker writing flag for SDRAM cpustate override
-	output            walker_writing_out
+	output            walker_writing_out,
+	// PMMU CI attribute for the external RAM-controller cache.
+	output            pmmu_cache_inhibit_out
 );
 
 // BUG #136 FIX: Include walker Fast RAM access in ramsel
@@ -369,6 +371,7 @@ wire        longword;
 wire [31:0] pmmu_addr_log_p;
 wire [31:0] pmmu_addr_phys_p;
 wire        pmmu_cache_inhibit_p;  // BUG #126 FIX: Cache inhibit from PMMU (was unconnected)
+assign pmmu_cache_inhibit_out = pmmu_cache_inhibit_p;
 wire        pmmu_walker_req_p;
 wire        pmmu_walker_we_p;    // MC68030 U/M bit: write enable for descriptor updates
 wire [31:0] pmmu_walker_addr_p;

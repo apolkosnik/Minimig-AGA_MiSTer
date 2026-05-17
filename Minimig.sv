@@ -417,16 +417,31 @@ end
 
 wire  [1:0] cpu_state;
 wire        cpu_nrst_out;
-wire  [3:0] cpu_cacr;
-// The 68030 core has its own on-chip cache model. Do not feed MC68030 CACR
-// enable bits into cpu_cache_new inside the SDRAM/DDR controllers, or fast RAM
-// gets cached twice with different tag/address semantics. cpu_cache_new also
-// continues line-fill sequencing when cc_en=0 unless cache_inhibit is asserted,
-// so force inhibit in 68030 mode and keep it as a one-word RAM adapter.
-wire  [3:0] ram_cache_ctrl = cpucfg[1] ? 4'b0000 : cpu_cacr;
-wire        ram_cache_inhibit = cpucfg[1];
+wire [31:0] cpu_cacr;
+// cpu_cache_new has separate I/D enable bits here.  Map the 68030 CACR
+// enables explicitly; older CPU modes keep the legacy single enable behavior.
+wire        ram_cache_i_enable = cpu_cacr[0];
+wire        ram_cache_d_enable = cpucfg[1] ? cpu_cacr[8] : cpu_cacr[0];
+wire        ram_cache_clear_raw = cpucfg[1] ? (cpu_cacr[2] | cpu_cacr[3] | cpu_cacr[10] | cpu_cacr[11]) : cpu_cacr[3];
+reg   [5:0] ram_cache_clear_hold;
+wire        ram_cache_clear = |ram_cache_clear_hold;
+wire  [3:0] ram_cache_ctrl = {ram_cache_clear, 1'b0, ram_cache_d_enable, ram_cache_i_enable};
+wire        ram_cache_inhibit;
 wire [31:0] cpu_nmi_addr;
 wire        cpu_rst;
+
+// MC68030 CACR clear bits are self-clearing in the CPU clock domain.  Stretch
+// the command before it crosses into the SDRAM/DDR cache clock domain so
+// cpu_cache_new cannot miss CacheClearU/CACR invalidates.
+always @(posedge clk_sys) begin
+	if (!cpu_rst) begin
+		ram_cache_clear_hold <= 6'd0;
+	end else if (ram_cache_clear_raw) begin
+		ram_cache_clear_hold <= 6'h3f;
+	end else if (ram_cache_clear_hold != 6'd0) begin
+		ram_cache_clear_hold <= ram_cache_clear_hold - 6'd1;
+	end
+end
 
 wire  [2:0] chip_ipl;
 wire        chip_dtack;
@@ -456,6 +471,14 @@ wire [7:0] toccata_base;
 wire toccata_ena;
 wire       walker_active_cpu;  // BUG #426: Walker active flag from cpu_wrapper
 wire       walker_writing_cpu; // BUG #427: Walker writing flag from cpu_wrapper
+wire       pmmu_cache_inhibit_cpu;
+// PMMU table walks are physical descriptor accesses.  They must not be served
+// from the SDRAM/DDR controller cache, even while that cache is enabled for
+// normal CPU fast-RAM cycles.
+// The same external cache must also obey the PMMU CI attribute so it behaves
+// like a physical L2 under the 68030 I/D cache instead of caching I/O or
+// deliberately uncached pages.
+assign ram_cache_inhibit = walker_active_cpu | (cpucfg[1] & pmmu_cache_inhibit_cpu);
 wire       cache_fill_blocks_cpu = cache_fill_active & ~walker_active_cpu;
 wire       cache_fill_owns_ram = cache_fill_blocks_cpu & ~cache_fill_gap;
 wire [28:1] ram_addr = cache_fill_blocks_cpu ? cache_fill_ramaddr : ram_addr_cpu;
@@ -615,7 +638,8 @@ cpu_wrapper
 	.cache_ramaddr  (cpu_cache_ramaddr  ),     // BUG #128: Properly encoded ramaddr for cache fills
 	.debug_fmt_err  (                   ),     // Format Error debug (not connected)
 	.walker_active_out(walker_active_cpu),     // BUG #426: Walker active for SDRAM cache deassert
-	.walker_writing_out(walker_writing_cpu)    // BUG #427: Walker writing for SDRAM cpustate override
+	.walker_writing_out(walker_writing_cpu),   // BUG #427: Walker writing for SDRAM cpustate override
+	.pmmu_cache_inhibit_out(pmmu_cache_inhibit_cpu)
 );
 
 wire [15:0] ram_dout1;
