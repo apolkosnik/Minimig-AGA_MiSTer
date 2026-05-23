@@ -114,7 +114,8 @@ entity TG68KdotC_Kernel is
 		BitField : integer := 2;			--0=>no,			1=>yes,				2=>switchable with CPU(1) 
 		
 		BarrelShifter : integer := 1;		--0=>no,			1=>yes,				2=>switchable with CPU(1)  
-		MUL_Hardware : integer := 1		--0=>no,			1=>yes,  
+		MUL_Hardware : integer := 1;		--0=>no,			1=>yes,
+		FPU_Enable : integer := 0			--0=>FPU shell only,	1=>instantiate 68881/68882 core
 		);
 	port(clk						: in std_logic;
 		nReset					: in std_logic;			--low active
@@ -682,6 +683,29 @@ architecture logic of TG68KdotC_Kernel is
 	signal fline_is_pmmu       : std_logic := '0';
 	signal fline_is_fpu        : std_logic := '0';
 	signal fline_has_brief     : std_logic := '0';
+	signal fpu_fpcr            : std_logic_vector(31 downto 0) := (others => '0');
+	signal fpu_fpsr            : std_logic_vector(31 downto 0) := (others => '0');
+	signal fpu_fpiar           : std_logic_vector(31 downto 0) := (others => '0');
+	signal fpu_shell_idle      : std_logic := '0';
+	signal fpu_save_idle_frame : std_logic := '0';
+	signal fpu_cr_rdat         : std_logic_vector(31 downto 0);
+	signal fpu_cr_bits         : std_logic_vector(2 downto 0);
+	signal fpu_sr_opcode       : std_logic_vector(15 downto 0) := (others => '0');
+	signal fpu_core_enable     : std_logic := '0';
+	signal fpu_core_busy       : std_logic := '0';
+	signal fpu_core_done       : std_logic := '0';
+	signal fpu_core_exception  : std_logic := '0';
+	signal fpu_core_exception_code : std_logic_vector(7 downto 0) := (others => '0');
+	signal fpu_core_data_out   : std_logic_vector(31 downto 0) := (others => '0');
+	signal fpu_core_cpu_data_in : std_logic_vector(31 downto 0) := (others => '0');
+	signal fpu_core_fmovem_out : std_logic_vector(79 downto 0) := (others => '0');
+	signal fpu_core_fpcr       : std_logic_vector(31 downto 0) := (others => '0');
+	signal fpu_core_fpsr       : std_logic_vector(31 downto 0) := (others => '0');
+	signal fpu_core_fpiar      : std_logic_vector(31 downto 0) := (others => '0');
+	signal fpu_core_fsave_size : integer range 4 to 216 := 4;
+	signal fpu_core_fsave_valid : std_logic := '0';
+	signal fpu_core_cir_out    : std_logic_vector(15 downto 0) := (others => '0');
+	signal fpu_core_cir_valid  : std_logic := '0';
 	signal pmmu_ea_mode_latched  : std_logic_vector(5 downto 0);  -- BUG #302: Latch EA mode+reg bits
 	-- Helper signals: use latched values when F-line context valid
 	signal pmmu_brief          : std_logic_vector(15 downto 0);
@@ -874,6 +898,48 @@ BEGIN
 
   debug_pmmu_pending_flags <= pmmu_pending_flags;
 
+  -- Imported 68881/68882 core from the FPU branch. The existing WinUAE-checked
+  -- shell still owns dispatch until each instruction class is routed here.
+  FPU_CORE_GEN: if FPU_Enable = 1 generate
+    FPU_CORE: TG68K_FPU
+      port map(
+        clk                 => clk,
+        nReset              => nReset,
+        clkena              => clkena_lw,
+        opcode              => fline_opcode_latch,
+        extension_word      => pmmu_brief,
+        fpu_enable          => fpu_core_enable,
+        supervisor_mode     => SVmode,
+        cpu_data_in         => fpu_core_cpu_data_in,
+        cpu_address_in      => addr,
+        fpu_data_out        => fpu_core_data_out,
+        fsave_data_request  => '0',
+        fsave_data_index    => 0,
+        frestore_data_write => '0',
+        frestore_data_in    => (others => '0'),
+        fmovem_data_request => '0',
+        fmovem_reg_index    => 0,
+        fmovem_data_write   => '0',
+        fmovem_data_in      => (others => '0'),
+        fmovem_data_out     => fpu_core_fmovem_out,
+        fpu_busy            => fpu_core_busy,
+        fpu_done            => fpu_core_done,
+        fpu_exception       => fpu_core_exception,
+        exception_code      => fpu_core_exception_code,
+        fpcr_out            => fpu_core_fpcr,
+        fpsr_out            => fpu_core_fpsr,
+        fpiar_out           => fpu_core_fpiar,
+        fsave_frame_size    => fpu_core_fsave_size,
+        fsave_size_valid    => fpu_core_fsave_valid,
+        cir_address         => addr(4 downto 0),
+        cir_write           => '0',
+        cir_read            => '0',
+        cir_data_in         => data_read(15 downto 0),
+        cir_data_out        => fpu_core_cir_out,
+        cir_data_valid      => fpu_core_cir_valid
+      );
+  end generate FPU_CORE_GEN;
+
 --   -- PMMU register interface connected (enabled for 68030)
 --   pmmu_reg_we   <= pmmu_reg_we_d when CPU = "11" else '0';
 --   pmmu_reg_re   <= pmmu_reg_re_d when CPU = "11" else '0';
@@ -884,6 +950,10 @@ BEGIN
   -- F-Line Context: Helper signals select latched values when context valid
   pmmu_brief  <= fline_brief_latch when fline_context_valid = '1' else brief;
   pmmu_opcode <= fline_opcode_latch when fline_context_valid = '1' else opcode;
+  fpu_cr_bits <= pmmu_brief(12) & pmmu_brief(11) & pmmu_brief(10);
+  fpu_cr_rdat <= fpu_fpcr  when pmmu_brief(12) = '1' else
+                 fpu_fpsr  when pmmu_brief(11) = '1' else
+                 fpu_fpiar;
 
   -- PMMU register interface connected (enabled for 68020-30)
   pmmu_reg_we   <= pmmu_reg_we_d when CPU(1) = '1' else '0';
@@ -1902,6 +1972,15 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec, rte_mmu_fix_commit, rte_mmu_f
 							regfile(conv_integer(moves_reg)) <= data_read;
 					END CASE;
 				END IF;
+				-- The normal predecrement datapath updates -(An) by one longword.
+				-- For the WinUAE-compatible 68882 idle FSAVE frame we already used
+				-- the correct bus address (old An - $3C); finish the architectural
+				-- writeback by subtracting the remaining $38 bytes after the write.
+				IF micro_state = fpu_save_done AND fpu_save_idle_frame='1' AND
+				   fpu_sr_opcode(5 downto 3)="100" THEN
+					regfile(conv_integer('1' & fpu_sr_opcode(2 downto 0))) <=
+						regfile(conv_integer('1' & fpu_sr_opcode(2 downto 0))) - x"00000038";
+				END IF;
 				IF rte_mmu_fix_commit = '1' THEN
 					IF rte_mmu_fix_opcode(8 downto 6) = "001" THEN
 						-- MOVEA to An: always 32-bit write, sign-extend for word
@@ -1965,7 +2044,7 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec, rte_mmu_fix_commit, rte_mmu_f
 -----------------------------------------------------------------------------
 -- BUG #20 FIX: Added pmmu_reg_rdat to sensitivity list
 -- Without it, PMOVE TC,Dn doesn't update Dn when pmmu_reg_rdat changes
-PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, SSP, MSP, ISP, movec_data, pmmu_reg_rdat, pmmu_ptest_a, pmmu_desc_addr)
+PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, movem_actiond, exec, ALUout, memaddr, memaddr_a, ea_only, USP, SSP, MSP, ISP, movec_data, pmmu_reg_rdat, pmmu_ptest_a, pmmu_desc_addr, fpu_cr_rdat)
 	BEGIN
 		regin <= ALUout;
 		IF exec(save_memaddr)='1' THEN
@@ -1982,6 +2061,8 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 			regin <= ISP;
 		ELSIF exec(movec_rd)='1' THEN
 			regin <= movec_data;
+		ELSIF exec(fpu_cr_rd)='1' THEN
+			regin <= fpu_cr_rdat;
 		ELSIF pmmu_ptest_a='1' THEN
 			-- PTEST A-bit: Return descriptor address
 			regin <= pmmu_desc_addr;
@@ -2036,7 +2117,7 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 -----------------------------------------------------------------------------
 -- set dest regaddr
 -----------------------------------------------------------------------------
-	PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, next_micro_state, pmove_dn_regnum, pmove_dn_areg, pmove_dn_mode, fline_context_valid, fline_opcode_latch, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode, pmmu_ptest_a, pmmu_brief)
+	PROCESS (opcode, rf_source_addrd, brief, setstackaddr, dest_hbits, dest_areg, dest_LDRareg, data_is_source, sndOPC, exec, set, dest_2ndHbits, dest_2ndLbits, dest_LDRHbits, dest_LDRLbits, last_data_read, last_opc_read, micro_state, next_micro_state, pmove_dn_regnum, pmove_dn_areg, pmove_dn_mode, fline_context_valid, fline_opcode_latch, moves_bus_pending, moves_ea_areg, moves_ea_regnum, moves_direction, moves_reg, setopcode, pmmu_ptest_a, pmmu_brief, fpu_sr_opcode)
 	BEGIN
 			IF exec(movem_action) ='1' THEN
 				rf_dest_addr <= rf_source_addrd;
@@ -2097,6 +2178,20 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 		      (fline_opcode_latch(5 downto 3) = "000" OR fline_opcode_latch(5 downto 3) = "001") THEN
 			-- PMOVE CPU-register mode (Dn/An): prime rf_dest_addr one cycle early.
 			rf_dest_addr <= fline_opcode_latch(3) & fline_opcode_latch(2 downto 0);
+		ELSIF micro_state = fpu_decode AND fline_context_valid = '1' AND
+		      (fline_opcode_latch(5 downto 3) = "000" OR fline_opcode_latch(5 downto 3) = "001") THEN
+			-- FPU control-register FMOVE uses the F-line EA register field.
+			rf_dest_addr <= fline_opcode_latch(3) & fline_opcode_latch(2 downto 0);
+		ELSIF micro_state = fpu_decode AND fline_context_valid = '1' AND
+		      (fline_opcode_latch(5 downto 3) = "010" OR fline_opcode_latch(5 downto 3) = "011" OR
+		       fline_opcode_latch(5 downto 3) = "100") THEN
+			rf_dest_addr <= '1' & fline_opcode_latch(2 downto 0);
+		ELSIF (micro_state = fpu_cr_mem_read OR micro_state = fpu_cr_mem_read_done OR
+		       micro_state = fpu_cr_mem_write OR micro_state = fpu_cr_mem_write_done OR
+		       micro_state = fpu_save OR micro_state = fpu_restore OR micro_state = fpu_restore_done) AND
+		      (fpu_sr_opcode(5 downto 3) = "010" OR fpu_sr_opcode(5 downto 3) = "011" OR fpu_sr_opcode(5 downto 3) = "100") THEN
+			-- FPU simple memory modes use An as the effective-address base.
+			rf_dest_addr <= '1' & fpu_sr_opcode(2 downto 0);
 		ELSIF micro_state = pmove_decode AND fline_context_valid = '1' AND
 		      (fline_opcode_latch(5 downto 3)="010" OR fline_opcode_latch(5 downto 3)="011" OR fline_opcode_latch(5 downto 3)="100") THEN
 			-- BUG #397 FIX: During pmove_decode, set rf_dest_addr for (An)/(An)+/-(An)
@@ -2195,6 +2290,10 @@ PROCESS (OP1in, reg_QA, Regwrena_now, Bwrena, Lwrena, exe_datatype, WR_AReg, mov
 		ELSIF micro_state = pmove_dn_lo THEN
 			-- PMOVE Dn→MMU 64-bit: LOW word source is Dn+1 (increment register number)
 			rf_source_addr <= pmove_dn_areg&(pmove_dn_regnum + "001");
+		ELSIF micro_state = fpu_decode AND fline_context_valid = '1' AND
+		      (fline_opcode_latch(5 downto 3) = "000" OR fline_opcode_latch(5 downto 3) = "001") THEN
+			-- FPU control-register FMOVE writes source data from Dn/An.
+			rf_source_addr <= fline_opcode_latch(3) & fline_opcode_latch(2 downto 0);
 		ELSIF pmove_dn_mode = '1' AND fline_context_valid = '1' THEN
 			-- BUG #398 FIX: Guard with fline_context_valid (same as rf_dest_addr fix)
 			rf_source_addr <= pmove_dn_areg&pmove_dn_regnum;
@@ -2225,7 +2324,9 @@ PROCESS (reg_QA, store_in_tmp, ea_data, long_start, addr, exec, memmaskmux, micr
 		-- Without this, PMOVE (An)+,TC corrupts An with (ea_data + increment) instead
 		-- of (An + increment) because set(ea_data_OP1) and set(postadd) are both set.
 		ELSIF (exec(postadd)='1' OR exec(presub)='1') AND
-		      (memmaskmux(3)='1' OR micro_state = pmove_mem_to_mmu_lo) THEN
+		      (memmaskmux(3)='1' OR micro_state = pmove_mem_to_mmu_lo OR
+		       micro_state = fpu_cr_mem_read_done OR micro_state = fpu_cr_mem_write_done OR
+		       micro_state = fpu_restore_done) THEN
 			-- Register update mode: OP1out stays as reg_QA (default)
 			NULL;
 		ELSIF exec(ea_data_OP1)='1' AND store_in_tmp='1' THEN
@@ -2490,6 +2591,17 @@ PROCESS (clk)
 				      OR next_micro_state=pmove_mmu_to_mem_hi OR next_micro_state=pmove_mmu_to_mem_lo THEN
 					-- MMU->memory: source data from PMMU register readback (ORIGINAL LOGIC)
 					data_write_tmp <= pmmu_reg_rdat;
+				ELSIF micro_state=fpu_cr_mem_write OR next_micro_state=fpu_cr_mem_write THEN
+					data_write_tmp <= fpu_cr_rdat;
+				ELSIF micro_state=fpu_save OR next_micro_state=fpu_save THEN
+					-- WinUAE fpp.cpp: 6888x null frames still encode the normal
+					-- frame-size field; once an FPU op ran, FSAVE emits an idle
+					-- 68882 frame headed by version $1F and size $38.
+					IF fpu_shell_idle='1' OR fpu_save_idle_frame='1' THEN
+						data_write_tmp <= x"1F380000";
+					ELSE
+						data_write_tmp <= x"00380000";
+					END IF;
 				ELSIF exec(exg)='1' THEN
 					data_write_tmp <= OP1out;
 				ELSIF exec(get_ea_now)='1' AND ea_only='1' THEN		-- ist for pea
@@ -2547,7 +2659,8 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 	PROCESS (clk, setdisp, memaddr_a, briefdata, memaddr_delta, setdispbyte, datatype, interrupt, rIPL_nr, IPL_vec,
 	         memaddr_reg, memaddr_delta_rega, memaddr_delta_regb, reg_QA, use_base, VBR, last_data_read, trap_vector, exec, set, cpu, use_VBR_Stackframe,
 	         pmove_disp_latched, micro_state, opcode, fline_opcode_latch, moves_ea_areg, moves_bus_pending, memmaskmux, rot_cnt,
-	         moves_ea_latched, moves_ea_use_base, pmove_ea_latched, pmmu_brief,
+	         moves_ea_latched, moves_ea_use_base, pmove_ea_latched, pmmu_brief, fpu_sr_opcode, next_micro_state, fpu_shell_idle,
+	         fpu_save_idle_frame,
 	         rte_fmt_a_replay_needed, rte_fmt_a_fault_addr)
 	BEGIN
 		
@@ -2727,6 +2840,17 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 				    memmaskmux(3)='1' THEN
 					memaddr_delta_rega <= (others => '0');  -- No delta for simple (An)/(An)+ mode, first word only
 					use_base <= '1';  -- Force memaddr_reg = reg_QA
+				ELSIF (micro_state = fpu_cr_mem_read OR micro_state = fpu_cr_mem_write OR
+				       micro_state = fpu_save OR micro_state = fpu_restore) AND
+				      (fpu_sr_opcode(5 downto 3)="010" OR fpu_sr_opcode(5 downto 3)="011" OR
+				       fpu_sr_opcode(5 downto 3)="100") AND memmaskmux(3)='1' THEN
+					IF micro_state = fpu_save AND fpu_save_idle_frame = '1' AND
+					   fpu_sr_opcode(5 downto 3)="100" THEN
+						memaddr_delta_rega <= x"FFFFFFC8";
+					ELSE
+						memaddr_delta_rega <= (others => '0');
+					END IF;
+					use_base <= '1';
 				-- BUG #172 FIX: PMOVE with simple EA modes needs use_base='1'
 				-- Without this, PMOVE TC,(An) writes to wrong address (PC+offset instead of An)
 				-- Must force use_base='1' during pmove_mmu_to_mem and pmove_mem_to_mmu states for (An)/-(An) modes
@@ -3103,7 +3227,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 		-- BUG #369 FIX: Also exclude ptest1/pflush1/pload1 - same stale opcode problem.
 		-- When these states retire with setstate="00", state is still "01" from the stall cycle,
 		-- causing opcode <= last_opc_read (stale extension word) instead of data_read (next instr).
-		IF (setstate="00" OR (setstate="01" AND fline_context_valid='1')) AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0' AND (micro_state /= pmmu_dn_read_wait OR state="00") AND micro_state /= pmove_decode AND micro_state /= pmove_mem_to_mmu_hi AND micro_state /= pmove_mem_to_mmu_lo AND micro_state /= pmove_mmu_to_mem_hi AND micro_state /= pmove_mmu_to_mem_lo AND micro_state /= ptest1 AND micro_state /= pflush1 AND micro_state /= pload1 AND cpu_halted='0' THEN
+		IF (setstate="00" OR (setstate="01" AND fline_context_valid='1')) AND next_micro_state=idle AND setnextpass='0' AND (exec_write_back='0' OR state="11") AND set_rot_cnt="000001" AND set_exec(opcCHK)='0' AND (micro_state /= pmmu_dn_read_wait OR state="00") AND micro_state /= pmove_decode AND micro_state /= pmove_mem_to_mmu_hi AND micro_state /= pmove_mem_to_mmu_lo AND micro_state /= pmove_mmu_to_mem_hi AND micro_state /= pmove_mmu_to_mem_lo AND micro_state /= fpu_cr_mem_read AND micro_state /= fpu_cr_mem_read_done AND micro_state /= fpu_cr_mem_write AND micro_state /= fpu_cr_mem_write_done AND micro_state /= ptest1 AND micro_state /= pflush1 AND micro_state /= pload1 AND cpu_halted='0' THEN
 			setendOPC <= '1';
 			-- BUG #400 FIX: Also check pmmu_fault directly (not just make_berr) for immediate
 			-- bus error dispatch. make_berr is registered and won't reflect pmmu_fault until
@@ -3135,7 +3259,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 		IF setstate="00" AND next_micro_state=idle AND set_direct_data='0' AND (exec_write_back='0' OR (state="10" AND addrvalue='0')) THEN
 			setexecOPC <= '1';
 		ELSIF setstate="01" AND next_micro_state=idle AND set_direct_data='0' AND (exec_write_back='0' OR (state="10" AND addrvalue='0')) AND
-		      (set_exec(pmmu_wr)='1' OR set_exec(pmmu_rd)='1' OR set(pmmu_rd)='1') THEN
+		      (set_exec(pmmu_wr)='1' OR set_exec(pmmu_rd)='1' OR set(pmmu_rd)='1' OR set_exec(fpu_cr_rd)='1') THEN
 			-- CRITICAL: Only for PMMU Dn mode operations! Other operations using setstate="01" don't need setexecOPC.
 			-- BUG #111 FIX: Removed set(pmmu_wr) check - now using set_exec(pmmu_wr) for Dn WRITE (line 4644)
 			-- Check for: set_exec(pmmu_wr) (pmove_decode Dn writes), set_exec(pmmu_rd) (pmove_dn_lo reads),
@@ -3203,6 +3327,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						fline_is_pmmu <= '0';
 						fline_is_fpu <= '0';
 						fline_has_brief <= '0';
+						fpu_fpcr <= (others => '0');
+						fpu_fpsr <= (others => '0');
+						fpu_fpiar <= (others => '0');
+						fpu_shell_idle <= '0';
+						fpu_save_idle_frame <= '0';
+						fpu_sr_opcode <= (others => '0');
 						movec_regsel <= (others => '0');
 						pmmu_ea_mode_latched <= (others => '0');  -- BUG #302: Initialize EA mode latch
 						trace_pending_group2 <= '0';
@@ -3231,7 +3361,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- Previously in clkena_lw block, which never executed for PMOVE memory EA modes!
 					-- PMOVE memory EA sets memmask="100111" → clkena_lw='0' → brief never captured
 					IF getbrief='1' THEN
-						IF next_micro_state = pmove_decode AND fline_context_valid='0' AND clkena_lw='0' THEN
+						IF (next_micro_state = pmove_decode OR next_micro_state = fpu_decode) AND fline_context_valid='0' AND clkena_lw='0' THEN
 							-- After PMMU translation resumes an instruction fetch, the first
 							-- F-line extension word can already be on the bus while data_read
 							-- still holds the opcode word from the previous fetch. Capture the
@@ -3279,7 +3409,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- CRITICAL: Use next_micro_state, not micro_state! At this clock edge,
 					-- micro_state still has the OLD value. next_micro_state has the value
 					-- that micro_state will become, which is pmove_decode when getbrief fired.
-						IF next_micro_state = pmove_decode AND fline_context_valid = '0' AND getbrief = '1' THEN
+					IF (next_micro_state = pmove_decode OR next_micro_state = fpu_decode) AND fline_context_valid = '0' AND getbrief = '1' THEN
 						fline_opcode_latch <= opcode;
 						-- Capture from SAME source as brief to avoid timing issues
 						IF clkena_lw='0' THEN
@@ -3289,12 +3419,35 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						ELSE
 							fline_brief_latch <= data_read(15 downto 0);
 						END IF;
-						fline_is_pmmu <= '1';
-						fline_is_fpu <= '0';
+						IF next_micro_state = pmove_decode THEN
+							fline_is_pmmu <= '1';
+							fline_is_fpu <= '0';
+						ELSE
+							fline_is_pmmu <= '0';
+							fline_is_fpu <= '1';
+						END IF;
 						fline_has_brief <= '1';  -- PMMU instructions with memory EA have extension word
 						pmmu_ea_mode_latched <= opcode(5 downto 0);  -- BUG #302: Latch EA mode+reg bits
 						fline_context_valid <= '1';
 						fline_opcode_pc <= TG68_PC;
+					END IF;
+					IF next_micro_state = fpu_cr_mem_read OR next_micro_state = fpu_cr_mem_write OR
+					   next_micro_state = fpu_save OR next_micro_state = fpu_restore THEN
+						IF (next_micro_state = fpu_cr_mem_read OR next_micro_state = fpu_cr_mem_write) AND
+						   fline_context_valid = '1' THEN
+							fpu_sr_opcode <= fline_opcode_latch;
+						ELSE
+							fpu_sr_opcode <= opcode;
+						END IF;
+					END IF;
+					IF next_micro_state = fpu_save THEN
+						IF opcode(5 downto 3) = "100" AND fpu_shell_idle = '1' THEN
+							fpu_save_idle_frame <= '1';
+						ELSE
+							fpu_save_idle_frame <= '0';
+						END IF;
+					ELSIF micro_state = idle THEN
+						fpu_save_idle_frame <= '0';
 					END IF;
 
 					-- BUG #355 FIX: Move PMMU/Dn mode context logic to clkena_in block!
@@ -3332,6 +3485,64 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						pmove_dn_regnum <= pmove_dn_regnum + "001";
 					END IF;
 
+					-- 68881/68882 control-register shell.
+					-- Matches WinUAE's Dn/An FMOVE(M).L control-register cases:
+					-- bit 12=FPCR, bit 11=FPSR, bit 10=FPIAR, no bits=FPIAR.
+					IF micro_state = fpu_decode AND fline_context_valid = '1' AND
+					   fline_opcode_latch(11 downto 6) = "001000" AND
+					   pmmu_brief(15 downto 14) = "10" AND pmmu_brief(13) = '0' THEN
+						IF fline_opcode_latch(5 downto 3) = "000" AND
+						   (fpu_cr_bits = "100" OR fpu_cr_bits = "010" OR fpu_cr_bits = "001" OR fpu_cr_bits = "000") THEN
+							IF pmmu_brief(12) = '1' THEN
+								fpu_fpcr <= reg_QA;
+							ELSIF pmmu_brief(11) = '1' THEN
+								fpu_fpsr <= reg_QA;
+							ELSE
+								fpu_fpiar <= reg_QA;
+							END IF;
+						ELSIF fline_opcode_latch(5 downto 3) = "001" AND
+						      (fpu_cr_bits = "001" OR fpu_cr_bits = "000") THEN
+							fpu_fpiar <= reg_QA;
+						END IF;
+					END IF;
+					IF micro_state = fpu_cr_mem_read_done AND clkena_lw = '1' AND fline_context_valid = '1' THEN
+						IF pmmu_brief(12) = '1' THEN
+							fpu_fpcr <= data_read;
+						ELSIF pmmu_brief(11) = '1' THEN
+							fpu_fpsr <= data_read;
+						ELSE
+							fpu_fpiar <= data_read;
+						END IF;
+						fline_context_valid <= '0';
+					END IF;
+					IF micro_state = fpu_decode AND fline_context_valid = '1' AND
+					   fline_opcode_latch(11 downto 6) = "001000" AND
+					   fline_opcode_latch(5 downto 3) = "000" AND
+					   pmmu_brief(15) = '0' AND pmmu_brief(6 downto 0) = "0111010" THEN
+						-- FTST integer Dn forms. WinUAE drives FPSR CC as N,Z,I,NaN in bits 27:24.
+						IF (pmmu_brief(12 downto 10) = "110" AND reg_QA(7 downto 0) = x"00") OR
+						   (pmmu_brief(12 downto 10) = "100" AND reg_QA(15 downto 0) = x"0000") OR
+						   (pmmu_brief(12 downto 10) = "000" AND reg_QA = x"00000000") THEN
+							fpu_fpsr(27 downto 24) <= "0100";
+						ELSIF (pmmu_brief(12 downto 10) = "110" AND reg_QA(7) = '1') OR
+						      (pmmu_brief(12 downto 10) = "100" AND reg_QA(15) = '1') OR
+						      (pmmu_brief(12 downto 10) = "000" AND reg_QA(31) = '1') THEN
+							fpu_fpsr(27 downto 24) <= "1000";
+						ELSE
+							fpu_fpsr(27 downto 24) <= "0000";
+						END IF;
+						-- WinUAE maybe_idle_state(): 68881/68882 arithmetic/test
+						-- instructions transition the FPU from null to idle state.
+						fpu_shell_idle <= '1';
+					END IF;
+					IF micro_state = fpu_restore_done AND clkena_lw = '1' THEN
+						IF data_read(31 downto 24) = x"00" THEN
+							fpu_shell_idle <= '0';
+						ELSIF data_read(31 downto 24) = x"1F" AND data_read(23 downto 16) = x"38" THEN
+							fpu_shell_idle <= '1';
+						END IF;
+					END IF;
+
 					-- BUG #356 FIX: Clear F-line context in clkena_in block!
 					-- Must use setendOPC from previous cycle (latched as endOPC or seen directly).
 					-- Using setendOPC directly is safe in clkena_in as it's the Combinatorial Retire signal.
@@ -3341,6 +3552,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					-- subsequent PMOVE instructions to fail to capture their fline_opcode_latch,
 					-- resulting in stale opcode(5:3) dispatching as Dn mode instead of memory mode.
 					IF (setendOPC = '1' OR trapmake = '1') AND
+					   NOT (micro_state = fpu_decode AND set_exec(fpu_cr_rd) = '1') AND
+					   micro_state /= fpu_cr_mem_read AND
+					   micro_state /= fpu_cr_mem_read_done AND
+					   micro_state /= fpu_cr_mem_write AND
+					   micro_state /= fpu_save AND
+					   micro_state /= fpu_restore AND
 					   micro_state /= pmove_decode AND
 					   micro_state /= pmove_dn_hi AND
 					   micro_state /= pmove_mem_to_mmu_hi AND
@@ -3358,7 +3575,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					   micro_state /= pmmu_ld_229_1 AND
 					   micro_state /= pmmu_ld_229_2 AND
 					   micro_state /= pmmu_ld_229_3 AND
-					   micro_state /= pmmu_ld_229_4 THEN
+					micro_state /= pmmu_ld_229_4 THEN
+						fline_context_valid <= '0';
+					END IF;
+					IF exec(fpu_cr_rd) = '1' THEN
 						fline_context_valid <= '0';
 					END IF;
 
@@ -6157,6 +6377,20 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						trapmake <= '1';
 					END IF;
 				--ELSIF cpu="11" AND opcode(8 downto 6)="100" THEN --cpSAVE
+				ELSIF cpu(1)='1' AND
+				      (opcode(11 downto 6)="001000" OR opcode=x"F280") THEN -- 68881/68882 FPP/FNOP shell
+					IF decodeOPC='1' THEN
+						IF clkena_lw='0' THEN
+							set(get_2ndOPC) <= '1';
+							setstate <= "00";
+						ELSE
+							set(get_2ndOPC) <= '1';
+							setstate <= "01";
+							getbrief <= '1';
+							next_micro_state <= fpu_decode;
+						END IF;
+					END IF;
+				--ELSIF cpu="11" AND opcode(8 downto 6)="100" THEN --cpSAVE
 				ELSIF cpu(1)='1' AND opcode(8 downto 6)="100" THEN --cpSAVE
 					-- cpSAVE valid EA modes: control alterable or predecrement
 					-- Valid: (An), -(An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
@@ -6165,9 +6399,22 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					   (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN
 						-- Valid EA mode for cpSAVE - this is a PRIVILEGED instruction
 						IF SVmode='1' THEN
-							-- Supervisor mode without FPU: F-line exception
-							trap_1111 <= '1';
-							trapmake <= '1';
+							IF decodeOPC='1' THEN
+								-- 68882 null FSAVE for common stack/register-indirect probes.
+								IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="100" THEN
+									datatype <= "10";
+									IF opcode(5 downto 3)="100" THEN
+										set(presub) <= '1';
+										set(longaktion) <= '1';
+										IF opcode(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
+									END IF;
+									setstate <= "01";
+									next_micro_state <= fpu_save;
+								ELSE
+									trap_1111 <= '1';
+									trapmake <= '1';
+								END IF;
+							END IF;
 						ELSE
 							-- User mode: privilege violation (cpSAVE is privileged)
 							trap_priv <= '1';
@@ -6188,9 +6435,17 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 					   (opcode(5 downto 3)/="111" OR opcode(2)='0') THEN
 						-- Valid EA mode for cpRESTORE - this is a PRIVILEGED instruction
 						IF SVmode='1' THEN
-							-- Supervisor mode without FPU: F-line exception
-							trap_1111 <= '1';
-							trapmake <= '1';
+							IF decodeOPC='1' THEN
+								-- Null/idle FRESTORE support for common register-indirect probes.
+								IF opcode(5 downto 3)="010" OR opcode(5 downto 3)="011" THEN
+									datatype <= "10";
+									setstate <= "01";
+									next_micro_state <= fpu_restore;
+								ELSE
+									trap_1111 <= '1';
+									trapmake <= '1';
+								END IF;
+							END IF;
 						ELSE
 							-- User mode: privilege violation (cpRESTORE is privileged)
 							trap_priv <= '1';
@@ -7788,6 +8043,166 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 							set(no_Flags) <= '1';  -- BUG #220: MOVES does not affect condition codes
 						END IF;
 					-- END IF;  -- BUG #170: reserved bits check
+
+                WHEN fpu_decode =>
+                    -- First-stage 68881/68882 support, using WinUAE's F-line split:
+                    -- F280 0000 is FNOP. F200-F23F with extension bits 15:14="10"
+                    -- are FMOVE(M).L control-register transfers. Arithmetic and
+                    -- FP data-register memory paths still raise F-line until implemented.
+                    setstate <= "01";
+                    datatype <= "10";
+                    IF fline_context_valid = '1' AND fline_opcode_latch = x"F280" AND pmmu_brief = x"0000" THEN
+                        setstate <= "00";
+                        next_micro_state <= nop;
+                    ELSIF fline_context_valid = '1' AND fline_opcode_latch(11 downto 6) = "001000" AND
+                          fline_opcode_latch(5 downto 3) = "000" AND
+                          pmmu_brief(15) = '0' AND pmmu_brief(6 downto 0) = "0111010" THEN
+                        -- FTST.B/W/L Dn: update FPSR condition codes in the clocked shell.
+                        IF pmmu_brief(12 downto 10) = "110" OR
+                           pmmu_brief(12 downto 10) = "100" OR
+                           pmmu_brief(12 downto 10) = "000" THEN
+                            setstate <= "00";
+                            next_micro_state <= nop;
+                        ELSE
+                            trap_1111 <= '1';
+                            trapmake <= '1';
+                        END IF;
+                    ELSIF fline_context_valid = '1' AND fline_opcode_latch(11 downto 6) = "001000" AND
+                          pmmu_brief(15 downto 14) = "10" THEN
+                        IF fline_opcode_latch(5 downto 3) = "000" THEN
+                            -- FMOVE(M).L control register(s) <-> Dn.
+                            -- 6888x allows only one selected CR here; no bits selects FPIAR.
+                            IF fpu_cr_bits = "100" OR fpu_cr_bits = "010" OR
+                               fpu_cr_bits = "001" OR fpu_cr_bits = "000" THEN
+                                IF pmmu_brief(13) = '1' THEN
+                                    set_exec(fpu_cr_rd) <= '1';
+                                    set_exec(Regwrena) <= '1';
+                                END IF;
+                            ELSE
+                                trap_1111 <= '1';
+                                trapmake <= '1';
+                            END IF;
+                        ELSIF fline_opcode_latch(5 downto 3) = "001" THEN
+                            -- FMOVE(M).L FPIAR <-> An. FPCR/FPSR with An are illegal.
+                            IF fpu_cr_bits = "001" OR fpu_cr_bits = "000" THEN
+                                IF pmmu_brief(13) = '1' THEN
+                                    set_exec(fpu_cr_rd) <= '1';
+                                    set_exec(Regwrena) <= '1';
+                                END IF;
+                            ELSE
+                                trap_1111 <= '1';
+                                trapmake <= '1';
+                            END IF;
+                        ELSIF (fline_opcode_latch(5 downto 3) = "010" OR
+                               fline_opcode_latch(5 downto 3) = "011" OR
+                               fline_opcode_latch(5 downto 3) = "100") THEN
+                            -- FMOVE(M).L control register <-> simple memory EA.
+                            -- WinUAE treats no selected bits as FPIAR. Multiple selected
+                            -- control registers are legal for memory forms, but this shell
+                            -- implements the one-longword forms first.
+                            IF fpu_cr_bits = "100" OR fpu_cr_bits = "010" OR
+                               fpu_cr_bits = "001" OR fpu_cr_bits = "000" THEN
+                                set(longaktion) <= '1';
+                                IF fline_opcode_latch(5 downto 3) = "100" THEN
+                                    set(presub) <= '1';
+                                    IF fline_opcode_latch(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
+                                END IF;
+                                setstate <= "01";
+                                IF pmmu_brief(13) = '1' THEN
+                                    next_micro_state <= fpu_cr_mem_write;
+                                ELSE
+                                    next_micro_state <= fpu_cr_mem_read;
+                                END IF;
+                            ELSE
+                                trap_1111 <= '1';
+                                trapmake <= '1';
+                            END IF;
+                        ELSE
+                            trap_1111 <= '1';
+                            trapmake <= '1';
+                        END IF;
+                    ELSE
+                        trap_1111 <= '1';
+                        trapmake <= '1';
+                    END IF;
+
+                WHEN fpu_cr_mem_read =>
+                    datatype <= "10";
+                    set_datatype <= "10";
+                    set(OP1addr) <= '1';
+                    set(longaktion) <= '1';
+                    IF fpu_sr_opcode(5 downto 3)="011" THEN
+                        set(postadd) <= '1';
+                        IF fpu_sr_opcode(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
+                    END IF;
+                    setstate <= "10";
+                    next_micro_state <= fpu_cr_mem_read_done;
+
+                WHEN fpu_cr_mem_read_done =>
+                    datatype <= "10";
+                    set_datatype <= "10";
+                    setstate <= "00";
+                    next_micro_state <= idle;
+
+                WHEN fpu_cr_mem_write =>
+                    datatype <= "10";
+                    set_datatype <= "10";
+                    set(OP1addr) <= '1';
+                    set(longaktion) <= '1';
+                    set(hold_dwr) <= '1';
+                    IF fpu_sr_opcode(5 downto 3)="011" THEN
+                        set(postadd) <= '1';
+                        IF fpu_sr_opcode(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
+                    END IF;
+                    setstate <= "11";
+                    next_micro_state <= fpu_cr_mem_write_done;
+
+                WHEN fpu_cr_mem_write_done =>
+                    datatype <= "10";
+                    set_datatype <= "10";
+                    setstate <= "00";
+                    next_micro_state <= idle;
+
+                WHEN fpu_save =>
+                    -- Minimal 68882 FSAVE: emit the null frame longword ($00380000).
+                    datatype <= "10";
+                    set_datatype <= "10";
+                    set(OP1addr) <= '1';
+                    set(longaktion) <= '1';
+                    set(hold_dwr) <= '1';
+                    setstate <= "11";
+                    next_micro_state <= fpu_save_done;
+
+                WHEN fpu_save_done =>
+                    -- Let the just-issued longword write complete before normal fetch resumes.
+                    datatype <= "10";
+                    set_datatype <= "10";
+                    setstate <= "00";
+                    next_micro_state <= idle;
+
+                WHEN fpu_restore =>
+                    -- Read the first FRESTORE frame longword. Null/idle frames are enough
+                    -- for detection/probing code; non-null resume state is not implemented.
+                    datatype <= "10";
+                    set_datatype <= "10";
+                    set(OP1addr) <= '1';
+                    set(longaktion) <= '1';
+                    IF fpu_sr_opcode(5 downto 3)="011" THEN
+                        set(postadd) <= '1';
+                        IF fpu_sr_opcode(2 downto 0)="111" THEN set(use_SP)<='1'; END IF;
+                    END IF;
+                    setstate <= "10";
+                    next_micro_state <= fpu_restore_done;
+
+                WHEN fpu_restore_done =>
+                    datatype <= "10";
+                    set_datatype <= "10";
+                    IF data_read(31 downto 24) /= x"00" AND
+                       NOT (data_read(31 downto 24) = x"1F" AND data_read(23 downto 16) = x"38") THEN
+                        trap_format_error <= '1';
+                        trapmake <= '1';
+                    END IF;
+                    setstate <= "00";
 
                 WHEN pmove_decode =>		-- PMMU instruction dispatch based on extension word
                     setstate <= "01";       -- Suppress fetch during dispatch (PC already at +4)
