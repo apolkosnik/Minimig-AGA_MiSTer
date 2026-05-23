@@ -116,7 +116,8 @@ entity TG68KdotC_Kernel is
 		BarrelShifter : integer := 1;		--0=>no,			1=>yes,				2=>switchable with CPU(1)  
 		MUL_Hardware : integer := 1;		--0=>no,			1=>yes,
 		FPU_Enable : integer := 0;			--0=>FPU shell only,	1=>instantiate 68881/68882 core
-		FPU_Transcendental_Enable : integer := 0	--0=>omit trig/log/exp core,	1=>include it
+		FPU_Transcendental_Enable : integer := 0;	--0=>omit trig/log/exp core,	1=>include it
+		FPU_Packed_Decimal_Enable : integer := 0	--0=>omit packed decimal converter,	1=>include it
 		);
 	port(clk						: in std_logic;
 		nReset					: in std_logic;			--low active
@@ -1022,7 +1023,8 @@ architecture logic of TG68KdotC_Kernel is
   FPU_CORE_GEN: if FPU_Enable = 1 generate
     FPU_CORE: TG68K_FPU
       generic map(
-        Enable_Transcendental => FPU_Transcendental_Enable
+        Enable_Transcendental => FPU_Transcendental_Enable,
+        Enable_Packed_Decimal => FPU_Packed_Decimal_Enable
       )
       port map(
         clk                 => clk,

@@ -598,6 +598,7 @@ cpu_wrapper
 	.chip_ipl     (chip_ipl        ),
 
 	.fastchip_dout   (fastchip_dout   ),
+	.fastchip_addr   (fastchip_addr   ),
 	.fastchip_sel    (fastchip_sel    ),
 	.fastchip_lds    (fastchip_lds    ),
 	.fastchip_uds    (fastchip_uds    ),
@@ -721,6 +722,7 @@ ddram_ctrl ram2
 );
 
 wire [15:0] fastchip_dout;
+wire [23:1] fastchip_addr;
 wire        fastchip_sel;
 wire        fastchip_lds;
 wire        fastchip_uds;
@@ -748,7 +750,7 @@ fastchip fastchip
 	.sel_ack      (fastchip_selack   ),
 	.ready        (fastchip_ready    ),
 
-	.addr         ({chip_addr,1'b0}  ),
+	.addr         ({fastchip_addr,1'b0}),
 	.din          (chip_din          ),
 	.dout         (fastchip_dout     ),
 	.lds          (~fastchip_lds     ),

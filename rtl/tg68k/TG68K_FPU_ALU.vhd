@@ -100,6 +100,7 @@ architecture rtl of TG68K_FPU_ALU is
 		ALU_NORMALIZE_INPUTS,
 		ALU_EXECUTE,
 		ALU_MUL_ITERATE,
+		ALU_DIV_ITERATE,
 		ALU_NORMALIZE_RESULT,
 		ALU_DONE
 	);
@@ -135,12 +136,20 @@ architecture rtl of TG68K_FPU_ALU is
 	signal mult_guard_bit : std_logic;
 	signal mult_round_bit : std_logic;
 	signal mult_sticky_bit : std_logic;
-	
-	-- Division signals  
+
+	-- Division signals
 	signal div_quotient : std_logic_vector(63 downto 0);
 	signal div_remainder : std_logic_vector(63 downto 0);
 	signal div_valid : std_logic;
 	signal div_by_zero_detected : std_logic;
+	signal div_mode : std_logic_vector(1 downto 0);
+	signal div_divisor : std_logic_vector(64 downto 0);
+	signal div_remainder_work : std_logic_vector(64 downto 0);
+	signal div_quotient_work : std_logic_vector(63 downto 0);
+	signal div_count : integer range 0 to 63;
+	constant DIV_MODE_FDIV : std_logic_vector(1 downto 0) := "00";
+	constant DIV_MODE_FSGLDIV : std_logic_vector(1 downto 0) := "01";
+	constant DIV_MODE_FMOD : std_logic_vector(1 downto 0) := "10";
 	
 	-- FMOD/FREM quotient calculation
 	signal fmod_quotient : std_logic_vector(7 downto 0) := (others => '0');
@@ -272,6 +281,12 @@ begin
 		variable norm_shift : integer range 0 to 63;
 		variable scale_factor : integer;
 		variable mult_accum_next : unsigned(127 downto 0);
+		variable div_remainder_next : unsigned(64 downto 0);
+		variable div_quotient_next : std_logic_vector(63 downto 0);
+		variable round_guard : std_logic;
+		variable round_round : std_logic;
+		variable round_sticky : std_logic;
+		variable round_increment : std_logic;
 	begin
 		if nReset = '0' then
 			alu_state <= ALU_IDLE;
@@ -294,6 +309,11 @@ begin
 			mult_guard_bit <= '0';
 			mult_round_bit <= '0';
 			mult_sticky_bit <= '0';
+			div_mode <= DIV_MODE_FDIV;
+			div_divisor <= (others => '0');
+			div_remainder_work <= (others => '0');
+			div_quotient_work <= (others => '0');
+			div_count <= 0;
 			
 		elsif rising_edge(clk) then
 			if clkena = '1' then
@@ -738,10 +758,8 @@ begin
 								else
 									-- Normal multiplication: Add exponents and subtract bias
 									exp_result <= std_logic_vector(unsigned(exp_a) + unsigned(exp_b) - unsigned(EXP_BIAS));
-									-- Area-optimized exact 64x64 mantissa multiply.
-									-- The old single-cycle '*' inferred a large LUT multiplier on Cyclone V
-									-- because the design has almost no free DSP blocks. This sequencer uses
-									-- one 128-bit accumulator over 64 cycles instead.
+									-- Keep FMUL multi-cycle to avoid a large timing-sensitive
+									-- 64x64 DSP chain perturbing the CPU core placement.
 									mult_multiplicand <= X"0000000000000000" & mant_a;
 									mult_multiplier <= mant_b;
 									mult_accum <= (others => '0');
@@ -752,6 +770,7 @@ begin
 							when OP_FDIV =>
 								-- Division with proper special value handling
 								sign_result <= sign_a xor sign_b;
+								alu_state <= ALU_NORMALIZE_RESULT;
 								if is_nan_a = '1' or is_nan_b = '1' then
 									-- Any NaN operand produces NaN result
 									flags_invalid <= '1';
@@ -802,34 +821,27 @@ begin
 									mant_result <= (others => '0');
 								else
 									-- Normal division: Subtract exponents and add bias
-									exp_result <= std_logic_vector(unsigned(exp_a) - unsigned(exp_b) + unsigned(EXP_BIAS));
-									-- Improved mantissa division for IEEE 754 compliance
-									-- Use proper integer division on mantissas with implicit leading 1
-									
-									-- For normalized numbers, perform (1.mant_a) / (1.mant_b)
-									-- This becomes (2^63 + mant_a) / (2^63 + mant_b) scaled appropriately
-									if mant_b(63 downto 32) /= x"00000000" then
-										-- Use high 32 bits for better precision division
-										mant_result <= std_logic_vector(
-											shift_left(unsigned(mant_a), 32) / unsigned(mant_b(63 downto 32))
-										);
-									elsif mant_b(63 downto 16) /= x"000000000000" then
-										-- Use high 48 bits
-										mant_result <= std_logic_vector(
-											shift_left(unsigned(mant_a), 16) / unsigned(mant_b(63 downto 16))
-										);
+									div_mode <= DIV_MODE_FDIV;
+									div_divisor <= '0' & mant_b;
+									div_quotient_work <= (others => '0');
+									if unsigned(mant_a) >= unsigned(mant_b) then
+										exp_result <= std_logic_vector(unsigned(exp_a) - unsigned(exp_b) + unsigned(EXP_BIAS));
+										div_remainder_work <= '0' & std_logic_vector(unsigned(mant_a) - unsigned(mant_b));
+										div_quotient_work(63) <= '1';
 									else
-										-- Full precision needed
-										mant_result <= std_logic_vector(
-											unsigned(mant_a) / unsigned(mant_b(63 downto 1))
-										);
+										exp_result <= std_logic_vector(unsigned(exp_a) - unsigned(exp_b) + unsigned(EXP_BIAS) - to_unsigned(1, 15));
+										div_remainder_next := shift_left(unsigned('0' & mant_a), 1);
+										if div_remainder_next >= unsigned('0' & mant_b) then
+											div_remainder_work <= std_logic_vector(div_remainder_next - unsigned('0' & mant_b));
+											div_quotient_work(63) <= '1';
+										else
+											div_remainder_work <= std_logic_vector(div_remainder_next);
+										end if;
 									end if;
-									
-									-- Mark as potentially inexact
-									flags_inexact <= '1';
+									div_count <= 62;
+									alu_state <= ALU_DIV_ITERATE;
 								end if;
-								alu_state <= ALU_NORMALIZE_RESULT;
-								
+
 							when OP_FCMP | OP_FTST =>
 								-- Comparison operations (set condition codes)
 								sign_result <= '0';
@@ -991,6 +1003,7 @@ begin
 							when OP_FSGLDIV =>
 								-- Single precision division (same as regular division but with limited precision)
 								sign_result <= sign_a xor sign_b;
+								alu_state <= ALU_NORMALIZE_RESULT;
 								if is_nan_a = '1' or is_nan_b = '1' then
 									-- Any NaN operand produces NaN result
 									flags_invalid <= '1';
@@ -1021,40 +1034,33 @@ begin
 									exp_result <= EXP_ZERO;
 									mant_result <= (others => '0');
 								else
-									-- Normal single precision division (simplified)
-									exp_result <= std_logic_vector(unsigned(exp_a) - unsigned(exp_b) + unsigned(EXP_BIAS));
-									-- Use same division algorithm as regular FDIV but limit precision
-									if mant_a = mant_b then
-										mant_result <= x"8000000000000000";  -- 1.0
-									elsif unsigned(mant_a) > unsigned(mant_b) then
-										if mant_b(63 downto 48) /= x"0000" then
-											mant_result <= std_logic_vector(resize(
-												unsigned(mant_a(63 downto 32)) * 2048 / unsigned(mant_b(63 downto 48)), 64
-											));
-										else
-											mant_result <= (others => '1');
-											flags_overflow <= '1';
-										end if;
+									-- Normal single precision division reuses the shared FDIV
+									-- restoring divider, then truncates the low bits.
+									div_mode <= DIV_MODE_FSGLDIV;
+									div_divisor <= '0' & mant_b;
+									div_quotient_work <= (others => '0');
+									if unsigned(mant_a) >= unsigned(mant_b) then
+										exp_result <= std_logic_vector(unsigned(exp_a) - unsigned(exp_b) + unsigned(EXP_BIAS));
+										div_remainder_work <= '0' & std_logic_vector(unsigned(mant_a) - unsigned(mant_b));
+										div_quotient_work(63) <= '1';
 									else
-										exp_result <= std_logic_vector(unsigned(exp_result) - 1);
-										if mant_b(63 downto 48) /= x"0000" then
-											-- Use smaller operands to avoid 64-bit division width limit
-											mant_result <= std_logic_vector(resize(
-												unsigned(mant_a(63 downto 32)) * 4096 / unsigned(mant_b(63 downto 48)), 64
-											));
+										exp_result <= std_logic_vector(unsigned(exp_a) - unsigned(exp_b) + unsigned(EXP_BIAS) - to_unsigned(1, 15));
+										div_remainder_next := shift_left(unsigned('0' & mant_a), 1);
+										if div_remainder_next >= unsigned('0' & mant_b) then
+											div_remainder_work <= std_logic_vector(div_remainder_next - unsigned('0' & mant_b));
+											div_quotient_work(63) <= '1';
 										else
-											mant_result <= mant_a(62 downto 0) & '0';
+											div_remainder_work <= std_logic_vector(div_remainder_next);
 										end if;
 									end if;
-									-- Round to single precision (24-bit mantissa)
-									mant_result(39 downto 0) <= (others => '0');
-									flags_inexact <= '1';
+									div_count <= 62;
+									alu_state <= ALU_DIV_ITERATE;
 								end if;
-								alu_state <= ALU_NORMALIZE_RESULT;
 
 							when OP_FSGLMUL =>
 								-- Single precision multiplication (same as regular multiplication but with limited precision)
 								sign_result <= sign_a xor sign_b;
+								alu_state <= ALU_NORMALIZE_RESULT;
 								if is_nan_a = '1' or is_nan_b = '1' then
 									-- Any NaN operand produces NaN result
 									flags_invalid <= '1';
@@ -1076,19 +1082,17 @@ begin
 									exp_result <= EXP_ZERO;
 									mant_result <= (others => '0');
 								else
-									-- Normal single precision multiplication - use simplified approach
+									-- Normal single precision multiplication reuses FMUL, then
+									-- truncates to the single-precision mantissa field.
 									exp_result <= std_logic_vector(unsigned(exp_a) + unsigned(exp_b) - unsigned(EXP_BIAS));
-									-- For single precision, use high bits of mantissa and simplified calculation
-									-- This is a simplified implementation that avoids complex multiplication
-									if mant_a(63 downto 56) > mant_b(63 downto 56) then
-										mant_result <= mant_a(63 downto 0);  -- Use larger operand as approximation
-									else
-										mant_result <= mant_b(63 downto 0);  -- Use larger operand as approximation
-									end if;
+									mult_multiplicand <= X"0000000000000000" & mant_a;
+									mult_multiplier <= mant_b;
+									mult_accum <= (others => '0');
+									mult_count <= 0;
 									flags_inexact <= '1';
+									alu_state <= ALU_MUL_ITERATE;
 								end if;
-								alu_state <= ALU_NORMALIZE_RESULT;
-								
+
 							when OP_FMOD =>
 								-- IEEE remainder: x - n*y where n = RoundToInt(x/y)
 								if is_nan_a = '1' or is_nan_b = '1' or is_inf_a = '1' or is_zero_b = '1' then
@@ -1109,16 +1113,28 @@ begin
 										-- |x| >= |y|: compute remainder and quotient
 										sign_result <= sign_a;  -- Result has sign of dividend
 										
-										-- Calculate integer quotient bits
+										-- Calculate integer quotient bits. The remainder datapath
+										-- intentionally matches the old mantissa-only modulo
+										-- behavior, but avoids inferring a wide combinational divider.
 										if unsigned(exp_a) - unsigned(exp_b) < 7 then
 											fmod_quotient <= (sign_a xor sign_b) & std_logic_vector(to_unsigned(
 												to_integer(unsigned(exp_a) - unsigned(exp_b)), 7));
 											exp_result <= exp_b;
-											mant_result <= std_logic_vector(unsigned(mant_a) mod (unsigned(mant_b) + 1));
+											div_mode <= DIV_MODE_FMOD;
+											div_divisor <= std_logic_vector(unsigned('0' & mant_b) + to_unsigned(1, 65));
+											div_remainder_work <= (others => '0');
+											div_quotient_work <= (others => '0');
+											div_count <= 63;
+											alu_state <= ALU_DIV_ITERATE;
 										elsif unsigned(exp_a) - unsigned(exp_b) < 64 then
 											fmod_quotient <= (sign_a xor sign_b) & "1111111";
 											exp_result <= exp_b;
-											mant_result <= std_logic_vector(unsigned(mant_a) mod (unsigned(mant_b) + 1));
+											div_mode <= DIV_MODE_FMOD;
+											div_divisor <= std_logic_vector(unsigned('0' & mant_b) + to_unsigned(1, 65));
+											div_remainder_work <= (others => '0');
+											div_quotient_work <= (others => '0');
+											div_count <= 63;
+											alu_state <= ALU_DIV_ITERATE;
 										else
 											fmod_quotient <= (sign_a xor sign_b) & "1111111";
 											exp_result <= exp_b;
@@ -1347,9 +1363,58 @@ begin
 									flags_inexact <= '1';
 								end if;
 							end if;
+							if operation_code = OP_FSGLMUL then
+								mant_result(39 downto 0) <= (others => '0');
+							end if;
 							alu_state <= ALU_NORMALIZE_RESULT;
 						else
 							mult_count <= mult_count + 1;
+						end if;
+
+					when ALU_DIV_ITERATE =>
+						div_quotient_next := div_quotient_work;
+						if div_mode = DIV_MODE_FMOD then
+							div_remainder_next := unsigned(div_remainder_work(63 downto 0) & mant_a(div_count));
+						else
+							div_remainder_next := shift_left(unsigned(div_remainder_work), 1);
+						end if;
+
+						if div_remainder_next >= unsigned(div_divisor) then
+							div_remainder_next := div_remainder_next - unsigned(div_divisor);
+							div_quotient_next(div_count) := '1';
+						else
+							div_quotient_next(div_count) := '0';
+						end if;
+
+						div_remainder_work <= std_logic_vector(div_remainder_next);
+						div_quotient_work <= div_quotient_next;
+
+						if div_count = 0 then
+							if div_mode = DIV_MODE_FMOD then
+								mant_result <= std_logic_vector(div_remainder_next(63 downto 0));
+								guard_bit <= '0';
+								round_bit <= '0';
+								sticky_bit <= '0';
+							else
+								mant_result <= div_quotient_next;
+								if div_mode = DIV_MODE_FSGLDIV then
+									mant_result(39 downto 0) <= (others => '0');
+									if div_quotient_next(39 downto 0) /= (39 downto 0 => '0') then
+										flags_inexact <= '1';
+									end if;
+								end if;
+								guard_bit <= '0';
+								round_bit <= '0';
+								if div_remainder_next /= to_unsigned(0, 65) then
+									sticky_bit <= '1';
+									flags_inexact <= '1';
+								else
+									sticky_bit <= '0';
+								end if;
+							end if;
+							alu_state <= ALU_NORMALIZE_RESULT;
+						else
+							div_count <= div_count - 1;
 						end if;
 
 					when ALU_NORMALIZE_RESULT =>
@@ -1411,7 +1476,7 @@ begin
 											else -- sign_a = '1' and sign_b = '0'
 												sign_result <= '1';     -- -0 - +0 = -0
 											end if;
-										when OP_FMUL | OP_FDIV | OP_FSGLDIV =>
+										when OP_FMUL | OP_FSGLMUL | OP_FDIV | OP_FSGLDIV =>
 											-- Multiplication/Division: sign follows XOR rule
 											sign_result <= sign_a xor sign_b;
 										when others =>
@@ -1461,7 +1526,7 @@ begin
 										round_bit <= '0';  -- No additional precision
 										sticky_bit <= '0';  -- No additional precision
 									end if;
-								when OP_FMUL =>
+								when OP_FMUL | OP_FSGLMUL =>
 									-- Multiplication: use bits captured by the iterative multiplier.
 									guard_bit <= mult_guard_bit;
 									round_bit <= mult_round_bit;

@@ -52,6 +52,7 @@ module cpu_wrapper
 	input       [2:0] chip_ipl,
 	
 	input      [15:0] fastchip_dout,
+	output reg [23:1] fastchip_addr,
 	output reg        fastchip_sel,
 	output            fastchip_lds,
 	output            fastchip_uds,
@@ -263,6 +264,7 @@ reg  [15:0] chip_din_latched;
 always @* begin
 	chip_addr_req = 23'b0;
 	chip_din_req  = 16'b0;
+	fastchip_addr = 23'b0;
 	if(cpucfg[1:0]) begin
 		cpu_dout     = cpu_dout_p;
 		cpu_addr     = cpu_addr_p;
@@ -325,6 +327,7 @@ always @* begin
 		end
 		chip_addr    = (chip_stage != 0) ? chip_addr_latched : chip_addr_req;
 		chip_din     = (chip_stage != 0) ? chip_din_latched  : chip_din_req;
+		fastchip_addr = chip_addr_req;
 		chip_data    = chipdout_i;
 		// BUG #417 FIX: Use physical address for fast chip select
 		// BUG #425 FIX: Suppress fastchip_sel during walker activity.
@@ -352,6 +355,7 @@ always @* begin
 		chip_din_req  = cpu_dout_o;
 		chip_addr    = chip_addr_req;
 		chip_din     = chip_din_req;
+		fastchip_addr = chip_addr_req;
 		chip_data    = chip_dout;
 		fastchip_sel = 0;
 		fastchip_lw  = 0;
@@ -2829,8 +2833,9 @@ TG68KdotC_Kernel
 	.mul_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no MUL,
 	.div_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,
 	.bitfield(2),       // 0=>no,     1=>yes,           2=>switchable with CPU(1)
-	.fpu_enable(1),     // 0=>WinUAE-validated FPU shell, 1=>68881/68882 core (too large for this target)
-	.fpu_transcendental_enable(0) // 0=>compile out trig/log/exp core, 1=>include it
+	.fpu_enable(1),     // 0=>WinUAE-validated FPU shell, 1=>68881/68882 core (disabled until timing closes)
+	.fpu_transcendental_enable(0), // 0=>compile out trig/log/exp core, 1=>include it
+	.fpu_packed_decimal_enable(0)  // 0=>compile out packed decimal converter, 1=>include it
 )
 cpu_inst_p
 (

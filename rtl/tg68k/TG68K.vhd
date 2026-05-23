@@ -29,7 +29,9 @@ use ieee.std_logic_unsigned.all;
 entity TG68K is
    generic(
       CPU           : std_logic_vector(1 downto 0):="01"; -- 00->68000  01->68010  10->68030
-      FPU_Enable    : integer := 1                        -- 0=>FPU shell only, 1=>68881/68882 core
+      FPU_Enable    : integer := 1;                       -- 0=>FPU shell only, 1=>68881/68882 core
+      FPU_Transcendental_Enable : integer := 0;           -- 0=>omit trig/log/exp core, 1=>include it
+      FPU_Packed_Decimal_Enable : integer := 0            -- 0=>omit packed decimal converter, 1=>include it
    );
    port(        
       CLK           : in std_logic;
@@ -84,7 +86,9 @@ COMPONENT TG68KdotC_Kernel
 
       BarrelShifter : integer := 1;     --0=>no,      1=>yes,           2=>switchable with CPU(1)
       MUL_Hardware : integer := 1;      --0=>no,      1=>yes
-      FPU_Enable : integer := 0         --0=>FPU shell only, 1=>68881/68882 core
+      FPU_Enable : integer := 0;        --0=>FPU shell only, 1=>68881/68882 core
+      FPU_Transcendental_Enable : integer := 0; --0=>omit trig/log/exp core, 1=>include it
+      FPU_Packed_Decimal_Enable : integer := 0  --0=>omit packed decimal converter, 1=>include it
    );
    port(
       clk                              : in std_logic;
@@ -454,7 +458,9 @@ cpu1: TG68KdotC_Kernel
 
       BarrelShifter => 2,        --0=>no,       1=>yes,           2=>switchable with CPU(1)
       MUL_Hardware => 1,         --0=>no,       1=>yes,
-      FPU_Enable => FPU_Enable
+      FPU_Enable => FPU_Enable,
+      FPU_Transcendental_Enable => FPU_Transcendental_Enable,
+      FPU_Packed_Decimal_Enable => FPU_Packed_Decimal_Enable
    )
    PORT MAP(
       CPU => CPU,                -- : in std_logic_vector(1 downto 0):="01";  -- 00->68000  01->68010  10->68030

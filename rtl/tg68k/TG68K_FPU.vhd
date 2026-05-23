@@ -28,7 +28,8 @@ use work.TG68K_Pack.all;
 
 entity TG68K_FPU is
 	generic(
-		Enable_Transcendental	: integer := 1		--0=>compile out trig/log/exp unit, nonzero=>include it
+		Enable_Transcendental	: integer := 1;		--0=>compile out trig/log/exp unit, nonzero=>include it
+		Enable_Packed_Decimal	: integer := 1		--0=>compile out packed decimal converter, nonzero=>include it
 	);
 	port(
 		clk						: in std_logic;
@@ -220,7 +221,7 @@ architecture rtl of TG68K_FPU is
 	signal timeout_counter : integer range 0 to 255 := 0;
 	-- Improved timeout limits for different operation types
 	constant TIMEOUT_LIMIT_MEMORY : integer := 128;  -- Memory operations (bus access)
-	constant TIMEOUT_LIMIT_ALU : integer := 64;      -- ALU operations (arithmetic)
+	constant TIMEOUT_LIMIT_ALU : integer := 160;     -- ALU operations (arithmetic)
 	constant TIMEOUT_LIMIT_FSAVE : integer := 32;    -- FSAVE/FRESTORE frame operations
 	constant TIMEOUT_LIMIT_MOVEM : integer := 256;   -- MOVEM operations (multi-register transfers)
 	
@@ -472,6 +473,23 @@ architecture rtl of TG68K_FPU is
 	constant FORMAT_WORD		: std_logic_vector(2 downto 0) := "100";	-- 16-bit integer  
 	constant FORMAT_DOUBLE		: std_logic_vector(2 downto 0) := "101";	-- 64-bit IEEE double
 	constant FORMAT_BYTE		: std_logic_vector(2 downto 0) := "110";	-- 8-bit integer
+
+	function uses_packed_decimal(inst_type : std_logic_vector(3 downto 0);
+	                             source_format : std_logic_vector(2 downto 0);
+	                             dest_format : std_logic_vector(2 downto 0);
+	                             ext_word : std_logic_vector(15 downto 0)) return boolean is
+	begin
+		if source_format = FORMAT_PACKED or dest_format = FORMAT_PACKED then
+			return true;
+		end if;
+
+		case inst_type is
+			when INST_GENERAL | INST_FMOVE_FP | INST_FMOVE_MEM =>
+				return ext_word(12 downto 10) = FORMAT_PACKED;
+			when others =>
+				return false;
+		end case;
+	end function;
 
 	-- MC68882 Coprocessor Primitive Response Codes (Complete Implementation)
 	constant PRIM_NULL			: std_logic_vector(15 downto 0) := X"0000";	-- NULL - No bus cycles required
@@ -809,6 +827,9 @@ begin
 
 	-- FPU Data Format Converter instantiation
 	FPU_CONVERTER: TG68K_FPU_Converter
+	generic map(
+		Enable_Packed_Decimal => Enable_Packed_Decimal
+	)
 	port map(
 		clk => clk,
 		nReset => nReset,
@@ -1383,6 +1404,11 @@ begin
 							exception_code_internal <= X"0C";  -- Unimplemented instruction
 						elsif Enable_Transcendental = 0 and is_transcendental_op(decoder_operation_code) then
 							-- Transcendental unit compiled out: report the opcode as unimplemented.
+							fpu_state <= FPU_EXCEPTION_STATE;
+							fpu_exception <= '1';
+							exception_code_internal <= X"0C";  -- Unimplemented instruction
+						elsif Enable_Packed_Decimal = 0 and uses_packed_decimal(decoder_instruction_type, decoder_source_format, decoder_dest_format, extension_word) then
+							-- Packed decimal converter compiled out: report packed-format opcodes as unimplemented.
 							fpu_state <= FPU_EXCEPTION_STATE;
 							fpu_exception <= '1';
 							exception_code_internal <= X"0C";  -- Unimplemented instruction

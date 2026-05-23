@@ -48,7 +48,8 @@ begin
 
     dut: entity work.TG68K_FPU
         generic map(
-            Enable_Transcendental => 0
+            Enable_Transcendental => 0,
+            Enable_Packed_Decimal => 0
         )
         port map(
             clk => clk,
@@ -177,35 +178,40 @@ begin
             wait until rising_edge(clk);
         end procedure;
 
-        procedure run_fmul_direct(
-            constant label_text : in string
+        procedure run_alu_binary_direct(
+            constant label_text : in string;
+            constant op_code : in std_logic_vector(6 downto 0);
+            constant operand_a : in std_logic_vector(79 downto 0);
+            constant operand_b : in std_logic_vector(79 downto 0);
+            constant expected_result : in std_logic_vector(79 downto 0);
+            constant max_cycles : in integer
         ) is
             variable cycles : integer := 0;
         begin
-            alu_operand_a <= x"3FFFC000000000000000"; -- 1.5
-            alu_operand_b <= x"3FFF8000000000000000"; -- 1.0
-            alu_operation_code <= "0100011";           -- FMUL
+            alu_operand_a <= operand_a;
+            alu_operand_b <= operand_b;
+            alu_operation_code <= op_code;
             alu_start_operation <= '1';
             wait until rising_edge(clk);
             alu_start_operation <= '0';
 
-            while alu_operation_done /= '1' and cycles < 120 loop
+            while alu_operation_done /= '1' and cycles < max_cycles loop
                 wait until rising_edge(clk);
                 cycles := cycles + 1;
             end loop;
             assert alu_operation_done = '1'
-                report "FAIL: ALU FMUL did not complete " & label_text
+                report "FAIL: ALU " & label_text & " did not complete"
                 severity failure;
             assert alu_result_valid = '1'
-                report "FAIL: ALU FMUL did not assert result_valid " & label_text
+                report "FAIL: ALU " & label_text & " did not assert result_valid"
                 severity failure;
             assert alu_invalid = '0' and alu_overflow = '0' and alu_underflow = '0'
-                report "FAIL: ALU FMUL raised unexpected exception flag " & label_text
+                report "FAIL: ALU " & label_text & " raised unexpected exception flag"
                 severity failure;
-            assert alu_result = x"3FFFC000000000000000"
-                report "FAIL: ALU FMUL 1.5 * 1.0 result mismatch"
+            assert alu_result = expected_result
+                report "FAIL: ALU " & label_text & " result mismatch"
                 severity failure;
-            report "PASS: ALU FMUL 1.5 * 1.0 uses iterative multiplier";
+            report "PASS: ALU " & label_text;
             wait until rising_edge(clk);
             wait until rising_edge(clk);
         end procedure;
@@ -219,7 +225,18 @@ begin
         run_ftst_long(x"00000001", "0000", "positive");
         run_ftst_long(x"FFFFFFFF", "1000", "negative");
         run_transcendental_disabled("FSIN.L");
-        run_fmul_direct("1.5 * 1.0");
+        run_alu_binary_direct("FMUL 1.5 * 1.0", "0100011",
+                              x"3FFFC000000000000000", x"3FFF8000000000000000",
+                              x"3FFFC000000000000000", 120);
+        run_alu_binary_direct("FDIV 1.5 / 1.0", "0100000",
+                              x"3FFFC000000000000000", x"3FFF8000000000000000",
+                              x"3FFFC000000000000000", 140);
+        run_alu_binary_direct("FSGLMUL 1.5 * 1.0", "0100111",
+                              x"3FFFC000000000000000", x"3FFF8000000000000000",
+                              x"3FFFC000000000000000", 120);
+        run_alu_binary_direct("FSGLDIV 1.5 / 1.0", "0100100",
+                              x"3FFFC000000000000000", x"3FFF8000000000000000",
+                              x"3FFFC000000000000000", 140);
 
         test_done <= true;
         report "FPU core smoke test complete";

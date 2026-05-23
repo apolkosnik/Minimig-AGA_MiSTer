@@ -26,6 +26,9 @@ use ieee.std_logic_unsigned.all;
 use ieee.numeric_std.all;
 
 entity TG68K_FPU_Converter is
+	generic(
+		Enable_Packed_Decimal	: integer := 1		--0=>compile out packed decimal converter, nonzero=>include it
+	);
 	port(
 		clk						: in std_logic;
 		nReset					: in std_logic;
@@ -126,33 +129,44 @@ architecture rtl of TG68K_FPU_Converter is
 
 begin
 
-	-- Instantiate packed decimal converter
-	PACKED_CONVERTER: entity work.TG68K_FPU_PackedDecimal
-	port map(
-		clk => clk,
-		nReset => nReset,
-		clkena => clkena,
-		
-		-- Control
-		start_conversion => packed_start,
-		conversion_done => packed_done,
-		conversion_valid => packed_valid,
-		
-		-- Direction and K-factor
-		packed_to_extended => packed_to_ext,
-		k_factor => packed_k_factor,
-		
-		-- Data
-		extended_in => dest_extended,
-		packed_in => data_in,
-		extended_out => packed_ext_out,
-		packed_out => packed_dec_out,
-		
-		-- Exceptions
-		overflow => packed_overflow,
-		inexact => packed_inexact,
-		invalid => packed_invalid
-	);
+	PACKED_CONVERTER_GEN: if Enable_Packed_Decimal /= 0 generate
+		PACKED_CONVERTER: entity work.TG68K_FPU_PackedDecimal
+		port map(
+			clk => clk,
+			nReset => nReset,
+			clkena => clkena,
+
+			-- Control
+			start_conversion => packed_start,
+			conversion_done => packed_done,
+			conversion_valid => packed_valid,
+
+			-- Direction and K-factor
+			packed_to_extended => packed_to_ext,
+			k_factor => packed_k_factor,
+
+			-- Data
+			extended_in => dest_extended,
+			packed_in => data_in,
+			extended_out => packed_ext_out,
+			packed_out => packed_dec_out,
+
+			-- Exceptions
+			overflow => packed_overflow,
+			inexact => packed_inexact,
+			invalid => packed_invalid
+		);
+	end generate;
+
+	NO_PACKED_CONVERTER_GEN: if Enable_Packed_Decimal = 0 generate
+		packed_done <= '1';
+		packed_valid <= '0';
+		packed_ext_out <= (others => '0');
+		packed_dec_out <= (others => '0');
+		packed_overflow <= '0';
+		packed_inexact <= '0';
+		packed_invalid <= '1';
+	end generate;
 
 	-- Assign concatenated signal
 	dest_extended <= dest_sign & dest_exp & dest_mant;
