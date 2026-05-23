@@ -210,6 +210,9 @@ package TG68K_Pack is
 	end component;
 
 	component TG68K_FPU
+	generic(
+		Enable_Transcendental	: integer := 1
+	);
 	port(
 		clk						: in std_logic;
 		nReset					: in std_logic;

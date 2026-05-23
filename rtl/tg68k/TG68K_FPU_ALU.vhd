@@ -99,6 +99,7 @@ architecture rtl of TG68K_FPU_ALU is
 		ALU_DECODE,
 		ALU_NORMALIZE_INPUTS,
 		ALU_EXECUTE,
+		ALU_MUL_ITERATE,
 		ALU_NORMALIZE_RESULT,
 		ALU_DONE
 	);
@@ -127,6 +128,13 @@ architecture rtl of TG68K_FPU_ALU is
 	signal mult_result : std_logic_vector(127 downto 0);
 	signal mult_partial : std_logic_vector(63 downto 0);
 	signal mult_valid : std_logic;
+	signal mult_multiplicand : std_logic_vector(127 downto 0);
+	signal mult_multiplier : std_logic_vector(63 downto 0);
+	signal mult_accum : std_logic_vector(127 downto 0);
+	signal mult_count : integer range 0 to 64;
+	signal mult_guard_bit : std_logic;
+	signal mult_round_bit : std_logic;
+	signal mult_sticky_bit : std_logic;
 	
 	-- Division signals  
 	signal div_quotient : std_logic_vector(63 downto 0);
@@ -263,6 +271,7 @@ begin
 		variable temp_exp : integer;
 		variable norm_shift : integer range 0 to 63;
 		variable scale_factor : integer;
+		variable mult_accum_next : unsigned(127 downto 0);
 	begin
 		if nReset = '0' then
 			alu_state <= ALU_IDLE;
@@ -277,6 +286,14 @@ begin
 			flags_inexact <= '0';
 			flags_invalid <= '0';
 			flags_div_by_zero <= '0';
+			mult_result <= (others => '0');
+			mult_multiplicand <= (others => '0');
+			mult_multiplier <= (others => '0');
+			mult_accum <= (others => '0');
+			mult_count <= 0;
+			mult_guard_bit <= '0';
+			mult_round_bit <= '0';
+			mult_sticky_bit <= '0';
 			
 		elsif rising_edge(clk) then
 			if clkena = '1' then
@@ -697,6 +714,7 @@ begin
 							when OP_FMUL =>
 								-- Multiplication with proper special value handling
 								sign_result <= sign_a xor sign_b;
+								alu_state <= ALU_NORMALIZE_RESULT;
 								if is_nan_a = '1' or is_nan_b = '1' then
 									-- Any NaN operand produces NaN result
 									flags_invalid <= '1';
@@ -718,29 +736,19 @@ begin
 									exp_result <= EXP_ZERO;
 									mant_result <= (others => '0');
 								else
-									-- Normal multiplication: Add exponents and subtract bias  
+									-- Normal multiplication: Add exponents and subtract bias
 									exp_result <= std_logic_vector(unsigned(exp_a) + unsigned(exp_b) - unsigned(EXP_BIAS));
-									-- Full 64-bit precision mantissa multiplication
-									-- For IEEE 754 extended precision, we need (1.mant_a) * (1.mant_b)
-									-- This requires 64x64 bit multiplication
-									-- Use high 64 bits of mantissas to fit in 128-bit result
-									mult_result <= std_logic_vector(unsigned(mant_a(63 downto 0)) * unsigned(mant_b(63 downto 0)));
-									-- Result is 128 bits (2.xxx format), normalize to 1.xxx by taking bits [126:63]
-									if mult_result(127) = '1' then
-										-- Result >= 2.0, shift right and increment exponent
-										exp_result <= std_logic_vector(unsigned(exp_result) + 1);
-										mant_result <= mult_result(126 downto 63);
-									else
-										-- Result in [1.0, 2.0), normal case
-										mant_result <= mult_result(125 downto 62);
-									end if;
-									-- Check for inexact result (bits below bit 62 are non-zero)
-									if mult_result(61 downto 0) /= (61 downto 0 => '0') then
-										flags_inexact <= '1';
-									end if;
+									-- Area-optimized exact 64x64 mantissa multiply.
+									-- The old single-cycle '*' inferred a large LUT multiplier on Cyclone V
+									-- because the design has almost no free DSP blocks. This sequencer uses
+									-- one 128-bit accumulator over 64 cycles instead.
+									mult_multiplicand <= X"0000000000000000" & mant_a;
+									mult_multiplier <= mant_b;
+									mult_accum <= (others => '0');
+									mult_count <= 0;
+									alu_state <= ALU_MUL_ITERATE;
 								end if;
-								alu_state <= ALU_NORMALIZE_RESULT;
-								
+
 							when OP_FDIV =>
 								-- Division with proper special value handling
 								sign_result <= sign_a xor sign_b;
@@ -1288,7 +1296,62 @@ begin
 								mant_result <= (others => '0');
 								alu_state <= ALU_NORMALIZE_RESULT;
 						end case;
-					
+
+					when ALU_MUL_ITERATE =>
+						mult_accum_next := unsigned(mult_accum);
+						if mult_multiplier(0) = '1' then
+							mult_accum_next := mult_accum_next + unsigned(mult_multiplicand);
+						end if;
+
+						mult_accum <= std_logic_vector(mult_accum_next);
+						mult_multiplicand <= mult_multiplicand(126 downto 0) & '0';
+						mult_multiplier <= '0' & mult_multiplier(63 downto 1);
+
+						if mult_count = 63 then
+							mult_result <= std_logic_vector(mult_accum_next);
+
+							-- Result is 128 bits (2.xxx format), normalize to 1.xxx.
+							if mult_accum_next(127) = '1' then
+								exp_result <= std_logic_vector(unsigned(exp_result) + 1);
+								mant_result <= std_logic_vector(mult_accum_next(127 downto 64));
+								mult_guard_bit <= mult_accum_next(63);
+								mult_round_bit <= mult_accum_next(62);
+								guard_bit <= mult_accum_next(63);
+								round_bit <= mult_accum_next(62);
+								if std_logic_vector(mult_accum_next(61 downto 0)) /= (61 downto 0 => '0') then
+									mult_sticky_bit <= '1';
+									sticky_bit <= '1';
+								else
+									mult_sticky_bit <= '0';
+									sticky_bit <= '0';
+								end if;
+								if mult_accum_next(63) = '1' or mult_accum_next(62) = '1' or
+								   std_logic_vector(mult_accum_next(61 downto 0)) /= (61 downto 0 => '0') then
+									flags_inexact <= '1';
+								end if;
+							else
+								mant_result <= std_logic_vector(mult_accum_next(126 downto 63));
+								mult_guard_bit <= mult_accum_next(62);
+								mult_round_bit <= mult_accum_next(61);
+								guard_bit <= mult_accum_next(62);
+								round_bit <= mult_accum_next(61);
+								if std_logic_vector(mult_accum_next(60 downto 0)) /= (60 downto 0 => '0') then
+									mult_sticky_bit <= '1';
+									sticky_bit <= '1';
+								else
+									mult_sticky_bit <= '0';
+									sticky_bit <= '0';
+								end if;
+								if mult_accum_next(62) = '1' or mult_accum_next(61) = '1' or
+								   std_logic_vector(mult_accum_next(60 downto 0)) /= (60 downto 0 => '0') then
+									flags_inexact <= '1';
+								end if;
+							end if;
+							alu_state <= ALU_NORMALIZE_RESULT;
+						else
+							mult_count <= mult_count + 1;
+						end if;
+
 					when ALU_NORMALIZE_RESULT =>
 						-- Proper normalization and rounding
 						-- Handle leading zero detection and normalization
@@ -1399,15 +1462,10 @@ begin
 										sticky_bit <= '0';  -- No additional precision
 									end if;
 								when OP_FMUL =>
-									-- Multiplication: use lower bits of mult_result
-									guard_bit <= mult_result(63);  -- Guard bit from multiplication
-									round_bit <= mult_result(62);  -- Round bit
-									-- Sticky bit: OR of all remaining lower bits
-									if mult_result(61 downto 0) /= (61 downto 0 => '0') then
-										sticky_bit <= '1';
-									else
-										sticky_bit <= '0';
-									end if;
+									-- Multiplication: use bits captured by the iterative multiplier.
+									guard_bit <= mult_guard_bit;
+									round_bit <= mult_round_bit;
+									sticky_bit <= mult_sticky_bit;
 								when OP_FDIV | OP_FSGLDIV =>
 									-- Division: determine remainder for proper rounding
 									-- For division a/b, check if there's a remainder

@@ -28,11 +28,28 @@ architecture sim of tb_fpu_core_smoke is
     signal fsave_size_valid : std_logic;
     signal cir_data_out : std_logic_vector(15 downto 0);
     signal cir_data_valid : std_logic;
+    signal alu_start_operation : std_logic := '0';
+    signal alu_operation_code : std_logic_vector(6 downto 0) := (others => '0');
+    signal alu_operand_a : std_logic_vector(79 downto 0) := (others => '0');
+    signal alu_operand_b : std_logic_vector(79 downto 0) := (others => '0');
+    signal alu_result : std_logic_vector(79 downto 0);
+    signal alu_result_valid : std_logic;
+    signal alu_overflow : std_logic;
+    signal alu_underflow : std_logic;
+    signal alu_inexact : std_logic;
+    signal alu_invalid : std_logic;
+    signal alu_divide_by_zero : std_logic;
+    signal alu_quotient_byte : std_logic_vector(7 downto 0);
+    signal alu_operation_busy : std_logic;
+    signal alu_operation_done : std_logic;
     signal test_done : boolean := false;
 begin
     clk <= not clk after CLK_PERIOD / 2 when not test_done;
 
     dut: entity work.TG68K_FPU
+        generic map(
+            Enable_Transcendental => 0
+        )
         port map(
             clk => clk,
             nReset => nReset,
@@ -68,6 +85,28 @@ begin
             cir_data_in => (others => '0'),
             cir_data_out => cir_data_out,
             cir_data_valid => cir_data_valid
+        );
+
+    alu_dut: entity work.TG68K_FPU_ALU
+        port map(
+            clk => clk,
+            nReset => nReset,
+            clkena => clkena,
+            start_operation => alu_start_operation,
+            operation_code => alu_operation_code,
+            rounding_mode => "00",
+            operand_a => alu_operand_a,
+            operand_b => alu_operand_b,
+            result => alu_result,
+            result_valid => alu_result_valid,
+            overflow => alu_overflow,
+            underflow => alu_underflow,
+            inexact => alu_inexact,
+            invalid => alu_invalid,
+            divide_by_zero => alu_divide_by_zero,
+            quotient_byte => alu_quotient_byte,
+            operation_busy => alu_operation_busy,
+            operation_done => alu_operation_done
         );
 
     process
@@ -106,6 +145,70 @@ begin
             wait until rising_edge(clk);
             wait until rising_edge(clk);
         end procedure;
+
+        procedure run_transcendental_disabled(
+            constant label_text : in string
+        ) is
+            variable cycles : integer := 0;
+        begin
+            opcode <= x"F200";          -- cpGEN, D0 source
+            extension_word <= x"000E";  -- FSIN.L D0
+            cpu_data_in <= x"00000001";
+            fpu_enable <= '1';
+            wait until rising_edge(clk);
+            while fpu_done = '1' and cycles < 10 loop
+                wait until rising_edge(clk);
+                cycles := cycles + 1;
+            end loop;
+            cycles := 0;
+            while fpu_done /= '1' and cycles < 80 loop
+                wait until rising_edge(clk);
+                cycles := cycles + 1;
+            end loop;
+            assert fpu_done = '1'
+                report "FAIL: FPU core did not complete disabled " & label_text
+                severity failure;
+            assert exception_code = x"0C"
+                report "FAIL: disabled " & label_text & " did not report unimplemented instruction"
+                severity failure;
+            report "PASS: disabled " & label_text & " reports unimplemented instruction";
+            fpu_enable <= '0';
+            wait until rising_edge(clk);
+            wait until rising_edge(clk);
+        end procedure;
+
+        procedure run_fmul_direct(
+            constant label_text : in string
+        ) is
+            variable cycles : integer := 0;
+        begin
+            alu_operand_a <= x"3FFFC000000000000000"; -- 1.5
+            alu_operand_b <= x"3FFF8000000000000000"; -- 1.0
+            alu_operation_code <= "0100011";           -- FMUL
+            alu_start_operation <= '1';
+            wait until rising_edge(clk);
+            alu_start_operation <= '0';
+
+            while alu_operation_done /= '1' and cycles < 120 loop
+                wait until rising_edge(clk);
+                cycles := cycles + 1;
+            end loop;
+            assert alu_operation_done = '1'
+                report "FAIL: ALU FMUL did not complete " & label_text
+                severity failure;
+            assert alu_result_valid = '1'
+                report "FAIL: ALU FMUL did not assert result_valid " & label_text
+                severity failure;
+            assert alu_invalid = '0' and alu_overflow = '0' and alu_underflow = '0'
+                report "FAIL: ALU FMUL raised unexpected exception flag " & label_text
+                severity failure;
+            assert alu_result = x"3FFFC000000000000000"
+                report "FAIL: ALU FMUL 1.5 * 1.0 result mismatch"
+                severity failure;
+            report "PASS: ALU FMUL 1.5 * 1.0 uses iterative multiplier";
+            wait until rising_edge(clk);
+            wait until rising_edge(clk);
+        end procedure;
     begin
         wait for 40 ns;
         nReset <= '1';
@@ -115,6 +218,8 @@ begin
         run_ftst_long(x"00000000", "0100", "zero");
         run_ftst_long(x"00000001", "0000", "positive");
         run_ftst_long(x"FFFFFFFF", "1000", "negative");
+        run_transcendental_disabled("FSIN.L");
+        run_fmul_direct("1.5 * 1.0");
 
         test_done <= true;
         report "FPU core smoke test complete";

@@ -27,6 +27,9 @@ use ieee.numeric_std.all;
 use work.TG68K_Pack.all;
 
 entity TG68K_FPU is
+	generic(
+		Enable_Transcendental	: integer := 1		--0=>compile out trig/log/exp unit, nonzero=>include it
+	);
 	port(
 		clk						: in std_logic;
 		nReset					: in std_logic;
@@ -433,7 +436,21 @@ architecture rtl of TG68K_FPU is
 	constant OP_FREM		: std_logic_vector(6 downto 0) := "0100101";
 	constant OP_FSCALE		: std_logic_vector(6 downto 0) := "0100110";
 	-- OP_FMOVECR already declared above at line 264
-	
+
+	function is_transcendental_op(op : std_logic_vector(6 downto 0)) return boolean is
+	begin
+		case op is
+			when OP_FSINH | OP_FLOGNP1 | OP_FETOXM1 | OP_FTANH |
+			     OP_FATAN | OP_FASIN | OP_FATANH | OP_FSIN |
+			     OP_FTAN | OP_FSINCOS | OP_FETOX | OP_FTWOTOX |
+			     OP_FTENTOX | OP_FLOGN | OP_FLOG10 | OP_FLOG2 |
+			     OP_FCOSH | OP_FACOS | OP_FCOS =>
+				return true;
+			when others =>
+				return false;
+		end case;
+	end function;
+
 	-- Instruction type constants (matching decoder)
 	constant INST_GENERAL		: std_logic_vector(3 downto 0) := "0000";	-- General instruction
 	constant INST_FMOVE_FP		: std_logic_vector(3 downto 0) := "0001";	-- FMOVE FPn,<ea>
@@ -749,33 +766,46 @@ begin
 	);
 
 	-- FPU Transcendental Functions instantiation
-	FPU_TRANS: TG68K_FPU_Transcendental
-	port map(
-		clk => clk,
-		nReset => nReset,
-		clkena => clkena,
-		
-		-- Operation control
-		start_operation => trans_start_operation,
-		operation_code => trans_operation_code,
-		
-		-- Operand
-		operand => trans_operand,
-		
-		-- Result
-		result => trans_result,
-		result_valid => trans_result_valid,
-		
-		-- Status flags
-		overflow => trans_overflow,
-		underflow => trans_underflow,
-		inexact => trans_inexact,
-		invalid => trans_invalid,
-		
-		-- Control
-		operation_busy => trans_operation_busy,
-		operation_done => trans_operation_done
-	);
+	FPU_TRANS_GEN: if Enable_Transcendental /= 0 generate
+		FPU_TRANS: TG68K_FPU_Transcendental
+		port map(
+			clk => clk,
+			nReset => nReset,
+			clkena => clkena,
+
+			-- Operation control
+			start_operation => trans_start_operation,
+			operation_code => trans_operation_code,
+
+			-- Operand
+			operand => trans_operand,
+
+			-- Result
+			result => trans_result,
+			result_valid => trans_result_valid,
+
+			-- Status flags
+			overflow => trans_overflow,
+			underflow => trans_underflow,
+			inexact => trans_inexact,
+			invalid => trans_invalid,
+
+			-- Control
+			operation_busy => trans_operation_busy,
+			operation_done => trans_operation_done
+		);
+	end generate;
+
+	FPU_NO_TRANS_GEN: if Enable_Transcendental = 0 generate
+		trans_result <= (others => '0');
+		trans_result_valid <= '0';
+		trans_overflow <= '0';
+		trans_underflow <= '0';
+		trans_inexact <= '0';
+		trans_invalid <= '0';
+		trans_operation_busy <= '0';
+		trans_operation_done <= '0';
+	end generate;
 
 	-- FPU Data Format Converter instantiation
 	FPU_CONVERTER: TG68K_FPU_Converter
@@ -1351,6 +1381,11 @@ begin
 							fpu_state <= FPU_EXCEPTION_STATE;
 							fpu_exception <= '1';
 							exception_code_internal <= X"0C";  -- Unimplemented instruction
+						elsif Enable_Transcendental = 0 and is_transcendental_op(decoder_operation_code) then
+							-- Transcendental unit compiled out: report the opcode as unimplemented.
+							fpu_state <= FPU_EXCEPTION_STATE;
+							fpu_exception <= '1';
+							exception_code_internal <= X"0C";  -- Unimplemented instruction
 						elsif decoder_valid_instruction = '0' then
 							-- Invalid F-line instruction
 							fpu_state <= FPU_EXCEPTION_STATE;
@@ -1767,9 +1802,13 @@ begin
 						elsif decoder_instruction_type = INST_GENERAL then
 							-- General arithmetic operations - handled by existing logic
 							-- Check operation code and data format for supported operations
-							if fpu_operation = OP_FMOVE or fpu_operation = OP_FINT or fpu_operation = OP_FINTRZ or 
-						      fpu_operation = OP_FADD or fpu_operation = OP_FSUB or fpu_operation = OP_FMUL or 
-						      fpu_operation = OP_FDIV or fpu_operation = OP_FSQRT or 
+							if Enable_Transcendental = 0 and is_transcendental_op(fpu_operation) then
+								fpu_state <= FPU_EXCEPTION_STATE;
+								fpu_exception <= '1';
+								exception_code_internal <= X"0C";  -- Unimplemented instruction
+							elsif fpu_operation = OP_FMOVE or fpu_operation = OP_FINT or fpu_operation = OP_FINTRZ or
+						      fpu_operation = OP_FADD or fpu_operation = OP_FSUB or fpu_operation = OP_FMUL or
+						      fpu_operation = OP_FDIV or fpu_operation = OP_FSQRT or
 						      fpu_operation = OP_FABS or fpu_operation = OP_FNEG or
 						      fpu_operation = OP_FCMP or fpu_operation = OP_FTST or
 						      fpu_operation = OP_FSGLDIV or fpu_operation = OP_FSGLMUL or
@@ -2427,13 +2466,12 @@ begin
 								-- CRITICAL FIX: Transition to FPU_UPDATE_FPSR to allow FPSR update to complete
 								fpu_state <= FPU_UPDATE_FPSR;
 							-- Check if operation is transcendental function
-							elsif fpu_operation = OP_FSIN or fpu_operation = OP_FCOS or fpu_operation = OP_FTAN or
-							   fpu_operation = OP_FASIN or fpu_operation = OP_FACOS or fpu_operation = OP_FATAN or
-							   fpu_operation = OP_FSINH or fpu_operation = OP_FCOSH or fpu_operation = OP_FTANH or
-							   fpu_operation = OP_FATANH or fpu_operation = OP_FETOX or fpu_operation = OP_FETOXM1 or 
-							   fpu_operation = OP_FTWOTOX or fpu_operation = OP_FTENTOX or fpu_operation = OP_FLOGN or 
-							   fpu_operation = OP_FLOGNP1 or fpu_operation = OP_FLOG10 or
-							   fpu_operation = OP_FLOG2 or fpu_operation = OP_FSINCOS then
+							elsif is_transcendental_op(fpu_operation) then
+								if Enable_Transcendental = 0 then
+									fpu_exception <= '1';
+									exception_code_internal <= X"0C";  -- Unimplemented instruction
+									fpu_state <= FPU_EXCEPTION_STATE;
+								else
 								-- Transcendental function - check for NaN/Infinity inputs first
 								if alu_operand_a(78 downto 64) = "111111111111111" then
 									-- Input is infinity or NaN
@@ -2491,6 +2529,7 @@ begin
 											fpu_state <= FPU_EXECUTE;
 										end if;
 									end if;
+								end if;
 								end if;
 							else
 								-- Regular ALU operation with FPCR enforcement

@@ -2829,7 +2829,8 @@ TG68KdotC_Kernel
 	.mul_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no MUL,
 	.div_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,
 	.bitfield(2),       // 0=>no,     1=>yes,           2=>switchable with CPU(1)
-	.fpu_enable(0)      // 0=>WinUAE-validated FPU shell, 1=>68881/68882 core (too large for this target)
+	.fpu_enable(1),     // 0=>WinUAE-validated FPU shell, 1=>68881/68882 core (too large for this target)
+	.fpu_transcendental_enable(0) // 0=>compile out trig/log/exp core, 1=>include it
 )
 cpu_inst_p
 (
