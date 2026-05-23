@@ -1222,8 +1222,9 @@ begin
 								frestore_reg_index <= 0;
 								fpu_state <= FPU_FRESTORE_READ;
 							end if;
-						elsif fpu_enable = '1' then
-							fpu_state <= FPU_DECODE;
+							elsif fpu_enable = '1' then
+								fpu_done <= '0';
+								fpu_state <= FPU_DECODE;
 						-- FIX ITEM 58: Enhanced command processing with privilege validation
 						elsif command_pending = '1' and command_valid = '1' then
 							case command_cir is

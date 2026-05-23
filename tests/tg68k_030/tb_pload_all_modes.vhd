@@ -8,6 +8,8 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 use std.textio.all;
+library work;
+use work.TG68K_Pack.all;
 
 entity tb_pload_all_modes is
 end entity;
@@ -901,8 +903,8 @@ begin
         variable prev_micro : integer := 0;
         variable capture_countdown : integer := 0;
         variable l : line;
-        constant PTEST1_POS : integer := 90;
-        constant PMMU_DN_WAIT_POS : integer := 96;
+        constant PTEST1_POS : integer := micro_states'pos(ptest1);
+        constant PMMU_DN_WAIT_POS : integer := micro_states'pos(pmmu_dn_read_wait);
     begin
         if rising_edge(clk) then
             -- Countdown-based capture: wait N cycles after PTEST completion for MMUSR to stabilize

@@ -33,7 +33,10 @@ package TG68K_Pack is
 						  cas25, cas26, cas27, cas28, chk20, chk21, chk22, chk23, chk24,
                           trap4, trap5, trap6, movec1, moves0, moves1, movep1, movep2, movep3, movep4, movep5, rota1, bf1,
                           pmove_decode, pmove_mem_to_mmu_hi, pmove_mmu_to_mem_hi, pmove_mem_to_mmu_lo, pmove_mmu_to_mem_lo, ptest1, ptest2, pflush1, pload1,
-                          fpu_decode, fpu_cr_mem_read, fpu_cr_mem_read_done, fpu_cr_mem_write, fpu_cr_mem_write_done,
+	                          fpu_decode, fpu_ftst_reg, fpu_core_wait, fpu_fdbcc, fpu_fbcc_long, fpu_ftrapcc, fpu_ftrapcc_long,
+	                          fpu_cr_imm_hi, fpu_cr_imm_done,
+	                          fpu_cond_mem_write, fpu_cond_mem_write_done,
+                          fpu_cr_mem_read, fpu_cr_mem_read_done, fpu_cr_mem_write, fpu_cr_mem_write_done,
                           fpu_save, fpu_save_done, fpu_restore, fpu_restore_done,
                           pmove_dn_hi, pmove_dn_lo, pmmu_dn_read_wait,
                           pmmu_ld_nn, pmmu_ld_dAn1, pmmu_ld_AnXn1, pmmu_ld_AnXn2, pmmu_ld_229_1, pmmu_ld_229_2, pmmu_ld_229_3, pmmu_ld_229_4,
@@ -146,8 +149,9 @@ package TG68K_Pack is
     constant pmmu_addr_inc        : integer := 102; -- PMMU: +4 address increment for 64-bit CRP/SRP second transfer (no reg write-back)
     constant pmmu_dbl             : integer := 103; -- PMMU: CRP/SRP doubleword size for (An)+/-(An) (updates An by 8)
     constant fpu_cr_rd            : integer := 104; -- FPU: FMOVE control register -> CPU register
+    constant fpu_cond_rd          : integer := 105; -- FPU: FScc condition byte -> CPU register
 
-    constant lastOpcBit			: integer := 104;
+    constant lastOpcBit			: integer := 105;
 
 	component TG68K_ALU
 	generic(
