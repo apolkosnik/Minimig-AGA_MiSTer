@@ -113,21 +113,19 @@ begin
 		ea_register <= opcode(2 downto 0);
 		
 		-- Extension word formats vary by instruction type
-		-- For general instructions: 0 R/M 0 fff SSS ooooooo 0 DF nnn (per WinUAE table68k)
-		--   R/M = register/memory bit (bit 14)
-		--   fff = source specifier (bits 15-13)
-		--   SSS = source format (bits 12-10)
-		--   ooooooo = opmode (operation) (bits 9-3)
-		--   DF = destination format (bits 2-1)
-		--   nnn = destination register (bits 2-0)
+		-- For cpGEN arithmetic instructions, WinUAE decodes:
+		--   bit 14    = register/memory source select
+		--   bits 12:10 = FP source register when bit14=0, EA format when bit14=1
+		--   bits 9:7   = destination FP register
+		--   bits 6:0   = operation code
 		
 		if inst_type_bits = "000" then  -- General instruction (always has extension)
 			-- FIXED: Always use extension_word for format/opcode fields
 			-- All general FPU instructions (including register-direct) need extension word
-			format_field <= extension_word(12 downto 10);	-- Source format from extension word
+			format_field <= extension_word(12 downto 10);	-- FP source register or EA source format
 			opmode_field <= extension_word(6 downto 0);		-- CRITICAL FIX: Operation is bits 6:0, not 9:3!
-			rm_field <= extension_word(15 downto 13);		-- Source specifier (corrected bit range)
-			rn_field <= extension_word(2 downto 0);			-- Destination register
+			rm_field <= extension_word(12 downto 10);		-- Source FP register when bit14=0
+			rn_field <= extension_word(9 downto 7);			-- Destination FP register
 		else
 			format_field <= "000";
 			opmode_field <= "0000000";

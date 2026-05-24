@@ -390,33 +390,85 @@ begin
         mem(16#119A# / 2) := x"1308";
         mem(16#119C# / 2) := x"4E72";
         mem(16#119E# / 2) := x"2700";
-        -- FMOVE.W #1,FP1; LEA (-$18,A4),A0; STOP.
-        -- The Line-F frame must point to the FPU extension word, not the
-        -- immediate word or the following LEA displacement.
+        -- FMOVE.W #1,FP1; LEA (-$18,A4),A0; marker; STOP.
+        -- Shell-only mode still raises Line-F and the frame must point to
+        -- the FPU extension word. With the imported core enabled, the CPU
+        -- shell must consume the immediate word before handing the op to the
+        -- core, so the OS emulator handler must not run.
         mem(16#1000# / 2) := x"F23C";
         mem(16#1002# / 2) := x"5080";
         mem(16#1004# / 2) := x"0001";
         mem(16#1006# / 2) := x"41EC";
         mem(16#1008# / 2) := x"FFE8";
-        mem(16#100A# / 2) := x"4E72";
-        mem(16#100C# / 2) := x"2700";
+        mem(16#100A# / 2) := x"33FC";
+        mem(16#100C# / 2) := x"00F1";
+        mem(16#100E# / 2) := x"0000";
+        mem(16#1010# / 2) := x"1308";
+        mem(16#1012# / 2) := x"4E72";
+        mem(16#1014# / 2) := x"2700";
         reset_and_run(12000);
 
         marker := mem(16#1308# / 2);
         stacked_pc := mem(16#1300# / 2) & mem(16#1302# / 2);
         format_vector := mem(16#1304# / 2);
-        if marker /= x"000B" then
-            report "FAIL: FMOVE.W #imm,FP1 did not reach Line-F handler; marker=$" &
-                   slv_to_hex(marker) & " dbg pc=$" & slv_to_hex(debug_pc) &
-                   " opcode=$" & slv_to_hex(debug_opcode) severity failure;
-        elsif stacked_pc /= x"00001002" then
-            report "FAIL: FMOVE.W #imm,FP1 Line-F stacked PC=$" & slv_to_hex(stacked_pc) &
-                   ", expected $00001002" severity failure;
-        elsif format_vector /= x"002C" then
-            report "FAIL: FMOVE.W #imm,FP1 format/vector=$" & slv_to_hex(format_vector) &
-                   ", expected $002C" severity failure;
+        if FPU_ENABLE_G = 0 then
+            if marker /= x"000B" then
+                report "FAIL: FMOVE.W #imm,FP1 did not reach Line-F handler; marker=$" &
+                       slv_to_hex(marker) & " dbg pc=$" & slv_to_hex(debug_pc) &
+                       " opcode=$" & slv_to_hex(debug_opcode) severity failure;
+            elsif stacked_pc /= x"00001002" then
+                report "FAIL: FMOVE.W #imm,FP1 Line-F stacked PC=$" & slv_to_hex(stacked_pc) &
+                       ", expected $00001002" severity failure;
+            elsif format_vector /= x"002C" then
+                report "FAIL: FMOVE.W #imm,FP1 format/vector=$" & slv_to_hex(format_vector) &
+                       ", expected $002C" severity failure;
+            else
+                report "PASS: FMOVE.W #imm,FP1 Line-F frame points at extension word" severity note;
+            end if;
         else
-            report "PASS: FMOVE.W #imm,FP1 Line-F frame points at extension word" severity note;
+            if marker /= x"00F1" then
+                report "FAIL: enabled FPU path leaked FMOVE.W #imm,FP1 or missed continuation; marker=$" &
+                       slv_to_hex(marker) & " dbg pc=$" & slv_to_hex(debug_pc) &
+                       " opcode=$" & slv_to_hex(debug_opcode) severity failure;
+            else
+                report "PASS: enabled FPU path consumes FMOVE.W #imm,FP1 without Line-F" severity note;
+            end if;
+        end if;
+
+        if FPU_ENABLE_G = 1 then
+            clear_mem;
+            mem(16#002C# / 2) := x"0000";
+            mem(16#002E# / 2) := x"1180";
+            mem(16#1180# / 2) := x"700B"; -- MOVEQ #$0B,D0
+            mem(16#1182# / 2) := x"33C0"; -- MOVE.W D0,$1308
+            mem(16#1184# / 2) := x"0000";
+            mem(16#1186# / 2) := x"1308";
+            mem(16#1188# / 2) := x"4E72";
+            mem(16#118A# / 2) := x"2700";
+            -- FMOVE.W #1,FP1; FSQRT.X FP1; FADD.X FP1,FP1; marker; STOP.
+            mem(16#1000# / 2) := x"F23C";
+            mem(16#1002# / 2) := x"5080";
+            mem(16#1004# / 2) := x"0001";
+            mem(16#1006# / 2) := x"F200";
+            mem(16#1008# / 2) := x"0484";
+            mem(16#100A# / 2) := x"F200";
+            mem(16#100C# / 2) := x"04A2";
+            mem(16#100E# / 2) := x"33FC";
+            mem(16#1010# / 2) := x"00F3";
+            mem(16#1012# / 2) := x"0000";
+            mem(16#1014# / 2) := x"1308";
+            mem(16#1016# / 2) := x"4E72";
+            mem(16#1018# / 2) := x"2700";
+            reset_and_run(16000);
+
+            marker := mem(16#1308# / 2);
+            if marker /= x"00F3" then
+                report "FAIL: enabled FPU path leaked FMOVE.W/FSQRT.X/FADD.X sequence; marker=$" &
+                       slv_to_hex(marker) & " dbg pc=$" & slv_to_hex(debug_pc) &
+                       " opcode=$" & slv_to_hex(debug_opcode) severity failure;
+            else
+                report "PASS: enabled FPU path keeps FMOVE.W/FSQRT.X/FADD.X out of Line-F" severity note;
+            end if;
         end if;
 
 	        clear_mem;

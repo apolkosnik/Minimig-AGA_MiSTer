@@ -34,7 +34,7 @@ package TG68K_Pack is
                           trap4, trap5, trap6, movec1, moves0, moves1, movep1, movep2, movep3, movep4, movep5, rota1, bf1,
                           pmove_decode, pmove_mem_to_mmu_hi, pmove_mmu_to_mem_hi, pmove_mem_to_mmu_lo, pmove_mmu_to_mem_lo, ptest1, ptest2, pflush1, pload1,
 	                          fpu_decode, fpu_ftst_reg, fpu_core_wait, fpu_fdbcc, fpu_fbcc_long, fpu_ftrapcc, fpu_ftrapcc_long,
-	                          fpu_cr_imm_hi, fpu_cr_imm_done,
+	                          fpu_cr_imm_hi, fpu_cr_imm_done, fpu_data_imm_done, fpu_data_imm_start,
 	                          fpu_cond_mem_write, fpu_cond_mem_write_done,
                           fpu_cr_mem_read, fpu_cr_mem_read_done, fpu_cr_mem_write, fpu_cr_mem_write_done,
                           fpu_save, fpu_save_done, fpu_restore, fpu_restore_done,

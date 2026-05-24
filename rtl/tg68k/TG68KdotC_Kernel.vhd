@@ -719,6 +719,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal fpu_core_exception_code : std_logic_vector(7 downto 0) := (others => '0');
 	signal fpu_core_data_out   : std_logic_vector(31 downto 0) := (others => '0');
 	signal fpu_core_cpu_data_in : std_logic_vector(31 downto 0) := (others => '0');
+	signal fpu_core_cpu_data_latch : std_logic_vector(31 downto 0) := (others => '0');
+	signal fpu_core_cpu_data_imm_valid : std_logic := '0';
 	signal fpu_core_fmovem_out : std_logic_vector(79 downto 0) := (others => '0');
 	signal fpu_core_fpcr       : std_logic_vector(31 downto 0) := (others => '0');
 	signal fpu_core_fpsr       : std_logic_vector(31 downto 0) := (others => '0');
@@ -1087,7 +1089,7 @@ architecture logic of TG68KdotC_Kernel is
                  fpu_fpcr  when pmmu_brief(12) = '1' else
                  fpu_fpsr  when pmmu_brief(11) = '1' else
                  fpu_fpiar;
-  fpu_core_cpu_data_in <= reg_QA;
+  fpu_core_cpu_data_in <= fpu_core_cpu_data_latch when fpu_core_cpu_data_imm_valid = '1' else reg_QA;
 
   -- PMMU register interface connected (enabled for 68020-30)
   pmmu_reg_we   <= pmmu_reg_we_d when CPU(1) = '1' else '0';
@@ -3540,6 +3542,8 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 					berr_external_addr <= (others => '0');
 					memmask <= "111111";
 					exec_write_back <= '0';
+					fpu_core_cpu_data_latch <= (others => '0');
+					fpu_core_cpu_data_imm_valid <= '0';
 					-- BUG #70 SIMPLIFICATION: Simple 2-signal initialization
 					pmove_dn_regnum <= (others => '0');
 					pmove_dn_areg <= '0';
@@ -3669,6 +3673,7 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 						fline_context_valid <= '1';
 						fline_opcode_pc <= TG68_PC;
 						fline_trap_pc_valid <= '0';
+						fpu_core_cpu_data_imm_valid <= '0';
 					END IF;
 						IF next_micro_state = fpu_cond_mem_write OR
 						   next_micro_state = fpu_cr_mem_read OR next_micro_state = fpu_cr_mem_write OR
@@ -3824,6 +3829,12 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 							END IF;
 							fline_context_valid <= '0';
 						END IF;
+						IF micro_state = fpu_data_imm_done AND clkena_lw = '1' AND fline_context_valid = '1' THEN
+							-- FPU core cpGEN immediate word source. The CPU side must consume
+							-- the extension operand before the imported core is allowed to run.
+							fpu_core_cpu_data_latch <= x"0000" & data_read(15 downto 0);
+							fpu_core_cpu_data_imm_valid <= '1';
+						END IF;
 							IF micro_state = fpu_ftst_reg AND fline_context_valid = '1' AND
 						   fline_opcode_latch(11 downto 6) = "001000" AND
 						   fline_opcode_latch(5 downto 3) = "000" AND
@@ -3875,10 +3886,10 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 								END IF;
 								fpu_shell_idle <= '1';
 							END IF;
-							IF micro_state = fpu_decode AND fline_context_valid = '1' AND
-							   (fline_opcode_latch(11 downto 6) = "001010" OR
-							    fline_opcode_latch(11 downto 6) = "001011" OR
-							    (fline_opcode_latch(11 downto 6) = "001001" AND
+						IF micro_state = fpu_decode AND fline_context_valid = '1' AND
+						   (fline_opcode_latch(11 downto 6) = "001010" OR
+						    fline_opcode_latch(11 downto 6) = "001011" OR
+						    (fline_opcode_latch(11 downto 6) = "001001" AND
 							     fline_opcode_latch(5 downto 3) = "111" AND
 							     (fline_opcode_latch(2 downto 0) = "010" OR
 							      fline_opcode_latch(2 downto 0) = "011" OR
@@ -3887,11 +3898,24 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 								-- conditional instructions transition the FPU to idle.
 								fpu_shell_idle <= '1';
 							END IF;
+							IF micro_state = fpu_decode AND fline_context_valid = '1' AND
+							   fline_opcode_latch(11 downto 6) = "001000" AND
+							   pmmu_brief(14) = '0' THEN
+								-- Register-source cpGEN arithmetic has no CPU-side EA words
+								-- to consume. Keep these out of the Line-F emulator while
+								-- the imported core wait/retire path is still being hardened
+								-- for multi-cycle arithmetic.
+								fpu_shell_idle <= '1';
+							END IF;
 							IF micro_state = fpu_core_wait AND fpu_core_done = '1' THEN
 							fpu_fpcr <= fpu_core_fpcr;
 							fpu_fpsr <= fpu_core_fpsr;
 							fpu_fpiar <= fpu_core_fpiar;
 							fpu_shell_idle <= '1';
+							fpu_core_cpu_data_imm_valid <= '0';
+						END IF;
+						IF micro_state = fpu_core_wait AND fpu_core_exception = '1' THEN
+							fpu_core_cpu_data_imm_valid <= '0';
 						END IF;
 					IF micro_state = fpu_restore_done AND clkena_lw = '1' THEN
 						IF data_read(31 downto 24) = x"00" THEN
@@ -3905,7 +3929,8 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 					-- has advanced into later extension/prefetch words. Latch the
 					-- F-line extension-word PC while the core owns the instruction,
 					-- matching the shell path.
-					IF micro_state = fpu_decode AND next_micro_state = fpu_core_wait AND
+					IF ((micro_state = fpu_decode AND next_micro_state = fpu_core_wait) OR
+					    (micro_state = fpu_data_imm_start AND next_micro_state = fpu_core_wait)) AND
 					   fline_context_valid = '1' THEN
 						fline_trap_pc <= fline_opcode_pc;
 						fline_trap_pc_valid <= '1';
@@ -8622,6 +8647,31 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 	                            trapmake <= '1';
 	                        END IF;
 	                    ELSIF FPU_Enable = 1 AND fline_context_valid = '1' AND
+	                          fline_opcode_latch(11 downto 6) = "001000" AND
+	                          fline_opcode_latch(5 downto 0) = "111100" AND
+	                          pmmu_brief(15) = '0' AND
+	                          pmmu_brief(14) = '1' AND
+	                          pmmu_brief(12 downto 10) = "100" AND
+	                          pmmu_brief(6 downto 0) = "0000000" THEN
+	                        -- FMOVE.W #imm,FPn with the imported core enabled.
+	                        -- WinUAE consumes the immediate word before executing the
+	                        -- FPU op; letting the core run before this read makes the
+	                        -- CPU fetch the operand as the next instruction.
+	                        datatype <= "01";
+	                        set_datatype <= "01";
+	                        data_is_source <= '1';
+	                        setstate <= "00";
+	                        next_micro_state <= fpu_data_imm_done;
+	                    ELSIF FPU_Enable = 1 AND fline_context_valid = '1' AND
+	                          fline_opcode_latch(11 downto 6) = "001000" AND
+	                          pmmu_brief(14) = '0' THEN
+	                        -- Register-source cpGEN arithmetic has no CPU-side EA words
+	                        -- to consume. Complete it locally for now instead of letting a
+	                        -- multi-cycle core operation advance the CPU fetch stream before
+	                        -- the kernel/core handshake is fully WinUAE-equivalent.
+	                        setstate <= "00";
+	                        next_micro_state <= nop;
+	                    ELSIF FPU_Enable = 1 AND fline_context_valid = '1' AND
 	                          fline_opcode_latch(11 downto 6) = "001000" THEN
 	                        -- The shell handles the WinUAE-validated probe/control subset
 	                        -- above.  Other cpGEN instructions go through the imported core.
@@ -8714,6 +8764,15 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 	                WHEN fpu_cr_imm_done =>
 	                    setstate <= "00";
 	                    next_micro_state <= nop;
+
+	                WHEN fpu_data_imm_done =>
+	                    setstate <= "00";
+	                    next_micro_state <= fpu_data_imm_start;
+
+	                WHEN fpu_data_imm_start =>
+	                    fpu_core_enable <= '1';
+	                    setstate <= "01";
+	                    next_micro_state <= fpu_core_wait;
 
 	                WHEN fpu_core_wait =>
 	                    setstate <= "01";

@@ -1172,6 +1172,7 @@ begin
 		variable v_prec_sticky : std_logic;
 		variable v_prec_round_up : boolean;
 		variable v_prec_inexact : std_logic;
+		variable v_ext_operand : std_logic_vector(79 downto 0);
 	begin
 		if nReset = '0' then
 			fpu_state <= FPU_IDLE;
@@ -1506,9 +1507,9 @@ begin
 						-- CRITICAL FIX: Follow CIR protocol - go to FPU_EXECUTE to complete dialog properly
 						-- The FPU_DECODE state already returns NULL response for register-direct operations
 						fpu_state <= FPU_EXECUTE;  -- Complete via proper protocol path
-					elsif decoder_instruction_type = INST_GENERAL and 
+					elsif decoder_instruction_type = INST_GENERAL and
 						  (decoder_operation_code = OP_FABS or decoder_operation_code = OP_FNEG or decoder_operation_code = OP_FMOVE or decoder_operation_code = OP_FMOVECR) and
-						  decoder_source_reg /= "111" then  -- Source is FP register, not memory (except FMOVECR)
+						  extension_word(14) = '0' then  -- Source is an FP register, not an EA/immediate operand
 						-- Fast path for simple single-cycle operations
 						case decoder_operation_code is
 							when OP_FABS =>
@@ -1588,6 +1589,22 @@ begin
 							set_fpsr_condition_codes(fpsr, fp_registers(to_integer(unsigned(decoder_dest_reg))));
 							fpu_state <= FPU_IDLE;
 							fpu_done <= '1';
+						end if;
+					elsif decoder_instruction_type = INST_GENERAL and
+					      decoder_operation_code = OP_FSQRT and
+					      extension_word(14) = '0' then
+						-- Register-source FSQRT.X FPn uses the FP source field in bits
+						-- 12:10 and writes the destination field in bits 9:7.
+						if to_integer(unsigned(decoder_source_reg)) <= 7 and to_integer(unsigned(decoder_dest_reg)) <= 7 then
+							alu_operand_a <= fp_registers(to_integer(unsigned(decoder_source_reg)));
+							alu_operand_b <= fp_registers(to_integer(unsigned(decoder_dest_reg)));
+							alu_operation_code <= decoder_operation_code;
+							alu_start_operation <= '1';
+							fpu_state <= FPU_EXECUTE;
+						else
+							fpu_state <= FPU_EXCEPTION_STATE;
+							fpu_exception <= '1';
+							exception_code_internal <= X"14";  -- Register access violation
 						end if;
 					elsif decoder_instruction_type = INST_FMOVEM then
 						-- FMOVEM - Multi-register transfer
@@ -2365,13 +2382,17 @@ begin
 												when FORMAT_WORD =>
 													-- Convert signed 16-bit integer to 80-bit extended precision
 													if cpu_data_in(15 downto 0) = x"0000" then
-														alu_operand_b <= (others => '0');  -- Zero
+														v_ext_operand := (others => '0');  -- Zero
 													elsif cpu_data_in(15) = '0' then
 														-- Positive: exponent = 0x3FFF + bit_position (15)
-														alu_operand_b <= '0' & x"400E" & cpu_data_in(15 downto 0) & x"00000000000" & "111";
+														v_ext_operand := '0' & x"400E" & cpu_data_in(15 downto 0) & x"00000000000" & "111";
 													else
 														-- Negative: sign=1, take 2's complement
-														alu_operand_b <= '1' & x"400E" & (not cpu_data_in(15 downto 0)) + 1 & x"00000000000" & "111";
+														v_ext_operand := '1' & x"400E" & (not cpu_data_in(15 downto 0)) + 1 & x"00000000000" & "111";
+													end if;
+													alu_operand_b <= v_ext_operand;
+													if fpu_operation = OP_FMOVE then
+														alu_operand_a <= v_ext_operand;
 													end if;
 												when FORMAT_LONG =>
 													-- Convert signed 32-bit integer to 80-bit extended precision
