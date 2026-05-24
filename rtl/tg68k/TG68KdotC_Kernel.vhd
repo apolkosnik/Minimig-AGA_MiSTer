@@ -2652,7 +2652,9 @@ PROCESS (clk)
 				-- Priority order (highest first):
 				--   1. writePC='1'                         -> TG68_PC         (role A)
 				--   2. micro_state=trap00                  -> exe_pc          (role A, Fmt$2 instr addr)
-				--   3. exec(writePC_add)='1', vec=$10|$20|$28|$2C -> opcode_pc (role A)
+				--   3. exec(writePC_add)='1', vec=$10|$20|$28 -> opcode_pc (role A)
+				--      exec(writePC_add)='1', vec=$2C with delayed FPU core -> fline_trap_pc
+				--      exec(writePC_add)='1', vec=$2C else -> opcode_pc
 				--      exec(writePC_add)='1', vec=$38           -> exe_pc       (role A)
 				--   4. exec(writePC_add)='1' (else)        -> TG68_PC_add     (role A)
 				--   5. micro_state=trap0, useStackframe2=1 -> $2xxx fmt/vec   (role B)
@@ -2678,11 +2680,11 @@ PROCESS (clk)
 				ELSIF exec(writePC_add)='1' THEN
 					-- Priorities 3 & 4: post-instruction PC push (Format $0 PC field).
 					-- BUG #387 FIX: illegal (vector $10), privilege violation ($20),
-					-- A-line ($28), and F-line ($2C) exceptions must stack the
-					-- faulting opcode PC. TG68_PC_add can already have moved through
-					-- extension-word fetch or handler/RTE sequencing by the time the
-					-- frame PC longword is written. RTE Format Error (vector $38)
-					-- stacks the RTE instruction PC.
+					-- and A-line ($28) exceptions must stack opcode_pc. Ordinary
+					-- F-line ($2C) uses opcode_pc too; delayed FPU-core Line-F uses
+					-- fline_trap_pc so prefetch cannot move the stacked PC into a
+					-- following instruction. RTE Format Error (vector $38) stacks
+					-- the RTE instruction PC.
 					IF trap_vector(9 downto 0) = "00" & X"2C" AND
 					   fline_trap_pc_valid = '1' THEN
 						data_write_tmp <= fline_trap_pc;
@@ -3666,6 +3668,7 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 						pmmu_ea_mode_latched <= opcode(5 downto 0);  -- BUG #302: Latch EA mode+reg bits
 						fline_context_valid <= '1';
 						fline_opcode_pc <= TG68_PC;
+						fline_trap_pc_valid <= '0';
 					END IF;
 						IF next_micro_state = fpu_cond_mem_write OR
 						   next_micro_state = fpu_cr_mem_read OR next_micro_state = fpu_cr_mem_write OR
@@ -3900,15 +3903,22 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 
 					-- Delayed FPU-core Line-F exceptions can arrive after opcode_pc
 					-- has advanced into later extension/prefetch words. Latch the
-					-- original F-line opcode PC before fline_context_valid is cleared.
-					IF trapmake = '1' THEN
-						IF trap_1111 = '1' AND fline_context_valid = '1' THEN
-							fline_trap_pc <= fline_opcode_pc;
-							fline_trap_pc_valid <= '1';
-						ELSE
-							fline_trap_pc_valid <= '0';
-						END IF;
-					ELSIF setopcode = '1' THEN
+					-- F-line extension-word PC while the core owns the instruction,
+					-- matching the shell path.
+					IF micro_state = fpu_decode AND next_micro_state = fpu_core_wait AND
+					   fline_context_valid = '1' THEN
+						fline_trap_pc <= fline_opcode_pc;
+						fline_trap_pc_valid <= '1';
+					ELSIF micro_state = fpu_core_wait AND fline_context_valid = '1' AND
+					   fpu_core_done = '0' THEN
+						fline_trap_pc <= fline_opcode_pc;
+						fline_trap_pc_valid <= '1';
+					ELSIF trapmake = '1' AND trap_1111 = '1' AND fline_context_valid = '1' THEN
+						fline_trap_pc <= fline_opcode_pc;
+						fline_trap_pc_valid <= '1';
+					ELSIF micro_state = fpu_core_wait AND fpu_core_exception = '1' THEN
+						fline_trap_pc_valid <= '1';
+					ELSIF micro_state = trap3 THEN
 						fline_trap_pc_valid <= '0';
 					END IF;
 

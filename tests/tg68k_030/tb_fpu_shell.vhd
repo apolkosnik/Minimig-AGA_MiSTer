@@ -391,8 +391,8 @@ begin
         mem(16#119C# / 2) := x"4E72";
         mem(16#119E# / 2) := x"2700";
         -- FMOVE.W #1,FP1; LEA (-$18,A4),A0; STOP.
-        -- The Line-F frame must point to the FMOVE opcode, not the immediate
-        -- word or the following LEA displacement.
+        -- The Line-F frame must point to the FPU extension word, not the
+        -- immediate word or the following LEA displacement.
         mem(16#1000# / 2) := x"F23C";
         mem(16#1002# / 2) := x"5080";
         mem(16#1004# / 2) := x"0001";
@@ -409,14 +409,14 @@ begin
             report "FAIL: FMOVE.W #imm,FP1 did not reach Line-F handler; marker=$" &
                    slv_to_hex(marker) & " dbg pc=$" & slv_to_hex(debug_pc) &
                    " opcode=$" & slv_to_hex(debug_opcode) severity failure;
-        elsif stacked_pc /= x"00001000" then
+        elsif stacked_pc /= x"00001002" then
             report "FAIL: FMOVE.W #imm,FP1 Line-F stacked PC=$" & slv_to_hex(stacked_pc) &
-                   ", expected $00001000" severity failure;
+                   ", expected $00001002" severity failure;
         elsif format_vector /= x"002C" then
             report "FAIL: FMOVE.W #imm,FP1 format/vector=$" & slv_to_hex(format_vector) &
                    ", expected $002C" severity failure;
         else
-            report "PASS: FMOVE.W #imm,FP1 Line-F frame points at opcode" severity note;
+            report "PASS: FMOVE.W #imm,FP1 Line-F frame points at extension word" severity note;
         end if;
 
 	        clear_mem;
