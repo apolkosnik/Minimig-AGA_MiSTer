@@ -682,6 +682,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal fline_opcode_pc     : std_logic_vector(31 downto 0) := (others => '0');
 	signal fline_brief_latch   : std_logic_vector(15 downto 0) := (others => '0');
 	signal fline_context_valid : std_logic := '0';
+	signal fline_trap_pc       : std_logic_vector(31 downto 0) := (others => '0');
+	signal fline_trap_pc_valid : std_logic := '0';
 	signal fline_is_pmmu       : std_logic := '0';
 	signal fline_is_fpu        : std_logic := '0';
 	signal fline_has_brief     : std_logic := '0';
@@ -2681,10 +2683,13 @@ PROCESS (clk)
 					-- extension-word fetch or handler/RTE sequencing by the time the
 					-- frame PC longword is written. RTE Format Error (vector $38)
 					-- stacks the RTE instruction PC.
-					IF trap_vector(9 downto 0) = "00" & X"10" OR
-					   trap_vector(9 downto 0) = "00" & X"20" OR
-					   trap_vector(9 downto 0) = "00" & X"28" OR
-					   trap_vector(9 downto 0) = "00" & X"2C" THEN
+					IF trap_vector(9 downto 0) = "00" & X"2C" AND
+					   fline_trap_pc_valid = '1' THEN
+						data_write_tmp <= fline_trap_pc;
+					ELSIF trap_vector(9 downto 0) = "00" & X"10" OR
+					      trap_vector(9 downto 0) = "00" & X"20" OR
+					      trap_vector(9 downto 0) = "00" & X"28" OR
+					      trap_vector(9 downto 0) = "00" & X"2C" THEN
 						data_write_tmp <= opcode_pc;
 					ELSIF trap_vector(9 downto 0) = "00" & X"38" THEN
 						data_write_tmp <= exe_pc;
@@ -3539,8 +3544,11 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 					pmove_dn_mode <= '0';
 					-- F-Line context latch initialization
 					fline_opcode_latch <= (others => '0');
+					fline_opcode_pc <= (others => '0');
 					fline_brief_latch <= (others => '0');
 						fline_context_valid <= '0';
+						fline_trap_pc <= (others => '0');
+						fline_trap_pc_valid <= '0';
 						fline_is_pmmu <= '0';
 						fline_is_fpu <= '0';
 						fline_has_brief <= '0';
@@ -3882,12 +3890,26 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 							fpu_fpiar <= fpu_core_fpiar;
 							fpu_shell_idle <= '1';
 						END IF;
-						IF micro_state = fpu_restore_done AND clkena_lw = '1' THEN
+					IF micro_state = fpu_restore_done AND clkena_lw = '1' THEN
 						IF data_read(31 downto 24) = x"00" THEN
 							fpu_shell_idle <= '0';
 						ELSIF data_read(31 downto 24) = x"1F" AND data_read(23 downto 16) = x"38" THEN
 							fpu_shell_idle <= '1';
 						END IF;
+					END IF;
+
+					-- Delayed FPU-core Line-F exceptions can arrive after opcode_pc
+					-- has advanced into later extension/prefetch words. Latch the
+					-- original F-line opcode PC before fline_context_valid is cleared.
+					IF trapmake = '1' THEN
+						IF trap_1111 = '1' AND fline_context_valid = '1' THEN
+							fline_trap_pc <= fline_opcode_pc;
+							fline_trap_pc_valid <= '1';
+						ELSE
+							fline_trap_pc_valid <= '0';
+						END IF;
+					ELSIF setopcode = '1' THEN
+						fline_trap_pc_valid <= '0';
 					END IF;
 
 					-- BUG #356 FIX: Clear F-line context in clkena_in block!
