@@ -4,6 +4,13 @@ derive_clock_uncertainty
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -setup 2
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -hold 1
 
+# The top-level RAM bridge waits for ram_sel to propagate through ram_sel_sync
+# before latching address/data/control into clk_114.  The controller-facing
+# bridge registers are therefore captured on the third clk_114 edge, not the
+# second edge covered by the legacy emu|ram* exception above.
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram_*_ctrl*} -setup 3
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram_*_ctrl*} -hold 2
+
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -setup 2
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -hold 1
 set_multicycle_path -from {emu|minimig|*} -to {emu|ram1|*} -setup 2

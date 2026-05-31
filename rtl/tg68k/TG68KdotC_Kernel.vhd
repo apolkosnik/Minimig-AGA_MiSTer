@@ -586,6 +586,7 @@ architecture logic of TG68KdotC_Kernel is
 	signal berr_pmmu_fault_fc     : std_logic_vector(2 downto 0);   -- PMMU fault FC latched at first-fire
 	signal berr_pmmu_fault_rw     : std_logic;                      -- PMMU fault R/W latched at first-fire
 	signal berr_pmmu_fault_is_insn : std_logic;                     -- PMMU fault type latched at first-fire
+	signal berr_pmmu_fault_valid  : std_logic;                      -- Latched PMMU fault metadata is pending frame construction
 	signal berr_external_addr    : std_logic_vector(31 downto 0);  -- BUG #434 FIX: fault addr latched at external BERR first-fire (addr at state="00" is PC-based)
 	signal useStackframe2	: std_logic;
 	
@@ -3189,6 +3190,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					berr_pmmu_fault_fc <= (others => '0');
 					berr_pmmu_fault_rw <= '1';
 					berr_pmmu_fault_is_insn <= '0';
+					berr_pmmu_fault_valid <= '0';
 					berr_external_addr <= (others => '0');
 					memmask <= "111111";
 					exec_write_back <= '0';
@@ -3465,14 +3467,16 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					end if;
 					-- Latch PMMU access size at first-fire so later micro-state activity
 					-- cannot corrupt SSW.SIZE for the eventual bus/MMU frame.
-					if pmmu_fault='0' and make_berr='0' and trap_berr='0' and trap_mmu_berr='0' then
+					if pmmu_fault='0' and make_berr='0' and trap_berr='0' and trap_mmu_berr='0' and berr_exception_active='0' then
 						berr_pmmu_datatype <= "10";
+						berr_pmmu_fault_valid <= '0';
 					elsif pmmu_fault='1' and make_berr='0' and trap_berr='0' and trap_mmu_berr='0' then
 						berr_pmmu_datatype <= datatype;
 						berr_pmmu_fault_addr <= pmmu_fault_addr_out;
 						berr_pmmu_fault_fc <= pmmu_fault_fc_out;
 						berr_pmmu_fault_rw <= pmmu_fault_rw_out;
 						berr_pmmu_fault_is_insn <= pmmu_fault_is_insn_out;
+						berr_pmmu_fault_valid <= '1';
 						v_pmmu_datatype := datatype;
 					end if;
 
@@ -3552,42 +3556,19 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								-- BERRs so the 68030 can build the right fault metadata. Both
 								-- still dispatch through vector 2 in trap_vector.
 								-- BUG #400 FIX: Also check pmmu_fault_stat directly for same-cycle dispatch
-								IF make_mmu_berr='1' OR
-								   (pmmu_fault='1' AND pmmu_fault_stat(15)='1' AND
-								    ((berr_exception_active='0' AND pmmu_fault_dispatched='0') OR pmmu_fault_was_cleared='1')) THEN
-									trap_mmu_berr <= '1';
-									-- MC68030 UM: Format $B (long) for ALL read faults (instruction + data)
-									-- Format $A (short) only for mid-instruction write faults
-									if pmmu_fault = '1' then
-										if pmmu_fault_rw_out = '1' then
+									IF make_mmu_berr='1' OR
+									   (pmmu_fault='1' AND pmmu_fault_stat(15)='1' AND
+									    ((berr_exception_active='0' AND pmmu_fault_dispatched='0') OR pmmu_fault_was_cleared='1')) THEN
+										trap_mmu_berr <= '1';
+											-- Diagnostic/spec candidate: use the long recoverable bus-fault
+											-- frame for PMMU faults instead of guessing instruction-boundary
+											-- timing from R/W polarity.
 											berr_long_frame <= '1';
-										else
-											berr_long_frame <= '0';
-										end if;
-									else
-										if berr_pmmu_fault_rw = '1' then
+									ELSE
+										trap_berr <= '1';  -- Use vector 2 for normal bus error
+											-- Same diagnostic candidate for external bus faults.
 											berr_long_frame <= '1';
-										else
-											berr_long_frame <= '0';
-										end if;
-									end if;
-								ELSE
-									trap_berr <= '1';  -- Use vector 2 for normal bus error
-									if pmmu_fault = '1' then
-										if pmmu_fault_rw_out = '1' then
-											berr_long_frame <= '1';
-										else
-											berr_long_frame <= '0';
-										end if;
-									else
-										-- MC68030 UM: Format $B for ALL read faults (instruction + data)
-										if berr_external_rw = '1' then
-											berr_long_frame <= '1';
-										else
-											berr_long_frame <= '0';
-										end if;
-									end if;
-								END IF;
+									END IF;
 								-- BUG #400 FIX: Mark pmmu_fault as dispatched to prevent false
 								-- double bus fault from stale fault_reg before new translation clears it
 								if pmmu_fault = '1' then
@@ -3605,7 +3586,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 								berr_ssw <= (others => '0');
 								-- BUG #414/#415: Latch fault address and construct SSW
 								-- SSW layout: FC(15) FB(14) RC(13) RB(12) [11:9] DF(8) RM(7) RW(6) SIZE(5:4) [3] FC(2:0)
-								if pmmu_fault = '1' or make_mmu_berr = '1' then
+								if pmmu_fault = '1' or berr_pmmu_fault_valid = '1' or make_mmu_berr = '1' then
 									-- PMMU fault: use live PMMU outputs for same-cycle
 									-- dispatch, or first-fire latched metadata when the
 									-- registered make_mmu_berr path fires after fault_reg
@@ -3614,14 +3595,14 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 										berr_fault_addr <= pmmu_fault_addr_out;
 										berr_ssw(2 downto 0) <= pmmu_fault_fc_out;
 										berr_ssw(6) <= pmmu_fault_rw_out;
-									else
+									elsif berr_pmmu_fault_valid = '1' or make_mmu_berr = '1' then
 										berr_fault_addr <= berr_pmmu_fault_addr;
 										berr_ssw(2 downto 0) <= berr_pmmu_fault_fc;
 										berr_ssw(6) <= berr_pmmu_fault_rw;
 									end if;
 									-- Pipeline bits based on instruction vs data fault
 									if (pmmu_fault = '1' and pmmu_fault_is_insn_out = '1') or
-									   (pmmu_fault = '0' and berr_pmmu_fault_is_insn = '1') then
+									   (pmmu_fault = '0' and (berr_pmmu_fault_valid = '1' or make_mmu_berr = '1') and berr_pmmu_fault_is_insn = '1') then
 										-- Instruction fetch fault: stage B (prefetch)
 										berr_ssw(15) <= '0';  -- FC=0: not stage C
 										berr_ssw(14) <= '1';  -- FB=1: stage B (prefetch) fault
@@ -3637,7 +3618,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 										berr_ssw(13) <= '0';
 										berr_ssw(12) <= '0';
 										berr_ssw(8) <= '1';   -- DF=1
-										berr_ssw(9) <= '1';   -- DF shadow bit used by 68030 software-fix handlers
+											berr_ssw(9) <= '0';   -- Reserved on 68020/030 SSW
 										-- SIZE from datatype latched at PMMU fault first-fire
 										case v_pmmu_datatype is
 											when "00" => berr_ssw(5 downto 4) <= "01";  -- Byte
@@ -3645,9 +3626,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 											when others => berr_ssw(5 downto 4) <= "00";  -- Long
 										end case;
 									end if;
-									berr_ssw(11 downto 10) <= "00";  -- Reserved (bit 9 preserved for software-fix)
+										berr_ssw(11 downto 10) <= "00";  -- Reserved
 									berr_ssw(7) <= exec_tas OR exec_cas;  -- RM: read-modify-write (TAS/CAS/CAS2)
 									berr_ssw(3) <= '0';   -- Reserved
+									berr_pmmu_fault_valid <= '0';
 								else
 									-- External BERR: use fault-time latched state
 									berr_fault_addr <= berr_external_addr;  -- BUG #434 FIX: use addr latched at first-fire, not PC-based addr at state="00"
@@ -3663,7 +3645,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 										berr_ssw(13) <= '0';
 										berr_ssw(12) <= '0';
 										berr_ssw(8) <= '1';   -- DF=1: data fault
-										berr_ssw(9) <= '1';   -- DF shadow bit used by 68030 software-fix handlers
+											berr_ssw(9) <= '0';   -- Reserved on 68020/030 SSW
 									else
 										-- Instruction fetch fault (stage B)
 										berr_ssw(15) <= '0';  -- FC=0: not stage C
@@ -3671,7 +3653,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 										berr_ssw(13) <= '0';  -- RC=0: not stage C
 										berr_ssw(12) <= '1';  -- RB=1: prefetch will be rerun
 										berr_ssw(8) <= '0';   -- DF=0: not data fault
-										berr_ssw(9) <= '0';   -- No software-fix for instruction faults
+											berr_ssw(9) <= '0';   -- Reserved
 									end if;
 									case berr_external_datatype is  -- BUG #433b FIX: use value latched at BERR first-fire
 										when "00" => berr_ssw(5 downto 4) <= "01";
@@ -4374,8 +4356,9 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				END IF;
 				-- BUG #401 FIX: Set setstackaddr at dispatch (see interrupt path above)
 				setstackaddr <= '1';
-			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR set(trap_chk)='1') THEN
-				next_micro_state <= trap00;  -- Format $2 (6-word) per MC68030 UM Table 8-4
+			ELSIF cpu(1)='1' AND (trap_trapv='1' OR set_Z_error='1' OR exec(trap_chk)='1' OR
+			                       set(trap_chk)='1' OR trap_mmu_config='1') THEN
+				next_micro_state <= trap00;  -- Format $2 (6-word) per MC68030 reference
 				-- Note: trap_trap (TRAP #n) uses Format $0 per Table 8-4 - handled by else branch
 				-- Note: trap_mmu_config and trap_format_error use Format $0, matching WinUAE's
 				-- common exception frame selection for vector 56 and format-error dispatch.
@@ -7811,11 +7794,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- BUG #377 FIX: Use pmmu_opcode (latched F-line opcode) instead of opcode!
                         -- By pmove_decode time, opcode may have been overwritten by prefetch.
                         -- fline_opcode_latch preserves the original F-line opcode EA mode bits.
-		                        -- Match WinUAE's MC68030 PMOVE EA validation:
-		                        -- Dn, An, (An)+, -(An), PC-relative, and immediate forms
+		                        -- PDF candidate: PMOVE allows Dn for 32/16-bit MMU registers.
+		                        -- An, auto inc/dec, PC-relative, immediate, and CRP/SRP via Dn
 		                        -- are invalid F-line instructions.
-		                        ELSIF (pmmu_opcode(5 downto 3)="000") OR
-		                              (pmmu_opcode(5 downto 3)="001") OR
+		                        ELSIF (pmmu_opcode(5 downto 3)="001") OR
+		                              (pmmu_opcode(5 downto 3)="000" AND
+		                               (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011")) OR
 		                              (pmmu_opcode(5 downto 3)="011") OR
 		                              (pmmu_opcode(5 downto 3)="100") OR
 		                              (pmmu_opcode(5 downto 3)="111" and pmmu_opcode(2)='1') OR
@@ -7824,8 +7808,8 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		                             trap_1111 <= '1';
 		                             trapmake <= '1';
 		                        ELSE
-	                             -- Valid WinUAE memory EA modes:
-	                             -- (An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
+	                             -- Valid EA modes:
+	                             -- Dn for 32/16-bit regs, (An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
 	                             set(ea_build) <= '1';
                              IF pmmu_brief(14 downto 10) = "11000" THEN
                                  datatype <= "01"; -- Word for MMUSR
@@ -7836,6 +7820,28 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                              -- Transition based on EA mode.
                              -- BUG #377 FIX: Use pmmu_opcode throughout (fline_opcode_latch)
                              CASE pmmu_opcode(5 downto 3) IS
+	                                    WHEN "000" =>
+	                                        -- Dn direct PMOVE for TC/TT0/TT1/MMUSR.
+	                                        set(ea_build) <= '0';
+	                                        IF pmmu_brief(14 downto 10) = "11000" THEN
+	                                            datatype <= "01"; -- Word for MMUSR
+	                                            set_datatype <= "01";
+	                                        ELSE
+	                                            datatype <= "10"; -- Longword for TC/TT0/TT1
+	                                            set_datatype <= "10";
+	                                        END IF;
+	                                        IF pmmu_brief(9)='1' THEN
+	                                            -- MMU -> Dn
+	                                            set(pmmu_rd) <= '1';
+	                                            set(Regwrena) <= '1';
+	                                            setstate <= "01";
+	                                            next_micro_state <= pmmu_dn_read_wait;
+	                                        ELSE
+	                                            -- Dn -> MMU
+	                                            set_exec(pmmu_wr) <= '1';
+	                                            setstate <= "01";
+	                                            next_micro_state <= idle;
+	                                        END IF;
 	                                    WHEN "010" =>
 	                                        -- (An). Per BUG #398 FIX,
                                         -- clear ea_build for simple modes so the

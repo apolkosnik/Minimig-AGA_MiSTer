@@ -1398,9 +1398,9 @@ begin
               atc_flush_req <= '1';
             end if;
           when "11000" =>
-            -- MC68030 UM 9.6.3.4: PMOVE to MMUSR is a direct 16-bit store
-            -- MMUSR is fully read-write via PMOVE (software clears before PTEST)
-            MMUSR <= reg_wdat(15 downto 0);
+            -- PMOVE to MMUSR ignores unimplemented/reserved bits.
+            -- Keep B/L/S/W/I/M/T/N and force the rest to zero.
+            MMUSR <= reg_wdat(15 downto 0) and x"EE47";
           when others =>
             -- MC68030 UM 9.6 (PDF line 15301-15303): "PMOVE for unsupported
             -- registers (CAL, VAL, SCC, BAD, BACx, DRP, and AC)" is on the list
@@ -2146,7 +2146,8 @@ begin
         --        " TT0_E=" & std_logic'image(TT0(15)) severity note;
         -- synthesis translate_on
         if translation_pending = '0' then
-          -- Check Transparent Translation first
+          -- PTEST level 0 checks transparent translation / ATC only.
+          -- Non-zero levels must perform a table search.
           ttr_check(TT0, ptest_addr, ptest_fc, '0', ptest_rw, '0', tmatch0, tci0, twp0);  -- Use PTEST R/W from brief(9)
           ttr_check(TT1, ptest_addr, ptest_fc, '0', ptest_rw, '0', tmatch1, tci1, twp1);  -- Use PTEST R/W from brief(9)
           -- synthesis translate_off
@@ -2165,7 +2166,7 @@ begin
           --        " TT0_fcm=" & std_logic'image(TT0(2)) & std_logic'image(TT0(1)) & std_logic'image(TT0(0))
           --        severity note;
           -- synthesis translate_on
-          if tmatch0 = '1' and tmatch1 = '1' then
+          if ptest_level = "000" and tmatch0 = '1' and tmatch1 = '1' then
             -- Dual transparent-translation hit: combine attributes so PTEST
             -- observes the same result as the live transparent path.
             mmusr_update_value <= encode_mmusr_success(
@@ -2176,7 +2177,7 @@ begin
             );
             mmusr_update_req <= '1';
             ptest_done <= '1';
-          elsif tmatch0 = '1' then
+          elsif ptest_level = "000" and tmatch0 = '1' then
             -- synthesis translate_off
             report "PTEST_TTR0_HIT: ptest_addr=" & slv_to_hex(ptest_addr) & " fc=" &
                    std_logic'image(ptest_fc(2)) & std_logic'image(ptest_fc(1)) & std_logic'image(ptest_fc(0)) severity note;
@@ -2190,7 +2191,7 @@ begin
             );
             mmusr_update_req <= '1';
             ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after TTR0 match
-          elsif tmatch1 = '1' then
+          elsif ptest_level = "000" and tmatch1 = '1' then
             -- TTR1 match - PTEST succeeds with transparent translation
             mmusr_update_value <= encode_mmusr_success(
               write_protect => twp1,
@@ -2233,13 +2234,13 @@ begin
                 );
               end if;
             else
-              -- ATC miss - set Invalid bit in MMUSR
+              -- PTEST level 0 ATC miss: report B=1/N=0 per 68030 reference.
               mmusr_update_value <= encode_mmusr_fault(
-                bus_error => '0',
+                bus_error => '1',
                 limit_violation => '0',
                 supervisor_violation => '0',
                 write_protect => '0',
-                invalid => '1',                          -- Not in ATC
+                invalid => '0',
                 modified => '0',
                 transparent => '0',
                 level => "000"
