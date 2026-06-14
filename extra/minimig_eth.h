@@ -4,30 +4,26 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "minimig_eth_abi.h"
+
 // Shared memory layout using the DDR-backed ethernet aperture.
 // Uses CPU address space 0xEA0000-0xEAFFFF (64KB) for ethernet communication.
 
 #define ETH_BOARD_ADDR   0xEA0000 // Amiga address space (Zorro II)
 #define ETH_BOARD_SIZE   0x10000 // 64KB
 
-#define ETH_SHMEM_ADDR   0x28EA0000 // HPS physical address mapped to Amiga 0xEA0000
+// A2065-style dedicated f2sdram2 mailbox window.  This is a reserved high-DDR
+// region (just below 0x20000000) that the MiSTer Linux kernel does not use, so
+// the FPGA (via the eth_ddr3_mailbox f2sdram2 master) and the ARM (via this
+// /dev/mem mmap) access exactly the same bytes.  The RTL single source of truth
+// is rtl/eth_dma_addr_map.v: ETH_F2SDRAM_BASE_WORD = ETH_SHMEM_ADDR >> 3.
+#define ETH_SHMEM_ADDR   0x1FF00000 // HPS physical base of the f2sdram2 mailbox (== RTL base<<3)
 #define ETH_SHMEM_OFFSET   0x00       // Zero, because we map to the beginning of the shared memory
-#define ETH_SHMEM_SIZE   0x10000     // 64KB of the mapped address space 0x28EA0000-0x28EAFFFF
-
-#define ETH_REG_OFFSET   0x0C00       // Register offset (32-bit aligned at 0xC00)
-#define ETH_REG_OFFSET_ALT 0x0600     // Alternate register offset at 0x600
+#define ETH_SHMEM_SIZE   0x10000     // 64KB of the mapped address space 0x1FF00000-0x1FF0FFFF
 #define ETH_SHM_BOARD_OFFSET 0x0000       // Shared memory offset from 0xEA0000
 #define ETH_SHARED_OFFSET   0x1000
 #define ETH_SHARED_BASE  (ETH_BOARD_ADDR + ETH_SHARED_OFFSET) // 0x00EA0000 - Amiga Base address for ethernet shared memory
 #define ETH_SHARED_SIZE   (ETH_SHMEM_SIZE)    // Full 64KB shared memory region
-
-
-
-// RTL8019/NE2000 Register definitions (32-bit aligned)
-#define NE_BASE           (ETH_SHMEM_ADDR + ETH_REG_OFFSET)  // HPS-side register access base (0xC00)
-#define NE_BASE_ALT       (ETH_SHMEM_ADDR + ETH_REG_OFFSET_ALT)  // HPS-side alternate base (0x600)
-#define NE_RESET          (0x1F * 4)  // Reset port offset (0x7C)
-#define NE_DATAPORT       (0x10 * 4)  // Data port offset (0x40 at 0x610, 0x40 at 0xC10)
 
 // Page 0 registers (read) - 32-bit aligned addresses
 #define NE_P0_CR          (0x00 * 4)  // Command Register (0x00)
@@ -146,54 +142,13 @@
 // Memory layout
 #define NE_PROM_SIZE      0x0020    // 32-byte station PROM / low memory shadow
 #define NE_PMEM_START     0x4000    // Packet memory starts at NE address 0x4000
-#define NE_PMEM_SIZE      0x8000    // 32KB packet RAM
+#define NE_PMEM_SIZE      0x4000    // 16KB packet RAM
 #define NE_PMEM_END       (NE_PMEM_START + NE_PMEM_SIZE)
 #define NE_MEM_SIZE       NE_PMEM_END
 #define NE_PAGE_SIZE      0x100     // 256 bytes per page
-#define NE_RX_START       0x40      // RX buffer start page
+#define NE_RX_START       0x46      // RX ring start page (after 6 TX pages)
 #define NE_RX_STOP        0x80      // RX buffer stop page
-#define NE_TX_START       0x20      // TX buffer start page
-
-
-
-// Control structure offsets from ETH_SHARED_BASE
-#define ETH_CTRL_FLAGS    0x1000    // 4 bytes - control flags
-#define ETH_CTRL_REGS     0x1004    // 72 bytes - NE2000 registers (expanded to 72 bytes)
-#define ETH_CTRL_MAC      0x104C    // 6 bytes - MAC address (moved down further)
-#define ETH_CTRL_STATUS   0x1052    // 2 bytes - status (moved down further)
-#define ETH_CTRL_STATS    0x1054    // 52 bytes - detailed packet statistics (moved down further)
-#define ETH_HPS_HEARTBEAT 0x1088    // 4 bytes - HPS heartbeat counter (moved down further)
-#define ETH_HPS_SIGNATURE 0x108C    // 4 bytes - HPS signature (0xCAFEBABE) (moved down further)
-
-// FPGA Features (no HPS duplication needed):
-// - Complete DMA management via NE2000 registers (CRDA0/1, RBCR0/1)
-// - Interrupt handling (ISR/IMR registers)
-// - Packet counters and statistics
-// - Register interception and modification
-// - Status flag synchronization
-// - Link status management
-// - Memory buffer coordination
-
-#define ETH_RTL8019_STATE 0x1100    // sizeof(rtl8019_state) bytes - full RTL8019 state structure (for compatibility)
-#define ETH_TX_BUFFER     0x2000    // 1500 bytes - TX buffer
-#define ETH_RX_BUFFER     0x2600    // 1500 bytes - RX buffer  
-#define ETH_PACKET_INFO   0x2C00    // 512 bytes - packet info and metadata
-#define ETH_NE_MEMORY     0x3000    // 32KB compact backing store for NE packet RAM 0x4000-0xBFFF
-#define ETH_DEBUG_INFO    0xB000    // 4KB - extensive debug info, logs, and statistics
-#define ETH_FUTURE_USE    0xC000    // 16KB - reserved for future expansion
-
-// Control flags for FPGA<->HPS communication
-#define ETH_FLAG_RESET      0x0001  // Legacy HPS-side reset request/ack
-#define ETH_FLAG_TX_REQ     0x0002  // FPGA requests HPS transmit service, HPS clears to acknowledge
-#define ETH_FLAG_RX_AVAIL   0x0004  // HPS has staged an RX packet for FPGA consumption
-#define ETH_FLAG_IRQ        0x0008  // FPGA interrupt state mirror
-#define ETH_FLAG_REG_DIRTY  0x0010  // DEPRECATED - FPGA handles registers directly
-#define ETH_FLAG_ENABLED    0x0020  // FPGA reports Ethernet enabled state
-
-#define ETH_FLAG_HPS_OWNED_MASK   (ETH_FLAG_RESET | ETH_FLAG_RX_AVAIL)
-#define ETH_FLAG_HPS_ACK_MASK     (ETH_FLAG_TX_REQ)
-#define ETH_FLAG_FPGA_MIRROR_MASK (ETH_FLAG_TX_REQ | ETH_FLAG_IRQ | ETH_FLAG_ENABLED)
-
+#define NE_TX_START       0x40      // TX buffer start page
 
 // Packet header structure (NE2000 format)
 struct ne_packet_header {
@@ -204,15 +159,15 @@ struct ne_packet_header {
 
 // RTL8019 state structure (minimal HPS state - FPGA handles registers directly)
 struct rtl8019_state {
-    // Minimal HPS state (FPGA handles all register state via shared memory)
+    // Minimal HPS state (FPGA owns all NIC semantics via shared memory)
     uint8_t current_page;  // For debugging only
     
-    // Configuration (cached for packet filtering)
+    // Debug snapshot fields mirrored by FPGA
     uint8_t mac_addr[6];
     bool link_up;
     bool enabled;
     
-    // HPS statistics (FPGA maintains its own counters)
+    // HPS transport statistics (host-side ingress/egress bookkeeping)
     uint32_t tx_packets;
     uint32_t rx_packets;
     uint32_t tx_errors;
@@ -223,10 +178,6 @@ struct rtl8019_state {
 void minimig_eth_init();
 void minimig_eth_poll();
 void minimig_eth_reset();
-uint8_t minimig_eth_read_reg(uint32_t addr);
-void minimig_eth_write_reg(uint32_t addr, uint8_t data);
-uint16_t minimig_eth_read_data();
-void minimig_eth_write_data(uint16_t data);
 void minimig_eth_test();  // Test function for debugging
 
 #endif // __MINIMIG_ETH_H__

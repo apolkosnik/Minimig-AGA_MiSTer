@@ -317,6 +317,7 @@ wire  [8:1] reg_address; 		//main register address bus
 wire [15:0] ethernet_data_out;
 wire        eth_irq;		// Ethernet interrupt
 wire        dtack_eth;		// Ethernet data acknowledge signal
+reg         dtack_eth_aligned = 1'b1;	// Ethernet acknowledge aligned to bridge data latch phase
 wire        _cpu_dtack_internal;	// Internal CPU DTACK from bridge
 
 //rest of local signals
@@ -954,9 +955,23 @@ ethernet_interface eth_if (
 );
 
 
-// Multiplex DTACK signals - ethernet takes priority for register/data port access only
-// Direct shared memory access uses normal memory timing
-assign _cpu_dtack = (sel_ethernet && !sel_ethernet_shm) ? dtack_eth : _cpu_dtack_internal;
+// Multiplex DTACK signals - ethernet takes priority for the whole configured
+// card aperture. The RTL8019 port block has real behavior; unused/mailbox
+// offsets are terminated by ethernet.v with harmless dummy cycles.
+//
+// minimig_m68k_bridge only updates the CPU-facing read data latch on the
+// !c1 && c3 phase. The Ethernet controller can make dtack_eth ready earlier,
+// so align the external DTACK to that latch phase to avoid acknowledging the
+// CPU while stale read data is still being driven.
+always @(posedge clk) begin
+	if (_cpu_as || !sel_ethernet) begin
+		dtack_eth_aligned <= 1'b1;
+	end else if (!dtack_eth && !c1 && c3) begin
+		dtack_eth_aligned <= 1'b0;
+	end
+end
+
+assign _cpu_dtack = sel_ethernet ? dtack_eth_aligned : _cpu_dtack_internal;
 
 //-------------------------------------------------------------------------------------
 

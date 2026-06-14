@@ -10,6 +10,8 @@ set_global_assignment -name QIP_FILE rtl/fpga-toccata/toccata.qip
 set_global_assignment -name VERILOG_FILE rtl/gary.v
 set_global_assignment -name VERILOG_FILE rtl/ethernet.v
 set_global_assignment -name VERILOG_FILE rtl/eth_dma_addr_map.v
+set_global_assignment -name VERILOG_FILE rtl/eth_ddr3_mailbox.v
+set_global_assignment -name VERILOG_FILE rtl/eth_avalon_arbiter.v
 set_global_assignment -name VERILOG_FILE rtl/rtg.v
 set_global_assignment -name VERILOG_FILE rtl/akiko.v
 set_global_assignment -name VERILOG_FILE rtl/fastchip.v

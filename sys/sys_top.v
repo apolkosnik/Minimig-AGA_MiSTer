@@ -660,19 +660,92 @@ wire        ram2_read;
 wire        ram2_write;
 wire  [7:0] ram2_bcnt;
 
+// ----------------------------------------------------------------------------
+// f2sdram2 (ram2) is shared between the audio/PAL DDR service (ddr_svc, m0,
+// priority) and the NE2000 ethernet DDR3 mailbox (m1) via eth_avalon_arbiter.
+// ddr_svc drives a private dsvc_* master that the arbiter forwards to ram2_*.
+// ----------------------------------------------------------------------------
+wire [28:0] dsvc_address;
+wire  [7:0] dsvc_burstcount;
+wire        dsvc_waitrequest;
+wire [63:0] dsvc_readdata;
+wire        dsvc_readdatavalid;
+wire        dsvc_read;
+wire [63:0] dsvc_writedata;
+wire  [7:0] dsvc_byteenable;
+wire        dsvc_write;
+
+// NE2000 ethernet mailbox Avalon master, brought out of the emu (CLK_AUDIO).
+wire [28:0] eth_mbx_address;
+wire  [7:0] eth_mbx_burstcount;
+wire  [7:0] eth_mbx_byteenable;
+wire [63:0] eth_mbx_writedata;
+wire        eth_mbx_read;
+wire        eth_mbx_write;
+wire        eth_mbx_waitrequest;
+wire [63:0] eth_mbx_readdata;
+wire        eth_mbx_readdatavalid;
+
+// Arbiter reset synchronized into the clk_audio (ram2) domain.
+(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *) reg arb_reset_0 = 1'b1;
+(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *) reg arb_reset_1 = 1'b1;
+always @(posedge clk_audio) begin
+	arb_reset_0 <= reset;
+	arb_reset_1 <= arb_reset_0;
+end
+
+eth_avalon_arbiter eth_arb
+(
+	.clk(clk_audio),
+	.reset(arb_reset_1),
+
+	// m0 = ddr_svc (priority)
+	.m0_address(dsvc_address),
+	.m0_burstcount(dsvc_burstcount),
+	.m0_byteenable(dsvc_byteenable),
+	.m0_writedata(dsvc_writedata),
+	.m0_read(dsvc_read),
+	.m0_write(dsvc_write),
+	.m0_waitrequest(dsvc_waitrequest),
+	.m0_readdata(dsvc_readdata),
+	.m0_readdatavalid(dsvc_readdatavalid),
+
+	// m1 = NE2000 ethernet mailbox
+	.m1_address(eth_mbx_address),
+	.m1_burstcount(eth_mbx_burstcount),
+	.m1_byteenable(eth_mbx_byteenable),
+	.m1_writedata(eth_mbx_writedata),
+	.m1_read(eth_mbx_read),
+	.m1_write(eth_mbx_write),
+	.m1_waitrequest(eth_mbx_waitrequest),
+	.m1_readdata(eth_mbx_readdata),
+	.m1_readdatavalid(eth_mbx_readdatavalid),
+
+	// shared slave = ram2 / f2sdram2
+	.s_address(ram2_address),
+	.s_burstcount(ram2_burstcount),
+	.s_byteenable(ram2_byteenable),
+	.s_writedata(ram2_writedata),
+	.s_read(ram2_read),
+	.s_write(ram2_write),
+	.s_waitrequest(ram2_waitrequest),
+	.s_readdata(ram2_readdata),
+	.s_readdatavalid(ram2_readdatavalid)
+);
+
 ddr_svc ddr_svc
 (
 	.clk(clk_audio),
 
-	.ram_waitrequest(ram2_waitrequest),
-	.ram_burstcnt(ram2_burstcount),
-	.ram_addr(ram2_address),
-	.ram_readdata(ram2_readdata),
-	.ram_read_ready(ram2_readdatavalid),
-	.ram_read(ram2_read),
-	.ram_writedata(ram2_writedata),
-	.ram_byteenable(ram2_byteenable),
-	.ram_write(ram2_write),
+	.ram_waitrequest(dsvc_waitrequest),
+	.ram_burstcnt(dsvc_burstcount),
+	.ram_addr(dsvc_address),
+	.ram_readdata(dsvc_readdata),
+	.ram_read_ready(dsvc_readdatavalid),
+	.ram_read(dsvc_read),
+	.ram_writedata(dsvc_writedata),
+	.ram_byteenable(dsvc_byteenable),
+	.ram_write(dsvc_write),
 	.ram_bcnt(ram2_bcnt),
 
 `ifndef MISTER_DISABLE_ALSA
@@ -1830,6 +1903,17 @@ emu emu
 	.DDRAM_DIN(ram_writedata),
 	.DDRAM_BE(ram_byteenable),
 	.DDRAM_WE(ram_write),
+
+	// NE2000 ethernet DDR3 mailbox Avalon master (clk_audio) -> eth_avalon_arbiter
+	.ETH_MBX_ADDRESS(eth_mbx_address),
+	.ETH_MBX_BURSTCNT(eth_mbx_burstcount),
+	.ETH_MBX_BE(eth_mbx_byteenable),
+	.ETH_MBX_WRITEDATA(eth_mbx_writedata),
+	.ETH_MBX_READ(eth_mbx_read),
+	.ETH_MBX_WRITE(eth_mbx_write),
+	.ETH_MBX_WAITREQUEST(eth_mbx_waitrequest),
+	.ETH_MBX_READDATA(eth_mbx_readdata),
+	.ETH_MBX_READDATAVALID(eth_mbx_readdatavalid),
 
 	.SDRAM_DQ(SDRAM_DQ),
 	.SDRAM_A(SDRAM_A),

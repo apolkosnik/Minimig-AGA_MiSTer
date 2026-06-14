@@ -108,6 +108,18 @@ output [63:0] DDRAM_DIN,
 output  [7:0] DDRAM_BE,
 output        DDRAM_WE,
 
+// NE2000 ethernet DDR3 mailbox: Avalon-MM master (CLK_AUDIO domain),
+// arbitrated onto the f2sdram2 (ram2) port in sys_top.v.
+output [28:0] ETH_MBX_ADDRESS,
+output  [7:0] ETH_MBX_BURSTCNT,
+output  [7:0] ETH_MBX_BE,
+output [63:0] ETH_MBX_WRITEDATA,
+output        ETH_MBX_READ,
+output        ETH_MBX_WRITE,
+input         ETH_MBX_WAITREQUEST,
+input  [63:0] ETH_MBX_READDATA,
+input         ETH_MBX_READDATAVALID,
+
 //SDRAM interface with lower latency
 output        SDRAM_CLK,
 output        SDRAM_CKE,

@@ -1,0 +1,529 @@
+$date
+	Fri Jul 18 22:50:45 2025
+$end
+$version
+	Icarus Verilog
+$end
+$timescale
+	1ps
+$end
+$scope module ethernet_tb $end
+$var wire 1 ! eth_irq $end
+$var wire 1 " force_cpu_wr $end
+$var wire 16 # force_cpu_data [15:0] $end
+$var wire 1 $ dtack_eth $end
+$var wire 16 % cpu_data_out [15:0] $end
+$var wire 23 & cpu_addr_out [23:1] $end
+$var wire 1 ' addr_override $end
+$var reg 1 ( clk $end
+$var reg 23 ) cpu_addr [23:1] $end
+$var reg 16 * cpu_data_in [15:0] $end
+$var reg 1 + cpu_hwr $end
+$var reg 1 , cpu_lds $end
+$var reg 1 - cpu_lwr $end
+$var reg 1 . cpu_rd $end
+$var reg 1 / cpu_uds $end
+$var reg 8 0 ethernet_base [7:0] $end
+$var reg 16 1 ram_data_in [15:0] $end
+$var reg 1 2 reset $end
+$var reg 1 3 sel_ethernet $end
+$var reg 1 4 sel_ethernet_shm $end
+$scope module dut $end
+$var wire 1 ( clk $end
+$var wire 23 5 cpu_addr [23:1] $end
+$var wire 16 6 cpu_data_in [15:0] $end
+$var wire 1 + cpu_hwr $end
+$var wire 1 , cpu_lds $end
+$var wire 1 - cpu_lwr $end
+$var wire 1 . cpu_rd $end
+$var wire 1 / cpu_uds $end
+$var wire 1 7 cpu_wr $end
+$var wire 1 $ dtack_eth $end
+$var wire 1 ! eth_irq $end
+$var wire 8 8 ethernet_base [7:0] $end
+$var wire 1 9 is_data_port_access $end
+$var wire 1 : is_register_access $end
+$var wire 16 ; ram_data_in [15:0] $end
+$var wire 1 2 reset $end
+$var wire 1 3 sel_ethernet $end
+$var wire 1 4 sel_ethernet_shm $end
+$var wire 5 < register_select [4:0] $end
+$var wire 16 = byte_addr [15:0] $end
+$var parameter 16 > ETH_SHM_NE_MEMORY $end
+$var reg 1 ' addr_override $end
+$var reg 8 ? boundary_page [7:0] $end
+$var reg 8 @ config0_register [7:0] $end
+$var reg 8 A config1_register [7:0] $end
+$var reg 8 B config2_register [7:0] $end
+$var reg 8 C config3_register [7:0] $end
+$var reg 23 D cpu_addr_out [23:1] $end
+$var reg 16 E cpu_data_out [15:0] $end
+$var reg 8 F cr_register [7:0] $end
+$var reg 16 G current_page [15:0] $end
+$var reg 8 H dcr_register [7:0] $end
+$var reg 1 I dtack_eth_reg $end
+$var reg 16 J force_cpu_data [15:0] $end
+$var reg 1 " force_cpu_wr $end
+$var reg 8 K id0_register [7:0] $end
+$var reg 8 L id1_register [7:0] $end
+$var reg 8 M imr_register [7:0] $end
+$var reg 8 N isr_register [7:0] $end
+$var reg 1 O mem_init_running $end
+$var reg 8 P rcr_register [7:0] $end
+$var reg 16 Q remote_byte_count [15:0] $end
+$var reg 16 R remote_dma_addr [15:0] $end
+$var reg 8 S rsr_register [7:0] $end
+$var reg 8 T tcr_register [7:0] $end
+$var reg 8 U tsr_register [7:0] $end
+$var reg 8 V tstart_page [7:0] $end
+$var reg 8 W tstop_page [7:0] $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+$comment Show the parameter values. $end
+$dumpall
+b11000000000000 >
+$end
+#0
+$dumpvars
+bx W
+bx V
+bx U
+bx T
+bx S
+bx R
+bx Q
+bx P
+xO
+bx N
+bx M
+bx L
+bx K
+bx J
+xI
+bx H
+bx G
+bx F
+b0 E
+bx D
+bx C
+bx B
+bx A
+bx @
+bx ?
+b0 =
+b0 <
+b0 ;
+0:
+09
+b11101010 8
+07
+b0 6
+b0 5
+04
+03
+12
+b0 1
+b11101010 0
+0/
+0.
+0-
+0,
+0+
+b0 *
+b0 )
+0(
+x'
+bx &
+b0 %
+x$
+bx #
+x"
+0!
+$end
+#5000
+b0 &
+b0 D
+0'
+b0 #
+b0 J
+0"
+0O
+b0 C
+b0 B
+b0 A
+b0 @
+b1110000 L
+b1010000 K
+b1000000 W
+b100000 V
+b1000000 ?
+b100000000000000 G
+b0 Q
+b0 R
+b0 S
+b0 P
+b0 U
+b0 T
+b0 H
+b0 M
+b0 N
+b100001 F
+1$
+1I
+1(
+#10000
+0(
+#15000
+1(
+#20000
+0(
+02
+#25000
+1(
+#30000
+0(
+#35000
+1(
+#40000
+b10000100000000 %
+b10000100000000 E
+1:
+b110000000000 =
+0(
+1/
+1.
+13
+b110000000000 )
+b110000000000 5
+#45000
+b110000000000 &
+b110000000000 D
+0$
+0I
+1(
+#50000
+0(
+#55000
+1(
+#60000
+0:
+b0 %
+b0 E
+0(
+03
+0/
+0.
+#65000
+1$
+1I
+1(
+#70000
+0(
+#75000
+1(
+#80000
+b101000000000000 %
+b101000000000000 E
+1:
+b110000010100 =
+b1010 <
+0(
+1/
+1.
+13
+b110000010100 )
+b110000010100 5
+#85000
+b110000010100 &
+b110000010100 D
+0$
+0I
+1(
+#90000
+0(
+#95000
+1(
+#100000
+0:
+b0 %
+b0 E
+0(
+03
+0/
+0.
+#105000
+1$
+1I
+1(
+#110000
+0(
+#115000
+1(
+#120000
+b111000000000000 %
+b111000000000000 E
+1:
+b110000010110 =
+b1011 <
+0(
+1/
+1.
+13
+b110000010110 )
+b110000010110 5
+#125000
+b110000010110 &
+b110000010110 D
+0$
+0I
+1(
+#130000
+0(
+#135000
+1(
+#140000
+0:
+b0 %
+b0 E
+0(
+03
+0/
+0.
+#145000
+1$
+1I
+1(
+#150000
+0(
+#155000
+1(
+#160000
+1:
+17
+b110000010000 =
+b1000 <
+0(
+1/
+1+
+13
+b1001000110100 *
+b1001000110100 6
+b110000010000 )
+b110000010000 5
+#165000
+b10010 R
+b110000010000 &
+b110000010000 D
+0$
+0I
+1(
+#170000
+0(
+#175000
+1(
+#180000
+0:
+07
+0(
+03
+0/
+0+
+#185000
+1$
+1I
+1(
+#190000
+0(
+#195000
+1(
+#200000
+b1001000000000 %
+b1001000000000 E
+1:
+0(
+1/
+1.
+13
+#205000
+0$
+0I
+1(
+#210000
+0(
+#215000
+1(
+#220000
+0:
+b0 %
+b0 E
+0(
+03
+0/
+0.
+#225000
+1$
+1I
+1(
+#230000
+0(
+#235000
+1(
+#240000
+1:
+17
+b110000010100 =
+b1010 <
+0(
+1/
+1+
+13
+b101011001111000 *
+b101011001111000 6
+b110000010100 )
+b110000010100 5
+#245000
+b1010110 Q
+b110000010100 &
+b110000010100 D
+0$
+0I
+1(
+#250000
+0(
+#255000
+1(
+#260000
+07
+0(
+0/
+0+
+#265000
+1$
+1I
+1(
+#270000
+0(
+#275000
+1(
+#280000
+b101000000000000 %
+b101000000000000 E
+0(
+1/
+1.
+#285000
+0$
+0I
+1(
+#290000
+0(
+#295000
+1(
+#300000
+0:
+b0 %
+b0 E
+0(
+03
+0/
+0.
+#305000
+1$
+1I
+1(
+#310000
+0(
+#315000
+1(
+#320000
+17
+19
+b110000100000 =
+b0 <
+0(
+b1010101111001101 1
+b1010101111001101 ;
+1/
+1+
+13
+b110000100000 )
+b110000100000 5
+#325000
+b1010100 Q
+b10100 R
+1'
+b11101010001100000001001 &
+b11101010001100000001001 D
+0$
+0I
+1(
+#330000
+0(
+#335000
+b1010010 Q
+b10110 R
+b11101010001100000001010 &
+b11101010001100000001010 D
+1'
+1(
+#340000
+09
+07
+0(
+03
+0/
+0+
+#345000
+b110000100000 &
+b110000100000 D
+0'
+1$
+1I
+1(
+#350000
+0(
+#355000
+1(
+#360000
+0(
+#365000
+1(
+#370000
+0(
+#375000
+1(
+#380000
+0(
+#385000
+1(
+#390000
+0(
+#395000
+1(
+#400000
+0(
+#405000
+1(
+#410000
+0(
+#415000
+1(
+#420000
+0(
+#425000
+1(
+#430000
+0(
+#435000
+1(
+#440000
+0(
+#445000
+1(
+#450000
+0(
+#455000
+1(
+#460000
+0(

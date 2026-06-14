@@ -82,8 +82,8 @@ module cpu_wrapper
 	output reg [31:0] nmi_addr
 );
 
-assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg | sel_ethernet_shm);
-assign ramshared    = sel_dd | sel_ethernet_shm;
+assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
+assign ramshared    = sel_dd;
 
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
@@ -100,8 +100,9 @@ wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
 //   Address Decoding:
 
 // Ethernet uses a 64KB Zorro II I/O aperture:
-//   - Register space (0xEA0000-0xEA0FFF): handled locally by the FPGA
-//   - Shared memory (0xEA1000-0xEAFFFF): routed to DDR-backed shared memory
+//   - Register/data/debug/reset ports (0xEA0C00-0xEA0C7F): handled locally by the FPGA
+//   - Shared memory (0xEA1000-0xEAFFFF): reserved for the internal FPGA/HPS
+//     mailbox transport, not exposed as an Amiga CPU memory target
 //
 //   HPS sees that same 64KB window at 0x28EA0000-0x28EAFFFF.
 
@@ -114,18 +115,13 @@ wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
 wire eth_shm_range = (cpu_addr[15:12] >= 4'h1); // Only 0x1000+ addresses (normal shared memory)
 
 // Ethernet shared memory excludes the local register/data-port window and starts at 0xEA1000.
+// This marker is exported for peripheral decode/diagnostics only. The Amiga CPU
+// must not be routed directly into this DDR-backed HPS mailbox window: the
+// RTL8019 device exposes local ports, while the FPGA/HPS transport uses the
+// ethernet module's private eth_dma path.
 assign sel_ethernet_shm = !cpu_addr[31:24] &&
                           (cpu_addr[23:16] == ethernet_base) && ethernet_ena &&
                           eth_shm_range;
-
-wire [28:1] eth_shm_ddr_word_addr;
-
-eth_dma_addr_map eth_shm_addr_map
-(
-	.local_word_addr(cpu_addr[15:1]),
-	.ddr_word_addr(eth_shm_ddr_word_addr)
-);
-
 
 // don't sel_kickram when writing
 wire sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx
@@ -143,31 +139,31 @@ wire [15:0] ramdat;
 // assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
 // assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
-assign ramlds = (sel_rtg | sel_ethernet_shm) ? uds_in : lds_in;
-assign ramuds = (sel_rtg | sel_ethernet_shm) ? lds_in : uds_in;
-assign ramdin = (sel_rtg | sel_ethernet_shm) ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
-assign ramdat = (sel_rtg | sel_ethernet_shm) ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
+assign ramlds = sel_rtg ? uds_in : lds_in;
+assign ramuds = sel_rtg ? lds_in : uds_in;
+assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
+assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
-//       Main  DDx  RTG  ETH  8M  128M  256M
-//       ----  ---  ---  ---  --  ----  ----
-//        SDR  DDR  RTG  DDR  Z2  Z3_0  Z3_1
-// 28      0    0    0    0   1    0     1
-// 27      0    0    0    1   1    1     X
-// 26      0    1    1    0   0    X     X
-// 25-23   0   111  110   0   0    X     X
+//       Main  DDx  RTG  8M  128M  256M
+//       ----  ---  ---  --  ----  ----
+//        SDR  DDR  RTG  Z2  Z3_0  Z3_1
+// 28      0    0    0   1    0     1
+// 27      0    0    0   1    1     X
+// 26      0    1    1   0    X     X
+// 25-23   0   111  110  0    X     X
 // supported configs: SDR + (Z2, Z3_1, Z3_0+Z3_1)
 
 // This is the mapping to the sram
 // map 00-1f to 00-1f (chipram), a0-ff to 20-7f. All non-fastram goes into the first
 // 8M block(SDRAM). This map should be the same as in minimig_sram_bridge.v 
 // All Zorro RAM goes to DDR3
-assign ramaddr[28]    = sel_ethernet_shm ? eth_shm_ddr_word_addr[28]    : (sel_zram & ~sel_z3ram0);
-assign ramaddr[27]    = sel_ethernet_shm ? eth_shm_ddr_word_addr[27]    : ((sel_zram) & (~sel_z3ram1 | cpu_addr[27]));
-assign ramaddr[26:23] = sel_ethernet_shm ? eth_shm_ddr_word_addr[26:23] : ((sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23] : (sel_rtg ? 4'b1110 : {4{sel_dd}}));
-assign ramaddr[22:19] = sel_ethernet_shm ? eth_shm_ddr_word_addr[22:19] : ({4{sel_dd}} | cpu_addr[22:19]);
-assign ramaddr[18]    = sel_ethernet_shm ? eth_shm_ddr_word_addr[18]    : (sel_dd | (sel_kicklower & bootrom) | cpu_addr[18]);
-assign ramaddr[17:16] = sel_ethernet_shm ? eth_shm_ddr_word_addr[17:16] : ({2{sel_dd}} | cpu_addr[17:16]);
-assign ramaddr[15:1]  = sel_ethernet_shm ? eth_shm_ddr_word_addr[15:1]  : cpu_addr[15:1];
+assign ramaddr[28]    = sel_zram & ~sel_z3ram0;
+assign ramaddr[27]    = (sel_zram) & (~sel_z3ram1 | cpu_addr[27]);
+assign ramaddr[26:23] = (sel_z3ram0 | sel_z3ram1) ? cpu_addr[26:23] : (sel_rtg ? 4'b1110 : {4{sel_dd}});
+assign ramaddr[22:19] = {4{sel_dd}} | cpu_addr[22:19];
+assign ramaddr[18]    = sel_dd | (sel_kicklower & bootrom) | cpu_addr[18];
+assign ramaddr[17:16] = {2{sel_dd}} | cpu_addr[17:16];
+assign ramaddr[15:1]  = cpu_addr[15:1];
 
 assign fastchip_lds = lds_in;
 assign fastchip_uds = uds_in;
@@ -176,6 +172,12 @@ assign fastchip_rnw = wr;
 reg  [31:0] cpu_addr;
 reg  [15:0] cpu_dout;
 wire [15:0] cpu_din = ramsel ? ramdat : fastchip_selack ? fastchip_dout : {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
+wire        sel_ethernet_card_cpu = !cpu_addr[31:24] &&
+                                    (cpu_addr[23:16] == ethernet_base) &&
+                                    ethernet_ena;
+wire        cpu_clkena = ~cpu_req |
+                         (sel_ethernet_card_cpu ? chipready :
+                          (chipready | ramready | fastchip_ready));
 reg         wr;
 reg         uds_in;
 reg         lds_in;
@@ -249,7 +251,7 @@ cpu_inst_p
 (
   .clk(clk),
   .nreset(reset),
-  .clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
+  .clkena_in(cpu_clkena),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),

@@ -61,6 +61,8 @@ wire cache_hit;
 wire cache_req;
 reg  cache_fill;
 wire cache_ack;
+reg  ddr_swap;
+reg [15:0] ddr_data;
 
 cpu_cache_new cpu_cache
 (
@@ -129,9 +131,6 @@ assign writeaccepted = write_ack;
 
 assign DDRAM_CLK = sysclk;
 assign DDRAM_BURSTCNT = 1;
-
-reg        ddr_swap;
-reg [15:0] ddr_data;
 
 always @ (posedge sysclk) begin
 	reg  [2:0] state = 0;

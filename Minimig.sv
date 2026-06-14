@@ -298,118 +298,65 @@ wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
 wire        zram_sel  = |ram_addr[28:26];
 wire        ramshared;
-// ddram_ctrl already converts shared-memory accesses between the Amiga-facing
-// byte lanes and the raw DDR layout. Keep Ethernet DMA in the same Amiga-side
-// lane convention here so the write path is swapped exactly once.
-wire [15:0] eth_dma_ddr_wdata = eth_dma_wdata;
-wire        eth_dma_ddr_u = eth_dma_uds;
-wire        eth_dma_ddr_l = eth_dma_lds;
-wire [28:1] eth_dma_ddr_addr;
-reg         eth_dma_req_sys_d = 1'b0;
-reg         eth_dma_req_toggle_sys = 1'b0;
-reg  [28:1] eth_dma_addr_sys_hold = 28'h0000000;
-reg  [15:0] eth_dma_wdata_sys_hold = 16'h0000;
-reg         eth_dma_write_sys_hold = 1'b0;
-reg         eth_dma_u_sys_hold = 1'b1;
-reg         eth_dma_l_sys_hold = 1'b1;
-reg         eth_dma_req_toggle_114_meta = 1'b0;
-reg         eth_dma_req_toggle_114_sync = 1'b0;
-reg         eth_dma_req_toggle_114_sync_d = 1'b0;
-reg         eth_dma_active_114 = 1'b0;
-reg         eth_dma_done_toggle_114 = 1'b0;
-reg  [15:0] eth_dma_rdata_114 = 16'h0000;
-reg         eth_dma_write_114 = 1'b0;
-reg  [28:1] eth_dma_addr_114 = 28'h0000000;
-reg  [15:0] eth_dma_wdata_114 = 16'h0000;
-reg         eth_dma_u_114 = 1'b0;
-reg         eth_dma_l_114 = 1'b0;
-reg         eth_dma_done_toggle_sys_meta = 1'b0;
-reg         eth_dma_done_toggle_sys_sync = 1'b0;
-reg         eth_dma_done_toggle_sys_sync_d = 1'b0;
-reg  [15:0] eth_dma_rdata_sys = 16'h0000;
 wire        ram_writeaccepted2_raw;
-// Give Ethernet DMA priority on the shared DDR port. Tight CPU polling loops
-// can otherwise starve remote-DMA completion forever, leaving ISR.RDC stuck low.
-wire        eth_dma_grant_114 = eth_dma_active_114;
-wire        eth_dma_done_sys_pulse = eth_dma_done_toggle_sys_sync ^ eth_dma_done_toggle_sys_sync_d;
 
 wire [7:0] toccata_base;
 wire toccata_ena;
 
-eth_dma_addr_map eth_dma_addr_map_inst
+// --------------------------------------------------------------------------
+// NE2000 ethernet DDR3 mailbox (A2065-style dedicated f2sdram2 transport).
+// The 16-bit eth_dma_* master from rtl/ethernet.v (clk_sys) is bridged to a
+// 64-bit Avalon-MM master in the CLK_AUDIO domain, exposed out of the emu and
+// arbitrated onto the f2sdram2 (ram2) port in sys_top.v.  This replaces the
+// previous piggyback onto the Amiga DDR controller (ddram_ctrl ram2).
+// --------------------------------------------------------------------------
+reg eth_reset_audio_0 = 1'b1;
+reg eth_reset_audio_1 = 1'b1;
+always @(posedge CLK_AUDIO) begin
+	eth_reset_audio_0 <= reset_d;
+	eth_reset_audio_1 <= eth_reset_audio_0;
+end
+
+eth_ddr3_mailbox eth_mailbox
 (
-	.local_word_addr(eth_dma_addr),
-	.ddr_word_addr(eth_dma_ddr_addr)
+	.clk_sys          (clk_sys             ),
+	.reset_sys        (reset_d             ),
+	.eth_dma_req      (eth_dma_req         ),
+	.eth_dma_write    (eth_dma_write       ),
+	.eth_dma_addr     (eth_dma_addr        ),
+	.eth_dma_wdata    (eth_dma_wdata       ),
+	.eth_dma_uds      (eth_dma_uds         ),
+	.eth_dma_lds      (eth_dma_lds         ),
+	.eth_dma_ready    (eth_dma_ready       ),
+	.eth_dma_rdata    (eth_dma_rdata       ),
+
+	.clk_avl          (CLK_AUDIO           ),
+	.reset_avl        (eth_reset_audio_1   ),
+	.avl_address      (ETH_MBX_ADDRESS     ),
+	.avl_burstcount   (ETH_MBX_BURSTCNT    ),
+	.avl_byteenable   (ETH_MBX_BE          ),
+	.avl_writedata    (ETH_MBX_WRITEDATA   ),
+	.avl_read         (ETH_MBX_READ        ),
+	.avl_write        (ETH_MBX_WRITE       ),
+	.avl_waitrequest  (ETH_MBX_WAITREQUEST ),
+	.avl_readdata     (ETH_MBX_READDATA    ),
+	.avl_readdatavalid(ETH_MBX_READDATAVALID),
+	.dbg              (eth_mbx_dbg         )
 );
 
-always @(posedge clk_sys) begin
-	if (reset_d) begin
-		eth_dma_req_sys_d <= 1'b0;
-		eth_dma_req_toggle_sys <= 1'b0;
-		eth_dma_addr_sys_hold <= 28'h0000000;
-		eth_dma_wdata_sys_hold <= 16'h0000;
-		eth_dma_write_sys_hold <= 1'b0;
-		eth_dma_u_sys_hold <= 1'b1;
-		eth_dma_l_sys_hold <= 1'b1;
-		eth_dma_done_toggle_sys_meta <= 1'b0;
-		eth_dma_done_toggle_sys_sync <= 1'b0;
-		eth_dma_done_toggle_sys_sync_d <= 1'b0;
-		eth_dma_rdata_sys <= 16'h0000;
-	end else begin
-		eth_dma_req_sys_d <= eth_dma_req;
-		if (eth_dma_req && !eth_dma_req_sys_d) begin
-			eth_dma_addr_sys_hold <= eth_dma_ddr_addr;
-			eth_dma_wdata_sys_hold <= eth_dma_ddr_wdata;
-			eth_dma_write_sys_hold <= eth_dma_write;
-			eth_dma_u_sys_hold <= eth_dma_ddr_u;
-			eth_dma_l_sys_hold <= eth_dma_ddr_l;
-			eth_dma_req_toggle_sys <= ~eth_dma_req_toggle_sys;
-		end
-
-		eth_dma_done_toggle_sys_meta <= eth_dma_done_toggle_114;
-		eth_dma_done_toggle_sys_sync <= eth_dma_done_toggle_sys_meta;
-		eth_dma_done_toggle_sys_sync_d <= eth_dma_done_toggle_sys_sync;
-		if (eth_dma_done_sys_pulse) begin
-			eth_dma_rdata_sys <= eth_dma_rdata_114;
-		end
-	end
-end
-
-always @(posedge clk_114) begin
-	if (reset_d) begin
-		eth_dma_req_toggle_114_meta <= 1'b0;
-		eth_dma_req_toggle_114_sync <= 1'b0;
-		eth_dma_req_toggle_114_sync_d <= 1'b0;
-		eth_dma_active_114     <= 1'b0;
-		eth_dma_done_toggle_114 <= 1'b0;
-		eth_dma_rdata_114      <= 16'h0000;
-		eth_dma_write_114      <= 1'b0;
-		eth_dma_addr_114       <= 28'h0000000;
-		eth_dma_wdata_114      <= 16'h0000;
-		eth_dma_u_114          <= 1'b0;
-		eth_dma_l_114          <= 1'b0;
-	end else begin
-		eth_dma_req_toggle_114_meta <= eth_dma_req_toggle_sys;
-		eth_dma_req_toggle_114_sync <= eth_dma_req_toggle_114_meta;
-		eth_dma_req_toggle_114_sync_d <= eth_dma_req_toggle_114_sync;
-
-		if (eth_dma_req_toggle_114_sync != eth_dma_req_toggle_114_sync_d) begin
-			eth_dma_active_114 <= 1'b1;
-			eth_dma_write_114 <= eth_dma_write_sys_hold;
-			eth_dma_addr_114  <= eth_dma_addr_sys_hold;
-			eth_dma_wdata_114 <= eth_dma_wdata_sys_hold;
-			eth_dma_u_114     <= eth_dma_u_sys_hold;
-			eth_dma_l_114     <= eth_dma_l_sys_hold;
-		end
-
-		if (eth_dma_active_114 &&
-		    (eth_dma_write_114 ? ram_writeaccepted2_raw : ram_ready2_raw)) begin
-			eth_dma_active_114 <= 1'b0;
-			eth_dma_done_toggle_114 <= ~eth_dma_done_toggle_114;
-			eth_dma_rdata_114 <= {ram_dout2_raw[7:0], ram_dout2_raw[15:8]};
-		end
-	end
-end
+// ISSP probe on the mailbox (clk_audio) Avalon write/read handshake, so we can
+// see on hardware whether f2sdram2 WRITES are accepted (dbg_wr_accept) or stall
+// (dbg_wr_stall). Instance reported by JTAG as "MBOX".
+wire [63:0] eth_mbx_dbg;
+ethernet_issp #(
+	.PROBE_WIDTH(64),
+	.SOURCE_WIDTH(2),
+	.INSTANCE_ID("MBOX")
+) eth_mbx_issp (
+	.clk(CLK_AUDIO),
+	.probe(eth_mbx_dbg),
+	.source()
+);
 
 cpu_wrapper cpu_wrapper
 (
@@ -514,13 +461,10 @@ sdram_ctrl ram1
 
 wire [15:0] ram_dout2_raw;
 wire        ram_ready2_raw;
-wire [15:0] ram_dout2 = eth_dma_grant_114 ? 16'h0000 : ram_dout2_raw;
-wire        ram_ready2 = eth_dma_grant_114 ? 1'b0 : ram_ready2_raw;
+wire [15:0] ram_dout2 = ram_dout2_raw;
+wire        ram_ready2 = ram_ready2_raw;
 wire  [7:0] DDRAM_BE_S;
 
-assign eth_dma_rdata = eth_dma_rdata_sys;
-assign eth_dma_ready = eth_dma_done_sys_pulse;
-   
 	ddram_ctrl ram2
 	(
 	.sysclk       (clk_114         ),
@@ -540,15 +484,15 @@ assign eth_dma_ready = eth_dma_done_sys_pulse;
 	.DDRAM_BE     (DDRAM_BE        ),
 	.DDRAM_WE     (DDRAM_WE        ),
 
-		.cpuWR        (eth_dma_grant_114 ? eth_dma_wdata_114 : ram_din          ),
-		.cpuAddr      (eth_dma_grant_114 ? eth_dma_addr_114  : ram_addr         ),
-		.cpuU         (eth_dma_grant_114 ? eth_dma_u_114     : ram_uds          ),
-		.cpuL         (eth_dma_grant_114 ? eth_dma_l_114     : ram_lds          ),
-		.cpustate     (eth_dma_grant_114 ? (eth_dma_write_114 ? 2'b11 : 2'b10) : cpu_state),
-		.cpuCS        (eth_dma_grant_114 ? 1'b1 : (zram_sel&ram_cs)),
-		.cpuRD        (ram_dout2_raw  ),
-		.ramshared    (eth_dma_grant_114 ? 1'b1 : ramshared ),
-		.ramready     (ram_ready2_raw ),
+		.cpuWR        (ram_din         ),
+		.cpuAddr      (ram_addr        ),
+		.cpuU         (ram_uds         ),
+		.cpuL         (ram_lds         ),
+		.cpustate     (cpu_state       ),
+		.cpuCS        (zram_sel&ram_cs ),
+		.cpuRD        (ram_dout2_raw   ),
+		.ramshared    (ramshared       ),
+		.ramready     (ram_ready2_raw  ),
 		.writeaccepted(ram_writeaccepted2_raw)
 	);
 

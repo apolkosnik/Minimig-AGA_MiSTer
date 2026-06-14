@@ -58,9 +58,21 @@
 static int raw_socket = -1;
 static uint8_t *eth_shmem = 0;
 static uint32_t hps_heartbeat_counter = 0;
+static uint16_t hps_last_tx_complete_seq = 0;
 static struct sockaddr_ll sock_addr;
 static char bridge_interface[16] = "eth0";
-static const uint8_t rtl8019_default_mac[6] = {0x52, 0x54, 0x05, 0x04, 0x03, 0x02};
+
+#define ETH_HOST_RX_QUEUE_DEPTH 8
+
+struct host_rx_packet {
+    uint16_t len;
+    uint8_t data[ETH_PACKET_BUFFER_SIZE];
+};
+
+static struct host_rx_packet host_rx_queue[ETH_HOST_RX_QUEUE_DEPTH];
+static uint8_t host_rx_queue_head = 0;
+static uint8_t host_rx_queue_tail = 0;
+static uint8_t host_rx_queue_count = 0;
 
 // Access ethernet shared memory through mapped region
 static void eth_write_shared_mem(uint32_t offset, const void *data, uint32_t size)
@@ -101,11 +113,9 @@ static void eth_write_shared_u32(uint32_t offset, uint32_t value)
     eth_write_shared_mem(offset, &value, 4);
 }
 
-static void eth_write_shared_reg(uint32_t offset, uint8_t value)
+static void eth_write_shared_u16(uint32_t offset, uint16_t value)
 {
-    // Write 8-bit register value to LSB of 32-bit word
-    uint32_t reg_val = (uint32_t)value;
-    eth_write_shared_mem(offset, &reg_val, 4);
+    eth_write_shared_mem(offset, &value, 2);
 }
 
 static uint8_t eth_read_shared_reg(uint32_t offset)
@@ -123,14 +133,116 @@ static uint32_t eth_read_shared_u32(uint32_t offset)
     return value;
 }
 
+static uint16_t eth_read_shared_u16(uint32_t offset)
+{
+    uint16_t value;
+    eth_read_shared_mem(offset, &value, 2);
+    return value;
+}
+
+static bool eth_read_text_file(const char* path, char* buffer, size_t buffer_size)
+{
+    if (!path || !buffer || buffer_size < 2) {
+        return false;
+    }
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    ssize_t len = read(fd, buffer, buffer_size - 1);
+    close(fd);
+
+    if (len <= 0) {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    buffer[len] = '\0';
+    while (len > 0 && (buffer[len - 1] == '\n' || buffer[len - 1] == '\r' ||
+                       buffer[len - 1] == ' '  || buffer[len - 1] == '\t')) {
+        buffer[--len] = '\0';
+    }
+
+    return true;
+}
+
+static uint16_t eth_detect_link_status_bits(void)
+{
+    char path[128];
+    char value[32];
+    uint16_t status = 0;
+    bool link_known = false;
+    bool link_up = false;
+
+    if (bridge_interface[0]) {
+        snprintf(path, sizeof(path), "/sys/class/net/%s/carrier", bridge_interface);
+        if (eth_read_text_file(path, value, sizeof(value))) {
+            link_known = true;
+            link_up = (value[0] == '1');
+        }
+
+        if (!link_known) {
+            snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", bridge_interface);
+            if (eth_read_text_file(path, value, sizeof(value))) {
+                link_known = true;
+                link_up = !strcmp(value, "up") || !strcmp(value, "unknown");
+            }
+        }
+
+        if (link_known) {
+            if (link_up) {
+                status |= ETH_STATUS_LINK_UP;
+                snprintf(path, sizeof(path), "/sys/class/net/%s/duplex", bridge_interface);
+                if (eth_read_text_file(path, value, sizeof(value)) && !strcmp(value, "full")) {
+                    status |= ETH_STATUS_FULL_DUPLEX;
+                }
+            }
+            return status;
+        }
+    }
+
+    return (raw_socket >= 0) ? ETH_STATUS_LINK_UP : 0;
+}
+
 static uint32_t eth_update_shared_flags(uint32_t clear_mask, uint32_t set_mask)
 {
-    uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS) & 0xFFFFu;
-    flags &= (ETH_FLAG_FPGA_MIRROR_MASK | ETH_FLAG_HPS_OWNED_MASK);
+    uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS);
     flags = (flags & ~clear_mask) | set_mask;
     eth_write_shared_u32(ETH_CTRL_FLAGS, flags);
     return flags;
 }
+
+static uint16_t eth_link_status_bits(void)
+{
+    static uint16_t cached_bits = 0;
+    static uint8_t refresh_divider = 0;
+
+    if ((raw_socket < 0) || (refresh_divider == 0)) {
+        cached_bits = eth_detect_link_status_bits();
+    }
+
+    if (refresh_divider == 0xFF) {
+        refresh_divider = 0;
+    } else {
+        refresh_divider++;
+    }
+
+    return cached_bits;
+}
+
+static void eth_update_shared_status(uint16_t clear_mask, uint16_t set_mask)
+{
+    uint16_t status = eth_read_shared_u16(ETH_CTRL_STATUS);
+    status = (status & ~clear_mask) | set_mask;
+    status &= ~(ETH_STATUS_LINK_UP | ETH_STATUS_FULL_DUPLEX);
+    status |= eth_link_status_bits();
+    eth_write_shared_u16(ETH_CTRL_STATUS, status);
+}
+
+static uint8_t read_ne_register(uint8_t page, uint8_t reg);
 
 static bool translate_ne_packet_addr(uint16_t addr, uint32_t* shared_offset)
 {
@@ -155,6 +267,38 @@ static uint8_t synthetic_prom_byte(uint16_t addr)
     return prom[(addr >> 1) & 0x0F];
 }
 
+static uint32_t ethernet_crc32_le(const uint8_t* data, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+
+    while (len--) {
+        crc ^= *data++;
+
+        for (int bit = 0; bit < 8; bit++) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0xEDB88320u;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+
+    return crc;
+}
+
+static bool multicast_hash_match(const uint8_t dest_mac[6])
+{
+    uint8_t mar[8];
+    uint32_t crc = ethernet_crc32_le(dest_mac, 6);
+    uint8_t hash = (crc >> 26) & 0x3F;
+
+    for (int i = 0; i < 8; i++) {
+        mar[i] = read_ne_register(1, 0x08 + i);
+    }
+
+    return (mar[hash >> 3] & (1u << (hash & 7))) != 0;
+}
+
 // Helper functions to access NE2000 memory directly from shared memory
 static uint8_t read_ne_memory(uint16_t addr)
 {
@@ -174,32 +318,6 @@ static uint8_t read_ne_memory(uint16_t addr)
     return value;
 }
 
-static void write_ne_memory(uint16_t addr, uint8_t value)
-{
-    uint32_t shared_offset;
-
-    if (!translate_ne_packet_addr(addr, &shared_offset)) {
-        eth_debug("NE2000 memory write to unmapped addr=0x%04X\n", addr);
-        return;
-    }
-
-    eth_write_shared_mem(shared_offset, &value, 1);
-}
-
-// read_ne_memory_block removed - unused after optimizations
-
-static void write_ne_memory_block(uint16_t addr, const void* data, uint16_t size)
-{
-    uint32_t shared_offset;
-
-    if ((addr < NE_PMEM_START) || ((uint32_t)addr + size > NE_PMEM_END) ||
-        !translate_ne_packet_addr(addr, &shared_offset)) {
-        eth_debug("NE2000 memory block write beyond bounds: addr=0x%04X, size=%d\n", addr, size);
-        return;
-    }
-    eth_write_shared_mem(shared_offset, data, size);
-}
-
 // Helper functions to access NE2000 registers directly from shared memory
 static uint8_t read_ne_register(uint8_t page, uint8_t reg)
 {
@@ -211,18 +329,6 @@ static uint8_t read_ne_register(uint8_t page, uint8_t reg)
     // Each page has 16 registers, each taking 4 bytes
     uint32_t offset = (page * 16 + reg) * 4;
     return eth_read_shared_reg(ETH_CTRL_REGS + offset);
-}
-
-static void write_ne_register(uint8_t page, uint8_t reg, uint8_t value)
-{
-    if (page > 3 || reg > 15) {
-        eth_debug("NE2000 register write beyond bounds: page=%d, reg=0x%02X\n", page, reg);
-        return;
-    }
-    // Registers are stored as 32-bit aligned values in shared memory
-    // Each page has 16 registers, each taking 4 bytes
-    uint32_t offset = (page * 16 + reg) * 4;
-    eth_write_shared_reg(ETH_CTRL_REGS + offset, value);
 }
 
 // DMA is handled entirely by FPGA - no HPS tracking needed
@@ -254,23 +360,156 @@ static void read_shared_mac(uint8_t mac_addr[6])
     eth_read_shared_mem(ETH_CTRL_MAC, mac_addr, 6);
 }
 
-static bool read_interface_mac(uint8_t mac_addr[6])
+struct tx_request {
+    uint16_t addr;
+    uint16_t len;
+    uint16_t seq;
+};
+
+static struct tx_request read_shared_tx_request()
 {
-    struct ifreq ifr;
+    struct tx_request request;
+
+    request.addr = eth_read_shared_u16(ETH_TX_REQUEST_ADDR);
+    request.len = eth_read_shared_u16(ETH_TX_REQUEST_LEN);
+    request.seq = eth_read_shared_u16(ETH_TX_REQUEST_SEQ);
+
+    return request;
+}
+
+static void clear_host_rx_queue()
+{
+    host_rx_queue_head = 0;
+    host_rx_queue_tail = 0;
+    host_rx_queue_count = 0;
+}
+
+static uint16_t next_shared_rx_slot(uint16_t slot)
+{
+    return (slot + 1) % ETH_RX_QUEUE_SLOTS;
+}
+
+static uint32_t shared_rx_slot_data_offset(uint16_t slot)
+{
+    return ETH_RX_QUEUE_DATA + slot * ETH_PACKET_BUFFER_SIZE;
+}
+
+static uint32_t shared_rx_slot_len_offset(uint16_t slot)
+{
+    return ETH_RX_QUEUE_LEN + slot * sizeof(uint16_t);
+}
+
+static uint16_t read_shared_rx_queue_head()
+{
+    return eth_read_shared_u16(ETH_RX_QUEUE_HEAD) & 0x00FF;
+}
+
+static uint16_t read_shared_rx_queue_tail()
+{
+    return eth_read_shared_u16(ETH_RX_QUEUE_TAIL) & 0x00FF;
+}
+
+static void write_shared_rx_queue_head(uint16_t head)
+{
+    eth_write_shared_u16(ETH_RX_QUEUE_HEAD, head & 0x00FF);
+}
+
+static void write_shared_rx_queue_tail(uint16_t tail)
+{
+    eth_write_shared_u16(ETH_RX_QUEUE_TAIL, tail & 0x00FF);
+}
+
+static bool enqueue_host_rx_packet(const uint8_t* data, uint16_t len)
+{
+    if (len > ETH_PACKET_BUFFER_SIZE || host_rx_queue_count >= ETH_HOST_RX_QUEUE_DEPTH) {
+        return false;
+    }
+
+    memcpy(host_rx_queue[host_rx_queue_tail].data, data, len);
+    host_rx_queue[host_rx_queue_tail].len = len;
+    host_rx_queue_tail = (host_rx_queue_tail + 1) % ETH_HOST_RX_QUEUE_DEPTH;
+    host_rx_queue_count++;
+    return true;
+}
+
+static bool enqueue_shared_rx_packet(const uint8_t* data, uint16_t len, uint32_t* flags,
+                                     struct rtl8019_state* state)
+{
+    uint16_t head = read_shared_rx_queue_head();
+    uint16_t tail = read_shared_rx_queue_tail();
+    uint16_t next_tail = next_shared_rx_slot(tail);
+
+    if (next_tail == head) {
+        return false;
+    }
+
+    eth_write_shared_mem(shared_rx_slot_data_offset(tail), data, len);
+    eth_write_shared_u16(shared_rx_slot_len_offset(tail), len);
+    write_shared_rx_queue_tail(next_tail);
+    *flags = eth_update_shared_flags(0, ETH_FLAG_RX_AVAIL);
+
+    eth_debug("ETH: Enqueued shared RX packet slot=%u len=%u head=%u tail->%u\n",
+              tail, len, head, next_tail);
+
+    if (state) {
+        state->rx_packets++;
+        write_eth_state_stats(state);
+    }
+    return true;
+}
+
+static bool rx_path_active(uint32_t flags)
+{
+    uint8_t cr_reg;
+    uint8_t rcr_reg;
+
+    if (!(flags & ETH_FLAG_ENABLED)) {
+        return false;
+    }
+
+    cr_reg = read_ne_register(0, 0x00);
+    rcr_reg = read_ne_register(0, 0x0C);
+
+    if (cr_reg & 0x01) {
+        return false;
+    }
+
+    if (rcr_reg & NE_RCR_MON) {
+        return false;
+    }
+
+    return true;
+}
+
+static void drain_disabled_rx_socket()
+{
+    uint8_t buffer[ETH_PACKET_BUFFER_SIZE];
 
     if (raw_socket < 0) {
+        return;
+    }
+
+    for (;;) {
+        ssize_t len = recv(raw_socket, buffer, sizeof(buffer), 0);
+        if (len <= 0) {
+            break;
+        }
+    }
+}
+
+static bool pump_host_rx_queue(uint32_t* flags, struct rtl8019_state* state)
+{
+    if (host_rx_queue_count == 0) {
         return false;
     }
 
-    memset(&ifr, 0, sizeof(ifr));
-    strncpy(ifr.ifr_name, bridge_interface, IFNAMSIZ - 1);
-    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
-
-    if (ioctl(raw_socket, SIOCGIFHWADDR, &ifr) < 0) {
+    struct host_rx_packet packet = host_rx_queue[host_rx_queue_head];
+    if (!enqueue_shared_rx_packet(packet.data, packet.len, flags, state)) {
         return false;
     }
 
-    memcpy(mac_addr, ifr.ifr_hwaddr.sa_data, 6);
+    host_rx_queue_head = (host_rx_queue_head + 1) % ETH_HOST_RX_QUEUE_DEPTH;
+    host_rx_queue_count--;
     return true;
 }
 
@@ -296,13 +535,14 @@ void minimig_eth_init()
     //                            0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99};
     //eth_write_shared_mem(ETH_RX_BUFFER, test_pattern, 16);
     
-    eth_debug("ETH: Shared memory initialized with signature 0x%08X\n", 0xCAFEBABE);
+    eth_debug("ETH: Shared memory initialized with signature 0x%08X\n", ETH_HPS_SIGNATURE_MAGIC);
     
     // Try to open raw socket for ethernet bridging
     eth_debug("ETH: Opening raw socket for bridging...\n");
     raw_socket = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (raw_socket < 0) {
         eth_debug("ETH: Warning: Could not open raw socket for ethernet bridging: %s\n", strerror(errno));
+        eth_update_shared_status(0xFFFF, 0);
         return;
     }
     eth_debug("ETH: Raw socket opened successfully\n");
@@ -313,6 +553,7 @@ void minimig_eth_init()
         eth_debug("Failed to get interface addresses\n");
         close(raw_socket);
         raw_socket = -1;
+        eth_update_shared_status(0xFFFF, 0);
         return;
     }
     
@@ -320,9 +561,11 @@ void minimig_eth_init()
     for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
         if (ifa->ifa_addr == NULL) continue;
         
-        if (ifa->ifa_addr->sa_family == AF_PACKET && 
-            strncmp(ifa->ifa_name, "eth", 3) == 0) {
-            strcpy(bridge_interface, ifa->ifa_name);
+        if (ifa->ifa_addr->sa_family == AF_PACKET &&
+            !(ifa->ifa_flags & IFF_LOOPBACK) &&
+            (ifa->ifa_flags & IFF_UP)) {
+            strncpy(bridge_interface, ifa->ifa_name, sizeof(bridge_interface) - 1);
+            bridge_interface[sizeof(bridge_interface) - 1] = '\0';
             interface_found = true;
             break;
         }
@@ -333,6 +576,7 @@ void minimig_eth_init()
         eth_debug("ETH: Warning: No ethernet interface found for bridging\n");
         close(raw_socket);
         raw_socket = -1;
+        eth_update_shared_status(0xFFFF, 0);
         return;
     }
     eth_debug("ETH: Found ethernet interface: %s\n", bridge_interface);
@@ -344,6 +588,7 @@ void minimig_eth_init()
         eth_debug("Failed to get interface index: %s\n", strerror(errno));
         close(raw_socket);
         raw_socket = -1;
+        eth_update_shared_status(0xFFFF, 0);
         return;
     }
     
@@ -357,35 +602,23 @@ void minimig_eth_init()
         eth_debug("ETH: Failed to bind raw socket: %s\n", strerror(errno));
         close(raw_socket);
         raw_socket = -1;
+        eth_update_shared_status(0xFFFF, 0);
         return;
     }
     eth_debug("ETH: Socket bound to interface successfully\n");
+    eth_update_shared_status(ETH_STATUS_LINK_UP, 0);
     
     // Print summary of ethernet initialization
-    uint8_t host_mac[6];
     uint8_t shared_mac[6];
-    bool have_host_mac = read_interface_mac(host_mac);
-
     read_shared_mac(shared_mac);
 
     eth_debug("===============================================\n");
     eth_debug("ETH: X-Surf 100 Ethernet Initialized!\n");
     eth_debug("ETH: Amiga Address: 0x%06X\n", ETH_BOARD_ADDR);
     eth_debug("ETH: HPS Memory:    0x%08X\n", ETH_SHMEM_ADDR);
-    if (have_host_mac) {
-        eth_debug("ETH: Host MAC:      %02X:%02X:%02X:%02X:%02X:%02X\n",
-               host_mac[0], host_mac[1], host_mac[2],
-               host_mac[3], host_mac[4], host_mac[5]);
-    } else {
-        eth_debug("ETH: Host MAC:      unavailable\n");
-    }
-    if (!memcmp(shared_mac, rtl8019_default_mac, sizeof(shared_mac))) {
-        eth_debug("ETH: RTL8019 MAC:   %02X:%02X:%02X:%02X:%02X:%02X\n",
-               shared_mac[0], shared_mac[1], shared_mac[2],
-               shared_mac[3], shared_mac[4], shared_mac[5]);
-    } else {
-        eth_debug("ETH: RTL8019 MAC:   pending shared mirror sync\n");
-    }
+    eth_debug("ETH: MAC Address:   %02X:%02X:%02X:%02X:%02X:%02X\n",
+           shared_mac[0], shared_mac[1], shared_mac[2],
+           shared_mac[3], shared_mac[4], shared_mac[5]);
     eth_debug("ETH: Interface:     %s\n", bridge_interface);
     eth_debug("===============================================\n");
     
@@ -410,273 +643,188 @@ void minimig_eth_reset()
     state.tx_errors = 0;
     state.rx_errors = 0;
 
-    memset(eth_shmem + ETH_RX_BUFFER, 0, 1500);
-    memset(eth_shmem + ETH_PACKET_INFO, 0, 4);
+    uint16_t reset_tx_request_seq = eth_read_shared_u16(ETH_TX_REQUEST_SEQ);
+    uint16_t reset_tx_complete_seq = eth_read_shared_u16(ETH_TX_COMPLETE_SEQ);
+    bool preserve_pending_tx =
+        (reset_tx_request_seq != 0) && (reset_tx_request_seq != reset_tx_complete_seq);
+
+    clear_host_rx_queue();
+
+    if (preserve_pending_tx) {
+        hps_last_tx_complete_seq = reset_tx_complete_seq;
+        eth_debug("ETH: Preserving pending TX request seq=%u across HPS reset\n",
+                  reset_tx_request_seq);
+    } else {
+        hps_last_tx_complete_seq = 0;
+        memset(eth_shmem + ETH_TX_BUFFER, 0, ETH_PACKET_BUFFER_SIZE);
+        eth_write_shared_u16(ETH_TX_REQUEST_ADDR, 0);
+        eth_write_shared_u16(ETH_TX_REQUEST_LEN, 0);
+        eth_write_shared_u16(ETH_TX_REQUEST_SEQ, 0);
+        eth_write_shared_u16(ETH_TX_COMPLETE_SEQ, 0);
+    }
+
+    memset(eth_shmem + ETH_RX_BUFFER, 0, ETH_PACKET_BUFFER_SIZE);
+    memset(eth_shmem + ETH_RX_QUEUE_DATA, 0, ETH_RX_QUEUE_SLOTS * ETH_PACKET_BUFFER_SIZE);
+    memset(eth_shmem + ETH_RX_QUEUE_LEN, 0, ETH_RX_QUEUE_SLOTS * sizeof(uint16_t));
+    write_shared_rx_queue_head(0);
+    write_shared_rx_queue_tail(0);
 
     write_eth_state_stats(&state);
-    eth_write_shared_u32(ETH_CTRL_FLAGS,
-                         eth_read_shared_u32(ETH_CTRL_FLAGS) & ETH_FLAG_FPGA_MIRROR_MASK);
-    eth_write_shared_u32(ETH_HPS_SIGNATURE, 0xCAFEBABE);
+    eth_update_shared_status(0xFFFF, 0);
+    eth_update_shared_flags(ETH_FLAG_RESET | ETH_FLAG_RX_AVAIL, 0);
+    eth_write_shared_u32(ETH_HPS_SIGNATURE, ETH_HPS_SIGNATURE_MAGIC);
     hps_heartbeat_counter = 0;
     eth_write_shared_u32(ETH_HPS_HEARTBEAT, hps_heartbeat_counter);
 }
 
-// Read from RTL8019 register (called when Amiga accesses ethernet card)
-uint8_t minimig_eth_read_reg(uint32_t addr)
-{
-    // Convert 32-bit aligned address to register number
-    // addr is offset from register base, divide by 4 to get register number
-    uint8_t reg = (addr >> 2) & 0x1F;  // Each register is 4 bytes apart
-    uint8_t value = 0;
-    
-    static int read_count = 0;
-    if (++read_count <= 10 || (read_count % 100) == 0) {
-        eth_debug("ETH: Amiga READ  reg[0x%02X] = 0x%02X (count: %d)\n", reg, value, read_count);
-    }
-    
-    if (reg == 0x1F) {  // NE_RESET register number
-        // Reading reset port triggers reset
-        minimig_eth_reset();
-        return 0;
-    }
-    
-    if (reg == 0x10) {  // NE_DATAPORT register number
-        // Data port access
-        return minimig_eth_read_data() & 0xFF;
-    }
-    
-    // Regular register read - FPGA handles all register logic
-    uint8_t cr_reg = read_ne_register(0, 0x00);  // Get CR register
-    uint8_t page = (cr_reg & (NE_CR_PS0 | NE_CR_PS1)) >> 6;  // Get page from CR register
-    
-    if (reg < 16) {
-        value = read_ne_register(page, reg);
-        // FPGA handles all register logic, interrupts, and status updates
-    }
-    
-    eth_debug("RTL8019 read reg[%d][0x%02X] = 0x%02X\n", page, reg, value);
-    return value;
-}
-
-// Legacy direct HPS register-write path. The FPGA now owns live register state.
-void minimig_eth_write_reg(uint32_t addr, uint8_t data)
-{
-    // Convert 32-bit aligned address to register number
-    // addr is offset from register base, divide by 4 to get register number
-    uint8_t reg = (addr >> 2) & 0x1F;  // Each register is 4 bytes apart
-    
-    static int write_count = 0;
-    if (++write_count <= 10 || (write_count % 100) == 0) {
-        eth_debug("ETH: Amiga WRITE reg[0x%02X] = 0x%02X (count: %d)\n", reg, data, write_count);
-    }
-    
-    if (reg == 0x1F) {  // NE_RESET register number
-        // Writing to reset port triggers reset
-        minimig_eth_reset();
-        return;
-    }
-    
-    if (reg == 0x10) {  // NE_DATAPORT register number
-        // Data port access
-        minimig_eth_write_data(data);
-        return;
-    }
-
-    eth_debug("ETH: direct HPS register writes are obsolete; reg[0x%02X] write ignored\n", reg);
-}
-
-// Read data from RTL8019 data port
-// FPGA handles all DMA address/count management automatically
-uint16_t minimig_eth_read_data()
-{
-    static int data_read_count = 0;
-    
-    // Get current DMA state from registers (FPGA manages these)
-    uint16_t dma_addr = read_ne_register(0, 0x08) | (read_ne_register(0, 0x09) << 8);  // CRDA0/CRDA1
-    uint16_t dma_count = read_ne_register(0, 0x0A) | (read_ne_register(0, 0x0B) << 8); // RBCR0/RBCR1
-    
-    // Enhanced debug for FPGA data port access
-    eth_debug("ETH: >>> Data port READ request (call #%d)\n", data_read_count + 1);
-    eth_debug("ETH: FPGA DMA state - addr=0x%04X, count=%d\n", dma_addr, dma_count);
-    uint8_t dcr_reg = read_ne_register(0, 0x0E);
-    uint8_t cr_reg = read_ne_register(0, 0x00);
-    eth_debug("ETH: DCR=0x%02X (%s-bit mode), CR=0x%02X (page %d)\n",
-           dcr_reg, (dcr_reg & NE_DCR_WTS) ? "16" : "8",
-           cr_reg, (cr_reg >> 6) & 3);
-    
-    if (dma_count == 0) {
-        eth_debug("ETH: Data port read with zero DMA count!\n");
-        return 0;
-    }
-    
-    uint16_t addr = dma_addr;
-    uint16_t data = 0;
-    
-    // Read from NE2000 memory
-    if ((addr < NE_PROM_SIZE) || (addr >= NE_PMEM_START && addr < NE_PMEM_END)) {
-        data = read_ne_memory(addr);
-        if (read_ne_register(0, 0x0E) & NE_DCR_WTS) {  // DCR register
-            // 16-bit mode
-            if ((addr + 1 < NE_PROM_SIZE) || ((addr + 1) >= NE_PMEM_START && (addr + 1) < NE_PMEM_END)) {
-                data |= (read_ne_memory(addr + 1) << 8);
-            }
-            // FPGA automatically handles DMA address increment and byte count decrement
-            
-            // Debug output for 16-bit reads
-            if (++data_read_count <= 20 || (data_read_count % 100) == 0) {
-                eth_debug("ETH: FPGA Data read [0x%04X] = 0x%04X (16-bit, count:%d) - FPGA handles DMA\n", 
-                       addr, data, data_read_count);
-                
-                // Check if FPGA might be writing in LSB format to shared memory
-                if (data == 0) {
-                    // Data is zero - might indicate communication issue
-                }
-            }
-        } else {
-            // 8-bit mode
-            // FPGA automatically handles DMA address increment and byte count decrement
-            
-            // Debug output for 8-bit reads
-            if (data_read_count <= 20 || (data_read_count % 100) == 0) {
-                eth_debug("ETH: FPGA Data read [0x%04X] = 0x%02X (8-bit, count:%d) - FPGA handles DMA\n", 
-                       addr, data & 0xFF, ++data_read_count);
-            }
-        }
-    } else {
-        eth_debug("ETH: Data port read beyond memory bounds: addr=0x%04X\n", addr);
-    }
-    
-    // FPGA automatically handles DMA completion and sets ISR_RDC interrupt
-    // No HPS intervention needed for DMA management
-    
-    return data;
-}
-
-// Legacy direct HPS data-port write path. The FPGA now owns DMA writes.
-void minimig_eth_write_data(uint16_t data)
-{
-    eth_debug("ETH: direct HPS data-port writes are obsolete; write 0x%04X ignored\n", data);
-}
-
 // Transmit packet to host ethernet
-void transmit_packet()
+static bool transmit_packet(const struct tx_request* request)
 {
     struct rtl8019_state state;
     read_eth_state(&state);
-    if (raw_socket < 0) return;
-    
-    uint8_t page = read_ne_register(0, 0x04);  // TPSR register
-    uint16_t length = read_ne_register(0, 0x05) |     // TBCR0
-                     (read_ne_register(0, 0x06) << 8);   // TBCR1
-    
-    if (length == 0 || length > 1500) {
+    if (raw_socket < 0) {
+        state.tx_errors++;
+        write_eth_state_stats(&state);
+        return false;
+    }
+
+    uint16_t addr = request->addr;
+    uint16_t length = request->len;
+
+    if ((request->seq == 0) || (length == 0) || (length > ETH_PACKET_BUFFER_SIZE)) {
         eth_debug("Invalid packet length: %d\n", length);
         state.tx_errors++;
         write_eth_state_stats(&state);
-        return;
+        return false;
     }
-    
-    uint16_t offset = page * NE_PAGE_SIZE;
-    if ((offset < NE_PMEM_START) || ((uint32_t)offset + length > NE_PMEM_END)) {
+
+    if ((addr < NE_PMEM_START) || ((uint32_t)addr + length > NE_PMEM_END)) {
         eth_debug("Packet exceeds memory bounds\n");
         state.tx_errors++;
         write_eth_state_stats(&state);
-        return;
+        return false;
     }
-    
-    // No need to copy to a separate TX buffer; transmit directly from the
-    // NE2000 memory mirror. Keep packet info writes away from the RX length
-    // field at ETH_PACKET_INFO + 2, which is owned by the HPS->FPGA RX path.
-    eth_write_shared_mem(ETH_PACKET_INFO, &length, 2);
-    
+
     // Debug: Show first 32 bytes of transmitted packet
-    eth_debug("ETH: Transmitting packet from offset 0x%04X, length %d bytes:\n", offset, length);
+    eth_debug("ETH: Transmitting request seq=%u from addr 0x%04X, length %d bytes:\n",
+              request->seq, addr, length);
     eth_debug("ETH: TX Data: ");
     for (int i = 0; i < 32 && i < length; i++) {
-        uint8_t byte_val = read_ne_memory(offset + i);
+        uint8_t byte_val = eth_shmem[ETH_TX_BUFFER + i];
         eth_debug("%02X ", byte_val);
         if ((i + 1) % 16 == 0) eth_debug("\nETH: TX Data: ");
     }
     eth_debug("\n");
-    
-    // Send packet via raw socket - read directly from shared memory
-    uint8_t* packet_data = eth_shmem + ETH_NE_MEMORY + (offset - NE_PMEM_START);
-    if (send(raw_socket, packet_data, length, 0) < 0) {
+
+    // Send the packet staged by the FPGA background DMA path.
+    uint8_t* packet_data = eth_shmem + ETH_TX_BUFFER;
+    ssize_t sent = send(raw_socket, packet_data, length, 0);
+    if (sent < 0) {
         eth_debug("ETH: Failed to send packet: %s\n", strerror(errno));
         state.tx_errors++;
+        write_eth_state_stats(&state);
+        return false;
+    } else if (sent != length) {
+        eth_debug("ETH: Short send: expected %u bytes, sent %zd bytes\n", length, sent);
+        state.tx_errors++;
+        write_eth_state_stats(&state);
+        return false;
     } else {
         eth_debug("ETH: Transmitted packet of %d bytes (total TX: %d)\n", length, state.tx_packets + 1);
         state.tx_packets++;
     }
 
     write_eth_state_stats(&state);
+    return true;
 }
 
 // Receive packet from host ethernet
 void receive_packet()
 {
-    uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS) & 0xFFFFu;
+    uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS);
     struct rtl8019_state state;
+    uint8_t rcr;
+    uint8_t mac_addr[6];
     read_eth_state(&state);
-    if (raw_socket < 0 || !(flags & ETH_FLAG_ENABLED)) return;
-    if (flags & ETH_FLAG_RX_AVAIL) return;
-    
-    uint8_t buffer[1600];
-    ssize_t len = recv(raw_socket, buffer, sizeof(buffer), 0);
-    
-    if (len <= 0) return;
-    
-    // Filter out our own transmitted packets and non-ethernet frames
-    if (len < 14) return;
-    
-    if (len > 1500) {
-        eth_debug("ETH: Dropping oversized RX packet (%zd bytes)\n", len);
-        state.rx_errors++;
-        write_eth_state_stats(&state);
+    if (raw_socket < 0) return;
+
+    if (!rx_path_active(flags)) {
+        if (host_rx_queue_count != 0) {
+            clear_host_rx_queue();
+        }
+        drain_disabled_rx_socket();
         return;
     }
 
-    uint8_t mac_addr[6];
+    rcr = read_ne_register(0, 0x0C);
     read_shared_mac(mac_addr);
 
-    // Check if packet is for us (broadcast, multicast, or our MAC)
-    bool accept = false;
-    
-    // Broadcast
-    if (memcmp(buffer, "\xFF\xFF\xFF\xFF\xFF\xFF", 6) == 0) {
-        accept = (read_ne_register(0, 0x0C) & NE_RCR_AB) != 0;  // RCR register
+    while (pump_host_rx_queue(&flags, &state)) {
     }
-    // Multicast
-    else if (buffer[0] & 0x01) {
-        accept = (read_ne_register(0, 0x0C) & NE_RCR_AM) != 0;  // RCR register
+
+    for (;;) {
+        uint8_t buffer[ETH_PACKET_BUFFER_SIZE];
+        ssize_t len = recv(raw_socket, buffer, sizeof(buffer), 0);
+
+        if (len <= 0) {
+            break;
+        }
+
+        // Filter out non-ethernet frames.
+        if (len < 14) {
+            continue;
+        }
+
+        if (len > ETH_PACKET_BUFFER_SIZE) {
+            eth_debug("ETH: Dropping oversized RX packet (%zd bytes)\n", len);
+            state.rx_errors++;
+            continue;
+        }
+
+        if ((len < 60) && !(rcr & NE_RCR_AR)) {
+            continue;
+        }
+
+        // Respect the RTL8019 receive filter so we don't queue the whole LAN.
+        bool accept = false;
+
+        if (rcr & NE_RCR_PRO) {
+            accept = true;
+        }
+        else if (memcmp(buffer, "\xFF\xFF\xFF\xFF\xFF\xFF", 6) == 0) {
+            accept = (rcr & NE_RCR_AB) != 0;
+        }
+        else if (buffer[0] & 0x01) {
+            accept = (rcr & NE_RCR_AM) && multicast_hash_match(buffer);
+        }
+        else if (memcmp(buffer, mac_addr, 6) == 0) {
+            accept = true;
+        }
+
+        if (!accept) {
+            continue;
+        }
+
+        uint16_t packet_len = (uint16_t)len;
+
+        if (enqueue_shared_rx_packet(buffer, packet_len, &flags, &state)) {
+        } else if (!enqueue_host_rx_packet(buffer, packet_len)) {
+            eth_debug("ETH: RX software queue full, dropping packet of %u bytes\n", packet_len);
+            state.rx_errors++;
+        } else {
+            eth_debug("ETH: Deferred RX packet of %u bytes in host queue (depth: %u)\n",
+                      packet_len, host_rx_queue_count);
+        }
+
+        // Debug: Show first 32 bytes of received packet
+        eth_debug("ETH: RX Data: ");
+        for (int i = 0; i < 32 && i < len; i++) {
+            eth_debug("%02X ", buffer[i]);
+            if ((i + 1) % 16 == 0) eth_debug("\nETH: RX Data: ");
+        }
+        eth_debug("\n");
     }
-    // Unicast to our MAC
-    else if (memcmp(buffer, mac_addr, 6) == 0) {
-        accept = true;
-    }
-    // Promiscuous mode
-    else if (read_ne_register(0, 0x0C) & NE_RCR_PRO) {  // RCR register
-        accept = true;
-    }
-    
-    if (!accept) return;
-    
-    uint16_t packet_len = (uint16_t)len;
-    eth_write_shared_mem(ETH_RX_BUFFER, buffer, packet_len);
-    eth_write_shared_mem(ETH_PACKET_INFO + 2, &packet_len, 2);
-    eth_update_shared_flags(0, ETH_FLAG_RX_AVAIL);
-    
-    eth_debug("ETH: Received packet of %zd bytes (total RX: %d)\n", len, state.rx_packets + 1);
-    
-    // Debug: Show first 32 bytes of received packet
-    eth_debug("ETH: RX Data: ");
-    for (int i = 0; i < 32 && i < len; i++) {
-        eth_debug("%02X ", buffer[i]);
-        if ((i + 1) % 16 == 0) eth_debug("\nETH: RX Data: ");
-    }
-    eth_debug("\n");
-    
-    state.rx_packets++;
+
     write_eth_state_stats(&state);
 }
 
@@ -693,22 +841,22 @@ void minimig_eth_poll()
 	else if(eth_shmem != (uint8_t *)-1)
 	{
         // Check for control flags from FPGA via shared memory
-        uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS) & 0xFFFFu;
+        uint32_t flags = eth_read_shared_u32(ETH_CTRL_FLAGS);
         
         // Update heartbeat counter every poll
         hps_heartbeat_counter++;
         eth_write_shared_u32(ETH_HPS_HEARTBEAT, hps_heartbeat_counter);
-        eth_write_shared_u32(ETH_HPS_SIGNATURE, 0xCAFEBABE);
+        eth_write_shared_u32(ETH_HPS_SIGNATURE, ETH_HPS_SIGNATURE_MAGIC);
+        eth_update_shared_status(ETH_STATUS_LINK_UP, 0);
         
-        // OPTIMIZATION: Reduced monitoring - only check packet info for activity
-        static uint16_t last_packet_info = 0;
-        
-        // Check packet info for new activity (both TX/RX use this)
-        uint16_t packet_info_check = 0;
-        eth_read_shared_mem(ETH_PACKET_INFO, &packet_info_check, 2);
-        if (packet_info_check != last_packet_info) {
-            eth_debug("ETH: Packet activity detected! Length: %d\n", packet_info_check);
-            last_packet_info = packet_info_check;
+        // Reduced monitoring: only log when a new TX mailbox request appears.
+        static uint16_t last_tx_request_seq = 0;
+        uint16_t tx_request_seq = eth_read_shared_u16(ETH_TX_REQUEST_SEQ);
+        bool tx_sequence_pending =
+            (tx_request_seq != 0) && (tx_request_seq != hps_last_tx_complete_seq);
+        if (tx_request_seq != last_tx_request_seq) {
+            eth_debug("ETH: TX mailbox activity detected! seq=%u\n", tx_request_seq);
+            last_tx_request_seq = tx_request_seq;
         }
         
         // Debug output every 10000 polls (reduced frequency)
@@ -716,29 +864,43 @@ void minimig_eth_poll()
             struct rtl8019_state state;
             uint8_t cr_reg = read_ne_register(0, 0x00);
             uint8_t curr_reg = read_ne_register(1, 0x07);
+            uint16_t status = eth_read_shared_u16(ETH_CTRL_STATUS);
+            uint32_t raw_cr_word = eth_read_shared_u32(ETH_CTRL_REGS);
+            uint16_t tx_complete_seq = eth_read_shared_u16(ETH_TX_COMPLETE_SEQ);
             read_eth_state(&state);
 
             // Read enabled status from shared memory
             bool enabled = (flags & ETH_FLAG_ENABLED) != 0;
             
-            eth_debug("ETH: Poll #%d, flags=0x%08X, enabled=%d, CR=0x%02X, CURR=0x%02X, P=%u, TX:%d, RX:%d, HB:%d\n",
-                   poll_count, flags, enabled, cr_reg, curr_reg, state.current_page,
-                   state.tx_packets, state.rx_packets, hps_heartbeat_counter);
+            eth_debug("ETH: Poll #%d, flags=0x%08X, status=0x%04X, enabled=%d, CR=0x%02X, rawCR=0x%08X, CURR=0x%02X, P=%u, TX:%d, RX:%d, TXSEQ:%u/%u, HB:%d\n",
+                   poll_count, flags, status, enabled, cr_reg, raw_cr_word,
+                   curr_reg, state.current_page, state.tx_packets, state.rx_packets,
+                   tx_request_seq, tx_complete_seq, hps_heartbeat_counter);
             //minimig_eth_test();
         }
         
         // FPGA handles all register management directly via shared memory
 
         // Handle transmit request
-        if (flags & ETH_FLAG_TX_REQ) {
-            transmit_packet();
+        if ((flags & ETH_FLAG_TX_REQ) || tx_sequence_pending) {
+            struct tx_request request = read_shared_tx_request();
+            if ((request.seq != 0) && (request.seq != hps_last_tx_complete_seq)) {
+                eth_update_shared_status(ETH_STATUS_TX_OK | ETH_STATUS_TX_ERR, 0);
+                bool tx_ok = transmit_packet(&request);
+                eth_write_shared_u16(ETH_TX_COMPLETE_SEQ, request.seq);
+                hps_last_tx_complete_seq = request.seq;
+                eth_update_shared_status(ETH_STATUS_TX_OK | ETH_STATUS_TX_ERR,
+                                         tx_ok ? ETH_STATUS_TX_OK : ETH_STATUS_TX_ERR);
+            } else if (request.seq == hps_last_tx_complete_seq) {
+                eth_write_shared_u16(ETH_TX_COMPLETE_SEQ, request.seq);
+            }
             flags = eth_update_shared_flags(ETH_FLAG_HPS_ACK_MASK, 0);
         }
         
         // Handle reset request
         if (flags & ETH_FLAG_RESET) {
             minimig_eth_reset();
-            flags = eth_read_shared_u32(ETH_CTRL_FLAGS) & 0xFFFFu;
+            flags = eth_read_shared_u32(ETH_CTRL_FLAGS);
         }
         
         // Check for incoming packets
@@ -779,9 +941,9 @@ void minimig_eth_test()
                shared_mac[0], shared_mac[1], shared_mac[2],
                shared_mac[3], shared_mac[4], shared_mac[5]);
         eth_debug("  Curr page: %u, enabled: %u, TX stats: %u, RX stats: %u\n",
-               state.current_page, state.enabled ? 1 : 0,
+               state.current_page, (flags & ETH_FLAG_ENABLED) ? 1 : 0,
                state.tx_packets, state.rx_packets);
-        eth_debug("  Use the RTL testbenches and ethernet_register_test.c for active validation.\n");
+        eth_debug("  Use extra/xsurftest.asm and ABI consistency checks for active validation.\n");
         return;
     }
     
@@ -812,7 +974,7 @@ void minimig_eth_test()
     uint32_t prev_heartbeat = eth_read_shared_u32(ETH_HPS_HEARTBEAT);
     uint32_t prev_signature = eth_read_shared_u32(ETH_HPS_SIGNATURE);
     uint32_t expected_heartbeat = 0x04000000 | ETH_HPS_HEARTBEAT;
-    uint32_t expected_signature = 0xCAFEBABE;
+    uint32_t expected_signature = ETH_HPS_SIGNATURE_MAGIC;
     
     // Region 5-7: Buffer patterns
     uint32_t prev_tx = eth_read_shared_u32(ETH_TX_BUFFER);
@@ -930,11 +1092,11 @@ void minimig_eth_test()
     // Region 4: Heartbeat and Signature
     pattern = 0x04000000 | ETH_HPS_HEARTBEAT;
     eth_write_shared_u32(ETH_HPS_HEARTBEAT, pattern);
-    eth_write_shared_u32(ETH_HPS_SIGNATURE, 0xCAFEBABE);
+    eth_write_shared_u32(ETH_HPS_SIGNATURE, ETH_HPS_SIGNATURE_MAGIC);
     eth_debug("  [0x%04X] Heartbeat         = 0x%08X (Amiga: 0x%06X)\n",
            ETH_HPS_HEARTBEAT, pattern, ETH_BOARD_ADDR +ETH_HPS_HEARTBEAT);
-    eth_debug("  [0x%04X] Signature         = 0xCAFEBABE (Amiga: 0x%06X)\n",
-           ETH_HPS_SIGNATURE, ETH_BOARD_ADDR +ETH_HPS_SIGNATURE);
+    eth_debug("  [0x%04X] Signature         = 0x%08X (Amiga: 0x%06X)\n",
+           ETH_HPS_SIGNATURE, ETH_HPS_SIGNATURE_MAGIC, ETH_BOARD_ADDR +ETH_HPS_SIGNATURE);
     
     // Region 5: TX Buffer (0x2000) - Write address pattern every 256 bytes
     eth_debug("  [0x%04X] TX Buffer patterns...\n", ETH_TX_BUFFER);
