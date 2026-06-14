@@ -779,9 +779,17 @@ function [15:0] sync_slot_wdata;
             6'd16, 6'd17, 6'd18, 6'd19, 6'd20, 6'd21, 6'd22, 6'd23,
             6'd24, 6'd25, 6'd26, 6'd27, 6'd28, 6'd29, 6'd30, 6'd31:
                 sync_slot_wdata = {8'h00, shm_ctrl_reg_value(slot[4:0])};
-            6'd32: sync_slot_wdata = {par_registers[1], par_registers[0]};
-            6'd33: sync_slot_wdata = {par_registers[3], par_registers[2]};
-            6'd34: sync_slot_wdata = {par_registers[5], par_registers[4]};
+            // ETH_CTRL_MAC mirror (0x104C). The mailbox byte-swaps each 16-bit
+            // word on the way to DDR, so emit the pair as {byte_n, byte_n+1} to
+            // make the daemon read the 6 MAC bytes in order (mac[0..5] =
+            // par_registers[0..5]). Previously emitted {par[1],par[0]} etc.,
+            // which landed pair-swapped (54:52:04:05:02:03) so the daemon
+            // filtered unicast RX for the wrong address and dropped ping/ARP
+            // replies. The Amiga-side station PROM already reads 52:54:... ; this
+            // makes the daemon view agree.
+            6'd32: sync_slot_wdata = {par_registers[0], par_registers[1]};
+            6'd33: sync_slot_wdata = {par_registers[2], par_registers[3]};
+            6'd34: sync_slot_wdata = {par_registers[4], par_registers[5]};
             6'd35: sync_slot_wdata = {par_registers[0], state_page_byte};
             6'd36: sync_slot_wdata = {par_registers[2], par_registers[1]};
             6'd37: sync_slot_wdata = {par_registers[4], par_registers[3]};
