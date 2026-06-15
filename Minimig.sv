@@ -80,10 +80,13 @@ wire        eth_dma_req;
 wire        eth_dma_write;
 wire  [15:1] eth_dma_addr;
 wire  [15:0] eth_dma_wdata;
+wire        eth_dma_wide;
+wire  [63:0] eth_dma_wdata64;
 wire        eth_dma_uds;
 wire        eth_dma_lds;
 wire        eth_dma_ready;
 wire [15:0] eth_dma_rdata;
+wire [63:0] eth_dma_rdata64;
 
 
 hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
@@ -325,10 +328,13 @@ eth_ddr3_mailbox eth_mailbox
 	.eth_dma_write    (eth_dma_write       ),
 	.eth_dma_addr     (eth_dma_addr        ),
 	.eth_dma_wdata    (eth_dma_wdata       ),
+	.eth_dma_wide     (eth_dma_wide        ),
+	.eth_dma_wdata64  (eth_dma_wdata64     ),
 	.eth_dma_uds      (eth_dma_uds         ),
 	.eth_dma_lds      (eth_dma_lds         ),
 	.eth_dma_ready    (eth_dma_ready       ),
 	.eth_dma_rdata    (eth_dma_rdata       ),
+	.eth_dma_rdata64  (eth_dma_rdata64     ),
 
 	.clk_avl          (CLK_AUDIO           ),
 	.reset_avl        (eth_reset_audio_1   ),
@@ -713,10 +719,13 @@ minimig minimig
 		.eth_dma_write(eth_dma_write),
 		.eth_dma_addr(eth_dma_addr),
 		.eth_dma_wdata(eth_dma_wdata),
+		.eth_dma_wide(eth_dma_wide),
+		.eth_dma_wdata64(eth_dma_wdata64),
 		.eth_dma_uds(eth_dma_uds),
 		.eth_dma_lds(eth_dma_lds),
 		.eth_dma_ready(eth_dma_ready),
 		.eth_dma_rdata(eth_dma_rdata),
+		.eth_dma_rdata64(eth_dma_rdata64),
 
 		//user i/o
 		.cpucfg       (cpucfg           ), // CPU config

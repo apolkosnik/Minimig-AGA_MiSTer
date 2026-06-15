@@ -45,8 +45,17 @@ module eth_ddr3_mailbox
     input      [15:0] eth_dma_wdata,
     input             eth_dma_uds,        // active-low upper-byte select
     input             eth_dma_lds,        // active-low lower-byte select
+    // 64-bit "wide" packing: when eth_dma_wide is high at the rising edge of
+    // eth_dma_req, the whole 64-bit DDR word (all four 16-bit lanes) is moved
+    // in one Avalon transaction.  eth_dma_addr must be 64-bit aligned (byte
+    // addr[2:0]==0).  Lane L holds the 16-bit word at byte (base+2L); each lane
+    // is byte-swapped exactly like the per-lane 16-bit path so the on-wire DDR
+    // bytes are identical to four single-lane transfers.
+    input             eth_dma_wide,
+    input      [63:0] eth_dma_wdata64,    // lane0=[15:0] .. lane3=[63:48]
     output reg        eth_dma_ready,      // 1-cycle pulse (clk_sys) on completion
     output reg [15:0] eth_dma_rdata,
+    output reg [63:0] eth_dma_rdata64,    // valid with eth_dma_ready on a wide read
 
     // ---- clk_audio side: Avalon-MM master to eth_avalon_arbiter (m1) ----
     input             clk_avl,
@@ -73,7 +82,9 @@ module eth_ddr3_mailbox
     reg        req_toggle    = 1'b0;     // clk_sys -> clk_avl
     reg [15:1] addr_hold     = 15'h0000;
     reg [15:0] wdata_hold    = 16'h0000;
+    reg [63:0] wdata64_hold  = 64'h0;
     reg        write_hold    = 1'b0;
+    reg        wide_hold     = 1'b0;
     reg        uds_hold       = 1'b1;
     reg        lds_hold       = 1'b1;
 
@@ -82,6 +93,7 @@ module eth_ddr3_mailbox
     reg        done_sync     = 1'b0;
     reg        done_sync_d   = 1'b0;
     reg [15:0] rdata_avl      = 16'h0000;
+    reg [63:0] rdata_avl64    = 64'h0;
 
     wire done_pulse_sys = done_sync ^ done_sync_d;
 
@@ -91,7 +103,9 @@ module eth_ddr3_mailbox
             req_toggle   <= 1'b0;
             addr_hold    <= 15'h0000;
             wdata_hold   <= 16'h0000;
+            wdata64_hold <= 64'h0;
             write_hold   <= 1'b0;
+            wide_hold    <= 1'b0;
             uds_hold     <= 1'b1;
             lds_hold     <= 1'b1;
             done_meta    <= 1'b0;
@@ -99,15 +113,18 @@ module eth_ddr3_mailbox
             done_sync_d  <= 1'b0;
             eth_dma_ready<= 1'b0;
             eth_dma_rdata<= 16'h0000;
+            eth_dma_rdata64 <= 64'h0;
         end else begin
             req_d <= eth_dma_req;
             if (eth_dma_req && !req_d) begin
-                addr_hold  <= eth_dma_addr;
-                wdata_hold <= eth_dma_wdata;
-                write_hold <= eth_dma_write;
-                uds_hold   <= eth_dma_uds;
-                lds_hold   <= eth_dma_lds;
-                req_toggle <= ~req_toggle;
+                addr_hold    <= eth_dma_addr;
+                wdata_hold   <= eth_dma_wdata;
+                wdata64_hold <= eth_dma_wdata64;
+                write_hold   <= eth_dma_write;
+                wide_hold    <= eth_dma_wide;
+                uds_hold     <= eth_dma_uds;
+                lds_hold     <= eth_dma_lds;
+                req_toggle   <= ~req_toggle;
             end
 
             done_meta   <= done_toggle;
@@ -115,8 +132,10 @@ module eth_ddr3_mailbox
             done_sync_d <= done_sync;
 
             eth_dma_ready <= done_pulse_sys;
-            if (done_pulse_sys)
-                eth_dma_rdata <= rdata_avl;
+            if (done_pulse_sys) begin
+                eth_dma_rdata   <= rdata_avl;
+                eth_dma_rdata64 <= rdata_avl64;
+            end
         end
     end
 
@@ -136,6 +155,20 @@ module eth_ddr3_mailbox
     reg [1:0] state = S_IDLE;
     reg [1:0] cap_lane  = 2'd0;
     reg       cap_write = 1'b0;
+
+    // Byte-swap each of the four 16-bit lanes of a 64-bit word, matching the
+    // per-lane swap of the 16-bit path ({wdata[7:0],wdata[15:8]}).  Applying
+    // this to a packed 64-bit write (or to avl_readdata on a read) yields DDR
+    // bytes identical to four single-lane transfers.
+    function [63:0] wide_swap16;
+        input [63:0] x;
+        begin
+            wide_swap16 = { x[55:48], x[63:56],
+                            x[39:32], x[47:40],
+                            x[23:16], x[31:24],
+                            x[ 7:0 ], x[15:8 ] };
+        end
+    endfunction
 
     // Debug counters (clk_avl) for the ISSP probe in the parent.
     reg [7:0] dbg_wr_accept = 8'd0;   // writes accepted (avl_write & !waitrequest)
@@ -187,6 +220,7 @@ module eth_ddr3_mailbox
             avl_byteenable <= 8'h00;
             avl_writedata  <= 64'd0;
             rdata_avl   <= 16'h0000;
+            rdata_avl64 <= 64'h0;
             cap_lane    <= 2'd0;
             cap_write   <= 1'b0;
             dbg_wr_accept <= 8'd0;
@@ -214,8 +248,9 @@ module eth_ddr3_mailbox
                         avl_address    <= req_word_addr;
                         avl_burstcount <= 8'd1;
                         if (write_hold) begin
-                            avl_writedata  <= req_wdata64;
-                            avl_byteenable <= req_be8;
+                            avl_writedata  <= wide_hold ? wide_swap16(wdata64_hold)
+                                                        : req_wdata64;
+                            avl_byteenable <= wide_hold ? 8'hFF : req_be8;
                             avl_write      <= 1'b1;
                             avl_read       <= 1'b0;
                         end else begin
@@ -245,6 +280,7 @@ module eth_ddr3_mailbox
                 S_READ: begin
                     if (avl_readdatavalid) begin
                         rdata_avl   <= {rd_raw_field[7:0], rd_raw_field[15:8]};
+                        rdata_avl64 <= wide_swap16(avl_readdata);
                         done_toggle <= ~done_toggle;
                         state       <= S_IDLE;
                     end
