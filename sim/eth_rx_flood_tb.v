@@ -50,6 +50,9 @@ module eth_rx_flood_tb;
 
     wire        eth_dma_ready;
     wire [15:0] eth_dma_rdata;
+    wire [63:0] eth_dma_rdata64;
+    wire        eth_dma_wide;
+    wire [63:0] eth_dma_wdata64;
     wire        eth_dma_req;
     wire        eth_dma_write;
     wire [15:1] eth_dma_addr;
@@ -78,6 +81,9 @@ module eth_rx_flood_tb;
         .cpu_as(cpu_as), .cpu_uds(cpu_uds), .cpu_lds(cpu_lds),
         .sel_ethernet_shm(sel_ethernet_shm), .sel_ethernet(sel_ethernet),
         .eth_dma_ready(eth_dma_ready), .eth_dma_rdata(eth_dma_rdata),
+        .eth_dma_rdata64(eth_dma_rdata64),
+        .eth_dma_wide(eth_dma_wide),
+        .eth_dma_wdata64(eth_dma_wdata64),
         .eth_dma_req(eth_dma_req), .eth_dma_write(eth_dma_write),
         .eth_dma_addr(eth_dma_addr), .eth_dma_wdata(eth_dma_wdata),
         .eth_dma_uds(eth_dma_uds), .eth_dma_lds(eth_dma_lds),
@@ -90,6 +96,9 @@ module eth_rx_flood_tb;
         .eth_dma_addr(eth_dma_addr), .eth_dma_wdata(eth_dma_wdata),
         .eth_dma_uds(eth_dma_uds), .eth_dma_lds(eth_dma_lds),
         .eth_dma_ready(eth_dma_ready), .eth_dma_rdata(eth_dma_rdata),
+        .eth_dma_rdata64(eth_dma_rdata64),
+        .eth_dma_wide(eth_dma_wide),
+        .eth_dma_wdata64(eth_dma_wdata64),
         .clk_avl(clk_avl), .reset_avl(reset_avl),
         .avl_address(avl_address), .avl_burstcount(avl_burstcount),
         .avl_byteenable(avl_byteenable), .avl_writedata(avl_writedata),
@@ -253,6 +262,16 @@ module eth_rx_flood_tb;
 
     integer slot; integer tail;
 
+    // per-frame register-sync round-trip counter (bg_state 18 = BG_SYNC_WORD_WAIT)
+    integer sync_writes = 0;
+    integer sw_before;
+    reg fl_req_d = 1'b0;
+    always @(posedge clk_sys) begin
+        fl_req_d <= eth_dma_req;
+        if (eth_dma_req && !fl_req_d && dut.bg_state == 6'd18)
+            sync_writes <= sync_writes + 1;
+    end
+
     initial begin
         reset_sys = 1; reset_avl = 1;
         repeat (8) @(posedge clk_sys); @(posedge clk_avl);
@@ -276,6 +295,7 @@ module eth_rx_flood_tb;
             marker = 8'hA0 + p[7:0];
             build_frame(marker);
             slot = p % 4;
+            sw_before = sync_writes;
 
             // read CURR (page1) BEFORE injection -> the page the bg will write at
             reg_write(R_CR, 8'h62); reg_read(R_ISR, curr_v); reg_write(R_CR, 8'h22);
@@ -344,8 +364,18 @@ module eth_rx_flood_tb;
 
             // advance BNRY = next_page - 1 (driver frees the page)
             reg_write(R_BNRY, next_v - 8'h01);
-            $display("INFO: pkt %0d marker=0x%02x read from page 0x%02x, next=0x%02x, CURR now 0x%02x",
-                     p, marker, rdptr, next_v, curr_v);
+            repeat (1500) @(posedge clk_sys);   // let this frame's register sync settle
+            $display("INFO: pkt %0d marker=0x%02x page 0x%02x next 0x%02x CURR 0x%02x  sync_round_trips=%0d",
+                     p, marker, rdptr, next_v, curr_v, sync_writes - sw_before);
+            // Steady-state regression guard: once the shadow is populated (pkt 0),
+            // a frame must re-sync only the few register slots that actually
+            // changed -- not the full ~41-slot mirror.  Catches an accidental
+            // return to the unconditional per-frame full sync.
+            if (p >= 1 && (sync_writes - sw_before) > 10) begin
+                $display("FAIL: pkt %0d register sync did %0d round-trips (expected <=10 with incremental sync)",
+                         p, sync_writes - sw_before);
+                errors = errors + 1;
+            end
         end
 
         if (errors == 0)

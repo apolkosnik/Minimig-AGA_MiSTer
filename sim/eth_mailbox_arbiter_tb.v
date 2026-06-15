@@ -82,6 +82,9 @@ module eth_mailbox_arbiter_tb;
         .eth_dma_addr(eth_dma_addr), .eth_dma_wdata(eth_dma_wdata),
         .eth_dma_uds(eth_dma_uds), .eth_dma_lds(eth_dma_lds),
         .eth_dma_ready(eth_dma_ready), .eth_dma_rdata(eth_dma_rdata),
+        .eth_dma_wide(1'b0),
+        .eth_dma_wdata64(64'd0),
+        .eth_dma_rdata64(),
 
         .clk_avl(clk_avl), .reset_avl(reset_avl),
         .avl_address(mbx_address), .avl_burstcount(mbx_burstcount),

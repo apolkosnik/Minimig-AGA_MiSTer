@@ -42,6 +42,9 @@ module eth_memtest_bg_tb;
     // ---- eth_dma between ethernet_interface and mailbox ----
     wire        eth_dma_ready;
     wire [15:0] eth_dma_rdata;
+    wire [63:0] eth_dma_rdata64;
+    wire        eth_dma_wide;
+    wire [63:0] eth_dma_wdata64;
     wire        eth_dma_req;
     wire        eth_dma_write;
     wire [15:1] eth_dma_addr;
@@ -71,6 +74,9 @@ module eth_memtest_bg_tb;
         .cpu_as(cpu_as), .cpu_uds(cpu_uds), .cpu_lds(cpu_lds),
         .sel_ethernet_shm(sel_ethernet_shm), .sel_ethernet(sel_ethernet),
         .eth_dma_ready(eth_dma_ready), .eth_dma_rdata(eth_dma_rdata),
+        .eth_dma_rdata64(eth_dma_rdata64),
+        .eth_dma_wide(eth_dma_wide),
+        .eth_dma_wdata64(eth_dma_wdata64),
         .eth_dma_req(eth_dma_req), .eth_dma_write(eth_dma_write),
         .eth_dma_addr(eth_dma_addr), .eth_dma_wdata(eth_dma_wdata),
         .eth_dma_uds(eth_dma_uds), .eth_dma_lds(eth_dma_lds),
@@ -83,6 +89,9 @@ module eth_memtest_bg_tb;
         .eth_dma_addr(eth_dma_addr), .eth_dma_wdata(eth_dma_wdata),
         .eth_dma_uds(eth_dma_uds), .eth_dma_lds(eth_dma_lds),
         .eth_dma_ready(eth_dma_ready), .eth_dma_rdata(eth_dma_rdata),
+        .eth_dma_rdata64(eth_dma_rdata64),
+        .eth_dma_wide(eth_dma_wide),
+        .eth_dma_wdata64(eth_dma_wdata64),
         .clk_avl(clk_avl), .reset_avl(reset_avl),
         .avl_address(avl_address), .avl_burstcount(avl_burstcount),
         .avl_byteenable(avl_byteenable), .avl_writedata(avl_writedata),

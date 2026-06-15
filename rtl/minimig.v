@@ -227,10 +227,13 @@ module minimig
 	output	   eth_dma_write,
 	output	   [15:1] eth_dma_addr,
 	output	   [15:0] eth_dma_wdata,
+	output	   eth_dma_wide,
+	output	   [63:0] eth_dma_wdata64,
 	output	   eth_dma_uds,
 	output	   eth_dma_lds,
 	input	   eth_dma_ready,
 	input	   [15:0] eth_dma_rdata,
+	input	   [63:0] eth_dma_rdata64,
 
 	//video
 	output 	     _hsync,      // horizontal sync
@@ -940,10 +943,13 @@ ethernet_interface eth_if (
     // External shared-memory DMA path
     .eth_dma_ready(eth_dma_ready),
     .eth_dma_rdata(eth_dma_rdata),
+    .eth_dma_rdata64(eth_dma_rdata64),
     .eth_dma_req(eth_dma_req),
     .eth_dma_write(eth_dma_write),
     .eth_dma_addr(eth_dma_addr),
     .eth_dma_wdata(eth_dma_wdata),
+    .eth_dma_wide(eth_dma_wide),
+    .eth_dma_wdata64(eth_dma_wdata64),
     .eth_dma_uds(eth_dma_uds),
     .eth_dma_lds(eth_dma_lds),
 

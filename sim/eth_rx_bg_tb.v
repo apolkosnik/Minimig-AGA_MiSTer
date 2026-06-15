@@ -61,6 +61,9 @@ module eth_rx_bg_tb;
     // ---- eth_dma between ethernet_interface and mailbox ----
     wire        eth_dma_ready;
     wire [15:0] eth_dma_rdata;
+    wire [63:0] eth_dma_rdata64;
+    wire        eth_dma_wide;
+    wire [63:0] eth_dma_wdata64;
     wire        eth_dma_req;
     wire        eth_dma_write;
     wire [15:1] eth_dma_addr;
@@ -83,6 +86,30 @@ module eth_rx_bg_tb;
 
     integer errors = 0;
 
+    // ---- throughput instrumentation: count mailbox round-trips ----
+    // A "wide" round-trip moves a full 64-bit DDR word (4 payload words); a
+    // narrow round-trip moves one 16-bit word.  Counting eth_dma_wide rising
+    // edges proves the 64-bit packing path actually ran (non-vacuous) and lets
+    // us compare against the per-16-bit-word round-trip count it replaced.
+    integer wide_pulses = 0;
+    integer req_pulses  = 0;
+    integer sync_incr   = 0;
+    integer st_hist [0:63];
+    integer hh;
+    initial for (hh = 0; hh < 64; hh = hh + 1) st_hist[hh] = 0;
+    reg     wide_d = 1'b0;
+    reg     req_d  = 1'b0;
+    always @(posedge clk_sys) begin
+        wide_d <= eth_dma_wide;
+        req_d  <= eth_dma_req;
+        if (eth_dma_wide && !wide_d) wide_pulses <= wide_pulses + 1;
+        if (eth_dma_req  && !req_d)  begin
+            req_pulses <= req_pulses + 1;
+            st_hist[dut.bg_state] <= st_hist[dut.bg_state] + 1;
+            if (dut.bg_state == 6'd18) sync_incr <= sync_incr + 1;
+        end
+    end
+
     ethernet_interface dut (
         .clk(clk_sys), .reset(reset_sys),
         .cpu_addr(cpu_addr), .cpu_data_in(cpu_data_in), .cpu_data_out(cpu_data_out),
@@ -90,6 +117,9 @@ module eth_rx_bg_tb;
         .cpu_as(cpu_as), .cpu_uds(cpu_uds), .cpu_lds(cpu_lds),
         .sel_ethernet_shm(sel_ethernet_shm), .sel_ethernet(sel_ethernet),
         .eth_dma_ready(eth_dma_ready), .eth_dma_rdata(eth_dma_rdata),
+        .eth_dma_rdata64(eth_dma_rdata64),
+        .eth_dma_wide(eth_dma_wide),
+        .eth_dma_wdata64(eth_dma_wdata64),
         .eth_dma_req(eth_dma_req), .eth_dma_write(eth_dma_write),
         .eth_dma_addr(eth_dma_addr), .eth_dma_wdata(eth_dma_wdata),
         .eth_dma_uds(eth_dma_uds), .eth_dma_lds(eth_dma_lds),
@@ -102,6 +132,9 @@ module eth_rx_bg_tb;
         .eth_dma_addr(eth_dma_addr), .eth_dma_wdata(eth_dma_wdata),
         .eth_dma_uds(eth_dma_uds), .eth_dma_lds(eth_dma_lds),
         .eth_dma_ready(eth_dma_ready), .eth_dma_rdata(eth_dma_rdata),
+        .eth_dma_rdata64(eth_dma_rdata64),
+        .eth_dma_wide(eth_dma_wide),
+        .eth_dma_wdata64(eth_dma_wdata64),
         .clk_avl(clk_avl), .reset_avl(reset_avl),
         .avl_address(avl_address), .avl_burstcount(avl_burstcount),
         .avl_byteenable(avl_byteenable), .avl_writedata(avl_writedata),
@@ -352,6 +385,19 @@ module eth_rx_bg_tb;
             errors = errors + 1;
         end
 
+        // ---- throughput proof: the 64-bit packing path must have moved the
+        // bulk of the 60-byte payload.  Divert is on bytes_remaining > 8, so a
+        // 60-byte frame copies 7 full 64-bit words (56 bytes) wide and the final
+        // 4 bytes narrow: 7 wide + 3 narrow = 10 payload round-trips, versus the
+        // 30 round-trips the old per-16-bit-word path needed.  Assert the wide
+        // path actually ran (non-vacuous) and report the round-trip counts. ----
+        $display("INFO: RX 60B payload used %0d wide round-trips (per-16-bit-word path needed ~30); total bg round-trips this frame = %0d",
+                 wide_pulses, req_pulses);
+        if (wide_pulses < 6) begin
+            $display("FAIL: expected >=6 wide round-trips for a 60-byte frame, got %0d (wide packing not engaged)", wide_pulses);
+            errors = errors + 1;
+        end
+
         // ---- Amiga reads the frame back via remote DMA from page 0x47 ----
         // RSAR = 0x4704 (skip the 4-byte header), CR = remote read
         write_high_reg(15'h0610, 8'h04);   // RSAR0
@@ -369,6 +415,13 @@ module eth_rx_bg_tb;
                 errors = errors + 1;
             end
         end
+
+        // let any pending register sync finish, then dump the round-trip histogram
+        repeat (5000) @(posedge clk_sys);
+        $display("SYNC WRITES total (1 frame incl. first-time shadow population) = %0d", sync_incr);
+        $display("ROUNDTRIP HISTOGRAM (bg_state : mailbox round-trips):");
+        for (hh = 0; hh < 64; hh = hh + 1)
+            if (st_hist[hh] != 0) $display("    state %0d : %0d", hh, st_hist[hh]);
 
         if (errors == 0)
             $display("PASS: eth_rx_bg_tb completed (RX frame delivered to packet RAM, ISR.PRX/CURR/head OK, Amiga read-back matches)");

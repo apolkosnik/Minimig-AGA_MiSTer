@@ -20,6 +20,7 @@ reg sel_ethernet;
 reg [7:0] ethernet_base;
 reg        eth_dma_ready;
 reg [15:0] eth_dma_rdata;
+reg [63:0] eth_dma_rdata64 = 64'h0;
 
 wire eth_irq;
 wire dtack_eth;
@@ -27,6 +28,8 @@ wire        eth_dma_req;
 wire        eth_dma_write;
 wire [15:1] eth_dma_addr;
 wire [15:0] eth_dma_wdata;
+wire        eth_dma_wide;
+wire [63:0] eth_dma_wdata64;
 wire        eth_dma_uds;
 wire        eth_dma_lds;
 integer     timeout_cycles;
@@ -47,10 +50,13 @@ ethernet_interface dut (
     .sel_ethernet(sel_ethernet),
     .eth_dma_ready(eth_dma_ready),
     .eth_dma_rdata(eth_dma_rdata),
+    .eth_dma_rdata64(eth_dma_rdata64),
     .eth_dma_req(eth_dma_req),
     .eth_dma_write(eth_dma_write),
     .eth_dma_addr(eth_dma_addr),
     .eth_dma_wdata(eth_dma_wdata),
+    .eth_dma_wide(eth_dma_wide),
+    .eth_dma_wdata64(eth_dma_wdata64),
     .eth_dma_uds(eth_dma_uds),
     .eth_dma_lds(eth_dma_lds),
     .eth_irq(eth_irq),

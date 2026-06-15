@@ -30,10 +30,13 @@ module ethernet_interface
     // External shared-memory DMA path
     input  wire        eth_dma_ready,
     input  wire [15:0] eth_dma_rdata,
+    input  wire [63:0] eth_dma_rdata64,
     output reg         eth_dma_req,
     output reg         eth_dma_write,
     output reg  [15:1] eth_dma_addr,
     output reg  [15:0] eth_dma_wdata,
+    output reg         eth_dma_wide,
+    output reg  [63:0] eth_dma_wdata64,
     output reg         eth_dma_uds,
     output reg         eth_dma_lds,
 
@@ -261,7 +264,28 @@ reg [15:0] bg_rx_bytes_remaining;
 reg [7:0]  bg_rx_next_page;
 reg [7:0]  bg_rx_status;
 reg [15:0] bg_source_word;
+// 64-bit "wide" packing buffer for the payload copy: holds four 16-bit words
+// (lane0=[15:0]..lane3=[63:48]) moved per single mailbox transfer; bg_wide_idx
+// walks the four words during the local packet-RAM read/write half-cycles.
+reg [63:0] bg_wide_buf;
+reg [1:0]  bg_wide_idx;
 reg [5:0]  bg_sync_slot;
+// Incremental register-mirror sync: the FPGA exclusively writes the synced
+// CTRL_REGS/MAC/STATE slots (the daemon only reads them, and writes only the
+// disjoint trailing stats), so a slot whose value is unchanged since the last
+// sync is already correct in shm and need not be re-written.  sync_shadow holds
+// the last value written per slot; only changed slots cost a mailbox round-trip.
+// shadow_valid marks slots whose shadow has been populated at least once; an
+// unvalidated slot is always written (and validated) the first time it is seen,
+// so coverage does not depend on any single sync pass running 0..40 to
+// completion (re-arming resets the slot index, which would otherwise restart a
+// pass-based "force full" indefinitely under steady traffic).
+// Keep this as logic registers (not an inferred block RAM): the FSM reads a slot
+// combinationally in the same cycle it may write it, and the compare must see the
+// OLD value -- forcing ramstyle=logic guarantees synthesis matches the simulated
+// (combinational-read, non-blocking-write) behavior.
+(* ramstyle = "logic" *) reg [15:0] sync_shadow [0:40];
+reg [40:0] shadow_valid;
 reg        bg_polling_rx_flags;
 reg        bg_clear_rx_avail;
 reg [7:0]  prom_shadow [0:31];
@@ -355,6 +379,19 @@ localparam [5:0] BG_READ_RX_TAIL_REQ    = 6'd44;
 localparam [5:0] BG_READ_RX_TAIL_WAIT   = 6'd45;
 localparam [5:0] BG_WRITE_RX_HEAD_REQ   = 6'd46;
 localparam [5:0] BG_WRITE_RX_HEAD_WAIT  = 6'd47;
+// 64-bit "wide" packing states: move 4 payload words (one full DDR word) per
+// mailbox round-trip instead of one 16-bit word, cutting RX/TX copy round-trips
+// ~4x.  Used only for the aligned bulk (>= 8 bytes left); the final <=8 bytes
+// fall back to the proven narrow states so byte-order / odd-byte behaviour is
+// byte-identical to before.
+localparam [5:0] BG_READ_PAYLOAD_WIDE_REQ  = 6'd48;
+localparam [5:0] BG_READ_PAYLOAD_WIDE_WAIT = 6'd49;
+localparam [5:0] BG_WRITE_PAYLOAD_WIDE     = 6'd50;
+localparam [5:0] BG_READ_TX_WIDE_REQ       = 6'd51;
+localparam [5:0] BG_READ_TX_WIDE_WAIT1     = 6'd52;
+localparam [5:0] BG_READ_TX_WIDE_WAIT2     = 6'd53;
+localparam [5:0] BG_WRITE_TX_WIDE_REQ      = 6'd54;
+localparam [5:0] BG_WRITE_TX_WIDE_WAIT     = 6'd55;
 
 wire [7:0] cr_write_value = cpu_write_byte;
 wire       rtl8019_config_write_enable = (rtl8019_e9346cr[7:6] == 2'b11);
@@ -425,6 +462,7 @@ task automatic apply_nic_reset;
         bg_rx_status <= 8'h00;
         bg_source_word <= 16'h0000;
         bg_sync_slot <= 6'd0;
+        shadow_valid <= 41'b0;     // force every slot to be written once after reset
         bg_polling_rx_flags <= 1'b0;
         bg_clear_rx_avail <= 1'b0;
         tx_stage_pending <= 1'b0;
@@ -440,8 +478,12 @@ task automatic apply_nic_reset;
         eth_dma_write <= 1'b0;
         eth_dma_addr <= 15'h0000;
         eth_dma_wdata <= 16'h0000;
+        eth_dma_wide <= 1'b0;
+        eth_dma_wdata64 <= 64'h0;
         eth_dma_uds <= 1'b1;
         eth_dma_lds <= 1'b1;
+        bg_wide_buf <= 64'h0;
+        bg_wide_idx <= 2'd0;
         eth_irq <= 1'b0;
         eth_dma_wait_counter <= 10'd0;
         data_port_wait_counter <= 10'd0;
@@ -902,6 +944,7 @@ wire [15:0] bg_tx_seq_byte_addr = ETH_SHM_TX_REQUEST_SEQ;
 wire [15:0] bg_tx_complete_seq_byte_addr = ETH_SHM_TX_COMPLETE_SEQ;
 wire [15:0] bg_tx_dst_byte_addr = ETH_SHM_TX_BUFFER + bg_tx_src_offset;
 /* verilator lint_on UNUSEDSIGNAL */
+wire [15:0] bg_sync_wd        = sync_slot_wdata(bg_sync_slot);
 wire [14:0] bg_flags_word_addr = ETH_SHM_CTRL_FLAGS[15:1];
 wire [14:0] bg_status_word_addr = ETH_SHM_CTRL_STATUS[15:1];
 wire [14:0] bg_rx_head_word_addr = bg_rx_head_byte_addr[15:1];
@@ -937,12 +980,16 @@ wire        data_port_cycle_timeout_now =
 // these states while a data-port cycle is pending -- the bg request block is
 // gated by !local_remote_dma_active -- so there is no RAM-port collision.)
 wire        bg_pmem_active =
-    (bg_state == BG_WRITE_HDR0_REQ)    ||
-    (bg_state == BG_WRITE_HDR1_REQ)    ||
-    (bg_state == BG_WRITE_PAYLOAD_REQ) ||
-    (bg_state == BG_READ_TX_BUF_REQ)   ||
-    (bg_state == BG_READ_TX_BUF_WAIT1) ||
-    (bg_state == BG_READ_TX_BUF_WAIT2);
+    (bg_state == BG_WRITE_HDR0_REQ)      ||
+    (bg_state == BG_WRITE_HDR1_REQ)      ||
+    (bg_state == BG_WRITE_PAYLOAD_REQ)   ||
+    (bg_state == BG_WRITE_PAYLOAD_WIDE)  ||
+    (bg_state == BG_READ_TX_BUF_REQ)     ||
+    (bg_state == BG_READ_TX_BUF_WAIT1)   ||
+    (bg_state == BG_READ_TX_BUF_WAIT2)   ||
+    (bg_state == BG_READ_TX_WIDE_REQ)    ||
+    (bg_state == BG_READ_TX_WIDE_WAIT1)  ||
+    (bg_state == BG_READ_TX_WIDE_WAIT2);
 wire        data_port_cycle_launch_ok =
     (data_port_cycle_start || data_port_cycle_active) &&
     !data_port_transfer_done &&
@@ -1218,6 +1265,14 @@ always @* begin
             pmem_byteena = 2'b10;
         end
         pmem_wren = 1'b1;
+    end else if (bg_state == BG_WRITE_PAYLOAD_WIDE) begin
+        // One of the four words of the wide-read 64-bit line; bg_wide_idx walks
+        // 0..3, each a full word (the aligned bulk never has an odd tail byte).
+        pmem_addr = packet_ram_word_addr(NE_PMEM_START + bg_rx_dst_offset + 16'h0004 +
+                                         bg_rx_src_offset + {13'd0, bg_wide_idx, 1'b0});
+        pmem_wdata = bg_wide_buf[{bg_wide_idx, 4'd0} +: 16];
+        pmem_byteena = 2'b11;
+        pmem_wren = 1'b1;
     end else if (data_port_cycle_launch_ok && cpu_wr && remote_dma_pmem_region &&
                  (~cpu_uds || ~cpu_lds)) begin
         pmem_addr = packet_ram_word_addr(remote_dma_addr);
@@ -1234,6 +1289,10 @@ always @* begin
     end else if ((bg_state == BG_READ_TX_BUF_REQ) || (bg_state == BG_READ_TX_BUF_WAIT1) ||
                  (bg_state == BG_READ_TX_BUF_WAIT2)) begin
         pmem_addr = packet_ram_word_addr(tx_stage_addr + bg_tx_src_offset);
+    end else if ((bg_state == BG_READ_TX_WIDE_REQ) || (bg_state == BG_READ_TX_WIDE_WAIT1) ||
+                 (bg_state == BG_READ_TX_WIDE_WAIT2)) begin
+        pmem_addr = packet_ram_word_addr(tx_stage_addr + bg_tx_src_offset +
+                                         {13'd0, bg_wide_idx, 1'b0});
     end else if (data_port_cycle_launch_ok && cpu_rd && remote_dma_pmem_region) begin
         pmem_addr = packet_ram_word_addr(remote_dma_addr);
     end
@@ -1581,6 +1640,7 @@ always @(posedge clk) begin
                 debug_dma_timeout_sticky <= 1'b1;
                 if (bg_dma_inflight) begin
                     bg_dma_inflight <= 1'b0;
+                    eth_dma_wide <= 1'b0;   // never leave a stale wide flag on abort
                     bg_state <= BG_IDLE;
                     bg_polling_rx_flags <= 1'b0;
                     bg_clear_rx_avail <= 1'b0;
@@ -1596,6 +1656,10 @@ always @(posedge clk) begin
             if (bg_dma_inflight) begin
                 bg_dma_inflight <= 1'b0;
                 eth_dma_req <= 1'b0;
+                // Clear the wide flag on every completion so a stale wide=1 from
+                // a payload burst can never be reinterpreted by the mailbox as a
+                // 64-bit transfer on the next (narrow) request.
+                eth_dma_wide <= 1'b0;
 
                 case (bg_state)
                     BG_READ_FLAGS_WAIT: begin
@@ -1662,11 +1726,36 @@ always @(posedge clk) begin
                         bg_state <= BG_WRITE_PAYLOAD_REQ;
                     end
 
+                    BG_READ_PAYLOAD_WIDE_WAIT: begin
+                        // Whole 64-bit line landed; replay it into packet RAM as
+                        // four word writes (bg_wide_idx 0..3).
+                        bg_wide_buf <= eth_dma_rdata64;
+                        bg_wide_idx <= 2'd0;
+                        bg_state    <= BG_WRITE_PAYLOAD_WIDE;
+                    end
+
                     BG_WRITE_TX_LEN_WAIT: begin
-                        if (bg_tx_bytes_remaining != 16'h0000) begin
+                        if (bg_tx_bytes_remaining > 16'h0008) begin
+                            bg_wide_idx <= 2'd0;
+                            bg_state <= BG_READ_TX_WIDE_REQ;
+                        end else if (bg_tx_bytes_remaining != 16'h0000) begin
                             bg_state <= BG_READ_TX_BUF_REQ;
                         end else begin
                             bg_state <= BG_WRITE_TX_SEQ_REQ;
+                        end
+                    end
+
+                    BG_WRITE_TX_WIDE_WAIT: begin
+                        // One 64-bit line published to the HPS TX buffer.  Switch
+                        // to the narrow path for the final <=8 bytes so the odd
+                        // tail byte is handled exactly as before.
+                        bg_tx_src_offset      <= bg_tx_src_offset + 16'h0008;
+                        bg_tx_bytes_remaining <= bg_tx_bytes_remaining - 16'h0008;
+                        if ((bg_tx_bytes_remaining - 16'h0008) > 16'h0008) begin
+                            bg_wide_idx <= 2'd0;
+                            bg_state <= BG_READ_TX_WIDE_REQ;
+                        end else begin
+                            bg_state <= BG_READ_TX_BUF_REQ;
                         end
                     end
 
@@ -2045,7 +2134,9 @@ always @(posedge clk) begin
                 end
 
                     BG_WRITE_HDR1_REQ: begin
-                        if (bg_rx_bytes_remaining != 16'h0000) begin
+                        if (bg_rx_bytes_remaining > 16'h0008) begin
+                            bg_state <= BG_READ_PAYLOAD_WIDE_REQ;
+                        end else if (bg_rx_bytes_remaining != 16'h0000) begin
                             bg_state <= BG_READ_PAYLOAD_REQ;
                         end else begin
                             rsr_register <= bg_rx_status;
@@ -2067,6 +2158,38 @@ always @(posedge clk) begin
                     eth_dma_lds <= 1'b0;
                     bg_dma_inflight <= 1'b1;
                     bg_state <= BG_READ_PAYLOAD_WAIT;
+                end
+
+                BG_READ_PAYLOAD_WIDE_REQ: begin
+                    // Read a full 64-bit line (4 payload words) in one round-trip.
+                    // bg_payload_src_word_addr is 64-bit aligned here because the
+                    // slot base and bg_rx_src_offset are both multiples of 8.
+                    eth_dma_req   <= 1'b1;
+                    eth_dma_write <= 1'b0;
+                    eth_dma_wide  <= 1'b1;
+                    eth_dma_addr  <= bg_payload_src_word_addr;
+                    eth_dma_wdata <= 16'h0000;
+                    eth_dma_uds   <= 1'b0;
+                    eth_dma_lds   <= 1'b0;
+                    bg_dma_inflight <= 1'b1;
+                    bg_state <= BG_READ_PAYLOAD_WIDE_WAIT;
+                end
+
+                BG_WRITE_PAYLOAD_WIDE: begin
+                    // Four local packet-RAM writes (combinational pmem write uses
+                    // bg_wide_idx); no mailbox traffic.  After the 4th, advance by
+                    // 8 and either keep packing or hand the <=8-byte tail to the
+                    // proven narrow path.
+                    if (bg_wide_idx == 2'd3) begin
+                        bg_rx_src_offset <= bg_rx_src_offset + 16'h0008;
+                        bg_rx_bytes_remaining <= bg_rx_bytes_remaining - 16'h0008;
+                        bg_state <= ((bg_rx_bytes_remaining - 16'h0008) > 16'h0008)
+                                    ? BG_READ_PAYLOAD_WIDE_REQ
+                                    : BG_READ_PAYLOAD_REQ;
+                    end else begin
+                        bg_wide_idx <= bg_wide_idx + 2'd1;
+                        bg_state <= BG_WRITE_PAYLOAD_WIDE;
+                    end
                 end
 
                     BG_WRITE_PAYLOAD_REQ: begin
@@ -2145,6 +2268,42 @@ always @(posedge clk) begin
                     bg_state <= BG_WRITE_TX_BUF_WAIT;
                 end
 
+                BG_READ_TX_WIDE_REQ: begin
+                    // Local packet-RAM read of word bg_wide_idx (combinational
+                    // pmem_addr); same 2-cycle BRAM latency as the narrow path.
+                    bg_state <= BG_READ_TX_WIDE_WAIT1;
+                end
+
+                BG_READ_TX_WIDE_WAIT1: begin
+                    bg_state <= BG_READ_TX_WIDE_WAIT2;
+                end
+
+                BG_READ_TX_WIDE_WAIT2: begin
+                    bg_wide_buf[{bg_wide_idx, 4'd0} +: 16] <= pmem_q;
+                    if (bg_wide_idx == 2'd3) begin
+                        bg_wide_idx <= 2'd0;
+                        bg_state <= BG_WRITE_TX_WIDE_REQ;
+                    end else begin
+                        bg_wide_idx <= bg_wide_idx + 2'd1;
+                        bg_state <= BG_READ_TX_WIDE_REQ;
+                    end
+                end
+
+                BG_WRITE_TX_WIDE_REQ: begin
+                    // Publish the packed 64-bit line to the HPS TX buffer in one
+                    // round-trip.  bg_tx_dst_word_addr is 64-bit aligned (TX
+                    // buffer base and bg_tx_src_offset are multiples of 8).
+                    eth_dma_req     <= 1'b1;
+                    eth_dma_write   <= 1'b1;
+                    eth_dma_wide    <= 1'b1;
+                    eth_dma_addr    <= bg_tx_dst_word_addr;
+                    eth_dma_wdata64 <= bg_wide_buf;
+                    eth_dma_uds     <= 1'b0;
+                    eth_dma_lds     <= 1'b0;
+                    bg_dma_inflight <= 1'b1;
+                    bg_state <= BG_WRITE_TX_WIDE_WAIT;
+                end
+
                 BG_WRITE_RX_HEAD_REQ: begin
                     eth_dma_req <= 1'b1;
                     eth_dma_write <= 1'b1;
@@ -2190,14 +2349,28 @@ always @(posedge clk) begin
                 end
 
                 BG_SYNC_WORD_REQ: begin
-                    eth_dma_req <= 1'b1;
-                    eth_dma_write <= 1'b1;
-                    eth_dma_addr <= sync_slot_word_addr(bg_sync_slot);
-                    eth_dma_wdata <= sync_slot_wdata(bg_sync_slot);
-                    eth_dma_uds <= 1'b0;
-                    eth_dma_lds <= 1'b0;
-                    bg_dma_inflight <= 1'b1;
-                    bg_state <= BG_SYNC_WORD_WAIT;
+                    if (!shadow_valid[bg_sync_slot] || (bg_sync_wd != sync_shadow[bg_sync_slot])) begin
+                        // First time seen, or value changed: write it and record
+                        // the new shadow value.
+                        eth_dma_req <= 1'b1;
+                        eth_dma_write <= 1'b1;
+                        eth_dma_addr <= sync_slot_word_addr(bg_sync_slot);
+                        eth_dma_wdata <= bg_sync_wd;
+                        eth_dma_uds <= 1'b0;
+                        eth_dma_lds <= 1'b0;
+                        bg_dma_inflight <= 1'b1;
+                        sync_shadow[bg_sync_slot] <= bg_sync_wd;
+                        shadow_valid[bg_sync_slot] <= 1'b1;
+                        bg_state <= BG_SYNC_WORD_WAIT;
+                    end else if (bg_sync_slot == 6'd40) begin
+                        // Unchanged and last slot: sync done, no round-trip.
+                        bg_sync_slot <= 6'd0;
+                        shm_sync_enabled <= 1'b0;
+                        bg_state <= BG_IDLE;
+                    end else begin
+                        // Unchanged: skip to the next slot without a round-trip.
+                        bg_sync_slot <= bg_sync_slot + 6'd1;
+                    end
                 end
 
                 BG_READ_HPS_HB_LO_REQ: begin
