@@ -140,7 +140,11 @@ module eth_station_mac_tb;
         begin
             done=1'b0; value=16'hXXXX;
             @(negedge clk_sys);
-            cpu_addr=15'h0620; sel_ethernet=1'b1; cpu_rd=1'b1; cpu_as=1'b0; cpu_uds=1'b0; cpu_lds=1'b0;
+            // Read via the X-Surf-100 32-bit DMA READ port at board 0x8880
+            // (cpu_addr 0x4440) -- the path the driver actually uses in CardType=2
+            // mode (lbC0002D4). sel_ethernet_shm stays 0 (cpu_wrapper carves this
+            // offset out of the shm window) so it routes to is_data_port_access.
+            cpu_addr=15'h4440; sel_ethernet=1'b1; cpu_rd=1'b1; cpu_as=1'b0; cpu_uds=1'b0; cpu_lds=1'b0;
             for (w=0; w<600 && !done; w=w+1) begin @(posedge clk_sys); #1; if (dtack_eth===1'b0) begin value=cpu_data_out; done=1'b1; end end
             @(negedge clk_sys);
             cpu_rd=1'b0; cpu_as=1'b1; cpu_uds=1'b1; cpu_lds=1'b1; sel_ethernet=1'b0;

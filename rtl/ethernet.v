@@ -45,7 +45,7 @@ module ethernet_interface
 );
 
 //   Ethernet Controller Memory Map
-// #define ETH_SHMEM_ADDR   0x28EA0000 // HPS physical address for the FPGA/HPS mailbox
+// #define ETH_SHMEM_ADDR   0x1FF00000 // HPS physical address for the FPGA/HPS mailbox
 
 //   Base Address: 0xEA0000 (configurable via autoconfig)
 
@@ -85,7 +85,7 @@ module ethernet_interface
 //
 //   This is not exposed as an Amiga CPU memory target. cpu_wrapper exports
 //   sel_ethernet_shm only as a marker for the top-level DTACK mux and for
-//   diagnostics. The live transport below is accessed by HPS at 0x28EA0000
+//   diagnostics. The live transport below is accessed by HPS at 0x1FF00000
 //   and by this module through the private eth_dma_* master path.
 
 //   Control Structure (0xEA1000 - 0xEA1FFF)
@@ -282,6 +282,7 @@ reg        tx_stage_pending;
 reg [15:0] bg_tx_src_offset;
 reg [15:0] bg_tx_bytes_remaining;
 reg        local_pmem_read_wait;
+reg        data_port_dport32;   // latched: this deferred pmem read is via a 32-bit port (needs per-word swap)
 reg [15:0] bg_hps_heartbeat_lo;
 reg [15:0] bg_hps_signature_lo;
 reg [31:0] hps_heartbeat_seen;
@@ -492,7 +493,7 @@ task automatic complete_data_port_transfer;
     input [15:0] dma_read_word;
     reg [15:0] read_word;
     begin
-        read_word = maybe_swap_word(dma_read_word, dcr_register[1]);
+        read_word = maybe_swap_word(dma_read_word, dcr_register[1] ^ data_port_dport32);
 
         // Capture the read result for data-port READ completions. This used to
         // gate on !eth_dma_write back when the data port itself drove eth_dma,
@@ -534,7 +535,11 @@ task automatic complete_data_port_transfer;
             end
         end
 
-        eth_dma_req <= 1'b0;
+        // Data port is local (packet RAM/PROM) and does not own eth_dma; only
+        // release eth_dma_req if a background mailbox transfer isn't using it,
+        // else this completion stomps the bg (ISSP: bg *_WAIT inflight=1 req=0,
+        // hb frozen -> CPU remote DMA blocked -> driver spins on CR/ISR -> lockup).
+        if (!bg_dma_inflight) eth_dma_req <= 1'b0;
         data_port_read_pending <= 1'b0;
         data_port_write_pending <= 1'b0;
         local_pmem_read_wait <= 1'b0;
@@ -805,6 +810,17 @@ wire [1:0]  tcr_loopback_mode = tcr_register[2:1];
 wire        rcr_monitor_mode = rcr_register[5];
 wire        dcr_word_mode = dcr_register[0];
 wire        dcr_byte_swap = dcr_register[1];
+// The X-Surf-100 32-bit DMA ports (board 0x8880 read / 0x8C80 write; cpu_addr
+// 0x4440 / 0x4640) are accessed by the driver with MOVE.L/MOVEM.L in CardType=2
+// mode. On the Amiga 68020 the 32-bit access delivers each 16-bit word's two
+// bytes in the OPPOSITE order from a normal 16-bit (MOVE.W) port access, so the
+// transmitted frame came out byte-swapped per word (HW: ARP/DHCP went out as
+// e.g. 54 52 04 05.. instead of 52 54 05 04..). Apply an extra per-word byte
+// swap for these two windows so the on-wire bytes are correct. (The 16-bit port
+// 0xC80 is unaffected. The station-MAC read via 0x8880 was swap-invariant
+// because the PROM duplicates each MAC byte, which is why it looked fine.)
+wire        is_dport32_access = ((cpu_addr >= 15'h4440) && (cpu_addr <= 15'h444F)) ||
+                                ((cpu_addr >= 15'h4640) && (cpu_addr <= 15'h464F));
 wire        remote_dma_prom_region = (remote_dma_addr < 16'h0020);
 wire        remote_dma_pmem_region = (remote_dma_addr >= NE_PMEM_START) && (remote_dma_addr < NE_PMEM_END);
 wire        irq_pending = |(isr_register & imr_register);
@@ -958,26 +974,85 @@ wire [7:0]  debug_status_byte = {
 //   [119:114] bg_state           (background mailbox FSM state)
 //   [113]     hps_signature_valid (hps_signature_seen == 0xCAFEBABE)
 //   [112]     hps_heartbeat_change_seen
-//   [111:96]  remote_byte_count
+//   [111:104] isr_register  (ISR)  | eth_irq = |(isr & imr); stuck nonzero => IRQ storm
+//   [103:96]  imr_register  (IMR mask)
 //   [95:80]   tx_request_seq
 //   [79:64]   hps_comm_status_word
 //   [63:32]   hps_heartbeat_seen   <- advancing => FPGA reads HPS via mailbox
-//   [31:0]    hps_signature_seen   <- 0xCAFEBABE => round trip works both ways
+//   [31:16]   dbg_last_acc_addr     <- last CPU aperture offset
+//   [15:12]   dbg_last_acc_flags    <- {sel_ethernet, is_data_port_access, cpu_rd, cpu_wr}
+//   [11:0]    live CPU/data-port flags
 //
-// Key check: read instance "ETHDBG"; if [31:0]==CAFEBABE and [63:32] advances
-// between reads, the f2sdram2 mailbox round trip is healthy on hardware.
+// Key check: read instance "ETHDBG"; if [113]==1 and [63:32] advances between
+// reads, the f2sdram2 mailbox round trip is healthy on hardware.
 // ---------------------------------------------------------------------------
 /* verilator lint_off UNUSEDSIGNAL */
+// Diagnostic: latch the last CPU access to the ethernet aperture so an ISSP
+// read during an Amiga lockup shows exactly which X-Surf offset the CPU is
+// stuck/spinning on (e.g. PHY/config 0x0406/0x04F2 returning open-bus). Latch
+// on any cpu_rd/cpu_wr; byte_addr is the aperture offset (cpu_addr<<1).
+reg [15:0] dbg_last_acc_addr = 16'h0000;
+reg [3:0]  dbg_last_acc_flags = 4'h0;   // {sel_ethernet, is_data_port_access, cpu_rd, cpu_wr} at that access
+always @(posedge clk) begin
+    if (reset) begin
+        dbg_last_acc_addr  <= 16'h0000;
+        dbg_last_acc_flags <= 4'h0;
+    end else if (cpu_rd || cpu_wr) begin
+        dbg_last_acc_addr  <= {cpu_addr, 1'b0};   // aperture byte offset (cpu_addr<<1)
+        dbg_last_acc_flags <= {sel_ethernet, is_data_port_access, cpu_rd, cpu_wr};
+    end
+end
+
+// Diagnostic: capture what the FPGA returns for the driver's station-MAC read
+// (remote-DMA read of the PROM region, remote_dma_addr 0..0x1F, via the 0xC80
+// data port). dbg_prom_rd_first latches the value returned for the FIRST PROM
+// word (addr 0) -- should be 0x5252 (DEFAULT_MAC0 duplicated) if the read is
+// healthy; 0xFFFF/0x0000 means the PROM read is broken. dbg_prom_rd_cnt counts
+// PROM-region reads so we can confirm the MAC read actually happened. Persists
+// across reset so the one-shot MAC read at device open stays visible to JTAG.
+reg [15:0] dbg_prom_rd_first = 16'h0000;
+reg [7:0]  dbg_prom_rd_cnt   = 8'h00;
+
+// Diagnostic event counters for the RX-interrupt path (why the driver receives
+// into the ring -- CURR advances -- but never gets an IRQ -- ISR reads 0x00).
+//   prx_set: bg delivered an RX frame and set ISR.PRX
+//   ptx_set: a TX completed and set ISR.PTX
+//   isr_clr: the CPU wrote ISR (write-1-to-clear)
+//   ethirq:  eth_irq rising edges (|(isr&imr) went 0->1) = interrupts raised to INT2
+// If prx_set climbs but ethirq stays ~0 -> ISR.PRX is being cleared before eth_irq
+// can assert (or it's never really set); if ethirq climbs but the Amiga doesn't
+// react -> the INT2/handler side. These persist across reset to accumulate.
+reg [7:0]  dbg_prx_set_cnt = 8'h00;
+reg [7:0]  dbg_ptx_set_cnt = 8'h00;
+reg [7:0]  dbg_isr_clr_cnt = 8'h00;
+reg [7:0]  dbg_ethirq_cnt  = 8'h00;
+
 wire [127:0] eth_dbg_probe = {
     debug_status_byte,            // [127:120]
     bg_state,                     // [119:114]
     hps_signature_valid,          // [113]
     hps_heartbeat_change_seen,    // [112]
-    remote_byte_count,            // [111:96]
-    tx_request_seq,               // [95:80]
+    isr_register,                 // [111:104] ISR (interrupt status)
+    imr_register,                 // [103:96]  IMR (mask); eth_irq = |(isr & imr)
+    dbg_prom_rd_first,            // [95:80]  first station-PROM read word (expect 0x5252)
     hps_comm_status_word,         // [79:64]
-    hps_heartbeat_seen,           // [63:32]
-    hps_signature_seen            // [31:0]
+    // [63:32] repurposed for RX-interrupt event counters (hb liveness still
+    // visible via bg_state cycling + hps_heartbeat_change_seen [112]).
+    dbg_prx_set_cnt,              // [63:56] bg set ISR.PRX (RX delivered)
+    dbg_ptx_set_cnt,              // [55:48] TX completed -> ISR.PTX
+    dbg_isr_clr_cnt,              // [47:40] CPU wrote/cleared ISR
+    dbg_ethirq_cnt,               // [39:32] eth_irq rising edges -> INT2
+    // [31:0] repurposed for the live CPU-access diagnostic (signature already
+    // confirmed CAFEBABE via hps_signature_valid [113]).
+    dbg_last_acc_addr,            // [31:16] last aperture offset accessed
+    dbg_last_acc_flags,           // [15:12] {sel_eth,is_dport,rd,wr} at that access
+    sel_ethernet,                 // [11] live
+    dtack_eth,                    // [10] live (1=not acked -> CPU waiting)
+    cpu_rd,                       // [9]  live
+    cpu_wr,                       // [8]  live
+    data_port_cycle_active,       // [7]
+    data_port_transfer_done,      // [6]
+    dbg_prom_rd_cnt[5:0]          // [5:0] count of station-PROM reads (>0 = MAC read happened)
 };
 wire [1:0] eth_dbg_source;        // JTAG-driven source (reserved; observe-only)
 /* verilator lint_on UNUSEDSIGNAL */
@@ -991,6 +1066,7 @@ ethernet_issp #(
     .probe(eth_dbg_probe),
     .source(eth_dbg_source)
 );
+
 
 // ISSP probe map:
 // [127:112] remote_dma_addr
@@ -1146,7 +1222,7 @@ always @* begin
                  (~cpu_uds || ~cpu_lds)) begin
         pmem_addr = packet_ram_word_addr(remote_dma_addr);
         if (dcr_word_mode) begin
-            pmem_wdata = dcr_byte_swap ? {cpu_data_in[7:0], cpu_data_in[15:8]} : cpu_data_in;
+            pmem_wdata = (dcr_byte_swap ^ is_dport32_access) ? {cpu_data_in[7:0], cpu_data_in[15:8]} : cpu_data_in;
             pmem_byteena = 2'b11;
         end else begin
             pmem_wdata = packet_ram_wdata_for_byte(remote_dma_addr[0], cpu_write_byte);
@@ -1241,23 +1317,43 @@ always @(posedge clk) begin
                         data_port_transfer_done <= 1'b0;
                         data_port_cycle_active <= 1'b0;
                         local_pmem_read_wait <= 1'b0;
-                        // Abort the CPU's remote DMA, but do NOT stomp the shared
-                        // eth_dma master if it is owned by a PURE background
-                        // mailbox transfer (bg_dma_inflight with no CPU data-port
-                        // op). The driver issues remote-DMA-abort (CR RD=100)
-                        // constantly; clearing eth_dma_req mid-background-transfer
-                        // left bg_dma_inflight stuck with eth_dma_req low (ISSP:
-                        // bg in *_WAIT, req=0), wedging the mailbox and then
-                        // blocking CPU remote DMA -> driver I/O error.
-                        if (!bg_dma_inflight || data_port_read_pending || data_port_write_pending) begin
+                        // Abort the CPU's remote DMA, but NEVER stomp the shared
+                        // eth_dma master while a background mailbox transfer owns
+                        // it (bg_dma_inflight). The data port is local (packet
+                        // RAM / PROM) and does not use eth_dma, so eth_dma_req is
+                        // only ever the bg's; clearing it mid-transfer leaves
+                        // bg_dma_inflight stuck with eth_dma_req=0, wedging the bg
+                        // (ISSP: bg in *_WAIT, req=0, hb frozen) which then blocks
+                        // CPU remote DMA -> ISR.RDC never sets -> the driver spins
+                        // on CR/ISR forever and the Amiga locks up. The earlier
+                        // guard also cleared on data_port_*_pending, which fires
+                        // constantly now that the data port runs concurrently with
+                        // the bg -> that re-opened the stomp. Gate purely on
+                        // bg ownership; the data-port state is cleared above
+                        // regardless, so the CPU's abort still takes effect.
+                        if (!bg_dma_inflight) begin
                             eth_dma_req <= 1'b0;
                             eth_dma_write <= 1'b0;
                             eth_dma_uds <= 1'b1;
                             eth_dma_lds <= 1'b1;
                             eth_dma_wait_counter <= 10'd0;
                         end
+                        // Only assert ISR.RDC (remote DMA complete) when the
+                        // abort actually terminates an in-flight remote DMA. The
+                        // driver writes CR=0x22 (STA + RD2:0=100 abort/complete)
+                        // on EVERY interrupt-handler entry and exit as its idle
+                        // command; unconditionally setting RDC here re-armed
+                        // ISR.RDC every iteration, so if IMR.RDC is enabled
+                        // (ISR & IMR) never cleared, eth_irq/irq_pending stuck
+                        // high -> the handler re-entered forever reading CR/ISR
+                        // (ISSP: CPU spinning 0x0C00/0x0C1C, no data-port access,
+                        // bg healthy). On real NE2000 RDC is set by the DMA byte
+                        // count reaching 0 (complete_data_port_transfer already
+                        // does that), not by an abort with no DMA pending.
                         isr_register <= (cr_write_value[0] ? (isr_register | ISR_RST)
-                                                          : (isr_register & ~ISR_RST)) | ISR_RDC;
+                                                          : (isr_register & ~ISR_RST))
+                                        | ((data_port_read_pending || data_port_write_pending ||
+                                            (remote_byte_count != 16'h0000)) ? ISR_RDC : 8'h00);
                     end else if ((cr_write_remote_dma_read || cr_write_remote_dma_write) &&
                                  (remote_byte_count == 16'h0000)) begin
                         isr_register <= (cr_write_value[0] ? (isr_register | ISR_RST)
@@ -1362,7 +1458,7 @@ always @(posedge clk) begin
                 end
                 5'h07: begin
                     case (current_page)
-                        2'b00: isr_register <= isr_register & ~cpu_write_byte;
+                        2'b00: begin isr_register <= isr_register & ~cpu_write_byte; dbg_isr_clr_cnt <= dbg_isr_clr_cnt + 8'd1; end
                         2'b01: curr_register <= cpu_write_byte;
                         default: begin
                         end
@@ -1457,6 +1553,7 @@ always @(posedge clk) begin
             end else begin
                 isr_register <= isr_register | ISR_PTX;
             end
+            dbg_ptx_set_cnt <= dbg_ptx_set_cnt + 8'd1;   // diagnostic
             shm_sync_enabled <= 1'b1;
             bg_sync_slot <= 6'd0;
         end
@@ -1706,7 +1803,8 @@ always @(posedge clk) begin
                     end
                     data_port_word_mode <= dcr_word_mode;
                     data_port_byte_addr <= remote_dma_addr;
-                    eth_dma_req <= 1'b0;
+                    // Local PROM write: never stomp the bg's eth_dma (see complete_data_port_transfer).
+                    if (!bg_dma_inflight) eth_dma_req <= 1'b0;
                     eth_dma_write <= 1'b0;
                     eth_dma_uds <= 1'b1;
                     eth_dma_lds <= 1'b1;
@@ -1760,7 +1858,8 @@ always @(posedge clk) begin
                     data_port_transfer_done <= 1'b1;
                     data_port_word_mode <= dcr_word_mode;
                     data_port_byte_addr <= remote_dma_addr;
-                    eth_dma_req <= 1'b0;
+                    // Local unmapped-region access: never stomp the bg's eth_dma.
+                    if (!bg_dma_inflight) eth_dma_req <= 1'b0;
                     eth_dma_write <= 1'b0;
                     eth_dma_uds <= 1'b1;
                     eth_dma_lds <= 1'b1;
@@ -1790,8 +1889,13 @@ always @(posedge clk) begin
         end else if (data_port_cycle_launch_ok && cpu_rd) begin
             if (remote_dma_prom_region) begin
                 data_port_transfer_done <= 1'b1;
+                dbg_prom_rd_cnt <= dbg_prom_rd_cnt + 8'd1;   // diagnostic: count PROM reads
+                if (remote_dma_addr == 16'h0000)             // diagnostic: capture first MAC word
+                    dbg_prom_rd_first <= dcr_word_mode
+                        ? maybe_swap_word(prom_read_word, dcr_byte_swap)
+                        : {prom_read_byte, prom_read_byte};
                 if (dcr_word_mode) begin
-                    data_port_read_data <= maybe_swap_word(prom_read_word, dcr_byte_swap);
+                    data_port_read_data <= maybe_swap_word(prom_read_word, dcr_byte_swap ^ is_dport32_access);
                     remote_dma_addr <= remote_dma_addr + 16'h0002;
                     if (remote_byte_count > 16'h0002) begin
                         remote_byte_count <= remote_byte_count - 16'h0002;
@@ -1816,6 +1920,7 @@ always @(posedge clk) begin
             end else if (remote_dma_pmem_region) begin
                 data_port_word_mode <= dcr_word_mode;
                 data_port_byte_addr <= remote_dma_addr;
+                data_port_dport32 <= is_dport32_access;   // remember 32-bit-port swap for the deferred read
                 local_pmem_read_wait <= 1'b1;
                 data_port_read_pending <= 1'b1;
             end else begin
@@ -1945,6 +2050,7 @@ always @(posedge clk) begin
                         end else begin
                             rsr_register <= bg_rx_status;
                             isr_register <= isr_register | ISR_PRX;
+                            dbg_prx_set_cnt <= dbg_prx_set_cnt + 8'd1;
                             curr_register <= bg_rx_next_page;
                             shm_sync_enabled <= 1'b1;
                             bg_sync_slot <= 6'd0;
@@ -1973,6 +2079,7 @@ always @(posedge clk) begin
                         bg_rx_bytes_remaining <= 16'h0000;
                         rsr_register <= bg_rx_status;
                         isr_register <= isr_register | ISR_PRX;
+                            dbg_prx_set_cnt <= dbg_prx_set_cnt + 8'd1;
                             curr_register <= bg_rx_next_page;
                             shm_sync_enabled <= 1'b1;
                             bg_sync_slot <= 6'd0;
@@ -2162,6 +2269,7 @@ always @(posedge clk) begin
             endcase
         end
 
+        if ((|(isr_register & imr_register)) && !eth_irq) dbg_ethirq_cnt <= dbg_ethirq_cnt + 8'd1; // diagnostic: eth_irq rising edges
         eth_irq <= |(isr_register & imr_register);
     end
 end
@@ -2177,7 +2285,32 @@ assign byte_addr = effective_addr << 1;  // Convert to byte address
 // The RTL8019 data port aliases over its register block so longword monitor
 // reads can hit the second word within that slot. Reg 0x17 (0xEA0C5C) is carved
 // out below as the link/media-status register, so the alias stops at 0xC5B.
-assign is_data_port_access = (byte_addr >= 16'h0C40) && (byte_addr <= 16'h0C5B);
+//
+// X-Surf 16-bit data port at NIC+0x80 (0xEA0C80): the x-surf-100.device driver
+// does ALL bulk remote-DMA transfers (the open-time memory test, MAC/PROM read,
+// and packet TX/RX) through a wide data port at board+0xC80, NOT the 8-bit
+// reg-0x10 window at 0xC40 (see lbC002690/lbC00279E: "MOVE.W ...,($0080,A2)").
+// Without decoding it, the driver's memory test reads back open-bus garbage and
+// OpenDevice fails -> "AddNetInterface: ... (Input/output error)". The transfer
+// itself still targets remote_dma_addr (set via RSAR), so routing this window to
+// the same data-port logic is correct; the driver sets DCR.WTS=1 (word mode)
+// before using it. xsurftest uses the 0xC40 port, which is why it worked.
+// The X-Surf-100 driver detects the card via autoconfig (manuf 0x1212, product
+// 0x64) and HARDCODES CardType=2 = 32-bit data-port mode (lbC000656). In that
+// mode it does NOT use the 16-bit port at 0xC80; instead it bulk-transfers via
+// dedicated 32-bit DMA ports at board offsets 0x8880 (READ, lbC0002D4 MOVE.L)
+// and 0x8C80 (WRITE, lbC000226 MOVEM.L). The 68k presents these as 16-bit half
+// cycles (0x8880/0x8882, 0x8C80/0x8C82); each must hit the remote-DMA logic and
+// advance remote_dma_addr exactly like the 0xC80 port. Without this the driver's
+// internal memtest reads back garbage, reports "Datacache is enabled", and skips
+// the station-MAC read entirely -> MAC=FF:FF:FF:FF:FF:FF and the stack locks up.
+// (These offsets are inside the HPS shm window 0x1000-0xFFFF, so cpu_wrapper.v
+// also excludes them from sel_ethernet_shm for the Amiga so they route here.)
+assign is_data_port_access =
+    ((byte_addr >= 16'h0C40) && (byte_addr <= 16'h0C5B)) ||
+    ((byte_addr >= 16'h0C80) && (byte_addr <= 16'h0C9F)) ||
+    ((byte_addr >= 16'h8880) && (byte_addr <= 16'h889F)) ||   // 32-bit DMA read port
+    ((byte_addr >= 16'h8C80) && (byte_addr <= 16'h8C9F));     // 32-bit DMA write port
 
 // RTL8019/X-Surf link/media-status register at reg 0x17 (0xEA0C5C). The X-Surf
 // TestPrg reads it after a transmit: bit0 = link up, bits[2:1] = speed/duplex

@@ -326,9 +326,16 @@ static uint8_t read_ne_register(uint8_t page, uint8_t reg)
         return 0;
     }
     // Registers are stored as 32-bit aligned values in shared memory
-    // Each page has 16 registers, each taking 4 bytes
+    // Each page has 16 registers, each taking 4 bytes.
+    // The FPGA emits each register slot as the 16-bit word {8'h00, value}
+    // (rtl/ethernet.v sync_slot_wdata) and the mailbox byte-swaps every 16-bit
+    // word on the way to DDR, so in memory the slot is [byte0]=0x00,[byte1]=value
+    // (i.e. value lands at bits [15:8] of the little-endian word). Reading byte 0
+    // returns the 0x00 pad, which is why CR/RCR/ISR/IMR all logged as 0x00 even
+    // though rawCR (=0x..VV..00) plainly carried the real value in byte 1.
     uint32_t offset = (page * 16 + reg) * 4;
-    return eth_read_shared_reg(ETH_CTRL_REGS + offset);
+    uint32_t word = eth_read_shared_u32(ETH_CTRL_REGS + offset);
+    return (uint8_t)((word >> 8) & 0xFF);
 }
 
 // DMA is handled entirely by FPGA - no HPS tracking needed
@@ -606,8 +613,34 @@ void minimig_eth_init()
         return;
     }
     eth_debug("ETH: Socket bound to interface successfully\n");
+
+    // Put the bridge interface in promiscuous mode so the host NIC delivers
+    // frames addressed to the Amiga's station MAC (which differs from the host
+    // NIC's own hardware MAC). Without this the kernel/NIC filter only passes
+    // up broadcast/multicast and unicast for the host's own MAC, so broadcast
+    // ARP reaches the Amiga but unicast replies (ping, TCP) addressed to the
+    // Amiga MAC are dropped before this socket sees them (observed: RX stays 0).
+    // PACKET_ADD_MEMBERSHIP/PACKET_MR_PROMISC is auto-cleared when the socket
+    // closes, unlike SIOCSIFFLAGS|IFF_PROMISC.
+    {
+        struct packet_mreq mreq;
+        memset(&mreq, 0, sizeof(mreq));
+        mreq.mr_ifindex = ifr.ifr_ifindex;
+        mreq.mr_type    = PACKET_MR_PROMISC;
+        if (setsockopt(raw_socket, SOL_PACKET, PACKET_ADD_MEMBERSHIP,
+                       &mreq, sizeof(mreq)) < 0) {
+            eth_debug("ETH: Warning: could not enable promiscuous mode on %s: %s "
+                      "(unicast RX to the Amiga MAC may be dropped)\n",
+                      bridge_interface, strerror(errno));
+        } else {
+            eth_debug("ETH: Promiscuous mode enabled on %s "
+                      "(receives unicast for the Amiga station MAC)\n",
+                      bridge_interface);
+        }
+    }
+
     eth_update_shared_status(ETH_STATUS_LINK_UP, 0);
-    
+
     // Print summary of ethernet initialization
     uint8_t shared_mac[6];
     read_shared_mac(shared_mac);
@@ -864,17 +897,25 @@ void minimig_eth_poll()
             struct rtl8019_state state;
             uint8_t cr_reg = read_ne_register(0, 0x00);
             uint8_t curr_reg = read_ne_register(1, 0x07);
+            uint8_t bnry_reg = read_ne_register(0, 0x03);   // BNRY: driver's RX read pointer; if it tracks CURR the driver is draining the ring
+            uint8_t rcr_reg = read_ne_register(0, 0x0C);   // RCR: bit5=MON(monitor), bit4=PRO, bit3=AM, bit2=AB
+            uint8_t isr_reg = read_ne_register(0, 0x07);   // ISR: bit0=PRX bit1=PTX bit3=TXE bit4=OVW bit6=RDC bit7=RST
+            uint8_t imr_reg = read_ne_register(0, 0x0F);   // IMR enable mask; (ISR & IMR)!=0 drives the X-Surf IRQ
             uint16_t status = eth_read_shared_u16(ETH_CTRL_STATUS);
             uint32_t raw_cr_word = eth_read_shared_u32(ETH_CTRL_REGS);
             uint16_t tx_complete_seq = eth_read_shared_u16(ETH_TX_COMPLETE_SEQ);
             read_eth_state(&state);
 
-            // Read enabled status from shared memory
+            // Read enabled status from shared memory. RX_ACTIVE in the FPGA
+            // status word (bit 0x2000) reflects receiver_active = rx_poll &&
+            // CR.STA && !RCR.MON; print RCR + that bit to diagnose why RX may be
+            // off while the NIC is enabled.
             bool enabled = (flags & ETH_FLAG_ENABLED) != 0;
-            
-            eth_debug("ETH: Poll #%d, flags=0x%08X, status=0x%04X, enabled=%d, CR=0x%02X, rawCR=0x%08X, CURR=0x%02X, P=%u, TX:%d, RX:%d, TXSEQ:%u/%u, HB:%d\n",
-                   poll_count, flags, status, enabled, cr_reg, raw_cr_word,
-                   curr_reg, state.current_page, state.tx_packets, state.rx_packets,
+            bool rx_active = (status & 0x2000) != 0;
+
+            eth_debug("ETH: Poll #%d, flags=0x%08X, status=0x%04X, enabled=%d, rxact=%d, CR=0x%02X, RCR=0x%02X, ISR=0x%02X, IMR=0x%02X, rawCR=0x%08X, CURR=0x%02X, BNRY=0x%02X, P=%u, TX:%d, RX:%d, TXSEQ:%u/%u, HB:%d\n",
+                   poll_count, flags, status, enabled, rx_active, cr_reg, rcr_reg, isr_reg, imr_reg, raw_cr_word,
+                   curr_reg, bnry_reg, state.current_page, state.tx_packets, state.rx_packets,
                    tx_request_seq, tx_complete_seq, hps_heartbeat_counter);
             //minimig_eth_test();
         }

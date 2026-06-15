@@ -632,6 +632,10 @@ initial begin
 
     write_high_reg(15'h0614, 8'h02);
     write_high_reg(15'h0616, 8'h00);
+    // Case A: CPU remote-DMA abort with NO background transfer in flight
+    // (bg_dma_inflight=0). The abort clears the CPU data-port state and, since
+    // eth_dma is not owned by the bg, also clears eth_dma_req.
+    dut.bg_dma_inflight = 1'b0;
     dut.data_port_write_pending = 1'b1;
     dut.eth_dma_req = 1'b1;
     dut.eth_dma_write = 1'b1;
@@ -650,6 +654,94 @@ initial begin
         $display("FAIL: CR abort/complete should not leave local_remote_dma_active asserted");
         $fatal(1);
     end
+
+    // Case B (regression for the Amiga lockup): a CPU remote-DMA abort must NOT
+    // stomp a BACKGROUND mailbox transfer that owns eth_dma. With
+    // bg_dma_inflight=1 (and a data-port op also pending, the concurrent case the
+    // data-port decouple made normal), the abort clears the CPU data-port state
+    // but must LEAVE eth_dma_req asserted so the bg transfer completes instead of
+    // wedging at *_WAIT (ISSP showed bg=26 inflight=1 req=0 -> CPU spins on
+    // CR/ISR -> lockup).
+    dut.bg_dma_inflight = 1'b1;
+    dut.eth_dma_req = 1'b1;
+    dut.eth_dma_write = 1'b0;
+    dut.data_port_read_pending = 1'b1;
+    write_high_reg(15'h0600, 8'h22);   // CR remote-DMA abort while bg owns eth_dma
+    if (dut.eth_dma_req !== 1'b1) begin
+        $display("FAIL: CR abort stomped the background eth_dma transfer (eth_dma_req cleared while bg_dma_inflight)");
+        $fatal(1);
+    end
+    if (dut.data_port_read_pending !== 1'b0) begin
+        $display("FAIL: CR abort should still clear the CPU data-port state even when bg owns eth_dma");
+        $fatal(1);
+    end
+    dut.bg_dma_inflight = 1'b0;
+    dut.eth_dma_req = 1'b0;
+    quiesce_background();
+    write_high_reg(15'h060e, 8'h40);
+    write_high_reg(15'h0600, 8'h21);
+
+    // Case C (regression for the Amiga lockup, second stomp path): a LOCAL
+    // packet-RAM read completion must NOT stomp a background mailbox transfer
+    // that owns eth_dma. complete_data_port_transfer used to clear eth_dma_req
+    // unconditionally; with the data-port decouple the pmem read completes while
+    // bg_dma_inflight=1, so it wedged the bg (ISSP: bg=18 BG_SYNC_WORD_WAIT
+    // inflight=1 req=0, hb frozen -> CPU remote DMA blocked -> driver spins on
+    // CR(0x0A)/ISR -> lockup). eth_dma_ready held low so the bg FSM cannot
+    // advance on its own; only the pmem completion can touch eth_dma_req here.
+    eth_dma_ready = 1'b0;
+    dut.bg_dma_inflight = 1'b1;        // bg owns eth_dma...
+    dut.eth_dma_req = 1'b1;
+    dut.eth_dma_write = 1'b0;
+    dut.bg_state = 6'd18;              // BG_SYNC_WORD_WAIT -> bg_pmem_active = 0
+    dut.remote_dma_addr = 16'h4000;   // pmem region -> remote_dma_pmem_region = 1
+    dut.local_pmem_read_wait = 1'b0;  // skip the wait state, fire completion now
+    dut.data_port_read_pending = 1'b1;// a local pmem read is outstanding
+    @(posedge clk);                   // complete_data_port_transfer(pmem_q) fires
+    #1;
+    if (dut.eth_dma_req !== 1'b1) begin
+        $display("FAIL: local pmem read completion stomped the background eth_dma transfer (eth_dma_req cleared while bg_dma_inflight)");
+        $fatal(1);
+    end
+    if (dut.bg_dma_inflight !== 1'b1) begin
+        $display("FAIL: local pmem read completion cleared bg_dma_inflight");
+        $fatal(1);
+    end
+    if (dut.data_port_read_pending !== 1'b0) begin
+        $display("FAIL: local pmem read completion should clear data_port_read_pending");
+        $fatal(1);
+    end
+    dut.bg_dma_inflight = 1'b0;
+    dut.eth_dma_req = 1'b0;
+    quiesce_background();
+    write_high_reg(15'h060e, 8'h40);
+    write_high_reg(15'h0600, 8'h21);
+
+    // Case D (regression for the Amiga interrupt-storm lockup during online):
+    // CR=0x22 (STA + RD2:0=100 abort/complete) is the driver's idle command,
+    // written on every interrupt-handler entry and exit. With NO remote DMA in
+    // flight it must NOT set ISR.RDC. Unconditionally re-arming RDC on every
+    // CR=0x22 kept (ISR & IMR) nonzero so eth_irq/irq_pending stayed high and
+    // the IRQ handler re-entered forever (ISSP: CPU spinning CR 0x0C00 / ISR
+    // 0x0C1C, no data-port access, bg healthy). On real NE2000 RDC is set when
+    // the remote-DMA byte count reaches zero, not by an abort with nothing
+    // pending. (Case A above covers the positive case: abort WITH a DMA pending
+    // still sets RDC.)
+    quiesce_background();
+    dut.data_port_read_pending = 1'b0;
+    dut.data_port_write_pending = 1'b0;
+    dut.remote_byte_count = 16'h0000;
+    write_high_reg(15'h060e, 8'hFF);   // clear all ISR bits, including any stray RDC
+    if ((dut.isr_register & 8'h40) !== 8'h00) begin
+        $display("FAIL: Case D setup - ISR.RDC should be clear, got 0x%02x", dut.isr_register);
+        $fatal(1);
+    end
+    write_high_reg(15'h0600, 8'h22);   // CR=0x22 abort/complete with NO DMA pending
+    if ((dut.isr_register & 8'h40) !== 8'h00) begin
+        $display("FAIL: CR=0x22 abort with no remote DMA pending must NOT set ISR.RDC (interrupt storm), got 0x%02x", dut.isr_register);
+        $fatal(1);
+    end
+    quiesce_background();
     write_high_reg(15'h060e, 8'h40);
     write_high_reg(15'h0600, 8'h21);
 

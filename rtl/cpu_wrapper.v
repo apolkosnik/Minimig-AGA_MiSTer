@@ -114,6 +114,14 @@ wire sel_rtg    = (cpu_addr[31:24] == 8'h02);
 
 wire eth_shm_range = (cpu_addr[15:12] >= 4'h1); // Only 0x1000+ addresses (normal shared memory)
 
+// The X-Surf-100 driver's 32-bit DMA data ports live at board offsets 0x8880
+// (read) and 0x8C80 (write) -- inside the shm address window but they must be
+// handled by the RTL8019 remote-DMA logic, NOT the HPS shm mailbox. Carve them
+// out of sel_ethernet_shm so the Amiga's accesses there reach the ethernet
+// module's local data-port path (is_data_port_access). See rtl/ethernet.v.
+wire eth_dport32_range = ((cpu_addr[15:0] >= 16'h8880) && (cpu_addr[15:0] <= 16'h889F)) ||
+                         ((cpu_addr[15:0] >= 16'h8C80) && (cpu_addr[15:0] <= 16'h8C9F));
+
 // Ethernet shared memory excludes the local register/data-port window and starts at 0xEA1000.
 // This marker is exported for peripheral decode/diagnostics only. The Amiga CPU
 // must not be routed directly into this DDR-backed HPS mailbox window: the
@@ -121,7 +129,7 @@ wire eth_shm_range = (cpu_addr[15:12] >= 4'h1); // Only 0x1000+ addresses (norma
 // ethernet module's private eth_dma path.
 assign sel_ethernet_shm = !cpu_addr[31:24] &&
                           (cpu_addr[23:16] == ethernet_base) && ethernet_ena &&
-                          eth_shm_range;
+                          eth_shm_range && !eth_dport32_range;
 
 // don't sel_kickram when writing
 wire sel_kickram   = !cpu_addr[31:24] && (&cpu_addr[23:19] || (cpu_addr[23:19] == 5'b11100)) && ckick && wr;	// $f8xxxx, e0xxxx

@@ -67,15 +67,30 @@ set prev_hb -1
 for {set i 0} {$i < $poll_count} {incr i} {
     if {$idx_hdbg >= 0} {
         set d [read_probe_data -instance_index $idx_hdbg]
-        set sig    [b2u [field $d $w_hdbg 31  0]]
-        set hb     [b2u [field $d $w_hdbg 63 32]]
+        set lastacc [b2u [field $d $w_hdbg 31 16]]
+        set laccfl  [b2u [field $d $w_hdbg 15 12]]
+        set lsel    [b2u [field $d $w_hdbg 11 11]]
+        set ldt     [b2u [field $d $w_hdbg 10 10]]
+        set lrd     [b2u [field $d $w_hdbg  9  9]]
+        set lwr     [b2u [field $d $w_hdbg  8  8]]
+        set sigvld  [b2u [field $d $w_hdbg 113 113]]
+        set hb     0
         set status [b2u [field $d $w_hdbg 79 64]]
         set bgst   [b2u [field $d $w_hdbg 119 114]]
         set dstat  [b2u [field $d $w_hdbg 127 120]]
+        set isr    [b2u [field $d $w_hdbg 111 104]]
+        set imr    [b2u [field $d $w_hdbg 103  96]]
+        set irqact [expr {($isr & $imr) ? 1 : 0}]
+        set promv  [b2u [field $d $w_hdbg 95 80]]
+        set promc  [b2u [field $d $w_hdbg  5  0]]
+        set prxset [b2u [field $d $w_hdbg 63 56]]
+        set ptxset [b2u [field $d $w_hdbg 55 48]]
+        set isrclr [b2u [field $d $w_hdbg 47 40]]
+        set ethirq [b2u [field $d $w_hdbg 39 32]]
         set mv ""; if {$prev_hb >= 0 && $hb != $prev_hb} { set mv " (adv)" }
         set prev_hb $hb
-        puts [format "\[%d\] HDBG sig=%08X hb=%08X%s status=%04X bg=%2d dstat=%02X" \
-            $i $sig $hb $mv $status $bgst $dstat]
+        puts [format "\[%d\] HDBG sig=%d status=%04X bg=%2d dstat=%02X ISR=%02X IMR=%02X irq=%d | prxSET=%d ptxSET=%d isrCLR=%d ethIRQ=%d | PROM0=%04X lastacc=0x%04X accfl=0x%X live(sel=%d dtack=%d rd=%d wr=%d)" \
+            $i $sigvld $status $bgst $dstat $isr $imr $irqact $prxset $ptxset $isrclr $ethirq $promv $lastacc $laccfl $lsel $ldt $lrd $lwr]
     }
     if {$idx_mbox >= 0} {
         set m [read_probe_data -instance_index $idx_mbox]

@@ -164,7 +164,8 @@ module eth_memtest_bg_tb;
         end
     endtask
 
-    // Word write to the data port (0x0620), waits for DTACK.
+    // Word write to the X-Surf 16-bit data port (word offset 0x0640,
+    // byte offset 0x0C80), waits for DTACK.
     task automatic data_port_write_word;
         input [15:0] value;
         integer w;
@@ -172,7 +173,7 @@ module eth_memtest_bg_tb;
         begin
             done = 1'b0;
             @(negedge clk_sys);
-            cpu_addr = 15'h0620; cpu_data_in = value;
+            cpu_addr = 15'h0640; cpu_data_in = value;   // X-Surf 16-bit data port at 0xEA0C80 (the driver's port)
             sel_ethernet = 1'b1; cpu_hwr = 1'b1; cpu_lwr = 1'b1;
             cpu_as = 1'b0; cpu_uds = 1'b0; cpu_lds = 1'b0;
             for (w = 0; w < 600 && !done; w = w + 1) begin
@@ -190,7 +191,8 @@ module eth_memtest_bg_tb;
         end
     endtask
 
-    // Word read from the data port (0x0620), waits for DTACK, returns value.
+    // Word read from the X-Surf 16-bit data port (word offset 0x0640,
+    // byte offset 0x0C80), waits for DTACK, returns value.
     task automatic data_port_read_word;
         output [15:0] value;
         integer w;
@@ -198,7 +200,7 @@ module eth_memtest_bg_tb;
         begin
             done = 1'b0; value = 16'hXXXX;
             @(negedge clk_sys);
-            cpu_addr = 15'h0620; sel_ethernet = 1'b1; cpu_rd = 1'b1;
+            cpu_addr = 15'h0640; sel_ethernet = 1'b1; cpu_rd = 1'b1;   // 16-bit data port 0xEA0C80
             cpu_as = 1'b0; cpu_uds = 1'b0; cpu_lds = 1'b0;
             for (w = 0; w < 600 && !done; w = w + 1) begin
                 @(posedge clk_sys); #1;
