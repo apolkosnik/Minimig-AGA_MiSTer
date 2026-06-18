@@ -730,7 +730,24 @@ architecture logic of TG68KdotC_Kernel is
 	signal pmmu_fault_is_insn_out : std_logic;                    -- BUG #414: Instruction fetch flag from PMMU
 	signal pmmu_pending_flags : std_logic_vector(15 downto 0);
 	signal pmmu_tc_en       : std_logic;
-	
+
+	-- MC68030 instruction-prefetch grace across MMU enable.
+	-- Real HW: when "pmove TC" enables the MMU, instruction words already in the
+	-- prefetch queue / logical instruction cache (fetched while the MMU was off)
+	-- execute WITHOUT being re-translated. The canonical "pmove TC; jmp <alias>"
+	-- relies on this: the jmp itself is prefetched, executes, and only its target
+	-- is translated. TG68K is uncached and refetches the next opcode after the
+	-- pmove, so it would re-translate the still-physical PC and bus-error when the
+	-- execution region is intentionally unmapped after enable (seen on Mac LC II
+	-- boot, where the ROM runs the post-pmove code from a now-unmapped alias).
+	-- Model the prefetch: while the CPU keeps fetching from the page it was
+	-- executing in when the MMU came on, bypass translation (identity); the first
+	-- instruction fetch that leaves that page (the jmp target) re-arms translation.
+	signal pmmu_tc_en_d       : std_logic := '0';
+	signal mmu_fetch_grace    : std_logic := '0';
+	signal mmu_grace_page     : std_logic_vector(11 downto 0) := (others => '0');
+	signal mmu_grace_suppress : std_logic;
+
 	-- PMMU instruction control signals
 	signal pmmu_ptest_req   : std_logic;
 	signal pmmu_pflush_req  : std_logic;
@@ -1114,14 +1131,30 @@ BEGIN
   pmmu_src_data   <= data_read when (micro_state = pmove_mem_to_mmu_hi or micro_state = pmove_mem_to_mmu_lo) else
                      pmmu_dn_data;
 
+  -- Instruction-prefetch grace (see signal declarations): suppress translation
+  -- for instruction fetches still inside the page the CPU was executing when the
+  -- MMU was enabled. addr_out falls back to identity for these (below). Two terms:
+  -- (1) the very cycle the enable goes live (mmu_fetch_grace is only registered the
+  -- next clkena, so without this the first prefetched fetch would race ahead and
+  -- translate); (2) the persistent grace window for the rest of the prefetched
+  -- page. Only instruction fetches (state="00") are graced.
+  mmu_grace_suppress <= '1' when (state = "00" and
+      ( (pmmu_tc_en = '1' and pmmu_tc_en_d = '0')
+        or (mmu_fetch_grace = '1'
+            and pmmu_addr_log_int(31 downto 20) = mmu_grace_page) ))
+                            else '0';
+
   -- Drive PMMU request metadata
   -- Suppress pmmu_req for odd instruction fetches, because vector 3 must win
-  -- before the MMU or external bus sees the cycle.
+  -- before the MMU or external bus sees the cycle. Also suppress during the
+  -- instruction-prefetch grace window so the post-pmove(TC) opcode fetch is not
+  -- re-translated.
   -- $00DD4000-$00DD5FFF is the MiSTer shared-memory trapdoor used by
   -- extra/MiSTerFileSystem.c. It is board-private I/O rather than Amiga RAM,
   -- so it must remain reachable even when the guest page tables do not map it.
   pmmu_req      <= '1' when (state /= "01" and pmmu_tc_en = '1'
                              and not (state = "00" and TG68_PC(0) = '1')
+                             and mmu_grace_suppress = '0'
                              and not (pmmu_addr_log_int(31 downto 16) = x"00DD" and
                                       pmmu_addr_log_int(15 downto 13) = "010")) else '0';
   pmmu_is_insn  <= '1' when state = "00" else '0';
@@ -1143,6 +1176,30 @@ BEGIN
   pmmu_mem_ack     <= pmmu_walker_ack;
   pmmu_mem_rdat    <= pmmu_walker_data;
   pmmu_mem_berr    <= pmmu_walker_berr;  -- MC68030: Bus error from external memory
+
+  -- Instruction-prefetch grace state machine. Arm on the rising edge of the MMU
+  -- enable, capturing the page the CPU is executing in (its prefetched stream);
+  -- disarm on the first instruction fetch that leaves that page (the jmp target),
+  -- which is translated normally. Data accesses are never graced (only state="00").
+  process(clk)
+  begin
+    if rising_edge(clk) then
+      if nReset = '0' then
+        pmmu_tc_en_d   <= '0';
+        mmu_fetch_grace <= '0';
+        mmu_grace_page  <= (others => '0');
+      elsif clkena_in = '1' then
+        pmmu_tc_en_d <= pmmu_tc_en;
+        if pmmu_tc_en = '1' and pmmu_tc_en_d = '0' then
+          mmu_fetch_grace <= '1';
+          mmu_grace_page  <= TG68_PC(31 downto 20);
+        elsif mmu_fetch_grace = '1' and state = "00"
+              and pmmu_addr_log_int(31 downto 20) /= mmu_grace_page then
+          mmu_fetch_grace <= '0';
+        end if;
+      end if;
+    end if;
+  end process;
 
 	-- BUG #418 FIX: CCR restore disabled. MC68030 UM 6.4.2 says format error
 	-- exception frame must contain the SR loaded from the RTE stack frame,
@@ -9088,7 +9145,8 @@ PROCESS (sndOPC, movem_mux)
 	END PROCESS;
 
 -- MC68030 address routing: direct when MMU disabled, translated when enabled
-addr_out <= pmmu_addr_log_int when pmmu_tc_en = '0' else pmmu_addr_phys_int;
+addr_out <= pmmu_addr_log_int when (pmmu_tc_en = '0' or mmu_grace_suppress = '1')
+            else pmmu_addr_phys_int;
 
 -- Format Error debug latch: captures key state when trap_format_error fires
 -- Once latched, holds until reset so hardware debug can read it
