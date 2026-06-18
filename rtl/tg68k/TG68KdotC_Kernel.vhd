@@ -2928,7 +2928,22 @@ PROCESS (brief, OP1out, OP1outbrief, cpu)
 						use_base <= '1';
 					END IF;
 				END IF;
-					
+
+				-- LC II post-MMU bsr.w FIX (PMMU-stall address hold): the logical-address
+				-- datapath (memaddr_reg/memaddr_delta -> addr / pmmu_addr_log_int) is
+				-- combinational off these registers, clocked by clkena_in, which keeps firing
+				-- while pmmu_busy='1' (the table walker needs it) UNLIKE clkena_lw (which
+				-- freezes micro_state). So a CPU read/write (state(1)='1') that stalls on an
+				-- ATC-miss walk would have its in-flight address recomputed mid-walk (e.g. a
+				-- bsr.w push redirected to the branch target via TG68_PC_brw -> TG68_PC_add),
+				-- committing the access to the wrong location. Freeze the address-datapath
+				-- registers while the PMMU is translating a pending CPU access.
+				IF pmmu_busy='1' AND state(1)='1' THEN
+					use_base           <= use_base;
+					memaddr_delta_rega <= memaddr_delta_rega;
+					memaddr_delta_regb <= memaddr_delta_regb;
+				END IF;
+
 		-- only used for movem address update
 --					IF (long_done='0' AND state(1)='1') OR movem_presub='0' THEN
 					if ((memread(0) = '1') and state(1) = '1') or movem_presub = '0' then -- fix for unaligned movem mikej
@@ -3211,7 +3226,12 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 			ELSE
 --				IPL_nr <= NOT IPL;
 				IF clkena_in='1' THEN
-					IF NOT (state = "00" AND pmmu_busy = '1') THEN
+					-- LC II post-MMU bsr.w FIX (longword word-counter hold): freeze the
+					-- longword word counter (memmask/memread) during a PMMU stall of ANY
+					-- access (fetch state="00" OR data read/write state(1)='1'), not just
+					-- fetches, so a longword WRITE whose 1st word misses the ATC commits BOTH
+					-- words instead of marching its data high->low and collapsing to one word.
+					IF NOT ((state = "00" OR state(1) = '1') AND pmmu_busy = '1') THEN
 						memmask <= memmask(3 downto 0)&"11";
 						memread <= memread(1 downto 0)&memmaskmux(5 downto 4);
 					END IF;
@@ -5695,7 +5715,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 				
 				IF micro_state=idle THEN
 					IF opcode(11 downto 8)="0001" THEN		--bsr
-						set(presub) <= '1';
+						-- BUG FIX (LC II post-MMU bsr.w/bsr.l): set(presub) moved to the bsr.s
+						-- ELSE branch + the bsr2 state so it fires in the SAME cycle as the
+						-- return-PC push (setstate="11"). It previously fired here for all bsr
+						-- forms, but the bsr2 (bsr.w/bsr.l) push ran without it -> the write used
+						-- the branch-target EA instead of -(A7) and rts later popped $0 -> derail.
 						setstackaddr <='1';
 						IF opcode(7 downto 0)="11111111" THEN
 							next_micro_state <= bsr2;
@@ -5703,6 +5727,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						ELSIF opcode(7 downto 0)="00000000" THEN
 							next_micro_state <= bsr2;
 						ELSE	
+							set(presub) <= '1';
 							next_micro_state <= bsr1;
 							setstate <= "11";
 							writePC <= '1';
@@ -6850,6 +6875,10 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						TG68_PC_brw <= '1';	
 						skipFetch <= '1';	-- AMR - can't skip fetch for bsr.l
 					END IF;
+					-- BUG FIX (LC II post-MMU bsr.w/bsr.l): set(presub) must fire HERE, atomic
+					-- with the setstate="11" push write below, so the write EA is -(A7). Without
+					-- it the push landed on the branch target and the stack slot stayed $0.
+					set(presub) <= '1';
 					set(longaktion) <= '1';
 					writePC <= '1';
 					setstate <= "11";
