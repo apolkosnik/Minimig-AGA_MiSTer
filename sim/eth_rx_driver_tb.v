@@ -232,10 +232,9 @@ module eth_rx_driver_tb;
         begin
             done = 1'b0;
             @(negedge clk_sys);
-            // Model the Amiga 68020 32-bit-port behavior: a MOVE.L/MOVEM.L to the
-            // 32-bit ports (0x8880/0x8C80, cpu_addr 0x4440/0x4640) delivers each
-            // 16-bit word's bytes swapped vs a 16-bit MOVE.W port. The FPGA undoes
-            // this (is_dport32_access). So drive cpu_data_in pre-swapped here.
+            // Data-port WRITE: the 0x8C80 write window STILL applies the
+            // is_dport32 swap (write swap kept; only the read swap was removed),
+            // so pre-swap the 32-bit-port write value to compensate.
             cpu_addr = port_word_off;
             cpu_data_in = (port_word_off == 15'h4440 || port_word_off == 15'h4640)
                           ? {value[7:0], value[15:8]} : value;
@@ -262,6 +261,8 @@ module eth_rx_driver_tb;
             cpu_as = 1'b0; cpu_uds = 1'b0; cpu_lds = 1'b0;
             for (w = 0; w < 600 && !done; w = w + 1) begin
                 @(posedge clk_sys); #1;
+                // 32-bit ports (0x8880/0x8C80) apply the is_dport32 per-word swap
+                // on read too, so re-swap the sampled word to recover the value.
                 if (dtack_eth === 1'b0) begin value = (port_word_off == 15'h4440 || port_word_off == 15'h4640) ? {cpu_data_out[7:0], cpu_data_out[15:8]} : cpu_data_out; done = 1'b1; end
             end
             @(negedge clk_sys);
@@ -286,13 +287,14 @@ module eth_rx_driver_tb;
     localparam [14:0] R_PSTART= 15'h0602;       // reg 1
     localparam [14:0] R_PSTOP = 15'h0604;       // reg 2
 
+    localparam [14:0] XSURF_INT_STATUS = 15'h0020; // board byte offset 0x0040
     localparam [14:0] PORT32_RD = 15'h4440;     // byte 0x8880 (32-bit DMA read port)
     localparam [14:0] PORT16    = 15'h0640;     // byte 0x0C80 (16-bit data port)
 
     localparam integer FRAME_LEN = 64;
     reg [7:0] frame [0:FRAME_LEN-1];
     integer k;
-    reg [7:0] isr_v, curr_v, bnry_v, st_v, next_v, lenlo_v, lenhi_v;
+    reg [7:0] isr_v, curr_v, bnry_v, st_v, next_v, lenlo_v, lenhi_v, xsurf_irq_v;
     reg [15:0] got, expw, hdr0, hdr1;
 
     initial begin
@@ -346,6 +348,11 @@ module eth_rx_driver_tb;
             $display("FAIL: eth_irq not asserted after RX (ISR=0x%02x IMR=0x%02x)", dut.isr_register, dut.imr_register);
             errors = errors + 1;
         end
+        reg_read(XSURF_INT_STATUS, xsurf_irq_v);
+        if ((xsurf_irq_v & 8'h80) == 8'h00) begin
+            $display("FAIL: X-Surf board irq status @0x0040=0x%02x; driver will not signal RX task", xsurf_irq_v);
+            errors = errors + 1;
+        end
 
         // ===================================================================
         // Replicate the driver's interrupt-handler RX drain
@@ -361,6 +368,12 @@ module eth_rx_driver_tb;
 
         // 2. clear ISR (write-1-to-clear PRX)
         reg_write(R_ISR, 8'h01);
+        repeat (2) @(posedge clk_sys);
+        reg_read(XSURF_INT_STATUS, xsurf_irq_v);
+        if ((xsurf_irq_v & 8'h80) != 8'h00) begin
+            $display("FAIL: X-Surf board irq status @0x0040 stuck high after ISR clear: 0x%02x", xsurf_irq_v);
+            errors = errors + 1;
+        end
 
         // 3. read CURR on page 1  <-- the key page-1 read the driver compares
         reg_write(R_CR, 8'h62);

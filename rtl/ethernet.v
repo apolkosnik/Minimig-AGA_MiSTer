@@ -163,7 +163,7 @@ parameter [15:0] ETH_SHM_TX_REQUEST_SEQ  = 16'h2C08;
 parameter [15:0] ETH_SHM_TX_COMPLETE_SEQ = 16'h2C0A;
 parameter [15:0] ETH_SHM_RX_QUEUE_LEN    = 16'h2C20;
 parameter [15:0] ETH_SHM_RX_QUEUE_DATA   = 16'h9000;
-parameter [15:0] ETH_RX_QUEUE_SLOTS      = 16'h0004;
+parameter [15:0] ETH_RX_QUEUE_SLOTS      = 16'h0010;
 parameter [15:0] ETH_FLAG_TX_REQ     = 16'h0002;
 parameter [15:0] ETH_FLAG_RX_AVAIL   = 16'h0004;
 parameter [15:0] ETH_FLAG_IRQ        = 16'h0008;
@@ -261,6 +261,13 @@ reg [15:0] bg_rx_total_length;
 reg [15:0] bg_rx_src_offset;
 reg [15:0] bg_rx_dst_offset;
 reg [15:0] bg_rx_bytes_remaining;
+// Integrity probe: running 16-bit byte-sum of every RX PAYLOAD byte the bg writes
+// into the ring (the bytes it actually read from shm via the mailbox). Exposed
+// through sync slot 40 (shm ETH_RTL8019_STATE+0x0A); the daemon keeps the same
+// running sum of frame bytes it enqueued and compares at quiescence. A divergence
+// means a frame was corrupted in shm->bg (mailbox/CDC) -- it does NOT see
+// ring->Amiga (data-port read) corruption, which is checked separately.
+reg [15:0] bg_rx_csum_run;
 reg [7:0]  bg_rx_next_page;
 reg [7:0]  bg_rx_status;
 reg [15:0] bg_source_word;
@@ -289,11 +296,18 @@ reg [40:0] shadow_valid;
 reg        bg_polling_rx_flags;
 reg        bg_clear_rx_avail;
 reg [7:0]  prom_shadow [0:31];
-reg [12:0] pmem_addr;
-reg [15:0] pmem_wdata;
-reg [1:0]  pmem_byteena;
-reg        pmem_wren;
-wire [15:0] pmem_q;
+// Port A -- background FSM (RX ring write / TX buffer read)
+reg [12:0]  pmem_addr_a;
+reg [15:0]  pmem_wdata_a;
+reg [1:0]   pmem_byteena_a;
+reg         pmem_wren_a;
+wire [15:0] pmem_q_a;
+// Port B -- CPU data-port (RX ring read / TX buffer write)
+reg [12:0]  pmem_addr_b;
+reg [15:0]  pmem_wdata_b;
+reg [1:0]   pmem_byteena_b;
+reg         pmem_wren_b;
+wire [15:0] pmem_q_b;
 // FPGA debug disabled to reduce Quartus build time.
 // reg [15:0] debug_heartbeat;
 // reg [15:0] debug_local_wait_cycles;
@@ -456,6 +470,7 @@ task automatic apply_nic_reset;
         bg_rx_queue_next_head <= 16'h0000;
         bg_rx_total_length <= 16'h0000;
         bg_rx_src_offset <= 16'h0000;
+        bg_rx_csum_run <= 16'h0000;
         bg_rx_dst_offset <= 16'h0000;
         bg_rx_bytes_remaining <= 16'h0000;
         bg_rx_next_page <= 8'h00;
@@ -556,7 +571,8 @@ task automatic complete_data_port_transfer;
         end
 
         if (data_port_word_mode) begin
-            remote_dma_addr <= data_port_byte_addr + 16'h0002;
+            remote_dma_addr <= ring_wrap_addr(data_port_byte_addr + 16'h0002,
+                                              pstart_register, pstop_register);
             if (remote_byte_count > 16'h0002) begin
                 remote_byte_count <= remote_byte_count - 16'h0002;
             end else begin
@@ -566,7 +582,8 @@ task automatic complete_data_port_transfer;
                 bg_sync_slot <= 6'd0;
             end
         end else begin
-            remote_dma_addr <= data_port_byte_addr + 16'h0001;
+            remote_dma_addr <= ring_wrap_addr(data_port_byte_addr + 16'h0001,
+                                              pstart_register, pstop_register);
             if (remote_byte_count > 16'h0001) begin
                 remote_byte_count <= remote_byte_count - 16'h0001;
             end else begin
@@ -628,10 +645,51 @@ function [7:0] wrap_ring_page_add;
     end
 endfunction
 
+function [7:0] ring_page_distance;
+    input [7:0] from_page;
+    input [7:0] to_page;
+    input [7:0] pstart;
+    input [7:0] pstop;
+    reg [8:0] ring_pages;
+    begin
+        ring_pages = {1'b0, pstop} - {1'b0, pstart};
+        if ((ring_pages == 9'd0) ||
+            (from_page < pstart) || (from_page >= pstop) ||
+            (to_page < pstart) || (to_page >= pstop)) begin
+            ring_page_distance = 8'h00;
+        end else if (to_page >= from_page) begin
+            ring_page_distance = to_page - from_page;
+        end else begin
+            ring_page_distance = ring_pages[7:0] - (from_page - to_page);
+        end
+    end
+endfunction
+
 function [15:0] ring_page_byte_offset;
     input [7:0] page;
     begin
         ring_page_byte_offset = {page - NE_PAGE_BASE, 8'h00};
+    end
+endfunction
+
+// Fold an NE packet-RAM byte address back into the receive ring [pstart, pstop)
+// when it runs off PSTOP. A real RTL8019 wraps both the receive write pointer
+// and the remote-DMA pointer at PSTOP -> PSTART. Without this, a frame whose
+// data crosses PSTOP runs linearly past NE_PMEM_END: the write masks back into
+// the TX buffer (pages < PSTART) corrupting a staged ACK, and the read leaves
+// the packet region entirely -> the Amiga receives a corrupt frame, drops it on
+// checksum, and the server retransmits (observed as ETHPERF retx with every
+// drop counter at zero). A single frame is far smaller than the ring, so it can
+// straddle PSTOP at most once -> one conditional fold-back is exact.
+function [15:0] ring_wrap_addr;
+    input [15:0] ne_addr;
+    input [7:0]  pstart;
+    input [7:0]  pstop;
+    begin
+        if (ne_addr >= {pstop, 8'h00})
+            ring_wrap_addr = ne_addr - ({pstop, 8'h00} - {pstart, 8'h00});
+        else
+            ring_wrap_addr = ne_addr;
     end
 endfunction
 
@@ -842,7 +900,7 @@ function [15:0] sync_slot_wdata;
             6'd37: sync_slot_wdata = {par_registers[4], par_registers[3]};
             6'd38: sync_slot_wdata = {8'h01, par_registers[5]};
             6'd39: sync_slot_wdata = {8'h00, state_enabled_byte};
-            6'd40: sync_slot_wdata = 16'h0000;
+            6'd40: sync_slot_wdata = bg_rx_csum_run;   // integrity probe: bg RX running byte-sum
             default: sync_slot_wdata = 16'h0000;
         endcase
     end
@@ -874,11 +932,10 @@ wire        receiver_active = rx_poll_enabled && cr_register[1] && !rcr_monitor_
 
 eth_packet_ram packet_ram_inst (
     .clk(clk),
-    .addr(pmem_addr),
-    .wren(pmem_wren),
-    .byteena(pmem_byteena),
-    .wdata(pmem_wdata),
-    .q(pmem_q)
+    .addr_a(pmem_addr_a),     .wren_a(pmem_wren_a),
+    .byteena_a(pmem_byteena_a), .wdata_a(pmem_wdata_a), .q_a(pmem_q_a),
+    .addr_b(pmem_addr_b),     .wren_b(pmem_wren_b),
+    .byteena_b(pmem_byteena_b), .wdata_b(pmem_wdata_b), .q_b(pmem_q_b)
 );
 
 // FPGA debug disabled to reduce Quartus build time.
@@ -925,18 +982,21 @@ wire [15:0] bg_rx_dst_offset_calc = ring_page_byte_offset(bg_rx_page_start_calc)
 wire [7:0]  bg_rx_page_count_calc = rx_page_count_for_length(bg_rx_length_from_dma);
 wire [7:0]  bg_rx_next_page_calc =
     wrap_ring_page_add(bg_rx_page_start_calc, bg_rx_page_count_calc, pstart_register, pstop_register);
-wire [1:0]  bg_rx_slot = bg_rx_queue_head[1:0];
-wire [1:0]  bg_rx_next_slot = bg_rx_slot + 2'd1;
+wire [7:0]  bg_rx_free_pages_calc =
+    ring_page_distance(bg_rx_page_start_calc, bnry_register, pstart_register, pstop_register);
+wire        bg_rx_ring_full_calc = (bg_rx_page_count_calc >= bg_rx_free_pages_calc);
+wire [3:0]  bg_rx_slot = bg_rx_queue_head[3:0];
+wire [3:0]  bg_rx_next_slot = bg_rx_slot + 4'd1;
+wire [15:0] bg_rx_slot_offset =
+    {2'b00, bg_rx_slot, 10'b0000000000} + {3'b000, bg_rx_slot, 9'b000000000};
 wire [15:0] bg_rx_slot_data_base =
-    ETH_SHM_RX_QUEUE_DATA +
-    (bg_rx_slot[1] ? (ETH_PACKET_BUFFER_SIZE << 1) : 16'h0000) +
-    (bg_rx_slot[0] ? ETH_PACKET_BUFFER_SIZE : 16'h0000);
+    ETH_SHM_RX_QUEUE_DATA + bg_rx_slot_offset;
 wire [15:0] tx_next_request_seq =
     (tx_request_seq == 16'hFFFF) ? 16'h0001 : (tx_request_seq + 16'h0001);
 /* verilator lint_off UNUSEDSIGNAL */
 wire [15:0] bg_rx_head_byte_addr = ETH_SHM_RX_QUEUE_HEAD;
 wire [15:0] bg_rx_tail_byte_addr = ETH_SHM_RX_QUEUE_TAIL;
-wire [15:0] bg_rx_len_byte_addr = ETH_SHM_RX_QUEUE_LEN + {13'h0000, bg_rx_slot, 1'b0};
+wire [15:0] bg_rx_len_byte_addr = ETH_SHM_RX_QUEUE_LEN + {11'h000, bg_rx_slot, 1'b0};
 wire [15:0] bg_payload_src_byte_addr = bg_rx_slot_data_base + bg_rx_src_offset;
 wire [15:0] bg_tx_addr_byte_addr = ETH_SHM_TX_REQUEST_ADDR;
 wire [15:0] bg_tx_len_byte_addr = ETH_SHM_TX_REQUEST_LEN;
@@ -979,23 +1039,21 @@ wire        data_port_cycle_timeout_now =
 // active HPS poll and broke xsurftest's 16-bit memory test.  bg cannot enter
 // these states while a data-port cycle is pending -- the bg request block is
 // gated by !local_remote_dma_active -- so there is no RAM-port collision.)
-wire        bg_pmem_active =
-    (bg_state == BG_WRITE_HDR0_REQ)      ||
-    (bg_state == BG_WRITE_HDR1_REQ)      ||
-    (bg_state == BG_WRITE_PAYLOAD_REQ)   ||
-    (bg_state == BG_WRITE_PAYLOAD_WIDE)  ||
-    (bg_state == BG_READ_TX_BUF_REQ)     ||
-    (bg_state == BG_READ_TX_BUF_WAIT1)   ||
-    (bg_state == BG_READ_TX_BUF_WAIT2)   ||
-    (bg_state == BG_READ_TX_WIDE_REQ)    ||
-    (bg_state == BG_READ_TX_WIDE_WAIT1)  ||
-    (bg_state == BG_READ_TX_WIDE_WAIT2);
+// (Historical: bg_pmem_active / bg_releasable_pmem tracked which bg states held
+// the shared single-port packet RAM, so the CPU data-port read could re-arm and
+// wait for a bg-idle cycle, and so those states could be released from the
+// data-port freeze to avoid a mutual deadlock.  The packet RAM is now TRUE
+// DUAL-PORT -- the bg owns port A, the CPU owns port B -- so the CPU never sees
+// the bg's writes and none of that mux/re-arm/release bookkeeping is needed.
+// Both wires and their gate term have been removed.)
 wire        data_port_cycle_launch_ok =
     (data_port_cycle_start || data_port_cycle_active) &&
     !data_port_transfer_done &&
     !data_port_cycle_timeout_now &&
     !data_port_dma_complete_now && !data_port_dma_timeout_now &&
-    !data_port_write_pending && !data_port_read_pending && !bg_pmem_active;
+    // No !bg_pmem_active term: the CPU drives the dedicated packet-RAM port B,
+    // so it never has to wait for the bg's port-A activity (dual-port RAM).
+    !data_port_write_pending && !data_port_read_pending;
 wire [7:0]  debug_status_byte = {
     debug_dma_timeout_sticky,
     bg_dma_inflight,
@@ -1104,6 +1162,14 @@ wire [127:0] eth_dbg_probe = {
 wire [1:0] eth_dbg_source;        // JTAG-driven source (reserved; observe-only)
 /* verilator lint_on UNUSEDSIGNAL */
 
+// Bring-up JTAG ISSP probe -- DISABLED for production. It (plus the sld_hub JTAG
+// fabric it pulls in and the dbg_* counters that feed it) consumes logic that
+// congests the fitter and was pushing the marginal Minimig cpu_cache->cpu_dat_r
+// setup path negative after the data-port-read race fix. With the probe removed,
+// eth_dbg_probe and every dbg_* counter become dead and are stripped by synthesis,
+// freeing that logic so timing closes. Define ETH_DEBUG_ISSP to bring it back for
+// JTAG debugging. (HW diagnosis now uses the daemon ETHPERF counters, not JTAG.)
+`ifdef ETH_DEBUG_ISSP
 ethernet_issp #(
     .PROBE_WIDTH(128),
     .SOURCE_WIDTH(2),
@@ -1113,6 +1179,7 @@ ethernet_issp #(
     .probe(eth_dbg_probe),
     .source(eth_dbg_source)
 );
+`endif
 
 
 // ISSP probe map:
@@ -1239,62 +1306,77 @@ ethernet_issp #(
 //     end
 // end
 
+// ---- Packet-RAM PORT A: background FSM (RX ring write / TX buffer read) ----
 always @* begin
-    pmem_addr = 13'h0000;
-    pmem_wdata = 16'h0000;
-    pmem_byteena = 2'b00;
-    pmem_wren = 1'b0;
+    pmem_addr_a    = 13'h0000;
+    pmem_wdata_a   = 16'h0000;
+    pmem_byteena_a = 2'b00;
+    pmem_wren_a    = 1'b0;
 
     if (bg_state == BG_WRITE_HDR0_REQ) begin
-        pmem_addr = packet_ram_word_addr(NE_PMEM_START + bg_rx_dst_offset);
-        pmem_wdata = {bg_rx_status, bg_rx_next_page};
-        pmem_byteena = 2'b11;
-        pmem_wren = 1'b1;
+        pmem_addr_a = packet_ram_word_addr(NE_PMEM_START + bg_rx_dst_offset);
+        pmem_wdata_a = {bg_rx_status, bg_rx_next_page};
+        pmem_byteena_a = 2'b11;
+        pmem_wren_a = 1'b1;
     end else if (bg_state == BG_WRITE_HDR1_REQ) begin
-        pmem_addr = packet_ram_word_addr(NE_PMEM_START + bg_rx_dst_offset + 16'h0002);
-        pmem_wdata = {bg_rx_total_length[7:0], bg_rx_total_length[15:8]};
-        pmem_byteena = 2'b11;
-        pmem_wren = 1'b1;
+        pmem_addr_a = packet_ram_word_addr(NE_PMEM_START + bg_rx_dst_offset + 16'h0002);
+        pmem_wdata_a = {bg_rx_total_length[7:0], bg_rx_total_length[15:8]};
+        pmem_byteena_a = 2'b11;
+        pmem_wren_a = 1'b1;
     end else if (bg_state == BG_WRITE_PAYLOAD_REQ) begin
-        pmem_addr = packet_ram_word_addr(NE_PMEM_START + bg_rx_dst_offset + 16'h0004 + bg_rx_src_offset);
+        pmem_addr_a = packet_ram_word_addr(ring_wrap_addr(
+            NE_PMEM_START + bg_rx_dst_offset + 16'h0004 + bg_rx_src_offset,
+            pstart_register, pstop_register));
         if (bg_rx_bytes_remaining > 16'h0001) begin
-            pmem_wdata = bg_source_word;
-            pmem_byteena = 2'b11;
+            pmem_wdata_a = bg_source_word;
+            pmem_byteena_a = 2'b11;
         end else begin
-            pmem_wdata = {bg_source_word[15:8], 8'h00};
-            pmem_byteena = 2'b10;
+            pmem_wdata_a = {bg_source_word[15:8], 8'h00};
+            pmem_byteena_a = 2'b10;
         end
-        pmem_wren = 1'b1;
+        pmem_wren_a = 1'b1;
     end else if (bg_state == BG_WRITE_PAYLOAD_WIDE) begin
         // One of the four words of the wide-read 64-bit line; bg_wide_idx walks
         // 0..3, each a full word (the aligned bulk never has an odd tail byte).
-        pmem_addr = packet_ram_word_addr(NE_PMEM_START + bg_rx_dst_offset + 16'h0004 +
-                                         bg_rx_src_offset + {13'd0, bg_wide_idx, 1'b0});
-        pmem_wdata = bg_wide_buf[{bg_wide_idx, 4'd0} +: 16];
-        pmem_byteena = 2'b11;
-        pmem_wren = 1'b1;
-    end else if (data_port_cycle_launch_ok && cpu_wr && remote_dma_pmem_region &&
-                 (~cpu_uds || ~cpu_lds)) begin
-        pmem_addr = packet_ram_word_addr(remote_dma_addr);
-        if (dcr_word_mode) begin
-            pmem_wdata = (dcr_byte_swap ^ is_dport32_access) ? {cpu_data_in[7:0], cpu_data_in[15:8]} : cpu_data_in;
-            pmem_byteena = 2'b11;
-        end else begin
-            pmem_wdata = packet_ram_wdata_for_byte(remote_dma_addr[0], cpu_write_byte);
-            pmem_byteena = packet_ram_byteena_for_byte(remote_dma_addr[0]);
-        end
-        pmem_wren = 1'b1;
-    end else if (data_port_read_pending) begin
-        pmem_addr = packet_ram_word_addr(data_port_byte_addr);
+        pmem_addr_a = packet_ram_word_addr(ring_wrap_addr(
+            NE_PMEM_START + bg_rx_dst_offset + 16'h0004 +
+            bg_rx_src_offset + {13'd0, bg_wide_idx, 1'b0},
+            pstart_register, pstop_register));
+        pmem_wdata_a = bg_wide_buf[{bg_wide_idx, 4'd0} +: 16];
+        pmem_byteena_a = 2'b11;
+        pmem_wren_a = 1'b1;
     end else if ((bg_state == BG_READ_TX_BUF_REQ) || (bg_state == BG_READ_TX_BUF_WAIT1) ||
                  (bg_state == BG_READ_TX_BUF_WAIT2)) begin
-        pmem_addr = packet_ram_word_addr(tx_stage_addr + bg_tx_src_offset);
+        pmem_addr_a = packet_ram_word_addr(tx_stage_addr + bg_tx_src_offset);
     end else if ((bg_state == BG_READ_TX_WIDE_REQ) || (bg_state == BG_READ_TX_WIDE_WAIT1) ||
                  (bg_state == BG_READ_TX_WIDE_WAIT2)) begin
-        pmem_addr = packet_ram_word_addr(tx_stage_addr + bg_tx_src_offset +
-                                         {13'd0, bg_wide_idx, 1'b0});
+        pmem_addr_a = packet_ram_word_addr(tx_stage_addr + bg_tx_src_offset +
+                                           {13'd0, bg_wide_idx, 1'b0});
+    end
+end
+
+// ---- Packet-RAM PORT B: CPU data-port (RX ring read / TX buffer write) ----
+always @* begin
+    pmem_addr_b    = 13'h0000;
+    pmem_wdata_b   = 16'h0000;
+    pmem_byteena_b = 2'b00;
+    pmem_wren_b    = 1'b0;
+
+    if (data_port_cycle_launch_ok && cpu_wr && remote_dma_pmem_region &&
+        (~cpu_uds || ~cpu_lds)) begin
+        pmem_addr_b = packet_ram_word_addr(remote_dma_addr);
+        if (dcr_word_mode) begin
+            pmem_wdata_b = (dcr_byte_swap ^ is_dport32_access) ? {cpu_data_in[7:0], cpu_data_in[15:8]} : cpu_data_in;
+            pmem_byteena_b = 2'b11;
+        end else begin
+            pmem_wdata_b = packet_ram_wdata_for_byte(remote_dma_addr[0], cpu_write_byte);
+            pmem_byteena_b = packet_ram_byteena_for_byte(remote_dma_addr[0]);
+        end
+        pmem_wren_b = 1'b1;
+    end else if (data_port_read_pending) begin
+        pmem_addr_b = packet_ram_word_addr(data_port_byte_addr);
     end else if (data_port_cycle_launch_ok && cpu_rd && remote_dma_pmem_region) begin
-        pmem_addr = packet_ram_word_addr(remote_dma_addr);
+        pmem_addr_b = packet_ram_word_addr(remote_dma_addr);
     end
 end
 
@@ -1617,10 +1699,17 @@ always @(posedge clk) begin
             bg_sync_slot <= 6'd0;
         end
 
+        // Data-port (Amiga PIO) read of packet RAM via the DEDICATED CPU port B.
+        // Port B always drives data_port_byte_addr while data_port_read_pending,
+        // independent of the bg's port A, so the old "wait for a bg-idle cycle"
+        // re-arm (which existed only because the single port could return the bg's
+        // write-address data) is gone: just wait one cycle for the registered q_b
+        // to settle, then capture it.  No bg_pmem_active gating, no corruption --
+        // the bg writes/reads port A, the CPU reads port B.
         if (data_port_read_pending && local_pmem_read_wait) begin
             local_pmem_read_wait <= 1'b0;
-        end else if (data_port_read_pending && !bg_pmem_active && remote_dma_pmem_region) begin
-            complete_data_port_transfer(pmem_q);
+        end else if (data_port_read_pending && remote_dma_pmem_region) begin
+            complete_data_port_transfer(pmem_q_b);
         end
 
         // The CPU-facing data-port path keeps a bounded eth_dma timeout so the
@@ -1683,7 +1772,7 @@ always @(posedge clk) begin
 
                     BG_READ_RX_TAIL_WAIT: begin
                         bg_rx_queue_tail <= bg_dma_hps_word & ETH_RX_QUEUE_INDEX_MASK;
-                        if (bg_rx_queue_head[1:0] == bg_dma_hps_word[1:0]) begin
+                        if (bg_rx_queue_head[3:0] == bg_dma_hps_word[3:0]) begin
                             bg_polling_rx_flags <= 1'b0;
                             bg_clear_rx_avail <= (bg_flags_word & ETH_FLAG_RX_AVAIL) != 16'h0000;
                             if ((bg_flags_word & ETH_FLAG_RX_AVAIL) != 16'h0000) begin
@@ -1703,13 +1792,13 @@ always @(posedge clk) begin
                         bg_rx_bytes_remaining <= bg_rx_length_from_dma;
                         bg_rx_dst_offset <= bg_rx_dst_offset_calc;
                         bg_rx_next_page <= bg_rx_next_page_calc;
-                        bg_rx_queue_next_head <= {14'h0000, bg_rx_next_slot};
+                        bg_rx_queue_next_head <= {12'h000, bg_rx_next_slot};
                         bg_rx_status <= RSR_PRX | RSR_PHY;
-                        bg_clear_rx_avail <= (bg_rx_next_slot == bg_rx_queue_tail[1:0]);
+                        bg_clear_rx_avail <= (bg_rx_next_slot == bg_rx_queue_tail[3:0]);
 
                         if (bg_rx_length_from_dma == 16'h0000) begin
                             bg_state <= BG_WRITE_RX_HEAD_REQ;
-                        end else if (bg_rx_next_page_calc == bnry_register) begin
+                        end else if (bg_rx_ring_full_calc) begin
                             rsr_register <= RSR_MPA;
                             isr_register <= isr_register | ISR_OVW;
                             cntr2_register <= cntr2_register + 8'h01;
@@ -1861,6 +1950,47 @@ always @(posedge clk) begin
                     BG_WRITE_STATUS_WAIT: begin
                         hps_poll_counter <= HPS_POLL_RELOAD;
                         bg_state <= BG_IDLE;
+                    end
+
+                    BG_WRITE_RX_HEAD_WAIT: begin
+                        // RX head write completed.  Advance the LOCAL head (the shm
+                        // copy was already written by BG_WRITE_RX_HEAD_REQ) and, if
+                        // more frames are already queued (bg_clear_rx_avail==0 means
+                        // bg_rx_next_slot != cached tail), drain the next slot
+                        // BACK-TO-BACK -- go straight to BG_READ_RX_LEN_REQ instead of
+                        // the default IDLE + 63-tick poll + FLAGS/HEAD/TAIL re-read.
+                        // bg_rx_queue_head advances this cycle so bg_rx_slot (LEN/data
+                        // addrs) and the curr-based ring dst point at the next slot.
+                        // The per-frame shm register-sync only runs from BG_IDLE, so
+                        // it coalesces to one pass after the whole batch (the Amiga
+                        // reads ISR/CURR from local regs, not the deferred shm mirror).
+                        // The LAST frame falls through to the original IDLE+re-poll
+                        // path, which clears RX_AVAIL and re-reads the tail to pick up
+                        // anything the daemon enqueued during the batch.
+                        //
+                        // ACK INTERLEAVE: a pending Amiga transmit (tx_stage_pending --
+                        // almost always a TCP ACK during a download) takes priority over
+                        // continuing the back-to-back RX drain.  Without this the ACK is
+                        // only serviced at the BG_IDLE dispatch, which the batch loop
+                        // bypasses, so the ACK waits until the WHOLE remaining batch
+                        // drains (proven in eth_ack_starvation_tb: issued at head=2,
+                        // staged at head=8).  The server, seeing no ACK, RTO-retransmits
+                        // -> retxDat climbs with dupAck~0 (the daemon's "ACKs aren't
+                        // reaching the server" signature) and the download stalls.
+                        // Staging it here, between frames, gets the ACK to the HPS
+                        // promptly; the RX batch resumes from the persisted
+                        // bg_rx_queue_head via the normal flags re-poll after staging
+                        // (no frames are lost -- the shm head/tail are re-read).
+                        bg_rx_queue_head <= bg_rx_queue_next_head;
+                        bg_polling_rx_flags <= 1'b0;
+                        if (tx_stage_pending) begin
+                            bg_state <= BG_WRITE_TX_ADDR_REQ;
+                        end else if (!bg_clear_rx_avail) begin
+                            bg_state <= BG_READ_RX_LEN_REQ;
+                        end else begin
+                            bg_state <= BG_IDLE;
+                            bg_poll_counter <= BG_POLL_RELOAD;
+                        end
                     end
 
                     default: begin
@@ -2082,8 +2212,20 @@ always @(posedge clk) begin
             bg_clear_rx_avail <= 1'b0;
             bg_poll_counter <= BG_POLL_RELOAD;
         end else if (!eth_dma_req && !bg_dma_inflight &&
-                     !local_remote_dma_active &&
-                     !(sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr))) begin
+                      // A CPU data-port access to the LOCAL packet-RAM (pmem)
+                      // region -- i.e. the Amiga PIO-reading/writing the NE2000
+                      // ring during a download -- does NOT touch the DDR mailbox
+                      // the bg uses, and the packet RAM is now TRUE DUAL-PORT:
+                      // the CPU reads/writes port B while the bg reads/writes
+                      // port A, so they never collide and no mux/re-arm/release
+                      // gymnastics are needed.  So only freeze the bg for a
+                      // NON-pmem data-port access (PROM/shm, which use eth_dma).
+                      // Letting the bg keep fetching+delivering RX frames while
+                      // the Amiga drains the ring overlaps the two and removes the
+                      // per-access stall that throttled RX delivery.
+                      (!local_remote_dma_active || remote_dma_pmem_region) &&
+                      !(sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr) &&
+                        !remote_dma_pmem_region)) begin
             case (bg_state)
                 BG_READ_FLAGS_REQ: begin
                     eth_dma_req <= 1'b1;
@@ -2180,6 +2322,13 @@ always @(posedge clk) begin
                     // bg_wide_idx); no mailbox traffic.  After the 4th, advance by
                     // 8 and either keep packing or hand the <=8-byte tail to the
                     // proven narrow path.
+                    // Integrity probe: sum this line's 8 payload bytes once (idx 0).
+                    if (bg_wide_idx == 2'd0)
+                        bg_rx_csum_run <= bg_rx_csum_run
+                            + {8'h0, bg_wide_buf[7:0]}   + {8'h0, bg_wide_buf[15:8]}
+                            + {8'h0, bg_wide_buf[23:16]} + {8'h0, bg_wide_buf[31:24]}
+                            + {8'h0, bg_wide_buf[39:32]} + {8'h0, bg_wide_buf[47:40]}
+                            + {8'h0, bg_wide_buf[55:48]} + {8'h0, bg_wide_buf[63:56]};
                     if (bg_wide_idx == 2'd3) begin
                         bg_rx_src_offset <= bg_rx_src_offset + 16'h0008;
                         bg_rx_bytes_remaining <= bg_rx_bytes_remaining - 16'h0008;
@@ -2194,10 +2343,15 @@ always @(posedge clk) begin
 
                     BG_WRITE_PAYLOAD_REQ: begin
                         if (bg_rx_bytes_remaining > 16'h0001) begin
+                            // Integrity probe: both payload bytes of this word.
+                            bg_rx_csum_run <= bg_rx_csum_run
+                                + {8'h0, bg_source_word[7:0]} + {8'h0, bg_source_word[15:8]};
                             bg_rx_src_offset <= bg_rx_src_offset + 16'h0002;
                             bg_rx_bytes_remaining <= bg_rx_bytes_remaining - 16'h0002;
                             bg_state <= BG_READ_PAYLOAD_REQ;
                     end else begin
+                        // Integrity probe: the single odd tail byte actually written.
+                        bg_rx_csum_run <= bg_rx_csum_run + {8'h0, bg_source_word[15:8]};
                         bg_rx_src_offset <= bg_rx_src_offset + bg_rx_bytes_remaining;
                         bg_rx_bytes_remaining <= 16'h0000;
                         rsr_register <= bg_rx_status;
@@ -2210,11 +2364,8 @@ always @(posedge clk) begin
                         end
                     end
 
-                    BG_WRITE_RX_HEAD_WAIT: begin
-                        bg_rx_queue_head <= bg_rx_queue_next_head;
-                        bg_polling_rx_flags <= 1'b0;
-                        bg_state <= BG_CLEAR_FLAG_REQ;
-                    end
+                    // (BG_WRITE_RX_HEAD_WAIT is a dma-completion wait -- handled in
+                    //  the eth_dma_ready case where the back-to-back drain lives.)
 
                 BG_WRITE_TX_LEN_REQ: begin
                     eth_dma_req <= 1'b1;
@@ -2247,7 +2398,7 @@ always @(posedge clk) begin
                 end
 
                 BG_READ_TX_BUF_WAIT2: begin
-                    bg_source_word <= pmem_q;
+                    bg_source_word <= pmem_q_a;
                     bg_state <= BG_WRITE_TX_BUF_REQ;
                 end
 
@@ -2279,7 +2430,7 @@ always @(posedge clk) begin
                 end
 
                 BG_READ_TX_WIDE_WAIT2: begin
-                    bg_wide_buf[{bg_wide_idx, 4'd0} +: 16] <= pmem_q;
+                    bg_wide_buf[{bg_wide_idx, 4'd0} +: 16] <= pmem_q_a;
                     if (bg_wide_idx == 2'd3) begin
                         bg_wide_idx <= 2'd0;
                         bg_state <= BG_WRITE_TX_WIDE_REQ;
@@ -2731,23 +2882,52 @@ end
 endmodule
 /* verilator lint_on DECLFILENAME */
 
+// True dual-port packet RAM (M10K).  Port A = background FSM (writes the RX
+// ring / reads the TX buffer); Port B = CPU data-port (reads the RX ring /
+// writes the TX buffer during upload).  Independent ports let the Amiga PIO-read
+// the ring while the bg fills it, with no single-port serialization, re-arm, or
+// deadlock.  The bg (port A) and CPU (port B) target different ring regions
+// concurrently (bg at CURR, CPU behind BNRY; bg RX pages vs CPU TX pages), so
+// same-address simultaneous writes don't occur in normal operation.
 module eth_packet_ram (
     input  wire        clk,
-    input  wire [12:0] addr,
-    input  wire        wren,
-    input  wire [1:0]  byteena,
-    input  wire [15:0] wdata,
-    output reg  [15:0] q
+    // Port A -- background FSM
+    input  wire [12:0] addr_a,
+    input  wire        wren_a,
+    input  wire [1:0]  byteena_a,
+    input  wire [15:0] wdata_a,
+    output reg  [15:0] q_a,
+    // Port B -- CPU data-port
+    input  wire [12:0] addr_b,
+    input  wire        wren_b,
+    input  wire [1:0]  byteena_b,
+    input  wire [15:0] wdata_b,
+    output reg  [15:0] q_b
 );
-    (* ramstyle = "M10K" *) reg [7:0] mem_l [0:8191];
-    (* ramstyle = "M10K" *) reg [7:0] mem_u [0:8191];
+    // Per-byte-lane true-dual-port inference (the proven dpram_be pattern): each
+    // 8-bit lane gets its own port-A and port-B always block so Quartus maps it
+    // to a true-dual-port M10K.  no_rw_check = read-during-write to the same
+    // address is don't-care (the bg and CPU access different ring regions).
+    (* ramstyle = "no_rw_check, M10K" *) reg [7:0] mem_l [0:8191];
+    (* ramstyle = "no_rw_check, M10K" *) reg [7:0] mem_u [0:8191];
 
+    // Low byte
     always @(posedge clk) begin
-        if (wren) begin
-            if (byteena[0]) mem_l[addr] <= wdata[7:0];
-            if (byteena[1]) mem_u[addr] <= wdata[15:8];
-        end
-        q <= {mem_u[addr], mem_l[addr]};
+        if (wren_a & byteena_a[0]) mem_l[addr_a] <= wdata_a[7:0];
+        q_a[7:0] <= mem_l[addr_a];
+    end
+    always @(posedge clk) begin
+        if (wren_b & byteena_b[0]) mem_l[addr_b] <= wdata_b[7:0];
+        q_b[7:0] <= mem_l[addr_b];
+    end
+    // High byte
+    always @(posedge clk) begin
+        if (wren_a & byteena_a[1]) mem_u[addr_a] <= wdata_a[15:8];
+        q_a[15:8] <= mem_u[addr_a];
+    end
+    always @(posedge clk) begin
+        if (wren_b & byteena_b[1]) mem_u[addr_b] <= wdata_b[15:8];
+        q_b[15:8] <= mem_u[addr_b];
     end
 endmodule
 

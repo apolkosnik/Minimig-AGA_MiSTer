@@ -28,7 +28,7 @@
 #define ETH_NE_MEMORY          0x3000       // compact 16KB NE packet RAM backing store
 #define ETH_DEBUG_INFO         0x7000       // debug/status region
 #define ETH_FUTURE_USE         0x9000       // reserved/shared queue backing
-#define ETH_RX_QUEUE_SLOTS     0x04         // shared RX queue slot count
+#define ETH_RX_QUEUE_SLOTS     0x10         // shared RX queue slot count
 #define ETH_RX_QUEUE_DATA      ETH_FUTURE_USE // payload base for shared RX queue slots
 
 // Shared control flags.

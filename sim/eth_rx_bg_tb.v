@@ -19,7 +19,7 @@
 //   RX_QUEUE_TAIL   0x2C06  (HPS-produced, low byte)
 //   RX_QUEUE_LEN    0x2C20  (uint16 per slot, +slot*2)
 //   RX_QUEUE_DATA   0x9000  (slot*0x600 bytes per slot)
-//   4 ring slots, slot buffer 0x600 bytes.
+//   16 ring slots, slot buffer 0x600 bytes.
 // ===========================================================================
 
 `timescale 1ns/1ps
@@ -34,6 +34,7 @@ module eth_rx_bg_tb;
     localparam [15:0] OFF_RX_LEN     = 16'h2C20;
     localparam [15:0] OFF_RX_DATA    = 16'h9000;
     localparam [15:0] RX_SLOT_SIZE   = 16'h0600;
+    localparam integer RX_QUEUE_SLOTS = 16;
     localparam [15:0] FLAG_RX_AVAIL  = 16'h0004;
 
     // ---- clocks ----
@@ -422,6 +423,26 @@ module eth_rx_bg_tb;
         $display("ROUNDTRIP HISTOGRAM (bg_state : mailbox round-trips):");
         for (hh = 0; hh < 64; hh = hh + 1)
             if (st_hist[hh] != 0) $display("    state %0d : %0d", hh, st_hist[hh]);
+
+        // ---- Integrity probe: sync slot 40 (shm 0x110A) carries the bg's running
+        // byte-sum of all RX payload bytes written to the ring. After this one
+        // 60-byte frame it must equal the frame's byte-sum (order-independent). ----
+        begin : csum_check
+            integer ci; reg [15:0] exp_csum, got_csum;
+            exp_csum = 16'h0000;
+            for (ci = 0; ci < FRAME_LEN; ci = ci + 1) exp_csum = exp_csum + {8'h00, frame[ci]};
+            got_csum = ddr_read_u16(16'h110A);
+            if (got_csum === exp_csum)
+                $display("OK: integrity-probe csum @0x110A = 0x%04x matches frame byte-sum (direct)", got_csum);
+            else if ({got_csum[7:0], got_csum[15:8]} === exp_csum)
+                $display("OK: integrity-probe csum @0x110A = 0x%04x matches frame byte-sum 0x%04x (byte-swapped)",
+                         got_csum, exp_csum);
+            else begin
+                $display("FAIL: integrity-probe csum @0x110A = 0x%04x, expected 0x%04x (neither direct nor swapped)",
+                         got_csum, exp_csum);
+                errors = errors + 1;
+            end
+        end
 
         if (errors == 0)
             $display("PASS: eth_rx_bg_tb completed (RX frame delivered to packet RAM, ISR.PRX/CURR/head OK, Amiga read-back matches)");

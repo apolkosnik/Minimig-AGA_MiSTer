@@ -26,6 +26,7 @@ module eth_rx_flood_tb;
     localparam [15:0] OFF_RX_LEN     = 16'h2C20;   // +slot*2
     localparam [15:0] OFF_RX_DATA    = 16'h9000;   // +slot*0x600
     localparam [15:0] RX_SLOT_SIZE   = 16'h0600;
+    localparam integer RX_QUEUE_SLOTS = 16;
     localparam [15:0] FLAG_RX_AVAIL  = 16'h0004;
 
     reg clk_sys = 0;
@@ -218,6 +219,7 @@ module eth_rx_flood_tb;
             cpu_as = 1'b0; cpu_uds = 1'b0; cpu_lds = 1'b0;
             for (w = 0; w < 600 && !done; w = w + 1) begin
                 @(posedge clk_sys); #1;
+                // 0x8880 applies the is_dport32 per-word read swap -> re-swap to recover.
                 if (dtack_eth === 1'b0) begin value = (port_word_off == 15'h4440 || port_word_off == 15'h4640) ? {cpu_data_out[7:0], cpu_data_out[15:8]} : cpu_data_out; done = 1'b1; end
             end
             @(negedge clk_sys);
@@ -294,7 +296,7 @@ module eth_rx_flood_tb;
         for (p = 0; p < NPKT; p = p + 1) begin
             marker = 8'hA0 + p[7:0];
             build_frame(marker);
-            slot = p % 4;
+            slot = p % RX_QUEUE_SLOTS;
             sw_before = sync_writes;
 
             // read CURR (page1) BEFORE injection -> the page the bg will write at
@@ -305,7 +307,7 @@ module eth_rx_flood_tb;
             for (k = 0; k < FLEN; k = k + 1)
                 ddr_write_byte(OFF_RX_DATA + slot*RX_SLOT_SIZE + k[15:0], frame[k]);
             ddr_write_u16(OFF_RX_LEN + slot*2, FLEN[15:0]);
-            tail = (tail + 1) % 4;
+            tail = (tail + 1) % RX_QUEUE_SLOTS;
             ddr_write_u16(OFF_RX_TAIL, tail[15:0]);
             ddr_write_u16(OFF_FLAGS, FLAG_RX_AVAIL);
 
@@ -363,7 +365,7 @@ module eth_rx_flood_tb;
             end
 
             // advance BNRY = next_page - 1 (driver frees the page)
-            reg_write(R_BNRY, next_v - 8'h01);
+            reg_write(R_BNRY, (next_v == 8'h46) ? 8'h49 : (next_v - 8'h01));
             repeat (1500) @(posedge clk_sys);   // let this frame's register sync settle
             $display("INFO: pkt %0d marker=0x%02x page 0x%02x next 0x%02x CURR 0x%02x  sync_round_trips=%0d",
                      p, marker, rdptr, next_v, curr_v, sync_writes - sw_before);

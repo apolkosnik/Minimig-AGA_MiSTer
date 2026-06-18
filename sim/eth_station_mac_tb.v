@@ -19,7 +19,8 @@ module eth_station_mac_tb;
 
     localparam [15:0] OFF_CTRL_MAC = 16'h104C;
 
-    // Expected default station MAC (DEFAULT_MAC0..5 in ethernet.v)
+    // Expected default station MAC (DEFAULT_MAC0..5 in ethernet.v), pre-byteswapped
+    // pairwise now that the is_dport32 data-port swap is removed.
     localparam [7:0] MAC0 = 8'h52, MAC1 = 8'h54, MAC2 = 8'h05,
                      MAC3 = 8'h04, MAC4 = 8'h03, MAC5 = 8'h02;
 
