@@ -14,6 +14,33 @@
 #define ETH_HPS_SIGNATURE      0x108C       // 4 bytes - HPS signature word
 #define ETH_HPS_SIGNATURE_MAGIC 0xCAFEBABE   // magic value written by the HPS bridge
 #define ETH_RTL8019_STATE      0x1100       // FPGA-owned RTL8019 state/debug mirror
+// Integrity probe (sync slots 40/41): the bg publishes a running byte-sum of the
+// payload it writes into the RX ring (RX_CSUM) and a count of frames delivered
+// (RX_FRAMES). The daemon keeps the same running sum + count for the frames it
+// enqueues and compares them ONLY when the counts match (bg caught up) so a
+// "sums equal" verdict is trustworthy. Both are byte-swapped by the mailbox.
+#define ETH_RTL8019_RX_CSUM    (ETH_RTL8019_STATE + 0x0A)  // 0x110A
+#define ETH_RTL8019_RX_FRAMES  (ETH_RTL8019_STATE + 0x0C)  // 0x110C
+// Read-side integrity probe (sync slots 42/43): ring_wr_csum = bytes the bg WROTE
+// into the NE2000 ring; dp_rd_csum = bytes the 68k READ back via the data port. At
+// a ring drain they match iff the 68k reads the ring intact -- splits a data-port
+// read corruption (RTL-fixable) from an Amiga-side drop. Both byte-swapped.
+#define ETH_RTL8019_RING_WR    (ETH_RTL8019_STATE + 0x0E)  // 0x110E
+#define ETH_RTL8019_DP_RD      (ETH_RTL8019_STATE + 0x10)  // 0x1110
+// Per-frame read-corruption probe (slot 44): count of even-length payload reads
+// where the 68k pulled different bytes than the bg wrote (keyed by ring page, no
+// peek confound). >0 = data-port READ corruption proven; ==0 = read is clean.
+#define ETH_RTL8019_RD_CORRUPT (ETH_RTL8019_STATE + 0x12)  // 0x1112
+// Count of payload reads actually compared (slot 45). 0 => the probe never armed
+// (the driver reads the ring differently than assumed) -> a rdCorrupt=0 is then
+// inconclusive, not "clean". >0 with rdCorrupt=0 = reads PROVEN clean.
+#define ETH_RTL8019_RD_CHECKED (ETH_RTL8019_STATE + 0x14)  // 0x1114
+// Last per-frame read-probe mismatch details (slots 46..49). These split real
+// packet-RAM/read data corruption from a length/accounting mismatch in the probe.
+#define ETH_RTL8019_RD_BAD_PAGE (ETH_RTL8019_STATE + 0x16)  // 0x1116
+#define ETH_RTL8019_RD_BAD_LEN  (ETH_RTL8019_STATE + 0x18)  // 0x1118
+#define ETH_RTL8019_RD_BAD_EXP  (ETH_RTL8019_STATE + 0x1A)  // 0x111A
+#define ETH_RTL8019_RD_BAD_ACT  (ETH_RTL8019_STATE + 0x1C)  // 0x111C
 #define ETH_PACKET_BUFFER_SIZE 0x0600       // 1536-byte staged frame capacity
 #define ETH_TX_BUFFER          0x2000       // staged TX buffer
 #define ETH_RX_BUFFER          0x2600       // legacy staged RX buffer

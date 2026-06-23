@@ -412,8 +412,14 @@ module eth_rx_driver_tb;
             $display("FAIL: RX header next_page via 0x8880 = 0x%02x, expected 0x48", next_v);
             errors = errors + 1;
         end
+        if ({lenhi_v, lenlo_v} !== (FRAME_LEN[15:0] + 16'h0004)) begin
+            $display("FAIL: RX header length via 0x8880 = 0x%04x, expected RTL8029/NE2000 count 0x%04x",
+                     {lenhi_v, lenlo_v}, FRAME_LEN[15:0] + 16'h0004);
+            errors = errors + 1;
+        end
 
-        // 5. remote-DMA read the payload via 0x8880 (continues from 0x4704)
+        // 5. remote-DMA read the payload via 0x8880 (driver subtracts the
+        //    4-byte NE2000 header count before reading from 0x4704).
         reg_write(R_RSAR0, 8'h04);
         reg_write(R_RSAR1, 8'h47);          // 0x4704
         reg_write(R_RBCR0, FRAME_LEN[7:0]);
@@ -426,6 +432,32 @@ module eth_rx_driver_tb;
                 $display("FAIL: payload via 0x8880 word %0d = 0x%04x, expected 0x%04x", k/2, got, expw);
                 errors = errors + 1;
             end
+        end
+
+        // Read-side probe validation: the driver read back exactly the 4-byte
+        // header + 64-byte payload the bg wrote, so the read-side running sum
+        // (dp_rd_csum) must equal the write-side running sum (ring_wr_csum). This
+        // exercises the ACTUAL data-port read -> dp_rd_csum accumulation path.
+        if (dut.dp_rd_csum !== dut.ring_wr_csum) begin
+            $display("FAIL: read-side probe dp_rd_csum=0x%04x != ring_wr_csum=0x%04x",
+                     dut.dp_rd_csum, dut.ring_wr_csum);
+            errors = errors + 1;
+        end else begin
+            $display("INFO: read-side probe OK -- dp_rd_csum==ring_wr_csum==0x%04x (68k read == bg wrote)",
+                     dut.dp_rd_csum);
+        end
+
+        // PER-FRAME read-corruption probe: the driver just did an even-length,
+        // offset-4, count>8 payload read (FRAME_LEN=64) -- exactly the armed case.
+        // The bg stored this frame's payload csum; the read re-summed it; a clean
+        // read must leave rd_corrupt == 0 (no false positive on a correct read).
+        if (dut.rd_corrupt !== 16'h0000) begin
+            $display("FAIL: per-frame read probe rd_corrupt=%0d after a CLEAN read (false positive)",
+                     dut.rd_corrupt);
+            errors = errors + 1;
+        end else begin
+            $display("INFO: per-frame read probe OK -- rd_corrupt=0 on the clean payload read (expect=0x%04x)",
+                     dut.dp_rd_expect_csum);
         end
 
         // 6. advance BNRY = next_page - 1 (0x47); ring now empty (read ptr == CURR)

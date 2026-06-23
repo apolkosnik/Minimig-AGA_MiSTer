@@ -215,6 +215,14 @@ module eth_rx_lensweep_tb;
     integer slot_idx;
     integer tail;
 
+    // integrity-probe running references: the bg's bg_rx_csum_run / bg_rx_frame_count
+    // accumulate across all delivered frames; after each frame we assert the DELTA
+    // equals this frame's payload byte-sum (mod 65536) and exactly +1 frame. This
+    // pins the probe byte-exact across every length class (odd, even, mult-of-8,
+    // wide/narrow boundary residues) -- the basis of the HW FPGA-vs-Amiga verdict.
+    reg [15:0] probe_prev_csum  = 16'h0000;
+    reg [15:0] probe_prev_count = 16'h0000;
+
     // build a position- and length-dependent frame so byte swaps / misplacement
     // are caught (frame[i] differs from its neighbours and varies with length)
     task automatic build_frame; input integer L; integer j;
@@ -225,6 +233,7 @@ module eth_rx_lensweep_tb;
         integer j;
         reg [7:0] page; reg [15:0] base; reg [7:0] got, exp;
         integer g; reg done;
+        integer fsum; reg [15:0] exp_delta, got_delta;
         begin
             build_frame(L);
             slot_idx = slot_idx % RX_QUEUE_SLOTS;
@@ -233,6 +242,9 @@ module eth_rx_lensweep_tb;
             // inject into the shared RX slot, exactly like the HPS daemon
             for (j = 0; j < L; j = j + 1)
                 ddr_write_byte(OFF_RX_DATA + slot_idx*RX_SLOT_SIZE + j[15:0], frame[j]);
+            // Poison the first byte after the frame. An off-by-one tail read/write
+            // must not include this byte in either packet RAM or the per-frame csum.
+            ddr_write_byte(OFF_RX_DATA + slot_idx*RX_SLOT_SIZE + L[15:0], 8'hA5);
             ddr_write_u16(OFF_RX_LEN + slot_idx*2, L[15:0]);
             tail = (tail + 1) % RX_QUEUE_SLOTS;
             ddr_write_u16(OFF_RX_TAIL, tail[15:0]);
@@ -270,7 +282,32 @@ module eth_rx_lensweep_tb;
                          dut.cntr2_register, L);
                 errors = errors + 1;
             end
-            $display("INFO: len %4d delivered to page 0x%02x, payload byte-exact", L, page);
+            // integrity probe: frame count +1, running byte-sum advanced by exactly
+            // this frame's payload sum (mod 65536). Disproves any phantom/missed
+            // tail-byte in the bg's accumulation for this length class.
+            fsum = 0;
+            for (j = 0; j < L; j = j + 1) fsum = fsum + ((j + L) & 8'hFF);
+            exp_delta = fsum[15:0];
+            got_delta = dut.bg_rx_csum_run - probe_prev_csum;
+            if (got_delta !== exp_delta) begin
+                $display("FAIL: len %0d csum delta = 0x%04x, expected 0x%04x (bg_rx_csum_run=0x%04x)",
+                         L, got_delta, exp_delta, dut.bg_rx_csum_run);
+                errors = errors + 1;
+            end
+            if (dut.frame_wr_csum[page] !== exp_delta) begin
+                $display("FAIL: len %0d frame_wr_csum[0x%02x] = 0x%04x, expected payload csum 0x%04x",
+                         L, page, dut.frame_wr_csum[page], exp_delta);
+                errors = errors + 1;
+            end
+            if ((dut.bg_rx_frame_count - probe_prev_count) !== 16'd1) begin
+                $display("FAIL: len %0d frame_count delta = %0d, expected 1",
+                         L, dut.bg_rx_frame_count - probe_prev_count);
+                errors = errors + 1;
+            end
+            probe_prev_csum  = dut.bg_rx_csum_run;
+            probe_prev_count = dut.bg_rx_frame_count;
+
+            $display("INFO: len %4d delivered to page 0x%02x, payload byte-exact (csum d=0x%04x)", L, page, exp_delta);
             slot_idx = slot_idx + 1;
         end
     endtask

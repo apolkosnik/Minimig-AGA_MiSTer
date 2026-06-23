@@ -10,6 +10,8 @@
 #include <linux/if_packet.h>
 #include <linux/if_ether.h>
 #include <linux/filter.h>
+#include <linux/ethtool.h>
+#include <linux/sockios.h>
 #include <ifaddrs.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -124,6 +126,10 @@ static uint8_t host_rx_queue_count = 0;
 // ---------------------------------------------------------------------------
 static uint64_t g_perf_rx_frames = 0, g_perf_rx_bytes = 0;
 static uint64_t g_perf_rx_defer  = 0, g_perf_rx_drop  = 0;
+// RX frames dropped for exceeding max Ethernet (1518B). >0 means the host NIC is
+// still coalescing receives (GRO/LRO) into oversized superframes the NE2000 ring
+// cannot hold -- a server-dependent corruption that never occurs on real X-Surf HW.
+static uint64_t g_perf_rx_oversize = 0;
 static uint64_t g_perf_tx_frames = 0, g_perf_tx_bytes = 0;
 static uint64_t g_perf_polls     = 0;
 static uint64_t g_perf_bcast_drop = 0;   // broadcast frames denoised (not forwarded)
@@ -163,14 +169,52 @@ static uint64_t g_perf_rx_gap      = 0;
 // the HPS. txDrop>0 with retx>0 and dupAck~0 == ACKs lost on egress, not on RX.
 static uint64_t g_perf_tx_drop     = 0;
 // Integrity probe: the FPGA bg publishes a running 16-bit byte-sum of every RX
-// payload byte it writes into the ring (sync slot 40, shm 0x110A, byte-swapped).
-// We keep the same running sum of frame bytes handed to the shm queue. At
-// quiescence (shm RX queue + host queue both empty) the bg has delivered exactly
-// what we enqueued, so the two sums differ by a CONSTANT offset (reset skew). If
-// that offset CHANGES between quiescent samples, a frame was corrupted in shm->bg
-// (mailbox/CDC) -- delivBad counts those events.
+// payload byte it writes into the ring (sync slot 40, shm 0x110A, byte-swapped)
+// AND a count of frames it has delivered (sync slot 41, shm 0x110C). We keep the
+// same running sum + count for the frames we enqueue, and compare the two sums
+// ONLY when the bg's count equals ours (it has delivered exactly the frames we
+// enqueued) and is stable across the read -- then both sums cover the identical
+// frame set, so an inequality is a real shm->ring (bg write) corruption rather
+// than a reset/origin offset. A match here while retxDat>0 proves the loss is
+// DOWNSTREAM of the bg write (data-port read or the Amiga), not FPGA delivery.
 static uint64_t g_perf_deliv_bad   = 0;
 static uint32_t g_sent_csum_run    = 0;   // daemon running byte-sum (16-bit)
+static uint16_t g_sent_frame_count = 0;   // daemon RX frames enqueued (count tag, matches bg slot 41)
+static int      g_csum_calibrated  = 0;   // origin-aligned to the bg counters on first caught-up sample
+static uint16_t g_perf_csum_bg     = 0;   // last bg running byte-sum read (for the ETHPERF line)
+static uint16_t g_perf_cnt_bg      = 0;   // last bg frame count read
+static uint16_t g_perf_deliv_bad_frame = 0; // bg frame count at the first detected divergence
+static int      g_rx_verify        = 0;   // OFF by default (the slot read-back is a heavy O(len) uncached diagnostic
+                                          // that perturbs the RX hot path); set MINIMIG_ETH_RX_VERIFY=1 to enable
+static uint64_t g_perf_wr_bad      = 0;   // frames whose slot read-back != intended (the uncached COPY dropped bytes)
+static uint32_t g_rx_settle_us     = 0;   // MINIMIG_ETH_RX_SETTLE_US: spin this long after the payload write, before
+                                          // advancing the tail, so the slot commits to SDRAM for the f2sdram read port
+                                          // (closes the HPS->FPGA cross-port visibility race wrBad=0 proved is the cause)
+// Delivery PACING (burst-overrun test): a real 10 Mbit NE2000 spaces frames ~1.2ms
+// apart; our bg delivers a window's worth (~3 segments) back-to-back in us, which
+// may overrun Roadshow's TCP input -> ~half the frames dropped -> retxDat -> the
+// 301-vs-1026 kbit/s gap. Enforce a MINIMUM interval between consecutive RX
+// deliveries (tail advances): throttles the microbursts but adds ZERO latency to
+// already-spaced frames (between bursts / the fast regime), so it can only help.
+// Tune ETH_RX_PACE_US (sweep e.g. 400 / 800 / 1500); 0 disables. Env override:
+// MINIMIG_ETH_RX_PACE_US.
+#define ETH_RX_PACE_US 0
+static uint32_t g_rx_pace_us       = ETH_RX_PACE_US;
+// Read-side probe (FPGA slots 42/43): ringWr = bytes the bg WROTE into the NE2000
+// ring; dpRd = bytes the 68k READ back via the data port. Equal at a ring drain
+// iff the 68k reads the ring intact. rdBad counts drains where they diverged.
+static uint16_t g_perf_ring_wr     = 0;
+static uint16_t g_perf_dp_rd       = 0;
+static uint64_t g_perf_rd_bad      = 0;
+// Per-frame read-corruption probe (FPGA slot 44): count of even-length payload
+// reads where the 68k pulled different bytes than the bg wrote. >0 = data-port
+// READ corruption PROVEN; ==0 = the 68k reads the ring intact (loss is Amiga/TCP).
+static uint16_t g_perf_rd_corrupt  = 0;
+static uint16_t g_perf_rd_checked  = 0;   // payload reads compared; 0 => probe never armed (rdCorrupt inconclusive)
+static uint16_t g_perf_rd_bad_page = 0;   // last mismatched payload-read page
+static uint16_t g_perf_rd_bad_len  = 0;   // last mismatched payload-read RBCR byte count
+static uint16_t g_perf_rd_bad_exp  = 0;   // last mismatched expected payload checksum
+static uint16_t g_perf_rd_bad_act  = 0;   // last mismatched actual payload checksum
 // DIAGNOSTIC: outgoing TX frames (usually Amiga ACKs) whose IP or TCP checksum is
 // INVALID as staged in shm. Such a frame is send()'d on the wire but silently
 // dropped by the peer's stack on checksum -> the server keeps retransmitting
@@ -839,6 +883,26 @@ static bool enqueue_shared_rx_packet(const uint8_t* data, uint16_t len, uint32_t
     if (len != 0) {
         eth_shared_readback_fence(shared_rx_slot_data_offset(tail) + len - 1);
     }
+    // Cross-port settling: wrBad=0 proves the payload IS in DDR from the ARM's
+    // view, yet the bg's f2sdram read still sees stale bytes (csBG!=csTX) when
+    // slots are reused fast. The ARM-side barriers above don't guarantee the write
+    // has committed to the SDRAM array for the FPGA's f2sdram read port. Spin a
+    // tunable settle window before exposing the slot (advancing the tail) so the
+    // commit lands first. 0 = off (default).
+    if (g_rx_settle_us) {
+        uint64_t t0 = eth_mono_us();
+        while ((eth_mono_us() - t0) < g_rx_settle_us) { __sync_synchronize(); }
+    }
+    // Delivery pacing: enforce a minimum interval between consecutive tail advances
+    // (= deliveries to the Amiga). Only throttles back-to-back microbursts; frames
+    // already >= pace apart pass with no delay.
+    if (g_rx_pace_us) {
+        static uint64_t last_deliver_us = 0;
+        if (last_deliver_us) {
+            while ((eth_mono_us() - last_deliver_us) < g_rx_pace_us) { __sync_synchronize(); }
+        }
+        last_deliver_us = eth_mono_us();
+    }
     write_shared_rx_queue_tail(next_tail);
     __sync_synchronize();
     eth_shared_readback_fence(ETH_RX_QUEUE_TAIL);
@@ -851,10 +915,32 @@ static bool enqueue_shared_rx_packet(const uint8_t* data, uint16_t len, uint32_t
     g_perf_rx_bytes += len;
     // Integrity probe: running byte-sum of frame bytes we hand to the shm queue
     // (matches the bg's slot-40 sum of what it writes into the ring).
+    //
+    // SPLIT TEST (MINIMIG_ETH_RX_VERIFY=1): the csBG!=csTX verdict proved the bg
+    // pulls DIFFERENT bytes from shm than we sent on large download frames. That is
+    // either (A) our uncached staged->slot copy dropping bytes, or (B) the bg's
+    // f2sdram read seeing a partially-written slot (the HPS->FPGA non-coherent
+    // ordering the barriers above are meant to close, but only guarantee ARM-side
+    // completion, not f2sdram-read-side visibility). To split them: after the copy
+    // + barriers, read the slot BACK through our own /dev/mem view and sum THAT.
+    //   intended != slot_readback  -> (A) the copy itself is broken (daemon fix)
+    //   intended == slot_readback but csBG != csTX -> (B) f2sdram read race (FPGA fix)
+    // Use the read-back (actual DDR, ARM view) for g_sent_csum_run so the running
+    // csBG-vs-csTX compare isolates the f2sdram READ path. Gated (O(len) uncached
+    // reads add bus traffic that can perturb the very race) -- enable for the run.
     {
-        uint32_t s = 0;
-        for (uint16_t i = 0; i < len; i++) s += data[i];
-        g_sent_csum_run = (g_sent_csum_run + s) & 0xFFFF;
+        uint32_t intended = 0;
+        for (uint16_t i = 0; i < len; i++) intended += data[i];
+        uint32_t slot_sum = intended;
+        if (g_rx_verify && len != 0) {
+            volatile uint8_t *slot = (volatile uint8_t *)eth_shmem + shared_rx_slot_data_offset(tail);
+            uint32_t rb = 0;
+            for (uint16_t i = 0; i < len; i++) rb += slot[i];
+            slot_sum = rb;
+            if ((rb & 0xFFFF) != (intended & 0xFFFF)) g_perf_wr_bad++;
+        }
+        g_sent_csum_run = (g_sent_csum_run + slot_sum) & 0xFFFF;
+        g_sent_frame_count++;   // count tag: matches the bg's slot-41 frame counter
     }
 
     eth_trace("ETH: Enqueued shared RX packet slot=%u len=%u head=%u tail->%u\n",
@@ -888,6 +974,43 @@ static bool rx_path_active(uint32_t flags)
     }
 
     return true;
+}
+
+// Disable one host NIC receive/segmentation offload via the SIOCETHTOOL ioctl
+// (self-contained -- no dependency on the ethtool binary or PATH). Best-effort:
+// some features are fixed (e.g. LRO on many NICs) and will return an error, which
+// is fine -- the MSG_TRUNC oversized guard in the RX loop backstops anything left.
+static void eth_set_offload(const char* ifname, uint32_t set_cmd, const char* label)
+{
+    struct ifreq ifr;
+    struct ethtool_value ev;
+
+    (void)label;   // referenced only by eth_debug, which is a no-op in quiet builds
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    memset(&ev, 0, sizeof(ev));
+    ev.cmd  = set_cmd;
+    ev.data = 0;                       // 0 = turn the feature OFF
+    ifr.ifr_data = (caddr_t)&ev;
+
+    if (ioctl(raw_socket, SIOCETHTOOL, &ifr) < 0) {
+        eth_debug("ETH: could not disable %s on %s: %s (fixed feature?)\n",
+                  label, ifname, strerror(errno));
+    } else {
+        eth_debug("ETH: disabled %s on %s\n", label, ifname);
+    }
+}
+
+// Turn off the host kernel's receive coalescing on the bridge NIC. With GRO/LRO on,
+// AF_PACKET taps see frames AFTER the kernel merges several TCP segments into one
+// oversized skb; we cannot deliver that to the NE2000 ring intact, and the loss is
+// server/path dependent (unlike real X-Surf HW, which only sees <=1514 wire frames).
+// Disabling it raised Amiga TCP download throughput ~4x in testing.
+static void eth_disable_rx_offload(const char* ifname)
+{
+    eth_set_offload(ifname, ETHTOOL_SGRO, "GRO");
+    eth_set_offload(ifname, ETHTOOL_SGSO, "GSO");
+    eth_set_offload(ifname, ETHTOOL_STSO, "TSO");
 }
 
 static void drain_disabled_rx_socket()
@@ -937,6 +1060,29 @@ void minimig_eth_init()
     }
 
     eth_debug("Initializing RTL8019 ethernet emulation\n");
+
+    // Integrity-probe split test: MINIMIG_ETH_RX_VERIFY=1 makes enqueue read each
+    // slot back from DDR after the copy+barriers and compare to the intended sum,
+    // so wrBad isolates an uncached COPY bug from an f2sdram READ visibility race.
+    {
+        const char *v = getenv("MINIMIG_ETH_RX_VERIFY");
+        if (v && v[0]) g_rx_verify = (v[0] != '0') ? 1 : 0;   // default ON; env only needed to disable
+        eth_debug("ETH: MINIMIG_ETH_RX_VERIFY=%d\n", g_rx_verify);
+        const char *s = getenv("MINIMIG_ETH_RX_SETTLE_US");
+        if (s && s[0]) {
+            unsigned long us = strtoul(s, 0, 0);
+            if (us > 1000) us = 1000;   // cap: this spins in the RX hot path
+            g_rx_settle_us = (uint32_t)us;
+        }
+        eth_debug("ETH: MINIMIG_ETH_RX_SETTLE_US=%u\n", g_rx_settle_us);
+        const char *p = getenv("MINIMIG_ETH_RX_PACE_US");
+        if (p && p[0]) {
+            unsigned long us = strtoul(p, 0, 0);
+            if (us > 20000) us = 20000;   // cap the busy-spin
+            g_rx_pace_us = (uint32_t)us;
+        }
+        eth_debug("ETH: MINIMIG_ETH_RX_PACE_US=%u\n", g_rx_pace_us);
+    }
 
     // HPS only initializes its own staging/debug regions. FPGA owns the live
     // NE2000 register mirrors, MAC mirror, and enabled/IRQ/TX flags.
@@ -992,7 +1138,11 @@ void minimig_eth_init()
         return;
     }
     eth_debug("ETH: Found ethernet interface: %s\n", bridge_interface);
-    
+
+    // Make the capture NIC behave like a real wire: no receive coalescing, so we
+    // never see GRO/LRO superframes that cannot fit the NE2000 ring (see RX loop).
+    eth_disable_rx_offload(bridge_interface);
+
     // Get interface index
     struct ifreq ifr;
     strncpy(ifr.ifr_name, bridge_interface, IFNAMSIZ-1);
@@ -1417,7 +1567,14 @@ void receive_packet()
 
     for (;;) {
         uint8_t buffer[ETH_PACKET_BUFFER_SIZE];
-        ssize_t len = recv(raw_socket, buffer, sizeof(buffer), 0);
+        // MSG_TRUNC: recv returns the TRUE frame length even when it exceeds the
+        // buffer. Without it, len is capped at sizeof(buffer), so a host-side
+        // GRO/LRO-coalesced superframe (several TCP segments merged under one
+        // IP/TCP header) comes back as a 1536-byte fragment and the oversized guard
+        // below can never fire -- the Amiga then gets a truncated segment whose IP
+        // length lies, and the coalesced remainder is lost. That misbehaves
+        // differently per server and never happens on real X-Surf hardware.
+        ssize_t len = recv(raw_socket, buffer, sizeof(buffer), MSG_TRUNC);
 
         if (len <= 0) {
             break;
@@ -1428,8 +1585,13 @@ void receive_packet()
             continue;
         }
 
-        if (len > ETH_PACKET_BUFFER_SIZE) {
-            eth_debug("ETH: Dropping oversized RX packet (%zd bytes)\n", len);
+        // Max frame the NE2000/Amiga can accept is 1500 MTU + 14B header (+4 VLAN)
+        // = 1518. Anything larger is a GRO/LRO superframe or jumbo we cannot deliver
+        // intact -- drop it (TCP retransmits) rather than hand the Amiga a truncated
+        // frame. rxOversz>0 during a download => host receive offload is still on.
+        if (len > 1518) {
+            g_perf_rx_oversize++;
+            eth_debug("ETH: dropping oversized RX frame (%zd bytes) -- GRO/LRO still on?\n", len);
             state.rx_errors++;
             continue;
         }
@@ -1587,32 +1749,85 @@ void minimig_eth_poll()
                         sock_drops = pst.tp_drops;
                     }
                 }
-                // Integrity-probe compare -- only after TWO consecutive fully-idle
-                // intervals (no RX in flight, shm + host queues empty). One idle
-                // interval isn't enough: the daemon bumps g_sent_csum_run the moment
-                // it ENQUEUES a frame, but the bg updates its slot-40 sum later when
-                // it WRITES the ring, and those two events straddle the 1s ETHPERF
-                // boundary -- so on a single idle sample the diff can wobble purely
-                // from that settle-lag and get miscounted as "bad". Requiring a
-                // second consecutive idle interval guarantees the bg has caught up,
-                // so a diff CHANGE then reflects a real shm->ring delivery mismatch.
-                // bg slot-40 csum (0x110A) is byte-swapped vs ours.
+                // Integrity-probe compare (count-tagged). The bg publishes a running
+                // byte-sum of payload it wrote into the ring (slot 40, 0x110A) and a
+                // count of frames delivered (slot 41, 0x110C); both are byte-swapped
+                // by the mailbox. We hold the same running sum + count for frames we
+                // enqueued. Compare the sums ONLY when the bg's count equals ours and
+                // is STABLE across the read (re-read the count): that means the bg has
+                // delivered exactly the frames we sent, so the sums cover the identical
+                // frame set and an inequality is a genuine shm->ring (bg write)
+                // corruption -- not the reset/origin offset that made the old idle-only
+                // probe untrustworthy. This fires at the frequent drain points during a
+                // download, so it reports DURING the loss, not only at full idle.
                 {
-                    uint16_t hd = read_shared_rx_queue_head();
-                    uint16_t tl = read_shared_rx_queue_tail();
-                    static int idle_run = 0;
-                    if (rxf < 1.0 && hd == tl && host_rx_queue_count == 0) {
-                        idle_run++;
-                        if (idle_run >= 2) {
-                            uint16_t raw = eth_read_shared_u16(0x110A);
-                            uint16_t bg_csum = (uint16_t)((raw << 8) | (raw >> 8));
-                            uint16_t diff = (uint16_t)(bg_csum - (uint16_t)g_sent_csum_run);
-                            static int have_diff = 0; static uint16_t last_diff = 0;
-                            if (have_diff && diff != last_diff) g_perf_deliv_bad++;
-                            last_diff = diff; have_diff = 1;
+                    uint16_t c1   = (uint16_t)0; uint16_t c2 = (uint16_t)0; uint16_t bgcs = (uint16_t)0;
+                    { uint16_t r = eth_read_shared_u16(ETH_RTL8019_RX_FRAMES); c1   = (uint16_t)((r << 8) | (r >> 8)); }
+                    { uint16_t r = eth_read_shared_u16(ETH_RTL8019_RX_CSUM);   bgcs = (uint16_t)((r << 8) | (r >> 8)); }
+                    { uint16_t r = eth_read_shared_u16(ETH_RTL8019_RX_FRAMES); c2   = (uint16_t)((r << 8) | (r >> 8)); }
+                    g_perf_csum_bg = bgcs; g_perf_cnt_bg = c1;
+                    if (!g_csum_calibrated) {
+                        // Origin-align once: adopt the bg's current count+sum so frames
+                        // enqueued from here advance both sides in lockstep (covers a
+                        // daemon that (re)started after the FPGA was already running).
+                        g_sent_frame_count = c1; g_sent_csum_run = bgcs; g_csum_calibrated = 1;
+                    } else if (c1 == c2 && c1 == g_sent_frame_count) {
+                        // Caught up and stable: the sums must be equal if the FPGA
+                        // delivered our bytes intact.
+                        uint16_t delta = (uint16_t)(bgcs - (uint16_t)g_sent_csum_run);
+                        static int prev_bad = 0; static uint16_t prev_delta = 0, counted_delta = 0;
+                        if (delta != 0) {
+                            // Debounce the <=1-sweep skew between the csum and count
+                            // slots: only count a divergence still present (same delta)
+                            // on a later caught-up sample, and only once per NEW delta.
+                            if (prev_bad && delta == prev_delta && delta != counted_delta) {
+                                g_perf_deliv_bad++;
+                                counted_delta = delta;
+                                if (g_perf_deliv_bad_frame == 0) g_perf_deliv_bad_frame = c1;
+                            }
+                            prev_bad = 1; prev_delta = delta;
+                        } else {
+                            prev_bad = 0;
                         }
+                    } else if (c1 == c2 && c1 != g_sent_frame_count) {
+                        // Counts diverged -> a frame was dropped (separately flagged by
+                        // ovwDrop/sockDrop/defer). Re-baseline so the probe keeps working.
+                        g_sent_frame_count = c1; g_sent_csum_run = bgcs;
+                    }
+                }
+                // Read-side probe: ringWr (bytes the bg WROTE into the ring) vs dpRd
+                // (bytes the 68k READ back via the data port). At RX idle the 68k has
+                // read every written frame, so the two totals match iff it reads the
+                // ring intact. A persistent (stable across two idle samples) nonzero
+                // delta => the 68k pulls different bytes than the bg wrote = a data-
+                // port READ corruption (RTL-fixable). Equal => 68k reads correctly =>
+                // the loss is Amiga-side. (The raw ringWr/dpRd are printed so a benign
+                // constant offset, e.g. a header re-read, can be told from corruption.)
+                {
+                    uint16_t rw = eth_read_shared_u16(ETH_RTL8019_RING_WR);
+                    uint16_t rd = eth_read_shared_u16(ETH_RTL8019_DP_RD);
+                    uint16_t rc = eth_read_shared_u16(ETH_RTL8019_RD_CORRUPT);
+                    uint16_t rk = eth_read_shared_u16(ETH_RTL8019_RD_CHECKED);
+                    uint16_t rp = eth_read_shared_u16(ETH_RTL8019_RD_BAD_PAGE);
+                    uint16_t rl = eth_read_shared_u16(ETH_RTL8019_RD_BAD_LEN);
+                    uint16_t re = eth_read_shared_u16(ETH_RTL8019_RD_BAD_EXP);
+                    uint16_t ra = eth_read_shared_u16(ETH_RTL8019_RD_BAD_ACT);
+                    g_perf_ring_wr = (uint16_t)((rw << 8) | (rw >> 8));
+                    g_perf_dp_rd   = (uint16_t)((rd << 8) | (rd >> 8));
+                    g_perf_rd_corrupt = (uint16_t)((rc << 8) | (rc >> 8));
+                    g_perf_rd_checked = (uint16_t)((rk << 8) | (rk >> 8));
+                    g_perf_rd_bad_page = (uint16_t)((rp << 8) | (rp >> 8));
+                    g_perf_rd_bad_len  = (uint16_t)((rl << 8) | (rl >> 8));
+                    g_perf_rd_bad_exp  = (uint16_t)((re << 8) | (re >> 8));
+                    g_perf_rd_bad_act  = (uint16_t)((ra << 8) | (ra >> 8));
+                    static int rd_idle = 0; static uint16_t prev_d = 0; static int have_d = 0;
+                    if (rxf < 1.0 && host_rx_queue_count == 0) {
+                        rd_idle++;
+                        uint16_t d = (uint16_t)(g_perf_ring_wr - g_perf_dp_rd);
+                        if (rd_idle >= 2 && d != 0 && have_d && d == prev_d) g_perf_rd_bad++;
+                        prev_d = d; have_d = 1;
                     } else {
-                        idle_run = 0;
+                        rd_idle = 0;
                     }
                 }
                 static uint64_t p_tm = 0, p_retx = 0, p_da = 0, p_gap = 0, p_txd = 0;
@@ -1622,7 +1837,10 @@ void minimig_eth_poll()
                          "sockDrop %u sockPkts %u | "
                          "ovwDrop %u/s ringCURR=0x%02X BNRY=0x%02X | "
                          "bcastDrop %.0f/s defer %llu drop %llu hostQ %u | "
-                         "recvMaxUs=%llu recvFrMax=%llu copyMaxUs=%llu winClamp=%llu | poll %.0f/s\n",
+                         "recvMaxUs=%llu recvFrMax=%llu copyMaxUs=%llu winClamp=%llu rxOversz=%llu | "
+                         "csBG=0x%04X csTX=0x%04X cnBG=%u cnTX=%u badFrm=%u wrBad=%llu | "
+                         "ringWr=0x%04X dpRd=0x%04X rdBad=%llu rdCorrupt=%u/%u "
+                         "rdLast=p%02X len=%u exp=0x%04X got=0x%04X | poll %.0f/s\n",
                          rxf, rxk, txf, txk,
                          amiga_win_min, (unsigned)g_perf_tx_win_last,
                          (unsigned long long)(g_perf_tx_zerowin - p_zw),
@@ -1644,6 +1862,18 @@ void minimig_eth_poll()
                          (unsigned long long)g_perf_recv_frames_max,
                          (unsigned long long)g_perf_rx_copy_us_max,
                          (unsigned long long)g_perf_tx_win_clamped,
+                         (unsigned long long)g_perf_rx_oversize,
+                         (unsigned)g_perf_csum_bg, (unsigned)(g_sent_csum_run & 0xFFFF),
+                         (unsigned)g_perf_cnt_bg, (unsigned)g_sent_frame_count,
+                         (unsigned)g_perf_deliv_bad_frame,
+                         (unsigned long long)g_perf_wr_bad,
+                         (unsigned)g_perf_ring_wr, (unsigned)g_perf_dp_rd,
+                         (unsigned long long)g_perf_rd_bad,
+                         (unsigned)g_perf_rd_corrupt, (unsigned)g_perf_rd_checked,
+                         (unsigned)(g_perf_rd_bad_page & 0xFF),
+                         (unsigned)g_perf_rd_bad_len,
+                         (unsigned)g_perf_rd_bad_exp,
+                         (unsigned)g_perf_rd_bad_act,
                          pls);
                 p_rxf = g_perf_rx_frames; p_rxb = g_perf_rx_bytes;
                 p_txf = g_perf_tx_frames; p_txb = g_perf_tx_bytes;

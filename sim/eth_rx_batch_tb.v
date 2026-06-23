@@ -371,6 +371,35 @@ module eth_rx_batch_tb;
             end
         end
 
+        // ---- integrity-probe assertions: the bg's published frame count and
+        //      running byte-sum (slots 41/40) must match exactly the frames we
+        //      injected -- FLEN payload bytes each, summed mod 65536. This is the
+        //      basis of the HW FPGA-vs-Amiga verdict, so it must be byte-exact
+        //      (no phantom tail byte on even-length frames, etc.).
+        begin : csum_check
+            integer cf, cb, exp_csum;
+            exp_csum = 0;
+            for (cf = 0; cf < NFRAMES; cf = cf + 1)
+                for (cb = 0; cb < FLEN; cb = cb + 1)
+                    exp_csum = exp_csum +
+                        ((cb == 0) ? (16'h00A0 + cf[7:0]) :
+                         (cb == 1) ? (16'h00C0 + cf[7:0]) :
+                         (16'h0040 + {10'd0, cb[5:0]}));
+            exp_csum = exp_csum & 16'hFFFF;
+            if (dut.bg_rx_frame_count !== NFRAMES[15:0]) begin
+                $display("FAIL: bg_rx_frame_count=%0d, expected %0d", dut.bg_rx_frame_count, NFRAMES);
+                errors = errors + 1;
+            end
+            if (dut.bg_rx_csum_run !== exp_csum[15:0]) begin
+                $display("FAIL: bg_rx_csum_run=0x%04x, expected 0x%04x (sum of %0d frames x %0d payload bytes)",
+                         dut.bg_rx_csum_run, exp_csum[15:0], NFRAMES, FLEN);
+                errors = errors + 1;
+            end else begin
+                $display("INFO: integrity probe byte-exact -- bg_rx_frame_count=%0d bg_rx_csum_run=0x%04x match injected frames",
+                         NFRAMES, exp_csum[15:0]);
+            end
+        end
+
         // ---- back-to-back assertion: HEAD/TAIL read exactly once for the batch ----
         if (head_reads != 1) begin
             $display("FAIL: BG_READ_RX_HEAD_REQ entered %0d times for %0d frames -> NOT draining back-to-back (per-frame re-poll)",

@@ -268,6 +268,46 @@ reg [15:0] bg_rx_bytes_remaining;
 // means a frame was corrupted in shm->bg (mailbox/CDC) -- it does NOT see
 // ring->Amiga (data-port read) corruption, which is checked separately.
 reg [15:0] bg_rx_csum_run;
+// Integrity probe: count of RX frames fully written to the ring. Published
+// (slot 41) alongside bg_rx_csum_run (slot 40) so the daemon can compare the
+// two running byte-sums ONLY at a matched frame count (bg caught up to what the
+// daemon enqueued) -- the count makes a "sums match" verdict trustworthy
+// instead of being confounded by an unknown origin offset.
+reg [15:0] bg_rx_frame_count;
+// Read-side integrity probe: ring_wr_csum sums EVERY byte the bg WRITES into the
+// ring (port A, header+payload); dp_rd_csum sums EVERY byte the CPU data-port
+// READ hands the 68k (port B). At a ring drain (68k caught up) they match iff the
+// 68k reads the ring intact -- this splits a data-port READ corruption (RTL-
+// fixable) from an Amiga-side drop. Published slots 42/43 (0x110E/0x1110).
+reg [15:0] ring_wr_csum;
+reg [15:0] dp_rd_csum;
+// PER-FRAME read-corruption probe (definitive, no peek confound): the bg stores
+// each RX frame's PAYLOAD checksum keyed by its ring start page as it writes it
+// (frame_wr_csum[page] <= bg_rx_csum_frame). When the 68k issues the PAYLOAD read
+// (the large remote-DMA burst, distinguished from the 4-byte header peeks by
+// count>8), the FPGA re-sums exactly the bytes it hands over and compares to the
+// stored value; a mismatch (rd_corrupt++) proves the data-port READ corrupted the
+// frame. Published slot 44 (0x1112).
+// Keep this diagnostic table as deterministic logic, not inferred MLAB RAM.
+// The bg writes it when a frame is committed while the CPU side may read another
+// page's checksum when arming a remote-DMA payload read. Hardware MLAB read/write
+// behavior under that mixed access is not a trustworthy probe source; if this
+// table is unstable, rdCorrupt can become a false positive even when packet RAM
+// itself is fine.
+(* ramstyle = "logic" *) reg [15:0] frame_wr_csum [0:255];
+reg [15:0] bg_rx_csum_frame;   // current bg frame's payload sum (reset per frame)
+reg [7:0]  bg_rx_frame_page;   // current bg frame's ring start page
+reg [15:0] dp_rd_frame_csum;   // current 68k payload-read sum
+reg [15:0] dp_rd_expect_csum;  // frame_wr_csum[page] latched at burst arm
+reg        dp_rd_in_payload;   // a payload read burst is in progress
+reg [15:0] rd_corrupt;         // count of payload reads whose sum != the bg wrote
+reg [15:0] rd_checked;         // count of payload reads actually compared (0 => probe never armed)
+reg [15:0] rd_probe_page;      // page of the payload-read probe currently armed
+reg [15:0] rd_probe_len;       // RBCR byte count of the payload-read probe currently armed
+reg [15:0] rd_bad_page;        // last mismatched payload-read start page
+reg [15:0] rd_bad_len;         // last mismatched payload-read RBCR byte count
+reg [15:0] rd_bad_expect;      // last mismatched bg-written payload checksum
+reg [15:0] rd_bad_actual;      // last mismatched data-port-read payload checksum
 reg [7:0]  bg_rx_next_page;
 reg [7:0]  bg_rx_status;
 reg [15:0] bg_source_word;
@@ -276,6 +316,8 @@ reg [15:0] bg_source_word;
 // walks the four words during the local packet-RAM read/write half-cycles.
 reg [63:0] bg_wide_buf;
 reg [1:0]  bg_wide_idx;
+wire [15:0] bg_source_word_sum = {8'h0, bg_source_word[7:0]} + {8'h0, bg_source_word[15:8]};
+wire [15:0] bg_source_tail_sum = {8'h0, bg_source_word[15:8]};
 reg [5:0]  bg_sync_slot;
 // Incremental register-mirror sync: the FPGA exclusively writes the synced
 // CTRL_REGS/MAC/STATE slots (the daemon only reads them, and writes only the
@@ -291,8 +333,8 @@ reg [5:0]  bg_sync_slot;
 // combinationally in the same cycle it may write it, and the compare must see the
 // OLD value -- forcing ramstyle=logic guarantees synthesis matches the simulated
 // (combinational-read, non-blocking-write) behavior.
-(* ramstyle = "logic" *) reg [15:0] sync_shadow [0:40];
-reg [40:0] shadow_valid;
+(* ramstyle = "logic" *) reg [15:0] sync_shadow [0:49];
+reg [49:0] shadow_valid;
 reg        bg_polling_rx_flags;
 reg        bg_clear_rx_avail;
 reg [7:0]  prom_shadow [0:31];
@@ -471,13 +513,29 @@ task automatic apply_nic_reset;
         bg_rx_total_length <= 16'h0000;
         bg_rx_src_offset <= 16'h0000;
         bg_rx_csum_run <= 16'h0000;
+        bg_rx_frame_count <= 16'h0000;
+        ring_wr_csum <= 16'h0000;
+        dp_rd_csum   <= 16'h0000;
+        bg_rx_csum_frame <= 16'h0000;
+        bg_rx_frame_page <= 8'h00;
+        dp_rd_frame_csum <= 16'h0000;
+        dp_rd_expect_csum <= 16'h0000;
+        dp_rd_in_payload <= 1'b0;
+        rd_corrupt   <= 16'h0000;
+        rd_checked   <= 16'h0000;
+        rd_probe_page <= 16'h0000;
+        rd_probe_len  <= 16'h0000;
+        rd_bad_page   <= 16'h0000;
+        rd_bad_len    <= 16'h0000;
+        rd_bad_expect <= 16'h0000;
+        rd_bad_actual <= 16'h0000;
         bg_rx_dst_offset <= 16'h0000;
         bg_rx_bytes_remaining <= 16'h0000;
         bg_rx_next_page <= 8'h00;
         bg_rx_status <= 8'h00;
         bg_source_word <= 16'h0000;
         bg_sync_slot <= 6'd0;
-        shadow_valid <= 41'b0;     // force every slot to be written once after reset
+        shadow_valid <= 50'b0;     // force every slot to be written once after reset
         bg_polling_rx_flags <= 1'b0;
         bg_clear_rx_avail <= 1'b0;
         tx_stage_pending <= 1'b0;
@@ -864,6 +922,15 @@ function [14:0] sync_slot_word_addr;
             6'd38: byte_addr = ETH_RTL8019_STATE + 16'h0006;
             6'd39: byte_addr = ETH_RTL8019_STATE + 16'h0008;
             6'd40: byte_addr = ETH_RTL8019_STATE + 16'h000A;
+            6'd41: byte_addr = ETH_RTL8019_STATE + 16'h000C;
+            6'd42: byte_addr = ETH_RTL8019_STATE + 16'h000E;
+            6'd43: byte_addr = ETH_RTL8019_STATE + 16'h0010;
+            6'd44: byte_addr = ETH_RTL8019_STATE + 16'h0012;
+            6'd45: byte_addr = ETH_RTL8019_STATE + 16'h0014;
+            6'd46: byte_addr = ETH_RTL8019_STATE + 16'h0016;
+            6'd47: byte_addr = ETH_RTL8019_STATE + 16'h0018;
+            6'd48: byte_addr = ETH_RTL8019_STATE + 16'h001A;
+            6'd49: byte_addr = ETH_RTL8019_STATE + 16'h001C;
             default: byte_addr = ETH_SHM_CTRL_REGS;
         endcase
         sync_slot_word_addr = byte_addr[15:1];
@@ -900,7 +967,16 @@ function [15:0] sync_slot_wdata;
             6'd37: sync_slot_wdata = {par_registers[4], par_registers[3]};
             6'd38: sync_slot_wdata = {8'h01, par_registers[5]};
             6'd39: sync_slot_wdata = {8'h00, state_enabled_byte};
-            6'd40: sync_slot_wdata = bg_rx_csum_run;   // integrity probe: bg RX running byte-sum
+            6'd40: sync_slot_wdata = bg_rx_csum_run;     // integrity probe: bg RX running byte-sum
+            6'd41: sync_slot_wdata = bg_rx_frame_count;  // integrity probe: bg RX frames delivered (count tag)
+            6'd42: sync_slot_wdata = ring_wr_csum;       // read-side probe: bytes bg WROTE into the ring
+            6'd43: sync_slot_wdata = dp_rd_csum;         // read-side probe: bytes 68k READ via the data port
+            6'd44: sync_slot_wdata = rd_corrupt;         // per-frame read probe: payload-read mismatches
+            6'd45: sync_slot_wdata = rd_checked;         // per-frame read probe: payload reads compared (0 => not armed)
+            6'd46: sync_slot_wdata = rd_bad_page;        // per-frame read probe: last mismatch page
+            6'd47: sync_slot_wdata = rd_bad_len;         // per-frame read probe: last mismatch RBCR byte count
+            6'd48: sync_slot_wdata = rd_bad_expect;      // per-frame read probe: last expected payload csum
+            6'd49: sync_slot_wdata = rd_bad_actual;      // per-frame read probe: last actual payload csum
             default: sync_slot_wdata = 16'h0000;
         endcase
     end
@@ -1024,6 +1100,9 @@ wire        data_port_select_active =
     sel_ethernet && !sel_ethernet_shm && is_data_port_access &&
     !cpu_as;
 wire        data_port_bus_active = data_port_select_active && (cpu_rd || cpu_wr);
+wire        data_port_pmem_busy =
+    data_port_bus_active || data_port_cycle_active ||
+    data_port_read_pending || data_port_write_pending;
 wire        data_port_cycle_start =
     data_port_bus_active && !data_port_bus_active_prev && !data_port_cycle_active;
 wire        data_port_cycle_end = !data_port_select_active && data_port_cycle_active;
@@ -1313,17 +1392,19 @@ always @* begin
     pmem_byteena_a = 2'b00;
     pmem_wren_a    = 1'b0;
 
-    if (bg_state == BG_WRITE_HDR0_REQ) begin
+    if (!data_port_pmem_busy && (bg_state == BG_WRITE_HDR0_REQ)) begin
         pmem_addr_a = packet_ram_word_addr(NE_PMEM_START + bg_rx_dst_offset);
         pmem_wdata_a = {bg_rx_status, bg_rx_next_page};
         pmem_byteena_a = 2'b11;
         pmem_wren_a = 1'b1;
-    end else if (bg_state == BG_WRITE_HDR1_REQ) begin
+    end else if (!data_port_pmem_busy && (bg_state == BG_WRITE_HDR1_REQ)) begin
         pmem_addr_a = packet_ram_word_addr(NE_PMEM_START + bg_rx_dst_offset + 16'h0002);
         pmem_wdata_a = {bg_rx_total_length[7:0], bg_rx_total_length[15:8]};
         pmem_byteena_a = 2'b11;
         pmem_wren_a = 1'b1;
-    end else if (bg_state == BG_WRITE_PAYLOAD_REQ) begin
+    end else if (!data_port_pmem_busy &&
+                 (bg_state == BG_WRITE_PAYLOAD_REQ) &&
+                 (bg_rx_bytes_remaining != 16'h0000)) begin
         pmem_addr_a = packet_ram_word_addr(ring_wrap_addr(
             NE_PMEM_START + bg_rx_dst_offset + 16'h0004 + bg_rx_src_offset,
             pstart_register, pstop_register));
@@ -1335,7 +1416,7 @@ always @* begin
             pmem_byteena_a = 2'b10;
         end
         pmem_wren_a = 1'b1;
-    end else if (bg_state == BG_WRITE_PAYLOAD_WIDE) begin
+    end else if (!data_port_pmem_busy && (bg_state == BG_WRITE_PAYLOAD_WIDE)) begin
         // One of the four words of the wide-read 64-bit line; bg_wide_idx walks
         // 0..3, each a full word (the aligned bulk never has an odd tail byte).
         pmem_addr_a = packet_ram_word_addr(ring_wrap_addr(
@@ -1345,11 +1426,13 @@ always @* begin
         pmem_wdata_a = bg_wide_buf[{bg_wide_idx, 4'd0} +: 16];
         pmem_byteena_a = 2'b11;
         pmem_wren_a = 1'b1;
-    end else if ((bg_state == BG_READ_TX_BUF_REQ) || (bg_state == BG_READ_TX_BUF_WAIT1) ||
-                 (bg_state == BG_READ_TX_BUF_WAIT2)) begin
+    end else if (!data_port_pmem_busy &&
+                 ((bg_state == BG_READ_TX_BUF_REQ) || (bg_state == BG_READ_TX_BUF_WAIT1) ||
+                  (bg_state == BG_READ_TX_BUF_WAIT2))) begin
         pmem_addr_a = packet_ram_word_addr(tx_stage_addr + bg_tx_src_offset);
-    end else if ((bg_state == BG_READ_TX_WIDE_REQ) || (bg_state == BG_READ_TX_WIDE_WAIT1) ||
-                 (bg_state == BG_READ_TX_WIDE_WAIT2)) begin
+    end else if (!data_port_pmem_busy &&
+                 ((bg_state == BG_READ_TX_WIDE_REQ) || (bg_state == BG_READ_TX_WIDE_WAIT1) ||
+                  (bg_state == BG_READ_TX_WIDE_WAIT2))) begin
         pmem_addr_a = packet_ram_word_addr(tx_stage_addr + bg_tx_src_offset +
                                            {13'd0, bg_wide_idx, 1'b0});
     end
@@ -1390,6 +1473,13 @@ always @(posedge clk) begin
         dtack_eth <= 1'b1;
     end else begin
         data_port_bus_active_prev <= data_port_bus_active;
+
+        // Read-side probe: accumulate every byte the bg writes into the ring (port
+        // A). pmem_wren_a is asserted only for the bg's RX header/payload writes,
+        // so this is the exact ring content the 68k will later read back.
+        if (pmem_wren_a) ring_wr_csum <= ring_wr_csum
+            + (pmem_byteena_a[0] ? {8'h0, pmem_wdata_a[7:0]}  : 16'h0000)
+            + (pmem_byteena_a[1] ? {8'h0, pmem_wdata_a[15:8]} : 16'h0000);
 
         if (debug_clear) begin
             debug_dma_timeout_sticky <= 1'b0;
@@ -1447,6 +1537,21 @@ always @(posedge clk) begin
             case (register_select[4:0])
                 5'h00: begin
                     cr_register <= cr_write_value;
+                    // per-frame read probe: arm on a PAYLOAD remote-read (RD2:0=001,
+                    // RSAR at a frame's payload offset 0x04, count>8 -- distinguishes
+                    // it from the 4-byte header peeks at offset 0x00). Latch the
+                    // frame's start page, snapshot the expected (bg-written) payload
+                    // csum, and reset the read accumulator.
+                    if (cr_write_remote_dma_read &&
+                        (remote_dma_addr[7:0] == 8'h04) &&
+                        (remote_byte_count > 16'd8) &&
+                        (remote_byte_count[0] == 1'b0)) begin
+                        dp_rd_expect_csum <= frame_wr_csum[remote_dma_addr[15:8]];
+                        dp_rd_frame_csum  <= 16'h0000;
+                        rd_probe_page <= {8'h00, remote_dma_addr[15:8]};
+                        rd_probe_len  <= remote_byte_count;
+                        dp_rd_in_payload  <= 1'b1;
+                    end
                     if (cr_write_value[0]) begin
                         isr_register <= isr_register | ISR_RST;
                     end else begin
@@ -1709,6 +1814,38 @@ always @(posedge clk) begin
         if (data_port_read_pending && local_pmem_read_wait) begin
             local_pmem_read_wait <= 1'b0;
         end else if (data_port_read_pending && remote_dma_pmem_region) begin
+            // Read-side probe: sum the RAW ring bytes the 68k pulls out of the ring
+            // via the data port (this is the ONLY ring-read completion path), to
+            // compare against ring_wr_csum (the raw bytes the bg wrote). Word mode
+            // delivers both bytes; byte mode the addressed one.
+            if (data_port_word_mode)
+                dp_rd_csum <= dp_rd_csum + {8'h0, pmem_q_b[7:0]} + {8'h0, pmem_q_b[15:8]};
+            else
+                dp_rd_csum <= dp_rd_csum + (data_port_byte_addr[0] ? {8'h0, pmem_q_b[7:0]}
+                                                                   : {8'h0, pmem_q_b[15:8]});
+            // PER-FRAME read-corruption compare. Only armed for even-length word-mode
+            // payload reads. Sum each word; on the LAST word (count<=2) compare the
+            // total to the bg-written value latched at arm. Mismatch = the 68k pulled
+            // different bytes than the bg wrote = data-port READ corruption.
+            if (dp_rd_in_payload && data_port_word_mode) begin
+                if (remote_byte_count <= 16'd2) begin
+                    rd_checked <= rd_checked + 16'd1;
+                    if ((dp_rd_frame_csum + {8'h0, pmem_q_b[7:0]} + {8'h0, pmem_q_b[15:8]})
+                        != dp_rd_expect_csum) begin
+                        rd_corrupt <= rd_corrupt + 16'd1;
+                        rd_bad_page <= rd_probe_page;
+                        rd_bad_len <= rd_probe_len;
+                        rd_bad_expect <= dp_rd_expect_csum;
+                        rd_bad_actual <= dp_rd_frame_csum + {8'h0, pmem_q_b[7:0]} + {8'h0, pmem_q_b[15:8]};
+                    end
+                    dp_rd_in_payload <= 1'b0;
+                end else begin
+                    dp_rd_frame_csum <= dp_rd_frame_csum
+                        + {8'h0, pmem_q_b[7:0]} + {8'h0, pmem_q_b[15:8]};
+                end
+            end else if (dp_rd_in_payload) begin
+                dp_rd_in_payload <= 1'b0;   // byte-mode read -> abandon (no false compare)
+            end
             complete_data_port_transfer(pmem_q_b);
         end
 
@@ -1787,10 +1924,18 @@ always @(posedge clk) begin
                     end
 
                     BG_READ_RX_LEN_WAIT: begin
+                        // RTL8029/NE2000-compatible RX headers report count
+                        // including the 4-byte ring header. The driver reads
+                        // the header, then subtracts 4 before remote-DMA-reading
+                        // the payload.
                         bg_rx_total_length <= bg_rx_length_from_dma + 16'h0004;
                         bg_rx_src_offset <= 16'h0000;
                         bg_rx_bytes_remaining <= bg_rx_length_from_dma;
                         bg_rx_dst_offset <= bg_rx_dst_offset_calc;
+                        // per-frame read probe: start this frame's payload checksum,
+                        // keyed by its ring start page.
+                        bg_rx_csum_frame <= 16'h0000;
+                        bg_rx_frame_page <= bg_rx_page_start_calc;
                         bg_rx_next_page <= bg_rx_next_page_calc;
                         bg_rx_queue_next_head <= {12'h000, bg_rx_next_slot};
                         bg_rx_status <= RSR_PRX | RSR_PHY;
@@ -1900,7 +2045,7 @@ always @(posedge clk) begin
                     end
 
                     BG_SYNC_WORD_WAIT: begin
-                        if (bg_sync_slot == 6'd40) begin
+                        if (bg_sync_slot == 6'd49) begin
                             bg_sync_slot <= 6'd0;
                             shm_sync_enabled <= 1'b0;
                         end else begin
@@ -2212,17 +2357,12 @@ always @(posedge clk) begin
             bg_clear_rx_avail <= 1'b0;
             bg_poll_counter <= BG_POLL_RELOAD;
         end else if (!eth_dma_req && !bg_dma_inflight &&
-                      // A CPU data-port access to the LOCAL packet-RAM (pmem)
-                      // region -- i.e. the Amiga PIO-reading/writing the NE2000
-                      // ring during a download -- does NOT touch the DDR mailbox
-                      // the bg uses, and the packet RAM is now TRUE DUAL-PORT:
-                      // the CPU reads/writes port B while the bg reads/writes
-                      // port A, so they never collide and no mux/re-arm/release
-                      // gymnastics are needed.  So only freeze the bg for a
-                      // NON-pmem data-port access (PROM/shm, which use eth_dma).
-                      // Letting the bg keep fetching+delivering RX frames while
-                      // the Amiga drains the ring overlaps the two and removes the
-                      // per-access stall that throttled RX delivery.
+                      // The packet RAM is true dual-port, but hardware captures
+                      // showed data-port read checksum mismatches under concurrent
+                      // Amiga PIO reads and bg port-A traffic.  Keep mailbox
+                      // ownership independent, but do not advance bg states while
+                      // the CPU is actively using the packet-RAM data port.
+                      !data_port_pmem_busy &&
                       (!local_remote_dma_active || remote_dma_pmem_region) &&
                       !(sel_ethernet && is_data_port_access && (cpu_rd || cpu_wr) &&
                         !remote_dma_pmem_region)) begin
@@ -2285,6 +2425,7 @@ always @(posedge clk) begin
                             isr_register <= isr_register | ISR_PRX;
                             dbg_prx_set_cnt <= dbg_prx_set_cnt + 8'd1;
                             curr_register <= bg_rx_next_page;
+                            bg_rx_frame_count <= bg_rx_frame_count + 16'd1;   // integrity probe: zero-payload frame delivered
                             shm_sync_enabled <= 1'b1;
                             bg_sync_slot <= 6'd0;
                             bg_state <= BG_WRITE_RX_HEAD_REQ;
@@ -2323,12 +2464,18 @@ always @(posedge clk) begin
                     // 8 and either keep packing or hand the <=8-byte tail to the
                     // proven narrow path.
                     // Integrity probe: sum this line's 8 payload bytes once (idx 0).
-                    if (bg_wide_idx == 2'd0)
+                    if (bg_wide_idx == 2'd0) begin
                         bg_rx_csum_run <= bg_rx_csum_run
                             + {8'h0, bg_wide_buf[7:0]}   + {8'h0, bg_wide_buf[15:8]}
                             + {8'h0, bg_wide_buf[23:16]} + {8'h0, bg_wide_buf[31:24]}
                             + {8'h0, bg_wide_buf[39:32]} + {8'h0, bg_wide_buf[47:40]}
                             + {8'h0, bg_wide_buf[55:48]} + {8'h0, bg_wide_buf[63:56]};
+                        bg_rx_csum_frame <= bg_rx_csum_frame
+                            + {8'h0, bg_wide_buf[7:0]}   + {8'h0, bg_wide_buf[15:8]}
+                            + {8'h0, bg_wide_buf[23:16]} + {8'h0, bg_wide_buf[31:24]}
+                            + {8'h0, bg_wide_buf[39:32]} + {8'h0, bg_wide_buf[47:40]}
+                            + {8'h0, bg_wide_buf[55:48]} + {8'h0, bg_wide_buf[63:56]};
+                    end
                     if (bg_wide_idx == 2'd3) begin
                         bg_rx_src_offset <= bg_rx_src_offset + 16'h0008;
                         bg_rx_bytes_remaining <= bg_rx_bytes_remaining - 16'h0008;
@@ -2344,20 +2491,42 @@ always @(posedge clk) begin
                     BG_WRITE_PAYLOAD_REQ: begin
                         if (bg_rx_bytes_remaining > 16'h0001) begin
                             // Integrity probe: both payload bytes of this word.
-                            bg_rx_csum_run <= bg_rx_csum_run
-                                + {8'h0, bg_source_word[7:0]} + {8'h0, bg_source_word[15:8]};
-                            bg_rx_src_offset <= bg_rx_src_offset + 16'h0002;
-                            bg_rx_bytes_remaining <= bg_rx_bytes_remaining - 16'h0002;
-                            bg_state <= BG_READ_PAYLOAD_REQ;
-                    end else begin
-                        // Integrity probe: the single odd tail byte actually written.
-                        bg_rx_csum_run <= bg_rx_csum_run + {8'h0, bg_source_word[15:8]};
-                        bg_rx_src_offset <= bg_rx_src_offset + bg_rx_bytes_remaining;
-                        bg_rx_bytes_remaining <= 16'h0000;
-                        rsr_register <= bg_rx_status;
-                        isr_register <= isr_register | ISR_PRX;
+                            bg_rx_csum_run <= bg_rx_csum_run + bg_source_word_sum;
+                            if (bg_rx_bytes_remaining > 16'h0002) begin
+                                bg_rx_csum_frame <= bg_rx_csum_frame + bg_source_word_sum;
+                                bg_rx_src_offset <= bg_rx_src_offset + 16'h0002;
+                                bg_rx_bytes_remaining <= bg_rx_bytes_remaining - 16'h0002;
+                                bg_state <= BG_READ_PAYLOAD_REQ;
+                            end else begin
+                                // Last even word. Finalize here; do not issue a
+                                // bogus extra read/write for a non-existent odd tail.
+                                frame_wr_csum[bg_rx_frame_page] <= bg_rx_csum_frame + bg_source_word_sum;
+                                bg_rx_csum_frame <= bg_rx_csum_frame + bg_source_word_sum;
+                                bg_rx_src_offset <= bg_rx_src_offset + 16'h0002;
+                                bg_rx_bytes_remaining <= 16'h0000;
+                                rsr_register <= bg_rx_status;
+                                isr_register <= isr_register | ISR_PRX;
+                                dbg_prx_set_cnt <= dbg_prx_set_cnt + 8'd1;
+                                curr_register <= bg_rx_next_page;
+                                bg_rx_frame_count <= bg_rx_frame_count + 16'd1;   // integrity probe: payload frame delivered
+                                shm_sync_enabled <= 1'b1;
+                                bg_sync_slot <= 6'd0;
+                                bg_state <= BG_WRITE_RX_HEAD_REQ;
+                            end
+                        end else begin
+                            // Integrity probe: the single odd tail byte actually written.
+                            bg_rx_csum_run <= bg_rx_csum_run + bg_source_tail_sum;
+                            // per-frame probe: finalize this frame's payload sum (incl the
+                            // tail byte) and store it keyed by the frame's ring start page.
+                            frame_wr_csum[bg_rx_frame_page] <= bg_rx_csum_frame + bg_source_tail_sum;
+                            bg_rx_csum_frame <= bg_rx_csum_frame + bg_source_tail_sum;
+                            bg_rx_src_offset <= bg_rx_src_offset + bg_rx_bytes_remaining;
+                            bg_rx_bytes_remaining <= 16'h0000;
+                            rsr_register <= bg_rx_status;
+                            isr_register <= isr_register | ISR_PRX;
                             dbg_prx_set_cnt <= dbg_prx_set_cnt + 8'd1;
                             curr_register <= bg_rx_next_page;
+                            bg_rx_frame_count <= bg_rx_frame_count + 16'd1;   // integrity probe: payload frame delivered
                             shm_sync_enabled <= 1'b1;
                             bg_sync_slot <= 6'd0;
                             bg_state <= BG_WRITE_RX_HEAD_REQ;
@@ -2513,7 +2682,7 @@ always @(posedge clk) begin
                         sync_shadow[bg_sync_slot] <= bg_sync_wd;
                         shadow_valid[bg_sync_slot] <= 1'b1;
                         bg_state <= BG_SYNC_WORD_WAIT;
-                    end else if (bg_sync_slot == 6'd40) begin
+                    end else if (bg_sync_slot == 6'd49) begin
                         // Unchanged and last slot: sync done, no round-trip.
                         bg_sync_slot <= 6'd0;
                         shm_sync_enabled <= 1'b0;
