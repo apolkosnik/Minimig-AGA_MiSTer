@@ -340,8 +340,30 @@ module eth_ack_starvation_tb;
             end
         end
 
+        // ---- DEADLOCK CHECK: RX must keep draining while a TX ack is OUTSTANDING.
+        // This TB never writes TX_COMPLETE_SEQ, so once the ACK stages,
+        // tx_request_pending stays asserted (the HPS "hasn't acked"). If the
+        // TX-ack poll is given absolute priority it starves RX and
+        // bg_rx_queue_head freezes -- the exact bring-up deadlock (the FPGA cannot
+        // deliver the DHCP OFFER while a TX ack is pending). Require all NFRAMES to
+        // drain DESPITE the stuck TX.
+        begin : wait_drain
+            integer g;
+            for (g = 0; g < 300000 && (dut.bg_rx_queue_head < NFRAMES[15:0]); g = g + 1)
+                @(posedge clk_sys);
+        end
+        $display("After ACK: tx_request_pending=%0b, RX drained=%0d/%0d",
+                 dut.tx_request_pending, dut.bg_rx_queue_head, NFRAMES);
+        if (dut.bg_rx_queue_head < NFRAMES[15:0]) begin
+            $display("FAIL: RX STARVED by a pending TX ack -- only %0d/%0d frames drained while tx_request_pending stuck (bring-up deadlock).",
+                     dut.bg_rx_queue_head, NFRAMES);
+            errors = errors + 1;
+        end else begin
+            $display("INFO: all %0d RX frames drained with the TX ack still outstanding -- RX not starved by the TX-ack poll.", NFRAMES);
+        end
+
         if (errors == 0)
-            $display("PASS: eth_ack_starvation_tb (Amiga ACK staged within %0d RX frame(s) of issue -- not starved by the RX drain)", delta_head);
+            $display("PASS: eth_ack_starvation_tb (ACK staged within %0d RX frame(s); RX not starved by a pending TX ack)", delta_head);
         else
             $display("FAILED: eth_ack_starvation_tb with %0d error(s)", errors);
         $finish;

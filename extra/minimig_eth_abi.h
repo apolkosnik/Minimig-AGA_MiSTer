@@ -35,12 +35,23 @@
 // (the driver reads the ring differently than assumed) -> a rdCorrupt=0 is then
 // inconclusive, not "clean". >0 with rdCorrupt=0 = reads PROVEN clean.
 #define ETH_RTL8019_RD_CHECKED (ETH_RTL8019_STATE + 0x14)  // 0x1114
-// Last per-frame read-probe mismatch details (slots 46..49). These split real
-// packet-RAM/read data corruption from a length/accounting mismatch in the probe.
-#define ETH_RTL8019_RD_BAD_PAGE (ETH_RTL8019_STATE + 0x16)  // 0x1116
-#define ETH_RTL8019_RD_BAD_LEN  (ETH_RTL8019_STATE + 0x18)  // 0x1118
-#define ETH_RTL8019_RD_BAD_EXP  (ETH_RTL8019_STATE + 0x1A)  // 0x111A
-#define ETH_RTL8019_RD_BAD_ACT  (ETH_RTL8019_STATE + 0x1C)  // 0x111C
+// Write/storage read-back probe (slots 46/47): the bg re-reads one-page RX
+// payloads through packet-RAM port A and compares them against frame_wr_csum.
+#define ETH_RTL8019_RB_BAD       (ETH_RTL8019_STATE + 0x16)  // 0x1116
+#define ETH_RTL8019_RB_CSUM_RUN  (ETH_RTL8019_STATE + 0x18)  // 0x1118
+// Last per-frame read-probe mismatch checksum details (slots 48/49).
+#define ETH_RTL8019_RD_BAD_EXP   (ETH_RTL8019_STATE + 0x1A)  // 0x111A
+#define ETH_RTL8019_RD_BAD_ACT   (ETH_RTL8019_STATE + 0x1C)  // 0x111C
+// TX-path probes. TX_MIRROR_* is the running byte-sum/count of frames captured
+// from Amiga data-port writes into the FPGA ping-pong TX mirror. TX_DRAIN_* is
+// the running byte-sum/count of bytes drained from that mirror into ETH_TX_BUFFER.
+// The HPS reports TXH for the bytes it reads/sends from ETH_TX_BUFFER.
+#define ETH_RTL8019_TX_MIRROR_CSUM   (ETH_RTL8019_STATE + 0x1E)  // 0x111E
+#define ETH_RTL8019_TX_MIRROR_FRAMES (ETH_RTL8019_STATE + 0x20)  // 0x1120
+#define ETH_RTL8019_TX_DRAIN_CSUM    (ETH_RTL8019_STATE + 0x22)  // 0x1122
+#define ETH_RTL8019_TX_DRAIN_FRAMES  (ETH_RTL8019_STATE + 0x24)  // 0x1124
+#define ETH_RTL8019_TX_MIRROR_BYTES  (ETH_RTL8019_STATE + 0x26)  // 0x1126
+#define ETH_RTL8019_TX_DRAIN_BYTES   (ETH_RTL8019_STATE + 0x28)  // 0x1128
 #define ETH_PACKET_BUFFER_SIZE 0x0600       // 1536-byte staged frame capacity
 #define ETH_TX_BUFFER          0x2000       // staged TX buffer
 #define ETH_RX_BUFFER          0x2600       // legacy staged RX buffer

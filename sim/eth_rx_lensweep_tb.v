@@ -314,14 +314,15 @@ module eth_rx_lensweep_tb;
 
     integer t;
     // lengths: wide/narrow boundary residues, odd sizes, and full segments
-    localparam integer NLEN = 20;
+    localparam integer NLEN = 21;
     integer lens [0:NLEN-1];
 
     initial begin
         lens[0]=46;  lens[1]=47;  lens[2]=48;  lens[3]=49;  lens[4]=55;
         lens[5]=56;  lens[6]=57;  lens[7]=63;  lens[8]=64;  lens[9]=65;
-        lens[10]=72; lens[11]=73; lens[12]=128; lens[13]=255; lens[14]=256;
-        lens[15]=512; lens[16]=1023; lens[17]=1024; lens[18]=1499; lens[19]=1500;
+        lens[10]=68; lens[11]=72; lens[12]=73; lens[13]=128; lens[14]=255;
+        lens[15]=256; lens[16]=512; lens[17]=1023; lens[18]=1024; lens[19]=1499;
+        lens[20]=1500;
 
         reset_sys = 1; reset_avl = 1;
         repeat (8) @(posedge clk_sys); @(posedge clk_avl);
