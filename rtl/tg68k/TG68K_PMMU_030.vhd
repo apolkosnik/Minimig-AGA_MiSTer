@@ -1055,11 +1055,22 @@ architecture rtl of TG68K_PMMU_030 is
     base_page_shift : integer;      -- TC.PS value (8-15)
     level : integer;                -- walk_level where page descriptor was found
     idx_bits : tc_bits_array_t;     -- tc_idx_bits: (0)=TIA, (1)=TIB, (2)=TIC, (3)=TID
-    fcl : std_logic                 -- TC.FCL (Function Code Lookup)
+    fcl : std_logic;                -- TC.FCL (Function Code Lookup)
+    is_root_pointer : std_logic := '0'  -- root pointer itself is DT=01 (no table read at all)
   ) return integer is
     variable result : integer;
   begin
     result := base_page_shift;
+    -- Root pointer itself holds a DT=01 page descriptor: no table read ever
+    -- happened, so NO index field was consumed by a lookup - all configured
+    -- TC fields fold into the offset regardless of FCL (WinUAE cpummu30.cpp
+    -- mmu030_table_search, t=0/descr_num=0 case). This is distinct from
+    -- "page found via a TIA-indexed A-table entry" (also level=0, but TIA
+    -- WAS consumed there) - see the FCL=0 level=0 branch below.
+    if is_root_pointer = '1' then
+      result := result + idx_bits(0) + idx_bits(1) + idx_bits(2) + idx_bits(3);
+      return result;
+    end if;
     -- Add remaining index bits based on termination level
     -- FCL=0:
     --   Level 0 (TIA): add TIB + TIC + TID
@@ -4247,7 +4258,7 @@ begin
             -- unused_offset = addr AND (effective_mask XOR page_mask)
             -- effective_mask zeros bits below effective_shift, page_mask zeros bits below page_shift
             -- XOR gives bits BETWEEN page_shift and effective_shift (the skipped index fields)
-            early_term_desc_addr := align_addr(saved_addr_log, calc_effective_page_shift(tc_page_shift, walk_level, tc_idx_bits, tc_fcl));
+            early_term_desc_addr := align_addr(saved_addr_log, calc_effective_page_shift(tc_page_shift, walk_level, tc_idx_bits, tc_fcl, walk_is_root_pointer));
             early_term_page_addr := align_addr(saved_addr_log, tc_page_shift);
             -- The offset to add = page-aligned addr - effective-aligned addr
             -- This extracts exactly the bits between tc_page_shift and effective_shift
