@@ -522,6 +522,114 @@ proc show_rtwr {bin} {
         $last0_addr $last0_data $last1_addr $last1_data $last2_addr $last2_data $last3_addr $last3_data]
 }
 
+proc show_halt {bin} {
+    puts "== HALT =="
+    if {[string length $bin] < 506} {
+        puts [format "halt-edge context unavailable, HALT probe width is %u bits" [string length $bin]]
+        return
+    }
+
+    set seen        [bin_to_uint [bit_slice $bin 505 505]]
+    set seq_count   [bin_to_uint [bit_slice $bin 504 501]]
+    set pc          [bin_to_hex  [bit_slice $bin 500 469]]
+    set exe_pc      [bin_to_hex  [bit_slice $bin 468 437]]
+    set opcode      [bin_to_hex  [bit_slice $bin 436 421]]
+    set state       [bin_to_uint [bit_slice $bin 420 419]]
+    set micro       [bin_to_uint [bit_slice $bin 418 411]]
+    set next_micro  [bin_to_uint [bit_slice $bin 410 403]]
+    set flags       [bin_to_hex  [bit_slice $bin 402 395]]
+    set a7          [bin_to_hex  [bit_slice $bin 394 363]]
+    set trap_vector [bin_to_hex  [bit_slice $bin 362 331]]
+    set memaddr     [bin_to_hex  [bit_slice $bin 330 299]]
+    set log_addr    [bin_to_hex  [bit_slice $bin 298 267]]
+    set phys_addr   [bin_to_hex  [bit_slice $bin 266 235]]
+    set cpu_addr    [bin_to_hex  [bit_slice $bin 234 203]]
+    set mmusr       [bin_to_hex  [bit_slice $bin 202 187]]
+    set saved_addr  [bin_to_hex  [bit_slice $bin 186 155]]
+    set desc_addr   [bin_to_hex  [bit_slice $bin 154 123]]
+    set desc_data   [bin_to_hex  [bit_slice $bin 122 91]]
+    set tc          [bin_to_hex  [bit_slice $bin 90 59]]
+    set crp_lo      [bin_to_hex  [bit_slice $bin 58 27]]
+    set wstate      [bin_to_uint [bit_slice $bin 26 22]]
+    set pmmu_fault              [bin_to_uint [bit_slice $bin 21 21]]
+    set pmmu_busy               [bin_to_uint [bit_slice $bin 20 20]]
+    set cpu_halted              [bin_to_uint [bit_slice $bin 19 19]]
+    set interrupt               [bin_to_uint [bit_slice $bin 18 18]]
+    set trapmake                [bin_to_uint [bit_slice $bin 17 17]]
+    set trap_addr_error         [bin_to_uint [bit_slice $bin 16 16]]
+    set trap_berr               [bin_to_uint [bit_slice $bin 15 15]]
+    set trap_mmu_berr           [bin_to_uint [bit_slice $bin 14 14]]
+    set make_berr               [bin_to_uint [bit_slice $bin 13 13]]
+    set berr_exception_active   [bin_to_uint [bit_slice $bin 12 12]]
+    set pmmu_fault_dispatched   [bin_to_uint [bit_slice $bin 11 11]]
+    set pmmu_fault_was_cleared  [bin_to_uint [bit_slice $bin 10 10]]
+    set pmmu_fault_rw           [bin_to_uint [bit_slice $bin 9 9]]
+    set pmmu_fault_is_insn      [bin_to_uint [bit_slice $bin 8 8]]
+    set pmmu_fault_fc           [bin_to_uint [bit_slice $bin 7 5]]
+    set clkena_lw               [bin_to_uint [bit_slice $bin 4 4]]
+    set walker_berr             [bin_to_uint [bit_slice $bin 3 3]]
+    set walker_timeout          [bin_to_uint [bit_slice $bin 2 2]]
+    set cpu_clkena_in           [bin_to_uint [bit_slice $bin 1 1]]
+    set fault_latched           [bin_to_uint [bit_slice $bin 0 0]]
+
+    puts [format "seen=%u seq=%u pc=%08s exe_pc=%08s opcode=%04s state=%s(%u) micro=%u next=%u flags=%02s a7=%08s" \
+        $seen $seq_count $pc $exe_pc $opcode [decode_cpustate $state] $state $micro $next_micro $flags $a7]
+    puts [format "trap_vector=%08s memaddr=%08s log=%08s phys=%08s cpu_addr=%08s mmusr=%04s" \
+        $trap_vector $memaddr $log_addr $phys_addr $cpu_addr $mmusr]
+    puts [format "saved_addr=%08s desc_addr=%08s desc_data=%08s tc=%08s crp_lo=%08s wstate=%u" \
+        $saved_addr $desc_addr $desc_data $tc $crp_lo $wstate]
+    puts [format "pmmu_fault=%u pmmu_busy=%u cpu_halted=%u interrupt=%u trapmake=%u" \
+        $pmmu_fault $pmmu_busy $cpu_halted $interrupt $trapmake]
+    puts [format "trap_addr_error=%u trap_berr=%u trap_mmu_berr=%u make_berr=%u berr_exception_active=%u" \
+        $trap_addr_error $trap_berr $trap_mmu_berr $make_berr $berr_exception_active]
+    puts [format "pmmu_fault_dispatched=%u pmmu_fault_was_cleared=%u pmmu_fault_rw=%u pmmu_fault_is_insn=%u fc=%s(%u)" \
+        $pmmu_fault_dispatched $pmmu_fault_was_cleared $pmmu_fault_rw $pmmu_fault_is_insn \
+        [decode_fc $pmmu_fault_fc] $pmmu_fault_fc]
+    puts [format "clkena_lw=%u walker_berr=%u walker_timeout=%u cpu_clkena_in=%u fault_latched=%u" \
+        $clkena_lw $walker_berr $walker_timeout $cpu_clkena_in $fault_latched]
+}
+
+proc show_nest {bin} {
+    puts "== NEST =="
+    if {[string length $bin] < 504} {
+        puts [format "nested-fault detail unavailable, NEST probe width is %u bits" [string length $bin]]
+        return
+    }
+
+    set latched     [bin_to_uint [bit_slice $bin 503 503]]
+    set pc          [bin_to_hex  [bit_slice $bin 502 471]]
+    set exe_pc      [bin_to_hex  [bit_slice $bin 470 439]]
+    set opcode      [bin_to_hex  [bit_slice $bin 438 423]]
+    set state       [bin_to_uint [bit_slice $bin 422 421]]
+    set micro       [bin_to_uint [bit_slice $bin 420 413]]
+    set memaddr     [bin_to_hex  [bit_slice $bin 412 381]]
+    set log_addr    [bin_to_hex  [bit_slice $bin 380 349]]
+    set phys_addr   [bin_to_hex  [bit_slice $bin 348 317]]
+    set flags       [bin_to_hex  [bit_slice $bin 316 309]]
+    set rw          [bin_to_uint [bit_slice $bin 308 308]]
+    set is_insn     [bin_to_uint [bit_slice $bin 307 307]]
+    set fc          [bin_to_uint [bit_slice $bin 306 304]]
+    set a7          [bin_to_hex  [bit_slice $bin 303 272]]
+    set mmusr       [bin_to_hex  [bit_slice $bin 271 256]]
+    set desc_addr   [bin_to_hex  [bit_slice $bin 255 224]]
+    set desc_data   [bin_to_hex  [bit_slice $bin 223 192]]
+    set ptr1_addr   [bin_to_hex  [bit_slice $bin 191 160]]
+    set ptr1_data   [bin_to_hex  [bit_slice $bin 159 128]]
+    set ptr2_addr   [bin_to_hex  [bit_slice $bin 127 96]]
+    set ptr2_data   [bin_to_hex  [bit_slice $bin 95 64]]
+    set ptr3_addr   [bin_to_hex  [bit_slice $bin 63 32]]
+    set ptr3_data   [bin_to_hex  [bit_slice $bin 31 0]]
+
+    puts [format "latched=%u pc=%08s exe_pc=%08s opcode=%04s state=%s(%u) micro=%u flags=%02s a7=%08s" \
+        $latched $pc $exe_pc $opcode [decode_cpustate $state] $state $micro $flags $a7]
+    puts [format "memaddr=%08s log=%08s phys=%08s rw=%u insn=%u fc=%s(%u) mmusr=%04s" \
+        $memaddr $log_addr $phys_addr $rw $is_insn [decode_fc $fc] $fc $mmusr]
+    puts [format "fault_desc: addr=%08s data=%08s" $desc_addr $desc_data]
+    puts [format "ptr1: addr=%08s data=%08s" $ptr1_addr $ptr1_data]
+    puts [format "ptr2: addr=%08s data=%08s" $ptr2_addr $ptr2_data]
+    puts [format "ptr3: addr=%08s data=%08s" $ptr3_addr $ptr3_data]
+}
+
 set clear_cpus 0
 foreach arg $::argv {
     switch -- $arg {
@@ -553,10 +661,20 @@ set rtwr_idx -1
 if {[llength $rtwr_inst] != 0} {
     set rtwr_idx [lindex $rtwr_inst 0]
 }
+set halt_inst [find_instance_optional $hw_name $dev_name "HALT"]
+set halt_idx -1
+if {[llength $halt_inst] != 0} {
+    set halt_idx [lindex $halt_inst 0]
+}
+set nest_inst [find_instance_optional $hw_name $dev_name "NEST"]
+set nest_idx -1
+if {[llength $nest_inst] != 0} {
+    set nest_idx [lindex $nest_inst 0]
+}
 
 puts "hardware: $hw_name"
 puts "device:   $dev_name"
-puts "instances: PMMU=$pmmu_idx PMM2=$pmm2_idx EXCF=$excf_idx CPUS=$cpus_idx REGS=$regs_idx TCWR=$tcwr_idx PMWR=$pmwr_idx RTWR=$rtwr_idx"
+puts "instances: PMMU=$pmmu_idx PMM2=$pmm2_idx EXCF=$excf_idx CPUS=$cpus_idx REGS=$regs_idx TCWR=$tcwr_idx PMWR=$pmwr_idx RTWR=$rtwr_idx HALT=$halt_idx NEST=$nest_idx"
 
 start_insystem_source_probe -hardware_name $hw_name -device_name $dev_name
 if {$clear_cpus} {
@@ -590,6 +708,18 @@ if {$clear_cpus} {
         write_source_data -instance_index $rtwr_idx -value 0 -value_in_hex
         after 20
     }
+    if {$halt_idx >= 0} {
+        write_source_data -instance_index $halt_idx -value 1 -value_in_hex
+        after 20
+        write_source_data -instance_index $halt_idx -value 0 -value_in_hex
+        after 20
+    }
+    if {$nest_idx >= 0} {
+        write_source_data -instance_index $nest_idx -value 1 -value_in_hex
+        after 20
+        write_source_data -instance_index $nest_idx -value 0 -value_in_hex
+        after 20
+    }
 }
 set cpus_bin [read_probe_data -instance_index $cpus_idx]
 set pmmu_bin [read_probe_data -instance_index $pmmu_idx]
@@ -604,6 +734,12 @@ if {$pmwr_idx >= 0} {
 }
 if {$rtwr_idx >= 0} {
     set rtwr_bin [read_probe_data -instance_index $rtwr_idx]
+}
+if {$halt_idx >= 0} {
+    set halt_bin [read_probe_data -instance_index $halt_idx]
+}
+if {$nest_idx >= 0} {
+    set nest_bin [read_probe_data -instance_index $nest_idx]
 }
 end_insystem_source_probe
 
@@ -620,4 +756,10 @@ if {$pmwr_idx >= 0} {
 }
 if {$rtwr_idx >= 0} {
     show_rtwr $rtwr_bin
+}
+if {$halt_idx >= 0} {
+    show_halt $halt_bin
+}
+if {$nest_idx >= 0} {
+    show_nest $nest_bin
 }

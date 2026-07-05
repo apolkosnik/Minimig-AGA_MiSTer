@@ -2214,8 +2214,12 @@ begin
             ptest_done <= '1';  -- BUG FIX: Signal PTEST completion after TTR1 match
           elsif ptest_level = "000" then
             -- BUG #413: PTEST level=0 - ATC-only search (no table walk)
-            -- Per MC68030 spec and WinUAE mmu030_ptest_atc_search():
-            -- Search ATC for matching entry, report status in MMUSR
+            -- Search ATC for matching entry, report status in MMUSR.
+            -- WinUAE's mmu030_ptest_atc_search() compares the raw EA against
+            -- the page-masked ATC tag, but its ATC fill and PFLUSH/PLOAD page
+            -- paths all treat tags as page-granular. Keep this compare aligned
+            -- to the cached tag so level-0 PTEST tests page residency, not byte
+            -- equality with the page base.
             hit := '0';
             for i in 0 to ATC_ENTRIES-1 loop
               if atc_valid(i) = '1' then
@@ -2230,8 +2234,19 @@ begin
             if hit = '1' then
               -- ATC hit - report entry status in MMUSR
               if atc_buserr(hit_idx) = '1' then
-                -- Cached fault entry: report the original MMUSR fault class.
-                mmusr_update_value <= x"0000" & atc_fault_status(hit_idx);
+                -- Cached fault entry: WinUAE's level-0 PTEST derives B|I from
+                -- the ATC bus_error bit, then still exposes the cached W/M
+                -- attributes. Preserve those from the original walker status.
+                mmusr_update_value <= encode_mmusr_fault(
+                  bus_error => '1',
+                  limit_violation => '0',
+                  supervisor_violation => '0',
+                  write_protect => atc_fault_status(hit_idx)(11),
+                  invalid => '1',
+                  modified => atc_fault_status(hit_idx)(9),
+                  transparent => '0',
+                  level => "000"
+                );
               else
                 -- Normal ATC hit - report WP and M from ATC attributes.
                 -- MC68030 UM 9.7.4 Table 9-3 (line 15636): for PTEST Level 0
@@ -2245,13 +2260,15 @@ begin
                 );
               end if;
             else
-              -- PTEST level 0 ATC miss: report B=1/N=0 per 68030 reference.
+              -- PTEST level 0 ATC miss: WinUAE (cpummu30.cpp) reports I=1, not B=1,
+              -- for a level-0 ATC miss (no table walk is performed at level 0, so
+              -- this is "no cached translation found", i.e. Invalid, not Bus Error).
               mmusr_update_value <= encode_mmusr_fault(
-                bus_error => '1',
+                bus_error => '0',
                 limit_violation => '0',
                 supervisor_violation => '0',
                 write_protect => '0',
-                invalid => '0',
+                invalid => '1',
                 modified => '0',
                 transparent => '0',
                 level => "000"

@@ -989,8 +989,11 @@ begin
             alloc_dst(1, dst_addr);
             -- Emit PFLUSH
             emit_pflush(pc, pflush_ea_mode, pflush_ea_reg, mode_bits, fc_spec, fc_mask, disp_or_addr, addr_hi);
-            -- Verify with PTEST (A2) - test the same address
-            emit_ptest(pc, "010", "010", "111", '1', '0', "000", "10101", x"0000", x"0000");
+            -- Verify with level-0 PTEST (A2). WinUAE only reports transparent
+            -- TTR hits on the level-0 ATC/TTR search path; nonzero levels walk
+            -- tables and would report invalid here because this bench has no
+            -- page tables.
+            emit_ptest(pc, "010", "010", "000", '1', '0', "000", "10101", x"0000", x"0000");
             -- Read MMUSR through a WinUAE-valid MC68030 MMU EA.
             emit_pmove(pc, REG_MMUSR, DIR_MMU_TO_MEM, "111", "001",
                        std_logic_vector(to_unsigned(dst_addr, 16)),
@@ -1281,6 +1284,10 @@ begin
         writeline(output, l);
         write(l, string'("=============================================="));
         writeline(output, l);
+
+        if fail_count /= 0 then
+            assert false report "PFLUSH all modes test failed" severity failure;
+        end if;
 
         wait;
     end process;

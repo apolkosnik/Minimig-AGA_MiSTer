@@ -268,8 +268,34 @@ architecture behavioral of tb_berr_frame is
         -- MOVE.L D4,$1E30.L
         m(181) := x"23C4"; m(182) := x"0000"; m(183) := x"1E30";
 
+        -- JMP test5 ($0174) instead of stopping
+        m(184) := x"4EF8"; m(185) := x"0174";
+
+        ---------------------------------------------------------------
+        -- Test 5: MOVEP.L write to WP page ($3000) - BUG fix verification
+        -- MOVEP transfers each byte as a separate bus cycle (An, An+2,
+        -- An+4, An+6 for .L). The FIRST byte-write already faults here
+        -- (whole page is WP), so this is NOT the instruction's last bus
+        -- cycle -> must stack Format $B (long), never Format $A, matching
+        -- WinUAE (which never marks any MOVEP byte-write LASTWRITE-eligible).
+        ---------------------------------------------------------------
+        -- test5 at $0174 (index 186)
+        -- LEA (test5_continue).W,A6   ; at $0190
+        m(186) := x"4DF8"; m(187) := x"0190";
+        -- MOVEQ #5,D6
+        m(188) := x"7C05";
+        -- LEA $3000.L,A0
+        m(189) := x"41F9"; m(190) := x"0000"; m(191) := x"3000";
+        -- MOVE.L #$5A5A1234,D0
+        m(192) := x"203C"; m(193) := x"5A5A"; m(194) := x"1234";
+        -- MOVEP.L D0,(0,A0)   ; opcode $01C8, disp=0 -> byte write to $3000 faults
+        m(195) := x"01C8"; m(196) := x"0000";
+        -- Fallthrough NOPs (should not reach - MOVEP write faults immediately)
+        m(197) := x"4E71"; m(198) := x"4E71"; m(199) := x"4E71";
+
+        -- test5_continue at $0190 (index 200)
         -- STOP
-        m(184) := x"4E72"; m(185) := x"2700";
+        m(200) := x"4E72"; m(201) := x"2700";
 
         ---------------------------------------------------------------
         -- CRP DATA at $1080; TC data at $1088.
@@ -680,6 +706,25 @@ begin
         val32 := mem(3968) & mem(3969);
         pass := (val32 /= x"FF000000");
         check_test(15, "No unexpected trap during test", pass);
+
+        ---------------------------------------------------------------
+        -- Verify Test 5: MOVEP.L write to WP page ($3000) -> Format $B
+        -- Test 5 (D6=5): base = $1E40 (idx 3872)
+        -- Only the format/vector word is checked here: it sits at a fixed,
+        -- format-independent offset (SP+$06, right after the 2-word PC) in
+        -- every MC68030 exception frame, unlike SSW/fault-address, whose
+        -- offsets differ between Format $A and Format $B and would read the
+        -- wrong location if this were genuinely a long frame (which is the
+        -- whole point of this test).
+        ---------------------------------------------------------------
+        val16 := mem(3873);  -- FmtVec at $1E42
+        report "  Test5 format/vector=$" & slv_to_hex(val16);
+        pass := (val16 = x"B008");
+        check_test(16, "MOVEP fault format/vector = $B008 (long frame, not LASTWRITE)", pass);
+        if not pass then
+            report "  Got format/vector=$" & slv_to_hex(val16) &
+                   " (a non-final MOVEP byte-write must never stack Format $A)";
+        end if;
 
         ---------------------------------------------------------------
         -- Summary

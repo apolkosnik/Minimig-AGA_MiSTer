@@ -153,8 +153,11 @@ architecture behavioral of tb_ptest_all_modes is
     -- TC with MMU enabled: E=1, PS=12, IS=0, TIA=8, TIB=7, TIC=5, TID=0
     constant VAL_TC_PTEST  : std_logic_vector(31 downto 0) := x"80C08750";
 
-    -- Expected MMUSR after PTEST with TT0 match: T=1 (bit 6) = $0040
-    constant VAL_MMUSR_EXPECTED : std_logic_vector(15 downto 0) := x"0040";
+    -- WinUAE applies transparent-translation lookup only to PTEST level 0.
+    -- Nonzero PTEST levels perform a table search; this test does not install
+    -- backing tables for PTEST_ADDR, so those searches report Invalid.
+    constant VAL_MMUSR_LEVEL0_TTR : std_logic_vector(15 downto 0) := x"0040";
+    constant VAL_MMUSR_WALK_INVALID : std_logic_vector(15 downto 0) := x"0400";
     constant VAL_A3_SENTINEL    : std_logic_vector(31 downto 0) := x"DEADBEEF";
     constant FLINE_A3_DST_ADDR  : integer := 16#2FF8#;
     constant FLINE_TAG_DST_ADDR : integer := 16#2FFC#;
@@ -1045,7 +1048,7 @@ begin
         emit_pmove(pc, REG_TC, DIR_MEM_TO_MMU, "010", "000", x"0000", x"0000");
 
         -- =====================================================
-        -- Phase 2: PTEST tests (MMU active, TT0 matches everything)
+        -- Phase 2: PTEST tests (MMU active, TT0 matches everything for level 0)
         -- After each PTEST, read MMUSR->D3 and store to memory
         -- =====================================================
 
@@ -1054,7 +1057,7 @@ begin
         emit_ptest_verify_mmusr(
             "PTESTR (A2), level=7, FC=5",
             "010", "010", "111", '1', '0', "000", "10101", x"0000", x"0000",
-            VAL_MMUSR_EXPECTED);
+            VAL_MMUSR_WALK_INVALID);
 
         -- Note: (An)+ and -(An) are ILLEGAL EA modes for PTEST (control modes only)
 
@@ -1064,7 +1067,7 @@ begin
         emit_ptest_verify_mmusr(
             "PTESTR (d16,A2), level=7, FC=5",
             "101", "010", "111", '1', '0', "000", "10101", x"0010", x"0000",
-            VAL_MMUSR_EXPECTED);
+            VAL_MMUSR_WALK_INVALID);
 
         -- Test 3: PTESTR (d8,A2,D6.W), level=7, imm FC=5
         -- D6=4, brief=$6002 -> D6.W scale=1 disp=2 -> EA = A2 + 4 + 2 = A2 + 6
@@ -1073,42 +1076,42 @@ begin
         emit_ptest_verify_mmusr(
             "PTESTR (d8,A2,D6.W), level=7, FC=5",
             "110", "010", "111", '1', '0', "000", "10101", x"6002", x"0000",
-            VAL_MMUSR_EXPECTED);
+            VAL_MMUSR_WALK_INVALID);
 
         -- Test 4: PTESTR (xxx).W, level=7, imm FC=5
         emit_ptest_verify_mmusr(
             "PTESTR (xxx).W=$1000, level=7, FC=5",
             "111", "000", "111", '1', '0', "000", "10101",
             PTEST_ADDR(15 downto 0), x"0000",
-            VAL_MMUSR_EXPECTED);
+            VAL_MMUSR_WALK_INVALID);
 
         -- Test 5: PTESTR (xxx).L, level=7, imm FC=5
         emit_ptest_verify_mmusr(
             "PTESTR (xxx).L=$00001000, level=7, FC=5",
             "111", "001", "111", '1', '0', "000", "10101",
             PTEST_ADDR(15 downto 0), PTEST_ADDR(31 downto 16),
-            VAL_MMUSR_EXPECTED);
+            VAL_MMUSR_WALK_INVALID);
 
         -- Test 6: PTESTW (A2), level=7, imm FC=5 (write test)
         emit_movea(pc, 2, PTEST_ADDR);
         emit_ptest_verify_mmusr(
             "PTESTW (A2), level=7, FC=5",
             "010", "010", "111", '0', '0', "000", "10101", x"0000", x"0000",
-            VAL_MMUSR_EXPECTED);
+            VAL_MMUSR_WALK_INVALID);
 
         -- Test 7: PTESTR (A2), level=0, imm FC=5
         emit_movea(pc, 2, PTEST_ADDR);
         emit_ptest_verify_mmusr(
             "PTESTR (A2), level=0, FC=5",
             "010", "010", "000", '1', '0', "000", "10101", x"0000", x"0000",
-            VAL_MMUSR_EXPECTED);
+            VAL_MMUSR_LEVEL0_TTR);
 
         -- Test 8: PTESTR (A2), level=3, imm FC=5
         emit_movea(pc, 2, PTEST_ADDR);
         emit_ptest_verify_mmusr(
             "PTESTR (A2), level=3, FC=5",
             "010", "010", "011", '1', '0', "000", "10101", x"0000", x"0000",
-            VAL_MMUSR_EXPECTED);
+            VAL_MMUSR_WALK_INVALID);
 
         -- Test 9: PTESTR (A2), level=7, FC from D0 (D0=5)
         -- FC spec = 01000 (Dn, reg=D0)
@@ -1116,7 +1119,7 @@ begin
         emit_ptest_verify_mmusr(
             "PTESTR (A2), level=7, FC=D0 (D0=5)",
             "010", "010", "111", '1', '0', "000", "01000", x"0000", x"0000",
-            VAL_MMUSR_EXPECTED);
+            VAL_MMUSR_WALK_INVALID);
 
         -- Test 10: PTESTR (A2), A=1, A3 (physical address writeback)
         -- Verify MMUSR is correct when A-bit is set
@@ -1129,7 +1132,7 @@ begin
                    std_logic_vector(to_unsigned(dst_addr_tmp, 16)),
                    std_logic_vector(to_unsigned(dst_addr_tmp / 65536, 16)));
         exp_words_tmp := (others => (others => '0'));
-        exp_words_tmp(0) := VAL_MMUSR_EXPECTED;
+        exp_words_tmp(0) := VAL_MMUSR_WALK_INVALID;
         set_desc(desc_str_tmp, "PTESTR (A2), A=1 A3, MMUSR");
         record_test(desc_str_tmp, dst_addr_tmp, 1, exp_words_tmp);
 
@@ -1142,7 +1145,7 @@ begin
                    std_logic_vector(to_unsigned(dst_addr_tmp, 16)),
                    std_logic_vector(to_unsigned(dst_addr_tmp / 65536, 16)));
         exp_words_tmp := (others => (others => '0'));
-        exp_words_tmp(0) := VAL_MMUSR_EXPECTED;
+        exp_words_tmp(0) := VAL_MMUSR_WALK_INVALID;
         set_desc(desc_str_tmp, "PTESTR (A2), A=1 A4, MMUSR");
         record_test(desc_str_tmp, dst_addr_tmp, 1, exp_words_tmp);
 
@@ -1156,7 +1159,7 @@ begin
         emit_ptest_verify_mmusr(
             "PTESTR (A7), level=7, FC=5",
             "010", "111", "111", '1', '0', "000", "10101", x"0000", x"0000",
-            VAL_MMUSR_EXPECTED);
+            VAL_MMUSR_WALK_INVALID);
 
         -- Test 13: PTESTR (d16,A7), level=7, imm FC=5
         -- d16=$0010, so A7 = $1000 - $10 = $0FF0
@@ -1164,14 +1167,14 @@ begin
         emit_ptest_verify_mmusr(
             "PTESTR (d16,A7), level=7, FC=5",
             "101", "111", "111", '1', '0', "000", "10101", x"0010", x"0000",
-            VAL_MMUSR_EXPECTED);
+            VAL_MMUSR_WALK_INVALID);
 
         -- Test 14: PTESTW (A7), level=7, imm FC=5 (write test with A7)
         emit_movea(pc, 7, PTEST_ADDR);
         emit_ptest_verify_mmusr(
             "PTESTW (A7), level=7, FC=5",
             "010", "111", "111", '0', '0', "000", "10101", x"0000", x"0000",
-            VAL_MMUSR_EXPECTED);
+            VAL_MMUSR_WALK_INVALID);
 
         -- Test 15: PTESTR (A2), level=0, A=1, A3
         -- MC68030/WinUAE treat this form as an unimplemented F-line instruction.
@@ -1196,7 +1199,7 @@ begin
         writeline(output, l);
         write(l, string'("Also: PTESTW, level=0/3, FC=D0, A-bit=A3/A4, level=0+A trap"));
         writeline(output, l);
-        write(l, string'("Expected MMUSR=$0040 (T=1, transparent TT0 match)"));
+        write(l, string'("Expected: level 0 TT0 -> $0040; nonzero table walks -> $0400"));
         writeline(output, l);
         write(l, string'("=============================================="));
         writeline(output, l);

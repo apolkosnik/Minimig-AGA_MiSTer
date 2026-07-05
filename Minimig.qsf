@@ -64,6 +64,7 @@ set_global_assignment -name VERILOG_MACRO "ENABLE_CPUWRAP_DEBUG_REGS_ISSP=1"
 set_global_assignment -name VERILOG_MACRO "ENABLE_CPUWRAP_DEBUG_TCWR_ISSP=1"
 set_global_assignment -name VERILOG_MACRO "ENABLE_CPUWRAP_DEBUG_PMWR_ISSP=1"
 set_global_assignment -name VERILOG_MACRO "ENABLE_CPUWRAP_DEBUG_RTWR_ISSP=1"
+set_global_assignment -name VERILOG_MACRO "ENABLE_CPUWRAP_DEBUG_HALTD_ISSP=1"
 
 source sys/sys.tcl
 source sys/sys_analog.tcl

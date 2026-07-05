@@ -450,6 +450,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal set_exec_tas		: std_logic;
 	signal exec_cas			: std_logic;
 	signal set_exec_cas		: std_logic;
+	signal pmmu_fault_effective_rw : std_logic;  -- WinUAE-parity Format $A/B: live-vs-latched RW for this fault
+	signal pmmu_fault_lastwrite_ok : std_logic;  -- WinUAE-parity Format $A/B: this write is LASTWRITE-eligible
 
 	signal exe_condition		: std_logic;
 	signal ea_only				: bit;
@@ -1470,6 +1472,28 @@ ALU: TG68K_ALU
 	nLDS <= memmaskmux(4) OR pmmu_busy OR pmmu_fault;
 	clkena_lw <= '1' WHEN clkena_in='1' AND memmaskmux(3)='1' AND pmmu_busy='0' ELSE '0';
 	clr_berr <= '1' WHEN setopcode='1' AND trap_berr='1' ELSE '0';
+
+	-- WinUAE-derived Format $A (LASTWRITE) eligibility for a PMMU data-write
+	-- fault. Per WinUAE (Exception_mmu030 / genastore_2 / gen_set_fault_pc):
+	-- a write fault gets the short, single-write-replayable Format $A frame
+	-- when this write is the LAST (or only) bus cycle the instruction
+	-- performs; every other fault (any read - Table 8-6 - CAS's locked write,
+	-- a non-final MOVEM register, any MOVEP byte, or an instruction fetch)
+	-- gets the long Format $B frame. Effective RW follows the same
+	-- live-vs-latched precedence as the SSW(6)/RW construction below
+	-- (pmmu_fault live for same-edge dispatch, the first-fire latch for the
+	-- deferred make_mmu_berr path). Conservative by construction: MOVEM,
+	-- CAS, and MOVEP are excluded (matches WinUAE exactly - WinUAE never
+	-- calls gen_set_fault_pc for MOVEP, so every MOVEP byte-write fault is
+	-- unconditionally Format $B, unlike MOVEM which is excluded only while
+	-- more registers remain), so any case this doesn't positively recognize
+	-- falls back to the existing, already-correct long-frame path.
+	pmmu_fault_effective_rw <= pmmu_fault_rw_out WHEN pmmu_fault = '1' ELSE berr_pmmu_fault_rw;
+	pmmu_fault_lastwrite_ok <= '1' WHEN pmmu_fault_effective_rw = '0' AND exec_cas = '0' AND
+	                                    NOT ((exec(movem_action) = '1' OR movem_actiond = '1') AND movem_run = '1') AND
+	                                    NOT (micro_state = movep1 OR micro_state = movep2 OR micro_state = movep3 OR
+	                                         micro_state = movep4 OR micro_state = movep5)
+	                           ELSE '0';
 	
 	PROCESS (clk, nReset)
 	BEGIN
@@ -3560,14 +3584,27 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									   (pmmu_fault='1' AND pmmu_fault_stat(15)='1' AND
 									    ((berr_exception_active='0' AND pmmu_fault_dispatched='0') OR pmmu_fault_was_cleared='1')) THEN
 										trap_mmu_berr <= '1';
-											-- Diagnostic/spec candidate: use the long recoverable bus-fault
-											-- frame for PMMU faults instead of guessing instruction-boundary
-											-- timing from R/W polarity.
-											berr_long_frame <= '1';
+											-- WinUAE parity (Exception_mmu030): Format $A (short,
+											-- single-write-replayable) exactly when this write is
+											-- LASTWRITE-eligible; Format $B (long) otherwise - covers
+											-- every read (Table 8-6), CAS's locked write, a
+											-- non-final MOVEM register, and instruction fetches.
+											berr_long_frame <= NOT pmmu_fault_lastwrite_ok;
 									ELSE
 										trap_berr <= '1';  -- Use vector 2 for normal bus error
-											-- Same diagnostic candidate for external bus faults.
-											berr_long_frame <= '1';
+											-- A PMMU-originated fault lands here too whenever it isn't
+											-- classified as the "B" (bus-error) subtype - e.g. a WP or
+											-- supervisor-violation ATC hit. It still carries genuine
+											-- LASTWRITE provenance (pmmu_fault_lastwrite_ok), so give it
+											-- the same WinUAE-parity Format $A/B treatment. Only a TRUE
+											-- external (non-PMMU) bus error, where no LASTWRITE
+											-- provenance exists at all, keeps the unconditional long
+											-- frame.
+											IF pmmu_fault = '1' OR berr_pmmu_fault_valid = '1' THEN
+												berr_long_frame <= NOT pmmu_fault_lastwrite_ok;
+											ELSE
+												berr_long_frame <= '1';
+											END IF;
 									END IF;
 								-- BUG #400 FIX: Mark pmmu_fault as dispatched to prevent false
 								-- double bus fault from stale fault_reg before new translation clears it

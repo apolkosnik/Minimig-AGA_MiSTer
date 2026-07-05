@@ -1078,7 +1078,7 @@ begin
         -- Test 6: MMUSR at $1F20 - valid page PTEST, no fault bits
         -- mem index: $1F20/2 = $0F90 = 3984
         val32 := mem(3984) & mem(3985);
-        pass := (val32(15) = '0' and val32(12) = '0' and val32(10) = '0');
+        pass := (mem(3984)(15) = '0' and mem(3984)(12) = '0' and mem(3984)(10) = '0');
         if not pass then
             report "  MMUSR@$1F20: expected no B/W/I bits, got 0x" & slv_to_hex(val32);
         end if;

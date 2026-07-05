@@ -1614,6 +1614,30 @@ localparam [7:0] MS_TRAP3 = 8'd56;
 `CPUWRAP_DEBUG_KEEP reg  [7:0] trpd_w3_micro;
 `CPUWRAP_DEBUG_KEEP reg        trpd_w3_lw;
 
+// One-cycle shadow of the address-datapath/fault-classification signals that
+// keep advancing for one extra tick after the internal halt DECISION is made
+// but before cpu_halted_p is externally visible (cpu_halted itself is a
+// registered signal - the halt-triggering condition is evaluated one cycle
+// before cpu_halted_p reads 1). Continuously updated every cycle so that,
+// when cpu_halted_p first reads 1, THESE shadow values (captured on the
+// previous cycle - i.e. the actual decision cycle) are what gets latched,
+// instead of the live signals which may already reflect one extra tick of
+// free-running prefetch/address-generation drift.
+`CPUWRAP_DEBUG_KEEP reg [31:0] halt_shadow_pc;
+`CPUWRAP_DEBUG_KEEP reg [31:0] halt_shadow_log_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] halt_shadow_phys_addr;
+`CPUWRAP_DEBUG_KEEP reg        halt_shadow_fault_rw;
+`CPUWRAP_DEBUG_KEEP reg        halt_shadow_fault_is_insn;
+`CPUWRAP_DEBUG_KEEP reg  [2:0] halt_shadow_fault_fc;
+always @(posedge clk) begin
+	halt_shadow_pc            <= kernel_TG68_PC_p;
+	halt_shadow_log_addr      <= pmmu_addr_log_p;
+	halt_shadow_phys_addr     <= pmmu_addr_phys_p;
+	halt_shadow_fault_rw      <= kernel_pmmu_fault_rw_p;
+	halt_shadow_fault_is_insn <= kernel_pmmu_fault_is_insn_p;
+	halt_shadow_fault_fc      <= kernel_pmmu_fault_fc_p;
+end
+
 `CPUWRAP_DEBUG_KEEP reg        haltd_seen;
 `CPUWRAP_DEBUG_KEEP reg        haltd_prev_cpu_halted;
 `CPUWRAP_DEBUG_KEEP reg  [3:0] haltd_seq_count;
@@ -2522,7 +2546,7 @@ always @(posedge clk) begin
 		if (cpu_halted_p && !haltd_prev_cpu_halted && !haltd_seen) begin
 			haltd_seen                   <= 1;
 			haltd_seq_count              <= haltd_seq_count + 1'b1;
-			haltd_pc                     <= kernel_TG68_PC_p;
+			haltd_pc                     <= halt_shadow_pc;
 			haltd_exe_pc                 <= kernel_exe_PC_p;
 			haltd_opcode                 <= kernel_opcode_p;
 			haltd_state                  <= kernel_state_p;
@@ -2532,8 +2556,8 @@ always @(posedge clk) begin
 			haltd_a7                     <= kernel_regfile_a7_p;
 			haltd_trap_vector            <= kernel_trap_vector_p;
 			haltd_memaddr                <= kernel_memaddr_reg_p;
-			haltd_log_addr               <= pmmu_addr_log_p;
-			haltd_phys_addr              <= pmmu_addr_phys_p;
+			haltd_log_addr               <= halt_shadow_log_addr;
+			haltd_phys_addr              <= halt_shadow_phys_addr;
 			haltd_cpu_addr               <= cpu_addr_p;
 			haltd_mmusr                  <= stp_fault_status_w;
 			haltd_saved_addr             <= stp_saved_addr_w;
@@ -2554,9 +2578,9 @@ always @(posedge clk) begin
 			haltd_berr_exception_active  <= kernel_berr_exception_active_p;
 			haltd_pmmu_fault_dispatched  <= kernel_pmmu_fault_dispatched_p;
 			haltd_pmmu_fault_was_cleared <= kernel_pmmu_fault_was_cleared_p;
-			haltd_pmmu_fault_rw          <= kernel_pmmu_fault_rw_p;
-			haltd_pmmu_fault_is_insn     <= kernel_pmmu_fault_is_insn_p;
-			haltd_pmmu_fault_fc          <= kernel_pmmu_fault_fc_p;
+			haltd_pmmu_fault_rw          <= halt_shadow_fault_rw;
+			haltd_pmmu_fault_is_insn     <= halt_shadow_fault_is_insn;
+			haltd_pmmu_fault_fc          <= halt_shadow_fault_fc;
 			haltd_clkena_lw              <= kernel_clkena_lw_p;
 			haltd_walker_berr            <= pmmu_walker_berr_p;
 			haltd_walker_timeout         <= walker_timeout_error;
