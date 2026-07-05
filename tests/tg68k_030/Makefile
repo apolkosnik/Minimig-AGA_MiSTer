@@ -319,7 +319,7 @@ test-pmove-pc-all-regs: compile
 test-pmove-all-modes: compile
 	@echo "Running PMOVE all regs + all legal EA modes test..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_all_modes.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 3000us; quit" tb_pmove_all_modes
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 3000us; quit -f" tb_pmove_all_modes
 
 test-pmove-crp-a7-postinc: compile
 	@echo "Running PMOVE.Q CRP,(A7)+ stack postincrement regression..."
@@ -473,7 +473,7 @@ test-ptest-all-modes: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_ptest_all_modes.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_ptest_all_modes
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 500us; quit -f" tb_ptest_all_modes
 
 test-pload-all-modes: setup
 	@echo "Running PLOAD all addressing modes tests..."
@@ -482,7 +482,7 @@ test-pload-all-modes: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pload_all_modes.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 800us; quit" tb_pload_all_modes
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 800us; quit -f" tb_pload_all_modes
 
 test-pflush-all-modes: setup
 	@echo "Running PFLUSH all addressing modes tests..."
@@ -491,7 +491,7 @@ test-pflush-all-modes: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pflush_all_modes.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit" tb_pflush_all_modes
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 500us; quit -f" tb_pflush_all_modes
 
 test-pflush-illegal-pc-relative: setup
 	@echo "Running illegal PC-relative PFLUSH regression..."

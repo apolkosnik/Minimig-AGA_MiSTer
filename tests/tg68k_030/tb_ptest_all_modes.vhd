@@ -1292,6 +1292,10 @@ begin
         write(l, string'("=============================================="));
         writeline(output, l);
 
+        if fail_count /= 0 then
+            assert false report "PTEST all modes test failed" severity failure;
+        end if;
+
         wait;
     end process;
 

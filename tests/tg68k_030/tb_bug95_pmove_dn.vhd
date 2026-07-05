@@ -1,13 +1,24 @@
--- BUG #95: PMOVE Dn Register Test
--- Tests PMOVE with data register mode (both directions)
+-- BUG #95 (SUPERSEDED): PMOVE Dn Register Test
+-- Originally verified PMOVE D0,TT0 / PMOVE TT0,D1 executed as a register
+-- transfer. Cross-checked against WinUAE's mmu_op30_invea() (cpummu30.cpp),
+-- which rejects Dn/An/(An)+/-(An)/immediate/PC-relative EA modes for EVERY
+-- MMU register uniformly - the EA mode alone determines legality, with no
+-- register-specific carve-out. TG68KdotC_Kernel.vhd's PMOVE decode was
+-- updated to match: Dn is now illegal for ALL MMU registers (previously it
+-- was permitted for TC/TT0/TT1/MMUSR and only rejected for CRP/SRP).
+-- This test now verifies the CORRECT (WinUAE-matching) behavior: PMOVE
+-- D0,TT0 must trap as an illegal F-line instruction (vector 11), not
+-- execute a register transfer.
 --
 -- Test sequence:
 --   MOVE.L #$12345678,D0   ; Load test value
 --   MOVEQ #$7F,D1          ; Load different value in D1
---   PMOVE D0,TT0           ; Write D0 to TT0 (register->MMU)
---   PMOVE TT0,D1           ; Read TT0 to D1 (MMU->register)
+--   PMOVE D0,TT0           ; Dn EA mode - MUST trap illegal (vector 11)
+--   PMOVE TT0,D1           ; Not reached if the trap above fires correctly
 --
--- Expected: D1 should contain $12345678 after execution
+-- Expected: debug_trap_1111 pulses at the PMOVE D0,TT0 instruction; the
+-- CPU must NOT reach the $110 NOP / $112 success loop, and TT0 must never
+-- be written.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -44,6 +55,7 @@ architecture behavior of tb_bug95_pmove_dn is
   signal pmmu_walker_addr : std_logic_vector(31 downto 0);
   signal pmmu_walker_ack : std_logic := '0';
   signal pmmu_walker_data : std_logic_vector(31 downto 0) := (others => '0');
+  signal pmmu_walker_berr : std_logic := '0';
 
   -- PMMU register interface
   signal pmmu_reg_we : std_logic;
@@ -56,6 +68,7 @@ architecture behavior of tb_bug95_pmove_dn is
   signal debug_pmove_dn_mode : std_logic;
   signal debug_pmove_dn_regnum : std_logic_vector(2 downto 0);
   signal debug_setopcode : std_logic;
+  signal debug_trap_1111 : std_logic;
 
   type mem_array is array (0 to 4095) of std_logic_vector(15 downto 0);
 
@@ -113,6 +126,8 @@ architecture behavior of tb_bug95_pmove_dn is
   signal pmove_d0_to_tt0_seen : boolean := false;
   signal pmove_tt0_to_d1_seen : boolean := false;
   signal tt0_value_written : std_logic_vector(31 downto 0) := (others => '0');
+  signal illegal_trap_seen : boolean := false;
+  signal success_loop_reached : boolean := false;
 
 begin
 
@@ -152,8 +167,7 @@ begin
       regin_out => regin_out,
       CACR_out => open,
       VBR_out => open,
-      cache_cinv_req => open,
-      cache_cpush_req => open,
+      cache_inv_req => open,
       cache_op_scope => open,
       cache_op_cache => open,
       cacr_ie => open,
@@ -176,6 +190,7 @@ begin
       pmmu_walker_addr => pmmu_walker_addr,
       pmmu_walker_ack => pmmu_walker_ack,
       pmmu_walker_data => pmmu_walker_data,
+      pmmu_walker_berr => pmmu_walker_berr,
       debug_SVmode => debug_SVmode,
       debug_preSVmode => open,
       debug_FlagsSR_S => open,
@@ -184,7 +199,8 @@ begin
       debug_exec_directSR => open,
       debug_exec_to_SR => open,
       debug_pmove_dn_mode => debug_pmove_dn_mode,
-      debug_pmove_dn_regnum => debug_pmove_dn_regnum
+      debug_pmove_dn_regnum => debug_pmove_dn_regnum,
+      debug_trap_1111 => debug_trap_1111
     );
 
   clk_process: process
@@ -227,6 +243,14 @@ begin
         report "DEBUG: PMOVE Dn mode active, regnum=" & integer'image(to_integer(unsigned(debug_pmove_dn_regnum)));
       end if;
 
+      -- Monitor the illegal-F-line trap: this is the signal that MUST fire
+      -- for PMOVE D0,TT0 now that Dn is uniformly illegal for all MMU
+      -- registers (matching WinUAE's mmu_op30_invea()).
+      if debug_trap_1111 = '1' and not illegal_trap_seen then
+        illegal_trap_seen <= true;
+        report "DEBUG: debug_trap_1111 asserted - illegal F-line trap fired";
+      end if;
+
       -- Monitor PMMU register interface activity
       if pmmu_reg_we = '1' then
         report "DEBUG: pmmu_reg_we=1, sel=" & integer'image(to_integer(unsigned(pmmu_reg_sel))) &
@@ -258,15 +282,16 @@ begin
                    integer'image(to_integer(unsigned(regin_out))) & "]";
           when 16#112# =>
             report "========================================";
-            report "SUCCESS: Reached success loop at $112";
-            report "  D0 captured = $" & integer'image(to_integer(unsigned(d0_value)));
-            report "  D0 current  = $" & integer'image(to_integer(unsigned(regin_out)));
+            report "UNEXPECTED: reached the post-PMOVE success loop at $112";
+            report "  This means PMOVE D0,TT0 executed instead of trapping -";
+            report "  Dn must be illegal for ALL MMU registers (WinUAE parity).";
             report "========================================";
-            test_passed <= true;
+            success_loop_reached <= true;
           when 16#200# =>
             report "========================================";
-            report "EXCEPTION: CPU took exception at $200";
+            report "EXPECTED: CPU took the illegal-instruction exception at $200";
             report "========================================";
+            test_passed <= true;
           when others =>
             null;
         end case;
@@ -330,13 +355,14 @@ begin
     wait for 100 ns;
 
     report "========================================";
-    report "BUG #95 PMOVE Dn TEST";
+    report "BUG #95 (SUPERSEDED) PMOVE Dn TEST - WinUAE parity";
     report "Test sequence:";
     report "  MOVE.L #$12345678,D0";
     report "  MOVEQ #$7F,D1";
-    report "  PMOVE D0,TT0  (register->MMU)";
-    report "  PMOVE TT0,D1  (MMU->register)";
-    report "Expected: TT0=$12345678 after PMOVE D0,TT0";
+    report "  PMOVE D0,TT0  (Dn EA mode - must trap illegal, vector 11)";
+    report "  PMOVE TT0,D1  (not reached if the trap fires correctly)";
+    report "Expected: debug_trap_1111 fires, CPU reaches $200 handler,";
+    report "TT0 is never written, success loop at $112 is NOT reached.";
     report "========================================";
 
     nReset <= '1';
@@ -353,22 +379,25 @@ begin
 
     report "========================================";
     report "TEST RESULTS:";
-    report "  PMOVE D0,TT0 executed: " & boolean'image(pmove_d0_to_tt0_seen);
-    report "  PMOVE TT0,D1 executed: " & boolean'image(pmove_tt0_to_d1_seen);
-    report "  TT0 value written: $" &
-           integer'image(to_integer(unsigned(tt0_value_written(31 downto 16)))) & "_" &
-           integer'image(to_integer(unsigned(tt0_value_written(15 downto 0))));
+    report "  debug_trap_1111 fired: " & boolean'image(illegal_trap_seen);
+    report "  Reached $200 (exception handler): " & boolean'image(test_passed);
+    report "  Reached $112 (success loop, should NOT happen): " & boolean'image(success_loop_reached);
+    report "  TT0 written (should NOT happen): " & boolean'image(pmove_d0_to_tt0_seen);
 
-    if pmove_d0_to_tt0_seen and pmove_tt0_to_d1_seen then
-      if tt0_value_written = x"12345678" then
-        report "TEST PASSED: PMOVE Dn operations work correctly!";
-      else
-        report "TEST FAILED: TT0 has wrong value";
-        report "  Expected: $12345678";
-        report "  Got: $" & integer'image(to_integer(unsigned(tt0_value_written)));
-      end if;
+    if illegal_trap_seen and test_passed and not success_loop_reached and not pmove_d0_to_tt0_seen then
+      report "TEST PASSED: PMOVE D0,TT0 correctly traps as illegal (WinUAE parity)!";
     else
-      report "TEST FAILED: Not all PMOVE operations completed";
+      if not illegal_trap_seen then
+        report "  debug_trap_1111 never asserted";
+      end if;
+      if success_loop_reached then
+        report "  CPU reached the post-PMOVE success loop instead of trapping";
+      end if;
+      if pmove_d0_to_tt0_seen then
+        report "  TT0 was written - the illegal instruction executed anyway";
+      end if;
+      report "========================================";
+      assert false report "TEST FAILED: PMOVE D0,TT0 did not trap as expected" severity failure;
     end if;
     report "========================================";
 

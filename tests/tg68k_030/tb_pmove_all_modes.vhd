@@ -1438,12 +1438,15 @@ begin
             record_test(desc_str, dst_addr, words, exp_words);
         end procedure;
 
-        -- Emit PTEST instruction: PTESTR (A2), immediate FC=5, level=7
-        -- Extension word: 100 111 1 0 000 10 101 = $9E15
+        -- Emit level-0 PTEST instruction: PTESTR (A2), immediate FC=5.
+        -- WinUAE reports transparent TTR hits through the level-0 ATC/TTR
+        -- search path; nonzero levels use the table-walk path and report the
+        -- no-table setup here as invalid.
+        -- Extension word: 100 000 1 0 000 10 101 = $8215
         procedure emit_ptest_a2 is
         begin
             emit_word(pc, x"F012");  -- F-line + EA=(A2) [mode=010, reg=010]
-            emit_word(pc, x"9E15");  -- PTESTR, level=7, A=0, imm FC=5 (super data)
+            emit_word(pc, x"8215");  -- PTESTR, level=0, A=0, imm FC=5 (super data)
         end procedure;
 
         -- Set up PTEST to populate MMUSR with non-zero value ($0040 = T bit)

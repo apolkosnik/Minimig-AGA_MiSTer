@@ -7831,12 +7831,13 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
                         -- BUG #377 FIX: Use pmmu_opcode (latched F-line opcode) instead of opcode!
                         -- By pmove_decode time, opcode may have been overwritten by prefetch.
                         -- fline_opcode_latch preserves the original F-line opcode EA mode bits.
-		                        -- PDF candidate: PMOVE allows Dn for 32/16-bit MMU registers.
-		                        -- An, auto inc/dec, PC-relative, immediate, and CRP/SRP via Dn
-		                        -- are invalid F-line instructions.
-		                        ELSIF (pmmu_opcode(5 downto 3)="001") OR
-		                              (pmmu_opcode(5 downto 3)="000" AND
-		                               (pmmu_brief(14 downto 10)="10010" OR pmmu_brief(14 downto 10)="10011")) OR
+		                        -- WinUAE mmu_op30_invea(): Dn, An, (An)+, -(An), immediate, and
+		                        -- PC-relative are ALL invalid F-line PMOVE forms, uniformly for
+		                        -- every MMU register (TC/TT0/TT1/MMUSR included, not just CRP/SRP).
+		                        -- The EA mode check alone determines legality; the register
+		                        -- selector (pmmu_brief) is irrelevant to this check.
+		                        ELSIF (pmmu_opcode(5 downto 3)="000") OR
+		                              (pmmu_opcode(5 downto 3)="001") OR
 		                              (pmmu_opcode(5 downto 3)="011") OR
 		                              (pmmu_opcode(5 downto 3)="100") OR
 		                              (pmmu_opcode(5 downto 3)="111" and pmmu_opcode(2)='1') OR
@@ -7846,7 +7847,7 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 		                             trapmake <= '1';
 		                        ELSE
 	                             -- Valid EA modes:
-	                             -- Dn for 32/16-bit regs, (An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
+	                             -- (An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
 	                             set(ea_build) <= '1';
                              IF pmmu_brief(14 downto 10) = "11000" THEN
                                  datatype <= "01"; -- Word for MMUSR

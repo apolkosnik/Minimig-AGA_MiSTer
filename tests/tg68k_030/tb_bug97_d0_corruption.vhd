@@ -1,12 +1,24 @@
--- BUG #97: PMOVE Dn WRITE corrupts source register D0
--- Verifies that D0 is NOT corrupted after PMOVE D0,TT0
+-- BUG #97 (SUPERSEDED): PMOVE Dn WRITE corrupts source register D0
+-- Originally verified D0 kept its value across a PMOVE D0,TT0 that executed
+-- normally as a register transfer. Cross-checked against WinUAE's
+-- mmu_op30_invea() (cpummu30.cpp), which rejects Dn for EVERY MMU register
+-- uniformly - TG68KdotC_Kernel.vhd's PMOVE decode now matches: Dn is illegal
+-- for all MMU registers (see tb_bug95_pmove_dn.vhd). PMOVE D0,TT0 no longer
+-- executes at all; it traps as an illegal F-line instruction (vector 11).
+--
+-- This test now verifies the narrower, still-meaningful claim: an illegal
+-- instruction must have NO side effects before it traps. D0 must be
+-- unchanged both at the PMOVE and after the CPU reaches the exception
+-- handler - i.e. the illegal-instruction path itself must not corrupt the
+-- register file on its way to trapping.
 --
 -- Test sequence:
 --   MOVE.L #$12345678,D0   ; Load test value
---   PMOVE D0,TT0           ; Write D0 to TT0 (should NOT corrupt D0!)
---   NOP                    ; D0 should still be $12345678
+--   PMOVE D0,TT0           ; Dn EA mode - must trap illegal (vector 11)
+--                          ; D0 must still be $12345678 at the handler
 --
--- Expected: D0 = $12345678 after PMOVE (not corrupted)
+-- Expected: debug_trap_1111 pulses, CPU reaches the $200 handler, and D0
+-- is unchanged at that point.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -42,6 +54,8 @@ architecture behavior of tb_bug97_d0_corruption is
   signal pmmu_walker_addr : std_logic_vector(31 downto 0);
   signal pmmu_walker_ack : std_logic := '0';
   signal pmmu_walker_data : std_logic_vector(31 downto 0) := (others => '0');
+  signal pmmu_walker_berr : std_logic := '0';
+  signal debug_trap_1111 : std_logic;
 
   -- PMMU register interface
   signal pmmu_reg_we : std_logic;
@@ -60,17 +74,37 @@ architecture behavior of tb_bug97_d0_corruption is
     result(2) := x"0000";
     result(3) := x"0100";  -- PC = $00000100
 
+    -- Exception vectors point to handler at $200 (illegal F-line = vector 11
+    -- lands here too, same as every other vector)
+    for i in 4 to 511 loop
+      if (i mod 2) = 0 then
+        result(i) := x"0000";
+      else
+        result(i) := x"0200";
+      end if;
+    end loop;
+
+    -- $200: MOVE.L D0,$0900.L - unambiguous D0 marker store (regin_out is a
+    -- multiplexed register-file output that reflects whatever register the
+    -- microcode currently addresses, not always D0 - it cannot be trusted to
+    -- read D0 during exception-handling bus activity, so store D0 to memory
+    -- explicitly instead and observe the write directly).
+    result(256) := x"23C0";  -- $200: MOVE.L D0,$0900.L
+    result(257) := x"0000";
+    result(258) := x"0900";
+    result(259) := x"60FE";  -- $206: BRA.S -2 (loop)
+
     -- Test program at $100
     result(128) := x"203C";  -- $100: MOVE.L #$12345678,D0
     result(129) := x"1234";  -- $102: immediate data high
     result(130) := x"5678";  -- $104: immediate data low
 
-    result(131) := x"F000";  -- $106: PMOVE D0,TT0 (should NOT corrupt D0!)
+    result(131) := x"F000";  -- $106: PMOVE D0,TT0 - must trap illegal now
     result(132) := x"0800";  -- $108: Extension word for PMOVE D0,TT0
 
-    result(133) := x"4E71";  -- $10A: NOP
+    result(133) := x"4E71";  -- $10A: NOP (NOT reached if the trap fires)
     result(134) := x"4E71";  -- $10C: NOP
-    result(135) := x"60FE";  -- $10E: BRA.S -2 (success loop)
+    result(135) := x"60FE";  -- $10E: BRA.S -2 (should NOT be reached)
 
     return result;
   end function;
@@ -79,8 +113,11 @@ architecture behavior of tb_bug97_d0_corruption is
 
   constant CLK_PERIOD : time := 20 ns;
   signal test_done : boolean := false;
-  signal d0_after_move : std_logic_vector(31 downto 0) := (others => '0');
-  signal d0_after_pmove : std_logic_vector(31 downto 0) := (others => '0');
+  signal d0_at_handler : std_logic_vector(31 downto 0) := (others => '0');
+  signal illegal_trap_seen : boolean := false;
+  signal handler_reached : boolean := false;
+  signal success_loop_reached : boolean := false;
+  signal d0_marker_seen : boolean := false;
 
   -- PMMU register file simulation
   type pmmu_regs_t is array(0 to 31) of std_logic_vector(31 downto 0);
@@ -124,8 +161,7 @@ begin
       regin_out => regin_out,
       CACR_out => open,
       VBR_out => open,
-      cache_cinv_req => open,
-      cache_cpush_req => open,
+      cache_inv_req => open,
       cache_op_scope => open,
       cache_op_cache => open,
       cacr_ie => open,
@@ -148,6 +184,7 @@ begin
       pmmu_walker_addr => pmmu_walker_addr,
       pmmu_walker_ack => pmmu_walker_ack,
       pmmu_walker_data => pmmu_walker_data,
+      pmmu_walker_berr => pmmu_walker_berr,
       debug_SVmode => open,
       debug_preSVmode => open,
       debug_FlagsSR_S => open,
@@ -156,7 +193,8 @@ begin
       debug_exec_directSR => open,
       debug_exec_to_SR => open,
       debug_pmove_dn_mode => open,
-      debug_pmove_dn_regnum => open
+      debug_pmove_dn_regnum => open,
+      debug_trap_1111 => debug_trap_1111
     );
 
   clk_process: process
@@ -185,37 +223,54 @@ begin
     end if;
   end process;
 
+  -- Watch for the handler's MOVE.L D0,$0900.L write - the only reliable way
+  -- to read D0's true value, since regin_out is a multiplexed register-file
+  -- output that reflects whatever register the microcode currently
+  -- addresses, not always D0 (it cannot be trusted during exception-entry
+  -- bus activity, which reads/writes other internal registers too).
+  mem_write_monitor: process(clk)
+    variable addr_idx : integer;
+  begin
+    if rising_edge(clk) then
+      if busstate = "11" and nWr = '0' then
+        addr_idx := to_integer(unsigned(addr_out(13 downto 1)));
+        if addr_idx = 16#0900#/2 and not d0_marker_seen then
+          d0_marker_seen <= true;
+          d0_at_handler(31 downto 16) <= data_write;
+          report "  -> D0 marker store: high word = $" & integer'image(to_integer(unsigned(data_write)));
+        elsif addr_idx = 16#0900#/2 + 1 and d0_marker_seen then
+          d0_at_handler(15 downto 0) <= data_write;
+          report "  -> D0 marker store: low word = $" & integer'image(to_integer(unsigned(data_write)));
+        end if;
+      end if;
+    end if;
+  end process;
+
   -- Track D0 value via CPU internal register file access
   -- We monitor regin_out when D0 is being accessed
   track: process(clk)
   begin
     if rising_edge(clk) then
+      if debug_trap_1111 = '1' and not illegal_trap_seen then
+        illegal_trap_seen <= true;
+        report "DEBUG: debug_trap_1111 asserted - illegal F-line trap fired";
+      end if;
+
       if busstate = "00" then
         case to_integer(unsigned(addr_out(15 downto 0))) is
           when 16#100# =>
             report "  -> MOVE.L #$12345678,D0";
           when 16#106# =>
-            -- Capture D0 after MOVE.L completes
-            d0_after_move <= regin_out;
-            report "  -> PMOVE D0,TT0 - D0 before=" & integer'image(to_integer(unsigned(regin_out)));
-          when 16#10A# =>
-            -- Capture D0 after PMOVE completes
-            d0_after_pmove <= regin_out;
-            report "  -> NOP - D0 after PMOVE=" & integer'image(to_integer(unsigned(regin_out)));
-          when 16#10E# =>
-            report "========================================";
-            report "D0 TEST RESULTS:";
-            report "  D0 after MOVE.L  = $" & integer'image(to_integer(unsigned(d0_after_move)));
-            report "  D0 after PMOVE   = $" & integer'image(to_integer(unsigned(d0_after_pmove)));
-            report "  Expected         = $305419896 ($12345678)";
-
-            if d0_after_pmove = x"12345678" then
-              report "TEST PASSED: D0 NOT corrupted!";
-            else
-              report "TEST FAILED: D0 CORRUPTED!";
-              report "  Corruption = $" & integer'image(to_integer(unsigned(d0_after_pmove)));
+            report "  -> PMOVE D0,TT0 (must trap illegal)";
+          when 16#10A# | 16#10E# =>
+            report "UNEXPECTED: reached $" & integer'image(to_integer(unsigned(addr_out(15 downto 0)))) &
+                   " - PMOVE D0,TT0 executed instead of trapping";
+            success_loop_reached <= true;
+          when 16#200# =>
+            if not handler_reached then
+              handler_reached <= true;
+              report "  -> Reached $200 handler, storing D0 to $0900 for verification";
             end if;
-            report "========================================";
           when others =>
             null;
         end case;
@@ -258,16 +313,50 @@ begin
     wait for 100 ns;
 
     report "========================================";
-    report "BUG #97 D0 CORRUPTION TEST";
-    report "Test: Verify D0 is NOT corrupted by PMOVE D0,TT0";
+    report "BUG #97 (SUPERSEDED) D0 CORRUPTION TEST - WinUAE parity";
+    report "Test: PMOVE D0,TT0 must trap illegal AND leave D0 unchanged";
     report "========================================";
 
     nReset <= '1';
 
     -- Wait for test completion
-    for i in 1 to 200 loop
+    for i in 1 to 300 loop
       wait for 100 ns;
+      if d0_marker_seen then
+        exit;
+      end if;
     end loop;
+
+    wait for 200 ns;
+
+    report "========================================";
+    report "FINAL RESULTS:";
+    report "  debug_trap_1111 fired: " & boolean'image(illegal_trap_seen);
+    report "  Reached $200 handler: " & boolean'image(handler_reached);
+    report "  D0 marker stored: " & boolean'image(d0_marker_seen);
+    report "  Reached post-PMOVE fallthrough (should NOT happen): " & boolean'image(success_loop_reached);
+    report "  D0 at handler = $" & integer'image(to_integer(unsigned(d0_at_handler)));
+
+    if illegal_trap_seen and handler_reached and d0_marker_seen and not success_loop_reached
+       and d0_at_handler = x"12345678" then
+      report "TEST PASSED: PMOVE D0,TT0 traps illegal and D0 is not corrupted!";
+    else
+      if not illegal_trap_seen then
+        report "  debug_trap_1111 never asserted";
+      end if;
+      if not d0_marker_seen then
+        report "  D0 marker was never stored - handler did not complete";
+      end if;
+      if success_loop_reached then
+        report "  CPU executed past the illegal PMOVE instead of trapping";
+      end if;
+      if d0_marker_seen and d0_at_handler /= x"12345678" then
+        report "  D0 corrupted: $" & integer'image(to_integer(unsigned(d0_at_handler)));
+      end if;
+      report "========================================";
+      assert false report "TEST FAILED: PMOVE D0,TT0 did not trap cleanly" severity failure;
+    end if;
+    report "========================================";
 
     test_done <= true;
     wait;
