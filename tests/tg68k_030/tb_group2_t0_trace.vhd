@@ -293,7 +293,7 @@ begin
         check_format("T1: CHK.W trace frame format=$2", "0010");
         check_vector("T1: CHK.W trace vector=$024", x"024");
         check_pc("T1: CHK.W trace PC=$2000", x"00002000");
-        check_ia("T1: CHK.W trace IA=$2000", x"00002000");
+        check_ia("T1: CHK.W trace IA=$100E (traced instr, UM Table 8-6)", x"0000100E");
         read_frame(x"00003FF4");
         check_format("T1: CHK.W frame format=$2", "0010");
         check_vector("T1: CHK.W vector=$018", x"018");
@@ -324,7 +324,7 @@ begin
         check_format("T2: CHK.L trace frame format=$2", "0010");
         check_vector("T2: CHK.L trace vector=$024", x"024");
         check_pc("T2: CHK.L trace PC=$2000", x"00002000");
-        check_ia("T2: CHK.L trace IA=$2000", x"00002000");
+        check_ia("T2: CHK.L trace IA=$1010 (traced instr, UM Table 8-6)", x"00001010");
         read_frame(x"00003FF4");
         check_format("T2: CHK.L frame format=$2", "0010");
         check_vector("T2: CHK.L vector=$018", x"018");
@@ -358,7 +358,7 @@ begin
         check_format("T3: CHK2.B trace frame format=$2", "0010");
         check_vector("T3: CHK2.B trace vector=$024", x"024");
         check_pc("T3: CHK2.B trace PC=$2000", x"00002000");
-        check_ia("T3: CHK2.B trace IA=$2000", x"00002000");
+        check_ia("T3: CHK2.B trace IA=$1012 (traced instr, UM Table 8-6)", x"00001012");
         read_frame(x"00003FF4");
         check_format("T3: CHK2.B frame format=$2", "0010");
         check_vector("T3: CHK2.B vector=$018", x"018");
@@ -384,7 +384,7 @@ begin
         check_format("T4: TRAP#5 trace frame format=$2", "0010");
         check_vector("T4: TRAP#5 trace vector=$024", x"024");
         check_pc("T4: TRAP#5 trace PC=$2200", x"00002200");
-        check_ia("T4: TRAP#5 trace IA=$2200", x"00002200");
+        check_ia("T4: TRAP#5 trace IA=$1006 (traced instr, UM Table 8-6)", x"00001006");
         read_frame0(x"00003FF8");
         check_format("T4: TRAP#5 frame format=$0", "0000");
         check_vector("T4: TRAP#5 vector=$094", x"094");
@@ -409,7 +409,7 @@ begin
         check_format("T5: TRAPV trace frame format=$2", "0010");
         check_vector("T5: TRAPV trace vector=$024", x"024");
         check_pc("T5: TRAPV trace PC=$2300", x"00002300");
-        check_ia("T5: TRAPV trace IA=$2300", x"00002300");
+        check_ia("T5: TRAPV trace IA=$1006 (traced instr, UM Table 8-6)", x"00001006");
         read_frame(x"00003FF4");
         check_format("T5: TRAPV frame format=$2", "0010");
         check_vector("T5: TRAPV vector=$01C", x"01C");
@@ -439,7 +439,7 @@ begin
         check_format("T6: DIV0 trace frame format=$2", "0010");
         check_vector("T6: DIV0 trace vector=$024", x"024");
         check_pc("T6: DIV0 trace PC=$2400", x"00002400");
-        check_ia("T6: DIV0 trace IA=$2400", x"00002400");
+        check_ia("T6: DIV0 trace IA=$100C (traced instr, UM Table 8-6)", x"0000100C");
         read_frame(x"00003FF4");
         check_format("T6: DIV0 frame format=$2", "0010");
         check_vector("T6: DIV0 vector=$014", x"014");
@@ -467,7 +467,7 @@ begin
         check_format("T7: TRAPcc trace frame format=$2", "0010");
         check_vector("T7: TRAPcc trace vector=$024", x"024");
         check_pc("T7: TRAPcc trace PC=$2300", x"00002300");
-        check_ia("T7: TRAPcc trace IA=$2300", x"00002300");
+        check_ia("T7: TRAPcc trace IA=$1008 (traced instr, UM Table 8-6)", x"00001008");
         read_frame(x"00003FF4");
         check_format("T7: TRAPcc frame format=$2", "0010");
         check_vector("T7: TRAPcc vector=$01C", x"01C");

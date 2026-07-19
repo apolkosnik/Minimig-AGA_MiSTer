@@ -2,15 +2,21 @@
 -- Tests CHK instruction + stacked trace frame behavior (BUG #439 fix).
 --
 -- When CHK fires with T1=1 (trace mode active), the MC68030 pushes two
--- consecutive Format $2 stack frames:
+-- consecutive Format $2 stack frames (MC68030 UM Table 8-6, p.8-33: stacked
+-- PC = next instruction to execute, INSTRUCTION ADDRESS = address of the
+-- instruction that caused the exception):
 --   1. CHK frame  (vector $18): PC = next instr after CHK,
 --                               instr_addr = CHK instruction address
---   2. Trace frame (vector $24): PC = CHK handler entry address,
---                                instr_addr = CHK handler entry address
+--   2. Trace frame (vector $24): PC = CHK handler entry address (next to
+--                                execute after the trace handler RTEs),
+--                                instr_addr = CHK instruction address (the
+--                                traced instruction caused the trace)
 --
 -- BUG #439 had two sub-bugs, both fixed in TG68KdotC_Kernel.vhd:
---   BUG A: exe_pc at trace_stk_grp2 used stale TG68_PC (pre-handler address).
---          Fix: use data_read (the actual handler address from vector table read).
+--   BUG A: the trace frame PC used stale TG68_PC (pre-handler address).
+--          Fixed via the vector-table read (data_read); the PC field is now
+--          sourced from trap_pc_latched, and exe_pc keeps the traced
+--          instruction address for the IA field per UM Table 8-6.
 --   BUG B: set(trap_chk)='1' persists from stale opcode throughout the stacked
 --          trace frame and overrides trap_trace='1' -> $24 in trap_vector chain.
 --          Fix: move trap_trace -> $24 AFTER exec/set(trap_chk) -> $18 so trace
@@ -31,7 +37,7 @@
 --     $3FE8: SR ($A700)
 --     $3FEA/$3FEC: PC = CHK handler entry address (BUG A: was stale pre-handler PC)
 --     $3FEE: Format/Vector = $2024 (BUG B: was $2018 due to stale opcode)
---     $3FF0/$3FF2: Instruction Address = CHK handler entry address (BUG A fix)
+--     $3FF0/$3FF2: Instruction Address = CHK instruction address (UM Table 8-6)
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -334,7 +340,7 @@ begin
         -- ================================================================
         report "" severity note;
         report "TEST 1: CHK.W D1,D0 with T1=1 (stacked trace)" severity note;
-        report "  BUG #439 check: trace frame must have vector=$024 and IA=CHK handler addr" severity note;
+        report "  BUG #439 check: trace frame must have vector=$024 and IA=CHK instruction addr (UM Table 8-6)" severity note;
 
         init_memory;
         setup_vector(16#18#, 16#2000#);  -- CHK exception vector -> $2000
@@ -365,7 +371,7 @@ begin
         check_format("CHK.W trace frame", "0010");
         check_vector("CHK.W trace frame vector (BUG B: $024 not $018)", x"024");
         check_pc("CHK.W trace PC=CHK_handler=$2000", x"00002000");
-        check_ia("CHK.W trace IA=CHK_handler=$2000 (BUG A fix)", x"00002000");
+        check_ia("CHK.W trace IA=CHK_addr=$100C (traced instr, UM Table 8-6)", x"0000100C");
 
         report "  -- CHK frame (SP=$3FF4, pushed first):" severity note;
         read_frame(x"00003FF4");
@@ -420,7 +426,7 @@ begin
         check_format("CHK.L trace frame", "0010");
         check_vector("CHK.L trace frame vector (BUG B: $024 not $018)", x"024");
         check_pc("CHK.L trace PC=CHK_handler=$2000", x"00002000");
-        check_ia("CHK.L trace IA=CHK_handler=$2000 (BUG A fix)", x"00002000");
+        check_ia("CHK.L trace IA=CHK.L_addr=$100E (traced instr, UM Table 8-6)", x"0000100E");
 
         report "  -- CHK.L frame (SP=$3FF4, pushed first):" severity note;
         read_frame(x"00003FF4");
@@ -485,7 +491,7 @@ begin
         check_format("CHK.L (A1)+ trace frame", "0010");
         check_vector("CHK.L (A1)+ trace frame vector=$024", x"024");
         check_pc("CHK.L (A1)+ trace PC=CHK_handler=$2000", x"00002000");
-        check_ia("CHK.L (A1)+ trace IA=CHK_handler=$2000", x"00002000");
+        check_ia("CHK.L (A1)+ trace IA=CHK_addr=$1010 (traced instr, UM Table 8-6)", x"00001010");
 
         report "  -- CHK.L frame (SP=$3FF4, pushed first):" severity note;
         read_frame(x"00003FF4");
@@ -551,7 +557,7 @@ begin
         check_format("CHK2.B trace frame", "0010");
         check_vector("CHK2.B trace vector=$024", x"024");
         check_pc("CHK2.B trace PC=CHK_handler=$2000", x"00002000");
-        check_ia("CHK2.B trace IA=CHK_handler=$2000", x"00002000");
+        check_ia("CHK2.B trace IA=CHK2_addr=$1010 (traced instr, UM Table 8-6)", x"00001010");
 
         report "  -- CHK frame (SP=$3FF4, pushed first):" severity note;
         read_frame(x"00003FF4");

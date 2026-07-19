@@ -5,6 +5,8 @@
 --   - instruction traps trace when they actually trap
 --   - non-trapping DIV instructions do not trace
 --   - DBcc traces only when the branch is actually taken
+--   - STOP (a status-register manipulation, MC68030 UM 8.1.7) traces and
+--     the CPU resumes past it instead of entering the stopped condition
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -545,6 +547,37 @@ begin
                    boolean'image(trap_seen) & ", result_seen=" &
                    boolean'image(result_seen) & ", result=$" &
                    integer'image(to_integer(unsigned(result_val))) & ")" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        -- STOP is a status-register manipulation, i.e. a T0 change-of-flow
+        -- instruction per MC68030 UM 8.1.7 (p.8-12). M68000PRM STOP (p.6-85):
+        -- "A trace exception occurs if instruction tracing is enabled
+        -- (T0 = 1, T1 = 0) when the STOP instruction begins execution."
+        -- UM p.8-13: a traced STOP "never enters the stopped condition".
+        -- STOP loads SR=$2000 (T off), so after the trace handler RTEs the
+        -- tail runs untraced; the result marker proves the CPU resumed
+        -- instead of waiting in the stopped state for an interrupt.
+        report "=== Test 13: T0 + STOP -> expect trace, CPU resumes ===" severity note;
+        init_common;
+        setup_trace_handler;
+        mem(16#1000#/2) := x"46FC";
+        mem(16#1002#/2) := x"6000";
+        mem(16#1004#/2) := x"4E71";
+        mem(16#1006#/2) := x"4E72";
+        mem(16#1008#/2) := x"2000";
+        mem(16#100A#/2) := x"33FC";
+        mem(16#100C#/2) := x"1313";
+        mem(16#100E#/2) := x"0000";
+        mem(16#1010#/2) := x"5000";
+        run_test(15000, trace_fired, result_seen, result_val);
+        if trace_fired and result_seen and result_val = x"1313" then
+            report "PASS: Test 13 - STOP traced with T0=1 and CPU resumed" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: Test 13 - STOP T0 trace/resume mismatch (trace=" &
+                   boolean'image(trace_fired) & ", result_seen=" &
+                   boolean'image(result_seen) & ")" severity error;
             fail_count := fail_count + 1;
         end if;
 

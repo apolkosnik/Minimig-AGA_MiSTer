@@ -7,6 +7,9 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity tb_rte_format_a_replay is
+    generic (
+        STALL_ENABLE : boolean := false
+    );
 end entity;
 
 architecture behavior of tb_rte_format_a_replay is
@@ -32,9 +35,28 @@ architecture behavior of tb_rte_format_a_replay is
 
     signal replay_write_seen : std_logic := '0';
     signal replay_fc_seen    : std_logic_vector(2 downto 0) := (others => '0');
+    signal stall_phase       : integer range 0 to 7 := 0;
     signal test_done         : boolean := false;
 begin
     clk <= not clk after CLK_PERIOD / 2 when not test_done;
+
+    -- The board holds the core while translated RAM reads wait for completion.
+    -- Exercise gaps both within and between the longword pops that make up the
+    -- extended frame; the original regression used an always-ready bus.
+    clkena_in <= '0' when STALL_ENABLE and nReset = '1' and
+                          (stall_phase = 1 or stall_phase = 2 or stall_phase = 5)
+                  else '1';
+
+    stall_clock: process(clk)
+    begin
+        if rising_edge(clk) then
+            if stall_phase = 7 then
+                stall_phase <= 0;
+            else
+                stall_phase <= stall_phase + 1;
+            end if;
+        end if;
+    end process;
 
     dut: entity work.TG68KdotC_Kernel
         generic map(

@@ -785,6 +785,32 @@ begin
         severity note;
     end if;
 
+    -- NetBSD context-switch sequence: a cached fault for a user page under
+    -- CRP A must not survive PFLUSHA followed by loading CRP B.  Root B maps
+    -- the same logical super-page successfully, so an ATC replay is visible
+    -- as a fault while a correct flush/context change performs a fresh walk.
+    pt(6144 + 30) := x"50000061";  -- root B at $6000, entry 30
+    wait for 20 ns;
+    pflusha;
+    write_reg("10011", x"7FFF0002", '1');
+    write_reg("10011", x"00006000", '0');
+    walks_before := berr_seen;
+    probe("S4 fault entry flushed across CRP switch", x"07800000", "101", '1',
+          x"50000000", false);
+    checks <= checks + 1;
+    if berr_seen = walks_before then
+      errors <= errors + 1;
+      report "[FAIL] S4 CRP switch reused the old cached fault entry"
+        severity error;
+    else
+      report "[PASS] S4 CRP switch discarded cached fault and walked root B"
+        severity note;
+    end if;
+
+    -- Restore the common root used by the following phases.
+    write_reg("10011", x"7FFF0002", '1');
+    write_reg("10011", x"00001000", '0');
+
     ---------------------------------------------------------------
     -- PHASE X: FCL=1 (function-code lookup) as the implicit first level.
     --

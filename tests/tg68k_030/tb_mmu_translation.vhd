@@ -1253,6 +1253,10 @@ begin
         end if;
         report "=========================================================";
 
+        assert tests_failed = 0
+            report "MMU translation suite failed"
+            severity failure;
+
         test_done <= true;
         wait;
     end process;

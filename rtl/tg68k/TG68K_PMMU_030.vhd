@@ -135,6 +135,16 @@ architecture rtl of TG68K_PMMU_030 is
   signal CRP_L  : std_logic_vector(31 downto 0); -- CPU Root Pointer low 32 bits (64-bit total)
   signal SRP_H  : std_logic_vector(31 downto 0); -- Supervisor Root Pointer high 32 bits
   signal SRP_L  : std_logic_vector(31 downto 0); -- Supervisor Root Pointer low 32 bits (64-bit total)
+  -- PMOVE transfers CRP/SRP as one quad-word operand.  The kernel presents the
+  -- high and low longwords on separate cycles, so keep the first longword out
+  -- of the live translation context until the second one arrives.  Otherwise
+  -- the low source read can itself be translated through a half-new root.
+  signal CRP_H_stage       : std_logic_vector(31 downto 0) := (others => '0');
+  signal SRP_H_stage       : std_logic_vector(31 downto 0) := (others => '0');
+  signal CRP_H_stage_valid : std_logic := '0';
+  signal SRP_H_stage_valid : std_logic := '0';
+  signal CRP_FD_stage      : std_logic := '0';
+  signal SRP_FD_stage      : std_logic := '0';
   signal TT0    : std_logic_vector(31 downto 0); -- Transparent Translation Register 0
   signal TT1    : std_logic_vector(31 downto 0); -- Transparent Translation Register 1
   signal MMUSR  : std_logic_vector(15 downto 0); -- MMU Status Register (MC68030 UM 9.7.4: architecturally 16 bits)
@@ -212,6 +222,14 @@ architecture rtl of TG68K_PMMU_030 is
   -- Debug: sticky fault status latch (captures MMUSR at exact moment of fault)
   signal debug_fault_status_latch : std_logic_vector(15 downto 0) := (others => '0');
   signal debug_fault_status_valid : std_logic := '0';  -- Set once, never cleared (sticky)
+  -- First internal walker timeout. For hardware diagnosis, the timeout request
+  -- temporarily replaces the otherwise per-level ptr2/ptr3 debug snapshots.
+  signal debug_timeout_seen     : std_logic := '0';
+  signal debug_timeout_mem_addr : std_logic_vector(31 downto 0) := (others => '0');
+  signal debug_timeout_mem_wdat : std_logic_vector(31 downto 0) := (others => '0');
+  signal debug_timeout_mem_we   : std_logic := '0';
+  signal debug_timeout_wstate   : std_logic_vector(4 downto 0) := (others => '0');
+  signal debug_timeout_count    : std_logic_vector(15 downto 0) := (others => '0');
 
   -- Walker fault signals (driven only by walker)
   signal walker_fault       : std_logic := '0';
@@ -1192,6 +1210,12 @@ begin
       CRP_L <= (others => '0');
       SRP_H <= (others => '0');
       SRP_L <= (others => '0');
+      CRP_H_stage <= (others => '0');
+      SRP_H_stage <= (others => '0');
+      CRP_H_stage_valid <= '0';
+      SRP_H_stage_valid <= '0';
+      CRP_FD_stage <= '0';
+      SRP_FD_stage <= '0';
       TT0   <= (others => '0');
       TT1   <= (others => '0');
       MMUSR <= (others => '0');
@@ -1208,6 +1232,13 @@ begin
     elsif rising_edge(clk) then
       atc_flush_req <= '0';
       mmusr_update_ack <= '0';
+      -- PFLUSH invalidates more than the associative entries: any registered
+      -- translation produced from an entry on this same edge must also become
+      -- stale.  Advance the translation generation on the edge that services
+      -- the pending flush; pflush_active keeps the CPU interlocked until then.
+      if pflush_clear_atc = '1' and wstate = W_IDLE then
+        xlat_cfg_seq <= xlat_cfg_seq + 1;
+      end if;
       -- BUG #154 FIX: Clear mmu_config_error when kernel acknowledges the trap
       -- This prevents infinite exception loops - the error latches until the
       -- kernel takes the trap and pulses mmu_config_ack
@@ -1264,6 +1295,8 @@ begin
         TT0(15) <= '0';
         TT1(15) <= '0';
         ptest_active <= '0';
+        CRP_H_stage_valid <= '0';
+        SRP_H_stage_valid <= '0';
         xlat_cfg_seq <= xlat_cfg_seq + 1;
       elsif ptest_update_mmusr = '1' then
         -- Highest priority: PTEST instruction (MC68030 specification)
@@ -1292,9 +1325,16 @@ begin
         -- Privilege check is performed by TG68KdotC_Kernel before asserting reg_we,
         -- so no additional FC check is needed here
         -- Invalidate "fresh translation" key when translation context changes.
-        if reg_sel = "00010" or reg_sel = "00011" or reg_sel = "10000" or
-           reg_sel = "10010" or reg_sel = "10011" then
+        if reg_sel = "00010" or reg_sel = "00011" or reg_sel = "10000" then
           xlat_cfg_seq <= xlat_cfg_seq + 1;
+        end if;
+        -- A root-pointer first half belongs only to its immediately following
+        -- second half.  Any other PMOVE abandons the incomplete transfer.
+        if reg_sel /= "10011" then
+          CRP_H_stage_valid <= '0';
+        end if;
+        if reg_sel /= "10010" then
+          SRP_H_stage_valid <= '0';
         end if;
         -- synthesis translate_off
         report "PMMU_REG_WRITE: sel=" & integer'image(to_integer(unsigned(reg_sel))) &
@@ -1360,25 +1400,33 @@ begin
               -- MC68030 UM 9.5.1.1: DT is a 2-bit field (codes $0..$3), reserved bits 47-34
               report "PMMU_REG_WRITE: SRP_H reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              SRP_H <= reg_wdat and CRP_HIGH_MASK;
-              -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
-              -- Per spec: Register is loaded BEFORE exception is taken.
-              -- BUG #445: sticky latch — valid DT does not clear it (see TC write).
-              if reg_wdat(1 downto 0) = "00" then
-                mmu_config_error <= '1';
-                -- synthesis translate_off
-                report "MMU_CONFIG: SRP_H DT=00 (invalid descriptor type)" severity warning;
-                -- synthesis translate_on
-              end if;
+              SRP_H_stage <= reg_wdat and CRP_HIGH_MASK;
+              SRP_H_stage_valid <= '1';
+              SRP_FD_stage <= reg_fd;
             else
               -- SRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
               report "PMMU_REG_WRITE: SRP_L reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              SRP_L <= reg_wdat and CRP_LOW_MASK;
-            end if;
-            if reg_fd = '0' then  -- Only flush if NOT PMOVEFD
-              atc_flush_req <= '1'; -- SRP changes invalidate all cached translations
+              -- Commit the complete quad-word and its architectural side
+              -- effects together. A low half without the immediately preceding
+              -- high half is not an architectural PMOVE and must not partially
+              -- mutate the active translation root.
+              if SRP_H_stage_valid = '1' then
+                SRP_H <= SRP_H_stage;
+                SRP_L <= reg_wdat and CRP_LOW_MASK;
+                if SRP_H_stage(1 downto 0) = "00" then
+                  mmu_config_error <= '1';
+                  -- synthesis translate_off
+                  report "MMU_CONFIG: SRP_H DT=00 (invalid descriptor type)" severity warning;
+                  -- synthesis translate_on
+                end if;
+                if SRP_FD_stage = '0' then
+                  atc_flush_req <= '1';
+                end if;
+                xlat_cfg_seq <= xlat_cfg_seq + 1;
+              end if;
+              SRP_H_stage_valid <= '0';
             end if;
           when "10011" =>  -- CRP: P-reg 0x13
             -- CRP register write - MC68030 Long-Format Root Pointer per User's Manual section 9.2.2
@@ -1387,26 +1435,29 @@ begin
               -- MC68030 UM 9.5.1.1: DT is a 2-bit field (codes $0..$3), reserved bits 47-34
               report "PMMU_REG_WRITE: CRP_H reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              CRP_H <= reg_wdat and CRP_HIGH_MASK;
-              -- MC68030 MMU Configuration Exception: DT=0 (invalid descriptor)
-              -- Per spec: Register is loaded BEFORE exception is taken.
-              -- BUG #445: sticky latch — valid DT does not clear it (see TC write).
-              if reg_wdat(1 downto 0) = "00" then
-                mmu_config_error <= '1';
-                -- synthesis translate_off
-                report "MMU_CONFIG: CRP_H DT=00 (invalid descriptor type)" severity warning;
-                -- synthesis translate_on
-              end if;
+              CRP_H_stage <= reg_wdat and CRP_HIGH_MASK;
+              CRP_H_stage_valid <= '1';
+              CRP_FD_stage <= reg_fd;
             else
               -- CRP LOW WORD (bits 31-0): Table Address[31:4] + Reserved[3:0]
               -- MC68030 spec: Table address bits 31-4, reserved bits 3-0 must be zero
               report "PMMU_REG_WRITE: CRP_L reg_part=" & std_logic'image(reg_part) &
                      " reg_wdat=" & integer'image(to_integer(signed(reg_wdat))) severity note;
-              CRP_L <= reg_wdat and CRP_LOW_MASK;
-            end if;
-            -- CRP changes invalidate ATC unless PMOVEFD (flush disable)
-            if reg_fd = '0' then
-              atc_flush_req <= '1';
+              if CRP_H_stage_valid = '1' then
+                CRP_H <= CRP_H_stage;
+                CRP_L <= reg_wdat and CRP_LOW_MASK;
+                if CRP_H_stage(1 downto 0) = "00" then
+                  mmu_config_error <= '1';
+                  -- synthesis translate_off
+                  report "MMU_CONFIG: CRP_H DT=00 (invalid descriptor type)" severity warning;
+                  -- synthesis translate_on
+                end if;
+                if CRP_FD_stage = '0' then
+                  atc_flush_req <= '1';
+                end if;
+                xlat_cfg_seq <= xlat_cfg_seq + 1;
+              end if;
+              CRP_H_stage_valid <= '0';
             end if;
           when "11000" =>
             -- PMOVE to MMUSR ignores unimplemented/reserved bits.
@@ -1508,10 +1559,11 @@ begin
   debug_saved_fc     <= saved_fc;
   debug_ptr1_desc_addr <= ptr1_desc_addr_reg;
   debug_ptr1_desc_data <= ptr1_desc_data_reg;
-  debug_ptr2_desc_addr <= ptr2_desc_addr_reg;
-  debug_ptr2_desc_data <= ptr2_desc_data_reg;
-  debug_ptr3_desc_addr <= ptr3_desc_addr_reg;
-  debug_ptr3_desc_data <= ptr3_desc_data_reg;
+  debug_ptr2_desc_addr <= debug_timeout_mem_addr when debug_timeout_seen = '1' else ptr2_desc_addr_reg;
+  debug_ptr2_desc_data <= debug_timeout_mem_wdat when debug_timeout_seen = '1' else ptr2_desc_data_reg;
+  debug_ptr3_desc_addr <= x"544F" & debug_timeout_count when debug_timeout_seen = '1' else ptr3_desc_addr_reg;
+  debug_ptr3_desc_data <= x"54494D" & "00" & debug_timeout_wstate & debug_timeout_mem_we
+                          when debug_timeout_seen = '1' else ptr3_desc_data_reg;
   -- DEBUG: Monitor all PMMU register reads (disabled for simulation speed)
   -- process(reg_sel, reg_part, TC, TT0, TT1, SRP_H, SRP_L, CRP_H, CRP_L, MMUSR)
   -- begin ... end process;
@@ -2148,7 +2200,10 @@ begin
         
       end if; -- req = '1'
       -- Handle PTEST requests - perform translation and update MMUSR
-      if ptest_active = '1' then
+      -- ptest_done is observed by the register process one edge later.  Without
+      -- this guard, level-0/TTR cases (which have no translation_pending phase)
+      -- regenerate the same MMUSR update on that intervening edge.
+      if ptest_active = '1' and ptest_done = '0' then
         -- PTEST request active - perform translation to test page (update MMUSR, don't cache)
         -- synthesis translate_off
         -- report "PTEST_HANDLER: active=1 tc_en=" & std_logic'image(tc_en) &
@@ -2683,6 +2738,12 @@ begin
       walk_limit_value <= (others => '0');
       walk_is_root_pointer <= '0';  -- Root pointer DT=01 flag
       walker_timeout_counter <= 0;  -- BUG #387: Reset timeout counter
+      debug_timeout_seen <= '0';
+      debug_timeout_mem_addr <= (others => '0');
+      debug_timeout_mem_wdat <= (others => '0');
+      debug_timeout_mem_we <= '0';
+      debug_timeout_wstate <= (others => '0');
+      debug_timeout_count <= (others => '0');
       xlat_cfg_seq_walk_seen <= (others => '0');
       ptr1_desc_addr_reg <= (others => '0');
       ptr1_desc_data_reg <= (others => '0');
@@ -2729,6 +2790,28 @@ begin
         -- Check for timeout condition BEFORE case statement to prevent override
         if walker_timeout_counter >= WALKER_TIMEOUT_CYCLES and mem_req = '1' then
           -- Timeout exceeded - force bus error fault and transition to W_FAULT
+          if debug_timeout_seen = '0' then
+            debug_timeout_seen <= '1';
+            if wstate = W_ROOT_LOW or wstate = W_PTR1_LOW or
+               wstate = W_PTR2_LOW or wstate = W_PTR3_LOW or
+               wstate = W_PTR4_LOW then
+              debug_timeout_mem_addr <= std_logic_vector(unsigned(desc_addr_reg) + 4);
+            elsif wstate = W_INDIRECT then
+              debug_timeout_mem_addr <= indirect_addr;
+            elsif wstate = W_INDIRECT_LOW then
+              debug_timeout_mem_addr <= std_logic_vector(unsigned(indirect_addr) + 4);
+            else
+              debug_timeout_mem_addr <= desc_addr_reg;
+            end if;
+            debug_timeout_mem_wdat <= desc_update_data;
+            if wstate = W_TABLE_UPDATE or wstate = W_UPDATE_DESC then
+              debug_timeout_mem_we <= '1';
+            else
+              debug_timeout_mem_we <= '0';
+            end if;
+            debug_timeout_wstate <= std_logic_vector(to_unsigned(walk_state_t'pos(wstate), 5));
+            debug_timeout_count <= std_logic_vector(to_unsigned(walker_timeout_counter, 16));
+          end if;
           walk_fault <= '1';
           walker_fault <= '1';
           walker_fault_status <= encode_mmusr_fault(
@@ -4778,17 +4861,17 @@ begin
     end if;
   end process;
   -- Walker busy indication - not busy if MMU disabled or TTR hit
-  process(wstate, addr_log, fc, rw, rmw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg, fault_current_req_match, pload_active, ptest_update_mmusr, ptest_active, ptest_walk_pending, ptest_desc_return_pending, mmusr_update_req)
+  process(wstate, addr_log, fc, rw, rmw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg, fault_current_req_match, pload_active, pflush_active, ptest_update_mmusr, ptest_active, ptest_walk_pending, ptest_desc_return_pending, mmusr_update_req)
     variable tmatch0, tmatch1 : std_logic;
     variable dummy_ci, dummy_wp : std_logic;
   begin
     -- Normal CPU translation is idle when TC.E is clear, but PTEST/PLOAD can
     -- still perform manual table searches with TC.E=0.
-    if ptest_update_mmusr = '1' or ptest_active = '1' or ptest_desc_return_pending = '1' or mmusr_update_req = '1' then
-      -- Hold the CPU while a PTEST command is being accepted/processed. Without
-      -- this, the A-bit writeback can sample stale desc_addr_reg before the
-      -- table search starts. Also hold until the resulting MMUSR update has
-      -- been committed so a following PMOVE MMUSR cannot read the old value.
+    if ptest_update_mmusr = '1' or ptest_active = '1' or ptest_desc_return_pending = '1' or
+       mmusr_update_req = '1' or pflush_active = '1' then
+      -- Hold the CPU while PTEST is accepted/processed and while PFLUSH waits
+      -- for its ATC invalidation edge. This also keeps a following PMOVE MMUSR
+      -- from observing the old PTEST result.
       busy <= '1';
     elsif tc_en = '0' and pload_active = '0' and ptest_walk_pending = '0'
        and translation_pending = '0' and wstate = W_IDLE then

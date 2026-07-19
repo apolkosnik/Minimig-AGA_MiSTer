@@ -88,7 +88,7 @@ begin
     if exec_movec_rd = '1' then
       case brief(11 downto 0) is
         when X"002" => 
-          movec_data <= CACR; -- CACR full 32-bit read
+          movec_data <= CACR and x"00003313";
         when others => 
           null;
       end case;
@@ -174,10 +174,8 @@ begin
 
     movec_write_cacr(x"FFFFFFFF"); -- All bits set
     movec_read_cacr;
-    -- MC68030 CACR valid bits: 0-4 (IE,FI,CEI,CI,IBE) and 8-13 (DE,FD,CED,CD,DBE,WA)
-    -- Reserved bits 5-7, 14-31 should be masked to 0
-    -- Self-clearing bits (2,3,10,11) are still visible immediately after write (see TEST 3)
-    report_test("Reserved Bits Masked", movec_data = x"00003F1F"); -- All valid bits set, reserved=0
+    -- Command bits accept writes but are not visible through MOVEC CACR,Dn.
+    report_test("Reserved/Command Bits Masked", movec_data = x"00003313");
 
     -- TEST 3: Self-Clearing Bits
     write(l, string'("TEST 3: Self-Clearing Bits"));
@@ -186,7 +184,7 @@ begin
     -- Set cache control command bits (CEI, CI, CED, CD)
     movec_write_cacr(x"00000C0C"); -- CEI=1 (bit 2), CI=1 (bit 3), CED=1 (bit 10), CD=1 (bit 11)
     movec_read_cacr;
-    report_test("Cache Control Bits Set", movec_data = x"00000C0C");
+    report_test("Cache Control Bits Are Write-Only", movec_data = x"00000000");
 
     -- Trigger self-clearing by enabling clock
     clkena_lw <= '1';
@@ -216,7 +214,7 @@ begin
     movec_write_cacr(x"00000F0F"); -- All sticky + command bits set
                                     -- IE,FI,CEI,CI (bits 0-3) + DE,FD,CED,CD (bits 8-11)
     movec_read_cacr;
-    report_test("All Bits Initially Set", movec_data = x"00000F0F");
+    report_test("Only Persistent Bits Visible", movec_data = x"00000303");
 
     clkena_lw <= '1';
     wait_cycles(1);

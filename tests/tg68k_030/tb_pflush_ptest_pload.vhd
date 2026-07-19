@@ -576,6 +576,48 @@ begin
         report "Verifying translation still works after flush...";
         translate_and_check(x"00000000", false);
 
+        -- PFLUSH must retire only after its ATC invalidation is architecturally
+        -- visible.  Change the backing descriptor, then start a translation in
+        -- the cycle immediately following the PFLUSHA request.  Accepting the
+        -- old ATC result on the flush edge returns $00100000 and performs no
+        -- table reads; the correct result is the new $00600000 mapping.
+        report "Testing immediate post-PFLUSHA translation ordering...";
+        page_table(16#400#) <= x"00600001";
+        wait_cycles(1);
+        clear_mem_read_count;
+
+        pmmu_brief <= x"2400";
+        pflush_req <= '1';
+        wait_cycles(1);
+        pflush_req <= '0';
+        addr_log <= x"00000000";
+        fc <= "101";
+        rw <= '1';
+        req <= '1';
+        wait_cycles(1);
+
+        timeout := 0;
+        while busy = '1' and timeout < 100 loop
+            wait_cycles(1);
+            timeout := timeout + 1;
+        end loop;
+        req <= '0';
+        wait_cycles(2);
+
+        if timeout < 100 and fault = '0' and addr_phys = x"00600000" and
+           mem_read_count > 0 then
+            report "  Immediate post-PFLUSHA access performed a fresh walk";
+            test_pass <= test_pass + 1;
+        else
+            report "  PFLUSHA exposed stale ATC translation: phys=0x" &
+                   slv_to_hex(addr_phys) & " reads=" &
+                   integer'image(mem_read_count) severity error;
+            test_fail <= test_fail + 1;
+        end if;
+
+        page_table(16#400#) <= x"00100001";
+        do_pflusha;
+
         report "" severity note;
         report "=== SECTION 1B: PFLUSHA While Walker Busy ===" severity note;
 

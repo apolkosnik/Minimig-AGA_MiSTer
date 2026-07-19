@@ -1,6 +1,8 @@
 -- tb_t1_trace.vhd
 -- MC68030 T1 (trace on every instruction) regression bench.
--- Covers settled T1 behavior with only legal trace-mode combinations.
+-- Covers settled T1 behavior with only legal trace-mode combinations,
+-- including a traced STOP (MC68030 UM p.8-13: forces a trace exception
+-- after loading SR and never enters the stopped condition).
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -432,7 +434,16 @@ begin
             fail_count := fail_count + 1;
         end if;
 
-        report "=== Test 11: reserved SR/CCR bits preserved in trace frame ===" severity note;
+        -- MC68030 UM 2.2.3 (p.2-4): "Only 12 bits of the status register are
+        -- defined; all undefined values are reserved by Motorola for future
+        -- definition. The undefined bits are read as zeros and should be
+        -- written as zeros for future compatibility."  M68000PRM p.1-26 says
+        -- the same for control registers generally.  The stacked SR is a read
+        -- of SR, so MOVE #$A8E0,SR must stack $A000 (T1=1, S=1; undefined
+        -- bits 11 and 7-5 read back as zeros).  This test previously expected
+        -- the written image ($A8E0) to be preserved; that expectation
+        -- contradicted the manuals and was fixed to the spec value.
+        report "=== Test 11: undefined SR/CCR bits read as zeros in trace frame ===" severity note;
         init_common;
         setup_stop_handler;
         mem(16#1000# / 2) := x"46FC";
@@ -440,11 +451,45 @@ begin
         mem(16#1004# / 2) := x"4E71";
         mem(16#1006# / 2) := x"4E71";
         run_cycles(10000);
-        if mem_read(16#07F4#) = x"A8E0" then
-            report "PASS: Test 11 - Stacked SR preserves unused SR/CCR bits" severity note;
+        if mem_read(16#07F4#) = x"A000" then
+            report "PASS: Test 11 - Stacked SR reads undefined bits as zeros (UM 2.2.3)" severity note;
             pass_count := pass_count + 1;
         else
-            report "FAIL: Test 11 - Stacked SR lost unused SR/CCR bits" severity error;
+            report "FAIL: Test 11 - Stacked SR undefined-bit mismatch, actual=$" &
+                   integer'image(to_integer(unsigned(mem_read(16#07F4#)))) &
+                   " expected=$A000 (40960)" severity error;
+            fail_count := fail_count + 1;
+        end if;
+
+        -- MC68030 UM p.8-13: "The STOP instruction does not perform its
+        -- function when it is traced. A STOP instruction that begins execution
+        -- with T1=1 and T0=0 forces a trace exception after it loads the
+        -- status register. Upon return from the trace handler routine,
+        -- execution continues with the instruction following the STOP, and
+        -- the processor never enters the stopped condition."
+        -- STOP is placed directly after MOVE-to-SR so it is the ONLY
+        -- instruction that can trace: STOP loads SR=$2000 (T off), so the
+        -- resume tail runs untraced and the result marker proves the CPU
+        -- did not remain stopped.
+        report "=== Test 12: T1 + STOP -> trace, never enters stopped condition ===" severity note;
+        init_common;
+        setup_trace_handler;
+        mem(16#1000# / 2) := x"46FC";
+        mem(16#1002# / 2) := x"A000";
+        mem(16#1004# / 2) := x"4E72";
+        mem(16#1006# / 2) := x"2000";
+        mem(16#1008# / 2) := x"33FC";
+        mem(16#100A# / 2) := x"1414";
+        mem(16#100C# / 2) := x"0000";
+        mem(16#100E# / 2) := x"5000";
+        run_test(15000, trace_fired, result_seen, result_val);
+        if trace_fired and result_seen and result_val = x"1414" then
+            report "PASS: Test 12 - T1=1 STOP traced and CPU resumed past STOP" severity note;
+            pass_count := pass_count + 1;
+        else
+            report "FAIL: Test 12 - T1 STOP trace/resume mismatch (trace=" &
+                   boolean'image(trace_fired) & ", result_seen=" &
+                   boolean'image(result_seen) & ")" severity error;
             fail_count := fail_count + 1;
         end if;
 

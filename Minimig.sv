@@ -404,15 +404,16 @@ always @(posedge clk_114) begin
 		end
 	end
 
-	// BUG #426 FIX: When walker is active, bypass cyc gating for ram_cs deassert.
-	// cpu_cache_new's CPU_SM_WAIT state needs !cpu_cs to return to IDLE.
-	// cpu_cs comes from ram_cs via sdram_ctrl's internal ramsel.
-	// For normal CPU reads, ram_sel drops when cpu_req deasserts, so ram_cs drops.
-	// For walker reads, walker_fast_ram keeps ram_sel high continuously.
-	// Without this fix, ram_cs can only deassert via ram_ready&cyc alignment,
-	// but cyc only pulses 1-in-4 clk_114 cycles, causing unreliable deassert
-	// that deadlocks cpu_cache_new in CPU_SM_WAIT.
-	ram_cs <= ~(ram_ready & (cyc | walker_active_cpu) & cpu_type) & ram_sel;
+	// Walker transfers are level handshakes across clk_sys and clk_114. Keep
+	// ram_cs asserted until the clk_sys walker has observed ram_ready and moves
+	// into its explicit RAM_GAP state, which drops ram_sel. Deasserting ram_cs
+	// immediately on ram_ready can shorten the ready indication to two clk_114
+	// periods; after a request-gap phase shift that pulse can fall entirely
+	// between clk_sys edges and the PMMU waits until its internal timeout.
+	if (walker_active_cpu)
+		ram_cs <= ram_sel;
+	else
+		ram_cs <= ~(ram_ready & cyc & cpu_type) & ram_sel;
 end
 
 wire  [1:0] cpu_state;
@@ -463,7 +464,7 @@ reg  [28:1] cache_fill_ramaddr;
 wire        ram_sel_cpu;
 wire        ram_lds_cpu;
 wire        ram_uds_cpu;
-wire [15:0] ram_din;
+wire [15:0] ram_din_cpu;
 wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ramshared;
 
@@ -481,12 +482,84 @@ wire       pmmu_cache_inhibit_cpu;
 assign ram_cache_inhibit = walker_active_cpu | (cpucfg[1] & pmmu_cache_inhibit_cpu);
 wire       cache_fill_blocks_cpu = cache_fill_active & ~walker_active_cpu;
 wire       cache_fill_owns_ram = cache_fill_blocks_cpu & ~cache_fill_gap;
-wire [28:1] ram_addr = cache_fill_blocks_cpu ? cache_fill_ramaddr : ram_addr_cpu;
-wire        ram_sel = cache_fill_blocks_cpu ? ~cache_fill_gap : ram_sel_cpu;
-wire        ram_lds = cache_fill_blocks_cpu ? (cache_fill_gap ? 1'b1 : 1'b0) : ram_lds_cpu;  // Active low - enable both bytes for cache
-wire        ram_uds = cache_fill_blocks_cpu ? (cache_fill_gap ? 1'b1 : 1'b0) : ram_uds_cpu;  // Active low - enable both bytes for cache
+
+// The 68030 address path includes effective-address generation, PMMU/TTR
+// translation, and RAM-bank encoding. Driving that path directly into the
+// 114 MHz controllers creates an unsafe cross-rate combinational path. Capture
+// each normal CPU transaction on clk_sys, hold the registered payload until the
+// controller responds, then register the response before releasing TG68K.
+// Walker and cache-fill traffic already have explicit level handshakes and keep
+// their existing direct ownership of the RAM bus.
+reg         cpu_ram_req_q;
+reg         cpu_ram_rsp_q;
+reg  [28:1] cpu_ram_addr_q;
+reg  [15:0] cpu_ram_din_q;
+reg         cpu_ram_lds_q;
+reg         cpu_ram_uds_q;
+reg         cpu_ram_shared_q;
+reg   [1:0] cpu_ram_state_q;
+reg  [15:0] cpu_ram_rdata_q;
+
+wire [28:1] cpu_ram_addr_mux = cpu_type ? cpu_ram_addr_q : ram_addr_cpu;
+wire [15:0] cpu_ram_din_mux = cpu_type ? cpu_ram_din_q : ram_din_cpu;
+wire        cpu_ram_lds_mux = cpu_type ? cpu_ram_lds_q : ram_lds_cpu;
+wire        cpu_ram_uds_mux = cpu_type ? cpu_ram_uds_q : ram_uds_cpu;
+wire        cpu_ram_shared_mux = cpu_type ? cpu_ram_shared_q : ramshared;
+wire  [1:0] cpu_ram_state_mux = cpu_type ? cpu_ram_state_q : cpu_state;
+wire        cpu_ram_sel_mux = cpu_type ? cpu_ram_req_q : ram_sel_cpu;
+
+wire [28:1] ram_addr = cache_fill_blocks_cpu ? cache_fill_ramaddr :
+                       walker_active_cpu ? ram_addr_cpu : cpu_ram_addr_mux;
+wire        ram_sel = cache_fill_blocks_cpu ? ~cache_fill_gap :
+                      walker_active_cpu ? ram_sel_cpu : cpu_ram_sel_mux;
+wire        ram_lds = cache_fill_blocks_cpu ? (cache_fill_gap ? 1'b1 : 1'b0) :
+                      walker_active_cpu ? ram_lds_cpu : cpu_ram_lds_mux;  // Active low
+wire        ram_uds = cache_fill_blocks_cpu ? (cache_fill_gap ? 1'b1 : 1'b0) :
+                      walker_active_cpu ? ram_uds_cpu : cpu_ram_uds_mux;  // Active low
+wire [15:0] ram_din = walker_active_cpu ? ram_din_cpu : cpu_ram_din_mux;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
 wire        zram_sel  = |ram_addr[28:26];
+
+always @(posedge clk_sys) begin
+	if (!cpu_rst) begin
+		cpu_ram_req_q    <= 1'b0;
+		cpu_ram_rsp_q    <= 1'b0;
+		cpu_ram_addr_q   <= 28'd0;
+		cpu_ram_din_q    <= 16'd0;
+		cpu_ram_lds_q    <= 1'b1;
+		cpu_ram_uds_q    <= 1'b1;
+		cpu_ram_shared_q <= 1'b0;
+		cpu_ram_state_q  <= 2'b01;
+		cpu_ram_rdata_q  <= 16'd0;
+	end else begin
+		// cpu_ram_rsp_q is consumed by TG68K on this edge. The CPU presents
+		// the following transaction after the edge, so it is captured no
+		// earlier than the next clk_sys edge and cannot reuse stale ready.
+		if (cpu_ram_rsp_q)
+			cpu_ram_rsp_q <= 1'b0;
+
+		if (cpu_type && !cpu_ram_req_q && !cpu_ram_rsp_q &&
+		    ram_sel_cpu && !walker_active_cpu && !cache_fill_blocks_cpu) begin
+			cpu_ram_req_q    <= 1'b1;
+			cpu_ram_addr_q   <= ram_addr_cpu;
+			cpu_ram_din_q    <= ram_din_cpu;
+			cpu_ram_lds_q    <= ram_lds_cpu;
+			cpu_ram_uds_q    <= ram_uds_cpu;
+			cpu_ram_shared_q <= ramshared;
+			cpu_ram_state_q  <= cpu_state;
+		end else if (cpu_ram_req_q && ram_ready) begin
+			cpu_ram_req_q   <= 1'b0;
+			cpu_ram_rsp_q   <= 1'b1;
+			cpu_ram_rdata_q <= ram_dout;
+		end
+	end
+end
+
+wire [15:0] ram_dout_to_cpu = (cpu_type && !walker_active_cpu) ? cpu_ram_rdata_q : ram_dout;
+wire        ram_ready_to_cpu = walker_active_cpu ? ram_ready :
+                               cpu_type ? cpu_ram_rsp_q :
+                               (ram_ready & ~cache_fill_active);
+wire        ramshared_bus = walker_active_cpu ? ramshared : cpu_ram_shared_mux;
 
 // BUG #427 FIX: Override cpustate when walker owns the SDRAM bus.
 // The SDRAM controllers use cpustate==3 to trigger the write buffer. When the
@@ -498,7 +571,7 @@ wire        zram_sel  = |ram_addr[28:26];
 // them to data reads so a stalled CPU write cannot turn a fill into a DDR write.
 wire [1:0] cpu_state_ram = walker_active_cpu ? (walker_writing_cpu ? 2'b11 : 2'b10) :
                            cache_fill_owns_ram ? 2'b10 :
-                           cpu_state;
+                           cpu_ram_state_mux;
 
 // 68030 Cache interface signals
 wire        cpu_cache_req;
@@ -618,9 +691,9 @@ cpu_wrapper
 	.ramaddr      (ram_addr_cpu    ),
 	.ramlds       (ram_lds_cpu     ),
 	.ramuds       (ram_uds_cpu     ),
-	.ramdout      (ram_dout        ),
-	.ramdin       (ram_din         ),
-	.ramready     (ram_ready & (~cache_fill_active | walker_active_cpu)),  // Block paused cache fills, but never hide walker completions
+	.ramdout      (ram_dout_to_cpu ),
+	.ramdin       (ram_din_cpu     ),
+	.ramready     (ram_ready_to_cpu),
 	.ramshared    (ramshared       ),
 
 	//custom CPU signals
@@ -716,7 +789,7 @@ ddram_ctrl ram2
 	.cpustate     (cpu_state_ram   ),  // BUG #427: Use walker-aware cpustate
 	.cpuCS        (zram_sel&ram_cs ),
 	.cpuRD        (ram_dout2       ),
-	.ramshared    (ramshared       ),
+	.ramshared    (ramshared_bus   ),
 	.ramready     (ram_ready2      )
 );
 

@@ -222,11 +222,37 @@ begin
             test_lo : std_logic_vector(31 downto 0);
             reg_name : string
         ) is
+            variable old_hi, old_lo : std_logic_vector(31 downto 0);
             variable read_hi, read_lo : std_logic_vector(31 downto 0);
         begin
+            -- A root-pointer PMOVE is one architectural quad-word transfer.
+            -- Capture the old pair so the test can verify that the first bus
+            -- beat is not exposed as a half-updated translation context.
+            read_reg(sel, '1');
+            old_hi := reg_rdat;
+            read_reg(sel, '0');
+            old_lo := reg_rdat;
+
             -- Write high word first (per MC68030 spec)
             write_reg(sel, test_hi, '1');
             wait_cycles(1);
+
+            read_reg(sel, '1');
+            read_hi := reg_rdat;
+            read_reg(sel, '0');
+            read_lo := reg_rdat;
+            if read_hi = old_hi and read_lo = old_lo then
+                report "PASS: " & reg_name & " remains atomic after high beat";
+                test_pass <= test_pass + 1;
+            else
+                report "FAIL: " & reg_name & " exposed a partial quad-word write" severity error;
+                report "  Old hi=" & integer'image(to_integer(unsigned(old_hi))) &
+                       " lo=" & integer'image(to_integer(unsigned(old_lo)));
+                report "  Got hi=" & integer'image(to_integer(unsigned(read_hi))) &
+                       " lo=" & integer'image(to_integer(unsigned(read_lo)));
+                test_fail <= test_fail + 1;
+            end if;
+
             -- Write low word
             write_reg(sel, test_lo, '0');
             wait_cycles(2);

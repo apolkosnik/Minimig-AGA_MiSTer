@@ -398,13 +398,19 @@ wire [31:0] kernel_micro_state_p;    // VHDL integer 0-255 maps to 32-bit
 wire [31:0] kernel_next_ms_p;        // VHDL integer 0-255 maps to 32-bit
 wire        kernel_trapmake_p;
 wire  [2:0] kernel_fc_p;
+wire        kernel_moves_bus_pending_p;
 // CPU Core debug signals (for CPUS ISSP probe)
 wire [31:0] kernel_TG68_PC_p;
 wire [15:0] kernel_opcode_p;
 wire [15:0] kernel_last_opc_read_p;
+wire [31:0] kernel_last_opc_pc_p;
 wire [31:0] kernel_data_read_p;
 wire [15:0] kernel_brief_p;
 wire [31:0] kernel_memaddr_reg_p;
+wire        kernel_exec_directpc_p;
+wire        kernel_pc_brw_p;
+wire        kernel_pc_word_p;
+wire [31:0] kernel_pc_add_p;
 wire  [5:0] kernel_memmask_p;
 wire        kernel_decodeOPC_p;
 wire        kernel_setnextpass_p;
@@ -440,6 +446,11 @@ wire [15:0] kernel_rte_format_word_p;
 wire [15:0] kernel_rte_mmu_fix_ssw_p;
 wire [15:0] kernel_rte_mmu_fix_opcode_p;
 wire        kernel_rte_mmu_fix_write_p;
+wire [15:0] kernel_rte_fmt_a_state1_p;
+wire [15:0] kernel_rte_fmt_a_ssw_p;
+wire [31:0] kernel_rte_fmt_a_fault_addr_p;
+wire [31:0] kernel_rte_fmt_a_data_out_p;
+wire        kernel_rte_fmt_a_replay_needed_p;
 wire        kernel_rte_format_b_version_error_p;
 // Register file debug (for REGS ISSP probe)
 wire [31:0] kernel_regfile_d0_p, kernel_regfile_d1_p, kernel_regfile_d2_p, kernel_regfile_d3_p;
@@ -550,6 +561,8 @@ wire [0:0] pmm2_issp_source;
 wire [0:0] tcwr_issp_source;
 wire [0:0] pmwr_issp_source;
 wire [0:0] rtwr_issp_source;
+wire [8:0] wwat_issp_source;
+wire [0:0] dpcw_issp_source;
 wire [0:0] walkr_issp_source;
 `ifndef ENABLE_CPUWRAP_DEBUG_PMMU_ISSP
 assign pmmu_issp_source = 1'b0;
@@ -565,6 +578,10 @@ assign pmwr_issp_source = 1'b0;
 `endif
 `ifndef ENABLE_CPUWRAP_DEBUG_RTWR_ISSP
 assign rtwr_issp_source = 1'b0;
+`endif
+`ifndef ENABLE_CPUWRAP_DEBUG_WWAT_ISSP
+assign wwat_issp_source = 9'b0;
+assign dpcw_issp_source = 1'b0;
 `endif
 `ifndef ENABLE_CPUWRAP_DEBUG_WALK_ISSP
 assign walkr_issp_source = 1'b0;
@@ -639,10 +656,10 @@ assign walkr_issp_source = 1'b0;
 `CPUWRAP_DEBUG_KEEP reg  [7:0] pmwr_write_ack_count;
 `CPUWRAP_DEBUG_KEEP reg  [3:0] pmwr_write_berr_count;
 
-// Root-table CPU write trace.  The current fast-RAM halt reads SRP[0] as
-// $00F8000D with TC=$82A08680; that value looks like the ROM-region descriptor
-// that should live at SRP[$F8], not the root slot for logical $00xxxxxx.  Trace
-// CPU writes to the live SRP/CRP root pages plus SRP[0] and SRP[$F8].
+// CPU write/PFLUSH trace for the page-table slot implicated by the NetBSD
+// init fault loop. The walker repeatedly reads $4FBFE2F4 as zero after
+// uvm_fault() returns success; record whether the CPU actually commits that
+// PTE and which PFLUSH immediately follows it.
 `CPUWRAP_DEBUG_KEEP reg        rtwr_page_seen;
 `CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_page_count;
 `CPUWRAP_DEBUG_KEEP reg        rtwr_exact_seen;
@@ -652,13 +669,15 @@ assign walkr_issp_source = 1'b0;
 `CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_exact_last_addr;
 `CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_exact_pc;
 `CPUWRAP_DEBUG_KEEP reg  [7:0] rtwr_exact_micro;
-`CPUWRAP_DEBUG_KEEP reg        rtwr_fc6_seen;
-`CPUWRAP_DEBUG_KEEP reg  [3:0] rtwr_fc6_hits;
-`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_fc6_hi_data;
-`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_fc6_lo_data;
-`CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_fc6_last_addr;
-`CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_fc6_pc;
-`CPUWRAP_DEBUG_KEEP reg  [7:0] rtwr_fc6_micro;
+`CPUWRAP_DEBUG_KEEP reg  [2:0] rtwr_exact_fc;
+`CPUWRAP_DEBUG_KEEP reg        rtwr_exact_moves_pending;
+`CPUWRAP_DEBUG_KEEP reg        rtwr_pflush_seen;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_pflush_count;
+`CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_pflush_brief;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_pflush_addr;
+`CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_pflush_pc;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] rtwr_pflush_micro;
+`CPUWRAP_DEBUG_KEEP reg        rtwr_pflush_prev;
 `CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_last0_addr;
 `CPUWRAP_DEBUG_KEEP reg [15:0] rtwr_last0_data;
 `CPUWRAP_DEBUG_KEEP reg [31:0] rtwr_last1_addr;
@@ -683,6 +702,7 @@ assign walkr_issp_source = 1'b0;
 `CPUWRAP_DEBUG_KEEP reg [15:0] walkr_fault_mmusr;
 `CPUWRAP_DEBUG_KEEP reg [31:0] walkr_fault_tc;
 `CPUWRAP_DEBUG_KEEP reg [31:0] walkr_fault_crp_lo;
+`CPUWRAP_DEBUG_KEEP reg  [4:0] walkr_fault_wstate;
 `CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e0_addr;
 `CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e0_data;
 `CPUWRAP_DEBUG_KEEP reg [31:0] walkr_e1_addr;
@@ -702,14 +722,18 @@ wire tcwr_srp_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10010);
 wire tcwr_crp_we = tcwr_any_we && (kernel_pmmu_reg_sel_p == 5'b10011);
 localparam [31:0] RTWR_NETBSD_FAULT_PAGE_ADDR = 32'h4FFF6000;
 localparam [31:0] RTWR_NETBSD_FAULT_SLOT_ADDR = 32'h4FFF6074;
-wire [31:0] rtwr_crp_slot74_addr = {stp_pmmu_crp_lo_w[31:2], 2'b00} + 32'h00000074;
+wire rtwr_pflush_cycle = cpucfg[1] && (kernel_micro_state_p == 8'd92);
+wire rtwr_pflush_hit = rtwr_pflush_cycle && !rtwr_pflush_prev;
 wire rtwr_cpu_write_done = cpucfg[1] && cpu_req && (cpustate_p == 2'b11) &&
                            ramsel && ramready && !walker_active && !pmmu_suppress_bus;
+// ramready can remain asserted while the CPU is still holding one bus beat.
+// Capture architectural context only on the edge that actually advances it.
+wire rtwr_cpu_write_accept = rtwr_cpu_write_done && cpu_clkena_in;
 wire rtwr_page_hit = rtwr_cpu_write_done &&
                      ((pmmu_addr_phys_p[31:12] == RTWR_NETBSD_FAULT_PAGE_ADDR[31:12]) ||
                       (pmmu_addr_phys_p[31:12] == stp_pmmu_crp_lo_w[31:12]));
-wire rtwr_exact_hit = rtwr_cpu_write_done && (pmmu_addr_phys_p[31:2] == RTWR_NETBSD_FAULT_SLOT_ADDR[31:2]);
-wire rtwr_fc6_hit = rtwr_exact_hit && (cpu_dout_p != 16'h0000);
+wire rtwr_exact_hit = rtwr_cpu_write_accept &&
+                      (pmmu_addr_phys_p[31:2] == RTWR_NETBSD_FAULT_SLOT_ADDR[31:2]);
 
 always @(posedge clk) begin
 	if (~reset || tcwr_issp_source[0]) begin
@@ -808,13 +832,15 @@ always @(posedge clk) begin
 		rtwr_exact_last_addr <= 0;
 		rtwr_exact_pc <= 0;
 		rtwr_exact_micro <= 0;
-		rtwr_fc6_seen <= 0;
-		rtwr_fc6_hits <= 0;
-		rtwr_fc6_hi_data <= 0;
-		rtwr_fc6_lo_data <= 0;
-		rtwr_fc6_last_addr <= 0;
-		rtwr_fc6_pc <= 0;
-		rtwr_fc6_micro <= 0;
+		rtwr_exact_fc <= 0;
+		rtwr_exact_moves_pending <= 0;
+		rtwr_pflush_seen <= 0;
+		rtwr_pflush_count <= 0;
+		rtwr_pflush_brief <= 0;
+		rtwr_pflush_addr <= 0;
+		rtwr_pflush_pc <= 0;
+		rtwr_pflush_micro <= 0;
+		rtwr_pflush_prev <= 0;
 		rtwr_last0_addr <= 0;
 		rtwr_last0_data <= 0;
 		rtwr_last1_addr <= 0;
@@ -829,50 +855,53 @@ always @(posedge clk) begin
 		rtwr_last_lds <= 0;
 		rtwr_last_ramready <= 0;
 		rtwr_last_mmu_enabled <= 0;
-	end else if (rtwr_page_hit) begin
-		rtwr_page_seen <= 1;
-		if (rtwr_page_count != 16'hFFFF)
-			rtwr_page_count <= rtwr_page_count + 16'd1;
-
-		rtwr_last3_addr <= rtwr_last2_addr;
-		rtwr_last3_data <= rtwr_last2_data;
-		rtwr_last2_addr <= rtwr_last1_addr;
-		rtwr_last2_data <= rtwr_last1_data;
-		rtwr_last1_addr <= rtwr_last0_addr;
-		rtwr_last1_data <= rtwr_last0_data;
-		rtwr_last0_addr <= pmmu_addr_phys_p;
-		rtwr_last0_data <= cpu_dout_p;
-		rtwr_last_flags <= kernel_FlagsSR_p;
-		rtwr_last_micro <= kernel_micro_state_p[7:0];
-		rtwr_last_uds <= uds_p;
-		rtwr_last_lds <= lds_p;
-		rtwr_last_ramready <= ramready;
-		rtwr_last_mmu_enabled <= stp_pmmu_tc_w[31];
-
-		if (rtwr_exact_hit) begin
-			rtwr_exact_seen <= 1;
-			if (rtwr_exact_hits != 4'hF)
-				rtwr_exact_hits <= rtwr_exact_hits + 4'd1;
-			rtwr_exact_last_addr <= pmmu_addr_log_p;
-			rtwr_exact_pc <= kernel_TG68_PC_p;
-			rtwr_exact_micro <= kernel_micro_state_p[7:0];
-			if (pmmu_addr_phys_p[1])
-				rtwr_exact_lo_data <= cpu_dout_p;
-			else
-				rtwr_exact_hi_data <= cpu_dout_p;
+	end else begin
+		rtwr_pflush_prev <= rtwr_pflush_cycle;
+		if (rtwr_pflush_hit) begin
+			rtwr_pflush_seen <= 1;
+			if (rtwr_pflush_count != 16'hFFFF)
+				rtwr_pflush_count <= rtwr_pflush_count + 16'd1;
+			rtwr_pflush_brief <= kernel_brief_p;
+			rtwr_pflush_addr <= kernel_memaddr_reg_p;
+			rtwr_pflush_pc <= kernel_exe_PC_p;
+			rtwr_pflush_micro <= kernel_micro_state_p[7:0];
 		end
 
-		if (rtwr_fc6_hit) begin
-			rtwr_fc6_seen <= 1;
-			if (rtwr_fc6_hits != 4'hF)
-				rtwr_fc6_hits <= rtwr_fc6_hits + 4'd1;
-			rtwr_fc6_last_addr <= pmmu_addr_log_p;
-			rtwr_fc6_pc <= kernel_TG68_PC_p;
-			rtwr_fc6_micro <= kernel_micro_state_p[7:0];
-			if (pmmu_addr_phys_p[1])
-				rtwr_fc6_lo_data <= cpu_dout_p;
-			else
-				rtwr_fc6_hi_data <= cpu_dout_p;
+		if (rtwr_page_hit) begin
+			rtwr_page_seen <= 1;
+			if (rtwr_page_count != 16'hFFFF)
+				rtwr_page_count <= rtwr_page_count + 16'd1;
+
+			rtwr_last3_addr <= rtwr_last2_addr;
+			rtwr_last3_data <= rtwr_last2_data;
+			rtwr_last2_addr <= rtwr_last1_addr;
+			rtwr_last2_data <= rtwr_last1_data;
+			rtwr_last1_addr <= rtwr_last0_addr;
+			rtwr_last1_data <= rtwr_last0_data;
+			rtwr_last0_addr <= pmmu_addr_phys_p;
+			rtwr_last0_data <= cpu_dout_p;
+			rtwr_last_flags <= kernel_FlagsSR_p;
+			rtwr_last_micro <= kernel_micro_state_p[7:0];
+			rtwr_last_uds <= uds_p;
+			rtwr_last_lds <= lds_p;
+			rtwr_last_ramready <= ramready;
+			rtwr_last_mmu_enabled <= stp_pmmu_tc_w[31];
+
+			if (rtwr_exact_hit) begin
+				rtwr_exact_seen <= 1;
+				if (rtwr_exact_hits != 4'hF)
+					rtwr_exact_hits <= rtwr_exact_hits + 4'd1;
+				rtwr_exact_last_addr <= pmmu_addr_log_p;
+				rtwr_exact_pc <= kernel_TG68_PC_p;
+				rtwr_exact_micro <= kernel_micro_state_p[7:0];
+				rtwr_exact_fc <= kernel_fc_p;
+				rtwr_exact_moves_pending <= kernel_moves_bus_pending_p;
+				if (pmmu_addr_phys_p[1])
+					rtwr_exact_lo_data <= cpu_dout_p;
+				else
+					rtwr_exact_hi_data <= cpu_dout_p;
+			end
+
 		end
 	end
 end
@@ -1210,11 +1239,12 @@ altsource_probe #(
 	.sld_auto_instance_index ("YES"),
 	.sld_instance_index      (14),
 	.instance_id             ("WALK"),
-	.probe_width             (501),
+	.probe_width             (506),
 	.source_width            (1),
 	.enable_metastability    ("YES")
 ) walkr_issp (
 	.probe ({
+		walkr_fault_wstate,      // [505:501]
 		walkr_seen,              // [500]
 		walkr_count,             // [499:497]
 		walkr_fault_seen,        // [496]
@@ -1334,6 +1364,392 @@ altsource_probe #(
 //   [510:493] page-write summary, [492:385] NetBSD fixed slot longword,
 //   [384:276] nonzero writes to same slot, [275:212] target/live slot addresses,
 //   [211:20] four newest root-page writes, [19:0] newest write context.
+
+
+// XWAT: execution watch at the MISSING store's PC ($226FEC - the wide
+// frozen capture showed the struct fill at $226FE0/E4/E8 stops one store
+// short). Records whether the instruction there ever RETIRES (exe_pc hit)
+// and, for the first hits, the write-beat gating state. Discriminates:
+// resume-PC skip (never retires) vs strobe-gated silent write drop
+// (retires, write suppressed).
+`CPUWRAP_DEBUG_KEEP reg  [7:0] xwat_exec_count;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] xwat_wbeat_count;
+`CPUWRAP_DEBUG_KEEP reg        xwat_seen;
+`CPUWRAP_DEBUG_KEEP reg [31:0] xwat_last_addr;
+`CPUWRAP_DEBUG_KEEP reg [15:0] xwat_last_dout;
+`CPUWRAP_DEBUG_KEEP reg        xwat_last_fault;
+`CPUWRAP_DEBUG_KEEP reg        xwat_last_uds;
+`CPUWRAP_DEBUG_KEEP reg        xwat_last_lds;
+`CPUWRAP_DEBUG_KEEP reg        xwat_last_ramsel;
+`CPUWRAP_DEBUG_KEEP reg        xwat_last_ramready;
+localparam [31:0] XWAT_PC = 32'h00226FEC;
+wire xwat_exec_hit = cpucfg[1] && cpu_clkena_in && (kernel_exe_PC_p == XWAT_PC);
+wire xwat_wbeat = cpucfg[1] && (kernel_exe_PC_p == XWAT_PC) && (cpustate_p == 2'b11);
+integer xwat_i;
+always @(posedge clk) begin
+	if (~reset || dpcw_issp_source[0]) begin
+		xwat_exec_count <= 0;
+		xwat_wbeat_count <= 0;
+		xwat_seen <= 0;
+		xwat_last_addr <= 0;
+		xwat_last_dout <= 0;
+		xwat_last_fault <= 0;
+		xwat_last_uds <= 0;
+		xwat_last_lds <= 0;
+		xwat_last_ramsel <= 0;
+		xwat_last_ramready <= 0;
+	end else begin
+		if (xwat_exec_hit && xwat_exec_count != 8'hFF)
+			xwat_exec_count <= xwat_exec_count + 8'd1;
+		if (xwat_wbeat) begin
+			xwat_seen <= 1;
+			if (xwat_wbeat_count != 8'hFF)
+				xwat_wbeat_count <= xwat_wbeat_count + 8'd1;
+			xwat_last_addr <= pmmu_addr_log_p;
+			xwat_last_dout <= cpu_dout_p;
+			xwat_last_fault <= pmmu_fault_p;
+			xwat_last_uds <= uds_p;
+			xwat_last_lds <= lds_p;
+			xwat_last_ramsel <= ramsel;
+			xwat_last_ramready <= ramready;
+		end
+	end
+end
+
+// DPCW: directPC-load trace. Every exec(directPC) PC load (RTS/RTE/vector)
+// is shift-latched with the loaded value, the read address, the prior PC and
+// micro_state. The deterministic $2F3C1B02 garbage-PC halt loads through
+// this path; the last records show WHICH pop supplied it and from WHERE.
+`CPUWRAP_DEBUG_KEEP reg  [7:0] dpcw_count;
+`CPUWRAP_DEBUG_KEEP reg [31:0] dpcw_data [0:3];
+`CPUWRAP_DEBUG_KEEP reg [31:0] dpcw_addr [0:3];
+`CPUWRAP_DEBUG_KEEP reg [31:0] dpcw_pc   [0:3];
+`CPUWRAP_DEBUG_KEEP reg  [7:0] dpcw_mi   [0:3];
+`CPUWRAP_DEBUG_KEEP reg        dpcw_bv   [0:3];  // beat_valid at the PC-load edge
+`CPUWRAP_DEBUG_KEEP reg        dpcw_pf   [0:3];  // pmmu_fault at the PC-load edge
+// Ack-path fingerprint at the PC-load edge: WHICH agent completed the beat.
+// {walker_active, suppress, busy, ready_q, fc_ready, fc_selack, chipready,
+//  ramready, ramsel, cpustate[1:0], cpu_req}
+`CPUWRAP_DEBUG_KEEP reg [11:0] dpcw_fp   [0:3];
+`CPUWRAP_DEBUG_KEEP reg [15:0] dpcw_phys [0:3];  // translated phys page [28:13]
+wire dpcw_hit = cpucfg[1] && cpu_clkena_in && kernel_clkena_lw_p &&
+                (kernel_state_p == 2'b10) && kernel_exec_directpc_p;
+`CPUWRAP_DEBUG_KEEP reg dpcw_frozen;
+// directPC is asserted across both words of a longword read. Address bit 1
+// cannot identify the final word because an RTE frame PC normally starts at
+// A7+2. Freeze only when the kernel's longword-complete qualifier is true.
+wire dpcw_freeze_now = cpucfg[1] && cpu_clkena_in && kernel_exec_directpc_p &&
+                       kernel_clkena_lw_p && (kernel_data_read_p == 32'h0);
+integer dpcw_i;
+always @(posedge clk) begin
+	if (~reset || dpcw_issp_source[0]) begin
+		dpcw_frozen <= 0;
+		dpcw_count <= 0;
+		for (dpcw_i = 0; dpcw_i < 4; dpcw_i = dpcw_i + 1) begin
+			dpcw_data[dpcw_i] <= 0;
+			dpcw_addr[dpcw_i] <= 0;
+			dpcw_pc[dpcw_i]   <= 0;
+			dpcw_mi[dpcw_i]   <= 0;
+			dpcw_bv[dpcw_i]   <= 0;
+			dpcw_pf[dpcw_i]   <= 0;
+			dpcw_fp[dpcw_i]   <= 0;
+			dpcw_phys[dpcw_i] <= 0;
+		end
+	end else if (dpcw_hit && !dpcw_frozen) begin
+		if (dpcw_freeze_now)
+			dpcw_frozen <= 1;
+		if (dpcw_count != 8'hFF)
+			dpcw_count <= dpcw_count + 8'd1;
+		for (dpcw_i = 3; dpcw_i > 0; dpcw_i = dpcw_i - 1) begin
+			dpcw_data[dpcw_i] <= dpcw_data[dpcw_i-1];
+			dpcw_addr[dpcw_i] <= dpcw_addr[dpcw_i-1];
+			dpcw_pc[dpcw_i]   <= dpcw_pc[dpcw_i-1];
+			dpcw_mi[dpcw_i]   <= dpcw_mi[dpcw_i-1];
+			dpcw_bv[dpcw_i]   <= dpcw_bv[dpcw_i-1];
+			dpcw_pf[dpcw_i]   <= dpcw_pf[dpcw_i-1];
+			dpcw_fp[dpcw_i]   <= dpcw_fp[dpcw_i-1];
+			dpcw_phys[dpcw_i] <= dpcw_phys[dpcw_i-1];
+		end
+		dpcw_data[0] <= kernel_data_read_p;
+		dpcw_addr[0] <= kernel_memaddr_reg_p;
+		dpcw_pc[0]   <= kernel_TG68_PC_p;
+		dpcw_mi[0]   <= kernel_micro_state_p[7:0];
+		dpcw_bv[0]   <= cpu_beat_valid;
+		dpcw_pf[0]   <= pmmu_fault_p;
+		dpcw_fp[0]   <= {walker_active, pmmu_suppress_bus, pmmu_busy_p,
+		                 cpu_ready_qualified, fastchip_ready, fastchip_selack,
+		                 chipready, ramready, ramsel, cpustate_p[1:0], cpu_req};
+		dpcw_phys[0] <= pmmu_addr_phys_p[28:13];
+	end
+end
+
+`ifdef ENABLE_CPUWRAP_DEBUG_WWAT_ISSP
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (15),
+	.instance_id             ("DPCW"),
+	.probe_width             (481),
+	.source_width            (1),
+	.enable_metastability    ("YES")
+) dpcw_issp (
+	// altsource_probe hard limit: 511 bits. The retired XWAT block (its
+	// store-skip/strobe-drop theories are both dead) freed the room for the
+	// per-record ack-path fingerprint; record PCs are low-16 like WWAT's.
+	.probe ({
+		dpcw_frozen, dpcw_bv[0], dpcw_pf[0], dpcw_bv[1], dpcw_pf[1], // [480:476]
+		dpcw_bv[2], dpcw_pf[2], dpcw_bv[3], dpcw_pf[3], // [475:472]
+		dpcw_fp[0], dpcw_phys[0],                       // [471:444]
+		dpcw_fp[1], dpcw_phys[1],                       // [443:416]
+		dpcw_fp[2], dpcw_phys[2],                       // [415:388]
+		dpcw_fp[3], dpcw_phys[3],                       // [387:360]
+		dpcw_count,                                     // [359:352]
+		dpcw_data[0], dpcw_addr[0], dpcw_pc[0][15:0], dpcw_mi[0],  // [351:264]
+		dpcw_data[1], dpcw_addr[1], dpcw_pc[1][15:0], dpcw_mi[1],  // [263:176]
+		dpcw_data[2], dpcw_addr[2], dpcw_pc[2][15:0], dpcw_mi[2],  // [175:88]
+		dpcw_data[3], dpcw_addr[3], dpcw_pc[3][15:0], dpcw_mi[3]   // [87:0]
+	}),
+	.source     (dpcw_issp_source),
+	.source_clk (clk),
+	.source_ena (1'b1)
+);
+`endif
+
+// WWAT: 512-entry PMMU fault history. Beacon 0034 records fault events rather
+// than CPU cycles so a late user-process fault/exit loop can be reconstructed
+// without relying on a fixed fault address.
+localparam [15:0] WWAT_BUILD_ID = 16'h0037;
+localparam integer WWAT_DEPTH = 512;
+localparam integer WWAT_RECORD_WIDTH = 232;
+
+`CPUWRAP_DEBUG_KEEP reg        wwat_seen;
+`CPUWRAP_DEBUG_KEEP reg        wwat_frozen;
+`CPUWRAP_DEBUG_KEEP reg        wwat_wrapped;
+`CPUWRAP_DEBUG_KEEP reg [15:0] wwat_count;
+`CPUWRAP_DEBUG_KEEP reg  [8:0] wwat_write_ptr;
+`CPUWRAP_DEBUG_KEEP reg  [8:0] wwat_read_index;
+`CPUWRAP_DEBUG_KEEP reg [31:0] wwat_freeze_addr;
+`CPUWRAP_DEBUG_KEEP reg [15:0] wwat_freeze_pc;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] wwat_freeze_micro;
+`CPUWRAP_DEBUG_KEEP reg        wwat_repeat_fault_prev;
+`CPUWRAP_DEBUG_KEEP reg        wwat_fault_prev;
+`CPUWRAP_DEBUG_KEEP reg        wwat_repeat_armed;
+`CPUWRAP_DEBUG_KEEP reg        wwat_repeat_freeze;
+`CPUWRAP_DEBUG_KEEP reg        wwat_repeat_gap_overflow;
+`CPUWRAP_DEBUG_KEEP reg  [9:0] wwat_repeat_gap_count;
+`CPUWRAP_DEBUG_KEEP reg        wwat_last_dpc_seen;
+`CPUWRAP_DEBUG_KEEP reg [31:0] wwat_last_dpc_target;
+`CPUWRAP_DEBUG_KEEP reg [15:0] wwat_last_dpc_pc;
+`CPUWRAP_DEBUG_KEEP reg  [7:0] wwat_last_dpc_micro;
+`CPUWRAP_DEBUG_KEEP reg        wwat_netbsd_diag_armed;
+`CPUWRAP_DEBUG_KEEP reg        wwat_copyout_onfault_seen;
+`CPUWRAP_DEBUG_KEEP reg [31:0] wwat_copyout_onfault_d0;
+`CPUWRAP_DEBUG_KEEP reg        wwat_origin_seen;
+`CPUWRAP_DEBUG_KEEP reg [31:0] wwat_origin_crp_hi;
+`CPUWRAP_DEBUG_KEEP reg [31:0] wwat_origin_crp_lo;
+`CPUWRAP_DEBUG_KEEP reg [31:0] wwat_origin_a0;
+`CPUWRAP_DEBUG_KEEP reg [31:0] wwat_origin_a7;
+`CPUWRAP_DEBUG_KEEP reg  [4:0] wwat_origin_wstate;
+(* ramstyle = "M10K" *) reg [WWAT_RECORD_WIDTH-1:0] wwat_trace [0:WWAT_DEPTH-1];
+`CPUWRAP_DEBUG_KEEP reg [WWAT_RECORD_WIDTH-1:0] wwat_read_data;
+
+wire wwat_hit = cpucfg[1];
+wire wwat_netbsd_fault_match = cpucfg[1] && pmmu_fault_p &&
+                               !kernel_pmmu_fault_is_insn_p &&
+                               !kernel_pmmu_fault_rw_p &&
+                               (kernel_pmmu_fault_fc_p == 3'b001) &&
+                               (pmmu_addr_log_p == 32'h1DFFFFF5) &&
+                               (kernel_exe_PC_p == 32'h00041C72);
+wire wwat_amiga_fault_match = cpucfg[1] && pmmu_fault_p &&
+                              !kernel_pmmu_fault_is_insn_p &&
+                              kernel_pmmu_fault_rw_p &&
+                              (kernel_pmmu_fault_fc_p == 3'b001) &&
+                              (pmmu_addr_log_p == 32'h00002C00) &&
+                              (kernel_exe_PC_p == 32'h4006D28A);
+wire wwat_repeat_fault_match = wwat_netbsd_fault_match || wwat_amiga_fault_match;
+wire wwat_fault_event = cpucfg[1] && pmmu_fault_p && !wwat_fault_prev;
+wire wwat_netbsd_origin_fault_match = cpucfg[1] && pmmu_fault_p &&
+                                      !kernel_pmmu_fault_is_insn_p &&
+                                      kernel_pmmu_fault_rw_p &&
+                                      (kernel_pmmu_fault_fc_p == 3'b001) &&
+                                      (pmmu_addr_log_p == 32'h0E17A67C) &&
+                                      (kernel_exe_PC_p == 32'h0E1552BA);
+wire wwat_copyout_onfault_match = cpucfg[1] && wwat_netbsd_diag_armed &&
+                                  (kernel_exe_PC_p == 32'h00041C92);
+wire walkr_loadustp_fault_match = cpucfg[1] && pmmu_fault_p &&
+                                  (kernel_exe_PC_p == 32'h00002D52);
+wire wwat_freeze_now = (cpucfg[1] && cpu_halted_p) || wwat_repeat_freeze;
+wire [7:0] wwat_record_flags = {
+    kernel_exec_directpc_p, kernel_pc_brw_p, kernel_pc_word_p,
+    kernel_clkena_lw_p, cpu_clkena_in, kernel_interrupt_p,
+    kernel_berr_exception_active_p, cpu_halted_p
+};
+
+always @(posedge clk) begin
+	if (~reset) begin
+		wwat_repeat_fault_prev <= 0;
+		wwat_fault_prev <= 0;
+		wwat_repeat_armed <= 0;
+		wwat_repeat_freeze <= 0;
+		wwat_repeat_gap_overflow <= 0;
+		wwat_repeat_gap_count <= 0;
+		wwat_last_dpc_seen <= 0;
+		wwat_last_dpc_target <= 0;
+		wwat_last_dpc_pc <= 0;
+		wwat_last_dpc_micro <= 0;
+		wwat_netbsd_diag_armed <= 0;
+		wwat_copyout_onfault_seen <= 0;
+		wwat_copyout_onfault_d0 <= 0;
+		wwat_origin_seen <= 0;
+		wwat_origin_crp_hi <= 0;
+		wwat_origin_crp_lo <= 0;
+		wwat_origin_a0 <= 0;
+		wwat_origin_a7 <= 0;
+		wwat_origin_wstate <= 0;
+	end else begin
+		wwat_repeat_fault_prev <= wwat_repeat_fault_match;
+		wwat_fault_prev <= pmmu_fault_p;
+		wwat_repeat_freeze <= 0;
+
+		if (wwat_repeat_armed) begin
+			if (wwat_repeat_gap_count != 10'h3FF)
+				wwat_repeat_gap_count <= wwat_repeat_gap_count + 10'd1;
+			if (wwat_repeat_gap_count >= 10'd511)
+				wwat_repeat_gap_overflow <= 1;
+			if (dpcw_hit) begin
+				wwat_last_dpc_seen <= 1;
+				wwat_last_dpc_target <= kernel_data_read_p;
+				wwat_last_dpc_pc <= kernel_TG68_PC_p[15:0];
+				wwat_last_dpc_micro <= kernel_micro_state_p[7:0];
+			end
+		end
+
+		if (wwat_repeat_fault_match && !wwat_repeat_fault_prev) begin
+			if (wwat_repeat_armed) begin
+				wwat_repeat_freeze <= 1;
+				wwat_repeat_armed <= 0;
+			end else if (!wwat_frozen) begin
+				wwat_repeat_armed <= 1;
+				wwat_repeat_gap_overflow <= 0;
+				wwat_repeat_gap_count <= 0;
+				wwat_last_dpc_seen <= 0;
+				wwat_last_dpc_target <= 0;
+				wwat_last_dpc_pc <= 0;
+				wwat_last_dpc_micro <= 0;
+			end
+		end
+
+			if (wwat_netbsd_fault_match)
+				wwat_netbsd_diag_armed <= 1;
+
+			if (wwat_netbsd_fault_match && !wwat_repeat_fault_prev &&
+			    !wwat_origin_seen) begin
+				wwat_origin_seen <= 1;
+				wwat_origin_crp_hi <= stp_pmmu_crp_hi_w;
+				wwat_origin_crp_lo <= stp_pmmu_crp_lo_w;
+				wwat_origin_a0 <= kernel_regfile_a0_p;
+				wwat_origin_a7 <= kernel_regfile_a1_p;
+				wwat_origin_wstate <= stp_pmmu_wstate_w;
+			end
+
+		if (wwat_copyout_onfault_match && !wwat_copyout_onfault_seen) begin
+			wwat_copyout_onfault_seen <= 1;
+			wwat_copyout_onfault_d0 <= kernel_regfile_d0_p;
+		end
+
+		end
+end
+
+always @(posedge clk) begin
+	// Synchronous debug read port keeps the trace in M10K rather than LUTs.
+	wwat_read_index <= wwat_issp_source;
+	wwat_read_data <= wwat_trace[wwat_issp_source];
+	if (~reset) begin
+		wwat_seen <= 0;
+		wwat_frozen <= 0;
+		wwat_wrapped <= 0;
+		wwat_count <= 0;
+		wwat_write_ptr <= 0;
+		wwat_freeze_addr <= 0;
+		wwat_freeze_pc <= 0;
+		wwat_freeze_micro <= 0;
+	end else if (!wwat_frozen) begin
+			if (wwat_hit && wwat_fault_event) begin
+				wwat_seen <= 1;
+				wwat_trace[wwat_write_ptr] <= {
+					pmmu_addr_log_p,
+					kernel_exe_PC_p,
+					kernel_TG68_PC_p,
+					stp_pmmu_crp_lo_w,
+					kernel_regfile_a7_p,
+					stp_walk_desc_addr_w,
+					stp_fault_status_w,
+					kernel_opcode_p,
+					kernel_pmmu_fault_rw_p,
+					kernel_pmmu_fault_is_insn_p,
+					kernel_pmmu_fault_fc_p,
+					kernel_berr_exception_active_p,
+					kernel_pmmu_fault_dispatched_p,
+					kernel_pmmu_fault_was_cleared_p
+				};
+			wwat_write_ptr <= wwat_write_ptr + 9'd1;
+			if (wwat_write_ptr == 9'h1FF)
+				wwat_wrapped <= 1;
+			if (wwat_count != 16'hFFFF)
+				wwat_count <= wwat_count + 16'd1;
+		end
+			if (wwat_freeze_now) begin
+				wwat_frozen <= 1;
+					if (wwat_repeat_freeze) begin
+					wwat_freeze_addr <= wwat_last_dpc_target;
+					wwat_freeze_pc <= wwat_last_dpc_pc;
+					wwat_freeze_micro <= {wwat_repeat_gap_overflow,
+					                      wwat_last_dpc_seen,
+					                      wwat_last_dpc_micro[5:0]};
+				end else begin
+					wwat_freeze_addr <= kernel_TG68_PC_p;
+					wwat_freeze_pc <= kernel_TG68_PC_p[15:0];
+					wwat_freeze_micro <= kernel_micro_state_p[7:0];
+				end
+			end
+	end
+end
+
+`ifdef ENABLE_CPUWRAP_DEBUG_WWAT_ISSP
+altsource_probe #(
+	.sld_auto_instance_index ("YES"),
+	.sld_instance_index      (14),
+	.instance_id             ("WWAT"),
+	.probe_width             (508),
+	.source_width            (9),
+	.enable_metastability    ("YES")
+) wwat_issp (
+	.probe ({
+		wwat_origin_seen,             // [507]
+		wwat_origin_crp_hi,           // [506:475]
+		wwat_origin_crp_lo,           // [474:443]
+		wwat_origin_a0,               // [442:411]
+		wwat_origin_a7,               // [410:379]
+		wwat_origin_wstate,           // [378:374]
+		wwat_copyout_onfault_seen,    // [373]
+		wwat_copyout_onfault_d0,      // [372:341]
+		WWAT_BUILD_ID,       // [340:325]
+		wwat_frozen,         // [324]
+		wwat_seen,           // [323]
+		wwat_wrapped,        // [322]
+		wwat_count,          // [321:306]
+		wwat_write_ptr,      // [305:297]
+		wwat_read_index,     // [296:288]
+		wwat_freeze_addr,    // [287:256]
+		wwat_freeze_pc,      // [255:240]
+		wwat_freeze_micro,   // [239:232]
+		wwat_read_data       // [231:0]
+	}),
+	.source     (wwat_issp_source),
+	.source_clk (clk),
+	.source_ena (1'b1)
+);
+`endif
+
 `ifdef ENABLE_CPUWRAP_DEBUG_RTWR_ISSP
 altsource_probe #(
 	.sld_auto_instance_index ("YES"),
@@ -1353,15 +1769,16 @@ altsource_probe #(
 		rtwr_exact_last_addr,      // [456:425]
 		rtwr_exact_pc,             // [424:393]
 		rtwr_exact_micro,          // [392:385]
-		rtwr_fc6_seen,             // [384]
-		rtwr_fc6_hits,             // [383:380]
-		rtwr_fc6_hi_data,          // [379:364]
-		rtwr_fc6_lo_data,          // [363:348]
-		rtwr_fc6_last_addr,        // [347:316]
-		rtwr_fc6_pc,               // [315:284]
-		rtwr_fc6_micro,            // [283:276]
+		rtwr_pflush_seen,          // [384]
+		rtwr_pflush_count,         // [383:368]
+		rtwr_pflush_brief,         // [367:352]
+		rtwr_pflush_addr,          // [351:320]
+		rtwr_pflush_pc,            // [319:288]
+		rtwr_pflush_micro,         // [287:280]
+		rtwr_exact_fc,             // [279:277]
+		rtwr_exact_moves_pending,  // [276]
 		RTWR_NETBSD_FAULT_SLOT_ADDR, // [275:244]
-		rtwr_crp_slot74_addr,      // [243:212]
+		stp_pmmu_crp_lo_w,         // [243:212]
 		rtwr_last0_addr,           // [211:180]
 		rtwr_last0_data,           // [179:164]
 		rtwr_last1_addr,           // [163:132]
@@ -2022,13 +2439,27 @@ wire        cacr_wa;   // Write Allocate
 // Qualify CPU completion on the bus that is currently selected.
 // This blocks stale ready pulses (e.g. delayed SDRAM ramready from a stale
 // physical address) from completing an unrelated chip/fast cycle.
+// The chip term must only ack a chip cycle the CPU actually REQUESTED:
+// under pmmu_suppress_bus (walk/fault in progress) ramsel and fastchip_selack
+// are forced low, so an unqualified chipready degenerates to a wildcard ack -
+// and the WALKER's own page-table chip reads pulse chipready. id12 capture:
+// the fork-return RTE pop consumed such a beat (cpu_din = stale chip_data =
+// the walker's zero descriptor) and popped PC=0 with no memory transaction.
 wire        cpu_ready_qualified = (ramsel & ramready) |
                                   (fastchip_selack & fastchip_ready) |
-                                  (~ramsel & ~fastchip_selack & chipready);
+                                  (~ramsel & ~fastchip_selack &
+                                   ~pmmu_suppress_bus & ~walker_active & chipready);
 wire        cpu_clkena_in = (~cpu_req | cpu_ready_qualified | (USE_68030_CACHE & cache_hit) |
                              pmmu_fault_p | walker_timeout_error | ~reset) &
                             (~pmmu_walker_req_p | ~reset | walker_timeout_error) &
                             (~pmmu_busy_p | pmmu_fault_p | walker_timeout_error | ~reset);
+// TRUE ready-ack qualifier for the kernel's data-consumption sites: clkena_in
+// releases on pmmu_fault (the CPU must advance to dispatch the exception) and
+// on walker_timeout, but such force-completed beats carry stale bus garbage
+// (hardware: $1B00/$FFFF/$4E71/$1500 junk consumed as opcodes/extensions/PC
+// across builds). beat_valid is high only when the beat completed via a REAL
+// ack (memory ready on the selected bus, or a cache hit) or no request is out.
+wire        cpu_beat_valid = ~cpu_req | cpu_ready_qualified | (USE_68030_CACHE & cache_hit);
 
 wire rted_rte_opcode = (kernel_opcode_p == 16'h4E73);
 wire rted_start = cpu_clkena_in && rted_rte_opcode &&
@@ -2169,10 +2600,14 @@ always @(posedge clk) begin
 	end
 end
 
+// Last-wins capture for 68030 $A/$B frames. For $A this records all six
+// extension longwords and the kernel's parsed replay fields, allowing the
+// physical frame contents to be distinguished from a pop-indexing error.
 wire fbrd_start = cpu_clkena_in &&
                   (kernel_micro_state_p[7:0] == MS_RTE4) &&
-                  (kernel_rte_format_word_p[15:12] == 4'hB) &&
-                  !fbrd_seen;
+                  ((kernel_rte_format_word_p[15:12] == 4'hA) ||
+                   (kernel_rte_format_word_p[15:12] == 4'hB)) &&
+                  !fbrd_active;
 wire fbrd_read_complete = fbrd_active && cpu_clkena_in &&
                           kernel_clkena_lw_p &&
                           (kernel_micro_state_p[7:0] == MS_RTE5);
@@ -2241,24 +2676,36 @@ always @(posedge clk) begin
 		if (fbrd_read_complete) begin
 			case (fbrd_read_count)
 				5'd0:  fbrd_l0_state_ssw   <= kernel_data_read_p; // SP+$08: state/SSW
+				5'd1:  if (fbrd_format_word[15:12] == 4'hA)
+				            fbrd_stageb_addr <= kernel_data_read_p; // SP+$0C: pipe C/B
 				5'd2:  fbrd_fault_addr     <= kernel_data_read_p; // SP+$10
 				5'd3:  fbrd_opcode_long    <= kernel_data_read_p; // SP+$14
 				5'd4:  fbrd_dob            <= kernel_data_read_p; // SP+$18
+				5'd5:  if (fbrd_format_word[15:12] == 4'hA)
+				            fbrd_dib <= kernel_data_read_p; // SP+$1C: internal state
 				5'd7:  fbrd_stageb_addr    <= kernel_data_read_p; // SP+$24
 				5'd9:  fbrd_dib            <= kernel_data_read_p; // SP+$2C
 				5'd10: fbrd_state01        <= kernel_data_read_p; // SP+$30
 				5'd11: fbrd_state2_version <= kernel_data_read_p; // SP+$34/$36
 				default: ;
 			endcase
-			if (fbrd_read_count == 5'd20) begin
+			if (((fbrd_format_word[15:12] == 4'hA) && (fbrd_read_count == 5'd5)) ||
+			    ((fbrd_format_word[15:12] == 4'hB) && (fbrd_read_count == 5'd20))) begin
 				fbrd_active     <= 0;
 				fbrd_done       <= 1;
 				fbrd_final_pc   <= kernel_TG68_PC_p;
 				fbrd_final_a7   <= kernel_regfile_a7_p;
-				fbrd_fix_ssw    <= kernel_rte_mmu_fix_ssw_p;
-				fbrd_fix_opcode <= kernel_rte_mmu_fix_opcode_p;
-				fbrd_mmusr      <= stp_fault_status_w;
-				fbrd_saved_addr <= stp_saved_addr_w;
+				if (fbrd_format_word[15:12] == 4'hA) begin
+					fbrd_fix_ssw    <= kernel_rte_fmt_a_ssw_p;
+					fbrd_fix_opcode <= kernel_rte_fmt_a_state1_p;
+					fbrd_mmusr      <= {15'b0, kernel_rte_fmt_a_replay_needed_p};
+					fbrd_saved_addr <= kernel_rte_fmt_a_fault_addr_p;
+				end else begin
+					fbrd_fix_ssw    <= kernel_rte_mmu_fix_ssw_p;
+					fbrd_fix_opcode <= kernel_rte_mmu_fix_opcode_p;
+					fbrd_mmusr      <= stp_fault_status_w;
+					fbrd_saved_addr <= stp_saved_addr_w;
+				end
 			end else begin
 				fbrd_read_count <= fbrd_read_count + 1'b1;
 			end
@@ -2867,6 +3314,7 @@ cpu_inst_p
   // advance to process the fault (accumulate make_berr, detect double bus fault).
   // Bus accesses are suppressed by pmmu_suppress_bus, so no stray writes occur.
   .clkena_in(cpu_clkena_in),
+  .beat_valid(cpu_beat_valid),
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
@@ -2916,6 +3364,7 @@ cpu_inst_p
   .debug_interrupt(kernel_interrupt_p),
   .debug_setendOPC(kernel_setendOPC_p),
   .debug_IPL_nr(kernel_IPL_nr_p),
+  .debug_last_opc_pc(kernel_last_opc_pc_p),
   // MC68030 bus fault: PMMU fault signal for bus access suppression
   .debug_pmmu_fault(pmmu_fault_p),
   .debug_pmmu_reg_we(kernel_pmmu_reg_we_p),
@@ -2973,6 +3422,11 @@ cpu_inst_p
   .debug_rte_mmu_fix_ssw(kernel_rte_mmu_fix_ssw_p),
   .debug_rte_mmu_fix_opcode(kernel_rte_mmu_fix_opcode_p),
   .debug_rte_mmu_fix_write(kernel_rte_mmu_fix_write_p),
+  .debug_rte_fmt_a_state1(kernel_rte_fmt_a_state1_p),
+  .debug_rte_fmt_a_ssw(kernel_rte_fmt_a_ssw_p),
+  .debug_rte_fmt_a_fault_addr(kernel_rte_fmt_a_fault_addr_p),
+  .debug_rte_fmt_a_data_out(kernel_rte_fmt_a_data_out_p),
+  .debug_rte_fmt_a_replay_needed(kernel_rte_fmt_a_replay_needed_p),
   .debug_rte_format_b_version_error(kernel_rte_format_b_version_error_p),
   .debug_trap_vector(kernel_trap_vector_p),
   .debug_micro_state(kernel_micro_state_p),
@@ -2984,7 +3438,12 @@ cpu_inst_p
   .debug_last_opc_read(kernel_last_opc_read_p),
   .debug_data_read(kernel_data_read_p),
   .debug_brief(kernel_brief_p),
+	.debug_moves_bus_pending(kernel_moves_bus_pending_p),
   .debug_memaddr_reg(kernel_memaddr_reg_p),
+	  .debug_exec_directPC(kernel_exec_directpc_p),
+	  .debug_pc_brw(kernel_pc_brw_p),
+	  .debug_pc_word(kernel_pc_word_p),
+	  .debug_pc_add(kernel_pc_add_p),
   .debug_memmask(kernel_memmask_p),
   .debug_decodeOPC(kernel_decodeOPC_p),
   .debug_setnextpass(kernel_setnextpass_p),
@@ -3095,8 +3554,11 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 		.z3ram_ena0(z3ram_ena0),
 		.z3ram_ena1(z3ram_ena1),
 		.z2ram_ena(z2ram_ena),
-		.cacr_ie(cacr_ie),
-		.cacr_de(cacr_de),
+		// CACHE BISECT EXPERIMENT: force the controller's native CACR-disabled
+		// mode (no hits, no fills - exactly how every boot's pre-SetPatch phase
+		// runs). Restore to cacr_ie/cacr_de after the hardware verdict.
+		.cacr_ie(1'b0),
+		.cacr_de(1'b0),
 		.cacr_ifreeze(cacr_ifreeze),
 		.cacr_dfreeze(cacr_dfreeze),
 		.cacr_wa(cacr_wa),
@@ -3238,6 +3700,7 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 			walkr_fault_mmusr <= 0;
 			walkr_fault_tc <= 0;
 			walkr_fault_crp_lo <= 0;
+			walkr_fault_wstate <= 0;
 			walkr_e0_addr <= 0;
 			walkr_e0_data <= 0;
 			walkr_e1_addr <= 0;
@@ -3268,12 +3731,14 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 				walkr_e5_addr <= walker_read_complete_addr;
 				walkr_e5_data <= walker_read_complete_data;
 			end
-			if (pmmu_fault_p && !walkr_fault_seen) begin
+			if ((wwat_netbsd_origin_fault_match || walkr_loadustp_fault_match) &&
+			    !walkr_fault_seen) begin
 				walkr_fault_seen <= 1;
 				walkr_fault_saved_addr <= stp_saved_addr_w;
 				walkr_fault_mmusr <= stp_fault_status_w;
 				walkr_fault_tc <= stp_pmmu_tc_w;
 				walkr_fault_crp_lo <= stp_pmmu_crp_lo_w;
+				walkr_fault_wstate <= stp_pmmu_wstate_w;
 			end
 		end
 	end

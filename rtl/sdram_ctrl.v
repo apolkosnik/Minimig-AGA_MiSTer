@@ -102,6 +102,40 @@ end
 
 wire ramsel = cpuCS & (~&cpustate | ~cpuU | ~cpuL);
 
+// Force one cache-clock request gap when TG68 changes transactions without
+// dropping the outer RAM select. Keep address/data live so a first-edge sample
+// cannot freeze write data before it is valid.
+reg [24:1] cacheReqAddr;
+reg [15:0] cacheReqDat;
+reg        cacheReqU, cacheReqL;
+reg  [1:0] cacheReqState;
+reg        cacheReqActive;
+wire cache_request_matches = cacheReqActive &&
+                             (cpuAddr == cacheReqAddr) &&
+                             (cpuU == cacheReqU) && (cpuL == cacheReqL) &&
+                             (cpustate == cacheReqState) &&
+                             ((cpustate != 2'b11) || (cpuWR == cacheReqDat));
+wire cache_cpu_cs = ramsel && cache_request_matches;
+always @(posedge sysclk) begin
+	if (!reset_n) begin
+		cacheReqActive <= 0;
+		cacheReqAddr <= 0;
+		cacheReqDat <= 0;
+		cacheReqU <= 1;
+		cacheReqL <= 1;
+		cacheReqState <= 1;
+	end else if (!ramsel) begin
+		cacheReqActive <= 0;
+	end else if (!cache_request_matches) begin
+		cacheReqAddr <= cpuAddr;
+		cacheReqDat <= cpuWR;
+		cacheReqU <= cpuU;
+		cacheReqL <= cpuL;
+		cacheReqState <= cpustate;
+		cacheReqActive <= 1;
+	end
+end
+
 // cpu cache
 wire cache_rd_ack;
 wire cache_wr_ack;
@@ -112,13 +146,13 @@ cpu_cache_new cpu_cache
 	.rst              (!reset || !cache_rst),  // cache reset
 	.cpu_cache_ctrl   (cpu_cache_ctrl),        // CPU cache control
 	.cache_inhibit    (cache_inhibit),         // cache inhibit
-	.cpu_cs           (ramsel),                // cpu activity
-	.cpu_adr          (cpuAddr),               // cpu address
+	.cpu_cs           (cache_cpu_cs),          // distinct cpu transactions
+	.cpu_adr          (cpuAddr),               // live cpu address
 	.cpu_bs           ({!cpuU, !cpuL}),        // cpu byte selects
 	.cpu_we           (cpustate == 3),         // cpu write
 	.cpu_ir           (cpustate == 0),         // cpu instruction read
 	.cpu_dr           (cpustate == 2),         // cpu data read
-	.cpu_dat_w        (cpuWR),                 // cpu write data
+	.cpu_dat_w        (cpuWR),                 // live cpu write data
 	.cpu_dat_r        (cpuRD),                 // cpu read data
 	.cpu_ack          (cache_rd_ack),          // cpu acknowledge
 	.wb_en            (cache_wr_ack),          // write enable
@@ -161,7 +195,7 @@ always @ (posedge sysclk) begin
 		write_ena <= 0;
 		case(write_state)
 			default:
-				if(ramsel && cpustate == 3) begin
+				if(cache_cpu_cs && cpustate == 3) begin
 					writeAddr <= cpuAddr;
 					writeDat  <= cpuWR;
 					write_dqm <= {cpuU, cpuL};
@@ -180,14 +214,21 @@ always @ (posedge sysclk) begin
 					write_state <= 2;
 				end
 
-			2: if(!write_ack) begin
-					write_state <= 0;
-				end
+			2: begin
+					// sysclk is 114 MHz while TG68 samples completion at
+					// 28 MHz. Hold the write acknowledgement until the
+					// registered CPU request drops so no completion pulse can
+					// fall entirely between CPU edges.
+					if (cache_cpu_cs)
+						write_ena <= 1;
+					else if (!write_ack)
+						write_state <= 0;
+			end
 		endcase
 	end
 end
 
-assign ramready = cache_rd_ack || write_ena;
+assign ramready = (cpustate == 2'b11) ? write_ena : cache_rd_ack;
 
 //// chip line read ////
 reg [15:0] chip48_1, chip48_2, chip48_3;

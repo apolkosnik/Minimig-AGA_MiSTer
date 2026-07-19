@@ -14,6 +14,9 @@ use ieee.numeric_std.all;
 use ieee.std_logic_unsigned.all;
 
 entity tb_mmu_restart_moves_dfc is
+    generic (
+        ONFAULT_REDIRECT : boolean := false
+    );
 end entity;
 
 architecture behavioral of tb_mmu_restart_moves_dfc is
@@ -90,6 +93,7 @@ architecture behavioral of tb_mmu_restart_moves_dfc is
     signal debug_regfile_d0 : std_logic_vector(31 downto 0);
     signal debug_regfile_d2 : std_logic_vector(31 downto 0);
     signal debug_regfile_a0 : std_logic_vector(31 downto 0);
+    signal debug_regfile_a7 : std_logic_vector(31 downto 0);
     signal debug_stop      : std_logic;
 
     signal stall_cooldown : integer range 0 to 3 := 0;
@@ -108,7 +112,7 @@ architecture behavioral of tb_mmu_restart_moves_dfc is
 
     type mem_type is array(0 to 16383) of std_logic_vector(15 downto 0);
 
-    function init_mem return mem_type is
+    impure function init_mem return mem_type is
         variable m : mem_type := (others => x"4E71");
     begin
         -- Reset vectors
@@ -120,15 +124,29 @@ architecture behavioral of tb_mmu_restart_moves_dfc is
             m(i*2+1) := x"00C0";
         end loop;
 
-        -- Vector 2 handler: mark entry, save frame base, repair the indirect
-        -- target descriptor for $1DFFFFF5, PFLUSH that page, RTE unmodified.
+        -- Vector 2 handler: mark entry and save the original frame base.
         m(64) := x"23FC"; m(65) := x"0000"; m(66) := x"0002"; m(67) := x"0000"; m(68) := x"1F00";
         m(69) := x"23CF"; m(70) := x"0000"; m(71) := x"1F24"; -- MOVE.L A7,$1F24.L
-        m(72) := x"23FC"; m(73) := x"0000"; m(74) := x"7C61"; -- MOVE.L #$00007C61,$7000.L
-        m(75) := x"0000"; m(76) := x"7000";
-        m(77) := x"227C"; m(78) := x"1DFF"; m(79) := x"FFF5"; -- MOVEA.L #$1DFFFFF5,A1
-        m(80) := x"F011"; m(81) := x"3810";                   -- PFLUSH #0,#0,(A1)
-        m(82) := x"4E73";                                     -- RTE
+        if ONFAULT_REDIRECT then
+            -- NetBSD trapcpfault/faultstkadj result for a format-A frame:
+            -- relocate the 8-byte header over the 24-byte extension, replace
+            -- PC with pcb_onfault, collapse to format 0, and RTE.
+            m(72) := x"3F57"; m(73) := x"0018";               -- MOVE.W (A7),24(A7)
+            m(74) := x"2F7C"; m(75) := x"0000"; m(76) := x"0150";
+            m(77) := x"001A";                                 -- MOVE.L #$150,26(A7)
+            m(78) := x"426F"; m(79) := x"001E";               -- CLR.W 30(A7)
+            m(80) := x"4FEF"; m(81) := x"0018";               -- LEA 24(A7),A7
+            m(82) := x"700E";                                  -- MOVEQ #EFAULT,D0
+            m(83) := x"4E73";                                  -- RTE
+        else
+            -- Demand-paging path: repair the indirect descriptor, PFLUSH the
+            -- page, and use an unmodified RTE to restart the MOVES.B.
+            m(72) := x"23FC"; m(73) := x"0000"; m(74) := x"7C61"; -- MOVE.L #$00007C61,$7000.L
+            m(75) := x"0000"; m(76) := x"7000";
+            m(77) := x"227C"; m(78) := x"1DFF"; m(79) := x"FFF5"; -- MOVEA.L #$1DFFFFF5,A1
+            m(80) := x"F011"; m(81) := x"3810";                   -- PFLUSH #0,#0,(A1)
+            m(82) := x"4E73";                                     -- RTE
+        end if;
 
         -- Unexpected trap handler
         m(96) := x"23FC"; m(97) := x"00FF"; m(98) := x"0000";
@@ -155,6 +173,12 @@ architecture behavioral of tb_mmu_restart_moves_dfc is
         m(158) := x"23FC"; m(159) := x"C0DE"; m(160) := x"700D"; -- MOVE.L #$C0DE700D,$1F2C.L
         m(161) := x"0000"; m(162) := x"1F2C";
         m(163) := x"60FE";                                     -- BRA.S *
+
+        -- pcb_onfault recovery target. The page remains invalid, so only a
+        -- successful short-frame redirect can reach this marker.
+        m(168) := x"23FC"; m(169) := x"C0DE"; m(170) := x"0F17";
+        m(171) := x"0000"; m(172) := x"1F2C";
+        m(173) := x"60FE";
 
         -- CRP / SRP
         m(2112) := x"8000"; m(2113) := x"0002"; m(2114) := x"4FAA"; m(2115) := x"6000";
@@ -242,7 +266,7 @@ begin
             debug_regfile_d1 => open, debug_regfile_d2 => debug_regfile_d2, debug_regfile_d3 => open, debug_regfile_d4 => open,
             debug_regfile_d5 => open, debug_regfile_d6 => open, debug_regfile_d7 => open, debug_regfile_a1 => open,
             debug_regfile_a2 => open, debug_regfile_a3 => open, debug_regfile_a4 => open, debug_regfile_a5 => open,
-            debug_regfile_a6 => open, debug_regfile_a7 => open, debug_regfile_we => open, debug_regfile_waddr => open,
+            debug_regfile_a6 => open, debug_regfile_a7 => debug_regfile_a7, debug_regfile_we => open, debug_regfile_waddr => open,
             debug_regfile_wdata => open, debug_trap_illegal => open, debug_trap_priv => open,
             debug_trap_addr_error => debug_trap_addr_error, debug_trap_berr => debug_trap_berr,
             debug_trap_mmu_berr => debug_trap_mmu_berr, debug_trap_vector => debug_trap_vector,
@@ -410,6 +434,9 @@ begin
         variable frame_ssw : std_logic_vector(15 downto 0);
         variable frame_pc : std_logic_vector(31 downto 0);
         variable frame_fault_addr : std_logic_vector(31 downto 0);
+        variable short_frame_word : integer;
+        variable short_frame_pc : std_logic_vector(31 downto 0);
+        variable short_frame_format : std_logic_vector(15 downto 0);
     begin
         report "=== MMU RESTART MOVES.B DFC WRITE TEST ===" severity note;
         wait for 100 ns;
@@ -418,7 +445,7 @@ begin
         for i in 0 to 50000 loop
             wait until rising_edge(clk);
             done_mark := mem(16#0F96#) & mem(16#0F97#); -- $1F2C
-            if debug_cpu_halted = '1' or done_mark = x"C0DE700D" then
+            if debug_cpu_halted = '1' or done_mark = x"C0DE700D" or done_mark = x"C0DE0F17" then
                 exit;
             end if;
         end loop;
@@ -433,6 +460,9 @@ begin
         frame_ssw := mem(frame_word + 5);
         frame_pc := mem(frame_word + 1) & mem(frame_word + 2);
         frame_fault_addr := mem(frame_word + 8) & mem(frame_word + 9);
+        short_frame_word := frame_word + 12;
+        short_frame_pc := mem(short_frame_word + 1) & mem(short_frame_word + 2);
+        short_frame_format := mem(short_frame_word + 3);
 
         if debug_cpu_halted = '1' then
             report "FAIL: cpu_halted asserted"
@@ -450,7 +480,16 @@ begin
 	                   & " done=$" & slv_to_hex(done_mark)
 	                   & " frame_a7=$" & slv_to_hex(frame_a7)
             severity failure;
-        elsif done_mark /= x"C0DE700D" then
+        elsif ONFAULT_REDIRECT and done_mark /= x"C0DE0F17" then
+            report "FAIL: pcb_onfault RTE did not reach the recovery target, PC=$" & slv_to_hex(debug_TG68_PC)
+                   & " A7=$" & slv_to_hex(debug_regfile_a7)
+                   & " marker=$" & slv_to_hex(marker)
+                   & " done=$" & slv_to_hex(done_mark)
+                   & " frame_a7=$" & slv_to_hex(frame_a7)
+                   & " short_pc=$" & slv_to_hex(short_frame_pc)
+                   & " short_format=$" & slv_to_hex(short_frame_format)
+                   severity failure;
+        elsif not ONFAULT_REDIRECT and done_mark /= x"C0DE700D" then
             report "FAIL: restarted MOVES.B did not reach done marker, PC=$" & slv_to_hex(debug_TG68_PC)
                    & " D0=$" & slv_to_hex(debug_regfile_d0)
                    & " D2=$" & slv_to_hex(debug_regfile_d2)
@@ -475,7 +514,28 @@ begin
         elsif saw_corrupt_crp_root_desc then
             report "FAIL: observed corrupted CRP root descriptor address $4FFF6074"
                    severity failure;
-        elsif moved_word /= x"00A5" then
+        elsif frame_fault_addr /= x"1DFFFFF5" or frame_pc /= x"0000013C" or
+              frame_ssw(8) /= '1' or frame_ssw(7) /= '0' or frame_ssw(6) /= '0' or
+              frame_ssw(5 downto 4) /= "01" or frame_ssw(2 downto 0) /= "001" then
+            report "FAIL: stacked frame does not describe the original MOVES.B DFC write fault"
+                   & " frame_a7=$" & slv_to_hex(frame_a7)
+                   & " frame_ssw=$" & slv_to_hex(frame_ssw)
+                   & " frame_pc=$" & slv_to_hex(frame_pc)
+                   & " frame_fault=$" & slv_to_hex(frame_fault_addr)
+                   severity failure;
+        elsif ONFAULT_REDIRECT and
+              (moved_word /= x"0000" or pte_target /= x"BADFEED0" or
+               short_frame_pc /= x"00000150" or short_frame_format /= x"0000" or
+               debug_regfile_a7 /= x"0BAFA000" or debug_regfile_d0 /= x"0000000E") then
+            report "FAIL: pcb_onfault frame collapse/return state is incorrect"
+                   & " word=$" & slv_to_hex(moved_word)
+                   & " pte=$" & slv_to_hex(pte_target)
+                   & " short_pc=$" & slv_to_hex(short_frame_pc)
+                   & " short_format=$" & slv_to_hex(short_frame_format)
+                   & " A7=$" & slv_to_hex(debug_regfile_a7)
+                   & " D0=$" & slv_to_hex(debug_regfile_d0)
+                   severity failure;
+        elsif not ONFAULT_REDIRECT and moved_word /= x"00A5" then
             report "FAIL: restarted MOVES.B did not write low byte $A5 at physical $7FF5"
                    & " word=$" & slv_to_hex(moved_word)
                    & " D2=$" & slv_to_hex(debug_regfile_d2)
@@ -492,19 +552,18 @@ begin
                    & " trap_addr=" & std_logic'image(debug_trap_addr_error)
                    & " MMUSR=$" & slv_to_hex(debug_pmmu_fault_status)
                    severity failure;
-        elsif frame_fault_addr /= x"1DFFFFF5" or frame_pc /= x"00000134" or
-              frame_ssw(8) /= '1' or frame_ssw(7) /= '0' or frame_ssw(6) /= '0' or
-              frame_ssw(5 downto 4) /= "01" or frame_ssw(2 downto 0) /= "001" then
-            report "FAIL: stacked frame does not describe the original MOVES.B DFC write fault"
-                   & " frame_a7=$" & slv_to_hex(frame_a7)
-                   & " frame_ssw=$" & slv_to_hex(frame_ssw)
-                   & " frame_pc=$" & slv_to_hex(frame_pc)
-                   & " frame_fault=$" & slv_to_hex(frame_fault_addr)
-                   severity failure;
-        elsif pte_target(31 downto 8) /= x"00007C" or pte_target(1 downto 0) /= "01" then
+        elsif not ONFAULT_REDIRECT and
+              (pte_target(31 downto 8) /= x"00007C" or pte_target(1 downto 0) /= "01") then
             report "FAIL: handler did not repair indirect target descriptor"
                    & " pte=$" & slv_to_hex(pte_target)
                    severity failure;
+        elsif ONFAULT_REDIRECT then
+            report "PASS: MOVES.B DFC fault returned through NetBSD-style pcb_onfault short frame"
+                   & " frame_a7=$" & slv_to_hex(frame_a7)
+                   & " short_pc=$" & slv_to_hex(short_frame_pc)
+                   & " A7=$" & slv_to_hex(debug_regfile_a7)
+                   & " D0=$" & slv_to_hex(debug_regfile_d0)
+            severity note;
         else
             report "PASS: MOVES.B DFC write fault restarted after live CRP/SRP walk"
                    & " frame_a7=$" & slv_to_hex(frame_a7)

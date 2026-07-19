@@ -355,24 +355,26 @@ begin
     report "" severity note;
     report "===== TEST 4: CRP Register (64-bit) =====" severity note;
 
-    -- 4a: CRP HIGH - all bits set, check reserved bits 15-2 cleared
-    -- 0xFFFFFFFF & 0xFFFF0003 = 0xFFFF0003
-    write_and_check(SEL_CRP, '1', x"FFFFFFFF", x"FFFF0003",
+    -- 4a/4b: CRP is one quad-word PMOVE operand.  Present both bus beats before
+    -- checking either architecturally visible half.
+    write_reg(SEL_CRP, '1', x"FFFFFFFF");
+    check_reg(SEL_CRP, '1', x"00000000", x"FFFFFFFF",
+      "CRP remains unchanged after first quad-word beat");
+    write_reg(SEL_CRP, '0', x"FFFFFFFF");
+    check_reg(SEL_CRP, '1', x"FFFF0003", x"FFFFFFFF",
       "CRP_H all-1s - reserved bits 15-2 cleared");
-
-    -- 4b: CRP LOW - all bits set, check reserved bits 3-0 cleared
-    -- 0xFFFFFFFF & 0xFFFFFFF0 = 0xFFFFFFF0
-    write_and_check(SEL_CRP, '0', x"FFFFFFFF", x"FFFFFFF0",
+    check_reg(SEL_CRP, '0', x"FFFFFFF0", x"FFFFFFFF",
       "CRP_L all-1s - reserved bits 3-0 cleared");
 
     -- 4c: CRP HIGH - typical value: L/U=1, Limit=0, DT=10 (short format)
     -- 0x80000002 & 0xFFFF0003 = 0x80000002
-    write_and_check(SEL_CRP, '1', x"80000002", x"80000002",
-      "CRP_H L/U=1 DT=10 (typical)");
+    write_reg(SEL_CRP, '1', x"80000002");
 
-    -- 4d: CRP LOW - typical table address
-    -- 0x00040010 & 0xFFFFFFF0 = 0x00040010
-    write_and_check(SEL_CRP, '0', x"00040010", x"00040010",
+    -- 4d: CRP LOW - typical table address; commits the complete pair.
+    write_reg(SEL_CRP, '0', x"00040010");
+    check_reg(SEL_CRP, '1', x"80000002", x"FFFFFFFF",
+      "CRP_H L/U=1 DT=10 (typical)");
+    check_reg(SEL_CRP, '0', x"00040010", x"FFFFFFFF",
       "CRP_L table address (typical)");
 
     -- 4e: Verify CRP HIGH persists after CRP LOW write
@@ -384,14 +386,21 @@ begin
     -- Actually: 0x5678 in binary = 0101 0110 0111 1000
     -- Masked by   0x0003        = 0000 0000 0000 0011
     -- Result lower 16 bits      = 0000 0000 0000 0000 = 0x0000
-    write_and_check(SEL_CRP, '1', x"ABCD5678", x"ABCD0000",
-      "CRP_H reserved bits 15-2 verified cleared");
-    ack_mmu_config_error_if_set;
+    write_reg(SEL_CRP, '1', x"ABCD5678");
 
     -- 4g: CRP LOW with reserved bits set in 3-0 range
     -- 0x1234000F & 0xFFFFFFF0 = 0x12340000
-    write_and_check(SEL_CRP, '0', x"1234000F", x"12340000",
+    write_reg(SEL_CRP, '0', x"1234000F");
+    check_reg(SEL_CRP, '1', x"ABCD0000", x"FFFFFFFF",
+      "CRP_H reserved bits 15-2 verified cleared");
+    check_reg(SEL_CRP, '0', x"12340000", x"FFFFFFFF",
       "CRP_L reserved bits 3-0 verified cleared");
+
+    -- A stray second beat must not splice a new table address into the live root.
+    write_reg(SEL_CRP, '0', x"DEAD0000");
+    check_reg(SEL_CRP, '0', x"12340000", x"FFFFFFFF",
+      "CRP low-only write ignored");
+    ack_mmu_config_error_if_set;
 
     -- =============================================
     -- TEST 5: SRP Register (sel="10010") - 64-bit
@@ -400,22 +409,26 @@ begin
     report "" severity note;
     report "===== TEST 5: SRP Register (64-bit) =====" severity note;
 
-    -- 5a: SRP HIGH - all bits set
-    write_and_check(SEL_SRP, '1', x"FFFFFFFF", x"FFFF0003",
+    -- 5a/5b: complete the SRP quad-word before checking either half.
+    write_reg(SEL_SRP, '1', x"FFFFFFFF");
+    check_reg(SEL_SRP, '1', x"00000000", x"FFFFFFFF",
+      "SRP remains unchanged after first quad-word beat");
+    write_reg(SEL_SRP, '0', x"FFFFFFFF");
+    check_reg(SEL_SRP, '1', x"FFFF0003", x"FFFFFFFF",
       "SRP_H all-1s - reserved bits 15-2 cleared");
-
-    -- 5b: SRP LOW - all bits set
-    write_and_check(SEL_SRP, '0', x"FFFFFFFF", x"FFFFFFF0",
+    check_reg(SEL_SRP, '0', x"FFFFFFF0", x"FFFFFFFF",
       "SRP_L all-1s - reserved bits 3-0 cleared");
 
     -- 5c: SRP HIGH - typical DT=11 (long format)
     -- 0x80000003 & 0xFFFF0003 = 0x80000003
-    write_and_check(SEL_SRP, '1', x"80000003", x"80000003",
-      "SRP_H DT=11 (long format)");
+    write_reg(SEL_SRP, '1', x"80000003");
 
     -- 5d: SRP LOW - table address with low nibble
     -- 0xCAFE00B0 & 0xFFFFFFF0 = 0xCAFE00B0
-    write_and_check(SEL_SRP, '0', x"CAFE00B0", x"CAFE00B0",
+    write_reg(SEL_SRP, '0', x"CAFE00B0");
+    check_reg(SEL_SRP, '1', x"80000003", x"FFFFFFFF",
+      "SRP_H DT=11 (long format)");
+    check_reg(SEL_SRP, '0', x"CAFE00B0", x"FFFFFFFF",
       "SRP_L table address");
 
     -- 5e: Verify SRP HIGH persists after LOW write
@@ -423,12 +436,18 @@ begin
       "SRP_H persistence after LOW write");
 
     -- 5f: SRP HIGH reserved bits test
-    write_and_check(SEL_SRP, '1', x"DEADBEEF", x"DEAD0003",
-      "SRP_H reserved bits 15-2 verified cleared");
+    write_reg(SEL_SRP, '1', x"DEADBEEF");
 
     -- 5g: SRP LOW reserved bits test
-    write_and_check(SEL_SRP, '0', x"8765400F", x"87654000",
+    write_reg(SEL_SRP, '0', x"8765400F");
+    check_reg(SEL_SRP, '1', x"DEAD0003", x"FFFFFFFF",
+      "SRP_H reserved bits 15-2 verified cleared");
+    check_reg(SEL_SRP, '0', x"87654000", x"FFFFFFFF",
       "SRP_L reserved bits 3-0 verified cleared");
+
+    write_reg(SEL_SRP, '0', x"BEEF0000");
+    check_reg(SEL_SRP, '0', x"87654000", x"FFFFFFFF",
+      "SRP low-only write ignored");
 
     -- =============================================
     -- TEST 6: MMUSR Register (sel="11000") - 16-bit
@@ -444,8 +463,8 @@ begin
 
     -- 6b: PMOVE to MMUSR is a direct 16-bit store on MC68030.
     write_reg(SEL_MMUSR, '0', x"0000FFFF");
-    check_reg(SEL_MMUSR, '0', x"0000FFFF", x"0000FFFF",
-      "MMUSR direct PMOVE store updates low 16 bits");
+    check_reg(SEL_MMUSR, '0', x"0000EE47", x"0000FFFF",
+      "MMUSR direct PMOVE masks unimplemented bits");
 
     -- 6c: Upper 16 bits always zero
     check_reg(SEL_MMUSR, '0', x"00000000", x"FFFF0000",
@@ -477,23 +496,21 @@ begin
     check_reg(SEL_SRP, '0', x"44440000", x"FFFFFFFF", "SRP_L independence");
 
     -- =============================================
-    -- TEST 8: 64-bit Register Part Ordering
-    -- Verify HIGH/LOW words are independent and can be written in any order
+    -- TEST 8: Consecutive 64-bit Register Transfers
+    -- Verify complete root-pointer PMOVEs do not cross-contaminate one another.
     -- =============================================
     report "" severity note;
-    report "===== TEST 8: 64-bit Register Part Ordering =====" severity note;
+    report "===== TEST 8: Consecutive 64-bit Register Transfers =====" severity note;
 
-    -- Write LOW first, then HIGH
-    write_reg(SEL_CRP, '0', x"AAAA0000"); -- CRP_L first
-    write_reg(SEL_CRP, '1', x"BBBB0002"); -- CRP_H second
-    check_reg(SEL_CRP, '0', x"AAAA0000", x"FFFFFFFF", "CRP_L (low first)");
-    check_reg(SEL_CRP, '1', x"BBBB0002", x"FFFF0003", "CRP_H (low first)");
+    write_reg(SEL_CRP, '1', x"BBBB0002");
+    write_reg(SEL_CRP, '0', x"AAAA0000");
+    check_reg(SEL_CRP, '0', x"AAAA0000", x"FFFFFFFF", "CRP_L consecutive pair");
+    check_reg(SEL_CRP, '1', x"BBBB0002", x"FFFF0003", "CRP_H consecutive pair");
 
-    -- Write HIGH first, then LOW
     write_reg(SEL_SRP, '1', x"CCCC0002"); -- SRP_H first
     write_reg(SEL_SRP, '0', x"DDDD0000"); -- SRP_L second
-    check_reg(SEL_SRP, '1', x"CCCC0002", x"FFFF0003", "SRP_H (high first)");
-    check_reg(SEL_SRP, '0', x"DDDD0000", x"FFFFFFFF", "SRP_L (high first)");
+    check_reg(SEL_SRP, '1', x"CCCC0002", x"FFFF0003", "SRP_H consecutive pair");
+    check_reg(SEL_SRP, '0', x"DDDD0000", x"FFFFFFFF", "SRP_L consecutive pair");
 
     -- =============================================
     -- TEST 9: Sequential Write Stability

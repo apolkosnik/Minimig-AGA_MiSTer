@@ -63,14 +63,10 @@ begin
         case brief(11 downto 0) is
           when X"002" =>
             -- Write to CACR with proper MC68030 behavior
-            CACR(1 downto 0) <= reg_QA(1 downto 0);     -- IE, FI
-            -- Bits 2-3 are self-clearing command bits - NOT stored
-            CACR(4) <= reg_QA(4);                        -- IBE
-            CACR(7 downto 5) <= (others => '0');         -- Reserved
-            CACR(9 downto 8) <= reg_QA(9 downto 8);     -- DE, FD
-            -- Bits 10-11 are self-clearing command bits - NOT stored
-            CACR(13 downto 12) <= reg_QA(13 downto 12); -- DBE, WA
-            CACR(31 downto 14) <= (others => '0');       -- Reserved
+            CACR(4 downto 0) <= reg_QA(4 downto 0);
+            CACR(7 downto 5) <= (others => '0');
+            CACR(13 downto 8) <= reg_QA(13 downto 8);
+            CACR(31 downto 14) <= (others => '0');
           when others =>
             null;
         end case;
@@ -93,7 +89,7 @@ begin
     if exec_movec_rd = '1' then
       case brief(11 downto 0) is
         when X"002" =>
-          movec_data <= CACR;
+          movec_data <= CACR and x"00003313";
         when others =>
           null;
       end case;

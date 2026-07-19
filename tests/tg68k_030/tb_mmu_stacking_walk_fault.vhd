@@ -629,9 +629,13 @@ begin
             report "FAIL: MOVES.B write not completed after restart, byte=$" & slv_to_hex(wr_byte) severity error;
             fails := fails + 1;
         end if;
-        -- SSP $3F00 - format $B frame $5C - MOVEM 16 = $3E94
-        if h_a7 /= x"00003E94" then
-            report "FAIL: handler A7=$" & slv_to_hex(h_a7) & " expected $00003E94 (stacking imbalance)" severity error;
+        -- The MOVES.B write fault is the instruction's last (only) bus cycle,
+        -- so it stacks the short Format $A LASTWRITE frame (32 bytes), not
+        -- Format $B (the $3E94 expectation predated the WinUAE-matched
+        -- LASTWRITE selection, commit 165ca22b).
+        -- SSP $3F00 - format $A frame $20 - MOVEM 16 = $3ED0
+        if h_a7 /= x"00003ED0" then
+            report "FAIL: handler A7=$" & slv_to_hex(h_a7) & " expected $00003ED0 (stacking imbalance)" severity error;
             fails := fails + 1;
         end if;
 

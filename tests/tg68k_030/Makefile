@@ -10,9 +10,14 @@ VLIB = $(MODELSIM_PATH)/linuxaloem/vlib
 TEST_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 PROJECT_ROOT := $(abspath $(TEST_DIR)/../..)
 RTL_DIR := $(PROJECT_ROOT)/rtl/tg68k
+DDRAM_CTRL ?= $(PROJECT_ROOT)/rtl/ddram_ctrl.v
 
 # Test targets
-.PHONY: all clean test-pmmu test-pmmu-reg test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-movec-selector-latch test-cpsave-cprestore test-mmu-library-detect test-mmu-library-failure-path test-mmu-library-root-probe test-mmu-library-enable-probe test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-readback-guard test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-mmu-fetch-fault-frame test-mmu-user-data-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-history-bits test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-pflush-illegal-pc-relative test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-privilege test-moves-d16an-pc test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-chk-long-odd-addr test-movec-active-stack test-interrupt-mode-stack test-lockup-all test-chk-stacked-trace test-basic-chk-trace test-basic-div-jmp-trace test-divs-word-overflow test-basic-chk2-cputest-entry test-basic-chk2-cputest-highaddr test-basic-chk2-packed-state test-basic-chk2-packed-group2 test-basic-jmp-cputest-entry test-basic-jmp-sp-disp-entry test-basic-jmp-sp-disp-highaddr test-basic-cputest-entry test-basic-exception-flags test-basic-group2-user-trace test-trace-post-rte-user test-basic-cputest test-basic-cputest-exact test-basic-cputest-exact-chk2bl test-basic-cputest-exact-chk2w test-basic-cputest-exact-jmp test-basic-cputest-runtime020 test-odd-exc-flags test-odd-irq-regwrite test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-jmp-65b2-trace test-jmp-65b2-index-target test-jmp-record37-ori-tail test-real validate setup help prepare-basic-cputest-data test-srp-root-direct-page-stacking
+.PHONY: all clean test-pmmu test-pmmu-reg test-pmmu-all-modes test-pmmu-walker test-pmmu-atc test-cache test-cacr test-movec-cacr test-movec-illegal test-movec-selector-latch test-cpsave-cprestore test-mmu-library-detect test-mmu-library-failure-path test-mmu-library-root-probe test-mmu-library-enable-probe test-pmove-tc test-pmove-tc-read test-pmove-tt0-read test-pmove-tt0-mem-read test-pmove-tt1-mem test-pmove-readback-guard test-pmove-crp-a7-postinc test-pmove-crp-mem-to-mmu-postinc test-pmove-comprehensive test-pmove-multiple-regs test-pmove-d16an-pc test-pmove-d8anxn-pc test-pmove-all-modes test-integration test-diagrom test-diagrom-detectcpu test-cpu-mmu-detection test-advanced test-fault test-fault-recovery test-mmu-fetch-fault-frame test-mmu-user-data-fault-recovery test-stress test-regression test-pmove-addressing test-pflush-ptest-pload test-ptest-history-bits test-ptest-all-modes test-pload-all-modes test-pflush-all-modes test-pflush-illegal-pc-relative test-indirect-descriptor test-mmu-instruction-suite test-amiga-sequence test-moves test-moves-validation test-moves-privilege test-moves-d16an-pc test-moves-all-modes test-rte-formats test-rte-mbit-abcd test-abcd-mbit test-rte-abcd-suite test-arch-suite test-mmu-translation test-lockup-walker-timeout test-lockup-bus-conflict test-lockup-cache-fill test-lockup-atc-handshake test-lockup-mem-ack-race test-branch-odd-addr test-chk-long-odd-addr test-movec-active-stack test-interrupt-mode-stack test-lockup-all test-chk-stacked-trace test-basic-chk-trace test-basic-div-jmp-trace test-divs-word-overflow test-basic-chk2-cputest-entry test-basic-chk2-cputest-highaddr test-basic-chk2-packed-state test-basic-chk2-packed-group2 test-basic-jmp-cputest-entry test-basic-jmp-sp-disp-entry test-basic-jmp-sp-disp-highaddr test-basic-cputest-entry test-basic-exception-flags test-basic-group2-user-trace test-trace-post-rte-user test-basic-cputest test-basic-cputest-exact test-basic-cputest-exact-chk2bl test-basic-cputest-exact-chk2w test-basic-cputest-exact-jmp test-basic-cputest-runtime020 test-odd-exc-flags test-odd-irq-regwrite test-trace-suite test-group2-t0-trace test-group2-t1-trace test-group2-stacked-trace test-jmp-65b2-trace test-jmp-65b2-index-target test-jmp-record37-ori-tail test-mmu-restart-netbsd test-real validate setup help prepare-basic-cputest-data test-srp-root-direct-page-stacking
+
+.PHONY: test-mmu-onfault-redirect test-mmu-replay-resume-pc test-mmu-replay-refault-context trace-mmu-replay-refault test-pmmu-consecutive test-mmu-pte-coherency test-mmu-suite
+
+TRACE_FILE ?= /tmp/tg68k_mmu_replay_refault.trace
 
 # Default target
 all: test-comprehensive
@@ -129,6 +134,8 @@ help:
 	@echo "  test-lockup-atc-handshake  - Test ATC completion handshake deadlock (ISSUE #4)"
 	@echo "  test-lockup-mem-ack-race   - Test memory request ack race conditions (ISSUE #6)"
 	@echo "  test-ddram-write-gap       - Test continuous two-word DDR write acknowledgement"
+	@echo "  test-mmu-pte-coherency     - Test CPU PTE write -> PFLUSH -> physical walker visibility"
+	@echo "  test-mmu-suite             - Run translation, instructions, restart, and memory-contract tests"
 	@echo "  test-lockup-all            - Run ALL lockup/deadlock tests"
 	@echo ""
 	@echo "  test-all         - Run original test suite"
@@ -269,6 +276,14 @@ test-ddram-write-gap: setup
 	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(PROJECT_ROOT)/rtl/cpu_cache_new.v $(PROJECT_ROOT)/rtl/ddram_ctrl.v $(TEST_DIR)/tb_ddram_write_gap.v
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run -all; quit" tb_ddram_write_gap
 
+test-mmu-pte-coherency: setup
+	@echo "Running NetBSD PTE write/PFLUSH/walker coherency test..."
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(PROJECT_ROOT)/rtl/cpu_cache_new.v $(DDRAM_CTRL) $(TEST_DIR)/tb_mmu_pte_coherency.v
+	@cd $(TEST_DIR) && $(VSIM) -c -do 'run -all; if {[examine -radix decimal /tb_mmu_pte_coherency/failures] != 0} {quit -f -code 1} else {quit -f -code 0}' tb_mmu_pte_coherency
+
+test-mmu-suite: test-mmu-translation test-pflush-ptest-pload test-pmmu-consecutive test-mmu-restart-netbsd test-ddram-write-gap test-mmu-pte-coherency
+	@echo "Maintained MMU system suite complete."
+
 test-cacr: compile
 	@echo "Running CACR tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 10us; quit" tb_cacr_test
@@ -302,6 +317,11 @@ test-pmove-readback-guard: compile
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_readback_guard.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2ms; quit -f" tb_pmove_readback_guard
 
+test-pmmu-consecutive: compile
+	@echo "Running consecutive PMMU instruction regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmmu_consecutive.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 5ms; quit -f" tb_pmmu_consecutive
+
 test-pmove-d16an-pc: compile
 	@echo "Running PMOVE (d16,An) PC increment + data value tests..."
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 50us; quit" tb_pmove_d16an_pc
@@ -320,6 +340,26 @@ test-pmove-all-modes: compile
 	@echo "Running PMOVE all regs + all legal EA modes test..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_pmove_all_modes.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 3000us; quit -f" tb_pmove_all_modes
+
+test-atc-stress: compile
+	@echo "Running ATC stress suite (live translation, U-trick hit/miss, faults, eviction, b2b)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_atc_stress.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2500us; quit -f" tb_atc_stress
+
+test-rte-stress: compile
+	@echo "Running RTE stress suite (all frame formats, S/M switching, replay, b2b chains)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_rte_stress.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2500us; quit -f" tb_rte_stress
+
+test-moves-stress: compile
+	@echo "Running MOVES stress suite (all modes, FC verification, b2b interactions)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_moves_stress.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2500us; quit -f" tb_moves_stress
+
+test-mmu-insn-stress: compile
+	@echo "Running MMU instruction stress suite (all insns, all modes, b2b interactions)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_insn_stress.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2500us; quit -f" tb_mmu_insn_stress
 
 test-pmove-crp-a7-postinc: compile
 	@echo "Running PMOVE.Q CRP,(A7)+ stack postincrement regression..."
@@ -438,7 +478,26 @@ test-mmu-user-data-fault-recovery: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_user_data_fault_recovery.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 600us; quit -f" tb_mmu_user_data_fault_recovery
 
-test-fault: test-fault-recovery test-mmu-fetch-fault-frame test-berr-frame test-addr-error-pmmu
+test-mmu-restart-netbsd: setup
+	@echo "Running MMU restart / NetBSD demand-paging contract (incl. non-final/final directPC release)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_restart_netbsd.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run -all; quit -f" tb_mmu_restart_netbsd
+	@cd $(TEST_DIR) && $(VSIM) -c -gT26_FINAL_BEAT=1 -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run -all; quit -f" tb_mmu_restart_netbsd
+
+test-mmu-onfault-redirect: setup
+	@echo "Running MOVES/DFC format-A pcb_onfault redirect regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_restart_moves_dfc.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -gONFAULT_REDIRECT=true -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 500us; quit -f" tb_mmu_restart_moves_dfc
+
+test-fault: test-fault-recovery test-mmu-fetch-fault-frame test-berr-frame test-addr-error-pmmu test-mmu-restart-netbsd test-mmu-replay-refault-context
 	@echo "Fault handling suite complete."
 
 test-stress: test-mmu-translation test-lockup-all
@@ -830,6 +889,35 @@ test-rte-format-a-replay: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_rte_format_a_replay.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 80us; quit -f" tb_rte_format_a_replay
+	@cd $(TEST_DIR) && $(VSIM) -c -gSTALL_ENABLE=true -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 80us; quit -f" tb_rte_format_a_replay
+
+test-mmu-replay-resume-pc: setup
+	@echo "Running translated-stack Format A replay regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_replay_resume_pc.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 1ms; quit -f" tb_mmu_replay_resume_pc
+
+test-mmu-replay-refault-context: setup
+	@echo "Running Format A replay re-fault context regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_replay_resume_pc.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -gREPLAY_REFAULT=true -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2ms; quit -f" tb_mmu_replay_resume_pc
+
+trace-mmu-replay-refault: setup
+	@echo "Tracing Format A replay re-fault context to $(TRACE_FILE)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_replay_resume_pc.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -gREPLAY_REFAULT=true -gTRACE_ENABLE=true -gTRACE_FILE=$(TRACE_FILE) -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 2ms; quit -f" tb_mmu_replay_resume_pc
+	@echo "Trace written to $(TRACE_FILE)"
 
 test-rte-mbit-abcd: setup
 	@echo "Running RTE M-bit/ABCD regression tests..."
@@ -1017,7 +1105,7 @@ test-mmu-translation: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_translation.vhd
-	@cd $(TEST_DIR) && $(VSIM) -c -do "run 250us; quit -f" tb_mmu_translation
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 250us; quit -f" tb_mmu_translation
 
 # Bus Error Frame Test (BUG #414/#415)
 test-berr-frame: setup
@@ -1120,7 +1208,7 @@ test-lockup-all: test-lockup-walker-timeout test-lockup-bus-conflict test-lockup
 	@echo ""
 
 # Complete MMU Instruction Test Suite
-test-mmu-instruction-suite: setup
+test-mmu-instruction-suite: setup test-mmu-insn-stress test-moves-stress test-rte-stress test-atc-stress
 	@echo "=========================================================="
 	@echo "Running Complete MMU Instruction Test Suite"
 	@echo "=========================================================="
@@ -1375,4 +1463,3 @@ test-jmp-record37-ori-tail: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_jmp_record37_ori_tail.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 40us; quit -f" tb_jmp_record37_ori_tail
-

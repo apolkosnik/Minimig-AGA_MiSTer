@@ -256,6 +256,14 @@ proc show_pmm2 {bin} {
     puts [format "ptr1: addr=%08s data=%08s" $ptr1_addr $ptr1_data]
     puts [format "ptr2: addr=%08s data=%08s" $ptr2_addr $ptr2_data]
     puts [format "ptr3: addr=%08s data=%08s" $ptr3_addr $ptr3_data]
+    if {[string range $ptr3_addr 0 3] eq "544F" &&
+        [string range $ptr3_data 0 5] eq "54494D"} {
+        scan [string range $ptr3_addr 4 7] %x timeout_count
+        scan [string range $ptr3_data 6 7] %x timeout_meta
+        puts [format "internal_timeout: count=%u request=%08s wdata=%08s wstate=%u we=%u" \
+            $timeout_count $ptr2_addr $ptr2_data \
+            [expr {($timeout_meta >> 1) & 0x1F}] [expr {$timeout_meta & 1}]]
+    }
     if {$fault_desc_addr ne ""} {
         puts [format "fault_desc: addr=%08s data=%08s" $fault_desc_addr $fault_desc_data]
     }
@@ -488,13 +496,14 @@ proc show_rtwr {bin} {
     set exact_addr [bin_to_hex [bit_slice $bin 456 425]]
     set exact_pc [bin_to_hex [bit_slice $bin 424 393]]
     set exact_micro [bin_to_uint [bit_slice $bin 392 385]]
-    set fc6_seen [bin_to_uint [bit_slice $bin 384 384]]
-    set fc6_hits [bin_to_uint [bit_slice $bin 383 380]]
-    set fc6_hi [bin_to_hex [bit_slice $bin 379 364]]
-    set fc6_lo [bin_to_hex [bit_slice $bin 363 348]]
-    set fc6_addr_last [bin_to_hex [bit_slice $bin 347 316]]
-    set fc6_pc [bin_to_hex [bit_slice $bin 315 284]]
-    set fc6_micro [bin_to_uint [bit_slice $bin 283 276]]
+    set pflush_seen [bin_to_uint [bit_slice $bin 384 384]]
+    set pflush_count [bin_to_uint [bit_slice $bin 383 368]]
+    set pflush_brief [bin_to_hex [bit_slice $bin 367 352]]
+    set pflush_addr [bin_to_hex [bit_slice $bin 351 320]]
+    set pflush_pc [bin_to_hex [bit_slice $bin 319 288]]
+    set pflush_micro [bin_to_uint [bit_slice $bin 287 280]]
+    set exact_fc [bin_to_uint [bit_slice $bin 279 277]]
+    set exact_moves_pending [bin_to_uint [bit_slice $bin 276 276]]
     set srp_l [bin_to_hex [bit_slice $bin 275 244]]
     set srp40_addr [bin_to_hex [bit_slice $bin 243 212]]
     set last0_addr [bin_to_hex [bit_slice $bin 211 180]]
@@ -514,10 +523,11 @@ proc show_rtwr {bin} {
 
     puts [format "root_page_writes: seen=%u count=%u newest_flags=%02s newest_micro=%u uds=%u lds=%u ramready=%u mmu_e=%u" \
         $page_seen $page_count $last_flags $last_micro $last_uds $last_lds $last_ready $last_mmu]
-    puts [format "srp_slot_000: seen=%u hits=%u data=%04s%04s last_addr=%08s pc=%08s micro=%u" \
-        $exact_seen $exact_hits $exact_hi $exact_lo $exact_addr $exact_pc $exact_micro]
-    puts [format "srp_slot_0f8: srp_l=%08s slot=%08s seen=%u hits=%u data=%04s%04s last_addr=%08s pc=%08s micro=%u" \
-        $srp_l $srp40_addr $fc6_seen $fc6_hits $fc6_hi $fc6_lo $fc6_addr_last $fc6_pc $fc6_micro]
+    puts [format "exact_slot: seen=%u hits=%u data=%04s%04s logical=%08s pc=%08s micro=%u fc=%s(%u) moves_pending=%u" \
+        $exact_seen $exact_hits $exact_hi $exact_lo $exact_addr $exact_pc $exact_micro \
+        [decode_fc $exact_fc] $exact_fc $exact_moves_pending]
+    puts [format "pflush: seen=%u count=%u brief=%04s addr=%08s pc=%08s micro=%u target=%08s crp=%08s" \
+        $pflush_seen $pflush_count $pflush_brief $pflush_addr $pflush_pc $pflush_micro $srp_l $srp40_addr]
     puts [format "last page writes: 0=%08s:%04s 1=%08s:%04s 2=%08s:%04s 3=%08s:%04s" \
         $last0_addr $last0_data $last1_addr $last1_data $last2_addr $last2_data $last3_addr $last3_data]
 }

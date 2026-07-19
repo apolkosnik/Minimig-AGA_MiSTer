@@ -315,7 +315,7 @@ begin
         mem(16#1004# / 2) := x"4E45";
         mem(16#1006# / 2) := x"4E71";
         run_case;
-        check_frame2_no_sr("TRAP #5 trace", 16#07EC#, x"2024", x"00002200", x"00002200");
+        check_frame2_no_sr("TRAP #5 trace", 16#07EC#, x"2024", x"00002200", x"00001004");
         check_frame0("TRAP #5 frame", 16#07F8#, x"8000", x"0094", x"00001006");
 
         report "=== Test 2: TRAPLT.W with SR=$8008 ===" severity note;
@@ -328,7 +328,7 @@ begin
         mem(16#1006# / 2) := x"0000";
         mem(16#1008# / 2) := x"4E71";
         run_case;
-        check_frame2_no_sr("TRAPcc trace", 16#07E8#, x"2024", x"00002300", x"00002300");
+        check_frame2_no_sr("TRAPcc trace", 16#07E8#, x"2024", x"00002300", x"00001004");
         check_frame2("TRAPcc frame", 16#07F4#, x"8008", x"201C", x"00001008", x"00001004");
 
         report "BASIC TRAP tests: " & integer'image(pass_count) & " PASSED, " &
