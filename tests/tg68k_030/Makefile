@@ -1017,6 +1017,22 @@ test-interrupt-mode-stack: setup
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 80us; quit -f" tb_interrupt_mode_stack
 
 # MOVEC Illegal Register Trap Test
+test-stop-mbit-stack-rev: setup
+	@echo "Running STOP #imm M-bit stack-swap test (reverse M 1->0)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_stop_mbit_stack_rev.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 40us; quit" tb_stop_mbit_stack_rev
+
+test-stop-mbit-stack: setup
+	@echo "Running STOP #imm M-bit stack-swap test..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_stop_mbit_stack.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 40us; quit" tb_stop_mbit_stack
+
 test-movec-illegal: setup
 	@echo "Running MOVEC illegal register trap test..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd

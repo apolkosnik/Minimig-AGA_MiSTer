@@ -1957,6 +1957,13 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 				IF exec(to_SR)='1' AND cpu(1)='1' AND FlagsSR(5)='1' AND SRin(5)='1' AND SRin(4) /= FlagsSR(4) THEN
 					a7_is_msp <= SRin(4);
 				END IF;
+				-- STOP #imm loads the whole immediate into SR (set_stop path). Its
+				-- new S/M (data_read(13)/data_read(12)) selects the active A7 just as
+				-- MOVE-to-SR does. Track the shadow A7 aliases when it changes M while
+				-- staying supervisor.
+				IF set_stop='1' AND cpu(1)='1' AND FlagsSR(5)='1' AND data_read(13)='1' AND data_read(12) /= FlagsSR(4) THEN
+					a7_is_msp <= data_read(12);
+				END IF;
 				IF setopcode='1' THEN
 					format1_chain_active <= '0';
 				ELSIF micro_state = rte4 THEN
@@ -2320,6 +2327,16 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec, rte_mmu_fix_commit, rte_mmu_f
 				-- deferred swap in rte4/rte5 via set(from_MSP)/set(from_ISP).
 				IF cpu(1)='1' AND preSVmode='1' AND exec(to_SR)='1' AND SRin(5)='1' AND SRin(4) /= FlagsSR(4) THEN
 					IF SRin(4) = '1' THEN
+						v_regfile(15) := MSP;  -- M 0->1: load MSP into A7
+					ELSE
+						v_regfile(15) := ISP;  -- M 1->0: load ISP into A7
+					END IF;
+				END IF;
+				-- STOP #imm companion A7 load (set_stop path): new M = data_read(12),
+				-- gated on staying supervisor (new S = data_read(13) = '1'). Companion
+				-- shadow-save in the movec/stack process and a7_is_msp update above.
+				IF cpu(1)='1' AND preSVmode='1' AND set_stop='1' AND data_read(13)='1' AND data_read(12) /= FlagsSR(4) THEN
+					IF data_read(12) = '1' THEN
 						v_regfile(15) := MSP;  -- M 0->1: load MSP into A7
 					ELSE
 						v_regfile(15) := ISP;  -- M 1->0: load ISP into A7
@@ -9758,6 +9775,16 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
     -- Companion to regfile(15) load in the regfile process.
     if cpu(1)='1' and preSVmode='1' and exec(to_SR)='1' and SRin(5)='1' and SRin(4) /= FlagsSR(4) then
       if SRin(4) = '1' then
+        ISP <= regfile(15);  -- M 0->1: save old A7 (was ISP) to ISP shadow
+      else
+        MSP <= regfile(15);  -- M 1->0: save old A7 (was MSP) to MSP shadow
+      end if;
+    end if;
+    -- STOP #imm companion shadow save (set_stop path). Mirrors the A7 load
+    -- in the regfile process: save the outgoing A7 to the shadow it was
+    -- aliasing before STOP's new M selects the other stack.
+    if cpu(1)='1' and preSVmode='1' and set_stop='1' and data_read(13)='1' and data_read(12) /= FlagsSR(4) then
+      if data_read(12) = '1' then
         ISP <= regfile(15);  -- M 0->1: save old A7 (was ISP) to ISP shadow
       else
         MSP <= regfile(15);  -- M 1->0: save old A7 (was MSP) to MSP shadow
