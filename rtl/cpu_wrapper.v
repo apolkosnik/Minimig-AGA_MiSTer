@@ -1647,7 +1647,7 @@ always @(posedge clk) begin
 				wwat_origin_crp_hi <= stp_pmmu_crp_hi_w;
 				wwat_origin_crp_lo <= stp_pmmu_crp_lo_w;
 				wwat_origin_a0 <= kernel_regfile_a0_p;
-				wwat_origin_a7 <= kernel_regfile_a1_p;
+				wwat_origin_a7 <= kernel_regfile_a7_p;
 				wwat_origin_wstate <= stp_pmmu_wstate_w;
 			end
 

@@ -1764,14 +1764,16 @@ ALU: TG68K_ALU
 		rte_format_word(15 downto 12) = "1011" AND
 		-- Software completion triggers: the MuLibs bit-9 softfix marker, OR the
 		-- genuine MC68030 UM 8.2.2 protocol (Enforcer/MuForce): handler filled
-		-- the Data Input Buffer and CLEARED DF on a pure-DATA read frame
-		-- (FB/RB clear excludes instruction-fault frames, which stack DF=0).
+		-- the Data Input Buffer and CLEARED DF on a pure-DATA read frame.
+		-- All pipeline continuation/rerun bits must be clear; stage-B uses FB/RB,
+		-- and stage-C uses FC/RC while still stacking DF=0.
 		-- Validated by tb_mmu_badfeed_softfix_recovery (DF-clear, NO bit-9:
 		-- captures SSW=$0041/DIB=$BADFEED0 and must commit) - without this the
 		-- restart model re-executes Enforcer-completed reads forever (hardware:
 		-- MuForce infinite fault loop at $4006D28A reading $2C00).
 		(rte_mmu_fix_ssw(9) = '1' OR
-		 (rte_mmu_fix_ssw(14) = '0' AND rte_mmu_fix_ssw(12) = '0')) AND
+		 (rte_mmu_fix_ssw(15) = '0' AND rte_mmu_fix_ssw(14) = '0' AND
+		  rte_mmu_fix_ssw(13) = '0' AND rte_mmu_fix_ssw(12) = '0')) AND
 		rte_mmu_fix_ssw(8) = '0' AND
 		rte_mmu_fix_ssw(7) = '0' AND
 		rte_mmu_fix_ssw(6) = '1' AND
@@ -4504,7 +4506,8 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					   rte_format_word(15 downto 12) = "1011" AND
 					   rte_mmu_fix_armed = '1' AND
 					   rte_mmu_fix_write = '0' AND
-					   rte_mmu_fix_ssw(14) = '0' AND rte_mmu_fix_ssw(12) = '0' AND
+					   rte_mmu_fix_ssw(15) = '0' AND rte_mmu_fix_ssw(14) = '0' AND
+					   rte_mmu_fix_ssw(13) = '0' AND rte_mmu_fix_ssw(12) = '0' AND
 					   rte_mmu_fix_ssw(8) = '0' AND
 					   rte_mmu_fix_ssw(7) = '0' AND
 					   rte_mmu_fix_ssw(6) = '1' THEN

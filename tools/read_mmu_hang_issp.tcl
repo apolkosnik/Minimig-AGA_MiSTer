@@ -640,13 +640,130 @@ proc show_nest {bin} {
     puts [format "ptr3: addr=%08s data=%08s" $ptr3_addr $ptr3_data]
 }
 
+proc show_dpcw_record {idx data addr pc micro fp phys bv pf} {
+    puts [format "r%u: data=%08s addr=%08s pc=%04s micro=%u phys_page=%04s bv=%u pf=%u fp=%03s" \
+        $idx $data $addr $pc $micro $phys $bv $pf $fp]
+}
+
+proc show_dpcw {bin} {
+    puts "== DPCW =="
+    if {[string length $bin] < 481} {
+        puts [format "directPC detail unavailable, DPCW probe width is %u bits" [string length $bin]]
+        return
+    }
+
+    set frozen [bin_to_uint [bit_slice $bin 480 480]]
+    set bv0 [bin_to_uint [bit_slice $bin 479 479]]
+    set pf0 [bin_to_uint [bit_slice $bin 478 478]]
+    set bv1 [bin_to_uint [bit_slice $bin 477 477]]
+    set pf1 [bin_to_uint [bit_slice $bin 476 476]]
+    set bv2 [bin_to_uint [bit_slice $bin 475 475]]
+    set pf2 [bin_to_uint [bit_slice $bin 474 474]]
+    set bv3 [bin_to_uint [bit_slice $bin 473 473]]
+    set pf3 [bin_to_uint [bit_slice $bin 472 472]]
+    set fp0 [bin_to_hex [bit_slice $bin 471 460]]
+    set phys0 [bin_to_hex [bit_slice $bin 459 444]]
+    set fp1 [bin_to_hex [bit_slice $bin 443 432]]
+    set phys1 [bin_to_hex [bit_slice $bin 431 416]]
+    set fp2 [bin_to_hex [bit_slice $bin 415 404]]
+    set phys2 [bin_to_hex [bit_slice $bin 403 388]]
+    set fp3 [bin_to_hex [bit_slice $bin 387 376]]
+    set phys3 [bin_to_hex [bit_slice $bin 375 360]]
+    set count [bin_to_uint [bit_slice $bin 359 352]]
+
+    puts [format "frozen=%u count=%u" $frozen $count]
+    show_dpcw_record 0 \
+        [bin_to_hex [bit_slice $bin 351 320]] \
+        [bin_to_hex [bit_slice $bin 319 288]] \
+        [bin_to_hex [bit_slice $bin 287 272]] \
+        [bin_to_uint [bit_slice $bin 271 264]] \
+        $fp0 $phys0 $bv0 $pf0
+    show_dpcw_record 1 \
+        [bin_to_hex [bit_slice $bin 263 232]] \
+        [bin_to_hex [bit_slice $bin 231 200]] \
+        [bin_to_hex [bit_slice $bin 199 184]] \
+        [bin_to_uint [bit_slice $bin 183 176]] \
+        $fp1 $phys1 $bv1 $pf1
+    show_dpcw_record 2 \
+        [bin_to_hex [bit_slice $bin 175 144]] \
+        [bin_to_hex [bit_slice $bin 143 112]] \
+        [bin_to_hex [bit_slice $bin 111 96]] \
+        [bin_to_uint [bit_slice $bin 95 88]] \
+        $fp2 $phys2 $bv2 $pf2
+    show_dpcw_record 3 \
+        [bin_to_hex [bit_slice $bin 87 56]] \
+        [bin_to_hex [bit_slice $bin 55 24]] \
+        [bin_to_hex [bit_slice $bin 23 8]] \
+        [bin_to_uint [bit_slice $bin 7 0]] \
+        $fp3 $phys3 $bv3 $pf3
+}
+
+proc show_wwat {bin} {
+    puts "== WWAT =="
+    if {[string length $bin] < 508} {
+        puts [format "fault-history detail unavailable, WWAT probe width is %u bits" [string length $bin]]
+        return
+    }
+
+    set origin_seen [bin_to_uint [bit_slice $bin 507 507]]
+    set origin_crp_hi [bin_to_hex [bit_slice $bin 506 475]]
+    set origin_crp_lo [bin_to_hex [bit_slice $bin 474 443]]
+    set origin_a0 [bin_to_hex [bit_slice $bin 442 411]]
+    set origin_a7 [bin_to_hex [bit_slice $bin 410 379]]
+    set origin_wstate [bin_to_uint [bit_slice $bin 378 374]]
+    set onfault_seen [bin_to_uint [bit_slice $bin 373 373]]
+    set onfault_d0 [bin_to_hex [bit_slice $bin 372 341]]
+    set build_id [bin_to_hex [bit_slice $bin 340 325]]
+    set frozen [bin_to_uint [bit_slice $bin 324 324]]
+    set seen [bin_to_uint [bit_slice $bin 323 323]]
+    set wrapped [bin_to_uint [bit_slice $bin 322 322]]
+    set count [bin_to_uint [bit_slice $bin 321 306]]
+    set write_ptr [bin_to_uint [bit_slice $bin 305 297]]
+    set read_index [bin_to_uint [bit_slice $bin 296 288]]
+    set freeze_addr [bin_to_hex [bit_slice $bin 287 256]]
+    set freeze_pc [bin_to_hex [bit_slice $bin 255 240]]
+    set freeze_micro [bin_to_hex [bit_slice $bin 239 232]]
+
+    set rec_log [bin_to_hex [bit_slice $bin 231 200]]
+    set rec_exe_pc [bin_to_hex [bit_slice $bin 199 168]]
+    set rec_pc [bin_to_hex [bit_slice $bin 167 136]]
+    set rec_crp_lo [bin_to_hex [bit_slice $bin 135 104]]
+    set rec_a7 [bin_to_hex [bit_slice $bin 103 72]]
+    set rec_desc_addr [bin_to_hex [bit_slice $bin 71 40]]
+    set rec_mmusr [bin_to_hex [bit_slice $bin 39 24]]
+    set rec_opcode [bin_to_hex [bit_slice $bin 23 8]]
+    set rec_rw [bin_to_uint [bit_slice $bin 7 7]]
+    set rec_insn [bin_to_uint [bit_slice $bin 6 6]]
+    set rec_fc [bin_to_uint [bit_slice $bin 5 3]]
+    set rec_berr_active [bin_to_uint [bit_slice $bin 2 2]]
+    set rec_dispatched [bin_to_uint [bit_slice $bin 1 1]]
+    set rec_was_cleared [bin_to_uint [bit_slice $bin 0 0]]
+
+    puts [format "build=%s frozen=%u seen=%u wrapped=%u count=%u write_ptr=%u read_index=%u" \
+        $build_id $frozen $seen $wrapped $count $write_ptr $read_index]
+    puts [format "freeze: addr=%08s pc=%04s micro=%02s" $freeze_addr $freeze_pc $freeze_micro]
+    puts [format "origin: seen=%u crp_hi=%08s crp_lo=%08s a0=%08s a7=%08s wstate=%u" \
+        $origin_seen $origin_crp_hi $origin_crp_lo $origin_a0 $origin_a7 $origin_wstate]
+    puts [format "onfault: seen=%u d0=%08s" $onfault_seen $onfault_d0]
+    puts [format "record[%u]: log=%08s exe_pc=%08s pc=%08s opcode=%04s crp_lo=%08s a7=%08s" \
+        $read_index $rec_log $rec_exe_pc $rec_pc $rec_opcode $rec_crp_lo $rec_a7]
+    puts [format "           desc_addr=%08s mmusr=%04s rw=%u insn=%u fc=%s(%u) berr_active=%u dispatched=%u was_cleared=%u" \
+        $rec_desc_addr $rec_mmusr $rec_rw $rec_insn [decode_fc $rec_fc] $rec_fc \
+        $rec_berr_active $rec_dispatched $rec_was_cleared]
+}
+
 set clear_cpus 0
+set wwat_index 0
 foreach arg $::argv {
-    switch -- $arg {
-        clear { set clear_cpus 1 }
-        default {
-            error "usage: quartus_stp -t tools/read_mmu_hang_issp.tcl ?clear?"
+    if {$arg eq "clear"} {
+        set clear_cpus 1
+    } elseif {[regexp {^wwat=([0-9]+)$} $arg -> idx]} {
+        if {$idx < 0 || $idx > 511} {
+            error "wwat index must be 0..511"
         }
+        set wwat_index $idx
+    } else {
+        error "usage: quartus_stp -t tools/read_mmu_hang_issp.tcl ?clear? ?wwat=N?"
     }
 }
 
@@ -681,10 +798,20 @@ set nest_idx -1
 if {[llength $nest_inst] != 0} {
     set nest_idx [lindex $nest_inst 0]
 }
+set dpcw_inst [find_instance_optional $hw_name $dev_name "DPCW"]
+set dpcw_idx -1
+if {[llength $dpcw_inst] != 0} {
+    set dpcw_idx [lindex $dpcw_inst 0]
+}
+set wwat_inst [find_instance_optional $hw_name $dev_name "WWAT"]
+set wwat_idx -1
+if {[llength $wwat_inst] != 0} {
+    set wwat_idx [lindex $wwat_inst 0]
+}
 
 puts "hardware: $hw_name"
 puts "device:   $dev_name"
-puts "instances: PMMU=$pmmu_idx PMM2=$pmm2_idx EXCF=$excf_idx CPUS=$cpus_idx REGS=$regs_idx TCWR=$tcwr_idx PMWR=$pmwr_idx RTWR=$rtwr_idx HALT=$halt_idx NEST=$nest_idx"
+puts "instances: PMMU=$pmmu_idx PMM2=$pmm2_idx EXCF=$excf_idx CPUS=$cpus_idx REGS=$regs_idx TCWR=$tcwr_idx PMWR=$pmwr_idx RTWR=$rtwr_idx HALT=$halt_idx NEST=$nest_idx DPCW=$dpcw_idx WWAT=$wwat_idx"
 
 start_insystem_source_probe -hardware_name $hw_name -device_name $dev_name
 if {$clear_cpus} {
@@ -730,6 +857,16 @@ if {$clear_cpus} {
         write_source_data -instance_index $nest_idx -value 0 -value_in_hex
         after 20
     }
+    if {$dpcw_idx >= 0} {
+        write_source_data -instance_index $dpcw_idx -value 1 -value_in_hex
+        after 20
+        write_source_data -instance_index $dpcw_idx -value 0 -value_in_hex
+        after 20
+    }
+}
+if {$wwat_idx >= 0} {
+    write_source_data -instance_index $wwat_idx -value [format "%x" $wwat_index] -value_in_hex
+    after 20
 }
 set cpus_bin [read_probe_data -instance_index $cpus_idx]
 set pmmu_bin [read_probe_data -instance_index $pmmu_idx]
@@ -750,6 +887,12 @@ if {$halt_idx >= 0} {
 }
 if {$nest_idx >= 0} {
     set nest_bin [read_probe_data -instance_index $nest_idx]
+}
+if {$dpcw_idx >= 0} {
+    set dpcw_bin [read_probe_data -instance_index $dpcw_idx]
+}
+if {$wwat_idx >= 0} {
+    set wwat_bin [read_probe_data -instance_index $wwat_idx]
 }
 end_insystem_source_probe
 
@@ -772,4 +915,10 @@ if {$halt_idx >= 0} {
 }
 if {$nest_idx >= 0} {
     show_nest $nest_bin
+}
+if {$dpcw_idx >= 0} {
+    show_dpcw $dpcw_bin
+}
+if {$wwat_idx >= 0} {
+    show_wwat $wwat_bin
 }

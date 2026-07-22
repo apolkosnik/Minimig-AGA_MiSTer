@@ -228,9 +228,9 @@ architecture behavioral of tb_mmu_captured_badfeed_dispatch is
         m(16#0188#) := x"F038"; m(16#0189#) := x"4000"; m(16#018A#) := x"0500";
         -- NOP settle after enabling translation
         m(16#018B#) := x"4E71"; m(16#018C#) := x"4E71"; m(16#018D#) := x"4E71";
-        -- SSP before the user bus-fault push. The current tree still has the
-        -- documented user-fault stack leak and pushes 88 bytes, so this lands
-        -- the handler at the captured $40079B1C signature.
+        -- SSP before the user bus-fault push. A 68020/030 format-B fault frame
+        -- is 92 bytes total (8-byte common frame + 84-byte format-B extension),
+        -- so this lands the handler at $40079B18.
         m(16#018E#) := x"2E7C"; m(16#018F#) := x"4007"; m(16#0190#) := x"9B74";
         -- Enter user mode so the $2C00 data access uses CRP, not SRP.
         m(16#0191#) := x"46FC"; m(16#0192#) := x"0000";
@@ -594,9 +594,9 @@ begin
             report "FAIL: vector 2 handler did not execute" severity error;
             fail_count := fail_count + 1;
         end if;
-        if handler_a7 /= x"40079B1C" then
+        if handler_a7 /= x"40079B18" then
             report "FAIL: handler A7 $" & slv_to_hex(handler_a7) &
-                   " expected captured $40079B1C signature" severity error;
+                   " expected format-B $40079B18 signature" severity error;
             fail_count := fail_count + 1;
         end if;
         if frame_fmt /= x"B008" then
