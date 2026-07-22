@@ -5053,6 +5053,12 @@ PROCESS (clk, Reset, FlagsSR, last_data_read, OP2out, exec)
 					FlagsSR(5) <= NOT preSVmode;
 					fc_internal(2) <= NOT preSVmode;
 				END IF;
+				-- STOP loads SR and then suppresses the next opcode boundary. A
+				-- supervisor-to-user STOP therefore must commit SVmode here; its
+				-- existing changeMode request still performs the A7/USP exchange.
+				IF set_stop='1' THEN
+					SVmode <= data_read(13);
+				END IF;
 				IF micro_state=trap3 THEN
 					-- MC68030 UM 8.1: Clear T1 and T0 on exception entry
 					-- MUST use partial assignments here, NOT full FlagsSR <=
@@ -5449,7 +5455,12 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						-- In this core interrupt_mode means the active supervisor A7 is on
 						-- the ISP path even if the saved M bit is stale or was changed by
 						-- handler code. Save that active A7 back to ISP before loading USP.
-						IF interrupt_mode='1' OR rte_saved_mbit='0' THEN
+						-- STOP can clear S while MSP is active. It is not an RTE
+						-- path, so use the live A7-shadow selector rather than the
+						-- stale RTE-only M-bit latch.
+						IF interrupt_mode='1' OR
+						   ((stop='1') AND a7_is_msp='0') OR
+						   ((stop='0') AND rte_saved_mbit='0') THEN
 							set(to_ISP) <= '1';   -- Active stack is ISP
 						ELSE
 							set(to_MSP) <= '1';   -- Active stack is MSP
@@ -6514,8 +6525,11 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 										
 									WHEN "1110001" =>					--nop
 									
-									WHEN "1110010" =>					--stop
-										IF SVmode='0' THEN
+										WHEN "1110010" =>					--stop
+											-- A legal supervisor STOP may load S=0 and retains
+											-- its opcode while stopped. Only a newly decoded user
+											-- STOP takes privilege violation.
+											IF SVmode='0' AND stop='0' THEN
 											trap_priv <= '1';
 											trapmake <= '1';
 										ELSE
@@ -7154,49 +7168,43 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
 						trapmake <= '1';
 					END IF;
 				--ELSIF cpu="11" AND opcode(8 downto 6)="100" THEN --cpSAVE
-				ELSIF cpu(1)='1' AND opcode(8 downto 6)="100" THEN --cpSAVE
-					-- cpSAVE valid EA modes: control alterable or predecrement
-					-- Valid: (An), -(An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
-					-- Invalid: Dn, An, (An)+, #imm, (d16,PC), (d8,PC,Xn)
-					IF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="011" AND
-					   (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN
-						-- Valid EA mode for cpSAVE - this is a PRIVILEGED instruction
-						IF SVmode='1' THEN
-							-- Supervisor mode without FPU: F-line exception
+					ELSIF cpu(1)='1' AND opcode(8 downto 6)="100" THEN --cpSAVE
+						-- cpSAVE valid EA modes: control alterable or predecrement
+						-- Valid: (An), -(An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
+						-- Invalid: Dn, An, (An)+, #imm, (d16,PC), (d8,PC,Xn)
+						-- MC68030 UM 6.6: privilege checking precedes EA validation.
+						IF SVmode='0' THEN
+							trap_priv <= '1';
+							trapmake <= '1';
+						ELSIF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="011" AND
+						      (opcode(5 downto 3)/="111" OR opcode(2 downto 1)="00") THEN
+							-- No external coprocessor: supervisor cpSAVE is F-line.
 							trap_1111 <= '1';
 							trapmake <= '1';
 						ELSE
-							-- User mode: privilege violation (cpSAVE is privileged)
-							trap_priv <= '1';
+							-- Invalid supervisor EA is also F-line.
+							trap_1111 <= '1';
 							trapmake <= '1';
-						END IF;
-					ELSE
-						-- Invalid EA mode: F-line exception regardless of mode
-						trap_1111 <= '1';
-						trapmake <= '1';
 					END IF;
 				--ELSIF cpu="11" AND opcode(8 downto 6)="101" THEN --cpRESTORE
 				ELSIF cpu(1)='1' AND opcode(8 downto 6)="101" THEN --cpRESTORE
-					-- cpRESTORE valid EA modes: control or postincrement
-					-- Valid: (An), (An)+, (d16,An), (d8,An,Xn), (xxx).W, (xxx).L, (d16,PC), (d8,PC,Xn)
-					-- Invalid: Dn, An, -(An), #imm
-					-- Mode 111 valid: reg 0-3 only (absolute and PC-relative, NOT #imm which is reg 4)
-					IF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="100" AND
-					   (opcode(5 downto 3)/="111" OR opcode(2)='0') THEN
-						-- Valid EA mode for cpRESTORE - this is a PRIVILEGED instruction
-						IF SVmode='1' THEN
-							-- Supervisor mode without FPU: F-line exception
+						-- cpRESTORE valid EA modes: control or postincrement
+						-- Valid: (An), (An)+, (d16,An), (d8,An,Xn), (xxx).W, (xxx).L, (d16,PC), (d8,PC,Xn)
+						-- Invalid: Dn, An, -(An), #imm
+						-- Mode 111 valid: reg 0-3 only (absolute and PC-relative, NOT #imm which is reg 4)
+						-- MC68030 UM 6.5: privilege checking precedes EA validation.
+						IF SVmode='0' THEN
+							trap_priv <= '1';
+							trapmake <= '1';
+						ELSIF opcode(5 downto 4)/="00" AND opcode(5 downto 3)/="100" AND
+						      (opcode(5 downto 3)/="111" OR opcode(2)='0') THEN
+							-- No external coprocessor: supervisor cpRESTORE is F-line.
 							trap_1111 <= '1';
 							trapmake <= '1';
 						ELSE
-							-- User mode: privilege violation (cpRESTORE is privileged)
-							trap_priv <= '1';
+							-- Invalid supervisor EA is also F-line.
+							trap_1111 <= '1';
 							trapmake <= '1';
-						END IF;
-					ELSE
-						-- Invalid EA mode: F-line exception regardless of mode
-						trap_1111 <= '1';
-						trapmake <= '1';
 					END IF;
 				ELSE
 					-- Generic missing-coprocessor F-line forms use vector 11.

@@ -1,7 +1,7 @@
 -- tb_cpsave_cprestore_exceptions.vhd
 -- Maintained regression for the old BUG302 cpSAVE/cpRESTORE side patch:
--- valid user-mode cpSAVE/cpRESTORE must raise vector 8, while invalid-EA
--- and generic missing-coprocessor F-line forms remain vector 11.
+-- user-mode cpSAVE/cpRESTORE must raise vector 8 before their effective
+-- address is decoded, while generic missing-coprocessor forms use vector 11.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -279,7 +279,7 @@ begin
 		wait until rising_edge(clk);
 		wait until rising_edge(clk);
 
-        run_case("cpSAVE (A0)+ in user mode", x"F318", x"4E71", false, true, x"000B", x"002C");
+        run_case("cpSAVE (A0)+ invalid EA in user mode", x"F318", x"4E71", false, true, x"0008", x"0020");
 		nReset <= '0';
 		wait until rising_edge(clk);
 		wait until rising_edge(clk);
@@ -289,7 +289,7 @@ begin
 		wait until rising_edge(clk);
 		wait until rising_edge(clk);
 
-        run_case("cpRESTORE -(A0) in user mode", x"F360", x"4E71", false, true, x"000B", x"002C");
+        run_case("cpRESTORE -(A0) invalid EA in user mode", x"F360", x"4E71", false, true, x"0008", x"0020");
 		nReset <= '0';
 		wait until rising_edge(clk);
 		wait until rising_edge(clk);
