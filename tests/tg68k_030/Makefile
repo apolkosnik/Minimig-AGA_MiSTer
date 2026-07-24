@@ -453,6 +453,19 @@ test-cpu-wrapper-pmmu: compile
 	@echo "Running wrapper-level PMMU test..."
 	@cd $(TEST_DIR) && $(VSIM) -c -L work -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 5ms; quit -f" tb_cpu_wrapper_pmmu
 
+test-walker-stale-rtg: compile
+	@echo "Compiling cpu_wrapper.v and BUG #447 stale-RTG walker bench..."
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(TEST_DIR)/altsource_probe_stub.v
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(PROJECT_ROOT)/rtl/fx68k/fx68kAlu.sv
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(PROJECT_ROOT)/rtl/fx68k/uaddrPla.sv
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv -suppress 7061 $(PROJECT_ROOT)/rtl/fx68k/fx68k.sv
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Cache_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_CacheCtrl_030.vhd
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(PROJECT_ROOT)/rtl/cpu_wrapper.v
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(TEST_DIR)/tb_walker_stale_rtg.v
+	@echo "Running BUG #447 stale-RTG walker test..."
+	@cd $(TEST_DIR) && $(VSIM) -c -L work -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 5ms; quit -f" tb_walker_stale_rtg
+
 # Enhanced comprehensive tests
 test-advanced: test-pmmu-walker test-pmmu-atc test-mmu-translation
 	@echo "Advanced PMMU functionality suite complete."
@@ -1012,6 +1025,15 @@ test-mmu-badfeed-softfix: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_badfeed_softfix_recovery.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit -f" tb_mmu_badfeed_softfix_recovery
+
+test-rte-mmu-fix-tst: setup
+	@echo "Running BUG #448 TST softfix D5/A5 regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_rte_mmu_fix_tst.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 1ms; quit -f" tb_rte_mmu_fix_tst
 
 test-movec-active-stack: setup
 	@echo "Running MOVEC active ISP/MSP -> A7 aliasing regression..."

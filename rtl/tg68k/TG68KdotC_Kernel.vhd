@@ -2299,7 +2299,11 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec, rte_mmu_fix_commit, rte_mmu_f
 							v_regfile(conv_integer(moves_reg)) := data_read;
 					END CASE;
 				END IF;
-				IF rte_mmu_fix_commit = '1' THEN
+				-- BUG #448 FIX: TST has no register destination - its commit is the
+				-- CCR update (rte_mmu_fix_ccr_update) plus the PC skip only. Without
+				-- this guard TST's opcode bits decode as MOVE fields here: TST.B/L
+				-- clobbered D5, TST.W matched the MOVEA arm and clobbered A5.
+				IF rte_mmu_fix_commit = '1' AND rte_mmu_fix_is_tst = '0' THEN
 					IF rte_mmu_fix_opcode(8 downto 6) = "001" THEN
 						-- MOVEA to An: always 32-bit write, sign-extend for word
 						IF rte_mmu_fix_size = "01" THEN  -- MOVEA.W: sign-extend 16->32

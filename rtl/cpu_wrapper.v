@@ -207,7 +207,12 @@ assign pmmu_shared_io_log = cpucfg[1] &&
 assign pmmu_suppress_bus = cpucfg[1] & ~pmmu_shared_io_log &
                            (pmmu_busy_p | pmmu_fault_p | walker_timeout_error);
 assign ramsel       = (cpu_req & ~sel_nmi_vector & ~walker_active & ~pmmu_suppress_bus & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg)) | walker_fast_ram;
-assign ramshared    = sel_dd;
+// BUG #447 FIX: During walker Fast RAM cycles, bus_addr holds the PMMU's stale
+// last-completed translation, so sel_dd/sel_rtg describe the PREVIOUS CPU access,
+// not the walker's descriptor address. ramshared feeds ddram_ctrl's byte-swap and
+// byte-enable mirroring (and Minimig routes the live ramshared during walker
+// cycles), so a stale sel_dd would swap walker descriptor reads and U/M writes.
+assign ramshared    = sel_dd & ~walker_fast_ram;
 assign walker_active_out = walker_active;
 assign walker_writing_out = walker_writing;
 
@@ -255,7 +260,9 @@ assign ramuds = walker_fast_ram ? 1'b0 : (sel_rtg ? lds_in : uds_in);
 // BUG #405 FIX: Write high word [31:16] to low address, low word [15:0] to high address (big-endian)
 assign ramdin = (walker_fast_ram && walker_writing) ? (walker_write_low_phase ? walker_wdata_latch[31:16] : walker_wdata_latch[15:0]) :
                 sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
-assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
+// BUG #447 FIX: Never byte-swap walker descriptor reads. sel_rtg is decoded from
+// the stale pre-walk translation; the walker itself never targets RTG.
+assign ramdat = (sel_rtg & ~walker_fast_ram) ? {ramdout[7:0], ramdout[15:8]} : ramdout;
 
 //       Main  DDx  RTG  8M  128M  256M
 //       ----  ---  ---  --  ----  ----
