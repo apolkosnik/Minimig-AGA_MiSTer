@@ -153,7 +153,7 @@ must be fixed BEFORE re-enabling the cache.
   CacheCtrl lookup/fill with `~pmmu_shared_io_log` (export the window decode to
   the cache controller, or fold it into `fill_inhibit` and the hit qualifier).
 
-### BUG #456 — fastchip not gated by pmmu_suppress_bus; stale acks complete beats  [LIVE]
+### BUG #456 — fastchip not gated by pmmu_suppress_bus; stale acks complete beats  [FIXED 2026-07-23]
 - **Where:** `rtl/cpu_wrapper.v:414` (`fastchip_sel = cpu_req &
   !pmmu_addr_phys_p[31:24] & ~walker_active`), `:2503` (`cpu_ready_qualified`
   ORs `fastchip_selack & fastchip_ready` unconditionally).
@@ -165,7 +165,7 @@ must be fixed BEFORE re-enabling the cache.
   qualify the fastchip term with `fastchip_sel` (current-cycle decode), not just
   `selack`.
 
-### BUG #457 — clkena/beat_valid accept cache_hit that cpu_din won't deliver  [latent]
+### BUG #457 — clkena/beat_valid accept cache_hit that cpu_din won't deliver  [FIXED 2026-07-23]
 - **Where:** `rtl/cpu_wrapper.v:2507,2517` (release on bare
   `USE_68030_CACHE & cache_hit`) vs `:338` (`cpu_din` cache arm additionally
   requires `~walker_active & ~pmmu_fault_p`).
@@ -251,7 +251,7 @@ must be fixed BEFORE re-enabling the cache.
 
 ## MINOR
 
-### BUG #464 — WALKER_READ_HIGH / WALKER_WRITE_HIGH lack timeout & req-drop escapes
+### BUG #464 — WALKER_READ_HIGH / WALKER_WRITE_HIGH lack timeout & req-drop escapes  [FIXED 2026-07-23]
 - `rtl/cpu_wrapper.v:4021-4030, 4166-4176`: both loop on `walker_mem_ready`
   high, increment `walker_timeout_cnt` but never compare against
   `WALKER_TIMEOUT_LIMIT`, and never check `~pmmu_walker_req_p` (BUG #419
@@ -324,7 +324,13 @@ rework / a PMMU FC-reporting issue respectively.
   unregressed). Run existing `test-cpu-wrapper-pmmu`,
   `test-mmu-fault-recovery`, `test-pmmu-comprehensive` targets.
 
-## Phase 2 — Bus-integrity majors (wrapper)
+## Phase 2 — Bus-integrity majors (wrapper)  ✅ DONE 2026-07-23
+All three landed in one commit. tb_walker_stale_rtg gained Scenario 2 (stuck-
+high ready in READ_HIGH → walker must escape; verified to hang with the
+escapes neutered) and a standing fastchip-suppress invariant. Note: the walker
+escape normally fires via the PMMU's ~500-cycle internal watchdog (req drop),
+not the wrapper's 2048-cycle limit — the #464 fix makes READ/WRITE_HIGH honor
+both. #457 is protective-only until the BUG #454 revert re-enables the cache.
 3. **#456** gate `fastchip_sel` with `~pmmu_suppress_bus`; qualify the fastchip
    ready term with `fastchip_sel`.
 4. **#457** shared `cache_hit_valid` qualifier for clkena/beat_valid/cpu_din.
