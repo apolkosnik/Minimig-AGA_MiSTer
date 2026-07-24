@@ -146,11 +146,16 @@ begin
       i_fill_addr <= (others => '0');
     elsif rising_edge(clk) then
       -- Cache fill completion - BUG #131 FIX: Use LATCHED values, not current
+      -- BUG #468 FIX: a fill completing after freeze was set mid-flight (or
+      -- after the request was withdrawn) must NOT replace an entry - freeze
+      -- means no replacements. Consume the completion, drop the line.
       if i_fill_valid = '1' then
-        i_data_array(i_fill_line_idx) <= i_fill_data;
-        i_tag_array(i_fill_line_idx) <= i_fill_tag;
-        i_valid_array(i_fill_line_idx) <= '1';
         i_fill_req_int <= '0';  -- Clear fill request when data arrives
+        if cacr_ifreeze = '0' and i_fill_req_int = '1' then
+          i_data_array(i_fill_line_idx) <= i_fill_data;
+          i_tag_array(i_fill_line_idx) <= i_fill_tag;
+          i_valid_array(i_fill_line_idx) <= '1';
+        end if;
       end if;
       
       -- Cache invalidation (instruction cache)
@@ -234,11 +239,14 @@ begin
       d_fill_addr <= (others => '0');
     elsif rising_edge(clk) then
       -- Cache fill completion - BUG #131 FIX: Use LATCHED values, not current
+      -- BUG #468 FIX: same commit gating as the I-cache (see above).
       if d_fill_valid = '1' then
-        d_data_array(d_fill_line_idx) <= d_fill_data;
-        d_tag_array(d_fill_line_idx) <= d_fill_tag;
-        d_valid_array(d_fill_line_idx) <= '1';
         d_fill_req_int <= '0';  -- Clear fill request when data arrives
+        if cacr_dfreeze = '0' and d_fill_req_int = '1' then
+          d_data_array(d_fill_line_idx) <= d_fill_data;
+          d_tag_array(d_fill_line_idx) <= d_fill_tag;
+          d_valid_array(d_fill_line_idx) <= '1';
+        end if;
       end if;
       
       -- Cache invalidation (data cache)

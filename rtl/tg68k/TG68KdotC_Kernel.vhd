@@ -9850,11 +9850,20 @@ PROCESS (clk, cpu, OP1out, OP2out, opcode, exe_condition, nextpass, micro_state,
     end if;
     -- Auto-clear self-clearing command bits after they've been set
     -- MC68030 spec: bits 2 (CEI), 3 (CI), 10 (CED), 11 (CD) are self-clearing
-    if CACR(2) = '1' or CACR(3) = '1' or CACR(10) = '1' or CACR(11) = '1' then
-      CACR(2) <= '0';   -- Clear CEI (Clear Entry in Instruction Cache)
+    -- BUG #453 FIX: clear ONLY the bit whose operation the priority encoder
+    -- (cache_op_scope/cache_op_cache process) emitted this cycle - same
+    -- priority order CI > CD > CEI > CED. Previously one write of CACR $0808
+    -- (CI+CD, exactly what AmigaOS CacheClearU issues on 030) wiped all four
+    -- bits at once and the D-cache invalidate was silently dropped. Pending
+    -- bits now emit on the following cycles until all are consumed.
+    if CACR(3) = '1' then
       CACR(3) <= '0';   -- Clear CI (Clear Instruction Cache)
-      CACR(10) <= '0';  -- Clear CED (Clear Entry in Data Cache)
+    elsif CACR(11) = '1' then
       CACR(11) <= '0';  -- Clear CD (Clear Data Cache)
+    elsif CACR(2) = '1' then
+      CACR(2) <= '0';   -- Clear CEI (Clear Entry in Instruction Cache)
+    elsif CACR(10) = '1' then
+      CACR(10) <= '0';  -- Clear CED (Clear Entry in Data Cache)
     end if;
 	  end if;
 	end if;

@@ -99,8 +99,6 @@ architecture rtl of TG68K_CacheCtrl_030 is
   signal fill_count        : unsigned(2 downto 0);
   signal fill_buffer       : std_logic_vector(127 downto 0);
   signal fill_active       : std_logic;
-  signal fill_owner_i      : std_logic;
-  signal fill_addr_latched : std_logic_vector(31 downto 0);
   signal fill_valid_r      : std_logic;
   signal fill_owner_r      : std_logic;
   signal fill_data_r       : std_logic_vector(127 downto 0);
@@ -108,6 +106,19 @@ architecture rtl of TG68K_CacheCtrl_030 is
   signal fill_pending_d    : std_logic;
   signal fill_start        : std_logic;
   signal fill_accept       : std_logic;
+
+  -- BUG #451/#452 FIX: request lock. Owner and address are frozen on the
+  -- cycle the request is armed and held until the fill completes, so the
+  -- address Minimig latches at grant, the words it fetches, and the owner
+  -- the line is committed to can never diverge (previously owner/address
+  -- were re-evaluated at first ack with I-over-D priority, and the pmmu_busy
+  -- gate could drop cache_req mid-stream so the two word counters split).
+  signal req_lock          : std_logic;
+  signal req_lock_owner_i  : std_logic;
+  signal req_lock_addr     : std_logic_vector(31 downto 0);
+  signal req_arm           : std_logic;
+  signal cand_addr         : std_logic_vector(31 downto 0);
+  signal shared_io_log     : std_logic;
 begin
 
   cache_inst: entity work.TG68K_Cache_030
@@ -157,14 +168,26 @@ begin
 
   cache_xlate_ready <= (not pmmu_busy) and (not pmmu_fault);
 
+  -- BUG #455 FIX: the shared-IO window ($00DD4000-$00DD5FFF) bypasses the
+  -- PMMU in the kernel (pmmu_req suppressed), so pmmu_addr_phys is STALE for
+  -- these accesses. Excluding them from both lookup and allocation prevents
+  -- window reads from hitting a line tagged for an unrelated address and
+  -- from poisoning a line under the stale physical tag. It is platform I/O,
+  -- never cacheable, MMU on or off.
+  shared_io_log <= '1' when pmmu_addr_log(31 downto 16) = x"00DD" and
+                            pmmu_addr_log(15 downto 13) = "010"
+                   else '0';
+
   -- WinUAE/68030 behavior: cache-inhibit controls allocation.  Existing hits
   -- still satisfy the access, so lookup requests are not gated by fill_inhibit.
   i_cache_req <= '1' when cpu_030 = '1' and cacr_ie = '1' and
-                          busstate = "00" and cache_xlate_ready = '1'
+                          busstate = "00" and cache_xlate_ready = '1' and
+                          shared_io_log = '0'
                  else '0';
   d_cache_req <= '1' when cpu_030 = '1' and cacr_de = '1' and
                           (busstate = "10" or busstate = "11") and
-                          cache_xlate_ready = '1'
+                          cache_xlate_ready = '1' and
+                          shared_io_log = '0'
                  else '0';
   d_cache_we <= '1' when busstate = "11" else '0';
 
@@ -181,16 +204,23 @@ begin
   phys_fast_cacheable <= phys_z3ram0 or phys_z3ram1 or phys_z2ram;
   fill_inhibit <= pmmu_cache_inhibit or (not phys_fast_cacheable);
 
+  -- Byte-lane map inside the 32-bit line slice (fill assembly puts bus word0
+  -- in bits 15:0, word1 in 31:16; bus 15:8 = even/UDS byte, 7:0 = odd/LDS):
+  --   byte0 -> 15:8, byte1 -> 7:0, byte2 -> 31:24, byte3 -> 23:16.
+  -- BUG #449/#450 FIX: the "11" (addr%4==3) write arm targeted byte2's lane
+  -- (31:24) with the UDS strobe - an odd-address byte store asserts only LDS,
+  -- so the enable never fired and a store-hit left the line stale. The odd
+  -- read arms returned the even sibling's lane (15:8 / 31:24).
   with pmmu_addr_log(1 downto 0) select
     d_cache_data_in <= x"0000" & cpu_data_write       when "00",
                        x"000000" & cpu_data_write(7 downto 0) when "01",
                        cpu_data_write & x"0000"       when "10",
-                       cpu_data_write(7 downto 0) & x"000000" when others;
+                       x"00" & cpu_data_write(7 downto 0) & x"0000" when others;
 
   d_cache_be <= "00" & (not uds_n) & (not lds_n) when pmmu_addr_log(1 downto 0) = "00" else
                 "000" & (not lds_n)              when pmmu_addr_log(1 downto 0) = "01" else
                 (not uds_n) & (not lds_n) & "00" when pmmu_addr_log(1 downto 0) = "10" else
-                (not uds_n) & "000";
+                '0' & (not lds_n) & "00";
 
   process(pmmu_addr_log, busstate, i_cache_data, d_cache_data_out)
   begin
@@ -208,9 +238,9 @@ begin
           cache_data_out_16 <= d_cache_data_out(31 downto 16);
         end if;
       when "01" =>
-        cache_data_out_16 <= x"00" & d_cache_data_out(15 downto 8);
+        cache_data_out_16 <= x"00" & d_cache_data_out(7 downto 0);
       when others =>
-        cache_data_out_16 <= x"00" & d_cache_data_out(31 downto 24);
+        cache_data_out_16 <= x"00" & d_cache_data_out(23 downto 16);
     end case;
   end process;
 
@@ -223,9 +253,10 @@ begin
   fill_pending_i <= i_fill_req;
   fill_pending_d <= d_fill_req;
 
-  cache_addr_int <= fill_addr_latched when fill_active = '1' else
-                    i_fill_addr       when fill_pending_i = '1' else
-                    d_fill_addr;
+  -- BUG #451 FIX: once req_lock is set, the fill address is frozen for the
+  -- whole transaction (grant through commit).
+  cand_addr <= i_fill_addr when fill_pending_i = '1' else d_fill_addr;
+  cache_addr_int <= req_lock_addr when req_lock = '1' else cand_addr;
   cache_addr <= cache_addr_int;
 
   fill_z3ram0 <= '1' when cache_addr_int(31 downto 27) = z3ram_base0 and
@@ -240,10 +271,22 @@ begin
                  else '0';
   fill_zram <= fill_z3ram0 or fill_z3ram1 or fill_z2ram;
 
-  cache_req_int <= fill_active or
-                   ((fill_pending_i or fill_pending_d) and
-                    (not pmmu_busy) and (not pmmu_fault) and
-                    (not pmmu_walker_req) and (not walker_active) and fill_zram);
+  -- BUG #452 FIX: the pmmu/walker gates apply only to ARMING a new request.
+  -- Once locked, cache_req holds level-stable through the whole burst - a
+  -- pmmu_busy pulse can no longer drop the request mid-stream and desync
+  -- this counter from Minimig's.
+  -- fill_valid_r = '0' term: at completion there is a one-cycle window where
+  -- the served requester's fill_req has not yet cleared in TG68K_Cache_030.
+  -- Arming there would start a spurious duplicate burst whose completion can
+  -- commit the OLD line data under a newly-latched tag. Block arming during
+  -- the completion pulse; pendings are coherent again the cycle after.
+  req_arm <= '1' when req_lock = '0' and fill_valid_r = '0' and
+                      (fill_pending_i = '1' or fill_pending_d = '1') and
+                      pmmu_busy = '0' and pmmu_fault = '0' and
+                      pmmu_walker_req = '0' and walker_active = '0' and
+                      fill_zram = '1'
+             else '0';
+  cache_req_int <= req_lock;
   cache_req <= cache_req_int;
   cache_burst <= cache_req_int;
   cache_burst_len <= "111";
@@ -266,23 +309,29 @@ begin
         fill_count <= (others => '0');
         fill_buffer <= (others => '0');
         fill_active <= '0';
-        fill_owner_i <= '0';
-        fill_addr_latched <= (others => '0');
         fill_valid_r <= '0';
         fill_owner_r <= '0';
         fill_data_r <= (others => '0');
+        req_lock <= '0';
+        req_lock_owner_i <= '0';
+        req_lock_addr <= (others => '0');
       else
         fill_valid_r <= '0';
+
+        -- BUG #451/#452 FIX: arm exactly once; owner and address freeze here.
+        -- The lock releases only at fill completion, so a requester that
+        -- withdraws mid-burst (freeze) cannot re-target an in-flight fill -
+        -- the completed line is offered to the locked owner, whose commit
+        -- logic drops it if it no longer wants it.
+        if req_arm = '1' then
+          req_lock <= '1';
+          req_lock_owner_i <= fill_pending_i;
+          req_lock_addr <= cand_addr;
+        end if;
 
         if fill_start = '1' then
           fill_active <= '1';
           fill_count <= (others => '0');
-          fill_owner_i <= fill_pending_i;
-          if fill_pending_i = '1' then
-            fill_addr_latched <= i_fill_addr;
-          else
-            fill_addr_latched <= d_fill_addr;
-          end if;
           fill_buffer(15 downto 0) <= cache_data;
         elsif fill_accept = '1' then
           case fill_count is
@@ -301,9 +350,10 @@ begin
             when "110" =>
               fill_buffer(127 downto 112) <= cache_data;
               fill_data_r <= cache_data & fill_buffer(111 downto 0);
-              fill_owner_r <= fill_owner_i;
+              fill_owner_r <= req_lock_owner_i;
               fill_valid_r <= '1';
               fill_active <= '0';
+              req_lock <= '0';
             when others =>
               null;
           end case;

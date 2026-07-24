@@ -1026,6 +1026,22 @@ test-mmu-badfeed-softfix: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_badfeed_softfix_recovery.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit -f" tb_mmu_badfeed_softfix_recovery
 
+test-cacr-clearu: setup
+	@echo "Running BUG #453 CACR CI+CD / CEI+CED regression..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cacr_clearu.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 1ms; quit -f" tb_cacr_clearu
+
+test-cache030-unit: setup
+	@echo "Running 030 L1 cache unit regression (BUG #449/#450/#451/#452/#455/#468)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Cache_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_CacheCtrl_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cache030_unit.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit -f" tb_cache030_unit
+
 # KNOWN-FAILING (BUG #458 reproducer): the deferred mask-word bus error races
 # MOVEM's store beats into a double-fault HALT, with or without an
 # insn_fetch_consumer term for set(get_2ndOPC). Kept as the reproducer for the

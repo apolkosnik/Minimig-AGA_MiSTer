@@ -3621,11 +3621,13 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 		.z3ram_ena0(z3ram_ena0),
 		.z3ram_ena1(z3ram_ena1),
 		.z2ram_ena(z2ram_ena),
-		// CACHE BISECT EXPERIMENT: force the controller's native CACR-disabled
-		// mode (no hits, no fills - exactly how every boot's pre-SetPatch phase
-		// runs). Restore to cacr_ie/cacr_de after the hardware verdict.
-		.cacr_ie(1'b0),
-		.cacr_de(1'b0),
+		// BUG #454 FIX: cache bisect experiment removed - CACR EI/ED reconnected.
+		// The 030 L1 is live again now that the masked cache bugs are fixed:
+		// BUG #449/#450 (byte lanes), #451 (fill owner lock), #452 (fill counter
+		// desync), #453 (CACR CI+CD), #455 (shared-IO window), #457 (cache_hit
+		// qualifier), #468 (freeze commit gate).
+		.cacr_ie(cacr_ie),
+		.cacr_de(cacr_de),
 		.cacr_ifreeze(cacr_ifreeze),
 		.cacr_dfreeze(cacr_dfreeze),
 		.cacr_wa(cacr_wa),
