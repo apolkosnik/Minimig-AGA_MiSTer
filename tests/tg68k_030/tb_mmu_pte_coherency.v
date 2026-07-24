@@ -363,12 +363,56 @@ module tb_mmu_pte_coherency;
 		end
 	endtask
 
+	// BUG #462 regression: an INHIBITED write (the walker's U/M descriptor
+	// write-back runs with cache_inhibit set via walker_active) must not
+	// leave a stale copy of the descriptor in the L2. Pre-fix, the write-hit
+	// update was gated by !cache_inhibit and the line stayed valid with the
+	// PRE-UPDATE value: the OS re-read the stale descriptor from L2 and could
+	// write back U/M=0 (lost update). Post-fix the matching line is
+	// invalidated, so the cacheable re-read fetches the fresh value.
+	task run_um_snoop_case;
+		begin
+			$display("CASE walker U/M inhibited-write snoop (BUG #462)");
+			wait_seed = 3'd0;
+			reset_n = 1'b0;
+			cpuCS = 1'b0;
+			cpuU = 1'b1;
+			cpuL = 1'b1;
+			cpustate = 2'b00;
+			cache_inhibit = 1'b1;
+			cpu_cache_ctrl = 4'b0000;
+			repeat (4) @(posedge clk);
+			reset_n = 1'b1;
+			repeat (320) @(posedge clk);
+
+			// OS reads the (zero) descriptor cacheably - allocates the L2 line.
+			cache_inhibit = 1'b0;
+			cpu_cache_ctrl = 4'b0010;
+			repeat (2) @(posedge clk);
+			read_word(PTE_HIGH_ADDR, 16'h0000, "UM: initial cached high");
+			read_word(PTE_LOW_ADDR, 16'h0000, "UM: initial cached low");
+
+			// Walker sets U in the descriptor: inhibited write-through.
+			cache_inhibit = 1'b1;
+			write_word(PTE_HIGH_ADDR, PTE_VALUE[31:16], "UM: walker high write");
+			write_word(PTE_LOW_ADDR, PTE_VALUE[15:0] | 16'h0008, "UM: walker low write");
+
+			// OS re-reads CACHEABLY and must observe the walker's update.
+			cache_inhibit = 1'b0;
+			read_word(PTE_HIGH_ADDR, PTE_VALUE[31:16],
+			          "UM: cached re-read high sees walker update");
+			read_word(PTE_LOW_ADDR, PTE_VALUE[15:0] | 16'h0008,
+			          "UM: cached re-read low sees walker update");
+		end
+	endtask
+
 	initial begin
 		$display("==== NetBSD PTE write/PFLUSH/walk coherency ====");
 		for (case_seed = 0; case_seed < 4; case_seed = case_seed + 1) begin
 			run_case(case_seed, 0);
 			run_case(case_seed, 1);
 		end
+		run_um_snoop_case;
 
 		if (failures == 0)
 			$display("PASS: all PTE coherency cases passed");

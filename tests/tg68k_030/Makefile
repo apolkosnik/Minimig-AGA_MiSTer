@@ -1026,6 +1026,11 @@ test-mmu-badfeed-softfix: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_badfeed_softfix_recovery.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit -f" tb_mmu_badfeed_softfix_recovery
 
+test-l2-inhibit-snoop: setup
+	@echo "Running BUG #462 L2 inhibited-write invalidate regression..."
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(PROJECT_ROOT)/rtl/cpu_cache_new.v $(TEST_DIR)/tb_l2_inhibit_snoop.v
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 3ms; quit -f" tb_l2_inhibit_snoop
+
 test-cacr-clearu: setup
 	@echo "Running BUG #453 CACR CI+CD / CEI+CED regression..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd

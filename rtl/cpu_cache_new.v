@@ -71,6 +71,7 @@ reg  [39:0] cpu_sm_tag_dat_w;
 reg         cpu_sm_id;
 reg         cpu_sm_ilru;
 reg         cpu_sm_dlru;
+reg         cpu_sm_inh_inv_i; // BUG #462: deferred I-side invalidate (D took the tag bus)
 reg   [9:0] sdr_sm_adr;
 reg         sdr_sm_itag_we;
 reg         sdr_sm_dtag_we;
@@ -260,6 +261,7 @@ always @ (posedge clk) begin
     cpu_sm_dram0_we   <= 1'b0;
     cpu_sm_dram1_we   <= 1'b0;
     cpu_sm_bs         <= 2'b11;
+    cpu_sm_inh_inv_i  <= 1'b0;
   end else begin
     // default values
     fill              <= 1'b0;
@@ -304,11 +306,44 @@ always @ (posedge clk) begin
         cpu_sm_iram1_we <= cc_ie && !cache_inhibit && itag1_match && itag1_valid /*&& !cc_fr*/;
         cpu_sm_dram0_we <= cc_de && !cache_inhibit && dtag0_match && dtag0_valid /*&& !cc_fr*/;
         cpu_sm_dram1_we <= cc_de && !cache_inhibit && dtag1_match && dtag1_valid /*&& !cc_fr*/;
+        // BUG #462 FIX: an INHIBITED write (walker U/M descriptor write-back,
+        // or any CI-mapped write) cannot update a matching line - but leaving
+        // it valid serves stale data to later reads (OS re-reads a pre-update
+        // page-table longword from L2 and can write back U/M=0). Invalidate
+        // the matching way instead; invalidate is always safe. The tag data
+        // bus is shared, so if BOTH an I and a D line match (self-modifying
+        // code corner), D is invalidated now and I one cycle later in WB.
+        cpu_sm_inh_inv_i <= 1'b0;
+        if (cache_inhibit) begin
+          if ((dtag0_match && dtag0_valid) || (dtag1_match && dtag1_valid)) begin
+            cpu_sm_dtag_we <= 1'b1;
+            cpu_sm_tag_dat_w <= {dtram_cpu_dat_r[39],
+                                 (dtag0_match ? 1'b0 : dtram_cpu_dat_r[38]),
+                                 (dtag1_match ? 1'b0 : dtram_cpu_dat_r[37]),
+                                 dtram_cpu_dat_r[36:0]};
+            cpu_sm_inh_inv_i <= (itag0_match && itag0_valid) || (itag1_match && itag1_valid);
+          end else if ((itag0_match && itag0_valid) || (itag1_match && itag1_valid)) begin
+            cpu_sm_itag_we <= 1'b1;
+            cpu_sm_tag_dat_w <= {itram_cpu_dat_r[39],
+                                 (itag0_match ? 1'b0 : itram_cpu_dat_r[38]),
+                                 (itag1_match ? 1'b0 : itram_cpu_dat_r[37]),
+                                 itram_cpu_dat_r[36:0]};
+          end
+        end
         cpu_sm_state <= CPU_SM_WB;
         wb_en <= 1'b1;
         if (!cpu_cs) cpu_sm_state <= CPU_SM_IDLE;
       end
       CPU_SM_WB : begin
+        // BUG #462: deferred I-side invalidate from the double-match corner
+        if (cpu_sm_inh_inv_i && ((itag0_match && itag0_valid) || (itag1_match && itag1_valid))) begin
+          cpu_sm_itag_we <= 1'b1;
+          cpu_sm_tag_dat_w <= {itram_cpu_dat_r[39],
+                               (itag0_match ? 1'b0 : itram_cpu_dat_r[38]),
+                               (itag1_match ? 1'b0 : itram_cpu_dat_r[37]),
+                               itram_cpu_dat_r[36:0]};
+        end
+        cpu_sm_inh_inv_i <= 1'b0;
         if (!cpu_cs) cpu_sm_state <= CPU_SM_IDLE;
         else wb_en <= 1'b1;
       end
