@@ -235,7 +235,7 @@ must be fixed BEFORE re-enabling the cache.
   frame doesn't expose the extension word to check bit 8). Brief-format-only
   support remains for the common cases.
 
-### BUG #462 — L2 (cpu_cache_new) not updated by walker U/M descriptor writes  [LIVE]
+### BUG #462 — L2 (cpu_cache_new) not updated by walker U/M descriptor writes  [FIXED 2026-07-24]
 - **Where:** `rtl/cpu_cache_new.v:303-306` (write-hit update gated by
   `!cache_inhibit`); `Minimig.sv:482` (`ram_cache_inhibit = walker_active |
   pmmu_CI`). Instantiated in `sdram_ctrl.v:143` and `ddram_ctrl.v:318`.
@@ -406,7 +406,12 @@ baseline.
   basic suite + Lightwave/LHA benchmarks, verify no regression vs the
   cache-off bisect baseline.
 
-## Phase 5 — L2 coherency
+## Phase 5 — L2 coherency  ✅ DONE 2026-07-24
+Exposure refined during verification: ddram_ctrl already snooped every CPU
+write (DDR path was coherent); sdram_ctrl snoops the CHIP port only, so
+SDRAM-backed fast RAM was the real exposure. Fixed inside cpu_cache_new
+(invalidate-on-inhibited-write-hit) for both instances; unit bench
+test-l2-inhibit-snoop fails 4/4 on baseline, passes post-fix.
 18. **#462** `cpu_cache_new`: tag-match invalidate on inhibited/walker writes
     (keep allocate gated).
 - **Verify:** new `tb_l2_walker_um_snoop.v` at the sdram/ddram_ctrl level: read
