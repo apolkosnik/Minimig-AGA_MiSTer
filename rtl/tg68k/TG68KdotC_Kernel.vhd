@@ -1620,7 +1620,15 @@ ALU: TG68K_ALU
 	-- data longword is in flight. That release is not a memory ack:
 	-- hold memmask/state so the same stack word retries. Do not hold the pop's
 	-- own data fault or an external/walker bus error; those must dispatch.
-	directpc_retry_hold <= '1' WHEN exec(directPC)='1' AND state="10" AND
+	-- BUG #459 FIX: also hold directSR/directCCR pop beats (RTE SR word, RTR
+	-- CCR word; exec(directSR) persists rte1-rte5, so this covers every RTE
+	-- frame pop). Pre-fix, a parasitic insn-side fault released the SR-word
+	-- beat and FlagsSR/trap_SR/make_trace/SVmode loaded bus garbage - the
+	-- restart shadow only rolls back the 8-bit CCR, never SR-high, so a
+	-- handler RTE then restored a garbage SR (e.g. S=0 -> pops from USP).
+	-- Signal keeps its historical name; it now guards all direct-pop beats.
+	directpc_retry_hold <= '1' WHEN (exec(directPC)='1' OR exec(directSR)='1' OR
+	                                 exec(directCCR)='1') AND state="10" AND
 	                                  beat_valid='0' AND
 	                                  dib_sub_hit='0' AND berr='0' AND
 	                                  pmmu_walker_berr='0' AND
@@ -1641,6 +1649,14 @@ ALU: TG68K_ALU
 	-- refetch path - restarting those caused the spurious-prefetch infinite
 	-- loop (MMU_RESTART_DESIGN.md section 9); the consumer strobes are the
 	-- discriminator that section said was missing.
+	-- BUG #458 (OPEN): the second-opcode-word fetch (MOVEM mask, DIVx.L/MULx.L/
+	-- CAS2/bitfield extensions) has no consumer term here. A set(get_2ndOPC)
+	-- term was tried and does NOT fix the observed failure: in the
+	-- tb_movem_mask_pagefault reproducer the double-fault halt is identical
+	-- with and without it - the deferred mask-word bus error races MOVEM's
+	-- own store beats (fault during berr_exception_active -> HALT). Needs a
+	-- deeper fix in the deferred-dispatch/squash path; reproducer kept as a
+	-- known-failing bench.
 	insn_fetch_consumer <= '1' WHEN getbrief='1' OR setnextpass='1' OR exec(update_ld)='1' OR
 	                                 micro_state = ld_nn  OR micro_state = st_nn  OR
 	                                 micro_state = ld_dAn1 OR micro_state = st_dAn1 OR
@@ -1777,8 +1793,8 @@ ALU: TG68K_ALU
 		rte_mmu_fix_ssw(8) = '0' AND
 		rte_mmu_fix_ssw(7) = '0' AND
 		rte_mmu_fix_ssw(6) = '1' AND
-		-- Side-effect-free source EA modes only: (An), (d16,An), (d8,An,Xn),
-		-- (xxx).W, (xxx).L, (d16,PC), (d8,PC,Xn). The commit skips the whole
+		-- Side-effect-free FIXED-LENGTH source EA modes only: (An), (d16,An),
+		-- (xxx).W, (xxx).L, (d16,PC). The commit skips the whole
 		-- instruction (rte_mmu_fix_len below), so post-increment/pre-decrement
 		-- sources (modes 011/100) are EXCLUDED - their An side effect was
 		-- rolled back at dispatch and would be lost. MuForce completes faults
@@ -1786,14 +1802,21 @@ ALU: TG68K_ALU
 		-- MOVE.L (d16,A6),D5 = $2A6E - only mode 010 was whitelisted, the
 		-- softfix never committed, and the re-executed read refaulted on the
 		-- hot fault-ATC entry forever).
+		-- BUG #461 FIX: indexed modes 110 (d8,An,Xn) and 111/011 (d8,PC,Xn)
+		-- are EXCLUDED from the commit fast-path: they admit 68020 full-format
+		-- extensions (bd16/bd32, memory-indirect, 2-4 ext words) which the
+		-- stacked frame cannot distinguish from brief format, and
+		-- rte_mmu_fix_len assumes ONE extension word - a committed full-format
+		-- MOVE resumed INSIDE its own displacement and executed garbage.
+		-- Declining here arms the DIB-substitution re-execution path instead
+		-- (dib_sub_valid requires rte_mmu_fix_write='0'), which re-runs the
+		-- whole EA calculation and is correct for every extension format.
 		(rte_mmu_fix_opcode(5 downto 3) = "010" OR
 		 rte_mmu_fix_opcode(5 downto 3) = "101" OR
-		 rte_mmu_fix_opcode(5 downto 3) = "110" OR
 		 (rte_mmu_fix_opcode(5 downto 3) = "111" AND
 		  (rte_mmu_fix_opcode(2 downto 0) = "000" OR
 		   rte_mmu_fix_opcode(2 downto 0) = "001" OR
-		   rte_mmu_fix_opcode(2 downto 0) = "010" OR
-		   rte_mmu_fix_opcode(2 downto 0) = "011"))) AND
+		   rte_mmu_fix_opcode(2 downto 0) = "010"))) AND
 		-- MOVE.{B,W,L} to Dn (mode 000)
 		((rte_mmu_fix_opcode(8 downto 6) = "000" AND
 		  (rte_mmu_fix_opcode(15 downto 12) = "0001" OR
@@ -1956,14 +1979,19 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 					a7_is_msp <= '0';
 				END IF;
 				-- Track M-bit swaps via exec(to_SR) (MOVE to SR, ANDI/ORI/EORI to SR)
-				IF exec(to_SR)='1' AND cpu(1)='1' AND FlagsSR(5)='1' AND SRin(5)='1' AND SRin(4) /= FlagsSR(4) THEN
+				-- BUG #467 FIX: qualify on preSVmode (same as the A7 regfile swap in
+				-- the regfile process), not FlagsSR(5). In a deferred S-change window
+				-- the two can disagree, letting the alias flag update without the
+				-- A7/shadow exchange (or vice versa) and desyncing later
+				-- MOVEC $803/$804 A7-aliasing decisions.
+				IF exec(to_SR)='1' AND cpu(1)='1' AND preSVmode='1' AND SRin(5)='1' AND SRin(4) /= FlagsSR(4) THEN
 					a7_is_msp <= SRin(4);
 				END IF;
 				-- STOP #imm loads the whole immediate into SR (set_stop path). Its
 				-- new S/M (data_read(13)/data_read(12)) selects the active A7 just as
 				-- MOVE-to-SR does. Track the shadow A7 aliases when it changes M while
-				-- staying supervisor.
-				IF set_stop='1' AND cpu(1)='1' AND FlagsSR(5)='1' AND data_read(13)='1' AND data_read(12) /= FlagsSR(4) THEN
+				-- staying supervisor. (BUG #467: preSVmode, matching the A7 load.)
+				IF set_stop='1' AND cpu(1)='1' AND preSVmode='1' AND data_read(13)='1' AND data_read(12) /= FlagsSR(4) THEN
 					a7_is_msp <= data_read(12);
 				END IF;
 				IF setopcode='1' THEN
@@ -2109,21 +2137,30 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 						rte_mmu_fix_long_index <= 0;
 					END IF;
 				ELSIF micro_state = rte5 AND rte_mmu_fix_capture_active = '1' THEN
-					CASE rte_mmu_fix_long_index IS
-						WHEN 0 =>
-							rte_mmu_fix_ssw <= data_read(15 downto 0);      -- SP+$0A after unwind starts at $08 longword
-						WHEN 2 =>
-							rte_mmu_fix_faddr <= data_read;                  -- SP+$10 fault address
-						WHEN 3 =>
-							rte_mmu_fix_opcode <= data_read(15 downto 0);   -- SP+$14 low word
-						WHEN 9 =>
-							rte_mmu_fix_input_buffer <= data_read;           -- SP+$2C data input buffer
-						WHEN OTHERS =>
-							NULL;
-					END CASE;
-					IF rte_mmu_fix_long_index = 11 AND
-					   data_read(15 downto 12) /= RTE_030_FORMAT_B_VERSION THEN
-						rte_format_b_version_error <= '1';
+					-- BUG #460 FIX: only a really-acked (or DIB-substituted) pop may
+					-- update the decision words (same hardening as rte_format_word).
+					-- A parasitic fault-released beat leaves the word at its reset
+					-- value (zeros), which fails SAFE: SSW=0 arms neither the commit
+					-- nor the DIB substitution, and the parasitic fault dispatches
+					-- its own exception. Index bookkeeping stays ungated so the
+					-- unwind depth remains aligned with rot_cnt.
+					IF (beat_valid='1' AND bus_datum_dirty='0') OR dib_sub_hit='1' THEN
+						CASE rte_mmu_fix_long_index IS
+							WHEN 0 =>
+								rte_mmu_fix_ssw <= data_read(15 downto 0);      -- SP+$0A after unwind starts at $08 longword
+							WHEN 2 =>
+								rte_mmu_fix_faddr <= data_read;                  -- SP+$10 fault address
+							WHEN 3 =>
+								rte_mmu_fix_opcode <= data_read(15 downto 0);   -- SP+$14 low word
+							WHEN 9 =>
+								rte_mmu_fix_input_buffer <= data_read;           -- SP+$2C data input buffer
+							WHEN OTHERS =>
+								NULL;
+						END CASE;
+						IF rte_mmu_fix_long_index = 11 AND
+						   data_read(15 downto 12) /= RTE_030_FORMAT_B_VERSION THEN
+							rte_format_b_version_error <= '1';
+						END IF;
 					END IF;
 					IF rot_cnt = "000001" THEN
 						rte_mmu_fix_capture_active <= '0';
@@ -2167,17 +2204,23 @@ PROCESS (clk, long_done, last_data_in, data_in, addr, long_start, memmaskmux, me
 						rte_fmt_a_long_index <= 0;
 					END IF;
 				ELSIF micro_state = rte5 AND rte_fmt_a_capture_active = '1' THEN
-					CASE rte_fmt_a_long_index IS
-						WHEN 0 =>
-							rte_fmt_a_state1 <= data_read(31 downto 16);
-							rte_fmt_a_ssw <= data_read(15 downto 0);
-						WHEN 2 =>
-							rte_fmt_a_fault_addr <= data_read;
-						WHEN 4 =>
-							rte_fmt_a_data_out <= data_read;
-						WHEN OTHERS =>
-							NULL;
-					END CASE;
+					-- BUG #460 FIX: same beat_valid hardening as the Format $B
+					-- captures above. Zeros fail safe: rte_fmt_a_replay_needed
+					-- requires state1(8) & ssw(8), so a garbage-released pop can
+					-- no longer aim a replay write with a junk SSW/fault address.
+					IF (beat_valid='1' AND bus_datum_dirty='0') OR dib_sub_hit='1' THEN
+						CASE rte_fmt_a_long_index IS
+							WHEN 0 =>
+								rte_fmt_a_state1 <= data_read(31 downto 16);
+								rte_fmt_a_ssw <= data_read(15 downto 0);
+							WHEN 2 =>
+								rte_fmt_a_fault_addr <= data_read;
+							WHEN 4 =>
+								rte_fmt_a_data_out <= data_read;
+							WHEN OTHERS =>
+								NULL;
+						END CASE;
+					END IF;
 					IF rot_cnt = "000001" THEN
 						rte_fmt_a_capture_active <= '0';
 					ELSE

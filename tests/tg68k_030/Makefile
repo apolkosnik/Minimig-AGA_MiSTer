@@ -1026,6 +1026,19 @@ test-mmu-badfeed-softfix: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_badfeed_softfix_recovery.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit -f" tb_mmu_badfeed_softfix_recovery
 
+# KNOWN-FAILING (BUG #458 reproducer): the deferred mask-word bus error races
+# MOVEM's store beats into a double-fault HALT, with or without an
+# insn_fetch_consumer term for set(get_2ndOPC). Kept as the reproducer for the
+# deeper deferred-dispatch/squash fix. See REVIEW_2026-07-23_CPU_MMU_CACHE.md.
+test-movem-mask-pagefault: setup
+	@echo "Running BUG #458 MOVEM mask-word page-fault restart regression (KNOWN-FAILING)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_movem_mask_pagefault.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "run 1ms; quit -f" tb_movem_mask_pagefault
+
 test-rte-mmu-fix-tst: setup
 	@echo "Running BUG #448 TST softfix D5/A5 regression..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
