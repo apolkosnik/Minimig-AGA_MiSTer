@@ -26,6 +26,16 @@
 //   c. Coverage: at least one walker Fast-RAM beat happened with sel_rtg
 //      stale-high (otherwise the scenario silently stopped exercising the bug).
 //   d. End-to-end: D5 == $CAFED00D and the $1300 checkpoint write landed.
+//
+// Scenario 2 (BUG #464): after the main pass, ramready is forced to stick
+// HIGH right after the walker consumes the low descriptor word of a fresh
+// walk ($20400200). The walker then enters WALKER_READ_HIGH with ready still
+// asserted; pre-fix it spun there forever (counter incremented, never
+// compared, no req-drop check) - a hard hang. Post-fix the 2048-cycle
+// watchdog fires: walker_timeout_error + BERR.
+//
+// Standing invariant (BUG #456): fastchip_sel must never assert while
+// pmmu_suppress_bus is high (stale pmmu_addr_phys_p in busy/fault windows).
 
 `timescale 1 ns / 1 ps
 
@@ -197,6 +207,17 @@ module tb_walker_stale_rtg;
   reg [15:0] ram_delay_cycles = 16'd2;
   reg [15:0] ram_cnt;
   wire ram_is_write = uut.walker_fast_ram ? uut.walker_writing : (cpustate == 2'b11);
+  // Scenario 2 (BUG #464): once armed, ramready sticks high after the walker
+  // consumes the LOW descriptor word, so the walker reaches WALKER_READ_HIGH
+  // with a level-held ready that never deasserts.
+  reg arm_stuck_after_low = 1'b0;
+  reg ram_stuck_high      = 1'b0;
+  always @(posedge clk) begin
+    if (arm_stuck_after_low && uut.walker_state == 4'd3 && ramready)
+      ram_stuck_high <= 1'b1;
+    if (!arm_stuck_after_low)
+      ram_stuck_high <= 1'b0;
+  end
   always @(posedge clk) begin
     if (~reset) begin
       ramready <= 1'b0;
@@ -236,6 +257,10 @@ module tb_walker_stale_rtg;
       end else begin
         ram_cnt <= 16'd0;
       end
+
+      // BUG #464 scenario override: level-held ready that never deasserts
+      if (ram_stuck_high)
+        ramready <= 1'b1;
     end
   end
 
@@ -350,9 +375,19 @@ module tb_walker_stale_rtg;
       chipmem[16'h043A >> 1] = 16'h31FC;
       chipmem[16'h043C >> 1] = 16'h600D;
       chipmem[16'h043E >> 1] = 16'h1300;
-      // $0440: NOP loop
-      chipmem[16'h0440 >> 1] = 16'h4E71;
-      chipmem[16'h0442 >> 1] = 16'h60FC;
+      // $0440-$047E: NOP slide - window for the harness to arm Scenario 2
+      // (BUG #464) after detecting the $1300 checkpoint.
+      for (i = 0; i < 32; i = i + 1)
+        chipmem[(16'h0440 + i*2) >> 1] = 16'h4E71;
+      // $0480: MOVEA.L #$20400200,A6 - page not yet in ATC -> fresh walk
+      chipmem[16'h0480 >> 1] = 16'h2C7C;
+      chipmem[16'h0482 >> 1] = 16'h2040;
+      chipmem[16'h0484 >> 1] = 16'h0200;
+      // $0486: MOVE.L (A6),D6 - the walk that gets the stuck-high ready
+      chipmem[16'h0486 >> 1] = 16'h2C16;
+      // $0488: NOP loop
+      chipmem[16'h0488 >> 1] = 16'h4E71;
+      chipmem[16'h048A >> 1] = 16'h60FC;
     end
   endtask
 
@@ -408,6 +443,19 @@ module tb_walker_stale_rtg;
       fail("walker-ownership: ramsel high during walker but not walker-driven");
   end
 
+  // BUG #456 invariant: fastchip_sel must be suppressed while the PMMU is
+  // busy/faulted (pmmu_addr_phys_p is stale in those windows). Also count the
+  // windows where the pre-fix decode would have asserted, for coverage.
+  integer n_fastchip_suppress_windows = 0;
+  always @(posedge clk) begin
+    if (reset && uut.pmmu_suppress_bus) begin
+      if (fastchip_sel)
+        fail("BUG #456: fastchip_sel asserted during pmmu busy/fault window");
+      if (uut.cpu_req && !uut.pmmu_addr_phys_p[31:24] && !uut.walker_active)
+        n_fastchip_suppress_windows = n_fastchip_suppress_windows + 1;
+    end
+  end
+
   // ============================================================
   // Test orchestration
   // ============================================================
@@ -451,9 +499,40 @@ module tb_walker_stale_rtg;
     else
       fail("coverage: no walker beat with stale sel_rtg - scenario broken");
 
+    // -------- Scenario 2 (BUG #464): stuck-high ready in WALKER_READ_HIGH ----
+    // Success criterion: the walker ESCAPES (walker_active drops) instead of
+    // parking in READ_HIGH forever. The escape route is either the BUG #419
+    // req-drop check (PMMU's internal ~500-cycle watchdog withdraws req) or
+    // the wrapper's own 2048-cycle watchdog - pre-fix READ_HIGH checked
+    // NEITHER, so walker_active stayed high for good and the CPU hard-hung.
+    $display("-- Scenario 2: arming stuck-high ramready after next low-word beat ...");
+    arm_stuck_after_low = 1'b1;
+
+    // Wait for the stuck condition to actually engage (low word consumed)
+    timeout_cycles = 0;
+    while (!ram_stuck_high && timeout_cycles < 100000) begin
+      @(posedge clk);
+      timeout_cycles = timeout_cycles + 1;
+    end
+    if (!ram_stuck_high)
+      fail("Scenario 2 (BUG #464): stuck-high never engaged - no fresh walk seen");
+    else begin
+      // Give the walker the wrapper watchdog budget (2048) plus slack.
+      timeout_cycles = 0;
+      while (uut.walker_active && timeout_cycles < 8192) begin
+        @(posedge clk);
+        timeout_cycles = timeout_cycles + 1;
+      end
+      if (!uut.walker_active)
+        pass("Scenario 2 (BUG #464): walker escaped READ_HIGH on stuck-high ready");
+      else
+        fail("Scenario 2 (BUG #464): walker parked in READ_HIGH - no escape fired");
+    end
+    arm_stuck_after_low = 1'b0;
+
     $display("==== tb_walker_stale_rtg summary ====");
-    $display("walker_fast_beats=%0d stale_rtg_windows=%0d",
-             n_walker_fast_beats, n_stale_rtg_windows);
+    $display("walker_fast_beats=%0d stale_rtg_windows=%0d fastchip_suppress_windows=%0d",
+             n_walker_fast_beats, n_stale_rtg_windows, n_fastchip_suppress_windows);
     if (errors == 0)
       $display("RESULT: PASS (0 failures)");
     else

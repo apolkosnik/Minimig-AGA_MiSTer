@@ -162,6 +162,7 @@ wire        walker_writing;  // MC68030 U/M bit: Walker actively writing memory
 wire        walker_write_low_phase;  // MC68030 U/M bit: Writing low word
 reg  [31:1] walker_addr_latch;  // BUG #135 FIX: Declare outside generate for chipreq logic
 wire        cache_hit;
+wire        cache_hit_valid;
 wire        walker_chip_ram;
 wire        walker_chip_cycle_active;
 wire        cpu_ready_qualified;
@@ -342,7 +343,13 @@ assign fastchip_rnw = wr;
 // BUG #408 FIX: When walker reads from legacy chip/Gary bus RAM, force cpu_din to chip_data.
 // Without this, CPU's frozen address can set ramsel=1 (turbochip/kickstart), causing
 // cpu_din to select ramdat (SDRAM data at CPU address) instead of chip_data (page table).
-assign cpu_din = (USE_68030_CACHE & cache_hit & ~walker_active & ~pmmu_fault_p) ? cache_data_out_16 :
+// BUG #457 FIX: ONE shared cache-hit qualifier for cpu_din, cpu_clkena_in and
+// cpu_beat_valid. Previously clkena/beat_valid released on bare cache_hit while
+// the cpu_din mux additionally required ~walker_active & ~pmmu_fault_p: in the
+// walk-tail window (walker still in WALKER_DONE after pmmu_busy dropped) the
+// CPU completed a "cache hit" beat while actually consuming chip_data/ramdat.
+assign cache_hit_valid = USE_68030_CACHE & cache_hit & ~walker_active & ~pmmu_fault_p;
+assign cpu_din = cache_hit_valid ? cache_data_out_16 :
                  walker_chip_ram ? chip_data :
                  ramsel ? ramdat : fastchip_selack ? fastchip_dout :
                  {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
@@ -418,7 +425,12 @@ always @* begin
 		// walker_active blocks pmmu_suppress_bus from gating cpu_req, and
 		// addr_phys may hold a stale walker address. Without this gate,
 		// fastchip could spuriously respond to walker descriptor addresses.
-		fastchip_sel = cpu_req & !pmmu_addr_phys_p[31:24] & ~walker_active;
+		// BUG #456 FIX: Also suppress during pmmu busy/fault windows.
+		// pmmu_addr_phys_p is STALE there (last completed translation), and
+		// fastchip decodes level-sensitively: a preceding IDE/Akiko access
+		// left in addr_phys could take spurious strobes, and its selack+ready
+		// could complete an unrelated CPU beat via cpu_ready_qualified.
+		fastchip_sel = cpu_req & !pmmu_addr_phys_p[31:24] & ~walker_active & ~pmmu_suppress_bus;
 		fastchip_lw  = longword;
 	end
 	else begin
@@ -2511,7 +2523,7 @@ assign cpu_ready_qualified = (ramsel & ramready) |
                              (fastchip_selack & fastchip_ready) |
                              (~ramsel & ~fastchip_selack &
                               ~pmmu_suppress_bus & ~walker_active & chipready);
-assign cpu_clkena_in = (~cpu_req | cpu_ready_qualified | (USE_68030_CACHE & cache_hit) |
+assign cpu_clkena_in = (~cpu_req | cpu_ready_qualified | cache_hit_valid |
                         pmmu_fault_p | walker_timeout_error | ~reset) &
                        (~pmmu_walker_req_p | ~reset | walker_timeout_error) &
                        (~pmmu_busy_p | pmmu_fault_p | walker_timeout_error | ~reset);
@@ -2521,7 +2533,7 @@ assign cpu_clkena_in = (~cpu_req | cpu_ready_qualified | (USE_68030_CACHE & cach
 // (hardware: $1B00/$FFFF/$4E71/$1500 junk consumed as opcodes/extensions/PC
 // across builds). beat_valid is high only when the beat completed via a REAL
 // ack (memory ready on the selected bus, or a cache hit) or no request is out.
-assign cpu_beat_valid = ~cpu_req | cpu_ready_qualified | (USE_68030_CACHE & cache_hit);
+assign cpu_beat_valid = ~cpu_req | cpu_ready_qualified | cache_hit_valid;
 
 wire rted_rte_opcode = (kernel_opcode_p == 16'h4E73);
 wire rted_start = cpu_clkena_in && rted_rte_opcode &&
@@ -4027,7 +4039,29 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 
 				WALKER_READ_HIGH: begin
 					// Drive walker address with LSB=1 for high word via walker_chip_addr mux
-					if (!walker_mem_ready) begin
+					// BUG #464 FIX: Same escape hatches as WALKER_READ_LOW. A level-held
+					// ready that never deasserts (or a PMMU-side req drop) previously
+					// parked the walker here forever: the counter incremented but was
+					// never compared, so walker_active stayed high and blocked all CPU
+					// completion with no BERR path - a hard hang instead of a timeout.
+					if (~pmmu_walker_req_p) begin
+						walker_state <= WALKER_DONE;
+					end
+					else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+						if (!pmwr_timeout_seen) begin
+							pmwr_timeout_seen <= 1;
+							pmwr_timeout_state <= walker_state;
+							pmwr_timeout_cnt <= walker_timeout_cnt;
+							pmwr_timeout_addr <= {walker_addr_word, 1'b0};
+							pmwr_timeout_ramaddr <= walker_ramaddr;
+							pmwr_timeout_flags <= pmwr_timeout_flags_next;
+						end
+						walker_timeout_error <= 1;
+						pmmu_walker_berr_p <= 1;
+						pmmu_walker_data_p <= 32'h0;
+						walker_state <= WALKER_DONE;
+					end
+					else if (!walker_mem_ready) begin
 						walker_read_ready_armed <= 1;
 						walker_state <= WALKER_WAIT_HIGH;
 					end else begin
@@ -4173,7 +4207,25 @@ if (USE_68030_CACHE) begin : gen_68030_cache
 					WALKER_WRITE_HIGH: begin
 					// Drive walker address with LSB=1 for high word
 						// Write data (walker_wdata_latch[31:16]) is driven via chip_din mux
-						if (!walker_mem_ready) begin
+						// BUG #464 FIX: Same escape hatches as WALKER_WRITE_LOW (see
+						// WALKER_READ_HIGH comment for the hang scenario).
+						if (~pmmu_walker_req_p) begin
+							walker_state <= WALKER_DONE;
+						end
+						else if (walker_timeout_cnt >= WALKER_TIMEOUT_LIMIT) begin
+							if (!pmwr_timeout_seen) begin
+								pmwr_timeout_seen <= 1;
+								pmwr_timeout_state <= walker_state;
+								pmwr_timeout_cnt <= walker_timeout_cnt;
+								pmwr_timeout_addr <= {walker_addr_word, 1'b0};
+								pmwr_timeout_ramaddr <= walker_ramaddr;
+								pmwr_timeout_flags <= pmwr_timeout_flags_next;
+							end
+							walker_timeout_error <= 1;
+							pmmu_walker_berr_p <= 1;
+							walker_state <= WALKER_DONE;
+						end
+						else if (!walker_mem_ready) begin
 							walker_write_ready_armed <= 1;
 							walker_state <= WALKER_WAIT_WR_HIGH;
 						end else begin
