@@ -59,7 +59,7 @@ must be fixed BEFORE re-enabling the cache.
   Add a regression tb: softfix-complete TST.B/W/L, assert D5/A5 unchanged, CCR
   updated.
 
-### BUG #449 — D-cache byte-store at addr%4==3 uses wrong strobe → line never updated  [latent]
+### BUG #449 — D-cache byte-store at addr%4==3 uses wrong strobe → line never updated  [FIXED 2026-07-24]
 - **Where:** `rtl/tg68k/TG68K_CacheCtrl_030.vhd:190-193` (`d_cache_be` "others"
   arm: `(not uds_n) & "000"`).
 - **Defect:** A 68k byte access to an odd address asserts only LDS; the "11"
@@ -70,7 +70,7 @@ must be fixed BEFORE re-enabling the cache.
 - **Fix:** Use `not lds_n` for the "11" arm — and fix the target lane together
   with BUG #450 (see below for the consistent layout).
 
-### BUG #450 — D-cache odd-address byte read-hits return the even sibling byte  [latent]
+### BUG #450 — D-cache odd-address byte read-hits return the even sibling byte  [FIXED 2026-07-24]
 - **Where:** `rtl/tg68k/TG68K_CacheCtrl_030.vhd:210-213` (read mux "01" returns
   `d_cache_data_out(15 downto 8)`, "11" returns `(31 downto 24)`).
 - **Defect:** The fill layout (word0 → line bits 15:0; bus big-endian: even byte
@@ -88,7 +88,7 @@ must be fixed BEFORE re-enabling the cache.
   - Re-derive the "00"/"10" word arms against the same layout (they are
     currently consistent) and add a tb sweeping all 4 byte offsets × R/W × hit.
 
-### BUG #451 — Fill owner/address race can commit D-line data into the I-cache  [latent]
+### BUG #451 — Fill owner/address race can commit D-line data into the I-cache  [FIXED 2026-07-24]
 - **Where:** `Minimig.sv:606-618` (fill address latched at grant) vs
   `rtl/tg68k/TG68K_CacheCtrl_030.vhd:277-285` (`fill_owner_i`/`fill_addr_latched`
   latched at first `cache_ack`), with `cache_addr_int` re-prioritizing I over D
@@ -102,7 +102,7 @@ must be fixed BEFORE re-enabling the cache.
   miss request while a fill is in flight (hold `cache_addr_int` stable from the
   latched owner).
 
-### BUG #452 — CacheCtrl/Minimig fill word counters can desynchronize  [latent]
+### BUG #452 — CacheCtrl/Minimig fill word counters can desynchronize  [FIXED 2026-07-24]
 - **Where:** `rtl/tg68k/TG68K_CacheCtrl_030.vhd:243-246, 258-259` (`fill_start`
   path requires `cache_req_int`, gated by `~pmmu_busy`/`~pmmu_walker_req` while
   `fill_active=0`) vs `Minimig.sv:594-648` (independent word counter, gated only
@@ -117,7 +117,7 @@ must be fixed BEFORE re-enabling the cache.
   CacheCtrl consumes it. Add an assertion tb pulsing `pmmu_busy` at every offset
   around the first ack.
 
-### BUG #453 — CACR $0808 (CacheClearU) drops the D-cache invalidate  [latent]
+### BUG #453 — CACR $0808 (CacheClearU) drops the D-cache invalidate  [FIXED 2026-07-24]
 - **Where:** priority encoder `rtl/tg68k/TG68KdotC_Kernel.vhd:1123-1145` (emits
   one op, CI wins) + self-clear `:9806-9810` (wipes all four clear bits at next
   `clkena_lw`).
@@ -134,14 +134,14 @@ must be fixed BEFORE re-enabling the cache.
 
 ## MAJOR
 
-### BUG #454 — "CACHE BISECT EXPERIMENT" ships with the 030 cache force-disabled  [LIVE]
+### BUG #454 — "CACHE BISECT EXPERIMENT" ships with the 030 cache force-disabled  [FIXED 2026-07-24 — CACHE RE-ENABLED]
 - **Where:** `rtl/cpu_wrapper.v:3606-3611` — `.cacr_ie(1'b0), .cacr_de(1'b0)`.
 - **Defect:** Committed experiment; CACR EI/ED writes have no effect, L1 never
   hits or fills in any current build.
 - **Fix:** Revert to `.cacr_ie(cacr_ie), .cacr_de(cacr_de)` — but only at
   Phase 4 (after #449-#453, #455, #457 are fixed), since it unmasks them.
 
-### BUG #455 — Shared-IO window ($00DD4xxx) reads can hit/allocate stale cache tags  [latent]
+### BUG #455 — Shared-IO window ($00DD4xxx) reads can hit/allocate stale cache tags  [FIXED 2026-07-24]
 - **Where:** kernel suppresses `pmmu_req` for the window
   (`TG68KdotC_Kernel.vhd:1197-1205`), so `pmmu_addr_phys_p` is stale there;
   `TG68K_CacheCtrl_030.vhd:171-182` indexes/allocates by `pmmu_addr_phys`;
@@ -290,7 +290,7 @@ must be fixed BEFORE re-enabling the cache.
   (`preSVmode`) at all three sites; same asymmetry pre-exists for
   `exec(to_SR)` (`:1959` vs `:2330`).
 
-### BUG #468 — CACR freeze set mid-fill still commits the in-flight line
+### BUG #468 — CACR freeze set mid-fill still commits the in-flight line  [FIXED 2026-07-24]
 - `TG68K_Cache_030.vhd:202-204,343-345` vs `:149-154,237-242`: freeze cancels
   the fill request, but the in-flight CacheCtrl fill still raises `fill_valid`
   and commits, replacing an entry while frozen. Fix: gate line commit on the
@@ -376,7 +376,18 @@ format/vector). Neither is caused by Phases 1-3.
   latch paths. Re-run the full `tests/tg68k_030` regression (all
   `test-mmu-*`, `test-addr-error-*`, record37 repro).
 
-## Phase 4 — Cache re-enable track (order matters; #454 revert comes LAST)
+## Phase 4 — Cache re-enable track  ✅ DONE 2026-07-24 — L1 CACHE IS LIVE
+All seven fixes + the #454 revert landed in one commit. New benches:
+`test-cache030-unit` (17 checks; pre-fix baseline fails 11) and
+`test-cacr-clearu` (real-kernel MOVEC op-stream; baseline drops CD/CED).
+Bench development exposed and closed a completion-window re-arm race in the
+new request-lock design itself. Note: `tb_movec_cacr_corner` tests a stale
+COPY of the kernel's CACR logic (still models the old clear-all behavior) —
+worth retiring or pointing at the real kernel.
+**REMAINING FOR PHASE 4 SIGN-OFF: the hardware soak** — build an RBF from
+b8ba7a2 or later, boot WB3.1 + SetPatch (caches ON for the first time since
+the bisect), run cputest + benchmarks, compare against the cache-off
+baseline.
 11. **#449 + #450** one consistent D-cache byte-lane map (write data, byte
     enables, read mux) — single commit.
 12. **#451** fill owner/address latched at grant; other cache's miss held off
