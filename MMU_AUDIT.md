@@ -143,7 +143,7 @@ Brief fields: `pflush_mode <= brief[12:8]`, `pflush_mask <= brief[7:5]`. The flu
 | Mode | Variant | Behavior |
 |---|---|---|
 | `001`, A=0 | PFLUSHA | Clear all ATC entries ([PMMU:3952](rtl/tg68k/TG68K_PMMU_030.vhd#L3952)) |
-| `001`, A=1 | PFLUSHAN | Clear non-global entries only (keep `atc_global(i)='1'`) ([PMMU:3960](rtl/tg68k/TG68K_PMMU_030.vhd#L3960)) |
+| `001` (A bit ignored) | PFLUSHA | Unconditionally flush all entries. The 68040 PFLUSHAN semantics (spare non-global entries) are NOT implemented and would require an `atc_global` exemption. *(Corrected 2026-07-24 per §13.2 #2 — the previous row claiming PFLUSHAN support was wrong.)* |
 | `100` | PFLUSH FC,MASK | Match FC via `((atc_fc(i) xor pflush_fc) and pflush_mask) = "000"` ([PMMU:3971-3988](rtl/tg68k/TG68K_PMMU_030.vhd#L3971-L3988)) |
 | `110` | PFLUSH FC,MASK,〈ea〉 | FC match + page-aligned address match ([PMMU:3990-4006](rtl/tg68k/TG68K_PMMU_030.vhd#L3990-L4006)) |
 
@@ -256,7 +256,7 @@ Pseudo-LRU ([PMMU:3803-3839, 3908-3923](rtl/tg68k/TG68K_PMMU_030.vhd#L3803-L3839
 | External BERR during walk | `mem_berr='1'` at any descriptor fetch; enters W_FAULT ([PMMU:2438, 2548+](rtl/tg68k/TG68K_PMMU_030.vhd#L2438)) | B (per BUG #153 [PMMU:2478](rtl/tg68k/TG68K_PMMU_030.vhd#L2478), **only** external BERR sets B) |
 | Walker timeout | `walker_timeout_counter >= 500` (BUG #387) | B |
 | Illegal TC (PS<8 or field-sum≠32) | Register write ([PMMU:1087-1104](rtl/tg68k/TG68K_PMMU_030.vhd#L1087-L1104)) | `mmu_config_error` (vector 56) |
-| Illegal PMOVE reg_sel (BUG #446) | Write or read with undecoded `brief[14:10]` ([PMMU:1189-1219](rtl/tg68k/TG68K_PMMU_030.vhd#L1189-L1219)) | `mmu_config_error` (vector 56) + sticky `pmmu_illegal_reg_sel_seen` |
+| Illegal PMOVE reg_sel (BUG #446, superseded) | Write or read with undecoded `brief[14:10]` | *(Updated 2026-07-24)* NO vector 56 — deliberately reverted: the kernel's F-line trap handles an illegal P-register selector per UM 9.6, and the PMMU only latches the sticky `pmmu_illegal_reg_sel_seen` debug flag ("no trap raised here" comment in the reg-write process). |
 
 ### Fault context latching (BUG #414/#415)
 On fault entry, these latch exactly once ([PMMU:164-167, 1614-1617, 1651-1654, and other walker fault sites](rtl/tg68k/TG68K_PMMU_030.vhd#L164-L167)):
@@ -524,7 +524,7 @@ Phase encoding ([cpu_wrapper.v:196-201](rtl/cpu_wrapper.v#L196-L201)): low-phase
 
 ### Verification gaps
 - ~~No guard for PTEST level > actual walk depth~~ — **false positive, retracted 2026-04-17**. Re-inspection shows every MMUSR-success site in a PTEST path reports `walk_level + 1` (the level actually reached), not `ptest_level` (the level requested). See e.g. [PMMU:2586](rtl/tg68k/TG68K_PMMU_030.vhd#L2586), [PMMU:3717](rtl/tg68k/TG68K_PMMU_030.vhd#L3717), [PMMU:3745](rtl/tg68k/TG68K_PMMU_030.vhd#L3745). Per MC68030 UM §9.7.2 the walker terminates at either a page descriptor _or_ the requested level, whichever is earlier, and reports the level reached — which is what this code does. Behavior is spec-compliant.
-- ~~Illegal PMOVE reg_sel does not raise a hardware trap~~ — **closed 2026-04-17**. BUG #446 now also routes to `mmu_config_error` ([PMMU:1207, 1217](rtl/tg68k/TG68K_PMMU_030.vhd#L1207)), so an undecoded P-register selector raises vector 56 alongside the sim assertion and the sticky `debug_illegal_reg_sel` latch. Kernel processes via the existing `pmmu_config_err` / `pmmu_config_ack` handshake.
+- ~~Illegal PMOVE reg_sel does not raise a hardware trap~~ — **closed 2026-04-17, then REVERTED**. BUG #446 briefly routed this to vector 56; the current code deliberately does NOT (an illegal P-register selector is an F-line trap per UM 9.6, handled in the kernel). The PMMU keeps only the sim assertion and the sticky `debug_illegal_reg_sel` latch. *(Doc corrected 2026-07-24.)*
 - The new wrapper bench is count/invariant-based, not exhaustive. Edge cases not covered:
   - walker U/M write-back while a CPU SDRAM cycle is in flight (race between `WALKER_WRITE_LOW` and `stale_ram_pending`);
   - repeated back-to-back walks across the `WALKER_DONE → WALKER_IDLE → WALKER_START` boundary;
@@ -535,7 +535,7 @@ Phase encoding ([cpu_wrapper.v:196-201](rtl/cpu_wrapper.v#L196-L201)): low-phase
 Items completed since the 2026-04-15 audit:
 - ~~Fix the header comment (8-entry → 22-entry) and the MOVEC whitelist claim~~ — done 2026-04-16 ([PMMU:3, 100-106](rtl/tg68k/TG68K_PMMU_030.vhd#L3)).
 - ~~Add a wrapper-level PMMU bench~~ — done 2026-04-16 ([tests/tg68k_030/tb_cpu_wrapper_pmmu.v](tests/tg68k_030/tb_cpu_wrapper_pmmu.v), Makefile target `test-cpu-wrapper-pmmu`). Exercises walker ownership, BUG #422 stale-ready, BUG #439 RAM-gap, BUG #424 watchdog escape, BUG #417 physical-address routing.
-- ~~Make illegal PMOVE reg_sel observable~~ — done 2026-04-16, extended 2026-04-17 (BUG #446). Sim assertions + sticky `pmmu_illegal_reg_sel_seen` latch on port `debug_illegal_reg_sel` + **hardware trap via `mmu_config_error` → vector 56** (reuses BUG #445 ack handshake).
+- ~~Make illegal PMOVE reg_sel observable~~ — done 2026-04-16. Sim assertions + sticky `pmmu_illegal_reg_sel_seen` latch on port `debug_illegal_reg_sel`. *(The 2026-04-17 vector-56 extension was later reverted — kernel F-line trap per UM 9.6 is the correct path; doc corrected 2026-07-24.)*
 - ~~Expose `mmu_config_error` as a latched signal that doesn't race on repeated TC writes~~ — done 2026-04-16 (BUG #445). Sticky until `mmu_config_ack` or async reset.
 
 Still open:

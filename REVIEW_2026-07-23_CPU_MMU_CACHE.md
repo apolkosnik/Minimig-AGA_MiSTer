@@ -20,6 +20,40 @@ must be fixed BEFORE re-enabling the cache.
 
 ---
 
+## DISPOSITION (as of 2026-07-24)
+
+| BUG | Disposition | Where fixed / tracked |
+|-----|-------------|----------------------|
+| #447 walker stale attributes | FIXED | cpu_wrapper.v + `test-walker-stale-rtg` |
+| #448 TST softfix D5/A5 | FIXED | kernel + `test-rte-mmu-fix-tst` |
+| #449/#450 D-cache byte lanes | FIXED | CacheCtrl + `test-cache030-unit` |
+| #451/#452 fill owner/counter races | FIXED | CacheCtrl request lock + `test-cache030-unit` |
+| #453 CACR CI+CD drop | FIXED | kernel + `test-cacr-clearu` |
+| #454 cache bisect tie-off | REVERTED — **L1 cache live**; hardware soak pending |
+| #455 shared-IO window vs cache | FIXED | CacheCtrl + `test-cache030-unit` |
+| #456 fastchip suppress | FIXED | cpu_wrapper.v + invariant in `test-walker-stale-rtg` |
+| #457 cache_hit_valid | FIXED | cpu_wrapper.v |
+| #458 2nd-opcode-word fault | **OPEN** — deeper than diagnosed; reproducer `test-movem-mask-pagefault` (KNOWN-FAILING) |
+| #459 RTE SR pop hold | FIXED | kernel retry-hold widened to directSR/directCCR |
+| #460 rte5 frame latches | FIXED | kernel beat_valid gating |
+| #461 softfix full-format EA | FIXED | whitelist veto → DIB-sub path |
+| #462 L2 inhibited-write staleness | FIXED | cpu_cache_new + `test-l2-inhibit-snoop` |
+| #463 ghost TI fields | FIXED | PMMU TC decode + comprehensive X1 case |
+| #464 walker HIGH escapes | FIXED | cpu_wrapper.v + `test-walker-stale-rtg` scen 2 |
+| #465 TC validation window | FIXED | PMMU busy during validation cycle |
+| #466 dead ATC bypass | REMOVED | PMMU |
+| #467 M-swap qualifier | FIXED | kernel preSVmode unify |
+| #468 freeze mid-fill commit | FIXED | Cache_030 + `test-cache030-unit` |
+| #469 CACR WA unimplemented | DOCUMENTED at the port (fidelity gap) |
+| #470 audit-doc drift | FIXED | MMU_AUDIT.md + 030_MMU_PORT_AUDIT.md corrected |
+
+Known-failing benches on baseline (pre-existing, unrelated):
+`tb_cpu_wrapper_pmmu` scen 3+4/5, `tb_pmmu_comprehensive` F6 fault_fc,
+`test-mmu-badfeed-fault-frame` SSW bit 9, `test-stack-frame-push` MMU-config
+frame, plus the intentional `test-movem-mask-pagefault` (#458 reproducer).
+
+---
+
 ## CRITICAL
 
 ### BUG #447 — Walker fast-RAM data corrupted by stale CPU address attributes  [FIXED 2026-07-23]
@@ -247,7 +281,7 @@ must be fixed BEFORE re-enabling the cache.
   not required, invalidate is safe and cheap): drop the `!cache_inhibit` gate
   on the tag-match invalidate path while keeping it on allocate.
 
-### BUG #463 — PMMU index math counts TI fields after the first zero  [LIVE, low likelihood]
+### BUG #463 — PMMU index math counts TI fields after the first zero  [FIXED 2026-07-24]
 - **Where:** `rtl/tg68k/TG68K_PMMU_030.vhd:708-710` (`get_table_index`),
   `:1104-1127` (`calc_effective_page_shift`) vs `tc_total_bits` `:864-875`
   (correctly stops at first zero, per UM §9.7.4 / "NOTE 1").
@@ -271,14 +305,14 @@ must be fixed BEFORE re-enabling the cache.
   forever → hard hang (CPU completion blocked) instead of BERR. Fix: replicate
   the escape clauses from the LOW-phase states.
 
-### BUG #465 — One-clock untranslated window after `PMOVE ...,TC` (E=1)
+### BUG #465 — One-clock untranslated window after `PMOVE ...,TC` (E=1)  [FIXED 2026-07-24]
 - `TG68K_PMMU_030.vhd:1387` (valid flag set at write edge) vs `:1250-1282`
   (validation one cycle later), `:1585`, `:4876-4878`;
   `TG68KdotC_Kernel.vhd:1200`. For 1 clk the MMU acts disabled (identity, no
   busy). Mitigated by real-030 enable-code conventions; fix by asserting busy
   for the validation cycle after a TC write with E=1.
 
-### BUG #466 — Dead "ATC combinational bypass" block
+### BUG #466 — Dead "ATC combinational bypass" block  [FIXED 2026-07-24 — removed]
 - `TG68K_PMMU_030.vhd:1153-1193`: outputs (`atc_*_comb`) never consumed; burns a
   22-way compare tree and contradicts its own comment. Delete (or wire into the
   output muxes deliberately — deletion recommended).
@@ -296,12 +330,12 @@ must be fixed BEFORE re-enabling the cache.
   and commits, replacing an entry while frozen. Fix: gate line commit on the
   freeze bit for the owning cache.
 
-### BUG #469 — CACR WA (write-allocate) accepted but unimplemented
+### BUG #469 — CACR WA (write-allocate) accepted but unimplemented  [DOCUMENTED 2026-07-24]
 - `TG68K_Cache_030.vhd`: `cacr_wa` port never read. Functionally conservative
   (write misses never allocate); document as a fidelity gap or implement 030 WA
   semantics (invalidate on write miss with WA=0 per UM 6.1.2 nuances).
 
-### BUG #470 — Audit-doc drift
+### BUG #470 — Audit-doc drift  [FIXED 2026-07-24]
 - `MMU_AUDIT.md` still claims illegal PMOVE reg_sel → vector 56 (code now
   F-line traps, per UM 9.6); the PTEST-sets-U-bits decision text predates the
   `6fd63e0` revert ("PTEST modifies no descriptor bits", PRM p.603);
@@ -419,7 +453,7 @@ test-l2-inhibit-snoop fails 4/4 on baseline, passes post-fix.
   `tb_mmu_pte_coherency.v` should also cover this — extend it to L2 if it
   doesn't.
 
-## Phase 6 — PMMU fidelity + cleanup
+## Phase 6 — PMMU fidelity + cleanup  ✅ DONE 2026-07-24 (commit 99a7d01)
 19. **#463** zero trailing TI fields at TC decode (single-point fix).
 20. **#465** hold busy through the TC-validation cycle.
 21. **#466** delete the dead ATC bypass block.
@@ -429,7 +463,7 @@ test-l2-inhibit-snoop fails 4/4 on baseline, passes post-fix.
   indices; PMOVE-TC-then-immediate-fetch timing test for #465. Cross-check
   against WinUAE `cpummu30.cpp` behavior where applicable.
 
-## Phase 7 — Documentation
+## Phase 7 — Documentation  ✅ DONE 2026-07-24
 23. **#470** refresh `MMU_AUDIT.md` / `030_MMU_PORT_AUDIT.md`: fix the vector-56
     and PTEST-U-bit drift, correct the PFLUSHAN row, and append a
     BUG #447-#469 disposition table referencing this file.
