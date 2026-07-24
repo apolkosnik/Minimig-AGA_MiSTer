@@ -176,7 +176,7 @@ must be fixed BEFORE re-enabling the cache.
   cache_hit & ~walker_active & ~pmmu_fault_p;` in `cpu_clkena_in`,
   `cpu_beat_valid`, and the `cpu_din` mux.
 
-### BUG #458 — Second-opcode-word fetch (MOVEM mask etc.) consumes force-completed beats  [LIVE]
+### BUG #458 — Second-opcode-word fetch (MOVEM mask etc.) consumes force-completed beats  [OPEN — deeper than diagnosed]
 - **Where:** `rtl/tg68k/TG68KdotC_Kernel.vhd:10077` (`sndOPC <= data_read` at
   decodeOPC, no `beat_valid` gate); `insn_fetch_consumer` (`:1644-1657`) has no
   term for the decodeOPC/get_2ndOPC fetch; MOVEM decode `:6202-6209`.
@@ -188,8 +188,20 @@ must be fixed BEFORE re-enabling the cache.
 - **Fix:** Add the decodeOPC/get_2ndOPC fetch to `insn_fetch_consumer` coverage
   (or gate the `sndOPC` latch on `beat_valid` and hold the micro-state until a
   valid beat), so the fault takes the restart path before any side effect.
+- **2026-07-23 update (reproducer built, fix attempt failed):**
+  `tests/tg68k_030/tb_movem_mask_pagefault.vhd` (make target marked
+  KNOWN-FAILING) places `MOVEM.L D0-D2,-(A6)` as the last word of a mapped 1K
+  page with the mask on an invalid page. Result: **double-bus-fault HALT** —
+  the deferred mask-word bus error dispatches (`trap_berr=1`,
+  `berr_exception_active=1`) while MOVEM's own store beats keep executing;
+  the first store's walk then re-faults into HALT_CTX_A. Identical with and
+  without a `set(get_2ndOPC)` term in `insn_fetch_consumer`, so the missing
+  consumer classification is NOT the (only) root cause: the deferred-dispatch
+  path fails to squash/preempt the in-flight instruction's data beats at all.
+  Needs a dedicated investigation of the deferred berr dispatch vs. microcode
+  sequencing (likely the same machinery gap for DIVx.L/MULx.L/CAS2/bitfields).
 
-### BUG #459 — RTE SR pop / STOP SR load ungated by beat_valid; SR-high never rolled back  [LIVE]
+### BUG #459 — RTE SR pop / STOP SR load ungated by beat_valid; SR-high never rolled back  [FIXED 2026-07-23]
 - **Where:** `TG68KdotC_Kernel.vhd:5092-5093` (`FlagsSR <= data_read(15:8)`),
   `:5062-5064` (`SVmode <= data_read(13)`), `:4815-4817` (`trap_SR <=
   data_read(15:8)`); restart rollback restores only the 8-bit CCR shadow.
@@ -201,7 +213,7 @@ must be fixed BEFORE re-enabling the cache.
   as `directpc_retry_hold`), gate `trap_SR` capture on `beat_valid`, and widen
   the restart shadow to full SR (or snapshot FlagsSR at fault-fire).
 
-### BUG #460 — Format $A/$B frame-word latches at rte5 unqualified  [LIVE]
+### BUG #460 — Format $A/$B frame-word latches at rte5 unqualified  [FIXED 2026-07-23]
 - **Where:** `TG68KdotC_Kernel.vhd:2111-2133`
   (`rte_mmu_fix_ssw/faddr/opcode/input_buffer`), `:2169-2185`
   (`rte_fmt_a_state1/ssw/fault_addr/data_out`) — bare `clkena_lw`, no
@@ -213,7 +225,7 @@ must be fixed BEFORE re-enabling the cache.
 - **Fix:** Apply the same `beat_valid`-qualified capture (or the
   `rte_format_word` retry-hold pattern) to every rte5 pop latch.
 
-### BUG #461 — rte_mmu_fix_len wrong for 68020 full-format extensions  [LIVE]
+### BUG #461 — rte_mmu_fix_len wrong for 68020 full-format extensions  [FIXED 2026-07-23]
 - **Where:** `TG68KdotC_Kernel.vhd:1812-1815` (hard-coded 1 ext word for modes
   110 / 111-011) with whitelist `:1789-1796`.
 - **Failure:** Software-completed `MOVE.L (bd16,An,Xn),Dn` (full-format, 2+ ext
@@ -271,7 +283,7 @@ must be fixed BEFORE re-enabling the cache.
   22-way compare tree and contradicts its own comment. Delete (or wire into the
   output muxes deliberately — deletion recommended).
 
-### BUG #467 — STOP/to_SR M-swap alias flag vs A7 swap use different S qualifiers
+### BUG #467 — STOP/to_SR M-swap alias flag vs A7 swap use different S qualifiers  [FIXED 2026-07-23]
 - `TG68KdotC_Kernel.vhd:1966` (`FlagsSR(5)`) vs `:2340,:9797` (`preSVmode`).
   Disagreement window can desync `a7_is_msp` from the actual A7/shadow exchange,
   corrupting later MOVEC $803/$804 aliasing. Fix: use one qualifier
@@ -339,7 +351,17 @@ both. #457 is protective-only until the BUG #454 revert re-enables the cache.
   sequence asserting no spurious fastchip strobes, (b) stuck-ready in
   READ_HIGH asserting BERR within `WALKER_TIMEOUT_LIMIT`. Full wrapper suite.
 
-## Phase 3 — Kernel fault-restart hardening
+## Phase 3 — Kernel fault-restart hardening  ✅ DONE 2026-07-23 (except #458 — OPEN)
+#459/#460/#461/#467 landed in one commit; 26-target suite, 22 pass. #458
+turned out deeper than diagnosed: the tb_movem_mask_pagefault reproducer
+double-fault-halts identically with and without the insn_fetch_consumer
+term — the deferred berr dispatch fails to squash the in-flight
+instruction's store beats. Reproducer kept as a KNOWN-FAILING target; needs
+a dedicated deferred-dispatch/squash investigation (also covers DIVx.L/
+MULx.L/CAS2/bitfields). Two MORE pre-existing failures found while running
+the wider suite (fail identically on baseline): test-mmu-badfeed-fault-frame
+(SSW $0141 vs expected $0341) and test-stack-frame-push (MMU-config frame
+format/vector). Neither is caused by Phases 1-3.
 6. **#458** decodeOPC second-word fetch → `insn_fetch_consumer` coverage
    (restartable, no side effects on faulting mask/ext words).
 7. **#459** `directSR` retry-hold + `beat_valid` on `trap_SR`; full-SR restart
