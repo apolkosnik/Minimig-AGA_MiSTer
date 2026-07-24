@@ -443,6 +443,11 @@ test-pmmu-comprehensive: compile
 test-cpu-wrapper-pmmu: compile
 	@echo "Compiling cpu_wrapper.v and wrapper-level PMMU bench..."
 	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(TEST_DIR)/altsource_probe_stub.v
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(PROJECT_ROOT)/rtl/fx68k/fx68kAlu.sv
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(PROJECT_ROOT)/rtl/fx68k/uaddrPla.sv
+	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv -suppress 7061 $(PROJECT_ROOT)/rtl/fx68k/fx68k.sv
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Cache_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_CacheCtrl_030.vhd
 	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(PROJECT_ROOT)/rtl/cpu_wrapper.v
 	@cd $(TEST_DIR) && $(MODELSIM_PATH)/linuxaloem/vlog -sv $(TEST_DIR)/tb_cpu_wrapper_pmmu.v
 	@echo "Running wrapper-level PMMU test..."
