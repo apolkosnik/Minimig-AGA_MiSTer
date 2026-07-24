@@ -187,10 +187,6 @@ architecture rtl of TG68K_PMMU_030 is
   signal ttr0_wp_comb    : std_logic;
   signal ttr1_ci_comb    : std_logic;
   signal ttr1_wp_comb    : std_logic;
-  signal atc_success_comb : std_logic;
-  signal atc_phys_comb    : std_logic_vector(31 downto 0);
-  signal atc_ci_comb      : std_logic;
-  signal atc_wp_comb      : std_logic;
   -- BUG #416: Track which addr_log/fc produced the current addr_phys_reg.
   -- ATC translations update addr_phys_reg on rising_edge, but addr_log changes
   -- combinationally after the Kernel's assignment in the same edge. This creates
@@ -1150,47 +1146,11 @@ begin
     ttr1_ci_comb <= ci1;
     ttr1_wp_comb <= wp1;
   end process;
-  -- Successful ATC hits can also bypass the registered translation result.
-  -- This keeps addr_phys/cache attributes aligned with the current request and
-  -- avoids stalling a clean cached access behind the previous cycle's output.
-  process(addr_log, fc, rw, tc_en, mmudis, atc_valid, atc_flush_req, atc_fc,
-          atc_shift, atc_log_base, atc_phys_base, atc_attr, atc_buserr)
-    variable aligned_addr : std_logic_vector(31 downto 0);
-    variable phys_base    : unsigned(31 downto 0);
-    variable offset       : unsigned(31 downto 0);
-    variable phys_result  : unsigned(31 downto 0);
-  begin
-    atc_success_comb <= '0';
-    atc_phys_comb    <= (others => '0');
-    atc_ci_comb      <= '0';
-    atc_wp_comb      <= '0';
-
-    if tc_en = '1' and mmudis = '0' then
-      for i in 0 to ATC_ENTRIES-1 loop
-        if atc_valid(i) = '1' and atc_flush_req = '0' then
-          aligned_addr := align_addr(addr_log, atc_shift(i));
-          if atc_fc(i) = fc and aligned_addr = atc_log_base(i) then
-            if rw = '1' or atc_attr(i)(1) = '1' or atc_attr(i)(0) = '1' or atc_buserr(i) = '1' then
-              -- Only bypass successful cached translations. Faulting ATC entries
-              -- still go through the registered path so the fault handshake can
-              -- latch MMUSR/fault state before the CPU is released.
-              if atc_buserr(i) = '0' and
-                 not (rw = '0' and atc_attr(i)(0) = '1') and
-                 not (fc(2) = '0' and atc_attr(i)(3) = '0') then
-                phys_base := unsigned(atc_phys_base(i));
-                offset    := unsigned(addr_log) - unsigned(atc_log_base(i));
-                phys_result := phys_base + offset;
-                atc_success_comb <= '1';
-                atc_phys_comb    <= std_logic_vector(phys_result);
-                atc_ci_comb      <= atc_attr(i)(2);
-                atc_wp_comb      <= atc_attr(i)(0);
-              end if;
-            end if;
-          end if;
-        end if;
-      end loop;
-    end if;
-  end process;
+  -- BUG #466: the former "ATC combinational bypass" process was DEAD logic -
+  -- its atc_*_comb outputs were never consumed by the addr_phys/attribute
+  -- muxes (correctness is provided by the BUG #416 busy gating), while its
+  -- 22-way compare tree cost area and misled readers into believing hit
+  -- attributes were cycle-aligned combinationally. Removed.
   -- Reset and register writes
   process(clk, nreset)
     -- Variables for TC validation (MMU configuration exception detection)
@@ -1605,6 +1565,25 @@ begin
     tib_bits := to_integer(unsigned(TC(11 downto 8)));
     tic_bits := to_integer(unsigned(TC(7 downto 4)));
     tid_bits := to_integer(unsigned(TC(3 downto 0)));
+    -- BUG #463 FIX: per MC68030 UM ("if any of these fields are zero, the
+    -- remaining fields are ignored"), TI fields AFTER the first zero must not
+    -- participate anywhere. The TC validator already stops summing at the
+    -- first zero, but the index/shift math added ALL fields - a spec-legal
+    -- TC like TIA=8,TIB=12,TIC=0,TID=5 passed validation yet every level's
+    -- index was shifted by the ghost TID (silent mistranslation; WinUAE
+    -- computes shifts top-down and stops at the first zero). Zeroing the
+    -- trailing fields HERE makes every consumer (get_table_index,
+    -- calc_effective_page_shift, total-bits, final-level detection) agree.
+    if tia_bits = 0 then
+      tib_bits := 0;
+      tic_bits := 0;
+      tid_bits := 0;
+    elsif tib_bits = 0 then
+      tic_bits := 0;
+      tid_bits := 0;
+    elsif tic_bits = 0 then
+      tid_bits := 0;
+    end if;
     tc_idx_bits(0) <= tia_bits;
     tc_idx_bits(1) <= tib_bits;
     tc_idx_bits(2) <= tic_bits;
@@ -4861,7 +4840,7 @@ begin
     end if;
   end process;
   -- Walker busy indication - not busy if MMU disabled or TTR hit
-  process(wstate, addr_log, fc, rw, rmw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg, fault_current_req_match, pload_active, pflush_active, ptest_update_mmusr, ptest_active, ptest_walk_pending, ptest_desc_return_pending, mmusr_update_req)
+  process(wstate, addr_log, fc, rw, rmw, is_insn, TT0, TT1, tc_en, translation_pending, walker_fault, walker_completed, walker_fault_ack_pending, translated_addr, translated_fc, translated_rw, translated_cfg_seq, xlat_cfg_seq, req, fault_reg, fault_current_req_match, pload_active, pflush_active, ptest_update_mmusr, ptest_active, ptest_walk_pending, ptest_desc_return_pending, mmusr_update_req, tc_config_check_pending, tc_config_valid)
     variable tmatch0, tmatch1 : std_logic;
     variable dummy_ci, dummy_wp : std_logic;
   begin
@@ -4872,6 +4851,15 @@ begin
       -- Hold the CPU while PTEST is accepted/processed and while PFLUSH waits
       -- for its ATC invalidation edge. This also keeps a following PMOVE MMUSR
       -- from observing the old PTEST result.
+      busy <= '1';
+    elsif tc_config_check_pending = '1' and tc_config_valid = '0' then
+      -- BUG #465 FIX: a TC image with E=1 is in its one-cycle validation
+      -- pipeline (tc_config_valid dropped at the write edge, restored one
+      -- clock later). tc_en is still 0, so without this branch the MMU
+      -- reported not-busy and a fast beat starting in that clock (e.g. an
+      -- I-cache-hit fetch) completed with an IDENTITY translation instead of
+      -- the just-enabled tables. Hold busy for the validation cycle; real
+      -- hardware translates the first bus cycle after PMOVE completes.
       busy <= '1';
     elsif tc_en = '0' and pload_active = '0' and ptest_walk_pending = '0'
        and translation_pending = '0' and wstate = W_IDLE then

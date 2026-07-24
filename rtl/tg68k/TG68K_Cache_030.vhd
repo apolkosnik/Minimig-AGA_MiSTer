@@ -17,7 +17,10 @@ entity TG68K_Cache_030 is
     cacr_de        : in  std_logic;  -- Data cache enable
     cacr_ifreeze    : in  std_logic;  -- Cache freeze (inhibit replacements)
     cacr_dfreeze    : in  std_logic;  -- Cache freeze (inhibit replacements)
-    cacr_wa        : in  std_logic;  -- Write Allocate (allocate line on write miss)
+    cacr_wa        : in  std_logic;  -- Write Allocate (BUG #469: accepted but
+                                     -- UNIMPLEMENTED - write misses never
+                                     -- allocate. Functionally conservative;
+                                     -- documented fidelity gap vs 68030 WA.)
     
     -- Cache invalidation (68030 via CACR bits)
     inv_req        : in  std_logic;  -- Cache invalidation request

@@ -364,6 +364,25 @@ begin
     probe("F3b WP=1 write @ $04001000", x"04001000", "101", '0',
           (others => '0'), true, MMUSR_W, MMUSR_W);
 
+    ---------------------------------------------------------------
+    -- BUG #463: TI fields after the first zero are IGNORED (UM 9.7.4
+    -- "if any of these fields are zero, the remaining fields are ignored").
+    -- TC = PS=12 TIA=10 TIB=10 TIC=0 TID=5 -> $80C0AA05: the validator sums
+    -- 12+10+10 = 32 (stops at TIC=0) so no configuration exception, and the
+    -- ghost TID=5 must not shift any level's index. Pre-fix, level-0's shift
+    -- gained +5, the root index for $04001000 collapsed to entry 0 (DT=00)
+    -- and this identity probe faulted instead of translating.
+    ---------------------------------------------------------------
+    write_reg("10000", x"80C0AA05", '0');
+    wait for 50 ns;
+    pflusha;
+    probe("X1 ghost-TID TC ($80C0AA05) read @ $04001000", x"04001000", "101", '1',
+          x"04001000", false);
+    -- Restore the canonical TC for the remaining phases.
+    write_reg("10000", x"80C0AA00", '0');
+    wait for 50 ns;
+    pflusha;
+
     -- F4: user (FC=001) access to supervisor-only (S=1) page.  Short-format
     --     descriptors have no S bit, so use a LONG-format page descriptor.
     --     Long descriptor 8-byte: HIGH word has S at bit 8.
