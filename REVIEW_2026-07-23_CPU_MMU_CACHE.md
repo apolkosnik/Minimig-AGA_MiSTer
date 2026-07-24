@@ -22,7 +22,7 @@ must be fixed BEFORE re-enabling the cache.
 
 ## CRITICAL
 
-### BUG #447 — Walker fast-RAM data corrupted by stale CPU address attributes  [LIVE]
+### BUG #447 — Walker fast-RAM data corrupted by stale CPU address attributes  [FIXED 2026-07-23]
 - **Where:** `rtl/cpu_wrapper.v:257-258` (`ramdat` RTG byte-swap), `:210`
   (`ramshared = sel_dd`), `:255-256` (`ramdin` swap is walker-gated only via
   `walker_fast_ram && walker_writing`; the `sel_rtg` else-arm still applies to
@@ -43,7 +43,7 @@ must be fixed BEFORE re-enabling the cache.
   decode`. Simplest: `assign ramdat = (sel_rtg & ~walker_fast_ram) ? swap :
   ramdout;` and `assign ramshared = sel_dd & ~walker_fast_ram;`.
 
-### BUG #448 — RTE MMU-softfix TST commit clobbers D5/A5  [LIVE]
+### BUG #448 — RTE MMU-softfix TST commit clobbers D5/A5  [FIXED 2026-07-23]
 - **Where:** whitelist `rtl/tg68k/TG68KdotC_Kernel.vhd:1797-1807`
   (`rte_mmu_fix_is_tst` accepted as CCR-only); commit block `:2302-2321` has no
   `rte_mmu_fix_is_tst` guard.
@@ -305,7 +305,14 @@ kernel fault-restart hardening, then the cache-re-enable track (fix everything
 the bisect experiment masks, then revert it), then fidelity/cleanup. Each phase
 is independently commitable and regression-gated.
 
-## Phase 1 — Live data-corruption fixes (small, surgical)
+## Phase 1 — Live data-corruption fixes (small, surgical)  ✅ DONE 2026-07-23
+Both fixes landed with regressions `test-walker-stale-rtg` and
+`test-rte-mmu-fix-tst`, each verified to FAIL pre-fix and PASS post-fix.
+`test-fault-recovery` and `test-mmu-badfeed-softfix` pass. Note: the
+`test-cpu-wrapper-pmmu` scenarios 3+4/5 failures and `tb_pmmu_comprehensive`
+F6 fault_fc failure are PRE-EXISTING on the baseline (verified by stash +
+re-run) — they predate Phase 1 and belong to the in-progress scenario-5
+rework / a PMMU FC-reporting issue respectively.
 1. **#447** walker `ramdat`/`ramshared`/`ramdin` attribute gating
    (`cpu_wrapper.v`).
 2. **#448** `rte_mmu_fix_is_tst` guard on the register-commit block
