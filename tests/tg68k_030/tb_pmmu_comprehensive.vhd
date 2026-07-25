@@ -421,9 +421,14 @@ begin
     probe("F5 walker BERR  @ $02000000", x"02000000", "101", '1',
           (others => '0'), true, MMUSR_B, MMUSR_B);
     berr_on_nth <= -1;
-    pflusha;
 
-    -- F6: fault_fc latch
+    -- F6: fault_fc latch. MUST be checked BEFORE the pflusha below: PFLUSH
+    -- advances xlat_cfg_seq, which deliberately clears all fault bookkeeping
+    -- (fault_fc_reg included) so stale faults cannot replay across a
+    -- translation-context change. The kernel consumes fault_fc at exception
+    -- dispatch, long before any handler-issued PFLUSH - checking it after
+    -- pflusha (as this test originally did) reads the intentionally-cleared
+    -- value and was a test-sequencing bug, not an RTL bug.
     if fault_fc /= "101" then
       errors <= errors + 1;
       report "[FAIL] F6 fault_fc=0x" & integer'image(to_integer(unsigned(fault_fc)))
@@ -432,6 +437,7 @@ begin
       checks <= checks + 1;
       report "[PASS] F6 fault_fc latched supervisor=101" severity note;
     end if;
+    pflusha;
 
     ---------------------------------------------------------------
     -- PHASE L: Long-format (DT=11) descriptors
