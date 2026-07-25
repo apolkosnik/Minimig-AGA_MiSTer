@@ -745,7 +745,7 @@ proc show_wwat {bin} {
     puts [format "origin: seen=%u crp_hi=%08s crp_lo=%08s a0=%08s a7=%08s wstate=%u" \
         $origin_seen $origin_crp_hi $origin_crp_lo $origin_a0 $origin_a7 $origin_wstate]
     puts [format "onfault: seen=%u d0=%08s" $onfault_seen $onfault_d0]
-    puts [format "record[%u]: log=%08s exe_pc=%08s pc=%08s opcode=%04s crp_lo=%08s a7=%08s" \
+    puts [format "record\[%u\]: log=%08s exe_pc=%08s pc=%08s opcode=%04s crp_lo=%08s a7=%08s" \
         $read_index $rec_log $rec_exe_pc $rec_pc $rec_opcode $rec_crp_lo $rec_a7]
     puts [format "           desc_addr=%08s mmusr=%04s rw=%u insn=%u fc=%s(%u) berr_active=%u dispatched=%u was_cleared=%u" \
         $rec_desc_addr $rec_mmusr $rec_rw $rec_insn [decode_fc $rec_fc] $rec_fc \

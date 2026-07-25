@@ -648,6 +648,8 @@ architecture logic of TG68KdotC_Kernel is
 	signal berr_fault_addr   : std_logic_vector(31 downto 0);  -- Faulting logical address
 	signal berr_frame_pc     : std_logic_vector(31 downto 0);  -- PC stacked in the 68030 bus-fault frame
 	signal stream_consumed_pc : std_logic_vector(31 downto 0) := (others => '0'); -- address of the newest stream word consumed by decode
+	signal insn_next_pc : std_logic_vector(31 downto 0) := (others => '0'); -- continuation PC of the instruction currently in execute: opcode address + 2 per consumed stream word
+	signal berr_pmmu_fault_next_pc : std_logic_vector(31 downto 0) := (others => '0'); -- insn_next_pc latched at PMMU-fault first-fire (the faulted instruction is still the executing one there)
 	signal berr_opcode_saved : std_logic_vector(15 downto 0);  -- Faulted instruction opcode for Format $B replay state
 	signal berr_ssw          : std_logic_vector(15 downto 0);  -- Special Status Word
 	signal berr_data_out_saved : std_logic_vector(31 downto 0);  -- Data output buffer saved at berr dispatch
@@ -2453,7 +2455,25 @@ PROCESS (clk, regfile, RDindex_A, RDindex_B, exec, rte_mmu_fix_commit, rte_mmu_f
 					v_hold_a7 := v_regfile(15);
 					v_regfile := regfile_shadow;
 					IF mmu_restart_restore='1' THEN
-						v_regfile(15) := v_hold_a7;
+						-- A7-exempt hold edge - but NOT for a straggler (SP)+/-(SP)
+						-- writeback of the faulted instruction landing here: keeping
+						-- it advances A7 past the rolled-back transfer, and the
+						-- restarted MOVEM.L (SP)+ reloads from beyond the saved
+						-- block. On a demand-zero stack page that loads ZEROS into
+						-- the whole callee-saved set (hardware 2026-07-25: NetBSD
+						-- init wiped D2-D7/A2-A5 inside vsnprintf after preemption
+						-- PFLUSHA, then livelocked on the a2=0 dereference; sim
+						-- repro tb_mmu_movem_atc_restore T36). The changeMode
+						-- swap / frame pushes this exemption protects never carry
+						-- postadd/presub.
+						-- The MOVEM base writeback arrives via save_memaddr, the
+						-- plain (An)+/-(An) forms via postadd/presub; none of the
+						-- exempt changeMode/frame-push A7 updates carry any of
+						-- these flags.
+						IF exec(postadd)='0' AND exec(presub)='0' AND
+						   exec(save_memaddr)='0' THEN
+							v_regfile(15) := v_hold_a7;
+						END IF;
 					END IF;
 				END IF;
 				IF decodeOPC='1' THEN
@@ -4177,6 +4197,20 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						-- the restored PC; that request must not replace the write metadata.
 						IF berr_pmmu_fault_valid = '0' THEN
 							berr_pmmu_datatype <= datatype;
+							-- Continuation PC for a LASTWRITE Format $A frame, decided at
+							-- first-fire while the faulted store is still the executing
+							-- instruction. A store's write beat can only run after every
+							-- stream word of the instruction was consumed (EA + data), so
+							-- a valid buffered word beyond insn_next_pc is the NEXT
+							-- instruction's opcode and its address is the continuation.
+							-- insn_next_pc is the counted fallback (immediate-operand
+							-- consumption is not fully counted; the buffer check
+							-- self-corrects the undercount).
+							IF opc_buf_valid='1' AND last_opc_pc > insn_next_pc THEN
+								berr_pmmu_fault_next_pc <= last_opc_pc;
+							ELSE
+								berr_pmmu_fault_next_pc <= insn_next_pc;
+							END IF;
 							berr_pmmu_fault_addr <= pmmu_fault_addr_out;
 							berr_pmmu_fault_fc <= pmmu_fault_fc_out;
 							berr_pmmu_fault_rw <= pmmu_fault_rw_out;
@@ -4362,8 +4396,25 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 									berr_frame_pc <= exe_pc;
 								ELSIF mmu_restart_pending = '1' THEN
 									berr_frame_pc <= berr_restart_pc;
-								ELSIF pmmu_fault_lastwrite_ok='1' AND last_opc_pc /= stream_consumed_pc THEN
-									berr_frame_pc <= last_opc_pc;
+								ELSIF pmmu_fault_lastwrite_ok='1' AND berr_pmmu_fault_valid='1' THEN
+									-- LASTWRITE Format $A continuation PC: the instruction-end
+									-- PC latched at the fault's first-fire, when the faulted
+									-- store was still the executing instruction. Fetch-side
+									-- reconstructions (TG68_PC, last_opc_pc vs
+									-- stream_consumed_pc) skew with prefetch depth: the
+									-- 2026-07-24 hardware capture (init's jemalloc MOVE.L
+									-- D2,$38(A3) WP/COW fault) stacked PC+2, the misaligned
+									-- RTE-replay resume executed a displacement word as an
+									-- opcode and fabricated a byte write to a chimera address,
+									-- and NetBSD livelocked forever because pid 1 discards
+									-- SIGSEGV (T33/T34 in tb_mmu_wp_lastwrite_frame).
+									berr_frame_pc <= berr_pmmu_fault_next_pc;
+								ELSIF pmmu_fault_lastwrite_ok='1' THEN
+									IF opc_buf_valid='1' AND last_opc_pc > insn_next_pc THEN
+										berr_frame_pc <= last_opc_pc;
+									ELSE
+										berr_frame_pc <= insn_next_pc;
+									END IF;
 								ELSE
 									berr_frame_pc <= TG68_PC;
 								END IF;
@@ -4529,8 +4580,10 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					IF setopcode='1' THEN
 						IF state="00" THEN
 							stream_consumed_pc <= tg68_pc;
+							insn_next_pc <= tg68_pc + 2;
 						ELSE
 							stream_consumed_pc <= last_opc_pc;
+							insn_next_pc <= last_opc_pc + 2;
 						END IF;
 					ELSIF getbrief='1' THEN
 						IF state(1)='1' THEN
@@ -4538,6 +4591,7 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 						ELSE
 							stream_consumed_pc <= tg68_pc;
 						END IF;
+						insn_next_pc <= insn_next_pc + 2;
 					ELSIF state="00" AND
 					      (exec(update_ld)='1' OR
 					       micro_state = ld_nn  OR micro_state = st_nn  OR
@@ -4550,6 +4604,15 @@ PROCESS (clk, IPL, setstate, addrvalue, state, exec_write_back, set_direct_data,
 					       micro_state = st_229_1 OR micro_state = st_229_2 OR
 					       micro_state = st_229_3 OR micro_state = st_229_4) THEN
 						stream_consumed_pc <= tg68_pc;
+						insn_next_pc <= insn_next_pc + 2;
+					ELSIF state="00" AND
+					      (micro_state = pmmu_ld_nn OR micro_state = pmmu_ld_dAn1 OR
+					       micro_state = pmmu_ld_AnXn1 OR micro_state = pmmu_ld_AnXn2 OR
+					       micro_state = pmmu_ld_229_1 OR micro_state = pmmu_ld_229_2 OR
+					       micro_state = pmmu_ld_229_3 OR micro_state = pmmu_ld_229_4) THEN
+						-- PMOVE EA builders consume stream words too; keep the
+						-- continuation PC honest for a PMOVE-to-memory write fault.
+						insn_next_pc <= insn_next_pc + 2;
 					END IF;
 					-- Arm the forced-refetch window at the completion of every
 					-- Format $B frame RTE: the buffered prefetch word at the

@@ -1265,6 +1265,24 @@ test-mmu-stacking-walk-fault: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_stacking_walk_fault.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 1ms; quit -f" tb_mmu_stacking_walk_fault
 
+test-mmu-wp-lastwrite-frame: setup
+	@echo "Running WP LASTWRITE frame-address regression (jemalloc/init livelock shape)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_wp_lastwrite_frame.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 1ms; quit -f" tb_mmu_wp_lastwrite_frame
+
+test-mmu-movem-atc-restore: setup
+	@echo "Running MOVEM ATC-flush/fault restore regression (init callee-saved wipe shape)..."
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68KdotC_Kernel.vhd
+	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_mmu_movem_atc_restore.vhd
+	@cd $(TEST_DIR) && $(VSIM) -c -do "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run 1ms; quit -f" tb_mmu_movem_atc_restore
+
 # Lockup/Deadlock Tests - CRITICAL ISSUES
 test-lockup-walker-timeout: setup
 	@echo "=========================================================="
