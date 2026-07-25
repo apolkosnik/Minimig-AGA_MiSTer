@@ -1197,9 +1197,16 @@ BEGIN
   -- $00DD4000-$00DD5FFF is the MiSTer shared-memory trapdoor used by
   -- extra/MiSTerFileSystem.c. It is board-private I/O rather than Amiga RAM,
   -- so it must remain reachable even when the guest page tables do not map it.
+  -- BUG #458 FIX: a squashed parasitic state="00" prefetch must not reach the
+  -- PMMU either - busstate="01" only silences the external bus, while the
+  -- internal walker would still re-walk the dead page and re-assert
+  -- pmmu_fault inside the bus-error window (double-fault HALT). Frame pushes
+  -- are state="11" and the trap3 handler-PC pop is state="10", so gating only
+  -- state="00" cycles cannot starve the stacking sequence.
   pmmu_req      <= '1' when (state /= "01" and pmmu_tc_en = '1'
                              and (mmu_restart_pending = '0' or mmu_restart_soft = '1')
                              and not (state = "00" and TG68_PC(0) = '1')
+                             and not (state = "00" and berr_stack_fetch_squash = '1')
                              and not (pmmu_addr_log_int(31 downto 16) = x"00DD" and
                                       pmmu_addr_log_int(15 downto 13) = "010")) else '0';
   pmmu_is_insn  <= '1' when state = "00" else '0';
@@ -1592,11 +1599,24 @@ ALU: TG68K_ALU
 	-- pushes strobe-gated by the pmmu_fault pulses). Zero-wait sim never
 	-- opens the window, so this is gated on REGISTERED micro_state only
 	-- (see [[sta-loop-artifact]] - no exec-cone signals in bus gates).
+	-- BUG #458 FIX: the window opened one cycle TOO LATE. In the DISPATCH cycle
+	-- itself (setinterrupt registered -> interrupt='1', trap_berr/trap_mmu_berr
+	-- just latched, micro_state still the PRE-trap value with next_micro_state=
+	-- berr_fill) the default state="00" prefetch at the stale PC is already live.
+	-- With a deferred insn-space fault (MOVEM mask word: fault record cleared by
+	-- the instruction's own later store translations -> pmmu_fault_was_cleared
+	-- latched), that prefetch re-walks the SAME dead page, re-asserts pmmu_fault
+	-- inside the just-opened berr window and the double-fault guard HALTs
+	-- (tb_movem_mask_pagefault: fetch $0404 re-walks invalid page $0400-$07FF at
+	-- the idle->berr_fill edge). interrupt/trap_berr/trap_mmu_berr are all
+	-- REGISTERED, so the [[sta-loop-artifact]] rule (no exec-cone signals in bus
+	-- gates) is preserved.
 	berr_stack_fetch_squash <= '1' WHEN micro_state = berr_fill OR micro_state = berr1 OR
 	                                     micro_state = berr2 OR micro_state = berr3 OR
 	                                     micro_state = berr4 OR micro_state = berr5 OR
 	                                     micro_state = berr6 OR micro_state = berr7 OR
-	                                     micro_state = berr8 OR micro_state = trap3
+	                                     micro_state = berr8 OR micro_state = trap3 OR
+	                                     (interrupt = '1' AND (trap_berr = '1' OR trap_mmu_berr = '1'))
 	                           ELSE '0';
 	busstate <= "01" WHEN (state="00" AND TG68_PC(0)='1') OR pmmu_busy='1' OR (mmu_restart_pending='1' AND mmu_restart_soft='0')
 	                      OR (state="00" AND berr_stack_fetch_squash='1') ELSE state;
@@ -1649,15 +1669,25 @@ ALU: TG68K_ALU
 	-- refetch path - restarting those caused the spurious-prefetch infinite
 	-- loop (MMU_RESTART_DESIGN.md section 9); the consumer strobes are the
 	-- discriminator that section said was missing.
-	-- BUG #458 (OPEN): the second-opcode-word fetch (MOVEM mask, DIVx.L/MULx.L/
-	-- CAS2/bitfield extensions) has no consumer term here. A set(get_2ndOPC)
-	-- term was tried and does NOT fix the observed failure: in the
-	-- tb_movem_mask_pagefault reproducer the double-fault halt is identical
-	-- with and without it - the deferred mask-word bus error races MOVEM's
-	-- own store beats (fault during berr_exception_active -> HALT). Needs a
-	-- deeper fix in the deferred-dispatch/squash path; reproducer kept as a
-	-- known-failing bench.
+	-- BUG #458 FIX (part 2/2): the second-opcode-word fetch (MOVEM mask,
+	-- DIVx.L/MULx.L/CAS2/bitfield extensions) is a CONSUMED stream word - the
+	-- set(get_2ndOPC) decode strobe is the discriminator (it fires only for
+	-- opcodes that require the 2nd word; the plain post-setopcode readahead
+	-- keeps the speculative/refetch path). Without this term the mask-word
+	-- fault classified consumer-less: no restart arm, MOVEM ran its stores on
+	-- the (would-be garbage on hardware) mask and the deferred dispatch
+	-- stacked TG68_PC ($0404, PAST the next unexecuted instruction) instead
+	-- of the restart PC ($03FE) - the resume skipped a word. With the term,
+	-- mmu_restart_pending/mmu_restart_soft arm at first-fire, the register
+	-- rollback undoes A6/Dn and the frame stacks berr_restart_pc = exe_pc, so
+	-- a plain handler RTE re-executes MOVEM from scratch. Note this alone did
+	-- NOT fix the HALT - that was the dispatch-cycle squash gap (part 1/2 at
+	-- berr_stack_fetch_squash/pmmu_req): the stale-PC prefetch re-walked the
+	-- dead page in the one uncovered cycle between setinterrupt and
+	-- micro_state=berr_fill, and pmmu_fault_was_cleared (latched by MOVEM's
+	-- own store translations) armed the double-fault guard.
 	insn_fetch_consumer <= '1' WHEN getbrief='1' OR setnextpass='1' OR exec(update_ld)='1' OR
+	                                 set(get_2ndOPC)='1' OR
 	                                 micro_state = ld_nn  OR micro_state = st_nn  OR
 	                                 micro_state = ld_dAn1 OR micro_state = st_dAn1 OR
 	                                 micro_state = ld_AnXn1 OR micro_state = ld_AnXn2 OR

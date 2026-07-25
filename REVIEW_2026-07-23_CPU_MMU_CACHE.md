@@ -33,7 +33,7 @@ must be fixed BEFORE re-enabling the cache.
 | #455 shared-IO window vs cache | FIXED | CacheCtrl + `test-cache030-unit` |
 | #456 fastchip suppress | FIXED | cpu_wrapper.v + invariant in `test-walker-stale-rtg` |
 | #457 cache_hit_valid | FIXED | cpu_wrapper.v |
-| #458 2nd-opcode-word fault | **OPEN** — deeper than diagnosed; reproducer `test-movem-mask-pagefault` (KNOWN-FAILING) |
+| #458 2nd-opcode-word fault | FIXED 2026-07-24 | kernel dispatch-cycle squash gap + `set(get_2ndOPC)` consumer term; `test-movem-mask-pagefault` passes |
 | #459 RTE SR pop hold | FIXED | kernel retry-hold widened to directSR/directCCR |
 | #460 rte5 frame latches | FIXED | kernel beat_valid gating |
 | #461 softfix full-format EA | FIXED | whitelist veto → DIB-sub path |
@@ -50,7 +50,8 @@ must be fixed BEFORE re-enabling the cache.
 Known-failing benches on baseline (pre-existing, unrelated):
 `tb_cpu_wrapper_pmmu` scen 3+4/5, `tb_pmmu_comprehensive` F6 fault_fc,
 `test-mmu-badfeed-fault-frame` SSW bit 9, `test-stack-frame-push` MMU-config
-frame, plus the intentional `test-movem-mask-pagefault` (#458 reproducer).
+frame. (`test-movem-mask-pagefault` was on this list as the intentional #458
+reproducer until the 2026-07-24 fix; it now passes.)
 
 ---
 
@@ -210,7 +211,7 @@ frame, plus the intentional `test-movem-mask-pagefault` (#458 reproducer).
   cache_hit & ~walker_active & ~pmmu_fault_p;` in `cpu_clkena_in`,
   `cpu_beat_valid`, and the `cpu_din` mux.
 
-### BUG #458 — Second-opcode-word fetch (MOVEM mask etc.) consumes force-completed beats  [OPEN — deeper than diagnosed]
+### BUG #458 — Second-opcode-word fetch (MOVEM mask etc.) consumes force-completed beats  [FIXED 2026-07-24]
 - **Where:** `rtl/tg68k/TG68KdotC_Kernel.vhd:10077` (`sndOPC <= data_read` at
   decodeOPC, no `beat_valid` gate); `insn_fetch_consumer` (`:1644-1657`) has no
   term for the decodeOPC/get_2ndOPC fetch; MOVEM decode `:6202-6209`.
@@ -234,6 +235,33 @@ frame, plus the intentional `test-movem-mask-pagefault` (#458 reproducer).
   path fails to squash/preempt the in-flight instruction's data beats at all.
   Needs a dedicated investigation of the deferred berr dispatch vs. microcode
   sequencing (likely the same machinery gap for DIVx.L/MULx.L/CAS2/bitfields).
+- **2026-07-24 FIXED (two-part root cause, cycle-traced):**
+  1. **HALT root cause — dispatch-cycle squash gap.** The berr HALT was NOT
+     MOVEM's store beats racing the dispatch (those complete BEFORE the
+     boundary and their walks succeed): it was the parasitic state="00"
+     prefetch at the STALE PC ($0404, same invalid 1K page as the mask word)
+     issued in the ONE cycle between `setinterrupt` and `micro_state=berr_fill`
+     — `berr_stack_fetch_squash` is gated on registered micro_state and opened
+     one cycle too late, and `pmmu_req` was never gated by the squash at all
+     (busstate="01" only silences the external bus). The re-walk re-asserted
+     `pmmu_fault` with `pmmu_fault_was_cleared` already latched (MOVEM's own
+     store translations cleared the fault record) → HALT_CTX_A. Fix: extend
+     `berr_stack_fetch_squash` with the registered dispatch-cycle term
+     `(interrupt='1' AND (trap_berr='1' OR trap_mmu_berr='1'))` and gate
+     `pmmu_req` with `NOT (state="00" AND berr_stack_fetch_squash='1')`.
+  2. **Classification/frame-PC — `set(get_2ndOPC)` consumer term.** With the
+     HALT gone the deferred path still stacked TG68_PC ($0404), skipping the
+     next unexecuted instruction ($0402), and performed no rollback. The
+     `set(get_2ndOPC)` decode strobe is a safe discriminator (fires only for
+     opcodes that consume a 2nd word, not for plain readahead); with it the
+     fault arms `mmu_restart_pending`/`mmu_restart_soft`, rolls back A6/Dn and
+     stacks `berr_restart_pc = exe_pc` → plain RTE re-executes MOVEM.
+  3. **Testbench bug:** the tb's handler wrote the repair descriptor to
+     logical $6E04 but the page-table page ($6C00-$6FFF) was unmapped and the
+     $4E71 fill pattern decodes as a garbage-VALID descriptor (DT=01) — the
+     write translated to ~$4E714E04 and was dropped, so no kernel fix could
+     ever make the bench pass. Level-C slot 27 now identity-maps the table
+     page. `test-movem-mask-pagefault` passes; KNOWN-FAILING marker removed.
 
 ### BUG #459 — RTE SR pop / STOP SR load ungated by beat_valid; SR-high never rolled back  [FIXED 2026-07-23]
 - **Where:** `TG68KdotC_Kernel.vhd:5092-5093` (`FlagsSR <= data_read(15:8)`),
@@ -385,14 +413,18 @@ both. #457 is protective-only until the BUG #454 revert re-enables the cache.
   sequence asserting no spurious fastchip strobes, (b) stuck-ready in
   READ_HIGH asserting BERR within `WALKER_TIMEOUT_LIMIT`. Full wrapper suite.
 
-## Phase 3 — Kernel fault-restart hardening  ✅ DONE 2026-07-23 (except #458 — OPEN)
+## Phase 3 — Kernel fault-restart hardening  ✅ DONE 2026-07-23 (#458 closed 2026-07-24)
 #459/#460/#461/#467 landed in one commit; 26-target suite, 22 pass. #458
-turned out deeper than diagnosed: the tb_movem_mask_pagefault reproducer
-double-fault-halts identically with and without the insn_fetch_consumer
-term — the deferred berr dispatch fails to squash the in-flight
-instruction's store beats. Reproducer kept as a KNOWN-FAILING target; needs
-a dedicated deferred-dispatch/squash investigation (also covers DIVx.L/
-MULx.L/CAS2/bitfields). Two MORE pre-existing failures found while running
+turned out deeper than diagnosed and was closed 2026-07-24 after a
+cycle-trace: the HALT was the berr DISPATCH-CYCLE squash gap (stale-PC
+prefetch re-walking the dead page in the one cycle between setinterrupt and
+micro_state=berr_fill, with pmmu_fault_was_cleared pre-armed by MOVEM's own
+store translations), fixed by the registered dispatch-cycle term in
+berr_stack_fetch_squash plus gating pmmu_req on the squash; the
+set(get_2ndOPC) consumer term was ALSO needed (restart classification +
+instruction-start frame PC), and the reproducer tb itself had an unmapped
+page-table page that made repair impossible (see the #458 entry).
+Two MORE pre-existing failures found while running
 the wider suite (fail identically on baseline): test-mmu-badfeed-fault-frame
 (SSW $0141 vs expected $0341) and test-stack-frame-push (MMU-config frame
 format/vector). Neither is caused by Phases 1-3.

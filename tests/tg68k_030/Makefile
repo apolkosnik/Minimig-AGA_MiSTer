@@ -1047,12 +1047,13 @@ test-cache030-unit: setup
 	@cd $(TEST_DIR) && $(VCOM) -93 $(TEST_DIR)/tb_cache030_unit.vhd
 	@cd $(TEST_DIR) && $(VSIM) -c -do "run 500us; quit -f" tb_cache030_unit
 
-# KNOWN-FAILING (BUG #458 reproducer): the deferred mask-word bus error races
-# MOVEM's store beats into a double-fault HALT, with or without an
-# insn_fetch_consumer term for set(get_2ndOPC). Kept as the reproducer for the
-# deeper deferred-dispatch/squash fix. See REVIEW_2026-07-23_CPU_MMU_CACHE.md.
+# BUG #458 FIXED: (1) berr dispatch-cycle squash gap closed (stale-PC prefetch
+# re-walked the dead page between setinterrupt and micro_state=berr_fill ->
+# double-fault HALT); (2) set(get_2ndOPC) consumer term restores restart
+# classification + instruction-start frame PC for consumed 2nd-opcode-word
+# faults. See REVIEW_2026-07-23_CPU_MMU_CACHE.md.
 test-movem-mask-pagefault: setup
-	@echo "Running BUG #458 MOVEM mask-word page-fault restart regression (KNOWN-FAILING)..."
+	@echo "Running BUG #458 MOVEM mask-word page-fault restart regression..."
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_Pack.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_ALU.vhd
 	@cd $(TEST_DIR) && $(VCOM) -93 $(RTL_DIR)/TG68K_PMMU_030.vhd

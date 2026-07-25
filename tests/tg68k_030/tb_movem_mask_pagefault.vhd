@@ -164,6 +164,13 @@ architecture behavioral of tb_movem_mask_pagefault is
         m(14082) := x"0000"; m(14083) := x"0000";
         -- Slot 7 ($1C00-$1FFF): stack/data page identity
         m(14094) := x"0000"; m(14095) := x"1C61";
+        -- Slot 27 ($6C00-$6FFF): identity map the PAGE-TABLE page itself.
+        -- The handler's descriptor write goes to LOGICAL $6E04; without this
+        -- mapping the memory fill pattern $4E714E71 in slot 27 decodes as a
+        -- garbage-but-VALID page descriptor (DT=01), the write translates to
+        -- ~$4E714E04 and is silently dropped - the fault could never be
+        -- repaired and the bench looped in the handler forever.
+        m(14134) := x"0000"; m(14135) := x"6C61";
 
         -- Pre-clear the MOVEM landing zone ($1DE0-$1DFF) and the counter
         for i in 0 to 15 loop
