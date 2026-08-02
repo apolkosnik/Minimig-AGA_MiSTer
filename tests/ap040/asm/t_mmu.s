@@ -211,6 +211,43 @@ ucont:
 	move.l	#$00005003,($4414).l
 	pflusha
 
+;----------------------------------------- MOVEM restart across a fault
+	; registers to memory into a page that faults mid-transfer: the
+	; 68040 restart model re-executes the whole MOVEM after the fix
+	move.l	#$00007000,(expect_fa).l
+	move.l	#$441C,(fix_addr).l	; page 7 descriptor
+	move.l	#$7003,(fix_val).l
+	move.l	#0,($441C).l		; make page 7 invalid
+	pflusha
+	move.l	#$AAAA0001,d1
+	move.l	#$BBBB0002,d2
+	move.l	#$CCCC0003,d3
+	lea	($6FFC).l,a0		; last longword of valid page 6
+	movem.l	d1-d3,(a0)		; d1 at $6FFC, d2/d3 fault into page 7
+	move.l	($6FFC).l,d0
+	chkl	d0,$AAAA0001,24
+	move.l	($7000).l,d0
+	chkl	d0,$BBBB0002,25
+	move.l	($7004).l,d0
+	chkl	d0,$CCCC0003,26
+	move.w	(cnt_aerr).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,5,27
+
+	; memory to registers with a fault on the second page
+	move.l	#0,($441C).l
+	pflusha
+	moveq	#0,d1
+	moveq	#0,d2
+	moveq	#0,d3
+	movem.l	(a0),d1-d3
+	chkl	d1,$AAAA0001,28
+	chkl	d2,$BBBB0002,29
+	chkl	d3,$CCCC0003,30
+	move.w	(cnt_aerr).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,6,31
+
 ;----------------------------------------------------------------- disable
 	moveq	#0,d0
 	movec	d0,tc

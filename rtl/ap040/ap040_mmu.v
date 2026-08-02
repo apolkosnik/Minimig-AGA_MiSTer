@@ -75,7 +75,8 @@ module ap040_mmu
 	input      [31:0] m_rdata,
 
 	output     [31:0] phys_addr,
-	output            cache_inhibit
+	output            cache_inhibit,
+	output            m_nocache
 );
 
 wire tc_e = tc[15];
@@ -236,6 +237,8 @@ assign c_rdata = m_rdata;
 assign phys_addr     = pa_out;
 assign cache_inhibit = ttr_hit ? ttr_cm[1]
                      : (tc_e && atc_hit) ? h_cm[1] : 1'b0;
+// table walker traffic must never be cached
+assign m_nocache     = w_active | cache_inhibit;
 
 //---------------------------------------------------------------------------
 // walker FSM (single always block: owns atc arrays and w_* state)

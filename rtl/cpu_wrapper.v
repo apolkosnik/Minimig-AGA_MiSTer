@@ -175,7 +175,11 @@ wire        lds_p;
 wire        reset_out_p;
 wire        longword;
 
-ap040_tg68k_compat cpu_inst_p
+ap040_tg68k_compat #(
+	// internal caches off: cpu_cache_new in the RAM controllers already
+	// provides (snooped) caching on this fabric
+	.AP040_ENABLE_CACHE(0)
+) cpu_inst_p
 (
 	.clk(clk),
 	.nreset(reset),

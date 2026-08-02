@@ -161,6 +161,11 @@ always @(posedge clk) begin
 				errors = errors + 1;
 				$display("FAIL: write to F120 with FC=%0d, expected 1", fc);
 			end
+			// DMA-style poke behind the CPU's back for the cache tests
+			if (addr_out[15:0] == 16'hF130) begin
+				mem[16'h3500 >> 1] = data_write;
+				mem[16'h3502 >> 1] = 16'h0000;
+			end
 		end
 	end
 end

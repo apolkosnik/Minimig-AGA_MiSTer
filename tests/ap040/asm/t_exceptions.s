@@ -33,6 +33,7 @@ cnt_priv	equ	$3618
 cnt_trapu	equ	$361A
 cnt_fmt		equ	$361C
 cnt_addr	equ	$361E
+cnt_trace	equ	$3620
 resume		equ	$3630
 
 failt	macro
@@ -65,7 +66,7 @@ ok\@:
 	dc.l	h_chk		; 6 CHK
 	dc.l	h_trapv		; 7 TRAPV/TRAPcc
 	dc.l	h_priv		; 8 privilege violation
-	dc.l	unexp		; 9 trace
+	dc.l	h_trace		; 9 trace
 	dc.l	h_aline		; 10 A-line
 	dc.l	h_fline		; 11 F-line
 	dc.l	unexp,unexp	; 12,13
@@ -92,7 +93,7 @@ ok\@:
 	org	$400
 start:
 	lea	(cnt_trap0).l,a0
-	moveq	#15,d0
+	moveq	#16,d0
 clrloop:
 	clr.w	(a0)+
 	dbra	d0,clrloop
@@ -123,6 +124,14 @@ clrloop:
 	move.l	#50,d0
 	chk.w	#100,d0		; in bounds: no trap
 	chkcnt	cnt_chk,2,8
+	move.w	#10,($3520).l	; CHK2 bounds pair {10, 20}
+	move.w	#20,($3522).l
+	moveq	#15,d0
+	chk2.w	($3520).l,d0	; inside: no trap
+	chkcnt	cnt_chk,2,55
+	moveq	#30,d0
+	chk2.w	($3520).l,d0	; outside: vector 6, format $2
+	chkcnt	cnt_chk,3,56
 
 ;----------------------------------------------------------------- divide by zero
 	move.l	#7,d0
@@ -143,6 +152,18 @@ clrloop:
 	chkcnt	cnt_trapv,2,13
 	trapeq.w #$1234		; with operand word
 	chkcnt	cnt_trapv,3,14
+
+;----------------------------------------------------------------- trace
+	move.w	#$A000,sr	; T1 + S: trace every instruction
+	nop			; traced; the handler clears the stacked T bits
+	chkcnt	cnt_trace,1,57
+	move.w	#$6000,sr	; T0 + S: trace only changes of flow
+	nop			; straight line: no trace
+	chkcnt	cnt_trace,1,58
+	bra	t0flow		; taken branch: traced (word form: zero displacement)
+t0flow:
+	chkcnt	cnt_trace,2,59
+	move.w	#$2700,sr
 
 ;----------------------------------------------------------------- MOVEC matrix
 	moveq	#0,d0
@@ -457,6 +478,13 @@ h_trapv:
 	cmpi.w	#$201C,6(sp)
 	bne	hfail
 	addq.w	#1,(cnt_trapv).l
+	rte
+
+h_trace:
+	cmpi.w	#$2024,6(sp)	; format $2, vector 9
+	bne	hfail
+	andi.w	#$3FFF,(sp)	; stop tracing on return
+	addq.w	#1,(cnt_trace).l
 	rte
 
 h_priv:

@@ -16,7 +16,7 @@ module ap040_tg68k_compat
 #(
 	parameter AP040_HAS_MMU      = 1,
 	parameter AP040_HAS_FPU      = 0,
-	parameter AP040_ENABLE_CACHE = 0,
+	parameter AP040_ENABLE_CACHE = 1,
 	parameter AP040_FAST_SIM     = 0
 )
 (
@@ -78,13 +78,24 @@ wire        mem_ack;
 wire [31:0] mem_rdata;
 wire        mem_flt;
 
-// MMU to bus adapter
+// MMU to cache
+wire        mm_req, mm_write, mm_instr;
+wire  [1:0] mm_size;
+wire [31:0] mm_addr, mm_wdata;
+wire  [2:0] mm_fc;
+wire        mm_ack, mm_nocache;
+wire [31:0] mm_rdata;
+
+// cache to bus adapter
 wire        b_req, b_write, b_instr;
 wire  [1:0] b_size;
 wire [31:0] b_addr, b_wdata;
 wire  [2:0] b_fc;
 wire        b_ack;
 wire [31:0] b_rdata;
+
+// CINV sideband
+wire        cinv_req, cinv_ic, cinv_dc, cinv_done;
 
 // control registers and PTEST/PFLUSH sideband
 wire [31:0] w_tc, w_urp, w_srp, w_itt0, w_itt1, w_dtt0, w_dtt1;
@@ -133,6 +144,10 @@ ap040_core #(
 	.pf_mode(pf_mode),
 	.pf_addr(pf_addr),
 	.pf_done(pf_done),
+	.cinv_req(cinv_req),
+	.cinv_ic(cinv_ic),
+	.cinv_dc(cinv_dc),
+	.cinv_done(cinv_done),
 
 	.ipl(ipl),
 	.ipl_autovector(ipl_autovector),
@@ -184,19 +199,77 @@ ap040_mmu mmu (
 	.pf_addr(pf_addr),
 	.pf_done(pf_done),
 
-	.m_req(b_req),
-	.m_write(b_write),
-	.m_instr(b_instr),
-	.m_size(b_size),
-	.m_addr(b_addr),
-	.m_wdata(b_wdata),
-	.m_fc(b_fc),
-	.m_ack(b_ack),
-	.m_rdata(b_rdata),
+	.m_req(mm_req),
+	.m_write(mm_write),
+	.m_instr(mm_instr),
+	.m_size(mm_size),
+	.m_addr(mm_addr),
+	.m_wdata(mm_wdata),
+	.m_fc(mm_fc),
+	.m_ack(mm_ack),
+	.m_rdata(mm_rdata),
 
 	.phys_addr(mmu_addr_phys),
-	.cache_inhibit(mmu_cache_inhibit)
+	.cache_inhibit(mmu_cache_inhibit),
+	.m_nocache(mm_nocache)
 );
+
+generate
+if (AP040_ENABLE_CACHE != 0) begin : g_cache
+	ap040_cache cache (
+		.clk(clk),
+		.nreset(nreset),
+		.ce(clkena_in),
+
+		.ie(cacr_out[15]),
+		.de(cacr_out[31]),
+
+		.cinv_req(cinv_req),
+		.cinv_ic(cinv_ic),
+		.cinv_dc(cinv_dc),
+		.cinv_done(cinv_done),
+
+		.c_req(mm_req),
+		.c_write(mm_write),
+		.c_instr(mm_instr),
+		.c_size(mm_size),
+		.c_addr(mm_addr),
+		.c_wdata(mm_wdata),
+		.c_fc(mm_fc),
+		.c_nocache(mm_nocache),
+		.c_ack(mm_ack),
+		.c_rdata(mm_rdata),
+
+		.m_req(b_req),
+		.m_write(b_write),
+		.m_instr(b_instr),
+		.m_size(b_size),
+		.m_addr(b_addr),
+		.m_wdata(b_wdata),
+		.m_fc(b_fc),
+		.m_ack(b_ack),
+		.m_rdata(b_rdata)
+	);
+end
+else begin : g_nocache
+	// no internal caches: the MMU talks straight to the bus adapter and
+	// CINV/CPUSH complete immediately (a 68040 whose caches never fill).
+	// The Minimig build uses this and relies on cpu_cache_new in the RAM
+	// controllers, which also snoops chipset DMA writes.
+	assign b_req    = mm_req;
+	assign b_write  = mm_write;
+	assign b_instr  = mm_instr;
+	assign b_size   = mm_size;
+	assign b_addr   = mm_addr;
+	assign b_wdata  = mm_wdata;
+	assign b_fc     = mm_fc;
+	assign mm_ack   = b_ack;
+	assign mm_rdata = b_rdata;
+	assign cinv_done = 1'b1;
+	wire unused_nc = mm_nocache | cinv_req | cinv_ic | cinv_dc |
+	                 (|cacr_out);
+end
+endgenerate
 
 ap040_bus16_adapter bus16 (
 	.clk(clk),

@@ -70,6 +70,10 @@ module ap040_core
 	output reg  [1:0] pf_mode,
 	output reg [31:0] pf_addr,
 	input             pf_done,
+	output reg        cinv_req,
+	output reg        cinv_ic,
+	output reg        cinv_dc,
+	input             cinv_done,
 
 	input       [2:0] ipl,
 	input             ipl_autovector,
@@ -351,6 +355,13 @@ localparam S_BF_X4     = 8'd129;
 localparam S_BF_M2     = 8'd130;
 localparam S_BF_M3     = 8'd131;
 localparam S_BF_M4     = 8'd132;
+localparam S_CINV2     = 8'd133;
+localparam S_CHK2_A    = 8'd134;
+localparam S_CHK2_B    = 8'd135;
+localparam S_CHK2_C    = 8'd136;
+localparam S_CHK2_D    = 8'd137;
+localparam S_BTSTI     = 8'd138;
+localparam S_BTSTI2    = 8'd139;
 
 // exec kinds
 localparam EK_ALU     = 4'd0;
@@ -460,6 +471,10 @@ reg        m16_rd_done;
 reg  [7:0] rst_cnt;
 reg        fault_r;
 reg  [2:0] fc_r;
+
+// trace: T bits sampled at instruction start; T0 traces only on a
+// change of flow (the go_pc path)
+reg        tr_t1, tr_t0;
 
 // bitfield and CAS working registers. The bitfield datapath is spread
 // over several states so each stage holds at most one wide variable
@@ -786,7 +801,11 @@ task fetch_next;
 		fc_ovr_v <= 0;
 		u0_v <= 0;
 		u1_v <= 0;
-		if (irq_pend) begin
+		if (tr_t1) begin
+			tr_t1 <= 0;
+			exc(`AP040_VEC_TRACE, 4'd2, pc, pc_i);
+		end
+		else if (irq_pend) begin
 			exc_vec <= `AP040_VEC_AUTOVEC + {5'd0, irq_lvl};
 			exc_fmt <= 0; exc_spc <= pc; exc_addr <= 0;
 			exc_is_irq <= 1; exc_pass2 <= 0;
@@ -818,6 +837,12 @@ task go_pc;
 	input [31:0] t;
 	begin
 		if (t[0]) exc(`AP040_VEC_ADDRERR, 4'd2, pc_i, t);
+		else if (tr_t1 || tr_t0) begin
+			tr_t1 <= 0;
+			tr_t0 <= 0;
+			pc <= t;
+			exc(`AP040_VEC_TRACE, 4'd2, t, pc_i);
+		end
 		else begin
 			pc <= t;
 			fc_ovr_v <= 0;
@@ -909,6 +934,8 @@ always @(posedge clk) begin
 		u0_reg <= 0; u1_reg <= 0; u0_old <= 0; u1_old <= 0;
 		pt_req <= 0; pt_write <= 0; pt_addr <= 0;
 		pf_req <= 0; pf_mode <= 0; pf_addr <= 0;
+		cinv_req <= 0; cinv_ic <= 0; cinv_dc <= 0;
+		tr_t1 <= 0; tr_t0 <= 0;
 	end
 	else if (ce) begin
 		rf_we <= 0;
@@ -948,6 +975,8 @@ always @(posedge clk) begin
 				ir <= mem_rdata[15:0];
 				pc <= pc + 32'd2;
 				// per-instruction defaults
+				tr_t1 <= sr[15];
+				tr_t0 <= sr[14];
 				p_src <= SK_NONE; p_dst <= DK_NONE;
 				p_rmw <= 0; p_wbsup <= 0; p_flags <= 1; p_sextw <= 0;
 				p_dst_mem_bit <= 0;
@@ -1543,6 +1572,13 @@ always @(posedge clk) begin
 				sr <= rte_sr & `AP040_SR_MASK;
 				if (ret_kind[0]) state <= S_RTE_SR;   // format $1: continue
 				else if (rte_pc[0]) exc(`AP040_VEC_ADDRERR, 4'd2, pc_i, rte_pc);
+				else if (tr_t1 || tr_t0) begin
+					// the RTE itself was traced (T set before the RTE)
+					tr_t1 <= 0;
+					tr_t0 <= 0;
+					pc <= rte_pc;
+					exc(`AP040_VEC_TRACE, 4'd2, rte_pc, pc_i);
+				end
 				else begin
 					pc <= rte_pc;
 					pc_i <= rte_pc;
@@ -1898,6 +1934,65 @@ always @(posedge clk) begin
 				fetch_next;
 			end
 
+			S_CINV2: if (cinv_done) begin
+				cinv_req <= 0;
+				fetch_next;
+			end
+
+			//----------------------------------------------------- CHK2/CMP2
+			S_CHK2_A: begin
+				x_ext <= imm;
+				ea_start(d_mode, d_rn, op_size, S_CHK2_B);
+			end
+
+			S_CHK2_B: begin
+				dst_addr <= ea_addr;
+				mrd(ea_addr, op_size, S_CHK2_C);
+			end
+
+			S_CHK2_C: begin
+				src_val <= m_val;              // lower bound
+				rr_a <= {x_ext[15], x_ext[14:12]};
+				mrd(dst_addr + ((op_size == `AP040_SZ_B) ? 32'd1 :
+				                (op_size == `AP040_SZ_W) ? 32'd2 : 32'd4),
+				    op_size, S_CHK2_D);
+			end
+
+			S_CHK2_D: begin : chk2d
+				reg signed [31:0] rn, lb, ub;
+				reg oob;
+				// operands sign-extended by size; address registers use
+				// their full value
+				if (x_ext[15]) rn = $signed(rf_rdata_a);
+				else rn = (op_size == `AP040_SZ_B) ? $signed(sxb(rf_rdata_a[7:0])) :
+				          (op_size == `AP040_SZ_W) ? $signed(sxw(rf_rdata_a[15:0])) :
+				          $signed(rf_rdata_a);
+				lb = (op_size == `AP040_SZ_B) ? $signed(sxb(src_val[7:0])) :
+				     (op_size == `AP040_SZ_W) ? $signed(sxw(src_val[15:0])) :
+				     $signed(src_val);
+				ub = (op_size == `AP040_SZ_B) ? $signed(sxb(m_val[7:0])) :
+				     (op_size == `AP040_SZ_W) ? $signed(sxw(m_val[15:0])) :
+				     $signed(m_val);
+				oob = (lb <= ub) ? (rn < lb || rn > ub) : (rn < lb && rn > ub);
+				sr[2] <= (rn == lb) || (rn == ub);
+				sr[0] <= oob;
+				if (x_ext[11] && oob)
+					exc(`AP040_VEC_CHK, 4'd2, pc, pc_i);
+				else fetch_next;
+			end
+
+			//------------------------------------------------- BTST Dn,#imm
+			S_BTSTI: begin
+				x_ext <= imm;
+				rr_a <= p_sreg;
+				state <= S_BTSTI2;
+			end
+
+			S_BTSTI2: begin
+				sr[2] <= ~x_ext[rf_rdata_a[2:0]];
+				fetch_next;
+			end
+
 			S_RESET_HOLD: begin
 				if (rst_cnt == 8'd0) fetch_next;
 				else rst_cnt <= rst_cnt - 8'd1;
@@ -2229,10 +2324,17 @@ always @(posedge clk) begin
 							// dynamic bit op, bit number in Dn
 							alu_op <= `AP040_ALU_BTST + {4'd0, ir[7:6]};
 							p_src <= SK_REG; p_sreg <= {1'b0, d_reg9};
-							if (d_mode == 3'b000) begin
+							if (ir[7:6] == 2'b00) p_wbsup <= 1; // BTST
+							if (ea_is_imm) begin
+								// only BTST Dn,#imm exists in this corner
+								if (ir[7:6] != 2'b00) go_illegal;
+								else immf(2'd1, S_BTSTI);
+							end
+							else if (d_mode == 3'b000) begin
 								op_size <= `AP040_SZ_L;
 								p_dsize <= `AP040_SZ_L;
 								p_dst <= DK_REG; p_dreg <= {1'b0, d_rn};
+								pipe_go;
 							end
 							else begin
 								op_size <= `AP040_SZ_B;
@@ -2241,9 +2343,8 @@ always @(posedge clk) begin
 								p_dst_mem_bit <= 1;
 								dst_mode_r <= d_mode; dst_rn_r <= d_rn;
 								p_rmw <= 1;
+								pipe_go;
 							end
-							if (ir[7:6] == 2'b00) p_wbsup <= 1; // BTST
-							pipe_go;
 						end
 						else if (d_reg9 == 3'b100) begin
 							// static bit op, bit number in extension word
@@ -2276,7 +2377,17 @@ always @(posedge clk) begin
 							end
 						end
 						else if (std_size == 2'b11) begin
-							if (d_reg9[2] && d_reg9[1:0] != 2'b00) begin
+							if (!d_reg9[2] && d_reg9[1:0] != 2'b11) begin
+								// CHK2/CMP2: bounds pair at a control EA
+								if (d_mode < 3'b010 || d_mode == 3'b011 ||
+								    d_mode == 3'b100 || ea_is_imm) go_illegal;
+								else begin
+									op_size <= d_reg9[1] ? `AP040_SZ_L :
+									           d_reg9[0] ? `AP040_SZ_W : `AP040_SZ_B;
+									immf(2'd1, S_CHK2_A);
+								end
+							end
+							else if (d_reg9[2] && d_reg9[1:0] != 2'b00) begin
 								// CAS (memory only; $0xFC encodings are CAS2)
 								if (d_mode < 3'b010 || ea_is_imm ||
 								    (d_mode == 3'b111 && d_rn > 3'b001)) go_illegal;
@@ -3120,11 +3231,17 @@ always @(posedge clk) begin
 					//------------------------------------------ 0xF: 040 group
 					default: begin
 						if (ir[11:8] == 4'h4) begin
-							// CINV/CPUSH: privileged cache maintenance, no-op
-							// while the caches are disabled
+							// CINV/CPUSH: write-through caches hold no dirty
+							// data, so both invalidate the selected caches
+							// (scope is widened to ALL, which is safe)
 							if (!sr_s) go_priv;
 							else if (ir[4:3] == 2'b00) go_illegal;
-							else fetch_next;
+							else begin
+								cinv_ic <= ir[7];
+								cinv_dc <= ir[6];
+								cinv_req <= 1;
+								state <= S_CINV2;
+							end
 						end
 						else if (ir[11:8] == 4'h5) begin
 							if (ir[7:5] == 3'b000) begin

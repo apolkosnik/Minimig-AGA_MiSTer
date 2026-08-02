@@ -571,6 +571,35 @@ cas2ok:
 	and.l	#$FF,d0
 	chkl	d0,$99,131
 
+;----------------------------------------------- BTST Dn,#imm and CMP2
+	move.w	#0,ccr
+	moveq	#1,d1
+	btst	d1,#$02		; bit 1 of $02 is set
+	chkccr	$00,132
+	btst	d1,#$0D		; bit 1 of $0D is clear
+	chkccr	$04,133
+
+	move.w	#10,($30A0).l	; word bounds pair {10, 20}
+	move.w	#20,($30A2).l
+	move.w	#0,ccr
+	moveq	#15,d0
+	cmp2.w	($30A0).l,d0	; inside
+	chkccr	$00,134
+	moveq	#10,d0
+	cmp2.w	($30A0).l,d0	; on the lower bound
+	chkccr	$04,135
+	moveq	#25,d0
+	cmp2.w	($30A0).l,d0	; above
+	chkccr	$01,136
+	moveq	#5,d0
+	cmp2.w	($30A0).l,d0	; below
+	chkccr	$01,137
+	move.l	#$00003000,($30A8).l	; long bounds for an address register
+	move.l	#$00004000,($30AC).l
+	movea.l	#$3800,a1
+	cmp2.l	($30A8).l,a1
+	chkccr	$00,138
+
 ;----------------------------------------------------------------- all done
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700
