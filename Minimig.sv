@@ -651,7 +651,7 @@ minimig minimig
 	.cpucfg       (cpucfg           ), // CPU config
 	.cachecfg     (cachecfg         ), // Cache config
 	.memcfg       (memcfg           ), // memory config
-	.bootrom      (bootrom          ), // bootrom mode. Needed here to tell tg68k to also mirror the 256k Kickstart 
+	.bootrom      (bootrom          ), // bootrom mode. Needed here to tell the CPU wrapper to also mirror the 256k Kickstart 
 
 	.ide_fast     (ide_fast         ),
 	.ide_ext_irq  (ide_f_irq        ),

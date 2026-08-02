@@ -141,53 +141,33 @@ reg         lds_in;
 reg  [15:0] chip_data;
 reg  [31:0] vbr;
 
+// AP040 is the only CPU path; cpucfg keeps its OSD meaning for the
+// turbo chipram/kickstart gating and autoconfig defaults below.
 always @* begin
-	if(cpucfg[1:0]) begin
-		cpu_dout     = cpu_dout_p;
-		cpu_addr     = cpu_addr_p;
-		cpustate     = cpustate_p;
-		cacr         = cacr_p;
-		vbr          = vbr_p;
-		wr           = wr_p;
-		uds_in       = uds_p;
-		lds_in       = lds_p;
-		reset_out    = reset_out_p;
-		chip_as      = c_as;
-		chip_rw      = c_rw;
-		chip_uds     = c_uds;
-		chip_lds     = c_lds;
-		chip_addr    = cpu_addr_p[23:1];
-		chip_din     = cpu_dout_p;
-		chip_data    = chipdout_i;
-		fastchip_sel = cpu_req & !cpu_addr_p[31:24];
-		fastchip_lw  = longword;
-	end
-	else begin
-		cpu_dout     = cpu_dout_o;
-		cpu_addr     = {cpu_addr_o,1'b0};
-		cpustate     = as_o ? 2'b01 : ~{wr_o,wr_o};
-		cacr         = 1;
-		vbr          = 0;
-		wr           = wr_o;
-		uds_in       = uds_o;
-		lds_in       = lds_o;
-		reset_out    = reset_out_o;
-		chip_as      = ramsel | as_o;
-		chip_rw      = wr_o;
-		chip_uds     = uds_o;
-		chip_lds     = lds_o;
-		chip_addr    = cpu_addr_o[23:1];
-		chip_din     = cpu_dout_o;
-		chip_data    = chip_dout;
-		fastchip_sel = 0;
-		fastchip_lw  = 0;
-	end
+	cpu_dout     = cpu_dout_p;
+	cpu_addr     = cpu_addr_p;
+	cpustate     = cpustate_p;
+	cacr         = {3'd0, cacr_p[15] | cacr_p[31]};  // 040 CACR IE/DE -> external cache enable
+	vbr          = vbr_p;
+	wr           = wr_p;
+	uds_in       = uds_p;
+	lds_in       = lds_p;
+	reset_out    = reset_out_p;
+	chip_as      = c_as;
+	chip_rw      = c_rw;
+	chip_uds     = c_uds;
+	chip_lds     = c_lds;
+	chip_addr    = cpu_addr_p[23:1];
+	chip_din     = cpu_dout_p;
+	chip_data    = chipdout_i;
+	fastchip_sel = cpu_req & !cpu_addr_p[31:24];
+	fastchip_lw  = longword;
 end
 
 wire [15:0] cpu_dout_p;
 wire [31:0] cpu_addr_p;
 wire  [1:0] cpustate_p;
-wire  [3:0] cacr_p;
+wire [31:0] cacr_p;
 wire [31:0] vbr_p;
 wire        wr_p;
 wire        uds_p;
@@ -195,78 +175,51 @@ wire        lds_p;
 wire        reset_out_p;
 wire        longword;
 
-TG68KdotC_Kernel
-#(
-	.sr_read(2),        // 0=>user,   1=>privileged,    2=>switchable with CPU(0)
-	.vbr_stackframe(2), // 0=>no,     1=>yes/extended,  2=>switchable with CPU(0)
-	.extaddr_mode(2),   // 0=>no,     1=>yes,           2=>switchable with CPU(1)
-	.mul_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no MUL,
-	.div_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,
-	.bitfield(2)        // 0=>no,     1=>yes,           2=>switchable with CPU(1)
-)
-cpu_inst_p
-(
-  .clk(clk),
-  .nreset(reset),
-  .clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
-  .data_in(cpu_din),
-  .ipl(cpu_ipl),
-  .ipl_autovector(1),
-  .regin_out(),
-  .addr_out(cpu_addr_p),
-  .data_write(cpu_dout_p),
-  .nwr(wr_p),
-  .nuds(uds_p),
-  .nlds(lds_p),
-  .nresetout(reset_out_p),
-  .longword(longword),
-  
-  .cpu(cpucfg),
-  .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
-  .cacr_out(cacr_p),
-  .vbr_out(vbr_p)
-);
-
-wire [15:0] cpu_dout_o;
-wire [23:1] cpu_addr_o;
-wire  [2:0] fc_o;
-wire        wr_o;
-wire        as_o;
-wire        uds_o;
-wire        lds_o;
-wire        reset_out_o;
-
-fx68k cpu_inst_o
+ap040_tg68k_compat cpu_inst_p
 (
 	.clk(clk),
-	.enPhi1(ph1),
-	.enPhi2(ph2),
+	.nreset(reset),
+	.clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
+	.data_in(cpu_din),
+	.ipl(cpu_ipl),
+	.ipl_autovector(1'b1),
+	.berr(1'b0),
 
-	.extReset(~reset),
-	.pwrUp(~reset),
-	.oRESETn(reset_out_o),
-	.HALTn(1),
+	.addr_out(cpu_addr_p),
+	.data_write(cpu_dout_p),
+	.nwr(wr_p),
+	.nuds(uds_p),
+	.nlds(lds_p),
+	.busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
+	.longword(longword),
+	.nresetout(reset_out_p),
+	.fc(),
 
-	.eRWn(wr_o),
-	.ASn(as_o),
-	.LDSn(lds_o),
-	.UDSn(uds_o),
-	.DTACKn(ramsel ? ~ramready : chip_dtack),
+	// MMU/walker/cache sideband: idle until the 040 MMU and caches land
+	.mmu_addr_log(),
+	.mmu_addr_phys(),
+	.mmu_cache_inhibit(),
+	.walker_req(),
+	.walker_we(),
+	.walker_addr(),
+	.walker_wdat(),
+	.walker_ack(1'b0),
+	.walker_data(32'd0),
+	.walker_berr(1'b0),
+	.cache_req(),
+	.cache_addr(),
+	.cache_data(16'd0),
+	.cache_ack(1'b0),
+	.cache_burst(),
+	.cache_burst_len(),
+	.cache_ramaddr(),
 
-	.FC0(fc_o[0]),
-	.FC1(fc_o[1]),
-	.FC2(fc_o[2]), 
-
-	.VPAn(~&fc_o),
-	.BERRn(1),
-	.BRn(1),
-	.BGACKn(1),
-	.IPL0n(chip_ipl[0]),
-	.IPL1n(chip_ipl[1]),
-	.IPL2n(chip_ipl[2]),
-	.iEdb(cpu_din),
-	.oEdb(cpu_dout_o),
-	.eab(cpu_addr_o)
+	.cacr_out(cacr_p),
+	.vbr_out(vbr_p),
+	.debug_busy(),
+	.debug_fault(),
+	.debug_halted(),
+	.debug_status()
 );
 
 wire cpu_req = (cpustate != 1);

@@ -1,0 +1,45 @@
+AP040 test suite
+================
+
+Testbenches (Icarus Verilog -g2012 and ModelSim, see run_tests.sh):
+
+  tb_ap040_reset.v      milestone B: reset vector fetch, 16-bit bus adapter
+                        sequencing (byte lanes, misaligned word/long), MOVE/
+                        MOVEQ/MOVEA/Bcc subset, wait-state robustness
+  tb_ap040_program.v    runs a self-checking assembled program twice (back to
+                        back ready and varied wait states):
+    asm/t_integer.s     milestone C integer ISA: MOVE/MOVEA all EA modes incl.
+                        full 68020 extension words and memory indirect, ALU
+                        ops with exact CCR checks, ADDX/SUBX/NEGX stickiness,
+                        shifts/rotates incl. count 0 and over-width, bit ops,
+                        word and long MUL/DIV incl. 64-bit forms and overflow,
+                        BCD, EXT/EXTB/SWAP/EXG, LINK/UNLK (.W/.L), JSR/BSR/
+                        RTS/RTD, DBcc/Scc, CMPM, TAS, MOVEM, MOVEP, PACK/UNPK,
+                        MOVE16, MOVE from/to CCR
+    asm/t_exceptions.s  milestone C exceptions: TRAP/illegal/BKPT/A-line/
+                        F-line/CHK/divide-by-zero/TRAPV/TRAPcc frames and
+                        vector offsets, format $0/$1/$2 layout, RTE format
+                        validation and format error, MOVEC full 040 register
+                        matrix with write masks, MOVE USP, MOVES with SFC/DFC
+                        (FC pins checked by the TB), PTEST/PFLUSH/CINV/CPUSH
+                        decode and privilege, user/supervisor round trip over
+                        USP, privilege violation, autovectored interrupts,
+                        IPL masking, STOP wake-up, NMI edge behavior, and the
+                        M-bit master/interrupt stack throwaway frame path
+
+Build requirements: vasmm68k_mot (vbcc toolchain) and python3; see
+build_tests.sh. Test programs communicate over memory-mapped registers
+($F100 fail number, $F102 result, $F110 IPL request, $F120 FC check).
+
+Known gaps in the core at milestone C (all take an illegal-instruction or
+F-line trap unless noted; planned in AP040_IMPLEMENTATION_PLAN.md):
+
+  - bitfield instructions (BFxxx)
+  - CAS/CAS2, CHK2/CMP2
+  - BTST Dn,#imm (dynamic bit test on an immediate)
+  - trace exceptions are not generated (T bits are stored in SR only)
+  - TAS is not bus-locked (no locked cycles on the 16-bit fabric yet)
+  - berr input ignored: no format $7 access error frames until milestone F
+  - interrupts are always autovectored (the wrapper ties ipl_autovector=1)
+  - MMU/ATC/caches are decode-only (milestones E and G); PTEST reports
+    transparent translation, MOVEC masks for TTR/TC refine at milestone E

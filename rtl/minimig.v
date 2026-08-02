@@ -424,7 +424,7 @@ wire        host_ack;
 wire        sys_reset;    		//reset output from minimig_syscontrol.v
 wire        rom_readonly; 		//writeprotect $f8-ff in gary.v
 
-wire        reset = sys_reset | ~_cpu_reset_in; // both tg68k and minimig_syscontrol hold the reset signal for some clicks
+wire        reset = sys_reset | ~_cpu_reset_in; // both the CPU wrapper and minimig_syscontrol hold the reset signal for some clicks
 
 //--------------------------------------------------------------------------------------
 //--------------------------------------------------------------------------------------

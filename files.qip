@@ -1,5 +1,4 @@
-set_global_assignment -name QIP_FILE rtl/tg68k/TG68K.qip
-set_global_assignment -name QIP_FILE rtl/fx68k/fx68k.qip
+set_global_assignment -name QIP_FILE rtl/ap040/ap040.qip
 set_global_assignment -name QIP_FILE rtl/ram.qip
 set_global_assignment -name QIP_FILE rtl/agnus.qip
 set_global_assignment -name QIP_FILE rtl/cia.qip
