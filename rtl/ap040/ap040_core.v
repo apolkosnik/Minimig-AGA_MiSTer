@@ -50,6 +50,26 @@ module ap040_core
 	output      [2:0] mem_fc,
 	input             mem_ack,
 	input      [31:0] mem_rdata,
+	input             mem_flt,     // access error pulse from the MMU
+
+	// MMU control register values and PTEST/PFLUSH sideband
+	output     [31:0] tc_out,
+	output     [31:0] urp_out,
+	output     [31:0] srp_out,
+	output     [31:0] itt0_out,
+	output     [31:0] itt1_out,
+	output     [31:0] dtt0_out,
+	output     [31:0] dtt1_out,
+	output reg        pt_req,
+	output reg        pt_write,
+	output reg [31:0] pt_addr,
+	output      [2:0] pt_fc,
+	input             pt_done,
+	input      [31:0] pt_mmusr,
+	output reg        pf_req,
+	output reg  [1:0] pf_mode,
+	output reg [31:0] pf_addr,
+	input             pf_done,
 
 	input       [2:0] ipl,
 	input             ipl_autovector,
@@ -86,6 +106,14 @@ wire sr_m = sr[`AP040_SR_M];
 
 assign vbr_out  = vbr;
 assign cacr_out = cacr;
+assign tc_out   = tc;
+assign urp_out  = urp;
+assign srp_out  = srp;
+assign itt0_out = itt0;
+assign itt1_out = itt1;
+assign dtt0_out = dtt0;
+assign dtt1_out = dtt1;
+assign pt_fc    = dfc;
 
 // interrupt input synchronization (active low pins, must be stable for two
 // consecutive samples like the real part)
@@ -149,11 +177,11 @@ reg   [1:0] op_size;
 reg  [31:0] src_val, dst_val;
 reg  [31:0] sh_val;
 reg   [4:0] sh_fl;
-reg   [6:0] state;
+reg   [7:0] state;
 wire [31:0] alu_res;
 wire  [4:0] alu_fl;
 
-localparam S_SHIFT = 7'd29;   // forward declaration for the alu_b mux
+localparam S_SHIFT      = 8'd29;   // forward declaration for the alu_b mux
 
 wire alu_is_bitop = (alu_op >= `AP040_ALU_BTST) && (alu_op <= `AP040_ALU_BSET);
 reg         p_sextw;
@@ -190,111 +218,139 @@ ap040_muldiv muldiv
 // states
 //---------------------------------------------------------------------------
 
-localparam S_START       = 7'd0;
-localparam S_BOOT0       = 7'd1;
-localparam S_BOOT1       = 7'd2;
-localparam S_FETCH       = 7'd3;
-localparam S_DECODE      = 7'd4;
-localparam S_NEXT        = 7'd5;
-localparam S_HALT        = 7'd6;
-localparam S_STOPPED     = 7'd7;
-localparam S_IMMF        = 7'd8;
-localparam S_MRD         = 7'd9;
-localparam S_MWR         = 7'd10;
-localparam S_EA_DISP     = 7'd11;
-localparam S_EA_BASE     = 7'd12;
-localparam S_EA_D16      = 7'd13;
-localparam S_EA_EXTW     = 7'd14;
-localparam S_EA_EXTW2    = 7'd15;
-localparam S_EA_BD       = 7'd16;
-localparam S_EA_MIND     = 7'd17;
-localparam S_EA_OD       = 7'd18;
-localparam S_EA_ABS      = 7'd19;
-localparam S_PIPE_START  = 7'd20;
-localparam S_PIPE_SREG   = 7'd21;
-localparam S_PIPE_SRD    = 7'd22;
-localparam S_PIPE_SDONE  = 7'd23;
-localparam S_PIPE_DST    = 7'd24;
-localparam S_PIPE_DREG   = 7'd25;
-localparam S_PIPE_DEA    = 7'd26;
-localparam S_PIPE_DDONE  = 7'd27;
-localparam S_EXEC        = 7'd28;
+localparam S_START      = 8'd0;
+localparam S_BOOT0      = 8'd1;
+localparam S_BOOT1      = 8'd2;
+localparam S_FETCH      = 8'd3;
+localparam S_DECODE      = 8'd4;
+localparam S_NEXT      = 8'd5;
+localparam S_HALT      = 8'd6;
+localparam S_STOPPED      = 8'd7;
+localparam S_IMMF      = 8'd8;
+localparam S_MRD      = 8'd9;
+localparam S_MWR      = 8'd10;
+localparam S_EA_DISP      = 8'd11;
+localparam S_EA_BASE      = 8'd12;
+localparam S_EA_D16      = 8'd13;
+localparam S_EA_EXTW      = 8'd14;
+localparam S_EA_EXTW2      = 8'd15;
+localparam S_EA_BD      = 8'd16;
+localparam S_EA_MIND      = 8'd17;
+localparam S_EA_OD      = 8'd18;
+localparam S_EA_ABS      = 8'd19;
+localparam S_PIPE_START      = 8'd20;
+localparam S_PIPE_SREG      = 8'd21;
+localparam S_PIPE_SRD      = 8'd22;
+localparam S_PIPE_SDONE      = 8'd23;
+localparam S_PIPE_DST      = 8'd24;
+localparam S_PIPE_DREG      = 8'd25;
+localparam S_PIPE_DEA      = 8'd26;
+localparam S_PIPE_DDONE      = 8'd27;
+localparam S_EXEC      = 8'd28;
 // S_SHIFT = 29 declared above
-localparam S_MD_WAIT     = 7'd30;
-localparam S_MD_WB2      = 7'd31;
-localparam S_MDL_RDR     = 7'd32;
-localparam S_MDL_GO      = 7'd33;
-localparam S_EXC0        = 7'd34;
-localparam S_EXC1        = 7'd35;
-localparam S_EXC2        = 7'd36;
-localparam S_EXC3        = 7'd37;
-localparam S_EXC4        = 7'd38;
-localparam S_EXC5        = 7'd39;
-localparam S_EXC6        = 7'd40;
-localparam S_EXC_VEC     = 7'd41;
-localparam S_EXC_JMP     = 7'd42;
-localparam S_RTE_SR      = 7'd43;
-localparam S_RTE_PC      = 7'd44;
-localparam S_RTE_FMT     = 7'd45;
-localparam S_RTE_FIN     = 7'd46;
-localparam S_RTE_FIN2    = 7'd47;
-localparam S_RET1        = 7'd48;
-localparam S_RET2        = 7'd49;
-localparam S_RET3        = 7'd50;
-localparam S_BCC_EXT     = 7'd51;
-localparam S_BSR_PUSH    = 7'd52;
-localparam S_DBCC1       = 7'd53;
-localparam S_DBCC2       = 7'd54;
-localparam S_JMP1        = 7'd55;
-localparam S_JSR1        = 7'd56;
-localparam S_JSR2        = 7'd57;
-localparam S_LEA1        = 7'd58;
-localparam S_PEA1        = 7'd59;
-localparam S_PEA2        = 7'd60;
-localparam S_LINK1       = 7'd61;
-localparam S_LINK2       = 7'd62;
-localparam S_LINK3       = 7'd63;
-localparam S_LINK4       = 7'd64;
-localparam S_UNLK1       = 7'd65;
-localparam S_UNLK2       = 7'd66;
-localparam S_UNLK3       = 7'd67;
-localparam S_MOVEM_SET   = 7'd68;
-localparam S_MOVEM_SET2  = 7'd69;
-localparam S_MOVEM_LOOP  = 7'd70;
-localparam S_MOVEM_RD    = 7'd71;
-localparam S_MOVEM_WR    = 7'd72;
-localparam S_MOVEM_LD    = 7'd73;
-localparam S_MOVEP1      = 7'd74;
-localparam S_MOVEP2      = 7'd75;
-localparam S_MOVEP_WR    = 7'd76;
-localparam S_MOVEP_RD    = 7'd77;
-localparam S_EXG1        = 7'd78;
-localparam S_EXG2        = 7'd79;
-localparam S_USP1        = 7'd80;
-localparam S_MOVEC1      = 7'd81;
-localparam S_MOVEC2      = 7'd82;
-localparam S_MOVES1      = 7'd83;
-localparam S_MOVES2      = 7'd84;
-localparam S_MOVES_WR    = 7'd85;
-localparam S_MOVES_RD    = 7'd86;
-localparam S_PTEST1      = 7'd87;
-localparam S_RESET_HOLD  = 7'd88;
-localparam S_M16_SRC     = 7'd89;
-localparam S_M16_DST     = 7'd90;
-localparam S_M16_DST2    = 7'd91;
-localparam S_M16_RD      = 7'd92;
-localparam S_M16_RD2     = 7'd93;
-localparam S_M16_WR      = 7'd94;
-localparam S_M16_WR2     = 7'd95;
-localparam S_M16_INC     = 7'd96;
-localparam S_M16_INC2    = 7'd97;
-localparam S_SROP        = 7'd98;
-localparam S_SHIFT_WB    = 7'd99;
-localparam S_TRAPCC      = 7'd100;
-localparam S_STOP_LD     = 7'd101;
-localparam S_MOVEM_EA    = 7'd102;
-localparam S_MDL_RDQ     = 7'd103;
-localparam S_MDL_EXT     = 7'd104;
+localparam S_MD_WAIT      = 8'd30;
+localparam S_MD_WB2      = 8'd31;
+localparam S_MDL_RDR      = 8'd32;
+localparam S_MDL_GO      = 8'd33;
+localparam S_EXC0      = 8'd34;
+localparam S_EXC1      = 8'd35;
+localparam S_EXC2      = 8'd36;
+localparam S_EXC3      = 8'd37;
+localparam S_EXC4      = 8'd38;
+localparam S_EXC5      = 8'd39;
+localparam S_EXC6      = 8'd40;
+localparam S_EXC_VEC      = 8'd41;
+localparam S_EXC_JMP      = 8'd42;
+localparam S_RTE_SR      = 8'd43;
+localparam S_RTE_PC      = 8'd44;
+localparam S_RTE_FMT      = 8'd45;
+localparam S_RTE_FIN      = 8'd46;
+localparam S_RTE_FIN2      = 8'd47;
+localparam S_RET1      = 8'd48;
+localparam S_RET2      = 8'd49;
+localparam S_RET3      = 8'd50;
+localparam S_BCC_EXT      = 8'd51;
+localparam S_BSR_PUSH      = 8'd52;
+localparam S_DBCC1      = 8'd53;
+localparam S_DBCC2      = 8'd54;
+localparam S_JMP1      = 8'd55;
+localparam S_JSR1      = 8'd56;
+localparam S_JSR2      = 8'd57;
+localparam S_LEA1      = 8'd58;
+localparam S_PEA1      = 8'd59;
+localparam S_PEA2      = 8'd60;
+localparam S_LINK1      = 8'd61;
+localparam S_LINK2      = 8'd62;
+localparam S_LINK3      = 8'd63;
+localparam S_LINK4      = 8'd64;
+localparam S_UNLK1      = 8'd65;
+localparam S_UNLK2      = 8'd66;
+localparam S_UNLK3      = 8'd67;
+localparam S_MOVEM_SET      = 8'd68;
+localparam S_MOVEM_SET2      = 8'd69;
+localparam S_MOVEM_LOOP      = 8'd70;
+localparam S_MOVEM_RD      = 8'd71;
+localparam S_MOVEM_WR      = 8'd72;
+localparam S_MOVEM_LD      = 8'd73;
+localparam S_MOVEP1      = 8'd74;
+localparam S_MOVEP2      = 8'd75;
+localparam S_MOVEP_WR      = 8'd76;
+localparam S_MOVEP_RD      = 8'd77;
+localparam S_EXG1      = 8'd78;
+localparam S_EXG2      = 8'd79;
+localparam S_USP1      = 8'd80;
+localparam S_MOVEC1      = 8'd81;
+localparam S_MOVEC2      = 8'd82;
+localparam S_MOVES1      = 8'd83;
+localparam S_MOVES2      = 8'd84;
+localparam S_MOVES_WR      = 8'd85;
+localparam S_MOVES_RD      = 8'd86;
+localparam S_PTEST1      = 8'd87;
+localparam S_RESET_HOLD      = 8'd88;
+localparam S_M16_SRC      = 8'd89;
+localparam S_M16_DST      = 8'd90;
+localparam S_M16_DST2      = 8'd91;
+localparam S_M16_RD      = 8'd92;
+localparam S_M16_RD2      = 8'd93;
+localparam S_M16_WR      = 8'd94;
+localparam S_M16_WR2      = 8'd95;
+localparam S_M16_INC      = 8'd96;
+localparam S_M16_INC2      = 8'd97;
+localparam S_SROP      = 8'd98;
+localparam S_SHIFT_WB      = 8'd99;
+localparam S_TRAPCC      = 8'd100;
+localparam S_STOP_LD      = 8'd101;
+localparam S_MOVEM_EA      = 8'd102;
+localparam S_MDL_RDQ      = 8'd103;
+localparam S_MDL_EXT      = 8'd104;
+localparam S_PFLUSH1      = 8'd105;
+localparam S_PFLUSH2      = 8'd106;
+localparam S_PTEST2      = 8'd107;
+localparam S_AERR0      = 8'd108;
+localparam S_AERR_U      = 8'd109;
+localparam S_AERR_SP      = 8'd110;
+localparam S_AERR_WR      = 8'd111;
+localparam S_BF0      = 8'd112;
+localparam S_BF1      = 8'd113;
+localparam S_BF_REG      = 8'd114;
+localparam S_BF_REG2      = 8'd115;
+localparam S_BF_REGX      = 8'd116;
+localparam S_BF_MEM0      = 8'd117;
+localparam S_BF_MEM1      = 8'd118;
+localparam S_BF_MEM2      = 8'd119;
+localparam S_BF_EXECM      = 8'd120;
+localparam S_BF_WR1      = 8'd121;
+localparam S_BF_WR2      = 8'd122;
+localparam S_CAS1      = 8'd123;
+localparam S_CAS2      = 8'd124;
+localparam S_CAS3      = 8'd125;
+localparam S_CAS4      = 8'd126;
+localparam S_BF_X2     = 8'd127;
+localparam S_BF_X3     = 8'd128;
+localparam S_BF_X4     = 8'd129;
+localparam S_BF_M2     = 8'd130;
+localparam S_BF_M3     = 8'd131;
+localparam S_BF_M4     = 8'd132;
 
 // exec kinds
 localparam EK_ALU     = 4'd0;
@@ -328,7 +384,7 @@ localparam RK_RTD = 2'd2;
 // control registers of the execution engine
 //---------------------------------------------------------------------------
 
-reg  [6:0] r_imm_ret, r_ea_ret, r_m_ret;
+reg  [7:0] r_imm_ret, r_ea_ret, r_m_ret;
 reg  [1:0] imm_n;
 reg        if_issued, m_issued;
 reg [31:0] imm;
@@ -404,6 +460,34 @@ reg        m16_rd_done;
 reg  [7:0] rst_cnt;
 reg        fault_r;
 reg  [2:0] fc_r;
+
+// bitfield and CAS working registers. The bitfield datapath is spread
+// over several states so each stage holds at most one wide variable
+// shifter (timing: a single-cycle version costs ~28ns of logic).
+reg [31:0] bf_off;
+reg  [5:0] bf_w;
+reg [31:0] bf_addr;
+reg  [2:0] bf_bib;              // bit offset inside the first byte
+reg  [2:0] bf_span;             // bytes touched (1..5)
+reg [31:0] bf_w1;
+reg  [7:0] bf_w2;
+reg [31:0] bf_du;
+reg [39:0] bf_t40;              // shifted window (mem) / rotated reg (reg form)
+reg [31:0] bf_field;            // extracted field, right aligned
+reg [31:0] bf_ones;             // width ones mask, right aligned
+reg [39:0] bf_maskl;            // field mask, left aligned in the work domain
+reg [31:0] cas_dc;
+
+// access error (format $7) context and EA register-update rollback
+reg        in_exc;              // exception stacking in progress
+reg [31:0] aer_addr, aer_sp;
+reg        aer_wr;
+reg  [1:0] aer_sz;
+reg  [2:0] aer_tm;
+reg  [4:0] aer_idx;
+reg        u0_v, u1_v;
+reg  [3:0] u0_reg, u1_reg;
+reg [31:0] u0_old, u1_old;
 
 assign mem_fc    = fc_r;
 assign nresetout = (state != S_RESET_HOLD);
@@ -492,6 +576,50 @@ function [3:0] ffs16;
 	end
 endfunction
 
+function [31:0] rotl32;
+	input [31:0] v;
+	input [4:0] n;
+	begin
+		rotl32 = (n == 0) ? v : ((v << n) | (v >> (6'd32 - {1'b0, n})));
+	end
+endfunction
+
+function [31:0] rotr32;
+	input [31:0] v;
+	input [4:0] n;
+	begin
+		rotr32 = (n == 0) ? v : ((v >> n) | (v << (6'd32 - {1'b0, n})));
+	end
+endfunction
+
+// fixed 32-bit leading zero count (shallow priority encoder)
+function [5:0] clz32;
+	input [31:0] v;
+	integer k;
+	begin
+		clz32 = 6'd32;
+		for (k = 0; k < 32; k = k + 1)
+			if (v[k]) clz32 = 6'd31 - k[5:0];
+	end
+endfunction
+
+// new right-aligned field value per bitfield operation; du must already be
+// masked to the field width, ones is the width mask (no shifters in here)
+function [31:0] bf_newf;
+	input [2:0] op;      // ir[10:8]
+	input [31:0] field;
+	input [31:0] du;
+	input [31:0] ones;
+	begin
+		case (op)
+			3'd2: bf_newf = (~field) & ones;            // BFCHG
+			3'd4: bf_newf = 32'd0;                      // BFCLR
+			3'd6: bf_newf = ones;                       // BFSET
+			default: bf_newf = du;                      // BFINS
+		endcase
+	end
+endfunction
+
 // MOVEC control register read mux
 function [31:0] movec_rd;
 	input [11:0] code;
@@ -552,7 +680,7 @@ endtask
 
 task immf;
 	input [1:0] n;
-	input [6:0] ret;
+	input [7:0] ret;
 	begin
 		imm_n <= n; imm <= 0; if_issued <= 0;
 		r_imm_ret <= ret; state <= S_IMMF;
@@ -562,7 +690,7 @@ endtask
 task mrd;
 	input [31:0] a;
 	input [1:0] size;
-	input [6:0] ret;
+	input [7:0] ret;
 	begin
 		m_addr_r <= a; m_size <= size; m_wr <= 0; m_issued <= 0;
 		r_m_ret <= ret; state <= S_MRD;
@@ -573,7 +701,7 @@ task mwr;
 	input [31:0] a;
 	input [1:0] size;
 	input [31:0] d;
-	input [6:0] ret;
+	input [7:0] ret;
 	begin
 		m_addr_r <= a; m_size <= size; m_wdat <= d; m_wr <= 1; m_issued <= 0;
 		r_m_ret <= ret; state <= S_MWR;
@@ -584,7 +712,7 @@ task ea_start;
 	input [2:0] mode;
 	input [2:0] rn;
 	input [1:0] size;
-	input [6:0] ret;
+	input [7:0] ret;
 	begin
 		ea_mode <= mode; ea_rn <= rn; ea_size <= size;
 		ea_pcmode <= 0; ea_pcb <= pc;
@@ -605,9 +733,59 @@ task exc;
 	end
 endtask
 
+// access error entry: capture the fault shape from the outstanding request
+task aerr_start;
+	begin
+		aer_addr <= mem_addr;
+		aer_wr   <= mem_write;
+		aer_sz   <= mem_size;
+		aer_tm   <= fc_r;
+		mem_req  <= 0;
+		state    <= S_AERR0;
+	end
+endtask
+
+// record an address register update for rollback on an access error
+task u_rec;
+	input [3:0] r;
+	input [31:0] old;
+	begin
+		if (!u0_v) begin
+			u0_v <= 1; u0_reg <= r; u0_old <= old;
+		end
+		else begin
+			u1_v <= 1; u1_reg <= r; u1_old <= old;
+		end
+	end
+endtask
+
+// format $7 frame contents, one word per index (30 words)
+function [15:0] aerr_word;
+	input [4:0] idx;
+	begin
+		case (idx)
+			5'd0:  aerr_word = sr_saved;
+			5'd1:  aerr_word = pc_i[31:16];
+			5'd2:  aerr_word = pc_i[15:0];
+			5'd3:  aerr_word = 16'h7008;               // format $7, vector 2
+			5'd4:  aerr_word = aer_addr[31:16];        // effective address
+			5'd5:  aerr_word = aer_addr[15:0];
+			5'd6:  aerr_word = {4'b0000, 1'b0, 1'b1, 1'b0, ~aer_wr, 1'b0,
+			                    (aer_sz == `AP040_SZ_B) ? 2'b01 :
+			                    (aer_sz == `AP040_SZ_W) ? 2'b10 : 2'b00,
+			                    2'b00, aer_tm};        // SSW: ATC fault
+			5'd10: aerr_word = aer_addr[31:16];        // fault address
+			5'd11: aerr_word = aer_addr[15:0];
+			default: aerr_word = 16'd0;                // writeback/push slots
+		endcase
+	end
+endfunction
+
 task fetch_next;
 	begin
 		fc_ovr_v <= 0;
+		u0_v <= 0;
+		u1_v <= 0;
 		if (irq_pend) begin
 			exc_vec <= `AP040_VEC_AUTOVEC + {5'd0, irq_lvl};
 			exc_fmt <= 0; exc_spc <= pc; exc_addr <= 0;
@@ -721,6 +899,16 @@ always @(posedge clk) begin
 		rst_cnt <= 0;
 		fault_r <= 0;
 		nmi_arm <= 0;
+		bf_off <= 0; bf_w <= 0; bf_addr <= 0; bf_bib <= 0; bf_span <= 0;
+		bf_w1 <= 0; bf_w2 <= 0; bf_du <= 0; cas_dc <= 0;
+		bf_t40 <= 0; bf_field <= 0; bf_ones <= 0; bf_maskl <= 0;
+		in_exc <= 0;
+		aer_addr <= 0; aer_sp <= 0; aer_wr <= 0;
+		aer_sz <= 0; aer_tm <= 0; aer_idx <= 0;
+		u0_v <= 0; u1_v <= 0;
+		u0_reg <= 0; u1_reg <= 0; u0_old <= 0; u1_old <= 0;
+		pt_req <= 0; pt_write <= 0; pt_addr <= 0;
+		pf_req <= 0; pf_mode <= 0; pf_addr <= 0;
 	end
 	else if (ce) begin
 		rf_we <= 0;
@@ -752,7 +940,11 @@ always @(posedge clk) begin
 			end
 
 			//----------------------------------------------------------- fetch
-			S_FETCH: if (mem_ack) begin
+			S_FETCH: if (mem_flt) begin
+				if (in_exc) begin fault_r <= 1; state <= S_HALT; end
+				else aerr_start;
+			end
+			else if (mem_ack) begin
 				ir <= mem_rdata[15:0];
 				pc <= pc + 32'd2;
 				// per-instruction defaults
@@ -772,6 +964,10 @@ always @(posedge clk) begin
 					issue_ifetch(pc);
 					if_issued <= 1;
 				end
+				else if (mem_flt) begin
+					if (in_exc) begin fault_r <= 1; state <= S_HALT; end
+					else aerr_start;
+				end
 				else if (mem_ack) begin
 					imm <= {imm[15:0], mem_rdata[15:0]};
 					pc <= pc + 32'd2;
@@ -789,6 +985,10 @@ always @(posedge clk) begin
 					        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
 					m_issued <= 1;
 				end
+				else if (mem_flt) begin
+					if (in_exc) begin fault_r <= 1; state <= S_HALT; end
+					else aerr_start;
+				end
 				else if (mem_ack) begin
 					m_val <= mem_rdata;
 					state <= r_m_ret;
@@ -803,6 +1003,10 @@ always @(posedge clk) begin
 					fc_r <= fc_ovr_v ? fc_ovr :
 					        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
 					m_issued <= 1;
+				end
+				else if (mem_flt) begin
+					if (in_exc) begin fault_r <= 1; state <= S_HALT; end
+					else aerr_start;
 				end
 				else if (mem_ack) begin
 					state <= r_m_ret;
@@ -842,10 +1046,12 @@ always @(posedge clk) begin
 					3'b011: begin
 						ea_addr <= rf_rdata_a;
 						rfw({1'b1, ea_rn}, rf_rdata_a + an_adj(ea_rn, ea_size));
+						u_rec({1'b1, ea_rn}, rf_rdata_a);
 					end
 					default: begin // 100
 						ea_addr <= rf_rdata_a - an_adj(ea_rn, ea_size);
 						rfw({1'b1, ea_rn}, rf_rdata_a - an_adj(ea_rn, ea_size));
+						u_rec({1'b1, ea_rn}, rf_rdata_a);
 					end
 				endcase
 				state <= r_ea_ret;
@@ -1193,10 +1399,53 @@ always @(posedge clk) begin
 			end
 
 			//------------------------------------------------------ exceptions
+			//------------------------------------- access error (format $7)
+			S_AERR0: begin
+				sr_saved <= sr;
+				sr[13] <= 1;
+				sr[15:14] <= 2'b00;
+				in_exc <= 1;
+				aer_idx <= 0;
+				state <= S_AERR_U;
+			end
+
+			S_AERR_U: begin
+				// roll back address register updates so RTE restarts the
+				// instruction from a clean context (68040 restart model)
+				if (u1_v) begin
+					rfw(u1_reg, u1_old);
+					u1_v <= 0;
+				end
+				else if (u0_v) begin
+					rfw(u0_reg, u0_old);
+					u0_v <= 0;
+				end
+				else state <= S_AERR_SP;
+			end
+
+			S_AERR_SP: begin
+				aer_sp <= dbg_a7 - 32'd60;
+				state <= S_AERR_WR;
+			end
+
+			S_AERR_WR: begin
+				if (aer_idx == 5'd30) begin
+					rfw(4'd15, aer_sp);
+					exc_vec <= `AP040_VEC_BUSERR;
+					state <= S_EXC_VEC;
+				end
+				else begin
+					aer_idx <= aer_idx + 5'd1;
+					mwr(aer_sp + {26'd0, aer_idx, 1'b0}, `AP040_SZ_W,
+					    {16'd0, aerr_word(aer_idx)}, S_AERR_WR);
+				end
+			end
+
 			S_EXC0: begin
 				sr_saved <= sr;
 				sr[13] <= 1;
 				sr[15:14] <= 2'b00;
+				in_exc <= 1;
 				if (exc_is_irq) begin
 					sr[10:8] <= irq_lvl_l;
 					if (irq_lvl_l == 3'd7) nmi_arm <= 0;
@@ -1242,6 +1491,7 @@ always @(posedge clk) begin
 			S_EXC_VEC: mrd(vbr + {22'd0, exc_vec, 2'b00}, `AP040_SZ_L, S_EXC_JMP);
 
 			S_EXC_JMP: begin
+				in_exc <= 0;
 				if (m_val[0]) begin
 					// odd handler address during exception processing:
 					// treat as double fault and halt
@@ -1275,6 +1525,13 @@ always @(posedge clk) begin
 					end
 					4'd4: begin
 						rfw(4'd15, dbg_a7 + 32'd16);
+						ret_kind <= 2'b00;
+						state <= S_RTE_FIN2;
+					end
+					4'd7: begin
+						// access error frame: restart semantics, the
+						// continuation/writeback fields are not consumed
+						rfw(4'd15, dbg_a7 + 32'd60);
 						ret_kind <= 2'b00;
 						state <= S_RTE_FIN2;
 					end
@@ -1616,10 +1873,28 @@ always @(posedge clk) begin
 				fetch_next;
 			end
 
-			//------------------------------------------------- PTEST / RESET
+			//------------------------------------------------- PTEST / PFLUSH
 			S_PTEST1: begin
-				// MMU disabled: transparent translation, resident
-				mmusr <= (rf_rdata_a & 32'hFFFF_F000) | 32'h0000_0001;
+				pt_addr <= rf_rdata_a;
+				pt_write <= ~ir[5];
+				pt_req <= 1;
+				state <= S_PTEST2;
+			end
+
+			S_PTEST2: if (pt_done) begin
+				pt_req <= 0;
+				mmusr <= pt_mmusr;
+				fetch_next;
+			end
+
+			S_PFLUSH1: begin
+				pf_addr <= rf_rdata_a;
+				pf_req <= 1;
+				state <= S_PFLUSH2;
+			end
+
+			S_PFLUSH2: if (pf_done) begin
+				pf_req <= 0;
 				fetch_next;
 			end
 
@@ -1707,6 +1982,225 @@ always @(posedge clk) begin
 				fetch_next;
 			end
 
+			//------------------------------------------------------ bitfields
+			S_BF0: begin
+				x_ext <= imm;
+				if (imm[11]) rr_a <= {1'b0, imm[8:6]};   // offset from Dn
+				if (imm[5])  rr_b <= {1'b0, imm[2:0]};   // width from Dn
+				state <= S_BF1;
+			end
+
+			S_BF1: begin
+				bf_off <= x_ext[11] ? rf_rdata_a : {27'd0, x_ext[10:6]};
+				bf_w <= x_ext[5] ? ((rf_rdata_b[4:0] == 5'd0) ? 6'd32 : {1'b0, rf_rdata_b[4:0]})
+				                 : ((x_ext[4:0] == 5'd0) ? 6'd32 : {1'b0, x_ext[4:0]});
+				if (d_mode == 3'b000) begin
+					rr_a <= {1'b0, d_rn};
+					state <= S_BF_REG;
+				end
+				else ea_start(d_mode, d_rn, `AP040_SZ_B, S_BF_MEM0);
+			end
+
+			S_BF_REG: begin
+				dst_val <= rf_rdata_a;    // register operand
+				if (ir[10:8] == 3'd7) begin
+					rr_a <= {1'b0, x_ext[14:12]};   // BFINS source
+					state <= S_BF_REG2;
+				end
+				else state <= S_BF_REGX;
+			end
+
+			S_BF_REG2: begin
+				bf_du <= rf_rdata_a;
+				state <= S_BF_REGX;
+			end
+
+			S_BF_REGX: begin
+				// stage 1: rotate the operand so the field is left aligned
+				bf_t40 <= {rotl32(dst_val, bf_off[4:0]), 8'd0};
+				state <= S_BF_X2;
+			end
+
+			S_BF_X2: begin
+				// stage 2: extract the field; precompute width masks
+				bf_field <= (bf_w == 6'd32) ? bf_t40[39:8]
+				                            : (bf_t40[39:8] >> (6'd32 - bf_w));
+				bf_ones <= (bf_w == 6'd32) ? 32'hFFFF_FFFF
+				                           : ((32'd1 << bf_w) - 32'd1);
+				bf_maskl <= {((bf_w == 6'd32) ? 32'hFFFF_FFFF
+				                              : (32'hFFFF_FFFF << (6'd32 - bf_w))), 8'd0};
+				state <= S_BF_X3;
+			end
+
+			S_BF_X3: begin : bf_x3
+				reg [31:0] nf, newr;
+				nf = bf_newf(ir[10:8], bf_field, bf_du & bf_ones, bf_ones);
+				sr[3] <= (ir[10:8] == 3'd7) ? nf[bf_w - 6'd1] : bf_field[bf_w - 6'd1];
+				sr[2] <= (ir[10:8] == 3'd7) ? (nf == 32'd0) : (bf_field == 32'd0);
+				sr[1] <= 0;
+				sr[0] <= 0;
+				case (ir[10:8])
+					3'd0: fetch_next;                              // BFTST
+					3'd1: begin rfw({1'b0, x_ext[14:12]}, bf_field); fetch_next; end
+					3'd3: begin                                    // BFEXTS
+						rfw({1'b0, x_ext[14:12]},
+						    bf_field | (bf_field[bf_w - 6'd1] ? ~bf_ones : 32'd0));
+						fetch_next;
+					end
+					3'd5: begin : bfffo_x                          // BFFFO
+						// left-aligned field = window AND left mask: no shifter
+						reg [31:0] al;
+						al = bf_t40[39:8] & bf_maskl[39:8];
+						rfw({1'b0, x_ext[14:12]},
+						    bf_off + {26'd0, (al == 32'd0) ? bf_w : clz32(al)});
+						fetch_next;
+					end
+					default: begin                                 // CHG/CLR/SET/INS
+						// stage 3: place the new field, still left aligned
+						newr = (bf_t40[39:8] & ~bf_maskl[39:8]) |
+						       (((bf_w == 6'd32) ? nf : (nf << (6'd32 - bf_w))) & bf_maskl[39:8]);
+						bf_t40[39:8] <= newr;
+						state <= S_BF_X4;
+					end
+				endcase
+			end
+
+			S_BF_X4: begin
+				// stage 4: rotate back and write the register
+				rfw({1'b0, d_rn}, rotr32(bf_t40[39:8], bf_off[4:0]));
+				fetch_next;
+			end
+
+			S_BF_MEM0: begin
+				bf_addr <= ea_addr + {{3{bf_off[31]}}, bf_off[31:3]};
+				bf_bib <= bf_off[2:0];
+				bf_span <= ({3'd0, bf_off[2:0]} + bf_w + 6'd7) >> 3;
+				if (ir[10:8] == 3'd7) rr_b <= {1'b0, x_ext[14:12]};
+				mrd(ea_addr + {{3{bf_off[31]}}, bf_off[31:3]}, `AP040_SZ_L, S_BF_MEM1);
+			end
+
+			S_BF_MEM1: begin
+				bf_w1 <= m_val;
+				bf_du <= rf_rdata_b;
+				if (bf_span == 3'd5) mrd(bf_addr + 32'd4, `AP040_SZ_B, S_BF_MEM2);
+				else begin
+					bf_w2 <= 8'd0;
+					state <= S_BF_EXECM;
+				end
+			end
+
+			S_BF_MEM2: begin
+				bf_w2 <= m_val[7:0];
+				state <= S_BF_EXECM;
+			end
+
+			S_BF_EXECM: begin
+				// stage 1: left align the window on the field start bit
+				bf_t40 <= {bf_w1, bf_w2} << bf_bib;
+				state <= S_BF_M2;
+			end
+
+			S_BF_M2: begin
+				// stage 2: extract the field; width masks in the t40 domain
+				bf_field <= (bf_w == 6'd32) ? bf_t40[39:8]
+				                            : (bf_t40[39:8] >> (6'd32 - bf_w));
+				bf_ones <= (bf_w == 6'd32) ? 32'hFFFF_FFFF
+				                           : ((32'd1 << bf_w) - 32'd1);
+				bf_maskl <= (bf_w == 6'd32) ? {32'hFFFF_FFFF, 8'd0}
+				                            : ({32'hFFFF_FFFF, 8'd0} << (6'd32 - bf_w));
+				state <= S_BF_M3;
+			end
+
+			S_BF_M3: begin : bf_m3
+				reg [31:0] nf;
+				nf = bf_newf(ir[10:8], bf_field, bf_du & bf_ones, bf_ones);
+				sr[3] <= (ir[10:8] == 3'd7) ? nf[bf_w - 6'd1] : bf_field[bf_w - 6'd1];
+				sr[2] <= (ir[10:8] == 3'd7) ? (nf == 32'd0) : (bf_field == 32'd0);
+				sr[1] <= 0;
+				sr[0] <= 0;
+				case (ir[10:8])
+					3'd0: fetch_next;
+					3'd1: begin rfw({1'b0, x_ext[14:12]}, bf_field); fetch_next; end
+					3'd3: begin
+						rfw({1'b0, x_ext[14:12]},
+						    bf_field | (bf_field[bf_w - 6'd1] ? ~bf_ones : 32'd0));
+						fetch_next;
+					end
+					3'd5: begin : bfffo_m
+						reg [31:0] al;
+						al = bf_t40[39:8] & bf_maskl[39:8];
+						rfw({1'b0, x_ext[14:12]},
+						    bf_off + {26'd0, (al == 32'd0) ? bf_w : clz32(al)});
+						fetch_next;
+					end
+					default: begin
+						// stage 3: substitute the new field, still left aligned
+						bf_t40 <= (bf_t40 & ~bf_maskl) |
+						          ((({nf, 8'd0}) << (6'd32 - bf_w)) & bf_maskl);
+						state <= S_BF_M4;
+					end
+				endcase
+			end
+
+			S_BF_M4: begin : bf_m4
+				// stage 4: shift back into the memory window; the top bf_bib
+				// bits of the original window pass through unchanged
+				reg [39:0] head, nw40;
+				head = ~(40'hFF_FFFF_FFFF >> bf_bib);
+				nw40 = ({bf_w1, bf_w2} & head) | (bf_t40 >> bf_bib);
+				bf_w1 <= nw40[39:8];
+				bf_w2 <= nw40[7:0];
+				state <= S_BF_WR1;
+			end
+
+			S_BF_WR1: begin
+				case (bf_span)
+					3'd1: mwr(bf_addr, `AP040_SZ_B, {24'd0, bf_w1[31:24]}, S_NEXT);
+					3'd2: mwr(bf_addr, `AP040_SZ_W, {16'd0, bf_w1[31:16]}, S_NEXT);
+					3'd3: mwr(bf_addr, `AP040_SZ_W, {16'd0, bf_w1[31:16]}, S_BF_WR2);
+					3'd4: mwr(bf_addr, `AP040_SZ_L, bf_w1, S_NEXT);
+					default: mwr(bf_addr, `AP040_SZ_L, bf_w1, S_BF_WR2);
+				endcase
+			end
+
+			S_BF_WR2: begin
+				if (bf_span == 3'd3)
+					mwr(bf_addr + 32'd2, `AP040_SZ_B, {24'd0, bf_w1[15:8]}, S_NEXT);
+				else
+					mwr(bf_addr + 32'd4, `AP040_SZ_B, {24'd0, bf_w2}, S_NEXT);
+			end
+
+			//------------------------------------------------------------ CAS
+			S_CAS1: begin
+				x_ext <= imm;
+				ea_start(d_mode, d_rn, op_size, S_CAS2);
+			end
+
+			S_CAS2: begin
+				dst_addr <= ea_addr;
+				rr_a <= {1'b0, x_ext[2:0]};   // Dc
+				rr_b <= {1'b0, x_ext[8:6]};   // Du
+				mrd(ea_addr, op_size, S_CAS3);
+			end
+
+			S_CAS3: begin
+				src_val <= rf_rdata_a;   // Dc: ALU computes operand - Dc
+				dst_val <= m_val;
+				cas_dc <= rf_rdata_a;
+				bf_du <= rf_rdata_b;
+				state <= S_CAS4;
+			end
+
+			S_CAS4: begin
+				sr[4:0] <= alu_fl;
+				if (alu_fl[2])
+					mwr(dst_addr, op_size, bf_du, S_NEXT);   // equal: update
+				else begin
+					rfw({1'b0, x_ext[2:0]}, merge_sz(cas_dc, dst_val, op_size));
+					fetch_next;
+				end
+			end
+
 			//----------------------------------------- immediate to CCR / SR
 			S_SROP: begin : srop
 				reg [15:0] nv;
@@ -1782,8 +2276,18 @@ always @(posedge clk) begin
 							end
 						end
 						else if (std_size == 2'b11) begin
-							// CAS / CAS2 / CHK2 / CMP2: not implemented yet
-							go_illegal;
+							if (d_reg9[2] && d_reg9[1:0] != 2'b00) begin
+								// CAS (memory only; $0xFC encodings are CAS2)
+								if (d_mode < 3'b010 || ea_is_imm ||
+								    (d_mode == 3'b111 && d_rn > 3'b001)) go_illegal;
+								else begin
+									alu_op <= `AP040_ALU_CMP;
+									op_size <= (d_reg9[1:0] == 2'b01) ? `AP040_SZ_B :
+									           (d_reg9[1:0] == 2'b10) ? `AP040_SZ_W : `AP040_SZ_L;
+									immf(2'd1, S_CAS1);
+								end
+							end
+							else go_illegal;   // CAS2 / CHK2 / CMP2
 						end
 						else begin
 							// ORI/ANDI/SUBI/ADDI/EORI/CMPI
@@ -2558,7 +3062,16 @@ always @(posedge clk) begin
 					//---------------------------------------- 0xE: shifts
 					4'hE: begin
 						if (ir[7:6] == 2'b11) begin
-							if (ir[11]) go_illegal;   // bitfields not implemented
+							if (ir[11]) begin
+								// bitfield group; ext word first
+								// modify ops need an alterable EA
+								if (d_mode == 3'b001 || d_mode == 3'b011 ||
+								    d_mode == 3'b100 || ea_is_imm) go_illegal;
+								else if ((d_mode == 3'b111 && d_rn > 3'b001) &&
+								         (ir[10:8] == 3'd2 || ir[10:8] == 3'd4 ||
+								          ir[10:8] == 3'd6 || ir[10:8] == 3'd7)) go_illegal;
+								else immf(2'd1, S_BF0);
+							end
 							else begin
 								// memory shift by one, word
 								exec_kind <= EK_SHIFT;
@@ -2615,9 +3128,20 @@ always @(posedge clk) begin
 						end
 						else if (ir[11:8] == 4'h5) begin
 							if (ir[7:5] == 3'b000) begin
-								// PFLUSH group: ATC arrives with milestone E
+								// PFLUSH group
 								if (!sr_s) go_priv;
-								else fetch_next;
+								else begin
+									pf_mode <= ir[4:3];
+									if (ir[4]) begin
+										// PFLUSHAN / PFLUSHA
+										pf_req <= 1;
+										state <= S_PFLUSH2;
+									end
+									else begin
+										rr_a <= {1'b1, d_rn};
+										state <= S_PFLUSH1;
+									end
+								end
 							end
 							else if (ir[7:6] == 2'b01) begin
 								// PTEST
@@ -2684,8 +3208,8 @@ assign debug_halted = (state == S_HALT);
 
 assign debug_status = {
 	16'hA040,                    // [255:240] magic
-	7'd0, unused_in,             // [239:232]
-	fault_r, state,              // [231:224]
+	6'd0, fault_r, unused_in,    // [239:232]
+	state,                       // [231:224]
 	dbg_a0,                      // [223:192]
 	dbg_d2,                      // [191:160]
 	dbg_d1,                      // [159:128]

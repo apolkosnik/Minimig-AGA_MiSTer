@@ -16,6 +16,29 @@ Testbenches (Icarus Verilog -g2012 and ModelSim, see run_tests.sh):
                         BCD, EXT/EXTB/SWAP/EXG, LINK/UNLK (.W/.L), JSR/BSR/
                         RTS/RTD, DBcc/Scc, CMPM, TAS, MOVEM, MOVEP, PACK/UNPK,
                         MOVE16, MOVE from/to CCR
+  tb_ap040_diagrom.v  boots a real ROM image against a minimal Amiga model
+                        (chip RAM, CIA overlay, custom register stubs) and
+                        captures serial output. DiagROM V2.0 completes its
+                        boot, passes its own 2MB memory address test and
+                        detects the core as "CPU: 68LC40 FPU: NONE". Build
+                        with Verilator (--binary --timing); iverilog is too
+                        slow for hundreds of millions of cycles. ROM image:
+                        python3 bin2hex.py DiagROM/diagrom.rom build/diagrom.hex
+                        Kickstart 3.1 (A1200 40.68) also runs: exec.library
+                        initializes and ExecBase is built and relocated; the
+                        FPU F-line probe and the privilege traps from exec's
+                        Supervisor() are the only exceptions taken. Boot then
+                        parks waiting on CIA timers the stub does not model.
+                        Note: ROM images whose header starts $1116 are linked
+                        for $200000 (ReKick) and will not boot at $F80000.
+
+    asm/t_mmu.s         milestone E MMU: three-level table walk with U/M
+                        history bit updates, page remapping, split I/D ATC
+                        caching semantics, PTEST/MMUSR, PFLUSH page and all
+                        variants, DTT transparent bypass, and access error
+                        (format $7) fault-fix-restart for write protection,
+                        invalid data page, instruction fetch, and user access
+                        to a supervisor page
     asm/t_exceptions.s  milestone C exceptions: TRAP/illegal/BKPT/A-line/
                         F-line/CHK/divide-by-zero/TRAPV/TRAPcc frames and
                         vector offsets, format $0/$1/$2 layout, RTE format
@@ -34,12 +57,20 @@ build_tests.sh. Test programs communicate over memory-mapped registers
 Known gaps in the core at milestone C (all take an illegal-instruction or
 F-line trap unless noted; planned in AP040_IMPLEMENTATION_PLAN.md):
 
-  - bitfield instructions (BFxxx)
-  - CAS/CAS2, CHK2/CMP2
+  - CAS2, CHK2/CMP2 (bitfields and single CAS are implemented; CAS is
+    not bus locked)
   - BTST Dn,#imm (dynamic bit test on an immediate)
   - trace exceptions are not generated (T bits are stored in SR only)
-  - TAS is not bus-locked (no locked cycles on the 16-bit fabric yet)
-  - berr input ignored: no format $7 access error frames until milestone F
+  - TAS is not bus-locked; table-search descriptor updates are plain
+    read/write cycles (single-master fabric)
+  - berr input ignored (the wrapper ties it 0)
   - interrupts are always autovectored (the wrapper ties ipl_autovector=1)
-  - MMU/ATC/caches are decode-only (milestones E and G); PTEST reports
-    transparent translation, MOVEC masks for TTR/TC refine at milestone E
+  - format $7 frames carry SSW/EA/FA with zeroed writeback slots; faults
+    use pure instruction restart with EA register rollback. MOVEM that
+    faults mid-transfer restarts from the beginning (idempotent by
+    construction here); the CM continuation path is milestone F
+  - misaligned accesses that fault report MA=0 and restart the whole
+    transfer; caches (milestone G) and the FPU (milestone H) are absent;
+    invalid translations are not cached in the ATC (each access re-walks)
+  - 8K page mode (TC.P) is implemented in RTL but only 4K is covered by
+    t_mmu.s so far

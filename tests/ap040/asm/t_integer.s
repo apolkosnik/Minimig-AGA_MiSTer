@@ -496,6 +496,81 @@ t96ok:
 	tst.w	($3004).l
 	chkccr	$04,111
 
+;----------------------------------------------------------------- bitfields
+	move.w	#0,ccr
+	move.l	#$12345678,d0
+	bfextu	d0{8:8},d1
+	chkl	d1,$34,112
+	move.l	#$F2345678,d0
+	bfexts	d0{0:4},d2
+	chkl	d2,$FFFFFFFF,113
+	moveq	#0,d3
+	bfset	d3{28:8}		; wraps around bit 0
+	chkl	d3,$F000000F,114
+	bfclr	d3{28:8}
+	chkl	d3,0,115
+	move.l	#$AAAA5555,d4
+	bfchg	d4{16:16}
+	chkl	d4,$AAAAAAAA,116
+	move.l	#$00080000,d5
+	bfffo	d5{0:32},d6
+	chkl	d6,12,117
+	bfffo	d5{0:8},d6
+	chkl	d6,8,118		; empty field: offset + width
+	moveq	#0,d7
+	move.l	#$5A,d1
+	bfins	d1,d7{4:8}
+	chkl	d7,$05A00000,119
+	move.w	d7,d7			; keep d7 for fail codes below
+	moveq	#0,d7
+
+	; memory bitfields
+	move.l	#$11223344,($3080).l
+	move.l	#$55667788,($3084).l
+	bftst	($3080).l{12:8}
+	bne.s	bf1ok
+	failt	120
+bf1ok:
+	bfset	($3080).l{12:8}
+	move.l	($3080).l,d0
+	chkl	d0,$112FF344,121
+	bfclr	($3080).l{4:32}		; spans five bytes
+	move.l	($3080).l,d0
+	chkl	d0,$10000000,122
+	move.l	($3084).l,d0
+	chkl	d0,$05667788,123
+	bfextu	($3084).l{0:16},d0
+	chkl	d0,$0566,124
+	move.l	#$77,d1
+	bfins	d1,($3080).l{8:8}
+	move.l	($3080).l,d0
+	chkl	d0,$10770000,125
+
+;----------------------------------------------------------------- CAS
+	move.l	#$C0FFEE00,($3090).l
+	move.l	#$C0FFEE00,d0		; Dc matches
+	move.l	#$12341234,d1		; Du
+	cas.l	d0,d1,($3090).l
+	beq.s	cas1ok
+	failt	126
+cas1ok:
+	move.l	($3090).l,d2
+	chkl	d2,$12341234,127
+	chkl	d0,$C0FFEE00,128	; Dc untouched on success
+	moveq	#0,d2			; Dc mismatch
+	cas.l	d2,d1,($3090).l
+	bne.s	cas2ok
+	failt	129
+cas2ok:
+	chkl	d2,$12341234,130	; Dc loaded with the operand
+	move.b	#$77,($3094).l
+	move.l	#$77,d3
+	move.l	#$99,d4
+	cas.b	d3,d4,($3094).l
+	move.b	($3094).l,d0
+	and.l	#$FF,d0
+	chkl	d0,$99,131
+
 ;----------------------------------------------------------------- all done
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700

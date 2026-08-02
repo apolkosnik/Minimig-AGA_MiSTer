@@ -167,10 +167,10 @@ clrloop:
 	moveq	#0,d0
 	movec	d0,cacr
 
-	move.l	#$FFFFFFFF,d0
+	move.l	#$FFFF4000,d0	; P bit only: E stays off here
 	movec	d0,tc
 	movec	tc,d1
-	chkl	d1,$0000C000,19
+	chkl	d1,$00004000,19
 	moveq	#0,d0
 	movec	d0,tc
 
@@ -238,7 +238,7 @@ t28ok:
 	lea	($5000).l,a0
 	ptestr	(a0)
 	movec	mmusr,d0
-	chkl	d0,$5001,30	; transparent + resident while MMU is off
+	chkl	d0,$5003,30	; transparent + resident while MMU is off
 	pflusha
 	cinva	bc
 	cpushl	dc,(a0)

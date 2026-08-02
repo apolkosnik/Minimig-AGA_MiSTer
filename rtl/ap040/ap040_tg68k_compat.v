@@ -66,6 +66,7 @@ module ap040_tg68k_compat
 	output [255:0] debug_status
 );
 
+// core to MMU
 wire        mem_req;
 wire        mem_write;
 wire        mem_instr;
@@ -75,6 +76,24 @@ wire [31:0] mem_wdata;
 wire  [2:0] mem_fc;
 wire        mem_ack;
 wire [31:0] mem_rdata;
+wire        mem_flt;
+
+// MMU to bus adapter
+wire        b_req, b_write, b_instr;
+wire  [1:0] b_size;
+wire [31:0] b_addr, b_wdata;
+wire  [2:0] b_fc;
+wire        b_ack;
+wire [31:0] b_rdata;
+
+// control registers and PTEST/PFLUSH sideband
+wire [31:0] w_tc, w_urp, w_srp, w_itt0, w_itt1, w_dtt0, w_dtt1;
+wire        pt_req, pt_write, pt_done;
+wire [31:0] pt_addr, pt_mmusr;
+wire  [2:0] pt_fcw;
+wire        pf_req, pf_done;
+wire  [1:0] pf_mode;
+wire [31:0] pf_addr;
 
 ap040_core #(
 	.AP040_HAS_MMU(AP040_HAS_MMU),
@@ -95,6 +114,25 @@ ap040_core #(
 	.mem_fc(mem_fc),
 	.mem_ack(mem_ack),
 	.mem_rdata(mem_rdata),
+	.mem_flt(mem_flt),
+
+	.tc_out(w_tc),
+	.urp_out(w_urp),
+	.srp_out(w_srp),
+	.itt0_out(w_itt0),
+	.itt1_out(w_itt1),
+	.dtt0_out(w_dtt0),
+	.dtt1_out(w_dtt1),
+	.pt_req(pt_req),
+	.pt_write(pt_write),
+	.pt_addr(pt_addr),
+	.pt_fc(pt_fcw),
+	.pt_done(pt_done),
+	.pt_mmusr(pt_mmusr),
+	.pf_req(pf_req),
+	.pf_mode(pf_mode),
+	.pf_addr(pf_addr),
+	.pf_done(pf_done),
 
 	.ipl(ipl),
 	.ipl_autovector(ipl_autovector),
@@ -110,20 +148,70 @@ ap040_core #(
 	.debug_status(debug_status)
 );
 
+ap040_mmu mmu (
+	.clk(clk),
+	.nreset(nreset),
+	.ce(clkena_in),
+
+	.tc(w_tc),
+	.urp(w_urp),
+	.srp(w_srp),
+	.itt0(w_itt0),
+	.itt1(w_itt1),
+	.dtt0(w_dtt0),
+	.dtt1(w_dtt1),
+
+	.c_req(mem_req),
+	.c_write(mem_write),
+	.c_instr(mem_instr),
+	.c_size(mem_size),
+	.c_addr(mem_addr),
+	.c_wdata(mem_wdata),
+	.c_fc(mem_fc),
+	.c_ack(mem_ack),
+	.c_rdata(mem_rdata),
+	.c_flt(mem_flt),
+
+	.pt_req(pt_req),
+	.pt_write(pt_write),
+	.pt_addr(pt_addr),
+	.pt_fc(pt_fcw),
+	.pt_done(pt_done),
+	.pt_mmusr(pt_mmusr),
+
+	.pf_req(pf_req),
+	.pf_mode(pf_mode),
+	.pf_addr(pf_addr),
+	.pf_done(pf_done),
+
+	.m_req(b_req),
+	.m_write(b_write),
+	.m_instr(b_instr),
+	.m_size(b_size),
+	.m_addr(b_addr),
+	.m_wdata(b_wdata),
+	.m_fc(b_fc),
+	.m_ack(b_ack),
+	.m_rdata(b_rdata),
+
+	.phys_addr(mmu_addr_phys),
+	.cache_inhibit(mmu_cache_inhibit)
+);
+
 ap040_bus16_adapter bus16 (
 	.clk(clk),
 	.nreset(nreset),
 	.clkena_in(clkena_in),
 
-	.mem_req(mem_req),
-	.mem_write(mem_write),
-	.mem_instr(mem_instr),
-	.mem_size(mem_size),
-	.mem_addr(mem_addr),
-	.mem_wdata(mem_wdata),
-	.mem_fc(mem_fc),
-	.mem_ack(mem_ack),
-	.mem_rdata(mem_rdata),
+	.mem_req(b_req),
+	.mem_write(b_write),
+	.mem_instr(b_instr),
+	.mem_size(b_size),
+	.mem_addr(b_addr),
+	.mem_wdata(b_wdata),
+	.mem_fc(b_fc),
+	.mem_ack(b_ack),
+	.mem_rdata(b_rdata),
 
 	.data_in(data_in),
 	.addr_out(addr_out),
@@ -136,12 +224,10 @@ ap040_bus16_adapter bus16 (
 	.fc(fc)
 );
 
-// MMU disabled: physical equals logical, nothing is cache inhibited yet
-assign mmu_addr_log      = mem_addr;
-assign mmu_addr_phys     = mem_addr;
-assign mmu_cache_inhibit = 1'b0;
+assign mmu_addr_log = mem_addr;
 
-// table walker idle until the 040 MMU lands (milestone E)
+// the table walker runs through the normal bus path; the dedicated walker
+// channel of the wrapper contract stays idle
 assign walker_req  = 1'b0;
 assign walker_we   = 1'b0;
 assign walker_addr = 32'd0;
