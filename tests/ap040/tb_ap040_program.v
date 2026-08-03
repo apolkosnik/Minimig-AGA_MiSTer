@@ -102,6 +102,7 @@ integer errors;
 integer phase;
 integer result;          // 0 running, 1 pass, 2 fail
 reg [1023:0] prog_file;
+reg [1023:0] dump_file;
 
 function [2:0] latency;
 	input integer ph;
@@ -241,6 +242,9 @@ initial begin
 
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else             $display("TEST FAILED with %0d errors", errors);
+	// differential testing: dump the data window for comparison
+	if (errors == 0 && $value$plusargs("dump=%s", dump_file))
+		$writememh(dump_file, mem, 'h3000 >> 1, ('h4000 >> 1) - 1);
 	$finish;
 end
 

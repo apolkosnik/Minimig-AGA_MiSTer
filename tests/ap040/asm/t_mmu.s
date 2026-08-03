@@ -248,6 +248,65 @@ ucont:
 	and.l	#$FFFF,d0
 	chkl	d0,6,31
 
+;----------------------------------------------------------------- 8K pages
+	moveq	#0,d0
+	movec	d0,tc		; MMU off while rebuilding tables
+	pflusha
+
+	; page table: 32 entries of 8K covering LA 0-$3FFFF, identity
+	lea	($4400).l,a0
+	moveq	#0,d0
+	moveq	#31,d1
+t8loop:
+	move.l	d0,d2
+	lsl.l	#8,d2
+	lsl.l	#5,d2		; i << 13
+	addq.l	#3,d2
+	move.l	d2,(a0)+
+	addq.l	#1,d0
+	dbra	d1,t8loop
+
+	; entry 5 (LA $A000-$BFFF) remapped to PA $C000-$DFFF
+	move.l	#$0000C003,($4414).l
+	; pre-place physical data through the identity map (MMU off)
+	move.l	#$08081111,($C120).l	; seen through LA $A120 (LA12=0)
+	move.l	#$08082222,($D120).l	; seen through LA $B120 (LA12=1)
+
+	move.l	#$C000,d0	; E=1, P=1: 8K pages
+	movec	d0,tc
+
+	move.l	($3000).l,d0	; identity page, LA12=1 within its 8K page
+	chkl	d0,$11112222,24
+	move.l	($A120).l,d0
+	chkl	d0,$08081111,25
+	move.l	($B120).l,d0	; same 8K page, LA bit 12 set
+	chkl	d0,$08082222,26
+
+	lea	($A000).l,a0	; PTEST under 8K paging
+	ptestr	(a0)
+	movec	mmusr,d0
+	and.l	#$FFFFF001,d0
+	chkl	d0,$0000C001,27
+	lea	($B000).l,a0
+	ptestr	(a0)
+	movec	mmusr,d0
+	and.l	#$FFFFF001,d0
+	chkl	d0,$0000D001,28
+
+	; fault and restart under 8K paging
+	move.l	#$0000E000,(expect_fa).l
+	move.l	#$441C,(fix_addr).l	; entry 7: LA $E000-$FFFF
+	move.l	#$0000E003,(fix_val).l
+	move.l	#0,($441C).l
+	pflusha
+	move.l	#$0E0E0E0E,d1
+	move.l	d1,($E000).l	; faults, handler fixes, restart writes
+	move.l	($E000).l,d0
+	chkl	d0,$0E0E0E0E,29
+	move.w	(cnt_aerr).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,7,30
+
 ;----------------------------------------------------------------- disable
 	moveq	#0,d0
 	movec	d0,tc

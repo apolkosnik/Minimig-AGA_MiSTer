@@ -83,28 +83,33 @@ wire addx_v = (a_msb == b_msb) && (addx_r_msb != a_msb);
 wire sub_v  = (a_msb != b_msb) && (sub_r_msb  == a_msb);
 wire subx_v = (a_msb != b_msb) && (subx_r_msb == a_msb);
 
-// BCD helpers (byte only)
-wire [4:0] bcd_al = {1'b0, b[3:0]} + {1'b0, a[3:0]} + {4'd0, f_x};
-wire       bcd_ac = (bcd_al > 5'd9);
-wire [3:0] bcd_alr = bcd_ac ? (bcd_al[3:0] + 4'd6) : bcd_al[3:0];
-wire [4:0] bcd_ah = {1'b0, b[7:4]} + {1'b0, a[7:4]} + {4'd0, bcd_ac};
-wire       bcd_hc = (bcd_ah > 5'd9);
-wire [3:0] bcd_ahr = bcd_hc ? (bcd_ah[3:0] + 4'd6) : bcd_ah[3:0];
+// BCD helpers (byte only). The decimal corrections are applied to the
+// whole byte so a +/-6 low-nibble adjust ripples binary into the high
+// nibble, and the carry comes from the corrected value above bit 3.
+// This matches real hardware for non-BCD digit inputs (cputest
+// 68040_default: abcd.b $FF+$FF+0 = $64 with C set, not $54).
+wire [4:0] bcd_al   = {1'b0, b[3:0]} + {1'b0, a[3:0]} + {4'd0, f_x};
+wire [9:0] bcd_asum = {2'd0, b[7:0]} + {2'd0, a[7:0]} + {9'd0, f_x}
+                    + ((bcd_al > 5'd9) ? 10'd6 : 10'd0);
+wire       bcd_ac   = ((bcd_asum & 10'h3F0) > 10'h090);
+wire [9:0] bcd_ares = bcd_asum + (bcd_ac ? 10'h060 : 10'd0);
 
-wire [4:0] bcd_sl = {1'b0, b[3:0]} - {1'b0, a[3:0]} - {4'd0, f_x};
-wire       bcd_sb = bcd_sl[4];
-wire [3:0] bcd_slr = bcd_sb ? (bcd_sl[3:0] - 4'd6) : bcd_sl[3:0];
-wire [4:0] bcd_sh = {1'b0, b[7:4]} - {1'b0, a[7:4]} - {4'd0, bcd_sb};
-wire       bcd_shb = bcd_sh[4];
-wire [3:0] bcd_shr = bcd_shb ? (bcd_sh[3:0] - 4'd6) : bcd_sh[3:0];
+// SBCD: b - a - X; the $60 adjust keys off the uncorrected byte borrow,
+// the carry flag off the borrow after the low-nibble correction
+wire       bcd_slb  = ({1'b0, b[3:0]} < ({1'b0, a[3:0]} + {4'd0, f_x}));
+wire [9:0] bcd_sraw = {2'd0, b[7:0]} - {2'd0, a[7:0]} - {9'd0, f_x};
+wire [9:0] bcd_scor = bcd_sraw - (bcd_slb ? 10'd6 : 10'd0);
+wire [9:0] bcd_sres = bcd_scor - (bcd_sraw[9] ? 10'h060 : 10'd0);
+wire       bcd_sc   = bcd_scor[9];
 
-// NBCD: 0 - a - X
-wire [4:0] nbc_sl = 5'd0 - {1'b0, a[3:0]} - {4'd0, f_x};
-wire       nbc_sb = nbc_sl[4];
-wire [3:0] nbc_slr = nbc_sb ? (nbc_sl[3:0] - 4'd6) : nbc_sl[3:0];
-wire [4:0] nbc_sh = 5'd0 - {1'b0, a[7:4]} - {4'd0, nbc_sb};
-wire       nbc_shb = nbc_sh[4];
-wire [3:0] nbc_shr = nbc_shb ? (nbc_sh[3:0] - 4'd6) : nbc_sh[3:0];
+// NBCD: 0 - b - X (the SBCD datapath with a zero destination; b is the
+// pipeline dst operand -- single-operand ops must not touch port a,
+// which still holds the previous instruction's source)
+wire       nbc_lb   = (b[3:0] != 4'd0) | f_x;
+wire [9:0] nbc_raw  = 10'd0 - {2'd0, b[7:0]} - {9'd0, f_x};
+wire [9:0] nbc_cor  = nbc_raw - (nbc_lb ? 10'd6 : 10'd0);
+wire [9:0] nbc_res  = nbc_cor - (nbc_raw[9] ? 10'h060 : 10'd0);
+wire       nbc_c    = nbc_cor[9];
 
 // single-bit shift/rotate primitives on the sized value bm
 wire sh_msb  = b_msb;
@@ -229,19 +234,22 @@ always @* begin
 			flags_out = {f_x, b[7], (b[7:0] == 8'd0), 1'b0, 1'b0};
 		end
 
+		// BCD: on the real 68040 the architecturally undefined N and V
+		// flags are left unchanged (verified with cputest 68040_default
+		// reference data on hardware); X/C carry out, Z is sticky
 		`AP040_ALU_ABCD: begin
-			result = {24'd0, bcd_ahr, bcd_alr};
-			flags_out = {bcd_hc, bcd_ahr[3], f_z & ({bcd_ahr, bcd_alr} == 8'd0), 1'b0, bcd_hc};
+			result = {24'd0, bcd_ares[7:0]};
+			flags_out = {bcd_ac, flags_in[3], f_z & (bcd_ares[7:0] == 8'd0), flags_in[1], bcd_ac};
 		end
 
 		`AP040_ALU_SBCD: begin
-			result = {24'd0, bcd_shr, bcd_slr};
-			flags_out = {bcd_shb, bcd_shr[3], f_z & ({bcd_shr, bcd_slr} == 8'd0), 1'b0, bcd_shb};
+			result = {24'd0, bcd_sres[7:0]};
+			flags_out = {bcd_sc, flags_in[3], f_z & (bcd_sres[7:0] == 8'd0), flags_in[1], bcd_sc};
 		end
 
 		`AP040_ALU_NBCD: begin
-			result = {24'd0, nbc_shr, nbc_slr};
-			flags_out = {nbc_shb, nbc_shr[3], f_z & ({nbc_shr, nbc_slr} == 8'd0), 1'b0, nbc_shb};
+			result = {24'd0, nbc_res[7:0]};
+			flags_out = {nbc_c, flags_in[3], f_z & (nbc_res[7:0] == 8'd0), flags_in[1], nbc_c};
 		end
 
 		`AP040_ALU_ASL1: begin

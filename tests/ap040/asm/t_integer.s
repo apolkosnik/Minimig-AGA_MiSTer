@@ -600,6 +600,118 @@ cas2ok:
 	cmp2.l	($30A8).l,a1
 	chkccr	$00,138
 
+;----------------------------------------------------------------- CAS2
+	move.l	#$11110000,($30B0).l
+	move.l	#$22220000,($30B8).l
+	lea	($30B0).l,a0
+	lea	($30B8).l,a1
+	move.l	#$11110000,d0	; Dc1 matches
+	move.l	#$22220000,d1	; Dc2 matches
+	move.l	#$AAAA0001,d2	; Du1
+	move.l	#$BBBB0002,d3	; Du2
+	cas2.l	d0:d1,d2:d3,(a0):(a1)
+	beq.s	c2aok
+	failt	140
+c2aok:
+	move.l	($30B0).l,d4
+	chkl	d4,$AAAA0001,141
+	move.l	($30B8).l,d4
+	chkl	d4,$BBBB0002,142
+	chkl	d0,$11110000,143	; compare registers untouched on success
+
+	moveq	#0,d0			; Dc1 mismatch: both loaded, no store
+	cas2.l	d0:d1,d2:d3,(a0):(a1)
+	bne.s	c2bok
+	failt	144
+c2bok:
+	chkl	d0,$AAAA0001,145
+	chkl	d1,$BBBB0002,146
+	move.l	($30B0).l,d4
+	chkl	d4,$AAAA0001,147	; memory unchanged
+
+	; second compare mismatch: flags from the second compare
+	move.l	#$AAAA0001,d0
+	moveq	#0,d1
+	cas2.l	d0:d1,d2:d3,(a0):(a1)
+	bne.s	c2cok
+	failt	148
+c2cok:
+	chkl	d1,$BBBB0002,149
+
+	; word form
+	move.w	#$1234,($30C0).l
+	move.w	#$5678,($30C4).l
+	lea	($30C0).l,a0
+	lea	($30C4).l,a1
+	move.l	#$1234,d0
+	move.l	#$5678,d1
+	move.l	#$1111,d2
+	move.l	#$2222,d3
+	cas2.w	d0:d1,d2:d3,(a0):(a1)
+	beq.s	c2dok
+	failt	150
+c2dok:
+	move.w	($30C0).l,d4
+	and.l	#$FFFF,d4
+	chkl	d4,$1111,151
+
+;----------------------------------------------------------------- BCD with
+; non-BCD digit inputs: the decimal correction is byte-wide on real
+; hardware (cputest 68040_default reference data), and N/V are unchanged
+	move.b	#$FF,d0
+	move.b	#$FF,d1
+	move.w	#0,ccr
+	abcd	d1,d0			; $FF+$FF+0 -> $64, X=C=1
+	chkccr	$11,152
+	and.l	#$FF,d0
+	chkl	d0,$64,153
+
+	move.b	#$FF,d2
+	move.b	#$FF,d3
+	move.w	#$1A,ccr		; X=1, N/V preset: must survive
+	abcd	d3,d2			; $FF+$FF+1 -> $65, X=C=1
+	chkccr	$1B,154
+	and.l	#$FF,d2
+	chkl	d2,$65,155
+
+	move.b	#$00,d0
+	move.b	#$FF,d1
+	move.w	#0,ccr
+	sbcd	d1,d0			; $00-$FF -> $9B, X=C=1
+	chkccr	$11,156
+	and.l	#$FF,d0
+	chkl	d0,$9B,157
+
+	move.b	#$12,d2
+	move.b	#$0E,d3
+	move.w	#0,ccr
+	sbcd	d3,d2			; low-nibble borrow only: -> $FE, X=C=1
+	chkccr	$11,158
+	and.l	#$FF,d2
+	chkl	d2,$FE,159
+
+	move.b	#$FF,d4
+	move.w	#0,ccr
+	nbcd	d4			; 0-$FF -> $9B, X=C=1
+	chkccr	$11,160
+	and.l	#$FF,d4
+	chkl	d4,$9B,161
+
+	move.b	#$10,d5
+	move.w	#0,ccr
+	nbcd	d5			; 0-$10 -> $90, X=C=1
+	chkccr	$11,162
+	and.l	#$FF,d5
+	chkl	d5,$90,163
+
+	move.b	#$99,d0
+	move.b	#$01,d1
+	move.w	#$04,ccr		; Z preset: stays set on zero result
+	abcd	d1,d0			; $99+$01 -> $00, X=Z=C=1
+	chkccr	$15,164
+	and.l	#$FF,d0
+	chkl	d0,0,165
+
 ;----------------------------------------------------------------- all done
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700

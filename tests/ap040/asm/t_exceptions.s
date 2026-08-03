@@ -114,6 +114,27 @@ clrloop:
 	dc.w	$F0FF		; 030 PMMU opcode: F-line on 040
 	chkcnt	cnt_fline,1,5
 
+;----------------------------------------------------------------- FSAVE/FRESTORE
+; FPU-less state frame model: FSAVE writes a 4-byte NULL frame (version
+; byte $00) and FRESTORE consumes it; neither takes the F-line trap
+	move.l	#$DEADBEEF,($3530).l
+	lea	($3534).l,a0
+	dc.w	$F320		; fsave -(a0)
+	cmp.l	#$3530,a0
+	beq.s	fsv1
+	failt	60
+fsv1:
+	tst.l	($3530).l	; NULL frame is all zero
+	beq.s	fsv2
+	failt	61
+fsv2:
+	dc.w	$F358		; frestore (a0)+
+	cmp.l	#$3534,a0
+	beq.s	fsv3
+	failt	62
+fsv3:
+	chkcnt	cnt_fline,1,63	; F-line count unchanged by fsave/frestore
+
 ;----------------------------------------------------------------- CHK
 	move.l	#5,d0
 	chk.w	#3,d0		; out of bounds high

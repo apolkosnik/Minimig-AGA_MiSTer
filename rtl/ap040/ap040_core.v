@@ -362,6 +362,19 @@ localparam S_CHK2_C    = 8'd136;
 localparam S_CHK2_D    = 8'd137;
 localparam S_BTSTI     = 8'd138;
 localparam S_BTSTI2    = 8'd139;
+localparam S_CAS2_0    = 8'd140;
+localparam S_CAS2_1    = 8'd141;
+localparam S_CAS2_2    = 8'd142;
+localparam S_CAS2_3    = 8'd143;
+localparam S_CAS2_4    = 8'd144;
+localparam S_CAS2_5    = 8'd145;
+localparam S_CAS2_6    = 8'd146;
+localparam S_CAS2_W2   = 8'd147;
+localparam S_CAS2_W3   = 8'd148;
+localparam S_CAS2_F    = 8'd149;
+localparam S_CAS2_F2   = 8'd150;
+localparam S_FSAVE1    = 8'd151;
+localparam S_FREST1    = 8'd152;
 
 // exec kinds
 localparam EK_ALU     = 4'd0;
@@ -1993,6 +2006,82 @@ always @(posedge clk) begin
 				fetch_next;
 			end
 
+			//------------------------------------------------------------ CAS2
+			// x_ext[31:16] = first, x_ext[15:0] = second extension word;
+			// not bus locked (single CPU master on this fabric)
+			S_CAS2_0: begin
+				x_ext <= imm;
+				rr_a <= {imm[31], imm[30:28]};   // Rn1 (address)
+				rr_b <= {imm[15], imm[14:12]};   // Rn2
+				state <= S_CAS2_1;
+			end
+
+			S_CAS2_1: begin
+				t_a <= rf_rdata_a;
+				t_b <= rf_rdata_b;
+				mrd(rf_rdata_a, op_size, S_CAS2_2);
+			end
+
+			S_CAS2_2: begin
+				bf_w1 <= m_val;                  // first memory operand
+				mrd(t_b, op_size, S_CAS2_3);
+			end
+
+			S_CAS2_3: begin
+				bf_field <= m_val;               // second memory operand
+				rr_a <= {1'b0, x_ext[18:16]};    // Dc1
+				rr_b <= {1'b0, x_ext[2:0]};      // Dc2
+				state <= S_CAS2_4;
+			end
+
+			S_CAS2_4: begin
+				cas_dc <= rf_rdata_a;
+				bf_du <= rf_rdata_b;
+				src_val <= rf_rdata_a;           // ALU: mem1 - Dc1
+				dst_val <= bf_w1;
+				state <= S_CAS2_5;
+			end
+
+			S_CAS2_5: begin
+				sr[4:0] <= alu_fl;
+				if (alu_fl[2]) begin
+					src_val <= bf_du;            // ALU: mem2 - Dc2
+					dst_val <= bf_field;
+					state <= S_CAS2_6;
+				end
+				else state <= S_CAS2_F;
+			end
+
+			S_CAS2_6: begin
+				sr[4:0] <= alu_fl;
+				if (alu_fl[2]) begin
+					rr_a <= {1'b0, x_ext[24:22]};   // Du1
+					rr_b <= {1'b0, x_ext[8:6]};     // Du2
+					state <= S_CAS2_W2;
+				end
+				else state <= S_CAS2_F;
+			end
+
+			S_CAS2_W2: mwr(t_a, op_size, rf_rdata_a, S_CAS2_W3);
+
+			S_CAS2_W3: mwr(t_b, op_size, rf_rdata_b, S_NEXT);
+
+			S_CAS2_F: begin
+				rfw({1'b0, x_ext[18:16]}, merge_sz(cas_dc, bf_w1, op_size));
+				state <= S_CAS2_F2;
+			end
+
+			S_CAS2_F2: begin
+				rfw({1'b0, x_ext[2:0]}, merge_sz(bf_du, bf_field, op_size));
+				fetch_next;
+			end
+
+			//------------------------------------------- FSAVE / FRESTORE
+			S_FSAVE1: mwr(ea_addr, `AP040_SZ_L, 32'h0000_0000, S_NEXT);
+
+			// the frame contents are ignored: only NULL frames ever exist
+			S_FREST1: mrd(ea_addr, `AP040_SZ_L, S_NEXT);
+
 			S_RESET_HOLD: begin
 				if (rst_cnt == 8'd0) fetch_next;
 				else rst_cnt <= rst_cnt - 8'd1;
@@ -2387,9 +2476,18 @@ always @(posedge clk) begin
 									immf(2'd1, S_CHK2_A);
 								end
 							end
+							else if (d_reg9[2] && d_reg9[1:0] != 2'b00 && ea_is_imm) begin
+								// CAS2.W/.L: two extension words follow
+								if (d_reg9[1:0] == 2'b01) go_illegal;   // no CAS2.B
+								else begin
+									alu_op <= `AP040_ALU_CMP;
+									op_size <= (d_reg9[1:0] == 2'b10) ? `AP040_SZ_W : `AP040_SZ_L;
+									immf(2'd2, S_CAS2_0);
+								end
+							end
 							else if (d_reg9[2] && d_reg9[1:0] != 2'b00) begin
-								// CAS (memory only; $0xFC encodings are CAS2)
-								if (d_mode < 3'b010 || ea_is_imm ||
+								// CAS (memory only)
+								if (d_mode < 3'b010 ||
 								    (d_mode == 3'b111 && d_rn > 3'b001)) go_illegal;
 								else begin
 									alu_op <= `AP040_ALU_CMP;
@@ -3267,6 +3365,31 @@ always @(posedge clk) begin
 									rr_a <= {1'b1, d_rn};
 									state <= S_PTEST1;
 								end
+							end
+							else exc(`AP040_VEC_FLINE, 4'd0, pc_i, 32'd0);
+						end
+						else if (ir[11:8] == 4'h3) begin
+							// FSAVE/FRESTORE state-frame model without an FPU:
+							// FSAVE always stores a 4-byte NULL frame (version
+							// byte $00 = nothing to restore) and FRESTORE
+							// consumes one. OS context switch code checks the
+							// version byte and skips the FP register moves, so
+							// no further FPU state is needed; arithmetic FPU
+							// instructions still take the F-line trap for
+							// software emulation.
+							if (ir[7:6] == 2'b00) begin
+								// FSAVE: control alterable or -(An)
+								if (!sr_s) go_priv;
+								else if (d_mode < 3'b010 || d_mode == 3'b011 ||
+								         (d_mode == 3'b111 && d_rn > 3'b001)) go_illegal;
+								else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FSAVE1);
+							end
+							else if (ir[7:6] == 2'b01) begin
+								// FRESTORE: control, (An)+ or PC relative
+								if (!sr_s) go_priv;
+								else if (d_mode < 3'b010 || d_mode == 3'b100 ||
+								         ea_is_imm) go_illegal;
+								else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FREST1);
 							end
 							else exc(`AP040_VEC_FLINE, 4'd0, pc_i, 32'd0);
 						end
