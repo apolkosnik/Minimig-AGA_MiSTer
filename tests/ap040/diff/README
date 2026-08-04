@@ -1,0 +1,32 @@
+AP040 differential testing against QEMU
+=======================================
+
+run_diff.sh generates random integer programs (gen_diff.py), runs the
+same flat binary on the AP040 (verilated tb_ap040_program) and on
+qemu-system-m68k -M virt -cpu m68040, and compares the $3000-$3FFF
+memory window: sandbox data, the final register file image and the
+final CCR.
+
+The per-instruction CCR trace ($3800-$3EFF) is generated but NOT
+compared by default. QEMU 11.0.2's m68k lazy flag evaluation was found
+to produce flags that contradict the M68000PRM (and QEMU's own behavior
+in isolated sequences) in at least these shapes, all reproduced in this
+directory during bring-up:
+
+  - SUBX with X=0, Z(old)=0 and result 0 reports Z=1 when the previous
+    flag producer was a lazily evaluated ALU op ("work/qbug.s" repro:
+    PRM says Z unchanged, i.e. 0)
+  - NEGX C reported 0 for a nonzero result when preceded by a bitfield
+    instruction with a register offset (stream context only)
+  - MULU.L overflow V lost in similar stream contexts, although the
+    isolated case ("work/mulv.s") is handled correctly
+
+The AP040 side of each arbitration was confirmed against hand-computed
+PRM semantics ("work/truth.s"). AP040 flag correctness is regression
+tested by tests/ap040/asm/* with exact CCR expectations; the
+differential run verifies data paths, EA computation and instruction
+sequencing, where QEMU is reliable.
+
+Usage:
+  verilator --binary --timing ... tb_ap040_program.v rtl/ap040/*.v
+  SIM=/path/to/Vtb_ap040_program ./run_diff.sh 1 50 150

@@ -712,6 +712,114 @@ c2dok:
 	and.l	#$FF,d0
 	chkl	d0,0,165
 
+;----------------------------------------------------------------- CHK flags
+; 68040: N always tracks the value's sign, C cleared when in bounds
+; (set on traps only for specific sign combos), Z/V/X unchanged
+	move.l	#16,d0
+	move.w	#$1F,ccr
+	chk.l	d0,d0		; value 16, bound 16: in bounds
+	chkccr	$16,166		; N,C cleared; X,Z,V survive
+
+	move.l	#0,d1
+	move.l	#10,d2
+	move.w	#$04,ccr
+	chk.l	d2,d1		; value 0, bound 10: in bounds
+	chkccr	$04,167		; Z preserved, N=C=0
+
+;----------------------------------------------------- DIVS.L 32-bit overflow
+; 68040: V=1, C=0, N/Z and destination unchanged
+	move.l	#$80000000,d0
+	moveq	#-1,d1
+	move.w	#$0C,ccr
+	divs.l	d1,d0		; $80000000/-1 overflows
+	chkccr	$0E,168		; V set, N/Z preserved
+	chkl	d0,$80000000,169
+
+;--------------------------------------------------- MULx.L with Dh == Dl
+; the 68040 writes Dh before Dl, so the shared register keeps the LOW
+; product half (020/030 end with the high half); V/C clear, X preserved
+	move.l	#$10000,d0
+	move.l	#$10000,d1
+	move.w	#$1F,ccr
+	mulu.l	d1,d0:d0	; $10000*$10000 = $1_0000_0000
+	chkccr	$10,170		; N=0 Z=0 (64-bit product nonzero) V=C=0, X kept
+	chkl	d0,0,171	; low half, not the high half
+
+;------------------------------------------------- shift/rotate count edges
+; register count 0: N/Z from the unchanged operand, V=C=0, X preserved,
+; except ROXd where C=X; count>=width via iteration
+	move.l	#$8000,d0
+	moveq	#0,d1
+	move.w	#$11,ccr	; X and C set
+	lsr.w	d1,d0		; count 0
+	chkccr	$18,172		; X kept, C cleared, N from d0
+	chkl	d0,$8000,173
+
+	move.l	#$8000,d0
+	moveq	#0,d1
+	move.w	#$10,ccr	; X only
+	roxr.w	d1,d0		; count 0: C = X
+	chkccr	$19,174		; X kept, C=X=1, N=1
+	chkl	d0,$8000,175
+
+	move.l	#1,d0
+	moveq	#16,d1
+	move.w	#0,ccr
+	lsl.w	d1,d0		; count == width: last real bit out
+	chkccr	$15,176		; X=C=1, Z=1
+	chkl	d0,0,177
+
+	move.l	#1,d0
+	moveq	#17,d1
+	move.w	#$10,ccr	; X preset
+	lsl.w	d1,d0		; count > width: zeros shift out
+	chkccr	$04,178		; X=C=0, Z=1
+	chkl	d0,0,179
+
+	move.l	#$80,d0
+	moveq	#63,d1
+	move.w	#0,ccr
+	asr.b	d1,d0		; maximum count: sign fill
+	chkccr	$19,180		; X=C=1 (sign), N=1
+	and.l	#$FF,d0
+	chkl	d0,$FF,181
+
+	move.l	#$8001,d0
+	moveq	#16,d1
+	move.w	#0,ccr
+	rol.w	d1,d0		; full cycle: value back, C = original bit 0
+	chkccr	$09,182		; N=1, C=1
+	chkl	d0,$8001,183
+
+	move.l	#$1234,d0
+	moveq	#17,d1
+	move.w	#$10,ccr	; X set
+	roxl.w	d1,d0		; count 17 = full 17-bit cycle: all restored
+	chkccr	$11,184		; X restored, C=X
+	chkl	d0,$1234,185
+
+;------------------------------------- MOVEM predec with base reg in list
+; the 68040 stores the initial base value minus the operation size
+	lea	($3200).l,a0
+	move.l	#$11112222,d0
+	movem.l	d0/a0,-(a0)
+	chkl	a0,$31F8,186	; final base = start - 2 regs
+	move.l	($31FC).l,d1
+	chkl	d1,$31FC,187	; stored a0 = initial - 4 (040 rule)
+	move.l	($31F8).l,d2
+	chkl	d2,$11112222,188
+
+	lea	($3220).l,a1
+	move.l	#$33334444,d3
+	movem.w	d3/a1,-(a1)	; word form: initial - 2
+	chkl	a1,$321C,189
+	move.w	($321E).l,d4
+	and.l	#$FFFF,d4
+	chkl	d4,$321E,190	; stored a1.w = (initial - 2) low word
+	move.w	($321C).l,d5
+	and.l	#$FFFF,d5
+	chkl	d5,$4444,191
+
 ;----------------------------------------------------------------- all done
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700

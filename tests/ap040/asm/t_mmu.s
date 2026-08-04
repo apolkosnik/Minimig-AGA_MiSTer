@@ -20,6 +20,7 @@ expect_fa	equ	$3604
 fix_addr	equ	$3608
 fix_val		equ	$360C
 cnt_stub	equ	$3614
+uret		equ	$3618
 
 failt	macro
 	move.w	#\1,d7
@@ -125,6 +126,23 @@ tloop:
 	movec	mmusr,d0
 	chkl	d0,$00005011,8		; PA $5000, M, resident
 
+	; PTEST installs its successful search in the selected ATC.  Changing
+	; the descriptor alone therefore leaves the probed mapping cached.
+	pflusha
+	lea	($E000).l,a0
+	ptestr	(a0)
+	move.l	#$00005003,($4438).l	; page 14 now points at physical $5000
+	move.l	($E000).l,d0
+	chkl	d0,$BBBB2222,36		; PTEST-installed identity mapping is stale
+
+	; every write to TC flushes both ATCs, even if its value is unchanged
+	move.l	#$8000,d0
+	movec	d0,tc
+	move.l	($E000).l,d0
+	chkl	d0,$CAFE0505,37		; descriptor remap visible without PFLUSH
+	move.l	#$0000E003,($4438).l
+	pflusha
+
 ;----------------------------------------------- write protection fault
 	move.l	#$8000,(expect_fa).l
 	move.l	#$4420,(fix_addr).l
@@ -161,6 +179,7 @@ tloop:
 ;------------------------------------------- user access to a super page
 	movea.l	#$3C00,a0
 	movec	a0,usp
+	move.l	#ucont,(uret).l
 	move.l	#$9000,(expect_fa).l
 	move.l	#$4424,(fix_addr).l
 	move.l	#$9003,(fix_val).l
@@ -179,6 +198,57 @@ ucont:
 	and.l	#$FFFF,d0
 	chkl	d0,4,16
 
+;------------------------------- RTE to user: fetch uses the user root
+; a separate user root maps VA $7000 -> PA $F000 (moveq/trap) while the
+; supervisor root keeps identity, where $7000 holds ILLEGAL. The first
+; fetch after RTE belongs to the restored user context, so it must
+; translate through URP; with a supervisor-FC fetch this executes the
+; ILLEGAL instead and the unexpected-exception handler fails the test.
+	lea	($4C00).l,a0
+	moveq	#0,d0
+	moveq	#63,d1
+utloop:
+	move.l	d0,d2
+	lsl.l	#8,d2
+	lsl.l	#4,d2
+	addq.l	#3,d2
+	move.l	d2,(a0)+
+	addq.l	#1,d0
+	dbra	d1,utloop
+	move.l	#$0000F003,($4C1C).l	; user VA page 7 -> PA $F000
+	move.l	#$00004A03,($4800).l
+	move.l	#$00004C03,($4A00).l
+	move.w	#$702A,($F000).l	; moveq #42,d0
+	move.w	#$4E41,($F002).l	; trap #1
+	move.w	#$4AFC,($7000).l	; illegal via the supervisor map
+	move.l	#$4800,d0
+	movec	d0,urp
+	pflusha
+	move.l	#ucont2,(uret).l
+	moveq	#0,d0
+	move.w	#$0000,-(sp)
+	pea	($7000).l
+	move.w	#$0000,-(sp)
+	rte
+
+ucont2:
+	chkl	d0,42,33		; ran the user-mapped code
+	move.l	#$4000,d0
+	movec	d0,urp			; restore the shared root
+	pflusha
+
+;---------------------------- high VA walk: nonzero root/pointer indexes
+; VA $1E0C3000: root index 15, pointer index 3, page index 3. The page
+; table sits at $4D00 (bit 8 set) to prove the 256-byte table base mask.
+	move.l	#$00004E03,($403C).l	; root[15] -> pointer table $4E00
+	move.l	#$00004D03,($4E0C).l	; pointer[3] -> page table $4D00
+	move.l	#$0000E003,($4D0C).l	; page[3] -> PA $E000
+	move.l	($1E0C3000).l,d0
+	chkl	d0,$BBBB2222,34
+	move.l	#$FEED5678,($1E0C3004).l
+	move.l	($E004).l,d0
+	chkl	d0,$FEED5678,35
+
 ;------------------------------------------------------------ TTR bypass
 	move.l	#0,($4414).l	; page 5 invalid
 	pflusha
@@ -193,6 +263,28 @@ ucont:
 	ptestr	(a0)
 	movec	mmusr,d0
 	chkl	d0,$00005003,19		; transparent + resident
+
+	; PTESTW reports a write-protected transparent translation as B
+	move.l	#$0000C004,d0
+	movec	d0,dtt0
+	ptestw	(a0)
+	movec	mmusr,d0
+	chkl	d0,$00000400,38
+
+	; DFC program space selects ITT rather than DTT during PTEST
+	moveq	#0,d0
+	movec	d0,dtt0
+	move.l	#$0000C000,d0
+	movec	d0,itt0
+	moveq	#6,d0
+	movec	d0,dfc
+	ptestr	(a0)
+	movec	mmusr,d0
+	chkl	d0,$00005003,39
+	moveq	#0,d0
+	movec	d0,itt0
+	moveq	#5,d0
+	movec	d0,dfc
 	moveq	#0,d0
 	movec	d0,dtt0
 	move.l	#$00005003,($4414).l
@@ -336,7 +428,7 @@ h_aerr:
 
 h_utrap:
 	ori.w	#$2000,(sp)	; back to supervisor
-	move.l	#ucont,2(sp)
+	move.l	(uret).l,2(sp)
 	rte
 
 hfail:

@@ -61,6 +61,7 @@ module ap040_mmu
 	input             pf_req,
 	input       [1:0] pf_mode,     // 00 (An) nonglobal, 01 (An), 10 all nonglobal, 11 all
 	input      [31:0] pf_addr,
+	input       [2:0] pf_fc,
 	output reg        pf_done,
 
 	// bus adapter side
@@ -149,6 +150,15 @@ wire ttr_hit   = ttr_hit_a | ttr_hit_b;
 wire ttr_w     = ttr_hit_a ? ttra[2]   : ttrb[2];
 wire [1:0] ttr_cm = ttr_hit_a ? ttra[6:5] : ttrb[6:5];
 
+// PTEST uses DFC to select supervisor/user and instruction/data space.
+wire        pt_instr = (pt_fc[1:0] == 2'b10);
+wire [31:0] pt_ttra  = pt_instr ? itt0 : dtt0;
+wire [31:0] pt_ttrb  = pt_instr ? itt1 : dtt1;
+wire        pt_ttr_a = ttr_match(pt_ttra, pt_addr, pt_fc[2]);
+wire        pt_ttr_b = ttr_match(pt_ttrb, pt_addr, pt_fc[2]);
+wire        pt_ttr_hit = pt_ttr_a | pt_ttr_b;
+wire        pt_ttr_w = pt_ttr_a ? pt_ttra[2] : pt_ttrb[2];
+
 //---------------------------------------------------------------------------
 // translation decision
 //---------------------------------------------------------------------------
@@ -215,6 +225,12 @@ wire fhit3 = atc_v[f_e3] && (atc_tag[f_e3] == f_tag);
 wire       f_way_hit = fhit0 | fhit1 | fhit2 | fhit3;
 wire [1:0] f_way = fhit0 ? 2'd0 : fhit1 ? 2'd1 : fhit2 ? 2'd2 : fhit3 ? 2'd3
                  : atc_rr[{f_bank, f_set}];
+
+// PTESTW has ordinary table-search history side effects only when the
+// probed write is permitted.  A failed probe still reports W/S in MMUSR.
+wire w_hist_m = w_write &&
+                  (!w_pt || (!(w_wp || w_desc[2]) &&
+                             !(w_user && w_desc[7])));
 
 //---------------------------------------------------------------------------
 // request forwarding
@@ -293,8 +309,8 @@ always @(posedge clk) begin
 				if (pf_req && !pf_done) begin
 					for (k = 0; k < 128; k = k + 1) begin
 						if (pf_mode[1] ||
-						    ((atc_tag[k][15:0] == (tc_p ? {pf_addr[31:17], 1'b0}
-						                                : pf_addr[31:16])) &&
+						    ((atc_tag[k] == (tc_p ? {pf_fc[2], pf_addr[31:17], 1'b0}
+						                             : {pf_fc[2], pf_addr[31:16]})) &&
 						     (k[5:2] == (tc_p ? pf_addr[16:13] : pf_addr[15:12])))) begin
 							if (pf_mode[0] || !atc_attr[k][7])
 								atc_v[k] <= 0;
@@ -303,18 +319,29 @@ always @(posedge clk) begin
 					pf_done <= 1;
 				end
 				else if (pt_req && !pt_done) begin
+					// A PTEST first discards the matching entry in its selected
+					// ATC.  A successful table search below installs a fresh one.
+					for (k = 0; k < 128; k = k + 1) begin
+						if ((k[6] == pt_instr) &&
+						    (k[5:2] == (tc_p ? pt_addr[16:13] : pt_addr[15:12])) &&
+						    (atc_tag[k] == (tc_p ? {pt_fc[2], pt_addr[31:17], 1'b0}
+						                               : {pt_fc[2], pt_addr[31:16]})))
+							atc_v[k] <= 0;
+					end
 					w_pt    <= 1;
 					w_la    <= pt_addr;
 					w_super <= pt_fc[2];
 					w_user  <= !pt_fc[2];
 					w_write <= pt_write;
 					w_wp    <= 0;
-					f_bank  <= 0;
-					if (!tc_e ||
-					    ttr_match(dtt0, pt_addr, pt_fc[2]) ||
-					    ttr_match(dtt1, pt_addr, pt_fc[2])) begin
+					f_bank  <= pt_instr;
+					if (!tc_e || pt_ttr_hit) begin
 						// transparent and resident
-						pt_mmusr <= (pt_addr & 32'hFFFF_F000) | 32'h0000_0003;
+						pt_mmusr <= (pt_ttr_hit && pt_write && pt_ttr_w)
+						            ? 32'h0000_0400
+						            : ((pt_addr & (tc_p ? 32'hFFFF_E000
+						                                  : 32'hFFFF_F000)) |
+						               32'h0000_0003);
 						pt_done <= 1;
 						w_pt <= 0;
 					end
@@ -415,10 +442,10 @@ always @(posedge clk) begin
 			W_UC: begin
 				if (!w_pt && w_user && w_desc[7]) wst <= W_FLT;
 				else if (!w_pt && w_write && (w_wp || w_desc[2])) wst <= W_FLT;
-				else if (!w_desc[3] || (!w_pt && w_write && !w_desc[4])) begin
+				else if (!w_desc[3] || (w_hist_m && !w_desc[4])) begin
 					wwr(w_desc_addr, w_desc | 32'h8 |
-					    ((!w_pt && w_write) ? 32'h10 : 32'h0));
-					w_desc <= w_desc | 32'h8 | ((!w_pt && w_write) ? 32'h10 : 32'h0);
+					    (w_hist_m ? 32'h10 : 32'h0));
+					w_desc <= w_desc | 32'h8 | (w_hist_m ? 32'h10 : 32'h0);
 					wst <= W_FILL;
 				end
 				else wst <= W_FILL;
@@ -429,6 +456,15 @@ always @(posedge clk) begin
 					if (walk_ack) w_active <= 0;
 				end
 				else if (w_pt) begin
+					atc_v[{f_bank, f_set, f_way}]    <= 1;
+					atc_tag[{f_bank, f_set, f_way}]  <= f_tag;
+					atc_pa[{f_bank, f_set, f_way}]   <=
+						tc_p ? {w_desc[31:13], 1'b0} : w_desc[31:12];
+					atc_attr[{f_bank, f_set, f_way}] <=
+						{w_desc[10], w_desc[9:8], w_desc[7], w_desc[6:5],
+						 w_desc[4], (w_wp | w_desc[2])};
+					if (!f_way_hit)
+						atc_rr[{f_bank, f_set}] <= atc_rr[{f_bank, f_set}] + 2'd1;
 					pt_mmusr <= (tc_p ? {w_desc[31:13], w_la[12], 12'd0}
 					                  : {w_desc[31:12], 12'd0}) |
 					            {21'd0, w_desc[10], w_desc[9:8], w_desc[7],

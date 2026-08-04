@@ -15,7 +15,7 @@
 module ap040_tg68k_compat
 #(
 	parameter AP040_HAS_MMU      = 1,
-	parameter AP040_HAS_FPU      = 0,
+	parameter AP040_HAS_FPU      = 1,
 	parameter AP040_ENABLE_CACHE = 1,
 	parameter AP040_FAST_SIM     = 0
 )
@@ -105,6 +105,7 @@ wire  [2:0] pt_fcw;
 wire        pf_req, pf_done;
 wire  [1:0] pf_mode;
 wire [31:0] pf_addr;
+wire  [2:0] pf_fcw;
 
 ap040_core #(
 	.AP040_HAS_MMU(AP040_HAS_MMU),
@@ -143,6 +144,7 @@ ap040_core #(
 	.pf_req(pf_req),
 	.pf_mode(pf_mode),
 	.pf_addr(pf_addr),
+	.pf_fc(pf_fcw),
 	.pf_done(pf_done),
 	.cinv_req(cinv_req),
 	.cinv_ic(cinv_ic),
@@ -197,6 +199,7 @@ ap040_mmu mmu (
 	.pf_req(pf_req),
 	.pf_mode(pf_mode),
 	.pf_addr(pf_addr),
+	.pf_fc(pf_fcw),
 	.pf_done(pf_done),
 
 	.m_req(mm_req),

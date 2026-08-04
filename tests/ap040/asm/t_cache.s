@@ -98,6 +98,9 @@ start:
 	move.w	($3512).l,d1
 	and.l	#$FFFF,d1
 	chkl	d1,$B3C4,13
+	move.w	($3511).l,d1
+	and.l	#$FFFF,d1
+	chkl	d1,$A2B3,18		; odd word bypasses the longword cache lane mux
 	move.b	($3513).l,d1
 	and.l	#$FF,d1
 	chkl	d1,$C4,14
@@ -105,6 +108,15 @@ start:
 	; misaligned long read bypasses but must stay correct
 	move.l	($3511).l,d0
 	chkl	d0,$A2B3C4D5,15
+
+	; a misaligned long write spans the $3510 and $3520 cache lines;
+	; both cached lines must be invalidated by the write-through path
+	move.l	#$11223344,($3520).l
+	move.l	($3510).l,d0		; cache first line
+	move.l	($3520).l,d0		; cache second line
+	move.l	#$AABBCCDD,($351F).l
+	move.l	($3520).l,d0
+	chkl	d0,$BBCCDD44,19
 
 ;---------------------------------------------------------- disable
 	moveq	#0,d0

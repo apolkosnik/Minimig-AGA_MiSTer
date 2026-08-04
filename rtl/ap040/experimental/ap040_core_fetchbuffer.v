@@ -70,7 +70,6 @@ module ap040_core
 	output reg        pf_req,
 	output reg  [1:0] pf_mode,
 	output reg [31:0] pf_addr,
-	output      [2:0] pf_fc,
 	input             pf_done,
 	output reg        cinv_req,
 	output reg        cinv_ic,
@@ -120,7 +119,6 @@ assign itt1_out = itt1;
 assign dtt0_out = dtt0;
 assign dtt1_out = dtt1;
 assign pt_fc    = dfc;
-assign pf_fc    = dfc;
 
 // interrupt input synchronization (active low pins, must be stable for two
 // consecutive samples like the real part)
@@ -378,27 +376,6 @@ localparam S_CAS2_F    = 8'd149;
 localparam S_CAS2_F2   = 8'd150;
 localparam S_FSAVE1    = 8'd151;
 localparam S_FREST1    = 8'd152;
-localparam S_FPU_DEC   = 8'd153;
-localparam S_FPU_AN    = 8'd154;
-localparam S_FPU_EA    = 8'd155;
-localparam S_FPU_DREG  = 8'd156;
-localparam S_FPU_IMM   = 8'd157;
-localparam S_FPU_RD    = 8'd158;
-localparam S_FPU_RD2   = 8'd159;
-localparam S_FPU_GO    = 8'd160;
-localparam S_FPU_WR    = 8'd161;
-localparam S_FPU_CR    = 8'd162;
-localparam S_FPU_CR2   = 8'd163;
-localparam S_FPU_MVM   = 8'd164;
-localparam S_FPU_MVM2  = 8'd165;
-localparam S_FPU_MVM3  = 8'd166;
-localparam S_FBCC      = 8'd167;
-localparam S_FSCC0     = 8'd168;
-localparam S_FSCC1     = 8'd169;
-localparam S_FDBCC     = 8'd170;
-localparam S_FREST2    = 8'd171;
-localparam S_FPU_MVML  = 8'd172;
-localparam S_FPU_CRD   = 8'd173;
 
 // exec kinds
 localparam EK_ALU     = 4'd0;
@@ -713,138 +690,76 @@ endfunction
 // micro operation tasks (all nonblocking assignments)
 //---------------------------------------------------------------------------
 
-// s = supervisor bit of the context the fetch belongs to. Passed
-// explicitly because RTE restores SR in its dispatch cycle: the first
-// fetch of the restored context must use its FC, not the handler's
-// (the MMU translates user and supervisor code through different
-// roots, and a faulting fetch reports this FC in the SSW TM field).
 //---------------------------------------------------------------------------
-// FPU (milestone H): the core owns decode, EAs and memory traffic; the
-// ap040_fpu engine owns registers, conversion and arithmetic
+// instruction fetch buffer: two aligned longwords, direct mapped by bit 2
+// of the address and tagged with the supervisor bit they were fetched
+// under. Demand filled only (a fill is issued exactly when a word is
+// needed), so access fault semantics are unchanged, and an aligned
+// longword fill never crosses a page. Invalidated by data writes that
+// touch a buffered longword and by MOVEC/PFLUSH/CINV (the content is
+// virtually tagged, so it must not survive a translation change).
 //---------------------------------------------------------------------------
 
-reg         fpu_req;
-reg   [2:0] fpu_class;
-reg   [6:0] fpu_opm;
-reg   [2:0] fpu_fmt;
-reg   [2:0] fpu_srcr, fpu_dstr;
-reg  [95:0] fpb;
-reg   [1:0] fpu_crsel;
-reg         fpu_crwe;
-reg  [31:0] fpu_crwd;
-reg         fpu_iawe;
-reg         fpu_bsun;
-reg   [2:0] fpu_fmsel;
-reg         fpu_fmwe;
-reg  [95:0] fpu_fmwd;
-reg         fpu_rst;
-reg   [1:0] fp_cnt;               // long transfers remaining
-reg   [3:0] fp_nb;                // operand bytes
-reg         fp_st;                // 1: store direction
-reg   [7:0] fp_list;              // FMOVEM register list (as processed)
-reg   [1:0] fp_mode;              // FMOVEM mode bits
-reg   [2:0] fp_creg;              // control list bits {FPCR,FPSR,FPIAR}
-reg   [5:0] fp_pred;              // FScc/FDBcc/FTRAPcc predicate
-reg   [3:0] fp_n;                 // loop index
-reg         fp_ea_pd, fp_ea_pi;   // predecrement / postincrement EA
-reg   [4:0] fp_adj;               // total An adjustment in bytes
+reg  [31:0] fb_d0, fb_d1;
+reg  [28:0] fb_a0, fb_a1;
+reg         fb_v0, fb_v1;
+reg         fb_s0, fb_s1;
 
-wire        fpu_done, fpu_unimp, fpu_exc_req, fpu_used;
-wire        fpu_bsun_en;
-wire  [7:0] fpu_exc_vec;
-wire [95:0] fpu_dout;
-wire  [3:0] fpu_cc;
-wire [31:0] fpu_crrd;
-wire [95:0] fpu_fmrd;
+// hit/word view at the current pc (the instruction stream read pointer)
+wire        fbp_hit  = pc[2] ? (fb_v1 && fb_s1 == sr_s && fb_a1 == pc[31:3])
+                             : (fb_v0 && fb_s0 == sr_s && fb_a0 == pc[31:3]);
+wire [15:0] fbp_word = pc[2] ? (pc[1] ? fb_d1[15:0] : fb_d1[31:16])
+                             : (pc[1] ? fb_d0[15:0] : fb_d0[31:16]);
+wire [31:0] fbp_long = pc[2] ? fb_d1 : fb_d0;
 
-generate if (AP040_HAS_FPU) begin : g_fpu
-	ap040_fpu fpu
-	(
-		.clk(clk), .nreset(nreset), .ce(ce),
-		.req(fpu_req), .op_class(fpu_class), .opmode(fpu_opm),
-		.src_fmt(fpu_fmt), .src_r(fpu_srcr), .dst_r(fpu_dstr),
-		.din(fpb), .done(fpu_done), .unimp(fpu_unimp),
-		.exc_req(fpu_exc_req), .exc_vec(fpu_exc_vec), .dout(fpu_dout),
-		.fpcc(fpu_cc),
-		.cr_sel(fpu_crsel), .cr_we(fpu_crwe), .cr_wdata(fpu_crwd),
-		.cr_rdata(fpu_crrd),
-		.bsun_req(fpu_bsun), .bsun_enable(fpu_bsun_en),
-		.ia_we(fpu_iawe), .ia_wdata(pc_i),
-		.fm_sel(fpu_fmsel), .fm_we(fpu_fmwe), .fm_wdata(fpu_fmwd),
-		.fm_rdata(fpu_fmrd),
-		.fpu_used(fpu_used), .fp_reset(fpu_rst)
-	);
-end else begin : g_nofpu
-	assign fpu_done = 0;
-	assign fpu_unimp = 0;
-	assign fpu_exc_req = 0;
-	assign fpu_exc_vec = 0;
-	assign fpu_bsun_en = 0;
-	assign fpu_dout = 0;
-	assign fpu_cc = 0;
-	assign fpu_crrd = 0;
-	assign fpu_fmrd = 0;
-	assign fpu_used = 0;
-end endgenerate
-
-// operand byte count per source format field
-function [3:0] fp_bytes;
-	input [2:0] fmt;
-	begin
-		case (fmt)
-			3'd0, 3'd1: fp_bytes = 4;         // L, S
-			3'd4:       fp_bytes = 2;         // W
-			3'd6:       fp_bytes = 1;         // B
-			3'd5:       fp_bytes = 8;         // D
-			default:    fp_bytes = 12;        // X, P
-		endcase
-	end
-endfunction
-
-// IEEE condition predicate over FPSR condition codes {N, Z, I, NAN}
-function fp_cond;
-	input [5:0] pred;
-	input [3:0] cc;
-	reg n, z, nan;
-	begin
-		n = cc[3]; z = cc[2]; nan = cc[0];
-		case (pred[3:0])
-			4'h0: fp_cond = 0;                          // F / SF
-			4'h1: fp_cond = z;                          // EQ
-			4'h2: fp_cond = !(nan | z | n);             // OGT
-			4'h3: fp_cond = z | !(nan | n);             // OGE
-			4'h4: fp_cond = n & !(nan | z);             // OLT
-			4'h5: fp_cond = z | (n & !nan);             // OLE
-			4'h6: fp_cond = !(nan | z);                 // OGL
-			4'h7: fp_cond = !nan;                       // OR
-			4'h8: fp_cond = nan;                        // UN
-			4'h9: fp_cond = nan | z;                    // UEQ
-			4'hA: fp_cond = nan | !(n | z);             // UGT
-			4'hB: fp_cond = nan | z | !n;               // UGE
-			4'hC: fp_cond = nan | (n & !z);             // ULT
-			4'hD: fp_cond = nan | z | n;                // ULE
-			4'hE: fp_cond = !z;                         // NE
-			default: fp_cond = 1;                       // T / ST
-		endcase
-	end
-endfunction
-
-// unimplemented FP instruction: vector 11, format $2, address = the
-// faulting FP instruction (the FPSP re-executes from the frame)
-task go_fp_unimp;
-	begin
-		fpu_req <= 0;
-		exc(`AP040_VEC_FLINE, 4'd2, pc, pc_i);
-	end
-endtask
+// data writes snoop the buffer (a write touches at most 4 bytes)
+wire [31:0] fb_wend  = m_addr_r + 32'd3;
 
 task issue_ifetch;
 	input [31:0] a;
 	input        s;
 	begin
 		mem_req <= 1; mem_write <= 0; mem_instr <= 1;
-		mem_size <= `AP040_SZ_W; mem_addr <= a;
+		mem_size <= `AP040_SZ_L; mem_addr <= {a[31:2], 2'b00};
 		fc_r <= s ? `AP040_FC_SUPER_PROG : `AP040_FC_USER_PROG;
+	end
+endtask
+
+// dispatch the instruction at a under fetch context s (supervisor bit)
+// with trace enables t1/t0: serve the opcode from the fetch buffer when
+// it holds the word, otherwise start an aligned longword fill. t1/t0 are
+// passed explicitly because RTE restores SR in the dispatch cycle.
+task fetch_go;
+	input [31:0] a;
+	input        s;
+	input        t1;
+	input        t0;
+	reg          hit;
+	reg   [15:0] w;
+	begin
+		hit = a[2] ? (fb_v1 && fb_s1 == s && fb_a1 == a[31:3])
+		           : (fb_v0 && fb_s0 == s && fb_a0 == a[31:3]);
+		w   = a[2] ? (a[1] ? fb_d1[15:0] : fb_d1[31:16])
+		           : (a[1] ? fb_d0[15:0] : fb_d0[31:16]);
+		pc_i <= a;
+		if (hit) begin
+			ir <= w;
+			pc <= a + 32'd2;
+			// per-instruction defaults, as in the S_FETCH ack path
+			tr_t1 <= t1;
+			tr_t0 <= t0;
+			p_src <= SK_NONE; p_dst <= DK_NONE;
+			p_rmw <= 0; p_wbsup <= 0; p_flags <= 1; p_sextw <= 0;
+			p_dst_mem_bit <= 0;
+			exec_kind <= EK_ALU;
+			fc_ovr_v <= 0;
+			state <= S_DECODE;
+		end
+		else begin
+			pc <= a;
+			issue_ifetch(a, s);
+			state <= S_FETCH;
+		end
 	end
 endtask
 
@@ -860,8 +775,29 @@ task immf;
 	input [1:0] n;
 	input [7:0] ret;
 	begin
-		imm_n <= n; imm <= 0; if_issued <= 0;
-		r_imm_ret <= ret; state <= S_IMMF;
+		if (n == 2'd2 && !pc[1] && fbp_hit) begin
+			// both words sit in one buffered aligned longword
+			imm <= fbp_long;
+			pc <= pc + 32'd4;
+			state <= ret;
+		end
+		else if (n == 2'd1 && fbp_hit) begin
+			imm <= {16'd0, fbp_word};
+			pc <= pc + 32'd2;
+			state <= ret;
+		end
+		else if (n == 2'd2 && fbp_hit) begin
+			// first of two words hits; collect the second in S_IMMF
+			imm <= {16'd0, fbp_word};
+			pc <= pc + 32'd2;
+			imm_n <= 2'd1; if_issued <= 0;
+			r_imm_ret <= ret; state <= S_IMMF;
+		end
+		else begin
+			imm_n <= n; imm <= 0; if_issued <= 1;
+			issue_ifetch(pc, sr_s);
+			r_imm_ret <= ret; state <= S_IMMF;
+		end
 	end
 endtask
 
@@ -975,11 +911,7 @@ task fetch_next;
 			irq_lvl_l <= irq_lvl;
 			state <= S_EXC0;
 		end
-		else begin
-			issue_ifetch(pc, sr_s);
-			pc_i <= pc;
-			state <= S_FETCH;
-		end
+		else fetch_go(pc, sr_s, sr[15], sr[14]);
 	end
 endtask
 
@@ -1016,11 +948,7 @@ task go_pc;
 				irq_lvl_l <= irq_lvl;
 				state <= S_EXC0;
 			end
-			else begin
-				issue_ifetch(t, sr_s);
-				pc_i <= t;
-				state <= S_FETCH;
-			end
+			else fetch_go(t, sr_s, sr[15], sr[14]);
 		end
 	end
 endtask
@@ -1051,14 +979,6 @@ always @(posedge clk) begin
 		mem_size <= `AP040_SZ_W; mem_addr <= 0; mem_wdata <= 0;
 		fc_r <= `AP040_FC_SUPER_DATA;
 		rf_we <= 0; rf_waddr <= 0; rf_wdata <= 0;
-		fpu_req <= 0; fpu_class <= 0; fpu_opm <= 0; fpu_fmt <= 0;
-		fpu_srcr <= 0; fpu_dstr <= 0; fpb <= 0;
-		fpu_crsel <= 0; fpu_crwe <= 0; fpu_crwd <= 0; fpu_iawe <= 0;
-		fpu_bsun <= 0;
-		fpu_fmsel <= 0; fpu_fmwe <= 0; fpu_fmwd <= 0; fpu_rst <= 0;
-		fp_cnt <= 0; fp_nb <= 0; fp_st <= 0; fp_list <= 0; fp_mode <= 0;
-		fp_creg <= 0; fp_pred <= 0; fp_n <= 0;
-		fp_ea_pd <= 0; fp_ea_pi <= 0; fp_adj <= 0;
 		rr_a <= 0; rr_b <= 0;
 		aux_we <= 0; aux_sel <= 0; aux_wdata <= 0;
 		md_start <= 0; md_isdiv <= 0; md_sign <= 0;
@@ -1069,6 +989,8 @@ always @(posedge clk) begin
 		sh_any <= 0;
 		r_imm_ret <= 0; r_ea_ret <= 0; r_m_ret <= 0;
 		imm_n <= 0; if_issued <= 0; m_issued <= 0; imm <= 0; x_ext <= 0;
+		fb_v0 <= 0; fb_v1 <= 0; fb_s0 <= 0; fb_s1 <= 0;
+		fb_d0 <= 0; fb_d1 <= 0; fb_a0 <= 0; fb_a1 <= 0;
 		m_wr <= 0; m_size <= 0; m_addr_r <= 0; m_wdat <= 0; m_val <= 0;
 		ea_mode <= 0; ea_rn <= 0; ea_size <= 0;
 		ea_pcmode <= 0; ea_pcb <= 0; extw <= 0;
@@ -1112,9 +1034,6 @@ always @(posedge clk) begin
 		rf_we <= 0;
 		aux_we <= 0;
 		md_start <= 0;
-		fpu_req <= 0; fpu_crwe <= 0; fpu_fmwe <= 0; fpu_iawe <= 0;
-		fpu_bsun <= 0;
-		fpu_rst <= 0;
 		if (mem_ack) mem_req <= 0;
 		if (irq_lvl != 3'd7) nmi_arm <= 1;
 
@@ -1133,11 +1052,7 @@ always @(posedge clk) begin
 
 			S_BOOT1: begin
 				if (m_val[0]) begin fault_r <= 1; state <= S_HALT; end
-				else begin
-					pc <= m_val; pc_i <= m_val;
-					issue_ifetch(m_val, sr_s);
-					state <= S_FETCH;
-				end
+				else fetch_go(m_val, sr_s, sr[15], sr[14]);
 			end
 
 			//----------------------------------------------------------- fetch
@@ -1146,7 +1061,16 @@ always @(posedge clk) begin
 				else aerr_start;
 			end
 			else if (mem_ack) begin
-				ir <= mem_rdata[15:0];
+				// fill the fetch buffer slot and consume the opcode word
+				if (pc[2]) begin
+					fb_d1 <= mem_rdata; fb_a1 <= pc[31:3];
+					fb_s1 <= fc_r[2]; fb_v1 <= 1;
+				end
+				else begin
+					fb_d0 <= mem_rdata; fb_a0 <= pc[31:3];
+					fb_s0 <= fc_r[2]; fb_v0 <= 1;
+				end
+				ir <= pc[1] ? mem_rdata[15:0] : mem_rdata[31:16];
 				pc <= pc + 32'd2;
 				// per-instruction defaults
 				tr_t1 <= sr[15];
@@ -1163,7 +1087,13 @@ always @(posedge clk) begin
 			S_NEXT: fetch_next;
 
 			S_IMMF: begin
-				if (!if_issued) begin
+				if (fbp_hit) begin
+					imm <= {imm[15:0], fbp_word};
+					pc <= pc + 32'd2;
+					if (imm_n == 2'd1) state <= r_imm_ret;
+					else imm_n <= imm_n - 2'd1;
+				end
+				else if (!if_issued) begin
 					issue_ifetch(pc, sr_s);
 					if_issued <= 1;
 				end
@@ -1172,7 +1102,16 @@ always @(posedge clk) begin
 					else aerr_start;
 				end
 				else if (mem_ack) begin
-					imm <= {imm[15:0], mem_rdata[15:0]};
+					// fill the slot and consume the word at pc
+					if (pc[2]) begin
+						fb_d1 <= mem_rdata; fb_a1 <= pc[31:3];
+						fb_s1 <= fc_r[2]; fb_v1 <= 1;
+					end
+					else begin
+						fb_d0 <= mem_rdata; fb_a0 <= pc[31:3];
+						fb_s0 <= fc_r[2]; fb_v0 <= 1;
+					end
+					imm <= {imm[15:0], pc[1] ? mem_rdata[15:0] : mem_rdata[31:16]};
 					pc <= pc + 32'd2;
 					if_issued <= 0;
 					if (imm_n == 2'd1) state <= r_imm_ret;
@@ -1206,6 +1145,11 @@ always @(posedge clk) begin
 					fc_r <= fc_ovr_v ? fc_ovr :
 					        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
 					m_issued <= 1;
+					// writes snoop the fetch buffer (self-modifying code)
+					if (fb_v0 && (fb_a0 == m_addr_r[31:3] || fb_a0 == fb_wend[31:3]))
+						fb_v0 <= 0;
+					if (fb_v1 && (fb_a1 == m_addr_r[31:3] || fb_a1 == fb_wend[31:3]))
+						fb_v1 <= 0;
 				end
 				else if (mem_flt) begin
 					if (in_exc) begin fault_r <= 1; state <= S_HALT; end
@@ -1467,8 +1411,8 @@ always @(posedge clk) begin
 									rfw(p_dreg, merge_sz(dst_val, alu_res, op_size));
 								fetch_next;
 							end
-							// SR settles first so the next fetch uses the new
-						// S bit's FC (and trace enables)
+							// SR settles first so the next dispatch samples the
+						// new S bit and trace enables (fetch buffer context)
 						DK_SR:  begin sr <= alu_res[15:0] & `AP040_SR_MASK; state <= S_NEXT; end
 							DK_CCR: begin sr[4:0] <= alu_res[4:0]; fetch_next; end
 							default: fetch_next;
@@ -1716,12 +1660,7 @@ always @(posedge clk) begin
 					fault_r <= 1;
 					state <= S_HALT;
 				end
-				else begin
-					pc <= m_val;
-					pc_i <= m_val;
-					issue_ifetch(m_val, sr_s);
-					state <= S_FETCH;
-				end
+				else fetch_go(m_val, sr_s, sr[15], sr[14]);
 			end
 
 			//------------------------------------------------------------- RTE
@@ -1769,12 +1708,11 @@ always @(posedge clk) begin
 					exc(`AP040_VEC_TRACE, 4'd2, rte_pc, pc_i);
 				end
 				else begin
-					// fetch under the restored context's FC (SR is being
-					// written this same cycle)
-					pc <= rte_pc;
-					pc_i <= rte_pc;
-					issue_ifetch(rte_pc, rte_sr[13]);
-					state <= S_FETCH;
+					// dispatch under the restored context: SR is written
+					// this same cycle, so the S bit and trace enables come
+					// from rte_sr, and a fetch miss is issued with the
+					// restored context's FC (not the handler's)
+					fetch_go(rte_pc, rte_sr[13], rte_sr[15], rte_sr[14]);
 				end
 			end
 
@@ -1951,12 +1889,7 @@ always @(posedge clk) begin
 
 			S_MOVEM_RD: begin : movem_rd
 				reg [31:0] v;
-				// predec MOVEM with the base register in the list: the
-				// 68020/030/040 store the initial value minus the operation
-				// size (the 68000/010 store the undecremented value)
-				v = (mm_predec && mm_reg == {1'b1, d_rn})
-				    ? (mm_init_an - ((mm_size == `AP040_SZ_L) ? 32'd4 : 32'd2))
-				    : rf_rdata_a;
+				v = (mm_predec && mm_reg == {1'b1, d_rn}) ? mm_init_an : rf_rdata_a;
 				if (mm_predec) mwr(mm_addr, mm_size, v, S_MOVEM_LOOP);
 				else begin
 					mwr(mm_addr, mm_size, v, S_MOVEM_LOOP);
@@ -2055,15 +1988,7 @@ always @(posedge clk) begin
 					12'h000: sfc <= rf_rdata_a[2:0];
 					12'h001: dfc <= rf_rdata_a[2:0];
 					12'h002: cacr <= rf_rdata_a & 32'h8000_8000;
-					12'h003: begin
-						tc <= rf_rdata_a & 32'h0000_C000;
-						// A TC write invalidates every ATC entry, including when
-						// the programmed value is unchanged.  Wait for the MMU so
-						// the following instruction cannot use stale page geometry.
-						pf_mode <= 2'b11;
-						pf_req <= 1;
-						state <= S_PFLUSH2;
-					end
+					12'h003: tc <= rf_rdata_a & 32'h0000_C000;
 					12'h004: itt0 <= rf_rdata_a & 32'hFFFF_E364;
 					12'h005: itt1 <= rf_rdata_a & 32'hFFFF_E364;
 					12'h006: dtt0 <= rf_rdata_a & 32'hFFFF_E364;
@@ -2076,7 +2001,10 @@ always @(posedge clk) begin
 					12'h806: urp <= rf_rdata_a & 32'hFFFF_FE00;
 					default: srp <= rf_rdata_a & 32'hFFFF_FE00;
 				endcase
-				if (imm[11:0] != 12'h003) fetch_next;
+				// control register writes can change fetch translation:
+				// drop the virtually tagged buffer and let the write settle
+				fb_v0 <= 0; fb_v1 <= 0;
+				state <= S_NEXT;
 			end
 
 			//---------------------------------------------------------- MOVES
@@ -2130,6 +2058,7 @@ always @(posedge clk) begin
 			S_PFLUSH1: begin
 				pf_addr <= rf_rdata_a;
 				pf_req <= 1;
+				fb_v0 <= 0; fb_v1 <= 0;
 				state <= S_PFLUSH2;
 			end
 
@@ -2193,9 +2122,7 @@ always @(posedge clk) begin
 			end
 
 			S_BTSTI2: begin
-				// The immediate destination is byte-sized, so the dynamic
-				// bit number is modulo 8.  Explicitly widen the array index.
-				sr[2] <= ~x_ext[{2'b00, rf_rdata_a[2:0]}];
+				sr[2] <= ~x_ext[rf_rdata_a[2:0]];
 				fetch_next;
 			end
 
@@ -2270,505 +2197,10 @@ always @(posedge clk) begin
 			end
 
 			//------------------------------------------- FSAVE / FRESTORE
-			// NULL frame ($00000000) when the FPU is untouched, 4-byte
-			// IDLE frame ($41000000) once it has state (68040 layout)
-			S_FSAVE1: mwr(ea_addr, `AP040_SZ_L,
-			              fpu_used ? 32'h4100_0000 : 32'h0000_0000, S_NEXT);
+			S_FSAVE1: mwr(ea_addr, `AP040_SZ_L, 32'h0000_0000, S_NEXT);
 
-			S_FREST1: mrd(ea_addr, `AP040_SZ_L, S_FREST2);
-
-			S_FREST2: begin
-				// version byte 0 = NULL frame: reset the FPU state.
-				// Nonzero versions restore the idle state; UNIMP/BUSY
-				// frames are never generated by this implementation so
-				// their extra words are not consumed (documented gap)
-				if (m_val[31:24] == 8'd0) fpu_rst <= 1;
-				fetch_next;
-			end
-
-			//------------------------------------------------------------- FPU
-			S_FPU_DEC: begin
-				fpu_class <= imm[15:13];
-				fpu_opm   <= imm[6:0];
-				fpu_fmt   <= imm[12:10];
-				fpu_srcr  <= imm[12:10];
-				fpu_dstr  <= imm[9:7];
-				fp_nb     <= fp_bytes(imm[12:10]);
-				fp_st     <= 0;
-				fp_n      <= 0;
-				fp_ea_pd  <= 0;
-				fp_ea_pi  <= 0;
-				case (imm[15:13])
-					3'b000: begin
-						// FPm to FPn general
-						fpu_iawe <= 1;
-						fpu_req <= 1;
-						state <= S_FPU_GO;
-					end
-					3'b010: begin
-						// <ea>{fmt} to FPn general
-						fpu_iawe <= 1;
-						if (imm[12:10] == 3'd7) begin
-							// FMOVECR: no EA; not hardware on the 040
-							fpu_req <= 1;
-							state <= S_FPU_GO;
-						end
-						else if (d_mode == 3'b000) begin
-							if (fp_bytes(imm[12:10]) > 4'd4) go_illegal;
-							else begin
-								rr_a <= {1'b0, d_rn};
-								state <= S_FPU_DREG;
-							end
-						end
-						else if (d_mode == 3'b001) go_illegal;
-						else if (ea_is_imm) begin
-							fpb <= 0;
-							state <= S_FPU_IMM;
-						end
-						else if (d_mode == 3'b011 || d_mode == 3'b100) begin
-							rr_a <= {1'b1, d_rn};
-							state <= S_FPU_AN;
-						end
-						else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FPU_EA);
-					end
-					3'b011: begin
-						// FMOVE FPn,<ea>{fmt}
-						fpu_srcr <= imm[9:7];
-						fp_st <= 1;
-						fpu_iawe <= 1;
-						if (imm[12:10] == 3'd3 || imm[12:10] == 3'd7)
-							go_fp_unimp;   // packed stores go to the FPSP
-						else if (d_mode == 3'b000) begin
-							if (fp_bytes(imm[12:10]) > 4'd4) go_illegal;
-							else begin
-								rr_a <= {1'b0, d_rn};
-								fpu_req <= 1;
-								state <= S_FPU_GO;
-							end
-						end
-						else if (d_mode == 3'b001 || ea_is_imm ||
-						         (d_mode == 3'b111 && d_rn[1])) go_illegal;
-						else if (d_mode == 3'b011 || d_mode == 3'b100) begin
-							rr_a <= {1'b1, d_rn};
-							state <= S_FPU_AN;
-						end
-						else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FPU_EA);
-					end
-					3'b100, 3'b101: begin : fp_crm
-						// FMOVEM control registers
-						reg [4:0] cnt;
-						cnt = ({4'd0, imm[12]} + {4'd0, imm[11]} +
-						       {4'd0, imm[10]}) << 2;
-						fp_creg <= imm[12:10];
-						fp_st <= imm[13];
-						fp_nb <= cnt[3:0];
-						fp_adj <= cnt;
-						if (imm[12:10] == 3'd0) go_illegal;
-						else if (d_mode == 3'b000) begin
-							rr_a <= {1'b0, d_rn};
-							state <= S_FPU_CRD;
-						end
-						else if (d_mode == 3'b001) go_illegal;
-						else if (ea_is_imm) begin
-							if (imm[13]) go_illegal;
-							else immf(2'd2, S_FPU_CRD);
-						end
-						else if (d_mode == 3'b011 || d_mode == 3'b100) begin
-							rr_a <= {1'b1, d_rn};
-							state <= S_FPU_AN;
-						end
-						else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FPU_EA);
-					end
-					default: begin : fp_mvm
-						// FMOVEM FP register list, 12 bytes per register
-						reg [4:0] cnt;
-						cnt = ({4'd0, imm[7]} + {4'd0, imm[6]} + {4'd0, imm[5]} +
-						       {4'd0, imm[4]} + {4'd0, imm[3]} + {4'd0, imm[2]} +
-						       {4'd0, imm[1]} + {4'd0, imm[0]}) * 5'd12;
-						fp_mode <= imm[12:11];
-						fp_st <= imm[15:13] == 3'b111;
-						fp_list <= imm[7:0];
-						fp_adj <= cnt;
-						if (imm[11]) begin
-							// dynamic list in a data register
-							rr_a <= {1'b0, imm[6:4]};
-							state <= S_FPU_MVML;
-						end
-						else if (d_mode == 3'b011 || d_mode == 3'b100) begin
-							rr_a <= {1'b1, d_rn};
-							state <= S_FPU_AN;
-						end
-						else if (d_mode < 3'b010 || ea_is_imm) go_illegal;
-						else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FPU_EA);
-					end
-				endcase
-			end
-
-			S_FPU_MVML: begin : fp_mvml
-				// latch the dynamic FMOVEM list, then resolve the EA
-				reg [4:0] cnt;
-				cnt = ({4'd0, rf_rdata_a[7]} + {4'd0, rf_rdata_a[6]} +
-				       {4'd0, rf_rdata_a[5]} + {4'd0, rf_rdata_a[4]} +
-				       {4'd0, rf_rdata_a[3]} + {4'd0, rf_rdata_a[2]} +
-				       {4'd0, rf_rdata_a[1]} + {4'd0, rf_rdata_a[0]}) * 5'd12;
-				fp_list <= rf_rdata_a[7:0];
-				fp_adj <= cnt;
-				if (d_mode == 3'b011 || d_mode == 3'b100) begin
-					rr_a <= {1'b1, d_rn};
-					state <= S_FPU_AN;
-				end
-				else if (d_mode < 3'b010 || ea_is_imm) go_illegal;
-				else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FPU_EA);
-			end
-
-			S_FPU_AN: begin : fp_an
-				// (An)+ / -(An): manual base handling, register written
-				// back only at successful completion (restart safe)
-				reg [4:0] adj;
-				adj = (fp_nb == 4'd1 && d_rn == 3'd7) ? 5'd2 : {1'b0, fp_nb};
-				if (fpu_class[2] == 1'b0 && fpu_class != 3'b010 &&
-				    fpu_class != 3'b011) adj = fp_adj;   // never taken; clarity
-				if (fpu_class == 3'b100 || fpu_class == 3'b101 ||
-				    fpu_class == 3'b110 || fpu_class == 3'b111)
-					adj = fp_adj;
-				fp_adj <= adj;
-				fp_ea_pd <= (d_mode == 3'b100);
-				fp_ea_pi <= (d_mode == 3'b011);
-				t_a <= (d_mode == 3'b100) ? (rf_rdata_a - {27'd0, adj})
-				                          : rf_rdata_a;
-				case (fpu_class)
-					3'b010: state <= S_FPU_RD;
-					3'b011: begin fpu_req <= 1; state <= S_FPU_GO; end
-					3'b100, 3'b101: state <= S_FPU_CR;
-					default: state <= S_FPU_MVM;
-				endcase
-			end
-
-			S_FPU_EA: begin
-				t_a <= ea_addr;
-				case (fpu_class)
-					3'b010: state <= S_FPU_RD;
-					3'b011: begin fpu_req <= 1; state <= S_FPU_GO; end
-					3'b100, 3'b101: state <= S_FPU_CR;
-					default: state <= S_FPU_MVM;
-				endcase
-			end
-
-			S_FPU_DREG: begin
-				// data register source, left aligned by format
-				case (fpu_fmt)
-					3'd4: fpb <= {rf_rdata_a[15:0], 80'd0};
-					3'd6: fpb <= {rf_rdata_a[7:0], 88'd0};
-					default: fpb <= {rf_rdata_a, 64'd0};
-				endcase
-				fpu_req <= 1;
-				state <= S_FPU_GO;
-			end
-
-			S_FPU_IMM: begin
-				// immediate operand: words arrive via the imm register
-				if (fp_n != 4'd0) begin
-					if (fp_nb == 4'd2) fpb[95:80] <= imm[15:0];
-					else if (fp_nb == 4'd1) fpb[95:88] <= imm[7:0];
-					else case (fp_n)
-						4'd1: fpb[95:64] <= imm[31:0];
-						4'd2: fpb[63:32] <= imm[31:0];
-						default: fpb[31:0] <= imm[31:0];
-					endcase
-				end
-				if ((fp_nb <= 4'd2 && fp_n != 4'd0) ||
-				    (fp_nb == 4'd4 && fp_n == 4'd1) ||
-				    (fp_nb == 4'd8 && fp_n == 4'd2) ||
-				    (fp_nb == 4'd12 && fp_n == 4'd3)) begin
-					fpu_req <= 1;
-					state <= S_FPU_GO;
-				end
-				else begin
-					fp_n <= fp_n + 4'd1;
-					immf((fp_nb <= 4'd2) ? 2'd1 : 2'd2, S_FPU_IMM);
-				end
-			end
-
-			S_FPU_RD: begin
-				// memory operand read loop
-				if (fp_n != 4'd0) begin
-					if (fp_nb == 4'd1) fpb[95:88] <= m_val[7:0];
-					else if (fp_nb == 4'd2) fpb[95:80] <= m_val[15:0];
-					else case (fp_n)
-						4'd1: fpb[95:64] <= m_val;
-						4'd2: fpb[63:32] <= m_val;
-						default: fpb[31:0] <= m_val;
-					endcase
-				end
-				if ((fp_nb <= 4'd4 && fp_n != 4'd0) ||
-				    (fp_nb == 4'd8 && fp_n == 4'd2) ||
-				    (fp_nb == 4'd12 && fp_n == 4'd3)) begin
-					fpu_req <= 1;
-					state <= S_FPU_GO;
-				end
-				else begin
-					if (fp_nb == 4'd1)
-						mrd(t_a, `AP040_SZ_B, S_FPU_RD);
-					else if (fp_nb == 4'd2)
-						mrd(t_a, `AP040_SZ_W, S_FPU_RD);
-					else
-						mrd(t_a + {26'd0, fp_n, 2'b00}, `AP040_SZ_L, S_FPU_RD);
-					fp_n <= fp_n + 4'd1;
-				end
-			end
-
-			S_FPU_GO: begin
-				if (fpu_unimp) go_fp_unimp;
-				else if (fpu_exc_req) begin
-					fpu_req <= 0;
-					exc(fpu_exc_vec, 4'd0, pc, pc_i);
-				end
-				else if (fpu_done) begin
-					if (!fp_st) begin
-						if (fp_ea_pd) rfw({1'b1, d_rn}, t_a);
-						else if (fp_ea_pi)
-							rfw({1'b1, d_rn}, t_a + {27'd0, fp_adj});
-						fetch_next;
-					end
-					else if (d_mode == 3'b000) begin : fp_stdn
-						// store to a data register with size merge
-						case (fpu_fmt)
-							3'd4: rfw({1'b0, d_rn},
-							          {rf_rdata_a[31:16], fpu_dout[95:80]});
-							3'd6: rfw({1'b0, d_rn},
-							          {rf_rdata_a[31:8], fpu_dout[95:88]});
-							default: rfw({1'b0, d_rn}, fpu_dout[95:64]);
-						endcase
-						fetch_next;
-					end
-					else begin
-						fp_n <= 0;
-						state <= S_FPU_WR;
-					end
-				end
-			end
-
-			S_FPU_WR: begin
-				// memory store loop from the FPU result
-				if ((fp_nb <= 4'd4 && fp_n != 4'd0) ||
-				    (fp_nb == 4'd8 && fp_n == 4'd2) ||
-				    (fp_nb == 4'd12 && fp_n == 4'd3)) begin
-					if (fp_ea_pd) rfw({1'b1, d_rn}, t_a);
-					else if (fp_ea_pi)
-						rfw({1'b1, d_rn}, t_a + {27'd0, fp_adj});
-					fetch_next;
-				end
-				else begin
-					if (fp_nb == 4'd1)
-						mwr(t_a, `AP040_SZ_B, {24'd0, fpu_dout[95:88]}, S_FPU_WR);
-					else if (fp_nb == 4'd2)
-						mwr(t_a, `AP040_SZ_W, {16'd0, fpu_dout[95:80]}, S_FPU_WR);
-					else begin : fp_wrl
-						reg [31:0] wv;
-						case (fp_n)
-							4'd0: wv = fpu_dout[95:64];
-							4'd1: wv = fpu_dout[63:32];
-							default: wv = fpu_dout[31:0];
-						endcase
-						mwr(t_a + {26'd0, fp_n, 2'b00}, `AP040_SZ_L, wv, S_FPU_WR);
-					end
-					fp_n <= fp_n + 4'd1;
-				end
-			end
-
-			S_FPU_CRD: begin
-				// single control register, register or immediate operand
-				fpu_crsel <= fp_creg[2] ? 2'd2 : (fp_creg[1] ? 2'd1 : 2'd0);
-				if (!fp_st) begin
-					fpu_crwe <= 1;
-					fpu_crwd <= ea_is_imm ? imm : rf_rdata_a;
-					fetch_next;
-				end
-				else state <= S_FPU_CR2;
-			end
-
-			S_FPU_CR2: begin
-				// Control-register read is valid one cycle after crsel.  A
-				// register-direct FMOVE completes here; an FMOVEM list emits
-				// the selected long and returns to the list sequencer.
-				if (d_mode == 3'b000) begin
-					rfw({1'b0, d_rn}, fpu_crrd);
-					fetch_next;
-				end
-				else mwr(t_a, `AP040_SZ_L, fpu_crrd, S_FPU_CR);
-			end
-
-			S_FPU_CR: begin : fp_cr
-				// control register list transfer, FPCR/FPSR/FPIAR order
-				if (fp_n[0]) begin
-					// completion of the previous long
-					if (!fp_st) begin
-						fpu_crwe <= 1;
-						fpu_crwd <= m_val;
-					end
-					t_a <= t_a + 32'd4;
-					fp_n <= 0;
-				end
-				else if (fp_creg == 3'd0) begin
-					if (fp_ea_pd) rfw({1'b1, d_rn}, t_a - {27'd0, fp_adj});
-					else if (fp_ea_pi) rfw({1'b1, d_rn}, t_a);
-					fetch_next;
-				end
-				else begin
-					fpu_crsel <= fp_creg[2] ? 2'd2 : (fp_creg[1] ? 2'd1 : 2'd0);
-					fp_creg <= fp_creg[2] ? {1'b0, fp_creg[1:0]} :
-					           fp_creg[1] ? {fp_creg[2], 1'b0, fp_creg[0]} :
-					                        {fp_creg[2:1], 1'b0};
-					fp_n <= 4'd1;
-					if (fp_st) state <= S_FPU_CR2;   // wait for crrd
-					else mrd(t_a, `AP040_SZ_L, S_FPU_CR);
-				end
-			end
-
-			S_FPU_MVM: begin : fp_mvm_sel
-				// FMOVEM register loop; mode bit 1: postinc order
-				reg [2:0] b;
-				reg found;
-				integer j;
-				found = 0; b = 0;
-				for (j = 7; j >= 0; j = j - 1)
-					if (!found && fp_list[j]) begin
-						b = j[2:0];
-						found = 1;
-					end
-					if (!found) begin
-						if (fp_ea_pd)
-							rfw({1'b1, d_rn}, t_a - {27'd0, fp_adj});
-						else if (fp_ea_pi) rfw({1'b1, d_rn}, t_a);
-					fetch_next;
-				end
-				else begin
-					fp_list <= fp_list & ~(8'd1 << b);
-					fpu_fmsel <= fp_mode[1] ? (3'd7 - b) : b;
-					if (fp_ea_pd) t_a <= t_a;   // base already lowered
-					fp_n <= 0;
-					state <= S_FPU_MVM2;
-				end
-			end
-
-			S_FPU_MVM2: begin
-				// one register = three longs; fm_rdata valid here
-				if (fp_n == 4'd3) begin
-					if (!fp_st) begin
-						fpu_fmwe <= 1;
-						fpu_fmwd <= fpb;
-					end
-					t_a <= t_a + 32'd12;
-					state <= S_FPU_MVM;
-				end
-				else begin : fp_mvm_x
-					reg [31:0] wv;
-					case (fp_n)
-						4'd0: wv = fpu_fmrd[95:64];
-						4'd1: wv = fpu_fmrd[63:32];
-						default: wv = fpu_fmrd[31:0];
-					endcase
-					if (fp_st)
-						mwr(t_a + {28'd0, fp_n[1:0], 2'b00}, `AP040_SZ_L, wv,
-						    S_FPU_MVM3);
-					else
-						mrd(t_a + {28'd0, fp_n[1:0], 2'b00}, `AP040_SZ_L,
-						    S_FPU_MVM3);
-					fp_n <= fp_n + 4'd1;
-				end
-			end
-
-			S_FPU_MVM3: begin
-				if (!fp_st) case (fp_n)
-					4'd1: fpb[95:64] <= m_val;
-					4'd2: fpb[63:32] <= m_val;
-					default: fpb[31:0] <= m_val;
-				endcase
-				state <= S_FPU_MVM2;
-			end
-
-			//--------------------------------------- FBcc / FScc / FDBcc
-			S_FBCC: begin : fbcc
-				reg [31:0] disp;
-				disp = ir[6] ? imm : sxw(imm[15:0]);
-				if (ir[5]) go_fp_unimp;
-				else if (ir[4] && fpu_cc[0] && fpu_bsun_en) begin
-					fpu_bsun <= 1;
-					exc(`AP040_VEC_FP_BSUN, 4'd0, pc, pc_i);
-				end
-				else begin
-					if (ir[4] && fpu_cc[0]) fpu_bsun <= 1;
-					if (fp_cond(ir[5:0], fpu_cc))
-						go_pc(pc_i + 32'd2 + disp);
-					else fetch_next;
-				end
-			end
-
-			S_FSCC0: begin
-				fp_pred <= imm[5:0];
-				if (d_mode == 3'b001) begin
-					// FDBcc Dn,disp
-					rr_a <= {1'b0, d_rn};
-					immf(2'd1, S_FDBCC);
-				end
-				else if (d_mode == 3'b111 && d_rn == 3'b010)
-					immf(2'd1, S_FSCC1);        // FTRAPcc.W
-				else if (d_mode == 3'b111 && d_rn == 3'b011)
-					immf(2'd2, S_FSCC1);        // FTRAPcc.L
-				else if (d_mode == 3'b111 && d_rn == 3'b100)
-					state <= S_FSCC1;           // FTRAPcc
-				else if (d_mode == 3'b000) begin
-					rr_a <= {1'b0, d_rn};
-					state <= S_FSCC1;
-				end
-				else if (ea_is_imm || (d_mode == 3'b111 && d_rn[1]))
-					go_illegal;
-				else ea_start(d_mode, d_rn, `AP040_SZ_B, S_FSCC1);
-			end
-
-			S_FSCC1: begin : fscc1
-				reg c;
-				c = fp_cond(fp_pred, fpu_cc);
-				if (fp_pred[5]) go_fp_unimp;
-				else if (fp_pred[4] && fpu_cc[0] && fpu_bsun_en) begin
-					fpu_bsun <= 1;
-					exc(`AP040_VEC_FP_BSUN, 4'd0, pc, pc_i);
-				end
-				else begin
-					if (fp_pred[4] && fpu_cc[0]) fpu_bsun <= 1;
-				if (d_mode == 3'b111 && (d_rn == 3'b010 || d_rn == 3'b011 ||
-				                         d_rn == 3'b100)) begin
-					// FTRAPcc
-					if (c) exc(`AP040_VEC_TRAPCC, 4'd2, pc, pc_i);
-					else fetch_next;
-				end
-				else if (d_mode == 3'b000) begin
-					rfw({1'b0, d_rn}, {rf_rdata_a[31:8], {8{c}}});
-					fetch_next;
-				end
-				else mwr(ea_addr, `AP040_SZ_B, {24'd0, {8{c}}}, S_NEXT);
-				end
-			end
-
-			S_FDBCC: begin : fdbcc
-				reg [15:0] cnt;
-				if (fp_pred[5]) go_fp_unimp;
-				else if (fp_pred[4] && fpu_cc[0] && fpu_bsun_en) begin
-					fpu_bsun <= 1;
-					exc(`AP040_VEC_FP_BSUN, 4'd0, pc, pc_i);
-				end
-				else begin
-					if (fp_pred[4] && fpu_cc[0]) fpu_bsun <= 1;
-					if (fp_cond(fp_pred, fpu_cc)) fetch_next;
-					else begin
-						cnt = rf_rdata_a[15:0] - 16'd1;
-						rfw({1'b0, d_rn}, {rf_rdata_a[31:16], cnt});
-						if (cnt != 16'hFFFF)
-							go_pc(pc_i + 32'd4 + sxw(imm[15:0]));
-						else fetch_next;
-					end
-				end
-			end
+			// the frame contents are ignored: only NULL frames ever exist
+			S_FREST1: mrd(ea_addr, `AP040_SZ_L, S_NEXT);
 
 			S_RESET_HOLD: begin
 				if (rst_cnt == 8'd0) fetch_next;
@@ -4032,6 +3464,7 @@ always @(posedge clk) begin
 								cinv_ic <= ir[7];
 								cinv_dc <= ir[6];
 								cinv_req <= 1;
+								fb_v0 <= 0; fb_v1 <= 0;
 								state <= S_CINV2;
 							end
 						end
@@ -4044,6 +3477,7 @@ always @(posedge clk) begin
 									if (ir[4]) begin
 										// PFLUSHAN / PFLUSHA
 										pf_req <= 1;
+										fb_v0 <= 0; fb_v1 <= 0;
 										state <= S_PFLUSH2;
 									end
 									else begin
@@ -4061,17 +3495,6 @@ always @(posedge clk) begin
 								end
 							end
 							else exc(`AP040_VEC_FLINE, 4'd0, pc_i, 32'd0);
-						end
-						else if (ir[11:8] == 4'h2) begin
-							// FPU coprocessor space (cpid 1)
-							if (AP040_HAS_FPU == 0)
-								exc(`AP040_VEC_FLINE, 4'd0, pc_i, 32'd0);
-							else case (ir[7:6])
-								2'b00:   immf(2'd1, S_FPU_DEC);   // general
-								2'b01:   immf(2'd1, S_FSCC0);     // FScc/FDBcc/FTRAPcc
-								2'b10:   immf(2'd1, S_FBCC);      // FBcc.W
-								default: immf(2'd2, S_FBCC);      // FBcc.L
-							endcase
 						end
 						else if (ir[11:8] == 4'h3) begin
 							// FSAVE/FRESTORE state-frame model without an FPU:

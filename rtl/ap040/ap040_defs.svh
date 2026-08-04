@@ -65,6 +65,13 @@
 `define AP040_VEC_FMTERR   8'd14
 `define AP040_VEC_AUTOVEC  8'd24   // + interrupt level
 `define AP040_VEC_TRAP     8'd32   // + trap number
+`define AP040_VEC_FP_BSUN  8'd48
+`define AP040_VEC_FP_INEX  8'd49
+`define AP040_VEC_FP_DZ    8'd50
+`define AP040_VEC_FP_UNFL  8'd51
+`define AP040_VEC_FP_OPERR 8'd52
+`define AP040_VEC_FP_OVFL  8'd53
+`define AP040_VEC_FP_SNAN  8'd54
 
 // SR write mask on MC68040: T1 T0 S M IPL2:0 XNZVC
 `define AP040_SR_MASK   16'hF71F

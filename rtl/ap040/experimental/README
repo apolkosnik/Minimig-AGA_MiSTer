@@ -1,0 +1,1 @@
+// Fetch-buffered ap040_core.v, rolled back 2026-08-02: booted DiagROM but not AmigaOS on hardware (sim boots both). See project memory before reusing.

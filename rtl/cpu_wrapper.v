@@ -178,7 +178,11 @@ wire        longword;
 ap040_tg68k_compat #(
 	// internal caches off: cpu_cache_new in the RAM controllers already
 	// provides (snooped) caching on this fabric
-	.AP040_ENABLE_CACHE(0)
+	.AP040_ENABLE_CACHE(0),
+	// FPU hardware subset (milestone H): FMOVE all formats, FMOVEM,
+	// FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FTST with IEEE rounding;
+	// unimplemented ops trap to the FPSP route like real 040 silicon
+	.AP040_HAS_FPU(1)
 ) cpu_inst_p
 (
 	.clk(clk),

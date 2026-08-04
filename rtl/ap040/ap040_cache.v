@@ -98,9 +98,16 @@ end
 wire        ena       = c_instr ? ie : de;
 // the access must sit inside one aligned longword to be served
 wire        fits_long = (c_size == `AP040_SZ_B) ||
-                        (c_size == `AP040_SZ_W && c_addr[1:0] != 2'b11) ||
+                        (c_size == `AP040_SZ_W && !c_addr[0]) ||
                         (c_size == `AP040_SZ_L && c_addr[1:0] == 2'b00);
 wire        bypass    = c_nocache || !ena || c_write || !fits_long;
+
+// Number of bytes following the first byte.  Use a five-bit sum so a
+// transfer ending beyond offset 15 cannot wrap before the comparison.
+wire  [2:0] write_tail = (c_size == `AP040_SZ_B) ? 3'd0 :
+                          (c_size == `AP040_SZ_W) ? 3'd1 : 3'd3;
+wire        write_cross_line = ({1'b0, c_addr[3:0]} +
+                                 {2'd0, write_tail}) > 5'd15;
 
 wire  [5:0] a_set  = c_addr[9:4];
 wire [21:0] a_tag  = c_addr[31:10];
@@ -239,7 +246,7 @@ always @(posedge clk) begin
 						for (k = 0; k < 4; k = k + 1) begin
 							cval[{1'b0, c_addr[9:4], k[1:0]}] <= 0;
 							cval[{1'b0, c_addr[9:4] + 6'd1, k[1:0]}] <=
-								((c_addr[3:0] + {2'd0, c_size} + 4'd1) > 4'hF) ? 1'b0
+								write_cross_line ? 1'b0
 								: cval[{1'b0, c_addr[9:4] + 6'd1, k[1:0]}];
 						end
 						if (m_ack) ;   // pass path acks combinationally

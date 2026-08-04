@@ -149,6 +149,16 @@ always @(posedge clk) begin
 	end
 end
 
+// loop pass detection: the end loop fits in the core's fetch buffer, so
+// after the first pass its fetches never reach the bus, and the buffered
+// dispatch never leaves pc parked on the loop head. Count decodes of the
+// loop head instruction instead (state 4 = S_DECODE, pc_i = its address).
+always @(posedge clk) begin
+	if (nreset && dut.core.ce && dut.core.state == 8'd4 &&
+	    dut.core.pc_i == LOOP_PC)
+		loop_hits = loop_hits + 1;
+end
+
 // bus monitor and write commit, at the qualified completion of a sub-cycle
 always @(posedge clk) begin
 	if (nreset && mem_ready) begin
@@ -191,8 +201,6 @@ always @(posedge clk) begin
 			end
 		end
 
-		if (busstate == 2'b00 && addr_out == LOOP_PC)
-			loop_hits = loop_hits + 1;
 
 		// strobe checks for the byte write to $1007 (odd, LDS only)
 		if (busstate == 2'b11 && addr_out == 32'h0000_1007) begin

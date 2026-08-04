@@ -202,6 +202,27 @@ always @(posedge clk) begin
 end
 
 //---------------------------------------------------------------------------
+// hang dump (+hangdump=N): at cycle N print the recent decode ring and
+// the core's fetch buffer state, then finish
+//---------------------------------------------------------------------------
+
+integer hangdump;
+always @(posedge clk) begin
+	if (nreset && hangdump > 0 && cycles == hangdump) begin
+		$display("HANGDUMP at cycle %0d, recent decodes (oldest first):", cycles);
+		for (i = 63; i >= 0; i = i - 1)
+			$display("  pc=%h ir=%h sr=%h",
+			         dring[(dring_i - 1 - i) & 63][79:48],
+			         dring[(dring_i - 1 - i) & 63][47:32],
+			         dring[(dring_i - 1 - i) & 63][31:16]);
+		$display("core: state=%0d pc=%h pc_i=%h imm=%h imm_n=%0d",
+		         dut.core.state, dut.core.pc, dut.core.pc_i,
+		         dut.core.imm, dut.core.imm_n);
+		report_and_finish;
+	end
+end
+
+//---------------------------------------------------------------------------
 // exception monitor
 //---------------------------------------------------------------------------
 
@@ -291,6 +312,7 @@ initial begin
 	esc_done = 0;
 	if (!$value$plusargs("prog=%s", rom_file)) rom_file = "build/diagrom.hex";
 	if (!$value$plusargs("cycles=%d", max_cycles)) max_cycles = 3000000;
+	if (!$value$plusargs("hangdump=%d", hangdump)) hangdump = 0;
 	$readmemh(rom_file, rom);
 	for (i = 0; i < 1048576; i = i + 1) chipram[i] = 16'h0000;
 

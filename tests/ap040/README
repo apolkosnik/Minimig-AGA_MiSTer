@@ -66,8 +66,8 @@ Build requirements: vasmm68k_mot (vbcc toolchain) and python3; see
 build_tests.sh. Test programs communicate over memory-mapped registers
 ($F100 fail number, $F102 result, $F110 IPL request, $F120 FC check).
 
-Known gaps in the core at milestone C (all take an illegal-instruction or
-F-line trap unless noted; planned in AP040_IMPLEMENTATION_PLAN.md):
+Implementation status and remaining gaps (milestones B-G complete; the
+FPU, milestone H, is the main absence):
 
   - bitfields, CAS, CAS2, CHK2/CMP2 and BTST Dn,#imm are all implemented
     (CAS/CAS2 are not bus locked: single CPU master on this fabric)
@@ -95,7 +95,17 @@ F-line trap unless noted; planned in AP040_IMPLEMENTATION_PLAN.md):
     keeps the caches enabled (compat default is 1) so t_cache.s stays
     meaningful
   - misaligned accesses that fault report MA=0 and restart the whole
-    transfer; caches (milestone G) and the FPU (milestone H) are absent;
-    invalid translations are not cached in the ATC (each access re-walks)
+    transfer; invalid translations are not cached in the ATC (each
+    access re-walks)
+  - FPU (milestone H): ap040_fpu.v implements FPCR/FPSR/FPIAR, B/W/L/S/
+    D/X movement and conversion, FABS/FNEG/FTST/FCMP, and hardware
+    FADD/FSUB/FMUL/FDIV/FSQRT. It supports FPCR rounding/precision,
+    gradual single/double store underflow, canonical extended special
+    values, SNAN/BSUN/DZ and enabled arithmetic-exception vectors.
+    FMOVEM register/control paths, FBcc/FScc/FDBcc/FTRAPcc and NULL/IDLE
+    FSAVE/FRESTORE frames are covered by t_fpu.s. Denormal/unnormal
+    operands, transcendentals, packed decimal and FMOVECR route through
+    vector 11. Full 68040 BUSY/UNIMP FSAVE frames required by a standard
+    FPSP are not implemented. The FPGA build enables AP040_HAS_FPU=1.
   - 8K page mode (TC.P) is covered by t_mmu.s including LA bit 12
     routing, PTEST and fault restart
