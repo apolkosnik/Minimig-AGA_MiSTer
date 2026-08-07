@@ -1889,7 +1889,12 @@ always @(posedge clk) begin
 
 			S_MOVEM_RD: begin : movem_rd
 				reg [31:0] v;
-				v = (mm_predec && mm_reg == {1'b1, d_rn}) ? mm_init_an : rf_rdata_a;
+				// predec MOVEM with the base register in the list: the
+				// 68020/030/040 store the initial value minus the operation
+				// size (the 68000/010 store the undecremented value)
+				v = (mm_predec && mm_reg == {1'b1, d_rn})
+				    ? (mm_init_an - ((mm_size == `AP040_SZ_L) ? 32'd4 : 32'd2))
+				    : rf_rdata_a;
 				if (mm_predec) mwr(mm_addr, mm_size, v, S_MOVEM_LOOP);
 				else begin
 					mwr(mm_addr, mm_size, v, S_MOVEM_LOOP);

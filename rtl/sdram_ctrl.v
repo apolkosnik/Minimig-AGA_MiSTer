@@ -65,7 +65,15 @@ module sdram_ctrl
 	input             cpuU,
 	input      [15:0] cpuWR,
 	output     [15:0] cpuRD,
-	output            ramready
+	output            ramready,
+
+	// Dedicated, cache-bypassing AP040 table-walker port (clk=sysclk).
+	input             walker_req,
+	input             walker_we,
+	input      [24:2] walker_addr,
+	input      [31:0] walker_wdata,
+	output reg        walker_ack,
+	output reg [31:0] walker_rdata
 );
 
 assign sd_cs = 0;
@@ -76,7 +84,17 @@ localparam [2:0]
 	IDLE = 0,
 	CHIP = 1,
 	CPU_READCACHE = 2,
-	CPU_WRITECACHE = 3;
+	CPU_WRITECACHE = 3,
+	WALKER_READ = 4,
+	WALKER_WRITE = 5;
+
+reg         cache_fill;
+reg  [3:0]  initstate;
+reg         init_done;
+reg  [3:0]  sdram_state;
+reg  [2:0]  slot_type = IDLE;
+reg [15:0]  sdata_reg;
+reg         chipWE;
 
 
 ////////////////////////////////////////
@@ -106,6 +124,19 @@ wire ramsel = cpuCS & (~&cpustate | ~cpuU | ~cpuL);
 wire cache_rd_ack;
 wire cache_wr_ack;
 wire cache_req;
+reg         walker_busy;
+reg [24:2]  walker_addr_latch;
+reg [31:0]  walker_wdata_latch;
+(* preserve *) reg [15:0] walker_sdata_pipe;
+reg [15:0]  walker_read_hi;
+reg [15:0]  walker_read_lo;
+wire        walker_snoop = (slot_type == WALKER_WRITE) &&
+				   ((sdram_state == 4'd2) || (sdram_state == 4'd4));
+wire [24:1] walker_snoop_addr = {walker_addr_latch,
+							(sdram_state == 4'd4)};
+wire [15:0] walker_snoop_data = (sdram_state == 4'd4)
+							? walker_wdata_latch[15:0]
+							: walker_wdata_latch[31:16];
 cpu_cache_new cpu_cache
 (
 	.clk              (sysclk),                // clock
@@ -125,13 +156,12 @@ cpu_cache_new cpu_cache
 	.sdr_dat_r        (sdata_reg),             // sdram read data
 	.sdr_read_req     (cache_req),             // sdram read request from cache
 	.sdr_read_ack     (cache_fill),            // sdram read acknowledge to cache
-	.snoop_act        (chipWE),                // snoop act (write only - just update existing data in cache)
-	.snoop_adr        (chipAddr),              // snoop address
-	.snoop_dat_w      (chipWR),                // snoop write data
-	.snoop_bs         ({!chipU, !chipL})       // snoop byte selects
+	.snoop_act        (chipWE | walker_snoop), // keep cached page-table words coherent
+	.snoop_adr        (walker_snoop ? walker_snoop_addr : chipAddr),
+	.snoop_dat_w      (walker_snoop ? walker_snoop_data : chipWR),
+	.snoop_bs         (walker_snoop ? 2'b11 : {!chipU, !chipL})
 );
 
-reg cache_fill;
 always @ (posedge sysclk) begin
 	cache_fill <= 0;
 
@@ -213,8 +243,6 @@ assign chip48 = {chip48_1, chip48_2, chip48_3};
 
 
 //// init counter ////
-reg [3:0] initstate;
-reg       init_done;
 always @ (posedge sysclk) begin
 	if(!reset) begin
 		initstate <= 0;
@@ -229,7 +257,6 @@ end
 
 
 //// sdram state ////
-reg [3:0] sdram_state;
 always @ (posedge sysclk) begin
 	reg old_7m;
 
@@ -241,9 +268,62 @@ end
 
 //// sdram control ////
 
-reg  [2:0] slot_type = IDLE;
-reg [15:0] sdata_reg;
-reg        chipWE;
+// The walker request is registered before it reaches the slot arbiter.  It
+// arrives gated by the SDRAM/DDR3 bank decode, which is several levels of
+// logic past the clock-domain-crossing register, and feeding that directly
+// into the priority chain and the row-address mux was the critical path of
+// the whole 113MHz domain.  The handshake is level held until ack, so one
+// cycle of extra acceptance latency changes nothing functionally.
+reg walker_req_q;
+always @(posedge sysclk) begin
+	if (!reset_n) walker_req_q <= 1'b0;
+	else          walker_req_q <= walker_req && !walker_busy;
+end
+
+wire walker_grant = init_done && (sdram_state == 4'd0) &&
+				    !walker_busy && walker_req_q && walker_req &&
+				    !((~chipDMA) | (~chipRW)) && !write_req;
+
+// Capture native walker completions. The request remains level-held across
+// the transfer; walker_busy prevents it from being accepted twice.
+always @(posedge sysclk) begin
+	if (!reset_n) begin
+		walker_busy        <= 0;
+		walker_addr_latch  <= 0;
+		walker_wdata_latch <= 0;
+		walker_sdata_pipe  <= 0;
+		walker_read_hi     <= 0;
+		walker_read_lo     <= 0;
+		walker_ack         <= 0;
+		walker_rdata       <= 0;
+	end
+	else begin
+		// Keep the SDRAM input register's new fanout to one simple local
+		// register.  Besides easing the 114 MHz path, the extra stages make
+		// the longword assembly independent of the controller's burst timing.
+		walker_sdata_pipe <= sdata_reg;
+		walker_ack <= 0;
+		if (!walker_req) walker_busy <= 0;
+		if (walker_grant) begin
+			walker_busy        <= 1;
+			walker_addr_latch  <= walker_addr;
+			walker_wdata_latch <= walker_wdata;
+		end
+
+		if (slot_type == WALKER_READ) begin
+			if (sdram_state == 4'd9)
+				walker_read_hi <= walker_sdata_pipe;
+			if (sdram_state == 4'd11)
+				walker_read_lo <= walker_sdata_pipe;
+			if (sdram_state == 4'd12) begin
+				walker_rdata <= {walker_read_hi, walker_read_lo};
+				walker_ack   <= 1;
+			end
+		end
+		else if ((slot_type == WALKER_WRITE) && (sdram_state == 4'd6))
+			walker_ack <= 1;
+	end
+end
 
 always @ (posedge sysclk) begin
 	reg        cas_sd_cas;
@@ -328,6 +408,15 @@ always @ (posedge sysclk) begin
 					write_ack    <= 1; // let the write buffer know we're about to write
 					datawr       <= writeDat;
 				end
+				else if(walker_grant) begin
+					slot_type    <= walker_we ? WALKER_WRITE : WALKER_READ;
+					{sd_ba,sd_addr,casaddr[8:0]} <= {walker_addr, 1'b0};
+					sd_ras       <= 0;
+					cas_dqm      <= 0;
+					cas_sd_cas   <= 0;
+					cas_sd_we    <= ~walker_we;
+					datawr       <= walker_wdata[31:16];
+				end
 				// request from read cache
 				else if(cache_req) begin
 					slot_type    <= CPU_READCACHE;
@@ -356,6 +445,16 @@ always @ (posedge sysclk) begin
 				end
 				write_ack       <= 0; // indicate to write that it's safe to accept the next write
 			end
+
+			// A walker write supplies the first two words of the configured
+			// four-word SDRAM burst and masks the remaining beats.
+			4 : if (slot_type == WALKER_WRITE) begin
+				sd_data <= walker_wdata_latch[15:0];
+				sd_dqm  <= 0;
+			end
+
+			6 : if (slot_type == WALKER_WRITE)
+				sd_dqm <= 3;
 		endcase
 	end
 end

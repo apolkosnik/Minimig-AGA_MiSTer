@@ -259,6 +259,7 @@ wire  [1:0] cpu_state;
 wire        cpu_nrst_out;
 wire  [3:0] cpu_cacr;
 wire [31:0] cpu_nmi_addr;
+wire        cpu_nmi_ack_toggle;
 wire        cpu_rst;
 
 wire  [2:0] chip_ipl;
@@ -280,6 +281,25 @@ wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
 wire        zram_sel  = |ram_addr[28:26];
 wire        ramshared;
+wire        cpu_cache_inhibit;
+
+// AP040 table-search port.  The CPU-side request crosses into clk_114 once,
+// then goes directly to the selected RAM controller as one 32-bit transfer.
+wire        walker_req_cpu, walker_we_cpu, walker_ddr_cpu, walker_bad_cpu;
+wire [28:2] walker_addr_cpu;
+wire [31:0] walker_wdat_cpu, walker_rdata_cpu;
+wire        walker_ack_cpu, walker_berr_cpu;
+wire        walker_req_mem, walker_we_mem, walker_ddr_mem;
+wire [28:2] walker_addr_mem;
+wire [31:0] walker_wdat_mem;
+wire        walker_ack_mem, walker_berr_mem;
+wire [31:0] walker_rdata_mem;
+wire        walker_ack1, walker_ack2;
+wire [31:0] walker_rdata1, walker_rdata2;
+
+assign walker_ack_mem   = walker_ddr_mem ? walker_ack2   : walker_ack1;
+assign walker_rdata_mem = walker_ddr_mem ? walker_rdata2 : walker_rdata1;
+assign walker_berr_mem  = 1'b0;
 
 wire [7:0] toccata_base;
 wire toccata_ena;
@@ -331,12 +351,50 @@ cpu_wrapper cpu_wrapper
 	.ramdout      (ram_dout        ),
 	.ramdin       (ram_din         ),
 	.ramready     (ram_ready       ),
+	.cache_inhibit(cpu_cache_inhibit ),
 	.ramshared    (ramshared       ),
+
+	.walker_mem_req  (walker_req_cpu  ),
+	.walker_mem_we   (walker_we_cpu   ),
+	.walker_mem_addr (walker_addr_cpu ),
+	.walker_mem_wdat (walker_wdat_cpu ),
+	.walker_mem_ddr  (walker_ddr_cpu  ),
+	.walker_mem_bad  (walker_bad_cpu  ),
+	.walker_mem_ack  (walker_ack_cpu  ),
+	.walker_mem_rdata(walker_rdata_cpu),
+	.walker_mem_berr (walker_berr_cpu ),
 
 	//custom CPU signals
 	.cpustate     (cpu_state       ),
 	.cacr         (cpu_cacr        ),
+	.nmi_ack_toggle(cpu_nmi_ack_toggle),
 	.nmi_addr     (cpu_nmi_addr    )
+);
+
+ap040_walker_cdc walker_cdc
+(
+	.s_clk     (clk_sys),
+	.s_reset_n (cpu_rst),
+	.s_req     (walker_req_cpu),
+	.s_we      (walker_we_cpu),
+	.s_addr    (walker_addr_cpu),
+	.s_wdata   (walker_wdat_cpu),
+	.s_ddr     (walker_ddr_cpu),
+	.s_bad     (walker_bad_cpu),
+	.s_ack     (walker_ack_cpu),
+	.s_rdata   (walker_rdata_cpu),
+	.s_berr    (walker_berr_cpu),
+
+	.m_clk     (clk_114),
+	.m_reset_n (~reset_d),
+	.m_req     (walker_req_mem),
+	.m_we      (walker_we_mem),
+	.m_addr    (walker_addr_mem),
+	.m_wdata   (walker_wdat_mem),
+	.m_ddr     (walker_ddr_mem),
+	.m_ack     (walker_ack_mem),
+	.m_rdata   (walker_rdata_mem),
+	.m_berr    (walker_berr_mem)
 );
 
 wire [15:0] ram_dout1;
@@ -368,8 +426,16 @@ sdram_ctrl ram1
 	.cpuL         (ram_lds         ),
 	.cpustate     (cpu_state       ),
 	.cpuCS        (~zram_sel&ram_cs),
+	.cache_inhibit(cpu_cache_inhibit ),
 	.cpuRD        (ram_dout1       ),
 	.ramready     (ram_ready1      ),
+
+	.walker_req   (walker_req_mem & ~walker_ddr_mem),
+	.walker_we    (walker_we_mem),
+	.walker_addr  (walker_addr_mem[24:2]),
+	.walker_wdata (walker_wdat_mem),
+	.walker_ack   (walker_ack1),
+	.walker_rdata (walker_rdata1),
 
 	.chipWR       (ram_data        ),
 	.chipAddr     (ram_address     ),
@@ -419,9 +485,17 @@ ddram_ctrl ram2
 	.cpuL         (ram_lds         ),
 	.cpustate     (cpu_state       ),
 	.cpuCS        (zram_sel&ram_cs ),
+	.cache_inhibit(cpu_cache_inhibit ),
 	.cpuRD        (ram_dout2       ),
 	.ramshared    (ramshared       ),
-	.ramready     (ram_ready2      )
+	.ramready     (ram_ready2      ),
+
+	.walker_req   (walker_req_mem & walker_ddr_mem),
+	.walker_we    (walker_we_mem),
+	.walker_addr  (walker_addr_mem),
+	.walker_wdata (walker_wdat_mem),
+	.walker_ack   (walker_ack2),
+	.walker_rdata (walker_rdata2)
 );
 
 ////////////////////////////  A2065 ETHERNET  ///////////////////////////////
@@ -559,6 +633,7 @@ minimig minimig
 	._cpu_reset   (cpu_rst          ), // M68K reset
 	._cpu_reset_in(cpu_nrst_out     ), // M68K reset out
 	.nmi_addr     (cpu_nmi_addr     ), // M68K NMI address
+	.nmi_ack_toggle(cpu_nmi_ack_toggle), // AP040 level-7 acceptance event
 
 	//sram pins
 	.ram_data     (ram_data         ), // SRAM data bus

@@ -19,8 +19,8 @@
 //                                                                          //
 // Known gaps, all documented in tests/ap040/README:                        //
 //  - TAS/CAS/CAS2 are not bus-locked (single-master fabric here)           //
-//  - berr input is ignored: only MMU faults raise format $7, physical      //
-//    bus errors do not (the wrapper ties berr low)                         //
+//  - MMU faults and physical berr both raise format $7; the SSW ATC bit   //
+//    distinguishes a translation fault from a physical bus error          //
 //  - interrupts are always autovectored (ipl_autovector is ignored)        //
 //  - no FPU: arithmetic F-ops take the F-line trap (milestone H)           //
 //                                                                          //
@@ -80,6 +80,10 @@ module ap040_core
 	input       [2:0] ipl,
 	input             ipl_autovector,
 	input             berr,
+	// Retained event for legacy peripherals which need to observe that a
+	// level-7 interrupt was accepted.  A toggle is used so a slower clock
+	// enable domain cannot miss the event.
+	output            nmi_ack_toggle,
 
 	output            nresetout,
 	output     [31:0] cacr_out,
@@ -127,23 +131,43 @@ assign pf_fc    = dfc;
 reg [2:0] ipl_s1, ipl_s2;
 reg [2:0] irq_lvl;
 reg       nmi_arm;
+reg       nmi_ack_t;              // toggled by the FSM when an NMI is taken
+reg       nmi_ack_d;              // sampler-side shadow of nmi_ack_t
+assign nmi_ack_toggle = nmi_ack_t;
 always @(posedge clk) begin
 	if (!nreset) begin
 		ipl_s1 <= 3'b111;
 		ipl_s2 <= 3'b111;
 		irq_lvl <= 3'd0;
+		nmi_arm <= 1'b0;
+		nmi_ack_d <= 1'b0;
 	end
 	else begin
 		ipl_s1 <= ipl;
 		ipl_s2 <= ipl_s1;
-		if (ipl_s1 == ipl_s2) irq_lvl <= ~ipl_s2;
+		if (ipl_s1 == ipl_s2) begin
+			irq_lvl <= ~ipl_s2;
+			// Re-arm the edge-triggered level 7 as soon as the pins leave
+			// it.  This tracks the pins rather than instruction execution,
+			// so an NMI cannot be missed because the CPU happened to be
+			// stalled waiting on memory (nmi_ack clears it on acceptance).
+			if (~ipl_s2 != 3'd7) nmi_arm <= 1;
+		end
+		// acceptance wins over re-arming in the same cycle
+		nmi_ack_d <= nmi_ack_t;
+		if (nmi_ack_t != nmi_ack_d) nmi_arm <= 0;
 	end
 end
 
 wire irq_pend = (irq_lvl == 3'd7 && nmi_arm) ||
                 (irq_lvl != 3'd0 && irq_lvl > sr[10:8]);
 
-wire unused_in = ipl_autovector | berr;
+wire unused_in = ipl_autovector;
+
+// An access error comes either from the MMU (translation fault) or from the
+// bus (a physical bus error: no device answered).  Both are only sampled
+// while a transfer is outstanding, which is the only time they are tested.
+wire mem_err = mem_flt | berr;
 
 //---------------------------------------------------------------------------
 // register file
@@ -399,6 +423,10 @@ localparam S_FDBCC     = 8'd170;
 localparam S_FREST2    = 8'd171;
 localparam S_FPU_MVML  = 8'd172;
 localparam S_FPU_CRD   = 8'd173;
+localparam S_EXC4B     = 8'd174;
+localparam S_MRD_B     = 8'd175;
+localparam S_MWR_B     = 8'd176;
+localparam S_FPU_CRI   = 8'd177;
 
 // exec kinds
 localparam EK_ALU     = 4'd0;
@@ -433,6 +461,8 @@ localparam RK_RTD = 2'd2;
 //---------------------------------------------------------------------------
 
 reg  [7:0] r_imm_ret, r_ea_ret, r_m_ret;
+reg  [2:0] m_bidx;                // byte index of a split transfer
+reg [31:0] m_acc;                 // assembled bytes of a split transfer
 reg  [1:0] imm_n;
 reg        if_issued, m_issued;
 reg [31:0] imm;
@@ -470,10 +500,17 @@ reg  [3:0] exc_fmt;
 reg [31:0] exc_spc, exc_addr, exc_sp;
 reg        exc_is_irq, exc_pass2;
 reg [15:0] sr_saved;
+reg        sr_fovr_v;            // one-shot: next frame stacks sr_fovr
+reg [15:0] sr_fovr;              //   (RTE/RTR odd-PC 68040 SR quirk)
+reg [15:0] rte_oldsr;            // SR before the RTE / last throwaway SR
+reg        texc_pend;            // 040: T0 trace survives a non-internal
+reg [31:0] texc_pc;              //   integer exception; fires at handler
 reg  [2:0] irq_lvl_l;
 
 reg [15:0] rte_sr;
 reg [31:0] rte_pc;
+wire rte_irq_pend = (irq_lvl == 3'd7 && nmi_arm) ||
+                    (irq_lvl != 3'd0 && irq_lvl > rte_sr[10:8]);
 
 reg  [1:0] ret_kind;
 reg [31:0] br_base, br_tgt;
@@ -496,6 +533,10 @@ reg        srop_sr;            // to SR (else CCR)
 
 reg        mvc_dir;            // 1 = general to control
 reg        fc_ovr_v;
+reg        lk_cyc;               // TAS/CAS/CAS2 locked-RMW operand cycle
+reg        aer_lk, aer_m16;      // SSW LK; MOVE16 line-fault shape
+reg  [1:0] aer_tt;               // SSW TT (MOVES to FC 0/3/4/7 reports TT1)
+reg [31:0] aer_wd;               // faulted write data for the WB3 slot
 reg  [2:0] fc_ovr;
 
 reg  [2:0] m16_form;
@@ -509,9 +550,10 @@ reg  [7:0] rst_cnt;
 reg        fault_r;
 reg  [2:0] fc_r;
 
-// trace: T bits sampled at instruction start; T0 traces only on a
-// change of flow (the go_pc path)
-reg        tr_t1, tr_t0;
+// Trace bits sampled when the instruction starts.  T0 includes actual
+// control-flow changes plus the 68040's pipeline-synchronizing instruction
+// list (NOP, SR/control-register changes, cache/MMU maintenance, etc.).
+reg        tr_t1, tr_t0, t0_force;
 
 // bitfield and CAS working registers. The bitfield datapath is spread
 // over several states so each stage holds at most one wide variable
@@ -532,7 +574,9 @@ reg [31:0] cas_dc;
 
 // access error (format $7) context and EA register-update rollback
 reg        in_exc;              // exception stacking in progress
-reg [31:0] aer_addr, aer_sp;
+reg [31:0] aer_fa, aer_sp;
+reg        aer_bus;          // fault came from the bus, not the ATC
+reg        aer_ma;           // ATC fault occurred on second page of transfer
 reg        aer_wr;
 reg  [1:0] aer_sz;
 reg  [2:0] aer_tm;
@@ -560,6 +604,10 @@ wire [1:0] move_size = (ir[13:12] == 2'b01) ? `AP040_SZ_B :
 wire [1:0] std_size  = ir[7:6];   // 00=B 01=W 10=L
 
 wire ea_is_imm     = (d_mode == 3'b111) && (d_rn == 3'b100);
+// Destination is not data alterable: an address register, program space
+// (both PC-relative encodings) or an immediate operand.
+wire dst_not_alt   = (d_mode == 3'b001) ||
+                     (d_mode == 3'b111 && d_rn > 3'b001);
 
 function [31:0] sxw;
 	input [15:0] v;
@@ -745,11 +793,15 @@ reg   [7:0] fp_list;              // FMOVEM register list (as processed)
 reg   [1:0] fp_mode;              // FMOVEM mode bits
 reg   [2:0] fp_creg;              // control list bits {FPCR,FPSR,FPIAR}
 reg   [5:0] fp_pred;              // FScc/FDBcc/FTRAPcc predicate
+reg         fp_rev;               // FMOVEM 040 quirk: reverse longword order
+reg         fp_lsb;               // FMOVEM predec store: mask consumed LSB first
 reg   [3:0] fp_n;                 // loop index
 reg         fp_ea_pd, fp_ea_pi;   // predecrement / postincrement EA
+reg         fp_ea_v;              // t_a holds a resolved operand address
+reg         fp_force_unsupp;      // packed store: trap after resolving EA
 reg   [4:0] fp_adj;               // total An adjustment in bytes
 
-wire        fpu_done, fpu_unimp, fpu_exc_req, fpu_used;
+wire        fpu_done, fpu_unimp, fpu_unsupp, fpu_exc_req, fpu_used;
 wire        fpu_bsun_en;
 wire  [7:0] fpu_exc_vec;
 wire [95:0] fpu_dout;
@@ -763,7 +815,7 @@ generate if (AP040_HAS_FPU) begin : g_fpu
 		.clk(clk), .nreset(nreset), .ce(ce),
 		.req(fpu_req), .op_class(fpu_class), .opmode(fpu_opm),
 		.src_fmt(fpu_fmt), .src_r(fpu_srcr), .dst_r(fpu_dstr),
-		.din(fpb), .done(fpu_done), .unimp(fpu_unimp),
+		.din(fpb), .done(fpu_done), .unimp(fpu_unimp), .unsupp(fpu_unsupp),
 		.exc_req(fpu_exc_req), .exc_vec(fpu_exc_vec), .dout(fpu_dout),
 		.fpcc(fpu_cc),
 		.cr_sel(fpu_crsel), .cr_we(fpu_crwe), .cr_wdata(fpu_crwd),
@@ -777,6 +829,7 @@ generate if (AP040_HAS_FPU) begin : g_fpu
 end else begin : g_nofpu
 	assign fpu_done = 0;
 	assign fpu_unimp = 0;
+	assign fpu_unsupp = 0;
 	assign fpu_exc_req = 0;
 	assign fpu_exc_vec = 0;
 	assign fpu_bsun_en = 0;
@@ -829,12 +882,94 @@ function fp_cond;
 	end
 endfunction
 
+// Non-branch instructions which the MC68040 defines as changes of flow for
+// T0 tracing because they synchronize/refill the instruction pipeline.
+// Taken branches/returns are handled by go_pc; FDBcc/FMOVEM need extension
+// word information and set t0_force in their decode states.
+function t0_special;
+	input [15:0] op;
+	begin
+		t0_special =
+		    op == 16'h007c || op == 16'h027c || op == 16'h0a7c || // to SR
+		    op == 16'h4e71 || op == 16'h4e72 ||                    // NOP/STOP
+		    op == 16'h4e7a || op == 16'h4e7b ||                    // MOVEC
+		    (op & 16'hfff0) == 16'h4e60 ||                         // MOVE USP
+		    (op & 16'hffc0) == 16'h46c0 ||                         // MOVE to SR
+		    (op & 16'hffc0) == 16'h4ac0 ||                         // TAS
+		    (op[15:12] == 4'h0 && op[11:9] == 3'b111 &&
+		     op[7:6] != 2'b11) ||                                  // MOVES
+		    (op[15:12] == 4'h0 && op[11] && op[7:6] == 2'b11 &&
+		     op[10:9] != 2'b00) ||                                 // CAS/CAS2
+		    op[15:8] == 8'hf4 || op[15:8] == 8'hf5 ||              // CINV/CPUSH/PFLUSH/PTEST
+		    op[15:8] == 8'hf3;                                     // FSAVE/FRESTORE
+	end
+endfunction
+
 // unimplemented FP instruction: vector 11, format $2, address = the
 // faulting FP instruction (the FPSP re-executes from the frame)
 task go_fp_unimp;
 	begin
 		fpu_req <= 0;
 		exc(`AP040_VEC_FLINE, 4'd2, pc, pc_i);
+	end
+endtask
+
+// Unsupported data type (denormal/unnormal operands, packed decimal).
+// EVERY vector-55 fault stacks format $3: opclass 011 stores carry the
+// next PC and the destination address; source faults keep the PC on the
+// FP instruction with the source address in EA -- and when the source
+// has no address (register or immediate operand) the EA field simply
+// reads zero.  Hardware cputest FABS.P #imm and FDMOVE.S Dn both expect
+// 00,00,42,05,00,00,30,dc,00,00,00,00; the format-$0 no-EA variant this
+// implementation used before came from the UM's "pre-instruction" prose
+// and does not match the reference (WinUAE raises all of these through
+// its post-instruction path with regs.fp_ea = 0).
+task go_fp_unsupp;
+	input        post;
+	input        has_ea;
+	input [31:0] ea;
+	begin
+		fpu_req <= 0;
+		if (post) exc(`AP040_VEC_FP_UNSUP, 4'd3, pc, ea);
+		else      exc(`AP040_VEC_FP_UNSUP, 4'd3, pc_i, has_ea ? ea : 32'd0);
+	end
+endtask
+
+// 68040 F-line opmode classification (WinUAE fault_if_nonexisting_opmode):
+// 0 = existing (hardware, or the unimplemented-instruction FPSP route with
+// its format-$2 frame); 1 = nonexisting, reported IMMEDIATELY as vector 11
+// with the plain format-$0 frame and NO FPIAR or FPSR side effects;
+// 2 = opmodes $78-$7F, which the 040 reports as vector 4 of all things
+// (WinUAE: "Unexpected, isn't it?!").
+function [1:0] fp_opmode_class;
+	input [6:0] op;
+	begin
+		case (op)
+			7'h05, 7'h07, 7'h0B, 7'h13, 7'h17, 7'h1B,
+			7'h29, 7'h2A, 7'h2B, 7'h2C, 7'h2D, 7'h2E, 7'h2F,
+			7'h39, 7'h3B, 7'h3C, 7'h3D, 7'h3E, 7'h3F,
+			7'h42, 7'h43, 7'h46, 7'h47,
+			7'h48, 7'h49, 7'h4A, 7'h4B, 7'h4C, 7'h4D, 7'h4E, 7'h4F,
+			7'h50, 7'h51, 7'h52, 7'h53, 7'h54, 7'h55, 7'h56, 7'h57,
+			7'h59, 7'h5B, 7'h5D, 7'h5F,
+			7'h61, 7'h65, 7'h69, 7'h6A, 7'h6B, 7'h6D, 7'h6E, 7'h6F,
+			7'h70, 7'h71, 7'h72, 7'h73, 7'h74, 7'h75, 7'h76, 7'h77:
+				fp_opmode_class = 2'd1;
+			7'h78, 7'h79, 7'h7A, 7'h7B, 7'h7C, 7'h7D, 7'h7E, 7'h7F:
+				fp_opmode_class = 2'd2;
+			default:
+				fp_opmode_class = 2'd0;
+		endcase
+	end
+endfunction
+
+// Malformed FPU command/effective-address combinations are still F-line
+// opcodes.  The 68040 reports vector 11 with the normal format-$0 frame;
+// this is distinct from the format-$2 FPSP route above.
+task go_fp_fline;
+	begin
+		fpu_req <= 0;
+		exc(`AP040_VEC_FLINE, 4'd0, pc_i, 32'd0);
 	end
 endtask
 
@@ -864,6 +999,19 @@ task immf;
 		r_imm_ret <= ret; state <= S_IMMF;
 	end
 endtask
+
+// A data transfer that crosses a page boundary would be translated once
+// and then incremented physically by the bus adapter, so the second page
+// would be accessed through the first page's mapping.  Such transfers are
+// issued one byte at a time instead: every byte is translated on its own,
+// faults report the byte that failed, and the history bits of both pages
+// are updated.  Only misaligned transfers can cross a boundary.
+wire  [2:0] m_nbytes = (m_size == `AP040_SZ_B) ? 3'd1 :
+                       (m_size == `AP040_SZ_W) ? 3'd2 : 3'd4;
+wire [31:0] m_pgmask = tc[14] ? 32'h0000_1FFF : 32'h0000_0FFF;
+wire        m_cross  = tc[15] &&
+                       (((m_addr_r & m_pgmask) + {29'd0, m_nbytes}) >
+                        (m_pgmask + 32'd1));
 
 task mrd;
 	input [31:0] a;
@@ -906,6 +1054,21 @@ task exc;
 	begin
 		exc_vec <= vec; exc_fmt <= fmt; exc_spc <= spc; exc_addr <= addr;
 		exc_is_irq <= 0; exc_pass2 <= 0;
+		// A pending T0 trace is cancelled by the 040's internal exceptions
+		// (CHK/TRAPcc/divide/TRAP#n) but SURVIVES the non-internal integer
+		// ones -- illegal, privilege, A-line and the format-$0 F-line -- and
+		// fires before the handler's first instruction (WinUAE
+		// Exception_cpu_oldpc + internalexception).
+		if (fmt == 4'd0 && tr_t0 && !tr_t1 &&
+		    (vec == `AP040_VEC_ILLEGAL || vec == `AP040_VEC_PRIV ||
+		     vec == `AP040_VEC_ALINE || vec == `AP040_VEC_FLINE)) begin
+			texc_pend <= 1;
+			texc_pc <= pc_i;
+		end
+		// Exception stack and vector accesses are always supervisor-data
+		// references.  In particular, do not let a faulting MOVES retain its
+		// SFC/DFC override into exception processing.
+		fc_ovr_v <= 0;
 		mem_req <= 0;
 		state <= S_EXC0;
 	end
@@ -914,10 +1077,30 @@ endtask
 // access error entry: capture the fault shape from the outstanding request
 task aerr_start;
 	begin
-		aer_addr <= mem_addr;
+		aer_bus  <= berr && !mem_flt;   // physical bus error, not an ATC fault
+		// FA is the initial byte of the original transfer, even when a
+		// page-crossing access has been split and a later byte faults.
+		aer_fa   <= mem_instr ? mem_addr : m_addr_r;
 		aer_wr   <= mem_write;
-		aer_sz   <= mem_size;
-		aer_tm   <= fc_r;
+		aer_sz   <= (!mem_instr && m_cross) ? m_size : mem_size;
+		aer_wd   <= (!mem_instr && m_cross) ? m_wdat : mem_wdata;
+		aer_lk   <= lk_cyc;
+		// memory ops wait in S_MRD/S_MWR: the requesting context is
+		// identified by the continuation state, not by `state` itself
+		aer_m16  <= !mem_instr &&
+		            (r_m_ret >= S_M16_RD2 && r_m_ret <= S_M16_INC2);
+		// MOVES faults report the alternate space in TT/TM: FC 0, 3, 4 and 7
+		// keep the raw FC with TT = 10; FC 2 and 6 are remapped onto the
+		// corresponding data space (WinUAE mmu_bus_error's ismoves block)
+		aer_tt   <= (fc_ovr_v && (fc_r[1:0] == 2'b00 || fc_r[1:0] == 2'b11))
+		            ? 2'b10 : 2'b00;
+		aer_tm   <= (fc_ovr_v && (fc_r[1:0] == 2'b00 || fc_r[1:0] == 2'b11)) ? fc_r :
+		            (fc_ovr_v && fc_r[1]) ? {fc_r[2], 2'b01} : fc_r;
+		aer_ma   <= mem_flt && !mem_instr && m_cross &&
+		            ((mem_addr & ~m_pgmask) != (m_addr_r & ~m_pgmask));
+		// Preserve fc_r above for the SSW, then force all frame/vector cycles
+		// back to supervisor data space.
+		fc_ovr_v <= 0;
 		mem_req  <= 0;
 		state    <= S_AERR0;
 	end
@@ -937,6 +1120,17 @@ task u_rec;
 	end
 endtask
 
+// Access-error SSW.  CP/CU/CT/CM stay clear: pure instruction restart.
+// MOVE16 line faults report SIZE = line with TT0; locked TAS/CAS cycles
+// report LK with RW clear (WinUAE mmu_bus_error).
+wire [15:0] aer_ssw = {4'b0000, aer_ma, ~aer_bus, aer_lk,
+                       (~aer_wr & ~aer_lk), 1'b0,
+                       aer_m16 ? 2'b11 :
+                       (aer_sz == `AP040_SZ_B) ? 2'b01 :
+                       (aer_sz == `AP040_SZ_W) ? 2'b10 : 2'b00,
+                       aer_m16 ? 2'b01 : aer_tt,
+                       aer_tm};
+
 // format $7 frame contents, one word per index (30 words)
 function [15:0] aerr_word;
 	input [4:0] idx;
@@ -946,14 +1140,23 @@ function [15:0] aerr_word;
 			5'd1:  aerr_word = pc_i[31:16];
 			5'd2:  aerr_word = pc_i[15:0];
 			5'd3:  aerr_word = 16'h7008;               // format $7, vector 2
-			5'd4:  aerr_word = aer_addr[31:16];        // effective address
-			5'd5:  aerr_word = aer_addr[15:0];
-			5'd6:  aerr_word = {4'b0000, 1'b0, 1'b1, 1'b0, ~aer_wr, 1'b0,
-			                    (aer_sz == `AP040_SZ_B) ? 2'b01 :
-			                    (aer_sz == `AP040_SZ_W) ? 2'b10 : 2'b00,
-			                    2'b00, aer_tm};        // SSW: ATC fault
-			5'd10: aerr_word = aer_addr[31:16];        // fault address
-			5'd11: aerr_word = aer_addr[15:0];
+			// WinUAE stacks the fault address in EA as well (aligned to the
+			// line for MOVE16); handlers that honour CM/CT never see those
+			// bits set here, so the field is informational
+			5'd4:  aerr_word = aer_fa[31:16];
+			5'd5:  aerr_word = aer_m16 ? {aer_fa[15:4], 4'd0} : aer_fa[15:0];
+			5'd6:  aerr_word = aer_ssw;
+			// WB3 carries the faulted write so a handler may complete it;
+			// the valid bit stays clear for MOVE16 (WinUAE clears it and
+			// uses a WB2 line writeback, which this restart model omits)
+			5'd7:  aerr_word = (aer_wr && !aer_m16)
+			                   ? {8'd0, 1'b1, aer_ssw[6:0]} : 16'd0;
+			5'd10: aerr_word = aer_fa[31:16];          // initial fault address
+			5'd11: aerr_word = aer_fa[15:0];
+			5'd12: aerr_word = aer_fa[31:16];          // WB3A
+			5'd13: aerr_word = aer_fa[15:0];
+			5'd14: aerr_word = aer_wd[31:16];          // WB3D
+			5'd15: aerr_word = aer_wd[15:0];
 			default: aerr_word = 16'd0;                // writeback/push slots
 		endcase
 	end
@@ -962,9 +1165,10 @@ endfunction
 task fetch_next;
 	begin
 		fc_ovr_v <= 0;
+		lk_cyc <= 0;
 		u0_v <= 0;
 		u1_v <= 0;
-		if (tr_t1) begin
+		if (tr_t1 || (tr_t0 && t0_force)) begin
 			tr_t1 <= 0;
 			exc(`AP040_VEC_TRACE, 4'd2, pc, pc_i);
 		end
@@ -983,6 +1187,9 @@ task fetch_next;
 	end
 endtask
 
+wire [31:0] exc_fsize = (exc_fmt == 4'd2 || exc_fmt == 4'd3) ? 32'd12 :
+                        (exc_fmt == 4'd4) ? 32'd16 : 32'd8;
+
 task go_illegal;
 	begin
 		exc(`AP040_VEC_ILLEGAL, 4'd0, pc_i, 32'd0);
@@ -999,7 +1206,9 @@ endtask
 task go_pc;
 	input [31:0] t;
 	begin
-		if (t[0]) exc(`AP040_VEC_ADDRERR, 4'd2, pc_i, t);
+		// The format-$2 address field contains the referenced address with A0
+		// cleared, not the raw odd target.
+		if (t[0]) exc(`AP040_VEC_ADDRERR, 4'd2, pc_i, {t[31:1], 1'b0});
 		else if (tr_t1 || tr_t0) begin
 			tr_t1 <= 0;
 			tr_t0 <= 0;
@@ -1022,6 +1231,19 @@ task go_pc;
 				state <= S_FETCH;
 			end
 		end
+	end
+endtask
+
+// Bcc calculates and validates its target even when the condition is false.
+// The 68040 therefore takes an address error for an odd target on a
+// not-taken conditional branch as well as on a taken one.
+task finish_bcc;
+	input [31:0] t;
+	input        taken;
+	begin
+		if (t[0]) exc(`AP040_VEC_ADDRERR, 4'd2, pc_i, {t[31:1], 1'b0});
+		else if (taken) go_pc(t);
+		else fetch_next;
 	end
 endtask
 
@@ -1057,8 +1279,11 @@ always @(posedge clk) begin
 		fpu_bsun <= 0;
 		fpu_fmsel <= 0; fpu_fmwe <= 0; fpu_fmwd <= 0; fpu_rst <= 0;
 		fp_cnt <= 0; fp_nb <= 0; fp_st <= 0; fp_list <= 0; fp_mode <= 0;
+		fp_rev <= 0; fp_lsb <= 0;
 		fp_creg <= 0; fp_pred <= 0; fp_n <= 0;
-		fp_ea_pd <= 0; fp_ea_pi <= 0; fp_adj <= 0;
+		fp_ea_pd <= 0; fp_ea_pi <= 0; fp_adj <= 0; fp_ea_v <= 0;
+		fp_force_unsupp <= 0;
+		m_bidx <= 0; m_acc <= 0;
 		rr_a <= 0; rr_b <= 0;
 		aux_we <= 0; aux_sel <= 0; aux_wdata <= 0;
 		md_start <= 0; md_isdiv <= 0; md_sign <= 0;
@@ -1082,6 +1307,7 @@ always @(posedge clk) begin
 		src_mode_r <= 0; src_rn_r <= 0; dst_mode_r <= 0; dst_rn_r <= 0;
 		exc_vec <= 0; exc_fmt <= 0; exc_spc <= 0; exc_addr <= 0; exc_sp <= 0;
 		exc_is_irq <= 0; exc_pass2 <= 0; sr_saved <= 0; irq_lvl_l <= 0;
+		sr_fovr_v <= 0; sr_fovr <= 0; rte_oldsr <= 0; texc_pend <= 0; texc_pc <= 0;
 		rte_sr <= 0; rte_pc <= 0; ret_kind <= 0;
 		br_base <= 0; br_tgt <= 0; br_long <= 0;
 		mm_mask <= 0; mm_dir <= 0; mm_predec <= 0; mm_postinc <= 0;
@@ -1089,24 +1315,25 @@ always @(posedge clk) begin
 		mp_cnt <= 0; mp_idx <= 0; mp_dir <= 0; mp_addr <= 0; mp_val <= 0;
 		t_a <= 0; t_b <= 0; srop_kind <= 0; srop_sr <= 0;
 		mvc_dir <= 0; fc_ovr_v <= 0; fc_ovr <= 0;
+		lk_cyc <= 0; aer_lk <= 0; aer_m16 <= 0; aer_tt <= 0; aer_wd <= 0;
 		m16_form <= 0; m16_dst_rn <= 0; m16_src <= 0; m16_dst <= 0;
 		m16_an <= 0; m16_idx <= 0; m16_rd_done <= 0;
 		for (li = 0; li < 4; li = li + 1) m16buf[li] <= 0;
 		rst_cnt <= 0;
 		fault_r <= 0;
-		nmi_arm <= 0;
+		nmi_ack_t <= 0;
 		bf_off <= 0; bf_w <= 0; bf_addr <= 0; bf_bib <= 0; bf_span <= 0;
 		bf_w1 <= 0; bf_w2 <= 0; bf_du <= 0; cas_dc <= 0;
 		bf_t40 <= 0; bf_field <= 0; bf_ones <= 0; bf_maskl <= 0;
 		in_exc <= 0;
-		aer_addr <= 0; aer_sp <= 0; aer_wr <= 0;
-		aer_sz <= 0; aer_tm <= 0; aer_idx <= 0;
+		aer_fa <= 0; aer_sp <= 0; aer_wr <= 0;
+		aer_sz <= 0; aer_tm <= 0; aer_idx <= 0; aer_bus <= 0; aer_ma <= 0;
 		u0_v <= 0; u1_v <= 0;
 		u0_reg <= 0; u1_reg <= 0; u0_old <= 0; u1_old <= 0;
 		pt_req <= 0; pt_write <= 0; pt_addr <= 0;
 		pf_req <= 0; pf_mode <= 0; pf_addr <= 0;
 		cinv_req <= 0; cinv_ic <= 0; cinv_dc <= 0;
-		tr_t1 <= 0; tr_t0 <= 0;
+		tr_t1 <= 0; tr_t0 <= 0; t0_force <= 0;
 	end
 	else if (ce) begin
 		rf_we <= 0;
@@ -1116,11 +1343,14 @@ always @(posedge clk) begin
 		fpu_bsun <= 0;
 		fpu_rst <= 0;
 		if (mem_ack) mem_req <= 0;
-		if (irq_lvl != 3'd7) nmi_arm <= 1;
 
 		case (state)
 			//------------------------------------------------------------ boot
 			S_START: begin
+				// Reset vector acquisition and the first target prefetch are part
+				// of reset exception processing.  Any access fault before the
+				// first opcode arrives is therefore a double bus fault.
+				in_exc <= 1;
 				m_addr_r <= `AP040_VEC_RESET_ISP; m_size <= `AP040_SZ_L;
 				m_wr <= 0; m_issued <= 0; r_m_ret <= S_BOOT0;
 				state <= S_MRD;
@@ -1141,22 +1371,100 @@ always @(posedge clk) begin
 			end
 
 			//----------------------------------------------------------- fetch
-			S_FETCH: if (mem_flt) begin
+			S_FETCH: if (mem_err) begin
 				if (in_exc) begin fault_r <= 1; state <= S_HALT; end
 				else aerr_start;
 			end
 			else if (mem_ack) begin
-				ir <= mem_rdata[15:0];
-				pc <= pc + 32'd2;
-				// per-instruction defaults
-				tr_t1 <= sr[15];
-				tr_t0 <= sr[14];
-				p_src <= SK_NONE; p_dst <= DK_NONE;
-				p_rmw <= 0; p_wbsup <= 0; p_flags <= 1; p_sextw <= 0;
-				p_dst_mem_bit <= 0;
-				exec_kind <= EK_ALU;
-				fc_ovr_v <= 0;
-				state <= S_DECODE;
+				// Exception processing includes the first handler refill.  An
+				// interrupt which becomes pending after vector fetch but before
+				// this opcode arrives must still run before the handler executes.
+				// Discard the fetched word and stack a return to the handler entry.
+				if (in_exc && irq_pend) begin
+					exc_vec <= `AP040_VEC_AUTOVEC + {5'd0, irq_lvl};
+					exc_fmt <= 0; exc_spc <= pc; exc_addr <= 0;
+					exc_is_irq <= 1; exc_pass2 <= 0;
+					irq_lvl_l <= irq_lvl;
+					state <= S_EXC0;
+				end
+				else begin
+					// Exception processing (including reset) ends when the first
+					// instruction of the handler has been fetched successfully.
+					in_exc <= 0;
+					ir <= mem_rdata[15:0];
+					pc <= pc + 32'd2;
+					// per-instruction defaults
+					tr_t1 <= sr[15];
+					tr_t0 <= sr[14];
+					t0_force <= t0_special(mem_rdata[15:0]);
+					p_src <= SK_NONE; p_dst <= DK_NONE;
+					p_rmw <= 0; p_wbsup <= 0; p_flags <= 1; p_sextw <= 0;
+					p_dst_mem_bit <= 0;
+					exec_kind <= EK_ALU;
+					fc_ovr_v <= 0;
+					state <= S_DECODE;
+				end
+			end
+
+			//---------------------------- page-crossing split transfers
+			// One byte per bus transaction, most significant first, so each
+			// byte is translated through its own page.
+			S_MRD_B: begin
+				if (!m_issued) begin
+					mem_req <= 1; mem_write <= 0; mem_instr <= 0;
+					mem_size <= `AP040_SZ_B;
+					mem_addr <= m_addr_r + {29'd0, m_bidx};
+					fc_r <= fc_ovr_v ? fc_ovr :
+					        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
+					m_issued <= 1;
+				end
+				else if (mem_err) begin
+					if (in_exc) begin fault_r <= 1; state <= S_HALT; end
+					else aerr_start;
+				end
+				else if (mem_ack) begin : mrd_b
+					reg [31:0] acc;
+					acc = {m_acc[23:0], mem_rdata[7:0]};
+					m_acc <= acc;
+					m_issued <= 0;
+					if (m_bidx + 3'd1 == m_nbytes) begin
+						m_val <= acc;
+						state <= r_m_ret;
+					end
+					else m_bidx <= m_bidx + 3'd1;
+				end
+			end
+
+			S_MWR_B: begin
+				if (!m_issued) begin : mwr_b
+					reg [7:0] byv;
+					case (m_size)
+						`AP040_SZ_W: byv = m_bidx[0] ? m_wdat[7:0] : m_wdat[15:8];
+						`AP040_SZ_L: case (m_bidx[1:0])
+							2'd0: byv = m_wdat[31:24];
+							2'd1: byv = m_wdat[23:16];
+							2'd2: byv = m_wdat[15:8];
+							default: byv = m_wdat[7:0];
+						endcase
+						default: byv = m_wdat[7:0];
+					endcase
+					mem_req <= 1; mem_write <= 1; mem_instr <= 0;
+					mem_size <= `AP040_SZ_B;
+					mem_addr <= m_addr_r + {29'd0, m_bidx};
+					mem_wdata <= {24'd0, byv};
+					fc_r <= fc_ovr_v ? fc_ovr :
+					        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
+					m_issued <= 1;
+				end
+				else if (mem_err) begin
+					if (in_exc) begin fault_r <= 1; state <= S_HALT; end
+					else aerr_start;
+				end
+				else if (mem_ack) begin
+					m_issued <= 0;
+					if (m_bidx + 3'd1 == m_nbytes) state <= r_m_ret;
+					else m_bidx <= m_bidx + 3'd1;
+				end
 			end
 
 			//------------------------------------------------- generic helpers
@@ -1167,7 +1475,7 @@ always @(posedge clk) begin
 					issue_ifetch(pc, sr_s);
 					if_issued <= 1;
 				end
-				else if (mem_flt) begin
+				else if (mem_err) begin
 					if (in_exc) begin fault_r <= 1; state <= S_HALT; end
 					else aerr_start;
 				end
@@ -1181,14 +1489,19 @@ always @(posedge clk) begin
 			end
 
 			S_MRD: begin
-				if (!m_issued) begin
+				if (!m_issued && m_cross) begin
+					m_bidx <= 0;
+					m_acc <= 0;
+					state <= S_MRD_B;
+				end
+				else if (!m_issued) begin
 					mem_req <= 1; mem_write <= 0; mem_instr <= 0;
 					mem_size <= m_size; mem_addr <= m_addr_r;
 					fc_r <= fc_ovr_v ? fc_ovr :
 					        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
 					m_issued <= 1;
 				end
-				else if (mem_flt) begin
+				else if (mem_err) begin
 					if (in_exc) begin fault_r <= 1; state <= S_HALT; end
 					else aerr_start;
 				end
@@ -1199,7 +1512,11 @@ always @(posedge clk) begin
 			end
 
 			S_MWR: begin
-				if (!m_issued) begin
+				if (!m_issued && m_cross) begin
+					m_bidx <= 0;
+					state <= S_MWR_B;
+				end
+				else if (!m_issued) begin
 					mem_req <= 1; mem_write <= 1; mem_instr <= 0;
 					mem_size <= m_size; mem_addr <= m_addr_r;
 					mem_wdata <= m_wdat;
@@ -1207,7 +1524,7 @@ always @(posedge clk) begin
 					        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
 					m_issued <= 1;
 				end
-				else if (mem_flt) begin
+				else if (mem_err) begin
 					if (in_exc) begin fault_r <= 1; state <= S_HALT; end
 					else aerr_start;
 				end
@@ -1383,8 +1700,12 @@ always @(posedge clk) begin
 					end
 
 					EK_MD_W: begin
-						if (md_isdiv && src_val[15:0] == 16'd0)
+						if (md_isdiv && src_val[15:0] == 16'd0) begin
+							// 68040 DIVU/DIVS divide-by-zero preserves X/N/Z/V
+							// but clears C before taking vector 5.
+							sr[0] <= 1'b0;
 							exc(`AP040_VEC_DIVZERO, 4'd2, pc, pc_i);
+						end
 						else begin
 							md_a  <= md_sign ? sxw(src_val[15:0]) : {16'd0, src_val[15:0]};
 							md_hi <= md_sign ? {32{dst_val[31]}} : 32'd0;
@@ -1516,8 +1837,12 @@ always @(posedge clk) begin
 
 			S_MDL_RDQ: begin
 				// rf_rdata_b is Dl (multiply) or Dq (divide low dividend)
-				if (md_isdiv && src_val == 32'd0)
+				if (md_isdiv && src_val == 32'd0) begin
+					// 68040 DIVL divide-by-zero preserves X/N/Z/V
+					// but clears C before taking vector 5.
+					sr[0] <= 1'b0;
 					exc(`AP040_VEC_DIVZERO, 4'd2, pc, pc_i);
+				end
 				else if (md_isdiv && x_ext[10]) begin
 					dst_val <= rf_rdata_b;
 					rr_a <= {1'b0, x_ext[2:0]};   // Dr holds the high dividend
@@ -1660,20 +1985,21 @@ always @(posedge clk) begin
 			end
 
 			S_EXC0: begin
-				sr_saved <= sr;
+				sr_saved <= sr_fovr_v ? sr_fovr : sr;
+				sr_fovr_v <= 0;
 				sr[13] <= 1;
 				sr[15:14] <= 2'b00;
 				in_exc <= 1;
 				if (exc_is_irq) begin
 					sr[10:8] <= irq_lvl_l;
-					if (irq_lvl_l == 3'd7) nmi_arm <= 0;
+					if (irq_lvl_l == 3'd7) nmi_ack_t <= ~nmi_ack_t;
 				end
 				state <= S_EXC1;
 			end
 
 			S_EXC1: begin
-				exc_sp <= dbg_a7 - ((exc_fmt == 4'd2) ? 32'd12 : 32'd8);
-				mwr(dbg_a7 - ((exc_fmt == 4'd2) ? 32'd12 : 32'd8),
+				exc_sp <= dbg_a7 - exc_fsize;
+				mwr(dbg_a7 - exc_fsize,
 				    `AP040_SZ_W, {16'd0, sr_saved}, S_EXC2);
 			end
 
@@ -1681,9 +2007,15 @@ always @(posedge clk) begin
 
 			S_EXC3: mwr(exc_sp + 32'd6, `AP040_SZ_W,
 			            {16'd0, exc_fmt, 2'b00, exc_vec, 2'b00},
-			            (exc_fmt == 4'd2) ? S_EXC4 : S_EXC5);
+			            (exc_fmt == 4'd2 || exc_fmt == 4'd3 ||
+			             exc_fmt == 4'd4) ? S_EXC4 : S_EXC5);
 
-			S_EXC4: mwr(exc_sp + 32'd8, `AP040_SZ_L, exc_addr, S_EXC5);
+			// Formats $2/$3 carry one additional longword.  Format $4,
+			// recognized only by LC/EC configurations, carries two.
+			S_EXC4: mwr(exc_sp + 32'd8, `AP040_SZ_L, exc_addr,
+			            (exc_fmt == 4'd4) ? S_EXC4B : S_EXC5);
+
+			S_EXC4B: mwr(exc_sp + 32'd12, `AP040_SZ_L, pc_i, S_EXC5);
 
 			S_EXC5: begin
 				// this A7 write commits on the next ce edge, while SR.M is
@@ -1695,12 +2027,14 @@ always @(posedge clk) begin
 
 			S_EXC6: begin
 				// interrupt with M set: clear M and build a format $1
-				// throwaway frame on the interrupt stack. The SR copy in
-				// the throwaway keeps M set so that RTE's format $1
-				// continuation switches back to the master stack where
-				// the real frame lives.
+				// throwaway frame on the interrupt stack.  Its SR image is
+				// the ORIGINAL SR with only S forced (WinUAE: regs.sr |=
+				// 1<<13 before the second push): the original trace bits and
+				// interrupt mask survive, and M stays set so that RTE's
+				// format $1 continuation switches back to the master stack
+				// where the real frame lives.
 				sr[12] <= 0;
-				sr_saved <= sr;
+				sr_saved <= sr_saved | 16'h2000;
 				exc_fmt <= 4'd1;
 				exc_pass2 <= 1;
 				state <= S_EXC1;
@@ -1709,12 +2043,41 @@ always @(posedge clk) begin
 			S_EXC_VEC: mrd(vbr + {22'd0, exc_vec, 2'b00}, `AP040_SZ_L, S_EXC_JMP);
 
 			S_EXC_JMP: begin
-				in_exc <= 0;
 				if (m_val[0]) begin
-					// odd handler address during exception processing:
-					// treat as double fault and halt
-					fault_r <= 1;
-					state <= S_HALT;
+					if (exc_vec == 8'd2 || exc_vec == 8'd3) begin
+						// odd bus/address error handler: double fault, halt
+						fault_r <= 1;
+						state <= S_HALT;
+					end
+					else begin
+						// any other odd handler address becomes an address
+						// error on 020+ (WinUAE exception3_notinstruction);
+						// the PC field keeps the original exception's
+						// next-PC context
+						texc_pend <= 0;
+						exc(`AP040_VEC_ADDRERR, 4'd2, pc,
+						    {m_val[31:1], 1'b0});
+					end
+				end
+				else if (texc_pend) begin
+					// the surviving T0 trace: vector 9, format $2, stacked
+					// PC = handler entry, address field = the instruction
+					// that took the original exception.  WinUAE's DOTRACE
+					// fires before a pending interrupt is sampled.
+					texc_pend <= 0;
+					pc <= m_val;
+					exc(`AP040_VEC_TRACE, 4'd2, m_val, texc_pc);
+				end
+				else if (irq_pend) begin
+					// An interrupt pending when another exception finishes is
+					// stacked before the original handler executes.  Its frame
+					// returns to that handler address.
+					pc <= m_val;
+					exc_vec <= `AP040_VEC_AUTOVEC + {5'd0, irq_lvl};
+					exc_fmt <= 0; exc_spc <= m_val; exc_addr <= 0;
+					exc_is_irq <= 1; exc_pass2 <= 0;
+					irq_lvl_l <= irq_lvl;
+					state <= S_EXC0;
 				end
 				else begin
 					pc <= m_val;
@@ -1742,9 +2105,15 @@ always @(posedge clk) begin
 						state <= S_RTE_FIN2;
 					end
 					4'd4: begin
-						rfw(4'd15, dbg_a7 + 32'd16);
-						ret_kind <= 2'b00;
-						state <= S_RTE_FIN2;
+						// A full MC68040 does not recognize format $4.  The
+						// eight-word frame belongs to the LC/EC variants.
+						if (AP040_HAS_FPU != 0)
+							exc(`AP040_VEC_FMTERR, 4'd0, pc_i, 32'd0);
+						else begin
+							rfw(4'd15, dbg_a7 + 32'd16);
+							ret_kind <= 2'b00;
+							state <= S_RTE_FIN2;
+						end
 					end
 					4'd7: begin
 						// access error frame: restart semantics, the
@@ -1759,8 +2128,23 @@ always @(posedge clk) begin
 
 			S_RTE_FIN2: begin
 				sr <= rte_sr & `AP040_SR_MASK;
-				if (ret_kind[0]) state <= S_RTE_SR;   // format $1: continue
-				else if (rte_pc[0]) exc(`AP040_VEC_ADDRERR, 4'd2, pc_i, rte_pc);
+				if (ret_kind[0]) begin
+					// format $1: continue with the next frame; the popped
+					// SR becomes the "before" image for the odd-PC quirk
+					rte_oldsr <= rte_sr & `AP040_SR_MASK;
+					state <= S_RTE_SR;
+				end
+				else if (rte_pc[0]) begin
+					// 68040 quirk (WinUAE exception3_read_prefetch_68040bug,
+					// cputest 68040_ae RTE): the machine takes the restored
+					// SR, but the address-error frame stacks the SR from
+					// BEFORE the RTE -- or the last throwaway SR when a
+					// format $1 chain was involved.
+					sr_fovr_v <= 1;
+					sr_fovr <= rte_oldsr;
+					exc(`AP040_VEC_ADDRERR, 4'd2, pc_i,
+					    {rte_pc[31:1], 1'b0});
+				end
 				else if (tr_t1 || tr_t0) begin
 					// the RTE itself was traced (T set before the RTE)
 					tr_t1 <= 0;
@@ -1768,9 +2152,21 @@ always @(posedge clk) begin
 					pc <= rte_pc;
 					exc(`AP040_VEC_TRACE, 4'd2, rte_pc, pc_i);
 				end
+				else if (rte_irq_pend) begin
+					// RTE can lower the interrupt mask.  Test the restored mask,
+					// not the handler's old SR, before fetching any restored
+					// instruction.
+					pc <= rte_pc;
+					exc_vec <= `AP040_VEC_AUTOVEC + {5'd0, irq_lvl};
+					exc_fmt <= 0; exc_spc <= rte_pc; exc_addr <= 0;
+					exc_is_irq <= 1; exc_pass2 <= 0;
+					irq_lvl_l <= irq_lvl;
+					state <= S_EXC0;
+				end
 				else begin
 					// fetch under the restored context's FC (SR is being
 					// written this same cycle)
+					in_exc <= 0;
 					pc <= rte_pc;
 					pc_i <= rte_pc;
 					issue_ifetch(rte_pc, rte_sr[13]);
@@ -1803,7 +2199,16 @@ always @(posedge clk) begin
 
 			S_RET3: begin
 				rfw(4'd15, dbg_a7 + 32'd6);
-				go_pc(m_val);
+				if (m_val[0]) begin
+					// RTR to an odd address: same 68040 quirk as RTE -- the
+					// popped CCR takes effect, the stacked SR is the one
+					// from before the RTR
+					sr_fovr_v <= 1;
+					sr_fovr <= rte_oldsr;
+					exc(`AP040_VEC_ADDRERR, 4'd2, pc_i,
+					    {m_val[31:1], 1'b0});
+				end
+				else go_pc(m_val);
 			end
 
 			//------------------------------------------------------- branches
@@ -1814,8 +2219,7 @@ always @(posedge clk) begin
 					br_tgt <= tgt;
 					mwr(dbg_a7 - 32'd4, `AP040_SZ_L, pc, S_BSR_PUSH);
 				end
-				else if (cond_true(ir[11:8])) go_pc(tgt);
-				else fetch_next;
+				else finish_bcc(tgt, cond_true(ir[11:8]));
 			end
 
 			S_BSR_PUSH: begin
@@ -2279,11 +2683,16 @@ always @(posedge clk) begin
 
 			S_FREST2: begin
 				// version byte 0 = NULL frame: reset the FPU state.
-				// Nonzero versions restore the idle state; UNIMP/BUSY
-				// frames are never generated by this implementation so
-				// their extra words are not consumed (documented gap)
-				if (m_val[31:24] == 8'd0) fpu_rst <= 1;
-				fetch_next;
+				// $41/$00 is the MC68040 IDLE frame.  Other version
+				// identifiers cannot be interpreted and take format error.
+				// UNIMP/BUSY frames are not generated by this implementation
+				// and their payload remains a documented limitation.
+				if (m_val[31:24] == 8'd0) begin
+					fpu_rst <= 1;
+					fetch_next;
+				end
+				else if (m_val == 32'h4100_0000) fetch_next;
+				else exc(`AP040_VEC_FMTERR, 4'd0, pc_i, 32'd0);
 			end
 
 			//------------------------------------------------------------- FPU
@@ -2297,30 +2706,50 @@ always @(posedge clk) begin
 				fp_st     <= 0;
 				fp_n      <= 0;
 				fp_ea_pd  <= 0;
+				fp_ea_v   <= 0;
 				fp_ea_pi  <= 0;
+				fp_force_unsupp <= 0;
 				case (imm[15:13])
 					3'b000: begin
-						// FPm to FPn general
-						fpu_iawe <= 1;
-						fpu_req <= 1;
-						state <= S_FPU_GO;
+						// FPm to FPn general.  Nonexisting opmodes fault
+						// before any side effect: no FPIAR update, no FPSR
+						// status clear, plain F-line (or, for $78-$7F, the
+						// integer illegal vector).
+						if (fp_opmode_class(imm[6:0]) == 2'd1) go_fp_fline;
+						else if (fp_opmode_class(imm[6:0]) == 2'd2) go_illegal;
+						else begin
+							fpu_iawe <= 1;
+							fpu_req <= 1;
+							state <= S_FPU_GO;
+						end
 					end
+					3'b001: go_fp_fline;   // undefined opclass
 					3'b010: begin
-						// <ea>{fmt} to FPn general
-						fpu_iawe <= 1;
-						if (imm[12:10] == 3'd7) begin
+						// <ea>{fmt} to FPn general.  The opmode check does
+						// not apply to FMOVECR, whose low bits are a ROM
+						// offset rather than an opmode.
+						if (imm[12:10] != 3'd7 &&
+						    fp_opmode_class(imm[6:0]) == 2'd1) go_fp_fline;
+						else if (imm[12:10] != 3'd7 &&
+						         fp_opmode_class(imm[6:0]) == 2'd2) go_illegal;
+						else if (imm[12:10] == 3'd7) begin
 							// FMOVECR: no EA; not hardware on the 040
+							fpu_iawe <= 1;
 							fpu_req <= 1;
 							state <= S_FPU_GO;
 						end
 						else if (d_mode == 3'b000) begin
-							if (fp_bytes(imm[12:10]) > 4'd4) go_illegal;
+							// A data-register EA only supplies a 32-bit value.  D/X/P
+							// source formats are malformed FPU commands and take the
+							// normal F-line vector, not the integer illegal-op vector.
+							if (fp_bytes(imm[12:10]) > 4'd4) go_fp_fline;
 							else begin
 								rr_a <= {1'b0, d_rn};
+								fpu_iawe <= 1;
 								state <= S_FPU_DREG;
 							end
 						end
-						else if (d_mode == 3'b001) go_illegal;
+						else if (d_mode == 3'b001) go_fp_fline;
 						else if (ea_is_imm) begin
 							fpb <= 0;
 							state <= S_FPU_IMM;
@@ -2332,22 +2761,35 @@ always @(posedge clk) begin
 						else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FPU_EA);
 					end
 					3'b011: begin
-						// FMOVE FPn,<ea>{fmt}
+						// FMOVE FPn,<ea>{fmt}; FPIAR is updated on the paths
+						// that actually engage the FPU, not on the malformed
+						// encodings that F-line out
 						fpu_srcr <= imm[9:7];
 						fp_st <= 1;
-						fpu_iawe <= 1;
+						// Packed output is an unsupported data type.  For a memory
+						// destination this is a post-instruction exception whose
+						// format-$3 frame must contain the calculated EA, so do not
+						// trap until normal EA resolution has completed.
 						if (imm[12:10] == 3'd3 || imm[12:10] == 3'd7)
-							go_fp_unimp;   // packed stores go to the FPSP
-						else if (d_mode == 3'b000) begin
-							if (fp_bytes(imm[12:10]) > 4'd4) go_illegal;
+							fp_force_unsupp <= 1;
+						if (d_mode == 3'b000) begin
+							// A data register cannot hold a double or
+							// extended result: the 68040 reports these as
+							// unimplemented FP instructions, not as integer
+							// illegal instructions (WinUAE put_fp_value:
+							// "68040+ generates unimplemented effective mode
+							// exception even if destination EA is Dn or An")
+							if (fp_bytes(imm[12:10]) > 4'd4) go_fp_fline;
 							else begin
 								rr_a <= {1'b0, d_rn};
+								fpu_iawe <= 1;
 								fpu_req <= 1;
 								state <= S_FPU_GO;
 							end
 						end
-						else if (d_mode == 3'b001 || ea_is_imm ||
-						         (d_mode == 3'b111 && d_rn[1])) go_illegal;
+						else if (d_mode == 3'b001) go_fp_fline;
+						else if (dst_not_alt ||
+						         (d_mode == 3'b111 && d_rn[1])) go_fp_fline;
 						else if (d_mode == 3'b011 || d_mode == 3'b100) begin
 							rr_a <= {1'b1, d_rn};
 							state <= S_FPU_AN;
@@ -2355,24 +2797,48 @@ always @(posedge clk) begin
 						else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FPU_EA);
 					end
 					3'b100, 3'b101: begin : fp_crm
-						// FMOVEM control registers
+						// FMOVEM control registers.  An empty selection means
+						// FPIAR (WinUAE: "All control register bits unset =
+						// FPIAR"), and every malformed combination is an
+						// F-line trap, not an integer illegal instruction.
 						reg [4:0] cnt;
-						cnt = ({4'd0, imm[12]} + {4'd0, imm[11]} +
-						       {4'd0, imm[10]}) << 2;
-						fp_creg <= imm[12:10];
+						reg [2:0] crsel;
+						reg       multi;
+						crsel = (imm[12:10] == 3'd0) ? 3'b001 : imm[12:10];
+						multi = (crsel != 3'b100) && (crsel != 3'b010) &&
+						        (crsel != 3'b001);
+						cnt = ({4'd0, crsel[2]} + {4'd0, crsel[1]} +
+						       {4'd0, crsel[0]}) << 2;
+						fp_creg <= crsel;
 						fp_st <= imm[13];
+						if (imm[13]) t0_force <= 1; // FMOVEM control regs to memory
 						fp_nb <= cnt[3:0];
 						fp_adj <= cnt;
-						if (imm[12:10] == 3'd0) go_illegal;
-						else if (d_mode == 3'b000) begin
-							rr_a <= {1'b0, d_rn};
-							state <= S_FPU_CRD;
+						if (d_mode == 3'b000) begin
+							// Dn: a single register only
+							if (multi) go_fp_fline;
+							else begin
+								rr_a <= {1'b0, d_rn};
+								state <= S_FPU_CRD;
+							end
 						end
-						else if (d_mode == 3'b001) go_illegal;
+						else if (d_mode == 3'b001) begin
+							// An: only FPIAR may be transferred
+							if (crsel != 3'b001) go_fp_fline;
+							else begin
+								rr_a <= {1'b1, d_rn};
+								state <= S_FPU_CRD;
+							end
+						end
 						else if (ea_is_imm) begin
-							if (imm[13]) go_illegal;
-							else immf(2'd2, S_FPU_CRD);
+							// an immediate source may load several registers
+							// back to back; an immediate destination is a
+							// malformed encoding
+							if (imm[13]) go_fp_fline;
+							else immf(2'd2, S_FPU_CRI);
 						end
+						else if (imm[13] && d_mode == 3'b111 && d_rn[1])
+							go_fp_fline;   // PC-relative destination
 						else if (d_mode == 3'b011 || d_mode == 3'b100) begin
 							rr_a <= {1'b1, d_rn};
 							state <= S_FPU_AN;
@@ -2380,16 +2846,35 @@ always @(posedge clk) begin
 						else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FPU_EA);
 					end
 					default: begin : fp_mvm
-						// FMOVEM FP register list, 12 bytes per register
+						// FMOVEM FP register list, 12 bytes per register.
+						// 68040 EA legality: stores reject (An)+ and the
+						// PC-relative modes, loads reject -(An); Dn, An and
+						// immediate F-line in both directions.
+						// 68040 ordering quirks (WinUAE fmovem2mem):
+						//   loads always map mask bit 7 to FP0;
+						//   a store whose mask convention disagrees with its
+						//   EA direction writes each register's three longs
+						//   in REVERSED order (low mantissa first);
+						//   predec stores consume the mask LSB first so the
+						//   ascending walk reproduces the descending layout.
 						reg [4:0] cnt;
+						reg is_st;
 						cnt = ({4'd0, imm[7]} + {4'd0, imm[6]} + {4'd0, imm[5]} +
 						       {4'd0, imm[4]} + {4'd0, imm[3]} + {4'd0, imm[2]} +
 						       {4'd0, imm[1]} + {4'd0, imm[0]}) * 5'd12;
+						is_st = (imm[15:13] == 3'b111);
 						fp_mode <= imm[12:11];
-						fp_st <= imm[15:13] == 3'b111;
+						fp_st <= is_st;
+						if (is_st) t0_force <= 1;
 						fp_list <= imm[7:0];
 						fp_adj <= cnt;
-						if (imm[11]) begin
+						fp_lsb <= is_st && (d_mode == 3'b100);
+						fp_rev <= is_st && (imm[12] == (d_mode == 3'b100));
+						if (d_mode < 3'b010 || ea_is_imm) go_fp_fline;
+						else if (is_st && (d_mode == 3'b011 ||
+						         (d_mode == 3'b111 && d_rn[1]))) go_fp_fline;
+						else if (!is_st && d_mode == 3'b100) go_fp_fline;
+						else if (imm[11]) begin
 							// dynamic list in a data register
 							rr_a <= {1'b0, imm[6:4]};
 							state <= S_FPU_MVML;
@@ -2398,7 +2883,6 @@ always @(posedge clk) begin
 							rr_a <= {1'b1, d_rn};
 							state <= S_FPU_AN;
 						end
-						else if (d_mode < 3'b010 || ea_is_imm) go_illegal;
 						else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FPU_EA);
 					end
 				endcase
@@ -2417,7 +2901,7 @@ always @(posedge clk) begin
 					rr_a <= {1'b1, d_rn};
 					state <= S_FPU_AN;
 				end
-				else if (d_mode < 3'b010 || ea_is_imm) go_illegal;
+				else if (d_mode < 3'b010 || ea_is_imm) go_fp_fline;
 				else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FPU_EA);
 			end
 
@@ -2432,13 +2916,21 @@ always @(posedge clk) begin
 				    fpu_class == 3'b110 || fpu_class == 3'b111)
 					adj = fp_adj;
 				fp_adj <= adj;
+				fp_ea_v <= 1;
 				fp_ea_pd <= (d_mode == 3'b100);
 				fp_ea_pi <= (d_mode == 3'b011);
 				t_a <= (d_mode == 3'b100) ? (rf_rdata_a - {27'd0, adj})
 				                          : rf_rdata_a;
 				case (fpu_class)
 					3'b010: state <= S_FPU_RD;
-					3'b011: begin fpu_req <= 1; state <= S_FPU_GO; end
+					3'b011: begin
+						fpu_iawe <= 1;
+						if (fp_force_unsupp)
+							go_fp_unsupp(1'b1, 1'b1,
+							    (d_mode == 3'b100) ?
+							    (rf_rdata_a - {27'd0, adj}) : rf_rdata_a);
+						else begin fpu_req <= 1; state <= S_FPU_GO; end
+					end
 					3'b100, 3'b101: state <= S_FPU_CR;
 					default: state <= S_FPU_MVM;
 				endcase
@@ -2446,9 +2938,14 @@ always @(posedge clk) begin
 
 			S_FPU_EA: begin
 				t_a <= ea_addr;
+				fp_ea_v <= 1;
 				case (fpu_class)
 					3'b010: state <= S_FPU_RD;
-					3'b011: begin fpu_req <= 1; state <= S_FPU_GO; end
+					3'b011: begin
+						fpu_iawe <= 1;
+						if (fp_force_unsupp) go_fp_unsupp(1'b1, 1'b1, ea_addr);
+						else begin fpu_req <= 1; state <= S_FPU_GO; end
+					end
 					3'b100, 3'b101: state <= S_FPU_CR;
 					default: state <= S_FPU_MVM;
 				endcase
@@ -2461,6 +2958,7 @@ always @(posedge clk) begin
 					3'd6: fpb <= {rf_rdata_a[7:0], 88'd0};
 					default: fpb <= {rf_rdata_a, 64'd0};
 				endcase
+				fpu_iawe <= 1;
 				fpu_req <= 1;
 				state <= S_FPU_GO;
 			end
@@ -2480,6 +2978,7 @@ always @(posedge clk) begin
 				    (fp_nb == 4'd4 && fp_n == 4'd1) ||
 				    (fp_nb == 4'd8 && fp_n == 4'd2) ||
 				    (fp_nb == 4'd12 && fp_n == 4'd3)) begin
+					fpu_iawe <= 1;
 					fpu_req <= 1;
 					state <= S_FPU_GO;
 				end
@@ -2503,6 +3002,7 @@ always @(posedge clk) begin
 				if ((fp_nb <= 4'd4 && fp_n != 4'd0) ||
 				    (fp_nb == 4'd8 && fp_n == 4'd2) ||
 				    (fp_nb == 4'd12 && fp_n == 4'd3)) begin
+					fpu_iawe <= 1;
 					fpu_req <= 1;
 					state <= S_FPU_GO;
 				end
@@ -2519,6 +3019,8 @@ always @(posedge clk) begin
 
 			S_FPU_GO: begin
 				if (fpu_unimp) go_fp_unimp;
+				else if (fpu_unsupp)
+					go_fp_unsupp(fp_st, fp_ea_v, fp_ea_v ? t_a : 32'd0);
 				else if (fpu_exc_req) begin
 					fpu_req <= 0;
 					exc(fpu_exc_vec, 4'd0, pc, pc_i);
@@ -2577,22 +3079,38 @@ always @(posedge clk) begin
 			end
 
 			S_FPU_CRD: begin
-				// single control register, register or immediate operand
+				// single control register, data or address register operand
 				fpu_crsel <= fp_creg[2] ? 2'd2 : (fp_creg[1] ? 2'd1 : 2'd0);
 				if (!fp_st) begin
 					fpu_crwe <= 1;
-					fpu_crwd <= ea_is_imm ? imm : rf_rdata_a;
+					fpu_crwd <= rf_rdata_a;
 					fetch_next;
 				end
 				else state <= S_FPU_CR2;
 			end
 
+			S_FPU_CRI: begin : fp_cri
+				// FMOVEM.L #imm,<control list>: one longword per selected
+				// register, consumed in FPCR, FPSR, FPIAR order
+				reg [2:0] rest;
+				rest = fp_creg[2] ? {1'b0, fp_creg[1:0]} :
+				       fp_creg[1] ? {fp_creg[2], 1'b0, fp_creg[0]} :
+				                    3'b000;
+				fpu_crsel <= fp_creg[2] ? 2'd2 : (fp_creg[1] ? 2'd1 : 2'd0);
+				fpu_crwe <= 1;
+				fpu_crwd <= imm;
+				fp_creg <= rest;
+				if (rest != 3'd0) immf(2'd2, S_FPU_CRI);
+				else fetch_next;
+			end
+
 			S_FPU_CR2: begin
 				// Control-register read is valid one cycle after crsel.  A
-				// register-direct FMOVE completes here; an FMOVEM list emits
-				// the selected long and returns to the list sequencer.
-				if (d_mode == 3'b000) begin
-					rfw({1'b0, d_rn}, fpu_crrd);
+				// register-direct FMOVE (Dn, or An for FPIAR) completes
+				// here; an FMOVEM list emits the selected long and returns
+				// to the list sequencer.
+				if (d_mode == 3'b000 || d_mode == 3'b001) begin
+					rfw({d_mode[0], d_rn}, fpu_crrd);
 					fetch_next;
 				end
 				else mwr(t_a, `AP040_SZ_L, fpu_crrd, S_FPU_CR);
@@ -2626,14 +3144,18 @@ always @(posedge clk) begin
 			end
 
 			S_FPU_MVM: begin : fp_mvm_sel
-				// FMOVEM register loop; mode bit 1: postinc order
+				// FMOVEM register loop.  Loads map mask bit 7 to FP0
+				// regardless of the mode field (68040); stores follow the
+				// mode's convention.  Predec stores walk the mask from the
+				// LSB so the ascending address walk reproduces the layout
+				// of the hardware's descending one.
 				reg [2:0] b;
 				reg found;
 				integer j;
 				found = 0; b = 0;
 				for (j = 7; j >= 0; j = j - 1)
-					if (!found && fp_list[j]) begin
-						b = j[2:0];
+					if (!found && fp_list[fp_lsb ? (3'd7 - j[2:0]) : j[2:0]]) begin
+						b = fp_lsb ? (3'd7 - j[2:0]) : j[2:0];
 						found = 1;
 					end
 					if (!found) begin
@@ -2644,7 +3166,7 @@ always @(posedge clk) begin
 				end
 				else begin
 					fp_list <= fp_list & ~(8'd1 << b);
-					fpu_fmsel <= fp_mode[1] ? (3'd7 - b) : b;
+					fpu_fmsel <= (!fp_st || fp_mode[1]) ? (3'd7 - b) : b;
 					if (fp_ea_pd) t_a <= t_a;   // base already lowered
 					fp_n <= 0;
 					state <= S_FPU_MVM2;
@@ -2663,7 +3185,7 @@ always @(posedge clk) begin
 				end
 				else begin : fp_mvm_x
 					reg [31:0] wv;
-					case (fp_n)
+					case (fp_rev ? (4'd2 - fp_n) : fp_n)
 						4'd0: wv = fpu_fmrd[95:64];
 						4'd1: wv = fpu_fmrd[63:32];
 						default: wv = fpu_fmrd[31:0];
@@ -2689,12 +3211,14 @@ always @(posedge clk) begin
 
 			//--------------------------------------- FBcc / FScc / FDBcc
 			S_FBCC: begin : fbcc
+				// the 6-bit predicate field aliases: WinUAE's fpp_cond masks
+				// with 0x1f, so bit 5 has no effect and is NOT a trap
+				// (table68k defines FBcc for all 64 encodings)
 				reg [31:0] disp;
 				disp = ir[6] ? imm : sxw(imm[15:0]);
-				if (ir[5]) go_fp_unimp;
-				else if (ir[4] && fpu_cc[0] && fpu_bsun_en) begin
+				if (ir[4] && fpu_cc[0] && fpu_bsun_en) begin
 					fpu_bsun <= 1;
-					exc(`AP040_VEC_FP_BSUN, 4'd0, pc, pc_i);
+					exc(`AP040_VEC_FP_BSUN, 4'd0, pc_i, 32'd0);
 				end
 				else begin
 					if (ir[4] && fpu_cc[0]) fpu_bsun <= 1;
@@ -2708,6 +3232,7 @@ always @(posedge clk) begin
 				fp_pred <= imm[5:0];
 				if (d_mode == 3'b001) begin
 					// FDBcc Dn,disp
+					t0_force <= 1;       // every FDBcc is T0-traced on 040
 					rr_a <= {1'b0, d_rn};
 					immf(2'd1, S_FDBCC);
 				end
@@ -2722,17 +3247,16 @@ always @(posedge clk) begin
 					state <= S_FSCC1;
 				end
 				else if (ea_is_imm || (d_mode == 3'b111 && d_rn[1]))
-					go_illegal;
+					go_fp_fline;
 				else ea_start(d_mode, d_rn, `AP040_SZ_B, S_FSCC1);
 			end
 
 			S_FSCC1: begin : fscc1
 				reg c;
 				c = fp_cond(fp_pred, fpu_cc);
-				if (fp_pred[5]) go_fp_unimp;
-				else if (fp_pred[4] && fpu_cc[0] && fpu_bsun_en) begin
+				if (fp_pred[4] && fpu_cc[0] && fpu_bsun_en) begin
 					fpu_bsun <= 1;
-					exc(`AP040_VEC_FP_BSUN, 4'd0, pc, pc_i);
+					exc(`AP040_VEC_FP_BSUN, 4'd0, pc_i, 32'd0);
 				end
 				else begin
 					if (fp_pred[4] && fpu_cc[0]) fpu_bsun <= 1;
@@ -2752,10 +3276,9 @@ always @(posedge clk) begin
 
 			S_FDBCC: begin : fdbcc
 				reg [15:0] cnt;
-				if (fp_pred[5]) go_fp_unimp;
-				else if (fp_pred[4] && fpu_cc[0] && fpu_bsun_en) begin
+				if (fp_pred[4] && fpu_cc[0] && fpu_bsun_en) begin
 					fpu_bsun <= 1;
-					exc(`AP040_VEC_FP_BSUN, 4'd0, pc, pc_i);
+					exc(`AP040_VEC_FP_BSUN, 4'd0, pc_i, 32'd0);
 				end
 				else begin
 					if (fp_pred[4] && fpu_cc[0]) fpu_bsun <= 1;
@@ -3132,6 +3655,16 @@ always @(posedge clk) begin
 						else if (d_reg9 == 3'b100) begin
 							// static bit op, bit number in extension word
 							// (checked before the size=11 group: BSET is 00xx11)
+							// BTST only reads, so it accepts program space and
+							// an immediate operand; BCHG/BCLR/BSET write and
+							// need a data alterable destination.  An address
+							// register is never allowed.
+							if (d_mode == 3'b001) go_illegal;
+							else if (d_mode == 3'b111 &&
+							         ((ir[7:6] == 2'b00) ? (d_rn > 3'b100)
+							                             : (d_rn > 3'b001)))
+								go_illegal;
+							else begin
 							alu_op <= `AP040_ALU_BTST + {4'd0, ir[7:6]};
 							p_src <= SK_IMM;
 							if (d_mode == 3'b000) begin
@@ -3149,6 +3682,7 @@ always @(posedge clk) begin
 							end
 							if (ir[7:6] == 2'b00) p_wbsup <= 1;
 							immf(2'd1, S_PIPE_START);
+							end
 						end
 						else if (d_reg9 == 3'b111 && std_size != 2'b11) begin
 							// MOVES (0000 1110 11 is CAS.L, not implemented)
@@ -3176,7 +3710,7 @@ always @(posedge clk) begin
 								else begin
 									alu_op <= `AP040_ALU_CMP;
 									op_size <= (d_reg9[1:0] == 2'b10) ? `AP040_SZ_W : `AP040_SZ_L;
-									immf(2'd2, S_CAS2_0);
+									begin lk_cyc <= 1; immf(2'd2, S_CAS2_0); end
 								end
 							end
 							else if (d_reg9[2] && d_reg9[1:0] != 2'b00) begin
@@ -3187,7 +3721,7 @@ always @(posedge clk) begin
 									alu_op <= `AP040_ALU_CMP;
 									op_size <= (d_reg9[1:0] == 2'b01) ? `AP040_SZ_B :
 									           (d_reg9[1:0] == 2'b10) ? `AP040_SZ_W : `AP040_SZ_L;
-									immf(2'd1, S_CAS1);
+									begin lk_cyc <= 1; immf(2'd1, S_CAS1); end
 								end
 							end
 							else go_illegal;   // CAS2 / CHK2 / CMP2
@@ -3206,6 +3740,13 @@ always @(posedge clk) begin
 								end
 							end
 							else if (d_mode == 3'b001) go_illegal;
+							// The destination must be data alterable, so the
+							// PC-relative and immediate encodings of mode 7
+							// are illegal.  CMPI is the exception: the 68020
+							// and later allow it to read program space.
+							else if (d_mode == 3'b111 && d_rn > 3'b001 &&
+							         !(d_reg9 == 3'b110 && d_rn < 3'b100))
+								go_illegal;
 							else begin
 								case (d_reg9)
 									3'b000: alu_op <= `AP040_ALU_OR;
@@ -3365,7 +3906,7 @@ always @(posedge clk) begin
 									op_size <= std_size;
 									p_dsize <= std_size;
 									if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
-									else if (d_mode == 3'b001 || ea_is_imm) go_illegal;
+									else if (dst_not_alt) go_illegal;
 									else begin p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go; end
 								end
 							end
@@ -3476,14 +4017,20 @@ always @(posedge clk) begin
 
 							3'b101: begin
 								if (d_op8_6 == 3'b011) begin
-									// TAS (not bus locked yet)
+									// TAS (not bus locked yet).  The 040
+									// reports its operand cycles as a locked
+									// RMW: an access error carries SSW LK
+									// with RW clear.
 									alu_op <= `AP040_ALU_TAS;
 									op_size <= `AP040_SZ_B;
 									p_dsize <= `AP040_SZ_B;
 									p_rmw <= 1;
 									if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
-									else if (d_mode == 3'b001 || ea_is_imm) go_illegal;
-									else begin p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go; end
+									else if (dst_not_alt) go_illegal;
+									else begin
+										lk_cyc <= 1;
+										p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go;
+									end
 								end
 								else begin
 									// TST (An/imm/PC modes allowed on 020+)
@@ -3573,7 +4120,12 @@ always @(posedge clk) begin
 										end
 										6'b110011: begin // RTE
 											if (!sr_s) go_priv;
-											else state <= S_RTE_SR;
+											else begin
+												// Faults while RTE loads state are double bus faults.
+												in_exc <= 1;
+												rte_oldsr <= sr;   // odd-PC quirk image
+												state <= S_RTE_SR;
+											end
 										end
 										6'b110100: begin ret_kind <= RK_RTD; immf(2'd1, S_RET1); end
 										6'b110101: begin ret_kind <= RK_RTS; state <= S_RET1; end
@@ -3581,7 +4133,11 @@ always @(posedge clk) begin
 											if (sr[1]) exc(`AP040_VEC_TRAPCC, 4'd2, pc, pc_i);
 											else fetch_next;
 										end
-										6'b110111: begin ret_kind <= RK_RTR; state <= S_RET1; end
+										6'b110111: begin
+											ret_kind <= RK_RTR;
+											rte_oldsr <= sr;   // odd-PC quirk image
+											state <= S_RET1;
+										end
 										6'b111010, 6'b111011: begin // MOVEC
 											if (!sr_s) go_priv;
 											else begin
@@ -3625,7 +4181,7 @@ always @(posedge clk) begin
 								p_dsize <= `AP040_SZ_B;
 								p_flags <= 0;
 								if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
-								else if (d_mode == 3'b001 || ea_is_imm) go_illegal;
+								else if (dst_not_alt) go_illegal;
 								else begin p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go; end
 							end
 						end
@@ -3666,8 +4222,7 @@ always @(posedge clk) begin
 							br_tgt <= pc + sxb(ir[7:0]);
 							mwr(dbg_a7 - 32'd4, `AP040_SZ_L, pc, S_BSR_PUSH);
 						end
-						else if (cond_true(ir[11:8])) go_pc(pc + sxb(ir[7:0]));
-						else fetch_next;
+						else finish_bcc(pc + sxb(ir[7:0]), cond_true(ir[11:8]));
 					end
 
 					//------------------------------------------- 0x7: MOVEQ
@@ -4116,7 +4671,12 @@ always @(posedge clk) begin
 			//------------------------------------------------------- stopped
 			S_STOP_LD: begin
 				sr <= imm[15:0] & `AP040_SR_MASK;
-				state <= S_STOPPED;
+				if (tr_t1 || tr_t0) begin
+					tr_t1 <= 0;
+					tr_t0 <= 0;
+					exc(`AP040_VEC_TRACE, 4'd2, pc, pc_i);
+				end
+				else state <= S_STOPPED;
 			end
 
 			S_STOPPED: begin

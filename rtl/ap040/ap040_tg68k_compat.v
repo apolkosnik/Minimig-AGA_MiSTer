@@ -37,6 +37,12 @@ module ap040_tg68k_compat
 	output        longword,
 	output        nresetout,
 	output [2:0]  fc,
+	output        nmi_ack_toggle,
+	// Cache-maintenance event for systems that compile out ap040_cache and
+	// use an external cache on the TG68K bus instead.
+	output        cache_maint_req,
+	output        cache_maint_ic,
+	output        cache_maint_dc,
 
 	output [31:0] mmu_addr_log,
 	output [31:0] mmu_addr_phys,
@@ -154,6 +160,7 @@ ap040_core #(
 	.ipl(ipl),
 	.ipl_autovector(ipl_autovector),
 	.berr(berr),
+	.nmi_ack_toggle(nmi_ack_toggle),
 
 	.nresetout(nresetout),
 	.cacr_out(cacr_out),
@@ -211,6 +218,14 @@ ap040_mmu mmu (
 	.m_fc(mm_fc),
 	.m_ack(mm_ack),
 	.m_rdata(mm_rdata),
+
+	.walker_req(walker_req),
+	.walker_we(walker_we),
+	.walker_addr(walker_addr),
+	.walker_wdat(walker_wdat),
+	.walker_ack(walker_ack),
+	.walker_data(walker_data),
+	.walker_berr(walker_berr),
 
 	.phys_addr(mmu_addr_phys),
 	.cache_inhibit(mmu_cache_inhibit),
@@ -280,6 +295,7 @@ ap040_bus16_adapter bus16 (
 	.clkena_in(clkena_in),
 
 	.mem_req(b_req),
+	.mem_berr(berr),
 	.mem_write(b_write),
 	.mem_instr(b_instr),
 	.mem_size(b_size),
@@ -301,13 +317,9 @@ ap040_bus16_adapter bus16 (
 );
 
 assign mmu_addr_log = mem_addr;
-
-// the table walker runs through the normal bus path; the dedicated walker
-// channel of the wrapper contract stays idle
-assign walker_req  = 1'b0;
-assign walker_we   = 1'b0;
-assign walker_addr = 32'd0;
-assign walker_wdat = 32'd0;
+assign cache_maint_req = cinv_req;
+assign cache_maint_ic  = cinv_ic;
+assign cache_maint_dc  = cinv_dc;
 
 // external cache/burst interface idle until milestone G
 assign cache_req       = 1'b0;
@@ -317,7 +329,6 @@ assign cache_burst_len = 3'd0;
 assign cache_ramaddr   = 28'd0;
 
 // unused sideband inputs, referenced to keep lint quiet
-wire unused_sideband = walker_ack | walker_berr | cache_ack |
-                       (|walker_data) | (|cache_data);
+wire unused_sideband = cache_ack | (|cache_data);
 
 endmodule

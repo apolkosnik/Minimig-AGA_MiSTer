@@ -31,6 +31,7 @@ module ap040_bus16_adapter
 
 	// core side
 	input             mem_req,
+	input             mem_berr,     // abort the active external sub-cycle
 	input             mem_write,
 	input             mem_instr,
 	input       [1:0] mem_size,     // AP040_SZ_B/W/L
@@ -111,7 +112,20 @@ always @(posedge clk) begin
 	else if (clkena_in) begin
 		mem_ack <= 0;
 
-		if (!active) begin
+		if (active && mem_berr) begin
+			// A physical bus error completes neither the current 16-bit
+			// sub-cycle nor the enclosing core transaction.  The core samples
+			// berr on this same qualified edge and builds the format-$7 frame;
+			// release the TG68K request here so a subsequent exception-vector
+			// fetch cannot inherit the failed cycle.
+			active   <= 0;
+			busstate <= `AP040_BUS_IDLE;
+			nwr      <= 1;
+			nuds     <= 1;
+			nlds     <= 1;
+			longword <= 0;
+		end
+		else if (!active) begin
 			// idle: busstate is 01, so the wrapper keeps clkena high
 			if (mem_req && !mem_ack) begin
 				active     <= 1;

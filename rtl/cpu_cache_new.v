@@ -85,11 +85,15 @@ reg         sdr_sm_ilru;
 reg         sdr_sm_dlru;
 
 // cpu cache control
-reg   [1:0] cc_clr_r;
+reg         cc_clear_seen;
+reg         cc_clear_pending;
+reg         cc_cpu_accepted;
+reg         cc_sdr_accepted;
 wire        cpu_cache_enable;
+wire        cpu_cache_enable_d;
 wire        cpu_cache_clear;
-reg         cc_en;
-reg         cc_clr;
+reg         cc_en;      // instruction side
+reg         cc_en_d;    // data side
 // cpu address
 wire  [1:0] cpu_adr_blk;
 wire  [7:0] cpu_adr_idx;
@@ -207,25 +211,51 @@ localparam [3:0]
 
 //// cpu side ////
 
-// cpu cache control
-always @ (posedge clk) begin
-	if (rst) cc_clr_r <= 2'd0;
-	else if (!cpu_cs) cc_clr_r <= {cc_clr_r[0], cpu_cache_ctrl[3]};
-end
+// The 68040 enables its instruction and data caches independently (CACR
+// bits 15 and 31), so the external cache follows both: bit 0 is the
+// instruction enable, bit 1 the data enable.  Bit 3 is a maintenance-event
+// toggle rather than a pulse, so a request cannot disappear while either
+// cache state machine is busy.
+assign cpu_cache_enable   = cpu_cache_ctrl[0];
+assign cpu_cache_enable_d = cpu_cache_ctrl[1];
+assign cpu_cache_clear    = cc_clear_pending;
 
-assign cpu_cache_enable = cpu_cache_ctrl[0];
-//assign cpu_cache_freeze = cpu_cache_ctrl[1];
-assign cpu_cache_clear  = cc_clr_r[0] && !cc_clr_r[1];
+wire cc_cpu_accept = cc_clear_pending && (cpu_sm_state == CPU_SM_IDLE);
+wire cc_sdr_accept = cc_clear_pending && (sdr_sm_state == SDR_SM_IDLE);
+
+// Synchronize the stable maintenance toggle and retain the request until
+// both the CPU-side and SDRAM/snoop-side state machines have accepted it.
+always @ (posedge clk) begin
+	if (rst) begin
+		cc_clear_seen    <= cpu_cache_ctrl[3];
+		cc_clear_pending <= 1'b0;
+		cc_cpu_accepted  <= 1'b0;
+		cc_sdr_accepted  <= 1'b0;
+	end else if (!cc_clear_pending) begin
+		cc_cpu_accepted <= 1'b0;
+		cc_sdr_accepted <= 1'b0;
+		if (cpu_cache_ctrl[3] != cc_clear_seen)
+			cc_clear_pending <= 1'b1;
+	end else begin
+		if (cc_cpu_accept) cc_cpu_accepted <= 1'b1;
+		if (cc_sdr_accept) cc_sdr_accepted <= 1'b1;
+		if ((cc_cpu_accepted || cc_cpu_accept) &&
+		    (cc_sdr_accepted || cc_sdr_accept)) begin
+			cc_clear_seen    <= cpu_cache_ctrl[3];
+			cc_clear_pending <= 1'b0;
+			cc_cpu_accepted  <= 1'b0;
+			cc_sdr_accepted  <= 1'b0;
+		end
+	end
+end
 
 always @ (posedge clk) begin
 	if (rst) begin
 		cc_en  <= 1'b0;
-		//cc_fr  <= 1'b0;
-		cc_clr <= 1'b0;
+		cc_en_d <= 1'b0;
 	end else if (!cpu_cs) begin
 		cc_en  <= cpu_cache_enable;
-		//cc_fr  <= cpu_cache_freeze;
-		cc_clr <= cpu_cache_clear;
+		cc_en_d <= cpu_cache_enable_d;
 	end
 end 
 
@@ -273,17 +303,16 @@ always @ (posedge clk) begin
       end
       CPU_SM_IDLE : begin
         // waiting for CPU access
-        if (cpu_cs) begin
+        if (cpu_cache_clear) begin
+          cpu_sm_state <= CPU_SM_INIT;
+        end else if (cpu_cs) begin
           if (cpu_we) begin
             cpu_sm_state <= CPU_SM_WRITE;
           end else begin
             cpu_sm_state <= CPU_SM_READ;
           end
         end else begin
-          if (cc_clr)
-            cpu_sm_state <= CPU_SM_INIT;
-          else
-            cpu_sm_state <= CPU_SM_IDLE;
+		  cpu_sm_state <= CPU_SM_IDLE;
         end
       end
       CPU_SM_WRITE : begin
@@ -304,28 +333,28 @@ always @ (posedge clk) begin
       end
       CPU_SM_READ : begin
         // on hit update LRU flag in tag memory
-        if (cc_en && itag0_match && itag0_valid) begin
+        if (cpu_ir && cc_en && itag0_match && itag0_valid) begin
           // data is already in instruction cache way 0
           cpu_dat_r <= idram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           cpu_sm_itag_we <= 1'b1;
           cpu_sm_tag_dat_w <= {1'b0, itram_cpu_dat_r[38:0]};
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cc_en && itag1_match && itag1_valid) begin
+        end else if (cpu_ir && cc_en && itag1_match && itag1_valid) begin
           // data is already in instruction cache way 1
           cpu_dat_r <= idram1_cpu_dat_r;
           cpu_ack <= 1'b1;
           cpu_sm_itag_we <= 1'b1;
           cpu_sm_tag_dat_w <= {1'b1, itram_cpu_dat_r[38:0]};
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cc_en && dtag0_match && dtag0_valid) begin
+        end else if (cpu_dr && cc_en_d && dtag0_match && dtag0_valid) begin
           // data is already in data cache way 0
           cpu_dat_r <= ddram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           cpu_sm_dtag_we <= 1'b1;
           cpu_sm_tag_dat_w <= {1'b0, dtram_cpu_dat_r[38:0]};
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cc_en && dtag1_match && dtag1_valid) begin
+        end else if (cpu_dr && cc_en_d && dtag1_match && dtag1_valid) begin
           // data is already in data cache way 1
           cpu_dat_r <= ddram1_cpu_dat_r;
           cpu_ack <= 1'b1;
@@ -351,7 +380,7 @@ always @ (posedge clk) begin
           // read data to cpu
           cpu_dat_r <= sdr_dat_r;
           cpu_ack <= 1'b1;
-          if (cache_inhibit) begin
+          if (cache_inhibit || (cpu_ir ? !cc_en : !cc_en_d)) begin
             // don't update cache if caching is inhibited
             cpu_sm_state <= CPU_SM_FILLW;
           end else begin      
@@ -485,7 +514,7 @@ always @ (posedge clk) begin
         // wait for action
         cache_init_done <= 1'b1;
         sdr_sm_adr <= snoop_adr[10:1];
-        if (cc_clr) begin
+        if (cpu_cache_clear) begin
           sdr_sm_state <= SDR_SM_INIT0;
         end
         else if (snoop_act) begin

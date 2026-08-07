@@ -25,6 +25,12 @@
 //--------------------------------------------------------------------------//
 
 module cpu_wrapper
+#(
+	// A missing target must eventually produce a 68040 bus error, but chip
+	// RAM can legitimately wait thousands of clk_sys cycles for a DMA slot.
+	// 2^20 clocks is about 9 ms at 114 MHz and comfortably separates the two.
+	parameter BUS_TIMEOUT_BITS = 20
+)
 (
 	input             reset,
 	output reg        reset_out,
@@ -66,6 +72,18 @@ module cpu_wrapper
 	output            ramuds,
 	output            ramshared,
 
+	// Dedicated AP040 physical table-walk channel.  Addresses are already
+	// encoded for the SDRAM/DDR3 controllers; walker_mem_ddr selects the bank.
+	output            walker_mem_req,
+	output            walker_mem_we,
+	output     [28:2] walker_mem_addr,
+	output     [31:0] walker_mem_wdat,
+	output            walker_mem_ddr,
+	output            walker_mem_bad,
+	input             walker_mem_ack,
+	input      [31:0] walker_mem_rdata,
+	input             walker_mem_berr,
+
 	output            toccata_ena,
 	output reg  [7:0] toccata_base,
 
@@ -75,6 +93,10 @@ module cpu_wrapper
 
 	output reg  [1:0] cpustate,
 	output reg  [3:0] cacr,
+	// MMU cache-inhibit attribute of the current access (TTR CM or page
+	// descriptor CM); the external caches must not retain such data.
+	output            cache_inhibit,
+	output            nmi_ack_toggle,
 	output reg [31:0] nmi_addr
 );
 
@@ -147,7 +169,9 @@ always @* begin
 	cpu_dout     = cpu_dout_p;
 	cpu_addr     = cpu_addr_p;
 	cpustate     = cpustate_p;
-	cacr         = {3'd0, cacr_p[15] | cacr_p[31]};  // 040 CACR IE/DE -> external cache enable
+	// 040 CACR: bit 15 enables the instruction cache, bit 31 the data
+	// cache.  The external cache takes them separately (bit 0 = I, 1 = D).
+	cacr         = {cache_clear_toggle, 1'b0, cacr_p[31], cacr_p[15]};
 	vbr          = vbr_p;
 	wr           = wr_p;
 	uds_in       = uds_p;
@@ -174,6 +198,13 @@ wire        uds_p;
 wire        lds_p;
 wire        reset_out_p;
 wire        longword;
+wire        walker_req_p, walker_we_p;
+wire [31:0] walker_addr_p, walker_wdat_p;
+wire        cache_maint_p;
+reg         cache_maint_d;
+reg         cache_clear_toggle;
+wire        bus_berr;
+wire        bus_complete = chipready | ramready | fastchip_ready;
 
 ap040_tg68k_compat #(
 	// internal caches off: cpu_cache_new in the RAM controllers already
@@ -187,11 +218,11 @@ ap040_tg68k_compat #(
 (
 	.clk(clk),
 	.nreset(reset),
-	.clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
+	.clkena_in(~cpu_req | bus_complete | bus_berr),
 	.data_in(cpu_din),
 	.ipl(cpu_ipl),
 	.ipl_autovector(1'b1),
-	.berr(1'b0),
+	.berr(bus_berr),
 
 	.addr_out(cpu_addr_p),
 	.data_write(cpu_dout_p),
@@ -202,18 +233,22 @@ ap040_tg68k_compat #(
 	.longword(longword),
 	.nresetout(reset_out_p),
 	.fc(),
+	.nmi_ack_toggle(nmi_ack_toggle),
+	.cache_maint_req(cache_maint_p),
+	.cache_maint_ic(),
+	.cache_maint_dc(),
 
-	// MMU/walker/cache sideband: idle until the 040 MMU and caches land
+	// MMU and dedicated physical table-walker sideband
 	.mmu_addr_log(),
 	.mmu_addr_phys(),
-	.mmu_cache_inhibit(),
-	.walker_req(),
-	.walker_we(),
-	.walker_addr(),
-	.walker_wdat(),
-	.walker_ack(1'b0),
-	.walker_data(32'd0),
-	.walker_berr(1'b0),
+	.mmu_cache_inhibit(cache_inhibit),
+	.walker_req(walker_req_p),
+	.walker_we(walker_we_p),
+	.walker_addr(walker_addr_p),
+	.walker_wdat(walker_wdat_p),
+	.walker_ack(walker_mem_ack),
+	.walker_data(walker_mem_rdata),
+	.walker_berr(walker_mem_berr),
 	.cache_req(),
 	.cache_addr(),
 	.cache_data(16'd0),
@@ -231,6 +266,73 @@ ap040_tg68k_compat #(
 );
 
 wire cpu_req = (cpustate != 1);
+
+// Convert the core's level handshake into a toggle.  The RAM controllers
+// may be in another clock domain and/or busy when CINV/CPUSH executes; a
+// stable toggle cannot be lost the way a one-cycle clear pulse can.
+always @(posedge clk) begin
+	if (!reset) begin
+		cache_maint_d      <= 0;
+		cache_clear_toggle <= 0;
+	end
+	else begin
+		cache_maint_d <= cache_maint_p;
+		if (cache_maint_p && !cache_maint_d)
+			cache_clear_toggle <= ~cache_clear_toggle;
+	end
+end
+
+// Keep berr asserted until the bus adapter has sampled it on a qualified
+// edge and released cpu_req; this avoids a narrow pulse at exactly the point
+// where clkena_in was previously stalled.
+ap040_bus_timeout #(.COUNTER_BITS(BUS_TIMEOUT_BITS)) bus_timeout (
+	.clk(clk),
+	.nreset(reset && reset_out_p),
+	.req(cpu_req),
+	.complete(bus_complete),
+	.berr(bus_berr)
+);
+
+// Translate the walker's physical address to the same SDRAM/DDR3 bank map
+// used by normal CPU traffic.  The MMU guarantees aligned longword accesses.
+wire walker_sel_z3ram0 = (walker_addr_p[31:27] == z3ram_base0) && z3ram_ena0;
+wire walker_sel_z3ram1 = (walker_addr_p[31:28] == z3ram_base1) && z3ram_ena1;
+wire walker_sel_z2ram  = !walker_addr_p[31:24] &&
+					 (walker_addr_p[23] ^ |walker_addr_p[22:21]) && z2ram_ena;
+wire walker_sel_zram   = walker_sel_z3ram0 | walker_sel_z3ram1 |
+					 walker_sel_z2ram;
+wire walker_sel_dd     = (walker_addr_p[31:16] == 16'h00DD) &&
+					 (walker_addr_p[15:13] == 3'b010);
+wire walker_sel_rtg    = (walker_addr_p[31:24] == 8'h02);
+wire walker_kicklower  = !walker_addr_p[31:24] &&
+					 (walker_addr_p[23:18] == 6'b111110);
+wire [28:1] walker_ramaddr;
+
+assign walker_ramaddr[28]    = walker_sel_zram & ~walker_sel_z3ram0;
+assign walker_ramaddr[27]    = walker_sel_zram &
+					      (~walker_sel_z3ram1 | walker_addr_p[27]);
+assign walker_ramaddr[26:23] = (walker_sel_z3ram0 | walker_sel_z3ram1)
+					      ? walker_addr_p[26:23]
+					      : (walker_sel_rtg ? 4'b1110 : {4{walker_sel_dd}});
+assign walker_ramaddr[22:19] = {4{walker_sel_dd}} | walker_addr_p[22:19];
+assign walker_ramaddr[18]    = walker_sel_dd | (walker_kicklower & bootrom) |
+					      walker_addr_p[18];
+assign walker_ramaddr[17:16] = {2{walker_sel_dd}} | walker_addr_p[17:16];
+assign walker_ramaddr[15:1]  = walker_addr_p[15:1];
+
+assign walker_mem_req  = walker_req_p;
+assign walker_mem_we   = walker_we_p;
+assign walker_mem_addr = walker_ramaddr[28:2];
+assign walker_mem_wdat = walker_wdat_p;
+assign walker_mem_ddr  = |walker_ramaddr[28:26];
+// High physical addresses are valid only when they decode as configured Z3
+// RAM.  Misalignment indicates corrupt descriptor-table state.
+// Valid table memory is Z2/Z3 RAM, the DD and RTG apertures, and the low
+// 16M (which decodes as chip/slow/kick).  Anything else, or a misaligned
+// descriptor address, indicates corrupt translation-table state.
+assign walker_mem_bad  = (|walker_addr_p[1:0]) |
+					 ((|walker_addr_p[31:24]) &&
+					  !(walker_sel_zram | walker_sel_dd | walker_sel_rtg));
 
 wire cchip = turbochip_d & (!cpustate | dcache_d);
 wire ckick = turbokick_d & (!cpustate | dcache_d);
@@ -275,11 +377,26 @@ always @(negedge clk, negedge reset) begin
 
 	if(~reset) begin
 		stage <= 0;
+		waitm <= 0;
 		c_as <= 1;
 		c_rw <= 1;
 		c_uds <= 1;
 		c_lds <= 1;
 		ready <= 0;
+		chipready <= 0;
+	end
+	else if (bus_berr) begin
+		// The bus16 adapter aborts on the next positive edge.  Release
+		// any chip-bus phase here as well so the exception-vector fetch
+		// starts from a clean bus transaction.
+		stage <= 0;
+		waitm <= 0;
+		c_as <= 1;
+		c_rw <= 1;
+		c_uds <= 1;
+		c_lds <= 1;
+		ready <= 0;
+		chipready <= 0;
 	end
 	else begin
 		if (ph2n) begin

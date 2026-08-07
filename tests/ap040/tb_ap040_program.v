@@ -35,9 +35,21 @@ wire  [2:0] fc;
 wire [31:0] cacr_out, vbr_out;
 wire        debug_busy, debug_fault, debug_halted;
 wire [255:0] debug_status;
+wire        walker_req, walker_we;
+wire [31:0] walker_addr, walker_wdat;
+reg         walker_ack;
+reg  [31:0] walker_data;
+reg         walker_berr_r;    // one-shot walker bus error, armed via $F146
+reg         wberr_arm;
 
 reg         mem_ready;
-wire        clkena_in = (busstate == 2'b01) | mem_ready;
+reg         berr_armed;
+reg   [1:0] irq_exc_armed;
+reg   [2:0] irq_fetch_stall;
+wire        berr = berr_armed && nreset && (busstate != 2'b01) &&
+                   (addr_out[15:0] == 16'hF140);
+
+wire        clkena_in = (busstate == 2'b01) | mem_ready | berr;
 
 reg   [2:0] ipl_lvl;
 
@@ -49,7 +61,7 @@ ap040_tg68k_compat dut
 	.data_in(data_in),
 	.ipl(~ipl_lvl),
 	.ipl_autovector(1'b1),
-	.berr(1'b0),
+	.berr(berr),
 
 	.addr_out(addr_out),
 	.data_write(data_write),
@@ -64,13 +76,13 @@ ap040_tg68k_compat dut
 	.mmu_addr_log(),
 	.mmu_addr_phys(),
 	.mmu_cache_inhibit(),
-	.walker_req(),
-	.walker_we(),
-	.walker_addr(),
-	.walker_wdat(),
-	.walker_ack(1'b0),
-	.walker_data(32'd0),
-	.walker_berr(1'b0),
+	.walker_req(walker_req),
+	.walker_we(walker_we),
+	.walker_addr(walker_addr),
+	.walker_wdat(walker_wdat),
+	.walker_ack(walker_ack),
+	.walker_data(walker_data),
+	.walker_berr(walker_berr_r),
 	.cache_req(),
 	.cache_addr(),
 	.cache_data(16'd0),
@@ -89,6 +101,8 @@ ap040_tg68k_compat dut
 
 wire [31:0] dbg_pc = debug_status[31:0];
 wire [15:0] dbg_ir = debug_status[63:48];
+reg  [7:0]  prev_core_state;
+always @(posedge clk) if (dut.core.ce) prev_core_state <= dut.core.state;
 
 //---------------------------------------------------------------------------
 // 64 KB memory model
@@ -115,12 +129,32 @@ endfunction
 
 reg [2:0] lat_cnt;
 integer lat_idx;
+reg       walker_pending;
+reg       walker_armed;
+reg       walker_we_latch;
+reg [31:0] walker_addr_latch;
+reg [31:0] walker_wdat_latch;
+reg  [2:0] walker_lat_cnt;
+integer   walker_lat_idx;
+integer   walker_cycles;
 
 always @(posedge clk) begin
 	mem_ready <= 0;
 	if (!nreset) begin
 		lat_cnt <= latency(phase, 0);
 		lat_idx <= 1;
+		berr_armed <= 1;
+		irq_exc_armed <= 0;
+		irq_fetch_stall <= 0;
+	end
+	else if (berr) begin
+		// One physical bus error per phase.  The restarted access succeeds,
+		// proving that the adapter released the failed sub-cycle.
+		berr_armed <= 0;
+	end
+	else if (irq_fetch_stall != 0 && busstate != 2'b01 && !mem_ready) begin
+		// Keep the first handler refill outstanding while IPL synchronizes.
+		irq_fetch_stall <= irq_fetch_stall - 1'd1;
 	end
 	else if (busstate != 2'b01 && !mem_ready) begin
 		if (lat_cnt == 0) begin
@@ -130,11 +164,133 @@ always @(posedge clk) begin
 		end
 		else lat_cnt <= lat_cnt - 1'd1;
 	end
+	// The exception program uses this write-only test register to arm a
+	// second physical bus error for its faulting-MOVES case.
+	if (nreset && mem_ready && busstate == 2'b11 &&
+	    addr_out[15:0] == 16'hF142)
+		berr_armed <= 1;
+
+	// $F146 arms a one-shot bus error on the NEXT table-walker descriptor
+	// access, for the PTEST MMUSR B-bit test.
+	if (nreset && mem_ready && busstate == 2'b11 &&
+	    addr_out[15:0] == 16'hF146)
+		wberr_arm <= 1;
+
+	// Mode 1 raises IPL during stacking. Mode 2 raises it after the vector
+	// has been read and stalls the first handler refill for synchronization.
+	if (nreset && mem_ready && busstate == 2'b11 &&
+	    addr_out[15:0] == 16'hF144) begin
+		irq_exc_armed <= data_write[1:0];
+			`ifdef AP040_TRACE
+			$display("TRACE armed exception-time IRQ mode=%0d pc=%h",
+			         data_write[1:0], dbg_pc);
+			`endif
+	end
+	else if (irq_exc_armed == 1 && dut.core.state == 8'd34 &&
+	         dut.core.exc_vec == 8'd32) begin
+		ipl_lvl <= 3'd2;
+		irq_exc_armed <= 0;
+			`ifdef AP040_TRACE
+			$display("TRACE raised stacking-time IPL2 pc=%h", dbg_pc);
+			`endif
+	end
+	else if (irq_exc_armed == 2 && dut.core.state == 8'd42 &&
+	         dut.core.exc_vec == 8'd32) begin
+		ipl_lvl <= 3'd2;
+		irq_exc_armed <= 0;
+		irq_fetch_stall <= 3'd5;
+		`ifdef AP040_TRACE
+		$display("TRACE raised handler-refill IPL2 pc=%h", dbg_pc);
+		`endif
+	end
+end
+
+// Dedicated 32-bit physical table-walker memory port.  It deliberately has
+// an independent latency profile and never asserts mem_ready on the 16-bit
+// CPU bus, so all MMU tests fail if descriptor traffic leaks onto that bus.
+always @(posedge clk) begin
+	walker_ack <= 0;
+	walker_berr_r <= 0;
+	if (!nreset) begin
+		wberr_arm        <= 0;
+		walker_pending   <= 0;
+		walker_armed     <= 1;
+		walker_we_latch  <= 0;
+		walker_addr_latch <= 0;
+		walker_wdat_latch <= 0;
+		walker_data      <= 0;
+		walker_lat_cnt   <= latency(phase, 0);
+		walker_lat_idx   <= 1;
+		walker_cycles    <= 0;
+	end
+	else begin
+		if (!walker_req) walker_armed <= 1;
+		if (walker_req && (busstate != 2'b01)) begin
+			errors = errors + 1;
+			$display("FAIL: walker and 16-bit CPU bus active together (pc=%h)", dbg_pc);
+			result = 2;
+		end
+
+		if (walker_req && walker_armed && !walker_pending) begin
+			walker_pending    <= 1;
+			walker_armed      <= 0;
+			walker_we_latch   <= walker_we;
+			walker_addr_latch <= walker_addr;
+			walker_wdat_latch <= walker_wdat;
+			walker_lat_cnt    <= latency(phase, walker_lat_idx);
+			walker_lat_idx    <= walker_lat_idx + 1;
+			walker_cycles     <= walker_cycles + 1;
+		end
+		else if (walker_pending) begin
+			if (walker_lat_cnt != 0)
+				walker_lat_cnt <= walker_lat_cnt - 1'd1;
+			else if (wberr_arm) begin
+				// injected physical bus error on this descriptor access
+				wberr_arm      <= 0;
+				walker_pending <= 0;
+				walker_berr_r  <= 1;
+			end
+			else begin
+				if (walker_addr_latch[31:16] != 0 ||
+				    walker_addr_latch[1:0] != 0) begin
+					errors = errors + 1;
+					$display("FAIL: invalid walker address %h", walker_addr_latch);
+					result = 2;
+				end
+				else if (walker_we_latch) begin
+					mem[walker_addr_latch[15:1]] = walker_wdat_latch[31:16];
+					mem[walker_addr_latch[15:1] + 1'b1] = walker_wdat_latch[15:0];
+				end
+				else begin
+					walker_data <= {mem[walker_addr_latch[15:1]],
+					                mem[walker_addr_latch[15:1] + 1'b1]};
+				end
+				walker_pending <= 0;
+				walker_ack     <= 1;
+			end
+		end
+	end
 end
 
 // bus monitor and write commit
 always @(posedge clk) begin
 	if (nreset && mem_ready) begin
+		// Reset vectors, exception frames and exception vectors are
+		// supervisor-data cycles; the first handler opcode is supervisor
+		// program.  This also catches a leaked MOVES SFC/DFC override.
+		if (dut.core.in_exc) begin
+			if (busstate == 2'b00 && fc !== 3'd6) begin
+				errors = errors + 1;
+				$display("FAIL: exception handler fetch used FC=%0d, expected 6", fc);
+				result = 2;
+			end
+			else if ((busstate == 2'b10 || busstate == 2'b11) && fc !== 3'd5) begin
+				errors = errors + 1;
+				$display("FAIL: exception/reset data cycle used FC=%0d, expected 5", fc);
+				result = 2;
+			end
+		end
+
 		if (addr_out[31:16] != 0) begin
 			errors = errors + 1;
 			$display("FAIL: access outside memory model at %h (pc=%h)", addr_out, dbg_pc);
@@ -175,7 +331,9 @@ end
 always @(posedge clk) begin
 	if (nreset && (debug_fault || debug_halted) && result == 0) begin
 		errors = errors + 1;
-		$display("FAIL: core halted, fault=%b pc=%h ir=%h", debug_fault, dbg_pc, dbg_ir);
+		$display("FAIL: core halted, fault=%b pc=%h ir=%h prev_state=%0d in_exc=%b mem_flt=%b",
+		         debug_fault, dbg_pc, dbg_ir, prev_core_state, dut.core.in_exc,
+		         dut.core.mem_flt);
 		result = 2;
 	end
 end
@@ -183,7 +341,8 @@ end
 `ifdef AP040_TRACE
 always @(posedge clk) if (nreset && dut.core.ce) begin
 	if (dut.core.state == 7'd4)
-		$display("TRACE decode pc=%h ir=%h sr=%h", dut.core.pc, dut.core.ir, dut.core.sr);
+		$display("TRACE decode pc=%h ir=%h sr=%h in_exc=%b", dut.core.pc,
+		         dut.core.ir, dut.core.sr, dut.core.in_exc);
 	if (dut.core.state == 7'd34)
 		$display("TRACE exc vec=%0d fmt=%0d spc=%h", dut.core.exc_vec, dut.core.exc_fmt, dut.core.exc_spc);
 end
@@ -205,6 +364,8 @@ task run_phase;
 		phase   = ph;
 		result  = 0;
 		ipl_lvl = 0;
+		irq_exc_armed = 0;
+		irq_fetch_stall = 0;
 
 		for (i = 0; i < 32768; i = i + 1) mem[i] = 16'h0000;
 		$readmemh(prog_file, mem);

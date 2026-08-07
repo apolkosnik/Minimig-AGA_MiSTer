@@ -19,8 +19,16 @@ cnt_aerr	equ	$3600
 expect_fa	equ	$3604
 fix_addr	equ	$3608
 fix_val		equ	$360C
+seen_desc	equ	$3610
 cnt_stub	equ	$3614
 uret		equ	$3618
+expect_tm	equ	$361C
+expect_ma	equ	$3620
+last_ssw	equ	$3624
+last_wb3s	equ	$3626
+last_wb3d	equ	$3628
+last_ea		equ	$362C
+WBERRCTL	equ	$F146
 
 failt	macro
 	move.w	#\1,d7
@@ -50,6 +58,7 @@ ok\@:
 start:
 	clr.w	(cnt_aerr).l
 	clr.w	(cnt_stub).l
+	clr.w	(expect_ma).l
 
 ;----------------------------------------------------------------- tables
 	lea	($4400).l,a0
@@ -144,6 +153,7 @@ tloop:
 	pflusha
 
 ;----------------------------------------------- write protection fault
+	move.l	#5,(expect_tm).l	; supervisor data write
 	move.l	#$8000,(expect_fa).l
 	move.l	#$4420,(fix_addr).l
 	move.l	#$8003,(fix_val).l
@@ -153,8 +163,12 @@ tloop:
 	move.w	(cnt_aerr).l,d0
 	and.l	#$FFFF,d0
 	chkl	d0,1,10
+	move.l	(seen_desc).l,d0
+	and.l	#8,d0
+	chkl	d0,8,45			; denied access still set descriptor U
 
 ;----------------------------------------------------- invalid data page
+	move.l	#5,(expect_tm).l	; supervisor data read
 	move.l	#$A000,(expect_fa).l
 	move.l	#$4428,(fix_addr).l
 	move.l	#$A003,(fix_val).l
@@ -165,6 +179,7 @@ tloop:
 	chkl	d0,2,12
 
 ;------------------------------------------------ instruction fetch fault
+	move.l	#6,(expect_tm).l	; supervisor instruction fetch
 	move.l	#$D000,(expect_fa).l
 	move.l	#$4434,(fix_addr).l
 	move.l	#$D003,(fix_val).l
@@ -180,6 +195,7 @@ tloop:
 	movea.l	#$3C00,a0
 	movec	a0,usp
 	move.l	#ucont,(uret).l
+	move.l	#1,(expect_tm).l	; user data read
 	move.l	#$9000,(expect_fa).l
 	move.l	#$4424,(fix_addr).l
 	move.l	#$9003,(fix_val).l
@@ -233,6 +249,24 @@ utloop:
 
 ucont2:
 	chkl	d0,42,33		; ran the user-mapped code
+
+;--------------------- MOVE to SR supervisor->user: fetch uses the user root
+; The MOVE to SR sits at VA $7000, which the supervisor root identity maps.
+; Clearing S means the NEXT fetch (VA $7004) belongs to the user context and
+; must translate through URP to PA $F004; the supervisor view of $7004 holds
+; ILLEGAL, so a stale supervisor FC on that fetch fails the test.
+	move.l	#ucont3,(uret).l
+	moveq	#0,d0
+	move.w	#$702B,($F004).l	; user view:  moveq #43,d0
+	move.w	#$4E41,($F006).l	;             trap #1
+	move.w	#$4AFC,($7004).l	; super view: illegal
+	move.w	#$46FC,($7000).l	; move.w #$0000,sr
+	move.w	#$0000,($7002).l
+	pflusha
+	jmp	($7000).l
+
+ucont3:
+	chkl	d0,43,39		; ran the user-mapped code after MOVE to SR
 	move.l	#$4000,d0
 	movec	d0,urp			; restore the shared root
 	pflusha
@@ -249,6 +283,59 @@ ucont2:
 	move.l	($E004).l,d0
 	chkl	d0,$FEED5678,35
 
+;------------------------- transfers that cross a page boundary
+; The MMU translates one address per bus transaction, so a misaligned
+; transfer spanning two pages must be split: every byte has to go through
+; its own page's mapping.  Page 2 ($2000) keeps its identity mapping while
+; page 3 ($3000) is remapped to physical $E000, so a long written at
+; $2FFE lands two bytes in $2FFE and two bytes at the top of $E000.
+	; First make the second page invalid.  Its ATC fault must report the
+	; original longword address/size, not the individually split byte, and
+	; set SSW.MA because the fault occurred after crossing the page boundary.
+	; Use pages 5/6 rather than 2/3: the active ISP is in page 3, so making
+	; page 3 invalid would correctly double-fault while stacking the frame.
+	move.w	#$1122,($5FFE).l
+	move.w	#$3344,($E000).l
+	move.l	#5,(expect_tm).l
+	move.l	#$00005FFE,(expect_fa).l
+	move.l	#$4418,(fix_addr).l
+	move.l	#$0000E003,(fix_val).l
+	move.w	#$0800,(expect_ma).l
+	move.l	#0,($4418).l
+	pflusha
+	move.l	($5FFE).l,d0
+	chkl	d0,$11223344,46
+	move.w	(cnt_aerr).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,5,47
+	clr.w	(expect_ma).l
+	move.l	#$00006003,($4418).l
+	pflusha
+
+	move.l	#$0000E003,($440C).l	; page 3 -> physical $E000
+	pflusha
+	move.l	#$00000000,($2FFC).l
+	move.l	#$00000000,($E000).l
+	move.l	#$11223344,($2FFE).l	; straddles the boundary
+	move.l	($2FFC).l,d0
+	chkl	d0,$00001122,40		; low half of page 2 got the top bytes
+	move.l	($E000).l,d0
+	chkl	d0,$33440000,41		; page 3's physical target got the rest
+	move.l	($2FFE).l,d0
+	chkl	d0,$11223344,42		; and it reads back through both pages
+
+	move.w	#$5566,($2FFF).l	; word crossing at an odd address
+	move.b	($2FFF).l,d0
+	and.l	#$FF,d0
+	chkl	d0,$55,43
+	move.b	($E000).l,d0
+	and.l	#$FF,d0
+	chkl	d0,$66,44
+
+	move.l	#$00003003,($440C).l	; restore the identity mapping
+	pflusha
+	move.l	#$BBBB2222,($E000).l	; the ATC tests below still need this
+
 ;------------------------------------------------------------ TTR bypass
 	move.l	#0,($4414).l	; page 5 invalid
 	pflusha
@@ -258,18 +345,19 @@ ucont2:
 	chkl	d0,$CAFE0505,17
 	move.w	(cnt_aerr).l,d0
 	and.l	#$FFFF,d0
-	chkl	d0,4,18
+	chkl	d0,5,18
 	lea	($5000).l,a0
 	ptestr	(a0)
 	movec	mmusr,d0
-	chkl	d0,$00005003,19		; transparent + resident
+	chkl	d0,$00000003,19		; T and R only: the PA field stays
+					; clear on a TTR match (WinUAE PTEST)
 
 	; PTESTW reports a write-protected transparent translation as B
 	move.l	#$0000C004,d0
 	movec	d0,dtt0
 	ptestw	(a0)
 	movec	mmusr,d0
-	chkl	d0,$00000400,38
+	chkl	d0,$00000800,38		; B is bit 11, not the G position
 
 	; DFC program space selects ITT rather than DTT during PTEST
 	moveq	#0,d0
@@ -280,7 +368,7 @@ ucont2:
 	movec	d0,dfc
 	ptestr	(a0)
 	movec	mmusr,d0
-	chkl	d0,$00005003,39
+	chkl	d0,$00000003,39	; ITT match: T and R only
 	moveq	#0,d0
 	movec	d0,itt0
 	moveq	#5,d0
@@ -306,6 +394,7 @@ ucont2:
 ;----------------------------------------- MOVEM restart across a fault
 	; registers to memory into a page that faults mid-transfer: the
 	; 68040 restart model re-executes the whole MOVEM after the fix
+	move.l	#5,(expect_tm).l	; supervisor data write (MOVEM)
 	move.l	#$00007000,(expect_fa).l
 	move.l	#$441C,(fix_addr).l	; page 7 descriptor
 	move.l	#$7003,(fix_val).l
@@ -324,7 +413,7 @@ ucont2:
 	chkl	d0,$CCCC0003,26
 	move.w	(cnt_aerr).l,d0
 	and.l	#$FFFF,d0
-	chkl	d0,5,27
+	chkl	d0,6,27
 
 	; memory to registers with a fault on the second page
 	move.l	#0,($441C).l
@@ -338,7 +427,7 @@ ucont2:
 	chkl	d3,$CCCC0003,30
 	move.w	(cnt_aerr).l,d0
 	and.l	#$FFFF,d0
-	chkl	d0,6,31
+	chkl	d0,7,31
 
 ;----------------------------------------------------------------- 8K pages
 	moveq	#0,d0
@@ -386,6 +475,7 @@ t8loop:
 	chkl	d0,$0000D001,28
 
 	; fault and restart under 8K paging
+	move.l	#5,(expect_tm).l	; supervisor data write (8K paging)
 	move.l	#$0000E000,(expect_fa).l
 	move.l	#$441C,(fix_addr).l	; entry 7: LA $E000-$FFFF
 	move.l	#$0000E003,(fix_val).l
@@ -397,13 +487,131 @@ t8loop:
 	chkl	d0,$0E0E0E0E,29
 	move.w	(cnt_aerr).l,d0
 	and.l	#$FFFF,d0
-	chkl	d0,7,30
+	chkl	d0,8,30
 
 ;----------------------------------------------------------------- disable
 	moveq	#0,d0
 	movec	d0,tc
 	move.l	($3000).l,d0
 	chkl	d0,$11112222,23
+
+;================ WinUAE-oracle MMU/frame audit battery (2026-08-07) ======
+; Rebuild the 4K identity tables (the 8K section rewrote the page table).
+	lea	($4400).l,a0
+	moveq	#0,d1
+	move.w	#63,d0
+t48loop:
+	move.l	d1,d2
+	lsl.l	#8,d2
+	lsl.l	#4,d2		; page number << 12
+	addq.l	#3,d2
+	move.l	d2,(a0)+
+	addq.l	#1,d1
+	dbra	d0,t48loop
+	pflusha
+
+; PTEST walks the tables even with translation disabled (TC is 0 here):
+; a resident probe reports the full translation, not a transparent stub
+	lea	($8000).l,a0
+	moveq	#5,d0
+	movec	d0,dfc
+	ptestr	(a0)
+	movec	mmusr,d0
+	chkl	d0,$00008001,48		; PA + R from a real table search
+
+; a bus error on a descriptor fetch during PTEST reports MMUSR B
+	move.w	#1,(WBERRCTL).l
+	ptestr	(a0)
+	movec	mmusr,d0
+	chkl	d0,$00000800,49		; B bit, nothing else
+
+; enable 4K translation for the fault-shape tests
+	move.l	#$8000,d0
+	movec	d0,tc
+	pflusha
+
+; MOVE16 write fault: SSW reports SIZE=line with TT0 and the WB3 slot
+; stays clear (the restart model omits the WB2 line writeback)
+	move.l	#5,(expect_tm).l
+	move.l	#0,(expect_ma).l
+	move.l	#$8000,(expect_fa).l
+	move.l	#$4420,(fix_addr).l
+	move.l	#$8003,(fix_val).l
+	move.l	#$16161616,($3100).l
+	move.l	#$27272727,($3104).l
+	move.l	#$38383838,($3108).l
+	move.l	#$49494949,($310C).l
+	move.l	#$00008007,($4420).l	; write protect page 8
+	pflusha
+	lea	($3100).l,a0
+	lea	($8000).l,a1
+	move16	(a0)+,(a1)+
+	move.w	(last_ssw).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$046D,50		; ATC + line size + TT0 + TM=5
+	move.w	(last_wb3s).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,0,51			; MOVE16 write: WB3 valid stays clear
+	move.l	($8000).l,d0
+	chkl	d0,$16161616,52		; restart completed the line
+
+; TAS operand fault: a locked RMW reports LK with RW clear
+	move.b	#$11,($8005).l
+	move.l	#$8005,(expect_fa).l
+	move.l	#$00008007,($4420).l
+	pflusha
+	tas	($8005).l
+	move.w	(last_ssw).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$0625,53		; ATC + LK + byte, RW clear
+	moveq	#0,d0
+	move.b	($8005).l,d0
+	chkl	d0,$91,54		; restart completed the set
+
+; MOVES to FC 0 keeps the raw FC in TM and reports TT=10
+	move.l	#0,(expect_tm).l
+	move.l	#$8006,(expect_fa).l
+	move.l	#$00008007,($4420).l
+	pflusha
+	moveq	#0,d0
+	movec	d0,dfc
+	move.b	#$5C,d1
+	moves.b	d1,($8006).l
+	move.w	(last_ssw).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$0430,55		; ATC + byte + TT1, TM=0
+	moveq	#0,d0
+	move.b	($8006).l,d0
+	chkl	d0,$5C,56
+
+; MOVES to FC 2 is remapped onto user data space in TM
+	move.l	#1,(expect_tm).l
+	move.l	#$8007,(expect_fa).l
+	move.l	#$00008007,($4420).l
+	pflusha
+	moveq	#2,d0
+	movec	d0,dfc
+	move.b	#$7B,d1
+	moves.b	d1,($8007).l
+	move.w	(last_ssw).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$0421,57		; ATC + byte, TM remapped to 1
+	moveq	#5,d0
+	movec	d0,dfc
+
+; a plain write fault carries the write in WB3 and the EA mirrors FA
+	move.l	#5,(expect_tm).l
+	move.l	#$8000,(expect_fa).l
+	move.l	#$00008007,($4420).l
+	pflusha
+	move.l	#$DEADBEE5,($8000).l
+	move.l	(last_wb3d).l,d0
+	chkl	d0,$DEADBEE5,58
+	move.l	(last_ea).l,d0
+	chkl	d0,$8000,59
+
+	moveq	#0,d0
+	movec	d0,tc
 
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700
@@ -412,18 +620,69 @@ t8loop:
 h_aerr:
 	cmpi.w	#$7008,6(sp)	; format $7, vector 2
 	bne	hfail
-	movem.l	d0/a0,-(sp)
-	move.l	$1C(sp),d0	; fault address (frame offset $14)
+	movem.l	d0-d1/a0,-(sp)
+	move.w	$18(sp),(last_ssw).l	; capture for the SSW-shape tests
+	move.w	$1A(sp),(last_wb3s).l
+	move.l	$28(sp),(last_wb3d).l
+	move.l	$14(sp),(last_ea).l
+	move.l	$14(sp),d0	; EA field: WinUAE stacks the fault address here
+	move.w	$18(sp),d1	; MOVE16 stacks the EA aligned to the line
+	and.w	#$0060,d1
+	cmp.w	#$0060,d1
+	bne.s	haerr_eachk
+	and.l	#$FFFFFFF0,d0
+	cmp.l	(expect_fa).l,d0
+	beq.s	haerr_eaok
+	bra	hfail
+haerr_eachk:
+	cmp.l	(expect_fa).l,d0	; (informational: CM/CT are never set)
+	bne	hfail
+haerr_eaok:
+	move.l	$20(sp),d0	; fault address (frame offset $14)
 	cmp.l	(expect_fa).l,d0
 	bne	hfail
-	move.w	$14(sp),d0	; SSW (frame offset $C)
+	move.w	$18(sp),d0	; SSW (frame offset $C)
 	and.w	#$0400,d0	; ATC fault bit
 	beq	hfail
+	move.w	$18(sp),d0
+	and.w	#$0800,d0	; fault on second page of a split access
+	cmp.w	(expect_ma).l,d0
+	bne	hfail
+	move.w	$18(sp),d0
+	and.l	#$0007,d0	; TM: the function code of the faulting access
+	cmp.l	(expect_tm).l,d0
+	bne	hfail
+	move.w	$18(sp),d0
+	btst	#8,d0		; write fault: WB3 slot carries the write
+	bne.s	haerr_rd
+	move.w	$18(sp),d0	; ...except a MOVE16 line write, whose WB3
+	and.w	#$0060,d0	; valid bit stays clear (WinUAE clears it and
+	cmp.w	#$0060,d0	; would use a WB2 line writeback instead)
+	bne.s	haerr_wbw
+	tst.w	$1A(sp)
+	bne	hfail
+	bra.s	haerr_wbok
+haerr_wbw:
+	move.w	$1A(sp),d0	; WB3S = valid + SSW size/TT/TM bits
+	move.w	$18(sp),d1
+	and.w	#$007F,d1
+	or.w	#$0080,d1
+	cmp.w	d1,d0
+	bne	hfail
+	move.l	$20(sp),d0	; WB3A mirrors the fault address
+	cmp.l	$24(sp),d0	; (frame offset $18, after movem +12)
+	bne	hfail
+	bra.s	haerr_wbok
+haerr_rd:
+	tst.w	$1A(sp)		; read fault: WB3S stays clear
+	bne	hfail
+haerr_wbok:
 	movea.l	(fix_addr).l,a0
+	move.l	(a0),(seen_desc).l	; capture descriptor before the handler fixes it
 	move.l	(fix_val).l,(a0)
 	pflusha
 	addq.w	#1,(cnt_aerr).l
-	movem.l	(sp)+,d0/a0
+	movem.l	(sp)+,d0-d1/a0
 	rte
 
 h_utrap:

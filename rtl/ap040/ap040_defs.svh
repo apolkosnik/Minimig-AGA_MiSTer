@@ -72,6 +72,7 @@
 `define AP040_VEC_FP_OPERR 8'd52
 `define AP040_VEC_FP_OVFL  8'd53
 `define AP040_VEC_FP_SNAN  8'd54
+`define AP040_VEC_FP_UNSUP 8'd55   // unsupported data type (format $0/$3)
 
 // SR write mask on MC68040: T1 T0 S M IPL2:0 XNZVC
 `define AP040_SR_MASK   16'hF71F

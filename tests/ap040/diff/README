@@ -30,3 +30,90 @@ sequencing, where QEMU is reliable.
 Usage:
   verilator --binary --timing ... tb_ap040_program.v rtl/ap040/*.v
   SIM=/path/to/Vtb_ap040_program ./run_diff.sh 1 50 150
+
+Floating-point differential (gen_fpdiff.py / run_fpdiff.sh)
+----------------------------------------------------------
+Random FP programs: a pool of normalized extended/single/double constants,
+FP0-FP7 loaded from it, then a stream of FADD/FSUB/FMUL/FDIV/FSQRT/FABS/
+FNEG/FMOVE (all formats, register and memory) with FPCR rounding changes,
+ending in FMOVEM.X of all eight registers plus FPCR and the FPSR condition
+codes into the compared window.  Operand ranges are constrained so no
+operation overflows, underflows, denormalizes, or produces Inf/NaN: those
+are exactly the cases where AP040 (which traps unsupported data types to
+vector 55 and flushes underflow) and qemu (which computes them) differ by
+design rather than by defect.
+
+  ./run_fpdiff.sh <first_seed> <last_seed> [ops]     # SIM=<verilated tb>
+
+FPDIFF_MODE selects coverage:
+  unset   extended precision, all rounding modes, all instructions
+  arith   all precisions and modes, arithmetic only (no register FMOVE)
+  all     everything -- diverges, see below
+
+qemu 11 deviation found 2026-08-04: **qemu does not apply the FPCR rounding
+precision (bits 7:6) to FMOVE into a floating-point register.**  A plain
+FMOVE is an arithmetic instruction for rounding purposes and must round its
+result like any other; WinUAE's reference `fp_move(a, b, prec)` sets the
+rounding precision around the move, and AP040 does the same.  Minimal
+repro: with FPCR=$40 (single, round to nearest), FMOVE.X of the extended
+value $3FFF/$8000000000000FFF gives $8000000000000000 on AP040 and on real
+040 silicon, but $8000000000000FFF on qemu.  Because the wrong operand then
+feeds every later instruction, a single such FMOVE makes an entire random
+program diverge; that is why reduced precision is only generated in the
+modes above.  AP040's behaviour is regression-covered by t_fpu.s tests
+88-92 instead.
+
+With that one case excluded, AP040 and qemu agree exactly: arithmetic
+across all four rounding modes and all three precisions (FPDIFF_MODE=arith)
+and the default mode both match on every seed tried.
+
+MMU differential (gen_mmudiff.py / run_mmudiff.sh)
+--------------------------------------------------
+Random three-level translation setups inside the 64K the testbench models:
+pages 0-5 identity (code, evidence window, stack/tables, result arrays),
+pages 6-11 randomly identity / remapped into pages 12-14 / write protected,
+page 15 left alone because it holds the testbench protocol registers.  The
+program enables translation, runs random translated reads, writes and PTEST
+probes, disables translation and copies the evidence into the compared
+window: read-back values, the page table itself (whose U/M history bits the
+hardware updates during the walks), the root and pointer descriptors, and
+the MMUSR results.
+
+  ./run_mmudiff.sh <first_seed> <last_seed> [ops]    # SIM=<verilated tb>
+
+Writes are never generated against a write-protected page and all mappings
+are resident, so no access error is taken: fault frames are format $7 on
+AP040 and a different shape on qemu, and t_mmu.s covers them instead.
+
+qemu 11 deviations found 2026-08-04, both worked around in the generator:
+
+  1. qemu does not flush its internal TLB when TC is written, so stale
+     translations survive enabling *and disabling* the MMU.  Real 040
+     hardware flushes both ATCs on a TC write (t_mmu.s test 37 asserts
+     this on AP040), so the generator issues PFLUSHA after every TC write
+     to keep the comparison meaningful.
+  2. qemu never sets the M (modified) history bit in a page descriptor.
+     AP040 sets it on the first write to a page, as the 68040 must, which
+     also shows up in MMUSR; t_mmu.s tests 5-7 cover it.  The generator
+     clears the M bit in the evidence copies so the rest still compares.
+
+With those two accounted for, AP040 and qemu agree exactly on translation,
+write protection, the U history bits on all three table levels, and PTEST
+MMUSR results across every seed tried (20 seeds x 24 operations).
+
+Further qemu 11 FP deviations found 2026-08-04 while closing the FPU gaps:
+
+  3. Reduced rounding precision narrows the significand, NOT the exponent
+     range.  softfloat's SOFTFLOAT_68K path checks overflow/underflow
+     against 0x7FFE for every rounding precision, and its roundMask only
+     trims mantissa bits.  AP040 originally clamped overflow/underflow at
+     the single/double exponent boundaries; the FP differential caught it
+     and it is fixed (t_fpu.s covers the rounding, and FPDIFF_MODE=unfl
+     exercises tiny operands at reduced precision).
+  4. Extended subnormals: an exponent field of zero scales by 2^-16382,
+     i.e. softfloat normalizes a subnormal to exponent (1 - shiftCount)
+     and packs an underflowed result by shifting right (1 - exponent).
+     qemu encodes such results one power of two too large, and does not
+     set UNFL.  Minimal repro: 2^-16380 * 2^-13 = 2^-16393 gives exponent
+     0 with significand $0010000000000000 on AP040 (and per softfloat),
+     $0020000000000000 on qemu.  t_fpu.s tests 93-99 pin AP040's encoding.

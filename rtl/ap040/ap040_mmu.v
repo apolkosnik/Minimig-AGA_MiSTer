@@ -75,6 +75,17 @@ module ap040_mmu
 	input             m_ack,
 	input      [31:0] m_rdata,
 
+	// Dedicated physical longword port used only for table searches.  Keeping
+	// descriptor traffic off m_* avoids serialising every descriptor through
+	// the 16-bit CPU bus and prevents it from polluting either CPU cache.
+	output            walker_req,
+	output            walker_we,
+	output     [31:0] walker_addr,
+	output     [31:0] walker_wdat,
+	input             walker_ack,
+	input      [31:0] walker_data,
+	input             walker_berr,
+
 	output     [31:0] phys_addr,
 	output            cache_inhibit,
 	output            m_nocache
@@ -191,6 +202,8 @@ localparam W_RI   = 4'd6;
 localparam W_UC   = 4'd7;
 localparam W_FILL = 4'd8;
 localparam W_FLT  = 4'd9;
+localparam W_DFLT = 4'd10;
+localparam W_DROP = 4'd11;
 
 reg  [3:0] wst;
 reg        w_issued;
@@ -207,7 +220,8 @@ reg        w_active;
 wire  [6:0] w_pi  = w_la[24:18];
 wire  [5:0] w_pgi = tc_p ? {1'b0, w_la[17:13]} : w_la[17:12];
 
-wire walk_ack = w_active && w_issued && m_ack;
+wire walk_ack = w_active && w_issued && walker_ack && !walker_berr;
+wire walk_err = w_active && w_issued && walker_berr;
 
 // fill way selection: overwrite an existing mapping of the same page
 wire  [3:0] f_set = tc_p ? w_la[16:13] : w_la[15:12];
@@ -231,6 +245,8 @@ wire [1:0] f_way = fhit0 ? 2'd0 : fhit1 ? 2'd1 : fhit2 ? 2'd2 : fhit3 ? 2'd3
 wire w_hist_m = w_write &&
                   (!w_pt || (!(w_wp || w_desc[2]) &&
                              !(w_user && w_desc[7])));
+wire w_denied = !w_pt && ((w_user && w_desc[7]) ||
+                          (w_write && (w_wp || w_desc[2])));
 
 //---------------------------------------------------------------------------
 // request forwarding
@@ -239,13 +255,21 @@ wire w_hist_m = w_write &&
 wire pass_ok = c_req && !c_flt && !need_walk && !ttr_fault && !atc_fault &&
                (wst == W_IDLE) && !w_active && !pf_req && !pt_req;
 
-assign m_req   = w_active ? 1'b1     : pass_ok;
-assign m_write = w_active ? w_req_wr : c_write;
-assign m_instr = w_active ? 1'b0     : c_instr;
-assign m_size  = w_active ? `AP040_SZ_L : c_size;
-assign m_addr  = w_active ? w_req_addr  : pa_out;
-assign m_wdata = w_active ? w_req_wdat  : c_wdata;
-assign m_fc    = w_active ? `AP040_FC_SUPER_DATA : c_fc;
+assign m_req   = pass_ok;
+assign m_write = c_write;
+assign m_instr = c_instr;
+assign m_size  = c_size;
+assign m_addr  = pa_out;
+assign m_wdata = c_wdata;
+assign m_fc    = c_fc;
+
+// w_issued inserts a request-low cycle before each descriptor transaction.
+// Besides making the interface unambiguous for a level-handshake backend,
+// this prevents a held ack from completing the following descriptor.
+assign walker_req  = w_active && w_issued;
+assign walker_we   = w_req_wr;
+assign walker_addr = w_req_addr;
+assign walker_wdat = w_req_wdat;
 
 assign c_ack   = pass_ok ? m_ack : 1'b0;
 assign c_rdata = m_rdata;
@@ -253,8 +277,7 @@ assign c_rdata = m_rdata;
 assign phys_addr     = pa_out;
 assign cache_inhibit = ttr_hit ? ttr_cm[1]
                      : (tc_e && atc_hit) ? h_cm[1] : 1'b0;
-// table walker traffic must never be cached
-assign m_nocache     = w_active | cache_inhibit;
+assign m_nocache     = cache_inhibit;
 
 //---------------------------------------------------------------------------
 // walker FSM (single always block: owns atc arrays and w_* state)
@@ -304,7 +327,20 @@ always @(posedge clk) begin
 		pf_done <= 0;
 		if (w_active && !w_issued) w_issued <= 1;
 
-		case (wst)
+		if (walk_err) begin
+			// A physical bus error while fetching or updating a descriptor is
+			// reported as an unsuccessful table search.  Do not fill the ATC.
+			// A probing PTEST reports it in the MMUSR B bit.
+			w_active <= 0;
+			if (w_pt) begin
+				pt_mmusr <= 32'h0000_0800;
+				pt_done <= 1;
+				w_pt <= 0;
+				wst <= W_IDLE;
+			end
+			else wst <= W_FLT;
+		end
+		else case (wst)
 			W_IDLE: begin
 				if (pf_req && !pf_done) begin
 					for (k = 0; k < 128; k = k + 1) begin
@@ -319,11 +355,12 @@ always @(posedge clk) begin
 					pf_done <= 1;
 				end
 				else if (pt_req && !pt_done) begin
-					// A PTEST first discards the matching entry in its selected
-					// ATC.  A successful table search below installs a fresh one.
+					// A PTEST first discards the matching entry in BOTH ATCs
+					// (WinUAE's mmu_flush_atc iterates the data and the
+					// instruction array).  A successful search below installs
+					// a fresh entry in the ATC its DFC selects.
 					for (k = 0; k < 128; k = k + 1) begin
-						if ((k[6] == pt_instr) &&
-						    (k[5:2] == (tc_p ? pt_addr[16:13] : pt_addr[15:12])) &&
+						if ((k[5:2] == (tc_p ? pt_addr[16:13] : pt_addr[15:12])) &&
 						    (atc_tag[k] == (tc_p ? {pt_fc[2], pt_addr[31:17], 1'b0}
 						                               : {pt_fc[2], pt_addr[31:16]})))
 							atc_v[k] <= 0;
@@ -335,17 +372,21 @@ always @(posedge clk) begin
 					w_write <= pt_write;
 					w_wp    <= 0;
 					f_bank  <= pt_instr;
-					if (!tc_e || pt_ttr_hit) begin
-						// transparent and resident
-						pt_mmusr <= (pt_ttr_hit && pt_write && pt_ttr_w)
-						            ? 32'h0000_0400
-						            : ((pt_addr & (tc_p ? 32'hFFFF_E000
-						                                  : 32'hFFFF_F000)) |
-						               32'h0000_0003);
+					if (pt_ttr_hit) begin
+						// A TTR match reports T and R only -- the physical
+						// address field stays clear -- and a write probe
+						// against a write-protected TTR reports B (WinUAE
+						// mmu_op PTEST: MMU_MMUSR_B, not a G-bit pattern).
+						pt_mmusr <= (pt_write && pt_ttr_w) ? 32'h0000_0800
+						                                   : 32'h0000_0003;
 						pt_done <= 1;
 						w_pt <= 0;
 					end
 					else begin
+						// PTEST runs the table search even when translation
+						// is disabled: TC.E gates ordinary accesses only,
+						// the probe always walks URP/SRP (WinUAE has no
+						// tc_e test in its PTEST path).
 						wrd({(pt_fc[2] ? srp[31:9] : urp[31:9]), 9'd0} +
 						    {23'd0, pt_addr[31:25], 2'b00});
 						wst <= W_RA;
@@ -369,18 +410,18 @@ always @(posedge clk) begin
 			end
 
 			W_RA: if (walk_ack) begin
-				w_desc <= m_rdata;
+				w_desc <= walker_data;
 				w_desc_addr <= w_req_addr;
 				w_active <= 0;
-				if (!m_rdata[1]) wst <= W_FLT;   // UDT invalid
+				if (!walker_data[1]) wst <= W_FLT;   // UDT invalid
 				else begin
-					w_wp <= w_wp | m_rdata[2];
-					if (!m_rdata[3]) begin
-						wwr(w_req_addr, m_rdata | 32'h8);
+					w_wp <= w_wp | walker_data[2];
+					if (!walker_data[3]) begin
+						wwr(w_req_addr, walker_data | 32'h8);
 						wst <= W_UA;
 					end
 					else begin
-						wrd({m_rdata[31:9], 9'd0} + {23'd0, w_pi, 2'b00});
+						wrd({walker_data[31:9], 9'd0} + {23'd0, w_pi, 2'b00});
 						wst <= W_RB;
 					end
 				end
@@ -393,18 +434,18 @@ always @(posedge clk) begin
 			end
 
 			W_RB: if (walk_ack) begin
-				w_desc <= m_rdata;
+				w_desc <= walker_data;
 				w_desc_addr <= w_req_addr;
 				w_active <= 0;
-				if (!m_rdata[1]) wst <= W_FLT;
+				if (!walker_data[1]) wst <= W_FLT;
 				else begin
-					w_wp <= w_wp | m_rdata[2];
-					if (!m_rdata[3]) begin
-						wwr(w_req_addr, m_rdata | 32'h8);
+					w_wp <= w_wp | walker_data[2];
+					if (!walker_data[3]) begin
+						wwr(w_req_addr, walker_data | 32'h8);
 						wst <= W_UB;
 					end
 					else begin
-						wrd(pgtbl_addr(m_rdata) + {24'd0, w_pgi, 2'b00});
+						wrd(pgtbl_addr(walker_data) + {24'd0, w_pgi, 2'b00});
 						wst <= W_RC;
 					end
 				end
@@ -417,13 +458,13 @@ always @(posedge clk) begin
 			end
 
 			W_RC: if (walk_ack) begin
-				w_desc <= m_rdata;
+				w_desc <= walker_data;
 				w_desc_addr <= w_req_addr;
 				w_active <= 0;
-				case (m_rdata[1:0])
+				case (walker_data[1:0])
 					2'b00: wst <= W_FLT;
 					2'b10: begin
-						wrd(m_rdata & 32'hFFFF_FFFC);
+						wrd(walker_data & 32'hFFFF_FFFC);
 						wst <= W_RI;
 					end
 					default: wst <= W_UC;
@@ -431,17 +472,29 @@ always @(posedge clk) begin
 			end
 
 			W_RI: if (walk_ack) begin
-				w_desc <= m_rdata;
+				w_desc <= walker_data;
 				w_desc_addr <= w_req_addr;
 				w_active <= 0;
 				// an indirect descriptor must resolve to a resident page
-				if (m_rdata[1:0] == 2'b00 || m_rdata[1:0] == 2'b10) wst <= W_FLT;
+				if (walker_data[1:0] == 2'b00 || walker_data[1:0] == 2'b10) wst <= W_FLT;
 				else wst <= W_UC;
 			end
 
 			W_UC: begin
-				if (!w_pt && w_user && w_desc[7]) wst <= W_FLT;
-				else if (!w_pt && w_write && (w_wp || w_desc[2])) wst <= W_FLT;
+				// A valid page descriptor is used by the table search even when
+				// its protection attributes deny the access.  The 68040 therefore
+				// sets U before reporting the access error, but must not set M for
+				// a denied write.  Defer c_flt until the descriptor writeback has
+				// completed, then keep the walker quiescent until the core drops
+				// the held request; otherwise it can immediately begin a second
+				// walk before the access-error state has consumed the fault pulse.
+				if (w_denied) begin
+					if (!w_desc[3]) begin
+						wwr(w_desc_addr, w_desc | 32'h8);
+						w_desc <= w_desc | 32'h8;
+					end
+					wst <= W_DFLT;
+				end
 				else if (!w_desc[3] || (w_hist_m && !w_desc[4])) begin
 					wwr(w_desc_addr, w_desc | 32'h8 |
 					    (w_hist_m ? 32'h10 : 32'h0));
@@ -449,6 +502,23 @@ always @(posedge clk) begin
 					wst <= W_FILL;
 				end
 				else wst <= W_FILL;
+			end
+
+			// Protection fault after the optional Used-bit writeback.
+			W_DFLT: begin
+				if (w_active) begin
+					if (walk_ack) w_active <= 0;
+				end
+				else begin
+					c_flt <= 1;
+					wst <= W_DROP;
+				end
+			end
+
+			// c_flt is sampled by the core one ce edge after it is registered.
+			// Do not return to W_IDLE until that edge has made c_req fall.
+			W_DROP: begin
+				if (!c_req) wst <= W_IDLE;
 			end
 
 			W_FILL: begin

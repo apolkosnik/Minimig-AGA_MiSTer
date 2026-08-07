@@ -43,7 +43,8 @@ module ap040_fpu
 	input       [2:0] dst_r,       // FPn
 	input      [95:0] din,         // memory operand, left aligned
 	output reg        done,
-	output reg        unimp,
+	output reg        unimp,       // unimplemented instruction -> vector 11
+	output reg        unsupp,      // unsupported data type -> vector 55
 	output reg        exc_req,       // enabled arithmetic exception
 	output reg [7:0]  exc_vec,
 	output reg [95:0] dout,        // store result, left aligned
@@ -122,16 +123,21 @@ function [83:0] unpack_x;
 	end
 endfunction
 
-// The 68040 hardware does not execute with denormal, unnormal or
-// pseudo-denormal extended operands.  They take the unimplemented-data-type
-// route so that an FPSP can complete the operation.
+// Only TRUE denormals (zero exponent, integer bit clear, nonzero
+// fraction) and true unnormals (nonzero finite exponent, integer bit
+// clear, nonzero mantissa) take the unimplemented-data-type route.
+// PSEUDO-DENORMALS -- zero exponent with the integer bit SET -- are
+// legal operands the hardware computes with directly, using the RAW
+// exponent field (floatx80_is_denormal requires the integer bit clear;
+// hardware cputest FDIV/FDADD with $0000-8xxx operands executes).
+// Unnormal ZEROS (nonzero exponent, mantissa zero) behave as zeros.
 function unsupported_x;
 	input [14:0] e;
 	input [63:0] m;
 	begin
-		unsupported_x = (m != 64'd0) &&
-		                (((e == 15'd0) && (m[63] || (m[62:0] != 0))) ||
-		                 ((e != 15'd0) && (e != 15'h7FFF) && !m[63]));
+		unsupported_x = ((e == 15'd0) && !m[63] && (m[62:0] != 0)) ||
+		                ((e != 15'd0) && (e != 15'h7FFF) && !m[63] &&
+		                 (m != 64'd0));
 	end
 endfunction
 
@@ -173,9 +179,12 @@ localparam F_SQRTL = 4'd12;  // square root loop
 localparam F_NORM2 = 4'd13;  // post-operation normalize
 localparam F_ROUND = 4'd14;  // precision rounding and range checks
 localparam F_PACKS = 4'd15;  // denormal single/double store packing
+localparam F_UNFL  = 5'd16;  // gradual underflow at single/double precision
 
-reg  [3:0] fst;
+reg  [4:0] fst;
 reg  [2:0] r_fmt, r_dst;
+reg        r_src_x;         // source operand arrived in extended format
+reg        r_ae7;           // accrued-IOP before this instruction (fault backout)
 reg  [6:0] r_op;
 reg [95:0] r_din;
 
@@ -203,7 +212,8 @@ reg  [68:0] srem;             // sqrt remainder
 reg [131:0] srad;             // sqrt radicand feed
 reg   [6:0] loop_n;
 reg   [3:0] op_kind;          // 0 none, 1 add, 2 mul, 3 div, 4 sqrt
-reg   [3:0] sh_ret;           // staged shifter return state
+reg   [4:0] sh_ret;           // staged shifter return state
+reg   [1:0] r_pr;             // rounding precision latched for F_UNFL
 reg signed [17:0] e_w;        // working exponent (wrap safe)
 
 // integer store bookkeeping
@@ -237,8 +247,44 @@ function [1:0] prec_of;
 	begin
 		if (op == 7'h24 || op == 7'h27) prec_of = 2'd1;   // FSGLDIV/FSGLMUL
 		else if (op >= 7'h40) prec_of = op[2] ? 2'd2 : 2'd1;
+		// FPCR rounding precision: 00 extended, 01 single, 10 double, and
+		// the reserved encoding 11 rounds as double (softfloat's 68k glue
+		// falls through its default into the double case, and hardware
+		// cputest agrees).
 		else prec_of = (fpcr[7:6] == 2'b01) ? 2'd1 :
-		               (fpcr[7:6] == 2'b10) ? 2'd2 : 2'd0;
+		               (fpcr[7:6] == 2'b00) ? 2'd0 : 2'd2;
+	end
+endfunction
+
+// FABS and FNEG round their result to the selected precision but do not
+// report it as inexact WHEN THE SOURCE IS ALREADY EXTENDED.  The PRM's
+// FABS and FNEG pages list INEX2 as "Cleared" with no qualifying
+// condition, but hardware cputest is narrower than that:
+//   fabs.x fp1,fp0  FPCR $D0  rounds to double, expects FPSR $00000000
+//   fabs.d (a0),fp2 FPCR $40  rounds to single, expects FPSR $00000208
+// Both roundings discard bits, so the discriminator is the source format,
+// not the instruction alone: a source that needs converting runs through
+// the rounder normally, while an extended source is pure sign handling.
+// Callers must therefore qualify this with r_src_x.  FMOVE is not exempt
+// at all (its page sets INEX2 "if <fmt> is L, D, or X").
+function op_no_inex;
+	input [6:0] op;
+	begin
+		op_no_inex = (op == 7'h18) || (op == 7'h58) || (op == 7'h5C) ||
+		             (op == 7'h1A) || (op == 7'h5A) || (op == 7'h5E);
+	end
+endfunction
+
+// FSGLMUL and FSGLDIV round the significand to single precision but keep
+// the EXTENDED exponent range: they go through roundSigAndPackFloatx80,
+// which has no expOffset, unlike the roundAndPackFloatx80 used by every
+// FPCR-precision and FS/FD operation.  Their overflow saturation value is
+// the full all-ones mantissa at the extended maximum, again unlike the
+// masked significand roundAndPackFloatx80 produces.
+function op_sgl;
+	input [6:0] op;
+	begin
+		op_sgl = (op == 7'h24) || (op == 7'h27);
 	end
 endfunction
 
@@ -276,18 +322,19 @@ integer k;
 always @(posedge clk) begin
 	if (!nreset) begin
 		fst <= F_IDLE;
-		done <= 0; unimp <= 0; exc_req <= 0; exc_vec <= 0;
+		done <= 0; unimp <= 0; unsupp <= 0; exc_req <= 0; exc_vec <= 0;
 		fpcr <= 0; fpsr <= 0; fpiar <= 0;
 		fpu_used <= 0;
 		dout <= 0;
 		r_fmt <= 0; r_dst <= 0; r_op <= 0; r_din <= 0;
+		r_src_x <= 0; r_ae7 <= 0;
 		a_s <= 0; a_e <= 0; a_m <= 0; a_t <= 0;
 		sh_v <= 0; sh_cnt <= 0;
 		pk_neg <= 0; pk_isz <= 0;
 		b_s <= 0; b_e <= 0; b_m <= 0; b_t <= 0;
 		grs <= 0; eff_sub <= 0; acc_hi <= 0; acc_lo <= 0;
 		qv <= 0; srem <= 0; srad <= 0; loop_n <= 0; op_kind <= 0;
-		sh_ret <= F_PACKI; e_w <= 0;
+		sh_ret <= F_PACKI; e_w <= 0; r_pr <= 0;
 		for (k = 0; k < 8; k = k + 1) begin
 			fr_s[k] <= 0; fr_e[k] <= 0; fr_m[k] <= 0;
 		end
@@ -295,6 +342,7 @@ always @(posedge clk) begin
 	else if (ce) begin
 		done <= 0;
 		unimp <= 0;
+		unsupp <= 0;
 		exc_req <= 0;
 
 		// side ports, independent of the FSM
@@ -302,7 +350,9 @@ always @(posedge clk) begin
 			case (cr_sel)
 				2'd0: fpiar <= cr_wdata;
 				2'd1: fpsr <= cr_wdata & 32'h0FFF_FFF8;
-				default: fpcr <= cr_wdata & 32'h0000_FFF0;
+				// 68040 FPCR keeps bits 15:0 (WinUAE fpcr_mask = 0xffff for
+				// the 040; only 6888x/060 mask the low nibble)
+				default: fpcr <= cr_wdata & 32'h0000_FFFF;
 			endcase
 			fpu_used <= 1;
 		end
@@ -327,16 +377,23 @@ always @(posedge clk) begin
 			F_IDLE: if (req) begin
 				// FPSR exception status is per instruction.  The accrued
 				// exception byte is intentionally retained until software
-				// writes FPSR.
-				fpsr[15:8] <= 8'd0;
+				// writes FPSR.  FMOVECR (opclass 010 fmt 7) faults before
+				// WinUAE's fpsr_clear_status runs, so it must leave the
+				// exception byte untouched; nonexisting opmodes never reach
+				// the FPU at all (classified in the core).
+				if (!(op_class == 3'b010 && src_fmt == 3'd7))
+					fpsr[15:8] <= 8'd0;
 				r_fmt <= src_fmt;
+				r_src_x <= (op_class == 3'b000) || (src_fmt == 3'd2);
+				r_ae7 <= fpsr[7];
 				r_dst <= dst_r;
 				r_op <= opmode;
 				r_din <= din;
 				if (op_class == 3'b011) begin
-					// FMOVE FPn,<ea>: source register, packed traps
-					if (src_fmt == 3'd3 || src_fmt == 3'd7) unimp <= 1;
-					else if (unsupported_x(fr_e[src_r], fr_m[src_r])) unimp <= 1;
+					// FMOVE FPn,<ea>: packed decimal and denormal/unnormal
+					// register contents are unsupported data types
+					if (src_fmt == 3'd3 || src_fmt == 3'd7) unsupp <= 1;
+					else if (unsupported_x(fr_e[src_r], fr_m[src_r])) unsupp <= 1;
 					else begin
 						{a_s, a_e, a_m, a_t} <=
 							unpack_x(fr_s[src_r], fr_e[src_r], fr_m[src_r]);
@@ -347,7 +404,7 @@ always @(posedge clk) begin
 				else if (!op_in_hw(opmode)) unimp <= 1;
 				else if (op_class == 3'b000) begin
 					if (unsupported_x(fr_e[src_r], fr_m[src_r])) begin
-						unimp <= 1;
+						unsupp <= 1;
 					end
 					else begin
 					{a_s, a_e, a_m, a_t} <=
@@ -356,9 +413,11 @@ always @(posedge clk) begin
 					end
 				end
 				else begin
-					// opclass 010, memory source; FMOVECR (fmt 7) and
-					// packed (fmt 3) are never hardware
-					if (src_fmt == 3'd3 || src_fmt == 3'd7) unimp <= 1;
+					// opclass 010, memory source: packed decimal (fmt 3) is
+					// an unsupported data type, FMOVECR (fmt 7) is an
+					// unimplemented instruction
+					if (src_fmt == 3'd3) unsupp <= 1;
+					else if (src_fmt == 3'd7) unimp <= 1;
 					else begin
 						a_t <= T_NUM;   // provisional; F_SRC classifies
 						fst <= F_SRC;
@@ -381,9 +440,17 @@ always @(posedge clk) begin
 							reg signed [17:0] sE, den_sh;
 							reg inx, tomax;
 							if (a_t != T_NUM) begin
+								// NaN payload passes through commonNaN form:
+								// the quiet bit is FORCED in the output and a
+								// signaling source raises SNAN
 								dout <= (a_t == T_ZERO) ? {a_s, 95'd0} :
 								        (a_t == T_INF)  ? {a_s, 8'hFF, 23'd0, 64'd0} :
-								                          {a_s, 8'hFF, a_m[62:40], 64'd0};
+								                          {a_s, 8'hFF,
+								                           a_m[62:40] | 23'h400000, 64'd0};
+								if (a_t == T_NAN && !a_m[62]) begin
+									fpsr[14] <= 1;
+									fpsr[7]  <= 1;
+								end
 								done <= 1; fpu_used <= 1; fst <= F_IDLE;
 							end
 							else begin
@@ -431,7 +498,13 @@ always @(posedge clk) begin
 							if (a_t != T_NUM) begin
 								dout <= (a_t == T_ZERO) ? {a_s, 95'd0} :
 								        (a_t == T_INF)  ? {a_s, 11'h7FF, 52'd0, 32'd0} :
-								                          {a_s, 11'h7FF, a_m[62:11], 32'd0};
+								                          {a_s, 11'h7FF,
+								                           a_m[62:11] | 52'h8_0000_0000_0000,
+								                           32'd0};
+								if (a_t == T_NAN && !a_m[62]) begin
+									fpsr[14] <= 1;
+									fpsr[7]  <= 1;
+								end
 								done <= 1; fpu_used <= 1; fst <= F_IDLE;
 							end
 							else begin
@@ -474,15 +547,36 @@ always @(posedge clk) begin
 							// lands in sh_v[66:3]; E = a_e - 16383 is the
 							// position of the integer bit
 							reg signed [17:0] sE;
+							reg [63:0] qm;
 							pk_isz <= (r_fmt == 3'd0) ? 2'd2 :
 							          (r_fmt == 3'd4) ? 2'd1 : 2'd0;
 							pk_neg <= a_s;
 							sE = $signed({1'b0, a_e}) - 18'sd16383;
+							qm = a_m | 64'h4000_0000_0000_0000;
 							if (a_t == T_ZERO) begin
 								sh_v <= 0; sh_cnt <= 0; fst <= F_PACKI;
 							end
-							else if (a_t != T_NUM || sE > 18'sd62) begin
-								// inf/NaN/too large: OPERR result
+							else if (a_t == T_NAN) begin
+								// floatx80_to_int32/16/8: the QUIETED NaN's
+								// top payload bits are stored; OPERR is only
+								// raised for an already-quiet NaN, a
+								// signaling one raises SNAN instead
+								dout <= {(r_fmt == 3'd0) ? qm[63:32] :
+								         (r_fmt == 3'd4) ? {qm[63:48], 16'd0} :
+								                           {qm[63:56], 24'd0}, 64'd0};
+								if (!a_m[62]) begin
+									fpsr[14] <= 1;
+									fpsr[7]  <= 1;
+								end
+								else begin
+									fpsr[13] <= 1;
+									fpsr[7]  <= 1;
+								end
+								done <= 1; fpu_used <= 1; fst <= F_IDLE;
+							end
+							else if (a_t == T_INF || sE > 18'sd62) begin
+								// infinity or far out of range: OPERR with
+								// sign-dependent saturation
 								sh_v <= 67'h7FFFFFFFFFFFFFFFF;
 								sh_cnt <= 7'd127;   // marker
 								fst <= F_PACKI;
@@ -532,12 +626,19 @@ always @(posedge clk) begin
 							if (r_din[94:87] == 8'hFF) begin
 								a_t <= (r_din[86:64] != 0) ? T_NAN : T_INF;
 								a_e <= 17'h07FFF;
-								a_m <= {1'b1, r_din[86:64], 40'd0};
+								// 68040 extended NaNs are unnormal: preserve the
+								// source payload and leave the explicit integer bit clear.
+								// (The quiet bit is bit 62 and is set below for an
+								// SNaN.)  Infinity is canonicalized during writeback.
+								a_m <= {1'b0, r_din[86:64], 40'd0};
 								fst <= F_EXEC;
 							end
 							else if (r_din[94:87] == 8'd0) begin
 								if (r_din[86:64] != 0) begin
-									unimp <= 1;
+									// denormalized single: an unsupported
+									// data type (vector 55), not an
+									// unimplemented instruction
+									unsupp <= 1;
 									fst <= F_IDLE;
 								end
 								else begin
@@ -559,12 +660,17 @@ always @(posedge clk) begin
 							if (r_din[94:84] == 11'h7FF) begin
 								a_t <= (r_din[83:32] != 0) ? T_NAN : T_INF;
 								a_e <= 17'h07FFF;
-								a_m <= {1'b1, r_din[83:32], 11'd0};
+								// Match the 68040 NaN encoding: bit 63 remains clear;
+								// only the payload (and, when needed, quiet bit 62) is
+								// carried into the extended significand.
+								a_m <= {1'b0, r_din[83:32], 11'd0};
 								fst <= F_EXEC;
 							end
 							else if (r_din[94:84] == 11'd0) begin
 								if (r_din[83:32] != 0) begin
-									unimp <= 1;
+									// denormalized double: likewise the
+									// data type trap, vector 55
+									unsupp <= 1;
 									fst <= F_IDLE;
 								end
 								else begin
@@ -583,7 +689,7 @@ always @(posedge clk) begin
 						end
 						default: begin : cv_x
 							if (unsupported_x(r_din[94:80], r_din[63:0])) begin
-								unimp <= 1;
+								unsupp <= 1;
 								fst <= F_IDLE;
 							end
 							else begin
@@ -612,6 +718,17 @@ always @(posedge clk) begin
 			end
 
 			F_EXEC: begin
+				// FCMP evaluates its destination without passing through
+				// F_BIN, so its unsupported-datatype check lives here -- and
+				// it must precede the SNaN bookkeeping: the datatype fault
+				// is taken before the arithmetic ever inspects a NaN, so the
+				// status byte stays clean.
+				if (r_op == 7'h38 &&
+				    unsupported_x(fr_e[r_dst], fr_m[r_dst])) begin
+					unsupp <= 1;
+					fst <= F_IDLE;
+				end
+				else begin
 				// Quiet signaling NaNs after recording SNAN.  Source and
 				// FCMP destination checks occur before result dispatch so an
 				// enabled SNAN is observed in F_WB and inhibits writeback.
@@ -626,7 +743,8 @@ always @(posedge clk) begin
 					fpsr[7] <= 1;
 				end
 				case (r_op)
-					7'h18, 7'h58, 7'h5C: a_s <= 0;                        // FABS
+					7'h18, 7'h58, 7'h5C:
+						if (a_t != T_NAN) a_s <= 0;                       // FABS
 					7'h1A, 7'h5A, 7'h5E:
 						if (a_t != T_NAN) a_s <= ~a_s;                    // FNEG
 					default: ;
@@ -652,6 +770,7 @@ always @(posedge clk) begin
 						fst <= F_BIN;
 					end
 				endcase
+				end
 			end
 
 			F_BIN: begin : f_bin
@@ -660,17 +779,24 @@ always @(posedge clk) begin
 				s_a = (op_kind == 4'd1 &&
 				       (r_op == 7'h28 || r_op == 7'h68 || r_op == 7'h6C))
 				      ? ~a_s : a_s;
+				if (op_kind != 4'd4 &&
+				    unsupported_x(b_e[14:0], b_m)) begin
+					// The destination datatype fault is taken with a clean
+					// status byte: undo the source-SNaN record F_EXEC made a
+					// cycle earlier (the exception byte was zeroed at
+					// dispatch; r_ae7 holds the prior accrued-IOP bit)
+					fpsr[14] <= 0;
+					fpsr[7]  <= r_ae7;
+					unsupp <= 1;
+					fst <= F_IDLE;
+				end
+				else begin
 				if (op_kind != 4'd4 && b_t == T_NAN && !b_m[62]) begin
 					fpsr[14] <= 1;
 					fpsr[7] <= 1;
 					b_m[62] <= 1;
 				end
-				if (op_kind != 4'd4 &&
-				    unsupported_x(b_e[14:0], b_m)) begin
-					unimp <= 1;
-					fst <= F_IDLE;
-				end
-				else if (a_t == T_NAN || (op_kind != 4'd4 && b_t == T_NAN)) begin
+				if (a_t == T_NAN || (op_kind != 4'd4 && b_t == T_NAN)) begin
 					// NaN propagation, destination NaN preferred
 					if (op_kind != 4'd4 && b_t == T_NAN) begin
 						a_s <= b_s;
@@ -685,8 +811,10 @@ always @(posedge clk) begin
 					4'd4: begin : bin_sqrt
 						if (a_t == T_ZERO) fst <= F_WB;         // sqrt(+-0)=+-0
 						else if (a_s) begin
-							// negative: operand error NaN
+							// negative: operand error, POSITIVE default NaN
+							// (floatx80_default_nan has the sign bit clear)
 							a_t <= T_NAN;
+							a_s <= 0;
 							a_m <= 64'hFFFF_FFFF_FFFF_FFFF;
 							a_e <= 17'h07FFF;
 							fpsr[13] <= 1;
@@ -717,14 +845,19 @@ always @(posedge clk) begin
 						if (a_t == T_INF || b_t == T_INF) begin
 							if (a_t == T_INF && b_t == T_INF &&
 							    s_a != b_s) begin
-								a_t <= T_NAN;
+								a_t <= T_NAN;      // inf - inf: default NaN
+								a_s <= 0;
 								a_m <= 64'hFFFF_FFFF_FFFF_FFFF;
 								a_e <= 17'h07FFF;
 								fpsr[13] <= 1;
 								fpsr[7] <= 1;
 							end
 							else begin
-								a_s <= (a_t == T_INF) ? s_a : b_s;
+								// both-inf same sign returns the DEST operand
+								// raw (68040 has addsub_swap_inf clear); a
+								// lone infinity keeps its own mantissa bits
+								a_s <= (a_t == T_INF && b_t != T_INF) ? s_a : b_s;
+								a_m <= (b_t == T_INF) ? b_m : a_m;
 								a_t <= T_INF;
 							end
 							fst <= F_WB;
@@ -771,17 +904,34 @@ always @(posedge clk) begin
 						end
 					end
 					4'd2: begin : bin_mul
+						reg [63:0] am_eff, bm_eff;
+						am_eff = (r_op == 7'h27) ?
+						         (a_m & 64'hFFFF_FF00_0000_0000) : a_m;
+						bm_eff = (r_op == 7'h27) ?
+						         (b_m & 64'hFFFF_FF00_0000_0000) : b_m;
+						// Latch chopped operands before testing the fast path.  The
+						// old code used nonblocking masks and then immediately
+						// tested the unmasked values, bypassing the chop.
+						a_m <= am_eff;
+						b_m <= bm_eff;
+						// FSGLMUL chops both mantissas to single precision
+						// before multiplying (the result is single rounded)
 						if (a_t == T_INF || b_t == T_INF) begin
 							if (a_t == T_ZERO || b_t == T_ZERO) begin
-								a_t <= T_NAN;      // 0 * inf
+								a_t <= T_NAN;      // 0 * inf: default NaN
+								a_s <= 0;
 								a_m <= 64'hFFFF_FFFF_FFFF_FFFF;
 								a_e <= 17'h07FFF;
 								fpsr[13] <= 1;
 								fpsr[7] <= 1;
 							end
 							else begin
+								// pass-through infinity keeps the raw
+								// mantissa of the winning operand (dest
+								// first, matching floatx80_mul's order)
 								a_t <= T_INF;
 								a_s <= a_s ^ b_s;
+								a_m <= (b_t == T_INF) ? b_m : a_m;
 							end
 							fst <= F_WB;
 						end
@@ -794,11 +944,11 @@ always @(posedge clk) begin
 							a_s <= a_s ^ b_s;
 							e_w <= $signed({1'b0, a_e}) +
 							       $signed({1'b0, b_e}) - 18'sd16383;
-							if (a_m == 64'h8000_0000_0000_0000 ||
-							    b_m == 64'h8000_0000_0000_0000) begin
+							if (am_eff == 64'h8000_0000_0000_0000 ||
+							    bm_eff == 64'h8000_0000_0000_0000) begin
 								// Multiplication by an exact power of two only changes
 								// sign/exponent and needs no iterative multiply.
-								a_m <= (a_m == 64'h8000_0000_0000_0000) ? b_m : a_m;
+								a_m <= (am_eff == 64'h8000_0000_0000_0000) ? bm_eff : am_eff;
 								grs <= 0;
 								fst <= F_ROUND;
 							end
@@ -811,9 +961,22 @@ always @(posedge clk) begin
 						end
 					end
 					default: begin : bin_div
-						// FPn = FPn / source
+						// FSGLDIV divides the FULL-width mantissas and only
+						// rounds the quotient to single precision: unlike
+						// FSGLMUL there is no operand chop (floatx80_sgldiv
+						// has no aSig/bSig masking).
+						reg [63:0] am_eff, bm_eff;
+						am_eff = a_m;
+						bm_eff = b_m;
+						// FPn = FPn / source (b = dividend, a = divisor).
+						// Special-case order follows floatx80_div: the
+						// dividend-infinity case comes BEFORE the divisor-zero
+						// check, so inf/0 is a clean infinity with NO DZ.
+						// 0/0 and inf/inf produce the default NaN: positive
+						// sign, all-ones mantissa (floatx80_default_nan).
 						if (a_t == T_INF && b_t == T_INF) begin
 							a_t <= T_NAN;
+							a_s <= 0;
 							a_m <= 64'hFFFF_FFFF_FFFF_FFFF;
 							a_e <= 17'h07FFF;
 							fpsr[13] <= 1;
@@ -822,16 +985,28 @@ always @(posedge clk) begin
 						end
 						else if (a_t == T_ZERO && b_t == T_ZERO) begin
 							a_t <= T_NAN;
+							a_s <= 0;
 							a_m <= 64'hFFFF_FFFF_FFFF_FFFF;
 							a_e <= 17'h07FFF;
 							fpsr[13] <= 1;
 							fpsr[7] <= 1;
 							fst <= F_WB;
 						end
-						else if (a_t == T_ZERO) begin
-							// divide by zero: signed infinity + DZ
+						else if (b_t == T_INF) begin
+							// dividend infinity passes through with its raw
+							// mantissa bits (the 040 does not clear the
+							// integer bit; that is 68060 behaviour)
 							a_t <= T_INF;
 							a_s <= a_s ^ b_s;
+							a_m <= b_m;
+							fst <= F_WB;
+						end
+						else if (a_t == T_ZERO) begin
+							// finite dividend / zero: DZ + created infinity
+							// (all-zero mantissa, floatx80_default_infinity)
+							a_t <= T_INF;
+							a_s <= a_s ^ b_s;
+							a_m <= 64'd0;
 							fpsr[10] <= 1;
 							fpsr[4] <= 1;
 							fst <= F_WB;
@@ -841,25 +1016,22 @@ always @(posedge clk) begin
 							a_s <= a_s ^ b_s;
 							fst <= F_WB;
 						end
-						else if (b_t == T_INF) begin
-							a_t <= T_INF;
-							a_s <= a_s ^ b_s;
-							fst <= F_WB;
-						end
 						else begin
 							a_s <= a_s ^ b_s;
 							e_w <= $signed({1'b0, b_e}) -
 							       $signed({1'b0, a_e}) + 18'sd16383;
-							if (a_m == 64'h8000_0000_0000_0000 || b_m == a_m) begin
+							if (am_eff == 64'h8000_0000_0000_0000 || bm_eff == am_eff) begin
 								// Division by a power of two, or equal normalized
 								// significands, is exact after exponent adjustment.
-								a_m <= (a_m == 64'h8000_0000_0000_0000) ? b_m :
+								a_m <= (am_eff == 64'h8000_0000_0000_0000) ? bm_eff :
 								       64'h8000_0000_0000_0000;
 								grs <= 0;
 								fst <= F_ROUND;
 							end
 							else begin
-								acc_hi <= {1'b0, b_m};   // remainder = dividend
+								// remainder = dividend (chopped for FSGLDIV,
+								// which the b_m write below cannot supply yet)
+								acc_hi <= {1'b0, bm_eff};
 								qv <= 0;
 								loop_n <= 0;
 								fst <= F_DIVL;
@@ -867,6 +1039,7 @@ always @(posedge clk) begin
 						end
 					end
 				endcase
+				end
 			end
 
 			F_ADDX: begin : f_addx
@@ -1023,7 +1196,7 @@ always @(posedge clk) begin
 				reg [64:0] mr;
 				reg        inx, up, ovf, unf, tomax;
 				reg [1:0]  pr;
-				reg signed [17:0] er;
+				reg signed [17:0] er, emin, emax;
 				pr = prec_of(r_op);
 				if (a_t != T_NUM) fst <= F_WB;
 				else begin
@@ -1050,42 +1223,87 @@ always @(posedge clk) begin
 					endcase
 					er = e_w + (mr[64] ? 18'sd1 : 18'sd0);
 					if (mr[64]) mr = {2'b01, 63'd0};
-					ovf = (pr == 2'd1) ? (er > 18'sd16510) :
-					      (pr == 2'd2) ? (er > 18'sd17406) :
-					                     (er > 18'sd32766);
-					unf = (pr == 2'd1) ? (er < 18'sd16257) :
-					      (pr == 2'd2) ? (er < 18'sd15361) :
-					                     (er < 18'sd1);
+					// Range control: the rounding precision narrows the
+					// exponent range as well as the significand (softfloat's
+					// SOFTFLOAT_68K roundAndPackFloatx80 expOffset, 0x3F80
+					// single / 0x3C00 double), EXCEPT for FSGLMUL/FSGLDIV,
+					// which round through roundSigAndPackFloatx80 and keep
+					// the extended range.
+					// Extended (and the sgl class) use the RAW exponent
+					// convention: a working exponent of ZERO still packs as
+					// a normal result with exponent field 0 (the
+					// pseudo-denormal encoding) and no flags; tininess only
+					// starts below that, shifting by -er (softfloat probes:
+					// (0001-8000)/2 -> 0000-8000 clean, /4 -> 0000-4000
+					// UNFL, 2^-16380*2^-13 -> 0000-0020.. shift 10).
+					emax = op_sgl(r_op) ? 18'sd32766 :
+					       (pr == 2'd1) ? 18'sd16510 :
+					       (pr == 2'd2) ? 18'sd17406 : 18'sd32766;
+					emin = op_sgl(r_op) ? 18'sd0 :
+					       (pr == 2'd1) ? 18'sd16257 :
+					       (pr == 2'd2) ? 18'sd15361 : 18'sd0;
+					ovf = (er > emax);
+					unf = (er < emin);
 					if (ovf) begin
 						fpsr[12] <= 1;              // OVFL
-						fpsr[6]  <= 1;
-						fpsr[9]  <= 1;              // INEX2
-						fpsr[3]  <= 1;
+						fpsr[6]  <= 1;              // accrued OVFL
+						fpsr[3]  <= 1;              // accrued INEX (from OVFL)
+						// INEX2 itself only reports actually-discarded bits
+						// (roundAndPackFloatx80 raises inexact on overflow
+						// only when zSig0 & roundMask is nonzero)
+						if (inx) fpsr[9] <= 1;
 						tomax = (rnd_mode == 2'b01) ||
 						        (rnd_mode == 2'b10 && !a_s) ||
 						        (rnd_mode == 2'b11 && a_s);
 						if (tomax) begin
-							a_e <= (pr == 2'd1) ? 17'd16510 :
-							       (pr == 2'd2) ? 17'd17406 : 17'd32766;
-							a_m <= (pr == 2'd1) ? 64'hFFFF_FF00_0000_0000 :
+							a_e <= emax[16:0];
+							a_m <= op_sgl(r_op) ? 64'hFFFF_FFFF_FFFF_FFFF :
+							       (pr == 2'd1) ? 64'hFFFF_FF00_0000_0000 :
 							       (pr == 2'd2) ? 64'hFFFF_FFFF_FFFF_F800 :
 							                      64'hFFFF_FFFF_FFFF_FFFF;
 						end
-						else a_t <= T_INF;
+						else begin
+							a_t <= T_INF;
+							a_m <= 64'd0;   // created infinity: all-zero
+						end
 						fst <= F_WB;
 					end
-					else if (unf) begin
-						fpsr[11] <= 1;              // UNFL
-						fpsr[5]  <= 1;
-						if (inx) begin
-							fpsr[9] <= 1;
+					else if (unf) begin : f_unf
+						// Gradual underflow.  At single or double rounding
+						// precision the result is only subnormal with respect
+						// to that precision, so it still fits the extended
+						// format as a normal number: shift the significand
+						// down to the precision's minimum exponent, round
+						// there, and renormalize in F_UNFL.  A result below
+						// the extended minimum exponent would need the
+						// denormalized encoding (and a signed working
+						// exponent throughout), which this implementation
+						// does not have; those flush to zero.
+						reg signed [17:0] extra;
+						extra = emin - er;
+						fpsr[11] <= 1;              // UNFL status (tiny)
+						// accrued UNFL is only recorded when the result is
+						// ALSO inexact (updateaccrued: UNFL && INEX2); the
+						// deep-flush is always inexact, the F_UNFL path
+						// decides for itself
+						if (extra > 18'sd66) begin
+							fpsr[9] <= 1;           // INEX2
 							fpsr[3] <= 1;
+							fpsr[5] <= 1;           // accrued UNFL
+							a_t <= T_ZERO;
+							fst <= F_WB;
 						end
-						a_t <= T_ZERO;              // no denormals yet
-						fst <= F_WB;
+						else begin
+							sh_v <= {a_m, grs};
+							sh_cnt <= extra[6:0];
+							e_w <= emin;
+							r_pr <= pr;
+							sh_ret <= F_UNFL;
+							fst <= F_SHR;
+						end
 					end
 					else begin
-						if (inx) begin
+						if (inx && !(op_no_inex(r_op) && r_src_x)) begin
 							fpsr[9] <= 1;
 							fpsr[3] <= 1;
 						end
@@ -1116,14 +1334,24 @@ always @(posedge clk) begin
 					dz = (du[1:0] == T_ZERO);
 					nan = (a_t == T_NAN) || (du[1:0] == T_NAN);
 					n = 0; z = 0;
-					if (!nan) begin
+					if (nan) begin
+						// cmp_signed_nan (68040): the propagated NaN keeps
+						// its sign and N reports it; the destination NaN is
+						// preferred, matching propagateFloatx80NaN(a, b)
+						n = (du[1:0] == T_NAN) ? ds : a_s;
+					end
+					else begin
 						eq = (dz && a_t == T_ZERO) ||
 						     (du[1:0] == a_t && ds == a_s && du[1:0] != T_ZERO &&
 						      (du[1:0] == T_INF ||
 						       (du[82:66] == a_e && du[65:2] == a_m)));
 						if (eq) begin
 							z = 1;
-							n = ds;
+							// equal ZEROS and equal INFINITIES report the
+							// destination sign in N; equal finite values
+							// compare as +0 (floatx80_cmp packs (0,0,0)),
+							// so N stays clear even for two negatives
+							n = (dz || du[1:0] == T_INF) ? ds : 1'b0;
 						end
 						else begin
 							if (dz)                 gt = a_s;
@@ -1142,7 +1370,7 @@ always @(posedge clk) begin
 				end
 				else if (r_op == 7'h3A) begin
 					// FTST
-					fpsr[27:24] <= {(a_t != T_NAN) && a_s,
+					fpsr[27:24] <= {a_s,
 					                (a_t == T_ZERO),
 					                (a_t == T_INF),
 					                (a_t == T_NAN)};
@@ -1154,10 +1382,12 @@ always @(posedge clk) begin
 					fr_e[r_dst] <= (a_t == T_ZERO) ? 15'd0 :
 					               (a_t == T_INF || a_t == T_NAN) ? 15'h7FFF :
 					                                                a_e[14:0];
-					fr_m[r_dst] <= (a_t == T_ZERO) ? 64'd0 :
-					                   (a_t == T_INF) ? 64'h8000_0000_0000_0000 :
-					                                      a_m;
-					fpsr[27:24] <= {(a_t != T_NAN) && a_s,
+					// Infinity keeps whatever mantissa the operation left
+					// in a_m: created infinities carry all-zero bits and
+					// pass-through infinities keep the operand's raw image
+					// (inf_clear_intbit is a 68060 flag, not 68040).
+					fr_m[r_dst] <= (a_t == T_ZERO) ? 64'd0 : a_m;
+					fpsr[27:24] <= {a_s,
 					                (a_t == T_ZERO),
 					                (a_t == T_INF),
 					                (a_t == T_NAN)};
@@ -1203,12 +1433,13 @@ always @(posedge clk) begin
 				reg signed [64:0] sv;
 				reg         ovf;
 				if (sh_cnt == 7'd127) begin
-					// inf/NaN/too large: operand error result
+					// infinity / far out of range: OPERR, saturating to the
+					// SIGN-DEPENDENT extreme (roundAndPackInt32/16/8)
 					fpsr[13] <= 1;                       // OPERR
 					fpsr[7]  <= 1;                       // accrued IOP
-					dout <= {(pk_isz == 2'd2) ? 32'h8000_0000 :
-					         (pk_isz == 2'd1) ? {16'h8000, 16'd0} :
-					                            {8'h80, 24'd0}, 64'd0};
+					dout <= {(pk_isz == 2'd2) ? (pk_neg ? 32'h8000_0000 : 32'h7FFF_FFFF) :
+					         (pk_isz == 2'd1) ? (pk_neg ? {16'h8000, 16'd0} : {16'h7FFF, 16'd0}) :
+					                            (pk_neg ? {8'h80, 24'd0} : {8'h7F, 24'd0}), 64'd0};
 				end
 				else begin
 					iv = {1'b0, sh_v[66:3]} +
@@ -1225,9 +1456,9 @@ always @(posedge clk) begin
 					if (ovf) begin
 						fpsr[13] <= 1;                   // OPERR
 						fpsr[7]  <= 1;
-						dout <= {(pk_isz == 2'd2) ? 32'h8000_0000 :
-						         (pk_isz == 2'd1) ? {16'h8000, 16'd0} :
-						                            {8'h80, 24'd0}, 64'd0};
+						dout <= {(pk_isz == 2'd2) ? (pk_neg ? 32'h8000_0000 : 32'h7FFF_FFFF) :
+						         (pk_isz == 2'd1) ? (pk_neg ? {16'h8000, 16'd0} : {16'h7FFF, 16'd0}) :
+						                            (pk_neg ? {8'h80, 24'd0} : {8'h7F, 24'd0}), 64'd0};
 					end
 					else begin
 						dout <= {(pk_isz == 2'd2) ? iv[31:0] :
@@ -1242,6 +1473,62 @@ always @(posedge clk) begin
 				done <= 1;
 				fpu_used <= 1;
 				fst <= F_IDLE;
+			end
+
+			F_UNFL: begin : f_unfl
+				// Round the shifted significand at the boundary of the
+				// rounding precision.  e_w holds that precision's minimum
+				// exponent, which the shift in F_SHR has already scaled the
+				// significand to.
+				reg [64:0] mr;
+				reg        up, inx2;
+				if (r_pr == 2'd0) begin
+					up = round_up(sh_v[3], sh_v[2],
+					              (sh_v[1:0] != 0), a_s);
+					inx2 = (sh_v[2:0] != 0);
+					mr = {1'b0, sh_v[66:3]} + (up ? 65'd1 : 65'd0);
+				end
+				else if (r_pr == 2'd1) begin
+					up = round_up(sh_v[43], sh_v[42],
+					              (sh_v[41:0] != 0), a_s);
+					inx2 = (sh_v[42:0] != 0);
+					mr = {1'b0, sh_v[66:3] & 64'hFFFF_FF00_0000_0000} +
+					     (up ? 65'h100_0000_0000 : 65'd0);
+				end
+				else begin
+					up = round_up(sh_v[14], sh_v[13],
+					              (sh_v[12:0] != 0), a_s);
+					inx2 = (sh_v[13:0] != 0);
+					mr = {1'b0, sh_v[66:3] & 64'hFFFF_FFFF_FFFF_F800} +
+					     (up ? 65'h800 : 65'd0);
+				end
+				if (inx2) begin
+					fpsr[9] <= 1;                   // INEX2
+					fpsr[3] <= 1;
+					fpsr[5] <= 1;                   // accrued UNFL (UNFL&&INEX2)
+				end
+				// At extended precision the result is subnormal for the
+				// destination format itself, so it takes the denormalized
+				// encoding: exponent field zero with the integer bit clear.
+				// At single or double precision the result is subnormal only
+				// with respect to that precision and keeps that precision's
+				// minimum exponent, matching softfloat's packFloatx80 of
+				// (expOffset + 1).  Rounding that carries into the integer
+				// bit has reached the next exponent up either way.
+				if (mr[64]) begin
+					a_m <= 64'h8000_0000_0000_0000;
+					a_e <= e_w[16:0] + 17'd1;
+					fst <= F_WB;
+				end
+				else if (mr[63:0] == 64'd0) begin
+					a_t <= T_ZERO;
+					fst <= F_WB;
+				end
+				else begin
+					a_m <= mr[63:0];
+					a_e <= (mr[63] || e_w != 18'sd1) ? e_w[16:0] : 17'd0;
+					fst <= F_WB;
+				end
 			end
 
 			F_PACKS: begin : f_packs

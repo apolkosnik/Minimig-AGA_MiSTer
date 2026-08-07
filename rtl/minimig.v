@@ -161,6 +161,7 @@ module minimig
 	output 	     _cpu_reset,  // m68k reset
 	input 	     _cpu_reset_in,//m68k reset in
 	input  [31:0] nmi_addr,    // m68k NMI address
+	input          nmi_ack_toggle, // retained AP040 level-7 acknowledge event
 	output 	     ovr,         // NMI address decoding override
 
 	//sram pins
@@ -763,6 +764,7 @@ cart CART1
   .cpu_hwr(cpu_hwr),
   .cpu_lwr(cpu_lwr),
   .nmi_addr(nmi_addr),
+  .nmi_ack_toggle(nmi_ack_toggle),
   .reg_address_in(reg_address),
   .reg_data_in(custom_data_in),
   .dbr(dbr),
@@ -984,4 +986,3 @@ assign rst_out = reset;
 
 
 endmodule
-
