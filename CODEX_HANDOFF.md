@@ -1,5 +1,36 @@
 # Handoff: AP040 cputest chip-RAM corruption investigation
 
+## Note 2026-08-15 (corrected twice): cputest irq/all on hardware
+
+Hardware `cputest irq/all` fails (first at IRQ/ANDSR.B round 1: "SR:
+expected 001f -> 0019 but got 001f"; the exception frame itself
+validates OK).  Verified account, after two wrong theories the same
+day (a "cycle-calibrated serial trigger" claim -- that machinery is
+v24-only -- and a "post-RTE one-instruction interrupt shadow" claim
+that was implemented, broke t_exceptions test 98, and was disproven
+by reading WinUAE's actual specialty-flag loop):
+
+- v20 set_interrupt() raises INTREQ directly and leaves it asserted
+  through the test; the request is pending when the harness RTEs into
+  the test block.
+- WinUAE's RTE (MakeFromSR_T0, non-accurate/non-JIT path) sets
+  SPCFLAG_INT, which do_specialties processes at the NEXT boundary =
+  the interrupt is taken IMMEDIATELY after RTE, before the first
+  restored instruction.  AP040 does exactly the same (rte_irq_pend).
+  SPCFLAG_DOINT (one-instruction deferral) is the JIT path only.
+- The v20 GENERATOR nevertheless encodes the test instruction
+  completing first (expected CCR 001f->0019): its synthetic interrupt
+  arrival model does not match its own runtime's INTREQ-pending-at-RTE
+  behavior.  This v20 arrival modeling is exactly what upstream
+  rewrote in v23/v24 ("CPU tester IPL timing rewrite", Aug 2022).
+- Conclusion: with v20 data the irq group's ARRIVAL expectations do
+  not bind an implementation; frames/priorities do, and those pass:
+  IRQ+ODD_IRQ sim corpus 100/100 on the current tree (incl. F1).
+  Regenerate data with a current WinUAE to make the irq group
+  meaningful on hardware.  No RTL change was kept from this episode
+  (the shadow experiment was fully reverted; t_exceptions still
+  encodes and verifies immediate-at-RTE acceptance).
+
 ## RESOLVED 2026-08-15: the two cputest failures are DATA ARTIFACTS.
 ## AP040 produces the correct 68040 result.  See the update below.
 

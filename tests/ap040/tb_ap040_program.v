@@ -52,6 +52,16 @@ wire        berr = berr_armed && nreset && (busstate != 2'b01) &&
 wire        clkena_in = (busstate == 2'b01) | mem_ready | berr;
 
 reg   [2:0] ipl_lvl;
+// +exctrace: print every exception entry (vector, pc) for A/B diffing
+reg [7:0] et_prev = 0;
+always @(posedge clk) begin
+	et_prev <= dut.core.state;
+	if ($test$plusargs("exctrace") &&
+	    dut.core.state == 8'd34 && et_prev != 8'd34)
+		$display("EXC vec=%0d pc=%08x spc=%08x sr=%04x",
+		         dut.core.exc_vec, dut.core.pc,
+		         dut.core.exc_spc, dut.core.sr);
+end
 
 ap040_tg68k_compat dut
 (
