@@ -15,6 +15,8 @@ cnt_fpbsun	equ	$3606
 cnt_fpline	equ	$3608
 cnt_fpunsup	equ	$360A
 cnt_ill4	equ	$3620
+save_unimp	equ	$3624
+unimp_frame	equ	$3A00
 unsup_fa	equ	$360C
 unsup_resume	equ	$3610
 unsup_pc	equ	$3614
@@ -52,8 +54,12 @@ ok\@:
 	dc.l	unexp		; vectors 5-10
 	endr
 	dc.l	h_fpunimp	; 11 F-line / FP unimplemented
-	rept	36
-	dc.l	unexp		; vectors 12-47
+	rept	20
+	dc.l	unexp		; vectors 12-31
+	endr
+	dc.l	h_trap0		; 32 TRAP #0: harness-replica test return
+	rept	15
+	dc.l	unexp		; vectors 33-47
 	endr
 	dc.l	h_fpbsun	; 48 signaling unordered conditional
 	dc.l	unexp		; 49 FP inexact
@@ -76,6 +82,7 @@ start:
 	clr.w	(cnt_fpbsun).l
 	clr.w	(cnt_fpline).l
 	clr.w	(cnt_ill4).l
+	clr.w	(save_unimp).l
 
 ;-------------------------------------------------- integer load/store
 	fmove.l	#123,fp0
@@ -294,6 +301,21 @@ fs1:
 	move.l	($3294).l,d0
 	chkl	d0,0,42
 	frestore	(a2)+
+	; Restoring IDLE into a NULL FPU must make a subsequent FSAVE emit IDLE.
+	; The old RTL accepted the header but left fpu_used clear.
+	move.l	#$41000000,($328C).l
+	lea	($328C).l,a1
+	frestore	(a1)+
+	lea	($3298).l,a2
+	fsave	-(a2)
+	cmp.l	#$3294,a2
+	beq.s	fs_idle_pd_ok
+	failt	284
+fs_idle_pd_ok:
+	move.l	(a2),d0
+	chkl	d0,$41000000,285
+	clr.l	(a2)
+	frestore	(a2)		; return to NULL before the vector-11 checks
 
 ;-------------------------------- unimplemented instructions (vector 11)
 	; cputest FABS.B/0001: an address-register-direct source is not a
@@ -315,10 +337,74 @@ fs1:
 
 	fmove.l	#7,fp0		; FPU in use again
 	move.l	#$202C,(exp_fmt).l
-	fsin.x	fp0		; transcendental: FPSP trap on a real 040
+	move.w	#1,(save_unimp).l
+	dc.w	$F200,$000E	; fsin.x fp0: transcendental, FPSP route
 	chkcnt	cnt_fpunimp,1,43
+	move.l	(unimp_frame+$00).l,d0
+	chkl	d0,$41300000,260	; revision $41, 48-byte payload
+	move.l	(unimp_frame+$04).l,d0
+	chkl	d0,$00260000,261	; CMDREG3B mapping of command $000E
+	move.l	(unimp_frame+$08).l,d0
+	chkl	d0,0,262		; reserved
+	move.l	(unimp_frame+$0C).l,d0
+	chkl	d0,0,263		; normalized STAG, no GRS/WBT bits
+	move.l	(unimp_frame+$10).l,d0
+	chkl	d0,$000E0000,264	; CMDREG1B
+	move.l	(unimp_frame+$14).l,d0
+	chkl	d0,0,265		; normalized DTAG
+	move.l	(unimp_frame+$18).l,d0
+	chkl	d0,$04000000,266	; E1=1, E3=0, T=0
+	move.l	(unimp_frame+$1C).l,d0
+	chkl	d0,$40010000,267	; FPTEMP destination = +7.0
+	move.l	(unimp_frame+$20).l,d0
+	chkl	d0,$E0000000,268
+	move.l	(unimp_frame+$24).l,d0
+	chkl	d0,0,269
+	move.l	(unimp_frame+$28).l,d0
+	chkl	d0,$40010000,270	; ETEMP source = +7.0
+	move.l	(unimp_frame+$2C).l,d0
+	chkl	d0,$E0000000,271
+	move.l	(unimp_frame+$30).l,d0
+	chkl	d0,0,272
+
+	; FRESTORE must consume the complete frame.  Saving the restored pending
+	; state through -(An) must subtract all 52 bytes and reproduce the frame.
+	lea	(unimp_frame).l,a1
+	frestore	(a1)+
+	cmp.l	#unimp_frame+$34,a1
+	beq.s	unimp_pi_ok
+	failt	273
+unimp_pi_ok:
+	fsave	-(a1)
+	cmp.l	#unimp_frame,a1
+	beq.s	unimp_pd_ok
+	failt	274
+unimp_pd_ok:
+	move.l	(a1),d0
+	chkl	d0,$41300000,275
+	move.l	$10(a1),d0
+	chkl	d0,$000E0000,276
+	move.l	$28(a1),d0
+	chkl	d0,$40010000,277
+
+	; Memory-source software operations must capture the converted source,
+	; not merely the raw 32-bit input window.  FINT.L #5,fp2 is opclass 2,
+	; format long, destination FP2, opmode $01.
+	dc.w	$F23C,$4101
+	dc.l	5
+	chkcnt	cnt_fpunimp,2,278
+	move.l	(unimp_frame+$04).l,d0
+	chkl	d0,$01010000,279	; CMDREG3B
+	move.l	(unimp_frame+$10).l,d0
+	chkl	d0,$41010000,280	; CMDREG1B
+	move.l	(unimp_frame+$0C).l,d0
+	chkl	d0,0,281		; normalized long-integer source
+	move.l	(unimp_frame+$28).l,d0
+	chkl	d0,$40010000,282	; ETEMP = extended +5.0
+	move.l	(unimp_frame+$2C).l,d0
+	chkl	d0,$A0000000,283
 	fmovecr	#0,fp1		; constant ROM: also not hardware
-	chkcnt	cnt_fpunimp,2,44
+	chkcnt	cnt_fpunimp,3,44
 
 ;-------------------------------------------------- arithmetic (stage H3)
 	fmove.l	#123,fp0
@@ -748,13 +834,12 @@ den_xadd_cont:
 	move.l	($3418).l,d0
 	chkl	d0,$00000800,112	; truncated at the double boundary
 
-;----------------- FABS and FNEG round to precision but never signal inexact
-; The PRM lists INEX2 as "Cleared" with no qualifying condition on both the
-; FABS and FNEG pages, even though each still rounds its result to the FPCR
-; precision.  Hardware cputest agrees: 68040_basicfpu FABS.X with FPCR $D0
-; expects the mantissa truncated at the double boundary and FPSR $00000000.
-; FMOVE is NOT exempt (its page sets INEX2 "if <fmt> is L, D, or X"), so the
-; final check proves the suppression is specific rather than a global loss.
+;----------------------- FABS and FNEG report precision-rounding inexactness
+; Despite the PRM operation tables describing INEX2 as "Cleared", cputest's
+; softfloat oracle routes FABS/FNEG through roundAndPackFloatx80.  Therefore
+; they set INEX2 and accrued INEX whenever the selected precision discards
+; nonzero bits, exactly like FMOVE.  This applies to register and memory X
+; sources as well as sources which first require format conversion.
 	move.l	#$BFFF0000,($3420).l	; -1.1000... with a tail below double
 	move.l	#$8CCCCCCC,($3424).l
 	move.l	#$CCCCCCCD,($3428).l
@@ -765,7 +850,7 @@ den_xadd_cont:
 	fmove.l	#0,fpcr
 	fmove.l	fpsr,d0
 	and.l	#$0000FFFF,d0		; exception and accrued bytes
-	chkl	d0,0,113		; rounded, but no INEX2 and no accrued
+	chkl	d0,$0208,113		; INEX2 plus the accrued INEX bit
 	fmovem.x	fp0,($3430).l
 	move.l	($3430).l,d0
 	chkl	d0,$3FFF0000,114	; sign cleared, exponent kept
@@ -778,7 +863,7 @@ den_xadd_cont:
 	fmove.l	#0,fpcr
 	fmove.l	fpsr,d0
 	and.l	#$0000FFFF,d0
-	chkl	d0,0,116		; FNEG is exempt on the same grounds
+	chkl	d0,$0208,116		; FNEG reports the discarded bits too
 	fmovem.x	fp1,($3440).l
 	move.l	($3440).l,d0
 	chkl	d0,$3FFF0000,117	; negated from a negative source
@@ -872,10 +957,8 @@ den_xadd_cont:
 	move.l	($34B4).l,d0
 	chkl	d0,$FFFFFF00,129
 
-; the exact case hardware cputest reported (68040_basicfpu FABS.X/0001):
-; fabs.x fp1,fp0 with FPCR $D0 and FP1 = bfff-8cccccccccccccccd expects
-; FP0 = 3fff-8cccccccccccc800 and FPSR $00000000.  Register to register is
-; a different decode path from the memory-source form checked above.
+; Register-to-register follows the same rule.  The reserved precision field
+; behaves as double, so this case discards eleven bits and reports INEX2.
 	move.l	#$BFFF0000,($34D0).l
 	move.l	#$8CCCCCCC,($34D4).l
 	move.l	#$CCCCCCCD,($34D8).l
@@ -886,7 +969,7 @@ den_xadd_cont:
 	fmove.l	#0,fpcr
 	fmove.l	fpsr,d0
 	and.l	#$0000FFFF,d0
-	chkl	d0,0,130		; no INEX2 despite the discarded bits
+	chkl	d0,$0208,130		; INEX2 for the discarded double tail
 	fmovem.x	fp0,($34E0).l
 	move.l	($34E0).l,d0
 	chkl	d0,$3FFF0000,131	; sign cleared
@@ -895,9 +978,9 @@ den_xadd_cont:
 	move.l	($34E8).l,d0
 	chkl	d0,$CCCCC800,133	; truncated at the double boundary
 
-; ...but a NON-extended source is not exempt.  cputest 68040_basicfpu
-; FABS.D runs fabs.d (a0),fp2 with FPCR $40 and expects FPSR $00000208,
-; so only an extended source skips the inexact report.  Source double
+; A non-extended source is also rounded in the same way.  cputest
+; 68040_basicfpu FABS.D runs fabs.d (a0),fp2 with FPCR $40 and expects
+; FPSR $00000208.  Source double
 ; $C1CBAA456E800000 becomes extended 401C-dd522b7400000000; rounding that
 ; to single drops $7400000000, below the halfway point, so it truncates.
 	move.l	#$C1CBAA45,($34F0).l
@@ -931,6 +1014,11 @@ h_fpunimp:
 	beq.s	h_fpline
 	cmp.w	(exp_fmt+2).l,d6
 	bne	hfail
+	; A real FPSP handler must acknowledge every pending UNIMP state before
+	; it can safely use the FPU again.  Save all format-$2 cases; save_unimp
+	; merely marks the one whose complete payload is checked above.
+	fsave	(unimp_frame).l
+	clr.w	(save_unimp).l
 	addq.w	#1,(cnt_fpunimp).l
 	rte			; format $2 frame resumes after the FP op
 
@@ -1152,7 +1240,7 @@ fcmpd_cont:
 	move.l	#$202C,(exp_fmt).l
 fmovecr_op:
 	dc.w	$F200,$5C00		; fmovecr #$00,fp0
-	chkcnt	cnt_fpunimp,3,157
+	chkcnt	cnt_fpunimp,4,157
 	fmove.l	fpsr,d0
 	and.l	#$0000FF08,d0
 	chkl	d0,$4008,158		; exception byte preserved
@@ -4115,4 +4203,356 @@ fimm_cont:
 	and.l	#$0F002000,d0
 	chkl	d0,$04000000,244	; 0/5 is +0 with Z, never 0/0 OPERR
 
+; RESOLVED 2026-08-09: the suppression revert was tested on hardware
+; and cputest FABS.X failed exactly here -- blanket INEX (this $0208)
+; is confirmed twice.  Exact 68040_basicfpu FABS.X capture 2026-08-07:
+; FPCR $40, extended register source with a tail below bit 24 ->
+; destination 3fff-8ccccd00..., FPSR $00000208.
+	move.l	#$BFFF0000,($3780).l
+	move.l	#$8CCCCCCC,($3784).l
+	move.l	#$CCCCCCCD,($3788).l
+	fmovem.x	($3780).l,fp1		; raw source, no load-time rounding
+	fmove.l	#0,fpsr
+	fmove.l	#$40,fpcr		; single precision, nearest-even
+	fabs.x	fp1,fp0
+	fmove.l	#0,fpcr
+	fmove.l	fpsr,d0
+	and.l	#$0000FFFF,d0
+	chkl	d0,$0208,245
+	fmovem.x	fp0,($3790).l
+	move.l	($3790).l,d0
+	chkl	d0,$3FFF0000,246
+	move.l	($3794).l,d0
+	chkl	d0,$8CCCCD00,247
+	move.l	($3798).l,d0
+	chkl	d0,0,248
+
+; FNEG uses the same rounding/status path.  Reload the unrounded positive
+; image so this is not merely negating the already-rounded FABS result.
+	move.l	#$3FFF0000,($3780).l
+	fmovem.x	($3780).l,fp1
+	fmove.l	#0,fpsr
+	fmove.l	#$40,fpcr
+	fneg.x	fp1,fp0
+	fmove.l	#0,fpcr
+	fmove.l	fpsr,d0
+	and.l	#$0000FFFF,d0
+	chkl	d0,$0208,249
+	fmovem.x	fp0,($3790).l
+	move.l	($3790).l,d0
+	chkl	d0,$BFFF0000,250
+	move.l	($3794).l,d0
+	chkl	d0,$8CCCCD00,251
+	move.l	($3798).l,d0
+	chkl	d0,0,252
+
+; Exact 68040_basicfpu FADD.P effective-address failure captured on hardware
+; 2026-08-07.  $0795 is a full extension word with base suppression, a null
+; base displacement, D0.W*8 post-indexing, and null outer displacement:
+;
+;             EA = mem.l[$00000000] + (D0.W * 8)
+;
+; With mem.l[0]=1 and D0=$154, vector 55's format-$3 EA field must therefore
+; be $00000AA1.  Packed operands are unsupported on the 68040, but the source
+; is fetched before the datatype trap, so install twelve readable bytes there.
+	move.l	#1,($0000).l
+	move.l	#$5A000000,($0AA1).l
+	move.l	#0,($0AA5).l
+	move.l	#0,($0AA9).l
+	move.l	#$00000154,d0
+	move.l	#0,(cnt_fpunsup).l
+	move.l	#$EEEEEEEE,(unsup_fa).l
+	lea	fpind_cont(pc),a0
+	move.l	a0,(unsup_resume).l
+fpind_op:
+	dc.w	$F231,$4CA2,$0795	; fadd.p ([D0.w*8]),fp1
+fpind_cont:
+	chkcnt	cnt_fpunsup,1,253
+	move.l	(unsup_fa).l,d1
+	chkl	d1,$00000AA1,254
+	move.l	(unsup_pc).l,d1
+	chkl	d1,fpind_op,255
+
+;=========== FABS.X ([0]),fp3 -- hardware cputest 68040_basicfpu fail
+; Full-extension EA: null base displacement, base AND index suppressed,
+; null outer displacement -> operand pointer at ABSOLUTE address 0.
+; The operand itself sits at an ODD address; the hardware fail read the
+; 12-byte window from P+2 (FP3 = 401c-d82c00000000df00), so the memory
+; image below mirrors the screenshot bytes exactly: a +2 window
+; reproduces that precise wrong value.
+	move.l	#$00003761,($0).l	; pointer -> odd operand address
+	move.b	#$00,($3761).l		; se word 0000 (sign +, exp 0)
+	move.b	#$00,($3762).l
+	move.b	#$40,($3763).l		; pad word 401c (ignored on read)
+	move.b	#$1C,($3764).l
+	move.b	#$B6,($3765).l		; mantissa b6bad82c00000000
+	move.b	#$BA,($3766).l		; (pseudo-denormal: int bit set)
+	move.b	#$D8,($3767).l
+	move.b	#$2C,($3768).l
+	move.b	#$00,($3769).l
+	move.b	#$00,($376A).l
+	move.b	#$00,($376B).l
+	move.b	#$00,($376C).l
+	move.b	#$DF,($376D).l		; trailing bytes a +2 window would
+	move.b	#$00,($376E).l		; pull into the mantissa
+	movea.l	#$DEADBEEF,a6		; suppressed base must not matter
+	movea.l	#$00000072,a1		; suppressed index must not matter
+	fmove.l	#1,fp3
+	fmove.l	#0,fpsr
+	dc.w	$F236,$4998,$95D1	; fabs.x ([0]),fp3
+	fmovem.x	fp3,($3710).l
+	move.l	($3710).l,d0
+	chkl	d0,0,256		; se 0000, not the +2 window's 401c
+	move.l	($3714).l,d0
+	chkl	d0,$B6BAD82C,257
+	move.l	($3718).l,d0
+	chkl	d0,0,258
+	fmove.l	fpsr,d0
+	chkl	d0,0,259		; extended pseudo-denormal FABS: no flags
+
+;================ chained-dependency benchmark loop (user 68040 kernel)
+; fadd/fmul/fsub/fdiv/fmul/fadd/fsub/fmul all accumulating in fp0 with
+; fp1=3, fp2=4 collapses to x <- 12x + 31 per pass, every step exact in
+; extended precision while the value fits the mantissa.  Eight passes
+; from 2 give 2071729987; no step discards bits so FPSR stays clean.
+; (The original uses DBNE, which tests the INTEGER CCR that no FPU op
+; writes -- looped here with dbra instead.)
+	fmove.l	#2,fp0
+	fmove.l	#3,fp1
+	fmove.l	#4,fp2
+	fmove.l	#0,fpsr
+	moveq	#7,d3
+fpubench_loop:
+	fadd.x	fp1,fp0
+	fmul.x	fp2,fp0
+	fsub.x	fp1,fp0
+	fdiv.x	fp2,fp0
+	fmul.x	fp1,fp0
+	fadd.x	fp2,fp0
+	fsub.x	fp1,fp0
+	fmul.x	fp2,fp0
+	dbra	d3,fpubench_loop
+	fmove.l	fp0,d0
+	chkl	d0,2071729987,260	; 12^8 chain, exact
+	fmove.l	fpsr,d0
+	chkl	d0,0,261		; every step exact: no status at all
+
+; the same kernel saturates: from 2^16382 the fmul.x by 4 overflows to
+; +inf under round-to-nearest and every following op passes it through
+	move.l	#$7FFE0000,($3700).l	; 2^16382
+	move.l	#$80000000,($3704).l
+	move.l	#$00000000,($3708).l
+	fmovem.x	($3700).l,fp0
+	fmove.l	#0,fpsr
+	fadd.x	fp1,fp0			; +3: absorbed, INEX2
+	fmul.x	fp2,fp0			; x4: OVFL -> +inf
+	fsub.x	fp1,fp0
+	fdiv.x	fp2,fp0
+	fmul.x	fp1,fp0
+	fadd.x	fp2,fp0
+	fsub.x	fp1,fp0
+	fmul.x	fp2,fp0
+	fmovem.x	fp0,($3710).l
+	move.l	($3710).l,d0
+	chkl	d0,$7FFF0000,262	; +infinity
+	move.l	($3714).l,d0
+	chkl	d0,0,263		; created infinity: zero mantissa
+	fmove.l	fpsr,d0
+	chkl	d0,$02000048,264	; I code; accrued OVFL+INEX only
+
+;=========== pointer-rewrite ([0]) sequences -- cputest per-test behavior
+; cputest rewrites the indirect pointer at absolute 0 immediately before
+; every test.  Both hardware failures decode as ONE STALE 16-BIT HALF of
+; that just-rewritten longword (FABS.X: low half stale -> operand window
+; at 4023; FADD.P: high half stale -> frame EA 80090AA1).  Alternate the
+; pointer between values differing in one half and dereference with the
+; exact failing encodings immediately after each rewrite, so a lost or
+; stale half-word is instantly visible in the result.
+	moveq	#7,d3
+ptrl:
+	move.l	#$00003761,($0).l	; fresh pointer, low half $3761
+	fmove.l	#1,fp3
+	dc.w	$F236,$4998,$95D1	; fabs.x ([0]),fp3
+	fmovem.x	fp3,($3710).l
+	move.l	($3710).l,d0
+	chkl	d0,$00000000,265	; a stale low half reads the $3763
+	move.l	($3714).l,d0		; window: se 401c
+	chkl	d0,$B6BAD82C,266
+	move.l	($3718).l,d0
+	chkl	d0,$00000000,267
+	move.l	#$00003763,($0).l	; rewrite: only the LOW half changes
+	fmove.l	#1,fp3
+	dc.w	$F236,$4998,$95D1	; fabs.x ([0]),fp3
+	fmovem.x	fp3,($3710).l
+	move.l	($3710).l,d0
+	chkl	d0,$401C0000,268	; a stale low half reads the $3761
+	move.l	($3714).l,d0		; window: se 0000
+	chkl	d0,$D82C0000,269
+	move.l	($3718).l,d0
+	chkl	d0,$0000DF00,270
+	dbra	d3,ptrl
+
+	; integer memory-indirect control: same rewrite pattern, plain read
+	move.l	#$00003761,($0).l
+	move.l	([$0.w]),d1
+	chkl	d1,$0000401C,271
+	move.l	#$00003763,($0).l
+	move.l	([$0.w]),d1
+	chkl	d1,$401CB6BA,272
+
+	; packed source: always vector 55; consecutive frames carry EAs that
+	; differ in one half, so a stale half of the stacked EA longword (the
+	; FADD.P hardware signature 80090AA1) cannot cancel out
+	move.l	#0,($0AAD).l		; 12 readable bytes from every EA below
+	move.l	#$00000154,d0
+	moveq	#3,d4
+pkl:
+	move.l	#1,($0).l		; EA = 1 + $AA0 = $00000AA1
+	move.l	#0,(cnt_fpunsup).l
+	lea	pk1c(pc),a0
+	move.l	a0,(unsup_resume).l
+	dc.w	$F231,$4CA2,$0795	; fadd.p ([D0.w*8]),fp1
+pk1c:
+	chkcnt	cnt_fpunsup,1,273
+	move.l	(unsup_fa).l,d1
+	chkl	d1,$00000AA1,274
+	move.l	#3,($0).l		; EA = $00000AA3: low half changes
+	move.l	#0,(cnt_fpunsup).l
+	lea	pk2c(pc),a0
+	move.l	a0,(unsup_resume).l
+	dc.w	$F231,$4CA2,$0795	; fadd.p ([D0.w*8]),fp1
+pk2c:
+	chkcnt	cnt_fpunsup,1,275
+	move.l	(unsup_fa).l,d1
+	chkl	d1,$00000AA3,276
+	move.l	#5,($0).l		; EA = $00000AA5: differs from both
+	move.l	#0,(cnt_fpunsup).l
+	lea	pk3c(pc),a0
+	move.l	a0,(unsup_resume).l
+	dc.w	$F231,$4CA2,$0795	; fadd.p ([D0.w*8]),fp1
+pk3c:
+	chkcnt	cnt_fpunsup,1,277
+	move.l	(unsup_fa).l,d1
+	chkl	d1,$00000AA5,278
+	dbra	d4,pkl
+
+;=========== faithful cputest harness replica around fabs.x ([0])
+; ptrfabs on hardware (move.l pointer rewrite, straight-line code) passes,
+; so replicate cputest's ACTUAL inter-test context from WinUAE's
+; cputest/asm.S execute_testfpu and main.c tomem: the pointer longword is
+; rewritten BYTE-WISE, then all eight FP registers are reloaded from the
+; register image with FMOVEM.X, FPIAR/FPCR/FPSR are loaded, the integer
+; file is reloaded with MOVEM.L, and an RTE drops into the USER-mode test
+; block whose tail (fnop) matches the screenshot.  The register images
+; are the exact "Registers before" of failing test 1789.
+	move.w	#0,(hr_iter).l
+hr_loop:
+	; --- tomem: byte-wise pointer rewrite at absolute 0 (order 0,1,2,3)
+	move.w	(hr_iter).l,d0
+	btst	#0,d0
+	bne.s	hr_p2
+	move.b	#$00,($0).l
+	move.b	#$00,($1).l
+	move.b	#$37,($2).l
+	move.b	#$61,($3).l		; pointer = $00003761
+	bra.s	hr_go
+hr_p2:
+	move.b	#$00,($0).l
+	move.b	#$00,($1).l
+	move.b	#$37,($2).l
+	move.b	#$63,($3).l		; pointer = $00003763
+hr_go:
+	; --- execute_testfpu replica
+	lea	hr_fpimg(pc),a0
+	fmovem.x	(a0),fp0-fp7
+	lea	hr_fpctl(pc),a1
+	fmove.l	(a1)+,fpiar
+	fmove.l	(a1)+,fpcr
+	fmove.l	(a1)+,fpsr
+	lea	hr_ustk+64(pc),a1
+	move.l	a1,usp
+	move.w	#$0080,-(sp)		; format 0, filler vector offset
+	pea	hr_ublk(pc)
+	move.w	#$0000,-(sp)		; SR: user mode, all IRQs enabled
+	lea	hr_iregs(pc),a0
+	movem.l	(a0),d0-d7/a0-a6
+	rte
+
+	; --- user-mode test block, tail per the hardware capture
+hr_ublk:
+	dc.w	$F236,$4998,$95D1	; fabs.x ([0]),fp3
+	fnop
+	trap	#0
+
+	; --- back in supervisor mode: verify FP3 against the FRESH pointer
+hr_back:
+	fmovem.x	fp3,($3720).l
+	move.w	(hr_iter).l,d0
+	btst	#0,d0
+	bne.s	hr_c2
+	move.l	($3720).l,d0
+	chkl	d0,$00000000,279	; window at $3761
+	move.l	($3724).l,d0
+	chkl	d0,$B6BAD82C,280
+	move.l	($3728).l,d0
+	chkl	d0,$00000000,281
+	bra.s	hr_next
+hr_c2:
+	move.l	($3720).l,d0
+	chkl	d0,$401C0000,282	; window at $3763
+	move.l	($3724).l,d0
+	chkl	d0,$D82C0000,283
+	move.l	($3728).l,d0
+	chkl	d0,$0000DF00,284
+hr_next:
+	move.w	(hr_iter).l,d0
+	addq.w	#1,d0
+	move.w	d0,(hr_iter).l
+	cmp.w	#8,d0
+	blo	hr_loop
+
 	jmp	audit_return
+
+; TRAP #0 from the user-mode block: record nothing, redirect the return
+; into the supervisor flow at hr_back with interrupts masked again.
+h_trap0:
+	move.w	#$2700,(sp)
+	lea	hr_back(pc),a0
+	move.l	a0,2(sp)
+	rte
+
+hr_iter	equ	$372C
+
+	even
+hr_fpimg:				; exact FABS.X test 1789 register image
+	dc.w	$3FFF,$0000
+	dc.l	$8CCCCCCC,$CCCCCCCD	; FP0
+	dc.w	$C001,$0000
+	dc.l	$8FFFFFFF,$FFFFFFFC	; FP1
+	dc.w	$8000,$0000
+	dc.l	$00000000,$00000000	; FP2 (-0.0)
+	dc.w	$70B4,$0000
+	dc.l	$BBC77C16,$00000000	; FP3 preload
+	dc.w	$075F,$0000
+	dc.l	$FF64ABB6,$00000000	; FP4
+	dc.w	$401A,$0000
+	dc.l	$9D4E6619,$4392A766	; FP5
+	dc.w	$C01D,$0000
+	dc.l	$B61C5011,$A1C22B68	; FP6
+	dc.w	$7FFF,$0000
+	dc.l	$FFFFFFFF,$FFFFFFFF	; FP7 (NaN)
+hr_fpctl:
+	dc.l	$FFFFFFFF		; FPIAR canary
+	dc.l	$00000000		; FPCR
+	dc.l	$00000000		; FPSR
+hr_iregs:				; integer file per the capture (A7
+	dc.l	$000000D6,$00000000	; slot unused by MOVEM d0-d7/a0-a6)
+	dc.l	$7FFB5F7F,$E00FBFFF
+	dc.l	$8017FFC4,$00050505
+	dc.l	$00202020,$6433AAA6
+	dc.l	$00000000,$00000072
+	dc.l	$00007FEE,$0000FFFF
+	dc.l	$7FFFFF62,$C03FFFFF
+	dc.l	$00003300
+hr_ustk:
+	ds.b	64

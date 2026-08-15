@@ -213,7 +213,7 @@ a2065_ddram_arbiter arbiter
 assign mem2_readdata = DDRAM_DOUT;
 
 always @ (posedge sysclk) begin
-	reg  [2:0] state = 0;
+	reg  [3:0] state;
 	reg  [1:0] ba;
 	reg [63:0] dout;
 
@@ -263,7 +263,7 @@ always @ (posedge sysclk) begin
 						end
 						else begin
 							ram_rd <= 1;
-							state  <= 7;
+							state  <= 14;
 						end
 					end
 					else if(cache_req) begin
@@ -291,8 +291,11 @@ always @ (posedge sysclk) begin
 					cache_fill    <= 1;
 					state         <= 0;
 				end
-			// Two snoop cycles update both cached 16-bit halves after a
-			// direct descriptor write, then the longword transaction acks.
+			// cpu_cache_new performs a synchronous tag lookup before its
+			// data-RAM write and has no ready output.  Keep each half's
+			// address/data selected for the complete lookup/write window,
+			// insert an inactive write edge between halves, and acknowledge
+			// only after the low-half write has landed.
 			5: begin
 					walker_snoop     <= 1;
 					walker_snoop_low <= 0;
@@ -300,11 +303,38 @@ always @ (posedge sysclk) begin
 				end
 			6: begin
 					walker_snoop     <= 1;
-					walker_snoop_low <= 1;
-					walker_ack       <= 1;
-					state             <= 0;
+					state             <= 7;
 				end
-			7: if(~ram_busy & ram_dout_ready) begin
+			7: begin
+					walker_snoop     <= 1;
+					state             <= 8;
+				end
+			8: begin
+					walker_snoop     <= 0;
+					state             <= 9;
+				end
+			9: begin
+					walker_snoop     <= 1;
+					walker_snoop_low <= 1;
+					state             <= 10;
+				end
+			10: begin
+					walker_snoop     <= 1;
+					state             <= 11;
+				end
+			11: begin
+					walker_snoop     <= 1;
+					state             <= 12;
+				end
+			12: begin
+					walker_snoop     <= 0;
+					state             <= 13;
+				end
+			13: begin
+					walker_ack <= 1;
+					state       <= 0;
+				end
+			14: if(~ram_busy & ram_dout_ready) begin
 					walker_rdata <= walker_addr_latch[2]
 						? {ram_dout[47:32], ram_dout[63:48]}
 						: {ram_dout[15:0], ram_dout[31:16]};

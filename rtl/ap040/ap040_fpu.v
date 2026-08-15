@@ -11,11 +11,13 @@
 // FABS/FNEG/FTST/FCMP, and iterative FADD/FSUB/FMUL/FDIV/FSQRT with FPCR   //
 // precision/rounding, FPSR status/accrual, signaling NaNs and enabled      //
 // arithmetic-exception vectors. Single/double stores generate gradual      //
-// underflow; unsupported denormal/unnormal inputs take vector 11.          //
+// underflow; unsupported denormal/unnormal inputs take vector 55.          //
 //                                                                          //
-// Transcendentals, packed decimal, FMOVECR and the remaining software      //
-// subset assert `unimp`, following the 68040 FPSP route. FSAVE BUSY/UNIMP  //
-// state frames remain a documented integration gap.                       //
+// Transcendentals, FMOVECR and the remaining software subset assert        //
+// `unimp`, following the 68040 FPSP route; packed decimal takes the        //
+// unsupported-data-type path.  Revision-$41                               //
+// UNIMP state is retained for FSAVE/FRESTORE; a true BUSY arithmetic       //
+// exception frame remains a documented integration gap.                   //
 //                                                                          //
 // The core owns instruction decode, effective addresses and memory         //
 // transfers; operands arrive left-aligned in a 96-bit window. FMOVEM       //
@@ -69,8 +71,28 @@ module ap040_fpu
 	input      [95:0] fm_wdata,
 	output     [95:0] fm_rdata,
 
-	// FSAVE/FRESTORE state
-	output reg        fpu_used,    // 0: NULL frame, 1: IDLE frame
+	// FSAVE/FRESTORE state.  An unimplemented instruction leaves the
+	// revision-$41 68040 state-frame payload here until a successful FSAVE
+	// acknowledges it.  FRESTORE can reinstate that pending state.
+	output reg        fpu_used,    // 0: NULL frame, 1: IDLE or exception frame
+	output reg        fstate_unimp,
+	output reg [15:0] fstate_cmd1,
+	output reg [15:0] fstate_cmd3,
+	output reg  [2:0] fstate_stag,
+	output reg  [2:0] fstate_dtag,
+	output reg  [2:0] fstate_flags, // {E1,E3,T}
+	output reg [95:0] fstate_fpt,
+	output reg [95:0] fstate_et,
+	input             fsave_ack,
+	input             frestore_idle,
+	input             frestore_unimp,
+	input      [15:0] frestore_cmd1,
+	input      [15:0] frestore_cmd3,
+	input       [2:0] frestore_stag,
+	input       [2:0] frestore_dtag,
+	input       [2:0] frestore_flags,
+	input      [95:0] frestore_fpt,
+	input      [95:0] frestore_et,
 	input             fp_reset     // FRESTORE of a NULL frame
 );
 
@@ -160,6 +182,20 @@ function [6:0] clz64;
 	end
 endfunction
 
+// 68040 state-frame tags (Table 9-15).  Register operands retain their raw
+// extended image in the frame even when it is an unnormal value.
+function [2:0] frame_tag_x;
+	input [14:0] e;
+	input [63:0] m;
+	begin
+		if (m == 64'd0 && e != 15'h7FFF) frame_tag_x = 3'd1;       // zero
+		else if (unsupported_x(e, m))    frame_tag_x = 3'd4;       // X denorm/unnormal
+		else if (e == 15'h7FFF && m[62:0] != 0) frame_tag_x = 3'd3; // NaN
+		else if (e == 15'h7FFF)          frame_tag_x = 3'd2;       // infinity
+		else                              frame_tag_x = 3'd0;       // normal
+	end
+endfunction
+
 //---------------------------------------------------------------------------
 // FSM
 //---------------------------------------------------------------------------
@@ -183,8 +219,9 @@ localparam F_UNFL  = 5'd16;  // gradual underflow at single/double precision
 
 reg  [4:0] fst;
 reg  [2:0] r_fmt, r_dst;
-reg        r_src_x;         // source operand arrived in extended format
 reg        r_ae7;           // accrued-IOP before this instruction (fault backout)
+reg        r_unimp;         // memory-source software op using normal converter
+reg  [2:0] r_stag;          // source tag retained while that conversion runs
 reg  [6:0] r_op;
 reg [95:0] r_din;
 
@@ -256,24 +293,6 @@ function [1:0] prec_of;
 	end
 endfunction
 
-// FABS and FNEG round their result to the selected precision but do not
-// report it as inexact WHEN THE SOURCE IS ALREADY EXTENDED.  The PRM's
-// FABS and FNEG pages list INEX2 as "Cleared" with no qualifying
-// condition, but hardware cputest is narrower than that:
-//   fabs.x fp1,fp0  FPCR $D0  rounds to double, expects FPSR $00000000
-//   fabs.d (a0),fp2 FPCR $40  rounds to single, expects FPSR $00000208
-// Both roundings discard bits, so the discriminator is the source format,
-// not the instruction alone: a source that needs converting runs through
-// the rounder normally, while an extended source is pure sign handling.
-// Callers must therefore qualify this with r_src_x.  FMOVE is not exempt
-// at all (its page sets INEX2 "if <fmt> is L, D, or X").
-function op_no_inex;
-	input [6:0] op;
-	begin
-		op_no_inex = (op == 7'h18) || (op == 7'h58) || (op == 7'h5C) ||
-		             (op == 7'h1A) || (op == 7'h5A) || (op == 7'h5E);
-	end
-endfunction
 
 // FSGLMUL and FSGLDIV round the significand to single precision but keep
 // the EXTENDED exponent range: they go through roundSigAndPackFloatx80,
@@ -317,6 +336,45 @@ function [7:0] fp_exception_vector;
 	end
 endfunction
 
+function [15:0] frame_cmd1;
+	input [15:0] cmd;
+	begin
+		// The 040 stores FSQRT's internal command encoding as 5 rather than 4.
+		frame_cmd1 = (cmd[6:0] == 7'h04) ? (cmd | 16'h0001) : cmd;
+	end
+endfunction
+
+function [15:0] frame_cmd3;
+	input [15:0] cmd;
+	begin
+		frame_cmd3 = (cmd & 16'h03C3) |
+		             ((cmd & 16'h0038) >> 1) |
+		             ((cmd & 16'h0004) << 3);
+	end
+endfunction
+
+task capture_unimp;
+	input [15:0] cmd;
+	input [95:0] src;
+	input  [2:0] stag;
+	input [95:0] dst;
+	input  [2:0] dtag;
+	reg   [15:0] c1;
+	begin
+		c1 = frame_cmd1(cmd);
+		fstate_cmd1  <= c1;
+		fstate_cmd3  <= frame_cmd3(c1);
+		fstate_stag  <= stag;
+		fstate_dtag  <= dtag;
+		fstate_flags <= 3'b100; // unimplemented instruction: E1=1, E3=T=0
+		fstate_fpt   <= dst;
+		fstate_et    <= src;
+		fstate_unimp <= 1;
+		fpu_used     <= 1;
+		unimp        <= 1;
+	end
+endtask
+
 integer k;
 
 always @(posedge clk) begin
@@ -325,9 +383,14 @@ always @(posedge clk) begin
 		done <= 0; unimp <= 0; unsupp <= 0; exc_req <= 0; exc_vec <= 0;
 		fpcr <= 0; fpsr <= 0; fpiar <= 0;
 		fpu_used <= 0;
+		fstate_unimp <= 0;
+		fstate_cmd1 <= 0; fstate_cmd3 <= 0;
+		fstate_stag <= 0; fstate_dtag <= 0; fstate_flags <= 0;
+		fstate_fpt <= 0; fstate_et <= 0;
 		dout <= 0;
 		r_fmt <= 0; r_dst <= 0; r_op <= 0; r_din <= 0;
-		r_src_x <= 0; r_ae7 <= 0;
+		r_ae7 <= 0;
+		r_unimp <= 0; r_stag <= 0;
 		a_s <= 0; a_e <= 0; a_m <= 0; a_t <= 0;
 		sh_v <= 0; sh_cnt <= 0;
 		pk_neg <= 0; pk_isz <= 0;
@@ -371,10 +434,34 @@ always @(posedge clk) begin
 		if (fp_reset) begin
 			fpcr <= 0; fpsr <= 0; fpiar <= 0;
 			fpu_used <= 0;
+			fstate_unimp <= 0;
+		end
+		if (fsave_ack) fstate_unimp <= 0;
+		if (frestore_idle) begin
+			fpu_used <= 1;
+			fstate_unimp <= 0;
+		end
+		if (frestore_unimp) begin
+			fpu_used <= 1;
+			fstate_unimp <= 1;
+			fstate_cmd1 <= frestore_cmd1;
+			fstate_cmd3 <= frestore_cmd3;
+			fstate_stag <= frestore_stag;
+			fstate_dtag <= frestore_dtag;
+			fstate_flags <= frestore_flags;
+			fstate_fpt <= frestore_fpt;
+			fstate_et <= frestore_et;
 		end
 
 		case (fst)
 			F_IDLE: if (req) begin
+				if (fstate_unimp) begin
+					// A restored exception frame remains pending until FSAVE.
+					// Re-enter the software package without destroying its state.
+					unimp <= 1;
+					fpu_used <= 1;
+				end
+				else begin : new_fp_command
 				// FPSR exception status is per instruction.  The accrued
 				// exception byte is intentionally retained until software
 				// writes FPSR.  FMOVECR (opclass 010 fmt 7) faults before
@@ -384,11 +471,11 @@ always @(posedge clk) begin
 				if (!(op_class == 3'b010 && src_fmt == 3'd7))
 					fpsr[15:8] <= 8'd0;
 				r_fmt <= src_fmt;
-				r_src_x <= (op_class == 3'b000) || (src_fmt == 3'd2);
 				r_ae7 <= fpsr[7];
 				r_dst <= dst_r;
 				r_op <= opmode;
 				r_din <= din;
+				r_unimp <= 0;
 				if (op_class == 3'b011) begin
 					// FMOVE FPn,<ea>: packed decimal and denormal/unnormal
 					// register contents are unsupported data types
@@ -401,7 +488,36 @@ always @(posedge clk) begin
 						r_op <= 7'h7F;  // internal: store
 					end
 				end
-				else if (!op_in_hw(opmode)) unimp <= 1;
+				else if (op_class == 3'b010 && src_fmt == 3'd7) begin : save_fmovecr
+					capture_unimp({op_class, src_fmt, dst_r, opmode},
+					               96'd0, 3'd1,
+					               {fr_s[dst_r], fr_e[dst_r], 16'd0, fr_m[dst_r]},
+					               frame_tag_x(fr_e[dst_r], fr_m[dst_r]));
+				end
+				else if (!op_in_hw(opmode)) begin : save_unimp_command
+					if (op_class == 3'b000) begin
+						capture_unimp({op_class, src_fmt, dst_r, opmode},
+						               {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
+						               frame_tag_x(fr_e[src_r], fr_m[src_r]),
+						               {fr_s[dst_r], fr_e[dst_r], 16'd0, fr_m[dst_r]},
+						               frame_tag_x(fr_e[dst_r], fr_m[dst_r]));
+					end
+					else if (src_fmt == 3'd3) begin
+						// Packed conversion needs the datatype/FPSP path; retain a
+						// deterministic empty source until that payload is modeled.
+						capture_unimp({op_class, src_fmt, dst_r, opmode},
+						               96'd0, 3'd1,
+						               {fr_s[dst_r], fr_e[dst_r], 16'd0, fr_m[dst_r]},
+						               frame_tag_x(fr_e[dst_r], fr_m[dst_r]));
+					end
+					else begin
+						// Reuse the normal sequential source converter instead of
+						// synthesizing a second wide combinational conversion path.
+						r_unimp <= 1;
+						a_t <= T_NUM;
+						fst <= F_SRC;
+					end
+				end
 				else if (op_class == 3'b000) begin
 					if (unsupported_x(fr_e[src_r], fr_m[src_r])) begin
 						unsupp <= 1;
@@ -414,14 +530,14 @@ always @(posedge clk) begin
 				end
 				else begin
 					// opclass 010, memory source: packed decimal (fmt 3) is
-					// an unsupported data type, FMOVECR (fmt 7) is an
-					// unimplemented instruction
+					// an unsupported data type.  FMOVECR was handled above so
+					// its exception could retain a complete state frame.
 					if (src_fmt == 3'd3) unsupp <= 1;
-					else if (src_fmt == 3'd7) unimp <= 1;
 					else begin
 						a_t <= T_NUM;   // provisional; F_SRC classifies
 						fst <= F_SRC;
 					end
+				end
 				end
 			end
 
@@ -603,6 +719,7 @@ always @(posedge clk) begin
 							a_m <= {(r_din[95] ? (32'd0 - r_din[95:64])
 							                   : r_din[95:64]), 32'd0};
 							a_e <= 17'd16383 + 17'd31;   // integer bit at 63
+							r_stag <= (r_din[95:64] == 32'd0) ? 3'd1 : 3'd0;
 							fst <= F_NORM;
 						end
 						3'd4: begin : cv_w
@@ -611,6 +728,7 @@ always @(posedge clk) begin
 							a_m <= {(r_din[95] ? (16'd0 - r_din[95:80])
 							                   : r_din[95:80]), 48'd0};
 							a_e <= 17'd16383 + 17'd15;
+							r_stag <= (r_din[95:80] == 16'd0) ? 3'd1 : 3'd0;
 							fst <= F_NORM;
 						end
 						3'd6: begin : cv_b
@@ -619,11 +737,13 @@ always @(posedge clk) begin
 							a_m <= {(r_din[95] ? (8'd0 - r_din[95:88])
 							                   : r_din[95:88]), 56'd0};
 							a_e <= 17'd16383 + 17'd7;
+							r_stag <= (r_din[95:88] == 8'd0) ? 3'd1 : 3'd0;
 							fst <= F_NORM;
 						end
 						3'd1: begin : cv_s
 							a_s <= r_din[95];
 							if (r_din[94:87] == 8'hFF) begin
+								r_stag <= (r_din[86:64] != 0) ? 3'd3 : 3'd2;
 								a_t <= (r_din[86:64] != 0) ? T_NAN : T_INF;
 								a_e <= 17'h07FFF;
 								// 68040 extended NaNs are unnormal: preserve the
@@ -638,10 +758,15 @@ always @(posedge clk) begin
 									// denormalized single: an unsupported
 									// data type (vector 55), not an
 									// unimplemented instruction
-									unsupp <= 1;
-									fst <= F_IDLE;
+									if (r_unimp) begin
+										a_t <= T_NUM; a_e <= 17'd16257;
+										a_m <= {1'b0, r_din[86:64], 40'd0};
+										r_stag <= 3'd5; fst <= F_NORM;
+									end
+									else begin unsupp <= 1; fst <= F_IDLE; end
 								end
 								else begin
+									r_stag <= 3'd1;
 									a_t <= T_ZERO;
 									a_m <= 0;
 									a_e <= 0;
@@ -649,6 +774,7 @@ always @(posedge clk) begin
 								end
 							end
 							else begin
+								r_stag <= 3'd0;
 								a_t <= T_NUM;
 								a_e <= {9'd0, r_din[94:87]} + 17'd16256; // -127+16383
 								a_m <= {1'b1, r_din[86:64], 40'd0};
@@ -658,6 +784,7 @@ always @(posedge clk) begin
 						3'd5: begin : cv_d
 							a_s <= r_din[95];
 							if (r_din[94:84] == 11'h7FF) begin
+								r_stag <= (r_din[83:32] != 0) ? 3'd3 : 3'd2;
 								a_t <= (r_din[83:32] != 0) ? T_NAN : T_INF;
 								a_e <= 17'h07FFF;
 								// Match the 68040 NaN encoding: bit 63 remains clear;
@@ -670,10 +797,15 @@ always @(posedge clk) begin
 								if (r_din[83:32] != 0) begin
 									// denormalized double: likewise the
 									// data type trap, vector 55
-									unsupp <= 1;
-									fst <= F_IDLE;
+									if (r_unimp) begin
+										a_t <= T_NUM; a_e <= 17'd15361;
+										a_m <= {1'b0, r_din[83:32], 11'd0};
+										r_stag <= 3'd5; fst <= F_NORM;
+									end
+									else begin unsupp <= 1; fst <= F_IDLE; end
 								end
 								else begin
+									r_stag <= 3'd1;
 									a_t <= T_ZERO;
 									a_m <= 0;
 									a_e <= 0;
@@ -681,6 +813,7 @@ always @(posedge clk) begin
 								end
 							end
 							else begin
+								r_stag <= 3'd0;
 								a_t <= T_NUM;
 								a_e <= {6'd0, r_din[94:84]} + 17'd15360; // -1023+16383
 								a_m <= {1'b1, r_din[83:32], 11'd0};
@@ -689,10 +822,15 @@ always @(posedge clk) begin
 						end
 						default: begin : cv_x
 							if (unsupported_x(r_din[94:80], r_din[63:0])) begin
-								unsupp <= 1;
-								fst <= F_IDLE;
+								if (r_unimp) begin
+									{a_s, a_e, a_m, a_t} <=
+										unpack_x(r_din[95], r_din[94:80], r_din[63:0]);
+									r_stag <= 3'd4; fst <= F_NORM;
+								end
+								else begin unsupp <= 1; fst <= F_IDLE; end
 							end
 							else begin
+								r_stag <= frame_tag_x(r_din[94:80], r_din[63:0]);
 								{a_s, a_e, a_m, a_t} <=
 									unpack_x(r_din[95], r_din[94:80], r_din[63:0]);
 								fst <= F_NORM;
@@ -718,12 +856,20 @@ always @(posedge clk) begin
 			end
 
 			F_EXEC: begin
+				if (r_unimp) begin
+					capture_unimp({3'b010, r_fmt, r_dst, r_op},
+					               {a_s, a_e[14:0], 16'd0, a_m}, r_stag,
+					               {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]},
+					               frame_tag_x(fr_e[r_dst], fr_m[r_dst]));
+					r_unimp <= 0;
+					fst <= F_IDLE;
+				end
 				// FCMP evaluates its destination without passing through
 				// F_BIN, so its unsupported-datatype check lives here -- and
 				// it must precede the SNaN bookkeeping: the datatype fault
 				// is taken before the arithmetic ever inspects a NaN, so the
 				// status byte stays clean.
-				if (r_op == 7'h38 &&
+				else if (r_op == 7'h38 &&
 				    unsupported_x(fr_e[r_dst], fr_m[r_dst])) begin
 					unsupp <= 1;
 					fst <= F_IDLE;
@@ -1303,7 +1449,13 @@ always @(posedge clk) begin
 						end
 					end
 					else begin
-						if (inx && !(op_no_inex(r_op) && r_src_x)) begin
+						// Blanket INEX: FABS/FNEG round through the same
+						// path as every op and report discarded bits even
+						// for extended sources.  Twice hardware-adjudicated:
+						// the 2026-08-07 FABS.X capture (FPSR $0208) and the
+						// 2026-08-09 rerun on the revert-built bitstream,
+						// which failed cputest exactly here.
+						if (inx) begin
 							fpsr[9] <= 1;
 							fpsr[3] <= 1;
 						end

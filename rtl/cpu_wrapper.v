@@ -28,7 +28,8 @@ module cpu_wrapper
 #(
 	// A missing target must eventually produce a 68040 bus error, but chip
 	// RAM can legitimately wait thousands of clk_sys cycles for a DMA slot.
-	// 2^20 clocks is about 9 ms at 114 MHz and comfortably separates the two.
+	// cpu_wrapper.clk is clk_sys (28.6875 MHz), so 2^20 clocks is about 36.6 ms
+	// and comfortably separates the two.
 	parameter BUS_TIMEOUT_BITS = 20
 )
 (
@@ -71,6 +72,11 @@ module cpu_wrapper
 	output            ramlds,
 	output            ramuds,
 	output            ramshared,
+	// One-CPU-clock strobe: the CPU sampled ramready high for an active
+	// RAM request on this edge, i.e. the level acknowledgement has been
+	// consumed.  ram_cs_guard keys its deselect on this instead of
+	// guessing the consumption point from a clock-phase marker.
+	output reg        ramconsumed,
 
 	// Dedicated AP040 physical table-walk channel.  Addresses are already
 	// encoded for the SDRAM/DDR3 controllers; walker_mem_ddr selects the bank.
@@ -205,6 +211,13 @@ reg         cache_maint_d;
 reg         cache_clear_toggle;
 wire        bus_berr;
 wire        bus_complete = chipready | ramready | fastchip_ready;
+
+// Level-acknowledge consumption strobe for ram_cs_guard: exactly the edge
+// where the qualified clock advances a waiting RAM transaction.
+always @(posedge clk) begin
+	if (~reset) ramconsumed <= 0;
+	else        ramconsumed <= cpu_req & ramsel & ramready;
+end
 
 ap040_tg68k_compat #(
 	// internal caches off: cpu_cache_new in the RAM controllers already

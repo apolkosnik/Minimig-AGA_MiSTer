@@ -125,6 +125,10 @@ reg  [16:0] atc_tag  [0:127];   // {super, LA page tag}
 reg  [19:0] atc_pa   [0:127];   // PA[31:12] (bit 0 unused with 8K pages)
 reg   [7:0] atc_attr [0:127];   // {G, U1, U0, S, CM1, CM0, M, W}
 reg   [1:0] atc_rr   [0:31];    // round robin per {bank, set}
+// ATC entries survive RSTI.  Clear them only at FPGA configuration/cold
+// start; the initialized flag makes later nreset assertions architectural
+// warm resets.
+reg         atc_reset_seen = 1'b0;
 
 wire        a_super = c_fc[2];
 wire  [3:0] a_set   = tc_p ? c_addr[16:13] : c_addr[15:12];
@@ -271,7 +275,12 @@ assign walker_we   = w_req_wr;
 assign walker_addr = w_req_addr;
 assign walker_wdat = w_req_wdat;
 
-assign c_ack   = pass_ok ? m_ack : 1'b0;
+// A downstream ack can only be generated for a request which m_req already
+// admitted.  Re-evaluating pass_ok on the response creates a needless
+// mem_addr -> ATC lookup -> core-ack critical path (over 50 logic levels in
+// TimeQuest) and cannot reject any legitimate stale response because the
+// core holds the request stable until ack.
+assign c_ack   = m_ack;
 assign c_rdata = m_rdata;
 
 assign phys_addr     = pa_out;
@@ -318,8 +327,11 @@ always @(posedge clk) begin
 		c_flt <= 0;
 		pt_done <= 0; pt_mmusr <= 0;
 		pf_done <= 0;
-		for (k = 0; k < 128; k = k + 1) atc_v[k] <= 0;
-		for (k = 0; k < 32; k = k + 1) atc_rr[k] <= 0;
+		if (!atc_reset_seen) begin
+			for (k = 0; k < 128; k = k + 1) atc_v[k] <= 0;
+			for (k = 0; k < 32; k = k + 1) atc_rr[k] <= 0;
+		end
+		atc_reset_seen <= 1;
 	end
 	else if (ce) begin
 		c_flt <= 0;

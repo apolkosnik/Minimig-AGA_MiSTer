@@ -144,11 +144,15 @@ tloop:
 	move.l	($E000).l,d0
 	chkl	d0,$BBBB2222,36		; PTEST-installed identity mapping is stale
 
-	; every write to TC flushes both ATCs, even if its value is unchanged
+	; MMU register writes do not flush either ATC.  An unchanged TC write
+	; must therefore leave the PTEST-installed mapping stale.
 	move.l	#$8000,d0
 	movec	d0,tc
 	move.l	($E000).l,d0
-	chkl	d0,$CAFE0505,37		; descriptor remap visible without PFLUSH
+	chkl	d0,$BBBB2222,37		; TC write did not flush the ATC
+	pflusha
+	move.l	($E000).l,d0
+	chkl	d0,$CAFE0505,60		; explicit PFLUSH exposes the remap
 	move.l	#$0000E003,($4438).l
 	pflusha
 

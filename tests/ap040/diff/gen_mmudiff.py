@@ -23,10 +23,11 @@ the compared window:
 Writes are never generated against a write-protected page and every mapping
 is resident, so no access error is taken: fault frames are format $7 on
 AP040 and a different shape on qemu, and are covered by t_mmu.s instead.
-A PFLUSHA follows every TC write because qemu does not flush its internal
-TLB when translation is enabled or disabled (real 040 hardware does), and
-the M history bit is cleared in the evidence copies because qemu does not
-maintain it at all (AP040 does, as 040 hardware must; t_mmu.s asserts it).
+A PFLUSHA follows every TC write because neither real 040 hardware nor AP040
+implicitly flushes the ATCs on an MMU-register write; software must request
+the flush when translations may have changed.  The M history bit is cleared
+in the evidence copies because qemu does not maintain it at all (AP040 does,
+as 040 hardware must; t_mmu.s asserts it).
 """
 import random
 import sys

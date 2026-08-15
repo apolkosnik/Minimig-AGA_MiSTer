@@ -419,14 +419,16 @@ bcc_nt:
 bcc_nt_cont:
 	chkcnt	cnt_addr,2,88
 
-	; RTE to an odd user-mode PC with tracing enabled stacks an address-error
-	; SR with S set on the 040 (unlike earlier family members).
+	; RTE to an odd user-mode PC with tracing enabled stacks the restored
+	; user/T1 SR exactly.  The handler verifies it before forcing a safe
+	; supervisor continuation.
 	lea	rte_odd_cont(pc),a0
 	move.l	a0,(resume).l
 	move.l	#$400,(exp_addr).l
-	lea	rte_odd(pc),a0
+	lea	rte_odd-2(pc),a0	; 040 frame identifies pre-opcode word
 	move.l	a0,(exp_pc).l
-	move.w	#1,(addr_sflag).l
+	move.w	#1,(exp_srv).l
+	move.w	#$8000,(exp_sr).l
 	move.w	#$0000,-(sp)
 	move.l	#$00000401,-(sp)
 	move.w	#$8000,-(sp)	; user + T1
@@ -595,6 +597,24 @@ fetch_irq_guarded:
 	chkcnt	cnt_ill,10,80
 	btst	#0,bittgt(pc)		; BTST may read program space
 	chkcnt	cnt_ill,10,81
+	dc.w	$017A,$0000,$4E71	; bchg d0,(d16,pc)
+	chkcnt	cnt_ill,11,111
+	dc.w	$01BA,$0000,$4E71	; bclr d0,(d16,pc)
+	chkcnt	cnt_ill,12,112
+	dc.w	$01FA,$0000,$4E71	; bset d0,(d16,pc)
+	chkcnt	cnt_ill,13,113
+	dc.w	$813A,$4E71		; or.b  d0,(d16,pc)
+	chkcnt	cnt_ill,14,115
+	dc.w	$913A,$4E71		; sub.b d0,(d16,pc)
+	chkcnt	cnt_ill,15,116
+	dc.w	$B13A,$4E71		; eor.b d0,(d16,pc)
+	chkcnt	cnt_ill,16,117
+	dc.w	$C13A,$4E71		; and.b d0,(d16,pc)
+	chkcnt	cnt_ill,17,118
+	dc.w	$D13A,$4E71		; add.b d0,(d16,pc)
+	chkcnt	cnt_ill,18,119
+	subq.w	#8,(cnt_ill).l
+					; keep the legacy counter sequence below
 	bra.s	bitok
 bittgt:
 	dc.b	0,0
@@ -605,10 +625,48 @@ bitok:
 	chkcnt	cnt_ill,11,83
 	dc.w	$4AFA,$4E71		; tas (d16,pc)
 	chkcnt	cnt_ill,12,84
+	dc.w	$403A,$4E71		; negx.b (d16,pc)
+	chkcnt	cnt_ill,13,106
+	dc.w	$443A,$4E71		; neg.b (d16,pc)
+	chkcnt	cnt_ill,14,107
+	dc.w	$463A,$4E71		; not.b (d16,pc)
+	chkcnt	cnt_ill,15,108
+	dc.w	$483A,$4E71		; nbcd (d16,pc)
+	chkcnt	cnt_ill,16,109
+	dc.w	$40FA,$4E71		; move sr,(d16,pc)
+	chkcnt	cnt_ill,17,110
+	dc.w	$42FA,$4E71		; move ccr,(d16,pc)
+	chkcnt	cnt_ill,18,111
+
+; Bit 8 is fixed clear in the unary/MOVEM subfamilies below.  The reserved
+; aliases must not fall through by looking only at the size bits.
+	dc.w	$4140			; reserved alias of negx.w d0
+	chkcnt	cnt_ill,19,120
+	dc.w	$4340			; reserved alias of clr.w d0
+	chkcnt	cnt_ill,20,121
+	dc.w	$4540			; reserved alias of neg.w d0
+	chkcnt	cnt_ill,21,122
+	dc.w	$4740			; reserved alias of not.w d0
+	chkcnt	cnt_ill,22,123
+	dc.w	$4908,$4E71,$4E71	; must not decode as link.l a0,#imm32
+	chkcnt	cnt_ill,23,124
+	dc.w	$4B40			; reserved alias of tst.w d0
+	chkcnt	cnt_ill,24,125
+	dc.w	$4D40,$4E71		; must not decode as divl + extension
+	chkcnt	cnt_ill,25,126
+
+; Reserved mode-7 source registers and PC-relative quick destinations are
+; encoding errors, including when a privileged SR operation is attempted.
+	dc.w	$46FE			; move <reserved>,sr
+	chkcnt	cnt_ill,26,127
+	dc.w	$42FE			; move <reserved>,ccr
+	chkcnt	cnt_ill,27,128
+	dc.w	$503A,$4E71		; addq.b #8,(d16,pc)
+	chkcnt	cnt_ill,28,129
 	; (Scc with a PC-relative encoding does not exist: mode 111 reg 010,
 	; 011 and 100 are TRAPcc on the 68020 and later, and are legal.)
 	tst.l	tsttgt(pc)		; TST may read program space on 020+
-	chkcnt	cnt_ill,12,85
+	chkcnt	cnt_ill,28,85
 	bra.s	tstok
 tsttgt:
 	dc.l	0
@@ -617,7 +675,7 @@ tstok:
 ; CMPI against program space is legal on the 68040 and must not trap
 	moveq	#0,d0
 	cmpi.b	#0,cmpitgt(pc)
-	chkcnt	cnt_ill,12,77
+	chkcnt	cnt_ill,28,77
 	bra.s	cmpiok
 cmpitgt:
 	dc.b	0,0
@@ -646,36 +704,36 @@ cmpiok:
 ;=========== WinUAE-oracle exception/stack-frame battery (2026-08-07) ======
 	clr.w	(exp_srv).l
 
-; RTE to an odd PC: the machine takes the restored SR, but the address
-; error frame stacks the SR from BEFORE the RTE (WinUAE 68040bug quirk,
-; cputest 68040_ae RTE).
+; RTE to an odd PC commits the restored SR before taking the address error;
+; the frame therefore carries that restored image (hardware cputest
+; 68040_ae RTE/0001).
 	lea	ex_t1_cont(pc),a0
 	move.l	a0,(resume).l
 	move.l	#$400,(exp_addr).l
-	lea	ex_t1_rte(pc),a0
+	lea	ex_t1_rte-2(pc),a0	; 040 frame identifies pre-opcode word
 	move.l	a0,(exp_pc).l
 	move.w	#$0000,-(sp)	; format $0
 	move.l	#$00000401,-(sp)	; odd return PC
 	move.w	#$0013,-(sp)	; restored SR: user, CCR=$13
 	move.w	#1,(exp_srv).l
-	move.w	sr,(exp_sr).l	; the pre-RTE SR is what must be stacked
+	move.w	#$0013,(exp_sr).l
 ex_t1_rte:
 	rte
 ex_t1_cont:
 	chkcnt	cnt_addr,5,104
 
-; RTR to an odd address: same quirk, and the frame SR carries the OLD
-; condition codes even though the popped CCR has taken effect.
+; RTR to an odd address likewise commits the popped CCR before taking the
+; address error.  The upper supervisor bits remain unchanged.
 	lea	ex_t2_cont(pc),a0
 	move.l	a0,(resume).l
 	move.l	#$400,(exp_addr).l
-	lea	ex_t2_rtr(pc),a0
+	lea	ex_t2_rtr-2(pc),a0	; same pre-opcode PC image as RTE
 	move.l	a0,(exp_pc).l
 	pea	($00000401).l	; odd return address
 	move.w	#$0000,-(sp)	; popped CCR = 0
 	move.w	#$1F,ccr	; old CCR: all set
 	move.w	#1,(exp_srv).l
-	move.w	sr,(exp_sr).l
+	move.w	#$2000,(exp_sr).l	; supervisor + popped CCR=0
 ex_t2_rtr:
 	rtr
 ex_t2_cont:
@@ -740,6 +798,87 @@ ex_t5a_ok:
 	beq.s	ex_t5b_ok
 	failt	110
 ex_t5b_ok:
+
+; BSR and JSR to an ODD target fault BEFORE the return-address push:
+; A7 must be untouched and no return address stored (hardware cputest
+; 68040_odd_stk BSR.B on build 50: frame matched but A7 was pushed).
+; Frame: format $2 vector 3, PC = the branch instruction (restart),
+; address field = target with A0 cleared.
+	lea	ex_t6_cont(pc),a0
+	move.l	a0,(resume).l
+	lea	ex_t6_op(pc),a0
+	move.l	a0,(exp_pc).l
+	lea	2(a0),a0
+	move.l	a0,(exp_addr).l	; (op+3) & ~1 = op+2
+	movea.l	sp,a4
+ex_t6_op:
+	dc.w	$6101		; bsr.b to ex_t6_op+3 (odd)
+ex_t6_cont:
+	chkcnt	cnt_addr,8,111
+	cmpa.l	sp,a4
+	beq.s	ex_t6_ok
+	failt	112		; A7 changed: the push must not happen
+ex_t6_ok:
+
+	lea	ex_t7_cont(pc),a0
+	move.l	a0,(resume).l
+	lea	ex_t7_op(pc),a0
+	move.l	a0,(exp_pc).l
+	lea	6(a0),a0
+	move.l	a0,(exp_addr).l	; target op+2+5 = op+7; field = op+6
+	movea.l	sp,a4
+ex_t7_op:
+	dc.w	$6100,$0005	; bsr.w: base op+2, disp 5 -> odd target
+ex_t7_cont:
+	chkcnt	cnt_addr,9,113
+	cmpa.l	sp,a4
+	beq.s	ex_t7_ok
+	failt	114
+ex_t7_ok:
+
+	lea	ex_t8_cont(pc),a0
+	move.l	a0,(resume).l
+	lea	ex_t8_op(pc),a0
+	move.l	a0,(exp_pc).l
+	lea	ex_t8_tgt(pc),a0
+	addq.l	#1,a0		; odd JSR target
+	move.l	a0,d0
+	bclr	#0,d0
+	move.l	d0,(exp_addr).l
+	movea.l	sp,a4
+ex_t8_op:
+	jsr	(a0)
+ex_t8_cont:
+	chkcnt	cnt_addr,10,115
+	cmpa.l	sp,a4
+	beq.s	ex_t8_ok
+	failt	116
+ex_t8_ok:
+ex_t8_tgt:
+
+; DBcc checks the branch-target parity BEFORE the condition on the 040:
+; DBT (condition always true, loop exits, no branch) to an odd label
+; still takes the address error, with D-reg and A7 untouched.
+	lea	ex_t9_cont(pc),a0
+	move.l	a0,(resume).l
+	lea	ex_t9_op(pc),a0
+	move.l	a0,(exp_pc).l
+	lea	6(a0),a0
+	move.l	a0,(exp_addr).l	; target = op+2+5 = op+7; field = op+6
+	moveq	#3,d3
+	movea.l	sp,a4
+ex_t9_op:
+	dc.w	$50CB,$0005	; dbt d3,ex_t9_op+7 (odd target)
+ex_t9_cont:
+	chkcnt	cnt_addr,11,117
+	cmpa.l	sp,a4
+	beq.s	ex_t9_sp
+	failt	118
+ex_t9_sp:
+	cmp.l	#3,d3		; DBT: counter must be untouched
+	beq.s	ex_t9_ok
+	failt	119
+ex_t9_ok:
 
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700
@@ -901,9 +1040,11 @@ h_addr:
 	tst.w	(exp_srv).l
 	beq.s	haddr_noexact
 	move.w	(sp),d6		; exact stacked-SR compare (RTE/RTR odd-PC
-	cmp.w	(exp_sr).l,d6	; quirk: pre-instruction SR, not restored)
+	cmp.w	(exp_sr).l,d6	; commits restored SR / popped CCR first)
 	bne	hfail
 	clr.w	(exp_srv).l
+	andi.w	#$3FFF,(sp)	; resume the test without the restored trace bits
+	ori.w	#$2000,(sp)	; and on the supervisor stack/context
 	bra.s	haddr_sr_ok
 haddr_noexact:
 	tst.w	(addr_sflag).l

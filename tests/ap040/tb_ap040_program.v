@@ -100,6 +100,7 @@ ap040_tg68k_compat dut
 );
 
 wire [31:0] dbg_pc = debug_status[31:0];
+
 wire [15:0] dbg_ir = debug_status[63:48];
 reg  [7:0]  prev_core_state;
 always @(posedge clk) if (dut.core.ce) prev_core_state <= dut.core.state;
@@ -110,11 +111,20 @@ always @(posedge clk) if (dut.core.ce) prev_core_state <= dut.core.state;
 
 reg [15:0] mem [0:32767];
 
-assign data_in = mem[addr_out[15:1]];
+// Phase 2 models the cpu_cache_new handshake: the acknowledge is a LEVEL
+// that stays high -- with the data captured when it rose -- until the bus
+// is sampled idle (cpu_ack clears only on !cpu_cs).  A request issued
+// with no sampled idle gap is therefore served the PREVIOUS data, which
+// is the hardware failure mode behind the cputest FADD.P ([]) stale
+// pointer word and the FABS.X ([0]) shifted operand window.
+reg        lvl_hold;
+reg [15:0] lvl_data;
 
 integer errors;
 integer phase;
 integer result;          // 0 running, 1 pass, 2 fail
+
+assign data_in = (phase == 2 && lvl_hold) ? lvl_data : mem[addr_out[15:1]];
 reg [1023:0] prog_file;
 reg [1023:0] dump_file;
 
@@ -139,8 +149,10 @@ integer   walker_lat_idx;
 integer   walker_cycles;
 
 always @(posedge clk) begin
-	mem_ready <= 0;
+	if (phase != 2) mem_ready <= 0;
 	if (!nreset) begin
+		mem_ready <= 0;
+		lvl_hold <= 0;
 		lat_cnt <= latency(phase, 0);
 		lat_idx <= 1;
 		berr_armed <= 1;
@@ -151,6 +163,27 @@ always @(posedge clk) begin
 		// One physical bus error per phase.  The restarted access succeeds,
 		// proving that the adapter released the failed sub-cycle.
 		berr_armed <= 0;
+		mem_ready <= 0;
+		lvl_hold <= 0;
+	end
+	else if (phase == 2) begin
+		// level acknowledge: drops only when the bus is sampled idle
+		if (busstate == 2'b01) begin
+			mem_ready <= 0;
+			lvl_hold <= 0;
+		end
+		else if (!lvl_hold) begin
+			if (lat_cnt == 0) begin
+				mem_ready <= 1;
+				lvl_hold <= 1;
+				lvl_data <= mem[addr_out[15:1]];
+				lat_cnt <= latency(phase, lat_idx);
+				lat_idx <= lat_idx + 1;
+			end
+			else lat_cnt <= lat_cnt - 1'd1;
+		end
+		// else: hold acknowledge and captured data (stale if the CPU
+		// started a new access without an idle gap)
 	end
 	else if (irq_fetch_stall != 0 && busstate != 2'b01 && !mem_ready) begin
 		// Keep the first handler refill outstanding while IPL synchronizes.
@@ -306,8 +339,9 @@ always @(posedge clk) begin
 				if (data_write == 16'h600D) result = 1;
 				else begin
 					errors = errors + 1;
-					$display("FAIL: program reports failure, test %0d (phase %0d)",
-					         mem[16'hF100 >> 1], phase);
+					$display("FAIL: program reports failure, test %0d (phase %0d, pc=%h, ill=%0d, addr=%0d)",
+					         mem[16'hF100 >> 1], phase, dbg_pc,
+					         mem[16'h3602 >> 1], mem[16'h361E >> 1]);
 					result = 2;
 				end
 			end
@@ -400,6 +434,7 @@ initial begin
 
 	run_phase(0);
 	run_phase(1);
+	run_phase(2);
 
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else             $display("TEST FAILED with %0d errors", errors);

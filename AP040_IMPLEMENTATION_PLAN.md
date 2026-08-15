@@ -634,3 +634,84 @@ The first AP040 patch should contain only:
 
 Do not start by porting the existing 030 MMU.  Start with a clean AP040 shell,
 prove the wrapper boundary, and then add architectural features behind tests.
+
+## 19. Performance Program: Pipelining, Multi-Issue (added 2026-08-09)
+
+Requested: pipelining + superscalar/multi-issue.  This section stages it so
+each step keeps the cputest-proven semantics testable.  The current core is a
+sequential multi-cycle FSM; every stage below is a re-architecture step, not
+a bolt-on, and the ordering is chosen by measured ROI per unit of risk.
+
+### P0. Prerequisites (gating everything)
+
+- The chip-RAM ghost-transaction fix (ram_cs_guard) verified on hardware with
+  a timing-clean fit.  No pipeline work while the memory fabric is unproven:
+  every new failure would be unattributable.
+- The tree committed.  All performance work happens behind fresh commits.
+- RESURRECT THE CPUTEST DAT-REPLAY SIM HARNESS (shelved 2026-08-02, resume
+  notes in the session memory file).  Photographed gurus are not a viable
+  regression loop for pipeline hazards; replaying the full cputest datasets
+  against the verilated/iverilog core in CI is the only way a pipelined core
+  keeps 040 semantics.  This is the single most important item in the section.
+
+### P1. Enable the internal I/D caches (biggest real-world win, least risk)
+
+AP040_ENABLE_CACHE is 0 in the Minimig build; ap040_cache.v exists and the
+Minimig fabric relies on cpu_cache_new in the RAM controllers instead.  An
+on-die cache removes the ~10-30 cycle external round trip per access, which
+dominates real software far more than CPI does.  Work: enable, size to fit
+M10K budget, wire CINV/CPUSH (already decoded), snoop/inhibit correctly
+(chip RAM + MMIO must stay uncached via TTR/MMU CM bits and the existing
+cache_inhibit plumbing), then full regression + cputest replay.  Expected
+gain: large on fast-RAM working sets; zero architectural risk to exception
+semantics.
+
+### P2. Single-clock-domain migration (28MHz -> clk_114 + 4:1 clock enable)
+
+Move cpu_wrapper + core onto clk_114 with a ce, multicycle-4 constraints on
+ce-qualified paths.  No speed change yet; eliminates the entire CDC/phase
+contract class (cyc kill, ph1/ph2 catching, level-ack consumption) that
+produced the ghost-transaction bug.  After P2, sim and silicon see identical
+cycle relationships, which P3+ depend on for debuggability.
+
+### P3. Overlapped sequencer (in-FSM pipelining, ~1.5-2x CPI on reg ops)
+
+The core already has three semi-independent engines: prefetch queue, EA/
+memory unit, exec/writeback.  Decouple them so instruction N+1 fetch/decode/
+EA-calc overlaps instruction N execute/WB, with a small scoreboard for
+register and CCR hazards.  Keep the restart exception model: an instruction
+still commits atomically at WB, faults still restart it, format $7 semantics
+unchanged.  This is the last stage that preserves the current verification
+story mostly intact.
+
+### P4. True pipelined IU (040-style six stage)
+
+IF / ID / EA-calc / EA-fetch / EX / WB with a store buffer.  At this point
+the format $7 writeback slots (WB1-WB3) become REAL microarchitecture (they
+exist on silicon because the 040 pipelines stores), interrupt/trace sampling
+points move, and precise-exception logic replaces the restart shortcut in
+places.  Months of work; only viable with the dat-replay harness as a nightly
+gate.  Frequency step to ce=2:1 (56.75MHz) belongs here, after the known
+>17.6ns cones (exc_addr capture, MMU translate->fault, F_ROUND) are split.
+
+### P5. Superscalar / dual issue
+
+This is 68060-class microarchitecture (pOEP/sOEP pairing rules, dual EA
+ports or issue restrictions, register scoreboarding across two lanes) -- the
+real 68040 is single-issue, so P5 makes the core behave like a faster-than-
+040 hybrid.  Ship it as an optional turbo mode: cputest is generated for a
+68040 model, so a dual-issue core must still present 040-visible semantics
+(instruction boundaries for traces/interrupts, serialization on CCR-visible
+pairs).  Pairing legality tables come from the 68060 UM; the win on in-order
+68k code is typically ~1.3-1.6x CPI, i.e. LESS than P1 or the P4 clock step.
+Do it last.
+
+### Expected cumulative effect (rough, workload-dependent)
+
+- P1 caches: 1.5-3x on fast-RAM code (chip-bus code unchanged)
+- P3 overlap: 1.3-1.8x CPI on top
+- P4 + 56MHz: up to ~2x more on compute kernels
+- P5 dual issue: ~1.3-1.5x on top, compute-bound only
+Chip-RAM-bound code (most OCS-era software) is paced by the 7MHz bus slots
+and gains almost nothing from any of this; the wins are for fast-RAM
+system/FPU/RTG workloads.

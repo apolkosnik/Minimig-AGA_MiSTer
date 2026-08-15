@@ -1,6 +1,112 @@
 AP040 differential testing against QEMU
 =======================================
 
+WinUAE cputest v20 corpus replay
+--------------------------------
+
+`../run_cputest.py` is the corpus-scale RTL regression harness.  It accepts
+the downloaded `data040.zip`, an extraction root, or its `data/` directory.
+The archive is intentionally not checked into this repository.
+
+Quick representative gate (64 records from each of integer, trace, FPU, IRQ,
+address-error and deliberately odd-vector slices):
+
+    ../run_cputest.py /path/to/data040.zip
+
+The native-code Verilator backend is recommended for corpus runs.  It builds
+the complete RTL once and then executes the same APR2 slice jobs roughly
+25--30 times faster than Icarus on this host:
+
+    ../run_cputest.py /path/to/data040.zip --simulator verilator
+    ../run_cputest.py /path/to/data040.zip --simulator verilator --compile-only
+
+Full corpus, deterministically divided between four workers or machines:
+
+    ../run_cputest.py /path/to/data040.zip --simulator verilator \
+        --full --shard 0/4 --jobs 2 --resume
+
+Focused reproduction and full codec/oracle audits:
+
+    ../run_cputest.py /path/to/data --full --group BasicFPU \
+        --instruction 'FABS.*' --slice 0001 --round-limit 2000
+    ../run_cputest.py /path/to/data040.zip --audit
+    ../run_cputest.py /path/to/data040.zip --audit --semantic-audit
+
+The supplied archive is `DATA_VERSION 20`: 587 instruction headers, 1,911
+compressed data slices, 1,917,739 cases and 31,522,118 execution rounds.
+Both structural and semantic full-corpus audits complete without a decoder
+desynchronization.  Newer WinUAE sources use version 24 and are not format
+authority for this archive; the decoder follows `main.c` at `f0cf9536~1`.
+
+Each compressed slice has a 16-byte version/start-time/flags/spare envelope.
+The old prototype incorrectly treated that envelope as test records; APR2
+validates and removes it before decoding.  APR2 jobs are deliberately made
+one slice at a time, so a 31.5-million-round run is resumable and never
+requires a multi-gigabyte expanded file.  `--shard INDEX/COUNT` assigns whole
+slices, preserving all delta and memory history within a slice.
+
+The RTL driver loads the corpus `lmem.dat` and `tmem.dat`, without overwriting
+address zero or its operands.  Reset and VBR use synthetic read overlays.  At
+the stalled first test fetch it injects D0-D7/A0-A6, USP/ISP/MSP, SR and trace
+latches, all FP registers, FPCR/FPSR/FPIAR, and neutral CPU/MMU controls; it
+also clears the warm-reset-persistent ATCs.  It drives the Amiga INTREQ-to-IPL
+mapping, captures architectural state at `S_EXC0` before exception stacking
+changes A7/SR, compares expected memory writes and restores their old values,
+and applies the stream's post-round and end-of-test memory actions in order.
+Vector 9 contains a real RTE so standalone and handler-stacked trace cases
+continue to the primary result.  A nonzero header `exception_vectors` value
+is returned for vectors 4 and above, reproducing the ODD_EXC/ODD_IRQ behavior.
+
+The v20 native checker constructs the stacked exception PC from the CPU value
+it just captured, rather than from corpus oracle bytes.  APR2 preserves that
+contract (frame PC bytes are masked), while normal terminator completion has
+an independent exact stacked-PC check.  Cycle counts are not compared: the
+040 corpus is functional data and this testbench intentionally uses a simple
+one-cycle memory target.  Physical BERR/MMU behavior remains covered by the
+directed AP040 exception and MMU suites.
+
+One v20 corpus defect remains observable in memory-source tails.  The
+generator resets its access-history indices for each candidate without
+undoing setup writes; if every CCR round of that candidate is then discarded,
+the memory mutation survives in the generator but no `CT_MEMWRITE` is emitted.
+The native v20 runner cannot reproduce that hidden transition either because
+it calls `restoreahist()` after each serialized test.  For example,
+`BasicFPU/FMOVE.P/0001` test 389 expects an FPEA calculated from `$00080006`,
+but the last serialized value is `$80080006` and the native-cleanup value is
+`$00080004`.  APR2 follows the serialized generator state (the model which
+matches more of the result oracles) and reports such cases instead of masking
+the effective-address bytes.  They must not be treated as evidence for an RTL
+EA change unless the operand memory is independently reconstructed.
+
+The 2026-08-12 full 1,911-slice Verilator run passes 1,875 slices with no
+timeouts or harness errors.  All 1,563 non-BasicFPU/PackedFPU slices pass.
+The FPU groups pass 312/348 (BasicFPU 288/320 and PackedFPU 24/28).  The first
+mismatch in every one of the 36 failing slices is a memory-EA FPU instruction:
+32 opclass-010 loads and four opclass-011 stores.  There is no first failure
+in a register-source arithmetic operation.  This classification is
+diagnostic, not an automatic waiver: `tb_dat_replay` prints `op=` and the
+dispatch-time `ea=`, and `summary.json` records `first_mismatch_opcode`,
+`first_mismatch_ea`, `first_mismatch_fpu_opclass`, and
+`first_mismatch_memory_ea`.  Failed slices still fail the run so a real
+memory-EA RTL regression cannot be hidden by the known corpus limitation.
+
+Two independently reconstructed load cases demonstrate the omitted state.
+`BasicFPU/FADD.X/0001` test 182 reads twelve zero bytes from the serialized EA
+`$0000BFFF`, although its oracle expects the sticky result and status from a
+nonzero tiny addend.  `BasicFPU/FNEG.X/0003` test 203 reads low mantissa
+`$2FD2B162` and AP040 preserves it, while the oracle expects `$2FD20000` from
+an unrecorded previous rounding/write.  Therefore changing FPU rounding or
+underflow behavior to satisfy those records would make self-contained inputs
+incorrect.
+
+Every run writes `summary.json`, JUnit `junit.xml`, and one log per slice below
+`--work` (default `build/cputest`).  A simulator's zero exit status is not
+accepted as success unless its log also contains `ALL TESTS PASSED`.  Verilator
+artifacts and reports live below `build/cputest/verilator`, independent of the
+Icarus files.  Each passing resume log has a sidecar identity covering the RTL
+binary, simulator, decoder, corpus slice, memory images and record limit, so a
+smoke result cannot accidentally satisfy a full-corpus `--resume` run.
+
 run_diff.sh generates random integer programs (gen_diff.py), runs the
 same flat binary on the AP040 (verilated tb_ap040_program) and on
 qemu-system-m68k -M virt -cpu m68040, and compares the $3000-$3FFF
@@ -85,19 +191,19 @@ Writes are never generated against a write-protected page and all mappings
 are resident, so no access error is taken: fault frames are format $7 on
 AP040 and a different shape on qemu, and t_mmu.s covers them instead.
 
-qemu 11 deviations found 2026-08-04, both worked around in the generator:
+qemu 11 deviation found 2026-08-04, worked around in the generator:
 
-  1. qemu does not flush its internal TLB when TC is written, so stale
-     translations survive enabling *and disabling* the MMU.  Real 040
-     hardware flushes both ATCs on a TC write (t_mmu.s test 37 asserts
-     this on AP040), so the generator issues PFLUSHA after every TC write
-     to keep the comparison meaningful.
-  2. qemu never sets the M (modified) history bit in a page descriptor.
+  1. qemu never sets the M (modified) history bit in a page descriptor.
      AP040 sets it on the first write to a page, as the 68040 must, which
      also shows up in MMUSR; t_mmu.s tests 5-7 cover it.  The generator
      clears the M bit in the evidence copies so the rest still compares.
 
-With those two accounted for, AP040 and qemu agree exactly on translation,
+The generator issues PFLUSHA after every TC write because the MC68040 does
+not invalidate either ATC when an MMU register is read or written.  Software
+must flush explicitly when the new register value can change translations;
+t_mmu.s tests 36, 37, and 60 pin that behavior.
+
+With those behaviors accounted for, AP040 and qemu agree exactly on translation,
 write protection, the U history bits on all three table levels, and PTEST
 MMUSR results across every seed tried (20 seeds x 24 operations).
 

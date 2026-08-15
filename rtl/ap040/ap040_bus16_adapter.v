@@ -9,6 +9,9 @@
 //  - busstate: 00 fetch, 01 idle, 10 data read, 11 data write              //
 //  - one stable bus request at a time; exactly one qualified completion    //
 //    (clkena_in pulse) advances one 16-bit sub-cycle                       //
+//  - split transfers insert a sampled IDLE cycle between sub-cycles.  The  //
+//    Minimig RAM/cache controllers return a level acknowledge and do not   //
+//    accept a new address until their chip-select drops.                   //
 //  - nwr is 1 for read, 0 for write; nuds/nlds are active low              //
 //                                                                          //
 // Transaction splitting (big endian):                                      //
@@ -55,6 +58,8 @@ module ap040_bus16_adapter
 
 reg        active;
 reg        write_r;
+reg        instr_r;
+reg        subcycle_gap;
 reg [31:0] cur_addr;
 reg  [2:0] bytes_left;
 reg [31:0] wshift;      // write data, left-aligned, consumed MSB first
@@ -78,10 +83,6 @@ wire [31:0] next_addr = cur_addr + {29'd0, consumed};
 wire  [2:0] next_left = bytes_left - consumed;
 wire [31:0] next_wsh  = (consumed == 3'd2) ? {wshift[15:0], 16'd0} : {wshift[23:0], 8'd0};
 
-// shape of the following sub-cycle
-wire        n_odd  = next_addr[0];
-wire        n_word = !n_odd && (next_left >= 3'd2);
-
 // first sub-cycle shape of a new request
 wire  [2:0] f_bytes = size_bytes(mem_size);
 wire [31:0] f_wsh   = (mem_size == `AP040_SZ_B) ? {mem_wdata[7:0], 24'd0} :
@@ -100,6 +101,8 @@ always @(posedge clk) begin
 		nlds       <= 1;
 		longword   <= 0;
 		write_r    <= 0;
+		instr_r    <= 0;
+		subcycle_gap <= 0;
 		bytes_left <= 0;
 		addr_out   <= 0;
 		data_write <= 0;
@@ -124,12 +127,15 @@ always @(posedge clk) begin
 			nuds     <= 1;
 			nlds     <= 1;
 			longword <= 0;
+			subcycle_gap <= 0;
 		end
 		else if (!active) begin
 			// idle: busstate is 01, so the wrapper keeps clkena high
 			if (mem_req && !mem_ack) begin
 				active     <= 1;
 				write_r    <= mem_write;
+				instr_r    <= mem_instr;
+				subcycle_gap <= 0;
 				cur_addr   <= mem_addr;
 				bytes_left <= f_bytes;
 				wshift     <= f_wsh;
@@ -145,6 +151,20 @@ always @(posedge clk) begin
 				data_write <= (f_odd || !f_word) ? {f_wsh[31:24], f_wsh[31:24]}
 				                                 : f_wsh[31:16];
 			end
+		end
+		else if (subcycle_gap) begin
+			// The external target sampled IDLE on this edge and can now
+			// accept the next word of the same internal transfer.  Reassert
+			// the saved request without consuming data on the boundary edge.
+			subcycle_gap <= 0;
+			busstate   <= instr_r ? `AP040_BUS_FETCH :
+			              write_r ? `AP040_BUS_WRITE : `AP040_BUS_READ;
+			nwr        <= ~write_r;
+			nuds       <= cur_addr[0];
+			nlds       <= !cur_addr[0] && !(bytes_left >= 3'd2);
+			data_write <= (cur_addr[0] || bytes_left < 3'd2)
+			              ? {wshift[31:24], wshift[31:24]}
+			              : wshift[31:16];
 		end
 		else begin
 			// one qualified completion for the in-flight 16-bit sub-cycle
@@ -162,6 +182,7 @@ always @(posedge clk) begin
 				nuds     <= 1;
 				nlds     <= 1;
 				longword <= 0;
+				subcycle_gap <= 0;
 				mem_ack  <= 1;
 				if (!write_r) begin
 					if (cur_addr[0])             mem_rdata <= {rshift[23:0], data_in[7:0]};
@@ -170,15 +191,19 @@ always @(posedge clk) begin
 				end
 			end
 			else begin
-				// set up the following sub-cycle
+				// Set up the following sub-cycle, but first lower the request
+				// for one sampled clock.  cpu_cache_new and both RAM write
+				// buffers retain ack/address state until cpu_cs drops; changing
+				// addr_out under their held acknowledge loses the second word.
 				cur_addr   <= next_addr;
 				bytes_left <= next_left;
 				wshift     <= next_wsh;
 				addr_out   <= next_addr;
-				nuds       <= n_odd;
-				nlds       <= !n_odd && !n_word;
-				data_write <= (n_odd || !n_word) ? {next_wsh[31:24], next_wsh[31:24]}
-				                                 : next_wsh[31:16];
+				busstate   <= `AP040_BUS_IDLE;
+				nwr        <= 1;
+				nuds       <= 1;
+				nlds       <= 1;
+				subcycle_gap <= 1;
 			end
 		end
 	end

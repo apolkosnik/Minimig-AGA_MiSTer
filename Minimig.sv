@@ -223,7 +223,7 @@ amiga_clk amiga_clk
 wire cpu_type = cpucfg[1];
 reg  cpu_ph1;
 reg  cpu_ph2;
-reg  ram_cs;
+wire ram_cs;
 reg  cyc;
 
 always @(posedge clk_114) begin
@@ -252,8 +252,20 @@ always @(posedge clk_114) begin
 		end
 	end
 
-	ram_cs <= ~(ram_ready & cyc & cpu_type) & ram_sel;
 end
+
+wire ram_consumed;
+
+ram_cs_guard ram_guard
+(
+	.clk         (clk_114),
+	.nreset      (cpu_rst),
+	.cpu_type    (cpu_type),
+	.ram_consumed(ram_consumed),
+	.ram_sel     (ram_sel),
+	.ram_ready   (ram_ready),
+	.ram_cs      (ram_cs)
+);
 
 wire  [1:0] cpu_state;
 wire        cpu_nrst_out;
@@ -351,6 +363,7 @@ cpu_wrapper cpu_wrapper
 	.ramdout      (ram_dout        ),
 	.ramdin       (ram_din         ),
 	.ramready     (ram_ready       ),
+	.ramconsumed  (ram_consumed    ),
 	.cache_inhibit(cpu_cache_inhibit ),
 	.ramshared    (ramshared       ),
 
