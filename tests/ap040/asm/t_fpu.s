@@ -514,6 +514,9 @@ denx_cont:
 	fmove.l	#7,fp6
 	fmove.l	#0,fp7
 	fdiv.x	fp7,fp6
+	fnop			; synchronize: enabled FPU exceptions are
+				; delivered pre-instruction at the next FPU
+				; dispatch (68040 FPSP model)
 	chkcnt	cnt_fpdz,1,68
 	fmove.l	fpsr,d0
 	and.l	#$00000400,d0
@@ -527,6 +530,7 @@ denx_cont:
 	move.l	#$7F800001,($32DC).l
 	fmove.l	#$4000,fpcr
 	fmove.s	($32DC).l,fp0
+	fnop			; synchronize the deferred enabled-SNAN trap
 	chkcnt	cnt_fpsnan,1,71
 	fmove.l	fpsr,d0
 	and.l	#$00004000,d0
@@ -4510,6 +4514,36 @@ hr_next:
 	move.w	d0,(hr_iter).l
 	cmp.w	#8,d0
 	blo	hr_loop
+
+;=========== background FPU execution (non-blocking S_FPU_GO)
+; A register-destination FDIV runs while the integer pipeline continues.
+; The quotient must be correct afterwards, and an enabled divide-by-zero
+; from a released op must be delivered pre-instruction at the next FPU
+; dispatch point -- after the intervening integer work, not during it.
+	fmove.l	#100,fp0
+	fmove.l	#7,fp1
+	fdiv.x	fp1,fp0			; released: runs in the background
+	moveq	#0,d0			; integer work overlapping the divide
+	moveq	#24,d1
+bgspin:
+	addq.l	#3,d0
+	dbra	d1,bgspin
+	chkl	d0,75,285		; the integer stream really ran
+	fmove.l	fp0,d0
+	chkl	d0,14,286		; 100/7 rounded to nearest = 14
+	fmove.l	#$4000,fpcr		; enable SNAN (a late, rounding-stage
+	fmove.l	#5,fp2			; trap: DZ fires early/synchronously)
+	move.l	#$7F800001,($32DC).l
+	move.l	#0,(cnt_fpsnan).l
+	fmove.s	($32DC).l,fp2		; released; SNAN trap becomes pending
+	moveq	#17,d3			; more integer work: the trap must NOT
+	add.l	d3,d3			; interrupt this stream
+	chkcnt	cnt_fpsnan,0,287	; counter untouched mid-stream
+	fnop				; FPU dispatch point: trap delivers here
+	chkcnt	cnt_fpsnan,1,288
+	fmove.l	fp2,d0
+	chkl	d0,5,289		; writeback inhibited by the trap
+	fmove.l	#0,fpcr
 
 	jmp	audit_return
 

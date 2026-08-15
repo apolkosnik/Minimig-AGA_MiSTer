@@ -45,6 +45,11 @@ module ap040_fpu
 	input       [2:0] dst_r,       // FPn
 	input      [95:0] din,         // memory operand, left aligned
 	output reg        done,
+	// the operation has passed operand classification: unimp/unsupp can no
+	// longer occur, only completion or an enabled arithmetic exception.
+	// The core uses this to run register-destination arithmetic in the
+	// background while integer execution continues.
+	output            accepted,
 	output reg        unimp,       // unimplemented instruction -> vector 11
 	output reg        unsupp,      // unsupported data type -> vector 55
 	output reg        exc_req,       // enabled arithmetic exception
@@ -214,10 +219,20 @@ localparam F_DIVL  = 4'd11;  // divide loop
 localparam F_SQRTL = 4'd12;  // square root loop
 localparam F_NORM2 = 4'd13;  // post-operation normalize
 localparam F_ROUND = 4'd14;  // precision rounding and range checks
+
 localparam F_PACKS = 4'd15;  // denormal single/double store packing
 localparam F_UNFL  = 5'd16;  // gradual underflow at single/double precision
 
 reg  [4:0] fst;
+// unimp/unsupp decisions are made in the dispatch cycle (register
+// sources, still F_IDLE), during source conversion (F_SRC), and by the
+// destination-operand checks in F_EXEC and F_BIN.  Only the arithmetic
+// and rounding states are strictly past every such decision: from here
+// on nothing but done or an enabled-exception exc_req can follow.
+assign accepted = (fst == F_ADDX) || (fst == F_MULT) ||
+                  (fst == F_DIVL) || (fst == F_SQRTL) ||
+                  (fst == F_NORM2) || (fst == F_ROUND);
+
 reg  [2:0] r_fmt, r_dst;
 reg        r_ae7;           // accrued-IOP before this instruction (fault backout)
 reg        r_unimp;         // memory-source software op using normal converter

@@ -868,6 +868,14 @@ reg         fp_force_unsupp;      // packed store: trap after resolving EA
 reg   [6:0] fp_adj;               // total An adjustment (up to 8*12 = 96 bytes)
 
 wire        fpu_done, fpu_unimp, fpu_unsupp, fpu_exc_req, fpu_used;
+wire        fpu_accepted;
+// Background (released) FPU operation tracking: the core continues
+// integer execution while the FPU finishes register-destination
+// arithmetic.  An enabled arithmetic exception from a released op is
+// held pending and delivered pre-instruction at the next FPU dispatch.
+reg         fpu_bg;
+reg         fpu_pend_exc;
+reg   [7:0] fpu_pend_vec;
 wire        fpu_fstate_unimp;
 wire        fpu_bsun_en;
 wire  [7:0] fpu_exc_vec;
@@ -885,7 +893,8 @@ generate if (AP040_HAS_FPU) begin : g_fpu
 		.clk(clk), .nreset(nreset), .ce(ce),
 		.req(fpu_req), .op_class(fpu_class), .opmode(fpu_opm),
 		.src_fmt(fpu_fmt), .src_r(fpu_srcr), .dst_r(fpu_dstr),
-		.din(fpb), .done(fpu_done), .unimp(fpu_unimp), .unsupp(fpu_unsupp),
+		.din(fpb), .done(fpu_done), .accepted(fpu_accepted),
+		.unimp(fpu_unimp), .unsupp(fpu_unsupp),
 		.exc_req(fpu_exc_req), .exc_vec(fpu_exc_vec), .dout(fpu_dout),
 		.fpcc(fpu_cc),
 		.cr_sel(fpu_crsel), .cr_we(fpu_crwe), .cr_wdata(fpu_crwd),
@@ -910,6 +919,7 @@ generate if (AP040_HAS_FPU) begin : g_fpu
 	);
 end else begin : g_nofpu
 	assign fpu_done = 0;
+	assign fpu_accepted = 0;
 	assign fpu_unimp = 0;
 	assign fpu_unsupp = 0;
 	assign fpu_exc_req = 0;
@@ -1500,6 +1510,7 @@ always @(posedge clk) begin
 		rf_we <= 0; rf_waddr <= 0; rf_wdata <= 0;
 		fpu_req <= 0; fpu_class <= 0; fpu_opm <= 0; fpu_fmt <= 0;
 		fpu_srcr <= 0; fpu_dstr <= 0; fpb <= 0;
+		fpu_bg <= 0; fpu_pend_exc <= 0; fpu_pend_vec <= 0;
 		fpu_crsel <= 0; fpu_crwe <= 0; fpu_crwd <= 0; fpu_iawe <= 0;
 		fpu_bsun <= 0;
 		fpu_fmsel <= 0; fpu_fmwe <= 0; fpu_fmwd <= 0; fpu_rst <= 0;
@@ -1576,6 +1587,15 @@ always @(posedge clk) begin
 		md_start <= 0;
 		fpu_req <= 0; fpu_crwe <= 0; fpu_fmwe <= 0; fpu_iawe <= 0;
 		fpu_bsun <= 0;
+		// released-operation completion: results retire inside the FPU;
+		// an enabled arithmetic exception becomes a pending pre-instruction
+		// exception for the next FPU dispatch point
+		if (fpu_bg && fpu_done) fpu_bg <= 0;
+		if (fpu_bg && fpu_exc_req) begin
+			fpu_bg <= 0;
+			fpu_pend_exc <= 1;
+			fpu_pend_vec <= fpu_exc_vec;
+		end
 		fpu_rst <= 0;
 		fpu_fsave_ack <= 0;
 		fpu_frestore_idle <= 0;
@@ -2273,6 +2293,8 @@ always @(posedge clk) begin
 			end
 
 			S_EXC0: begin
+				if (fpu_bg) state <= S_EXC0;   // FSAVE-quiescent exception
+				else begin : exc0_run
 				sr_saved <= sr_fovr_v ? sr_fovr : sr;
 				sr_fovr_v <= 0;
 				sr[13] <= 1;
@@ -2284,6 +2306,7 @@ always @(posedge clk) begin
 					else irq_ack_t <= ~irq_ack_t;
 				end
 				state <= S_EXC1;
+				end
 			end
 
 			S_EXC1: begin
@@ -2974,7 +2997,12 @@ always @(posedge clk) begin
 			// already adjusted -(An) by one longword; extend that adjustment
 			// to the complete exception frame before issuing any writes.
 			S_FSAVE1: begin
-				if (fpu_fstate_unimp) begin
+				if (fpu_bg) state <= S_FSAVE1;       // wait for background op
+				else if (fpu_pend_exc) begin
+					fpu_pend_exc <= 0;
+					exc(fpu_pend_vec, 4'd0, pc_i, pc_i);
+				end
+				else if (fpu_fstate_unimp) begin
 					t_a <= (ea_mode == 3'b100) ? ea_addr - 32'd48 : ea_addr;
 					if (ea_mode == 3'b100)
 						rfw({1'b1, ea_rn}, ea_addr - 32'd48);
@@ -3002,7 +3030,9 @@ always @(posedge clk) begin
 				end
 			end
 
-			S_FREST1: mrd(ea_addr, `AP040_SZ_L, S_FREST2);
+			S_FREST1:
+				if (fpu_bg) state <= S_FREST1;       // wait for background op
+				else mrd(ea_addr, `AP040_SZ_L, S_FREST2);
 
 			S_FREST2: begin
 				// version byte 0 = NULL frame: reset the FPU state.
@@ -3056,6 +3086,19 @@ always @(posedge clk) begin
 
 			//------------------------------------------------------------- FPU
 			S_FPU_DEC: begin
+				if (fpu_bg) begin
+					// hold the dispatch until the background FPU
+					// operation has retired
+				end
+				else if (fpu_pend_exc) begin
+					// pre-instruction delivery of the pending enabled
+					// arithmetic exception, FPSP style: the stacked PC is
+					// the FPU instruction being dispatched, FPIAR still
+					// identifies the faulting one
+					fpu_pend_exc <= 0;
+					exc(fpu_pend_vec, 4'd0, pc_i, pc_i);
+				end
+				else begin
 				fpu_class <= imm[15:13];
 				fpu_opm   <= imm[6:0];
 				fpu_fmt   <= imm[12:10];
@@ -3287,6 +3330,7 @@ always @(posedge clk) begin
 						else ea_start(d_mode, d_rn, `AP040_SZ_L, S_FPU_EA);
 					end
 				endcase
+				end
 			end
 
 			S_FPU_MVML: begin : fp_mvml
@@ -3431,6 +3475,17 @@ always @(posedge clk) begin
 				else if (fpu_exc_req) begin
 					fpu_req <= 0;
 					exc(fpu_exc_vec, 4'd0, pc, pc_i);
+				end
+				else if (fpu_accepted && !fp_st) begin
+					// register-destination arithmetic past every datatype
+					// check: release it to the background and continue
+					// integer execution.  Post-increment/-decrement address
+					// register updates do not depend on the result.
+					fpu_bg <= 1;
+					if (fp_ea_pd) rfw({1'b1, d_rn}, t_a);
+					else if (fp_ea_pi)
+						rfw({1'b1, d_rn}, t_a + {25'd0, fp_adj});
+					fetch_next;
 				end
 				else if (fpu_done) begin
 					if (!fp_st) begin
@@ -3618,6 +3673,12 @@ always @(posedge clk) begin
 
 			//--------------------------------------- FBcc / FScc / FDBcc
 			S_FBCC: begin : fbcc
+				if (fpu_bg) state <= S_FBCC;         // wait for background op
+				else if (fpu_pend_exc) begin
+					fpu_pend_exc <= 0;
+					exc(fpu_pend_vec, 4'd0, pc_i, pc_i);
+				end
+				else begin : fbcc_run
 				// the 6-bit predicate field aliases: WinUAE's fpp_cond masks
 				// with 0x1f, so bit 5 has no effect and is NOT a trap
 				// (table68k defines FBcc for all 64 encodings)
@@ -3633,9 +3694,16 @@ always @(posedge clk) begin
 						go_pc(pc_i + 32'd2 + disp);
 					else fetch_next;
 				end
+				end
 			end
 
 			S_FSCC0: begin
+				if (fpu_bg) state <= S_FSCC0;        // wait for background op
+				else if (fpu_pend_exc) begin
+					fpu_pend_exc <= 0;
+					exc(fpu_pend_vec, 4'd0, pc_i, pc_i);
+				end
+				else begin : fscc0_run
 				fp_pred <= imm[5:0];
 				// On the 68040 FDBcc, FScc and FTRAPcc record the command
 				// address in FPIAR once their extension word has decoded.  FBcc
@@ -3662,6 +3730,7 @@ always @(posedge clk) begin
 				else if (ea_is_imm || (d_mode == 3'b111 && d_rn[1]))
 					go_fp_fline;
 				else ea_start(d_mode, d_rn, `AP040_SZ_B, S_FSCC1);
+				end
 			end
 
 			S_FSCC1: begin : fscc1

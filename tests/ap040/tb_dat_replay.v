@@ -155,6 +155,12 @@ endfunction
 assign data_in = {rd8({addr_out[31:1], 1'b0}),
 	              rd8({addr_out[31:1], 1'b1})};
 
+// declared before first use: the write monitor below references them, the
+// driver blocks assign them (iverilog requires declaration before use)
+reg [31:0] patch_addr;
+integer jf, jn, jr;
+reg [31:0] flags, test_idx, round_idx;
+
 always @(posedge clk) begin
 	if (nreset && mem_ready && busstate == 2'b11) begin
 		if ($test$plusargs("patchhistory") &&
@@ -246,7 +252,6 @@ end
 // APR2 input
 //--------------------------------------------------------------------------
 
-integer jf, jn, jr;
 // The public annotations are not for an external API.  They prevent
 // They stop constant folding of the final summary across run_round's timed
 // coroutine; otherwise comparisons execute and print, but the final block
@@ -256,7 +261,6 @@ integer ran    /* verilator public_flat_rw */;
 integer mism   /* verilator public_flat_rw */;
 integer report_lim, timeout;
 integer trace_round;
-reg [31:0] patch_addr;
 reg [31:0] round_fpu_ea;
 reg        round_fpu_ea_valid;
 integer k, n, p, fgot;
@@ -300,7 +304,6 @@ always @(posedge clk) begin
 	end
 end
 
-reg [31:0] flags, test_idx, round_idx;
 reg [31:0] i_regs [0:15];
 reg [15:0] i_fe [0:7];
 reg [63:0] i_fm [0:7];
