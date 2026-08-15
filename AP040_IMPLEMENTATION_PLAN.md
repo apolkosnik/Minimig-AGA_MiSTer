@@ -738,7 +738,18 @@ FDIV ~74, FSQRT ~73; 6581 ALUTs, 1799 registers, zero DSP blocks.
   more cycles each if the subtract cascade still meets timing; measure
   first, the returns are shrinking.
 
-### F1. Non-blocking S_FPU_GO (largest sustained win, largest risk)
+### F1. Non-blocking S_FPU_GO (DONE 2026-08-15)
+
+Implemented as designed below: ap040_fpu exports `accepted` (state past
+every unimp/unsupp decision, including the late F_EXEC/F_BIN destination
+checks); S_FPU_GO releases register-destination arithmetic and the core
+continues; a one-deep scoreboard gates S_FPU_DEC, the FPSR-reading
+predicates (S_FBCC/S_FSCC0), FSAVE/FRESTORE and S_EXC0; enabled
+arithmetic exceptions from a released op deliver pre-instruction at the
+next FPU dispatch (FPSP model).  t_fpu 285-289 cover overlap and
+deferred-trap delivery; 68/71 gained their architecturally required
+FNOPs.  Full suite green; 365-slice FPU corpus identical to baseline.
+Design notes kept for reference:
 
 Let the core continue fetching/executing integer instructions while the
 FPU computes, stalling only on the next FPU instruction, an FPU register
