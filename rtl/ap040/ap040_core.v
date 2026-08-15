@@ -238,6 +238,8 @@ wire [31:0] alu_res;
 wire  [4:0] alu_fl;
 
 localparam S_SHIFT      = 8'd29;   // forward declaration for the alu_b mux
+// hoisted like the localparam: the ALU instance below consumes it
+reg  [5:0] sh_cnt;
 
 wire alu_is_bitop = (alu_op >= `AP040_ALU_BTST) && (alu_op <= `AP040_ALU_BSET);
 reg         p_sextw;
@@ -254,6 +256,7 @@ ap040_alu alu
 	.op(alu_op), .size(op_size),
 	.a(alu_a), .b(alu_b),
 	.flags_in(alu_fin),
+	.shcnt((state == S_SHIFT) ? sh_cnt : 6'd1),
 	.result(alu_res), .flags_out(alu_fl)
 );
 
@@ -537,7 +540,6 @@ reg  [3:0] exec_kind;
 reg  [2:0] src_mode_r, src_rn_r, dst_mode_r, dst_rn_r;
 reg [31:0] dst_addr;
 
-reg  [5:0] sh_cnt;
 reg        sh_vacc;
 reg        sh_rox;
 reg        sh_any;
@@ -2120,11 +2122,15 @@ always @(posedge clk) begin
 					state <= S_SHIFT_WB;
 				end
 				else begin
+					// single-cycle barrel: the ALU composed the whole count,
+					// commit value and flags directly
 					sh_val <= alu_res;
-					sh_fl <= alu_fl;
-					sh_vacc <= sh_vacc | alu_fl[1];
-					sh_any <= 1;
-					sh_cnt <= sh_cnt - 6'd1;
+					sr[4] <= alu_fl[4];
+					sr[3] <= alu_fl[3];
+					sr[2] <= alu_fl[2];
+					sr[1] <= alu_fl[1];
+					sr[0] <= alu_fl[0];
+					state <= S_SHIFT_WB;
 				end
 			end
 

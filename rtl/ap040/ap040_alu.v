@@ -21,6 +21,7 @@ module ap040_alu
 (
 	input       [5:0] op,
 	input       [1:0] size,       // AP040_SZ_B/W/L
+	input       [5:0] shcnt,      // shift/rotate count this call (1..63)
 	input      [31:0] a,
 	input      [31:0] b,
 	input       [4:0] flags_in,   // {X,N,Z,V,C}
@@ -60,23 +61,20 @@ wire [32:0] addx_full = {1'b0, bm} + {1'b0, am} + {32'd0, f_x};
 wire [32:0] sub_full  = {1'b0, bm} - {1'b0, am};
 wire [32:0] subx_full = {1'b0, bm} - {1'b0, am} - {32'd0, f_x};
 
-function carry_of;
-	input [32:0] r;
-	begin
-		carry_of = (size == `AP040_SZ_B) ? (r[8] ^ 1'b0) : (size == `AP040_SZ_W) ? r[16] : r[32];
-	end
-endfunction
-
 // carry out of the sized MSB position for byte/word needs the sized bit
 wire add_c  = (size == `AP040_SZ_B) ? add_full[8]  : (size == `AP040_SZ_W) ? add_full[16]  : add_full[32];
 wire addx_c = (size == `AP040_SZ_B) ? addx_full[8] : (size == `AP040_SZ_W) ? addx_full[16] : addx_full[32];
 wire sub_c  = (size == `AP040_SZ_B) ? sub_full[8]  : (size == `AP040_SZ_W) ? sub_full[16]  : sub_full[32];
 wire subx_c = (size == `AP040_SZ_B) ? subx_full[8] : (size == `AP040_SZ_W) ? subx_full[16] : subx_full[32];
 
-wire add_r_msb  = res_msb(add_full[31:0]);
-wire addx_r_msb = res_msb(addx_full[31:0]);
-wire sub_r_msb  = res_msb(sub_full[31:0]);
-wire subx_r_msb = res_msb(subx_full[31:0]);
+// explicit size selects: res_msb reads `size` from inside the function
+// body, which iverilog leaves out of a continuous assignment's sensitivity
+// (functions reading module state are only safe from the main @* block,
+// which reads szmask directly and so re-evaluates on every size change)
+wire add_r_msb  = (size == `AP040_SZ_B) ? add_full[7]  : (size == `AP040_SZ_W) ? add_full[15]  : add_full[31];
+wire addx_r_msb = (size == `AP040_SZ_B) ? addx_full[7] : (size == `AP040_SZ_W) ? addx_full[15] : addx_full[31];
+wire sub_r_msb  = (size == `AP040_SZ_B) ? sub_full[7]  : (size == `AP040_SZ_W) ? sub_full[15]  : sub_full[31];
+wire subx_r_msb = (size == `AP040_SZ_B) ? subx_full[7] : (size == `AP040_SZ_W) ? subx_full[15] : subx_full[31];
 
 wire add_v  = (a_msb == b_msb) && (add_r_msb  != a_msb);
 wire addx_v = (a_msb == b_msb) && (addx_r_msb != a_msb);
@@ -252,45 +250,80 @@ always @* begin
 			flags_out = {nbc_c, flags_in[3], f_z & (nbc_res[7:0] == 8'd0), flags_in[1], nbc_c};
 		end
 
-		`AP040_ALU_ASL1: begin
-			result = shl_r;
-			// V accumulates in the core across steps
-			flags_out = {sh_msb, res_msb(shl_r), res_zero(shl_r), sh_msb ^ sh_msb2, sh_msb};
-		end
-
-		`AP040_ALU_LSL1: begin
-			result = shl_r;
-			flags_out = {sh_msb, res_msb(shl_r), res_zero(shl_r), 1'b0, sh_msb};
-		end
-
-		`AP040_ALU_ASR1: begin
-			result = asr_r;
-			flags_out = {sh_lsb, res_msb(asr_r), res_zero(asr_r), 1'b0, sh_lsb};
-		end
-
-		`AP040_ALU_LSR1: begin
-			result = shr_l;
-			flags_out = {sh_lsb, res_msb(shr_l), res_zero(shr_l), 1'b0, sh_lsb};
-		end
-
-		`AP040_ALU_ROL1: begin
-			result = rol_r;
-			flags_out = {f_x, res_msb(rol_r), res_zero(rol_r), 1'b0, sh_msb};
-		end
-
-		`AP040_ALU_ROR1: begin
-			result = ror_r;
-			flags_out = {f_x, res_msb(ror_r), res_zero(ror_r), 1'b0, sh_lsb};
-		end
-
-		`AP040_ALU_ROXL1: begin
-			result = roxl_r;
-			flags_out = {sh_msb, res_msb(roxl_r), res_zero(roxl_r), 1'b0, sh_msb};
-		end
-
-		`AP040_ALU_ROXR1: begin
-			result = roxr_r;
-			flags_out = {sh_lsb, res_msb(roxr_r), res_zero(roxr_r), 1'b0, sh_lsb};
+		`AP040_ALU_ASL1, `AP040_ALU_LSL1, `AP040_ALU_ASR1,
+		`AP040_ALU_LSR1, `AP040_ALU_ROL1, `AP040_ALU_ROR1,
+		`AP040_ALU_ROXL1, `AP040_ALU_ROXR1: begin : sh_barrel
+			// single-cycle barrel: closed forms equal to composing shcnt
+			// (1..63) of the former one-bit steps.  Verified equivalences:
+			// shifts: C=X=last bit out; ASL V = the top shcnt+1 bits of the
+			// source are not all equal (any-step MSB change); plain rotates
+			// leave X and take C from the bit that wrapped last; ROXx
+			// rotates the (size+1)-bit {X,value} container by shcnt mod
+			// (size+1) and reports C = the rotated X for every nonzero
+			// count, including exact multiples of size+1.
+			reg  [5:0] n, nm, nx, ne;
+			reg [32:0] w, rot, cmask;
+			reg [31:0] r, sext, win;
+			reg        c, x2, vf;
+			n  = shcnt;
+			r  = 32'd0; c = 1'b0; x2 = f_x; vf = 1'b0;
+			nm = n & (nbits - 6'd1);
+			nx = n % (nbits + 6'd1);
+			ne = (n > nbits) ? nbits : n;
+			cmask = (33'd2 << nbits) - 33'd1;
+			w = ({32'd0, f_x} << nbits) | {1'b0, bm};
+			case (op)
+				`AP040_ALU_ASL1, `AP040_ALU_LSL1: begin
+					r = (bm << n) & szmask;
+					c = (n <= nbits) && (((bm >> (nbits - n)) & 32'd1) != 0);
+					x2 = c;
+					if (op == `AP040_ALU_ASL1) begin
+						if (n >= nbits) vf = (bm != 0);
+						else begin
+							win = bm >> (nbits - 6'd1 - n);
+							vf = !((win == 0) ||
+							       (win == ((32'd2 << n) - 32'd1)));
+						end
+					end
+				end
+				`AP040_ALU_LSR1: begin
+					r = bm >> n;
+					c = (n <= nbits) && (((bm >> (n - 6'd1)) & 32'd1) != 0);
+					x2 = c;
+				end
+				`AP040_ALU_ASR1: begin
+					// unsigned formulation: shift, then OR the sign fill
+					// (an embedded >>> would lose its signedness to the
+					// surrounding unsigned expression context)
+					r = (bm >> ne) |
+					    (b_msb ? ((~(szmask >> ne)) & szmask) : 32'd0);
+					c = (n >= nbits) ? b_msb
+					                 : (((bm >> (n - 6'd1)) & 32'd1) != 0);
+					x2 = c;
+				end
+				`AP040_ALU_ROL1: begin
+					r = ((bm << nm) | (bm >> (nbits - nm))) & szmask;
+					c = r[0];
+				end
+				`AP040_ALU_ROR1: begin
+					r = ((bm >> nm) | (bm << (nbits - nm))) & szmask;
+					c = ((r >> (nbits - 6'd1)) & 32'd1) != 0;
+				end
+				`AP040_ALU_ROXL1: begin
+					rot = ((w << nx) | (w >> (nbits + 6'd1 - nx))) & cmask;
+					x2 = ((rot >> nbits) & 33'd1) != 0;
+					r = rot[31:0] & szmask;
+					c = x2;
+				end
+				default: begin // AP040_ALU_ROXR1
+					rot = ((w >> nx) | (w << (nbits + 6'd1 - nx))) & cmask;
+					x2 = ((rot >> nbits) & 33'd1) != 0;
+					r = rot[31:0] & szmask;
+					c = x2;
+				end
+			endcase
+			result = r;
+			flags_out = {x2, res_msb(r), res_zero(r), vf, c};
 		end
 
 		`AP040_ALU_BTST: begin
