@@ -248,6 +248,7 @@ reg  [66:0] qv;               // divide quotient / sqrt root
 reg  [68:0] srem;             // sqrt remainder
 reg [131:0] srad;             // sqrt radicand feed
 reg   [6:0] loop_n;
+reg [127:0] mul_pd;           // registered DSP full product (F_MULT)
 reg   [3:0] op_kind;          // 0 none, 1 add, 2 mul, 3 div, 4 sqrt
 reg   [4:0] sh_ret;           // staged shifter return state
 reg   [1:0] r_pr;             // rounding precision latched for F_UNFL
@@ -1248,43 +1249,34 @@ always @(posedge clk) begin
 			end
 
 			F_MULT: begin : f_mult
-				reg [65:0] t;
-				if (loop_n == 7'd32) begin : mul_fin
-					reg [127:0] pd;
-					pd = {acc_hi[63:0], acc_lo};
-					if (pd[127]) begin
-						a_m <= pd[127:64];
-						grs <= {pd[63], pd[62], (pd[61:0] != 0)};
+				if (loop_n == 7'd1) begin : mul_fin
+					// mul_pd is the registered full 128-bit product, exactly
+					// the value the former 32-cycle radix-4 loop accumulated.
+					if (mul_pd[127]) begin
+						a_m <= mul_pd[127:64];
+						grs <= {mul_pd[63], mul_pd[62], (mul_pd[61:0] != 0)};
 						e_w <= e_w + 18'sd1;
 					end
 					else begin
-						a_m <= pd[126:63];
-						grs <= {pd[62], pd[61], (pd[60:0] != 0)};
+						a_m <= mul_pd[126:63];
+						grs <= {mul_pd[62], mul_pd[61], (mul_pd[60:0] != 0)};
 					end
 					a_t <= T_NUM;
 					fst <= F_ROUND;
 				end
 				else begin
-					// Unsigned radix-4 shift/add: consume two multiplier
-					// bits per cycle, then shift the combined accumulator by 2.
-					case (a_m[1:0])
-						2'd0: t = {1'b0, acc_hi};
-						2'd1: t = {1'b0, acc_hi} + {2'b0, b_m};
-						2'd2: t = {1'b0, acc_hi} + {1'b0, b_m, 1'b0};
-						default:
-							t = {1'b0, acc_hi} + {2'b0, b_m} +
-							    {1'b0, b_m, 1'b0};
-					endcase
-					acc_hi <= {1'b0, t[65:2]};
-					acc_lo <= {t[1:0], acc_lo[63:2]};
-					a_m <= {2'b0, a_m[63:2]};
-					loop_n <= loop_n + 7'd1;
+					// One registered 64x64 DSP-tree multiply replaces the
+					// 32-cycle serial radix-4 loop.  At this clock (34.8 ns
+					// budget) the cascade closes in a single cycle.
+					mul_pd <= a_m * b_m;
+					loop_n <= 7'd1;
 				end
 			end
 
 			F_DIVL: begin : f_divl
-				reg [64:0] r2;
-				if (loop_n == 7'd67) begin
+				reg [64:0] r2a, rem1, r2b, rem2, r2c, rem3;
+				reg        q1, q2, q3;
+				if (loop_n == 7'd23) begin
 					if (qv[66]) begin
 						a_m <= qv[66:3];
 						grs <= {qv[2], qv[1], qv[0] | (acc_hi != 65'd0)};
@@ -1297,43 +1289,63 @@ always @(posedge clk) begin
 					a_t <= T_NUM;
 					fst <= F_ROUND;
 				end
-				else begin
-					// integer quotient bit compares unshifted; fraction
-					// bits shift the remainder left, zeros entering
-					r2 = (loop_n == 7'd0) ? acc_hi : {acc_hi[63:0], 1'b0};
-					if (r2 >= {1'b0, a_m}) begin
-						acc_hi <= r2 - {1'b0, a_m};
+				else if (loop_n == 7'd0) begin
+					// integer quotient bit compares unshifted
+					if (acc_hi >= {1'b0, a_m}) begin
+						acc_hi <= acc_hi - {1'b0, a_m};
 						qv <= {qv[65:0], 1'b1};
 					end
-					else begin
-						acc_hi <= r2;
-						qv <= {qv[65:0], 1'b0};
-					end
+					else qv <= {qv[65:0], 1'b0};
+					loop_n <= 7'd1;
+				end
+				else begin
+					// three restoring fraction bits per cycle (66 = 3 x 22):
+					// the remainder shifts left with zeros entering, exactly
+					// three former one-bit iterations cascaded combinationally
+					r2a = {acc_hi[63:0], 1'b0};
+					q1 = (r2a >= {1'b0, a_m});
+					rem1 = q1 ? (r2a - {1'b0, a_m}) : r2a;
+					r2b = {rem1[63:0], 1'b0};
+					q2 = (r2b >= {1'b0, a_m});
+					rem2 = q2 ? (r2b - {1'b0, a_m}) : r2b;
+					r2c = {rem2[63:0], 1'b0};
+					q3 = (r2c >= {1'b0, a_m});
+					rem3 = q3 ? (r2c - {1'b0, a_m}) : r2c;
+					acc_hi <= rem3;
+					qv <= {qv[63:0], q1, q2, q3};
 					loop_n <= loop_n + 7'd1;
 				end
 			end
 
 			F_SQRTL: begin : f_sqrtl
-				reg [68:0] r2;
-				reg [68:0] trial;
-				if (loop_n == 7'd66) begin
+				reg [68:0] r2a, rem1, r2b, rem2, r2c, rem3;
+				reg [68:0] trial1, trial2, trial3;
+				reg        q1, q2, q3;
+				if (loop_n == 7'd22) begin
 					a_m <= qv[65:2];
 					grs <= {qv[1], qv[0], (srem != 69'd0)};
 					a_t <= T_NUM;
 					fst <= F_ROUND;
 				end
 				else begin
-					r2 = {srem[66:0], srad[131:130]};
-					trial = {1'b0, qv[65:0], 2'b01};
-					srad <= {srad[129:0], 2'b00};
-					if (r2 >= trial) begin
-						srem <= r2 - trial;
-						qv <= {qv[65:0], 1'b1};
-					end
-					else begin
-						srem <= r2;
-						qv <= {qv[65:0], 1'b0};
-					end
+					// three result digits per cycle (66 = 3 x 22): each trial
+					// folds the earlier digits into the partial root, exactly
+					// three former one-digit steps cascaded combinationally
+					r2a = {srem[66:0], srad[131:130]};
+					trial1 = {1'b0, qv[65:0], 2'b01};
+					q1 = (r2a >= trial1);
+					rem1 = q1 ? (r2a - trial1) : r2a;
+					r2b = {rem1[66:0], srad[129:128]};
+					trial2 = {1'b0, qv[64:0], q1, 2'b01};
+					q2 = (r2b >= trial2);
+					rem2 = q2 ? (r2b - trial2) : r2b;
+					r2c = {rem2[66:0], srad[127:126]};
+					trial3 = {1'b0, qv[63:0], q1, q2, 2'b01};
+					q3 = (r2c >= trial3);
+					rem3 = q3 ? (r2c - trial3) : r2c;
+					srad <= {srad[125:0], 6'b000000};
+					srem <= rem3;
+					qv <= {qv[63:0], q1, q2, q3};
 					loop_n <= loop_n + 7'd1;
 				end
 			end

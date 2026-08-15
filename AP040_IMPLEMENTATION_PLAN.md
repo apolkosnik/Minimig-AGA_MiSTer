@@ -715,3 +715,64 @@ Do it last.
 Chip-RAM-bound code (most OCS-era software) is paced by the 7MHz bus slots
 and gains almost nothing from any of this; the wins are for fast-RAM
 system/FPU/RTG workloads.
+
+## 20. FPU Acceleration (added 2026-08-15)
+
+Measured shape of the problem (fitted numbers, 28.7 MHz effective, fully
+blocking): FABS/FNEG/FTST/FCMP 4-7 cycles, FADD/FSUB 8-14, FMUL ~39,
+FDIV ~74, FSQRT ~73; 6581 ALUTs, 1799 registers, zero DSP blocks.
+
+### F0. Arithmetic cores (DONE 2026-08-15, bit-exact by construction)
+
+- F_MULT: the 32-cycle serial radix-4 loop replaced by ONE registered
+  64x64 DSP-tree product (`mul_pd <= a_m * b_m`; 34.8 ns budget closes a
+  Cyclone V cascade comfortably).  F_MULT is now 2 states: ~39 -> ~8
+  cycles total, and the serial accumulator ALUTs become DSP blocks.
+  A separate single/FSGL fast path (once proposed) is REDUNDANT: the full
+  multiplier already serves every format at the same latency.
+- F_DIVL: 2 restoring bits/cycle (two cascaded 65-bit compare-subtracts);
+  integer bit + 33 pair-iterations: ~74 -> ~41 cycles.
+- F_SQRTL: 2 result digits/cycle (second trial folds the first digit into
+  the partial root combinationally): ~73 -> ~40 cycles.
+- Follow-up headroom: 3 bits/cycle divide (66 = 3x22) and sqrt cut ~10
+  more cycles each if the subtract cascade still meets timing; measure
+  first, the returns are shrinking.
+
+### F1. Non-blocking S_FPU_GO (largest sustained win, largest risk)
+
+Let the core continue fetching/executing integer instructions while the
+FPU computes, stalling only on the next FPU instruction, an FPU register
+consumer (FMOVE/FMOVEM read), or FSAVE/exception boundaries.  This is what
+the real 68040 does; its architecture is already visible here in the
+E-bit/pending-exception frame machinery.  Requirements:
+- a one-deep FPU scoreboard (busy + destination register + pending
+  exception state);
+- exception model care: an FPU exception raised after completion must
+  stack the format-$0/$2/$3 frames with the ORIGINAL FPU PC (FPIAR path
+  already holds it) -- cputest's E11/E55 corpora are the regression;
+- FNOP and FSAVE become synchronization points (both already decode).
+Prerequisite: the cputest dat-replay harness from P0 (section 19), since
+interrupt/trace interactions with a busy FPU are exactly the corner
+photographed gurus cannot regress.
+
+### F2. Wide operand path
+
+Extended operands are three 32-bit reads = six 16-bit bus transactions
+before execution.  Options, cheapest first: (a) let the FPU operand
+fetch use the walker-style 32-bit port to the RAM controllers for
+non-chip addresses; (b) a 64-bit burst port shared with a future P1
+cache line fill.  Saves ~10-20 cycles per memory-operand FPU op on
+fast RAM; nothing for chip RAM (7 MHz bus is the floor there).
+
+### F3. FPU at 57/114 MHz
+
+Run the FPU FSM on clk_114 with a 4:1 enable handshake to the core.
+Multiplies the F0 iteration savings by up to 4 for div/sqrt, but crosses
+the ce-gated clocking contract (section 14) and re-opens CDC review for
+fpu_req/fpu_done/exception strobes.  Only worth it after F1: while the
+core blocks, wall-clock per op is what matters and F0 already cut the
+long poles 2-5x.
+
+Ordering: F0 (done) -> F1 -> F2 -> F3, with P1 caches (section 19)
+interleaved by ROI: for mixed real-world FPU code the caches likely beat
+everything except F1.
