@@ -220,9 +220,17 @@ always @(posedge clk) begin
 end
 
 ap040_tg68k_compat #(
-	// internal caches off: cpu_cache_new in the RAM controllers already
-	// provides (snooped) caching on this fabric
-	.AP040_ENABLE_CACHE(1),
+	// Internal caches OFF: they do not fit this device with usable timing.
+	// At the designed 4KB per side the fitter needs 4226 LABs against the
+	// 5CSEBA6's 4191; halved to 2KB per side it fits at 98% ALM
+	// utilization but timing collapses to -0.716 ns on the CPU domain,
+	// because at that occupancy the fitter has no placement freedom left
+	// (the same tree closes at +0.071 ns with them off).  cpu_cache_new in
+	// the RAM controllers already provides snooped caching on this fabric,
+	// so what is lost is hit LATENCY, not caching.  The cache and its
+	// fast-RAM cacheability windows stay wired up and covered by the test
+	// suite; flip this to 1 if area is freed elsewhere.
+	.AP040_ENABLE_CACHE(0),
 	// FPU hardware subset (milestone H): FMOVE all formats, FMOVEM,
 	// FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FTST with IEEE rounding;
 	// unimplemented ops trap to the FPSP route like real 040 silicon

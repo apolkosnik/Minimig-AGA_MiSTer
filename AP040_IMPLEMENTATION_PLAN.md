@@ -666,6 +666,27 @@ cache_inhibit plumbing), then full regression + cputest replay.  Expected
 gain: large on fast-RAM working sets; zero architectural risk to exception
 semantics.
 
+STATUS 2026-08-16: implemented and validated in simulation, but BLOCKED ON
+DEVICE AREA and left disabled (AP040_ENABLE_CACHE 0 in cpu_wrapper).
+Cacheability windows mirror the wrapper's own RAM decode, so only
+configured Zorro fast RAM is cacheable and chip RAM / ROM / IO never are;
+t_integer and t_fpu run their whole batteries cache-hot.  Fit results on
+the 5CSEBA6:
+
+  4KB/side (64 sets x 4 ways):  does not fit -- 4226 LABs needed vs 4191
+  2KB/side (32 sets x 4 ways):  fits at 98% ALMs, but the CPU domain then
+                                fails timing at -0.716 ns; the same tree
+                                closes at +0.071 ns with the caches off,
+                                i.e. the loss is placement freedom, not a
+                                specific path.
+
+What P1 buys is hit LATENCY -- cpu_cache_new in the RAM controllers
+already caches this fabric -- so it is not worth spending the last 2% of
+the device and all timing margin on.  Revisit if area is freed elsewhere
+(P2's single-clock-domain migration removes CDC hardware, and the FPU is
+the other large block).  The RTL and its windows stay wired up and
+suite-covered so re-enabling is a one-line change.
+
 ### P2. Single-clock-domain migration (28MHz -> clk_114 + 4:1 clock enable)
 
 Move cpu_wrapper + core onto clk_114 with a ce, multicycle-4 constraints on
