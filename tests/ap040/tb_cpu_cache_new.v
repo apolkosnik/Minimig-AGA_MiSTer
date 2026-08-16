@@ -36,9 +36,9 @@ module tb_cpu_cache_new;
 	integer errors = 0;
 	integer timeout;
 	integer mem_index;
-	reg [18:0] tag;
+	reg [17:0] tag;
 	reg [17:0] vtag;        // victim line's tag, for the resurrection check
-	reg  [6:0] index;
+	reg  [7:0] index;
 	reg  [1:0] block;
 	reg        saw_req;
 
@@ -70,11 +70,11 @@ module tb_cpu_cache_new;
 	task install_i_line;
 		input [15:0] value;
 		begin
-			tag = cpu_adr[28:10];
-			index = cpu_adr[9:3];
+			tag = cpu_adr[28:11];
+			index = cpu_adr[10:3];
 			block = cpu_adr[2:1];
 			mem_index = {index, block};
-			dut.itram.mem[index] = (42'h1 << 40) | tag;
+			dut.itram.mem[index] = (40'h1 << 38) | tag;
 			dut.idram0.ram_l.mem[mem_index] = value[7:0];
 			dut.idram0.ram_u.mem[mem_index] = value[15:8];
 		end
@@ -83,11 +83,11 @@ module tb_cpu_cache_new;
 	task install_d_line;
 		input [15:0] value;
 		begin
-			tag = cpu_adr[28:10];
-			index = cpu_adr[9:3];
+			tag = cpu_adr[28:11];
+			index = cpu_adr[10:3];
 			block = cpu_adr[2:1];
 			mem_index = {index, block};
-			dut.dtram.mem[index] = (42'h1 << 40) | tag;
+			dut.dtram.mem[index] = (40'h1 << 38) | tag;
 			dut.ddram0.ram_l.mem[mem_index] = value[7:0];
 			dut.ddram0.ram_u.mem[mem_index] = value[15:8];
 		end
@@ -162,7 +162,7 @@ module tb_cpu_cache_new;
 		repeat (2) @(posedge clk);
 		cached_read(1'b1, 16'h1234);
 		uncached_read(1'b0);
-		if (dut.dtram.mem[index][40]) begin
+		if (dut.dtram.mem[index][38]) begin
 			$display("FAIL: disabled data cache filled a tag");
 			errors = errors + 1;
 		end
@@ -195,9 +195,9 @@ module tb_cpu_cache_new;
 		// waiting for the completed invalidation pass.
 		repeat (2) @(posedge clk);
 		wait_idle;
-		index = cpu_adr[9:3];
-		if (dut.itram.mem[index][40:39] != 0 ||
-		    dut.dtram.mem[index][40:39] != 0) begin
+		index = cpu_adr[10:3];
+		if (dut.itram.mem[index][38:37] != 0 ||
+		    dut.dtram.mem[index][38:37] != 0) begin
 			$display("FAIL: maintenance toggle did not invalidate both caches");
 			errors = errors + 1;
 		end
@@ -216,13 +216,13 @@ module tb_cpu_cache_new;
 		cpu_cache_ctrl[1:0] = 2'b11;
 		repeat (3) @(posedge clk);
 		cpu_adr = 28'h0012340;
-		tag   = cpu_adr[28:10];
-		index = cpu_adr[9:3];
+		tag   = cpu_adr[28:11];
+		index = cpu_adr[10:3];
 		block = cpu_adr[2:1];
 		mem_index = {index, block};
-		dut.dtram.mem[index] = (42'h1 << 41)          // LRU: fill takes way0
-		                     | (42'h1 << 39)          // way1 valid
-		                     | ({23'd0, tag} << 19);  // way1 tag
+		dut.dtram.mem[index] = (40'h1 << 39)          // LRU: fill takes way0
+		                     | (40'h1 << 37)          // way1 valid
+		                     | ({22'd0, tag} << 18);  // way1 tag
 		vtag = tag;
 		dut.ddram1.ram_l.mem[mem_index] = 8'h0D;
 		dut.ddram1.ram_u.mem[mem_index] = 8'hD0;
@@ -287,9 +287,9 @@ module tb_cpu_cache_new;
 		wait_idle;
 		// the swept victim must not be valid in EITHER way: the fill may
 		// validate only its own way, with its own tag
-		index = cpu_adr[9:3];
-		if ((dut.dtram.mem[index][40] && dut.dtram.mem[index][18: 0] == vtag) ||
-		    (dut.dtram.mem[index][39] && dut.dtram.mem[index][37:19] == vtag)) begin
+		index = cpu_adr[10:3];
+		if ((dut.dtram.mem[index][38] && dut.dtram.mem[index][17: 0] == vtag) ||
+		    (dut.dtram.mem[index][37] && dut.dtram.mem[index][35:18] == vtag)) begin
 			$display("FAIL: fill writeback resurrected the swept victim line (tagrow=%h)",
 			         dut.dtram.mem[index]);
 			errors = errors + 1;
