@@ -37,6 +37,7 @@ module tb_cpu_cache_new;
 	integer timeout;
 	integer mem_index;
 	reg [17:0] tag;
+	reg [17:0] vtag;        // victim line's tag, for the resurrection check
 	reg  [7:0] index;
 	reg  [1:0] block;
 	reg        saw_req;
@@ -203,18 +204,31 @@ module tb_cpu_cache_new;
 
 		// A maintenance clear whose background sweep passes the miss index
 		// while a line fill is waiting for SDRAM must not be undone by the
-		// fill's tag writeback: the fill may validate only its own way.
-		// (The AmigaOS crash signature of the captured-at-miss tag
-		// implementation: exec's CacheClearU sweep ran during the fill
-		// wait and FILL1 restored the pre-sweep valid bits, resurrecting
-		// flushed lines.)
+		// fill's tag writeback.  The writeback composes the OTHER way's
+		// tag and valid bit from the tag row it read, so that read has to
+		// reflect the sweep: a row snapshot taken at the miss decision
+		// restores valid bits the sweep cleared and resurrects flushed
+		// lines with stale data underneath them.
+		//
+		// Set the victim in way1 and leave the row's LRU bit selecting
+		// way0, so the fill goes to way0 and way1 is carried across the
+		// writeback purely from the tag-row read under test.
 		cpu_cache_ctrl[1:0] = 2'b11;
 		repeat (3) @(posedge clk);
-		cpu_adr = 28'h0012340;	// index/block as the earlier tests
-		install_d_line(16'hD00D);	// stale victim line ("tag" holds its tag)
-		cached_read(0, 16'hD00D);	// sanity: it hits before the clear
+		cpu_adr = 28'h0012340;
+		tag   = cpu_adr[28:11];
+		index = cpu_adr[10:3];
+		block = cpu_adr[2:1];
+		mem_index = {index, block};
+		dut.dtram.mem[index] = (40'h1 << 39)          // LRU: fill takes way0
+		                     | (40'h1 << 37)          // way1 valid
+		                     | ({22'd0, tag} << 18);  // way1 tag
+		vtag = tag;
+		dut.ddram1.ram_l.mem[mem_index] = 8'h0D;
+		dut.ddram1.ram_u.mem[mem_index] = 8'hD0;
+		cached_read(0, 16'hD00D);	// sanity: way1 hits before the clear
 
-		cpu_adr = 28'h1012340;	// same index, different tag
+		cpu_adr = 28'h1012340;	// same index, different tag: must miss
 		cpu_ir = 0;
 		cpu_dr = 1;
 		cpu_cs = 1;
@@ -227,7 +241,8 @@ module tb_cpu_cache_new;
 			$display("FAIL: clear-during-fill test did not miss");
 			errors = errors + 1;
 		end
-		// fill is now pending; run a full maintenance sweep before acking
+		// the fill is now pending: run a full maintenance sweep before
+		// acknowledging it, exactly as CacheClearU does under load
 		cpu_cache_ctrl[3] = ~cpu_cache_ctrl[3];
 		timeout = 0;
 		while (dut.cache_init_done && timeout < 20) begin
@@ -243,7 +258,20 @@ module tb_cpu_cache_new;
 			$display("FAIL: maintenance sweep did not finish during fill wait");
 			errors = errors + 1;
 		end
-		// complete the four-word fill
+		// Complete the fill just after a sweep pass has walked past this
+		// row.  The clear stays pending until the CPU side accepts it (only
+		// possible once the fill retires), so the SDR side keeps re-sweeping
+		// -- a writeback landing mid-pass is wiped by the next pass.  The
+		// reachable window is the FINAL pass: the CPU retires the fill, the
+		// pending clear is then accepted by both sides and stops, and any
+		// bits the writeback restored after the pass swept this row survive
+		// with stale data under them.
+		timeout = 0;
+		while (!(dut.sdr_sm_state == 4'd1 && dut.sdr_sm_adr[9:2] > 8'd220 &&
+		         dut.sdr_sm_adr[9:2] < 8'd248) && timeout < 4000) begin
+			@(posedge clk);
+			timeout = timeout + 1;
+		end
 		sdr_dat_r = 16'hF111;
 		sdr_read_ack = 1;
 		timeout = 0;
@@ -257,14 +285,16 @@ module tb_cpu_cache_new;
 		cpu_dr = 0;
 		repeat (2) @(posedge clk);
 		wait_idle;
-		// the swept victim way must stay invalid: a read with the old tag
-		// has to miss again instead of hitting resurrected stale data
+		// the swept victim must not be valid in EITHER way: the fill may
+		// validate only its own way, with its own tag
 		index = cpu_adr[10:3];
-		if (dut.dtram.mem[index][17:0] == tag &&
-		    dut.dtram.mem[index][38]) begin
-			$display("FAIL: fill writeback resurrected the swept way0 line");
+		if ((dut.dtram.mem[index][38] && dut.dtram.mem[index][17: 0] == vtag) ||
+		    (dut.dtram.mem[index][37] && dut.dtram.mem[index][35:18] == vtag)) begin
+			$display("FAIL: fill writeback resurrected the swept victim line (tagrow=%h)",
+			         dut.dtram.mem[index]);
 			errors = errors + 1;
 		end
+		// and the architectural consequence: the old address must miss
 		cpu_adr = 28'h0012340;
 		cpu_ir = 0;
 		cpu_dr = 1;
@@ -284,7 +314,7 @@ module tb_cpu_cache_new;
 		cpu_cs = 0;
 		cpu_dr = 0;
 		if (!saw_req) begin
-			$display("FAIL: stale tag survived the clear (read hit old line, data=%h)",
+			$display("FAIL: stale line survived the clear (read hit, data=%h)",
 			         cpu_dat_r);
 			errors = errors + 1;
 		end
