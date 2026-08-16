@@ -37,11 +37,11 @@ compile() {
 }
 
 compile reset iverilog -g2012 -I "$RTL" -o "$WORK/tb_reset.vvp" \
-	tb_ap040_reset.v $SRC &
+	tb_ap040_reset.v sim_dpram.v $SRC &
 compile prog iverilog -g2012 -I "$RTL" -o "$WORK/tb_prog.vvp" \
-	tb_ap040_program.v $SRC &
+	tb_ap040_program.v sim_dpram.v $SRC &
 compile double_fault iverilog -g2012 -I "$RTL" -o "$WORK/tb_double_fault.vvp" \
-	tb_ap040_double_fault.v $SRC &
+	tb_ap040_double_fault.v sim_dpram.v $SRC &
 compile walker_cdc iverilog -g2012 -I "$RTL" -o "$WORK/tb_walker_cdc.vvp" \
 	tb_ap040_walker_cdc.v $RTL/ap040_walker_cdc.v &
 compile bus16_gap iverilog -g2012 -I "$RTL" -o "$WORK/tb_bus16_gap.vvp" \
@@ -59,7 +59,7 @@ compile cart_hrtmon iverilog -g2012 -o "$WORK/tb_cart_hrtmon.vvp" \
 	tb_cart_hrtmon.v ../../rtl/cart.v &
 compile wrapchip iverilog -g2012 -I "$RTL" -o "$WORK/tb_wrapchip.vvp" \
 	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
-	$RTL/ap040_bus_timeout.v $SRC &
+	sim_dpram.v $RTL/ap040_bus_timeout.v $SRC &
 compile sdram_turbo iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
 	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=0 \
 	-o "$WORK/tb_sdram_turbo.vvp" tb_sdram_turbo.v \
