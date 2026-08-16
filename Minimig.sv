@@ -415,11 +415,14 @@ ap040_walker_cdc walker_cdc
 wire [15:0] ram_dout1;
 wire        ram_ready1;
 
-// ap040_cache is snooped now, so it holds chip RAM as well as fast RAM
-// and the controller caches are redundant: one cache, at CPU latency,
-// instead of two.  (Keeping both fits only at 99% ALMs, where timing
-// collapses; the snoop is what makes dropping these safe.)
-sdram_ctrl #(.CPU_CACHE(0)) ram1
+// The controller caches carry the system.  ap040_cache is measured NOT
+// ready to replace them: its miss costs a 4-beat line fill serialised
+// through the 16-bit bus adapter (8 bus cycles) against 1-2 for an
+// uncached word, so miss-heavy code -- fast RAM above all -- ran SLOWER
+// with it than with no CPU-side cache at all.  Its snoop CDC also loses
+// events while clkena is frozen.  Re-enable it only with a 32-bit/burst
+// fill path and a ce-independent snoop queue.
+sdram_ctrl #(.CPU_CACHE(1)) ram1
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
@@ -471,7 +474,7 @@ sdram_ctrl #(.CPU_CACHE(0)) ram1
 wire [15:0] ram_dout2;
 wire        ram_ready2;
 
-ddram_ctrl #(.CPU_CACHE(0)) ram2
+ddram_ctrl #(.CPU_CACHE(1)) ram2
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),

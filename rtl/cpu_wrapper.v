@@ -255,7 +255,7 @@ ap040_tg68k_compat #(
 	// so what is lost is hit LATENCY, not caching.  The cache and its
 	// fast-RAM cacheability windows stay wired up and covered by the test
 	// suite; flip this to 1 if area is freed elsewhere.
-	.AP040_ENABLE_CACHE(1),
+	.AP040_ENABLE_CACHE(0),
 	// FPU hardware subset (milestone H): FMOVE all formats, FMOVEM,
 	// FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FTST with IEEE rounding;
 	// unimplemented ops trap to the FPSP route like real 040 silicon
