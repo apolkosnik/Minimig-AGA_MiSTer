@@ -1830,6 +1830,17 @@ always @(posedge clk) begin
 					if (in_exc) fatal_halt;
 					else aerr_start;
 				end
+				else if (ifetch_done && ifetch_lw && imm_n == 2'd2) begin
+					// A longword immediate that the aligned fetch already
+					// delivered whole: take both words and skip the second
+					// pass through this state entirely.
+					epf_hit   <= 0;
+					ifetch_lw <= 0;
+					imm       <= mem_rdata;
+					pc        <= pc + 32'd4;
+					if_issued <= 0;
+					state     <= r_imm_ret;
+				end
 				else if (ifetch_done) begin
 					epf_hit <= 0;
 					// the longword's second word becomes the whole
