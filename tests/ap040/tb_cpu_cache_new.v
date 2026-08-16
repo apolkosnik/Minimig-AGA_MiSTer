@@ -201,6 +201,95 @@ module tb_cpu_cache_new;
 			errors = errors + 1;
 		end
 
+		// A maintenance clear whose background sweep passes the miss index
+		// while a line fill is waiting for SDRAM must not be undone by the
+		// fill's tag writeback: the fill may validate only its own way.
+		// (The AmigaOS crash signature of the captured-at-miss tag
+		// implementation: exec's CacheClearU sweep ran during the fill
+		// wait and FILL1 restored the pre-sweep valid bits, resurrecting
+		// flushed lines.)
+		cpu_cache_ctrl[1:0] = 2'b11;
+		repeat (3) @(posedge clk);
+		cpu_adr = 28'h0012340;	// index/block as the earlier tests
+		install_d_line(16'hD00D);	// stale victim line ("tag" holds its tag)
+		cached_read(0, 16'hD00D);	// sanity: it hits before the clear
+
+		cpu_adr = 28'h1012340;	// same index, different tag
+		cpu_ir = 0;
+		cpu_dr = 1;
+		cpu_cs = 1;
+		timeout = 0;
+		while (!sdr_read_req && timeout < 20) begin
+			@(posedge clk);
+			timeout = timeout + 1;
+		end
+		if (!sdr_read_req) begin
+			$display("FAIL: clear-during-fill test did not miss");
+			errors = errors + 1;
+		end
+		// fill is now pending; run a full maintenance sweep before acking
+		cpu_cache_ctrl[3] = ~cpu_cache_ctrl[3];
+		timeout = 0;
+		while (dut.cache_init_done && timeout < 20) begin
+			@(posedge clk);
+			timeout = timeout + 1;
+		end
+		timeout = 0;
+		while (!dut.cache_init_done && timeout < 2000) begin
+			@(posedge clk);
+			timeout = timeout + 1;
+		end
+		if (!dut.cache_init_done) begin
+			$display("FAIL: maintenance sweep did not finish during fill wait");
+			errors = errors + 1;
+		end
+		// complete the four-word fill
+		sdr_dat_r = 16'hF111;
+		sdr_read_ack = 1;
+		timeout = 0;
+		while (!cpu_ack && timeout < 20) begin
+			@(posedge clk);
+			timeout = timeout + 1;
+		end
+		repeat (4) @(posedge clk);
+		sdr_read_ack = 0;
+		cpu_cs = 0;
+		cpu_dr = 0;
+		repeat (2) @(posedge clk);
+		wait_idle;
+		// the swept victim way must stay invalid: a read with the old tag
+		// has to miss again instead of hitting resurrected stale data
+		index = cpu_adr[10:3];
+		if (dut.dtram.mem[index][17:0] == tag &&
+		    dut.dtram.mem[index][38]) begin
+			$display("FAIL: fill writeback resurrected the swept way0 line");
+			errors = errors + 1;
+		end
+		cpu_adr = 28'h0012340;
+		cpu_ir = 0;
+		cpu_dr = 1;
+		cpu_cs = 1;
+		saw_req = 0;
+		timeout = 0;
+		while (!cpu_ack && timeout < 30) begin
+			@(posedge clk);
+			if (sdr_read_req) begin
+				saw_req = 1;
+				sdr_dat_r = 16'hF222;
+				sdr_read_ack = 1;
+			end
+			timeout = timeout + 1;
+		end
+		sdr_read_ack = 0;
+		cpu_cs = 0;
+		cpu_dr = 0;
+		if (!saw_req) begin
+			$display("FAIL: stale tag survived the clear (read hit old line, data=%h)",
+			         cpu_dat_r);
+			errors = errors + 1;
+		end
+		repeat (3) @(posedge clk);
+
 		if (errors == 0) $display("ALL TESTS PASSED");
 		else             $display("TEST FAILED with %0d errors", errors);
 		$finish;

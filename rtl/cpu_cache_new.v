@@ -103,8 +103,8 @@ reg  [39:0] sdr_sm_tag_dat_w;
 reg         sdr_sm_id;
 reg         sdr_sm_ilru;
 reg         sdr_sm_dlru;
-reg  [39:0] miss_itram;   // tag words captured at the miss decision
-reg  [39:0] miss_dtram;
+reg  [39:0] itram_cpu_q;  // one-cycle shadows of the CPU-side tag read
+reg  [39:0] dtram_cpu_q;  //   ports (registered copies for FILL1's cones)
 
 // cpu cache control
 reg         cc_clear_seen;
@@ -286,6 +286,16 @@ assign cpu_adr_blk = cpu_adr[2:1];    // cache block address (inside cache row),
 assign cpu_adr_idx = cpu_adr[10:3];   // cache row address, 8 bits
 assign cpu_adr_tag = cpu_adr[28:11];  // tag, 18 bits
 
+// one-cycle shadows of the CPU-side tag read ports.  FILL1 reads these
+// instead of the live M10K outputs so its update logic starts from a
+// register (timing), yet still tracks tag writes that land during the
+// fill wait (a background cache-clear sweep must not be undone by the
+// fill's tag writeback).
+always @ (posedge clk) begin
+  itram_cpu_q <= itram_cpu_dat_r;
+  dtram_cpu_q <= dtram_cpu_dat_r;
+end
+
 // cpu side state machine
 always @ (posedge clk) begin
   if (rst) begin
@@ -387,13 +397,7 @@ always @ (posedge clk) begin
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= dtram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
         end else begin
-          // on miss fetch data from SDRAM.  Capture both tag words NOW:
-          // they are stable for this address until the fill acknowledges,
-          // and sampling them here keeps the M10K output out of FILL1's
-          // input cones (the tram->tagupd_lru path was a -0.12 ns setup
-          // violator of the 113 MHz floorplan).
-          miss_itram <= itram_cpu_dat_r;
-          miss_dtram <= dtram_cpu_dat_r;
+          // on miss fetch data from SDRAM
           sdr_read_req <= 1'b1;
           cpu_sm_state <= CPU_SM_FILL1;
         end
@@ -415,22 +419,30 @@ always @ (posedge clk) begin
             // don't update cache if caching is inhibited
             cpu_sm_state <= CPU_SM_FILLW;
           end else begin      
-            // update tag ram (deferred one cycle; see tagupd_* regs)
+            // update tag ram (deferred one cycle; see tagupd_* regs).
+            // All tag state feeding this update comes from the one-cycle
+            // shadows itram_cpu_q/dtram_cpu_q: the registered copies keep
+            // the M10K output out of FILL1's input cones (tram->tagupd_lru
+            // was a -0.12 ns setup violator of the 113 MHz floorplan)
+            // while tracking the live tags to within the RAM's own
+            // sync-read latency -- a background cache-clear sweep passing
+            // this index during the fill wait is still honoured, and the
+            // way select below always agrees with the tag word written.
             tagupd_fill_v <= 1'b1;
             tagupd_is_i   <= cpu_ir;
             tagupd_idx    <= cpu_adr_idx;
             tagupd_tag    <= cpu_adr_tag;
-            tagupd_lru    <= cpu_ir ? miss_itram[39] : miss_dtram[39];
-            tagupd_tram   <= cpu_ir ? miss_itram : miss_dtram;
+            tagupd_lru    <= cpu_ir ? itram_cpu_q[39] : dtram_cpu_q[39];
+            tagupd_tram   <= cpu_ir ? itram_cpu_q : dtram_cpu_q;
             // cache line fill 1st word
             cpu_sm_id   <= cpu_ir;
-            cpu_sm_ilru <= miss_itram[39];
-            cpu_sm_dlru <= miss_dtram[39];
+            cpu_sm_ilru <= itram_cpu_q[39];
+            cpu_sm_dlru <= dtram_cpu_q[39];
             cpu_sm_mem_dat_w <= sdr_dat_r;
-            cpu_sm_iram0_we <=  itag_lru &&  cpu_ir;
-            cpu_sm_iram1_we <= !itag_lru &&  cpu_ir;
-            cpu_sm_dram0_we <=  dtag_lru && !cpu_ir;
-            cpu_sm_dram1_we <= !dtag_lru && !cpu_ir;
+            cpu_sm_iram0_we <=  itram_cpu_q[39] &&  cpu_ir;
+            cpu_sm_iram1_we <= !itram_cpu_q[39] &&  cpu_ir;
+            cpu_sm_dram0_we <=  dtram_cpu_q[39] && !cpu_ir;
+            cpu_sm_dram1_we <= !dtram_cpu_q[39] && !cpu_ir;
             cpu_sm_state <= CPU_SM_FILL2;
           end
         end
