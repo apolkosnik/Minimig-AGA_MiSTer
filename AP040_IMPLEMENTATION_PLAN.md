@@ -711,6 +711,44 @@ contract class (cyc kill, ph1/ph2 catching, level-ack consumption) that
 produced the ghost-transaction bug.  After P2, sim and silicon see identical
 cycle relationships, which P3+ depend on for debuggability.
 
+### Where the cycles actually go (measured 2026-08-16)
+
+Profiling every cycle of t_integer by core state (scratch instrumentation
+on tb_ap040_program, `dut.core.state` histogram with a stall column):
+
+    S_FETCH        8798  (1680 stalled)   39.6%
+    S_IMMF         6959  ( 904 stalled)   31.3%
+    S_MRD          1779  ( 365 stalled)    8.0%
+    S_DECODE        904                    4.1%
+    S_EXEC + PIPE  2360                   10.6%
+
+The machine is FETCH-bound, not execute-bound: 71% of cycles fetch
+instruction and immediate words, and only 2584 of those 15757 are memory
+stalls -- the rest is one request/ack handshake per 16-bit word.  Worth
+keeping in mind when weighing execute-side work: the barrel shifter and
+DSP multiply/divide, real as they are, address the ~15% slice.
+
+Taken since, on that same benchmark (23750 -> 20106 cycles, -15.3%):
+
+  2-cycle cache hit          23750 -> 22214   one data RAM per way, so
+                                              the tag compare picks among
+                                              words already read
+  longword instruction fetch 22214 -> 20586   aligned fetches take both
+                                              words, odd one buffered in
+                                              the existing epf queue
+  1-cycle prefetched immed.  20586 -> 20106   consume a queued word in
+                                              the cycle S_IMMF would have
+                                              spent issuing
+
+What remains in S_FETCH is the cache's own two-cycle hit latency, which
+no peephole reaches: the fetch has to be ISSUED while the previous
+instruction still executes.  That is P3 below.  The concrete obstacle is
+that the core has a single memory request port shared with data
+accesses, so a speculative fetch must arbitrate against S_MRD/S_MWR and
+must not fault -- restricting prefetch to the current page makes the
+fault question go away, the same argument that makes the aligned
+longword fetch safe.
+
 ### P3. Overlapped sequencer (in-FSM pipelining, ~1.5-2x CPI on reg ops)
 
 The core already has three semi-independent engines: prefetch queue, EA/
