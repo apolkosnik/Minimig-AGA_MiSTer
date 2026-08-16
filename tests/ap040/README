@@ -70,8 +70,12 @@ Testbenches (Icarus Verilog -g2012 and ModelSim, see run_tests.sh):
                         (every arbitrated case matched the PRM on AP040).
 
   run_cputest.py       WinUAE cputest v20 corpus replay through the real AP040
-                        RTL and 16-bit compatibility bus, using either Icarus
-                        or the substantially faster compiled Verilator model.
+                        RTL and 16-bit compatibility bus.  Defaults to the
+                        compiled Verilator model and one job per core: the
+                        full 1911-slice corpus takes ~7 minutes instead of
+                        ~3 hours under Icarus, for identical results (same
+                        1875/1911, same 36 failing slices).  --simulator
+                        iverilog cross-checks a result on a second engine.
                         It reads
                         data040.zip directly, validates every per-instruction
                         header and per-slice envelope, expands delta state one

@@ -8,8 +8,9 @@ Examples:
   # Every one of the 1,911 data slices; split safely across four machines
   ./run_cputest.py /path/to/data040.zip --full --shard 0/4 --jobs 2
 
-  # Native-code RTL simulation (normally much faster than vvp)
-  ./run_cputest.py /path/to/data040.zip --simulator verilator
+  # Cross-check a result under Icarus (the default backend is Verilator,
+  # which is ~26x faster over the full corpus for identical results)
+  ./run_cputest.py /path/to/data040.zip --simulator iverilog
 
   # Codec/envelope audit only (no RTL simulation)
   ./run_cputest.py /path/to/data040.zip --audit
@@ -410,9 +411,14 @@ def parser():
     ap.add_argument("--instruction", action="append", default=[], metavar="GLOB")
     ap.add_argument("--slice", action="append", default=[], metavar="GLOB")
     ap.add_argument("--shard", metavar="INDEX/COUNT")
-    ap.add_argument("--jobs", type=int, default=1, help="parallel RTL processes")
+    ap.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 16),
+                    help="parallel RTL processes (default: cores, capped at 16)")
+    # Verilator compiles the design to native code: measured 26x faster over
+    # the full 1911-slice corpus (7m09s vs 3h07m) for identical results --
+    # same 1875/1911, same 36 failing slices.  Icarus stays available for
+    # cross-checking a suspicious result against a second simulator.
     ap.add_argument("--simulator", choices=("iverilog", "verilator"),
-                    default="iverilog", help="RTL simulation backend")
+                    default="verilator", help="RTL simulation backend")
     ap.add_argument("--build-jobs", type=int,
                     help="parallel C++ compiler jobs for a Verilator build")
     ap.add_argument("--compile-only", action="store_true",
