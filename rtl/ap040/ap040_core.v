@@ -169,6 +169,14 @@ always @(posedge clk) begin
 		irq_ack_d <= irq_ack_t;
 		if (irq_ack_t != irq_ack_d)
 			irq_hold_lvl <= 3'd0;
+		// The hold exists to survive a MASK change, not the source going
+		// away.  A 68040 requires the requesting device to keep IPL
+		// asserted until the CPU acknowledges; if it drops the request
+		// first, the interrupt is simply not taken.  Track the pins down
+		// so a withdrawn request cannot fire later as a phantom
+		// interrupt at the next instruction boundary.
+		else if (irq_hold_lvl > irq_lvl)
+			irq_hold_lvl <= irq_lvl;
 		else if (irq_lvl != 3'd0 && irq_lvl != 3'd7 &&
 		         irq_lvl > sr[10:8] && irq_lvl > irq_hold_lvl)
 			irq_hold_lvl <= irq_lvl;

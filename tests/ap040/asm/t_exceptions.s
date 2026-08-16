@@ -15,6 +15,8 @@
 FAILREG	equ	$F100
 DONEREG	equ	$F102
 IPLREG	equ	$F110
+IPLPULSE	equ	$F14C	; raise IPL, then withdraw it N cycles later
+IPLDLY	equ	$F148	; raise IPL N cycles from now
 FCREG	equ	$F120
 BERRCTL equ	$F142
 IRQEXCCTL equ	$F144
@@ -564,6 +566,48 @@ fetch_irq_done:
 	bne.s	fetch_irq_guarded
 	failt	105
 fetch_irq_guarded:
+
+	; A device that drops its request before the CPU acknowledges it must
+	; not produce an interrupt.  The 68040 requires IPL to be held until
+	; acknowledged; the internal mask-qualified hold exists so a later
+	; MOVE to SR raising the mask cannot lose a pending request, and it
+	; must not outlive the request itself -- otherwise the level fires as
+	; a phantom interrupt at the next instruction boundary, long after
+	; the device let go.
+	move.w	#$2000,sr		; mask 0, so the level qualifies at once
+	move.w	(cnt_int2).l,d5		; remember the count
+	move.w	#$0202,(IPLPULSE).l	; IPL2, withdrawn two cycles later: the
+	nop				; pins are idle again before this
+	nop				; instruction boundary, so a core that
+	nop				; holds the level fires a phantom here
+	move.w	#$2700,sr
+	move.w	(cnt_int2).l,d6
+	cmp.w	d5,d6
+	beq.s	irq_withdraw_ok
+	failt	135			; phantom interrupt from a dropped request
+irq_withdraw_ok:
+
+	; The other half of the same rule: a request that DID qualify keeps
+	; its claim even though the very next instruction raises the mask.
+	; The 68040 sets IPEND when the level beats the mask, and an
+	; interrupt whose IPEND is set is taken at the next instruction
+	; boundary regardless of a mask raised in the meantime.  Time the
+	; request to arrive inside the MOVE to SR that masks it.
+	move.w	#$2000,sr		; mask 0 while the request arrives
+	move.w	(cnt_int2).l,d5
+	move.w	#6,(IPLDLY).l
+	move.w	#$2700,sr		; request qualifies inside this insn
+	nop
+	nop
+	nop
+	move.w	(cnt_int2).l,d6
+	sub.w	d5,d6
+	cmp.w	#1,d6
+	beq.s	irq_hold_ok
+	failt	136			; qualified request lost to a later mask
+irq_hold_ok:
+	move.w	#0,(IPLREG).l
+	move.w	#$2700,sr
 
 ;-------------------- immediate group: destination must be data alterable
 ; ORI/ANDI/SUBI/ADDI/EORI with a PC-relative or immediate destination are

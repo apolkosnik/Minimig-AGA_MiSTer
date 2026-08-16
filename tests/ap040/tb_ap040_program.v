@@ -53,6 +53,7 @@ wire        clkena_in = (busstate == 2'b01) | mem_ready | berr;
 
 reg   [2:0] ipl_lvl;
 reg  [15:0] ipl_delay = 0;   // $F148: delayed level-2 IPL countdown
+reg   [7:0] ipl_pulse = 0;   // $F14C: withdraw the request after N cycles
 // +exctrace: print every exception entry (vector, pc) for A/B diffing
 reg [7:0] et_prev = 0;
 always @(posedge clk) begin
@@ -263,6 +264,20 @@ always @(posedge clk) begin
 	else if (ipl_delay != 0) begin
 		ipl_delay <= ipl_delay - 1'd1;
 		if (ipl_delay == 16'd1) ipl_lvl <= 3'd2;
+	end
+
+	// $F14C models a device that WITHDRAWS its request: IPL rises to the
+	// written level and drops again after the written number of cycles,
+	// without waiting to be acknowledged.  A 68040 requires the request
+	// to be held until acknowledged, so nothing may be taken from it.
+	if (nreset && mem_ready && busstate == 2'b11 &&
+	    addr_out[15:0] == 16'hF14C) begin
+		ipl_lvl   <= data_write[2:0];
+		ipl_pulse <= data_write[15:8];
+	end
+	else if (ipl_pulse != 0) begin
+		ipl_pulse <= ipl_pulse - 1'd1;
+		if (ipl_pulse == 8'd1) ipl_lvl <= 3'd0;
 	end
 end
 
