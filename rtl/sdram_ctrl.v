@@ -138,10 +138,11 @@ reg [15:0]  walker_read_lo;
 // the low half at state 6 also leaves the cache idle after the high-half
 // write; the former state-2/state-4 pulses made the low request arrive while
 // the cache was busy and changed the live RAM address under the high write.
-wire        walker_snoop_hi = (slot_type == WALKER_WRITE) &&
-						   (sdram_state >= 4'd2) && (sdram_state <= 4'd5);
-wire        walker_snoop_lo = (slot_type == WALKER_WRITE) &&
-						   (sdram_state >= 4'd6) && (sdram_state <= 4'd9);
+// registered one cycle ahead (see the pre-decode block by the state
+// counter): the raw range compares fed the cache's snoop tag-match cone
+// straight from sdram_state and violated setup at 113 MHz
+reg         walker_snoop_hi;
+reg         walker_snoop_lo;
 wire        walker_snoop = walker_snoop_hi | walker_snoop_lo;
 wire [24:1] walker_snoop_addr = {walker_addr_latch, walker_snoop_lo};
 wire [15:0] walker_snoop_data = walker_snoop_lo
@@ -302,6 +303,24 @@ always @ (posedge sysclk) begin
 
 	old_7m <= c_7m;
 	if(~old_7m & c_7m) sdram_state <= 0;
+end
+
+// One-cycle pre-decodes of the state selects that feed SDRAM pin
+// registers and the cache snoop cone.  next_sdram_state mirrors the
+// counter including the 7MHz resync, so every flag is exact even on the
+// cycle the counter is yanked back to zero.
+reg        old_7m_q;
+reg        ras_go;          // high during state 0
+reg        walker_cas2_go;  // high during state 4 of a walker write slot
+always @ (posedge sysclk) old_7m_q <= c_7m;
+wire [3:0] next_sdram_state = (~old_7m_q & c_7m) ? 4'd0 : (sdram_state + 4'd1);
+always @ (posedge sysclk) begin
+	ras_go         <= (next_sdram_state == 4'd0);
+	walker_cas2_go <= (slot_type == WALKER_WRITE) && (next_sdram_state == 4'd4);
+	walker_snoop_hi <= (slot_type == WALKER_WRITE) &&
+	                   (next_sdram_state >= 4'd2) && (next_sdram_state <= 4'd5);
+	walker_snoop_lo <= (slot_type == WALKER_WRITE) &&
+	                   (next_sdram_state >= 4'd6) && (next_sdram_state <= 4'd9);
 end
 
 //// sdram control ////
@@ -474,8 +493,15 @@ always @ (posedge sysclk) begin
 
 		case(sdram_state)
 
-			// RAS
-			0 : begin
+			// RAS, CAS and the walker's second CAS are keyed on the
+			// one-cycle pre-decoded ras_go/cas_go/walker_cas2_go flags in
+			// the blocks below the case, so the sd_* pin registers see
+			// single-signal selects instead of 4-bit state compares
+			2 : write_ack <= 0; // safe to accept the next write
+		endcase
+
+		// RAS slot arbitration (state 0)
+		if (ras_go) begin
 				cas_sd_cas      <= 1;
 				cas_sd_we       <= 1;
 				cas_dqm         <= 0;
@@ -528,27 +554,21 @@ always @ (posedge sysclk) begin
 					sd_cas       <= 0;
 					rcnt         <= 0;
 				end
-			end
+		end
 
-			// CAS command moved below the case, keyed on the one-cycle
-			// pre-decoded cas_go flag so the sd_* pin registers see a
-			// single-signal select instead of the 4-bit state compare
-			2 : write_ack <= 0; // safe to accept the next write
-
-			// The mode word sets A9 (write burst = single location), so a
-			// data beat after the CAS cycle is IGNORED by the chip -- the
-			// original code lost the low word of every 32-bit walker
-			// write.  Issue a second single-write CAS to column+1 with
-			// the low word instead (tCCD=1 on SDR makes back-to-back
-			// writes two states apart legal).
-			4 : if (walker_wr_slot) begin
+		// walker write: second single-write CAS to column+1 (state 4).
+		// The mode word sets A9 (write burst = single location), so a data
+		// beat after the CAS cycle is IGNORED by the chip -- without this
+		// the low word of every 32-bit walker write is lost (tCCD=1 on SDR
+		// makes back-to-back writes two states apart legal).
+		if (walker_cas2_go) begin
 				sd_addr      <= {1'b1, casaddr[9:1], 1'b1}; // col+1, A10 precharge
 				sd_cas       <= 0;
 				sd_we        <= 0;
 				sd_data      <= walker_wdata_latch[15:0];
 				sd_dqm       <= 0;
-			end
-		endcase
+		end
+
 
 		// CAS: all qualifiers (cas_sd_cas/cas_sd_we/cas_dqm/casaddr/
 		// datawr) are registers latched at the RAS state, so with the
