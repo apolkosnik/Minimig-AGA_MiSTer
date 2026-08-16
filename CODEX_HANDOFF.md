@@ -1,5 +1,43 @@
 # Handoff: AP040 cputest chip-RAM corruption investigation
 
+## Claude update: 2026-08-16 -- external-cache line resurrection (crash candidate)
+
+User reported random AmigaOS crashes on the 19:55 RBF (build 413010).
+Found and fixed a real cache-coherence regression that shipped in it.
+
+- The timing retime in 9580a2a8 changed cpu_cache_new's FILL1 tag
+  writeback to use a snapshot of the tag row taken at the miss
+  decision.  That writeback composes the OTHER way's tag and valid bit
+  from that row, and the CPU-side tag RAM port is free-running, so the
+  original code deliberately read the row LIVE.  With the snapshot, a
+  maintenance sweep that runs during the fill wait is undone: the
+  writeback restores valid bits the sweep cleared and resurrects
+  flushed lines with stale data under them.  AmigaOS sweeps caches on
+  every Load/Seg, so this is a plausible source of the crashes.
+- Fixed in 6f2310e7 (free-running one-cycle shadows keep FILL1's cones
+  registered AND track tag writes) and hardened in 959c11d7 (no CPU
+  side tag writeback at all while a clear is pending -- closes the
+  narrower hit-path window by construction).
+- Regression test: tests/ap040/tb_cpu_cache_new.v.  The window is only
+  reachable on the sweep's FINAL pass, because the clear stays pending
+  until the CPU side accepts it (only possible once the fill retires),
+  so earlier passes clean up after a bad writeback.  A test that does
+  not time the fill acknowledgement past the swept row passes on broken
+  RTL -- two earlier versions of this test did exactly that.
+- The sdram_ctrl RAS/CAS/walker pre-decodes (40d27077) were checked by
+  lockstep co-simulation against the pre-retime controller: SDRAM pins
+  and CPU-side responses cycle-identical across full t_integer and
+  t_fpu runs.
+
+Coverage note: t_cache runs only on the direct bench.  Its staleness
+expectations (stale I-line after a self-modifying write, DMA poke
+invisible until CINVA) are internal-cache semantics; cpu_cache_new
+updates I-lines on CPU writes and snoops chipset writes, both of which
+are architecturally permitted and stronger.  Porting t_cache to the
+turbo benches was attempted and rejected for that reason; the external
+cache's maintenance paths are covered by tb_cpu_cache_new's directed
+tests instead.
+
 ## Note 2026-08-15 (corrected twice): cputest irq/all on hardware
 
 Hardware `cputest irq/all` fails (first at IRQ/ANDSR.B round 1: "SR:
