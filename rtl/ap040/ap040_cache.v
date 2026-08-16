@@ -3,7 +3,7 @@
 //                                                                          //
 // ap040_cache.v - internal instruction and data caches (milestone G)       //
 //                                                                          //
-// 2KB per side: 32 sets x 4 ways x 16 byte lines, physically tagged        //
+// 4KB per side: 64 sets x 4 ways x 16 byte lines, physically tagged        //
 // (sits between the MMU and the 16-bit bus adapter). Write-through with    //
 // invalidate-on-write: writes always go to memory and clear any matching   //
 // data cache set, so no dirty state ever exists and CPUSH degenerates to   //
@@ -64,42 +64,26 @@ module ap040_cache
 // storage
 //---------------------------------------------------------------------------
 
-// The tag row carries everything the lookup needs: 4 tags, their valid
-// bits and the round-robin victim pointer.  Keeping validity and LRU here
-// instead of in flop arrays puts them in M10K with the tags (the flop
-// version cost ~2% of the device in LABs, which is what kept the internal
-// caches from fitting).  The price is that invalidation becomes a write
-// rather than a broadcast clear: reset and CINV sweep the rows, and a
-// store invalidates through a second write port.
-(* ramstyle = "no_rw_check" *) reg [97:0] ctag [0:63];    // {rr, valid, tags}
-(* ramstyle = "no_rw_check" *) reg [31:0] cdata [0:1023];  // {bank, set, way, word}
+(* ramstyle = "no_rw_check" *) reg [87:0] ctag [0:127];   // 4 way tags per row
+(* ramstyle = "no_rw_check" *) reg [31:0] cdata [0:2047];  // {bank, set, way, word}
+reg         cval [0:511];        // {bank, set, way}
+reg   [1:0] crr  [0:127];        // round robin per {bank, set}
 
-reg  [97:0] tag_q;               // no reset: RAM read-side registers
+reg  [87:0] tag_q;               // no reset: RAM read-side registers
 reg  [31:0] data_q;
 
 // RAM control (driven combinationally from the FSM state so the arrays
 // infer as block RAM: no resets, enable-gated synchronous reads)
 wire        tag_rd_en, tag_we;
-wire  [5:0] tag_ridx, tag_widx;
-wire [97:0] tag_wdat;
-// second write port, used only to invalidate on a store
-wire        inv_we;
-wire  [5:0] inv_idx;
+wire  [6:0] tag_ridx, tag_widx;
+wire [87:0] tag_wdat;
 wire        cd_rd_en, cd_we;
-wire  [9:0] cd_ridx, cd_widx;
+wire [10:0] cd_ridx, cd_widx;
 wire [31:0] cd_wdat;
 
 always @(posedge clk) begin
 	if (ce & tag_we)    ctag[tag_widx] <= tag_wdat;
 	if (ce & tag_rd_en) tag_q <= ctag[tag_ridx];
-end
-
-// Port B: store invalidation.  A cleared row is simply an invalid row --
-// the tags left behind are never consulted without their valid bit -- so
-// this port never needs to read first.  It can only fire while port A is
-// idle (one request is in flight at a time), so the two never collide.
-always @(posedge clk) begin
-	if (ce & inv_we) ctag[inv_idx] <= 98'd0;
 end
 
 always @(posedge clk) begin
@@ -125,9 +109,9 @@ wire  [2:0] write_tail = (c_size == `AP040_SZ_B) ? 3'd0 :
 wire        write_cross_line = ({1'b0, c_addr[3:0]} +
                                  {2'd0, write_tail}) > 5'd15;
 
-wire  [4:0] a_set  = c_addr[8:4];
-wire [22:0] a_tag  = c_addr[31:9];
-wire  [5:0] a_row  = {c_instr, a_set};
+wire  [5:0] a_set  = c_addr[9:4];
+wire [21:0] a_tag  = c_addr[31:10];
+wire  [6:0] a_row  = {c_instr, a_set};
 
 // cacheable read acceptance out of idle (shared with the tag RAM read)
 wire rd_accept;
@@ -139,19 +123,14 @@ wire rd_accept;
 localparam C_IDLE  = 3'd0;
 localparam C_LOOK  = 3'd1;
 localparam C_RDD   = 3'd2;
-localparam C_WINV  = 3'd3;   // second-line invalidate owed by a store
+localparam C_ACK   = 3'd3;
 localparam C_FILL  = 3'd4;
 localparam C_TAGW  = 3'd5;
 localparam C_PASS  = 3'd6;
-localparam C_SWEEP = 3'd7;   // reset / CINV: walk the rows clearing them
 
 reg   [2:0] cst;
-reg   [5:0] sweep_cnt;
-reg         sweep_all;   // reset sweep: clear both banks
-reg         winv_pend;   // a store still owes its second-line invalidate
-reg   [4:0] winv_set2;
-reg   [5:0] r_row;
-reg  [22:0] r_tag;
+reg   [6:0] r_row;
+reg  [21:0] r_tag;
 reg   [3:0] r_word;              // {word[1:0]} of the request, plus bank/way
 reg   [1:0] r_way;
 reg         r_bank;
@@ -164,14 +143,14 @@ reg  [31:0] fill_hold;           // requested longword captured during fill
 reg         ack_r;
 reg  [31:0] rdata_r;
 
-wire [22:0] t_w0 = tag_q[22:0];
-wire [22:0] t_w1 = tag_q[45:23];
-wire [22:0] t_w2 = tag_q[68:46];
-wire [22:0] t_w3 = tag_q[91:69];
-wire v_w0 = tag_q[92];
-wire v_w1 = tag_q[93];
-wire v_w2 = tag_q[94];
-wire v_w3 = tag_q[95];
+wire [21:0] t_w0 = tag_q[21:0];
+wire [21:0] t_w1 = tag_q[43:22];
+wire [21:0] t_w2 = tag_q[65:44];
+wire [21:0] t_w3 = tag_q[87:66];
+wire v_w0 = cval[{r_bank, r_row[5:0], 2'd0}];
+wire v_w1 = cval[{r_bank, r_row[5:0], 2'd1}];
+wire v_w2 = cval[{r_bank, r_row[5:0], 2'd2}];
+wire v_w3 = cval[{r_bank, r_row[5:0], 2'd3}];
 wire h0 = v_w0 && (t_w0 == r_tag);
 wire h1 = v_w1 && (t_w1 == r_tag);
 wire h2 = v_w2 && (t_w2 == r_tag);
@@ -223,45 +202,29 @@ assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
 
 assign tag_rd_en = rd_accept;
 assign tag_ridx  = a_row;
-// Port A writes either a completed fill's row or a swept (cleared) row.
-wire [91:0] tags_next = (r_way == 2'd0) ? {tag_q[91:23], r_tag} :
-                        (r_way == 2'd1) ? {tag_q[91:46], r_tag, tag_q[22:0]} :
-                        (r_way == 2'd2) ? {tag_q[91:69], r_tag, tag_q[45:0]} :
-                                          {r_tag, tag_q[68:0]};
-wire  [3:0] val_next  = tag_q[95:92] | (4'd1 << r_way);
-wire        sweep_hit = sweep_all ||
-                        (sweep_cnt[5] ? cinv_ic : cinv_dc);
-assign tag_we    = (cst == C_TAGW) || ((cst == C_SWEEP) && sweep_hit);
-assign tag_widx  = (cst == C_SWEEP) ? sweep_cnt : r_row;
-assign tag_wdat  = (cst == C_SWEEP) ? 98'd0
-                                    : {tag_q[97:96] + 2'd1, val_next, tags_next};
-
-// Port B: a store invalidates the data-bank set it touches (and the next
-// set when the transfer crosses the line).  The 68040 leaves the
-// instruction cache alone here, which is why only bank 0 is cleared.
-assign inv_we    = ((cst == C_IDLE) && c_req && c_write && !ack_r) ||
-                   ((cst == C_PASS) && winv_pend) ||
-                   (cst == C_WINV);
-assign inv_idx   = (cst == C_IDLE) ? {1'b0, c_addr[8:4]} : {1'b0, winv_set2};
+assign tag_we    = (cst == C_TAGW);
+assign tag_widx  = r_row;
+assign tag_wdat  = (r_way == 2'd0) ? {tag_q[87:22], r_tag} :
+                   (r_way == 2'd1) ? {tag_q[87:44], r_tag, tag_q[21:0]} :
+                   (r_way == 2'd2) ? {tag_q[87:66], r_tag, tag_q[43:0]} :
+                                     {r_tag, tag_q[65:0]};
 assign cd_rd_en  = (cst == C_LOOK) && look_hit;
-assign cd_ridx   = {r_bank, r_row[4:0], hit_way, r_addr[3:2]};
+assign cd_ridx   = {r_bank, r_row[5:0], hit_way, r_addr[3:2]};
 assign cd_we     = (cst == C_FILL) && r_issued && m_ack;
-assign cd_widx   = {r_bank, r_row[4:0], r_way, r_beat};
+assign cd_widx   = {r_bank, r_row[5:0], r_way, r_beat};
 assign cd_wdat   = m_rdata;
+
+integer k;
 
 always @(posedge clk) begin
 	if (!nreset) begin
-		// the tag RAM has no reset, so sweep it clear before serving
-		// anything: a garbage row would otherwise read back as a hit
-		cst <= C_SWEEP;
-		sweep_cnt <= 0;
-		sweep_all <= 1;
-		winv_pend <= 0;
-		winv_set2 <= 0;
+		cst <= C_IDLE;
 		cinv_done <= 0;
 		r_row <= 0; r_tag <= 0; r_word <= 0; r_way <= 0; r_bank <= 0;
 		r_beat <= 0; r_issued <= 0; r_addr <= 0; r_size <= 0; r_off <= 0;
 		fill_hold <= 0; ack_r <= 0; rdata_r <= 0;
+		for (k = 0; k < 512; k = k + 1) cval[k] <= 0;
+		for (k = 0; k < 128; k = k + 1) crr[k] <= 0;
 	end
 	else if (ce) begin
 		ack_r <= 0;
@@ -270,24 +233,24 @@ always @(posedge clk) begin
 		case (cst)
 			C_IDLE: begin
 				if (cinv_req && !cinv_done) begin
-					sweep_cnt <= 0;
-					sweep_all <= 0;   // honour the cinv_ic/cinv_dc selects
-					cst <= C_SWEEP;
+					for (k = 0; k < 512; k = k + 1) begin
+						if ((k[8] && cinv_ic) || (!k[8] && cinv_dc))
+							cval[k] <= 0;
+					end
+					cinv_done <= 1;
 				end
 				else if (c_req && !ack_r) begin
 					if (c_write) begin
-						// write-through.  Port B clears the set this store
-						// touches; a store that crosses the line owes a
-						// second one, which is taken either during the pass
-						// wait or in C_WINV if the write acked immediately.
-						winv_set2 <= c_addr[8:4] + 5'd1;
-						if (m_ack) begin
-							if (write_cross_line) cst <= C_WINV;
+						// write-through: invalidate both possibly touched
+						// data cache sets while the write passes through
+						for (k = 0; k < 4; k = k + 1) begin
+							cval[{1'b0, c_addr[9:4], k[1:0]}] <= 0;
+							cval[{1'b0, c_addr[9:4] + 6'd1, k[1:0]}] <=
+								write_cross_line ? 1'b0
+								: cval[{1'b0, c_addr[9:4] + 6'd1, k[1:0]}];
 						end
-						else begin
-							winv_pend <= write_cross_line;
-							cst <= C_PASS;
-						end
+						if (m_ack) ;   // pass path acks combinationally
+						else cst <= C_PASS;
 					end
 					else if (bypass) begin
 						if (!m_ack) cst <= C_PASS;
@@ -306,22 +269,7 @@ always @(posedge clk) begin
 				end
 			end
 
-			C_PASS: begin
-				winv_pend <= 0;   // port B takes it in this same cycle
-				if (m_ack) cst <= C_IDLE;
-			end
-
-			C_WINV: cst <= C_IDLE;
-
-			C_SWEEP: begin
-				// one row per cycle; port A writes it (see sweep_hit)
-				sweep_cnt <= sweep_cnt + 6'd1;
-				if (sweep_cnt == 6'd63) begin
-					if (!sweep_all) cinv_done <= 1;
-					sweep_all <= 0;
-					cst <= C_IDLE;
-				end
-			end
+			C_PASS: if (m_ack) cst <= C_IDLE;
 
 			C_LOOK: begin
 				if (look_hit) begin
@@ -329,7 +277,7 @@ always @(posedge clk) begin
 					cst <= C_RDD;
 				end
 				else begin
-					r_way <= tag_q[97:96];   // round-robin victim
+					r_way <= crr[r_row];
 					r_beat <= 0;
 					r_issued <= 0;
 					cst <= C_FILL;
@@ -354,8 +302,9 @@ always @(posedge clk) begin
 			end
 
 			C_TAGW: begin
-				// the tag row write runs in parallel (tag_we): it carries
-				// the new tag, its valid bit and the advanced round robin
+				// the tag row write runs in parallel (tag_we)
+				cval[{r_bank, r_row[5:0], r_way}] <= 1;
+				crr[r_row] <= crr[r_row] + 2'd1;
 				rdata_r <= lw_extract(fill_hold, r_size, r_off);
 				ack_r <= 1;
 				cst <= C_IDLE;
