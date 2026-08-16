@@ -717,7 +717,7 @@ initial begin
 	// interrupt delivery needs the chip stage machine to see the ph2
 	// pulse: only the real-hardware alignment (CPU_PHASE 3) does; at
 	// other phases the capability word stays 0 and t_fpu skips its soak
-	mem[16'hF14A >> 1] = (CPU_PHASE[1:0] == 2'd3) ? 16'h0001 : 16'h0000;
+	mem[16'hF160 >> 1] = (CPU_PHASE[1:0] == 2'd3) ? 16'h0001 : 16'h0000;
 	for (i = 0; i < 16; i = i + 1) begin
 		rd_pipe_dat[i] = 0;
 		rd_pipe_en[i] = 0;

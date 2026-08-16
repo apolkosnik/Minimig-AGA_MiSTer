@@ -184,7 +184,7 @@ initial begin
 	for (i = 0; i < 32768; i = i + 1) mem[i] = 16'h0000;
 	$readmemh(prog_file, mem);
 	// interrupt-injection capability word (see t_fpu IRQ soak)
-	mem[16'hF14A >> 1] = 16'h0001;
+	mem[16'hF160 >> 1] = 16'h0001;
 
 	reset = 0;
 	repeat (50) @(posedge clk);

@@ -45,6 +45,12 @@ ap040_tg68k_compat dut
 (
 	.clk(clk),
 	.nreset(nreset),
+	.cache_allow_all(1'b1),
+	.cache_z2_ena(1'b0),
+	.cache_z3_base0(5'd0),
+	.cache_z3_ena0(1'b0),
+	.cache_z3_base1(4'd0),
+	.cache_z3_ena1(1'b0),
 	.clkena_in(clkena_in),
 	.data_in(data_in),
 	.ipl(3'b111),

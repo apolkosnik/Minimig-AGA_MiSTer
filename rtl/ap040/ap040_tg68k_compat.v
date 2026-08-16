@@ -23,6 +23,18 @@ module ap040_tg68k_compat
 	input         clk,
 	input         nreset,
 	input         clkena_in,
+
+	// Physical cacheability windows for the internal caches when no MMU
+	// translation supplies CM attributes: only configured fast RAM may be
+	// cached (chip RAM is chipset-DMA-written and never snooped here; IO
+	// and unconfigured space must never be cached).  cache_allow_all
+	// bypasses the windows for flat simulation environments.
+	input         cache_allow_all,
+	input         cache_z2_ena,
+	input   [4:0] cache_z3_base0,
+	input         cache_z3_ena0,
+	input   [3:0] cache_z3_base1,
+	input         cache_z3_ena1,
 	input  [15:0] data_in,
 	input  [2:0]  ipl,
 	input         ipl_autovector,
@@ -234,6 +246,12 @@ ap040_mmu mmu (
 
 generate
 if (AP040_ENABLE_CACHE != 0) begin : g_cache
+	wire cache_win =
+		((mm_addr[31:27] == cache_z3_base0) && cache_z3_ena0) ||
+		((mm_addr[31:28] == cache_z3_base1) && cache_z3_ena1) ||
+		(!mm_addr[31:24] && (mm_addr[23] ^ |mm_addr[22:21]) && cache_z2_ena);
+	wire cache_allow = cache_allow_all | cache_win;
+
 	ap040_cache cache (
 		.clk(clk),
 		.nreset(nreset),
@@ -254,7 +272,7 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.c_addr(mm_addr),
 		.c_wdata(mm_wdata),
 		.c_fc(mm_fc),
-		.c_nocache(mm_nocache),
+		.c_nocache(mm_nocache | ~cache_allow),
 		.c_ack(mm_ack),
 		.c_rdata(mm_rdata),
 

@@ -10,7 +10,7 @@ FAILREG		equ	$F100
 DONEREG		equ	$F102
 IPLREG		equ	$F110
 IPLDLY		equ	$F148
-IPLCAP		equ	$F14A
+IPLCAP		equ	$F160
 cnt_int2	equ	$360C
 cnt_fpunimp	equ	$3600
 cnt_fpdz	equ	$3602
@@ -83,6 +83,13 @@ ok\@:
 
 	org	$400
 start:
+;------------------------------------------------- run cache-hot (P1)
+; The FPU battery (extended-precision memory operands, FSAVE frames,
+; the IRQ soak's handler stack traffic) executes with both internal
+; caches enabled.
+	move.l	#$80008000,d0
+	movec	d0,cacr
+
 	clr.w	(cnt_fpunimp).l
 	clr.w	(cnt_fpunsup).l
 	clr.w	(cnt_fpdz).l

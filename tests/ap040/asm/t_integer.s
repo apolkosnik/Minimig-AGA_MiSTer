@@ -43,6 +43,14 @@ ok\@:
 
 	org	$400
 start:
+;------------------------------------------------- run cache-hot (P1)
+; The whole integer battery executes with both internal caches enabled:
+; every test after this point doubles as I/D-cache-hit coverage.  The
+; caches are write-through with invalidate-on-write, so no test below
+; needs cache maintenance.
+	move.l	#$80008000,d0
+	movec	d0,cacr
+
 ;----------------------------------------------------------------- moveq
 	moveq	#-1,d0
 	chkl	d0,$FFFFFFFF,1

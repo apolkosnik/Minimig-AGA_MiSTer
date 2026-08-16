@@ -68,6 +68,12 @@ ap040_tg68k_compat dut
 (
 	.clk(clk),
 	.nreset(nreset),
+	.cache_allow_all(1'b1),
+	.cache_z2_ena(1'b0),
+	.cache_z3_base0(5'd0),
+	.cache_z3_ena0(1'b0),
+	.cache_z3_base1(4'd0),
+	.cache_z3_ena1(1'b0),
 	.clkena_in(clkena_in),
 	.data_in(data_in),
 	.ipl(~ipl_lvl),
@@ -360,8 +366,7 @@ always @(posedge clk) begin
 			if (addr_out[15:0] == 16'hF102 && !nuds && !nlds) begin
 				if (data_write == 16'h600D) result = 1;
 				else begin
-					errors = errors + 1;
-					$display("FAIL: program reports failure, test %0d (phase %0d, pc=%h, ill=%0d, addr=%0d)",
+					errors = errors + 1;					$display("FAIL: program reports failure, test %0d (phase %0d, pc=%h, ill=%0d, addr=%0d)",
 					         mem[16'hF100 >> 1], phase, dbg_pc,
 					         mem[16'h3602 >> 1], mem[16'h361E >> 1]);
 					result = 2;
@@ -427,7 +432,7 @@ task run_phase;
 		$readmemh(prog_file, mem);
 		// interrupt-injection capability word: t_fpu's IRQ soak runs
 		// only where the bench can deliver IPL
-		mem[16'hF14A >> 1] = 16'h0001;
+		mem[16'hF160 >> 1] = 16'h0001;
 
 		nreset = 0;
 		repeat (10) @(posedge clk);

@@ -222,7 +222,7 @@ end
 ap040_tg68k_compat #(
 	// internal caches off: cpu_cache_new in the RAM controllers already
 	// provides (snooped) caching on this fabric
-	.AP040_ENABLE_CACHE(0),
+	.AP040_ENABLE_CACHE(1),
 	// FPU hardware subset (milestone H): FMOVE all formats, FMOVEM,
 	// FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FTST with IEEE rounding;
 	// unimplemented ops trap to the FPSP route like real 040 silicon
@@ -232,6 +232,12 @@ ap040_tg68k_compat #(
 	.clk(clk),
 	.nreset(reset),
 	.clkena_in(~cpu_req | bus_complete | bus_berr),
+	.cache_allow_all(1'b0),
+	.cache_z2_ena(z2ram_ena),
+	.cache_z3_base0(z3ram_base0),
+	.cache_z3_ena0(z3ram_ena0),
+	.cache_z3_base1(z3ram_base1),
+	.cache_z3_ena1(z3ram_ena1),
 	.data_in(cpu_din),
 	.ipl(cpu_ipl),
 	.ipl_autovector(1'b1),
