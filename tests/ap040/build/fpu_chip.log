@@ -1,0 +1,5 @@
+tb_cpu_wrapper_chip: running build/t_fpu.hex over the 7MHz chip bus
+WARNING: tb_cpu_wrapper_chip.v:187: $readmemh(build/t_fpu.hex): Not enough words in the file for the requested range [0:32767].
+chip-bus run passed (666441 cycles)
+ALL TESTS PASSED
+tb_cpu_wrapper_chip.v:212: $finish called at 26659595 (1ns)

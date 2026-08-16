@@ -1,0 +1,604 @@
+AP040 test suite
+================
+
+Testbenches (Icarus Verilog -g2012 and ModelSim, see run_tests.sh):
+
+  tb_ap040_reset.v      milestone B: reset vector fetch, 16-bit bus adapter
+                        sequencing (byte lanes, misaligned word/long), MOVE/
+                        MOVEQ/MOVEA/Bcc subset, wait-state robustness
+  tb_ap040_bus16_gap.v  split-transfer integration: models the RAM/cache
+                        controllers' held acknowledge and requires a sampled
+                        IDLE boundary between accepted 16-bit subcycles
+  tb_sdram_turbo.v     full t_fpu through cpu_wrapper, cpu_cache_new and
+                        sdram_ctrl at the board's phase-locked 28/114 MHz
+                        ratio, including periodic chipset DMA contention
+  tb_ap040_program.v    runs a self-checking assembled program twice (back to
+                        back ready and varied wait states):
+    asm/t_integer.s     milestone C integer ISA: MOVE/MOVEA all EA modes incl.
+                        full 68020 extension words and memory indirect, ALU
+                        ops with exact CCR checks, ADDX/SUBX/NEGX stickiness,
+                        shifts/rotates incl. count 0 and over-width, bit ops,
+                        word and long MUL/DIV incl. 64-bit forms and overflow,
+                        BCD, EXT/EXTB/SWAP/EXG, LINK/UNLK (.W/.L), JSR/BSR/
+                        RTS/RTD, DBcc/Scc, CMPM, TAS, MOVEM, MOVEP, PACK/UNPK,
+                        MOVE16, MOVE from/to CCR
+  tb_ap040_diagrom.v  boots a real ROM image against a minimal Amiga model
+                        (chip RAM, CIA overlay, custom register stubs) and
+                        captures serial output. DiagROM V2.0 completes its
+                        boot, passes its own 2MB memory address test and
+                        detects the core as "CPU: 68LC40 FPU: NONE". Build
+                        with Verilator (--binary --timing); iverilog is too
+                        slow for hundreds of millions of cycles. ROM image:
+                        python3 bin2hex.py DiagROM/diagrom.rom build/diagrom.hex
+                        Kickstart 3.1 (A1200 40.68) also runs: exec.library
+                        initializes and ExecBase is built and relocated; the
+                        FPU F-line probe and the privilege traps from exec's
+                        Supervisor() are the only exceptions taken. Boot then
+                        parks waiting on CIA timers the stub does not model.
+                        Note: ROM images whose header starts $1116 are linked
+                        for $200000 (ReKick) and will not boot at $F80000.
+
+    asm/t_mmu.s         milestone E MMU: three-level table walk with U/M
+                        history bit updates, page remapping, split I/D ATC
+                        caching semantics, PTEST/MMUSR, PFLUSH page and all
+                        variants, DTT transparent bypass, and access error
+                        (format $7) fault-fix-restart for write protection,
+                        invalid data page, instruction fetch, and user access
+                        to a supervisor page
+    asm/t_cache.s       milestone G caches: CACR enables, I-cache staleness
+                        with self-modifying code and CINV recovery, D-cache
+                        staleness against DMA-style pokes and CINV recovery,
+                        TTR cache-inhibit bypass, byte/word extraction from
+                        cached lines, misaligned bypass, disable behavior
+    asm/t_exceptions.s  milestone C exceptions: TRAP/illegal/BKPT/A-line/
+                        F-line/CHK/divide-by-zero/TRAPV/TRAPcc frames and
+                        vector offsets, format $0/$1/$2/$3/$7 layout, RTE and
+                        FRESTORE format validation, double-fault handling,
+                        interrupt/trace priority, MOVEC full 040 register
+                        matrix with write masks, MOVE USP, MOVES with SFC/DFC
+                        (FC pins checked by the TB), PTEST/PFLUSH/CINV/CPUSH
+                        decode and privilege, user/supervisor round trip over
+                        USP, privilege violation, autovectored interrupts,
+                        IPL masking, STOP wake-up, NMI edge behavior, and the
+                        M-bit master/interrupt stack throwaway frame path
+
+  diff/               differential testing against qemu-system-m68k:
+                        random integer programs (10k+ instructions across
+                        70 seeds) with full register file and memory window
+                        comparison. See diff/README, including documented
+                        QEMU 11 lazy-flag deviations found during bring-up
+                        (every arbitrated case matched the PRM on AP040).
+
+  run_cputest.py       WinUAE cputest v20 corpus replay through the real AP040
+                        RTL and 16-bit compatibility bus.  Defaults to the
+                        compiled Verilator model and one job per core: the
+                        full 1911-slice corpus takes ~7 minutes instead of
+                        ~3 hours under Icarus, for identical results (same
+                        1875/1911, same 36 failing slices).  --simulator
+                        iverilog cross-checks a result on a second engine.
+                        It reads
+                        data040.zip directly, validates every per-instruction
+                        header and per-slice envelope, expands delta state one
+                        slice at a time, and checks integer/FPU/control state,
+                        CCR/SR masks, memory writes, IRQs, exception vectors
+                        and format $0/$2/$3/$4 frames. Trace handlers execute
+                        RTE and the deliberately odd-vector groups retain
+                        their nested address-error behavior. See diff/README.
+
+Build requirements: vasmm68k_mot (vbcc toolchain) and python3; see
+build_tests.sh. Test programs communicate over memory-mapped registers
+($F100 fail number, $F102 result, $F110 IPL request, $F120 FC check).
+
+Implementation status and remaining gaps (milestones B-H complete):
+
+  - bitfields, CAS, CAS2, CHK2/CMP2 and BTST Dn,#imm are all implemented
+    (CAS/CAS2 are not bus locked: single CPU master on this fabric)
+  - trace: T1 (all instructions) and T0 (change of flow plus the 68040
+    pipeline-synchronizing list such as NOP, SR/control-register changes,
+    cache/MMU maintenance, FMOVEM/FRESTORE and STOP) generate format $2
+    vector 9 exceptions on completion. A traced STOP does not enter the
+    stopped state. An instruction that itself raises an exception (TRAP,
+    etc.) leaves its trace disposition to that exception's handler.
+  - TAS is not bus-locked; table-search descriptor updates are plain
+    read/write cycles (single-master fabric)
+  - physical bus errors stack a format $7 frame with the SSW ATC bit clear,
+    abort the active 16-bit adapter/chip-bus cycle, and are generated by a
+    2^20-clk_sys watchdog (about 36.6 ms at 28.6875 MHz).  This is deliberately far
+    longer than chip RAM's legitimate DMA-slot wait.  t_exceptions injects
+    berr and verifies the frame plus restart; tb_ap040_bus_timeout verifies
+    the watchdog boundary, persistence and reset
+  - reset/exception processing fetches four complete longwords before
+    handler execution.  The eight words are retained and consumed without
+    duplicate bus reads; a fault on any word is a double bus fault.  Fatal
+    halt cancels all CPU/MMU/cache-maintenance request sidebands and the
+    external bus remains idle until reset.  RTE frame-load faults remain
+    double faults as required by MC68040UM 8.2
+  - denied accesses (supervisor-page violation or write protection) set the
+    page descriptor's U bit before faulting, without setting M.  The MMU
+    waits for descriptor writeback, raises c_flt, then waits for the core to
+    drop the held request before returning to W_IDLE.  t_mmu's protected-page
+    handler records the pre-fix descriptor and verifies U was set
+  - transfers that cross a page boundary are split into byte transactions
+    so each byte is translated through its own page (t_mmu tests 40-44);
+    only misaligned transfers can cross
+  - every multiword transfer also presents each 16-bit physical subcycle as
+    a separate external request. cpu_cache_new and the SDRAM/DDR3 write
+    buffers retain their accepted address while acknowledge is high, so the
+    adapter inserts one sampled IDLE clock before presenting the next word.
+    tb_ap040_bus16_gap proves both halves of reads and writes are accepted
+    exactly once under that level-acknowledge contract
+  - interrupts are always autovectored (the wrapper ties ipl_autovector=1)
+  - format $7 frames carry SSW and the initial FA, with an unused zero EA
+    and zeroed writeback slots; faults use pure instruction restart with EA
+    register rollback. MOVEM restart across a page fault is covered by
+    t_mmu.s (the CM continuation bit is never set, which handlers treat as
+    a plain restart)
+  - caches are write-through with invalidate-on-write, so CPUSH equals
+    CINV and no copyback/push state exists; CINV/CPUSH invalidate the
+    whole selected cache regardless of scope (architecturally safe);
+    misaligned and line-crossing reads bypass the caches; the I-cache is
+    not snooped by CPU writes (real 68040 behavior: software must CINV)
+  - the Minimig build sets AP040_ENABLE_CACHE=0 in cpu_wrapper.v: the
+    internal caches are compiled out (CINV/CPUSH complete immediately,
+    which is a valid 68040 whose caches never fill) and cpu_cache_new in
+    the RAM controllers provides snooped caching instead. Simulation
+    keeps the caches enabled (compat default is 1) so t_cache.s stays
+    meaningful.  CACR enables reach the external I and D banks independently;
+    CINV/CPUSH crosses as a retained toggle and clears both external caches
+    (safe over-invalidation for selected/scope variants). tb_cpu_cache_new
+    verifies I/D isolation, disabled-fill suppression and maintenance clear
+  - misaligned accesses restart the whole transfer. A second-page ATC
+    fault reports the original transfer address/size and sets SSW.MA;
+    invalid translations are not cached in the ATC (each access re-walks)
+  - FPU (milestone H): ap040_fpu.v implements FPCR/FPSR/FPIAR, B/W/L/S/
+    D/X movement and conversion, FABS/FNEG/FTST/FCMP, and hardware
+    FADD/FSUB/FMUL/FDIV/FSQRT. It supports FPCR rounding/precision,
+    gradual single/double store underflow, canonical extended special
+    values, SNAN/BSUN/DZ and enabled arithmetic-exception vectors.
+    FMOVEM register/control paths, FBcc/FScc/FDBcc/FTRAPcc and NULL/IDLE/
+    UNIMP FSAVE/FRESTORE frames are covered by t_fpu.s. Transcendentals and
+    FMOVECR are unimplemented instructions (vector 11, format $2);
+    denormal/unnormal operands and packed decimal are unsupported data
+    types and take vector 55 in a format-$3 frame. Opclass 000/010 sources
+    stack the faulting PC and their source EA (zero for register/immediate);
+    opclass 011 stores stack the next PC and calculated destination EA.
+    FSGLMUL chops its source mantissas to 24 bits; FSGLDIV does not.
+    Underflowed results take the denormalized encoding (exponent field
+    zero, significand shifted right by 1 - exponent), which is what
+    softfloat and so the cputest reference data define; UNFL and INEX
+    are signalled with them. Arithmetic rounding precision controls both
+    significand precision and exponent range; extended precision and the
+    FSGL class retain the extended exponent range.
+    Unimplemented instructions retain the revision-$41 52-byte UNIMP
+    state: CMDREG1B/CMDREG3B, STAG/DTAG, E1 and the 96-bit FPTEMP/ETEMP
+    operands. FSAVE writes and acknowledges that payload only after its
+    final successful bus transfer; FRESTORE reads the complete payload
+    before installing it. Full-frame -(An)/(An)+ adjustment is covered,
+    along with exact register-source and converted memory-source images.
+    This supplies the operand state a stock Motorola FPSP expects for
+    vector-11 software instructions such as transcendentals and FMOVECR.
+    FRESTORE accepts NULL, IDLE and revision-
+    $41 UNIMP frames and raises vector 14 for an incompatible version or
+    size. Remaining state-frame deviations are the vector-55 datatype
+    variant (the exception frame is correct, but FSAVE does not yet expose
+    its source payload) and the 96-byte BUSY form; AP040 has no pipelined
+    mid-instruction arithmetic state to serialize. Real 040 silicon also takes non-maskable OVFL/UNFL traps so
+    the FPSP can produce these results, where AP040 computes them
+    directly. The FPGA build enables AP040_HAS_FPU=1.
+  - 8K page mode (TC.P) is covered by t_mmu.s including LA bit 12
+    routing, PTEST and fault restart
+
+Gaps closed 2026-08-05
+----------------------
+The bus-error, denied-access U-bit, independent external I/D enable and
+external CINV/CPUSH gaps recorded here on 2026-08-04/05 are implemented and
+covered by negative-control regressions.  CPU function codes are still left
+unconnected at cpu_wrapper because the current Minimig fabric has no FC
+consumer; they remain available at ap040_tg68k_compat.fc if one is added.
+HRTMon receives AP040's retained level-7 acceptance toggle, so the cartridge
+overlay is armed and its interrupt is released even though AP040 autovectors
+without a legacy $FFFFFFFF IACK bus cycle. tb_cart_hrtmon covers the retained
+event, vector override to $00A1000C, and stealth cartridge visibility.
+
+FPU rounding corrections 2026-08-05
+-----------------------------------
+Two fixes in ap040_fpu.v, both driven by hardware cputest 68040_basicfpu
+and confirmed against M68000PRM.pdf:
+
+  - FABS and FNEG round their result to the selected precision and report
+    INEX2 plus accrued INEX whenever nonzero bits are discarded.  This is
+    also true for an already-extended register source.  The earlier
+    source-format exemption was disproved by 68040_basicfpu FABS.X/0001
+    with FPCR $40, which requires FPSR $00000208.  WinUAE's cputest oracle
+    confirms why: floatx80_abs/neg both call roundAndPackFloatx80, whose
+    single- and double-precision paths raise inexact on nonzero round bits.
+    The PRM operation-table shorthand saying INEX2 is "Cleared" does not
+    describe the reference behavior.  t_fpu 113/116/130 cover double and
+    reserved-as-double precision; 134 covers a converted double source;
+    245-252 reproduce the exact register-source single-precision FABS and
+    FNEG cases captured from hardware.
+
+  - Range control restored for ARITHMETIC: the rounding precision narrows
+    the exponent range as well as the significand.  Working bounds (bias
+    16383) are single 16257..16510, double 15361..17406, extended
+    1..32766.  Overflow saturates at that precision's largest normal;
+    underflow keeps that precision's minimum exponent with a denormalized
+    significand, and only extended underflow uses the exponent-field-zero
+    denormal encoding.  t_fpu 120-125, overflow and underflow separately
+    negative-control proven.
+    The move-class exemption originally implemented here was REVERTED on
+    2026-08-06: softfloat's floatx80_move/abs/neg go through
+    roundAndPackFloatx80 and range-control like everything else, and the
+    cputest reference is generated from softfloat (on silicon the case
+    traps nonmaskably into the FPSP, which computes the range-controlled
+    result too, so the PRM's "OVFL Cleared" prose describes neither).
+    t_fpu 126-129 now assert the softfloat behaviour.  FSGLMUL/FSGLDIV
+    are the true exemption: they round through roundSigAndPackFloatx80,
+    which keeps the EXTENDED exponent range (op_sgl; t_fpu 153-155).
+    FABS/FNEG use the same INEX2-producing rounder as FMOVE; there is no
+    extended-source suppression.
+    This reverts a change made on 2026-08-04 that judged both against the
+    extended range.  That change came from reading the WRONG definition of
+    roundAndPackFloatx80: softfloat.cpp has two, and the one AP040 must
+    follow is the `#else // SOFTFLOAT_68K` copy (~line 1349) with its
+    expOffset, not the `#ifndef SOFTFLOAT_68K` copy (~line 1108).  qemu
+    behaves like the non-68k variant, which is why the FP differential
+    appeared to justify the change; WinUAE plus the PRM outrank it.
+
+F_UNFL also rounded extended-precision underflow at the double boundary
+(dropping 11 bits); it now rounds at the guard/round/sticky boundary for
+extended and at the precision boundary otherwise.
+
+Turbo chip-RAM split-transfer corrections 2026-08-07
+-----------------------------------------------------
+Hardware cputest exposed two deterministic corruptions below the CPU core:
+`fadd.p ([D0.w*8]),fp1` expected format-$3 EA $00000AA1 but stacked
+$80090AA1, and `fabs.x ([0]),fp3` read its odd-addressed 12-byte operand
+from a +2-byte window. The EA engine and FPU loader were correct.
+
+Two independent request-boundary defects were fixed:
+
+  - ap040_bus16_adapter changed addr_out directly between halves of a split
+    transfer while keeping the external request asserted. Minimig's RAM
+    targets use a level acknowledge and accept a new address only after
+    cpu_cs drops, so the adapter now presents a sampled IDLE boundary.
+    tb_ap040_bus16_gap negative-controls aligned and odd longword reads and
+    writes (two word requests, or byte+word+byte respectively).
+  - Minimig.sv's legacy early-CS logic dropped ram_cs for one clk_114 after
+    ready, then reasserted it while cpu_wrapper still held ram_sel. That
+    launched a ghost cpu_cache_new fill whose late data could acknowledge
+    the following 16-bit subcycle. ram_cs_guard now latches the completed
+    deselection until ram_sel drops. In the full turbo-SDRAM simulation,
+    old behavior hangs four of the eight physically valid clk_28/cyc phase
+    relationships; the guard passes all eight. The standard suite uses one
+    of the old failing phases as its negative control.
+
+t_fpu 253-255 reproduces the packed-operand frame, and 256-259 reproduces
+the exact FABS.X indirect encoding and byte window captured on hardware.
+
+WinUAE-oracle FPU audit 2026-08-06
+----------------------------------
+Requested comparison of the FPU against /home/adam/Musashi and
+/home/adam/WinUAE to pass cputest.  Musashi turned out to be a generic
+softfloat port (sign-set default NaN, no 040 quirks) and was set aside;
+WinUAE generates the cputest reference data and is the oracle.  Dataset
+insight that scopes the work: cputestgen.ini excludes vectors 48-54 from
+the FPU sets and the generated FPCR never enables traps, so every case
+that would raise the 040's NONMASKABLE OVFL/UNFL is filtered out at
+generation time -- untrapped status-setting cases (DZ, OPERR, SNAN,
+INEX2) remain in the data and are compared exactly.
+
+Fixed in ap040_fpu.v (each negative-control proven, t_fpu 138 on):
+  - FDIV special-case order: dividend-infinity precedes the divisor-zero
+    check, so inf/0 is a clean infinity with NO DZ (t_fpu 138-140).
+  - The default NaN is POSITIVE all-ones (0/0, inf/inf, inf-inf, 0*inf,
+    sqrt of a negative); AP040 had kept the operand sign (141-146).
+  - Infinity mantissas: created infinities are all-zero; pass-through
+    infinities keep the operand's raw bits.  inf_clear_intbit is a 68060
+    flag -- the 040 never canonicalizes to the 6888x 0x8000... form
+    (62, 140, 147-148).
+  - FCMP: equal nonzero finite values compare as +0 (N clear even for
+    two negatives); equal zeros and infinities keep the DEST sign in N;
+    a NaN compare reports the propagated NaN's sign in N (dest NaN
+    preferred; the 040's cmp_signed_nan flag); a denormal DESTINATION
+    faults v55, checked before any SNaN bookkeeping (149-152).
+  - FSGLDIV does NOT chop its operands (only FSGLMUL does); both keep
+    the extended exponent range via roundSigAndPackFloatx80 and saturate
+    at the full all-ones mantissa (88-90, 153-155).
+  - OVFL sets INEX2 only when mantissa bits were actually discarded;
+    the accrued-INEX bit is set by OVFL regardless (126-127).
+  - Accrued UNFL only accrues when the result is also inexact.
+  - FPCR write mask on the 040 is $FFFF, not $FFF0 (156).
+  - Integer stores saturate SIGN-dependently ($7FFF.../$8000...); a NaN
+    stores its quieted payload top bits, raising OPERR only when it was
+    already quiet and SNAN when signaling; S/D stores of a NaN force the
+    quiet bit and record SNAN for signaling sources.
+  - FMOVECR faults v11 WITHOUT clearing the FPSR exception byte
+    (WinUAE faults before fpsr_clear_status) (157-159).
+
+Fixed in ap040_core.v:
+  - Nonexisting opmodes (WinUAE fault_if_nonexisting_opmode's 68040
+    list) take an immediate F-line: format $0 vector 11 with FPIAR and
+    FPSR untouched; opmodes $78-$7F take VECTOR 4 (160-163).  Existing
+    but unimplemented opmodes keep the format-$2 FPSP route.
+  - FPIAR updates only on paths that engage the FPU; malformed
+    encodings that F-line out leave it alone.
+  - FBcc/FScc/FDBcc/FTRAPcc predicate bit 5 ALIASES (fpp_cond masks
+    0x1f; table68k defines FBcc for all 64 encodings) (164-165, 207).
+  - FMOVEM register lists, 68040 rules: loads map mask bit 7 to FP0
+    regardless of mode and reject -(An); stores reject (An)+ and
+    PC-relative EAs; a store whose mask convention disagrees with its
+    EA direction (control EA + pred mode, or -(An) + postinc mode)
+    writes each register's three longwords REVERSED, low mantissa
+    first (166-183).
+  - Control-register moves: empty selection means FPIAR; An transfers
+    legal for FPIAR only; immediate sources may load several registers;
+    multi-register-to-Dn and other malformed encodings are F-line traps,
+    not vector 4 (184-190).
+  - The conditional-predicate logic was verified EQUAL to WinUAE's
+    condition_table_040_060 for all 512 control/predicate combinations
+    offline, and t_fpu 191-206 sweeps all 16 FPSR rows against the
+    table words on every run.
+
+The predicate sweep pushed the code section past $3200 where the data
+area starts, silently corrupting test code; the battery therefore lives
+in its own org $8000 section and failt uses jmp.  If t_fpu grows,
+check the section sizes vasm prints.
+
+Still deliberately unimplemented (dataset-invisible): nonmaskable
+OVFL/UNFL traps with BUSY-frame FSAVE state, vector-55 datatype FSAVE
+payloads, and INEX-on-away-rounding for deep extended underflow.
+Revision-$41 vector-11 UNIMP frame contents, complete multiword transfer,
+acknowledgement, FRESTORE round trip, and IDLE-state restoration are now
+covered by t_fpu's directed checks 260-285.
+
+WinUAE-oracle MMU and exception-frame audit 2026-08-07
+------------------------------------------------------
+Requested comparison of the MMU and exception frames against Musashi and
+WinUAE.  Musashi's m68kmmu.h does not implement 040 PTEST at all, so the
+oracle is WinUAE's cpummu.cpp/newcpu.cpp throughout.  The table walk
+itself audited CLEAN: index arithmetic at every level, UDT/PDT decoding,
+single-level indirect resolution, W-bit accumulation across levels, the
+U/M history protocol including U-without-M on denied writes, S-protection
+at access time, TTR matching (priority, S-field, E=0 behaviour) and
+PFLUSH page/global variants with the G bit all match the oracle.
+
+Fixed (t_mmu 48-59 plus updated 19/38/39, each negative-control proven):
+  - MOVEC to TC no longer performs an implicit PFLUSHA.  Reads/writes of
+    every MMU register leave both ATCs intact; t_mmu 36/37/60 proves the
+    stale mapping survives TC and becomes visible only after explicit
+    PFLUSHA (MC68040UM 3.7.4).
+  - Warm RSTI clears only TC.E and the four TTR E bits.  TC.P, the other
+    MMU register fields and all ATC entries survive; the directed reset
+    test distinguishes this from deterministic FPGA cold initialization
+    (MC68040UM 3.6.1).
+  - PTEST on a TTR match returns exactly T|R ($3): the PA field stays
+    clear.  A PTESTW against a write-protected TTR returns the B bit
+    ($800) -- the old code returned $400, which is the G position.
+  - PTEST runs the table search even with TC.E clear: the enable bit
+    gates ordinary translation only.  t_exceptions' MMU-off PTEST decode
+    test now sets up a real (invalid) root descriptor.
+  - A physical bus error on a descriptor fetch during PTEST returns
+    MMUSR = B.  tb_ap040_program gained a $F146 register that arms a
+    one-shot walker bus error to test it.
+  - PTEST's pre-flush drops the matching page from BOTH ATCs.
+  - MOVE16 access errors report SSW SIZE=line with TT0, the EA aligned
+    to the line, and the WB3 valid bit clear (WinUAE clears it in favour
+    of a WB2 line writeback, which the pure-restart model omits).
+  - TAS/CAS/CAS2 operand faults report SSW LK with RW clear.
+  - Faulting MOVES to FC 0/3/4/7 reports TT=10 with the raw FC in TM;
+    FC 2/6 is remapped onto the corresponding data space.
+  - The format $7 frame now carries the fault address in EA, and for
+    write faults a valid WB3 slot (WB3S = $80 | SSW low bits, WB3A = FA,
+    WB3D = write data), matching WinUAE.  A handler that completes the
+    writeback and RTEs will see the write repeated by the restart --
+    the same behaviour WinUAE produces.
+
+Documented deviations (unchanged, deliberately):
+  - Invalid translations are NOT cached in the ATC.  Real 040 silicon
+    caches the invalid entry and requires the handler to PFLUSH; this
+    implementation re-walks instead, which is strictly more forgiving
+    (a handler that fixes the table without PFLUSH works here, hangs on
+    real silicon).  PTEST cannot observe the difference: it always
+    performs a fresh search.
+  - SSW CM/CT continuation is never generated (pure instruction
+    restart); the RTE ignores those bits, so hand-crafted continuation
+    frames are not honoured.
+  - No WB2/WB1 writeback slots (always zero), consistent with restart.
+  - The 68040's "always fill the ATC even on a failed search" detail is
+    subsumed by the above.
+
+WinUAE-oracle exception/stack-frame audit 2026-08-07 (second pass)
+------------------------------------------------------------------
+Requested comparison of the whole exception machinery against Musashi and
+WinUAE.  The per-vector table audited CLEAN: every exc() call site matches
+WinUAE's exception_pc() (stacked PC = the faulting instruction for vectors
+2/3/4/8/10/11, the next instruction otherwise) and the format map (formats
+$0/$2 fields per vector, $3 EA, $4 EA+PC ordering, $7 layout, RTE frame
+sizes, format error on undefined formats stacking the RTE's own address).
+Musashi corroborates the interrupt throwaway rule verbatim ("Same as SR in
+master stack frame except S is forced high") but models none of the 040
+quirks below; WinUAE remains the primary oracle.
+
+Fixed (t_exceptions 104-110, each negative-control proven):
+  - Exception/reset completion now prefetches all four longwords required
+    by the 040 flowcharts.  Directed errors on the sixth word prove that
+    the whole window is double-fault protected, and per-address counters
+    prove the FIFO does not fetch any word twice.
+  - Double-fault halt drops an outstanding request even though BERR returns
+    no mem_ack; the old held mem_req could be reissued by the 16-bit adapter.
+    The test now waits after halt and requires both debug_busy and busstate
+    to remain idle.
+  - RTE to an odd PC: the machine takes the restored SR, but the address
+    error frame stacks the SR from BEFORE the RTE -- or the last throwaway
+    SR when a format $1 chain was involved (WinUAE
+    exception3_read_prefetch_68040bug; exercised by cputest 68040_ae RTE).
+    The old implementation stacked the restored SR with S conditionally
+    forced.
+  - RTR to an odd return address: same quirk; the popped CCR takes
+    effect but the frame carries the pre-RTR condition codes.
+  - The interrupt throwaway frame's SR image is the ORIGINAL SR with only
+    S forced: the old interrupt mask, trace bits and M survive in the
+    image (both oracles agree).  The old code stacked the already-updated
+    SR (new mask, T cleared).
+  - An odd HANDLER address only halts (double fault) for vectors 2 and 3;
+    every other exception whose vector holds an odd address takes a
+    nested address error (WinUAE exception3_notinstruction).  cputest's
+    feature_exception_vectors=0x000123 plants odd handler addresses, so
+    the old halt-on-everything behaviour would wedge those runs.
+  - A pending T0 trace SURVIVES the non-internal integer exceptions
+    (illegal, privilege, A-line, format-$0 F-line) on the 040 and fires
+    before the handler's first instruction as vector 9 format $2 with
+    PC = handler entry and address = the excepting instruction; internal
+    exceptions (CHK, TRAPcc, divide, TRAP#n) cancel it (WinUAE
+    Exception_cpu_oldpc + internalexception).  Fires before a pending
+    interrupt is sampled.
+
+Note for future sessions: a vasm assembly error leaves the previous .hex
+in place and run_tests.sh aborts BEFORE simulating, so the last test logs
+are stale.  Check for "built build/<t>.hex" lines (or the error 3007 that
+bit this audit: an undefined symbol in a new test) before trusting a
+green grep.
+
+WinUAE-oracle Agnus/copper audit 2026-08-07
+--------------------------------------------
+Requested comparison of the Agnus/copper implementations against WinUAE
+(custom.cpp, the 2022+ cycle-exact RGA-pipeline copper).  New testbench
+tb_agnus_copper.v pins the behaviour (wired into run_tests.sh): it models
+the CCK-phased beam, the odd-slot grant and the register-bus loopback.
+Note the custom bus holds register writes for a FULL CCK -- a one-tick
+write races the COPJMP strobe against its own clk_ena clear.
+
+Audited CLEAN against the oracle:
+  - WAIT comparison: Minimig's substitute-unmasked-bits-then-GE trick is
+    equivalent to WinUAE's mask-both-sides two-stage compare (vertical
+    greater wins; equal vertical compares HP8..HP1 at 2-CCK resolution);
+    V7 always compared; BFD gates both WAIT and SKIP.
+  - SKIP taken before a non-MOVE: the WAIT/SKIP executes normally
+    (WinUAE clears skiplatch without effect) -- Minimig's 2005 "skip only
+    skips MOVE" fix matches the oracle.
+  - CDANG classes ($080 / $040 OCS / all ECS) match
+    test_copper_dangerous exactly.
+  - Wake-up consumes a free DMA slot without transferring; the
+    dummy-cycle count after IR2 matches WinUAE's irload pipeline
+    (4-cycle WAIT/SKIP shape).
+  - Strobe/reset takes a pointer-reload DMA cycle then fetches, the
+    documented 2-cycle COPJMP delay.
+  - Beamcounter: VPOSR Agnus-ID composition is exactly right for
+    OCS/ECS/AGA in PAL and NTSC (0x00/0x10/0x20/0x30/0x23/0x33), LOL at
+    bit 7; VERTB at line 0 (line 1 with the A1000 quirk); VHPOSW/VPOSW
+    write paths present; LOF toggles only under LACE.
+
+Fixed (negative-control proven in tb_agnus_copper):
+  - An illegal MOVE (CDANG-protected register) now fetches its SECOND
+    instruction word into COPINS before halting, using one more DMA
+    cycle, as real hardware does: WinUAE clears validmove at the IR1
+    stage but the IR2 cycle is already allocated and completes; only the
+    register write is suppressed.  The old code halted in FETCH2 without
+    fetching, leaving a visible free slot and stale COPINS.  A new
+    HALTED state holds the copper until a strobe or SOF.
+
+Documented deviations (unchanged -- all marginal-cycle or pathological,
+and the copper feeds a hardware-proven display pipeline):
+  - SKIP latches its comparison ~2 CCKs earlier than WinUAE (which
+    samples at the next-IR1-fetch cycle); only marginal beam-crossing
+    SKIPs differ.
+  - COPJMP written while a fetch is in flight: WinUAE models a strobe
+    pipeline that can merge with the in-flight cycle (startstrobe
+    shift); Minimig aborts to RESET at the next CCK.
+  - The VHPOSW even-to-even transition copper bug (spurious DMA from
+    address 0) is not modeled.
+  - Blitter uses slots 1+2 instead of 1+3 (documented Minimig design
+    choice for DMA contention).
+  - NTSC alternating 227/228-CCK long/short lines are not implemented
+    (fixed 227); LOL reads back toggling but line length is constant.
+  - Sub-CCK ordering inside agnus_copper uses blocking assignments
+    across always blocks (copjmp/strobe) -- functional in the shipped
+    integration, but simulation-order sensitive; the TB drives writes
+    with full-CCK hold like the real bus.
+Systemic FPU fixes from hardware cputest screenshots (2026-08-07)
+-----------------------------------------------------------------
+Thirteen 68040_intfpu/basicfpu failures (FDNEG.D, FDMOVE.S/P, FDIV.B/W/
+D/P/X, FDDIV.B/L/S/W/X/P, FDADD.X, FABS.P) reduced to two root causes,
+both pinned against the compiled WinUAE softfloat (scratchpad
+fporacle/fpprobe oracles run on the exact screenshot operands):
+
+  1. PSEUDO-DENORMALS ARE LEGAL OPERANDS.  floatx80_is_denormal
+     requires the integer bit CLEAR, so an exponent-field-0 operand
+     with the integer bit SET computes directly with the RAW exponent
+     (value 1.m x 2^-16382-ish by encoding, raw 0 in the working
+     math).  unsupported_x in ap040_fpu.v narrowed to true denormals
+     (e=0, int clear, frac!=0) and true unnormals (0<e<7FFF, int
+     clear, m!=0); unnormal ZEROS (m=0, any e) behave as zeros.
+     Consequences pinned by the oracle: extended-precision tininess
+     starts at er < 0 (not er < 1) -- er == 0 packs exponent field 0
+     with the significand UNSHIFTED and NO flags; er < 0 shifts by -er
+     with UNFL (INEX2 only for lost bits).  emin for extended and the
+     FSGL class is now 0 in F_ROUND; F_UNFL packs exponent 0.  The
+     old (1 - er) shift was validated against qemu only, and t_fpu
+     93-98 carried its wrong expectations ($00100000 shift-11 and
+     $40000000 halving results); both re-pinned to the softfloat
+     oracle ($00200000, $80000000).  Note the 68881-fpga reference
+     implements 1-exp shift with normalize-before-arithmetic: that is
+     correct FOR A 68881 -- the 040 raw-exponent model is different
+     architecture, not a bug in either.
+  2. EVERY vector-55 fault stacks FORMAT $3.  Register and immediate
+     sources have no address and stack EA = 0 (cputest frames end
+     30,dc,00,00,00,00); the old format-$0 branch in go_fp_unsupp came
+     from the UM 9.6.2 "pre-instruction" prose.  WinUAE get_fp_value
+     inits ad = 0 and immediate operands never assign it.
+
+Tests: h_fpunsup accepts only $30DC frames now; t_fpu 208-240 add the
+screenshot vectors (FDIV.B by -1 sign-flip preserving the 0000
+encoding, FDDIV.W pseudo/0 -> clean +inf + DZ, -0/pseudo -> -0 N+Z,
+FDADD.X pseudo addend -> double-rounded with INEX only, unnormal-zero
+addend, er==0/er<0 packing, EA=0 frames for register and immediate
+sources) and 241-244 cover memory-indirect FP operands (base-suppress
+indirection, odd-address word operand, outer displacement) -- the
+FDIV.W ([0]) screenshot did not reproduce in sim with a correct EA
+decode, so it likely shared root cause 1; hardware retest will tell.
+Negative controls: reverting unsupported_x fails 210, reverting emin
+fails 94, reverting the frame format fails via the handler's hfail
+(id 98) at the first no-EA fault.
+
+Retained IRQ and FPU resume fixes (2026-08-11)
+------------------------------------------------
+The full WinUAE IRQ and ODD_IRQ corpus exposed an instruction-boundary detail
+which a combinational `IPL > SR.I` test cannot model.  Once a level 1--6
+request has reached IPEND while unmasked, AP040 now retains the highest level
+until exception entry acknowledges it.  An instruction which raises the SR
+mask in the meantime therefore cannot erase an already-pending interrupt.
+Level 7 remains a separate edge latch.  Interrupt and trace entry also pass
+through `S_POST_EXC`, so same-edge BSR/JSR/DBcc and ordinary register
+writeback is visible before the exception snapshot.  Verilator passes all
+100 IRQ/ODD_IRQ slices, including MOVE-to-SR, AND/OR/EOR-to-SR, STOP,
+control-flow and odd-vector cases.
+
+Vector-55 register-store faults now distinguish two PCs.  A statically
+unsupported packed store still reports the last consumed extension word,
+whereas a datatype fault discovered by the FPU while converting an otherwise
+valid store stacks the following PC.  Resuming the latter at `pc-2` had made
+RTE execute the EA extension as an opcode.  The complete directed AP040 suite
+and both BasicFPU FMOVE.X slices pass with the split behavior.
+
+The 2026-08-12 full 1,911-slice Verilator sweep passes 1,875 slices with no
+timeouts or harness errors.  Every non-BasicFPU/PackedFPU group is perfect,
+including AE 32/32, Basic 494/494, Default 821/821, FFEXT 60/60, IRQ 92/92,
+ODD_EXC/IRQ/STK 45/45, and intFPU 17/17.  BasicFPU passes 288/320 and
+PackedFPU passes 24/28.  All 36 first failures decode as FPU memory-EA
+instructions: 32 memory-to-FPU operations (opclass 010) and four
+FPU-to-memory operations (opclass 011).  No failing slice first diverges in a
+register-source arithmetic operation.  The replay log now prints the six
+instruction bytes and the EA captured at FPU dispatch, and `summary.json`
+records that context plus the decoded opclass and memory-EA classification.
+
+Representative failures were reconstructed from the serialized input.  In
+BasicFPU FADD.X/0001 test 182, the indirect pointer at address zero selects
+$0000BFFF and all twelve serialized operand bytes there are zero, while the
+oracle expects a one-bit tiny addend and INEX/UNFL status.  In FNEG.X/0003
+test 203, AP040 returns the serialized low mantissa `$2FD2B162`, while the
+oracle expects `$2FD20000`, a value left by an unrecorded prior generator
+write.  These are instances of the v20 omitted-memory-transition defect
+described in `diff/README`, not evidence for an RTL unary-rounding or
+underflow change.  The failures remain visible; the harness does not xfail or
+mask them.

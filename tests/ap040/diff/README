@@ -1,0 +1,225 @@
+AP040 differential testing against QEMU
+=======================================
+
+WinUAE cputest v20 corpus replay
+--------------------------------
+
+`../run_cputest.py` is the corpus-scale RTL regression harness.  It accepts
+the downloaded `data040.zip`, an extraction root, or its `data/` directory.
+The archive is intentionally not checked into this repository.
+
+Quick representative gate (64 records from each of integer, trace, FPU, IRQ,
+address-error and deliberately odd-vector slices):
+
+    ../run_cputest.py /path/to/data040.zip
+
+The native-code Verilator backend is recommended for corpus runs.  It builds
+the complete RTL once and then executes the same APR2 slice jobs roughly
+25--30 times faster than Icarus on this host:
+
+    ../run_cputest.py /path/to/data040.zip --simulator verilator
+    ../run_cputest.py /path/to/data040.zip --simulator verilator --compile-only
+
+Full corpus, deterministically divided between four workers or machines:
+
+    ../run_cputest.py /path/to/data040.zip --simulator verilator \
+        --full --shard 0/4 --jobs 2 --resume
+
+Focused reproduction and full codec/oracle audits:
+
+    ../run_cputest.py /path/to/data --full --group BasicFPU \
+        --instruction 'FABS.*' --slice 0001 --round-limit 2000
+    ../run_cputest.py /path/to/data040.zip --audit
+    ../run_cputest.py /path/to/data040.zip --audit --semantic-audit
+
+The supplied archive is `DATA_VERSION 20`: 587 instruction headers, 1,911
+compressed data slices, 1,917,739 cases and 31,522,118 execution rounds.
+Both structural and semantic full-corpus audits complete without a decoder
+desynchronization.  Newer WinUAE sources use version 24 and are not format
+authority for this archive; the decoder follows `main.c` at `f0cf9536~1`.
+
+Each compressed slice has a 16-byte version/start-time/flags/spare envelope.
+The old prototype incorrectly treated that envelope as test records; APR2
+validates and removes it before decoding.  APR2 jobs are deliberately made
+one slice at a time, so a 31.5-million-round run is resumable and never
+requires a multi-gigabyte expanded file.  `--shard INDEX/COUNT` assigns whole
+slices, preserving all delta and memory history within a slice.
+
+The RTL driver loads the corpus `lmem.dat` and `tmem.dat`, without overwriting
+address zero or its operands.  Reset and VBR use synthetic read overlays.  At
+the stalled first test fetch it injects D0-D7/A0-A6, USP/ISP/MSP, SR and trace
+latches, all FP registers, FPCR/FPSR/FPIAR, and neutral CPU/MMU controls; it
+also clears the warm-reset-persistent ATCs.  It drives the Amiga INTREQ-to-IPL
+mapping, captures architectural state at `S_EXC0` before exception stacking
+changes A7/SR, compares expected memory writes and restores their old values,
+and applies the stream's post-round and end-of-test memory actions in order.
+Vector 9 contains a real RTE so standalone and handler-stacked trace cases
+continue to the primary result.  A nonzero header `exception_vectors` value
+is returned for vectors 4 and above, reproducing the ODD_EXC/ODD_IRQ behavior.
+
+The v20 native checker constructs the stacked exception PC from the CPU value
+it just captured, rather than from corpus oracle bytes.  APR2 preserves that
+contract (frame PC bytes are masked), while normal terminator completion has
+an independent exact stacked-PC check.  Cycle counts are not compared: the
+040 corpus is functional data and this testbench intentionally uses a simple
+one-cycle memory target.  Physical BERR/MMU behavior remains covered by the
+directed AP040 exception and MMU suites.
+
+One v20 corpus defect remains observable in memory-source tails.  The
+generator resets its access-history indices for each candidate without
+undoing setup writes; if every CCR round of that candidate is then discarded,
+the memory mutation survives in the generator but no `CT_MEMWRITE` is emitted.
+The native v20 runner cannot reproduce that hidden transition either because
+it calls `restoreahist()` after each serialized test.  For example,
+`BasicFPU/FMOVE.P/0001` test 389 expects an FPEA calculated from `$00080006`,
+but the last serialized value is `$80080006` and the native-cleanup value is
+`$00080004`.  APR2 follows the serialized generator state (the model which
+matches more of the result oracles) and reports such cases instead of masking
+the effective-address bytes.  They must not be treated as evidence for an RTL
+EA change unless the operand memory is independently reconstructed.
+
+The 2026-08-12 full 1,911-slice Verilator run passes 1,875 slices with no
+timeouts or harness errors.  All 1,563 non-BasicFPU/PackedFPU slices pass.
+The FPU groups pass 312/348 (BasicFPU 288/320 and PackedFPU 24/28).  The first
+mismatch in every one of the 36 failing slices is a memory-EA FPU instruction:
+32 opclass-010 loads and four opclass-011 stores.  There is no first failure
+in a register-source arithmetic operation.  This classification is
+diagnostic, not an automatic waiver: `tb_dat_replay` prints `op=` and the
+dispatch-time `ea=`, and `summary.json` records `first_mismatch_opcode`,
+`first_mismatch_ea`, `first_mismatch_fpu_opclass`, and
+`first_mismatch_memory_ea`.  Failed slices still fail the run so a real
+memory-EA RTL regression cannot be hidden by the known corpus limitation.
+
+Two independently reconstructed load cases demonstrate the omitted state.
+`BasicFPU/FADD.X/0001` test 182 reads twelve zero bytes from the serialized EA
+`$0000BFFF`, although its oracle expects the sticky result and status from a
+nonzero tiny addend.  `BasicFPU/FNEG.X/0003` test 203 reads low mantissa
+`$2FD2B162` and AP040 preserves it, while the oracle expects `$2FD20000` from
+an unrecorded previous rounding/write.  Therefore changing FPU rounding or
+underflow behavior to satisfy those records would make self-contained inputs
+incorrect.
+
+Every run writes `summary.json`, JUnit `junit.xml`, and one log per slice below
+`--work` (default `build/cputest`).  A simulator's zero exit status is not
+accepted as success unless its log also contains `ALL TESTS PASSED`.  Verilator
+artifacts and reports live below `build/cputest/verilator`, independent of the
+Icarus files.  Each passing resume log has a sidecar identity covering the RTL
+binary, simulator, decoder, corpus slice, memory images and record limit, so a
+smoke result cannot accidentally satisfy a full-corpus `--resume` run.
+
+run_diff.sh generates random integer programs (gen_diff.py), runs the
+same flat binary on the AP040 (verilated tb_ap040_program) and on
+qemu-system-m68k -M virt -cpu m68040, and compares the $3000-$3FFF
+memory window: sandbox data, the final register file image and the
+final CCR.
+
+The per-instruction CCR trace ($3800-$3EFF) is generated but NOT
+compared by default. QEMU 11.0.2's m68k lazy flag evaluation was found
+to produce flags that contradict the M68000PRM (and QEMU's own behavior
+in isolated sequences) in at least these shapes, all reproduced in this
+directory during bring-up:
+
+  - SUBX with X=0, Z(old)=0 and result 0 reports Z=1 when the previous
+    flag producer was a lazily evaluated ALU op ("work/qbug.s" repro:
+    PRM says Z unchanged, i.e. 0)
+  - NEGX C reported 0 for a nonzero result when preceded by a bitfield
+    instruction with a register offset (stream context only)
+  - MULU.L overflow V lost in similar stream contexts, although the
+    isolated case ("work/mulv.s") is handled correctly
+
+The AP040 side of each arbitration was confirmed against hand-computed
+PRM semantics ("work/truth.s"). AP040 flag correctness is regression
+tested by tests/ap040/asm/* with exact CCR expectations; the
+differential run verifies data paths, EA computation and instruction
+sequencing, where QEMU is reliable.
+
+Usage:
+  verilator --binary --timing ... tb_ap040_program.v rtl/ap040/*.v
+  SIM=/path/to/Vtb_ap040_program ./run_diff.sh 1 50 150
+
+Floating-point differential (gen_fpdiff.py / run_fpdiff.sh)
+----------------------------------------------------------
+Random FP programs: a pool of normalized extended/single/double constants,
+FP0-FP7 loaded from it, then a stream of FADD/FSUB/FMUL/FDIV/FSQRT/FABS/
+FNEG/FMOVE (all formats, register and memory) with FPCR rounding changes,
+ending in FMOVEM.X of all eight registers plus FPCR and the FPSR condition
+codes into the compared window.  Operand ranges are constrained so no
+operation overflows, underflows, denormalizes, or produces Inf/NaN: those
+are exactly the cases where AP040 (which traps unsupported data types to
+vector 55 and flushes underflow) and qemu (which computes them) differ by
+design rather than by defect.
+
+  ./run_fpdiff.sh <first_seed> <last_seed> [ops]     # SIM=<verilated tb>
+
+FPDIFF_MODE selects coverage:
+  unset   extended precision, all rounding modes, all instructions
+  arith   all precisions and modes, arithmetic only (no register FMOVE)
+  all     everything -- diverges, see below
+
+qemu 11 deviation found 2026-08-04: **qemu does not apply the FPCR rounding
+precision (bits 7:6) to FMOVE into a floating-point register.**  A plain
+FMOVE is an arithmetic instruction for rounding purposes and must round its
+result like any other; WinUAE's reference `fp_move(a, b, prec)` sets the
+rounding precision around the move, and AP040 does the same.  Minimal
+repro: with FPCR=$40 (single, round to nearest), FMOVE.X of the extended
+value $3FFF/$8000000000000FFF gives $8000000000000000 on AP040 and on real
+040 silicon, but $8000000000000FFF on qemu.  Because the wrong operand then
+feeds every later instruction, a single such FMOVE makes an entire random
+program diverge; that is why reduced precision is only generated in the
+modes above.  AP040's behaviour is regression-covered by t_fpu.s tests
+88-92 instead.
+
+With that one case excluded, AP040 and qemu agree exactly: arithmetic
+across all four rounding modes and all three precisions (FPDIFF_MODE=arith)
+and the default mode both match on every seed tried.
+
+MMU differential (gen_mmudiff.py / run_mmudiff.sh)
+--------------------------------------------------
+Random three-level translation setups inside the 64K the testbench models:
+pages 0-5 identity (code, evidence window, stack/tables, result arrays),
+pages 6-11 randomly identity / remapped into pages 12-14 / write protected,
+page 15 left alone because it holds the testbench protocol registers.  The
+program enables translation, runs random translated reads, writes and PTEST
+probes, disables translation and copies the evidence into the compared
+window: read-back values, the page table itself (whose U/M history bits the
+hardware updates during the walks), the root and pointer descriptors, and
+the MMUSR results.
+
+  ./run_mmudiff.sh <first_seed> <last_seed> [ops]    # SIM=<verilated tb>
+
+Writes are never generated against a write-protected page and all mappings
+are resident, so no access error is taken: fault frames are format $7 on
+AP040 and a different shape on qemu, and t_mmu.s covers them instead.
+
+qemu 11 deviation found 2026-08-04, worked around in the generator:
+
+  1. qemu never sets the M (modified) history bit in a page descriptor.
+     AP040 sets it on the first write to a page, as the 68040 must, which
+     also shows up in MMUSR; t_mmu.s tests 5-7 cover it.  The generator
+     clears the M bit in the evidence copies so the rest still compares.
+
+The generator issues PFLUSHA after every TC write because the MC68040 does
+not invalidate either ATC when an MMU register is read or written.  Software
+must flush explicitly when the new register value can change translations;
+t_mmu.s tests 36, 37, and 60 pin that behavior.
+
+With those behaviors accounted for, AP040 and qemu agree exactly on translation,
+write protection, the U history bits on all three table levels, and PTEST
+MMUSR results across every seed tried (20 seeds x 24 operations).
+
+Further qemu 11 FP deviations found 2026-08-04 while closing the FPU gaps:
+
+  3. Reduced rounding precision narrows the significand, NOT the exponent
+     range.  softfloat's SOFTFLOAT_68K path checks overflow/underflow
+     against 0x7FFE for every rounding precision, and its roundMask only
+     trims mantissa bits.  AP040 originally clamped overflow/underflow at
+     the single/double exponent boundaries; the FP differential caught it
+     and it is fixed (t_fpu.s covers the rounding, and FPDIFF_MODE=unfl
+     exercises tiny operands at reduced precision).
+  4. Extended subnormals: an exponent field of zero scales by 2^-16382,
+     i.e. softfloat normalizes a subnormal to exponent (1 - shiftCount)
+     and packs an underflowed result by shifting right (1 - exponent).
+     qemu encodes such results one power of two too large, and does not
+     set UNFL.  Minimal repro: 2^-16380 * 2^-13 = 2^-16393 gives exponent
+     0 with significand $0010000000000000 on AP040 (and per softfloat),
+     $0020000000000000 on qemu.  t_fpu.s tests 93-99 pin AP040's encoding.

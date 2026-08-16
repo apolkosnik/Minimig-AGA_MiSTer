@@ -1,0 +1,5 @@
+tb_ap040_reset: AP040 reset and bus smoke test
+phase 0 done: 71 sub-cycles, 0 errors so far
+phase 1 done: 68 sub-cycles, 0 errors so far
+ALL TESTS PASSED
+tb_ap040_reset.v:442: $finish called at 12935000 (1ps)

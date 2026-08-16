@@ -22,6 +22,13 @@
 
 
 module ddram_ctrl
+#(
+	// CPU_CACHE 0 removes this controller's cpu_cache_new storage: the CPU's
+	// own ap040_cache becomes the only cache, and this instance keeps just
+	// the fill/pass protocol.  Left at 1 by default so the existing
+	// controller benches still exercise the cached path.
+	parameter CPU_CACHE = 1
+)
 (
 	// system
 	input             sysclk,
@@ -64,7 +71,15 @@ module ddram_ctrl
 	input      [15:0] cpuWR,
 	output     [15:0] cpuRD,
 	input             ramshared,
-	output            ramready
+	output            ramready,
+
+	// Dedicated, cache-bypassing AP040 table-walker port (clk=sysclk).
+	input             walker_req,
+	input             walker_we,
+	input      [28:2] walker_addr,
+	input      [31:0] walker_wdata,
+	output reg        walker_ack,
+	output reg [31:0] walker_rdata
 );
 
 wire ramsel = cpuCS & (~&cpustate | ~cpuU | ~cpuL);
@@ -73,8 +88,20 @@ wire cache_hit;
 wire cache_req;
 reg  cache_fill;
 wire cache_ack;
+reg         walker_busy;
+reg [28:2]  walker_addr_latch;
+reg [31:0]  walker_wdata_latch;
+reg         walker_snoop;
+reg         walker_snoop_low;
+reg         ddr_swap;
+reg [15:0]  ddr_data;
 
-cpu_cache_new cpu_cache
+wire [28:1] walker_snoop_addr = {walker_addr_latch, walker_snoop_low};
+wire [15:0] walker_snoop_data = walker_snoop_low
+							? walker_wdata_latch[15:0]
+							: walker_wdata_latch[31:16];
+
+cpu_cache_new #(.CACHE_ENABLE(CPU_CACHE)) cpu_cache
 (
 	.clk              (sysclk),                 // clock
 	.rst              (~reset_n | ~cache_rst),  // cache reset
@@ -92,7 +119,11 @@ cpu_cache_new cpu_cache
 	.wb_en            (cache_ack),              // write enable
 	.sdr_dat_r        (ddr_swap ? {ddr_data[7:0], ddr_data[15:8]} : ddr_data), // sdram read data
 	.sdr_read_req     (cache_req),              // sdram read request from cache
-	.sdr_read_ack     (cache_fill)              // sdram read acknowledge to cache
+	.sdr_read_ack     (cache_fill),             // sdram read acknowledge to cache
+	.snoop_act        (walker_snoop),
+	.snoop_adr        (walker_snoop_addr),
+	.snoop_dat_w      (walker_snoop_data),
+	.snoop_bs         (2'b11)
 );
 
 // write buffer, enables CPU to continue while a write is in progress
@@ -188,16 +219,15 @@ a2065_ddram_arbiter arbiter
 
 assign mem2_readdata = DDRAM_DOUT;
 
-reg        ddr_swap;
-reg [15:0] ddr_data;
-
 always @ (posedge sysclk) begin
-	reg  [2:0] state = 0;
+	reg  [3:0] state;
 	reg  [1:0] ba;
 	reg [63:0] dout;
 
 	cache_fill <= 0;
 	ddr_data <= dout[{ba, 4'b0000} +:16];
+	walker_ack   <= 0;
+	walker_snoop <= 0;
 
 	if(~ram_busy) begin
 		ram_we  <= 0;
@@ -205,10 +235,16 @@ always @ (posedge sysclk) begin
 	end
 
 	if(~reset_n) begin
-		state     <= 0;
-		write_ack <= 0;
+		state                <= 0;
+		write_ack            <= 0;
+		walker_busy          <= 0;
+		walker_addr_latch    <= 0;
+		walker_wdata_latch   <= 0;
+		walker_snoop_low     <= 0;
+		walker_rdata         <= 0;
 	end
 	else begin
+		if (!walker_req) walker_busy <= 0;
 		case(state)
 			0: if(~ram_busy) begin
 					if(~write_ack & write_req) begin
@@ -217,6 +253,25 @@ always @ (posedge sysclk) begin
 						ram_din  <= {writeDat,writeDat,writeDat,writeDat};
 						ram_we   <= 1;
 						write_ack  <= 1;
+					end
+					else if(walker_req && !walker_busy) begin
+						walker_busy        <= 1;
+						walker_addr_latch  <= walker_addr;
+						walker_wdata_latch <= walker_wdata;
+						ram_addr <= {3'b001, walker_addr[28:3]};
+						ram_be   <= walker_we
+								? (walker_addr[2] ? 8'hF0 : 8'h0F)
+								: 8'hFF;
+						ram_din  <= {walker_wdata[15:0], walker_wdata[31:16],
+								     walker_wdata[15:0], walker_wdata[31:16]};
+						if (walker_we) begin
+							ram_we <= 1;
+							state  <= 5;
+						end
+						else begin
+							ram_rd <= 1;
+							state  <= 14;
+						end
 					end
 					else if(cache_req) begin
 						ram_addr <= {3'b001, cpuAddr[28:3]};
@@ -242,6 +297,56 @@ always @ (posedge sysclk) begin
 			4: begin
 					cache_fill    <= 1;
 					state         <= 0;
+				end
+			// cpu_cache_new performs a synchronous tag lookup before its
+			// data-RAM write and has no ready output.  Keep each half's
+			// address/data selected for the complete lookup/write window,
+			// insert an inactive write edge between halves, and acknowledge
+			// only after the low-half write has landed.
+			5: begin
+					walker_snoop     <= 1;
+					walker_snoop_low <= 0;
+					state             <= 6;
+				end
+			6: begin
+					walker_snoop     <= 1;
+					state             <= 7;
+				end
+			7: begin
+					walker_snoop     <= 1;
+					state             <= 8;
+				end
+			8: begin
+					walker_snoop     <= 0;
+					state             <= 9;
+				end
+			9: begin
+					walker_snoop     <= 1;
+					walker_snoop_low <= 1;
+					state             <= 10;
+				end
+			10: begin
+					walker_snoop     <= 1;
+					state             <= 11;
+				end
+			11: begin
+					walker_snoop     <= 1;
+					state             <= 12;
+				end
+			12: begin
+					walker_snoop     <= 0;
+					state             <= 13;
+				end
+			13: begin
+					walker_ack <= 1;
+					state       <= 0;
+				end
+			14: if(~ram_busy & ram_dout_ready) begin
+					walker_rdata <= walker_addr_latch[2]
+						? {ram_dout[47:32], ram_dout[63:48]}
+						: {ram_dout[15:0], ram_dout[31:16]};
+					walker_ack <= 1;
+					state      <= 0;
 				end
 		endcase
 

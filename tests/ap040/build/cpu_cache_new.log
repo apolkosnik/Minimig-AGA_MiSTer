@@ -1,0 +1,2 @@
+ALL TESTS PASSED
+tb_cpu_cache_new.v:325: $finish called at 11005000 (1ps)

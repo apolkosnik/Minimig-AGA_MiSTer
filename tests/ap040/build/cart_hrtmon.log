@@ -1,0 +1,2 @@
+HRTMon cartridge regression: ALL TESTS PASSED
+tb_cart_hrtmon.v:116: $finish called at 87000 (1ps)

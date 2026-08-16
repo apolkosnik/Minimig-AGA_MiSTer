@@ -25,6 +25,13 @@
 //--------------------------------------------------------------------------//
 
 module cpu_wrapper
+#(
+	// A missing target must eventually produce a 68040 bus error, but chip
+	// RAM can legitimately wait thousands of clk_sys cycles for a DMA slot.
+	// cpu_wrapper.clk is clk_sys (28.6875 MHz), so 2^20 clocks is about 36.6 ms
+	// and comfortably separates the two.
+	parameter BUS_TIMEOUT_BITS = 20
+)
 (
 	input             reset,
 	output reg        reset_out,
@@ -65,6 +72,23 @@ module cpu_wrapper
 	output            ramlds,
 	output            ramuds,
 	output            ramshared,
+	// One-CPU-clock strobe: the CPU sampled ramready high for an active
+	// RAM request on this edge, i.e. the level acknowledgement has been
+	// consumed.  ram_cs_guard keys its deselect on this instead of
+	// guessing the consumption point from a clock-phase marker.
+	output reg        ramconsumed,
+
+	// Dedicated AP040 physical table-walk channel.  Addresses are already
+	// encoded for the SDRAM/DDR3 controllers; walker_mem_ddr selects the bank.
+	output            walker_mem_req,
+	output            walker_mem_we,
+	output     [28:2] walker_mem_addr,
+	output     [31:0] walker_mem_wdat,
+	output            walker_mem_ddr,
+	output            walker_mem_bad,
+	input             walker_mem_ack,
+	input      [31:0] walker_mem_rdata,
+	input             walker_mem_berr,
 
 	output            toccata_ena,
 	output reg  [7:0] toccata_base,
@@ -75,6 +99,15 @@ module cpu_wrapper
 
 	output reg  [1:0] cpustate,
 	output reg  [3:0] cacr,
+	// MMU cache-inhibit attribute of the current access (TTR CM or page
+	// descriptor CM); the external caches must not retain such data.
+	output            cache_inhibit,
+	// Chipset-DMA write snoop from the RAM controller (clk_114 domain).
+	// snoop_tgl flips once per write with snoop_adr held; this crosses it
+	// into the CPU clock so ap040_cache can invalidate the line.
+	input             snoop_tgl,
+	input      [24:1] snoop_adr,
+	output            nmi_ack_toggle,
 	output reg [31:0] nmi_addr
 );
 
@@ -141,135 +174,219 @@ reg         lds_in;
 reg  [15:0] chip_data;
 reg  [31:0] vbr;
 
+// AP040 is the only CPU path; cpucfg keeps its OSD meaning for the
+// turbo chipram/kickstart gating and autoconfig defaults below.
 always @* begin
-	if(cpucfg[1:0]) begin
-		cpu_dout     = cpu_dout_p;
-		cpu_addr     = cpu_addr_p;
-		cpustate     = cpustate_p;
-		cacr         = cacr_p;
-		vbr          = vbr_p;
-		wr           = wr_p;
-		uds_in       = uds_p;
-		lds_in       = lds_p;
-		reset_out    = reset_out_p;
-		chip_as      = c_as;
-		chip_rw      = c_rw;
-		chip_uds     = c_uds;
-		chip_lds     = c_lds;
-		chip_addr    = cpu_addr_p[23:1];
-		chip_din     = cpu_dout_p;
-		chip_data    = chipdout_i;
-		fastchip_sel = cpu_req & !cpu_addr_p[31:24];
-		fastchip_lw  = longword;
-	end
-	else begin
-		cpu_dout     = cpu_dout_o;
-		cpu_addr     = {cpu_addr_o,1'b0};
-		cpustate     = as_o ? 2'b01 : ~{wr_o,wr_o};
-		cacr         = 1;
-		vbr          = 0;
-		wr           = wr_o;
-		uds_in       = uds_o;
-		lds_in       = lds_o;
-		reset_out    = reset_out_o;
-		chip_as      = ramsel | as_o;
-		chip_rw      = wr_o;
-		chip_uds     = uds_o;
-		chip_lds     = lds_o;
-		chip_addr    = cpu_addr_o[23:1];
-		chip_din     = cpu_dout_o;
-		chip_data    = chip_dout;
-		fastchip_sel = 0;
-		fastchip_lw  = 0;
-	end
+	cpu_dout     = cpu_dout_p;
+	cpu_addr     = cpu_addr_p;
+	cpustate     = cpustate_p;
+	// 040 CACR: bit 15 enables the instruction cache, bit 31 the data
+	// cache.  The external cache takes them separately (bit 0 = I, 1 = D).
+	cacr         = {cache_clear_toggle, 1'b0, cacr_p[31], cacr_p[15]};
+	vbr          = vbr_p;
+	wr           = wr_p;
+	uds_in       = uds_p;
+	lds_in       = lds_p;
+	reset_out    = reset_out_p;
+	chip_as      = c_as;
+	chip_rw      = c_rw;
+	chip_uds     = c_uds;
+	chip_lds     = c_lds;
+	chip_addr    = cpu_addr_p[23:1];
+	chip_din     = cpu_dout_p;
+	chip_data    = chipdout_i;
+	fastchip_sel = cpu_req & !cpu_addr_p[31:24];
+	fastchip_lw  = longword;
 end
 
 wire [15:0] cpu_dout_p;
 wire [31:0] cpu_addr_p;
 wire  [1:0] cpustate_p;
-wire  [3:0] cacr_p;
+wire [31:0] cacr_p;
 wire [31:0] vbr_p;
 wire        wr_p;
 wire        uds_p;
 wire        lds_p;
 wire        reset_out_p;
 wire        longword;
+wire        walker_req_p, walker_we_p;
+wire [31:0] walker_addr_p, walker_wdat_p;
+wire        cache_maint_p;
+reg         cache_maint_d;
+reg         cache_clear_toggle;
+wire        bus_berr;
+wire        bus_complete = chipready | ramready | fastchip_ready;
 
-TG68KdotC_Kernel
-#(
-	.sr_read(2),        // 0=>user,   1=>privileged,    2=>switchable with CPU(0)
-	.vbr_stackframe(2), // 0=>no,     1=>yes/extended,  2=>switchable with CPU(0)
-	.extaddr_mode(2),   // 0=>no,     1=>yes,           2=>switchable with CPU(1)
-	.mul_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no MUL,
-	.div_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,
-	.bitfield(2)        // 0=>no,     1=>yes,           2=>switchable with CPU(1)
-)
-cpu_inst_p
-(
-  .clk(clk),
-  .nreset(reset),
-  .clkena_in(~cpu_req | chipready | ramready | fastchip_ready),
-  .data_in(cpu_din),
-  .ipl(cpu_ipl),
-  .ipl_autovector(1),
-  .regin_out(),
-  .addr_out(cpu_addr_p),
-  .data_write(cpu_dout_p),
-  .nwr(wr_p),
-  .nuds(uds_p),
-  .nlds(lds_p),
-  .nresetout(reset_out_p),
-  .longword(longword),
-  
-  .cpu(cpucfg),
-  .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
-  .cacr_out(cacr_p),
-  .vbr_out(vbr_p)
-);
+// Level-acknowledge consumption strobe for ram_cs_guard: exactly the edge
+// where the qualified clock advances a waiting RAM transaction.
+always @(posedge clk) begin
+	if (~reset) ramconsumed <= 0;
+	else        ramconsumed <= cpu_req & ramsel & ramready;
+end
 
-wire [15:0] cpu_dout_o;
-wire [23:1] cpu_addr_o;
-wire  [2:0] fc_o;
-wire        wr_o;
-wire        as_o;
-wire        uds_o;
-wire        lds_o;
-wire        reset_out_o;
+// Snoop CDC.  A chipset write happens at most once per CCK, i.e. every
+// four CPU clocks, so a two-flop synchroniser on the toggle plus one
+// cycle to act keeps up without a queue.  The address is held by the
+// producer until the next write, so it is stable when the toggle arrives.
+reg  [2:0] snoop_tgl_s;
+reg        snoop_stb_r;
+reg [31:0] snoop_addr_r;
+always @(posedge clk) begin
+	if (!reset) begin
+		snoop_tgl_s <= 0;
+		snoop_stb_r <= 0;
+	end
+	else begin
+		snoop_tgl_s <= {snoop_tgl_s[1:0], snoop_tgl};
+		snoop_stb_r <= snoop_tgl_s[2] ^ snoop_tgl_s[1];
+		if (snoop_tgl_s[2] ^ snoop_tgl_s[1])
+			snoop_addr_r <= {7'd0, snoop_adr, 1'b0};
+	end
+end
 
-fx68k cpu_inst_o
+ap040_tg68k_compat #(
+	// Internal caches OFF: they do not fit this device with usable timing.
+	// At the designed 4KB per side the fitter needs 4226 LABs against the
+	// 5CSEBA6's 4191; halved to 2KB per side it fits at 98% ALM
+	// utilization but timing collapses to -0.716 ns on the CPU domain,
+	// because at that occupancy the fitter has no placement freedom left
+	// (the same tree closes at +0.071 ns with them off).  cpu_cache_new in
+	// the RAM controllers already provides snooped caching on this fabric,
+	// so what is lost is hit LATENCY, not caching.  The cache and its
+	// fast-RAM cacheability windows stay wired up and covered by the test
+	// suite; flip this to 1 if area is freed elsewhere.
+	.AP040_ENABLE_CACHE(0),
+	// FPU hardware subset (milestone H): FMOVE all formats, FMOVEM,
+	// FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FTST with IEEE rounding;
+	// unimplemented ops trap to the FPSP route like real 040 silicon
+	.AP040_HAS_FPU(1)
+) cpu_inst_p
 (
 	.clk(clk),
-	.enPhi1(ph1),
-	.enPhi2(ph2),
+	.nreset(reset),
+	.clkena_in(~cpu_req | bus_complete | bus_berr),
+	.cache_allow_all(1'b0),
+	.cache_snoop_stb(snoop_stb_r),
+	.cache_snoop_addr(snoop_addr_r),
+	.cache_z2_ena(z2ram_ena),
+	.cache_z3_base0(z3ram_base0),
+	.cache_z3_ena0(z3ram_ena0),
+	.cache_z3_base1(z3ram_base1),
+	.cache_z3_ena1(z3ram_ena1),
+	.data_in(cpu_din),
+	.ipl(cpu_ipl),
+	.ipl_autovector(1'b1),
+	.berr(bus_berr),
 
-	.extReset(~reset),
-	.pwrUp(~reset),
-	.oRESETn(reset_out_o),
-	.HALTn(1),
+	.addr_out(cpu_addr_p),
+	.data_write(cpu_dout_p),
+	.nwr(wr_p),
+	.nuds(uds_p),
+	.nlds(lds_p),
+	.busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
+	.longword(longword),
+	.nresetout(reset_out_p),
+	.fc(),
+	.nmi_ack_toggle(nmi_ack_toggle),
+	.cache_maint_req(cache_maint_p),
+	.cache_maint_ic(),
+	.cache_maint_dc(),
 
-	.eRWn(wr_o),
-	.ASn(as_o),
-	.LDSn(lds_o),
-	.UDSn(uds_o),
-	.DTACKn(ramsel ? ~ramready : chip_dtack),
+	// MMU and dedicated physical table-walker sideband
+	.mmu_addr_log(),
+	.mmu_addr_phys(),
+	.mmu_cache_inhibit(cache_inhibit),
+	.walker_req(walker_req_p),
+	.walker_we(walker_we_p),
+	.walker_addr(walker_addr_p),
+	.walker_wdat(walker_wdat_p),
+	.walker_ack(walker_mem_ack),
+	.walker_data(walker_mem_rdata),
+	.walker_berr(walker_mem_berr),
+	.cache_req(),
+	.cache_addr(),
+	.cache_data(16'd0),
+	.cache_ack(1'b0),
+	.cache_burst(),
+	.cache_burst_len(),
+	.cache_ramaddr(),
 
-	.FC0(fc_o[0]),
-	.FC1(fc_o[1]),
-	.FC2(fc_o[2]), 
-
-	.VPAn(~&fc_o),
-	.BERRn(1),
-	.BRn(1),
-	.BGACKn(1),
-	.IPL0n(chip_ipl[0]),
-	.IPL1n(chip_ipl[1]),
-	.IPL2n(chip_ipl[2]),
-	.iEdb(cpu_din),
-	.oEdb(cpu_dout_o),
-	.eab(cpu_addr_o)
+	.cacr_out(cacr_p),
+	.vbr_out(vbr_p),
+	.debug_busy(),
+	.debug_fault(),
+	.debug_halted(),
+	.debug_status()
 );
 
 wire cpu_req = (cpustate != 1);
+
+// Convert the core's level handshake into a toggle.  The RAM controllers
+// may be in another clock domain and/or busy when CINV/CPUSH executes; a
+// stable toggle cannot be lost the way a one-cycle clear pulse can.
+always @(posedge clk) begin
+	if (!reset) begin
+		cache_maint_d      <= 0;
+		cache_clear_toggle <= 0;
+	end
+	else begin
+		cache_maint_d <= cache_maint_p;
+		if (cache_maint_p && !cache_maint_d)
+			cache_clear_toggle <= ~cache_clear_toggle;
+	end
+end
+
+// Keep berr asserted until the bus adapter has sampled it on a qualified
+// edge and released cpu_req; this avoids a narrow pulse at exactly the point
+// where clkena_in was previously stalled.
+ap040_bus_timeout #(.COUNTER_BITS(BUS_TIMEOUT_BITS)) bus_timeout (
+	.clk(clk),
+	.nreset(reset && reset_out_p),
+	.req(cpu_req),
+	.complete(bus_complete),
+	.berr(bus_berr)
+);
+
+// Translate the walker's physical address to the same SDRAM/DDR3 bank map
+// used by normal CPU traffic.  The MMU guarantees aligned longword accesses.
+wire walker_sel_z3ram0 = (walker_addr_p[31:27] == z3ram_base0) && z3ram_ena0;
+wire walker_sel_z3ram1 = (walker_addr_p[31:28] == z3ram_base1) && z3ram_ena1;
+wire walker_sel_z2ram  = !walker_addr_p[31:24] &&
+					 (walker_addr_p[23] ^ |walker_addr_p[22:21]) && z2ram_ena;
+wire walker_sel_zram   = walker_sel_z3ram0 | walker_sel_z3ram1 |
+					 walker_sel_z2ram;
+wire walker_sel_dd     = (walker_addr_p[31:16] == 16'h00DD) &&
+					 (walker_addr_p[15:13] == 3'b010);
+wire walker_sel_rtg    = (walker_addr_p[31:24] == 8'h02);
+wire walker_kicklower  = !walker_addr_p[31:24] &&
+					 (walker_addr_p[23:18] == 6'b111110);
+wire [28:1] walker_ramaddr;
+
+assign walker_ramaddr[28]    = walker_sel_zram & ~walker_sel_z3ram0;
+assign walker_ramaddr[27]    = walker_sel_zram &
+					      (~walker_sel_z3ram1 | walker_addr_p[27]);
+assign walker_ramaddr[26:23] = (walker_sel_z3ram0 | walker_sel_z3ram1)
+					      ? walker_addr_p[26:23]
+					      : (walker_sel_rtg ? 4'b1110 : {4{walker_sel_dd}});
+assign walker_ramaddr[22:19] = {4{walker_sel_dd}} | walker_addr_p[22:19];
+assign walker_ramaddr[18]    = walker_sel_dd | (walker_kicklower & bootrom) |
+					      walker_addr_p[18];
+assign walker_ramaddr[17:16] = {2{walker_sel_dd}} | walker_addr_p[17:16];
+assign walker_ramaddr[15:1]  = walker_addr_p[15:1];
+
+assign walker_mem_req  = walker_req_p;
+assign walker_mem_we   = walker_we_p;
+assign walker_mem_addr = walker_ramaddr[28:2];
+assign walker_mem_wdat = walker_wdat_p;
+assign walker_mem_ddr  = |walker_ramaddr[28:26];
+// High physical addresses are valid only when they decode as configured Z3
+// RAM.  Misalignment indicates corrupt descriptor-table state.
+// Valid table memory is Z2/Z3 RAM, the DD and RTG apertures, and the low
+// 16M (which decodes as chip/slow/kick).  Anything else, or a misaligned
+// descriptor address, indicates corrupt translation-table state.
+assign walker_mem_bad  = (|walker_addr_p[1:0]) |
+					 ((|walker_addr_p[31:24]) &&
+					  !(walker_sel_zram | walker_sel_dd | walker_sel_rtg));
 
 wire cchip = turbochip_d & (!cpustate | dcache_d);
 wire ckick = turbokick_d & (!cpustate | dcache_d);
@@ -314,11 +431,26 @@ always @(negedge clk, negedge reset) begin
 
 	if(~reset) begin
 		stage <= 0;
+		waitm <= 0;
 		c_as <= 1;
 		c_rw <= 1;
 		c_uds <= 1;
 		c_lds <= 1;
 		ready <= 0;
+		chipready <= 0;
+	end
+	else if (bus_berr) begin
+		// The bus16 adapter aborts on the next positive edge.  Release
+		// any chip-bus phase here as well so the exception-vector fetch
+		// starts from a clean bus transaction.
+		stage <= 0;
+		waitm <= 0;
+		c_as <= 1;
+		c_rw <= 1;
+		c_uds <= 1;
+		c_lds <= 1;
+		ready <= 0;
+		chipready <= 0;
 	end
 	else begin
 		if (ph2n) begin

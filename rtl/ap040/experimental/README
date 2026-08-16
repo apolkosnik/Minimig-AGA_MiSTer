@@ -1,0 +1,6 @@
+// Fetch-buffered ap040_core.v, rolled back 2026-08-02: booted DiagROM but not AmigaOS on hardware (sim boots both). See project memory before reusing.
+Kept in sync with the active core only for bugs that would otherwise be
+resurrected on revival: the MOVEM predecrement base-in-list rule was
+back-ported 2026-08-04.  Everything else in this file predates the
+milestone-H FPU and the vector-55 data type trap, so a revival must be
+rebased on the current ap040_core.v rather than dropped in as-is.

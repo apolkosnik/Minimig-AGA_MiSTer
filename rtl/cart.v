@@ -50,6 +50,7 @@ module cart
 	input         cpu_hwr,
 	input         cpu_lwr,
 	input  [31:0] nmi_addr,
+	input         nmi_ack_toggle,
 	input   [8:1] reg_address_in,
 	input  [15:0] reg_data_in,
 	input         dbr,
@@ -62,6 +63,8 @@ module cart
 	output        ovr
 );
 
+reg active=0;
+reg stealth=0; // hide until the first freeze request
 
 //  cart selected, is in stealth mode until first freeze, has to be available during halt to allow userio 
 assign sel_cart = ~dbr && (cpu_address_in[23:19]==5'b1010_0) && (stealth | cpuhlt); // $A00000
@@ -87,7 +90,23 @@ wire freeze_req = freeze && ~freeze_d;
 wire int7_req = freeze_req;
 
 // level7 interrupt ack cycle, on Amiga interrupt vector number is read from kickstart rom
-wire int7_ack = &cpu_address_in && ~_cpu_as;
+wire legacy_int7_ack = &cpu_address_in && ~_cpu_as;
+
+// AP040 autovectors internally and therefore never emits the legacy
+// $FFFFFFFF interrupt-acknowledge bus cycle.  Its acknowledge is exported
+// as a retained toggle; sample it only in this module's clk7_en domain so an
+// event that arrives between enables cannot be lost.
+reg nmi_ack_seen=0;
+wire ap040_int7_ack = nmi_ack_toggle != nmi_ack_seen;
+
+always @ (posedge clk) begin
+	if (clk7_en) begin
+		if (cpu_rst)
+			nmi_ack_seen <= nmi_ack_toggle;
+		else if (ap040_int7_ack)
+			nmi_ack_seen <= nmi_ack_toggle;
+	end
+end
 
 // level 7 interrupt request logic
 // interrupt request lines are sampled during S4->S5 transition (falling cpu clock edge)
@@ -95,7 +114,7 @@ always @ (posedge clk) begin
 	if (clk7_en) begin
 		     if (cpu_rst)  int7 <= 0;
 		else if (int7_req) int7 <= 1;
-		else if (int7_ack) int7 <= 0;
+		else if (legacy_int7_ack || ap040_int7_ack) int7 <= 0;
 	end
 end
 
@@ -105,7 +124,7 @@ reg l_int7_ack=0;
 always @ (posedge clk) begin
 	if (clk7_en) begin
 		l_int7_req <= int7_req;
-		l_int7_ack <= int7_ack;
+		l_int7_ack <= legacy_int7_ack;
 	end
 end
 
@@ -119,13 +138,18 @@ always @ (posedge clk) begin
 end
 
 // overlay active
-reg active=0;
-reg stealth; //hide till first freeze request   
 always @ (posedge clk) begin
 	if (clk7_en) begin
 		if (cpu_rst) begin
 			active <= 0;
 			stealth <= 0;
+		end
+		// Unlike a bus IACK, AP040's acceptance happens before it stacks the
+		// exception frame and its bus is no longer in a read cycle here.  Arm
+		// the overlay directly; it will be ready well before the vector fetch.
+		else if (ap040_int7_ack && (int7 || l_int7)) begin
+			active <= 1;
+			stealth <= 1;
 		end
 		else if (l_int7 && l_int7_ack && cpu_rd) begin
 			active <= 1;
@@ -156,4 +180,3 @@ assign cart_data_out = custom_mirror_out | nmi_adr_out;
 
 
 endmodule
-

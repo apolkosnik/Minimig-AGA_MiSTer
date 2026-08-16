@@ -223,7 +223,7 @@ amiga_clk amiga_clk
 wire cpu_type = cpucfg[1];
 reg  cpu_ph1;
 reg  cpu_ph2;
-reg  ram_cs;
+wire ram_cs;
 reg  cyc;
 
 always @(posedge clk_114) begin
@@ -252,13 +252,26 @@ always @(posedge clk_114) begin
 		end
 	end
 
-	ram_cs <= ~(ram_ready & cyc & cpu_type) & ram_sel;
 end
+
+wire ram_consumed;
+
+ram_cs_guard ram_guard
+(
+	.clk         (clk_114),
+	.nreset      (cpu_rst),
+	.cpu_type    (cpu_type),
+	.ram_consumed(ram_consumed),
+	.ram_sel     (ram_sel),
+	.ram_ready   (ram_ready),
+	.ram_cs      (ram_cs)
+);
 
 wire  [1:0] cpu_state;
 wire        cpu_nrst_out;
 wire  [3:0] cpu_cacr;
 wire [31:0] cpu_nmi_addr;
+wire        cpu_nmi_ack_toggle;
 wire        cpu_rst;
 
 wire  [2:0] chip_ipl;
@@ -280,6 +293,25 @@ wire [15:0] ram_dout  = zram_sel ? ram_dout2  : ram_dout1;
 wire        ram_ready = zram_sel ? ram_ready2 : ram_ready1;
 wire        zram_sel  = |ram_addr[28:26];
 wire        ramshared;
+wire        cpu_cache_inhibit;
+
+// AP040 table-search port.  The CPU-side request crosses into clk_114 once,
+// then goes directly to the selected RAM controller as one 32-bit transfer.
+wire        walker_req_cpu, walker_we_cpu, walker_ddr_cpu, walker_bad_cpu;
+wire [28:2] walker_addr_cpu;
+wire [31:0] walker_wdat_cpu, walker_rdata_cpu;
+wire        walker_ack_cpu, walker_berr_cpu;
+wire        walker_req_mem, walker_we_mem, walker_ddr_mem;
+wire [28:2] walker_addr_mem;
+wire [31:0] walker_wdat_mem;
+wire        walker_ack_mem, walker_berr_mem;
+wire [31:0] walker_rdata_mem;
+wire        walker_ack1, walker_ack2;
+wire [31:0] walker_rdata1, walker_rdata2;
+
+assign walker_ack_mem   = walker_ddr_mem ? walker_ack2   : walker_ack1;
+assign walker_rdata_mem = walker_ddr_mem ? walker_rdata2 : walker_rdata1;
+assign walker_berr_mem  = 1'b0;
 
 wire [7:0] toccata_base;
 wire toccata_ena;
@@ -288,6 +320,8 @@ wire [7:0] a2065_base;
 
 cpu_wrapper cpu_wrapper
 (
+	.snoop_tgl    (chip_snoop_tgl  ),
+	.snoop_adr    (chip_snoop_adr  ),
 	.reset        (cpu_rst         ),
 	.reset_out    (cpu_nrst_out    ),
 
@@ -331,18 +365,64 @@ cpu_wrapper cpu_wrapper
 	.ramdout      (ram_dout        ),
 	.ramdin       (ram_din         ),
 	.ramready     (ram_ready       ),
+	.ramconsumed  (ram_consumed    ),
+	.cache_inhibit(cpu_cache_inhibit ),
 	.ramshared    (ramshared       ),
+
+	.walker_mem_req  (walker_req_cpu  ),
+	.walker_mem_we   (walker_we_cpu   ),
+	.walker_mem_addr (walker_addr_cpu ),
+	.walker_mem_wdat (walker_wdat_cpu ),
+	.walker_mem_ddr  (walker_ddr_cpu  ),
+	.walker_mem_bad  (walker_bad_cpu  ),
+	.walker_mem_ack  (walker_ack_cpu  ),
+	.walker_mem_rdata(walker_rdata_cpu),
+	.walker_mem_berr (walker_berr_cpu ),
 
 	//custom CPU signals
 	.cpustate     (cpu_state       ),
 	.cacr         (cpu_cacr        ),
+	.nmi_ack_toggle(cpu_nmi_ack_toggle),
 	.nmi_addr     (cpu_nmi_addr    )
+);
+
+ap040_walker_cdc walker_cdc
+(
+	.s_clk     (clk_sys),
+	.s_reset_n (cpu_rst),
+	.s_req     (walker_req_cpu),
+	.s_we      (walker_we_cpu),
+	.s_addr    (walker_addr_cpu),
+	.s_wdata   (walker_wdat_cpu),
+	.s_ddr     (walker_ddr_cpu),
+	.s_bad     (walker_bad_cpu),
+	.s_ack     (walker_ack_cpu),
+	.s_rdata   (walker_rdata_cpu),
+	.s_berr    (walker_berr_cpu),
+
+	.m_clk     (clk_114),
+	.m_reset_n (~reset_d),
+	.m_req     (walker_req_mem),
+	.m_we      (walker_we_mem),
+	.m_addr    (walker_addr_mem),
+	.m_wdata   (walker_wdat_mem),
+	.m_ddr     (walker_ddr_mem),
+	.m_ack     (walker_ack_mem),
+	.m_rdata   (walker_rdata_mem),
+	.m_berr    (walker_berr_mem)
 );
 
 wire [15:0] ram_dout1;
 wire        ram_ready1;
 
-sdram_ctrl ram1
+// The controller caches carry the system.  ap040_cache is measured NOT
+// ready to replace them: its miss costs a 4-beat line fill serialised
+// through the 16-bit bus adapter (8 bus cycles) against 1-2 for an
+// uncached word, so miss-heavy code -- fast RAM above all -- ran SLOWER
+// with it than with no CPU-side cache at all.  Its snoop CDC also loses
+// events while clkena is frozen.  Re-enable it only with a 32-bit/burst
+// fill path and a ce-independent snoop queue.
+sdram_ctrl #(.CPU_CACHE(1)) ram1
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
@@ -368,8 +448,16 @@ sdram_ctrl ram1
 	.cpuL         (ram_lds         ),
 	.cpustate     (cpu_state       ),
 	.cpuCS        (~zram_sel&ram_cs),
+	.cache_inhibit(cpu_cache_inhibit ),
 	.cpuRD        (ram_dout1       ),
 	.ramready     (ram_ready1      ),
+
+	.walker_req   (walker_req_mem & ~walker_ddr_mem),
+	.walker_we    (walker_we_mem),
+	.walker_addr  (walker_addr_mem[24:2]),
+	.walker_wdata (walker_wdat_mem),
+	.walker_ack   (walker_ack1),
+	.walker_rdata (walker_rdata1),
 
 	.chipWR       (ram_data        ),
 	.chipAddr     (ram_address     ),
@@ -378,13 +466,15 @@ sdram_ctrl ram1
 	.chipRW       (_ram_we         ),
 	.chipDMA      (_ram_oe         ),
 	.chipRD       (ramdata_in      ),
+	.snoop_tgl    (chip_snoop_tgl  ),
+	.snoop_addr   (chip_snoop_adr  ),
 	.chip48       (chip48          )
 );
 
 wire [15:0] ram_dout2;
 wire        ram_ready2;
 
-ddram_ctrl ram2
+ddram_ctrl #(.CPU_CACHE(1)) ram2
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
@@ -419,9 +509,17 @@ ddram_ctrl ram2
 	.cpuL         (ram_lds         ),
 	.cpustate     (cpu_state       ),
 	.cpuCS        (zram_sel&ram_cs ),
+	.cache_inhibit(cpu_cache_inhibit ),
 	.cpuRD        (ram_dout2       ),
 	.ramshared    (ramshared       ),
-	.ramready     (ram_ready2      )
+	.ramready     (ram_ready2      ),
+
+	.walker_req   (walker_req_mem & walker_ddr_mem),
+	.walker_we    (walker_we_mem),
+	.walker_addr  (walker_addr_mem),
+	.walker_wdata (walker_wdat_mem),
+	.walker_ack   (walker_ack2),
+	.walker_rdata (walker_rdata2)
 );
 
 ////////////////////////////  A2065 ETHERNET  ///////////////////////////////
@@ -521,6 +619,8 @@ wire  [6:0] memcfg;
 wire        bootrom;   
 wire [15:0] ram_data;      // sram data bus
 wire [15:0] ramdata_in;    // sram data bus in
+wire        chip_snoop_tgl;
+wire [24:1] chip_snoop_adr;
 wire [47:0] chip48;        // big chip read
 wire [23:1] ram_address;   // sram address bus
 wire        _ram_bhe;      // sram upper byte select
@@ -559,6 +659,7 @@ minimig minimig
 	._cpu_reset   (cpu_rst          ), // M68K reset
 	._cpu_reset_in(cpu_nrst_out     ), // M68K reset out
 	.nmi_addr     (cpu_nmi_addr     ), // M68K NMI address
+	.nmi_ack_toggle(cpu_nmi_ack_toggle), // AP040 level-7 acceptance event
 
 	//sram pins
 	.ram_data     (ram_data         ), // SRAM data bus
@@ -651,7 +752,7 @@ minimig minimig
 	.cpucfg       (cpucfg           ), // CPU config
 	.cachecfg     (cachecfg         ), // Cache config
 	.memcfg       (memcfg           ), // memory config
-	.bootrom      (bootrom          ), // bootrom mode. Needed here to tell tg68k to also mirror the 256k Kickstart 
+	.bootrom      (bootrom          ), // bootrom mode. Needed here to tell the CPU wrapper to also mirror the 256k Kickstart 
 
 	.ide_fast     (ide_fast         ),
 	.ide_ext_irq  (ide_f_irq        ),

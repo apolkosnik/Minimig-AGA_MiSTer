@@ -14,7 +14,12 @@
 //
 //
 
-module cpu_cache_new
+module cpu_cache_new #(
+  // CACHE_ENABLE 0 leaves only the fill/pass machinery: every access misses
+  // and goes straight to memory, and the tag/data RAMs are not built at all.
+  // Used when the CPU's own internal cache is the only cache in the system.
+  parameter CACHE_ENABLE = 1
+)
 (
   // system
   input             clk,            // clock
@@ -59,6 +64,12 @@ reg   [3:0] sdr_sm_state;
 // state signals
 reg         fill;
 reg   [9:0] cpu_sm_adr;
+// write-hit line updates execute one state after the tag match, but the
+// write buffer acknowledges the CPU immediately, so the live cpu_adr can
+// already point at the NEXT transfer when the data ram write fires --
+// every hit update landed one word late (the hardware cputest FABS.X
+// ([0]) +2 window).  Capture the address with the data and byte selects.
+reg   [9:0] cpu_sm_wadr;
 reg         cpu_sm_itag_we;
 reg         cpu_sm_dtag_we;
 reg         cpu_sm_iram0_we;
@@ -68,6 +79,20 @@ reg         cpu_sm_dram1_we;
 reg   [1:0] cpu_sm_bs;
 reg  [15:0] cpu_sm_mem_dat_w;
 reg  [39:0] cpu_sm_tag_dat_w;
+// deferred tag/LRU update: the hit and fill paths only RECORD the
+// decision; the 40-bit staging mux runs one cycle later, giving the
+// tagram-read -> LRU-remix -> cpu_sm_tag_dat_w cone its own cycle
+// (it was the last 113MHz setup violator).  Address and tram read
+// data are held by the level handshake across that cycle.
+reg         tagupd_hit_v;
+reg         tagupd_fill_v;
+reg         tagupd_is_i;
+reg         tagupd_lru;
+// captured at arm time: the deferred write must not sample live signals
+// (the CPU can advance on the first-beat ack before the write fires)
+reg  [7:0]  tagupd_idx;
+reg [39:0]  tagupd_tram;
+reg [17:0]  tagupd_tag;
 reg         cpu_sm_id;
 reg         cpu_sm_ilru;
 reg         cpu_sm_dlru;
@@ -83,13 +108,19 @@ reg  [39:0] sdr_sm_tag_dat_w;
 reg         sdr_sm_id;
 reg         sdr_sm_ilru;
 reg         sdr_sm_dlru;
+reg  [39:0] itram_cpu_q;  // one-cycle shadows of the CPU-side tag read
+reg  [39:0] dtram_cpu_q;  //   ports (registered copies for FILL1's cones)
 
 // cpu cache control
-reg   [1:0] cc_clr_r;
+reg         cc_clear_seen;
+reg         cc_clear_pending;
+reg         cc_cpu_accepted;
+reg         cc_sdr_accepted;
 wire        cpu_cache_enable;
+wire        cpu_cache_enable_d;
 wire        cpu_cache_clear;
-reg         cc_en;
-reg         cc_clr;
+reg         cc_en;      // instruction side
+reg         cc_en_d;    // data side
 // cpu address
 wire  [1:0] cpu_adr_blk;
 wire  [7:0] cpu_adr_idx;
@@ -207,25 +238,51 @@ localparam [3:0]
 
 //// cpu side ////
 
-// cpu cache control
-always @ (posedge clk) begin
-	if (rst) cc_clr_r <= 2'd0;
-	else if (!cpu_cs) cc_clr_r <= {cc_clr_r[0], cpu_cache_ctrl[3]};
-end
+// The 68040 enables its instruction and data caches independently (CACR
+// bits 15 and 31), so the external cache follows both: bit 0 is the
+// instruction enable, bit 1 the data enable.  Bit 3 is a maintenance-event
+// toggle rather than a pulse, so a request cannot disappear while either
+// cache state machine is busy.
+assign cpu_cache_enable   = CACHE_ENABLE ? cpu_cache_ctrl[0] : 1'b0;
+assign cpu_cache_enable_d = CACHE_ENABLE ? cpu_cache_ctrl[1] : 1'b0;
+assign cpu_cache_clear    = cc_clear_pending;
 
-assign cpu_cache_enable = cpu_cache_ctrl[0];
-//assign cpu_cache_freeze = cpu_cache_ctrl[1];
-assign cpu_cache_clear  = cc_clr_r[0] && !cc_clr_r[1];
+wire cc_cpu_accept = cc_clear_pending && (cpu_sm_state == CPU_SM_IDLE);
+wire cc_sdr_accept = cc_clear_pending && (sdr_sm_state == SDR_SM_IDLE);
+
+// Synchronize the stable maintenance toggle and retain the request until
+// both the CPU-side and SDRAM/snoop-side state machines have accepted it.
+always @ (posedge clk) begin
+	if (rst) begin
+		cc_clear_seen    <= cpu_cache_ctrl[3];
+		cc_clear_pending <= 1'b0;
+		cc_cpu_accepted  <= 1'b0;
+		cc_sdr_accepted  <= 1'b0;
+	end else if (!cc_clear_pending) begin
+		cc_cpu_accepted <= 1'b0;
+		cc_sdr_accepted <= 1'b0;
+		if (cpu_cache_ctrl[3] != cc_clear_seen)
+			cc_clear_pending <= 1'b1;
+	end else begin
+		if (cc_cpu_accept) cc_cpu_accepted <= 1'b1;
+		if (cc_sdr_accept) cc_sdr_accepted <= 1'b1;
+		if ((cc_cpu_accepted || cc_cpu_accept) &&
+		    (cc_sdr_accepted || cc_sdr_accept)) begin
+			cc_clear_seen    <= cpu_cache_ctrl[3];
+			cc_clear_pending <= 1'b0;
+			cc_cpu_accepted  <= 1'b0;
+			cc_sdr_accepted  <= 1'b0;
+		end
+	end
+end
 
 always @ (posedge clk) begin
 	if (rst) begin
 		cc_en  <= 1'b0;
-		//cc_fr  <= 1'b0;
-		cc_clr <= 1'b0;
+		cc_en_d <= 1'b0;
 	end else if (!cpu_cs) begin
 		cc_en  <= cpu_cache_enable;
-		//cc_fr  <= cpu_cache_freeze;
-		cc_clr <= cpu_cache_clear;
+		cc_en_d <= cpu_cache_enable_d;
 	end
 end 
 
@@ -234,6 +291,16 @@ assign cpu_adr_blk = cpu_adr[2:1];    // cache block address (inside cache row),
 assign cpu_adr_idx = cpu_adr[10:3];   // cache row address, 8 bits
 assign cpu_adr_tag = cpu_adr[28:11];  // tag, 18 bits
 
+// one-cycle shadows of the CPU-side tag read ports.  FILL1 reads these
+// instead of the live M10K outputs so its update logic starts from a
+// register (timing), yet still tracks tag writes that land during the
+// fill wait (a background cache-clear sweep must not be undone by the
+// fill's tag writeback).
+always @ (posedge clk) begin
+  itram_cpu_q <= itram_cpu_dat_r;
+  dtram_cpu_q <= dtram_cpu_dat_r;
+end
+
 // cpu side state machine
 always @ (posedge clk) begin
   if (rst) begin
@@ -241,6 +308,8 @@ always @ (posedge clk) begin
     sdr_read_req      <= 1'b0;
     wb_en             <= 1'b0;
     cpu_ack           <= 1'b0;
+    tagupd_hit_v      <= 1'b0;
+    tagupd_fill_v     <= 1'b0;
     cpu_sm_state      <= CPU_SM_INIT;
     cpu_sm_itag_we    <= 1'b0;
     cpu_sm_dtag_we    <= 1'b0;
@@ -273,22 +342,22 @@ always @ (posedge clk) begin
       end
       CPU_SM_IDLE : begin
         // waiting for CPU access
-        if (cpu_cs) begin
+        if (cpu_cache_clear) begin
+          cpu_sm_state <= CPU_SM_INIT;
+        end else if (cpu_cs) begin
           if (cpu_we) begin
             cpu_sm_state <= CPU_SM_WRITE;
           end else begin
             cpu_sm_state <= CPU_SM_READ;
           end
         end else begin
-          if (cc_clr)
-            cpu_sm_state <= CPU_SM_INIT;
-          else
-            cpu_sm_state <= CPU_SM_IDLE;
+		  cpu_sm_state <= CPU_SM_IDLE;
         end
       end
       CPU_SM_WRITE : begin
         // on hit update cache, on miss no update neccessary; tags don't get updated on writes
         cpu_sm_bs <= cpu_bs;
+        cpu_sm_wadr <= {cpu_adr_idx, cpu_adr_blk};
         cpu_sm_mem_dat_w <= cpu_dat_w;
         cpu_sm_iram0_we <= itag0_match && itag0_valid /*&& !cc_fr*/;
         cpu_sm_iram1_we <= itag1_match && itag1_valid /*&& !cc_fr*/;
@@ -304,33 +373,33 @@ always @ (posedge clk) begin
       end
       CPU_SM_READ : begin
         // on hit update LRU flag in tag memory
-        if (cc_en && itag0_match && itag0_valid) begin
+        if (cpu_ir && cc_en && itag0_match && itag0_valid) begin
           // data is already in instruction cache way 0
           cpu_dat_r <= idram0_cpu_dat_r;
           cpu_ack <= 1'b1;
-          cpu_sm_itag_we <= 1'b1;
-          cpu_sm_tag_dat_w <= {1'b0, itram_cpu_dat_r[38:0]};
+          tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b0;
+          tagupd_idx <= cpu_adr_idx; tagupd_tram <= itram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cc_en && itag1_match && itag1_valid) begin
+        end else if (cpu_ir && cc_en && itag1_match && itag1_valid) begin
           // data is already in instruction cache way 1
           cpu_dat_r <= idram1_cpu_dat_r;
           cpu_ack <= 1'b1;
-          cpu_sm_itag_we <= 1'b1;
-          cpu_sm_tag_dat_w <= {1'b1, itram_cpu_dat_r[38:0]};
+          tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b1;
+          tagupd_idx <= cpu_adr_idx; tagupd_tram <= itram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cc_en && dtag0_match && dtag0_valid) begin
+        end else if (cpu_dr && cc_en_d && dtag0_match && dtag0_valid) begin
           // data is already in data cache way 0
           cpu_dat_r <= ddram0_cpu_dat_r;
           cpu_ack <= 1'b1;
-          cpu_sm_dtag_we <= 1'b1;
-          cpu_sm_tag_dat_w <= {1'b0, dtram_cpu_dat_r[38:0]};
+          tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b0; tagupd_lru <= 1'b0;
+          tagupd_idx <= cpu_adr_idx; tagupd_tram <= dtram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cc_en && dtag1_match && dtag1_valid) begin
+        end else if (cpu_dr && cc_en_d && dtag1_match && dtag1_valid) begin
           // data is already in data cache way 1
           cpu_dat_r <= ddram1_cpu_dat_r;
           cpu_ack <= 1'b1;
-          cpu_sm_dtag_we <= 1'b1;
-          cpu_sm_tag_dat_w <= {1'b1, dtram_cpu_dat_r[38:0]};
+          tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b0; tagupd_lru <= 1'b1;
+          tagupd_idx <= cpu_adr_idx; tagupd_tram <= dtram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
         end else begin
           // on miss fetch data from SDRAM
@@ -351,35 +420,34 @@ always @ (posedge clk) begin
           // read data to cpu
           cpu_dat_r <= sdr_dat_r;
           cpu_ack <= 1'b1;
-          if (cache_inhibit) begin
+          if (cache_inhibit || (cpu_ir ? !cc_en : !cc_en_d)) begin
             // don't update cache if caching is inhibited
             cpu_sm_state <= CPU_SM_FILLW;
           end else begin      
-            // update tag ram
-            if (cpu_ir) begin
-              if (itag_lru) begin
-                cpu_sm_tag_dat_w <= {1'b0, 1'b1, itram_cpu_dat_r[37], 1'b0, itram_cpu_dat_r[35:18], cpu_adr_tag};
-              end else begin
-                cpu_sm_tag_dat_w <= {1'b1, itram_cpu_dat_r[38], 1'b1, 1'b0, cpu_adr_tag, itram_cpu_dat_r[17: 0]};
-              end
-            end else begin
-              if (dtag_lru) begin
-                cpu_sm_tag_dat_w <= {1'b0, 1'b1, dtram_cpu_dat_r[37], 1'b0, dtram_cpu_dat_r[35:18], cpu_adr_tag};
-              end else begin
-                cpu_sm_tag_dat_w <= {1'b1, dtram_cpu_dat_r[38], 1'b1, 1'b0, cpu_adr_tag, dtram_cpu_dat_r[17: 0]};
-              end
-            end
-            cpu_sm_itag_we <=  cpu_ir;
-            cpu_sm_dtag_we <= !cpu_ir;
+            // update tag ram (deferred one cycle; see tagupd_* regs).
+            // All tag state feeding this update comes from the one-cycle
+            // shadows itram_cpu_q/dtram_cpu_q: the registered copies keep
+            // the M10K output out of FILL1's input cones (tram->tagupd_lru
+            // was a -0.12 ns setup violator of the 113 MHz floorplan)
+            // while tracking the live tags to within the RAM's own
+            // sync-read latency -- a background cache-clear sweep passing
+            // this index during the fill wait is still honoured, and the
+            // way select below always agrees with the tag word written.
+            tagupd_fill_v <= 1'b1;
+            tagupd_is_i   <= cpu_ir;
+            tagupd_idx    <= cpu_adr_idx;
+            tagupd_tag    <= cpu_adr_tag;
+            tagupd_lru    <= cpu_ir ? itram_cpu_q[39] : dtram_cpu_q[39];
+            tagupd_tram   <= cpu_ir ? itram_cpu_q : dtram_cpu_q;
             // cache line fill 1st word
             cpu_sm_id   <= cpu_ir;
-            cpu_sm_ilru <= itag_lru;
-            cpu_sm_dlru <= dtag_lru;
+            cpu_sm_ilru <= itram_cpu_q[39];
+            cpu_sm_dlru <= dtram_cpu_q[39];
             cpu_sm_mem_dat_w <= sdr_dat_r;
-            cpu_sm_iram0_we <=  itag_lru &&  cpu_ir;
-            cpu_sm_iram1_we <= !itag_lru &&  cpu_ir;
-            cpu_sm_dram0_we <=  dtag_lru && !cpu_ir;
-            cpu_sm_dram1_we <= !dtag_lru && !cpu_ir;
+            cpu_sm_iram0_we <=  itram_cpu_q[39] &&  cpu_ir;
+            cpu_sm_iram1_we <= !itram_cpu_q[39] &&  cpu_ir;
+            cpu_sm_dram0_we <=  dtram_cpu_q[39] && !cpu_ir;
+            cpu_sm_dram1_we <= !dtram_cpu_q[39] && !cpu_ir;
             cpu_sm_state <= CPU_SM_FILL2;
           end
         end
@@ -430,6 +498,29 @@ always @ (posedge clk) begin
         end
       end
     endcase
+
+    // deferred tag/LRU staging, one cycle after the decision, sourced
+    // ONLY from arm-time captures (registers): the live index and tram
+    // outputs may already belong to the NEXT access
+    if (tagupd_hit_v) begin
+      cpu_sm_tag_dat_w <= {tagupd_lru, tagupd_tram[38:0]};
+      // never write a tag row composed before a pending maintenance
+      // clear: the row carries BOTH ways' valid bits, so a writeback
+      // that races the sweep restores lines the sweep invalidated.  A
+      // dropped LRU update or fill tag only costs a caching opportunity
+      cpu_sm_itag_we <=  tagupd_is_i && !cc_clear_pending;
+      cpu_sm_dtag_we <= !tagupd_is_i && !cc_clear_pending;
+      tagupd_hit_v   <= 1'b0;
+    end
+    else if (tagupd_fill_v) begin
+      if (tagupd_lru)
+        cpu_sm_tag_dat_w <= {1'b0, 1'b1, tagupd_tram[37], 1'b0, tagupd_tram[35:18], tagupd_tag};
+      else
+        cpu_sm_tag_dat_w <= {1'b1, tagupd_tram[38], 1'b1, 1'b0, tagupd_tag, tagupd_tram[17: 0]};
+      cpu_sm_itag_we <=  tagupd_is_i && !cc_clear_pending;
+      cpu_sm_dtag_we <= !tagupd_is_i && !cc_clear_pending;
+      tagupd_fill_v  <= 1'b0;
+    end
     // when CPU lowers its request signal, lower ack too
     if (!cpu_cs) cpu_ack <= 1'b0;
   end
@@ -485,7 +576,7 @@ always @ (posedge clk) begin
         // wait for action
         cache_init_done <= 1'b1;
         sdr_sm_adr <= snoop_adr[10:1];
-        if (cc_clr) begin
+        if (cpu_cache_clear) begin
           sdr_sm_state <= SDR_SM_INIT0;
         end
         else if (snoop_act) begin
@@ -513,7 +604,7 @@ end
 //// instruction memories ////
 
 // instruction tag ram
-assign itram_cpu_adr    = cpu_adr_idx;
+assign itram_cpu_adr    = cpu_sm_itag_we ? tagupd_idx : cpu_adr_idx;
 assign itram_cpu_we     = cpu_sm_itag_we;
 assign itram_cpu_dat_w  = cpu_sm_tag_dat_w;
 assign itag0_match      = (cpu_adr_tag == itram_cpu_dat_r[17:0]);
@@ -529,6 +620,8 @@ assign sdr_itag1_match  = (snoop_adr[28:11] == itram_sdr_dat_r[35:18]);
 assign sdr_itag0_valid  = itram_sdr_dat_r[38];
 assign sdr_itag1_valid  = itram_sdr_dat_r[37];
 
+generate if (CACHE_ENABLE) begin : g_storage
+
 dpram #(8,40) itram (
   .clock      (clk              ),
   .address_a  (itram_cpu_adr    ),
@@ -542,7 +635,7 @@ dpram #(8,40) itram (
 );
 
 // instruction data ram 0
-assign idram0_cpu_adr   = fill ? cpu_sm_adr : {cpu_adr_idx, cpu_adr_blk};
+assign idram0_cpu_adr   = fill ? cpu_sm_adr : cpu_sm_iram0_we ? cpu_sm_wadr : {cpu_adr_idx, cpu_adr_blk};
 assign idram0_cpu_bs    = cpu_sm_bs;
 assign idram0_cpu_we    = cpu_sm_iram0_we;
 assign idram0_cpu_dat_w = cpu_sm_mem_dat_w;
@@ -566,7 +659,7 @@ dpram_be_1024x16 idram0 (
 );
 
 // instruction data ram 1
-assign idram1_cpu_adr   = fill ? cpu_sm_adr : {cpu_adr_idx, cpu_adr_blk};
+assign idram1_cpu_adr   = fill ? cpu_sm_adr : cpu_sm_iram1_we ? cpu_sm_wadr : {cpu_adr_idx, cpu_adr_blk};
 assign idram1_cpu_bs    = cpu_sm_bs;
 assign idram1_cpu_we    = cpu_sm_iram1_we;
 assign idram1_cpu_dat_w = cpu_sm_mem_dat_w;
@@ -593,7 +686,7 @@ dpram_be_1024x16 idram1 (
 //// data data memories ////
 
 // data tag ram
-assign dtram_cpu_adr    = cpu_adr_idx;
+assign dtram_cpu_adr    = cpu_sm_dtag_we ? tagupd_idx : cpu_adr_idx;
 assign dtram_cpu_we     = cpu_sm_dtag_we;
 assign dtram_cpu_dat_w  = cpu_sm_tag_dat_w;
 assign dtag0_match      = (cpu_adr_tag == dtram_cpu_dat_r[17:0]);
@@ -622,7 +715,7 @@ dpram #(8,40) dtram (
 );
 
 // data data ram 0
-assign ddram0_cpu_adr   = fill ? cpu_sm_adr : {cpu_adr_idx, cpu_adr_blk};
+assign ddram0_cpu_adr   = fill ? cpu_sm_adr : cpu_sm_dram0_we ? cpu_sm_wadr : {cpu_adr_idx, cpu_adr_blk};
 assign ddram0_cpu_bs    = cpu_sm_bs;
 assign ddram0_cpu_we    = cpu_sm_dram0_we;
 assign ddram0_cpu_dat_w = cpu_sm_mem_dat_w;
@@ -646,7 +739,7 @@ dpram_be_1024x16 ddram0 (
 );
 
 // data data ram 1
-assign ddram1_cpu_adr   = fill ? cpu_sm_adr : {cpu_adr_idx, cpu_adr_blk};
+assign ddram1_cpu_adr   = fill ? cpu_sm_adr : cpu_sm_dram1_we ? cpu_sm_wadr : {cpu_adr_idx, cpu_adr_blk};
 assign ddram1_cpu_bs    = cpu_sm_bs;
 assign ddram1_cpu_we    = cpu_sm_dram1_we;
 assign ddram1_cpu_dat_w = cpu_sm_mem_dat_w;
@@ -668,6 +761,24 @@ dpram_be_1024x16 ddram1 (
   .data_b     (ddram1_sdr_dat_w ),
   .q_b        (ddram1_sdr_dat_r )
 );
+
+end
+else begin : g_nostorage
+	// no tags, no data: valid bits read as 0, so no path can report a hit
+	assign itram_cpu_dat_r = 40'd0;
+	assign itram_sdr_dat_r = 40'd0;
+	assign dtram_cpu_dat_r = 40'd0;
+	assign dtram_sdr_dat_r = 40'd0;
+	assign idram0_cpu_dat_r = 16'd0;
+	assign idram0_sdr_dat_r = 16'd0;
+	assign idram1_cpu_dat_r = 16'd0;
+	assign idram1_sdr_dat_r = 16'd0;
+	assign ddram0_cpu_dat_r = 16'd0;
+	assign ddram0_sdr_dat_r = 16'd0;
+	assign ddram1_cpu_dat_r = 16'd0;
+	assign ddram1_sdr_dat_r = 16'd0;
+end
+endgenerate
 
 endmodule
 

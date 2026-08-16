@@ -29,6 +29,13 @@
 
 
 module sdram_ctrl
+#(
+	// CPU_CACHE 0 removes this controller's cpu_cache_new storage: the CPU's
+	// own ap040_cache becomes the only cache, and this instance keeps just
+	// the fill/pass protocol.  Left at 1 by default so the existing
+	// controller benches still exercise the cached path.
+	parameter CPU_CACHE = 1
+)
 (
 	// system
 	input             sysclk,
@@ -56,6 +63,12 @@ module sdram_ctrl
 	input             chipDMA,
 	input      [15:0] chipWR,
 	output reg [15:0] chipRD,
+	// Chipset write visible to the CPU's internal cache.  snoop_tgl flips
+	// once per write and snoop_addr is held with it, so cpu_wrapper can
+	// cross a single event into the CPU clock domain with a toggle
+	// synchroniser rather than trying to catch a 113MHz pulse.
+	output            snoop_tgl,
+	output     [24:1] snoop_addr,
 	output     [47:0] chip48,
 	// cpu
 	input      [24:1] cpuAddr,
@@ -65,7 +78,15 @@ module sdram_ctrl
 	input             cpuU,
 	input      [15:0] cpuWR,
 	output     [15:0] cpuRD,
-	output            ramready
+	output            ramready,
+
+	// Dedicated, cache-bypassing AP040 table-walker port (clk=sysclk).
+	input             walker_req,
+	input             walker_we,
+	input      [24:2] walker_addr,
+	input      [31:0] walker_wdata,
+	output reg        walker_ack,
+	output reg [31:0] walker_rdata
 );
 
 assign sd_cs = 0;
@@ -76,7 +97,18 @@ localparam [2:0]
 	IDLE = 0,
 	CHIP = 1,
 	CPU_READCACHE = 2,
-	CPU_WRITECACHE = 3;
+	CPU_WRITECACHE = 3,
+	WALKER_READ = 4,
+	WALKER_WRITE = 5;
+
+reg         cache_fill;
+reg  [3:0]  initstate;
+reg         init_done;
+reg  [3:0]  sdram_state;
+reg  [2:0]  slot_type = IDLE;
+reg [15:0]  sdata_reg;
+reg [15:0]  sdata_reg_q;
+reg         chipWE;
 
 
 ////////////////////////////////////////
@@ -106,7 +138,44 @@ wire ramsel = cpuCS & (~&cpustate | ~cpuU | ~cpuL);
 wire cache_rd_ack;
 wire cache_wr_ack;
 wire cache_req;
-cpu_cache_new cpu_cache
+reg         walker_busy;
+reg [24:2]  walker_addr_latch;
+reg [31:0]  walker_wdata_latch;
+(* preserve *) reg [15:0] walker_sdata_pipe;
+reg [15:0] walker_sdata_pipe2;
+reg [15:0]  walker_read_hi;
+reg [15:0]  walker_read_lo;
+// cpu_cache_new has no snoop-ready output.  Its synchronous tag lookup and
+// data-RAM write take four sampled edges (IDLE, WAIT, SNOOP, write), so each
+// address/data half must remain selected throughout that window.  Starting
+// the low half at state 6 also leaves the cache idle after the high-half
+// write; the former state-2/state-4 pulses made the low request arrive while
+// the cache was busy and changed the live RAM address under the high write.
+// registered one cycle ahead (see the pre-decode block by the state
+// counter): the raw range compares fed the cache's snoop tag-match cone
+// straight from sdram_state and violated setup at 113 MHz
+reg         walker_snoop_hi;
+reg         walker_snoop_lo;
+wire        walker_snoop = walker_snoop_hi | walker_snoop_lo;
+wire [24:1] walker_snoop_addr = {walker_addr_latch, walker_snoop_lo};
+wire [15:0] walker_snoop_data = walker_snoop_lo
+							? walker_wdata_latch[15:0]
+							: walker_wdata_latch[31:16];
+reg        snoop_tgl_r = 0;
+reg [24:1] snoop_addr_r;
+reg        snoop_ev_q;
+wire       snoop_ev = chipWE | walker_snoop;
+always @ (posedge sysclk) begin
+	snoop_ev_q <= snoop_ev;
+	if (snoop_ev && !snoop_ev_q) begin
+		snoop_tgl_r  <= ~snoop_tgl_r;
+		snoop_addr_r <= walker_snoop ? walker_snoop_addr : chipAddr;
+	end
+end
+assign snoop_tgl  = snoop_tgl_r;
+assign snoop_addr = snoop_addr_r;
+
+cpu_cache_new #(.CACHE_ENABLE(CPU_CACHE)) cpu_cache
 (
 	.clk              (sysclk),                // clock
 	.rst              (!reset || !cache_rst),  // cache reset
@@ -122,22 +191,27 @@ cpu_cache_new cpu_cache
 	.cpu_dat_r        (cpuRD),                 // cpu read data
 	.cpu_ack          (cache_rd_ack),          // cpu acknowledge
 	.wb_en            (cache_wr_ack),          // write enable
-	.sdr_dat_r        (sdata_reg),             // sdram read data
+	.sdr_dat_r        (sdata_reg_q),           // sdram read data (registered)
 	.sdr_read_req     (cache_req),             // sdram read request from cache
 	.sdr_read_ack     (cache_fill),            // sdram read acknowledge to cache
-	.snoop_act        (chipWE),                // snoop act (write only - just update existing data in cache)
-	.snoop_adr        (chipAddr),              // snoop address
-	.snoop_dat_w      (chipWR),                // snoop write data
-	.snoop_bs         ({!chipU, !chipL})       // snoop byte selects
+	.snoop_act        (chipWE | walker_snoop), // keep cached page-table words coherent
+	.snoop_adr        (walker_snoop ? walker_snoop_addr : chipAddr),
+	.snoop_dat_w      (walker_snoop ? walker_snoop_data : chipWR),
+	.snoop_bs         (walker_snoop ? 2'b11 : {!chipU, !chipL})
 );
 
-reg cache_fill;
+// The cache consumes fill data through a dedicated register: the direct
+// sdata_reg hop into cpu_cache_new's line-write port was the other
+// recurring -0.38ns violator.  The strobes move one state later to
+// match; the cache just counts four acknowledges, so the shift is
+// transparent to it (last beat lands during state 15, inside the slot).
 always @ (posedge sysclk) begin
+	sdata_reg_q <= sdata_reg;
 	cache_fill <= 0;
 
 	if(init_done && slot_type == CPU_READCACHE) begin
 		case(sdram_state)
-		   7, 9, 11, 13: cache_fill <= 1;
+		   8, 10, 12, 14: cache_fill <= 1;
 		endcase
 	end
 end
@@ -213,8 +287,6 @@ assign chip48 = {chip48_1, chip48_2, chip48_3};
 
 
 //// init counter ////
-reg [3:0] initstate;
-reg       init_done;
 always @ (posedge sysclk) begin
 	if(!reset) begin
 		initstate <= 0;
@@ -228,8 +300,29 @@ always @ (posedge sysclk) begin
 end
 
 
+// One-cycle pre-decoded select for the CAS state: the recurring setup
+// violators across every fit of this floorplan are the sd_addr/sd_cas/
+// sd_data pin-register input cones, whose selects previously computed
+// the full 4-bit state compare plus qualifiers in the same cycle they
+// load.  cas_go collapses that to a single registered flag.  The state
+// counter only leaves the 0..15 ramp at the c_7m wrap, which in steady
+// state coincides with 15->0, so state==1 now is exactly state==2 next.
+reg cas_go;
+always @ (posedge sysclk) begin
+	cas_go <= (sdram_state == 4'd1);
+end
+
+// Same treatment for the walker write's second CAS: slot_type is loaded
+// at state 0, so a registered copy of the comparison is stable long
+// before states 4 and 6 use it, and the sd_addr/sd_dqm pin registers see
+// a single-bit select instead of the 3-bit slot compare (the recurring
+// -0.2 ns sd_addr[12] violator of this floorplan).
+reg walker_wr_slot;
+always @ (posedge sysclk) begin
+	walker_wr_slot <= (slot_type == WALKER_WRITE);
+end
+
 //// sdram state ////
-reg [3:0] sdram_state;
 always @ (posedge sysclk) begin
 	reg old_7m;
 
@@ -239,11 +332,142 @@ always @ (posedge sysclk) begin
 	if(~old_7m & c_7m) sdram_state <= 0;
 end
 
+// One-cycle pre-decodes of the state selects that feed SDRAM pin
+// registers and the cache snoop cone.  next_sdram_state mirrors the
+// counter including the 7MHz resync, so every flag is exact even on the
+// cycle the counter is yanked back to zero.
+reg        old_7m_q;
+reg        ras_go;          // high during state 0
+reg        walker_cas2_go;  // high during state 4 of a walker write slot
+always @ (posedge sysclk) old_7m_q <= c_7m;
+wire [3:0] next_sdram_state = (~old_7m_q & c_7m) ? 4'd0 : (sdram_state + 4'd1);
+always @ (posedge sysclk) begin
+	ras_go         <= (next_sdram_state == 4'd0);
+	walker_cas2_go <= (slot_type == WALKER_WRITE) && (next_sdram_state == 4'd4);
+	walker_snoop_hi <= (slot_type == WALKER_WRITE) &&
+	                   (next_sdram_state >= 4'd2) && (next_sdram_state <= 4'd5);
+	walker_snoop_lo <= (slot_type == WALKER_WRITE) &&
+	                   (next_sdram_state >= 4'd6) && (next_sdram_state <= 4'd9);
+end
+
 //// sdram control ////
 
-reg  [2:0] slot_type = IDLE;
-reg [15:0] sdata_reg;
-reg        chipWE;
+// The walker request is registered before it reaches the slot arbiter.  It
+// arrives gated by the SDRAM/DDR3 bank decode, which is several levels of
+// logic past the clock-domain-crossing register, and feeding that directly
+// into the priority chain and the row-address mux was the critical path of
+// the whole 113MHz domain.  The handshake is level held until ack, so one
+// cycle of extra acceptance latency changes nothing functionally.
+reg walker_req_q;
+always @(posedge sysclk) begin
+	if (!reset_n) walker_req_q <= 1'b0;
+	else          walker_req_q <= walker_req && !walker_busy;
+end
+
+// Slot pre-arbitration: the local requesters (write buffer, walker,
+// cache) are all level-held registers, so they are arbitrated one
+// cycle EARLY (state 15) into staging registers.  The state-0 row-
+// address load then muxes through a single 2-bit select instead of
+// the full request/address cones -- the recurring sd_addr[7/8] setup
+// violators (walker_req_q/init_done/state-dups into the row mux) get
+// a whole cycle of their own.  The chipset keeps absolute priority,
+// still sampled AT state 0: when it steals the slot the staged local
+// grant is simply discarded and retried next CCK (level-held, no
+// loss).  A request first asserting during state 15/0 waits one CCK.
+localparam [1:0] PRE_NONE = 2'd0, PRE_WRITE = 2'd1,
+                 PRE_WALKER = 2'd2, PRE_CACHE = 2'd3;
+
+// The cache acknowledges the CPU on the FIRST burst beat, so cpuAddr can
+// already point at the next access while sdr_read_req still streams the
+// fill: a slot granted then would fetch the WRONG address into the line
+// (the stale-hit corruption behind cputest FABS.X ([0]) and friends --
+// present since before the pre-arbitration, which inherited it).  Latch
+// the address at the request EDGE, when it is still the miss address.
+reg [24:1] cache_addr_lat;
+reg        cache_req_q2;
+always @(posedge sysclk) begin
+	cache_req_q2 <= cache_req;
+	if (cache_req && !cache_req_q2)
+		cache_addr_lat <= cpuAddr;
+end
+reg  [1:0] pre_sel;
+reg  [1:0] pre_ba;
+reg [12:0] pre_row;
+reg  [9:0] pre_col;
+always @(posedge sysclk) begin
+	if (!reset_n) begin
+		pre_sel <= PRE_NONE;
+	end
+	else if (sdram_state == 4'd15) begin
+		if (!init_done)
+			pre_sel <= PRE_NONE;
+		else if (write_req) begin
+			pre_sel <= PRE_WRITE;
+			{pre_ba, pre_row, pre_col[8:0]} <= writeAddr;
+		end
+		else if (!walker_busy && walker_req_q) begin
+			pre_sel <= PRE_WALKER;
+			{pre_ba, pre_row, pre_col[8:0]} <= {walker_addr, 1'b0};
+		end
+		else if (cache_req && cache_req_q2) begin
+			pre_sel <= PRE_CACHE;
+			{pre_ba, pre_row, pre_col[8:0]} <= cache_addr_lat;
+		end
+		else
+			pre_sel <= PRE_NONE;
+	end
+end
+
+wire walker_grant = (sdram_state == 4'd0) && (pre_sel == PRE_WALKER) &&
+				    !((~chipDMA) | (~chipRW));
+
+// Capture native walker completions. The request remains level-held across
+// the transfer; walker_busy prevents it from being accepted twice.
+always @(posedge sysclk) begin
+	if (!reset_n) begin
+		walker_busy        <= 0;
+		walker_addr_latch  <= 0;
+		walker_wdata_latch <= 0;
+		walker_sdata_pipe  <= 0;
+		walker_read_hi     <= 0;
+		walker_read_lo     <= 0;
+		walker_ack         <= 0;
+		walker_rdata       <= 0;
+	end
+	else begin
+		// Keep the SDRAM input register's new fanout to one simple local
+		// register.  Besides easing the 114 MHz path, the extra stages make
+		// the longword assembly independent of the controller's burst timing.
+		// Two stages: sdata_reg -> pipe -> pipe2 gives the router a full
+		// spare cycle on the sdata_reg hop (it was a -0.39ns violator).
+		walker_sdata_pipe  <= sdata_reg;
+		walker_sdata_pipe2 <= walker_sdata_pipe;
+		walker_ack <= 0;
+		if (!walker_req) walker_busy <= 0;
+		if (walker_grant) begin
+			walker_busy        <= 1;
+			walker_addr_latch  <= walker_addr;
+			walker_wdata_latch <= walker_wdata;
+		end
+
+		if (slot_type == WALKER_READ) begin
+			// one state later than before: the data now arrives through
+			// pipe2 (same burst words, one extra register of margin)
+			if (sdram_state == 4'd10)
+				walker_read_hi <= walker_sdata_pipe2;
+			if (sdram_state == 4'd12)
+				walker_read_lo <= walker_sdata_pipe2;
+			if (sdram_state == 4'd13) begin
+				walker_rdata <= {walker_read_hi, walker_read_lo};
+				walker_ack   <= 1;
+			end
+		end
+		// Ack only after both cache snoops have reached their data-RAM write
+		// edge.  The physical SDRAM writes themselves complete at state 4.
+		else if ((slot_type == WALKER_WRITE) && (sdram_state == 4'd10))
+			walker_ack <= 1;
+	end
+end
 
 always @ (posedge sysclk) begin
 	reg        cas_sd_cas;
@@ -296,8 +520,15 @@ always @ (posedge sysclk) begin
 
 		case(sdram_state)
 
-			// RAS
-			0 : begin
+			// RAS, CAS and the walker's second CAS are keyed on the
+			// one-cycle pre-decoded ras_go/cas_go/walker_cas2_go flags in
+			// the blocks below the case, so the sd_* pin registers see
+			// single-signal selects instead of 4-bit state compares
+			2 : write_ack <= 0; // safe to accept the next write
+		endcase
+
+		// RAS slot arbitration (state 0)
+		if (ras_go) begin
 				cas_sd_cas      <= 1;
 				cas_sd_we       <= 1;
 				cas_dqm         <= 0;
@@ -318,9 +549,9 @@ always @ (posedge sysclk) begin
 					datawr       <= chipWR;
 					chipWE       <= !chipRW;
 				end
-				else if(write_req) begin
+				else if(pre_sel == PRE_WRITE) begin
 					slot_type    <= CPU_WRITECACHE;
-					{sd_ba,sd_addr,casaddr[8:0]} <= writeAddr;
+					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
 					sd_ras       <= 0;
 					cas_dqm      <= write_dqm;
 					cas_sd_we    <= 0;
@@ -328,10 +559,19 @@ always @ (posedge sysclk) begin
 					write_ack    <= 1; // let the write buffer know we're about to write
 					datawr       <= writeDat;
 				end
+				else if(pre_sel == PRE_WALKER) begin
+					slot_type    <= walker_we ? WALKER_WRITE : WALKER_READ;
+					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
+					sd_ras       <= 0;
+					cas_dqm      <= 0;
+					cas_sd_cas   <= 0;
+					cas_sd_we    <= ~walker_we;
+					datawr       <= walker_wdata[31:16];
+				end
 				// request from read cache
-				else if(cache_req) begin
+				else if(pre_sel == PRE_CACHE) begin
 					slot_type    <= CPU_READCACHE;
-					{sd_ba,sd_addr,casaddr[8:0]} <= cpuAddr;
+					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
 					sd_ras       <= 0;
 					cas_sd_cas   <= 0;
 				end
@@ -341,22 +581,43 @@ always @ (posedge sysclk) begin
 					sd_cas       <= 0;
 					rcnt         <= 0;
 				end
-			end
+		end
 
-			// CAS
-			2 : begin
-				sd_addr         <= {1'b1, casaddr}; // AUTO PRECHARGE
-				sd_cas          <= cas_sd_cas;
-				sd_dqm          <= 0;
-				if(!cas_sd_we) begin
-					sd_data      <= datawr;
-					sd_addr[12:11]<= cas_dqm;
-					sd_dqm       <= cas_dqm;
-					sd_we        <= 0;
-				end
-				write_ack       <= 0; // indicate to write that it's safe to accept the next write
+		// walker write: second single-write CAS to column+1 (state 4).
+		// The mode word sets A9 (write burst = single location), so a data
+		// beat after the CAS cycle is IGNORED by the chip -- without this
+		// the low word of every 32-bit walker write is lost (tCCD=1 on SDR
+		// makes back-to-back writes two states apart legal).
+		if (walker_cas2_go) begin
+				sd_addr      <= {1'b1, casaddr[9:1], 1'b1}; // col+1, A10 precharge
+				sd_cas       <= 0;
+				sd_we        <= 0;
+				sd_data      <= walker_wdata_latch[15:0];
+				sd_dqm       <= 0;
+		end
+
+
+		// CAS: all qualifiers (cas_sd_cas/cas_sd_we/cas_dqm/casaddr/
+		// datawr) are registers latched at the RAS state, so with the
+		// pre-decoded flag every sd_* pin-register input cone is one
+		// LUT deep.  Placed after the case: overrides the even-state
+		// deasserts exactly like the original arm did.
+		if (cas_go) begin
+			// A walker write issues a second single-write CAS two cycles
+			// later; auto-precharging on the FIRST command would put the
+			// bank into precharge under that second command (undefined on
+			// real silicon).  Hold the row open here and let the second
+			// command carry A10 instead.
+			sd_addr         <= {!walker_wr_slot, casaddr}; // A10: AUTO PRECHARGE
+			sd_cas          <= cas_sd_cas;
+			sd_dqm          <= 0;
+			if(!cas_sd_we) begin
+				sd_data      <= datawr;
+				sd_addr[12:11]<= cas_dqm;
+				sd_dqm       <= cas_dqm;
+				sd_we        <= 0;
 			end
-		endcase
+		end
 	end
 end
 
