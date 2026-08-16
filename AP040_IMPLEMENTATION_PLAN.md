@@ -666,49 +666,42 @@ cache_inhibit plumbing), then full regression + cputest replay.  Expected
 gain: large on fast-RAM working sets; zero architectural risk to exception
 semantics.
 
-STATUS 2026-08-16: implemented and validated in simulation, but BLOCKED ON
-DEVICE AREA and left disabled (AP040_ENABLE_CACHE 0 in cpu_wrapper).
-Cacheability windows mirror the wrapper's own RAM decode, so only
-configured Zorro fast RAM is cacheable and chip RAM / ROM / IO never are;
-t_integer and t_fpu run their whole batteries cache-hot.  Fit results on
-the 5CSEBA6:
+STATUS 2026-08-16: DONE and enabled.  ap040_cache is the only cache in
+the system; both cpu_cache_new instances are built without their storage
+(CPU_CACHE 0 on sdram_ctrl/ddram_ctrl from Minimig.sv).
 
-  4KB/side (64 sets x 4 ways):  does not fit -- 4226 LABs needed vs 4191
-  2KB/side (32 sets x 4 ways):  fits at 98% ALMs, but the CPU domain then
-                                fails timing at -0.716 ns; the same tree
-                                closes at +0.071 ns with the caches off,
-                                i.e. the loss is placement freedom, not a
-                                specific path.
+Getting there was an area problem, and the measurements are worth
+keeping because two of the three obvious moves were wrong:
 
-Two area reductions were tried and measured on 2026-08-16, and both are
-reverted:
+  halve cpu_cache_new           frees BLOCK RAM, which was never the
+                                constraint (31% used), and almost no
+                                ALMs -- the storage was already M10K and
+                                the tag comparators widen as the index
+                                shrinks.  Reverted.
+  valid/LRU into the tag row,   made the design BIGGER, 98% -> 104%.
+  inferred array                A second write port written as its own
+                                always block does not match Quartus's
+                                dual-port template: ctag stopped
+                                inferring and became ~6300 flops.
+  valid/LRU into the tag row,   worked.  Instantiate the project's
+  rtl/bram.vhd dpram            true-dual-port wrapper (the one
+                                cpu_cache_new already uses) instead of
+                                relying on inference.
 
-  halve cpu_cache_new to 2kB/side:  frees BLOCK RAM, which was never the
-      constraint (31% used).  Barely touches ALMs: the storage was
-      already M10K and the tag comparators get wider as the index
-      shrinks.  Costs external cache hit rate for nothing.
-  move ap040_cache's valid/round-robin bits into the tag row:  intended
-      to put them in M10K instead of LABs.  Made the design BIGGER --
-      104% (43,486 ALMs) vs 98% before.  The second write port needed
-      for store invalidation was written as its own always block, which
-      breaks Quartus's dual-port template: ctag stopped inferring as
-      altsyncram (only cdata still did, see Minimig.map.rpt) and became
-      ~6,300 flops.  A corrected single-block template would recover at
-      most the ~350 ALMs the flop arrays cost, against the ~950 ALM gap.
+Final fit, all clocks met:
 
-The measured budget: with the caches off the design sits at 39,508 ALMs
-(94%) with every clock met; enabling P1 cost 1,759 ALMs and broke timing
-at 98%.  Getting P1 in needs roughly 950 ALMs found elsewhere, and the
-caches are not where they are: ap040_mmu is 5,563 ALMs and ap040_fpu
-4,542, against ap040_cache's 854 and cpu_cache_new's 567 for both
-instances.
+  no internal cache, external caches on   39,508 ALMs (94%)  +0.281 ns
+  internal cache only, block-RAM tags     38,899 ALMs (93%)  +0.118 ns
 
-What P1 buys is hit LATENCY -- cpu_cache_new in the RAM controllers
-already caches this fabric -- so it is not worth spending the last 2% of
-the device and all timing margin on.  Revisit if area is freed elsewhere
-(P2's single-clock-domain migration removes CDC hardware, and the FPU is
-the other large block).  The RTL and its windows stay wired up and
-suite-covered so re-enabling is a one-line change.
+So the internal cache now costs 609 ALMs LESS than the external caches
+it replaced, against the +1,759 it cost before this work.
+
+Known consequence: ap040_cache caches only configured fast RAM, because
+chip RAM needs snooping for chipset DMA and ap040_cache has no snoop
+port.  Chip-RAM accesses are uncached now -- good for fast-RAM code (an
+internal hit skips the clock-domain round trip), worse for code running
+from chip RAM.  Giving ap040_cache a snoop port is the obvious follow-up
+if chip-RAM performance matters.
 
 ### P2. Single-clock-domain migration (28MHz -> clk_114 + 4:1 clock enable)
 
