@@ -508,8 +508,13 @@ mdelay:
 	failt	44
 t44ok:
 
-	; A level made pending under mask 7 must be taken immediately when RTE
-	; restores mask 0, before the first instruction at the restored PC.
+	; A level already pending under mask 7 when RTE restores mask 0 is NOT
+	; taken at that boundary: the first instruction at the restored PC
+	; executes, and the interrupt follows it.  RTE samples IPL too late to
+	; act on it itself (WinUAE models this as ipl_fetch_next, and gencpu
+	; marks RTE/RTS/RTD with ipl_fetched = 10), and hardware cputest
+	; irq/all ANDSR.B and ANDSR.W both show the tested instruction
+	; completing before the interrupt is delivered.
 	move.w	#$2700,sr
 	clr.w	(irq_guard).l
 	move.w	#1,(irq_early).l
@@ -1198,8 +1203,8 @@ h_int2:
 hi2exc_ok:
 	tst.w	(irq_early).l
 	beq.s	hi2early_ok
-	tst.w	(irq_guard).l
-	bne	hfail
+	tst.w	(irq_guard).l	; the restored instruction must have run first
+	beq	hfail
 	clr.w	(irq_early).l
 hi2early_ok:
 	move.w	10(sp),d0	; frame format/vector

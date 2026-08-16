@@ -2514,17 +2514,6 @@ always @(posedge clk) begin
 					pc <= rte_pc;
 					exc(`AP040_VEC_TRACE, 4'd2, rte_pc, pc_i);
 				end
-				else if (rte_irq_pend) begin
-					// RTE can lower the interrupt mask.  Test the restored mask,
-					// not the handler's old SR, before fetching any restored
-					// instruction.
-					pc <= rte_pc;
-					exc_vec <= `AP040_VEC_AUTOVEC + {5'd0, rte_irq_take_lvl};
-					exc_fmt <= 0; exc_spc <= rte_pc; exc_addr <= 0;
-					exc_is_irq <= 1; exc_pass2 <= 0;
-					irq_lvl_l <= rte_irq_take_lvl;
-					state <= S_EXC0;
-				end
 				else begin
 					// fetch under the restored context's FC (SR is being
 					// written this same cycle)
