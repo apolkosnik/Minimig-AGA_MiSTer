@@ -146,6 +146,8 @@ reg [15:0] ipl_arm_v = 0;
 
 cpu_wrapper cpu
 (
+	.snoop_tgl(1'b0),
+	.snoop_adr(24'd0),
 	.reset(reset),
 	.reset_out(cpu_nrst_out),
 

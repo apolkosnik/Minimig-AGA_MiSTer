@@ -59,6 +59,8 @@ reg [15:0] ipl_delay = 0;   // $F148: delayed level-2 IPL countdown
 
 cpu_wrapper dut
 (
+	.snoop_tgl(1'b0),
+	.snoop_adr(24'd0),
 	.reset(reset),
 	.reset_out(cpu_nrst_out),
 

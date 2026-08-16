@@ -102,6 +102,11 @@ module cpu_wrapper
 	// MMU cache-inhibit attribute of the current access (TTR CM or page
 	// descriptor CM); the external caches must not retain such data.
 	output            cache_inhibit,
+	// Chipset-DMA write snoop from the RAM controller (clk_114 domain).
+	// snoop_tgl flips once per write with snoop_adr held; this crosses it
+	// into the CPU clock so ap040_cache can invalidate the line.
+	input             snoop_tgl,
+	input      [24:1] snoop_adr,
 	output            nmi_ack_toggle,
 	output reg [31:0] nmi_addr
 );
@@ -219,6 +224,26 @@ always @(posedge clk) begin
 	else        ramconsumed <= cpu_req & ramsel & ramready;
 end
 
+// Snoop CDC.  A chipset write happens at most once per CCK, i.e. every
+// four CPU clocks, so a two-flop synchroniser on the toggle plus one
+// cycle to act keeps up without a queue.  The address is held by the
+// producer until the next write, so it is stable when the toggle arrives.
+reg  [2:0] snoop_tgl_s;
+reg        snoop_stb_r;
+reg [31:0] snoop_addr_r;
+always @(posedge clk) begin
+	if (!reset) begin
+		snoop_tgl_s <= 0;
+		snoop_stb_r <= 0;
+	end
+	else begin
+		snoop_tgl_s <= {snoop_tgl_s[1:0], snoop_tgl};
+		snoop_stb_r <= snoop_tgl_s[2] ^ snoop_tgl_s[1];
+		if (snoop_tgl_s[2] ^ snoop_tgl_s[1])
+			snoop_addr_r <= {7'd0, snoop_adr, 1'b0};
+	end
+end
+
 ap040_tg68k_compat #(
 	// Internal caches OFF: they do not fit this device with usable timing.
 	// At the designed 4KB per side the fitter needs 4226 LABs against the
@@ -241,6 +266,8 @@ ap040_tg68k_compat #(
 	.nreset(reset),
 	.clkena_in(~cpu_req | bus_complete | bus_berr),
 	.cache_allow_all(1'b0),
+	.cache_snoop_stb(snoop_stb_r),
+	.cache_snoop_addr(snoop_addr_r),
 	.cache_z2_ena(z2ram_ena),
 	.cache_z3_base0(z3ram_base0),
 	.cache_z3_ena0(z3ram_ena0),

@@ -30,6 +30,9 @@ module ap040_tg68k_compat
 	// and unconfigured space must never be cached).  cache_allow_all
 	// bypasses the windows for flat simulation environments.
 	input         cache_allow_all,
+	// chipset/DMA write snoop, already in this clock domain
+	input         cache_snoop_stb,
+	input  [31:0] cache_snoop_addr,
 	input         cache_z2_ena,
 	input   [4:0] cache_z3_base0,
 	input         cache_z3_ena0,
@@ -246,10 +249,15 @@ ap040_mmu mmu (
 
 generate
 if (AP040_ENABLE_CACHE != 0) begin : g_cache
+	// With the snoop port wired up, chip RAM is cacheable too: a chipset
+	// write invalidates the line before the CPU can see stale data.  ROM
+	// and IO stay out (nothing snoops those, and IO must never be cached).
+	wire cache_chip = (mm_addr[31:21] == 11'd0);          // $000000-$1fffff
 	wire cache_win =
 		((mm_addr[31:27] == cache_z3_base0) && cache_z3_ena0) ||
 		((mm_addr[31:28] == cache_z3_base1) && cache_z3_ena1) ||
-		(!mm_addr[31:24] && (mm_addr[23] ^ |mm_addr[22:21]) && cache_z2_ena);
+		(!mm_addr[31:24] && (mm_addr[23] ^ |mm_addr[22:21]) && cache_z2_ena) ||
+		cache_chip;
 	wire cache_allow = cache_allow_all | cache_win;
 
 	ap040_cache cache (
@@ -273,6 +281,8 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.c_wdata(mm_wdata),
 		.c_fc(mm_fc),
 		.c_nocache(mm_nocache | ~cache_allow),
+		.s_stb(cache_snoop_stb),
+		.s_addr(cache_snoop_addr),
 		.c_ack(mm_ack),
 		.c_rdata(mm_rdata),
 

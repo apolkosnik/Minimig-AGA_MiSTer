@@ -59,6 +59,7 @@ wire        clkena_in = (busstate == 2'b01) | mem_ready;
 ap040_tg68k_compat dut
 (
 	.clk(clk), .nreset(nreset), .cache_allow_all(1'b1),
+	.cache_snoop_stb(1'b0), .cache_snoop_addr(32'd0),
 	.cache_z2_ena(1'b0),
 	.cache_z3_base0(5'd0),
 	.cache_z3_ena0(1'b0),

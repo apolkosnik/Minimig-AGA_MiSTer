@@ -57,7 +57,15 @@ module ap040_cache
 	output     [31:0] m_wdata,
 	output      [2:0] m_fc,
 	input             m_ack,
-	input      [31:0] m_rdata
+	input      [31:0] m_rdata,
+
+	// Snoop: an external master (chipset DMA, or the MMU table walker)
+	// wrote memory behind the CPU's back.  s_stb is a single ce-cycle
+	// pulse in THIS clock domain with s_addr held alongside it; the
+	// matching data-cache set is invalidated.  Without this the windows
+	// below can only admit memory no one else writes.
+	input             s_stb,
+	input      [31:0] s_addr
 );
 
 //---------------------------------------------------------------------------
@@ -171,6 +179,8 @@ reg   [6:0] sweep_cnt;
 reg         sweep_all;   // reset sweep clears both banks
 reg         winv_pend;   // a store still owes its second-line invalidate
 reg   [5:0] winv_set2;
+reg         store_inv_lost;  // a store invalidate that a snoop displaced
+reg   [5:0] store_inv_set;
 reg   [6:0] r_row;
 reg  [21:0] r_tag;
 reg   [3:0] r_word;              // {word[1:0]} of the request, plus bank/way
@@ -258,10 +268,16 @@ assign tag_wdat  = (cst == C_SWEEP) ? {ROWW{1'b0}}
 // set when the transfer crosses the line.  A cleared row needs no
 // read-modify-write -- the tags left behind are never consulted without
 // their valid bit.  The 68040 leaves the instruction cache alone here.
-assign inv_we    = ((cst == C_IDLE) && c_req && c_write && !ack_r) ||
-                   ((cst == C_PASS) && winv_pend) ||
-                   (cst == C_WINV);
-assign inv_idx   = (cst == C_IDLE) ? {1'b0, c_addr[9:4]} : {1'b0, winv_set2};
+// Port B invalidates: a snoop takes priority over a store's own
+// invalidate, because a missed snoop leaves stale data while a delayed
+// store invalidate is picked up again from snoop_pend below.
+wire store_inv = ((cst == C_IDLE) && c_req && c_write && !ack_r) ||
+                 ((cst == C_PASS) && winv_pend) ||
+                 (cst == C_WINV);
+assign inv_we    = s_stb || store_inv || store_inv_lost;
+assign inv_idx   = s_stb          ? {1'b0, s_addr[9:4]} :
+                   store_inv_lost ? {1'b0, store_inv_set} :
+                   (cst == C_IDLE) ? {1'b0, c_addr[9:4]} : {1'b0, winv_set2};
 assign cd_rd_en  = rd_accept;                       // issued with the tag read
 assign cd_ridx   = {c_instr, a_set, c_addr[3:2]};
 assign cd_we     = ((cst == C_FILL) && r_issued && m_ack)
@@ -283,6 +299,8 @@ always @(posedge clk) begin
 		sweep_all <= 1;
 		winv_pend <= 0;
 		winv_set2 <= 0;
+		store_inv_lost <= 0;
+		store_inv_set <= 0;
 		cinv_done <= 0;
 		r_row <= 0; r_tag <= 0; r_word <= 0; r_way <= 0; r_bank <= 0;
 		r_beat <= 0; r_issued <= 0; r_addr <= 0; r_size <= 0; r_off <= 0;
@@ -291,6 +309,15 @@ always @(posedge clk) begin
 	else if (ce) begin
 		ack_r <= 0;
 		cinv_done <= 0;
+
+		// a snoop displaced a store's invalidate this cycle: remember it
+		// and issue it as soon as port B is free again
+		if (s_stb && store_inv) begin
+			store_inv_lost <= 1;
+			store_inv_set  <= (cst == C_IDLE) ? c_addr[9:4] : winv_set2;
+		end
+		else if (store_inv_lost && !s_stb)
+			store_inv_lost <= 0;
 
 		case (cst)
 			C_IDLE: begin

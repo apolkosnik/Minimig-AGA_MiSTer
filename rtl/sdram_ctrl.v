@@ -63,6 +63,12 @@ module sdram_ctrl
 	input             chipDMA,
 	input      [15:0] chipWR,
 	output reg [15:0] chipRD,
+	// Chipset write visible to the CPU's internal cache.  snoop_tgl flips
+	// once per write and snoop_addr is held with it, so cpu_wrapper can
+	// cross a single event into the CPU clock domain with a toggle
+	// synchroniser rather than trying to catch a 113MHz pulse.
+	output            snoop_tgl,
+	output     [24:1] snoop_addr,
 	output     [47:0] chip48,
 	// cpu
 	input      [24:1] cpuAddr,
@@ -155,6 +161,20 @@ wire [24:1] walker_snoop_addr = {walker_addr_latch, walker_snoop_lo};
 wire [15:0] walker_snoop_data = walker_snoop_lo
 							? walker_wdata_latch[15:0]
 							: walker_wdata_latch[31:16];
+reg        snoop_tgl_r = 0;
+reg [24:1] snoop_addr_r;
+reg        snoop_ev_q;
+wire       snoop_ev = chipWE | walker_snoop;
+always @ (posedge sysclk) begin
+	snoop_ev_q <= snoop_ev;
+	if (snoop_ev && !snoop_ev_q) begin
+		snoop_tgl_r  <= ~snoop_tgl_r;
+		snoop_addr_r <= walker_snoop ? walker_snoop_addr : chipAddr;
+	end
+end
+assign snoop_tgl  = snoop_tgl_r;
+assign snoop_addr = snoop_addr_r;
+
 cpu_cache_new #(.CACHE_ENABLE(CPU_CACHE)) cpu_cache
 (
 	.clk              (sysclk),                // clock

@@ -320,6 +320,8 @@ wire [7:0] a2065_base;
 
 cpu_wrapper cpu_wrapper
 (
+	.snoop_tgl    (chip_snoop_tgl  ),
+	.snoop_adr    (chip_snoop_adr  ),
 	.reset        (cpu_rst         ),
 	.reset_out    (cpu_nrst_out    ),
 
@@ -462,6 +464,8 @@ sdram_ctrl #(.CPU_CACHE(1)) ram1
 	.chipRW       (_ram_we         ),
 	.chipDMA      (_ram_oe         ),
 	.chipRD       (ramdata_in      ),
+	.snoop_tgl    (chip_snoop_tgl  ),
+	.snoop_addr   (chip_snoop_adr  ),
 	.chip48       (chip48          )
 );
 
@@ -613,6 +617,8 @@ wire  [6:0] memcfg;
 wire        bootrom;   
 wire [15:0] ram_data;      // sram data bus
 wire [15:0] ramdata_in;    // sram data bus in
+wire        chip_snoop_tgl;
+wire [24:1] chip_snoop_adr;
 wire [47:0] chip48;        // big chip read
 wire [23:1] ram_address;   // sram address bus
 wire        _ram_bhe;      // sram upper byte select
