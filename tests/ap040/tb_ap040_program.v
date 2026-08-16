@@ -54,6 +54,14 @@ wire        clkena_in = (busstate == 2'b01) | mem_ready | berr;
 reg   [2:0] ipl_lvl;
 reg  [15:0] ipl_delay = 0;   // $F148: delayed level-2 IPL countdown
 reg   [7:0] ipl_pulse = 0;   // $F14C: withdraw the request after N cycles
+// A device that has let go of IPL must never produce an interrupt.  Rather
+// than time a program against it, watch the invariant directly: count how
+// long the pins have been idle and fail if an autovectored interrupt is
+// accepted well after that.  The 12-cycle margin is comfortably past the
+// core's two-stage IPL synchronizer and the hold tracking it (~5 cycles),
+// while a core that retains a withdrawn level indefinitely is caught.
+reg  [15:0] ipl_idle_for = 0;
+reg         irq_seen_q = 0;
 // +exctrace: print every exception entry (vector, pc) for A/B diffing
 reg [7:0] et_prev = 0;
 always @(posedge clk) begin
@@ -264,6 +272,20 @@ always @(posedge clk) begin
 	else if (ipl_delay != 0) begin
 		ipl_delay <= ipl_delay - 1'd1;
 		if (ipl_delay == 16'd1) ipl_lvl <= 3'd2;
+	end
+
+	// phantom-interrupt invariant
+	if (ipl_lvl == 3'd0) begin
+		if (ipl_idle_for != 16'hffff) ipl_idle_for <= ipl_idle_for + 1'd1;
+	end
+	else
+		ipl_idle_for <= 0;
+	irq_seen_q <= (dut.core.state == 8'd34) && dut.core.exc_is_irq;
+	if ((dut.core.state == 8'd34) && dut.core.exc_is_irq && !irq_seen_q &&
+	    ipl_idle_for > 16'd12) begin
+		errors = errors + 1;
+		$display("FAIL: interrupt accepted %0d cycles after IPL went idle (phantom)",
+		         ipl_idle_for);
 	end
 
 	// $F14C models a device that WITHDRAWS its request: IPL rises to the

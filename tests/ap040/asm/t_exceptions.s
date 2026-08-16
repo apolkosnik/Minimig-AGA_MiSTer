@@ -52,6 +52,7 @@ exp_sr		equ	$3648
 exp_srv		equ	$364A
 tw_sr		equ	$364C
 got_fsp		equ	$3650
+irq_guard2	equ	$3652
 
 failt	macro
 	move.w	#\1,d7
@@ -517,6 +518,7 @@ t44ok:
 	; completing before the interrupt is delivered.
 	move.w	#$2700,sr
 	clr.w	(irq_guard).l
+	clr.w	(irq_guard2).l
 	move.w	#1,(irq_early).l
 	move.w	#2,(IPLREG).l
 	moveq	#20,d0
@@ -527,7 +529,8 @@ rte_irq_wait:
 	move.w	#$2000,-(sp)
 	rte
 rte_irq_target:
-	move.w	#1,(irq_guard).l
+	move.w	#1,(irq_guard).l	; must run before the interrupt
+	move.w	#1,(irq_guard2).l	; must NOT: the deferral is one instruction
 	chkcnt	cnt_int2,4,90
 	tst.w	(irq_early).l
 	beq.s	rte_irq_ok
@@ -579,18 +582,25 @@ fetch_irq_guarded:
 	; must not outlive the request itself -- otherwise the level fires as
 	; a phantom interrupt at the next instruction boundary, long after
 	; the device let go.
+	; Sweep several withdrawal widths; the testbench itself fails the run
+	; if any interrupt is accepted after the pins have gone idle, so this
+	; does not depend on where the code happens to land in a cycle.
 	move.w	#$2000,sr		; mask 0, so the level qualifies at once
-	move.w	(cnt_int2).l,d5		; remember the count
-	move.w	#$0202,(IPLPULSE).l	; IPL2, withdrawn two cycles later: the
-	nop				; pins are idle again before this
-	nop				; instruction boundary, so a core that
-	nop				; holds the level fires a phantom here
+	moveq	#1,d5
+irq_withdraw_loop:
+	move.w	d5,d6
+	lsl.w	#8,d6
+	ori.w	#2,d6			; d6 = width:level
+	move.w	d6,(IPLPULSE).l
+	nop
+	nop
+	nop
+	nop
+	addq.w	#1,d5
+	cmp.w	#6,d5
+	bls.s	irq_withdraw_loop
+	move.w	#0,(IPLREG).l
 	move.w	#$2700,sr
-	move.w	(cnt_int2).l,d6
-	cmp.w	d5,d6
-	beq.s	irq_withdraw_ok
-	failt	135			; phantom interrupt from a dropped request
-irq_withdraw_ok:
 
 	; The other half of the same rule: a request that DID qualify keeps
 	; its claim even though the very next instruction raises the mask.
@@ -1205,6 +1215,8 @@ hi2exc_ok:
 	beq.s	hi2early_ok
 	tst.w	(irq_guard).l	; the restored instruction must have run first
 	beq	hfail
+	tst.w	(irq_guard2).l	; but only that one -- deferral is by exactly one
+	bne	hfail
 	clr.w	(irq_early).l
 hi2early_ok:
 	move.w	10(sp),d0	; frame format/vector
