@@ -76,10 +76,17 @@ module ap040_cache
 localparam TAGW = 22;
 localparam ROWW = 2 + 4 + 4*TAGW;
 
-(* ramstyle = "no_rw_check" *) reg [31:0] cdata [0:2047];  // {bank, set, way, word}
+// One data RAM per way, each {bank, set, word}: reading all four at once
+// lets the hit be served in the same cycle the tag compare resolves, so a
+// hit costs two cycles instead of three.  Same total bits as the single
+// {bank, set, way, word} array it replaces.
+(* ramstyle = "no_rw_check" *) reg [31:0] cdata0 [0:511];
+(* ramstyle = "no_rw_check" *) reg [31:0] cdata1 [0:511];
+(* ramstyle = "no_rw_check" *) reg [31:0] cdata2 [0:511];
+(* ramstyle = "no_rw_check" *) reg [31:0] cdata3 [0:511];
 
 wire [ROWW-1:0] tag_q;
-reg  [31:0] data_q;
+reg  [31:0] data_q0, data_q1, data_q2, data_q3;
 
 // RAM control (driven combinationally from the FSM state so the arrays
 // infer as block RAM: no resets, enable-gated synchronous reads)
@@ -88,8 +95,9 @@ wire  [6:0] tag_ridx, tag_widx;
 wire [ROWW-1:0] tag_wdat;
 wire        inv_we;              // port B: store invalidation
 wire  [6:0] inv_idx;
-wire        cd_rd_en, cd_we;
-wire [10:0] cd_ridx, cd_widx;
+wire        cd_rd_en;
+wire  [8:0] cd_ridx, cd_widx;
+wire  [3:0] cd_we;               // one per way
 wire [31:0] cd_wdat;
 
 // Reads free-run: the address is held for the whole request, so a stalled
@@ -108,8 +116,16 @@ dpram #(7, ROWW) ctag_ram
 );
 
 always @(posedge clk) begin
-	if (ce & cd_we)    cdata[cd_widx] <= cd_wdat;
-	if (ce & cd_rd_en) data_q <= cdata[cd_ridx];
+	if (ce & cd_we[0]) cdata0[cd_widx] <= cd_wdat;
+	if (ce & cd_we[1]) cdata1[cd_widx] <= cd_wdat;
+	if (ce & cd_we[2]) cdata2[cd_widx] <= cd_wdat;
+	if (ce & cd_we[3]) cdata3[cd_widx] <= cd_wdat;
+	if (ce & cd_rd_en) begin
+		data_q0 <= cdata0[cd_ridx];
+		data_q1 <= cdata1[cd_ridx];
+		data_q2 <= cdata2[cd_ridx];
+		data_q3 <= cdata3[cd_ridx];
+	end
 end
 
 //---------------------------------------------------------------------------
@@ -143,7 +159,7 @@ wire rd_accept;
 
 localparam C_IDLE  = 3'd0;
 localparam C_LOOK  = 3'd1;
-localparam C_RDD   = 3'd2;
+localparam C_RDD   = 3'd2;   // retired: hits now complete in C_LOOK
 localparam C_WINV  = 3'd3;   // second-line invalidate owed by a store
 localparam C_FILL  = 3'd4;
 localparam C_TAGW  = 3'd5;
@@ -246,11 +262,17 @@ assign inv_we    = ((cst == C_IDLE) && c_req && c_write && !ack_r) ||
                    ((cst == C_PASS) && winv_pend) ||
                    (cst == C_WINV);
 assign inv_idx   = (cst == C_IDLE) ? {1'b0, c_addr[9:4]} : {1'b0, winv_set2};
-assign cd_rd_en  = (cst == C_LOOK) && look_hit;
-assign cd_ridx   = {r_bank, r_row[5:0], hit_way, r_addr[3:2]};
-assign cd_we     = (cst == C_FILL) && r_issued && m_ack;
-assign cd_widx   = {r_bank, r_row[5:0], r_way, r_beat};
+assign cd_rd_en  = rd_accept;                       // issued with the tag read
+assign cd_ridx   = {c_instr, a_set, c_addr[3:2]};
+assign cd_we     = ((cst == C_FILL) && r_issued && m_ack)
+                   ? (4'd1 << r_way) : 4'd0;
+assign cd_widx   = {r_bank, r_row[5:0], r_beat};
 assign cd_wdat   = m_rdata;
+
+// the four ways arrive together; the tag compare picks one
+wire [31:0] data_hit = (hit_way == 2'd0) ? data_q0 :
+                       (hit_way == 2'd1) ? data_q1 :
+                       (hit_way == 2'd2) ? data_q2 : data_q3;
 
 always @(posedge clk) begin
 	if (!nreset) begin
@@ -328,8 +350,11 @@ always @(posedge clk) begin
 
 			C_LOOK: begin
 				if (look_hit) begin
-					// the data RAM read runs in parallel (cd_rd_en)
-					cst <= C_RDD;
+					// all four ways were read alongside the tags, so the
+					// hit completes here: two cycles request-to-ack
+					rdata_r <= lw_extract(data_hit, r_size, r_off);
+					ack_r <= 1;
+					cst <= C_IDLE;
 				end
 				else begin
 					r_way <= tag_q[93:92];   // round-robin victim
@@ -337,12 +362,6 @@ always @(posedge clk) begin
 					r_issued <= 0;
 					cst <= C_FILL;
 				end
-			end
-
-			C_RDD: begin
-				rdata_r <= lw_extract(data_q, r_size, r_off);
-				ack_r <= 1;
-				cst <= C_IDLE;
 			end
 
 			C_FILL: begin
