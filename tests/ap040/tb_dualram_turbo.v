@@ -704,16 +704,16 @@ task walker_selftest;
 		// Install the same descriptor in way 0 of both cache views.  The
 		// walker bypasses cpu_cache_new, so its writeback snoops must update
 		// both 16-bit halves in both I and D caches.
-		ram.cpu_cache.itram.mem[8'h80] = (40'h1 << 38) | 18'h00003;
-		ram.cpu_cache.dtram.mem[8'h80] = (40'h1 << 38) | 18'h00003;
-		ram.cpu_cache.idram0.ram_u.mem[10'h200] = 8'h00;
-		ram.cpu_cache.idram0.ram_l.mem[10'h200] = 8'h00;
-		ram.cpu_cache.idram0.ram_u.mem[10'h201] = 8'h00;
-		ram.cpu_cache.idram0.ram_l.mem[10'h201] = 8'h01;
-		ram.cpu_cache.ddram0.ram_u.mem[10'h200] = 8'h00;
-		ram.cpu_cache.ddram0.ram_l.mem[10'h200] = 8'h00;
-		ram.cpu_cache.ddram0.ram_u.mem[10'h201] = 8'h00;
-		ram.cpu_cache.ddram0.ram_l.mem[10'h201] = 8'h01;
+		ram.cpu_cache.itram.mem[7'h00] = (42'h1 << 40) | 19'h00007;
+		ram.cpu_cache.dtram.mem[7'h00] = (42'h1 << 40) | 19'h00007;
+		ram.cpu_cache.idram0.ram_u.mem[9'h000] = 8'h00;
+		ram.cpu_cache.idram0.ram_l.mem[9'h000] = 8'h00;
+		ram.cpu_cache.idram0.ram_u.mem[9'h001] = 8'h00;
+		ram.cpu_cache.idram0.ram_l.mem[9'h001] = 8'h01;
+		ram.cpu_cache.ddram0.ram_u.mem[9'h000] = 8'h00;
+		ram.cpu_cache.ddram0.ram_l.mem[9'h000] = 8'h00;
+		ram.cpu_cache.ddram0.ram_u.mem[9'h001] = 8'h00;
+		ram.cpu_cache.ddram0.ram_l.mem[9'h001] = 8'h01;
 
 		// 32-bit write: BOTH halves must land (the SDRAM mode word sets
 		// write-burst-single, so the low word needs its own CAS command),
@@ -728,26 +728,26 @@ task walker_selftest;
 			$display("FAIL: walker write low word: %h", mem[15'h0E01]);
 			wk_errors = wk_errors + 1;
 		end
-		if ({ram.cpu_cache.idram0.ram_u.mem[10'h200],
-		     ram.cpu_cache.idram0.ram_l.mem[10'h200],
-		     ram.cpu_cache.idram0.ram_u.mem[10'h201],
-		     ram.cpu_cache.idram0.ram_l.mem[10'h201]} !== 32'h12340019) begin
+		if ({ram.cpu_cache.idram0.ram_u.mem[9'h000],
+		     ram.cpu_cache.idram0.ram_l.mem[9'h000],
+		     ram.cpu_cache.idram0.ram_u.mem[9'h001],
+		     ram.cpu_cache.idram0.ram_l.mem[9'h001]} !== 32'h12340019) begin
 			$display("FAIL: SDRAM walker I-cache snoop: %h%h%h%h",
-			         ram.cpu_cache.idram0.ram_u.mem[10'h200],
-			         ram.cpu_cache.idram0.ram_l.mem[10'h200],
-			         ram.cpu_cache.idram0.ram_u.mem[10'h201],
-			         ram.cpu_cache.idram0.ram_l.mem[10'h201]);
+			         ram.cpu_cache.idram0.ram_u.mem[9'h000],
+			         ram.cpu_cache.idram0.ram_l.mem[9'h000],
+			         ram.cpu_cache.idram0.ram_u.mem[9'h001],
+			         ram.cpu_cache.idram0.ram_l.mem[9'h001]);
 			wk_errors = wk_errors + 1;
 		end
-		if ({ram.cpu_cache.ddram0.ram_u.mem[10'h200],
-		     ram.cpu_cache.ddram0.ram_l.mem[10'h200],
-		     ram.cpu_cache.ddram0.ram_u.mem[10'h201],
-		     ram.cpu_cache.ddram0.ram_l.mem[10'h201]} !== 32'h12340019) begin
+		if ({ram.cpu_cache.ddram0.ram_u.mem[9'h000],
+		     ram.cpu_cache.ddram0.ram_l.mem[9'h000],
+		     ram.cpu_cache.ddram0.ram_u.mem[9'h001],
+		     ram.cpu_cache.ddram0.ram_l.mem[9'h001]} !== 32'h12340019) begin
 			$display("FAIL: SDRAM walker D-cache snoop: %h%h%h%h",
-			         ram.cpu_cache.ddram0.ram_u.mem[10'h200],
-			         ram.cpu_cache.ddram0.ram_l.mem[10'h200],
-			         ram.cpu_cache.ddram0.ram_u.mem[10'h201],
-			         ram.cpu_cache.ddram0.ram_l.mem[10'h201]);
+			         ram.cpu_cache.ddram0.ram_u.mem[9'h000],
+			         ram.cpu_cache.ddram0.ram_l.mem[9'h000],
+			         ram.cpu_cache.ddram0.ram_u.mem[9'h001],
+			         ram.cpu_cache.ddram0.ram_l.mem[9'h001]);
 			wk_errors = wk_errors + 1;
 		end
 

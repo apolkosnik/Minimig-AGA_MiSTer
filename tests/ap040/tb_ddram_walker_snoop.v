@@ -57,18 +57,18 @@ module tb_ddram_walker_snoop;
 			errors = errors + 1;
 		end
 
-		// Descriptor byte address $00001c00: tag 3, set $80, words
-		// $200/$201 in the 1Kx16 cache data RAMs.
-		dut.cpu_cache.itram.mem[8'h80] = (40'h1 << 38) | 18'h00003;
-		dut.cpu_cache.dtram.mem[8'h80] = (40'h1 << 38) | 18'h00003;
-		dut.cpu_cache.idram0.ram_u.mem[10'h200] = 8'h00;
-		dut.cpu_cache.idram0.ram_l.mem[10'h200] = 8'h00;
-		dut.cpu_cache.idram0.ram_u.mem[10'h201] = 8'h00;
-		dut.cpu_cache.idram0.ram_l.mem[10'h201] = 8'h01;
-		dut.cpu_cache.ddram0.ram_u.mem[10'h200] = 8'h00;
-		dut.cpu_cache.ddram0.ram_l.mem[10'h200] = 8'h00;
-		dut.cpu_cache.ddram0.ram_u.mem[10'h201] = 8'h00;
-		dut.cpu_cache.ddram0.ram_l.mem[10'h201] = 8'h01;
+		// Descriptor byte address $00001c00: with the 2kB/side geometry
+		// that is tag 7, set 0, words $000/$001 in the 512x16 data RAMs.
+		dut.cpu_cache.itram.mem[7'h00] = (42'h1 << 40) | 19'h00007;
+		dut.cpu_cache.dtram.mem[7'h00] = (42'h1 << 40) | 19'h00007;
+		dut.cpu_cache.idram0.ram_u.mem[9'h000] = 8'h00;
+		dut.cpu_cache.idram0.ram_l.mem[9'h000] = 8'h00;
+		dut.cpu_cache.idram0.ram_u.mem[9'h001] = 8'h00;
+		dut.cpu_cache.idram0.ram_l.mem[9'h001] = 8'h01;
+		dut.cpu_cache.ddram0.ram_u.mem[9'h000] = 8'h00;
+		dut.cpu_cache.ddram0.ram_l.mem[9'h000] = 8'h00;
+		dut.cpu_cache.ddram0.ram_u.mem[9'h001] = 8'h00;
+		dut.cpu_cache.ddram0.ram_l.mem[9'h001] = 8'h01;
 
 		@(negedge clk);
 		walker_addr = 27'h0000700;
@@ -89,26 +89,26 @@ module tb_ddram_walker_snoop;
 		end
 		walker_req = 0;
 
-		if ({dut.cpu_cache.idram0.ram_u.mem[10'h200],
-		     dut.cpu_cache.idram0.ram_l.mem[10'h200],
-		     dut.cpu_cache.idram0.ram_u.mem[10'h201],
-		     dut.cpu_cache.idram0.ram_l.mem[10'h201]} !== 32'h12340019) begin
+		if ({dut.cpu_cache.idram0.ram_u.mem[9'h000],
+		     dut.cpu_cache.idram0.ram_l.mem[9'h000],
+		     dut.cpu_cache.idram0.ram_u.mem[9'h001],
+		     dut.cpu_cache.idram0.ram_l.mem[9'h001]} !== 32'h12340019) begin
 			$display("FAIL: DDR walker I-cache snoop: %h%h%h%h",
-			         dut.cpu_cache.idram0.ram_u.mem[10'h200],
-			         dut.cpu_cache.idram0.ram_l.mem[10'h200],
-			         dut.cpu_cache.idram0.ram_u.mem[10'h201],
-			         dut.cpu_cache.idram0.ram_l.mem[10'h201]);
+			         dut.cpu_cache.idram0.ram_u.mem[9'h000],
+			         dut.cpu_cache.idram0.ram_l.mem[9'h000],
+			         dut.cpu_cache.idram0.ram_u.mem[9'h001],
+			         dut.cpu_cache.idram0.ram_l.mem[9'h001]);
 			errors = errors + 1;
 		end
-		if ({dut.cpu_cache.ddram0.ram_u.mem[10'h200],
-		     dut.cpu_cache.ddram0.ram_l.mem[10'h200],
-		     dut.cpu_cache.ddram0.ram_u.mem[10'h201],
-		     dut.cpu_cache.ddram0.ram_l.mem[10'h201]} !== 32'h12340019) begin
+		if ({dut.cpu_cache.ddram0.ram_u.mem[9'h000],
+		     dut.cpu_cache.ddram0.ram_l.mem[9'h000],
+		     dut.cpu_cache.ddram0.ram_u.mem[9'h001],
+		     dut.cpu_cache.ddram0.ram_l.mem[9'h001]} !== 32'h12340019) begin
 			$display("FAIL: DDR walker D-cache snoop: %h%h%h%h",
-			         dut.cpu_cache.ddram0.ram_u.mem[10'h200],
-			         dut.cpu_cache.ddram0.ram_l.mem[10'h200],
-			         dut.cpu_cache.ddram0.ram_u.mem[10'h201],
-			         dut.cpu_cache.ddram0.ram_l.mem[10'h201]);
+			         dut.cpu_cache.ddram0.ram_u.mem[9'h000],
+			         dut.cpu_cache.ddram0.ram_l.mem[9'h000],
+			         dut.cpu_cache.ddram0.ram_u.mem[9'h001],
+			         dut.cpu_cache.ddram0.ram_l.mem[9'h001]);
 			errors = errors + 1;
 		end
 
