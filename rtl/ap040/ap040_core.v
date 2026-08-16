@@ -521,10 +521,12 @@ reg  [3:0] epf_count;
 reg  [2:0] epf_head, epf_fill;
 reg [31:0] epf_base, epf_next;
 reg        epf_super;
+reg        ifetch_lw;            // the outstanding fetch is a longword
 reg        epf_hit;
 reg [15:0] epf_hit_data;
 wire       ifetch_done = mem_ack | epf_hit;
-wire [15:0] ifetch_word = epf_hit ? epf_hit_data : mem_rdata[15:0];
+wire [15:0] ifetch_word = epf_hit    ? epf_hit_data :
+                          ifetch_lw  ? mem_rdata[31:16] : mem_rdata[15:0];
 
 reg        m_wr;
 reg  [1:0] m_size;
@@ -1122,6 +1124,7 @@ task issue_ifetch;
 		if (epf_count != 0 && epf_next == a && epf_super == s) begin
 			// Consume a word already fetched by exception processing.
 			epf_hit <= 1;
+			ifetch_lw <= 0;
 			epf_hit_data <= epf_data[epf_head];
 			epf_head <= epf_head + 3'd1;
 			epf_count <= epf_count - 4'd1;
@@ -1133,7 +1136,17 @@ task issue_ifetch;
 			epf_count <= 0;
 			epf_hit <= 0;
 			mem_req <= 1; mem_write <= 0; mem_instr <= 1;
-			mem_size <= `AP040_SZ_W; mem_addr <= a;
+			// A longword-aligned fetch takes both words in one request and
+			// buffers the odd one for the next sequential fetch, which is
+			// where most of this core's cycles went.  Alignment is what
+			// makes it safe: an aligned longword cannot span a page, so it
+			// cannot translate or fault differently than the two halves
+			// would have (the exception prefetch below stays word-wise
+			// precisely because its $FFE entry CAN span).
+			ifetch_lw <= ~a[1];
+			mem_size <= a[1] ? `AP040_SZ_W : `AP040_SZ_L;
+			mem_addr <= a;
+			epf_super <= s;
 			fc_r <= s ? `AP040_FC_SUPER_PROG : `AP040_FC_USER_PROG;
 		end
 	end
@@ -1542,7 +1555,7 @@ always @(posedge clk) begin
 		sh_any <= 0;
 		r_imm_ret <= 0; r_ea_ret <= 0; r_m_ret <= 0;
 		imm_n <= 0; if_issued <= 0; m_issued <= 0; imm <= 0; x_ext <= 0;
-		epf_count <= 0; epf_head <= 0; epf_fill <= 0;
+		epf_count <= 0; epf_head <= 0; epf_fill <= 0; ifetch_lw <= 0;
 		epf_base <= 0; epf_next <= 0; epf_super <= 0;
 		epf_hit <= 0; epf_hit_data <= 0;
 		for (li = 0; li < 8; li = li + 1) epf_data[li] <= 0;
@@ -1675,6 +1688,14 @@ always @(posedge clk) begin
 			end
 			else if (ifetch_done) begin
 				epf_hit <= 0;
+				if (ifetch_lw) begin
+					epf_data[0] <= mem_rdata[15:0];
+					epf_head    <= 3'd0;
+					epf_fill    <= 3'd1;
+					epf_count   <= 4'd1;
+					epf_next    <= mem_addr + 32'd2;
+					ifetch_lw   <= 0;
+				end
 				// Exception processing includes the first handler refill.  An
 				// interrupt which becomes pending after vector fetch but before
 				// this opcode arrives must still run before the handler executes.
@@ -1796,6 +1817,16 @@ always @(posedge clk) begin
 				end
 				else if (ifetch_done) begin
 					epf_hit <= 0;
+					// the longword's second word becomes the whole
+					// prefetch queue: one word, tagged for pc+2
+					if (ifetch_lw) begin
+						epf_data[0] <= mem_rdata[15:0];
+						epf_head    <= 3'd0;
+						epf_fill    <= 3'd1;
+						epf_count   <= 4'd1;
+						epf_next    <= mem_addr + 32'd2;
+						ifetch_lw   <= 0;
+					end
 					imm <= {imm[15:0], ifetch_word};
 					pc <= pc + 32'd2;
 					if_issued <= 0;
