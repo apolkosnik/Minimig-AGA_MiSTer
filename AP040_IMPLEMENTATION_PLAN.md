@@ -862,3 +862,134 @@ long poles 2-5x.
 Ordering: F0 (done) -> F1 -> F2 -> F3, with P1 caches (section 19)
 interleaved by ROI: for mixed real-world FPU code the caches likely beat
 everything except F1.
+
+============================================================================
+# Part X2: AP040X2 -- superscalar, 32-bit dual-SDRAM, toward 114 MHz
+============================================================================
+
+Branch: ap040x2 (worktree /home/adam/ap040/ap040x2), base 809b9558 +
+the validated AP040 core and test infrastructure as of ap040@37591618.
+fx68k/tg68k are removed.  This part supersedes P2-P5 above on this
+branch; the ap040 branch stays the stable single-issue line.
+
+## X2.0 Target and how it is measured
+
+Match or beat a real 25 MHz MC68040 on sustained integer and FPU code.
+The 040 at 25 MHz retires at best 1 instruction/cycle from its caches
+(~18-21 host MIPS); its FPU sustains ~3.5 MFLOPS.  The bar, measured on
+this fabric:
+
+  T1  cycle-count parity: >= 25 M retired instructions/sec sustained on
+      cache-resident integer code (t_integer-style mix).
+  T2  memory parity: a cache-line fill in <= 8 core cycles (real 040:
+      burst 4 longwords over a 32-bit bus in 4+ bus clocks).
+  T3  FPU: pipelined FMUL/FADD throughput >= 1 op / 8 core cycles.
+
+The profiling that motivates the shape (measured on AP040, t_integer):
+fetch is 71% of cycles, execute ~15%.  A superscalar back end without a
+transformed front end and memory path is pointless -- the order of work
+below follows from that number.
+
+## X2.1 Memory: DUAL_SDRAM as a native 32-bit bus  [FIRST -- everything
+     else keys on it]
+
+The io-board slot gives a second 16-bit SDRAM.  Driven in lockstep with
+the primary (same clock, same command, same address; each carries one
+half of the longword) the pair is one 32-bit SDRAM: a 4-longword line is
+one ACTIVE + 4-beat burst instead of the 8+2 the 16-bit path needs.
+
+  - sdram32_ctrl: new controller instantiating the proven sdram_ctrl
+    command engine once, data path doubled.  SDRAM_* carries D[15:0],
+    SDRAM2_* carries D[31:16].  Same slot/refresh discipline as today.
+  - sys/ already has the ports and sys_dual_sdram.tcl for the pins; the
+    build gains a DUAL_SDRAM=1 qsf macro.  Boards without the second
+    module fall back to the 16-bit path at half fill rate (runtime
+    detectable: probe pattern on SDRAM2 at init; config error out).
+  - Chipset traffic stays 16-bit on the primary (Agnus timing is CCK
+    locked and must not change).  Only the CPU/cache port widens.
+  - CDC: none new.  The controller stays on clk_114; the CPU-side
+    handshake is unchanged in protocol, doubled in width.
+
+Deliverable gate: tb_sdram32 proves lockstep command identity (the two
+chips' command pins compare equal every cycle), fill latency <= 8 core
+cycles, and the chipset port byte-identical against the old controller
+under the existing turbo benches.
+
+## X2.2 Fetch front end: decouple and widen  [the 71%]
+
+  - 32-bit fetch through the new bus; fetch QUEUE (4 longwords) filled
+    autonomously whenever the bus is idle, drained by decode.  The
+    existing epf machinery is the seed of this queue; it becomes
+    free-running instead of exception-only.
+  - Prefetch never crosses a page (reuses the aligned-fetch fault
+    argument); flow change flushes the queue (mechanism exists).
+  - Gate: S_FETCH+S_IMMF occupancy on t_integer drops below 20% (from
+    71%) with the suite and corpus untouched.
+
+## X2.3 Pipeline: 040-style stages on one clock domain
+
+IF | ID | EA | MEM | EX | WB, ce-based single clock (clk_114 with ce=4
+initially -- same frequency as today, structure first, speed second).
+The restart exception model is kept until X2.6: an instruction commits
+at WB or restarts whole; format $7 stays synthetic.  Forwarding EX->EA
+and WB->EX; scoreboard on Dn/An/CCR (the "collapse staging + add
+forwarding" item -- it lives INSIDE this stage structure, not bolted to
+the old FSM).
+
+  Gate: >= 1 instruction/2 ce on reg-reg streams (t_integer chkl-free
+  inner blocks), suite + corpus green.
+
+## X2.4 Dual issue (68060-style pOEP/sOEP)
+
+Second ALU pipe fed by the same decoder; issue rules after the 68060:
+pOEP takes anything, sOEP takes reg-reg/imm-reg ALU ops with no EA unit
+need, no CCR read of the same-cycle pOEP result, no pairing across
+flow control or privileged ops.  Memory, shifts>1, mul/div, FPU stay
+single-issue in pOEP.  This is bounded: the pairing table is ~40 rows
+of the 68060 UM's table 10-1 reduced to what AP040X2 executes natively.
+
+  Gate: pairing rate >= 30% on t_integer, zero behavior change when
+  sOEP is compile-disabled (AP040X2_DUAL=0 must bit-match AP040X2_DUAL=1
+  with pairing suppressed -- that equivalence run is the regression).
+
+## X2.5 FPU pipelining
+
+The F0/F1 work gave single-op latencies (FMUL ~5, FDIV ~20, FSQRT ~21
+at ce).  X2 pipelines FMUL/FADD to initiation interval 1 ce (3-stage),
+keeps FDIV/FSQRT iterative but overlapped (fpu_bg already proves the
+scoreboard).  Gate: T3.
+
+## X2.6 Frequency: 57 MHz (ce=2), then 114 MHz native
+
+Only after X2.3-X2.5 hold at ce=4.  57 first: the known >17.6 ns cones
+(exc_addr capture, MMU translate->fault, F_ROUND, now the 4-way hit mux)
+get registered splits; STA drives the list.  114 native requires the
+MEM stage to tolerate 1-cycle SDRAM CAS variance -- that is the point
+where the restart model gets re-examined (real WB1-WB3).  T1 falls out
+at 57 MHz already if X2.3's CPI gate held: 57M * 0.5 IPC > 25M * 1.0.
+
+## X2.7 Area budget (honest numbers from the ap040 branch fits)
+
+Current: core 10.0K + MMU 5.6K + FPU 4.5K ALMs, system total 94%.
+X2 adds: fetch queue (+0.3K), pipeline regs/forwarding (+1.5K), second
+ALU pipe + pairing (+1.5K), sdram32 datapath (+0.5K) ~= +4K => does NOT
+fit beside everything at 41.9K.  Funded by: cpu_cache_new out (-0.8K,
+the internal cache with the 32-bit fill path replaces it FOR REAL this
+time -- the fill tax that killed it was the 16-bit bus, X2.1 removes
+exactly that), bus16 adapter out (-0.4K), MMU pruning of the never-used
+5.6K -> target 3.5K (srp/urp tables share one walker datapath).  Net
+target: <= 95% with dual issue, <= 92% without.  If the fitter says
+otherwise, X2.4 is the item that yields (it is compile-optional by
+construction).
+
+## X2.8 Verification invariants (non-negotiable, learned the hard way)
+
+  - run_tests.sh green at every commit; corpus slices for any touched
+    instruction class; full corpus before any RBF.
+  - Every pipeline hazard fix ships with a directed test THAT FAILS on
+    the pre-fix RTL (a test never seen to fail proves nothing).
+  - Hardware measurements outrank every simulation and every test I
+    wrote (see 2026-08-16: the internal cache "win" that measured
+    slower than no cache; the RTE deferral reverted against its own
+    correct fix).
+  - Cycle claims come from the tb_prof state histogram, not estimates.
