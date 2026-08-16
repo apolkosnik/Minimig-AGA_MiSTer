@@ -415,12 +415,11 @@ ap040_walker_cdc walker_cdc
 wire [15:0] ram_dout1;
 wire        ram_ready1;
 
-// Both caches are active: ap040_cache serves configured fast RAM at CPU
-// latency, and cpu_cache_new keeps caching everything else -- chip RAM
-// above all, which the internal cache cannot take because it has no snoop
-// port for chipset DMA.  Turning the controller caches off made every
-// chip-RAM access go to SDRAM uncached.
-sdram_ctrl #(.CPU_CACHE(1)) ram1
+// ap040_cache is snooped now, so it holds chip RAM as well as fast RAM
+// and the controller caches are redundant: one cache, at CPU latency,
+// instead of two.  (Keeping both fits only at 99% ALMs, where timing
+// collapses; the snoop is what makes dropping these safe.)
+sdram_ctrl #(.CPU_CACHE(0)) ram1
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
@@ -472,7 +471,7 @@ sdram_ctrl #(.CPU_CACHE(1)) ram1
 wire [15:0] ram_dout2;
 wire        ram_ready2;
 
-ddram_ctrl #(.CPU_CACHE(1)) ram2
+ddram_ctrl #(.CPU_CACHE(0)) ram2
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
