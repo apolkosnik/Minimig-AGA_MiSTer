@@ -525,6 +525,11 @@ reg        ifetch_lw;            // the outstanding fetch is a longword
 reg        epf_hit;
 reg [15:0] epf_hit_data;
 wire       ifetch_done = mem_ack | epf_hit;
+// A prefetched word that matches the PC needs no bus cycle at all, so the
+// immediate fetch below consumes it in the very cycle it would otherwise
+// have spent issuing a request.
+wire       epf_ready_pc = (epf_count != 0) && (epf_next == pc) &&
+                          (epf_super == sr_s);
 wire [15:0] ifetch_word = epf_hit    ? epf_hit_data :
                           ifetch_lw  ? mem_rdata[31:16] : mem_rdata[15:0];
 
@@ -1807,7 +1812,17 @@ always @(posedge clk) begin
 			S_POST_EXC: state <= S_EXC0;
 
 			S_IMMF: begin
-				if (!if_issued) begin
+				if (!if_issued && epf_ready_pc) begin
+					// already prefetched: take it and move on this cycle
+					imm <= {imm[15:0], epf_data[epf_head]};
+					pc <= pc + 32'd2;
+					epf_head  <= epf_head + 3'd1;
+					epf_count <= epf_count - 4'd1;
+					epf_next  <= epf_next + 32'd2;
+					if (imm_n == 2'd1) state <= r_imm_ret;
+					else imm_n <= imm_n - 2'd1;
+				end
+				else if (!if_issued) begin
 					issue_ifetch(pc, sr_s);
 					if_issued <= 1;
 				end
