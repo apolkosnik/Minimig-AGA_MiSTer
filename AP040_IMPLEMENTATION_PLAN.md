@@ -905,15 +905,30 @@ one ACTIVE + 4-beat burst instead of the 8+2 the 16-bit path needs.
     build gains a DUAL_SDRAM=1 qsf macro.  Boards without the second
     module fall back to the 16-bit path at half fill rate (runtime
     detectable: probe pattern on SDRAM2 at init; config error out).
-  - Chipset traffic stays 16-bit on the primary (Agnus timing is CCK
-    locked and must not change).  Only the CPU/cache port widens.
+  - Chipset traffic keeps its 16-bit port SHAPE, slot and cycle timing
+    (proven byte/cycle-identical against sdram_ctrl in tb_sdram32) --
+    but NOT "primary chip only": in a lockstep pair the even word of
+    every longword lives in chip 2, so a chipset write lands in the
+    lane its addr[1] selects.  The original wording was tried and is
+    physically wrong (measured: CPU reads the stale half of everything
+    Agnus writes).
+  - Io-board reality: sys_dual_sdram.tcl routes no DQM to SDRAM2, so
+    lane masking uses nCS across the WHOLE slot including ACTIVE
+    (masking only the write leaves the secondary's row open against
+    the primary's auto-precharge -- illegal on the next ACTIVE).
   - CDC: none new.  The controller stays on clk_114; the CPU-side
     handshake is unchanged in protocol, doubled in width.
 
-Deliverable gate: tb_sdram32 proves lockstep command identity (the two
-chips' command pins compare equal every cycle), fill latency <= 8 core
-cycles, and the chipset port byte-identical against the old controller
-under the existing turbo benches.
+Deliverable gate MET (44572b32): lockstep command identity checked
+every cycle, chipset port byte/cycle-identical against sdram_ctrl on
+shared stimulus, and all three deliberate breaks (lane swap, lockstep
+break, primary-only chipset writes) caught with thousands of errors.
+Measured: slot grant -> 4th beat = 15 clk_114 = 4 core cycles at ce=4
+(T2 gate is <= 8 core cycles; met with margin).  The 16-bit fallback
+measures 31 for the same line.  Note 15 clk_114 is the FLOOR for this
+command engine (tRCD 2 + CL 4 + 3 beats*2 + capture 3) -- a raw
+"8 clk_114" reading of the gate is physically impossible and was a
+spec error, not a shortfall.
 
 ## X2.2 Fetch front end: decouple and widen  [the 71%]
 
