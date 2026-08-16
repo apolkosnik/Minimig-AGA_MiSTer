@@ -680,6 +680,29 @@ the 5CSEBA6:
                                 i.e. the loss is placement freedom, not a
                                 specific path.
 
+Two area reductions were tried and measured on 2026-08-16, and both are
+reverted:
+
+  halve cpu_cache_new to 2kB/side:  frees BLOCK RAM, which was never the
+      constraint (31% used).  Barely touches ALMs: the storage was
+      already M10K and the tag comparators get wider as the index
+      shrinks.  Costs external cache hit rate for nothing.
+  move ap040_cache's valid/round-robin bits into the tag row:  intended
+      to put them in M10K instead of LABs.  Made the design BIGGER --
+      104% (43,486 ALMs) vs 98% before.  The second write port needed
+      for store invalidation was written as its own always block, which
+      breaks Quartus's dual-port template: ctag stopped inferring as
+      altsyncram (only cdata still did, see Minimig.map.rpt) and became
+      ~6,300 flops.  A corrected single-block template would recover at
+      most the ~350 ALMs the flop arrays cost, against the ~950 ALM gap.
+
+The measured budget: with the caches off the design sits at 39,508 ALMs
+(94%) with every clock met; enabling P1 cost 1,759 ALMs and broke timing
+at 98%.  Getting P1 in needs roughly 950 ALMs found elsewhere, and the
+caches are not where they are: ap040_mmu is 5,563 ALMs and ap040_fpu
+4,542, against ap040_cache's 854 and cpu_cache_new's 567 for both
+instances.
+
 What P1 buys is hit LATENCY -- cpu_cache_new in the RAM controllers
 already caches this fabric -- so it is not worth spending the last 2% of
 the device and all timing margin on.  Revisit if area is freed elsewhere
