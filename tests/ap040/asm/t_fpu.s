@@ -8,6 +8,10 @@
 
 FAILREG		equ	$F100
 DONEREG		equ	$F102
+IPLREG		equ	$F110
+IPLDLY		equ	$F148
+IPLCAP		equ	$F14A
+cnt_int2	equ	$360C
 cnt_fpunimp	equ	$3600
 cnt_fpdz	equ	$3602
 cnt_fpsnan	equ	$3604
@@ -54,8 +58,12 @@ ok\@:
 	dc.l	unexp		; vectors 5-10
 	endr
 	dc.l	h_fpunimp	; 11 F-line / FP unimplemented
-	rept	20
-	dc.l	unexp		; vectors 12-31
+	rept	14
+	dc.l	unexp		; vectors 12-25
+	endr
+	dc.l	h_int2		; 26 level-2 autovector (F1 IRQ soak)
+	rept	5
+	dc.l	unexp		; vectors 27-31
 	endr
 	dc.l	h_trap0		; 32 TRAP #0: harness-replica test return
 	rept	15
@@ -4545,7 +4553,54 @@ bgspin:
 	chkl	d0,5,289		; writeback inhibited by the trap
 	fmove.l	#0,fpcr
 
+;=========== IRQ arrival sweep across background FPU execution (F1 soak)
+; A level-2 interrupt lands at a swept clk offset inside a released FDIV
+; while the integer stream continues; the handler runs FSAVE/FRESTORE --
+; the AmigaOS task-switch idiom.  Every offset must deliver the interrupt
+; exactly once, the quotient must survive, and nothing may wedge (a stuck
+; wait here trips the testbench's global timeout).  Benches whose modeled
+; clock alignment cannot deliver IPL at all (turbo co-sim at non-hardware
+; CPU_PHASE values) advertise it through the capability word and the
+; sweep is bypassed rather than faked.
+	tst.w	(IPLCAP).l
+	beq	soak_done
+	clr.w	(cnt_int2).l
+	move.w	#$2000,sr	; open the mask for level 2
+	moveq	#1,d7
+soak_loop:
+	move.w	d7,(IPLDLY).l	; arm the delayed IPL2
+	fmove.l	#100,fp0
+	fmove.l	#7,fp1
+	fdiv.x	fp1,fp0		; released: runs in the background
+	moveq	#0,d0
+	moveq	#24,d1
+soak_spin:
+	addq.l	#3,d0
+	dbra	d1,soak_spin
+	fnop			; FPU sync point
+	fmove.l	fp0,d0
+	chkl	d0,14,290	; quotient survived the interrupt
+soak_wait:
+	move.w	(cnt_int2).l,d0
+	cmp.w	d7,d0		; exactly one delivery per armed delay
+	bne.s	soak_wait
+	addq.w	#1,d7
+	cmp.w	#48,d7
+	bls.s	soak_loop
+	chkcnt	cnt_int2,48,291
+	move.w	#$2700,sr	; interrupts masked again
+soak_done:
+
 	jmp	audit_return
+
+; level-2 autovector: the task-switch idiom around a possibly-active
+; background FPU op -- FSAVE gates on quiescence, FRESTORE rearms
+h_int2:
+	fsave	-(sp)
+	frestore	(sp)+
+	move.w	#0,(IPLREG).l	; release the IPL lines
+	addq.w	#1,(cnt_int2).l
+	rte
 
 ; TRAP #0 from the user-mode block: record nothing, redirect the return
 ; into the supervisor flow at hr_back with interrupts masked again.

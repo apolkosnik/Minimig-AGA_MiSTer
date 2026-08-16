@@ -142,6 +142,12 @@ wire        mw_req, mw_we, mw_ddr;
 wire [28:2] mw_addr;
 wire [31:0] mw_wdata;
 
+reg  [2:0] ipl_lvl = 0;
+reg [15:0] ipl_delay = 0;
+reg        ipl_set_w = 0, ipl_arm_w = 0;
+reg  [2:0] ipl_set_v = 0;
+reg [15:0] ipl_arm_v = 0;
+
 cpu_wrapper cpu
 (
 	.reset(reset),
@@ -164,7 +170,7 @@ cpu_wrapper cpu
 	.chip_lds(),
 	.chip_rw(),
 	.chip_dtack(1'b0),
-	.chip_ipl(3'b111),
+	.chip_ipl(~ipl_lvl),
 
 	.fastchip_dout(16'd0),
 	.fastchip_sel(),
@@ -784,11 +790,31 @@ reg        sd_q_en = 0;
 assign sd_data = sd_q_en ? sd_q : 16'hZZZZ;
 
 wire [2:0] slot_typ_dbg = ram.slot_type;
+// interrupt injection, mirroring tb_ap040_program: $F110 sets the level
+// directly (0 releases), $F148 arms a delayed level-2 rise counted in
+// clk113 cycles
+always @(posedge clk113) begin
+	if (ipl_delay != 0) begin
+		ipl_delay <= ipl_delay - 1'd1;
+		if (ipl_delay == 16'd1) ipl_lvl <= 3'd2;
+	end
+	if (ipl_set_w) ipl_lvl <= ipl_set_v;
+	if (ipl_arm_w) ipl_delay <= ipl_arm_v;
+	// auto-release at interrupt acceptance: the handler's $F110 release
+	// write drains through the write buffer, so holding the level until
+	// it lands could re-enter the handler after RTE
+	if (ipl_lvl != 0 && cpu.cpu_inst_p.core.state == 8'd34 &&
+	    cpu.cpu_inst_p.core.exc_is_irq)
+		ipl_lvl <= 0;
+end
+
 reg sdclk_q = 0;
 wire chip_tick = sd_clk && !sdclk_q;   // the chip's own clock edge
 
 always @(posedge clk113) begin
 	sdclk_q <= sd_clk;
+	ipl_set_w <= 0;
+	ipl_arm_w <= 0;
 	if (chip_tick) begin
 	// shift the read pipeline (one beat per CHIP clock)
 	sd_q    <= rd_pipe_dat[0];
@@ -838,6 +864,14 @@ always @(posedge clk113) begin
 
 		if (lin[15:1] == (16'hF100 >> 1))
 			failcode <= sd_data;
+		if (lin[15:1] == (16'hF110 >> 1)) begin
+			ipl_set_w <= 1;
+			ipl_set_v <= sd_data[2:0];
+		end
+		if (lin[15:1] == (16'hF148 >> 1)) begin
+			ipl_arm_w <= 1;
+			ipl_arm_v <= sd_data;
+		end
 		if (lin[15:1] == (16'hF146 >> 1))
 			wberr_arm <= 1;
 		if (lin[15:1] == (16'hF102 >> 1) && sd_dqm == 2'b00) begin
@@ -868,6 +902,10 @@ initial begin
 
 	for (i = 0; i < 32768; i = i + 1) mem[i] = 16'h0000;
 	$readmemh(prog_file, mem);
+	// interrupt delivery needs the chip stage machine to see the ph2
+	// pulse: only the real-hardware alignment (CPU_PHASE 3) does; at
+	// other phases the capability word stays 0 and t_fpu skips its soak
+	mem[16'hF14A >> 1] = (CPU_PHASE[1:0] == 2'd3) ? 16'h0001 : 16'h0000;
 	for (i = 0; i < 16; i = i + 1) begin
 		rd_pipe_dat[i] = 0;
 		rd_pipe_en[i] = 0;

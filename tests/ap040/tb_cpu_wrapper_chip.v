@@ -54,6 +54,9 @@ reg [7:0] cck_count = 0;
 always @(posedge clk_114) if (div == 4'hf) cck_count <= cck_count + 1'd1;
 wire chip_wait = (DTACK_MODE != 0) && !cck_count[0];
 
+reg  [2:0] ipl_lvl = 0;
+reg [15:0] ipl_delay = 0;   // $F148: delayed level-2 IPL countdown
+
 cpu_wrapper dut
 (
 	.reset(reset),
@@ -76,7 +79,7 @@ cpu_wrapper dut
 	.chip_lds(chip_lds),
 	.chip_rw(chip_rw),
 	.chip_dtack(chip_wait),
-	.chip_ipl(3'b111),
+	.chip_ipl(~ipl_lvl),
 
 	.fastchip_dout(16'd0),
 	.fastchip_sel(),
@@ -145,6 +148,22 @@ always @(posedge clk) begin
 			end
 		end
 	end
+
+	// interrupt injection, mirroring tb_ap040_program: $F110 sets the
+	// level directly (0 releases), $F148 arms a delayed level-2 rise
+	if (ph2 && !chip_as && !chip_rw && reset &&
+	    chip_addr[15:1] == (16'hF110 >> 1))
+		ipl_lvl <= chip_din[2:0];
+	// the 7 MHz bus stretches every instruction ~16x, so scale the armed
+	// delay to sweep the same fraction of the FPU op's window as the
+	// fast-bus testbench does with raw clk counts
+	if (ph2 && !chip_as && !chip_rw && reset &&
+	    chip_addr[15:1] == (16'hF148 >> 1))
+		ipl_delay <= chip_din << 8;
+	else if (ipl_delay != 0) begin
+		ipl_delay <= ipl_delay - 1'd1;
+		if (ipl_delay == 16'd1) ipl_lvl <= 3'd2;
+	end
 end
 
 //---------------------------------------------------------------------------
@@ -164,6 +183,8 @@ initial begin
 
 	for (i = 0; i < 32768; i = i + 1) mem[i] = 16'h0000;
 	$readmemh(prog_file, mem);
+	// interrupt-injection capability word (see t_fpu IRQ soak)
+	mem[16'hF14A >> 1] = 16'h0001;
 
 	reset = 0;
 	repeat (50) @(posedge clk);

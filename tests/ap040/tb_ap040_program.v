@@ -52,6 +52,7 @@ wire        berr = berr_armed && nreset && (busstate != 2'b01) &&
 wire        clkena_in = (busstate == 2'b01) | mem_ready | berr;
 
 reg   [2:0] ipl_lvl;
+reg  [15:0] ipl_delay = 0;   // $F148: delayed level-2 IPL countdown
 // +exctrace: print every exception entry (vector, pc) for A/B diffing
 reg [7:0] et_prev = 0;
 always @(posedge clk) begin
@@ -246,6 +247,17 @@ always @(posedge clk) begin
 		$display("TRACE raised handler-refill IPL2 pc=%h", dbg_pc);
 		`endif
 	end
+
+	// $F148 arms a delayed level-2 interrupt: the IPL lines rise the
+	// written number of clk cycles later.  The FPU soak in t_fpu sweeps
+	// this against background (released) FPU execution.
+	if (nreset && mem_ready && busstate == 2'b11 &&
+	    addr_out[15:0] == 16'hF148)
+		ipl_delay <= data_write;
+	else if (ipl_delay != 0) begin
+		ipl_delay <= ipl_delay - 1'd1;
+		if (ipl_delay == 16'd1) ipl_lvl <= 3'd2;
+	end
 end
 
 // Dedicated 32-bit physical table-walker memory port.  It deliberately has
@@ -413,6 +425,9 @@ task run_phase;
 
 		for (i = 0; i < 32768; i = i + 1) mem[i] = 16'h0000;
 		$readmemh(prog_file, mem);
+		// interrupt-injection capability word: t_fpu's IRQ soak runs
+		// only where the bench can deliver IPL
+		mem[16'hF14A >> 1] = 16'h0001;
 
 		nreset = 0;
 		repeat (10) @(posedge clk);

@@ -40,6 +40,17 @@ iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
 	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
 	../../rtl/cpu_cache_new.v sim_dpram.v ../../rtl/ram_cs_guard.v \
 	$RTL/ap040_bus_timeout.v $RTL/ap040_walker_cdc.v $SRC
+# second sdram-turbo instance at the real-hardware phase alignment
+# (CPU_PHASE=3): the only alignment whose chip stage machine can sample
+# the ph2 pulse and therefore deliver interrupts -- t_fpu's IRQ soak
+# needs it, while the CPU_PHASE=0 instance keeps the guard-hostile
+# alignment coverage
+iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
+	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=3 \
+	-o "$WORK/tb_sdram_turbo_ph3.vvp" tb_sdram_turbo.v \
+	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
+	../../rtl/cpu_cache_new.v sim_dpram.v ../../rtl/ram_cs_guard.v \
+	$RTL/ap040_bus_timeout.v $RTL/ap040_walker_cdc.v $SRC
 iverilog -g2012 -I "$RTL" -s tb_dualram_turbo \
 	-P tb_dualram_turbo.CYC_PHASE=1 -P tb_dualram_turbo.CPU_PHASE=3 \
 	-o "$WORK/tb_dualram_turbo.vvp" tb_dualram_turbo.v \
@@ -66,6 +77,7 @@ vvp "$WORK/tb_prog.vvp" +prog=build/t_fpu.hex | tee "$WORK/fpu.log" | grep -q "A
 vvp "$WORK/tb_wrapchip.vvp" +prog=build/t_fpu.hex | tee "$WORK/fpu_chip.log" | grep -q "ALL TESTS PASSED" || fail=1
 vvp "$WORK/tb_sdram_turbo.vvp" +prog=build/t_fpu.hex | tee "$WORK/fpu_turbo.log" | grep -q "ALL TESTS PASSED" || fail=1
 vvp "$WORK/tb_dualram_turbo.vvp" +prog=build/t_fpu.hex | tee "$WORK/fpu_dualram.log" | grep -q "ALL TESTS PASSED" || fail=1
+vvp "$WORK/tb_sdram_turbo_ph3.vvp" +prog=build/t_fpu.hex | tee "$WORK/fpu_turbo_ph3.log" | grep -q "ALL TESTS PASSED" || fail=1
 
 if [ $fail -eq 0 ]; then
 	echo "AP040 regression: ALL TESTS PASSED"
