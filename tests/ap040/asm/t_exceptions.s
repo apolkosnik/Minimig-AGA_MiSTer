@@ -49,6 +49,7 @@ trap_guard	equ	$3646
 exp_sr		equ	$3648
 exp_srv		equ	$364A
 tw_sr		equ	$364C
+got_fsp		equ	$3650
 
 failt	macro
 	move.w	#\1,d7
@@ -722,8 +723,14 @@ ex_t1_rte:
 ex_t1_cont:
 	chkcnt	cnt_addr,5,104
 
-; RTR to an odd address likewise commits the popped CCR before taking the
-; address error.  The upper supervisor bits remain unchanged.
+; RTR to an odd address commits the popped CCR before taking the address
+; error, and the format-$2 frame carries that updated image (the v20
+; corpus validates the frame byte; newer WinUAE instead models a 68040
+; quirk stacking the pre-RTR SR, but the v20 generator predates it and
+; the corpus is the hardware acceptance test).  A7 keeps its pre-RTR
+; value: the pop is backed out before the fault, so the popped words are
+; still on the stack and the frame sits directly below them.
+	move.w	#$2000,sr	; pin the upper byte: supervisor, mask 0
 	lea	ex_t2_cont(pc),a0
 	move.l	a0,(resume).l
 	move.l	#$400,(exp_addr).l
@@ -731,12 +738,20 @@ ex_t1_cont:
 	move.l	a0,(exp_pc).l
 	pea	($00000401).l	; odd return address
 	move.w	#$0000,-(sp)	; popped CCR = 0
-	move.w	#$1F,ccr	; old CCR: all set
+	move.l	sp,d7		; pre-RTR A7
 	move.w	#1,(exp_srv).l
-	move.w	#$2000,(exp_sr).l	; supervisor + popped CCR=0
+	move.w	#$2000,(exp_sr).l	; frame image = supervisor + popped CCR=0
+	move.w	#$1F,ccr	; old CCR: all set (last: MOVE to memory clears NZVC)
 ex_t2_rtr:
 	rtr
 ex_t2_cont:
+	addq.l	#6,sp		; the un-popped CCR word and return address
+	move.l	(got_fsp).l,d6
+	add.l	#12,d6		; frame base + format-$2 size
+	cmp.l	d7,d6		; must equal the pre-RTR A7
+	beq.s	ex_t2_sp_ok
+	failt	130
+ex_t2_sp_ok:
 	chkcnt	cnt_addr,6,105
 
 ; The interrupt throwaway frame's SR image is the ORIGINAL SR with only S
@@ -879,6 +894,59 @@ ex_t9_sp:
 	beq.s	ex_t9_ok
 	failt	119
 ex_t9_ok:
+
+; RTS to an odd return address: the 68040 backs the pop out of A7 before
+; taking the address error (gencpu cpu_level>=4 rolls areg7 back by 4), so
+; the return address is still on the stack and the frame sits directly
+; below the pre-RTS A7.  The stacked SR is the plain live SR: no CCR pop
+; is involved, exception3_read_prefetch_only carries no override.
+	move.w	#$2000,sr
+	lea	ex_ta_cont(pc),a0
+	move.l	a0,(resume).l
+	move.l	#$400,(exp_addr).l
+	lea	ex_ta_rts(pc),a0	; go_pc frames identify the instruction
+	move.l	a0,(exp_pc).l
+	move.w	#1,(exp_srv).l
+	move.w	#$2000,(exp_sr).l
+	pea	($00000401).l	; odd return address
+	move.l	sp,d7		; pre-RTS A7
+	move.w	#$00,ccr	; pin CCR incl. X for the exact frame-SR compare
+ex_ta_rts:
+	rts
+ex_ta_cont:
+	addq.l	#4,sp		; the un-popped return address
+	move.l	(got_fsp).l,d6
+	add.l	#12,d6
+	cmp.l	d7,d6
+	beq.s	ex_ta_sp_ok
+	failt	131
+ex_ta_sp_ok:
+	chkcnt	cnt_addr,12,132
+
+; RTD likewise: the pop and the displacement adjustment are both backed
+; out (gencpu rolls areg7 back by 4+offs), so A7 is the pre-RTD value.
+	move.w	#$2000,sr
+	lea	ex_tb_cont(pc),a0
+	move.l	a0,(resume).l
+	move.l	#$400,(exp_addr).l
+	lea	ex_tb_rtd(pc),a0
+	move.l	a0,(exp_pc).l
+	move.w	#1,(exp_srv).l
+	move.w	#$2000,(exp_sr).l
+	pea	($00000401).l	; odd return address
+	move.l	sp,d7		; pre-RTD A7
+	move.w	#$00,ccr	; pin CCR incl. X for the exact frame-SR compare
+ex_tb_rtd:
+	rtd	#8
+ex_tb_cont:
+	addq.l	#4,sp		; the un-popped return address
+	move.l	(got_fsp).l,d6
+	add.l	#12,d6
+	cmp.l	d7,d6
+	beq.s	ex_tb_sp_ok
+	failt	133
+ex_tb_sp_ok:
+	chkcnt	cnt_addr,13,134
 
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700
@@ -1029,6 +1097,7 @@ h_fmt:
 	rte
 
 h_addr:
+	move.l	sp,(got_fsp).l	; frame base, for SP-preservation checks
 	cmpi.w	#$200C,6(sp)
 	bne	hfail
 	move.l	8(sp),d6

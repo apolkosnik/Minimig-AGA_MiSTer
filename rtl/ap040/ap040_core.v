@@ -549,8 +549,6 @@ reg  [3:0] exc_fmt;
 reg [31:0] exc_spc, exc_addr, exc_sp;
 reg        exc_is_irq, exc_pass2;
 reg [15:0] sr_saved;
-reg        sr_fovr_v;            // one-shot: next frame stacks sr_fovr
-reg [15:0] sr_fovr;              //   (RTE/RTR odd-PC 68040 SR quirk)
 reg [15:0] rte_oldsr;            // SR before the RTE / last throwaway SR
 reg        texc_pend;            // 040: T0 trace survives a non-internal
 reg [31:0] texc_pc;              //   integer exception; fires at handler
@@ -1553,7 +1551,7 @@ always @(posedge clk) begin
 		src_mode_r <= 0; src_rn_r <= 0; dst_mode_r <= 0; dst_rn_r <= 0;
 		exc_vec <= 0; exc_fmt <= 0; exc_spc <= 0; exc_addr <= 0; exc_sp <= 0;
 		exc_is_irq <= 0; exc_pass2 <= 0; sr_saved <= 0; irq_lvl_l <= 0;
-		sr_fovr_v <= 0; sr_fovr <= 0; rte_oldsr <= 0; texc_pend <= 0; texc_pc <= 0;
+		rte_oldsr <= 0; texc_pend <= 0; texc_pc <= 0;
 		flow_t0_pend <= 0; flow_t0_oldpc <= 0;
 		rte_sr <= 0; rte_pc <= 0; ret_kind <= 0;
 		br_base <= 0; br_tgt <= 0; br_long <= 0;
@@ -2301,8 +2299,7 @@ always @(posedge clk) begin
 			S_EXC0: begin
 				if (fpu_bg) state <= S_EXC0;   // FSAVE-quiescent exception
 				else begin : exc0_run
-				sr_saved <= sr_fovr_v ? sr_fovr : sr;
-				sr_fovr_v <= 0;
+				sr_saved <= sr;
 				sr[13] <= 1;
 				sr[15:14] <= 2'b00;
 				in_exc <= 1;
@@ -2497,27 +2494,40 @@ always @(posedge clk) begin
 						sr[4:0] <= m_val[4:0];
 						mrd(dbg_a7 + 32'd2, `AP040_SZ_L, S_RET3);
 					end
+					// odd return address: the 68040 backs the pop out of A7
+					// before taking the address error (gencpu cpu_level>=4
+					// rolls areg7 back), so the fault frame sees the
+					// pre-return stack pointer
 					RK_RTD: begin
-						rfw(4'd15, dbg_a7 + 32'd4 + sxw(imm[15:0]));
+						if (!m_val[0]) rfw(4'd15, dbg_a7 + 32'd4 + sxw(imm[15:0]));
 						go_pc(m_val);
 					end
 					default: begin
-						rfw(4'd15, dbg_a7 + 32'd4);
+						if (!m_val[0]) rfw(4'd15, dbg_a7 + 32'd4);
 						go_pc(m_val);
 					end
 				endcase
 			end
 
 			S_RET3: begin
-				rfw(4'd15, dbg_a7 + 32'd6);
 				if (m_val[0]) begin
-					// RTR has already committed the popped CCR when its odd
-					// return address is checked.  The 040 frame carries that
-					// updated SR and identifies the pre-opcode pipeline word.
+					// Odd return address: A7 keeps its pre-RTR value (the
+					// 68040 backs the pop out before the address error,
+					// cputest 68040_ae RTR round 0 checks A7 exactly), and
+					// the frame stacks the SR with the CCR already popped in
+					// S_RET2 -- the v20 corpus data validates that frame
+					// byte.  (Newer WinUAE models a 68040 quirk stacking the
+					// pre-RTR SR instead, exception3_read_prefetch_68040bug;
+					// the v20 generator predates it, and the corpus is the
+					// hardware acceptance test.)  The PC field identifies
+					// the pre-opcode pipeline word.
 					exc(`AP040_VEC_ADDRERR, 4'd2, pc_i - 32'd2,
 					    {m_val[31:1], 1'b0});
 				end
-				else go_pc(m_val);
+				else begin
+					rfw(4'd15, dbg_a7 + 32'd6);
+					go_pc(m_val);
+				end
 			end
 
 			//------------------------------------------------------- branches

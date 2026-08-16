@@ -188,10 +188,17 @@ end
 
 //--------------------------------------------------------------------------
 // Exception-entry snapshot.  S_EXC0 is visible for one cycle before the
-// core changes SR or decrements the active supervisor stack.
+// core changes SR or decrements the active supervisor stack.  SR and the
+// FPU state are sampled on that entry cycle; the integer register file is
+// sampled one cycle later because a register write issued by the faulting
+// state (rf_we set in the same cycle as the S_EXC0 transition) only lands
+// in the regfile on the following edge -- sampling at entry reads the
+// pre-write value and hides an architecturally committed update (the AE
+// RTR odd-return-PC A7 corruption escaped exactly this way).
 //--------------------------------------------------------------------------
 
 reg exc_seen;
+reg cap_pend;
 reg [7:0] cap_vec;
 reg [7:0] latest_exc_vec;
 reg [31:0] cap_regs [0:15];
@@ -207,7 +214,18 @@ integer ci;
 always @(posedge clk) begin
 	if (!round_active) begin
 		exc_seen <= 0;
+		cap_pend <= 0;
 	end else begin
+		// deferred integer-register sample: one cycle after S_EXC0 entry,
+		// once any write in flight at the faulting edge has landed
+		if (cap_pend) begin
+			cap_pend <= 0;
+			for (ci = 0; ci < 8; ci = ci + 1) begin
+				cap_regs[ci] <= dut.core.regfile.dreg[ci];
+				cap_regs[8+ci] <= (ci == 7) ? dut.core.regfile.usp
+				                                : dut.core.regfile.areg[ci];
+			end
+		end
 		if (dut.core.state != S_EXC0)
 			exc_seen <= 0;
 		if (dut.core.state == S_EXC0 && !exc_seen) begin
@@ -223,9 +241,6 @@ always @(posedge clk) begin
 			if (dut.core.exc_vec != 9 || expected_exc_live == 9 || e_trace == 2) begin
 				cap_vec <= dut.core.exc_vec;
 				for (ci = 0; ci < 8; ci = ci + 1) begin
-					cap_regs[ci] <= dut.core.regfile.dreg[ci];
-					cap_regs[8+ci] <= (ci == 7) ? dut.core.regfile.usp
-					                                : dut.core.regfile.areg[ci];
 					cap_fe[ci] <= {dut.core.g_fpu.fpu.fr_s[ci],
 					               dut.core.g_fpu.fpu.fr_e[ci]};
 					cap_fm[ci] <= dut.core.g_fpu.fpu.fr_m[ci];
@@ -234,6 +249,7 @@ always @(posedge clk) begin
 				cap_fpcr <= dut.core.g_fpu.fpu.fpcr;
 				cap_fpsr <= dut.core.g_fpu.fpu.fpsr;
 				cap_fpiar <= dut.core.g_fpu.fpu.fpiar;
+				cap_pend <= 1;
 			end
 			// The v20 68020+ generator samples interrupts after the tested
 			// instruction.  If that instruction first raises a synchronous
