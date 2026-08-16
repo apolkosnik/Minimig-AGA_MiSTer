@@ -284,6 +284,16 @@ always @ (posedge sysclk) begin
 	cas_go <= (sdram_state == 4'd1);
 end
 
+// Same treatment for the walker write's second CAS: slot_type is loaded
+// at state 0, so a registered copy of the comparison is stable long
+// before states 4 and 6 use it, and the sd_addr/sd_dqm pin registers see
+// a single-bit select instead of the 3-bit slot compare (the recurring
+// -0.2 ns sd_addr[12] violator of this floorplan).
+reg walker_wr_slot;
+always @ (posedge sysclk) begin
+	walker_wr_slot <= (slot_type == WALKER_WRITE);
+end
+
 //// sdram state ////
 always @ (posedge sysclk) begin
 	reg old_7m;
@@ -531,7 +541,7 @@ always @ (posedge sysclk) begin
 			// write.  Issue a second single-write CAS to column+1 with
 			// the low word instead (tCCD=1 on SDR makes back-to-back
 			// writes two states apart legal).
-			4 : if (slot_type == WALKER_WRITE) begin
+			4 : if (walker_wr_slot) begin
 				sd_addr      <= {1'b1, casaddr[9:1], 1'b1}; // col+1, A10 precharge
 				sd_cas       <= 0;
 				sd_we        <= 0;
@@ -551,7 +561,7 @@ always @ (posedge sysclk) begin
 			// bank into precharge under that second command (undefined on
 			// real silicon).  Hold the row open here and let the second
 			// command carry A10 instead.
-			sd_addr         <= {(slot_type != WALKER_WRITE), casaddr}; // A10: AUTO PRECHARGE
+			sd_addr         <= {!walker_wr_slot, casaddr}; // A10: AUTO PRECHARGE
 			sd_cas          <= cas_sd_cas;
 			sd_dqm          <= 0;
 			if(!cas_sd_we) begin

@@ -103,6 +103,8 @@ reg  [39:0] sdr_sm_tag_dat_w;
 reg         sdr_sm_id;
 reg         sdr_sm_ilru;
 reg         sdr_sm_dlru;
+reg  [39:0] miss_itram;   // tag words captured at the miss decision
+reg  [39:0] miss_dtram;
 
 // cpu cache control
 reg         cc_clear_seen;
@@ -385,7 +387,13 @@ always @ (posedge clk) begin
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= dtram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
         end else begin
-          // on miss fetch data from SDRAM
+          // on miss fetch data from SDRAM.  Capture both tag words NOW:
+          // they are stable for this address until the fill acknowledges,
+          // and sampling them here keeps the M10K output out of FILL1's
+          // input cones (the tram->tagupd_lru path was a -0.12 ns setup
+          // violator of the 113 MHz floorplan).
+          miss_itram <= itram_cpu_dat_r;
+          miss_dtram <= dtram_cpu_dat_r;
           sdr_read_req <= 1'b1;
           cpu_sm_state <= CPU_SM_FILL1;
         end
@@ -412,12 +420,12 @@ always @ (posedge clk) begin
             tagupd_is_i   <= cpu_ir;
             tagupd_idx    <= cpu_adr_idx;
             tagupd_tag    <= cpu_adr_tag;
-            tagupd_lru    <= cpu_ir ? itag_lru : dtag_lru;
-            tagupd_tram   <= cpu_ir ? itram_cpu_dat_r : dtram_cpu_dat_r;
+            tagupd_lru    <= cpu_ir ? miss_itram[39] : miss_dtram[39];
+            tagupd_tram   <= cpu_ir ? miss_itram : miss_dtram;
             // cache line fill 1st word
             cpu_sm_id   <= cpu_ir;
-            cpu_sm_ilru <= itag_lru;
-            cpu_sm_dlru <= dtag_lru;
+            cpu_sm_ilru <= miss_itram[39];
+            cpu_sm_dlru <= miss_dtram[39];
             cpu_sm_mem_dat_w <= sdr_dat_r;
             cpu_sm_iram0_we <=  itag_lru &&  cpu_ir;
             cpu_sm_iram1_we <= !itag_lru &&  cpu_ir;
