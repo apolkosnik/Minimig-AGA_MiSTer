@@ -1,3 +1,41 @@
+# Handoff: AP040X2 (branch ap040x2) -- superscalar, 32-bit dual-SDRAM
+
+## For Codex: ready work packages (2026-08-16)
+
+Branch ap040x2, worktree /home/adam/ap040/ap040x2, base 809b9558 + the
+validated AP040 core (ap040@37591618).  fx68k/tg68k removed.  The spec
+is AP040_IMPLEMENTATION_PLAN.md Part X2 -- read X2.0-X2.8 before
+touching anything.  Non-negotiables are X2.8: suite green every commit,
+directed tests must be seen to FAIL on pre-fix RTL, hardware outranks
+simulation, cycle claims come from the tb_prof histogram.
+
+In progress by Claude (do not duplicate):
+  X2.1  rtl/sdram32_ctrl.v + tests/ap040/tb_sdram32.v (dual-SDRAM
+        lockstep controller)
+  X2.2  free-running fetch queue in rtl/ap040/ap040_core.v
+
+Open packages, in dependency order:
+  X2.3a Pipeline register/forwarding skeleton: IF|ID|EA|MEM|EX|WB
+        stage boundary definition as a document + interface stub
+        (rtl/ap040x2/ap040x2_pipe.svh), agreed BEFORE code.
+  X2.4a 68060 pairing table: extract UM table 10-1 into a machine
+        readable pairing matrix (tests/ap040/pairing_rules.py) with the
+        subset AP040X2 executes natively; unit test that every opcode
+        class maps to exactly one of {pOEP-only, pOEP|sOEP, break}.
+  X2.5a FPU pipelining survey: which of ap040_fpu.v's F_* states can
+        take initiation-interval-1 3-stage FMUL/FADD without touching
+        the FPSP trap model; deliverable is a written plan w/ state
+        list, no RTL yet.
+  X2.1b Minimig.sv/qsf integration of sdram32_ctrl behind DUAL_SDRAM=1
+        (waits on X2.1 landing; sys_dual_sdram.tcl has the pins).
+
+Status of the irq/all hunt (context): ANDSR.B fixed by d5957dab (RTE
+does not take an already-pending interrupt).  ANDSR.W round 1 remains:
+group-1 priority, interrupt must outrank privilege violation -- the fix
+shape is known (go_priv yields to irq_pend, frame carries pc_i), was
+prototyped and backed out during the cache firefight; needs re-landing
+WITH its directed test on ap040 first, then merges here.
+
 # Handoff: AP040 cputest chip-RAM corruption investigation
 
 ## Claude update: 2026-08-16 -- phantom interrupt from a withdrawn request
