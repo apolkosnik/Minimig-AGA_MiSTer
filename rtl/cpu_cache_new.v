@@ -499,8 +499,12 @@ always @ (posedge clk) begin
     // outputs may already belong to the NEXT access
     if (tagupd_hit_v) begin
       cpu_sm_tag_dat_w <= {tagupd_lru, tagupd_tram[38:0]};
-      cpu_sm_itag_we <=  tagupd_is_i;
-      cpu_sm_dtag_we <= !tagupd_is_i;
+      // never write a tag row composed before a pending maintenance
+      // clear: the row carries BOTH ways' valid bits, so a writeback
+      // that races the sweep restores lines the sweep invalidated.  A
+      // dropped LRU update or fill tag only costs a caching opportunity
+      cpu_sm_itag_we <=  tagupd_is_i && !cc_clear_pending;
+      cpu_sm_dtag_we <= !tagupd_is_i && !cc_clear_pending;
       tagupd_hit_v   <= 1'b0;
     end
     else if (tagupd_fill_v) begin
@@ -508,8 +512,8 @@ always @ (posedge clk) begin
         cpu_sm_tag_dat_w <= {1'b0, 1'b1, tagupd_tram[37], 1'b0, tagupd_tram[35:18], tagupd_tag};
       else
         cpu_sm_tag_dat_w <= {1'b1, tagupd_tram[38], 1'b1, 1'b0, tagupd_tag, tagupd_tram[17: 0]};
-      cpu_sm_itag_we <=  tagupd_is_i;
-      cpu_sm_dtag_we <= !tagupd_is_i;
+      cpu_sm_itag_we <=  tagupd_is_i && !cc_clear_pending;
+      cpu_sm_dtag_we <= !tagupd_is_i && !cc_clear_pending;
       tagupd_fill_v  <= 1'b0;
     end
     // when CPU lowers its request signal, lower ack too
