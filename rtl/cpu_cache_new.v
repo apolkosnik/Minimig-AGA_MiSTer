@@ -14,7 +14,12 @@
 //
 //
 
-module cpu_cache_new
+module cpu_cache_new #(
+  // CACHE_ENABLE 0 leaves only the fill/pass machinery: every access misses
+  // and goes straight to memory, and the tag/data RAMs are not built at all.
+  // Used when the CPU's own internal cache is the only cache in the system.
+  parameter CACHE_ENABLE = 1
+)
 (
   // system
   input             clk,            // clock
@@ -238,8 +243,8 @@ localparam [3:0]
 // instruction enable, bit 1 the data enable.  Bit 3 is a maintenance-event
 // toggle rather than a pulse, so a request cannot disappear while either
 // cache state machine is busy.
-assign cpu_cache_enable   = cpu_cache_ctrl[0];
-assign cpu_cache_enable_d = cpu_cache_ctrl[1];
+assign cpu_cache_enable   = CACHE_ENABLE ? cpu_cache_ctrl[0] : 1'b0;
+assign cpu_cache_enable_d = CACHE_ENABLE ? cpu_cache_ctrl[1] : 1'b0;
 assign cpu_cache_clear    = cc_clear_pending;
 
 wire cc_cpu_accept = cc_clear_pending && (cpu_sm_state == CPU_SM_IDLE);
@@ -615,6 +620,8 @@ assign sdr_itag1_match  = (snoop_adr[28:11] == itram_sdr_dat_r[35:18]);
 assign sdr_itag0_valid  = itram_sdr_dat_r[38];
 assign sdr_itag1_valid  = itram_sdr_dat_r[37];
 
+generate if (CACHE_ENABLE) begin : g_storage
+
 dpram #(8,40) itram (
   .clock      (clk              ),
   .address_a  (itram_cpu_adr    ),
@@ -754,6 +761,24 @@ dpram_be_1024x16 ddram1 (
   .data_b     (ddram1_sdr_dat_w ),
   .q_b        (ddram1_sdr_dat_r )
 );
+
+end
+else begin : g_nostorage
+	// no tags, no data: valid bits read as 0, so no path can report a hit
+	assign itram_cpu_dat_r = 40'd0;
+	assign itram_sdr_dat_r = 40'd0;
+	assign dtram_cpu_dat_r = 40'd0;
+	assign dtram_sdr_dat_r = 40'd0;
+	assign idram0_cpu_dat_r = 16'd0;
+	assign idram0_sdr_dat_r = 16'd0;
+	assign idram1_cpu_dat_r = 16'd0;
+	assign idram1_sdr_dat_r = 16'd0;
+	assign ddram0_cpu_dat_r = 16'd0;
+	assign ddram0_sdr_dat_r = 16'd0;
+	assign ddram1_cpu_dat_r = 16'd0;
+	assign ddram1_sdr_dat_r = 16'd0;
+end
+endgenerate
 
 endmodule
 

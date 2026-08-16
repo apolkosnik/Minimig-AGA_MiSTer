@@ -413,7 +413,9 @@ ap040_walker_cdc walker_cdc
 wire [15:0] ram_dout1;
 wire        ram_ready1;
 
-sdram_ctrl ram1
+// Both RAM controllers run without their own caches: the CPU's internal
+// ap040_cache is the only cache in the system now.
+sdram_ctrl #(.CPU_CACHE(0)) ram1
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
@@ -463,7 +465,7 @@ sdram_ctrl ram1
 wire [15:0] ram_dout2;
 wire        ram_ready2;
 
-ddram_ctrl ram2
+ddram_ctrl #(.CPU_CACHE(0)) ram2
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),

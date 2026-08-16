@@ -29,6 +29,13 @@
 
 
 module sdram_ctrl
+#(
+	// CPU_CACHE 0 removes this controller's cpu_cache_new storage: the CPU's
+	// own ap040_cache becomes the only cache, and this instance keeps just
+	// the fill/pass protocol.  Left at 1 by default so the existing
+	// controller benches still exercise the cached path.
+	parameter CPU_CACHE = 1
+)
 (
 	// system
 	input             sysclk,
@@ -148,7 +155,7 @@ wire [24:1] walker_snoop_addr = {walker_addr_latch, walker_snoop_lo};
 wire [15:0] walker_snoop_data = walker_snoop_lo
 							? walker_wdata_latch[15:0]
 							: walker_wdata_latch[31:16];
-cpu_cache_new cpu_cache
+cpu_cache_new #(.CACHE_ENABLE(CPU_CACHE)) cpu_cache
 (
 	.clk              (sysclk),                // clock
 	.rst              (!reset || !cache_rst),  // cache reset
