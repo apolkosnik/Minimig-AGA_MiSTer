@@ -1,5 +1,52 @@
 # Handoff: AP040 cputest chip-RAM corruption investigation
 
+## Claude update: 2026-08-16 -- phantom interrupt from a withdrawn request
+
+Chasing the hardware `cputest irq/all` ANDSR.B/ANDSR.W failures (an
+interrupt taken one instruction early, PC still on the test
+instruction, SR unmodified) turned up a real core bug.
+
+ap040_core's `irq_hold_lvl` retains a mask-qualified interrupt level so
+that an instruction which later raises the SR mask cannot lose a request
+whose IPEND is already set -- correct, and what a 68040 does.  But it
+was cleared ONLY on exception acknowledge, and `irq_pend` fires on it:
+
+    wire irq_pend = nmi_pend || irq_live || irq_hold_lvl != 3'd0;
+
+so nothing cleared it when the requesting device withdrew.  Once a level
+had qualified, the core took that interrupt at the next instruction
+boundary with the IPL lines already idle -- a phantom landing at the
+first boundary of whatever ran next.  Fixed in 45c4eb4f: the hold now
+tracks the pins downward while still surviving a mask change.
+
+Tests, because neither direction was covered:
+
+- $F14C in tb_ap040_program models a device that withdraws its request
+  after N cycles.  t_exceptions test 135 pulses IPL2 for two cycles with
+  the mask open, short enough that the pins are idle before the next
+  instruction boundary.  Old core fires a phantom, fixed core does not.
+- Test 136 is the counterpart: $F148 times a request to qualify inside
+  the MOVE to SR that masks it; it must still be taken.  Removing the
+  hold entirely used to pass the ENTIRE suite (verified), so nothing
+  stopped it being deleted as dead logic.
+
+Both windows were found by sweeping (pulse width, arrival delay).  The
+first two attempts at test 135 passed on the broken core too -- one
+masked interrupts so the level never qualified, the other used a window
+wide enough that the interrupt was legitimately taken.  A test that has
+not been seen to fail on the broken RTL proves nothing.
+
+Whether this accounts for the cputest irq failures is not established.
+The runtime's clear_interrupt() (cputest/main.c:2311) withdraws the
+request after every test, so the mechanism is available, but the
+recorded expectations also depend on where the interrupt lands in the
+instruction stream, which is a function of CPU speed: set_interrupt()
+(main.c:2283) writes INTREQ directly and is called BEFORE
+execute_test020() (main.c:3464) with no timing control in that path.
+Later cputest versions added a calibrated delay for exactly this reason
+(cputest.cpp:5350-5375, swept at 6597-6604) and print the count as a
+fourth field; the user's binary prints three, so their data predates it.
+
 ## Claude update: 2026-08-16 -- external-cache line resurrection (crash candidate)
 
 User reported random AmigaOS crashes on the 19:55 RBF (build 413010).
