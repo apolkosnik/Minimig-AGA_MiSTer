@@ -15,9 +15,10 @@
 //                                                                          //
 // Transcendentals, FMOVECR and the remaining software subset assert        //
 // `unimp`, following the 68040 FPSP route; packed decimal takes the        //
-// unsupported-data-type path.  Revision-$41                               //
-// UNIMP state is retained for FSAVE/FRESTORE; a true BUSY arithmetic       //
-// exception frame remains a documented integration gap.                   //
+// unsupported-data-type path.  Revision-$41 UNIMP state remains available  //
+// for FSAVE/FRESTORE, and native arithmetic write-back exceptions now      //
+// capture/serialize the 100-byte BUSY (E3) frame.  E1 arithmetic payloads  //
+// are retained for FSAVE and retired when the handler completes RTE.        //
 //                                                                          //
 // The core owns instruction decode, effective addresses and memory         //
 // transfers; operands arrive left-aligned in a 96-bit window. FMOVEM       //
@@ -76,11 +77,13 @@ module ap040_fpu
 	input      [95:0] fm_wdata,
 	output     [95:0] fm_rdata,
 
-	// FSAVE/FRESTORE state.  An unimplemented instruction leaves the
-	// revision-$41 68040 state-frame payload here until a successful FSAVE
-	// acknowledges it.  FRESTORE can reinstate that pending state.
+	// FSAVE/FRESTORE state.  E1/E3 exceptions and unimplemented instructions
+	// leave their revision-$41 payload here until FSAVE (or completed RTE for
+	// E1); FRESTORE can reinstate the saved state.
 	output reg        fpu_used,    // 0: NULL frame, 1: IDLE or exception frame
 	output reg        fstate_unimp,
+	output reg        fstate_e1,
+	output reg        fstate_busy,
 	output reg [15:0] fstate_cmd1,
 	output reg [15:0] fstate_cmd3,
 	output reg  [2:0] fstate_stag,
@@ -88,9 +91,18 @@ module ap040_fpu
 	output reg  [2:0] fstate_flags, // {E1,E3,T}
 	output reg [95:0] fstate_fpt,
 	output reg [95:0] fstate_et,
+	output reg [31:0] fstate_cusavepc,
+	output reg [31:0] fstate_fpiarcu,
+	output reg [31:0] fstate_wbt0,
+	output reg [31:0] fstate_wbt1,
+	output reg [31:0] fstate_wbt2,
+	output reg        fstate_wbtm66,
+	output reg  [2:0] fstate_grs,
+	output reg        fstate_wbte15,
 	input             fsave_ack,
 	input             frestore_idle,
 	input             frestore_unimp,
+	input             frestore_busy,
 	input      [15:0] frestore_cmd1,
 	input      [15:0] frestore_cmd3,
 	input       [2:0] frestore_stag,
@@ -98,6 +110,15 @@ module ap040_fpu
 	input       [2:0] frestore_flags,
 	input      [95:0] frestore_fpt,
 	input      [95:0] frestore_et,
+	input      [31:0] frestore_cusavepc,
+	input      [31:0] frestore_fpiarcu,
+	input      [31:0] frestore_wbt0,
+	input      [31:0] frestore_wbt1,
+	input      [31:0] frestore_wbt2,
+	input             frestore_wbtm66,
+	input       [2:0] frestore_grs,
+	input             frestore_wbte15,
+	input             fpu_rte,      // completed RTE without an intervening FSAVE
 	input             fp_reset     // FRESTORE of a NULL frame
 );
 
@@ -237,8 +258,15 @@ reg  [2:0] r_fmt, r_dst;
 reg        r_ae7;           // accrued-IOP before this instruction (fault backout)
 reg        r_unimp;         // memory-source software op using normal converter
 reg  [2:0] r_stag;          // source tag retained while that conversion runs
+reg  [2:0] r_class;         // original FP opclass for E1/E3 frame selection
 reg  [6:0] r_op;
 reg [95:0] r_din;
+
+// Original operands retained for a native arithmetic exception frame.  The
+// working `a` value is overwritten by the arithmetic result, while ETEMP and
+// FPTEMP must describe the source and destination operands at dispatch time.
+reg [95:0] frame_src, frame_dst;
+reg  [2:0] frame_src_tag, frame_dst_tag;
 
 // operand/result in working format
 reg         a_s;
@@ -268,6 +296,17 @@ reg   [3:0] op_kind;          // 0 none, 1 add, 2 mul, 3 div, 4 sqrt
 reg   [4:0] sh_ret;           // staged shifter return state
 reg   [1:0] r_pr;             // rounding precision latched for F_UNFL
 reg signed [17:0] e_w;        // working exponent (wrap safe)
+
+// Write-back exception snapshot.  E3 exceptions expose the intermediate
+// result (WBTEMP), not the saturated/zero architectural result selected by
+// F_ROUND.  Keep the snapshot in registers so F_WB can build the state frame
+// after the range-control decision has completed.
+reg        fwb_s;
+reg [16:0] fwb_e;
+reg [63:0] fwb_m;
+reg  [2:0] fwb_grs;
+reg        fwb_m66;
+reg        fwb_wbte15;
 
 // integer store bookkeeping
 reg        pk_neg;
@@ -323,6 +362,34 @@ function op_sgl;
 	end
 endfunction
 
+// Only write-back exceptions from native arithmetic operations use the 040
+// busy (E3) frame.  Conversion-unit exceptions, and all FMOVE/FABS/FNEG
+// range exceptions, use the 26-word E1 frame instead.
+function e3_arith_op;
+	input [2:0] cls;
+	input [6:0] op;
+	begin
+		e3_arith_op = (cls != 3'b011) &&
+			((op == 7'h22) || (op == 7'h28) ||
+			 (op == 7'h62) || (op == 7'h68) || (op == 7'h66) ||
+			 (op == 7'h6C) || (op == 7'h23) || (op == 7'h27) ||
+			 (op == 7'h63) || (op == 7'h67) || (op == 7'h20) ||
+			 (op == 7'h24) || (op == 7'h60) || (op == 7'h64) ||
+			 (op == 7'h04) || (op == 7'h41) || (op == 7'h45));
+	end
+endfunction
+
+// WinUAE's fp_is_dyadic() uses the operation encoding (rather than the
+// opclass) to decide whether FPTEMP/DTAG are meaningful in a datatype frame.
+// Keep the same distinction for vector-55 captures: unary moves and tests
+// have no destination temporary, while arithmetic/compare operations do.
+function frame_dyadic;
+	input [6:0] op;
+	begin
+		frame_dyadic = ((op & 7'h30) == 7'h20) || (op == 7'h38);
+	end
+endfunction
+
 // IEEE round-up decision from {lsb, G, R|S} and sign
 function round_up;
 	input       lsb, g, rs;
@@ -333,6 +400,21 @@ function round_up;
 			2'b01:   round_up = 1'b0;               // toward zero
 			2'b10:   round_up = sign && (g || rs);  // toward minus
 			default: round_up = !sign && (g || rs); // toward plus
+		endcase
+	end
+endfunction
+
+// One ulp at the selected gradual-underflow boundary, represented in the
+// extended working significand.  A deeply tiny result has no retained G/R/S
+// bits left, but directed rounding still produces the least positive result
+// instead of flushing to zero.
+function [63:0] underflow_min_m;
+	input [1:0] pr;
+	begin
+		case (pr)
+			2'd1:   underflow_min_m = 64'h0000_0100_0000_0000; // single ulp
+			2'd2:   underflow_min_m = 64'h0000_0000_0000_0800; // double ulp
+			default:underflow_min_m = 64'h0000_0000_0000_0001; // extended ulp
 		endcase
 	end
 endfunction
@@ -369,6 +451,19 @@ function [15:0] frame_cmd3;
 	end
 endfunction
 
+// A restored revision-$41 E1 payload may have come from either an
+// unimplemented instruction or a native conversion/arithmetic exception.
+// The command word is sufficient to distinguish the software subset for the
+// native opclasses; opclass 011 stores remain E1 conversion state.
+function frame_is_unimp;
+	input [15:0] cmd;
+	reg [6:0] op;
+	begin
+		op = (cmd[6:0] == 7'h05) ? 7'h04 : cmd[6:0];
+		frame_is_unimp = (cmd[15:13] != 3'b011) && !op_in_hw(op);
+	end
+endfunction
+
 task capture_unimp;
 	input [15:0] cmd;
 	input [95:0] src;
@@ -385,9 +480,118 @@ task capture_unimp;
 		fstate_flags <= 3'b100; // unimplemented instruction: E1=1, E3=T=0
 		fstate_fpt   <= dst;
 		fstate_et    <= src;
+		fstate_fpiarcu <= ia_we ? ia_wdata : fpiar;
 		fstate_unimp <= 1;
+		fstate_e1    <= 0;
+		fstate_busy   <= 0;
 		fpu_used     <= 1;
 		unimp        <= 1;
+	end
+endtask
+
+// E1 exceptions (conversion-unit exceptions) use the same revision-$41
+// payload shape as an unimplemented instruction.  Capture the payload and
+// hold it resident until FSAVE or a completed RTE: F_WB reports the enabled
+// arithmetic vector, while a handler may still inspect/save the frame.
+task capture_e1;
+	input [15:0] cmd;
+	input [95:0] src;
+	input  [2:0] stag;
+	input [95:0] dst;
+	input  [2:0] dtag;
+	reg [15:0] c1;
+	begin
+		c1 = frame_cmd1(cmd);
+		fstate_cmd1  <= c1;
+		fstate_cmd3  <= frame_cmd3(c1);
+		fstate_stag  <= stag;
+		fstate_dtag  <= dtag;
+		fstate_flags <= 3'b100; // E1=1, E3=T=0
+		fstate_fpt   <= dst;
+		fstate_et    <= src;
+		fstate_busy  <= 0;
+		fstate_unimp <= 0;
+		fstate_e1    <= 1;
+		fstate_fpiarcu <= ia_we ? ia_wdata : fpiar;
+		fpu_used     <= 1;
+	end
+endtask
+
+// E3 exceptions are write-back exceptions and require the 50-word busy
+// frame.  WBT0/1/2 are the sign/exponent and mantissa words in the 040's
+// internal image; WBTM66, GRS and WBTE15 are packed into the common fields.
+task capture_e3;
+	input [15:0] cmd;
+	input [95:0] src;
+	input  [2:0] stag;
+	input [95:0] dst;
+	input  [2:0] dtag;
+	input [31:0] wb0;
+	input [31:0] wb1;
+	input [31:0] wb2;
+	input        wb66;
+	input  [2:0] wbgrs;
+	input        wbexp15;
+	reg [15:0] c1;
+	begin
+		c1 = frame_cmd1(cmd);
+		fstate_cmd1  <= c1;
+		fstate_cmd3  <= frame_cmd3(c1);
+		fstate_stag  <= stag;
+		fstate_dtag  <= dtag;
+		fstate_flags <= 3'b010; // E1=0, E3=1, T=0
+		fstate_fpt   <= dst;
+		fstate_et    <= src;
+		fstate_busy  <= 1;
+		fstate_unimp <= 0;
+		fstate_e1    <= 0;
+		fstate_cusavepc <= 0;
+		fstate_fpiarcu <= ia_we ? ia_wdata : fpiar;
+		fstate_wbt0 <= wb0;
+		fstate_wbt1 <= wb1;
+		fstate_wbt2 <= wb2;
+		fstate_wbtm66 <= wb66;
+		fstate_grs <= wbgrs;
+		fstate_wbte15 <= wbexp15;
+		fpu_used <= 1;
+	end
+endtask
+
+// Unsupported denormal/unnormal and packed operands use the 68040 BUSY
+// (revision-$41) frame as well.  Unlike a write-back E3 frame, the E1/E3/T
+// bits are data-type markers: packed data sets E1, opclass 011 sets T, and
+// ordinary single/double/extended denormals leave them clear.  Keeping this
+// payload resident makes FSAVE/FRESTORE restart-safe after vector 55.
+task capture_unsupp;
+	input [15:0] cmd;
+	input [95:0] src;
+	input  [2:0] stag;
+	input [95:0] dst;
+	input  [2:0] dtag;
+	input  [2:0] flags;
+	reg [15:0] c1;
+	begin
+		c1 = frame_cmd1(cmd);
+		fstate_cmd1  <= c1;
+		fstate_cmd3  <= frame_cmd3(c1);
+		fstate_stag  <= stag;
+		fstate_dtag  <= dtag;
+		fstate_flags <= flags;
+		fstate_fpt   <= dst;
+		fstate_et    <= src;
+		fstate_busy  <= 1;
+		fstate_unimp <= 0;
+		fstate_e1    <= 0;
+		fstate_cusavepc <= 0;
+		fstate_fpiarcu <= ia_we ? ia_wdata : fpiar;
+		fstate_wbt0 <= 0;
+		fstate_wbt1 <= 0;
+		fstate_wbt2 <= 0;
+		fstate_wbtm66 <= 0;
+		fstate_grs <= 0;
+		fstate_wbte15 <= 0;
+		fpu_used <= 1;
+		unsupp <= 1;
 	end
 endtask
 
@@ -400,13 +604,20 @@ always @(posedge clk) begin
 		fpcr <= 0; fpsr <= 0; fpiar <= 0;
 		fpu_used <= 0;
 		fstate_unimp <= 0;
+		fstate_e1 <= 0;
+		fstate_busy <= 0;
 		fstate_cmd1 <= 0; fstate_cmd3 <= 0;
 		fstate_stag <= 0; fstate_dtag <= 0; fstate_flags <= 0;
 		fstate_fpt <= 0; fstate_et <= 0;
+		fstate_cusavepc <= 0; fstate_fpiarcu <= 0;
+		fstate_wbt0 <= 0; fstate_wbt1 <= 0; fstate_wbt2 <= 0;
+		fstate_wbtm66 <= 0; fstate_grs <= 0; fstate_wbte15 <= 0;
 		dout <= 0;
 		r_fmt <= 0; r_dst <= 0; r_op <= 0; r_din <= 0;
 		r_ae7 <= 0;
-		r_unimp <= 0; r_stag <= 0;
+		r_unimp <= 0; r_stag <= 0; r_class <= 0;
+		frame_src <= 0; frame_dst <= 0;
+		frame_src_tag <= 0; frame_dst_tag <= 0;
 		a_s <= 0; a_e <= 0; a_m <= 0; a_t <= 0;
 		sh_v <= 0; sh_cnt <= 0;
 		pk_neg <= 0; pk_isz <= 0;
@@ -414,6 +625,8 @@ always @(posedge clk) begin
 		grs <= 0; eff_sub <= 0; acc_hi <= 0; acc_lo <= 0;
 		qv <= 0; srem <= 0; srad <= 0; loop_n <= 0; op_kind <= 0;
 		sh_ret <= F_PACKI; e_w <= 0; r_pr <= 0;
+		fwb_s <= 0; fwb_e <= 0; fwb_m <= 0; fwb_grs <= 0;
+		fwb_m66 <= 0; fwb_wbte15 <= 0;
 		for (k = 0; k < 8; k = k + 1) begin
 			fr_s[k] <= 0; fr_e[k] <= 0; fr_m[k] <= 0;
 		end
@@ -451,15 +664,25 @@ always @(posedge clk) begin
 			fpcr <= 0; fpsr <= 0; fpiar <= 0;
 			fpu_used <= 0;
 			fstate_unimp <= 0;
+			fstate_e1 <= 0;
+			fstate_busy <= 0;
 		end
-		if (fsave_ack) fstate_unimp <= 0;
+		if (fsave_ack) begin
+			fstate_unimp <= 0;
+			fstate_e1 <= 0;
+			fstate_busy <= 0;
+		end
+		if (fpu_rte) fstate_e1 <= 0;
 		if (frestore_idle) begin
 			fpu_used <= 1;
 			fstate_unimp <= 0;
+			fstate_e1 <= 0;
+			fstate_busy <= 0;
 		end
 		if (frestore_unimp) begin
 			fpu_used <= 1;
-			fstate_unimp <= 1;
+			fstate_unimp <= frame_is_unimp(frestore_cmd1);
+			fstate_e1 <= !frame_is_unimp(frestore_cmd1);
 			fstate_cmd1 <= frestore_cmd1;
 			fstate_cmd3 <= frestore_cmd3;
 			fstate_stag <= frestore_stag;
@@ -467,11 +690,33 @@ always @(posedge clk) begin
 			fstate_flags <= frestore_flags;
 			fstate_fpt <= frestore_fpt;
 			fstate_et <= frestore_et;
+			fstate_busy <= 0;
+		end
+		if (frestore_busy) begin
+			fpu_used <= 1;
+			fstate_unimp <= 0;
+			fstate_e1 <= 0;
+			fstate_busy <= 1;
+			fstate_cmd1 <= frestore_cmd1;
+			fstate_cmd3 <= frestore_cmd3;
+			fstate_stag <= frestore_stag;
+			fstate_dtag <= frestore_dtag;
+			fstate_flags <= frestore_flags;
+			fstate_fpt <= frestore_fpt;
+			fstate_et <= frestore_et;
+			fstate_cusavepc <= frestore_cusavepc;
+			fstate_fpiarcu <= frestore_fpiarcu;
+			fstate_wbt0 <= frestore_wbt0;
+			fstate_wbt1 <= frestore_wbt1;
+			fstate_wbt2 <= frestore_wbt2;
+			fstate_wbtm66 <= frestore_wbtm66;
+			fstate_grs <= frestore_grs;
+			fstate_wbte15 <= frestore_wbte15;
 		end
 
 		case (fst)
 			F_IDLE: if (req) begin
-				if (fstate_unimp) begin
+				if (fstate_unimp && !fsave_ack) begin
 					// A restored exception frame remains pending until FSAVE.
 					// Re-enter the software package without destroying its state.
 					unimp <= 1;
@@ -487,6 +732,7 @@ always @(posedge clk) begin
 				if (!(op_class == 3'b010 && src_fmt == 3'd7))
 					fpsr[15:8] <= 8'd0;
 				r_fmt <= src_fmt;
+				r_class <= op_class;
 				r_ae7 <= fpsr[7];
 				r_dst <= dst_r;
 				r_op <= opmode;
@@ -495,8 +741,18 @@ always @(posedge clk) begin
 				if (op_class == 3'b011) begin
 					// FMOVE FPn,<ea>: packed decimal and denormal/unnormal
 					// register contents are unsupported data types
-					if (src_fmt == 3'd3 || src_fmt == 3'd7) unsupp <= 1;
-					else if (unsupported_x(fr_e[src_r], fr_m[src_r])) unsupp <= 1;
+					if (src_fmt == 3'd3 || src_fmt == 3'd7)
+						capture_unsupp({op_class, src_fmt, dst_r, opmode},
+						               {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
+						               frame_tag_x(fr_e[src_r], fr_m[src_r]),
+						               {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
+						               frame_tag_x(fr_e[src_r], fr_m[src_r]), 3'b101);
+					else if (unsupported_x(fr_e[src_r], fr_m[src_r]))
+						capture_unsupp({op_class, src_fmt, dst_r, opmode},
+						               {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
+						               frame_tag_x(fr_e[src_r], fr_m[src_r]),
+						               {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
+						               frame_tag_x(fr_e[src_r], fr_m[src_r]), 3'b001);
 					else begin
 						{a_s, a_e, a_m, a_t} <=
 							unpack_x(fr_s[src_r], fr_e[src_r], fr_m[src_r]);
@@ -509,6 +765,16 @@ always @(posedge clk) begin
 					               96'd0, 3'd1,
 					               {fr_s[dst_r], fr_e[dst_r], 16'd0, fr_m[dst_r]},
 					               frame_tag_x(fr_e[dst_r], fr_m[dst_r]));
+				end
+				else if (op_class == 3'b010 && src_fmt == 3'd3) begin : save_packed_source
+					// Packed source bytes are already present in din.  WinUAE's
+					// 040 frame uses the undocumented shuffle observed in silicon:
+					// FPTEMP[2]=packed[0], FPTEMP[1]=packed[1], while ETEMP[1:2]
+					// retain packed[1:2], with STAG=7 and no destination temp.
+					capture_unsupp({op_class, src_fmt, dst_r, opmode},
+					               {32'd0, din[63:32], din[31:0]}, 3'd7,
+					               {32'd0, din[63:32], din[95:64]}, 3'd0,
+					               3'b100);
 				end
 				else if (!op_in_hw(opmode)) begin : save_unimp_command
 					if (op_class == 3'b000) begin
@@ -536,7 +802,13 @@ always @(posedge clk) begin
 				end
 				else if (op_class == 3'b000) begin
 					if (unsupported_x(fr_e[src_r], fr_m[src_r])) begin
-						unsupp <= 1;
+						capture_unsupp({op_class, src_fmt, dst_r, opmode},
+						               {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
+						               frame_tag_x(fr_e[src_r], fr_m[src_r]),
+						               frame_dyadic(opmode) ?
+						                 {fr_s[dst_r], fr_e[dst_r], 16'd0, fr_m[dst_r]} : 96'd0,
+						               frame_dyadic(opmode) ? frame_tag_x(fr_e[dst_r], fr_m[dst_r]) : 3'd0,
+						               3'b000);
 					end
 					else begin
 					{a_s, a_e, a_m, a_t} <=
@@ -779,7 +1051,17 @@ always @(posedge clk) begin
 										a_m <= {1'b0, r_din[86:64], 40'd0};
 										r_stag <= 3'd5; fst <= F_NORM;
 									end
-									else begin unsupp <= 1; fst <= F_IDLE; end
+									else begin
+										capture_unsupp({r_class, r_fmt, r_dst, r_op},
+										               {32'h3f800000,
+										                1'b0, r_din[86:64], 40'd0},
+										               3'd5,
+										               frame_dyadic(r_op) ?
+										                 {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]} : 96'd0,
+										               frame_dyadic(r_op) ? frame_tag_x(fr_e[r_dst], fr_m[r_dst]) : 3'd0,
+										               3'b000);
+										fst <= F_IDLE;
+									end
 								end
 								else begin
 									r_stag <= 3'd1;
@@ -818,7 +1100,17 @@ always @(posedge clk) begin
 										a_m <= {1'b0, r_din[83:32], 11'd0};
 										r_stag <= 3'd5; fst <= F_NORM;
 									end
-									else begin unsupp <= 1; fst <= F_IDLE; end
+									else begin
+										capture_unsupp({r_class, r_fmt, r_dst, r_op},
+										               {32'h3c000000,
+										                1'b0, r_din[83:32], 11'd0},
+										               3'd5,
+										               frame_dyadic(r_op) ?
+										                 {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]} : 96'd0,
+										               frame_dyadic(r_op) ? frame_tag_x(fr_e[r_dst], fr_m[r_dst]) : 3'd0,
+										               3'b000);
+										fst <= F_IDLE;
+									end
 								end
 								else begin
 									r_stag <= 3'd1;
@@ -843,7 +1135,16 @@ always @(posedge clk) begin
 										unpack_x(r_din[95], r_din[94:80], r_din[63:0]);
 									r_stag <= 3'd4; fst <= F_NORM;
 								end
-								else begin unsupp <= 1; fst <= F_IDLE; end
+								else begin
+									capture_unsupp({r_class, r_fmt, r_dst, r_op},
+									               r_din,
+									               frame_tag_x(r_din[94:80], r_din[63:0]),
+									               frame_dyadic(r_op) ?
+									                 {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]} : 96'd0,
+									               frame_dyadic(r_op) ? frame_tag_x(fr_e[r_dst], fr_m[r_dst]) : 3'd0,
+									               3'b000);
+									fst <= F_IDLE;
+								end
 							end
 							else begin
 								r_stag <= frame_tag_x(r_din[94:80], r_din[63:0]);
@@ -887,10 +1188,21 @@ always @(posedge clk) begin
 				// status byte stays clean.
 				else if (r_op == 7'h38 &&
 				    unsupported_x(fr_e[r_dst], fr_m[r_dst])) begin
-					unsupp <= 1;
+					capture_unsupp({r_class, r_fmt, r_dst, r_op},
+					               {a_s, a_e[14:0], 16'd0, a_m},
+					               frame_tag_x(a_e[14:0], a_m),
+					               {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]},
+					               frame_tag_x(fr_e[r_dst], fr_m[r_dst]), 3'b000);
 					fst <= F_IDLE;
 				end
 				else begin
+				// Save the original operands before F_BIN overwrites `a` with
+				// the arithmetic result.  These become ETEMP/FPTEMP in an E3
+				// busy frame (WBTEMP is captured separately in F_ROUND/F_UNFL).
+				frame_src <= {a_s, a_e[14:0], 16'd0, a_m};
+				frame_src_tag <= frame_tag_x(a_e[14:0], a_m);
+				frame_dst <= {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]};
+				frame_dst_tag <= frame_tag_x(fr_e[r_dst], fr_m[r_dst]);
 				// Quiet signaling NaNs after recording SNAN.  Source and
 				// FCMP destination checks occur before result dispatch so an
 				// enabled SNAN is observed in F_WB and inhibits writeback.
@@ -917,7 +1229,18 @@ always @(posedge clk) begin
 					7'h38, 7'h3A: fst <= F_WB;               // FCMP/FTST
 					7'h00, 7'h40, 7'h44,
 					7'h18, 7'h58, 7'h5C,
-					7'h1A, 7'h5A, 7'h5E: fst <= F_ROUND;     // move class
+					7'h1A, 7'h5A, 7'h5E: begin               // move class
+						// A register-X operand already has the full extended
+						// significand.  With FPCR precision=extended there is
+						// no conversion, GRS generation, or range control to do;
+						// skip the general rounder but retain F_WB's condition,
+						// SNAN, and writeback-exception handling.
+						if (r_class == 3'b000 && r_fmt == 3'd7 &&
+						    fpcr[7:6] == 2'b00)
+							fst <= F_WB;
+						else
+							fst <= F_ROUND;
+					end
 					7'h04, 7'h41, 7'h45: begin               // FSQRT
 						op_kind <= 4'd4;
 						fst <= F_BIN;
@@ -949,7 +1272,10 @@ always @(posedge clk) begin
 					// dispatch; r_ae7 holds the prior accrued-IOP bit)
 					fpsr[14] <= 0;
 					fpsr[7]  <= r_ae7;
-					unsupp <= 1;
+					capture_unsupp({r_class, r_fmt, r_dst, r_op},
+					               frame_src, frame_src_tag,
+					               {b_s, b_e[14:0], 16'd0, b_m},
+					               frame_tag_x(b_e[14:0], b_m), 3'b000);
 					fst <= F_IDLE;
 				end
 				else begin
@@ -1395,7 +1721,16 @@ always @(posedge clk) begin
 						end
 					endcase
 					er = e_w + (mr[64] ? 18'sd1 : 18'sd0);
+					// Preserve the rounded internal result for a possible E3
+					// exception frame before F_ROUND selects saturation, zero, or
+					// the architectural destination value.
+					fwb_s <= a_s;
+					fwb_e <= er[16:0];
+					fwb_m66 <= mr[64];
+					fwb_grs <= grs;
+					fwb_wbte15 <= 0;
 					if (mr[64]) mr = {2'b01, 63'd0};
+					fwb_m <= mr[63:0];
 					// Range control: the rounding precision narrows the
 					// exponent range as well as the significand (softfloat's
 					// SOFTFLOAT_68K roundAndPackFloatx80 expOffset, 0x3F80
@@ -1448,12 +1783,17 @@ always @(posedge clk) begin
 						// format as a normal number: shift the significand
 						// down to the precision's minimum exponent, round
 						// there, and renormalize in F_UNFL.  A result below
-						// the extended minimum exponent would need the
-						// denormalized encoding (and a signed working
-						// exponent throughout), which this implementation
-						// does not have; those flush to zero.
+						// the extended minimum exponent enters F_UNFL with
+						// exponent zero and is packed as an extended denormal;
+						// only values beyond the retained GRS window flush.
 						reg signed [17:0] extra;
 						extra = emin - er;
+						// UNFL exposes the unrounded pre-shift value in WBTEMP.
+						fwb_e <= e_w[16:0];
+						fwb_m <= a_m;
+						fwb_m66 <= 0;
+						fwb_grs <= grs;
+						fwb_wbte15 <= 1;
 						fpsr[11] <= 1;              // UNFL status (tiny)
 						// accrued UNFL is only recorded when the result is
 						// ALSO inexact (updateaccrued: UNFL && INEX2); the
@@ -1463,7 +1803,24 @@ always @(posedge clk) begin
 							fpsr[9] <= 1;           // INEX2
 							fpsr[3] <= 1;
 							fpsr[5] <= 1;           // accrued UNFL
-							a_t <= T_ZERO;
+							// No retained G/R/S bit remains at this depth, but
+							// round-toward-plus for a positive result (or
+							// round-toward-minus for a negative result) is still
+							// directed away from zero.  Return one ulp at the
+							// destination precision instead of flushing it.
+							if ((rnd_mode == 2'b10 && a_s) ||
+							    (rnd_mode == 2'b11 && !a_s)) begin
+								a_t <= T_NUM;
+								// A result below the extended exponent range is
+								// encoded with exponent field zero.  Do not carry
+								// the signed working exponent into the 15-bit
+								// architectural field (e.g. -99 would become 7F9D).
+								a_e <= 17'd0;
+								a_m <= underflow_min_m(r_pr);
+							end
+							else begin
+								a_t <= T_ZERO;
+							end
 							fst <= F_WB;
 						end
 						else begin
@@ -1497,10 +1854,38 @@ always @(posedge clk) begin
 				reg        n, z, nan;
 				reg        ds, dz, gt, eq, dbig;
 				reg [83:0] du;
+				reg  [7:0] ex_en;
+				reg        use_e3;
+				reg [95:0] fr_src, fr_dst;
+				reg  [2:0] fr_stag, fr_dtag;
 				if (|(fpsr[15:8] & fpcr[15:8])) begin
 					// Enabled exceptions suppress architectural destination
-					// writeback.  The core builds the normal arithmetic-
-					// exception stack frame for the selected vector.
+					// writeback.  Preserve the exact 040 E1 or E3 state frame
+					// before handing the selected vector to the core.
+					ex_en = fpsr[15:8] & fpcr[15:8];
+					fr_src = frame_src;
+					fr_stag = frame_src_tag;
+					if (op_kind == 4) begin
+						fr_dst = 96'd0;
+						fr_dtag = 0;
+					end
+					else begin
+						fr_dst = frame_dst;
+						fr_dtag = frame_dst_tag;
+					end
+					use_e3 = e3_arith_op(r_class, r_op) &&
+						!(ex_en[7] || ex_en[6] || ex_en[5] ||
+						  ex_en[2] || ex_en[0]) &&
+						 (ex_en[4] || ex_en[3] || ex_en[1]);
+					if (use_e3)
+						capture_e3({r_class, r_fmt, r_dst, r_op},
+						           fr_src, fr_stag, fr_dst, fr_dtag,
+						           {fwb_s, fwb_e[14:0], 16'd0},
+						           fwb_m[63:32], fwb_m[31:0],
+						           fwb_m66, fwb_grs, fwb_wbte15);
+					else
+						capture_e1({r_class, r_fmt, r_dst, r_op},
+						           fr_src, fr_stag, fr_dst, fr_dtag);
 					exc_req <= 1;
 					exc_vec <= fp_exception_vector(fpsr[15:8] & fpcr[15:8]);
 					fpu_used <= 1;

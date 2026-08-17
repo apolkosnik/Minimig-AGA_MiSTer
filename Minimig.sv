@@ -415,13 +415,9 @@ ap040_walker_cdc walker_cdc
 wire [15:0] ram_dout1;
 wire        ram_ready1;
 
-// The controller caches carry the system.  ap040_cache is measured NOT
-// ready to replace them: its miss costs a 4-beat line fill serialised
-// through the 16-bit bus adapter (8 bus cycles) against 1-2 for an
-// uncached word, so miss-heavy code -- fast RAM above all -- ran SLOWER
-// with it than with no CPU-side cache at all.  Its snoop CDC also loses
-// events while clkena is frozen.  Re-enable it only with a 32-bit/burst
-// fill path and a ce-independent snoop queue.
+// Keep the production controller caches enabled.  The AP040 internal cache
+// is disabled for area/timing, so this is the only cache-backed path in the
+// deployed fabric; CPU_CACHE=0 remains available in the standalone benches.
 sdram_ctrl #(.CPU_CACHE(1)) ram1
 (
 	.sysclk       (clk_114         ),

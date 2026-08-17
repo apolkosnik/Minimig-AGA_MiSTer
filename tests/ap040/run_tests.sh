@@ -60,7 +60,7 @@ compile cart_hrtmon iverilog -g2012 -o "$WORK/tb_cart_hrtmon.vvp" \
 compile wrapchip iverilog -g2012 -I "$RTL" -o "$WORK/tb_wrapchip.vvp" \
 	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
 	sim_dpram.v $RTL/ap040_bus_timeout.v $SRC &
-compile sdram_turbo iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
+compile sdram_turbo iverilog -g2012 -DAP040_TURBO_CACHE_STORAGE -I "$RTL" -s tb_sdram_turbo \
 	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=0 \
 	-o "$WORK/tb_sdram_turbo.vvp" tb_sdram_turbo.v \
 	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
@@ -71,9 +71,20 @@ compile sdram_turbo iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
 # the ph2 pulse and therefore deliver interrupts -- t_fpu's IRQ soak
 # needs it, while the CPU_PHASE=0 instance keeps the guard-hostile
 # alignment coverage
-compile sdram_turbo_ph3 iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
+compile sdram_turbo_ph3 iverilog -g2012 -DAP040_TURBO_CACHE_STORAGE -I "$RTL" -s tb_sdram_turbo \
 	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=3 \
 	-o "$WORK/tb_sdram_turbo_ph3.vvp" tb_sdram_turbo.v \
+	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
+	../../rtl/cpu_cache_new.v sim_dpram.v ../../rtl/ram_cs_guard.v \
+	$RTL/ap040_bus_timeout.v $RTL/ap040_walker_cdc.v $SRC &
+# Keep the no-storage controller path under regression as well.  It is not
+# the production topology (which keeps CPU_CACHE=1), but this catches future
+# regressions in the parameterized bypass implementation before anyone tries
+# it in an RBF.
+compile sdram_turbo_nocache iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
+	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=3 \
+	-P tb_sdram_turbo.CPU_CACHE=0 \
+	-o "$WORK/tb_sdram_turbo_nocache.vvp" tb_sdram_turbo.v \
 	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
 	../../rtl/cpu_cache_new.v sim_dpram.v ../../rtl/ram_cs_guard.v \
 	$RTL/ap040_bus_timeout.v $RTL/ap040_walker_cdc.v $SRC &
@@ -85,6 +96,17 @@ compile dualram_turbo iverilog -g2012 -I "$RTL" -s tb_dualram_turbo \
 	../../rtl/A2065/a2065_ddram_arbiter.v \
 	sim_dpram.v ../../rtl/ram_cs_guard.v \
 	$RTL/ap040_bus_timeout.v $RTL/ap040_walker_cdc.v $SRC &
+compile dualram_turbo_nocache iverilog -g2012 -I "$RTL" -s tb_dualram_turbo \
+	-P tb_dualram_turbo.CYC_PHASE=1 -P tb_dualram_turbo.CPU_PHASE=3 \
+	-P tb_dualram_turbo.CPU_CACHE=0 \
+	-o "$WORK/tb_dualram_turbo_nocache.vvp" tb_dualram_turbo.v \
+	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
+	../../rtl/cpu_cache_new.v ../../rtl/ddram_ctrl.v \
+	../../rtl/A2065/a2065_ddram_arbiter.v \
+	sim_dpram.v ../../rtl/ram_cs_guard.v \
+	$RTL/ap040_bus_timeout.v $RTL/ap040_walker_cdc.v $SRC &
+compile fpu_busy_frame iverilog -g2012 -I "$RTL" \
+	-o "$WORK/tb_fpu_busy_frame.vvp" tb_fpu_busy_frame.v "$RTL/ap040_fpu.v" &
 wait
 
 if ls "$WORK"/.status.compile_* >/dev/null 2>&1; then
@@ -121,6 +143,9 @@ leg fpu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_fpu.hex &
 leg fpu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_fpu.hex &
 leg fpu_dualram        "$WORK/tb_dualram_turbo.vvp" +prog=build/t_fpu.hex &
 leg fpu_turbo_ph3      "$WORK/tb_sdram_turbo_ph3.vvp" +prog=build/t_fpu.hex &
+leg integer_turbo_nocache "$WORK/tb_sdram_turbo_nocache.vvp" +prog=build/t_integer.hex &
+leg integer_dualram_nocache "$WORK/tb_dualram_turbo_nocache.vvp" +prog=build/t_integer.hex +datasplit &
+leg fpu_busy_frame     "$WORK/tb_fpu_busy_frame.vvp" &
 wait
 
 if ls "$WORK"/.status.* >/dev/null 2>&1; then

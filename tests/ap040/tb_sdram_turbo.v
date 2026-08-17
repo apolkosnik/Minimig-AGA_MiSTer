@@ -15,6 +15,10 @@
 
 module tb_sdram_turbo;
 
+// Keep the cache-enabled board configuration as the default, but allow the
+// production no-storage controller path to be exercised explicitly.
+parameter CPU_CACHE = 1;
+
 reg clk113 = 0;
 always #44 clk113 = ~clk113;
 
@@ -288,7 +292,7 @@ ap040_walker_cdc walker_cdc
 );
 
 
-sdram_ctrl ram
+sdram_ctrl #(.CPU_CACHE(CPU_CACHE)) ram
 (
 	.sysclk(clk113),
 	.c_7m(c_7m),
@@ -505,6 +509,7 @@ endtask
 integer wk_errors;
 reg [31:0] wk_got;
 
+`ifdef AP040_TURBO_CACHE_STORAGE
 task walker_selftest;
 	begin
 		wk_errors = 0;
@@ -586,6 +591,14 @@ task walker_selftest;
 		else                errors = errors + wk_errors;
 	end
 endtask
+`else
+// The direct no-storage configuration has no cache RAM hierarchy to poke.
+task walker_selftest;
+	begin
+		// intentionally empty
+	end
+endtask
+`endif
 
 reg [12:0] row [0:3];
 reg  [2:0] pre_busy [0:3];   // auto-precharge busy countdown per bank

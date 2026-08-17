@@ -18,6 +18,10 @@
 
 module tb_dualram_turbo;
 
+// Default matches the deployed cache-coherence stress topology.  Zero
+// explicitly exercises the production no-storage controller configuration.
+parameter CPU_CACHE = 1;
+
 reg clk113 = 0;
 always #44 clk113 = ~clk113;
 
@@ -292,7 +296,7 @@ ap040_walker_cdc walker_cdc
 );
 
 
-sdram_ctrl ram
+sdram_ctrl #(.CPU_CACHE(CPU_CACHE)) ram
 (
 	.sysclk(clk113),
 	.c_7m(c_7m),
@@ -358,7 +362,7 @@ wire [63:0] DDRAM_DIN;
 wire  [7:0] DDRAM_BE;
 wire        DDRAM_WE;
 
-ddram_ctrl ram2
+ddram_ctrl #(.CPU_CACHE(CPU_CACHE)) ram2
 (
 	.sysclk(clk113),
 	.reset_n(reset),
@@ -694,6 +698,7 @@ endtask
 integer wk_errors;
 reg [31:0] wk_got;
 
+`ifdef AP040_TURBO_CACHE_STORAGE
 task walker_selftest;
 	begin
 		wk_errors = 0;
@@ -775,6 +780,13 @@ task walker_selftest;
 		else                errors = errors + wk_errors;
 	end
 endtask
+`else
+task walker_selftest;
+	begin
+		// no-storage configuration has no cache RAM hierarchy to poke
+	end
+endtask
+`endif
 
 reg [12:0] row [0:3];
 reg  [2:0] pre_busy [0:3];   // auto-precharge busy countdown per bank

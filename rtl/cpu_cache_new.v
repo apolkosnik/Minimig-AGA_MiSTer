@@ -765,6 +765,11 @@ dpram_be_1024x16 ddram1 (
 end
 else begin : g_nostorage
 	// no tags, no data: valid bits read as 0, so no path can report a hit
+	assign dtag0_match      = 1'b0;
+	assign dtag1_match      = 1'b0;
+	assign dtag_lru         = 1'b0;
+	assign dtag0_valid      = 1'b0;
+	assign dtag1_valid      = 1'b0;
 	assign itram_cpu_dat_r = 40'd0;
 	assign itram_sdr_dat_r = 40'd0;
 	assign dtram_cpu_dat_r = 40'd0;

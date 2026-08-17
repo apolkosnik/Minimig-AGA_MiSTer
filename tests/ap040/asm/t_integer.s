@@ -483,6 +483,57 @@ t96ok:
 	move.l	($334C).l,d0
 	chkl	d0,$DDDD0004,106
 
+; MOVE16 preserves the longword offset within each 16-byte line.  The
+; transfer wraps at the line boundary; only the postincrement forms update
+; their address register.
+	lea	($3304).l,a0
+	move16	(a0)+,($3388).l
+	move.l	a0,d0
+	chkl	d0,$3314,1001
+	move.l	($3388).l,d0
+	chkl	d0,$BBBB0002,1002
+	move.l	($338C).l,d0
+	chkl	d0,$CCCC0003,1003
+	move.l	($3380).l,d0
+	chkl	d0,$DDDD0004,1004
+	move.l	($3384).l,d0
+	chkl	d0,$AAAA0001,1005
+
+	lea	($33C8).l,a1
+	move16	($3308).l,(a1)+
+	move.l	a1,d0
+	chkl	d0,$33D8,1006
+	move.l	($33C8).l,d0
+	chkl	d0,$CCCC0003,1007
+	move.l	($33CC).l,d0
+	chkl	d0,$DDDD0004,1008
+	move.l	($33C0).l,d0
+	chkl	d0,$AAAA0001,1009
+	move.l	($33C4).l,d0
+	chkl	d0,$BBBB0002,1010
+
+	lea	($330C).l,a0
+	move16	(a0),($340C).l
+	move.l	($340C).l,d0
+	chkl	d0,$DDDD0004,1011
+	move.l	($3400).l,d0
+	chkl	d0,$AAAA0001,1012
+	move.l	($3404).l,d0
+	chkl	d0,$BBBB0002,1013
+	move.l	($3408).l,d0
+	chkl	d0,$CCCC0003,1014
+
+	lea	($3444).l,a1
+	move16	($3304).l,(a1)
+	move.l	($3444).l,d0
+	chkl	d0,$BBBB0002,1015
+	move.l	($3448).l,d0
+	chkl	d0,$CCCC0003,1016
+	move.l	($344C).l,d0
+	chkl	d0,$DDDD0004,1017
+	move.l	($3440).l,d0
+	chkl	d0,$AAAA0001,1018
+
 ;----------------------------------------------------------------- ccr moves
 	move.w	#$1F,ccr
 	move.w	ccr,d0

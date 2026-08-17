@@ -666,9 +666,10 @@ cache_inhibit plumbing), then full regression + cputest replay.  Expected
 gain: large on fast-RAM working sets; zero architectural risk to exception
 semantics.
 
-STATUS 2026-08-16: DONE and enabled.  ap040_cache is the only cache in
-the system; both cpu_cache_new instances are built without their storage
-(CPU_CACHE 0 on sdram_ctrl/ddram_ctrl from Minimig.sv).
+STATUS 2026-08-16: AP040_ENABLE_CACHE remains 0 in production for area and
+timing. The controller caches remain enabled (CPU_CACHE 1 on both
+sdram_ctrl/ddram_ctrl); disabling both layers produced a hardware ADD.B
+regression and is supported only by the standalone parameterized benches.
 
 Getting there was an area problem, and the measurements are worth
 keeping because two of the three obvious moves were wrong:

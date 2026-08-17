@@ -746,6 +746,65 @@ unnorm_cont:
 	and.l	#$00000A00,d0
 	chkl	d0,0,208		; working exponent 0 is not tiny: no UNFL
 
+; Deep underflow still honors directed rounding after every retained bit has
+; shifted out of the 67-bit GRS window.  Round-plus of a positive result and
+; round-minus of a negative result produce the least extended subnormal;
+; round-toward-zero produces zero.  All three cases remain UNFL+INEX2.
+	move.l	#$00010000,($34C0).l	; 2^-16382 (smallest normal)
+	move.l	#$80000000,($34C4).l
+	move.l	#$00000000,($34C8).l
+	move.l	#$3F9B0000,($34D0).l	; 2^-100
+	move.l	#$80000000,($34D4).l
+	move.l	#$00000000,($34D8).l
+	fmove.x	($34C0).l,fp4
+	fmove.x	($34D0).l,fp5
+	fmove.l	#0,fpsr
+	fmove.l	#$30,fpcr		; extended, round toward plus
+	fmul.x	fp5,fp4			; 2^-16482: beyond retained GRS
+	fmove.l	#0,fpcr
+	fmovem.x	fp4,($34E0).l
+	move.l	($34E0).l,d0
+	chkl	d0,0,291		; positive least subnormal
+	move.l	($34E4).l,d0
+	chkl	d0,0,292
+	move.l	($34E8).l,d0
+	chkl	d0,1,293
+	fmove.l	fpsr,d0
+	and.l	#$00000A00,d0
+	chkl	d0,$A00,294
+	fmove.l	fpsr,d0
+	and.l	#$00000028,d0
+	chkl	d0,$28,295
+
+	fmove.x	($34C0).l,fp4
+	fmove.x	($34D0).l,fp5
+	fmove.l	#0,fpsr
+	fmove.l	#$10,fpcr		; extended, round toward zero
+	fmul.x	fp5,fp4
+	fmove.l	#0,fpcr
+	fmovem.x	fp4,($34F0).l
+	move.l	($34F0).l,d0
+	chkl	d0,0,296
+	move.l	($34F4).l,d0
+	chkl	d0,0,297
+	move.l	($34F8).l,d0
+	chkl	d0,0,298
+
+	move.l	#$80010000,($34C0).l	; -2^-16382
+	fmove.x	($34C0).l,fp4
+	fmove.x	($34D0).l,fp5
+	fmove.l	#0,fpsr
+	fmove.l	#$20,fpcr		; extended, round toward minus
+	fmul.x	fp5,fp4
+	fmove.l	#0,fpcr
+	fmovem.x	fp4,($3500).l
+	move.l	($3500).l,d0
+	chkl	d0,$80000000,299
+	move.l	($3504).l,d0
+	chkl	d0,0,300
+	move.l	($3508).l,d0
+	chkl	d0,1,301
+
 ; a TRUE subnormal operand (integer bit clear) is still an unsupported
 ; data type: vector 55, as on 040
 	move.l	#0,(cnt_fpunsup).l

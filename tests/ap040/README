@@ -138,15 +138,12 @@ Implementation status and remaining gaps (milestones B-H complete):
     whole selected cache regardless of scope (architecturally safe);
     misaligned and line-crossing reads bypass the caches; the I-cache is
     not snooped by CPU writes (real 68040 behavior: software must CINV)
-  - the Minimig build sets AP040_ENABLE_CACHE=0 in cpu_wrapper.v: the
-    internal caches are compiled out (CINV/CPUSH complete immediately,
-    which is a valid 68040 whose caches never fill) and cpu_cache_new in
-    the RAM controllers provides snooped caching instead. Simulation
-    keeps the caches enabled (compat default is 1) so t_cache.s stays
-    meaningful.  CACR enables reach the external I and D banks independently;
-    CINV/CPUSH crosses as a retained toggle and clears both external caches
-    (safe over-invalidation for selected/scope variants). tb_cpu_cache_new
-    verifies I/D isolation, disabled-fill suppression and maintenance clear
+  - the production Minimig build sets AP040_ENABLE_CACHE=0 in cpu_wrapper.v
+    and CPU_CACHE=1 on both SDRAM/DDR3 controllers: the controller
+    cpu_cache_new instances provide the deployed cache-backed path. The
+    CPU_CACHE=0 no-storage configuration remains covered by the parameterized
+    standalone benches; using it together with AP040_ENABLE_CACHE=0 caused a
+    hardware ADD.B regression. CACR and snoop behavior remain covered.
   - misaligned accesses restart the whole transfer. A second-page ATC
     fault reports the original transfer address/size and sets SSW.MA;
     invalid translations are not cached in the ATC (each access re-walks)
@@ -156,7 +153,11 @@ Implementation status and remaining gaps (milestones B-H complete):
     gradual single/double store underflow, canonical extended special
     values, SNAN/BSUN/DZ and enabled arithmetic-exception vectors.
     FMOVEM register/control paths, FBcc/FScc/FDBcc/FTRAPcc and NULL/IDLE/
-    UNIMP FSAVE/FRESTORE frames are covered by t_fpu.s. Transcendentals and
+    UNIMP FSAVE/FRESTORE frames are covered by t_fpu.s. Native arithmetic
+    write-back exceptions capture the revision-$41 100-byte BUSY/E3 frame;
+    vector-55 denormal/unnormal and packed-data faults retain their revision-$41
+    BUSY payload, and tb_fpu_busy_frame.v checks WBTEMP, operands, and datatype
+    payloads. Transcendentals and
     FMOVECR are unimplemented instructions (vector 11, format $2);
     denormal/unnormal operands and packed decimal are unsupported data
     types and take vector 55 in a format-$3 frame. Opclass 000/010 sources
@@ -177,14 +178,14 @@ Implementation status and remaining gaps (milestones B-H complete):
     along with exact register-source and converted memory-source images.
     This supplies the operand state a stock Motorola FPSP expects for
     vector-11 software instructions such as transcendentals and FMOVECR.
-    FRESTORE accepts NULL, IDLE and revision-
-    $41 UNIMP frames and raises vector 14 for an incompatible version or
-    size. Remaining state-frame deviations are the vector-55 datatype
-    variant (the exception frame is correct, but FSAVE does not yet expose
-    its source payload) and the 96-byte BUSY form; AP040 has no pipelined
-    mid-instruction arithmetic state to serialize. Real 040 silicon also takes non-maskable OVFL/UNFL traps so
-    the FPSP can produce these results, where AP040 computes them
-    directly. The FPGA build enables AP040_HAS_FPU=1.
+    Vector-55 denormal/unnormal and packed-data faults now retain their
+    revision-$41 BUSY payload as well, including the packed three-word
+    shuffle observed on the 040. FRESTORE accepts NULL, IDLE, revision-$41
+    UNIMP/E1 and BUSY frames and raises vector 14 for an incompatible version
+    or size. E1 arithmetic payloads remain resident until FSAVE or a completed
+    RTE. Real 040 silicon also takes non-maskable OVFL/UNFL traps so the FPSP
+    can produce these results, where AP040 computes them directly. The FPGA
+    build enables AP040_HAS_FPU=1.
   - 8K page mode (TC.P) is covered by t_mmu.s including LA bit 12
     routing, PTEST and fault restart
 
@@ -346,8 +347,8 @@ in its own org $8000 section and failt uses jmp.  If t_fpu grows,
 check the section sizes vasm prints.
 
 Still deliberately unimplemented (dataset-invisible): nonmaskable
-OVFL/UNFL traps with BUSY-frame FSAVE state, vector-55 datatype FSAVE
-payloads, and INEX-on-away-rounding for deep extended underflow.
+OVFL/UNFL trap delivery.  Vector-55 datatype BUSY-frame payloads are now
+captured and retained through FSAVE/FRESTORE.
 Revision-$41 vector-11 UNIMP frame contents, complete multiword transfer,
 acknowledgement, FRESTORE round trip, and IDLE-state restoration are now
 covered by t_fpu's directed checks 260-285.
@@ -385,6 +386,9 @@ Fixed (t_mmu 48-59 plus updated 19/38/39, each negative-control proven):
   - MOVE16 access errors report SSW SIZE=line with TT0, the EA aligned
     to the line, and the WB3 valid bit clear (WinUAE clears it in favour
     of a WB2 line writeback, which the pure-restart model omits).
+  - MOVE16 now honors EA[3:2]: transfers begin at the selected longword and
+    wrap within the 16-byte line.  Coverage exercises all four absolute and
+    postincrement forms, including nonzero line offsets.
   - TAS/CAS/CAS2 operand faults report SSW LK with RW clear.
   - Faulting MOVES to FC 0/3/4/7 reports TT=10 with the raw FC in TM;
     FC 2/6 is remapped onto the corresponding data space.
