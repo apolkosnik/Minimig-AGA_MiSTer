@@ -3434,11 +3434,13 @@ always @(posedge clk) begin
 				// (fpu_pendcap), or the pend would be judged frameless
 				if (fpu_bg || fpu_pendcap) state <= S_FSAVE1;
 				else if (fpu_pend_exc && !fpu_fstate_unimp) begin
-					// only the e3 class (OVFL/UNFL/INEX from the five
-					// arithmetic ops) still traps here: its BUSY frame is
-					// not implemented (Tier 2).  Every e1-class pend has a
-					// prepared $30 frame below and is EXTRACTED by FSAVE,
-					// as on the real 040.
+					// Frameless fallback: a pend whose frame state is gone
+					// because an earlier FSAVE already extracted it
+					// (fsave_ack) or an FRESTORE of IDLE replaced it.
+					// Capture arms fstate_unimp for BOTH classes -- e1 to
+					// the $30 frame, e3 to the $41/$60 BUSY frame -- so a
+					// pend that still owns its frame takes one of the two
+					// branches below and is EXTRACTED, as on the real 040.
 					fpu_pend_exc <= 0;
 					exc(fpu_pend_vec, 4'd0, pc_i, pc_i);
 				end

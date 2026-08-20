@@ -521,8 +521,9 @@ always @(posedge clk) begin
 			// core.  Prepare the FPSP-parseable $30 e1 frame from the
 			// shadow (WinUAE fpsr_check_arithmetic_exception's 68040
 			// fsave_data recipe).  The e3 class -- OVFL/UNFL/INEX from
-			// the five arithmetic ops -- needs the BUSY frame and keeps
-			// the documented FSAVE-trap behavior instead (Tier 2).
+			// the five arithmetic ops -- takes the else arm and prepares
+			// the $41/$60 BUSY frame.  Both arms set fstate_unimp, so a
+			// later FSAVE EXTRACTS the prepared frame instead of trapping.
 			reg [7:0] pv;
 			pv = fp_exception_vector(fpsr[15:8] & fpcr[15:8]);
 			if (pv == `AP040_VEC_FP_SNAN || pv == `AP040_VEC_FP_OPERR ||
