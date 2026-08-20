@@ -1146,15 +1146,23 @@ function t0_special;
 	begin
 		t0_special =
 		    op == 16'h007c || op == 16'h027c || op == 16'h0a7c || // to SR
-		    op == 16'h4e71 || op == 16'h4e72 ||                    // NOP/STOP
+		    op == 16'h4e71 ||                                      // NOP
+		    // STOP is absent: it never reaches the fetch_next boundary --
+		    // S_STOP_LD makes its own T0 decision (changed-bits rule).
 		    op == 16'h4e7b ||                                      // MOVEC to CR
-		    (op & 16'hfff0) == 16'h4e60 ||                         // MOVE USP
+		    (op & 16'hfff8) == 16'h4e60 ||                         // MOVE An,USP
+		    // MOVE USP,An ($4E68-F) does not trace: gencpu marks only
+		    // i_MVR2USP with trace_t0_68040_only, the same on-silicon
+		    // narrowing hardware already proved for MOVEC ($4E7B only).
 		    (op & 16'hffc0) == 16'h46c0 ||                         // MOVE to SR
-		    (op & 16'hffc0) == 16'h4ac0 ||                         // TAS
 		    (op[15:12] == 4'h0 && op[11:8] == 4'he &&
 		     op[7:6] != 2'b11) ||                                  // MOVES
-		    (op[15:12] == 4'h0 && op[11] && op[7:6] == 2'b11 &&
+		    (op[15:12] == 4'h0 && op[11] && !op[8] && op[7:6] == 2'b11 &&
 		     op[10:9] != 2'b00) ||                                 // CAS/CAS2
+		    // op[8] discriminates CAS ($0AC0/$0CC0/$0EC0, clear) from the
+		    // dynamic bit ops BSET Dn,<ea> for D5-D7 ($0Bxx/$0Dxx/$0Fxx,
+		    // set): hardware cputest basic/all failed BSET.B D5,(A6)
+		    // under T0 with a phantom trace before the bit was added.
 		    op[15:8] == 8'hf4 || op[15:8] == 8'hf5 ||              // CINV/CPUSH/PFLUSH/PTEST
 		    op[15:8] == 8'hf3;                                     // FSAVE/FRESTORE
 	end
@@ -5844,7 +5852,15 @@ always @(posedge clk) begin
 			S_STOP_LD: begin
 				epf_flush;
 				sr <= imm[15:0] & `AP040_SR_MASK;
-				if (tr_t1 || tr_t0) begin
+				// T1 traces STOP unconditionally.  T0 traces it only when
+				// the written SR changes T1/T0/S/M or the interrupt mask:
+				// WinUAE's MakeFromSR returns before its trace decision
+				// when none of those bits change ("STOP SR-modification
+				// does not generate T0"), and STOP has no check_t0_trace
+				// like the MOVE/ORI/ANDI/EORI-to-SR family, so an
+				// upper-identical STOP under T0 does not trace on the 040.
+				if (tr_t1 || (tr_t0 && {imm[15:12], imm[10:8]} !=
+				                       {sr[15:12], sr[10:8]})) begin
 					tr_t1 <= 0;
 					tr_t0 <= 0;
 					exc(`AP040_VEC_TRACE, 4'd2, pc, pc_i);

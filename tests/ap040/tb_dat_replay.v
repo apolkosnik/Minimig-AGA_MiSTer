@@ -811,7 +811,7 @@ task run_round;
 					         rd8(dut.core.t_a + 6), rd8(dut.core.t_a + 7),
 					         rd8(dut.core.t_a + 8), rd8(dut.core.t_a + 9),
 					         rd8(dut.core.t_a + 10), rd8(dut.core.t_a + 11));
-				if (vec == 9 && (e_trace != 0 || trace_bits)) begin
+				if (vec == 9 && (e_trace != 0 || e_exc == 9)) begin
 					check_trace_frame;
 					// T0 can redirect from the primary S_EXC_JMP directly into
 					// trace without ever fetching the primary handler.  Its
@@ -838,6 +838,16 @@ task run_round;
 						// Stacked trace: let RTE resume the primary handler.
 						while (busstate == 2'b00 && addr_out == CAPH + vec*8) @(posedge clk);
 					end
+				end else if (vec == 9) begin
+					// The corpus recorded neither a trace result (e_exc == 9)
+					// nor a trace record (e_trace) for this round, so this
+					// vector-9 entry is a phantom trace.  The native runner
+					// reports these as "Got unexpected trace exception"; the
+					// bench used to accept any trace whenever T bits were set
+					// (the old trace_bits clause above), which is exactly how
+					// the BSET.B D5,(A6)-under-T0 phantom reached hardware.
+					mismatch("unexpected trace", 32'd0, {16'd0, dut.core.sr});
+					timeout = EXEC_TIMEOUT;
 				end else if ((e_trace == 1 ||
 				              (e_exc == 4 && trace_bits)) &&
 				             !saw_primary && !saw_trace) begin
