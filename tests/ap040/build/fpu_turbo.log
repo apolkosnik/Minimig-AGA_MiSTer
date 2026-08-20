@@ -341,42 +341,42 @@ EXCJMP t=35206996 target=00001fd2
 EXC t=35433332 vec=55 pc=0000b52e sr=2700
 EXCJMP t=35435092 target=00001fd2
 EXC t=36050036 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=36064820 target=0000bc3c
-EXC t=36587892 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=36589652 target=0000bc3c
-EXC t=37060980 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=37062740 target=0000bc3c
-EXC t=37469300 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=37471060 target=0000bc3c
-EXC t=37953652 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=37955412 target=0000bc3c
-EXC t=38361972 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=38363732 target=0000bc3c
-EXC t=38773108 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=38774868 target=0000bc3c
-EXC t=39181428 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=39183188 target=0000bc3c
-EXC t=39643252 vec=54 pc=0000b74e sr=2704
-EXCJMP t=39645012 target=0000204a
-L2 t=40033972 D1WR adr=154 bs=11 dat=ffff fill=1
-L2 t=40034148 D1WR adr=155 bs=11 dat=ffff fill=1
-L2 t=40034324 D1WR adr=156 bs=11 dat=0000 fill=1
-L2 t=40034500 D1WR adr=157 bs=11 dat=0000 fill=1
-EXC t=40172660 vec=52 pc=0000b8cc sr=2708
-EXCJMP t=40174420 target=0000205e
-EXC t=40403572 vec=52 pc=0000b932 sr=2700
-EXCJMP t=40405332 target=0000205e
-EXC t=40634484 vec=53 pc=0000b9a4 sr=2704
-EXCJMP t=40636244 target=0000207a
-L2 t=40805556 D1WR adr=154 bs=11 dat=ffff fill=1
-L2 t=40805732 D1WR adr=155 bs=11 dat=ffff fill=1
-L2 t=40805908 D1WR adr=156 bs=11 dat=0000 fill=1
-L2 t=40806084 D1WR adr=157 bs=11 dat=0000 fill=1
-EXC t=41324404 vec=54 pc=0000baec sr=2704
-EXCJMP t=41326164 target=0000204a
-EXC t=41983348 vec=53 pc=0000bbfe sr=2704
-EXCJMP t=41985108 target=0000207a
+EXCJMP t=36064820 target=0000bcc4
+EXC t=36576628 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=36578388 target=0000bcc4
+EXC t=37049716 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=37051476 target=0000bcc4
+EXC t=37458036 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=37459796 target=0000bcc4
+EXC t=37925492 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=37927252 target=0000bcc4
+EXC t=38333812 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=38335572 target=0000bcc4
+EXC t=38744948 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=38746708 target=0000bcc4
+EXC t=39153268 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=39155028 target=0000bcc4
+EXC t=39615092 vec=54 pc=0000b74e sr=2704
+EXCJMP t=39616852 target=0000204a
+L2 t=40005812 D1WR adr=154 bs=11 dat=ffff fill=1
+L2 t=40005988 D1WR adr=155 bs=11 dat=ffff fill=1
+L2 t=40006164 D1WR adr=156 bs=11 dat=0000 fill=1
+L2 t=40006340 D1WR adr=157 bs=11 dat=0000 fill=1
+EXC t=40144500 vec=52 pc=0000b8cc sr=2708
+EXCJMP t=40146260 target=0000205e
+EXC t=40375412 vec=52 pc=0000b932 sr=2700
+EXCJMP t=40377172 target=0000205e
+EXC t=40606324 vec=53 pc=0000b9a4 sr=2704
+EXCJMP t=40608084 target=0000207a
+L2 t=40777396 D1WR adr=154 bs=11 dat=ffff fill=1
+L2 t=40777572 D1WR adr=155 bs=11 dat=ffff fill=1
+L2 t=40777748 D1WR adr=156 bs=11 dat=0000 fill=1
+L2 t=40777924 D1WR adr=157 bs=11 dat=0000 fill=1
+EXC t=41296244 vec=54 pc=0000baec sr=2704
+EXCJMP t=41298004 target=0000204a
+EXC t=42217076 vec=53 pc=0000bc86 sr=2704
+EXCJMP t=42218836 target=0000207a
 walker port selftest passed
-turbo-path run passed (478047 cycles)
+turbo-path run passed (480735 cycles)
 ALL TESTS PASSED
-tb_sdram_turbo.v:766: $finish called at 42112884 (100ps)
+tb_sdram_turbo.v:766: $finish called at 42349428 (100ps)

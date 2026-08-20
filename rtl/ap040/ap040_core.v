@@ -191,12 +191,21 @@ always @(posedge clk) begin
 	end
 end
 
-wire       nmi_pend = irq_lvl == 3'd7 && nmi_arm;
-wire       irq_live = irq_lvl != 3'd0 && irq_lvl != 3'd7 &&
-                      irq_lvl > sr[10:8];
+// Recognise the level one cycle earlier than the registered irq_lvl.
+// Both samples are synchroniser flops, so the coherence check that guards
+// against reading a transient encoder value (3 -> 5 passing through 7
+// would look like an NMI) still holds; only the extra register stage is
+// removed.  cputest's irq tests time the request to land just before an
+// instruction boundary, and the third cycle pushed recognition past it --
+// hardware stacked the address AFTER the tested instruction.
+wire [2:0] irq_lvl_live = (ipl_s1 == ipl_s2) ? ~ipl_s2 : irq_lvl;
+
+wire       nmi_pend = irq_lvl_live == 3'd7 && nmi_arm;
+wire       irq_live = irq_lvl_live != 3'd0 && irq_lvl_live != 3'd7 &&
+                      irq_lvl_live > sr[10:8];
 wire [2:0] irq_take_lvl = nmi_pend ? 3'd7 :
-                          (irq_live && irq_lvl > irq_hold_lvl) ? irq_lvl :
-                          irq_hold_lvl;
+                          (irq_live && irq_lvl_live > irq_hold_lvl)
+                              ? irq_lvl_live : irq_hold_lvl;
 wire       irq_pend = nmi_pend || irq_live || irq_hold_lvl != 3'd0;
 
 wire unused_in = ipl_autovector;

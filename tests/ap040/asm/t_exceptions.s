@@ -470,6 +470,32 @@ bra_odd_cont:
 	bsr	wait_int2_1
 	chkcnt	cnt_int2,1,36
 
+	; A request already asserted at an instruction boundary must be taken
+	; AT that boundary: the next instruction does not execute first, and
+	; the stacked PC names it.  cputest irq/all checks exactly this and it
+	; failed on hardware -- exception 25 stacked the address AFTER the
+	; tested instruction (43900004) where the reference expects 43900000.
+	; The request is asserted while MASKED and left to settle, so nothing
+	; here depends on synchroniser latency: the only question is which
+	; boundary takes it once the mask drops.  It must be the very next
+	; one -- the instruction after the SR write does not execute first.
+	move.w	#$2700,sr	; mask 7: the request cannot be taken yet
+	move.w	#2,(IPLREG).l	; assert level 2 and let it settle
+	move.w	#40,d1
+irq_bnd_settle:
+	dbra	d1,irq_bnd_settle
+	move.l	#0,(int2_pc).l
+	move.w	#$2000,sr	; mask 0: taken at THIS boundary
+irq_bnd_op0:
+	nop
+irq_bnd_op:
+	moveq	#1,d0		; must NOT run before the interrupt is taken
+irq_bnd_cont:
+	move.w	#0,(IPLREG).l
+	move.l	(int2_pc).l,d0
+	chkl	d0,irq_bnd_op0,150
+	subq.w	#1,(cnt_int2).l	; keep the absolute counts below intact
+
 	; masked interrupt stays pending
 	move.w	#$2700,sr
 	move.w	#5,(IPLREG).l
