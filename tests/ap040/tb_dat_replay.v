@@ -596,14 +596,14 @@ task check_final;
 				         frame_b[9], frame_b[10], frame_b[11], rd8(sp+0), rd8(sp+1),
 				         rd8(sp+2), rd8(sp+3), rd8(sp+4), rd8(sp+5), rd8(sp+6),
 				         rd8(sp+7), rd8(sp+8), rd8(sp+9), rd8(sp+10), rd8(sp+11));
-			// The bench relocates the vector table to CAPV, so a frame
-			// field that names a vector-table ENTRY -- the odd-vector
-			// address error stacks vbr + 4*vec -- carries CAPV + 4*vec
-			// where the corpus recorded it with the test's own vbr of 0.
-			// Translate that field back before comparing; everything else
-			// is read straight from the stacked frame.
+			// No translation: the odd-vector address error stacks the
+			// vector OFFSET (4*vec, without vbr), which is vbr-independent
+			// and so needs no adjusting for this bench's relocated table.
+			// An earlier version subtracted CAPV here to compensate for a
+			// frame built from vbr + 4*vec; that hid the defect, because
+			// in sim vbr IS CAPV while on hardware it is cputest's own.
 			fpc = read_value(sp + 2, 2);
-			fpc_adj = (fpc >= CAPV && fpc < CAPV + 32'h100) ? fpc - CAPV : fpc;
+			fpc_adj = fpc;
 			for (fi = 0; fi < frame_len; fi = fi + 1)
 				if ((((fi >= 2 && fi <= 5)
 				        ? fpc_adj[8*(5-fi) +: 8] : rd8(sp + fi))

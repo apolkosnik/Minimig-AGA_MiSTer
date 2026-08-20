@@ -2705,16 +2705,20 @@ always @(posedge clk) begin
 					end
 					else begin
 						// Any other odd handler address becomes an address
-						// error.  The frame's PC field is the VECTOR TABLE
-						// ENTRY that supplied the odd address, not the
-						// original exception's next-PC context: the
-						// interrupted flow is already abandoned, and what
-						// identifies the fault is where the bad vector came
-						// from.  The address field carries the odd target
-						// with A0 cleared.
+						// error.  The frame's PC field identifies the vector
+						// that supplied the odd address as its OFFSET --
+						// 4 * vector, WITHOUT vbr -- not the original
+						// exception's next-PC context.  WinUAE says so in
+						// as many words on the path it models explicitly
+						// ("offset, not vbr + offset").  Hardware settled
+						// it: with cputest's own vbr ($403e4e68) a frame
+						// built from vbr + 4*vec read $403e4e88 where the
+						// corpus expects $00000020 for vector 8.  The
+						// address field carries the odd target with A0
+						// cleared.
 						texc_pend <= 0;
 						exc(`AP040_VEC_ADDRERR, 4'd2,
-						    vbr + {22'd0, exc_vec, 2'b00},
+						    {22'd0, exc_vec, 2'b00},
 						    {m_val[31:1], 1'b0});
 					end
 				end
