@@ -247,6 +247,43 @@ ap040_mmu mmu (
 	.m_nocache(mm_nocache)
 );
 
+// The MMU's table walker writes U/M bits into page descriptors over its
+// own port, behind the data cache.  Nothing else invalidates those lines,
+// so a descriptor the CPU had previously read AS DATA would go stale --
+// the last coherence hole once the internal caches are enabled (audit
+// 5.5).  The walker sits inside this module, so the invalidate is
+// generated here rather than plumbed through the SoC: its address is
+// already physical, and the cache is physically tagged.
+//
+// The chipset pulse arrives from a CDC edge detector and cannot be held,
+// so it wins the port; the walker's own invalidate waits at most a cycle.
+// A second walker write cannot arrive that fast (each is a full memory
+// transaction), so one pending slot is enough.
+reg         wsnp_pend;
+reg  [31:0] wsnp_addr;
+reg         walker_wr_d;
+wire        walker_wr_edge = (walker_req & walker_we) & ~walker_wr_d;
+
+always @(posedge clk) begin
+	if (!nreset) begin
+		walker_wr_d <= 1'b0;
+		wsnp_pend   <= 1'b0;
+		wsnp_addr   <= 32'd0;
+	end
+	else begin
+		walker_wr_d <= walker_req & walker_we;
+		if (walker_wr_edge) begin
+			wsnp_pend <= 1'b1;
+			wsnp_addr <= walker_addr;
+		end
+		else if (wsnp_pend && !cache_snoop_stb)
+			wsnp_pend <= 1'b0;      // issued on the port this cycle
+	end
+end
+
+wire        snp_stb  = cache_snoop_stb | wsnp_pend;
+wire [31:0] snp_addr = cache_snoop_stb ? cache_snoop_addr : wsnp_addr;
+
 generate
 if (AP040_ENABLE_CACHE != 0) begin : g_cache
 	// With the snoop port wired up, chip RAM is cacheable too: a chipset
@@ -281,8 +318,8 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.c_wdata(mm_wdata),
 		.c_fc(mm_fc),
 		.c_nocache(mm_nocache | ~cache_allow),
-		.s_stb(cache_snoop_stb),
-		.s_addr(cache_snoop_addr),
+		.s_stb(snp_stb),
+		.s_addr(snp_addr),
 		.c_ack(mm_ack),
 		.c_rdata(mm_rdata),
 

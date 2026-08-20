@@ -638,6 +638,27 @@ t48loop:
 	move.l	(last_ea).l,d0
 	chkl	d0,$8000,59
 
+;----------- walker U/M writes must invalidate a cached descriptor (5.5)
+; The table walker updates U/M over its own physical port, behind the data
+; cache.  A descriptor the CPU has already read AS DATA would otherwise go
+; stale -- the last coherence hole once the internal caches are enabled.
+; The descriptor is rewritten and the ATC flushed first, so the test does
+; not depend on history bits left by anything above.
+	move.l	#$80008000,d0
+	movec	d0,cacr			; caches on for this test only
+	move.l	#$00007003,($441C).l	; page 7 identity, U and M clear
+	pflusha
+	move.l	($441C).l,d0		; caches the line holding the descriptor
+	and.l	#$18,d0
+	chkl	d0,0,148		; U and M start clear
+	tst.l	($7000).l		; touch page 7: the walker sets U
+	move.l	($441C).l,d0		; must not be served from the stale line
+	and.l	#8,d0
+	chkl	d0,8,149
+	cinva	bc
+	moveq	#0,d0
+	movec	d0,cacr			; back to the uncached regime
+
 	moveq	#0,d0
 	movec	d0,tc
 
