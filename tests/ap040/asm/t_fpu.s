@@ -4820,6 +4820,26 @@ soak_done:
 	fmove.l	fp3,d0
 	chkl	d0,7,317		; FPU dispatches normally again
 
+	; cputest fbasic FADD.L, reproduced exactly: the hardware round adds
+	; the longword -659575266 to FP5 = 401d-c4e82b879548fe56 and must
+	; yield 401c-ec8f0f872a91fcac.  On the board the corpus round fails
+	; because its operand is written 64KB away from the source address it
+	; records, so the CPU reads zero; given the operand it is supposed to
+	; read, the arithmetic itself must be exact.
+	move.l	#$c4e82b87,($3360).l	; FP5 = 401d-c4e82b879548fe56
+	move.l	#$9548fe56,($3364).l
+	move.l	#$401d0000,($335C).l
+	fmove.x	($335C).l,fp5
+	move.l	#$d8afae1e,($3368).l	; the addend, as a signed long
+	fadd.l	($3368).l,fp5
+	fmove.x	fp5,($3370).l
+	move.l	($3370).l,d0
+	chkl	d0,$401c0000,330	; sign/exponent
+	move.l	($3374).l,d0
+	chkl	d0,$ec8f0f87,331	; mantissa high
+	move.l	($3378).l,d0
+	chkl	d0,$2a91fcac,332	; mantissa low
+
 	; e3-class pend (enabled OVFL on a released multiply): FSAVE
 	; extracts the 100-byte $41/$60 BUSY frame -- E3 set, WBTEMP the
 	; internal rounded intermediate -- and FRESTORE re-arms the pend

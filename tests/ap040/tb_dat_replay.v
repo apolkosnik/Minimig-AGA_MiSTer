@@ -690,9 +690,19 @@ task run_round;
 			disable run_round;
 		end
 		inject_state;
-		if (i_level != 0 && !i_sr[13] &&
-		    expected_exc_live >= 25 && expected_exc_live <= 31 &&
-		    initial_privileged({rd8(i_pc), rd8(i_pc + 1)}))
+		// Mid-stream start: the native runner asserts IPL while a PREVIOUS
+		// instruction is still executing, so the interrupt is recognised at
+		// the boundary BEFORE the tested one and that instruction never
+		// runs.  Replay begins straight out of reset with no preceding
+		// boundary, and AP040 samples IRQs in fetch_next, so it would
+		// execute the tested instruction first and take the interrupt
+		// after -- A7 already pushed, the wrong PC stacked.  in_exc makes
+		// S_FETCH honour the pending interrupt ahead of the first opcode,
+		// which is what the corpus recorded.  This used to be restricted
+		// to a PRIVILEGED first instruction in user mode; the same
+		// reasoning applies whenever an autovector interrupt is the
+		// round's recorded result.
+		if (i_level != 0 && expected_exc_live >= 25 && expected_exc_live <= 31)
 			dut.core.in_exc = 1;
 		boot_overlay = 0;
 		round_active = 1;

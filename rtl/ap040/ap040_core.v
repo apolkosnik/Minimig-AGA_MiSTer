@@ -1946,10 +1946,20 @@ always @(posedge clk) begin
 					epf_flush;
 					state <= S_EXC0;
 				end
-				else if (flow_t0_pend && fw != 16'h4afc) begin
-					// A normal redirect target loses to the already completed
-					// change-of-flow instruction's T0 trace.  The frame PC is the
-					// target; its address field identifies the branch/return.
+				else if (flow_t0_pend) begin
+					// The completed change-of-flow instruction's T0 trace fires
+					// at the redirect target, ahead of the target instruction.
+					// The frame PC is the target; its address field identifies
+					// the branch/return.
+					//
+					// This used to be suppressed when the target was ILLEGAL
+					// ($4AFC), to avoid double-reporting under the old model
+					// where a T0 trace ALSO survived the illegal-instruction
+					// exception.  That survivor path is gone (no exception
+					// leaves a T0 trace pending on the 040), so the
+					// suppression only lost the trace: cputest branches
+					// straight into its terminating ILLEGAL and expects
+					// vector 9 with the branch target stacked.
 					flow_t0_pend <= 0;
 					exc(`AP040_VEC_TRACE, 4'd2, pc, flow_t0_oldpc);
 				end
@@ -1962,10 +1972,7 @@ always @(posedge clk) begin
 					pc <= pc + 32'd2;
 					// per-instruction defaults
 					tr_t1 <= sr[15];
-					// A first-target ILLEGAL cancels this pending redirect trace.
-					// Directly executed ILLEGAL still samples T0 and follows the
-					// survivor path in exc().
-					tr_t0 <= flow_t0_pend ? 1'b0 : sr[14];
+					tr_t0 <= sr[14];
 					flow_t0_pend <= 0;
 					t0_force <= t0_special(fw);
 					p_src <= SK_NONE; p_dst <= DK_NONE;
