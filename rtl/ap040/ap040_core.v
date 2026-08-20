@@ -208,6 +208,7 @@ wire [2:0] irq_take_lvl = nmi_pend ? 3'd7 :
                               ? irq_lvl_live : irq_hold_lvl;
 wire       irq_pend = nmi_pend || irq_live || irq_hold_lvl != 3'd0;
 
+
 wire unused_in = ipl_autovector;
 
 // An access error comes either from the MMU (translation fault) or from the
@@ -608,6 +609,18 @@ reg [31:0] flow_t0_oldpc;
 reg  [2:0] irq_lvl_l;
 
 reg [15:0] rte_sr;
+// RTE restores the SR and redirects in one step, so a request that the
+// popped mask unblocks has to be qualified against THAT mask -- the sr
+// register still holds the pre-RTE value in the cycle the decision is
+// made.  Everything else is identical to the wires above.
+wire       rte_irq_live = irq_lvl_live != 3'd0 && irq_lvl_live != 3'd7 &&
+                          irq_lvl_live > rte_sr[10:8];
+wire       rte_irq_hold = irq_hold_lvl != 3'd0 &&
+                          irq_hold_lvl > rte_sr[10:8];
+wire       rte_irq_pend = nmi_pend || rte_irq_live || rte_irq_hold;
+wire [2:0] rte_irq_lvl  = nmi_pend ? 3'd7 :
+                          (rte_irq_live && irq_lvl_live > irq_hold_lvl)
+                              ? irq_lvl_live : irq_hold_lvl;
 reg [31:0] rte_pc;
 
 reg  [1:0] ret_kind;
@@ -2786,6 +2799,26 @@ always @(posedge clk) begin
 					tr_t0 <= 0;
 					pc <= rte_pc;
 					exc(`AP040_VEC_TRACE, 4'd2, rte_pc, pc_i);
+				end
+				else if (rte_irq_pend) begin
+					// The restored mask unblocks a pending request: it is
+					// taken AT this boundary, before the instruction RTE
+					// returns to.  This path used to go straight to
+					// S_FETCH without sampling interrupts at all -- unlike
+					// fetch_next and go_pc -- so the target instruction ran
+					// first and the interrupt was reported one instruction
+					// late.  cputest enters every test through RTE, which
+					// is why irq/all saw it on hardware while the
+					// MOVE-to-SR path looked correct.
+					in_exc <= 0;
+					pc <= rte_pc;
+					pc_i <= rte_pc;
+					exc_vec <= `AP040_VEC_AUTOVEC + {5'd0, rte_irq_lvl};
+					exc_fmt <= 0; exc_spc <= rte_pc; exc_addr <= 0;
+					exc_is_irq <= 1; exc_pass2 <= 0;
+					irq_lvl_l <= rte_irq_lvl;
+					epf_flush;
+					state <= S_POST_EXC;
 				end
 				else begin
 					// fetch under the restored context's FC (SR is being

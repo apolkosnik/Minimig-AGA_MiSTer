@@ -496,6 +496,29 @@ irq_bnd_cont:
 	chkl	d0,irq_bnd_op0,150
 	subq.w	#1,(cnt_int2).l	; keep the absolute counts below intact
 
+	; The mask can also be lowered by RTE -- which is how cputest enters
+	; every test -- and the pending request must be taken at THAT
+	; boundary, with the target instruction not yet executed.  Hardware
+	; irq/all stacked the address after the tested instruction, so the
+	; RTE path is tested separately from the MOVE-to-SR path above.
+	move.w	#$2700,sr	; mask 7: level 2 cannot be taken yet
+	move.w	#2,(IPLREG).l	; assert it and let it settle
+	move.w	#40,d1
+irq_rte_settle:
+	dbra	d1,irq_rte_settle
+	move.l	#0,(int2_pc).l
+	move.w	#$0000,-(sp)	; format $0 frame
+	pea	irq_rte_target
+	move.w	#$2000,-(sp)	; SR with mask 0
+	rte			; lowers the mask AND redirects
+irq_rte_target:
+	moveq	#1,d0		; must NOT run before the interrupt is taken
+irq_rte_cont:
+	move.w	#0,(IPLREG).l
+	move.l	(int2_pc).l,d0
+	chkl	d0,irq_rte_target,151
+	subq.w	#1,(cnt_int2).l	; keep the absolute counts below intact
+
 	; masked interrupt stays pending
 	move.w	#$2700,sr
 	move.w	#5,(IPLREG).l
@@ -544,13 +567,17 @@ mdelay:
 	failt	44
 t44ok:
 
-	; A level already pending under mask 7 when RTE restores mask 0 is NOT
-	; taken at that boundary: the first instruction at the restored PC
-	; executes, and the interrupt follows it.  RTE samples IPL too late to
-	; act on it itself (WinUAE models this as ipl_fetch_next, and gencpu
-	; marks RTE/RTS/RTD with ipl_fetched = 10), and hardware cputest
-	; irq/all ANDSR.B and ANDSR.W both show the tested instruction
-	; completing before the interrupt is delivered.
+	; A level already pending under mask 7 when RTE restores mask 0 IS
+	; taken at that boundary: the instruction at the restored PC does not
+	; execute first.  This test previously required the opposite, from
+	; gencpu's `ipl_fetched = 10` on RTE -- but that machinery is emitted
+	; only for the cycle-exact 68000/68020 paths (using_ce / isce020()).
+	; The 68040 model has no such deferral: it checks interrupts in
+	; do_specialties once RTE has restored SR and PC, so the request is
+	; serviced with the RTE target stacked.  cputest irq/all agrees --
+	; its ANDSR.B round EXPECTS frame PC $43900000, the tested
+	; instruction's own address, and hardware reported $43900004 until
+	; ap040_core sampled interrupts on the RTE path.
 	move.w	#$2700,sr
 	clr.w	(irq_guard).l
 	clr.w	(irq_guard2).l
@@ -564,8 +591,8 @@ rte_irq_wait:
 	move.w	#$2000,-(sp)
 	rte
 rte_irq_target:
-	move.w	#1,(irq_guard).l	; must run before the interrupt
-	move.w	#1,(irq_guard2).l	; must NOT: the deferral is one instruction
+	move.w	#1,(irq_guard).l	; both run only AFTER the handler returns
+	move.w	#1,(irq_guard2).l
 	chkcnt	cnt_int2,4,90
 	tst.w	(irq_early).l
 	beq.s	rte_irq_ok
@@ -1446,9 +1473,9 @@ h_int2:
 hi2exc_ok:
 	tst.w	(irq_early).l
 	beq.s	hi2early_ok
-	tst.w	(irq_guard).l	; the restored instruction must have run first
-	beq	hfail
-	tst.w	(irq_guard2).l	; but only that one -- deferral is by exactly one
+	tst.w	(irq_guard).l	; RTE takes the request AT its own boundary, so
+	bne	hfail		; the restored instruction has NOT run yet
+	tst.w	(irq_guard2).l
 	bne	hfail
 	clr.w	(irq_early).l
 hi2early_ok:
