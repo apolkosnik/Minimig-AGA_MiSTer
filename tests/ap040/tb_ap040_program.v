@@ -83,6 +83,8 @@ reg         irq_seen_q = 0;
 // when the encoder falls back to it, it must requalify like a fresh
 // request.  This is the reference model for the mask invariant below.
 reg   [6:1] tb_qual = 0;
+// Previous core state, for the exception-prefetch invariant below.
+reg   [7:0] epf_state_q = 0;
 integer ql;
 always @(posedge clk) begin
 	if (!nreset) tb_qual <= 0;
@@ -361,6 +363,23 @@ always @(posedge clk) begin
 		errors = errors + 1;
 		$display("FAIL: level %0d interrupt accepted at or below mask %0d (pc=%h)",
 		         dut.core.irq_lvl_l, dut.core.sr[10:8], dbg_pc);
+	end
+
+	// X2.2 queue invariant (audit 3.5): exception_prefetch issues the
+	// first vector-stream word unconditionally, so it must never run
+	// while a queue fetch is still outstanding -- the second request
+	// would collide with the in-flight one at the bus adapter.  The core
+	// enforces this remotely, in S_EXC0's epf_pend wait, so check it
+	// here at the point that DEPENDS on it: a future resequencing of the
+	// exception path then fails the suite instead of the hardware.
+	// State 178 is S_EPF_FILL, reachable only from exception_prefetch
+	// and from state 179 (S_EPF_GAP, the word-to-word handshake gap).
+	epf_state_q <= dut.core.state;
+	if (nreset && dut.core.state == 8'd178 && epf_state_q != 8'd178 &&
+	    epf_state_q != 8'd179 && dut.core.epf_pend) begin
+		errors = errors + 1;
+		$display("FAIL: exception_prefetch entered with a queue fetch outstanding (pc=%h)",
+		         dbg_pc);
 	end
 
 	// $F14C models a device that WITHDRAWS its request: IPL rises to the
