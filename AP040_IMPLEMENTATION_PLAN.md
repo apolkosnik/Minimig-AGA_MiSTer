@@ -666,19 +666,31 @@ cache_inhibit plumbing), then full regression + cputest replay.  Expected
 gain: large on fast-RAM working sets; zero architectural risk to exception
 semantics.
 
-STATUS 2026-08-16 (corrected, same day): REVERTED on hardware evidence.
-The enable was built and shipped, measured SLOWER than no internal cache
-on hardware, and backed out: the Minimig build now sets
-AP040_ENABLE_CACHE(0) (cpu_wrapper.v, with the fit/timing rationale in
-the comment above the instance) and BOTH cpu_cache_new instances keep
-their storage (CPU_CACHE 1 on sdram_ctrl/ddram_ctrl).  Minimig.sv's
-comment at the ram1 instance records the revert and the second reason:
-the snoop CDC loses events while clkena is frozen.  The paragraphs
-below describe the enable experiment and are kept for the area
-measurements, which remain valid.  The internal cache returns on the
-X2.1 32-bit fill path (X2.7), NOT by flipping the parameter back: see
-AUDIT_20260816.md section 5 for the latent snoop/port-B bugs that must
-be fixed (with a directed s_stb bench) before any re-enable.
+STATUS 2026-08-18 (third state, ENABLED -- supersedes the 2026-08-16
+revert note that stood here).  AP040_ENABLE_CACHE(1) ships
+(cpu_wrapper.v), timing-clean, with the external cpu_cache_new
+instances ALSO keeping their storage (CPU_CACHE 1) -- the two are
+complementary, not alternatives: the internal cache eats the external
+round trip, the controller caches eat the SDRAM latency behind it.
+Both reasons for the 08-16 revert were fixed, not argued away:
+
+  * snoop loss while clkena frozen (the CDC objection): the cache's
+    snoop port is free-running and ce-independent (audit 5.1-5.3
+    fixes), covered by tb_ap040_cache_snoop T1 exactly in the
+    frozen-clkena window;
+  * "measured SLOWER on hardware": true only for straight-line
+    miss-heavy code, which is what the regression programs are.  On
+    loop code (bench_loop.s under +prof) the internal cache is 1.41x
+    faster on a zero-latency bus, 2.27x on a latent one, and makes the
+    CPU nearly immune to bus latency.
+
+The timing blocker found on the way matters more than the parameter:
+ap040_cache forwarded c_req to c_ack combinationally through pass_active
+in C_IDLE, putting the whole MMU/adapter handshake in one clk_28 cycle;
+clk_28 collapsed to -4.988 the moment the cache was enabled.  Fixed by
+registering the pass (pass_active = C_PASS only).  The paragraphs below
+describe the enable experiment and are kept for the area measurements,
+which remain valid.
 
 Getting there was an area problem, and the measurements are worth
 keeping because two of the three obvious moves were wrong:

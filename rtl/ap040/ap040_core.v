@@ -8,7 +8,8 @@
 //    incl. memory indirect, 32/64-bit MUL/DIV, LINK.L, TRAPcc, bitfields,  //
 //    CAS/CAS2, CHK2/CMP2, and the 040 set: MOVE16, MOVEC registers,        //
 //    CINV/CPUSH/PFLUSH/PTEST with MMU/cache sidebands                      //
-//  - exceptions: formats $0/$1/$2/$3/$4 and format $7 access errors with   //
+//  - exceptions: formats $0/$1/$2/$3 ($4 RTE-accepted when built FPU-less //
+//    but never generated) and format $7 access errors with                 //
 //    pure instruction restart and EA register rollback (MMU faults),       //
 //    RTE with format validation and $1 throwaway continuation, trace       //
 //    (T1/T0), autovectored interrupts with M-bit master/interrupt stack    //
