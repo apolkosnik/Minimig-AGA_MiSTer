@@ -108,9 +108,9 @@ class FpGen:
         if MODE in ("arith", "unfl"):
             # arithmetic and rounding control only: no FMOVE into a register,
             # which is where qemu diverges (it ignores the FPCR precision)
-            k = self.r.choice([0, 1, 2, 3, 4, 5, 6, 13])
+            k = self.r.choice([0, 1, 2, 3, 4, 5, 6, 13, 14])
         else:
-            k = self.r.randrange(14)
+            k = self.r.randrange(15)
         d = self.r.randrange(8)
         s = self.r.randrange(8)
         p = self.r.randrange(NPOOL)
@@ -145,11 +145,30 @@ class FpGen:
             # integer sources exercise the conversion path
             self.emit("fmove.l\t#%d,fp%d" % (self.r.randint(-9999, 9999), d))
         elif k == 12:
-            # store and reload: exercises the packing paths in both formats
-            a = SANDBOX_LO + self.r.randrange(0, 0x300) * 4
+            # store and reload: exercises the packing paths in both formats.
+            # The scratch address must stay BELOW the constant pool: a store
+            # landing in the pool can leave an UNNORMAL extended constant
+            # there (nonzero exponent, clear integer bit), which a real 68040
+            # and AP040 trap as vector 55 while qemu computes it -- a
+            # by-design divergence masquerading as a defect.
+            a = SANDBOX_LO + self.r.randrange(0, (POOL_BASE - SANDBOX_LO) // 4 - 3) * 4
             fmt = self.r.choice(["s", "d", "x"])
             self.emit("fmove.%s\tfp%d,($%X).l" % (fmt, d, a))
             self.emit("fmove.%s\t($%X).l,fp%d" % (fmt, a, s))
+        elif k == 14:
+            # memory-SOURCE arithmetic through (d16,SP): unlike the fmove
+            # loads above, the operand converts on the fly inside the
+            # dispatched op (hardware report shape: FADD.D ($5C,A7),FP2).
+            # SP is $4000 throughout, so the pools sit at negative d16.
+            op = self.r.choice(["fadd", "fsub", "fmul"])
+            fmt = self.r.choice(["s", "d", "x"])
+            if fmt == "s":
+                a = self.sing_addr(self.r.randrange(NSING))
+            elif fmt == "d":
+                a = self.doub_addr(self.r.randrange(NDOUB))
+            else:
+                a = self.pool_addr(self.r.randrange(NPOOL))
+            self.emit("%s.%s	(%d,sp),fp%d" % (op, fmt, a - 0x4000, d))
         else:
             # rounding mode and precision changes drive the rounder
             # Default: extended precision with every rounding mode.  Reduced

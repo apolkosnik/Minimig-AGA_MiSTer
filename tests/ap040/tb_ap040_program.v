@@ -64,6 +64,8 @@ wire        clkena_in = (busstate == 2'b01) | mem_ready | berr;
 
 reg   [2:0] ipl_lvl;
 reg  [15:0] ipl_delay = 0;   // $F148: delayed level-2 IPL countdown
+integer   clkcount = 0;      // free-running clk counter for $F108 stamps
+integer   stamp_prev = 0;
 reg   [7:0] ipl_pulse = 0;   // $F14C: withdraw the request after N cycles
 reg   [7:0] ipl_step  = 0;   // $F150: downgrade the request after N cycles
 reg   [2:0] ipl_next  = 0;   // $F150: level the encoder falls back to
@@ -103,13 +105,27 @@ always @(posedge clk) begin
 end
 // +exctrace: print every exception entry (vector, pc) for A/B diffing
 reg [7:0] et_prev = 0;
+always @(posedge clk) clkcount = clkcount + 1;
 always @(posedge clk) begin
 	et_prev <= dut.core.state;
 	if ($test$plusargs("exctrace") &&
-	    dut.core.state == 8'd34 && et_prev != 8'd34)
+	    dut.core.state == 8'd34 && et_prev != 8'd34) begin
 		$display("EXC vec=%0d pc=%08x spc=%08x sr=%04x",
 		         dut.core.exc_vec, dut.core.pc,
 		         dut.core.exc_spc, dut.core.sr);
+		// vector 55 means an unsupported FP data type reached the FPU:
+		// dump the register file so the offending operand is visible
+		// without a rebuild (a denormal/unnormal register value here is
+		// itself a defect -- no AP040 path may create one).
+		if (dut.core.exc_vec == 8'd55) begin : et_fpdump
+			integer efr;
+			for (efr = 0; efr < 8; efr = efr + 1)
+				$display("  FP%0d = %x %04x %x", efr,
+				         dut.core.g_fpu.fpu.fr_s[efr],
+				         dut.core.g_fpu.fpu.fr_e[efr],
+				         dut.core.g_fpu.fpu.fr_m[efr]);
+		end
+	end
 end
 
 // The internal caches are ON by default here, as in the shipping build.
@@ -518,6 +534,15 @@ always @(posedge clk) begin
 					         mem[16'h3602 >> 1], mem[16'h361E >> 1]);
 					result = 2;
 				end
+			end
+			// $F108: cycle-stamp marker.  Writing a tag prints the clk
+			// count since the previous stamp, so a program can bracket a
+			// block of instructions and get its cost without a waveform.
+			// Used by the FPU latency probe (hw/fptime.s).
+			if (addr_out[15:0] == 16'hF108) begin
+				$display("STAMP tag=%04x cycles=%0d", data_write,
+				         clkcount - stamp_prev);
+				stamp_prev = clkcount;
 			end
 			if (addr_out[15:0] == 16'hF110) begin
 				ipl_lvl <= data_write[2:0];
