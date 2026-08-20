@@ -244,8 +244,13 @@ t0flow:
 	move.w	#$6000,sr
 	stop	#$2700		; a traced STOP never enters stopped state
 	chkcnt	cnt_trace,5,99
+	; MOVEC to a control register is a T0 change of flow; reading one
+	; back is NOT.  gencpu marks only i_MOVE2C ($4E7B) with
+	; trace_t0_68040_only(), and cputest Basic/MOVEC2 expects the trace
+	; after the $4E7B in its sequence rather than the $4E7A before it.
 	move.w	#$6000,sr
-	movec	vbr,d0		; MOVEC also forces a pipeline refill
+	movec	vbr,d0		; $4E7A: reads a control register, no trace
+	nop			; ...so the trace comes from this NOP instead
 	chkcnt	cnt_trace,6,100
 	move.w	#$2700,sr
 

@@ -1133,6 +1133,11 @@ endfunction
 
 // Non-branch instructions which the MC68040 defines as changes of flow for
 // T0 tracing because they synchronize/refill the instruction pipeline.
+// gencpu marks them with trace_t0_68040_only(); note MOVEC is listed for
+// the TO-control-register direction only (i_MOVE2C, $4E7B).  Reading a
+// control register ($4E7A, i_MOVEC2) changes nothing and does not trace --
+// cputest Basic/MOVEC2 expects the trace after the $4E7B in its sequence,
+// not after the $4E7A that precedes it.
 // Taken branches/returns are handled by go_pc; FDBcc/FMOVEM need extension
 // word information and set t0_force in their decode states.
 function t0_special;
@@ -1141,7 +1146,7 @@ function t0_special;
 		t0_special =
 		    op == 16'h007c || op == 16'h027c || op == 16'h0a7c || // to SR
 		    op == 16'h4e71 || op == 16'h4e72 ||                    // NOP/STOP
-		    op == 16'h4e7a || op == 16'h4e7b ||                    // MOVEC
+		    op == 16'h4e7b ||                                      // MOVEC to CR
 		    (op & 16'hfff0) == 16'h4e60 ||                         // MOVE USP
 		    (op & 16'hffc0) == 16'h46c0 ||                         // MOVE to SR
 		    (op & 16'hffc0) == 16'h4ac0 ||                         // TAS
