@@ -236,3 +236,23 @@ whose FPSR is weak and whose NaN-to-integer result is wrong.  Build:
 Used 2026-08-20 to confirm FMOVE.L FPn,Dn: values AND the OPERR/INEX2
 flags match AP040 on all 13 probes across the 2^31 boundary, including
 the rule that a NaN converts to its HIGH MANTISSA LONGWORD.
+
+mmu_oracle.cpp / gen_mmuops.py / cmp_mmuops.py / run_mmuops.sh
+--------------------------------------------------------------
+MMU differential against WinUAE's OWN cpummu.cpp rather than qemu, the
+counterpart to fp_oracle.cpp.  Only the ~37 symbols cpummu.cpp needs are
+stubbed (flat memory, regs, currprefs, the x_phys_* pointers, logging);
+the table walk itself is WinUAE's unmodified code, driven through its
+public mmu_op_real PTEST entry so the result is a real MMUSR.  Build:
+
+  cd /home/adam/WinUAE
+  g++ -w -I. -Iinclude -Iod-unix -o mmu_oracle \
+      /path/to/mmu_oracle.cpp cpummu.cpp
+
+  SIM=.../Vtb_ap040_program ORACLE=.../mmu_oracle ./run_mmuops.sh 1 25
+
+gen_mmuops.py builds one page table and emits it twice -- as an assembly
+program for AP040 and as a memory image plus probe list for the oracle --
+so both sides walk byte-identical tables.  PTEST is compared because its
+MMUSR carries the whole result: resident, write-protect, supervisor,
+modified, global, U bits, cache mode and the physical address.
