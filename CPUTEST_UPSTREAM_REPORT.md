@@ -169,6 +169,40 @@ just terse.
 
 ---
 
+## Issue 3 (informational): the generator records but never applies the 68040 odd-RTE stacked-SR quirk the emulator applies
+
+Not a test failure -- the corpus is self-consistent -- but a
+generator/emulator divergence noticed while verifying the frames above,
+recorded here because it means regenerated data could silently change
+behavior.
+
+The mainline emulator models a hardware-verified 68040 quirk
+(`newcpu.cpp`, in `Exception_normal`):
+
+```c
+if (currprefs.cpu_model == 68040 && nr == 3 && (last_op_for_exception_3 & 0x10000)) {
+    // Weird 68040 bug with RTR and RTE. New SR when exception starts. Stacked SR is different!
+    x_put_word(m68k_areg(regs, 7), last_sr_for_exception3);
+}
+```
+
+i.e. on RTE/RTR to an odd PC the NEW (restored) SR selects mode and
+stack, but the frame's SR word is the PRE-instruction SR
+(`oldsr = regs.sr` before the pop loop, updated across format $1
+throwaways), passed via `exception3_read_prefetch_68040bug`.
+
+`cputest.cpp` has the same plumbing -- its
+`exception3_read_prefetch_68040bug` stores
+`test_exception_3_sr = secondarysr` -- but nothing ever reads
+`test_exception_3_sr`, and `doexcstack2`'s cpu_lvl>=4 path stacks
+`regs.sr`, the restored SR.  So the corpus's odd-RTE/RTR address-error
+frames carry the restored SR, and a CPU implementing the emulator's
+(hardware-true, per the comment) quirk would FAIL the AE group's
+RTE/RTR rounds.  Either the generator should apply the substitution
+like the emulator does, or the dead `test_exception_3_sr` should go.
+
+---
+
 ## Reproducing
 
 ```
