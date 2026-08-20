@@ -1630,7 +1630,29 @@ always @(posedge clk) begin
 							fpsr[9] <= 1;           // INEX2
 							fpsr[3] <= 1;
 							fpsr[5] <= 1;           // accrued UNFL
-							a_t <= T_ZERO;
+							// The significand shifts out entirely, so the
+							// magnitude is below everything representable at
+							// emin.  Round-to-nearest and round-to-zero give
+							// zero, but a DIRECTED mode pointing away from
+							// zero must not: IEEE and softfloat both round a
+							// nonzero value up to the smallest representable
+							// magnitude.  At single/double precision that is
+							// still a normal extended number at emin (one
+							// unit in the last place of the narrowed
+							// significand), so it is expressible here.
+							// Extended precision would need the true
+							// denormal encoding (exponent field 0), which
+							// this implementation does not have, and keeps
+							// flushing to zero.
+							if (pr != 2'd0 && !op_sgl(r_op) &&
+							    ((rnd_mode == 2'b11 && !a_s) ||
+							     (rnd_mode == 2'b10 && a_s))) begin
+								a_t <= T_NUM;
+								a_e <= emin[16:0];
+								a_m <= (pr == 2'd1) ? 64'h0000_0100_0000_0000
+								                    : 64'h0000_0000_0000_0800;
+							end
+							else a_t <= T_ZERO;
 							fst <= F_WB;
 						end
 						else begin
