@@ -410,8 +410,8 @@ frestore_bad_cont:
 	lea	addr_cont(pc),a0
 	move.l	a0,(resume).l
 	move.l	#$400,(exp_addr).l
-	lea	odd_jmp(pc),a0
-	move.l	a0,(exp_pc).l
+	lea	odd_jmp+2(pc),a0	; frame PC is the word after the opcode:
+	move.l	a0,(exp_pc).l		; gencpu's i_JMP incpc(2) before the fault
 	clr.w	(addr_sflag).l
 odd_jmp:
 	jmp	($0401).l	; odd target
@@ -438,7 +438,7 @@ bcc_nt_cont:
 	lea	rte_odd_cont(pc),a0
 	move.l	a0,(resume).l
 	move.l	#$400,(exp_addr).l
-	lea	rte_odd-2(pc),a0	; 040 frame identifies pre-opcode word
+	lea	rte_odd(pc),a0		; the frame names the RTE itself
 	move.l	a0,(exp_pc).l
 	move.w	#1,(exp_srv).l
 	move.w	#$8000,(exp_sr).l
@@ -1004,7 +1004,7 @@ cmpiok:
 	lea	ex_t1_cont(pc),a0
 	move.l	a0,(resume).l
 	move.l	#$400,(exp_addr).l
-	lea	ex_t1_rte-2(pc),a0	; 040 frame identifies pre-opcode word
+	lea	ex_t1_rte(pc),a0	; the frame names the RTE itself
 	move.l	a0,(exp_pc).l
 	move.w	#$0000,-(sp)	; format $0
 	move.l	#$00000401,-(sp)	; odd return PC
@@ -1027,7 +1027,7 @@ ex_t1_cont:
 	lea	ex_t2_cont(pc),a0
 	move.l	a0,(resume).l
 	move.l	#$400,(exp_addr).l
-	lea	ex_t2_rtr-2(pc),a0	; same pre-opcode PC image as RTE
+	lea	ex_t2_rtr(pc),a0	; same as RTE: the frame names the RTR
 	move.l	a0,(exp_pc).l
 	pea	($00000401).l	; odd return address
 	move.w	#$0000,-(sp)	; popped CCR = 0
@@ -1158,10 +1158,12 @@ ex_t7_ok:
 
 	lea	ex_t8_cont(pc),a0
 	move.l	a0,(resume).l
-	lea	ex_t8_op(pc),a0
-	move.l	a0,(exp_pc).l
 	lea	ex_t8_tgt(pc),a0
 	addq.l	#1,a0		; odd JSR target
+	; Unlike BSR and JMP, gencpu guards i_JSR's odd-target special case
+	; with cpu_level <= 1, so a 68040 pushes and then faults on the
+	; INSTRUCTION FETCH at the odd target: the frame names that target.
+	move.l	a0,(exp_pc).l
 	move.l	a0,d0
 	bclr	#0,d0
 	move.l	d0,(exp_addr).l

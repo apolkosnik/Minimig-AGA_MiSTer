@@ -2795,7 +2795,7 @@ always @(posedge clk) begin
 					// committed its SR.  Consequently the address-error frame
 					// carries the restored SR, just as RTR carries its popped
 					// CCR (68040_ae RTE/RTR corpus behavior).
-					exc(`AP040_VEC_ADDRERR, 4'd2, pc_i - 32'd2,
+					exc(`AP040_VEC_ADDRERR, 4'd2, pc_i,
 					    {rte_pc[31:1], 1'b0});
 				end
 				else if (tr_t1 || tr_t0) begin
@@ -2875,7 +2875,7 @@ always @(posedge clk) begin
 					// the v20 generator predates it, and the corpus is the
 					// hardware acceptance test.)  The PC field identifies
 					// the pre-opcode pipeline word.
-					exc(`AP040_VEC_ADDRERR, 4'd2, pc_i - 32'd2,
+					exc(`AP040_VEC_ADDRERR, 4'd2, pc_i,
 					    {m_val[31:1], 1'b0});
 				end
 				else begin
@@ -2927,10 +2927,33 @@ always @(posedge clk) begin
 			end
 
 			//------------------------------------------- jumps and stack frame
-			S_JMP1: go_pc(ea_addr);
+			S_JMP1:
+				if (ea_addr[0])
+					// gencpu's i_JMP does incpc(2) before
+					// exception3_read_prefetch_only, and that path is NOT
+					// gated on cpu_level, so the frame PC is measured from
+					// wherever the PC had reached -- not from the
+					// instruction address.  For (An), (d16,An) and absw
+					// nothing has synced it yet, giving pc_i + 2; the
+					// INDEXED modes resolve their extension against the
+					// real PC first, so it has already advanced past the
+					// extension word and the frame reads pc_i + 6.  Both
+					// values are what the v24 AE group records.
+					exc(`AP040_VEC_ADDRERR, 4'd2,
+					    (ea_mode == 3'b110 ||
+					     (ea_mode == 3'b111 && ea_rn == 3'd3))
+					        ? pc_i + 32'd6 : pc_i + 32'd2,
+					    {ea_addr[31:1], 1'b0});
+				else go_pc(ea_addr);
 
 			S_JSR1: begin
-				if (ea_addr[0]) go_pc(ea_addr); // odd target: no push
+				if (ea_addr[0])
+					// Unlike JMP, gencpu guards i_JSR's odd-target case with
+					// cpu_level <= 1.  A 68040 therefore takes the fault on
+					// the INSTRUCTION FETCH at the odd target, so the frame
+					// names that target, not this instruction.
+					exc(`AP040_VEC_ADDRERR, 4'd2, ea_addr,
+					    {ea_addr[31:1], 1'b0});
 				else begin
 					br_tgt <= ea_addr;
 					mwr(dbg_a7 - 32'd4, `AP040_SZ_L, pc, S_JSR2);
