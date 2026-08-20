@@ -223,3 +223,16 @@ Further qemu 11 FP deviations found 2026-08-04 while closing the FPU gaps:
      set UNFL.  Minimal repro: 2^-16380 * 2^-13 = 2^-16393 gives exponent
      0 with significand $0010000000000000 on AP040 (and per softfloat),
      $0020000000000000 on qemu.  t_fpu.s tests 93-99 pin AP040's encoding.
+
+softfloat_oracle.cpp
+--------------------
+Drives WinUAE's own softfloat (SOFTFLOAT_68K) directly, so an AP040 result
+can be checked against the 68040 reference code rather than against qemu,
+whose FPSR is weak and whose NaN-to-integer result is wrong.  Build:
+
+  cd /path/to/WinUAE
+  g++ -O0 -w -I. -o sfcheck /path/to/softfloat_oracle.cpp softfloat/softfloat.cpp
+
+Used 2026-08-20 to confirm FMOVE.L FPn,Dn: values AND the OPERR/INEX2
+flags match AP040 on all 13 probes across the 2^31 boundary, including
+the rule that a NaN converts to its HIGH MANTISSA LONGWORD.
