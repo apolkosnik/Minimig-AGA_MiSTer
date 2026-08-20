@@ -22,7 +22,8 @@ import os
 import struct
 import sys
 
-DATA_VERSION = 20  # the downloaded 040 sets; header layout per main.c @f0cf9536~1
+DATA_VERSION = 20
+SUPPORTED_VERSIONS = (20, 24)  # the downloaded 040 sets; header layout per main.c @f0cf9536~1
 
 CT_SSP, CT_MSP, CT_SR, CT_PC = 16, 17, 18, 19
 CT_FPIAR, CT_FPSR, CT_FPCR = 20, 21, 22
@@ -47,12 +48,23 @@ class Header:
     # v20 layout: version, starttimeid, hmem/lmem, tmem addr/size,
     # opcode addr, lvl_mask, fpu_model, low start/end, high start/end,
     # safe start/end, ustack, sstack, vectors, 3 spare, name
+    #
+    # v24 is v20 with three longwords inserted after the lvl/mask word
+    # (initial interrupt state + fpu_max_precision, then two reserved),
+    # so everything from fpu_model on shifts up by three and the
+    # instruction name moves from +80 to +92.  Field order verified
+    # against WinUAE cputest/main.c's header reader, not inferred.
     def __init__(self, data):
         if len(data) < 96:
             raise ValueError("short instruction header (%d bytes)" % len(data))
-        f = struct.unpack(">18I", data[0:72])
-        if f[0] != DATA_VERSION:
-            raise ValueError("bad DATA_VERSION %d" % f[0])
+        ver = struct.unpack(">I", data[0:4])[0]
+        if ver not in SUPPORTED_VERSIONS:
+            raise ValueError("bad DATA_VERSION %d" % ver)
+        self.data_version = ver
+        shift = 3 if ver >= 24 else 0
+        name_off = 92 if ver >= 24 else 80
+        f = struct.unpack(">21I", data[0:84])
+        f = f[0:7] + f[7 + shift:]
         self.starttimeid = f[1]
         self.hmem_rom = struct.unpack(">h", data[8:10])[0]
         self.lmem_rom = struct.unpack(">h", data[10:12])[0]
@@ -76,11 +88,17 @@ class Header:
         self.user_stack_memory = f[14]
         self.super_stack_memory = f[15]
         self.exception_vectors = f[16]
-        self.inst_name = data[80:96].split(b"\0")[0].decode("ascii", "replace")
+        self.inst_name = data[name_off:name_off + 16].split(b"\0")[0].decode(
+            "ascii", "replace")
 
 
 class DataFile:
-    """Validated v20 NNNN.dat envelope and its process_test() payload."""
+    """Validated NNNN.dat envelope and its process_test() payload.
+
+    The envelope (version, starttimeid, flags, spare; 16 bytes; footer
+    CT_END_FINISH) is byte-identical in v20 and v24 -- verified against
+    WinUAE cputest/main.c -- so only the accepted version number differs.
+    """
 
     HEADER_SIZE = 16
 
@@ -91,9 +109,13 @@ class DataFile:
         self.path = path
         self.version, self.starttimeid, self.flags, self.spare = \
             struct.unpack(">4I", data[:self.HEADER_SIZE])
-        if self.version != DATA_VERSION:
+        if self.version not in SUPPORTED_VERSIONS:
             raise ValueError("bad data-file version %d%s" %
                              (self.version, (" in " + path) if path else ""))
+        if header is not None and self.version != header.data_version:
+            raise ValueError("data v%d under header v%d%s" %
+                             (self.version, header.data_version,
+                              (" in " + path) if path else ""))
         if header is not None and self.starttimeid != header.starttimeid:
             raise ValueError("data/header starttime mismatch %08x != %08x%s" %
                              (self.starttimeid, header.starttimeid,
@@ -225,7 +247,30 @@ class Stream:
         return (e, m0, m1)
 
     def restore_bytes(self):
-        """CT_MEMWRITES/CT_PC_BYTES: opcode bytes at opcode_memory+offset."""
+        """CT_MEMWRITES/CT_PC_BYTES: opcode bytes at opcode_memory+offset.
+
+        The escape encoding differs between corpus versions (main.c
+        restore_bytes): v20 keys it on the packed length field being 31 and
+        follows with a length byte only, keeping the packed 3-bit offset.
+        v24 keys it on the whole byte being $FF and follows with a FULL
+        offset byte and then the length.  Getting this wrong shifts the
+        entire opcode image by one byte, which shows up as the CPU
+        fetching garbage rather than as a decode error.
+        """
+        if getattr(self.h, "data_version", 20) >= 24:
+            if self.peek() == 0xFF:
+                self.u8()
+                off = self.u8()
+                n = self.u8()
+                if n == 0:
+                    n = 256
+            else:
+                v = self.u8()
+                off = v >> 5
+                n = v & 31
+                if n == 0:
+                    n = 32
+            return off, self.take(n)
         v = self.u8()
         off = v >> 5
         n = v & 31

@@ -154,6 +154,7 @@ module sdram32_ctrl
 	output            sd2_ras,
 	output            sd2_cas,
 	output reg  [1:0] sd2_dqm,
+	output reg        dual_ok,       // init probe found the second module
 	inout      [15:0] sd2_data,
 	output            sd2_clk,
 	output            sd2_cke,
@@ -204,8 +205,23 @@ module sdram32_ctrl
 assign sd_cke  = 1;
 assign sd2_cke = 1;
 
-// Command lockstep: one source, two pin groups (see header).
-assign sd2_addr = sd_addr;
+// The io-board routes no DQM lines to the secondary socket; the SDRAM
+// module itself shorts DQMH/DQML to A12/A11 (the convention the primary
+// already serves with sd_addr[12:11] <= cas_dqm at the write CAS).  The
+// secondary chip therefore takes ITS lane's byte masks on
+// sd2_addr[12:11] in exactly the cycles the primary's [12:11] carry
+// cas_dqm; everywhere else (rows, refresh, mode word) the two address
+// buses stay lockstep-identical.  Without this, a secondary-lane write
+// reaches the chip with A12/A11 = cas_dqm = 2'b11 and is dropped whole.
+reg        sd2_a_dqm_live = 0;   // sd_addr[12:11] carries write masks now
+reg  [1:0] sd2_a_dqm;            // the secondary lane's masks for then
+
+// Command lockstep: one source, two pin groups (see header).  A12/A11
+// diverge only while the write CAS (and its hold window) carries byte
+// masks: the modules short DQMH/DQML to those pins, so each chip must
+// see its own lane's masks there (see sd2_a_dqm above).
+assign sd2_addr = {sd2_a_dqm_live ? sd2_a_dqm : sd_addr[12:11],
+                   sd_addr[10:0]};
 assign sd2_ba   = sd_ba;
 assign sd2_we   = sd_we;
 assign sd2_ras  = sd_ras;
@@ -223,11 +239,32 @@ localparam [2:0]
 	CPU_FILL = 6;
 
 reg         cache_fill;
-reg  [3:0]  initstate;
+reg  [4:0]  initstate;
 reg         init_done;
+// Secondary-module probe (DUAL builds): during init, one write/read
+// pair per pattern proves the second SDRAM is present and its lanes
+// are straight -- a socket without a module reads garbage and clears
+// dual_ok, so the build can refuse to run with a broken chip-RAM lane
+// instead of corrupting silently.  The primary lane is checked with
+// the complement, which also catches crossed lanes and validates the
+// capture timing itself.  DUAL_SDRAM=0 builds keep the original
+// 16-state init cycle-identically and tie dual_ok on.
+localparam [4:0] INIT_LAST = DUAL_SDRAM ? 5'd23 : 5'd15;
+localparam [15:0] PROBE_A = 16'hA5C3;
+localparam [15:0] PROBE_B = 16'h3C5A;
+reg         dual_a;
+// The probe compares run on their OWN capture registers: hanging the
+// equality gates off sdata_reg/sdata2_reg puts init-only logic into
+// those registers' already-critical fill/read fanout cones (measured
+// -0.5 ns on the first DUAL fit).  The shadows see nothing but the
+// probe, and the compare is staged over two cycles for the same
+// reason.  DUAL_SDRAM=0 folds all of it away.
+reg  [15:0] probe_cap, probe_cap2;
+reg         probe_eq, probe_eq2;
 reg  [3:0]  sdram_state;
 reg  [2:0]  slot_type = IDLE;
 reg [15:0]  sdata_reg;
+(* preserve *) reg [15:0] sdata_reg_f, sdata2_reg_f;
 reg [15:0]  sdata_reg_q;
 reg [15:0]  sdata2_reg;
 reg         chipWE;
@@ -348,6 +385,21 @@ wire [15:0] dsel1 = (j1 == 2'd0) ? dw0 : (j1 == 2'd1) ? dw1 : (j1 == 2'd2) ? dw2
 wire [15:0] dsel2 = (j2 == 2'd0) ? dw0 : (j2 == 2'd1) ? dw1 : (j2 == 2'd2) ? dw2 : dw3;
 wire [15:0] dsel3 = (j3 == 2'd0) ? dw0 : (j3 == 2'd1) ? dw1 : (j3 == 2'd2) ? dw2 : dw3;
 
+// the fill path's private bypass/rotation over its own capture copies;
+// identical selects, so the data is the same by construction
+wire [15:0] fA_hi = (sdram_state == 4'd8)  ? sdata2_reg_f : hA_hi;
+wire [15:0] fA_lo = (sdram_state == 4'd8)  ? sdata_reg_f  : hA_lo;
+wire [15:0] fB_hi = (sdram_state == 4'd10) ? sdata2_reg_f : hB_hi;
+wire [15:0] fB_lo = (sdram_state == 4'd10) ? sdata_reg_f  : hB_lo;
+wire [15:0] fw0 = (cas_rot[1] == 1'b0) ? fA_hi : fB_hi;
+wire [15:0] fw1 = (cas_rot[1] == 1'b0) ? fA_lo : fB_lo;
+wire [15:0] fw2 = (cas_rot[1] == 1'b1) ? fA_hi : fB_hi;
+wire [15:0] fw3 = (cas_rot[1] == 1'b1) ? fA_lo : fB_lo;
+wire [15:0] fsel0 = (j0 == 2'd0) ? fw0 : (j0 == 2'd1) ? fw1 : (j0 == 2'd2) ? fw2 : fw3;
+wire [15:0] fsel1 = (j1 == 2'd0) ? fw0 : (j1 == 2'd1) ? fw1 : (j1 == 2'd2) ? fw2 : fw3;
+wire [15:0] fsel2 = (j2 == 2'd0) ? fw0 : (j2 == 2'd1) ? fw1 : (j2 == 2'd2) ? fw2 : fw3;
+wire [15:0] fsel3 = (j3 == 2'd0) ? fw0 : (j3 == 2'd1) ? fw1 : (j3 == 2'd2) ? fw2 : fw3;
+
 // fill data for cpu_cache_new: same pipeline depth as sdata_reg_q, so the
 // cache's four acknowledges are unchanged in timing.
 reg [15:0] cfill_dat;
@@ -389,10 +441,10 @@ always @ (posedge sysclk) begin
 
 	if(init_done && slot_type == CPU_READCACHE) begin
 		case(sdram_state)
-			 8: begin cache_fill <= 1; cfill_dat <= dsel0; end
-			10: begin cache_fill <= 1; cfill_dat <= dsel1; end
-			12: begin cache_fill <= 1; cfill_dat <= dsel2; end
-			14: begin cache_fill <= 1; cfill_dat <= dsel3; end
+			 8: begin cache_fill <= 1; cfill_dat <= fsel0; end
+			10: begin cache_fill <= 1; cfill_dat <= fsel1; end
+			12: begin cache_fill <= 1; cfill_dat <= fsel2; end
+			14: begin cache_fill <= 1; cfill_dat <= fsel3; end
 		endcase
 	end
 end
@@ -472,10 +524,34 @@ always @ (posedge sysclk) begin
 	if(!reset) begin
 		initstate <= 0;
 		init_done <= 0;
+		dual_a    <= 0;
+		dual_ok   <= (DUAL_SDRAM == 0);
 	end else begin
 		if (sdram_state == 15) begin
-			if(~&initstate) initstate <= initstate + 1'd1;
+			if (initstate != INIT_LAST) initstate <= initstate + 1'd1;
 			else init_done <= 1;
+		end
+		if (DUAL_SDRAM != 0 && !init_done) begin
+			// the probe READ at state 0 lands its first beat in the
+			// shadow captures at state 5 (the engine's CAS-to-capture
+			// spacing); equality flags at 6, verdict at 7 -- before
+			// later beats overwrite the captures
+			if (sdram_state[0]) begin
+				probe_cap  <= sd_data;
+				probe_cap2 <= sd2_data;
+			end
+			if (sdram_state == 4'd6) begin
+				probe_eq  <= (probe_cap ==
+				              ((initstate == 5'd17) ? ~PROBE_A : ~PROBE_B));
+				probe_eq2 <= (probe_cap2 ==
+				              ((initstate == 5'd17) ?  PROBE_A :  PROBE_B));
+			end
+			if (sdram_state == 4'd7) begin
+				if (initstate == 5'd17)
+					dual_a <= probe_eq && probe_eq2;
+				if (initstate == 5'd21)
+					dual_ok <= dual_a && probe_eq && probe_eq2;
+			end
 		end
 	end
 end
@@ -772,14 +848,24 @@ always @ (posedge sysclk) begin
 	if(sdram_state[0]) begin
 		sdata_reg  <= sd_data;
 		sdata2_reg <= sd2_data;
+		// dedicated fill-path copies: the live-bypass cone
+		// sdata2_reg -> dsel -> cfill_dat was the DUAL variant's last
+		// clk_114 violator; these let the fitter place the fill mux at
+		// cpu_cache_new's port without stretching the chip48 consumers
+		sdata_reg_f  <= sd_data;
+		sdata2_reg_f <= sd2_data;
 	end
 
 	if(!init_done) begin
 		slot_type             <= IDLE;
 		casaddr               <= 0;
 		rcnt                  <= 0;
-		sd_dqm                <= 3;
-		sd2_dqm               <= 3;
+		// masked through the register/refresh part of init; the probe
+		// slots need DQM held low across their write/read windows
+		if (initstate < 5'd14) begin
+			sd_dqm        <= 3;
+			sd2_dqm       <= 3;
+		end
 		sd_ba                 <= 0;
 		sd_cs                 <= 0;
 		sd2_cs                <= 0;
@@ -803,6 +889,38 @@ always @ (posedge sysclk) begin
 					sd_cas       <= 0;
 					sd_we        <= 0;
 					sd_addr      <= 13'b0001000100010; // CL=2, BURST=4
+					sd2_a_dqm_live <= 0;
+				end
+				// secondary-module probe: one command per slot, so every
+				// tRCD/tWR/tRP is covered by the 16-cycle slot spacing.
+				// Row 0/bank 0/column 0 with auto-precharge throughout;
+				// A12/A11 stay low, so the modules' A-shorted DQM pins
+				// leave every byte unmasked.
+				14, 16, 18, 20 : if (DUAL_SDRAM != 0) begin // ACTIVE row 0
+					sd_ras       <= 0;
+					sd_cas       <= 1;
+					sd_we        <= 1;
+					sd_addr      <= 0;
+				end
+				15, 19 : if (DUAL_SDRAM != 0) begin // WRITE col 0, AP
+					sd_ras       <= 1;
+					sd_cas       <= 0;
+					sd_we        <= 0;
+					sd_addr      <= 13'b0010000000000;
+					sd_dqm       <= 0;
+					sd2_dqm      <= 0;
+					sd_dout      <= (initstate == 5'd15) ? ~PROBE_A : ~PROBE_B;
+					sd2_dout     <= (initstate == 5'd15) ?  PROBE_A :  PROBE_B;
+					sd_doe       <= 1;
+					sd2_doe      <= 1;
+				end
+				17, 21 : if (DUAL_SDRAM != 0) begin // READ col 0, AP
+					sd_ras       <= 1;
+					sd_cas       <= 0;
+					sd_we        <= 1;
+					sd_addr      <= 13'b0010000000000;
+					sd_dqm       <= 0;
+					sd2_dqm      <= 0;
 				end
 			endcase
 		end
@@ -839,6 +957,7 @@ always @ (posedge sysclk) begin
 				if(~chipDMA | ~chipRW) begin
 					slot_type    <= CHIP;
 					{sd_ba,sd_addr,casaddr[8:0]} <= chip_unit;
+					sd2_a_dqm_live <= 0;
 					sd_ras       <= 0;
 					cas_dqm      <= {chipU,chipL};
 					cas_dqm2     <= {chipU,chipL};
@@ -862,6 +981,7 @@ always @ (posedge sysclk) begin
 				else if(pre_sel == PRE_WRITE) begin
 					slot_type    <= CPU_WRITECACHE;
 					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
+					sd2_a_dqm_live <= 0;
 					sd_ras       <= 0;
 					cas_dqm      <= write_dqm;
 					cas_dqm2     <= write_dqm;
@@ -881,6 +1001,7 @@ always @ (posedge sysclk) begin
 				else if(pre_sel == PRE_WALKER) begin
 					slot_type    <= walker_we ? WALKER_WRITE : WALKER_READ;
 					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
+					sd2_a_dqm_live <= 0;
 					sd_ras       <= 0;
 					cas_dqm      <= 0;
 					cas_dqm2     <= 0;
@@ -897,6 +1018,7 @@ always @ (posedge sysclk) begin
 				else if(pre_sel == PRE_CACHE) begin
 					slot_type    <= CPU_READCACHE;
 					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
+					sd2_a_dqm_live <= 0;
 					sd_ras       <= 0;
 					cas_sd_cas   <= 0;
 					cas_rot      <= pre_rot;
@@ -906,6 +1028,7 @@ always @ (posedge sysclk) begin
 				else if(pre_sel == PRE_FILL) begin
 					slot_type    <= CPU_FILL;
 					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
+					sd2_a_dqm_live <= 0;
 					sd_ras       <= 0;
 					cas_sd_cas   <= 0;
 				end
@@ -931,6 +1054,7 @@ always @ (posedge sysclk) begin
 		// real silicon).
 		if (cas2_go && slot_cas2) begin
 				sd_addr      <= {1'b1, casaddr[9:1], ~casaddr[0]};
+				sd2_a_dqm_live <= 0;
 				sd_cas       <= 0;
 				sd_dqm       <= 0;
 				sd2_dqm      <= 0;
@@ -951,6 +1075,7 @@ always @ (posedge sysclk) begin
 		// deasserts exactly like the original arm did.
 		if (cas_go) begin
 			sd_addr         <= {!slot_cas2, casaddr}; // A10: AUTO PRECHARGE
+			sd2_a_dqm_live  <= 0;
 			sd_cas          <= cas_sd_cas;
 			sd_dqm          <= 0;
 			sd2_dqm         <= 0;
@@ -961,6 +1086,10 @@ always @ (posedge sysclk) begin
 				sd2_doe      <= 1;
 				sd_addr[12:11]<= cas_dqm;
 				sd_dqm       <= cas_dqm;
+				// the secondary's A12/11-shorted DQM takes ITS lane's
+				// masks for exactly as long as the primary's hold cas_dqm
+				sd2_a_dqm_live <= 1;
+				sd2_a_dqm    <= cas_dqm2;
 				sd2_dqm      <= cas_dqm2;
 				sd_we        <= 0;
 			end

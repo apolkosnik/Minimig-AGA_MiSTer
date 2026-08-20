@@ -85,6 +85,13 @@ compile dualram_turbo iverilog -g2012 -I "$RTL" -s tb_dualram_turbo \
 	../../rtl/A2065/a2065_ddram_arbiter.v \
 	sim_dpram.v ../../rtl/ram_cs_guard.v \
 	$RTL/ap040_bus_timeout.v $RTL/ap040_walker_cdc.v $SRC &
+compile cache_snoop iverilog -g2012 -I "$RTL" -s tb_ap040_cache_snoop \
+	-o "$WORK/tb_cache_snoop.vvp" tb_ap040_cache_snoop.v \
+	sim_dpram.v $RTL/ap040_cache.v &
+compile sdram32 iverilog -g2012 -s tb_sdram32 \
+	-o "$WORK/tb_sdram32.vvp" tb_sdram32.v \
+	../../rtl/sdram32_ctrl.v "$WORK/sdram_ctrl_sim.v" \
+	../../rtl/cpu_cache_new.v sim_dpram.v &
 wait
 
 if ls "$WORK"/.status.compile_* >/dev/null 2>&1; then
@@ -104,6 +111,19 @@ leg() {
 	fi
 }
 
+# a negative leg passes only when the bench FAILS: the deliberate-break
+# modes must stay capable of failing, or the positive checks prove nothing
+negleg() {
+	name=$1
+	shift
+	if vvp "$@" > "$WORK/$name.log" 2>&1 &&
+	   grep -q "TEST FAILED" "$WORK/$name.log"; then
+		:
+	else
+		echo "$name" > "$WORK/.status.$name"
+	fi
+}
+
 leg reset              "$WORK/tb_reset.vvp" &
 leg double_fault       "$WORK/tb_double_fault.vvp" &
 leg walker_cdc         "$WORK/tb_walker_cdc.vvp" &
@@ -112,6 +132,12 @@ leg cpu_cache_new      "$WORK/tb_cpu_cache_new.vvp" &
 leg ddram_walker_snoop "$WORK/tb_ddram_walker_snoop.vvp" &
 leg bus_timeout        "$WORK/tb_bus_timeout.vvp" &
 leg cart_hrtmon        "$WORK/tb_cart_hrtmon.vvp" &
+leg sdram32            "$WORK/tb_sdram32.vvp" &
+leg cache_snoop        "$WORK/tb_cache_snoop.vvp" &
+negleg sdram32_brk_lock "$WORK/tb_sdram32.vvp" +break_lockstep &
+negleg sdram32_brk_lane "$WORK/tb_sdram32.vvp" +break_laneswap &
+negleg sdram32_brk_wr   "$WORK/tb_sdram32.vvp" +break_chipwr &
+leg sdram32_nomod      "$WORK/tb_sdram32.vvp" +no_module &
 leg integer            "$WORK/tb_prog.vvp" +prog=build/t_integer.hex &
 leg exceptions         "$WORK/tb_prog.vvp" +prog=build/t_exceptions.hex &
 leg mmu                "$WORK/tb_prog.vvp" +prog=build/t_mmu.hex &

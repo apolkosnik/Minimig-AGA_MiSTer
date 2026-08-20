@@ -666,9 +666,19 @@ cache_inhibit plumbing), then full regression + cputest replay.  Expected
 gain: large on fast-RAM working sets; zero architectural risk to exception
 semantics.
 
-STATUS 2026-08-16: DONE and enabled.  ap040_cache is the only cache in
-the system; both cpu_cache_new instances are built without their storage
-(CPU_CACHE 0 on sdram_ctrl/ddram_ctrl from Minimig.sv).
+STATUS 2026-08-16 (corrected, same day): REVERTED on hardware evidence.
+The enable was built and shipped, measured SLOWER than no internal cache
+on hardware, and backed out: the Minimig build now sets
+AP040_ENABLE_CACHE(0) (cpu_wrapper.v, with the fit/timing rationale in
+the comment above the instance) and BOTH cpu_cache_new instances keep
+their storage (CPU_CACHE 1 on sdram_ctrl/ddram_ctrl).  Minimig.sv's
+comment at the ram1 instance records the revert and the second reason:
+the snoop CDC loses events while clkena is frozen.  The paragraphs
+below describe the enable experiment and are kept for the area
+measurements, which remain valid.  The internal cache returns on the
+X2.1 32-bit fill path (X2.7), NOT by flipping the parameter back: see
+AUDIT_20260816.md section 5 for the latent snoop/port-B bugs that must
+be fixed (with a directed s_stb bench) before any re-enable.
 
 Getting there was an area problem, and the measurements are worth
 keeping because two of the three obvious moves were wrong:
@@ -696,12 +706,12 @@ Final fit, all clocks met:
 So the internal cache now costs 609 ALMs LESS than the external caches
 it replaced, against the +1,759 it cost before this work.
 
-Known consequence: ap040_cache caches only configured fast RAM, because
-chip RAM needs snooping for chipset DMA and ap040_cache has no snoop
-port.  Chip-RAM accesses are uncached now -- good for fast-RAM code (an
-internal hit skips the clock-domain round trip), worse for code running
-from chip RAM.  Giving ap040_cache a snoop port is the obvious follow-up
-if chip-RAM performance matters.
+Correction to an earlier version of this section: ap040_cache DOES have
+a snoop port now (s_stb/s_addr), and the cacheable windows include chip
+RAM because of it (ap040_tg68k_compat.v wires sdram_ctrl's chipset-write
+snoop through cpu_wrapper).  That is the machinery whose CDC drops
+events while clkena is frozen -- one of the two reasons for the revert
+above, and one of the audited latent bugs.
 
 ### P2. Single-clock-domain migration (28MHz -> clk_114 + 4:1 clock enable)
 
@@ -805,13 +815,15 @@ FDIV ~74, FSQRT ~73; 6581 ALUTs, 1799 registers, zero DSP blocks.
   cycles total, and the serial accumulator ALUTs become DSP blocks.
   A separate single/FSGL fast path (once proposed) is REDUNDANT: the full
   multiplier already serves every format at the same latency.
-- F_DIVL: 2 restoring bits/cycle (two cascaded 65-bit compare-subtracts);
-  integer bit + 33 pair-iterations: ~74 -> ~41 cycles.
-- F_SQRTL: 2 result digits/cycle (second trial folds the first digit into
-  the partial root combinationally): ~73 -> ~40 cycles.
-- Follow-up headroom: 3 bits/cycle divide (66 = 3x22) and sqrt cut ~10
-  more cycles each if the subtract cascade still meets timing; measure
-  first, the returns are shrinking.
+- F_DIVL: 3 restoring bits/cycle (three cascaded compare-subtracts,
+  66 = 3 x 22): integer bit + 22 iterations: ~74 -> ~24 cycles.  (This
+  section originally recorded the 2-bit/cycle intermediate step; the
+  follow-up headroom item below was taken the same day and the RTL is
+  the 3-bit form.)
+- F_SQRTL: 3 result digits/cycle (later trials fold the earlier digits
+  into the partial root combinationally): ~73 -> ~24 cycles.
+- Follow-up headroom REALIZED: the 3-per-cycle forms above met timing;
+  further widening was not attempted, the returns are shrinking.
 
 ### F1. Non-blocking S_FPU_GO (DONE 2026-08-15)
 
@@ -916,6 +928,19 @@ one ACTIVE + 4-beat burst instead of the 8+2 the 16-bit path needs.
     lane masking uses nCS across the WHOLE slot including ACTIVE
     (masking only the write leaves the secondary's row open against
     the primary's auto-precharge -- illegal on the next ACTIVE).
+    BYTE masking within the secondary lane (corrected 2026-08-16):
+    the SDRAM modules short DQMH/DQML to A12/A11 -- the same
+    convention sdram_ctrl already serves with its
+    sd_addr[12:11] <= cas_dqm write-CAS mirror -- so the secondary's
+    byte masks travel on sd2_addr[12:11], which diverges from the
+    lockstep copy for exactly the write-CAS hold window (sd2_a_dqm in
+    sdram32_ctrl).  The sd2_dqm output is a phantom on this board.
+    Before this fix every secondary-lane 16-bit write reached the
+    chip with A12/A11 = 2'b11 and was dropped whole; tb_sdram32 now
+    models the module short (dqm from addr[12:11]) and is wired into
+    run_tests.sh.  Caveat: a secondary module with REAL (unshorted)
+    DQM routing would need read-modify-write instead; the plan
+    assumes the standard shorted modules.
   - CDC: none new.  The controller stays on clk_114; the CPU-side
     handshake is unchanged in protocol, doubled in width.
 
@@ -940,6 +965,23 @@ spec error, not a shortfall.
     argument); flow change flushes the queue (mechanism exists).
   - Gate: S_FETCH+S_IMMF occupancy on t_integer drops below 20% (from
     71%) with the suite and corpus untouched.
+
+MEASURED 2026-08-17 (tb_ap040_program +prof, the tb_prof X2.8 asks
+for; t_integer phase 0): the free-running queue lands 17236 cycles,
+down from 20106 after the peephole round and 23750 at the section-19
+baseline (-27% cumulative), suite and corpus untouched.  Occupancy is
+51% (8865/17236; was 66% by the same metric), of which only 1799
+cycles are bus-wait stalls -- BUT the 20% gate as written is
+structurally unreachable by any queue: decode folds into S_FETCH's pop
+cycle (S_DECODE holds only 976 cycles), so one S_FETCH cycle per
+instruction plus one S_IMMF cycle per immediate word are irreducible
+in the multi-cycle FSM, and those actives alone are ~41% of the total.
+Like X2.1's "8 clk_114" reading, the number was a spec error: fetch
+occupancy below 20% requires fetch to OVERLAP execute, which is
+X2.3's definition.  X2.2's gate is re-scoped to what it measures:
+wall clock (met: -14% from the queue alone) and fetch-state bus-wait
+stalls (met: 1799, from 2584 on a 27% larger total); the <20%
+occupancy line moves to X2.3's exit criteria.
 
 ## X2.3 Pipeline: 040-style stages on one clock domain
 
@@ -984,6 +1026,19 @@ where the restart model gets re-examined (real WB1-WB3).  T1 falls out
 at 57 MHz already if X2.3's CPI gate held: 57M * 0.5 IPC > 25M * 1.0.
 
 ## X2.7 Area budget (honest numbers from the ap040 branch fits)
+
+MEASURED 2026-08-17: the X2.2 queue plus the audit-fix program took the
+tree from 39,645 ALMs (95%, committed HEAD) to 42,067 -- OVER the
+41,910-ALM device.  Recovered by the "MMU pruning" item below, executed
+as storage conversion rather than feature removal: the ATC's 128 x 45b
+payload (5.7K flops + the 4-way mux fabric, the single largest ALM sink)
+moved into one 180x32 bram.vhd dpram row per {bank, set}.  Validity and
+round-robin stay in flops, so PFLUSHA, warm-reset retention and the
+lookup guard remain single-cycle; enabled translation pays a one-clock
+lookup pipe (TC.E=0 and TTR hits stay combinational -- the common
+configuration pays nothing); PFLUSH page/nonglobal variants and the
+PTEST pre-flush became a ~34-cycle row sweep.  Result: 37,170 ALMs
+(89%), clk_114/clk_sys met, and ~4.7K ALMs of headroom for X2.3-X2.5.
 
 Current: core 10.0K + MMU 5.6K + FPU 4.5K ALMs, system total 94%.
 X2 adds: fetch queue (+0.3K), pipeline regs/forwarding (+1.5K), second

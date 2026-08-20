@@ -12,8 +12,13 @@
 
 module tb_dat_replay;
 
-localparam [31:0] TBASE = 32'h4200_0000;
-localparam [31:0] TSIZE = 32'h000A_0000;
+// Corpus geometry is a property of the DATA, not of this bench: v20 data
+// puts test memory at $4200_0000/640K, v24 at $4380_0000/2M.  Both are
+// taken from the APR2 job header at startup; TMEM_MAX only has to bound
+// the largest corpus we accept.
+localparam [31:0] TMEM_MAX = 32'h0020_0000;
+reg [31:0] TBASE;
+reg [31:0] TSIZE;
 localparam [31:0] CAPV  = 32'h4210_0000;
 localparam [31:0] CAPH  = 32'h4211_0000;
 localparam [31:0] RND2  = 32'h524E4432;
@@ -88,7 +93,7 @@ wire [31:0] dbg_pc = debug_status[31:0];
 //--------------------------------------------------------------------------
 
 reg [7:0] lmem [0:32767];
-reg [7:0] tmem [0:655359];
+reg [7:0] tmem [0:TMEM_MAX-1];
 
 wire in_low  = (addr_out[31:15] == 0);
 wire in_test = (addr_out >= TBASE) && (addr_out < TBASE + TSIZE);
@@ -176,11 +181,11 @@ always @(posedge clk) begin
 			         jr, test_idx, round_idx, addr_out, data_write, nuds, nlds);
 		if (!nuds) begin
 			if (in_low)  lmem[{addr_out[14:1], 1'b0}] <= data_write[15:8];
-			if (in_test) tmem[{toff[19:1], 1'b0}] <= data_write[15:8];
+			if (in_test) tmem[{toff[20:1], 1'b0}] <= data_write[15:8];
 		end
 		if (!nlds) begin
 			if (in_low)  lmem[{addr_out[14:1], 1'b1}] <= data_write[7:0];
-			if (in_test) tmem[{toff[19:1], 1'b1}] <= data_write[7:0];
+			if (in_test) tmem[{toff[20:1], 1'b1}] <= data_write[7:0];
 		end
 	end
 end
@@ -206,6 +211,7 @@ end
 
 reg exc_seen;
 reg cap_pend;
+reg cap_pend2;
 reg [7:0] cap_vec;
 reg [7:0] latest_exc_vec;
 reg [31:0] cap_regs [0:15];
@@ -222,11 +228,22 @@ always @(posedge clk) begin
 	if (!round_active) begin
 		exc_seen <= 0;
 		cap_pend <= 0;
+		cap_pend2 <= 0;
 	end else begin
-		// deferred integer-register sample: one cycle after S_EXC0 entry,
-		// once any write in flight at the faulting edge has landed
-		if (cap_pend) begin
+		// Deferred integer-register sample: TWO qualified cycles after
+		// S_EXC0 entry.  A write issued by the faulting state has rf_we
+		// high during the first of those cycles and only reaches the
+		// register file on the edge that ENDS it, so sampling any earlier
+		// reads the pre-write value and reports an architecturally
+		// committed update as missing.  The wait must also be on
+		// clkena_in rather than the raw clock, because the register file
+		// only commits on qualified edges.
+		if (cap_pend && clkena_in) begin
 			cap_pend <= 0;
+			cap_pend2 <= 1;
+		end
+		else if (cap_pend2 && clkena_in) begin
+			cap_pend2 <= 0;
 			for (ci = 0; ci < 8; ci = ci + 1) begin
 				cap_regs[ci] <= dut.core.regfile.dreg[ci];
 				cap_regs[8+ci] <= (ci == 7) ? dut.core.regfile.usp
@@ -635,7 +652,7 @@ task inject_state;
 		dut.core.tc = 0; dut.core.itt0 = 0; dut.core.itt1 = 0;
 		dut.core.dtt0 = 0; dut.core.dtt1 = 0;
 			dut.core.mmusr = 0; dut.core.urp = 0; dut.core.srp = 0;
-			dut.core.epf_count = 0; dut.core.epf_hit = 0;
+			dut.core.epf_count = 0; dut.core.epf_armed = 0;
 			// Direct state injection replaces the native runner's completed entry
 			// RTE.  Reset refill left this asserted, which made a pending corpus
 			// IRQ preempt the held test opcode as though it were the first opcode
@@ -767,11 +784,18 @@ task run_round;
 						primary_vec = cap_vec;
 					end
 					saw_trace = 1;
-					if (e_trace == 2 && e_exc == 9) begin
-						// Trace-only record: the vector-9 entry is the result.
-						// If another exception is recorded, this standalone
-						// trace happened first; execute the synthetic RTE and
-						// continue to that primary exception.
+					if (e_exc == 9) begin
+						// The vector-9 entry IS the round's recorded result --
+						// whenever the corpus says so, not only for the
+						// standalone-trace encoding (e_trace == 2).  With T1
+						// set the tested instruction traces and the corpus
+						// records exception 9 with NO separate trace record
+						// (e_trace == 0); treating that as a stacked trace let
+						// the synthetic handler RTE on into the terminating
+						// ILLEGAL, whose vector 4 then displaced the result --
+						// "expected 9 got 4" across the whole Basic/Default
+						// corpus.  Freeze here instead, so cap_sp still points
+						// at the trace frame the comparison reads.
 						timeout = EXEC_TIMEOUT;
 					end else begin
 						// Stacked trace: let RTE resume the primary handler.
@@ -835,7 +859,7 @@ initial begin
 	if (!$value$plusargs("trace_round=%d", trace_round)) trace_round = -1;
 	if (!$value$plusargs("patchaddr=%h", patch_addr)) patch_addr = 0;
 	for (k = 0; k < 32768; k = k + 1) lmem[k] = 0;
-	for (k = 0; k < 655360; k = k + 1) tmem[k] = 0;
+	for (k = 0; k < TMEM_MAX; k = k + 1) tmem[k] = 0;
 
 	if (!$value$plusargs("job=%s", job_file) ||
 	    !$value$plusargs("lmem=%s", lmem_file) ||
@@ -844,20 +868,30 @@ initial begin
 	end
 	if (!$value$plusargs("limit=%d", limit)) limit = 32'h7fffffff;
 	if (!$value$plusargs("start=%d", start_record)) start_record = 0;
+	jf = $fopen(job_file, "rb");
+	if (!jf) begin $display("FAIL: cannot open APR2 job"); $finish; end
+	if (jread32(0) !== "APR2") begin $display("FAIL: bad job magic"); $finish; end
+	job_version = jread32(0); jn = jread32(0);
+	job_tbase = jread32(0); job_tsize = jread32(0); odd_vector = jread32(0);
+	if (job_version != 3 || job_tsize > TMEM_MAX) begin
+		$display("FAIL: unsupported APR2 geometry/version"); $finish;
+	end
+	TBASE = job_tbase;
+	TSIZE = job_tsize;
+	$fclose(jf);
+
 	lmfd = $fopen(lmem_file, "rb");
 	tmfd = $fopen(tmem_file, "rb");
 	if (!lmfd || !tmfd) begin $display("FAIL: cannot open corpus memory images"); $finish; end
 	fgot = $fread(lmem, lmfd); $fclose(lmfd);
 	fgot = $fread(tmem, tmfd); $fclose(tmfd);
 
+	// re-open and re-read the header: the geometry was consumed above
 	jf = $fopen(job_file, "rb");
 	if (!jf) begin $display("FAIL: cannot open APR2 job"); $finish; end
 	if (jread32(0) !== "APR2") begin $display("FAIL: bad job magic"); $finish; end
 	job_version = jread32(0); jn = jread32(0);
 	job_tbase = jread32(0); job_tsize = jread32(0); odd_vector = jread32(0);
-	if (job_version != 3 || job_tbase != TBASE || job_tsize != TSIZE) begin
-		$display("FAIL: unsupported APR2 geometry/version"); $finish;
-	end
 	if (jn > limit) jn = limit;
 	$display("tb_dat_replay: %0d APR2 records", jn);
 

@@ -46,14 +46,27 @@ reg         mem_ready;
 reg         berr_armed;
 reg   [1:0] irq_exc_armed;
 reg   [2:0] irq_fetch_stall;
-wire        berr = berr_armed && nreset && (busstate != 2'b01) &&
-                   (addr_out[15:0] == 16'hF140);
+wire        berr_d = berr_armed && nreset && (busstate != 2'b01) &&
+                     (addr_out[15:0] == 16'hF140);
+
+// $F154 arms a one-shot bus error on an instruction FETCH at the written
+// address (0 disarms).  This is the only way to reach the queue's
+// speculative-fault paths: the page guard rules out translation
+// differences, so only a physical berr can fault a fetch ahead of demand.
+reg         fberr_armed = 0;
+reg  [15:0] fberr_addr = 0;
+wire        fberr = fberr_armed && nreset && (busstate == 2'b00) &&
+                    (addr_out[15:0] == fberr_addr);
+
+wire        berr = berr_d | fberr;
 
 wire        clkena_in = (busstate == 2'b01) | mem_ready | berr;
 
 reg   [2:0] ipl_lvl;
 reg  [15:0] ipl_delay = 0;   // $F148: delayed level-2 IPL countdown
 reg   [7:0] ipl_pulse = 0;   // $F14C: withdraw the request after N cycles
+reg   [7:0] ipl_step  = 0;   // $F150: downgrade the request after N cycles
+reg   [2:0] ipl_next  = 0;   // $F150: level the encoder falls back to
 // A device that has let go of IPL must never produce an interrupt.  Rather
 // than time a program against it, watch the invariant directly: count how
 // long the pins have been idle and fail if an autovectored interrupt is
@@ -62,6 +75,30 @@ reg   [7:0] ipl_pulse = 0;   // $F14C: withdraw the request after N cycles
 // while a core that retains a withdrawn level indefinitely is caught.
 reg  [15:0] ipl_idle_for = 0;
 reg         irq_seen_q = 0;
+// Shadow IPEND claims over the core's own synchronized level: bit L is set
+// while a level-L request is visibly asserted AND has qualified against the
+// live mask; it is cleared when the synchronized level falls below L (the
+// device let go, taking any claim with it) or when an acceptance consumes
+// it.  A level hidden behind a higher request holds no claim of its own:
+// when the encoder falls back to it, it must requalify like a fresh
+// request.  This is the reference model for the mask invariant below.
+reg   [6:1] tb_qual = 0;
+integer ql;
+always @(posedge clk) begin
+	if (!nreset) tb_qual <= 0;
+	else begin
+		for (ql = 1; ql <= 6; ql = ql + 1) begin
+			if (dut.core.irq_lvl < ql)
+				tb_qual[ql] <= 0;
+			else if (dut.core.irq_lvl == ql && ql > dut.core.sr[10:8])
+				tb_qual[ql] <= 1;
+		end
+		if ((dut.core.state == 8'd34) && dut.core.exc_is_irq &&
+		    !irq_seen_q && dut.core.irq_lvl_l != 3'd7 &&
+		    dut.core.irq_lvl_l != 3'd0)
+			tb_qual[dut.core.irq_lvl_l] <= 0;
+	end
+end
 // +exctrace: print every exception entry (vector, pc) for A/B diffing
 reg [7:0] et_prev = 0;
 always @(posedge clk) begin
@@ -73,7 +110,15 @@ always @(posedge clk) begin
 		         dut.core.exc_spc, dut.core.sr);
 end
 
-ap040_tg68k_compat dut
+// The internal caches are ON by default here, as in the shipping build.
+// -DAP040_TB_CACHE=0 builds the g_nocache configuration instead, for
+// cache-vs-no-cache cycle comparisons (t_cache's architected
+// stale-until-CINVA expectations only hold with them on).
+`ifndef AP040_TB_CACHE
+`define AP040_TB_CACHE 1
+`endif
+
+ap040_tg68k_compat #(.AP040_ENABLE_CACHE(`AP040_TB_CACHE)) dut
 (
 	.clk(clk),
 	.nreset(nreset),
@@ -187,9 +232,12 @@ always @(posedge clk) begin
 		irq_fetch_stall <= 0;
 	end
 	else if (berr) begin
-		// One physical bus error per phase.  The restarted access succeeds,
-		// proving that the adapter released the failed sub-cycle.
-		berr_armed <= 0;
+		// One physical bus error per arming.  The restarted access
+		// succeeds, proving that the adapter released the failed
+		// sub-cycle.  Each one-shot clears only itself: a fetch berr
+		// must not eat the armed data berr or vice versa.
+		if (berr_d) berr_armed  <= 0;
+		if (fberr)  fberr_armed <= 0;
 		mem_ready <= 0;
 		lvl_hold <= 0;
 	end
@@ -229,6 +277,14 @@ always @(posedge clk) begin
 	if (nreset && mem_ready && busstate == 2'b11 &&
 	    addr_out[15:0] == 16'hF142)
 		berr_armed <= 1;
+
+	// $F154: one-shot fetch bus error (see the fberr wire above; the
+	// fire-cycle bookkeeping lives in the main berr branch)
+	if (nreset && mem_ready && busstate == 2'b11 &&
+	    addr_out[15:0] == 16'hF154) begin
+		fberr_armed <= |data_write;
+		fberr_addr  <= data_write;
+	end
 
 	// $F146 arms a one-shot bus error on the NEXT table-walker descriptor
 	// access, for the PTEST MMUSR B-bit test.
@@ -289,6 +345,24 @@ always @(posedge clk) begin
 		         ipl_idle_for);
 	end
 
+	// mask invariant: a level 1-6 interrupt is accepted strictly above the
+	// SR mask, with exactly one exception: a request that QUALIFIED
+	// against the mask while asserted keeps its claim across a later mask
+	// raise (IPEND; test 136).  tb_qual below models those claims from
+	// the pins alone, so an acceptance at or below the mask without a
+	// claim -- e.g. a hold retargeted to a level that never qualified --
+	// is a phantom.  State 34 is S_EXC0; sr still holds the pre-exception
+	// mask on its first cycle (the throwaway second pass re-enters at
+	// S_EXC1, so it cannot trip this).
+	if ((dut.core.state == 8'd34) && dut.core.exc_is_irq && !irq_seen_q &&
+	    dut.core.irq_lvl_l != 3'd7 &&
+	    dut.core.irq_lvl_l <= dut.core.sr[10:8] &&
+	    !tb_qual[dut.core.irq_lvl_l]) begin
+		errors = errors + 1;
+		$display("FAIL: level %0d interrupt accepted at or below mask %0d (pc=%h)",
+		         dut.core.irq_lvl_l, dut.core.sr[10:8], dbg_pc);
+	end
+
 	// $F14C models a device that WITHDRAWS its request: IPL rises to the
 	// written level and drops again after the written number of cycles,
 	// without waiting to be acknowledged.  A 68040 requires the request
@@ -301,6 +375,22 @@ always @(posedge clk) begin
 	else if (ipl_pulse != 0) begin
 		ipl_pulse <= ipl_pulse - 1'd1;
 		if (ipl_pulse == 8'd1) ipl_lvl <= 3'd0;
+	end
+
+	// $F150 models TWO devices sharing the IPL encoder: the higher one
+	// (bits [2:0]) withdraws after the written number of cycles while a
+	// lower one (bits [6:4]) keeps requesting, so the lines DOWNGRADE
+	// instead of going idle.  The lower level is a fresh request that is
+	// only ever taken if it qualifies against the mask on its own.
+	if (nreset && mem_ready && busstate == 2'b11 &&
+	    addr_out[15:0] == 16'hF150) begin
+		ipl_lvl  <= data_write[2:0];
+		ipl_next <= data_write[6:4];
+		ipl_step <= data_write[15:8];
+	end
+	else if (ipl_step != 0) begin
+		ipl_step <= ipl_step - 1'd1;
+		if (ipl_step == 8'd1) ipl_lvl <= ipl_next;
 	end
 end
 
@@ -426,6 +516,30 @@ always @(posedge clk) begin
 	end
 end
 
+// Locked-RMW indivisibility (plan section 8): once a data read has
+// completed inside a TAS/CAS/CAS2 (lk_cyc), no instruction fetch may
+// appear on the bus until the locked write completes.  Further reads are
+// legal (misaligned splits, CAS2's second operand, a memory-indirect
+// pointer), and a fault path disarms at its first frame write.  This
+// catches a background queue fetch issued between the locked read and
+// the locked write.
+reg lk_window = 0;
+always @(posedge clk) begin
+	if (!nreset) lk_window <= 0;
+	else begin
+		if (mem_ready && busstate == 2'b10 && dut.core.lk_cyc)
+			lk_window <= 1;
+		else if (mem_ready && busstate == 2'b11)
+			lk_window <= 0;
+		if (lk_window && busstate == 2'b00) begin
+			errors = errors + 1;
+			$display("FAIL: instruction fetch inside a locked RMW (pc=%h addr=%h)",
+			         dbg_pc, addr_out);
+			lk_window <= 0;
+		end
+	end
+end
+
 // unexpected halt detection
 always @(posedge clk) begin
 	if (nreset && (debug_fault || debug_halted) && result == 0) begin
@@ -454,6 +568,48 @@ always @(posedge clk) if (nreset && mem_ready && busstate == 2'b11 &&
 // phase driver
 //---------------------------------------------------------------------------
 
+// +prof: per-state cycle histogram -- the tb_prof the plan's cycle
+// claims come from (X2.8).  Counts every clk cycle by core state; the
+// stall column is the subset spent with clkena_in low (bus wait).
+// Printed and cleared at the end of each phase.
+integer prof_cnt [0:255];
+integer prof_stall [0:255];
+integer prof_on = 0;
+integer pi;
+initial begin
+	prof_on = $test$plusargs("prof");
+	for (pi = 0; pi < 256; pi = pi + 1) begin
+		prof_cnt[pi] = 0;
+		prof_stall[pi] = 0;
+	end
+end
+always @(posedge clk) if (prof_on && nreset) begin
+	prof_cnt[dut.core.state] = prof_cnt[dut.core.state] + 1;
+	if (!clkena_in)
+		prof_stall[dut.core.state] = prof_stall[dut.core.state] + 1;
+end
+
+task prof_dump;
+	input integer ph;
+	integer total, fetch_immf;
+	begin
+		total = 0;
+		for (pi = 0; pi < 256; pi = pi + 1) total = total + prof_cnt[pi];
+		$display("PROF phase %0d: %0d cycles total", ph, total);
+		for (pi = 0; pi < 256; pi = pi + 1)
+			if (prof_cnt[pi] != 0)
+				$display("PROF   state %0d: %0d (%0d stalled)",
+				         pi, prof_cnt[pi], prof_stall[pi]);
+		fetch_immf = prof_cnt[8'd3] + prof_cnt[8'd8];
+		$display("PROF   S_FETCH+S_IMMF occupancy: %0d / %0d = %0d%%",
+		         fetch_immf, total, (fetch_immf * 100) / total);
+		for (pi = 0; pi < 256; pi = pi + 1) begin
+			prof_cnt[pi] = 0;
+			prof_stall[pi] = 0;
+		end
+	end
+endtask
+
 integer timeout;
 integer i;
 
@@ -465,6 +621,7 @@ task run_phase;
 		ipl_lvl = 0;
 		irq_exc_armed = 0;
 		irq_fetch_stall = 0;
+		fberr_armed = 0;
 
 		for (i = 0; i < 32768; i = i + 1) mem[i] = 16'h0000;
 		$readmemh(prog_file, mem);
@@ -489,6 +646,7 @@ task run_phase;
 		end
 		else if (result == 1)
 			$display("phase %0d passed (%0d cycles)", ph, timeout);
+		if (prof_on) prof_dump(ph);
 	end
 endtask
 

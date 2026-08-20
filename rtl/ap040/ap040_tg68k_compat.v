@@ -294,7 +294,8 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.m_wdata(b_wdata),
 		.m_fc(b_fc),
 		.m_ack(b_ack),
-		.m_rdata(b_rdata)
+		.m_rdata(b_rdata),
+		.m_err(berr)
 	);
 end
 else begin : g_nocache

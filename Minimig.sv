@@ -415,13 +415,82 @@ ap040_walker_cdc walker_cdc
 wire [15:0] ram_dout1;
 wire        ram_ready1;
 
-// The controller caches carry the system.  ap040_cache is measured NOT
-// ready to replace them: its miss costs a 4-beat line fill serialised
-// through the 16-bit bus adapter (8 bus cycles) against 1-2 for an
-// uncached word, so miss-heavy code -- fast RAM above all -- ran SLOWER
-// with it than with no CPU-side cache at all.  Its snoop CDC also loses
-// events while clkena is frozen.  Re-enable it only with a 32-bit/burst
-// fill path and a ce-independent snoop queue.
+// The controller caches no longer carry the system alone: ap040_cache is
+// enabled as of 2026-08-18 (cpu_wrapper.v).  Both halves of the old
+// objection to it are gone.  Snoop loss is fixed -- the cache's snoop
+// port is free-running and ce-independent since the 5.1 fix, with
+// tb_ap040_cache_snoop T1 covering exactly the frozen-clkena window.
+// And the "ran SLOWER" measurement turns out to describe only
+// straight-line miss-heavy code, which is what the regression programs
+// are: on loop-heavy code the internal cache is 1.41x faster with a
+// zero-latency bus and 2.27x with a latent one, and it makes the CPU
+// nearly immune to bus latency (bench_loop.s under +prof).
+`ifdef MISTER_DUAL_SDRAM
+// X2.1b: the io-board's second SDRAM in lockstep with the primary makes
+// the pair one 32-bit bus (sdram32_ctrl; 16-bit-facing contract proven
+// cycle-identical against sdram_ctrl in tb_sdram32).  The 32-bit fill
+// port has no consumer yet -- it arrives with the internal cache's
+// return in X2.7.  The init probe refuses to run without the second
+// module: dual_fault holds the machine in reset instead of letting
+// half of every chip-RAM longword vanish silently.
+wire        dual_ok;
+wire [12:0] sd2_a;
+wire  [1:0] sd2_ba;
+wire        sd2_cs, sd2_we, sd2_ras, sd2_cas, sd2_clk, sd2_cke;
+wire  [1:0] sd2_dqm_nc;   // no DQM routed; masks travel on A12/A11
+
+wire dual_fault = ~SDRAM2_EN | ~dual_ok;
+
+// per the framework contract, all SDRAM2 outputs go Z when the port is
+// not enabled for this io board
+assign SDRAM2_A    = SDRAM2_EN ? sd2_a   : 13'bZ;
+assign SDRAM2_BA   = SDRAM2_EN ? sd2_ba  : 2'bZ;
+assign SDRAM2_nCS  = SDRAM2_EN ? sd2_cs  : 1'bZ;
+assign SDRAM2_nWE  = SDRAM2_EN ? sd2_we  : 1'bZ;
+assign SDRAM2_nRAS = SDRAM2_EN ? sd2_ras : 1'bZ;
+assign SDRAM2_nCAS = SDRAM2_EN ? sd2_cas : 1'bZ;
+assign SDRAM2_CLK  = SDRAM2_EN ? sd2_clk : 1'bZ;
+
+sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ram1
+(
+	.sysclk       (clk_114         ),
+	.reset_n      (~reset_d        ),
+	.c_7m         (c1              ),
+
+	.cache_rst    (cpu_rst         ),
+	.cpu_cache_ctrl(cpu_cacr       ),
+
+	.sd_data      (SDRAM_DQ        ),
+	.sd_addr      (SDRAM_A         ),
+	.sd_dqm       ({SDRAM_DQMH, SDRAM_DQML}),
+	.sd_cs        (SDRAM_nCS       ),
+	.sd_ba        (SDRAM_BA        ),
+	.sd_we        (SDRAM_nWE       ),
+	.sd_ras       (SDRAM_nRAS      ),
+	.sd_cas       (SDRAM_nCAS      ),
+	.sd_cke       (SDRAM_CKE       ),
+	.sd_clk       (SDRAM_CLK       ),
+
+	.sd2_data     (SDRAM2_DQ       ),
+	.sd2_addr     (sd2_a           ),
+	.sd2_dqm      (sd2_dqm_nc      ),
+	.sd2_cs       (sd2_cs          ),
+	.sd2_ba       (sd2_ba          ),
+	.sd2_we       (sd2_we          ),
+	.sd2_ras      (sd2_ras         ),
+	.sd2_cas      (sd2_cas         ),
+	.sd2_cke      (sd2_cke         ),
+	.sd2_clk      (sd2_clk         ),
+	.dual_ok      (dual_ok         ),
+
+	.fill_req     (1'b0            ),
+	.fill_addr    (21'd0           ),
+	.fill_dat     (                ),
+	.fill_strb    (                ),
+	.fill_ack     (                ),
+`else
+wire dual_fault = 1'b0;
+
 sdram_ctrl #(.CPU_CACHE(1)) ram1
 (
 	.sysclk       (clk_114         ),
@@ -441,6 +510,7 @@ sdram_ctrl #(.CPU_CACHE(1)) ram1
 	.sd_cas       (SDRAM_nCAS      ),
 	.sd_cke       (SDRAM_CKE       ),
 	.sd_clk       (SDRAM_CLK       ),
+`endif
 
 	.cpuWR        (ram_din         ),
 	.cpuAddr      (ram_addr[22:1]  ),
@@ -672,7 +742,9 @@ minimig minimig
 	.chip48       (chip48           ), // big chipram read
 
 	//system  pins
-	.rst_ext      (reset_d          ), // reset from ctrl block
+	.rst_ext      (reset_d | dual_fault), // reset from ctrl block; a DUAL
+	                                     // build without its second SDRAM
+	                                     // refuses to run (init probe)
 	.rst_out      (                 ), // minimig reset status
 	.clk          (clk_sys          ), // output clock c1 ( 28.687500MHz)
 	.clk7_en      (clk7_en          ), // 7MHz clock enable

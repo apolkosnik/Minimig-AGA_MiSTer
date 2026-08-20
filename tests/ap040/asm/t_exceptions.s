@@ -17,6 +17,8 @@ DONEREG	equ	$F102
 IPLREG	equ	$F110
 IPLPULSE	equ	$F14C	; raise IPL, then withdraw it N cycles later
 IPLDLY	equ	$F148	; raise IPL N cycles from now
+IPLSTEP	equ	$F150	; raise IPL, then DOWNGRADE it N cycles later
+FBERRCTL equ	$F154	; one-shot bus error on a FETCH at the written address
 FCREG	equ	$F120
 BERRCTL equ	$F142
 IRQEXCCTL equ	$F144
@@ -39,6 +41,8 @@ cnt_fmt		equ	$361C
 cnt_addr	equ	$361E
 cnt_trace	equ	$3620
 cnt_buserr	equ	$3622
+cnt_int3	equ	$3624
+cnt_fberr	equ	$3626
 resume		equ	$3630
 exp_addr	equ	$3634
 exp_pc		equ	$3638
@@ -46,6 +50,7 @@ addr_sflag	equ	$363C
 irq_early	equ	$363E
 irq_guard	equ	$3640
 buserr_fc	equ	$3642
+fberr_fa	equ	$3654
 irq_exc	equ	$3644
 trap_guard	equ	$3646
 exp_sr		equ	$3648
@@ -53,6 +58,9 @@ exp_srv		equ	$364A
 tw_sr		equ	$364C
 got_fsp		equ	$3650
 irq_guard2	equ	$3652
+int2_pc		equ	$3658	; level-2 frame PC captured by h_int2
+trace_pc	equ	$365C	; first trace frame PC since the last clear
+order_hit	equ	$3660	; trace-vs-IRQ order test saw a same-boundary hit
 
 failt	macro
 	move.w	#\1,d7
@@ -104,7 +112,8 @@ ok\@:
 	endr
 	dc.l	unexp,unexp	; 24 spurious, 25 level 1
 	dc.l	h_int2		; 26 level 2 autovector
-	dc.l	unexp,unexp	; 27,28
+	dc.l	h_int3		; 27 level 3 autovector
+	dc.l	unexp		; 28
 	dc.l	h_int5		; 29 level 5 autovector
 	dc.l	unexp		; 30
 	dc.l	h_nmi		; 31 level 7 autovector
@@ -624,6 +633,178 @@ irq_hold_ok:
 	move.w	#0,(IPLREG).l
 	move.w	#$2700,sr
 
+	; Downgrade, not withdrawal: a second device keeps requesting at a
+	; LOWER level when the qualified one lets go, so the IPL encoder
+	; falls back instead of going idle.  The retained hold must
+	; requalify against the mask -- the lower level is a fresh request
+	; and may never be taken at or below it (levels 1-6 are accepted
+	; only strictly above SR[10:8]; a real 040 resamples IPL
+	; continuously).  A hold that merely tracks the pins DOWN retargets
+	; the qualified level 5 to the still-asserted level 3 and fires it
+	; against mask 3 as a phantom.  The divide keeps the instruction
+	; boundary away until after the downgrade so the level-5 request
+	; qualifies mid-instruction; sweep the width across the synchronizer
+	; window.  The testbench independently fails any interrupt accepted
+	; at or below the mask.
+	move.w	#$2300,sr		; mask 3: 5 qualifies, 3 never may
+	moveq	#1,d5
+irq_step_loop:
+	move.w	d5,d6
+	lsl.w	#8,d6
+	ori.w	#$35,d6			; width:levels -- 5 now, 3 after width
+	move.w	d6,(IPLSTEP).l
+	move.l	#100,d0
+	divu.w	#3,d0			; boundary held off past the downgrade
+	nop
+	move.w	#0,(IPLREG).l
+	addq.w	#1,d5
+	cmp.w	#8,d5
+	bls.s	irq_step_loop
+	move.w	#$2700,sr
+	chkcnt	cnt_int3,0,137		; downgraded level fired at/below mask
+
+	; Queue fault discipline (X2.2): a bus error on a SPECULATIVE
+	; instruction fetch must never surface as an exception.  $F154 arms
+	; a one-shot fetch berr at a written address -- the only reachable
+	; speculative-fault source, since prefetch never leaves the page.
+	; The four nops keep the armed word beyond the queue's 16-byte
+	; lookahead at arming time; the divide then gives the fill engine
+	; the idle cycles to reach it.
+	; 138: the faulted word is discarded by a redirect; nothing fires
+	; and the stream continues.
+	clr.w	(cnt_fberr).l
+	lea	t138_y(pc),a0
+	move.l	a0,(fberr_fa).l
+	move.w	a0,(FBERRCTL).l
+	nop
+	nop
+	nop
+	nop
+	move.l	#100,d0
+	divu.w	#3,d0		; the queue runs ahead across the branch
+	bra.s	t138_done	; redirect discards the faulted fetch
+t138_y:
+	nop
+	nop
+t138_done:
+	chkcnt	cnt_fberr,0,138
+	move.w	#0,(FBERRCTL).l	; disarm
+
+	; 139: the faulted word IS reached: the fault is only recorded, the
+	; demand point re-issues the fetch, the consumed one-shot lets it
+	; succeed, and execution continues -- no exception anywhere.
+	clr.w	(cnt_fberr).l
+	moveq	#0,d1
+	lea	t139_x(pc),a0
+	move.l	a0,(fberr_fa).l
+	move.w	a0,(FBERRCTL).l
+	nop
+	nop
+	nop
+	nop
+	move.l	#100,d0
+	divu.w	#3,d0		; speculative fetch of t139_x faults here
+t139_x:
+	moveq	#1,d1		; reached via the re-issued fetch
+	chkcnt	cnt_fberr,0,139
+	cmp.l	#1,d1
+	beq.s	t139_ok
+	failt	140
+t139_ok:
+	move.w	#0,(FBERRCTL).l
+
+	; 141: a DEMAND fetch fault takes the access error: format $7,
+	; FA = the fetch address, supervisor program space, ATC clear; RTE
+	; restarts the fetch, which then succeeds.  The target sits BEHIND
+	; the arming code so it can only ever be fetched through the
+	; branch's flush -- a demand fetch by construction.
+	bra.s	t141_arm
+t141_t:
+	nop			; restarted after the handler
+	bra.s	t141_chk
+t141_arm:
+	clr.w	(cnt_fberr).l
+	lea	t141_t(pc),a0
+	move.l	a0,(fberr_fa).l
+	move.w	a0,(FBERRCTL).l
+	bra.s	t141_t		; backward: flush, then a faulting demand
+t141_chk:
+	chkcnt	cnt_fberr,1,141
+	move.w	#0,(FBERRCTL).l
+	clr.l	(fberr_fa).l
+
+	; Trace vs interrupt at one boundary (WinUAE do_specialties): the
+	; completing instruction's trace converts to a PENDING trace and
+	; the interrupt is sampled after that conversion, so the interrupt
+	; exception processes FIRST and the trace is delivered at the
+	; interrupt handler's entry -- never lost, never first.
+	; 142 covers the change-of-flow boundary: sweep IPL2 into a traced
+	; RTS; at least one delay must land both at the RTS boundary, where
+	; the IRQ frame returns to the RTS target and the trace frame
+	; stacks the IRQ handler's entry address.
+	clr.w	(order_hit).l
+	moveq	#2,d5
+tio_loop:
+	clr.l	(int2_pc).l
+	clr.l	(trace_pc).l
+	lea	tio_ret(pc),a0
+	move.l	a0,-(sp)	; RTS target
+	move.w	d5,(IPLDLY).l
+	move.w	#$A000,sr	; T1 + S, mask 0; pins still idle here
+	rts			; traced change of flow; IPL2 lands inside
+tio_ret:
+	move.w	#$2700,sr	; stop; the handlers already ran
+	move.l	(int2_pc).l,d0
+	lea	tio_ret(pc),a0
+	cmp.l	a0,d0		; IRQ frame returned to the RTS target?
+	bne.s	tio_next
+	move.l	(trace_pc).l,d0
+	lea	(h_int2).l,a0
+	cmp.l	a0,d0		; trace delivered at the IRQ handler entry?
+	bne.s	tio_next
+	move.w	#1,(order_hit).l
+tio_next:
+	addq.w	#1,d5
+	cmp.w	#12,d5
+	bls.s	tio_loop
+	move.w	#0,(IPLREG).l
+	tst.w	(order_hit).l
+	bne.s	tio_ok
+	failt	142		; interrupt never won a simultaneous trace
+tio_ok:
+
+	; 143 covers the straight-line boundary: sweep IPL2 into a traced
+	; divide so some delay lands trace and interrupt simultaneously
+	; pending at its boundary.  The interrupt goes first and the trace
+	; must arrive at the IRQ handler entry (trace frame PC = h_int2) --
+	; a core that drops the trace event resumes tracing only at the
+	; following instruction and stacks a later PC, and that signature
+	; must then never appear across the whole sweep.
+	clr.w	(order_hit).l
+	moveq	#4,d5
+tio2_loop:
+	clr.l	(int2_pc).l
+	clr.l	(trace_pc).l
+	move.w	d5,(IPLDLY).l
+	move.w	#$A000,sr	; T1 + S, mask 0
+	move.l	#100,d0
+	divu.w	#3,d0		; traced; IPL2 qualifies inside
+	move.w	#$2700,sr
+	move.l	(trace_pc).l,d0
+	lea	(h_int2).l,a0
+	cmp.l	a0,d0
+	bne.s	tio2_next
+	move.w	#1,(order_hit).l
+tio2_next:
+	addq.w	#1,d5
+	cmp.w	#20,d5
+	bls.s	tio2_loop
+	move.w	#0,(IPLREG).l
+	tst.w	(order_hit).l
+	bne.s	tio2_ok
+	failt	143		; simultaneous trace lost or misplaced
+tio2_ok:
+
 ;-------------------- immediate group: destination must be data alterable
 ; ORI/ANDI/SUBI/ADDI/EORI with a PC-relative or immediate destination are
 ; illegal; executing them instead consumes the following words as operands
@@ -846,18 +1027,26 @@ ex_t4_cont:
 	chkcnt	cnt_trapu,1,108	; the TRAP handler itself never ran (count
 				; unchanged from the user round-trip test)
 
-; A pending T0 trace survives a NON-internal integer exception and fires
-; before the handler's first instruction; internal ones (CHK et al)
-; cancel it.
+; A pending T0 trace does NOT survive an exception on the 68040 -- not for
+; the internal ones (CHK et al) and not for the others either.  This test
+; used to require a "survivor" trace at the handler's first instruction,
+; from reading WinUAE's Exception_cpu_oldpc as the path every exception
+; takes.  It is not: gencpu emits exception_cpu() only for divide-by-zero,
+; CHK, TRAPV, TRAP #n and the RTE format error, and on a 68040 that path
+; forces t0 = false for exactly those; everything else -- op_illg's
+; vector 4 included -- goes through plain Exception(), which clears T0.
+; Hardware settled it: cputest basic/all and fbasic/all both reported
+; "Got unexpected trace exception ... Exception 4 also pending" after the
+; ILLEGAL that terminates every test, for plain integer instructions as
+; well as FP ones.
 	move.w	(cnt_trace).l,d5
 	move.w	#$6000,sr	; T0, supervisor
-	dc.w	$4AFC		; ILLEGAL: trace fires at h_ill entry, then
-				; h_ill skips this word
-	move.w	#$2700,sr	; T0 still restored by h_ill's RTE: this
-				; SR write is itself T0-traced
+	dc.w	$4AFC		; ILLEGAL: no trace at h_ill entry
+	move.w	#$2700,sr	; T0 restored by h_ill's RTE: this SR write
+				; is itself a T0 change-of-flow, so it traces
 	move.w	(cnt_trace).l,d6
 	sub.w	d5,d6
-	cmp.w	#2,d6		; one survivor trace + one from the SR write
+	cmp.w	#1,d6		; the SR write only: no survivor
 	beq.s	ex_t5a_ok
 	failt	109
 ex_t5a_ok:
@@ -1136,6 +1325,10 @@ h_trapv:
 h_trace:
 	cmpi.w	#$2024,6(sp)	; format $2, vector 9
 	bne	hfail
+	tst.l	(trace_pc).l	; capture the FIRST trace since the clear
+	bne.s	ht_nocap
+	move.l	2(sp),(trace_pc).l
+ht_nocap:
 	andi.w	#$3FFF,(sp)	; stop tracing on return
 	addq.w	#1,(cnt_trace).l
 	rte
@@ -1191,6 +1384,8 @@ h_buserr:
 	cmpi.w	#$7008,6(sp)	; format $7, vector 2
 	bne	hfail
 	move.l	$14(sp),d0	; fault address
+	cmp.l	(fberr_fa).l,d0	; the armed FETCH berr address?
+	beq.s	hb_fetch
 	cmpi.l	#(FCREG+$20),d0
 	bne	hfail
 	move.w	$0C(sp),d0	; SSW
@@ -1203,8 +1398,20 @@ h_buserr:
 	addq.w	#1,(cnt_buserr).l
 	rte
 
+hb_fetch:
+	move.w	$0C(sp),d0	; SSW
+	andi.w	#$0400,d0	; ATC clear: physical berr
+	bne	hfail
+	move.w	$0C(sp),d0
+	andi.w	#7,d0		; supervisor program space
+	cmp.w	#6,d0
+	bne	hfail
+	addq.w	#1,(cnt_fberr).l
+	rte
+
 h_int2:
 	move.l	d0,-(sp)
+	move.l	6(sp),(int2_pc).l
 	tst.w	(irq_exc).l
 	beq.s	hi2exc_ok
 	tst.w	(trap_guard).l	; original TRAP handler must not have begun
@@ -1238,6 +1445,13 @@ hi2f0:
 	addq.w	#1,(cnt_int2).l
 	move.w	#0,(IPLREG).l
 	move.l	(sp)+,d0
+	rte
+
+h_int3:
+	cmpi.w	#$006C,6(sp)
+	bne	hfail
+	addq.w	#1,(cnt_int3).l
+	move.w	#0,(IPLREG).l
 	rte
 
 h_int5:

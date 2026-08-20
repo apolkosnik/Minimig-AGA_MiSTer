@@ -433,6 +433,30 @@ ucont3:
 	and.l	#$FFFF,d0
 	chkl	d0,7,31
 
+	; the EA base register inside a LOADED list: a fault after the base
+	; was loaded must still restart with the ORIGINAL base.  The loaded
+	; value may only commit with the last transfer -- a core that writes
+	; it mid-loop recomputes the restart EA from the loaded DATA (here a
+	; non-address) and reads garbage.
+	move.l	#5,(expect_tm).l	; supervisor data read
+	move.l	#$00007000,(expect_fa).l
+	move.l	#$441C,(fix_addr).l
+	move.l	#$7003,(fix_val).l
+	move.l	#$11112222,($6FF8).l	; a0's image: not an address
+	move.l	#$33334444,($6FFC).l	; a1's image, last valid long
+	move.l	#$55556666,($7000).l	; a2's image, first faulting long
+	move.l	#0,($441C).l		; page 7 invalid again
+	pflusha
+	lea	($6FF8).l,a0
+	movem.l	(a0),a0-a2		; a0 loads first; a2's read faults
+	chkl	a0,$11112222,144
+	chkl	a1,$33334444,145
+	chkl	a2,$55556666,146
+	move.w	(cnt_aerr).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,8,147
+	subq.w	#1,(cnt_aerr).l	; later sections count faults absolutely
+
 ;----------------------------------------------------------------- 8K pages
 	moveq	#0,d0
 	movec	d0,tc		; MMU off while rebuilding tables

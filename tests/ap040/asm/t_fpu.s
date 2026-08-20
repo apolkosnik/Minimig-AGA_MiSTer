@@ -20,6 +20,9 @@ cnt_fpline	equ	$3608
 cnt_fpunsup	equ	$360A
 cnt_ill4	equ	$3620
 save_unimp	equ	$3624
+cnt_fpoperr	equ	$3628
+cnt_fpovfl	equ	$362A
+fp_exc_ea	equ	$362C
 unimp_frame	equ	$3A00
 unsup_fa	equ	$360C
 unsup_resume	equ	$3610
@@ -72,9 +75,9 @@ ok\@:
 	dc.l	h_fpbsun	; 48 signaling unordered conditional
 	dc.l	unexp		; 49 FP inexact
 	dc.l	h_fpdz		; 50 enabled FP divide-by-zero
-	rept	3
-	dc.l	unexp		; vectors 51-53
-	endr
+	dc.l	unexp		; 51 FP underflow
+	dc.l	h_fpoperr	; 52 FP operand error
+	dc.l	h_fpovfl	; 53 FP overflow
 	dc.l	h_fpsnan	; 54 enabled signaling NaN
 	dc.l	h_fpunsup	; 55 unimplemented data type
 	rept	200
@@ -96,8 +99,23 @@ start:
 	clr.w	(cnt_fpsnan).l
 	clr.w	(cnt_fpbsun).l
 	clr.w	(cnt_fpline).l
+	clr.w	(cnt_fpoperr).l
+	clr.w	(cnt_fpovfl).l
 	clr.w	(cnt_ill4).l
 	clr.w	(save_unimp).l
+
+;-------------------------------------------------- reset register state
+; FP0-FP7 power up as the default nonsignaling NaN: positive, exponent
+; $7FFF, mantissa all ones (WinUAE fpu_reset/fpnan, xhex_nan).  fp7 is
+; stored before anything else touches the register file; an extended
+; store of a NaN passes the raw bits through.
+	fmove.x	fp7,($32A0).l
+	move.l	($32A0).l,d0
+	chkl	d0,$7FFF0000,292
+	move.l	($32A4).l,d0
+	chkl	d0,$FFFFFFFF,293
+	move.l	($32A8).l,d0
+	chkl	d0,$FFFFFFFF,294
 
 ;-------------------------------------------------- integer load/store
 	fmove.l	#123,fp0
@@ -350,6 +368,48 @@ fs_idle_pd_ok:
 	fmove.l	fp1,d0
 	chkl	d0,88,79
 
+	; An invalid FMOVE-out DESTINATION is an F-line with no FPIAR side
+	; effect: opclass 011 records FPIAR only once the store's EA has been
+	; accepted (WinUAE fpuop_arithmetic case 3 reaches maybe_set_fpiar
+	; only after put_fp_value succeeds).  AP040 used to write FPIAR here.
+	fmove.l	#-1,fpiar
+	dc.w	$F208,$6C00	; fmove.p fp0,a0 -- An is not a destination
+	chkcnt	cnt_fpline,3,324
+	fmove.l	fpiar,d0
+	chkl	d0,-1,325	; FPIAR untouched by the rejected store
+	subq.w	#1,(cnt_fpline).l	; keep the absolute counts below intact
+
+	; An FPSP-emulated opmode with an ILLEGAL EA still reports through the
+	; unimplemented-instruction route (vector 11, format $2, PC of the
+	; following instruction), not as a plain format-$0 F-line: WinUAE's
+	; get_fp_value runs fault_if_unimplemented_680x0 before it rejects a
+	; Dn or An source.  FABS with the same EA stays a format-$0 F-line
+	; (tests 76-79 above) because FABS is hardware.
+	move.l	#$202C,(exp_fmt).l
+	dc.w	$F201,$4881	; fint.x a1,fp1 -- An source, FPSP opmode
+	chkcnt	cnt_fpunimp,1,326
+	subq.w	#1,(cnt_fpunimp).l
+
+	; A store whose destination cannot hold the format is an F-line with
+	; no FPIAR side effect, exactly like the An/PC-relative destinations.
+	fmove.l	#-1,fpiar
+	dc.w	$F200,$7400	; fmove.d fp0,d0 -- Dn cannot take a double
+	chkcnt	cnt_fpline,3,327
+	fmove.l	fpiar,d0
+	chkl	d0,-1,328
+	subq.w	#1,(cnt_fpline).l
+
+	; A packed STORE through (An)+ is post-instruction too: the address
+	; register update stands across the datatype fault.
+	lea	($3340).l,a0
+	move.l	a0,d2
+	move.l	#0,(unsup_resume).l
+	fmove.p	fp0,(a0)+	; unsupported data type, post-instruction
+	move.l	a0,d0
+	sub.l	d2,d0
+	chkl	d0,12,329
+	subq.w	#1,(cnt_fpunsup).l
+
 	fmove.l	#7,fp0		; FPU in use again
 	move.l	#$202C,(exp_fmt).l
 	move.w	#1,(save_unimp).l
@@ -519,7 +579,7 @@ denx_op:
 denx_cont:
 	chkcnt	cnt_fpunsup,1,66
 	move.l	(unsup_pc).l,d0
-	chkl	d0,denx_op,76
+	chkl	d0,denx_cont,76	; post-instruction: the FOLLOWING PC
 	fmove.l	fp0,d0
 	chkl	d0,99,67
 
@@ -572,10 +632,15 @@ fbsun1:
 	fmove.l	#0,fpcr
 
 ;--------------------------- unsupported data types (vector 55, format $3)
-; EVERY datatype fault stacks format $3.  Source operands keep the faulting
-; PC with the source address in EA (zero for a register or immediate
-; source, which has no address); register-to-memory stores are post-
-; instruction exceptions with the following PC and the destination EA.
+; EVERY datatype fault stacks format $3 with the FOLLOWING instruction's
+; PC -- sources as well as stores.  It is a post-instruction exception in
+; both directions; only the EA field distinguishes them (the source
+; address, zero for a register or immediate source with no address, or
+; the destination address for a store).  These expectations used to name
+; the faulting instruction instead: the v20 corpus masked the stacked PC
+; out of every frame comparison, so nothing contradicted that reading
+; until the v24 corpus checked it (WinUAE fpp.cpp: "simplification:
+; always mid/post-instruction exception").
 	fmove.l	#1,fp0			; keep the FPU in a known state
 	move.l	#$00000000,($3300).l	; denormal extended: exp 0, mantissa set
 	move.l	#$00010000,($3304).l
@@ -589,11 +654,27 @@ den_src_op:
 den_src_cont:
 	chkcnt	cnt_fpunsup,1,80
 	move.l	(unsup_pc).l,d0
-	chkl	d0,den_src_op,81	; the stacked PC identifies the FP op
+	chkl	d0,den_src_cont,81	; post-instruction: the FOLLOWING PC
 	fmove.p	fp0,($3320).l		; packed decimal store: data type
 	chkcnt	cnt_fpunsup,2,83
 	move.l	(unsup_fa).l,d0
 	chkl	d0,$3320,82		; format-$3 carries destination EA
+
+; A datatype fault is POST-instruction, so an (An)+ source leaves the
+; address register INCREMENTED by the operand size.  WinUAE applies the
+; increment in get_fp_value when the EA is computed and only the 68060
+; undoes it (mmufixup); the v24 corpus checks it, v20 did not.
+	lea	($3300).l,a3		; the denormal extended operand above
+	move.l	a3,d2
+	lea	pinc_cont(pc),a0
+	move.l	a0,(unsup_resume).l
+pinc_op:
+	fmove.x	(a3)+,fp1		; faults: denormal source
+pinc_cont:
+	move.l	a3,d0
+	sub.l	d2,d0
+	chkl	d0,12,323		; (An)+ update stands across the fault
+	subq.w	#1,(cnt_fpunsup).l	; keep the absolute counts below intact
 
 	move.l	#$40000000,($3310).l	; unnormal: exponent set, msb of
 	move.l	#$40000000,($3314).l	; the mantissa clear
@@ -1087,6 +1168,30 @@ h_fpsnan:
 	cmp.w	#$00D8,d6	; format $0, vector 54 offset
 	bne	hfail
 	addq.w	#1,(cnt_fpsnan).l
+	rte
+
+; enabled store exceptions arrive post-instruction in a format $3 frame
+; whose EA names the destination (0 for a register); capture it so the
+; test can verify against the store address
+h_fpoperr:
+	move.w	6(sp),d6
+	cmp.w	#$30D0,d6	; format $3, vector 52 offset
+	bne	hfail
+	move.l	8(sp),(fp_exc_ea).l
+	addq.w	#1,(cnt_fpoperr).l
+	rte
+
+h_fpovfl:
+	move.w	6(sp),d6
+	cmp.w	#$30D4,d6	; format $3, vector 53 (post-instruction store)
+	beq.s	hov_ok3
+	cmp.w	#$00D4,d6	; format $0, vector 53 (pre-instruction pend)
+	bne	hfail
+	addq.w	#1,(cnt_fpovfl).l
+	rte
+hov_ok3:
+	move.l	8(sp),(fp_exc_ea).l
+	addq.w	#1,(cnt_fpovfl).l
 	rte
 
 hfail:
@@ -4177,7 +4282,7 @@ fregea_cont:
 	move.l	(unsup_fa).l,d0
 	chkl	d0,0,235		; EA field is zero
 	move.l	(unsup_pc).l,d0
-	chkl	d0,fregea_op,236	; PC still names the FP instruction
+	chkl	d0,fregea_cont,236	; post-instruction: the FOLLOWING PC
 
 ; an immediate source also has no address: EA = 0 (cputest FABS.P #imm)
 	move.l	#$EEEEEEEE,(unsup_fa).l
@@ -4191,7 +4296,7 @@ fimm_cont:
 	move.l	(unsup_fa).l,d0
 	chkl	d0,0,238
 	move.l	(unsup_pc).l,d0
-	chkl	d0,fimm_op,239
+	chkl	d0,fimm_cont,239
 
 ;================== memory-indirect FP operands (cputest FDIV.W ([0]))
 ; full-extension EAs with base suppress and memory indirection feed the
@@ -4290,7 +4395,7 @@ fpind_cont:
 	move.l	(unsup_fa).l,d1
 	chkl	d1,$00000AA1,254
 	move.l	(unsup_pc).l,d1
-	chkl	d1,fpind_op,255
+	chkl	d1,fpind_cont,255
 
 ;=========== FABS.X ([0]),fp3 -- hardware cputest 68040_basicfpu fail
 ; Full-extension EA: null base displacement, base AND index suppressed,
@@ -4597,6 +4702,148 @@ soak_wait:
 	chkcnt	cnt_int2,48,291
 	move.w	#$2700,sr	; interrupts masked again
 soak_done:
+
+;-------------------------------------------------- FRESTORE state lifecycle
+; FRESTORE of a NULL frame returns the FPU to the reset state: control
+; registers cleared AND FP0-FP7 the default NaN again (WinUAE fpu_null).
+; A pending deferred exception from a released op belongs to the OLD
+; context: on silicon the pending state lives inside the FPU and
+; FRESTORE overwrites it wholesale, so it must be discarded, never
+; delivered into the new context (where FPIAR is already zero and the
+; trap would be undiagnosable).
+	fmove.l	#$4000,fpcr	; enable SNAN
+	fmove.l	#5,fp2
+	move.l	#$7F800001,($32DC).l
+	clr.w	(cnt_fpsnan).l
+	fmove.s	($32DC).l,fp2	; released; SNAN trap becomes pending
+	clr.l	-(sp)
+	frestore	(sp)+	; NULL: new context, pending state discarded
+	fnop			; sync point: nothing may deliver here
+	chkcnt	cnt_fpsnan,0,295
+	fmove.x	fp2,($32A0).l	; and fp2 is the default NaN again
+	move.l	($32A0).l,d0
+	chkl	d0,$7FFF0000,296
+	move.l	($32A4).l,d0
+	chkl	d0,$FFFFFFFF,297
+
+;-------------------------------------------------- enabled store exceptions
+; FMOVE FPn,<ea> is an arithmetic instruction: an exception enabled in
+; FPCR must trap post-instruction (format $3, stacked PC = next opcode,
+; EA = destination).  The 040 integer-store SNAN/OPERR set does NOT
+; write the destination (WinUAE fault_if_68040_integer_nonmaskable
+; returns before the store); float-format stores write the default
+; result first (WinUAE put_fp_value, then the post check).  Disabled
+; exceptions keep completing in hardware with the default result.
+	fmove.l	#0,fpcr
+	fmove.l	#$7FFFFFFF,fp0
+	fadd.x	fp0,fp0		; 2^32-2: exceeds any 32-bit signed integer
+	clr.w	(cnt_fpoperr).l
+	clr.w	(cnt_fpovfl).l
+	move.l	#$CAFEBABE,($32A0).l
+	fmove.l	#$2000,fpcr	; enable OPERR
+	fmove.l	fp0,($32A0).l	; integer overflow: v52, store suppressed
+	fmove.l	#0,fpcr
+	chkcnt	cnt_fpoperr,1,298
+	move.l	($32A0).l,d0
+	chkl	d0,$CAFEBABE,299	; destination untouched
+	move.l	(fp_exc_ea).l,d0
+	chkl	d0,$32A0,300	; format $3 frame carries the EA
+
+	move.l	#$12345678,d4
+	fmove.l	#$2000,fpcr
+	fmove.l	fp0,d4		; suppressed: d4 unchanged
+	fmove.l	#0,fpcr
+	chkcnt	cnt_fpoperr,2,301
+	chkl	d4,$12345678,302
+	move.l	(fp_exc_ea).l,d0
+	chkl	d0,0,303	; register destination: frame EA is zero
+
+	fmove.l	#$7FFFFFFF,fp1
+	fmul.x	fp1,fp1
+	fmul.x	fp1,fp1
+	fmul.x	fp1,fp1		; ~2^248: overflows single format on store
+	fmove.l	#$1000,fpcr	; enable OVFL
+	fmove.s	fp1,($32A0).l	; +inf written first, then v53 post
+	fmove.l	#0,fpcr
+	chkcnt	cnt_fpovfl,1,304
+	move.l	($32A0).l,d0
+	chkl	d0,$7F800000,305	; the default result reached memory
+	move.l	(fp_exc_ea).l,d0
+	chkl	d0,$32A0,306
+
+;--------------------------------------- FSAVE pending-exception frames
+; An e1-class deferred exception (here: enabled SNAN from a released
+; load) is EXTRACTED by FSAVE as a $41/$30 frame instead of trapping,
+; exactly as on a real 040 running FPSP: E1 set, CMDREG1B = the op,
+; ETEMP = the operand, GRS=7/WBTE15 for SNAN.  FRESTORE of that frame
+; re-arms the pend, delivered pre-instruction at the next dispatch; if
+; the enables were cleared before the restore, the state executes
+; through silently.  The e3 class (OVFL/UNFL/INEX from the arithmetic
+; ops) keeps the documented FSAVE-trap behavior until Tier 2.
+	fmove.l	#$4000,fpcr	; enable SNAN
+	fmove.l	#5,fp2
+	move.l	#$7F800001,($32DC).l
+	clr.w	(cnt_fpsnan).l
+	fmove.s	($32DC).l,fp2	; released; SNAN trap becomes pending
+	lea	($3800).l,a3
+	fsave	(a3)		; extraction: NO trap may fire here
+	chkcnt	cnt_fpsnan,0,307
+	move.l	($3800).l,d0
+	chkl	d0,$41300000,308	; a $30 frame, not IDLE/NULL
+	move.l	($3818).l,d0
+	and.l	#$06100000,d0	; E1 bit26 set, E3 bit25 clear, T bit20 clear
+	chkl	d0,$04000000,309
+	move.l	($3810).l,d0
+	chkl	d0,$45000000,310	; CMDREG1B = fmove.s mem,fp2
+	move.l	($380C).l,d0
+	and.l	#$03800000,d0	; GRS = 7 for SNAN
+	chkl	d0,$03800000,311
+	move.l	($3814).l,d0
+	and.l	#$00100000,d0	; WBTE15 set for SNAN
+	chkl	d0,$00100000,312
+	move.l	($3828).l,d0
+	chkl	d0,$7FFF0000,313	; ETEMP = the signaling operand
+
+	; FRESTORE re-arms: the next FPU dispatch delivers pre-instruction
+	frestore	(a3)
+	fnop
+	chkcnt	cnt_fpsnan,1,314
+	fmove.l	fp2,d0
+	chkl	d0,5,315		; writeback stayed inhibited
+
+	; enables cleared before the restore: the state executes through
+	fmove.l	#0,fpcr
+	frestore	(a3)
+	fnop
+	chkcnt	cnt_fpsnan,1,316
+	fmove.l	#7,fp3
+	fmove.l	fp3,d0
+	chkl	d0,7,317		; FPU dispatches normally again
+
+	; e3-class pend (enabled OVFL on a released multiply): FSAVE
+	; extracts the 100-byte $41/$60 BUSY frame -- E3 set, WBTEMP the
+	; internal rounded intermediate -- and FRESTORE re-arms the pend
+	; for pre-instruction delivery at the next dispatch
+	fmove.l	#$7FFFFFFF,fp1
+	fmul.x	fp1,fp1
+	fmul.x	fp1,fp1
+	fmul.x	fp1,fp1		; ~2^248 in extended: exact, no overflow yet
+	fmove.l	#$1040,fpcr	; enable OVFL, rounding precision SINGLE
+	clr.w	(cnt_fpovfl).l
+	fmul.x	fp1,fp1		; released; single-precision OVFL pends
+	fsave	(a3)		; extraction: NO trap may fire here
+	chkcnt	cnt_fpovfl,0,318
+	move.l	($3800).l,d0
+	chkl	d0,$41600000,319	; BUSY frame id, size $60
+	move.l	($3848).l,d0	; +72: exception flags
+	and.l	#$06100000,d0
+	chkl	d0,$02000000,320	; E3 set, E1 and T clear
+	move.l	($3818).l,d0	; +24: WBTS/WBTE = internal sign/exponent
+	chkl	d0,$41EF0000,321	; 2^248 squared: biased exp $41EF
+	frestore	(a3)
+	fnop			; re-armed pend delivers here
+	chkcnt	cnt_fpovfl,1,322
+	fmove.l	#0,fpcr
 
 	jmp	audit_return
 

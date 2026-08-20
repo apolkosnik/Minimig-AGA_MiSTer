@@ -314,17 +314,17 @@ always @(posedge clk) begin
 end
 
 ap040_tg68k_compat #(
-	// Internal caches OFF: they do not fit this device with usable timing.
-	// At the designed 4KB per side the fitter needs 4226 LABs against the
-	// 5CSEBA6's 4191; halved to 2KB per side it fits at 98% ALM
-	// utilization but timing collapses to -0.716 ns on the CPU domain,
-	// because at that occupancy the fitter has no placement freedom left
-	// (the same tree closes at +0.071 ns with them off).  cpu_cache_new in
-	// the RAM controllers already provides snooped caching on this fabric,
-	// so what is lost is hit LATENCY, not caching.  The cache and its
-	// fast-RAM cacheability windows stay wired up and covered by the test
-	// suite; flip this to 1 if area is freed elsewhere.
-	.AP040_ENABLE_CACHE(0),
+	// Internal caches ON.  Their storage is block RAM by construction
+	// (ap040_cache.v: explicit dpram tag row, inferred cdata ways), so the
+	// pair of 4KB caches costs 283 ALMs and 13 M10K -- the ATC's own move
+	// into block RAM is what made the room.  The timing objection that
+	// kept them off is fixed at the source: the cache no longer forwards a
+	// bypassed access combinationally in C_IDLE, which had put the ATC
+	// compare in front of the core's exception-format mux (see the
+	// pass_active comment there).  Measured worth on loop-heavy code:
+	// 1.41x with a zero-latency bus, 2.27x with a latent one, and near
+	// immunity to bus latency (tests/ap040/asm/bench_loop.s under +prof).
+	.AP040_ENABLE_CACHE(1),
 	// FPU hardware subset (milestone H): FMOVE all formats, FMOVEM,
 	// FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FTST with IEEE rounding;
 	// unimplemented ops trap to the FPSP route like real 040 silicon

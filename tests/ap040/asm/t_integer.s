@@ -828,6 +828,35 @@ c2dok:
 	and.l	#$FFFF,d5
 	chkl	d5,$4444,191
 
+;------------------------------------------- store into the fetch queue
+; A CPU write landing inside the free-running fetch queue's window must
+; flush it: the stale prefetched word would otherwise execute.  The 040
+; architecture only requires CPUSH/CINV for self-modifying code, but the
+; queue snoops its own stores as insurance -- the previous fetch-buffered
+; core booted DiagROM and not AmigaOS on hardware with exactly this
+; hazard, invisible to every CINV-disciplined test.  The divide keeps
+; the queue filled across smcq while the store rewrites it.
+	moveq	#0,d7
+	move.l	#$80000000,d0
+	movec	d0,cacr		; I-cache bypassed: the queue is the only
+				; instruction staleness this test probes (a
+				; cached stale line is t_cache's contract and
+				; needs CINV by design)
+	lea	smcq(pc),a0
+	move.l	#100,d0
+	divu.w	#3,d0		; queue runs ahead through smcq
+	move.w	#$5247,(a0)	; nop -> addq.w #1,d7, while queued
+smcq:
+	nop
+	moveq	#0,d0
+	cmp.l	#1,d7		; the REWRITTEN instruction must have run
+	beq.s	smcq_ok
+	failt	192
+smcq_ok:
+	cinva	ic		; drop the line cached before the bypass
+	move.l	#$80008000,d0
+	movec	d0,cacr		; cache-hot again
+
 ;----------------------------------------------------------------- all done
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700

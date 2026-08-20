@@ -91,6 +91,24 @@ module ap040_fpu
 	input             fsave_ack,
 	input             frestore_idle,
 	input             frestore_unimp,
+	// Pending-exception frame support (FSAVE e1 tier): the core pulses
+	// pend_capture when a released op's enabled exception is deferred;
+	// the e1-class frame is then prepared from the operand shadow so a
+	// later FSAVE emits it instead of trapping.  cur_vec is the
+	// priority vector over the live FPSR/FPCR enables;
+	// frestore_e1_pend classifies a frame being restored as a
+	// re-armable arithmetic E1 state.
+	input             pend_capture,
+	output      [7:0] cur_vec,
+	output            frestore_e1_pend,
+	output reg  [2:0] fstate_grs,
+	output reg        fstate_wbte15,
+	output reg        fstate_busy,      // the pending frame is $41/$60 BUSY
+	output reg [95:0] fstate_wbt,       // WBTEMP: the internal intermediate
+	output reg [31:0] fstate_fpiar_c,   // FPIARCU
+	input      [95:0] frestore_wbt,
+	input      [31:0] frestore_fpiar,
+	input             frestore_busy,
 	input      [15:0] frestore_cmd1,
 	input      [15:0] frestore_cmd3,
 	input       [2:0] frestore_stag,
@@ -98,6 +116,8 @@ module ap040_fpu
 	input       [2:0] frestore_flags,
 	input      [95:0] frestore_fpt,
 	input      [95:0] frestore_et,
+	input       [2:0] frestore_grs,
+	input             frestore_wbte15,
 	input             fp_reset     // FRESTORE of a NULL frame
 );
 
@@ -222,6 +242,7 @@ localparam F_ROUND = 4'd14;  // precision rounding and range checks
 
 localparam F_PACKS = 4'd15;  // denormal single/double store packing
 localparam F_UNFL  = 5'd16;  // gradual underflow at single/double precision
+localparam F_STDONE = 5'd17; // store completion: settled-status trap check
 
 reg  [4:0] fst;
 // unimp/unsupp decisions are made in the dispatch cycle (register
@@ -352,6 +373,42 @@ function [7:0] fp_exception_vector;
 	end
 endfunction
 
+// Operand shadow for the pending-exception frame: captured at
+// F_EXEC/F_BIN entry, where the classified source is in hand -- by the
+// time the exception is known (F_WB) the pipeline has consumed it.
+reg [15:0] sh_cmd;
+reg [95:0] sh_src;
+reg  [2:0] sh_stag;
+reg [95:0] sh_dst;
+reg  [2:0] sh_dtag;
+// internal intermediate for the BUSY frame's WBTEMP: captured in
+// F_ROUND at the overflow/underflow/inexact decision (rounded for
+// OVFL/INEX, unrounded for UNFL, per WinUAE fpp_get_internal[_round])
+reg        wb_s;
+reg [16:0] wb_e;
+reg [63:0] wb_m;
+reg  [2:0] wb_grs;
+reg        fstate_e1;    // the prepared/restored frame is an arithmetic
+                         // E1 state, not an unimplemented instruction
+
+assign cur_vec = fp_exception_vector(fpsr[15:8] & fpcr[15:8]);
+
+// WinUAE's e3 predicate: OVFL/UNFL/INEX from the five arithmetic ops
+// take the 96-byte BUSY frame (Tier 2, not implemented); everything
+// else pends as the $30 e1 frame.
+function arith5;
+	input [6:0] op;
+	begin
+		arith5 = ((op & 7'h30) == 7'h20) || ((op & 7'h3f) == 7'h04);
+	end
+endfunction
+
+wire [6:0] fr_cmd_op = (frestore_cmd1[6:0] == 7'h05) ? 7'h04
+                                                     : frestore_cmd1[6:0];
+assign frestore_e1_pend = (frestore_flags[2] || frestore_flags[1]) &&
+                          op_in_hw(fr_cmd_op) &&
+                          (|(fpsr[15:8] & fpcr[15:8]));
+
 function [15:0] frame_cmd1;
 	input [15:0] cmd;
 	begin
@@ -385,6 +442,10 @@ task capture_unimp;
 		fstate_flags <= 3'b100; // unimplemented instruction: E1=1, E3=T=0
 		fstate_fpt   <= dst;
 		fstate_et    <= src;
+		fstate_e1    <= 0;
+		fstate_grs   <= 0;
+		fstate_wbte15 <= 0;
+		fstate_busy  <= 0;
 		fstate_unimp <= 1;
 		fpu_used     <= 1;
 		unimp        <= 1;
@@ -403,6 +464,11 @@ always @(posedge clk) begin
 		fstate_cmd1 <= 0; fstate_cmd3 <= 0;
 		fstate_stag <= 0; fstate_dtag <= 0; fstate_flags <= 0;
 		fstate_fpt <= 0; fstate_et <= 0;
+		fstate_e1 <= 0; fstate_grs <= 0; fstate_wbte15 <= 0;
+		fstate_busy <= 0; fstate_wbt <= 0; fstate_fpiar_c <= 0;
+		sh_cmd <= 0; sh_src <= 0; sh_stag <= 0;
+		sh_dst <= 0; sh_dtag <= 0;
+		wb_s <= 0; wb_e <= 0; wb_m <= 0; wb_grs <= 0;
 		dout <= 0;
 		r_fmt <= 0; r_dst <= 0; r_op <= 0; r_din <= 0;
 		r_ae7 <= 0;
@@ -414,8 +480,11 @@ always @(posedge clk) begin
 		grs <= 0; eff_sub <= 0; acc_hi <= 0; acc_lo <= 0;
 		qv <= 0; srem <= 0; srad <= 0; loop_n <= 0; op_kind <= 0;
 		sh_ret <= F_PACKI; e_w <= 0; r_pr <= 0;
+		// FP0-FP7 reset to the default nonsignaling NaN: positive,
+		// exponent $7FFF, mantissa all ones (WinUAE fpu_reset/fpnan)
 		for (k = 0; k < 8; k = k + 1) begin
-			fr_s[k] <= 0; fr_e[k] <= 0; fr_m[k] <= 0;
+			fr_s[k] <= 0; fr_e[k] <= 15'h7FFF;
+			fr_m[k] <= 64'hFFFF_FFFF_FFFF_FFFF;
 		end
 	end
 	else if (ce) begin
@@ -447,10 +516,70 @@ always @(posedge clk) begin
 			fr_m[fm_sel] <= fm_wdata[63:0];
 			fpu_used <= 1;
 		end
+		if (pend_capture) begin : pcap
+			// A released op's enabled exception was just deferred by the
+			// core.  Prepare the FPSP-parseable $30 e1 frame from the
+			// shadow (WinUAE fpsr_check_arithmetic_exception's 68040
+			// fsave_data recipe).  The e3 class -- OVFL/UNFL/INEX from
+			// the five arithmetic ops -- needs the BUSY frame and keeps
+			// the documented FSAVE-trap behavior instead (Tier 2).
+			reg [7:0] pv;
+			pv = fp_exception_vector(fpsr[15:8] & fpcr[15:8]);
+			if (pv == `AP040_VEC_FP_SNAN || pv == `AP040_VEC_FP_OPERR ||
+			    pv == `AP040_VEC_FP_DZ || !arith5(sh_cmd[6:0])) begin
+				fstate_cmd1  <= frame_cmd1(sh_cmd);
+				fstate_cmd3  <= frame_cmd3(frame_cmd1(sh_cmd));
+				fstate_stag  <= sh_stag;
+				fstate_dtag  <= 0;
+				fstate_flags <= 3'b100;   // E1
+				fstate_fpt   <= 0;
+				fstate_et    <= sh_src;
+				fstate_grs   <= (pv == `AP040_VEC_FP_SNAN) ? 3'd7 : 3'd1;
+				fstate_wbte15 <= (pv == `AP040_VEC_FP_SNAN);
+				fstate_busy  <= 0;
+				fstate_e1    <= 1;
+				fstate_unimp <= 1;
+			end
+			else begin
+				// e3 class: OVFL/UNFL/INEX from the five arithmetic ops
+				// prepare the $41/$60 BUSY frame with the internal
+				// intermediate captured at F_ROUND (WinUAE's 68040 BUSY
+				// recipe: e3, swizzled CMDREG3B, WBTEMP+GRS, src and dst
+				// operands -- dst only for the dyadic ops)
+				fstate_cmd1  <= frame_cmd1(sh_cmd);
+				fstate_cmd3  <= frame_cmd3(frame_cmd1(sh_cmd));
+				fstate_stag  <= sh_stag;
+				fstate_et    <= sh_src;
+				if ((sh_cmd[5:4] == 2'b10)) begin  // dyadic: 0x20-0x2F range
+					fstate_fpt  <= sh_dst;
+					fstate_dtag <= sh_dtag;
+				end
+				else begin
+					fstate_fpt  <= 0;
+					fstate_dtag <= 0;
+				end
+				fstate_flags <= 3'b010;   // E3
+				fstate_grs   <= wb_grs;
+				fstate_wbte15 <= (pv == `AP040_VEC_FP_UNFL);
+				fstate_wbt   <= {wb_s, wb_e[14:0], 16'd0, wb_m};
+				fstate_fpiar_c <= fpiar;
+				fstate_busy  <= 1;
+				fstate_e1    <= 1;        // arithmetic E-state (either tier)
+				fstate_unimp <= 1;
+			end
+		end
 		if (fp_reset) begin
 			fpcr <= 0; fpsr <= 0; fpiar <= 0;
 			fpu_used <= 0;
 			fstate_unimp <= 0;
+			fstate_e1 <= 0;
+			fstate_busy <= 0;
+			// FRESTORE of a NULL frame returns the FPU to the reset
+			// state, data registers included (WinUAE fpu_null)
+			for (k = 0; k < 8; k = k + 1) begin
+				fr_s[k] <= 0; fr_e[k] <= 15'h7FFF;
+				fr_m[k] <= 64'hFFFF_FFFF_FFFF_FFFF;
+			end
 		end
 		if (fsave_ack) fstate_unimp <= 0;
 		if (frestore_idle) begin
@@ -467,17 +596,36 @@ always @(posedge clk) begin
 			fstate_flags <= frestore_flags;
 			fstate_fpt <= frestore_fpt;
 			fstate_et <= frestore_et;
+			fstate_grs <= frestore_grs;
+			fstate_wbte15 <= frestore_wbte15;
+			fstate_busy <= frestore_busy;
+			fstate_wbt <= frestore_wbt;
+			fstate_fpiar_c <= frestore_fpiar;
+			// an E1 frame whose command the hardware implements is a
+			// deferred ARITHMETIC exception, not an unimplemented
+			// instruction: the core re-arms the pend (frestore_e1_pend)
+			// and delivery happens at the next dispatch; if the enables
+			// were cleared before the restore, the state simply executes
+			// through (see the F_IDLE dispatch gate)
+			fstate_e1 <= (frestore_flags[2] || frestore_flags[1]) &&
+			             op_in_hw(fr_cmd_op);
 		end
 
 		case (fst)
 			F_IDLE: if (req) begin
-				if (fstate_unimp) begin
+				if (fstate_unimp && !fstate_e1) begin
 					// A restored exception frame remains pending until FSAVE.
 					// Re-enter the software package without destroying its state.
 					unimp <= 1;
 					fpu_used <= 1;
 				end
 				else begin : new_fp_command
+				// a normal dispatch consumes any leftover frame state: a
+				// delivered-but-unsaved pend frame, or a restored e1 state
+				// whose enables were cleared before the restore
+				fstate_e1 <= 0;
+				fstate_unimp <= 0;
+				fstate_busy <= 0;
 				// FPSR exception status is per instruction.  The accrued
 				// exception byte is intentionally retained until software
 				// writes FPSR.  FMOVECR (opclass 010 fmt 7) faults before
@@ -563,8 +711,11 @@ always @(posedge clk) begin
 					// rounding bit positions); B/W/L go through the shifter
 					case (r_fmt)
 						3'd2: begin
+							// raw X pass-through can set no status bits, so
+							// it alone skips the F_STDONE enabled-trap check
 							dout <= {a_s, a_e[14:0], 16'd0, a_m};
-							done <= 1; fpu_used <= 1; fst <= F_IDLE;
+							done <= 1; fpu_used <= 1;
+							fst <= F_IDLE;
 						end
 						3'd1: begin : pk_s
 							reg [24:0] mr;
@@ -583,7 +734,7 @@ always @(posedge clk) begin
 									fpsr[14] <= 1;
 									fpsr[7]  <= 1;
 								end
-								done <= 1; fpu_used <= 1; fst <= F_IDLE;
+								fpu_used <= 1; fst <= F_STDONE;
 							end
 							else begin
 								sE = $signed({1'b0, a_e}) - 18'sd16383;
@@ -618,7 +769,7 @@ always @(posedge clk) begin
 									dout <= {a_s, enc[7:0], mr[22:0], 64'd0};
 									if (inx) begin fpsr[9] <= 1; fpsr[3] <= 1; end
 								end
-								done <= 1; fpu_used <= 1; fst <= F_IDLE;
+								fpu_used <= 1; fst <= F_STDONE;
 								end
 							end
 						end
@@ -637,7 +788,7 @@ always @(posedge clk) begin
 									fpsr[14] <= 1;
 									fpsr[7]  <= 1;
 								end
-								done <= 1; fpu_used <= 1; fst <= F_IDLE;
+								fpu_used <= 1; fst <= F_STDONE;
 							end
 							else begin
 								sE = $signed({1'b0, a_e}) - 18'sd16383;
@@ -670,7 +821,7 @@ always @(posedge clk) begin
 									dout <= {a_s, enc[10:0], mr[51:0], 32'd0};
 									if (inx) begin fpsr[9] <= 1; fpsr[3] <= 1; end
 								end
-								done <= 1; fpu_used <= 1; fst <= F_IDLE;
+								fpu_used <= 1; fst <= F_STDONE;
 								end
 							end
 						end
@@ -704,7 +855,7 @@ always @(posedge clk) begin
 									fpsr[13] <= 1;
 									fpsr[7]  <= 1;
 								end
-								done <= 1; fpu_used <= 1; fst <= F_IDLE;
+								fpu_used <= 1; fst <= F_STDONE;
 							end
 							else if (a_t == T_INF || sE > 18'sd62) begin
 								// infinity or far out of range: OPERR with
@@ -872,6 +1023,10 @@ always @(posedge clk) begin
 			end
 
 			F_EXEC: begin
+				// operand shadow for a possible deferred-exception frame
+				sh_cmd  <= {3'b010, r_fmt, r_dst, r_op};
+				sh_src  <= {a_s, a_e[14:0], 16'd0, a_m};
+				sh_stag <= r_stag;
 				if (r_unimp) begin
 					capture_unimp({3'b010, r_fmt, r_dst, r_op},
 					               {a_s, a_e[14:0], 16'd0, a_m}, r_stag,
@@ -937,6 +1092,11 @@ always @(posedge clk) begin
 
 			F_BIN: begin : f_bin
 				reg        s_a;
+				sh_cmd  <= {3'b010, r_fmt, r_dst, r_op};
+				sh_src  <= {a_s, a_e[14:0], 16'd0, a_m};
+				sh_stag <= r_stag;
+				sh_dst  <= {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]};
+				sh_dtag <= frame_tag_x(fr_e[r_dst], fr_m[r_dst]);
 				// FSUB family: fold the source sign
 				s_a = (op_kind == 4'd1 &&
 				       (r_op == 7'h28 || r_op == 7'h68 || r_op == 7'h6C))
@@ -1417,6 +1577,12 @@ always @(posedge clk) begin
 					       (pr == 2'd2) ? 18'sd15361 : 18'sd0;
 					ovf = (er > emax);
 					unf = (er < emin);
+					// WBTEMP capture for a possible BUSY frame: rounded for
+					// OVFL and the plain inexact path, unrounded for UNFL
+					wb_s   <= a_s;
+					wb_e   <= er[16:0];
+					wb_m   <= unf ? a_m : mr[63:0];
+					wb_grs <= grs;
 					if (ovf) begin
 						fpsr[12] <= 1;              // OVFL
 						fpsr[6]  <= 1;              // accrued OVFL
@@ -1649,9 +1815,8 @@ always @(posedge clk) begin
 						end
 					end
 				end
-				done <= 1;
 				fpu_used <= 1;
-				fst <= F_IDLE;
+				fst <= F_STDONE;
 			end
 
 			F_UNFL: begin : f_unfl
@@ -1740,8 +1905,25 @@ always @(posedge clk) begin
 						fpsr[5] <= 1;             // accrued UNFL
 					end
 				end
-				done <= 1;
 				fpu_used <= 1;
+				fst <= F_STDONE;
+			end
+
+			F_STDONE: begin
+				// Store completion one cycle after the exits above, so the
+				// status byte has settled: an ENABLED exception is reported
+				// for post-instruction delivery by the core (write-then-trap
+				// for float formats; the integer SNAN/OPERR set suppresses
+				// the write, decided core-side).  Disabled exceptions
+				// complete in hardware with the architectural default
+				// result already in dout: AP040 runs without FPSP, so the
+				// real 040's nonmaskable store set is served by the same
+				// defaults FPSP would have stored.
+				done <= 1;
+				if (|(fpsr[15:8] & fpcr[15:8])) begin
+					exc_req <= 1;
+					exc_vec <= fp_exception_vector(fpsr[15:8] & fpcr[15:8]);
+				end
 				fst <= F_IDLE;
 			end
 

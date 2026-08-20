@@ -56,6 +56,7 @@ module sdram32_model
 	input      [12:0] addr,
 	input       [1:0] ba,
 	input       [1:0] dqm,
+	input             absent,       // no module in the socket: never drive
 	inout      [15:0] dq
 );
 
@@ -77,7 +78,7 @@ wire [24:1] lin_base = {c_ba, row[c_ba], addr[8:0]};
 
 reg [15:0] sd_q = 0;
 reg        sd_q_en = 0;
-assign dq = sd_q_en ? sd_q : 16'hZZZZ;
+assign dq = (sd_q_en && !absent) ? sd_q : 16'hZZZZ;
 
 reg  sdclk_q = 0;
 wire chip_tick = sd_clk && !sdclk_q;
@@ -181,6 +182,31 @@ module tb_sdram32;
 reg clk113 = 0;
 always #44 clk113 = ~clk113;
 
+// Deliberate-break modes.  The X2.1 commit proved the bench catches
+// each of these with one-off RTL edits (2450 lockstep mismatch cycles /
+// 5214 lane errors / 536 confined-write errors); the forces below keep
+// those negative tests regression-runnable, and run_tests.sh requires
+// each of them to FAIL this bench.
+//   +break_lockstep  chip 2 receives a perturbed address bus
+//   +break_laneswap  chip 2's read capture mirrors chip 1's lane
+//   +break_chipwr    writes never land in chip 2 (masks forced)
+// +no_module: the DUAL controller runs with nothing in the secondary
+// socket -- its DQ never drives.  The init probe must refuse dual_ok;
+// the functional battery is skipped (a floating lane fails it by
+// construction).
+reg no_module = 0;
+initial begin
+	no_module = $test$plusargs("no_module");
+	if ($test$plusargs("break_lockstep"))
+		force ctl_d.sd2_addr = {ctl_d.sd_addr[12:1], ~ctl_d.sd_addr[0]};
+	if ($test$plusargs("break_laneswap")) begin
+		force ctl_d.sdata2_reg   = ctl_d.sdata_reg;
+		force ctl_d.sdata2_reg_f = ctl_d.sdata_reg_f;
+	end
+	if ($test$plusargs("break_chipwr"))
+		force ctl_d.sd2_a_dqm = 2'b11;
+end
+
 reg [3:0] div = 0;
 always @(posedge clk113) div <= div + 1'd1;
 
@@ -266,7 +292,7 @@ sdram32_model ram_ref
 (
 	.clk(clk113), .sd_clk(r_sd_clk), .cs_n(r_sd_cs), .ras_n(r_sd_ras),
 	.cas_n(r_sd_cas), .we_n(r_sd_we), .addr(r_sd_addr), .ba(r_sd_ba),
-	.dqm(r_sd_dqm), .dq(r_sd_data)
+	.absent(1'b0), .dqm(r_sd_dqm), .dq(r_sd_data)
 );
 
 //---------------------------------------------------------------------------
@@ -295,6 +321,8 @@ wire [31:0] d_fill_dat;
 wire        d_fill_strb;
 wire        d_fill_ack;
 
+wire d_dual_ok, z_dual_ok;
+
 sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ctl_d
 (
 	.sysclk(clk113), .c_7m(c_7m), .reset_n(reset), .cache_rst(reset),
@@ -320,21 +348,29 @@ sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ctl_d
 	.walker_wdata(wk_wdata), .walker_ack(d_wk_ack), .walker_rdata(d_wk_rdata),
 
 	.fill_req(fill_req), .fill_addr(fill_addr), .fill_dat(d_fill_dat),
-	.fill_strb(d_fill_strb), .fill_ack(d_fill_ack)
+	.fill_strb(d_fill_strb), .fill_ack(d_fill_ack),
+	.dual_ok(d_dual_ok)
 );
 
 sdram32_model ram_d1     // primary: D[15:0], odd (low) words
 (
 	.clk(clk113), .sd_clk(d_sd_clk), .cs_n(d_sd_cs), .ras_n(d_sd_ras),
 	.cas_n(d_sd_cas), .we_n(d_sd_we), .addr(d_sd_addr), .ba(d_sd_ba),
-	.dqm(d_sd_dqm), .dq(d_sd_data)
+	.absent(1'b0), .dqm(d_sd_dqm), .dq(d_sd_data)
 );
 
 sdram32_model ram_d2     // secondary: D[31:16], even (high) words
 (
 	.clk(clk113), .sd_clk(d_sd2_clk), .cs_n(d_sd2_cs), .ras_n(d_sd2_ras),
 	.cas_n(d_sd2_cas), .we_n(d_sd2_we), .addr(d_sd2_addr), .ba(d_sd2_ba),
-	.dqm(d_sd2_dqm), .dq(d_sd2_data)
+	.absent(no_module),
+	// BOARD FIDELITY: the io-board routes no DQM to the secondary
+	// socket; the SDRAM module itself shorts DQMH/DQML to A12/A11
+	// (the same convention sdram_ctrl serves with its
+	// sd_addr[12:11] <= cas_dqm mirror).  The controller's sd2_dqm
+	// output is a phantom on this board and must not reach the model:
+	// byte masks only work if they arrive on sd2_addr[12:11].
+	.dqm(d_sd2_addr[12:11]), .dq(d_sd2_data)
 );
 
 //---------------------------------------------------------------------------
@@ -388,23 +424,28 @@ sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(0)) ctl_z
 	.walker_wdata(wk_wdata), .walker_ack(z_wk_ack), .walker_rdata(z_wk_rdata),
 
 	.fill_req(fill_req), .fill_addr(fill_addr), .fill_dat(z_fill_dat),
-	.fill_strb(z_fill_strb), .fill_ack(z_fill_ack)
+	.fill_strb(z_fill_strb), .fill_ack(z_fill_ack),
+	.dual_ok(z_dual_ok)
 );
 
 sdram32_model ram_z
 (
 	.clk(clk113), .sd_clk(z_sd_clk), .cs_n(z_sd_cs), .ras_n(z_sd_ras),
 	.cas_n(z_sd_cas), .we_n(z_sd_we), .addr(z_sd_addr), .ba(z_sd_ba),
-	.dqm(z_sd_dqm), .dq(z_sd_data)
+	.absent(1'b0), .dqm(z_sd_dqm), .dq(z_sd_data)
 );
 
 //---------------------------------------------------------------------------
 // 1. lockstep command identity
 //---------------------------------------------------------------------------
 // The command word driven to chip 2 must equal chip 1's every cycle.  nCS,
-// DQM and DQ are deliberately excluded: those are the lane controls.
+// DQM and DQ are deliberately excluded: those are the lane controls.  So
+// are addr[12:11]: the modules short DQMH/DQML to A12/A11, which makes
+// those two address bits per-lane byte masks during a write CAS (rows,
+// refresh and the mode word still drive them identically, covered by the
+// cycle-equivalence and memory-image checks).
 wire lock_match =
-	(d_sd_addr === d_sd2_addr) && (d_sd_ba  === d_sd2_ba ) &&
+	(d_sd_addr[10:0] === d_sd2_addr[10:0]) && (d_sd_ba  === d_sd2_ba ) &&
 	(d_sd_ras  === d_sd2_ras ) && (d_sd_cas === d_sd2_cas) &&
 	(d_sd_we   === d_sd2_we  ) && (d_sd_cke === d_sd2_cke) &&
 	(d_sd_clk  === d_sd2_clk );
@@ -412,7 +453,7 @@ wire lock_match =
 // the same identity is required of the fallback build (it drives both pin
 // groups too, the board just has nothing on the second one)
 wire lock_match_z =
-	(z_sd_addr === z_sd2_addr) && (z_sd_ba  === z_sd2_ba ) &&
+	(z_sd_addr[10:0] === z_sd2_addr[10:0]) && (z_sd_ba  === z_sd2_ba ) &&
 	(z_sd_ras  === z_sd2_ras ) && (z_sd_cas === z_sd2_cas) &&
 	(z_sd_we   === z_sd2_we  ) && (z_sd_cke === z_sd2_cke) &&
 	(z_sd_clk  === z_sd2_clk );
@@ -896,6 +937,33 @@ initial begin
 		errors = errors + 1;
 	end
 	repeat (64) @(posedge clk113);
+
+	// the init probe's verdict comes first: with no module in the
+	// secondary socket only the probe check runs (a floating lane fails
+	// the functional battery by construction)
+	if (no_module) begin
+		if (d_dual_ok === 1'b1) begin
+			$display("FAIL: dual_ok claims a module in an empty socket");
+			errors = errors + 1;
+		end
+		$display("no-module probe check only; functional battery skipped");
+		if (errors == 0) $display("ALL TESTS PASSED");
+		else $display("TEST FAILED with %0d errors", errors);
+		$finish;
+	end
+	if (d_dual_ok !== 1'b1) begin
+		$display("FAIL: DUAL probe missed the present module (dual_ok=%b)",
+		         d_dual_ok);
+		errors = errors + 1;
+	end
+	if (z_dual_ok !== 1'b1) begin
+		$display("FAIL: DUAL=0 build must tie dual_ok on (got %b)", z_dual_ok);
+		errors = errors + 1;
+	end
+	// the probe wrote its patterns through unit 0: restore the image
+	poke_word(24'h0, pat(24'h0));
+	poke_word(24'h1, pat(24'h1));
+
 	mon_en = 1;
 	$display("init complete at cycle %0d, equivalence monitor armed", cyc);
 

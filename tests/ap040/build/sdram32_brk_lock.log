@@ -1,0 +1,113 @@
+tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)
+FAIL: lockstep mismatch at cycle 650 (state 1, slot 0, cpu_slot=0)
+FAIL: lockstep mismatch at cycle 651 (state 2, slot 0, cpu_slot=0)
+FAIL: lockstep mismatch at cycle 652 (state 3, slot 0, cpu_slot=0)
+FAIL: lockstep mismatch at cycle 653 (state 4, slot 0, cpu_slot=0)
+FAIL: lockstep mismatch at cycle 654 (state 5, slot 0, cpu_slot=0)
+FAIL: lockstep mismatch at cycle 655 (state 6, slot 0, cpu_slot=0)
+FAIL: lockstep mismatch at cycle 656 (state 7, slot 0, cpu_slot=0)
+FAIL: lockstep mismatch at cycle 657 (state 8, slot 0, cpu_slot=0)
+FAIL: lockstep mismatch at cycle 658 (state 9, slot 0, cpu_slot=0)
+FAIL: lockstep mismatch at cycle 659 (state 10, slot 0, cpu_slot=0)
+SDRAM MODEL: ACTIVE into open bank 0 at t=74228
+SDRAM MODEL: ACTIVE into open bank 0 at t=77044
+SDRAM MODEL: ACTIVE into open bank 0 at t=79860
+FAIL: DUAL probe missed the present module (dual_ok=x)
+init complete at cycle 1033, equivalence monitor armed
+SDRAM MODEL: ACTIVE into open bank 0 at t=92532
+FAIL: chipRD mismatch (DUAL=1) at cycle 1059 state 10: dut=000000000000xxxx ref=0000000000005a5b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1060 state 11: dut=000000000000xxxx ref=0000000000005a5b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1061 state 12: dut=000000000000xxxx ref=0000000000005a5b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1062 state 13: dut=000000000000xxxx ref=0000000000005a5b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1063 state 14: dut=000000000000xxxx ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1063 state 14: dut=00005b5bxxxxxxxx ref=00005b5b585bxxxx
+FAIL: chipRD mismatch (DUAL=1) at cycle 1064 state 15: dut=000000000000xxxx ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1064 state 15: dut=00005b5bxxxxxxxx ref=00005b5b585bxxxx
+FAIL: chipRD mismatch (DUAL=1) at cycle 1065 state 0: dut=000000000000xxxx ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1065 state 0: dut=00005b5bxxxx595b ref=00005b5b585b595b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1066 state 1: dut=000000000000xxxx ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1066 state 1: dut=00005b5bxxxx595b ref=00005b5b585b595b
+FAIL: DUAL chipRD @0000200 = xxxx, expected 5a5b
+FAIL: DUAL chip48 @0000200 = 5b5bxxxx595b, expected 5b5b585b595b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1067 state 2: dut=000000000000xxxx ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1067 state 2: dut=00005b5bxxxx595b ref=00005b5b585b595b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1068 state 3: dut=000000000000xxxx ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1068 state 3: dut=00005b5bxxxx595b ref=00005b5b585b595b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1069 state 4: dut=000000000000xxxx ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1069 state 4: dut=00005b5bxxxx595b ref=00005b5b585b595b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1070 state 5: dut=000000000000xxxx ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1070 state 5: dut=00005b5bxxxx595b ref=00005b5b585b595b
+SDRAM MODEL: ACTIVE into open bank 0 at t=95348
+FAIL: DUAL chip48 @0000202 = xxxx595bxxxx, expected 585b595b5a5b
+SDRAM MODEL: ACTIVE into open bank 0 at t=98164
+FAIL: DUAL chipRD @0000204 = xxxx, expected 585b
+FAIL: DUAL chip48 @0000204 = 595bxxxx5b5b, expected 595b5a5b5b5b
+SDRAM MODEL: ACTIVE into open bank 0 at t=100980
+FAIL: DUAL chip48 @0000206 = xxxx5b5bxxxx, expected 5a5b5b5b585b
+SDRAM MODEL: ACTIVE into open bank 0 at t=103796
+FAIL: DUAL chip48 @000050e = xxxxdf58xxxx, expected de58df58dc58
+SDRAM MODEL: ACTIVE into open bank 0 at t=106612
+SDRAM MODEL: AUTOREFRESH with an open bank at t=108020
+FAIL: DUAL chipRD @0000754 = xxxx, expected f059
+FAIL: DUAL chip48 @0000754 = f159xxxxf359, expected f159f259f359
+SDRAM MODEL: ACTIVE into open bank 0 at t=109428
+SDRAM MODEL: ACTIVE into open bank 0 at t=115060
+SDRAM MODEL: ACTIVE into open bank 0 at t=120692
+FAIL: DUAL chipRD @0000400 = xxxx, expected 1234
+FAIL: DUAL chip48 @0000400 = 5678xxxx59cd, expected 5678ab5859cd
+SDRAM MODEL: ACTIVE into open bank 0 at t=123508
+FAIL: DUAL chipRD @0000404 = xxxx, expected ab58
+FAIL: DUAL chip48 @0000404 = 59cdxxxx5678, expected 59cd12345678
+SDRAM MODEL: ACTIVE into open bank 0 at t=126324
+FAIL: DUAL chipRD @0000408 = xxxx, expected 5e58
+FAIL: DUAL chip48 @0000408 = 5f58xxxx5d58, expected 5f585c585d58
+SDRAM MODEL: ACTIVE into open bank 0 at t=129140
+FAIL: DUAL cpuRD @0000800 = xxxx, expected 5a5e
+SDRAM MODEL: AUTOREFRESH with an open bank at t=130548
+SDRAM MODEL: ACTIVE into open bank 0 at t=133364
+FAIL: DUAL cpuRD @0000a04 = xxxx, expected 585f
+SDRAM MODEL: ACTIVE into open bank 0 at t=136180
+SDRAM MODEL: ACTIVE into open bank 0 at t=144628
+FAIL: DUAL cpuRD @0000c00 = xxxx, expected cafe
+SDRAM MODEL: ACTIVE into open bank 0 at t=147444
+SDRAM MODEL: ACTIVE into open bank 0 at t=150260
+FAIL: DUAL walker read = xxxx5678
+SDRAM MODEL: ACTIVE into open bank 0 at t=153076
+SDRAM MODEL: AUTOREFRESH with an open bank at t=154484
+FAIL: DUAL walker image read = xxxx5678, expected 12345678
+SDRAM MODEL: ACTIVE into open bank 0 at t=155892
+FAIL: DUAL fill @0000800 beat 0 = xxxx5b5e, expected 5a5e5b5e
+FAIL: DUAL fill @0000800 beat 1 = xxxx595e, expected 585e595e
+FAIL: DUAL fill @0000800 beat 2 = xxxx5f5e, expected 5e5e5f5e
+FAIL: DUAL fill @0000800 beat 3 = xxxx5d5e, expected 5c5e5d5e
+FILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4
+FILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)
+FILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)
+SDRAM MODEL: ACTIVE into open bank 0 at t=160116
+SDRAM MODEL: ACTIVE into open bank 0 at t=161524
+SDRAM MODEL: ACTIVE into open bank 0 at t=162932
+SDRAM MODEL: ACTIVE into open bank 0 at t=165748
+FAIL: DUAL fill @0000900 beat 0 = xxxxdb5e, expected da5edb5e
+FAIL: DUAL fill @0000900 beat 1 = xxxxd95e, expected d85ed95e
+FAIL: DUAL fill @0000900 beat 2 = xxxxdf5e, expected de5edf5e
+FAIL: DUAL fill @0000900 beat 3 = xxxxdd5e, expected dc5edd5e
+SDRAM MODEL: ACTIVE into open bank 0 at t=168564
+SDRAM MODEL: ACTIVE into open bank 0 at t=174196
+SDRAM MODEL: AUTOREFRESH with an open bank at t=178420
+SDRAM MODEL: ACTIVE into open bank 0 at t=179828
+FAIL: DUAL fill @0001400 beat 0 = xxxxbeef, expected deadbeef
+FAIL: DUAL fill @0001400 beat 1 = xxxxface, expected feedface
+FAIL: DUAL fill @0001400 beat 2 = xxxx5f50, expected 5e505f50
+FAIL: DUAL fill @0001400 beat 3 = xxxx5d50, expected 5c505d50
+FAIL: chipset writes not coherent with the 32-bit fill port: beats xxxxbeef xxxxface
+FAIL: secondary memory word 512 (unit 256) = 5a58, expected 1234
+FAIL: secondary memory word 514 (unit 257) = 5858, expected ab58
+FAIL: secondary memory word 768 (unit 384) = 5a59, expected 1234
+FAIL: secondary memory word 1536 (unit 768) = 5a5c, expected cafe
+FAIL: secondary memory word 2560 (unit 1280) = 5a50, expected dead
+FAIL: secondary memory word 2562 (unit 1281) = 5850, expected feed
+FAIL: 29 ACTIVE-into-open-bank violations (ref 0, pri 0, sec 29, 16b 0)
+FAIL: 4 refresh-with-open-bank violations
+lockstep: 1497 mismatching cycles
+TEST FAILED with 3523 errors
+tb_sdram32.v:1151: $finish called at 188892 (100ps)
