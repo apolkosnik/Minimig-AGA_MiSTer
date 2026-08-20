@@ -2704,12 +2704,17 @@ always @(posedge clk) begin
 						fatal_halt;
 					end
 					else begin
-						// any other odd handler address becomes an address
-						// error on 020+ (WinUAE exception3_notinstruction);
-						// the PC field keeps the original exception's
-						// next-PC context
+						// Any other odd handler address becomes an address
+						// error.  The frame's PC field is the VECTOR TABLE
+						// ENTRY that supplied the odd address, not the
+						// original exception's next-PC context: the
+						// interrupted flow is already abandoned, and what
+						// identifies the fault is where the bad vector came
+						// from.  The address field carries the odd target
+						// with A0 cleared.
 						texc_pend <= 0;
-						exc(`AP040_VEC_ADDRERR, 4'd2, pc,
+						exc(`AP040_VEC_ADDRERR, 4'd2,
+						    vbr + {22'd0, exc_vec, 2'b00},
 						    {m_val[31:1], 1'b0});
 					end
 				end

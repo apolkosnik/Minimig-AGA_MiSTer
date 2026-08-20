@@ -127,6 +127,14 @@ function [7:0] rd8;
 			rd8 = tmem[a - TBASE];
 		else if (a >= CAPV && a < CAPV + 32'h100) begin
 			vec = (a - CAPV) >> 2;
+			// NOTE: which vectors are odd varies per ROUND -- some expect
+			// the trace vector to fault, others expect it delivered and
+			// the tested exception's vector to fault.  This synthetic
+			// overlay cannot express that.  Taking the answer from the
+			// round's lmem vector table was tried and is WRONG: the corpus
+			// does not plant those entries where this would read them, and
+			// it drops ODD_EXC from 20/33 to 0/33.  A faithful model needs
+			// the per-round vector image the corpus actually builds.
 			vv = (odd_vector != 0 && vec >= 4) ? odd_vector
 			     : CAPH + {21'd0, vec, 3'd0};
 			rd8 = be_byte(vv, a[1:0]);
@@ -553,6 +561,7 @@ endtask
 task check_final;
 	integer fi;
 	reg [31:0] sp;
+	reg [31:0] fpc, fpc_adj;
 	begin
 		if (!(flags & F_IGNORE_EXC) && cap_vec !== e_exc)
 			mismatch("exception", e_exc, cap_vec);
@@ -587,11 +596,23 @@ task check_final;
 				         frame_b[9], frame_b[10], frame_b[11], rd8(sp+0), rd8(sp+1),
 				         rd8(sp+2), rd8(sp+3), rd8(sp+4), rd8(sp+5), rd8(sp+6),
 				         rd8(sp+7), rd8(sp+8), rd8(sp+9), rd8(sp+10), rd8(sp+11));
+			// The bench relocates the vector table to CAPV, so a frame
+			// field that names a vector-table ENTRY -- the odd-vector
+			// address error stacks vbr + 4*vec -- carries CAPV + 4*vec
+			// where the corpus recorded it with the test's own vbr of 0.
+			// Translate that field back before comparing; everything else
+			// is read straight from the stacked frame.
+			fpc = read_value(sp + 2, 2);
+			fpc_adj = (fpc >= CAPV && fpc < CAPV + 32'h100) ? fpc - CAPV : fpc;
 			for (fi = 0; fi < frame_len; fi = fi + 1)
-				if (((rd8(sp + fi) ^ frame_b[fi]) & frame_m[fi]) != 0) begin
+				if ((((fi >= 2 && fi <= 5)
+				        ? fpc_adj[8*(5-fi) +: 8] : rd8(sp + fi))
+				     ^ frame_b[fi]) & frame_m[fi]) begin
 					if (mism < report_lim)
 						$display("  frame byte %0d at %08x mask=%02x", fi, sp+fi, frame_m[fi]);
-					mismatch("exception frame", frame_b[fi], rd8(sp + fi));
+					mismatch("exception frame", frame_b[fi],
+					         (fi >= 2 && fi <= 5)
+					             ? fpc_adj[8*(5-fi) +: 8] : rd8(sp + fi));
 				end
 		end else if (!(flags & F_IGNORE_EXC) && e_exc == 4) begin
 			if (read_value(sp + 2, 2) !== e_pc)
@@ -702,7 +723,13 @@ task run_round;
 		// to a PRIVILEGED first instruction in user mode; the same
 		// reasoning applies whenever an autovector interrupt is the
 		// round's recorded result.
-		if (i_level != 0 && expected_exc_live >= 25 && expected_exc_live <= 31)
+		// ...and an odd-vector round whose recorded result is the nested
+		// ADDRESS ERROR is the same case: the interrupt was still taken
+		// before the tested instruction, it just faulted on its own vector
+		// instead of reaching a handler.
+		if (i_level != 0 &&
+		    ((expected_exc_live >= 25 && expected_exc_live <= 31) ||
+		     (odd_vector != 0 && expected_exc_live == 3)))
 			dut.core.in_exc = 1;
 		boot_overlay = 0;
 		round_active = 1;

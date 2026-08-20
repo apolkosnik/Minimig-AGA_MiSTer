@@ -1068,8 +1068,12 @@ ex_t3_wait:
 	lea	ex_t4_cont(pc),a0
 	move.l	a0,(resume).l
 	move.l	#$400,(exp_addr).l
-	lea	ex_t4_next(pc),a0
-	move.l	a0,(exp_pc).l	; PC field: the original exception's next PC
+	; PC field: the VECTOR TABLE ENTRY that supplied the odd address
+	; ($84 = vbr + 4*33 for TRAP #1), not the original exception's next
+	; PC.  This test required the latter until the v24 corpus contradicted
+	; it -- its ODD_EXC group stacks vbr + 4*vec, and honouring that took
+	; the group from 0/33 to 20/33 with nothing else moving.
+	move.l	#$84,(exp_pc).l
 	movea.l	sp,a5		; the TRAP frame stays behind: unwind after
 	trap	#1
 ex_t4_next:
