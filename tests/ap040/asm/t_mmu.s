@@ -29,6 +29,10 @@ last_wb3s	equ	$3626
 last_wb3d	equ	$3628
 last_ea		equ	$362C
 wb_complete	equ	$3680	; h_aerr performs valid WB3s like NetBSD trap.c
+cnt_int2	equ	$3684	; level-2 interrupts taken (interleave sweeps)
+IPLREG	equ	$F110
+IPLDLY	equ	$F148
+IPLCAP	equ	$F160	; bench IPL-injection capability (bit 0)
 WBERRCTL	equ	$F146
 
 failt	macro
@@ -47,8 +51,12 @@ ok\@:
 	dc.l	$3400
 	dc.l	start
 	dc.l	h_aerr		; 2 access error
-	rept	30
-	dc.l	unexp		; 3-32
+	rept	23
+	dc.l	unexp		; 3-25
+	endr
+	dc.l	h_int2		; 26 level-2 autovector (interleave sweeps)
+	rept	6
+	dc.l	unexp		; 27-32
 	endr
 	dc.l	h_utrap		; 33 TRAP #1
 	rept	222
@@ -61,6 +69,7 @@ start:
 	clr.w	(cnt_stub).l
 	clr.w	(expect_ma).l
 	clr.w	(wb_complete).l
+	clr.w	(cnt_int2).l
 
 ;----------------------------------------------------------------- tables
 	lea	($4400).l,a0
@@ -837,6 +846,84 @@ u8dat:
 	and.l	#$FFFF,d0
 	chkl	d0,5,160		; the two extra write faults, once each
 
+;---------------- interrupt-vs-MMU-operation interleave sweeps (161-164)
+; The live NetBSD freeze happened inside pmap_enter -- PTE rewrite,
+; PFLUSH, fresh table walks -- with a VBL interrupt nested in the same
+; window and every interrupt level dead afterwards.  Sweep a delayed
+; level-2 request across that whole window.  PFLUSHA empties the ATC
+; each round, so the interrupt's own exception entry (vector fetch,
+; frame pushes) re-walks the tables while the pipeline is mid-MMU-op:
+; exactly the nesting the hardware died in.  Nothing may wedge (the
+; bench timeout catches a stall), every request must be taken, and the
+; translated accesses must stay correct.
+	move.w	(IPLCAP).l,d0	; the interleave sweeps need working IPL
+	btst	#0,d0		; injection; benches without it advertise 0
+	beq	imix_done	; and the sweeps are bypassed, not faked
+
+	; The bench ports live at PA $F1xx -- inside 8K page 7, which the
+	; faulting sweep leaves non-resident.  The interrupt handler must
+	; acknowledge through a mapping that never disappears: alias entry 6
+	; (LA $C000) onto PA $E000 so VA $D110 reaches the port at PA $F110.
+	move.l	#$0000E003,($4418).l
+	pflusha
+	move.w	#$2000,sr	; open the mask for level 2
+	move.l	#$0EE0BEEF,($E000).l
+	moveq	#1,d5
+imix_a:
+	move.w	d5,(IPLDLY).l	; level-2 lands d5 cycles from now
+	move.l	#$0000E003,($441C).l
+	pflusha			; ATC empty: everything below re-walks
+	move.l	($E000).l,d0
+	chkl	d0,$0EE0BEEF,162	; translated read correct every round
+imix_aw:
+	move.w	(cnt_int2).l,d0
+	cmp.w	d5,d0		; the request must be delivered before the
+	bne.s	imix_aw		; next round arms a new one
+	addq.w	#1,d5
+	cmp.w	#64,d5
+	bls.s	imix_a
+	moveq	#0,d0
+	move.w	(cnt_int2).l,d0
+	chkl	d0,64,161	; one interrupt per round, none lost
+
+	; Same sweep with the access FAULTING: fault entry, h_aerr repair,
+	; restart, and the pending interrupt all contend in one window --
+	; the trap-plus-uvm_fault-plus-interrupt shape from the live stack.
+	move.l	#5,(expect_tm).l
+	move.l	#$0000E000,(expect_fa).l
+	move.l	#$441C,(fix_addr).l
+	move.l	#$0000E003,(fix_val).l
+	move.w	(cnt_aerr).l,d6
+	moveq	#1,d5
+imix_b:
+	move.w	d5,(IPLDLY).l	; arm FIRST: the port page ($F1xx) is about
+	move.l	#0,($441C).l	; to become non-resident, and a faulting arm
+	pflusha			; would deadlock the failure reporting too
+	move.l	#$0DDF0000,d1
+	add.l	d5,d1
+	move.l	d1,($E000).l	; faults, handler repairs, restart stores
+	move.l	($E000).l,d0
+	cmp.l	d1,d0
+	beq.s	imix_bd
+	failt	164		; restarted store lost or doubled
+imix_bd:
+imix_bw:
+	move.w	(cnt_int2).l,d0
+	sub.w	#64,d0
+	cmp.w	d5,d0
+	bne.s	imix_bw
+	addq.w	#1,d5
+	cmp.w	#64,d5
+	bls.s	imix_b
+	move.w	(cnt_aerr).l,d0
+	sub.w	d6,d0
+	and.l	#$FFFF,d0
+	chkl	d0,64,163	; exactly one repair fault per round
+	move.w	#$2700,sr
+	move.l	#$0000C003,($4418).l	; entry 6 back to identity
+	pflusha
+imix_done:
+
 	; leave translation off for the harness epilogue
 	moveq	#0,d0
 	movec	d0,tc
@@ -920,6 +1007,11 @@ haerr_nowb:
 	addq.w	#1,(cnt_aerr).l
 	movem.l	(sp)+,d0-d1/a0
 	rte
+
+h_int2:
+	addq.w	#1,(cnt_int2).l
+	move.w	#0,($D110).l	; IPLREG through the always-resident alias:
+	rte			; the direct page may be mid-repair (sweep B)
 
 h_utrap:
 	ori.w	#$2000,(sp)	; back to supervisor

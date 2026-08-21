@@ -611,6 +611,9 @@ always @(posedge clk) begin
 		$display("FAIL: core halted, fault=%b pc=%h ir=%h prev_state=%0d in_exc=%b mem_flt=%b",
 		         debug_fault, dbg_pc, dbg_ir, prev_core_state, dut.core.in_exc,
 		         dut.core.mem_flt);
+		// the last failure code the program managed to report, if any --
+		// a halt after a failed report leaves the real code visible here
+		$display("  failcode=%04x", mem[16'hF100 >> 1]);
 		result = 2;
 	end
 end
