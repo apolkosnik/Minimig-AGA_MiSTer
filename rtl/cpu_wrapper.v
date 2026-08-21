@@ -399,6 +399,14 @@ always @(posedge clk) begin
 					3'd3: beacon_wdat <= {16'd0,
 					                      core_dbgstat[239:232],
 					                      core_dbgstat[231:224]}; // flags,state
+					// A7 identifies the stack the frame was being written
+					// to when the second fault hit -- the single most
+					// diagnostic value for a double fault taken during
+					// exception stacking.
+					3'd4: beacon_wdat <= core_dbgstat[95:64];     // A7
+					3'd5: beacon_wdat <= core_dbgstat[223:192];   // A0
+					3'd6: beacon_wdat <= core_dbgstat[127:96];    // D0
+					3'd7: beacon_wdat <= core_dbgstat[159:128];   // D1
 					default: beacon_wdat <= 32'd0;
 				endcase
 				beacon_addr <= BEACON_ADDR + {27'd0, beacon_idx, 2'b00};
@@ -406,7 +414,7 @@ always @(posedge clk) begin
 			end
 			else if (walker_mem_ack) begin
 				beacon_req <= 0;
-				if (beacon_idx == 3'd3) beacon_active <= 0;
+				if (beacon_idx == 3'd7) beacon_active <= 0;
 				else beacon_idx <= beacon_idx + 3'd1;
 			end
 		end
