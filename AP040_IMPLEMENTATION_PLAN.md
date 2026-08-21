@@ -1111,6 +1111,61 @@ wall clock (met: -14% from the queue alone) and fetch-state bus-wait
 stalls (met: 1799, from 2584 on a 27% larger total); the <20%
 occupancy line moves to X2.3's exit criteria.
 
+### X2.2b DECOUPLE THE PORTS -- design, grounded 2026-08-20
+
+Motivated by measurement, not principle: +memlat shows 44% of
+S_MRD/S_MWR cycles (56-57% with a latent bus) pass with an instruction
+fetch outstanding, and the data access itself is only 2 cycles once it
+gets the port.  Roughly 3 of the 7.6 cycles a cached load spends in
+S_MRD are waiting for a fill it has nothing to do with.  A real 68040
+runs the two independently; we serialize them on one request port.
+
+What the code actually allows, checked rather than assumed:
+
+  * MMU: `assign c_ack = m_ack` -- it is a TRANSLATION stage, not a
+    latency stage.  An ATC or TTR hit rewrites the address
+    combinationally and forwards; the acknowledge comes from the cache.
+    So a second requester needs a second ATC lookup path and a second
+    TTR compare (combinational, cheap), NOT a second MMU.
+  * Cache: single c_req/c_ack with c_instr selecting the bank via
+    a_row = {c_instr, a_set}.  The two banks are already separate
+    storage; what is shared is the REQUEST PATH and the tag RAM ports
+    (A = lookup, B = invalidate).  A second concurrent lookup needs a
+    third tag port -- so either duplicated tag storage per bank (area,
+    and X2.7 says the budget is tight) or lookups time-multiplexed on
+    alternate ce phases.  The core runs at ce=4, so the cache has spare
+    cycles; multiplexing is the cheaper bet and should be costed first.
+  * Core: one mem_req/m_issued pair, and S_MRD's own `!m_issued &&
+    epf_pend` arm is the stall being measured.
+
+Staged so each stage is gateable on its own:
+
+  1. Split the core's port BOOKKEEPING into an instruction channel and a
+     data channel (separate issue/pending/ack tracking) while still
+     serializing at the MMU.  No speedup yet -- the gate is that nothing
+     changes: suite, corpus and all three differentials identical, and
+     +memlat's port-wait percentage UNMOVED.  This is the risky part
+     (fault attribution, restart, lk_cyc, epf_pend) done with no
+     performance variable in play.
+  2. Let a data HIT proceed while an instruction fill is in flight.
+     This is where the win lands, because data reads hit 767 times out
+     of 770.  Gate: port-wait percentage falls, cached load moves toward
+     ~12 cycles, everything else unchanged.
+  3. Full concurrency with bus arbitration for two misses.  Smaller
+     incremental win; only worth it if stage 2 leaves measurable wait.
+
+Hazards that must be argued explicitly, not discovered:
+  * a store followed by a fetch of the same line -- the queue-vs-store
+    snoop (3.2) must still see stores with two channels live;
+  * fault attribution: an access error on the instruction channel must
+    stack the fetch's address and the data channel's must stack its
+    own, with the restart model unchanged;
+  * locked RMW: lk_cyc indivisibility must survive an independent fetch
+    channel (this is exactly what 3.1 fixed for the single port);
+  * exception_prefetch still requires no queue fetch outstanding -- the
+    bench invariant added for 3.5 covers it and must stay green;
+  * CINV/CPUSH sweeps versus concurrent lookups on the other bank.
+
 ## X2.3 Pipeline: 040-style stages on one clock domain
 
 IF | ID | EA | MEM | EX | WB, ce-based single clock (clk_114 with ce=4
