@@ -1158,10 +1158,33 @@ step 2):
   where the next several cycles per load live, and it is the same round
   trip the 5.7-cycle nop floor pays on every instruction fetch.
 
-  This is a deeper change than the staging collapses (it touches the
-  core/MMU/cache handshake, not one FSM arm), so it wants its own step
-  with the request-to-acknowledge latency measured first, per operation
-  class, before any RTL moves.
+  MEASURED 2026-08-20 with the new +memlat instrument, and the answer
+  was NOT the handshake:
+
+    data read   n=770  avg 2.2 cycles  (767 of them exactly 2)
+    data write  n=5    avg 4.0
+    ifetch      n=539  avg 9.2, max 31+, with 133 in the 31+ bucket
+
+  The cache round trip is already 2 cycles for data.  What S_MRD is
+  actually doing is WAITING FOR THE SHARED MEMORY PORT: 44% of
+  S_MRD/S_MWR cycles in phase 0 and 56-57% in the latent-bus phases are
+  spent with a fetch outstanding (!m_issued && epf_pend).  The fetches
+  it waits behind are largely 31+ cycle line fills, i.e. real cold
+  misses, not gratuitous prefetch.
+
+  HYPOTHESIS TESTED AND WRONG, recorded so it is not retried:
+  suppressing speculative fetch issue while an effective address is
+  being computed (all S_EA_*, S_PIPE_SRD, S_PIPE_DEA) changed nothing --
+  load cost 4039 vs 4036 cycles, port wait 44%/57% unchanged.  The
+  blocking fetch is issued BEFORE the EA states, so gating on them is
+  too late.  Reverted.
+
+  The real fix is architectural and already named: X2.2's DECOUPLING.
+  The cache has separate I and D banks, but the core has ONE request
+  port to the MMU, so an instruction line fill and a data access
+  serialize.  A real 68040 runs them independently.  Until the fetch
+  port is separate, ~half of every data access's wait is a fill it has
+  nothing to do with -- and no FSM-level change reaches it.
 
 ### X2.3a PREREQUISITE: de-fragilize the timing-dependent tests
      [added 2026-08-20, found by attempting X2.3 step 1]

@@ -639,19 +639,99 @@ always @(posedge clk) if (nreset && mem_ready && busstate == 2'b11 &&
 integer prof_cnt [0:255];
 integer prof_stall [0:255];
 integer prof_on = 0;
+
+// +memlat: request-to-acknowledge latency for the core's memory port,
+// split by operation class.  S_MRD costs ~7.6 cycles on a CACHED load
+// while stalling on the bus for only 12% of them, so the round trip
+// through the MMU and cache -- not the wait for memory -- is what the
+// core is paying.  This measures that path directly, per class, which
+// is the prerequisite the plan sets before touching the handshake.
+integer memlat_on = 0;
+integer memlat_run;            // cycles since the current request went out
+integer memlat_n    [0:2];     // 0 = ifetch, 1 = data read, 2 = data write
+integer memlat_sum  [0:2];
+integer memlat_max  [0:2];
+integer memlat_hist [0:2][0:31];
+integer memlat_cls;
+integer mli, mlj;
+// How much of S_MRD/S_MWR is spent waiting for the fetch queue to give
+// the shared memory port back, rather than waiting for memory itself.
+integer memlat_portwait;
+integer memlat_mrd;
 integer pi;
 initial begin
 	prof_on = $test$plusargs("prof");
+	memlat_on = $test$plusargs("memlat");
+	memlat_run = -1;
+	memlat_portwait = 0;
+	memlat_mrd = 0;
+	for (mli = 0; mli < 3; mli = mli + 1) begin
+		memlat_n[mli] = 0; memlat_sum[mli] = 0; memlat_max[mli] = 0;
+		for (mlj = 0; mlj < 32; mlj = mlj + 1) memlat_hist[mli][mlj] = 0;
+	end
 	for (pi = 0; pi < 256; pi = pi + 1) begin
 		prof_cnt[pi] = 0;
 		prof_stall[pi] = 0;
 	end
 end
+always @(posedge clk) if (memlat_on && nreset) begin
+	// state 9 = S_MRD, 10 = S_MWR
+	if (dut.core.state == 8'd9 || dut.core.state == 8'd10) begin
+		memlat_mrd = memlat_mrd + 1;
+		if (!dut.core.m_issued && dut.core.epf_pend)
+			memlat_portwait = memlat_portwait + 1;
+	end
+	if (dut.core.mem_req && memlat_run < 0) begin
+		// request just went out: classify it and start counting
+		memlat_run <= 0;
+		memlat_cls <= dut.core.mem_instr ? 0 : (dut.core.mem_write ? 2 : 1);
+	end
+	else if (memlat_run >= 0) begin
+		if (dut.core.mem_ack) begin
+			memlat_n[memlat_cls]   = memlat_n[memlat_cls] + 1;
+			memlat_sum[memlat_cls] = memlat_sum[memlat_cls] + memlat_run + 1;
+			if (memlat_run + 1 > memlat_max[memlat_cls])
+				memlat_max[memlat_cls] = memlat_run + 1;
+			memlat_hist[memlat_cls][(memlat_run + 1) > 31 ? 31 : memlat_run + 1] =
+				memlat_hist[memlat_cls][(memlat_run + 1) > 31 ? 31 : memlat_run + 1] + 1;
+			memlat_run <= -1;
+		end
+		else memlat_run <= memlat_run + 1;
+	end
+end
+
 always @(posedge clk) if (prof_on && nreset) begin
 	prof_cnt[dut.core.state] = prof_cnt[dut.core.state] + 1;
 	if (!clkena_in)
 		prof_stall[dut.core.state] = prof_stall[dut.core.state] + 1;
 end
+
+task memlat_dump;
+	input integer ph;
+	integer c, b;
+	begin
+		$display("MEMLAT phase %0d: S_MRD/S_MWR %0d cycles, %0d waiting for the fetch queue to release the port (%0d%%)",
+		         ph, memlat_mrd, memlat_portwait,
+		         (memlat_mrd == 0) ? 0 : (memlat_portwait * 100) / memlat_mrd);
+		memlat_mrd = 0; memlat_portwait = 0;
+		for (c = 0; c < 3; c = c + 1) begin
+			if (memlat_n[c] != 0) begin
+				$display("MEMLAT phase %0d %0s: n=%0d avg=%0d.%0d max=%0d",
+				         ph,
+				         (c == 0) ? "ifetch " : (c == 1) ? "dataread" : "datawrite",
+				         memlat_n[c],
+				         memlat_sum[c] / memlat_n[c],
+				         (memlat_sum[c] * 10 / memlat_n[c]) % 10,
+				         memlat_max[c]);
+				for (b = 0; b < 32; b = b + 1)
+					if (memlat_hist[c][b] != 0)
+						$display("MEMLAT     %0d cyc: %0d", b, memlat_hist[c][b]);
+			end
+			memlat_n[c] = 0; memlat_sum[c] = 0; memlat_max[c] = 0;
+			for (b = 0; b < 32; b = b + 1) memlat_hist[c][b] = 0;
+		end
+	end
+endtask
 
 task prof_dump;
 	input integer ph;
@@ -711,6 +791,7 @@ task run_phase;
 		else if (result == 1)
 			$display("phase %0d passed (%0d cycles)", ph, timeout);
 		if (prof_on) prof_dump(ph);
+		if (memlat_on) memlat_dump(ph);
 	end
 endtask
 
