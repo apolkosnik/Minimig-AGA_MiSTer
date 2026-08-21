@@ -575,10 +575,19 @@ always @(posedge clk) begin
 			lk_window <= 1;
 		else if (mem_ready && busstate == 2'b11)
 			lk_window <= 0;
+		// A locked sequence can also end WITHOUT a write: CAS/CAS2 whose
+		// comparison fails performs no memory write, and a faulted one is
+		// abandoned.  lk_cyc is held from decode to fetch_next across the
+		// whole indivisible sequence, so once it drops the sequence is over
+		// and the next fetch is legal.  Closing only on the write reported
+		// every failed CAS as a violation.
+		else if (!dut.core.lk_cyc)
+			lk_window <= 0;
 		if (lk_window && busstate == 2'b00) begin
 			errors = errors + 1;
-			$display("FAIL: instruction fetch inside a locked RMW (pc=%h addr=%h)",
-			         dbg_pc, addr_out);
+			$display("FAIL: instruction fetch inside a locked RMW (pc=%h addr=%h state=%0d lk=%b epf_pend=%b ir=%04x)",
+			         dbg_pc, addr_out, dut.core.state, dut.core.lk_cyc,
+			         dut.core.epf_pend, dbg_ir);
 			lk_window <= 0;
 		end
 	end
