@@ -161,6 +161,7 @@ reg   [3:0] beacon_idx;
 reg         beacon_req;
 reg  [31:0] beacon_wdat;
 reg  [31:0] beacon_addr;
+wire        beacon_own;
 wire        walker_req_eff;
 wire        walker_we_eff;
 wire [31:0] walker_addr_eff;
@@ -447,6 +448,14 @@ ap040_bus_timeout #(.COUNTER_BITS(BUS_TIMEOUT_BITS)) bus_timeout (
 // costs nothing, and the record is readable afterwards over /dev/mem.      //
 // Layout at BEACON_ADDR: magic, PC, {IR,SR}, {state,fault}.                //
 //--------------------------------------------------------------------------//
+// The halt beacon is diagnostic instrumentation: it found the A7 shadow
+// rollback bug (see 2035c49d) by writing the core's state to memory when
+// fatal_halt fired.  Routing debug_status/debug_status2 across the design
+// costs real timing (HDMI setup went negative on three consecutive fitter
+// seeds with it in), so it is compiled out by default and switched on when
+// a silent halt needs investigating again.
+localparam HALT_BEACON = 0;
+
 // hoisted: wire         core_halted;
 // hoisted: wire [255:0] core_dbgstat;
 // hoisted: wire [127:0] core_dbgstat2;
@@ -468,7 +477,7 @@ always @(posedge clk) begin
 	end
 	else begin
 		halted_d <= core_halted;
-		if (core_halted && !halted_d) begin
+		if (HALT_BEACON && core_halted && !halted_d) begin
 			beacon_active <= 1;
 			beacon_idx    <= 0;
 			beacon_req    <= 0;
@@ -514,10 +523,11 @@ end
 
 // The beacon owns the walker port only while the core is halted, so it can
 // never contend with a live table walk.
-assign walker_req_eff = beacon_active ? beacon_req  : walker_req_p; 
-assign walker_we_eff = beacon_active ? 1'b1        : walker_we_p; 
-assign walker_addr_eff = beacon_active ? beacon_addr : walker_addr_p; 
-assign walker_wdat_eff = beacon_active ? beacon_wdat : walker_wdat_p; 
+assign beacon_own = HALT_BEACON[0] & beacon_active; 
+assign walker_req_eff = beacon_own ? beacon_req  : walker_req_p; 
+assign walker_we_eff = beacon_own ? 1'b1        : walker_we_p; 
+assign walker_addr_eff = beacon_own ? beacon_addr : walker_addr_p; 
+assign walker_wdat_eff = beacon_own ? beacon_wdat : walker_wdat_p; 
 
 // Translate the walker's physical address to the same SDRAM/DDR3 bank map
 // used by normal CPU traffic.  The MMU guarantees aligned longword accesses.
