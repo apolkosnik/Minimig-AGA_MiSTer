@@ -2346,8 +2346,21 @@ always @(posedge clk) begin
 				endcase
 			end
 
-			S_PIPE_SRD:   mrd(ea_addr, p_ssize, S_PIPE_SDONE);
-			S_PIPE_SDONE: begin src_val <= m_val; state <= S_PIPE_DST; end
+			// The EA is finished by now, so port B is free: point it at a
+			// register destination WHILE the source read is in flight, and
+			// both operands land together when the read returns (X2.3).
+			S_PIPE_SRD: begin
+				if (p_dst == DK_REG) rr_b <= p_dreg;
+				mrd(ea_addr, p_ssize, S_PIPE_SDONE);
+			end
+			S_PIPE_SDONE: begin
+				src_val <= m_val;
+				if (p_dst == DK_REG) begin
+					dst_val <= rf_rdata_b;   // port B was set at S_PIPE_SRD
+					state <= S_EXEC;
+				end
+				else state <= S_PIPE_DST;
+			end
 			S_PIPE_SREG:  begin src_val <= rf_rdata_a; state <= S_PIPE_DST; end
 
 			S_PIPE_DST: begin

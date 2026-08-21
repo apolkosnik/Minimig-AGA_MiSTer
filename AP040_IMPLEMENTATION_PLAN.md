@@ -1124,6 +1124,45 @@ the old FSM).
   Gate: >= 1 instruction/2 ce on reg-reg streams (t_integer chkl-free
   inner blocks), suite + corpus green.
 
+### X2.3 step 2 SHIPPED (2026-08-20): memory source, same collapse
+
+The EA is finished by the time the source read issues, so port B is free
+during the read: point it at a register destination at S_PIPE_SRD and
+both operands land together when the read returns.  S_PIPE_SDONE ->
+S_PIPE_DST -> S_PIPE_DREG becomes S_PIPE_SDONE -> S_EXEC.
+
+    move.l (An),Dn (cached)   17.6 -> 15.6 cycles
+
+  Gated: suite green, corpus 3776/3801 failing set unchanged, integer
+  15/15, FP 8/8, MMU 8/8.
+
+### X2.3 NEXT TARGET, measured: S_MRD is 37.7% of a load
+
+Profiled with +prof over 768 cached longword loads (20.1 cyc/load before
+step 2):
+
+    S_MRD         5832  37.7%   (only 682 stalled -- 12%)
+    S_FETCH       1196   7.7%
+    S_PIPE_START  1161   7.5%
+    S_DECODE      1037   6.7%
+    S_EXEC        1033   6.7%
+    S_PIPE_SRD     864   5.6%
+    S_EA_DISP      777   5.0%
+    S_EA_BASE      768   5.0%
+    S_PIPE_SDONE   768   5.0%   <- step 2 removed the DST/DREG pair here
+
+  S_MRD costs 7.6 cycles per load and is WAITING ON THE BUS for only 12%
+  of them.  The other 88% is the core/MMU/cache request-acknowledge
+  round trip on a HIT -- the audit's "2-cycle cache hit" describes the
+  cache array, not the path around it.  That path, not the staging, is
+  where the next several cycles per load live, and it is the same round
+  trip the 5.7-cycle nop floor pays on every instruction fetch.
+
+  This is a deeper change than the staging collapses (it touches the
+  core/MMU/cache handshake, not one FSM arm), so it wants its own step
+  with the request-to-acknowledge latency measured first, per operation
+  class, before any RTL moves.
+
 ### X2.3a PREREQUISITE: de-fragilize the timing-dependent tests
      [added 2026-08-20, found by attempting X2.3 step 1]
 
