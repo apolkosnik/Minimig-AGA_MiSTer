@@ -64,6 +64,9 @@ irq_guard2	equ	$3652
 int2_pc		equ	$3658	; level-2 frame PC captured by h_int2
 trace_pc	equ	$365C	; first trace frame PC since the last clear
 order_hit	equ	$3660	; trace-vs-IRQ order test saw a same-boundary hit
+hold2		equ	$3664	; h_int2 leaves the line ASSERTED for N entries
+kick5		equ	$3666	; h_int2 raises level 5 mid-handler once
+nest52		equ	$3668	; h_int5 hands the line back to level 2 once
 
 failt	macro
 	move.w	#\1,d7
@@ -880,6 +883,74 @@ tio2_next:
 	failt	143		; simultaneous trace lost or misplaced
 tio2_ok:
 
+;-------------------------- level-sensitive IPL: the NetBSD ports shape
+; Amiga INT2 is shared (CIA-A, gayle IDE, other ports devices).  When a
+; second device asserts before the first is acknowledged, the line NEVER
+; DROPS across the handler's RTE.  A real 68040 samples IPL by level and
+; re-enters; a core that waits for an edge never services level 2 again
+; while every other level keeps running -- exactly the live NetBSD hang
+; (uvmexp counters: vbl and clock advancing, ports frozen).  Here the
+; handler leaves the line asserted through its first RTE: the second
+; entry must be taken at that RTE boundary, before the guard runs.
+	move.w	#$2700,sr
+	clr.w	(hold2).l
+	clr.w	(kick5).l
+	clr.w	(nest52).l
+	move.w	(cnt_int2).l,d6	; count relative to here
+	move.w	#1,(hold2).l	; first entry: no acknowledge
+	move.w	#2,(IPLREG).l	; assert under mask 7 and let it settle
+	move.w	#40,d1
+ihold_settle:
+	dbra	d1,ihold_settle
+	move.w	#$2000,sr	; mask 0: entry 1 at THIS boundary
+irq_hold_guard:
+	moveq	#1,d0		; runs only after BOTH entries
+	move.w	#$2700,sr
+	moveq	#0,d1
+	move.w	(cnt_int2).l,d1
+	sub.w	d6,d1
+	chkl	d1,2,152		; held line re-entered after RTE
+	move.l	(int2_pc).l,d0
+	chkl	d0,irq_hold_guard,153 ; re-entry AT the RTE boundary
+
+	; Nested service must not wedge the lower level: level 5 arrives
+	; while level 2 is in service, the level-5 handler is nested, and on
+	; its RTE the level-2 request is STILL standing -- but level 2 is in
+	; service (mask 2), so it must not re-enter.  After the level-2
+	; handler acknowledges and returns, a fresh level-2 request must
+	; still be taken -- a core that latched "level 2 seen" during the
+	; nesting would leave ports dead from then on.
+	move.w	(cnt_int2).l,d6
+	move.w	(cnt_int5).l,d5
+	move.w	#1,(kick5).l	; h_int2 raises level 5 mid-handler
+	move.w	#1,(nest52).l	; h_int5 hands the line back to level 2
+	move.w	#2,(IPLREG).l	; assert under mask 7 and let it settle
+	move.w	#40,d1
+inest_settle:
+	dbra	d1,inest_settle
+	move.w	#$2000,sr	; entry: int2 -> nested int5 -> back
+	moveq	#0,d1
+	move.w	(cnt_int2).l,d1
+	sub.w	d6,d1
+	chkl	d1,1,154		; exactly one level-2 service, no re-entry
+	moveq	#0,d1
+	move.w	(cnt_int5).l,d1
+	sub.w	d5,d1
+	chkl	d1,1,156		; the nested level 5 really was taken
+	move.w	#2,(IPLREG).l	; the NEXT ports request after the nesting
+	move.l	#20000,d0
+inext_wait:
+	moveq	#0,d1
+	move.w	(cnt_int2).l,d1
+	sub.w	d6,d1
+	cmp.w	#2,d1
+	beq.s	inext_done
+	subq.l	#1,d0
+	bne.s	inext_wait
+inext_done:
+	chkl	d1,2,155		; is still delivered
+	move.w	#$2700,sr
+
 ;-------------------- immediate group: destination must be data alterable
 ; ORI/ANDI/SUBI/ADDI/EORI with a PC-relative or immediate destination are
 ; illegal; executing them instead consumes the following words as operands
@@ -1509,6 +1580,11 @@ h_int2:
 	move.w	#14,(hid).l	; X2.3a: identify the handler for hfail
 	move.l	d0,-(sp)
 	move.l	6(sp),(int2_pc).l
+	tst.w	(kick5).l	; nested-service test: a level-5 device
+	beq.s	hi2nokick	; asserts while level 2 is in service
+	clr.w	(kick5).l
+	move.w	#5,(IPLREG).l
+hi2nokick:
 	tst.w	(irq_exc).l
 	beq.s	hi2exc_ok
 	tst.w	(trap_guard).l	; original TRAP handler must not have begun
@@ -1540,7 +1616,13 @@ hi2early_ok:
 	bne	hfail
 hi2f0:
 	addq.w	#1,(cnt_int2).l
+	tst.w	(hold2).l	; level-sensitivity test: the device is NOT
+	beq.s	hi2clr		; acknowledged -- the line stays asserted
+	subq.w	#1,(hold2).l	; through the RTE and must be taken again
+	bra.s	hi2held
+hi2clr:
 	move.w	#0,(IPLREG).l
+hi2held:
 	move.l	(sp)+,d0
 	rte
 
@@ -1557,6 +1639,12 @@ h_int5:
 	cmpi.w	#$0074,6(sp)
 	bne	hfail
 	addq.w	#1,(cnt_int5).l
+	tst.w	(nest52).l	; nested-service test: only the level-5
+	beq.s	hi5clr		; device is cleared; the level-2 request
+	clr.w	(nest52).l	; below it is still standing
+	move.w	#2,(IPLREG).l
+	rte
+hi5clr:
 	move.w	#0,(IPLREG).l
 	rte
 
