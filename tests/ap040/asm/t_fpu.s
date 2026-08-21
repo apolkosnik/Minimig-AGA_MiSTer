@@ -428,7 +428,16 @@ fs_idle_pd_ok:
 	move.l	(unimp_frame+$14).l,d0
 	chkl	d0,0,265		; normalized DTAG
 	move.l	(unimp_frame+$18).l,d0
-	chkl	d0,$04000000,266	; E1=1, E3=0, T=0
+	chkl	d0,0,266		; E1=E3=T=0: the exception-pending bits
+					; belong to the ARITHMETIC frame, not to the
+					; unimplemented-instruction frame.  WinUAE
+					; sets E1 only in
+					; fpsr_check_arithmetic_exception and for a
+					; packed operand in fp_unimp_datatype;
+					; fp_unimp_instruction leaves them zero.
+					; This assertion previously read $04000000
+					; and encoded the RTL's error rather than
+					; checking it.
 	move.l	(unimp_frame+$1C).l,d0
 	chkl	d0,$40010000,267	; FPTEMP destination = +7.0
 	move.l	(unimp_frame+$20).l,d0

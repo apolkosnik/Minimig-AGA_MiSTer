@@ -439,7 +439,16 @@ task capture_unimp;
 		fstate_cmd3  <= frame_cmd3(c1);
 		fstate_stag  <= stag;
 		fstate_dtag  <= dtag;
-		fstate_flags <= 3'b100; // unimplemented instruction: E1=1, E3=T=0
+		// E1/E3/T are the ARITHMETIC exception-pending bits and stay CLEAR
+		// on the unimplemented-instruction frame.  WinUAE sets them only in
+		// fpsr_check_arithmetic_exception (e1/e3 classes) and for a packed
+		// operand in fp_unimp_datatype; fp_unimp_instruction leaves the
+		// reset_fsave_data zeros in place.  This frame carries the
+		// instruction in CMDREG1B and its operand in ETEMP -- there is no
+		// pending arithmetic exception for the FPSP to complete, and
+		// claiming one sends its dispatch down the arithmetic path.
+		fstate_flags <= 3'b000; // E1=E3=T=0
+
 		fstate_fpt   <= dst;
 		fstate_et    <= src;
 		fstate_e1    <= 0;
