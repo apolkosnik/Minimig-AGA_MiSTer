@@ -40,6 +40,15 @@ module tb_ddram_walker_read;
 	wire        mw_ack;
 	wire [31:0] mw_rdata;
 
+	// walker watchdog between the CDC m side and the controller, wired as
+	// in Minimig.sv: a transaction the controller never answers completes
+	// as a bus error instead of stalling the MMU (and the CPU) forever.
+	wire mw_wd_berr;
+	ap040_bus_timeout #(.COUNTER_BITS(10)) walker_timeout (
+		.clk(clk), .nreset(reset_n),
+		.req(mw_req), .complete(mw_ack), .berr(mw_wd_berr)
+	);
+
 	ap040_walker_cdc walker_cdc (
 		.s_clk(clk28), .s_reset_n(reset_n),
 		.s_req(walker_req), .s_we(walker_we), .s_addr(walker_addr),
@@ -47,7 +56,7 @@ module tb_ddram_walker_read;
 		.s_ack(walker_ack), .s_rdata(walker_rdata), .s_berr(walker_berr_s),
 		.m_clk(clk), .m_reset_n(reset_n),
 		.m_req(mw_req), .m_we(mw_we), .m_addr(mw_addr), .m_wdata(mw_wdata),
-		.m_ddr(mw_ddr), .m_ack(mw_ack), .m_rdata(mw_rdata), .m_berr(1'b0)
+		.m_ddr(mw_ddr), .m_ack(mw_ack), .m_rdata(mw_rdata), .m_berr(mw_wd_berr)
 	);
 
 	// CPU cache port -- exercises the OTHER DDR3 read consumer (cache line
@@ -112,6 +121,10 @@ module tb_ddram_walker_read;
 	reg [63:0] ddr_mem [0:1023];       // 8 KB modelled at {addr[12:3]}
 	integer    rd_lat = 4;             // cycles from accepted read to valid
 	reg        busy_pattern = 0;       // 1 = waitrequest toggles every cycle
+	reg        slave_wedged = 0;       // 1 = accepted reads held, not returned
+	reg        wedge_seen = 0;         // latched: phase 10 has begun
+	reg        held_v = 0;             // a held read awaiting release
+	reg [63:0] held_dat = 0;
 
 	// waitrequest: either always ready, or a one-cycle-on/off stutter to
 	// exercise held commands
@@ -137,8 +150,20 @@ module tb_ddram_walker_read;
 			rr_dat[i] <= rr_dat[i+1];
 		end
 		rr_v[15]   <= 1'b0;
-		// accept a read command this cycle?
-		if (ddram_rd && !ddram_busy) begin
+		// accept a read command this cycle?  A wedged slave HOLDS the
+		// response (models a beat delayed beyond the watchdog) and
+		// releases it when unwedged -- the transient-hang shape.
+		if (slave_wedged) wedge_seen <= 1'b1;
+		if (ddram_rd && !ddram_busy && slave_wedged) begin
+			held_v   <= 1'b1;
+			held_dat <= ddr_mem[ddram_addr[12:3]];
+		end
+		if (held_v && !slave_wedged) begin
+			held_v         <= 1'b0;
+			rr_v[rd_lat]   <= 1'b1;
+			rr_dat[rd_lat] <= held_dat;
+		end
+		if (ddram_rd && !ddram_busy && !slave_wedged) begin
 			rr_v[rd_lat]   <= 1'b1;
 			rr_dat[rd_lat] <= ddr_mem[ddram_addr[12:3]];
 			// outstanding-read accounting: the arbiter promises only one
@@ -146,7 +171,11 @@ module tb_ddram_walker_read;
 			// while one is still outstanding, the single-slave model would
 			// corrupt -- and the arbiter contract is broken.
 			outstanding <= outstanding + 1;
-			if (outstanding != 0) begin
+			// phase 10 deliberately abandons a transaction whose response
+			// arrives late; the one-in-flight bookkeeping does not apply
+			// from that point on (the check has done its job for the
+			// contention phases 1-9)
+			if (outstanding != 0 && !wedge_seen) begin
 				$display("FAIL: two DDR reads in flight (arbiter let a second start) t=%0t addr=%h",
 				         $time, ddram_addr);
 				errors = errors + 1;
@@ -227,6 +256,30 @@ module tb_ddram_walker_read;
 			end
 			@(negedge clk28);
 			walker_req = 0; walker_we = 0;
+			repeat (3) @(posedge clk28);
+		end
+	endtask
+
+	// a walker read that must complete as a BUS ERROR (watchdog case)
+	task walker_read_berr;
+		input [28:2] addr;
+		begin
+			@(negedge clk28);
+			walker_we = 0; walker_addr = addr; walker_req = 1;
+			guard = 0;
+			while (!walker_ack && guard < 2000) begin
+				@(posedge clk28); guard = guard + 1;
+			end
+			if (!walker_ack) begin
+				$display("FAIL: wedged walk neither acked nor bus-errored");
+				errors = errors + 1;
+			end
+			else if (!walker_berr_s) begin
+				$display("FAIL: wedged walk completed without berr");
+				errors = errors + 1;
+			end
+			@(negedge clk28);
+			walker_req = 0;
 			repeat (3) @(posedge clk28);
 		end
 	endtask
@@ -427,6 +480,18 @@ module tb_ddram_walker_read;
 		cpu_read(28'h000680);
 		walker_read (27'h0000A80);
 		busy_pattern = 0; rd_lat = 4; m1_on = 0;
+
+		// 10) wedged slave: read data never returns (the hang class the
+		//     readdatavalid fix removed, induced deliberately).  The
+		//     watchdog must complete the walk as a bus error -- the MMU
+		//     reports a failed table search instead of freezing the CPU --
+		//     and the path must recover for the next well-behaved walk.
+		$display("PHASE 10: wedged slave -> watchdog berr, then recovery");
+		slave_wedged = 1;
+		walker_read_berr(27'h0000440);   // held past the watchdog: berr
+		slave_wedged = 0;                // the late data now arrives; the
+		repeat (60) @(posedge clk);      // completed-but-abandoned response
+		walker_read(27'h0000440);        // must not corrupt the next walk
 
 		if (errors == 0) $display("ALL TESTS PASSED");
 		else $display("TEST FAILED with %0d errors", errors);

@@ -311,7 +311,28 @@ wire [31:0] walker_rdata1, walker_rdata2;
 
 assign walker_ack_mem   = walker_ddr_mem ? walker_ack2   : walker_ack1;
 assign walker_rdata_mem = walker_ddr_mem ? walker_rdata2 : walker_rdata1;
-assign walker_berr_mem  = 1'b0;
+
+// Walker watchdog.  The CPU port has had a bus timeout from the start,
+// but a table-walk transaction that a controller never answers stalled
+// the MMU -- and therefore the CPU, mid-instruction -- forever, with the
+// CPU-port watchdog blind to it: the live NetBSD freeze signature (every
+// interrupt dead, zero progress).  The working 030 core on this platform
+// carries the same armor for the same reason (its BUG #138/#387 walker
+// deadlock timeouts).  A timeout completes the transaction as a bus
+// error through the normal handshake: the MMU's walk_err path turns it
+// into an access error with the B bit set, so the OS reports a fault at
+// the failing walk instead of freezing the machine.  2^16 cycles at
+// 114 MHz is ~0.6 ms -- orders of magnitude beyond any legitimate
+// walker transaction, contention included.
+wire walker_wd_berr;
+ap040_bus_timeout #(.COUNTER_BITS(16)) walker_timeout (
+	.clk(clk_114),
+	.nreset(~reset_d & cpu_rst),
+	.req(walker_req_mem),
+	.complete(walker_ack_mem),
+	.berr(walker_wd_berr)
+);
+assign walker_berr_mem  = walker_wd_berr;
 
 wire [7:0] toccata_base;
 wire toccata_ena;

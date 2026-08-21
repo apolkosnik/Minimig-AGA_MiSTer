@@ -7,5 +7,6 @@ PHASE 5f: latency + stutter + m1
 PHASE 7: cache fills under m1 contention
 PHASE 8: cache + walker + m1 interleaved, latency+stutter
 PHASE 9: walker writes + reads + cache + m1, latency+stutter
+PHASE 10: wedged slave -> watchdog berr, then recovery
 ALL TESTS PASSED
-tb_ddram_walker_read.v:433: $finish called at 20700000 (1ps)
+tb_ddram_walker_read.v:498: $finish called at 32260000 (1ps)
