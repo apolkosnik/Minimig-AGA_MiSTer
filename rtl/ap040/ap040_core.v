@@ -1581,11 +1581,18 @@ function [15:0] aerr_word;
 			5'd4:  aerr_word = aer_fa[31:16];
 			5'd5:  aerr_word = aer_m16 ? {aer_fa[15:4], 4'd0} : aer_fa[15:0];
 			5'd6:  aerr_word = aer_ssw;
-			// WB3 carries the faulted write so a handler may complete it;
-			// the valid bit stays clear for MOVE16 (WinUAE clears it and
-			// uses a WB2 line writeback, which this restart model omits)
-			5'd7:  aerr_word = (aer_wr && !aer_m16)
-			                   ? {8'd0, 1'b1, aer_ssw[6:0]} : 16'd0;
+			// WB3S stays CLEAR: this core RESTARTS the faulting
+			// instruction after the handler repairs the mapping, so it
+			// must not also advertise a pending writeback.  An OS that
+			// honours the 040 frame (NetBSD trap.c: "the 68040 doesn't
+			// re-run instructions that cause write page faults ... we
+			// have to write the value out to memory ourselves") performs
+			// every VALID WB3 -- combined with the restart, an RMW store
+			// like ld.elf_so's relocation add.l lands TWICE.  Captured
+			// live: init's ctor pointer held link VA + 2x load base and
+			// NetBSD hung looping on the resulting wild ifetch.  WB3D/A
+			// keep the write data for diagnostics; valid stays 0.
+			5'd7:  aerr_word = 16'd0;
 			5'd10: aerr_word = aer_fa[31:16];          // initial fault address
 			5'd11: aerr_word = aer_fa[15:0];
 			5'd12: aerr_word = aer_fa[31:16];          // WB3A

@@ -28,6 +28,7 @@ last_ssw	equ	$3624
 last_wb3s	equ	$3626
 last_wb3d	equ	$3628
 last_ea		equ	$362C
+wb_complete	equ	$3680	; h_aerr performs valid WB3s like NetBSD trap.c
 WBERRCTL	equ	$F146
 
 failt	macro
@@ -59,6 +60,7 @@ start:
 	clr.w	(cnt_aerr).l
 	clr.w	(cnt_stub).l
 	clr.w	(expect_ma).l
+	clr.w	(wb_complete).l
 
 ;----------------------------------------------------------------- tables
 	lea	($4400).l,a0
@@ -779,6 +781,33 @@ u8dat:
 	move.l	#$4400,d0	; restore the shared root
 	movec	d0,urp
 
+;--------------- write-fault discipline: the NetBSD relocation shape (154/155)
+; ld.elf_so relocates libc with add.l %d1,%a0@ on copy-on-write data pages.
+; The first store to such a page write-faults; NetBSD repairs the page,
+; performs any writeback the frame marks VALID, and returns.  A restart
+; model that ALSO advertises a valid WB3 gets the add applied twice --
+; captured live on hardware: init's ctor pointer held link VA + 2x load
+; base and init looped on an ifetch of the bogus address forever.  Here
+; the handler behaves exactly like NetBSD's trap.c (h_aerr completes any
+; valid WB3), the faulting instruction is the same RMW shape, and the
+; datum must gain the addend EXACTLY ONCE.
+	move.w	#1,(wb_complete).l
+	move.l	#$11110000,($E000).l	; datum, via the identity map
+	move.l	#$0000E007,($441C).l	; 8K entry 7: LA $E000 write-protected
+	pflusha
+	move.l	#5,(expect_tm).l	; supervisor data write fault
+	move.l	#$0000E000,(expect_fa).l
+	move.l	#$441C,(fix_addr).l	; handler clears the write protect
+	move.l	#$0000E003,(fix_val).l
+	move.l	#$00220000,d1
+	add.l	d1,($E000).l		; read succeeds, write faults
+	move.l	($E000).l,d0
+	chkl	d0,$11330000,155	; the addend landed exactly once
+	move.w	(cnt_aerr).l,d0
+	sub.w	d7,d0
+	and.l	#$FFFF,d0
+	chkl	d0,3,154		; exactly one write fault
+	clr.w	(wb_complete).l
 
 	; leave translation off for the harness epilogue
 	moveq	#0,d0
@@ -824,35 +853,42 @@ haerr_eaok:
 	and.l	#$0007,d0	; TM: the function code of the faulting access
 	cmp.l	(expect_tm).l,d0
 	bne	hfail
-	move.w	$18(sp),d0
-	btst	#8,d0		; write fault: WB3 slot carries the write
-	bne.s	haerr_rd
-	move.w	$18(sp),d0	; ...except a MOVE16 line write, whose WB3
-	and.w	#$0060,d0	; valid bit stays clear (WinUAE clears it and
-	cmp.w	#$0060,d0	; would use a WB2 line writeback instead)
-	bne.s	haerr_wbw
+	; WB3S must be CLEAR on every fault, reads and writes alike: the
+	; core restarts the repaired instruction, so a valid WB3 would make
+	; an OS that completes writebacks (NetBSD trap.c) apply RMW stores
+	; twice.  WB3D still carries the write data for diagnostics; WB3A
+	; mirrors the fault address.
 	tst.w	$1A(sp)
 	bne	hfail
-	bra.s	haerr_wbok
-haerr_wbw:
-	move.w	$1A(sp),d0	; WB3S = valid + SSW size/TT/TM bits
-	move.w	$18(sp),d1
-	and.w	#$007F,d1
-	or.w	#$0080,d1
-	cmp.w	d1,d0
-	bne	hfail
-	move.l	$20(sp),d0	; WB3A mirrors the fault address
-	cmp.l	$24(sp),d0	; (frame offset $18, after movem +12)
-	bne	hfail
-	bra.s	haerr_wbok
-haerr_rd:
-	tst.w	$1A(sp)		; read fault: WB3S stays clear
+	move.w	$18(sp),d0
+	btst	#8,d0		; write fault: WB3A must mirror the FA
+	bne.s	haerr_wbok
+	move.w	$18(sp),d0	; (MOVE16 line writes keep their aligned EA
+	and.w	#$0060,d0	; handling above; WB3A is not checked there)
+	cmp.w	#$0060,d0
+	beq.s	haerr_wbok
+	move.l	$20(sp),d0
+	cmp.l	$24(sp),d0	; WB3A (frame offset $18, after movem +12)
 	bne	hfail
 haerr_wbok:
+	; NetBSD's trap.c completes every writeback the frame marks VALID
+	; ("the 68040 doesn't re-run instructions that cause write page
+	; faults ... we have to write the value out to memory ourselves").
+	; Mimic that here when the test asks for it: a restart-model core
+	; advertising a valid WB3 gets the store applied TWICE.
 	movea.l	(fix_addr).l,a0
 	move.l	(a0),(seen_desc).l	; capture descriptor before the handler fixes it
 	move.l	(fix_val).l,(a0)
 	pflusha
+	; NetBSD order: repair the mapping FIRST, then complete writebacks
+	tst.w	(wb_complete).l
+	beq.s	haerr_nowb
+	move.w	$1A(sp),d0
+	btst	#7,d0
+	beq.s	haerr_nowb
+	movea.l	$24(sp),a0	; WB3A
+	move.l	$28(sp),(a0)	; WB3D: perform the faulted store
+haerr_nowb:
 	addq.w	#1,(cnt_aerr).l
 	movem.l	(sp)+,d0-d1/a0
 	rte
