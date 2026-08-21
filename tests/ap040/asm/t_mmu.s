@@ -30,6 +30,9 @@ last_wb3d	equ	$3628
 last_ea		equ	$362C
 wb_complete	equ	$3680	; h_aerr performs valid WB3s like NetBSD trap.c
 cnt_int2	equ	$3684	; level-2 interrupts taken (interleave sweeps)
+cnt_int3	equ	$3688	; level-3 interrupts taken (spl-storm sweep)
+storm_scr	equ	$368C	; scratch the storm decrements, like serintr's count
+storm_dly	equ	$368E	; sweep delay handed to h_int3 for its own arming
 IPLREG	equ	$F110
 IPLDLY	equ	$F148
 IPLCAP	equ	$F160	; bench IPL-injection capability (bit 0)
@@ -55,8 +58,9 @@ ok\@:
 	dc.l	unexp		; 3-25
 	endr
 	dc.l	h_int2		; 26 level-2 autovector (interleave sweeps)
-	rept	6
-	dc.l	unexp		; 27-32
+	dc.l	h_int3		; 27 level-3 autovector (spl-storm sweep)
+	rept	5
+	dc.l	unexp		; 28-32
 	endr
 	dc.l	h_utrap		; 33 TRAP #1
 	rept	222
@@ -70,6 +74,7 @@ start:
 	clr.w	(expect_ma).l
 	clr.w	(wb_complete).l
 	clr.w	(cnt_int2).l
+	clr.w	(cnt_int3).l
 
 ;----------------------------------------------------------------- tables
 	lea	($4400).l,a0
@@ -920,6 +925,39 @@ imix_bw:
 	and.l	#$FFFF,d0
 	chkl	d0,64,163	; exactly one repair fault per round
 	move.w	#$2700,sr
+
+	; Sweep C: the spl storm.  A level-3 handler does the serintr mask
+	; dance while a delayed level-2 request lands at every offset across
+	; the handler's life -- entry, mid-storm between mask writes, and the
+	; RTE.  The pending 2 must survive every mask transition and be taken
+	; exactly once when the mask finally opens.
+	move.l	#$0000E003,($441C).l	; page 7 resident again
+	pflusha
+	move.w	#$2000,sr
+	moveq	#1,d5
+imix_cc:
+	move.w	#96,(storm_scr).l
+	move.w	d5,(storm_dly).l
+	move.w	#3,(IPLREG).l	; the level-3 device interrupts; h_int3 arms
+				; the delayed ports request itself
+imix_cw:
+	moveq	#0,d0
+	move.w	(cnt_int2).l,d0
+	sub.w	#128,d0		; sweeps A+B consumed 128
+	cmp.w	d5,d0		; one more level-2 per round
+	bne.s	imix_cw
+	addq.w	#1,d5
+	cmp.w	#96,d5
+	bls.s	imix_cc
+	moveq	#0,d0
+	move.w	(cnt_int3).l,d0
+	chkl	d0,96,165	; one level-3 service per round
+	moveq	#0,d0
+	move.w	(cnt_int2).l,d0
+	chkl	d0,224,166	; 128 + 96: every pending 2 delivered
+	move.l	($3000).l,d0
+	chkl	d0,$11112222,167	; the stormed touches stayed coherent
+	move.w	#$2700,sr
 	move.l	#$0000C003,($4418).l	; entry 6 back to identity
 	pflusha
 imix_done:
@@ -1012,6 +1050,30 @@ h_int2:
 	addq.w	#1,(cnt_int2).l
 	move.w	#0,($D110).l	; IPLREG through the always-resident alias:
 	rte			; the direct page may be mid-repair (sweep B)
+
+; The NetBSD serintr shape, verbatim from the live freeze: inside a
+; level-3 handler, storm the SR mask up and down (splraise/splx pairs at
+; $2400/$2500) around translated memory touches, exactly as serintr
+; drains its ring -- while a lower-priority request stays pending the
+; whole time.  Every mask write resynchronises the pipeline and refills
+; the fetch stream through translation.
+h_int3:
+	movem.l	d0-d1,-(sp)
+	move.w	#0,($D110).l	; take the level-3 device down FIRST, then
+	move.w	(storm_dly).l,(IPLDLY).l ; arm the ports device: its rise can
+	addq.w	#1,(cnt_int3).l	; never race the clear, and the swept delay
+	pflusha			; lands it anywhere in the storm below
+	moveq	#7,d1
+h3storm:
+	move.w	sr,d0
+	move.w	#$2400,sr	; splraise, serintr-style
+	tst.l	($3000).l	; translated data touch
+	move.w	#$2500,sr	; deeper raise around the count update
+	subq.w	#1,(storm_scr).l
+	move.w	d0,sr		; splx back to the entry mask
+	dbra	d1,h3storm
+	movem.l	(sp)+,d0-d1
+	rte
 
 h_utrap:
 	ori.w	#$2000,(sp)	; back to supervisor

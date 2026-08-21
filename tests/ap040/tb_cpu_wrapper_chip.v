@@ -56,6 +56,7 @@ wire chip_wait = (DTACK_MODE != 0) && !cck_count[0];
 
 reg  [2:0] ipl_lvl = 0;
 reg [15:0] ipl_delay = 0;   // $F148: delayed level-2 IPL countdown
+reg        wberr_arm = 0;   // $F146: one-shot walker bus error
 
 wire        walker_req, walker_we, walker_ddr, walker_bad;
 wire [28:2] walker_addr;
@@ -178,8 +179,10 @@ always @(posedge clk) begin
 				walker_lat <= walker_lat - 1'd1;
 			else begin
 				walker_pending <= 0;
-				if (walker_bad_l)
+				if (walker_bad_l || wberr_arm) begin
+					wberr_arm   <= 0;
 					walker_berr <= 1;
+				end
 				else if (walker_we_l) begin
 					mem[{walker_word_l, 1'b0}] <= walker_wdat_l[31:16];
 					mem[{walker_word_l, 1'b1}] <= walker_wdat_l[15:0];
@@ -223,6 +226,9 @@ always @(posedge clk) begin
 	// the 7 MHz bus stretches every instruction ~16x, so scale the armed
 	// delay to sweep the same fraction of the FPU op's window as the
 	// fast-bus testbench does with raw clk counts
+	if (ph2 && !chip_as && !chip_rw && reset &&
+	    chip_addr[15:1] == (16'hF146 >> 1))
+		wberr_arm <= 1;   // next walker transaction bus-errors
 	if (ph2 && !chip_as && !chip_rw && reset &&
 	    chip_addr[15:1] == (16'hF148 >> 1))
 		ipl_delay <= chip_din << 8;

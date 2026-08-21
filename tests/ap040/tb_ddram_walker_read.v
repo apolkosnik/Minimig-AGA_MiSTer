@@ -17,16 +17,49 @@
 
 module tb_ddram_walker_read;
 	reg clk = 0;
-	always #5 clk = ~clk;
+	always #5 clk = ~clk;          // 113 MHz domain (ddram_ctrl sysclk)
+	reg clk28 = 0;
+	always #20 clk28 = ~clk28;     // 28 MHz domain (MMU / walker s-side)
 	reg reset_n = 0;
 
-	// walker port
+	// walker stimulus enters on the 28 MHz side of the REAL clock-domain
+	// bridge (ap040_walker_cdc), exactly as the MMU's requests do on
+	// hardware; the bridge's m side feeds ddram_ctrl at 113 MHz.  Driving
+	// the controller directly would skip the CDC handshake entirely.
 	reg         walker_req = 0;
 	reg         walker_we = 0;
 	reg  [28:2] walker_addr = 0;
 	reg  [31:0] walker_wdata = 0;
 	wire        walker_ack;
 	wire [31:0] walker_rdata;
+	wire        walker_berr_s;
+
+	wire        mw_req, mw_we, mw_ddr;
+	wire [28:2] mw_addr;
+	wire [31:0] mw_wdata;
+	wire        mw_ack;
+	wire [31:0] mw_rdata;
+
+	ap040_walker_cdc walker_cdc (
+		.s_clk(clk28), .s_reset_n(reset_n),
+		.s_req(walker_req), .s_we(walker_we), .s_addr(walker_addr),
+		.s_wdata(walker_wdata), .s_ddr(1'b1), .s_bad(1'b0),
+		.s_ack(walker_ack), .s_rdata(walker_rdata), .s_berr(walker_berr_s),
+		.m_clk(clk), .m_reset_n(reset_n),
+		.m_req(mw_req), .m_we(mw_we), .m_addr(mw_addr), .m_wdata(mw_wdata),
+		.m_ddr(mw_ddr), .m_ack(mw_ack), .m_rdata(mw_rdata), .m_berr(1'b0)
+	);
+
+	// CPU cache port -- exercises the OTHER DDR3 read consumer (cache line
+	// fill, ddram_ctrl state 1) under the same contention.  A cache fill
+	// that never completes hangs the CPU exactly as the live NetBSD stall.
+	reg  [28:1] cpuAddr = 0;
+	reg         cpuCS = 0;
+	reg  [1:0]  cpustate = 0;
+	reg         cpuL = 1, cpuU = 1;
+	reg  [15:0] cpuWR = 0;
+	wire [15:0] cpuRD;
+	wire        ramready;
 
 	// a2065 second master (m1)
 	reg  [28:0] mem2_address = 0;
@@ -63,12 +96,12 @@ module tb_ddram_walker_read;
 		.mem2_readdatavalid(mem2_readdatavalid),
 		.mem2_writedata(mem2_writedata), .mem2_byteenable(mem2_byteenable),
 		.mem2_write(mem2_write), .mem2_waitrequest(mem2_waitrequest),
-		.cpuAddr(28'd0), .cpuCS(1'b0), .cpustate(2'b00),
-		.cpuL(1'b1), .cpuU(1'b1), .cpuWR(16'd0), .cpuRD(),
-		.ramshared(1'b0), .ramready(),
-		.walker_req(walker_req), .walker_we(walker_we),
-		.walker_addr(walker_addr), .walker_wdata(walker_wdata),
-		.walker_ack(walker_ack), .walker_rdata(walker_rdata)
+		.cpuAddr(cpuAddr), .cpuCS(cpuCS), .cpustate(cpustate),
+		.cpuL(cpuL), .cpuU(cpuU), .cpuWR(cpuWR), .cpuRD(cpuRD),
+		.ramshared(1'b0), .ramready(ramready),
+		.walker_req(mw_req), .walker_we(mw_we),
+		.walker_addr(mw_addr), .walker_wdata(mw_wdata),
+		.walker_ack(mw_ack), .walker_rdata(mw_rdata)
 	);
 
 	//----------------------------------------------------------------------
@@ -148,11 +181,11 @@ module tb_ddram_walker_read;
 	task walker_read;
 		input [28:2] addr;
 		begin
-			@(negedge clk);
+			@(negedge clk28);
 			walker_we = 0; walker_addr = addr; walker_req = 1;
 			guard = 0;
 			while (!walker_ack && guard < 500) begin
-				@(posedge clk); guard = guard + 1;
+				@(posedge clk28); guard = guard + 1;
 			end
 			if (!walker_ack) begin
 				$display("FAIL: walker read timeout addr=%h walker_busy=%b",
@@ -167,9 +200,56 @@ module tb_ddram_walker_read;
 					errors = errors + 1;
 				end
 			end
-			@(negedge clk);
+			@(negedge clk28);
 			walker_req = 0;
-			repeat (3) @(posedge clk);
+			repeat (3) @(posedge clk28);
+		end
+	endtask
+
+	// walker WRITE (M/U-bit writeback path, ddram_ctrl states 5-13 with the
+	// cache snoop) -- pmap_enter's faulting writes set M/U on DDR3 PTEs, so
+	// this path runs under exactly the contention that froze NetBSD.
+	task walker_write;
+		input [28:2] addr;
+		input [31:0] data;
+		begin
+			@(negedge clk28);
+			walker_we = 1; walker_addr = addr; walker_wdata = data;
+			walker_req = 1;
+			guard = 0;
+			while (!walker_ack && guard < 500) begin
+				@(posedge clk28); guard = guard + 1;
+			end
+			if (!walker_ack) begin
+				$display("FAIL: walker WRITE timeout addr=%h walker_busy=%b",
+				         {addr,2'b00}, dut.walker_busy);
+				errors = errors + 1;
+			end
+			@(negedge clk28);
+			walker_req = 0; walker_we = 0;
+			repeat (3) @(posedge clk28);
+		end
+	endtask
+
+	// drive one CPU cache read (ifetch) and wait for it to complete.  On a
+	// miss this runs the ddram_ctrl cache-fill path (state 1) through the
+	// arbiter, the same path NetBSD's kernel code fetch from DDR3 uses.
+	task cpu_read;
+		input [28:1] addr;
+		begin
+			@(negedge clk);
+			cpuAddr = addr; cpuL = 0; cpuU = 0; cpustate = 0; cpuCS = 1;
+			guard = 0;
+			while (!ramready && guard < 800) begin
+				@(posedge clk); guard = guard + 1;
+			end
+			if (!ramready) begin
+				$display("FAIL: CPU cache read timeout addr=%h", {addr,1'b0});
+				errors = errors + 1;
+			end
+			@(negedge clk);
+			cpuCS = 0; cpustate = 0; cpuL = 1; cpuU = 1;
+			repeat (2) @(posedge clk);
 		end
 	endtask
 
@@ -182,23 +262,33 @@ module tb_ddram_walker_read;
 	reg m1_on = 0;
 	reg [1:0] m1_state = 0;
 	reg [3:0] m1_gap = 0;
+	reg m1_wr_turn = 0;
 	always @(posedge clk) begin
 		if (!reset_n || !m1_on) begin
 			mem2_read <= 0; mem2_burstcount <= 0; m1_state <= 0; m1_gap <= 0;
 		end
 		else begin
 			case (m1_state)
-				0: begin   // issue
+				0: begin   // issue: alternate read and single-beat write,
+					   // as the a2065 mailbox does (CSR poll reads + command
+					   // writes), always burstcount 1, hold until accepted
 					mem2_address    <= 29'h20 + ((mem2_address + 8) & 29'hFF);
 					mem2_burstcount <= 1;
-					mem2_read       <= 1;
-					m1_state        <= 1;
+					if (m1_wr_turn) begin
+						mem2_writedata  <= 64'hA2065_DEAD_0000 + mem2_address;
+						mem2_byteenable <= 8'hFF;
+						mem2_write      <= 1;
+					end
+					else mem2_read <= 1;
+					m1_wr_turn <= ~m1_wr_turn;
+					m1_state   <= 1;
 				end
 				1: if (!mem2_waitrequest) begin   // command accepted
-					mem2_read <= 0;
-					m1_state  <= 2;
+					mem2_read  <= 0;
+					mem2_write <= 0;
+					m1_state   <= mem2_write ? 3 : 2;  // writes need no data
 				end
-				2: if (mem2_readdatavalid) begin  // data returned
+				2: if (mem2_readdatavalid) begin  // read data returned
 					m1_gap   <= 3;
 					m1_state <= 3;
 				end
@@ -291,6 +381,51 @@ module tb_ddram_walker_read;
 		repeat (20) @(posedge clk);
 		walker_read(27'h00005C0);
 		walker_read(27'h0000600);
+		busy_pattern = 0; rd_lat = 4; m1_on = 0;
+
+		// 7) CPU cache fills under a2065 contention, then interleaved
+		//    with walker reads -- the full pmap_enter contention shape
+		//    (kernel code fetch + table walk + ethernet DMA on one DDR
+		//    port).  Sweep latency and stutter so a dropped readdatavalid
+		//    on the cache path (state 1) or an arbitration deadlock would
+		//    hang the CPU read here.
+		$display("PHASE 7: cache fills under m1 contention");
+		m1_on = 1;
+		repeat (20) @(posedge clk);
+		cpu_read(28'h000100);
+		cpu_read(28'h000180);
+		cpu_read(28'h000200);
+		rd_lat = 10; busy_pattern = 1;
+		cpu_read(28'h000280);
+		cpu_read(28'h000300);
+		busy_pattern = 0; rd_lat = 4;
+		m1_on = 0;
+
+		$display("PHASE 8: cache + walker + m1 interleaved, latency+stutter");
+		rd_lat = 8; busy_pattern = 1; m1_on = 1;
+		repeat (20) @(posedge clk);
+		cpu_read(28'h000400);
+		walker_read(27'h0000900);
+		cpu_read(28'h000480);
+		walker_read(27'h0000940);
+		cpu_read(28'h000500);
+		walker_read(27'h0000980);
+		busy_pattern = 0; rd_lat = 4; m1_on = 0;
+
+		// 9) walker WRITES (M/U writeback) under a2065 contention with
+		//    latency + stutter, interleaved with walker reads and cache
+		//    fills -- the exact DDR3 traffic mix pmap_enter generates.
+		$display("PHASE 9: walker writes + reads + cache + m1, latency+stutter");
+		rd_lat = 7; busy_pattern = 1; m1_on = 1;
+		repeat (20) @(posedge clk);
+		walker_write(27'h0000A00, 32'h1111_2223);
+		walker_read (27'h0000A00);
+		cpu_read(28'h000600);
+		walker_write(27'h0000A40, 32'h4444_5556);
+		walker_read (27'h0000A40);
+		walker_write(27'h0000A80, 32'h7777_8889);
+		cpu_read(28'h000680);
+		walker_read (27'h0000A80);
 		busy_pattern = 0; rd_lat = 4; m1_on = 0;
 
 		if (errors == 0) $display("ALL TESTS PASSED");

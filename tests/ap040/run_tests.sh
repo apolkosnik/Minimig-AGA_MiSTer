@@ -56,7 +56,8 @@ compile ddram_walker_snoop iverilog -g2012 -s tb_ddram_walker_snoop \
 compile ddram_walker_read iverilog -g2012 -s tb_ddram_walker_read \
 	-o "$WORK/tb_ddram_walker_read.vvp" \
 	tb_ddram_walker_read.v ../../rtl/ddram_ctrl.v \
-	../../rtl/cpu_cache_new.v ../../rtl/A2065/a2065_ddram_arbiter.v sim_dpram.v &
+	../../rtl/cpu_cache_new.v ../../rtl/A2065/a2065_ddram_arbiter.v \
+	$RTL/ap040_walker_cdc.v sim_dpram.v &
 compile bus_timeout iverilog -g2012 -o "$WORK/tb_bus_timeout.vvp" \
 	tb_ap040_bus_timeout.v $RTL/ap040_bus_timeout.v &
 compile cart_hrtmon iverilog -g2012 -o "$WORK/tb_cart_hrtmon.vvp" \
@@ -150,6 +151,7 @@ leg cache              "$WORK/tb_prog.vvp" +prog=build/t_cache.hex &
 leg fpu                "$WORK/tb_prog.vvp" +prog=build/t_fpu.hex &
 leg fpu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_fpu.hex &
 leg exceptions_chip    "$WORK/tb_wrapchip.vvp" +prog=build/t_exceptions.hex &
+leg mmu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_mmu.hex &
 leg fpu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_fpu.hex &
 leg mmu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_mmu.hex &
 leg mmu_turbo_ph3      "$WORK/tb_sdram_turbo_ph3.vvp" +prog=build/t_mmu.hex &

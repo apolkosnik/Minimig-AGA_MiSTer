@@ -1,9 +1,9 @@
 tb_ap040_program: running build/t_mmu.hex
 WARNING: tb_ap040_program.v:774: $readmemh(build/t_mmu.hex): Not enough words in the file for the requested range [0:32767].
-phase 0 passed (231916 cycles)
+phase 0 passed (400832 cycles)
 WARNING: tb_ap040_program.v:774: $readmemh(build/t_mmu.hex): Not enough words in the file for the requested range [0:32767].
-phase 1 passed (333750 cycles)
+phase 1 passed (579054 cycles)
 WARNING: tb_ap040_program.v:774: $readmemh(build/t_mmu.hex): Not enough words in the file for the requested range [0:32767].
-phase 2 passed (333750 cycles)
+phase 2 passed (579054 cycles)
 ALL TESTS PASSED
-tb_ap040_program.v:818: $finish called at 8994455000 (1ps)
+tb_ap040_program.v:818: $finish called at 15589695000 (1ps)
