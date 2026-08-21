@@ -90,7 +90,8 @@ module sdram_ctrl
 );
 
 reg [15:0] sd_data_r;
-assign sd_data = sd_data_r;
+reg sd_data_en;
+assign sd_data = sd_data_en ? sd_data_r : 16'hZZZZ;
 
 assign sd_cs = 0;
 assign sd_cke = 1;
@@ -486,7 +487,7 @@ always @ (posedge sysclk) begin
 		sd_ras                <= 1;
 		sd_cas                <= 1;
 		sd_we                 <= 1;
-		sd_data_r             <= 16'hZZZZ;
+		sd_data_en            <= 1'b0;
 		chipWE                <= 0;
 	end
 
@@ -595,7 +596,7 @@ always @ (posedge sysclk) begin
 				sd_addr      <= {1'b1, casaddr[9:1], 1'b1}; // col+1, A10 precharge
 				sd_cas       <= 0;
 				sd_we        <= 0;
-				sd_data_r    <= walker_wdata_latch[15:0];
+				begin sd_data_r <= walker_wdata_latch[15:0]; sd_data_en <= 1'b1; end
 				sd_dqm       <= 0;
 		end
 
@@ -615,7 +616,7 @@ always @ (posedge sysclk) begin
 			sd_cas          <= cas_sd_cas;
 			sd_dqm          <= 0;
 			if(!cas_sd_we) begin
-				sd_data_r    <= datawr;
+				begin sd_data_r <= datawr; sd_data_en <= 1'b1; end
 				sd_addr[12:11]<= cas_dqm;
 				sd_dqm       <= cas_dqm;
 				sd_we        <= 0;
