@@ -15,7 +15,7 @@ mkdir -p "$WORK"
 
 ./build_tests.sh
 
-SRC="$RTL/ap040_tg68k_compat.v $RTL/ap040_core.v $RTL/ap040_bus16_adapter.v \
+SRC="$RTL/ap040_tg68k_compat.v $RTL/ap040_core.v $RTL/ap040_bus16_adapter.v $RTL/ap040_bus_timeout.v \
      $RTL/ap040_regfile.v $RTL/ap040_alu.v $RTL/ap040_muldiv.v $RTL/ap040_mmu.v $RTL/ap040_cache.v $RTL/ap040_fpu.v"
 
 # generated sources: every bench below reads them, so they come first
@@ -64,13 +64,13 @@ compile cart_hrtmon iverilog -g2012 -o "$WORK/tb_cart_hrtmon.vvp" \
 	tb_cart_hrtmon.v ../../rtl/cart.v &
 compile wrapchip iverilog -g2012 -I "$RTL" -o "$WORK/tb_wrapchip.vvp" \
 	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
-	sim_dpram.v $RTL/ap040_bus_timeout.v $SRC &
+	sim_dpram.v $SRC &
 compile sdram_turbo iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
 	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=0 \
 	-o "$WORK/tb_sdram_turbo.vvp" tb_sdram_turbo.v \
 	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
 	../../rtl/cpu_cache_new.v sim_dpram.v ../../rtl/ram_cs_guard.v \
-	$RTL/ap040_bus_timeout.v $RTL/ap040_walker_cdc.v $SRC &
+	$RTL/ap040_walker_cdc.v $SRC &
 # second sdram-turbo instance at the real-hardware phase alignment
 # (CPU_PHASE=3): the only alignment whose chip stage machine can sample
 # the ph2 pulse and therefore deliver interrupts -- t_fpu's IRQ soak
@@ -81,7 +81,7 @@ compile sdram_turbo_ph3 iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
 	-o "$WORK/tb_sdram_turbo_ph3.vvp" tb_sdram_turbo.v \
 	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
 	../../rtl/cpu_cache_new.v sim_dpram.v ../../rtl/ram_cs_guard.v \
-	$RTL/ap040_bus_timeout.v $RTL/ap040_walker_cdc.v $SRC &
+	$RTL/ap040_walker_cdc.v $SRC &
 compile dualram_turbo iverilog -g2012 -I "$RTL" -s tb_dualram_turbo \
 	-P tb_dualram_turbo.CYC_PHASE=1 -P tb_dualram_turbo.CPU_PHASE=3 \
 	-o "$WORK/tb_dualram_turbo.vvp" tb_dualram_turbo.v \
@@ -89,7 +89,7 @@ compile dualram_turbo iverilog -g2012 -I "$RTL" -s tb_dualram_turbo \
 	../../rtl/cpu_cache_new.v ../../rtl/ddram_ctrl.v \
 	../../rtl/A2065/a2065_ddram_arbiter.v \
 	sim_dpram.v ../../rtl/ram_cs_guard.v \
-	$RTL/ap040_bus_timeout.v $RTL/ap040_walker_cdc.v $SRC &
+	$RTL/ap040_walker_cdc.v $SRC &
 compile cache_snoop iverilog -g2012 -I "$RTL" -s tb_ap040_cache_snoop \
 	-o "$WORK/tb_cache_snoop.vvp" tb_ap040_cache_snoop.v \
 	sim_dpram.v $RTL/ap040_cache.v &

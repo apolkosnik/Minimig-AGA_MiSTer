@@ -97,7 +97,31 @@ wire [31:0] mem_wdata;
 wire  [2:0] mem_fc;
 wire        mem_ack;
 wire [31:0] mem_rdata;
-wire        mem_flt;
+wire        mem_flt_mmu;
+// Core-side stall watchdog.  Every prior watchdog counts a DOWNSTREAM
+// request (CPU port, walker port), so a transaction lost between the
+// core and those ports -- or a wedge in the clock-enable machinery the
+// downstream layers are gated by -- stalls the core forever with every
+// watchdog blind: the live NetBSD freeze shows exactly that (identical
+// silent halt across three memory-path-hardened builds, no fault frame
+// ever stacked).  This one watches the CORE's own held request on the
+// free-running clock (a clkena wedge cannot stop the count) and injects
+// an access error through the same mem_flt input the MMU uses; the
+// well-tested fault path then reports it.  2^21 cycles at 28 MHz is
+// ~75 ms -- beyond every legitimate stall including all downstream
+// timeout chains.  If a freeze persists with no fault reported even
+// with this armed, the core is not holding a request at all: a
+// clock-enable or internal-FSM wedge, which is itself the decisive
+// diagnostic.
+wire        core_stall_flt;
+ap040_bus_timeout #(.COUNTER_BITS(21)) core_stall_watchdog (
+	.clk(clk),
+	.nreset(nreset),
+	.req(mem_req),
+	.complete(mem_ack | mem_flt_mmu),
+	.berr(core_stall_flt)
+);
+wire        mem_flt = mem_flt_mmu | core_stall_flt;
 
 // MMU to cache
 wire        mm_req, mm_write, mm_instr;
@@ -209,7 +233,7 @@ ap040_mmu mmu (
 	.c_fc(mem_fc),
 	.c_ack(mem_ack),
 	.c_rdata(mem_rdata),
-	.c_flt(mem_flt),
+	.c_flt(mem_flt_mmu),
 
 	.pt_req(pt_req),
 	.pt_write(pt_write),
