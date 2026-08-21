@@ -662,6 +662,129 @@ t48loop:
 	moveq	#0,d0
 	movec	d0,tc
 
+;--------------------- relocated: 8K user-mode demand paging (see below)
+; Runs LAST: it rebuilds its own tables and nothing downstream depends on
+; the state it leaves.  Re-enable 8K translation with the shared root.
+	move.l	#$4000,d0	; shared root: $4000 -> $4200 -> $4400
+	movec	d0,urp
+	movec	d0,srp
+	move.l	#$00004203,($4000).l
+	move.l	#$00004403,($4200).l
+	lea	($4400).l,a0	; rebuild the 32-entry 8K identity table
+	moveq	#0,d0
+	moveq	#31,d1
+t8loop2:
+	move.l	d0,d2
+	lsl.l	#8,d2
+	lsl.l	#5,d2
+	addq.l	#3,d2
+	move.l	d2,(a0)+
+	addq.l	#1,d0
+	dbra	d1,t8loop2
+	move.l	#$C000,d0
+	movec	d0,tc
+	pflusha
+	move.w	(cnt_aerr).l,d7	; running last: count faults relative
+
+;--------------------- 8K user-mode demand paging: the NetBSD exec shape
+; NetBSD/amiga runs the 040 with 8K pages and execs init by mapping
+; nothing, letting the FIRST USER INSTRUCTION FETCH fault, and paging the
+; code in from disk at whatever fault address the frame reports.  If the
+; stacked FA is wrong under 8K user ifetch, UVM pages in the wrong page
+; and the right one never arrives -- the exact live signature captured in
+; tests/ap040/hw/netbsd (uvmexp.paging stuck at 1).  This test performs
+; that sequence: user table with the code page NOT RESIDENT, RTE to user,
+; ifetch faults (TM=2), the handler validates FA and maps the page, the
+; restart runs the user code, and a trap returns.  Still under TC=$C000.
+	lea	($4C00).l,a0	; user page table: 32 x 8K identity
+	moveq	#0,d0
+	moveq	#31,d1
+u8loop:
+	move.l	d0,d2
+	lsl.l	#8,d2
+	lsl.l	#5,d2		; i << 13
+	addq.l	#3,d2
+	move.l	d2,(a0)+
+	addq.l	#1,d0
+	dbra	d1,u8loop
+	move.l	#$00004A03,($4800).l	; user root -> pointer -> table
+	move.l	#$00004C03,($4A00).l
+	; user code page: VA $6000 (8K page 3, covers $6000-$7FFF), NOT
+	; resident yet; physical backing prepared at PA $E000
+	move.l	#0,($4C0C).l
+	move.w	#$702C,($E000).l	; moveq #44,d0
+	move.w	#$4E41,($E002).l	; trap #1
+	move.l	#$4800,d0
+	movec	d0,urp
+	pflusha
+	move.l	#2,(expect_tm).l	; USER instruction fetch
+	move.l	#$6000,(expect_fa).l	; the 8K page base: fetch of VA $6000
+	move.l	#$4C0C,(fix_addr).l	; entry 3
+	move.l	#$0000E003,(fix_val).l	; map VA $6000-$7FFF -> PA $E000
+	move.l	#u8cont,(uret).l
+	moveq	#0,d0
+	move.w	#$0000,-(sp)
+	pea	($6000).l
+	move.w	#$0000,-(sp)
+	rte			; to user; the ifetch at $6000 faults
+
+u8cont:
+	chkl	d0,44,150	; the paged-in user code ran after restart
+	move.w	(cnt_aerr).l,d0
+	sub.w	d7,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,151	; exactly one ifetch fault
+
+	; same shape for a user DATA fault mid-page: fault on a non-resident
+	; 8K page at an offset with LA bit 12 SET, so a bit-12 confusion in
+	; the fault path (the 8K MMUSR reporting class) would surface here.
+	; The user code lives on a FRESH page (VA $B000, upper half of 8K
+	; entry 5, identity) written
+	; before it ever executes -- and executing from the UPPER 4K half
+	; also proves the ifetch side of the 13-bit offset.  The faulting
+	; read targets VA $9120 (bit 12 SET: offset $1120) on
+	; non-resident entry 4, mapped by the handler to PA $C000, where the
+	; datum sits at PA $C000 + $1120 = $D120 (13-bit page offset).
+	move.w	#$2039,($B000).l	; move.l ($9120).l,d0
+	move.l	#$00009120,($B002).l
+	move.w	#$4E41,($B006).l	; trap #1
+	cpusha	bc			; the code page must reach memory and
+	cinva	ic			; no stale line may shadow it
+	move.l	#0,($4C10).l		; entry 4 (VA $8000-$9FFF) not resident
+	move.l	#$0BBB1234,($D120).l	; backing for VA $8120: offset $1120
+	move.l	#$0000A003,($4C14).l	; entry 5 identity: the code page
+					; VA $A000 -> PA $A000; code placed
+					; in its SECOND half at PA $B000 so
+					; the RTE target VA $B000 needs the
+					; 13-bit offset to reach it
+	pflusha
+	move.l	#1,(expect_tm).l	; USER data read
+	move.l	#$9120,(expect_fa).l
+	move.l	#$4C10,(fix_addr).l
+	move.l	#$0000C003,(fix_val).l
+	move.l	#u8dat,(uret).l
+	moveq	#0,d0
+	move.w	#$0000,-(sp)
+	pea	($B000).l		; offset $1000 into the 8K page
+	move.w	#$0000,-(sp)
+	rte
+
+u8dat:
+	chkl	d0,$0BBB1234,152	; read through the paged-in mapping
+	move.w	(cnt_aerr).l,d0
+	sub.w	d7,d0
+	and.l	#$FFFF,d0
+	chkl	d0,2,153	; exactly one more, the data fault
+
+	move.l	#$4400,d0	; restore the shared root
+	movec	d0,urp
+
+
+	; leave translation off for the harness epilogue
+	moveq	#0,d0
+	movec	d0,tc
+	pflusha
+
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700
 
