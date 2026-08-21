@@ -75,13 +75,24 @@ module a2065_ddram_arbiter #(
     reg               owner;         // which master owns it
     reg               owner_is_read;
     reg [BURST_W:0]   beats_left;
+    reg [BURST_W:0]   stale_beats;   // abandoned burst's beats still owed
 
     wire m0_req = m0_read | m0_write;
     wire m1_req = m1_read | m1_write;
 
     // While idle, m0 wins outright; m1 is granted only when m0 is quiet.
-    wire       start_m0 = !busy && m0_req;
-    wire       start_m1 = !busy && !m0_req && m1_req;
+    // No new READ may start while an abandoned burst's beats are still
+    // quarantined: in-order Avalon offers no tags, so a response arriving
+    // during that window can only be attributed by position -- admitting a
+    // read would let the swallow logic eat ITS beats (a lost response) or
+    // let the stale beats complete it (a late one).  Reads therefore wait
+    // out the quarantine, which either drains (beats arrive, swallowed) or
+    // decays (nothing arrives for a full timeout window -- far beyond any
+    // functioning bridge's latency, so the response is genuinely lost).
+    // Writes consume no read beats and remain safe to admit.
+    wire       rd_hold  = (stale_beats != 0);
+    wire       start_m0 = !busy && m0_req && !(m0_read && rd_hold);
+    wire       start_m1 = !busy && !m0_req && m1_req && !(m1_read && rd_hold);
     wire       sel      = busy ? owner : (m0_req ? M0 : M1);
     wire       starting = start_m0 | start_m1;
 
@@ -104,7 +115,6 @@ module a2065_ddram_arbiter #(
     // burst's master (the late-response aliasing hazard).
     localparam RD_TIMEOUT_BITS = 14;
     reg [RD_TIMEOUT_BITS-1:0] resp_wait;
-    reg [BURST_W:0]           stale_beats;
     // In-order Avalon cannot distinguish a LATE response from a LOST one.
     // Quarantined beats therefore decay: if no beat at all arrives within
     // the same timeout window, the abandoned response is presumed lost and
@@ -185,7 +195,7 @@ module a2065_ddram_arbiter #(
 
     assign s_address    = (sel == M0) ? m0_address    : m1_address;
     assign s_burstcount = (sel == M0) ? m0_burstcount : m1_burstcount;
-    assign s_read       = (sel == M0) ? m0_read       : m1_read;
+    assign s_read       = ((sel == M0) ? m0_read : m1_read) && !rd_hold;
     assign s_writedata  = (sel == M0) ? m0_writedata  : m1_writedata;
     assign s_byteenable = (sel == M0) ? m0_byteenable : m1_byteenable;
     assign s_write      = (sel == M0) ? m0_write      : m1_write;
@@ -196,10 +206,16 @@ module a2065_ddram_arbiter #(
     // which in turn would keep it held off — a deadlock that never lets the
     // 68k reach fast RAM. Only a master that genuinely cannot have the bus
     // right now is stalled.
-    assign m0_waitrequest = (busy && owner == M1) ? 1'b1          // m1 mid-burst
+    // During the stale-beat quarantine a read-requesting master is held in
+    // waitrequest: its level-held command must neither reach the slave nor
+    // appear accepted (dropping s_read alone would let ~waitrequest clear
+    // the master's command register as if the burst had started).
+    assign m0_waitrequest = (m0_read && rd_hold)  ? 1'b1
+                          : (busy && owner == M1) ? 1'b1          // m1 mid-burst
                                                   : s_waitrequest;
 
-    assign m1_waitrequest = (busy && owner == M1) ? s_waitrequest // m1 owns it
+    assign m1_waitrequest = (m1_read && rd_hold)  ? 1'b1
+                          : (busy && owner == M1) ? s_waitrequest // m1 owns it
                           : (busy || m0_req)      ? 1'b1          // m0 owns or wants it
                                                   : s_waitrequest;
 

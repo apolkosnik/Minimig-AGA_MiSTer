@@ -313,8 +313,9 @@ always @ (posedge sysclk) begin
 				end
 				else if (&rdwait) begin
 					rdwait <= 0;
-					state  <= 0;   // abandoned: the fill retries or the
-				end                // CPU-port watchdog reports it
+					ram_rd <= 0;   // withdraw the command: a level-held
+					state  <= 0;   // read the slave accepted late would
+				end                // otherwise become an untracked orphan
 				else rdwait <= rdwait + 1'd1;
 			2,3: begin
 					cache_fill    <= 1;
@@ -343,8 +344,9 @@ always @ (posedge sysclk) begin
 				end
 				else if (&rdwait) begin
 					rdwait <= 0;   // write never accepted: abandon without
-					state  <= 0;   // ack; the walker watchdog reports it
-				end
+					ram_we <= 0;   // ack and WITHDRAW it -- a late-accepted
+					state  <= 0;   // U/M write would bypass the snoop
+				end                // sequence; the walker watchdog reports
 				else rdwait <= rdwait + 1'd1;
 			6: begin
 					walker_snoop     <= 1;
@@ -389,8 +391,9 @@ always @ (posedge sysclk) begin
 				end
 				else if (&rdwait) begin
 					rdwait <= 0;   // abandoned: no ack -- the walker
-					state  <= 0;   // watchdog bus-errors the MMU side
-				end
+					ram_rd <= 0;   // watchdog bus-errors the MMU side;
+					state  <= 0;   // withdraw the command so no orphan
+				end                // is accepted later
 				else rdwait <= rdwait + 1'd1;
 		endcase
 

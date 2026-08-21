@@ -44,7 +44,7 @@ module tb_ddram_walker_read;
 	// in Minimig.sv: a transaction the controller never answers completes
 	// as a bus error instead of stalling the MMU (and the CPU) forever.
 	wire mw_wd_berr;
-	ap040_bus_timeout #(.COUNTER_BITS(10)) walker_timeout (
+	ap040_bus_timeout #(.COUNTER_BITS(16)) walker_timeout (
 		.clk(clk), .nreset(reset_n),
 		.req(mw_req), .complete(mw_ack), .berr(mw_wd_berr)
 	);
@@ -217,7 +217,7 @@ module tb_ddram_walker_read;
 			@(negedge clk28);
 			walker_we = 0; walker_addr = addr; walker_req = 1;
 			guard = 0;
-			while (!walker_ack && guard < 500) begin
+			while (!walker_ack && guard < 40000) begin
 				@(posedge clk28); guard = guard + 1;
 			end
 			if (!walker_ack) begin
@@ -255,12 +255,35 @@ module tb_ddram_walker_read;
 			walker_we = 1; walker_addr = addr; walker_wdata = data;
 			walker_req = 1;
 			guard = 0;
-			while (!walker_ack && guard < 500) begin
+			while (!walker_ack && guard < 40000) begin
 				@(posedge clk28); guard = guard + 1;
 			end
 			if (!walker_ack) begin
 				$display("FAIL: walker WRITE timeout addr=%h walker_busy=%b",
 				         {addr,2'b00}, dut.walker_busy);
+				errors = errors + 1;
+			end
+			@(negedge clk28);
+			walker_req = 0; walker_we = 0;
+			repeat (3) @(posedge clk28);
+		end
+	endtask
+
+	// a walker WRITE that must complete as a BUS ERROR (watchdog case)
+	task walker_write_berr;
+		input [28:2] addr;
+		input [31:0] data;
+		begin
+			@(negedge clk28);
+			walker_we = 1; walker_addr = addr; walker_wdata = data;
+			walker_req = 1;
+			guard = 0;
+			while (!walker_ack && guard < 40000) begin
+				@(posedge clk28); guard = guard + 1;
+			end
+			if (!walker_ack || !walker_berr_s) begin
+				$display("FAIL: backpressured write did not bus-error (ack=%b berr=%b)",
+				         walker_ack, walker_berr_s);
 				errors = errors + 1;
 			end
 			@(negedge clk28);
@@ -276,7 +299,7 @@ module tb_ddram_walker_read;
 			@(negedge clk28);
 			walker_we = 0; walker_addr = addr; walker_req = 1;
 			guard = 0;
-			while (!walker_ack && guard < 2000) begin
+			while (!walker_ack && guard < 40000) begin
 				@(posedge clk28); guard = guard + 1;
 			end
 			if (!walker_ack) begin
@@ -302,7 +325,7 @@ module tb_ddram_walker_read;
 			@(negedge clk);
 			cpuAddr = addr; cpuL = 0; cpuU = 0; cpustate = 0; cpuCS = 1;
 			guard = 0;
-			while (!ramready && guard < 800) begin
+			while (!ramready && guard < 200000) begin
 				@(posedge clk); guard = guard + 1;
 			end
 			if (!ramready) begin
@@ -490,23 +513,62 @@ module tb_ddram_walker_read;
 		walker_read (27'h0000A80);
 		busy_pattern = 0; rd_lat = 4; m1_on = 0;
 
-		// 11) LOST response: the slave accepts a walker read and the
-		//     response vanishes (the transient-loss class the freeze is
-		//     built from).  The walker walk bus-errors -- and, the part
-		//     that used to kill the machine, the CPU cache path and a
-		//     following walk must be served normally afterwards: the
-		//     controller's state-14 abort and the arbiter's abandonment
-		//     free the port, so the bus-error exception itself can reach
-		//     memory instead of double-faulting into a silent halt.
-		$display("PHASE 11: lost response -> berr, then everything recovers");
+		// 11) LOST walker response, NO quiescence: the response vanishes;
+		//     the walker walk bus-errors at the (production-ordered) outer
+		//     watchdog, by which time the controller abort, the arbiter
+		//     abandonment, and the quarantine decay have already freed the
+		//     port -- so the bus-error exception's own memory traffic (here
+		//     the immediately following reads) is served, not double-
+		//     faulted.  Reads issued DURING the quarantine stall in
+		//     waitrequest until it lifts and then complete correctly; they
+		//     are never mis-completed with another burst's data.
+		$display("PHASE 11: lost walker response, no quiescence");
 		drop_next = 1;
 		walker_read_berr(27'h0000450);
-		// wait out the controller's state-14 abort and the arbiter's
-		// abandon + stale-quarantine decay (each 2^14 sysclk)
-		repeat (34000) @(posedge clk);
-		cpu_read(28'h000700);            // cache path alive again
-		walker_read(27'h0000450);        // walks fully recovered
+		cpu_read(28'h000700);            // immediately: stalls, then works
+		walker_read(27'h0000450);
 		cpu_read(28'h000740);
+
+		// 12) LOST CPU cache fill: the fill's response vanishes.  The
+		//     controller aborts state 1, the still-held cache_req retries,
+		//     the quarantine holds the retry until decay, and the read
+		//     completes with CORRECT data -- the retry's response must not
+		//     be swallowed (the repeating timeout->swallow->timeout loop
+		//     the first quarantine design allowed).
+		$display("PHASE 12: lost CPU fill recovers by retry");
+		drop_next = 1;
+		cpu_read(28'h000780);
+		walker_read(27'h0000480);
+
+		// 13) LOST a2065 read followed by CPU traffic.  The real mailbox
+		//     has no timeout and stays wedged waiting for its data -- but
+		//     the ARBITER must abandon the burst so the CPU keeps running
+		//     (le0 dies, the machine lives).  m1 stops driving after the
+		//     loss, as the real mailbox would.
+		$display("PHASE 13: lost a2065 read, CPU unaffected");
+		m1_on = 1;
+		repeat (30) @(posedge clk);
+		drop_next = 1;                   // next accepted read (m1's) lost
+		repeat (200) @(posedge clk);
+		m1_on = 0;                       // mailbox wedged: stops requesting
+		cpu_read(28'h0007C0);
+		walker_read(27'h00004C0);
+
+		// 14) permanently backpressured walker WRITE: the command can
+		//     never be accepted; the state-5 escape withdraws it (no late
+		//     acceptance bypassing the snoop sequence) and the walker
+		//     watchdog reports the walk.  The port then works again.
+		$display("PHASE 14: permanent write backpressure");
+		force ddram_busy = 1'b1;
+		walker_write_berr(27'h0000500, 32'h5A5A_0001);
+		if (ddram_we) begin
+			$display("FAIL: abandoned walker write still asserted");
+			errors = errors + 1;
+		end
+		release ddram_busy;
+		repeat (200) @(posedge clk);
+		walker_read(27'h0000440);
+		cpu_read(28'h000600);
 
 		// 10) wedged slave: read data never returns (the hang class the
 		//     readdatavalid fix removed, induced deliberately).  The
@@ -527,7 +589,7 @@ module tb_ddram_walker_read;
 
 	// global watchdog: a walker hang would otherwise spin to $finish never
 	initial begin
-		#500000;
+		#20_000_000;
 		$display("FAIL: global timeout -- walker never completed");
 		$finish;
 	end
