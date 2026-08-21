@@ -771,6 +771,88 @@ must not fault -- restricting prefetch to the current page makes the
 fault question go away, the same argument that makes the aligned
 longword fetch safe.
 
+### Re-measured 2026-08-20, after the caches and the fetch queue landed
+
+The fetch-bound picture above is the PRE-queue machine.  With the fetch
+queue and the internal caches shipping, t_integer redistributes but does
+not get much cheaper, and the reason matters for what to build next:
+
+    S_FETCH       6019  (1239 stalled)  34.0%
+    S_IMMF        3006  ( 598 stalled)  17.0%
+    S_MRD         2539  ( 547 stalled)  14.4%
+    S_MWR         1257  ( 284 stalled)   7.1%
+    S_DECODE       994  (  76 stalled)   5.6%
+    S_EXEC         700  (  93 stalled)   4.0%
+    S_PIPE_*      1911  ( 178 stalled)  10.8%
+
+  17686 cycles total, 3098 of them stalled on the bus -- 17.5%.
+  So 82.5% of all cycles are the FSM walking states with memory
+  ALREADY ANSWERED.  The machine is no longer fetch-bound in the
+  memory sense; it is sequencer-bound.
+
+Per-instruction cost, measured directly with the $F108 cycle-stamp port
+(tests/ap040/hw/fptime.s and the cpi/hit/width probes), caches enabled:
+
+    nop                       5.7 cycles     real 68040: ~1
+    addq.l #1,Dn              7.2            real 68040: ~1
+    add.l Dn,Dn               8.1            real 68040: ~1
+    move.l Dn,Dn              8.1            real 68040: ~1
+    move.l (An),Dn  (cached) 17.6            real 68040: ~1-2
+    move.l Dn,(An)           20.1            real 68040: ~1 (copyback)
+    longword vs word access    +3            real 68040: 0
+
+  FPU, same method: FMOVE.X 9.1, FMUL.X 11.1, FADD.X 13.0,
+  FSQRT.X 15.8, FDIV.X 33.0.  The FPU is within 2-3x of silicon; the
+  integer core is 7-8x.  That asymmetry is why the performance program
+  is an INTEGER program.
+
+  Measurement gotcha, learned the hard way: the 68040 comes out of reset
+  with both caches DISABLED until software writes CACR.  A probe that
+  does not set CACR ($8000_8000: DE bit 31, IE bit 15) measures the
+  uncached machine and will show cold and warm passes costing the same.
+
+### What the A4000 does, and what it means here (2026-08-20)
+
+Read against the A4000 Rev B schematics (sheets 3, 4, 7, 11, 14, 15),
+because the real machine solves exactly the 32-bit/16-bit problem X2.1
+and X2.2 are circling.
+
+  * It never narrows the CPU.  Two TERMINATION protocols coexist:
+    _STERM (synchronous, 32-bit, burst-capable) driven by RAMSEY for
+    Fast RAM, and _DSACK1/_DSACK0 (asynchronous, with the responding
+    device encoding its own port width) for ROM, IDE and Zorro.  The
+    68040's dynamic bus sizing splits the transfer per device.  A
+    16-bit device makes THAT access 16-bit; Fast RAM stays 32-bit.
+  * Burst line fill is _CBREQ/_CBACK: four longwords, 16 bytes, one
+    cache line -- and only on the fast path.  This maps 1:1 onto the
+    X2.1 fill port, which is already the right shape.
+  * BRIDGETTE (sheet 7) is a width/direction BRIDGE, not a narrower:
+    PD(0:31) on the CPU side, CD(0:31) on the chip side, with CDIR,
+    _CLATCH and separate half enables _COEH/_COEL.  A second half of
+    the same part does the Zorro side (sheet 14).
+  * The chip bus itself is 32 bits: chip RAM is an x32 SIMM on
+    DRD(31:0).  Only the legacy chips are narrow -- Alice and Paula sit
+    on DRD(15:0), while Lisa (CSG 4203) takes D0..D31.  AGA widened the
+    DISPLAY FETCH and left the rest at 16.
+  * The 32-bit chip bus uses four byte strobes (_UUDS/_UMDS/_LMDS/
+    _LLDS) rather than issuing two 16-bit cycles.
+  * Gary drives _CIIN so chipset/register space is never cached.
+
+  Where AP040 departs, and what it costs:
+
+    ap040_bus16_adapter narrows EVERYTHING -- its own header says
+    "long: two word cycles when even".  Fast RAM included.  The X2.1
+    32-bit path is read-only line fill; cpuWR and the write buffer stay
+    16-bit.  Measured penalty: +3 cycles per longword access.  And
+    write-through-with-invalidate means a store kills its own line, so
+    the next read of it refills, where the A4000's 68040 would have
+    absorbed the store in the cache.
+
+  Consequence for the plan: the device-split above is the model to copy
+  (X2.1b on the store side, below), but it is worth ~3 cycles per
+  longword store against a 8-cycle register add.  It does not reorder
+  the program: the sequencer is the dominant cost and X2.3 stays first.
+
 ### P3. Overlapped sequencer (in-FSM pipelining, ~1.5-2x CPI on reg ops)
 
 The core already has three semi-independent engines: prefetch queue, EA/
@@ -914,6 +996,16 @@ fetch is 71% of cycles, execute ~15%.  A superscalar back end without a
 transformed front end and memory path is pointless -- the order of work
 below follows from that number.
 
+  REVISED 2026-08-20, after the caches and the fetch queue shipped.
+  That 71% was the pre-queue machine.  Re-measured (section 19), fetch
+  is 51% and the decisive number is different: only 17.5% of cycles are
+  bus stalls, so 82.5% are the FSM walking states with memory already
+  answered.  Per-instruction: 8.1 cycles for add.l Dn,Dn, 17.6 for a
+  CACHED longword load, 20.1 for a store, against ~1 on real silicon.
+  The bar in T1 is therefore 7-8x away and the gap is SEQUENCER, not
+  memory.  X2.3 moves first; the remaining width work (X2.1c) is worth
+  ~3 cycles per longword access and is sized accordingly.
+
 ## X2.1 Memory: DUAL_SDRAM as a native 32-bit bus  [FIRST -- everything
      else keys on it]
 
@@ -966,6 +1058,30 @@ measures 31 for the same line.  Note 15 clk_114 is the FLOOR for this
 command engine (tRCD 2 + CL 4 + 3 beats*2 + capture 3) -- a raw
 "8 clk_114" reading of the gate is physically impossible and was a
 spec error, not a shortfall.
+
+### X2.1c Store side: byte lanes on the 32-bit bus  [added 2026-08-20]
+
+X2.1/X2.1b widened READS only: the fill port is a 32-bit read-only line
+fill, while cpuWR and the write buffer stay 16-bit, so a longword store
+is still two lane-masked slots.  The A4000 shows the alternative it
+should have been all along (see the schematic reading in section 19):
+the real machine puts FOUR BYTE STROBES on a 32-bit bus rather than
+issuing two narrower cycles, and reserves narrow transfers for the
+devices that are actually narrow.
+
+  - extend sdram32_ctrl's write path to accept a 32-bit datum with four
+    byte enables, the direct analogue of _UUDS/_UMDS/_LMDS/_LLDS
+  - route CPU stores to fast RAM through it; keep ap040_bus16_adapter
+    for chip RAM, chipset and IO, which is BRIDGETTE's split
+  - the adapter stays the fallback for DUAL_SDRAM=0 builds
+
+  Gate: longword store cost drops by the measured 3-cycle split penalty
+  with no change to chipset timing (the 16-bit chipset contract is the
+  one thing X2.1 must never disturb -- byte/cycle identity against
+  sdram_ctrl on shared stimulus, as X2.1 already proves).
+
+  Honest sizing: 3 cycles against a 20-cycle store and an 8-cycle
+  register add.  Worth doing, not worth doing FIRST.  X2.3 is first.
 
 ## X2.2 Fetch front end: decouple and widen  [the 71%]
 
@@ -1075,3 +1191,27 @@ construction).
     slower than no cache; the RTE deferral reverted against its own
     correct fix).
   - Cycle claims come from the tb_prof state histogram, not estimates.
+    Per-instruction claims come from the $F108 cycle-stamp port with
+    CACR ENABLED -- the 68040 resets with both caches off, and a probe
+    that forgets to set $8000_8000 measures the uncached machine.
+  - Correctness claims are checked against WinUAE's OWN code, executed,
+    not read (added 2026-08-20).  tests/ap040/diff carries two oracles
+    built for this:
+      fp_oracle.cpp    links WinUAE's softfloat and answers with the
+                       same floatx80_* calls fpp_softfloat.cpp makes;
+                       run_fpops.sh compares AP040 op by op.
+      mmu_oracle.cpp   links WinUAE's cpummu.cpp behind ~37 stubs and
+                       drives its public mmu_op_real PTEST path;
+                       run_mmuops.sh compares MMUSR probe by probe.
+    Standing results: FP 25 seeds x 96 ops all match (one architectural
+    class remains -- extended-precision underflow flushes to zero where
+    softfloat builds the denormal the FPSP would); MMU 25 seeds x 48
+    probes all match, bit for bit.  qemu remains available but is the
+    WEAKER oracle: it raises neither OPERR nor INEX2 on FP-to-integer
+    conversions and gets the NaN result wrong.
+  - A differential that finds a "CPU bug" is guilty until the HARNESS is
+    cleared.  Every divergence chased on 2026-08-20 was harness-side:
+    an inverted PTEST R/W bit, an FPSR read after a store that clears
+    it, operands pre-rounded by the FMOVE that loaded them, a program
+    grown into its own result window, and a result page whose M bit the
+    program set itself.
