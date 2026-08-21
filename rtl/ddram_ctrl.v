@@ -223,6 +223,17 @@ always @ (posedge sysclk) begin
 	reg  [3:0] state;
 	reg  [1:0] ba;
 	reg [63:0] dout;
+	// Read-wait watchdog: states 1 and 14 used to wait on ram_dout_ready
+	// unconditionally, so a response the DDR3 bridge lost wedged this
+	// controller -- and with it every CPU and walker access to fast RAM,
+	// including the bus-error exception frames that would have reported
+	// the problem.  Abandon the wait after 2^14 cycles (~143 us, well
+	// inside the port-level watchdogs above): the walker path is then
+	// bus-errored by the Minimig walker watchdog, the cache path retries
+	// or falls to the CPU-port watchdog, and the machine stays alive to
+	// report what happened.  The arbiter quarantines the abandoned
+	// burst's late beats so they cannot alias into a newer read.
+	reg [13:0] rdwait;
 
 	cache_fill <= 0;
 	ddr_data <= dout[{ba, 4'b0000} +:16];
@@ -237,6 +248,7 @@ always @ (posedge sysclk) begin
 	if(~reset_n) begin
 		state                <= 0;
 		write_ack            <= 0;
+		rdwait               <= 0;
 		walker_busy          <= 0;
 		walker_addr_latch    <= 0;
 		walker_wdata_latch   <= 0;
@@ -292,12 +304,18 @@ always @ (posedge sysclk) begin
 			// NetBSD (page tables in DDR3, le0 adding traffic) froze in a
 			// table walk while AmigaOS, which never walks DDR3, did not.
 			1: if(ram_dout_ready) begin
+					rdwait        <= 0;
 					ddr_data      <= ram_dout[{ba, 4'b0000} +:16];
 					dout          <= ram_dout;
 					cache_fill    <= 1;
 					ba            <= ba + 1'd1;
 					state         <= state + 1'd1;
 				end
+				else if (&rdwait) begin
+					rdwait <= 0;
+					state  <= 0;   // abandoned: the fill retries or the
+				end                // CPU-port watchdog reports it
+				else rdwait <= rdwait + 1'd1;
 			2,3: begin
 					cache_fill    <= 1;
 					ba            <= ba + 1'd1;
@@ -312,11 +330,22 @@ always @ (posedge sysclk) begin
 			// address/data selected for the complete lookup/write window,
 			// insert an inactive write edge between halves, and acknowledge
 			// only after the low-half write has landed.
-			5: begin
+			// The write command is level-held until ~ram_busy clears ram_we
+			// (top of this block).  Do not start the snoop/ack countdown
+			// until that acceptance: acknowledging the MMU's U/M update
+			// before the slave has the write would let a walk observe a
+			// descriptor its own update had not reached.
+			5: if (!ram_we) begin
+					rdwait           <= 0;
 					walker_snoop     <= 1;
 					walker_snoop_low <= 0;
 					state             <= 6;
 				end
+				else if (&rdwait) begin
+					rdwait <= 0;   // write never accepted: abandon without
+					state  <= 0;   // ack; the walker watchdog reports it
+				end
+				else rdwait <= rdwait + 1'd1;
 			6: begin
 					walker_snoop     <= 1;
 					state             <= 7;
@@ -351,12 +380,18 @@ always @ (posedge sysclk) begin
 					state       <= 0;
 				end
 			14: if(ram_dout_ready) begin
+					rdwait       <= 0;
 					walker_rdata <= walker_addr_latch[2]
 						? {ram_dout[47:32], ram_dout[63:48]}
 						: {ram_dout[15:0], ram_dout[31:16]};
 					walker_ack <= 1;
 					state      <= 0;
 				end
+				else if (&rdwait) begin
+					rdwait <= 0;   // abandoned: no ack -- the walker
+					state  <= 0;   // watchdog bus-errors the MMU side
+				end
+				else rdwait <= rdwait + 1'd1;
 		endcase
 
 		if(~write_req) write_ack <= 0;

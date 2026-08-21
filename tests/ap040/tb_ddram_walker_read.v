@@ -122,6 +122,7 @@ module tb_ddram_walker_read;
 	integer    rd_lat = 4;             // cycles from accepted read to valid
 	reg        busy_pattern = 0;       // 1 = waitrequest toggles every cycle
 	reg        slave_wedged = 0;       // 1 = accepted reads held, not returned
+	reg        drop_next = 0;          // drop exactly one accepted read
 	reg        wedge_seen = 0;         // latched: phase 10 has begun
 	reg        held_v = 0;             // a held read awaiting release
 	reg [63:0] held_dat = 0;
@@ -153,8 +154,11 @@ module tb_ddram_walker_read;
 		// accept a read command this cycle?  A wedged slave HOLDS the
 		// response (models a beat delayed beyond the watchdog) and
 		// releases it when unwedged -- the transient-hang shape.
-		if (slave_wedged) wedge_seen <= 1'b1;
-		if (ddram_rd && !ddram_busy && slave_wedged) begin
+		if (slave_wedged || drop_next) wedge_seen <= 1'b1;
+		if (ddram_rd && !ddram_busy && drop_next) begin
+			drop_next <= 1'b0;   // response lost forever: nothing scheduled
+		end
+		else if (ddram_rd && !ddram_busy && slave_wedged) begin
 			held_v   <= 1'b1;
 			held_dat <= ddr_mem[ddram_addr[12:3]];
 		end
@@ -163,7 +167,7 @@ module tb_ddram_walker_read;
 			rr_v[rd_lat]   <= 1'b1;
 			rr_dat[rd_lat] <= held_dat;
 		end
-		if (ddram_rd && !ddram_busy && !slave_wedged) begin
+		if (ddram_rd && !ddram_busy && !slave_wedged && !drop_next) begin
 			rr_v[rd_lat]   <= 1'b1;
 			rr_dat[rd_lat] <= ddr_mem[ddram_addr[12:3]];
 			// outstanding-read accounting: the arbiter promises only one
@@ -219,6 +223,11 @@ module tb_ddram_walker_read;
 			if (!walker_ack) begin
 				$display("FAIL: walker read timeout addr=%h walker_busy=%b",
 				         {addr,2'b00}, dut.walker_busy);
+				errors = errors + 1;
+			end
+			else if (walker_berr_s) begin
+				$display("FAIL: walker read addr=%h unexpected BERR",
+				         {addr,2'b00});
 				errors = errors + 1;
 			end
 			else begin
@@ -480,6 +489,24 @@ module tb_ddram_walker_read;
 		cpu_read(28'h000680);
 		walker_read (27'h0000A80);
 		busy_pattern = 0; rd_lat = 4; m1_on = 0;
+
+		// 11) LOST response: the slave accepts a walker read and the
+		//     response vanishes (the transient-loss class the freeze is
+		//     built from).  The walker walk bus-errors -- and, the part
+		//     that used to kill the machine, the CPU cache path and a
+		//     following walk must be served normally afterwards: the
+		//     controller's state-14 abort and the arbiter's abandonment
+		//     free the port, so the bus-error exception itself can reach
+		//     memory instead of double-faulting into a silent halt.
+		$display("PHASE 11: lost response -> berr, then everything recovers");
+		drop_next = 1;
+		walker_read_berr(27'h0000450);
+		// wait out the controller's state-14 abort and the arbiter's
+		// abandon + stale-quarantine decay (each 2^14 sysclk)
+		repeat (34000) @(posedge clk);
+		cpu_read(28'h000700);            // cache path alive again
+		walker_read(27'h0000450);        // walks fully recovered
+		cpu_read(28'h000740);
 
 		// 10) wedged slave: read data never returns (the hang class the
 		//     readdatavalid fix removed, induced deliberately).  The

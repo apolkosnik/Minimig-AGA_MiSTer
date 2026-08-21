@@ -93,34 +93,84 @@ module a2065_ddram_arbiter #(
     // issued. Read data comes back later and is counted by readdatavalid.
     wire write_beat = sel_write && !s_waitrequest;
 
+    // Response watchdog.  A read burst whose data never returns used to
+    // latch busy/owner forever, blocking BOTH masters -- once wedged, even
+    // the CPU's bus-error exception could not stack (its frames live in
+    // the same DDR3), so the machine died silently.  After RD_TIMEOUT
+    // cycles with beats outstanding and no readdatavalid, abandon the
+    // burst: clear busy so new bursts can start, and remember how many
+    // beats of the dead burst are still owed so that, if the slave later
+    // delivers them, they are SWALLOWED here rather than routed to a newer
+    // burst's master (the late-response aliasing hazard).
+    localparam RD_TIMEOUT_BITS = 14;
+    reg [RD_TIMEOUT_BITS-1:0] resp_wait;
+    reg [BURST_W:0]           stale_beats;
+    // In-order Avalon cannot distinguish a LATE response from a LOST one.
+    // Quarantined beats therefore decay: if no beat at all arrives within
+    // the same timeout window, the abandoned response is presumed lost and
+    // the quarantine lifts -- otherwise it would swallow the next real
+    // burst's beats and re-wedge the very reads it exists to protect.
+    reg [RD_TIMEOUT_BITS-1:0] stale_wait;
+    wire stale_swallow = (stale_beats != 0) && s_readdatavalid;
+
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             busy          <= 1'b0;
             owner         <= M0;
             owner_is_read <= 1'b0;
             beats_left    <= 0;
+            resp_wait     <= 0;
+            stale_beats   <= 0;
+            stale_wait    <= 0;
         end
-        else if (!busy) begin
-            if (starting && !s_waitrequest) begin
-                owner         <= sel;
-                owner_is_read <= sel_read;
-                if (sel_read) begin
-                    // The whole read burst is issued as one command; every
-                    // beat is still outstanding until its data comes back.
-                    busy       <= 1'b1;
-                    beats_left <= sel_burstcount;
+        else begin
+            if (stale_swallow) begin
+                stale_beats <= stale_beats - 1'b1;
+                stale_wait  <= 0;
+            end
+            else if (stale_beats != 0) begin
+                if (&stale_wait) begin
+                    stale_beats <= 0;   // presumed lost, lift quarantine
+                    stale_wait  <= 0;
                 end
-                else begin
-                    // The first write beat is placed in this same cycle, so
-                    // only the remainder is outstanding.
-                    busy       <= (sel_burstcount > 1);
-                    beats_left <= sel_burstcount - 1'b1;
+                else stale_wait <= stale_wait + 1'b1;
+            end
+
+            if (!busy) begin
+                resp_wait <= 0;
+                if (starting && !s_waitrequest) begin
+                    owner         <= sel;
+                    owner_is_read <= sel_read;
+                    if (sel_read) begin
+                        // The whole read burst is issued as one command; every
+                        // beat is still outstanding until its data comes back.
+                        busy       <= 1'b1;
+                        beats_left <= sel_burstcount;
+                    end
+                    else begin
+                        // The first write beat is placed in this same cycle, so
+                        // only the remainder is outstanding.
+                        busy       <= (sel_burstcount > 1);
+                        beats_left <= sel_burstcount - 1'b1;
+                    end
                 end
             end
-        end
-        else if (owner_is_read ? s_readdatavalid : write_beat) begin
-            beats_left <= beats_left - 1'b1;
-            if (beats_left == 1) busy <= 1'b0;
+            else if (owner_is_read ? (s_readdatavalid && !stale_swallow)
+                                   : write_beat) begin
+                resp_wait  <= 0;
+                beats_left <= beats_left - 1'b1;
+                if (beats_left == 1) busy <= 1'b0;
+            end
+            else if (owner_is_read) begin
+                if (&resp_wait) begin
+                    // abandon: free the port, quarantine the owed beats
+                    busy        <= 1'b0;
+                    stale_beats <= stale_beats + beats_left;
+                    beats_left  <= 0;
+                    resp_wait   <= 0;
+                end
+                else resp_wait <= resp_wait + 1'b1;
+            end
         end
     end
 
@@ -155,7 +205,7 @@ module a2065_ddram_arbiter #(
 
     assign m0_readdata       = s_readdata;
     assign m1_readdata       = s_readdata;
-    assign m0_readdatavalid  = s_readdatavalid && (rd_owner == M0);
-    assign m1_readdatavalid  = s_readdatavalid && (rd_owner == M1);
+    assign m0_readdatavalid  = s_readdatavalid && !stale_swallow && (rd_owner == M0);
+    assign m1_readdatavalid  = s_readdatavalid && !stale_swallow && (rd_owner == M1);
 
 endmodule
