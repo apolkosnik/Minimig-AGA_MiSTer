@@ -326,6 +326,10 @@ localparam S_PIPE_SRD      = 8'd22;
 localparam S_PIPE_SDONE      = 8'd23;
 localparam S_PIPE_DST      = 8'd24;
 localparam S_PIPE_DREG      = 8'd25;
+// X2.3 step 1: both regfile read ports are independent and combinational,
+// so a register source and a register destination can be fetched in ONE
+// cycle instead of walking SREG then DST then DREG.
+localparam S_PIPE_REGS      = 8'd190;
 localparam S_PIPE_DEA      = 8'd26;
 localparam S_PIPE_DDONE      = 8'd27;
 localparam S_EXEC      = 8'd28;
@@ -2316,11 +2320,29 @@ always @(posedge clk) begin
 				// x_ext keeps a decode-time immediate through EA fetches;
 				// for long MUL/DIV it was already captured in S_MDL_EXT
 				if (exec_kind != EK_MD_L) x_ext <= imm;
+				// A register destination needs no EA, so its operand can be
+				// read on port B in the SAME cycle the source is read on
+				// port A (X2.3).  The old path spent one state per port.
 				case (p_src)
 					SK_MEM: ea_start(src_mode_r, src_rn_r, p_ssize, S_PIPE_SRD);
-					SK_REG: begin rr_a <= p_sreg; state <= S_PIPE_SREG; end
-					SK_IMM: begin src_val <= imm; state <= S_PIPE_DST; end
-					default: state <= S_PIPE_DST;
+					SK_REG:
+						if (p_dst == DK_REG) begin
+							rr_a <= p_sreg; rr_b <= p_dreg;
+							state <= S_PIPE_REGS;
+						end
+						else begin rr_a <= p_sreg; state <= S_PIPE_SREG; end
+					SK_IMM: begin
+						src_val <= imm;
+						if (p_dst == DK_REG) begin
+							rr_b <= p_dreg; state <= S_PIPE_REGS;
+						end
+						else state <= S_PIPE_DST;
+					end
+					default:
+						if (p_dst == DK_REG) begin
+							rr_b <= p_dreg; state <= S_PIPE_REGS;
+						end
+						else state <= S_PIPE_DST;
 				endcase
 			end
 
@@ -2344,6 +2366,15 @@ always @(posedge clk) begin
 
 			S_PIPE_DDONE: begin dst_val <= m_val; state <= S_EXEC; end
 			S_PIPE_DREG:  begin dst_val <= rf_rdata_b; state <= S_EXEC; end
+
+			// Both operands captured together.  src_val is taken only for a
+			// REGISTER source: an immediate source was latched in
+			// S_PIPE_START and a sourceless op never reads it.
+			S_PIPE_REGS: begin
+				if (p_src == SK_REG) src_val <= rf_rdata_a;
+				dst_val <= rf_rdata_b;
+				state <= S_EXEC;
+			end
 
 			//-------------------------------------------------------- execute
 			S_EXEC: begin

@@ -23,6 +23,9 @@ FCREG	equ	$F120
 BERRCTL equ	$F142
 IRQEXCCTL equ	$F144
 
+hfa		equ	$3674	; fault address seen by h_buserr
+hfpc		equ	$3678	; and its stacked PC
+hid		equ	$3670	; which handler called hfail (X2.3a diagnostic)
 cnt_trap0	equ	$3600
 cnt_ill		equ	$3602
 cnt_aline	equ	$3604
@@ -760,8 +763,17 @@ t138_done:
 	nop
 	nop
 	nop
+	; The premise is that t139_x is reached ONLY by a speculative fetch.
+	; The queue fetches ALIGNED LONGWORDS, so that holds only if the DIVU
+	; occupies a longword by itself: straddling two, its own demand fetch
+	; for the extension word covers the next word too and faults for real
+	; (X2.3a -- this used to hold by accident of layout, and any timing
+	; change that moved the code exposed it).  move.l #imm,d0 is 6 bytes,
+	; so aligning it to 4n+2 puts the DIVU on a longword boundary.
+	cnop	2,4
 	move.l	#100,d0
 	divu.w	#3,d0		; speculative fetch of t139_x faults here
+	cnop	0,4		; and t139_x starts its own longword
 t139_x:
 	moveq	#1,d1		; reached via the re-issued fetch
 	chkcnt	cnt_fberr,0,139
@@ -800,6 +812,10 @@ t141_chk:
 	; RTS; at least one delay must land both at the RTS boundary, where
 	; the IRQ frame returns to the RTS target and the trace frame
 	; stacks the IRQ handler's entry address.
+	; The delay at which the coincidence lands scales with the core's
+	; instruction timing, so the sweep must be wide enough to survive a
+	; faster core (X2.3a).  It only needs ONE hit; a wider range costs
+	; iterations, not accuracy.
 	clr.w	(order_hit).l
 	moveq	#2,d5
 tio_loop:
@@ -823,7 +839,7 @@ tio_ret:
 	move.w	#1,(order_hit).l
 tio_next:
 	addq.w	#1,d5
-	cmp.w	#12,d5
+	cmp.w	#40,d5
 	bls.s	tio_loop
 	move.w	#0,(IPLREG).l
 	tst.w	(order_hit).l
@@ -838,8 +854,9 @@ tio_ok:
 	; a core that drops the trace event resumes tracing only at the
 	; following instruction and stacks a later PC, and that signature
 	; must then never appear across the whole sweep.
+	; Same widening as 142: the coincidence delay moves with core timing.
 	clr.w	(order_hit).l
-	moveq	#4,d5
+	moveq	#2,d5
 tio2_loop:
 	clr.l	(int2_pc).l
 	clr.l	(trace_pc).l
@@ -855,7 +872,7 @@ tio2_loop:
 	move.w	#1,(order_hit).l
 tio2_next:
 	addq.w	#1,d5
-	cmp.w	#20,d5
+	cmp.w	#48,d5
 	bls.s	tio2_loop
 	move.w	#0,(IPLREG).l
 	tst.w	(order_hit).l
@@ -1325,6 +1342,7 @@ wn2:
 
 ;----------------------------------------------------------------- handlers
 h_trap0:
+	move.w	#1,(hid).l	; X2.3a: identify the handler for hfail
 	move.w	#1,(trap_guard).l	; deliberately the first handler instruction
 	cmpi.w	#$0080,6(sp)
 	bne	hfail
@@ -1332,6 +1350,7 @@ h_trap0:
 	rte
 
 h_trap1:
+	move.w	#2,(hid).l	; X2.3a: identify the handler for hfail
 	; arrived from user mode: check stacked SR, USP and user stack data
 	move.l	d0,-(sp)
 	move.w	4(sp),d0	; stacked SR
@@ -1348,6 +1367,7 @@ h_trap1:
 	rte
 
 h_ill:
+	move.w	#3,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$0010,6(sp)
 	bne	hfail
 	addq.l	#2,2(sp)	; skip the 2-byte opcode
@@ -1355,6 +1375,7 @@ h_ill:
 	rte
 
 h_aline:
+	move.w	#4,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$0028,6(sp)
 	bne	hfail
 	addq.l	#2,2(sp)
@@ -1362,6 +1383,7 @@ h_aline:
 	rte
 
 h_fline:
+	move.w	#5,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$002C,6(sp)
 	bne	hfail
 	addq.l	#2,2(sp)
@@ -1369,24 +1391,28 @@ h_fline:
 	rte
 
 h_chk:
+	move.w	#6,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$2018,6(sp)
 	bne	hfail
 	addq.w	#1,(cnt_chk).l
 	rte
 
 h_divz:
+	move.w	#7,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$2014,6(sp)
 	bne	hfail
 	addq.w	#1,(cnt_divz).l
 	rte
 
 h_trapv:
+	move.w	#8,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$201C,6(sp)
 	bne	hfail
 	addq.w	#1,(cnt_trapv).l
 	rte
 
 h_trace:
+	move.w	#9,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$2024,6(sp)	; format $2, vector 9
 	bne	hfail
 	tst.l	(trace_pc).l	; capture the FIRST trace since the clear
@@ -1398,6 +1424,7 @@ ht_nocap:
 	rte
 
 h_priv:
+	move.w	#10,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$0020,6(sp)
 	bne	hfail
 	ori.w	#$2000,(sp)	; return in supervisor mode
@@ -1406,6 +1433,7 @@ h_priv:
 	rte
 
 h_fmt:
+	move.w	#11,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$0038,6(sp)
 	bne	hfail
 	move.l	(resume).l,2(sp)
@@ -1413,6 +1441,7 @@ h_fmt:
 	rte
 
 h_addr:
+	move.w	#12,(hid).l	; X2.3a: identify the handler for hfail
 	move.l	sp,(got_fsp).l	; frame base, for SP-preservation checks
 	cmpi.w	#$200C,6(sp)
 	bne	hfail
@@ -1445,6 +1474,9 @@ haddr_sr_ok:
 	rte
 
 h_buserr:
+	move.w	#13,(hid).l	; X2.3a: identify the handler for hfail
+	move.l	$14(sp),(hfa).l	; X2.3a: record the fault address for hfail
+	move.l	2(sp),(hfpc).l
 	cmpi.w	#$7008,6(sp)	; format $7, vector 2
 	bne	hfail
 	move.l	$14(sp),d0	; fault address
@@ -1474,6 +1506,7 @@ hb_fetch:
 	rte
 
 h_int2:
+	move.w	#14,(hid).l	; X2.3a: identify the handler for hfail
 	move.l	d0,-(sp)
 	move.l	6(sp),(int2_pc).l
 	tst.w	(irq_exc).l
@@ -1512,6 +1545,7 @@ hi2f0:
 	rte
 
 h_int3:
+	move.w	#15,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$006C,6(sp)
 	bne	hfail
 	addq.w	#1,(cnt_int3).l
@@ -1519,6 +1553,7 @@ h_int3:
 	rte
 
 h_int5:
+	move.w	#16,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$0074,6(sp)
 	bne	hfail
 	addq.w	#1,(cnt_int5).l
@@ -1526,6 +1561,7 @@ h_int5:
 	rte
 
 h_nmi:
+	move.w	#17,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$007C,6(sp)
 	bne	hfail
 	addq.w	#1,(cnt_nmi).l
@@ -1533,6 +1569,8 @@ h_nmi:
 	rte
 
 hfail:
+	; hid names the handler that rejected something; the testbench prints
+	; it, so a timing shift no longer produces an anonymous "test 98".
 	failt	98
 
 fail_all:

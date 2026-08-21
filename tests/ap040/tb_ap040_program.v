@@ -532,6 +532,17 @@ always @(posedge clk) begin
 					errors = errors + 1;					$display("FAIL: program reports failure, test %0d (phase %0d, pc=%h, ill=%0d, addr=%0d)",
 					         mem[16'hF100 >> 1], phase, dbg_pc,
 					         mem[16'h3602 >> 1], mem[16'h361E >> 1]);
+					// t_exceptions stamps $3670 with the handler that
+					// rejected a frame, so a shared hfail is still
+					// attributable (X2.3a).
+					if (mem[16'hF100 >> 1] == 98) begin
+						$display("     hfail from handler id %0d",
+						         mem[16'h3670 >> 1]);
+						$display("     berr fault addr=%04x%04x stacked pc=%04x%04x armed=%04x%04x",
+						         mem[16'h3674 >> 1], mem[16'h3676 >> 1],
+						         mem[16'h3678 >> 1], mem[16'h367A >> 1],
+						         mem[16'h3654 >> 1], mem[16'h3656 >> 1]);
+					end
 					result = 2;
 				end
 			end

@@ -1154,7 +1154,7 @@ interrupt, mask qualification, exception_prefetch/epf_pend), and those
 did NOT fire during the X2.3 experiment -- only the coincidence-hunting
 assertions did.
 
-### X2.3 step 1 measured (patch parked, NOT shipped)
+### X2.3 step 1 SHIPPED after X2.3a (2026-08-20)
 
 Both regfile read ports are independent and combinational, so a
 register source and a register destination can be read in ONE cycle
@@ -1168,12 +1168,24 @@ Measured with the $F108 stamp port:
 
   25% on the register-op class for a ~20 line change, and it is the
   first concrete piece of the "collapse staging + add forwarding" item.
-  Parked in rtl/ap040/experimental/x23_step1_dualport_operand.v.txt
-  rather than shipped: it fails t_exceptions in the fragile region
-  above, and while the baseline fails there too under an equivalent
-  timing perturbation, that is NOT proof the CPU is still correct.  It
-  is only proof that the test cannot tell.  Ship it after X2.3a, with
-  the corpus and both differentials as the real gate.
+  Held back until X2.3a had made the fragile tests say something real,
+  then gated properly: directed suite green, v24 corpus 3776/3801 with
+  the failing set unchanged, integer differential 15/15 vs qemu, FP
+  10/10 and MMU 10/10 vs the WinUAE oracles.
+
+  X2.3a paid for itself immediately.  The t_exceptions failure was NOT
+  the coincidence sweeps at all -- widening those changed nothing.  It
+  was test 139, and the handler-identity stamp added by X2.3a named it
+  in one run (h_buserr, id 13) instead of an anonymous shared "test 98".
+  The fault address then gave the mechanism outright: armed $0F56,
+  delivered $0F54, stacked PC $0F52.  $0F54 is the DIVU's own extension
+  word, and the queue fetches ALIGNED LONGWORDS -- so a DEMAND fetch at
+  $0F54 spans $0F54..$0F57 and covers the armed word.  The DIVU sat at
+  $0F52, straddling two longwords, so the word the test wanted reached
+  only speculatively was pulled in by a demand fetch instead.  The test
+  premise held by accident of layout.  Fixed with cnop so the DIVU
+  occupies a longword alone and t139_x starts its own: now structural,
+  and BOTH cores pass.  No RTL was changed to make it pass.
 
 ## X2.4 Dual issue (68060-style pOEP/sOEP)
 
