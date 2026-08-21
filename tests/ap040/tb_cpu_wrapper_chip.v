@@ -57,6 +57,13 @@ wire chip_wait = (DTACK_MODE != 0) && !cck_count[0];
 reg  [2:0] ipl_lvl = 0;
 reg [15:0] ipl_delay = 0;   // $F148: delayed level-2 IPL countdown
 
+wire        walker_req, walker_we, walker_ddr, walker_bad;
+wire [28:2] walker_addr;
+wire [31:0] walker_wdat;
+reg         walker_ack   = 0;
+reg         walker_berr  = 0;
+reg  [31:0] walker_rdata = 0;
+
 cpu_wrapper dut
 (
 	.snoop_tgl(1'b0),
@@ -101,15 +108,15 @@ cpu_wrapper dut
 	.ramuds(),
 	.ramshared(),
 
-	.walker_mem_req(),
-	.walker_mem_we(),
-	.walker_mem_addr(),
-	.walker_mem_wdat(),
-	.walker_mem_ddr(),
-	.walker_mem_bad(),
-	.walker_mem_ack(1'b0),
-	.walker_mem_rdata(32'd0),
-	.walker_mem_berr(1'b0),
+	.walker_mem_req(walker_req),
+	.walker_mem_we(walker_we),
+	.walker_mem_addr(walker_addr),
+	.walker_mem_wdat(walker_wdat),
+	.walker_mem_ddr(walker_ddr),
+	.walker_mem_bad(walker_bad),
+	.walker_mem_ack(walker_ack),
+	.walker_mem_rdata(walker_rdata),
+	.walker_mem_berr(walker_berr),
 
 	.toccata_ena(),
 	.toccata_base(),
@@ -130,6 +137,63 @@ cpu_wrapper dut
 
 reg [15:0] mem [0:32767];
 assign chip_dout = mem[chip_addr[15:1]];
+
+//---------------------------------------------------------------------------
+// MMU walker physical port.  On hardware the table walker bypasses the
+// chip bus and reads descriptors over the SDRAM/DDR3 port; here the
+// tables live in the same 64 KB model.  Handshake mirrors the flat TB:
+// a held request is accepted once, re-armed when it drops, acked for one
+// cycle after a short latency.  walker_mem_bad (corrupt table address)
+// answers with a bus error, as Minimig does.
+//---------------------------------------------------------------------------
+
+reg       walker_armed   = 1;
+reg       walker_pending = 0;
+reg [1:0] walker_lat     = 0;
+reg       walker_we_l    = 0;
+reg [13:0] walker_word_l = 0;
+reg       walker_bad_l   = 0;
+reg [31:0] walker_wdat_l = 0;
+
+always @(posedge clk) begin
+	walker_ack  <= 0;
+	walker_berr <= 0;
+	if (!reset) begin
+		walker_armed   <= 1;
+		walker_pending <= 0;
+	end
+	else begin
+		if (!walker_req) walker_armed <= 1;
+		if (walker_req && walker_armed && !walker_pending) begin
+			walker_pending <= 1;
+			walker_armed   <= 0;
+			walker_we_l    <= walker_we;
+			walker_word_l  <= walker_addr[15:2];
+			walker_bad_l   <= walker_bad | walker_ddr | (|walker_addr[28:16]);
+			walker_wdat_l  <= walker_wdat;
+			walker_lat     <= 2'd2;
+		end
+		else if (walker_pending) begin
+			if (walker_lat != 0)
+				walker_lat <= walker_lat - 1'd1;
+			else begin
+				walker_pending <= 0;
+				if (walker_bad_l)
+					walker_berr <= 1;
+				else if (walker_we_l) begin
+					mem[{walker_word_l, 1'b0}] <= walker_wdat_l[31:16];
+					mem[{walker_word_l, 1'b1}] <= walker_wdat_l[15:0];
+					walker_ack <= 1;
+				end
+				else begin
+					walker_rdata <= {mem[{walker_word_l, 1'b0}],
+					                 mem[{walker_word_l, 1'b1}]};
+					walker_ack <= 1;
+				end
+			end
+		end
+	end
+end
 
 integer errors = 0;
 integer result = 0;      // 0 running, 1 pass, 2 fail
@@ -201,6 +265,9 @@ initial begin
 	if (result == 0) begin
 		errors = errors + 1;
 		$display("FAIL: timeout after %0d cycles", timeout);
+		$display("  pc=%08x ir=%04x sr=%04x state=%02x",
+		         dut.cpu_inst_p.core.pc, dut.cpu_inst_p.core.ir,
+		         dut.cpu_inst_p.core.sr, dut.cpu_inst_p.core.state);
 	end
 	else if (result == 2)
 		$display("FAIL: program reports failure, test %0d", failcode);

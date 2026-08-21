@@ -144,6 +144,7 @@ leg mmu                "$WORK/tb_prog.vvp" +prog=build/t_mmu.hex &
 leg cache              "$WORK/tb_prog.vvp" +prog=build/t_cache.hex &
 leg fpu                "$WORK/tb_prog.vvp" +prog=build/t_fpu.hex &
 leg fpu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_fpu.hex &
+leg exceptions_chip    "$WORK/tb_wrapchip.vvp" +prog=build/t_exceptions.hex &
 leg fpu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_fpu.hex &
 leg fpu_dualram        "$WORK/tb_dualram_turbo.vvp" +prog=build/t_fpu.hex &
 leg fpu_turbo_ph3      "$WORK/tb_sdram_turbo_ph3.vvp" +prog=build/t_fpu.hex &

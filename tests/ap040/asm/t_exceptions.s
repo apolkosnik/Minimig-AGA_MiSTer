@@ -22,6 +22,11 @@ FBERRCTL equ	$F154	; one-shot bus error on a FETCH at the written address
 FCREG	equ	$F120
 BERRCTL equ	$F142
 IRQEXCCTL equ	$F144
+IPLCAP	equ	$F160	; bench capability word: bit 0 = coarse IPL delivery
+			; (IPLREG, IPLDLY arriving eventually), bit 1 = cycle-
+			; fine injectors (IPLDLY exact, IPLPULSE, IPLSTEP,
+			; IRQEXCCTL), bit 2 = bus-error injection (BERRCTL,
+			; FBERRCTL).  Gated tests are bypassed, never faked.
 
 hfa		equ	$3674	; fault address seen by h_buserr
 hfpc		equ	$3678	; and its stacked PC
@@ -611,6 +616,10 @@ rte_irq_target:
 rte_irq_ok:
 	move.w	#$2700,sr
 
+	move.w	(IPLCAP).l,d0	; tests 93-105/136/137 need cycle-fine
+	btst	#1,d0		; injectors; benches without them advertise
+	beq	fine_inj_done	; it and the block is bypassed, not faked
+
 	; If an interrupt becomes pending while another exception is being
 	; processed, the 68040 stacks the interrupt and vectors to it before it
 	; executes the first instruction of the original exception handler.
@@ -726,6 +735,11 @@ irq_step_loop:
 	bls.s	irq_step_loop
 	move.w	#$2700,sr
 	chkcnt	cnt_int3,0,137		; downgraded level fired at/below mask
+fine_inj_done:
+
+	move.w	(IPLCAP).l,d0	; tests 138-141 inject fetch bus errors
+	btst	#2,d0
+	beq	fberr_done
 
 	; Queue fault discipline (X2.2): a bus error on a SPECULATIVE
 	; instruction fetch must never surface as an exception.  $F154 arms
@@ -805,6 +819,11 @@ t141_chk:
 	chkcnt	cnt_fberr,1,141
 	move.w	#0,(FBERRCTL).l
 	clr.l	(fberr_fa).l
+fberr_done:
+
+	move.w	(IPLCAP).l,d0	; the 142/143 sweeps time IPL2 into exact
+	btst	#1,d0		; instruction boundaries: cycle-fine IPLDLY
+	beq	fine_sweep_done
 
 	; Trace vs interrupt at one boundary (WinUAE do_specialties): the
 	; completing instruction's trace converts to a PENDING trace and
@@ -882,6 +901,7 @@ tio2_next:
 	bne.s	tio2_ok
 	failt	143		; simultaneous trace lost or misplaced
 tio2_ok:
+fine_sweep_done:
 
 ;-------------------------- level-sensitive IPL: the NetBSD ports shape
 ; Amiga INT2 is shared (CIA-A, gayle IDE, other ports devices).  When a
@@ -1070,6 +1090,9 @@ cmpiok:
 
 ;------------------------------------------------------- physical bus error
 ; The testbench rejects the first access to $F140 and allows its restart.
+	move.w	(IPLCAP).l,d0
+	btst	#2,d0
+	beq	buserr_done
 ; The handler verifies format $7, a clear ATC-fault bit and the original
 ; supervisor-data function code before returning to the faulting instruction.
 	move.w	#5,(buserr_fc).l
@@ -1085,6 +1108,7 @@ cmpiok:
 	lea	(FCREG+$20).l,a0
 	moves.l	(a0),d0
 	chkcnt	cnt_buserr,2,92
+buserr_done:
 
 ;----------------------------------------------------------------- all done
 

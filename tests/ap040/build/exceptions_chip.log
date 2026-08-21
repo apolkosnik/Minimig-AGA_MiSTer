@@ -1,0 +1,5 @@
+tb_cpu_wrapper_chip: running build/t_exceptions.hex over the 7MHz chip bus
+WARNING: tb_cpu_wrapper_chip.v:251: $readmemh(build/t_exceptions.hex): Not enough words in the file for the requested range [0:32767].
+chip-bus run passed (175553 cycles)
+ALL TESTS PASSED
+tb_cpu_wrapper_chip.v:279: $finish called at 7024075 (1ns)
