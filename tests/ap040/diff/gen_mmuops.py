@@ -27,7 +27,7 @@ NPROBE   = 48
 IDENT_MAX = 16
 
 
-def build(seed):
+def build(seed, eightk=False):
     r = random.Random(seed)
     attr = {}
     for p in range(64):
@@ -45,28 +45,41 @@ def build(seed):
     # probes -- never sees.  Page 3 holds the result array; skip it so the
     # comparison stays about translation rules rather than about the
     # harness's own footprint.
-    RESULT_PAGE = MMUSR_A >> 12
+    # In 8K mode a page spans two 4K units, so exclusion must use the
+    # ACTIVE page size or a probe lands in the half that shares a page
+    # with the result array and sees the program's own M bit.
+    shift = 13 if eightk else 12
+    result_page = MMUSR_A >> shift
     probes = []
     for _ in range(NPROBE):
         page = r.randrange(64)
-        while page == RESULT_PAGE:
+        while (page * 0x1000) >> shift == result_page:
             page = r.randrange(64)
         off = r.randrange(0, 0x1000, 4)
         probes.append((page * 0x1000 + off, r.randrange(2), r.randrange(2)))
     return attr, resident, probes
 
 
-def page_desc(attr, resident, p):
+def page_desc(attr, resident, p, eightk=False):
     phys, wp, sup, cm, g = attr[p]
     if not resident[p]:
         return 0
+    if eightk:
+        # 8K pages: descriptor bits [31:13] are the frame; pair logical
+        # pages 2n/2n+1 onto phys frame from the even entry's attributes
+        return (((phys & ~1) << 12) | (g << 10) | (sup << 7) | (cm << 5)
+                | (wp << 2) | 0x1)
     return ((phys << 12) | (g << 10) | (sup << 7) | (cm << 5)
             | (wp << 2) | 0x1)                  # PDT = 01 resident
 
 
 def main():
     seed = int(sys.argv[1])
-    attr, resident, probes = build(seed)
+    # 8K page mode on odd seeds: NetBSD/amiga runs the 040 with TC.P set
+    # (uvmexp.pagesize 8192 on the live system), and the 4K-only sweep
+    # left that half of the translator uncovered.
+    eightk = (seed & 1) == 1
+    attr, resident, probes = build(seed, eightk)
 
     # ---- memory image for the oracle -------------------------------------
     mem = bytearray(0x200000)
@@ -77,14 +90,20 @@ def main():
     # one root entry -> one pointer entry -> the 64-entry page table
     putl(TBL_ROOT, TBL_PTR | 0x3)               # UDT = 11 resident
     putl(TBL_PTR,  TBL_PAGE | 0x3)
-    for p in range(64):
-        putl(TBL_PAGE + p * 4, page_desc(attr, resident, p))
+    if eightk:
+        # 32 descriptors of 8K each cover the same 256K
+        for p in range(32):
+            putl(TBL_PAGE + p * 4, page_desc(attr, resident, p * 2, True))
+    else:
+        for p in range(64):
+            putl(TBL_PAGE + p * 4, page_desc(attr, resident, p))
 
     with open(sys.argv[2], "wb") as f:
         f.write(mem)
 
     with open(sys.argv[3], "w") as f:
-        f.write("cfg %08x %08x %08x\n" % (TBL_ROOT, TBL_ROOT, 0x8000))
+        f.write("cfg %08x %08x %08x\n" % (TBL_ROOT, TBL_ROOT,
+                                           0xC000 if eightk else 0x8000))
         for la, sup, wr in probes:
             f.write("probe %08x %d 1 %d\n" % (la, sup, wr))
 
@@ -95,13 +114,18 @@ def main():
     # build the same tables in RAM
     out.append("\tmove.l\t#$%X,($%X).l" % (TBL_PTR | 0x3, TBL_ROOT))
     out.append("\tmove.l\t#$%X,($%X).l" % (TBL_PAGE | 0x3, TBL_PTR))
-    for p in range(64):
-        out.append("\tmove.l\t#$%X,($%X).l"
-                   % (page_desc(attr, resident, p), TBL_PAGE + p * 4))
+    if eightk:
+        for p in range(32):
+            out.append("\tmove.l\t#$%X,($%X).l"
+                       % (page_desc(attr, resident, p * 2, True), TBL_PAGE + p * 4))
+    else:
+        for p in range(64):
+            out.append("\tmove.l\t#$%X,($%X).l"
+                       % (page_desc(attr, resident, p), TBL_PAGE + p * 4))
     out.append("\tmove.l\t#$%X,d0" % TBL_ROOT)
     out.append("\tmovec\td0,urp")
     out.append("\tmovec\td0,srp")
-    out.append("\tmove.l\t#$8000,d0")
+    out.append("\tmove.l\t#$%X,d0" % (0xC000 if eightk else 0x8000))
     out.append("\tmovec\td0,tc")
     out.append("\tpflusha")
     out.append("\tlea\t($%X).l,a1" % MMUSR_A)

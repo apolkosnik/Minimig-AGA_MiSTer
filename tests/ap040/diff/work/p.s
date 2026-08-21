@@ -10,348 +10,345 @@ start:
 	move.w	#$2700,sr
 	movea.l	#$4000,sp
 	lea	($3800).l,a6
-	move.l	#$608099F6,d0
-	move.l	#$C4BB895C,d1
-	move.l	#$ED4202ED,d2
-	move.l	#$D7F20E07,d3
-	move.l	#$D7EC202A,d4
-	move.l	#$3ED3511,d5
-	move.l	#$36CBB404,d6
-	move.l	#$EE544EEB,d7
-	movea.l	#$36F8,a0
-	movea.l	#$3270,a1
-	movea.l	#$3516,a2
-	movea.l	#$33C8,a3
-	movea.l	#$3056,a4
-	movea.l	#$36DC,a5
+	move.l	#$F71A1BFC,d0
+	move.l	#$357FBC5A,d1
+	move.l	#$2FBCD4F,d2
+	move.l	#$85750621,d3
+	move.l	#$BC69F265,d4
+	move.l	#$942DC06,d5
+	move.l	#$28738582,d6
+	move.l	#$E9BB466A,d7
+	movea.l	#$37E4,a0
+	movea.l	#$31E8,a1
+	movea.l	#$3022,a2
+	movea.l	#$3070,a3
+	movea.l	#$3708,a4
+	movea.l	#$3670,a5
 	move.w	#0,ccr
-	cas.l d0,d4,($3484).l
+	bfclr ($32B4).l{27:16}
 	move.w ccr,(a6)+
-	ext.w d1
+	tst.w d3
 	move.w ccr,(a6)+
-	addq.l #6,-(a4)
+	and.w d4,d6
 	move.w ccr,(a6)+
-	mulu.w d1,d5
+	eor.w d7,d1
 	move.w ccr,(a6)+
-	extb.l d3
+	mulu.l d7,d5
 	move.w ccr,(a6)+
-	move.l #40,d1
-	bfclr ($333A).l{d1:5}
+	bfins d3,d0{25:5}
 	move.w ccr,(a6)+
-	movea.l #$3700,a5
+	eori.b #$26,d1
 	move.w ccr,(a6)+
-	move.l d1,d3
+	ori.b #$FF,d4
 	move.w ccr,(a6)+
-	movem.l d3-d7,($3364).l
+	exg d3,d2
 	move.w ccr,(a6)+
-	subx.w d0,d7
+	lea ($31E0).l,a0
 	move.w ccr,(a6)+
-	move.w #18,ccr
-	add.w d7,($33D2).l
+	rol.b #7,d7
 	move.w ccr,(a6)+
-	or.l ($36B6).w,d2
+	roxr.b #8,d2
 	move.w ccr,(a6)+
-	add.b d2,d3
+	cmp.w d6,d0
 	move.w ccr,(a6)+
-	and.b d7,d5
+	not.w ($339A).l
 	move.w ccr,(a6)+
-	ror.w #8,d7
+	move.w d7,d7
 	move.w ccr,(a6)+
-	bfffo d1{28:25},d4
+	moveq #-97,d7
+	move.w ccr,(a6)+
+	move.l -882(a4),d4
+	move.w ccr,(a6)+
+	bfset d6{0:4}
 	move.w ccr,(a6)+
 	extb.l d0
 	move.w ccr,(a6)+
-	bfchg d1{1:12}
+	subx.l d7,d4
 	move.w ccr,(a6)+
-	move.l #-28,d4
-	bfextu ($35B4).l{d4:4},d2
+	move.w #1,ccr
+	swap d0
 	move.w ccr,(a6)+
-	subx.b d1,d6
+	move.l #-1,d7
+	bfexts ($3202).l{d7:1},d5
 	move.w ccr,(a6)+
-	move.w #9,ccr
-	lea ($3230).l,a1
+	asr.l #8,d5
 	move.w ccr,(a6)+
-	move.l #$7FFFFFFF,d2
+	move.l d3,-(a0)
 	move.w ccr,(a6)+
-	move.b #$E0,d3
+	cmpi.l #$8000,d5
 	move.w ccr,(a6)+
-	not.l ($3256).w
+	and.b -(a3),d7
 	move.w ccr,(a6)+
-	move.w d5,(a2)+
+	addq.w #1,($35AB).l
 	move.w ccr,(a6)+
-	not.b d6
+	bfins d6,d5{10:13}
 	move.w ccr,(a6)+
-	move.l d0,(a0)+
+	eori.l #$80000000,d2
 	move.w ccr,(a6)+
-	bfclr ($31E3).l{30:31}
+	move.l #11,d4
+	bfexts ($322D).l{d4:27},d5
 	move.w ccr,(a6)+
-	btst #28,d5
+	add.w d1,d1
 	move.w ccr,(a6)+
-	asl.w #2,d3
+	bfextu d2{13:5},d3
 	move.w ccr,(a6)+
-	move.l #$8000,d0
+	asl.l d5,d6
 	move.w ccr,(a6)+
-	subi.l #$7FFF,d4
+	or.l d5,d2
 	move.w ccr,(a6)+
-	moveq #-90,d5
+	movea.l #$33C8,a3
 	move.w ccr,(a6)+
-	move.b #$F7,d7
+	muls.l #$8000,d4
 	move.w ccr,(a6)+
-	move.b #$7F,d6
+	muls.w #$FFFF,d5
 	move.w ccr,(a6)+
-	cas2.l d0:d1,d2:d3,(a4):(a2)
+	ext.l d0
 	move.w ccr,(a6)+
-	move.l #-22,d4
-	bfclr ($307A).l{d4:24}
+	bftst ($32B0).l{25:29}
 	move.w ccr,(a6)+
-	bfchg d1{11:5}
-	move.w ccr,(a6)+
-	bfins d2,d2{4:15}
-	move.w ccr,(a6)+
-	movea.l #$33D2,a2
-	move.w ccr,(a6)+
-	ext.l d1
-	move.w ccr,(a6)+
-	muls.l #$58,d2
-	move.w ccr,(a6)+
-	or.b ($31D9).l,d3
-	move.w ccr,(a6)+
-	rol.w #6,d0
-	move.w ccr,(a6)+
-	and.l d0,($357C).l
-	move.w ccr,(a6)+
-	add.l d4,($372F).l
-	move.w ccr,(a6)+
-	bftst d4{22:27}
-	move.w ccr,(a6)+
-	lsl.b #8,d7
-	move.w ccr,(a6)+
-	not.l d6
-	move.w ccr,(a6)+
-	move.w #$0,d0
-	move.w ccr,(a6)+
-	move.b ($34BE).l,d1
-	move.w ccr,(a6)+
-	moveq #16,d6
-	move.l d1,($34C2).l
-	move.w ccr,(a6)+
-	addq.l #1,d0
-	move.w ccr,(a6)+
-	bchg d5,d2
-	move.w ccr,(a6)+
-	divs.l #7545,d5
-	move.w ccr,(a6)+
-	move.w #16,ccr
-	move.b d7,(a2)+
-	move.w ccr,(a6)+
-	exg d0,d1
-	move.w ccr,(a6)+
-	addq.b #4,d0
-	move.w ccr,(a6)+
-	and.b (a2)+,d6
-	move.w ccr,(a6)+
-	subx.b d7,d3
-	move.w ccr,(a6)+
-	move.w #22,ccr
-	bftst ($31D4).l{12:27}
-	move.w ccr,(a6)+
-	bfset d0{25:23}
-	move.w ccr,(a6)+
-	bfset d7{4:3}
-	move.w ccr,(a6)+
-	addq.l #3,($348F).l
-	move.w ccr,(a6)+
-	move.l -(a2),d3
-	move.w ccr,(a6)+
-	lsl.b d7,d6
-	move.w ccr,(a6)+
-	cmpa.l d1,a2
-	move.w ccr,(a6)+
-	cmpa.l d7,a2
-	move.w ccr,(a6)+
-	bfextu d0{17:15},d5
-	move.w ccr,(a6)+
-	and.b d3,-(a4)
-	move.w ccr,(a6)+
-	move.l #$1,d7
-	move.w ccr,(a6)+
-	move.l #-2,d5
-	bfexts ($33DC).l{d5:32},d4
-	move.w ccr,(a6)+
-	cas2.l d0:d1,d2:d3,(a1):(a2)
-	move.w ccr,(a6)+
-	sub.b d3,d6
-	move.w ccr,(a6)+
-	asr.b d4,d1
-	move.w ccr,(a6)+
-	roxl.w #8,d0
-	move.w ccr,(a6)+
-	subx.w d7,d3
-	move.w ccr,(a6)+
-	move.w #15,ccr
-	move.b d0,d6
-	move.w ccr,(a6)+
-	addx.b d1,d6
-	move.w ccr,(a6)+
-	move.w #26,ccr
-	move.l d6,($363D).l
-	move.w ccr,(a6)+
-	addx.b d3,d3
-	move.w ccr,(a6)+
-	move.w #21,ccr
-	asl.l d3,d4
-	move.w ccr,(a6)+
-	move.l ($30ED).l,d3
-	move.w ccr,(a6)+
-	bclr d6,d2
-	move.w ccr,(a6)+
-	muls.l #$F93A,d2
-	move.w ccr,(a6)+
-	movea.l #$3658,a4
-	move.w ccr,(a6)+
-	andi.w #$FFFF,d5
-	move.w ccr,(a6)+
-	cmp.b d4,d5
-	move.w ccr,(a6)+
-	moveq #-27,d1
-	move.w ccr,(a6)+
-	move.l d2,($30F4).l
-	move.w ccr,(a6)+
-	move.l #-2,d4
-	bfclr ($3432).l{d4:4}
-	move.w ccr,(a6)+
-	bfextu d0{10:1},d3
-	move.w ccr,(a6)+
-	subq.w #3,d5
-	move.w ccr,(a6)+
-	addq.l #5,d1
-	move.w ccr,(a6)+
-	cas.l d3,d2,($32F2).l
-	move.w ccr,(a6)+
-	subx.w d3,d2
+	subx.w d7,d7
 	move.w ccr,(a6)+
 	move.w #25,ccr
-	bfffo d0{27:17},d1
+	bfset d7{10:21}
+	move.w ccr,(a6)+
+	roxr.l d3,d3
+	move.w ccr,(a6)+
+	eor.l d1,d6
+	move.w ccr,(a6)+
+	bfexts d2{20:29},d4
+	move.w ccr,(a6)+
+	ext.w d4
+	move.w ccr,(a6)+
+	bfchg d4{17:11}
+	move.w ccr,(a6)+
+	or.l d2,d7
+	move.w ccr,(a6)+
+	moveq #-4,d3
+	move.w ccr,(a6)+
+	swap d3
+	move.w ccr,(a6)+
+	subx.w d7,d6
+	move.w ccr,(a6)+
+	move.w #30,ccr
+	cas2.l d0:d1,d2:d3,(a1):(a2)
+	move.w ccr,(a6)+
+	bclr #24,d5
+	move.w ccr,(a6)+
+	bfexts d3{6:9},d3
+	move.w ccr,(a6)+
+	addq.b #5,d3
+	move.w ccr,(a6)+
+	tst.w d2
+	move.w ccr,(a6)+
+	tst.w -58(a4)
+	move.w ccr,(a6)+
+	lea ($30E6).l,a4
+	move.w ccr,(a6)+
+	addx.w d0,d3
+	move.w ccr,(a6)+
+	move.w #2,ccr
+	bchg #18,d5
+	move.w ccr,(a6)+
+	ror.w #1,d7
+	move.w ccr,(a6)+
+	move.l #-15,d1
+	bfchg ($337D).l{d1:5}
+	move.w ccr,(a6)+
+	move.l #$80000000,d6
+	move.w ccr,(a6)+
+	bset d5,d1
+	move.w ccr,(a6)+
+	add.w ($3384).l,d0
+	move.w ccr,(a6)+
+	add.l d7,-1354(a5)
+	move.w ccr,(a6)+
+	move.l #59,d6
+	bfclr ($37DA).l{d6:16}
+	move.w ccr,(a6)+
+	roxr.b d2,d6
+	move.w ccr,(a6)+
+	subq.w #2,d2
+	move.w ccr,(a6)+
+	moveq #-4,d4
+	move.w ccr,(a6)+
+	muls.w #$FFFF,d1
+	move.w ccr,(a6)+
+	subx.b d0,d7
+	move.w ccr,(a6)+
+	move.w #22,ccr
+	subi.b #$7F,d3
+	move.w ccr,(a6)+
+	eor.w d2,d7
+	move.w ccr,(a6)+
+	not.b -(a3)
+	move.w ccr,(a6)+
+	move.w d2,-(a4)
+	move.w ccr,(a6)+
+	move.l ($33E0).l,d5
+	move.w ccr,(a6)+
+	addx.b d6,d5
+	move.w ccr,(a6)+
+	move.w #28,ccr
+	subq.l #6,d1
+	move.w ccr,(a6)+
+	and.l d1,d1
+	move.w ccr,(a6)+
+	move.b 122(a2),d6
+	move.w ccr,(a6)+
+	bset d6,d3
+	move.w ccr,(a6)+
+	exg d6,d0
+	move.w ccr,(a6)+
+	addq.b #3,($37E2).w
+	move.w ccr,(a6)+
+	mulu.l d2,d6
+	move.w ccr,(a6)+
+	move.l #-13,d0
+	bfins d2,($331A).l{d0:8}
+	move.w ccr,(a6)+
+	lea ($346C).l,a2
+	move.w ccr,(a6)+
+	ror.w #4,d1
+	move.w ccr,(a6)+
+	and.w ($3368).l,d4
+	move.w ccr,(a6)+
+	movea.l #$338C,a2
+	move.w ccr,(a6)+
+	asr.b #7,d3
+	move.w ccr,(a6)+
+	extb.l d4
+	move.w ccr,(a6)+
+	move.b d1,d5
+	move.w ccr,(a6)+
+	divu.w #53871,d4
+	move.w ccr,(a6)+
+	move.w #14,ccr
+	move.l #-14,d2
+	bfextu ($3606).l{d2:1},d0
+	move.w ccr,(a6)+
+	move.l #2,d0
+	bfexts ($3571).l{d0:21},d3
+	move.w ccr,(a6)+
+	addx.b d1,d4
+	move.w ccr,(a6)+
+	move.w #13,ccr
+	move.l #-2,d2
+	bfchg ($341F).l{d2:19}
+	move.w ccr,(a6)+
+	addx.l d5,d0
+	move.w ccr,(a6)+
+	move.w #8,ccr
+	move.l d2,($3474).w
+	move.w ccr,(a6)+
+	cas.l d2,d3,($32FA).l
+	move.w ccr,(a6)+
+	move.l #35,d2
+	bfset ($3068).l{d2:11}
+	move.w ccr,(a6)+
+	negx.l 872(a2)
+	move.w ccr,(a6)+
+	move.w #10,ccr
+	moveq #-97,d6
+	move.w ccr,(a6)+
+	sub.w d1,($37E4).l
+	move.w ccr,(a6)+
+	move.l #-15,d4
+	bfins d4,($3306).l{d4:15}
+	move.w ccr,(a6)+
+	addq.w #5,($33F2).l
+	move.w ccr,(a6)+
+	bchg #29,d7
+	move.w ccr,(a6)+
+	bfins d5,d7{12:14}
+	move.w ccr,(a6)+
+	negx.l d1
+	move.w ccr,(a6)+
+	move.w #23,ccr
+	swap d7
+	move.w ccr,(a6)+
+	clr.b d1
+	move.w ccr,(a6)+
+	add.w ($371E).l,d7
+	move.w ccr,(a6)+
+	cmp.w d6,d3
+	move.w ccr,(a6)+
+	mulu.l d3,d3
+	move.w ccr,(a6)+
+	move.b d5,d5
+	move.w ccr,(a6)+
+	ext.w d2
+	move.w ccr,(a6)+
+	cmpa.w d7,a4
+	move.w ccr,(a6)+
+	asl.w d0,d3
+	move.w ccr,(a6)+
+	and.w d2,d4
+	move.w ccr,(a6)+
+	addx.b d2,d6
+	move.w ccr,(a6)+
+	move.w #9,ccr
+	move.l #$80,d0
+	move.w ccr,(a6)+
+	move.w #$FFFF,d7
+	move.w ccr,(a6)+
+	or.w (a4)+,d4
 	move.w ccr,(a6)+
 	move.b #$FF,d3
 	move.w ccr,(a6)+
-	move.l #-1,d6
-	bfclr ($37EF).l{d6:8}
+	move.l #$EC582056,d0
 	move.w ccr,(a6)+
-	muls.l #$49DBF04E,d1
+	tst.b ($36D6).l
 	move.w ccr,(a6)+
-	move.b d5,($3035).l
+	moveq #28,d2
+	neg.w ($351E).l
 	move.w ccr,(a6)+
-	bfextu d4{1:18},d3
+	and.w d4,($3626).w
 	move.w ccr,(a6)+
-	movem.l d0-d4,($348C).l
+	swap d4
 	move.w ccr,(a6)+
-	and.b d5,($37CA).w
+	not.w d1
 	move.w ccr,(a6)+
-	move.w ($3600).l,d6
+	swap d2
 	move.w ccr,(a6)+
-	move.b #$8,d5
+	or.l d3,d2
 	move.w ccr,(a6)+
-	bfchg d2{11:23}
+	bfextu d0{21:28},d7
 	move.w ccr,(a6)+
-	lea ($350A).l,a2
+	ext.l d4
 	move.w ccr,(a6)+
-	move.b d5,d6
+	move.l #55,d6
+	bftst ($33A2).l{d6:1}
 	move.w ccr,(a6)+
-	bfclr d3{1:11}
+	move.w d0,d2
 	move.w ccr,(a6)+
-	bchg #0,d4
+	move.b ($37B0).l,d1
 	move.w ccr,(a6)+
-	or.w ($37E6).l,d1
+	lea ($3606).l,a0
 	move.w ccr,(a6)+
-	bftst d5{15:5}
+	muls.w #$80,d0
 	move.w ccr,(a6)+
-	negx.l d7
+	bset #12,d0
 	move.w ccr,(a6)+
-	move.w #10,ccr
-	bchg d2,d6
+	move.l d6,d2
 	move.w ccr,(a6)+
-	addx.l d7,d6
+	sub.l d3,(a5)+
 	move.w ccr,(a6)+
-	move.w #20,ccr
-	moveq #2,d6
-	subq.b #5,($3416).l
+	clr.w ($3036).w
 	move.w ccr,(a6)+
-	clr.w ($324F).l
+	btst d4,d4
 	move.w ccr,(a6)+
-	move.l #-23,d2
-	bfins d7,($3040).l{d2:29}
+	movea.l #$30C2,a4
 	move.w ccr,(a6)+
-	move.l #57,d2
-	bftst ($36CA).l{d2:13}
+	moveq #4,d5
+	move.w d2,(44,a4,d5.l)
 	move.w ccr,(a6)+
-	move.l #5,d3
-	bfclr ($36AA).l{d3:22}
+	cmpa.w d2,a3
 	move.w ccr,(a6)+
-	tst.b d4
+	muls.l #$FFFF,d3
 	move.w ccr,(a6)+
-	bclr #0,d2
+	and.b d5,d1
 	move.w ccr,(a6)+
-	bfset d6{24:18}
-	move.w ccr,(a6)+
-	bfexts d4{30:24},d6
-	move.w ccr,(a6)+
-	extb.l d2
-	move.w ccr,(a6)+
-	or.w d3,d3
-	move.w ccr,(a6)+
-	bset d2,d4
-	move.w ccr,(a6)+
-	moveq #58,d0
-	move.b (-10,a2,d0.l),d6
-	move.w ccr,(a6)+
-	move.w d5,d2
-	move.w ccr,(a6)+
-	asr.b d7,d3
-	move.w ccr,(a6)+
-	and.w ($3187).l,d7
-	move.w ccr,(a6)+
-	subx.l d5,d6
-	move.w ccr,(a6)+
-	move.w #30,ccr
-	bfexts d4{8:8},d0
-	move.w ccr,(a6)+
-	subx.b d4,d3
-	move.w ccr,(a6)+
-	move.w #8,ccr
-	muls.l #$80,d3
-	move.w ccr,(a6)+
-	move.b #$1,d5
-	move.w ccr,(a6)+
-	move.l #-27,d1
-	bfclr ($334C).l{d1:30}
-	move.w ccr,(a6)+
-	ror.w #5,d3
-	move.w ccr,(a6)+
-	addi.b #$1,d5
-	move.w ccr,(a6)+
-	move.l #-14,d0
-	bfclr ($35A8).l{d0:1}
-	move.w ccr,(a6)+
-	move.l d2,-(a4)
-	move.w ccr,(a6)+
-	addx.w d3,d5
-	move.w ccr,(a6)+
-	move.w #11,ccr
-	lea ($3262).l,a4
-	move.w ccr,(a6)+
-	ext.l d1
-	move.w ccr,(a6)+
-	divu.w #28779,d1
-	move.w ccr,(a6)+
-	move.w #11,ccr
-	andi.w #$189F,d2
-	move.w ccr,(a6)+
-	lea ($34CE).l,a0
-	move.w ccr,(a6)+
-	move.b #$1,d0
-	move.w ccr,(a6)+
-	lea ($375C).l,a3
+	cmpa.l d3,a5
 	move.w ccr,(a6)+
 	movem.l	d0-d7/a0-a5,($3F00).l
 	move.w	ccr,($3F38).l
