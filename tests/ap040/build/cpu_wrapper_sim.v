@@ -152,6 +152,18 @@ reg  [2:0] snoop_tgl_s;
 reg        snoop_stb_r;
 reg [31:0] snoop_addr_r;
 wire cpu_req;
+wire         core_halted;
+wire [255:0] core_dbgstat;
+reg         halted_d;
+reg         beacon_active;
+reg   [2:0] beacon_idx;
+reg         beacon_req;
+reg  [31:0] beacon_wdat;
+reg  [31:0] beacon_addr;
+wire        walker_req_eff;
+wire        walker_we_eff;
+wire [31:0] walker_addr_eff;
+wire [31:0] walker_wdat_eff;
 wire walker_sel_z3ram0;
 wire walker_sel_z3ram1;
 wire walker_sel_rtg;
@@ -384,8 +396,8 @@ ap040_tg68k_compat #(
 	.vbr_out(vbr_p),
 	.debug_busy(),
 	.debug_fault(),
-	.debug_halted(),
-	.debug_status()
+	.debug_halted(core_halted),
+	.debug_status(core_dbgstat)
 );
 
 assign cpu_req = (cpustate != 1); 
@@ -416,45 +428,118 @@ ap040_bus_timeout #(.COUNTER_BITS(BUS_TIMEOUT_BITS)) bus_timeout (
 	.berr(bus_berr)
 );
 
+//--------------------------------------------------------------------------//
+// Halt post-mortem beacon                                                  //
+//                                                                          //
+// fatal_halt (a fault taken while processing another fault -- a double     //
+// bus fault) clears mem_req and parks the core in S_HALT.  Because every   //
+// bus watchdog counts only while a request is ASSERTED, a halted core is   //
+// invisible to all of them: the machine simply goes silent, which is the   //
+// live NetBSD signature (all interrupts dead, zero memory movement, and    //
+// no exception frame ever stacked because the second fault is exactly what //
+// could not be stacked).                                                   //
+//                                                                          //
+// The core is halted, so the table-walker port is permanently idle and can //
+// be borrowed.  On the halt edge, write a post-mortem record to a fixed    //
+// physical address; the machine is already dead, so clobbering that memory //
+// costs nothing, and the record is readable afterwards over /dev/mem.      //
+// Layout at BEACON_ADDR: magic, PC, {IR,SR}, {state,fault}.                //
+//--------------------------------------------------------------------------//
+// hoisted: wire         core_halted;
+// hoisted: wire [255:0] core_dbgstat;
+localparam [31:0] BEACON_ADDR = 32'h4000_0000;   // Z3_1 base (ARM 0x30000000)
+
+// hoisted: reg         halted_d;
+// hoisted: reg         beacon_active;
+// hoisted: reg   [2:0] beacon_idx;
+// hoisted: reg         beacon_req;
+// hoisted: reg  [31:0] beacon_wdat;
+// hoisted: reg  [31:0] beacon_addr;
+
+always @(posedge clk) begin
+	if (!reset) begin
+		halted_d      <= 0;
+		beacon_active <= 0;
+		beacon_idx    <= 0;
+		beacon_req    <= 0;
+	end
+	else begin
+		halted_d <= core_halted;
+		if (core_halted && !halted_d) begin
+			beacon_active <= 1;
+			beacon_idx    <= 0;
+			beacon_req    <= 0;
+		end
+		else if (beacon_active) begin
+			if (!beacon_req) begin
+				case (beacon_idx)
+					3'd0: beacon_wdat <= 32'hA040_DEAD;
+					3'd1: beacon_wdat <= core_dbgstat[31:0];      // PC
+					3'd2: beacon_wdat <= {core_dbgstat[63:48],
+					                      core_dbgstat[47:32]};   // IR, SR
+					3'd3: beacon_wdat <= {16'd0,
+					                      core_dbgstat[239:232],
+					                      core_dbgstat[231:224]}; // flags,state
+					default: beacon_wdat <= 32'd0;
+				endcase
+				beacon_addr <= BEACON_ADDR + {27'd0, beacon_idx, 2'b00};
+				beacon_req  <= 1;
+			end
+			else if (walker_mem_ack) begin
+				beacon_req <= 0;
+				if (beacon_idx == 3'd3) beacon_active <= 0;
+				else beacon_idx <= beacon_idx + 3'd1;
+			end
+		end
+	end
+end
+
+// The beacon owns the walker port only while the core is halted, so it can
+// never contend with a live table walk.
+assign walker_req_eff = beacon_active ? beacon_req  : walker_req_p; 
+assign walker_we_eff = beacon_active ? 1'b1        : walker_we_p; 
+assign walker_addr_eff = beacon_active ? beacon_addr : walker_addr_p; 
+assign walker_wdat_eff = beacon_active ? beacon_wdat : walker_wdat_p; 
+
 // Translate the walker's physical address to the same SDRAM/DDR3 bank map
 // used by normal CPU traffic.  The MMU guarantees aligned longword accesses.
-assign walker_sel_z3ram0 = (walker_addr_p[31:27] == z3ram_base0) && z3ram_ena0; 
-assign walker_sel_z3ram1 = (walker_addr_p[31:28] == z3ram_base1) && z3ram_ena1; 
-wire walker_sel_z2ram  = !walker_addr_p[31:24] &&
-					 (walker_addr_p[23] ^ |walker_addr_p[22:21]) && z2ram_ena;
+assign walker_sel_z3ram0 = (walker_addr_eff[31:27] == z3ram_base0) && z3ram_ena0; 
+assign walker_sel_z3ram1 = (walker_addr_eff[31:28] == z3ram_base1) && z3ram_ena1; 
+wire walker_sel_z2ram  = !walker_addr_eff[31:24] &&
+					 (walker_addr_eff[23] ^ |walker_addr_eff[22:21]) && z2ram_ena;
 wire walker_sel_zram   = walker_sel_z3ram0 | walker_sel_z3ram1 |
 					 walker_sel_z2ram;
-wire walker_sel_dd     = (walker_addr_p[31:16] == 16'h00DD) &&
-					 (walker_addr_p[15:13] == 3'b010);
-assign walker_sel_rtg = (walker_addr_p[31:24] == 8'h02); 
-wire walker_kicklower  = !walker_addr_p[31:24] &&
-					 (walker_addr_p[23:18] == 6'b111110);
+wire walker_sel_dd     = (walker_addr_eff[31:16] == 16'h00DD) &&
+					 (walker_addr_eff[15:13] == 3'b010);
+assign walker_sel_rtg = (walker_addr_eff[31:24] == 8'h02); 
+wire walker_kicklower  = !walker_addr_eff[31:24] &&
+					 (walker_addr_eff[23:18] == 6'b111110);
 // hoisted: wire [28:1] walker_ramaddr;
 
 assign walker_ramaddr[28]    = walker_sel_zram & ~walker_sel_z3ram0;
 assign walker_ramaddr[27]    = walker_sel_zram &
-					      (~walker_sel_z3ram1 | walker_addr_p[27]);
+					      (~walker_sel_z3ram1 | walker_addr_eff[27]);
 assign walker_ramaddr[26:23] = (walker_sel_z3ram0 | walker_sel_z3ram1)
-					      ? walker_addr_p[26:23]
+					      ? walker_addr_eff[26:23]
 					      : (walker_sel_rtg ? 4'b1110 : {4{walker_sel_dd}});
-assign walker_ramaddr[22:19] = {4{walker_sel_dd}} | walker_addr_p[22:19];
+assign walker_ramaddr[22:19] = {4{walker_sel_dd}} | walker_addr_eff[22:19];
 assign walker_ramaddr[18]    = walker_sel_dd | (walker_kicklower & bootrom) |
-					      walker_addr_p[18];
-assign walker_ramaddr[17:16] = {2{walker_sel_dd}} | walker_addr_p[17:16];
-assign walker_ramaddr[15:1]  = walker_addr_p[15:1];
+					      walker_addr_eff[18];
+assign walker_ramaddr[17:16] = {2{walker_sel_dd}} | walker_addr_eff[17:16];
+assign walker_ramaddr[15:1]  = walker_addr_eff[15:1];
 
-assign walker_mem_req  = walker_req_p;
-assign walker_mem_we   = walker_we_p;
+assign walker_mem_req  = walker_req_eff;
+assign walker_mem_we   = walker_we_eff;
 assign walker_mem_addr = walker_ramaddr[28:2];
-assign walker_mem_wdat = walker_wdat_p;
+assign walker_mem_wdat = walker_wdat_eff;
 assign walker_mem_ddr  = |walker_ramaddr[28:26];
 // High physical addresses are valid only when they decode as configured Z3
 // RAM.  Misalignment indicates corrupt descriptor-table state.
 // Valid table memory is Z2/Z3 RAM, the DD and RTG apertures, and the low
 // 16M (which decodes as chip/slow/kick).  Anything else, or a misaligned
 // descriptor address, indicates corrupt translation-table state.
-assign walker_mem_bad  = (|walker_addr_p[1:0]) |
-					 ((|walker_addr_p[31:24]) &&
+assign walker_mem_bad  = (|walker_addr_eff[1:0]) |
+					 ((|walker_addr_eff[31:24]) &&
 					  !(walker_sel_zram | walker_sel_dd | walker_sel_rtg));
 
 assign cchip = turbochip_d & (!cpustate | dcache_d); 
