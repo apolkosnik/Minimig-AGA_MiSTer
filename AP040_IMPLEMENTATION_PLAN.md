@@ -1124,6 +1124,57 @@ the old FSM).
   Gate: >= 1 instruction/2 ce on reg-reg streams (t_integer chkl-free
   inner blocks), suite + corpus green.
 
+### X2.3a PREREQUISITE: de-fragilize the timing-dependent tests
+     [added 2026-08-20, found by attempting X2.3 step 1]
+
+X2.3 changes instruction timing by design.  Several t_exceptions tests
+are written against the CURRENT timing and fail when it moves -- and
+they fail for the BASELINE core too, which is how this was established
+rather than assumed: removing ONE nop from the withdrawal sweep breaks
+the unmodified core (test 142).  Any pipeline work will trip these
+before it can be judged on correctness, so they have to be made robust
+FIRST or every X2.3 step will land in a false failure.
+
+The fragile pattern is a fixed sweep hoping a coincidence lands inside
+it:
+  * test 142 sweeps an IPL delay 2..12 into a traced RTS and requires
+    at least one delay to land trace and interrupt together;
+  * test 143 does the same into a traced divide;
+  * the withdrawal sweep pads with a fixed number of nops;
+  * test 139 needs the fetch queue to run AHEAD during a DIVU so the
+    faulting fetch is SPECULATIVE (fault deferred and discarded).  If
+    the fetch instead becomes a DEMAND fetch it faults for real, which
+    is correct behavior and a test failure at the same time.
+
+Task: rewrite these to search a range derived at RUNTIME, or to assert
+the invariant directly rather than by hitting a cycle coincidence.  The
+architectural rules they exist to protect are already enforced
+independently by tb_ap040_program's always-on invariants (phantom
+interrupt, mask qualification, exception_prefetch/epf_pend), and those
+did NOT fire during the X2.3 experiment -- only the coincidence-hunting
+assertions did.
+
+### X2.3 step 1 measured (patch parked, NOT shipped)
+
+Both regfile read ports are independent and combinational, so a
+register source and a register destination can be read in ONE cycle
+instead of walking S_PIPE_SREG then S_PIPE_DST then S_PIPE_DREG.
+Measured with the $F108 stamp port:
+
+    add.l Dn,Dn     8.1 -> 6.1 cycles
+    move.l Dn,Dn    8.1 -> 6.1
+    addq.l #1,Dn    7.2 -> 6.2
+    nop             unchanged (no operand staging)
+
+  25% on the register-op class for a ~20 line change, and it is the
+  first concrete piece of the "collapse staging + add forwarding" item.
+  Parked in rtl/ap040/experimental/x23_step1_dualport_operand.v.txt
+  rather than shipped: it fails t_exceptions in the fragile region
+  above, and while the baseline fails there too under an equivalent
+  timing perturbation, that is NOT proof the CPU is still correct.  It
+  is only proof that the test cannot tell.  Ship it after X2.3a, with
+  the corpus and both differentials as the real gate.
+
 ## X2.4 Dual issue (68060-style pOEP/sOEP)
 
 Second ALU pipe fed by the same decoder; issue rules after the 68060:
