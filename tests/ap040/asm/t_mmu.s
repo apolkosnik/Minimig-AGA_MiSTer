@@ -809,6 +809,34 @@ u8dat:
 	chkl	d0,3,154		; exactly one write fault
 	clr.w	(wb_complete).l
 
+	; The same family, register side effects: a faulting (An)+ / -(An)
+	; store must restart with the ORIGINAL address register and leave
+	; exactly one increment behind -- NetBSD's copy loops fault like
+	; this on every fresh COW page.
+	move.l	#$0000E007,($441C).l	; write protect the page again
+	pflusha
+	lea	($E000).l,a0
+	move.l	#$0FEE1234,d1
+	move.l	d1,(a0)+		; write faults, handler unprotects
+	move.l	($E000).l,d0
+	chkl	d0,$0FEE1234,156	; landed at the original address
+	move.l	a0,d0
+	chkl	d0,$E004,157		; increment applied exactly once
+
+	move.l	#$0000E007,($441C).l
+	pflusha
+	lea	($E004).l,a0
+	move.l	#$0FEE5678,d1
+	move.l	d1,-(a0)		; predecrement flavour
+	move.l	($E000).l,d0
+	chkl	d0,$0FEE5678,158
+	move.l	a0,d0
+	chkl	d0,$E000,159
+	move.w	(cnt_aerr).l,d0
+	sub.w	d7,d0
+	and.l	#$FFFF,d0
+	chkl	d0,5,160		; the two extra write faults, once each
+
 	; leave translation off for the harness epilogue
 	moveq	#0,d0
 	movec	d0,tc
