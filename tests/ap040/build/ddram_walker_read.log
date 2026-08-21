@@ -1,0 +1,8 @@
+PHASE 5a: m1 only
+PHASE 5b: stutter only
+PHASE 5c: latency only
+PHASE 5d: stutter + m1
+PHASE 5e: latency + m1
+PHASE 5f: latency + stutter + m1
+ALL TESTS PASSED
+tb_ddram_walker_read.v:298: $finish called at 7215000 (1ps)

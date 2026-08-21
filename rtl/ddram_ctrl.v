@@ -282,7 +282,16 @@ always @ (posedge sysclk) begin
 						ddr_swap   <= ramshared;
 					end
 				end
-			1: if(~ram_busy & ram_dout_ready) begin
+			// Avalon read data is qualified by readdatavalid ALONE.
+			// waitrequest gates command acceptance and is independent: a
+			// pipelined slave may return this read's data while asserting
+			// waitrequest against the NEXT command.  Gating the data on
+			// ~ram_busy dropped the valid whenever the two coincided,
+			// hanging the fill (and the walker read below) -- the DDR3
+			// bridge does exactly this under contention, which is why
+			// NetBSD (page tables in DDR3, le0 adding traffic) froze in a
+			// table walk while AmigaOS, which never walks DDR3, did not.
+			1: if(ram_dout_ready) begin
 					ddr_data      <= ram_dout[{ba, 4'b0000} +:16];
 					dout          <= ram_dout;
 					cache_fill    <= 1;
@@ -341,7 +350,7 @@ always @ (posedge sysclk) begin
 					walker_ack <= 1;
 					state       <= 0;
 				end
-			14: if(~ram_busy & ram_dout_ready) begin
+			14: if(ram_dout_ready) begin
 					walker_rdata <= walker_addr_latch[2]
 						? {ram_dout[47:32], ram_dout[63:48]}
 						: {ram_dout[15:0], ram_dout[31:16]};

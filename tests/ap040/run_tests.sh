@@ -53,6 +53,10 @@ compile ddram_walker_snoop iverilog -g2012 -s tb_ddram_walker_snoop \
 	-o "$WORK/tb_ddram_walker_snoop.vvp" \
 	tb_ddram_walker_snoop.v ../../rtl/ddram_ctrl.v \
 	../../rtl/cpu_cache_new.v ../../rtl/A2065/a2065_ddram_arbiter.v sim_dpram.v &
+compile ddram_walker_read iverilog -g2012 -s tb_ddram_walker_read \
+	-o "$WORK/tb_ddram_walker_read.vvp" \
+	tb_ddram_walker_read.v ../../rtl/ddram_ctrl.v \
+	../../rtl/cpu_cache_new.v ../../rtl/A2065/a2065_ddram_arbiter.v sim_dpram.v &
 compile bus_timeout iverilog -g2012 -o "$WORK/tb_bus_timeout.vvp" \
 	tb_ap040_bus_timeout.v $RTL/ap040_bus_timeout.v &
 compile cart_hrtmon iverilog -g2012 -o "$WORK/tb_cart_hrtmon.vvp" \
@@ -130,6 +134,7 @@ leg walker_cdc         "$WORK/tb_walker_cdc.vvp" &
 leg bus16_gap          "$WORK/tb_bus16_gap.vvp" &
 leg cpu_cache_new      "$WORK/tb_cpu_cache_new.vvp" &
 leg ddram_walker_snoop "$WORK/tb_ddram_walker_snoop.vvp" &
+leg ddram_walker_read  "$WORK/tb_ddram_walker_read.vvp" &
 leg bus_timeout        "$WORK/tb_bus_timeout.vvp" &
 leg cart_hrtmon        "$WORK/tb_cart_hrtmon.vvp" &
 leg sdram32            "$WORK/tb_sdram32.vvp" &
