@@ -294,6 +294,20 @@ reg signed [17:0] e_w;        // working exponent (wrap safe)
 reg        pk_neg;
 reg  [1:0] pk_isz;            // 0 byte, 1 word, 2 long
 
+// A pending unimplemented state re-signals on the next FP instruction ONLY
+// when software put it there with FRESTORE.  That is the architectural
+// re-entry mechanism: the FPSP restores a frame and the next FP dispatch
+// hands control back to it.  A state left by our OWN trap must NOT
+// re-signal: on a 68040 the unimplemented instruction simply did not
+// execute, and the following FP instruction runs normally (WinUAE never
+// consults fpu_exp_state at dispatch -- it is written by the exception and
+// read only by FSAVE/FRESTORE).  Re-signalling there traps every later FP
+// instruction until an FSAVE that a handler is not required to perform;
+// worse, the FPSP's own emulation uses FP instructions, so the retrap
+// nests until the stack faults during exception processing -- a double
+// fault, which halts the core silently.
+reg        fstate_resig;
+
 // hardware subset at this stage: move/abs/neg/tst/cmp families
 function op_in_hw;
 	input [6:0] op;
@@ -456,6 +470,7 @@ task capture_unimp;
 		fstate_wbte15 <= 0;
 		fstate_busy  <= 0;
 		fstate_unimp <= 1;
+		fstate_resig <= 0;   // our own trap: the next FP instruction runs
 		fpu_used     <= 1;
 		unimp        <= 1;
 	end
@@ -470,6 +485,7 @@ always @(posedge clk) begin
 		fpcr <= 0; fpsr <= 0; fpiar <= 0;
 		fpu_used <= 0;
 		fstate_unimp <= 0;
+		fstate_resig <= 0;
 		fstate_cmd1 <= 0; fstate_cmd3 <= 0;
 		fstate_stag <= 0; fstate_dtag <= 0; fstate_flags <= 0;
 		fstate_fpt <= 0; fstate_et <= 0;
@@ -591,14 +607,19 @@ always @(posedge clk) begin
 				fr_m[k] <= 64'hFFFF_FFFF_FFFF_FFFF;
 			end
 		end
-		if (fsave_ack) fstate_unimp <= 0;
+		if (fsave_ack) begin
+			fstate_unimp <= 0;
+			fstate_resig <= 0;
+		end
 		if (frestore_idle) begin
 			fpu_used <= 1;
 			fstate_unimp <= 0;
+			fstate_resig <= 0;
 		end
 		if (frestore_unimp) begin
 			fpu_used <= 1;
 			fstate_unimp <= 1;
+			fstate_resig <= 1;   // software asked to be re-entered
 			fstate_cmd1 <= frestore_cmd1;
 			fstate_cmd3 <= frestore_cmd3;
 			fstate_stag <= frestore_stag;
@@ -623,7 +644,7 @@ always @(posedge clk) begin
 
 		case (fst)
 			F_IDLE: if (req) begin
-				if (fstate_unimp && !fstate_e1) begin
+				if (fstate_unimp && !fstate_e1 && fstate_resig) begin
 					// A restored exception frame remains pending until FSAVE.
 					// Re-enter the software package without destroying its state.
 					unimp <= 1;
@@ -635,6 +656,7 @@ always @(posedge clk) begin
 				// whose enables were cleared before the restore
 				fstate_e1 <= 0;
 				fstate_unimp <= 0;
+				fstate_resig <= 0;
 				fstate_busy <= 0;
 				// FPSR exception status is per instruction.  The accrued
 				// exception byte is intentionally retained until software
