@@ -84,7 +84,8 @@ module ap040_tg68k_compat
 	output        debug_busy,
 	output        debug_fault,
 	output        debug_halted,
-	output [255:0] debug_status
+	output [255:0] debug_status,
+	output [127:0] debug_status2
 );
 
 // core to MMU
@@ -208,7 +209,8 @@ ap040_core #(
 	.debug_busy(debug_busy),
 	.debug_fault(debug_fault),
 	.debug_halted(debug_halted),
-	.debug_status(debug_status)
+	.debug_status(debug_status),
+	.debug_status2(debug_status2)
 );
 
 ap040_mmu mmu (

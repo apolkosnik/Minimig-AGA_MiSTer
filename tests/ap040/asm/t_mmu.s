@@ -851,6 +851,71 @@ u8dat:
 	and.l	#$FFFF,d0
 	chkl	d0,5,160		; the two extra write faults, once each
 
+;----- A7 rollback must not corrupt the supervisor stack (168/169/170)
+; The killer NetBSD bug, captured live: libc's __cerror ends with
+;   MOVE.L (A7)+,(A0)     ; store the error value through the errno pointer
+; run in USER mode.  When the (A0) write faults -- routine demand paging --
+; the 68040 restart model rolls the A7 post-increment back.  A7 is a
+; SHADOWED register: writes land in USP, ISP or MSP according to S/M.  If
+; the rollback runs after exception entry has set S, the USER stack value
+; is written into the SUPERVISOR pointer; the frame is then stacked in
+; user space, that write faults too, and the fault-during-exception halts
+; the core.  Hardware beacon at the halt: A7=1dfff9b8 (a user stack) in
+; supervisor mode, IR=209f, PC in __cerror.
+; Here: user code runs exactly that instruction with a non-resident
+; destination.  The handler maps the page and returns.  On a broken core
+; the supervisor stack pointer is destroyed and the machine dies inside
+; exception processing; on a correct one the ISP is untouched, the store
+; completes on restart, and A7 (USP) advances exactly one longword.
+	move.l	#$4800,d0		; user root -> pointer -> page table
+	movec	d0,urp			; (the 154-160 block left URP elsewhere)
+	move.l	#$0000A003,($4C14).l	; user code page identity
+	move.l	#$00008003,($4C10).l	; user data page VA $8000 resident
+	pflusha
+	; user code at PA $B000:  move.l (a7)+,(a0) ; trap #1
+	move.w	#$209F,($B000).l
+	move.w	#$4E41,($B002).l	; trap #1
+	cpusha	bc
+	cinva	ic
+	; user stack at VA $8100 holding the value to store
+	move.l	#$C0DE1234,($8100).l
+	move.l	#0,($4C18).l		; USER entry 6 (VA $C000) NOT resident
+	pflusha
+	move.l	#1,(expect_tm).l	; user data write
+	move.l	#$C000,(expect_fa).l
+	move.l	#$4C18,(fix_addr).l
+	move.l	#$0000C003,(fix_val).l
+	move.w	(cnt_aerr).l,d6
+	movec	isp,d4			; the supervisor stack, before
+	move.l	#u7done,(uret).l
+	move.l	#$8100,d0
+	movec	d0,usp			; USP = the user stack
+	lea	($C000).l,a0		; destination: the non-resident page
+	move.w	#$0000,-(sp)
+	pea	($B000).l
+	move.w	#$0000,-(sp)
+	rte				; to user: MOVE.L (A7)+,(A0)
+
+u7done:
+	movec	isp,d0
+	cmp.l	d4,d0
+	beq.s	u7isp
+	failt	168			; ISP corrupted by the A7 rollback
+u7isp:
+	movec	usp,d0
+	chkl	d0,$8104,169		; USP advanced exactly one longword
+	move.l	($C000).l,d0		; the restarted store landed
+	chkl	d0,$C0DE1234,170
+	move.w	(cnt_aerr).l,d0
+	sub.w	d6,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,171		; exactly one fault
+	move.l	#$0000C003,($4C18).l
+	move.l	#$4400,d0		; hand URP back as the block found it
+	movec	d0,urp
+	pflusha
+
+
 ;---------------- interrupt-vs-MMU-operation interleave sweeps (161-164)
 ; The live NetBSD freeze happened inside pmap_enter -- PTE rewrite,
 ; PFLUSH, fresh table walks -- with a VBL interrupt nested in the same

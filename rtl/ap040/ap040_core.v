@@ -93,7 +93,13 @@ module ap040_core
 	output            debug_busy,
 	output            debug_fault,
 	output            debug_halted,
-	output    [255:0] debug_status
+	output    [255:0] debug_status,
+	// Second debug bus, for the halt post-mortem beacon: the stack
+	// registers and the faulting address.  A double fault taken while
+	// stacking an exception frame is only explicable with these -- the
+	// active A7 alone cannot say whether the stack switch failed or the
+	// supervisor stack pointer was already wrong.
+	output    [127:0] debug_status2
 );
 
 //---------------------------------------------------------------------------
@@ -2667,10 +2673,20 @@ always @(posedge clk) begin
 			//------------------------------------------------------ exceptions
 			//------------------------------------- access error (format $7)
 			S_AERR0: begin
+				// The address-register rollback below must run BEFORE the S
+				// bit changes the stack selection.  A7 is a shadowed
+				// register -- writes reach USP, ISP or MSP according to
+				// S/M -- so undoing an A7 update from a USER-mode
+				// instruction after setting S restores the user value into
+				// the SUPERVISOR pointer.  The frame is then stacked in
+				// user space, that write faults, and the fault-during-
+				// exception halts the core: the silent NetBSD freeze,
+				// captured on hardware as A7=1dfff9b8 (a user stack) in
+				// supervisor mode with IR=209f (MOVE.L (A7)+,(A0), libc's
+				// __cerror storing through the errno pointer).  Roll back
+				// first, in the faulting instruction's own context, and
+				// only then enter the exception.
 				sr_saved <= sr;
-				sr[13] <= 1;
-				sr[15:14] <= 2'b00;
-				in_exc <= 1;
 				aer_idx <= 0;
 				state <= S_AERR_U;
 			end
@@ -2686,7 +2702,13 @@ always @(posedge clk) begin
 					rfw(u0_reg, u0_old);
 					u0_v <= 0;
 				end
-				else state <= S_AERR_SP;
+				else begin
+					// rollback complete: now switch to supervisor state
+					sr[13] <= 1;
+					sr[15:14] <= 2'b00;
+					in_exc <= 1;
+					state <= S_AERR_SP;
+				end
 			end
 
 			S_AERR_SP: begin
@@ -6075,6 +6097,13 @@ end
 assign debug_busy   = mem_req;
 assign debug_fault  = fault_r;
 assign debug_halted = (state == S_HALT);
+
+assign debug_status2 = {
+	aer_fa,                      // [127:96] address whose access faulted
+	usp_q,                       // [95:64]
+	isp_q,                       // [63:32]
+	16'd0, exc_vec, 5'd0, in_exc, fault_r, 1'b0   // [31:0]
+};
 
 assign debug_status = {
 	16'hA040,                    // [255:240] magic

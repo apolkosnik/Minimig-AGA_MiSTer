@@ -316,7 +316,8 @@ ap040_tg68k_compat #(
 	.debug_busy(),
 	.debug_fault(),
 	.debug_halted(core_halted),
-	.debug_status(core_dbgstat)
+	.debug_status(core_dbgstat),
+	.debug_status2(core_dbgstat2)
 );
 
 wire cpu_req = (cpustate != 1);
@@ -366,11 +367,12 @@ ap040_bus_timeout #(.COUNTER_BITS(BUS_TIMEOUT_BITS)) bus_timeout (
 //--------------------------------------------------------------------------//
 wire         core_halted;
 wire [255:0] core_dbgstat;
+wire [127:0] core_dbgstat2;
 localparam [31:0] BEACON_ADDR = 32'h4000_0000;   // Z3_1 base (ARM 0x30000000)
 
 reg         halted_d;
 reg         beacon_active;
-reg   [2:0] beacon_idx;
+reg   [3:0] beacon_idx;
 reg         beacon_req;
 reg  [31:0] beacon_wdat;
 reg  [31:0] beacon_addr;
@@ -392,30 +394,37 @@ always @(posedge clk) begin
 		else if (beacon_active) begin
 			if (!beacon_req) begin
 				case (beacon_idx)
-					3'd0: beacon_wdat <= 32'hA040_DEAD;
-					3'd1: beacon_wdat <= core_dbgstat[31:0];      // PC
-					3'd2: beacon_wdat <= {core_dbgstat[63:48],
+					4'd0: beacon_wdat <= 32'hA040_DEAD;
+					4'd1: beacon_wdat <= core_dbgstat[31:0];      // PC
+					4'd2: beacon_wdat <= {core_dbgstat[63:48],
 					                      core_dbgstat[47:32]};   // IR, SR
-					3'd3: beacon_wdat <= {16'd0,
+					4'd3: beacon_wdat <= {16'd0,
 					                      core_dbgstat[239:232],
 					                      core_dbgstat[231:224]}; // flags,state
 					// A7 identifies the stack the frame was being written
 					// to when the second fault hit -- the single most
 					// diagnostic value for a double fault taken during
 					// exception stacking.
-					3'd4: beacon_wdat <= core_dbgstat[95:64];     // A7
-					3'd5: beacon_wdat <= core_dbgstat[223:192];   // A0
-					3'd6: beacon_wdat <= core_dbgstat[127:96];    // D0
-					3'd7: beacon_wdat <= core_dbgstat[159:128];   // D1
+					4'd4: beacon_wdat <= core_dbgstat[95:64];     // A7
+					4'd5: beacon_wdat <= core_dbgstat[223:192];   // A0
+					4'd6: beacon_wdat <= core_dbgstat[127:96];    // D0
+					4'd7: beacon_wdat <= core_dbgstat[159:128];   // D1
+					// stack registers and the faulting address: these
+					// separate "the stack switch failed" from "the
+					// supervisor stack pointer was already wrong"
+					4'd8:  beacon_wdat <= core_dbgstat2[127:96];  // fault addr
+					4'd9:  beacon_wdat <= core_dbgstat2[95:64];   // USP
+					4'd10: beacon_wdat <= core_dbgstat2[63:32];   // ISP
+					4'd11: beacon_wdat <= core_dbgstat2[31:0];    // vec/flags
 					default: beacon_wdat <= 32'd0;
 				endcase
-				beacon_addr <= BEACON_ADDR + {27'd0, beacon_idx, 2'b00};
+				beacon_addr <= BEACON_ADDR + {26'd0, beacon_idx, 2'b00};
 				beacon_req  <= 1;
 			end
 			else if (walker_mem_ack) begin
 				beacon_req <= 0;
-				if (beacon_idx == 3'd7) beacon_active <= 0;
-				else beacon_idx <= beacon_idx + 3'd1;
+				if (beacon_idx == 4'd11) beacon_active <= 0;
+				else beacon_idx <= beacon_idx + 4'd1;
 			end
 		end
 	end
