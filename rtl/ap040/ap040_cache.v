@@ -286,6 +286,18 @@ wire fill_active = (cst == C_FILL);
 // request would be re-accepted on the very next cycle and re-issued to
 // the address that just faulted.
 reg  err_hold;
+// A cache-inhibited READ that hits a resident line must invalidate it
+// while it bypasses (WinUAE dcache040: a hit under CACHE_DISABLE_MMU is
+// pushed and invalidated before the uncached access; the icache path
+// invalidates likewise).  Leaving the line valid let stale data hit
+// again when the mapping turned cacheable.  Stores need nothing extra:
+// every accepted store already clears its row (store_inv).  The
+// invalidate is recorded here and served through port B whenever the
+// port is free; new cacheable reads are held off until it lands, so the
+// stale line cannot be re-hit in the window.
+reg        pass_ci_chk;   // first C_PASS cycle of a CI read: tags valid
+reg        ci_inv_pend;   // a CI hit awaits its row invalidate
+reg  [6:0] ci_inv_row;
 
 assign m_req   = fill_active ? 1'b1 : (pass_active ? c_req : 1'b0);
 assign m_write = fill_active ? 1'b0 : c_write;
@@ -299,7 +311,7 @@ assign c_ack   = pass_active ? m_ack : ack_r;
 assign c_rdata = pass_active ? m_rdata : rdata_r;
 
 assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
-                   c_req && !ack_r && !c_write && !bypass;
+                   c_req && !ack_r && !c_write && !bypass && !ci_inv_pend;
 
 assign tag_ridx  = a_row;
 wire [87:0] tags_next = (r_way == 2'd0) ? {tag_q[87:22], r_tag} :
@@ -342,11 +354,17 @@ wire snoop_wr  = s_stb && !((cst == C_SWEEP) && sweep_hit &&
 // writes a constant zero and so cannot race the live tag read the way a
 // port A read-modify-write would.  Over-invalidation is correctness-safe.
 wire fill_err_inv = (cst == C_FERR) && !snoop_wr;
+// lowest priority: the zero-row write is idempotent, so waiting is safe
+wire ci_inv = ci_inv_pend && !snoop_wr && !store_inv && !store_inv_lost &&
+              !fill_err_inv;
 
-assign inv_we   = snoop_wr || store_inv || store_inv_lost || fill_err_inv;
-assign inv_wren = snoop_wr | (ce & (store_inv | store_inv_lost | fill_err_inv));
+assign inv_we   = snoop_wr || store_inv || store_inv_lost || fill_err_inv ||
+                  ci_inv;
+assign inv_wren = snoop_wr | (ce & (store_inv | store_inv_lost | fill_err_inv |
+                                    ci_inv));
 assign inv_idx  = snoop_wr        ? {1'b0, s_addr[9:4]} :
                   fill_err_inv    ? r_row :   // the fill's own bank and row
+                  ci_inv          ? ci_inv_row :
                   store_inv_lost ? {1'b0, store_inv_set} :
                   (cst == C_IDLE) ? {1'b0, c_addr[9:4]} : {1'b0, winv_set2};
 assign cd_rd_en  = rd_accept;                       // issued with the tag read
@@ -373,6 +391,9 @@ always @(posedge clk) begin
 		winv_pend <= 0;
 		winv_set2 <= 0;
 		err_hold <= 0;
+		pass_ci_chk <= 0;
+		ci_inv_pend <= 0;
+		ci_inv_row <= 0;
 		store_inv_lost <= 0;
 		store_inv_set <= 0;
 		cinv_done <= 0;
@@ -383,6 +404,7 @@ always @(posedge clk) begin
 	else if (ce) begin
 		ack_r <= 0;
 		cinv_done <= 0;
+		if (ci_inv) ci_inv_pend <= 0;
 
 		// A snoop displaced a store's first-set invalidate in its
 		// acceptance cycle: remember it and issue it as soon as port B
@@ -426,7 +448,15 @@ always @(posedge clk) begin
 						cst <= C_PASS;
 						end
 					end
-					else if (bypass) cst <= C_PASS;
+					else if (bypass) begin
+						// the tag row read runs in parallel here too, so
+						// a cache-inhibited read can detect and kill a
+						// resident line while it bypasses
+						r_row <= a_row;
+						r_tag <= a_tag;
+						pass_ci_chk <= c_nocache && !c_write;
+						cst <= C_PASS;
+					end
 					else begin
 						// cacheable read: the tag row read runs in parallel
 						r_row <= a_row;
@@ -446,6 +476,13 @@ always @(posedge clk) begin
 				// served it; a snoop or a recorded first-set replay owns
 				// the port this cycle and winv stays pending
 				if (!s_stb && !store_inv_lost) winv_pend <= 0;
+				if (pass_ci_chk) begin
+					pass_ci_chk <= 0;
+					if (look_hit) begin
+						ci_inv_pend <= 1;
+						ci_inv_row  <= r_row;
+					end
+				end
 				if (m_err) begin
 					// a passed access faulted: release the bus, but a
 					// still-owed invalidate is honoured (invalidating

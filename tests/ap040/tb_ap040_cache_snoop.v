@@ -440,6 +440,22 @@ initial begin
 	expect_read(32'h0000_8C00, mem[32'h8C00>>2], 6);
 	expect_read(32'h0000_8C04, mem[32'h8C04>>2], 6);
 
+	//------------------------------------------------------------------
+	// T7: a cache-inhibited read that HITS a resident line must
+	// invalidate it as it bypasses (WinUAE dcache040: hit under
+	// CACHE_DISABLE_MMU -> push+invalidate, then the uncached access).
+	// Retaining the line let PRE-DMA data hit again once the mapping
+	// turned cacheable -- the value below comes back A instead of C on
+	// the old cache, with no bus request.
+	//------------------------------------------------------------------
+	expect_read(32'h0000_A000, mem[32'hA000>>2], 7);  // prime: value A
+	mem[32'hA000>>2] = 32'hD11A_0002;                 // DMA writes B
+	c_nocache = 1;
+	expect_read(32'h0000_A000, 32'hD11A_0002, 7);     // CI read: memory B,
+	c_nocache = 0;                                    // and the line dies
+	mem[32'hA000>>2] = 32'hD11A_0003;                 // DMA writes C
+	expect_read(32'h0000_A000, 32'hD11A_0003, 7);     // must MISS: value C
+
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else $display("TEST FAILED with %0d errors", errors);
 	$finish;
