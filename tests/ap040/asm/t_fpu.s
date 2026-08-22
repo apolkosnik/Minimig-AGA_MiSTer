@@ -492,6 +492,39 @@ unimp_pd_ok:
 	fmovecr	#0,fp1		; constant ROM: also not hardware
 	chkcnt	cnt_fpunimp,3,44
 
+; Consecutive transcendentals on DIFFERENT registers.  Hardware reported an
+; exception on the SECOND of a back-to-back FSIN.X pair (HRTmon caught it at
+; the FSIN.X FP1 following an FSIN.X FP0), the same "first one works, the
+; next one traps" shape as the unimplemented-state re-signal bug.  Each must
+; take its own vector-11 trap and leave a frame naming ITS destination
+; register: CMDREG1B carries the register field, so a stale frame from the
+; previous instruction shows up here.
+	fmove.l	#7,fp0
+	fmove.l	#9,fp1
+	fmove.l	#11,fp2
+	move.l	#$202C,(exp_fmt).l
+	move.w	(cnt_fpunimp).l,d5
+	move.w	#1,(save_unimp).l
+	dc.w	$F200,$000E	; fsin.x fp0
+	move.l	(unimp_frame+$10).l,d0
+	chkl	d0,$000E0000,189	; CMDREG1B: opclass 0, src X, dst FP0
+	move.w	#1,(save_unimp).l
+	dc.w	$F200,$048E	; fsin.x fp1  (src FP1, dst FP1)
+	move.l	(unimp_frame+$10).l,d0
+	chkl	d0,$048E0000,190	; ...dst FP1, not a stale FP0 frame
+	move.w	#1,(save_unimp).l
+	dc.w	$F200,$090E	; fsin.x fp2  (src FP2, dst FP2)
+	move.l	(unimp_frame+$10).l,d0
+	chkl	d0,$090E0000,191	; ...dst FP2
+	move.w	(cnt_fpunimp).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,3,192		; exactly three traps, one per instruction
+	; cnt_fpunimp is a RUNNING total that later tests assert exact values
+	; of, so hand it back unchanged (the same idiom the FSIN test above
+	; uses for cnt_fpunsup).
+	sub.w	#3,(cnt_fpunimp).l
+
 ;-------------------------------------------------- arithmetic (stage H3)
 	fmove.l	#123,fp0
 	fmove.l	#456,fp1

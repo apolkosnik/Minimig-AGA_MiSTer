@@ -1,9 +1,9 @@
 tb_ap040_program: running build/t_fpu.hex
 WARNING: tb_ap040_program.v:774: $readmemh(build/t_fpu.hex): Not enough words in the file for the requested range [0:32767].
-phase 0 passed (154040 cycles)
+phase 0 passed (155940 cycles)
 WARNING: tb_ap040_program.v:774: $readmemh(build/t_fpu.hex): Not enough words in the file for the requested range [0:32767].
-phase 1 passed (208036 cycles)
+phase 1 passed (210718 cycles)
 WARNING: tb_ap040_program.v:774: $readmemh(build/t_fpu.hex): Not enough words in the file for the requested range [0:32767].
-phase 2 passed (208036 cycles)
+phase 2 passed (210718 cycles)
 ALL TESTS PASSED
-tb_ap040_program.v:818: $finish called at 5701415000 (1ps)
+tb_ap040_program.v:818: $finish called at 5774055000 (1ps)
