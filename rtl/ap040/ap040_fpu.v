@@ -663,7 +663,24 @@ always @(posedge clk) begin
 		if (frestore_unimp) begin
 			fpu_used <= 1;
 			fstate_unimp <= 1;
-			fstate_resig <= 1;   // software asked to be re-entered
+			// A restored frame must NOT re-signal the unimplemented trap.
+			// This used to set fstate_resig, on the reading that FRESTORE
+			// is how the FPSP asks to be re-entered.  It is not, and the
+			// cost was severe: any handler that FSAVEs and FRESTOREs an
+			// UNIMP frame -- which is what a debugger or a partial FPSP
+			// does -- made the NEXT FP instruction take Line-F, even a
+			// hardware opcode the FPU executes directly.  Seen on
+			// hardware as $202C on FMUL.L immediately after an
+			// FTWOTOX.X trap, and reproduced in t_fpu 197.
+			//
+			// WinUAE is unambiguous: fpu_exp_state is written by the
+			// exception and read only by FSAVE/FRESTORE, never at
+			// dispatch.  What FRESTORE can re-arm is fp_exp_pend, and
+			// that holds an ARITHMETIC vector (50 DZ, 51 UNFL, 52 OPERR,
+			// 53 OVFL, 54 SNAN) delivered as itself -- never vector 11.
+			// AP040 already models that separately through fstate_e1 and
+			// frestore_e1_pend below, so nothing is lost here.
+			fstate_resig <= 0;
 			fstate_cmd1 <= frestore_cmd1;
 			fstate_cmd3 <= frestore_cmd3;
 			fstate_stag <= frestore_stag;

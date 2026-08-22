@@ -13,6 +13,8 @@ IPLDLY		equ	$F148
 IPLCAP		equ	$F160
 cnt_int2	equ	$360C
 cnt_fpunimp	equ	$3600
+nosave_unimp	equ	$3904	; handler skips FSAVE (models HRTmon)
+restore_unimp	equ	$3908	; handler FSAVEs then FRESTOREs the frame
 cnt_fpdz	equ	$3602
 cnt_fpsnan	equ	$3604
 cnt_fpbsun	equ	$3606
@@ -524,6 +526,70 @@ unimp_pd_ok:
 	; of, so hand it back unchanged (the same idiom the FSIN test above
 	; uses for cnt_fpunsup).
 	sub.w	#3,(cnt_fpunimp).l
+
+; A vector-11 trap whose handler does NOT acknowledge the frame must not
+; leave the FPU re-signalling on the next VALID instruction.  Hardware
+; showed exactly that: an FSIN.X trapped to HRTmon (which has no FPSP and
+; does not FSAVE), and a later FMUL.L -- a hardware opcode the 68040
+; executes directly -- came back as another $202C Line-F.  Only a frame
+; placed by FRESTORE may re-signal; a trap the core raised itself must
+; not.  This is the shape of the bug fixed in dbf6ad78, re-pinned here
+; with the field's own instruction pair.
+	move.w	(cnt_fpunimp).l,d5
+	move.w	#1,(nosave_unimp).l
+	fmove.l	#7,fp0
+	dc.w	$F200,$000E	; fsin.x fp0: traps, handler does NOT FSAVE
+	fmove.l	#3,fp1
+	dc.w	$F23C,$4023	; fmul.l #$20AB,fp0 -- HARDWARE op, must execute
+	dc.l	$000020AB
+	clr.w	(nosave_unimp).l
+	move.w	(cnt_fpunimp).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,193		; ONE trap: the FSIN only, not the FMUL
+	fmove.l	fp0,d0
+	chkl	d0,$0000E4AD,194	; and the FMUL actually multiplied (7*$20AB)
+	sub.w	#1,(cnt_fpunimp).l
+
+; The field case used FTWOTOX.X, not FSIN.X, immediately before the FMUL.
+; Both are unimplemented transcendentals but they are different opmodes
+; ($11 vs $0E), so pin the reported pair exactly rather than a relative.
+	move.w	(cnt_fpunimp).l,d5
+	move.w	#1,(nosave_unimp).l
+	fmove.l	#7,fp0
+	dc.w	$F200,$0011	; ftwotox.x fp0: traps, handler does NOT FSAVE
+	dc.w	$F23C,$4023	; fmul.l #$20AB,fp0 -- HARDWARE op, must execute
+	dc.l	$000020AB
+	clr.w	(nosave_unimp).l
+	move.w	(cnt_fpunimp).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,195		; ONE trap: the FTWOTOX only
+	fmove.l	fp0,d0
+	chkl	d0,$0000E4AD,196	; the FMUL executed after it
+	sub.w	#1,(cnt_fpunimp).l
+
+; THE FIELD CASE.  Same pair, but the handler FSAVEs and FRESTOREs the
+; frame -- what a debugger or a partial FPSP does.  A restored frame must
+; not re-signal the unimplemented trap: hardware showed $202C Line-F on
+; the FMUL.L, a hardware opcode the FPU executes directly, immediately
+; after an FTWOTOX.X trap whose handler had restored the frame.
+; WinUAE reads fpu_exp_state only in FSAVE/FRESTORE, never at dispatch;
+; what FRESTORE re-arms is an ARITHMETIC vector, never vector 11.
+	move.w	(cnt_fpunimp).l,d5
+	move.w	#1,(restore_unimp).l
+	fmove.l	#7,fp0
+	dc.w	$F200,$0011	; ftwotox.x fp0: traps, handler FSAVE+FRESTORE
+	dc.w	$F23C,$4023	; fmul.l #$20AB,fp0 -- must EXECUTE, not re-trap
+	dc.l	$000020AB
+	clr.w	(restore_unimp).l
+	move.w	(cnt_fpunimp).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,197		; ONE trap: the restored frame did not re-signal
+	fmove.l	fp0,d0
+	chkl	d0,$0000E4AD,198	; and the FMUL produced 7*$20AB
+	sub.w	#1,(cnt_fpunimp).l
 
 ;-------------------------------------------------- arithmetic (stage H3)
 	fmove.l	#123,fp0
@@ -1201,7 +1267,13 @@ h_fpunimp:
 	; A real FPSP handler must acknowledge every pending UNIMP state before
 	; it can safely use the FPU again.  Save all format-$2 cases; save_unimp
 	; merely marks the one whose complete payload is checked above.
+	tst.w	(nosave_unimp).l
+	bne.s	h_fpunimp_nosave
 	fsave	(unimp_frame).l
+	tst.w	(restore_unimp).l
+	beq.s	h_fpunimp_nosave
+	frestore (unimp_frame).l	; hand the frame back, FPSP-style
+h_fpunimp_nosave:
 	clr.w	(save_unimp).l
 	addq.w	#1,(cnt_fpunimp).l
 	rte			; format $2 frame resumes after the FP op
