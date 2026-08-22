@@ -1,5 +1,5 @@
 tb_cpu_wrapper_chip: running build/t_mmu.hex over the 7MHz chip bus
 WARNING: tb_cpu_wrapper_chip.v:257: $readmemh(build/t_mmu.hex): Not enough words in the file for the requested range [0:32767].
-chip-bus run passed (2905657 cycles)
+chip-bus run passed (2915161 cycles)
 ALL TESTS PASSED
-tb_cpu_wrapper_chip.v:285: $finish called at 116228235 (1ns)
+tb_cpu_wrapper_chip.v:285: $finish called at 116608395 (1ns)
