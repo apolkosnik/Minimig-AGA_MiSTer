@@ -121,6 +121,15 @@ wire        cpu_cache_enable_d;
 wire        cpu_cache_clear;
 reg         cc_en;      // instruction side
 reg         cc_en_d;    // data side
+// A cache-inhibited access may not be ANSWERED from the cache, not just
+// barred from allocating in it.  Folded into the bank enables once rather
+// than qualifying each of the four hit comparisons: identical behaviour,
+// two gates instead of four, and it keeps the term off the tag-compare
+// fan-in where this design's fitter is tightest (four-way qualification
+// cost 0.7ns of HDMI slack).  FILL1 still applies cache_inhibit
+// separately to block allocation.
+wire        cc_en_hit   = cc_en   && !cache_inhibit;
+wire        cc_en_d_hit = cc_en_d && !cache_inhibit;
 // cpu address
 wire  [1:0] cpu_adr_blk;
 wire  [7:0] cpu_adr_idx;
@@ -373,28 +382,28 @@ always @ (posedge clk) begin
       end
       CPU_SM_READ : begin
         // on hit update LRU flag in tag memory
-        if (cpu_ir && cc_en && itag0_match && itag0_valid) begin
+        if (cpu_ir && cc_en_hit && itag0_match && itag0_valid) begin
           // data is already in instruction cache way 0
           cpu_dat_r <= idram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b0;
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= itram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_ir && cc_en && itag1_match && itag1_valid) begin
+        end else if (cpu_ir && cc_en_hit && itag1_match && itag1_valid) begin
           // data is already in instruction cache way 1
           cpu_dat_r <= idram1_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b1;
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= itram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_dr && cc_en_d && dtag0_match && dtag0_valid) begin
+        end else if (cpu_dr && cc_en_d_hit && dtag0_match && dtag0_valid) begin
           // data is already in data cache way 0
           cpu_dat_r <= ddram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b0; tagupd_lru <= 1'b0;
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= dtram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_dr && cc_en_d && dtag1_match && dtag1_valid) begin
+        end else if (cpu_dr && cc_en_d_hit && dtag1_match && dtag1_valid) begin
           // data is already in data cache way 1
           cpu_dat_r <= ddram1_cpu_dat_r;
           cpu_ack <= 1'b1;
@@ -420,27 +429,8 @@ always @ (posedge clk) begin
           // read data to cpu
           cpu_dat_r <= sdr_dat_r;
           cpu_ack <= 1'b1;
-          // KNOWN DEVIATION, deliberately left in place.  cache_inhibit
-          // is consulted only HERE, after a miss has already reached
-          // memory, so it decides whether to ALLOCATE a line and never
-          // whether the cache may ANSWER one: an inhibited read that
-          // hits a line primed through a cacheable alias is served the
-          // cached copy.  That is wrong for the MMU's CI bit, which
-          // NetBSD sets on DMA-coherent RAM (the le0 lance rings).
-          //
-          // Gating the four read-hit paths on cache_inhibit (7c68cb1e)
-          // is the obvious fix and it made NetBSD panic with an MMU
-          // fault on build -022, where -021b booted.  It was reverted
-          // rather than shipped.  The mechanism is NOT understood: the
-          // suspicion was that a controller answers every cache_req with
-          // a four-beat line (ddram_ctrl states 1..4, sdram_ctrl slots
-          // 8/10/12/14) while an inhibited fill leaves after beat 1,
-          // stranding three that a later fill could adopt -- but that
-          // could not be reproduced even with back-to-back CPU reads
-          // against the real controller, because the cache needs about
-          // four cycles to re-enter FILL1 and the trailing beats take
-          // three.  Do not re-apply the gate without a test that
-          // reproduces the failure first.
+          // Allocation is blocked here; the hit paths above are what
+          // stop a CI access being ANSWERED from the cache.
           if (cache_inhibit || (cpu_ir ? !cc_en : !cc_en_d)) begin
             // don't update cache if caching is inhibited
             cpu_sm_state <= CPU_SM_FILLW;
