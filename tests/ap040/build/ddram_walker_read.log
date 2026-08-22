@@ -12,5 +12,6 @@ PHASE 12: lost CPU fill recovers by retry
 PHASE 13: lost a2065 read, CPU unaffected
 PHASE 14: permanent write backpressure
 PHASE 10: wedged slave -> watchdog berr, then recovery
+PHASE 15: late beat in the timeout-epoch skew window
 ALL TESTS PASSED
-tb_ddram_walker_read.v:587: $finish called at 2648820000 (1ps)
+tb_ddram_walker_read.v:696: $finish called at 3306820000 (1ps)
