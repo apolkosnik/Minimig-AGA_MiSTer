@@ -121,6 +121,13 @@ wire        cpu_cache_enable_d;
 wire        cpu_cache_clear;
 reg         cc_en;      // instruction side
 reg         cc_en_d;    // data side
+// Cache-inhibited accesses may not be answered from the cache at all, so
+// fold the inhibit into the bank enables ONCE rather than qualifying each
+// of the four hit comparisons: same behaviour, two gates instead of four,
+// and it keeps the term off the tag-compare fan-in the fitter is tightest
+// on.  FILL1 still applies cache_inhibit separately to block allocation.
+wire        cc_en_hit   = cc_en   && !cache_inhibit;
+wire        cc_en_d_hit = cc_en_d && !cache_inhibit;
 // cpu address
 wire  [1:0] cpu_adr_blk;
 wire  [7:0] cpu_adr_idx;
@@ -381,28 +388,28 @@ always @ (posedge clk) begin
         // memory, and FILL1's existing check keeps the line from being
         // allocated or refreshed on the way back.
         // on hit update LRU flag in tag memory
-        if (cpu_ir && cc_en && !cache_inhibit && itag0_match && itag0_valid) begin
+        if (cpu_ir && cc_en_hit && itag0_match && itag0_valid) begin
           // data is already in instruction cache way 0
           cpu_dat_r <= idram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b0;
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= itram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_ir && cc_en && !cache_inhibit && itag1_match && itag1_valid) begin
+        end else if (cpu_ir && cc_en_hit && itag1_match && itag1_valid) begin
           // data is already in instruction cache way 1
           cpu_dat_r <= idram1_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b1;
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= itram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_dr && cc_en_d && !cache_inhibit && dtag0_match && dtag0_valid) begin
+        end else if (cpu_dr && cc_en_d_hit && dtag0_match && dtag0_valid) begin
           // data is already in data cache way 0
           cpu_dat_r <= ddram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b0; tagupd_lru <= 1'b0;
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= dtram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_dr && cc_en_d && !cache_inhibit && dtag1_match && dtag1_valid) begin
+        end else if (cpu_dr && cc_en_d_hit && dtag1_match && dtag1_valid) begin
           // data is already in data cache way 1
           cpu_dat_r <= ddram1_cpu_dat_r;
           cpu_ack <= 1'b1;
