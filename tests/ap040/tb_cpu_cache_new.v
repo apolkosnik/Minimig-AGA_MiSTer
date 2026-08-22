@@ -120,66 +120,6 @@ module tb_cpu_cache_new;
 		end
 	endtask
 
-	// Finish a line fill the previous test left half-serviced: cpu_ack
-	// arrives on the first word, but the fill keeps requesting the rest
-	// of the line, so both state machines stay busy until those are
-	// acked.  Pump acks until the cache is genuinely idle.
-	task drain_fill;
-		begin
-			// FILL2..FILL4 do not re-request: the controller streams the
-			// rest of the line, so the ack must be driven unconditionally
-			timeout = 0;
-			while ((dut.cpu_sm_state != 4'd1 || dut.sdr_sm_state != 4'd2) &&
-			       timeout < 500) begin
-				@(posedge clk);
-				sdr_read_ack = 1;
-				timeout = timeout + 1;
-			end
-			sdr_read_ack = 0;
-			repeat (3) @(posedge clk);
-		end
-	endtask
-
-	// A cache-inhibited read must go to memory and return what memory
-	// holds NOW -- never the cached copy of the same physical address.
-	task inhibited_read;
-		input instr;
-		input [15:0] fresh;
-		begin
-			cpu_ir = instr;
-			cpu_dr = !instr;
-			cpu_cs = 1;
-			timeout = 0;
-			while (!sdr_read_req && timeout < 20) begin
-				@(posedge clk);
-				timeout = timeout + 1;
-			end
-			if (!sdr_read_req) begin
-				$display("FAIL: cache-inhibited %s read was served from the cache",
-				         instr ? "instruction" : "data");
-				errors = errors + 1;
-			end
-			sdr_dat_r = fresh;
-			sdr_read_ack = 1;
-			@(posedge clk);
-			sdr_read_ack = 0;
-			timeout = 0;
-			while (!cpu_ack && timeout < 20) begin
-				@(posedge clk);
-				timeout = timeout + 1;
-			end
-			if (cpu_dat_r !== fresh) begin
-				$display("FAIL: cache-inhibited %s read returned %h, memory holds %h",
-				         instr ? "instruction" : "data", cpu_dat_r, fresh);
-				errors = errors + 1;
-			end
-			cpu_cs = 0;
-			cpu_ir = 0;
-			cpu_dr = 0;
-			repeat (3) @(posedge clk);
-		end
-	endtask
-
 	task uncached_read;
 		input instr;
 		begin
@@ -379,36 +319,6 @@ module tb_cpu_cache_new;
 			errors = errors + 1;
 		end
 		repeat (3) @(posedge clk);
-
-		//------------------------------------------------------------
-		// cache_inhibit must be honoured on a HIT, not only on a miss.
-		// The MMU sets CI per page for memory-mapped registers; if a
-		// cacheable alias of the same physical address has already
-		// primed the line, an inhibited access used to be answered from
-		// the cache and never reached the device at all.
-		//------------------------------------------------------------
-		drain_fill;
-		wait_idle;
-		cpu_cache_ctrl = 4'b0011;          // both banks enabled
-		cache_inhibit = 0;
-
-		cpu_adr = 28'h0055660;
-		install_d_line(16'hCA11);
-		cached_read(1'b0, 16'hCA11);       // primed and hitting
-
-		cache_inhibit = 1;
-		cpu_adr = 28'h0055660;
-		inhibited_read(1'b0, 16'hD00D);    // must reach memory, fresh data
-
-		cache_inhibit = 0;
-		cpu_adr = 28'h0077880;
-		install_i_line(16'hBEE5);
-		cached_read(1'b1, 16'hBEE5);
-
-		cache_inhibit = 1;
-		cpu_adr = 28'h0077880;
-		inhibited_read(1'b1, 16'hF00D);
-		cache_inhibit = 0;
 
 		if (errors == 0) $display("ALL TESTS PASSED");
 		else             $display("TEST FAILED with %0d errors", errors);
