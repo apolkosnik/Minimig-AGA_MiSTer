@@ -830,6 +830,26 @@ fberr_done:
 	; the interrupt is sampled after that conversion, so the interrupt
 	; exception processes FIRST and the trace is delivered at the
 	; interrupt handler's entry -- never lost, never first.
+	;
+	; An external audit called this backwards, citing MC68040 UM 8.2.6
+	; and 8.3 (trace stacked before the interrupt), because
+	; do_specialties LOOKS like it takes the trace first:
+	;     if (spcflags & SPCFLAG_DOTRACE) Exception(9);
+	;     if (spcflags & SPCFLAG_TRACE)   do_trace();
+	;     if (spcflags & SPCFLAG_INT)     do_interrupt(intr);
+	; It does not.  do_trace() -> activate_trace() is
+	;     unset_special(SPCFLAG_TRACE); set_special(SPCFLAG_DOTRACE);
+	; so the trace it arms is consumed only on the NEXT pass, while the
+	; interrupt in the SAME pass is taken immediately.  For an
+	; instruction completing with T1 set and an IRQ pending:
+	;   pass 1: no DOTRACE yet -> do_trace() ARMS it -> interrupt taken
+	;   pass 2: DOTRACE -> Exception(9), now inside the IRQ handler
+	; Interrupt first, trace at the handler's entry -- what these tests
+	; encode.  Corroborated independently on hardware: an odd IRQ vector
+	; producing a nested address error stacks an SR carrying the
+	; ACCEPTED interrupt mask, which is only reachable if the interrupt
+	; was processed first.  Manual-vs-reference goes to the reference
+	; here, as it did for the T0 change-of-flow list.
 	; 142 covers the change-of-flow boundary: sweep IPL2 into a traced
 	; RTS; at least one delay must land both at the RTS boundary, where
 	; the IRQ frame returns to the RTS target and the trace frame
