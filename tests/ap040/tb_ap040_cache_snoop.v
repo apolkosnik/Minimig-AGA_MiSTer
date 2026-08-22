@@ -147,6 +147,48 @@ task cpu_read;
 	end
 endtask
 
+// Two reads with NO request-low cycle between them.  cpu_read above
+// drops c_req and idles a cycle after each access, which lets a pending
+// CI invalidate land before the next request is looked up -- so it can
+// never expose an FSM that accepts while the invalidate is still owed.
+task cpu_read_btb;
+	input  [31:0] a1;
+	input         ci1;
+	input  [31:0] a2;
+	output [31:0] o1;
+	output [31:0] o2;
+	integer guard;
+	begin
+		@(negedge clk);
+		c_req = 1; c_write = 0; c_size = 2'b10; c_addr = a1; c_nocache = ci1;
+		guard = 0;
+		while (!(c_ack && ce) && guard < 200) begin
+			@(posedge clk); guard = guard + 1;
+		end
+		if (guard >= 200) begin
+			$display("FAIL: btb first read timeout at %h", a1);
+			errors = errors + 1;
+		end
+		o1 = c_rdata;
+		// present the next access immediately: c_req never falls
+		@(negedge clk);
+		c_addr = a2; c_nocache = 0;
+		@(posedge clk);
+		guard = 0;
+		while (!(c_ack && ce) && guard < 200) begin
+			@(posedge clk); guard = guard + 1;
+		end
+		if (guard >= 200) begin
+			$display("FAIL: btb second read timeout at %h", a2);
+			errors = errors + 1;
+		end
+		o2 = c_rdata;
+		@(negedge clk);
+		c_req = 0;
+		@(posedge clk);
+	end
+endtask
+
 task cpu_write;
 	input [31:0] a;
 	input [31:0] d;
@@ -243,6 +285,7 @@ endtask
 integer i, off;
 integer guard5;
 reg [31:0] d;
+reg [31:0] d2;
 
 initial begin
 	for (i = 0; i < 16384; i = i + 1) mem[i] = 32'h1111_0000 + i;
@@ -455,6 +498,53 @@ initial begin
 	c_nocache = 0;                                    // and the line dies
 	mem[32'hA000>>2] = 32'hD11A_0003;                 // DMA writes C
 	expect_read(32'h0000_A000, 32'hD11A_0003, 7);     // must MISS: value C
+
+	//------------------------------------------------------------------
+	// T8: back-to-back CI-then-cacheable reads with NO request-low cycle,
+	// under a port-B stealing snoop swept across the completion.
+	//
+	// This does NOT currently discriminate: it passes whether or not the
+	// FSM holds acceptance while a CI invalidate is owed, because
+	// ci_inv_pend is raised on the first cycle of C_PASS and the access
+	// runs to m_ack, so the invalidate always lands during the memory
+	// latency.  It is kept because it is the only coverage of the no-gap
+	// request path, and it would catch a future change that raised the
+	// pending invalidate later (at completion rather than at lookup),
+	// which is exactly when the window would become real.
+	//------------------------------------------------------------------
+	// A snoop must be stealing port B as the CI access completes,
+	// otherwise the invalidate lands in the very cycle the FSM returns
+	// to C_IDLE and the window never opens.  Sweep the snoop across the
+	// completion so at least one offset collides.
+	for (off = 0; off < 8; off = off + 1) begin
+		cinv_req = 1; cinv_ic = 1; cinv_dc = 1;
+		@(negedge clk);
+		guard5 = 0;
+		while (!cinv_done && guard5 < 4000) begin
+			@(posedge clk); guard5 = guard5 + 1;
+		end
+		cinv_req = 0;
+		repeat (20) @(posedge clk);
+
+		mem[32'hB000>>2] = 32'hB77B_0000 + off;
+		expect_read(32'h0000_B000, mem[32'hB000>>2], 8);   // prime
+		mem[32'hB000>>2] = 32'hB77B_0080 + off;            // DMA changes it
+		fork
+			cpu_read_btb(32'h0000_B000, 1'b1, 32'h0000_B000, d, d2);
+			begin
+				repeat (off) @(negedge clk);
+				snoop(32'h0000_C300);   // unrelated row, steals port B
+			end
+		join
+		if (d2 !== 32'hB77B_0080 + off) begin
+			$display("FAIL test 8 (snoop offset %0d): back-to-back cacheable read got %h (stale line) expected %h",
+			         off, d2, 32'hB77B_0080 + off);
+			errors = errors + 1;
+			off = 8;
+		end
+	end
+	d = 32'hB77B_0080;   // silence the unused-check below
+	d2 = 32'hB77B_0080;
 
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else $display("TEST FAILED with %0d errors", errors);

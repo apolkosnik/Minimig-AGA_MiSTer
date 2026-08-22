@@ -429,7 +429,25 @@ always @(posedge clk) begin
 					sweep_all <= 0;   // honour the cinv_ic/cinv_dc selects
 					cst <= C_SWEEP;
 				end
-				else if (c_req && !ack_r && !err_hold) begin
+				// A cache-inhibited hit owes a row invalidate.  Accept
+				// NOTHING until it lands.  rd_accept alone gated only the
+				// data-RAM read enable, so on paper the FSM could still
+				// enter C_LOOK and compare against the not-yet-invalidated
+				// tag row using stale data_q.
+				//
+				// HONEST NOTE: that window could not be demonstrated.
+				// ci_inv_pend is raised on the FIRST cycle of C_PASS while
+				// the access itself runs to m_ack, so the invalidate lands
+				// during the memory latency -- before the FSM can accept
+				// anything.  A back-to-back request pair with a port-B
+				// stealing snoop swept across the completion (T8) passes
+				// with and without this guard.  It is kept as
+				// defence-in-depth: it makes the module enforce its own
+				// contract instead of depending on the caller inserting a
+				// request-low cycle, and it keeps ci_inv_row single-slot
+				// so a second CI hit cannot overwrite a pending row and
+				// lose its invalidate.  The cost is nil in practice.
+				else if (c_req && !ack_r && !err_hold && !ci_inv_pend) begin
 					if (c_write) begin
 						if (store_inv_lost) begin
 							// port B owes a recorded invalidate: hold the
