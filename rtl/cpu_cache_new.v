@@ -372,29 +372,37 @@ always @ (posedge clk) begin
         else wb_en <= 1'b1;
       end
       CPU_SM_READ : begin
+        // A cache-inhibited access must never be served from the cache.
+        // cache_inhibit used to be consulted only after a miss reached
+        // memory (see FILL1), so an inhibited read that HIT a line primed
+        // through a cacheable alias of the same physical address returned
+        // the stale cached copy -- exactly what CI exists to prevent for
+        // memory-mapped registers.  Forcing the miss here sends it to
+        // memory, and FILL1's existing check keeps the line from being
+        // allocated or refreshed on the way back.
         // on hit update LRU flag in tag memory
-        if (cpu_ir && cc_en && itag0_match && itag0_valid) begin
+        if (cpu_ir && cc_en && !cache_inhibit && itag0_match && itag0_valid) begin
           // data is already in instruction cache way 0
           cpu_dat_r <= idram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b0;
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= itram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_ir && cc_en && itag1_match && itag1_valid) begin
+        end else if (cpu_ir && cc_en && !cache_inhibit && itag1_match && itag1_valid) begin
           // data is already in instruction cache way 1
           cpu_dat_r <= idram1_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b1;
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= itram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_dr && cc_en_d && dtag0_match && dtag0_valid) begin
+        end else if (cpu_dr && cc_en_d && !cache_inhibit && dtag0_match && dtag0_valid) begin
           // data is already in data cache way 0
           cpu_dat_r <= ddram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b0; tagupd_lru <= 1'b0;
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= dtram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_dr && cc_en_d && dtag1_match && dtag1_valid) begin
+        end else if (cpu_dr && cc_en_d && !cache_inhibit && dtag1_match && dtag1_valid) begin
           // data is already in data cache way 1
           cpu_dat_r <= ddram1_cpu_dat_r;
           cpu_ack <= 1'b1;
