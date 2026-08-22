@@ -1006,6 +1006,70 @@ t0_ok:
 	and.l	#$FFFF,d0
 	chkl	d0,1,176		; exactly one access error
 
+;----- MOVES alternate function codes select the ROOT by FC bit 2 (177-180)
+; An external audit read MC68040 UM 3.2.5 as requiring FC 0/3/4/7 MOVES to
+; BYPASS translation as physical accesses.  WinUAE -- the reference this
+; core is validated against, and the source of the cputest corpus -- does
+; not do that.  Its 68040 MOVES source read is:
+;     bool super = (regs.sfc & 4) != 0;
+;     res = mmu_get_user_byte(addr, super, false, sz_byte, false);
+; i.e. EVERY function code is translated, and only bit 2 picks the root.
+; ap040_mmu.v derives `a_super = c_fc[2]`, which is the same rule, so the
+; implementation already agrees with the oracle and the audit's item is a
+; manual-versus-reference disagreement.  This core has lost that bet in
+; the manual's favour before (the T0 change-of-flow list), so pin the
+; behaviour with a test that can actually tell the roots apart: URP and
+; SRP address DIFFERENT tables here, so a bypass -- or a super bit taken
+; from anything but FC2 -- lands the store in the wrong page.
+;   user  VA $C000 -> PA $C000     (URP tables)
+;   super VA $C000 -> PA $E000     (SRP tables)
+;   super VA $E000 -> PA $C000     (so PA $C000 is readable from here)
+	move.l	#$4800,d0
+	movec	d0,urp			; user root, distinct from SRP ($4000)
+	move.l	#$0000C003,($4C18).l	; user   entry 6: VA $C000 -> PA $C000
+	move.l	#$0000E003,($4418).l	; super  entry 6: VA $C000 -> PA $E000
+	move.l	#$0000C003,($441C).l	; super  entry 7: VA $E000 -> PA $C000
+	pflusha
+	move.l	#0,($C000).l		; PA $C000 via super VA $E000 below
+	move.l	#0,($E000).l
+	pflusha
+
+	moveq	#1,d0			; FC1: user data
+	movec	d0,dfc
+	move.l	#$11111111,d1
+	moves.l	d1,($C000).l
+	move.l	($E000).l,d0		; super VA $E000 = PA $C000
+	chkl	d0,$11111111,177	; FC1 translated through URP
+
+	moveq	#5,d0			; FC5: supervisor data
+	movec	d0,dfc
+	move.l	#$55555555,d1
+	moves.l	d1,($C000).l
+	move.l	($C000).l,d0		; super VA $C000 = PA $E000
+	chkl	d0,$55555555,178	; FC5 translated through SRP
+
+	moveq	#0,d0			; FC0: bit 2 clear -> USER, not a bypass
+	movec	d0,dfc
+	move.l	#$00000000,d1
+	moves.l	d1,($C000).l
+	move.l	($E000).l,d0
+	chkl	d0,0,179		; FC0 landed in the USER page
+
+	moveq	#4,d0			; FC4: bit 2 set -> SUPERVISOR
+	movec	d0,dfc
+	move.l	#$44444444,d1
+	moves.l	d1,($C000).l
+	move.l	($C000).l,d0
+	chkl	d0,$44444444,180	; FC4 landed in the SUPERVISOR page
+
+	moveq	#5,d0
+	movec	d0,dfc			; leave DFC as the block found it
+	move.l	#$0000C003,($4418).l
+	move.l	#$0000E003,($441C).l
+	move.l	#$4400,d0
+	movec	d0,urp
+	pflusha
+
 
 ;---------------- interrupt-vs-MMU-operation interleave sweeps (161-164)
 ; The live NetBSD freeze happened inside pmap_enter -- PTE rewrite,
