@@ -173,7 +173,7 @@ wire rd_accept;
 
 localparam C_IDLE  = 3'd0;
 localparam C_LOOK  = 3'd1;
-localparam C_RDD   = 3'd2;   // retired: hits now complete in C_LOOK
+localparam C_FERR  = 3'd2;   // aborted fill: invalidate the corrupted row
 localparam C_WINV  = 3'd3;   // second-line invalidate owed by a store
 localparam C_FILL  = 3'd4;
 localparam C_TAGW  = 3'd5;
@@ -332,9 +332,21 @@ wire store_inv = ((cst == C_IDLE) && c_req && c_write && !ack_r &&
 // double write is avoided, the effect is identical).
 wire snoop_wr  = s_stb && !((cst == C_SWEEP) && sweep_hit &&
                             (sweep_cnt == {1'b0, s_addr[9:4]}));
-assign inv_we   = snoop_wr || store_inv || store_inv_lost;
-assign inv_wren = snoop_wr | (ce & (store_inv | store_inv_lost));
+// An aborted refill has already written its beats into the victim way's
+// data RAM while that way still carries its PREVIOUS tag and valid bit.
+// Only C_TAGW validates a line, so the incoming line stays unreachable --
+// but the line it was evicting does NOT: it keeps hitting on its old tag
+// over data the dead fill overwrote.  A user-side miss that bus-errors
+// mid-fill therefore hands the next SUPERVISOR hit on that row a mixture
+// of kernel tag and user data.  Clear the whole row through port B, which
+// writes a constant zero and so cannot race the live tag read the way a
+// port A read-modify-write would.  Over-invalidation is correctness-safe.
+wire fill_err_inv = (cst == C_FERR) && !snoop_wr;
+
+assign inv_we   = snoop_wr || store_inv || store_inv_lost || fill_err_inv;
+assign inv_wren = snoop_wr | (ce & (store_inv | store_inv_lost | fill_err_inv));
 assign inv_idx  = snoop_wr        ? {1'b0, s_addr[9:4]} :
+                  fill_err_inv    ? r_row :   // the fill's own bank and row
                   store_inv_lost ? {1'b0, store_inv_set} :
                   (cst == C_IDLE) ? {1'b0, c_addr[9:4]} : {1'b0, winv_set2};
 assign cd_rd_en  = rd_accept;                       // issued with the tag read
@@ -446,6 +458,17 @@ always @(posedge clk) begin
 				                  ? C_WINV : C_IDLE;
 			end
 
+			C_FERR: begin
+				// The core withdraws the faulting request while this
+				// state runs, and only C_IDLE used to watch for that.
+				// Release the hold here too, or a request raised again
+				// before C_IDLE is reached is blocked forever.
+				if (!c_req) err_hold <= 0;
+				// a free-running snoop owns port B when it fires; retry
+				// until this row's invalidate is the one that lands
+				if (!snoop_wr) cst <= C_IDLE;
+			end
+
 			C_WINV: begin
 				if (!s_stb && !store_inv_lost) begin
 					winv_pend <= 0;
@@ -481,16 +504,18 @@ always @(posedge clk) begin
 
 			C_FILL: begin
 				if (m_err) begin
-					// 5.4: abandon the fill.  The line is never
-					// validated (only C_TAGW validates it) so the
-					// partial beats already written to the data RAM
-					// are unreachable, and the core is taking the
-					// fault on this same edge.  err_hold keeps the
-					// still-asserted request from being re-accepted
-					// before the core withdraws it.
+					// 5.4: abandon the fill.  The incoming line is
+					// never validated (only C_TAGW validates it), but
+					// the beats already written landed in the VICTIM
+					// way, whose old tag and valid bit are still live
+					// -- so the evicted line would keep hitting over
+					// corrupted data.  C_FERR invalidates the row
+					// before anything can look at it.  err_hold keeps
+					// the still-asserted request from being
+					// re-accepted before the core withdraws it.
 					r_issued <= 0;
 					err_hold <= 1;
-					cst <= C_IDLE;
+					cst <= C_FERR;
 				end
 				else if (!r_issued) r_issued <= 1;
 				else if (m_ack) begin

@@ -403,6 +403,43 @@ initial begin
 	expect_bus_idle(5);
 	expect_read(32'h0000_7100, mem[32'h7100>>2], 5);
 
+	//------------------------------------------------------------------
+	// T6 (5.4b): an aborted fill must not leave the line it was EVICTING
+	// hitting over the dead fill's data.  T5 above cannot see this: it
+	// invalidates the whole cache first, so the victim way is empty and
+	// the abandoned beats really are unreachable.  Here the row is fully
+	// populated first, exactly as it is in a running system, so the
+	// refill's beats land on top of a live line whose tag and valid bit
+	// survive the abort.  In NetBSD terms: a user miss bus-errors
+	// mid-fill and the next supervisor hit on that row is served kernel
+	// tag over user data -- the tc_windup panic, where the timehands
+	// pointer came back as a user address.
+	// row = addr[9:4], so these five addresses share one row and the
+	// fifth fill must evict one of the four primed ways.
+	expect_read(32'h0000_8000, mem[32'h8000>>2], 6);
+	expect_read(32'h0000_8400, mem[32'h8400>>2], 6);
+	expect_read(32'h0000_8800, mem[32'h8800>>2], 6);
+	expect_read(32'h0000_8C00, mem[32'h8C00>>2], 6);
+
+	err_arm = 1;
+	err_addr = 32'h0000_9000;
+	err_beat = 2'd2;          // beats 0 and 1 land before the error
+	err_count = 0;
+	cpu_access_berr(32'h0000_9000, 1'b0);
+	err_arm = 0;
+	expect_bus_idle(6);
+
+	// every primed line must still read its OWN data (or miss and refetch
+	// it); none may be served the aborted fill's beats
+	expect_read(32'h0000_8000, mem[32'h8000>>2], 6);
+	expect_read(32'h0000_8004, mem[32'h8004>>2], 6);
+	expect_read(32'h0000_8400, mem[32'h8400>>2], 6);
+	expect_read(32'h0000_8404, mem[32'h8404>>2], 6);
+	expect_read(32'h0000_8800, mem[32'h8800>>2], 6);
+	expect_read(32'h0000_8804, mem[32'h8804>>2], 6);
+	expect_read(32'h0000_8C00, mem[32'h8C00>>2], 6);
+	expect_read(32'h0000_8C04, mem[32'h8C04>>2], 6);
+
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else $display("TEST FAILED with %0d errors", errors);
 	$finish;
