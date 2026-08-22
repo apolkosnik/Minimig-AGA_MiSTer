@@ -2736,6 +2736,19 @@ always @(posedge clk) begin
 				// port from in_exc onwards, so let it retire first.
 				else if (epf_pend) state <= S_EXC0;
 				else begin : exc0_run
+				// Kill any address-register rollback records on the way into
+				// a non-access exception.  The records exist solely so the
+				// access-error path can restore the FAULTING instruction's
+				// (An)+/-(An) side effects; only fetch_next and the S_AERR
+				// consumer clear them, and an instruction whose EA succeeded
+				// but which then raises CHK / zero-divide / an FP trap
+				// reaches here with its record still live.  Left alone it
+				// survives exception_prefetch into the handler, where the
+				// next access error "rolls back" an unrelated instruction's
+				// register to a stale value -- possibly from the other
+				// privilege context.
+				u0_v <= 0;
+				u1_v <= 0;
 				sr_saved <= sr;
 				sr[13] <= 1;
 				sr[15:14] <= 2'b00;

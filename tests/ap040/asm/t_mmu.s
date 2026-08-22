@@ -32,6 +32,7 @@ wb_complete	equ	$3680	; h_aerr performs valid WB3s like NetBSD trap.c
 cnt_int2	equ	$3684	; level-2 interrupts taken (interleave sweeps)
 cnt_int3	equ	$3688	; level-3 interrupts taken (spl-storm sweep)
 storm_scr	equ	$368C	; scratch the storm decrements, like serintr's count
+chkbuf		equ	$3690	; CHK bound operand (stale-record test)
 storm_dly	equ	$368E	; sweep delay handed to h_int3 for its own arming
 IPLREG	equ	$F110
 IPLDLY	equ	$F148
@@ -915,6 +916,43 @@ u7isp:
 	movec	d0,urp
 	pflusha
 
+;----- stale (An)+ record must die at non-access exception entry (172-174)
+; CHK.W (A2)+,D1 with D1 negative: the EA read SUCCEEDS (a2 advances),
+; then the CHK exception is taken.  The rollback records exist solely so
+; the access-error path can undo the FAULTING instruction's side effects;
+; only fetch_next and that consumer cleared them, so an instruction that
+; raises a non-access exception after its EA carried a live record
+; through exception_prefetch into its handler.  h_chk's FIRST instruction
+; stores to a non-resident page; the access error's rollback then
+; "restored" a2 from the stale record -- an unrelated instruction's
+; register reverted to a stale value.  h_aerr repairs the page and the
+; store restarts; afterwards a2 must still hold the post-increment value.
+	move.l	#h_chk,($18).l		; CHK, vector 6
+	move.l	#0,($C000).l		; scrub the target while still mapped
+	move.w	#$7FFF,(chkbuf).l	; CHK bound operand
+	move.l	#0,($4418).l		; supervisor VA $C000 not resident
+	pflusha
+	move.l	#5,(expect_tm).l	; supervisor data write
+	move.l	#$C000,(expect_fa).l
+	move.l	#$4418,(fix_addr).l
+	move.l	#$0000C003,(fix_val).l
+	move.w	(cnt_aerr).l,d6
+	lea	(chkbuf).l,a2
+	moveq	#-1,d1			; negative: CHK always traps
+	chk.w	(a2)+,d1
+	lea	(chkbuf+2).l,a0
+	cmp.l	a0,a2
+	beq.s	stale_ok
+	failt	172			; a2 reverted by the stale record
+stale_ok:
+	move.l	($C000).l,d0
+	chkl	d0,$FFFFFFFF,173	; h_chk ran and its store landed
+	move.w	(cnt_aerr).l,d0
+	sub.w	d6,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,174		; exactly one access error
+	move.l	#unexp,($18).l
+
 
 ;---------------- interrupt-vs-MMU-operation interleave sweeps (161-164)
 ; The live NetBSD freeze happened inside pmap_enter -- PTE rewrite,
@@ -1036,6 +1074,10 @@ imix_done:
 	stop	#$2700
 
 ;----------------------------------------------------------------- handlers
+h_chk:
+	move.l	d1,($C000).l		; FIRST instruction: faults, restarts
+	rte
+
 h_aerr:
 	cmpi.w	#$7008,6(sp)	; format $7, vector 2
 	bne	hfail
