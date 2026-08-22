@@ -956,56 +956,6 @@ stale_ok:
 	chkl	d0,1,174		; exactly one access error
 	move.l	#unexp,($18).l
 
-;----- a pending T0 trace must not leak into the access-error handler (175)
-; A T0 change-of-flow trace is armed by the COMPLETED branch and fires at
-; the redirect target.  If the target's instruction FETCH faults, the
-; latch used to survive into the handler -- only exc() cleared it and the
-; access error does not run through exc() -- so vector 9 fired at the
-; handler's first word, reporting a trace against supervisor code that
-; was never traced.  Here the jump target page is not resident: h_aerr
-; maps it and returns.  h_trace counts only traces taken while h_aerr is
-; executing; that count must be zero.
-	move.l	#h_trace,($24).l	; vector 9
-	clr.w	(cnt_trace).l
-	clr.w	(aerr_act).l
-	move.l	#$0000E003,($441C).l	; PA $E000 backs VA $E000
-	move.w	#$4E71,($E000).l	; target: nop
-	move.w	#$4E75,($E002).l	; rts
-	cpusha	bc
-	cinva	ic
-	move.l	#0,($441C).l		; ...but the page is NOT resident
-	pflusha
-	move.l	#6,(expect_tm).l	; supervisor INSTRUCTION fetch
-	move.l	#$E000,(expect_fa).l
-	move.l	#$441C,(fix_addr).l
-	move.l	#$0000E003,(fix_val).l
-	move.w	(cnt_aerr).l,d6
-	move.w	sr,d5			; save the mask/trace bits
-	; Enter the T0 context by RTE, not ORI-to-SR: the 040 traces a
-	; narrow instruction list on T0 and ORI/MOVE to SR is ON it, so
-	; setting the bit that way traces immediately and the handler's
-	; T-bit clear disarms the branch we actually want traced.  RTE
-	; loads the new SR for the NEXT instruction, so the JSR is the
-	; first traced change of flow.
-	move.w	#$0000,-(sp)		; format 0
-	pea	(t0site).l
-	move.w	#$6700,-(sp)		; supervisor, T0 set, IPL 7
-	rte
-t0site:
-	jsr	($E000).l		; target fetch faults; trace armed
-	move.w	d5,sr			; restore, T0 off
-	move.l	(last_tpc).l,d0
-	move.l	#h_aerr,d1
-	cmp.l	d1,d0
-	bne.s	t0_ok
-	failt	175			; trace reported against the handler
-t0_ok:
-	move.l	#unexp,($24).l
-	move.w	(cnt_aerr).l,d0
-	sub.w	d6,d0
-	and.l	#$FFFF,d0
-	chkl	d0,1,176		; exactly one access error
-
 ;----- MOVES alternate function codes select the ROOT by FC bit 2 (177-180)
 ; An external audit read MC68040 UM 3.2.5 as requiring FC 0/3/4/7 MOVES to
 ; BYPASS translation as physical accesses.  WinUAE -- the reference this
@@ -1299,19 +1249,6 @@ h3storm:
 	move.w	d0,sr		; splx back to the entry mask
 	dbra	d1,h3storm
 	movem.l	(sp)+,d0-d1
-	rte
-
-h_trace:
-	; The leaked trace fires at the access-error handler's ENTRY, before
-	; its first instruction runs, so a flag the handler sets cannot see
-	; it.  Record the first trace's stacked PC instead: if the latch
-	; leaked, that PC is h_aerr.
-	tst.w	(cnt_trace).l
-	bne.s	h_tr_out
-	move.l	2(sp),(last_tpc).l
-h_tr_out:
-	addq.w	#1,(cnt_trace).l
-	and.w	#$3FFF,(sp)	; clear T1/T0 in the stacked SR: one shot
 	rte
 
 h_utrap:

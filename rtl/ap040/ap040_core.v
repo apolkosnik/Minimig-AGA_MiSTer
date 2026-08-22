@@ -1543,18 +1543,6 @@ task aerr_start;
 		// captures the pre-edge value): the 040 drops LOCK, and a stale
 		// lk_cyc would throttle the handler's fetch queue.
 		lk_cyc   <= 0;
-		// A T0 change-of-flow trace armed by the completed branch is
-		// still pending when its TARGET FETCH faults.  Only exc() cleared
-		// it, and the access error does not run through exc(), so the
-		// latch survived into the handler: S_EXC_JMP's consumer then
-		// fired vector 9 at the handler's first word, reporting a trace
-		// against supervisor code that was never traced.  A global latch
-		// must not be visible during handler execution.  Architecturally
-		// the event belongs in the format-$7 continuation state (CT),
-		// which this core does not build, so the trace is dropped rather
-		// than misattributed: losing it costs a debugger one step report,
-		// firing it invents an event that never happened.
-		flow_t0_pend <= 0;
 		state    <= S_AERR0;
 	end
 endtask
