@@ -476,6 +476,50 @@ task capture_unimp;
 	end
 endtask
 
+// A datatype fault (vector 55) must leave a BUSY frame the FPSP can
+// parse.  Previously the fault was raised with no capture at all, so a
+// handler's FSAVE saw the IDLE frame ($4100 -- measured) and had no
+// CMDREG, ETEMP, tags or FPIARCU to emulate the operand from.
+//
+// WinUAE fp_unimp_datatype's 68040 recipe: fpu_exp_state = 2 (BUSY),
+// cmdreg1b = the command word (FSQRT 4->5, which frame_cmd1 does),
+// fpiarcu = fpiar, E1 set for a packed operand, and for OPCLASS 011 the
+// T bit with the register value in BOTH ETEMP and FPTEMP.  For opclass
+// 000/010 the source goes to ETEMP with its tag, and a dyadic operation
+// also carries the destination in FPTEMP.
+task capture_datatype;
+	input [15:0] cmd;
+	input [95:0] src;
+	input  [2:0] stag;
+	input [95:0] dst;
+	input  [2:0] dtag;
+	input        t_flag;    // OPCLASS 011 register store
+	input        e1_flag;   // packed operand
+	reg   [15:0] c1;
+	begin
+		c1 = frame_cmd1(cmd);
+		fstate_cmd1  <= c1;
+		fstate_cmd3  <= frame_cmd3(c1);
+		fstate_stag  <= stag;
+		fstate_dtag  <= dtag;
+		fstate_flags <= {e1_flag, 1'b0, t_flag};   // {E1,E3,T}
+		fstate_fpt   <= dst;
+		fstate_et    <= src;
+		fstate_grs   <= 0;
+		fstate_wbte15 <= 0;
+		fstate_wbt   <= 0;
+		fstate_fpiar_c <= fpiar;
+		fstate_busy  <= 1;
+		fstate_e1    <= e1_flag;
+		// fstate_unimp marks "a frame is prepared", so FSAVE extracts it
+		// instead of reporting IDLE; fstate_busy selects the $41/$60
+		// format.  Both are needed, exactly as the e3 arm above does.
+		fstate_unimp <= 1;
+		fstate_resig <= 0;   // our own trap: the next FP instruction runs
+		fpu_used     <= 1;
+	end
+endtask
+
 integer k;
 
 always @(posedge clk) begin
@@ -675,8 +719,27 @@ always @(posedge clk) begin
 				if (op_class == 3'b011) begin
 					// FMOVE FPn,<ea>: packed decimal and denormal/unnormal
 					// register contents are unsupported data types
-					if (src_fmt == 3'd3 || src_fmt == 3'd7) unsupp <= 1;
-					else if (unsupported_x(fr_e[src_r], fr_m[src_r])) unsupp <= 1;
+					// OPCLASS 011: T set, and the register value goes to
+					// BOTH ETEMP and FPTEMP (WinUAE marks the FPTEMP/dtag
+					// half undocumented but writes it).
+					if (src_fmt == 3'd3 || src_fmt == 3'd7) begin
+						unsupp <= 1;
+						capture_datatype({op_class, src_fmt, dst_r, opmode},
+						    {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
+						    frame_tag_x(fr_e[src_r], fr_m[src_r]),
+						    {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
+						    frame_tag_x(fr_e[src_r], fr_m[src_r]),
+						    1'b1, 1'b1);   // T, packed -> E1
+					end
+					else if (unsupported_x(fr_e[src_r], fr_m[src_r])) begin
+						unsupp <= 1;
+						capture_datatype({op_class, src_fmt, dst_r, opmode},
+						    {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
+						    frame_tag_x(fr_e[src_r], fr_m[src_r]),
+						    {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
+						    frame_tag_x(fr_e[src_r], fr_m[src_r]),
+						    1'b1, 1'b0);   // T, not packed
+					end
 					else begin
 						{a_s, a_e, a_m, a_t} <=
 							unpack_x(fr_s[src_r], fr_e[src_r], fr_m[src_r]);
@@ -717,6 +780,14 @@ always @(posedge clk) begin
 				else if (op_class == 3'b000) begin
 					if (unsupported_x(fr_e[src_r], fr_m[src_r])) begin
 						unsupp <= 1;
+						// OPCLASS 000: source in ETEMP; a dyadic op also
+						// carries its destination in FPTEMP
+						capture_datatype({op_class, src_fmt, dst_r, opmode},
+						    {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
+						    frame_tag_x(fr_e[src_r], fr_m[src_r]),
+						    {fr_s[dst_r], fr_e[dst_r], 16'd0, fr_m[dst_r]},
+						    frame_tag_x(fr_e[dst_r], fr_m[dst_r]),
+						    1'b0, 1'b0);
 					end
 					else begin
 					{a_s, a_e, a_m, a_t} <=
@@ -728,7 +799,17 @@ always @(posedge clk) begin
 					// opclass 010, memory source: packed decimal (fmt 3) is
 					// an unsupported data type.  FMOVECR was handled above so
 					// its exception could retain a complete state frame.
-					if (src_fmt == 3'd3) unsupp <= 1;
+					if (src_fmt == 3'd3) begin
+						unsupp <= 1;
+						// packed memory operand: E1 distinguishes it, and
+						// the operand words arrive later, so ETEMP carries
+						// what the dispatch cycle has
+						capture_datatype({op_class, src_fmt, dst_r, opmode},
+						    96'd0, 3'd7,
+						    {fr_s[dst_r], fr_e[dst_r], 16'd0, fr_m[dst_r]},
+						    frame_tag_x(fr_e[dst_r], fr_m[dst_r]),
+						    1'b0, 1'b1);   // packed -> E1, stag 7
+					end
 					else begin
 						a_t <= T_NUM;   // provisional; F_SRC classifies
 						fst <= F_SRC;
@@ -962,7 +1043,18 @@ always @(posedge clk) begin
 										a_m <= {1'b0, r_din[86:64], 40'd0};
 										r_stag <= 3'd5; fst <= F_NORM;
 									end
-									else begin unsupp <= 1; fst <= F_IDLE; end
+									else begin
+										unsupp <= 1;
+										capture_datatype(
+										    {3'b010, r_fmt, r_dst, r_op},
+										    {r_din[95], r_din[94:80], 16'd0,
+										     r_din[63:0]}, 3'd5,
+										    {fr_s[r_dst], fr_e[r_dst], 16'd0,
+										     fr_m[r_dst]},
+										    frame_tag_x(fr_e[r_dst], fr_m[r_dst]),
+										    1'b0, 1'b0);
+										fst <= F_IDLE;
+									end
 								end
 								else begin
 									r_stag <= 3'd1;
@@ -1001,7 +1093,18 @@ always @(posedge clk) begin
 										a_m <= {1'b0, r_din[83:32], 11'd0};
 										r_stag <= 3'd5; fst <= F_NORM;
 									end
-									else begin unsupp <= 1; fst <= F_IDLE; end
+									else begin
+										unsupp <= 1;
+										capture_datatype(
+										    {3'b010, r_fmt, r_dst, r_op},
+										    {r_din[95], r_din[94:80], 16'd0,
+										     r_din[63:0]}, 3'd5,
+										    {fr_s[r_dst], fr_e[r_dst], 16'd0,
+										     fr_m[r_dst]},
+										    frame_tag_x(fr_e[r_dst], fr_m[r_dst]),
+										    1'b0, 1'b0);
+										fst <= F_IDLE;
+									end
 								end
 								else begin
 									r_stag <= 3'd1;
@@ -1026,7 +1129,19 @@ always @(posedge clk) begin
 										unpack_x(r_din[95], r_din[94:80], r_din[63:0]);
 									r_stag <= 3'd4; fst <= F_NORM;
 								end
-								else begin unsupp <= 1; fst <= F_IDLE; end
+								else begin
+									unsupp <= 1;
+									capture_datatype(
+									    {3'b010, r_fmt, r_dst, r_op},
+									    {r_din[95], r_din[94:80], 16'd0,
+									     r_din[63:0]},
+									    frame_tag_x(r_din[94:80], r_din[63:0]),
+									    {fr_s[r_dst], fr_e[r_dst], 16'd0,
+									     fr_m[r_dst]},
+									    frame_tag_x(fr_e[r_dst], fr_m[r_dst]),
+									    1'b0, 1'b0);
+									fst <= F_IDLE;
+								end
 							end
 							else begin
 								r_stag <= frame_tag_x(r_din[94:80], r_din[63:0]);
@@ -1075,6 +1190,11 @@ always @(posedge clk) begin
 				else if (r_op == 7'h38 &&
 				    unsupported_x(fr_e[r_dst], fr_m[r_dst])) begin
 					unsupp <= 1;
+					capture_datatype({3'b010, r_fmt, r_dst, r_op},
+					    {a_s, a_e[14:0], 16'd0, a_m}, r_stag,
+					    {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]},
+					    frame_tag_x(fr_e[r_dst], fr_m[r_dst]),
+					    1'b0, 1'b0);
 					fst <= F_IDLE;
 				end
 				else begin
@@ -1142,6 +1262,11 @@ always @(posedge clk) begin
 					fpsr[14] <= 0;
 					fpsr[7]  <= r_ae7;
 					unsupp <= 1;
+					capture_datatype({3'b010, r_fmt, r_dst, r_op},
+					    {a_s, a_e[14:0], 16'd0, a_m}, r_stag,
+					    {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]},
+					    frame_tag_x(fr_e[r_dst], fr_m[r_dst]),
+					    1'b0, 1'b0);
 					fst <= F_IDLE;
 				end
 				else begin

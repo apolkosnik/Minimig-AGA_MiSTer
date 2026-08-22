@@ -25,6 +25,8 @@ cnt_fpovfl	equ	$362A
 fp_exc_ea	equ	$362C
 unimp_frame	equ	$3A00
 unsup_fa	equ	$360C
+unsup_fhdr	equ	$3900	; FSAVE frame header seen at vector 55
+unsup_fsave	equ	$3910	; FSAVE landing area (100 bytes, $3910-$3973)
 unsup_resume	equ	$3610
 unsup_pc	equ	$3614
 bsun_resume	equ	$3618
@@ -611,6 +613,21 @@ unimp_pd_ok:
 denx_op:
 	fmove.x	($32D0).l,fp0
 denx_cont:
+	; The handler ran FSAVE.  A real FPSP needs the offending datatype in
+	; a BUSY frame; this used to be an IDLE frame ($41000000) carrying no
+	; CMDREG, ETEMP or tags, and nothing tested it because the handler
+	; only counted the trap.
+	move.l	(unsup_fhdr).l,d0
+	chkl	d0,$41600000,184	; $41/$60 BUSY, not IDLE
+	move.l	(unsup_fsave+96).l,d0
+	chkl	d0,$00000001,185	; ETEMP holds the denormal operand
+	move.l	(unsup_fsave+88).l,d0
+	chkl	d0,$00000000,186	; ...and its sign/exponent longword
+	move.l	(unsup_fsave+60).l,d0
+	and.l	#$E0000000,d0
+	chkl	d0,$80000000,187	; STAG = 4: denormal/unnormal
+	move.l	(unsup_fsave+40).l,d0
+	chkl	d0,denx_op,188		; FPIARCU addresses the faulting op
 	chkcnt	cnt_fpunsup,1,66
 	move.l	(unsup_pc).l,d0
 	chkl	d0,denx_cont,76	; post-instruction: the FOLLOWING PC
@@ -1177,6 +1194,18 @@ h_fpunsup:
 	move.l	(unsup_resume).l,2(sp)
 	clr.l	(unsup_resume).l
 h_fpunsup_post:
+	; Capture what a real FPSP handler would see.  This test previously
+	; only counted the trap, so the state the handler needs -- CMDREG,
+	; ETEMP/FPTEMP, tags -- was never examined and could be absent
+	; without any test noticing.
+	lea	(unsup_fsave).l,a1
+	fsave	(a1)
+	move.l	(unsup_fsave).l,d6
+	move.l	d6,(unsup_fhdr).l
+	; No FRESTORE: AP040 re-arms a restored BUSY frame, so replaying it
+	; here would re-trap.  FSAVE alone leaves the FPU idle, which is all
+	; this inspection needs.  (Restoring a BUSY frame is audit finding 6
+	; and is a separate piece of work.)
 	addq.w	#1,(cnt_fpunsup).l
 	rte
 
