@@ -60,6 +60,16 @@ reg         m_err = 0;
 reg         s_stb = 0;
 reg  [31:0] s_addr = 0;
 
+reg         snoop_storm = 0;
+reg         s_stb_storm = 0;
+// free-running chipset snoop traffic on its own driver: port B is taken
+// every other cycle, which is what blitter/copper/display DMA looks like
+// to this cache.  ORed into the DUT input so the snoop task keeps its own.
+always @(negedge clk) begin
+	if (snoop_storm) s_stb_storm <= ~s_stb_storm;
+	else             s_stb_storm <= 1'b0;
+end
+
 ap040_cache dut
 (
 	.clk(clk), .nreset(nreset), .ce(ce),
@@ -73,7 +83,7 @@ ap040_cache dut
 	.m_req(m_req), .m_write(m_write), .m_instr(m_instr),
 	.m_size(m_size), .m_addr(m_addr), .m_wdata(m_wdata),
 	.m_fc(), .m_ack(m_ack), .m_rdata(m_rdata), .m_err(m_err),
-	.s_stb(s_stb), .s_addr(s_addr)
+	.s_stb(s_stb | s_stb_storm), .s_addr(s_stb_storm ? 32'h0000_C300 : s_addr)
 );
 
 integer errors = 0;
@@ -186,6 +196,42 @@ task cpu_read_btb;
 		@(negedge clk);
 		c_req = 0;
 		@(posedge clk);
+	end
+endtask
+
+// A cache-inhibited read that HITS, immediately followed by a WRITE.
+// store_inv asserts combinationally while a write waits in C_IDLE and it
+// blocks ci_inv; if the FSM also refuses to accept while ci_inv_pend is
+// set, the write and the invalidate block each other forever.
+task cpu_ci_read_then_write;
+	input [31:0] a;
+	input [31:0] wa;
+	integer guard;
+	begin
+		@(negedge clk);
+		c_req = 1; c_write = 0; c_size = 2'b10; c_addr = a; c_nocache = 1;
+		guard = 0;
+		while (!(c_ack && ce) && guard < 200) begin
+			@(posedge clk); guard = guard + 1;
+		end
+		if (guard >= 200) begin
+			$display("FAIL: CI read never completed");
+			errors = errors + 1;
+		end
+		// present the store with no idle gap
+		@(negedge clk);
+		c_nocache = 0; c_write = 1; c_addr = wa; c_wdata = 32'hDEAD_5170;
+		guard = 0;
+		while (!(c_ack && ce) && guard < 300) begin
+			@(posedge clk); guard = guard + 1;
+		end
+		if (guard >= 300) begin
+			$display("FAIL: DEADLOCK -- store after a cache-inhibited hit never completed");
+			errors = errors + 1;
+		end
+		@(negedge clk);
+		c_req = 0; c_write = 0;
+		repeat (3) @(posedge clk);
 	end
 endtask
 
@@ -545,6 +591,23 @@ initial begin
 	end
 	d = 32'hB77B_0080;   // silence the unused-check below
 	d2 = 32'hB77B_0080;
+
+	//------------------------------------------------------------------
+	// T9: a store issued right after a cache-inhibited HIT must complete.
+	// The CI hit owes a row invalidate; a waiting store asserts store_inv
+	// combinationally, which blocks that invalidate.  If acceptance is
+	// also held while the invalidate is owed, the two block each other
+	// and the CPU wedges -- programs hang or loop forever.
+	//------------------------------------------------------------------
+	// Chipset DMA snoops CONSTANTLY on a real Amiga (blitter, copper,
+	// display), and a snoop owns port B whenever it fires -- so the CI
+	// invalidate cannot land during the bypassed access the way it does
+	// in a quiet bench.  Drive that traffic while the pair runs.
+	expect_read(32'h0000_D000, mem[32'hD000>>2], 9);   // prime the line
+	snoop_storm = 1;
+	cpu_ci_read_then_write(32'h0000_D000, 32'h0000_D400);
+	snoop_storm = 0;
+	repeat (6) @(posedge clk);
 
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else $display("TEST FAILED with %0d errors", errors);

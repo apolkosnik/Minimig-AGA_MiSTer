@@ -435,6 +435,16 @@ always @(posedge clk) begin
 				// enter C_LOOK and compare against the not-yet-invalidated
 				// tag row using stale data_q.
 				//
+				// WRITES ARE EXEMPT, and must be.  store_inv asserts
+				// combinationally while a store waits in C_IDLE and it
+				// blocks ci_inv; holding the store as well made the two
+				// block each other with no way out -- a hard wedge, the
+				// worst possible failure for a cache.  A store needs no
+				// exemption from the guarantee anyway: it never reads
+				// data_q, and it clears its own row on acceptance.
+				// Exempting it also lets ci_inv fire the moment the FSM
+				// leaves C_IDLE.
+				//
 				// HONEST NOTE: that window could not be demonstrated.
 				// ci_inv_pend is raised on the FIRST cycle of C_PASS while
 				// the access itself runs to m_ack, so the invalidate lands
@@ -447,7 +457,8 @@ always @(posedge clk) begin
 				// request-low cycle, and it keeps ci_inv_row single-slot
 				// so a second CI hit cannot overwrite a pending row and
 				// lose its invalidate.  The cost is nil in practice.
-				else if (c_req && !ack_r && !err_hold && !ci_inv_pend) begin
+				else if (c_req && !ack_r && !err_hold &&
+				         (c_write || !ci_inv_pend)) begin
 					if (c_write) begin
 						if (store_inv_lost) begin
 							// port B owes a recorded invalidate: hold the
