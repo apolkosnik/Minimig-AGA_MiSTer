@@ -124,8 +124,10 @@ module tb_ddram_walker_read;
 	reg        slave_wedged = 0;       // 1 = accepted reads held, not returned
 	reg        drop_next = 0;          // drop exactly one accepted read
 	reg        wedge_seen = 0;         // latched: phase 10 has begun
-	reg        held_v = 0;             // a held read awaiting release
+	reg [15:0] ref16, got16;           // phase 15 reference and result
+	reg [1:0]  held_v = 0;             // held reads awaiting release (queue)
 	reg [63:0] held_dat = 0;
+	reg [63:0] held_dat1 = 0;
 
 	// waitrequest: either always ready, or a one-cycle-on/off stutter to
 	// exercise held commands
@@ -159,11 +161,19 @@ module tb_ddram_walker_read;
 			drop_next <= 1'b0;   // response lost forever: nothing scheduled
 		end
 		else if (ddram_rd && !ddram_busy && slave_wedged) begin
-			held_v   <= 1'b1;
-			held_dat <= ddr_mem[ddram_addr[12:3]];
+			if (!held_v[0]) begin
+				held_v[0] <= 1'b1;
+				held_dat  <= ddr_mem[ddram_addr[12:3]];
+			end
+			else begin
+				held_v[1] <= 1'b1;
+				held_dat1 <= ddr_mem[ddram_addr[12:3]];
+			end
 		end
-		if (held_v && !slave_wedged) begin
-			held_v         <= 1'b0;
+		if (held_v[0] && !slave_wedged) begin
+			held_v[0]      <= held_v[1];
+			held_dat       <= held_dat1;
+			held_v[1]      <= 1'b0;
 			rr_v[rd_lat]   <= 1'b1;
 			rr_dat[rd_lat] <= held_dat;
 		end
@@ -201,6 +211,16 @@ module tb_ddram_walker_read;
 	// mirror the DUT exactly: it forms ddram_addr = {3'b001, a[28:3]} and
 	// the slave indexes ddr_mem[ddram_addr[12:3]] == ddr_mem[a[15:6]].
 	// a[2] then selects the 32-bit half, with the 16-bit swap of state 14.
+	// the halfword a CPU cache fill must hand back for a given word address
+	function [15:0] expect_cpu;
+		input [28:1] a;
+		reg [63:0] w;
+		begin
+			w = ddr_mem[a >> 2];
+			expect_cpu = w[47:32];   // == the ddr_mem index for this pattern
+		end
+	endfunction
+
 	function [31:0] expect_word;
 		input [28:2] a;
 		reg [63:0] w;
@@ -332,6 +352,30 @@ module tb_ddram_walker_read;
 				$display("FAIL: CPU cache read timeout addr=%h", {addr,1'b0});
 				errors = errors + 1;
 			end
+			@(negedge clk);
+			cpuCS = 0; cpustate = 0; cpuL = 1; cpuU = 1;
+			repeat (2) @(posedge clk);
+		end
+	endtask
+
+	// cpu_read that also returns the halfword the cache handed back --
+	// phase 15 compares a fill that raced an orphan beat against a clean
+	// reference fill of the same pattern word.
+	task cpu_read_val;
+		input [28:1] addr;
+		output [15:0] val;
+		begin
+			@(negedge clk);
+			cpuAddr = addr; cpuL = 0; cpuU = 0; cpustate = 0; cpuCS = 1;
+			guard = 0;
+			while (!ramready && guard < 200000) begin
+				@(posedge clk); guard = guard + 1;
+			end
+			if (!ramready) begin
+				$display("FAIL: CPU cache read timeout addr=%h", {addr,1'b0});
+				errors = errors + 1;
+			end
+			val = cpuRD;
 			@(negedge clk);
 			cpuCS = 0; cpustate = 0; cpuL = 1; cpuU = 1;
 			repeat (2) @(posedge clk);
@@ -581,6 +625,71 @@ module tb_ddram_walker_read;
 		slave_wedged = 0;                // the late data now arrives; the
 		repeat (60) @(posedge clk);      // completed-but-abandoned response
 		walker_read(27'h0000440);        // must not corrupt the next walk
+
+		// 15) late response after a controller abort.  A read the slave
+		//     ACCEPTED but answers only after ddram_ctrl's rdwait abort
+		//     owes a beat nobody is waiting for.  Before the drain it was
+		//     consumed as the NEXT read's data: one cache line filled with
+		//     the previous read's bytes -- the tc_windup a2 panic, where a
+		//     movem restore popped a shifted longword into the timehands
+		//     pointer.  The drain must swallow the orphan and hold new
+		//     reads off until the pipe is clean.
+		// 15) late beat in the timeout-epoch skew window.  ddram_ctrl's
+		//     rdwait counts from COMMAND ISSUE; the arbiter's resp_wait
+		//     counts from SLAVE ACCEPTANCE.  When waitrequest stretches
+		//     (DDR3 under ARM-side contention does), the controller
+		//     aborts thousands of cycles before the arbiter would
+		//     quarantine -- a response landing in that window is forwarded
+		//     by the live arbiter and was consumed as the NEXT read's
+		//     data: one fill of the neighbouring word, the tc_windup a2
+		//     panic.  The controller-side drain must swallow the orphan
+		//     and hold new reads until the pipe is clean.
+		// 15) late beat inside the timeout-epoch skew window.  ddram_ctrl's
+		//     rdwait counts from COMMAND ISSUE; the arbiter's resp_wait
+		//     counts from SLAVE ACCEPTANCE.  Stretched waitrequest (DDR3
+		//     under ARM-side contention) separates the two epochs, so the
+		//     controller abandons a read thousands of cycles before the
+		//     arbiter would quarantine its response.  That response is
+		//     still forwarded, and with nothing tracking it, the NEXT read
+		//     consumed it as its own data: a cache line filled from the
+		//     neighbouring address.  One such fill under a movem restore
+		//     pops a shifted longword into a register -- the tc_windup a2
+		//     panic, where the kernel's timehands pointer became a user
+		//     address.  The controller must account for an accepted read
+		//     and drain the orphan before admitting another.
+		$display("PHASE 15: late beat in the timeout-epoch skew window");
+		cpu_read_val(28'h0000600, got16);  // formula self-check on a clean
+		if (got16 !== expect_cpu(28'h0000600)) begin
+			$display("FAIL: phase 15 reference model wrong: got=%h exp=%h",
+			         got16, expect_cpu(28'h0000600));
+			errors = errors + 1;
+		end
+		slave_wedged = 1;
+		@(negedge clk28);
+		walker_we = 0; walker_addr = 27'h0000520; walker_req = 1;
+		wait (dut.walker_busy === 1'b1);   // dispatched: rdwait counting
+		force ddram_busy = 1'b1;           // acceptance held off, so the
+		repeat (3000) @(posedge clk);      // arbiter's epoch lags by 3000
+		release ddram_busy;                // accepted; the wedge holds data
+		repeat (13600) @(posedge clk);     // controller abort (2^14 from
+		                                   // issue) has now fired, while
+		                                   // the arbiter is still live
+		rd_lat = 4;
+		slave_wedged = 0;                  // the orphan beat is in flight
+		cpu_read_val(28'h0000700, got16);  // the victim fill races it
+		ref16 = expect_cpu(28'h0000700);
+		if (got16 !== ref16) begin
+			$display("FAIL: post-abort orphan aliased the next fill: got=%h exp=%h",
+			         got16, ref16);
+			errors = errors + 1;
+		end
+		guard = 0;                         // retire the bus-errored walk
+		while (!walker_ack && guard < 90000) begin
+			@(posedge clk28); guard = guard + 1;
+		end
+		@(negedge clk28); walker_req = 0;
+		repeat (200) @(posedge clk);
+		walker_read(27'h0000540);          // and the pipe is clean again
 
 		if (errors == 0) $display("ALL TESTS PASSED");
 		else $display("TEST FAILED with %0d errors", errors);

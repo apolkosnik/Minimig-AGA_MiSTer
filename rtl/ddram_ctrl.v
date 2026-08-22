@@ -234,6 +234,9 @@ always @ (posedge sysclk) begin
 	// report what happened.  The arbiter quarantines the abandoned
 	// burst's late beats so they cannot alias into a newer read.
 	reg [13:0] rdwait;
+	reg        rd_owed;     // an accepted Avalon read whose data has not returned
+	reg        stale_rd;    // ...and whose consumer timed out: drain before reading
+	reg [13:0] stale_wait;  // lost-response decay so a vanished beat cannot wedge reads
 
 	cache_fill <= 0;
 	ddr_data <= dout[{ba, 4'b0000} +:16];
@@ -249,6 +252,9 @@ always @ (posedge sysclk) begin
 		state                <= 0;
 		write_ack            <= 0;
 		rdwait               <= 0;
+		rd_owed              <= 0;
+		stale_rd             <= 0;
+		stale_wait           <= 0;
 		walker_busy          <= 0;
 		walker_addr_latch    <= 0;
 		walker_wdata_latch   <= 0;
@@ -257,6 +263,28 @@ always @ (posedge sysclk) begin
 	end
 	else begin
 		if (!walker_req) walker_busy <= 0;
+
+		// Avalon read accounting.  A command transfers on the cycle it is
+		// asserted with waitrequest low; its response arrives later, in
+		// order.  The timeout aborts below withdraw the command, but one
+		// the slave already ACCEPTED still owes a response beat.  Nothing
+		// consumed it before: the beat arrived during the NEXT read and
+		// was taken as that read's data, shifting every later beat by one
+		// -- the CPU then fills cache lines with the neighbouring data,
+		// and a single such fill is enough to hand the kernel a corrupted
+		// movem mask or pointer (the tc_windup a2 panic).  Track
+		// acceptance; after an abort, drain the orphan beat -- with a
+		// decay so a response lost outright cannot block reads forever --
+		// and hold new reads off until the pipe is clean again.
+		if (ram_rd && !ram_busy) rd_owed <= 1;
+		if (stale_rd) begin
+			if (ram_dout_ready || (&stale_wait)) begin
+				stale_rd   <= 0;
+				stale_wait <= 0;
+			end
+			else stale_wait <= stale_wait + 1'd1;
+		end
+
 		case(state)
 			0: if(~ram_busy) begin
 					if(~write_ack & write_req) begin
@@ -266,7 +294,7 @@ always @ (posedge sysclk) begin
 						ram_we   <= 1;
 						write_ack  <= 1;
 					end
-					else if(walker_req && !walker_busy) begin
+					else if(walker_req && !walker_busy && !stale_rd) begin
 						walker_busy        <= 1;
 						walker_addr_latch  <= walker_addr;
 						walker_wdata_latch <= walker_wdata;
@@ -285,7 +313,7 @@ always @ (posedge sysclk) begin
 							state  <= 14;
 						end
 					end
-					else if(cache_req) begin
+					else if(cache_req && !stale_rd) begin
 						ram_addr <= {3'b001, cpuAddr[28:3]};
 						ram_be   <= 8'hFF;
 						ram_rd   <= 1;
@@ -305,6 +333,7 @@ always @ (posedge sysclk) begin
 			// table walk while AmigaOS, which never walks DDR3, did not.
 			1: if(ram_dout_ready) begin
 					rdwait        <= 0;
+					rd_owed       <= 0;
 					ddr_data      <= ram_dout[{ba, 4'b0000} +:16];
 					dout          <= ram_dout;
 					cache_fill    <= 1;
@@ -315,7 +344,13 @@ always @ (posedge sysclk) begin
 					rdwait <= 0;
 					ram_rd <= 0;   // withdraw the command: a level-held
 					state  <= 0;   // read the slave accepted late would
-				end                // otherwise become an untracked orphan
+					               // otherwise become an untracked orphan
+					if (rd_owed) begin
+						stale_rd   <= 1;   // accepted: a beat is still owed
+						stale_wait <= 0;
+						rd_owed    <= 0;
+					end
+				end
 				else rdwait <= rdwait + 1'd1;
 			2,3: begin
 					cache_fill    <= 1;
@@ -383,6 +418,7 @@ always @ (posedge sysclk) begin
 				end
 			14: if(ram_dout_ready) begin
 					rdwait       <= 0;
+					rd_owed      <= 0;
 					walker_rdata <= walker_addr_latch[2]
 						? {ram_dout[47:32], ram_dout[63:48]}
 						: {ram_dout[15:0], ram_dout[31:16]};
@@ -393,7 +429,13 @@ always @ (posedge sysclk) begin
 					rdwait <= 0;   // abandoned: no ack -- the walker
 					ram_rd <= 0;   // watchdog bus-errors the MMU side;
 					state  <= 0;   // withdraw the command so no orphan
-				end                // is accepted later
+					               // is accepted later
+					if (rd_owed) begin
+						stale_rd   <= 1;   // accepted: a beat is still owed
+						stale_wait <= 0;
+						rd_owed    <= 0;
+					end
+				end
 				else rdwait <= rdwait + 1'd1;
 		endcase
 
