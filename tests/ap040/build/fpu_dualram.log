@@ -6,8 +6,8 @@ L2 t=275220 D1WR adr=156 bs=11 dat=0000 fill=1
 L2 t=275396 D1WR adr=157 bs=11 dat=0000 fill=1
 RD t=1830180 lin=010513 (byte 0020a26) words=0000 0000 670a 3e3c slot=1
 RD t=1832996 lin=010515 (byte 0020a2a) words=670a 3e3c 002a 4ef9 slot=1
-RD t=1835812 lin=010517 (byte 0020a2e) words=002a 4ef9 0000 20c4 slot=1
-RD t=1838628 lin=010519 (byte 0020a32) words=0000 20c4 f35a 23fc slot=1
+RD t=1835812 lin=010517 (byte 0020a2e) words=002a 4ef9 0000 215a slot=1
+RD t=1838628 lin=010519 (byte 0020a32) words=0000 215a f35a 23fc slot=1
 RD t=1841444 lin=01051b (byte 0020a36) words=f35a 23fc 4100 0000 slot=1
 RD t=1844260 lin=01051d (byte 0020a3a) words=4100 0000 0000 328c slot=1
 FT t=1946780 st=1 sd=zzzz reg=zzzz q=zzzz fill=0
@@ -31,24 +31,24 @@ FT t=1952500 st=2 sd=zzzz reg=zzzz q=zzzz fill=0
 FT t=1952588 st=3 sd=zzzz reg=zzzz q=zzzz fill=0
 FT t=1952676 st=4 sd=zzzz reg=zzzz q=zzzz fill=0
 EXC t=2463516 vec=11 pc=00000a88 sr=2704
-EXCJMP t=2478300 target=00001f9e
+EXCJMP t=2478300 target=00002034
 LC t=2527668 D1WR adr=1fc bs=11 dat=2704 fill=1
 LC t=2527844 D1WR adr=1fd bs=11 dat=0000 fill=1
 LC t=2528020 D1WR adr=1fe bs=11 dat=0a84 fill=1
-LC t=2580732 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=2581788 D1WR adr=1fe bs=11 dat=0a88 fill=0
-LC t=2694780 D1WR adr=1fc bs=11 dat=2704 fill=0
-LC t=2697244 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=2698300 D1WR adr=1fe bs=11 dat=0ac2 fill=0
+LC t=2568060 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=2569116 D1WR adr=1fe bs=11 dat=0a88 fill=0
+LC t=2693372 D1WR adr=1fc bs=11 dat=2704 fill=0
+LC t=2695836 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=2696892 D1WR adr=1fe bs=11 dat=0ac2 fill=0
 EXC t=2702876 vec=11 pc=00000ac6 sr=2704
-EXCJMP t=2704636 target=00001f9e
+EXCJMP t=2704636 target=00002034
 LC t=2739836 D1WR adr=1fd bs=11 dat=0000 fill=0
 LC t=2740892 D1WR adr=1fe bs=11 dat=0ac6 fill=0
-LC t=2850716 D1WR adr=1fc bs=11 dat=2704 fill=0
-LC t=2853180 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=2851068 D1WR adr=1fc bs=11 dat=2704 fill=0
+LC t=2853532 D1WR adr=1fd bs=11 dat=0000 fill=0
 LC t=2854588 D1WR adr=1fe bs=11 dat=0b00 fill=0
 EXC t=2860572 vec=11 pc=00000b04 sr=2704
-EXCJMP t=2862332 target=00001f9e
+EXCJMP t=2862332 target=00002034
 LC t=2910644 D1WR adr=1fd bs=11 dat=0000 fill=1
 LC t=2910820 D1WR adr=1fe bs=11 dat=0b00 fill=1
 LC t=2911172 D1WR adr=1fc bs=11 dat=2704 fill=1
@@ -58,157 +58,157 @@ LC t=3060508 D1WR adr=1fc bs=11 dat=0b4a fill=0
 LC t=3064380 D1WR adr=1fd bs=11 dat=202c fill=0
 LC t=3067196 D1WR adr=1fe bs=11 dat=0000 fill=0
 EXC t=3071772 vec=11 pc=00000b4a sr=2700
-EXCJMP t=3073532 target=00001f9e
-LC t=3212572 D1WR adr=1fc bs=11 dat=2704 fill=0
-LC t=3215036 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=3216092 D1WR adr=1fe bs=11 dat=0b74 fill=0
-EXC t=3221020 vec=11 pc=00000b78 sr=2704
-EXCJMP t=3222780 target=00001f9e
-LC t=3257980 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=3259036 D1WR adr=1fe bs=11 dat=0b78 fill=0
-LC t=3406524 D1WR adr=1fc bs=11 dat=0bc6 fill=0
-LC t=3410748 D1WR adr=1fd bs=11 dat=30dc fill=0
-LC t=3413564 D1WR adr=1fe bs=11 dat=0000 fill=0
-EXC t=3418140 vec=55 pc=00000bc6 sr=2704
-EXCJMP t=3432924 target=00001fd2
-LC t=3657852 D1WR adr=1fc bs=11 dat=0c00 fill=0
-LC t=3661372 D1WR adr=1fd bs=11 dat=202c fill=0
-LC t=3664188 D1WR adr=1fe bs=11 dat=0000 fill=0
-EXC t=3668764 vec=11 pc=00000c00 sr=2700
-EXCJMP t=3670524 target=00001f9e
-LC t=4532220 D1WR adr=1fc bs=11 dat=0dca fill=0
-LC t=4534684 D1WR adr=1fd bs=11 dat=202c fill=0
-LC t=4537148 D1WR adr=1fe bs=11 dat=0000 fill=0
-EXC t=4541724 vec=11 pc=00000dca sr=2704
-EXCJMP t=4543484 target=00001f9e
-LC t=4898300 D1WR adr=1fc bs=11 dat=0e62 fill=0
-LC t=4900764 D1WR adr=1fd bs=11 dat=202c fill=0
-LC t=4903228 D1WR adr=1fe bs=11 dat=0000 fill=0
-EXC t=4907804 vec=11 pc=00000e62 sr=2704
-EXCJMP t=4909564 target=00001f9e
-L2 t=5349300 D1WR adr=154 bs=11 dat=aaaa fill=1
-L2 t=5349476 D1WR adr=155 bs=11 dat=aaab fill=1
-L2 t=5349652 D1WR adr=156 bs=11 dat=0000 fill=1
-L2 t=5349828 D1WR adr=157 bs=11 dat=0000 fill=1
-L2 t=5844916 D1WR adr=154 bs=11 dat=aaaa fill=1
-L2 t=5845092 D1WR adr=155 bs=11 dat=aaaa fill=1
-L2 t=5845268 D1WR adr=156 bs=11 dat=0000 fill=1
-L2 t=5845444 D1WR adr=157 bs=11 dat=0000 fill=1
-EXC t=6104604 vec=55 pc=00001132 sr=2700
-EXCJMP t=6106364 target=00001fd2
-LC t=6129332 D1WR adr=1fc bs=11 dat=1132 fill=1
-LC t=6129508 D1WR adr=1fd bs=11 dat=30dc fill=1
-EXC t=6403100 vec=50 pc=00001198 sr=2704
-EXCJMP t=6417884 target=00002010
-EXC t=6650908 vec=54 pc=00001218 sr=2700
-EXCJMP t=6652668 target=0000204a
-EXC t=6901532 vec=48 pc=0000128c sr=2700
-EXCJMP t=6903292 target=00002024
-EXC t=7233820 vec=55 pc=00001328 sr=2700
-EXCJMP t=7235580 target=00001fd2
-EXC t=7453468 vec=55 pc=00001364 sr=2704
-EXCJMP t=7455228 target=00001fd2
-EXC t=7656220 vec=55 pc=000013ae sr=2700
-EXCJMP t=7657980 target=00001fd2
-EXC t=7937820 vec=55 pc=000013fc sr=2700
-EXCJMP t=7939580 target=00001fd2
-EXC t=9787932 vec=55 pc=00001808 sr=2704
-EXCJMP t=9789692 target=00001fd2
-EXC t=10215964 vec=55 pc=000018ac sr=2704
-EXCJMP t=10217724 target=00001fd2
-EXC t=10522908 vec=55 pc=00001906 sr=2700
-EXCJMP t=10524668 target=00001fd2
-EXC t=10796060 vec=55 pc=00001952 sr=2700
-EXCJMP t=10797820 target=00001fd2
-EXC t=11091740 vec=11 pc=000019c0 sr=2704
-EXCJMP t=11106524 target=00001f9e
-EXC t=11280412 vec=11 pc=000019e0 sr=2704
-EXCJMP t=11282172 target=00001f9e
-EXC t=11398684 vec=11 pc=00001a00 sr=2704
-EXCJMP t=11400444 target=00001f9e
-EXC t=11514140 vec=11 pc=00001a20 sr=2704
-EXCJMP t=11515900 target=00001f9e
-WILD: pc left program at t=13749340: 00008000 -> 00008002
-  ring[0] t=13468092 pc=00001ed4
-  ring[1] t=13477948 pc=00001ed6
-  ring[2] t=13479356 pc=00001ed8
-  ring[3] t=13479708 pc=00001eda
-  ring[4] t=13483228 pc=00001edc
-  ring[5] t=13486044 pc=00001ee0
-  ring[6] t=13495900 pc=00001ee2
-  ring[7] t=13496252 pc=00001eec
-  ring[8] t=13497308 pc=00001eee
-  ring[9] t=13498716 pc=00001ef0
-  ring[10] t=13513500 pc=00001ef2
-  ring[11] t=13516668 pc=00001ef4
-  ring[12] t=13517372 pc=00001ef8
-  ring[13] t=13518780 pc=00001efa
-  ring[14] t=13519132 pc=00001f04
-  ring[15] t=13532860 pc=00001f06
-  ring[16] t=13533564 pc=00001f08
-  ring[17] t=13534268 pc=00001f0a
-  ring[18] t=13535676 pc=00001f0c
-  ring[19] t=13536028 pc=00001f0e
-  ring[20] t=13556092 pc=00001f10
-  ring[21] t=13556796 pc=00001f14
-  ring[22] t=13558204 pc=00001f18
-  ring[23] t=13564540 pc=00001f1a
-  ring[24] t=13565244 pc=00001f1c
-  ring[25] t=13567356 pc=00001f20
-  ring[26] t=13576156 pc=00001f22
-  ring[27] t=13576860 pc=00001f24
-  ring[28] t=13577564 pc=00001f28
-  ring[29] t=13578972 pc=00001f2a
-  ring[30] t=13579676 pc=00001f2c
-  ring[31] t=13580732 pc=00001f30
-  ring[32] t=13614876 pc=00001f32
-  ring[33] t=13615580 pc=00001f34
-  ring[34] t=13616284 pc=00001f38
-  ring[35] t=13616988 pc=00001f3a
-  ring[36] t=13621564 pc=00001f3c
-  ring[37] t=13622972 pc=00001f3e
-  ring[38] t=13623676 pc=00001f40
-  ring[39] t=13630012 pc=00001f42
-  ring[40] t=13631420 pc=00001f44
-  ring[41] t=13632124 pc=00001f48
-  ring[42] t=13633532 pc=00001f4a
-  ring[43] t=13633884 pc=00001f54
-  ring[44] t=13648316 pc=00001f56
-  ring[45] t=13649020 pc=00001f58
-  ring[46] t=13650076 pc=00001f5c
-  ring[47] t=13680700 pc=00001f5e
-  ring[48] t=13682108 pc=00001f62
-  ring[49] t=13698300 pc=00001f64
-  ring[50] t=13699004 pc=00001f68
-  ring[51] t=13702524 pc=00001f6a
-  ring[52] t=13702876 pc=00001f74
-  ring[53] t=13713436 pc=00001f76
-  ring[54] t=13714844 pc=00001f78
-  ring[55] t=13715196 pc=00001f7a
-  ring[56] t=13718716 pc=00001f7c
-  ring[57] t=13722588 pc=00001f80
-  ring[58] t=13733500 pc=00001f82
-  ring[59] t=13733852 pc=00001f8c
-  ring[60] t=13734908 pc=00001f8e
-  ring[61] t=13735964 pc=00001f90
-  ring[62] t=13736316 pc=00001f92
-  ring[63] t=13737020 pc=00008000
-EXC t=14853916 vec=55 pc=000082c6 sr=2700
-EXCJMP t=14868700 target=00001fd2
-EXC t=15403036 vec=11 pc=000083cc sr=2700
-EXCJMP t=15417820 target=00001f9e
-EXC t=15712796 vec=11 pc=0000843c sr=2700
-EXCJMP t=15714556 target=00001f9e
-EXC t=15887388 vec=4 pc=00008490 sr=2704
-EXCJMP t=15902172 target=000020ae
-EXC t=16949020 vec=11 pc=000086f8 sr=2700
-EXCJMP t=16950780 target=00001f9e
-EXC t=17072924 vec=11 pc=0000871e sr=2700
-EXCJMP t=17074684 target=00001f9e
-EXC t=17405212 vec=11 pc=000087dc sr=2700
-EXCJMP t=17406972 target=00001f9e
-EXC t=17529116 vec=11 pc=000087fc sr=2700
-EXCJMP t=17530876 target=00001f9e
+EXCJMP t=3073532 target=00002034
+LC t=3216092 D1WR adr=1fc bs=11 dat=2704 fill=0
+LC t=3218556 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=3219612 D1WR adr=1fe bs=11 dat=0b74 fill=0
+EXC t=3223836 vec=11 pc=00000b78 sr=2704
+EXCJMP t=3225596 target=00002034
+LC t=3260796 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=3261852 D1WR adr=1fe bs=11 dat=0b78 fill=0
+LC t=3409692 D1WR adr=1fc bs=11 dat=0bc6 fill=0
+LC t=3413564 D1WR adr=1fd bs=11 dat=30dc fill=0
+LC t=3416380 D1WR adr=1fe bs=11 dat=0000 fill=0
+EXC t=3420956 vec=55 pc=00000bc6 sr=2704
+EXCJMP t=3435740 target=00002068
+LC t=3663484 D1WR adr=1fc bs=11 dat=0c00 fill=0
+LC t=3667004 D1WR adr=1fd bs=11 dat=202c fill=0
+LC t=3669820 D1WR adr=1fe bs=11 dat=0000 fill=0
+EXC t=3674396 vec=11 pc=00000c00 sr=2700
+EXCJMP t=3676156 target=00002034
+LC t=4540668 D1WR adr=1fc bs=11 dat=0dca fill=0
+LC t=4543132 D1WR adr=1fd bs=11 dat=202c fill=0
+LC t=4545596 D1WR adr=1fe bs=11 dat=0000 fill=0
+EXC t=4550172 vec=11 pc=00000dca sr=2704
+EXCJMP t=4551932 target=00002034
+LC t=4907452 D1WR adr=1fc bs=11 dat=0e62 fill=0
+LC t=4911676 D1WR adr=1fd bs=11 dat=202c fill=0
+LC t=4914492 D1WR adr=1fe bs=11 dat=0000 fill=0
+EXC t=4919068 vec=11 pc=00000e62 sr=2704
+EXCJMP t=4920828 target=00002034
+L2 t=5360564 D1WR adr=154 bs=11 dat=aaaa fill=1
+L2 t=5360740 D1WR adr=155 bs=11 dat=aaab fill=1
+L2 t=5360916 D1WR adr=156 bs=11 dat=0000 fill=1
+L2 t=5361092 D1WR adr=157 bs=11 dat=0000 fill=1
+L2 t=5858996 D1WR adr=154 bs=11 dat=aaaa fill=1
+L2 t=5859172 D1WR adr=155 bs=11 dat=aaaa fill=1
+L2 t=5859348 D1WR adr=156 bs=11 dat=0000 fill=1
+L2 t=5859524 D1WR adr=157 bs=11 dat=0000 fill=1
+EXC t=6338332 vec=55 pc=000011c8 sr=2700
+EXCJMP t=6340092 target=00002068
+LC t=6363060 D1WR adr=1fc bs=11 dat=11c8 fill=1
+LC t=6363236 D1WR adr=1fd bs=11 dat=30dc fill=1
+EXC t=6622748 vec=50 pc=0000122e sr=2704
+EXCJMP t=6637532 target=000020a6
+EXC t=6870556 vec=54 pc=000012ae sr=2700
+EXCJMP t=6872316 target=000020e0
+EXC t=7104284 vec=48 pc=00001322 sr=2700
+EXCJMP t=7106044 target=000020ba
+EXC t=7459100 vec=55 pc=000013be sr=2700
+EXCJMP t=7460860 target=00002068
+EXC t=7678748 vec=55 pc=000013fa sr=2704
+EXCJMP t=7680508 target=00002068
+EXC t=7901212 vec=55 pc=00001444 sr=2700
+EXCJMP t=7902972 target=00002068
+EXC t=8174364 vec=55 pc=00001492 sr=2700
+EXCJMP t=8176124 target=00002068
+EXC t=10030108 vec=55 pc=0000189e sr=2704
+EXCJMP t=10031868 target=00002068
+EXC t=10469404 vec=55 pc=00001942 sr=2704
+EXCJMP t=10471164 target=00002068
+EXC t=10776348 vec=55 pc=0000199c sr=2700
+EXCJMP t=10778108 target=00002068
+EXC t=11063580 vec=55 pc=000019e8 sr=2700
+EXCJMP t=11065340 target=00002068
+EXC t=11353628 vec=11 pc=00001a56 sr=2704
+EXCJMP t=11368412 target=00002034
+EXC t=11533852 vec=11 pc=00001a76 sr=2704
+EXCJMP t=11535612 target=00002034
+EXC t=11666204 vec=11 pc=00001a96 sr=2704
+EXCJMP t=11667964 target=00002034
+EXC t=11790108 vec=11 pc=00001ab6 sr=2704
+EXCJMP t=11791868 target=00002034
+WILD: pc left program at t=14025308: 00008000 -> 00008002
+  ring[0] t=13729980 pc=00001f6c
+  ring[1] t=13731388 pc=00001f70
+  ring[2] t=13747932 pc=00001f72
+  ring[3] t=13748636 pc=00001f74
+  ring[4] t=13749340 pc=00001f76
+  ring[5] t=13750748 pc=00001f78
+  ring[6] t=13751100 pc=00001f82
+  ring[7] t=13765180 pc=00001f84
+  ring[8] t=13766588 pc=00001f88
+  ring[9] t=13770108 pc=00001f8a
+  ring[10] t=13770812 pc=00001f8c
+  ring[11] t=13771516 pc=00001f8e
+  ring[12] t=13772924 pc=00001f90
+  ring[13] t=13775740 pc=00001f9a
+  ring[14] t=13787004 pc=00001f9c
+  ring[15] t=13788412 pc=00001fa0
+  ring[16] t=13804956 pc=00001fa4
+  ring[17] t=13812348 pc=00001fa6
+  ring[18] t=13813052 pc=00001fa8
+  ring[19] t=13813404 pc=00001faa
+  ring[20] t=13814812 pc=00001fae
+  ring[21] t=13832060 pc=00001fb0
+  ring[22] t=13832764 pc=00001fb2
+  ring[23] t=13833468 pc=00001fb6
+  ring[24] t=13834172 pc=00001fb8
+  ring[25] t=13834876 pc=00001fba
+  ring[26] t=13835580 pc=00001fbc
+  ring[27] t=13835932 pc=00001fbe
+  ring[28] t=13836636 pc=00001fc0
+  ring[29] t=13851420 pc=00001fc2
+  ring[30] t=13852476 pc=00001fc4
+  ring[31] t=13852828 pc=00001fc6
+  ring[32] t=13875356 pc=00001fc8
+  ring[33] t=13876060 pc=00001fca
+  ring[34] t=13876764 pc=00001fce
+  ring[35] t=13877468 pc=00001fd0
+  ring[36] t=13884156 pc=00001fd2
+  ring[37] t=13885564 pc=00001fd4
+  ring[38] t=13886268 pc=00001fd8
+  ring[39] t=13887676 pc=00001fda
+  ring[40] t=13888380 pc=00001fdc
+  ring[41] t=13888732 pc=00001fde
+  ring[42] t=13892956 pc=00001fe0
+  ring[43] t=13893308 pc=00001fea
+  ring[44] t=13904924 pc=00001fec
+  ring[45] t=13906332 pc=00001fee
+  ring[46] t=13907388 pc=00001ff0
+  ring[47] t=13920764 pc=00001ff2
+  ring[48] t=13939772 pc=00001ff4
+  ring[49] t=13941180 pc=00001ff8
+  ring[50] t=13957372 pc=00001ffa
+  ring[51] t=13958076 pc=00001ffe
+  ring[52] t=13959484 pc=00002000
+  ring[53] t=13959836 pc=0000200a
+  ring[54] t=13973916 pc=0000200c
+  ring[55] t=13975324 pc=00002010
+  ring[56] t=13991164 pc=00002012
+  ring[57] t=13991868 pc=00002014
+  ring[58] t=13992572 pc=00002016
+  ring[59] t=13993980 pc=00002018
+  ring[60] t=13994332 pc=00002022
+  ring[61] t=14007708 pc=00002024
+  ring[62] t=14009116 pc=00002028
+  ring[63] t=14009820 pc=00008000
+EXC t=15135516 vec=55 pc=000082c6 sr=2700
+EXCJMP t=15150300 target=00002068
+EXC t=15681820 vec=11 pc=000083cc sr=2700
+EXCJMP t=15696604 target=00002034
+EXC t=15988764 vec=11 pc=0000843c sr=2700
+EXCJMP t=15990524 target=00002034
+EXC t=16166172 vec=4 pc=00008490 sr=2704
+EXCJMP t=16180956 target=00002144
+EXC t=17205276 vec=11 pc=000086f8 sr=2700
+EXCJMP t=17207036 target=00002034
+EXC t=17354524 vec=11 pc=0000871e sr=2700
+EXCJMP t=17356284 target=00002034
+EXC t=17681180 vec=11 pc=000087dc sr=2700
+EXCJMP t=17682940 target=00002034
+EXC t=17791004 vec=11 pc=000087fc sr=2700
+EXCJMP t=17792764 target=00002034
 RD t=27100964 lin=014b2f (byte 002965e) words=0000 0001 8481 e38a slot=1
 RD t=27103780 lin=014b31 (byte 0029662) words=8481 e38a 7200 f241 slot=1
 RD t=27106596 lin=014b33 (byte 0029666) words=7200 f241 0005 c2bc slot=1
@@ -237,8 +237,8 @@ RD t=27168548 lin=014b5f (byte 00296be) words=0000 0001 8481 b4bc slot=1
 RD t=27171364 lin=014b61 (byte 00296c2) words=8481 b4bc aaaa aaaa slot=1
 RD t=27174180 lin=014b63 (byte 00296c6) words=aaaa aaaa 670a 3e3c slot=1
 RD t=27176996 lin=014b65 (byte 00296ca) words=670a 3e3c 00c5 4ef9 slot=1
-RD t=27179812 lin=014b67 (byte 00296ce) words=00c5 4ef9 0000 20c4 slot=1
-RD t=27182628 lin=014b69 (byte 00296d2) words=0000 20c4 f23c 8800 slot=1
+RD t=27179812 lin=014b67 (byte 00296ce) words=00c5 4ef9 0000 215a slot=1
+RD t=27182628 lin=014b69 (byte 00296d2) words=0000 215a f23c 8800 slot=1
 RD t=27185444 lin=014b6b (byte 00296d6) words=f23c 8800 0700 0000 slot=1
 RD t=27188260 lin=014b6d (byte 00296da) words=0700 0000 7400 e38a slot=1
 RD t=27191076 lin=014b6f (byte 00296de) words=7400 e38a 7200 f241 slot=1
@@ -259,158 +259,158 @@ RD t=27230500 lin=014b8b (byte 0029716) words=001c c2bc 0000 0001 slot=1
 RD t=27233316 lin=014b8d (byte 002971a) words=0000 0001 8481 e38a slot=1
 RD t=27236132 lin=014b8f (byte 002971e) words=8481 e38a 7200 f241 slot=1
 RD t=27238948 lin=014b91 (byte 0029722) words=7200 f241 001b c2bc slot=1
-EXC t=29209884 vec=55 pc=0000ad96 sr=2700
-EXCJMP t=29211644 target=00001fd2
-EXC t=29575964 vec=55 pc=0000ae06 sr=2700
-EXCJMP t=29577724 target=00001fd2
-L2 t=30794676 D1WR adr=154 bs=11 dat=0000 fill=1
-L2 t=30794852 D1WR adr=155 bs=11 dat=0000 fill=1
-L2 t=30795028 D1WR adr=156 bs=11 dat=004d fill=1
-L2 t=30795204 D1WR adr=157 bs=11 dat=670a fill=1
-EXC t=30815004 vec=55 pc=0000b0d2 sr=2700
-EXCJMP t=30816764 target=00001fd2
-L2 t=33990836 D1WR adr=154 bs=11 dat=0000 fill=1
-L2 t=33991012 D1WR adr=155 bs=11 dat=0000 fill=1
-L2 t=33991188 D1WR adr=156 bs=11 dat=0000 fill=1
-L2 t=33991364 D1WR adr=157 bs=11 dat=0000 fill=1
-EXC t=34011164 vec=55 pc=0000b47e sr=2700
-EXCJMP t=34012924 target=00001fd2
-EXC t=34326556 vec=55 pc=0000b4d6 sr=2700
-EXCJMP t=34328316 target=00001fd2
-EXC t=34636316 vec=55 pc=0000b52e sr=2700
-EXCJMP t=34638076 target=00001fd2
-L2 t=34908852 D1WR adr=154 bs=11 dat=0000 fill=1
-L2 t=34909028 D1WR adr=155 bs=11 dat=0000 fill=1
-L2 t=34909204 D1WR adr=156 bs=11 dat=0000 fill=1
-L2 t=34909380 D1WR adr=157 bs=11 dat=0000 fill=1
-EXC t=34929180 vec=55 pc=0000b47e sr=2700
-EXCJMP t=34930940 target=00001fd2
-EXC t=35154460 vec=55 pc=0000b4d6 sr=2700
-EXCJMP t=35156220 target=00001fd2
-EXC t=35379740 vec=55 pc=0000b52e sr=2700
-EXCJMP t=35381500 target=00001fd2
-EXC t=35607836 vec=55 pc=0000b47e sr=2700
-EXCJMP t=35609596 target=00001fd2
-EXC t=35833116 vec=55 pc=0000b4d6 sr=2700
-EXCJMP t=35834876 target=00001fd2
-EXC t=36058396 vec=55 pc=0000b52e sr=2700
-EXCJMP t=36060156 target=00001fd2
-EXC t=36286492 vec=55 pc=0000b47e sr=2700
-EXCJMP t=36288252 target=00001fd2
-EXC t=36511772 vec=55 pc=0000b4d6 sr=2700
-EXCJMP t=36513532 target=00001fd2
-EXC t=36737052 vec=55 pc=0000b52e sr=2700
-EXCJMP t=36738812 target=00001fd2
-EXC t=37367836 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=37382620 target=0000bcc4
-EXC t=37962012 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=37963772 target=0000bcc4
-EXC t=38435100 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=38436860 target=0000bcc4
-EXC t=38846236 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=38847996 target=0000bcc4
-EXC t=39257372 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=39259132 target=0000bcc4
-EXC t=39668508 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=39670268 target=0000bcc4
-EXC t=40079644 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=40081404 target=0000bcc4
-EXC t=40524572 vec=32 pc=0000b5fc sr=2000
-EXCJMP t=40526332 target=0000bcc4
-EXC t=40955420 vec=54 pc=0000b74e sr=2704
-EXCJMP t=40957180 target=0000204a
-EXC t=41208860 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=41223644 target=0000bcb0
-EXC t=41501724 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=41503484 target=0000bcb0
-EXC t=41721372 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=41723132 target=0000bcb0
-EXC t=41941020 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=41942780 target=0000bcb0
-EXC t=42160668 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=42162428 target=0000bcb0
-EXC t=42380316 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=42382076 target=0000bcb0
-EXC t=42605596 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=42607356 target=0000bcb0
-EXC t=42822428 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=42824188 target=0000bcb0
-EXC t=43047708 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=43049468 target=0000bcb0
-EXC t=43264540 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=43266300 target=0000bcb0
-EXC t=43495452 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=43497212 target=0000bcb0
-EXC t=43720732 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=43722492 target=0000bcb0
-EXC t=43937564 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=43939324 target=0000bcb0
+EXC t=29468956 vec=55 pc=0000ad96 sr=2700
+EXCJMP t=29470716 target=00002068
+EXC t=29846300 vec=55 pc=0000ae06 sr=2700
+EXCJMP t=29848060 target=00002068
+L2 t=31065012 D1WR adr=154 bs=11 dat=0000 fill=1
+L2 t=31065188 D1WR adr=155 bs=11 dat=0000 fill=1
+L2 t=31065364 D1WR adr=156 bs=11 dat=004d fill=1
+L2 t=31065540 D1WR adr=157 bs=11 dat=670a fill=1
+EXC t=31085340 vec=55 pc=0000b0d2 sr=2700
+EXCJMP t=31087100 target=00002068
+L2 t=34283700 D1WR adr=154 bs=11 dat=0000 fill=1
+L2 t=34283876 D1WR adr=155 bs=11 dat=0000 fill=1
+L2 t=34284052 D1WR adr=156 bs=11 dat=0000 fill=1
+L2 t=34284228 D1WR adr=157 bs=11 dat=0000 fill=1
+EXC t=34304028 vec=55 pc=0000b47e sr=2700
+EXCJMP t=34305788 target=00002068
+EXC t=34639132 vec=55 pc=0000b4d6 sr=2700
+EXCJMP t=34640892 target=00002068
+L2 t=34928564 D1WR adr=154 bs=11 dat=0000 fill=1
+L2 t=34928740 D1WR adr=155 bs=11 dat=0000 fill=1
+L2 t=34928916 D1WR adr=156 bs=11 dat=0000 fill=1
+L2 t=34929092 D1WR adr=157 bs=11 dat=0000 fill=1
+EXC t=34954524 vec=55 pc=0000b52e sr=2700
+EXCJMP t=34956284 target=00002068
+EXC t=35222044 vec=55 pc=0000b47e sr=2700
+EXCJMP t=35223804 target=00002068
+EXC t=35450140 vec=55 pc=0000b4d6 sr=2700
+EXCJMP t=35451900 target=00002068
+EXC t=35678236 vec=55 pc=0000b52e sr=2700
+EXCJMP t=35679996 target=00002068
+EXC t=35909148 vec=55 pc=0000b47e sr=2700
+EXCJMP t=35910908 target=00002068
+EXC t=36137244 vec=55 pc=0000b4d6 sr=2700
+EXCJMP t=36139004 target=00002068
+EXC t=36365340 vec=55 pc=0000b52e sr=2700
+EXCJMP t=36367100 target=00002068
+EXC t=36596252 vec=55 pc=0000b47e sr=2700
+EXCJMP t=36598012 target=00002068
+EXC t=36824348 vec=55 pc=0000b4d6 sr=2700
+EXCJMP t=36826108 target=00002068
+EXC t=37052444 vec=55 pc=0000b52e sr=2700
+EXCJMP t=37054204 target=00002068
+EXC t=37686044 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=37700828 target=0000bcc4
+EXC t=38246428 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=38248188 target=0000bcc4
+EXC t=38722332 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=38724092 target=0000bcc4
+EXC t=39133468 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=39135228 target=0000bcc4
+EXC t=39544604 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=39546364 target=0000bcc4
+EXC t=39955740 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=39957500 target=0000bcc4
+EXC t=40366876 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=40368636 target=0000bcc4
+EXC t=40837148 vec=32 pc=0000b5fc sr=2000
+EXCJMP t=40838908 target=0000bcc4
+EXC t=41265180 vec=54 pc=0000b74e sr=2704
+EXCJMP t=41266940 target=000020e0
+EXC t=41515804 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=41530588 target=0000bcb0
+EXC t=41811484 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=41813244 target=0000bcb0
+EXC t=42031132 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=42032892 target=0000bcb0
+EXC t=42250780 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=42252540 target=0000bcb0
+EXC t=42470428 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=42472188 target=0000bcb0
+EXC t=42690076 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=42691836 target=0000bcb0
+EXC t=42915356 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=42917116 target=0000bcb0
+EXC t=43132188 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=43133948 target=0000bcb0
+EXC t=43357468 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=43359228 target=0000bcb0
+EXC t=43582748 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=43584508 target=0000bcb0
+EXC t=43808028 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=43809788 target=0000bcb0
+EXC t=44024860 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=44026620 target=0000bcb0
 progress: 500000 cycles
-EXC t=44162844 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=44164604 target=0000bcb0
-EXC t=44379676 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=44381436 target=0000bcb0
-EXC t=44604956 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=44606716 target=0000bcb0
-EXC t=44821788 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=44823548 target=0000bcb0
-EXC t=45047068 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=45048828 target=0000bcb0
-EXC t=45263900 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=45265660 target=0000bcb0
-EXC t=45489180 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=45490940 target=0000bcb0
-EXC t=45706012 vec=26 pc=0000b7ac sr=2200
-EXCJMP t=45707772 target=0000bcb0
-EXC t=45931292 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=45933052 target=0000bcb0
-EXC t=46150940 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=46152700 target=0000bcb0
-EXC t=46379036 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=46380796 target=0000bcb0
-EXC t=46598684 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=46600444 target=0000bcb0
-EXC t=46818332 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=46820092 target=0000bcb0
-EXC t=47037980 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=47039740 target=0000bcb0
-EXC t=47257628 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=47259388 target=0000bcb0
-EXC t=47477276 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=47479036 target=0000bcb0
-EXC t=47696924 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=47698684 target=0000bcb0
-EXC t=47916572 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=47918332 target=0000bcb0
-EXC t=48136220 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=48137980 target=0000bcb0
-EXC t=48355868 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=48357628 target=0000bcb0
-EXC t=48575516 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=48577276 target=0000bcb0
-EXC t=48795164 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=48796924 target=0000bcb0
-EXC t=49014812 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=49016572 target=0000bcb0
-EXC t=49242908 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=49244668 target=0000bcb0
-EXC t=49462556 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=49464316 target=0000bcb0
-EXC t=49682204 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=49683964 target=0000bcb0
-EXC t=49901852 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=49903612 target=0000bcb0
-EXC t=50121500 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=50123260 target=0000bcb0
-EXC t=50341148 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=50342908 target=0000bcb0
-EXC t=50560796 vec=26 pc=0000b7b4 sr=2200
-EXCJMP t=50562556 target=0000bcb0
-L2 t=52103348 D1WR adr=154 bs=11 dat=ffff fill=1
-L2 t=52103524 D1WR adr=155 bs=11 dat=ffff fill=1
-L2 t=52103700 D1WR adr=156 bs=11 dat=0000 fill=1
-L2 t=52103876 D1WR adr=157 bs=11 dat=0000 fill=1
+EXC t=44250140 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=44251900 target=0000bcb0
+EXC t=44466972 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=44468732 target=0000bcb0
+EXC t=44692252 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=44694012 target=0000bcb0
+EXC t=44909084 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=44910844 target=0000bcb0
+EXC t=45134364 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=45136124 target=0000bcb0
+EXC t=45351196 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=45352956 target=0000bcb0
+EXC t=45576476 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=45578236 target=0000bcb0
+EXC t=45793308 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=45795068 target=0000bcb0
+EXC t=46018588 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=46020348 target=0000bcb0
+EXC t=46241052 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=46242812 target=0000bcb0
+EXC t=46469148 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=46470908 target=0000bcb0
+EXC t=46688796 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=46690556 target=0000bcb0
+EXC t=46908444 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=46910204 target=0000bcb0
+EXC t=47128092 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=47129852 target=0000bcb0
+EXC t=47347740 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=47349500 target=0000bcb0
+EXC t=47567388 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=47569148 target=0000bcb0
+EXC t=47787036 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=47788796 target=0000bcb0
+EXC t=48006684 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=48008444 target=0000bcb0
+EXC t=48226332 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=48228092 target=0000bcb0
+EXC t=48445980 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=48447740 target=0000bcb0
+EXC t=48665628 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=48667388 target=0000bcb0
+EXC t=48885276 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=48887036 target=0000bcb0
+EXC t=49110556 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=49112316 target=0000bcb0
+EXC t=49330204 vec=26 pc=0000b7ac sr=2200
+EXCJMP t=49331964 target=0000bcb0
+EXC t=49555484 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=49557244 target=0000bcb0
+EXC t=49775132 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=49776892 target=0000bcb0
+EXC t=49994780 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=49996540 target=0000bcb0
+EXC t=50214428 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=50216188 target=0000bcb0
+EXC t=50434076 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=50435836 target=0000bcb0
+EXC t=50653724 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=50655484 target=0000bcb0
+EXC t=50873372 vec=26 pc=0000b7b4 sr=2200
+EXCJMP t=50875132 target=0000bcb0
+L2 t=52387764 D1WR adr=154 bs=11 dat=ffff fill=1
+L2 t=52387940 D1WR adr=155 bs=11 dat=ffff fill=1
+L2 t=52388116 D1WR adr=156 bs=11 dat=0000 fill=1
+L2 t=52388292 D1WR adr=157 bs=11 dat=0000 fill=1
 walker port selftest passed
-turbo-path run passed (618399 cycles)
+turbo-path run passed (621663 cycles)
 ALL TESTS PASSED
-tb_dualram_turbo.v:954: $finish called at 54463860 (100ps)
+tb_dualram_turbo.v:954: $finish called at 54751092 (100ps)

@@ -82,8 +82,31 @@ def main():
                          and (rhi >> 31) == 0)
                         or ((rse & 0x7FFF) == 0 and (rhi or rlo)))
             both_unfl = (fpsr & 0x0800) and (rfpsr & 0x0800)
-            if ap_zero and ref_tiny and both_unfl:
+            # Flushing a deeply underflowing result to zero is only
+            # defensible when the active rounding mode actually points
+            # TOWARD zero for that sign.  Under directed rounding away
+            # from zero the architecture requires the smallest
+            # representable value, not zero: rounding toward -inf must
+            # not turn a negative tiny into -0, and toward +inf must not
+            # turn a positive tiny into +0.  Waiving those hid a real
+            # numerical mismatch (and a wrong Z condition code) behind
+            # the same label as the legitimate cases.
+            #   rmode 0 = RN, 1 = RZ, 2 = RM (-inf), 3 = RP (+inf)
+            ap_sign = (se >> 15) & 1
+            away_from_zero = (rmode == 2 and ap_sign) or \
+                             (rmode == 3 and not ap_sign)
+            if ap_zero and ref_tiny and both_unfl and not away_from_zero:
                 classes["underflow-flush"] = classes.get("underflow-flush", 0) + 1
+                continue
+            if ap_zero and ref_tiny and away_from_zero:
+                classes["underflow-WRONG-DIRECTION"] = classes.get(
+                    "underflow-WRONG-DIRECTION", 0) + 1
+                bad += 1
+                if bad <= 12:
+                    print("slot %3d %-6s prec=%d rmode=%d  DIRECTED ROUNDING AWAY FROM ZERO"
+                          % (i, OPNAME[op], prec, rmode))
+                    print("   ap  = %04X %08X %08X  fpsr=%08X" % (se, hi, lo, fpsr))
+                    print("   ref = %04X %08X %08X  fpsr=%08X" % (rse, rhi, rlo, rfpsr))
                 continue
             classes["OTHER"] = classes.get("OTHER", 0) + 1
             bad += 1

@@ -1670,18 +1670,43 @@ always @(posedge clk) begin
 							// magnitude.  At single/double precision that is
 							// still a normal extended number at emin (one
 							// unit in the last place of the narrowed
-							// significand), so it is expressible here.
-							// Extended precision would need the true
-							// denormal encoding (exponent field 0), which
-							// this implementation does not have, and keeps
-							// flushing to zero.
-							if (pr != 2'd0 && !op_sgl(r_op) &&
-							    ((rnd_mode == 2'b11 && !a_s) ||
-							     (rnd_mode == 2'b10 && a_s))) begin
+							// significand).
+							// EXTENDED and FSGL were flushed to zero here
+							// on the grounds that they would need the true
+							// denormal encoding.  They do -- and the
+							// writeback can express it: the register form
+							// is {sign, exponent, 16'd0, significand}, so
+							// exponent field 0 with the integer bit clear
+							// is just a value, not a new representation.
+							// Flushing instead returned -0 where the
+							// answer is the minimum negative denormal and
+							// wrongly set the Z condition code.  WinUAE's
+							// softfloat rounds these up; a differential
+							// FMUL.X toward -inf caught it (AP040
+							// 8000-0000000000000000 vs reference
+							// 8000-0000000000000001).  A denormal left in
+							// a register faults as an unsupported data
+							// type on its next use, which is exactly how a
+							// 68040 hands it to the FPSP.
+							if ((rnd_mode == 2'b11 && !a_s) ||
+							    (rnd_mode == 2'b10 && a_s)) begin
 								a_t <= T_NUM;
-								a_e <= emin[16:0];
-								a_m <= (pr == 2'd1) ? 64'h0000_0100_0000_0000
-								                    : 64'h0000_0000_0000_0800;
+								if (pr != 2'd0 && !op_sgl(r_op)) begin
+									a_e <= emin[16:0];
+									a_m <= (pr == 2'd1)
+									       ? 64'h0000_0100_0000_0000
+									       : 64'h0000_0000_0000_0800;
+								end
+								else begin
+									// smallest representable magnitude:
+									// exponent 0, one ulp of this
+									// operation's significand granularity
+									// (FSGL keeps single's 24-bit step)
+									a_e <= 17'd0;
+									a_m <= op_sgl(r_op)
+									       ? 64'h0000_0100_0000_0000
+									       : 64'h0000_0000_0000_0001;
+								end
 							end
 							else a_t <= T_ZERO;
 							fst <= F_WB;
@@ -1951,13 +1976,25 @@ always @(posedge clk) begin
 					tiny = !md[52];
 					dout <= {a_s, 10'd0, md[52], md[51:0], 32'd0};
 				end
+				// Tininess is detected BEFORE rounding.  Reaching F_PACKS
+				// already means the value is below this precision's
+				// minimum normal exponent (the sE < -126 / -1022 test at
+				// the entry above), so UNFL is raised even when the
+				// conversion is EXACT, and even when rounding carries the
+				// significand back up to the minimum normal.  Gating it
+				// on `inx && tiny` -- tininess measured AFTER rounding --
+				// lost both cases: an exact extended 2^-127 stored as
+				// single 00400000 reported no UNFL, and a value just
+				// below the single normal boundary rounded to 00800000
+				// reported only INEX.  softfloat sets UNFL for both.
+				// Accrued UNFL still follows the 040's updateaccrued rule
+				// (UNFL && INEX2), which is why it stays inside the
+				// inexact branch.
+				fpsr[11] <= 1;                        // UNFL status
 				if (inx) begin
 					fpsr[9] <= 1;                 // INEX2
 					fpsr[3] <= 1;                 // accrued INEX
-					if (tiny) begin
-						fpsr[11] <= 1;            // UNFL
-						fpsr[5] <= 1;             // accrued UNFL
-					end
+					fpsr[5] <= 1;                 // accrued UNFL
 				end
 				fpu_used <= 1;
 				fst <= F_STDONE;

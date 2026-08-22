@@ -571,9 +571,34 @@ unimp_pd_ok:
 	move.l	#$80000000,($32D4).l
 	clr.l	($32D8).l
 	fmove.x	($32D0).l,fp5
+	fmove.l	#0,fpsr
 	fmove.s	fp5,($32DC).l
 	move.l	($32DC).l,d0
 	chkl	d0,$00400000,65
+	; Tininess is detected BEFORE rounding, so an EXACT subnormal store
+	; still raises UNFL.  This check was missing: the test looked only at
+	; the stored datum, so `inx && tiny-after-rounding` gating hid it.
+	; Exact => INEX2 clear, and accrued UNFL follows UNFL && INEX2, so
+	; only the UNFL status bit is set.
+	fmove.l	fpsr,d0
+	and.l	#$00000A28,d0		; UNFL/INEX2 status + accrued UNFL/INEX
+	chkl	d0,$00000800,181	; UNFL status alone
+
+; A value just below the single normal boundary rounds UP to the minimum
+; normal, but tininess was already decided before that rounding: UNFL is
+; raised alongside INEX, and the accrued UNFL bit follows.
+	move.l	#$3F800000,($32D0).l	; 2^-127 significand all ones:
+	move.l	#$FFFFFFFF,($32D4).l	; just below the single minimum
+	move.l	#$FFFFFFFF,($32D8).l	; normal 2^-126
+	fmove.x	($32D0).l,fp5
+	fmove.l	#0,fpsr
+	fmove.s	fp5,($32DC).l
+	move.l	($32DC).l,d0
+	chkl	d0,$00800000,182	; carried up to the minimum normal
+	fmove.l	fpsr,d0
+	and.l	#$00000A28,d0
+	chkl	d0,$00000A28,183	; UNFL+INEX2 status, both accrued
+	fmove.l	#0,fpsr
 
 ; A denormal extended source is an unimplemented data type on the 68040.
 ; It takes the vector-55 datatype trap so the FPSP can inspect the operand.
