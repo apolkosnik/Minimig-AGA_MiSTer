@@ -20,6 +20,11 @@ SRC="$RTL/ap040_tg68k_compat.v $RTL/ap040_core.v $RTL/ap040_bus16_adapter.v $RTL
 
 # generated sources: every bench below reads them, so they come first
 python3 hoist_decls.py ../../rtl/cpu_wrapper.v "$WORK/cpu_wrapper_sim.v"
+# the chip bench carries the real chipset block so the RTG register
+# handshake is exercised; all five need the same iverilog fixups
+for m in fastchip rtg akiko gayle ide; do
+	python3 hoist_decls.py "../../rtl/$m.v" "$WORK/${m}_sim.v"
+done
 python3 prepare_sdram_sim.py ../../rtl/sdram_ctrl.v "$WORK/sdram_ctrl_sim.v"
 
 rm -f "$WORK"/.status.*
@@ -64,6 +69,8 @@ compile cart_hrtmon iverilog -g2012 -o "$WORK/tb_cart_hrtmon.vvp" \
 	tb_cart_hrtmon.v ../../rtl/cart.v &
 compile wrapchip iverilog -g2012 -I "$RTL" -o "$WORK/tb_wrapchip.vvp" \
 	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" \
 	sim_dpram.v $SRC &
 compile sdram_turbo iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
 	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=0 \

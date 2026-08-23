@@ -42,6 +42,11 @@ always @(posedge clk_114) begin
 end
 
 wire [23:1] chip_addr;
+wire        fc_sel, fc_lds, fc_uds, fc_rnw, fc_lw;
+wire        fc_selack, fc_ready;
+wire [15:0] fc_dout;
+
+
 wire [15:0] chip_din;
 wire        chip_as, chip_uds, chip_lds, chip_rw;
 wire        cpu_nrst_out;
@@ -91,14 +96,14 @@ cpu_wrapper dut
 	.chip_dtack(chip_wait),
 	.chip_ipl(~ipl_lvl),
 
-	.fastchip_dout(16'd0),
-	.fastchip_sel(),
-	.fastchip_lds(),
-	.fastchip_uds(),
-	.fastchip_rnw(),
-	.fastchip_lw(),
-	.fastchip_selack(1'b0),
-	.fastchip_ready(1'b0),
+	.fastchip_dout(fc_dout),
+	.fastchip_sel(fc_sel),
+	.fastchip_lds(fc_lds),
+	.fastchip_uds(fc_uds),
+	.fastchip_rnw(fc_rnw),
+	.fastchip_lw(fc_lw),
+	.fastchip_selack(fc_selack),
+	.fastchip_ready(fc_ready),
 
 	.ramsel(),
 	.ramaddr(),
@@ -129,6 +134,38 @@ cpu_wrapper dut
 	.cache_inhibit(),
 	.nmi_ack_toggle(),
 	.nmi_addr()
+);
+
+// The fastchip block (RTG registers, IDE, Akiko) was stubbed off in this
+// bench -- selack/ready tied 0, dout tied 0 -- so the whole RTG register
+// interface had never been simulated on this CPU.  Hardware reads the RTG
+// ID at $B8010E as $5001 on TG68K-020 and $0000 here, which is precisely
+// what an unsimulated handshake looks like.  Wire the real modules in.
+
+fastchip fastchip
+(
+	.clk(clk_114),
+	.cyc(1'b1),                 // fastchip declares cyc but never uses it
+	.clk_sys(clk),
+	// Minimig.sv drives ~cpu_rst | ~cpu_nrst_out: active HIGH, while the
+	// bench's own reset is active low
+	.reset(~reset | ~cpu_nrst_out),
+	.sel(fc_sel),
+	.sel_ack(fc_selack),
+	.ready(fc_ready),
+	.addr({chip_addr, 1'b0}),
+	.din(chip_din),
+	.dout(fc_dout),
+	.lds(~fc_lds),
+	.uds(~fc_uds),
+	.rnw(fc_rnw),
+	.longword(fc_lw),
+	.rtg_ena(), .rtg_hsize(), .rtg_vsize(), .rtg_format(),
+	.rtg_base(), .rtg_stride(), .rtg_pal_clk(), .rtg_pal_dw(),
+	.rtg_pal_dr(24'd0), .rtg_pal_a(), .rtg_pal_wr(),
+	.ide_ena(1'b0), .ide_irq(), .ide_req(),
+	.ide_address(5'd0), .ide_write(1'b0), .ide_writedata(16'd0),
+	.ide_read(1'b0), .ide_readdata(), .ide_led()
 );
 
 //---------------------------------------------------------------------------
@@ -243,6 +280,7 @@ end
 //---------------------------------------------------------------------------
 
 reg [1023:0] prog_file;
+reg [1023:0] vcd_file;
 integer i;
 integer timeout;
 
@@ -252,13 +290,19 @@ initial begin
 		$finish;
 	end
 	$display("tb_cpu_wrapper_chip: running %0s over the 7MHz chip bus", prog_file);
+	if ($value$plusargs("vcd=%s", vcd_file)) begin
+		$dumpfile(vcd_file);
+		$dumpvars(1, tb_cpu_wrapper_chip);
+		$dumpvars(1, fastchip);
+		$dumpvars(1, fastchip.rtg);
+	end
 
 	for (i = 0; i < 32768; i = i + 1) mem[i] = 16'h0000;
 	$readmemh(prog_file, mem);
 	// capability word: bit 0 coarse IPL; bit 3 = the cache_allow window
 	// models production (cache_allow_all=0), so the chip-window I-fetch
 	// bypass is active and t_exceptions 157/158 can assert it
-	mem[16'hF160 >> 1] = 16'h0009;
+	mem[16'hF160 >> 1] = 16'h0019;	// coarse IPL + production cache window + fastchip
 
 	reset = 0;
 	repeat (50) @(posedge clk);

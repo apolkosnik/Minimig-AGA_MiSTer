@@ -26,7 +26,10 @@ IPLCAP	equ	$F160	; bench capability word: bit 0 = coarse IPL delivery
 			; (IPLREG, IPLDLY arriving eventually), bit 1 = cycle-
 			; fine injectors (IPLDLY exact, IPLPULSE, IPLSTEP,
 			; IRQEXCCTL), bit 2 = bus-error injection (BERRCTL,
-			; FBERRCTL).  Gated tests are bypassed, never faked.
+			; FBERRCTL), bit 3 = the cache_allow window models
+			; production (cache_allow_all=0), bit 4 = the real
+			; fastchip/rtg block is instantiated.  Gated tests are
+			; bypassed, never faked.
 
 hfa		equ	$3674	; fault address seen by h_buserr
 hfpc		equ	$3678	; and its stacked PC
@@ -1021,6 +1024,65 @@ smc_t:
 	moveq	#1,d0
 	rts
 smc_done:
+
+;----- the RTG register block must answer (159) ------------------------
+; Hardware: reading the RTG ID at $B8010E gives $5001 on TG68K-020 and
+; $0000 on this CPU, so the register block never responds and the driver
+; can never enable RTG -- a black screen with everything downstream
+; irrelevant.  The fastchip path (RTG regs, IDE, Akiko) was stubbed off
+; in every bench, selack/ready tied low, so this handshake had never been
+; simulated.  rtg.v holds ID/VERSION at $B8010E per the MiSTer.card.asm
+; register map, and its read needs the cycle held until rtg_ready.
+	move.w	(IPLCAP).l,d0
+	btst	#4,d0			; the real fastchip/rtg block is present
+	beq	rtgid_done
+
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,159	; ID = $50, VERSION = $01
+
+; The driver never touches a register with a plain word move: it writes
+; base as a longword at $B80100 and reads back through the same window.
+; A longword access is one CPU request that the 16-bit adapter splits into
+; two chipset cycles, so it re-enters fastchip with fastchip_lw asserted --
+; a different path from the word read above, and the one MiSTer.card.asm
+; actually uses.
+	move.l	#$01345678,d0
+	move.l	d0,($B80100).l		; base[31:16] then base[15:0]
+	move.l	($B80100).l,d1
+	chkl	d1,$01345678,160
+
+	move.w	#$0567,($B80108).l	; HSIZE, 12 bits
+	move.w	#$0345,($B8010A).l	; VSIZE, 12 bits
+	move.l	($B80108).l,d1		; both halves in one longword read
+	chkl	d1,$05670345,161
+
+	move.w	#$1234,($B8010C).l	; STRIDE, 14 bits -> $1234
+	move.l	($B8010C).l,d1		; stride in the high half, ID in the low
+	chkl	d1,$12345001,162
+
+	move.w	#$0015,($B80104).l	; FORMAT, 5 bits
+	move.w	#$0001,($B80106).l	; ENABLE
+	move.l	($B80104).l,d1
+	chkl	d1,$00150001,163
+
+; HRTMon reads memory a byte at a time, which is how the ID was first seen
+; to differ between CPUs.  A byte read drives only one of uds/lds; rtg
+; ignores the strobes on reads and always returns the whole word, so the
+; adapter has to pick the right half.
+	moveq	#0,d1
+	move.b	($B8010E).l,d1
+	chkl	d1,$00000050,164	; ID
+	moveq	#0,d1
+	move.b	($B8010F).l,d1
+	chkl	d1,$00000001,165	; VERSION
+
+; and the whole register file must survive being written back to the
+; values the driver leaves behind, read as one 32-bit access each
+	move.l	#$02000000,($B80100).l	; MEMORY_BASE, as the driver sets it
+	move.l	($B80100).l,d1
+	chkl	d1,$02000000,166
+rtgid_done:
 
 ;-------------------- immediate group: destination must be data alterable
 ; ORI/ANDI/SUBI/ADDI/EORI with a PC-relative or immediate destination are
