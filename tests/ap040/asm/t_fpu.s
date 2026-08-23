@@ -15,6 +15,8 @@ cnt_int2	equ	$360C
 cnt_fpunimp	equ	$3600
 nosave_unimp	equ	$3904	; handler skips FSAVE (models HRTmon)
 restore_unimp	equ	$3908	; handler FSAVEs then FRESTOREs the frame
+cnt_trc9	equ	$390C	; vector-9 traces taken (single-step tests)
+trc9_pc		equ	$3990	; stacked PC of the last trace
 cnt_fpdz	equ	$3602
 cnt_fpsnan	equ	$3604
 cnt_fpbsun	equ	$3606
@@ -657,6 +659,61 @@ frt_ok:
 	fmove.l	fp0,d0
 	chkl	d0,$0000E4AD,196	; the FMUL executed after it
 	sub.w	#1,(cnt_fpunimp).l
+
+;----------- single-step over an unimplemented FP instruction (218-221)
+; HRTmon steps by setting T1 and waiting for the vector-9 trace.  On a
+; 68040 the F-line exception CANCELS the pending trace but stacks the SR
+; with T1 intact (WinUAE exception_check_trace: every Exception() clears
+; the pending trace and the live T bits; the frame keeps the old SR);
+; the handler runs untraced, its RTE restores T1, and the instruction at
+; the resume point executes and traces.  The step comes back.  Hardware
+; showed it NOT coming back on exactly this instruction, so pin the
+; whole chain: one vector-11 trap, then exactly one trace whose stacked
+; PC is after the resume instruction.
+	move.l	#h_trace9,($24).l
+	clr.w	(cnt_trc9).l
+	move.w	(cnt_fpunimp).l,d5
+	fmove.l	#7,fp1
+	move.l	#$202C,(exp_fmt).l
+	move.w	#1,(save_unimp).l
+	move.w	#$0000,-(sp)
+	pea	(t1site).l
+	move.w	#$A000,-(sp)	; S set, T1 set: enter the site single-stepping
+	rte
+t1site:
+	dc.w	$F200,$0503	; fintrz.x fp1,fp2: vector 11 with T1 pending
+t1next:
+	nop			; the $202C frame resumes here, T1 restored
+t1after:
+	move.w	(cnt_trc9).l,d0
+	chkl	d0,1,218	; the step CAME BACK: exactly one trace
+	move.l	(trc9_pc).l,d0
+	chkl	d0,t1after,219	; ...taken after the resume instruction
+	move.w	(cnt_fpunimp).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,220	; and exactly one vector-11 trap
+	sub.w	#1,(cnt_fpunimp).l
+
+; the same step with an FPSP-shaped handler: FSAVE, inspect, FRESTORE,
+; RTE.  The restored frame must not eat the trace either.
+	move.w	(cnt_fpunimp).l,d5
+	clr.w	(cnt_trc9).l
+	move.w	#1,(restore_unimp).l
+	fmove.l	#7,fp1
+	move.w	#$0000,-(sp)
+	pea	(t2site).l
+	move.w	#$A000,-(sp)
+	rte
+t2site:
+	dc.w	$F200,$0503	; fintrz.x fp1,fp2
+	nop
+t2after:
+	clr.w	(restore_unimp).l
+	move.w	(cnt_trc9).l,d0
+	chkl	d0,1,221	; the step still comes back through FRESTORE
+	sub.w	#1,(cnt_fpunimp).l
+	move.l	#unexp,($24).l
 
 ; THE FIELD CASE.  Same pair, but the handler FSAVEs and FRESTOREs the
 ; frame -- what a debugger or a partial FPSP does.  A restored frame must
@@ -1347,6 +1404,12 @@ audit_return:
 	stop	#$2700
 
 ;----------------------------------------------------------------- handlers
+h_trace9:
+	addq.w	#1,(cnt_trc9).l
+	move.l	2(sp),(trc9_pc).l
+	and.w	#$3FFF,(sp)	; clear T1/T0: one step, like a debugger
+	rte
+
 h_fpunimp:
 	move.w	6(sp),d6
 	cmp.w	#$002C,d6	; standard format-$0 F-line frame
