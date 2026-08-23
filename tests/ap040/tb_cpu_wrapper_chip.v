@@ -255,8 +255,10 @@ initial begin
 
 	for (i = 0; i < 32768; i = i + 1) mem[i] = 16'h0000;
 	$readmemh(prog_file, mem);
-	// interrupt-injection capability word (see t_fpu IRQ soak)
-	mem[16'hF160 >> 1] = 16'h0001;
+	// capability word: bit 0 coarse IPL; bit 3 = the cache_allow window
+	// models production (cache_allow_all=0), so the chip-window I-fetch
+	// bypass is active and t_exceptions 157/158 can assert it
+	mem[16'hF160 >> 1] = 16'h0009;
 
 	reset = 0;
 	repeat (50) @(posedge clk);

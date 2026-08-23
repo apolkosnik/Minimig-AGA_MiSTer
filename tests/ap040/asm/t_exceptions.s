@@ -994,6 +994,34 @@ inext_done:
 	chkl	d1,2,155		; is still delivered
 	move.w	#$2700,sr
 
+;----- self-modifying code in the CHIP window needs no cache flush (157/158)
+; Instruction fetches from chip RAM must bypass the I-cache when the
+; internal caches are on: nothing invalidates I lines when the blitter,
+; trackdisk DMA, or a CPU decruncher writes code there (the snoop and
+; store_inv reach the D bank only), and A500-era programs never CINV --
+; Phenomena's Enigma crashed exactly here.  Capability bit 3 marks a
+; bench whose cache_allow window models production (cache_allow_all=0),
+; where the bypass is active.
+	move.w	(IPLCAP).l,d0
+	btst	#3,d0
+	beq	smc_done
+	move.l	#$80008000,d0
+	movec	d0,cacr			; caches on: the I-line must be cacheable
+	lea	(smc_t).l,a0
+	jsr	(a0)			; first run: would cache the line
+	chkl	d0,1,157
+	move.w	#$7002,(a0)		; moveq #1 -> moveq #2, NO flush
+	jsr	(a0)
+	chkl	d0,2,158		; a stale I-line still returns 1
+	moveq	#0,d0
+	movec	d0,cacr
+	cinva	bc
+	bra.s	smc_done
+smc_t:
+	moveq	#1,d0
+	rts
+smc_done:
+
 ;-------------------- immediate group: destination must be data alterable
 ; ORI/ANDI/SUBI/ADDI/EORI with a PC-relative or immediate destination are
 ; illegal; executing them instead consumes the following words as operands

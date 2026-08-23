@@ -1,9 +1,9 @@
 tb_ap040_program: running build/t_exceptions.hex
 WARNING: tb_ap040_program.v:774: $readmemh(build/t_exceptions.hex): Not enough words in the file for the requested range [0:32767].
-phase 0 passed (156276 cycles)
+phase 0 passed (156320 cycles)
 WARNING: tb_ap040_program.v:774: $readmemh(build/t_exceptions.hex): Not enough words in the file for the requested range [0:32767].
-phase 1 passed (237992 cycles)
+phase 1 passed (238060 cycles)
 WARNING: tb_ap040_program.v:774: $readmemh(build/t_exceptions.hex): Not enough words in the file for the requested range [0:32767].
-phase 2 passed (237986 cycles)
+phase 2 passed (238054 cycles)
 ALL TESTS PASSED
-tb_ap040_program.v:818: $finish called at 6322835000 (1ps)
+tb_ap040_program.v:818: $finish called at 6324635000 (1ps)

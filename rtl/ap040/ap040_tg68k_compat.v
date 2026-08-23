@@ -315,6 +315,22 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 	// With the snoop port wired up, chip RAM is cacheable too: a chipset
 	// write invalidates the line before the CPU can see stale data.  ROM
 	// and IO stay out (nothing snoops those, and IO must never be cached).
+	//
+	// DATA ONLY.  The snoop invalidate reaches just the D bank
+	// (ap040_cache port B writes row {1'b0, set}, and store_inv
+	// likewise), so the sentence above was never true of the I-cache:
+	// code written into chip RAM by the blitter, trackdisk DMA, or a CPU
+	// decruncher stayed stale in the I bank, and A500-era programs that
+	// predate caches never CINV.  Phenomena's Enigma crashed exactly
+	// here -- it runs with the internal caches forced off and fails with
+	// them on, from the first commit that enabled them.  On a real 040
+	// Amiga this cannot happen because 68040.library marks chip RAM
+	// noncacheable through the MMU; with the MMU off, nothing does.
+	// So instruction fetches from the chip window bypass the cache, and
+	// only the snooped D side caches chip RAM.  cache_allow_all (the
+	// benches' everything-cacheable mode; production ties it 0) keeps
+	// the bypass out of simulation programs, which run at low addresses
+	// and would otherwise lose all I-cache coverage.
 	wire cache_chip = (mm_addr[31:21] == 11'd0);          // $000000-$1fffff
 	wire cache_win =
 		((mm_addr[31:27] == cache_z3_base0) && cache_z3_ena0) ||
@@ -343,7 +359,8 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.c_addr(mm_addr),
 		.c_wdata(mm_wdata),
 		.c_fc(mm_fc),
-		.c_nocache(mm_nocache | ~cache_allow),
+		.c_nocache(mm_nocache | ~cache_allow |
+		           (mm_instr & cache_chip & ~cache_allow_all)),
 		.s_stb(snp_stb),
 		.s_addr(snp_addr),
 		.c_ack(mm_ack),
