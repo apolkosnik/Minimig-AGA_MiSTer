@@ -13,5 +13,7 @@ PHASE 13: lost a2065 read, CPU unaffected
 PHASE 14: permanent write backpressure
 PHASE 10: wedged slave -> watchdog berr, then recovery
 PHASE 15: late beat in the timeout-epoch skew window
+PHASE 16: no-allocate fill must not strand its line
+  (inhibited=0880 next=1100)
 ALL TESTS PASSED
-tb_ddram_walker_read.v:696: $finish called at 3306820000 (1ps)
+tb_ddram_walker_read.v:750: $finish called at 3307105000 (1ps)

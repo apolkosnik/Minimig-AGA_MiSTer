@@ -92,9 +92,47 @@ module tb_ddram_walker_read;
 	reg         ddram_dout_ready = 0;
 	reg         ddram_busy = 0;
 
+	reg        cache_inhibit = 0;   // MMU CI bit, driven per access
+	reg [15:0] ci_a, ci_b;
+
+	// Two CPU reads with the SHORTEST possible gap -- cpuCS low for a
+	// single cycle -- which is what the core does between consecutive
+	// loads, and the window in which a no-allocate fill's stranded beats
+	// are still being delivered by the real controller.
+	task cpu_read_tight;
+		input [28:1] addr1;
+		input        ci1;
+		input [28:1] addr2;
+		output [15:0] v1;
+		output [15:0] v2;
+		integer guard;
+		begin
+			@(negedge clk);
+			cache_inhibit = ci1;
+			cpuAddr = addr1; cpuL = 0; cpuU = 0; cpustate = 0; cpuCS = 1;
+			guard = 0;
+			while (!ramready && guard < 200000) begin
+				@(posedge clk); guard = guard + 1;
+			end
+			v1 = cpuRD;
+			@(negedge clk);
+			cpuCS = 0; cache_inhibit = 0;
+			@(negedge clk);
+			cpuAddr = addr2; cpuCS = 1;
+			guard = 0;
+			while (!ramready && guard < 200000) begin
+				@(posedge clk); guard = guard + 1;
+			end
+			v2 = cpuRD;
+			@(negedge clk);
+			cpuCS = 0; cpustate = 0; cpuL = 1; cpuU = 1;
+			repeat (2) @(posedge clk);
+		end
+	endtask
+
 	ddram_ctrl #(.CPU_CACHE(1)) dut (
 		.sysclk(clk), .reset_n(reset_n), .cache_rst(1'b1),
-		.cache_inhibit(1'b0), .cpu_cache_ctrl(4'b0011),
+		.cache_inhibit(cache_inhibit), .cpu_cache_ctrl(4'b0011),
 		.DDRAM_CLK(ddram_clk), .DDRAM_BUSY(ddram_busy),
 		.DDRAM_BURSTCNT(ddram_burstcnt), .DDRAM_ADDR(ddram_addr),
 		.DDRAM_DOUT(ddram_dout), .DDRAM_DOUT_READY(ddram_dout_ready),
@@ -690,6 +728,22 @@ module tb_ddram_walker_read;
 		@(negedge clk28); walker_req = 0;
 		repeat (200) @(posedge clk);
 		walker_read(27'h0000540);          // and the pipe is clean again
+
+		// 16) a cache-inhibited (no-allocate) fill must not strand the
+		//     rest of its line.  ddram_ctrl answers every cache_req with
+		//     four beats from one 64-bit word; a cache that takes beat 1
+		//     and leaves lets the NEXT fill adopt a leftover as its own
+		//     data.  On an instruction fetch that is a garbage opcode --
+		//     NetBSD died with trap type 2 (T_ILLINST) at pc=00002276.
+		//     Run against the REAL controller so the beats are real.
+		$display("PHASE 16: no-allocate fill must not strand its line");
+		cpu_read_tight(28'h0002200, 1'b1, 28'h0004400, ci_a, ci_b);
+		if (ci_b === ci_a) begin
+			$display("FAIL: read after a no-allocate fill returned the first line's word (%h)",
+			         ci_b);
+			errors = errors + 1;
+		end
+		$display("  (inhibited=%h next=%h)", ci_a, ci_b);
 
 		if (errors == 0) $display("ALL TESTS PASSED");
 		else $display("TEST FAILED with %0d errors", errors);

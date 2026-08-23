@@ -63,6 +63,19 @@ reg   [3:0] cpu_sm_state;
 reg   [3:0] sdr_sm_state;
 // state signals
 reg         fill;
+// NOTE, unresolved: a no-allocate miss (cache-inhibited, or a disabled
+// bank) still gets a WHOLE LINE from the controller -- ddram_ctrl
+// asserts cache_fill in states 1..4, sdram_ctrl in slots 8/10/12/14 --
+// yet FILL1 takes beat 1 and jumps to FILLW, leaving three beats
+// asserting sdr_read_ack.  A later FILL1 waits on exactly that signal.
+// Walking the line instead (a fill_noalloc flag suppressing the data
+// writes) was implemented and REVERTED: it could not be shown to fix
+// anything.  The unit bench reproduced a corrupted second read only
+// under hand-driven beats, and reproduced it with the walk in place
+// too, while the real-controller bench (tb_ddram_walker_read phase 16)
+// passes either way.  Since -021b strands the same beats and boots,
+// this is not urgent -- but it is a genuine mismatch with both
+// controllers and wants a faithful reproduction before anyone acts.
 reg   [9:0] cpu_sm_adr;
 // write-hit line updates execute one state after the tag match, but the
 // write buffer acknowledges the CPU immediately, so the live cpu_adr can
@@ -121,15 +134,21 @@ wire        cpu_cache_enable_d;
 wire        cpu_cache_clear;
 reg         cc_en;      // instruction side
 reg         cc_en_d;    // data side
-// A cache-inhibited access may not be ANSWERED from the cache, not just
-// barred from allocating in it.  Folded into the bank enables once rather
-// than qualifying each of the four hit comparisons: identical behaviour,
-// two gates instead of four, and it keeps the term off the tag-compare
-// fan-in where this design's fitter is tightest (four-way qualification
-// cost 0.7ns of HDMI slack).  FILL1 still applies cache_inhibit
-// separately to block allocation.
-wire        cc_en_hit   = cc_en   && !cache_inhibit;
-wire        cc_en_d_hit = cc_en_d && !cache_inhibit;
+// KNOWN DEVIATION, twice reverted.  cache_inhibit is consulted only in
+// FILL1 -- after a miss has reached memory -- so it decides whether to
+// ALLOCATE a line and never whether the cache may ANSWER one.  A CI read
+// that hits a line primed through a cacheable alias is served the cached
+// copy, which is wrong for the MMU's CI bit (NetBSD sets it on
+// DMA-coherent RAM, and the a2065's DDR writes are never snooped here).
+//
+// Gating the four hit paths is the obvious fix and BOTH audits call it
+// correct.  It has now broken NetBSD twice: -022 panicked with an MMU
+// fault, and -027 died with trap type 2 (T_ILLINST) at pc=00002276 one
+// second into boot -- a corrupted instruction fetch.  Neither failure
+// has been reproduced in simulation, against the unit bench or the real
+// ddram_ctrl, so what the gate EXPOSES is still unknown.  Do not
+// re-apply it a third time without a test that reproduces one of those
+// two failures first.
 // cpu address
 wire  [1:0] cpu_adr_blk;
 wire  [7:0] cpu_adr_idx;
@@ -382,28 +401,28 @@ always @ (posedge clk) begin
       end
       CPU_SM_READ : begin
         // on hit update LRU flag in tag memory
-        if (cpu_ir && cc_en_hit && itag0_match && itag0_valid) begin
+        if (cpu_ir && cc_en && itag0_match && itag0_valid) begin
           // data is already in instruction cache way 0
           cpu_dat_r <= idram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b0;
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= itram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_ir && cc_en_hit && itag1_match && itag1_valid) begin
+        end else if (cpu_ir && cc_en && itag1_match && itag1_valid) begin
           // data is already in instruction cache way 1
           cpu_dat_r <= idram1_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b1;
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= itram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_dr && cc_en_d_hit && dtag0_match && dtag0_valid) begin
+        end else if (cpu_dr && cc_en_d && dtag0_match && dtag0_valid) begin
           // data is already in data cache way 0
           cpu_dat_r <= ddram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b0; tagupd_lru <= 1'b0;
           tagupd_idx <= cpu_adr_idx; tagupd_tram <= dtram_cpu_dat_r;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_dr && cc_en_d_hit && dtag1_match && dtag1_valid) begin
+        end else if (cpu_dr && cc_en_d && dtag1_match && dtag1_valid) begin
           // data is already in data cache way 1
           cpu_dat_r <= ddram1_cpu_dat_r;
           cpu_ack <= 1'b1;
@@ -434,7 +453,7 @@ always @ (posedge clk) begin
           if (cache_inhibit || (cpu_ir ? !cc_en : !cc_en_d)) begin
             // don't update cache if caching is inhibited
             cpu_sm_state <= CPU_SM_FILLW;
-          end else begin      
+          end else begin
             // update tag ram (deferred one cycle; see tagupd_* regs).
             // All tag state feeding this update comes from the one-cycle
             // shadows itram_cpu_q/dtram_cpu_q: the registered copies keep
