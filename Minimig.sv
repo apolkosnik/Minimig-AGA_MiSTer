@@ -113,6 +113,17 @@ assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
 
 assign VGA_SCALER   = FB_EN;
 
+// RTG framebuffer base: the driver programs the AMIGA-visible address in
+// the $02xxxxxx window, but the CPU's accesses to that window are
+// remapped by cpu_wrapper (ramaddr[26:23] = 4'b1110), so the pixels
+// actually land at RAM address $0700_0000 + offset.  FB_BASE was wired
+// straight from the register with no translation, so the scanout read
+// $02xxxxxx while the CPU wrote $07xxxxxx -- different memory, hence a
+// black RTG screen.  Apply cpu_wrapper's own mapping so both halves
+// address the same bytes.
+wire [31:0] rtg_base_raw;
+assign FB_BASE = {5'd0, 4'b1110, rtg_base_raw[22:0]};
+
 wire clk_114;
 wire clk_sys;
 wire locked;
@@ -667,7 +678,7 @@ fastchip fastchip
 	.rtg_hsize    (FB_WIDTH          ),
 	.rtg_vsize    (FB_HEIGHT         ),
 	.rtg_format   (FB_FORMAT         ),
-	.rtg_base     (FB_BASE           ),
+	.rtg_base     (rtg_base_raw      ),
 	.rtg_stride   (FB_STRIDE         ),
 	.rtg_pal_clk  (FB_PAL_CLK        ),
 	.rtg_pal_dw   (FB_PAL_DOUT       ),
