@@ -53,6 +53,9 @@ wire [31:0] c_rdata;
 wire        m_req, m_write, m_instr;
 wire  [1:0] m_size;
 wire [31:0] m_addr, m_wdata;
+reg  [1:0]  mem_lat = 2'd2;   // cycles before m_ack; 0 models a
+                              // downstream controller-cache HIT, which is
+                              // how fast this port can really answer
 reg         m_ack = 0;
 reg  [31:0] m_rdata = 0;
 reg         m_err = 0;
@@ -111,7 +114,7 @@ always @(posedge clk) begin
 	m_ack <= 0;
 	m_err <= 0;
 	if (m_req && ce) begin
-		if (mlat != 2'd2) mlat <= mlat + 1'd1;
+		if (mlat != mem_lat) mlat <= mlat + 1'd1;
 		else begin
 			mlat <= 0;
 			if (err_hit) begin
@@ -603,10 +606,22 @@ initial begin
 	// display), and a snoop owns port B whenever it fires -- so the CI
 	// invalidate cannot land during the bypassed access the way it does
 	// in a quiet bench.  Drive that traffic while the pair runs.
+	// Run it at BOTH memory speeds.  With three cycles of latency the
+	// invalidate always lands during C_PASS and the hazard is invisible;
+	// a downstream cache hit answers in one, which is when the CI
+	// invalidate is still owed as the store arrives.
 	expect_read(32'h0000_D000, mem[32'hD000>>2], 9);   // prime the line
 	snoop_storm = 1;
 	cpu_ci_read_then_write(32'h0000_D000, 32'h0000_D400);
 	snoop_storm = 0;
+	repeat (6) @(posedge clk);
+
+	mem_lat = 2'd0;                                    // controller-cache hit
+	expect_read(32'h0000_D800, mem[32'hD800>>2], 9);   // prime
+	snoop_storm = 1;
+	cpu_ci_read_then_write(32'h0000_D800, 32'h0000_DC00);
+	snoop_storm = 0;
+	mem_lat = 2'd2;
 	repeat (6) @(posedge clk);
 
 	if (errors == 0) $display("ALL TESTS PASSED");
