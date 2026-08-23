@@ -29,6 +29,7 @@ unimp_frame	equ	$3A00
 unsup_fa	equ	$360C
 unsup_fhdr	equ	$3900	; FSAVE frame header seen at vector 55
 unsup_fsave	equ	$3910	; FSAVE landing area (100 bytes, $3910-$3973)
+frame_b		equ	$3980	; second FSAVE area for round-trip checks
 unsup_resume	equ	$3610
 unsup_pc	equ	$3614
 bsun_resume	equ	$3618
@@ -493,6 +494,94 @@ unimp_pd_ok:
 	chkl	d0,$A0000000,283
 	fmovecr	#0,fp1		; constant ROM: also not hardware
 	chkcnt	cnt_fpunimp,3,44
+
+; FRAME SIGNATURE for the AIBB shape: FINTRZ.X FP1,FP2 is the exact
+; instruction AIBB's BeachBall uses to convert before FMOVE.L FPn,Dn,
+; and the FPSP dispatches on this frame's contents.  cputest never
+; FSAVEs an unimplemented instruction, so nothing else in this suite
+; can see these fields changing.  XOR the whole 48-byte payload into
+; one longword: any field drift moves it.
+	fmove.l	#7,fp1
+	move.l	#$202C,(exp_fmt).l
+	move.w	#1,(save_unimp).l
+	dc.w	$F200,$0883	; fintrz.x fp1,fp2
+	moveq	#0,d0
+	lea	(unimp_frame).l,a0
+	moveq	#11,d1
+fsig_lp:
+	move.l	(a0)+,d2
+	eor.l	d2,d0
+	dbra	d1,fsig_lp
+	move.l	d0,d3
+	swap	d3
+	eor.w	d3,d0			; fold the 48-byte XOR to 16 bits
+	and.l	#$FFFF,d0
+	chkl	d0,$0000F6CE,199	; FINTRZ unimp-frame signature
+	sub.w	#1,(cnt_fpunimp).l
+
+;------------------------------------------- unimplemented-frame fields
+; The FPSP DISPATCHES on these fields, and cputest never FSAVEs an
+; unimplemented instruction -- so a corpus run cannot see any of them
+; drift.  A wrong E1 here once hung AIBB forever (the FPSP took the
+; arithmetic path instead of emulate-and-advance), which is why every
+; case below re-checks the exception-pending bits.
+;
+; CMDREG3B is WinUAE's swizzle of the extension word:
+;     (cmd & $03C3) | ((cmd & $0038) >> 1) | ((cmd & $0004) << 3)
+; Each case states the hand-computed value so a mapping change shows up
+; as a specific field rather than a signature mismatch.
+
+FRAMECHK	macro	; \1=extword \2=cmdreg3b \3=base test number
+	fmove.l	#7,fp0
+	fmove.l	#3,fp1
+	move.l	#$202C,(exp_fmt).l
+	move.w	#1,(save_unimp).l
+	dc.w	$F200,\1
+	move.l	(unimp_frame+$00).l,d0
+	chkl	d0,$41300000,\3	; frame id: revision $41, 48-byte
+	move.l	(unimp_frame+$10).l,d0
+	chkl	d0,(\1)<<16,\3+1	; CMDREG1B = the extension word
+	move.l	(unimp_frame+$04).l,d0
+	chkl	d0,(\2)<<16,\3+2	; CMDREG3B = the swizzle
+	move.l	(unimp_frame+$18).l,d0
+	chkl	d0,0,\3+3		; E1=E3=T=0 on an unimp INSTRUCTION
+	sub.w	#1,(cnt_fpunimp).l
+	endm
+
+	; FINTRZ.X FP1,FP2 -- AIBB's BeachBall converts with exactly this
+	; before FMOVE.L FPn,Dn, and it is what the hardware trace showed.
+	FRAMECHK	$0503,$0103,200
+	; FTWOTOX.X FP0,FP0 -- opmode bit 4 exercises the >>1 half
+	FRAMECHK	$0011,$0009,204
+	; FETOX.X FP0,FP0
+	FRAMECHK	$0010,$0008,208
+	; FREM FP0,FP0 -- dyadic, opmode bit 2 exercises the <<3 half
+	FRAMECHK	$0025,$0031,212
+
+;--------------------------------------- FSAVE/FRESTORE frame round trip
+; A frame handed back by FRESTORE must come out of the next FSAVE
+; unchanged.  The FPSP saves, inspects, restores and returns; if a field
+; is dropped or re-derived on the way through, the state it resumes with
+; is not the state it saved.
+	fmove.l	#7,fp0
+	move.l	#$202C,(exp_fmt).l
+	move.w	#1,(save_unimp).l
+	dc.w	$F200,$0503	; fintrz.x fp1,fp2: leaves a frame
+	frestore (unimp_frame).l	; hand it back
+	fsave	(frame_b).l		; and take it again
+	lea	(unimp_frame).l,a0
+	lea	(frame_b).l,a1
+	moveq	#11,d1
+frt_lp:
+	move.l	(a0)+,d2
+	cmp.l	(a1)+,d2
+	beq.s	frt_ok
+	failt	216			; frame changed across FRESTORE+FSAVE
+frt_ok:
+	dbra	d1,frt_lp
+	move.l	(frame_b).l,d0
+	chkl	d0,$41300000,217	; and it is still the UNIMP frame
+	sub.w	#1,(cnt_fpunimp).l
 
 ; Consecutive transcendentals on DIFFERENT registers.  Hardware reported an
 ; exception on the SECOND of a back-to-back FSIN.X pair (HRTmon caught it at
