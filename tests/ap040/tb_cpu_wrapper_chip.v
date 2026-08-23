@@ -42,6 +42,11 @@ always @(posedge clk_114) begin
 end
 
 wire [23:1] chip_addr;
+wire        pal_clk;
+wire [23:0] pal_dr;
+wire [23:0] pal_dw;
+wire  [7:0] pal_a;
+wire        pal_wr;
 wire        fc_sel, fc_lds, fc_uds, fc_rnw, fc_lw;
 wire        fc_selack, fc_ready;
 wire [15:0] fc_dout;
@@ -161,12 +166,25 @@ fastchip fastchip
 	.rnw(fc_rnw),
 	.longword(fc_lw),
 	.rtg_ena(), .rtg_hsize(), .rtg_vsize(), .rtg_format(),
-	.rtg_base(), .rtg_stride(), .rtg_pal_clk(), .rtg_pal_dw(),
-	.rtg_pal_dr(24'd0), .rtg_pal_a(), .rtg_pal_wr(),
+	.rtg_base(), .rtg_stride(),
+	.rtg_pal_clk(pal_clk), .rtg_pal_dw(pal_dw), .rtg_pal_dr(pal_dr),
+	.rtg_pal_a(pal_a), .rtg_pal_wr(pal_wr),
 	.ide_ena(1'b0), .ide_irq(), .ide_req(),
 	.ide_address(5'd0), .ide_write(1'b0), .ide_writedata(16'd0),
 	.ide_read(1'b0), .ide_readdata(), .ide_led()
 );
+
+//---------------------------------------------------------------------------
+// RTG CLUT model.  On the board these four signals leave the core for the
+// HPS framebuffer, which holds the 256-entry palette; a black RTG screen is
+// exactly what an all-zero CLUT looks like, and the palette is the one RTG
+// window whose read handshake differs -- rtg.v holds it for three clk_sys
+// edges (rd_r[2]) against one (rd_r[0]) for the control registers.  Model it
+// the way ascal does: written on pal_wr at pal_a, read combinationally.
+//---------------------------------------------------------------------------
+reg  [23:0] clut [0:255];
+always @(posedge pal_clk) if (pal_wr) clut[pal_a] <= pal_dw;
+assign pal_dr = clut[pal_a];
 
 //---------------------------------------------------------------------------
 // 64 KB chip RAM model (word addressed), data valid combinationally like

@@ -1082,6 +1082,25 @@ smc_done:
 	move.l	#$02000000,($B80100).l	; MEMORY_BASE, as the driver sets it
 	move.l	($B80100).l,d1
 	chkl	d1,$02000000,166
+
+; The CLUT at $B80400-$B807FF is the one RTG window whose read handshake is
+; longer -- rtg.v holds the cycle for three clk_sys edges (rd_r[2]) rather
+; than one -- and an 8-bit RTG screen with an all-zero palette is black
+; whether or not the framebuffer holds pixels.  Each entry is 4 bytes:
+; the word at +0 carries RR in its low byte, the word at +2 carries GGBB,
+; and rtg commits the whole 24 bits when the second word is written.
+	move.w	#$0012,($B80400).l	; entry 0: RR
+	move.w	#$3456,($B80402).l	; entry 0: GGBB, commits $123456
+	move.w	#$00AB,($B80404).l	; entry 1: RR
+	move.w	#$CDEF,($B80406).l	; entry 1: GGBB, commits $ABCDEF
+	moveq	#0,d1
+	move.w	($B80400).l,d1
+	chkl	d1,$00000012,167
+	moveq	#0,d1
+	move.w	($B80402).l,d1
+	chkl	d1,$00003456,168
+	move.l	($B80404).l,d1		; both halves of entry 1 at once
+	chkl	d1,$00ABCDEF,169
 rtgid_done:
 
 ;-------------------- immediate group: destination must be data alterable
