@@ -671,7 +671,19 @@ always @(posedge clk) begin
 					// fill_we writes fill_wrow at this same edge
 					if (!f_way_hit)
 						atc_rr[fill_row] <= atc_rr[fill_row] + 2'd1;
-					pt_mmusr <= (tc_p ? {w_desc[31:13], w_la[12], 12'd0}
+					// PTEST reports the PAGE FRAME, not the translated
+					// address of the probed LA.  In 8K mode that means
+					// bit 12 is CLEAR: the frame is 8K-aligned, and the
+					// LA's bit 12 belongs to the page offset.  This used
+					// to substitute w_la[12] on the reasoning that the
+					// "true PA" is what matters -- but WinUAE keeps the
+					// two separate and so does the architecture:
+					// mmu_translate returns the full PA while PTEST
+					// returns `desc & mmu_pagemaski` (~0x1FFF at 8K), so
+					// its MMUSR frame has bit 12 clear.  The differential
+					// comparator had been masking this bit, which is the
+					// only reason an "all seeds match" ever held here.
+					pt_mmusr <= (tc_p ? {w_desc[31:13], 13'd0}
 					                  : {w_desc[31:12], 12'd0}) |
 					            {21'd0, w_desc[10], w_desc[9:8], w_desc[7],
 					             w_desc[6:5], w_desc[4], 1'b0,

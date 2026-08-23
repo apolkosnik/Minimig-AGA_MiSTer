@@ -9,19 +9,14 @@ DUMP_BASE = 0x3000
 def main():
     words = [int(w, 16) for w in open(sys.argv[1]).read().split()]
     ref = [l.split() for l in open(sys.argv[2]) if l.strip()]
-    # 8K page mode: MMUSR bit 12 is inside the page offset.  AP040 reports
-    # the true translated PA (PA[12] = VA[12], which is what WinUAE's own
-    # mmu_translate produces); WinUAE's PTEST path reports the frame with
-    # bit 12 masked.  Compare modulo that reporting difference.
+    # 8K page mode: MMUSR bit 12 is inside the page offset, and PTEST
+    # reports the PAGE FRAME -- so the bit is CLEAR on both sides now.
+    # This used to mask bit 12 because AP040 substituted the probed LA's
+    # bit 12 ("the true translated PA") while WinUAE returns
+    # `desc & mmu_pagemaski`.  Masking it meant "all seeds match" never
+    # covered the field; AP040 was corrected to report the frame, so the
+    # comparison is exact again.
     mask = 0xFFFFFFFF
-    try:
-        import os.path
-        pf = os.path.join(os.path.dirname(sys.argv[1]) or ".", "mmu_probes.txt")
-        cfg = open(pf).readline().split()
-        if len(cfg) == 4 and int(cfg[3], 16) & 0x4000:
-            mask = 0xFFFFEFFF
-    except OSError:
-        pass
     base = (MMUSR_A - DUMP_BASE) // 2
     bad = 0
     for i, r in enumerate(ref):

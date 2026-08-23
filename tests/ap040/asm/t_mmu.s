@@ -516,11 +516,16 @@ t8loop:
 	movec	mmusr,d0
 	and.l	#$FFFFF001,d0
 	chkl	d0,$0000C001,27
-	lea	($B000).l,a0
+	lea	($B000).l,a0	; SAME 8K page as $A000 above
 	ptestr	(a0)
 	movec	mmusr,d0
 	and.l	#$FFFFF001,d0
-	chkl	d0,$0000D001,28
+	; MMUSR carries the page FRAME, not the probed LA's translation, so
+	; both probes in one 8K page report the same address and bit 12 is
+	; clear.  This used to expect $D001 -- the frame with the LA's bit 12
+	; folded in -- which is what WinUAE's PTEST does NOT do
+	; (mmu_fill_atc: desc & mmu_pagemaski, ~0x1FFF at 8K).
+	chkl	d0,$0000C001,28
 
 	; fault and restart under 8K paging
 	move.l	#5,(expect_tm).l	; supervisor data write (8K paging)
