@@ -70,7 +70,22 @@ compile cart_hrtmon iverilog -g2012 -o "$WORK/tb_cart_hrtmon.vvp" \
 compile wrapchip iverilog -g2012 -I "$RTL" -o "$WORK/tb_wrapchip.vvp" \
 	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
 	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
-	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" \
+	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
+	sim_dpram.v $SRC &
+# the RAM port's acknowledgement outlives its own access, so the latency at
+# which a stale ready overlaps the next request is what decides whether
+# bus_complete can cross targets -- one value proves nothing
+compile wrapchip_l0 iverilog -g2012 -I "$RTL" \
+	-P tb_cpu_wrapper_chip.RAM_LAT=0 -o "$WORK/tb_wrapchip_l0.vvp" \
+	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
+	sim_dpram.v $SRC &
+compile wrapchip_l7 iverilog -g2012 -I "$RTL" \
+	-P tb_cpu_wrapper_chip.RAM_LAT=7 -o "$WORK/tb_wrapchip_l7.vvp" \
+	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
 	sim_dpram.v $SRC &
 compile sdram_turbo iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
 	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=0 \
@@ -158,6 +173,8 @@ leg cache              "$WORK/tb_prog.vvp" +prog=build/t_cache.hex &
 leg fpu                "$WORK/tb_prog.vvp" +prog=build/t_fpu.hex &
 leg fpu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_fpu.hex &
 leg exceptions_chip    "$WORK/tb_wrapchip.vvp" +prog=build/t_exceptions.hex &
+leg exceptions_chip_l0 "$WORK/tb_wrapchip_l0.vvp" +prog=build/t_exceptions.hex &
+leg exceptions_chip_l7 "$WORK/tb_wrapchip_l7.vvp" +prog=build/t_exceptions.hex &
 leg mmu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_mmu.hex &
 leg fpu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_fpu.hex &
 leg mmu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_mmu.hex &

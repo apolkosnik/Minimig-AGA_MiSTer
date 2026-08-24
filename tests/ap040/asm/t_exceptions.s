@@ -1101,6 +1101,30 @@ smc_done:
 	chkl	d1,$00003456,168
 	move.l	($B80404).l,d1		; both halves of entry 1 at once
 	chkl	d1,$00ABCDEF,169
+
+; The framebuffer aperture.  cpu_wrapper routes $02xxxxxx to the RAM port
+; (ramaddr[26:23] = 4'b1110 -> DDR3 $27000000) rather than to fastchip, so a
+; pixel write and an RTG register access use two different targets -- and
+; cpu_wrapper's bus_complete ORs chipready, ramready and fastchip_ready
+; without asking which target the current access belongs to.  The RAM
+; controllers hold their acknowledgement until cpuCS falls, which lags the
+; request, so a register access issued straight after a framebuffer write
+; can be completed by the PREVIOUS access's ready.  That is the sequence the
+; driver runs constantly: blit pixels, then touch a register.
+	move.l	#$12345678,($02000000).l
+	move.l	($02000000).l,d1
+	chkl	d1,$12345678,175	; the aperture itself round-trips
+
+	move.l	#$0BADC0DE,($02000010).l	; a RAM access immediately before
+	move.w	($B8010E).l,d0			; ...an RTG register read
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,176	; must not be completed by the RAM ready
+
+	move.l	($02000010).l,d1	; and a RAM read immediately before
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,177
+	chkl	d1,$0BADC0DE,178
 rtgid_done:
 
 ;-------------------- immediate group: destination must be data alterable

@@ -11,7 +11,8 @@
 
 module tb_cpu_wrapper_chip #(
 	parameter CPU_PHASE = 0,
-	parameter DTACK_MODE = 0
+	parameter DTACK_MODE = 0,
+	parameter RAM_LAT = 3
 );
 
 reg reset = 0;
@@ -42,6 +43,10 @@ always @(posedge clk_114) begin
 end
 
 wire [23:1] chip_addr;
+wire        ramsel, ramlds, ramuds, ramready, ramconsumed;
+wire [28:1] ramaddr;
+wire [15:0] ramdin, ramdout;
+wire  [1:0] cpustate;
 wire        pal_clk;
 wire [23:0] pal_dr;
 wire [23:0] pal_dw;
@@ -110,13 +115,14 @@ cpu_wrapper dut
 	.fastchip_selack(fc_selack),
 	.fastchip_ready(fc_ready),
 
-	.ramsel(),
-	.ramaddr(),
-	.ramdin(),
-	.ramdout(16'd0),
-	.ramready(1'b0),
-	.ramlds(),
-	.ramuds(),
+	.ramsel(ramsel),
+	.ramaddr(ramaddr),
+	.ramdin(ramdin),
+	.ramdout(ramdout),
+	.ramready(ramready),
+	.ramconsumed(ramconsumed),
+	.ramlds(ramlds),
+	.ramuds(ramuds),
 	.ramshared(),
 
 	.walker_mem_req(walker_req),
@@ -134,7 +140,7 @@ cpu_wrapper dut
 	.a2065_ena(),
 	.a2065_base(),
 
-	.cpustate(),
+	.cpustate(cpustate),
 	.cacr(),
 	.cache_inhibit(),
 	.nmi_ack_toggle(),
@@ -173,6 +179,116 @@ fastchip fastchip
 	.ide_address(5'd0), .ide_write(1'b0), .ide_writedata(16'd0),
 	.ide_read(1'b0), .ide_readdata(), .ide_led()
 );
+
+//---------------------------------------------------------------------------
+// Accelerated RAM port model.
+//
+// This port used to be tied off (ramready 1'b0), which made the bench blind
+// to how the real controllers acknowledge: sdram_ctrl/ddram_ctrl hold their
+// level ack -- and the captured data -- until cpuCS falls, and cpuCS is
+// ram_cs_guard's REGISTERED copy of ramsel, so it lags the request by a
+// clk_114 cycle.  A ready that outlives its own access is exactly what
+// cpu_wrapper's unqualified bus_complete (chipready | ramready |
+// fastchip_ready) can mistake for the NEXT access completing.
+//
+// With fastramcfg/cachecfg both zero the only thing that selects this port
+// is the RTG framebuffer aperture, cpu_addr $02xxxxxx, which cpu_wrapper
+// remaps to ramaddr[26:23] = 4'b1110 -- DDR3 byte $27000000 once ddram_ctrl
+// adds its {3'b001} prefix, the FB_BASE MiSTer.card.asm hardcodes.  Model a
+// window of it so a framebuffer write can be read back, and so an RTG
+// register access can follow a RAM access the way it does on the board.
+//
+// ramuds/ramlds are active low (sdram_ctrl takes them as {!cpuU, !cpuL}),
+// and cpu_wrapper swaps the two halves plus the data bytes for the RTG
+// aperture, so the model stores what the scaler would actually fetch.
+//---------------------------------------------------------------------------
+// swept by run_tests.sh: the window where a stale ready can be mistaken for
+// the next access's is latency dependent, so one value proves nothing
+
+wire ram_cs;
+ram_cs_guard ram_guard
+(
+	.clk(clk_114),
+	.nreset(reset),
+	.cpu_type(1'b1),
+	.ram_consumed(ramconsumed),
+	.ram_sel(ramsel),
+	.ram_ready(ramready),
+	.ram_cs(ram_cs)
+);
+
+reg [15:0] fbmem [0:2047];
+reg [15:0] ramdout_r;
+reg        ramready_r;
+reg  [2:0] ram_lat;
+wire [10:0] fbidx = ramaddr[11:1];
+integer fi;
+initial begin
+	for (fi = 0; fi < 2048; fi = fi + 1) fbmem[fi] = 16'h0000;
+	ramdout_r  = 16'h0000;
+	ramready_r = 1'b0;
+	ram_lat    = 3'd0;
+end
+
+always @(posedge clk_114) begin
+	if (!reset || !ram_cs) begin
+		// the ack is dropped only when the select falls, never earlier
+		ramready_r <= 1'b0;
+		ram_lat    <= 3'd0;
+	end
+	else if (!ramready_r) begin
+		if (ram_lat == RAM_LAT[2:0]) begin
+			if (cpustate == 2'd3) begin
+				if (!ramuds) fbmem[fbidx][15:8] <= ramdin[15:8];
+				if (!ramlds) fbmem[fbidx][7:0]  <= ramdin[7:0];
+			end
+			ramdout_r  <= fbmem[fbidx];
+			ramready_r <= 1'b1;
+		end
+		else ram_lat <= ram_lat + 3'd1;
+	end
+end
+
+assign ramready = ramready_r;
+assign ramdout  = ramdout_r;
+
+//---------------------------------------------------------------------------
+// Cross-target completion checker.
+//
+// cpu_wrapper advances the CPU on
+//     clkena_in = ~cpu_req | bus_complete | bus_berr
+// with
+//     bus_complete = chipready | ramready | fastchip_ready
+// which never asks WHICH target the access in flight belongs to.  Each of
+// the three is a level that outlives its own access by some amount -- the
+// RAM controllers hold theirs until cpuCS falls, and cpuCS is ram_cs_guard's
+// registered copy of ramsel -- so a ready left over from the previous access
+// can complete the current one.  A fastchip read finished that way returns
+// rtg's registered dout before its read pipeline has driven it, which is
+// 16'h0000: exactly the $0000 seen reading the RTG ID on hardware where
+// $5001 is expected.
+//
+// Watch for it continuously rather than hoping a test lands in the window.
+//---------------------------------------------------------------------------
+integer xtarget_hits = 0;
+always @(posedge clk) begin
+	if (reset && dut.cpu_req) begin
+		if (fc_selack && !fc_ready && (ramready || dut.chipready)) begin
+			if (xtarget_hits < 20)
+				$display("XTARGET: fastchip access completed by %s at t=%0t addr=%h",
+				         ramready ? "ramready" : "chipready", $time,
+				         {chip_addr, 1'b0});
+			xtarget_hits = xtarget_hits + 1;
+		end
+		if (ramsel && !ramready && (fc_ready || dut.chipready)) begin
+			if (xtarget_hits < 20)
+				$display("XTARGET: RAM access completed by %s at t=%0t addr=%h",
+				         fc_ready ? "fastchip_ready" : "chipready", $time,
+				         {ramaddr, 1'b0});
+			xtarget_hits = xtarget_hits + 1;
+		end
+	end
+end
 
 //---------------------------------------------------------------------------
 // RTG CLUT model.  On the board these four signals leave the core for the
@@ -342,7 +458,9 @@ initial begin
 	else if (result == 2)
 		$display("FAIL: program reports failure, test %0d", failcode);
 	else
-		$display("chip-bus run passed (%0d cycles)", timeout);
+		if (xtarget_hits != 0)
+		$display("XTARGET: %0d cross-target completions", xtarget_hits);
+	$display("chip-bus run passed (%0d cycles)", timeout);
 
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else             $display("TEST FAILED with %0d errors", errors);
