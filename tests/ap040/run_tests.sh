@@ -87,6 +87,16 @@ compile wrapchip_l7 iverilog -g2012 -I "$RTL" \
 	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
 	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
 	sim_dpram.v $SRC &
+# turbo chipram: cchip claims $000000-$1FFFFF, so fetches AND data leave the
+# chip bus for the accelerated RAM port.  That is how an accelerated board
+# runs, and it is the only configuration where a fastchip access follows a
+# RAM access rather than a chip-bus one.
+compile wrapchip_turbo iverilog -g2012 -I "$RTL" \
+	-P tb_cpu_wrapper_chip.TURBO_CHIP=1 -o "$WORK/tb_wrapchip_turbo.vvp" \
+	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
+	sim_dpram.v $SRC &
 compile sdram_turbo iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
 	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=0 \
 	-o "$WORK/tb_sdram_turbo.vvp" tb_sdram_turbo.v \
@@ -175,6 +185,14 @@ leg fpu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_fpu.hex &
 leg exceptions_chip    "$WORK/tb_wrapchip.vvp" +prog=build/t_exceptions.hex &
 leg exceptions_chip_l0 "$WORK/tb_wrapchip_l0.vvp" +prog=build/t_exceptions.hex &
 leg exceptions_chip_l7 "$WORK/tb_wrapchip_l7.vvp" +prog=build/t_exceptions.hex &
+# t_cache is deliberately absent: it asserts that a stale I-cache line is
+# still served, which the chip-window I-fetch bypass prevents whenever
+# cache_allow_all is 0 as it is here and in production.  That program
+# belongs to tb_prog, which runs everything-cacheable.
+leg exceptions_turbo   "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_exceptions.hex &
+leg mmu_turbo          "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_mmu.hex &
+leg fpu_turbo          "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_fpu.hex &
+leg integer_turbo      "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_integer.hex &
 leg mmu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_mmu.hex &
 leg fpu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_fpu.hex &
 leg mmu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_mmu.hex &

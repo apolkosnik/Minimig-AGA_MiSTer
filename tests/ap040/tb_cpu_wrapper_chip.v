@@ -269,6 +269,16 @@ end
 assign ramready = ramready_r;
 assign ramdout  = ramdout_r;
 
+// Under TURBO_CHIP, sel_chipram claims $000000-$1FFFFF, which contains every
+// testbench control port -- result, failcode and the interrupt injectors --
+// so those writes leave the chip bus entirely.  Decoding them on the chip
+// bus alone made the program hang waiting for an interrupt that was never
+// injected.  Expose the RAM-path write as a single-cycle event instead, and
+// let one decode below serve both paths.
+wire ram_wr_commit = reset && ram_cs && !ramready_r &&
+                     (ram_lat == RAM_LAT[2:0]) && (cpustate == 2'd3) &&
+                     !ram_is_fb;
+
 //---------------------------------------------------------------------------
 // Cross-target completion checker.
 //
@@ -389,36 +399,51 @@ integer errors = 0;
 integer result = 0;      // 0 running, 1 pass, 2 fail
 reg [15:0] failcode = 0;
 
+// chip RAM writes still land here, on the chip bus, as before
 always @(posedge clk) begin
 	if (ph2 && !chip_as && !chip_rw && reset) begin
 		if (!chip_uds) mem[chip_addr[15:1]][15:8] <= chip_din[15:8];
 		if (!chip_lds) mem[chip_addr[15:1]][7:0]  <= chip_din[7:0];
+	end
+end
 
-		if (chip_addr[15:1] == (16'hF100 >> 1))
-			failcode <= chip_din;
-		if (chip_addr[15:1] == (16'hF102 >> 1) && !chip_uds && !chip_lds) begin
-			if (chip_din == 16'h600D) result <= 1;
+// One control-port decode for both paths.  ph2 is four clk_114 cycles wide,
+// so take its rising edge to keep the chip-bus source single-cycle, matching
+// what one posedge clk used to see.
+reg  chip_ph2_d;
+wire chip_wr_commit = reset && ph2 && !chip_ph2_d && !chip_as && !chip_rw;
+wire        cw_stb  = chip_wr_commit | ram_wr_commit;
+wire [15:1] cw_addr = ram_wr_commit ? ram_cidx : chip_addr[15:1];
+wire [15:0] cw_data = ram_wr_commit ? ramdin   : chip_din;
+wire        cw_uds  = ram_wr_commit ? ramuds   : chip_uds;
+wire        cw_lds  = ram_wr_commit ? ramlds   : chip_lds;
+
+always @(posedge clk_114) begin
+	chip_ph2_d <= ph2;
+
+	if (cw_stb) begin
+		if (cw_addr == (16'hF100 >> 1))
+			failcode <= cw_data;
+		if (cw_addr == (16'hF102 >> 1) && !cw_uds && !cw_lds) begin
+			if (cw_data == 16'h600D) result <= 1;
 			else begin
 				errors <= errors + 1;
 				result <= 2;
 			end
 		end
+		// interrupt injection, mirroring tb_ap040_program: $F110 sets the
+		// level directly (0 releases), $F148 arms a delayed level-2 rise
+		if (cw_addr == (16'hF110 >> 1))
+			ipl_lvl <= cw_data[2:0];
+		if (cw_addr == (16'hF146 >> 1))
+			wberr_arm <= 1;   // next walker transaction bus-errors
 	end
 
-	// interrupt injection, mirroring tb_ap040_program: $F110 sets the
-	// level directly (0 releases), $F148 arms a delayed level-2 rise
-	if (ph2 && !chip_as && !chip_rw && reset &&
-	    chip_addr[15:1] == (16'hF110 >> 1))
-		ipl_lvl <= chip_din[2:0];
 	// the 7 MHz bus stretches every instruction ~16x, so scale the armed
 	// delay to sweep the same fraction of the FPU op's window as the
 	// fast-bus testbench does with raw clk counts
-	if (ph2 && !chip_as && !chip_rw && reset &&
-	    chip_addr[15:1] == (16'hF146 >> 1))
-		wberr_arm <= 1;   // next walker transaction bus-errors
-	if (ph2 && !chip_as && !chip_rw && reset &&
-	    chip_addr[15:1] == (16'hF148 >> 1))
-		ipl_delay <= chip_din << 8;
+	if (cw_stb && cw_addr == (16'hF148 >> 1))
+		ipl_delay <= cw_data << 8;
 	else if (ipl_delay != 0) begin
 		ipl_delay <= ipl_delay - 1'd1;
 		if (ipl_delay == 16'd1) ipl_lvl <= 3'd2;
@@ -464,6 +489,11 @@ initial begin
 		timeout = timeout + 1;
 	end
 
+	if (xtarget_hits != 0) begin
+		errors = errors + 1;
+		$display("FAIL: %0d cross-target bus completions", xtarget_hits);
+	end
+
 	if (result == 0) begin
 		errors = errors + 1;
 		$display("FAIL: timeout after %0d cycles", timeout);
@@ -471,12 +501,11 @@ initial begin
 		         dut.cpu_inst_p.core.pc, dut.cpu_inst_p.core.ir,
 		         dut.cpu_inst_p.core.sr, dut.cpu_inst_p.core.state);
 	end
-	else if (result == 2)
+	else if (result == 2) begin
 		$display("FAIL: program reports failure, test %0d", failcode);
+	end
 	else
-		if (xtarget_hits != 0)
-		$display("XTARGET: %0d cross-target completions", xtarget_hits);
-	$display("chip-bus run passed (%0d cycles)", timeout);
+		$display("chip-bus run passed (%0d cycles)", timeout);
 
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else             $display("TEST FAILED with %0d errors", errors);
