@@ -399,6 +399,41 @@ ucont3:
 	movec	d0,dfc
 	moveq	#0,d0
 	movec	d0,dtt0
+
+;--------------------------- chipset IO through a transparent translation
+; Everything that covers RTG so far runs with the MMU off, but the MMU is
+; the structural difference between this CPU and the TG68K the upstream
+; core uses -- and 68040.library always enables it, mapping the low 16MB
+; of IO space through a transparent translation rather than page tables.
+; Reproduce that idiom exactly: DTT0 base $00, mask $00 (so only
+; $00000000-$00FFFFFF matches), E=1, S=both, CM=10 cache-inhibited
+; serialized, and read the RTG ID through it.  The page tables here cover
+; only $0-$3FFFF, so this access reaches fastchip solely via the TTR.
+	move.w	(IPLCAP).l,d0
+	btst	#4,d0			; the real fastchip/rtg block is present
+	beq	rtg_ttr_done
+	move.l	#$0000C040,d0
+	movec	d0,dtt0
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,171	; ID/VERSION through the TTR
+
+	; and the registers must still take a write under translation
+	move.l	#$02000000,($B80100).l
+	move.l	($B80100).l,d1
+	chkl	d1,$02000000,172
+
+	; same again with the TTR marked cache-inhibited nonserialized, the
+	; other mode 68040.library uses for IO
+	move.l	#$0000C060,d0
+	movec	d0,dtt0
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,173
+	moveq	#0,d0
+	movec	d0,dtt0
+rtg_ttr_done:
+
 	move.l	#$00005003,($4414).l
 	pflusha
 

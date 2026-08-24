@@ -12,7 +12,12 @@
 module tb_cpu_wrapper_chip #(
 	parameter CPU_PHASE = 0,
 	parameter DTACK_MODE = 0,
-	parameter RAM_LAT = 3
+	parameter RAM_LAT = 3,
+	// Turbo chipram: cchip claims $000000-$1FFFFF, so fetches and data both
+	// leave the chip bus for the accelerated RAM port.  That is how an
+	// accelerated board actually runs, and it means EVERY fastchip access is
+	// preceded by a RAM access rather than a chip-bus one.
+	parameter TURBO_CHIP = 0
 );
 
 reg reset = 0;
@@ -93,7 +98,7 @@ cpu_wrapper dut
 
 	.cpucfg(2'b10),          // 68040 class, no fastchip acceleration
 	.fastramcfg(3'd0),       // no Zorro RAM: nothing selects the RAM port
-	.cachecfg(3'd0),         // turbo chipram OFF: chip goes to the chip bus
+	.cachecfg(TURBO_CHIP ? 3'b101 : 3'd0),  // turbochip + dcache, or all off
 	.bootrom(1'b0),
 
 	.chip_addr(chip_addr),
@@ -217,11 +222,17 @@ ram_cs_guard ram_guard
 	.ram_cs(ram_cs)
 );
 
+reg [15:0] mem [0:32767];
 reg [15:0] fbmem [0:2047];
 reg [15:0] ramdout_r;
 reg        ramready_r;
 reg  [2:0] ram_lat;
 wire [10:0] fbidx = ramaddr[11:1];
+// ramaddr[26] is set only by the RTG aperture remap (ramaddr[26:23]=1110);
+// everything else reaching this port under TURBO_CHIP is chip RAM, which
+// must come from the SAME array the chip bus serves or the program cannot run
+wire        ram_is_fb = ramaddr[26];
+wire [14:0] ram_cidx  = ramaddr[15:1];
 integer fi;
 initial begin
 	for (fi = 0; fi < 2048; fi = fi + 1) fbmem[fi] = 16'h0000;
@@ -239,10 +250,16 @@ always @(posedge clk_114) begin
 	else if (!ramready_r) begin
 		if (ram_lat == RAM_LAT[2:0]) begin
 			if (cpustate == 2'd3) begin
-				if (!ramuds) fbmem[fbidx][15:8] <= ramdin[15:8];
-				if (!ramlds) fbmem[fbidx][7:0]  <= ramdin[7:0];
+				if (ram_is_fb) begin
+					if (!ramuds) fbmem[fbidx][15:8] <= ramdin[15:8];
+					if (!ramlds) fbmem[fbidx][7:0]  <= ramdin[7:0];
+				end
+				else begin
+					if (!ramuds) mem[ram_cidx][15:8] <= ramdin[15:8];
+					if (!ramlds) mem[ram_cidx][7:0]  <= ramdin[7:0];
+				end
 			end
-			ramdout_r  <= fbmem[fbidx];
+			ramdout_r  <= ram_is_fb ? fbmem[fbidx] : mem[ram_cidx];
 			ramready_r <= 1'b1;
 		end
 		else ram_lat <= ram_lat + 3'd1;
@@ -307,7 +324,6 @@ assign pal_dr = clut[pal_a];
 // real chip RAM by the dtack phase; writes latch during the data phase.
 //---------------------------------------------------------------------------
 
-reg [15:0] mem [0:32767];
 assign chip_dout = mem[chip_addr[15:1]];
 
 //---------------------------------------------------------------------------

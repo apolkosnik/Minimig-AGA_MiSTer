@@ -1125,6 +1125,43 @@ smc_done:
 	and.l	#$FFFF,d0
 	chkl	d0,$00005001,177
 	chkl	d1,$0BADC0DE,178
+
+; Consecutive accesses INSIDE the $B80xxx window.  aen (sel_rtg) covers the
+; whole 4K page, so it stays high across the boundary between one access and
+; the next, and rtg's read pipeline -- rd_r <= rd_ready ? 0 : {rd_r,aen&rd}
+; -- is a free-running shift register that no address change requeues.  dout
+; defaults to 16'h0000 for any in-window address that is neither a control
+; register ($B80100-$B8010F) nor palette ($B80400-$B807FF), so a read that
+; lands on one of those and is immediately followed by a register read is
+; the shape that could hand back a stale $0000.  A memory dump walks exactly
+; across the $B8010F/$B80110 boundary.
+	moveq	#0,d1
+	move.w	($B80110).l,d1		; in window, no register there
+	chkl	d1,$00000000,179
+	move.w	($B8010E).l,d0		; ...immediately followed by the ID
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,180
+
+	move.w	($B80120).l,d1		; again, other way round
+	move.l	($B8010C).l,d1		; stride:ID as one longword
+	chkl	d1,$12345001,181
+
+	; and a run straight through the end of the register block, which is
+	; what dumping memory from $B80100 does
+	lea	($B80100).l,a0
+	move.l	(a0)+,d1
+	chkl	d1,$02000000,182	; base
+	move.l	(a0)+,d1
+	chkl	d1,$00150001,183	; format:ena
+	move.l	(a0)+,d1
+	chkl	d1,$05670345,184	; hsize:vsize
+	move.l	(a0)+,d1
+	chkl	d1,$12345001,185	; stride:ID
+	move.l	(a0)+,d1
+	chkl	d1,$00000000,186	; past the block
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,187	; and back to the ID afterwards
 rtgid_done:
 
 ;-------------------- immediate group: destination must be data alterable
