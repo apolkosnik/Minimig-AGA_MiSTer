@@ -1037,6 +1037,14 @@ smc_done:
 	btst	#4,d0			; the real fastchip/rtg block is present
 	beq	rtgid_done
 
+	; SetPatch turns the caches on as well as the MMU, and the RTG ID
+	; reads $5001 before it and $0000 after -- so run the whole block
+	; cached.  $B8xxxx is outside cache_win, so the L1 must treat every
+	; one of these as nocache and bypass; if it ever caches one, the
+	; register reads below stop tracking the hardware.
+	move.l	#$80008000,d0
+	movec	d0,cacr
+
 	move.w	($B8010E).l,d0
 	and.l	#$FFFF,d0
 	chkl	d0,$00005001,159	; ID = $50, VERSION = $01
@@ -1162,6 +1170,18 @@ smc_done:
 	move.w	($B8010E).l,d0
 	and.l	#$FFFF,d0
 	chkl	d0,$00005001,187	; and back to the ID afterwards
+
+	; and the same reads once more after a full cache invalidate
+	cinva	bc
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,188
+	move.l	($B80100).l,d1
+	chkl	d1,$02000000,189
+
+	moveq	#0,d0
+	movec	d0,cacr			; back to the uncached regime
+	cinva	bc
 rtgid_done:
 
 ;-------------------- immediate group: destination must be data alterable

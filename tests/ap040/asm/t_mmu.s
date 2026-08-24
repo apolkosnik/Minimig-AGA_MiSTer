@@ -432,10 +432,115 @@ ucont3:
 	chkl	d0,$00005001,173
 	moveq	#0,d0
 	movec	d0,dtt0
+
 rtg_ttr_done:
 
 	move.l	#$00005003,($4414).l
 	pflusha
+
+; ...and now the case that actually matters.  A TTR bypasses the table walk
+; entirely, but SetPatch installs 68040.library, which maps IO space through
+; real page tables -- and the RTG ID reads $5001 before SetPatch and $0000
+; after.  So walk to it: $00B8010E splits into root index 0, pointer index
+; $2E (VA[24:18]), page index 0 (VA[17:12]), and the page frame is
+; identity with CM = 10, cache-inhibited serialized, the mode 68040.library
+; uses for a register block.
+	move.w	(IPLCAP).l,d0
+	btst	#4,d0			; the real fastchip/rtg block is present
+	beq	rtg_walk_done
+	move.l	#$00B80043,($5800).l	; page 0 of the $B8 region, CI serialized
+	move.l	#$00005803,($42B8).l	; pointer entry $2E -> that page table
+	pflusha
+	move.l	#$80008000,d0
+	movec	d0,cacr			; SetPatch enables these too
+	lea	($B8010E).l,a0
+	ptestr	(a0)
+	movec	mmusr,d0
+	and.l	#$FFFFF001,d0
+	chkl	d0,$00B80001,190	; the walk itself resolves
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,174	; ID through a real table walk
+
+	; a write and read-back through the same translation
+	move.l	#$02000000,($B80100).l
+	move.l	($B80100).l,d1
+	chkl	d1,$02000000,175
+
+	; the walk must be repeatable once the ATC entry is resident, and
+	; still correct after it is flushed away again
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,176
+	pflusha
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,177
+
+	; 68040.library chooses the cache mode in the descriptor, and it does
+	; not necessarily know $B80000 is a register block: an unknown region
+	; can end up copyback or writethrough rather than cache-inhibited.
+	; The L1 must bypass it regardless, because $B8xxxx is outside
+	; cache_win -- so every CM encoding has to read the same.
+	move.l	#$00B80003,($5800).l	; CM = 00, writethrough
+	pflusha
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,191
+	move.l	#$00B80023,($5800).l	; CM = 01, copyback
+	pflusha
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,192
+	move.l	#$00B80063,($5800).l	; CM = 11, cache-inhibited nonserialized
+	pflusha
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,193
+
+	; and a write-back-then-read under copyback, which is the mode that
+	; would post a dirty line if anything ever cached this page
+	move.l	#$00B80023,($5800).l
+	pflusha
+	move.l	#$02000000,($B80100).l
+	move.l	($B80100).l,d1
+	chkl	d1,$02000000,194
+	cpusha	dc
+	move.l	($B80100).l,d1
+	chkl	d1,$02000000,195
+
+	; With the region UNMAPPED -- which is what an MMU setup that only
+	; covers the boards it knows about leaves behind, and the MiSTer RTG
+	; board is not autoconfig -- the access must take a normal access
+	; fault, not quietly return data.  A faulted read is what a monitor
+	; displays as $0000, which is exactly the post-SetPatch symptom.
+	move.w	(cnt_aerr).l,d5		; hand the counter back below
+	and.l	#$FFFF,d5
+	move.l	#0,($42B8).l
+	pflusha
+	move.l	#5,(expect_tm).l	; supervisor data read
+	move.l	#$00B8010E,(expect_fa).l
+	move.l	#$42B8,(fix_addr).l
+	move.l	#$00005803,(fix_val).l
+	move.w	($B8010E).l,d0		; faults, handler maps it, restarts
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,196	; and the restarted access reads the ID
+	move.w	(cnt_aerr).l,d0
+	and.l	#$FFFF,d0
+	sub.l	d5,d0
+	chkl	d0,1,197		; exactly one access fault was taken
+	move.w	d5,(cnt_aerr).l		; cnt_aerr is cumulative and asserted
+					; downstream: hand it back untouched
+
+	moveq	#0,d0
+	movec	d0,cacr			; back to the uncached regime
+	cinva	bc
+	move.l	#0,($42B8).l		; unmap the region again
+	pflusha
+rtg_walk_done:
+	; 8K is checked in the 8K-pages section below, where the tables that
+	; map this code have been rebuilt for it -- switching TC alone would
+	; reinterpret them and fault on the next instruction fetch
 
 ;--------------------------------------- ATC caching and page PFLUSH
 	move.l	($5000).l,d0	; walk and cache the mapping
@@ -536,6 +641,16 @@ t8loop:
 	move.l	#$08081111,($C120).l	; seen through LA $A120 (LA12=0)
 	move.l	#$08082222,($D120).l	; seen through LA $B120 (LA12=1)
 
+	; the $B8 region again, now under 8K paging: root index 0, pointer
+	; index $2E, and the page index is VA[17:13] which is still 0, so the
+	; same descriptor serves -- the frame simply carries no bit 12
+	move.w	(IPLCAP).l,d0
+	btst	#4,d0
+	beq	rtg_8k_skip
+	move.l	#$00B80043,($5800).l
+	move.l	#$00005803,($42B8).l
+rtg_8k_skip:
+
 	move.l	#$C000,d0	; E=1, P=1: 8K pages
 	movec	d0,tc
 
@@ -545,6 +660,16 @@ t8loop:
 	chkl	d0,$08081111,25
 	move.l	($B120).l,d0	; same 8K page, LA bit 12 set
 	chkl	d0,$08082222,26
+
+	move.w	(IPLCAP).l,d0
+	btst	#4,d0			; the real fastchip/rtg block is present
+	beq	rtg_8k_done
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,179	; RTG ID through an 8K page walk
+rtg_8k_done:
+	move.l	#0,($42B8).l
+	pflusha
 
 	lea	($A000).l,a0	; PTEST under 8K paging
 	ptestr	(a0)
