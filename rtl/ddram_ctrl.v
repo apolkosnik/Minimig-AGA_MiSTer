@@ -223,6 +223,20 @@ always @ (posedge sysclk) begin
 	reg  [3:0] state;
 	reg  [1:0] ba;
 	reg [63:0] dout;
+	// Read-wait watchdog: states 1 and 14 used to wait on ram_dout_ready
+	// unconditionally, so a response the DDR3 bridge lost wedged this
+	// controller -- and with it every CPU and walker access to fast RAM,
+	// including the bus-error exception frames that would have reported
+	// the problem.  Abandon the wait after 2^14 cycles (~143 us, well
+	// inside the port-level watchdogs above): the walker path is then
+	// bus-errored by the Minimig walker watchdog, the cache path retries
+	// or falls to the CPU-port watchdog, and the machine stays alive to
+	// report what happened.  The arbiter quarantines the abandoned
+	// burst's late beats so they cannot alias into a newer read.
+	reg [13:0] rdwait;
+	reg        rd_owed;     // an accepted Avalon read whose data has not returned
+	reg        stale_rd;    // ...and whose consumer timed out: drain before reading
+	reg [13:0] stale_wait;  // lost-response decay so a vanished beat cannot wedge reads
 
 	cache_fill <= 0;
 	ddr_data <= dout[{ba, 4'b0000} +:16];
@@ -237,6 +251,10 @@ always @ (posedge sysclk) begin
 	if(~reset_n) begin
 		state                <= 0;
 		write_ack            <= 0;
+		rdwait               <= 0;
+		rd_owed              <= 0;
+		stale_rd             <= 0;
+		stale_wait           <= 0;
 		walker_busy          <= 0;
 		walker_addr_latch    <= 0;
 		walker_wdata_latch   <= 0;
@@ -245,6 +263,28 @@ always @ (posedge sysclk) begin
 	end
 	else begin
 		if (!walker_req) walker_busy <= 0;
+
+		// Avalon read accounting.  A command transfers on the cycle it is
+		// asserted with waitrequest low; its response arrives later, in
+		// order.  The timeout aborts below withdraw the command, but one
+		// the slave already ACCEPTED still owes a response beat.  Nothing
+		// consumed it before: the beat arrived during the NEXT read and
+		// was taken as that read's data, shifting every later beat by one
+		// -- the CPU then fills cache lines with the neighbouring data,
+		// and a single such fill is enough to hand the kernel a corrupted
+		// movem mask or pointer (the tc_windup a2 panic).  Track
+		// acceptance; after an abort, drain the orphan beat -- with a
+		// decay so a response lost outright cannot block reads forever --
+		// and hold new reads off until the pipe is clean again.
+		if (ram_rd && !ram_busy) rd_owed <= 1;
+		if (stale_rd) begin
+			if (ram_dout_ready || (&stale_wait)) begin
+				stale_rd   <= 0;
+				stale_wait <= 0;
+			end
+			else stale_wait <= stale_wait + 1'd1;
+		end
+
 		case(state)
 			0: if(~ram_busy) begin
 					if(~write_ack & write_req) begin
@@ -254,7 +294,7 @@ always @ (posedge sysclk) begin
 						ram_we   <= 1;
 						write_ack  <= 1;
 					end
-					else if(walker_req && !walker_busy) begin
+					else if(walker_req && !walker_busy && !stale_rd) begin
 						walker_busy        <= 1;
 						walker_addr_latch  <= walker_addr;
 						walker_wdata_latch <= walker_wdata;
@@ -273,7 +313,7 @@ always @ (posedge sysclk) begin
 							state  <= 14;
 						end
 					end
-					else if(cache_req) begin
+					else if(cache_req && !stale_rd) begin
 						ram_addr <= {3'b001, cpuAddr[28:3]};
 						ram_be   <= 8'hFF;
 						ram_rd   <= 1;
@@ -282,13 +322,36 @@ always @ (posedge sysclk) begin
 						ddr_swap   <= ramshared;
 					end
 				end
-			1: if(~ram_busy & ram_dout_ready) begin
+			// Avalon read data is qualified by readdatavalid ALONE.
+			// waitrequest gates command acceptance and is independent: a
+			// pipelined slave may return this read's data while asserting
+			// waitrequest against the NEXT command.  Gating the data on
+			// ~ram_busy dropped the valid whenever the two coincided,
+			// hanging the fill (and the walker read below) -- the DDR3
+			// bridge does exactly this under contention, which is why
+			// NetBSD (page tables in DDR3, le0 adding traffic) froze in a
+			// table walk while AmigaOS, which never walks DDR3, did not.
+			1: if(ram_dout_ready) begin
+					rdwait        <= 0;
+					rd_owed       <= 0;
 					ddr_data      <= ram_dout[{ba, 4'b0000} +:16];
 					dout          <= ram_dout;
 					cache_fill    <= 1;
 					ba            <= ba + 1'd1;
 					state         <= state + 1'd1;
 				end
+				else if (&rdwait) begin
+					rdwait <= 0;
+					ram_rd <= 0;   // withdraw the command: a level-held
+					state  <= 0;   // read the slave accepted late would
+					               // otherwise become an untracked orphan
+					if (rd_owed) begin
+						stale_rd   <= 1;   // accepted: a beat is still owed
+						stale_wait <= 0;
+						rd_owed    <= 0;
+					end
+				end
+				else rdwait <= rdwait + 1'd1;
 			2,3: begin
 					cache_fill    <= 1;
 					ba            <= ba + 1'd1;
@@ -303,11 +366,23 @@ always @ (posedge sysclk) begin
 			// address/data selected for the complete lookup/write window,
 			// insert an inactive write edge between halves, and acknowledge
 			// only after the low-half write has landed.
-			5: begin
+			// The write command is level-held until ~ram_busy clears ram_we
+			// (top of this block).  Do not start the snoop/ack countdown
+			// until that acceptance: acknowledging the MMU's U/M update
+			// before the slave has the write would let a walk observe a
+			// descriptor its own update had not reached.
+			5: if (!ram_we) begin
+					rdwait           <= 0;
 					walker_snoop     <= 1;
 					walker_snoop_low <= 0;
 					state             <= 6;
 				end
+				else if (&rdwait) begin
+					rdwait <= 0;   // write never accepted: abandon without
+					ram_we <= 0;   // ack and WITHDRAW it -- a late-accepted
+					state  <= 0;   // U/M write would bypass the snoop
+				end                // sequence; the walker watchdog reports
+				else rdwait <= rdwait + 1'd1;
 			6: begin
 					walker_snoop     <= 1;
 					state             <= 7;
@@ -341,13 +416,27 @@ always @ (posedge sysclk) begin
 					walker_ack <= 1;
 					state       <= 0;
 				end
-			14: if(~ram_busy & ram_dout_ready) begin
+			14: if(ram_dout_ready) begin
+					rdwait       <= 0;
+					rd_owed      <= 0;
 					walker_rdata <= walker_addr_latch[2]
 						? {ram_dout[47:32], ram_dout[63:48]}
 						: {ram_dout[15:0], ram_dout[31:16]};
 					walker_ack <= 1;
 					state      <= 0;
 				end
+				else if (&rdwait) begin
+					rdwait <= 0;   // abandoned: no ack -- the walker
+					ram_rd <= 0;   // watchdog bus-errors the MMU side;
+					state  <= 0;   // withdraw the command so no orphan
+					               // is accepted later
+					if (rd_owed) begin
+						stale_rd   <= 1;   // accepted: a beat is still owed
+						stale_wait <= 0;
+						rd_owed    <= 0;
+					end
+				end
+				else rdwait <= rdwait + 1'd1;
 		endcase
 
 		if(~write_req) write_ack <= 0;

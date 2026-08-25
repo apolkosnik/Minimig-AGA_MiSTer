@@ -666,10 +666,31 @@ cache_inhibit plumbing), then full regression + cputest replay.  Expected
 gain: large on fast-RAM working sets; zero architectural risk to exception
 semantics.
 
-STATUS 2026-08-16: AP040_ENABLE_CACHE remains 0 in production for area and
-timing. The controller caches remain enabled (CPU_CACHE 1 on both
-sdram_ctrl/ddram_ctrl); disabling both layers produced a hardware ADD.B
-regression and is supported only by the standalone parameterized benches.
+STATUS 2026-08-18 (third state, ENABLED -- supersedes the 2026-08-16
+revert note that stood here).  AP040_ENABLE_CACHE(1) ships
+(cpu_wrapper.v), timing-clean, with the external cpu_cache_new
+instances ALSO keeping their storage (CPU_CACHE 1) -- the two are
+complementary, not alternatives: the internal cache eats the external
+round trip, the controller caches eat the SDRAM latency behind it.
+Both reasons for the 08-16 revert were fixed, not argued away:
+
+  * snoop loss while clkena frozen (the CDC objection): the cache's
+    snoop port is free-running and ce-independent (audit 5.1-5.3
+    fixes), covered by tb_ap040_cache_snoop T1 exactly in the
+    frozen-clkena window;
+  * "measured SLOWER on hardware": true only for straight-line
+    miss-heavy code, which is what the regression programs are.  On
+    loop code (bench_loop.s under +prof) the internal cache is 1.41x
+    faster on a zero-latency bus, 2.27x on a latent one, and makes the
+    CPU nearly immune to bus latency.
+
+The timing blocker found on the way matters more than the parameter:
+ap040_cache forwarded c_req to c_ack combinationally through pass_active
+in C_IDLE, putting the whole MMU/adapter handshake in one clk_28 cycle;
+clk_28 collapsed to -4.988 the moment the cache was enabled.  Fixed by
+registering the pass (pass_active = C_PASS only).  The paragraphs below
+describe the enable experiment and are kept for the area measurements,
+which remain valid.
 
 Getting there was an area problem, and the measurements are worth
 keeping because two of the three obvious moves were wrong:
@@ -697,12 +718,12 @@ Final fit, all clocks met:
 So the internal cache now costs 609 ALMs LESS than the external caches
 it replaced, against the +1,759 it cost before this work.
 
-Known consequence: ap040_cache caches only configured fast RAM, because
-chip RAM needs snooping for chipset DMA and ap040_cache has no snoop
-port.  Chip-RAM accesses are uncached now -- good for fast-RAM code (an
-internal hit skips the clock-domain round trip), worse for code running
-from chip RAM.  Giving ap040_cache a snoop port is the obvious follow-up
-if chip-RAM performance matters.
+Correction to an earlier version of this section: ap040_cache DOES have
+a snoop port now (s_stb/s_addr), and the cacheable windows include chip
+RAM because of it (ap040_tg68k_compat.v wires sdram_ctrl's chipset-write
+snoop through cpu_wrapper).  That is the machinery whose CDC drops
+events while clkena is frozen -- one of the two reasons for the revert
+above, and one of the audited latent bugs.
 
 ### P2. Single-clock-domain migration (28MHz -> clk_114 + 4:1 clock enable)
 
@@ -749,6 +770,88 @@ accesses, so a speculative fetch must arbitrate against S_MRD/S_MWR and
 must not fault -- restricting prefetch to the current page makes the
 fault question go away, the same argument that makes the aligned
 longword fetch safe.
+
+### Re-measured 2026-08-20, after the caches and the fetch queue landed
+
+The fetch-bound picture above is the PRE-queue machine.  With the fetch
+queue and the internal caches shipping, t_integer redistributes but does
+not get much cheaper, and the reason matters for what to build next:
+
+    S_FETCH       6019  (1239 stalled)  34.0%
+    S_IMMF        3006  ( 598 stalled)  17.0%
+    S_MRD         2539  ( 547 stalled)  14.4%
+    S_MWR         1257  ( 284 stalled)   7.1%
+    S_DECODE       994  (  76 stalled)   5.6%
+    S_EXEC         700  (  93 stalled)   4.0%
+    S_PIPE_*      1911  ( 178 stalled)  10.8%
+
+  17686 cycles total, 3098 of them stalled on the bus -- 17.5%.
+  So 82.5% of all cycles are the FSM walking states with memory
+  ALREADY ANSWERED.  The machine is no longer fetch-bound in the
+  memory sense; it is sequencer-bound.
+
+Per-instruction cost, measured directly with the $F108 cycle-stamp port
+(tests/ap040/hw/fptime.s and the cpi/hit/width probes), caches enabled:
+
+    nop                       5.7 cycles     real 68040: ~1
+    addq.l #1,Dn              7.2            real 68040: ~1
+    add.l Dn,Dn               8.1            real 68040: ~1
+    move.l Dn,Dn              8.1            real 68040: ~1
+    move.l (An),Dn  (cached) 17.6            real 68040: ~1-2
+    move.l Dn,(An)           20.1            real 68040: ~1 (copyback)
+    longword vs word access    +3            real 68040: 0
+
+  FPU, same method: FMOVE.X 9.1, FMUL.X 11.1, FADD.X 13.0,
+  FSQRT.X 15.8, FDIV.X 33.0.  The FPU is within 2-3x of silicon; the
+  integer core is 7-8x.  That asymmetry is why the performance program
+  is an INTEGER program.
+
+  Measurement gotcha, learned the hard way: the 68040 comes out of reset
+  with both caches DISABLED until software writes CACR.  A probe that
+  does not set CACR ($8000_8000: DE bit 31, IE bit 15) measures the
+  uncached machine and will show cold and warm passes costing the same.
+
+### What the A4000 does, and what it means here (2026-08-20)
+
+Read against the A4000 Rev B schematics (sheets 3, 4, 7, 11, 14, 15),
+because the real machine solves exactly the 32-bit/16-bit problem X2.1
+and X2.2 are circling.
+
+  * It never narrows the CPU.  Two TERMINATION protocols coexist:
+    _STERM (synchronous, 32-bit, burst-capable) driven by RAMSEY for
+    Fast RAM, and _DSACK1/_DSACK0 (asynchronous, with the responding
+    device encoding its own port width) for ROM, IDE and Zorro.  The
+    68040's dynamic bus sizing splits the transfer per device.  A
+    16-bit device makes THAT access 16-bit; Fast RAM stays 32-bit.
+  * Burst line fill is _CBREQ/_CBACK: four longwords, 16 bytes, one
+    cache line -- and only on the fast path.  This maps 1:1 onto the
+    X2.1 fill port, which is already the right shape.
+  * BRIDGETTE (sheet 7) is a width/direction BRIDGE, not a narrower:
+    PD(0:31) on the CPU side, CD(0:31) on the chip side, with CDIR,
+    _CLATCH and separate half enables _COEH/_COEL.  A second half of
+    the same part does the Zorro side (sheet 14).
+  * The chip bus itself is 32 bits: chip RAM is an x32 SIMM on
+    DRD(31:0).  Only the legacy chips are narrow -- Alice and Paula sit
+    on DRD(15:0), while Lisa (CSG 4203) takes D0..D31.  AGA widened the
+    DISPLAY FETCH and left the rest at 16.
+  * The 32-bit chip bus uses four byte strobes (_UUDS/_UMDS/_LMDS/
+    _LLDS) rather than issuing two 16-bit cycles.
+  * Gary drives _CIIN so chipset/register space is never cached.
+
+  Where AP040 departs, and what it costs:
+
+    ap040_bus16_adapter narrows EVERYTHING -- its own header says
+    "long: two word cycles when even".  Fast RAM included.  The X2.1
+    32-bit path is read-only line fill; cpuWR and the write buffer stay
+    16-bit.  Measured penalty: +3 cycles per longword access.  And
+    write-through-with-invalidate means a store kills its own line, so
+    the next read of it refills, where the A4000's 68040 would have
+    absorbed the store in the cache.
+
+  Consequence for the plan: the device-split above is the model to copy
+  (X2.1b on the store side, below), but it is worth ~3 cycles per
+  longword store against a 8-cycle register add.  It does not reorder
+  the program: the sequencer is the dominant cost and X2.3 stays first.
 
 ### P3. Overlapped sequencer (in-FSM pipelining, ~1.5-2x CPI on reg ops)
 
@@ -806,13 +909,15 @@ FDIV ~74, FSQRT ~73; 6581 ALUTs, 1799 registers, zero DSP blocks.
   cycles total, and the serial accumulator ALUTs become DSP blocks.
   A separate single/FSGL fast path (once proposed) is REDUNDANT: the full
   multiplier already serves every format at the same latency.
-- F_DIVL: 2 restoring bits/cycle (two cascaded 65-bit compare-subtracts);
-  integer bit + 33 pair-iterations: ~74 -> ~41 cycles.
-- F_SQRTL: 2 result digits/cycle (second trial folds the first digit into
-  the partial root combinationally): ~73 -> ~40 cycles.
-- Follow-up headroom: 3 bits/cycle divide (66 = 3x22) and sqrt cut ~10
-  more cycles each if the subtract cascade still meets timing; measure
-  first, the returns are shrinking.
+- F_DIVL: 3 restoring bits/cycle (three cascaded compare-subtracts,
+  66 = 3 x 22): integer bit + 22 iterations: ~74 -> ~24 cycles.  (This
+  section originally recorded the 2-bit/cycle intermediate step; the
+  follow-up headroom item below was taken the same day and the RTL is
+  the 3-bit form.)
+- F_SQRTL: 3 result digits/cycle (later trials fold the earlier digits
+  into the partial root combinationally): ~73 -> ~24 cycles.
+- Follow-up headroom REALIZED: the 3-per-cycle forms above met timing;
+  further widening was not attempted, the returns are shrinking.
 
 ### F1. Non-blocking S_FPU_GO (DONE 2026-08-15)
 
@@ -863,3 +968,430 @@ long poles 2-5x.
 Ordering: F0 (done) -> F1 -> F2 -> F3, with P1 caches (section 19)
 interleaved by ROI: for mixed real-world FPU code the caches likely beat
 everything except F1.
+
+============================================================================
+# Part X2: AP040X2 -- superscalar, 32-bit dual-SDRAM, toward 114 MHz
+============================================================================
+
+Branch: ap040x2 (worktree /home/adam/ap040/ap040x2), base 809b9558 +
+the validated AP040 core and test infrastructure as of ap040@37591618.
+fx68k/tg68k are removed.  This part supersedes P2-P5 above on this
+branch; the ap040 branch stays the stable single-issue line.
+
+## X2.0 Target and how it is measured
+
+Match or beat a real 25 MHz MC68040 on sustained integer and FPU code.
+The 040 at 25 MHz retires at best 1 instruction/cycle from its caches
+(~18-21 host MIPS); its FPU sustains ~3.5 MFLOPS.  The bar, measured on
+this fabric:
+
+  T1  cycle-count parity: >= 25 M retired instructions/sec sustained on
+      cache-resident integer code (t_integer-style mix).
+  T2  memory parity: a cache-line fill in <= 8 core cycles (real 040:
+      burst 4 longwords over a 32-bit bus in 4+ bus clocks).
+  T3  FPU: pipelined FMUL/FADD throughput >= 1 op / 8 core cycles.
+
+The profiling that motivates the shape (measured on AP040, t_integer):
+fetch is 71% of cycles, execute ~15%.  A superscalar back end without a
+transformed front end and memory path is pointless -- the order of work
+below follows from that number.
+
+  REVISED 2026-08-20, after the caches and the fetch queue shipped.
+  That 71% was the pre-queue machine.  Re-measured (section 19), fetch
+  is 51% and the decisive number is different: only 17.5% of cycles are
+  bus stalls, so 82.5% are the FSM walking states with memory already
+  answered.  Per-instruction: 8.1 cycles for add.l Dn,Dn, 17.6 for a
+  CACHED longword load, 20.1 for a store, against ~1 on real silicon.
+  The bar in T1 is therefore 7-8x away and the gap is SEQUENCER, not
+  memory.  X2.3 moves first; the remaining width work (X2.1c) is worth
+  ~3 cycles per longword access and is sized accordingly.
+
+## X2.1 Memory: DUAL_SDRAM as a native 32-bit bus  [FIRST -- everything
+     else keys on it]
+
+The io-board slot gives a second 16-bit SDRAM.  Driven in lockstep with
+the primary (same clock, same command, same address; each carries one
+half of the longword) the pair is one 32-bit SDRAM: a 4-longword line is
+one ACTIVE + 4-beat burst instead of the 8+2 the 16-bit path needs.
+
+  - sdram32_ctrl: new controller instantiating the proven sdram_ctrl
+    command engine once, data path doubled.  SDRAM_* carries D[15:0],
+    SDRAM2_* carries D[31:16].  Same slot/refresh discipline as today.
+  - sys/ already has the ports and sys_dual_sdram.tcl for the pins; the
+    build gains a DUAL_SDRAM=1 qsf macro.  Boards without the second
+    module fall back to the 16-bit path at half fill rate (runtime
+    detectable: probe pattern on SDRAM2 at init; config error out).
+  - Chipset traffic keeps its 16-bit port SHAPE, slot and cycle timing
+    (proven byte/cycle-identical against sdram_ctrl in tb_sdram32) --
+    but NOT "primary chip only": in a lockstep pair the even word of
+    every longword lives in chip 2, so a chipset write lands in the
+    lane its addr[1] selects.  The original wording was tried and is
+    physically wrong (measured: CPU reads the stale half of everything
+    Agnus writes).
+  - Io-board reality: sys_dual_sdram.tcl routes no DQM to SDRAM2, so
+    lane masking uses nCS across the WHOLE slot including ACTIVE
+    (masking only the write leaves the secondary's row open against
+    the primary's auto-precharge -- illegal on the next ACTIVE).
+    BYTE masking within the secondary lane (corrected 2026-08-16):
+    the SDRAM modules short DQMH/DQML to A12/A11 -- the same
+    convention sdram_ctrl already serves with its
+    sd_addr[12:11] <= cas_dqm write-CAS mirror -- so the secondary's
+    byte masks travel on sd2_addr[12:11], which diverges from the
+    lockstep copy for exactly the write-CAS hold window (sd2_a_dqm in
+    sdram32_ctrl).  The sd2_dqm output is a phantom on this board.
+    Before this fix every secondary-lane 16-bit write reached the
+    chip with A12/A11 = 2'b11 and was dropped whole; tb_sdram32 now
+    models the module short (dqm from addr[12:11]) and is wired into
+    run_tests.sh.  Caveat: a secondary module with REAL (unshorted)
+    DQM routing would need read-modify-write instead; the plan
+    assumes the standard shorted modules.
+  - CDC: none new.  The controller stays on clk_114; the CPU-side
+    handshake is unchanged in protocol, doubled in width.
+
+Deliverable gate MET (44572b32): lockstep command identity checked
+every cycle, chipset port byte/cycle-identical against sdram_ctrl on
+shared stimulus, and all three deliberate breaks (lane swap, lockstep
+break, primary-only chipset writes) caught with thousands of errors.
+Measured: slot grant -> 4th beat = 15 clk_114 = 4 core cycles at ce=4
+(T2 gate is <= 8 core cycles; met with margin).  The 16-bit fallback
+measures 31 for the same line.  Note 15 clk_114 is the FLOOR for this
+command engine (tRCD 2 + CL 4 + 3 beats*2 + capture 3) -- a raw
+"8 clk_114" reading of the gate is physically impossible and was a
+spec error, not a shortfall.
+
+### X2.1c Store side: byte lanes on the 32-bit bus  [added 2026-08-20]
+
+X2.1/X2.1b widened READS only: the fill port is a 32-bit read-only line
+fill, while cpuWR and the write buffer stay 16-bit, so a longword store
+is still two lane-masked slots.  The A4000 shows the alternative it
+should have been all along (see the schematic reading in section 19):
+the real machine puts FOUR BYTE STROBES on a 32-bit bus rather than
+issuing two narrower cycles, and reserves narrow transfers for the
+devices that are actually narrow.
+
+  - extend sdram32_ctrl's write path to accept a 32-bit datum with four
+    byte enables, the direct analogue of _UUDS/_UMDS/_LMDS/_LLDS
+  - route CPU stores to fast RAM through it; keep ap040_bus16_adapter
+    for chip RAM, chipset and IO, which is BRIDGETTE's split
+  - the adapter stays the fallback for DUAL_SDRAM=0 builds
+
+  Gate: longword store cost drops by the measured 3-cycle split penalty
+  with no change to chipset timing (the 16-bit chipset contract is the
+  one thing X2.1 must never disturb -- byte/cycle identity against
+  sdram_ctrl on shared stimulus, as X2.1 already proves).
+
+  Honest sizing: 3 cycles against a 20-cycle store and an 8-cycle
+  register add.  Worth doing, not worth doing FIRST.  X2.3 is first.
+
+## X2.2 Fetch front end: decouple and widen  [the 71%]
+
+  - 32-bit fetch through the new bus; fetch QUEUE (4 longwords) filled
+    autonomously whenever the bus is idle, drained by decode.  The
+    existing epf machinery is the seed of this queue; it becomes
+    free-running instead of exception-only.
+  - Prefetch never crosses a page (reuses the aligned-fetch fault
+    argument); flow change flushes the queue (mechanism exists).
+  - Gate: S_FETCH+S_IMMF occupancy on t_integer drops below 20% (from
+    71%) with the suite and corpus untouched.
+
+MEASURED 2026-08-17 (tb_ap040_program +prof, the tb_prof X2.8 asks
+for; t_integer phase 0): the free-running queue lands 17236 cycles,
+down from 20106 after the peephole round and 23750 at the section-19
+baseline (-27% cumulative), suite and corpus untouched.  Occupancy is
+51% (8865/17236; was 66% by the same metric), of which only 1799
+cycles are bus-wait stalls -- BUT the 20% gate as written is
+structurally unreachable by any queue: decode folds into S_FETCH's pop
+cycle (S_DECODE holds only 976 cycles), so one S_FETCH cycle per
+instruction plus one S_IMMF cycle per immediate word are irreducible
+in the multi-cycle FSM, and those actives alone are ~41% of the total.
+Like X2.1's "8 clk_114" reading, the number was a spec error: fetch
+occupancy below 20% requires fetch to OVERLAP execute, which is
+X2.3's definition.  X2.2's gate is re-scoped to what it measures:
+wall clock (met: -14% from the queue alone) and fetch-state bus-wait
+stalls (met: 1799, from 2584 on a 27% larger total); the <20%
+occupancy line moves to X2.3's exit criteria.
+
+### X2.2b DECOUPLE THE PORTS -- design, grounded 2026-08-20
+
+Motivated by measurement, not principle: +memlat shows 44% of
+S_MRD/S_MWR cycles (56-57% with a latent bus) pass with an instruction
+fetch outstanding, and the data access itself is only 2 cycles once it
+gets the port.  Roughly 3 of the 7.6 cycles a cached load spends in
+S_MRD are waiting for a fill it has nothing to do with.  A real 68040
+runs the two independently; we serialize them on one request port.
+
+What the code actually allows, checked rather than assumed:
+
+  * MMU: `assign c_ack = m_ack` -- it is a TRANSLATION stage, not a
+    latency stage.  An ATC or TTR hit rewrites the address
+    combinationally and forwards; the acknowledge comes from the cache.
+    So a second requester needs a second ATC lookup path and a second
+    TTR compare (combinational, cheap), NOT a second MMU.
+  * Cache: single c_req/c_ack with c_instr selecting the bank via
+    a_row = {c_instr, a_set}.  The two banks are already separate
+    storage; what is shared is the REQUEST PATH and the tag RAM ports
+    (A = lookup, B = invalidate).  A second concurrent lookup needs a
+    third tag port -- so either duplicated tag storage per bank (area,
+    and X2.7 says the budget is tight) or lookups time-multiplexed on
+    alternate ce phases.  The core runs at ce=4, so the cache has spare
+    cycles; multiplexing is the cheaper bet and should be costed first.
+  * Core: one mem_req/m_issued pair, and S_MRD's own `!m_issued &&
+    epf_pend` arm is the stall being measured.
+
+Staged so each stage is gateable on its own:
+
+  1. Split the core's port BOOKKEEPING into an instruction channel and a
+     data channel (separate issue/pending/ack tracking) while still
+     serializing at the MMU.  No speedup yet -- the gate is that nothing
+     changes: suite, corpus and all three differentials identical, and
+     +memlat's port-wait percentage UNMOVED.  This is the risky part
+     (fault attribution, restart, lk_cyc, epf_pend) done with no
+     performance variable in play.
+  2. Let a data HIT proceed while an instruction fill is in flight.
+     This is where the win lands, because data reads hit 767 times out
+     of 770.  Gate: port-wait percentage falls, cached load moves toward
+     ~12 cycles, everything else unchanged.
+  3. Full concurrency with bus arbitration for two misses.  Smaller
+     incremental win; only worth it if stage 2 leaves measurable wait.
+
+Hazards that must be argued explicitly, not discovered:
+  * a store followed by a fetch of the same line -- the queue-vs-store
+    snoop (3.2) must still see stores with two channels live;
+  * fault attribution: an access error on the instruction channel must
+    stack the fetch's address and the data channel's must stack its
+    own, with the restart model unchanged;
+  * locked RMW: lk_cyc indivisibility must survive an independent fetch
+    channel (this is exactly what 3.1 fixed for the single port);
+  * exception_prefetch still requires no queue fetch outstanding -- the
+    bench invariant added for 3.5 covers it and must stay green;
+  * CINV/CPUSH sweeps versus concurrent lookups on the other bank.
+
+## X2.3 Pipeline: 040-style stages on one clock domain
+
+IF | ID | EA | MEM | EX | WB, ce-based single clock (clk_114 with ce=4
+initially -- same frequency as today, structure first, speed second).
+The restart exception model is kept until X2.6: an instruction commits
+at WB or restarts whole; format $7 stays synthetic.  Forwarding EX->EA
+and WB->EX; scoreboard on Dn/An/CCR (the "collapse staging + add
+forwarding" item -- it lives INSIDE this stage structure, not bolted to
+the old FSM).
+
+  Gate: >= 1 instruction/2 ce on reg-reg streams (t_integer chkl-free
+  inner blocks), suite + corpus green.
+
+### X2.3 step 2 SHIPPED (2026-08-20): memory source, same collapse
+
+The EA is finished by the time the source read issues, so port B is free
+during the read: point it at a register destination at S_PIPE_SRD and
+both operands land together when the read returns.  S_PIPE_SDONE ->
+S_PIPE_DST -> S_PIPE_DREG becomes S_PIPE_SDONE -> S_EXEC.
+
+    move.l (An),Dn (cached)   17.6 -> 15.6 cycles
+
+  Gated: suite green, corpus 3776/3801 failing set unchanged, integer
+  15/15, FP 8/8, MMU 8/8.
+
+### X2.3 NEXT TARGET, measured: S_MRD is 37.7% of a load
+
+Profiled with +prof over 768 cached longword loads (20.1 cyc/load before
+step 2):
+
+    S_MRD         5832  37.7%   (only 682 stalled -- 12%)
+    S_FETCH       1196   7.7%
+    S_PIPE_START  1161   7.5%
+    S_DECODE      1037   6.7%
+    S_EXEC        1033   6.7%
+    S_PIPE_SRD     864   5.6%
+    S_EA_DISP      777   5.0%
+    S_EA_BASE      768   5.0%
+    S_PIPE_SDONE   768   5.0%   <- step 2 removed the DST/DREG pair here
+
+  S_MRD costs 7.6 cycles per load and is WAITING ON THE BUS for only 12%
+  of them.  The other 88% is the core/MMU/cache request-acknowledge
+  round trip on a HIT -- the audit's "2-cycle cache hit" describes the
+  cache array, not the path around it.  That path, not the staging, is
+  where the next several cycles per load live, and it is the same round
+  trip the 5.7-cycle nop floor pays on every instruction fetch.
+
+  MEASURED 2026-08-20 with the new +memlat instrument, and the answer
+  was NOT the handshake:
+
+    data read   n=770  avg 2.2 cycles  (767 of them exactly 2)
+    data write  n=5    avg 4.0
+    ifetch      n=539  avg 9.2, max 31+, with 133 in the 31+ bucket
+
+  The cache round trip is already 2 cycles for data.  What S_MRD is
+  actually doing is WAITING FOR THE SHARED MEMORY PORT: 44% of
+  S_MRD/S_MWR cycles in phase 0 and 56-57% in the latent-bus phases are
+  spent with a fetch outstanding (!m_issued && epf_pend).  The fetches
+  it waits behind are largely 31+ cycle line fills, i.e. real cold
+  misses, not gratuitous prefetch.
+
+  HYPOTHESIS TESTED AND WRONG, recorded so it is not retried:
+  suppressing speculative fetch issue while an effective address is
+  being computed (all S_EA_*, S_PIPE_SRD, S_PIPE_DEA) changed nothing --
+  load cost 4039 vs 4036 cycles, port wait 44%/57% unchanged.  The
+  blocking fetch is issued BEFORE the EA states, so gating on them is
+  too late.  Reverted.
+
+  The real fix is architectural and already named: X2.2's DECOUPLING.
+  The cache has separate I and D banks, but the core has ONE request
+  port to the MMU, so an instruction line fill and a data access
+  serialize.  A real 68040 runs them independently.  Until the fetch
+  port is separate, ~half of every data access's wait is a fill it has
+  nothing to do with -- and no FSM-level change reaches it.
+
+### X2.3a PREREQUISITE: de-fragilize the timing-dependent tests
+     [added 2026-08-20, found by attempting X2.3 step 1]
+
+X2.3 changes instruction timing by design.  Several t_exceptions tests
+are written against the CURRENT timing and fail when it moves -- and
+they fail for the BASELINE core too, which is how this was established
+rather than assumed: removing ONE nop from the withdrawal sweep breaks
+the unmodified core (test 142).  Any pipeline work will trip these
+before it can be judged on correctness, so they have to be made robust
+FIRST or every X2.3 step will land in a false failure.
+
+The fragile pattern is a fixed sweep hoping a coincidence lands inside
+it:
+  * test 142 sweeps an IPL delay 2..12 into a traced RTS and requires
+    at least one delay to land trace and interrupt together;
+  * test 143 does the same into a traced divide;
+  * the withdrawal sweep pads with a fixed number of nops;
+  * test 139 needs the fetch queue to run AHEAD during a DIVU so the
+    faulting fetch is SPECULATIVE (fault deferred and discarded).  If
+    the fetch instead becomes a DEMAND fetch it faults for real, which
+    is correct behavior and a test failure at the same time.
+
+Task: rewrite these to search a range derived at RUNTIME, or to assert
+the invariant directly rather than by hitting a cycle coincidence.  The
+architectural rules they exist to protect are already enforced
+independently by tb_ap040_program's always-on invariants (phantom
+interrupt, mask qualification, exception_prefetch/epf_pend), and those
+did NOT fire during the X2.3 experiment -- only the coincidence-hunting
+assertions did.
+
+### X2.3 step 1 SHIPPED after X2.3a (2026-08-20)
+
+Both regfile read ports are independent and combinational, so a
+register source and a register destination can be read in ONE cycle
+instead of walking S_PIPE_SREG then S_PIPE_DST then S_PIPE_DREG.
+Measured with the $F108 stamp port:
+
+    add.l Dn,Dn     8.1 -> 6.1 cycles
+    move.l Dn,Dn    8.1 -> 6.1
+    addq.l #1,Dn    7.2 -> 6.2
+    nop             unchanged (no operand staging)
+
+  25% on the register-op class for a ~20 line change, and it is the
+  first concrete piece of the "collapse staging + add forwarding" item.
+  Held back until X2.3a had made the fragile tests say something real,
+  then gated properly: directed suite green, v24 corpus 3776/3801 with
+  the failing set unchanged, integer differential 15/15 vs qemu, FP
+  10/10 and MMU 10/10 vs the WinUAE oracles.
+
+  X2.3a paid for itself immediately.  The t_exceptions failure was NOT
+  the coincidence sweeps at all -- widening those changed nothing.  It
+  was test 139, and the handler-identity stamp added by X2.3a named it
+  in one run (h_buserr, id 13) instead of an anonymous shared "test 98".
+  The fault address then gave the mechanism outright: armed $0F56,
+  delivered $0F54, stacked PC $0F52.  $0F54 is the DIVU's own extension
+  word, and the queue fetches ALIGNED LONGWORDS -- so a DEMAND fetch at
+  $0F54 spans $0F54..$0F57 and covers the armed word.  The DIVU sat at
+  $0F52, straddling two longwords, so the word the test wanted reached
+  only speculatively was pulled in by a demand fetch instead.  The test
+  premise held by accident of layout.  Fixed with cnop so the DIVU
+  occupies a longword alone and t139_x starts its own: now structural,
+  and BOTH cores pass.  No RTL was changed to make it pass.
+
+## X2.4 Dual issue (68060-style pOEP/sOEP)
+
+Second ALU pipe fed by the same decoder; issue rules after the 68060:
+pOEP takes anything, sOEP takes reg-reg/imm-reg ALU ops with no EA unit
+need, no CCR read of the same-cycle pOEP result, no pairing across
+flow control or privileged ops.  Memory, shifts>1, mul/div, FPU stay
+single-issue in pOEP.  This is bounded: the pairing table is ~40 rows
+of the 68060 UM's table 10-1 reduced to what AP040X2 executes natively.
+
+  Gate: pairing rate >= 30% on t_integer, zero behavior change when
+  sOEP is compile-disabled (AP040X2_DUAL=0 must bit-match AP040X2_DUAL=1
+  with pairing suppressed -- that equivalence run is the regression).
+
+## X2.5 FPU pipelining
+
+The F0/F1 work gave single-op latencies (FMUL ~5, FDIV ~20, FSQRT ~21
+at ce).  X2 pipelines FMUL/FADD to initiation interval 1 ce (3-stage),
+keeps FDIV/FSQRT iterative but overlapped (fpu_bg already proves the
+scoreboard).  Gate: T3.
+
+## X2.6 Frequency: 57 MHz (ce=2), then 114 MHz native
+
+Only after X2.3-X2.5 hold at ce=4.  57 first: the known >17.6 ns cones
+(exc_addr capture, MMU translate->fault, F_ROUND, now the 4-way hit mux)
+get registered splits; STA drives the list.  114 native requires the
+MEM stage to tolerate 1-cycle SDRAM CAS variance -- that is the point
+where the restart model gets re-examined (real WB1-WB3).  T1 falls out
+at 57 MHz already if X2.3's CPI gate held: 57M * 0.5 IPC > 25M * 1.0.
+
+## X2.7 Area budget (honest numbers from the ap040 branch fits)
+
+MEASURED 2026-08-17: the X2.2 queue plus the audit-fix program took the
+tree from 39,645 ALMs (95%, committed HEAD) to 42,067 -- OVER the
+41,910-ALM device.  Recovered by the "MMU pruning" item below, executed
+as storage conversion rather than feature removal: the ATC's 128 x 45b
+payload (5.7K flops + the 4-way mux fabric, the single largest ALM sink)
+moved into one 180x32 bram.vhd dpram row per {bank, set}.  Validity and
+round-robin stay in flops, so PFLUSHA, warm-reset retention and the
+lookup guard remain single-cycle; enabled translation pays a one-clock
+lookup pipe (TC.E=0 and TTR hits stay combinational -- the common
+configuration pays nothing); PFLUSH page/nonglobal variants and the
+PTEST pre-flush became a ~34-cycle row sweep.  Result: 37,170 ALMs
+(89%), clk_114/clk_sys met, and ~4.7K ALMs of headroom for X2.3-X2.5.
+
+Current: core 10.0K + MMU 5.6K + FPU 4.5K ALMs, system total 94%.
+X2 adds: fetch queue (+0.3K), pipeline regs/forwarding (+1.5K), second
+ALU pipe + pairing (+1.5K), sdram32 datapath (+0.5K) ~= +4K => does NOT
+fit beside everything at 41.9K.  Funded by: cpu_cache_new out (-0.8K,
+the internal cache with the 32-bit fill path replaces it FOR REAL this
+time -- the fill tax that killed it was the 16-bit bus, X2.1 removes
+exactly that), bus16 adapter out (-0.4K), MMU pruning of the never-used
+5.6K -> target 3.5K (srp/urp tables share one walker datapath).  Net
+target: <= 95% with dual issue, <= 92% without.  If the fitter says
+otherwise, X2.4 is the item that yields (it is compile-optional by
+construction).
+
+## X2.8 Verification invariants (non-negotiable, learned the hard way)
+
+  - run_tests.sh green at every commit; corpus slices for any touched
+    instruction class; full corpus before any RBF.
+  - Every pipeline hazard fix ships with a directed test THAT FAILS on
+    the pre-fix RTL (a test never seen to fail proves nothing).
+  - Hardware measurements outrank every simulation and every test I
+    wrote (see 2026-08-16: the internal cache "win" that measured
+    slower than no cache; the RTE deferral reverted against its own
+    correct fix).
+  - Cycle claims come from the tb_prof state histogram, not estimates.
+    Per-instruction claims come from the $F108 cycle-stamp port with
+    CACR ENABLED -- the 68040 resets with both caches off, and a probe
+    that forgets to set $8000_8000 measures the uncached machine.
+  - Correctness claims are checked against WinUAE's OWN code, executed,
+    not read (added 2026-08-20).  tests/ap040/diff carries two oracles
+    built for this:
+      fp_oracle.cpp    links WinUAE's softfloat and answers with the
+                       same floatx80_* calls fpp_softfloat.cpp makes;
+                       run_fpops.sh compares AP040 op by op.
+      mmu_oracle.cpp   links WinUAE's cpummu.cpp behind ~37 stubs and
+                       drives its public mmu_op_real PTEST path;
+                       run_mmuops.sh compares MMUSR probe by probe.
+    Standing results: FP 25 seeds x 96 ops all match (one architectural
+    class remains -- extended-precision underflow flushes to zero where
+    softfloat builds the denormal the FPSP would); MMU 25 seeds x 48
+    probes all match, bit for bit.  qemu remains available but is the
+    WEAKER oracle: it raises neither OPERR nor INEX2 on FP-to-integer
+    conversions and gets the NaN result wrong.
+  - A differential that finds a "CPU bug" is guilty until the HARNESS is
+    cleared.  Every divergence chased on 2026-08-20 was harness-side:
+    an inverted PTEST R/W bit, an FPSR read after a store that clears
+    it, operands pre-rounded by the FMOVE that loaded them, a program
+    grown into its own result window, and a result page whose M bit the
+    program set itself.

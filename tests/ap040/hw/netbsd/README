@@ -1,0 +1,40 @@
+NetBSD-on-AP040 live debugging notes (2026-08-21)
+=================================================
+
+The MiSTer's ARM can read the core's DDR3 window while the Amiga runs, so
+a stuck NetBSD can be debugged from the outside with no cooperation from
+the guest.  Everything here was used live against a hang at init-exec.
+
+Memory map (ARM physical -> Amiga):
+  0x2800_0000   Z3_0 fast RAM (128MB window)     [cpu_wrapper.v ramaddr]
+  0x3000_0000   Z3_1 fast RAM (256MB window)
+  chip/slow/motherboard fast are in SDRAM: NOT ARM-visible.
+  DDR data is 16-bit byte-swapped relative to ARM byte order: swap every
+  byte pair before interpreting.
+
+Tools:
+  memdump.py         mmap-based /dev/mem reader (dd read() fails past the
+                     kernel map; mmap works).  scp to /tmp on the MiSTer.
+  ksyms-9.2-GENERIC.txt  symbol addresses extracted from the OFFICIAL
+                     NetBSD-9.2 amiga GENERIC kernel (mkrepro build, so it
+                     bit-matches what users run).  Kernel VA == offset
+                     into the Z3 segment: VA X is ARM (segment base + X).
+
+Findings from the captured hang (kernel loaded in Z3_1):
+  * the msgbuf (struct kern_msgbuf, magic 0x063061, top of the segment)
+    showed boot got PAST the on-screen "kern.module.path=..." -- root
+    mounted on wd0a (ffs), "WARNING: clock gained 20 days" printed --
+    i.e. the hang is at EXEC OF /sbin/init: first user-mode process,
+    first demand paging, first RTE to user space.
+  * the machine was ALIVE: clock interrupts ticking, callout wheel
+    advancing, ~1KB/8s of kernel data changing, no fault storm, no
+    panic string.  A quiescent sleep, not a wedge and not a loop.
+  * AmigaOS (no MMU, no user mode) boots on the same image, and its IDE
+    interrupts work, which localizes suspicion to the user-mode/MMU
+    transition rather than the disk path.
+  * confound not yet excluded: that image closed clk_114 at +0.034 ns
+    and X2.3 builds are consistently razor-thin there; a timing-clean
+    build must reproduce the hang before it is chased as logic.
+
+Capture BEFORE rebooting: the DDR window is repurposed the moment
+another OS boots.

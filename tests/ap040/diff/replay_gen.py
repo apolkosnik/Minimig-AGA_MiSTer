@@ -139,7 +139,15 @@ class Payload:
 def decode_exception(hdr: Header, exc: int, payload: Optional[bytes],
                      expected_sr: int, expected_pc: int,
                      previous: ExceptionSpec) -> ExceptionSpec:
-    """Decode v20 validate_exception() data for an MC68040 frame."""
+    """Decode validate_exception() data for an MC68040 frame (v20 and v24).
+
+    The one format change between the two: v24 encodes the STACKED PC as a
+    rel_ordered oracle value ahead of the frame word, where v20 rebuilt
+    those four bytes from the processor's own captured PC and therefore
+    never checked them.  Under v24 they are real corpus data, so they are
+    decoded and compared.  Verified against WinUAE cputest/main.c's
+    validate_exception, not inferred from the data.
+    """
     if payload is None:              # length $ff: vector/count only
         # validate_exception() resets last_exception_len at entry.  The $ff
         # marker therefore skips trace/frame decoding and returns with a zero
@@ -174,17 +182,21 @@ def decode_exception(hdr: Header, exc: int, payload: Optional[bytes],
         return ExceptionSpec(trace_mode=trace_mode, trace_sr=trace_sr,
                              trace_pc=trace_pc, group2=group2)
 
+    if hdr.data_version >= 24:
+        stacked_pc = q.rel_ordered(hdr.opcode_memory_addr)
+    else:
+        stacked_pc = expected_pc & 0xFFFFFFFF
     frame_word = q.u16()
     fmt = frame_word >> 12
     frame = bytearray(struct.pack(">HIH", expected_sr & 0xFFFF,
-                                  expected_pc & 0xFFFFFFFF, frame_word))
+                                  stacked_pc, frame_word))
     mask = bytearray(b"\xff" * 8)
-    # v20 validate_exception() constructs bytes 2..5 from test_regs.pc --
-    # the PC already captured from the processor -- rather than decoding an
-    # oracle value from the payload.  Consequently those four bytes are not
-    # corpus-checked by the native runner.  Preserve that exact contract;
-    # successful (exception marker zero) termination is checked separately.
-    mask[2:6] = b"\x00" * 4
+    if hdr.data_version < 24:
+        # v20 validate_exception() constructs bytes 2..5 from test_regs.pc --
+        # the PC already captured from the processor -- rather than decoding
+        # an oracle value from the payload.  Those four bytes are therefore
+        # not corpus-checked by the native runner; preserve that contract.
+        mask[2:6] = b"\x00" * 4
 
     if fmt == 0:
         pass
@@ -360,21 +372,27 @@ def generate(header_path: str, dat_path: str, out_path: str,
         while True:
             cur["endpc"] = endpc
             cur["pc"] = startpc
-            setup_mem = []
+            # Setup patches are applied in STREAM ORDER, not grouped by kind.
+            # They overlap: v24 setups fill the opcode area with $F2 bytes
+            # through a CT_PC_BYTES record and then write the instruction
+            # words over it with CT_MEMWRITE records.  Emitting all memory
+            # writes before all opcode bytes lets the fill erase the
+            # instruction, and the CPU then executes the fill pattern.
+            setup_patches = []
             setup_cleanup = []
-            setup_op = []
             while st.peek() not in (CT_END_INIT, CT_END_FINISH):
                 cur["mem"] = []
                 cur["opbytes"] = []
                 st.restore_data(cur)
                 for base, addr, old, new, size in cur["mem"]:
                     a = resolve_addr(hdr, base, addr)
-                    setup_mem.append(Patch(a, value_bytes(new, size)))
+                    setup_patches.append(Patch(a, value_bytes(new, size)))
                     # CT_MEMWRITE setup records enter WinUAE's access
                     # history and are restored at the end of this test.
                     setup_cleanup.append(Patch(a, value_bytes(old, size)))
                 for off, data in cur["opbytes"]:
-                    setup_op.append(Patch(hdr.opcode_memory_addr + off, data))
+                    setup_patches.append(Patch(hdr.opcode_memory_addr + off,
+                                               data))
                 cur["mem"] = []
                 cur["opbytes"] = []
             if st.peek() == CT_END_FINISH:
@@ -385,11 +403,30 @@ def generate(header_path: str, dat_path: str, out_path: str,
             startpc = cur["pc"]
             endpc = cur["endpc"]
             fpumode = bool(hdr.fpu_model)
+            # main.c: interrupt tests at level 2+ keep a fixed opcode tail
+            doopcodeswap = not (hdr.interrupttest >= 2)
             last = clone_regs(cur)
 
             extraccr = 0
             roundno = 0
-            opcodeend = (ILLG << 16) | NOP
+            # Mirror cputest exactly (main.c): the tail starts as
+            # NOP:ILLG, is swapped BEFORE each round only when opcode
+            # swapping is enabled, and the PC adjustment is DERIVED from
+            # the current tail rather than toggled alongside it.  The old
+            # code started from the opposite value and toggled
+            # unconditionally, which put every round's opcode image one
+            # round out of phase.  v20 could not see it -- it masked the
+            # stacked PC out of the frame comparison -- but v24 encodes
+            # that PC as a real oracle, and it shows up immediately.
+            # The 2020-era v20 generator started this tail as ILLG:NOP;
+            # current cputest (main.c originalopcodeend) starts it as
+            # NOP:ILLG.  Measured, not assumed: using the v24 phase on v20
+            # data breaks nine slices (FBcc, FDBcc, FMOVEM.X, FSMUL.W) and
+            # using the v20 phase on v24 data puts every round's opcode
+            # image one round out of step.  The derived opcodeextra rule
+            # below is identical for both.
+            opcodeend = ((NOP << 16) | ILLG) if hdr.data_version >= 24 \
+                else ((ILLG << 16) | NOP)
             opcodeextra = 0
             first_round = True
             deferred_toggles = []
@@ -403,8 +440,10 @@ def generate(header_path: str, dat_path: str, out_path: str,
                            (0x1000 if extraccr & 8 else 0))
 
                 for ccr in range(maxccr):
-                    opcodeend = ((opcodeend >> 16) | (opcodeend << 16)) & 0xFFFFFFFF
-                    opcodeextra = 0 if opcodeextra else 2
+                    if doopcodeswap:
+                        opcodeend = ((opcodeend >> 16) |
+                                     (opcodeend << 16)) & 0xFFFFFFFF
+                    opcodeextra = 2 if (opcodeend >> 16) == NOP else 0
 
                     level = irq_level(st.u8()) if hdr.interrupttest else 0
                     test = clone_regs(cur)
@@ -535,8 +574,7 @@ def generate(header_path: str, dat_path: str, out_path: str,
 
                         pre = []
                         if first_round:
-                            pre.extend(setup_mem)
-                            pre.extend(setup_op)
+                            pre.extend(setup_patches)
                         pre.append(Patch(endpc, struct.pack(">I", opcodeend)))
                         # A CT_MEMWRITE result carries both the expected value
                         # and the value restored by WinUAE after validation.

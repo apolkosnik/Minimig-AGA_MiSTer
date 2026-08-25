@@ -8,22 +8,21 @@
 //    incl. memory indirect, 32/64-bit MUL/DIV, LINK.L, TRAPcc, bitfields,  //
 //    CAS/CAS2, CHK2/CMP2, and the 040 set: MOVE16, MOVEC registers,        //
 //    CINV/CPUSH/PFLUSH/PTEST with MMU/cache sidebands                      //
-//  - exceptions: formats $0/$1/$2/$3/$4 and format $7 access errors with   //
+//  - exceptions: formats $0/$1/$2/$3 ($4 RTE-accepted when built FPU-less //
+//    but never generated) and format $7 access errors with                 //
 //    pure instruction restart and EA register rollback (MMU faults),       //
 //    RTE with format validation and $1 throwaway continuation, trace       //
 //    (T1/T0), autovectored interrupts with M-bit master/interrupt stack    //
 //    switching                                                             //
 //  - integrated 68040 FPU arithmetic, conversions, control and condition   //
-//    operations; FSAVE/FRESTORE support NULL, IDLE, rev-$41 UNIMP and      //
-//    native-arithmetic BUSY/E3 state frames                               //
+//    operations; FSAVE/FRESTORE support NULL, IDLE and rev-$41 UNIMP state //
 //                                                                          //
 // Known gaps, all documented in tests/ap040/README:                        //
 //  - TAS/CAS/CAS2 are not bus-locked (single-master fabric here)           //
 //  - MMU faults and physical berr both raise format $7; the SSW ATC bit   //
 //    distinguishes a translation fault from a physical bus error          //
 //  - interrupts are always autovectored (ipl_autovector is ignored)        //
-//  - non-maskable OVFL/UNFL delivery remains outside this direct-compute    //
-//    model; E1 state is retired by FSAVE or a completed RTE                 //
+//  - true pipelined arithmetic BUSY state frames are not generated         //
 //  - access faults use pure restart; CM/CT and WB2/WB1 are not generated   //
 //                                                                          //
 // The whole core advances only when ce (clkena_in) is high.                //
@@ -94,7 +93,13 @@ module ap040_core
 	output            debug_busy,
 	output            debug_fault,
 	output            debug_halted,
-	output    [255:0] debug_status
+	output    [255:0] debug_status,
+	// Second debug bus, for the halt post-mortem beacon: the stack
+	// registers and the faulting address.  A double fault taken while
+	// stacking an exception frame is only explicable with these -- the
+	// active A7 alone cannot say whether the stack switch failed or the
+	// supervisor stack pointer was already wrong.
+	output    [127:0] debug_status2
 );
 
 //---------------------------------------------------------------------------
@@ -176,9 +181,13 @@ always @(posedge clk) begin
 		// asserted until the CPU acknowledges; if it drops the request
 		// first, the interrupt is simply not taken.  Track the pins down
 		// so a withdrawn request cannot fire later as a phantom
-		// interrupt at the next instruction boundary.
+		// interrupt at the next instruction boundary.  The level the
+		// encoder falls back to is a DIFFERENT device's request that was
+		// hidden behind the withdrawn one: it must qualify against the
+		// mask on its own, or the hold would fire it at or below the
+		// mask (levels 1-6 are taken only strictly above SR[10:8]).
 		else if (irq_hold_lvl > irq_lvl)
-			irq_hold_lvl <= irq_lvl;
+			irq_hold_lvl <= (irq_lvl > sr[10:8]) ? irq_lvl : 3'd0;
 		else if (irq_lvl != 3'd0 && irq_lvl != 3'd7 &&
 		         irq_lvl > sr[10:8] && irq_lvl > irq_hold_lvl)
 			irq_hold_lvl <= irq_lvl;
@@ -189,13 +198,23 @@ always @(posedge clk) begin
 	end
 end
 
-wire       nmi_pend = irq_lvl == 3'd7 && nmi_arm;
-wire       irq_live = irq_lvl != 3'd0 && irq_lvl != 3'd7 &&
-                      irq_lvl > sr[10:8];
+// Recognise the level one cycle earlier than the registered irq_lvl.
+// Both samples are synchroniser flops, so the coherence check that guards
+// against reading a transient encoder value (3 -> 5 passing through 7
+// would look like an NMI) still holds; only the extra register stage is
+// removed.  cputest's irq tests time the request to land just before an
+// instruction boundary, and the third cycle pushed recognition past it --
+// hardware stacked the address AFTER the tested instruction.
+wire [2:0] irq_lvl_live = (ipl_s1 == ipl_s2) ? ~ipl_s2 : irq_lvl;
+
+wire       nmi_pend = irq_lvl_live == 3'd7 && nmi_arm;
+wire       irq_live = irq_lvl_live != 3'd0 && irq_lvl_live != 3'd7 &&
+                      irq_lvl_live > sr[10:8];
 wire [2:0] irq_take_lvl = nmi_pend ? 3'd7 :
-                          (irq_live && irq_lvl > irq_hold_lvl) ? irq_lvl :
-                          irq_hold_lvl;
+                          (irq_live && irq_lvl_live > irq_hold_lvl)
+                              ? irq_lvl_live : irq_hold_lvl;
 wire       irq_pend = nmi_pend || irq_live || irq_hold_lvl != 3'd0;
+
 
 wire unused_in = ipl_autovector;
 
@@ -313,6 +332,10 @@ localparam S_PIPE_SRD      = 8'd22;
 localparam S_PIPE_SDONE      = 8'd23;
 localparam S_PIPE_DST      = 8'd24;
 localparam S_PIPE_DREG      = 8'd25;
+// X2.3 step 1: both regfile read ports are independent and combinational,
+// so a register source and a register destination can be fetched in ONE
+// cycle instead of walking SREG then DST then DREG.
+localparam S_PIPE_REGS      = 8'd190;
 localparam S_PIPE_DEA      = 8'd26;
 localparam S_PIPE_DDONE      = 8'd27;
 localparam S_EXEC      = 8'd28;
@@ -514,30 +537,50 @@ reg  [7:0] r_imm_ret, r_ea_ret, r_m_ret;
 reg  [2:0] m_bidx;                // byte index of a split transfer
 reg [31:0] m_acc;                 // assembled bytes of a split transfer
 reg  [1:0] imm_n;
-reg        if_issued, m_issued;
+reg        m_issued;
 reg [31:0] imm;
 reg [31:0] x_ext;              // saved copy of imm (survives EA fetches)
 
-// Exception/reset completion prefetch.  The 68040 does not begin handler
-// execution until four longwords have been fetched.  This eight-word FIFO
-// retains those reads so normal opcode/extension fetches consume each word
-// exactly once instead of repeating the exception prefetch traffic.
+// Instruction fetch queue.  The 68040 does not begin handler execution until
+// four longwords have been fetched; that architectural requirement built this
+// eight-word FIFO, and the same storage now carries every instruction word.
+// The fill engine at the end of the state machine appends to the tail
+// whenever the memory port is idle, S_FETCH and S_IMMF pop the head, and any
+// flow, context or FC change flushes the whole thing.
 reg [15:0] epf_data [0:7];
-reg  [3:0] epf_count;
-reg  [2:0] epf_head, epf_fill;
-reg [31:0] epf_base, epf_next;
-reg        epf_super;
-reg        ifetch_lw;            // the outstanding fetch is a longword
-reg        epf_hit;
-reg [15:0] epf_hit_data;
-wire       ifetch_done = mem_ack | epf_hit;
-// A prefetched word that matches the PC needs no bus cycle at all, so the
-// immediate fetch below consumes it in the very cycle it would otherwise
-// have spent issuing a request.
-wire       epf_ready_pc = (epf_count != 0) && (epf_next == pc) &&
-                          (epf_super == sr_s);
-wire [15:0] ifetch_word = epf_hit    ? epf_hit_data :
-                          ifetch_lw  ? mem_rdata[31:16] : mem_rdata[15:0];
+reg  [3:0] epf_count;            // words resident
+reg  [2:0] epf_head, epf_fill;   // pop / append indices
+reg [31:0] epf_base;             // exception prefetch origin
+reg [31:0] epf_next;             // address of the word at the head
+reg [31:0] epf_ftail;            // address of the next word to be fetched
+reg        epf_super;            // FC the queue was filled under
+reg        epf_armed;            // the fill engine owns this stream
+reg        epf_pend;             // a queue fetch is outstanding
+reg        epf_pend_lw;          // ... and it returns two words
+reg        epf_kill;             // ... whose data a flush has abandoned
+reg        epf_err;              // the fill engine faulted: re-issue on demand
+
+// Combinational within the state machine's always block: the port claim and
+// the flush both have to be visible to the fill engine, which runs after the
+// case so that a state claiming the port this cycle always wins it.
+reg        epf_issue;            // the port was claimed by a state this cycle
+reg        epf_flushed;          // the queue was flushed this cycle
+reg  [1:0] epf_pop;              // words consumed this cycle
+reg  [1:0] epf_fillw;            // words appended this cycle
+
+// A resident word needs no bus cycle at all, so a fetch consumes it in the
+// very cycle it would otherwise have spent issuing a request.
+wire       epf_ready_pc = epf_armed && (epf_count != 4'd0) &&
+                          (epf_next == pc) && (epf_super == sr_s);
+wire       epf_ready_pc2 = epf_armed && (epf_count > 4'd1) &&
+                           (epf_next == pc) && (epf_super == sr_s);
+// The word arriving this cycle bypasses the queue: a fetch that ran the
+// queue dry still completes in the acknowledge cycle, exactly as the
+// pre-queue demand fetch did.
+wire       epf_fwd_pc = epf_pend && mem_ack && !epf_kill && epf_armed &&
+                        (epf_count == 4'd0) && (epf_next == mem_addr) &&
+                        (epf_next == pc) && (epf_super == sr_s);
+wire [15:0] epf_fwd_word = epf_pend_lw ? mem_rdata[31:16] : mem_rdata[15:0];
 
 reg        m_wr;
 reg  [1:0] m_size;
@@ -570,7 +613,6 @@ reg  [3:0] exc_fmt;
 reg [31:0] exc_spc, exc_addr, exc_sp;
 reg        exc_is_irq, exc_pass2;
 reg [15:0] sr_saved;
-reg [15:0] rte_oldsr;            // SR before the RTE / last throwaway SR
 reg        texc_pend;            // 040: T0 trace survives a non-internal
 reg [31:0] texc_pc;              //   integer exception; fires at handler
 reg        flow_t0_pend;         // T0 redirect waits for target predecode
@@ -578,16 +620,19 @@ reg [31:0] flow_t0_oldpc;
 reg  [2:0] irq_lvl_l;
 
 reg [15:0] rte_sr;
+// RTE restores the SR and redirects in one step, so a request that the
+// popped mask unblocks has to be qualified against THAT mask -- the sr
+// register still holds the pre-RTE value in the cycle the decision is
+// made.  Everything else is identical to the wires above.
+wire       rte_irq_live = irq_lvl_live != 3'd0 && irq_lvl_live != 3'd7 &&
+                          irq_lvl_live > rte_sr[10:8];
+wire       rte_irq_hold = irq_hold_lvl != 3'd0 &&
+                          irq_hold_lvl > rte_sr[10:8];
+wire       rte_irq_pend = nmi_pend || rte_irq_live || rte_irq_hold;
+wire [2:0] rte_irq_lvl  = nmi_pend ? 3'd7 :
+                          (rte_irq_live && irq_lvl_live > irq_hold_lvl)
+                              ? irq_lvl_live : irq_hold_lvl;
 reg [31:0] rte_pc;
-wire rte_irq_pend = (irq_lvl == 3'd7 && nmi_arm) ||
-                    irq_hold_lvl != 3'd0 ||
-                    (irq_lvl != 3'd0 && irq_lvl != 3'd7 &&
-                     irq_lvl > rte_sr[10:8]);
-wire [2:0] rte_irq_take_lvl = (irq_lvl == 3'd7 && nmi_arm) ? 3'd7 :
-                              (irq_lvl != 3'd0 && irq_lvl != 3'd7 &&
-                               irq_lvl > rte_sr[10:8] &&
-                               irq_lvl > irq_hold_lvl) ? irq_lvl :
-                              irq_hold_lvl;
 
 reg  [1:0] ret_kind;
 reg [31:0] br_base, br_tgt;
@@ -598,6 +643,9 @@ reg        mm_dir;             // 1 = mem to reg
 reg        mm_predec, mm_postinc;
 reg  [1:0] mm_size;
 reg [31:0] mm_addr, mm_init_an;
+reg        mm_base_ea;            // the EA depends on An (see S_MOVEM_LD)
+reg        mm_base_pend;          // a loaded base register awaits commit
+reg [31:0] mm_base_val;           // its value, written with the last transfer
 reg  [3:0] mm_reg;
 
 reg  [2:0] mp_cnt, mp_idx;     // byte counts: 2 for word, 4 for long
@@ -619,7 +667,6 @@ reg  [2:0] fc_ovr;
 reg  [2:0] m16_form;
 reg  [2:0] m16_dst_rn;
 reg [31:0] m16_src, m16_dst, m16_an;
-reg  [1:0] m16_src_off, m16_dst_off;
 reg  [1:0] m16_idx;
 reg [31:0] m16buf [0:3];
 reg        m16_rd_done;
@@ -868,29 +915,24 @@ reg   [2:0] fpu_fmsel;
 reg         fpu_fmwe;
 reg  [95:0] fpu_fmwd;
 reg         fpu_rst;
-reg         fpu_rte;
 reg         fpu_fsave_ack;
 reg         fpu_frestore_idle;
 reg         fpu_frestore_unimp;
-reg         fpu_frestore_busy;
 reg  [15:0] fp_restore_cmd1, fp_restore_cmd3;
 reg   [2:0] fp_restore_stag, fp_restore_dtag, fp_restore_flags;
 reg  [95:0] fp_restore_fpt, fp_restore_et;
-reg  [31:0] fp_restore_cusavepc, fp_restore_fpiarcu;
-reg  [31:0] fp_restore_wbt0, fp_restore_wbt1, fp_restore_wbt2;
-reg         fp_restore_wbtm66;
-reg   [2:0] fp_restore_grs;
-reg         fp_restore_wbte15;
 reg   [1:0] fp_cnt;               // long transfers remaining
 reg   [3:0] fp_nb;                // operand bytes
 reg         fp_st;                // 1: store direction
+reg         fp_st_epend;          // enabled store exception: deliver post-write
+reg   [7:0] fp_st_evec;           // its vector
 reg   [7:0] fp_list;              // FMOVEM register list (as processed)
 reg   [1:0] fp_mode;              // FMOVEM mode bits
 reg   [2:0] fp_creg;              // control list bits {FPCR,FPSR,FPIAR}
 reg   [5:0] fp_pred;              // FScc/FDBcc/FTRAPcc predicate
 reg         fp_rev;               // FMOVEM 040 quirk: reverse longword order
 reg         fp_lsb;               // FMOVEM predec store: mask consumed LSB first
-reg   [4:0] fp_n;                 // loop index (also 25-word busy frame)
+reg   [3:0] fp_n;                 // loop index
 reg         fp_ea_pd, fp_ea_pi;   // predecrement / postincrement EA
 reg         fp_ea_v;              // t_a holds a resolved operand address
 reg         fp_force_unsupp;      // packed store: trap after resolving EA
@@ -906,8 +948,20 @@ reg         fpu_bg;
 reg         fpu_pend_exc;
 reg   [7:0] fpu_pend_vec;
 wire        fpu_fstate_unimp;
-wire        fpu_fstate_e1;
+wire  [7:0] fpu_cur_vec;
+wire        fpu_frestore_e1_pend;
+wire  [2:0] fpu_fstate_grs;
+wire        fpu_fstate_wbte15;
+reg         fpu_pendcap;
+reg   [2:0] fp_restore_grs;
+reg         fp_restore_wbte15;
+reg  [95:0] fp_restore_wbt;
+reg  [31:0] fp_restore_fpiar;
+reg         fp_restore_busy;
+reg   [4:0] fpb_n;
 wire        fpu_fstate_busy;
+wire [95:0] fpu_fstate_wbt;
+wire [31:0] fpu_fstate_fpiar_c;
 wire        fpu_bsun_en;
 wire  [7:0] fpu_exc_vec;
 wire [95:0] fpu_dout;
@@ -917,10 +971,6 @@ wire [95:0] fpu_fmrd;
 wire [15:0] fpu_fstate_cmd1, fpu_fstate_cmd3;
 wire  [2:0] fpu_fstate_stag, fpu_fstate_dtag, fpu_fstate_flags;
 wire [95:0] fpu_fstate_fpt, fpu_fstate_et;
-wire [31:0] fpu_fstate_cusavepc, fpu_fstate_fpiarcu;
-wire [31:0] fpu_fstate_wbt0, fpu_fstate_wbt1, fpu_fstate_wbt2;
-wire        fpu_fstate_wbtm66, fpu_fstate_wbte15;
-wire  [2:0] fpu_fstate_grs;
 
 generate if (AP040_HAS_FPU) begin : g_fpu
 	ap040_fpu fpu
@@ -940,31 +990,24 @@ generate if (AP040_HAS_FPU) begin : g_fpu
 		.fm_rdata(fpu_fmrd),
 		.fpu_used(fpu_used),
 		.fstate_unimp(fpu_fstate_unimp),
-		.fstate_e1(fpu_fstate_e1),
-		.fstate_busy(fpu_fstate_busy),
 		.fstate_cmd1(fpu_fstate_cmd1), .fstate_cmd3(fpu_fstate_cmd3),
 		.fstate_stag(fpu_fstate_stag), .fstate_dtag(fpu_fstate_dtag),
 		.fstate_flags(fpu_fstate_flags),
 		.fstate_fpt(fpu_fstate_fpt), .fstate_et(fpu_fstate_et),
+		.pend_capture(fpu_pendcap), .cur_vec(fpu_cur_vec),
+		.frestore_e1_pend(fpu_frestore_e1_pend),
+		.fstate_grs(fpu_fstate_grs), .fstate_wbte15(fpu_fstate_wbte15),
+		.frestore_grs(fp_restore_grs), .frestore_wbte15(fp_restore_wbte15),
+		.fstate_busy(fpu_fstate_busy), .fstate_wbt(fpu_fstate_wbt),
+		.fstate_fpiar_c(fpu_fstate_fpiar_c),
+		.frestore_wbt(fp_restore_wbt), .frestore_fpiar(fp_restore_fpiar),
+		.frestore_busy(fp_restore_busy),
 		.fsave_ack(fpu_fsave_ack), .frestore_idle(fpu_frestore_idle),
-		.frestore_unimp(fpu_frestore_unimp), .frestore_busy(fpu_frestore_busy),
+		.frestore_unimp(fpu_frestore_unimp),
 		.frestore_cmd1(fp_restore_cmd1), .frestore_cmd3(fp_restore_cmd3),
 		.frestore_stag(fp_restore_stag), .frestore_dtag(fp_restore_dtag),
 		.frestore_flags(fp_restore_flags),
 		.frestore_fpt(fp_restore_fpt), .frestore_et(fp_restore_et),
-		.fstate_cusavepc(fpu_fstate_cusavepc),
-		.fstate_fpiarcu(fpu_fstate_fpiarcu),
-		.fstate_wbt0(fpu_fstate_wbt0), .fstate_wbt1(fpu_fstate_wbt1),
-		.fstate_wbt2(fpu_fstate_wbt2),
-		.fstate_wbtm66(fpu_fstate_wbtm66), .fstate_grs(fpu_fstate_grs),
-		.fstate_wbte15(fpu_fstate_wbte15),
-		.frestore_cusavepc(fp_restore_cusavepc),
-		.frestore_fpiarcu(fp_restore_fpiarcu),
-		.frestore_wbt0(fp_restore_wbt0), .frestore_wbt1(fp_restore_wbt1),
-		.frestore_wbt2(fp_restore_wbt2),
-		.frestore_wbtm66(fp_restore_wbtm66), .frestore_grs(fp_restore_grs),
-		.frestore_wbte15(fp_restore_wbte15),
-		.fpu_rte(fpu_rte),
 		.fp_reset(fpu_rst)
 	);
 end else begin : g_nofpu
@@ -981,8 +1024,13 @@ end else begin : g_nofpu
 	assign fpu_fmrd = 0;
 	assign fpu_used = 0;
 	assign fpu_fstate_unimp = 0;
-	assign fpu_fstate_e1 = 0;
+	assign fpu_cur_vec = 0;
+	assign fpu_frestore_e1_pend = 0;
+	assign fpu_fstate_grs = 0;
+	assign fpu_fstate_wbte15 = 0;
 	assign fpu_fstate_busy = 0;
+	assign fpu_fstate_wbt = 0;
+	assign fpu_fstate_fpiar_c = 0;
 	assign fpu_fstate_cmd1 = 0;
 	assign fpu_fstate_cmd3 = 0;
 	assign fpu_fstate_stag = 0;
@@ -990,14 +1038,6 @@ end else begin : g_nofpu
 	assign fpu_fstate_flags = 0;
 	assign fpu_fstate_fpt = 0;
 	assign fpu_fstate_et = 0;
-	assign fpu_fstate_cusavepc = 0;
-	assign fpu_fstate_fpiarcu = 0;
-	assign fpu_fstate_wbt0 = 0;
-	assign fpu_fstate_wbt1 = 0;
-	assign fpu_fstate_wbt2 = 0;
-	assign fpu_fstate_wbtm66 = 0;
-	assign fpu_fstate_grs = 0;
-	assign fpu_fstate_wbte15 = 0;
 end endgenerate
 
 // operand byte count per source format field
@@ -1016,16 +1056,51 @@ endfunction
 
 // Revision-$41 MC68040 unimplemented-instruction frame.  The size field in
 // the header is the payload size (48 bytes), making 13 longwords total.
-function [31:0] fsave_unimp_word;
+// the $41/$60 BUSY frame: 25 longwords, offsets per WinUAE's 68040
+// fpuop_save writer (WBTEMP at +24, FPIARCU at +40, CMDREG3B at +52,
+// STAG/GRS at +60, CMDREG1B at +64, DTAG/WBTE15 at +68, flags at +72,
+// FPTEMP at +76, ETEMP at +88; CU_SAVEPC and the reserved words zero)
+function [31:0] fsave_busy_word;
 	input [4:0] n;
+	begin
+		case (n)
+			5'd0:  fsave_busy_word = 32'h4160_0000;
+			5'd6:  fsave_busy_word = {fpu_fstate_wbt[95:80], 16'd0};
+			5'd7:  fsave_busy_word = fpu_fstate_wbt[63:32];
+			5'd8:  fsave_busy_word = fpu_fstate_wbt[31:0];
+			5'd10: fsave_busy_word = fpu_fstate_fpiar_c;
+			5'd13: fsave_busy_word = {fpu_fstate_cmd3, 16'd0};
+			5'd15: fsave_busy_word = {fpu_fstate_stag, 3'd0,
+			                          fpu_fstate_grs, 23'd0};
+			5'd16: fsave_busy_word = {fpu_fstate_cmd1, 16'd0};
+			5'd17: fsave_busy_word = {fpu_fstate_dtag, 8'd0,
+			                          fpu_fstate_wbte15, 20'd0};
+			5'd18: fsave_busy_word = {5'd0, fpu_fstate_flags[2],
+			                                fpu_fstate_flags[1], 4'd0,
+			                                fpu_fstate_flags[0], 20'd0};
+			5'd19: fsave_busy_word = fpu_fstate_fpt[95:64];
+			5'd20: fsave_busy_word = fpu_fstate_fpt[63:32];
+			5'd21: fsave_busy_word = fpu_fstate_fpt[31:0];
+			5'd22: fsave_busy_word = fpu_fstate_et[95:64];
+			5'd23: fsave_busy_word = fpu_fstate_et[63:32];
+			5'd24: fsave_busy_word = fpu_fstate_et[31:0];
+			default: fsave_busy_word = 32'd0;
+		endcase
+	end
+endfunction
+
+function [31:0] fsave_unimp_word;
+	input [3:0] n;
 	begin
 		case (n)
 			4'd0:  fsave_unimp_word = 32'h4130_0000;
 			4'd1:  fsave_unimp_word = {fpu_fstate_cmd3, 16'd0};
 			4'd2:  fsave_unimp_word = 32'd0;
-			4'd3:  fsave_unimp_word = {fpu_fstate_stag, 29'd0};
+			4'd3:  fsave_unimp_word = {fpu_fstate_stag, 3'd0,
+			                           fpu_fstate_grs, 23'd0};
 			4'd4:  fsave_unimp_word = {fpu_fstate_cmd1, 16'd0};
-			4'd5:  fsave_unimp_word = {fpu_fstate_dtag, 29'd0};
+			4'd5:  fsave_unimp_word = {fpu_fstate_dtag, 8'd0,
+			                           fpu_fstate_wbte15, 20'd0};
 			4'd6:  fsave_unimp_word = {5'd0, fpu_fstate_flags[2],
 			                                  fpu_fstate_flags[1], 4'd0,
 			                                  fpu_fstate_flags[0], 20'd0};
@@ -1035,47 +1110,6 @@ function [31:0] fsave_unimp_word;
 			4'd10: fsave_unimp_word = fpu_fstate_et[95:64];
 			4'd11: fsave_unimp_word = fpu_fstate_et[63:32];
 			default: fsave_unimp_word = fpu_fstate_et[31:0];
-		endcase
-	end
-endfunction
-
-// Revision-$41 68040 busy state frame.  The 0x60 size in the header is the
-// payload length (25 longwords total including the header).  Reserved words
-// are emitted explicitly to keep the exact offsets used by FPSP/FRESTORE.
-function [31:0] fsave_busy_word;
-	input [4:0] n;
-	begin
-		case (n)
-			5'd0:  fsave_busy_word = 32'h4160_0000;
-			5'd1:  fsave_busy_word = 32'd0;
-			5'd2:  fsave_busy_word = fpu_fstate_cusavepc;
-			5'd3:  fsave_busy_word = 32'd0;
-			5'd4:  fsave_busy_word = 32'd0;
-			5'd5:  fsave_busy_word = 32'd0;
-			5'd6:  fsave_busy_word = fpu_fstate_wbt0;
-			5'd7:  fsave_busy_word = fpu_fstate_wbt1;
-			5'd8:  fsave_busy_word = fpu_fstate_wbt2;
-			5'd9:  fsave_busy_word = 32'd0;
-			5'd10: fsave_busy_word = fpu_fstate_fpiarcu;
-			5'd11: fsave_busy_word = 32'd0;
-			5'd12: fsave_busy_word = 32'd0;
-			5'd13: fsave_busy_word = {fpu_fstate_cmd3, 16'd0};
-			5'd14: fsave_busy_word = 32'd0;
-			5'd15: fsave_busy_word = {fpu_fstate_stag, 2'd0,
-									 fpu_fstate_wbtm66, fpu_fstate_grs, 23'd0};
-			5'd16: fsave_busy_word = {fpu_fstate_cmd1, 16'd0};
-			5'd17: fsave_busy_word = {fpu_fstate_dtag, 8'd0,
-								 fpu_fstate_wbte15, 20'd0};
-			5'd18: fsave_busy_word = {5'd0, fpu_fstate_flags[2],
-								 fpu_fstate_flags[1], 4'd0,
-								 fpu_fstate_flags[0], 20'd0};
-			5'd19: fsave_busy_word = fpu_fstate_fpt[95:64];
-			5'd20: fsave_busy_word = fpu_fstate_fpt[63:32];
-			5'd21: fsave_busy_word = fpu_fstate_fpt[31:0];
-			5'd22: fsave_busy_word = fpu_fstate_et[95:64];
-			5'd23: fsave_busy_word = fpu_fstate_et[63:32];
-			5'd24: fsave_busy_word = fpu_fstate_et[31:0];
-			default: fsave_busy_word = fpu_fstate_et[31:0];
 		endcase
 	end
 endfunction
@@ -1110,6 +1144,11 @@ endfunction
 
 // Non-branch instructions which the MC68040 defines as changes of flow for
 // T0 tracing because they synchronize/refill the instruction pipeline.
+// gencpu marks them with trace_t0_68040_only(); note MOVEC is listed for
+// the TO-control-register direction only (i_MOVE2C, $4E7B).  Reading a
+// control register ($4E7A, i_MOVEC2) changes nothing and does not trace --
+// cputest Basic/MOVEC2 expects the trace after the $4E7B in its sequence,
+// not after the $4E7A that precedes it.
 // Taken branches/returns are handled by go_pc; FDBcc/FMOVEM need extension
 // word information and set t0_force in their decode states.
 function t0_special;
@@ -1117,15 +1156,23 @@ function t0_special;
 	begin
 		t0_special =
 		    op == 16'h007c || op == 16'h027c || op == 16'h0a7c || // to SR
-		    op == 16'h4e71 || op == 16'h4e72 ||                    // NOP/STOP
-		    op == 16'h4e7a || op == 16'h4e7b ||                    // MOVEC
-		    (op & 16'hfff0) == 16'h4e60 ||                         // MOVE USP
+		    op == 16'h4e71 ||                                      // NOP
+		    // STOP is absent: it never reaches the fetch_next boundary --
+		    // S_STOP_LD makes its own T0 decision (changed-bits rule).
+		    op == 16'h4e7b ||                                      // MOVEC to CR
+		    (op & 16'hfff8) == 16'h4e60 ||                         // MOVE An,USP
+		    // MOVE USP,An ($4E68-F) does not trace: gencpu marks only
+		    // i_MVR2USP with trace_t0_68040_only, the same on-silicon
+		    // narrowing hardware already proved for MOVEC ($4E7B only).
 		    (op & 16'hffc0) == 16'h46c0 ||                         // MOVE to SR
-		    (op & 16'hffc0) == 16'h4ac0 ||                         // TAS
 		    (op[15:12] == 4'h0 && op[11:8] == 4'he &&
 		     op[7:6] != 2'b11) ||                                  // MOVES
-		    (op[15:12] == 4'h0 && op[11] && op[7:6] == 2'b11 &&
+		    (op[15:12] == 4'h0 && op[11] && !op[8] && op[7:6] == 2'b11 &&
 		     op[10:9] != 2'b00) ||                                 // CAS/CAS2
+		    // op[8] discriminates CAS ($0AC0/$0CC0/$0EC0, clear) from the
+		    // dynamic bit ops BSET Dn,<ea> for D5-D7 ($0Bxx/$0Dxx/$0Fxx,
+		    // set): hardware cputest basic/all failed BSET.B D5,(A6)
+		    // under T0 with a phantom trace before the bit was added.
 		    op[15:8] == 8'hf4 || op[15:8] == 8'hf5 ||              // CINV/CPUSH/PFLUSH/PTEST
 		    op[15:8] == 8'hf3;                                     // FSAVE/FRESTORE
 	end
@@ -1134,6 +1181,21 @@ endfunction
 // Unimplemented FP instruction: vector 11, format $2.  Register/immediate
 // forms identify the faulting FP instruction, while a resolved memory form
 // carries its operand EA (hardware FINT/FINTRZ corpus behavior).
+// Malformed source EA.  A hardware opmode reports the plain format-$0
+// F-line; an FPSP-emulated one reports through the unimplemented route.
+// Both are written from ONE exc() site so the format and PC selection is
+// a 2:1 mux on a single predicate rather than two more writers into the
+// exception-format priority tree, which is the core's critical path.
+task go_fp_ea_fault;
+	input hw;
+	begin
+		fpu_req <= 0;
+		exc(`AP040_VEC_FLINE, hw ? 4'd0 : 4'd2,
+		    hw ? pc_i : pc,
+		    hw ? 32'd0 : (fp_ea_v ? t_a : pc_i));
+	end
+endtask
+
 task go_fp_unimp;
 	begin
 		fpu_req <= 0;
@@ -1158,17 +1220,46 @@ task go_fp_unsupp;
 	input [31:0] ea;
 	begin
 		fpu_req <= 0;
-		// A statically unsupported packed store is reported after EA decoding
-		// but before the following opcode and identifies the last consumed
-		// extension word.  A runtime datatype fault discovered by the FPU while
-		// converting a register store is a true post-instruction exception and
-		// stacks the following PC.  Keeping those cases distinct is essential:
-		// resuming a subnormal FMOVE.X store at pc-2 re-executes its EA word.
-		if (post) exc(`AP040_VEC_FP_UNSUP, 4'd3,
-		              packed_early ? pc - 32'd2 : pc, ea);
-		else      exc(`AP040_VEC_FP_UNSUP, 4'd3, pc_i, has_ea ? ea : 32'd0);
+		// Datatype faults are POST-instruction exceptions: format $3 with
+		// the FOLLOWING instruction's PC, for sources as well as stores.
+		// AP040 used to stack the faulting instruction's own PC for source
+		// operands (and pc-2 for a statically unsupported packed store).
+		// The v20 corpus masked the stacked PC out of every frame
+		// comparison, so nothing contradicted it; the v24 corpus checks
+		// that field and rejects both, and WinUAE agrees explicitly
+		// (fpp.cpp, "simplification: always mid/post-instruction
+		// exception" -> newcpu_common.cpp stacks currpc with format $3).
+		if (post) exc(`AP040_VEC_FP_UNSUP, 4'd3, pc, ea);
+		else      exc(`AP040_VEC_FP_UNSUP, 4'd3, pc, has_ea ? ea : 32'd0);
 	end
 endtask
+
+// Does the 040 execute this opmode in hardware, or is it one of the
+// FPSP-emulated ones (FINT, FSIN, FMOD, ...)?  Mirrors ap040_fpu's
+// op_in_hw.  It matters at the malformed-EA sites below: WinUAE's
+// get_fp_value runs fault_if_unimplemented_680x0 BEFORE it rejects a Dn
+// or An source, so an unimplemented INSTRUCTION with an illegal EA is
+// still reported through the FPSP route (vector 11, format $2, PC of the
+// following instruction), not as a plain format-$0 F-line.
+function fp_op_in_hw;
+	input [6:0] op;
+	begin
+		case (op)
+			7'h00, 7'h40, 7'h44,          // FMOVE, FSMOVE, FDMOVE
+			7'h18, 7'h58, 7'h5C,          // FABS, FSABS, FDABS
+			7'h1A, 7'h5A, 7'h5E,          // FNEG, FSNEG, FDNEG
+			7'h38, 7'h3A,                 // FCMP, FTST
+			7'h22, 7'h62, 7'h66,          // FADD, FSADD, FDADD
+			7'h28, 7'h68, 7'h6C,          // FSUB, FSSUB, FDSUB
+			7'h23, 7'h27, 7'h63, 7'h67,   // FMUL, FSGLMUL, FSMUL, FDMUL
+			7'h20, 7'h24, 7'h60, 7'h64,   // FDIV, FSGLDIV, FSDIV, FDDIV
+			7'h04, 7'h41, 7'h45:          // FSQRT, FSSQRT, FDSQRT
+				fp_op_in_hw = 1;
+			default:
+				fp_op_in_hw = 0;
+		endcase
+	end
+endfunction
 
 // 68040 F-line opmode classification (WinUAE fault_if_nonexisting_opmode):
 // 0 = existing (hardware, or the unimplemented-instruction FPSP route with
@@ -1208,37 +1299,60 @@ task go_fp_fline;
 	end
 endtask
 
+// Abandon the queue and stop the fill engine.  Whatever is in flight is
+// reaped and discarded, so nothing can re-arm the engine between here and the
+// redirect: only issue_ifetch arms it again.
+task epf_flush;
+	begin
+		epf_count <= 0;
+		epf_head  <= 0;
+		epf_fill  <= 0;
+		epf_armed <= 0;
+		epf_err   <= 0;
+		if (epf_pend) epf_kill <= 1;
+		epf_flushed = 1;
+	end
+endtask
+
+// Point the queue at a, under function code s, and start filling.  A queue
+// already tracking that address in that context is kept: the words are
+// resident, in flight, or about to be requested, and the caller's S_FETCH
+// pops them.  Anything else is a flow, context or FC change and flushes.
 task issue_ifetch;
 	input [31:0] a;
 	input        s;
 	begin
-		if (epf_count != 0 && epf_next == a && epf_super == s) begin
-			// Consume a word already fetched by exception processing.
-			epf_hit <= 1;
-			ifetch_lw <= 0;
-			epf_hit_data <= epf_data[epf_head];
-			epf_head <= epf_head + 3'd1;
-			epf_count <= epf_count - 4'd1;
-			epf_next <= epf_next + 32'd2;
-			mem_req <= 0;
+		if (epf_armed && epf_next == a && epf_super == s) begin
+			// the stream already runs here: nothing to do
 		end
 		else begin
-			// A control-flow/context mismatch abandons the unused prefetch.
 			epf_count <= 0;
-			epf_hit <= 0;
-			mem_req <= 1; mem_write <= 0; mem_instr <= 1;
-			// A longword-aligned fetch takes both words in one request and
-			// buffers the odd one for the next sequential fetch, which is
-			// where most of this core's cycles went.  Alignment is what
-			// makes it safe: an aligned longword cannot span a page, so it
-			// cannot translate or fault differently than the two halves
-			// would have (the exception prefetch below stays word-wise
-			// precisely because its $FFE entry CAN span).
-			ifetch_lw <= ~a[1];
-			mem_size <= a[1] ? `AP040_SZ_W : `AP040_SZ_L;
-			mem_addr <= a;
+			epf_head  <= 0;
+			epf_fill  <= 0;
+			epf_err   <= 0;
+			epf_next  <= a;
+			epf_ftail <= a;
 			epf_super <= s;
-			fc_r <= s ? `AP040_FC_SUPER_PROG : `AP040_FC_USER_PROG;
+			epf_armed <= 1;
+			epf_flushed = 1;
+			if (epf_pend) epf_kill <= 1;
+			else if (!mem_req && !mem_ack) begin
+				// The port is free: issue the redirect now rather than
+				// leaving it to the engine one cycle later.  A longword
+				// aligned fetch takes both words in one request.  Alignment
+				// is what makes it safe: an aligned longword cannot span a
+				// page, so it cannot translate or fault differently than the
+				// two halves would have (the exception prefetch below stays
+				// word-wise precisely because its $FFE entry CAN span).
+				mem_req <= 1; mem_write <= 0; mem_instr <= 1;
+				mem_size <= a[1] ? `AP040_SZ_W : `AP040_SZ_L;
+				mem_addr <= a;
+				fc_r <= s ? `AP040_FC_SUPER_PROG : `AP040_FC_USER_PROG;
+				epf_pend <= 1;
+				epf_pend_lw <= ~a[1];
+				epf_kill <= 0;
+				epf_issue = 1;
+			end
 		end
 	end
 endtask
@@ -1250,18 +1364,17 @@ task exception_prefetch;
 	input [31:0] a;
 	input        s;
 	begin
-		epf_count <= 0;
-		epf_head <= 0;
-		epf_fill <= 0;
+		epf_flush;
 		epf_base <= a;
 		epf_next <= a;
+		epf_ftail <= a;
 		epf_super <= s;
-		epf_hit <= 0;
 		pc <= a;
 		pc_i <= a;
 		mem_req <= 1; mem_write <= 0; mem_instr <= 1;
 		mem_size <= `AP040_SZ_W; mem_addr <= a;
 		fc_r <= s ? `AP040_FC_SUPER_PROG : `AP040_FC_USER_PROG;
+		epf_issue = 1;
 		state <= S_EPF_FILL;
 	end
 endtask
@@ -1274,14 +1387,14 @@ endtask
 task fatal_halt;
 	begin
 		mem_req <= 0;
-		if_issued <= 0;
 		m_issued <= 0;
 		pt_req <= 0;
 		pf_req <= 0;
 		cinv_req <= 0;
 		fpu_req <= 0;
-		epf_count <= 0;
-		epf_hit <= 0;
+		epf_flush;
+		epf_pend <= 0;
+		epf_kill <= 0;
 		fc_ovr_v <= 0;
 		lk_cyc <= 0;
 		fault_r <= 1;
@@ -1301,7 +1414,7 @@ task immf;
 	input [1:0] n;
 	input [7:0] ret;
 	begin
-		imm_n <= n; imm <= 0; if_issued <= 0;
+		imm_n <= n; imm <= 0;
 		r_imm_ret <= ret; state <= S_IMMF;
 	end
 endtask
@@ -1360,23 +1473,39 @@ task exc;
 	begin
 		exc_vec <= vec; exc_fmt <= fmt; exc_spc <= spc; exc_addr <= addr;
 		exc_is_irq <= 0; exc_pass2 <= 0;
-		// A pending T0 trace is cancelled by the 040's internal exceptions
-		// (CHK/TRAPcc/divide/TRAP#n) but SURVIVES the non-internal integer
-		// ones -- illegal, privilege, A-line and the format-$0 F-line -- and
-		// fires before the handler's first instruction (WinUAE
-		// Exception_cpu_oldpc + internalexception).
-		if (fmt == 4'd0 && tr_t0 && !tr_t1 &&
-		    (vec == `AP040_VEC_ILLEGAL || vec == `AP040_VEC_PRIV ||
-		     vec == `AP040_VEC_ALINE || vec == `AP040_VEC_FLINE)) begin
-			texc_pend <= 1;
-			texc_pc <= pc_i;
-		end
+		// A T0 trace does NOT survive an exception on the 68040.  This
+		// used to arm one for illegal/privilege/A-line/F-line, reading
+		// WinUAE's Exception_cpu_oldpc as if every exception ran through
+		// it.  Only the INTERNAL exceptions do -- gencpu emits
+		// exception_cpu() solely for divide-by-zero, CHK, TRAPV, TRAP #n
+		// and the RTE format error -- and on a 68040 that path then forces
+		// t0 = false for exactly those vectors, while everything else
+		// (op_illg's vector 4 included) goes through plain Exception(),
+		// whose exception_check_trace clears T0 outright.  So no exception
+		// leaves a T0 trace pending.  Hardware agrees: cputest basic/all
+		// and fbasic/all both reported "Got unexpected trace exception"
+		// after the ILLEGAL that terminates every test, on plain integer
+		// instructions as well as FP ones.
+		//
+		// The texc machinery itself stays: it still delivers a trace that
+		// a simultaneous INTERRUPT preempted (see fetch_next and go_pc),
+		// which is a different and real case.
 		// Exception stack and vector accesses are always supervisor-data
 		// references.  In particular, do not let a faulting MOVES retain its
 		// SFC/DFC override into exception processing.
 		fc_ovr_v <= 0;
 		flow_t0_pend <= 0;
-		mem_req <= 0;
+		// Exception processing owns the memory port from here: the fetch
+		// queue is abandoned and cannot re-arm until the handler's
+		// prefetch runs.  A queue fetch already on the bus is left to
+		// finish -- dropping a request the cache has accepted would lose
+		// its acknowledge -- and its data is discarded by epf_kill.
+		epf_flush;
+		if (!epf_pend) mem_req <= 0;
+		// A faulted/aborted locked sequence ends here: the 040 drops LOCK
+		// on the fault, and a stale lk_cyc would throttle the handler's
+		// fetch queue (fetch_next is not on the exception entry path).
+		lk_cyc <= 0;
 		state <= S_EXC0;
 	end
 endtask
@@ -1408,7 +1537,12 @@ task aerr_start;
 		// Preserve fc_r above for the SSW, then force all frame/vector cycles
 		// back to supervisor data space.
 		fc_ovr_v <= 0;
+		epf_flush;
 		mem_req  <= 0;
+		// The locked sequence ends at the fault (aer_lk above still
+		// captures the pre-edge value): the 040 drops LOCK, and a stale
+		// lk_cyc would throttle the handler's fetch queue.
+		lk_cyc   <= 0;
 		state    <= S_AERR0;
 	end
 endtask
@@ -1453,11 +1587,18 @@ function [15:0] aerr_word;
 			5'd4:  aerr_word = aer_fa[31:16];
 			5'd5:  aerr_word = aer_m16 ? {aer_fa[15:4], 4'd0} : aer_fa[15:0];
 			5'd6:  aerr_word = aer_ssw;
-			// WB3 carries the faulted write so a handler may complete it;
-			// the valid bit stays clear for MOVE16 (WinUAE clears it and
-			// uses a WB2 line writeback, which this restart model omits)
-			5'd7:  aerr_word = (aer_wr && !aer_m16)
-			                   ? {8'd0, 1'b1, aer_ssw[6:0]} : 16'd0;
+			// WB3S stays CLEAR: this core RESTARTS the faulting
+			// instruction after the handler repairs the mapping, so it
+			// must not also advertise a pending writeback.  An OS that
+			// honours the 040 frame (NetBSD trap.c: "the 68040 doesn't
+			// re-run instructions that cause write page faults ... we
+			// have to write the value out to memory ourselves") performs
+			// every VALID WB3 -- combined with the restart, an RMW store
+			// like ld.elf_so's relocation add.l lands TWICE.  Captured
+			// live: init's ctor pointer held link VA + 2x load base and
+			// NetBSD hung looping on the resulting wild ifetch.  WB3D/A
+			// keep the write data for diagnostics; valid stays 0.
+			5'd7:  aerr_word = 16'd0;
 			5'd10: aerr_word = aer_fa[31:16];          // initial fault address
 			5'd11: aerr_word = aer_fa[15:0];
 			5'd12: aerr_word = aer_fa[31:16];          // WB3A
@@ -1476,18 +1617,27 @@ task fetch_next;
 		u0_v <= 0;
 		u1_v <= 0;
 		// An interrupt already sampled at the completing instruction's
-		// boundary wins over a simultaneous T1/T0 trace on the 68040.  The
-		// trace bits remain in the IRQ frame and can be resumed by RTE.  This
-		// ordering is visible when an odd IRQ vector produces a nested address
-		// error: its SR must contain the accepted interrupt mask, not the trace
-		// exception's pre-IRQ context.
+		// boundary wins over a simultaneous T1/T0 trace on the 68040
+		// (WinUAE do_specialties: the trace converts to a PENDING trace
+		// before interrupts are sampled).  This ordering is visible when an
+		// odd IRQ vector produces a nested address error: its SR must
+		// contain the accepted interrupt mask, not the trace exception's
+		// pre-IRQ context.  The trace event itself is NOT lost: it is
+		// delivered at the interrupt handler's entry through the S_EXC_JMP
+		// texc machinery, like the T0 survival.
 		if (irq_pend) begin
+			if (tr_t1 || (tr_t0 && t0_force)) begin
+				texc_pend <= 1;
+				texc_pc <= pc_i;
+				tr_t1 <= 0;
+			end
 			exc_vec <= `AP040_VEC_AUTOVEC + {5'd0, irq_take_lvl};
 			exc_fmt <= 0; exc_spc <= pc; exc_addr <= 0;
 			exc_is_irq <= 1; exc_pass2 <= 0;
 			irq_lvl_l <= irq_take_lvl;
 			// As with trace, an interrupt recognized at the instruction
 			// boundary must see the just-completed register writeback.
+			epf_flush;
 			state <= S_POST_EXC;
 		end
 		else if (tr_t1 || (tr_t0 && t0_force)) begin
@@ -1504,6 +1654,16 @@ task fetch_next;
 		end
 	end
 endtask
+
+// True while an effective address is being computed, i.e. while a data
+// access is known to be coming.  Keeps speculative instruction fetches
+// off the shared memory port just ahead of it.
+wire ea_state = (state == S_EA_DISP)  || (state == S_EA_BASE) ||
+                (state == S_EA_D16)   || (state == S_EA_EXTW) ||
+                (state == S_EA_EXTW2) || (state == S_EA_BD)   ||
+                (state == S_EA_MIND)  || (state == S_EA_OD)   ||
+                (state == S_EA_ABS)   || (state == S_PIPE_SRD) ||
+                (state == S_PIPE_DEA);
 
 wire [31:0] exc_fsize = (exc_fmt == 4'd2 || exc_fmt == 4'd3) ? 32'd12 :
                         (exc_fmt == 4'd4) ? 32'd16 : 32'd8;
@@ -1531,7 +1691,25 @@ task go_pc;
 			tr_t1 <= 0;
 			tr_t0 <= 0;
 			pc <= t;
-			exc(`AP040_VEC_TRACE, 4'd2, t, pc_i);
+			if (irq_pend) begin
+				// WinUAE do_specialties: the completing instruction's
+				// trace converts to a PENDING trace and the interrupt is
+				// sampled after that conversion, so the interrupt
+				// exception processes first and the trace is delivered at
+				// its handler entry (the S_EXC_JMP texc machinery, same
+				// as the T0 survival), with the traced instruction in the
+				// format-$2 address field.  The trace event is never
+				// lost and never precedes the interrupt.
+				texc_pend <= 1;
+				texc_pc <= pc_i;
+				exc_vec <= `AP040_VEC_AUTOVEC + {5'd0, irq_take_lvl};
+				exc_fmt <= 0; exc_spc <= t; exc_addr <= 0;
+				exc_is_irq <= 1; exc_pass2 <= 0;
+				irq_lvl_l <= irq_take_lvl;
+				epf_flush;
+				state <= S_POST_EXC;
+			end
+			else exc(`AP040_VEC_TRACE, 4'd2, t, pc_i);
 		end
 		else if (tr_t0) begin
 			// The 040 resolves a T0 change-of-flow trace only after the
@@ -1557,6 +1735,7 @@ task go_pc;
 				// BSR/JSR and taken DBcc can commit A7/Dn on the
 				// same edge that redirects here.  Let that registered
 				// writeback become visible before S_EXC0 snapshots it.
+				epf_flush;
 				state <= S_POST_EXC;
 			end
 			else begin
@@ -1594,6 +1773,14 @@ endtask
 integer li;
 
 always @(posedge clk) begin
+	// Combinational carriers, valid only inside this block: the fetch queue's
+	// fill engine runs after the case statement and has to see what the case
+	// did to the memory port and to the queue in the same cycle.
+	epf_issue   = 0;
+	epf_flushed = 0;
+	epf_pop     = 2'd0;
+	epf_fillw   = 2'd0;
+
 	if (!nreset) begin
 		state <= S_START;
 		pc <= 0; pc_i <= 0;
@@ -1623,19 +1810,18 @@ always @(posedge clk) begin
 		fpu_req <= 0; fpu_class <= 0; fpu_opm <= 0; fpu_fmt <= 0;
 		fpu_srcr <= 0; fpu_dstr <= 0; fpb <= 0;
 		fpu_bg <= 0; fpu_pend_exc <= 0; fpu_pend_vec <= 0;
+		fpu_pendcap <= 0; fp_restore_grs <= 0; fp_restore_wbte15 <= 0;
+		fp_restore_wbt <= 0; fp_restore_fpiar <= 0; fp_restore_busy <= 0;
+		fpb_n <= 0;
 		fpu_crsel <= 0; fpu_crwe <= 0; fpu_crwd <= 0; fpu_iawe <= 0;
 		fpu_bsun <= 0;
 		fpu_fmsel <= 0; fpu_fmwe <= 0; fpu_fmwd <= 0; fpu_rst <= 0;
-		fpu_rte <= 0;
-		fpu_fsave_ack <= 0; fpu_frestore_idle <= 0;
-		fpu_frestore_unimp <= 0; fpu_frestore_busy <= 0;
+		fpu_fsave_ack <= 0; fpu_frestore_idle <= 0; fpu_frestore_unimp <= 0;
 		fp_restore_cmd1 <= 0; fp_restore_cmd3 <= 0;
 		fp_restore_stag <= 0; fp_restore_dtag <= 0; fp_restore_flags <= 0;
 		fp_restore_fpt <= 0; fp_restore_et <= 0;
-		fp_restore_cusavepc <= 0; fp_restore_fpiarcu <= 0;
-		fp_restore_wbt0 <= 0; fp_restore_wbt1 <= 0; fp_restore_wbt2 <= 0;
-		fp_restore_wbtm66 <= 0; fp_restore_grs <= 0; fp_restore_wbte15 <= 0;
 		fp_cnt <= 0; fp_nb <= 0; fp_st <= 0; fp_list <= 0; fp_mode <= 0;
+		fp_st_epend <= 0; fp_st_evec <= 0;
 		fp_rev <= 0; fp_lsb <= 0;
 		fp_creg <= 0; fp_pred <= 0; fp_n <= 0;
 		fp_ea_pd <= 0; fp_ea_pi <= 0; fp_adj <= 0; fp_ea_v <= 0;
@@ -1650,10 +1836,11 @@ always @(posedge clk) begin
 		sh_val <= 0; sh_fl <= 0; sh_cnt <= 0; sh_vacc <= 0; sh_rox <= 0;
 		sh_any <= 0;
 		r_imm_ret <= 0; r_ea_ret <= 0; r_m_ret <= 0;
-		imm_n <= 0; if_issued <= 0; m_issued <= 0; imm <= 0; x_ext <= 0;
-		epf_count <= 0; epf_head <= 0; epf_fill <= 0; ifetch_lw <= 0;
+		imm_n <= 0; m_issued <= 0; imm <= 0; x_ext <= 0;
+		epf_count <= 0; epf_head <= 0; epf_fill <= 0;
 		epf_base <= 0; epf_next <= 0; epf_super <= 0;
-		epf_hit <= 0; epf_hit_data <= 0;
+		epf_ftail <= 0; epf_armed <= 0; epf_pend <= 0;
+		epf_pend_lw <= 0; epf_kill <= 0; epf_err <= 0;
 		for (li = 0; li < 8; li = li + 1) epf_data[li] <= 0;
 		m_wr <= 0; m_size <= 0; m_addr_r <= 0; m_wdat <= 0; m_val <= 0;
 		ea_mode <= 0; ea_rn <= 0; ea_size <= 0;
@@ -1668,19 +1855,19 @@ always @(posedge clk) begin
 		src_mode_r <= 0; src_rn_r <= 0; dst_mode_r <= 0; dst_rn_r <= 0;
 		exc_vec <= 0; exc_fmt <= 0; exc_spc <= 0; exc_addr <= 0; exc_sp <= 0;
 		exc_is_irq <= 0; exc_pass2 <= 0; sr_saved <= 0; irq_lvl_l <= 0;
-		rte_oldsr <= 0; texc_pend <= 0; texc_pc <= 0;
+		texc_pend <= 0; texc_pc <= 0;
 		flow_t0_pend <= 0; flow_t0_oldpc <= 0;
 		rte_sr <= 0; rte_pc <= 0; ret_kind <= 0;
 		br_base <= 0; br_tgt <= 0; br_long <= 0;
 		mm_mask <= 0; mm_dir <= 0; mm_predec <= 0; mm_postinc <= 0;
 		mm_size <= 0; mm_addr <= 0; mm_init_an <= 0; mm_reg <= 0;
+		mm_base_ea <= 0; mm_base_pend <= 0; mm_base_val <= 0;
 		mp_cnt <= 0; mp_idx <= 0; mp_dir <= 0; mp_addr <= 0; mp_val <= 0;
 		t_a <= 0; t_b <= 0; srop_kind <= 0; srop_sr <= 0;
 		mvc_dir <= 0; fc_ovr_v <= 0; fc_ovr <= 0;
 		lk_cyc <= 0; aer_lk <= 0; aer_m16 <= 0; aer_tt <= 0; aer_wd <= 0;
 		m16_form <= 0; m16_dst_rn <= 0; m16_src <= 0; m16_dst <= 0;
-		m16_an <= 0; m16_src_off <= 0; m16_dst_off <= 0;
-		m16_idx <= 0; m16_rd_done <= 0;
+		m16_an <= 0; m16_idx <= 0; m16_rd_done <= 0;
 		for (li = 0; li < 4; li = li + 1) m16buf[li] <= 0;
 		rst_cnt <= 0;
 		fault_r <= 0;
@@ -1708,19 +1895,34 @@ always @(posedge clk) begin
 		// released-operation completion: results retire inside the FPU;
 		// an enabled arithmetic exception becomes a pending pre-instruction
 		// exception for the next FPU dispatch point
+		fpu_pendcap <= 0;   // default BEFORE the retire branch's set
 		if (fpu_bg && fpu_done) fpu_bg <= 0;
 		if (fpu_bg && fpu_exc_req) begin
 			fpu_bg <= 0;
 			fpu_pend_exc <= 1;
 			fpu_pend_vec <= fpu_exc_vec;
+			// let the FPU prepare the FSAVE e1 frame from its shadow
+			fpu_pendcap <= 1;
 		end
 		fpu_rst <= 0;
 		fpu_fsave_ack <= 0;
 		fpu_frestore_idle <= 0;
 		fpu_frestore_unimp <= 0;
-		fpu_frestore_busy <= 0;
-		fpu_rte <= 0;
 		if (mem_ack) mem_req <= 0;
+
+		// A completing CPU write that lands inside the fetch queue's
+		// window [epf_next, epf_ftail) flushes it, so the rewritten
+		// words are refetched.  Stronger than the architected CPUSH/CINV
+		// requirement, and deliberate: the previous fetch-buffered core
+		// booted DiagROM but not AmigaOS on hardware with exactly this
+		// stale-prefetch hazard, invisible to CINV-disciplined tests.
+		// Data ops never overlap an outstanding queue fetch (they hold
+		// issue on epf_pend), so the flush here is pure bookkeeping.
+		// Both ranges are logical addresses; ftail never wraps past the
+		// page guard, so the plain compares suffice.
+		if (mem_ack && mem_write && epf_armed && epf_count != 4'd0 &&
+		    (mem_addr + 32'd3 >= epf_next) && (mem_addr < epf_ftail))
+			epf_flush;
 
 		case (state)
 			//------------------------------------------------------------ boot
@@ -1753,7 +1955,15 @@ always @(posedge clk) begin
 					if (epf_fill == 3'd7) begin
 						epf_count <= 4'd8;
 						epf_head <= 0;
+						// eight words wrap the ring: the append index
+						// belongs back at the head, or the engine's first
+						// fill would land on a resident word
+						epf_fill <= 0;
 						epf_next <= epf_base;
+						// the handler's stream continues past the four
+						// architectural longwords under the fill engine
+						epf_ftail <= epf_base + 32'd16;
+						epf_armed <= 1;
 						state <= S_EPF_READY;
 					end
 					else begin
@@ -1781,20 +1991,12 @@ always @(posedge clk) begin
 			end
 
 			//----------------------------------------------------------- fetch
-			S_FETCH: if (mem_err) begin
-				if (in_exc) fatal_halt;
-				else aerr_start;
-			end
-			else if (ifetch_done) begin
-				epf_hit <= 0;
-				if (ifetch_lw) begin
-					epf_data[0] <= mem_rdata[15:0];
-					epf_head    <= 3'd0;
-					epf_fill    <= 3'd1;
-					epf_count   <= 4'd1;
-					epf_next    <= mem_addr + 32'd2;
-					ifetch_lw   <= 0;
-				end
+			// A pure consumer of the fetch queue: the opcode word is either
+			// resident, arriving on the bus this very cycle, or the queue is
+			// not tracking this address and has to be re-armed here.
+			S_FETCH: if (epf_ready_pc || epf_fwd_pc) begin : fetch_word
+				reg [15:0] fw;
+				fw = epf_fwd_pc ? epf_fwd_word : epf_data[epf_head];
 				// Exception processing includes the first handler refill.  An
 				// interrupt which becomes pending after vector fetch but before
 				// this opcode arrives must still run before the handler executes.
@@ -1804,12 +2006,23 @@ always @(posedge clk) begin
 					exc_fmt <= 0; exc_spc <= pc; exc_addr <= 0;
 					exc_is_irq <= 1; exc_pass2 <= 0;
 					irq_lvl_l <= irq_take_lvl;
+					epf_flush;
 					state <= S_EXC0;
 				end
-				else if (flow_t0_pend && ifetch_word != 16'h4afc) begin
-					// A normal redirect target loses to the already completed
-					// change-of-flow instruction's T0 trace.  The frame PC is the
-					// target; its address field identifies the branch/return.
+				else if (flow_t0_pend) begin
+					// The completed change-of-flow instruction's T0 trace fires
+					// at the redirect target, ahead of the target instruction.
+					// The frame PC is the target; its address field identifies
+					// the branch/return.
+					//
+					// This used to be suppressed when the target was ILLEGAL
+					// ($4AFC), to avoid double-reporting under the old model
+					// where a T0 trace ALSO survived the illegal-instruction
+					// exception.  That survivor path is gone (no exception
+					// leaves a T0 trace pending on the 040), so the
+					// suppression only lost the trace: cputest branches
+					// straight into its terminating ILLEGAL and expects
+					// vector 9 with the branch target stacked.
 					flow_t0_pend <= 0;
 					exc(`AP040_VEC_TRACE, 4'd2, pc, flow_t0_oldpc);
 				end
@@ -1817,16 +2030,14 @@ always @(posedge clk) begin
 					// All four exception-prefetch longwords are now resident; the
 					// first buffered handler instruction begins normal execution.
 					in_exc <= 0;
-					ir <= ifetch_word;
+					epf_pop = 2'd1;
+					ir <= fw;
 					pc <= pc + 32'd2;
 					// per-instruction defaults
 					tr_t1 <= sr[15];
-					// A first-target ILLEGAL cancels this pending redirect trace.
-					// Directly executed ILLEGAL still samples T0 and follows the
-					// survivor path in exc().
-					tr_t0 <= flow_t0_pend ? 1'b0 : sr[14];
+					tr_t0 <= sr[14];
 					flow_t0_pend <= 0;
-					t0_force <= t0_special(ifetch_word);
+					t0_force <= t0_special(fw);
 					p_src <= SK_NONE; p_dst <= DK_NONE;
 					p_rmw <= 0; p_wbsup <= 0; p_flags <= 1; p_sextw <= 0;
 					p_dst_mem_bit <= 0;
@@ -1835,12 +2046,23 @@ always @(posedge clk) begin
 					state <= S_DECODE;
 				end
 			end
+			// The queue does not run this stream -- a redirect that could not
+			// claim the port, or an SR write that changed the FC one cycle
+			// after the fetch was armed -- so re-arm it on the live context.
+			else if (!epf_armed || epf_next != pc || epf_super != sr_s)
+				issue_ifetch(pc, sr_s);
 
 			//---------------------------- page-crossing split transfers
 			// One byte per bus transaction, most significant first, so each
 			// byte is translated through its own page.
 			S_MRD_B: begin
-				if (!m_issued) begin
+				// A queue fetch owns the memory port: hold this transfer
+				// until it completes.  Only the issue is delayed -- the
+				// acknowledge branches below stay unreachable meanwhile,
+				// so the fetch's ack is never mistaken for this one's.
+				if (!m_issued && epf_pend) begin
+				end
+				else if (!m_issued) begin
 					mem_req <= 1; mem_write <= 0; mem_instr <= 0;
 					mem_size <= `AP040_SZ_B;
 					mem_addr <= m_addr_r + {29'd0, m_bidx};
@@ -1866,7 +2088,13 @@ always @(posedge clk) begin
 			end
 
 			S_MWR_B: begin
-				if (!m_issued) begin : mwr_b
+				// A queue fetch owns the memory port: hold this transfer
+				// until it completes.  Only the issue is delayed -- the
+				// acknowledge branches below stay unreachable meanwhile,
+				// so the fetch's ack is never mistaken for this one's.
+				if (!m_issued && epf_pend) begin
+				end
+				else if (!m_issued) begin : mwr_b
 					reg [7:0] byv;
 					case (m_size)
 						`AP040_SZ_W: byv = m_bidx[0] ? m_wdat[7:0] : m_wdat[15:8];
@@ -1905,58 +2133,42 @@ always @(posedge clk) begin
 			// the time S_EXC0 runs on the following qualified edge.
 			S_POST_EXC: state <= S_EXC0;
 
+			// Extension-word fetch, the queue's second consumer.  A longword
+			// immediate whose two words are both available is taken in one
+			// pass, whether they come from the queue or off the bus.
 			S_IMMF: begin
-				if (!if_issued && epf_ready_pc) begin
-					// already prefetched: take it and move on this cycle
-					imm <= {imm[15:0], epf_data[epf_head]};
+				if (imm_n == 2'd2 && epf_fwd_pc && epf_pend_lw) begin
+					imm      <= mem_rdata;
+					pc       <= pc + 32'd4;
+					epf_pop   = 2'd2;
+					state    <= r_imm_ret;
+				end
+				else if (imm_n == 2'd2 && epf_ready_pc2) begin
+					imm      <= {epf_data[epf_head], epf_data[epf_head + 3'd1]};
+					pc       <= pc + 32'd4;
+					epf_pop   = 2'd2;
+					state    <= r_imm_ret;
+				end
+				else if (epf_ready_pc || epf_fwd_pc) begin
+					imm <= {imm[15:0],
+					        epf_fwd_pc ? epf_fwd_word : epf_data[epf_head]};
 					pc <= pc + 32'd2;
-					epf_head  <= epf_head + 3'd1;
-					epf_count <= epf_count - 4'd1;
-					epf_next  <= epf_next + 32'd2;
+					epf_pop = 2'd1;
 					if (imm_n == 2'd1) state <= r_imm_ret;
 					else imm_n <= imm_n - 2'd1;
 				end
-				else if (!if_issued) begin
+				else if (!epf_armed || epf_next != pc || epf_super != sr_s)
 					issue_ifetch(pc, sr_s);
-					if_issued <= 1;
-				end
-				else if (mem_err) begin
-					if (in_exc) fatal_halt;
-					else aerr_start;
-				end
-				else if (ifetch_done && ifetch_lw && imm_n == 2'd2) begin
-					// A longword immediate that the aligned fetch already
-					// delivered whole: take both words and skip the second
-					// pass through this state entirely.
-					epf_hit   <= 0;
-					ifetch_lw <= 0;
-					imm       <= mem_rdata;
-					pc        <= pc + 32'd4;
-					if_issued <= 0;
-					state     <= r_imm_ret;
-				end
-				else if (ifetch_done) begin
-					epf_hit <= 0;
-					// the longword's second word becomes the whole
-					// prefetch queue: one word, tagged for pc+2
-					if (ifetch_lw) begin
-						epf_data[0] <= mem_rdata[15:0];
-						epf_head    <= 3'd0;
-						epf_fill    <= 3'd1;
-						epf_count   <= 4'd1;
-						epf_next    <= mem_addr + 32'd2;
-						ifetch_lw   <= 0;
-					end
-					imm <= {imm[15:0], ifetch_word};
-					pc <= pc + 32'd2;
-					if_issued <= 0;
-					if (imm_n == 2'd1) state <= r_imm_ret;
-					else imm_n <= imm_n - 2'd1;
-				end
 			end
 
 			S_MRD: begin
-				if (!m_issued && m_cross) begin
+				// A queue fetch owns the memory port: hold this transfer
+				// until it completes.  Only the issue is delayed -- the
+				// acknowledge branches below stay unreachable meanwhile,
+				// so the fetch's ack is never mistaken for this one's.
+				if (!m_issued && epf_pend) begin
+				end
+				else if (!m_issued && m_cross) begin
 					m_bidx <= 0;
 					m_acc <= 0;
 					state <= S_MRD_B;
@@ -1979,7 +2191,13 @@ always @(posedge clk) begin
 			end
 
 			S_MWR: begin
-				if (!m_issued && m_cross) begin
+				// A queue fetch owns the memory port: hold this transfer
+				// until it completes.  Only the issue is delayed -- the
+				// acknowledge branches below stay unreachable meanwhile,
+				// so the fetch's ack is never mistaken for this one's.
+				if (!m_issued && epf_pend) begin
+				end
+				else if (!m_issued && m_cross) begin
 					m_bidx <= 0;
 					state <= S_MWR_B;
 				end
@@ -2125,16 +2343,47 @@ always @(posedge clk) begin
 				// x_ext keeps a decode-time immediate through EA fetches;
 				// for long MUL/DIV it was already captured in S_MDL_EXT
 				if (exec_kind != EK_MD_L) x_ext <= imm;
+				// A register destination needs no EA, so its operand can be
+				// read on port B in the SAME cycle the source is read on
+				// port A (X2.3).  The old path spent one state per port.
 				case (p_src)
 					SK_MEM: ea_start(src_mode_r, src_rn_r, p_ssize, S_PIPE_SRD);
-					SK_REG: begin rr_a <= p_sreg; state <= S_PIPE_SREG; end
-					SK_IMM: begin src_val <= imm; state <= S_PIPE_DST; end
-					default: state <= S_PIPE_DST;
+					SK_REG:
+						if (p_dst == DK_REG) begin
+							rr_a <= p_sreg; rr_b <= p_dreg;
+							state <= S_PIPE_REGS;
+						end
+						else begin rr_a <= p_sreg; state <= S_PIPE_SREG; end
+					SK_IMM: begin
+						src_val <= imm;
+						if (p_dst == DK_REG) begin
+							rr_b <= p_dreg; state <= S_PIPE_REGS;
+						end
+						else state <= S_PIPE_DST;
+					end
+					default:
+						if (p_dst == DK_REG) begin
+							rr_b <= p_dreg; state <= S_PIPE_REGS;
+						end
+						else state <= S_PIPE_DST;
 				endcase
 			end
 
-			S_PIPE_SRD:   mrd(ea_addr, p_ssize, S_PIPE_SDONE);
-			S_PIPE_SDONE: begin src_val <= m_val; state <= S_PIPE_DST; end
+			// The EA is finished by now, so port B is free: point it at a
+			// register destination WHILE the source read is in flight, and
+			// both operands land together when the read returns (X2.3).
+			S_PIPE_SRD: begin
+				if (p_dst == DK_REG) rr_b <= p_dreg;
+				mrd(ea_addr, p_ssize, S_PIPE_SDONE);
+			end
+			S_PIPE_SDONE: begin
+				src_val <= m_val;
+				if (p_dst == DK_REG) begin
+					dst_val <= rf_rdata_b;   // port B was set at S_PIPE_SRD
+					state <= S_EXEC;
+				end
+				else state <= S_PIPE_DST;
+			end
 			S_PIPE_SREG:  begin src_val <= rf_rdata_a; state <= S_PIPE_DST; end
 
 			S_PIPE_DST: begin
@@ -2153,6 +2402,15 @@ always @(posedge clk) begin
 
 			S_PIPE_DDONE: begin dst_val <= m_val; state <= S_EXEC; end
 			S_PIPE_DREG:  begin dst_val <= rf_rdata_b; state <= S_EXEC; end
+
+			// Both operands captured together.  src_val is taken only for a
+			// REGISTER source: an immediate source was latched in
+			// S_PIPE_START and a sourceless op never reads it.
+			S_PIPE_REGS: begin
+				if (p_src == SK_REG) src_val <= rf_rdata_a;
+				dst_val <= rf_rdata_b;
+				state <= S_EXEC;
+			end
 
 			//-------------------------------------------------------- execute
 			S_EXEC: begin
@@ -2415,10 +2673,20 @@ always @(posedge clk) begin
 			//------------------------------------------------------ exceptions
 			//------------------------------------- access error (format $7)
 			S_AERR0: begin
+				// The address-register rollback below must run BEFORE the S
+				// bit changes the stack selection.  A7 is a shadowed
+				// register -- writes reach USP, ISP or MSP according to
+				// S/M -- so undoing an A7 update from a USER-mode
+				// instruction after setting S restores the user value into
+				// the SUPERVISOR pointer.  The frame is then stacked in
+				// user space, that write faults, and the fault-during-
+				// exception halts the core: the silent NetBSD freeze,
+				// captured on hardware as A7=1dfff9b8 (a user stack) in
+				// supervisor mode with IR=209f (MOVE.L (A7)+,(A0), libc's
+				// __cerror storing through the errno pointer).  Roll back
+				// first, in the faulting instruction's own context, and
+				// only then enter the exception.
 				sr_saved <= sr;
-				sr[13] <= 1;
-				sr[15:14] <= 2'b00;
-				in_exc <= 1;
 				aer_idx <= 0;
 				state <= S_AERR_U;
 			end
@@ -2434,7 +2702,13 @@ always @(posedge clk) begin
 					rfw(u0_reg, u0_old);
 					u0_v <= 0;
 				end
-				else state <= S_AERR_SP;
+				else begin
+					// rollback complete: now switch to supervisor state
+					sr[13] <= 1;
+					sr[15:14] <= 2'b00;
+					in_exc <= 1;
+					state <= S_AERR_SP;
+				end
 			end
 
 			S_AERR_SP: begin
@@ -2457,7 +2731,24 @@ always @(posedge clk) begin
 
 			S_EXC0: begin
 				if (fpu_bg) state <= S_EXC0;   // FSAVE-quiescent exception
+				// An abandoned queue fetch may still be on the bus under the
+				// pre-exception function code.  Exception processing owns the
+				// port from in_exc onwards, so let it retire first.
+				else if (epf_pend) state <= S_EXC0;
 				else begin : exc0_run
+				// Kill any address-register rollback records on the way into
+				// a non-access exception.  The records exist solely so the
+				// access-error path can restore the FAULTING instruction's
+				// (An)+/-(An) side effects; only fetch_next and the S_AERR
+				// consumer clear them, and an instruction whose EA succeeded
+				// but which then raises CHK / zero-divide / an FP trap
+				// reaches here with its record still live.  Left alone it
+				// survives exception_prefetch into the handler, where the
+				// next access error "rolls back" an unrelated instruction's
+				// register to a stale value -- possibly from the other
+				// privilege context.
+				u0_v <= 0;
+				u1_v <= 0;
 				sr_saved <= sr;
 				sr[13] <= 1;
 				sr[15:14] <= 2'b00;
@@ -2523,12 +2814,21 @@ always @(posedge clk) begin
 						fatal_halt;
 					end
 					else begin
-						// any other odd handler address becomes an address
-						// error on 020+ (WinUAE exception3_notinstruction);
-						// the PC field keeps the original exception's
-						// next-PC context
+						// Any other odd handler address becomes an address
+						// error.  The frame's PC field identifies the vector
+						// that supplied the odd address as its OFFSET --
+						// 4 * vector, WITHOUT vbr -- not the original
+						// exception's next-PC context.  WinUAE says so in
+						// as many words on the path it models explicitly
+						// ("offset, not vbr + offset").  Hardware settled
+						// it: with cputest's own vbr ($403e4e68) a frame
+						// built from vbr + 4*vec read $403e4e88 where the
+						// corpus expects $00000020 for vector 8.  The
+						// address field carries the odd target with A0
+						// cleared.
 						texc_pend <= 0;
-						exc(`AP040_VEC_ADDRERR, 4'd2, pc,
+						exc(`AP040_VEC_ADDRERR, 4'd2,
+						    {22'd0, exc_vec, 2'b00},
 						    {m_val[31:1], 1'b0});
 					end
 				end
@@ -2550,6 +2850,7 @@ always @(posedge clk) begin
 					exc_fmt <= 0; exc_spc <= m_val; exc_addr <= 0;
 					exc_is_irq <= 1; exc_pass2 <= 0;
 					irq_lvl_l <= irq_take_lvl;
+					epf_flush;
 					state <= S_EXC0;
 				end
 				else begin
@@ -2601,28 +2902,44 @@ always @(posedge clk) begin
 				if (ret_kind[0]) begin
 					// format $1: continue with the next frame; the popped
 					// SR becomes the "before" image for the odd-PC quirk
-					rte_oldsr <= rte_sr & `AP040_SR_MASK;
 					state <= S_RTE_SR;
 				end
 				else if (rte_pc[0]) begin
-					fpu_rte <= 1;
 					// The odd restored PC is detected after the RTE has
 					// committed its SR.  Consequently the address-error frame
 					// carries the restored SR, just as RTR carries its popped
 					// CCR (68040_ae RTE/RTR corpus behavior).
-					exc(`AP040_VEC_ADDRERR, 4'd2, pc_i - 32'd2,
+					exc(`AP040_VEC_ADDRERR, 4'd2, pc_i,
 					    {rte_pc[31:1], 1'b0});
 				end
 				else if (tr_t1 || tr_t0) begin
-					fpu_rte <= 1;
 					// the RTE itself was traced (T set before the RTE)
 					tr_t1 <= 0;
 					tr_t0 <= 0;
 					pc <= rte_pc;
 					exc(`AP040_VEC_TRACE, 4'd2, rte_pc, pc_i);
 				end
+				else if (rte_irq_pend) begin
+					// The restored mask unblocks a pending request: it is
+					// taken AT this boundary, before the instruction RTE
+					// returns to.  This path used to go straight to
+					// S_FETCH without sampling interrupts at all -- unlike
+					// fetch_next and go_pc -- so the target instruction ran
+					// first and the interrupt was reported one instruction
+					// late.  cputest enters every test through RTE, which
+					// is why irq/all saw it on hardware while the
+					// MOVE-to-SR path looked correct.
+					in_exc <= 0;
+					pc <= rte_pc;
+					pc_i <= rte_pc;
+					exc_vec <= `AP040_VEC_AUTOVEC + {5'd0, rte_irq_lvl};
+					exc_fmt <= 0; exc_spc <= rte_pc; exc_addr <= 0;
+					exc_is_irq <= 1; exc_pass2 <= 0;
+					irq_lvl_l <= rte_irq_lvl;
+					epf_flush;
+					state <= S_POST_EXC;
+				end
 				else begin
-					fpu_rte <= 1;
 					// fetch under the restored context's FC (SR is being
 					// written this same cycle)
 					in_exc <= 0;
@@ -2672,7 +2989,7 @@ always @(posedge clk) begin
 					// the v20 generator predates it, and the corpus is the
 					// hardware acceptance test.)  The PC field identifies
 					// the pre-opcode pipeline word.
-					exc(`AP040_VEC_ADDRERR, 4'd2, pc_i - 32'd2,
+					exc(`AP040_VEC_ADDRERR, 4'd2, pc_i,
 					    {m_val[31:1], 1'b0});
 				end
 				else begin
@@ -2724,10 +3041,33 @@ always @(posedge clk) begin
 			end
 
 			//------------------------------------------- jumps and stack frame
-			S_JMP1: go_pc(ea_addr);
+			S_JMP1:
+				if (ea_addr[0])
+					// gencpu's i_JMP does incpc(2) before
+					// exception3_read_prefetch_only, and that path is NOT
+					// gated on cpu_level, so the frame PC is measured from
+					// wherever the PC had reached -- not from the
+					// instruction address.  For (An), (d16,An) and absw
+					// nothing has synced it yet, giving pc_i + 2; the
+					// INDEXED modes resolve their extension against the
+					// real PC first, so it has already advanced past the
+					// extension word and the frame reads pc_i + 6.  Both
+					// values are what the v24 AE group records.
+					exc(`AP040_VEC_ADDRERR, 4'd2,
+					    (ea_mode == 3'b110 ||
+					     (ea_mode == 3'b111 && ea_rn == 3'd3))
+					        ? pc_i + 32'd6 : pc_i + 32'd2,
+					    {ea_addr[31:1], 1'b0});
+				else go_pc(ea_addr);
 
 			S_JSR1: begin
-				if (ea_addr[0]) go_pc(ea_addr); // odd target: no push
+				if (ea_addr[0])
+					// Unlike JMP, gencpu guards i_JSR's odd-target case with
+					// cpu_level <= 1.  A 68040 therefore takes the fault on
+					// the INSTRUCTION FETCH at the odd target, so the frame
+					// names that target, not this instruction.
+					exc(`AP040_VEC_ADDRERR, 4'd2, ea_addr,
+					    {ea_addr[31:1], 1'b0});
 				else begin
 					br_tgt <= ea_addr;
 					mwr(dbg_a7 - 32'd4, `AP040_SZ_L, pc, S_JSR2);
@@ -2791,6 +3131,12 @@ always @(posedge clk) begin
 			//---------------------------------------------------------- MOVEM
 			S_MOVEM_SET: begin
 				mm_mask <= imm[15:0];
+				// the EA depends on An for these modes: a LOADED base
+				// register must not be written mid-loop (restart safety;
+				// see S_MOVEM_LD)
+				mm_base_ea <= (d_mode == 3'b010) || (d_mode == 3'b011) ||
+				              (d_mode == 3'b101) || (d_mode == 3'b110);
+				mm_base_pend <= 0;
 				if (mm_predec || mm_postinc) begin
 					rr_a <= {1'b1, d_rn};
 					state <= S_MOVEM_SET2;
@@ -2813,6 +3159,8 @@ always @(posedge clk) begin
 				if (mm_mask == 16'd0) begin
 					if (mm_predec || mm_postinc)
 						rfw({1'b1, d_rn}, mm_addr);
+					else if (mm_base_pend)
+						rfw({1'b1, d_rn}, mm_base_val);
 					fetch_next;
 				end
 				else begin : movem_step
@@ -2851,8 +3199,23 @@ always @(posedge clk) begin
 				end
 			end
 
-			S_MOVEM_LD: begin
-				rfw(mm_reg, (mm_size == `AP040_SZ_W) ? sxw(m_val[15:0]) : m_val);
+			S_MOVEM_LD: begin : movem_ld
+				reg [31:0] lv;
+				lv = (mm_size == `AP040_SZ_W) ? sxw(m_val[15:0]) : m_val;
+				// A loaded register that is also the EA base is not written
+				// mid-loop: a fault on a LATER transfer restarts the whole
+				// instruction and would recompute the EA from the loaded
+				// DATA.  For (An)+ the final address writeback wins anyway
+				// (the 040 leaves the postincremented address, not the
+				// memory value); for the control modes the loaded value is
+				// held and committed with the last transfer.
+				if (mm_base_ea && mm_reg == {1'b1, d_rn}) begin
+					if (!mm_postinc) begin
+						mm_base_pend <= 1;
+						mm_base_val  <= lv;
+					end
+				end
+				else rfw(mm_reg, lv);
 				mm_addr <= mm_addr + ((mm_size == `AP040_SZ_L) ? 32'd4 : 32'd2);
 				state <= S_MOVEM_LOOP;
 			end
@@ -2926,7 +3289,7 @@ always @(posedge clk) begin
 
 			//---------------------------------------------------------- MOVEC
 			S_MOVEC1: begin
-				epf_count <= 0;
+				epf_flush;
 				if (!movec_valid(imm[11:0])) go_illegal;
 				else if (mvc_dir) begin
 					rr_a <= {imm[15], imm[14:12]};
@@ -2939,7 +3302,7 @@ always @(posedge clk) begin
 			end
 
 			S_MOVEC2: begin
-				epf_count <= 0; // control-register access serializes fetch
+				epf_flush;      // control-register access serializes fetch
 				case (imm[11:0])
 					12'h000: sfc <= rf_rdata_a[2:0];
 					12'h001: dfc <= rf_rdata_a[2:0];
@@ -3001,27 +3364,34 @@ always @(posedge clk) begin
 
 			//------------------------------------------------- PTEST / PFLUSH
 			S_PTEST1: begin
-				epf_count <= 0; // PTEST replaces the matching ATC entry
+				epf_flush;      // PTEST replaces the matching ATC entry
 				pt_addr <= rf_rdata_a;
 				pt_write <= ~ir[5];
-				pt_req <= 1;
 				state <= S_PTEST2;
 			end
 
-			S_PTEST2: if (pt_done) begin
+			// The table walker has its own memory port.  An abandoned queue
+			// fetch may still be on the CPU bus, so the probe waits for it to
+			// retire rather than running two masters at once.
+			S_PTEST2: if (!pt_req) begin
+				if (!epf_pend) pt_req <= 1;
+			end
+			else if (pt_done) begin
 				pt_req <= 0;
 				mmusr <= pt_mmusr;
 				fetch_next;
 			end
 
 			S_PFLUSH1: begin
-				epf_count <= 0;
+				epf_flush;
 				pf_addr <= rf_rdata_a;
-				pf_req <= 1;
 				state <= S_PFLUSH2;
 			end
 
-			S_PFLUSH2: if (pf_done) begin
+			S_PFLUSH2: if (!pf_req) begin
+				if (!epf_pend) pf_req <= 1;
+			end
+			else if (pf_done) begin
 				pf_req <= 0;
 				fetch_next;
 			end
@@ -3159,45 +3529,41 @@ always @(posedge clk) begin
 
 			//------------------------------------------- FSAVE / FRESTORE
 			// NULL frame ($00000000) when the FPU is untouched, 4-byte IDLE
-			// frame ($41000000) once it has state, a 52-byte revision-$41 E1
-			// frame, or a 100-byte revision-$41 BUSY/E3 frame.  The generic EA
-			// engine has already adjusted -(An) by one longword; extend that
-			// adjustment to the complete exception frame before issuing writes.
+			// frame ($41000000) once it has state, or the 52-byte revision-$41
+			// UNIMP frame retained by the FPU.  The generic EA engine has
+			// already adjusted -(An) by one longword; extend that adjustment
+			// to the complete exception frame before issuing any writes.
 			S_FSAVE1: begin
-				if (fpu_bg) state <= S_FSAVE1;       // wait for background op
-				else if (fpu_pend_exc &&
-				         (fpu_fstate_busy || fpu_fstate_unimp || fpu_fstate_e1)) begin
-					// A released arithmetic exception has already captured its
-					// revision-$41 state.  FSAVE is a synchronization point: save
-					// that state first and leave fpu_pend_exc set so the vector is
-					// delivered at the next FPU dispatch after FRESTORE/context save.
-					if (fpu_fstate_busy) begin
-						t_a <= (ea_mode == 3'b100) ? ea_addr - 32'd96 : ea_addr;
-						if (ea_mode == 3'b100)
-							rfw({1'b1, ea_rn}, ea_addr - 32'd96);
-						fp_n <= 0;
-						state <= S_FSAVE_B;
-					end
-					else begin
-						t_a <= (ea_mode == 3'b100) ? ea_addr - 32'd48 : ea_addr;
-						if (ea_mode == 3'b100)
-							rfw({1'b1, ea_rn}, ea_addr - 32'd48);
-						fp_n <= 0;
-						state <= S_FSAVE_U;
-					end
-				end
-				else if (fpu_pend_exc) begin
+				// wait for a background op -- and for the one-cycle frame
+				// preparation that follows its deferred-exception retire
+				// (fpu_pendcap), or the pend would be judged frameless
+				if (fpu_bg || fpu_pendcap) state <= S_FSAVE1;
+				else if (fpu_pend_exc && !fpu_fstate_unimp) begin
+					// Frameless fallback: a pend whose frame state is gone
+					// because an earlier FSAVE already extracted it
+					// (fsave_ack) or an FRESTORE of IDLE replaced it.
+					// Capture arms fstate_unimp for BOTH classes -- e1 to
+					// the $30 frame, e3 to the $41/$60 BUSY frame -- so a
+					// pend that still owns its frame takes one of the two
+					// branches below and is EXTRACTED, as on the real 040.
 					fpu_pend_exc <= 0;
 					exc(fpu_pend_vec, 4'd0, pc_i, pc_i);
 				end
-				else if (fpu_fstate_busy) begin
+				else if (fpu_fstate_unimp && fpu_fstate_busy) begin
+					// an e3 arithmetic pend extracts as the 100-byte
+					// $41/$60 BUSY frame
+					fpu_pend_exc <= 0;
 					t_a <= (ea_mode == 3'b100) ? ea_addr - 32'd96 : ea_addr;
 					if (ea_mode == 3'b100)
 						rfw({1'b1, ea_rn}, ea_addr - 32'd96);
-					fp_n <= 0;
+					fpb_n <= 0;
 					state <= S_FSAVE_B;
 				end
-				else if (fpu_fstate_unimp || fpu_fstate_e1) begin
+				else if (fpu_fstate_unimp) begin
+					// pending state (unimplemented instruction, or a
+					// prepared/lingering arithmetic e1 frame) is extracted
+					// into the $30 frame; extraction consumes the pend
+					fpu_pend_exc <= 0;
 					t_a <= (ea_mode == 3'b100) ? ea_addr - 32'd48 : ea_addr;
 					if (ea_mode == 3'b100)
 						rfw({1'b1, ea_rn}, ea_addr - 32'd48);
@@ -3209,7 +3575,7 @@ always @(posedge clk) begin
 			end
 
 			S_FSAVE_U:
-				mwr(t_a + {25'd0, fp_n, 2'b00}, `AP040_SZ_L,
+				mwr(t_a + {26'd0, fp_n, 2'b00}, `AP040_SZ_L,
 				    fsave_unimp_word(fp_n), S_FSAVE_UD);
 
 			S_FSAVE_UD: begin
@@ -3226,16 +3592,16 @@ always @(posedge clk) begin
 			end
 
 			S_FSAVE_B:
-				mwr(t_a + {25'd0, fp_n, 2'b00}, `AP040_SZ_L,
-				    fsave_busy_word(fp_n), S_FSAVE_BD);
+				mwr(t_a + {25'd0, fpb_n, 2'b00}, `AP040_SZ_L,
+				    fsave_busy_word(fpb_n), S_FSAVE_BD);
 
 			S_FSAVE_BD: begin
-				if (fp_n == 5'd24) begin
+				if (fpb_n == 5'd24) begin
 					fpu_fsave_ack <= 1;
 					fetch_next;
 				end
 				else begin
-					fp_n <= fp_n + 5'd1;
+					fpb_n <= fpb_n + 5'd1;
 					state <= S_FSAVE_B;
 				end
 			end
@@ -3247,23 +3613,33 @@ always @(posedge clk) begin
 			S_FREST2: begin
 				// version byte 0 = NULL frame: reset the FPU state.
 				// $41/$00 is the MC68040 IDLE frame.  $41/$30 is the 52-byte
-				// E1 frame; $41/$60 is the 100-byte E3 busy frame.  Read the
-				// complete payload so bus faults remain precise before installing
-				// any FPU state.
+				// unimplemented-instruction frame; read its complete payload so
+				// bus faults remain precise before installing any FPU state.
+				// A completed FRESTORE replaces the FPU state wholesale, so
+				// a pending deferred exception from the OLD context is
+				// discarded with it (on silicon the pending state lives
+				// inside the FPU; FRESTORE neither reports it -- only FSAVE
+				// is exempt from reporting, and WinUAE's fpuop_restore
+				// never calls fp_exception_pending -- nor may it leak into
+				// the new context, whose FPIAR is already reset).
 				if (m_val[31:24] == 8'd0) begin
 					fpu_rst <= 1;
+					fpu_pend_exc <= 0;
 					fetch_next;
 				end
 				else if (m_val == 32'h4100_0000) begin
 					fpu_frestore_idle <= 1;
+					fpu_pend_exc <= 0;
 					fetch_next;
 				end
 				else if (m_val == 32'h4130_0000) begin
+					fp_restore_busy <= 0;
 					fp_n <= 4'd1;
 					mrd(ea_addr + 32'd4, `AP040_SZ_L, S_FREST_U);
 				end
 				else if (m_val == 32'h4160_0000) begin
-					fp_n <= 5'd1;
+					fp_restore_busy <= 1;
+					fpb_n <= 5'd1;
 					mrd(ea_addr + 32'd4, `AP040_SZ_L, S_FREST_B);
 				end
 				else exc(`AP040_VEC_FMTERR, 4'd0, pc_i, 32'd0);
@@ -3272,9 +3648,15 @@ always @(posedge clk) begin
 			S_FREST_U: begin
 				case (fp_n)
 					4'd1: fp_restore_cmd3 <= m_val[31:16];
-					4'd3: fp_restore_stag <= m_val[31:29];
+					4'd3: begin
+					fp_restore_stag <= m_val[31:29];
+					fp_restore_grs  <= m_val[25:23];
+				end
 					4'd4: fp_restore_cmd1 <= m_val[31:16];
-					4'd5: fp_restore_dtag <= m_val[31:29];
+					4'd5: begin
+					fp_restore_dtag   <= m_val[31:29];
+					fp_restore_wbte15 <= m_val[20];
+				end
 					4'd6: fp_restore_flags <= {m_val[26], m_val[25], m_val[20]};
 					4'd7: fp_restore_fpt[95:64] <= m_val;
 					4'd8: fp_restore_fpt[63:32] <= m_val;
@@ -3292,44 +3674,35 @@ always @(posedge clk) begin
 				end
 			end
 
-			S_FREST_UD: begin
-				if (ea_mode == 3'b011)
-					rfw({1'b1, ea_rn}, ea_addr + 32'd52);
-				fpu_frestore_unimp <= 1;
-				fetch_next;
-			end
-
 			S_FREST_B: begin
-				case (fp_n)
-					5'd2:  fp_restore_cusavepc <= m_val;
-					5'd6:  fp_restore_wbt0 <= m_val;
-					5'd7:  fp_restore_wbt1 <= m_val;
-					5'd8:  fp_restore_wbt2 <= m_val;
-					5'd10: fp_restore_fpiarcu <= m_val;
+				case (fpb_n)
+					5'd6:  fp_restore_wbt[95:64] <= m_val;
+					5'd7:  fp_restore_wbt[63:32] <= m_val;
+					5'd8:  fp_restore_wbt[31:0]  <= m_val;
+					5'd10: fp_restore_fpiar <= m_val;
 					5'd13: fp_restore_cmd3 <= m_val[31:16];
 					5'd15: begin
 						fp_restore_stag <= m_val[31:29];
-						fp_restore_wbtm66 <= m_val[26];
-						fp_restore_grs <= m_val[25:23];
+						fp_restore_grs  <= m_val[25:23];
 					end
 					5'd16: fp_restore_cmd1 <= m_val[31:16];
 					5'd17: begin
-						fp_restore_dtag <= m_val[31:29];
+						fp_restore_dtag   <= m_val[31:29];
 						fp_restore_wbte15 <= m_val[20];
 					end
 					5'd18: fp_restore_flags <= {m_val[26], m_val[25], m_val[20]};
 					5'd19: fp_restore_fpt[95:64] <= m_val;
 					5'd20: fp_restore_fpt[63:32] <= m_val;
-					5'd21: fp_restore_fpt[31:0] <= m_val;
-					5'd22: fp_restore_et[95:64] <= m_val;
-					5'd23: fp_restore_et[63:32] <= m_val;
-					5'd24: fp_restore_et[31:0] <= m_val;
+					5'd21: fp_restore_fpt[31:0]  <= m_val;
+					5'd22: fp_restore_et[95:64]  <= m_val;
+					5'd23: fp_restore_et[63:32]  <= m_val;
+					5'd24: fp_restore_et[31:0]   <= m_val;
 					default: ;
 				endcase
-				if (fp_n == 5'd24) state <= S_FREST_BD;
+				if (fpb_n == 5'd24) state <= S_FREST_BD;
 				else begin
-					fp_n <= fp_n + 5'd1;
-					mrd(ea_addr + ({27'd0, fp_n} << 2) + 32'd4,
+					fpb_n <= fpb_n + 5'd1;
+					mrd(ea_addr + ({27'd0, fpb_n} << 2) + 32'd4,
 					    `AP040_SZ_L, S_FREST_B);
 				end
 			end
@@ -3337,7 +3710,24 @@ always @(posedge clk) begin
 			S_FREST_BD: begin
 				if (ea_mode == 3'b011)
 					rfw({1'b1, ea_rn}, ea_addr + 32'd100);
-				fpu_frestore_busy <= 1;
+				fpu_frestore_unimp <= 1;
+				fpu_pend_exc <= fpu_frestore_e1_pend;
+				fpu_pend_vec <= fpu_cur_vec;
+				fetch_next;
+			end
+
+			S_FREST_UD: begin
+				fp_restore_busy <= 0;
+				if (ea_mode == 3'b011)
+					rfw({1'b1, ea_rn}, ea_addr + 32'd52);
+				fpu_frestore_unimp <= 1;
+				// see S_FREST2: a completed FRESTORE discards the old
+				// context's pending deferred exception -- and a restored
+				// arithmetic E1 frame re-arms one for the NEW context,
+				// vectored by the (already restored) FPSR/FPCR enables,
+				// delivered pre-instruction at the next FPU dispatch
+				fpu_pend_exc <= fpu_frestore_e1_pend;
+				fpu_pend_vec <= fpu_cur_vec;
 				fetch_next;
 			end
 
@@ -3363,6 +3753,7 @@ always @(posedge clk) begin
 				fpu_dstr  <= imm[9:7];
 				fp_nb     <= fp_bytes(imm[12:10]);
 				fp_st     <= 0;
+				fp_st_epend <= 0;
 				fp_n      <= 0;
 				fp_ea_pd  <= 0;
 				fp_ea_v   <= 0;
@@ -3406,8 +3797,13 @@ always @(posedge clk) begin
 								// source format still records its instruction address
 								// before taking vector 11.  Allow that side-port write
 								// to commit before exception entry snapshots FPIAR.
+								// ...except a PACKED source, which WinUAE
+								// rejects outright for a Dn EA (get_fp_value
+								// case 0 size 3 returns 0 on the 040 without
+								// consulting the opmode at all).
 								fpu_iawe <= 1;
-								go_fp_fline;
+								go_fp_ea_fault(fp_op_in_hw(imm[6:0]) ||
+								               imm[12:10] == 3'd3);
 								state <= S_POST_EXC;
 							end
 							else begin
@@ -3419,9 +3815,11 @@ always @(posedge clk) begin
 						else if (d_mode == 3'b001) begin
 							// Arithmetic opmode validation precedes source-EA
 							// validation on the 040.  An is not a legal source, but
-							// the recognized command has already updated FPIAR.
+							// the recognized command has already updated FPIAR --
+							// and an FPSP-emulated opmode reports through the
+							// unimplemented-instruction route even here.
 							fpu_iawe <= 1;
-							go_fp_fline;
+							go_fp_ea_fault(fp_op_in_hw(imm[6:0]));
 							state <= S_POST_EXC;
 						end
 						else if (ea_is_imm) begin
@@ -3453,11 +3851,8 @@ always @(posedge clk) begin
 							// addressable destination, the format-$3 EA is zero.
 							if (imm[12:10] == 3'd3 || imm[12:10] == 3'd7) begin
 								fpu_iawe <= 1;
-								// Let the FPU capture the packed source/destination
-								// payload before vector 55 is entered.  The EA is zero
-								// for a Dn destination, as required by the 040 frame.
-								fpu_req <= 1;
-								state <= S_FPU_GO;
+								go_fp_unsupp(1'b1, 1'b1, 1'b0, 32'd0);
+								state <= S_POST_EXC;
 							end
 							// A data register cannot hold a double or
 							// extended result: the 68040 reports these as
@@ -3466,7 +3861,9 @@ always @(posedge clk) begin
 							// "68040+ generates unimplemented effective mode
 							// exception even if destination EA is Dn or An")
 							else if (fp_bytes(imm[12:10]) > 4'd4) begin
-								fpu_iawe <= 1;
+								// rejected store destination: F-line, and as
+								// with the An/PC-relative cases above the 040
+								// records no FPIAR for it
 								go_fp_fline;
 								state <= S_POST_EXC;
 							end
@@ -3478,19 +3875,21 @@ always @(posedge clk) begin
 							end
 						end
 						else if (d_mode == 3'b001) begin
-							// The packed command is recognized before the invalid
-							// An destination is rejected, so FPIAR is written even
-							// though the resulting exception is plain vector 11.
-							fpu_iawe <= 1;
+							// An is not a legal FMOVE-out destination.  FPIAR is
+							// NOT written: for opclass 011 the 040 only records
+							// it once the store's EA has been accepted (WinUAE
+							// fpuop_arithmetic case 3 reaches maybe_set_fpiar
+							// only after put_fp_value succeeds; an An
+							// destination returns through fpu_noinst first).
 							go_fp_fline;
 							state <= S_POST_EXC;
 						end
 						else if (dst_not_alt ||
 						         (d_mode == 3'b111 && d_rn[1])) begin
-							// The command word is recognized before destination-EA
-							// validation.  Preserve its FPIAR side effect even though
-							// the eventual exception is the plain F-line vector.
-							fpu_iawe <= 1;
+							// Non-alterable or PC-relative destination: F-line
+							// with NO FPIAR side effect.  Same rule as the An
+							// destination above -- opclass 011 records FPIAR
+							// only once put_fp_value has accepted the store.
 							go_fp_fline;
 							state <= S_POST_EXC;
 						end
@@ -3631,8 +4030,18 @@ always @(posedge clk) begin
 					3'b011: begin
 						fpu_iawe <= 1;
 						if (fp_force_unsupp) begin
-							fpu_req <= 1;
-							state <= S_FPU_GO;
+							// post-instruction: the address register update
+							// stands here too (see S_FPU_GO)
+							if (d_mode == 3'b100)
+								rfw({1'b1, d_rn},
+								    rf_rdata_a - {25'd0, adj});
+							else
+								rfw({1'b1, d_rn},
+								    rf_rdata_a + {25'd0, adj});
+							go_fp_unsupp(1'b1, 1'b1, 1'b1,
+							    (d_mode == 3'b100) ?
+								    (rf_rdata_a - {25'd0, adj}) : rf_rdata_a);
+							state <= S_POST_EXC;
 						end
 						else begin fpu_req <= 1; state <= S_FPU_GO; end
 					end
@@ -3649,8 +4058,8 @@ always @(posedge clk) begin
 					3'b011: begin
 						fpu_iawe <= 1;
 						if (fp_force_unsupp) begin
-							fpu_req <= 1;
-							state <= S_FPU_GO;
+							go_fp_unsupp(1'b1, 1'b1, 1'b1, ea_addr);
+							state <= S_POST_EXC;
 						end
 						else begin fpu_req <= 1; state <= S_FPU_GO; end
 					end
@@ -3720,17 +4129,33 @@ always @(posedge clk) begin
 					else if (fp_nb == 4'd2)
 						mrd(t_a, `AP040_SZ_W, S_FPU_RD);
 					else
-						mrd(t_a + {25'd0, fp_n, 2'b00}, `AP040_SZ_L, S_FPU_RD);
+						mrd(t_a + {26'd0, fp_n, 2'b00}, `AP040_SZ_L, S_FPU_RD);
 					fp_n <= fp_n + 4'd1;
 				end
 			end
 
 			S_FPU_GO: begin
-				if (fpu_unimp) go_fp_unimp;
-				else if (fpu_unsupp)
+				// Both FPSP routes -- unimplemented INSTRUCTION and
+				// unsupported DATA TYPE -- report after the operand has
+				// been fetched, so the (An)+ / -(An) update stands.
+				// WinUAE applies it in get_fp_value when the EA is
+				// computed, ahead of either check, and only the 68060
+				// takes it back (mmufixup).  Withholding it left the
+				// handler pointed at an operand already consumed.
+				if (fpu_unimp) begin
+					if (fp_ea_pd) rfw({1'b1, d_rn}, t_a);
+					else if (fp_ea_pi)
+						rfw({1'b1, d_rn}, t_a + {25'd0, fp_adj});
+					go_fp_unimp;
+				end
+				else if (fpu_unsupp) begin
+					if (fp_ea_pd) rfw({1'b1, d_rn}, t_a);
+					else if (fp_ea_pi)
+						rfw({1'b1, d_rn}, t_a + {25'd0, fp_adj});
 					go_fp_unsupp(fp_st, 1'b0, fp_ea_v,
 					               fp_ea_v ? t_a : 32'd0);
-				else if (fpu_exc_req) begin
+				end
+				else if (fpu_exc_req && !fp_st) begin
 					fpu_req <= 0;
 					exc(fpu_exc_vec, 4'd0, pc, pc_i);
 				end
@@ -3752,6 +4177,25 @@ always @(posedge clk) begin
 							rfw({1'b1, d_rn}, t_a + {25'd0, fp_adj});
 						fetch_next;
 					end
+					else if (fpu_exc_req &&
+					         (fpu_exc_vec == `AP040_VEC_FP_SNAN ||
+					          fpu_exc_vec == `AP040_VEC_FP_OPERR) &&
+					         (fpu_fmt == 3'd0 || fpu_fmt == 3'd4 ||
+					          fpu_fmt == 3'd6)) begin
+						// Enabled integer-store SNAN/OPERR: the 040 does not
+						// write the destination (WinUAE
+						// fault_if_68040_integer_nonmaskable returns before
+						// the store).  Post-instruction format $3, EA = the
+						// operand address, 0 for a Dn destination.  The
+						// (An)+/-(An) update still commits: the instruction
+						// completed, only the store is suppressed.
+						fpu_req <= 0;
+						if (fp_ea_pd) rfw({1'b1, d_rn}, t_a);
+						else if (fp_ea_pi)
+							rfw({1'b1, d_rn}, t_a + {25'd0, fp_adj});
+						exc(fpu_exc_vec, 4'd3, pc,
+						    (d_mode == 3'b000) ? 32'd0 : t_a);
+					end
 					else if (d_mode == 3'b000) begin : fp_stdn
 						// store to a data register with size merge
 						case (fpu_fmt)
@@ -3761,10 +4205,24 @@ always @(posedge clk) begin
 							          {rf_rdata_a[31:8], fpu_dout[95:88]});
 							default: rfw({1'b0, d_rn}, fpu_dout[95:64]);
 						endcase
-						fetch_next;
+						// enabled float-format exception on a Dn store: the
+						// destination IS written (WinUAE put_fp_value, then
+						// fpsr_check_arithmetic_exception), then the trap is
+						// post-instruction with EA = 0
+						if (fpu_exc_req) begin
+							fpu_req <= 0;
+							exc(fpu_exc_vec, 4'd3, pc, 32'd0);
+						end
+						else fetch_next;
 					end
 					else begin
 						fp_n <= 0;
+						// float-format memory store with an enabled
+						// exception: write memory first, deliver after the
+						// last write (WinUAE order: put_fp_value completes,
+						// then fp_exception_pending(false))
+						fp_st_epend <= fpu_exc_req;
+						fp_st_evec  <= fpu_exc_vec;
 						state <= S_FPU_WR;
 					end
 				end
@@ -3778,7 +4236,13 @@ always @(posedge clk) begin
 					if (fp_ea_pd) rfw({1'b1, d_rn}, t_a);
 					else if (fp_ea_pi)
 						rfw({1'b1, d_rn}, t_a + {25'd0, fp_adj});
-					fetch_next;
+					if (fp_st_epend) begin
+						// post-instruction delivery of the enabled store
+						// exception, after the destination was written
+						fp_st_epend <= 0;
+						exc(fp_st_evec, 4'd3, pc, t_a);
+					end
+					else fetch_next;
 				end
 				else begin
 					if (fp_nb == 4'd1)
@@ -3792,7 +4256,7 @@ always @(posedge clk) begin
 							4'd1: wv = fpu_dout[63:32];
 							default: wv = fpu_dout[31:0];
 						endcase
-						mwr(t_a + {25'd0, fp_n, 2'b00}, `AP040_SZ_L, wv, S_FPU_WR);
+						mwr(t_a + {26'd0, fp_n, 2'b00}, `AP040_SZ_L, wv, S_FPU_WR);
 					end
 					fp_n <= fp_n + 4'd1;
 				end
@@ -4043,7 +4507,7 @@ always @(posedge clk) begin
 			end
 
 			S_RESET_HOLD: begin
-				epf_count <= 0;
+				epf_flush;
 				if (rst_cnt == 8'd0) fetch_next;
 				else rst_cnt <= rst_cnt - 8'd1;
 			end
@@ -4058,21 +4522,16 @@ always @(posedge clk) begin
 			S_M16_DST: begin
 				m16_an <= rf_rdata_a;
 				case (m16_form)
-					3'd0, 3'd2: begin  // (An)+ or (An) to abs
+					3'd0, 3'd2: begin  // (An)[+] to abs
 						m16_src <= rf_rdata_a & 32'hFFFF_FFF0;
-						m16_src_off <= rf_rdata_a[3:2];
 						m16_dst <= imm & 32'hFFFF_FFF0;
-						m16_dst_off <= imm[3:2];
 					end
-					3'd1, 3'd3: begin  // abs to (An)+ or (An)
+					3'd1, 3'd3: begin  // abs to (An)[+]
 						m16_src <= imm & 32'hFFFF_FFF0;
-						m16_src_off <= imm[3:2];
 						m16_dst <= rf_rdata_a & 32'hFFFF_FFF0;
-						m16_dst_off <= rf_rdata_a[3:2];
 					end
 					default: begin     // (Ax)+ to (Ay)+
 						m16_src <= rf_rdata_a & 32'hFFFF_FFF0;
-						m16_src_off <= rf_rdata_a[3:2];
 						rr_b <= {1'b1, m16_dst_rn};
 					end
 				endcase
@@ -4083,16 +4542,11 @@ always @(posedge clk) begin
 
 			S_M16_DST2: begin
 				m16_dst <= rf_rdata_b & 32'hFFFF_FFF0;
-				m16_dst_off <= rf_rdata_b[3:2];
 				t_b <= rf_rdata_b;
 				state <= S_M16_RD;
 			end
 
-			// A MOVE16 line is aligned for the transfer, but the first
-			// longword is the one selected by EA[3:2].  The four longwords
-			// wrap within the line rather than spilling into the next line.
-			S_M16_RD: mrd(m16_src + {28'd0, (m16_src_off + m16_idx), 2'b00},
-			             `AP040_SZ_L, S_M16_RD2);
+			S_M16_RD: mrd(m16_src + {28'd0, m16_idx, 2'b00}, `AP040_SZ_L, S_M16_RD2);
 
 			S_M16_RD2: begin
 				m16buf[m16_idx] <= m_val;
@@ -4106,7 +4560,7 @@ always @(posedge clk) begin
 				end
 			end
 
-			S_M16_WR: mwr(m16_dst + {28'd0, (m16_dst_off + m16_idx), 2'b00}, `AP040_SZ_L,
+			S_M16_WR: mwr(m16_dst + {28'd0, m16_idx, 2'b00}, `AP040_SZ_L,
 			              m16buf[m16_idx], S_M16_WR2);
 
 			S_M16_WR2: begin
@@ -4910,7 +5364,6 @@ always @(posedge clk) begin
 												// from the old frame is a double bus fault (MC68040 UM
 												// 8.2), not a new format-$7 exception.
 												in_exc <= 1;
-												rte_oldsr <= sr;   // odd-PC quirk image
 												state <= S_RTE_SR;
 											end
 										end
@@ -4922,7 +5375,6 @@ always @(posedge clk) begin
 										end
 										6'b110111: begin
 											ret_kind <= RK_RTR;
-											rte_oldsr <= sr;   // odd-PC quirk image
 											state <= S_RET1;
 										end
 										6'b111010, 6'b111011: begin // MOVEC
@@ -5394,7 +5846,7 @@ always @(posedge clk) begin
 							else begin
 								cinv_ic <= ir[7];
 								cinv_dc <= ir[6];
-								epf_count <= 0;
+								epf_flush;
 								cinv_req <= 1;
 								state <= S_CINV2;
 							end
@@ -5404,11 +5856,10 @@ always @(posedge clk) begin
 								// PFLUSH group
 								if (!sr_s) go_priv;
 								else begin
-									epf_count <= 0;
+									epf_flush;
 									pf_mode <= ir[4:3];
 									if (ir[4]) begin
 										// PFLUSHAN / PFLUSHA
-										pf_req <= 1;
 										state <= S_PFLUSH2;
 									end
 									else begin
@@ -5456,9 +5907,10 @@ always @(posedge clk) begin
 							endcase
 						end
 						else if (ir[11:8] == 4'h3) begin
-							// FSAVE/FRESTORE state-frame model: NULL, IDLE, the
-							// revision-$41 unimplemented-instruction frame, and the
-							// native-arithmetic BUSY/E3 frame are implemented.
+							// FSAVE/FRESTORE state-frame model: NULL, IDLE and the
+							// revision-$41 unimplemented-instruction frame are
+							// implemented.  A true BUSY arithmetic-exception frame
+							// remains outside this non-pipelined FPU's state model.
 							if (ir[7:6] == 2'b00) begin
 								// FSAVE: control alterable or -(An)
 								// Malformed coprocessor EAs are F-line faults and
@@ -5494,9 +5946,17 @@ always @(posedge clk) begin
 
 			//------------------------------------------------------- stopped
 			S_STOP_LD: begin
-				epf_count <= 0;
+				epf_flush;
 				sr <= imm[15:0] & `AP040_SR_MASK;
-				if (tr_t1 || tr_t0) begin
+				// T1 traces STOP unconditionally.  T0 traces it only when
+				// the written SR changes T1/T0/S/M or the interrupt mask:
+				// WinUAE's MakeFromSR returns before its trace decision
+				// when none of those bits change ("STOP SR-modification
+				// does not generate T0"), and STOP has no check_t0_trace
+				// like the MOVE/ORI/ANDI/EORI-to-SR family, so an
+				// upper-identical STOP under T0 does not trace on the 040.
+				if (tr_t1 || (tr_t0 && {imm[15:12], imm[10:8]} !=
+				                       {sr[15:12], sr[10:8]})) begin
 					tr_t1 <= 0;
 					tr_t0 <= 0;
 					exc(`AP040_VEC_TRACE, 4'd2, pc, pc_i);
@@ -5510,6 +5970,7 @@ always @(posedge clk) begin
 					exc_fmt <= 0; exc_spc <= pc; exc_addr <= 0;
 					exc_is_irq <= 1; exc_pass2 <= 0;
 					irq_lvl_l <= irq_take_lvl;
+					epf_flush;
 					state <= S_EXC0;
 				end
 			end
@@ -5520,18 +5981,125 @@ always @(posedge clk) begin
 			//--------------------------------------------------------- halted
 			S_HALT: begin
 				mem_req <= 0;
-				if_issued <= 0;
 				m_issued <= 0;
 				pt_req <= 0;
 				pf_req <= 0;
 				cinv_req <= 0;
 				fpu_req <= 0;
-				epf_count <= 0;
-				epf_hit <= 0;
+				epf_flush;
+				epf_pend <= 0;
+				epf_kill <= 0;
 			end
 
 			default: fatal_halt;
 		endcase
+
+		//-------------------------------------------------- fetch queue engine
+		// The queue fills itself: whenever the memory port is idle, the
+		// stream is armed, and there is room for the whole request, the
+		// next words of the instruction stream are fetched while the core
+		// executes.  This runs after the case statement so that any state
+		// which claimed the port this cycle keeps it; epf_issue/epf_flushed
+		// carry that decision here combinationally.
+		if (epf_pend && mem_ack) begin
+			// A longword request returns the word at the fetch address in
+			// [31:16] and its successor in [15:0]; a word request returns
+			// one word in [15:0].
+			epf_pend <= 0;
+			epf_kill <= 0;
+			if (!epf_kill && !epf_flushed) begin
+				if (epf_pend_lw) begin
+					epf_data[epf_fill]        <= mem_rdata[31:16];
+					epf_data[epf_fill + 3'd1] <= mem_rdata[15:0];
+					epf_fillw = 2'd2;
+				end
+				else begin
+					epf_data[epf_fill] <= mem_rdata[15:0];
+					epf_fillw = 2'd1;
+				end
+			end
+		end
+		else if (epf_pend && mem_err) begin
+			// A fault on a queue fetch.  If the core is waiting for exactly
+			// this word the access error is taken now, with the faulting
+			// request still in the mem_* registers that build the frame.
+			// A fault on a word fetched ahead of demand is only recorded:
+			// the fetch is re-issued when execution actually reaches it, and
+			// faults again there with the live context.
+			mem_req  <= 0;
+			epf_pend <= 0;
+			epf_kill <= 0;
+			if (epf_kill || epf_flushed) begin
+				// abandoned before the fault: nothing to report
+			end
+			else if ((state == S_FETCH || state == S_IMMF) &&
+			         epf_count == 4'd0 && epf_next == mem_addr) begin
+				if (in_exc) fatal_halt;
+				else aerr_start;
+			end
+			else epf_err <= 1;
+		end
+		// A recorded fault re-arms when execution reaches the faulting word.
+		else if (epf_err && epf_armed && !epf_pend && epf_count == 4'd0 &&
+		         epf_next == epf_ftail &&
+		         (state == S_FETCH || state == S_IMMF))
+			epf_err <= 0;
+		// Self-fill.  The fetch stays inside the page the core is already
+		// executing from: an aligned fetch within that page cannot translate
+		// or fault differently than the fetch that got the core here, which
+		// is what makes a speculative fetch safe.
+		// epf_kill is not tested here: it only qualifies an outstanding
+		// fetch, and the issue below clears it.
+		// lk_cyc: a TAS/CAS/CAS2 operand sequence must stay indivisible at
+		// the core/adapter boundary (plan section 8), so no SPECULATIVE
+		// fetch may be interleaved between the locked read and write.  A
+		// demand fetch (S_IMMF starving on an empty queue) must still be
+		// served: lk_cyc is set at decode, BEFORE the extension words are
+		// consumed, and those fetches precede the locked read.  This also
+		// keeps a stale lk_cyc after a faulted CAS from starving the
+		// handler's first instruction.
+		else if (epf_armed && !epf_pend && !epf_err &&
+		         !epf_issue && !epf_flushed &&
+		         !mem_req && !mem_ack &&
+		         (!lk_cyc || state == S_IMMF) &&
+		         (epf_super == sr_s) &&
+		         (epf_ftail[31:12] == pc[31:12]) &&
+		         state != S_MRD && state != S_MWR &&
+		         state != S_MRD_B && state != S_MWR_B &&
+		         state != S_EPF_FILL && state != S_EPF_GAP &&
+		         // Computing an effective address means a DATA access is
+		         // imminent, and the port is shared: a speculative fetch
+		         // started here is still in flight when S_MRD wants it, so
+		         // the data access queues behind a whole fill.  Skipping
+		         // these slots costs the queue a little run-ahead and is
+		         // worth 12% on loop code (bench_loop).  Demand fetches are
+		         // untouched -- S_FETCH and S_IMMF are not EA states.
+		         !ea_state &&
+		         (epf_ftail[1] ? (epf_count <= 4'd7) : (epf_count <= 4'd6)))
+		begin
+			mem_req <= 1; mem_write <= 0; mem_instr <= 1;
+			mem_size <= epf_ftail[1] ? `AP040_SZ_W : `AP040_SZ_L;
+			mem_addr <= epf_ftail;
+			fc_r <= epf_super ? `AP040_FC_SUPER_PROG : `AP040_FC_USER_PROG;
+			epf_pend <= 1;
+			epf_pend_lw <= ~epf_ftail[1];
+			epf_kill <= 0;
+		end
+
+		// Queue bookkeeping in one place, so that a pop and an append in the
+		// same cycle cannot lose each other's update.  A flush has already
+		// written the whole set and wins.
+		if (!epf_flushed && (epf_pop != 2'd0 || epf_fillw != 2'd0)) begin
+			epf_count <= epf_count + {2'd0, epf_fillw} - {2'd0, epf_pop};
+			if (epf_pop != 2'd0) begin
+				epf_head <= epf_head + {1'b0, epf_pop};
+				epf_next <= epf_next + {29'd0, epf_pop, 1'b0};
+			end
+			if (epf_fillw != 2'd0) begin
+				epf_fill  <= epf_fill + {1'b0, epf_fillw};
+				epf_ftail <= epf_ftail + {29'd0, epf_fillw, 1'b0};
+			end
+		end
 	end
 end
 
@@ -5542,6 +6110,13 @@ end
 assign debug_busy   = mem_req;
 assign debug_fault  = fault_r;
 assign debug_halted = (state == S_HALT);
+
+assign debug_status2 = {
+	aer_fa,                      // [127:96] address whose access faulted
+	usp_q,                       // [95:64]
+	isp_q,                       // [63:32]
+	16'd0, exc_vec, 5'd0, in_exc, fault_r, 1'b0   // [31:0]
+};
 
 assign debug_status = {
 	16'hA040,                    // [255:240] magic

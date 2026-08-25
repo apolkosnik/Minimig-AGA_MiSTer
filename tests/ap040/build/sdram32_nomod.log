@@ -1,0 +1,4 @@
+tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)
+no-module probe check only; functional battery skipped
+ALL TESTS PASSED
+tb_sdram32.v:952: $finish called at 90948 (100ps)

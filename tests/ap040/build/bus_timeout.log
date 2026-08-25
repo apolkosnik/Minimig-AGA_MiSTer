@@ -1,0 +1,2 @@
+ALL TESTS PASSED
+tb_ap040_bus_timeout.v:67: $finish called at 400000 (1ps)

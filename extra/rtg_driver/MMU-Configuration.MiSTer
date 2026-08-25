@@ -1,0 +1,49 @@
+; MiSTer RTG -- mmu.library configuration
+;
+; Append these two lines to ENVARC:MMU-Configuration (and copy to ENV:, or
+; reboot).  mmu.library reads the file when it initialises, which is before
+; SetPatch installs 68040.library, so the regions are already tagged by the
+; time anything builds a page table.
+;
+; WHY THIS IS NEEDED
+;
+; Every other graphics board in the stock MMU-Configuration is declared with
+; a "For <manufacturer> <product>" clause, because AutoConfig gave it a
+; ConfigDev and mmu.library can find it by ID.  The MiSTer RTG board has no
+; ConfigDev at all: MiSTer.card.asm hardcodes REGISTER_BASE $b80100 and
+; MEMORY_BASE $02000000 and never calls FindConfigDev, so expansion.library
+; never learns the board exists.  With nothing to tag, mmu.library leaves
+; both regions marked Blank -- address space it believes holds nothing --
+; and MuScan shows exactly that:
+;
+;   0x00A80000 - 0x00BBFFFF  Blank WriteThrough          <- the registers
+;   0x00BC0000 - 0x00BFFFFF  CacheInhibit I/O space      <- real I/O, tagged
+;   0x02000000 - 0x027FFFFF  Imprecise NonSerial Blank   <- the framebuffer
+;
+; On a CPU without an MMU the hardcoded addresses simply work, which is why
+; RTG is fine on the stock TG68K core.  On the 040 the pages are not mapped,
+; so every register access faults -- reading the RTG ID at $B8010E gives
+; $0000 where the hardware returns $5001 -- and every pixel write goes
+; nowhere.  Hence: works before SetPatch, black screen after it.
+;
+; Since there is no ConfigDev to match on, these use literal addresses rather
+; than {base}.  Standalone SetCacheMode is supported for exactly this case.
+;
+; The flags follow what the stock file uses for every other board: a register
+; block is Valid IOSpace CacheInhibit (cache-inhibited SERIALIZED, so ordering
+; is preserved across register writes), and video memory adds NonSerial
+; Imprecise for fast uncached writes.  Compare the VA2000 entry, which splits
+; the same way.  Note the framebuffer already reads back as Imprecise
+; NonSerial above -- the only thing being changed there is Blank -> Valid
+; IOSpace.
+;
+; Addresses come from MiSTer.card.asm: REGISTER_BASE $b80100 lives in the 4K
+; page fastchip decodes at $B80000-$B80FFF (addr[23:12] == 'hB80, palette
+; included), and MEMORY_BASE $02000000 with MEMORY_SIZE $800000.  Both are
+; page aligned at the 4K page size MuScan reports.
+
+;MiSTer RTG registers ($B80000-$B80FFF: control block and CLUT)
+SetCacheMode	0x00b80000	0x00001000	Valid IOSpace CacheInhibit
+
+;MiSTer RTG framebuffer (MEMORY_BASE, MEMORY_SIZE = 8MB)
+SetCacheMode	0x02000000	0x00800000	Valid IOSpace CacheInhibit NonSerial Imprecise

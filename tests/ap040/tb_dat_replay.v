@@ -12,8 +12,13 @@
 
 module tb_dat_replay;
 
-localparam [31:0] TBASE = 32'h4200_0000;
-localparam [31:0] TSIZE = 32'h000A_0000;
+// Corpus geometry is a property of the DATA, not of this bench: v20 data
+// puts test memory at $4200_0000/640K, v24 at $4380_0000/2M.  Both are
+// taken from the APR2 job header at startup; TMEM_MAX only has to bound
+// the largest corpus we accept.
+localparam [31:0] TMEM_MAX = 32'h0020_0000;
+reg [31:0] TBASE;
+reg [31:0] TSIZE;
 localparam [31:0] CAPV  = 32'h4210_0000;
 localparam [31:0] CAPH  = 32'h4211_0000;
 localparam [31:0] RND2  = 32'h524E4432;
@@ -88,7 +93,7 @@ wire [31:0] dbg_pc = debug_status[31:0];
 //--------------------------------------------------------------------------
 
 reg [7:0] lmem [0:32767];
-reg [7:0] tmem [0:655359];
+reg [7:0] tmem [0:TMEM_MAX-1];
 
 wire in_low  = (addr_out[31:15] == 0);
 wire in_test = (addr_out >= TBASE) && (addr_out < TBASE + TSIZE);
@@ -122,6 +127,14 @@ function [7:0] rd8;
 			rd8 = tmem[a - TBASE];
 		else if (a >= CAPV && a < CAPV + 32'h100) begin
 			vec = (a - CAPV) >> 2;
+			// NOTE: which vectors are odd varies per ROUND -- some expect
+			// the trace vector to fault, others expect it delivered and
+			// the tested exception's vector to fault.  This synthetic
+			// overlay cannot express that.  Taking the answer from the
+			// round's lmem vector table was tried and is WRONG: the corpus
+			// does not plant those entries where this would read them, and
+			// it drops ODD_EXC from 20/33 to 0/33.  A faithful model needs
+			// the per-round vector image the corpus actually builds.
 			vv = (odd_vector != 0 && vec >= 4) ? odd_vector
 			     : CAPH + {21'd0, vec, 3'd0};
 			rd8 = be_byte(vv, a[1:0]);
@@ -176,11 +189,11 @@ always @(posedge clk) begin
 			         jr, test_idx, round_idx, addr_out, data_write, nuds, nlds);
 		if (!nuds) begin
 			if (in_low)  lmem[{addr_out[14:1], 1'b0}] <= data_write[15:8];
-			if (in_test) tmem[{toff[19:1], 1'b0}] <= data_write[15:8];
+			if (in_test) tmem[{toff[20:1], 1'b0}] <= data_write[15:8];
 		end
 		if (!nlds) begin
 			if (in_low)  lmem[{addr_out[14:1], 1'b1}] <= data_write[7:0];
-			if (in_test) tmem[{toff[19:1], 1'b1}] <= data_write[7:0];
+			if (in_test) tmem[{toff[20:1], 1'b1}] <= data_write[7:0];
 		end
 	end
 end
@@ -206,6 +219,7 @@ end
 
 reg exc_seen;
 reg cap_pend;
+reg cap_pend2;
 reg [7:0] cap_vec;
 reg [7:0] latest_exc_vec;
 reg [31:0] cap_regs [0:15];
@@ -222,11 +236,22 @@ always @(posedge clk) begin
 	if (!round_active) begin
 		exc_seen <= 0;
 		cap_pend <= 0;
+		cap_pend2 <= 0;
 	end else begin
-		// deferred integer-register sample: one cycle after S_EXC0 entry,
-		// once any write in flight at the faulting edge has landed
-		if (cap_pend) begin
+		// Deferred integer-register sample: TWO qualified cycles after
+		// S_EXC0 entry.  A write issued by the faulting state has rf_we
+		// high during the first of those cycles and only reaches the
+		// register file on the edge that ENDS it, so sampling any earlier
+		// reads the pre-write value and reports an architecturally
+		// committed update as missing.  The wait must also be on
+		// clkena_in rather than the raw clock, because the register file
+		// only commits on qualified edges.
+		if (cap_pend && clkena_in) begin
 			cap_pend <= 0;
+			cap_pend2 <= 1;
+		end
+		else if (cap_pend2 && clkena_in) begin
+			cap_pend2 <= 0;
 			for (ci = 0; ci < 8; ci = ci + 1) begin
 				cap_regs[ci] <= dut.core.regfile.dreg[ci];
 				cap_regs[8+ci] <= (ci == 7) ? dut.core.regfile.usp
@@ -536,6 +561,7 @@ endtask
 task check_final;
 	integer fi;
 	reg [31:0] sp;
+	reg [31:0] fpc, fpc_adj;
 	begin
 		if (!(flags & F_IGNORE_EXC) && cap_vec !== e_exc)
 			mismatch("exception", e_exc, cap_vec);
@@ -570,11 +596,23 @@ task check_final;
 				         frame_b[9], frame_b[10], frame_b[11], rd8(sp+0), rd8(sp+1),
 				         rd8(sp+2), rd8(sp+3), rd8(sp+4), rd8(sp+5), rd8(sp+6),
 				         rd8(sp+7), rd8(sp+8), rd8(sp+9), rd8(sp+10), rd8(sp+11));
+			// No translation: the odd-vector address error stacks the
+			// vector OFFSET (4*vec, without vbr), which is vbr-independent
+			// and so needs no adjusting for this bench's relocated table.
+			// An earlier version subtracted CAPV here to compensate for a
+			// frame built from vbr + 4*vec; that hid the defect, because
+			// in sim vbr IS CAPV while on hardware it is cputest's own.
+			fpc = read_value(sp + 2, 2);
+			fpc_adj = fpc;
 			for (fi = 0; fi < frame_len; fi = fi + 1)
-				if (((rd8(sp + fi) ^ frame_b[fi]) & frame_m[fi]) != 0) begin
+				if ((((fi >= 2 && fi <= 5)
+				        ? fpc_adj[8*(5-fi) +: 8] : rd8(sp + fi))
+				     ^ frame_b[fi]) & frame_m[fi]) begin
 					if (mism < report_lim)
 						$display("  frame byte %0d at %08x mask=%02x", fi, sp+fi, frame_m[fi]);
-					mismatch("exception frame", frame_b[fi], rd8(sp + fi));
+					mismatch("exception frame", frame_b[fi],
+					         (fi >= 2 && fi <= 5)
+					             ? fpc_adj[8*(5-fi) +: 8] : rd8(sp + fi));
 				end
 		end else if (!(flags & F_IGNORE_EXC) && e_exc == 4) begin
 			if (read_value(sp + 2, 2) !== e_pc)
@@ -635,7 +673,7 @@ task inject_state;
 		dut.core.tc = 0; dut.core.itt0 = 0; dut.core.itt1 = 0;
 		dut.core.dtt0 = 0; dut.core.dtt1 = 0;
 			dut.core.mmusr = 0; dut.core.urp = 0; dut.core.srp = 0;
-			dut.core.epf_count = 0; dut.core.epf_hit = 0;
+			dut.core.epf_count = 0; dut.core.epf_armed = 0;
 			// Direct state injection replaces the native runner's completed entry
 			// RTE.  Reset refill left this asserted, which made a pending corpus
 			// IRQ preempt the held test opcode as though it were the first opcode
@@ -673,9 +711,25 @@ task run_round;
 			disable run_round;
 		end
 		inject_state;
-		if (i_level != 0 && !i_sr[13] &&
-		    expected_exc_live >= 25 && expected_exc_live <= 31 &&
-		    initial_privileged({rd8(i_pc), rd8(i_pc + 1)}))
+		// Mid-stream start: the native runner asserts IPL while a PREVIOUS
+		// instruction is still executing, so the interrupt is recognised at
+		// the boundary BEFORE the tested one and that instruction never
+		// runs.  Replay begins straight out of reset with no preceding
+		// boundary, and AP040 samples IRQs in fetch_next, so it would
+		// execute the tested instruction first and take the interrupt
+		// after -- A7 already pushed, the wrong PC stacked.  in_exc makes
+		// S_FETCH honour the pending interrupt ahead of the first opcode,
+		// which is what the corpus recorded.  This used to be restricted
+		// to a PRIVILEGED first instruction in user mode; the same
+		// reasoning applies whenever an autovector interrupt is the
+		// round's recorded result.
+		// ...and an odd-vector round whose recorded result is the nested
+		// ADDRESS ERROR is the same case: the interrupt was still taken
+		// before the tested instruction, it just faulted on its own vector
+		// instead of reaching a handler.
+		if (i_level != 0 &&
+		    ((expected_exc_live >= 25 && expected_exc_live <= 31) ||
+		     (odd_vector != 0 && expected_exc_live == 3)))
 			dut.core.in_exc = 1;
 		boot_overlay = 0;
 		round_active = 1;
@@ -757,7 +811,7 @@ task run_round;
 					         rd8(dut.core.t_a + 6), rd8(dut.core.t_a + 7),
 					         rd8(dut.core.t_a + 8), rd8(dut.core.t_a + 9),
 					         rd8(dut.core.t_a + 10), rd8(dut.core.t_a + 11));
-				if (vec == 9 && (e_trace != 0 || trace_bits)) begin
+				if (vec == 9 && (e_trace != 0 || e_exc == 9)) begin
 					check_trace_frame;
 					// T0 can redirect from the primary S_EXC_JMP directly into
 					// trace without ever fetching the primary handler.  Its
@@ -767,16 +821,33 @@ task run_round;
 						primary_vec = cap_vec;
 					end
 					saw_trace = 1;
-					if (e_trace == 2 && e_exc == 9) begin
-						// Trace-only record: the vector-9 entry is the result.
-						// If another exception is recorded, this standalone
-						// trace happened first; execute the synthetic RTE and
-						// continue to that primary exception.
+					if (e_exc == 9) begin
+						// The vector-9 entry IS the round's recorded result --
+						// whenever the corpus says so, not only for the
+						// standalone-trace encoding (e_trace == 2).  With T1
+						// set the tested instruction traces and the corpus
+						// records exception 9 with NO separate trace record
+						// (e_trace == 0); treating that as a stacked trace let
+						// the synthetic handler RTE on into the terminating
+						// ILLEGAL, whose vector 4 then displaced the result --
+						// "expected 9 got 4" across the whole Basic/Default
+						// corpus.  Freeze here instead, so cap_sp still points
+						// at the trace frame the comparison reads.
 						timeout = EXEC_TIMEOUT;
 					end else begin
 						// Stacked trace: let RTE resume the primary handler.
 						while (busstate == 2'b00 && addr_out == CAPH + vec*8) @(posedge clk);
 					end
+				end else if (vec == 9) begin
+					// The corpus recorded neither a trace result (e_exc == 9)
+					// nor a trace record (e_trace) for this round, so this
+					// vector-9 entry is a phantom trace.  The native runner
+					// reports these as "Got unexpected trace exception"; the
+					// bench used to accept any trace whenever T bits were set
+					// (the old trace_bits clause above), which is exactly how
+					// the BSET.B D5,(A6)-under-T0 phantom reached hardware.
+					mismatch("unexpected trace", 32'd0, {16'd0, dut.core.sr});
+					timeout = EXEC_TIMEOUT;
 				end else if ((e_trace == 1 ||
 				              (e_exc == 4 && trace_bits)) &&
 				             !saw_primary && !saw_trace) begin
@@ -835,7 +906,7 @@ initial begin
 	if (!$value$plusargs("trace_round=%d", trace_round)) trace_round = -1;
 	if (!$value$plusargs("patchaddr=%h", patch_addr)) patch_addr = 0;
 	for (k = 0; k < 32768; k = k + 1) lmem[k] = 0;
-	for (k = 0; k < 655360; k = k + 1) tmem[k] = 0;
+	for (k = 0; k < TMEM_MAX; k = k + 1) tmem[k] = 0;
 
 	if (!$value$plusargs("job=%s", job_file) ||
 	    !$value$plusargs("lmem=%s", lmem_file) ||
@@ -844,20 +915,30 @@ initial begin
 	end
 	if (!$value$plusargs("limit=%d", limit)) limit = 32'h7fffffff;
 	if (!$value$plusargs("start=%d", start_record)) start_record = 0;
+	jf = $fopen(job_file, "rb");
+	if (!jf) begin $display("FAIL: cannot open APR2 job"); $finish; end
+	if (jread32(0) !== "APR2") begin $display("FAIL: bad job magic"); $finish; end
+	job_version = jread32(0); jn = jread32(0);
+	job_tbase = jread32(0); job_tsize = jread32(0); odd_vector = jread32(0);
+	if (job_version != 3 || job_tsize > TMEM_MAX) begin
+		$display("FAIL: unsupported APR2 geometry/version"); $finish;
+	end
+	TBASE = job_tbase;
+	TSIZE = job_tsize;
+	$fclose(jf);
+
 	lmfd = $fopen(lmem_file, "rb");
 	tmfd = $fopen(tmem_file, "rb");
 	if (!lmfd || !tmfd) begin $display("FAIL: cannot open corpus memory images"); $finish; end
 	fgot = $fread(lmem, lmfd); $fclose(lmfd);
 	fgot = $fread(tmem, tmfd); $fclose(tmfd);
 
+	// re-open and re-read the header: the geometry was consumed above
 	jf = $fopen(job_file, "rb");
 	if (!jf) begin $display("FAIL: cannot open APR2 job"); $finish; end
 	if (jread32(0) !== "APR2") begin $display("FAIL: bad job magic"); $finish; end
 	job_version = jread32(0); jn = jread32(0);
 	job_tbase = jread32(0); job_tsize = jread32(0); odd_vector = jread32(0);
-	if (job_version != 3 || job_tbase != TBASE || job_tsize != TSIZE) begin
-		$display("FAIL: unsupported APR2 geometry/version"); $finish;
-	end
 	if (jn > limit) jn = limit;
 	$display("tb_dat_replay: %0d APR2 records", jn);
 

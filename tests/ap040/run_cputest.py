@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import fnmatch
+import struct
 import gzip
 import hashlib
 import json
@@ -107,14 +108,76 @@ def corpus_root(source: Path, work: Path) -> Path:
         root = safe_extract(source, work / "corpus-v20")
     else:
         root = source / "data" if (source / "data").is_dir() else source
-    if not any(root.glob("68040_*")):
-        raise ValueError("no 68040_* groups below %s" % root)
+    if not any(root.glob("68040_*")) and not any(root.glob("4_*")):
+        # a v24 zip unpacks with its own data040/ wrapper directory
+        nested = root / "data040"
+        if nested.is_dir() and any(nested.glob("4_*")):
+            return nested
+        raise ValueError("no 68040_* or 4_* groups below %s" % root)
     return root
+
+
+# The v24 generator renamed the group directories (4_FBASIC for what v20
+# called 68040_BasicFPU, and so on).  Map them back onto the established
+# short names so --group patterns, the smoke gate and every recorded
+# baseline keep meaning the same thing across both corpora.
+V24_GROUPS = {
+    "4_AE": "AE",
+    "4_BASIC": "Basic",
+    "4_Default": "Default",
+    "4_EXTDST": "FFEXT_DST",
+    "4_EXTSRC": "FFEXT_SRC",
+    "4_FBASIC": "BasicFPU",
+    "4_FINT": "intFPU",
+    "4_FPACK": "PackedFPU",
+    "4_IRQ": "IRQ",
+    "4_ODDEXC": "ODD_EXC",
+    "4_ODDIRQ": "ODD_IRQ",
+    "4_ODDSTK": "ODD_STK",
+}
 
 
 def group_short(path: Path) -> str:
     name = path.name
+    if name in V24_GROUPS:
+        return V24_GROUPS[name]
     return name[6:] if name.startswith("68040_") else name
+
+
+def unpack_daz(daz: Path, cache: Path) -> Path:
+    """Split a v24 .daz merge container into the per-slice .dat layout.
+
+    A .daz is a sequence of ("\xafMRG", u32 length, gzip member) records:
+    member 0 is the instruction header that used to be 0000.dat, the rest
+    are the numbered slices.  They are expanded once into a cache keyed by
+    the container's hash, so re-runs cost nothing.
+    """
+    key = hashlib.sha256(daz.read_bytes()).hexdigest()[:16]
+    target = cache / key
+    stamp = target / ".complete"
+    if stamp.exists():
+        return target
+    data = daz.read_bytes()
+    target.mkdir(parents=True, exist_ok=True)
+    off = 0
+    index = 0
+    # cputest's own reader (main.c load_file_offset) walks the same way and
+    # treats anything that is not the record magic -- including the trailing
+    # zero word some containers carry -- as end of container.
+    while off + 8 <= len(data):
+        if data[off:off + 4] != b"\xafMRG":
+            break
+        length = struct.unpack(">I", data[off + 4:off + 8])[0]
+        if length == 0:
+            break
+        member = gzip.decompress(data[off + 8:off + 8 + length])
+        (target / ("%04d.dat" % index)).write_bytes(member)
+        off += 8 + length
+        index += 1
+    if index < 2:
+        raise ValueError("%s holds no test slices" % daz)
+    stamp.write_text("%d\n" % index)
+    return target
 
 
 def matches_any(value: str, patterns: list[str]) -> bool:
@@ -124,11 +187,16 @@ def matches_any(value: str, patterns: list[str]) -> bool:
 def discover(root: Path, args) -> list[dict]:
     slices = []
     smoke = set(SMOKE)
-    for header_path in sorted(root.glob("68040_*/*/0000.dat")):
-        instruction_dir = header_path.parent
-        group_dir = instruction_dir.parent
+    daz_cache = args.work / "unpacked"
+    # (header, directory holding the numbered slices, group dir, instruction)
+    headers = [(p, p.parent, p.parent.parent, p.parent.name)
+               for p in sorted(root.glob("68040_*/*/0000.dat"))]
+    for daz in sorted(root.glob("4_*/*/0000.daz")):
+        expanded = unpack_daz(daz, daz_cache)
+        headers.append((expanded / "0000.dat", expanded,
+                        daz.parent.parent, daz.parent.name))
+    for header_path, instruction_dir, group_dir, instruction in headers:
         group = group_short(group_dir)
-        instruction = instruction_dir.name
         if not matches_any(group, args.group):
             continue
         if not matches_any(instruction, args.instruction):

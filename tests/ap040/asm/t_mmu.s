@@ -28,6 +28,18 @@ last_ssw	equ	$3624
 last_wb3s	equ	$3626
 last_wb3d	equ	$3628
 last_ea		equ	$362C
+wb_complete	equ	$3680	; h_aerr performs valid WB3s like NetBSD trap.c
+cnt_int2	equ	$3684	; level-2 interrupts taken (interleave sweeps)
+cnt_int3	equ	$3688	; level-3 interrupts taken (spl-storm sweep)
+storm_scr	equ	$368C	; scratch the storm decrements, like serintr's count
+chkbuf		equ	$3690	; CHK bound operand (stale-record test)
+aerr_act	equ	$3694	; nonzero while h_aerr is executing
+cnt_trace	equ	$3698	; vector-9 traces taken in the T0 window
+last_tpc	equ	$369C	; stacked PC of the first such trace
+storm_dly	equ	$368E	; sweep delay handed to h_int3 for its own arming
+IPLREG	equ	$F110
+IPLDLY	equ	$F148
+IPLCAP	equ	$F160	; bench IPL-injection capability (bit 0)
 WBERRCTL	equ	$F146
 
 failt	macro
@@ -46,8 +58,13 @@ ok\@:
 	dc.l	$3400
 	dc.l	start
 	dc.l	h_aerr		; 2 access error
-	rept	30
-	dc.l	unexp		; 3-32
+	rept	23
+	dc.l	unexp		; 3-25
+	endr
+	dc.l	h_int2		; 26 level-2 autovector (interleave sweeps)
+	dc.l	h_int3		; 27 level-3 autovector (spl-storm sweep)
+	rept	5
+	dc.l	unexp		; 28-32
 	endr
 	dc.l	h_utrap		; 33 TRAP #1
 	rept	222
@@ -59,6 +76,9 @@ start:
 	clr.w	(cnt_aerr).l
 	clr.w	(cnt_stub).l
 	clr.w	(expect_ma).l
+	clr.w	(wb_complete).l
+	clr.w	(cnt_int2).l
+	clr.w	(cnt_int3).l
 
 ;----------------------------------------------------------------- tables
 	lea	($4400).l,a0
@@ -379,8 +399,148 @@ ucont3:
 	movec	d0,dfc
 	moveq	#0,d0
 	movec	d0,dtt0
+
+;--------------------------- chipset IO through a transparent translation
+; Everything that covers RTG so far runs with the MMU off, but the MMU is
+; the structural difference between this CPU and the TG68K the upstream
+; core uses -- and 68040.library always enables it, mapping the low 16MB
+; of IO space through a transparent translation rather than page tables.
+; Reproduce that idiom exactly: DTT0 base $00, mask $00 (so only
+; $00000000-$00FFFFFF matches), E=1, S=both, CM=10 cache-inhibited
+; serialized, and read the RTG ID through it.  The page tables here cover
+; only $0-$3FFFF, so this access reaches fastchip solely via the TTR.
+	move.w	(IPLCAP).l,d0
+	btst	#4,d0			; the real fastchip/rtg block is present
+	beq	rtg_ttr_done
+	move.l	#$0000C040,d0
+	movec	d0,dtt0
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,171	; ID/VERSION through the TTR
+
+	; and the registers must still take a write under translation
+	move.l	#$02000000,($B80100).l
+	move.l	($B80100).l,d1
+	chkl	d1,$02000000,172
+
+	; same again with the TTR marked cache-inhibited nonserialized, the
+	; other mode 68040.library uses for IO
+	move.l	#$0000C060,d0
+	movec	d0,dtt0
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,173
+	moveq	#0,d0
+	movec	d0,dtt0
+
+rtg_ttr_done:
+
 	move.l	#$00005003,($4414).l
 	pflusha
+
+; ...and now the case that actually matters.  A TTR bypasses the table walk
+; entirely, but SetPatch installs 68040.library, which maps IO space through
+; real page tables -- and the RTG ID reads $5001 before SetPatch and $0000
+; after.  So walk to it: $00B8010E splits into root index 0, pointer index
+; $2E (VA[24:18]), page index 0 (VA[17:12]), and the page frame is
+; identity with CM = 10, cache-inhibited serialized, the mode 68040.library
+; uses for a register block.
+	move.w	(IPLCAP).l,d0
+	btst	#4,d0			; the real fastchip/rtg block is present
+	beq	rtg_walk_done
+	move.l	#$00B80043,($5800).l	; page 0 of the $B8 region, CI serialized
+	move.l	#$00005803,($42B8).l	; pointer entry $2E -> that page table
+	pflusha
+	move.l	#$80008000,d0
+	movec	d0,cacr			; SetPatch enables these too
+	lea	($B8010E).l,a0
+	ptestr	(a0)
+	movec	mmusr,d0
+	and.l	#$FFFFF001,d0
+	chkl	d0,$00B80001,190	; the walk itself resolves
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,174	; ID through a real table walk
+
+	; a write and read-back through the same translation
+	move.l	#$02000000,($B80100).l
+	move.l	($B80100).l,d1
+	chkl	d1,$02000000,175
+
+	; the walk must be repeatable once the ATC entry is resident, and
+	; still correct after it is flushed away again
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,176
+	pflusha
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,177
+
+	; 68040.library chooses the cache mode in the descriptor, and it does
+	; not necessarily know $B80000 is a register block: an unknown region
+	; can end up copyback or writethrough rather than cache-inhibited.
+	; The L1 must bypass it regardless, because $B8xxxx is outside
+	; cache_win -- so every CM encoding has to read the same.
+	move.l	#$00B80003,($5800).l	; CM = 00, writethrough
+	pflusha
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,191
+	move.l	#$00B80023,($5800).l	; CM = 01, copyback
+	pflusha
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,192
+	move.l	#$00B80063,($5800).l	; CM = 11, cache-inhibited nonserialized
+	pflusha
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,193
+
+	; and a write-back-then-read under copyback, which is the mode that
+	; would post a dirty line if anything ever cached this page
+	move.l	#$00B80023,($5800).l
+	pflusha
+	move.l	#$02000000,($B80100).l
+	move.l	($B80100).l,d1
+	chkl	d1,$02000000,194
+	cpusha	dc
+	move.l	($B80100).l,d1
+	chkl	d1,$02000000,195
+
+	; With the region UNMAPPED -- which is what an MMU setup that only
+	; covers the boards it knows about leaves behind, and the MiSTer RTG
+	; board is not autoconfig -- the access must take a normal access
+	; fault, not quietly return data.  A faulted read is what a monitor
+	; displays as $0000, which is exactly the post-SetPatch symptom.
+	move.w	(cnt_aerr).l,d5		; hand the counter back below
+	and.l	#$FFFF,d5
+	move.l	#0,($42B8).l
+	pflusha
+	move.l	#5,(expect_tm).l	; supervisor data read
+	move.l	#$00B8010E,(expect_fa).l
+	move.l	#$42B8,(fix_addr).l
+	move.l	#$00005803,(fix_val).l
+	move.w	($B8010E).l,d0		; faults, handler maps it, restarts
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,196	; and the restarted access reads the ID
+	move.w	(cnt_aerr).l,d0
+	and.l	#$FFFF,d0
+	sub.l	d5,d0
+	chkl	d0,1,197		; exactly one access fault was taken
+	move.w	d5,(cnt_aerr).l		; cnt_aerr is cumulative and asserted
+					; downstream: hand it back untouched
+
+	moveq	#0,d0
+	movec	d0,cacr			; back to the uncached regime
+	cinva	bc
+	move.l	#0,($42B8).l		; unmap the region again
+	pflusha
+rtg_walk_done:
+	; 8K is checked in the 8K-pages section below, where the tables that
+	; map this code have been rebuilt for it -- switching TC alone would
+	; reinterpret them and fault on the next instruction fetch
 
 ;--------------------------------------- ATC caching and page PFLUSH
 	move.l	($5000).l,d0	; walk and cache the mapping
@@ -433,6 +593,30 @@ ucont3:
 	and.l	#$FFFF,d0
 	chkl	d0,7,31
 
+	; the EA base register inside a LOADED list: a fault after the base
+	; was loaded must still restart with the ORIGINAL base.  The loaded
+	; value may only commit with the last transfer -- a core that writes
+	; it mid-loop recomputes the restart EA from the loaded DATA (here a
+	; non-address) and reads garbage.
+	move.l	#5,(expect_tm).l	; supervisor data read
+	move.l	#$00007000,(expect_fa).l
+	move.l	#$441C,(fix_addr).l
+	move.l	#$7003,(fix_val).l
+	move.l	#$11112222,($6FF8).l	; a0's image: not an address
+	move.l	#$33334444,($6FFC).l	; a1's image, last valid long
+	move.l	#$55556666,($7000).l	; a2's image, first faulting long
+	move.l	#0,($441C).l		; page 7 invalid again
+	pflusha
+	lea	($6FF8).l,a0
+	movem.l	(a0),a0-a2		; a0 loads first; a2's read faults
+	chkl	a0,$11112222,144
+	chkl	a1,$33334444,145
+	chkl	a2,$55556666,146
+	move.w	(cnt_aerr).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,8,147
+	subq.w	#1,(cnt_aerr).l	; later sections count faults absolutely
+
 ;----------------------------------------------------------------- 8K pages
 	moveq	#0,d0
 	movec	d0,tc		; MMU off while rebuilding tables
@@ -457,6 +641,16 @@ t8loop:
 	move.l	#$08081111,($C120).l	; seen through LA $A120 (LA12=0)
 	move.l	#$08082222,($D120).l	; seen through LA $B120 (LA12=1)
 
+	; the $B8 region again, now under 8K paging: root index 0, pointer
+	; index $2E, and the page index is VA[17:13] which is still 0, so the
+	; same descriptor serves -- the frame simply carries no bit 12
+	move.w	(IPLCAP).l,d0
+	btst	#4,d0
+	beq	rtg_8k_skip
+	move.l	#$00B80043,($5800).l
+	move.l	#$00005803,($42B8).l
+rtg_8k_skip:
+
 	move.l	#$C000,d0	; E=1, P=1: 8K pages
 	movec	d0,tc
 
@@ -467,16 +661,31 @@ t8loop:
 	move.l	($B120).l,d0	; same 8K page, LA bit 12 set
 	chkl	d0,$08082222,26
 
+	move.w	(IPLCAP).l,d0
+	btst	#4,d0			; the real fastchip/rtg block is present
+	beq	rtg_8k_done
+	move.w	($B8010E).l,d0
+	and.l	#$FFFF,d0
+	chkl	d0,$00005001,179	; RTG ID through an 8K page walk
+rtg_8k_done:
+	move.l	#0,($42B8).l
+	pflusha
+
 	lea	($A000).l,a0	; PTEST under 8K paging
 	ptestr	(a0)
 	movec	mmusr,d0
 	and.l	#$FFFFF001,d0
 	chkl	d0,$0000C001,27
-	lea	($B000).l,a0
+	lea	($B000).l,a0	; SAME 8K page as $A000 above
 	ptestr	(a0)
 	movec	mmusr,d0
 	and.l	#$FFFFF001,d0
-	chkl	d0,$0000D001,28
+	; MMUSR carries the page FRAME, not the probed LA's translation, so
+	; both probes in one 8K page report the same address and bit 12 is
+	; clear.  This used to expect $D001 -- the frame with the LA's bit 12
+	; folded in -- which is what WinUAE's PTEST does NOT do
+	; (mmu_fill_atc: desc & mmu_pagemaski, ~0x1FFF at 8K).
+	chkl	d0,$0000C001,28
 
 	; fault and restart under 8K paging
 	move.l	#5,(expect_tm).l	; supervisor data write (8K paging)
@@ -614,14 +823,495 @@ t48loop:
 	move.l	(last_ea).l,d0
 	chkl	d0,$8000,59
 
+;----------- walker U/M writes must invalidate a cached descriptor (5.5)
+; The table walker updates U/M over its own physical port, behind the data
+; cache.  A descriptor the CPU has already read AS DATA would otherwise go
+; stale -- the last coherence hole once the internal caches are enabled.
+; The descriptor is rewritten and the ATC flushed first, so the test does
+; not depend on history bits left by anything above.
+	move.l	#$80008000,d0
+	movec	d0,cacr			; caches on for this test only
+	move.l	#$00007003,($441C).l	; page 7 identity, U and M clear
+	pflusha
+	move.l	($441C).l,d0		; caches the line holding the descriptor
+	and.l	#$18,d0
+	chkl	d0,0,148		; U and M start clear
+	tst.l	($7000).l		; touch page 7: the walker sets U
+	move.l	($441C).l,d0		; must not be served from the stale line
+	and.l	#8,d0
+	chkl	d0,8,149
+	cinva	bc
+	moveq	#0,d0
+	movec	d0,cacr			; back to the uncached regime
+
 	moveq	#0,d0
 	movec	d0,tc
+
+;--------------------- relocated: 8K user-mode demand paging (see below)
+; Runs LAST: it rebuilds its own tables and nothing downstream depends on
+; the state it leaves.  Re-enable 8K translation with the shared root.
+	move.l	#$4000,d0	; shared root: $4000 -> $4200 -> $4400
+	movec	d0,urp
+	movec	d0,srp
+	move.l	#$00004203,($4000).l
+	move.l	#$00004403,($4200).l
+	lea	($4400).l,a0	; rebuild the 32-entry 8K identity table
+	moveq	#0,d0
+	moveq	#31,d1
+t8loop2:
+	move.l	d0,d2
+	lsl.l	#8,d2
+	lsl.l	#5,d2
+	addq.l	#3,d2
+	move.l	d2,(a0)+
+	addq.l	#1,d0
+	dbra	d1,t8loop2
+	move.l	#$C000,d0
+	movec	d0,tc
+	pflusha
+	move.w	(cnt_aerr).l,d7	; running last: count faults relative
+
+;--------------------- 8K user-mode demand paging: the NetBSD exec shape
+; NetBSD/amiga runs the 040 with 8K pages and execs init by mapping
+; nothing, letting the FIRST USER INSTRUCTION FETCH fault, and paging the
+; code in from disk at whatever fault address the frame reports.  If the
+; stacked FA is wrong under 8K user ifetch, UVM pages in the wrong page
+; and the right one never arrives -- the exact live signature captured in
+; tests/ap040/hw/netbsd (uvmexp.paging stuck at 1).  This test performs
+; that sequence: user table with the code page NOT RESIDENT, RTE to user,
+; ifetch faults (TM=2), the handler validates FA and maps the page, the
+; restart runs the user code, and a trap returns.  Still under TC=$C000.
+	lea	($4C00).l,a0	; user page table: 32 x 8K identity
+	moveq	#0,d0
+	moveq	#31,d1
+u8loop:
+	move.l	d0,d2
+	lsl.l	#8,d2
+	lsl.l	#5,d2		; i << 13
+	addq.l	#3,d2
+	move.l	d2,(a0)+
+	addq.l	#1,d0
+	dbra	d1,u8loop
+	move.l	#$00004A03,($4800).l	; user root -> pointer -> table
+	move.l	#$00004C03,($4A00).l
+	; user code page: VA $6000 (8K page 3, covers $6000-$7FFF), NOT
+	; resident yet; physical backing prepared at PA $E000
+	move.l	#0,($4C0C).l
+	move.w	#$702C,($E000).l	; moveq #44,d0
+	move.w	#$4E41,($E002).l	; trap #1
+	move.l	#$4800,d0
+	movec	d0,urp
+	pflusha
+	move.l	#2,(expect_tm).l	; USER instruction fetch
+	move.l	#$6000,(expect_fa).l	; the 8K page base: fetch of VA $6000
+	move.l	#$4C0C,(fix_addr).l	; entry 3
+	move.l	#$0000E003,(fix_val).l	; map VA $6000-$7FFF -> PA $E000
+	move.l	#u8cont,(uret).l
+	moveq	#0,d0
+	move.w	#$0000,-(sp)
+	pea	($6000).l
+	move.w	#$0000,-(sp)
+	rte			; to user; the ifetch at $6000 faults
+
+u8cont:
+	chkl	d0,44,150	; the paged-in user code ran after restart
+	move.w	(cnt_aerr).l,d0
+	sub.w	d7,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,151	; exactly one ifetch fault
+
+	; same shape for a user DATA fault mid-page: fault on a non-resident
+	; 8K page at an offset with LA bit 12 SET, so a bit-12 confusion in
+	; the fault path (the 8K MMUSR reporting class) would surface here.
+	; The user code lives on a FRESH page (VA $B000, upper half of 8K
+	; entry 5, identity) written
+	; before it ever executes -- and executing from the UPPER 4K half
+	; also proves the ifetch side of the 13-bit offset.  The faulting
+	; read targets VA $9120 (bit 12 SET: offset $1120) on
+	; non-resident entry 4, mapped by the handler to PA $C000, where the
+	; datum sits at PA $C000 + $1120 = $D120 (13-bit page offset).
+	move.w	#$2039,($B000).l	; move.l ($9120).l,d0
+	move.l	#$00009120,($B002).l
+	move.w	#$4E41,($B006).l	; trap #1
+	cpusha	bc			; the code page must reach memory and
+	cinva	ic			; no stale line may shadow it
+	move.l	#0,($4C10).l		; entry 4 (VA $8000-$9FFF) not resident
+	move.l	#$0BBB1234,($D120).l	; backing for VA $8120: offset $1120
+	move.l	#$0000A003,($4C14).l	; entry 5 identity: the code page
+					; VA $A000 -> PA $A000; code placed
+					; in its SECOND half at PA $B000 so
+					; the RTE target VA $B000 needs the
+					; 13-bit offset to reach it
+	pflusha
+	move.l	#1,(expect_tm).l	; USER data read
+	move.l	#$9120,(expect_fa).l
+	move.l	#$4C10,(fix_addr).l
+	move.l	#$0000C003,(fix_val).l
+	move.l	#u8dat,(uret).l
+	moveq	#0,d0
+	move.w	#$0000,-(sp)
+	pea	($B000).l		; offset $1000 into the 8K page
+	move.w	#$0000,-(sp)
+	rte
+
+u8dat:
+	chkl	d0,$0BBB1234,152	; read through the paged-in mapping
+	move.w	(cnt_aerr).l,d0
+	sub.w	d7,d0
+	and.l	#$FFFF,d0
+	chkl	d0,2,153	; exactly one more, the data fault
+
+	move.l	#$4400,d0	; restore the shared root
+	movec	d0,urp
+
+;--------------- write-fault discipline: the NetBSD relocation shape (154/155)
+; ld.elf_so relocates libc with add.l %d1,%a0@ on copy-on-write data pages.
+; The first store to such a page write-faults; NetBSD repairs the page,
+; performs any writeback the frame marks VALID, and returns.  A restart
+; model that ALSO advertises a valid WB3 gets the add applied twice --
+; captured live on hardware: init's ctor pointer held link VA + 2x load
+; base and init looped on an ifetch of the bogus address forever.  Here
+; the handler behaves exactly like NetBSD's trap.c (h_aerr completes any
+; valid WB3), the faulting instruction is the same RMW shape, and the
+; datum must gain the addend EXACTLY ONCE.
+	move.w	#1,(wb_complete).l
+	move.l	#$11110000,($E000).l	; datum, via the identity map
+	move.l	#$0000E007,($441C).l	; 8K entry 7: LA $E000 write-protected
+	pflusha
+	move.l	#5,(expect_tm).l	; supervisor data write fault
+	move.l	#$0000E000,(expect_fa).l
+	move.l	#$441C,(fix_addr).l	; handler clears the write protect
+	move.l	#$0000E003,(fix_val).l
+	move.l	#$00220000,d1
+	add.l	d1,($E000).l		; read succeeds, write faults
+	move.l	($E000).l,d0
+	chkl	d0,$11330000,155	; the addend landed exactly once
+	move.w	(cnt_aerr).l,d0
+	sub.w	d7,d0
+	and.l	#$FFFF,d0
+	chkl	d0,3,154		; exactly one write fault
+	clr.w	(wb_complete).l
+
+	; The same family, register side effects: a faulting (An)+ / -(An)
+	; store must restart with the ORIGINAL address register and leave
+	; exactly one increment behind -- NetBSD's copy loops fault like
+	; this on every fresh COW page.
+	move.l	#$0000E007,($441C).l	; write protect the page again
+	pflusha
+	lea	($E000).l,a0
+	move.l	#$0FEE1234,d1
+	move.l	d1,(a0)+		; write faults, handler unprotects
+	move.l	($E000).l,d0
+	chkl	d0,$0FEE1234,156	; landed at the original address
+	move.l	a0,d0
+	chkl	d0,$E004,157		; increment applied exactly once
+
+	move.l	#$0000E007,($441C).l
+	pflusha
+	lea	($E004).l,a0
+	move.l	#$0FEE5678,d1
+	move.l	d1,-(a0)		; predecrement flavour
+	move.l	($E000).l,d0
+	chkl	d0,$0FEE5678,158
+	move.l	a0,d0
+	chkl	d0,$E000,159
+	move.w	(cnt_aerr).l,d0
+	sub.w	d7,d0
+	and.l	#$FFFF,d0
+	chkl	d0,5,160		; the two extra write faults, once each
+
+;----- A7 rollback must not corrupt the supervisor stack (168/169/170)
+; The killer NetBSD bug, captured live: libc's __cerror ends with
+;   MOVE.L (A7)+,(A0)     ; store the error value through the errno pointer
+; run in USER mode.  When the (A0) write faults -- routine demand paging --
+; the 68040 restart model rolls the A7 post-increment back.  A7 is a
+; SHADOWED register: writes land in USP, ISP or MSP according to S/M.  If
+; the rollback runs after exception entry has set S, the USER stack value
+; is written into the SUPERVISOR pointer; the frame is then stacked in
+; user space, that write faults too, and the fault-during-exception halts
+; the core.  Hardware beacon at the halt: A7=1dfff9b8 (a user stack) in
+; supervisor mode, IR=209f, PC in __cerror.
+; Here: user code runs exactly that instruction with a non-resident
+; destination.  The handler maps the page and returns.  On a broken core
+; the supervisor stack pointer is destroyed and the machine dies inside
+; exception processing; on a correct one the ISP is untouched, the store
+; completes on restart, and A7 (USP) advances exactly one longword.
+	move.l	#$4800,d0		; user root -> pointer -> page table
+	movec	d0,urp			; (the 154-160 block left URP elsewhere)
+	move.l	#$0000A003,($4C14).l	; user code page identity
+	move.l	#$00008003,($4C10).l	; user data page VA $8000 resident
+	pflusha
+	; user code at PA $B000:  move.l (a7)+,(a0) ; trap #1
+	move.w	#$209F,($B000).l
+	move.w	#$4E41,($B002).l	; trap #1
+	cpusha	bc
+	cinva	ic
+	; user stack at VA $8100 holding the value to store
+	move.l	#$C0DE1234,($8100).l
+	move.l	#0,($4C18).l		; USER entry 6 (VA $C000) NOT resident
+	pflusha
+	move.l	#1,(expect_tm).l	; user data write
+	move.l	#$C000,(expect_fa).l
+	move.l	#$4C18,(fix_addr).l
+	move.l	#$0000C003,(fix_val).l
+	move.w	(cnt_aerr).l,d6
+	movec	isp,d4			; the supervisor stack, before
+	move.l	#u7done,(uret).l
+	move.l	#$8100,d0
+	movec	d0,usp			; USP = the user stack
+	lea	($C000).l,a0		; destination: the non-resident page
+	move.w	#$0000,-(sp)
+	pea	($B000).l
+	move.w	#$0000,-(sp)
+	rte				; to user: MOVE.L (A7)+,(A0)
+
+u7done:
+	movec	isp,d0
+	cmp.l	d4,d0
+	beq.s	u7isp
+	failt	168			; ISP corrupted by the A7 rollback
+u7isp:
+	movec	usp,d0
+	chkl	d0,$8104,169		; USP advanced exactly one longword
+	move.l	($C000).l,d0		; the restarted store landed
+	chkl	d0,$C0DE1234,170
+	move.w	(cnt_aerr).l,d0
+	sub.w	d6,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,171		; exactly one fault
+	move.l	#$0000C003,($4C18).l
+	move.l	#$4400,d0		; hand URP back as the block found it
+	movec	d0,urp
+	pflusha
+
+;----- stale (An)+ record must die at non-access exception entry (172-174)
+; CHK.W (A2)+,D1 with D1 negative: the EA read SUCCEEDS (a2 advances),
+; then the CHK exception is taken.  The rollback records exist solely so
+; the access-error path can undo the FAULTING instruction's side effects;
+; only fetch_next and that consumer cleared them, so an instruction that
+; raises a non-access exception after its EA carried a live record
+; through exception_prefetch into its handler.  h_chk's FIRST instruction
+; stores to a non-resident page; the access error's rollback then
+; "restored" a2 from the stale record -- an unrelated instruction's
+; register reverted to a stale value.  h_aerr repairs the page and the
+; store restarts; afterwards a2 must still hold the post-increment value.
+	move.l	#h_chk,($18).l		; CHK, vector 6
+	move.l	#0,($C000).l		; scrub the target while still mapped
+	move.w	#$7FFF,(chkbuf).l	; CHK bound operand
+	move.l	#0,($4418).l		; supervisor VA $C000 not resident
+	pflusha
+	move.l	#5,(expect_tm).l	; supervisor data write
+	move.l	#$C000,(expect_fa).l
+	move.l	#$4418,(fix_addr).l
+	move.l	#$0000C003,(fix_val).l
+	move.w	(cnt_aerr).l,d6
+	lea	(chkbuf).l,a2
+	moveq	#-1,d1			; negative: CHK always traps
+	chk.w	(a2)+,d1
+	lea	(chkbuf+2).l,a0
+	cmp.l	a0,a2
+	beq.s	stale_ok
+	failt	172			; a2 reverted by the stale record
+stale_ok:
+	move.l	($C000).l,d0
+	chkl	d0,$FFFFFFFF,173	; h_chk ran and its store landed
+	move.w	(cnt_aerr).l,d0
+	sub.w	d6,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,174		; exactly one access error
+	move.l	#unexp,($18).l
+
+;----- MOVES alternate function codes select the ROOT by FC bit 2 (177-180)
+; An external audit read MC68040 UM 3.2.5 as requiring FC 0/3/4/7 MOVES to
+; BYPASS translation as physical accesses.  WinUAE -- the reference this
+; core is validated against, and the source of the cputest corpus -- does
+; not do that.  Its 68040 MOVES source read is:
+;     bool super = (regs.sfc & 4) != 0;
+;     res = mmu_get_user_byte(addr, super, false, sz_byte, false);
+; i.e. EVERY function code is translated, and only bit 2 picks the root.
+; ap040_mmu.v derives `a_super = c_fc[2]`, which is the same rule, so the
+; implementation already agrees with the oracle and the audit's item is a
+; manual-versus-reference disagreement.  This core has lost that bet in
+; the manual's favour before (the T0 change-of-flow list), so pin the
+; behaviour with a test that can actually tell the roots apart: URP and
+; SRP address DIFFERENT tables here, so a bypass -- or a super bit taken
+; from anything but FC2 -- lands the store in the wrong page.
+;   user  VA $C000 -> PA $C000     (URP tables)
+;   super VA $C000 -> PA $E000     (SRP tables)
+;   super VA $E000 -> PA $C000     (so PA $C000 is readable from here)
+	move.l	#$4800,d0
+	movec	d0,urp			; user root, distinct from SRP ($4000)
+	move.l	#$0000C003,($4C18).l	; user   entry 6: VA $C000 -> PA $C000
+	move.l	#$0000E003,($4418).l	; super  entry 6: VA $C000 -> PA $E000
+	move.l	#$0000C003,($441C).l	; super  entry 7: VA $E000 -> PA $C000
+	pflusha
+	move.l	#0,($C000).l		; PA $C000 via super VA $E000 below
+	move.l	#0,($E000).l
+	pflusha
+
+	moveq	#1,d0			; FC1: user data
+	movec	d0,dfc
+	move.l	#$11111111,d1
+	moves.l	d1,($C000).l
+	move.l	($E000).l,d0		; super VA $E000 = PA $C000
+	chkl	d0,$11111111,177	; FC1 translated through URP
+
+	moveq	#5,d0			; FC5: supervisor data
+	movec	d0,dfc
+	move.l	#$55555555,d1
+	moves.l	d1,($C000).l
+	move.l	($C000).l,d0		; super VA $C000 = PA $E000
+	chkl	d0,$55555555,178	; FC5 translated through SRP
+
+	moveq	#0,d0			; FC0: bit 2 clear -> USER, not a bypass
+	movec	d0,dfc
+	move.l	#$00000000,d1
+	moves.l	d1,($C000).l
+	move.l	($E000).l,d0
+	chkl	d0,0,179		; FC0 landed in the USER page
+
+	moveq	#4,d0			; FC4: bit 2 set -> SUPERVISOR
+	movec	d0,dfc
+	move.l	#$44444444,d1
+	moves.l	d1,($C000).l
+	move.l	($C000).l,d0
+	chkl	d0,$44444444,180	; FC4 landed in the SUPERVISOR page
+
+	moveq	#5,d0
+	movec	d0,dfc			; leave DFC as the block found it
+	move.l	#$0000C003,($4418).l
+	move.l	#$0000E003,($441C).l
+	move.l	#$4400,d0
+	movec	d0,urp
+	pflusha
+
+
+;---------------- interrupt-vs-MMU-operation interleave sweeps (161-164)
+; The live NetBSD freeze happened inside pmap_enter -- PTE rewrite,
+; PFLUSH, fresh table walks -- with a VBL interrupt nested in the same
+; window and every interrupt level dead afterwards.  Sweep a delayed
+; level-2 request across that whole window.  PFLUSHA empties the ATC
+; each round, so the interrupt's own exception entry (vector fetch,
+; frame pushes) re-walks the tables while the pipeline is mid-MMU-op:
+; exactly the nesting the hardware died in.  Nothing may wedge (the
+; bench timeout catches a stall), every request must be taken, and the
+; translated accesses must stay correct.
+	move.w	(IPLCAP).l,d0	; the interleave sweeps need working IPL
+	btst	#0,d0		; injection; benches without it advertise 0
+	beq	imix_done	; and the sweeps are bypassed, not faked
+
+	; The bench ports live at PA $F1xx -- inside 8K page 7, which the
+	; faulting sweep leaves non-resident.  The interrupt handler must
+	; acknowledge through a mapping that never disappears: alias entry 6
+	; (LA $C000) onto PA $E000 so VA $D110 reaches the port at PA $F110.
+	move.l	#$0000E003,($4418).l
+	pflusha
+	move.w	#$2000,sr	; open the mask for level 2
+	move.l	#$0EE0BEEF,($E000).l
+	moveq	#1,d5
+imix_a:
+	move.w	d5,(IPLDLY).l	; level-2 lands d5 cycles from now
+	move.l	#$0000E003,($441C).l
+	pflusha			; ATC empty: everything below re-walks
+	move.l	($E000).l,d0
+	chkl	d0,$0EE0BEEF,162	; translated read correct every round
+imix_aw:
+	move.w	(cnt_int2).l,d0
+	cmp.w	d5,d0		; the request must be delivered before the
+	bne.s	imix_aw		; next round arms a new one
+	addq.w	#1,d5
+	cmp.w	#64,d5
+	bls.s	imix_a
+	moveq	#0,d0
+	move.w	(cnt_int2).l,d0
+	chkl	d0,64,161	; one interrupt per round, none lost
+
+	; Same sweep with the access FAULTING: fault entry, h_aerr repair,
+	; restart, and the pending interrupt all contend in one window --
+	; the trap-plus-uvm_fault-plus-interrupt shape from the live stack.
+	move.l	#5,(expect_tm).l
+	move.l	#$0000E000,(expect_fa).l
+	move.l	#$441C,(fix_addr).l
+	move.l	#$0000E003,(fix_val).l
+	move.w	(cnt_aerr).l,d6
+	moveq	#1,d5
+imix_b:
+	move.w	d5,(IPLDLY).l	; arm FIRST: the port page ($F1xx) is about
+	move.l	#0,($441C).l	; to become non-resident, and a faulting arm
+	pflusha			; would deadlock the failure reporting too
+	move.l	#$0DDF0000,d1
+	add.l	d5,d1
+	move.l	d1,($E000).l	; faults, handler repairs, restart stores
+	move.l	($E000).l,d0
+	cmp.l	d1,d0
+	beq.s	imix_bd
+	failt	164		; restarted store lost or doubled
+imix_bd:
+imix_bw:
+	move.w	(cnt_int2).l,d0
+	sub.w	#64,d0
+	cmp.w	d5,d0
+	bne.s	imix_bw
+	addq.w	#1,d5
+	cmp.w	#64,d5
+	bls.s	imix_b
+	move.w	(cnt_aerr).l,d0
+	sub.w	d6,d0
+	and.l	#$FFFF,d0
+	chkl	d0,64,163	; exactly one repair fault per round
+	move.w	#$2700,sr
+
+	; Sweep C: the spl storm.  A level-3 handler does the serintr mask
+	; dance while a delayed level-2 request lands at every offset across
+	; the handler's life -- entry, mid-storm between mask writes, and the
+	; RTE.  The pending 2 must survive every mask transition and be taken
+	; exactly once when the mask finally opens.
+	move.l	#$0000E003,($441C).l	; page 7 resident again
+	pflusha
+	move.w	#$2000,sr
+	moveq	#1,d5
+imix_cc:
+	move.w	#96,(storm_scr).l
+	move.w	d5,(storm_dly).l
+	move.w	#3,(IPLREG).l	; the level-3 device interrupts; h_int3 arms
+				; the delayed ports request itself
+imix_cw:
+	moveq	#0,d0
+	move.w	(cnt_int2).l,d0
+	sub.w	#128,d0		; sweeps A+B consumed 128
+	cmp.w	d5,d0		; one more level-2 per round
+	bne.s	imix_cw
+	addq.w	#1,d5
+	cmp.w	#96,d5
+	bls.s	imix_cc
+	moveq	#0,d0
+	move.w	(cnt_int3).l,d0
+	chkl	d0,96,165	; one level-3 service per round
+	moveq	#0,d0
+	move.w	(cnt_int2).l,d0
+	chkl	d0,224,166	; 128 + 96: every pending 2 delivered
+	move.l	($3000).l,d0
+	chkl	d0,$11112222,167	; the stormed touches stayed coherent
+	move.w	#$2700,sr
+	move.l	#$0000C003,($4418).l	; entry 6 back to identity
+	pflusha
+imix_done:
+
+	; leave translation off for the harness epilogue
+	moveq	#0,d0
+	movec	d0,tc
+	pflusha
 
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700
 
 ;----------------------------------------------------------------- handlers
+h_chk:
+	move.l	d1,($C000).l		; FIRST instruction: faults, restarts
+	rte
+
 h_aerr:
+	move.w	#1,(aerr_act).l	; a trace taken now is a leaked latch
 	cmpi.w	#$7008,6(sp)	; format $7, vector 2
 	bne	hfail
 	movem.l	d0-d1/a0,-(sp)
@@ -656,37 +1346,74 @@ haerr_eaok:
 	and.l	#$0007,d0	; TM: the function code of the faulting access
 	cmp.l	(expect_tm).l,d0
 	bne	hfail
-	move.w	$18(sp),d0
-	btst	#8,d0		; write fault: WB3 slot carries the write
-	bne.s	haerr_rd
-	move.w	$18(sp),d0	; ...except a MOVE16 line write, whose WB3
-	and.w	#$0060,d0	; valid bit stays clear (WinUAE clears it and
-	cmp.w	#$0060,d0	; would use a WB2 line writeback instead)
-	bne.s	haerr_wbw
+	; WB3S must be CLEAR on every fault, reads and writes alike: the
+	; core restarts the repaired instruction, so a valid WB3 would make
+	; an OS that completes writebacks (NetBSD trap.c) apply RMW stores
+	; twice.  WB3D still carries the write data for diagnostics; WB3A
+	; mirrors the fault address.
 	tst.w	$1A(sp)
 	bne	hfail
-	bra.s	haerr_wbok
-haerr_wbw:
-	move.w	$1A(sp),d0	; WB3S = valid + SSW size/TT/TM bits
-	move.w	$18(sp),d1
-	and.w	#$007F,d1
-	or.w	#$0080,d1
-	cmp.w	d1,d0
-	bne	hfail
-	move.l	$20(sp),d0	; WB3A mirrors the fault address
-	cmp.l	$24(sp),d0	; (frame offset $18, after movem +12)
-	bne	hfail
-	bra.s	haerr_wbok
-haerr_rd:
-	tst.w	$1A(sp)		; read fault: WB3S stays clear
+	move.w	$18(sp),d0
+	btst	#8,d0		; write fault: WB3A must mirror the FA
+	bne.s	haerr_wbok
+	move.w	$18(sp),d0	; (MOVE16 line writes keep their aligned EA
+	and.w	#$0060,d0	; handling above; WB3A is not checked there)
+	cmp.w	#$0060,d0
+	beq.s	haerr_wbok
+	move.l	$20(sp),d0
+	cmp.l	$24(sp),d0	; WB3A (frame offset $18, after movem +12)
 	bne	hfail
 haerr_wbok:
+	; NetBSD's trap.c completes every writeback the frame marks VALID
+	; ("the 68040 doesn't re-run instructions that cause write page
+	; faults ... we have to write the value out to memory ourselves").
+	; Mimic that here when the test asks for it: a restart-model core
+	; advertising a valid WB3 gets the store applied TWICE.
 	movea.l	(fix_addr).l,a0
 	move.l	(a0),(seen_desc).l	; capture descriptor before the handler fixes it
 	move.l	(fix_val).l,(a0)
 	pflusha
+	; NetBSD order: repair the mapping FIRST, then complete writebacks
+	tst.w	(wb_complete).l
+	beq.s	haerr_nowb
+	move.w	$1A(sp),d0
+	btst	#7,d0
+	beq.s	haerr_nowb
+	movea.l	$24(sp),a0	; WB3A
+	move.l	$28(sp),(a0)	; WB3D: perform the faulted store
+haerr_nowb:
 	addq.w	#1,(cnt_aerr).l
 	movem.l	(sp)+,d0-d1/a0
+	clr.w	(aerr_act).l
+	rte
+
+h_int2:
+	addq.w	#1,(cnt_int2).l
+	move.w	#0,($D110).l	; IPLREG through the always-resident alias:
+	rte			; the direct page may be mid-repair (sweep B)
+
+; The NetBSD serintr shape, verbatim from the live freeze: inside a
+; level-3 handler, storm the SR mask up and down (splraise/splx pairs at
+; $2400/$2500) around translated memory touches, exactly as serintr
+; drains its ring -- while a lower-priority request stays pending the
+; whole time.  Every mask write resynchronises the pipeline and refills
+; the fetch stream through translation.
+h_int3:
+	movem.l	d0-d1,-(sp)
+	move.w	#0,($D110).l	; take the level-3 device down FIRST, then
+	move.w	(storm_dly).l,(IPLDLY).l ; arm the ports device: its rise can
+	addq.w	#1,(cnt_int3).l	; never race the clear, and the swept delay
+	pflusha			; lands it anywhere in the storm below
+	moveq	#7,d1
+h3storm:
+	move.w	sr,d0
+	move.w	#$2400,sr	; splraise, serintr-style
+	tst.l	($3000).l	; translated data touch
+	move.w	#$2500,sr	; deeper raise around the count update
+	subq.w	#1,(storm_scr).l
+	move.w	d0,sr		; splx back to the entry mask
+	dbra	d1,h3storm
+	movem.l	(sp)+,d0-d1
 	rte
 
 h_utrap:

@@ -117,7 +117,13 @@ gayle gayle
 	.led(ide_led)
 );
 
-wire        sel_rtg = sel && (addr[23:12] == 'hB80);
+// Akiko ($B800xx) sits INSIDE the RTG window ($B80000-$B80FFF), so both
+// decodes fire in the overlap and dout/ready are wired-OR
+// (dout = akiko_dout | ide_dout | rtg_dout).  Upstream gives Akiko
+// priority; match it.  This affects the CD32 Akiko range rather than
+// RTG's own registers (control at $B80200+, palette at $B80800+), but it
+// is a real divergence from upstream and free to correct.
+wire        sel_rtg = sel && !sel_akiko && (addr[23:12] == 'hB80);
 wire [15:0] rtg_dout;
 wire        rtg_ready;
 

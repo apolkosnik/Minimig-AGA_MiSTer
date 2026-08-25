@@ -1,0 +1,11 @@
+PASS: four-longword reset prefetch was consumed without duplicate reads
+PASS: reset-vector access fault halted and bus is quiescent in 132 cycles
+PASS: first exception-handler fetch fault halted and bus is quiescent in 238 cycles
+PASS: RTE frame-load access fault halted and bus is quiescent in 203 cycles
+PASS: exception stack-write fault halted and bus is quiescent in 204 cycles
+PASS: exception vector-fetch fault halted and bus is quiescent in 229 cycles
+PASS: later exception-prefetch fault halted and bus is quiescent in 268 cycles
+PASS: later reset-prefetch fault halted and bus is quiescent in 181 cycles
+PASS: warm reset preserved MMU state/ATC and cleared E bits
+ALL TESTS PASSED
+tb_ap040_double_fault.v:217: $finish called at 17966000 (1ps)

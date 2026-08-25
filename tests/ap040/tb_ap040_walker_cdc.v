@@ -30,6 +30,7 @@ ap040_walker_cdc dut (
 
 integer errors = 0;
 integer native_count = 0;
+integer base_count = 0;
 reg native_armed = 1;
 reg native_pending = 0;
 reg [2:0] native_wait;
@@ -60,6 +61,40 @@ always @(posedge m_clk) begin
 		end
 	end
 end
+
+task transact_blind;
+	// A consumer that samples only under a clock enable: after issuing,
+	// go blind for longer than the round trip, then look ONCE.  The ack
+	// must still be there (level-held until the request drops); a
+	// single-cycle pulse dies inside the blind window and the walker
+	// hangs -- exactly what happens when clkena is low while a data-side
+	// walk completes once the X2.2 fetch front end can hold the bus.
+	input [28:2] addr;
+	reg [31:0] expected;
+	begin
+		@(negedge s_clk);
+		s_we = 0; s_ddr = 0; s_bad = 0;
+		s_addr = addr; s_wdata = 0; s_req = 1;
+		repeat (40) @(posedge s_clk);   // blind: no s_ack sampling
+		if (!s_ack) begin
+			$display("FAIL: ack lost in the ce-blind window");
+			errors = errors + 1;
+		end
+		expected = {addr[15:2], 2'b00} ^ 32'hA5A5_5A5A;
+		if (s_ack && s_rdata !== expected) begin
+			$display("FAIL: blind rdata got=%h expected=%h", s_rdata, expected);
+			errors = errors + 1;
+		end
+		@(negedge s_clk);
+		s_req = 0;
+		repeat (2) @(posedge s_clk);
+		if (s_ack) begin
+			$display("FAIL: ack did not clear after the request dropped");
+			errors = errors + 1;
+		end
+		repeat (2) @(posedge s_clk);
+	end
+endtask
 
 task transact;
 	input we;
@@ -111,6 +146,39 @@ initial begin
 
 	if (native_count != 2) begin
 		$display("FAIL: native request count=%0d expected=2", native_count);
+		errors = errors + 1;
+	end
+
+	// the ack must survive a ce-gated consumer's blind window
+	transact_blind(27'h00ABCD0);
+
+	// one more transaction so the request toggle parity is ODD (1 on
+	// both sides) going into the reset scenario below
+	transact(0, 0, 0, 27'h0077110, 0, 0);
+
+	// s-side-only reset with the m side running (a CPU-only reset while
+	// the system stays up).  The request toggle is 1 on both sides after
+	// the transactions above; the s reset alone forces it back to 0, and
+	// a desynced m side then launches a PHANTOM request from the stale
+	// payload with no s_req anywhere -- a stale descriptor WRITE in the
+	// worst case.  The module must reset its m side from the s reset.
+	base_count = native_count;
+	@(negedge s_clk);
+	s_reset_n = 0;
+	repeat (3) @(posedge s_clk);
+	@(negedge s_clk);
+	s_reset_n = 1;
+	repeat (20) @(posedge s_clk);   // settle: no request may appear
+	if (native_count != base_count) begin
+		$display("FAIL: phantom m-side request after s-only reset");
+		errors = errors + 1;
+	end
+	// and the bridge still works after the one-sided reset
+	transact(0, 0, 0, 27'h0055AA0, 0, 0);
+
+	if (native_count != base_count + 1) begin
+		$display("FAIL: final native request count=%0d expected=%0d",
+		         native_count, base_count + 1);
 		errors = errors + 1;
 	end
 	if (errors == 0) $display("ALL TESTS PASSED");

@@ -120,6 +120,73 @@ module tb_cpu_cache_new;
 		end
 	endtask
 
+	// Finish a line fill the previous test left half-serviced: cpu_ack
+	// arrives on the first word, but the fill keeps requesting the rest
+	// of the line, so both state machines stay busy until those are
+	// acked.  Pump acks until the cache is genuinely idle.
+	task drain_fill;
+		begin
+			// FILL2..FILL4 do not re-request: the controller streams the
+			// rest of the line, so the ack must be driven unconditionally
+			timeout = 0;
+			while ((dut.cpu_sm_state != 4'd1 || dut.sdr_sm_state != 4'd2) &&
+			       timeout < 500) begin
+				@(posedge clk);
+				sdr_read_ack = 1;
+				timeout = timeout + 1;
+			end
+			sdr_read_ack = 0;
+			repeat (3) @(posedge clk);
+		end
+	endtask
+
+	// A cache-inhibited read must go to memory and return what memory
+	// holds NOW -- never the cached copy of the same physical address.
+	task inhibited_read;
+		input instr;
+		input [15:0] fresh;
+		begin
+			cpu_ir = instr;
+			cpu_dr = !instr;
+			cpu_cs = 1;
+			timeout = 0;
+			while (!sdr_read_req && timeout < 20) begin
+				@(posedge clk);
+				timeout = timeout + 1;
+			end
+			if (!sdr_read_req) begin
+				$display("FAIL: cache-inhibited %s read was served from the cache",
+				         instr ? "instruction" : "data");
+				errors = errors + 1;
+			end
+			sdr_dat_r = fresh;
+			// BOTH shipped controllers answer a cache_req with a WHOLE
+			// LINE -- ddram_ctrl states 1..4, sdram_ctrl slots
+			// 8/10/12/14 -- whether or not the cache allocates it.
+			// Driving a single beat modelled hardware that does not
+			// exist, and hid the stranded-beat corruption below.
+			repeat (4) begin
+				sdr_read_ack = 1;
+				@(posedge clk);
+			end
+			sdr_read_ack = 0;
+			timeout = 0;
+			while (!cpu_ack && timeout < 20) begin
+				@(posedge clk);
+				timeout = timeout + 1;
+			end
+			if (cpu_dat_r !== fresh) begin
+				$display("FAIL: cache-inhibited %s read returned %h, memory holds %h",
+				         instr ? "instruction" : "data", cpu_dat_r, fresh);
+				errors = errors + 1;
+			end
+			cpu_cs = 0;
+			cpu_ir = 0;
+			cpu_dr = 0;
+			repeat (3) @(posedge clk);
+		end
+	endtask
+
 	task uncached_read;
 		input instr;
 		begin
@@ -138,8 +205,15 @@ module tb_cpu_cache_new;
 			end
 			// The selected bank is disabled, so one returned word must complete
 			// without starting a four-word line fill.
-			sdr_read_ack = 1;
-			@(posedge clk);
+			// BOTH shipped controllers answer a cache_req with a WHOLE
+			// LINE -- ddram_ctrl states 1..4, sdram_ctrl slots
+			// 8/10/12/14 -- whether or not the cache allocates it.
+			// Driving a single beat modelled hardware that does not
+			// exist, and hid the stranded-beat corruption below.
+			repeat (4) begin
+				sdr_read_ack = 1;
+				@(posedge clk);
+			end
 			sdr_read_ack = 0;
 			cpu_cs = 0;
 			cpu_ir = 0;

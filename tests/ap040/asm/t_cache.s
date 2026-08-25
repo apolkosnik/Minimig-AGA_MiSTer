@@ -80,10 +80,16 @@ start:
 	moveq	#0,d0
 	movec	d0,dtt0
 
-	; back to cacheable: the line still holds the value cached at test 7;
-	; the bypassed reads never updated it (exactly like a real 68040)
+	; back to cacheable: the FIRST cache-inhibited access that HIT the
+	; resident line invalidated it while it bypassed (WinUAE dcache040:
+	; a hit under CACHE_DISABLE_MMU is pushed and invalidated before the
+	; uncached access).  An earlier revision of this test expected the
+	; stale $BEEF0000 line to survive the CI window and hit again --
+	; "exactly like a real 68040", it said.  It is not: retaining the
+	; line hands out pre-DMA data the moment the mapping is cacheable
+	; again, which is precisely what CM=NC exists to prevent.
 	move.l	($3500).l,d0
-	chkl	d0,$BEEF0000,11
+	chkl	d0,$CAFE0000,11
 	cinva	dc
 	move.l	($3500).l,d0
 	chkl	d0,$CAFE0000,17

@@ -1,0 +1,7 @@
+kernel_map 0041BCA8
+allproc 00420440
+curlwp 0041CCFC
+uvmexp 00464740
+intrcnt 0040C4EC
+intrnames 0040C448
+time_second 00421940

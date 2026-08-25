@@ -1,0 +1,45 @@
+tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)
+init complete at cycle 1033, equivalence monitor armed
+chipset reads: chipRD and chip48 match the reference in all rotations
+FAIL: chipRD mismatch (DUAL=1) at cycle 1379 state 10: dut=0000000000005a58 ref=0000000000001234
+FAIL: chipRD mismatch (DUAL=1) at cycle 1380 state 11: dut=0000000000005a58 ref=0000000000001234
+FAIL: chipRD mismatch (DUAL=1) at cycle 1381 state 12: dut=0000000000005a58 ref=0000000000001234
+FAIL: chipRD mismatch (DUAL=1) at cycle 1382 state 13: dut=0000000000005a58 ref=0000000000001234
+FAIL: chipRD mismatch (DUAL=1) at cycle 1383 state 14: dut=0000000000005a58 ref=0000000000001234
+FAIL: chip48 mismatch (DUAL=1) at cycle 1383 state 14: dut=000056785858zzzz ref=00005678ab58zzzz
+FAIL: chipRD mismatch (DUAL=1) at cycle 1384 state 15: dut=0000000000005a58 ref=0000000000001234
+FAIL: chip48 mismatch (DUAL=1) at cycle 1384 state 15: dut=000056785858zzzz ref=00005678ab58zzzz
+FAIL: chipRD mismatch (DUAL=1) at cycle 1385 state 0: dut=0000000000005a58 ref=0000000000001234
+FAIL: chip48 mismatch (DUAL=1) at cycle 1385 state 0: dut=00005678585859cd ref=00005678ab5859cd
+FAIL: chipRD mismatch (DUAL=1) at cycle 1386 state 1: dut=0000000000005a58 ref=0000000000001234
+FAIL: chip48 mismatch (DUAL=1) at cycle 1386 state 1: dut=00005678585859cd ref=00005678ab5859cd
+FAIL: DUAL chipRD @0000400 = 5a58, expected 1234
+FAIL: DUAL chip48 @0000400 = 5678585859cd, expected 5678ab5859cd
+FAIL: chipRD mismatch (DUAL=1) at cycle 1387 state 2: dut=0000000000005a58 ref=0000000000001234
+FAIL: chip48 mismatch (DUAL=1) at cycle 1387 state 2: dut=00005678585859cd ref=00005678ab5859cd
+FAIL: chipRD mismatch (DUAL=1) at cycle 1388 state 3: dut=0000000000005a58 ref=0000000000001234
+FAIL: chip48 mismatch (DUAL=1) at cycle 1388 state 3: dut=00005678585859cd ref=00005678ab5859cd
+FAIL: chipRD mismatch (DUAL=1) at cycle 1389 state 4: dut=0000000000005a58 ref=0000000000001234
+FAIL: chip48 mismatch (DUAL=1) at cycle 1389 state 4: dut=00005678585859cd ref=00005678ab5859cd
+FAIL: chipRD mismatch (DUAL=1) at cycle 1390 state 5: dut=0000000000005a58 ref=0000000000001234
+FAIL: chip48 mismatch (DUAL=1) at cycle 1390 state 5: dut=00005678585859cd ref=00005678ab5859cd
+FAIL: DUAL chipRD @0000404 = 5858, expected ab58
+FAIL: DUAL chip48 @0000404 = 59cd5a585678, expected 59cd12345678
+FAIL: DUAL cpuRD @0000c00 = 5a5c, expected cafe
+FAIL: DUAL walker read = 5a595678
+FAIL: DUAL walker image read = 5a585678, expected 12345678
+FILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4
+FILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)
+FILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)
+FAIL: DUAL fill @0001400 beat 0 = 5a50beef, expected deadbeef
+FAIL: DUAL fill @0001400 beat 1 = 5850face, expected feedface
+FAIL: chipset writes not coherent with the 32-bit fill port: beats 5a50beef 5850face
+FAIL: secondary memory word 512 (unit 256) = 5a58, expected 1234
+FAIL: secondary memory word 514 (unit 257) = 5858, expected ab58
+FAIL: secondary memory word 768 (unit 384) = 5a59, expected 1234
+FAIL: secondary memory word 1536 (unit 768) = 5a5c, expected cafe
+FAIL: secondary memory word 2560 (unit 1280) = 5a50, expected dead
+FAIL: secondary memory word 2562 (unit 1281) = 5850, expected feed
+lockstep: chip 2 saw the same command as chip 1 on all 2146 cycles
+TEST FAILED with 646 errors
+tb_sdram32.v:1151: $finish called at 188892 (100ps)

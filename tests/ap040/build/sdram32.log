@@ -1,0 +1,15 @@
+tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)
+init complete at cycle 1033, equivalence monitor armed
+chipset reads: chipRD and chip48 match the reference in all rotations
+chipset writes: byte-masked single-lane writes verified
+cpu port: cached fills and write buffer match the reference
+walker port: 32-bit read/write identical to the reference
+FILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4
+FILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)
+FILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)
+line fill under chipset traffic: 4 beats delivered, data correct
+coherence: chipset writes are visible to the 32-bit fill port
+memory image: all three controllers hold the expected 8KB window
+lockstep: chip 2 saw the same command as chip 1 on all 2146 cycles
+ALL TESTS PASSED
+tb_sdram32.v:1151: $finish called at 188892 (100ps)

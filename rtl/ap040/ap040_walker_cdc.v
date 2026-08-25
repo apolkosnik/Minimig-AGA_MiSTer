@@ -70,8 +70,16 @@ always @(posedge s_clk or negedge s_reset_n) begin
 	end
 	else begin
 		s_ack_sync <= {s_ack_sync[0], m_ack_toggle};
-		s_ack      <= 0;
-		s_berr     <= 0;
+		// s_ack is LEVEL-HELD until the MMU drops s_req: the consumer
+		// samples only under its clock enable, and a single-cycle pulse
+		// landing in a ce-gated blind window would be lost, hanging the
+		// walk.  The MMU's request-low re-arm cycle guarantees a held
+		// ack can never be mistaken for the next transaction's (see the
+		// w_issued comment in ap040_mmu.v).  s_berr holds with it.
+		if (!s_req) begin
+			s_ack  <= 0;
+			s_berr <= 0;
+		end
 
 		if (!s_busy && s_req) begin
 			s_we_hold    <= s_we;
@@ -95,10 +103,23 @@ always @(posedge s_clk or negedge s_reset_n) begin
 	end
 end
 
+// The s-side reset crossed into the m domain: a CPU-only reset must clear
+// BOTH sides or the toggle parity desyncs -- the m side would replay a
+// stale request (a phantom descriptor WRITE in the worst case) or answer
+// the first post-reset walk with a stale instant ack.  Async assert,
+// release synchronized into m_clk.  (The m-side-only direction needs no
+// mirror: the system reset behind m_reset_n also resets the CPU.)
+(* async_reg = "true" *) reg [1:0] m_srst_sync;
+always @(posedge m_clk or negedge s_reset_n) begin
+	if (!s_reset_n) m_srst_sync <= 2'b00;
+	else            m_srst_sync <= {m_srst_sync[0], 1'b1};
+end
+wire m_rst_n = m_reset_n & m_srst_sync[1];
+
 // Destination side.  The source payload has been stable for at least two
 // destination clocks when the synchronized request toggle changes.
-always @(posedge m_clk or negedge m_reset_n) begin
-	if (!m_reset_n) begin
+always @(posedge m_clk or negedge m_rst_n) begin
+	if (!m_rst_n) begin
 		m_req_sync   <= 0;
 		m_req_seen   <= 0;
 		m_ack_toggle <= 0;

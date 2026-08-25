@@ -1,0 +1,62 @@
+tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)
+init complete at cycle 1033, equivalence monitor armed
+FAIL: chipRD mismatch (DUAL=1) at cycle 1059 state 10: dut=0000000000005b5b ref=0000000000005a5b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1060 state 11: dut=0000000000005b5b ref=0000000000005a5b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1061 state 12: dut=0000000000005b5b ref=0000000000005a5b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1062 state 13: dut=0000000000005b5b ref=0000000000005a5b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1063 state 14: dut=0000000000005b5b ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1063 state 14: dut=00005b5b595bxxxx ref=00005b5b585bxxxx
+FAIL: chipRD mismatch (DUAL=1) at cycle 1064 state 15: dut=0000000000005b5b ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1064 state 15: dut=00005b5b595bxxxx ref=00005b5b585bxxxx
+FAIL: chipRD mismatch (DUAL=1) at cycle 1065 state 0: dut=0000000000005b5b ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1065 state 0: dut=00005b5b595b595b ref=00005b5b585b595b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1066 state 1: dut=0000000000005b5b ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1066 state 1: dut=00005b5b595b595b ref=00005b5b585b595b
+FAIL: DUAL chipRD @0000200 = 5b5b, expected 5a5b
+FAIL: DUAL chip48 @0000200 = 5b5b595b595b, expected 5b5b585b595b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1067 state 2: dut=0000000000005b5b ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1067 state 2: dut=00005b5b595b595b ref=00005b5b585b595b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1068 state 3: dut=0000000000005b5b ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1068 state 3: dut=00005b5b595b595b ref=00005b5b585b595b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1069 state 4: dut=0000000000005b5b ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1069 state 4: dut=00005b5b595b595b ref=00005b5b585b595b
+FAIL: chipRD mismatch (DUAL=1) at cycle 1070 state 5: dut=0000000000005b5b ref=0000000000005a5b
+FAIL: chip48 mismatch (DUAL=1) at cycle 1070 state 5: dut=00005b5b595b595b ref=00005b5b585b595b
+FAIL: DUAL chip48 @0000202 = 595b595b5b5b, expected 585b595b5a5b
+FAIL: DUAL chipRD @0000204 = 595b, expected 585b
+FAIL: DUAL chip48 @0000204 = 595b5b5b5b5b, expected 595b5a5b5b5b
+FAIL: DUAL chip48 @0000206 = 5b5b5b5b595b, expected 5a5b5b5b585b
+FAIL: DUAL chip48 @000050e = df58df58dd58, expected de58df58dc58
+FAIL: DUAL chipRD @0000754 = f159, expected f059
+FAIL: DUAL chip48 @0000754 = f159f359f359, expected f159f259f359
+FAIL: DUAL chipRD @0000400 = 5678, expected 1234
+FAIL: DUAL chip48 @0000400 = 567859cd59cd, expected 5678ab5859cd
+FAIL: DUAL chipRD @0000404 = 59cd, expected ab58
+FAIL: DUAL chip48 @0000404 = 59cd56785678, expected 59cd12345678
+FAIL: DUAL chipRD @0000408 = 5f58, expected 5e58
+FAIL: DUAL chip48 @0000408 = 5f585d585d58, expected 5f585c585d58
+FAIL: DUAL cpuRD @0000800 = 5b5e, expected 5a5e
+FAIL: DUAL cpuRD @0000a04 = 595f, expected 585f
+FAIL: DUAL cpuRD @0000c00 = babe, expected cafe
+FAIL: DUAL walker read = 56785678
+FAIL: DUAL walker image read = 56785678, expected 12345678
+FAIL: DUAL fill @0000800 beat 0 = 5b5e5b5e, expected 5a5e5b5e
+FAIL: DUAL fill @0000800 beat 1 = 595e595e, expected 585e595e
+FAIL: DUAL fill @0000800 beat 2 = 5f5e5f5e, expected 5e5e5f5e
+FAIL: DUAL fill @0000800 beat 3 = 5d5e5d5e, expected 5c5e5d5e
+FILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4
+FILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)
+FILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)
+FAIL: DUAL fill @0000900 beat 0 = db5edb5e, expected da5edb5e
+FAIL: DUAL fill @0000900 beat 1 = d95ed95e, expected d85ed95e
+FAIL: DUAL fill @0000900 beat 2 = df5edf5e, expected de5edf5e
+FAIL: DUAL fill @0000900 beat 3 = dd5edd5e, expected dc5edd5e
+FAIL: DUAL fill @0001400 beat 0 = beefbeef, expected deadbeef
+FAIL: DUAL fill @0001400 beat 1 = faceface, expected feedface
+FAIL: DUAL fill @0001400 beat 2 = 5f505f50, expected 5e505f50
+FAIL: DUAL fill @0001400 beat 3 = 5d505d50, expected 5c505d50
+FAIL: chipset writes not coherent with the 32-bit fill port: beats beefbeef faceface
+memory image: all three controllers hold the expected 8KB window
+lockstep: chip 2 saw the same command as chip 1 on all 2146 cycles
+TEST FAILED with 1986 errors
+tb_sdram32.v:1151: $finish called at 188892 (100ps)

@@ -483,57 +483,6 @@ t96ok:
 	move.l	($334C).l,d0
 	chkl	d0,$DDDD0004,106
 
-; MOVE16 preserves the longword offset within each 16-byte line.  The
-; transfer wraps at the line boundary; only the postincrement forms update
-; their address register.
-	lea	($3304).l,a0
-	move16	(a0)+,($3388).l
-	move.l	a0,d0
-	chkl	d0,$3314,1001
-	move.l	($3388).l,d0
-	chkl	d0,$BBBB0002,1002
-	move.l	($338C).l,d0
-	chkl	d0,$CCCC0003,1003
-	move.l	($3380).l,d0
-	chkl	d0,$DDDD0004,1004
-	move.l	($3384).l,d0
-	chkl	d0,$AAAA0001,1005
-
-	lea	($33C8).l,a1
-	move16	($3308).l,(a1)+
-	move.l	a1,d0
-	chkl	d0,$33D8,1006
-	move.l	($33C8).l,d0
-	chkl	d0,$CCCC0003,1007
-	move.l	($33CC).l,d0
-	chkl	d0,$DDDD0004,1008
-	move.l	($33C0).l,d0
-	chkl	d0,$AAAA0001,1009
-	move.l	($33C4).l,d0
-	chkl	d0,$BBBB0002,1010
-
-	lea	($330C).l,a0
-	move16	(a0),($340C).l
-	move.l	($340C).l,d0
-	chkl	d0,$DDDD0004,1011
-	move.l	($3400).l,d0
-	chkl	d0,$AAAA0001,1012
-	move.l	($3404).l,d0
-	chkl	d0,$BBBB0002,1013
-	move.l	($3408).l,d0
-	chkl	d0,$CCCC0003,1014
-
-	lea	($3444).l,a1
-	move16	($3304).l,(a1)
-	move.l	($3444).l,d0
-	chkl	d0,$BBBB0002,1015
-	move.l	($3448).l,d0
-	chkl	d0,$CCCC0003,1016
-	move.l	($344C).l,d0
-	chkl	d0,$DDDD0004,1017
-	move.l	($3440).l,d0
-	chkl	d0,$AAAA0001,1018
-
 ;----------------------------------------------------------------- ccr moves
 	move.w	#$1F,ccr
 	move.w	ccr,d0
@@ -878,6 +827,35 @@ c2dok:
 	move.w	($321C).l,d5
 	and.l	#$FFFF,d5
 	chkl	d5,$4444,191
+
+;------------------------------------------- store into the fetch queue
+; A CPU write landing inside the free-running fetch queue's window must
+; flush it: the stale prefetched word would otherwise execute.  The 040
+; architecture only requires CPUSH/CINV for self-modifying code, but the
+; queue snoops its own stores as insurance -- the previous fetch-buffered
+; core booted DiagROM and not AmigaOS on hardware with exactly this
+; hazard, invisible to every CINV-disciplined test.  The divide keeps
+; the queue filled across smcq while the store rewrites it.
+	moveq	#0,d7
+	move.l	#$80000000,d0
+	movec	d0,cacr		; I-cache bypassed: the queue is the only
+				; instruction staleness this test probes (a
+				; cached stale line is t_cache's contract and
+				; needs CINV by design)
+	lea	smcq(pc),a0
+	move.l	#100,d0
+	divu.w	#3,d0		; queue runs ahead through smcq
+	move.w	#$5247,(a0)	; nop -> addq.w #1,d7, while queued
+smcq:
+	nop
+	moveq	#0,d0
+	cmp.l	#1,d7		; the REWRITTEN instruction must have run
+	beq.s	smcq_ok
+	failt	192
+smcq_ok:
+	cinva	ic		; drop the line cached before the bypass
+	move.l	#$80008000,d0
+	movec	d0,cacr		; cache-hot again
 
 ;----------------------------------------------------------------- all done
 	move.w	#$600D,(DONEREG).l

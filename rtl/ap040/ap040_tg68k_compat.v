@@ -84,7 +84,8 @@ module ap040_tg68k_compat
 	output        debug_busy,
 	output        debug_fault,
 	output        debug_halted,
-	output [255:0] debug_status
+	output [255:0] debug_status,
+	output [127:0] debug_status2
 );
 
 // core to MMU
@@ -97,7 +98,31 @@ wire [31:0] mem_wdata;
 wire  [2:0] mem_fc;
 wire        mem_ack;
 wire [31:0] mem_rdata;
-wire        mem_flt;
+wire        mem_flt_mmu;
+// Core-side stall watchdog.  Every prior watchdog counts a DOWNSTREAM
+// request (CPU port, walker port), so a transaction lost between the
+// core and those ports -- or a wedge in the clock-enable machinery the
+// downstream layers are gated by -- stalls the core forever with every
+// watchdog blind: the live NetBSD freeze shows exactly that (identical
+// silent halt across three memory-path-hardened builds, no fault frame
+// ever stacked).  This one watches the CORE's own held request on the
+// free-running clock (a clkena wedge cannot stop the count) and injects
+// an access error through the same mem_flt input the MMU uses; the
+// well-tested fault path then reports it.  2^21 cycles at 28 MHz is
+// ~75 ms -- beyond every legitimate stall including all downstream
+// timeout chains.  If a freeze persists with no fault reported even
+// with this armed, the core is not holding a request at all: a
+// clock-enable or internal-FSM wedge, which is itself the decisive
+// diagnostic.
+wire        core_stall_flt;
+ap040_bus_timeout #(.COUNTER_BITS(21)) core_stall_watchdog (
+	.clk(clk),
+	.nreset(nreset),
+	.req(mem_req),
+	.complete(mem_ack | mem_flt_mmu),
+	.berr(core_stall_flt)
+);
+wire        mem_flt = mem_flt_mmu | core_stall_flt;
 
 // MMU to cache
 wire        mm_req, mm_write, mm_instr;
@@ -184,7 +209,8 @@ ap040_core #(
 	.debug_busy(debug_busy),
 	.debug_fault(debug_fault),
 	.debug_halted(debug_halted),
-	.debug_status(debug_status)
+	.debug_status(debug_status),
+	.debug_status2(debug_status2)
 );
 
 ap040_mmu mmu (
@@ -209,7 +235,7 @@ ap040_mmu mmu (
 	.c_fc(mem_fc),
 	.c_ack(mem_ack),
 	.c_rdata(mem_rdata),
-	.c_flt(mem_flt),
+	.c_flt(mem_flt_mmu),
 
 	.pt_req(pt_req),
 	.pt_write(pt_write),
@@ -247,11 +273,64 @@ ap040_mmu mmu (
 	.m_nocache(mm_nocache)
 );
 
+// The MMU's table walker writes U/M bits into page descriptors over its
+// own port, behind the data cache.  Nothing else invalidates those lines,
+// so a descriptor the CPU had previously read AS DATA would go stale --
+// the last coherence hole once the internal caches are enabled (audit
+// 5.5).  The walker sits inside this module, so the invalidate is
+// generated here rather than plumbed through the SoC: its address is
+// already physical, and the cache is physically tagged.
+//
+// The chipset pulse arrives from a CDC edge detector and cannot be held,
+// so it wins the port; the walker's own invalidate waits at most a cycle.
+// A second walker write cannot arrive that fast (each is a full memory
+// transaction), so one pending slot is enough.
+reg         wsnp_pend;
+reg  [31:0] wsnp_addr;
+reg         walker_wr_d;
+wire        walker_wr_edge = (walker_req & walker_we) & ~walker_wr_d;
+
+always @(posedge clk) begin
+	if (!nreset) begin
+		walker_wr_d <= 1'b0;
+		wsnp_pend   <= 1'b0;
+		wsnp_addr   <= 32'd0;
+	end
+	else begin
+		walker_wr_d <= walker_req & walker_we;
+		if (walker_wr_edge) begin
+			wsnp_pend <= 1'b1;
+			wsnp_addr <= walker_addr;
+		end
+		else if (wsnp_pend && !cache_snoop_stb)
+			wsnp_pend <= 1'b0;      // issued on the port this cycle
+	end
+end
+
+wire        snp_stb  = cache_snoop_stb | wsnp_pend;
+wire [31:0] snp_addr = cache_snoop_stb ? cache_snoop_addr : wsnp_addr;
+
 generate
 if (AP040_ENABLE_CACHE != 0) begin : g_cache
 	// With the snoop port wired up, chip RAM is cacheable too: a chipset
 	// write invalidates the line before the CPU can see stale data.  ROM
 	// and IO stay out (nothing snoops those, and IO must never be cached).
+	//
+	// DATA ONLY.  The snoop invalidate reaches just the D bank
+	// (ap040_cache port B writes row {1'b0, set}, and store_inv
+	// likewise), so the sentence above was never true of the I-cache:
+	// code written into chip RAM by the blitter, trackdisk DMA, or a CPU
+	// decruncher stayed stale in the I bank, and A500-era programs that
+	// predate caches never CINV.  Phenomena's Enigma crashed exactly
+	// here -- it runs with the internal caches forced off and fails with
+	// them on, from the first commit that enabled them.  On a real 040
+	// Amiga this cannot happen because 68040.library marks chip RAM
+	// noncacheable through the MMU; with the MMU off, nothing does.
+	// So instruction fetches from the chip window bypass the cache, and
+	// only the snooped D side caches chip RAM.  cache_allow_all (the
+	// benches' everything-cacheable mode; production ties it 0) keeps
+	// the bypass out of simulation programs, which run at low addresses
+	// and would otherwise lose all I-cache coverage.
 	wire cache_chip = (mm_addr[31:21] == 11'd0);          // $000000-$1fffff
 	wire cache_win =
 		((mm_addr[31:27] == cache_z3_base0) && cache_z3_ena0) ||
@@ -280,9 +359,10 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.c_addr(mm_addr),
 		.c_wdata(mm_wdata),
 		.c_fc(mm_fc),
-		.c_nocache(mm_nocache | ~cache_allow),
-		.s_stb(cache_snoop_stb),
-		.s_addr(cache_snoop_addr),
+		.c_nocache(mm_nocache | ~cache_allow |
+		           (mm_instr & cache_chip & ~cache_allow_all)),
+		.s_stb(snp_stb),
+		.s_addr(snp_addr),
 		.c_ack(mm_ack),
 		.c_rdata(mm_rdata),
 
@@ -294,7 +374,8 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.m_wdata(b_wdata),
 		.m_fc(b_fc),
 		.m_ack(b_ack),
-		.m_rdata(b_rdata)
+		.m_rdata(b_rdata),
+		.m_err(berr)
 	);
 end
 else begin : g_nocache
