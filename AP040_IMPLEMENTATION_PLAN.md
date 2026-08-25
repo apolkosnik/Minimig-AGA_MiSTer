@@ -733,6 +733,80 @@ contract class (cyc kill, ph1/ph2 catching, level-ack consumption) that
 produced the ghost-transaction bug.  After P2, sim and silicon see identical
 cycle relationships, which P3+ depend on for debuggability.
 
+### P2 SCOPED against the code (2026-08-24), and it is the critical path
+
+X2.2b stage 2 was costed and deferred behind P2 (see X2.2b above): the cheap
+route it wanted -- multiplexing a second lookup onto spare ce phases -- needs
+spare ce phases, and today `ce` is cpu_wrapper's stall enable, not a 4:1
+divider.  P2 is what creates them.  Note the ordering that follows, because
+it is easy to get backwards: AREA does not gate P2.  Area gates the
+DUPLICATION route for stage 2, and P2 removes the need for that route
+entirely, so P2 comes first and the area question may never need answering.
+
+What P2 actually touches, read rather than assumed:
+
+  * Minimig.sv: cpu_wrapper is instantiated with .clk(clk_sys) (line ~348).
+    That becomes clk_114 plus a 4:1 enable.  cpu_ph1/cpu_ph2 are ALREADY
+    generated on clk_114, so they stop being a crossing and become plain
+    same-domain signals.
+  * cpu_wrapper.v: clkena_in = ~cpu_req | bus_complete | bus_berr gains the
+    4:1 term.  The harder part is the chip stage machine, which is
+    `always @(negedge clk, negedge reset)` and samples ph1n/ph2n registered
+    off the opposite edge -- a negedge machine at 4:1 on a 114MHz clock is
+    not the same shape, and this is the piece to design rather than port.
+  * ram_cs_guard exists ONLY for the level-ack consumption contract across
+    the phase relationship (read its header: the TG68K-era `cyc` marker
+    guessed the consumption edge from the PLL phase and starved the CPU at
+    half the alignments).  After P2 that contract is same-domain and the
+    module should be re-derived or deleted, not carried over.
+  * Minimig.sdc:36-37 is the clk_sys -> clk_114 multicycle 2/1 exception.
+    It goes away for the CPU paths, replaced by multicycle 4 on the
+    ce-qualified paths inside clk_114.  Minimig.sdc:4-5 (cpu_inst -> ram)
+    wants re-deriving against the new relationship at the same time.
+  * tests: tb_cpu_wrapper_chip's CPU_PHASE parameter sweeps the four PLL
+    edge alignments.  After P2 there is one alignment, so the sweep
+    collapses -- which is the point, and is the cleanest confirmation that
+    the CDC contract class is gone.
+
+The payoff is not speed.  It is that the entire phase-contract class
+disappears: cyc kill, ph1/ph2 catching, level-ack consumption.  That class
+has cost more debugging time in this campaign than any other single thing --
+ram_cs_guard's own header documents a serve/kill loop that missed every
+sample edge at half the alignments -- and after P2 sim and silicon see
+identical cycle relationships, which P3+ need to be debuggable at all.
+
+### X2.7 AREA: measured 2026-08-24, and it is the CORE, not the periphery
+
+From the last fit, ALMs needed by hierarchy:
+
+    sys_top                          38238   (91% of 41910)
+      emu                            30982
+        cpu_wrapper                  21349
+          ap040_tg68k_compat         21179
+            ap040_core               19997   <- 52% of the whole design
+              ap040_fpu               5336
+              ap040_alu               1536
+            ap040_mmu                  736
+        minimig (the whole chipset)   4809
+      ascal                           2107
+
+  So the core's own FSM/decode -- 19997 less the FPU and ALU -- is about
+  13100 ALMs, 34% of the entire design, and the whole Amiga chipset is less
+  than a quarter of it.  Any area program is a CORE program; trimming the
+  periphery cannot reach it.
+
+  Where it plausibly goes: 57 DISTINCT Add instances are referenced inside
+  ap040_core in the fit report's timing nodes alone (plus 24 Selector, 13
+  Mux).  A 68k needs a handful of adders; 57 is one inferred per use site
+  across the big case, never shared because the operands come from
+  different registers in mutually exclusive states.  Sharing them is not
+  free -- one adder means a wide operand mux -- so the honest first step is
+  to group by operand class (address+displacement, PC+n, stack adjust) and
+  cost ONE group before touching the rest.
+
+  Not scheduled: P2 first.  If stage 2 becomes a multiplexing change, the
+  area budget is not on the critical path at all.
+
 ### Where the cycles actually go (measured 2026-08-16)
 
 Profiling every cycle of t_integer by core state (scratch instrumentation
