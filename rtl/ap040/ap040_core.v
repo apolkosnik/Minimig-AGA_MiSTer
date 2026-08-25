@@ -223,6 +223,26 @@ wire unused_in = ipl_autovector;
 // while a transfer is outstanding, which is the only time they are tested.
 wire mem_err = mem_req && (mem_flt | berr);
 
+// X2.2b stage 1: the memory port carries two channels, and mem_instr tags
+// which one owns the transaction in flight -- aerr_start already builds the
+// fault frame from it.  What was NOT explicit is the acknowledge: a data
+// state reaches its ack branch only when m_issued, and m_issued can only be
+// set while !epf_pend, so today an ack is attributed by construction rather
+// than by inspection.  That construction IS the serialization stage 2
+// removes, at which point an unqualified mem_ack would be delivered to
+// whichever channel happened to be looking.  Qualify both channels now,
+// while the stall still guarantees the answer, so the change that matters
+// later is not also the change that introduces the qualification.
+//
+// Behaviour is identical today: epf_pend is set only by instruction issues
+// (issue_ifetch's port-free branch and the fill engine, both mem_instr=1),
+// exception_prefetch owns the port outright on the exception path, and the
+// data states set mem_instr=0 at their own issue.
+wire d_ack = mem_ack && !mem_instr;   // data channel acknowledge
+wire i_ack = mem_ack &&  mem_instr;   // instruction channel acknowledge
+wire d_err = mem_err && !mem_instr;
+wire i_err = mem_err &&  mem_instr;
+
 //---------------------------------------------------------------------------
 // register file
 //---------------------------------------------------------------------------
@@ -577,7 +597,7 @@ wire       epf_ready_pc2 = epf_armed && (epf_count > 4'd1) &&
 // The word arriving this cycle bypasses the queue: a fetch that ran the
 // queue dry still completes in the acknowledge cycle, exactly as the
 // pre-queue demand fetch did.
-wire       epf_fwd_pc = epf_pend && mem_ack && !epf_kill && epf_armed &&
+wire       epf_fwd_pc = epf_pend && i_ack && !epf_kill && epf_armed &&
                         (epf_count == 4'd0) && (epf_next == mem_addr) &&
                         (epf_next == pc) && (epf_super == sr_s);
 wire [15:0] epf_fwd_word = epf_pend_lw ? mem_rdata[31:16] : mem_rdata[15:0];
@@ -1920,7 +1940,7 @@ always @(posedge clk) begin
 		// issue on epf_pend), so the flush here is pure bookkeeping.
 		// Both ranges are logical addresses; ftail never wraps past the
 		// page guard, so the plain compares suffice.
-		if (mem_ack && mem_write && epf_armed && epf_count != 4'd0 &&
+		if (d_ack && mem_write && epf_armed && epf_count != 4'd0 &&
 		    (mem_addr + 32'd3 >= epf_next) && (mem_addr < epf_ftail))
 			epf_flush;
 
@@ -1949,8 +1969,8 @@ always @(posedge clk) begin
 			// Reset/exception processing concludes by fetching four longwords.
 			// Any fault in this window is itself a double bus fault.
 			S_EPF_FILL: begin
-				if (mem_err) fatal_halt;
-				else if (mem_ack) begin
+				if (i_err) fatal_halt;
+				else if (i_ack) begin
 					epf_data[epf_fill] <= mem_rdata[15:0];
 					if (epf_fill == 3'd7) begin
 						epf_count <= 4'd8;
@@ -2070,11 +2090,11 @@ always @(posedge clk) begin
 					        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
 					m_issued <= 1;
 				end
-				else if (mem_err) begin
+				else if (d_err) begin
 					if (in_exc) fatal_halt;
 					else aerr_start;
 				end
-				else if (mem_ack) begin : mrd_b
+				else if (d_ack) begin : mrd_b
 					reg [31:0] acc;
 					acc = {m_acc[23:0], mem_rdata[7:0]};
 					m_acc <= acc;
@@ -2114,11 +2134,11 @@ always @(posedge clk) begin
 					        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
 					m_issued <= 1;
 				end
-				else if (mem_err) begin
+				else if (d_err) begin
 					if (in_exc) fatal_halt;
 					else aerr_start;
 				end
-				else if (mem_ack) begin
+				else if (d_ack) begin
 					m_issued <= 0;
 					if (m_bidx + 3'd1 == m_nbytes) state <= r_m_ret;
 					else m_bidx <= m_bidx + 3'd1;
@@ -2180,11 +2200,11 @@ always @(posedge clk) begin
 					        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
 					m_issued <= 1;
 				end
-				else if (mem_err) begin
+				else if (d_err) begin
 					if (in_exc) fatal_halt;
 					else aerr_start;
 				end
-				else if (mem_ack) begin
+				else if (d_ack) begin
 					m_val <= mem_rdata;
 					state <= r_m_ret;
 				end
@@ -2209,11 +2229,11 @@ always @(posedge clk) begin
 					        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
 					m_issued <= 1;
 				end
-				else if (mem_err) begin
+				else if (d_err) begin
 					if (in_exc) fatal_halt;
 					else aerr_start;
 				end
-				else if (mem_ack) begin
+				else if (d_ack) begin
 					state <= r_m_ret;
 				end
 			end
@@ -6001,7 +6021,7 @@ always @(posedge clk) begin
 		// executes.  This runs after the case statement so that any state
 		// which claimed the port this cycle keeps it; epf_issue/epf_flushed
 		// carry that decision here combinationally.
-		if (epf_pend && mem_ack) begin
+		if (epf_pend && i_ack) begin
 			// A longword request returns the word at the fetch address in
 			// [31:16] and its successor in [15:0]; a word request returns
 			// one word in [15:0].
@@ -6019,7 +6039,7 @@ always @(posedge clk) begin
 				end
 			end
 		end
-		else if (epf_pend && mem_err) begin
+		else if (epf_pend && i_err) begin
 			// A fault on a queue fetch.  If the core is waiting for exactly
 			// this word the access error is taken now, with the faulting
 			// request still in the mem_* registers that build the frame.

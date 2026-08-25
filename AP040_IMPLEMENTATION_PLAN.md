@@ -1154,6 +1154,34 @@ Staged so each stage is gateable on its own:
   3. Full concurrency with bus arbitration for two misses.  Smaller
      incremental win; only worth it if stage 2 leaves measurable wait.
 
+### X2.2b stage 1 SHIPPED (2026-08-24): channel-qualified acknowledge
+
+The port already tags its transaction: mem_instr says which channel owns it,
+and aerr_start builds the fault frame from it.  What was NOT explicit was the
+ACKNOWLEDGE.  A data state reaches its ack branch only when m_issued, and
+m_issued can only be set while !epf_pend, so an acknowledge was attributed by
+CONSTRUCTION -- and that construction is exactly the serialization stage 2
+removes.  Left alone, the change that adds concurrency would also be the
+change that first makes an ack ambiguous.
+
+So the qualification lands first, while the stall still guarantees the
+answer: d_ack/i_ack/d_err/i_err, and all 14 consumers routed to their own
+channel -- the four transfer states and the store-into-queue-window flush to
+the data channel, the queue forward, the fill engine's ack and fault, and the
+architectural four-longword exception prefetch to the instruction channel.
+Three uses stay port-level and become the arbiter's business in stage 2: the
+two "is the port free?" tests and the shared request deassert.
+
+Gate, as specified -- nothing changes:
+  * directed suite: all 51 leg logs BIT-IDENTICAL to the pre-change
+    baseline, cycle counts included.  Timing identity, not just pass/fail.
+  * v24 corpus AE: 38/38, RTE/RTR odd-PC address errors included.
+  * v24 corpus ODD_EXC: exactly 13 failures, the documented generator
+    artifacts -- the instruction-channel fault path is untouched.
+
+Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
+a change to the ISSUE rule alone; the acknowledge side is already correct.
+
 Hazards that must be argued explicitly, not discovered:
   * a store followed by a fetch of the same line -- the queue-vs-store
     snoop (3.2) must still see stores with two channels live;
