@@ -1182,6 +1182,49 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### X2.2b stage 2 COSTED (2026-08-24): it must follow P2, not precede it
+
+The staging above offered two routes for the second lookup and preferred
+one: "either duplicated tag storage per bank (area, and X2.7 says the budget
+is tight) or lookups time-multiplexed on alternate ce phases.  The core runs
+at ce=4, so the cache has spare cycles; multiplexing is the cheaper bet and
+should be costed first."  Costed:
+
+**The cheap route does not exist yet.**  The core does NOT run at ce=4 today.
+`ce` is cpu_wrapper's `clkena_in = ~cpu_req | bus_complete | bus_berr` -- a
+STALL enable on clk_sys, high whenever the core is not waiting on a
+transaction, not a 4:1 phase.  The 4:1 enable is P2 (28MHz -> clk_114 + 4:1
+clock enable), which has not been done.  There are no spare ce phases to
+multiplex a second lookup into.
+
+**The remaining route is duplication, and ALMs are the binding constraint.**
+A second concurrent lookup needs a second ATC lookup path and TTR compare in
+the MMU, a second tag comparator set, hit mux and request state in the cache,
+and a second read port on the data arrays.  Measured against the last fit:
+
+    Logic utilization    38,238 / 41,910 ALMs   91%
+    Total RAM blocks        250 /    553        45%
+    Worst setup slack     -0.517 (pll_hdmi; clk_114 and clk_sys close)
+
+  The RAM half is affordable.  cdata0..3 are 512x32 simple-dual-port
+  (one read address, one write address), ~2 M10K each; a true-dual-port
+  x32 needs parallel halves because TDP caps the per-port width, so call
+  it +8 blocks against 303 spare.  Nothing there is a problem.
+
+  The ALM half is the problem.  At 91% with a domain already failing
+  setup, adding two lookup datapaths is the wrong shape of change.
+
+**Consequence: stage 2 moves after P2.**  P2 is what turns the second lookup
+from a DUPLICATION problem (expensive in ALMs, unaffordable at 91%) into a
+MULTIPLEXING problem (nearly free in ALMs, which is what the staging assumed
+in the first place).  Doing stage 2 first buys ~3 of the 20.1 cycles a cached
+load spends, at the cost of the area budget and on a design that already
+misses timing -- and then P2 would have made it cheap anyway.
+
+Stage 1 (channel-qualified acknowledge) is unaffected and already shipped:
+it is pure bookkeeping, costs nothing, and is exactly the part that wants to
+be settled before either route is taken.
+
 Hazards that must be argued explicitly, not discovered:
   * a store followed by a fetch of the same line -- the queue-vs-store
     snoop (3.2) must still see stores with two channels live;
