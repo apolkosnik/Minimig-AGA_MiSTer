@@ -449,10 +449,19 @@ always @(posedge clk) begin
 					end
 				end
 				else if (pt_req && !pt_done) begin
-					// A PTEST first discards the matching entry in BOTH ATCs
-					// (WinUAE's mmu_flush_atc iterates the data and the
-					// instruction array), via the same sweep; the search
-					// itself starts from W_SWEEP's completion.
+					// A PTEST first discards the matching entry in BOTH ATCs,
+					// via the same sweep; the search itself starts from
+					// W_SWEEP's completion.
+					//
+					// VERIFIED 2026-08-24 against an audit claiming Motorola
+					// selects ONE ATC by DFC here.  It does not: PTEST calls
+					// mmu_flush_atc(addr, super, true) (cpummu.cpp:1427) and
+					// that walks both arrays --
+					//   for (type=0; type<ATC_TYPE; type++)
+					//     for (way=0; way<ATC_WAYS; way++) ...
+					// (cpummu.cpp:1493).  DFC selects the array the probe
+					// RESULT is installed in, which is pt_instr below, not
+					// the array the pre-flush clears.
 					sweep_on  <= 1;
 					sweep_cnt <= 0;
 					sw_pt     <= 1;
@@ -531,8 +540,20 @@ always @(posedge clk) begin
 					if (pt_ttr_hit) begin
 						// A TTR match reports T and R only -- the physical
 						// address field stays clear -- and a write probe
-						// against a write-protected TTR reports B (WinUAE
-						// mmu_op PTEST: MMU_MMUSR_B, not a G-bit pattern).
+						// against a write-protected TTR reports B.
+						//
+						// VERIFIED against the oracle 2026-08-24, because an
+						// audit claimed Motorola returns T|R here and that
+						// this is wrong.  cpummu.cpp:1429-1435 is explicit:
+						//   if (ttr_match == TTR_NO_WRITE && write)
+						//       regs.mmusr = MMU_MMUSR_B;
+						//   else
+						//       regs.mmusr = MMU_MMUSR_T | MMU_MMUSR_R;
+						// with MMU_MMUSR_B = 1<<11 (include/cpummu.h:103),
+						// T|R = 3, and mmu_match_ttr returning TTR_NO_WRITE
+						// exactly on MMU_TTR_BIT_WRITE_PROTECT
+						// (cpummu.cpp:573).  Manual-vs-reference goes to the
+						// reference; t_mmu 38 pins it.
 						pt_mmusr <= (pt_write && pt_ttr_w) ? 32'h0000_0800
 						                                   : 32'h0000_0003;
 						pt_done <= 1;
