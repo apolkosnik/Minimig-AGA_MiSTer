@@ -1,9 +1,9 @@
 ; MiSTer RTG -- mmu.library configuration
 ;
-; Append these two lines to ENVARC:MMU-Configuration (and copy to ENV:, or
-; reboot).  mmu.library reads the file when it initialises, which is before
-; SetPatch installs 68040.library, so the regions are already tagged by the
-; time anything builds a page table.
+; Append to ENVARC:MMU-Configuration (then copy to ENV:, or reboot).
+; mmu.library reads the file when it initialises, which is before SetPatch
+; installs 68040.library, so the regions are tagged before anything builds a
+; page table.
 ;
 ; WHY THIS IS NEEDED
 ;
@@ -26,24 +26,40 @@
 ; $0000 where the hardware returns $5001 -- and every pixel write goes
 ; nowhere.  Hence: works before SetPatch, black screen after it.
 ;
-; Since there is no ConfigDev to match on, these use literal addresses rather
-; than {base}.  Standalone SetCacheMode is supported for exactly this case.
+; SYNTAX -- read this before editing, the two forms are not interchangeable
 ;
-; The flags follow what the stock file uses for every other board: a register
-; block is Valid IOSpace CacheInhibit (cache-inhibited SERIALIZED, so ordering
-; is preserved across register writes), and video memory adds NonSerial
-; Imprecise for fast uncached writes.  Compare the VA2000 entry, which splits
-; the same way.  Note the framebuffer already reads back as Imprecise
-; NonSerial above -- the only thing being changed there is Blank -> Valid
-; IOSpace.
+; With no ConfigDev there is nothing for a "For" clause to match, so these
+; are standalone commands with literal addresses.  The stock file's lines are
+; all positional inside a For clause ("For 8512 34 Z3 SetCacheMode {base}
+; {size} Valid IOSpace CacheInhibit"); the form documented for standalone use
+; with literal addresses is the KEYWORD form, which is what is used below:
+;
+;     SetCacheMode from <address> size <size> <flags>
+;
+; If your mmu.library rejects that, the positional equivalent is
+;
+;     SetCacheMode <address> <size> <flags>
+;
+; and either way mmu.library reports a parse error at boot rather than
+; failing silently, so a wrong guess is visible immediately.
+;
+; The flags follow the stock file's own convention for a graphics board, and
+; the VA2000 entry splits exactly this way: a register block is Valid IOSpace
+; CacheInhibit -- cache-inhibited SERIALIZED, so ordering is preserved across
+; register writes -- and video memory adds NonSerial Imprecise for fast
+; uncached writes.  Note the framebuffer already reads back as Imprecise
+; NonSerial above; the only thing changing there is Blank -> Valid IOSpace.
 ;
 ; Addresses come from MiSTer.card.asm: REGISTER_BASE $b80100 lives in the 4K
 ; page fastchip decodes at $B80000-$B80FFF (addr[23:12] == 'hB80, palette
 ; included), and MEMORY_BASE $02000000 with MEMORY_SIZE $800000.  Both are
 ; page aligned at the 4K page size MuScan reports.
+;
+; VERIFY AFTERWARDS with showmmu: $00B80000 should read "CacheInhibit I/O
+; space", and the 0x02000000-0x027FFFFF line should lose "Blank".
 
 ;MiSTer RTG registers ($B80000-$B80FFF: control block and CLUT)
-SetCacheMode	0x00b80000	0x00001000	Valid IOSpace CacheInhibit
+SetCacheMode from 0x00b80000 size 0x00001000 Valid IOSpace CacheInhibit
 
 ;MiSTer RTG framebuffer (MEMORY_BASE, MEMORY_SIZE = 8MB)
-SetCacheMode	0x02000000	0x00800000	Valid IOSpace CacheInhibit NonSerial Imprecise
+SetCacheMode from 0x02000000 size 0x00800000 Valid IOSpace CacheInhibit NonSerial Imprecise
