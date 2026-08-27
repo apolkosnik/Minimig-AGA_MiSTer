@@ -1307,6 +1307,63 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### Streaming and RMW measured; UNIFIED DUAL-PORT L1 proposed (2026-08-27)
+
+Clean numbers (code L1-cached via scratch bypass-off, clk_sys):
+
+                                 TURBO=1     TURBO=0 (raw 7MHz bus)
+    streaming read /long            20.0        54.0
+    streaming write /long           15.8        42.0
+    RMW one line (2R+2W) /iter     143.3       401.1
+    warm re-read /long              10.7
+
+  * The raw 7MHz bus (54 cyc/long) is NOT what hardware chip does (22):
+    on the board, chip fills take the turbo/controller path.  The bench
+    turbo figure (20) brackets hardware chip (22) and fast (17); precise
+    attribution of the remaining 22-vs-17 needs tb_dualram_turbo (it has
+    BOTH real controllers) with the $F108 stamp ported to it -- the
+    difference is a controller-path property (SDRAM+cache vs DDR3, fill
+    efficiency), not a core property.  Not yet done.
+  * RMW is the scandal: 143 clk_sys for 2 reads + 2 writes of ONE resident
+    line, ~36 cyc per access against 10.7 warm -- the whole-set store
+    invalidation forces a full refill after every store.  This is the
+    counters-and-linked-structures pattern ordinary code does constantly.
+
+### PROPOSAL: unified dual-port L1 (suggested by Adam, 2026-08-27)
+
+FPGA block RAM is true-dual-port, and RAM is the cheap resource here (250 of
+553 M10K used) while ALMs are the scarce one (91%).  A unified L1 exploits
+that:
+
+  * I-fetch and data lookup SIMULTANEOUSLY: tag array replicated (standard
+    FPGA trick for a third port -- both copies written identically, each
+    copy serves one read port), data array likewise.  Costs block RAM and a
+    second compare (modest ALMs), not a second cache.  This is X2.2b stage
+    2's concurrency without the duplication problem that deferred it --
+    and without P2, since it is enable-ratio-agnostic.
+  * SELF-MODIFYING CODE WORKS BY CONSTRUCTION: one storage means a store
+    hits the same line an I-fetch reads.  The Enigma bypass (measured cost:
+    25-34% of all chip-window execution) retires without building a
+    separate I-bank invalidation path.  The store-vs-queue window stays
+    handled by the existing fetch-queue flush.
+  * The whole-set store invalidation can die in the same redesign: with a
+    second tag read port, a store can invalidate (or update) its matching
+    WAY via read-modify-write instead of zeroing the row -- fixing the
+    36-cyc RMW pattern above.
+  * MMU: concurrent I+D lookups need two ATC/TTR compares; the ATC RAM
+    replicates in block RAM like the tags, the TTR compares are
+    combinational.  Same trick, same cheap resource.
+  * 040 semantics: CINV IC/DC selectivity becomes over-invalidation on a
+    unified cache -- correctness-safe under write-through.
+  * Risk: I/D set contention.  Mitigate with more sets: doubling to 8KB
+    costs only block RAM, which is 55% free.
+
+This SUPERSEDES both "I-bank invalidation path" (previous highest-value
+item) and X2.2b stage 2 as separate efforts: one redesign delivers the
+measured 25-34% bypass win, the stage-2 concurrency win (~3 cyc/load), and
+the RMW fix, for block RAM plus modest ALMs.  It is the successor to
+ap040_cache, to be built as such -- not patched in.
+
 ### Chip-window cost DECOMPOSED (2026-08-27): the I-fetch bypass is 25-34%
 
 Measured with a new $F108-stamped bandwidth probe (asm/bw_probe.s) on the

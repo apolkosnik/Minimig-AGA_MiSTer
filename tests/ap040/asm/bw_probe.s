@@ -75,6 +75,56 @@ bw4:
 	dbra	d6,bw4
 	move.w	#$0041,($F108).l
 
+	; ---- block 5: STREAMING reads -- the xsysinfo regime -------------
+	; Sweep a 32KB region ($4000-$BFFF) so every line is a miss: the L1
+	; is far smaller, so this measures the line-fill path, which is what
+	; a bandwidth benchmark over a large buffer actually exercises.
+	move.w	#$0050,($F108).l
+	lea	($4000).l,a0
+	move.w	#1023,d6		; 1024 x 32 bytes = 32KB
+bw5:
+	movem.l	(a0)+,d0-d5		; 24 bytes
+	addq.l	#8,a0			; skip to next 32B so lines never rehit
+	dbra	d6,bw5
+	move.w	#$0051,($F108).l
+
+	; ---- block 6: streaming again, warmed -- proves it still misses --
+	move.w	#$0060,($F108).l
+	lea	($4000).l,a0
+	move.w	#1023,d6
+bw6:
+	movem.l	(a0)+,d0-d5
+	addq.l	#8,a0
+	dbra	d6,bw6
+	move.w	#$0061,($F108).l
+
+	; ---- block 7: streaming WRITES over the same region --------------
+	move.w	#$0070,($F108).l
+	lea	($4000).l,a0
+	move.w	#1023,d6
+bw7:
+	movem.l	d0-d5,(a0)
+	lea	32(a0),a0
+	dbra	d6,bw7
+	move.w	#$0071,($F108).l
+
+	; ---- block 8: read-modify-write of ONE line, repeatedly ----------
+	; The whole-set store invalidation case: a store kills its own set,
+	; so the next read of the same line refills.  Real code does this
+	; constantly (counters, linked structures).
+	move.w	#$0080,($F108).l
+	move.w	#255,d6
+	lea	($3000).l,a0
+bw8:
+	move.l	(a0),d0
+	addq.l	#1,d0
+	move.l	d0,(a0)
+	move.l	4(a0),d1
+	addq.l	#1,d1
+	move.l	d1,4(a0)
+	dbra	d6,bw8
+	move.w	#$0081,($F108).l
+
 	move.w	#$600D,($F102).l
 	stop	#$2700
 
