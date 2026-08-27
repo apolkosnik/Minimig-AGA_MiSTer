@@ -101,17 +101,17 @@ module ap040_ucache
 localparam TAGW = 21;
 localparam ROWW = 2 + 4 + 4*TAGW;
 
-// One data RAM per way, 512 longwords ({set[6:0], word[1:0]}), written with
-// byte enables: a line fill writes all four lanes, a store merge writes only
-// the lanes the store touches.  The byte-conditional writes below are the
-// canonical byte-enable inference pattern, so these stay block RAM.
-(* ramstyle = "no_rw_check" *) reg [31:0] cdata0 [0:511];
-(* ramstyle = "no_rw_check" *) reg [31:0] cdata1 [0:511];
-(* ramstyle = "no_rw_check" *) reg [31:0] cdata2 [0:511];
-(* ramstyle = "no_rw_check" *) reg [31:0] cdata3 [0:511];
-
+// One data RAM per way, 512 longwords ({set[6:0], word[1:0]}).  Each way is
+// built from FOUR byte-wide arrays rather than one 32-bit array with
+// conditional part-selects: a line fill writes all four lanes, a store merge
+// writes only the lanes it touches, and byte-wide arrays are the only shape
+// Quartus 17.0 reliably infers as M10K under that pattern.  Writing
+// `if (be[n]) arr[idx][hi:lo] <= ...` into a 32-bit array instead sent all
+// four ways into LABs: 87,184 ALMs, 208% of the device, build refused.  The
+// same split is what cpu_cache_new's dpram_be_1024x16 does, for the same
+// reason.
 wire [ROWW-1:0] tag_q;
-reg  [31:0] data_q0, data_q1, data_q2, data_q3;
+wire [31:0] data_q0, data_q1, data_q2, data_q3;
 
 wire        tag_we;
 wire  [6:0] tag_ridx, tag_widx;
@@ -138,39 +138,18 @@ dpram #(7, ROWW) ctag_ram
 	.q_b       ()
 );
 
-// data writes: fills assert all four lanes, merges only the store's lanes
-always @(posedge clk) begin
-	if (ce & cd_wsel[0]) begin
-		if (cd_be[3]) cdata0[cd_widx][31:24] <= cd_wdat[31:24];
-		if (cd_be[2]) cdata0[cd_widx][23:16] <= cd_wdat[23:16];
-		if (cd_be[1]) cdata0[cd_widx][15:8]  <= cd_wdat[15:8];
-		if (cd_be[0]) cdata0[cd_widx][7:0]   <= cd_wdat[7:0];
-	end
-	if (ce & cd_wsel[1]) begin
-		if (cd_be[3]) cdata1[cd_widx][31:24] <= cd_wdat[31:24];
-		if (cd_be[2]) cdata1[cd_widx][23:16] <= cd_wdat[23:16];
-		if (cd_be[1]) cdata1[cd_widx][15:8]  <= cd_wdat[15:8];
-		if (cd_be[0]) cdata1[cd_widx][7:0]   <= cd_wdat[7:0];
-	end
-	if (ce & cd_wsel[2]) begin
-		if (cd_be[3]) cdata2[cd_widx][31:24] <= cd_wdat[31:24];
-		if (cd_be[2]) cdata2[cd_widx][23:16] <= cd_wdat[23:16];
-		if (cd_be[1]) cdata2[cd_widx][15:8]  <= cd_wdat[15:8];
-		if (cd_be[0]) cdata2[cd_widx][7:0]   <= cd_wdat[7:0];
-	end
-	if (ce & cd_wsel[3]) begin
-		if (cd_be[3]) cdata3[cd_widx][31:24] <= cd_wdat[31:24];
-		if (cd_be[2]) cdata3[cd_widx][23:16] <= cd_wdat[23:16];
-		if (cd_be[1]) cdata3[cd_widx][15:8]  <= cd_wdat[15:8];
-		if (cd_be[0]) cdata3[cd_widx][7:0]   <= cd_wdat[7:0];
-	end
-	if (ce & cd_rd_en) begin
-		data_q0 <= cdata0[cd_ridx];
-		data_q1 <= cdata1[cd_ridx];
-		data_q2 <= cdata2[cd_ridx];
-		data_q3 <= cdata3[cd_ridx];
-	end
-end
+ap040_ucache_way way0 (.clk(clk), .ce(ce), .we(cd_wsel[0]), .be(cd_be),
+	.waddr(cd_widx), .wdata(cd_wdat), .rd_en(cd_rd_en), .raddr(cd_ridx),
+	.q(data_q0));
+ap040_ucache_way way1 (.clk(clk), .ce(ce), .we(cd_wsel[1]), .be(cd_be),
+	.waddr(cd_widx), .wdata(cd_wdat), .rd_en(cd_rd_en), .raddr(cd_ridx),
+	.q(data_q1));
+ap040_ucache_way way2 (.clk(clk), .ce(ce), .we(cd_wsel[2]), .be(cd_be),
+	.waddr(cd_widx), .wdata(cd_wdat), .rd_en(cd_rd_en), .raddr(cd_ridx),
+	.q(data_q2));
+ap040_ucache_way way3 (.clk(clk), .ce(ce), .we(cd_wsel[3]), .be(cd_be),
+	.waddr(cd_widx), .wdata(cd_wdat), .rd_en(cd_rd_en), .raddr(cd_ridx),
+	.q(data_q3));
 
 //---------------------------------------------------------------------------
 // request classification
@@ -610,5 +589,47 @@ always @(posedge clk) begin
 		endcase
 	end
 end
+
+endmodule
+
+//--------------------------------------------------------------------------//
+// One cache way's data storage: 512 longwords with byte enables, built from //
+// four byte-wide arrays so each infers as block RAM.  Reads free-run under  //
+// ce exactly as the split cache's did -- the address is held for the whole  //
+// request, so a stalled ce simply re-reads the same row.                    //
+//--------------------------------------------------------------------------//
+module ap040_ucache_way
+(
+	input             clk,
+	input             ce,
+	input             we,
+	input       [3:0] be,
+	input       [8:0] waddr,
+	input      [31:0] wdata,
+	input             rd_en,
+	input       [8:0] raddr,
+	output     [31:0] q
+);
+
+(* ramstyle = "no_rw_check" *) reg [7:0] b3 [0:511];
+(* ramstyle = "no_rw_check" *) reg [7:0] b2 [0:511];
+(* ramstyle = "no_rw_check" *) reg [7:0] b1 [0:511];
+(* ramstyle = "no_rw_check" *) reg [7:0] b0 [0:511];
+reg [7:0] q3, q2, q1, q0;
+
+always @(posedge clk) begin
+	if (ce & we & be[3]) b3[waddr] <= wdata[31:24];
+	if (ce & we & be[2]) b2[waddr] <= wdata[23:16];
+	if (ce & we & be[1]) b1[waddr] <= wdata[15:8];
+	if (ce & we & be[0]) b0[waddr] <= wdata[7:0];
+	if (ce & rd_en) begin
+		q3 <= b3[raddr];
+		q2 <= b2[raddr];
+		q1 <= b1[raddr];
+		q0 <= b0[raddr];
+	end
+end
+
+assign q = {q3, q2, q1, q0};
 
 endmodule
