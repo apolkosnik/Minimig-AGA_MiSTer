@@ -297,6 +297,9 @@ ap040_walker_cdc walker_cdc
 
 sdram_ctrl ram
 (
+	// fill port unused in this bench: the CPU side ties fill_avail low
+	.fill_req(1'b0), .fill_addr(21'd0), .fill_bsel(2'd0),
+	.fill_dat(), .fill_beat(), .fill_strb(), .fill_ack(),
 	.sysclk(clk113),
 	.c_7m(c_7m),
 	.reset_n(reset),

@@ -272,7 +272,10 @@ wire        r_wk_ack;
 wire [31:0] r_wk_rdata;
 
 sdram_ctrl #(.CPU_CACHE(1)) ctl_ref
+// the reference controller ignores the fill port in this bench; ties below
 (
+	.fill_req(1'b0), .fill_addr(21'd0), .fill_bsel(2'd0),
+	.fill_dat(), .fill_beat(), .fill_strb(), .fill_ack(),
 	.sysclk(clk113), .c_7m(c_7m), .reset_n(reset), .cache_rst(reset),
 	.cache_inhibit(1'b0), .cpu_cache_ctrl(4'b0011),
 

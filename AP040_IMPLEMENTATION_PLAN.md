@@ -2316,3 +2316,36 @@ COVERAGE NOTES, honest ones:
     exposure.
   - t_cache "fails" on the chip bench because that bench has no POKEREG
     port; it never ran there (tb_prog leg only).  Pre-existing, not new.
+
+### The fill port on sdram_ctrl -- because the hardware runs the SINGLE build
+
+A check of the build config stopped the first RBF attempt: Minimig.qsf uses
+sys_analog.tcl with MISTER_DUAL_SDRAM commented out, and the build logs of
+the RBFs measured on hardware confirm the macro was never defined.  The
+user's board runs plain sdram_ctrl -- where the fill path just landed was
+dormant.  (The dual-SDRAM variant trades the analog VGA pins for the second
+module; sdram32_ctrl refuses boards without it via dual_ok.)
+
+So sdram_ctrl now carries the same port, implemented as sdram32_ctrl's
+16-bit mode verbatim: two 4-word half bursts per line, the critical half
+first (fill_bsel[1]; bsel[0] ignored), fill_slot released at state 12 so the
+second half pre-arbitrates in the same CCK.  PRE_FILL is lowest arbitration
+priority; the burst words are taken from sdata_reg_q at states 9/11/13/15,
+one state after the CPU_READCACHE strobes, paired into longwords.
+
+COVERAGE CLOSED.  tb_sdram_turbo now carries the REAL stack end to end --
+cpu_wrapper -> ap040_fill_cdc -> sdram_ctrl, the exact configuration the
+single-SDRAM build ships -- in both CPU_PHASE variants, and the regression
+runs t_integer/t_mmu/t_fpu/t_exceptions over it.  The FILL_AVAIL bench
+parameter rebuilds with the path off, which is the A/B knob and the proof of
+engagement:
+
+    t_integer, tb_sdram_turbo (real sdram_ctrl, real CDC):
+        FILL_AVAIL=0   73087 cycles
+        FILL_AVAIL=1   62143 cycles     -15.0%
+
+A 15% gain on a general-purpose program (not a streaming probe) over the
+real controller is the number that predicts hardware.
+
+Remaining coverage gap, unchanged: a chipset DMA write snooping a line
+mid-fast-fill.  The snoop guard is shared with the slow fill via any_fill.

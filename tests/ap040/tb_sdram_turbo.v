@@ -24,6 +24,7 @@ always #44 clk113 = ~clk113;
 reg [3:0] div = 0;
 always @(posedge clk113) div <= div + 1'd1;
 parameter CPU_PHASE = 3;
+parameter FILL_AVAIL = 1;
 wire clk28 = (div[1:0] == CPU_PHASE[1:0]) | (div[1:0] == ((CPU_PHASE[1:0] + 2'd1) & 2'd3));
 
 // 7MHz square for the SDRAM slot engine (16 clk113 per CCK)
@@ -144,11 +145,29 @@ reg        ipl_set_w = 0, ipl_arm_w = 0;
 reg  [2:0] ipl_set_v = 0;
 reg [15:0] ipl_arm_v = 0;
 
+wire        tb_fill_req;
+wire [24:4] tb_fill_addr;
+wire  [1:0] tb_fill_bsel;
+wire[127:0] tb_fill_line;
+wire        tb_fill_done;
+wire        mf_req;
+wire [24:4] mf_addr;
+wire  [1:0] mf_bsel;
+wire [31:0] mf_dat;
+wire  [1:0] mf_beat;
+wire        mf_strb;
+wire        mf_ack;
+
 cpu_wrapper cpu
 (
-	// no 32-bit fill port: sdram_ctrl has none, so the L1 keeps the
-	// 16-bit path throughout this bench
-	.fill_avail(1'b0), .fill_line(128'd0), .fill_done(1'b0),
+	// the REAL 32-bit fill path: cpu_wrapper -> ap040_fill_cdc ->
+	// sdram_ctrl's fill port, the exact stack the single-SDRAM build
+	// ships.  FILL_AVAIL=0 rebuilds the bench with the path off, which
+	// is both the A/B measurement knob and proof the path is really
+	// engaged when it is on.
+	.fill_avail(FILL_AVAIL[0]),
+	.fill_req(tb_fill_req), .fill_addr(tb_fill_addr), .fill_bsel(tb_fill_bsel),
+	.fill_line(tb_fill_line), .fill_done(tb_fill_done),
 	.snoop_tgl(1'b0),
 	.snoop_adr(24'd0),
 	.reset(reset),
@@ -291,8 +310,26 @@ ap040_walker_cdc walker_cdc
 );
 
 
+ap040_fill_cdc fill_cdc
+(
+	.s_clk(clk28), .s_reset_n(reset),
+	.s_req(tb_fill_req), .s_addr(tb_fill_addr), .s_bsel(tb_fill_bsel),
+	.s_done(tb_fill_done), .s_line(tb_fill_line),
+	.m_clk(clk113), .m_reset_n(reset),
+	.m_req(mf_req), .m_addr(mf_addr), .m_bsel(mf_bsel),
+	.m_dat(mf_dat), .m_beat(mf_beat), .m_strb(mf_strb), .m_ack(mf_ack)
+);
+
 sdram_ctrl ram
 (
+	.fill_req(mf_req),
+	.fill_addr(mf_addr),
+	.fill_bsel(mf_bsel),
+	.fill_dat(mf_dat),
+	.fill_beat(mf_beat),
+	.fill_strb(mf_strb),
+	.fill_ack(mf_ack),
+
 	.sysclk(clk113),
 	.c_7m(c_7m),
 	.reset_n(reset),

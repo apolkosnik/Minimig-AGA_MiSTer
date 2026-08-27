@@ -561,16 +561,21 @@ sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ram1
 	.fill_ack     (m_fill_ack      ),
 `else
 wire dual_fault = 1'b0;
-// plain sdram_ctrl has no 32-bit fill port: the bridge stays idle and the
-// L1 uses the 16-bit path everywhere
-wire fill_avail = 1'b0;
-assign m_fill_dat  = 32'd0;
-assign m_fill_beat = 2'd0;
-assign m_fill_strb = 1'b0;
-assign m_fill_ack  = 1'b0;
+// sdram_ctrl carries the same fill port (two 4-word half bursts per line),
+// so the single-SDRAM build -- the one actually measured on hardware --
+// gets the 32-bit fill path too
+wire fill_avail = 1'b1;
 
 sdram_ctrl #(.CPU_CACHE(1)) ram1
 (
+	.fill_req     (m_fill_req      ),
+	.fill_addr    (m_fill_addr     ),
+	.fill_bsel    (m_fill_bsel     ),
+	.fill_dat     (m_fill_dat      ),
+	.fill_beat    (m_fill_beat     ),
+	.fill_strb    (m_fill_strb     ),
+	.fill_ack     (m_fill_ack      ),
+
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
 	.c_7m         (c1              ),
