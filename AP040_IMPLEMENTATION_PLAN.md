@@ -2496,3 +2496,29 @@ reaching for without the shipping build paying for it.
 WHAT THIS SAYS ABOUT THE OTHER CHANGES.  It exonerates them: the fill path is
 inert on hardware (chip RAM is cache-inhibited), and early restart and CWF
 are what moved FAST +6.8%.  NetBSD broke earlier and for an unrelated reason.
+
+### Known deviation found while chasing the above: walker writes are not
+### snooped into the L1, and structurally cannot be
+
+The table walker updates U and M bits by writing the descriptor through its
+own dedicated port.  Those writes are snooped into cpu_cache_new inside the
+controllers (sdram_ctrl and ddram_ctrl both drive .snoop_act(walker_snoop)),
+but NOT into the AP040's L1: the L1's snoop comes from chip_snoop_tgl, the
+chipset DMA snoop.
+
+It could not be routed there as things stand even if one wanted to.
+cpu_wrapper takes snoop_adr as [24:1] and presents it to the cache as
+{7'd0, snoop_adr, 1'b0} (cpu_wrapper.v:118, :261), so the snoop path can
+only express the low 24 bits of address space.  Z3 and DDR3 descriptors live
+above that and have no representation.
+
+Consequence: a page-table word the CPU has read (and so cached) goes stale
+in the L1 when the walker sets its U or M bit.  A kernel that reads PTEs
+back to decide whether a page is dirty can therefore see M clear on a page
+the walker has already marked modified.
+
+NOT the boot regression -- it predates the unified L1, and NetBSD booted on
+-021b with the same hole -- and it is recorded here rather than fixed
+because widening the snoop path is a cpu_wrapper interface change.  But it
+is squarely on NetBSD's path (it is the only OS here that walks DDR3) and
+belongs on the conformance backlog next to the other audited deviations.
