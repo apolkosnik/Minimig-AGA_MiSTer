@@ -88,6 +88,26 @@ module ap040_ucache
 	input      [31:0] m_rdata,
 	input             m_err,
 
+	// 32-bit line fill port, reached through ap040_fill_cdc (the L1 runs
+	// at clk_sys, sdram32_ctrl at clk_114).  Optional: when f_ok is low --
+	// the target is not served by a controller that has the port, or it is
+	// not wired at all -- the fill falls back to the master side above and
+	// this module behaves exactly as it did before the port existed.
+	//
+	// f_req is held until f_done.  f_addr is the LINE address and f_bsel
+	// the critical beat; both stay stable while f_req is asserted.  The
+	// bridge collects the controller's burst and presents the COMPLETE
+	// line with f_done held high until f_req drops, so a ce-gated consumer
+	// can never miss it (the walker-ack lesson, see ap040_mmu.v).
+	output            f_req,
+	output     [31:0] f_addr,
+	output      [1:0] f_bsel,
+	output            f_instr,
+	output            f_busy,
+	input             f_ok,
+	input     [127:0] f_line,      // {beat3, beat2, beat1, beat0}
+	input             f_done,      // level, holds until f_req drops
+
 	// free-running snoop, as in ap040_cache.v
 	input             s_stb,
 	input      [31:0] s_addr
@@ -188,9 +208,21 @@ localparam C_WINV  = 3'd3;
 localparam C_FILL  = 3'd4;
 localparam C_TAGW  = 3'd5;
 localparam C_PASS  = 3'd6;
-localparam C_SWEEP = 3'd7;
+localparam C_SWEEP = 4'd7;
+// Fast line fill over the controller's own 32-bit port: same contract as
+// C_FILL (tag written only at C_TAGW, so the line stays invalid; cst held
+// so a second miss waits) but four longword beats instead of eight 16-bit
+// subcycles through the adapter.
+localparam C_FFILL = 4'd8;
+localparam C_FWR   = 4'd9;
 
-reg   [2:0] cst;
+// anything that must hold for the duration of a line fill, either flavour
+wire fill_active;
+wire ffill_active;
+wire fwr_active;
+wire any_fill = fill_active || ffill_active || fwr_active;
+
+reg   [3:0] cst;
 reg   [7:0] sweep_cnt;
 reg         sweep_all;
 reg         winv_pend;
@@ -308,7 +340,7 @@ always @(posedge clk) begin
 	end
 	else begin
 		if (ce && cst == C_LOOK && !look_hit) fill_snooped <= 0;
-		if ((cst == C_FILL || cst == C_TAGW) && snoop_fill_row)
+		if ((any_fill || cst == C_TAGW) && snoop_fill_row)
 			fill_snooped <= 1;
 		if (ce && rd_accept) look_snooped <= 0;
 		if ((rd_accept || cst == C_LOOK) && snoop_look_row)
@@ -329,7 +361,9 @@ end
 //---------------------------------------------------------------------------
 
 wire pass_active = (cst == C_PASS);
-wire fill_active = (cst == C_FILL);
+assign fill_active  = (cst == C_FILL);
+assign ffill_active = (cst == C_FFILL);
+assign fwr_active   = (cst == C_FWR);
 
 reg  err_hold;
 reg        pass_ci_chk;
@@ -337,6 +371,27 @@ reg        ci_inv_pend;
 reg  [6:0] ci_inv_row;
 
 assign m_req   = fill_active ? 1'b1 : (pass_active ? c_req : 1'b0);
+
+// 32-bit line fill port.  Held for the whole of C_FFILL; the line address
+// and critical beat come from the access that missed, both stable because
+// r_addr is latched at acceptance.
+assign f_req   = ffill_active;
+assign f_addr  = {r_addr[31:4], 4'b0000};
+assign f_bsel  = r_addr[3:2];
+assign f_instr = r_instr;
+// The fill port lives OUTSIDE the ce domain: ce is clkena_in, which
+// cpu_wrapper holds low for the whole of an outstanding CPU bus access, and
+// a fast fill is exactly that.  With ce low the way RAMs (which take ce) drop
+// every beat and this state machine never sees f_ack, so the fill deadlocks.
+// f_busy tells cpu_wrapper to keep the enable up for the duration.  Same
+// root cause as the walker-ack blind window fixed in 4ae61485: anything that
+// is not the 16-bit CPU bus is invisible to the core while the core waits.
+// f_busy covers every state whose progress depends on nothing the external
+// bus will ever signal: the wait for the bridge, the line write-back, and
+// the tag write.  Without it, clkena_in (= ~cpu_req | bus_complete | ...)
+// can sit low forever the moment the core starts its next access while the
+// cache is still finishing internal work.
+assign f_busy  = ffill_active || fwr_active || (cst == C_TAGW);
 assign m_write = fill_active ? 1'b0 : c_write;
 assign m_instr = fill_active ? r_instr : c_instr;
 assign m_size  = fill_active ? `AP040_SZ_L : c_size;
@@ -358,7 +413,7 @@ assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
 // worked by accident; anything that releases the core mid-fill (early
 // restart) makes C_TAGW compose the fill's tag into a DIFFERENT set's row
 // image, corrupting that set and validating a line that was never filled.
-assign tag_ridx  = (fill_active || cst == C_TAGW) ? r_row : a_row;
+assign tag_ridx  = (any_fill || cst == C_TAGW) ? r_row : a_row;
 wire [83:0] tags_next = (r_way == 2'd0) ? {tag_q[83:21], r_tag} :
                         (r_way == 2'd1) ? {tag_q[83:42], r_tag, tag_q[20:0]} :
                         (r_way == 2'd2) ? {tag_q[83:63], r_tag, tag_q[41:0]} :
@@ -404,11 +459,16 @@ assign cd_ridx   = {a_set, c_addr[3:2]};
 // data writes: a fill beat, or a store merge in its PASS m_ack cycle
 wire st_merge_now = pass_active && st_merge_arm && !st_snooped &&
                     look_hit && m_ack && !m_err;
-assign cd_wsel = ((cst == C_FILL) && r_issued && m_ack) ? (4'd1 << r_way) :
+assign cd_wsel = fwr_active ? (4'd1 << r_way) :
+                 ((cst == C_FILL) && r_issued && m_ack) ? (4'd1 << r_way) :
                  st_merge_now ? (4'd1 << hit_way) : 4'd0;
-assign cd_be   = fill_active ? 4'b1111 : st_lanes(r_size, r_off);
-assign cd_widx = fill_active ? {r_row, r_beat} : {r_row, r_addr[3:2]};
-assign cd_wdat = fill_active ? m_rdata : st_place(c_wdata, r_size, r_off);
+assign cd_be   = any_fill ? 4'b1111 : st_lanes(r_size, r_off);
+// C_FWR streams the bridge's line buffer into the way RAM one longword per
+// ce cycle; the buffer is already beat-indexed, so plain 0..3 order is fine
+assign cd_widx = fwr_active  ? {r_row, r_beat} :
+                 fill_active ? {r_row, r_beat} : {r_row, r_addr[3:2]};
+assign cd_wdat = fwr_active  ? f_line[r_beat*32 +: 32] :
+                 fill_active ? m_rdata : st_place(c_wdata, r_size, r_off);
 
 wire [31:0] data_hit = (hit_way == 2'd0) ? data_q0 :
                        (hit_way == 2'd1) ? data_q1 :
@@ -588,7 +648,10 @@ always @(posedge clk) begin
 					// about and the wrap costs nothing downstream.
 					r_beat <= r_addr[3:2];
 					r_issued <= 0;
-								cst <= C_FILL;
+					// take the controller's 32-bit port when the
+					// target has one -- four longword beats instead
+					// of eight 16-bit subcycles through the adapter
+					cst <= f_ok ? C_FFILL : C_FILL;
 				end
 			end
 
@@ -627,6 +690,38 @@ always @(posedge clk) begin
 					if ((r_beat + 2'd1) == r_addr[3:2]) cst <= C_TAGW;
 					else r_beat <= r_beat + 2'd1;
 				end
+			end
+
+			// Fast fill: the bridge collects the controller's whole
+			// burst and raises f_done as a level.  Same contract as
+			// C_FILL -- the tag is written only at C_TAGW so the line
+			// stays invalid until it is complete in the way RAM, and cst
+			// is held so a second miss waits rather than colliding.
+			// There is no error path: this port only ever serves RAM.
+			C_FFILL: begin
+				if (f_done) begin
+					// early restart: ack the core with its longword the
+					// moment the line lands, and write the line back
+					// behind the ack.  f_bsel asked the controller to
+					// burst-start here, so this is also the first data
+					// out of the SDRAM.
+					fill_hold  <= f_line[r_addr[3:2]*32 +: 32];
+					rdata_r    <= lw_extract(f_line[r_addr[3:2]*32 +: 32],
+					                         r_size, r_off);
+					ack_r      <= 1;
+					fill_acked <= 1;
+					r_beat     <= 2'd0;
+					cst        <= C_FWR;
+				end
+			end
+
+			// stream the buffered line into the way RAM, one longword per
+			// ce cycle.  f_req dropped on C_FFILL exit, which re-arms the
+			// bridge; its s_line register holds until the NEXT fill
+			// completes, which cannot happen before this state ends.
+			C_FWR: begin
+				if (r_beat == 2'd3) cst <= C_TAGW;
+				r_beat <= r_beat + 2'd1;
 			end
 
 			C_TAGW: begin

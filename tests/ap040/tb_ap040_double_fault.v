@@ -40,6 +40,7 @@ ap040_tg68k_compat dut (
 	.cache_z3_base1(4'd0),
 	.cache_z3_ena1(1'b0),
 	.clkena_in(clkena_in),
+	.fill_ok(1'b0), .fill_line(128'd0), .fill_done(1'b0),
 	.data_in(data_in), .ipl(3'b111), .ipl_autovector(1'b1), .berr(berr),
 	.addr_out(addr_out), .data_write(data_write), .nwr(nwr),
 	.nuds(nuds), .nlds(nlds), .busstate(busstate), .longword(longword),

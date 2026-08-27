@@ -177,8 +177,9 @@ ap040_tg68k_compat #(.AP040_ENABLE_CACHE(`AP040_TB_CACHE)) dut
 	.cache_addr(),
 	.cache_data(16'd0),
 	.cache_ack(1'b0),
-	.cache_burst(),
-	.cache_burst_len(),
+	.fill_ok(1'b0),          // no 32-bit fill port behind these benches
+	.fill_line(128'd0),
+	.fill_done(1'b0),
 	.cache_ramaddr(),
 
 	.cacr_out(cacr_out),

@@ -57,6 +57,7 @@ wire chip_as, chip_uds, chip_lds, chip_rw, chip_dtack;
 wire cpu_nrst_out;
 
 cpu_wrapper dut (
+	.fill_avail(1'b0), .fill_line(128'd0), .fill_done(1'b0),
 	.reset(reset), .reset_out(cpu_nrst_out),
 	.clk(clk_sys), .ph1(cpu_ph1), .ph2(cpu_ph2),
 	.cpucfg(2'b10), .fastramcfg(3'd0), .cachecfg(3'd0),

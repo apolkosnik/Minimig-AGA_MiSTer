@@ -2249,3 +2249,70 @@ should be decided before the client is written rather than after.
 
 ddram_ctrl and sdram_ctrl have no equivalent port, so a fill-port client has
 to keep the 16-bit path as its fallback for those targets.
+
+## Item 3 implemented: the 32-bit fill path (2026-08-27)
+
+The client side of sdram32_ctrl's line fill port now exists end to end:
+ap040_ucache -> ap040_tg68k_compat -> cpu_wrapper -> ap040_fill_cdc ->
+Minimig.sv -> ram1.  Scoped to CHIP RAM (fill_ok in cpu_wrapper), the
+worst-measured region; kick RAM is the natural follow-up, FAST needs the
+port added to ddram_ctrl first.
+
+THE DISCOVERY THAT SHAPED IT.  cpu_wrapper runs on clk_sys (28MHz) while
+sdram32_ctrl runs on clk_114 -- the fill port CROSSES CLOCK DOMAINS, and its
+single-clk_114 strobes are physically unsamplable from the CPU domain (most
+fall between its clock edges; the ce gating sits on top of that).  The first
+attempt wired the port straight through and hung exactly the way the
+walker-ack blind window hung.  Two structural fixes came out of it:
+
+  - ap040_fill_cdc: toggle-handshake bridge modeled line by line on
+    ap040_walker_cdc, including the s-side reset crossed into the m domain.
+    It collects the whole burst m-side, indexed by each strobe's named beat,
+    and presents the COMPLETE line to the cache with s_done LEVEL-HELD until
+    the cache drops its request -- the same contract, for the same reason.
+    The cache consumes the line from a buffer, so the burst order never
+    reaches it at all.
+
+  - f_busy: the cache exports "internal work in flight that no external bus
+    level will ever advance" (C_FFILL wait, C_FWR line write-back, C_TAGW),
+    and cpu_wrapper ORs it into clkena_in.  Without it the fast fill
+    deadlocks: clkena_in = ~cpu_req | bus_complete never rises because no
+    16-bit bus activity exists to raise bus_complete.
+
+CACHE SIDE.  New states: C_FFILL (request + wait on the bridge) and C_FWR
+(stream the buffered line into the way RAM, one longword per ce cycle).
+Early restart is preserved -- the core is acked with its critical longword
+the cycle f_done is seen, and the line writes back BEHIND the ack.  CWF is
+preserved -- f_bsel asks the controller to burst-start at the critical beat.
+The tag still writes only at C_TAGW and cst is held through the fill, so the
+invariants (line invalid until complete, second miss waits) carry over.
+
+MEASURED, bw_probe on tb_cpu_wrapper_chip TURBO_CHIP=1, RAM_LAT=3, with the
+real ap040_fill_cdc in the bench:
+
+    tag   block                       16b+CWF    32-bit     delta
+    0051  streaming reads 32KB        468076     328132     -29.9%
+    0061  streaming, warmed           468052     328092     -29.9%
+    0071  streaming WRITES            389376     389248      -0.0%
+    0091  mid-line entry (beat 3)     393944     287080     -27.1%
+    00a1  same loop, beat 0           394256     287028     -27.2%
+
+Against the original pre-early-restart baseline, streaming reads are
+492764 -> 328132 = -33.4%.  Writes unchanged is the expected signature: the
+port is read-only by design (stores keep the 16-bit write-through path).
+
+COVERAGE NOTES, honest ones:
+  - tb_sdram32 exercises the controller half against the real SDRAM model,
+    all four critical beats, with a negative control (a controller made to
+    ignore fill_bsel fails 8 checks with the exact rotation predicted).
+  - tb_cpu_wrapper_chip runs the real CDC + cache + cpu_wrapper against a
+    bench model of the port; t_integer/t_mmu/t_exceptions/t_fpu pass over
+    it under TURBO_CHIP.
+  - NOT COVERED: the real sdram32_ctrl and the real CDC in the SAME bench
+    (tb_sdram32 drives the port directly; the chip bench uses a model), and
+    a chipset DMA write snooping a line mid-fast-fill (the chip bench ties
+    snoop_tgl off).  Both are RBF-risk items to keep in mind; the snoop
+    guard logic is shared with the slow fill via any_fill, which bounds the
+    exposure.
+  - t_cache "fails" on the chip bench because that bench has no POKEREG
+    port; it never ran there (tb_prog leg only).  Pre-existing, not new.

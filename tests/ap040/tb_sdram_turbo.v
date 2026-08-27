@@ -146,6 +146,9 @@ reg [15:0] ipl_arm_v = 0;
 
 cpu_wrapper cpu
 (
+	// no 32-bit fill port: sdram_ctrl has none, so the L1 keeps the
+	// 16-bit path throughout this bench
+	.fill_avail(1'b0), .fill_line(128'd0), .fill_done(1'b0),
 	.snoop_tgl(1'b0),
 	.snoop_adr(24'd0),
 	.reset(reset),

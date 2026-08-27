@@ -49,6 +49,30 @@ end
 
 wire [23:1] chip_addr;
 wire        ramsel, ramlds, ramuds, ramready, ramconsumed;
+wire        fill_req;
+wire [24:4] fill_addr;
+wire  [1:0] fill_bsel;
+wire[127:0] fill_line;
+wire        fill_done;
+// m (clk_114) side of the bridge, served by the fill model below
+wire        mf_req;
+wire [24:4] mf_addr;
+wire  [1:0] mf_bsel;
+wire [31:0] fill_dat;
+wire  [1:0] fill_beat;
+wire        fill_strb;
+wire        fill_ack;
+
+// the REAL bridge, so the bench covers the CDC as well as the cache logic
+ap040_fill_cdc fill_cdc
+(
+	.s_clk(clk), .s_reset_n(reset),
+	.s_req(fill_req), .s_addr(fill_addr), .s_bsel(fill_bsel),
+	.s_done(fill_done), .s_line(fill_line),
+	.m_clk(clk_114), .m_reset_n(reset),
+	.m_req(mf_req), .m_addr(mf_addr), .m_bsel(mf_bsel),
+	.m_dat(fill_dat), .m_beat(fill_beat), .m_strb(fill_strb), .m_ack(fill_ack)
+);
 wire [28:1] ramaddr;
 wire [15:0] ramdin, ramdout;
 wire  [1:0] cpustate;
@@ -119,6 +143,13 @@ cpu_wrapper dut
 	.fastchip_lw(fc_lw),
 	.fastchip_selack(fc_selack),
 	.fastchip_ready(fc_ready),
+
+	.fill_req(fill_req),
+	.fill_addr(fill_addr),
+	.fill_bsel(fill_bsel),
+	.fill_avail(1'b1),
+	.fill_line(fill_line),
+	.fill_done(fill_done),
 
 	.ramsel(ramsel),
 	.ramaddr(ramaddr),
@@ -268,6 +299,67 @@ end
 
 assign ramready = ramready_r;
 assign ramdout  = ramdout_r;
+
+//---------------------------------------------------------------------------
+// 32-bit line fill port model (sdram32_ctrl's contract)
+//---------------------------------------------------------------------------
+// fill_req is level held until fill_ack.  Delivery starts at fill_bsel and
+// wraps; each strobe names its beat on fill_beat.  RAM_LAT models the
+// first-word latency and the remaining beats follow back to back, which is
+// what a burst of 4 does -- that back-to-back part is the whole point of the
+// port, so modelling it any other way would measure the wrong thing.
+//
+// Reads the SAME mem[] array the chip bus and the 16-bit RAM port serve, so
+// a line filled through this port is indistinguishable from one filled the
+// slow way except in timing.
+reg  [2:0] fl_lat;
+reg  [2:0] fl_cnt;
+reg        fl_busy;
+reg [31:0] fill_dat_r;
+reg  [1:0] fill_beat_r;
+reg        fill_strb_r;
+reg        fill_ack_r;
+
+wire  [1:0] fl_beat = mf_bsel + fl_cnt[1:0];
+wire [14:0] fl_widx = {mf_addr[15:4], fl_beat, 1'b0};
+
+initial begin
+	fl_lat = 0; fl_cnt = 0; fl_busy = 0;
+	fill_dat_r = 0; fill_beat_r = 0; fill_strb_r = 0; fill_ack_r = 0;
+end
+
+always @(posedge clk_114) begin
+	fill_strb_r <= 1'b0;
+	fill_ack_r  <= 1'b0;
+
+	if (!reset || !mf_req) begin
+		fl_lat  <= 3'd0;
+		fl_cnt  <= 3'd0;
+		fl_busy <= 1'b0;
+	end
+	else if (!fl_busy) begin
+		if (fl_lat == RAM_LAT[2:0]) begin
+			fl_busy <= 1'b1;
+			fill_dat_r  <= {mem[fl_widx], mem[fl_widx + 15'd1]};
+			fill_beat_r <= fl_beat;
+			fill_strb_r <= 1'b1;
+			fl_cnt      <= 3'd1;
+		end
+		else fl_lat <= fl_lat + 3'd1;
+	end
+	else if (fl_cnt < 3'd4) begin
+		fill_dat_r  <= {mem[fl_widx], mem[fl_widx + 15'd1]};
+		fill_beat_r <= fl_beat;
+		fill_strb_r <= 1'b1;
+		if (fl_cnt == 3'd3) fill_ack_r <= 1'b1;
+		fl_cnt <= fl_cnt + 3'd1;
+	end
+end
+
+assign fill_dat  = fill_dat_r;
+assign fill_beat = fill_beat_r;
+assign fill_strb = fill_strb_r;
+assign fill_ack  = fill_ack_r;
 
 // Under TURBO_CHIP, sel_chipram claims $000000-$1FFFFF, which contains every
 // testbench control port -- result, failcode and the interrupt injectors --
@@ -523,5 +615,6 @@ initial begin
 	else             $display("TEST FAILED with %0d errors", errors);
 	$finish;
 end
+
 
 endmodule

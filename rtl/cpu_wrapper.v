@@ -66,6 +66,15 @@ module cpu_wrapper
 
 	output            ramsel,
 	output     [28:1] ramaddr,
+
+	// 32-bit line fill port, forwarded to ram1 (sdram32_ctrl).  See the
+	// fill_ok comment below for why only part of the map can use it.
+	output            fill_req,
+	output     [24:4] fill_addr,
+	output      [1:0] fill_bsel,
+	input             fill_avail,   // an ap040_fill_cdc + ported controller exist
+	input     [127:0] fill_line,
+	input             fill_done,
 	output     [15:0] ramdin,
 	input      [15:0] ramdout,
 	input             ramready,
@@ -116,6 +125,15 @@ assign ramshared    = sel_dd;
 
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
+
+// declared here so they precede the ap040 instance; driven further down,
+// beside turbochip_d/dcache_d which the decode needs
+wire        fill_req_c;
+wire [31:0] fill_addr_c;
+wire        fill_instr_c;
+wire        fill_cchip;
+wire        fill_ok;
+wire        fill_busy;
 
 wire sel_z3ram0 = (cpu_addr[31:27] == z3ram_base0) && z3ram_ena0;
 wire sel_z3ram1 = (cpu_addr[31:28] == z3ram_base1) && z3ram_ena1;
@@ -264,7 +282,7 @@ ap040_tg68k_compat #(
 (
 	.clk(clk),
 	.nreset(reset),
-	.clkena_in(~cpu_req | bus_complete | bus_berr),
+	.clkena_in(~cpu_req | bus_complete | bus_berr | fill_busy),
 	.cache_allow_all(1'b0),
 	.cache_snoop_stb(snoop_stb_r),
 	.cache_snoop_addr(snoop_addr_r),
@@ -307,8 +325,14 @@ ap040_tg68k_compat #(
 	.cache_addr(),
 	.cache_data(16'd0),
 	.cache_ack(1'b0),
-	.cache_burst(),
-	.cache_burst_len(),
+	.fill_req(fill_req_c),
+	.fill_addr(fill_addr_c),
+	.fill_bsel(fill_bsel),
+	.fill_instr(fill_instr_c),
+	.fill_busy(fill_busy),
+	.fill_ok(fill_ok),
+	.fill_line(fill_line),
+	.fill_done(fill_done),
 	.cache_ramaddr(),
 
 	.cacr_out(cacr_p),
@@ -486,6 +510,32 @@ assign walker_mem_ddr  = |walker_ramaddr[28:26];
 assign walker_mem_bad  = (|walker_addr_eff[1:0]) |
 					 ((|walker_addr_eff[31:24]) &&
 					  !(walker_sel_zram | walker_sel_dd | walker_sel_rtg));
+
+// ---------------------------------------------------------------------
+// 32-bit line fill port routing.
+//
+// ram1 (sdram32_ctrl) is the only controller with the port, and Minimig.sv
+// routes to it on zram_sel = |ram_addr[28:26] being LOW -- which after the
+// ramaddr map above means chip and kick RAM.  ram2 (ddram_ctrl) serves Z2/Z3
+// fast RAM, RTG and DD, and has no such port, so those must keep using the
+// 16-bit path.
+//
+// Restricted further to CHIP RAM here.  It is the worst-measured region
+// (22.0 clocks/long against FAST's 17.0), and it avoids sel_kickram's
+// bootrom shadowing and its "not while writing" term, neither of which has
+// an obvious meaning for a line fill and both of which would need their own
+// argument.  Kick RAM is the natural follow-up once this is proven on
+// hardware; FAST needs the port added to ddram_ctrl before it can join.
+//
+// cchip's (!cpustate | dcache_d) is mirrored with the fill's own instr flag:
+// a fill is not a CPU bus cycle, so cpustate does not describe it.
+assign fill_cchip = turbochip_d & (fill_instr_c | dcache_d);
+assign fill_ok    = fill_avail && !fill_addr_c[31:21] && fill_cchip;
+
+assign fill_req  = fill_req_c & fill_ok;
+// chip RAM maps straight through: every ramaddr term above is zero for
+// addr[31:21] == 0, so the line address needs no translation
+assign fill_addr = fill_addr_c[24:4];
 
 wire cchip = turbochip_d & (!cpustate | dcache_d);
 wire ckick = turbokick_d & (!cpustate | dcache_d);

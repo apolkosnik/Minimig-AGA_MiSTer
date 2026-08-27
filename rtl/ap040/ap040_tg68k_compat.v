@@ -75,8 +75,20 @@ module ap040_tg68k_compat
 	output [31:0] cache_addr,
 	input  [15:0] cache_data,
 	input         cache_ack,
-	output        cache_burst,
-	output [2:0]  cache_burst_len,
+	// 32-bit line fill port, forwarded from the L1.  cache_burst/
+	// cache_burst_len used to sit here as placeholders that were tied off
+	// and unconnected at every level; this is the real thing.  fill_ok
+	// says the target is served by a controller that HAS the port -- when
+	// it is low the L1 falls back to the 16-bit adapter, so a build that
+	// leaves this unwired behaves exactly as before.
+	output        fill_req,
+	output [31:0] fill_addr,
+	output  [1:0] fill_bsel,
+	output        fill_instr,
+	output        fill_busy,
+	input         fill_ok,
+	input [127:0] fill_line,
+	input         fill_done,
 	output [28:1] cache_ramaddr,
 
 	output [31:0] cacr_out,
@@ -380,7 +392,16 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.m_fc(b_fc),
 		.m_ack(b_ack),
 		.m_rdata(b_rdata),
-		.m_err(berr)
+		.m_err(berr),
+
+		.f_req(fill_req),
+		.f_addr(fill_addr),
+		.f_bsel(fill_bsel),
+		.f_instr(fill_instr),
+		.f_busy(fill_busy),
+		.f_ok(fill_ok),
+		.f_line(fill_line),
+		.f_done(fill_done)
 	);
 end
 else begin : g_nocache
@@ -398,6 +419,12 @@ else begin : g_nocache
 	assign mm_ack   = b_ack;
 	assign mm_rdata = b_rdata;
 	assign cinv_done = 1'b1;
+	// no L1, so nothing to fill: the port is unused in this configuration
+	assign fill_req  = 1'b0;
+	assign fill_addr = 32'd0;
+	assign fill_bsel = 2'd0;
+	assign fill_instr = 1'b0;
+	assign fill_busy = 1'b0;
 	wire unused_nc = mm_nocache | cinv_req | cinv_ic | cinv_dc |
 	                 (|cacr_out);
 end
@@ -438,8 +465,7 @@ assign cache_maint_dc  = cinv_dc;
 // external cache/burst interface idle until milestone G
 assign cache_req       = 1'b0;
 assign cache_addr      = 32'd0;
-assign cache_burst     = 1'b0;
-assign cache_burst_len = 3'd0;
+
 assign cache_ramaddr   = 28'd0;
 
 // unused sideband inputs, referenced to keep lint quiet

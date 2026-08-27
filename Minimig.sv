@@ -286,6 +286,42 @@ wire [23:1] chip_addr;
 
 wire [28:1] ram_addr;
 wire        ram_sel;
+wire        cpu_fill_req;
+wire [24:4] cpu_fill_addr;
+wire  [1:0] cpu_fill_bsel;
+wire[127:0] cpu_fill_line;
+wire        cpu_fill_done;
+// clk_114 side of the fill bridge; driven by ram1 only when that is
+// sdram32_ctrl (the MISTER_DUAL_SDRAM build) -- fill_avail tells the CPU
+// whether the path exists at all
+wire        m_fill_req;
+wire [24:4] m_fill_addr;
+wire  [1:0] m_fill_bsel;
+wire [31:0] m_fill_dat;
+wire  [1:0] m_fill_beat;
+wire        m_fill_strb;
+wire        m_fill_ack;
+
+ap040_fill_cdc fill_cdc
+(
+	.s_clk     (clk_sys        ),
+	.s_reset_n (~reset_d       ),
+	.s_req     (cpu_fill_req   ),
+	.s_addr    (cpu_fill_addr  ),
+	.s_bsel    (cpu_fill_bsel  ),
+	.s_done    (cpu_fill_done  ),
+	.s_line    (cpu_fill_line  ),
+
+	.m_clk     (clk_114        ),
+	.m_reset_n (~reset_d       ),
+	.m_req     (m_fill_req     ),
+	.m_addr    (m_fill_addr    ),
+	.m_bsel    (m_fill_bsel    ),
+	.m_dat     (m_fill_dat     ),
+	.m_beat    (m_fill_beat    ),
+	.m_strb    (m_fill_strb    ),
+	.m_ack     (m_fill_ack     )
+);
 wire        ram_lds;
 wire        ram_uds;
 wire [15:0] ram_din;
@@ -381,6 +417,17 @@ cpu_wrapper cpu_wrapper
 	
 	.ramsel       (ram_sel         ),
 	.ramaddr      (ram_addr        ),
+
+	// 32-bit L1 line fill straight into ram1's own port, bypassing the
+	// 16-bit CPU path.  cpu_wrapper gates fill_req on the address being
+	// one ram1 actually serves, so this is inert everywhere else.
+	.fill_req     (cpu_fill_req    ),
+	.fill_addr    (cpu_fill_addr   ),
+	.fill_bsel    (cpu_fill_bsel   ),
+	.fill_avail   (fill_avail      ),
+	.fill_line    (cpu_fill_line   ),
+	.fill_done    (cpu_fill_done   ),
+
 	.ramlds       (ram_lds         ),
 	.ramuds       (ram_uds         ),
 	.ramdout      (ram_dout        ),
@@ -447,6 +494,7 @@ wire        ram_ready1;
 // zero-latency bus and 2.27x with a latent one, and it makes the CPU
 // nearly immune to bus latency (bench_loop.s under +prof).
 `ifdef MISTER_DUAL_SDRAM
+wire fill_avail = 1'b1;
 // X2.1b: the io-board's second SDRAM in lockstep with the primary makes
 // the pair one 32-bit bus (sdram32_ctrl; 16-bit-facing contract proven
 // cycle-identical against sdram_ctrl in tb_sdram32).  The 32-bit fill
@@ -504,15 +552,22 @@ sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ram1
 	.sd2_clk      (sd2_clk         ),
 	.dual_ok      (dual_ok         ),
 
-	.fill_req     (1'b0            ),
-	.fill_bsel    (2'd0            ),
-	.fill_beat    (                ),
-	.fill_addr    (21'd0           ),
-	.fill_dat     (                ),
-	.fill_strb    (                ),
-	.fill_ack     (                ),
+	.fill_req     (m_fill_req      ),
+	.fill_bsel    (m_fill_bsel     ),
+	.fill_beat    (m_fill_beat     ),
+	.fill_addr    (m_fill_addr     ),
+	.fill_dat     (m_fill_dat      ),
+	.fill_strb    (m_fill_strb     ),
+	.fill_ack     (m_fill_ack      ),
 `else
 wire dual_fault = 1'b0;
+// plain sdram_ctrl has no 32-bit fill port: the bridge stays idle and the
+// L1 uses the 16-bit path everywhere
+wire fill_avail = 1'b0;
+assign m_fill_dat  = 32'd0;
+assign m_fill_beat = 2'd0;
+assign m_fill_strb = 1'b0;
+assign m_fill_ack  = 1'b0;
 
 sdram_ctrl #(.CPU_CACHE(1)) ram1
 (

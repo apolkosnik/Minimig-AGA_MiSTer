@@ -80,7 +80,7 @@ ap040_tg68k_compat dut
 	.walker_req(), .walker_we(), .walker_addr(), .walker_wdat(),
 	.walker_ack(1'b0), .walker_data(32'd0), .walker_berr(1'b0),
 	.cache_req(), .cache_addr(), .cache_data(16'd0), .cache_ack(1'b0),
-	.cache_burst(), .cache_burst_len(), .cache_ramaddr(),
+	.fill_ok(1'b0), .fill_line(128'd0), .fill_done(1'b0), .cache_ramaddr(),
 	.cacr_out(cacr_out), .vbr_out(vbr_out),
 	.debug_busy(), .debug_fault(), .debug_halted(),
 	.debug_status(debug_status)
