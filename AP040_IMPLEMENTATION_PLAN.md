@@ -2100,3 +2100,45 @@ landed separately as 111e855d and 864ea1ac; this is blocker 3.
 
 The fix lands on its own, ahead of any decision about early restart, because
 it is a real deviation from what the memory controllers actually drive.
+
+### Early restart: settled, and the real blocker is one level up
+
+With blocker 3 fixed, early restart is correct -- full regression passes on
+branch `early-restart` (7031d620).  It is also nearly worthless as it stands:
+
+    bench_loop      phase 0    phase 1    phase 2
+    baseline        325896     326674     326674
+    early restart   325780     326558     326558
+    delta             -116       -116       -116   (0.036%)
+
+The delta does not move with latency across the three phases.  A genuine
+fill-latency win would scale with latency; a fixed 116 cycles means the
+mechanism almost never fires usefully.
+
+The reason is structural and sits above the cache.  cpu_wrapper.v:267 drives
+
+    .clkena_in(~cpu_req | bus_complete | bus_berr)     with
+    wire cpu_req = (cpustate != 1);                    (cpu_wrapper.v:323)
+
+so the CPU's clock enable is low for the whole of ANY outstanding bus
+transaction.  The cache acking the critical word early cannot let the core
+advance, because the wrapper has already frozen it until the transaction
+completes.  Every cycle early restart was meant to recover is a cycle the
+wrapper is holding the core still anyway.
+
+This also explains the earlier profiling without contradicting it: fills
+really are 85% of fetch latency and fetch really is 57.9% of cycles, but that
+latency is not addressable from inside the cache while clkena_in is derived
+from cpu_req.
+
+NEXT, if this thread is picked up: change clkena_in to stall the CPU only
+when the CPU is itself waiting on an unacked access, rather than whenever
+memory is busy.  That is a cpu_wrapper change with real risk -- it is the
+same class of change as the P2 attempt that black-screened -- and it needs
+its own measurement before the cache-side work is worth landing.  Early
+restart stays on its branch until then.
+
+The width work (X2.1c) remains the other unexplored lever, and is not blocked
+by any of this: it reduces the number of beats rather than trying to overlap
+them.  It still needs the tied-off cache_burst port or a widened controller
+interface.
