@@ -125,6 +125,36 @@ bw8:
 	dbra	d6,bw8
 	move.w	#$0081,($F108).l
 
+	; ---- block 9: LAST-BEAT-FIRST line entry -------------------------
+	; Every block above enters each line at offset 0, so beat 0 is
+	; already the critical beat and critical-word-first has nothing to
+	; recover.  This one touches offset 12 of every line first, so the
+	; critical beat is beat 3: with a beat-0-first fill the core waits
+	; the whole line, with a wrapped fill it waits one beat.  Stride 16
+	; so each iteration is a fresh line and nothing rehits.
+	;   $400C + 2048*16 = $BFFC, inside the $4000-$BFFF sweep region.
+	move.w	#$0090,($F108).l
+	lea	($400C).l,a0
+	move.w	#2047,d6
+bw9:
+	move.l	(a0),d0
+	lea	16(a0),a0
+	dbra	d6,bw9
+	move.w	#$0091,($F108).l
+
+	; ---- block 10: same line entry, forward at offset 0 --------------
+	; The control for block 9: identical instruction count and stride,
+	; differing only in where each line is entered.  The gap between
+	; 0091 and 00A1 is what wrapping the fill is worth.
+	move.w	#$00A0,($F108).l
+	lea	($4000).l,a0
+	move.w	#2047,d6
+bw10:
+	move.l	(a0),d0
+	lea	16(a0),a0
+	dbra	d6,bw10
+	move.w	#$00A1,($F108).l
+
 	move.w	#$600D,($F102).l
 	stop	#$2700
 

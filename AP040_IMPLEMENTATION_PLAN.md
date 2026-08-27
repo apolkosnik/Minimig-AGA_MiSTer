@@ -2161,3 +2161,41 @@ claimed.
 Two bugs this exercise exposed on the way -- live m_instr/m_fc, and a live
 tag_ridx during fill -- were real latent defects and landed separately as
 111e855d and 864ea1ac.  The walker-ack blind window (4ae61485) was the third.
+
+### Critical word first: 11.1% when a line is entered at its last beat
+
+Early restart alone still fetched beat 0 first, so a miss that wanted beat 3
+waited the whole line before its ack.  Wrapping the fill -- start at the
+requested beat, wrap, stop when the next beat would be the start -- makes the
+critical beat always the FIRST one.
+
+Nothing downstream had to change.  Each beat is an independent 32-bit request
+that the adapter splits into two word cycles, so there is no burst order for
+the controller to care about and the wrap is free.
+
+Measuring it needed a new probe.  Every existing bw_probe block enters each
+line at offset 0, where beat 0 is already critical and CWF has nothing to
+recover -- and indeed the whole run was unchanged (441400 -> 441396).  Blocks
+9 and 10 were added for this: block 9 touches offset 12 of every line first
+(critical beat 3), block 10 is the identical loop at offset 0 as its control.
+
+    block                          beat-0     wrapped    delta
+    9   enters line at offset 12   443352     393944     -11.13%
+    10  enters line at offset 0    394272     394256     -0.00%
+
+The control matters as much as the result: CWF doing nothing on block 10 is
+what says the 11% on block 9 is the mechanism and not drift.  Note also that
+443352 vs 394272 is the penalty mid-line entry used to carry -- 12.4% -- and
+wrapping removes essentially all of it.
+
+Real code sits between the two blocks: branch targets, struct fields and
+stack frames enter lines at arbitrary offsets.  For a uniform entry offset
+the mean saving is about half the block-9 figure.
+
+Together with early restart (5.0% on the streaming blocks) this completes
+item 1.  Remaining from the sequence, unchanged in order:
+
+  2. remove the forced inter-word idle cycle   (measured 8.7% of cycles)
+  3. real 32-bit fill path                     (est. up to 22%)
+  4. instrument CHIP's extra ~5 clocks/long
+  5. core sequencing (82.5% of cycles are FSM progression, not bus stalls)

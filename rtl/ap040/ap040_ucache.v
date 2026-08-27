@@ -580,7 +580,13 @@ always @(posedge clk) begin
 				end
 				else begin
 					r_way <= tag_q[89:88];
-					r_beat <= 0;
+					// CRITICAL WORD FIRST: start at the beat the core
+					// actually asked for and wrap, rather than always at
+					// beat 0.  Each beat is an independent 32-bit request
+					// that the adapter splits into two word cycles, so
+					// there is no burst order for the controller to care
+					// about and the wrap costs nothing downstream.
+					r_beat <= r_addr[3:2];
 					r_issued <= 0;
 								cst <= C_FILL;
 				end
@@ -594,18 +600,21 @@ always @(posedge clk) begin
 				end
 				else if (!r_issued) r_issued <= 1;
 				else if (m_ack) begin
-					// EARLY RESTART belongs here -- ack the core the
-					// moment ITS longword lands and let the line finish
-					// behind it -- and it is the largest cheap win left:
-					// fills are 85% of fetch latency, fetch is 57.9% of
-					// all cycles, and sequential fetch enters a line at
-					// beat 0 so the common miss would cost one beat
-					// instead of four.  Two of its three blockers are
-					// already fixed (see r_instr/r_fc, and tag_ridx being
-					// pinned to r_row).  The third is not: releasing the
-					// core mid-fill lets the MMU start a table walk
-					// concurrently, and that currently faults.  See the
-					// plan entry before trying again.
+					// EARLY RESTART: ack the core the moment ITS
+					// longword lands and let the rest of the line finish
+					// behind it.  With the wrapped start above this is
+					// always the FIRST beat, so a read miss costs one
+					// beat of latency instead of up to four.
+					//
+					// The line stays INVALID meanwhile -- the tag is
+					// written only at C_TAGW -- and cst stays in C_FILL
+					// for the whole line, so a second miss waits rather
+					// than colliding with the fill in flight.
+					//
+					// Releasing the core mid-fill lets the MMU start a
+					// table walk concurrently.  That used to hang: the
+					// controllers pulse walker_ack for one cycle and the
+					// MMU only samples under ce.  Fixed in 4ae61485.
 					if (r_beat == r_addr[3:2]) begin
 						fill_hold <= m_rdata;
 						rdata_r <= lw_extract(m_rdata, r_size, r_off);
@@ -613,7 +622,9 @@ always @(posedge clk) begin
 						fill_acked <= 1;
 					end
 					r_issued <= 0;
-					if (r_beat == 2'd3) cst <= C_TAGW;
+					// four beats total, wrapping: done when the next
+					// beat would be the one we started on
+					if ((r_beat + 2'd1) == r_addr[3:2]) cst <= C_TAGW;
 					else r_beat <= r_beat + 2'd1;
 				end
 			end
