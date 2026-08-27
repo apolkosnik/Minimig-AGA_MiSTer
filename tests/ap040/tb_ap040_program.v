@@ -689,6 +689,25 @@ initial begin
 		prof_stall[pi] = 0;
 	end
 end
+// Which term blocks the fetch fill engine?  Sampled only when the queue is
+// EMPTY and the engine is armed -- i.e. when a fill is genuinely wanted --
+// so the counts say what to fix, not merely what is false.
+integer blk_port=0, blk_dstate=0, blk_ea=0, blk_pend=0, blk_room=0,
+        blk_page=0, blk_lk=0, blk_other=0, blk_want=0;
+always @(posedge clk) if (q_on && nreset && dut.core.epf_count == 4'd0
+                          && dut.core.epf_armed && !dut.core.epf_err) begin
+	blk_want = blk_want + 1;
+	if (dut.core.epf_pend)                      blk_pend  = blk_pend + 1;
+	else if (dut.core.mem_req || dut.core.mem_ack) blk_port = blk_port + 1;
+	else if (dut.core.state == 8'd9 || dut.core.state == 8'd10 ||
+	         dut.core.state == 8'd175 || dut.core.state == 8'd176)
+	                                            blk_dstate = blk_dstate + 1;
+	else if (dut.core.ea_state)                 blk_ea    = blk_ea + 1;
+	else if (dut.core.epf_ftail[31:12] != dut.core.pc[31:12])
+	                                            blk_page  = blk_page + 1;
+	else if (dut.core.lk_cyc && dut.core.state != 8'd8) blk_lk = blk_lk + 1;
+	else                                        blk_other = blk_other + 1;
+end
 always @(posedge clk) if (q_on && nreset) begin
 	q_hist[dut.core.epf_count] = q_hist[dut.core.epf_count] + 1;
 	if (dut.core.state == 8'd3) begin      // S_FETCH
@@ -763,6 +782,8 @@ task prof_dump;
 		total = 0;
 		for (pi = 0; pi < 256; pi = pi + 1) total = total + prof_cnt[pi];
 		if (q_on) begin
+			$display("QBLK want=%0d pend=%0d port=%0d dstate=%0d ea=%0d page=%0d lk=%0d other=%0d",
+			         blk_want, blk_pend, blk_port, blk_dstate, blk_ea, blk_page, blk_lk, blk_other);
 			$display("QPROF fetch_cyc=%0d dry_at_fetch=%0d (%0d%%)", q_fetch_cyc, q_dry_at_fetch, (100*q_dry_at_fetch)/(q_fetch_cyc==0?1:q_fetch_cyc));
 			for (qi = 0; qi < 9; qi = qi + 1)
 				$display("QPROF   occupancy %0d: %0d", qi, q_hist[qi]);

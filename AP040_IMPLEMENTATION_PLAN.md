@@ -1307,6 +1307,48 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### CORRECTION: the queue starves on FILL LATENCY, not port contention
+
+The section below concluded that the shared port starves the fetch queue and
+that the unified cache's second lookup port was therefore the top priority.
+That was WRONG, and a gate-attribution probe (+qprof, QBLK line) says so
+directly.  Sampling only the cycles where the queue is empty AND the fill
+engine is armed -- i.e. where a fill is genuinely wanted:
+
+    want=9636   pend=9209 (95.6%)   port=91 (0.9%)   dstate=11   ea=34
+                                    page=0  lk=8     other=283
+
+In 95.6% of those cycles a fetch is ALREADY IN FLIGHT.  The engine is not
+waiting for the port; it has issued and is waiting for the answer.  Port
+contention accounts for 0.9%.  A second lookup port would have bought
+essentially nothing here, and building it first would have been a large
+change aimed at the wrong thing.
+
++memlat says what the wait actually is:
+
+    ifetch  n=1274  avg 9.5  max 31
+        921 at  2 cyc   (72%)  cache hits
+        326 at 31 cyc   (26%)  line fills
+    time:   hits 1842 cyc (15%)   FILLS 10106 cyc (85%)
+
+The 25% miss rate is STRUCTURAL and not worth attacking: a 16-byte line is
+eight words, a request takes one longword, so sequential code is necessarily
+one miss and three hits per line.  The target is the 31-CYCLE FILL, which is
+26% of fetches and 85% of all fetch latency.
+
+A 16-byte fill over the 16-bit bus adapter is eight word transfers.  That
+puts the next move squarely on X2.1c -- the 32-bit width work this document
+has been deferring behind sequencer work -- and NOT on cache concurrency,
+sequencer overlap or a deeper pipeline.  Halving the transfer count would
+take fetch from 9.5 to roughly 5.8 cycles average, and fetch is 57.9% of all
+cycles.
+
+Sequence of wrong turns worth remembering, because each was cheap to test
+and expensive to have built:
+  1. "the EA gate starves it"      -- tested, made bench_loop 11.6% worse
+  2. "the shared port starves it"  -- 0.9% of blocked cycles
+  3. fill latency                  -- 85% of fetch time.  Measure first.
+
 ### THE QUEUE IS STARVING: 90% of S_FETCH runs on an EMPTY queue (2026-08-27)
 
 Re-profiled t_integer with the unified cache in place (16650 cycles, down
