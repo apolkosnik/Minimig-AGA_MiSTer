@@ -145,6 +145,23 @@ Further info about Minimig can be found on the [Minimig Discussion Forum](http:/
 MiSTer board support & other cores on the [MiSTer Project Page](https://github.com/MiSTer-devel).
 
 
+## RTG on an MMU-enabled CPU
+
+RTG works before SetPatch and goes black after it?  The MiSTer RTG board is
+not an AutoConfig board -- `extra/rtg_driver/MiSTer.card.asm` hardcodes its
+register and memory bases and never calls `FindConfigDev` -- so
+expansion.library never learns it exists and mmu.library leaves both regions
+marked `Blank`.  Once SetPatch enables the MMU those pages are unmapped, every
+register access faults, and every pixel write goes nowhere.  On a CPU without
+an MMU the hardcoded addresses simply work, which is why the stock TG68K core
+is unaffected.
+
+Fix: append the two `SetCacheMode` lines in
+[extra/rtg_driver/MMU-Configuration.MiSTer](extra/rtg_driver/MMU-Configuration.MiSTer)
+to `ENVARC:MMU-Configuration`.  No core change, no new bitstream.  Verify with
+`showmmu`: `$00B80000` should read `CacheInhibit I/O space`, and the
+`0x02000000-0x027FFFFF` line should lose `Blank`.
+
 ## The CPU as a standalone core
 
 The AP040 core is published on its own at

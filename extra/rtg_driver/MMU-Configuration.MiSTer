@@ -1,5 +1,8 @@
 ; MiSTer RTG -- mmu.library configuration
 ;
+; CONFIRMED WORKING on hardware 2026-08-26: with these two lines in place RTG
+; runs after SetPatch.  No core change and no new RBF are involved.
+;
 ; Append to ENVARC:MMU-Configuration (then copy to ENV:, or reboot).
 ; mmu.library reads the file when it initialises, which is before SetPatch
 ; installs 68040.library, so the regions are tagged before anything builds a
