@@ -1307,6 +1307,43 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### WHAT THE 31-CYCLE FILL IS MADE OF (2026-08-27), and why X2.1c is misnamed
+
+Chased the fill cost one level further, because "make it 32-bit" assumes the
+cost is transfer WIDTH and it is not.
+
+  * The 32-bit burst fill path X2.1 describes DOES NOT EXIST in this tree.
+    ap040_tg68k_compat ties cache_req/cache_burst/cache_burst_len to zero,
+    still marked "idle until milestone G".  Every fill goes through
+    ap040_bus16_adapter as eight 16-bit sub-cycles.
+  * At ZERO modelled memory latency (+prof phase 0) a 16-byte fill still
+    costs 31 cycles -- about 3.9 cycles per 16-bit sub-cycle.  So the fill
+    is not waiting on memory at all.
+  * The adapter's own header says where the 3.9 goes: "split transfers
+    insert a sampled IDLE cycle between sub-cycles.  The Minimig RAM/cache
+    controllers return a level acknowledge and do not accept a new address
+    until their chip-select drops."
+
+So the fill cost is eight repetitions of (request, level-ack, mandated idle),
+and the tax is the LEVEL-ACKNOWLEDGE CONTRACT, not the bus width.  Two
+consequences:
+
+  1. Widening to 32 bits halves the sub-cycle COUNT and would roughly halve
+     the fill -- worth having, but it treats the symptom.  The physical
+     Minimig ram port is 16 bits wide (ramdout[15:0]), so this is not a
+     small change: it needs the burst/cache port that is currently tied off,
+     or a widened controller interface.
+  2. The per-sub-cycle idle is the same level-ack contract that
+     ram_cs_guard exists to police and that P2 was going to delete.  P2 was
+     shelved as infrastructure with no direct payoff; this says it has one,
+     and that the two efforts are the same effort seen from opposite ends.
+
+Recommended next measurement before either: instrument the adapter to count
+cycles per sub-cycle by phase (request, ack-wait, idle).  If the idle is one
+cycle of four, removing it is a 25% fill win with no width change; if the
+handshake itself is the bulk, only width helps.  That is a probe, not a
+build, and it decides between two large changes.
+
 ### CORRECTION: the queue starves on FILL LATENCY, not port contention
 
 The section below concluded that the shared port starves the fetch queue and
