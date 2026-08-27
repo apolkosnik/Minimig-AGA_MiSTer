@@ -145,6 +145,21 @@ Further info about Minimig can be found on the [Minimig Discussion Forum](http:/
 MiSTer board support & other cores on the [MiSTer Project Page](https://github.com/MiSTer-devel).
 
 
+## The CPU as a standalone core
+
+The AP040 core is published on its own at
+[AP68040](https://github.com/apolkosnik/AP68040) so other projects can consume
+it as a submodule.  That publication is a copy, not a live split, so it is
+regenerated rather than hand-maintained:
+
+    tools/export-ap68040.sh <path-to-AP68040-checkout>
+
+The script is idempotent -- after running it, `git status` in the target shows
+exactly what a release would change, and an empty status means the published
+core is current.  Benches that co-simulate the CPU with the chipset,
+sdram_ctrl, ddram_ctrl or fastchip stay here, because they need those modules;
+the exported suite is CPU-only by construction.
+
 ## License
 
 Copyright © 2011 - 2016 Rok Krajnc (rok.krajnc@gmail.com)
