@@ -160,12 +160,28 @@ wire [ROWW-1:0] row_q, frow_q;
 reg   [4:0] l_row;
 reg  [16:0] l_tag;
 reg         l_ld;
-always @(posedge clk) begin
+// P2: this pipeline used to free-run, which is safe under a STALL enable --
+// the request is held, so re-registering the same row is a no-op.  It is not
+// safe under a 4:1 enable, where it would advance four times per enabled
+// cycle and lk_fresh would describe a different cycle than the ce-gated
+// walker that consumes it.  Gate it with everything else.
+always @(posedge clk) if (ce) begin
 	l_row <= a_row;
 	l_tag <= a_tag;
 	l_ld  <= c_req && !sweep_on && !fill_we;
 end
 wire lk_fresh = l_ld && (l_row == a_row) && (l_tag == a_tag);
+
+// P2: the sweep below reads a row at count N and judges it at count N+1.
+// That worked only because the RAM's one-cycle read latency happened to
+// equal one enabled step -- true when ce was a stall enable, false at 4:1,
+// where the address is held for four clocks and q_a settles to the CURRENT
+// row.  The tags were then judged one row out, so a page PFLUSH matched
+// nothing (PFLUSHA still worked: it clears every row regardless of tag).
+// Shadow the row read on ce so the pipeline is one ENABLED step by
+// construction, whatever the ratio.
+reg [ROWW-1:0] row_q_ce;
+always @(posedge clk) if (ce) row_q_ce <= row_q;
 
 wire [EW-1:0] a_w0 = row_q[0*EW +: EW];
 wire [EW-1:0] a_w1 = row_q[1*EW +: EW];
@@ -503,7 +519,7 @@ always @(posedge clk) begin
 					pr = sweep_cnt[4:0] - 5'd1;
 					for (w = 0; w < 4; w = w + 1) begin : sweep_way
 						reg [EW-1:0] e;
-						e = row_q[w*EW +: EW];
+						e = row_q_ce[w*EW +: EW];
 						if (sw_pt) begin
 							if (pr[3:0] == sw_set && e[44:28] == sw_tag)
 								atc_v[{pr, w[1:0]}] <= 0;
