@@ -209,6 +209,49 @@ tloop:
 	move.l	#$00007003,($441C).l
 	pflusha
 
+;------------------------------------- PFLUSHAN / PFLUSHN and the global bit
+	; The N forms spare entries whose descriptor had G (page descriptor bit
+	; 10) set.  That is how a kernel keeps its own mappings resident across
+	; a context switch, and NetBSD's pmap does exactly this: kernel pages
+	; global, user flushes with the N forms.  Nothing in this file exercised
+	; G at all -- the ATC carries it as attribute bit 7 (see f_attr_new in
+	; ap040_mmu.v) and the sweep consults it as e[7].
+	move.l	#$00006403,($4418).l	; page 6 resident and GLOBAL
+	move.l	#$00007003,($441C).l	; page 7 resident, non-global
+	pflusha
+	move.l	($6000).l,d0
+	chkl	d0,$6666AAAA,205	; both resident in the ATC
+	move.l	($7000).l,d0
+	chkl	d0,$7777BBBB,206
+	move.l	#$00005403,($4418).l	; remap page 6, still global
+	move.l	#$00005003,($441C).l	; remap page 7
+	pflushan			; flush every NON-global entry
+	move.l	($6000).l,d0
+	chkl	d0,$6666AAAA,207	; global entry survived PFLUSHAN
+	move.l	($7000).l,d0
+	chkl	d0,$CAFE0505,208	; non-global entry was flushed
+
+	; the page form of the same rule
+	move.l	#$00006403,($4418).l
+	pflusha
+	move.l	($6000).l,d0
+	chkl	d0,$6666AAAA,209	; global page resident again
+	move.l	#$00005403,($4418).l	; remap it
+	moveq	#5,d0
+	movec	d0,dfc
+	lea	($6000).l,a0
+	pflushn	(a0)			; page form, non-global only
+	move.l	($6000).l,d0
+	chkl	d0,$6666AAAA,210	; PFLUSHN spared the global page
+	lea	($6000).l,a0
+	pflush	(a0)			; the plain page form must flush it
+	move.l	($6000).l,d0
+	chkl	d0,$CAFE0505,211
+
+	move.l	#$00006003,($4418).l
+	move.l	#$00007003,($441C).l
+	pflusha
+
 ;----------------------------------------------- write protection fault
 	move.l	#5,(expect_tm).l	; supervisor data write
 	move.l	#$8000,(expect_fa).l
