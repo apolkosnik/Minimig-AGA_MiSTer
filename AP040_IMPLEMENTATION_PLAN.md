@@ -2199,3 +2199,53 @@ item 1.  Remaining from the sequence, unchanged in order:
   3. real 32-bit fill path                     (est. up to 22%)
   4. instrument CHIP's extra ~5 clocks/long
   5. core sequencing (82.5% of cycles are FSM progression, not bus stalls)
+
+### Items 2 and 3: what each actually requires (surveyed 2026-08-27)
+
+ITEM 2 -- the forced inter-word idle cycle.
+
+The gap is real and is required by the module the adapter comment names.
+cpu_cache_new's CPU-side state machine returns to IDLE only on !cpu_cs
+(cpu_cache_new.v:396, :399, :467) and clears cpu_ack only on !cpu_cs
+(:583).  So the adapter cannot change addr_out under a held ack, exactly as
+ap040_bus16_adapter.v:193 says.
+
+What makes this tractable: cpu_cache_new is instantiated INSIDE sdram_ctrl,
+sdram32_ctrl and ddram_ctrl, and this tree is AP040-only -- there is no
+fx68k or tg68k left to keep compatible.  The AP040 adapter is its only
+client, so its CPU-side contract can be changed outright rather than
+extended with a compatibility mode.  The work is a pulse-ack/back-to-back
+contract in cpu_cache_new, removal of the adapter's subcycle_gap, and a
+matching pass over ram_cs_guard.
+
+ITEM 3 -- the 32-bit fill path.  Much further along than assumed.
+
+sdram32_ctrl ALREADY HAS the port, with a documented contract
+(sdram32_ctrl.v:194-202):
+
+    // 32-bit cache line fill port (16 byte line, 4 longword beats).
+    // fill_req is level held until fill_ack; fill_addr must stay stable
+    // while it is asserted.  fill_strb pulses once per delivered longword,
+    // beats ascending within the line, and fill_ack pulses with the last.
+
+and tb_sdram32.v already exercises it in both dual and single-SDRAM modes
+(tb_sdram32.v:350, :426).  The build uses this controller:
+Minimig.sv:475 instantiates sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)).
+
+The missing half is entirely on the client side.  Minimig.sv:507 ties
+fill_req to 1'b0 and leaves fill_strb/fill_ack unconnected, and the
+placeholders that would carry it -- cache_burst / cache_burst_len -- are
+tied off in ap040_tg68k_compat.v:441 and unconnected at cpu_wrapper.v:310.
+So the work is: drive the port from ap040_ucache's fill loop and route it
+through those two placeholders to the top level.  The hard part (SDRAM burst
+scheduling, dual-lane assembly) is written and covered.
+
+INTERACTION TO SETTLE FIRST.  The port delivers "beats ascending within the
+line".  Critical word first needs to start at an arbitrary beat, so
+connecting the port as it stands would give up the 11.1% measured on
+mid-line entry in exchange for width.  SDRAM bursts take a start column
+natively, so extending the port with a start-beat is the natural fix and
+should be decided before the client is written rather than after.
+
+ddram_ctrl and sdram_ctrl have no equivalent port, so a fill-port client has
+to keep the 16-bit path as its fallback for those targets.
