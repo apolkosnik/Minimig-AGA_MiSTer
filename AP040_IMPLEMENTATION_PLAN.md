@@ -775,6 +775,57 @@ ram_cs_guard's own header documents a serve/kill loop that missed every
 sample edge at half the alignments -- and after P2 sim and silicon see
 identical cycle relationships, which P3+ need to be debuggable at all.
 
+### P2: the chip-bus timing contract, MEASURED 2026-08-26
+
+The one piece of P2 that needs designing rather than porting is the chip
+stage machine: it is `always @(negedge clk, negedge reset)` testing ph1n/ph2n,
+which are registered off the opposite edge, and it does not keep its shape at
+4:1 on a 114MHz clock -- `if (ph1n)` would fire for four consecutive cycles
+instead of one.  So the contract it keeps today was measured rather than
+inferred, by logging clk_114 cycle numbers in tb_cpu_wrapper_chip:
+
+    div:      0    3    4    6    8    b    c    e
+    clk_sys   ^         ^         ^         ^          (posedge at div[1:0]=0)
+    ph2            ^         .                         (rise div=3, act div=6)
+    ph1                                 ^         .    (rise div=b, act div=e)
+
+  ph1 and ph2 each rise exactly ONE clk_114 cycle before a clk_sys posedge.
+  That posedge samples them into ph1n/ph2n.  The negedge machine then acts
+  TWO clk_114 cycles later still -- at div=e for ph1, div=6 for ph2.
+
+  Both act phases are therefore `div[1:0] == 2'b10`, i.e. the CPU clock
+  enable delayed by two clk_114 cycles.
+
+That gives an exact transformation, with no new timing relationship invented:
+
+  * cpu_wrapper takes clk = clk_114 plus `ce`, true 1 cycle in 4 at the
+    phase where clk_sys posedges today (div[1:0] == 0; Minimig.sv already
+    computes exactly this as `cyc`).
+  * clkena_in becomes `ce & (~cpu_req | bus_complete | bus_berr)` -- the
+    existing stall term, gated by the enable.
+  * ph1n/ph2n register on `ce`, which is what "posedge clk_sys" meant.
+  * the stage machine moves from `negedge clk` to `posedge clk_114`
+    qualified by `ce` delayed two cycles, still testing ph1n/ph2n.  Do NOT
+    keep it on a negedge: at 114MHz that is a 4.4ns half-cycle path.
+
+  Everything else in the module is already posedge-clk and becomes
+  ce-qualified in the ordinary way.
+
+Then the cleanup P2 exists for: ram_cs_guard's entire reason to exist is the
+cross-phase level-ack contract (its header documents a serve/kill loop that
+missed every sample edge at half the PLL alignments), and after this it is
+same-domain and should be re-derived or deleted rather than carried over.
+Minimig.sdc:36-37's clk_sys -> clk_114 exception is replaced by multicycle 4
+on the ce-qualified paths, and Minimig.sdc:4-5 re-derived against the new
+relationship.
+
+Verification available without hardware: tb_cpu_wrapper_chip runs the whole
+directed suite over the 7MHz chip path, tb_sdram_turbo and tb_dualram_turbo
+cover the RAM side, and all three sweep CPU_PHASE today.  After P2 there is
+one alignment, so the sweep collapsing is itself the evidence the contract
+class is gone.  The final gate is still a NetBSD boot: this is the seam where
+a half-cycle error desynchronises the chip bus and nothing boots at all.
+
 ### X2.7 AREA: measured 2026-08-24, and it is the CORE, not the periphery
 
 From the last fit, ALMs needed by hierarchy:
