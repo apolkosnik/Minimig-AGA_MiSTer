@@ -248,6 +248,7 @@ reg         st_snooped;     // a snoop touched the store's row: no merge
 // issue anything while a fill ran.  Early restart releases it mid-fill, so a
 // new request would otherwise swing busstate between FETCH and READ inside
 // one transaction and change the function code under the adapter.
+reg         fast_fill;      // this fill took the 32-bit port
 reg         fill_acked;
 reg         r_instr;
 reg   [2:0] r_fc;
@@ -391,7 +392,13 @@ assign f_instr = r_instr;
 // the tag write.  Without it, clkena_in (= ~cpu_req | bus_complete | ...)
 // can sit low forever the moment the core starts its next access while the
 // cache is still finishing internal work.
-assign f_busy  = ffill_active || fwr_active || (cst == C_TAGW);
+// C_TAGW is entered from BOTH fill flavours, so keying f_busy on the state
+// alone forced clkena_in high on every ORDINARY 16-bit fill too -- handing
+// the core, the MMU and the bus adapter an enabled cycle they would not
+// otherwise get, on the shipping path, for a port that is inert there.
+// fast_fill remembers which flavour this fill was so the slow path is
+// bit-for-bit what it was before the port existed.
+assign f_busy  = ffill_active || fwr_active || (fast_fill && (cst == C_TAGW));
 assign m_write = fill_active ? 1'b0 : c_write;
 assign m_instr = fill_active ? r_instr : c_instr;
 assign m_size  = fill_active ? `AP040_SZ_L : c_size;
@@ -490,6 +497,7 @@ always @(posedge clk) begin
 		cinv_done <= 0;
 		st_merge_arm <= 0;
 		st_inv_arm <= 0;
+		fast_fill <= 0;
 		fill_acked <= 0;
 		r_instr <= 0;
 		r_fc <= 0;
@@ -651,6 +659,7 @@ always @(posedge clk) begin
 					// take the controller's 32-bit port when the
 					// target has one -- four longword beats instead
 					// of eight 16-bit subcycles through the adapter
+					fast_fill <= f_ok;
 					cst <= f_ok ? C_FFILL : C_FILL;
 				end
 			end
