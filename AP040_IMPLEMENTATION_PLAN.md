@@ -2452,3 +2452,47 @@ CONFIRMATION STILL OWED: the chip-RAM half of this is inferred from the code
 and fits the data, but has not been observed on the machine.  showmmu will
 say directly whether $000000-$1FFFFF reads as CacheInhibit -- the same tool
 that settled the RTG question.  Worth doing before building on it.
+
+## The NetBSD regression: a per-page PFLUSH that flushed the wrong row
+
+NetBSD stopped booting several builds ago -- before the fill path, before
+early restart, before the unified L1.  It was 12cf17f5, which changed the
+ATC sweep and shipped with NO test able to see what it broke.
+
+MECHANISM.  The ATC RAM's port A read free-runs on clk while the walker
+state machine advances on ce, so WHICH row q_a carries at a ce edge depends
+on the ce ratio:
+
+    stall enable (1:1, the shipping build)   q_a = mem[previous count]
+    4:1 (P2)                                 q_a = mem[current count],
+                                             the address having been held
+                                             for four clocks
+
+12cf17f5 shadowed the DATA through an extra ce-gated register to fix the 4:1
+case.  That made 4:1 right and made 1:1 -- the build that ships -- wrong by
+exactly one row.  A per-page PFLUSH then cleared a NEIGHBOURING ATC entry
+and left the named page's stale translation resident.
+
+Which is invisible to AmigaOS and fatal to NetBSD.  A pmap unmaps pages with
+the page form of PFLUSH constantly; 68040.library leans on PFLUSHA.  A
+kernel that unmaps a page and keeps translating it is exactly the freeze
+signature this core has been chased around before.
+
+THE TEST GAP, which is the real lesson.  Every PFLUSH in t_mmu was a
+PFLUSHA -- twenty of them.  PFLUSHA clears every row REGARDLESS OF TAG, so
+it passes whatever row the sweep judges.  The entire suite was structurally
+incapable of seeing a row-addressing error in the sweep, and 12cf17f5 went
+in green.  Tests 201-204 close it: two pages made resident, BOTH descriptors
+remapped, exactly ONE flushed -- the flushed page must show its remap
+(catches judging the wrong row) and the other must stay stale (catches
+flushing more than was asked).  Test 203 fails on the pre-fix RTL.
+
+FIX.  Pipe the ADDRESS through the same one-clock free-running delay the RAM
+puts the data through, and judge with that.  Data and address then leave the
+same pipeline, so they agree by construction at ANY ce ratio -- 1:1 and 4:1
+both, rather than trading one for the other.  P2 keeps what 12cf17f5 was
+reaching for without the shipping build paying for it.
+
+WHAT THIS SAYS ABOUT THE OTHER CHANGES.  It exonerates them: the fill path is
+inert on hardware (chip RAM is cache-inhibited), and early restart and CWF
+are what moved FAST +6.8%.  NetBSD broke earlier and for an unrelated reason.

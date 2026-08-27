@@ -176,6 +176,39 @@ tloop:
 	move.l	#$0000E003,($4438).l
 	pflusha
 
+;------------------------------------------------ per-page PFLUSH (not PFLUSHA)
+	; Every other PFLUSH in this file is PFLUSHA.  PFLUSHA clears every ATC
+	; row regardless of tag, so it cannot see an error in WHICH row the
+	; sweep judges -- and the page form, which an OS issues on nearly every
+	; unmap, can.  NetBSD leans on it constantly; AmigaOS mostly does not.
+	;
+	; Both pages are read first so both are resident in the ATC, then BOTH
+	; descriptors are remapped, then exactly ONE is flushed.  The flushed
+	; page must show its remap and the other must still be stale: the first
+	; check catches a sweep that judges the wrong row, the second catches
+	; one that flushes more than it was asked to.
+	move.l	#$6666AAAA,($6000).l
+	move.l	#$7777BBBB,($7000).l
+	pflusha
+	move.l	($6000).l,d0
+	chkl	d0,$6666AAAA,201	; page 6 resident in the ATC
+	move.l	($7000).l,d0
+	chkl	d0,$7777BBBB,202	; page 7 resident too
+	move.l	#$00005003,($4418).l	; page 6 -> physical $5000
+	move.l	#$00005003,($441C).l	; page 7 -> physical $5000
+	moveq	#5,d0
+	movec	d0,dfc
+	lea	($6000).l,a0
+	pflush	(a0)			; flush ONLY page 6
+	move.l	($6000).l,d0
+	chkl	d0,$CAFE0505,203	; the named page WAS flushed
+	move.l	($7000).l,d0
+	chkl	d0,$7777BBBB,204	; the unnamed page was NOT flushed
+	pflusha
+	move.l	#$00006003,($4418).l
+	move.l	#$00007003,($441C).l
+	pflusha
+
 ;----------------------------------------------- write protection fault
 	move.l	#5,(expect_tm).l	; supervisor data write
 	move.l	#$8000,(expect_fa).l
