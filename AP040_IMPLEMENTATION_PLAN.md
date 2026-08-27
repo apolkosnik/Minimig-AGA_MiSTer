@@ -2046,3 +2046,57 @@ construction).
     it, operands pre-rounded by the FMOVE that loaded them, a program
     grown into its own result window, and a result page whose M bit the
     program set itself.
+
+## The walker-ack blind window (2026-08-27)
+
+Early restart's third blocker turned out not to be an MMU logic bug at all,
+and not the "walk concurrent with a fill faults" that the symptom suggested.
+
+The symptom was a double fault: `pc=146c ir=f518 mem_flt=1 prev_state=10
+in_exc=1`, with `aer_fa=146c` (the address of the PFLUSHA whose own fetch
+faulted) while `m_addr_r=33c4` (the exception frame write that faulted
+second).  A cycle trace of the window shows what actually happens:
+
+    [47629205000] st=3 addr=0000146c ack=0 | wst=1 wact=1 | wreq=1 wack=0 armed=0
+    ...  42 ms of simulated time, unchanged  ...
+    [89572215000] st=10 addr=000033c4 ack=0 flt=1 | wst=1 wact=1 | wreq=1 wack=0
+
+`walker_req` is asserted and never acknowledged.  The walk never completes,
+the frame write stalls behind it, and the bus watchdog eventually fires --
+which the core, already in exception processing, takes as a second fault.
+The fault was the watchdog, not a translation error, which is why every
+theory that started from "the walk faulted" went nowhere.
+
+ROOT CAUSE.  A protocol mismatch, latent in the shipping core:
+
+  - sdram_ctrl, sdram32_ctrl and ddram_ctrl all default `walker_ack` low
+    and raise it for exactly one clk cycle.
+  - The MMU's walk state machine advances only under `ce`.
+  - cpu_wrapper.v:267 drives `.clkena_in(~cpu_req | bus_complete | bus_berr)`
+    -- ce is low for the WHOLE of an outstanding CPU bus access.
+
+So a walk that overlaps a bus access has a multi-cycle blind window in which
+a one-cycle ack is lost outright.  Today no walk can overlap one, because the
+core cannot run while an access is outstanding, so the mismatch is dormant.
+It is the first thing any change that lets the core run during a fill hits.
+
+Worth noting where the contract already existed: ap040_walker_cdc level-holds
+its `s_ack` until the MMU drops `s_req`, and its comment names this exact
+hazard.  But the CDC is only in the benches that cross clock domains -- the
+shipping design (cpu_wrapper.v:476) wires the walker port straight through,
+so the MMU has to provide the hold for itself.
+
+FIX.  Latch `walker_ack`/`walker_berr`/`walker_data` and hold them until
+`walker_req` drops.  Since `walker_req` is `w_active && w_issued` and
+`w_issued` is cleared by `walk_ack`, the hold releases exactly when the walk
+consumes it and can never be read as the next descriptor's response.  The
+live signals are still taken when they coincide with a ce cycle, so a walk
+that is not shadowed by a bus access costs exactly what it did before -- the
+fix is free in the common case.
+
+With it in place, early restart passes the full regression.  Blockers 1 and 2
+(live `m_instr`/`m_fc`, live `tag_ridx` during fill) were already fixed and
+landed separately as 111e855d and 864ea1ac; this is blocker 3.
+
+The fix lands on its own, ahead of any decision about early restart, because
+it is a real deviation from what the memory controllers actually drive.

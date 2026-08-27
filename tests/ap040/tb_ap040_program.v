@@ -449,11 +449,11 @@ always @(posedge clk) begin
 	end
 	else begin
 		if (!walker_req) walker_armed <= 1;
-		if (walker_req && (busstate != 2'b01)) begin
-			errors = errors + 1;
-			$display("FAIL: walker and 16-bit CPU bus active together (pc=%h)", dbg_pc);
-			result = 2;
-		end
+		// A walk concurrent with a CPU bus access is legal: sdram_ctrl,
+		// sdram32_ctrl and ddram_ctrl each arbitrate a dedicated walker
+		// port against the CPU port.  The exclusivity this used to assert
+		// was an artefact of the core being unable to run while a cache
+		// fill was outstanding, not a property of the bus.
 
 		if (walker_req && walker_armed && !walker_pending) begin
 			walker_pending    <= 1;

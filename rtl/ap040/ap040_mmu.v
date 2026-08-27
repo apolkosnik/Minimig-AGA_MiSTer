@@ -279,8 +279,56 @@ reg        sw_pt;               // the running sweep is a PTEST pre-flush
 wire  [6:0] w_pi  = w_la[24:18];
 wire  [5:0] w_pgi = tc_p ? {1'b0, w_la[17:13]} : w_la[17:12];
 
-wire walk_ack = w_active && w_issued && walker_ack && !walker_berr;
-wire walk_err = w_active && w_issued && walker_berr;
+// The memory controllers pulse walker_ack for a single clk cycle
+// (sdram_ctrl/sdram32_ctrl/ddram_ctrl all default it low and raise it for
+// one cycle), but this state machine advances only under ce -- and
+// cpu_wrapper drives clkena_in as ~cpu_req | bus_complete | bus_berr, so ce
+// is low for the WHOLE of an outstanding CPU bus access.  A walk that
+// overlaps such an access therefore has a multi-cycle blind window in which
+// a one-cycle ack is lost outright, and the walk then hangs until the bus
+// watchdog fires -- which the core takes as a second fault and halts on.
+// Today no walk overlaps a bus access so this is latent, but it is a
+// protocol mismatch rather than a timing accident, and it is what any
+// change that lets the core run during a fill runs into first.
+//
+// Latch the response and hold it until the request drops.  walker_req is
+// w_active && w_issued, and w_issued is cleared by walk_ack, so the hold is
+// released exactly when the walk consumes it and can never be mistaken for
+// the next descriptor's response.  The live signals are still taken when
+// they happen to coincide with a ce cycle, so an unshadowed walk costs
+// exactly what it did before this.  ap040_walker_cdc provides the same
+// contract (its level-held s_ack) on the paths that do cross clocks; the
+// shipping design wires this port straight through, so the MMU has to
+// provide it for itself.
+reg        wack_h;
+reg        wberr_h;
+reg [31:0] wdata_h;
+
+always @(posedge clk) begin
+	if (!nreset) begin
+		wack_h  <= 0;
+		wberr_h <= 0;
+		wdata_h <= 0;
+	end
+	else begin
+		if (!walker_req) begin
+			wack_h  <= 0;
+			wberr_h <= 0;
+		end
+		if (walker_req && (walker_ack || walker_berr)) begin
+			wack_h  <= walker_ack;
+			wberr_h <= walker_berr;
+			wdata_h <= walker_data;
+		end
+	end
+end
+
+wire        w_ack_eff  = walker_ack  | wack_h;
+wire        w_berr_eff = walker_berr | wberr_h;
+wire [31:0] wdat       = wack_h ? wdata_h : walker_data;
+
+wire walk_ack = w_active && w_issued && w_ack_eff && !w_berr_eff;
+wire walk_err = w_active && w_issued && w_berr_eff;
 
 // fill way selection: overwrite an existing mapping of the same page.
 // q_b has been holding the fill row since the walk started (address_b is
@@ -588,18 +636,18 @@ always @(posedge clk) begin
 			end
 
 			W_RA: if (walk_ack) begin
-				w_desc <= walker_data;
+				w_desc <= wdat;
 				w_desc_addr <= w_req_addr;
 				w_active <= 0;
-				if (!walker_data[1]) wst <= W_FLT;   // UDT invalid
+				if (!wdat[1]) wst <= W_FLT;   // UDT invalid
 				else begin
-					w_wp <= w_wp | walker_data[2];
-					if (!walker_data[3]) begin
-						wwr(w_req_addr, walker_data | 32'h8);
+					w_wp <= w_wp | wdat[2];
+					if (!wdat[3]) begin
+						wwr(w_req_addr, wdat | 32'h8);
 						wst <= W_UA;
 					end
 					else begin
-						wrd({walker_data[31:9], 9'd0} + {23'd0, w_pi, 2'b00});
+						wrd({wdat[31:9], 9'd0} + {23'd0, w_pi, 2'b00});
 						wst <= W_RB;
 					end
 				end
@@ -612,18 +660,18 @@ always @(posedge clk) begin
 			end
 
 			W_RB: if (walk_ack) begin
-				w_desc <= walker_data;
+				w_desc <= wdat;
 				w_desc_addr <= w_req_addr;
 				w_active <= 0;
-				if (!walker_data[1]) wst <= W_FLT;
+				if (!wdat[1]) wst <= W_FLT;
 				else begin
-					w_wp <= w_wp | walker_data[2];
-					if (!walker_data[3]) begin
-						wwr(w_req_addr, walker_data | 32'h8);
+					w_wp <= w_wp | wdat[2];
+					if (!wdat[3]) begin
+						wwr(w_req_addr, wdat | 32'h8);
 						wst <= W_UB;
 					end
 					else begin
-						wrd(pgtbl_addr(walker_data) + {24'd0, w_pgi, 2'b00});
+						wrd(pgtbl_addr(wdat) + {24'd0, w_pgi, 2'b00});
 						wst <= W_RC;
 					end
 				end
@@ -636,13 +684,13 @@ always @(posedge clk) begin
 			end
 
 			W_RC: if (walk_ack) begin
-				w_desc <= walker_data;
+				w_desc <= wdat;
 				w_desc_addr <= w_req_addr;
 				w_active <= 0;
-				case (walker_data[1:0])
+				case (wdat[1:0])
 					2'b00: wst <= W_FLT;
 					2'b10: begin
-						wrd(walker_data & 32'hFFFF_FFFC);
+						wrd(wdat & 32'hFFFF_FFFC);
 						wst <= W_RI;
 					end
 					default: wst <= W_UC;
@@ -650,11 +698,11 @@ always @(posedge clk) begin
 			end
 
 			W_RI: if (walk_ack) begin
-				w_desc <= walker_data;
+				w_desc <= wdat;
 				w_desc_addr <= w_req_addr;
 				w_active <= 0;
 				// an indirect descriptor must resolve to a resident page
-				if (walker_data[1:0] == 2'b00 || walker_data[1:0] == 2'b10) wst <= W_FLT;
+				if (wdat[1:0] == 2'b00 || wdat[1:0] == 2'b10) wst <= W_FLT;
 				else wst <= W_UC;
 			end
 
