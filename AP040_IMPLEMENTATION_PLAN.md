@@ -2101,44 +2101,63 @@ landed separately as 111e855d and 864ea1ac; this is blocker 3.
 The fix lands on its own, ahead of any decision about early restart, because
 it is a real deviation from what the memory controllers actually drive.
 
-### Early restart: settled, and the real blocker is one level up
+### Early restart: worth 5% on the streaming regime (2026-08-27)
 
-With blocker 3 fixed, early restart is correct -- full regression passes on
-branch `early-restart` (7031d620).  It is also nearly worthless as it stands:
+CORRECTION.  An earlier version of this section concluded from bench_loop
+that early restart was worth 0.036% and was blocked by cpu_wrapper's
+clkena_in gating.  Both halves were wrong and the section is replaced.
 
-    bench_loop      phase 0    phase 1    phase 2
-    baseline        325896     326674     326674
-    early restart   325780     326558     326558
-    delta             -116       -116       -116   (0.036%)
+bench_loop cannot measure fill work.  Its own profile says so:
 
-The delta does not move with latency across the three phases.  A genuine
-fill-latency win would scale with latency; a fixed 116 cycles means the
-mechanism almost never fires usefully.
+    PROF phase 2: 326674 cycles, summed "stalled" column ~1089  = 0.33%
+    ADLAT gap=453  wait=3422   (of ~979k cycles over three phases)
 
-The reason is structural and sits above the cache.  cpu_wrapper.v:267 drives
+A benchmark that spends 0.33% of its cycles stalled on the bus cannot
+measure a change to the fill path.  The -116 cycle delta measured there was
+noise around zero, not a small win, and it must not be used to rank
+memory-hierarchy work.  The clkena_in story built on top of it does not
+survive either: busstate is the ap040's external bus state and clkena_in
+releases on bus_complete, so an earlier ack does release the core sooner --
+which the measurement below confirms directly.
 
-    .clkena_in(~cpu_req | bus_complete | bus_berr)     with
-    wire cpu_req = (cpustate != 1);                    (cpu_wrapper.v:323)
+MEASURED on bw_probe under tb_cpu_wrapper_chip with TURBO_CHIP=1, which is
+the realistic path (real fastchip/rtg/akiko/gayle/ide, ram_cs_guard):
 
-so the CPU's clock enable is low for the whole of ANY outstanding bus
-transaction.  The cache acking the critical word early cannot let the core
-advance, because the wrapper has already frozen it until the transaction
-completes.  Every cycle early restart was meant to recover is a cycle the
-wrapper is holding the core still anyway.
+    tag   block                          base      early     delta
+    0011  movem reads, code in window    71184     71132     -0.07%
+    0021  same, code relocated out       65716     65708     -0.01%
+    0031  move.l (a0)+ reads            118048    118032     -0.01%
+    0041  movem writes                   95412     95404     -0.01%
+    0051  STREAMING reads 32KB          492764    468076     -5.01%
+    0061  streaming reads, warmed       492716    468052     -5.00%
+    0071  streaming WRITES              389384    389376     -0.00%
+    0081  RMW of one line                87444     87420     -0.03%
+    ----  whole chip-bus run            453784    441400     -2.73%
 
-This also explains the earlier profiling without contradicting it: fills
-really are 85% of fetch latency and fetch really is 57.9% of cycles, but that
-latency is not addressable from inside the cache while clkena_in is derived
-from cpu_req.
+Blocks 5 and 6 sweep 32KB with movem.l so every line is a miss -- the
+xsysinfo regime that produces the hardware MB/s figures.  That is where the
+5% lands, and it is the number that matters.  Block 7 shows nothing because
+a streaming write never needs the critical word back, which is the right
+signature for this change and a check that the 5% is real rather than drift.
 
-NEXT, if this thread is picked up: change clkena_in to stall the CPU only
-when the CPU is itself waiting on an unacked access, rather than whenever
-memory is busy.  That is a cpu_wrapper change with real risk -- it is the
-same class of change as the P2 attempt that black-screened -- and it needs
-its own measurement before the cache-side work is worth landing.  Early
-restart stays on its branch until then.
+WHAT IS AND IS NOT IMPLEMENTED.  The landed version is the safe subset:
 
-The width work (X2.1c) remains the other unexplored lever, and is not blocked
-by any of this: it reduces the number of beats rather than trying to overlap
-them.  It still needs the tied-off cache_burst port or a widened controller
-interface.
+  - acks the critical longword as soon as its beat returns; fill_acked
+    suppresses the later C_TAGW ack so the core is never acked twice
+  - the tag is still written only at C_TAGW, so the line stays INVALID
+    until every beat has arrived
+  - cst stays in C_FILL for the whole line, so a second miss waits rather
+    than colliding with the background fill
+
+Not yet done, and the next increment: start the fill at the REQUESTED beat
+and wrap, instead of always at beat 0.  Note the ceiling on that here is
+modest for this particular probe -- bw5/bw6 walk forward with movem.l from
+a 32-byte-aligned base, so the first touch of each line is already at
+offset 0 and beat 0 is already the critical beat.  It pays on non-zero
+first touches (backward walks, unaligned bases, data structures entered
+mid-line), so it needs a probe with those before its own win can be
+claimed.
+
+Two bugs this exercise exposed on the way -- live m_instr/m_fc, and a live
+tag_ridx during fill -- were real latent defects and landed separately as
+111e855d and 864ea1ac.  The walker-ack blind window (4ae61485) was the third.

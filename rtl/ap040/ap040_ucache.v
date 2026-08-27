@@ -216,6 +216,7 @@ reg         st_snooped;     // a snoop touched the store's row: no merge
 // issue anything while a fill ran.  Early restart releases it mid-fill, so a
 // new request would otherwise swing busstate between FETCH and READ inside
 // one transaction and change the function code under the adapter.
+reg         fill_acked;
 reg         r_instr;
 reg   [2:0] r_fc;
 
@@ -429,6 +430,7 @@ always @(posedge clk) begin
 		cinv_done <= 0;
 		st_merge_arm <= 0;
 		st_inv_arm <= 0;
+		fill_acked <= 0;
 		r_instr <= 0;
 		r_fc <= 0;
 		r_row <= 0; r_tag <= 0; r_way <= 0;
@@ -499,6 +501,7 @@ always @(posedge clk) begin
 						r_off <= c_addr[1:0];
 						r_instr <= c_instr;
 						r_fc <= c_fc;
+						fill_acked <= 0;
 										cst <= C_LOOK;
 					end
 				end
@@ -603,7 +606,12 @@ always @(posedge clk) begin
 					// core mid-fill lets the MMU start a table walk
 					// concurrently, and that currently faults.  See the
 					// plan entry before trying again.
-					if (r_beat == r_addr[3:2]) fill_hold <= m_rdata;
+					if (r_beat == r_addr[3:2]) begin
+						fill_hold <= m_rdata;
+						rdata_r <= lw_extract(m_rdata, r_size, r_off);
+						ack_r <= 1;
+						fill_acked <= 1;
+					end
 					r_issued <= 0;
 					if (r_beat == 2'd3) cst <= C_TAGW;
 					else r_beat <= r_beat + 2'd1;
@@ -611,8 +619,11 @@ always @(posedge clk) begin
 			end
 
 			C_TAGW: begin
-				rdata_r <= lw_extract(fill_hold, r_size, r_off);
-				ack_r <= 1;
+				if (!fill_acked) begin
+					rdata_r <= lw_extract(fill_hold, r_size, r_off);
+					ack_r <= 1;
+				end
+				fill_acked <= 0;
 				cst <= C_IDLE;
 			end
 
