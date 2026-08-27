@@ -1307,6 +1307,43 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### EARLY RESTART: tried, reverted, and what it actually needs (2026-08-27)
+
+Before the width work, tried the cheap attack on the same 31 cycles: ack the
+core the moment ITS longword lands and finish the line behind it.  The cache
+already captures the requested beat (fill_hold) and then waits out the
+remaining three for no benefit to that access.  Sequential fetch enters a
+line at beat 0, so this should turn the common fetch miss from four beats of
+latency into one -- against fills being 85% of fetch latency and fetch 57.9%
+of all cycles, easily the largest cheap win available.
+
+It does not work as a local change, and the failures say why.
+
+  * FOUND A LATENT BUG, KEPT THE FIX: the cache drove m_instr and m_fc from
+    the LIVE c_instr/c_fc, which was only safe because the core could not
+    issue anything while a fill ran.  Released early, a new request swings
+    busstate between FETCH and READ inside one adapter transaction and
+    changes the function code under it.  They are now registered at
+    acceptance (r_instr/r_fc) and used while fill_active.  This is worth
+    having on its own and is retained.
+  * STILL FAILS AFTER THAT FIX: t_integer runs off to a wild address and
+    t_mmu trips the bench's walker/CPU-bus exclusivity check.  The second is
+    a bench modelling limit rather than a hardware rule -- sdram_ctrl has a
+    DEDICATED walker port (walker_req/walker_we/walker_addr) separate from
+    the CPU port and arbitrates internally, and the bench's single memory
+    model cannot serve both -- but the first is a real defect and was not
+    chased to ground.
+
+So early restart needs, at minimum: the bench's walker model taught to
+arbitrate rather than assert, and the wild-address failure understood.  It
+is NOT a cache-local change; releasing the core mid-fill lets it start
+traffic the rest of the system was built assuming could not exist.  Recorded
+in the module at the fill loop so the next attempt starts from here rather
+than rediscovering it.
+
+Sizing is unchanged and still favours it if it can be made to work: it
+attacks the same 85% the width work does, for far less integration.
+
 ### THE TWO LEVERS SIZED (2026-08-27): width 21.9%, level-ack gap 8.7%
 
 Ran the probe the section below asks for (+qprof ADLAT line: adapter phase

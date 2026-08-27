@@ -211,6 +211,13 @@ reg  [31:0] rdata_r;
 reg         st_merge_arm;   // this PASS may merge on hit at its m_ack
 reg         st_inv_arm;     // this PASS records a hit for invalidation
 reg         st_snooped;     // a snoop touched the store's row: no merge
+// The fill's OWN instr/fc, captured at acceptance.  m_instr and m_fc used to
+// track c_instr/c_fc live, which was safe only because the core could not
+// issue anything while a fill ran.  Early restart releases it mid-fill, so a
+// new request would otherwise swing busstate between FETCH and READ inside
+// one transaction and change the function code under the adapter.
+reg         r_instr;
+reg   [2:0] r_fc;
 
 wire [20:0] t_w0 = tag_q[20:0];
 wire [20:0] t_w1 = tag_q[41:21];
@@ -330,11 +337,11 @@ reg  [6:0] ci_inv_row;
 
 assign m_req   = fill_active ? 1'b1 : (pass_active ? c_req : 1'b0);
 assign m_write = fill_active ? 1'b0 : c_write;
-assign m_instr = c_instr;
+assign m_instr = fill_active ? r_instr : c_instr;
 assign m_size  = fill_active ? `AP040_SZ_L : c_size;
 assign m_addr  = fill_active ? {r_addr[31:4], r_beat, 2'b00} : c_addr;
 assign m_wdata = c_wdata;
-assign m_fc    = c_fc;
+assign m_fc    = fill_active ? r_fc : c_fc;
 
 assign c_ack   = pass_active ? m_ack : ack_r;
 assign c_rdata = pass_active ? m_rdata : rdata_r;
@@ -414,6 +421,8 @@ always @(posedge clk) begin
 		cinv_done <= 0;
 		st_merge_arm <= 0;
 		st_inv_arm <= 0;
+		r_instr <= 0;
+		r_fc <= 0;
 		r_row <= 0; r_tag <= 0; r_way <= 0;
 		r_beat <= 0; r_issued <= 0; r_addr <= 0; r_size <= 0; r_off <= 0;
 		fill_hold <= 0; ack_r <= 0; rdata_r <= 0;
@@ -480,6 +489,8 @@ always @(posedge clk) begin
 						r_addr <= c_addr;
 						r_size <= c_size;
 						r_off <= c_addr[1:0];
+						r_instr <= c_instr;
+						r_fc <= c_fc;
 						cst <= C_LOOK;
 					end
 				end
@@ -560,7 +571,7 @@ always @(posedge clk) begin
 					r_way <= tag_q[89:88];
 					r_beat <= 0;
 					r_issued <= 0;
-					cst <= C_FILL;
+								cst <= C_FILL;
 				end
 			end
 
@@ -572,6 +583,15 @@ always @(posedge clk) begin
 				end
 				else if (!r_issued) r_issued <= 1;
 				else if (m_ack) begin
+					// EARLY RESTART WAS TRIED HERE AND REVERTED.  Acking
+					// the core the moment its own longword lands, and
+					// letting the rest of the line finish behind it,
+					// attacks the largest single cost in the machine --
+					// fills are 85% of fetch latency and fetch is 57.9%
+					// of all cycles.  It does not work as a local change:
+					// releasing the core mid-fill lets it start traffic
+					// the rest of the system assumes cannot exist while a
+					// fill runs.  See the plan entry for what it needs.
 					if (r_beat == r_addr[3:2]) fill_hold <= m_rdata;
 					r_issued <= 0;
 					if (r_beat == 2'd3) cst <= C_TAGW;
