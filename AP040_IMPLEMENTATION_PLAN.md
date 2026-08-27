@@ -1307,6 +1307,54 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### THE NUMBER THAT MATTERS: 4.5x slower than the core it replaces (2026-08-27)
+
+First hardware measurement against the incumbent, xsysinfo 0.9.0 on the same
+board, b9013c2a (65cfcf7f) versus the stock TG68K-020 core:
+
+                        TG68K-020    AP040     ratio
+    Dhrystones             20911       4674    4.47x slower
+    chip   MB/s            24.21       5.17    4.7x
+    fast   MB/s            19.91       6.66    3.0x
+    ROM    MB/s            24.44       8.23    3.0x
+
+Converted to cycles per longword at 28.375MHz, which is the form that maps
+onto everything else in this document:
+
+                        TG68K-020    AP040
+    chip                   4.7 cyc   22.0 cyc
+    fast                   5.7 cyc   17.0 cyc
+    ROM                    4.6 cyc   13.8 cyc
+
+Three things follow, and the first one is why this entry exists.
+
+1. THE BENCH PROFILING IS VALIDATED.  17.0 cycles per fast-RAM longword
+   derived from hardware bandwidth against 17.6 measured in simulation for
+   move.l (An),Dn cached.  Every per-instruction figure in "Where the cycles
+   actually go" can now be trusted as describing the board, not the model.
+
+2. THE MACHINE IS SEQUENCER-BOUND, CONFIRMED FROM OUTSIDE.  Dhrystones are
+   4.47x off while memory is 3.0x off, so the excess is in instruction
+   execution rather than in the memory path.  That is the same conclusion the
+   state histogram reached from the inside -- 82.5% of cycles walking states
+   with memory already answered -- arrived at independently.  It is the
+   argument for P3/X2.3 ahead of the width work in X2.1c.
+
+3. CHIP RAM IS DISPROPORTIONATELY BAD: 22.0 cycles against fast RAM's 17.0,
+   where the 020 core is FASTER on chip than on fast (4.7 vs 5.7).  Whatever
+   costs the extra 5 cycles is specific to the chip window and does not
+   appear in the fast path.  Candidates, in the order worth testing: the
+   whole-set store invalidation, the snoop traffic chip RAM attracts that
+   fast RAM does not, and the chip-window I-fetch bypass added in 192d82ce.
+   None of these has been measured on the board; this is a lead, not a
+   finding.
+
+Context for expectations: the plan already put the integer core at 7-8x off
+real 68040 silicon, so being 4.5x off a mature 020 core is consistent rather
+than surprising.  It is recorded here because "slower than the core it
+replaces" is the number a user actually experiences, and no amount of
+cycle-accuracy work substitutes for closing it.
+
 ### X2.2b stage 1 CONFIRMED ON HARDWARE (2026-08-27)
 
 The b9013c2a bitstream boots.  That carries stage 1's channel-qualified
