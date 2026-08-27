@@ -1307,6 +1307,44 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### UNIFIED L1 ON HARDWARE (2026-08-27): +12.9% Dhrystones, streaming flat
+
+xsysinfo 0.9.0, same board, cd033533 against b9013c2a:
+
+    Dhrystones     4674 -> 5277    +12.9%
+    chip     5.17 -> 5.19 MB/s     +0.4%  (noise)
+    fast     6.66 -> 6.64 MB/s     -0.3%  (noise)
+    ROM      8.23 -> 8.26 MB/s     +0.4%  (noise)
+
+    versus TG68K-020: 4.47x slower -> 3.96x slower
+
+Attribution, carefully, because only one of the two predicted wins is
+actually visible in these numbers:
+
+  * STREAMING FLAT WAS PREDICTED AND CONFIRMED.  The fill path did not
+    change, so bandwidth should not have moved, and it did not (0.4% either
+    way is below the measurement's resolution).  Worth stating because it
+    is the control: had bandwidth moved, something unintended would have.
+
+  * THE +12.9% IS THE STORE-MERGE WIN, essentially alone.  The bypass
+    retirement only ever applied below $200000 -- cache_chip is
+    mm_addr[31:21] == 0 -- so code resident in FAST RAM never took the
+    bypass and gains nothing from retiring it.  If xsysinfo's Dhrystone
+    runs from fast RAM, which is the normal case for a Workbench tool with
+    fast RAM present, then the entire 12.9% comes from stores no longer
+    invalidating their set.  That is consistent with bw_probe block 8's
+    -49% on a pure RMW loop diluted across Dhrystone's instruction mix.
+
+  * THE 24-34% CHIP-WINDOW WIN IS THEREFORE STILL UNMEASURED.  It applies
+    to chip-RAM-resident code -- demos, OCS-era software, anything that
+    runs from the low 2MB.  Nothing in an xsysinfo run exercises it.  The
+    test that would: a chip-RAM demo (Phenomena Enigma is the one whose
+    breakage motivated the bypass in the first place), or a Dhrystone
+    forced to load low.
+
+So the honest position is one win confirmed at 12.9%, one control
+confirmed flat, and the larger predicted win untested rather than absent.
+
 ### UNIFIED L1 BUILT AND MEASURED (2026-08-27): both predicted wins banked
 
 ap040_ucache.v replaces ap040_cache.v behind the same interface: 128 sets x
