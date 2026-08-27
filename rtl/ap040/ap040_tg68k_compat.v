@@ -339,7 +339,7 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		cache_chip;
 	wire cache_allow = cache_allow_all | cache_win;
 
-	ap040_cache cache (
+	ap040_ucache cache (
 		.clk(clk),
 		.nreset(nreset),
 		.ce(clkena_in),
@@ -359,8 +359,13 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.c_addr(mm_addr),
 		.c_wdata(mm_wdata),
 		.c_fc(mm_fc),
-		.c_nocache(mm_nocache | ~cache_allow |
-		           (mm_instr & cache_chip & ~cache_allow_all)),
+		// The chip-window instruction-fetch bypass (192d82ce) is RETIRED
+		// by the unified cache: a store hits the same line an I-fetch
+		// reads, so self-modifying chip-RAM code is coherent by
+		// construction and the bypass's measured 25-34% cost on all
+		// chip-window execution is recovered.  cache_chip stays for the
+		// cacheability window computation above.
+		.c_nocache(mm_nocache | ~cache_allow),
 		.s_stb(snp_stb),
 		.s_addr(snp_addr),
 		.c_ack(mm_ack),

@@ -45,11 +45,18 @@ start:
 
 	move.w	#$7002,($2000).l	; memory now says moveq #2
 	jsr	($2000).l
-	chkl	d0,1,3			; stale I-cache line still serves 1
+	; UNIFIED CACHE (ap040_ucache): the store merged into the same line
+	; the I-fetch reads, so the new code runs WITHOUT a CINV.  Real 040
+	; silicon would still return 1 here (its I-cache is not snooped by
+	; CPU writes); the deviation is deliberate and documented in the
+	; module header -- coherence is what A500-era software needs, and
+	; the split cache's bypass workaround cost 25-34% of chip-window
+	; execution.  This test pins the NEW contract.
+	chkl	d0,2,3			; coherent: the store updated the line
 
 	cinva	ic
 	jsr	($2000).l
-	chkl	d0,2,4			; after CINV the new code runs
+	chkl	d0,2,4			; and CINV of course still shows it
 
 ;----------------------------------------------- D-cache and stale data
 	move.l	#$0D0D0001,($3500).l	; write-through (invalidates the set)

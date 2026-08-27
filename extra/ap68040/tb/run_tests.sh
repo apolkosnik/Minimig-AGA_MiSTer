@@ -16,7 +16,7 @@ mkdir -p "$WORK"
 
 SRC="$RTL/ap040_tg68k_compat.v $RTL/ap040_core.v $RTL/ap040_bus16_adapter.v \
      $RTL/ap040_bus_timeout.v $RTL/ap040_regfile.v $RTL/ap040_alu.v \
-     $RTL/ap040_muldiv.v $RTL/ap040_mmu.v $RTL/ap040_cache.v $RTL/ap040_fpu.v \
+     $RTL/ap040_muldiv.v $RTL/ap040_mmu.v $RTL/ap040_ucache.v $RTL/ap040_fpu.v \
      $RTL/ap040_walker_cdc.v $RTL/primitives/dpram.v"
 
 echo "== assembling test programs =="

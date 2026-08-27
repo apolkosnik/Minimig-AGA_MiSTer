@@ -1307,6 +1307,41 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### UNIFIED L1 BUILT AND MEASURED (2026-08-27): both predicted wins banked
+
+ap040_ucache.v replaces ap040_cache.v behind the same interface: 128 sets x
+4 ways x 16B unified -- the same 8KB and the same array shapes as the split
+cache, so the storage cost is zero.  Stores that fit one aligned longword
+merge into the hitting way (byte-enable writes); misaligned stores keep the
+old invalidate path; snoops reach every line, so the chip-window I-fetch
+bypass is retired in the same change.  All five paid-for hazard fixes are
+carried forward and documented in the module header.
+
+bw_probe, chip bench TURBO=1, clk_114 counts, against the shipped split
+cache:
+
+                          split+bypass   unified     win
+    movem reads (cold)        105780      71184     -33%
+    movem reads (warm)         99320      65716     -34%
+    move.l x8 reads           155684     118048     -24%
+    movem writes              129024      95412     -26%
+    RMW one line              173124      87444     -49%
+    streaming read            (n/a)      492764     unchanged vs scratch
+
+  Blocks 1-4 land BYTE-IDENTICAL to the scratch bypass-off measurement, so
+  the bypass retirement banked in full.  RMW halves: ~14 cycles per access
+  against ~36 -- the store-merge path working.  Streaming is unchanged, as
+  expected: the fill path did not move.
+
+  t_cache test 3 now pins the new contract (SMC coherent without CINV, a
+  deliberate deviation from real 040 silicon, argued in the module header).
+  Full regression green on the first complete run, every leg.
+
+  Still open from the proposal: the SECOND lookup port (simultaneous I+D)
+  -- that is the replicated-tag phase and needs the core-side channel
+  split (X2.2b stage 2's issue rule).  This change deliberately shipped
+  the coherence and store-merge wins first, which needed no core changes.
+
 ### Streaming and RMW measured; UNIFIED DUAL-PORT L1 proposed (2026-08-27)
 
 Clean numbers (code L1-cached via scratch bypass-off, clk_sys):

@@ -6,7 +6,7 @@ set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap0
 set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap040_bus_timeout.v ]
 set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap040_walker_cdc.v ]
 set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap040_mmu.v ]
-set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap040_cache.v ]
+set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap040_ucache.v ]
 set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap040_fpu.v ]
 set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap040_core.v ]
 set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap040_tg68k_compat.v ]

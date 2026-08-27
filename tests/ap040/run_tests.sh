@@ -16,7 +16,7 @@ mkdir -p "$WORK"
 ./build_tests.sh
 
 SRC="$RTL/ap040_tg68k_compat.v $RTL/ap040_core.v $RTL/ap040_bus16_adapter.v $RTL/ap040_bus_timeout.v \
-     $RTL/ap040_regfile.v $RTL/ap040_alu.v $RTL/ap040_muldiv.v $RTL/ap040_mmu.v $RTL/ap040_cache.v $RTL/ap040_fpu.v"
+     $RTL/ap040_regfile.v $RTL/ap040_alu.v $RTL/ap040_muldiv.v $RTL/ap040_mmu.v $RTL/ap040_ucache.v $RTL/ap040_fpu.v"
 
 # generated sources: every bench below reads them, so they come first
 python3 hoist_decls.py ../../rtl/cpu_wrapper.v "$WORK/cpu_wrapper_sim.v"
