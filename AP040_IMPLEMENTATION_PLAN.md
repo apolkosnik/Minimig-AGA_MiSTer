@@ -2353,3 +2353,41 @@ during C_FFILL or C_FWR prevents the line from being TAGGED (the re-read
 misses and refetches fresh data), with two controls -- a clean fill's
 re-read HITS, and a snoop to a different row does not de-tag.  It runs as
 the fillsnoop regression leg.
+
+### RBF built: timing IMPROVED, and the CPU is not the critical path
+
+  output_files/Minimig-ap040x2-4273daf3-20260827_133123.rbf
+  (also left at output_files/Minimig.rbf -- this is the mainline branch)
+
+Its RTL is identical to HEAD: the only commit after it, 994751ce, touches
+tests and this document.
+
+    Quartus 17.0.2, 5CSEBA6U23I7, 0 errors, elapsed 00:14:08
+
+                        cd033533 (boots)   this build
+    setup slack             -0.290           +0.023
+    hold slack               0.167            0.238
+    ALMs                    38,238 (91%)    38,522 (92%)
+    RAM blocks                   --          258 (47%)
+
+Two things worth keeping:
+
+  - the build that currently runs on the user's board was failing setup by
+    0.290ns and booted anyway.  This one CLOSES, with TNS 0.000 on every
+    clock, so the fill path and its CDC did not cost timing -- they bought
+    some.  ~+284 ALMs against the 38,238 the plan last recorded, inside the
+    "<= 92% without dual issue" gate in the sizing section.
+
+  - the worst path is pll_hdmi's counter, not the CPU.  The two emu|pll
+    domains (clk_114 and clk_sys) sit at +0.108 and +0.835.  Whatever the
+    next timing fight is, it is not in this core.
+
+What this bitstream carries, none of it yet hardware-tested: the walker-ack
+hold (4ae61485), early restart (494903c7), critical word first (714a7e50),
+and the 32-bit fill path on BOTH controllers (bcd8a7f9, 4273daf3).
+
+The single number to watch on hardware is xsysinfo's CHIP figure: 5.19 MB/s
+before, and the real-stack simulation says a general-purpose program spends
+15% fewer cycles.  ROM should move too (kick RAM is served by the same
+controller but is NOT yet in fill_ok's window -- that is the next increment
+and deliberately not in this build).
