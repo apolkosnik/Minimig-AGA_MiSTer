@@ -2347,5 +2347,9 @@ engagement:
 A 15% gain on a general-purpose program (not a streaming probe) over the
 real controller is the number that predicts hardware.
 
-Remaining coverage gap, unchanged: a chipset DMA write snooping a line
-mid-fast-fill.  The snoop guard is shared with the slow fill via any_fill.
+The last coverage gap is now closed too: tb_ap040_fillsnoop is a directed
+bench against the real ap040_ucache proving that a snoop into the fill's row
+during C_FFILL or C_FWR prevents the line from being TAGGED (the re-read
+misses and refetches fresh data), with two controls -- a clean fill's
+re-read HITS, and a snoop to a different row does not de-tag.  It runs as
+the fillsnoop regression leg.
