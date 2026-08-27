@@ -401,6 +401,34 @@ always @ (posedge clk) begin
       end
       CPU_SM_READ : begin
         // on hit update LRU flag in tag memory
+        //
+        // The four tagupd_tram captures below read the LIVE RAM output
+        // (*_cpu_dat_r), NOT the one-cycle shadows (*_cpu_q) that FILL1
+        // uses.  That asymmetry is deliberate and must stay.
+        //
+        // It is tempting to "fix" it, because this is the design's worst
+        // setup path: with fitter seed 7 all eight worst paths in the
+        // clk_114 domain ran dtram's M10K output to tagupd_tram[*] and
+        // missed by -0.446 ns (seed 11 closes it at +0.112, which is a
+        // lottery ticket rather than a fix).  Swapping in the shadows
+        // looks like the same trick FILL1 already plays.
+        //
+        // It is not.  The way-select decision here comes from the live
+        // output too -- dtag0_match/dtag0_valid are combinational on
+        // dtram_cpu_dat_r (see the assigns below) -- so the decision and
+        // the captured word are consistent with each other.  Feeding the
+        // capture from the shadow while the decision stays live would
+        // choose a way from the current tags and then write back a word
+        // that is one cycle old, so a snoop or a background clear sweep
+        // landing in that window would be undone: the stale tag would be
+        // resurrected as valid.  FILL1 can use the shadows precisely
+        // because it takes BOTH its lru decision and its capture from
+        // them, so its pair agrees.
+        //
+        // A real fix has to move the tag COMPARE off this path, not the
+        // capture -- the endpoints are data bits whose enable cone runs
+        // through the 18-bit compare -- or accept an extra cycle on the
+        // hit path, which is the hot path.  Neither is a drive-by.
         if (cpu_ir && cc_en && itag0_match && itag0_valid) begin
           // data is already in instruction cache way 0
           cpu_dat_r <= idram0_cpu_dat_r;
