@@ -1307,6 +1307,23 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### X2.2b stage 1 CONFIRMED ON HARDWARE (2026-08-27)
+
+The b9013c2a bitstream boots.  That carries stage 1's channel-qualified
+acknowledge, so the refactor is validated on silicon and not merely
+cycle-identical in simulation -- which matters, because stage 2 changes the
+issue rule on top of exactly this acknowledge logic and would otherwise be
+building on an unproven base.
+
+Also confirmed by the same boot: baf20e99 (Akiko priority over the RTG
+window) and 192d82ce (the chip-window I-fetch bypass, already known good).
+
+NOT yet confirmed on hardware, being the only RTL on ap040x2 above that
+bitstream: 12cf17f5, the ATC sweep read/judge fix.  It is behaviourally
+neutral under the current stall enable -- full regression green with cycle
+counts unchanged -- so the risk is low, but it has not booted and should not
+be described as though it has.
+
 ### X2.2b stage 2 COSTED (2026-08-24): it must follow P2, not precede it
 
 The staging above offered two routes for the second lookup and preferred
