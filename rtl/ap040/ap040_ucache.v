@@ -349,7 +349,15 @@ assign c_rdata = pass_active ? m_rdata : rdata_r;
 assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
                    c_req && !ack_r && !c_write && !bypass && !ci_inv_pend;
 
-assign tag_ridx  = a_row;
+// Hold the tag read at the FILL's row while a fill is in flight.  The row
+// DATA still comes live from the RAM -- that is deliberate, so a concurrent
+// snoop or CINV sweep is not undone by the writeback -- but the ADDRESS must
+// be the fill's own, not whatever the core is currently asking for.  With
+// the core blocked during a fill those were always the same row, so a_row
+// worked by accident; anything that releases the core mid-fill (early
+// restart) makes C_TAGW compose the fill's tag into a DIFFERENT set's row
+// image, corrupting that set and validating a line that was never filled.
+assign tag_ridx  = (fill_active || cst == C_TAGW) ? r_row : a_row;
 wire [83:0] tags_next = (r_way == 2'd0) ? {tag_q[83:21], r_tag} :
                         (r_way == 2'd1) ? {tag_q[83:42], r_tag, tag_q[20:0]} :
                         (r_way == 2'd2) ? {tag_q[83:63], r_tag, tag_q[41:0]} :
@@ -491,7 +499,7 @@ always @(posedge clk) begin
 						r_off <= c_addr[1:0];
 						r_instr <= c_instr;
 						r_fc <= c_fc;
-						cst <= C_LOOK;
+										cst <= C_LOOK;
 					end
 				end
 			end
@@ -583,15 +591,18 @@ always @(posedge clk) begin
 				end
 				else if (!r_issued) r_issued <= 1;
 				else if (m_ack) begin
-					// EARLY RESTART WAS TRIED HERE AND REVERTED.  Acking
-					// the core the moment its own longword lands, and
-					// letting the rest of the line finish behind it,
-					// attacks the largest single cost in the machine --
-					// fills are 85% of fetch latency and fetch is 57.9%
-					// of all cycles.  It does not work as a local change:
-					// releasing the core mid-fill lets it start traffic
-					// the rest of the system assumes cannot exist while a
-					// fill runs.  See the plan entry for what it needs.
+					// EARLY RESTART belongs here -- ack the core the
+					// moment ITS longword lands and let the line finish
+					// behind it -- and it is the largest cheap win left:
+					// fills are 85% of fetch latency, fetch is 57.9% of
+					// all cycles, and sequential fetch enters a line at
+					// beat 0 so the common miss would cost one beat
+					// instead of four.  Two of its three blockers are
+					// already fixed (see r_instr/r_fc, and tag_ridx being
+					// pinned to r_row).  The third is not: releasing the
+					// core mid-fill lets the MMU start a table walk
+					// concurrently, and that currently faults.  See the
+					// plan entry before trying again.
 					if (r_beat == r_addr[3:2]) fill_hold <= m_rdata;
 					r_issued <= 0;
 					if (r_beat == 2'd3) cst <= C_TAGW;

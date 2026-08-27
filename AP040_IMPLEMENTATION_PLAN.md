@@ -1307,6 +1307,45 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### EARLY RESTART: two of three blockers fixed, the third is MMU concurrency
+
+Chased this properly.  Early restart -- ack the core when ITS longword lands,
+finish the line behind it -- is the largest cheap win left (fills are 85% of
+fetch latency, fetch is 57.9% of all cycles, and sequential fetch enters a
+line at beat 0, so the common miss would cost one beat instead of four).
+Three things blocked it.  Two are now fixed and LANDED, because both were
+latent bugs that early restart merely exposed:
+
+  1. m_instr and m_fc were driven from the LIVE c_instr/c_fc.  Safe only
+     while the core could not issue during a fill; released early, a new
+     request swings busstate between FETCH and READ inside one adapter
+     transaction and changes the function code under it.  Now registered at
+     acceptance (r_instr/r_fc).
+
+  2. tag_ridx was the LIVE a_row, so C_TAGW composed the fill's tag
+     writeback from whatever row the CORE was addressing.  With the core
+     blocked those were always the same row and it worked by accident;
+     released early, the fill's tag is written into a DIFFERENT set's row
+     image -- corrupting that set and validating a line never filled.  This
+     was the wild-address failure (t_integer to 22222220).  tag_ridx is now
+     pinned to r_row while a fill is in flight; the row DATA still comes
+     live, which is what the snoop/sweep hazard actually required.
+
+  3. NOT FIXED: releasing the core mid-fill lets the MMU start a table walk
+     concurrently with the fill.  The bench's walker/CPU exclusivity
+     assertion fires on this, and that assertion IS stricter than hardware
+     (sdram_ctrl has a dedicated walker port and arbitrates internally).
+     But relaxing it to model the arbitration does not make the test pass:
+     t_mmu then takes a real access fault during exception processing and
+     double-faults (pc=146c, ir=f518, mem_flt=1).  So there is a genuine
+     MMU-side interaction, not just a bench limit, and it was not chased to
+     ground.
+
+Next attempt starts at (3): find why a walk concurrent with a fill faults.
+The two fixes above are already in and are worth having on their own -- (2)
+especially, since it is a real corruption path that only stayed dormant
+because the core happened to be blocked.
+
 ### EARLY RESTART: tried, reverted, and what it actually needs (2026-08-27)
 
 Before the width work, tried the cheap attack on the same 31 cycles: ack the
