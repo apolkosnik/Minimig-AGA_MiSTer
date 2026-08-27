@@ -1307,6 +1307,48 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### THE QUEUE IS STARVING: 90% of S_FETCH runs on an EMPTY queue (2026-08-27)
+
+Re-profiled t_integer with the unified cache in place (16650 cycles, down
+from 17686 with the split cache), and the bottleneck has MOVED:
+
+                    split cache      unified
+    S_FETCH            34.0%          38.5%
+    S_IMMF             17.0%          19.5%
+    S_MRD              14.4%          10.0%
+    S_MWR               7.1%           7.2%
+    bus stalls         17.5%          16.4%
+
+The data side got faster, so the fetch side now dominates outright:
+S_FETCH + S_IMMF are 57.9% of every cycle, and only 16.4% of all cycles are
+stalled on the bus at all.
+
+The +qprof probe (fetch-queue occupancy, new in tb_ap040_program) says why:
+
+    dry_at_fetch = 90%     -- 90% of S_FETCH cycles have epf_count == 0
+    occupancy 0  = 9968    -- the queue is EMPTY for 60% of all cycles
+
+So S_FETCH is not costing pop cycles with words available.  The queue is
+STARVING.  That distinguishes the two candidate fixes decisively: this needs
+fetch BANDWIDTH, not a deeper pipeline.
+
+Tested and REVERTED, so it is not retried: removing the fill engine's
+`!ea_state` gate.  It moved t_integer 16650 -> 16628 (noise) and the dry
+rate 90% -> 89%, while making bench_loop 11.6% WORSE (325896 -> 363704).
+The gate earns its keep exactly as its comment claims; it is not what
+starves the queue.
+
+What starves it is the SHARED PORT: the fill engine also requires
+`!mem_req && !mem_ack` and `state != S_MRD/S_MWR/S_MRD_B/S_MWR_B`, so it
+only fills when the core is quiet AND the port is idle.  With data accesses
+and EA computation occupying much of the time, those slots are rare.
+
+That is precisely what the unified cache's SECOND PHASE removes -- a second
+lookup port serving an instruction fetch while a data access proceeds.  The
+proposal's remaining phase is now the measured top priority, ahead of P3:
+P3 overlaps execution with fetch, but there is nothing to overlap while the
+queue is empty 60% of the time.
+
 ### UNIFIED L1 ON HARDWARE (2026-08-27): +12.9% Dhrystones, streaming flat
 
 xsysinfo 0.9.0, same board, cd033533 against b9013c2a:

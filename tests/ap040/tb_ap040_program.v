@@ -639,6 +639,16 @@ always @(posedge clk) if (nreset && mem_ready && busstate == 2'b11 &&
 // claims come from (X2.8).  Counts every clk cycle by core state; the
 // stall column is the subset spent with clkena_in low (bus wait).
 // Printed and cleared at the end of each phase.
+// +qprof: fetch-queue occupancy histogram.  S_FETCH is now 38.5% of all
+// cycles; whether that is the queue running DRY (needs more fetch
+// bandwidth -- the unified cache's second lookup port) or the pop path
+// costing cycles with words available (needs a deeper pipeline -- P3) is
+// the question this answers.
+integer q_hist [0:15];
+integer q_on = 0;
+integer q_dry_at_fetch = 0;
+integer q_fetch_cyc = 0;
+integer qi;
 integer prof_cnt [0:255];
 integer prof_stall [0:255];
 integer prof_on = 0;
@@ -664,6 +674,7 @@ integer memlat_mrd;
 integer pi;
 initial begin
 	prof_on = $test$plusargs("prof");
+	q_on = $test$plusargs("qprof");
 	memlat_on = $test$plusargs("memlat");
 	memlat_run = -1;
 	memlat_portwait = 0;
@@ -672,9 +683,18 @@ initial begin
 		memlat_n[mli] = 0; memlat_sum[mli] = 0; memlat_max[mli] = 0;
 		for (mlj = 0; mlj < 32; mlj = mlj + 1) memlat_hist[mli][mlj] = 0;
 	end
+	for (qi = 0; qi < 16; qi = qi + 1) q_hist[qi] = 0;
 	for (pi = 0; pi < 256; pi = pi + 1) begin
 		prof_cnt[pi] = 0;
 		prof_stall[pi] = 0;
+	end
+end
+always @(posedge clk) if (q_on && nreset) begin
+	q_hist[dut.core.epf_count] = q_hist[dut.core.epf_count] + 1;
+	if (dut.core.state == 8'd3) begin      // S_FETCH
+		q_fetch_cyc = q_fetch_cyc + 1;
+		if (dut.core.epf_count == 4'd0)
+			q_dry_at_fetch = q_dry_at_fetch + 1;
 	end
 end
 always @(posedge clk) if (memlat_on && nreset) begin
@@ -742,6 +762,11 @@ task prof_dump;
 	begin
 		total = 0;
 		for (pi = 0; pi < 256; pi = pi + 1) total = total + prof_cnt[pi];
+		if (q_on) begin
+			$display("QPROF fetch_cyc=%0d dry_at_fetch=%0d (%0d%%)", q_fetch_cyc, q_dry_at_fetch, (100*q_dry_at_fetch)/(q_fetch_cyc==0?1:q_fetch_cyc));
+			for (qi = 0; qi < 9; qi = qi + 1)
+				$display("QPROF   occupancy %0d: %0d", qi, q_hist[qi]);
+		end
 		$display("PROF phase %0d: %0d cycles total", ph, total);
 		for (pi = 0; pi < 256; pi = pi + 1)
 			if (prof_cnt[pi] != 0)
