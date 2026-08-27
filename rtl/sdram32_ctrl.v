@@ -192,12 +192,25 @@ module sdram32_ctrl
 	output reg [31:0] walker_rdata,
 
 	// 32-bit cache line fill port (16 byte line, 4 longword beats).
-	// fill_req is level held until fill_ack; fill_addr must stay stable
-	// while it is asserted.  fill_strb pulses once per delivered longword,
-	// beats ascending within the line, and fill_ack pulses with the last.
+	// fill_req is level held until fill_ack; fill_addr and fill_bsel must
+	// stay stable while it is asserted.  fill_strb pulses once per
+	// delivered longword and fill_ack pulses with the last.
+	//
+	// fill_bsel names the CRITICAL beat: the line is delivered starting
+	// there so the requester gets the longword it is actually waiting for
+	// first.  Delivery order is not the caller's problem -- fill_beat
+	// carries the index of the beat accompanying each fill_strb, so the
+	// client writes each longword where fill_beat says and never has to
+	// model the burst order.  In DUAL mode the SDRAM's own sequential
+	// burst of 4 wraps within the line, so this is just the low two bits
+	// of the column address.  In 16-bit mode the line is two 4-word half
+	// bursts, so only fill_bsel[1] is honoured -- the half holding the
+	// critical beat is fetched first -- and fill_bsel[0] is ignored.
 	input             fill_req,
 	input      [24:4] fill_addr,
+	input       [1:0] fill_bsel,
 	output reg [31:0] fill_dat,
+	output reg  [1:0] fill_beat,
 	output reg        fill_strb,
 	output reg        fill_ack
 );
@@ -662,8 +675,12 @@ wire [23:0] walker_unit = DUAL_SDRAM ? {1'b0, walker_addr[24:2]}    : {walker_ad
 wire [23:0] cache_unit  = DUAL_SDRAM ? {1'b0, cache_addr_lat[24:2]} : cache_addr_lat[24:1];
 // 16-bit mode fetches the line in two 4-word halves; fill_started selects
 // which half is being requested.
-wire [23:0] fill_unit   = DUAL_SDRAM ? {1'b0, fill_addr[24:4], 2'b00}
-                                     : {fill_addr[24:4], fill_started, 2'b00};
+// DUAL: the burst of 4 covers the whole line, so the critical beat is just
+// the column's low two bits and the SDRAM wraps for us.  16-bit: each slot
+// is a 4-word half line, so start with the half holding the critical beat.
+wire [23:0] fill_unit   = DUAL_SDRAM ? {1'b0, fill_addr[24:4], fill_bsel}
+                                     : {fill_addr[24:4],
+                                        fill_started ^ fill_bsel[1], 2'b00};
 
 reg  [2:0] pre_sel;
 reg  [1:0] pre_ba;
@@ -770,6 +787,7 @@ always @(posedge sysclk) begin
 		fill_strb    <= 0;
 		fill_ack     <= 0;
 		fill_dat     <= 0;
+		fill_beat    <= 0;
 	end
 	else begin
 		fill_strb <= 0;
@@ -796,6 +814,7 @@ always @(posedge sysclk) begin
 					case (sdram_state)
 						8, 10, 12, 14: begin
 							fill_dat  <= {sdata2_reg, sdata_reg};
+							fill_beat <= fill_bsel + fill_cnt[1:0];
 							fill_strb <= 1;
 							fill_cnt  <= fill_cnt + 1'd1;
 							if (fill_cnt == 3'd3) fill_ack <= 1;
@@ -807,6 +826,12 @@ always @(posedge sysclk) begin
 						8, 12: fill_hi16 <= sdata_reg;
 						10, 14: begin
 							fill_dat  <= {fill_hi16, sdata_reg};
+							// slot 0 carries the critical half, slot 1 the
+							// other; within a slot the two longwords are in
+							// ascending order
+							fill_beat <= {fill_cnt[1] ? ~fill_bsel[1]
+							                          :  fill_bsel[1],
+							              fill_cnt[0]};
 							fill_strb <= 1;
 							fill_cnt  <= fill_cnt + 1'd1;
 							if (fill_cnt == 3'd3) fill_ack <= 1;

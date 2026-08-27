@@ -505,6 +505,8 @@ sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ram1
 	.dual_ok      (dual_ok         ),
 
 	.fill_req     (1'b0            ),
+	.fill_bsel    (2'd0            ),
+	.fill_beat    (                ),
 	.fill_addr    (21'd0           ),
 	.fill_dat     (                ),
 	.fill_strb    (                ),

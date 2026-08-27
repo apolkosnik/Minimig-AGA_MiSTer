@@ -249,6 +249,9 @@ reg [31:0] wk_wdata = 32'd0;
 
 reg        fill_req  = 1'b0;
 reg [24:4] fill_addr = 21'd0;
+reg  [1:0] fill_bsel = 2'd0;
+wire [1:0] d_fill_beat;
+wire [1:0] z_fill_beat;
 
 //---------------------------------------------------------------------------
 // reference controller: rtl/sdram_ctrl.v + one 16-bit SDRAM
@@ -347,7 +350,8 @@ sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ctl_d
 	.walker_req(wk_req), .walker_we(wk_we), .walker_addr(wk_addr),
 	.walker_wdata(wk_wdata), .walker_ack(d_wk_ack), .walker_rdata(d_wk_rdata),
 
-	.fill_req(fill_req), .fill_addr(fill_addr), .fill_dat(d_fill_dat),
+	.fill_req(fill_req), .fill_addr(fill_addr), .fill_bsel(fill_bsel),
+	.fill_beat(d_fill_beat), .fill_dat(d_fill_dat),
 	.fill_strb(d_fill_strb), .fill_ack(d_fill_ack),
 	.dual_ok(d_dual_ok)
 );
@@ -423,7 +427,8 @@ sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(0)) ctl_z
 	.walker_req(wk_req), .walker_we(wk_we), .walker_addr(wk_addr),
 	.walker_wdata(wk_wdata), .walker_ack(z_wk_ack), .walker_rdata(z_wk_rdata),
 
-	.fill_req(fill_req), .fill_addr(fill_addr), .fill_dat(z_fill_dat),
+	.fill_req(fill_req), .fill_addr(fill_addr), .fill_bsel(fill_bsel),
+	.fill_beat(z_fill_beat), .fill_dat(z_fill_dat),
 	.fill_strb(z_fill_strb), .fill_ack(z_fill_ack),
 	.dual_ok(z_dual_ok)
 );
@@ -533,6 +538,10 @@ integer    d_req_cyc   = -1;
 integer    d_last_cyc  = -1;
 integer    z_grant_cyc = -1;
 integer    z_last_cyc  = -1;
+reg  [3:0] d_seen  = 4'd0;
+reg  [3:0] z_seen  = 4'd0;
+reg  [1:0] d_first = 2'd0;
+reg  [1:0] z_first = 2'd0;
 reg        fill_req_q  = 0;
 reg        d_fill_ack_seen = 0;
 reg        z_fill_ack_seen = 0;
@@ -540,6 +549,10 @@ reg        z_fill_ack_seen = 0;
 always @(posedge clk113) begin
 	fill_req_q <= fill_req;
 	if (fill_req && !fill_req_q) begin
+		d_seen      = 4'd0;
+		z_seen      = 4'd0;
+		d_first     = 2'd0;
+		z_first     = 2'd0;
 		d_beats     = 0;
 		z_beats     = 0;
 		d_grant_cyc = -1;
@@ -548,13 +561,21 @@ always @(posedge clk113) begin
 	end
 	if (ctl_d.fill_grant && d_grant_cyc < 0) d_grant_cyc = cyc;
 	if (ctl_z.fill_grant && z_grant_cyc < 0) z_grant_cyc = cyc;
+	// Index by the beat the controller NAMES, not by arrival order: with a
+	// critical-beat start the two differ, and that is the whole point of
+	// fill_beat.  d_first/z_first record which beat arrived first so the
+	// test can assert the critical one led.
 	if (d_fill_strb) begin
-		if (d_beats < 4) d_beat[d_beats] = d_fill_dat;
+		d_beat[d_fill_beat] = d_fill_dat;
+		d_seen[d_fill_beat] = 1'b1;
+		if (d_beats == 0) d_first = d_fill_beat;
 		d_beats    = d_beats + 1;
 		d_last_cyc = cyc;
 	end
 	if (z_fill_strb) begin
-		if (z_beats < 4) z_beat[z_beats] = z_fill_dat;
+		z_beat[z_fill_beat] = z_fill_dat;
+		z_seen[z_fill_beat] = 1'b1;
+		if (z_beats == 0) z_first = z_fill_beat;
 		z_beats    = z_beats + 1;
 		z_last_cyc = cyc;
 	end
@@ -804,11 +825,14 @@ task walker_xfer;
 endtask
 
 integer fill_to;
+integer bs_i;
 task fill_line;
 	input [24:4] a;
+	input  [1:0] bs;
 	begin
 		@(posedge clk113);
 		fill_addr <= a;
+		fill_bsel <= bs;
 		fill_req  <= 1'b1;
 		fill_to = 0;
 		@(posedge clk113);
@@ -831,7 +855,29 @@ reg [31:0] exp_lw;
 integer    b;
 task fill_check;
 	input [24:4] a;
+	input  [1:0] bs;
 	begin
+		if (d_seen !== 4'hF) begin
+			$display("FAIL: DUAL fill @%h bsel %0d delivered beats mask %h, expected F",
+			         {a, 4'h0}, bs, d_seen);
+			errors = errors + 1;
+		end
+		if (z_seen !== 4'hF) begin
+			$display("FAIL: DUAL=0 fill @%h bsel %0d delivered beats mask %h, expected F",
+			         {a, 4'h0}, bs, z_seen);
+			errors = errors + 1;
+		end
+		// DUAL honours the full critical beat; 16-bit honours only its half
+		if (d_first !== bs) begin
+			$display("FAIL: DUAL fill @%h bsel %0d led with beat %0d, expected %0d",
+			         {a, 4'h0}, bs, d_first, bs);
+			errors = errors + 1;
+		end
+		if (z_first[1] !== bs[1]) begin
+			$display("FAIL: DUAL=0 fill @%h bsel %0d led with beat %0d, wrong half",
+			         {a, 4'h0}, bs, z_first);
+			errors = errors + 1;
+		end
 		if (d_beats != 4) begin
 			$display("FAIL: DUAL fill delivered %0d beats, expected 4", d_beats);
 			errors = errors + 1;
@@ -1042,8 +1088,12 @@ initial begin
 	//----------------------------------------------------------------
 	// 3. line fill latency, quiet bus
 	//----------------------------------------------------------------
-	fill_line(21'h00080);            // byte $800
-	fill_check(21'h00080);
+	// sweep every critical beat: 0 is the old behaviour, 1-3 exercise the
+	// wrapped start that critical-word-first depends on
+	for (bs_i = 0; bs_i < 4; bs_i = bs_i + 1) begin
+		fill_line(21'h00080, bs_i[1:0]);   // byte $800
+		fill_check(21'h00080, bs_i[1:0]);
+	end
 	if (d_grant_cyc < 0) begin
 		$display("FAIL: DUAL fill was never granted a slot");
 		errors = errors + 1;
@@ -1085,8 +1135,8 @@ initial begin
 	err_mark = errors;
 	fork
 		begin
-			fill_line(21'h00090);
-			fill_check(21'h00090);
+			fill_line(21'h00090, 2'd2);
+			fill_check(21'h00090, 2'd2);
 		end
 		begin
 			chip_cycle(24'h000300, 1'b1, 1'b0, 1'b0, 16'h0000);
@@ -1106,8 +1156,8 @@ initial begin
 	chip_write(24'h000A01, 1'b0, 1'b0, 16'hBEEF);   // odd word  (primary)
 	chip_write(24'h000A02, 1'b0, 1'b0, 16'hFEED);
 	chip_write(24'h000A03, 1'b0, 1'b0, 16'hFACE);
-	fill_line(21'h00140);                            // byte $1400
-	fill_check(21'h00140);
+	fill_line(21'h00140, 2'd0);                      // byte $1400
+	fill_check(21'h00140, 2'd0);
 	if (d_beat[0] !== 32'hDEADBEEF || d_beat[1] !== 32'hFEEDFACE) begin
 		$display("FAIL: chipset writes not coherent with the 32-bit fill port: beats %h %h",
 		         d_beat[0], d_beat[1]);
