@@ -1307,6 +1307,35 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### THE TWO LEVERS SIZED (2026-08-27): width 21.9%, level-ack gap 8.7%
+
+Ran the probe the section below asks for (+qprof ADLAT line: adapter phase
+occupancy).  t_integer, phase 0, 16650 cycles:
+
+    adapter waiting for completion   5850   35.1% of ALL cycles
+    adapter in subcycle_gap          1444    8.7%
+    adapter busy, total              7294   43.8%
+
+So the level-acknowledge gap is REAL but it is not the bulk: 19.8% of
+adapter-busy time.  Sizing the two candidate changes against the whole
+program rather than against each other:
+
+    remove the gap (P2's level-ack cleanup)      up to  8.7%
+    halve the sub-cycle count (32-bit transfers) up to 21.9%
+
+Width wins, and by more than the ratio suggests, because halving the
+sub-cycle count halves BOTH buckets -- fewer sub-cycles means proportionally
+fewer gaps.  The gap removal is worth having afterwards, not instead.
+
+CAUTION ON A NUMBER I NEARLY REPORTED: a fourth bucket, "core has mem_req
+while the adapter is inactive", came out at 45.1% of all cycles and looked
+like a stalled adapter.  It is not.  The adapter's mem_req comes from the
+CACHE's m_req (ap040_tg68k_compat line 411, b_req), not the core's, so that
+bucket is simply every cycle a request is being served INSIDE the MMU and
+cache -- hits, and the cache FSM -- and never reaches the bus.  It is the
+cache doing its job, not a stall.  Recorded because the mislabelled version
+would have sent the next investigation at the core-to-cache path.
+
 ### WHAT THE 31-CYCLE FILL IS MADE OF (2026-08-27), and why X2.1c is misnamed
 
 Chased the fill cost one level further, because "make it 32-bit" assumes the

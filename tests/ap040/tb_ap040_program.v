@@ -708,6 +708,24 @@ always @(posedge clk) if (q_on && nreset && dut.core.epf_count == 4'd0
 	else if (dut.core.lk_cyc && dut.core.state != 8'd8) blk_lk = blk_lk + 1;
 	else                                        blk_other = blk_other + 1;
 end
+// +adlat: where a 16-bit sub-cycle's cycles actually go.  The adapter
+// spends, per sub-cycle, one edge waiting for the external completion, one
+// edge with the request LOWERED (subcycle_gap -- the level-acknowledge
+// contract: the target will not take a new address until chip-select
+// drops), and one edge reasserting.  If the gap+reassert are the bulk, the
+// level-ack contract is the fill cost and P2 removes it; if the completion
+// wait is the bulk, only width helps.
+integer ad_issue=0, ad_wait=0, ad_gap=0, ad_idle=0, ad_qual=0, ad_tot=0;
+always @(posedge clk) if (q_on && nreset) begin
+	ad_tot = ad_tot + 1;
+	if (dut.bus16.active) begin
+		if (dut.bus16.subcycle_gap) ad_gap = ad_gap + 1;
+		else                                   ad_wait = ad_wait + 1;
+	end
+	else if (dut.core.mem_req) ad_issue = ad_issue + 1;
+	else                       ad_idle = ad_idle + 1;
+	if (dut.clkena_in) ad_qual = ad_qual + 1;
+end
 always @(posedge clk) if (q_on && nreset) begin
 	q_hist[dut.core.epf_count] = q_hist[dut.core.epf_count] + 1;
 	if (dut.core.state == 8'd3) begin      // S_FETCH
@@ -782,6 +800,8 @@ task prof_dump;
 		total = 0;
 		for (pi = 0; pi < 256; pi = pi + 1) total = total + prof_cnt[pi];
 		if (q_on) begin
+			$display("ADLAT tot=%0d qualified=%0d | issue=%0d wait=%0d gap=%0d idle=%0d",
+			         ad_tot, ad_qual, ad_issue, ad_wait, ad_gap, ad_idle);
 			$display("QBLK want=%0d pend=%0d port=%0d dstate=%0d ea=%0d page=%0d lk=%0d other=%0d",
 			         blk_want, blk_pend, blk_port, blk_dstate, blk_ea, blk_page, blk_lk, blk_other);
 			$display("QPROF fetch_cyc=%0d dry_at_fetch=%0d (%0d%%)", q_fetch_cyc, q_dry_at_fetch, (100*q_dry_at_fetch)/(q_fetch_cyc==0?1:q_fetch_cyc));
