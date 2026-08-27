@@ -2391,3 +2391,64 @@ before, and the real-stack simulation says a general-purpose program spends
 15% fewer cycles.  ROM should move too (kick RAM is served by the same
 controller but is NOT yet in fill_ok's window -- that is the next increment
 and deliberately not in this build).
+
+## Hardware result: the fill path is inert, and WHY reorders everything
+
+    xsysinfo            before      after     TG68K-020
+    Dhrystones           5277       5307        20911
+    chip  MB/s           5.19       5.19        24.21
+    fast  MB/s           6.64       7.09        19.91
+    rom   MB/s           8.26       8.24        24.44
+
+CHIP -- the region fill_ok was scoped to -- did not move by a single digit,
+while FAST moved +6.8% and is served by ddram_ctrl, which has no fill port
+at all.  That is the prediction exactly inverted, and the cause is in
+ap040_tg68k_compat.v:380:
+
+    .c_nocache(mm_nocache | ~cache_allow)
+
+with the comment forty lines above it saying what mm_nocache does on a real
+machine: "On a real 040 Amiga this cannot happen because 68040.library marks
+chip RAM noncacheable through the MMU; with the MMU off, nothing does."
+
+Decode cache_win per region and all three numbers fall out:
+
+  CHIP $000000-1FFFFF  in cache_win (cache_chip), but 68040.library marks it
+                       cache-inhibited -> mm_nocache -> bypass -> NO L1 fill
+  ROM  $F80000+        addr[23:21]=111 fails cache_chip AND the z2ram term
+                       (23 ^ |[22:21] = 1^1 = 0) -> never cacheable at all
+  FAST Z2/Z3           cacheable, and the OS marks it so -> fills happen
+
+So on hardware the L1 fills FAST and nothing else.  Early restart and
+critical word first are what moved FAST by 6.8%; the 32-bit fill path,
+scoped to chip RAM, never runs.
+
+THE METHOD ERROR, because it is the second of its kind.  bw_probe measured
+-30% and tb_sdram_turbo -15% because BOTH benches run with the MMU off, so
+mm_nocache is 0 and chip RAM is cacheable there.  The measurement was real
+for the bench and meaningless for the machine -- exactly like measuring
+early restart on bench_loop, which spends 0.33% of its cycles on the bus.
+A performance bench has to be checked for whether it reproduces the
+CACHEABILITY the shipping software establishes, not just the timing.
+
+WHAT THIS REORDERS
+
+  1. Point the fill path at FAST, which needs the port on ddram_ctrl.  That
+     is cheap in an unexpected way: ram_dout is ALREADY 64 bits (one DDR3
+     read = 8 bytes = half a line) and ddram_ctrl currently slices it into
+     four 16-bit beats at states 1-4.  A line is two DDR3 reads; the wide
+     data is already in hand and is being thrown away.
+
+  2. Item 2 (the inter-word idle gap) is worth MORE than the 8.7% estimate,
+     not less.  Chip and ROM are uncached on hardware, so every one of their
+     accesses is a bare 16-bit adapter cycle and pays the gap on every
+     subcycle.  It is the only lever that touches chip and ROM at all.
+
+  3. Chip RAM's 5.19 MB/s is not a cache problem and never was.  Nothing in
+     the cache can reach it while the OS marks it cache-inhibited -- which
+     it does for a good reason (the I-bank staleness that crashed Enigma).
+
+CONFIRMATION STILL OWED: the chip-RAM half of this is inferred from the code
+and fits the data, but has not been observed on the machine.  showmmu will
+say directly whether $000000-$1FFFFF reads as CacheInhibit -- the same tool
+that settled the RTG question.  Worth doing before building on it.
