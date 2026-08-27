@@ -411,6 +411,9 @@ end
 // so take its rising edge to keep the chip-bus source single-cycle, matching
 // what one posedge clk used to see.
 reg  chip_ph2_d;
+integer c114_free = 0;
+integer stamp_prev = 0;
+always @(posedge clk_114) c114_free = c114_free + 1;
 wire chip_wr_commit = reset && ph2 && !chip_ph2_d && !chip_as && !chip_rw;
 wire        cw_stb  = chip_wr_commit | ram_wr_commit;
 wire [15:1] cw_addr = ram_wr_commit ? ram_cidx : chip_addr[15:1];
@@ -422,6 +425,15 @@ always @(posedge clk_114) begin
 	chip_ph2_d <= ph2;
 
 	if (cw_stb) begin
+		// $F108: cycle-stamp marker, as in tb_ap040_program -- a write
+		// prints the clk_114-cycle count since the previous stamp so a
+		// program can bracket a block and read its cost from the log.
+		// clk_114 counts are 4x the clk_sys costs the plan quotes.
+		if (cw_addr == (16'hF108 >> 1)) begin
+			$display("STAMP tag=%04x cycles114=%0d", cw_data,
+			         c114_free - stamp_prev);
+			stamp_prev = c114_free;
+		end
 		if (cw_addr == (16'hF100 >> 1))
 			failcode <= cw_data;
 		if (cw_addr == (16'hF102 >> 1) && !cw_uds && !cw_lds) begin

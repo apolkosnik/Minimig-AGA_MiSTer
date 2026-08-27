@@ -1307,6 +1307,40 @@ Gate, as specified -- nothing changes:
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.
 
+### Chip-window cost DECOMPOSED (2026-08-27): the I-fetch bypass is 25-34%
+
+Measured with a new $F108-stamped bandwidth probe (asm/bw_probe.s) on the
+chip bench under TURBO_CHIP=1, which the xsysinfo figures below validate as
+the hardware configuration (bench warm movem: 16.2 clk_sys per longword;
+hardware fast RAM: 17.0).  Same probe with the 192d82ce chip-window I-fetch
+bypass disabled in a scratch build:
+
+                                bypass ON    bypass OFF
+    movem reads (warm)           97.0         64.2  clk_sys/iter   -34%
+    movem reads (cold)          103.3         69.5                 -33%
+    move.l x8 reads             152.0        115.3                 -24%
+    movem writes                126.0         93.2                 -26%
+
+    warm movem per longword      16.2         10.7
+
+So when CODE runs from the chip window, the bypass -- every instruction
+fetch going to the memory port instead of the L1 I bank -- costs a quarter
+to a third of ALL execution.  That is the price of the Enigma fix, now
+quantified.  It does NOT explain the xsysinfo chip-vs-fast delta if
+xsysinfo's code sits in fast RAM (only its data buffer is in chip); the
+likely account of that 22-vs-17 is chip DATA taking the 7MHz bus rather
+than the turbo path, which is an OSD cachecfg question before it is a core
+question.
+
+Consequence: the bypass was the correct emergency fix and is the wrong
+permanent one.  The real fix was named in the original commit -- the I bank
+has no invalidation path.  Give it one (snoop the I bank the way the D bank
+already is, plus store-to-line invalidation covering the SMC case) and the
+bypass can be retired, recovering 25-34% on all chip-window code: demos,
+games, anything OCS-era.  That is now the highest-value single change in
+the performance program, ahead of P3, because it is localized and its win
+is measured rather than estimated.
+
 ### THE NUMBER THAT MATTERS: 4.5x slower than the core it replaces (2026-08-27)
 
 First hardware measurement against the incumbent, xsysinfo 0.9.0 on the same
