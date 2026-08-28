@@ -4,7 +4,7 @@
 // ap040_muldiv.v - iterative multiply and divide unit                      //
 //                                                                          //
 // MUL: 32x32 -> 64, unsigned or signed (one registered DSP product)       //
-// DIV: 64/32 -> q32,r32, unsigned or signed (restoring, 4 bits/cycle)      //
+// DIV: 64/32 -> q32,r32, unsigned or signed (restoring, 8 bits/cycle)      //
 //      ovf set when the true quotient does not fit in 32 bits; for signed  //
 //      division the quotient truncates toward zero and the remainder       //
 //      carries the dividend sign                                           //
@@ -54,7 +54,7 @@ wire [63:0] dvd    = {op_hi, op_lo};
 wire [63:0] abs_d  = (sign_op && op_hi[31]) ? (64'd0 - dvd) : dvd;
 wire [31:0] abs_m  = (sign_op && op_lo[31]) ? (32'd0 - op_lo) : op_lo;
 
-// divide: four cascaded restoring steps per cycle (64 bits = 16 rounds),
+// divide: eight cascaded restoring steps per cycle (64 bits = 8 rounds),
 // each exactly one former one-bit iteration; the divisor is an explicit
 // argument so the function stays pure (module-level variables read from
 // inside a function are unreliable in continuous assignments under iverilog)
@@ -71,7 +71,11 @@ function [96:0] div_step;
 	end
 endfunction
 
-wire [96:0] div4 = div_step(div_step(div_step(div_step(acc, den), den), den), den);
+// Keep the cascade in two named halves.  Besides making the eight-step data
+// path readable, this gives synthesis a natural midpoint at which to balance
+// the repeated compare/subtract logic.
+wire [96:0] div4 = div_step(div_step(div_step(div_step(acc,  den), den), den), den);
+wire [96:0] div8 = div_step(div_step(div_step(div_step(div4, den), den), den), den);
 
 wire [63:0] q_raw = div_r ? acc[63:0] : prod;
 wire [31:0] r_raw = acc[95:64];
@@ -102,7 +106,7 @@ always @(posedge clk) begin
 			if (is_div) begin
 				den   <= abs_a;
 				acc   <= {33'd0, abs_d};
-				count <= 7'd16;
+				count <= 7'd8;
 				neg_q <= sign_op && (op_hi[31] ^ op_a[31]);
 				neg_r <= sign_op && op_hi[31];
 			end
@@ -118,7 +122,7 @@ always @(posedge clk) begin
 			if (count != 0) begin
 				count <= count - 7'd1;
 				if (div_r) begin
-					acc <= div4;
+					acc <= div8;
 				end
 				else begin
 					// one registered 32x32 DSP-tree product, exactly the
