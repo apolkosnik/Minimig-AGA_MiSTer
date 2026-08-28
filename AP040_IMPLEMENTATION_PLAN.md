@@ -2522,3 +2522,67 @@ NOT the boot regression -- it predates the unified L1, and NetBSD booted on
 because widening the snoop path is a cpu_wrapper interface change.  But it
 is squarely on NetBSD's path (it is the only OS here that walks DDR3) and
 belongs on the conformance backlog next to the other audited deviations.
+
+## Core CPI work, session of 2026-08-27: -17% measured, method recorded
+
+INSTRUMENTATION (kept, in-tree): asm/bench_cpi.s times 4096 copies of each
+instruction class between $F108 stamps; tb_ap040_program +strace=<hextag>
+prints the state walk right after that stamp.  Together they turn "the core
+is slow" into a named list of states with cycle counts on each.
+
+BASELINE per-class cost (phase 0, caches on, everything hits):
+
+    class                    clk    state walk
+    nop / moveq / bra.s     2.77
+    add.l d2,d3             5.52    FETCH DECODE PIPE_START PIPE_REGS EXEC
+    lea 4(a0),a0            6.97
+    move.l (a0),d3 hit     12.52    ... EA_DISP EA_BASE SRD MRD*4 SDONE EXEC
+    move.l d3,(a0)         19.71    8 front states + S_MWR*11
+    add/load mix            9.02
+
+Three landed changes (bf74faa4, 08ef7682, + the SREG fold):
+
+ 1. Cache hits ack COMBINATIONALLY from C_LOOK (tag_q/data_hit are already
+    registered at accept; nothing needed the extra edge).  Every hit -- data
+    and fetch-queue refills both -- got one cycle back.  Taken branches
+    went 2.77 -> 2.09 on this alone.
+ 2. ea_start dispatches (An)/(An)+/-(An) straight to S_EA_BASE.
+ 3. Operand bypass (X2.4): register-destination ops go PIPE_START -> EXEC
+    with src_eff/dst_eff muxing the regfile ports (or m_val) into the ALU
+    and the EXEC body; EXEC's top commits them so chained states see
+    registered values.  Also folds SDONE for reg-destination loads, and
+    S_PIPE_SREG's capture into S_PIPE_DST for stores.
+
+AFTER:
+
+    class                   before   after
+    nop                      2.77     2.46
+    add.l d2,d3              5.52     4.39
+    move.l d2,d3             5.52     4.39
+    move.l (a0),d3 hit      12.52     9.40
+    move.l d3,(a0)          19.71    17.52
+    bra.s taken              2.77     2.09
+    dependent add chain      5.51     4.39   (bypass has no forwarding cost)
+    bench_cpi total                  -16.8%
+    bw_probe move.l block            -24.3%
+
+WHAT IS LEFT, in value order:
+
+ a. THE STORE PATH: 17.5 clk, of which ~11 are S_MWR waiting out the
+    write-through handshake.  The fix is a posted store (accept + ack, drain
+    behind), but that is a FAULT-CONTRACT decision, not a state fold:
+    t_exceptions relies on precise write bus errors, and a posted store's
+    late m_err has nowhere precise to land on a restart-model core.  Options:
+    post only after MMU translation (MMU faults stay precise; only the bus
+    timeout goes imprecise, and that already halts), or a 68040-style
+    writeback frame, which the compat contract currently forbids.  Decide
+    before implementing.
+ b. Store front end: PIPE_START could point port B at the source data for a
+    pure store (port B is free when dst is memory) and run the EA
+    immediately -- folds PIPE_DST/PIPE_DEA, walk 8 -> ~5 front cycles.
+ c. DECODE -> PIPE_START fold needs decode-time p_* threading (pipe_go is
+    blind; the p_* are same-cycle NBAs).  Worth ~1 clk on everything.
+ d. S_MRD hit is now 3 cycles (req reg, accept, comb-hit).  Getting to 2
+    needs the tag read issued from the REQUEST cycle (index from c_addr
+    while still in C_IDLE) -- the RAM read is already synchronous-1-cycle,
+    so accept+lookup could overlap with a bypassable tag index mux.

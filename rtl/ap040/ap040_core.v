@@ -290,6 +290,7 @@ reg         x_rf_src;    // src_eff from regfile port A
 reg         x_rf_dst;    // dst_eff from regfile port B
 reg [31:0] m_addr_r, m_wdat, m_val;
 reg         x_src_mval;  // src_eff from m_val (load data registered at ack)
+reg         x_srd_cap;   // S_PIPE_DST owes a port-A source capture
 wire [31:0] src_eff = x_src_mval ? m_val :
                       x_rf_src   ? rf_rdata_a : src_val;
 wire [31:0] dst_eff = x_rf_dst   ? rf_rdata_b : dst_val;
@@ -1892,7 +1893,7 @@ always @(posedge clk) begin
 		ea_base_v <= 0; ea_idx_v <= 0; ea_mind <= 0;
 		ea_post <= 0; ea_odl <= 0; ea_absl <= 0; ea_addr <= 0;
 		p_src <= 0; p_dst <= 0; p_sreg <= 0; p_dreg <= 0;
-		x_rf_src <= 0; x_rf_dst <= 0; x_src_mval <= 0;
+		x_rf_src <= 0; x_rf_dst <= 0; x_src_mval <= 0; x_srd_cap <= 0;
 		p_ssize <= 0; p_dsize <= 0;
 		p_rmw <= 0; p_wbsup <= 0; p_flags <= 0; p_sextw <= 0;
 		p_dst_mem_bit <= 0;
@@ -2413,7 +2414,12 @@ always @(posedge clk) begin
 							x_rf_src <= 1; x_rf_dst <= 1;
 							state <= S_EXEC;
 						end
-						else begin rr_a <= p_sreg; state <= S_PIPE_SREG; end
+						else begin
+							// capture happens at the top of S_PIPE_DST,
+							// one state earlier than S_PIPE_SREG did it
+							rr_a <= p_sreg; x_srd_cap <= 1;
+							state <= S_PIPE_DST;
+						end
 					SK_IMM: begin
 						src_val <= imm;
 						if (p_dst == DK_REG) begin
@@ -2449,6 +2455,13 @@ always @(posedge clk) begin
 			S_PIPE_SREG:  begin src_val <= rf_rdata_a; state <= S_PIPE_DST; end
 
 			S_PIPE_DST: begin
+				// pending source capture from port A (set by S_PIPE_START):
+				// rr_a still holds the source register this whole cycle --
+				// an ea_start below reassigns it only at the cycle's end
+				if (x_srd_cap) begin
+					src_val <= rf_rdata_a;
+					x_srd_cap <= 0;
+				end
 				case (p_dst)
 					DK_MEM: ea_start(dst_mode_r, dst_rn_r, p_dsize, S_PIPE_DEA);
 					DK_REG: begin rr_b <= p_dreg; state <= S_PIPE_DREG; end
