@@ -334,6 +334,41 @@ wire        w_ack_eff  = walker_ack  | wack_h;
 wire        w_berr_eff = walker_berr | wberr_h;
 wire [31:0] wdat       = wack_h ? wdata_h : walker_data;
 
+// PAGE-WALK CACHE (X2.5): one root and one pointer descriptor, keyed by the
+// PHYSICAL address of the descriptor itself.  Consecutive misses in one
+// region share both upper levels, so a hit turns a three-read walk into one.
+//
+// Correctness rests on four invalidation rules, each load-bearing:
+//  - every CPU STORE is snooped against both keys by page: an OS that
+//    installs a new page table writes the pointer entry with a normal store
+//    and performs NO PFLUSH, because nothing stale was ever in the ATC --
+//    the next walk must see the new table (NetBSD pmap_enter does exactly
+//    this).  Snooped for every store, MMU on or off.
+//  - every PFLUSH form clears it: after table rewrites the OS's contract is
+//    that a flush makes the walker re-read memory.
+//  - a TC change clears it (page size changes the key derivation).  SRP/URP
+//    need no rule: their value is part of the root ADDRESS, so a change
+//    misses by construction.
+//  - PTEST bypasses it entirely, both lookup and refill: its architectural
+//    job is to observe the real tables, faults included.
+// The cached value is the descriptor AFTER its U update, so a hit never
+// owes a descriptor write-back; root/pointer levels carry no M bit.
+reg         pwc_root_v, pwc_ptr_v;
+reg  [31:0] pwc_root_key, pwc_ptr_key;
+reg  [31:0] pwc_root_d,   pwc_ptr_d;
+reg  [15:0] tc_q_pwc;
+
+// walk-start address derivations, from the LIVE request (w_la is only being
+// registered this cycle)
+wire [31:0] pwc_root_a = {(a_super ? srp[31:9] : urp[31:9]), 9'd0} +
+                         {23'd0, c_addr[31:25], 2'b00};
+wire  [6:0] pwc_pi     = c_addr[24:18];
+wire  [5:0] pwc_pgi    = tc_p ? {1'b0, c_addr[17:13]} : c_addr[17:12];
+wire [31:0] pwc_ptr_a  = {pwc_root_d[31:9], 9'd0} + {23'd0, pwc_pi, 2'b00};
+wire        pwc_root_hit = pwc_root_v && (pwc_root_key == pwc_root_a);
+wire        pwc_ptr_hit  = pwc_root_hit && pwc_ptr_v &&
+                           (pwc_ptr_key == pwc_ptr_a);
+
 wire walk_ack = w_active && w_issued && w_ack_eff && !w_berr_eff;
 wire walk_err = w_active && w_issued && w_berr_eff;
 
@@ -475,6 +510,10 @@ always @(posedge clk) begin
 		pt_done <= 0; pt_mmusr <= 0;
 		pf_done <= 0;
 		sweep_on <= 0; sweep_cnt <= 0; sw_pt <= 0;
+		pwc_root_v <= 0; pwc_ptr_v <= 0;
+		pwc_root_key <= 0; pwc_ptr_key <= 0;
+		pwc_root_d <= 0; pwc_ptr_d <= 0;
+		tc_q_pwc <= 0;
 		if (!atc_reset_seen) begin
 			for (k = 0; k < 128; k = k + 1) atc_v[k] <= 0;
 			for (k = 0; k < 32; k = k + 1) atc_rr[k] <= 0;
@@ -486,6 +525,22 @@ always @(posedge clk) begin
 		pt_done <= 0;
 		pf_done <= 0;
 		if (w_active && !w_issued) w_issued <= 1;
+
+		// page-walk cache invalidation (see the PWC block above): every
+		// PFLUSH form, any TC change, and every CPU store landing in a
+		// cached descriptor's page -- MMU on or off, since tables can be
+		// written before translation is enabled
+		tc_q_pwc <= tc;
+		if ((pf_req && !pf_done) || (tc != tc_q_pwc)) begin
+			pwc_root_v <= 0;
+			pwc_ptr_v  <= 0;
+		end
+		if (c_req && c_write &&
+		    ((pwc_root_v && (pa_out[31:12] == pwc_root_key[31:12])) ||
+		     (pwc_ptr_v  && (pa_out[31:12] == pwc_ptr_key[31:12])))) begin
+			pwc_root_v <= 0;
+			pwc_ptr_v  <= 0;
+		end
 
 		if (walk_err) begin
 			// A physical bus error while fetching or updating a descriptor is
@@ -547,11 +602,28 @@ always @(posedge clk) begin
 					w_super <= a_super;
 					w_user  <= !a_super;
 					w_write <= c_write;
-					w_wp    <= 0;
 					f_bank  <= c_instr;
-					wrd({(a_super ? srp[31:9] : urp[31:9]), 9'd0} +
-					    {23'd0, c_addr[31:25], 2'b00});
-					wst <= W_RA;
+					if (pwc_ptr_hit) begin
+						// both upper levels cached: go straight to the
+						// page descriptor, WP accumulated from the
+						// cached levels exactly as the reads would have
+						w_wp   <= pwc_root_d[2] | pwc_ptr_d[2];
+						w_desc <= pwc_ptr_d;
+						wrd(pgtbl_addr(pwc_ptr_d) +
+						    {24'd0, pwc_pgi, 2'b00});
+						wst <= W_RC;
+					end
+					else if (pwc_root_hit) begin
+						w_wp   <= pwc_root_d[2];
+						w_desc <= pwc_root_d;
+						wrd(pwc_ptr_a);
+						wst <= W_RB;
+					end
+					else begin
+						w_wp <= 0;
+						wrd(pwc_root_a);
+						wst <= W_RA;
+					end
 				end
 			end
 
@@ -648,6 +720,12 @@ always @(posedge clk) begin
 				w_active <= 0;
 				if (!wdat[1]) wst <= W_FLT;   // UDT invalid
 				else begin
+					// cache the level (post-U value); never for PTEST
+					if (!w_pt) begin
+						pwc_root_v   <= 1;
+						pwc_root_key <= w_req_addr;
+						pwc_root_d   <= wdat | 32'h8;
+					end
 					w_wp <= w_wp | wdat[2];
 					if (!wdat[3]) begin
 						wwr(w_req_addr, wdat | 32'h8);
@@ -672,6 +750,11 @@ always @(posedge clk) begin
 				w_active <= 0;
 				if (!wdat[1]) wst <= W_FLT;
 				else begin
+					if (!w_pt) begin
+						pwc_ptr_v   <= 1;
+						pwc_ptr_key <= w_req_addr;
+						pwc_ptr_d   <= wdat | 32'h8;
+					end
 					w_wp <= w_wp | wdat[2];
 					if (!wdat[3]) begin
 						wwr(w_req_addr, wdat | 32'h8);

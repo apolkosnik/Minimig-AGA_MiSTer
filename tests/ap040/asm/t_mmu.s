@@ -1373,6 +1373,55 @@ imix_cw:
 	pflusha
 imix_done:
 
+;--------------------------- table rewrite WITHOUT PFLUSH (pmap_enter shape)
+	; An OS that installs a NEW page table writes the pointer entry with a
+	; normal store and performs NO PFLUSH -- nothing stale was ever in the
+	; ATC for the new region.  The next walk must read the new table from
+	; memory.  This pins the page-walk cache's store-snoop invalidation: a
+	; walk cache that survived the pointer-entry store would walk the OLD
+	; table and translate through the stale world.
+	; FULLY self-contained: the blocks above leave TC, the page size and
+	; several table entries in test-specific states, so rebuild the whole
+	; 4K identity world from scratch with translation off
+	moveq	#0,d0
+	movec	d0,tc
+	pflusha
+	lea	($4400).l,a0
+	moveq	#0,d0
+	moveq	#63,d1
+pwc0:	move.l	d0,d2
+	lsl.l	#8,d2
+	lsl.l	#4,d2
+	addq.l	#3,d2
+	move.l	d2,(a0)+
+	addq.l	#1,d0
+	dbra	d1,pwc0
+	move.l	#$00004203,($4000).l
+	move.l	#$00004403,($4200).l
+	move.l	#$66AA66AA,($6000).l	; physical writes, MMU off
+	move.l	#$0D15EA5E,($5000).l	; the replica will map page 7 here
+	move.l	#$8000,d0		; enable, 4K pages
+	movec	d0,tc
+	pflusha
+
+	move.l	($6000).l,d0
+	chkl	d0,$66AA66AA,212	; walk: primes the walk cache
+
+	lea	($4400).l,a0		; replicate the page table at $4600
+	lea	($4600).l,a1
+	moveq	#63,d1
+pwc1:	move.l	(a0)+,(a1)+
+	dbra	d1,pwc1
+	move.l	#$00005003,($461C).l	; replica maps page 7 -> physical $5000
+	move.l	#$00004603,($4200).l	; redirect the pointer entry -- NO PFLUSH
+	move.l	($7000).l,d0		; page 7 not in the ATC: must walk fresh
+	chkl	d0,$0D15EA5E,213	; ... and see the NEW table
+
+	move.l	#$00004403,($4200).l	; restore -- again with NO PFLUSH
+	pflusha				; drop the ATC entries just created
+	move.l	($6000).l,d0
+	chkl	d0,$66AA66AA,214	; walks the restored original table
+
 	; leave translation off for the harness epilogue
 	moveq	#0,d0
 	movec	d0,tc
