@@ -65,6 +65,20 @@ wire        clkena_in = (busstate == 2'b01) | mem_ready | berr;
 reg   [2:0] ipl_lvl;
 reg  [15:0] ipl_delay = 0;   // $F148: delayed level-2 IPL countdown
 integer   clkcount = 0;      // free-running clk counter for $F108 stamps
+
+// +strace=<hextag>: after the $F108 stamp with that tag, print the core
+// state sequence for the next 120 enabled cycles -- the per-instruction
+// state walk, readable directly.
+integer strace_tag = -1;
+integer strace_left = 0;
+initial if ($value$plusargs("strace=%h", strace_tag))
+	$display("STRACE armed for tag %04x", strace_tag[15:0]);
+
+
+always @(posedge clk) if (nreset && strace_left > 0 && clkena_in) begin
+	$display("TRACE st=%0d", dut.core.state);
+	strace_left = strace_left - 1;
+end
 integer   stamp_prev = 0;
 reg   [7:0] ipl_pulse = 0;   // $F14C: withdraw the request after N cycles
 reg   [7:0] ipl_step  = 0;   // $F150: downgrade the request after N cycles
@@ -552,6 +566,7 @@ always @(posedge clk) begin
 			// block of instructions and get its cost without a waveform.
 			// Used by the FPU latency probe (hw/fptime.s).
 			if (addr_out[15:0] == 16'hF108) begin
+				if (data_write == strace_tag[15:0]) strace_left = 120;
 				$display("STAMP tag=%04x cycles=%0d", data_write,
 				         clkcount - stamp_prev);
 				stamp_prev = clkcount;

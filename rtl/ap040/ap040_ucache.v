@@ -406,8 +406,7 @@ assign m_addr  = fill_active ? {r_addr[31:4], r_beat, 2'b00} : c_addr;
 assign m_wdata = c_wdata;
 assign m_fc    = fill_active ? r_fc : c_fc;
 
-assign c_ack   = pass_active ? m_ack : ack_r;
-assign c_rdata = pass_active ? m_rdata : rdata_r;
+// (c_ack/c_rdata assigned below data_hit -- see the hit_now block)
 
 assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
                    c_req && !ack_r && !c_write && !bypass && !ci_inv_pend;
@@ -480,6 +479,17 @@ assign cd_wdat = fwr_active  ? f_line[r_beat*32 +: 32] :
 wire [31:0] data_hit = (hit_way == 2'd0) ? data_q0 :
                        (hit_way == 2'd1) ? data_q1 :
                        (hit_way == 2'd2) ? data_q2 : data_q3;
+
+// A hit acks COMBINATIONALLY from C_LOOK: tag_q and data_hit were both
+// registered by the accept cycle, so the compare and the extract are stable
+// all through C_LOOK and there is nothing left to wait a cycle for.  The
+// registered ack_r path still serves fills and the C_TAGW leftover.  This
+// takes one cycle off EVERY cache hit -- data loads and each fetch-queue
+// refill alike (S_MRD measured 4 enabled cycles for a hit; this makes it 3).
+wire hit_now = (cst == C_LOOK) && look_hit && !look_snooped && !snoop_look_row;
+assign c_ack   = pass_active ? m_ack : (ack_r | hit_now);
+assign c_rdata = pass_active ? m_rdata :
+                 hit_now ? lw_extract(data_hit, r_size, r_off) : rdata_r;
 
 always @(posedge clk) begin
 	if (!nreset) begin
@@ -642,8 +652,8 @@ always @(posedge clk) begin
 
 			C_LOOK: begin
 				if (look_hit && !look_snooped && !snoop_look_row) begin
-					rdata_r <= lw_extract(data_hit, r_size, r_off);
-					ack_r <= 1;
+					// acked combinationally this cycle (hit_now); the core
+					// consumes it at this same ce edge and drops c_req
 					cst <= C_IDLE;
 				end
 				else begin

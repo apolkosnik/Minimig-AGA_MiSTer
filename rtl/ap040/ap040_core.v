@@ -1481,7 +1481,17 @@ task ea_start;
 	begin
 		ea_mode <= mode; ea_rn <= rn; ea_size <= size;
 		ea_pcmode <= 0; ea_pcb <= pc;
-		r_ea_ret <= ret; state <= S_EA_DISP;
+		r_ea_ret <= ret;
+		// (An), (An)+ and -(An) need nothing from S_EA_DISP except the
+		// port-A read address, so set it here and go straight to
+		// S_EA_BASE: one cycle less on the three most common data modes.
+		// Every other mode still passes through S_EA_DISP for its
+		// extension-word fetch.
+		if (mode == 3'b010 || mode == 3'b011 || mode == 3'b100) begin
+			rr_a <= {1'b1, rn};
+			state <= S_EA_BASE;
+		end
+		else state <= S_EA_DISP;
 	end
 endtask
 
