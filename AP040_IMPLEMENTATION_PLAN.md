@@ -2751,3 +2751,19 @@ the always block so partial overrides dispatch on the pop defaults.
     bench_cpi total    -10.3%              cumulative -43.5%
 
 A register ALU op now costs what a NOP cost at the session start.
+
+### Synthesis pre-check and the 18-second regression
+
+quartus_map over a CLEAN worktree at 5ccc00e7 (Codex's live muldiv edits
+excluded): 0 errors, all ten acceleration commits elaborate, and the storage
+inference holds -- the ucache ways still come out as altsyncram, and every
+"uninferred RAM" note is pre-existing Agnus chipset logic.  ALM and timing
+remain unknown until a fit; this only retires the "does it even synthesize"
+risk.  Benign note: m_wr is write-only, and was before the session too
+(S_MWR hardcodes mem_write).
+
+run_tests.sh now verilates the seven heavy co-simulation legs (wrapchip x4,
+sdram_turbo x2, dualram_turbo) alongside the program bench, same dual-path
+pattern with the iverilog fallback kept:
+
+    full regression wall time: ~8 min (morning) -> 54 s -> 17.9 s

@@ -41,6 +41,13 @@ compile() {
 	fi
 }
 
+# The heavy co-simulation legs dominate the wall clock under vvp; verilate
+# them when verilator is installed (~30x), keeping the iverilog build as the
+# fallback.  Both simulators stay buildable on purpose: they have caught
+# DIFFERENT bug classes (2-state tristate vs function/array sensitivity).
+HAVE_VL=0
+command -v verilator >/dev/null 2>&1 && HAVE_VL=1
+
 compile reset iverilog -g2012 -I "$RTL" -o "$WORK/tb_reset.vvp" \
 	tb_ap040_reset.v sim_dpram.v $SRC &
 # The program bench carries five programs x three phases and dominates the
@@ -81,61 +88,139 @@ compile bus_timeout iverilog -g2012 -o "$WORK/tb_bus_timeout.vvp" \
 	tb_ap040_bus_timeout.v $RTL/ap040_bus_timeout.v &
 compile cart_hrtmon iverilog -g2012 -o "$WORK/tb_cart_hrtmon.vvp" \
 	tb_cart_hrtmon.v ../../rtl/cart.v &
-compile wrapchip iverilog -g2012 -I "$RTL" -o "$WORK/tb_wrapchip.vvp" \
-	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+if [ "$HAVE_VL" = 1 ]; then
+	compile wrapchip verilator --binary --timing -j 4 -Wno-fatal -Wno-lint \
+		-Wno-style --top-module tb_cpu_wrapper_chip \
+		-I"$RTL" -Mdir "$WORK/vl_wrapchip" -o Vwrapchip \
+		tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
 	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
 	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
 	sim_dpram.v $SRC &
+	WRAPCHIP_SIM="$WORK/vl_wrapchip/Vwrapchip"
+else
+	compile wrapchip iverilog -g2012 -I "$RTL" -s tb_cpu_wrapper_chip \
+		-o "$WRAPCHIP_SIM" tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+		"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+		"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
+		sim_dpram.v $SRC &
+	WRAPCHIP_SIM="$WRAPCHIP_SIM"
+fi
 # the RAM port's acknowledgement outlives its own access, so the latency at
 # which a stale ready overlaps the next request is what decides whether
 # bus_complete can cross targets -- one value proves nothing
-compile wrapchip_l0 iverilog -g2012 -I "$RTL" \
-	-P tb_cpu_wrapper_chip.RAM_LAT=0 -o "$WORK/tb_wrapchip_l0.vvp" \
-	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+if [ "$HAVE_VL" = 1 ]; then
+	compile wrapchip_l0 verilator --binary --timing -j 4 -Wno-fatal -Wno-lint \
+		-Wno-style --top-module tb_cpu_wrapper_chip -GRAM_LAT=0 \
+		-I"$RTL" -Mdir "$WORK/vl_wrapchip_l0" -o Vwrapchip_l0 \
+		tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
 	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
 	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
 	sim_dpram.v $SRC &
-compile wrapchip_l7 iverilog -g2012 -I "$RTL" \
-	-P tb_cpu_wrapper_chip.RAM_LAT=7 -o "$WORK/tb_wrapchip_l7.vvp" \
-	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+	WRAPCHIP_L0_SIM="$WORK/vl_wrapchip_l0/Vwrapchip_l0"
+else
+	compile wrapchip_l0 iverilog -g2012 -I "$RTL" -s tb_cpu_wrapper_chip -P tb_cpu_wrapper_chip.RAM_LAT=0 \
+		-o "$WRAPCHIP_L0_SIM" tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+		"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+		"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
+		sim_dpram.v $SRC &
+	WRAPCHIP_L0_SIM="$WRAPCHIP_L0_SIM"
+fi
+if [ "$HAVE_VL" = 1 ]; then
+	compile wrapchip_l7 verilator --binary --timing -j 4 -Wno-fatal -Wno-lint \
+		-Wno-style --top-module tb_cpu_wrapper_chip -GRAM_LAT=7 \
+		-I"$RTL" -Mdir "$WORK/vl_wrapchip_l7" -o Vwrapchip_l7 \
+		tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
 	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
 	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
 	sim_dpram.v $SRC &
+	WRAPCHIP_L7_SIM="$WORK/vl_wrapchip_l7/Vwrapchip_l7"
+else
+	compile wrapchip_l7 iverilog -g2012 -I "$RTL" -s tb_cpu_wrapper_chip -P tb_cpu_wrapper_chip.RAM_LAT=7 \
+		-o "$WRAPCHIP_L7_SIM" tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+		"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+		"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
+		sim_dpram.v $SRC &
+	WRAPCHIP_L7_SIM="$WRAPCHIP_L7_SIM"
+fi
 # turbo chipram: cchip claims $000000-$1FFFFF, so fetches AND data leave the
 # chip bus for the accelerated RAM port.  That is how an accelerated board
 # runs, and it is the only configuration where a fastchip access follows a
 # RAM access rather than a chip-bus one.
-compile wrapchip_turbo iverilog -g2012 -I "$RTL" \
-	-P tb_cpu_wrapper_chip.TURBO_CHIP=1 -o "$WORK/tb_wrapchip_turbo.vvp" \
-	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+if [ "$HAVE_VL" = 1 ]; then
+	compile wrapchip_turbo verilator --binary --timing -j 4 -Wno-fatal -Wno-lint \
+		-Wno-style --top-module tb_cpu_wrapper_chip -GTURBO_CHIP=1 \
+		-I"$RTL" -Mdir "$WORK/vl_wrapchip_turbo" -o Vwrapchip_turbo \
+		tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
 	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
 	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
 	sim_dpram.v $SRC &
-compile sdram_turbo iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
-	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=0 \
-	-o "$WORK/tb_sdram_turbo.vvp" tb_sdram_turbo.v \
+	WRAPCHIP_TURBO_SIM="$WORK/vl_wrapchip_turbo/Vwrapchip_turbo"
+else
+	compile wrapchip_turbo iverilog -g2012 -I "$RTL" -s tb_cpu_wrapper_chip -P tb_cpu_wrapper_chip.TURBO_CHIP=1 \
+		-o "$WRAPCHIP_TURBO_SIM" tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+		"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+		"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
+		sim_dpram.v $SRC &
+	WRAPCHIP_TURBO_SIM="$WRAPCHIP_TURBO_SIM"
+fi
+if [ "$HAVE_VL" = 1 ]; then
+	compile sdram_turbo verilator --binary --timing -j 4 -Wno-fatal -Wno-lint \
+		-Wno-style --top-module tb_sdram_turbo -GCYC_PHASE=1 -GCPU_PHASE=0 \
+		-I"$RTL" -Mdir "$WORK/vl_sdram_turbo" -o Vsdram_turbo \
+		tb_sdram_turbo.v \
 	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
 	../../rtl/cpu_cache_new.v sim_dpram.v ../../rtl/ram_cs_guard.v \
 	$RTL/ap040_walker_cdc.v $SRC &
+	SDRAM_TURBO_SIM="$WORK/vl_sdram_turbo/Vsdram_turbo"
+else
+	compile sdram_turbo iverilog -g2012 -I "$RTL" -s tb_sdram_turbo -P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=0 \
+		-o "$SDRAM_TURBO_SIM" tb_sdram_turbo.v \
+		"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
+		../../rtl/cpu_cache_new.v sim_dpram.v ../../rtl/ram_cs_guard.v \
+		$RTL/ap040_walker_cdc.v $SRC &
+	SDRAM_TURBO_SIM="$SDRAM_TURBO_SIM"
+fi
 # second sdram-turbo instance at the real-hardware phase alignment
 # (CPU_PHASE=3): the only alignment whose chip stage machine can sample
 # the ph2 pulse and therefore deliver interrupts -- t_fpu's IRQ soak
 # needs it, while the CPU_PHASE=0 instance keeps the guard-hostile
 # alignment coverage
-compile sdram_turbo_ph3 iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
-	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=3 \
-	-o "$WORK/tb_sdram_turbo_ph3.vvp" tb_sdram_turbo.v \
+if [ "$HAVE_VL" = 1 ]; then
+	compile sdram_turbo_ph3 verilator --binary --timing -j 4 -Wno-fatal -Wno-lint \
+		-Wno-style --top-module tb_sdram_turbo -GCYC_PHASE=1 -GCPU_PHASE=3 \
+		-I"$RTL" -Mdir "$WORK/vl_sdram_turbo_ph3" -o Vsdram_turbo_ph3 \
+		tb_sdram_turbo.v \
 	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
 	../../rtl/cpu_cache_new.v sim_dpram.v ../../rtl/ram_cs_guard.v \
 	$RTL/ap040_walker_cdc.v $SRC &
-compile dualram_turbo iverilog -g2012 -I "$RTL" -s tb_dualram_turbo \
-	-P tb_dualram_turbo.CYC_PHASE=1 -P tb_dualram_turbo.CPU_PHASE=3 \
-	-o "$WORK/tb_dualram_turbo.vvp" tb_dualram_turbo.v \
+	SDRAM_TURBO_PH3_SIM="$WORK/vl_sdram_turbo_ph3/Vsdram_turbo_ph3"
+else
+	compile sdram_turbo_ph3 iverilog -g2012 -I "$RTL" -s tb_sdram_turbo -P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=3 \
+		-o "$SDRAM_TURBO_PH3_SIM" tb_sdram_turbo.v \
+		"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
+		../../rtl/cpu_cache_new.v sim_dpram.v ../../rtl/ram_cs_guard.v \
+		$RTL/ap040_walker_cdc.v $SRC &
+	SDRAM_TURBO_PH3_SIM="$SDRAM_TURBO_PH3_SIM"
+fi
+if [ "$HAVE_VL" = 1 ]; then
+	compile dualram_turbo verilator --binary --timing -j 4 -Wno-fatal -Wno-lint \
+		-Wno-style --top-module tb_dualram_turbo -GCYC_PHASE=1 -GCPU_PHASE=3 \
+		-I"$RTL" -Mdir "$WORK/vl_dualram_turbo" -o Vdualram_turbo \
+		tb_dualram_turbo.v \
 	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
 	../../rtl/cpu_cache_new.v ../../rtl/ddram_ctrl.v \
 	../../rtl/A2065/a2065_ddram_arbiter.v \
-	sim_dpram.v ../../rtl/ram_cs_guard.v \
-	$RTL/ap040_walker_cdc.v $SRC &
+	sim_dpram.v ../../rtl/ram_cs_guard.v $RTL/ap040_walker_cdc.v $SRC &
+	DUALRAM_TURBO_SIM="$WORK/vl_dualram_turbo/Vdualram_turbo"
+else
+	compile dualram_turbo iverilog -g2012 -I "$RTL" -s tb_dualram_turbo -P tb_dualram_turbo.CYC_PHASE=1 -P tb_dualram_turbo.CPU_PHASE=3 \
+		-o "$DUALRAM_TURBO_SIM" tb_dualram_turbo.v \
+		"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
+		../../rtl/cpu_cache_new.v ../../rtl/ddram_ctrl.v \
+		../../rtl/A2065/a2065_ddram_arbiter.v \
+		sim_dpram.v ../../rtl/ram_cs_guard.v $RTL/ap040_walker_cdc.v $SRC &
+	DUALRAM_TURBO_SIM="$DUALRAM_TURBO_SIM"
+fi
 compile fillsnoop iverilog -g2012 -I "$RTL" -s tb_ap040_fillsnoop \
 	-o "$WORK/tb_fillsnoop.vvp" tb_ap040_fillsnoop.v \
 	$RTL/ap040_ucache.v sim_dpram.v &
@@ -205,24 +290,24 @@ leg exceptions         "$PROG_SIM" +prog=build/t_exceptions.hex &
 leg mmu                "$PROG_SIM" +prog=build/t_mmu.hex &
 leg cache              "$PROG_SIM" +prog=build/t_cache.hex &
 leg fpu                "$PROG_SIM" +prog=build/t_fpu.hex &
-leg fpu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_fpu.hex &
-leg exceptions_chip    "$WORK/tb_wrapchip.vvp" +prog=build/t_exceptions.hex &
-leg exceptions_chip_l0 "$WORK/tb_wrapchip_l0.vvp" +prog=build/t_exceptions.hex &
-leg exceptions_chip_l7 "$WORK/tb_wrapchip_l7.vvp" +prog=build/t_exceptions.hex &
+leg fpu_chip           "$WRAPCHIP_SIM" +prog=build/t_fpu.hex &
+leg exceptions_chip    "$WRAPCHIP_SIM" +prog=build/t_exceptions.hex &
+leg exceptions_chip_l0 "$WRAPCHIP_L0_SIM" +prog=build/t_exceptions.hex &
+leg exceptions_chip_l7 "$WRAPCHIP_L7_SIM" +prog=build/t_exceptions.hex &
 # t_cache is deliberately absent: it asserts that a stale I-cache line is
 # still served, which the chip-window I-fetch bypass prevents whenever
 # cache_allow_all is 0 as it is here and in production.  That program
 # belongs to tb_prog, which runs everything-cacheable.
-leg exceptions_turbo   "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_exceptions.hex &
-leg mmu_turbo          "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_mmu.hex &
-leg fpu_turbo          "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_fpu.hex &
-leg integer_turbo      "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_integer.hex &
-leg mmu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_mmu.hex &
-leg fpu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_fpu.hex &
-leg mmu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_mmu.hex &
-leg mmu_turbo_ph3      "$WORK/tb_sdram_turbo_ph3.vvp" +prog=build/t_mmu.hex &
-leg fpu_dualram        "$WORK/tb_dualram_turbo.vvp" +prog=build/t_fpu.hex &
-leg fpu_turbo_ph3      "$WORK/tb_sdram_turbo_ph3.vvp" +prog=build/t_fpu.hex &
+leg exceptions_turbo   "$WRAPCHIP_TURBO_SIM" +prog=build/t_exceptions.hex &
+leg mmu_turbo          "$WRAPCHIP_TURBO_SIM" +prog=build/t_mmu.hex &
+leg fpu_turbo          "$WRAPCHIP_TURBO_SIM" +prog=build/t_fpu.hex &
+leg integer_turbo      "$WRAPCHIP_TURBO_SIM" +prog=build/t_integer.hex &
+leg mmu_chip           "$WRAPCHIP_SIM" +prog=build/t_mmu.hex &
+leg fpu_turbo          "$SDRAM_TURBO_SIM" +prog=build/t_fpu.hex &
+leg mmu_turbo          "$SDRAM_TURBO_SIM" +prog=build/t_mmu.hex &
+leg mmu_turbo_ph3      "$SDRAM_TURBO_PH3_SIM" +prog=build/t_mmu.hex &
+leg fpu_dualram        "$DUALRAM_TURBO_SIM" +prog=build/t_fpu.hex &
+leg fpu_turbo_ph3      "$SDRAM_TURBO_PH3_SIM" +prog=build/t_fpu.hex &
 wait
 
 if ls "$WORK"/.status.* >/dev/null 2>&1; then
