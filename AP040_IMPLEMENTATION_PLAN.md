@@ -2926,3 +2926,46 @@ vector-derivation attempt showed the shape of a fix and the trap in it
 A real fix registers the decode output -- the same second stage the 6-stage
 question and the in-DECODE dispatch both point at -- rather than trying to
 shrink the cone in place.
+
+### The decode cone, measured properly at last (fit 4)
+
+    Logic utilization 41,440 / 41,910 (99%)   setup -1.762 on clk_sys
+
+Full path breakdown, which is what the two earlier guesses lacked:
+
+    launch clock reaches core|ir[7]        8.481 ns
+    ir[7] -> exc_vec~14                    9.382
+    exc_vec~14 -> exc_fmt[3]~33 ~34 ~43 ~49 ~50 ~51 ~56 ~60 ... -> exc_fmt[0]
+    Data Arrival  45.156   Data Required 43.394   Slack -1.762
+
+So the combinational path is 36.7 ns across roughly SIXTY LUT levels, and
+its shape is the finding: exc_fmt is computed FROM exc_vec.  Synthesis
+already shares the two, chaining fmt behind vec and doubling the depth --
+which also explains why the earlier "derive exc_fmt from the vector" idea
+would have made timing WORSE had it been correct.  It failed on conformance
+first, which was luck rather than judgement.
+
+THE TREE HAS ALWAYS BEEN THIS DEEP.  The same structure closed at +0.269 in
+the 4736e68a build at 92% utilization: ~35 ns then, ~36.7 ns now.  It did not
+grow sixty levels this session; it was always marginal, and the session's
+~+2,800 ALMs of CPI work cost the placement quality that was hiding it.  That
+is also why fit 3 got WORSE after removing logic -- at 98-99% the fitter's
+placement is the dominant variable, not the netlist.
+
+TWO WAYS OUT, and only two:
+  a) shed ~2,800 ALMs to get back under ~93%, where the cone placed well.
+     The measured candidates do not add up: cpu_cache_new is 400 ALMs, the
+     dispatch fusion 345, the FPU latch 150.  Reverting the CPI series
+     entirely would do it and give back the 37%.
+  b) PIPELINE THE CONE -- register the decode output so ir -> exc_vec ->
+     exc_fmt spans two cycles instead of one.  This is the same second
+     decode stage the 6-stage question and the in-DECODE dispatch both
+     pointed at, and the only option that creates headroom rather than
+     spending it.  Exceptions already cost many cycles, so a cycle of
+     latency there is free; the work is that 89 exc() sites and the
+     access-error path (which never calls exc()) must all be routed through
+     the new stage, and the conformance corpus checks every frame it builds.
+
+Do (b), as its own change, with the corpus run between steps.  Do not attempt
+it as a fold at the end of a session -- that is how the exc_fmt derivation
+went in, and it was wrong twice over.
