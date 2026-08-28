@@ -2816,3 +2816,46 @@ cone:
     which is the same prerequisite the 6-stage question surfaced
   - re-measure ANY area/timing claim with at least two fits before believing
     a single number
+
+### Can ALUTs be traded for M10Ks in the FPU?  Measured, 2026-08-28
+
+The headroom is real and lopsided: 41,152/41,910 ALMs (98%, binding) against
+258/553 M10K blocks and 32% of block memory bits.  ~295 blocks are free.
+
+MOSTLY NO, for the FPU as a whole.  Its 9.8K ALUTs are arithmetic datapath,
+not storage: two 64-bit variable barrel shifters, five clz64 priority chains
+(a 64-iteration loop each), the divide/sqrt restoring cascades, and the
+round/pack/unpack trees.  None of that is memory-shaped -- a table for a
+64-bit input does not exist -- so it cannot move to M10K at any price.  The
+FSAVE state is ~230 bits of output registers, far too small to matter.
+
+ONE REAL CANDIDATE, and it is worth more than expected.  The FP register
+file (fr_s/fr_e/fr_m, 8 x 80 bits) is read COMBINATIONALLY at 49 sites
+through three different index variables (fm_sel, src_r, dst_r), several of
+them inside functions -- so synthesis builds replicated 8:1 muxes over 80
+bits, several times over.  Measured by synthesizing ap040_fpu standalone and
+again with the arrays collapsed to single registers (consumers untouched, so
+only the storage and the muxes disappear):
+
+    baseline                 8,854 ALUTs   2,259 registers
+    register file collapsed  6,901 ALUTs   1,699 registers
+    difference               ~1,953 ALUTs    560 registers
+
+That is 22% of the FPU, and an UPPER BOUND: collapsing to one register also
+lets Quartus merge per-index cones that a real conversion would keep.  Call
+it 1.2-1.9K ALUTs recoverable, against a deficit that is currently ~750 ALMs.
+
+SHAPE OF THE CONVERSION, if it is taken:
+  - 8 x 80 bits is trivial for M10K; the constraint is PORTS, not capacity.
+    Three simultaneous read indices need more than true-dual-port gives, so
+    duplicate the array across two M10Ks for four read ports.  With 295
+    blocks free, duplication is free.
+  - The cost is READ LATENCY at 49 sites in the FPU's dispatch and frame
+    paths.  That is the whole risk, and it lands in the block whose
+    correctness rests on the cputest/WinUAE corpus.
+  - Do it as its own change, with t_fpu (the oracle battery) run between
+    every step, and expect the FSM's operand-read cycle to need a stage.
+
+RECOMMENDATION: this is the best area lever found so far -- better than the
+X2.7 candidates for ALUTs-per-unit-risk -- but it is a real FPU change and
+should not be bolted onto the end of an acceleration session.
