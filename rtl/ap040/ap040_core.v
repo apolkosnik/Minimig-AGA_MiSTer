@@ -291,8 +291,11 @@ reg         x_rf_dst;    // dst_eff from regfile port B
 reg [31:0] m_addr_r, m_wdat, m_val;
 reg         x_src_mval;  // src_eff from m_val (load data registered at ack)
 reg         x_srd_cap;   // S_PIPE_DST owes a port-A source capture
+reg         x_rf_srcb;   // src_eff from regfile port B (fast store path)
+reg         x_dst_ea;    // EXEC's memory destination is ea_addr, not dst_addr
 wire [31:0] src_eff = x_src_mval ? m_val :
-                      x_rf_src   ? rf_rdata_a : src_val;
+                      x_rf_src   ? rf_rdata_a :
+                      x_rf_srcb  ? rf_rdata_b : src_val;
 wire [31:0] dst_eff = x_rf_dst   ? rf_rdata_b : dst_val;
 
 reg  [31:0] sh_val;
@@ -1934,6 +1937,7 @@ always @(posedge clk) begin
 		ea_post <= 0; ea_odl <= 0; ea_absl <= 0; ea_addr <= 0;
 		p_src <= 0; p_dst <= 0; p_sreg <= 0; p_dreg <= 0;
 		x_rf_src <= 0; x_rf_dst <= 0; x_src_mval <= 0; x_srd_cap <= 0;
+		x_rf_srcb <= 0; x_dst_ea <= 0;
 		p_ssize <= 0; p_dsize <= 0;
 		p_rmw <= 0; p_wbsup <= 0; p_flags <= 0; p_sextw <= 0;
 		p_dst_mem_bit <= 0;
@@ -2454,6 +2458,30 @@ always @(posedge clk) begin
 							x_rf_src <= 1; x_rf_dst <= 1;
 							state <= S_EXEC;
 						end
+						// FAST STORE (X2.5): the destination is memory, so
+						// port B is free -- stage the source there, run the
+						// EA at once, and return straight to S_EXEC.  Gated
+						// to the plain-ALU store with a simple EA mode:
+						//  - !p_rmw: a read-modify destination needs its
+						//    read (S_PIPE_DEA's mrd) first
+						//  - EK_ALU only: other kinds' EXEC arms read
+						//    dst_addr without the x_dst_ea mux
+						//  - modes 010/011/100 only: the extended EA
+						//    states use port B for their index register
+						//  - no alias of the source with an UPDATING base
+						//    (move.l a0,(a0)+ must store the pre-update
+						//    value; S_EA_BASE's writeback lands before
+						//    EXEC's port-B read under the bypass)
+						else if (!p_rmw && exec_kind == EK_ALU &&
+						         p_dst == DK_MEM &&
+						         (dst_mode_r == 3'b010 ||
+						          dst_mode_r == 3'b011 ||
+						          dst_mode_r == 3'b100) &&
+						         !((dst_mode_r != 3'b010) &&
+						           (p_sreg == {1'b1, dst_rn_r}))) begin
+							rr_b <= p_sreg; x_rf_srcb <= 1; x_dst_ea <= 1;
+							ea_start(dst_mode_r, dst_rn_r, p_dsize, S_EXEC);
+						end
 						else begin
 							// capture happens at the top of S_PIPE_DST,
 							// one state earlier than S_PIPE_SREG did it
@@ -2466,12 +2494,28 @@ always @(posedge clk) begin
 							rr_b <= p_dreg; x_rf_dst <= 1;
 							state <= S_EXEC;
 						end
+						else if (!p_rmw && exec_kind == EK_ALU &&
+						         p_dst == DK_MEM &&
+						         (dst_mode_r == 3'b010 ||
+						          dst_mode_r == 3'b011 ||
+						          dst_mode_r == 3'b100)) begin
+							x_dst_ea <= 1;
+							ea_start(dst_mode_r, dst_rn_r, p_dsize, S_EXEC);
+						end
 						else state <= S_PIPE_DST;
 					end
 					default:
 						if (p_dst == DK_REG) begin
 							rr_b <= p_dreg; x_rf_dst <= 1;
 							state <= S_EXEC;
+						end
+						else if (!p_rmw && exec_kind == EK_ALU &&
+						         p_dst == DK_MEM &&
+						         (dst_mode_r == 3'b010 ||
+						          dst_mode_r == 3'b011 ||
+						          dst_mode_r == 3'b100)) begin
+							x_dst_ea <= 1;
+							ea_start(dst_mode_r, dst_rn_r, p_dsize, S_EXEC);
 						end
 						else state <= S_PIPE_DST;
 				endcase
@@ -2533,9 +2577,12 @@ always @(posedge clk) begin
 				// S_MD_WAIT, writeback...) see registered values, exactly
 				// as if S_PIPE_REGS / S_PIPE_SDONE had run
 				if (x_rf_src)   src_val <= rf_rdata_a;
+				if (x_rf_srcb)  src_val <= rf_rdata_b;
 				if (x_src_mval) src_val <= m_val;
 				if (x_rf_dst)   dst_val <= rf_rdata_b;
+				if (x_dst_ea)   dst_addr <= ea_addr;
 				x_rf_src <= 0; x_rf_dst <= 0; x_src_mval <= 0;
+				x_rf_srcb <= 0; x_dst_ea <= 0;
 				case (exec_kind)
 					EK_SHIFT: begin
 						sh_val <= dst_eff;
@@ -2627,7 +2674,8 @@ always @(posedge clk) begin
 						if (p_flags) sr[4:0] <= alu_fl;
 						if (p_wbsup) fetch_next;
 						else case (p_dst)
-							DK_MEM: mwr(dst_addr, p_dsize, alu_res, S_NEXT);
+							DK_MEM: mwr(x_dst_ea ? ea_addr : dst_addr,
+							            p_dsize, alu_res, S_NEXT);
 							DK_REG: begin
 								if (p_dreg[3])
 									rfw(p_dreg, alu_res);
