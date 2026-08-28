@@ -2703,3 +2703,30 @@ fill's FC was latched at issue and is correct.  The monitor now judges only
 cycles serving the core's own current request (matched by longword
 address), which is the actual contract: handler opcodes FC6, frames and
 vectors FC5.  Real leaks still match the qualifier and still fail.
+
+### FDIV/FSQRT at six digits per cycle
+
+Same cascade shape as the integer divider's doubling: FDIV 22+1 rounds ->
+11+1, FSQRT 22 -> 11.  t_fpu bit-exact in all three phases (the
+WinUAE-oracle battery is the arbiter); program-level only -301 cycles
+because t_fpu is an exception battery, not a divide benchmark -- the win is
+per-operation.  Timing carries the same caveat as the integer divider.
+
+## Acceleration series status (end of 2026-08-27)
+
+NINE RTL commits sit unbuilt on ap040x2 (2f789d09 through 67e3b5b2): the
+f_busy fix, CPI works 1-7, the page-walk cache and the FPU radix doubling.
+Session-cumulative on bench_cpi: -37%.  None of it has seen the fitter, and
+the last build attempt failed clk_114 setup at -0.114 BEFORE most of this
+logic existed -- assume the next build is a timing fight, with the comb hit
+ack (hit_now feeding c_ack) and the two doubled dividers as the likely new
+critical paths.  If the divider cascades fail, halve them back or register
+the midpoint; if hit_now fails, the fallback is re-registering the ack (one
+cycle back on loads, everything else stands).
+
+Codex owns ap040_muldiv.v (division); its WIP is checkpointed at 0b4e2dc6
+and further edits ride uncommitted in the tree.  Coordinate before building.
+
+Remaining CPI ladder: decode-during-EXEC (needs the decoder extraction),
+32-bit writes (stores are drain-limited at 10.77), branch redirect cost
+(2.09 floor), Verilator conversion of the multi-bench legs.
