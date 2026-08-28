@@ -2969,3 +2969,37 @@ TWO WAYS OUT, and only two:
 Do (b), as its own change, with the corpus run between steps.  Do not attempt
 it as a fold at the end of a session -- that is how the exc_fmt derivation
 went in, and it was wrong twice over.
+
+### Third probe of the decode cone: exc_fmt is NOT derivable from the vector
+
+Path anatomy from fit 4's full report: 18.55 ns of LUT delay across 64
+levels plus 25.35 ns of routing (58% routing).  The depth is the SITE-SELECT
+tree of the decode arms; exc_fmt's network is synthesized chained behind
+exc_vec's, which is why exc_fmt[] is always the endpoint.
+
+The surgical idea -- write only exc_vec from the tree, derive exc_fmt one
+enabled cycle later from the registered vector (safe: S_EXC0 never reads
+exc_fmt; first read is S_EXC1) -- was implemented and FAILED on t_exceptions
+test 98 (h_trap0: frame must be format 0, vector 32).  Enumerating the
+non-literal call sites killed the premise outright:
+
+    exc(fpu_exc_vec, 4'd0)    line 4433   PRE-instruction FP exception
+    exc(fpu_exc_vec, 4'd3)    lines 4469/4487  POST-instruction, SAME vector
+    exc(`AP040_VEC_TRAP + ir[3:0], ...)  computed vector, format 0
+    plus FLINE's two formats found by the first probe
+
+The format encodes pre/post-instruction context that the vector does not
+carry.  There is NO function vec -> fmt.  Any future attempt at this cone
+must treat the format as independent information, full stop.
+
+WHAT ALL THREE PROBES ADD UP TO.  The cone is the site-select tree itself
+(~60 levels); every register written under it has that depth, and exc_fmt is
+merely the endpoint synthesis happens to serialize last.  Shrinking one
+output does not shrink the tree.  The only structural fix remains the
+REGISTERED DECODE STAGE: run the tree in one cycle into a staging register
+(vector, format, spc, addr, plus the dispatch plan), commit in the next.
+That is a planned restructuring of S_DECODE's 89 exception exits and the
+pipe dispatch -- the second decode stage, done deliberately.
+
+Meanwhile the series still fits at 99% and misses timing by ~1.8 ns; the
+last KNOWN-GOOD closing build remains 4736e68a (+0.269 at 92%).
