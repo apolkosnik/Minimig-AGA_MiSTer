@@ -2730,3 +2730,24 @@ and further edits ride uncommitted in the tree.  Coordinate before building.
 Remaining CPI ladder: decode-during-EXEC (needs the decoder extraction),
 32-bit writes (stores are drain-limited at 10.77), branch redirect cost
 (2.09 floor), Verilator conversion of the multi-bench legs.
+
+### CPI work 8: the dispatch fused into S_DECODE -- S_PIPE_START retired
+### from the common path
+
+The +prof histogram after works 1-7 put S_PIPE_START at 15% of ALL cycles
+(28,468 of 188,925) -- the largest remaining foldable block, spent waiting
+for the p_* operand plan to register.  The dispatch now runs in the DECODE
+cycle itself: one pipe_dispatch task takes the twelve operand-plan values
+as ARGUMENTS, S_PIPE_START passes the registered p_* (still reached by the
+19 S_IMMF extension-word returns), and pipe_go passes same-cycle blocking
+mirrors (bd_*) that every operand write in S_DECODE also updates -- 363
+writes rewritten by script, seeded from the registered values at the top of
+the always block so partial overrides dispatch on the pop defaults.
+
+    class              before    after     session start
+    add.l d2,d3         3.45      2.46         5.52
+    move.l (a0),d3      7.40      6.77        12.52
+    move.l d3,(a0)     10.77     10.46        19.71
+    bench_cpi total    -10.3%              cumulative -43.5%
+
+A register ALU op now costs what a NOP cost at the session start.

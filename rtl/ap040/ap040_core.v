@@ -291,6 +291,14 @@ reg         x_rf_dst;    // dst_eff from regfile port B
 reg [31:0] m_addr_r, m_wdat, m_val;
 reg         x_src_mval;  // src_eff from m_val (load data registered at ack)
 reg         x_srd_cap;   // S_PIPE_DST owes a port-A source capture
+// Same-cycle blocking mirrors of the operand plan, for pipe_go's fused
+// dispatch.  Seeded from the registered values at the top of the always
+// block; every operand write inside S_DECODE also updates its mirror.
+reg [1:0] bd_src, bd_dst;
+reg [3:0] bd_sreg, bd_dreg, bd_ekind;
+reg       bd_rmw;
+reg [1:0] bd_ssize, bd_dsize;
+reg [2:0] bd_smode, bd_srn, bd_dmode, bd_drn;
 reg         x_rf_srcb;   // src_eff from regfile port B (fast store path)
 reg         x_dst_ea;    // EXEC's memory destination is ea_addr, not dst_addr
 wire [31:0] src_eff = x_src_mval ? m_val :
@@ -1884,9 +1892,94 @@ task finish_bcc;
 	end
 endtask
 
+// Operand-plan dispatch, shared by TWO callers so the paths cannot drift:
+// S_PIPE_START passes the REGISTERED p_* (the extension-word instructions
+// return there from S_IMMF), and pipe_go passes the decode arms' same-cycle
+// blocking mirrors (bd_*), fusing the dispatch into the S_DECODE cycle --
+// the state S_PIPE_START spent existed only to wait for these values to
+// register (X2.5).
+task pipe_dispatch;
+	input [1:0]  t_src;
+	input [1:0]  t_dst;
+	input [3:0]  t_sreg;
+	input [3:0]  t_dreg;
+	input        t_rmw;
+	input [1:0]  t_ssize;
+	input [1:0]  t_dsize;
+	input [2:0]  t_smode;
+	input [2:0]  t_srn;
+	input [2:0]  t_dmode;
+	input [2:0]  t_drn;
+	input [3:0]  t_ekind;
+	begin
+		// x_ext keeps a decode-time immediate through EA fetches;
+		// for long MUL/DIV it was already captured in S_MDL_EXT
+		if (t_ekind != EK_MD_L) x_ext <= imm;
+		case (t_src)
+			SK_MEM: ea_start(t_smode, t_srn, t_ssize, S_PIPE_SRD);
+			// A register destination goes STRAIGHT to S_EXEC (X2.4).
+			SK_REG:
+				if (t_dst == DK_REG) begin
+					rr_a <= t_sreg; rr_b <= t_dreg;
+					x_rf_src <= 1; x_rf_dst <= 1;
+					state <= S_EXEC;
+				end
+				// FAST STORE (X2.5): see the gate rationale at the
+				// original S_PIPE_START site (kept in git history);
+				// each term is load-bearing.
+				else if (!t_rmw && t_ekind == EK_ALU &&
+				         t_dst == DK_MEM &&
+				         (t_dmode == 3'b010 ||
+				          t_dmode == 3'b011 ||
+				          t_dmode == 3'b100) &&
+				         !((t_dmode != 3'b010) &&
+				           (t_sreg == {1'b1, t_drn}))) begin
+					rr_b <= t_sreg; x_rf_srcb <= 1; x_dst_ea <= 1;
+					ea_start(t_dmode, t_drn, t_dsize, S_EXEC);
+				end
+				else begin
+					rr_a <= t_sreg; x_srd_cap <= 1;
+					state <= S_PIPE_DST;
+				end
+			SK_IMM: begin
+				src_val <= imm;
+				if (t_dst == DK_REG) begin
+					rr_b <= t_dreg; x_rf_dst <= 1;
+					state <= S_EXEC;
+				end
+				else if (!t_rmw && t_ekind == EK_ALU &&
+				         t_dst == DK_MEM &&
+				         (t_dmode == 3'b010 ||
+				          t_dmode == 3'b011 ||
+				          t_dmode == 3'b100)) begin
+					x_dst_ea <= 1;
+					ea_start(t_dmode, t_drn, t_dsize, S_EXEC);
+				end
+				else state <= S_PIPE_DST;
+			end
+			default:
+				if (t_dst == DK_REG) begin
+					rr_b <= t_dreg; x_rf_dst <= 1;
+					state <= S_EXEC;
+				end
+				else if (!t_rmw && t_ekind == EK_ALU &&
+				         t_dst == DK_MEM &&
+				         (t_dmode == 3'b010 ||
+				          t_dmode == 3'b011 ||
+				          t_dmode == 3'b100)) begin
+					x_dst_ea <= 1;
+					ea_start(t_dmode, t_drn, t_dsize, S_EXEC);
+				end
+				else state <= S_PIPE_DST;
+		endcase
+	end
+endtask
+
 task pipe_go;
 	begin
-		state <= S_PIPE_START;
+		pipe_dispatch(bd_src, bd_dst, bd_sreg, bd_dreg, bd_rmw,
+		              bd_ssize, bd_dsize, bd_smode, bd_srn,
+		              bd_dmode, bd_drn, bd_ekind);
 	end
 endtask
 
@@ -1901,6 +1994,10 @@ always @(posedge clk) begin
 	// fill engine runs after the case statement and has to see what the case
 	// did to the memory port and to the queue in the same cycle.
 	epf_issue   = 0;
+	bd_src = p_src; bd_dst = p_dst; bd_sreg = p_sreg; bd_dreg = p_dreg;
+	bd_rmw = p_rmw; bd_ssize = p_ssize; bd_dsize = p_dsize;
+	bd_smode = src_mode_r; bd_srn = src_rn_r;
+	bd_dmode = dst_mode_r; bd_drn = dst_rn_r; bd_ekind = exec_kind;
 	epf_flushed = 0;
 	epf_pop     = 2'd0;
 	epf_fillw   = 2'd0;
@@ -2462,85 +2559,11 @@ always @(posedge clk) begin
 
 			//------------------------------------------------ operand pipeline
 			S_PIPE_START: begin
-				// x_ext keeps a decode-time immediate through EA fetches;
-				// for long MUL/DIV it was already captured in S_MDL_EXT
-				if (exec_kind != EK_MD_L) x_ext <= imm;
-				// A register destination needs no EA, so its operand can be
-				// read on port B in the SAME cycle the source is read on
-				// port A (X2.3).  The old path spent one state per port.
-				case (p_src)
-					SK_MEM: ea_start(src_mode_r, src_rn_r, p_ssize, S_PIPE_SRD);
-					// A register destination goes STRAIGHT to S_EXEC: the
-					// read addresses are set here and the operands taken
-					// from the ports in the EXEC cycle via src_eff/dst_eff
-					// (X2.4).  S_PIPE_REGS is what this replaces.
-					SK_REG:
-						if (p_dst == DK_REG) begin
-							rr_a <= p_sreg; rr_b <= p_dreg;
-							x_rf_src <= 1; x_rf_dst <= 1;
-							state <= S_EXEC;
-						end
-						// FAST STORE (X2.5): the destination is memory, so
-						// port B is free -- stage the source there, run the
-						// EA at once, and return straight to S_EXEC.  Gated
-						// to the plain-ALU store with a simple EA mode:
-						//  - !p_rmw: a read-modify destination needs its
-						//    read (S_PIPE_DEA's mrd) first
-						//  - EK_ALU only: other kinds' EXEC arms read
-						//    dst_addr without the x_dst_ea mux
-						//  - modes 010/011/100 only: the extended EA
-						//    states use port B for their index register
-						//  - no alias of the source with an UPDATING base
-						//    (move.l a0,(a0)+ must store the pre-update
-						//    value; S_EA_BASE's writeback lands before
-						//    EXEC's port-B read under the bypass)
-						else if (!p_rmw && exec_kind == EK_ALU &&
-						         p_dst == DK_MEM &&
-						         (dst_mode_r == 3'b010 ||
-						          dst_mode_r == 3'b011 ||
-						          dst_mode_r == 3'b100) &&
-						         !((dst_mode_r != 3'b010) &&
-						           (p_sreg == {1'b1, dst_rn_r}))) begin
-							rr_b <= p_sreg; x_rf_srcb <= 1; x_dst_ea <= 1;
-							ea_start(dst_mode_r, dst_rn_r, p_dsize, S_EXEC);
-						end
-						else begin
-							// capture happens at the top of S_PIPE_DST,
-							// one state earlier than S_PIPE_SREG did it
-							rr_a <= p_sreg; x_srd_cap <= 1;
-							state <= S_PIPE_DST;
-						end
-					SK_IMM: begin
-						src_val <= imm;
-						if (p_dst == DK_REG) begin
-							rr_b <= p_dreg; x_rf_dst <= 1;
-							state <= S_EXEC;
-						end
-						else if (!p_rmw && exec_kind == EK_ALU &&
-						         p_dst == DK_MEM &&
-						         (dst_mode_r == 3'b010 ||
-						          dst_mode_r == 3'b011 ||
-						          dst_mode_r == 3'b100)) begin
-							x_dst_ea <= 1;
-							ea_start(dst_mode_r, dst_rn_r, p_dsize, S_EXEC);
-						end
-						else state <= S_PIPE_DST;
-					end
-					default:
-						if (p_dst == DK_REG) begin
-							rr_b <= p_dreg; x_rf_dst <= 1;
-							state <= S_EXEC;
-						end
-						else if (!p_rmw && exec_kind == EK_ALU &&
-						         p_dst == DK_MEM &&
-						         (dst_mode_r == 3'b010 ||
-						          dst_mode_r == 3'b011 ||
-						          dst_mode_r == 3'b100)) begin
-							x_dst_ea <= 1;
-							ea_start(dst_mode_r, dst_rn_r, p_dsize, S_EXEC);
-						end
-						else state <= S_PIPE_DST;
-				endcase
+				// reached only via S_IMMF returns (r_imm_ret): direct
+				// decode dispatch now happens inside S_DECODE via pipe_go
+				pipe_dispatch(p_src, p_dst, p_sreg, p_dreg, p_rmw,
+				              p_ssize, p_dsize, src_mode_r, src_rn_r,
+				              dst_mode_r, dst_rn_r, exec_kind);
 			end
 
 			// The EA is finished by now, so port B is free: point it at a
@@ -5045,23 +5068,23 @@ always @(posedge clk) begin
 								go_illegal;
 							else begin
 								alu_op <= `AP040_ALU_BTST + {4'd0, ir[7:6]};
-								p_src <= SK_REG; p_sreg <= {1'b0, d_reg9};
+								begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_reg9}; bd_sreg = {1'b0, d_reg9}; end
 								if (ir[7:6] == 2'b00) p_wbsup <= 1; // BTST
 								if (ea_is_imm)
 									immf(2'd1, S_BTSTI);
 								else if (d_mode == 3'b000) begin
 									op_size <= `AP040_SZ_L;
-									p_dsize <= `AP040_SZ_L;
-									p_dst <= DK_REG; p_dreg <= {1'b0, d_rn};
+									begin p_dsize <= `AP040_SZ_L; bd_dsize = `AP040_SZ_L; end
+									begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end
 									pipe_go;
 								end
 								else begin
 									op_size <= `AP040_SZ_B;
-									p_dsize <= `AP040_SZ_B;
-									p_dst <= DK_MEM;
+									begin p_dsize <= `AP040_SZ_B; bd_dsize = `AP040_SZ_B; end
+									begin p_dst <= DK_MEM; bd_dst = DK_MEM; end
 									p_dst_mem_bit <= 1;
-									dst_mode_r <= d_mode; dst_rn_r <= d_rn;
-									p_rmw <= 1;
+									begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end
+									begin p_rmw <= 1; bd_rmw = 1; end
 									pipe_go;
 								end
 							end
@@ -5080,19 +5103,19 @@ always @(posedge clk) begin
 								go_illegal;
 							else begin
 							alu_op <= `AP040_ALU_BTST + {4'd0, ir[7:6]};
-							p_src <= SK_IMM;
+							begin p_src <= SK_IMM; bd_src = SK_IMM; end
 							if (d_mode == 3'b000) begin
 								op_size <= `AP040_SZ_L;
-								p_dsize <= `AP040_SZ_L;
-								p_dst <= DK_REG; p_dreg <= {1'b0, d_rn};
+								begin p_dsize <= `AP040_SZ_L; bd_dsize = `AP040_SZ_L; end
+								begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end
 							end
 							else begin
 								op_size <= `AP040_SZ_B;
-								p_dsize <= `AP040_SZ_B;
-								p_dst <= DK_MEM;
+								begin p_dsize <= `AP040_SZ_B; bd_dsize = `AP040_SZ_B; end
+								begin p_dst <= DK_MEM; bd_dst = DK_MEM; end
 								p_dst_mem_bit <= 1;
-								dst_mode_r <= d_mode; dst_rn_r <= d_rn;
-								p_rmw <= 1;
+								begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end
+								begin p_rmw <= 1; bd_rmw = 1; end
 							end
 							if (ir[7:6] == 2'b00) p_wbsup <= 1;
 							immf(2'd1, S_PIPE_START);
@@ -5176,14 +5199,14 @@ always @(posedge clk) begin
 								endcase
 								if (d_reg9 == 3'b110) p_wbsup <= 1; // CMPI
 								op_size <= std_size;
-								p_ssize <= std_size; p_dsize <= std_size;
-								p_src <= SK_IMM;
+								begin p_ssize <= std_size; bd_ssize = std_size; end begin p_dsize <= std_size; bd_dsize = std_size; end
+								begin p_src <= SK_IMM; bd_src = SK_IMM; end
 								if (d_mode == 3'b000) begin
-									p_dst <= DK_REG; p_dreg <= {1'b0, d_rn};
+									begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end
 								end
 								else begin
-									p_dst <= DK_MEM; p_rmw <= 1;
-									dst_mode_r <= d_mode; dst_rn_r <= d_rn;
+									begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin p_rmw <= 1; bd_rmw = 1; end
+									begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end
 								end
 								immf((std_size == `AP040_SZ_L) ? 2'd2 : 2'd1, S_PIPE_START);
 							end
@@ -5198,30 +5221,30 @@ always @(posedge clk) begin
 						else begin
 							alu_op <= `AP040_ALU_MOVE;
 							op_size <= move_size;
-							p_ssize <= move_size; p_dsize <= move_size;
+							begin p_ssize <= move_size; bd_ssize = move_size; end begin p_dsize <= move_size; bd_dsize = move_size; end
 							// source
 							if (d_mode == 3'b000 || d_mode == 3'b001) begin
-								p_src <= SK_REG; p_sreg <= {d_mode[0], d_rn};
+								begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {d_mode[0], d_rn}; bd_sreg = {d_mode[0], d_rn}; end
 							end
-							else if (ea_is_imm) p_src <= SK_IMM;
+							else if (ea_is_imm) begin p_src <= SK_IMM; bd_src = SK_IMM; end
 							else begin
-								p_src <= SK_MEM;
-								src_mode_r <= d_mode; src_rn_r <= d_rn;
+								begin p_src <= SK_MEM; bd_src = SK_MEM; end
+								begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end
 							end
 							// destination
 							if (d_op8_6 == 3'b000) begin
-								p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+								begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 							end
 							else if (d_op8_6 == 3'b001) begin
 								// MOVEA: full register, no flags, word sexts
-								p_dst <= DK_REG; p_dreg <= {1'b1, d_reg9};
+								begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b1, d_reg9}; bd_dreg = {1'b1, d_reg9}; end
 								p_flags <= 0;
 								if (move_size == `AP040_SZ_W) p_sextw <= 1;
 								op_size <= `AP040_SZ_L;
 							end
 							else begin
-								p_dst <= DK_MEM;
-								dst_mode_r <= d_op8_6; dst_rn_r <= d_reg9;
+								begin p_dst <= DK_MEM; bd_dst = DK_MEM; end
+								begin dst_mode_r <= d_op8_6; bd_dmode = d_op8_6; end begin dst_rn_r <= d_reg9; bd_drn = d_reg9; end
 							end
 							if (ea_is_imm)
 								immf((move_size == `AP040_SZ_L) ? 2'd2 : 2'd1, S_PIPE_START);
@@ -5238,7 +5261,7 @@ always @(posedge clk) begin
 									// EXTB.L
 									alu_op <= `AP040_ALU_EXTB;
 									op_size <= `AP040_SZ_L;
-									p_dst <= DK_REG; p_dreg <= {1'b0, d_rn};
+									begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end
 									pipe_go;
 								end
 								else go_illegal;
@@ -5249,15 +5272,15 @@ always @(posedge clk) begin
 						end
 						else if (d_op8_6 == 3'b110) begin
 							// CHK.W
-							exec_kind <= EK_CHK;
+							begin exec_kind <= EK_CHK; bd_ekind = EK_CHK; end
 							op_size <= `AP040_SZ_W;
-							p_ssize <= `AP040_SZ_W;
+							begin p_ssize <= `AP040_SZ_W; bd_ssize = `AP040_SZ_W; end
 							if (d_mode == 3'b001) go_illegal;
 							else begin
-								if (d_mode == 3'b000) begin p_src <= SK_REG; p_sreg <= {1'b0, d_rn}; end
-								else if (ea_is_imm) p_src <= SK_IMM;
-								else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; end
-								p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+								if (d_mode == 3'b000) begin begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end end
+								else if (ea_is_imm) begin p_src <= SK_IMM; bd_src = SK_IMM; end
+								else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end end
+								begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 								if (ea_is_imm) immf(2'd1, S_PIPE_START);
 								else pipe_go;
 							end
@@ -5265,15 +5288,15 @@ always @(posedge clk) begin
 						else if (d_op8_6 == 3'b100 &&
 						         !(ir[11:9] == 3'b100 && d_mode == 3'b001)) begin
 							// CHK.L (0100 ddd 100; 0100 100 000 001 rrr is LINK.L)
-							exec_kind <= EK_CHK;
+							begin exec_kind <= EK_CHK; bd_ekind = EK_CHK; end
 							op_size <= `AP040_SZ_L;
-							p_ssize <= `AP040_SZ_L;
+							begin p_ssize <= `AP040_SZ_L; bd_ssize = `AP040_SZ_L; end
 							if (d_mode == 3'b001) go_illegal;
 							else begin
-								if (d_mode == 3'b000) begin p_src <= SK_REG; p_sreg <= {1'b0, d_rn}; end
-								else if (ea_is_imm) p_src <= SK_IMM;
-								else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; end
-								p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+								if (d_mode == 3'b000) begin begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end end
+								else if (ea_is_imm) begin p_src <= SK_IMM; bd_src = SK_IMM; end
+								else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end end
+								begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 								if (ea_is_imm) immf(2'd2, S_PIPE_START);
 								else pipe_go;
 							end
@@ -5287,13 +5310,13 @@ always @(posedge clk) begin
 									if (dst_not_alt) go_illegal;
 									else if (!sr_s) go_priv;
 									else begin
-										p_src <= SK_IMPL; src_val <= {16'd0, sr};
+										begin p_src <= SK_IMPL; bd_src = SK_IMPL; end src_val <= {16'd0, sr};
 										alu_op <= `AP040_ALU_MOVE;
 										op_size <= `AP040_SZ_W;
-										p_dsize <= `AP040_SZ_W;
+										begin p_dsize <= `AP040_SZ_W; bd_dsize = `AP040_SZ_W; end
 										p_flags <= 0;
-										if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
-										else begin p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go; end
+										if (d_mode == 3'b000) begin begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end pipe_go; end
+										else begin begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end pipe_go; end
 									end
 								end
 								else if (d_op8_6[2]) go_illegal;
@@ -5301,35 +5324,35 @@ always @(posedge clk) begin
 									// NEGX
 									alu_op <= `AP040_ALU_NEGX;
 									op_size <= std_size;
-									p_dsize <= std_size;
-									p_rmw <= 1;
-									if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
+									begin p_dsize <= std_size; bd_dsize = std_size; end
+									begin p_rmw <= 1; bd_rmw = 1; end
+									if (d_mode == 3'b000) begin begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end pipe_go; end
 									else if (dst_not_alt) go_illegal;
-									else begin p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go; end
+									else begin begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end pipe_go; end
 								end
 							end
 
 							3'b001: begin
 								if (d_op8_6 == 3'b011) begin
 									// MOVE from CCR
-									p_src <= SK_IMPL; src_val <= {27'd0, sr[4:0]};
+									begin p_src <= SK_IMPL; bd_src = SK_IMPL; end src_val <= {27'd0, sr[4:0]};
 									alu_op <= `AP040_ALU_MOVE;
 									op_size <= `AP040_SZ_W;
-									p_dsize <= `AP040_SZ_W;
+									begin p_dsize <= `AP040_SZ_W; bd_dsize = `AP040_SZ_W; end
 									p_flags <= 0;
-										if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
+										if (d_mode == 3'b000) begin begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end pipe_go; end
 										else if (dst_not_alt) go_illegal;
-										else begin p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go; end
+										else begin begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end pipe_go; end
 								end
 								else if (d_op8_6[2]) go_illegal;
 								else begin
 									// CLR (pure write on 68040)
 									alu_op <= `AP040_ALU_CLR;
 									op_size <= std_size;
-									p_dsize <= std_size;
-									if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
+									begin p_dsize <= std_size; bd_dsize = std_size; end
+									if (d_mode == 3'b000) begin begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end pipe_go; end
 									else if (dst_not_alt) go_illegal;
-									else begin p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go; end
+									else begin begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end pipe_go; end
 								end
 							end
 
@@ -5338,24 +5361,24 @@ always @(posedge clk) begin
 									// MOVE to CCR
 									alu_op <= `AP040_ALU_MOVE;
 									op_size <= `AP040_SZ_W;
-									p_ssize <= `AP040_SZ_W;
+									begin p_ssize <= `AP040_SZ_W; bd_ssize = `AP040_SZ_W; end
 									p_flags <= 0;
-									p_dst <= DK_CCR;
-									if (d_mode == 3'b000) begin p_src <= SK_REG; p_sreg <= {1'b0, d_rn}; pipe_go; end
+									begin p_dst <= DK_CCR; bd_dst = DK_CCR; end
+									if (d_mode == 3'b000) begin begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end pipe_go; end
 									else if (src_not_data) go_illegal;
-									else if (ea_is_imm) begin p_src <= SK_IMM; immf(2'd1, S_PIPE_START); end
-									else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; pipe_go; end
+									else if (ea_is_imm) begin begin p_src <= SK_IMM; bd_src = SK_IMM; end immf(2'd1, S_PIPE_START); end
+									else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end pipe_go; end
 								end
 								else if (d_op8_6[2]) go_illegal;
 								else begin
 									// NEG
 									alu_op <= `AP040_ALU_NEG;
 									op_size <= std_size;
-									p_dsize <= std_size;
-									p_rmw <= 1;
-									if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
+									begin p_dsize <= std_size; bd_dsize = std_size; end
+									begin p_rmw <= 1; bd_rmw = 1; end
+									if (d_mode == 3'b000) begin begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end pipe_go; end
 									else if (dst_not_alt) go_illegal;
-									else begin p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go; end
+									else begin begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end pipe_go; end
 								end
 							end
 
@@ -5369,12 +5392,12 @@ always @(posedge clk) begin
 									else begin
 										alu_op <= `AP040_ALU_MOVE;
 										op_size <= `AP040_SZ_W;
-										p_ssize <= `AP040_SZ_W;
+										begin p_ssize <= `AP040_SZ_W; bd_ssize = `AP040_SZ_W; end
 										p_flags <= 0;
-										p_dst <= DK_SR;
-										if (d_mode == 3'b000) begin p_src <= SK_REG; p_sreg <= {1'b0, d_rn}; pipe_go; end
-										else if (ea_is_imm) begin p_src <= SK_IMM; immf(2'd1, S_PIPE_START); end
-										else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; pipe_go; end
+										begin p_dst <= DK_SR; bd_dst = DK_SR; end
+										if (d_mode == 3'b000) begin begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end pipe_go; end
+										else if (ea_is_imm) begin begin p_src <= SK_IMM; bd_src = SK_IMM; end immf(2'd1, S_PIPE_START); end
+										else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end pipe_go; end
 									end
 								end
 								else if (d_op8_6[2]) go_illegal;
@@ -5382,11 +5405,11 @@ always @(posedge clk) begin
 									// NOT
 									alu_op <= `AP040_ALU_NOT;
 									op_size <= std_size;
-									p_dsize <= std_size;
-									p_rmw <= 1;
-									if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
+									begin p_dsize <= std_size; bd_dsize = std_size; end
+									begin p_rmw <= 1; bd_rmw = 1; end
+									if (d_mode == 3'b000) begin begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end pipe_go; end
 									else if (dst_not_alt) go_illegal;
-									else begin p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go; end
+									else begin begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end pipe_go; end
 								end
 							end
 
@@ -5403,11 +5426,11 @@ always @(posedge clk) begin
 										// NBCD
 										alu_op <= `AP040_ALU_NBCD;
 										op_size <= `AP040_SZ_B;
-										p_dsize <= `AP040_SZ_B;
-										p_rmw <= 1;
-										if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
+										begin p_dsize <= `AP040_SZ_B; bd_dsize = `AP040_SZ_B; end
+										begin p_rmw <= 1; bd_rmw = 1; end
+										if (d_mode == 3'b000) begin begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end pipe_go; end
 										else if (dst_not_alt) go_illegal;
-										else begin p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go; end
+										else begin begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end pipe_go; end
 									end
 								end
 								2'b01: begin
@@ -5415,7 +5438,7 @@ always @(posedge clk) begin
 										// SWAP
 										alu_op <= `AP040_ALU_SWAP;
 										op_size <= `AP040_SZ_L;
-										p_dst <= DK_REG; p_dreg <= {1'b0, d_rn};
+										begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end
 										pipe_go;
 									end
 									else if (d_mode == 3'b001) go_illegal; // BKPT
@@ -5427,7 +5450,7 @@ always @(posedge clk) begin
 										// EXT.W / EXT.L
 										alu_op <= `AP040_ALU_EXT;
 										op_size <= d_op8_6[0] ? `AP040_SZ_L : `AP040_SZ_W;
-										p_dst <= DK_REG; p_dreg <= {1'b0, d_rn};
+										begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end
 										pipe_go;
 									end
 									else begin
@@ -5453,34 +5476,34 @@ always @(posedge clk) begin
 									// with RW clear.
 									alu_op <= `AP040_ALU_TAS;
 									op_size <= `AP040_SZ_B;
-									p_dsize <= `AP040_SZ_B;
-									p_rmw <= 1;
-									if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
+									begin p_dsize <= `AP040_SZ_B; bd_dsize = `AP040_SZ_B; end
+									begin p_rmw <= 1; bd_rmw = 1; end
+									if (d_mode == 3'b000) begin begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end pipe_go; end
 									else if (dst_not_alt) go_illegal;
 									else begin
 										lk_cyc <= 1;
-										p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go;
+										begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end pipe_go;
 									end
 								end
 								else begin
 									// TST (An/imm/PC modes allowed on 020+)
 									alu_op <= `AP040_ALU_TST;
 									op_size <= std_size;
-									p_ssize <= std_size;
+									begin p_ssize <= std_size; bd_ssize = std_size; end
 									p_wbsup <= 1;
 									if (d_mode == 3'b000 || d_mode == 3'b001) begin
 										if (d_mode == 3'b001 && std_size == `AP040_SZ_B) go_illegal;
 										else begin
-											p_src <= SK_REG; p_sreg <= {d_mode[0], d_rn};
+											begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {d_mode[0], d_rn}; bd_sreg = {d_mode[0], d_rn}; end
 											pipe_go;
 										end
 									end
 									else if (ea_is_imm) begin
-										p_src <= SK_IMM;
+										begin p_src <= SK_IMM; bd_src = SK_IMM; end
 										immf((std_size == `AP040_SZ_L) ? 2'd2 : 2'd1, S_PIPE_START);
 									end
 									else begin
-										p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn;
+										begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end
 										pipe_go;
 									end
 								end
@@ -5490,15 +5513,15 @@ always @(posedge clk) begin
 								if (d_op8_6[2]) go_illegal;
 								else if (!d_op8_6[1]) begin
 									// MULx.L / DIVx.L with extension word
-									exec_kind <= EK_MD_L;
+									begin exec_kind <= EK_MD_L; bd_ekind = EK_MD_L; end
 									md_isdiv <= d_op8_6[0];
 									op_size <= `AP040_SZ_L;
-									p_ssize <= `AP040_SZ_L;
+									begin p_ssize <= `AP040_SZ_L; bd_ssize = `AP040_SZ_L; end
 									if (d_mode == 3'b001) go_illegal;
 									else begin
-										if (d_mode == 3'b000) begin p_src <= SK_REG; p_sreg <= {1'b0, d_rn}; end
-										else if (ea_is_imm) p_src <= SK_IMM;
-										else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; end
+										if (d_mode == 3'b000) begin begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end end
+										else if (ea_is_imm) begin p_src <= SK_IMM; bd_src = SK_IMM; end
+										else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end end
 										// extension word first, then any immediate
 										immf(2'd1, S_MDL_EXT);
 									end
@@ -5607,36 +5630,36 @@ always @(posedge clk) begin
 							end
 							else begin
 								// Scc
-								exec_kind <= EK_SCC;
+								begin exec_kind <= EK_SCC; bd_ekind = EK_SCC; end
 								op_size <= `AP040_SZ_B;
-								p_dsize <= `AP040_SZ_B;
+								begin p_dsize <= `AP040_SZ_B; bd_dsize = `AP040_SZ_B; end
 								p_flags <= 0;
-								if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
+								if (d_mode == 3'b000) begin begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end pipe_go; end
 								else if (dst_not_alt) go_illegal;
-								else begin p_dst <= DK_MEM; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go; end
+								else begin begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end pipe_go; end
 							end
 						end
 						else begin
 							// ADDQ/SUBQ
 							alu_op <= ir[8] ? `AP040_ALU_SUB : `AP040_ALU_ADD;
-							p_src <= SK_IMPL;
+							begin p_src <= SK_IMPL; bd_src = SK_IMPL; end
 							src_val <= {28'd0, (d_reg9 == 3'd0) ? 4'd8 : {1'b0, d_reg9}};
 							if (d_mode == 3'b001) begin
 								// to An: whole register, no flags, any size but byte
 								if (std_size == `AP040_SZ_B) go_illegal;
 								else begin
 									op_size <= `AP040_SZ_L;
-									p_dst <= DK_REG; p_dreg <= {1'b1, d_rn};
+									begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b1, d_rn}; bd_dreg = {1'b1, d_rn}; end
 									p_flags <= 0;
 									pipe_go;
 								end
 							end
 							else begin
 								op_size <= std_size;
-								p_dsize <= std_size;
-								if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
+								begin p_dsize <= std_size; bd_dsize = std_size; end
+								if (d_mode == 3'b000) begin begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end pipe_go; end
 								else if (dst_not_alt) go_illegal;
-								else begin p_dst <= DK_MEM; p_rmw <= 1; dst_mode_r <= d_mode; dst_rn_r <= d_rn; pipe_go; end
+								else begin begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin p_rmw <= 1; bd_rmw = 1; end begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end pipe_go; end
 							end
 						end
 					end
@@ -5677,16 +5700,16 @@ always @(posedge clk) begin
 					4'h8: begin
 						if (d_op8_6 == 3'b011 || d_op8_6 == 3'b111) begin
 							// DIVU.W / DIVS.W
-							exec_kind <= EK_MD_W;
+							begin exec_kind <= EK_MD_W; bd_ekind = EK_MD_W; end
 							md_isdiv <= 1;
 							md_sign <= d_op8_6[2];
 							op_size <= `AP040_SZ_W;
-							p_ssize <= `AP040_SZ_W;
-							p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+							begin p_ssize <= `AP040_SZ_W; bd_ssize = `AP040_SZ_W; end
+							begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 							if (d_mode == 3'b001) go_illegal;
-							else if (d_mode == 3'b000) begin p_src <= SK_REG; p_sreg <= {1'b0, d_rn}; pipe_go; end
-							else if (ea_is_imm) begin p_src <= SK_IMM; immf(2'd1, S_PIPE_START); end
-							else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; pipe_go; end
+							else if (d_mode == 3'b000) begin begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end pipe_go; end
+							else if (ea_is_imm) begin begin p_src <= SK_IMM; bd_src = SK_IMM; end immf(2'd1, S_PIPE_START); end
+							else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end pipe_go; end
 						end
 						else if (ir[8] && d_mode[2:1] == 2'b00) begin
 							case (d_op8_6[1:0])
@@ -5694,45 +5717,45 @@ always @(posedge clk) begin
 									// SBCD
 									alu_op <= `AP040_ALU_SBCD;
 									op_size <= `AP040_SZ_B;
-									p_ssize <= `AP040_SZ_B; p_dsize <= `AP040_SZ_B;
+									begin p_ssize <= `AP040_SZ_B; bd_ssize = `AP040_SZ_B; end begin p_dsize <= `AP040_SZ_B; bd_dsize = `AP040_SZ_B; end
 									if (!d_mode[0]) begin
-										p_src <= SK_REG; p_sreg <= {1'b0, d_rn};
-										p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+										begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end
+										begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 									end
 									else begin
-										p_src <= SK_MEM; src_mode_r <= 3'b100; src_rn_r <= d_rn;
-										p_dst <= DK_MEM; dst_mode_r <= 3'b100; dst_rn_r <= d_reg9;
-										p_rmw <= 1;
+										begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= 3'b100; bd_smode = 3'b100; end begin src_rn_r <= d_rn; bd_srn = d_rn; end
+										begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= 3'b100; bd_dmode = 3'b100; end begin dst_rn_r <= d_reg9; bd_drn = d_reg9; end
+										begin p_rmw <= 1; bd_rmw = 1; end
 									end
 									pipe_go;
 								end
 								2'b01: begin
 									// PACK
-									exec_kind <= EK_PACK;
+									begin exec_kind <= EK_PACK; bd_ekind = EK_PACK; end
 									p_flags <= 0;
-									p_ssize <= `AP040_SZ_W; p_dsize <= `AP040_SZ_B;
+									begin p_ssize <= `AP040_SZ_W; bd_ssize = `AP040_SZ_W; end begin p_dsize <= `AP040_SZ_B; bd_dsize = `AP040_SZ_B; end
 									if (!d_mode[0]) begin
-										p_src <= SK_REG; p_sreg <= {1'b0, d_rn};
-										p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+										begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end
+										begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 									end
 									else begin
-										p_src <= SK_MEM; src_mode_r <= 3'b100; src_rn_r <= d_rn;
-										p_dst <= DK_MEM; dst_mode_r <= 3'b100; dst_rn_r <= d_reg9;
+										begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= 3'b100; bd_smode = 3'b100; end begin src_rn_r <= d_rn; bd_srn = d_rn; end
+										begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= 3'b100; bd_dmode = 3'b100; end begin dst_rn_r <= d_reg9; bd_drn = d_reg9; end
 									end
 									immf(2'd1, S_PIPE_START);
 								end
 								2'b10: begin
 									// UNPK
-									exec_kind <= EK_UNPK;
+									begin exec_kind <= EK_UNPK; bd_ekind = EK_UNPK; end
 									p_flags <= 0;
-									p_ssize <= `AP040_SZ_B; p_dsize <= `AP040_SZ_W;
+									begin p_ssize <= `AP040_SZ_B; bd_ssize = `AP040_SZ_B; end begin p_dsize <= `AP040_SZ_W; bd_dsize = `AP040_SZ_W; end
 									if (!d_mode[0]) begin
-										p_src <= SK_REG; p_sreg <= {1'b0, d_rn};
-										p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+										begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end
+										begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 									end
 									else begin
-										p_src <= SK_MEM; src_mode_r <= 3'b100; src_rn_r <= d_rn;
-										p_dst <= DK_MEM; dst_mode_r <= 3'b100; dst_rn_r <= d_reg9;
+										begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= 3'b100; bd_smode = 3'b100; end begin src_rn_r <= d_rn; bd_srn = d_rn; end
+										begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= 3'b100; bd_dmode = 3'b100; end begin dst_rn_r <= d_reg9; bd_drn = d_reg9; end
 									end
 									immf(2'd1, S_PIPE_START);
 								end
@@ -5743,20 +5766,20 @@ always @(posedge clk) begin
 							// OR
 							alu_op <= `AP040_ALU_OR;
 							op_size <= std_size;
-							p_ssize <= std_size; p_dsize <= std_size;
+							begin p_ssize <= std_size; bd_ssize = std_size; end begin p_dsize <= std_size; bd_dsize = std_size; end
 							if (!ir[8]) begin
 								// <ea> OR Dn -> Dn
-								p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+								begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 								if (d_mode == 3'b001) go_illegal;
-								else if (d_mode == 3'b000) begin p_src <= SK_REG; p_sreg <= {1'b0, d_rn}; pipe_go; end
-								else if (ea_is_imm) begin p_src <= SK_IMM; immf((std_size == `AP040_SZ_L) ? 2'd2 : 2'd1, S_PIPE_START); end
-								else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; pipe_go; end
+								else if (d_mode == 3'b000) begin begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end pipe_go; end
+								else if (ea_is_imm) begin begin p_src <= SK_IMM; bd_src = SK_IMM; end immf((std_size == `AP040_SZ_L) ? 2'd2 : 2'd1, S_PIPE_START); end
+								else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end pipe_go; end
 							end
 							else begin
 								// Dn OR <ea> -> <ea>
-								p_src <= SK_REG; p_sreg <= {1'b0, d_reg9};
-								p_dst <= DK_MEM; p_rmw <= 1;
-								dst_mode_r <= d_mode; dst_rn_r <= d_rn;
+								begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_reg9}; bd_sreg = {1'b0, d_reg9}; end
+								begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin p_rmw <= 1; bd_rmw = 1; end
+								begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end
 								// The register-to-EA OR form is memory-only.
 								// Mode 000/001 combinations are reserved for the
 								// SBCD/PACK/UNPK subfamily above.
@@ -5775,54 +5798,54 @@ always @(posedge clk) begin
 							// ADDA/SUBA
 							alu_op <= is_add ? `AP040_ALU_ADD : `AP040_ALU_SUB;
 							op_size <= `AP040_SZ_L;
-							p_ssize <= d_op8_6[2] ? `AP040_SZ_L : `AP040_SZ_W;
+							begin p_ssize <= d_op8_6[2] ? `AP040_SZ_L : `AP040_SZ_W; bd_ssize = d_op8_6[2] ? `AP040_SZ_L : `AP040_SZ_W; end
 							p_sextw <= !d_op8_6[2];
 							p_flags <= 0;
-							p_dst <= DK_REG; p_dreg <= {1'b1, d_reg9};
+							begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b1, d_reg9}; bd_dreg = {1'b1, d_reg9}; end
 							if (d_mode == 3'b000 || d_mode == 3'b001) begin
-								p_src <= SK_REG; p_sreg <= {d_mode[0], d_rn}; pipe_go;
+								begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {d_mode[0], d_rn}; bd_sreg = {d_mode[0], d_rn}; end pipe_go;
 							end
 							else if (ea_is_imm) begin
-								p_src <= SK_IMM;
+								begin p_src <= SK_IMM; bd_src = SK_IMM; end
 								immf(d_op8_6[2] ? 2'd2 : 2'd1, S_PIPE_START);
 							end
-							else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; pipe_go; end
+							else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end pipe_go; end
 						end
 						else if (ir[8] && d_mode[2:1] == 2'b00 && std_size != 2'b11) begin
 							// ADDX/SUBX
 							alu_op <= is_add ? `AP040_ALU_ADDX : `AP040_ALU_SUBX;
 							op_size <= std_size;
-							p_ssize <= std_size; p_dsize <= std_size;
+							begin p_ssize <= std_size; bd_ssize = std_size; end begin p_dsize <= std_size; bd_dsize = std_size; end
 							if (!d_mode[0]) begin
-								p_src <= SK_REG; p_sreg <= {1'b0, d_rn};
-								p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+								begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end
+								begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 							end
 							else begin
-								p_src <= SK_MEM; src_mode_r <= 3'b100; src_rn_r <= d_rn;
-								p_dst <= DK_MEM; dst_mode_r <= 3'b100; dst_rn_r <= d_reg9;
-								p_rmw <= 1;
+								begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= 3'b100; bd_smode = 3'b100; end begin src_rn_r <= d_rn; bd_srn = d_rn; end
+								begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= 3'b100; bd_dmode = 3'b100; end begin dst_rn_r <= d_reg9; bd_drn = d_reg9; end
+								begin p_rmw <= 1; bd_rmw = 1; end
 							end
 							pipe_go;
 						end
 						else begin
 							alu_op <= is_add ? `AP040_ALU_ADD : `AP040_ALU_SUB;
 							op_size <= std_size;
-							p_ssize <= std_size; p_dsize <= std_size;
+							begin p_ssize <= std_size; bd_ssize = std_size; end begin p_dsize <= std_size; bd_dsize = std_size; end
 							if (!ir[8]) begin
 								// <ea> op Dn -> Dn
-								p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+								begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 								if (d_mode == 3'b001 && std_size == `AP040_SZ_B) go_illegal;
 								else if (d_mode == 3'b000 || d_mode == 3'b001) begin
-									p_src <= SK_REG; p_sreg <= {d_mode[0], d_rn}; pipe_go;
+									begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {d_mode[0], d_rn}; bd_sreg = {d_mode[0], d_rn}; end pipe_go;
 								end
-								else if (ea_is_imm) begin p_src <= SK_IMM; immf((std_size == `AP040_SZ_L) ? 2'd2 : 2'd1, S_PIPE_START); end
-								else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; pipe_go; end
+								else if (ea_is_imm) begin begin p_src <= SK_IMM; bd_src = SK_IMM; end immf((std_size == `AP040_SZ_L) ? 2'd2 : 2'd1, S_PIPE_START); end
+								else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end pipe_go; end
 							end
 							else begin
 								// Dn op <ea> -> <ea>
-								p_src <= SK_REG; p_sreg <= {1'b0, d_reg9};
-								p_dst <= DK_MEM; p_rmw <= 1;
-								dst_mode_r <= d_mode; dst_rn_r <= d_rn;
+								begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_reg9}; bd_sreg = {1'b0, d_reg9}; end
+								begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin p_rmw <= 1; bd_rmw = 1; end
+								begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end
 								// The register-to-EA ADD/SUB form is memory-only;
 								// register-direct encodings belong to ADDX/SUBX.
 								if (d_mode < 3'b010 ||
@@ -5841,55 +5864,55 @@ always @(posedge clk) begin
 							// CMPA
 							alu_op <= `AP040_ALU_CMP;
 							op_size <= `AP040_SZ_L;
-							p_ssize <= d_op8_6[2] ? `AP040_SZ_L : `AP040_SZ_W;
+							begin p_ssize <= d_op8_6[2] ? `AP040_SZ_L : `AP040_SZ_W; bd_ssize = d_op8_6[2] ? `AP040_SZ_L : `AP040_SZ_W; end
 							p_sextw <= !d_op8_6[2];
 							p_wbsup <= 1;
-							p_dst <= DK_REG; p_dreg <= {1'b1, d_reg9};
+							begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b1, d_reg9}; bd_dreg = {1'b1, d_reg9}; end
 							if (d_mode == 3'b000 || d_mode == 3'b001) begin
-								p_src <= SK_REG; p_sreg <= {d_mode[0], d_rn}; pipe_go;
+								begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {d_mode[0], d_rn}; bd_sreg = {d_mode[0], d_rn}; end pipe_go;
 							end
 							else if (ea_is_imm) begin
-								p_src <= SK_IMM;
+								begin p_src <= SK_IMM; bd_src = SK_IMM; end
 								immf(d_op8_6[2] ? 2'd2 : 2'd1, S_PIPE_START);
 							end
-							else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; pipe_go; end
+							else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end pipe_go; end
 						end
 						else if (!ir[8]) begin
 							// CMP <ea>,Dn
 							alu_op <= `AP040_ALU_CMP;
 							op_size <= std_size;
-							p_ssize <= std_size;
+							begin p_ssize <= std_size; bd_ssize = std_size; end
 							p_wbsup <= 1;
-							p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+							begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 							if (d_mode == 3'b001 && std_size == `AP040_SZ_B) go_illegal;
 							else if (d_mode == 3'b000 || d_mode == 3'b001) begin
-								p_src <= SK_REG; p_sreg <= {d_mode[0], d_rn}; pipe_go;
+								begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {d_mode[0], d_rn}; bd_sreg = {d_mode[0], d_rn}; end pipe_go;
 							end
-							else if (ea_is_imm) begin p_src <= SK_IMM; immf((std_size == `AP040_SZ_L) ? 2'd2 : 2'd1, S_PIPE_START); end
-							else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; pipe_go; end
+							else if (ea_is_imm) begin begin p_src <= SK_IMM; bd_src = SK_IMM; end immf((std_size == `AP040_SZ_L) ? 2'd2 : 2'd1, S_PIPE_START); end
+							else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end pipe_go; end
 						end
 						else if (d_mode == 3'b001) begin
 							// CMPM (Ay)+,(Ax)+
 							alu_op <= `AP040_ALU_CMP;
 							op_size <= std_size;
-							p_ssize <= std_size; p_dsize <= std_size;
+							begin p_ssize <= std_size; bd_ssize = std_size; end begin p_dsize <= std_size; bd_dsize = std_size; end
 							p_wbsup <= 1;
-							p_src <= SK_MEM; src_mode_r <= 3'b011; src_rn_r <= d_rn;
-							p_dst <= DK_MEM; dst_mode_r <= 3'b011; dst_rn_r <= d_reg9;
-							p_rmw <= 1;
+							begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= 3'b011; bd_smode = 3'b011; end begin src_rn_r <= d_rn; bd_srn = d_rn; end
+							begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= 3'b011; bd_dmode = 3'b011; end begin dst_rn_r <= d_reg9; bd_drn = d_reg9; end
+							begin p_rmw <= 1; bd_rmw = 1; end
 							pipe_go;
 						end
 						else begin
 							// EOR Dn,<ea>
 							alu_op <= `AP040_ALU_EOR;
 							op_size <= std_size;
-							p_dsize <= std_size;
-							p_src <= SK_REG; p_sreg <= {1'b0, d_reg9};
-							if (d_mode == 3'b000) begin p_dst <= DK_REG; p_dreg <= {1'b0, d_rn}; pipe_go; end
+							begin p_dsize <= std_size; bd_dsize = std_size; end
+							begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_reg9}; bd_sreg = {1'b0, d_reg9}; end
+							if (d_mode == 3'b000) begin begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end pipe_go; end
 							else if (dst_not_alt) go_illegal;
 							else begin
-								p_dst <= DK_MEM; p_rmw <= 1;
-								dst_mode_r <= d_mode; dst_rn_r <= d_rn;
+								begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin p_rmw <= 1; bd_rmw = 1; end
+								begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end
 								pipe_go;
 							end
 						end
@@ -5899,30 +5922,30 @@ always @(posedge clk) begin
 					4'hC: begin
 						if (d_op8_6 == 3'b011 || d_op8_6 == 3'b111) begin
 							// MULU.W / MULS.W
-							exec_kind <= EK_MD_W;
+							begin exec_kind <= EK_MD_W; bd_ekind = EK_MD_W; end
 							md_isdiv <= 0;
 							md_sign <= d_op8_6[2];
 							op_size <= `AP040_SZ_W;
-							p_ssize <= `AP040_SZ_W;
-							p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+							begin p_ssize <= `AP040_SZ_W; bd_ssize = `AP040_SZ_W; end
+							begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 							if (d_mode == 3'b001) go_illegal;
-							else if (d_mode == 3'b000) begin p_src <= SK_REG; p_sreg <= {1'b0, d_rn}; pipe_go; end
-							else if (ea_is_imm) begin p_src <= SK_IMM; immf(2'd1, S_PIPE_START); end
-							else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; pipe_go; end
+							else if (d_mode == 3'b000) begin begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end pipe_go; end
+							else if (ea_is_imm) begin begin p_src <= SK_IMM; bd_src = SK_IMM; end immf(2'd1, S_PIPE_START); end
+							else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end pipe_go; end
 						end
 						else if (ir[8] && d_op8_6[1:0] == 2'b00 && d_mode[2:1] == 2'b00) begin
 							// ABCD
 							alu_op <= `AP040_ALU_ABCD;
 							op_size <= `AP040_SZ_B;
-							p_ssize <= `AP040_SZ_B; p_dsize <= `AP040_SZ_B;
+							begin p_ssize <= `AP040_SZ_B; bd_ssize = `AP040_SZ_B; end begin p_dsize <= `AP040_SZ_B; bd_dsize = `AP040_SZ_B; end
 							if (!d_mode[0]) begin
-								p_src <= SK_REG; p_sreg <= {1'b0, d_rn};
-								p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+								begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end
+								begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 							end
 							else begin
-								p_src <= SK_MEM; src_mode_r <= 3'b100; src_rn_r <= d_rn;
-								p_dst <= DK_MEM; dst_mode_r <= 3'b100; dst_rn_r <= d_reg9;
-								p_rmw <= 1;
+								begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= 3'b100; bd_smode = 3'b100; end begin src_rn_r <= d_rn; bd_srn = d_rn; end
+								begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin dst_mode_r <= 3'b100; bd_dmode = 3'b100; end begin dst_rn_r <= d_reg9; bd_drn = d_reg9; end
+								begin p_rmw <= 1; bd_rmw = 1; end
 							end
 							pipe_go;
 						end
@@ -5942,18 +5965,18 @@ always @(posedge clk) begin
 							// AND
 							alu_op <= `AP040_ALU_AND;
 							op_size <= std_size;
-							p_ssize <= std_size; p_dsize <= std_size;
+							begin p_ssize <= std_size; bd_ssize = std_size; end begin p_dsize <= std_size; bd_dsize = std_size; end
 							if (!ir[8]) begin
-								p_dst <= DK_REG; p_dreg <= {1'b0, d_reg9};
+								begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_reg9}; bd_dreg = {1'b0, d_reg9}; end
 								if (d_mode == 3'b001) go_illegal;
-								else if (d_mode == 3'b000) begin p_src <= SK_REG; p_sreg <= {1'b0, d_rn}; pipe_go; end
-								else if (ea_is_imm) begin p_src <= SK_IMM; immf((std_size == `AP040_SZ_L) ? 2'd2 : 2'd1, S_PIPE_START); end
-								else begin p_src <= SK_MEM; src_mode_r <= d_mode; src_rn_r <= d_rn; pipe_go; end
+								else if (d_mode == 3'b000) begin begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_rn}; bd_sreg = {1'b0, d_rn}; end pipe_go; end
+								else if (ea_is_imm) begin begin p_src <= SK_IMM; bd_src = SK_IMM; end immf((std_size == `AP040_SZ_L) ? 2'd2 : 2'd1, S_PIPE_START); end
+								else begin begin p_src <= SK_MEM; bd_src = SK_MEM; end begin src_mode_r <= d_mode; bd_smode = d_mode; end begin src_rn_r <= d_rn; bd_srn = d_rn; end pipe_go; end
 							end
 							else begin
-								p_src <= SK_REG; p_sreg <= {1'b0, d_reg9};
-								p_dst <= DK_MEM; p_rmw <= 1;
-								dst_mode_r <= d_mode; dst_rn_r <= d_rn;
+								begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_reg9}; bd_sreg = {1'b0, d_reg9}; end
+								begin p_dst <= DK_MEM; bd_dst = DK_MEM; end begin p_rmw <= 1; bd_rmw = 1; end
+								begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end
 								// The register-to-EA AND form is memory-only.
 								// Mode 000 combinations not claimed by ABCD/EXG
 								// are reserved, rather than AND Dn,Dn aliases.
@@ -5979,7 +6002,7 @@ always @(posedge clk) begin
 							end
 							else begin
 								// memory shift by one, word
-								exec_kind <= EK_SHIFT;
+								begin exec_kind <= EK_SHIFT; bd_ekind = EK_SHIFT; end
 								sh_rox <= (ir[10:9] == 2'b10);
 								case (ir[10:9])
 									2'b00: alu_op <= ir[8] ? `AP040_ALU_ASL1 : `AP040_ALU_ASR1;
@@ -5988,23 +6011,23 @@ always @(posedge clk) begin
 									default: alu_op <= ir[8] ? `AP040_ALU_ROL1 : `AP040_ALU_ROR1;
 								endcase
 								op_size <= `AP040_SZ_W;
-								p_dsize <= `AP040_SZ_W;
-								p_src <= SK_NONE;   // count of one
-								p_rmw <= 1;
+								begin p_dsize <= `AP040_SZ_W; bd_dsize = `AP040_SZ_W; end
+								begin p_src <= SK_NONE; bd_src = SK_NONE; end   // count of one
+								begin p_rmw <= 1; bd_rmw = 1; end
 								// Memory shifts require a memory-alterable EA: Dn/An
 								// direct and all program-space encodings are illegal.
 								if (d_mode < 3'b010 ||
 								    (d_mode == 3'b111 && d_rn > 3'b001)) go_illegal;
 								else begin
-									p_dst <= DK_MEM;
-									dst_mode_r <= d_mode; dst_rn_r <= d_rn;
+									begin p_dst <= DK_MEM; bd_dst = DK_MEM; end
+									begin dst_mode_r <= d_mode; bd_dmode = d_mode; end begin dst_rn_r <= d_rn; bd_drn = d_rn; end
 									pipe_go;
 								end
 							end
 						end
 						else begin
 							// register shift
-							exec_kind <= EK_SHIFT;
+							begin exec_kind <= EK_SHIFT; bd_ekind = EK_SHIFT; end
 							sh_rox <= (ir[4:3] == 2'b10);
 							case (ir[4:3])
 								2'b00: alu_op <= ir[8] ? `AP040_ALU_ASL1 : `AP040_ALU_ASR1;
@@ -6013,12 +6036,12 @@ always @(posedge clk) begin
 								default: alu_op <= ir[8] ? `AP040_ALU_ROL1 : `AP040_ALU_ROR1;
 							endcase
 							op_size <= std_size;
-							p_dst <= DK_REG; p_dreg <= {1'b0, d_rn};
+							begin p_dst <= DK_REG; bd_dst = DK_REG; end begin p_dreg <= {1'b0, d_rn}; bd_dreg = {1'b0, d_rn}; end
 							if (ir[5]) begin
-								p_src <= SK_REG; p_sreg <= {1'b0, d_reg9};
+								begin p_src <= SK_REG; bd_src = SK_REG; end begin p_sreg <= {1'b0, d_reg9}; bd_sreg = {1'b0, d_reg9}; end
 							end
 							else begin
-								p_src <= SK_IMPL;
+								begin p_src <= SK_IMPL; bd_src = SK_IMPL; end
 								src_val <= {26'd0, (d_reg9 == 3'd0) ? 6'd8 : {3'd0, d_reg9}};
 							end
 							pipe_go;
