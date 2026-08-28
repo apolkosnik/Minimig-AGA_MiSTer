@@ -1467,12 +1467,43 @@ wire        m_cross  = tc[15] &&
                        (((m_addr_r & m_pgmask) + {29'd0, m_nbytes}) >
                         (m_pgmask + 32'd1));
 
+// mrd/mwr PRE-ISSUE the request in the calling cycle when the port is
+// demonstrably free, so S_MRD/S_MWR receive the transfer already on the bus
+// instead of spending their first cycle raising mem_req -- one cycle off
+// every load and store.  The blocking epf_issue claim keeps the fetch-queue
+// fill engine (which runs after the case and cannot see these NBAs) from
+// taking the port in the same cycle, exactly as the queue's own claim sites
+// do.  Falls back to the in-state issue -- same behaviour as before -- when
+// a queue fetch is outstanding, the bus is mid-transaction, or the access
+// would cross a page under the MMU (S_MRD_B/S_MWR_B own that split).
+function pre_issue_ok;
+	input [31:0] a;
+	input [1:0] size;
+	begin
+		pre_issue_ok = !epf_pend && !mem_req && !mem_ack && !epf_issue &&
+		               !(tc[15] &&
+		                 (((a & m_pgmask) +
+		                   {29'd0, (size == `AP040_SZ_B) ? 3'd1 :
+		                           (size == `AP040_SZ_W) ? 3'd2 : 3'd4}) >
+		                  (m_pgmask + 32'd1)));
+	end
+endfunction
+
 task mrd;
 	input [31:0] a;
 	input [1:0] size;
 	input [7:0] ret;
 	begin
-		m_addr_r <= a; m_size <= size; m_wr <= 0; m_issued <= 0;
+		m_addr_r <= a; m_size <= size; m_wr <= 0;
+		if (pre_issue_ok(a, size)) begin
+			mem_req <= 1; mem_write <= 0; mem_instr <= 0;
+			mem_size <= size; mem_addr <= a;
+			fc_r <= fc_ovr_v ? fc_ovr :
+			        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
+			epf_issue = 1;
+			m_issued <= 1;
+		end
+		else m_issued <= 0;
 		r_m_ret <= ret; state <= S_MRD;
 	end
 endtask
@@ -1483,7 +1514,16 @@ task mwr;
 	input [31:0] d;
 	input [7:0] ret;
 	begin
-		m_addr_r <= a; m_size <= size; m_wdat <= d; m_wr <= 1; m_issued <= 0;
+		m_addr_r <= a; m_size <= size; m_wdat <= d; m_wr <= 1;
+		if (pre_issue_ok(a, size)) begin
+			mem_req <= 1; mem_write <= 1; mem_instr <= 0;
+			mem_size <= size; mem_addr <= a; mem_wdata <= d;
+			fc_r <= fc_ovr_v ? fc_ovr :
+			        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
+			epf_issue = 1;
+			m_issued <= 1;
+		end
+		else m_issued <= 0;
 		r_m_ret <= ret; state <= S_MWR;
 	end
 endtask

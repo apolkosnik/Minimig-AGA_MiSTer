@@ -2586,3 +2586,54 @@ WHAT IS LEFT, in value order:
     needs the tag read issued from the REQUEST cycle (index from c_addr
     while still in C_IDLE) -- the RAM read is already synchronous-1-cycle,
     so accept+lookup could overlap with a bypassable tag index mux.
+
+## The 6-stage pipeline question, and register renaming (asked 2026-08-27)
+
+Short answer: the 6-stage IN-ORDER pipeline is the right destination and the
+work is already climbing toward it stage by stage; register renaming is the
+wrong tool for this core on this device, and the case is quantitative.
+
+WHAT RENAMING WOULD BUY HERE: elimination of WAR/WAW hazards so that
+multiple in-flight instructions can write the same architectural register.
+That pays on a wide OOO machine.  The AP040 is single-issue, and today's
+measured cycle budget contains essentially zero WAR/WAW stall: the cycles go
+to state-walk serialization (4.39 clk ALU ops), the memory path (8.5 load /
+16.4 store), and the 16-bit bus.  Renaming attacks a cost this core does not
+yet pay.  Amdahl says: nothing, until CPI is near 1 and issue width is >1.
+
+WHAT IT WOULD COST:
+  - A physical regfile with more read ports (replication on this fabric),
+    a map table, and checkpoint/rollback.  The restart exception model
+    already needed ONE shadow-register rollback (the A7 shadow), and that
+    machinery produced the NetBSD silent-freeze root cause (2035c49d).  A
+    renamed core is that hazard class multiplied across every register.
+  - Precise faults on a renamed machine mean a ROB and retirement -- a
+    re-verification of the entire conformance corpus against a new
+    micro-architecture.
+  - Area: the device is at 92%, and X2.7's honest budget shows even
+    dual-issue (+4K) only fits by funded removals.  Renaming does not fit.
+  - The 68040 itself has no renaming; nothing in the 68k line does.  The
+    conformance oracles (cputest, WinUAE) encode in-order timing-visible
+    behaviour the tests can see.
+
+THE LADDER ALREADY BEING CLIMBED maps onto the real 68040's six stages:
+
+    IA/IF   fetch queue                          done (X2.2)
+    D       decode-ahead during EXEC             NEXT BIG ITEM (below)
+    EAC     ea_start folds                       partly done today
+    EAF     operand bypass + mrd/mwr pre-issue   done today
+    EX      single-cycle ALU                     done
+    (WB)    posted stores                        next, fault-contract first
+
+Session cumulative (bench_cpi, phase 0): 300062 -> 239334 cycles, -20.2%.
+    add.l 5.52->4.39   load hit 12.52->8.52   store 19.71->16.40
+    bra.s 2.77->2.09   floor 2.77->2.46
+
+DECODE-AHEAD, the D stage, is where the next factor lives: run the decoder
+over the queue head DURING the current instruction's EXEC/terminal state and
+latch p_* so the next instruction enters at its first useful state.  ALU ops
+4.39 -> ~2.5, floor -> ~1.5.  Prerequisite: the decoder (the giant S_DECODE
+case) must become a standalone combinational block with registered outputs
+-- an extraction, mechanical but large, and the single biggest remaining
+step.  After it, the 6-stage shape exists in all but name; 57 MHz (X2.6)
+then covers the remaining gap to TG68K rather than renaming.
