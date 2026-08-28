@@ -41,3 +41,4 @@ c5_pin_model_dump.txt
 # cputest corpora: multi-hundred-MB extracted data, fetched not versioned
 tests/ap040/build/cputest/
 __pycache__/
+output_files/Minimig.rbf.lastgood
