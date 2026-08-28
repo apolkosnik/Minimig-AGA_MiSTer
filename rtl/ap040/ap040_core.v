@@ -616,6 +616,15 @@ reg  [1:0] epf_fillw;            // words appended this cycle
 
 // A resident word needs no bus cycle at all, so a fetch consumes it in the
 // very cycle it would otherwise have spent issuing a request.
+// A store acknowledged THIS cycle that lands inside the queued stream: the
+// SMC snoop (above the state case) flushes the queue on it, and the
+// queue-hot fetch fold must not pop a stale word in the same cycle.  One
+// wire serves both so the conditions cannot drift.
+wire       smc_qhit = d_ack && mem_write && epf_armed &&
+                      (epf_count != 4'd0) &&
+                      ((mem_addr + 32'd3) >= epf_next) &&
+                      (mem_addr < epf_ftail);
+
 wire       epf_ready_pc = epf_armed && (epf_count != 4'd0) &&
                           (epf_next == pc) && (epf_super == sr_s);
 wire       epf_ready_pc2 = epf_armed && (epf_count > 4'd1) &&
@@ -1775,7 +1784,16 @@ task fetch_next;
 		// every case that state handles specially: exception-entry
 		// refills (in_exc), a change-of-flow T0 trace waiting at the
 		// target, and a queue error.  irq/trace took their branches above.
-		else if (!in_exc && !flow_t0_pend && !epf_err && epf_ready_pc) begin
+		// !smc_qhit: a store completing THIS cycle may have hit the queued
+		// stream; the SMC snoop's epf_flush lands at this edge, and the
+		// registered epf_* this fold reads are still the stale values --
+		// t_integer's smcq test (192) is the reproducer.  The NARROW
+		// condition matters: gating on the broad epf_flushed carrier
+		// changed pop timing on unrelated paths by a cycle, which was
+		// enough to catch tb_sdram_turbo's boot IPL-init window and fire
+		// a phantom level-7 at the first instruction (mmu_turbo wedge).
+		else if (!in_exc && !flow_t0_pend && !epf_err && !smc_qhit &&
+		         epf_ready_pc) begin
 			pc_i <= pc;
 			pop_decode(epf_data[epf_head]);
 		end
@@ -2143,8 +2161,7 @@ always @(posedge clk) begin
 		// issue on epf_pend), so the flush here is pure bookkeeping.
 		// Both ranges are logical addresses; ftail never wraps past the
 		// page guard, so the plain compares suffice.
-		if (d_ack && mem_write && epf_armed && epf_count != 4'd0 &&
-		    (mem_addr + 32'd3 >= epf_next) && (mem_addr < epf_ftail))
+		if (smc_qhit)
 			epf_flush;
 
 		case (state)
@@ -2405,6 +2422,10 @@ always @(posedge clk) begin
 						x_src_mval <= 1; x_rf_dst <= 1;
 						state <= S_EXEC;
 					end
+					// S_NEXT is a bare fetch_next: do it here and save
+					// the state (the queue-hot fold then usually turns
+					// this ack cycle straight into the next DECODE)
+					else if (r_m_ret == S_NEXT) fetch_next;
 					else state <= r_m_ret;
 				end
 			end
@@ -2433,7 +2454,8 @@ always @(posedge clk) begin
 					else aerr_start;
 				end
 				else if (d_ack) begin
-					state <= r_m_ret;
+					if (r_m_ret == S_NEXT) fetch_next;
+					else state <= r_m_ret;
 				end
 			end
 
