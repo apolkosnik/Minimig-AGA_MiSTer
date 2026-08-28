@@ -2767,3 +2767,52 @@ sdram_turbo x2, dualram_turbo) alongside the program bench, same dual-path
 pattern with the iverilog fallback kept:
 
     full regression wall time: ~8 min (morning) -> 54 s -> 17.9 s
+
+## The first full fit of the acceleration series (2026-08-28)
+
+Three fits from a clean worktree, Codex's muldiv WIP excluded.  The series
+does NOT close, and the reason is not what the sim work predicted.
+
+    fit 1  121c7dfa + FPU radix      42,301 ALMs (101%)  -- DOES NOT FIT
+    fit 2  after FPU revert, IPL fix 41,497 ALMs  (99%)  setup -1.350
+    fit 3  + dispatch deferral       41,152 ALMs  (98%)  setup -2.040
+
+WHAT THE FITS ESTABLISHED
+
+1. AREA.  The session added ~+2,072 ALUTs inside ap040: FPU +1,439 (the
+   doubled FDIV/FSQRT cascades), core +1,107 (the folds), MMU +207 (the
+   page-walk cache), muldiv -682 (Codex's divider is SMALLER).  The FPU
+   radix doubling alone was the difference between fitting and not, and it
+   bought -301 cycles on t_fpu -- reverted (19ad9771), and that revert is
+   the honest trade: it was the worst area-per-cycle change of the series.
+
+2. TIMING.  Worst path is ir[] -> exc_fmt[], and it is PRE-EXISTING decode
+   logic, not something the folds created.  I assumed CPI work 8's in-DECODE
+   dispatch had caused it and reverted it (defb56f3): slack got WORSE
+   (-1.350 -> -2.040) while costing 10.7% performance, so it was restored
+   (1ccb1fee).  The lesson is the same one this project keeps teaching --
+   at 98-101% utilization the fitter is placement-starved and slack swings
+   on routing noise, so a single fit is not evidence about a single change.
+
+3. The exc_fmt cone has 51 exc() call sites across the decode tree, each
+   driving a 4-bit constant.  Deriving exc_fmt from the VECTOR instead
+   looked exact -- and a scripted check across all sites caught FLINE using
+   BOTH formats (0 for a real F-line, 2 for the FPU's mid-instruction trap),
+   which would have silently corrupted FPU frames.  Even with FLINE
+   exempted, t_exceptions 98 and the FPU legs stayed red: the access-error
+   path (S_AERR*) never calls exc() and inherits exc_fmt, and format 7 alone
+   did not restore it.  REVERTED.  Anyone retrying this must treat
+   S_AERR*/S_EXC1 pass-2 (format 1) and RTE's re-entry as first-class cases,
+   not afterthoughts -- the conformance corpus checks all of them.
+
+WHERE THIS LEAVES THE SERIES
+
+The sim work stands (-37%, all green), but it does not fit and does not
+close timing.  The next move is NOT more folds; it is area and the decode
+cone:
+  - the FPU is 9.8K ALUTs, the single largest block, and X2.7 already
+    identifies MMU pruning and cpu_cache_new removal as funded reductions
+  - the decode cone wants a real second stage (a registered decode output),
+    which is the same prerequisite the 6-stage question surfaced
+  - re-measure ANY area/timing claim with at least two fits before believing
+    a single number
