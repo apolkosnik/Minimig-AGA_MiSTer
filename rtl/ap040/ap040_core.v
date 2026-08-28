@@ -280,6 +280,20 @@ ap040_regfile regfile
 reg   [5:0] alu_op;
 reg   [1:0] op_size;
 reg  [31:0] src_val, dst_val;
+// Operand bypass (X2.4): S_PIPE_START dispatches a register-destination op
+// straight to S_EXEC with these flags set, and the operands are taken from
+// the regfile read ports (or m_val for a just-returned load) IN the EXEC
+// cycle instead of spending S_PIPE_REGS / S_PIPE_SDONE capturing them.  The
+// top of S_EXEC still captures them into src_val/dst_val, so every state
+// EXEC chains into sees the same registered values as before.
+reg         x_rf_src;    // src_eff from regfile port A
+reg         x_rf_dst;    // dst_eff from regfile port B
+reg [31:0] m_addr_r, m_wdat, m_val;
+reg         x_src_mval;  // src_eff from m_val (load data registered at ack)
+wire [31:0] src_eff = x_src_mval ? m_val :
+                      x_rf_src   ? rf_rdata_a : src_val;
+wire [31:0] dst_eff = x_rf_dst   ? rf_rdata_b : dst_val;
+
 reg  [31:0] sh_val;
 reg   [4:0] sh_fl;
 reg   [7:0] state;
@@ -294,10 +308,10 @@ wire alu_is_bitop = (alu_op >= `AP040_ALU_BTST) && (alu_op <= `AP040_ALU_BSET);
 reg         p_sextw;
 reg         p_dst_mem_bit;    // bit op destination is memory (modulo 8)
 
-wire [31:0] alu_a = alu_is_bitop ? (p_dst_mem_bit ? {29'd0, src_val[2:0]}
-                                                  : {27'd0, src_val[4:0]}) :
-                    p_sextw      ? {{16{src_val[15]}}, src_val[15:0]} : src_val;
-wire [31:0] alu_b = (state == S_SHIFT) ? sh_val : dst_val;
+wire [31:0] alu_a = alu_is_bitop ? (p_dst_mem_bit ? {29'd0, src_eff[2:0]}
+                                                  : {27'd0, src_eff[4:0]}) :
+                    p_sextw      ? {{16{src_eff[15]}}, src_eff[15:0]} : src_eff;
+wire [31:0] alu_b = (state == S_SHIFT) ? sh_val : dst_eff;
 wire  [4:0] alu_fin = (state == S_SHIFT) ? sh_fl : sr[4:0];
 
 ap040_alu alu
@@ -604,7 +618,7 @@ wire [15:0] epf_fwd_word = epf_pend_lw ? mem_rdata[31:16] : mem_rdata[15:0];
 
 reg        m_wr;
 reg  [1:0] m_size;
-reg [31:0] m_addr_r, m_wdat, m_val;
+// (m_addr_r/m_wdat/m_val hoisted above src_eff, which reads m_val)
 
 reg  [2:0] ea_mode;
 reg  [2:0] ea_rn;
@@ -1878,6 +1892,7 @@ always @(posedge clk) begin
 		ea_base_v <= 0; ea_idx_v <= 0; ea_mind <= 0;
 		ea_post <= 0; ea_odl <= 0; ea_absl <= 0; ea_addr <= 0;
 		p_src <= 0; p_dst <= 0; p_sreg <= 0; p_dreg <= 0;
+		x_rf_src <= 0; x_rf_dst <= 0; x_src_mval <= 0;
 		p_ssize <= 0; p_dsize <= 0;
 		p_rmw <= 0; p_wbsup <= 0; p_flags <= 0; p_sextw <= 0;
 		p_dst_mem_bit <= 0;
@@ -2216,7 +2231,17 @@ always @(posedge clk) begin
 				end
 				else if (d_ack) begin
 					m_val <= mem_rdata;
-					state <= r_m_ret;
+					// a load returning to S_PIPE_SDONE with a REGISTER
+					// destination skips SDONE: src comes from m_val (just
+					// registered this edge) and dst from port B, which
+					// S_PIPE_SRD already pointed at the destination (X2.4).
+					// The memory-destination path keeps SDONE -- a later
+					// RMW read would clobber m_val under the bypass flag.
+					if (r_m_ret == S_PIPE_SDONE && p_dst == DK_REG) begin
+						x_src_mval <= 1; x_rf_dst <= 1;
+						state <= S_EXEC;
+					end
+					else state <= r_m_ret;
 				end
 			end
 
@@ -2378,22 +2403,29 @@ always @(posedge clk) begin
 				// port A (X2.3).  The old path spent one state per port.
 				case (p_src)
 					SK_MEM: ea_start(src_mode_r, src_rn_r, p_ssize, S_PIPE_SRD);
+					// A register destination goes STRAIGHT to S_EXEC: the
+					// read addresses are set here and the operands taken
+					// from the ports in the EXEC cycle via src_eff/dst_eff
+					// (X2.4).  S_PIPE_REGS is what this replaces.
 					SK_REG:
 						if (p_dst == DK_REG) begin
 							rr_a <= p_sreg; rr_b <= p_dreg;
-							state <= S_PIPE_REGS;
+							x_rf_src <= 1; x_rf_dst <= 1;
+							state <= S_EXEC;
 						end
 						else begin rr_a <= p_sreg; state <= S_PIPE_SREG; end
 					SK_IMM: begin
 						src_val <= imm;
 						if (p_dst == DK_REG) begin
-							rr_b <= p_dreg; state <= S_PIPE_REGS;
+							rr_b <= p_dreg; x_rf_dst <= 1;
+							state <= S_EXEC;
 						end
 						else state <= S_PIPE_DST;
 					end
 					default:
 						if (p_dst == DK_REG) begin
-							rr_b <= p_dreg; state <= S_PIPE_REGS;
+							rr_b <= p_dreg; x_rf_dst <= 1;
+							state <= S_EXEC;
 						end
 						else state <= S_PIPE_DST;
 				endcase
@@ -2444,28 +2476,35 @@ always @(posedge clk) begin
 
 			//-------------------------------------------------------- execute
 			S_EXEC: begin
+				// commit bypassed operands so chained states (S_SHIFT,
+				// S_MD_WAIT, writeback...) see registered values, exactly
+				// as if S_PIPE_REGS / S_PIPE_SDONE had run
+				if (x_rf_src)   src_val <= rf_rdata_a;
+				if (x_src_mval) src_val <= m_val;
+				if (x_rf_dst)   dst_val <= rf_rdata_b;
+				x_rf_src <= 0; x_rf_dst <= 0; x_src_mval <= 0;
 				case (exec_kind)
 					EK_SHIFT: begin
-						sh_val <= dst_val;
+						sh_val <= dst_eff;
 						sh_fl <= sr[4:0];
 						sh_vacc <= 0;
 						sh_any <= 0;
-						sh_cnt <= (p_src == SK_NONE) ? 6'd1 : src_val[5:0];
+						sh_cnt <= (p_src == SK_NONE) ? 6'd1 : src_eff[5:0];
 						state <= S_SHIFT;
 					end
 
 					EK_MD_W: begin
-						if (md_isdiv && src_val[15:0] == 16'd0) begin
+						if (md_isdiv && src_eff[15:0] == 16'd0) begin
 							// 68040 DIVU/DIVS divide-by-zero preserves X/N/Z/V
 							// but clears C before taking vector 5.
 							sr[0] <= 1'b0;
 							exc(`AP040_VEC_DIVZERO, 4'd2, pc, pc_i);
 						end
 						else begin
-							md_a  <= md_sign ? sxw(src_val[15:0]) : {16'd0, src_val[15:0]};
-							md_hi <= md_sign ? {32{dst_val[31]}} : 32'd0;
-							md_lo <= md_isdiv ? dst_val
-							         : (md_sign ? sxw(dst_val[15:0]) : {16'd0, dst_val[15:0]});
+							md_a  <= md_sign ? sxw(src_eff[15:0]) : {16'd0, src_eff[15:0]};
+							md_hi <= md_sign ? {32{dst_eff[31]}} : 32'd0;
+							md_lo <= md_isdiv ? dst_eff
+							         : (md_sign ? sxw(dst_eff[15:0]) : {16'd0, dst_eff[15:0]});
 							md_start <= 1;
 							state <= S_MD_WAIT;
 						end
@@ -2480,10 +2519,10 @@ always @(posedge clk) begin
 
 					EK_CHK: begin : ek_chk
 						reg signed [31:0] v, bound;
-						v = (op_size == `AP040_SZ_W) ? $signed(sxw(dst_val[15:0]))
-						                             : $signed(dst_val);
-						bound = (op_size == `AP040_SZ_W) ? $signed(sxw(src_val[15:0]))
-						                                 : $signed(src_val);
+						v = (op_size == `AP040_SZ_W) ? $signed(sxw(dst_eff[15:0]))
+						                             : $signed(dst_eff);
+						bound = (op_size == `AP040_SZ_W) ? $signed(sxw(src_eff[15:0]))
+						                                 : $signed(src_eff);
 						// 68040 flags: N always tracks the value's sign; C is
 						// cleared in bounds and set on a trap only for these
 						// sign combinations; Z, V and X are left unchanged
@@ -2505,7 +2544,7 @@ always @(posedge clk) begin
 						reg [31:0] r;
 						r = {24'd0, {8{cond_true(ir[11:8])}}};
 						if (p_dst == DK_REG) begin
-							rfw(p_dreg, merge_sz(dst_val, r, `AP040_SZ_B));
+							rfw(p_dreg, merge_sz(dst_eff, r, `AP040_SZ_B));
 							fetch_next;
 						end
 						else mwr(dst_addr, `AP040_SZ_B, r, S_NEXT);
@@ -2513,9 +2552,9 @@ always @(posedge clk) begin
 
 					EK_PACK: begin : ek_pack
 						reg [15:0] v;
-						v = src_val[15:0] + x_ext[15:0];
+						v = src_eff[15:0] + x_ext[15:0];
 						if (p_dst == DK_REG) begin
-							rfw(p_dreg, merge_sz(dst_val, {24'd0, v[11:8], v[3:0]}, `AP040_SZ_B));
+							rfw(p_dreg, merge_sz(dst_eff, {24'd0, v[11:8], v[3:0]}, `AP040_SZ_B));
 							fetch_next;
 						end
 						else mwr(dst_addr, `AP040_SZ_B, {24'd0, v[11:8], v[3:0]}, S_NEXT);
@@ -2523,9 +2562,9 @@ always @(posedge clk) begin
 
 					EK_UNPK: begin : ek_unpk
 						reg [15:0] v;
-						v = {4'd0, src_val[7:4], 4'd0, src_val[3:0]} + x_ext[15:0];
+						v = {4'd0, src_eff[7:4], 4'd0, src_eff[3:0]} + x_ext[15:0];
 						if (p_dst == DK_REG) begin
-							rfw(p_dreg, merge_sz(dst_val, {16'd0, v}, `AP040_SZ_W));
+							rfw(p_dreg, merge_sz(dst_eff, {16'd0, v}, `AP040_SZ_W));
 							fetch_next;
 						end
 						else mwr(dst_addr, `AP040_SZ_W, {16'd0, v}, S_NEXT);
@@ -2540,7 +2579,7 @@ always @(posedge clk) begin
 								if (p_dreg[3])
 									rfw(p_dreg, alu_res);
 								else
-									rfw(p_dreg, merge_sz(dst_val, alu_res, op_size));
+									rfw(p_dreg, merge_sz(dst_eff, alu_res, op_size));
 								fetch_next;
 							end
 							// SR settles first so the next fetch uses the new
