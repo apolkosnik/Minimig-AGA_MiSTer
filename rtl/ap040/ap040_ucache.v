@@ -248,6 +248,19 @@ reg         st_snooped;     // a snoop touched the store's row: no merge
 // issue anything while a fill ran.  Early restart releases it mid-fill, so a
 // new request would otherwise swing busstate between FETCH and READ inside
 // one transaction and change the function code under the adapter.
+// POSTED STORE (X2.5): a store that HITS a resident line is acknowledged
+// at the tag compare and drains to memory behind the core.  The gate is the
+// hit itself, which is what keeps every fault precise where the tests
+// demand it: a write MISS -- all I/O, all first-touch, and both of
+// t_exceptions' injected write bus errors (they target $F140, which no
+// cached line ever covers) -- still completes synchronously.  A late bus
+// error on a posted store has nowhere precise to land; it is only reachable
+// as a hardware timeout on resident-line RAM, i.e. a dying machine, and is
+// swallowed exactly as a real 68040's late writeback fault would be without
+// a WB frame (which the compat contract forbids advertising).
+reg         st_posted;
+reg  [31:0] r_wdat;
+reg   [2:0] r_sfc;
 reg         fast_fill;      // this fill took the 32-bit port
 reg         fill_acked;
 reg         r_instr;
@@ -371,7 +384,8 @@ reg        pass_ci_chk;
 reg        ci_inv_pend;
 reg  [6:0] ci_inv_row;
 
-assign m_req   = fill_active ? 1'b1 : (pass_active ? c_req : 1'b0);
+assign m_req   = fill_active ? 1'b1 :
+                 (pass_active ? (st_posted ? 1'b1 : c_req) : 1'b0);
 
 // 32-bit line fill port.  Held for the whole of C_FFILL; the line address
 // and critical beat come from the access that missed, both stable because
@@ -399,12 +413,13 @@ assign f_instr = r_instr;
 // fast_fill remembers which flavour this fill was so the slow path is
 // bit-for-bit what it was before the port existed.
 assign f_busy  = ffill_active || fwr_active || (fast_fill && (cst == C_TAGW));
-assign m_write = fill_active ? 1'b0 : c_write;
-assign m_instr = fill_active ? r_instr : c_instr;
-assign m_size  = fill_active ? `AP040_SZ_L : c_size;
-assign m_addr  = fill_active ? {r_addr[31:4], r_beat, 2'b00} : c_addr;
-assign m_wdata = c_wdata;
-assign m_fc    = fill_active ? r_fc : c_fc;
+assign m_write = fill_active ? 1'b0 : (st_posted ? 1'b1 : c_write);
+assign m_instr = fill_active ? r_instr : (st_posted ? 1'b0 : c_instr);
+assign m_size  = fill_active ? `AP040_SZ_L : (st_posted ? r_size : c_size);
+assign m_addr  = fill_active ? {r_addr[31:4], r_beat, 2'b00}
+               : (st_posted ? r_addr : c_addr);
+assign m_wdata = st_posted ? r_wdat : c_wdata;
+assign m_fc    = fill_active ? r_fc : (st_posted ? r_sfc : c_fc);
 
 // (c_ack/c_rdata assigned below data_hit -- see the hit_now block)
 
@@ -419,7 +434,13 @@ assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
 // worked by accident; anything that releases the core mid-fill (early
 // restart) makes C_TAGW compose the fill's tag into a DIFFERENT set's row
 // image, corrupting that set and validating a line that was never filled.
-assign tag_ridx  = (any_fill || cst == C_TAGW) ? r_row : a_row;
+// st_posted joined the holders: during a posted store's drain the core has
+// moved on and a_row tracks ITS address, but the merge decision at m_ack
+// still compares tag_q against the STORE's latched r_tag -- so the read
+// must stay on the store's row.  (The first two PASS cycles are covered
+// without this: the accept and first PASS cycle both still see the store's
+// live address, and tag_q lags tag_ridx by one cycle.)
+assign tag_ridx  = (any_fill || cst == C_TAGW || st_posted) ? r_row : a_row;
 wire [83:0] tags_next = (r_way == 2'd0) ? {tag_q[83:21], r_tag} :
                         (r_way == 2'd1) ? {tag_q[83:42], r_tag, tag_q[20:0]} :
                         (r_way == 2'd2) ? {tag_q[83:63], r_tag, tag_q[41:0]} :
@@ -474,7 +495,11 @@ assign cd_be   = any_fill ? 4'b1111 : st_lanes(r_size, r_off);
 assign cd_widx = fwr_active  ? {r_row, r_beat} :
                  fill_active ? {r_row, r_beat} : {r_row, r_addr[3:2]};
 assign cd_wdat = fwr_active  ? f_line[r_beat*32 +: 32] :
-                 fill_active ? m_rdata : st_place(c_wdata, r_size, r_off);
+                 // r_wdat, NOT c_wdata: under a posted store the core has
+                 // moved on by the m_ack that triggers the merge, and the
+                 // live bus already carries the NEXT store's data.  (Found
+                 // by t_integer's MOVEM readback, test 94.)
+                 fill_active ? m_rdata : st_place(r_wdat, r_size, r_off);
 
 wire [31:0] data_hit = (hit_way == 2'd0) ? data_q0 :
                        (hit_way == 2'd1) ? data_q1 :
@@ -487,7 +512,12 @@ wire [31:0] data_hit = (hit_way == 2'd0) ? data_q0 :
 // takes one cycle off EVERY cache hit -- data loads and each fetch-queue
 // refill alike (S_MRD measured 4 enabled cycles for a hit; this makes it 3).
 wire hit_now = (cst == C_LOOK) && look_hit && !look_snooped && !snoop_look_row;
-assign c_ack   = pass_active ? m_ack : (ack_r | hit_now);
+// first C_PASS cycle of a mergeable store that hits: ack the core NOW and
+// let the write-through drain behind (see the POSTED STORE block above)
+wire st_post_now = pass_active && st_merge_arm && !st_snooped &&
+                   look_hit && !st_posted && !m_ack && !m_err;
+assign c_ack   = pass_active ? ((m_ack & ~st_posted) | st_post_now)
+                             : (ack_r | hit_now);
 assign c_rdata = pass_active ? m_rdata :
                  hit_now ? lw_extract(data_hit, r_size, r_off) : rdata_r;
 
@@ -508,6 +538,9 @@ always @(posedge clk) begin
 		st_merge_arm <= 0;
 		st_inv_arm <= 0;
 		fast_fill <= 0;
+		st_posted <= 0;
+		r_wdat <= 0;
+		r_sfc <= 0;
 		fill_acked <= 0;
 		r_instr <= 0;
 		r_fc <= 0;
@@ -557,6 +590,8 @@ always @(posedge clk) begin
 							r_addr <= c_addr;
 							r_size <= c_size;
 							r_off  <= c_addr[1:0];
+							r_wdat <= c_wdata;
+							r_sfc  <= c_fc;
 							st_merge_arm <= st_mergeable;
 							st_inv_arm   <= !st_mergeable ||
 							                c_nocache || !ena;
@@ -586,6 +621,7 @@ always @(posedge clk) begin
 			end
 
 			C_PASS: begin
+				if (st_post_now) st_posted <= 1;
 				if (!s_stb && !store_inv_lost) winv_pend <= 0;
 				if (pass_ci_chk) begin
 					pass_ci_chk <= 0;
@@ -616,6 +652,7 @@ always @(posedge clk) begin
 				if (m_err) begin
 					st_merge_arm <= 0;
 					st_inv_arm <= 0;
+					st_posted <= 0;   // late error: swallowed, see above
 					err_hold <= 1;
 					cst <= (winv_pend && (s_stb || store_inv_lost))
 					       ? C_WINV : C_IDLE;
@@ -624,6 +661,7 @@ always @(posedge clk) begin
 					// st_merge_now writes the data array THIS cycle
 					st_merge_arm <= 0;
 					st_inv_arm <= 0;
+					st_posted <= 0;
 					cst <= (winv_pend && (s_stb || store_inv_lost))
 					                  ? C_WINV : C_IDLE;
 				end

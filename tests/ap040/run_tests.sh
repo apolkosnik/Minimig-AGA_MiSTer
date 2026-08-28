@@ -43,8 +43,22 @@ compile() {
 
 compile reset iverilog -g2012 -I "$RTL" -o "$WORK/tb_reset.vvp" \
 	tb_ap040_reset.v sim_dpram.v $SRC &
-compile prog iverilog -g2012 -I "$RTL" -o "$WORK/tb_prog.vvp" \
-	tb_ap040_program.v sim_dpram.v $SRC &
+# The program bench carries five programs x three phases and dominates the
+# wall clock.  Verilator runs it ~30x faster than vvp with identical
+# results, so use it when installed; the vvp build stays as the fallback
+# (and the two have caught different bug classes before -- see the
+# sdram-turbo tristate history -- so keeping both buildable is deliberate).
+if command -v verilator >/dev/null 2>&1; then
+	compile prog verilator --binary --timing -j 4 -Wno-fatal -Wno-lint \
+		-Wno-style --top-module tb_ap040_program -I"$RTL" \
+		-Mdir "$WORK/vl_prog" -o Vtb_ap040_program \
+		tb_ap040_program.v sim_dpram.v $SRC &
+	PROG_SIM="$WORK/vl_prog/Vtb_ap040_program"
+else
+	compile prog iverilog -g2012 -I "$RTL" -o "$WORK/tb_prog.vvp" \
+		tb_ap040_program.v sim_dpram.v $SRC &
+	PROG_SIM="$WORK/tb_prog.vvp"
+fi
 compile double_fault iverilog -g2012 -I "$RTL" -o "$WORK/tb_double_fault.vvp" \
 	tb_ap040_double_fault.v sim_dpram.v $SRC &
 compile walker_cdc iverilog -g2012 -I "$RTL" -o "$WORK/tb_walker_cdc.vvp" \
@@ -143,7 +157,13 @@ fi
 leg() {
 	name=$1
 	shift
-	if vvp "$@" > "$WORK/$name.log" 2>&1 &&
+	# a verilated bench is a native executable; everything else is a .vvp
+	sim=$1
+	case "$sim" in
+		*.vvp) sim="vvp $sim" ;;
+	esac
+	shift
+	if $sim "$@" > "$WORK/$name.log" 2>&1 &&
 	   grep -q "ALL TESTS PASSED" "$WORK/$name.log"; then
 		:
 	else
@@ -180,11 +200,11 @@ negleg sdram32_brk_lock "$WORK/tb_sdram32.vvp" +break_lockstep &
 negleg sdram32_brk_lane "$WORK/tb_sdram32.vvp" +break_laneswap &
 negleg sdram32_brk_wr   "$WORK/tb_sdram32.vvp" +break_chipwr &
 leg sdram32_nomod      "$WORK/tb_sdram32.vvp" +no_module &
-leg integer            "$WORK/tb_prog.vvp" +prog=build/t_integer.hex &
-leg exceptions         "$WORK/tb_prog.vvp" +prog=build/t_exceptions.hex &
-leg mmu                "$WORK/tb_prog.vvp" +prog=build/t_mmu.hex &
-leg cache              "$WORK/tb_prog.vvp" +prog=build/t_cache.hex &
-leg fpu                "$WORK/tb_prog.vvp" +prog=build/t_fpu.hex &
+leg integer            "$PROG_SIM" +prog=build/t_integer.hex &
+leg exceptions         "$PROG_SIM" +prog=build/t_exceptions.hex &
+leg mmu                "$PROG_SIM" +prog=build/t_mmu.hex &
+leg cache              "$PROG_SIM" +prog=build/t_cache.hex &
+leg fpu                "$PROG_SIM" +prog=build/t_fpu.hex &
 leg fpu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_fpu.hex &
 leg exceptions_chip    "$WORK/tb_wrapchip.vvp" +prog=build/t_exceptions.hex &
 leg exceptions_chip_l0 "$WORK/tb_wrapchip_l0.vvp" +prog=build/t_exceptions.hex &

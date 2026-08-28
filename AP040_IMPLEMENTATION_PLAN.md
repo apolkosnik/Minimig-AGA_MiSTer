@@ -2637,3 +2637,40 @@ case) must become a standalone combinational block with registered outputs
 -- an extraction, mechanical but large, and the single biggest remaining
 step.  After it, the 6-stage shape exists in all but name; 57 MHz (X2.6)
 then covers the remaining gap to TG68K rather than renaming.
+
+### Posted stores landed; the fault question answered itself
+
+The gate that preserves every precise-fault test: post ONLY a store that
+HITS a resident line.  A write miss -- all I/O, all first-touch, and both of
+t_exceptions' injected write bus errors, which target $F140 and no cached
+line ever covers -- still completes synchronously.  A write hit is acked at
+the tag compare and drains from latched registers (r_addr/r_size/r_wdat/
+r_sfc) while the core runs; the next memory access naturally interlocks on
+cst != C_IDLE, so ordering needs no new machinery.  tag_ridx holds the
+store's row during the drain so the merge decision still compares the right
+tags after the core moves on.
+
+The drain exposed one real bug the old synchronous path had been masking:
+the merge wrote st_place(c_wdata, ...) -- LIVE data, correct only because
+the core used to hold it through the wait.  Under posting, MOVEM's next
+store was already on the bus at merge time and the line took the wrong
+register (t_integer test 94, seven legs red).  The merge now uses r_wdat.
+
+    move.l d3,(a0)   16.40 -> 12.46   (back-to-back; drain-limited)
+    bench_cpi        -25.6% cumulative for the session
+
+Late bus error on a posted store: swallowed, documented at the declaration.
+Only reachable as a hardware timeout on resident-line RAM, i.e. a machine
+already dying; a real 68040 would deliver a writeback fault frame, which
+the compat contract forbids advertising.
+
+### Verilator is now the program-bench runner
+
+run_tests.sh verilates tb_ap040_program when verilator is installed (~30x
+faster than vvp with identical results on all five programs) and falls back
+to the vvp build otherwise.  Both simulators stay buildable on purpose: the
+two have caught DIFFERENT bug classes before (the sdram-turbo 2-state
+tristate artifact was verilator-specific; the function/array sensitivity
+hazard was iverilog-specific).  Full regression wall time: ~8min -> 54s,
+now dominated by the iverilog multi-bench legs -- convert those next if the
+loop needs to get tighter still.
