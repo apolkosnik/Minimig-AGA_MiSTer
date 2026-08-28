@@ -3003,3 +3003,20 @@ pipe dispatch -- the second decode stage, done deliberately.
 
 Meanwhile the series still fits at 99% and misses timing by ~1.8 ns; the
 last KNOWN-GOOD closing build remains 4736e68a (+0.269 at 92%).
+
+### Seed sweep + the closing branch (2026-08-28)
+
+Seed sweep at HEAD (99% ALMs), seeds 7/23/42/3: seed 7 came back -3.319,
+the worst yet.  With the earlier fits the spread is -1.35..-3.32 across six
+placements, all deeply negative -- the evidence says this netlist does not
+close at 99% by placement luck, and the seed lottery is over.
+
+Branch `closing` created for the meantime: 4736e68a (the last closing
+build, +0.269 at 92%, already booting on the user's board) plus ONLY the
+IPL power-up fix (8c17d81c cherry-picked as deafbc26).  Full regression
+green.  This is the bitstream for continuing the NetBSD hunt: every
+correctness fix, none of the timing debt.  The 37%-faster series stays on
+ap040x2 awaiting the registered decode stage.
+
+The Codex divider (0b4e2dc6) is deliberately NOT on `closing`: it is a
+performance change, and the branch's only job is to be trustworthy.
