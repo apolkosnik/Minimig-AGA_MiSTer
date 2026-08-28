@@ -44,6 +44,8 @@ reg         wberr_arm;
 
 reg         mem_ready;
 reg         berr_armed;
+reg         exc_at_issue = 0;
+reg         exc_req_d = 0;
 reg   [1:0] irq_exc_armed;
 reg   [2:0] irq_fetch_stall;
 wire        berr_d = berr_armed && nreset && (busstate != 2'b01) &&
@@ -513,14 +515,34 @@ end
 
 // bus monitor and write commit
 always @(posedge clk) begin
+	// Judge exception-cycle FCs on cycles serving THE CORE'S OWN current
+	// request, identified by longword address.  Two kinds of legal traffic
+	// otherwise trip this monitor since the cache detached from the core:
+	// a request accepted BEFORE the exception that exc() deliberately lets
+	// finish, and a background LINE FILL of user code (early restart) or a
+	// posted-store drain still streaming with its own -- correct -- FC
+	// while the core is already stacking.  The real contract is that the
+	// core's in-exception requests (handler opcodes, frames, vectors)
+	// carry FC6/FC5, and those are exactly the cycles whose address
+	// matches the core's request.
+	if (dut.core.mem_req && !exc_req_d) exc_at_issue <= dut.core.in_exc;
+	exc_req_d <= dut.core.mem_req;
+
 	if (nreset && mem_ready) begin
 		// Reset vectors, exception frames and exception vectors are
 		// supervisor-data cycles; the first handler opcode is supervisor
 		// program.  This also catches a leaked MOVES SFC/DFC override.
-		if (dut.core.in_exc) begin
+		if (dut.core.in_exc && exc_at_issue && dut.core.mem_req &&
+		    (addr_out[31:2] == dut.core.mem_addr[31:2])) begin
 			if (busstate == 2'b00 && fc !== 3'd6) begin
 				errors = errors + 1;
 				$display("FAIL: exception handler fetch used FC=%0d, expected 6", fc);
+				$display("      state=%0d pc=%h pc_i=%h addr=%h epf_armed=%b epf_super=%b epf_next=%h",
+				         dut.core.state, dut.core.pc, dut.core.pc_i, addr_out,
+				         dut.core.epf_armed, dut.core.epf_super, dut.core.epf_next);
+				$display("      exc_at_issue=%b req=%b req_d=%b ack=%b instr=%b core_addr=%h",
+				         exc_at_issue, dut.core.mem_req, exc_req_d,
+				         dut.core.mem_ack, dut.core.mem_instr, dut.core.mem_addr);
 				result = 2;
 			end
 			else if ((busstate == 2'b10 || busstate == 2'b11) && fc !== 3'd5) begin

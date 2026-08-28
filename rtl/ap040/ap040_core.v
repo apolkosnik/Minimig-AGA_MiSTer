@@ -1698,6 +1698,30 @@ function [15:0] aerr_word;
 	end
 endfunction
 
+// Pop one instruction word and enter S_DECODE with the per-instruction
+// defaults set.  ONE definition, used by S_FETCH and by fetch_next's
+// queue-hot fold below, so the two can never drift.
+task pop_decode;
+	input [15:0] fw;
+	begin
+		in_exc <= 0;
+		epf_pop = 2'd1;
+		ir <= fw;
+		pc <= pc + 32'd2;
+		// per-instruction defaults
+		tr_t1 <= sr[15];
+		tr_t0 <= sr[14];
+		flow_t0_pend <= 0;
+		t0_force <= t0_special(fw);
+		p_src <= SK_NONE; p_dst <= DK_NONE;
+		p_rmw <= 0; p_wbsup <= 0; p_flags <= 1; p_sextw <= 0;
+		p_dst_mem_bit <= 0;
+		exec_kind <= EK_ALU;
+		fc_ovr_v <= 0;
+		state <= S_DECODE;
+	end
+endtask
+
 task fetch_next;
 	begin
 		fc_ovr_v <= 0;
@@ -1734,6 +1758,18 @@ task fetch_next;
 			// Instruction writeback is registered separately.  Do not let
 			// S_EXC0 sample Dn/An/A7 on the same edge that commits it.
 			state <= S_POST_EXC;
+		end
+		// QUEUE-HOT FOLD (X2.5): the next instruction word is already
+		// buffered, so pop it and enter S_DECODE directly -- S_FETCH would
+		// spend a cycle discovering exactly this.  One cycle off EVERY
+		// instruction the queue keeps up with; a one-state instruction
+		// becomes decode-to-decode.  The guards fall back to S_FETCH for
+		// every case that state handles specially: exception-entry
+		// refills (in_exc), a change-of-flow T0 trace waiting at the
+		// target, and a queue error.  irq/trace took their branches above.
+		else if (!in_exc && !flow_t0_pend && !epf_err && epf_ready_pc) begin
+			pc_i <= pc;
+			pop_decode(epf_data[epf_head]);
 		end
 		else begin
 			issue_ifetch(pc, sr_s);
@@ -2119,21 +2155,7 @@ always @(posedge clk) begin
 				else begin
 					// All four exception-prefetch longwords are now resident; the
 					// first buffered handler instruction begins normal execution.
-					in_exc <= 0;
-					epf_pop = 2'd1;
-					ir <= fw;
-					pc <= pc + 32'd2;
-					// per-instruction defaults
-					tr_t1 <= sr[15];
-					tr_t0 <= sr[14];
-					flow_t0_pend <= 0;
-					t0_force <= t0_special(fw);
-					p_src <= SK_NONE; p_dst <= DK_NONE;
-					p_rmw <= 0; p_wbsup <= 0; p_flags <= 1; p_sextw <= 0;
-					p_dst_mem_bit <= 0;
-					exec_kind <= EK_ALU;
-					fc_ovr_v <= 0;
-					state <= S_DECODE;
+					pop_decode(fw);
 				end
 			end
 			// The queue does not run this stream -- a redirect that could not

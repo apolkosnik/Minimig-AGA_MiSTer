@@ -2674,3 +2674,32 @@ tristate artifact was verilator-specific; the function/array sensitivity
 hazard was iverilog-specific).  Full regression wall time: ~8min -> 54s,
 now dominated by the iverilog multi-bench legs -- convert those next if the
 loop needs to get tighter still.
+
+### The queue-hot fetch fold: the D stage arrives
+
+fetch_next now pops the next instruction word itself when the queue already
+holds it (epf_ready_pc) and enters S_DECODE directly -- S_FETCH would have
+spent a cycle discovering exactly this.  The pop logic lives in ONE task
+(pop_decode) shared with S_FETCH so the two cannot drift, and the fold
+falls back to S_FETCH for every case that state handles specially:
+exception-entry refills, a change-of-flow T0 trace waiting at the target,
+a queue error, and the queue-dry/forwarding cases.
+
+    class              before    after
+    nop / moveq         2.46      2.09
+    add.l d2,d3         4.39      3.45
+    move.l (a0),d3      8.52      7.40
+    move.l d3,(a0)     11.09     10.77
+    lea 4(a0),a0        6.78      5.72
+    add/load mix        6.40      5.46
+    bench_cpi total    -13.2%, session cumulative -37.0%
+
+The fold surfaced a MONITOR error, not a core bug: the TB required every
+instruction-fetch bus cycle during in_exc to carry FC6.  That was only ever
+true while the core could not run detached from its bus traffic.  A
+background line fill of USER code (early restart) legally streams its
+remaining beats with FC2 while the core stacks an exception frame -- the
+fill's FC was latched at issue and is correct.  The monitor now judges only
+cycles serving the core's own current request (matched by longword
+address), which is the actual contract: handler opcodes FC6, frames and
+vectors FC5.  Real leaks still match the qualifier and still fail.
