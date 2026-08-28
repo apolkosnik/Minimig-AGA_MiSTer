@@ -2892,3 +2892,37 @@ from the levers X2.7 already names -- cpu_cache_new removal (-0.8K ALMs, now
 genuinely available since the L1 plus the 32-bit fill path replaces it),
 bus16 adapter removal (-0.4K), MMU pruning -- or from reverting changes whose
 ALUTs-per-cycle is poor, as the FPU radix doubling was.
+
+### cpu_cache_new removal: measured, and it is the wrong problem
+
+Measured by flipping CPU_CACHE to 0 on all three controllers and
+synthesizing:
+
+    CPU_CACHE=1   61,265 total ALUTs   cpu_cache_new self 758
+    CPU_CACHE=0   60,991 total ALUTs   cpu_cache_new self  93   (fill/pass
+                                                                 residue)
+
+So removal is worth ~665 ALUTs, roughly 400 ALMs -- NOT the -0.8K ALMs X2.7
+estimated.  The estimate predated the storage moving to M10K: the tag and
+data arrays are block RAM already, so only the control logic is in ALUTs.
+Removal also frees ~171K block-memory bits, which is worthless here -- 295
+M10K blocks are already idle.  Paying an entire cache level for 1% of the
+device is a bad trade, and it should come off the X2.7 funded list at this
+price.
+
+THE LARGER POINT, which this measurement forced.  The design FITS: fit 3 was
+41,152 / 41,910 ALMs (98%).  What fails is TIMING, at -2.040 ns on
+ir[] -> exc_fmt[].  The last several pieces of work -- the FPU ALUT/M10K
+trade, this -- were solving area, and area is not the binding constraint.
+Area and timing are coupled at 98% (the fitter has no room to place for
+speed), but 400 ALMs will not close 2 ns.
+
+WHAT ACTUALLY BLOCKS A BITSTREAM is the decode cone, and it has been the
+worst path in every fit of this series regardless of what else changed:
+51 exc() sites across a 1,114-line S_DECODE, each driving exc_vec/exc_fmt/
+exc_spc/exc_addr, with exc_fmt fanning on into exc_fsize.  The failed
+vector-derivation attempt showed the shape of a fix and the trap in it
+(FLINE takes two formats; the access-error path never calls exc() at all).
+A real fix registers the decode output -- the same second stage the 6-stage
+question and the in-DECODE dispatch both point at -- rather than trying to
+shrink the cone in place.
