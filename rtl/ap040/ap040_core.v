@@ -1996,17 +1996,9 @@ endtask
 
 task pipe_go;
 	begin
-		// TIMING (2026-08-28): the fused in-DECODE dispatch (CPI work 8)
-		// cost -1.35 ns on clk_sys.  With it, ir[] reached exc_fmt[] --
-		// through the whole decode tree AND the dispatch's EA/mode
-		// selection AND exc() -- in one cycle; that cone is the design's
-		// worst path by a wide margin.  Deferring to S_PIPE_START restores
-		// the register boundary between decode and dispatch.  The
-		// pipe_dispatch task and the bd_* mirrors stay: S_PIPE_START calls
-		// the same single body, so nothing about the operand handling
-		// changed, and the fusion can be re-enabled here if the decode
-		// cone is ever split (the mirrors are already correct).
-		state <= S_PIPE_START;
+		pipe_dispatch(bd_src, bd_dst, bd_sreg, bd_dreg, bd_rmw,
+		              bd_ssize, bd_dsize, bd_smode, bd_srn,
+		              bd_dmode, bd_drn, bd_ekind);
 	end
 endtask
 
