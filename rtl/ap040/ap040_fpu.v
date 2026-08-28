@@ -1624,8 +1624,9 @@ always @(posedge clk) begin
 
 			F_DIVL: begin : f_divl
 				reg [64:0] r2a, rem1, r2b, rem2, r2c, rem3;
-				reg        q1, q2, q3;
-				if (loop_n == 7'd23) begin
+				reg [64:0] r2d, rem4, r2e, rem5, r2f, rem6;
+				reg        q1, q2, q3, q4, q5, q6;
+				if (loop_n == 7'd12) begin
 					if (qv[66]) begin
 						a_m <= qv[66:3];
 						grs <= {qv[2], qv[1], qv[0] | (acc_hi != 65'd0)};
@@ -1648,9 +1649,13 @@ always @(posedge clk) begin
 					loop_n <= 7'd1;
 				end
 				else begin
-					// three restoring fraction bits per cycle (66 = 3 x 22):
+					// six restoring fraction bits per cycle (66 = 6 x 11):
 					// the remainder shifts left with zeros entering, exactly
-					// three former one-bit iterations cascaded combinationally
+					// six former one-bit iterations cascaded combinationally.
+					// Same cascade-doubling as the integer divider; the
+					// F_MULT comment records the 34.8 ns budget this must
+					// close in, and six 65-bit subtract/compare stages are
+					// far shallower than the 64x64 product that already does.
 					r2a = {acc_hi[63:0], 1'b0};
 					q1 = (r2a >= {1'b0, a_m});
 					rem1 = q1 ? (r2a - {1'b0, a_m}) : r2a;
@@ -1660,26 +1665,36 @@ always @(posedge clk) begin
 					r2c = {rem2[63:0], 1'b0};
 					q3 = (r2c >= {1'b0, a_m});
 					rem3 = q3 ? (r2c - {1'b0, a_m}) : r2c;
-					acc_hi <= rem3;
-					qv <= {qv[63:0], q1, q2, q3};
+					r2d = {rem3[63:0], 1'b0};
+					q4 = (r2d >= {1'b0, a_m});
+					rem4 = q4 ? (r2d - {1'b0, a_m}) : r2d;
+					r2e = {rem4[63:0], 1'b0};
+					q5 = (r2e >= {1'b0, a_m});
+					rem5 = q5 ? (r2e - {1'b0, a_m}) : r2e;
+					r2f = {rem5[63:0], 1'b0};
+					q6 = (r2f >= {1'b0, a_m});
+					rem6 = q6 ? (r2f - {1'b0, a_m}) : r2f;
+					acc_hi <= rem6;
+					qv <= {qv[60:0], q1, q2, q3, q4, q5, q6};
 					loop_n <= loop_n + 7'd1;
 				end
 			end
 
 			F_SQRTL: begin : f_sqrtl
 				reg [68:0] r2a, rem1, r2b, rem2, r2c, rem3;
-				reg [68:0] trial1, trial2, trial3;
-				reg        q1, q2, q3;
-				if (loop_n == 7'd22) begin
+				reg [68:0] r2d, rem4, r2e, rem5, r2f, rem6;
+				reg [68:0] trial1, trial2, trial3, trial4, trial5, trial6;
+				reg        q1, q2, q3, q4, q5, q6;
+				if (loop_n == 7'd11) begin
 					a_m <= qv[65:2];
 					grs <= {qv[1], qv[0], (srem != 69'd0)};
 					a_t <= T_NUM;
 					fst <= F_ROUND;
 				end
 				else begin
-					// three result digits per cycle (66 = 3 x 22): each trial
+					// six result digits per cycle (66 = 6 x 11): each trial
 					// folds the earlier digits into the partial root, exactly
-					// three former one-digit steps cascaded combinationally
+					// six former one-digit steps cascaded combinationally
 					r2a = {srem[66:0], srad[131:130]};
 					trial1 = {1'b0, qv[65:0], 2'b01};
 					q1 = (r2a >= trial1);
@@ -1692,9 +1707,21 @@ always @(posedge clk) begin
 					trial3 = {1'b0, qv[63:0], q1, q2, 2'b01};
 					q3 = (r2c >= trial3);
 					rem3 = q3 ? (r2c - trial3) : r2c;
-					srad <= {srad[125:0], 6'b000000};
-					srem <= rem3;
-					qv <= {qv[63:0], q1, q2, q3};
+					r2d = {rem3[66:0], srad[125:124]};
+					trial4 = {1'b0, qv[62:0], q1, q2, q3, 2'b01};
+					q4 = (r2d >= trial4);
+					rem4 = q4 ? (r2d - trial4) : r2d;
+					r2e = {rem4[66:0], srad[123:122]};
+					trial5 = {1'b0, qv[61:0], q1, q2, q3, q4, 2'b01};
+					q5 = (r2e >= trial5);
+					rem5 = q5 ? (r2e - trial5) : r2e;
+					r2f = {rem5[66:0], srad[121:120]};
+					trial6 = {1'b0, qv[60:0], q1, q2, q3, q4, q5, 2'b01};
+					q6 = (r2f >= trial6);
+					rem6 = q6 ? (r2f - trial6) : r2f;
+					srad <= {srad[119:0], 12'b000000000000};
+					srem <= rem6;
+					qv <= {qv[60:0], q1, q2, q3, q4, q5, q6};
 					loop_n <= loop_n + 7'd1;
 				end
 			end
