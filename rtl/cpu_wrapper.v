@@ -557,7 +557,12 @@ always @(posedge clk) begin
 end
 
 reg       chipreq;
-reg [2:0] cpu_ipl;
+// Initialized to IDLE (active-low: 111 = no interrupt).  These power up as
+// zeros, and zeros on this chain mean LEVEL 7: under a 2-state simulator the
+// core sees a phantom NMI racing its first instruction boundary (the
+// mmu_turbo boot wedge), and on hardware the same window exists for a few
+// cycles after reset release until real samples propagate.
+reg [2:0] cpu_ipl = 3'b111;
 always @(posedge clk) begin
 	chipreq <= cpu_req & ~ramsel & ~fastchip_selack;
 	cpu_ipl <= ipl_i;
@@ -571,7 +576,7 @@ end
 
 reg        chipready;
 reg [15:0] chipdout_i;
-reg  [2:0] ipl_i;
+reg  [2:0] ipl_i = 3'b111;   // idle, see cpu_ipl
 reg        c_as,c_rw,c_uds,c_lds;
 always @(negedge clk, negedge reset) begin
 	reg [1:0] stage;

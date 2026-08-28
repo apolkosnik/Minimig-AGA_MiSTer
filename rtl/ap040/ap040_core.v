@@ -139,7 +139,8 @@ assign pf_fc    = dfc;
 
 // interrupt input synchronization (active low pins, must be stable for two
 // consecutive samples like the real part)
-reg [2:0] ipl_s1, ipl_s2;
+// idle at power-up (active-low): zeros here would be a pending level 7
+reg [2:0] ipl_s1 = 3'b111, ipl_s2 = 3'b111;
 reg [2:0] irq_lvl;
 reg [2:0] irq_hold_lvl;          // mask-qualified level retained until accepted
 reg       irq_ack_t;             // toggled by the FSM when a level 1-6 IRQ is taken
