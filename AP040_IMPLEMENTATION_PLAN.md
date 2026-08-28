@@ -2859,3 +2859,36 @@ SHAPE OF THE CONVERSION, if it is taken:
 RECOMMENDATION: this is the best area lever found so far -- better than the
 X2.7 candidates for ALUTs-per-unit-risk -- but it is a real FPU change and
 should not be bolted onto the end of an acceleration session.
+
+### And elsewhere?  No -- the M10K headroom cannot be spent
+
+Asked whether the ALUT/M10K trade pays outside the FPU.  Measured across the
+whole design, it does not, and the reason is structural rather than a matter
+of effort.
+
+WHERE THE ALUTs ARE.  cpu_wrapper is 38,667 of the design's ALUTs; everything
+else is small (ascal 2,952, the two OSDs ~1,800 together, sdram_ctrl 422).
+Inside the CPU: core 22,195 self, FPU 9,795, ALU 2,501, MMU 1,503, muldiv
+992, ucache 686, regfile 388.  Those are decode trees, FSM state, barrel
+shifters and arithmetic -- logic, not storage.  Memory cannot replace them at
+any price.
+
+THE STORAGE IS ALREADY IN M10K.  The ucache ways infer altsyncram, the ATC's
+128 x 45b payload moved to BRAM under X2.7, cpu_cache_new and the video
+buffers are memory.  That is what the 258 used blocks are.  What remains in
+flops is genuinely small: the core's epf_data[0:7] and m16buf[0:3] are 128
+bits each.
+
+THE ONE TEMPTING LEAD, AND WHY IT IS DECLINED.  quartus_map reports 11 arrays
+it recognized as RAM logic but left "uninferred due to inappropriate RAM
+size" -- all in Agnus (blitter pointers and barrel shifters, sprite/bitplane/
+audio pointers).  Forcing them with a ramstyle attribute is possible, and the
+blocks are free.  But the ENTIRE agnus subtree is 1,529 ALUTs, so the yield
+is a few hundred at best, in chipset logic the AP040 suite barely exercises
+(the wrapchip bench has fastchip/rtg, not Agnus).  Bad reward for the risk.
+
+CONCLUSION.  ~295 M10K blocks are free and will stay free.  Area has to come
+from the levers X2.7 already names -- cpu_cache_new removal (-0.8K ALMs, now
+genuinely available since the L1 plus the 32-bit fill path replaces it),
+bus16 adapter removal (-0.4K), MMU pruning -- or from reverting changes whose
+ALUTs-per-cycle is poor, as the FPU radix doubling was.
