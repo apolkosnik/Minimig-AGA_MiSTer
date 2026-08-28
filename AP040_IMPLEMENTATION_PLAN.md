@@ -3020,3 +3020,37 @@ ap040x2 awaiting the registered decode stage.
 
 The Codex divider (0b4e2dc6) is deliberately NOT on `closing`: it is a
 performance change, and the branch's only job is to be trustworthy.
+
+### The closing bitstream does not boot -- and it should never have been built
+
+Reported not booting.  Diagnosis, and it is a mistake of mine end to end.
+
+The video domain regressed: pll_hdmi went +0.269 (in 4736e68a, which boots)
+to -0.172 with TNS -2.744.  Both CPU domains still close (+0.043, +0.290),
+so the CPU is fine and the display is not -- which presents exactly as "not
+booting".
+
+WORSE, the change that perturbed the placement was unnecessary.  The IPL
+power-up fix (deafbc26) is redundant on hardware:
+
+    ap040_core.v:153-160  reset sets ipl_s1/s2 <= 3'b111 and nmi_arm <= 0
+    ap040_core.v:171      nmi_arm is set ONLY once the pins leave level 7
+
+So a power-up 000 on cpu_ipl does read as level 7, but it CANNOT fire an
+NMI, because nmi_arm starts clear and only arms after the pins have been
+seen at a non-7 level.  The design was already protected.  The mmu_turbo
+wedge that motivated the fix was a Verilator artefact -- cpu_ipl had no
+initializer, so it was X, and X propagated into the comparisons.  That makes
+the cpu_wrapper initializers worth keeping for SIM determinism and nothing
+more; the ap040_core ones are pure redundancy.  Calling it "real on hardware
+for a few cycles after reset" was wrong.
+
+CONSEQUENCE: `closing` adds nothing 4736e68a does not already have, and
+4736e68a is ALREADY on the user's board (md5 72c0a032, deployed as 035-038).
+The correct action is to go back to it -- no rebuild.  Delete
+Minimig-040-x2-CLOSING_20260828.rbf from the board.
+
+The initializers stay on ap040x2 (where the CPI series needs deterministic
+sim), and any future bitstream from that branch must have pll_hdmi checked
+as well as the CPU domains -- a negative video path is invisible in the
+slack headline when the CPU numbers look fine.
