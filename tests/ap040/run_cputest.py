@@ -55,8 +55,9 @@ RTL_SOURCES = [
     RTL / "ap040_alu.v",
     RTL / "ap040_muldiv.v",
     RTL / "ap040_mmu.v",
-    RTL / "ap040_cache.v",
-    HERE / "sim_dpram.v",   # ap040_cache's tag RAM (Quartus uses rtl/bram.vhd)
+    RTL / "ap040_ucache.v",
+    RTL / "ap040_bus_timeout.v",
+    HERE / "sim_dpram.v",   # ap040_ucache's tag RAM (Quartus uses rtl/bram.vhd)
     RTL / "ap040_fpu.v",
 ]
 
