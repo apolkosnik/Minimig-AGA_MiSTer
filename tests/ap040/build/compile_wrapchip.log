@@ -1,0 +1,16 @@
+%Warning-MULTIDRIVEN: tb_cpu_wrapper_chip.v:103:12: Signal has multiple driving blocks with different clocking: 'tb_cpu_wrapper_chip.wberr_arm'
+                      tb_cpu_wrapper_chip.v:544:4: ... Location of first driving block
+  544 |    wberr_arm <= 1;    
+      |    ^~~~~~~~~
+                      tb_cpu_wrapper_chip.v:473:6: ... Location of other driving block
+  473 |      wberr_arm   <= 0;
+      |      ^~~~~~~~~
+                      ... For warning description see https://verilator.org/warn/MULTIDRIVEN?v=5.050
+                      ... Use "/* verilator lint_off MULTIDRIVEN */" and lint_on around source to disable this message.
+%Warning-MULTIDRIVEN: tb_cpu_wrapper_chip.v:257:12: Signal has multiple driving blocks with different clocking: 'tb_cpu_wrapper_chip.mem'
+                      tb_cpu_wrapper_chip.v:290:19: ... Location of first driving block
+  290 |      if (!ramuds) mem[ram_cidx][15:8] <= ramdin[15:8];
+      |                   ^~~
+                      tb_cpu_wrapper_chip.v:477:6: ... Location of other driving block
+  477 |      mem[{walker_word_l, 1'b0}] <= walker_wdat_l[31:16];
+      |      ^~~

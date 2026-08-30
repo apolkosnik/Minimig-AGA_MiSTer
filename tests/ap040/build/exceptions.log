@@ -1,9 +1,9 @@
 tb_ap040_program: running build/t_exceptions.hex
-WARNING: tb_ap040_program.v:774: $readmemh(build/t_exceptions.hex): Not enough words in the file for the requested range [0:32767].
-phase 0 passed (156320 cycles)
-WARNING: tb_ap040_program.v:774: $readmemh(build/t_exceptions.hex): Not enough words in the file for the requested range [0:32767].
-phase 1 passed (238060 cycles)
-WARNING: tb_ap040_program.v:774: $readmemh(build/t_exceptions.hex): Not enough words in the file for the requested range [0:32767].
-phase 2 passed (238054 cycles)
+phase 0 passed (144249 cycles)
+phase 1 passed (221716 cycles)
+phase 2 passed (221711 cycles)
 ALL TESTS PASSED
-tb_ap040_program.v:818: $finish called at 6324635000 (1ps)
+- tb_ap040_program.v:922: Verilog $finish
+- S i m u l a t i o n   R e p o r t: Verilator 5.050 2026-07-01
+- Verilator: $finish at 6ms; walltime 0.381 s; speed 15.414 ms/s
+- Verilator: cpu 0.380 s on 1 threads; allocated 8 MB

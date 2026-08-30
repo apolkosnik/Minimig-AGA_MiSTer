@@ -106,10 +106,10 @@ wire        ide_wr;
 wire  [5:0] ide_req;
 
 wire [35:0] EXT_BUS;
-hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata));
+hps_ext hps_ext(.*);
 
 assign LED_POWER[1] = 1;
-assign LED_DISK     = {1'b0, ide_fast ? ide_f_led : ide_c_led};
+assign LED_DISK     = {1'b0, gayle_led};
 
 assign VGA_SCALER   = FB_EN;
 
@@ -698,10 +698,27 @@ wire        fastchip_ready;
 wire        fastchip_lw;
 
 wire        ide_fast;
-wire        ide_f_led;
-wire        ide_f_irq;
-wire  [5:0] ide_f_req;
-wire [15:0] ide_f_readdata;
+
+wire        minimig_rst;
+
+wire        gayle_f_sel_ide, gayle_f_sel_gayle, gayle_f_rd, gayle_f_wr;
+wire        gayle_c_sel_ide, gayle_c_sel_gayle, gayle_c_rd, gayle_c_wr;
+wire [23:1] gayle_c_addr;
+wire [15:0] gayle_c_din;
+
+wire [15:0] gayle_dout;
+wire        gayle_irq, gayle_nrdy, gayle_led;
+
+// Replies go back only to the frontend that owns the block.  This matters
+// for nrdy: minimig feeds it into gary's bus stall, so an unmasked fast-path
+// nrdy would stall the classic chipset bus.  dout is masked for the same
+// reason in reverse -- both frontends decode the same $DAxxxx/$DE1xxx
+// ranges, so only ide_fast says whose access produced the data.
+wire [15:0] gayle_f_dout = ide_fast ? gayle_dout : 16'd0;
+wire [15:0] gayle_c_dout = ide_fast ? 16'd0     : gayle_dout;
+wire        gayle_f_nrdy = ide_fast & gayle_nrdy;
+wire        gayle_c_nrdy = ~ide_fast & gayle_nrdy;
+
 
 // fastchip is working on CPU clock.
 // Only high performance 68020 devices are inside
@@ -722,7 +739,6 @@ fastchip fastchip
 	.lds          (~fastchip_lds     ),
 	.uds          (~fastchip_uds     ),
 	.rnw          (fastchip_rnw      ),
-	.longword     (fastchip_lw       ),
 
 	//RTG framebuffer control
 	.rtg_ena      (FB_EN             ),
@@ -738,14 +754,12 @@ fastchip fastchip
 	.rtg_pal_wr   (FB_PAL_WR         ),
 
 	.ide_ena      (ide_ena & ide_fast),
-	.ide_irq      (ide_f_irq         ),
-	.ide_req      (ide_f_req         ),
-	.ide_address  (ide_addr          ),
-	.ide_write    (ide_wr            ),
-	.ide_writedata(ide_dout          ),
-	.ide_read     (ide_rd            ),
-	.ide_readdata (ide_f_readdata    ),
-	.ide_led      (ide_f_led         )
+	.gayle_sel_ide  (gayle_f_sel_ide  ),
+	.gayle_sel_gayle(gayle_f_sel_gayle),
+	.gayle_rd       (gayle_f_rd       ),
+	.gayle_wr       (gayle_f_wr       ),
+	.gayle_dout     (gayle_f_dout     ),
+	.gayle_nrdy     (gayle_f_nrdy     )
 );
 
 
@@ -789,9 +803,6 @@ wire        hs;
 wire  [1:0] ar;
 wire        ntsc;
 
-wire  [5:0] ide_c_req;
-wire [15:0] ide_c_readdata;
-wire        ide_c_led;
 wire        ide_ena;
 
 wire [15:0] toccata_aud_left;
@@ -828,7 +839,7 @@ minimig minimig
 	.rst_ext      (reset_d | dual_fault), // reset from ctrl block; a DUAL
 	                                     // build without its second SDRAM
 	                                     // refuses to run (init probe)
-	.rst_out      (                 ), // minimig reset status
+	.rst_out      (minimig_rst      ), // minimig reset status
 	.clk          (clk_sys          ), // output clock c1 ( 28.687500MHz)
 	.clk7_en      (clk7_en          ), // 7MHz clock enable
 	.clk7n_en     (clk7n_en         ), // 7MHz negedge clock enable
@@ -860,7 +871,6 @@ minimig minimig
 	.kms_level    (kbd_mouse_level  ),
 	.pwr_led      (pwr_led          ), // power led
 	.fdd_led      (LED_USER         ),
-	.hdd_led      (ide_c_led        ),
 	.rtc          (RTC              ),
 
 	//host controller interface (SPI)
@@ -910,14 +920,16 @@ minimig minimig
 	.bootrom      (bootrom          ), // bootrom mode. Needed here to tell the CPU wrapper to also mirror the 256k Kickstart 
 
 	.ide_fast     (ide_fast         ),
-	.ide_ext_irq  (ide_f_irq        ),
 	.ide_ena      (ide_ena          ),
-	.ide_req      (ide_c_req        ),
-	.ide_address  (ide_addr         ),
-	.ide_write    (ide_wr           ),
-	.ide_writedata(ide_dout         ),
-	.ide_read     (ide_rd           ),
-	.ide_readdata (ide_c_readdata   ),
+	.gayle_sel_ide  (gayle_c_sel_ide  ),
+	.gayle_sel_gayle(gayle_c_sel_gayle),
+	.gayle_addr     (gayle_c_addr     ),
+	.gayle_din      (gayle_c_din      ),
+	.gayle_rd       (gayle_c_rd       ),
+	.gayle_wr       (gayle_c_wr       ),
+	.gayle_dout     (gayle_c_dout     ),
+	.gayle_irq      (gayle_irq        ),
+	.gayle_nrdy     (gayle_c_nrdy     ),
 
 	.a2065_clk_ddr(DDRAM_CLK),
 	.a2065_mem_address(a2065_mem_address),
@@ -929,6 +941,46 @@ minimig minimig
 	.a2065_mem_byteenable(a2065_mem_byteenable),
 	.a2065_mem_write(a2065_mem_write),
 	.a2065_mem_waitrequest(a2065_mem_waitrequest)
+);
+
+////////////////////////////  GAYLE / IDE  /////////////////////////////
+//
+// fastchip and minimig used to carry a gayle each -- 369 + 345 ALMs and
+// 64 M10Ks -- even though only one can ever decode: fastchip gates its
+// decode with ide_ena & ide_fast, gary with ide_ena & ~ide_fast.  Both
+// ran on clk_sys, so one block serves both frontends with ide_fast as
+// the select.
+//
+// ide_fast is a config bit (~ide_config[5] & cpucfg[1]), not a per-cycle
+// signal, so this mux is static in practice.
+
+gayle gayle
+(
+	.clk       (clk_sys),
+	.reset     (ide_fast ? (~cpu_rst | ~cpu_nrst_out) : minimig_rst),
+
+	// fastchip sees the same chip bus this level drives, so its address,
+	// data and longword come straight from here rather than back out of it.
+	.addr      (ide_fast ? chip_addr         : gayle_c_addr),
+	.data_in   (ide_fast ? chip_din          : gayle_c_din ),
+	.rd        (ide_fast ? gayle_f_rd        : gayle_c_rd  ),
+	.wr        (ide_fast ? gayle_f_wr        : gayle_c_wr  ),
+	.sel_ide   (ide_fast ? gayle_f_sel_ide   : gayle_c_sel_ide  ),
+	.sel_gayle (ide_fast ? gayle_f_sel_gayle : gayle_c_sel_gayle),
+	// GAYLE1 left longword unconnected, so the classic path stays 16-bit
+	.longword  (ide_fast ? fastchip_lw       : 1'b0),
+
+	.data_out  (gayle_dout),
+	.irq       (gayle_irq ),
+	.nrdy      (gayle_nrdy),
+	.led       (gayle_led ),
+
+	.ide_req      (ide_req ),
+	.ide_address  (ide_addr),
+	.ide_write    (ide_wr  ),
+	.ide_writedata(ide_dout),
+	.ide_read     (ide_rd  ),
+	.ide_readdata (ide_din )
 );
 
 // power led control

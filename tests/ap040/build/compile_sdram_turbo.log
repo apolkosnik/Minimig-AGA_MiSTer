@@ -1,6 +1,0 @@
-build/sdram_ctrl_sim.v:182: warning: Port 6 (cpu_adr) of module cpu_cache_new expects 28 bit(s), given 24.
-build/sdram_ctrl_sim.v:182:        : Padding 4 high bits of the port.
-build/sdram_ctrl_sim.v:182: warning: Port 19 (snoop_adr) of module cpu_cache_new expects 28 bit(s), given 24.
-build/sdram_ctrl_sim.v:182:        : Padding 4 high bits of the port.
-tb_sdram_turbo.v:291: warning: Port 17 (chipAddr) of module sdram_ctrl expects 24 bit(s), given 23.
-tb_sdram_turbo.v:291:        : Padding 1 high bits of the port.

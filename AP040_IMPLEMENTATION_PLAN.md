@@ -3054,3 +3054,62 @@ The initializers stay on ap040x2 (where the CPI series needs deterministic
 sim), and any future bitstream from that branch must have pll_hdmi checked
 as well as the CPU domains -- a negative video path is invisible in the
 slack headline when the CPU numbers look fine.
+
+### One Gayle instead of two (2026-08-30)
+
+The design carried two complete Gayle/IDE subsystems: `fastchip|gayle` and
+`minimig|GAYLE1`, each with its own pair of `ide` cores and sector buffers.
+Only one can ever decode -- fastchip gates its $DAxxxx/$DE1xxx decode with
+`ide_ena & ide_fast`, gary gates the classic one with `ide_ena & ~ide_fast`
+-- and both ran on clk_sys.  So the second copy was pure duplication.
+
+One `gayle` now sits in Minimig.sv with `ide_fast` selecting the frontend.
+Both modules export their decode (`gayle_sel_ide`, `gayle_sel_gayle`, rd/wr,
+and for minimig the cpu address/data) and take back data_out/irq/nrdy.
+Replies are masked by ide_fast on the way back: nrdy especially, because
+minimig feeds it into gary's bus stall, and an unmasked fast-path nrdy would
+stall the classic chipset bus.  GAYLE1 left gayle's `longword` unconnected,
+so the classic side is tied to 1'b0 -- same 16-bit behaviour, now stated.
+`ide_ext_irq` is gone: with one block there is no fast/classic IRQ to choose
+between.  fastchip's `longword` input became dead and was removed with it.
+
+Measured, fit against fit (2026-08-28 build vs this one, same seed):
+
+    ALMs           41,440 -> 41,300   (-140, 99% either way)
+    registers      35,516 -> 35,168   (-348)
+    RAM blocks        258 ->    226   (-32, exactly one gayle)
+    memory bits 1,785,980 -> 1,523,836 (-262,144, likewise exact)
+
+The M10K and register savings came in as predicted; the ALMs did not.  The
+Fitter's per-entity table listed the two copies at 368.7 and 344.6 ALMs, but
+only 140 came back.  At 99% the fitter was already packing unrelated logic
+into shared ALMs, so "ALMs needed" per entity is not a budget you can
+subtract from the total.  Worth remembering before costing the next removal
+off that table -- the BRAM numbers there are exact, the ALM numbers are not.
+
+Timing, same fit:
+
+    emu|pll counter[1]  (CPU)   -1.195   TNS -1.195, a single endpoint
+    emu|pll counter[0]  (sys)   +0.285
+    pll_hdmi                    +0.027
+
+-1.195 is the best CPU number seen at 99% -- the seed sweep spread was
+-1.35..-3.32 -- but it is one placement, not proof the netlist closes, and
+the failing path is unchanged:
+
+    ir[4] -> exc_fmt[0], data delay 36.108 ns against a 35.234 ns period
+
+which is the same decode cone measured at 36.7 ns, format chained behind
+vector.  Freeing area did not shorten it and was never going to; the
+REGISTERED DECODE STAGE is still the fix.  What this buys is 140 ALMs of
+placement headroom and 32 M10Ks, and it removes 32 M10Ks of state that had
+to stay coherent for no reason.
+
+Note pll_hdmi at +0.027: it closes, but that is the domain whose -0.172
+broke video in the closing build.  Any bitstream from here gets all three
+domains checked, not just the CPU pair.
+
+Verified: AP040 regression green (`run_tests.sh`, ALL TESTS PASSED),
+Analysis & Synthesis clean with exactly one `gayle:gayle` in the netlist,
+Fitter successful.  No bitstream was assembled -- quartus_fit + quartus_sta
+only, so nothing reached output_files/Minimig.rbf.

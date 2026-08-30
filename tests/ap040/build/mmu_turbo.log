@@ -1,263 +1,280 @@
-tb_sdram_turbo: running build/t_mmu.hex through cpu_cache_new/SDRAM
-WARNING: tb_sdram_turbo.v:718: $readmemh(build/t_mmu.hex): Not enough words in the file for the requested range [0:32767].
-RD t=1830180 lin=010513 (byte 0020a26) words=3344 6708 3e3c 002a slot=1
-RD t=1832996 lin=010515 (byte 0020a2a) words=3e3c 002a 6000 10a8 slot=1
-RD t=1835812 lin=010517 (byte 0020a2e) words=6000 10a8 33fc 5566 slot=1
-FT t=1836956 st=1 sd=zzzz reg=zzzz q=zzzz fill=0
-FT t=1837044 st=2 sd=zzzz reg=zzzz q=zzzz fill=0
-FT t=1837132 st=3 sd=zzzz reg=zzzz q=zzzz fill=0
-FT t=1837220 st=4 sd=zzzz reg=zzzz q=zzzz fill=0
-RD t=1837220 lin=000270 (byte 00004e0) words=0000 8000 4e7b 0003 slot=2
-FT t=1837308 st=5 sd=zzzz reg=zzzz q=zzzz fill=0
-FT t=1837396 st=6 sd=zzzz reg=zzzz q=zzzz fill=0
-FT t=1837484 st=7 sd=0000 reg=zzzz q=zzzz fill=0
-FT t=1837572 st=8 sd=0000 reg=0000 q=zzzz fill=0
-FT t=1837660 st=9 sd=8000 reg=0000 q=0000 fill=1
-FT t=1837748 st=10 sd=8000 reg=8000 q=0000 fill=0
-FT t=1837836 st=11 sd=4e7b reg=8000 q=8000 fill=1
-FT t=1837924 st=12 sd=4e7b reg=4e7b q=8000 fill=0
-FT t=1838012 st=13 sd=0003 reg=4e7b q=4e7b fill=1
-FT t=1838100 st=14 sd=0003 reg=0003 q=4e7b fill=0
-FT t=1838188 st=15 sd=zzzz reg=0003 q=0003 fill=1
-WT t=1838276 st=10 cs=1 we=0 adr=04e2 wdat=4e75 wena=0
-FT t=1838276 st=0 sd=zzzz reg=zzzz q=0003 fill=0
-WT t=1838364 st=1 cs=1 we=0 adr=04e2 wdat=4e75 wena=0
-WT t=1838452 st=4 cs=1 we=0 adr=04e2 wdat=4e75 wena=0
-WT t=1838540 st=5 cs=1 we=0 adr=04e2 wdat=4e75 wena=0
-RD t=1838628 lin=010519 (byte 0020a32) words=33fc 5566 0000 2fff slot=1
-WT t=1839068 st=1 cs=0 we=0 adr=04e2 wdat=4e75 wena=0
-WT t=1840476 st=4 cs=1 we=0 adr=04e4 wdat=0000 wena=0
-WT t=1840564 st=5 cs=1 we=0 adr=04e4 wdat=0000 wena=0
-WT t=1840828 st=1 cs=0 we=0 adr=04e6 wdat=0000 wena=0
-WT t=1841180 st=4 cs=1 we=0 adr=04e6 wdat=4e75 wena=0
-WT t=1841268 st=5 cs=1 we=0 adr=04e6 wdat=4e75 wena=0
-RD t=1841444 lin=01051b (byte 0020a36) words=0000 2fff 1039 0000 slot=1
-WT t=1841532 st=1 cs=0 we=0 adr=04e6 wdat=4e75 wena=0
-WT t=1842940 st=4 cs=1 we=0 adr=04e8 wdat=0000 wena=0
-WT t=1843028 st=6 cs=1 we=0 adr=04e8 wdat=0000 wena=0
-RD t=1844260 lin=01051d (byte 0020a3a) words=1039 0000 2fff c0bc slot=1
-FT t=1845404 st=1 sd=zzzz reg=zzzz q=zzzz fill=0
-FT t=1845492 st=2 sd=zzzz reg=zzzz q=zzzz fill=0
-FT t=1845580 st=3 sd=zzzz reg=zzzz q=zzzz fill=0
-FT t=1845668 st=4 sd=zzzz reg=zzzz q=zzzz fill=0
-RD t=1845668 lin=000274 (byte 00004e8) words=2039 0000 3000 b0bc slot=2
-WT t=1846196 st=7 cs=1 we=0 adr=04e8 wdat=0000 wena=0
-WT t=1846372 st=8 cs=0 we=0 adr=04ea wdat=0000 wena=0
-EXC t=2835668 vec=2 pc=00000676 sr=2708
-EXCJMP t=2858900 target=00001960
-EXC t=3753684 vec=2 pc=000006f2 sr=2700
-EXCJMP t=3776916 target=00001960
-WILD: pc left program at t=4325684: 0000074c -> 0000d000
-  ring[0] t=3990932 pc=00001a0a
-  ring[1] t=3991636 pc=00001a0c
-  ring[2] t=3992340 pc=00001a0e
-  ring[3] t=3993748 pc=00001a10
-  ring[4] t=3998324 pc=00001a12
-  ring[5] t=3999028 pc=00001a14
-  ring[6] t=4000436 pc=00001a16
-  ring[7] t=4000788 pc=00001a30
-  ring[8] t=4005716 pc=00001a32
-  ring[9] t=4007124 pc=00001a34
-  ring[10] t=4008532 pc=00001a36
-  ring[11] t=4013108 pc=00001a38
-  ring[12] t=4040212 pc=00001a3c
-  ring[13] t=4046548 pc=00001a3e
-  ring[14] t=4047956 pc=00001a40
-  ring[15] t=4048660 pc=00001a42
-  ring[16] t=4060628 pc=00001a44
-  ring[17] t=4084212 pc=00001a46
-  ring[18] t=4085620 pc=00001a48
-  ring[19] t=4087028 pc=00001a4a
-  ring[20] t=4107444 pc=00001a4c
-  ring[21] t=4107796 pc=00001a5e
-  ring[22] t=4110964 pc=00001a60
-  ring[23] t=4113780 pc=00001a64
-  ring[24] t=4122580 pc=00001a66
-  ring[25] t=4123284 pc=00001a68
-  ring[26] t=4139828 pc=00001a6a
-  ring[27] t=4141588 pc=00001a6e
-  ring[28] t=4148276 pc=00001a70
-  ring[29] t=4159540 pc=000006ec
-  ring[30] t=4179956 pc=000006ee
-  ring[31] t=4181364 pc=000006f0
-  ring[32] t=4182772 pc=000006f2
-  ring[33] t=4211636 pc=000006f4
-  ring[34] t=4213396 pc=000006f8
-  ring[35] t=4219028 pc=000006fa
-  ring[36] t=4219380 pc=00000702
-  ring[37] t=4223604 pc=00000704
-  ring[38] t=4226420 pc=00000708
-  ring[39] t=4235924 pc=0000070a
-  ring[40] t=4236628 pc=0000070c
-  ring[41] t=4238740 pc=0000070e
-  ring[42] t=4240148 pc=00000710
-  ring[43] t=4244372 pc=00000714
-  ring[44] t=4247188 pc=00000716
-  ring[45] t=4247540 pc=0000071e
-  ring[46] t=4251764 pc=00000720
-  ring[47] t=4258452 pc=00000724
-  ring[48] t=4261268 pc=00000728
-  ring[49] t=4271828 pc=0000072a
-  ring[50] t=4272532 pc=0000072c
-  ring[51] t=4273940 pc=0000072e
-  ring[52] t=4275348 pc=00000730
-  ring[53] t=4278164 pc=00000732
-  ring[54] t=4285908 pc=00000734
-  ring[55] t=4286612 pc=00000738
-  ring[56] t=4292244 pc=0000073c
-  ring[57] t=4299988 pc=0000073e
-  ring[58] t=4300692 pc=00000740
-  ring[59] t=4306324 pc=00000742
-  ring[60] t=4307732 pc=00000744
-  ring[61] t=4309140 pc=00000746
-  ring[62] t=4319700 pc=00000748
-  ring[63] t=4320756 pc=0000074c
-EXC t=4429524 vec=2 pc=0000d000 sr=2700
-EXCJMP t=4450292 target=00001960
-LC t=4881844 D1WR adr=1fe bs=11 dat=0000 fill=1
-LC t=4882196 D1WR adr=1fc bs=11 dat=0000 fill=1
-LC t=4882372 D1WR adr=1fd bs=11 dat=0000 fill=1
-LC t=5070516 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=5071572 D1WR adr=1fe bs=11 dat=07ce fill=0
-LC t=5085300 D1WR adr=1fc bs=11 dat=0000 fill=0
-LC t=5222228 D1WR adr=1fc bs=11 dat=0000 fill=0
-LC t=5225044 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=5227860 D1WR adr=1fe bs=11 dat=0000 fill=0
-EXC t=5232084 vec=2 pc=000007d4 sr=2000
-EXCJMP t=5252852 target=00001960
-LC t=5688628 D1WR adr=1fc bs=11 dat=0000 fill=0
-LC t=5691444 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=5692500 D1WR adr=1fe bs=11 dat=07d6 fill=0
-EXC t=5696724 vec=33 pc=000007d6 sr=2000
-EXCJMP t=5719956 target=00001ac2
-LC t=5751636 D1WR adr=1fc bs=11 dat=2000 fill=0
-LC t=5766420 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=5767476 D1WR adr=1fe bs=11 dat=07d6 fill=0
-LC t=5799860 D1WR adr=1fc bs=11 dat=2000 fill=1
-LC t=5800036 D1WR adr=1fd bs=11 dat=0000 fill=1
-LC t=5800212 D1WR adr=1fe bs=11 dat=07d6 fill=1
-LC t=7644340 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=7645396 D1WR adr=1fe bs=11 dat=7000 fill=0
-LC t=7659124 D1WR adr=1fc bs=11 dat=0000 fill=0
-LC t=7721428 D1WR adr=1fc bs=11 dat=0000 fill=0
-LC t=7724244 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=7725300 D1WR adr=1fe bs=11 dat=7004 fill=0
-EXC t=7729524 vec=33 pc=00007004 sr=2000
-EXCJMP t=7753108 target=00001ac2
-LC t=7801684 D1WR adr=1fc bs=11 dat=2000 fill=0
-LC t=7816468 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=7817524 D1WR adr=1fe bs=11 dat=087a fill=0
-LC t=8050548 D1WR adr=1fc bs=11 dat=0000 fill=0
-LC t=8053364 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=8054420 D1WR adr=1fe bs=11 dat=7008 fill=0
-EXC t=8058996 vec=33 pc=00007008 sr=2000
-EXCJMP t=8080116 target=00001ac2
-LC t=8121300 D1WR adr=1fc bs=11 dat=2000 fill=0
-LC t=8132916 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=8133972 D1WR adr=1fe bs=11 dat=08c6 fill=0
-EXC t=8744692 vec=2 pc=00000988 sr=2004
-EXCJMP t=8766868 target=00001960
-EXC t=10803188 vec=2 pc=00000c06 sr=2008
-EXCJMP t=10822900 target=00001960
-EXC t=11650804 vec=2 pc=00000c7a sr=2004
-EXCJMP t=11672980 target=00001960
-EXC t=12706804 vec=2 pc=00000d22 sr=2004
-EXCJMP t=12726516 target=00001960
-EXC t=14672372 vec=2 pc=00000e84 sr=2000
-EXCJMP t=14694548 target=00001960
-EXC t=17397204 vec=2 pc=00000fb2 sr=2000
-EXCJMP t=17420436 target=00001960
-EXC t=18358516 vec=2 pc=00001024 sr=2000
-EXCJMP t=18378228 target=00001960
-EXC t=19135732 vec=2 pc=0000108a sr=2000
-EXCJMP t=19155444 target=00001960
-EXC t=19901684 vec=2 pc=000010f0 sr=2000
-EXCJMP t=19921396 target=00001960
-EXC t=20673268 vec=2 pc=0000113c sr=2008
-EXCJMP t=20695444 target=00001960
-LC t=23602612 D1WR adr=1fc bs=11 dat=0000 fill=1
-LC t=23602788 D1WR adr=1fd bs=11 dat=0000 fill=1
-LC t=23602964 D1WR adr=1fe bs=11 dat=6000 fill=1
-LC t=23717716 D1WR adr=1fc bs=11 dat=0000 fill=0
-LC t=23720532 D1WR adr=1fd bs=11 dat=0000 fill=0
-LC t=23723348 D1WR adr=1fe bs=11 dat=0000 fill=0
-EXC t=23727572 vec=2 pc=00006000 sr=2000
-EXCJMP t=23750804 target=00001960
-LC t=24287956 D1WR adr=1fc bs=11 dat=0000 fill=0
-EXC t=24296052 vec=33 pc=00006004 sr=2000
-EXCJMP t=24319636 target=00001ac2
-EXC t=24986324 vec=2 pc=0000b006 sr=2000
-EXCJMP t=25009556 target=00001960
-EXC t=25580148 vec=33 pc=0000b008 sr=2000
-EXCJMP t=25603732 target=00001ac2
-EXC t=26031764 vec=2 pc=000013ea sr=2000
-EXCJMP t=26054292 target=00001960
-EXC t=26936052 vec=2 pc=0000143e sr=2000
-EXCJMP t=26955764 target=00001960
+tb_cpu_wrapper_chip: running build/t_mmu.hex over the 7MHz chip bus
+chip-bus run passed (770601 cycles)
+ALL TESTS PASSED
+- tb_cpu_wrapper_chip.v:617: Verilog $finish
+- S i m u l a t i o n   R e p o r t: Verilator 5.050 2026-07-01
+- Verilator: $finish at 31ms; walltime 0.944 s; speed 32.670 ms/s
+- Verilator: cpu 0.942 s on 1 threads; allocated 8 MB
+in=0002dc (byte 00005b8) words=0001 41f9 0000 5000 slot=2
+FT t=1831676 st=5 sd=0000 reg=0000 q=0000 fill=0
+FT t=1831764 st=6 sd=0000 reg=0000 q=0000 fill=0
+FT t=1831852 st=7 sd=0001 reg=0000 q=0000 fill=0
+FT t=1831940 st=8 sd=0001 reg=0001 q=0000 fill=0
+FT t=1832028 st=9 sd=41f9 reg=0001 q=0001 fill=1
+FT t=1832116 st=10 sd=41f9 reg=41f9 q=0001 fill=0
+FT t=1832204 st=11 sd=0000 reg=41f9 q=41f9 fill=1
+FT t=1832292 st=12 sd=0000 reg=0000 q=41f9 fill=0
+FT t=1832380 st=13 sd=5000 reg=0000 q=0000 fill=1
+FT t=1832468 st=14 sd=5000 reg=5000 q=0000 fill=0
+FT t=1832556 st=15 sd=0000 reg=5000 q=5000 fill=1
+FT t=1832644 st=0 sd=0000 reg=0000 q=5000 fill=0
+RD t=1832996 lin=010515 (byte 0020a2a) words=b0bc 0000 002a 6708 slot=1
+RD t=1835812 lin=010517 (byte 0020a2e) words=002a 6708 3e3c 0021 slot=1
+WT t=1838364 st=4 cs=1 we=0 adr=05be wdat=0505 wena=0
+WT t=1838452 st=5 cs=1 we=0 adr=05be wdat=0505 wena=0
+RD t=1838628 lin=010519 (byte 0020a32) words=3e3c 0021 6000 160a slot=1
+WT t=1838716 st=1 cs=0 we=0 adr=05be wdat=0505 wena=0
+WT t=1840828 st=4 cs=1 we=0 adr=05c0 wdat=cafe wena=0
+WT t=1840916 st=6 cs=1 we=0 adr=05c0 wdat=cafe wena=0
+RD t=1841444 lin=01051b (byte 0020a36) words=6000 160a 23fc 0000 slot=1
+FT t=1842588 st=1 sd=0000 reg=0000 q=0000 fill=0
+FT t=1842676 st=2 sd=0000 reg=0000 q=0000 fill=0
+FT t=1842764 st=3 sd=0000 reg=0000 q=0000 fill=0
+FT t=1842852 st=4 sd=0000 reg=0000 q=0000 fill=0
+RD t=1842852 lin=0002e0 (byte 00005c0) words=f568 4e7a 0805 b0bc slot=2
+WT t=1843380 st=7 cs=1 we=0 adr=05c0 wdat=cafe wena=0
+WT t=1843556 st=8 cs=0 we=0 adr=05c2 wdat=cafe wena=0
+WT t=1843732 st=9 cs=0 we=0 adr=05c2 wdat=cafe wena=0
+WT t=1843908 st=10 cs=1 we=0 adr=05c2 wdat=0505 wena=0
+WT t=1843996 st=1 cs=1 we=0 adr=05c2 wdat=0505 wena=0
+WT t=1844084 st=4 cs=1 we=0 adr=05c2 wdat=0505 wena=0
+WT t=1844172 st=5 cs=1 we=0 adr=05c2 wdat=0505 wena=0
+RD t=1844260 lin=01051d (byte 0020a3a) words=23fc 0000 0a76 0000 slot=1
+WT t=1844348 st=1 cs=0 we=0 adr=05c2 wdat=0505 wena=0
+WT t=1846108 st=4 cs=1 we=0 adr=05c4 wdat=cafe wena=0
+WT t=1846196 st=5 cs=1 we=0 adr=05c4 wdat=cafe wena=0
+WT t=1846460 st=1 cs=0 we=0 adr=05c6 wdat=cafe wena=0
+EXC t=3316852 vec=2 pc=00000826 sr=2708
+EXCJMP t=3328820 target=00001eca
+EXC t=4096884 vec=2 pc=000008a2 sr=2700
+EXCJMP t=4106740 target=00001eca
+WILD: pc left program at t=4569972: 000008fc -> 0000d000
+  ring[0] t=4289780 pc=00001f70
+  ring[1] t=4292244 pc=00001f72
+  ring[2] t=4295764 pc=00001f74
+  ring[3] t=4297524 pc=00001f76
+  ring[4] t=4297876 pc=00001f78
+  ring[5] t=4300340 pc=00001f7a
+  ring[6] t=4303156 pc=00001f7c
+  ring[7] t=4305620 pc=00001f7e
+  ring[8] t=4306324 pc=00001f80
+  ring[9] t=4306676 pc=00001f9a
+  ring[10] t=4310548 pc=00001f9c
+  ring[11] t=4313364 pc=00001fa0
+  ring[12] t=4319348 pc=00001fa2
+  ring[13] t=4335540 pc=00001fa6
+  ring[14] t=4341524 pc=00001fa8
+  ring[15] t=4342580 pc=00001fac
+  ring[16] t=4352788 pc=00001fae
+  ring[17] t=4373556 pc=00001fb0
+  ring[18] t=4376372 pc=00001fb4
+  ring[19] t=4387636 pc=00001fb6
+  ring[20] t=4387988 pc=00001fc8
+  ring[21] t=4390452 pc=00001fca
+  ring[22] t=4391860 pc=00001fcc
+  ring[23] t=4393268 pc=00001fce
+  ring[24] t=4400660 pc=00001fd0
+  ring[25] t=4401364 pc=00001fd2
+  ring[26] t=4418260 pc=00001fd4
+  ring[27] t=4419668 pc=00001fd8
+  ring[28] t=4423188 pc=00001fda
+  ring[29] t=4433748 pc=0000089c
+  ring[30] t=4441844 pc=0000089e
+  ring[31] t=4442900 pc=000008a0
+  ring[32] t=4444660 pc=000008a2
+  ring[33] t=4461204 pc=000008a4
+  ring[34] t=4463668 pc=000008a8
+  ring[35] t=4469300 pc=000008aa
+  ring[36] t=4469652 pc=000008b2
+  ring[37] t=4474228 pc=000008b4
+  ring[38] t=4477044 pc=000008b8
+  ring[39] t=4483380 pc=000008ba
+  ring[40] t=4484084 pc=000008bc
+  ring[41] t=4486196 pc=000008be
+  ring[42] t=4486900 pc=000008c0
+  ring[43] t=4491828 pc=000008c4
+  ring[44] t=4494644 pc=000008c6
+  ring[45] t=4494996 pc=000008ce
+  ring[46] t=4499572 pc=000008d0
+  ring[47] t=4505908 pc=000008d4
+  ring[48] t=4508724 pc=000008d8
+  ring[49] t=4519988 pc=000008da
+  ring[50] t=4520692 pc=000008dc
+  ring[51] t=4522804 pc=000008de
+  ring[52] t=4524212 pc=000008e0
+  ring[53] t=4528436 pc=000008e2
+  ring[54] t=4533012 pc=000008e4
+  ring[55] t=4535828 pc=000008e8
+  ring[56] t=4539700 pc=000008ec
+  ring[57] t=4547092 pc=000008ee
+  ring[58] t=4547796 pc=000008f0
+  ring[59] t=4550964 pc=000008f2
+  ring[60] t=4552372 pc=000008f4
+  ring[61] t=4553780 pc=000008f6
+  ring[62] t=4558356 pc=000008f8
+  ring[63] t=4565044 pc=000008fc
+EXC t=4662900 vec=2 pc=0000d000 sr=2700
+EXCJMP t=4672756 target=00001eca
+LC t=5039540 D1WR adr=1fe bs=11 dat=0000 fill=1
+LC t=5039892 D1WR adr=1fc bs=11 dat=0000 fill=1
+LC t=5040068 D1WR adr=1fd bs=11 dat=0000 fill=1
+LC t=5211316 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=5212020 D1WR adr=1fe bs=11 dat=097e fill=0
+LC t=5218708 D1WR adr=1fc bs=11 dat=0000 fill=0
+LC t=5331348 D1WR adr=1fc bs=11 dat=0000 fill=0
+LC t=5334164 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=5336980 D1WR adr=1fe bs=11 dat=0000 fill=0
+EXC t=5341556 vec=2 pc=00000984 sr=2000
+EXCJMP t=5351412 target=00001eca
+LC t=5707636 D1WR adr=1fc bs=11 dat=0000 fill=0
+LC t=5709748 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=5710452 D1WR adr=1fe bs=11 dat=0986 fill=0
+EXC t=5716084 vec=33 pc=00000986 sr=2000
+EXCJMP t=5728052 target=0000202c
+LC t=5771348 D1WR adr=1fc bs=11 dat=2000 fill=0
+LC t=5791412 D1WR adr=1fc bs=11 dat=2000 fill=1
+LC t=5791588 D1WR adr=1fd bs=11 dat=0000 fill=1
+LC t=5791764 D1WR adr=1fe bs=11 dat=0986 fill=1
+LC t=7156468 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=7157172 D1WR adr=1fe bs=11 dat=7000 fill=0
+LC t=7168436 D1WR adr=1fc bs=11 dat=0000 fill=0
+LC t=7227924 D1WR adr=1fc bs=11 dat=0000 fill=0
+LC t=7230036 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=7230740 D1WR adr=1fe bs=11 dat=7004 fill=0
+EXC t=7236724 vec=33 pc=00007004 sr=2000
+EXCJMP t=7259956 target=0000202c
+LC t=7297620 D1WR adr=1fc bs=11 dat=2000 fill=0
+LC t=7309236 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=7309940 D1WR adr=1fe bs=11 dat=0a2a fill=0
+LC t=7501428 D1WR adr=1fc bs=11 dat=0000 fill=0
+LC t=7503540 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=7504244 D1WR adr=1fe bs=11 dat=7008 fill=0
+EXC t=7509876 vec=33 pc=00007008 sr=2000
+EXCJMP t=7519732 target=0000202c
+LC t=7550356 D1WR adr=1fc bs=11 dat=2000 fill=0
+LC t=7559508 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=7560212 D1WR adr=1fe bs=11 dat=0a76 fill=0
+LC t=8076948 D1WR adr=1fc bs=11 dat=0000 fill=0
+LC t=8079764 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=8082580 D1WR adr=1fe bs=11 dat=0000 fill=0
+EXC t=8087156 vec=2 pc=00000b38 sr=2004
+EXCJMP t=8099124 target=00001eca
+EXC t=9965428 vec=2 pc=0000104c sr=2008
+EXCJMP t=9977396 target=00001eca
+EXC t=10770804 vec=2 pc=000010c0 sr=2004
+EXCJMP t=10780660 target=00001eca
+EXC t=11508596 vec=2 pc=00001168 sr=2004
+EXCJMP t=11518452 target=00001eca
+EXC t=13353076 vec=2 pc=00001322 sr=2000
+EXCJMP t=13365044 target=00001eca
+EXC t=15462260 vec=2 pc=00001450 sr=2000
+EXCJMP t=15479860 target=00001eca
+EXC t=16267636 vec=2 pc=000014c2 sr=2000
+EXCJMP t=16277492 target=00001eca
+EXC t=16923764 vec=2 pc=00001528 sr=2000
+EXCJMP t=16933620 target=00001eca
+EXC t=17577076 vec=2 pc=0000158e sr=2000
+EXCJMP t=17589044 target=00001eca
+EXC t=18317684 vec=2 pc=000015da sr=2008
+EXCJMP t=18327540 target=00001eca
+LC t=20519092 D1WR adr=1fc bs=11 dat=0000 fill=1
+LC t=20519268 D1WR adr=1fd bs=11 dat=0000 fill=1
+LC t=20519444 D1WR adr=1fe bs=11 dat=6000 fill=1
+LC t=20630676 D1WR adr=1fc bs=11 dat=0000 fill=0
+LC t=20633492 D1WR adr=1fd bs=11 dat=0000 fill=0
+LC t=20636308 D1WR adr=1fe bs=11 dat=0000 fill=0
+EXC t=20640884 vec=2 pc=00006000 sr=2000
+EXCJMP t=20664116 target=00001eca
+EXC t=21156212 vec=33 pc=00006004 sr=2000
+EXCJMP t=21179444 target=0000202c
+EXC t=21789812 vec=2 pc=0000b006 sr=2000
+EXCJMP t=21813044 target=00001eca
+EXC t=22319220 vec=33 pc=0000b008 sr=2000
+EXCJMP t=22342452 target=0000202c
+EXC t=22733172 vec=2 pc=00001888 sr=2000
+EXCJMP t=22743028 target=00001eca
+EXC t=23409012 vec=2 pc=000018dc sr=2000
+EXCJMP t=23420980 target=00001eca
+EXC t=24115828 vec=2 pc=0000191e sr=2000
+EXCJMP t=24125684 target=00001eca
+EXC t=25154932 vec=2 pc=0000b002 sr=2008
+EXCJMP t=25178164 target=00001eca
+EXC t=25715316 vec=33 pc=0000b004 sr=2008
+EXCJMP t=25738548 target=0000202c
+EXC t=26185588 vec=6 pc=00001ad8 sr=2009
+EXCJMP t=26197556 target=00001ec2
+EXC t=26317940 vec=2 pc=00001ec8 sr=2008
+EXCJMP t=26324276 target=00001eca
 RD t=27100964 lin=014b2f (byte 002965e) words=0000 0000 0000 0000 slot=1
 RD t=27103780 lin=014b31 (byte 0029662) words=0000 0000 0000 0000 slot=1
 RD t=27106596 lin=014b33 (byte 0029666) words=0000 0000 0000 0000 slot=1
 RD t=27109412 lin=014b35 (byte 002966a) words=0000 0000 0000 0000 slot=1
+RD t=27110820 lin=000db8 (byte 0001b70) words=1111 1111 0eb9 1800 slot=2
 RD t=27112228 lin=014b37 (byte 002966e) words=0000 0000 0000 0000 slot=1
 RD t=27115044 lin=014b39 (byte 0029672) words=0000 0000 0000 0000 slot=1
 RD t=27117860 lin=014b3b (byte 0029676) words=0000 0000 0000 0000 slot=1
+RD t=27119268 lin=000dbc (byte 0001b78) words=0000 c000 2039 0000 slot=2
 RD t=27120676 lin=014b3d (byte 002967a) words=0000 0000 0000 0000 slot=1
 RD t=27123492 lin=014b3f (byte 002967e) words=0000 0000 0000 0000 slot=1
 RD t=27126308 lin=014b41 (byte 0029682) words=0000 0000 0000 0000 slot=1
+RD t=27127716 lin=002400 (byte 0004800) words=0000 4a0b 0000 0000 slot=4
 RD t=27129124 lin=014b43 (byte 0029686) words=0000 0000 0000 0000 slot=1
 RD t=27131940 lin=014b45 (byte 002968a) words=0000 0000 0000 0000 slot=1
+RD t=27133348 lin=002500 (byte 0004a00) words=0000 4c0b 0000 0000 slot=4
 RD t=27134756 lin=014b47 (byte 002968e) words=0000 0000 0000 0000 slot=1
 RD t=27137572 lin=014b49 (byte 0029692) words=0000 0000 0000 0000 slot=1
+RD t=27138980 lin=00260c (byte 0004c18) words=0000 c003 0000 e003 slot=4
 RD t=27140388 lin=014b4b (byte 0029696) words=0000 0000 0000 0000 slot=1
 RD t=27143204 lin=014b4d (byte 002969a) words=0000 0000 0000 0000 slot=1
 RD t=27146020 lin=014b4f (byte 002969e) words=0000 0000 0000 0000 slot=1
 RD t=27148836 lin=014b51 (byte 00296a2) words=0000 0000 0000 0000 slot=1
 RD t=27151652 lin=014b53 (byte 00296a6) words=0000 0000 0000 0000 slot=1
 RD t=27154468 lin=014b55 (byte 00296aa) words=0000 0000 0000 0000 slot=1
+RD t=27155876 lin=000dc0 (byte 0001b80) words=e000 b0bc 1111 1111 slot=2
 RD t=27157284 lin=014b57 (byte 00296ae) words=0000 0000 0000 0000 slot=1
 RD t=27160100 lin=014b59 (byte 00296b2) words=0000 0000 0000 0000 slot=1
+RD t=27161508 lin=002000 (byte 0004000) words=0000 420b 0000 0000 slot=4
 RD t=27162916 lin=014b5b (byte 00296b6) words=0000 0000 0000 0000 slot=1
 RD t=27165732 lin=014b5d (byte 00296ba) words=0000 0000 0000 0000 slot=1
+RD t=27167140 lin=002100 (byte 0004200) words=0000 440b 0000 0000 slot=4
 RD t=27168548 lin=014b5f (byte 00296be) words=0000 0000 0000 0000 slot=1
 RD t=27171364 lin=014b61 (byte 00296c2) words=0000 0000 0000 0000 slot=1
+RD t=27172772 lin=00220e (byte 000441c) words=0000 c01b 0001 0003 slot=4
 RD t=27174180 lin=014b63 (byte 00296c6) words=0000 0000 0000 0000 slot=1
 RD t=27176996 lin=014b65 (byte 00296ca) words=0000 0000 0000 0000 slot=1
 RD t=27179812 lin=014b67 (byte 00296ce) words=0000 0000 0000 0000 slot=1
 RD t=27182628 lin=014b69 (byte 00296d2) words=0000 0000 0000 0000 slot=1
+RD t=27184036 lin=000dc4 (byte 0001b88) words=6708 3e3c 00b1 6000 slot=2
 RD t=27185444 lin=014b6b (byte 00296d6) words=0000 0000 0000 0000 slot=1
 RD t=27188260 lin=014b6d (byte 00296da) words=0000 0000 0000 0000 slot=1
+RD t=27189668 lin=000dc9 (byte 0001b92) words=7005 4e7b 0001 223c slot=2
 RD t=27191076 lin=014b6f (byte 00296de) words=0000 0000 0000 0000 slot=1
 RD t=27193892 lin=014b71 (byte 00296e2) words=0000 0000 0000 0000 slot=1
 RD t=27196708 lin=014b73 (byte 00296e6) words=0000 0000 0000 0000 slot=1
+RD t=27198116 lin=000dcc (byte 0001b98) words=223c 5555 5555 0eb9 slot=2
 RD t=27199524 lin=014b75 (byte 00296ea) words=0000 0000 0000 0000 slot=1
 RD t=27202340 lin=014b77 (byte 00296ee) words=0000 0000 0000 0000 slot=1
 RD t=27205156 lin=014b79 (byte 00296f2) words=0000 0000 0000 0000 slot=1
 RD t=27207972 lin=014b7b (byte 00296f6) words=0000 0000 0000 0000 slot=1
+RD t=27209380 lin=000dd0 (byte 0001ba0) words=1800 0000 c000 2039 slot=2
 RD t=27210788 lin=014b7d (byte 00296fa) words=0000 0000 0000 0000 slot=1
 RD t=27213604 lin=014b7f (byte 00296fe) words=0000 0000 0000 0000 slot=1
 RD t=27216420 lin=014b81 (byte 0029702) words=0000 0000 0000 0000 slot=1
+RD t=27217828 lin=000dd4 (byte 0001ba8) words=0000 c000 b0bc 5555 slot=2
 RD t=27219236 lin=014b83 (byte 0029706) words=0000 0000 0000 0000 slot=1
-RD t=27220644 lin=002000 (byte 0004000) words=0000 420b 0000 0000 slot=4
 RD t=27222052 lin=014b85 (byte 002970a) words=0000 0000 0000 0000 slot=1
+RD t=27223460 lin=00220c (byte 0004418) words=0000 e01b 0000 c01b slot=4
 RD t=27224868 lin=014b87 (byte 002970e) words=0000 0000 0000 0000 slot=1
-RD t=27226276 lin=002100 (byte 0004200) words=0000 440b 0000 0000 slot=4
 RD t=27227684 lin=014b89 (byte 0029712) words=0000 0000 0000 0000 slot=1
 RD t=27230500 lin=014b8b (byte 0029716) words=0000 0000 0000 0000 slot=1
-RD t=27231908 lin=002204 (byte 0004408) words=0000 401b 0000 6003 slot=4
 RD t=27233316 lin=014b8d (byte 002971a) words=0000 0000 0000 0000 slot=1
+RD t=27234724 lin=007000 (byte 000e000) words=5555 5555 feed 5678 slot=2
 RD t=27236132 lin=014b8f (byte 002971e) words=0000 0000 0000 0000 slot=1
 RD t=27238948 lin=014b91 (byte 0029722) words=0000 0000 0000 0000 slot=1
-EXC t=27628788 vec=2 pc=00001480 sr=2000
-EXCJMP t=27648500 target=00001960
-EXC t=28844596 vec=2 pc=0000b002 sr=2008
-EXCJMP t=28867476 target=00001960
-EXC t=29494388 vec=33 pc=0000b004 sr=2008
-EXCJMP t=29517972 target=00001ac2
-EXC t=30049140 vec=6 pc=0000163a sr=2009
-EXCJMP t=30072724 target=00001958
-EXC t=30201556 vec=2 pc=0000195e sr=2008
-EXCJMP t=30204724 target=00001960
 walker port selftest passed
-turbo-path run passed (356447 cycles)
+turbo-path run passed (342463 cycles)
 ALL TESTS PASSED
-tb_sdram_turbo.v:766: $finish called at 31412084 (100ps)
+- tb_sdram_turbo.v:806: Verilog $finish
+- S i m u l a t i o n   R e p o r t: Verilator 5.050 2026-07-01
+- Verilator: $finish at 3ms; walltime 0.168 s; speed 18.012 ms/s
+- Verilator: cpu 0.166 s on 1 threads; allocated 8 MB

@@ -208,7 +208,6 @@ module minimig
 	input   [7:0] kbd_mouse_data,
 	output 	     pwr_led,     // power led
 	output 	     fdd_led,     // disk activity LED, active when DMA is on
-	output 	     hdd_led,
 	input  [64:0] rtc,
 
 	//host controller interface (SPI)
@@ -261,13 +260,19 @@ module minimig
 	output        ide_ena,
 
 	output        ide_fast,
-	input         ide_ext_irq,
-	output  [5:0] ide_req,
-	input   [4:0] ide_address,
-	input         ide_write,
-	input  [15:0] ide_writedata,
-	input         ide_read,
-	output [15:0] ide_readdata,
+
+	// Gayle/IDE frontend.  The block itself lives in Minimig.sv and is
+	// shared with fastchip: gary only decodes when ide_ena & ~ide_fast and
+	// fastchip only when ide_ena & ide_fast, so the two never overlap.
+	output        gayle_sel_ide,
+	output        gayle_sel_gayle,
+	output [23:1] gayle_addr,
+	output [15:0] gayle_din,
+	output        gayle_rd,
+	output        gayle_wr,
+	input  [15:0] gayle_dout,
+	input         gayle_irq,
+	input         gayle_nrdy,
 
 	// A2065 register file + doorbell
 	// A2065 memory port — goes to ddram_ctrl alongside the fast RAM
@@ -296,7 +301,7 @@ wire [15:0] paula_data_out;	//paula data bus out
 wire [15:0] denise_data_out;	//denise data bus out
 wire [15:0] user_data_out;	   //user IO data out
 wire [15:0] gary_data_out;	   //data out from memory bus multiplexer
-wire [15:0] gayle_data_out;	//Gayle data out
+//Gayle data out arrives from the shared block in Minimig.sv
 wire [15:0] cia_data_out;	   //cia A+B data bus out
 wire [15:0] ar3_data_out;	   //Action Replay data out
 
@@ -408,8 +413,6 @@ wire  [5:0] ide_config;			//HDD & HDC config: bit #0 enables Gayle, bit #1 enabl
 //gayle stuff
 wire        sel_ide;				//select IDE drive registers
 wire        sel_gayle;			//select GAYLE control registers
-wire        gayle_irq;			//interrupt request
-wire        gayle_nrdy;       // HDD fifo is not ready for reading
 
 wire	[7:0] bank;					//memory bank select
 
@@ -508,7 +511,7 @@ paula PAULA1
 	.sof(sof),
 	.strhor(strhor_paula),
 	.vblint(vbl_int),
-	.int2(int2|(ide_fast ? ide_ext_irq : gayle_irq)|a2065_int2_sync),
+	.int2(int2|gayle_irq|a2065_int2_sync),
 	.int3(int3),
 	.int6(int6 | int6_toccata),
 	._ipl(_iplx),
@@ -832,29 +835,16 @@ gary GARY1
 	.bootrom(bootrom)
 );
 
-gayle GAYLE1
-(
-	.clk(clk),
-	.reset(reset),
-	.addr(cpu_address_out),
-	.data_in(cpu_data_out),
-	.data_out(gayle_data_out),
-	.rd(cpu_rd),
-	.wr(cpu_hwr),
-	.sel_ide(sel_ide),
-	.sel_gayle(sel_gayle),
-	.irq(gayle_irq),
-	.nrdy(gayle_nrdy),
-
-	.ide_req(ide_req),
-	.ide_address(ide_address),
-	.ide_write(ide_write),
-	.ide_writedata(ide_writedata),
-	.ide_read(ide_read),
-	.ide_readdata(ide_readdata),
-
-	.led(hdd_led)
-);
+// Classic-side Gayle frontend.  GAYLE1 used to sit here; the block moved to
+// Minimig.sv so fastchip can share the one copy.  The old instance left
+// gayle's longword input unconnected, so the classic path is 16-bit only --
+// Minimig.sv reproduces that by tying longword low when ~ide_fast.
+assign gayle_sel_ide   = sel_ide;
+assign gayle_sel_gayle = sel_gayle;
+assign gayle_addr      = cpu_address_out;
+assign gayle_din       = cpu_data_out;
+assign gayle_rd        = cpu_rd;
+assign gayle_wr        = cpu_hwr;
 
 //instantiate system control
 minimig_syscontrol CONTROL1 
@@ -957,7 +947,7 @@ a2065 a2065_inst (
 //data multiplexer
 assign cpu_data_in[15:0]= gary_data_out[15:0]
 							 | cia_data_out[15:0]
-							 | gayle_data_out[15:0]
+							 | gayle_dout[15:0]
 							 | cart_data_out[15:0]
 							 | rtc_out
 							 | toccata_out

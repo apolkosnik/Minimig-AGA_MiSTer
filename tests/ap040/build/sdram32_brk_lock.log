@@ -80,21 +80,36 @@ FAIL: DUAL fill @0000800 beat 0 = xxxx5b5e, expected 5a5e5b5e
 FAIL: DUAL fill @0000800 beat 1 = xxxx595e, expected 585e595e
 FAIL: DUAL fill @0000800 beat 2 = xxxx5f5e, expected 5e5e5f5e
 FAIL: DUAL fill @0000800 beat 3 = xxxx5d5e, expected 5c5e5d5e
-FILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4
-FILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)
-FILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)
 SDRAM MODEL: ACTIVE into open bank 0 at t=160116
-SDRAM MODEL: ACTIVE into open bank 0 at t=161524
-SDRAM MODEL: ACTIVE into open bank 0 at t=162932
-SDRAM MODEL: ACTIVE into open bank 0 at t=165748
+FAIL: DUAL fill @0000800 beat 0 = xxxx5b5e, expected 5a5e5b5e
+FAIL: DUAL fill @0000800 beat 1 = xxxx595e, expected 585e595e
+FAIL: DUAL fill @0000800 beat 2 = xxxx5f5e, expected 5e5e5f5e
+FAIL: DUAL fill @0000800 beat 3 = xxxx5d5e, expected 5c5e5d5e
+SDRAM MODEL: ACTIVE into open bank 0 at t=164340
+FAIL: DUAL fill @0000800 beat 0 = xxxx5b5e, expected 5a5e5b5e
+FAIL: DUAL fill @0000800 beat 1 = xxxx595e, expected 585e595e
+FAIL: DUAL fill @0000800 beat 2 = xxxx5f5e, expected 5e5e5f5e
+FAIL: DUAL fill @0000800 beat 3 = xxxx5d5e, expected 5c5e5d5e
+SDRAM MODEL: ACTIVE into open bank 0 at t=168564
+FAIL: DUAL fill @0000800 beat 0 = xxxx5b5e, expected 5a5e5b5e
+FAIL: DUAL fill @0000800 beat 1 = xxxx595e, expected 585e595e
+FAIL: DUAL fill @0000800 beat 2 = xxxx5f5e, expected 5e5e5f5e
+FAIL: DUAL fill @0000800 beat 3 = xxxx5d5e, expected 5c5e5d5e
+FILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4
+FILL LATENCY (DUAL=1): request -> 4th beat = 20 clk_114 cycles (includes the wait for the CCK slot)
+FILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)
+SDRAM MODEL: ACTIVE into open bank 0 at t=172788
+SDRAM MODEL: ACTIVE into open bank 0 at t=174196
+SDRAM MODEL: ACTIVE into open bank 0 at t=175604
+SDRAM MODEL: AUTOREFRESH with an open bank at t=177012
+SDRAM MODEL: ACTIVE into open bank 0 at t=178420
 FAIL: DUAL fill @0000900 beat 0 = xxxxdb5e, expected da5edb5e
 FAIL: DUAL fill @0000900 beat 1 = xxxxd95e, expected d85ed95e
 FAIL: DUAL fill @0000900 beat 2 = xxxxdf5e, expected de5edf5e
 FAIL: DUAL fill @0000900 beat 3 = xxxxdd5e, expected dc5edd5e
-SDRAM MODEL: ACTIVE into open bank 0 at t=168564
-SDRAM MODEL: ACTIVE into open bank 0 at t=174196
-SDRAM MODEL: AUTOREFRESH with an open bank at t=178420
-SDRAM MODEL: ACTIVE into open bank 0 at t=179828
+SDRAM MODEL: ACTIVE into open bank 0 at t=181236
+SDRAM MODEL: ACTIVE into open bank 0 at t=186868
+SDRAM MODEL: ACTIVE into open bank 0 at t=192500
 FAIL: DUAL fill @0001400 beat 0 = xxxxbeef, expected deadbeef
 FAIL: DUAL fill @0001400 beat 1 = xxxxface, expected feedface
 FAIL: DUAL fill @0001400 beat 2 = xxxx5f50, expected 5e505f50
@@ -106,8 +121,9 @@ FAIL: secondary memory word 768 (unit 384) = 5a59, expected 1234
 FAIL: secondary memory word 1536 (unit 768) = 5a5c, expected cafe
 FAIL: secondary memory word 2560 (unit 1280) = 5a50, expected dead
 FAIL: secondary memory word 2562 (unit 1281) = 5850, expected feed
-FAIL: 29 ACTIVE-into-open-bank violations (ref 0, pri 0, sec 29, 16b 0)
-FAIL: 4 refresh-with-open-bank violations
-lockstep: 1497 mismatching cycles
-TEST FAILED with 3523 errors
-tb_sdram32.v:1151: $finish called at 188892 (100ps)
+SDRAM MODEL: AUTOREFRESH with an open bank at t=199540
+FAIL: 32 ACTIVE-into-open-bank violations (ref 0, pri 0, sec 32, 16b 0)
+FAIL: 5 refresh-with-open-bank violations
+lockstep: 1641 mismatching cycles
+TEST FAILED with 4115 errors
+tb_sdram32.v:1204: $finish called at 201564 (100ps)

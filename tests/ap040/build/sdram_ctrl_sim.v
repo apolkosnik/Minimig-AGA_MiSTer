@@ -86,7 +86,22 @@ module sdram_ctrl
 	input      [24:2] walker_addr,
 	input      [31:0] walker_wdata,
 	output reg        walker_ack,
-	output reg [31:0] walker_rdata
+	output reg [31:0] walker_rdata,
+
+	// 32-bit cache line fill port -- same contract as sdram32_ctrl's
+	// (fill_req level held until fill_ack; fill_addr/fill_bsel stable while
+	// asserted; fill_strb once per longword with fill_beat naming its place
+	// in the line; fill_ack with the last).  A line is two 4-word half
+	// bursts here; only fill_bsel[1] is honoured -- the half holding the
+	// critical beat is fetched first -- and fill_bsel[0] is ignored,
+	// exactly as in sdram32_ctrl's 16-bit mode.
+	input             fill_req,
+	input      [24:4] fill_addr,
+	input       [1:0] fill_bsel,
+	output reg [31:0] fill_dat,
+	output reg  [1:0] fill_beat,
+	output reg        fill_strb,
+	output reg        fill_ack
 );
 
 reg [15:0] sd_data_r;
@@ -103,7 +118,8 @@ localparam [2:0]
 	CPU_READCACHE = 2,
 	CPU_WRITECACHE = 3,
 	WALKER_READ = 4,
-	WALKER_WRITE = 5;
+	WALKER_WRITE = 5,
+	CPU_FILL = 6;
 
 reg         cache_fill;
 reg  [3:0]  initstate;
@@ -378,8 +394,24 @@ end
 // still sampled AT state 0: when it steals the slot the staged local
 // grant is simply discarded and retried next CCK (level-held, no
 // loss).  A request first asserting during state 15/0 waits one CCK.
-localparam [1:0] PRE_NONE = 2'd0, PRE_WRITE = 2'd1,
-                 PRE_WALKER = 2'd2, PRE_CACHE = 2'd3;
+// line fill port state, the sdram32_ctrl 16-bit-mode scheme verbatim:
+// two 4-word half bursts per line, the critical half first, fill_slot
+// released at state 12 so the second half pre-arbitrates in the same CCK.
+reg        fill_started;
+reg        fill_more;
+reg        fill_slot;
+reg  [2:0] fill_cnt;
+reg [15:0] fill_hi16;
+reg        fill_req_q;
+wire       fill_want = fill_req && (!fill_started || fill_more) && !fill_slot;
+always @(posedge sysclk) begin
+	if (!reset_n) fill_req_q <= 1'b0;
+	else          fill_req_q <= fill_want;
+end
+wire [23:0] fill_unit = {fill_addr[24:4], fill_started ^ fill_bsel[1], 2'b00};
+
+localparam [2:0] PRE_NONE = 3'd0, PRE_WRITE = 3'd1,
+                 PRE_WALKER = 3'd2, PRE_CACHE = 3'd3, PRE_FILL = 3'd4;
 
 // The cache acknowledges the CPU on the FIRST burst beat, so cpuAddr can
 // already point at the next access while sdr_read_req still streams the
@@ -394,7 +426,7 @@ always @(posedge sysclk) begin
 	if (cache_req && !cache_req_q2)
 		cache_addr_lat <= cpuAddr;
 end
-reg  [1:0] pre_sel;
+reg  [2:0] pre_sel;
 reg  [1:0] pre_ba;
 reg [12:0] pre_row;
 reg  [9:0] pre_col;
@@ -417,12 +449,18 @@ always @(posedge sysclk) begin
 			pre_sel <= PRE_CACHE;
 			{pre_ba, pre_row, pre_col[8:0]} <= cache_addr_lat;
 		end
+		else if (fill_req_q) begin
+			pre_sel <= PRE_FILL;
+			{pre_ba, pre_row, pre_col[8:0]} <= fill_unit;
+		end
 		else
 			pre_sel <= PRE_NONE;
 	end
 end
 
 wire walker_grant = (sdram_state == 4'd0) && (pre_sel == PRE_WALKER) &&
+				    !((~chipDMA) | (~chipRW));
+wire fill_grant   = (sdram_state == 4'd0) && (pre_sel == PRE_FILL) &&
 				    !((~chipDMA) | (~chipRW));
 
 // Capture native walker completions. The request remains level-held across
@@ -470,6 +508,62 @@ always @(posedge sysclk) begin
 		// edge.  The physical SDRAM writes themselves complete at state 4.
 		else if ((slot_type == WALKER_WRITE) && (sdram_state == 4'd10))
 			walker_ack <= 1;
+	end
+end
+
+// line fill delivery.  The burst words sit in sdata_reg_q at the same states
+// the CPU_READCACHE strobe uses (one after cache_fill's 8/10/12/14), paired
+// into longwords: the even word of each pair is the longword's HIGH half.
+// fill_beat is derived exactly as in sdram32_ctrl's 16-bit mode -- the first
+// slot carries the critical half -- so the client never needs to know which
+// half arrived first.
+always @(posedge sysclk) begin
+	if (!reset_n) begin
+		fill_started <= 0;
+		fill_more    <= 0;
+		fill_slot    <= 0;
+		fill_cnt     <= 0;
+		fill_hi16    <= 0;
+		fill_strb    <= 0;
+		fill_ack     <= 0;
+		fill_dat     <= 0;
+		fill_beat    <= 0;
+	end
+	else begin
+		fill_strb <= 0;
+		fill_ack  <= 0;
+
+		if (!fill_req) begin
+			fill_started <= 0;
+			fill_more    <= 0;
+			fill_slot    <= 0;
+			fill_cnt     <= 0;
+		end
+		else begin
+			if (fill_grant) begin
+				fill_slot    <= 1;
+				fill_started <= 1;
+				fill_more    <= ~fill_started;
+			end
+			// released early enough for the second half to be
+			// pre-arbitrated at state 15 of the same CCK
+			if (sdram_state == 4'd12) fill_slot <= 0;
+
+			if (init_done && slot_type == CPU_FILL) begin
+				case (sdram_state)
+					9, 13: fill_hi16 <= sdata_reg_q;
+					11, 15: begin
+						fill_dat  <= {fill_hi16, sdata_reg_q};
+						fill_beat <= {fill_cnt[1] ? ~fill_bsel[1]
+						                          :  fill_bsel[1],
+						              fill_cnt[0]};
+						fill_strb <= 1;
+						fill_cnt  <= fill_cnt + 1'd1;
+						if (fill_cnt == 3'd3) fill_ack <= 1;
+					end
+				endcase
+			end
+		end
 	end
 end
 
@@ -575,6 +669,14 @@ always @ (posedge sysclk) begin
 				// request from read cache
 				else if(pre_sel == PRE_CACHE) begin
 					slot_type    <= CPU_READCACHE;
+					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
+					sd_ras       <= 0;
+					cas_sd_cas   <= 0;
+				end
+				// L1 line fill: a plain 4-word read burst, addressed at a
+				// half-line boundary by the fill scheduler above
+				else if(pre_sel == PRE_FILL) begin
+					slot_type    <= CPU_FILL;
 					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
 					sd_ras       <= 0;
 					cas_sd_cas   <= 0;

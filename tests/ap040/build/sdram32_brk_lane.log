@@ -44,8 +44,20 @@ FAIL: DUAL fill @0000800 beat 0 = 5b5e5b5e, expected 5a5e5b5e
 FAIL: DUAL fill @0000800 beat 1 = 595e595e, expected 585e595e
 FAIL: DUAL fill @0000800 beat 2 = 5f5e5f5e, expected 5e5e5f5e
 FAIL: DUAL fill @0000800 beat 3 = 5d5e5d5e, expected 5c5e5d5e
+FAIL: DUAL fill @0000800 beat 0 = 5b5e5b5e, expected 5a5e5b5e
+FAIL: DUAL fill @0000800 beat 1 = 595e595e, expected 585e595e
+FAIL: DUAL fill @0000800 beat 2 = 5f5e5f5e, expected 5e5e5f5e
+FAIL: DUAL fill @0000800 beat 3 = 5d5e5d5e, expected 5c5e5d5e
+FAIL: DUAL fill @0000800 beat 0 = 5b5e5b5e, expected 5a5e5b5e
+FAIL: DUAL fill @0000800 beat 1 = 595e595e, expected 585e595e
+FAIL: DUAL fill @0000800 beat 2 = 5f5e5f5e, expected 5e5e5f5e
+FAIL: DUAL fill @0000800 beat 3 = 5d5e5d5e, expected 5c5e5d5e
+FAIL: DUAL fill @0000800 beat 0 = 5b5e5b5e, expected 5a5e5b5e
+FAIL: DUAL fill @0000800 beat 1 = 595e595e, expected 585e595e
+FAIL: DUAL fill @0000800 beat 2 = 5f5e5f5e, expected 5e5e5f5e
+FAIL: DUAL fill @0000800 beat 3 = 5d5e5d5e, expected 5c5e5d5e
 FILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4
-FILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)
+FILL LATENCY (DUAL=1): request -> 4th beat = 20 clk_114 cycles (includes the wait for the CCK slot)
 FILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)
 FAIL: DUAL fill @0000900 beat 0 = db5edb5e, expected da5edb5e
 FAIL: DUAL fill @0000900 beat 1 = d95ed95e, expected d85ed95e
@@ -57,6 +69,6 @@ FAIL: DUAL fill @0001400 beat 2 = 5f505f50, expected 5e505f50
 FAIL: DUAL fill @0001400 beat 3 = 5d505d50, expected 5c505d50
 FAIL: chipset writes not coherent with the 32-bit fill port: beats beefbeef faceface
 memory image: all three controllers hold the expected 8KB window
-lockstep: chip 2 saw the same command as chip 1 on all 2146 cycles
-TEST FAILED with 1986 errors
-tb_sdram32.v:1151: $finish called at 188892 (100ps)
+lockstep: chip 2 saw the same command as chip 1 on all 2290 cycles
+TEST FAILED with 2430 errors
+tb_sdram32.v:1204: $finish called at 201564 (100ps)

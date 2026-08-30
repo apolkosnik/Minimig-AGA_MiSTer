@@ -1,5 +1,7 @@
 tb_cpu_wrapper_chip: running build/t_mmu.hex over the 7MHz chip bus
-WARNING: tb_cpu_wrapper_chip.v:257: $readmemh(build/t_mmu.hex): Not enough words in the file for the requested range [0:32767].
-chip-bus run passed (2915797 cycles)
+chip-bus run passed (1399780 cycles)
 ALL TESTS PASSED
-tb_cpu_wrapper_chip.v:287: $finish called at 116633835 (1ns)
+- tb_cpu_wrapper_chip.v:617: Verilog $finish
+- S i m u l a t i o n   R e p o r t: Verilator 5.050 2026-07-01
+- Verilator: $finish at 56ms; walltime 1.568 s; speed 35.700 ms/s
+- Verilator: cpu 1.565 s on 1 threads; allocated 8 MB

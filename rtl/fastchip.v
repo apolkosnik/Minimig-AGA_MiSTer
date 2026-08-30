@@ -35,7 +35,6 @@ module fastchip
 	input         lds,
 	input         uds,
 	input         rnw,
-	input         longword,
 
 	//RTG framebuffer control
 	output        rtg_ena,
@@ -50,16 +49,17 @@ module fastchip
 	output [7:0]  rtg_pal_a,
 	output        rtg_pal_wr,
 
+	// Gayle/IDE frontend.  One shared gayle sits in Minimig.sv because
+	// only one of the two frontends is ever decoding (ide_ena & ide_fast
+	// here, ide_ena & ~ide_fast in gary), so a second copy was 369 ALMs
+	// and 32 M10Ks of pure duplicate.
 	input         ide_ena,
-	output        ide_irq,
-	output  [5:0] ide_req,
-	input   [4:0] ide_address,
-	input         ide_write,
-	input  [15:0] ide_writedata,
-	input         ide_read,
-	output [15:0] ide_readdata,
-
-	output        ide_led
+	output        gayle_sel_ide,
+	output        gayle_sel_gayle,
+	output        gayle_rd,
+	output        gayle_wr,
+	input  [15:0] gayle_dout,
+	input         gayle_nrdy
 );
 
 assign sel_ack = sel_akiko  | sel_ide   | sel_rtg   | sel_gayle;
@@ -88,34 +88,15 @@ always @(posedge clk_sys) ide_ack <= (sel_ide | sel_gayle);
 
 wire ide_ready = ide_ack & (sel_ide | sel_gayle) & ~(ide_nrdy & rnw);
 
-wire [15:0] ide_dout;
-wire        ide_nrdy;
+// the shared gayle in Minimig.sv answers with these; its addr/data_in and
+// longword come straight off the same top-level chip bus this block sees.
+wire [15:0] ide_dout = gayle_dout;
+wire        ide_nrdy = gayle_nrdy;
 
-gayle gayle
-(
-	.clk(clk_sys),
-	.reset(reset),
-
-	.addr(addr[23:1]),
-	.data_in(din),
-	.data_out(ide_dout),
-	.rd(rnw & uds),
-	.wr(~rnw & uds),
-	.sel_ide(sel_ide),
-	.sel_gayle(sel_gayle),
-	.irq(ide_irq),
-	.nrdy(ide_nrdy),
-	.longword(longword),
-
-	.ide_req(ide_req),
-	.ide_address(ide_address),
-	.ide_write(ide_write),
-	.ide_writedata(ide_writedata),
-	.ide_read(ide_read),
-	.ide_readdata(ide_readdata),
-	
-	.led(ide_led)
-);
+assign gayle_sel_ide   = sel_ide;
+assign gayle_sel_gayle = sel_gayle;
+assign gayle_rd        = rnw & uds;
+assign gayle_wr        = ~rnw & uds;
 
 // Akiko ($B800xx) sits INSIDE the RTG window ($B80000-$B80FFF), so both
 // decodes fire in the overlap and dout/ready are wired-OR

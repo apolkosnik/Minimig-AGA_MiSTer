@@ -29,7 +29,7 @@ FAIL: DUAL cpuRD @0000c00 = 5a5c, expected cafe
 FAIL: DUAL walker read = 5a595678
 FAIL: DUAL walker image read = 5a585678, expected 12345678
 FILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4
-FILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)
+FILL LATENCY (DUAL=1): request -> 4th beat = 20 clk_114 cycles (includes the wait for the CCK slot)
 FILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)
 FAIL: DUAL fill @0001400 beat 0 = 5a50beef, expected deadbeef
 FAIL: DUAL fill @0001400 beat 1 = 5850face, expected feedface
@@ -40,6 +40,6 @@ FAIL: secondary memory word 768 (unit 384) = 5a59, expected 1234
 FAIL: secondary memory word 1536 (unit 768) = 5a5c, expected cafe
 FAIL: secondary memory word 2560 (unit 1280) = 5a50, expected dead
 FAIL: secondary memory word 2562 (unit 1281) = 5850, expected feed
-lockstep: chip 2 saw the same command as chip 1 on all 2146 cycles
-TEST FAILED with 646 errors
-tb_sdram32.v:1151: $finish called at 188892 (100ps)
+lockstep: chip 2 saw the same command as chip 1 on all 2290 cycles
+TEST FAILED with 790 errors
+tb_sdram32.v:1204: $finish called at 201564 (100ps)

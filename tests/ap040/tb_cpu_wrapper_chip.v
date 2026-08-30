@@ -206,14 +206,15 @@ fastchip fastchip
 	.lds(~fc_lds),
 	.uds(~fc_uds),
 	.rnw(fc_rnw),
-	.longword(fc_lw),
 	.rtg_ena(), .rtg_hsize(), .rtg_vsize(), .rtg_format(),
 	.rtg_base(), .rtg_stride(),
 	.rtg_pal_clk(pal_clk), .rtg_pal_dw(pal_dw), .rtg_pal_dr(pal_dr),
 	.rtg_pal_a(pal_a), .rtg_pal_wr(pal_wr),
-	.ide_ena(1'b0), .ide_irq(), .ide_req(),
-	.ide_address(5'd0), .ide_write(1'b0), .ide_writedata(16'd0),
-	.ide_read(1'b0), .ide_readdata(), .ide_led()
+	// the gayle block moved up to Minimig.sv and is shared with minimig;
+	// this bench never enabled IDE, so leave the frontend unclaimed
+	.ide_ena(1'b0),
+	.gayle_sel_ide(), .gayle_sel_gayle(), .gayle_rd(), .gayle_wr(),
+	.gayle_dout(16'd0), .gayle_nrdy(1'b0)
 );
 
 //---------------------------------------------------------------------------
