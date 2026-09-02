@@ -808,6 +808,20 @@ task fill_line;
 	input [24:4] a;
 	begin
 		@(posedge clk113);
+		// Reset the beat counters HERE, before the request goes up.  The
+		// monitor block below also clears them when it sees the request
+		// rise, but that is one edge later, and whether this task's
+		// next wait resumes before or after that block runs is
+		// unspecified: Icarus ran the block first, Verilator ran the
+		// task first, which then saw the PREVIOUS fill's four beats and
+		// returned before this fill had started.  A task that owns its
+		// own bookkeeping does not depend on the order.
+		d_beats = 0;
+		z_beats = 0;
+		d_grant_cyc = -1;
+		z_grant_cyc = -1;
+		d_fill_ack_seen = 0;
+		z_fill_ack_seen = 0;
 		fill_addr <= a;
 		fill_req  <= 1'b1;
 		fill_to = 0;

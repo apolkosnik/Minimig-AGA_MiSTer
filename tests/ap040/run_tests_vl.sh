@@ -114,15 +114,15 @@ leg() {
 	fi
 }
 
-# KNOWN DIVERGENCE (2026-09-02, unmodified X2 RTL): three legs pass under
-# Icarus and fail under Verilator, and the failures are in the BENCHES'
+# KNOWN DIVERGENCE (2026-09-02, unmodified X2 RTL): legs that pass under
+# Icarus and fail under Verilator, where the failure is in the BENCH's
 # own timing, not in the RTL under test:
-#   sdram32       the fill-port check counts beats with blocking
-#                 assignments in an always @(posedge clk113) block that
-#                 the fill_line task samples on the same edge; the order
-#                 is unspecified and Verilator picks the other one (the
-#                 chipset, lockstep and break-mode checks of the same
-#                 bench all pass)
+#   sdram32       FIXED the same day: fill_line raised the request and
+#                 then read beat counters that the monitor block reset
+#                 one edge later; which of the two ran first was
+#                 unspecified, and Verilator's order let the task return
+#                 on the previous fill's counts.  The task now resets its
+#                 own counters before the request.  Counted again.
 #   fpu_sdram     tb_sdram_turbo at CPU_PHASE=0 derives clk28
 #   mmu_sdram     combinationally from the clk113 counter, so the 28 MHz
 #                 edge shares a time step with the 113 MHz one; at this
@@ -170,7 +170,7 @@ leg ddram_walker_snoop ddram_walker_snoop &
 leg ddram_walker_read  ddram_walker_read &
 leg bus_timeout        bus_timeout &
 leg cart_hrtmon        cart_hrtmon &
-divleg sdram32         sdram32 &
+leg sdram32            sdram32 &
 leg cache_snoop        cache_snoop &
 negleg sdram32_brk_lock sdram32 +break_lockstep &
 negleg sdram32_brk_lane sdram32 +break_laneswap &

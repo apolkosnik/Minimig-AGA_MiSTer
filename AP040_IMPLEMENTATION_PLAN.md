@@ -1609,9 +1609,11 @@ cpu_cache_new, bus_timeout, cart_hrtmon, cache_snoop, the five program
 legs, every wrapchip variant, sdram_turbo at CPU_PHASE=3, dualram, the
 ddram walker pair, and sdram32's chipset/lockstep/break-mode checks.
 Three legs DIVERGE, and in each the divergence is in the bench, not the
-RTL: sdram32's fill-port check counts beats with blocking assignments in
-an always block that its driving task samples on the same edge (the
-order is unspecified between simulators), and tb_sdram_turbo at
+RTL: sdram32's fill_line task raised its request and then read beat
+counters that the monitor block reset one edge later, so under
+Verilator's ordering it returned on the PREVIOUS fill's four beats
+(fixed the same day: the task resets its own counters before the
+request, and the leg is counted again), and tb_sdram_turbo at
 CPU_PHASE=0 derives clk28 combinationally from the clk113 counter, so
 its 28 MHz edge shares a time step with the 113 MHz edge and the two
 simulators order the cross-domain sampling differently -- the boot
