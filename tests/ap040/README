@@ -8,6 +8,16 @@ build_tests.sh).  The two must agree; three legs are known to diverge
 under Verilator for bench-timing reasons named in run_tests_vl.sh and
 are reported there without being counted (plan X3.1).
 
+The images under build/ are committed and MUST match their .s sources:
+after editing a program, rebuild with
+    VASM=/path/to/vasmm68k_mot ./build_tests.sh
+and commit the .bin/.hex with the .s (vasm 2.0f from the vasm source
+tarball, `make CPU=m68k SYNTAX=mot`, reproduces the committed images
+byte for byte).  On 2026-09-02 t_mmu and t_exceptions were found stale
+against their sources -- the RTG-through-MMU tests of 2026-08-23 had
+never been assembled into the committed images -- which is why this
+rule is written down.
+
 Testbenches (Icarus Verilog -g2012 and ModelSim, see run_tests.sh):
 
   tb_ap040_reset.v      milestone B: reset vector fetch, 16-bit bus adapter
