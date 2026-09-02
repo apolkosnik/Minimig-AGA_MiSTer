@@ -200,6 +200,9 @@ end
 `define AP040_TB_CACHE 1
 `endif
 
+// POST=0 keeps every store synchronous: the A/B reference for the posted
+// store (plan X3.3), whose logs must match the tree before it.
+parameter POST = 1;
 ap040_tg68k_compat #(.AP040_ENABLE_CACHE(`AP040_TB_CACHE)) dut
 (
 	.clk(clk),
@@ -362,26 +365,26 @@ always @(posedge clk) begin
 
 	// $F154: one-shot fetch bus error (see the fberr wire above; the
 	// fire-cycle bookkeeping lives in the main berr branch)
-	if (nreset && mem_ready && busstate == 2'b11 &&
-	    addr_out[15:0] == 16'hF154) begin
-		fberr_armed <= |data_write;
-		fberr_addr  <= data_write;
+	if (nreset && dut.mem_ack && dut.mem_write &&
+	    dut.mem_addr[15:0] == 16'hF154) begin
+		fberr_armed <= |dut.mem_wdata[15:0];
+		fberr_addr  <= dut.mem_wdata[15:0];
 	end
 
 	// $F146 arms a one-shot bus error on the NEXT table-walker descriptor
 	// access, for the PTEST MMUSR B-bit test.
-	if (nreset && mem_ready && busstate == 2'b11 &&
-	    addr_out[15:0] == 16'hF146)
+	if (nreset && dut.mem_ack && dut.mem_write &&
+	    dut.mem_addr[15:0] == 16'hF146)
 		wberr_arm <= 1;
 
 	// Mode 1 raises IPL during stacking. Mode 2 raises it after the vector
 	// has been read and stalls the first handler refill for synchronization.
-	if (nreset && mem_ready && busstate == 2'b11 &&
-	    addr_out[15:0] == 16'hF144) begin
-		irq_exc_armed <= data_write[1:0];
+	if (nreset && dut.mem_ack && dut.mem_write &&
+	    dut.mem_addr[15:0] == 16'hF144) begin
+		irq_exc_armed <= dut.mem_wdata[1:0];
 			`ifdef AP040_TRACE
 			$display("TRACE armed exception-time IRQ mode=%0d pc=%h",
-			         data_write[1:0], dbg_pc);
+			         dut.mem_wdata[1:0], dbg_pc);
 			`endif
 	end
 	else if (irq_exc_armed == 1 && dut.core.state == 8'd34 &&
@@ -405,9 +408,9 @@ always @(posedge clk) begin
 	// $F148 arms a delayed level-2 interrupt: the IPL lines rise the
 	// written number of clk cycles later.  The FPU soak in t_fpu sweeps
 	// this against background (released) FPU execution.
-	if (nreset && mem_ready && busstate == 2'b11 &&
-	    addr_out[15:0] == 16'hF148)
-		ipl_delay <= data_write;
+	if (nreset && dut.mem_ack && dut.mem_write &&
+	    dut.mem_addr[15:0] == 16'hF148)
+		ipl_delay <= dut.mem_wdata[15:0];
 	else if (ipl_delay != 0) begin
 		ipl_delay <= ipl_delay - 1'd1;
 		if (ipl_delay == 16'd1) ipl_lvl <= 3'd2;
@@ -466,10 +469,10 @@ always @(posedge clk) begin
 	// written level and drops again after the written number of cycles,
 	// without waiting to be acknowledged.  A 68040 requires the request
 	// to be held until acknowledged, so nothing may be taken from it.
-	if (nreset && mem_ready && busstate == 2'b11 &&
-	    addr_out[15:0] == 16'hF14C) begin
-		ipl_lvl   <= data_write[2:0];
-		ipl_pulse <= data_write[15:8];
+	if (nreset && dut.mem_ack && dut.mem_write &&
+	    dut.mem_addr[15:0] == 16'hF14C) begin
+		ipl_lvl   <= dut.mem_wdata[2:0];
+		ipl_pulse <= dut.mem_wdata[15:8];
 	end
 	else if (ipl_pulse != 0) begin
 		ipl_pulse <= ipl_pulse - 1'd1;
@@ -481,11 +484,11 @@ always @(posedge clk) begin
 	// lower one (bits [6:4]) keeps requesting, so the lines DOWNGRADE
 	// instead of going idle.  The lower level is a fresh request that is
 	// only ever taken if it qualifies against the mask on its own.
-	if (nreset && mem_ready && busstate == 2'b11 &&
-	    addr_out[15:0] == 16'hF150) begin
-		ipl_lvl  <= data_write[2:0];
-		ipl_next <= data_write[6:4];
-		ipl_step <= data_write[15:8];
+	if (nreset && dut.mem_ack && dut.mem_write &&
+	    dut.mem_addr[15:0] == 16'hF150) begin
+		ipl_lvl  <= dut.mem_wdata[2:0];
+		ipl_next <= dut.mem_wdata[6:4];
+		ipl_step <= dut.mem_wdata[15:8];
 	end
 	else if (ipl_step != 0) begin
 		ipl_step <= ipl_step - 1'd1;
