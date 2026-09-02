@@ -24,10 +24,18 @@
 //             must not validate the partly-filled line, and must leave
 //             the cache able to serve the exception handler's own
 //             accesses.  The error is swept across all four beats.
+//   T10 (X3.2) a store that hits a resident data line updates it in
+//             place: the read after it returns the stored value with NO
+//             bus read (the bench counts memory reads), byte and word
+//             lanes merge, a store to a non-resident line does not
+//             allocate, a misaligned store still invalidates, and a
+//             snoop swept across the store window leaves the value
+//             readable and a later DMA write visible.
 //
 // Every test reprograms memory behind the cache and requires the next
 // read to return the NEW value: a stale cached longword is the failure
-// signature throughout.
+// signature throughout (T10 adds the opposite direction: a value that
+// must be served WITHOUT going to memory).
 
 `timescale 1ns/1ps
 
@@ -97,6 +105,7 @@ integer errors = 0;
 //---------------------------------------------------------------------------
 reg [31:0] mem [0:16383];   // 64KB
 reg  [1:0] mlat = 0;
+integer    m_read_count = 0; // memory reads served: a hit issues none
 
 // Fault injection: while err_arm is set, an access whose address matches
 // err_addr (line-aligned, beat selected by err_beat) reports a bus error
@@ -124,10 +133,23 @@ always @(posedge clk) begin
 			else begin
 				m_ack <= 1;
 				if (m_write) begin
-					// longword stores only in this bench
-					mem[m_addr[15:2]] <= m_wdata;
+					// big-endian lanes, the adapter's view of a store
+					case (m_size)
+						2'd0: case (m_addr[1:0])
+							2'd0: mem[m_addr[15:2]][31:24] <= m_wdata[7:0];
+							2'd1: mem[m_addr[15:2]][23:16] <= m_wdata[7:0];
+							2'd2: mem[m_addr[15:2]][15:8]  <= m_wdata[7:0];
+							default: mem[m_addr[15:2]][7:0] <= m_wdata[7:0];
+						endcase
+						2'd1: if (m_addr[1]) mem[m_addr[15:2]][15:0]  <= m_wdata[15:0];
+						      else           mem[m_addr[15:2]][31:16] <= m_wdata[15:0];
+						default: mem[m_addr[15:2]] <= m_wdata;
+					endcase
 				end
-				else m_rdata <= mem[m_addr[15:2]];
+				else begin
+					m_rdata <= mem[m_addr[15:2]];
+					m_read_count = m_read_count + 1;
+				end
 			end
 		end
 	end
@@ -238,6 +260,31 @@ task cpu_ci_read_then_write;
 	end
 endtask
 
+// A store of the given size (0 byte, 1 word, 2 long), data right-aligned
+// the way the core presents it.
+task cpu_write_sz;
+	input [31:0] a;
+	input [31:0] d;
+	input  [1:0] sz;
+	integer guard;
+	begin
+		@(negedge clk);
+		c_req = 1; c_write = 1; c_size = sz; c_addr = a; c_wdata = d;
+		guard = 0;
+		while (!(c_ack && ce) && guard < 200) begin
+			@(posedge clk);
+			guard = guard + 1;
+		end
+		if (guard >= 200) begin
+			$display("FAIL: write timeout at %h", a);
+			errors = errors + 1;
+		end
+		@(negedge clk);
+		c_req = 0; c_write = 0; c_size = 2'b10;
+		@(posedge clk);
+	end
+endtask
+
 task cpu_write;
 	input [31:0] a;
 	input [31:0] d;
@@ -333,6 +380,7 @@ endtask
 
 integer i, off;
 integer guard5;
+integer rd0;
 reg [31:0] d;
 reg [31:0] d2;
 
@@ -620,6 +668,125 @@ initial begin
 	expect_read(32'h0000_D800, mem[32'hD800>>2], 9);   // prime
 	snoop_storm = 1;
 	cpu_ci_read_then_write(32'h0000_D800, 32'h0000_DC00);
+	snoop_storm = 0;
+	mem_lat = 2'd2;
+	repeat (6) @(posedge clk);
+
+	//------------------------------------------------------------------
+	// T10 (plan X3.2): a store that HITS a resident data line updates
+	// the line in place.  Write-through, no write-allocate -- but no
+	// eviction either: MC68040UM section 7, a write hit updates the
+	// cache line and always goes to memory.  The old cache cleared the
+	// whole row on every store, so each store to cached data cost the
+	// next load a full refill.
+	//
+	// The read after the store returns the stored value under BOTH
+	// models (write-through keeps memory right); what discriminates is
+	// that it must issue NO bus read.  The bench counts memory reads.
+	// On the pre-change cache the row was invalidated and the read
+	// refills: FAIL.
+	//
+	// Swept over both memory speeds: with the controller-hit latency
+	// the memory acknowledge lands in the cycle the merge is decided.
+	//------------------------------------------------------------------
+	for (off = 0; off < 2; off = off + 1) begin
+		mem_lat = off[0] ? 2'd0 : 2'd2;
+		cinv_req = 1; cinv_ic = 1; cinv_dc = 1;
+		@(negedge clk);
+		while (!cinv_done) @(posedge clk);
+		cinv_req = 0;
+		repeat (20) @(posedge clk);
+
+		// long store into a resident line
+		expect_read(32'h0000_E000, mem[32'hE000>>2], 10);
+		cpu_write_sz(32'h0000_E004, 32'hCAFE_1234, 2'd2);
+		if (mem[32'hE004>>2] !== 32'hCAFE_1234) begin
+			$display("FAIL test 10 (lat %0d): write-through lost the store, memory holds %h",
+			         mem_lat, mem[32'hE004>>2]);
+			errors = errors + 1;
+		end
+		rd0 = m_read_count;
+		expect_read(32'h0000_E004, 32'hCAFE_1234, 10);
+		if (m_read_count != rd0) begin
+			$display("FAIL test 10 (lat %0d): long store evicted its line -- the read after it refilled (%0d bus reads)",
+			         mem_lat, m_read_count - rd0);
+			errors = errors + 1;
+		end
+
+		// byte lane 1 and the low word: the merge must keep the other
+		// lanes.  Memory is the reference -- the adapter model merges
+		// lanes the same way the real bus does.
+		cpu_write_sz(32'h0000_E009, 32'h0000_00A5, 2'd0);
+		rd0 = m_read_count;
+		expect_read(32'h0000_E008, mem[32'hE008>>2], 10);
+		if (m_read_count != rd0) begin
+			$display("FAIL test 10 (lat %0d): byte store evicted its line", mem_lat);
+			errors = errors + 1;
+		end
+		cpu_write_sz(32'h0000_E00A, 32'h0000_BEEF, 2'd1);
+		rd0 = m_read_count;
+		expect_read(32'h0000_E008, mem[32'hE008>>2], 10);
+		if (m_read_count != rd0) begin
+			$display("FAIL test 10 (lat %0d): word store evicted its line", mem_lat);
+			errors = errors + 1;
+		end
+		if (mem[32'hE008>>2][23:16] !== 8'hA5 || mem[32'hE008>>2][15:0] !== 16'hBEEF) begin
+			$display("FAIL test 10 (lat %0d): lane merge reference wrong: memory %h",
+			         mem_lat, mem[32'hE008>>2]);
+			errors = errors + 1;
+		end
+
+		// no write-allocate: a store to a line that is NOT resident must
+		// not bring it in, so the read after it is a genuine refill
+		cpu_write_sz(32'h0000_E404, 32'h0E40_0000 + off, 2'd2);
+		rd0 = m_read_count;
+		expect_read(32'h0000_E404, 32'h0E40_0000 + off, 10);
+		if (m_read_count == rd0) begin
+			$display("FAIL test 10 (lat %0d): store to a non-resident line allocated it", mem_lat);
+			errors = errors + 1;
+		end
+
+		// a misaligned store keeps the invalidate path: the line it
+		// touches must be gone (memory changes underneath, refetch)
+		expect_read(32'h0000_E800, mem[32'hE800>>2], 10);
+		cpu_write_sz(32'h0000_E802, 32'h5A5A_A5A5, 2'd2);   // long at +2
+		mem[32'hE800>>2] = 32'h0E80_0000 + off;
+		mem[32'hE804>>2] = 32'h0E84_0000 + off;
+		expect_read(32'h0000_E800, 32'h0E80_0000 + off, 10);
+		expect_read(32'h0000_E804, 32'h0E84_0000 + off, 10);
+	end
+	mem_lat = 2'd2;
+
+	// T10b: a snoop swept across the store's acceptance and merge
+	// window, first on ANOTHER line of the same row (port B writes the
+	// row the lookup is reading), then on the store's own line.  The
+	// stored value must read back either way, and a DMA write that
+	// follows, announced by its snoop, must be visible.
+	for (off = 0; off < 10; off = off + 1) begin
+		expect_read(32'h0000_F000, mem[32'hF000>>2], 10);
+		expect_read(32'h0000_F400, mem[32'hF400>>2], 10);   // same row
+		fork
+			cpu_write_sz(32'h0000_F004, 32'hF0F0_0000 + off, 2'd2);
+			begin
+				repeat (off) @(negedge clk);
+				snoop(off[0] ? 32'h0000_F000 : 32'h0000_F400);
+			end
+		join
+		expect_read(32'h0000_F004, 32'hF0F0_0000 + off, 10);
+		expect_read(32'h0000_F400, mem[32'hF400>>2], 10);
+		mem[32'hF004>>2] = 32'hD3A0_0000 + off;
+		snoop(32'h0000_F000);
+		expect_read(32'h0000_F004, 32'hD3A0_0000 + off, 10);
+	end
+
+	// T10c: the same store under constant chipset traffic, both speeds
+	snoop_storm = 1;
+	expect_read(32'h0000_F800, mem[32'hF800>>2], 10);
+	cpu_write_sz(32'h0000_F808, 32'hF8F8_F8F8, 2'd2);
+	expect_read(32'h0000_F808, 32'hF8F8_F8F8, 10);
+	mem_lat = 2'd0;
+	cpu_write_sz(32'h0000_F80C, 32'hF80C_F80C, 2'd2);
+	expect_read(32'h0000_F80C, 32'hF80C_F80C, 10);
 	snoop_storm = 0;
 	mem_lat = 2'd2;
 	repeat (6) @(posedge clk);
