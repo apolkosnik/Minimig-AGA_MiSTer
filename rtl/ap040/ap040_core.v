@@ -53,6 +53,14 @@ module ap040_core
 	input             mem_ack,
 	input      [31:0] mem_rdata,
 	input             mem_flt,     // access error pulse from the MMU
+	// Posted-store sideband (plan X3.3, A2b-1).  post_busy: a store the
+	// cache acknowledged early is still draining; instructions that
+	// serialize the machine (MOVEC to the MMU, PTEST, PFLUSH) wait for
+	// it, everything else waits by construction because the cache is
+	// busy.  post_err: that drain bus-errored after this core moved on;
+	// nothing can be restarted, so it is a fatal halt.
+	input             post_busy,
+	input             post_err,
 
 	// MMU control register values and PTEST/PFLUSH sideband
 	output     [31:0] tc_out,
@@ -3335,7 +3343,7 @@ always @(posedge clk) begin
 			// the clock enable did the waiting for it.  Flushing every cycle
 			// keeps the fill engine from re-arming the queue in the meantime
 			// (epf_flushed gates its issue).
-			S_MOVEC2: if (epf_pend) epf_flush;
+			S_MOVEC2: if (epf_pend || post_busy) epf_flush;
 			else begin
 				epf_flush;      // control-register access serializes fetch
 				case (imm[11:0])
@@ -3409,7 +3417,7 @@ always @(posedge clk) begin
 			// fetch may still be on the CPU bus, so the probe waits for it to
 			// retire rather than running two masters at once.
 			S_PTEST2: if (!pt_req) begin
-				if (!epf_pend) pt_req <= 1;
+				if (!epf_pend && !post_busy) pt_req <= 1;
 			end
 			else if (pt_done) begin
 				pt_req <= 0;
@@ -3424,7 +3432,7 @@ always @(posedge clk) begin
 			end
 
 			S_PFLUSH2: if (!pf_req) begin
-				if (!epf_pend) pf_req <= 1;
+				if (!epf_pend && !post_busy) pf_req <= 1;
 			end
 			else if (pf_done) begin
 				pf_req <= 0;
@@ -6028,6 +6036,11 @@ always @(posedge clk) begin
 
 			default: fatal_halt;
 		endcase
+
+		// A posted store that bus-errored after this core was acknowledged
+		// has no instruction left to restart.  Last word on the state so
+		// it overrides whatever the case above decided this cycle.
+		if (post_err && state != S_HALT) fatal_halt;
 
 		//-------------------------------------------------- fetch queue engine
 		// The queue fills itself: whenever the memory port is idle, the

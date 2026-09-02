@@ -203,7 +203,8 @@ end
 // POST=0 keeps every store synchronous: the A/B reference for the posted
 // store (plan X3.3), whose logs must match the tree before it.
 parameter POST = 1;
-ap040_tg68k_compat #(.AP040_ENABLE_CACHE(`AP040_TB_CACHE)) dut
+ap040_tg68k_compat #(.AP040_ENABLE_CACHE(`AP040_TB_CACHE),
+                     .AP040_POST_STORES(POST)) dut
 (
 	.clk(clk),
 	.nreset(nreset),

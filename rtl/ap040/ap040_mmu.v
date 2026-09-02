@@ -46,6 +46,11 @@ module ap040_mmu
 	input      [31:0] c_addr,
 	input      [31:0] c_wdata,
 	input       [2:0] c_fc,
+	// A posted store is still draining behind the cache (plan X3.3,
+	// A2b-1).  A table search must not start until it has landed: the
+	// descriptor it reads may be the very word that store is writing,
+	// and the 68040 completes pending writes before a search.
+	input             walk_hold,
 	output            c_ack,
 	output     [31:0] c_rdata,
 	output reg        c_flt,       // one ce cycle; request is consumed
@@ -470,7 +475,7 @@ always @(posedge clk) begin
 				else if (c_req && !c_flt && (ttr_fault || atc_fault)) begin
 					c_flt <= 1;
 				end
-				else if (c_req && !c_flt && need_walk) begin
+				else if (c_req && !c_flt && need_walk && !walk_hold) begin
 					w_pt    <= 0;
 					w_la    <= c_addr;
 					w_super <= a_super;

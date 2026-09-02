@@ -17,7 +17,10 @@ module ap040_tg68k_compat
 	parameter AP040_HAS_MMU      = 1,
 	parameter AP040_HAS_FPU      = 1,
 	parameter AP040_ENABLE_CACHE = 1,
-	parameter AP040_FAST_SIM     = 0
+	parameter AP040_FAST_SIM     = 0,
+	// X3.3 A2b-1: stores to cacheable pages are acknowledged early and
+	// drained by the cache.  0 is the synchronous-store A/B reference.
+	parameter AP040_POST_STORES  = 1
 )
 (
 	input         clk,
@@ -161,6 +164,9 @@ wire [31:0] b_rdata;
 // CINV sideband
 wire        cinv_req, cinv_ic, cinv_dc, cinv_done;
 
+// posted-store sideband from the cache (A2b-1)
+wire        post_busy, post_err;
+
 // control registers and PTEST/PFLUSH sideband
 wire [31:0] w_tc, w_urp, w_srp, w_itt0, w_itt1, w_dtt0, w_dtt1;
 wire        pt_req, pt_write, pt_done;
@@ -191,6 +197,8 @@ ap040_core #(
 	.mem_ack(mem_ack),
 	.mem_rdata(mem_rdata),
 	.mem_flt(mem_flt),
+	.post_busy(post_busy),
+	.post_err(post_err),
 
 	.tc_out(w_tc),
 	.urp_out(w_urp),
@@ -251,6 +259,7 @@ ap040_mmu mmu (
 	.c_addr(mem_addr),
 	.c_wdata(mem_wdata),
 	.c_fc(mem_fc),
+	.walk_hold(post_busy),
 	.c_ack(mem_ack),
 	.c_rdata(mem_rdata),
 	.c_flt(mem_flt_mmu),
@@ -357,7 +366,9 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		cache_chip;
 	wire cache_allow = cache_allow_all | cache_win;
 
-	ap040_cache cache (
+	ap040_cache #(
+		.POST_STORES(AP040_POST_STORES)
+	) cache (
 		.clk(clk),
 		.nreset(nreset),
 		.ce(ce_core),
@@ -393,7 +404,9 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.m_fc(b_fc),
 		.m_ack(b_ack),
 		.m_rdata(b_rdata),
-		.m_err(berr)
+		.m_err(berr),
+		.post_busy(post_busy),
+		.post_err(post_err)
 	);
 end
 else begin : g_nocache
@@ -411,6 +424,8 @@ else begin : g_nocache
 	assign mm_ack   = b_ack;
 	assign mm_rdata = b_rdata;
 	assign cinv_done = 1'b1;
+	assign post_busy = 1'b0;    // no cache, no buffer: stores are synchronous
+	assign post_err  = 1'b0;
 	wire unused_nc = mm_nocache | cinv_req | cinv_ic | cinv_dc |
 	                 (|cacr_out);
 end
