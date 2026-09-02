@@ -103,6 +103,70 @@ always @(posedge clk) begin
 			tb_qual[dut.core.irq_lvl_l] <= 0;
 	end
 end
+// The other direction of the IPEND rule, asserted directly instead of by
+// aiming a delay at an instruction (X2.3a): a request that has QUALIFIED
+// -- level above the live mask while visibly asserted -- must be taken
+// at the next instruction boundary, whatever the mask does in between.
+// A MOVE to SR that raises the mask after the request qualified does not
+// cancel it; that is what the 68040's IPEND bit means.  tb_must[L] holds
+// such a claim; it is dropped only when the device lets go (the level
+// falls below L) or when an interrupt of level >= L is accepted (a
+// higher level masks it, and it must requalify when the encoder falls
+// back -- the same rule tb_qual encodes above).  A claim may see ONE
+// instruction start, because it can qualify in the cycle after the
+// boundary sampled it; a second start with the claim still held is the
+// lost-hold signature.  Before this rule, test 136 timed a request to
+// land inside the MOVE with a fixed delay, which stopped landing there
+// the moment the core stopped freezing during bus waits (plan A2b-0).
+reg   [6:1] tb_must = 0;
+reg   [1:0] must_age [1:6];
+reg   [7:0] must_prev = 0;
+integer ml;
+initial for (ml = 1; ml <= 6; ml = ml + 1) must_age[ml] = 0;
+always @(posedge clk) begin
+	must_prev <= dut.core.state;
+	if (!nreset) begin
+		tb_must <= 0;
+		for (ml = 1; ml <= 6; ml = ml + 1) must_age[ml] <= 0;
+	end
+	else begin
+		for (ml = 1; ml <= 6; ml = ml + 1) begin
+			if (dut.core.irq_lvl < ml) begin
+				tb_must[ml] <= 0;
+				must_age[ml] <= 0;
+			end
+			else if ((dut.core.state == 8'd34) && dut.core.exc_is_irq &&
+			         must_prev != 8'd34 && dut.core.irq_lvl_l >= ml) begin
+				tb_must[ml] <= 0;
+				must_age[ml] <= 0;
+			end
+			// A claim arms only outside exception processing: between
+			// the acceptance edge and the cycle the new mask reaches
+			// SR the level is still above the OLD mask (states
+			// S_EXC0..S_EXC_JMP, 34..42, precede in_exc by a cycle),
+			// and a request raised during stacking is taken at the
+			// handler's entry fetch without ever starting an
+			// instruction.
+			else if (!tb_must[ml] && !dut.core.in_exc &&
+			         !(dut.core.state >= 8'd34 && dut.core.state <= 8'd42) &&
+			         dut.core.irq_lvl == ml && ml > dut.core.sr[10:8]) begin
+				tb_must[ml] <= 1;
+				must_age[ml] <= 0;
+			end
+			else if (tb_must[ml] && dut.core.state == 8'd4 &&
+			         must_prev != 8'd4) begin
+				// an instruction started with the claim still held
+				must_age[ml] <= must_age[ml] + 1'd1;
+				if (must_age[ml] == 2'd1) begin
+					errors = errors + 1;
+					$display("FAIL: qualified level-%0d request not taken at the next boundary (pc=%h sr=%h)",
+					         ml, dbg_pc, dut.core.sr);
+					result = 2;
+				end
+			end
+		end
+	end
+end
 // +exctrace: print every exception entry (vector, pc) for A/B diffing
 reg [7:0] et_prev = 0;
 always @(posedge clk) clkcount = clkcount + 1;

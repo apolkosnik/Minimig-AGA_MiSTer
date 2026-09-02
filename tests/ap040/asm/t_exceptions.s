@@ -691,22 +691,44 @@ irq_withdraw_loop:
 	; its claim even though the very next instruction raises the mask.
 	; The 68040 sets IPEND when the level beats the mask, and an
 	; interrupt whose IPEND is set is taken at the next instruction
-	; boundary regardless of a mask raised in the meantime.  Time the
-	; request to arrive inside the MOVE to SR that masks it.
+	; boundary regardless of a mask raised in the meantime.
+	;
+	; This used to aim ONE delay at the inside of the MOVE to SR, which
+	; held only while the fetch queue's bus wait happened to stretch the
+	; MOVE (X2.3a's coincidence class; it broke the day the core stopped
+	; freezing during bus waits).  Now the arrival is SWEPT across the
+	; MOVE, and the rule itself is asserted by the bench: its IPEND
+	; shadow (tb_must) fails the run if any qualified request survives
+	; an instruction boundary untaken.  The program checks only that the
+	; sweep straddled the mask -- some delays were taken, some were not
+	; -- so the bench rule was actually exercised on both sides.
+	move.w	#0,(IPLREG).l
+	moveq	#1,d3			; delay under test
+	moveq	#0,d4			; how many were taken
+irq_hold_loop:
+	move.w	#0,(IPLREG).l		; lines idle before the mask opens
 	move.w	#$2000,sr		; mask 0 while the request arrives
 	move.w	(cnt_int2).l,d5
-	move.w	#6,(IPLDLY).l
-	move.w	#$2700,sr		; request qualifies inside this insn
+	move.w	d3,(IPLDLY).l
+	move.w	#$2700,sr		; the request lands around this insn
+	nop
 	nop
 	nop
 	nop
 	move.w	(cnt_int2).l,d6
-	sub.w	d5,d6
-	cmp.w	#1,d6
-	beq.s	irq_hold_ok
-	failt	136			; qualified request lost to a later mask
-irq_hold_ok:
+	sub.w	d5,d6			; 0 or 1 for this delay
+	add.w	d6,d4
+	addq.w	#1,d3
+	cmp.w	#20,d3
+	bls.s	irq_hold_loop
 	move.w	#0,(IPLREG).l
+	tst.w	d4
+	beq.s	irq_hold_bad		; nothing taken: the sweep never
+	cmp.w	#20,d4			;   reached the open mask, or all
+	bne.s	irq_hold_ok		;   taken: it never reached the closed one
+irq_hold_bad:
+	failt	136			; sweep did not straddle the mask raise
+irq_hold_ok:
 	move.w	#$2700,sr
 
 	; Downgrade, not withdrawal: a second device keeps requesting at a
