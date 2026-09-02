@@ -1,6 +1,13 @@
 AP040 test suite
 ================
 
+Two runners, one leg list: run_tests.sh (Icarus Verilog) and
+run_tests_vl.sh (Verilator --binary --timing, for a host without Icarus;
+it reads the assembled images from build/*.hex and does not run
+build_tests.sh).  The two must agree; three legs are known to diverge
+under Verilator for bench-timing reasons named in run_tests_vl.sh and
+are reported there without being counted (plan X3.1).
+
 Testbenches (Icarus Verilog -g2012 and ModelSim, see run_tests.sh):
 
   tb_ap040_reset.v      milestone B: reset vector fetch, 16-bit bus adapter

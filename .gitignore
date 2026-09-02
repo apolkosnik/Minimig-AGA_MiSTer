@@ -40,4 +40,6 @@ c5_pin_model_dump.txt
 
 # cputest corpora: multi-hundred-MB extracted data, fetched not versioned
 tests/ap040/build/cputest/
+# run_tests_vl.sh work directory (verilated models, logs)
+tests/ap040/build_vl/
 __pycache__/
