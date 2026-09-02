@@ -1590,11 +1590,18 @@ sdram_ctrl_sim.v sources; the same +prog images).  run_tests.sh stays the
 reference on a host with Icarus; the two must agree, and a leg that passes
 on one and not the other is a bug in the leg.
 
-The assembled images under tests/ap040/build/*.hex are the program inputs
-until vasm is available again.  A change to a .s file cannot be built here:
-new directed coverage on this branch is written at the BENCH level
-(tb_ap040_cache_snoop-style, driving the RTL port directly), which is also
-the right level for the memory-path stages below.
+The assembled images under tests/ap040/build/*.hex are the program inputs.
+AMENDED 2026-09-02, same day: vasm 2.0f built from the source tarball
+(`make CPU=m68k SYNTAX=mot`) reproduces t_integer, t_cache, t_fpu and
+bench_loop byte for byte, so it is the right toolchain, and build_tests.sh
+runs again with VASM=<path>.  Doing that exposed that the COMMITTED
+t_mmu.hex and t_exceptions.hex were stale: their sources gained the
+RTG-through-MMU tests on 2026-08-23 and were never re-assembled, so
+every regression since had been running the old programs.  The images
+are rebuilt and committed with this branch; the README now says the
+.bin/.hex travel with the .s.  Bench-level directed coverage remains the
+right level for the memory-path stages below, but program changes are
+no longer blocked.
 
 Gate, measured 2026-09-02 on the unmodified X2 RTL: 33 of 36 legs green
 under Verilator -- reset, double_fault, walker_cdc, bus16_gap,
@@ -1714,15 +1721,109 @@ Ledger (tb_ap040_program +prof / +memlat, Verilator, phase 0):
                                                    must be: its loop
                                                    stores nothing)
 
-The Quartus fit for the merge cone is still owed (X3.9 ledger rule:
-recorded when the next full compile runs; a clk_sys regression moves the
-merge to a second C_PASS cycle).
+Quartus fit of the A2a tree (18d7386), full flow, SEED 7, 2026-09-02:
+
+    Logic utilization    38,209 / 41,910 ALMs   91%   (was 38,238)
+    RAM blocks              250 / 553           45%
+    DSP blocks               73 / 112           65%
+    ap040_cache entity      315 ALMs, 13 M10K         (was 283: +32 for
+                                                       the merge path)
+    Setup slack, all met:  clk_sys +0.351  clk_114 +0.196  pll_hdmi +0.151
+
+  The merge cone did not move clk_sys, so it stays in the first C_PASS
+  cycle.  Noted for later: the DSP budget is two thirds used already,
+  almost all of it the FPU's 64x64 product tree; stage D must not assume
+  free DSPs.
 
 ## X3.3 Stage A2b: posted store buffer
 
 A store today holds the core in S_MWR until the 16-bit adapter has
 finished both halves: 20.1 cycles for move.l Dn,(An), of which the core's
 own work is ~4.  Silicon posts the write and moves on.
+
+### A2b-0 PREREQUISITE, found on reading the enable path (2026-09-02)
+
+Posting a store buys nothing while the core's clock enable is the bus
+wait.  ap040_tg68k_compat feeds cpu_wrapper's clkena_in
+(= busstate idle | ready | berr) to the core, the MMU, the cache AND the
+adapter as `ce`, so for the whole of an external transaction every one of
+them is frozen -- an early acknowledge would let the core take one step
+and then stand still until the store's last half had landed.  (This is
+also why the fetch queue "fills while the core executes" only for
+internal-cache hits: an external fetch freezes everything.)  X2.2b's
+costing noted that ce is a stall enable and not a divider; this is the
+consequence for the store buffer.
+
+The decoupling is confined to the compat layer and needs no change to
+the wrapper contract: the ADAPTER keeps clkena_in, because its outputs
+must change only on the wrapper's qualified edges and its sub-cycle
+sequencing is written against them; the core, MMU and cache take a free
+enable.  What that rests on, checked in the code:
+  * mem_ack from the adapter is a registered one-clock pulse issued on a
+    qualified edge and visible in the following clock, when the adapter
+    is idle and clkena is high anyway -- a free-running consumer sees the
+    same pulse the gated one did;
+  * the adapter accepts a request only from idle, where clkena is high;
+    the core drops its request in the acknowledge cycle as before;
+  * the MMU's c_flt, the core's berr sampling (berr is held by the
+    wrapper until the adapter releases the request, and aerr_start
+    drops mem_req) and the walker CDC's level-held s_ack were all written
+    so that a ce-gated consumer could not miss them; a free-running one
+    cannot either;
+  * every FSM above the adapter polls its acknowledge, so with a free
+    enable it spins where it used to freeze -- same state, same cycle.
+What changes: work that needs no port -- an FPU op released by F1, a
+multiply, the fetch queue's bookkeeping, and above all EXECUTION under
+an outstanding speculative fetch -- proceeds during a bus wait instead
+of pausing.  That last one is the real gain: the queue's fetch used to
+freeze the core for the whole bus round trip, so fetch never overlapped
+execute at all outside internal-cache hits.
+
+Found by the change, the same day (the bench rules did their job):
+  * MOVEC to an MMU register under an outstanding fetch.  The MMU
+    translates a held request against the LIVE registers, and the core
+    could now commit TC while the queue's last speculative fetch was
+    still on the bus: the MMU re-translated it, missed the ATC and
+    started a walk for an access already in flight -- caught by
+    tb_ap040_program's walker-versus-bus rule.  PTEST and PFLUSH already
+    waited for the port (their comments say why); MOVEC never had to,
+    because the frozen enable waited for it.  Fix: S_MOVEC2 drains the
+    port before committing -- the 68040 serializes there anyway.
+  * t_exceptions 136 is the X2.3a coincidence class: it times an IPL
+    request to land inside a MOVE to SR with a fixed delay that used to
+    be stretched by the fetch freeze.  Replaced by two things: a BENCH
+    rule (tb_ap040_program tb_must) that asserts the IPEND property
+    directly -- a request that qualified must be taken within one
+    instruction start, whatever the mask does in between; it arms only
+    outside exception-entry states, because between the acceptance
+    edge and the SR write the level is still above the old mask -- and
+    a program-side SWEEP of the arrival delay across the MOVE whose
+    only check is that some delays were taken and some were not, so the
+    rule was exercised on both sides.  Negative control: with
+    irq_hold_lvl forced to zero in a scratch copy of the core, the rule
+    fails t_exceptions at the sweep (pc $0E96, SR $2700 -- the lost
+    hold); the README had recorded that removing the hold used to pass
+    the entire suite.  HEAD's RTL passes under the new rule.
+
+A2b-0 SHIPPED 2026-09-02.  Gate: run_tests_vl.sh green; ledger, phase 0
+and phase 1 totals, HEAD RTL -> this tree, same rebuilt images:
+
+    t_integer   16,650 / 23,967  ->  16,619 / 23,915
+    t_fpu      155,715 / 206,473 -> 155,679 / 206,413
+    t_mmu      410,701 / 591,670 -> 399,805 / 566,615   (-2.7% / -4.2%)
+    bench_loop 325,895 / 326,673 -> unchanged
+
+  The cache-resident programs barely move, as they should: their fetches
+  hit the internal cache and the freeze never applied.  t_mmu, which
+  walks tables and touches cache-inhibited pages, shows the freeze's
+  cost.  The point of A2b-0 is not these numbers; it is that a store can
+  now be posted at all.
+Gate for A2b-0 on its own: suite green, +prof totals recorded, and the
+directed-suite logs compared line by line against the pre-change run
+(X2.2b stage 1's gate) with every difference explained by the paragraph
+above.
+
+### A2b-1: the buffer
 
 Design (physical side, after translation): the MMU resolves translation,
 protection and cache mode in the store's issue cycle, so every fault the
