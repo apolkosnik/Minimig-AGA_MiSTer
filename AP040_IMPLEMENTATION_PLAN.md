@@ -1852,6 +1852,72 @@ bench tests for each hazard above, each seen to fail with the hazard
 guard removed; suite and corpus green; t_exceptions/t_mmu fault shapes
 unchanged (a store that faults in TRANSLATION still restarts precisely).
 
+A2b-1 SHIPPED 2026-09-02, built as designed with three things learned on
+the way:
+
+  * The buffer lives in the cache, not in a new module: C_PASS already
+    holds the store for the length of its drain, so the change is to
+    latch the operands at acceptance, acknowledge from ack_r one cycle
+    later, drive the master side from the latched copy while st_posted,
+    and NOT forward the drain's m_ack to the core -- which by then may
+    hold an unrelated request that would take it as its own.  POST_STORES
+    is a parameter (default 1); 0 is the synchronous A/B reference.
+  * Two hazards the design paragraph above did not list.  (1) The MMU
+    starts a table walk for the next access as soon as it misses the ATC
+    -- upstream of the cache, while the posted store is still on the bus:
+    the walk could read the very descriptor the store is writing.  The
+    68040 completes pending writes before a search; ap040_mmu now has
+    walk_hold (= post_busy) on the W_IDLE walk start.  Caught by
+    tb_ap040_program's walker-versus-bus rule at t_mmu's first
+    translated access.  (2) The bench's cycle-fine injectors ($F144,
+    $F146, $F148, $F14C, $F150, $F154) decoded their trigger on the BUS
+    completion of the write, so a posted write started their countdown
+    after the instruction it was aimed at.  "N cycles from now" always
+    meant from the instruction; they now decode on the core's own
+    acknowledge (dut.mem_ack).  The program-visible devices ($F100/$F102
+    result, $F130 DMA poke, $F108 stamp) stay on the bus.
+  * post_err is a fatal halt in the core, last word after the case.
+
+  Directed coverage: tb_ap040_cache_snoop T11 -- acknowledge before
+  memory took the store (both latencies), drain lands the value, a read
+  behind a posted store reaches memory after it (bus sequence numbers in
+  the model), read-after-write to the same resident word hits the merged
+  line without a bus read, a cache-inhibited store is NOT posted, a bus
+  error on the drain raises post_err and the cache stays usable, posted
+  stores under the snoop storm.  Negative control: POST=0 fails T11a and
+  T11e and nothing else.  T10 gained explicit drain waits wherever it
+  inspects or overwrites memory behind a store -- the acknowledge no
+  longer means the write has landed, and three of its checks assumed it.
+
+  A/B: with POST_STORES=0 the five program logs are IDENTICAL, line for
+  line, to HEAD's RTL under the same bench.  Suite green at POST=1.
+
+  Ledger, tests/ap040/asm/bench_store.s (new, built with the others),
+  $F108 stamps, flat bench phase 0, cycles per instruction:
+
+                                          before    after
+    256 x move.l d0,(a0)+  back to back   22.3      16.7
+    256 x { move.l d0,(a0)+ ; addq.l }    29.2      23.9   per pair
+    256 x move.l d0,d1     (control)       5.7       5.7
+    256 x move.l (a0)+,d0  (loads)        21.3      21.2
+    256 x { store ; 3 x move.l Dn,Dn }    44.1      38.1   per group
+       -> the store alone, isolated       26.9      20.9
+
+    t_integer  16,619 -> 16,450   t_fpu  155,679 -> 148,828
+    t_mmu     399,805 -> 382,540   t_cache  2,949 -> 2,928
+
+  The gate asked for <= 6 cycles per store and got about 6 cycles OFF
+  per store.  What the buffer hides is the core's handshake and the
+  acknowledge latency; what it cannot hide is that the 16-bit adapter
+  occupies the ONLY port for the whole drain -- two sub-cycles with a
+  sampled idle gap each -- during which the fetch queue cannot refill
+  and the next load cannot issue, so a store still costs the port ~10
+  cycles and the core runs out of resident instruction words behind it.
+  The remaining cost is the bus width, which is A1/X2.1c's item: a
+  32-bit single-slot store on the dual-SDRAM path shortens the drain to
+  the ~4 cycles T2 measured for a fill.  Recorded so the next stage is
+  chosen from the number and not from the gate as written.
+
 ## X3.4 Stage A1: the 32-bit line-fill consumer  (executes X2.7's item)
 
 sdram32_ctrl's fill port (fill_req/fill_addr[24:4]/fill_dat/fill_strb/
