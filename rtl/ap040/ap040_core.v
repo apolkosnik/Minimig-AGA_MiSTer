@@ -3321,7 +3321,22 @@ always @(posedge clk) begin
 				end
 			end
 
-			S_MOVEC2: begin
+			// A control-register write serializes: the 68040 drains its
+			// pipeline before TC, the TTRs, the root pointers or CACR take
+			// effect.  Here that means the memory port must be IDLE, not
+			// just the queue flushed -- a flushed queue can still have its
+			// last speculative fetch on the bus, and the MMU translates a
+			// held request against the LIVE registers.  Committing TC under
+			// it re-translated an in-flight fetch: an ATC miss, a table walk
+			// for an access already on the bus (tb_ap040_program's
+			// walker-versus-bus rule caught it the moment the core stopped
+			// freezing during bus waits, plan A2b-0).  PTEST and PFLUSH
+			// already wait for the same reason; MOVEC did not need to while
+			// the clock enable did the waiting for it.  Flushing every cycle
+			// keeps the fill engine from re-arming the queue in the meantime
+			// (epf_flushed gates its issue).
+			S_MOVEC2: if (epf_pend) epf_flush;
+			else begin
 				epf_flush;      // control-register access serializes fetch
 				case (imm[11:0])
 					12'h000: sfc <= rf_rdata_a[2:0];

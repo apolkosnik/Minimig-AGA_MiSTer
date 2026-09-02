@@ -88,6 +88,24 @@ module ap040_tg68k_compat
 	output [127:0] debug_status2
 );
 
+// Clock enable for everything above the bus adapter (plan X3.3, A2b-0).
+// cpu_wrapper's clkena_in is the BUS WAIT: idle, or a qualified
+// completion, or a bus error.  The adapter must keep it -- its outputs
+// change only on the wrapper's qualified edges and its 16-bit sub-cycle
+// sequencing is written against them.  The core, MMU and cache do not
+// need it: each of their FSMs polls its acknowledge, and every signal
+// that crosses from the adapter or the walker bridge (mem_ack, berr,
+// c_flt, walker s_ack) was already written so that a gated consumer
+// could not miss it, so a free-running one cannot either.  Gating them
+// froze the whole stack for the length of every external transaction,
+// which is what made a posted store worthless: the core would take one
+// step and stand still until the store's last half had landed.  With a
+// free enable, work that needs no port -- a released FPU op, a multiply,
+// the fetch queue's bookkeeping -- proceeds during the wait.  This is
+// the seed of P2's divider; a 4:1 enable on clk_114 drives the same
+// wire later.
+wire        ce_core = 1'b1;
+
 // core to MMU
 wire        mem_req;
 wire        mem_write;
@@ -161,7 +179,7 @@ ap040_core #(
 ) core (
 	.clk(clk),
 	.nreset(nreset),
-	.ce(clkena_in),
+	.ce(ce_core),
 
 	.mem_req(mem_req),
 	.mem_write(mem_write),
@@ -216,7 +234,7 @@ ap040_core #(
 ap040_mmu mmu (
 	.clk(clk),
 	.nreset(nreset),
-	.ce(clkena_in),
+	.ce(ce_core),
 
 	.tc(w_tc),
 	.urp(w_urp),
@@ -342,7 +360,7 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 	ap040_cache cache (
 		.clk(clk),
 		.nreset(nreset),
-		.ce(clkena_in),
+		.ce(ce_core),
 
 		.ie(cacr_out[15]),
 		.de(cacr_out[31]),
