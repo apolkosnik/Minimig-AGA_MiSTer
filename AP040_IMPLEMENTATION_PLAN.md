@@ -1540,3 +1540,330 @@ construction).
     it, operands pre-rounded by the FMOVE that loaded them, a program
     grown into its own result window, and a result page whose M bit the
     program set itself.
+
+============================================================================
+# Part X3: the parity program (branch ap040x3, opened 2026-09-02)
+============================================================================
+
+Branch ap040x3, base ap040x2 @ b9013c2.  This part is the executable form
+of the 2026-09-02 architecture assessment ("What separates AP040 from a
+25 MHz MC68040").  It does not replace Part X2: X2's measurements, gates
+and discipline (X2.8) stand, and every stage below names the X2 item it
+executes or supersedes.  What it changes is the ORDER and the SHAPE of the
+work, from one finding that X2.7 measured but did not act on:
+
+    the core's own FSM/decode is ~13,100 ALMs -- 34% of the device --
+    and the design sits at 91%.  Nothing can be ADDED to that core.
+    The pipeline must REPLACE the sequencer, not sit beside it.
+
+## X3.0 Where the gap is, restated from measurement
+
+Cached, caches on, $F108 stamps (2026-08-20) against the MC68040UM tables:
+
+    nop                        5.7    silicon ~1
+    add.l Dn,Dn                6.1    silicon ~1
+    move.l (An),Dn  hit       15.6    silicon ~1
+    move.l Dn,(An)            20.1    silicon ~1
+    FADD.X / FMUL.X       13.0 / 11.1  silicon ~3 / 3-5
+    FDIV.X / FSQRT.X      33.0 / 15.8  silicon ~38 / ~103  (already ahead)
+
+t_integer under +prof: 17.5% of cycles are bus stalls, 82.5% are the FSM
+walking states with memory already answered.  The integer gap is 6-10x and
+it is the SEQUENCER; the FPU gap is 3x on add/multiply only.  So:
+
+  (1) the parity step is a real pipeline (X3.6), and it is the only step
+      that reaches T1 (28 MHz / CPI 1.4 = 20 MIPS = a 25 MHz 68040);
+  (2) the memory-side items (X3.2-X3.5) are each worth a bounded number of
+      cycles, are small, and are prerequisites for a pipeline that is not
+      starved -- they go first because they are cheap and because they
+      remove round trips a pipeline would otherwise stall on;
+  (3) dual issue (X2.4) is parked: silicon is single-issue, the area does
+      not exist, and on a 6-cycle sequencer it buys nothing.
+
+## X3.1 Tooling: Verilator is the simulator on this branch
+
+The host that carries this branch has Verilator 5.050, python3 and Quartus
+17.0 -- no iverilog, no vasm.  tests/ap040/run_tests_vl.sh mirrors
+run_tests.sh leg for leg (`verilator --binary --timing`, module parameters
+via -G instead of -P; the same generated cpu_wrapper_sim.v / *_sim.v /
+sdram_ctrl_sim.v sources; the same +prog images).  run_tests.sh stays the
+reference on a host with Icarus; the two must agree, and a leg that passes
+on one and not the other is a bug in the leg.
+
+The assembled images under tests/ap040/build/*.hex are the program inputs
+until vasm is available again.  A change to a .s file cannot be built here:
+new directed coverage on this branch is written at the BENCH level
+(tb_ap040_cache_snoop-style, driving the RTL port directly), which is also
+the right level for the memory-path stages below.
+
+Gate, measured 2026-09-02 on the unmodified X2 RTL: 33 of 36 legs green
+under Verilator -- reset, double_fault, walker_cdc, bus16_gap,
+cpu_cache_new, bus_timeout, cart_hrtmon, cache_snoop, the five program
+legs, every wrapchip variant, sdram_turbo at CPU_PHASE=3, dualram, the
+ddram walker pair, and sdram32's chipset/lockstep/break-mode checks.
+Three legs DIVERGE, and in each the divergence is in the bench, not the
+RTL: sdram32's fill-port check counts beats with blocking assignments in
+an always block that its driving task samples on the same edge (the
+order is unspecified between simulators), and tb_sdram_turbo at
+CPU_PHASE=0 derives clk28 combinationally from the clk113 counter, so
+its 28 MHz edge shares a time step with the 113 MHz edge and the two
+simulators order the cross-domain sampling differently -- the boot
+wedges before the first test, while the CPU_PHASE=3 instances of the
+same bench pass.  run_tests_vl.sh runs and REPORTS those three
+(divleg) without counting them; making the benches order-independent
+is an open item, and a divergent leg that starts passing is removed
+from the list in the same commit.  Until then a change touching the
+SDRAM path must be run on a host with Icarus as well.
+
+## X3.2 Stage A2a: data-cache write-hit UPDATE  [first RTL change]
+
+What ap040_cache does today on a store: clears the whole data-bank ROW the
+store touches (port B zero write) and passes the store to memory.  So a
+store to a resident line evicts it, and the next load of that line -- the
+common case, a variable being incremented -- pays a full refill through
+the 16-bit adapter.  A real 68040 in write-through mode UPDATES the line on
+a write hit and always writes memory (MC68040UM section 7); it never
+evicts on a store.  cpu_cache_new, the controller-side cache this design
+also carries, already updates on write hit.  The internal cache is the odd
+one out.
+
+Change: a store that fits inside one aligned longword, with the data cache
+enabled and the page cacheable, runs a tag lookup in its acceptance cycle
+(the tag row read is already free-running on the store's address, exactly
+as pass_ci_chk uses it for cache-inhibited reads) and reads the four ways'
+words alongside.  In the first C_PASS cycle, on a hit, the store's bytes
+are merged into the hitting way's word (big-endian lanes, the inverse of
+lw_extract) and written to the data array; on a miss nothing is allocated.
+The memory write is untouched: write-through, no write-allocate, CPUSH
+still equals CINV, no dirty state exists anywhere.
+
+Stores that keep the OLD row-invalidate path, deliberately: misaligned and
+line-crossing transfers (they never fit one longword and the second-row
+machinery already exists for them), cache-inhibited stores (a CI store may
+not touch the cache), stores with DE clear (a disabled cache must not be
+left holding a line memory has moved past), and the instruction bank
+(silicon does not snoop the I-cache on CPU writes; CINV covers it -- t_cache
+tests 2-4 assert exactly this staleness and are unchanged).
+
+Hazards, argued rather than discovered:
+
+  * Snoop read-during-write on the tag row.  A chipset snoop writing the
+    store's row through port B in the acceptance cycle makes port A's
+    read of that row DONT_CARE on silicon (the same collision class as
+    5.2c for reads).  A false hit would merge the store into the WRONG way
+    and corrupt a valid unrelated line.  Construction copied from
+    look_snooped: st_snooped is armed FREE-RUNNING by any snoop to the row
+    between acceptance and the merge cycle, and a set flag turns the merge
+    into the fallback -- the row is invalidated through the existing
+    recorded slot (store_inv_lost / store_inv_set), which already stalls
+    the next store until port B has served it.  Over-invalidation is
+    correctness-safe under write-through.
+  * Snoop in the merge cycle itself: tag_q is registered, so the compare
+    is trustworthy; the snoop kills the row through port B while the merge
+    writes the data array -- different ports, and the merged word sits in a
+    way whose valid bit died the same cycle.  Harmless.
+  * Store bus error after a merge: the line would hold the new value while
+    memory keeps the old one.  On m_err in a store that took the update
+    path, the row is invalidated through the same recorded slot; the
+    store restarts under the format-$7 model and re-merges.
+  * Port budget: the merge uses the data arrays' write port (idle outside
+    C_FILL, and a store is never in flight during a fill), the snoop uses
+    tag port B, the lookup uses tag port A.  No new port, no new RAM.
+  * store_inv_lost is single-slot.  It stalls the next store while it is
+    occupied, and a cacheable read cannot hit a row whose invalidate is
+    owed... except that rd_accept does not test it.  This is a PRE-EXISTING
+    window (a store's displaced invalidate vs the next read) that the
+    serial request stream makes unreachable in practice; A2a does not widen
+    it (the fallback fires in the merge cycle, one cycle after where the old
+    code recorded it).  Noted so the store buffer (X3.3) closes it properly.
+
+Gate:
+  * tb_ap040_cache_snoop T10, seen to FAIL on the pre-change RTL: after a
+    long store to a resident line, the following read returns the stored
+    value AND issues no bus read (the bench counts memory reads).  Byte and
+    word lane merges likewise; a store to a NON-resident line must not
+    allocate; a snoop swept across the store window (same row other line,
+    and the store's own line) must leave the stored value readable and a
+    subsequent DMA write + snoop visible; both memory latencies (2 and the
+    controller-hit 0).
+  * t_cache.hex unchanged and green -- its tests 5/6/8/19 already encode
+    write-through semantics that hold under update (test 19's misaligned
+    store keeps the invalidate path by construction).
+  * full run_tests_vl.sh green; +prof on t_integer and bench_loop recorded
+    before and after (baseline 2026-09-02: t_integer phase 0 17,375 cycles,
+    bench_loop phase 0 325,895).
+  * Quartus: the merge cone is tag_q compare -> way select -> byte merge ->
+    data-array write data, the same depth class as the existing hit path
+    (compare -> way select -> lw_extract -> rdata_r).  STA on clk_sys must
+    not move; if it does, the merge takes a second C_PASS cycle.
+
+SHIPPED 2026-09-02.  T10 was seen to fail on the pre-change RTL with the
+same bench binary -- six errors, "long/byte/word store evicted its line",
+at both memory latencies, nothing else in the bench moved -- and passes
+after.  t_cache.hex unchanged and green; the five program legs green.
+Ledger (tb_ap040_program +prof / +memlat, Verilator, phase 0):
+
+    t_integer   total cycles   17,375 -> 16,650   (-4.2%)
+                S_MRD           2,384 ->  1,659   (-30%: loads after
+                                                   stores now hit)
+                S_MWR           1,199 ->  1,199   (unchanged: the store
+                                                   itself still blocks;
+                                                   that is A2b's job)
+    t_cache     data read avg   22.1  ->  18.5 cycles
+    bench_loop  total          325,895 -> 325,895 (unchanged, as it
+                                                   must be: its loop
+                                                   stores nothing)
+
+The Quartus fit for the merge cone is still owed (X3.9 ledger rule:
+recorded when the next full compile runs; a clk_sys regression moves the
+merge to a second C_PASS cycle).
+
+## X3.3 Stage A2b: posted store buffer
+
+A store today holds the core in S_MWR until the 16-bit adapter has
+finished both halves: 20.1 cycles for move.l Dn,(An), of which the core's
+own work is ~4.  Silicon posts the write and moves on.
+
+Design (physical side, after translation): the MMU resolves translation,
+protection and cache mode in the store's issue cycle, so every fault the
+RESTART model can report is known before the store is posted.  A one-entry
+buffer between MMU and cache accepts the translated store and acks the core
+in the next cycle; it drains through the existing C_PASS/adapter path.
+Hazards:
+  * load after store to the same longword: stall the load until the buffer
+    drains (no forwarding in A2b; measure whether forwarding is worth it);
+  * store after store: the second waits for the buffer (one entry);
+  * TAS/CAS/CAS2 (lk_cyc), CINV/CPUSH/PFLUSH/PTEST, MOVEC, RTE/exception
+    entry, and any CI/serialized access: drain first -- serialization is
+    what the 040 does for exactly these;
+  * physical bus error on a posted store: the core has moved on and pure
+    restart is impossible.  This is the hole the format-$7 WB slots exist
+    for on silicon.  A2b takes the narrow answer: only stores whose
+    physical target is configured RAM (the cache's own cacheable windows:
+    Z2/Z3/chip) are posted; everything else (IO, autoconfig, ROM space,
+    CI pages) stays synchronous.  On configured RAM the only berr source
+    is the 2^20-cycle watchdog, i.e. a dead fabric; that case halts with
+    the post-mortem beacon rather than pretending to restart.  The real
+    WB-slot machinery belongs to X3.6, where stores become a pipeline
+    stage anyway.
+Gate: move.l Dn,(An) from 20.1 to <= 6 cycles at the $F108 port; directed
+bench tests for each hazard above, each seen to fail with the hazard
+guard removed; suite and corpus green; t_exceptions/t_mmu fault shapes
+unchanged (a store that faults in TRANSLATION still restarts precisely).
+
+## X3.4 Stage A1: the 32-bit line-fill consumer  (executes X2.7's item)
+
+sdram32_ctrl's fill port (fill_req/fill_addr[24:4]/fill_dat/fill_strb/
+fill_ack; grant to fourth beat measured at 15 clk_114 = 4 core cycles,
+T2 met) has no consumer.  ap040_cache's C_FILL issues four longword
+requests through the 16-bit adapter instead: eight sub-cycles, each with a
+sampled idle gap, ~24 core cycles.  Give C_FILL a second source: a 32-bit
+fill channel on the compat layer that the wrapper routes to the fill port
+for fast-RAM lines (physical address in a configured RAM window) and to the
+adapter for everything else -- BRIDGETTE's split, the one the A4000 reading
+in section 19 recommends.  Then cpu_cache_new goes to CPU_CACHE=0 in the
+DUAL_SDRAM build (the internal cache with a 32-bit fill is what X2.7 said
+would replace it "for real this time").
+Gate: line fill <= 8 core cycles measured on a tb_sdram32-based bench with
+the cache instantiated; all sdram32 breaks still caught; timing-clean fit;
+suite green in both DUAL_SDRAM=0/1 builds (the adapter path must be
+byte-identical to today when the fill port is absent).
+Note: DUAL_SDRAM builds only.  The single-SDRAM path stays 16-bit; this is
+the one stage whose benefit is board-dependent.
+
+## X3.5 Stage A3: second cache lookup  (= X2.2b stage 2, after P2)
+
+Unchanged from the X2.2b costing: after the 28 MHz -> clk_114 + 4:1 enable
+move (P2), a second lookup multiplexes onto spare ce phases and costs
+nearly nothing; before it, it is a duplicated datapath at 91% utilization.
+Order: P2, then A3.  P2's scope is written up under section 19.
+
+## X3.6 Stage B: replace the sequencer with a pipeline  [the parity step]
+
+Scope.  What stays: ap040_regfile (two combinational read ports, one
+write), ap040_alu, ap040_muldiv, ap040_fpu (with its scoreboard), ap040_mmu,
+ap040_cache, the bus adapter, the exception frame formats and the restart
+model, the MOVEC/MMU/cache-maintenance sidebands.  What goes: the 188-state
+FSM and the 1,100-line S_DECODE case in ap040_core.v.  What replaces them:
+
+  IF   fetch queue as today (8 words, self-filling, page-bounded), plus a
+       decoupled PC generator; one aligned longword per cycle from the
+       I-bank once A3 gives it its own lookup.
+  ID   two-level decode: the opcode word indexes a control store in M10K
+       (one row per opcode class: EA kinds, operand sizes, ALU op, flag
+       mask, sequencing flags), extension words are consumed by a small
+       EA microsequencer rather than by FSM states.  The 57 inferred adders
+       become three: EA (base+index+disp), PC+n, SP adjust.
+  EA   effective-address formation with the two regfile ports, forwarding
+       from EX and WB.
+  MEM  data access through MMU/cache/A2b buffer; misaligned splits and
+       page-crossing bytes stay here as multi-cycle MEM sequences, not
+       core states.
+  EX   ALU/shift/muldiv/CCR; register-register ops arrive here two cycles
+       after IF and retire one per cycle.
+  WB   commit: register and CCR writes, the ONLY point that changes
+       architectural state.  Faults, traces and interrupts are sampled
+       here, so the restart model is unchanged: an instruction either
+       commits at WB or restarts whole, and format $7 stays synthetic.
+       MOVEM, bitfield, CAS2, MOVE16 and the exception-entry sequences run
+       as microsequences that hold ID (the pipeline drains behind them),
+       which keeps their existing, corpus-proven ordering.
+
+Hazards: Dn/An/CCR scoreboard with EX->EA and WB->EX forwarding; a
+load-use stall of one cycle; branches resolve in EX with the queue flushed
+on a taken branch (no prediction -- silicon has none either; the 040's
+taken-branch cost is 2-3 cycles and that is the target).  Stores retire at
+WB into the A2b buffer.
+
+Staging, each stage gated on the full suite + corpus:
+  B0  the stage-boundary document and interface stub (X2.3a's package),
+      agreed before code: what each pipeline register carries, what the
+      microsequencer's control word looks like, which instructions are
+      "fast path" (pipelined) versus "sequenced" (drain and run as a
+      microsequence).  The fast-path list is derived from the +prof
+      histogram of t_integer and bench_loop, not from taste.
+  B1  IF/ID with the control store, running the FAST PATH ONLY, behind a
+      compile-time switch; everything else traps into the existing FSM,
+      which stays whole.  Equivalence run: switch off must bit-match
+      today's timing logs (X2.2b stage 1 set that precedent).
+  B2  EA/MEM for the fast path: loads and stores with the simple modes.
+  B3  EX/WB with forwarding and the scoreboard; the cputest corpus is the
+      gate from here on, every commit.
+  B4  fold the sequenced instructions in as microsequences; retire the
+      FSM.  This is where the area drops.
+  B5  area and timing: the target is that ap040_core ends SMALLER than
+      the 13.1K it replaces (comparable pipelined 68020-class cores fit
+      in 8-12K ALMs), with the control store in the ~300 spare M10K
+      blocks; clk_sys slack must not regress.
+
+Gate: CPI <= 1.5 on t_integer's register blocks and <= 2 on bench_loop
+(both from +prof, total cycles / retired instructions); corpus 3776/3801
+with the failing set unchanged; all three differentials; ap040_core ALMs
+<= 13.1K; T1 (25 M instr/s) at 28 MHz on cache-resident code.
+
+## X3.7 Stages C and D  (= X2.6 and X2.5)
+
+C: 57 MHz with a 2:1 enable, AFTER B -- the pipeline registers are what
+split the 34 ns cones (exc_addr capture, MMU translate->fault, F_ROUND, the
+4-way hit mux).  STA drives the list; no speculative retiming before B.
+D: FPU add/multiply as a 3-4 stage pipe (F_SRC/F_NORM/F_BIN/F_ADDX/
+F_NORM2/F_ROUND/F_WB collapse), extended operands over the 32-bit port
+(F2).  FDIV/FSQRT stay iterative; they are already ahead of silicon.
+
+## X3.8 Not in this part
+
+Dual issue (X2.4): parked until B and C hold; compile-optional by
+construction if it ever returns.  Copyback D-cache: the correctness trap
+section 10 names; A2a + A2b capture most of its benefit under write-through.
+An L2 in block RAM: would fit, compensates for DDR3 latency rather than for
+anything the 68040 had -- optional, last.
+
+## X3.9 Discipline
+
+X2.8 applies unchanged.  Two additions for this branch:
+  * every stage records its +prof / $F108 numbers BEFORE and AFTER in this
+    file, from run_tests_vl.sh's benches, so the cumulative effect is a
+    ledger and not a recollection;
+  * a directed bench test written for a memory-path stage must be seen to
+    fail on the pre-change RTL with the SAME bench binary, by checking out
+    the previous commit's RTL file, not by weakening the check.
