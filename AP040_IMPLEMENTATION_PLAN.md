@@ -1908,6 +1908,22 @@ the way:
     t_integer  16,619 -> 16,450   t_fpu  155,679 -> 148,828
     t_mmu     399,805 -> 382,540   t_cache  2,949 -> 2,928
 
+  Quartus fit of the A2b-1 tree (11c5445), full flow, SEED 7:
+
+    Logic utilization    38,345 / 41,910 ALMs   91%   (A2a tree: 38,209)
+    ap040_cache entity      308 ALMs                  (315 before -- the
+                                                       latched store
+                                                       replaced muxes)
+    ap040_core entity    19,974 ALMs (12,281 own)
+    Setup slack:  clk_sys +0.946 (was +0.351)  clk_114 +0.210
+                  pll_hdmi -0.196 (display clock, seed-dependent; +0.151
+                  on the A2a tree with the same seed -- to be closed by a
+                  seed sweep before any RBF, per the standing rule that
+                  emu clocks are functional and pll_hdmi is not)
+
+  clk_sys gained 0.6 ns: the bus-wait enable was a high-fanout net into
+  every core register, and A2b-0 took it off them.
+
   The gate asked for <= 6 cycles per store and got about 6 cycles OFF
   per store.  What the buffer hides is the core's handshake and the
   acknowledge latency; what it cannot hide is that the 16-bit adapter
@@ -1939,6 +1955,60 @@ suite green in both DUAL_SDRAM=0/1 builds (the adapter path must be
 byte-identical to today when the fill port is absent).
 Note: DUAL_SDRAM builds only.  The single-SDRAM path stays 16-bit; this is
 the one stage whose benefit is board-dependent.
+
+### A1 RE-AIMED (2026-09-02): the fast RAM is in DDR3, not in the SDRAM
+
+Read against cpu_wrapper's address map before starting: the SDRAM holds
+chip RAM, slow RAM and the Kickstart mirror; every Zorro II and Zorro III
+window -- the CPU's fast RAM, where the OS, the stack and every
+"accelerated" workload live -- is ddram_ctrl, the 64-bit HPS DDR3 bridge
+with its own cpu_cache_new.  sdram32's fill port therefore accelerates
+chip-RAM fills only, and only on dual-SDRAM boards.  A1 as written would
+have left the working set on the 16-bit adapter.
+
+So A1 is a dedicated line-fill CHANNEL, modelled on the walker channel
+that already crosses the same clock boundary, served by BOTH controllers:
+
+  * ap040_cache: C_FILL gets a second source.  When the compat layer
+    says the line's physical address is fill-capable, the cache raises
+    fill_req with the line-aligned address and takes the four beats
+    from the channel (cd_we per beat, fill_hold as today); fill_ack ends
+    it, fill_err abandons it exactly as m_err does (C_FERR).  Otherwise
+    the four longword requests through the adapter run as today.
+  * ap040_tg68k_compat / cpu_wrapper: the channel is routed by the same
+    sel_* decode the walker uses (z3ram0/z3ram1/z2ram/chip -> encoded
+    address plus a ddr flag); the wrapper reports which windows are
+    fill-capable (DDR3 always once ddram_ctrl has the port; SDRAM only in
+    DUAL_SDRAM builds), and the compat gates fill_req on it.
+  * Minimig.sv: one CDC, line-granular.  A request toggle carries the
+    address into clk_114; the controller collects the WHOLE line (four
+    longwords) and hands it back with one toggle, walker-style; the
+    cache then drains it in four consecutive core cycles.  One toggle
+    each way and a 128-bit payload that is stable until observed -- the
+    same discipline ap040_walker_cdc already proves.
+  * ddram_ctrl: a fill port that issues one burst-of-2 64-bit read at
+    the line address and returns 128 bits; arbitrated after the CPU port
+    and the walker, before mem2, on the same read-wait watchdog.
+  * sdram32_ctrl: its existing beat-wise fill port, collected into the
+    same 128-bit handoff on the clk_114 side.
+
+  Expected: a fill today is four longword transactions through the
+  adapter and cpu_cache_new, ~24 core cycles; with the channel it is
+  the DDR3 read latency plus two CDC crossings, ~8-10 core cycles.  T2
+  as written (<= 8) is therefore borderline on DDR3 and the honest gate
+  is "measured, and less than half of today".  The 32-bit STORE side
+  (X2.1c) follows on the same channel shape -- one longword with byte
+  enables per transaction -- and is what shortens the posted store's
+  drain, which A2b-1's ledger names as the remaining store cost.
+
+  Staging: A1-0 the cache consumer and compat ports against a channel
+  model in tb_ap040_cache_snoop and tb_ap040_program (gate: fill cycles
+  measured, everything else bit-identical with the channel absent, which
+  is the same switch discipline as POST_STORES); A1-1 ddram_ctrl's port
+  and the CDC against tb_ddram_walker_read's DDR3 model; A1-2 the wrapper
+  and Minimig.sv routing, proven in tb_dualram_turbo; A1-3 the store
+  channel.  cpu_cache_new stays until the numbers say the internal cache
+  no longer needs it in front.
 
 ## X3.5 Stage A3: second cache lookup  (= X2.2b stage 2, after P2)
 
