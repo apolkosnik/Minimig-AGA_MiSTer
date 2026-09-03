@@ -36,7 +36,7 @@ for m in fastchip rtg akiko gayle ide; do
 done
 python3 prepare_sdram_sim.py ../../rtl/sdram_ctrl.v "$WORK/sdram_ctrl_sim.v"
 
-rm -f "$WORK"/.status.*
+rm -f "$WORK"/.status.* "$WORK"/.divergent.*
 
 VL="verilator --binary --timing -j 2 -Wno-fatal -Wno-lint -Wno-style -Wno-WIDTH -I$RTL"
 
