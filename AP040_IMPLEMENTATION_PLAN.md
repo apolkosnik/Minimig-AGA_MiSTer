@@ -2179,6 +2179,14 @@ Staging, each stage gated on the full suite + corpus:
       "fast path" (pipelined) versus "sequenced" (drain and run as a
       microsequence).  The fast-path list is derived from the +prof
       histogram of t_integer and bench_loop, not from taste.
+      WRITTEN 2026-09-02: AP040_PIPELINE_B0.md -- six stages, the
+      pipeline registers field by field, a two-level decode (a
+      combinational classifier from S_DECODE's knowledge into a 256-entry
+      control store in one M10K), the fast-path/sequenced split taken
+      from the histograms, forwarding and stalls, the restart model kept
+      by committing only at WB, and the staging B1-B5 with AP040_PIPE as
+      the A/B switch.  Its first code is a decode equivalence test over
+      all 65,536 opcodes, before any RTL.
   B1  IF/ID with the control store, running the FAST PATH ONLY, behind a
       compile-time switch; everything else traps into the existing FSM,
       which stays whole.  Equivalence run: switch off must bit-match
