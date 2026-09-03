@@ -82,6 +82,20 @@ warm:
 	endr
 	move.w	#6,(STAMP).l
 
+	; the same isolated store in a LOOP: after the first pass its
+	; instruction words are I-cache hits, which is what loop code looks
+	; like and what a store that leaves the cache free lets proceed
+	; while its write drains (stamp 6 -> 7, 256 iterations)
+	lea	(BLOCK).l,a0
+	move.w	#255,d4
+sloop:
+	move.l	d0,(a0)+
+	move.l	d0,d1
+	move.l	d1,d2
+	move.l	d2,d3
+	dbra	d4,sloop
+	move.w	#7,(STAMP).l
+
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700
 

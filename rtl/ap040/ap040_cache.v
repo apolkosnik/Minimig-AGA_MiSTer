@@ -237,6 +237,17 @@ localparam C_FILLW = 4'd9;   // A1: the delivered line goes into the way
 
 reg   [3:0] cst;
 reg [127:0] fill_line;       // the channel's payload, drained by C_FILLW
+// Decoupled drain (plan X3.4, A1-3a).  A posted store leaves C_PASS the
+// cycle after its merge and drains to memory from these registers while
+// the FSM goes on serving hits; the master side is driven from them for
+// as long as dr_active.  Everything that needs memory or the port --
+// misses, bypassed accesses, further stores -- waits for the drain, so
+// memory order is the program's order and a single slot suffices.
+reg         dr_active;
+reg  [31:0] dr_addr;
+reg  [31:0] dr_wdata;
+reg   [1:0] dr_size;
+reg   [2:0] dr_fc;
 reg   [6:0] sweep_cnt;
 reg         sweep_all;   // reset sweep clears both banks
 reg         winv_pend;   // a store still owes its second-line invalidate
@@ -348,7 +359,7 @@ reg [31:0] r_wdata;
 reg  [2:0] r_fc;
 wire       st_post_ok = (POST_STORES != 0) && c_write && !c_nocache &&
                         !c_instr;
-assign post_busy = st_posted;
+assign post_busy = st_posted | dr_active;
 
 // Snoop-vs-fill and snoop-vs-lookup collisions (5.2).  A snoop hitting
 // the row of an in-flight fill poisons it: the fill's data may predate
@@ -428,14 +439,23 @@ reg  [6:0] ci_inv_row;
 // While a posted store drains, the master side is the latched store:
 // the core has dropped its request and may already present the next
 // one, which the cache does not look at until it is idle again.
-assign m_req   = fill_active ? 1'b1 : (pass_active ? (c_req | st_posted) : 1'b0);
-assign m_write = fill_active ? 1'b0 : (st_posted ? 1'b1 : c_write);
-assign m_instr = st_posted ? 1'b0 : c_instr;
-assign m_size  = fill_active ? `AP040_SZ_L : (st_posted ? r_size : c_size);
-assign m_addr  = fill_active ? {r_addr[31:4], r_beat, 2'b00}
+// The drain owns the master side outright while it runs: nothing else can
+// be in C_FILL or C_PASS then, because misses and bypassed accesses are
+// held until it ends.  The handover is seamless -- dr_* holds the same
+// address and data the first C_PASS cycle presented, so an adapter that
+// already latched the request sees no change.
+assign m_req   = dr_active   ? 1'b1 :
+                 fill_active ? 1'b1 : (pass_active ? (c_req | st_posted) : 1'b0);
+assign m_write = dr_active   ? 1'b1 :
+                 fill_active ? 1'b0 : (st_posted ? 1'b1 : c_write);
+assign m_instr = (dr_active | st_posted) ? 1'b0 : c_instr;
+assign m_size  = dr_active   ? dr_size :
+                 fill_active ? `AP040_SZ_L : (st_posted ? r_size : c_size);
+assign m_addr  = dr_active   ? dr_addr :
+                 fill_active ? {r_addr[31:4], r_beat, 2'b00}
                              : (st_posted ? r_addr : c_addr);
-assign m_wdata = st_posted ? r_wdata : c_wdata;
-assign m_fc    = st_posted ? r_fc : c_fc;
+assign m_wdata = dr_active ? dr_wdata : (st_posted ? r_wdata : c_wdata);
+assign m_fc    = dr_active ? dr_fc    : (st_posted ? r_fc    : c_fc);
 
 // A posted store was acknowledged from ack_r at acceptance; the memory
 // acknowledge that ends its drain must NOT reach the core, which by then
@@ -449,7 +469,7 @@ assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
 // name exactly the cycle the C_IDLE write branch takes that path
 assign wr_accept_upd = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
                        c_req && !ack_r && !err_hold && !store_inv_lost &&
-                       st_upd_ok;
+                       !dr_active && st_upd_ok;
 
 assign tag_ridx  = a_row;
 wire [87:0] tags_next = (r_way == 2'd0) ? {tag_q[87:22], r_tag} :
@@ -474,7 +494,7 @@ assign tag_wdat  = (cst == C_SWEEP) ? {ROWW{1'b0}}
 // An update-path store (st_upd_ok) owes no row invalidate at all: it
 // merges into the line on a hit and allocates nothing on a miss.
 wire store_inv = ((cst == C_IDLE) && c_req && c_write && !ack_r &&
-                  !store_inv_lost && !st_upd_ok) ||
+                  !store_inv_lost && !st_upd_ok && !dr_active) ||
                  ((cst == C_PASS) && winv_pend) ||
                  (cst == C_WINV);
 // Snoop invalidates are FREE-RUNNING (5.1): a chipset write must land
@@ -559,6 +579,8 @@ always @(posedge clk) begin
 		r_fc <= 0;
 		fill_req <= 0;
 		fill_line <= 0;
+		dr_active <= 0;
+		dr_addr <= 0; dr_wdata <= 0; dr_size <= 0; dr_fc <= 0;
 		store_inv_lost <= 0;
 		store_inv_set <= 0;
 		cinv_done <= 0;
@@ -572,6 +594,14 @@ always @(posedge clk) begin
 		post_err <= 0;
 		if (ci_inv) ci_inv_pend <= 0;
 
+		// the decoupled drain completes, or fails, whatever the FSM is
+		// doing; a failure is the late error the core cannot restart
+		if (dr_active && m_err) begin
+			dr_active <= 0;
+			post_err  <= 1;
+		end
+		else if (dr_active && m_ack) dr_active <= 0;
+
 		// A snoop displaced a store's first-set invalidate in its
 		// acceptance cycle: remember it and issue it as soon as port B
 		// is free.  The second-set (winv) invalidate needs no recording:
@@ -580,7 +610,7 @@ always @(posedge clk) begin
 		// (store_inv's !store_inv_lost term), so the single slot cannot
 		// be overwritten.
 		if (snoop_wr && (cst == C_IDLE) && c_req && c_write && !ack_r &&
-		    !store_inv_lost && !st_upd_ok) begin
+		    !store_inv_lost && !st_upd_ok && !dr_active) begin
 			store_inv_lost <= 1;
 			store_inv_set  <= c_addr[9:4];
 		end
@@ -631,6 +661,10 @@ always @(posedge clk) begin
 							// store one cycle so its own invalidate cannot
 							// be skipped (the request is level-held)
 						end
+						else if (dr_active) begin
+							// the one drain slot is taken: the next store
+							// waits, so stores reach memory in order
+						end
 						else if (st_upd_ok) begin
 							// update path (X3.2): no row invalidate.  The
 							// tag row and the four ways' words are read
@@ -675,6 +709,13 @@ always @(posedge clk) begin
 						end
 					end
 					else if (bypass) begin
+						// A bypassed read needs the port, and it is a
+						// serializing access: it waits for a draining
+						// store, as the 68040 completes pending writes
+						// before a serialized access.
+						if (dr_active) begin
+						end
+						else begin
 						// the tag row read runs in parallel here too, so
 						// a cache-inhibited read can detect and kill a
 						// resident line while it bypasses
@@ -682,6 +723,7 @@ always @(posedge clk) begin
 						r_tag <= a_tag;
 						pass_ci_chk <= c_nocache && !c_write;
 						cst <= C_PASS;
+						end
 					end
 					else begin
 						// cacheable read: the tag row read runs in parallel
@@ -721,7 +763,23 @@ always @(posedge clk) begin
 						store_inv_set  <= r_row[5:0];
 					end
 				end
-				if (m_err) begin
+				if (st_posted) begin
+					// A1-3a: the posted store is handed to the drain in
+					// this, its first C_PASS cycle -- the merge above has
+					// just landed -- and the FSM is free again.  A
+					// line-crossing store's second-row invalidate, if port
+					// B has not served it yet, is finished in C_WINV.
+					dr_active <= 1;
+					dr_addr   <= r_addr;
+					dr_wdata  <= r_wdata;
+					dr_size   <= r_size;
+					dr_fc     <= r_fc;
+					st_posted <= 0;
+					st_flow   <= 0;
+					cst <= (winv_pend && (s_stb || store_inv_lost))
+					       ? C_WINV : C_IDLE;
+				end
+				else if (m_err) begin
 					// a passed access faulted: release the bus, but a
 					// still-owed invalidate is honoured (invalidating
 					// more is always safe under write-through)
@@ -789,7 +847,15 @@ always @(posedge clk) begin
 					r_way <= tag_q[93:92];   // round-robin victim
 					r_beat <= 0;
 					r_issued <= 0;
-					if (FILL_CHANNEL != 0 && fill_ok) begin
+					if (dr_active) begin
+						// a miss waits here for the draining store: the
+						// tag row keeps being read at the held address, a
+						// snoop meanwhile forces the miss it would have
+						// forced anyway, and memory order is preserved
+						// (the fill cannot overtake the store it may be
+						// reading)
+					end
+					else if (FILL_CHANNEL != 0 && fill_ok) begin
 						// A1: the whole line over the fill channel
 						fill_req <= 1;
 						cst <= C_FILLC;

@@ -61,7 +61,7 @@ wire [31:0] c_rdata;
 wire        m_req, m_write, m_instr;
 wire  [1:0] m_size;
 wire [31:0] m_addr, m_wdata;
-reg  [1:0]  mem_lat = 2'd2;   // cycles before m_ack; 0 models a
+reg  [2:0]  mem_lat = 3'd2;   // cycles before m_ack; 0 models a
                               // downstream controller-cache HIT, which is
                               // how fast this port can really answer
 reg         m_ack = 0;
@@ -148,7 +148,7 @@ integer errors = 0;
 // their ack cycles are deterministic for the sweep offsets below
 //---------------------------------------------------------------------------
 reg [31:0] mem [0:16383];   // 64KB
-reg  [1:0] mlat = 0;
+reg  [2:0] mlat = 0;
 integer    m_read_count = 0; // memory reads served: a hit issues none
 // bus order: every acknowledged transfer takes the next sequence number,
 // so "the read reached memory after the store" is a comparison
@@ -386,6 +386,33 @@ task drain;
 			errors = errors + 1;
 		end
 		repeat (2) @(posedge clk);
+	end
+endtask
+
+// A read that also reports whether a posted store was still draining
+// when it was acknowledged: the decoupled-drain signature (A1-3a).
+task cpu_read_watch;
+	input  [31:0] a;
+	output [31:0] d;
+	output        busy_at_ack;
+	integer guard;
+	begin
+		@(negedge clk);
+		c_req = 1; c_write = 0; c_size = 2'b10; c_addr = a;
+		guard = 0;
+		while (!(c_ack && ce) && guard < 300) begin
+			@(posedge clk);
+			guard = guard + 1;
+		end
+		if (guard >= 300) begin
+			$display("FAIL: watched read timeout at %h", a);
+			errors = errors + 1;
+		end
+		d = c_rdata;
+		busy_at_ack = post_busy;
+		@(negedge clk);
+		c_req = 0;
+		@(posedge clk);
 	end
 endtask
 
@@ -1118,6 +1145,86 @@ initial begin
 		errors = errors + 1;
 	end
 	fill_ok = 0;
+	repeat (6) @(posedge clk);
+
+	//------------------------------------------------------------------
+	// T13 (plan X3.4, A1-3a): a posted store drains while the cache
+	// serves hits.  A hit issued right behind a store must be
+	// acknowledged while the drain is still in flight (post_busy high);
+	// a miss, a bypassed read and a second store must wait for it and
+	// reach memory after it.  Pre-change the cache sat in C_PASS for
+	// the whole drain, so the hit waited: FAIL.
+	//------------------------------------------------------------------
+	// a slow memory, so the drain is still in flight when the hit behind
+	// it is acknowledged -- at the bench's usual two cycles the drain
+	// ends first and the check cannot tell the two caches apart
+	mem_lat = 3'd6;
+	expect_read(32'h0000_1A00, mem[32'h1A00>>2], 13);   // line A resident
+	cpu_write_sz(32'h0000_1A40, 32'h13A0_1A40, 2'd2);   // posted, line B
+	cpu_read_watch(32'h0000_1A00, d, ackfirst);          // hit on A
+	if (!ackfirst) begin
+		$display("FAIL test 13: a hit waited for the posted store's drain");
+		errors = errors + 1;
+	end
+	if (d !== mem[32'h1A00>>2]) begin
+		$display("FAIL test 13: hit during a drain returned %h expected %h",
+		         d, mem[32'h1A00>>2]);
+		errors = errors + 1;
+	end
+	drain;
+	if (mem[32'h1A40>>2] !== 32'h13A0_1A40) begin
+		$display("FAIL test 13: the drain lost the store (memory %h)", mem[32'h1A40>>2]);
+		errors = errors + 1;
+	end
+
+	// a miss behind the drain waits and reaches memory after the store
+	cpu_write_sz(32'h0000_1A80, 32'h13A0_1A80, 2'd2);
+	expect_read(32'h0000_1AC0, mem[32'h1AC0>>2], 13);   // non-resident
+	if (!(last_wr_seq >= 0 && last_rd_seq > last_wr_seq)) begin
+		$display("FAIL test 13: a miss overtook the draining store on the bus");
+		errors = errors + 1;
+	end
+
+	// a bypassed read behind the drain waits and follows it
+	cpu_write_sz(32'h0000_1B00, 32'h13B0_1B00, 2'd2);
+	c_nocache = 1;
+	expect_read(32'h0000_1B40, mem[32'h1B40>>2], 13);
+	c_nocache = 0;
+	if (!(last_rd_seq > last_wr_seq)) begin
+		$display("FAIL test 13: a cache-inhibited read overtook the draining store");
+		errors = errors + 1;
+	end
+
+	// two stores back to back: the second waits for the slot, both land,
+	// in order
+	cpu_write_sz(32'h0000_1B80, 32'h13B8_0001, 2'd2);
+	cpu_write_sz(32'h0000_1B84, 32'h13B8_0002, 2'd2);
+	drain;
+	if (mem[32'h1B80>>2] !== 32'h13B8_0001 || mem[32'h1B84>>2] !== 32'h13B8_0002) begin
+		$display("FAIL test 13: back-to-back stores lost one (%h %h)",
+		         mem[32'h1B80>>2], mem[32'h1B84>>2]);
+		errors = errors + 1;
+	end
+
+	// under chipset traffic, both speeds: hits during drains stay right
+	snoop_storm = 1;
+	for (off = 0; off < 6; off = off + 1) begin
+		mem_lat = off[0] ? 3'd0 : 3'd6;
+		cpu_write_sz(32'h0000_1BC0 + {off[2:0], 2'b00}, 32'h13BC_0000 + off, 2'd2);
+		cpu_read_watch(32'h0000_1A00, d, ackfirst);
+		if (d !== mem[32'h1A00>>2]) begin
+			$display("FAIL test 13 (storm %0d): hit during a drain returned %h", off, d);
+			errors = errors + 1;
+		end
+	end
+	snoop_storm = 0;
+	mem_lat = 2'd2;
+	drain;
+	for (off = 0; off < 6; off = off + 1)
+		if (mem[(32'h1BC0 >> 2) + off] !== 32'h13BC_0000 + off) begin
+			$display("FAIL test 13: storm store %0d lost", off);
+			errors = errors + 1;
+		end
 	repeat (6) @(posedge clk);
 
 	if (errors == 0) $display("ALL TESTS PASSED");
