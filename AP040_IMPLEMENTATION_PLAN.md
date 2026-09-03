@@ -2010,6 +2010,30 @@ that already crosses the same clock boundary, served by BOTH controllers:
   channel.  cpu_cache_new stays until the numbers say the internal cache
   no longer needs it in front.
 
+A1-0 SHIPPED 2026-09-02: C_FILLC/C_FILLW in ap040_cache behind
+FILL_CHANNEL, fill_ok = fill_ena & cache_win in the compat layer,
+cpu_wrapper ties fill_ena low until A1-2.  T12 in tb_ap040_cache_snoop
+(channel-served miss, hits after, every word offset, T2's snoop rule
+across the channel fill, a snoop on the filling line, a channel error,
+a store merging into a channel-filled line); FILLC=0 fails T12a and the
+error case.  A/B: FILLCH=0 identical to HEAD, line for line, on all five
+programs.  Ledger, flat bench with the channel MODELLED at 8 core cycles
+(the real latency is A1-1/A1-2's to measure), phase 0 / phase 1:
+
+    t_integer   16,450 / 23,717  ->  11,688 / 12,083
+    t_fpu      148,828 / 198,915 -> 122,989 / 136,035
+    t_cache      2,928 /  4,048  ->   2,256 /  2,418
+    bench_loop 325,895 / 326,673 -> 325,279 / 325,635  (resident)
+
+    +memlat, t_integer, average request-to-acknowledge in core cycles:
+      instruction fetch  9.7 / 15.2  ->  6.0 / 6.4
+      data read          9.9 / 13.4  ->  7.0 / 6.0
+
+  Phase 1 halves because the adapter's per-sub-cycle wait states no
+  longer multiply by eight per line; the channel pays them once.  What
+  this settles is the shape of the consumer; the number that matters is
+  the DDR3 bridge's.
+
 ## X3.5 Stage A3: second cache lookup  (= X2.2b stage 2, after P2)
 
 Unchanged from the X2.2b costing: after the 28 MHz -> clk_114 + 4:1 enable
