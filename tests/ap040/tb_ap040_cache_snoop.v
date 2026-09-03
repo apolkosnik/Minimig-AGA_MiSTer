@@ -76,6 +76,42 @@ reg  [31:0] s_addr = 0;
 parameter   POST = 1;
 wire        post_busy, post_err;
 
+// Line-fill channel model (plan X3.4, A1).  fill_ok is raised only by
+// T12; with it low every fill takes the adapter path and T1-T11 run as
+// before.  The responder answers a request after FILL_LAT cycles with
+// the four longwords of the line from mem, holding fill_ack until the
+// request drops -- or fill_err instead when ferr_arm matches the line.
+// FILLC=0 is T12's negative control: the channel is compiled out.
+parameter   FILLC = 1;
+parameter   FILL_LAT = 6;
+reg         fill_ok = 0;
+wire        fill_req;
+wire [31:4] fill_addr;
+reg [127:0] fill_data = 0;
+reg         fill_ack = 0;
+reg         fill_err = 0;
+reg         ferr_arm = 0;
+reg  [31:4] ferr_addr = 0;
+integer     f_count = 0;         // channel fills served
+integer     f_lat = 0;
+always @(posedge clk) begin
+	if (!fill_req) begin
+		fill_ack <= 0;
+		fill_err <= 0;
+		f_lat <= 0;
+	end
+	else if (!fill_ack && !fill_err) begin
+		if (f_lat != FILL_LAT) f_lat <= f_lat + 1;
+		else if (ferr_arm && fill_addr == ferr_addr) fill_err <= 1;
+		else begin
+			fill_data <= {mem[{fill_addr[15:4], 2'd0}], mem[{fill_addr[15:4], 2'd1}],
+			              mem[{fill_addr[15:4], 2'd2}], mem[{fill_addr[15:4], 2'd3}]};
+			fill_ack <= 1;
+			f_count = f_count + 1;
+		end
+	end
+end
+
 reg         snoop_storm = 0;
 reg         s_stb_storm = 0;
 // free-running chipset snoop traffic on its own driver: port B is taken
@@ -86,10 +122,12 @@ always @(negedge clk) begin
 	else             s_stb_storm <= 1'b0;
 end
 
-ap040_cache #(.POST_STORES(POST)) dut
+ap040_cache #(.POST_STORES(POST), .FILL_CHANNEL(FILLC)) dut
 (
 	.clk(clk), .nreset(nreset), .ce(ce),
 	.post_busy(post_busy), .post_err(post_err),
+	.fill_ok(fill_ok), .fill_req(fill_req), .fill_addr(fill_addr),
+	.fill_data(fill_data), .fill_ack(fill_ack), .fill_err(fill_err),
 	.ie(1'b1), .de(1'b1),
 	.cinv_req(cinv_req), .cinv_ic(cinv_ic), .cinv_dc(cinv_dc),
 	.cinv_done(cinv_done),
@@ -963,6 +1001,123 @@ initial begin
 	mem_lat = 2'd2;
 	for (off = 0; off < 6; off = off + 1)
 		expect_read(32'h0000_1D00 + {off[2:0], 2'b00}, 32'h11F0_0000 + off, 11);
+	repeat (6) @(posedge clk);
+
+	//------------------------------------------------------------------
+	// T12 (plan X3.4, A1): a miss whose line the channel serves takes the
+	// whole line from the channel: no adapter reads, correct data, and
+	// the same snoop and error rules as the adapter path.  FILLC=0 is
+	// the negative control (T12a must fail: the adapter fills instead).
+	//------------------------------------------------------------------
+	cinv_req = 1; cinv_ic = 1; cinv_dc = 1;
+	@(negedge clk);
+	while (!cinv_done) @(posedge clk);
+	cinv_req = 0;
+	repeat (20) @(posedge clk);
+
+	// T12a: served by the channel, no bus read, data right, then a hit
+	fill_ok = 1;
+	rd0 = m_read_count;
+	i = f_count;
+	expect_read(32'h0000_2A00, mem[32'h2A00>>2], 12);
+	if (f_count != i + 1 || m_read_count != rd0) begin
+		$display("FAIL test 12: miss not served by the channel (channel fills %0d->%0d, bus reads %0d->%0d)",
+		         i, f_count, rd0, m_read_count);
+		errors = errors + 1;
+	end
+	expect_read(32'h0000_2A04, mem[32'h2A04>>2], 12);   // resident now
+	expect_read(32'h0000_2A0C, mem[32'h2A0C>>2], 12);
+	if (f_count != i + 1 || m_read_count != rd0) begin
+		$display("FAIL test 12: the channel-filled line did not hit");
+		errors = errors + 1;
+	end
+	// every offset within the line, as the requested word
+	for (off = 0; off < 4; off = off + 1) begin
+		cinv_req = 1; cinv_ic = 1; cinv_dc = 1;
+		@(negedge clk);
+		while (!cinv_done) @(posedge clk);
+		cinv_req = 0;
+		repeat (8) @(posedge clk);
+		expect_read(32'h0000_2B00 + {off[1:0], 2'b00}, mem[(32'h2B00 >> 2) + off], 12);
+	end
+
+	// T12b: a snoop on ANOTHER line of the row during a channel fill
+	// must not be undone by the tag writeback (T2's rule), swept
+	for (off = 0; off < 14; off = off + 1) begin
+		cinv_req = 1; cinv_ic = 1; cinv_dc = 1;
+		@(negedge clk);
+		while (!cinv_done) @(posedge clk);
+		cinv_req = 0;
+		repeat (8) @(posedge clk);
+		expect_read(32'h0000_2C00, mem[32'h2C00>>2], 12);   // X valid
+		mem[32'h2C00>>2] = 32'h2CC0_0000 + off;              // X changes
+		fork
+			expect_read(32'h0000_3C00, mem[32'h3C00>>2], 12); // Y: same row, channel
+			begin
+				repeat (off + 1) @(negedge clk);
+				snoop(32'h0000_2C00);
+			end
+		join
+		expect_read(32'h0000_2C00, 32'h2CC0_0000 + off, 12);  // X must refetch
+	end
+
+	// T12c: a snoop on the FILLING line itself must leave it invalid:
+	// memory changes under it and the next read must refetch
+	for (off = 0; off < 14; off = off + 1) begin
+		cinv_req = 1; cinv_ic = 1; cinv_dc = 1;
+		@(negedge clk);
+		while (!cinv_done) @(posedge clk);
+		cinv_req = 0;
+		repeat (8) @(posedge clk);
+		fork
+			cpu_read(32'h0000_2D00, d);
+			begin
+				repeat (off + 1) @(negedge clk);
+				snoop(32'h0000_2D00);
+			end
+		join
+		mem[32'h2D00>>2] = 32'h2DD0_0000 + off;
+		snoop(32'h0000_2D00);
+		expect_read(32'h0000_2D00, 32'h2DD0_0000 + off, 12);
+	end
+
+	// T12d: a channel error abandons the fill, the line is not validated,
+	// and the cache keeps serving
+	ferr_arm = 1;
+	ferr_addr = 28'h000_2E0;
+	@(negedge clk);
+	c_req = 1; c_write = 0; c_size = 2'b10; c_addr = 32'h0000_2E00;
+	guard5 = 0;
+	while (!(fill_err && ce) && guard5 < 300) begin
+		@(posedge clk); guard5 = guard5 + 1;
+	end
+	if (guard5 >= 300) begin
+		$display("FAIL test 12: channel error never reported");
+		errors = errors + 1;
+	end
+	@(negedge clk);
+	c_req = 0;
+	@(posedge clk);
+	ferr_arm = 0;
+	repeat (4) @(posedge clk);
+	expect_read(32'h0000_7100, mem[32'h7100>>2], 12);
+	mem[32'h2E00>>2] = 32'h2EE0_2EE0;               // no snoop: only a
+	expect_read(32'h0000_2E00, 32'h2EE0_2EE0, 12);  // refetch sees it
+
+	// T12e: cache-inhibited reads still bypass, stores still merge
+	c_nocache = 1;
+	expect_read(32'h0000_2F00, mem[32'h2F00>>2], 12);
+	c_nocache = 0;
+	expect_read(32'h0000_2F40, mem[32'h2F40>>2], 12);
+	cpu_write_sz(32'h0000_2F44, 32'h2F44_2F44, 2'd2);
+	drain;
+	rd0 = m_read_count; i = f_count;
+	expect_read(32'h0000_2F44, 32'h2F44_2F44, 12);
+	if (f_count != i || m_read_count != rd0) begin
+		$display("FAIL test 12: store into a channel-filled line did not merge");
+		errors = errors + 1;
+	end
+	fill_ok = 0;
 	repeat (6) @(posedge clk);
 
 	if (errors == 0) $display("ALL TESTS PASSED");

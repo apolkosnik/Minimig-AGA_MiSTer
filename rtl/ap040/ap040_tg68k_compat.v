@@ -20,7 +20,10 @@ module ap040_tg68k_compat
 	parameter AP040_FAST_SIM     = 0,
 	// X3.3 A2b-1: stores to cacheable pages are acknowledged early and
 	// drained by the cache.  0 is the synchronous-store A/B reference.
-	parameter AP040_POST_STORES  = 1
+	parameter AP040_POST_STORES  = 1,
+	// X3.4 A1: line fills over the fill channel when fill_ena says the
+	// wrapper serves it.  0 is the adapter-only A/B reference.
+	parameter AP040_FILL_CHANNEL = 1
 )
 (
 	input         clk,
@@ -56,6 +59,17 @@ module ap040_tg68k_compat
 	output        nresetout,
 	output [2:0]  fc,
 	output        nmi_ack_toggle,
+	// Line-fill channel to the wrapper (plan X3.4, A1).  fill_ena: the
+	// wrapper serves the channel for the cacheable RAM windows (0 until
+	// A1-2 wires it; every fill then takes the adapter path).  A request
+	// carries the physical line address; the answer is the whole line
+	// under a level-held ack, or a level-held error.
+	input         fill_ena,
+	output        fill_req,
+	output [31:4] fill_addr,
+	input [127:0] fill_data,
+	input         fill_ack,
+	input         fill_err,
 	// Cache-maintenance event for systems that compile out ap040_cache and
 	// use an external cache on the TG68K bus instead.
 	output        cache_maint_req,
@@ -367,11 +381,19 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 	wire cache_allow = cache_allow_all | cache_win;
 
 	ap040_cache #(
-		.POST_STORES(AP040_POST_STORES)
+		.POST_STORES(AP040_POST_STORES),
+		.FILL_CHANNEL(AP040_FILL_CHANNEL)
 	) cache (
 		.clk(clk),
 		.nreset(nreset),
 		.ce(ce_core),
+		// the channel serves the same RAM windows the cache may hold
+		.fill_ok(fill_ena & cache_win),
+		.fill_req(fill_req),
+		.fill_addr(fill_addr),
+		.fill_data(fill_data),
+		.fill_ack(fill_ack),
+		.fill_err(fill_err),
 
 		.ie(cacr_out[15]),
 		.de(cacr_out[31]),
@@ -426,6 +448,9 @@ else begin : g_nocache
 	assign cinv_done = 1'b1;
 	assign post_busy = 1'b0;    // no cache, no buffer: stores are synchronous
 	assign post_err  = 1'b0;
+	assign fill_req  = 1'b0;    // no cache, no line fills
+	assign fill_addr = 28'd0;
+	wire unused_fill = fill_ena | fill_ack | fill_err | (|fill_data);
 	wire unused_nc = mm_nocache | cinv_req | cinv_ic | cinv_dc |
 	                 (|cacr_out);
 end

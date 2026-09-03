@@ -203,12 +203,48 @@ end
 // POST=0 keeps every store synchronous: the A/B reference for the posted
 // store (plan X3.3), whose logs must match the tree before it.
 parameter POST = 1;
+// FILLCH=0 keeps every line fill on the 16-bit adapter: the A/B
+// reference for the fill channel (plan X3.4, A1).  With FILLCH=1 the
+// bench serves the channel itself: a request is answered FILL_LAT
+// cycles later with the line from mem, ack held until the request
+// drops -- the shape the wrapper's CDC will present.  FILL_LAT models
+// DDR3 latency plus two crossings in core cycles.
+parameter FILLCH = 1;
+parameter FILL_LAT = 8;
+wire        fill_req;
+wire [31:4] fill_addr;
+reg [127:0] fill_data = 0;
+reg         fill_ack = 0;
+integer     fill_lat_cnt = 0;
+always @(posedge clk) begin
+	if (!fill_req) begin
+		fill_ack <= 0;
+		fill_lat_cnt <= 0;
+	end
+	else if (!fill_ack) begin
+		if (fill_lat_cnt != FILL_LAT) fill_lat_cnt <= fill_lat_cnt + 1;
+		else begin
+			fill_data <= {mem[{fill_addr[15:4], 3'd0}], mem[{fill_addr[15:4], 3'd1}],
+			              mem[{fill_addr[15:4], 3'd2}], mem[{fill_addr[15:4], 3'd3}],
+			              mem[{fill_addr[15:4], 3'd4}], mem[{fill_addr[15:4], 3'd5}],
+			              mem[{fill_addr[15:4], 3'd6}], mem[{fill_addr[15:4], 3'd7}]};
+			fill_ack <= 1;
+		end
+	end
+end
 ap040_tg68k_compat #(.AP040_ENABLE_CACHE(`AP040_TB_CACHE),
-                     .AP040_POST_STORES(POST)) dut
+                     .AP040_POST_STORES(POST),
+                     .AP040_FILL_CHANNEL(FILLCH)) dut
 (
 	.clk(clk),
 	.nreset(nreset),
 	.cache_allow_all(1'b1),
+	.fill_ena(FILLCH != 0),
+	.fill_req(fill_req),
+	.fill_addr(fill_addr),
+	.fill_data(fill_data),
+	.fill_ack(fill_ack),
+	.fill_err(1'b0),
 	.cache_snoop_stb(1'b0), .cache_snoop_addr(32'd0),
 	.cache_z2_ena(1'b0),
 	.cache_z3_base0(5'd0),

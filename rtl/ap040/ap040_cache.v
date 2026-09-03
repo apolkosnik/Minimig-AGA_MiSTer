@@ -32,7 +32,12 @@ module ap040_cache
 	// X3.3, A2b-1).  0 keeps every store synchronous, which is the A/B
 	// reference: with it the logs must be bit-identical to the tree
 	// before the buffer.
-	parameter POST_STORES = 1
+	parameter POST_STORES = 1,
+	// A miss whose line the wrapper can serve over the line-fill
+	// channel (fill_ok) takes the whole line as one payload instead of
+	// four longword transactions through the adapter (plan X3.4, A1).
+	// 0 keeps every fill on the adapter path: the A/B reference.
+	parameter FILL_CHANNEL = 1
 )
 (
 	input             clk,
@@ -84,6 +89,23 @@ module ap040_cache
 	// posts to, the only bus error is the dead-fabric watchdog anyway.
 	output            post_busy,
 	output reg        post_err,
+
+	// Line-fill channel (A1).  When fill_ok says the line's physical
+	// address is served by a controller with a fill port, a miss raises
+	// fill_req with the line address and takes the whole line as one
+	// 128-bit payload -- longword at line offset 0 in [127:96], offset
+	// 12 in [31:0] -- under fill_ack, a LEVEL held until fill_req drops
+	// (the walker bridge's discipline: one toggle each way, payload
+	// stable until observed).  fill_err, held the same way, abandons the
+	// fill as m_err abandons an adapter fill.  fill_ok = 0 (the wrapper's
+	// value until A1-2 wires the channel) keeps every fill on the adapter
+	// path, bit for bit as before.
+	input             fill_ok,
+	output reg        fill_req,
+	output     [31:4] fill_addr,
+	input     [127:0] fill_data,
+	input             fill_ack,
+	input             fill_err,
 
 	// Snoop: an external master (chipset DMA, or the MMU table walker)
 	// wrote memory behind the CPU's back.  s_stb is a single CLOCK
@@ -202,16 +224,19 @@ wire rd_accept;
 // FSM
 //---------------------------------------------------------------------------
 
-localparam C_IDLE  = 3'd0;
-localparam C_LOOK  = 3'd1;
-localparam C_FERR  = 3'd2;   // aborted fill: invalidate the corrupted row
-localparam C_WINV  = 3'd3;   // second-line invalidate owed by a store
-localparam C_FILL  = 3'd4;
-localparam C_TAGW  = 3'd5;
-localparam C_PASS  = 3'd6;
-localparam C_SWEEP = 3'd7;   // reset / CINV: walk the rows clearing them
+localparam C_IDLE  = 4'd0;
+localparam C_LOOK  = 4'd1;
+localparam C_FERR  = 4'd2;   // aborted fill: invalidate the corrupted row
+localparam C_WINV  = 4'd3;   // second-line invalidate owed by a store
+localparam C_FILL  = 4'd4;
+localparam C_TAGW  = 4'd5;
+localparam C_PASS  = 4'd6;
+localparam C_SWEEP = 4'd7;   // reset / CINV: walk the rows clearing them
+localparam C_FILLC = 4'd8;   // A1: line requested over the fill channel
+localparam C_FILLW = 4'd9;   // A1: the delivered line goes into the way
 
-reg   [2:0] cst;
+reg   [3:0] cst;
+reg [127:0] fill_line;       // the channel's payload, drained by C_FILLW
 reg   [6:0] sweep_cnt;
 reg         sweep_all;   // reset sweep clears both banks
 reg         winv_pend;   // a store still owes its second-line invalidate
@@ -346,7 +371,8 @@ always @(posedge clk) begin
 	end
 	else begin
 		if (ce && cst == C_LOOK && !look_hit) fill_snooped <= 0;
-		if ((cst == C_FILL || cst == C_TAGW) && snoop_fill_row)
+		if ((cst == C_FILL || cst == C_TAGW ||
+		     cst == C_FILLC || cst == C_FILLW) && snoop_fill_row)
 			fill_snooped <= 1;
 		if (ce && rd_accept) look_snooped <= 0;
 		if ((rd_accept || cst == C_LOOK) && snoop_look_row)
@@ -375,6 +401,11 @@ end
 // and is untouched.
 wire pass_active = (cst == C_PASS);
 wire fill_active = (cst == C_FILL);
+// the channel's line, one longword per C_FILLW cycle, offset 0 first
+wire [31:0] fill_beat = (r_beat == 2'd0) ? fill_line[127:96] :
+                        (r_beat == 2'd1) ? fill_line[95:64]  :
+                        (r_beat == 2'd2) ? fill_line[63:32]  : fill_line[31:0];
+assign fill_addr = r_addr[31:4];
 
 // Set when a transfer this cache issued took a bus error; cleared when
 // the core withdraws the faulted request.  Without it the level-held
@@ -496,12 +527,14 @@ wire st_merge = (cst == C_PASS) && st_chk && look_hit && !st_snooped && !m_err;
 assign cd_rd_en  = rd_accept | wr_accept_upd;
 assign cd_ridx   = {c_instr, a_set, c_addr[3:2]};
 assign cd_we     = ((cst == C_FILL) && r_issued && m_ack) ? (4'd1 << r_way) :
+                   (cst == C_FILLW)                        ? (4'd1 << r_way) :
                    st_merge                                ? (4'd1 << hit_way) :
                                                              4'd0;
 assign cd_widx   = st_merge ? {1'b0, r_row[5:0], r_addr[3:2]}
                             : {r_bank, r_row[5:0], r_beat};
-assign cd_wdat   = st_merge ? lw_merge(data_hit, r_wdata, r_size, r_off)
-                            : m_rdata;
+assign cd_wdat   = st_merge         ? lw_merge(data_hit, r_wdata, r_size, r_off) :
+                   (cst == C_FILLW) ? fill_beat :
+                                      m_rdata;
 
 
 
@@ -524,6 +557,8 @@ always @(posedge clk) begin
 		post_err <= 0;
 		r_wdata <= 0;
 		r_fc <= 0;
+		fill_req <= 0;
+		fill_line <= 0;
 		store_inv_lost <= 0;
 		store_inv_set <= 0;
 		cinv_done <= 0;
@@ -754,8 +789,42 @@ always @(posedge clk) begin
 					r_way <= tag_q[93:92];   // round-robin victim
 					r_beat <= 0;
 					r_issued <= 0;
-					cst <= C_FILL;
+					if (FILL_CHANNEL != 0 && fill_ok) begin
+						// A1: the whole line over the fill channel
+						fill_req <= 1;
+						cst <= C_FILLC;
+					end
+					else cst <= C_FILL;
 				end
+			end
+
+			C_FILLC: begin
+				// The channel answers with the whole line, or with an
+				// error.  Nothing has touched the victim way yet, so an
+				// error leaves nothing to clean up; C_FERR is taken
+				// anyway so the abandoned request is released on the
+				// one path that already knows how (err_hold, the row
+				// invalidate is idempotent).
+				if (fill_err) begin
+					fill_req <= 0;
+					err_hold <= 1;
+					cst <= C_FERR;
+				end
+				else if (fill_ack) begin
+					fill_req <= 0;
+					fill_line <= fill_data;
+					r_beat <= 0;
+					cst <= C_FILLW;
+				end
+			end
+
+			C_FILLW: begin
+				// one longword per cycle into the victim way (cd_we);
+				// the tag write in C_TAGW validates the line, or not, by
+				// the same fill_snooped rule as the adapter path
+				if (r_beat == r_addr[3:2]) fill_hold <= fill_beat;
+				if (r_beat == 2'd3) cst <= C_TAGW;
+				else r_beat <= r_beat + 2'd1;
 			end
 
 			C_FILL: begin

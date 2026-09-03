@@ -268,6 +268,15 @@ ap040_tg68k_compat #(
 	.cache_allow_all(1'b0),
 	.cache_snoop_stb(snoop_stb_r),
 	.cache_snoop_addr(snoop_addr_r),
+	// Line-fill channel (plan X3.4): not served by the wrapper until
+	// A1-2 routes it to the RAM controllers.  With fill_ena low every
+	// fill takes the 16-bit adapter path exactly as before.
+	.fill_ena(1'b0),
+	.fill_req(),
+	.fill_addr(),
+	.fill_data(128'd0),
+	.fill_ack(1'b0),
+	.fill_err(1'b0),
 	.cache_z2_ena(z2ram_ena),
 	.cache_z3_base0(z3ram_base0),
 	.cache_z3_ena0(z3ram_ena0),
