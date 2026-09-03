@@ -2087,6 +2087,47 @@ chip window in dual builds.  Elaboration clean.
   read instead of two singles, and, once measured on hardware, the
   decision on cpu_cache_new.
 
+A1-3a SHIPPED 2026-09-02: the decoupled drain.  A posted store used to
+hold the cache in C_PASS for its whole drain, so every access behind it
+-- hits included -- waited.  Now the store is handed to its own drain
+registers in its first C_PASS cycle (the merge lands in that cycle) and
+the FSM is free: hits are served during the drain; misses, bypassed
+(serialized) accesses and further stores wait for it, so memory order
+stays the program's and one slot suffices; a bus error on the drain is
+post_err as before.  T13 in tb_ap040_cache_snoop (a hit acknowledged
+while post_busy is still high, at a six-cycle memory so the window is
+real; a miss, a cache-inhibited read and a second store ordered after
+the drain; under the snoop storm) -- HEAD's cache fails the first check.
+POST_STORES=0 identical to HEAD on all five programs.
+
+  Ledger, flat bench, channel modelled at 8:
+    t_integer  11,688 / 12,083 -> 11,577 / 11,854
+    t_fpu     122,989 / 136,035 -> 121,334 / 131,700   (-3% phase 1)
+    bench_store: unchanged to within a few cycles, including a NEW
+    looped store block (stamp 6 -> 7: store + three register moves +
+    dbra, 256 iterations: 39.2 cycles per iteration on both caches).
+
+  WHY THE BENCHMARK DOES NOT MOVE, and what it settles.  The +prof
+  histogram of bench_store puts a store at ~13.5 cycles: S_MWR 5.5 (the
+  issue -> MMU -> cache-accept -> acknowledge -> S_NEXT handshake) and
+  ~8 in S_FETCH, S_DECODE, S_PIPE_START, S_EA_DISP, S_EA_BASE,
+  S_PIPE_DST, S_PIPE_DEA and S_EXEC -- one state each.  A load is the
+  same shape at ~11.  In this bench's zero-wait phase the adapter drain
+  is only 3-4 cycles and ends before the next fetch is even issued, so
+  there is little to overlap; the drain only bites with wait states,
+  which is where the 3% came from, and on hardware the controller cache's
+  write buffer absorbs a fast-RAM store in about that time too.  So
+  after A2b-1 and A1-3a the store's cost is the SEQUENCER, exactly as
+  X3.0 said of everything else.
+
+  Consequence: A1-3b, the 32-bit byte-enabled store path (X2.1c), is
+  RE-SCOPED to "after B".  Its case rested on the drain blocking the
+  core; that is gone.  It would still shorten the drain on chip RAM in
+  dual-SDRAM builds and free the port sooner, but it is a controller-
+  mask-pipeline change (both SDRAM controllers' CAS/DQM cones, the ones
+  the fit history names as timing violators) for a number the flat bench
+  cannot see.  The next stage in this part is P2 and A3, and then B.
+
 ## X3.5 Stage A3: second cache lookup  (= X2.2b stage 2, after P2)
 
 Unchanged from the X2.2b costing: after the 28 MHz -> clk_114 + 4:1 enable
