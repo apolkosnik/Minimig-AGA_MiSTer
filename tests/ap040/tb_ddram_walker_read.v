@@ -59,6 +59,35 @@ module tb_ddram_walker_read;
 		.m_ddr(mw_ddr), .m_ack(mw_ack), .m_rdata(mw_rdata), .m_berr(mw_wd_berr)
 	);
 
+	// AP040 line-fill channel (plan X3.4, A1-1): the cache's request
+	// enters on the 28 MHz side of the REAL bridge (ap040_fill_cdc), the
+	// bridge's m side feeds ddram_ctrl's fill port at 113 MHz, and the
+	// line comes back as one 128-bit payload.  The watchdog in front of
+	// the controller is wired as Minimig.sv will wire it: a fill the
+	// controller never answers ends as an error, not a hang.
+	reg         fill_req = 0;
+	reg  [28:4] fill_addr = 0;
+	wire        fill_ack;
+	wire [127:0] fill_data;
+	wire        fill_err;
+	wire        mf_req, mf_ddr;
+	wire [28:4] mf_addr;
+	wire        mf_strb, mf_ack;
+	wire [31:0] mf_dat;
+	wire        mf_wd_berr;
+	ap040_bus_timeout #(.COUNTER_BITS(16)) fill_timeout (
+		.clk(clk), .nreset(reset_n),
+		.req(mf_req), .complete(mf_ack), .berr(mf_wd_berr)
+	);
+	ap040_fill_cdc fill_cdc (
+		.s_clk(clk28), .s_reset_n(reset_n),
+		.s_req(fill_req), .s_addr(fill_addr), .s_ddr(1'b1), .s_bad(1'b0),
+		.s_ack(fill_ack), .s_data(fill_data), .s_err(fill_err),
+		.m_clk(clk), .m_reset_n(reset_n),
+		.m_req(mf_req), .m_addr(mf_addr), .m_ddr(mf_ddr),
+		.m_strb(mf_strb), .m_dat(mf_dat), .m_ack(mf_ack), .m_berr(mf_wd_berr)
+	);
+
 	// CPU cache port -- exercises the OTHER DDR3 read consumer (cache line
 	// fill, ddram_ctrl state 1) under the same contention.  A cache fill
 	// that never completes hangs the CPU exactly as the live NetBSD stall.
@@ -146,6 +175,8 @@ module tb_ddram_walker_read;
 		.cpuAddr(cpuAddr), .cpuCS(cpuCS), .cpustate(cpustate),
 		.cpuL(cpuL), .cpuU(cpuU), .cpuWR(cpuWR), .cpuRD(cpuRD),
 		.ramshared(1'b0), .ramready(ramready),
+		.fill_req(mf_req), .fill_addr(mf_addr),
+		.fill_strb(mf_strb), .fill_dat(mf_dat), .fill_ack(mf_ack),
 		.walker_req(mw_req), .walker_we(mw_we),
 		.walker_addr(mw_addr), .walker_wdata(mw_wdata),
 		.walker_ack(mw_ack), .walker_rdata(mw_rdata)
@@ -268,6 +299,87 @@ module tb_ddram_walker_read;
 			                   : {w[15:0],  w[31:16]};
 		end
 	endfunction
+
+	// the 16-byte line the fill channel must hand back for a line address:
+	// two consecutive 64-bit words, each split into two longwords in 68k
+	// byte order exactly as expect_word does for the walker
+	// The slave model indexes ddr_mem[ddram_addr[12:3]], i.e. by byte
+	// address bits [15:6], so the two 64-bit words of one line land on
+	// the SAME entry here -- the model is coarse on purpose (see
+	// expect_word).  The channel must return that entry twice, each
+	// half split as the walker splits it.
+	function [127:0] expect_line;
+		input [28:4] a;
+		reg [63:0] w;
+		begin
+			w = ddr_mem[a[15:6]];
+			expect_line = {w[15:0], w[31:16], w[47:32], w[63:48],
+			               w[15:0], w[31:16], w[47:32], w[63:48]};
+		end
+	endfunction
+
+	integer fill_cyc;
+	integer fill_cyc_min = 99999;
+	integer fill_cyc_max = 0;
+	task fill_line;
+		input [28:4] addr;
+		reg [127:0] expl;
+		begin
+			@(negedge clk28);
+			fill_addr = addr; fill_req = 1;
+			guard = 0;
+			while (!fill_ack && guard < 40000) begin
+				@(posedge clk28); guard = guard + 1;
+			end
+			fill_cyc = guard;
+			if (!fill_ack) begin
+				$display("FAIL: fill timeout addr=%h (bridge m_req=%b)",
+				         {addr,4'h0}, mf_req);
+				errors = errors + 1;
+			end
+			else if (fill_err) begin
+				$display("FAIL: fill addr=%h unexpected error", {addr,4'h0});
+				errors = errors + 1;
+			end
+			else begin
+				expl = expect_line(addr);
+				if (fill_data !== expl) begin
+					$display("FAIL: fill addr=%h got=%h exp=%h",
+					         {addr,4'h0}, fill_data, expl);
+					errors = errors + 1;
+				end
+				if (fill_cyc < fill_cyc_min) fill_cyc_min = fill_cyc;
+				if (fill_cyc > fill_cyc_max) fill_cyc_max = fill_cyc;
+			end
+			@(negedge clk28);
+			fill_req = 0;
+			repeat (3) @(posedge clk28);
+		end
+	endtask
+
+	// a fill that must complete as an ERROR (lost response, watchdog)
+	task fill_line_berr;
+		input [28:4] addr;
+		begin
+			@(negedge clk28);
+			fill_addr = addr; fill_req = 1;
+			guard = 0;
+			while (!fill_ack && guard < 90000) begin
+				@(posedge clk28); guard = guard + 1;
+			end
+			if (!fill_ack) begin
+				$display("FAIL: lost-response fill never completed at all (no error either)");
+				errors = errors + 1;
+			end
+			else if (!fill_err) begin
+				$display("FAIL: lost-response fill completed WITHOUT an error");
+				errors = errors + 1;
+			end
+			@(negedge clk28);
+			fill_req = 0;
+			repeat (3) @(posedge clk28);
+		end
+	endtask
 
 	task walker_read;
 		input [28:2] addr;
@@ -744,6 +856,50 @@ module tb_ddram_walker_read;
 			errors = errors + 1;
 		end
 		$display("  (inhibited=%h next=%h)", ci_a, ci_b);
+
+		// 17) the line-fill channel (plan X3.4, A1-1): whole lines through
+		//     the real bridge and ddram_ctrl's fill port, quiet and under
+		//     every contention shape the walker phases use, then a lost
+		//     response that must end as an error and leave the port clean.
+		$display("PHASE 17: line-fill channel");
+		rd_lat = 4; busy_pattern = 0; m1_on = 0;
+		repeat (20) @(posedge clk);
+		fill_line(25'h0000080);            // quiet
+		fill_line(25'h0000090);
+		fill_line(25'h00000C0);
+		$display("  fill latency, quiet bus: %0d clk28 cycles request->ack", fill_cyc);
+		rd_lat = 12;                       // high latency
+		fill_line(25'h0000100);
+		rd_lat = 4;
+		busy_pattern = 1;                  // waitrequest stutter
+		fill_line(25'h0000140);
+		fill_line(25'h0000150);
+		busy_pattern = 0;
+		m1_on = 1;                         // a2065 contention
+		repeat (20) @(posedge clk);
+		fill_line(25'h0000180);
+		walker_read(27'h0000A00);
+		fill_line(25'h00001C0);
+		cpu_read(28'h000200);
+		fill_line(25'h0000200);
+		rd_lat = 8; busy_pattern = 1;      // everything at once
+		fill_line(25'h0000240);
+		walker_read(27'h0000A40);
+		fill_line(25'h0000280);
+		cpu_read(28'h000280);
+		fill_line(25'h00002C0);
+		busy_pattern = 0; rd_lat = 4; m1_on = 0;
+		$display("  fill latency over the phase: min %0d max %0d clk28 cycles",
+		         fill_cyc_min, fill_cyc_max);
+
+		// a lost response: the controller abandons the fill by its
+		// read-wait watchdog, the bridge-side watchdog reports the
+		// error, and the next fill and walker read are served correctly
+		drop_next = 1;
+		fill_line_berr(25'h0000300);
+		fill_line(25'h0000300);
+		walker_read(27'h0000C00);
+		fill_line(25'h0000340);
 
 		if (errors == 0) $display("ALL TESTS PASSED");
 		else $display("TEST FAILED with %0d errors", errors);

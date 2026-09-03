@@ -26,7 +26,8 @@ if ! ls "$IMG"/t_integer.hex "$IMG"/t_exceptions.hex "$IMG"/t_mmu.hex \
 fi
 
 SRC="$RTL/ap040_tg68k_compat.v $RTL/ap040_core.v $RTL/ap040_bus16_adapter.v $RTL/ap040_bus_timeout.v \
-     $RTL/ap040_regfile.v $RTL/ap040_alu.v $RTL/ap040_muldiv.v $RTL/ap040_mmu.v $RTL/ap040_cache.v $RTL/ap040_fpu.v"
+     $RTL/ap040_regfile.v $RTL/ap040_alu.v $RTL/ap040_muldiv.v $RTL/ap040_mmu.v $RTL/ap040_cache.v $RTL/ap040_fpu.v \
+     $RTL/ap040_fill_cdc.v"
 
 # generated sources: every bench below reads them, so they come first
 python3 hoist_decls.py ../../rtl/cpu_wrapper.v "$WORK/cpu_wrapper_sim.v"
@@ -74,7 +75,7 @@ compile ddram_walker_snoop tb_ddram_walker_snoop \
 compile ddram_walker_read tb_ddram_walker_read \
 	tb_ddram_walker_read.v ../../rtl/ddram_ctrl.v \
 	../../rtl/cpu_cache_new.v ../../rtl/A2065/a2065_ddram_arbiter.v \
-	$RTL/ap040_walker_cdc.v $RTL/ap040_bus_timeout.v sim_dpram.v &
+	$RTL/ap040_walker_cdc.v $RTL/ap040_fill_cdc.v $RTL/ap040_bus_timeout.v sim_dpram.v &
 compile bus_timeout tb_ap040_bus_timeout tb_ap040_bus_timeout.v $RTL/ap040_bus_timeout.v &
 compile cart_hrtmon tb_cart_hrtmon tb_cart_hrtmon.v ../../rtl/cart.v &
 compile cache_snoop tb_ap040_cache_snoop tb_ap040_cache_snoop.v sim_dpram.v $RTL/ap040_cache.v &

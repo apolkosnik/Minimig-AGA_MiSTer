@@ -16,7 +16,8 @@ mkdir -p "$WORK"
 ./build_tests.sh
 
 SRC="$RTL/ap040_tg68k_compat.v $RTL/ap040_core.v $RTL/ap040_bus16_adapter.v $RTL/ap040_bus_timeout.v \
-     $RTL/ap040_regfile.v $RTL/ap040_alu.v $RTL/ap040_muldiv.v $RTL/ap040_mmu.v $RTL/ap040_cache.v $RTL/ap040_fpu.v"
+     $RTL/ap040_regfile.v $RTL/ap040_alu.v $RTL/ap040_muldiv.v $RTL/ap040_mmu.v $RTL/ap040_cache.v $RTL/ap040_fpu.v \
+     $RTL/ap040_fill_cdc.v"
 
 # generated sources: every bench below reads them, so they come first
 python3 hoist_decls.py ../../rtl/cpu_wrapper.v "$WORK/cpu_wrapper_sim.v"
@@ -62,7 +63,7 @@ compile ddram_walker_read iverilog -g2012 -s tb_ddram_walker_read \
 	-o "$WORK/tb_ddram_walker_read.vvp" \
 	tb_ddram_walker_read.v ../../rtl/ddram_ctrl.v \
 	../../rtl/cpu_cache_new.v ../../rtl/A2065/a2065_ddram_arbiter.v \
-	$RTL/ap040_walker_cdc.v $RTL/ap040_bus_timeout.v sim_dpram.v &
+	$RTL/ap040_walker_cdc.v $RTL/ap040_fill_cdc.v $RTL/ap040_bus_timeout.v sim_dpram.v &
 compile bus_timeout iverilog -g2012 -o "$WORK/tb_bus_timeout.vvp" \
 	tb_ap040_bus_timeout.v $RTL/ap040_bus_timeout.v &
 compile cart_hrtmon iverilog -g2012 -o "$WORK/tb_cart_hrtmon.vvp" \

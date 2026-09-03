@@ -79,7 +79,23 @@ module ddram_ctrl
 	input      [28:2] walker_addr,
 	input      [31:0] walker_wdata,
 	output reg        walker_ack,
-	output reg [31:0] walker_rdata
+	output reg [31:0] walker_rdata,
+
+	// AP040 line-fill port (plan X3.4, A1; clk=sysclk).  fill_req is
+	// level-held until fill_ack; fill_addr must stay stable while it is
+	// asserted.  The 16-byte line comes back as four longword beats
+	// (fill_strb with fill_dat, line offset 0 first, in 68k byte order),
+	// fill_ack pulsing with the last -- sdram32_ctrl's fill port shape.
+	// Two single-word DDR3 reads, the second issued when the first
+	// returns: the arbiter promises one read burst in flight and the
+	// benches' slave model serves one word per command.  A response the
+	// bridge loses is abandoned by the read-wait watchdog like a walker
+	// read; the watchdog in front of the bridge then reports it.
+	input             fill_req,
+	input      [28:4] fill_addr,
+	output reg        fill_strb,
+	output reg [31:0] fill_dat,
+	output reg        fill_ack
 );
 
 wire ramsel = cpuCS & (~&cpustate | ~cpuU | ~cpuL);
@@ -220,9 +236,10 @@ a2065_ddram_arbiter arbiter
 assign mem2_readdata = DDRAM_DOUT;
 
 always @ (posedge sysclk) begin
-	reg  [3:0] state;
+	reg  [4:0] state;
 	reg  [1:0] ba;
 	reg [63:0] dout;
+	reg        fill_busy;   // a fill accepted, until its request drops
 	// Read-wait watchdog: states 1 and 14 used to wait on ram_dout_ready
 	// unconditionally, so a response the DDR3 bridge lost wedged this
 	// controller -- and with it every CPU and walker access to fast RAM,
@@ -242,6 +259,8 @@ always @ (posedge sysclk) begin
 	ddr_data <= dout[{ba, 4'b0000} +:16];
 	walker_ack   <= 0;
 	walker_snoop <= 0;
+	fill_strb    <= 0;
+	fill_ack     <= 0;
 
 	if(~ram_busy) begin
 		ram_we  <= 0;
@@ -260,9 +279,12 @@ always @ (posedge sysclk) begin
 		walker_wdata_latch   <= 0;
 		walker_snoop_low     <= 0;
 		walker_rdata         <= 0;
+		fill_busy            <= 0;
+		fill_dat             <= 0;
 	end
 	else begin
 		if (!walker_req) walker_busy <= 0;
+		if (!fill_req)   fill_busy   <= 0;
 
 		// Avalon read accounting.  A command transfers on the cycle it is
 		// asserted with waitrequest low; its response arrives later, in
@@ -320,6 +342,14 @@ always @ (posedge sysclk) begin
 						ba         <= cpuAddr[2:1];
 						state      <= 1;
 						ddr_swap   <= ramshared;
+					end
+					else if(fill_req && !fill_busy && !stale_rd) begin
+						// line fill: first 64-bit word of the line
+						fill_busy <= 1;
+						ram_addr  <= {3'b001, fill_addr[28:4], 1'b0};
+						ram_be    <= 8'hFF;
+						ram_rd    <= 1;
+						state     <= 15;
 					end
 				end
 			// Avalon read data is qualified by readdatavalid ALONE.
@@ -437,6 +467,62 @@ always @ (posedge sysclk) begin
 					end
 				end
 				else rdwait <= rdwait + 1'd1;
+			// line fill, word 0: beat 0 now, beat 1 next cycle while the
+			// second word is requested.  Longwords come out in 68k byte
+			// order from the little-endian 64-bit word, exactly as the
+			// walker read forms its result in state 14.
+			15: if(ram_dout_ready) begin
+					rdwait    <= 0;
+					rd_owed   <= 0;
+					dout      <= ram_dout;
+					fill_dat  <= {ram_dout[15:0], ram_dout[31:16]};
+					fill_strb <= 1;
+					state     <= 16;
+				end
+				else if (&rdwait) begin
+					rdwait <= 0;   // abandoned like a walker read: no
+					ram_rd <= 0;   // ack, the watchdog in front of the
+					state  <= 0;   // bridge reports it; withdraw the
+					if (rd_owed) begin       // command so no orphan lands
+						stale_rd   <= 1;
+						stale_wait <= 0;
+						rd_owed    <= 0;
+					end
+				end
+				else rdwait <= rdwait + 1'd1;
+			16: begin
+					fill_dat  <= {dout[47:32], dout[63:48]};
+					fill_strb <= 1;
+					ram_addr  <= {3'b001, fill_addr[28:4], 1'b1};
+					ram_be    <= 8'hFF;
+					ram_rd    <= 1;
+					state     <= 17;
+				end
+			17: if(ram_dout_ready) begin
+					rdwait    <= 0;
+					rd_owed   <= 0;
+					dout      <= ram_dout;
+					fill_dat  <= {ram_dout[15:0], ram_dout[31:16]};
+					fill_strb <= 1;
+					state     <= 18;
+				end
+				else if (&rdwait) begin
+					rdwait <= 0;
+					ram_rd <= 0;
+					state  <= 0;
+					if (rd_owed) begin
+						stale_rd   <= 1;
+						stale_wait <= 0;
+						rd_owed    <= 0;
+					end
+				end
+				else rdwait <= rdwait + 1'd1;
+			18: begin
+					fill_dat  <= {dout[47:32], dout[63:48]};
+					fill_strb <= 1;
+					fill_ack  <= 1;
+					state     <= 0;
+				end
 		endcase
 
 		if(~write_req) write_ack <= 0;
