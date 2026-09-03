@@ -2058,6 +2058,35 @@ that must end as an error and leave the port clean.
   add on hardware (its ~20 clk_114 first-beat latency is ~5 core cycles
   more than the model's 4, so ~15 on silicon -- still under half).
 
+A1-2 SHIPPED 2026-09-02: the channel is routed end to end.  cpu_wrapper
+encodes the line address with the walker's bank map and tells the compat
+layer which windows are served (fill_ddr_ena: the Zorro windows, always;
+fill_sdr_ena: the chip window, dual-SDRAM builds only -- Minimig.sv
+asserts it inside MISTER_DUAL_SDRAM and ties it low otherwise, where
+chip-window fills stay on the adapter exactly as before).  Minimig.sv
+carries the bridge, the walker-style watchdog, and the per-controller
+routing: ddram_ctrl's port for the Zorro windows, sdram32_ctrl's for the
+chip window in dual builds.  Elaboration clean.
+
+  Integrated proof: tb_dualram_turbo now carries the real bridge, the
+  watchdog and the real ddram_ctrl's fill port on the wrapper's channel,
+  and t_fpu runs green through it -- 277 channel fills, 0 errors, 0
+  adapter fills.  Its cycle count is unchanged (674,175 -> 674,271),
+  and that is expected, not a disappointment: the bench's program lives
+  in the chip window, whose instruction fetches bypass the internal
+  cache by production rule, so only data lines used the channel, and
+  those were already hits in the SDRAM side's controller cache while
+  the bench's DDR3 model answers in 10 to 41 cycles.  The Zorro-window
+  benefit -- the one that matters -- needs a program that lives there;
+  that measurement is hardware's, or a bench with an image in a Z3
+  window, and is recorded as owed.  (t_mmu and t_integer fail on this
+  bench with the channel OFF as well: a pre-existing limit of the bench,
+  which the runner has only ever asked to carry t_fpu.)
+
+  Still to do in A1: the store side (A1-3, X2.1c), a burst-of-two DDR3
+  read instead of two singles, and, once measured on hardware, the
+  decision on cpu_cache_new.
+
 ## X3.5 Stage A3: second cache lookup  (= X2.2b stage 2, after P2)
 
 Unchanged from the X2.2b costing: after the 28 MHz -> clk_114 + 4:1 enable
