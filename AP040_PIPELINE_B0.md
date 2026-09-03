@@ -154,10 +154,37 @@ in block RAM, 256 x 48 bits (one M10K), indexed by class:
 
 The classifier is where S_DECODE's KNOWLEDGE moves; what it loses is the
 per-class sequencing, which the stages and the control word carry.  The
-control store is generated from a table (tests/ap040/pipe_ctrl.py, to
-be written) so the same table drives a decode unit test that compares
-class + control word against the old S_DECODE's decisions over every
-16-bit opcode -- the equivalence gate for B1.
+control store is generated from a table so the same table drives a
+decode unit test that compares class + control word against the old
+S_DECODE's decisions over every 16-bit opcode -- the equivalence gate
+for B1.
+
+MEASURED 2026-09-02 (tests/ap040/tb_ap040_decode.v feeds all 65,536
+opcodes through the real fetch and decode path and dumps the decision;
+tests/ap040/pipe_ctrl.py groups them): the "~180 classes" above was an
+estimate, and the truth is larger.  Grouping by everything S_DECODE
+sets -- next state, operand kinds, WHICH ir field names each register,
+ALU op, size, exec kind, rmw/wbsup, immediate count and return state,
+EA return state, exception vector -- gives 1,191 distinct decisions
+raw and 706 once the ones a control word never distinguishes are folded
+(one class per exception vector regardless of stale operand registers,
+TRAP #n as one class, the branch-with-odd-target address error as the
+branch class since that check moves to EX).  530 of the 706 cover eight
+or more opcodes; the rest are singletons and near-singletons (MOVEC,
+the MMU/cache ops, individual system instructions).  Two things follow:
+
+  * the control store is 706 x ~48 bits, four M10K blocks, not one --
+    still nothing against the ~300 spare; or fewer entries if the
+    classifier derives op_size from ir[7:6] where the class allows it
+    (MOVE.B/.W/.L are three classes today), which is B1's call;
+  * the opcode space splits 59% into the operand pipe (S_PIPE_START),
+    28% into exceptions raised at decode (illegal, A-line, F-line), 6%
+    completing in decode, 5% into an immediate fetch, and under 1% into
+    the EA states and the instruction-specific states -- the fast path
+    of section 5 is where the opcodes are, as the histograms said of
+    where the cycles are.
+
+The dump is the ground truth the B1 classifier is checked against.
 
 ## 5. Fast path versus sequenced
 

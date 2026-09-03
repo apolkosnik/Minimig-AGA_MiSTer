@@ -39,6 +39,12 @@ Testbenches (Icarus Verilog -g2012 and ModelSim, see run_tests.sh):
                         BCD, EXT/EXTB/SWAP/EXG, LINK/UNLK (.W/.L), JSR/BSR/
                         RTS/RTD, DBcc/Scc, CMPM, TAS, MOVEM, MOVEP, PACK/UNPK,
                         MOVE16, MOVE from/to CCR
+  tb_ap040_decode.v     pipeline stage B0/B1 tool, not a regression leg:
+                        feeds every 16-bit opcode through the real fetch
+                        and decode path and dumps S_DECODE's decision per
+                        opcode (+out=<file>); pipe_ctrl.py summarises the
+                        dump into the control-store classes the pipeline's
+                        classifier must reproduce (AP040_PIPELINE_B0.md)
   tb_ap040_diagrom.v  boots a real ROM image against a minimal Amiga model
                         (chip RAM, CIA overlay, custom register stubs) and
                         captures serial output. DiagROM V2.0 completes its
