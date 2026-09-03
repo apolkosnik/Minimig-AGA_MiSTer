@@ -2120,6 +2120,30 @@ POST_STORES=0 identical to HEAD on all five programs.
   after A2b-1 and A1-3a the store's cost is the SEQUENCER, exactly as
   X3.0 said of everything else.
 
+  Quartus fit of the A1 tree (A1-0..A1-2, 1411575), full flow, SEED 7:
+
+    Logic utilization    38,641 / 41,910 ALMs   92%   (A2b tree: 38,345;
+                                                       +296 for the fill
+                                                       channel, bridge,
+                                                       ddram port and
+                                                       routing)
+    RAM blocks              250 / 553           45%
+    DSP blocks               73 / 112           65%
+    ap040_cache entity      368 ALMs (308 before: +60 for the channel
+                                      consumer's two states and the
+                                      128-bit line register)
+    ap040_fill_cdc           96 ALMs
+    ddram_ctrl              619 ALMs (234 own; the fill port is ~40)
+    ap040_core           19,993 ALMs (12,240 own) -- unchanged, as it
+                                      must be: nothing was added to it
+    Setup slack, ALL MET:  clk_114 +0.238  clk_sys +0.442
+                           pll_hdmi +0.257 (was -0.196 on the A2b tree,
+                           same seed: the display clock moves with the
+                           placement, as the standing rule says)
+
+  The margin is thin -- 3,269 ALMs free, 8% -- which is the X2.7
+  arithmetic again: nothing more is added to this core; B replaces.
+
   Consequence: A1-3b, the 32-bit byte-enabled store path (X2.1c), is
   RE-SCOPED to "after B".  Its case rested on the drain blocking the
   core; that is gone.  It would still shorten the drain on chip RAM in
