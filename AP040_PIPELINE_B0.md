@@ -184,6 +184,20 @@ the MMU/cache ops, individual system instructions).  Two things follow:
     of section 5 is where the opcodes are, as the histograms said of
     where the cycles are.
 
+A second pass in USER mode (+user: a move.w #0,sr precedes the opcode
+and the second S_DECODE is captured) adds two things the supervisor
+pass cannot show.  563 opcodes raise the privilege violation in user
+mode, spread over 11 supervisor-decision states -- that is the priv bit
+of the control word, and it belongs to the class's supervisor decision.
+And every field that differs between the passes without a trap is one
+S_DECODE never set for that opcode (reset value in one pass, the mode
+switch's leftovers in the other): imm_n and r_imm_ret for 61,685
+opcodes, op_size for 22,012.  Those are the control word's don't-cares;
+whether a class whose members set op_size unevenly is one class with
+the size derived from ir or two is the control-word design of B1, and
+masking per opcode (1,004 classes) rather than per class is the wrong
+grain for that question.
+
 The dump is the ground truth the B1 classifier is checked against.
 
 ## 5. Fast path versus sequenced

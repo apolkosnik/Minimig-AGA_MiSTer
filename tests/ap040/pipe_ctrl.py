@@ -152,6 +152,85 @@ def main():
               % (n, st, key[1], key[2], key[3], key[4], key[5], key[6], key[7], key[8],
                  key[9], key[10], key[11], key[12], key[13], key[14], key[15], members[key][0]))
 
+    # --user <dump>: the same opcodes decoded in user mode.  An opcode that
+    # decodes identically in both modes carries no privilege check; one
+    # that raises vector 8 in user mode is privileged -- the control
+    # word's priv bit -- and its class is the SUPERVISOR decision.
+    if "--user" in sys.argv:
+        upath = sys.argv[sys.argv.index("--user") + 1]
+        urows = {}
+        with open(upath) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] != "-1":
+                    urows[int(parts[0], 16)] = tuple(int(x) for x in parts[1:])
+        priv = []
+        differ = []
+        for op, v in rows.items():
+            u = urows.get(op)
+            if u is None:
+                continue
+            if u == v:
+                continue
+            ud = dict(zip(FIELDS, u))
+            if ud["state"] == 34 and ud["exc_vec"] == 8:
+                priv.append(op)
+            else:
+                differ.append((op, v, u))
+        priv_classes = set()
+        for op in priv:
+            v = rows[op]
+            d = dict(zip(FIELDS, v))
+            priv_classes.add((d["state"], d["exc_vec"] if d["state"] == 34 else -1))
+        print("\nuser-mode pass: %d privileged opcodes (vector 8 in user mode), in %d supervisor-decision states"
+              % (len(priv), len(priv_classes)))
+
+        # Every other difference is a field S_DECODE did NOT set for that
+        # opcode: in the supervisor pass it holds its reset value, in the
+        # user pass whatever the preceding "move.w #0,sr" left behind.
+        # Those are the control word's DON'T-CARES.  Rebuild the classes
+        # with them masked, and report which fields are don't-care how
+        # often -- what the classifier need not produce.
+        dc_count = Counter()
+        masked = Counter()
+        masked_members = defaultdict(list)
+        for op, v in sorted(rows.items()):
+            u = urows.get(op)
+            m = list(v)
+            if u is not None and op not in priv:
+                for i, name in enumerate(FIELDS):
+                    if v[i] != u[i]:
+                        m[i] = "x"
+                        dc_count[name] += 1
+            dm = dict(zip(FIELDS, m))
+            st = dm["state"]
+            if st == 34:
+                vec = dm["exc_vec"]
+                key = ("EXC", "TRAP" if isinstance(vec, int) and 32 <= vec <= 47
+                       else ("branch-odd" if vec == 3 else vec))
+            else:
+                def fs(x):
+                    return "x" if x == "x" else field_src(op, x)
+                key = (st, dm["p_src"], dm["p_dst"], fs(dm["p_sreg"]), fs(dm["p_dreg"]),
+                       dm["alu_op"], dm["op_size"], dm["exec_kind"], dm["p_rmw"],
+                       dm["p_wbsup"], dm["imm_n"], dm["r_imm_ret"],
+                       dm["ea_mode"] if st == 11 else -1,
+                       fs(dm["ea_rn"]) if st == 11 else "-",
+                       dm["r_ea_ret"], -1)
+            if op in priv:
+                key = key + ("priv",)
+            masked[key] += 1
+            masked_members[key].append(op)
+        print("distinct decisions with don't-cares masked (both passes): %d" % len(masked))
+        big = sum(1 for k, n in masked.items() if n >= 8)
+        print("  of which with 8 or more opcodes: %d" % big)
+        print("  fields the decode leaves unset (don't-care), opcodes each:")
+        for name, n in dc_count.most_common():
+            print("    %-10s %6d" % (name, n))
+        print("  (masking per opcode splits a class whose members set a field\n"
+              "   unevenly; whether that is one class with the field derived from\n"
+              "   ir, or two, is the control-word design of B1)")
+
     if classes_out:
         with open(classes_out, "w") as f:
             f.write("# class  count  state p_src p_dst sreg dreg alu_op op_size exec_kind rmw wbsup imm_n imm_ret ea_mode ea_rn ea_ret exc_vec  first-opcode\n")

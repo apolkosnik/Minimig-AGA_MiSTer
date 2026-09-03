@@ -96,30 +96,51 @@ end
 integer fd, op, i, guard;
 reg     dec_seen, dec_cap;
 reg [1023:0] out_name;
+// +user: the opcode runs in USER mode -- a "move.w #0,sr" precedes it
+// and the capture is the SECOND S_DECODE.  A supervisor pass cannot show
+// the privilege violations, which are one control-word bit.
+reg     user_mode = 0;
+integer dec_skip;
 
 always @(posedge clk) begin
 	dec_cap <= 0;
-	if (!nreset) dec_seen <= 0;
+	if (!nreset) begin
+		dec_seen <= 0;
+		dec_skip <= user_mode ? 1 : 0;
+	end
 	else if (!dec_seen && dut.state == 8'd4) begin
-		dec_seen <= 1;
-		dec_cap  <= 1;      // the decision is visible next cycle
+		if (dec_skip != 0) dec_skip <= dec_skip - 1;
+		else begin
+			dec_seen <= 1;
+			dec_cap  <= 1;      // the decision is visible next cycle
+		end
 	end
 end
 
 initial begin
+	user_mode = $test$plusargs("user");
 	if (!$value$plusargs("out=%s", out_name)) out_name = "build_vl/decode.txt";
 	fd = $fopen(out_name, "w");
 	for (op = 0; op < 65536; op = op + 1) begin
-		// image: vectors, the opcode with zero extension words at $1000,
-		// every exception vector at $2000 (NOPs), stack at $4000
+		// image: vectors, the opcode with zero extension words at $1000
+		// (after a mode switch in the user pass), every exception vector
+		// at $2000 (NOPs), stack at $4000
 		for (i = 0; i < 16384; i = i + 1) mem[i] = 16'h0000;
 		mem[0] = 16'h0000; mem[1] = 16'h4000;     // ISP
 		mem[2] = 16'h0000; mem[3] = 16'h1000;     // PC
 		for (i = 2; i < 256; i = i + 1) begin
 			mem[2*i] = 16'h0000; mem[2*i+1] = 16'h2000;
 		end
-		mem[16'h1000 >> 1] = op[15:0];
-		for (i = 1; i < 8; i = i + 1) mem[(16'h1000 >> 1) + i] = 16'h0000;
+		if (user_mode) begin
+			mem[16'h1000 >> 1] = 16'h46FC;        // move.w #0,sr
+			mem[16'h1002 >> 1] = 16'h0000;
+			mem[16'h1004 >> 1] = op[15:0];
+			for (i = 1; i < 8; i = i + 1) mem[(16'h1004 >> 1) + i] = 16'h0000;
+		end
+		else begin
+			mem[16'h1000 >> 1] = op[15:0];
+			for (i = 1; i < 8; i = i + 1) mem[(16'h1000 >> 1) + i] = 16'h0000;
+		end
 		for (i = 0; i < 16; i = i + 1) mem[(16'h2000 >> 1) + i] = 16'h4E71;
 
 		nreset = 0;
