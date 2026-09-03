@@ -2034,6 +2034,30 @@ programs.  Ledger, flat bench with the channel MODELLED at 8 core cycles
   this settles is the shape of the consumer; the number that matters is
   the DDR3 bridge's.
 
+A1-1 SHIPPED 2026-09-02: ddram_ctrl gains the fill port (two single-word
+DDR3 reads, the second issued as the first returns -- the arbiter
+promises one read burst in flight and the bench's slave serves one word
+per command; a burst of two is a later optimization), delivered as four
+longword beats in 68k byte order with fill_ack on the last, sdram32's
+shape, abandoned by the read-wait watchdog like a walker read.
+ap040_fill_cdc is the walker bridge's twin for a 128-bit payload: it
+collects the beats on the clk_114 side and hands the line over with one
+toggle, ack level-held until the cache drops its request.  Coverage in
+tb_ddram_walker_read phase 17, through the REAL bridge and controller
+with the bridge-side watchdog wired as Minimig.sv will wire it: quiet,
+high latency, waitrequest stutter, a2065 contention interleaved with
+walker reads and CPU fills, everything at once, then a lost response
+that must end as an error and leave the port clean.
+
+    fill latency, request to acknowledge at the cache side,
+    slave model latency 4:   quiet 10 clk28 cycles, 10..14 under
+                             contention
+
+  Against today's ~24 for the adapter path that is the "less than half"
+  the re-aimed gate asked for, with the real bridge's latency still to
+  add on hardware (its ~20 clk_114 first-beat latency is ~5 core cycles
+  more than the model's 4, so ~15 on silicon -- still under half).
+
 ## X3.5 Stage A3: second cache lookup  (= X2.2b stage 2, after P2)
 
 Unchanged from the X2.2b costing: after the 28 MHz -> clk_114 + 4:1 enable
