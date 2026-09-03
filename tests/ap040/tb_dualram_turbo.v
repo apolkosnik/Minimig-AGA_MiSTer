@@ -148,6 +148,34 @@ reg        ipl_set_w = 0, ipl_arm_w = 0;
 reg  [2:0] ipl_set_v = 0;
 reg [15:0] ipl_arm_v = 0;
 
+// AP040 line-fill channel (plan X3.4, A1-2), wired as Minimig.sv wires
+// it: the wrapper's request crosses the REAL bridge into clk113 with the
+// watchdog in front of the controller, and the REAL ddram_ctrl's fill
+// port answers.  This bench serves ONE program image through two
+// controllers (fetches from DDR3, chip data from the SDRAM), which no
+// board does; so every channel fill goes to ddram_ctrl here regardless
+// of the bank flag, and a fill is held while the SDRAM side still owes
+// a buffered write -- the ordering sdram32_ctrl's own arbitration gives
+// a chip-window fill on hardware (writes before fills).
+wire        cf_req, cf_ddr, cf_bad, cf_ack, cf_berr;
+wire [28:4] cf_addr;
+wire [127:0] cf_data;
+wire        mf_req, mf_ddr, mf_strb, mf_ack, mf_wd_berr;
+wire [28:4] mf_addr;
+wire [31:0] mf_dat;
+ap040_bus_timeout #(.COUNTER_BITS(16)) fill_timeout (
+	.clk(clk113), .nreset(reset),
+	.req(mf_req), .complete(mf_ack), .berr(mf_wd_berr)
+);
+ap040_fill_cdc fill_cdc (
+	.s_clk(clk28), .s_reset_n(reset),
+	.s_req(cf_req), .s_addr(cf_addr), .s_ddr(cf_ddr), .s_bad(cf_bad),
+	.s_ack(cf_ack), .s_data(cf_data), .s_err(cf_berr),
+	.m_clk(clk113), .m_reset_n(reset),
+	.m_req(mf_req), .m_addr(mf_addr), .m_ddr(mf_ddr),
+	.m_strb(mf_strb), .m_dat(mf_dat), .m_ack(mf_ack), .m_berr(mf_wd_berr)
+);
+
 cpu_wrapper cpu
 (
 	.snoop_tgl(1'b0),
@@ -158,6 +186,16 @@ cpu_wrapper cpu
 	.clk(clk28),
 	.ph1(ph1),
 	.ph2(ph2),
+
+	.fill_ddr_ena(1'b1),
+	.fill_sdr_ena(1'b1),
+	.fill_mem_req(cf_req),
+	.fill_mem_addr(cf_addr),
+	.fill_mem_ddr(cf_ddr),
+	.fill_mem_bad(cf_bad),
+	.fill_mem_ack(cf_ack),
+	.fill_mem_data(cf_data),
+	.fill_mem_berr(cf_berr),
 
 	.cpucfg(2'b10),
 	.fastramcfg(3'd0),
@@ -402,7 +440,13 @@ ddram_ctrl ram2
 	.walker_addr(27'd0),
 	.walker_wdata(32'd0),
 	.walker_ack(),
-	.walker_rdata()
+	.walker_rdata(),
+
+	.fill_req(mf_req & ~ram.write_req),
+	.fill_addr(mf_addr),
+	.fill_strb(mf_strb),
+	.fill_dat(mf_dat),
+	.fill_ack(mf_ack)
 );
 
 // Behavioral DDR3/HPS Avalon slave and fetch-path truth monitor live

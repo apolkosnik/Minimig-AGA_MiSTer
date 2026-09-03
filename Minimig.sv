@@ -334,6 +334,57 @@ ap040_bus_timeout #(.COUNTER_BITS(16)) walker_timeout (
 );
 assign walker_berr_mem  = walker_wd_berr;
 
+// AP040 line-fill channel (plan X3.4, A1-2).  The cache's request crosses
+// into clk_114 once (ap040_fill_cdc), goes to the controller the bank map
+// selects, and the line comes back as one payload.  The DDR3 controller
+// serves the Zorro windows; the chip window is served only in dual-SDRAM
+// builds (sdram32_ctrl's fill port) -- fill_sdr_ena tells the wrapper.
+// The watchdog is the walker's, for the same reason: a fill a controller
+// never answers must end as a bus error, not a frozen CPU.
+wire        fill_req_cpu, fill_ddr_cpu, fill_bad_cpu;
+wire [28:4] fill_addr_cpu;
+wire        fill_ack_cpu, fill_berr_cpu;
+wire [127:0] fill_data_cpu;
+wire        fill_req_mem, fill_ddr_mem;
+wire [28:4] fill_addr_mem;
+wire        fill_strb1, fill_ack1, fill_strb2, fill_ack2;
+wire [31:0] fill_dat1, fill_dat2;
+wire        fill_strb_mem = fill_ddr_mem ? fill_strb2 : fill_strb1;
+wire [31:0] fill_dat_mem  = fill_ddr_mem ? fill_dat2  : fill_dat1;
+wire        fill_ack_mem  = fill_ddr_mem ? fill_ack2  : fill_ack1;
+wire        fill_wd_berr;
+wire        fill_sdr_ena;
+ap040_bus_timeout #(.COUNTER_BITS(16)) fill_timeout (
+	.clk(clk_114),
+	.nreset(~reset_d & cpu_rst),
+	.req(fill_req_mem),
+	.complete(fill_ack_mem),
+	.berr(fill_wd_berr)
+);
+
+ap040_fill_cdc fill_cdc
+(
+	.s_clk     (clk_sys),
+	.s_reset_n (cpu_rst),
+	.s_req     (fill_req_cpu),
+	.s_addr    (fill_addr_cpu),
+	.s_ddr     (fill_ddr_cpu),
+	.s_bad     (fill_bad_cpu),
+	.s_ack     (fill_ack_cpu),
+	.s_data    (fill_data_cpu),
+	.s_err     (fill_berr_cpu),
+
+	.m_clk     (clk_114),
+	.m_reset_n (~reset_d),
+	.m_req     (fill_req_mem),
+	.m_addr    (fill_addr_mem),
+	.m_ddr     (fill_ddr_mem),
+	.m_strb    (fill_strb_mem),
+	.m_dat     (fill_dat_mem),
+	.m_ack     (fill_ack_mem),
+	.m_berr    (fill_wd_berr)
+);
+
 wire [7:0] toccata_base;
 wire toccata_ena;
 wire a2065_ena;
@@ -400,6 +451,16 @@ cpu_wrapper cpu_wrapper
 	.walker_mem_rdata(walker_rdata_cpu),
 	.walker_mem_berr (walker_berr_cpu ),
 
+	.fill_ddr_ena    (1'b1            ),
+	.fill_sdr_ena    (fill_sdr_ena    ),
+	.fill_mem_req    (fill_req_cpu    ),
+	.fill_mem_addr   (fill_addr_cpu   ),
+	.fill_mem_ddr    (fill_ddr_cpu    ),
+	.fill_mem_bad    (fill_bad_cpu    ),
+	.fill_mem_ack    (fill_ack_cpu    ),
+	.fill_mem_data   (fill_data_cpu   ),
+	.fill_mem_berr   (fill_berr_cpu   ),
+
 	//custom CPU signals
 	.cpustate     (cpu_state       ),
 	.cacr         (cpu_cacr        ),
@@ -461,6 +522,8 @@ wire        sd2_cs, sd2_we, sd2_ras, sd2_cas, sd2_clk, sd2_cke;
 wire  [1:0] sd2_dqm_nc;   // no DQM routed; masks travel on A12/A11
 
 wire dual_fault = ~SDRAM2_EN | ~dual_ok;
+// the lockstep pair has a fill port: chip-window lines come over the channel
+assign fill_sdr_ena = 1'b1;
 
 // per the framework contract, all SDRAM2 outputs go Z when the port is
 // not enabled for this io board
@@ -504,13 +567,18 @@ sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ram1
 	.sd2_clk      (sd2_clk         ),
 	.dual_ok      (dual_ok         ),
 
-	.fill_req     (1'b0            ),
-	.fill_addr    (21'd0           ),
-	.fill_dat     (                ),
-	.fill_strb    (                ),
-	.fill_ack     (                ),
+	.fill_req     (fill_req_mem & ~fill_ddr_mem),
+	.fill_addr    (fill_addr_mem[24:4]),
+	.fill_dat     (fill_dat1       ),
+	.fill_strb    (fill_strb1      ),
+	.fill_ack     (fill_ack1       ),
 `else
 wire dual_fault = 1'b0;
+// single SDRAM: no fill port, so chip-window fills stay on the adapter
+assign fill_sdr_ena = 1'b0;
+assign fill_strb1   = 1'b0;
+assign fill_dat1    = 32'd0;
+assign fill_ack1    = 1'b0;
 
 sdram_ctrl #(.CPU_CACHE(1)) ram1
 (
@@ -610,7 +678,13 @@ ddram_ctrl #(.CPU_CACHE(1)) ram2
 	.walker_addr  (walker_addr_mem),
 	.walker_wdata (walker_wdat_mem),
 	.walker_ack   (walker_ack2),
-	.walker_rdata (walker_rdata2)
+	.walker_rdata (walker_rdata2),
+
+	.fill_req     (fill_req_mem & fill_ddr_mem),
+	.fill_addr    (fill_addr_mem),
+	.fill_strb    (fill_strb2),
+	.fill_dat     (fill_dat2),
+	.fill_ack     (fill_ack2)
 );
 
 ////////////////////////////  A2065 ETHERNET  ///////////////////////////////

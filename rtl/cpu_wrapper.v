@@ -90,6 +90,22 @@ module cpu_wrapper
 	input      [31:0] walker_mem_rdata,
 	input             walker_mem_berr,
 
+	// AP040 line-fill channel (plan X3.4, A1-2).  Which windows the
+	// channel serves is the board's to say: the Zorro windows live in
+	// DDR3 (fill_ddr_ena), the chip window in the SDRAM, which has a fill
+	// port only in dual-SDRAM builds (fill_sdr_ena).  The request carries
+	// the line address encoded for the controllers, like the walker's;
+	// the answer is the whole line.
+	input             fill_ddr_ena,
+	input             fill_sdr_ena,
+	output            fill_mem_req,
+	output     [28:4] fill_mem_addr,
+	output            fill_mem_ddr,
+	output            fill_mem_bad,
+	input             fill_mem_ack,
+	input     [127:0] fill_mem_data,
+	input             fill_mem_berr,
+
 	output            toccata_ena,
 	output reg  [7:0] toccata_base,
 
@@ -211,6 +227,8 @@ wire        reset_out_p;
 wire        longword;
 wire        walker_req_p, walker_we_p;
 wire [31:0] walker_addr_p, walker_wdat_p;
+wire        fill_req_p;
+wire [31:4] fill_addr_p;
 wire        cache_maint_p;
 reg         cache_maint_d;
 reg         cache_clear_toggle;
@@ -271,12 +289,13 @@ ap040_tg68k_compat #(
 	// Line-fill channel (plan X3.4): not served by the wrapper until
 	// A1-2 routes it to the RAM controllers.  With fill_ena low every
 	// fill takes the 16-bit adapter path exactly as before.
-	.fill_ena(1'b0),
-	.fill_req(),
-	.fill_addr(),
-	.fill_data(128'd0),
-	.fill_ack(1'b0),
-	.fill_err(1'b0),
+	.fill_ena_zorro(fill_ddr_ena),
+	.fill_ena_chip(fill_sdr_ena),
+	.fill_req(fill_req_p),
+	.fill_addr(fill_addr_p),
+	.fill_data(fill_mem_data),
+	.fill_ack(fill_mem_ack),
+	.fill_err(fill_mem_berr),
 	.cache_z2_ena(z2ram_ena),
 	.cache_z3_base0(z3ram_base0),
 	.cache_z3_ena0(z3ram_ena0),
@@ -495,6 +514,29 @@ assign walker_mem_ddr  = |walker_ramaddr[28:26];
 assign walker_mem_bad  = (|walker_addr_eff[1:0]) |
 					 ((|walker_addr_eff[31:24]) &&
 					  !(walker_sel_zram | walker_sel_dd | walker_sel_rtg));
+
+// The line-fill channel's address takes the same bank map as the walker's
+// (plan X3.4, A1-2): the cache asks only for lines inside the windows the
+// board said it serves, so a "bad" request here means the compat layer's
+// window and this map disagree -- it answers as a bus error rather than
+// reading an unrelated bank.
+wire [31:0] fill_addr_eff = {fill_addr_p, 4'd0};
+wire fill_sel_z3ram0 = (fill_addr_eff[31:27] == z3ram_base0) && z3ram_ena0;
+wire fill_sel_z3ram1 = (fill_addr_eff[31:28] == z3ram_base1) && z3ram_ena1;
+wire fill_sel_z2ram  = !fill_addr_eff[31:24] &&
+                       (fill_addr_eff[23] ^ |fill_addr_eff[22:21]) && z2ram_ena;
+wire fill_sel_zram   = fill_sel_z3ram0 | fill_sel_z3ram1 | fill_sel_z2ram;
+wire fill_sel_chip   = !fill_addr_eff[31:21];
+wire [28:1] fill_ramaddr;
+assign fill_ramaddr[28]    = fill_sel_zram & ~fill_sel_z3ram0;
+assign fill_ramaddr[27]    = fill_sel_zram & (~fill_sel_z3ram1 | fill_addr_eff[27]);
+assign fill_ramaddr[26:23] = (fill_sel_z3ram0 | fill_sel_z3ram1) ? fill_addr_eff[26:23] : 4'd0;
+assign fill_ramaddr[22:1]  = fill_addr_eff[22:1];
+
+assign fill_mem_req  = fill_req_p;
+assign fill_mem_addr = fill_ramaddr[28:4];
+assign fill_mem_ddr  = |fill_ramaddr[28:26];
+assign fill_mem_bad  = !((fill_sel_zram & fill_ddr_ena) | (fill_sel_chip & fill_sdr_ena));
 
 wire cchip = turbochip_d & (!cpustate | dcache_d);
 wire ckick = turbokick_d & (!cpustate | dcache_d);

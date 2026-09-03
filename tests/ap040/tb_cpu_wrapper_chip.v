@@ -140,6 +140,17 @@ cpu_wrapper dut
 	.walker_mem_rdata(walker_rdata),
 	.walker_mem_berr(walker_berr),
 
+	// no line-fill channel on this bench: every fill takes the adapter
+	.fill_ddr_ena(1'b0),
+	.fill_sdr_ena(1'b0),
+	.fill_mem_req(),
+	.fill_mem_addr(),
+	.fill_mem_ddr(),
+	.fill_mem_bad(),
+	.fill_mem_ack(1'b0),
+	.fill_mem_data(128'd0),
+	.fill_mem_berr(1'b0),
+
 	.toccata_ena(),
 	.toccata_base(),
 	.a2065_ena(),
