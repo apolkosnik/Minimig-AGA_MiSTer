@@ -96,10 +96,13 @@ cpu_wrapper dut
 	.ph1(ph1),
 	.ph2(ph2),
 
-	.cpucfg(2'b10),          // 68040 class, no fastchip acceleration
+	.cpucfg(3'b010),          // 68040 class, no fastchip acceleration
 	.fastramcfg(3'd0),       // no Zorro RAM: nothing selects the RAM port
 	.cachecfg(TURBO_CHIP ? 3'b101 : 3'd0),  // turbochip + dcache, or all off
 	.bootrom(1'b0),
+	.cdtv_mode(1'b0),
+	.cdtv_din(16'd0),
+	.cdtv_selack(1'b0),
 
 	.chip_addr(chip_addr),
 	.chip_dout(chip_dout),

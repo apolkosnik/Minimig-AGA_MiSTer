@@ -159,10 +159,13 @@ cpu_wrapper cpu
 	.ph1(ph1),
 	.ph2(ph2),
 
-	.cpucfg(2'b10),
+	.cpucfg(3'b010),
 	.fastramcfg(3'd0),
 	.cachecfg(3'b101),       // turbo chipram ON, data cache ON: chip data
-	.bootrom(1'b0),          // reads take the cpu_cache_new/SDRAM path
+	.bootrom(1'b0),
+	.cdtv_mode(1'b0),
+	.cdtv_din(16'd0),
+	.cdtv_selack(1'b0),          // reads take the cpu_cache_new/SDRAM path
 
 	.chip_addr(),
 	.chip_dout(16'h0000),

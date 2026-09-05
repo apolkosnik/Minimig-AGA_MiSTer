@@ -9,6 +9,8 @@ module tb_ddram_walker_snoop;
 	always #5 clk = ~clk;
 
 	reg reset_n = 0;
+	reg dma_cs = 0;
+	wire dma_ack;
 	reg walker_req = 0;
 	reg walker_we = 0;
 	reg [28:2] walker_addr = 0;
@@ -39,6 +41,10 @@ module tb_ddram_walker_snoop;
 		.cpuAddr(28'd0), .cpuCS(1'b0), .cpustate(2'b00),
 		.cpuL(1'b1), .cpuU(1'b1), .cpuWR(16'd0), .cpuRD(),
 		.ramshared(1'b0), .ramready(),
+		.dcache_sw_en(1'b1),
+		.dmaAddr(28'h0000E02), .dmaCS(dma_cs), .dmaWE(1'b1),
+		.dmaL(1'b0), .dmaU(1'b0), .dmaWR(16'hBEEF),
+		.dmaRD(), .dmaACK(dma_ack),
 		.walker_req(walker_req), .walker_we(walker_we),
 		.walker_addr(walker_addr), .walker_wdata(walker_wdata),
 		.walker_ack(walker_ack), .walker_rdata(walker_rdata)
@@ -75,6 +81,11 @@ module tb_ddram_walker_snoop;
 		walker_wdata = 32'h12340019;
 		walker_we = 1;
 		walker_req = 1;
+		// Queue a CD DMA write while the walker owns the snoop port.
+		// It must neither steal the walker's tag-read address nor vanish.
+		wait (dut.walker_snoop);
+		@(negedge clk);
+		dma_cs = 1;
 		timeout = 0;
 		while (!walker_ack && timeout < 100) begin
 			@(posedge clk);
@@ -109,6 +120,25 @@ module tb_ddram_walker_snoop;
 			         dut.cpu_cache.g_storage.ddram0.ram_l.mem[10'h200],
 			         dut.cpu_cache.g_storage.ddram0.ram_u.mem[10'h201],
 			         dut.cpu_cache.g_storage.ddram0.ram_l.mem[10'h201]);
+			errors = errors + 1;
+		end
+
+		timeout = 0;
+		while (!dma_ack && timeout < 100) begin
+			@(posedge clk); timeout = timeout + 1;
+		end
+		if (timeout == 100) begin
+			$display("FAIL: queued CD DMA write timed out");
+			errors = errors + 1;
+		end
+		@(negedge clk); dma_cs = 0;
+		repeat (8) @(posedge clk);
+		#1;
+		if ({dut.cpu_cache.g_storage.idram0.ram_u.mem[10'h202],
+		     dut.cpu_cache.g_storage.idram0.ram_l.mem[10'h202]} !== 16'hBEEF ||
+		    {dut.cpu_cache.g_storage.ddram0.ram_u.mem[10'h202],
+		     dut.cpu_cache.g_storage.ddram0.ram_l.mem[10'h202]} !== 16'hBEEF) begin
+			$display("FAIL: queued CD DMA did not snoop both caches");
 			errors = errors + 1;
 		end
 

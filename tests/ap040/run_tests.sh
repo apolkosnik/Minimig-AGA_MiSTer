@@ -16,7 +16,7 @@ mkdir -p "$WORK"
 ./build_tests.sh
 
 SRC="$RTL/ap040_tg68k_compat.v $RTL/ap040_core.v $RTL/ap040_bus16_adapter.v $RTL/ap040_bus_timeout.v \
-     $RTL/ap040_regfile.v $RTL/ap040_alu.v $RTL/ap040_muldiv.v $RTL/ap040_mmu.v $RTL/ap040_cache.v $RTL/ap040_fpu.v"
+     $RTL/ap040_regfile.v $RTL/ap040_alu.v $RTL/ap040_muldiv.v $RTL/ap040_mmu.v $RTL/ap040_cache.v $RTL/ap040_fpu.v ../../rtl/memory_router.v"
 
 # generated sources: every bench below reads them, so they come first
 python3 hoist_decls.py ../../rtl/cpu_wrapper.v "$WORK/cpu_wrapper_sim.v"
@@ -70,6 +70,7 @@ compile cart_hrtmon iverilog -g2012 -o "$WORK/tb_cart_hrtmon.vvp" \
 compile wrapchip iverilog -g2012 -I "$RTL" -o "$WORK/tb_wrapchip.vvp" \
 	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
 	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+	../../rtl/akiko_hps_bridge.v ../../rtl/akiko_nvram.v \
 	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
 	sim_dpram.v $SRC &
 # the RAM port's acknowledgement outlives its own access, so the latency at
@@ -79,12 +80,14 @@ compile wrapchip_l0 iverilog -g2012 -I "$RTL" \
 	-P tb_cpu_wrapper_chip.RAM_LAT=0 -o "$WORK/tb_wrapchip_l0.vvp" \
 	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
 	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+	../../rtl/akiko_hps_bridge.v ../../rtl/akiko_nvram.v \
 	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
 	sim_dpram.v $SRC &
 compile wrapchip_l7 iverilog -g2012 -I "$RTL" \
 	-P tb_cpu_wrapper_chip.RAM_LAT=7 -o "$WORK/tb_wrapchip_l7.vvp" \
 	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
 	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+	../../rtl/akiko_hps_bridge.v ../../rtl/akiko_nvram.v \
 	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
 	sim_dpram.v $SRC &
 # turbo chipram: cchip claims $000000-$1FFFFF, so fetches AND data leave the
@@ -95,6 +98,7 @@ compile wrapchip_turbo iverilog -g2012 -I "$RTL" \
 	-P tb_cpu_wrapper_chip.TURBO_CHIP=1 -o "$WORK/tb_wrapchip_turbo.vvp" \
 	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
 	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+	../../rtl/akiko_hps_bridge.v ../../rtl/akiko_nvram.v \
 	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
 	sim_dpram.v $SRC &
 compile sdram_turbo iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
@@ -190,8 +194,8 @@ leg exceptions_chip_l7 "$WORK/tb_wrapchip_l7.vvp" +prog=build/t_exceptions.hex &
 # cache_allow_all is 0 as it is here and in production.  That program
 # belongs to tb_prog, which runs everything-cacheable.
 leg exceptions_turbo   "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_exceptions.hex &
-leg mmu_turbo          "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_mmu.hex &
-leg fpu_turbo          "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_fpu.hex &
+leg mmu_chip_turbo     "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_mmu.hex &
+leg fpu_chip_turbo     "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_fpu.hex &
 leg integer_turbo      "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_integer.hex &
 leg mmu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_mmu.hex &
 leg fpu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_fpu.hex &
