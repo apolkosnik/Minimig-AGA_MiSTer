@@ -1,0 +1,293 @@
+{
+  "baseline_commit": "a48b5c30",
+  "optimized_commit": "7acd71d1",
+  "simulator": "Verilator 5.052",
+  "workloads": {
+    "bench_loop": {
+      "baseline": [
+        {
+          "phase": 0,
+          "cycles": 325895
+        },
+        {
+          "phase": 1,
+          "cycles": 326673
+        },
+        {
+          "phase": 2,
+          "cycles": 326673
+        }
+      ],
+      "optimized": [
+        {
+          "phase": 0,
+          "cycles": 262367
+        },
+        {
+          "phase": 1,
+          "cycles": 263145
+        },
+        {
+          "phase": 2,
+          "cycles": 263145
+        }
+      ],
+      "speedup": [
+        1.2421,
+        1.2414,
+        1.2414
+      ]
+    },
+    "bench_alu": {
+      "baseline": [
+        {
+          "phase": 0,
+          "cycles": 330846
+        },
+        {
+          "phase": 1,
+          "cycles": 331608
+        },
+        {
+          "phase": 2,
+          "cycles": 331608
+        }
+      ],
+      "optimized": [
+        {
+          "phase": 0,
+          "cycles": 200190
+        },
+        {
+          "phase": 1,
+          "cycles": 200952
+        },
+        {
+          "phase": 2,
+          "cycles": 200952
+        }
+      ],
+      "speedup": [
+        1.6527,
+        1.6502,
+        1.6502
+      ]
+    }
+  },
+  "corpus_comparison": {
+    "slices": 1911,
+    "baseline_pass": 1265,
+    "candidate_pass": 1265,
+    "baseline_fail": 646,
+    "candidate_fail": 646,
+    "changed_results": []
+  },
+  "regressions": {
+    "core": {
+      "bench": "core",
+      "parameters": [],
+      "passed_programs": [
+        "t_integer",
+        "t_exceptions",
+        "t_mmu",
+        "t_cache",
+        "t_fpu",
+        "bench_loop"
+      ]
+    },
+    "alu": {
+      "bench": "core",
+      "parameters": [],
+      "passed_programs": [
+        "bench_alu"
+      ]
+    },
+    "chip": {
+      "bench": "chip",
+      "parameters": [],
+      "passed_programs": [
+        "t_integer",
+        "t_exceptions",
+        "t_mmu",
+        "t_fpu"
+      ]
+    },
+    "sdram": {
+      "bench": "sdram",
+      "parameters": [
+        "CPU_PHASE=3",
+        "CPU_CACHE=0",
+        "MAX_CYCLES=6000000"
+      ],
+      "passed_programs": [
+        "t_integer",
+        "t_mmu",
+        "t_fpu"
+      ]
+    },
+    "dualram": {
+      "bench": "dualram",
+      "parameters": [
+        "CPU_PHASE=3",
+        "CPU_CACHE=0",
+        "MAX_CYCLES=6000000"
+      ],
+      "passed_programs": [
+        "t_integer",
+        "t_mmu",
+        "t_fpu"
+      ],
+      "additional_integer_cycles": 119647
+    },
+    "cache_unit": {
+      "bench": "cache-unit",
+      "parameters": [],
+      "passed_programs": [
+        "unit"
+      ]
+    },
+    "chip_fast_div1": {
+      "bench": "chip",
+      "parameters": [
+        "FAST_CLOCK=1",
+        "CORE_DIV=1",
+        "TURBO_CHIP=1",
+        "RAM_LAT=0",
+        "DTACK_MODE=1"
+      ],
+      "passed_programs": [
+        "t_integer",
+        "t_exceptions",
+        "t_mmu",
+        "t_fpu"
+      ]
+    },
+    "chip_fast_div2": {
+      "bench": "chip",
+      "parameters": [
+        "FAST_CLOCK=1",
+        "CORE_DIV=2",
+        "CPU_PHASE=3",
+        "RAM_LAT=7",
+        "DTACK_MODE=1"
+      ],
+      "passed_programs": [
+        "t_integer",
+        "t_exceptions",
+        "t_mmu",
+        "t_fpu"
+      ]
+    },
+    "chip_fast_div4": {
+      "bench": "chip",
+      "parameters": [
+        "FAST_CLOCK=1",
+        "CORE_DIV=4",
+        "CPU_PHASE=2",
+        "TURBO_CHIP=1",
+        "RAM_LAT=3"
+      ],
+      "passed_programs": [
+        "t_integer",
+        "t_exceptions",
+        "t_mmu",
+        "t_fpu"
+      ]
+    },
+    "sdram_fast_div2": {
+      "bench": "sdram",
+      "parameters": [
+        "FAST_CLOCK=1",
+        "CORE_DIV=2",
+        "CPU_CACHE=0",
+        "MAX_CYCLES=6000000"
+      ],
+      "passed_programs": [
+        "t_integer",
+        "t_mmu",
+        "t_fpu"
+      ]
+    },
+    "dualram_fast_div1": {
+      "bench": "dualram",
+      "parameters": [
+        "FAST_CLOCK=1",
+        "CORE_DIV=1",
+        "CPU_CACHE=0",
+        "MAX_CYCLES=6000000"
+      ],
+      "passed_programs": [
+        "t_integer",
+        "t_mmu",
+        "t_fpu"
+      ],
+      "additional_integer_cycles": 97823
+    },
+    "dualram_fast_div4": {
+      "bench": "dualram",
+      "parameters": [
+        "FAST_CLOCK=1",
+        "CORE_DIV=4",
+        "CPU_CACHE=0",
+        "MAX_CYCLES=6000000"
+      ],
+      "passed_programs": [
+        "t_mmu",
+        "t_fpu"
+      ]
+    }
+  },
+  "target": {
+    "reference": "Motorola 68040 at 40 MHz",
+    "achieved": false,
+    "hardware_cpu_mhz_approx": 28,
+    "fast_clock_hardware_enabled": false,
+    "hardware_benchmark_verified": false
+  },
+  "dma_equivalence": {
+    "reference_commit": "a48b5c30",
+    "candidate_commit": "0fd9fa88",
+    "cycles": 100000,
+    "compared_outputs": 17,
+    "passed": true,
+    "command": "python3 tests/ap040/check_chipdma_equivalence.py"
+  },
+  "fpga_build": {
+    "source_commit": "07ed97cfa76f9a280060e4e837fc99adebd9184c",
+    "branch": "ap040-40mhz",
+    "tool": "Quartus Prime 17.0 Lite",
+    "completed_at": "2026-09-07T19:05:53-04:00",
+    "log": "build_20260907_184915.log",
+    "rbf": "output_files/Minimig.rbf",
+    "rbf_bytes": 3939728,
+    "rbf_sha256": "f9baef0447a212403e50f349d36e01f51fccf2f80fd44f9aa59d1549a68528f6",
+    "compilation_errors": 0,
+    "compilation_warnings": 152,
+    "timing_summary": "output_files/Minimig.sta.summary",
+    "timing_closed": false,
+    "fully_constrained": false,
+    "timing_summary_entries": 160,
+    "worst_slack_ns": {
+      "Setup": -0.474,
+      "Hold": 0.072,
+      "Recovery": 3.442,
+      "Removal": 0.397,
+      "Minimum Pulse Width": 1.101
+    },
+    "failing_timing_entries": [
+      {
+        "type": "Slow 1100mV 100C Model Setup 'pll_hdmi|pll_hdmi_inst|altera_pll_i|cyclonev_pll|counter[0].output_counter|divclk'",
+        "slack_ns": -0.474
+      },
+      {
+        "type": "Slow 1100mV -40C Model Setup 'pll_hdmi|pll_hdmi_inst|altera_pll_i|cyclonev_pll|counter[0].output_counter|divclk'",
+        "slack_ns": -0.36
+      }
+    ],
+    "hardware_tested": false,
+    "scaler_and_shadowmask_match_baseline": "a48b5c30",
+    "scaler_synthesis_overrides_removed": true,
+    "hdmi_uncertainty_override_removed": true,
+    "fitter_seed": 1
+  }
+}

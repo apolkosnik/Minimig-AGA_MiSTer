@@ -26,7 +26,9 @@ A matching real-machine benchmark/result is needed to establish parity.
   remaining words.
 * Factor the late chipset-idle signal out of the CD DMA address-class muxes.
   All 17 outputs matched the original arbiter across 100,000 randomized
-  Verilator cycles. Timing constraints have not been relaxed.
+  Verilator cycles. Explicit buffer cells give the retained CD DMA word
+  propagation delay without adding a bus cycle. The 0.25 ns minimum-delay
+  requirement tightens hold timing relative to the baseline constraints.
 
 ## Measured core throughput
 
@@ -65,7 +67,8 @@ Functional runs pass at divide four, two and one. Coverage includes:
   with DMA wait slots, turbo chip RAM, RAM latency variations, and different
   peripheral clock phases.
 * Integer/MMU/FPU through SDRAM at divide two.
-* MMU/FPU through the combined SDRAM/DDR model at divide one and four.
+* Integer/MMU/FPU through the combined SDRAM/DDR model at divide one;
+  MMU/FPU at divide four.
 
 The SDRAM/dual-memory benches do not implement the exception suite's full
 interrupt-injection interface. Run `t_exceptions` in the core/chip benches.
@@ -75,7 +78,7 @@ interrupt-injection interface. Run `t_exceptions` in the core/chip benches.
 * Core integer, exceptions, MMU, cache, FPU and both benchmarks pass; the
   original six programs pass all three bus-latency phases.
 * Production clock configuration passes chip-bus integer/exception/MMU/FPU,
-  SDRAM integer/MMU/FPU, and combined SDRAM/DDR MMU/FPU tests.
+  SDRAM integer/MMU/FPU, and combined SDRAM/DDR integer/MMU/FPU tests.
 * The controller-cache unit regression passes. Its new early-restart case
   fails with 24 errors against the baseline controller and passes after the
   burst-drain fix.
@@ -96,10 +99,11 @@ All generated files and bounded subprocess logs go under `--work`.
 ```sh
 python3 tests/ap040/run_verilator.py --work /tmp/ap040-core
 python3 tests/ap040/run_verilator.py --bench cache-unit --work /tmp/ap040-cache
+python3 tests/ap040/check_chipdma_equivalence.py --work /tmp/ap040-dma
 python3 tests/ap040/run_verilator.py --bench chip --work /tmp/ap040-chip
 python3 tests/ap040/run_verilator.py --bench sdram --param CPU_PHASE=3 \
   --param CPU_CACHE=0 --param MAX_CYCLES=6000000 --work /tmp/ap040-sdram
-python3 tests/ap040/run_verilator.py --bench dualram --program t_mmu,t_fpu \
+python3 tests/ap040/run_verilator.py --bench dualram \
   --param CPU_PHASE=3 --param CPU_CACHE=0 --param MAX_CYCLES=6000000 \
   --work /tmp/ap040-dualram
 python3 tests/ap040/run_verilator.py --bench chip --param FAST_CLOCK=1 \
@@ -121,4 +125,25 @@ dependent integer benchmark is about three clocks per operation; at
 114 MHz that would approach 38 million operations per second, but this is
 an extrapolation, not demonstrated board performance or universal 040 parity.
 
-RBF validation is recorded after the timing-closure build completes.
+Scaler and shadowmask sources match the pre-optimization baseline. The
+scaler-specific synthesis assignments, HDMI fitter uncertainty override,
+and subsequent fitter-seed experiments have been reverted. CPU and DMA
+optimizations remain enabled, with seed 1 and all-corner timing analysis.
+The replacement RBF was built from `07ed97cf` on 2026-09-07 at 19:05 EDT
+using Quartus Prime 17.0 Lite (zero compilation errors, 152 warnings).
+The scaler/video reversion is included in this artifact.
+
+**This RBF is not timing closed.** Across the four timing corners, HDMI setup
+slack is -0.474 ns at 100 C and -0.360 ns at -40 C in the slow model. The
+other 158 summary entries are nonnegative; worst hold slack is +0.072 ns.
+TimeQuest also reports that setup/hold requirements are not fully constrained.
+No further scaler or HDMI timing changes were made. Board testing has not
+been performed.
+
+* RBF: `output_files/Minimig.rbf` (3,939,728 bytes).
+* SHA-256: `f9baef0447a212403e50f349d36e01f51fccf2f80fd44f9aa59d1549a68528f6`.
+* Build log: `build_20260907_184915.log`.
+* Timing summary: `output_files/Minimig.sta.summary`.
+
+Cycle counts and the full corpus comparison are also recorded in
+[`performance_40mhz.json`](performance_40mhz.json).
