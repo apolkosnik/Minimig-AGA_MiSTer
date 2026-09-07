@@ -4,6 +4,13 @@
 // Verifies independent I/D enables, that a hit in the wrong bank cannot    //
 // satisfy a read, disabled banks do not fill, and a maintenance toggle is   //
 // retained long enough to clear both tag RAMs.                              //
+//                                                                          //
+// A second instance carries CACHE_ENABLE(0) -- the configuration the        //
+// Minimig build now ships, where ap040_cache is the only cache and this     //
+// module is reduced to pass-through.  It has no storage to poke, so it is   //
+// driven through its ports alone and held to the contract that matters      //
+// there: every read goes to memory, no read is ever answered from a tag,    //
+// and a re-read after memory changes returns the NEW value.                 //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -50,6 +57,34 @@ module tb_cpu_cache_new;
 		.wb_en(wb_en), .sdr_dat_r(sdr_dat_r), .sdr_read_req(sdr_read_req),
 		.sdr_read_ack(sdr_read_ack), .snoop_act(snoop_act),
 		.snoop_adr(snoop_adr), .snoop_dat_w(snoop_dat_w), .snoop_bs(snoop_bs)
+	);
+
+	// The shipping configuration.  Its own stimulus throughout: sharing the
+	// enabled instance's signals would run two state machines off one set of
+	// acknowledges and prove nothing about either.
+	reg  [3:0]  nx_cache_ctrl = 4'b0011;   // both banks enabled, and ignored
+	reg         nx_cpu_cs = 0;
+	reg [28:1]  nx_cpu_adr = 0;
+	reg         nx_cpu_we = 0;
+	reg         nx_cpu_ir = 0;
+	reg         nx_cpu_dr = 0;
+	reg [15:0]  nx_cpu_dat_w = 0;
+	wire [15:0] nx_cpu_dat_r;
+	wire        nx_cpu_ack;
+	wire        nx_wb_en;
+	reg [15:0]  nx_sdr_dat_r = 0;
+	wire        nx_sdr_read_req;
+	reg         nx_sdr_read_ack = 0;
+
+	cpu_cache_new #(.CACHE_ENABLE(0)) dut_nx (
+		.clk(clk), .rst(rst), .cpu_cache_ctrl(nx_cache_ctrl),
+		.cache_inhibit(1'b0), .cpu_cs(nx_cpu_cs), .cpu_adr(nx_cpu_adr),
+		.cpu_bs(2'b11), .cpu_we(nx_cpu_we), .cpu_ir(nx_cpu_ir),
+		.cpu_dr(nx_cpu_dr), .cpu_dat_w(nx_cpu_dat_w),
+		.cpu_dat_r(nx_cpu_dat_r), .cpu_ack(nx_cpu_ack), .wb_en(nx_wb_en),
+		.sdr_dat_r(nx_sdr_dat_r), .sdr_read_req(nx_sdr_read_req),
+		.sdr_read_ack(nx_sdr_read_ack), .snoop_act(1'b0), .snoop_adr(28'd0),
+		.snoop_dat_w(16'd0), .snoop_bs(2'b00)
 	);
 
 	task wait_idle;
@@ -219,6 +254,91 @@ module tb_cpu_cache_new;
 			cpu_ir = 0;
 			cpu_dr = 0;
 			repeat (3) @(posedge clk);
+		end
+	endtask
+
+	// ---- pass-through instance (CACHE_ENABLE=0) ----------------------
+	//
+	// The only read path left is CPU_SM_READ's miss branch: it raises
+	// sdr_read_req, and FILL1 takes the FIRST acknowledged word as the
+	// CPU's data before jumping straight to FILLW without allocating.
+	// Both controllers answer with a whole line regardless, so the task
+	// drives four beats and poisons beats 2..4 -- taking any of them
+	// would be the stranded-beat mis-selection, and it must not happen.
+	integer nx_timeout;
+	reg     nx_saw_req;
+
+	task nx_read;
+		input instr;
+		input [15:0] expected;
+		begin
+			nx_cpu_ir = instr;
+			nx_cpu_dr = !instr;
+			nx_sdr_dat_r = expected;
+			nx_cpu_cs = 1;
+			nx_saw_req = 0;
+			nx_timeout = 0;
+			while (!nx_sdr_read_req && nx_timeout < 20) begin
+				@(posedge clk);
+				nx_timeout = nx_timeout + 1;
+			end
+			if (!nx_sdr_read_req) begin
+				$display("FAIL: pass-through %s read never reached memory (ack=%b data=%h)",
+				         instr ? "instruction" : "data", nx_cpu_ack, nx_cpu_dat_r);
+				errors = errors + 1;
+			end
+			else nx_saw_req = 1;
+			// beat 1 carries the answer; the rest of the line is poison
+			nx_sdr_read_ack = 1;
+			@(posedge clk);
+			nx_sdr_dat_r = 16'hBAD0;
+			repeat (3) @(posedge clk);
+			nx_sdr_read_ack = 0;
+			nx_timeout = 0;
+			while (!nx_cpu_ack && nx_timeout < 20) begin
+				@(posedge clk);
+				nx_timeout = nx_timeout + 1;
+			end
+			if (!nx_cpu_ack) begin
+				$display("FAIL: pass-through %s read never acknowledged",
+				         instr ? "instruction" : "data");
+				errors = errors + 1;
+			end
+			else if (nx_cpu_dat_r !== expected) begin
+				$display("FAIL: pass-through %s read returned %h, memory held %h",
+				         instr ? "instruction" : "data", nx_cpu_dat_r, expected);
+				errors = errors + 1;
+			end
+			nx_cpu_cs = 0;
+			nx_cpu_ir = 0;
+			nx_cpu_dr = 0;
+			repeat (4) @(posedge clk);
+		end
+	endtask
+
+	task nx_write;
+		input [15:0] value;
+		begin
+			nx_cpu_dat_w = value;
+			nx_cpu_we = 1;
+			nx_cpu_cs = 1;
+			nx_timeout = 0;
+			while (!nx_wb_en && nx_timeout < 20) begin
+				@(posedge clk);
+				nx_timeout = nx_timeout + 1;
+			end
+			if (!nx_wb_en) begin
+				$display("FAIL: pass-through write did not enable the write buffer");
+				errors = errors + 1;
+			end
+			nx_cpu_cs = 0;
+			nx_cpu_we = 0;
+			repeat (4) @(posedge clk);
+			if (dut_nx.cpu_sm_state !== 4'd1) begin
+				$display("FAIL: pass-through write left the CPU state machine at %0d",
+				         dut_nx.cpu_sm_state);
+				errors = errors + 1;
+			end
 		end
 	endtask
 
@@ -393,6 +513,58 @@ module tb_cpu_cache_new;
 			errors = errors + 1;
 		end
 		repeat (3) @(posedge clk);
+
+		// ---- CACHE_ENABLE(0): the shipping pass-through ------------------
+		// No storage exists, so the nostorage branch must tie every tag and
+		// data read to zero -- that is what makes the valid bits read as 0
+		// and every hit path unreachable.
+		if (dut_nx.itram_cpu_dat_r !== 40'd0 || dut_nx.dtram_cpu_dat_r !== 40'd0 ||
+		    dut_nx.idram0_cpu_dat_r !== 16'd0 || dut_nx.ddram0_cpu_dat_r !== 16'd0 ||
+		    dut_nx.idram1_cpu_dat_r !== 16'd0 || dut_nx.ddram1_cpu_dat_r !== 16'd0) begin
+			$display("FAIL: CACHE_ENABLE(0) left storage outputs undriven");
+			errors = errors + 1;
+		end
+
+		nx_cpu_adr = 28'h0012340;
+		// Same address twice with memory changed underneath.  With storage
+		// the second read would hit and return the first value; without it,
+		// every read must reach memory and see the new one.  Instruction and
+		// data views are checked separately: they are separate banks, and
+		// only cpu_cache_enable/_d being forced low disables both.
+		nx_read(1'b1, 16'h1111);
+		nx_read(1'b1, 16'h2222);
+		nx_read(1'b0, 16'h3333);
+		nx_read(1'b0, 16'h4444);
+
+		// A write still has to drive the write buffer and retire; nothing
+		// about the write path depends on the tags being present.
+		nx_write(16'h5555);
+
+		// The maintenance toggle re-runs the init sweep, which is state
+		// machine work with no storage behind it.  It must still complete,
+		// or the first CINV after boot parks the CPU state machine in INIT
+		// forever.
+		nx_cache_ctrl[3] = ~nx_cache_ctrl[3];
+		nx_timeout = 0;
+		while (!dut_nx.cache_init_done && nx_timeout < 20) begin
+			@(posedge clk);
+			nx_timeout = nx_timeout + 1;
+		end
+		nx_timeout = 0;
+		while (dut_nx.cache_init_done && nx_timeout < 100) begin
+			@(posedge clk);
+			nx_timeout = nx_timeout + 1;
+		end
+		nx_timeout = 0;
+		while (!dut_nx.cache_init_done && nx_timeout < 2000) begin
+			@(posedge clk);
+			nx_timeout = nx_timeout + 1;
+		end
+		if (!dut_nx.cache_init_done) begin
+			$display("FAIL: CACHE_ENABLE(0) maintenance sweep never completed");
+			errors = errors + 1;
+		end
+		nx_read(1'b0, 16'h6666);
 
 		if (errors == 0) $display("ALL TESTS PASSED");
 		else             $display("TEST FAILED with %0d errors", errors);

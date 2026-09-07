@@ -126,6 +126,31 @@ compile dualram_turbo iverilog -g2012 -I "$RTL" -s tb_dualram_turbo \
 	../../rtl/A2065/a2065_ddram_arbiter.v \
 	sim_dpram.v ../../rtl/ram_cs_guard.v \
 	$RTL/ap040_walker_cdc.v $SRC &
+# The SHIPPING configuration: CPU_CACHE=0 takes cpu_cache_new's storage
+# out, leaving ap040_cache as the only cache in the system (Minimig.sv).
+# Every access misses in the controller, so these legs run the same
+# programs over the pass-through path the hardware now uses.
+#
+# MAX_CYCLES is raised because these programs genuinely take longer, not
+# because anything about them is flakier: measured on this tree, t_mmu
+# goes 1,827,231 -> 3,627,135 cycles and t_fpu 759,551 -> 1,697,151 once
+# the controller stops caching.  6M leaves ~65% headroom over the worst.
+compile sdram_turbo_nx iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
+	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=3 \
+	-P tb_sdram_turbo.CPU_CACHE=0 -P tb_sdram_turbo.MAX_CYCLES=6000000 \
+	-o "$WORK/tb_sdram_turbo_nx.vvp" tb_sdram_turbo.v \
+	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
+	../../rtl/cpu_cache_new.v sim_dpram.v ../../rtl/ram_cs_guard.v \
+	$RTL/ap040_walker_cdc.v $SRC &
+compile dualram_turbo_nx iverilog -g2012 -I "$RTL" -s tb_dualram_turbo \
+	-P tb_dualram_turbo.CYC_PHASE=1 -P tb_dualram_turbo.CPU_PHASE=3 \
+	-P tb_dualram_turbo.CPU_CACHE=0 -P tb_dualram_turbo.MAX_CYCLES=6000000 \
+	-o "$WORK/tb_dualram_turbo_nx.vvp" tb_dualram_turbo.v \
+	"$WORK/cpu_wrapper_sim.v" "$WORK/sdram_ctrl_sim.v" \
+	../../rtl/cpu_cache_new.v ../../rtl/ddram_ctrl.v \
+	../../rtl/A2065/a2065_ddram_arbiter.v \
+	sim_dpram.v ../../rtl/ram_cs_guard.v \
+	$RTL/ap040_walker_cdc.v $SRC &
 compile cache_snoop iverilog -g2012 -I "$RTL" -s tb_ap040_cache_snoop \
 	-o "$WORK/tb_cache_snoop.vvp" tb_ap040_cache_snoop.v \
 	sim_dpram.v $RTL/ap040_cache.v &
@@ -202,6 +227,9 @@ leg fpu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_fpu.hex &
 leg mmu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_mmu.hex &
 leg mmu_turbo_ph3      "$WORK/tb_sdram_turbo_ph3.vvp" +prog=build/t_mmu.hex &
 leg fpu_dualram        "$WORK/tb_dualram_turbo.vvp" +prog=build/t_fpu.hex &
+leg fpu_dualram_nx     "$WORK/tb_dualram_turbo_nx.vvp" +prog=build/t_fpu.hex &
+leg mmu_turbo_nx       "$WORK/tb_sdram_turbo_nx.vvp" +prog=build/t_mmu.hex &
+leg fpu_turbo_nx       "$WORK/tb_sdram_turbo_nx.vvp" +prog=build/t_fpu.hex &
 leg fpu_turbo_ph3      "$WORK/tb_sdram_turbo_ph3.vvp" +prog=build/t_fpu.hex &
 wait
 

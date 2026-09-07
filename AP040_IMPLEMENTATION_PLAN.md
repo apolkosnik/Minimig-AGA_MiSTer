@@ -666,8 +666,67 @@ cache_inhibit plumbing), then full regression + cputest replay.  Expected
 gain: large on fast-RAM working sets; zero architectural risk to exception
 semantics.
 
-STATUS 2026-08-18 (third state, ENABLED -- supersedes the 2026-08-16
-revert note that stood here).  AP040_ENABLE_CACHE(1) ships
+STATUS 2026-09-01 (fourth state, INTERNAL CACHE ONLY -- supersedes the
+"complementary, not alternatives" reading in the 08-18 note below, which
+otherwise still stands).  Two changes:
+
+  * ap040_cache's four data ways are now INSTANTIATED dpram
+    (rtl/bram.vhd -> altsyncram), matching the tag row, instead of
+    inferred arrays carrying a ramstyle attribute.  Measured either way
+    on a standalone quartus_map (Cyclone V 5CSEBA6U23I7): 77,568 block
+    memory bits, 177 registers, 473 -> 472 ALUTs.  So inference WAS
+    reaching M10K and this buys no area -- what it buys is that the
+    result no longer depends on a synthesis judgement renewed on every
+    recompile, whose failure mode is silent and costs ~2000 ALMs.
+  * CPU_CACHE(0) on all three RAM controllers (Minimig.sv): the
+    cpu_cache_new storage is gone and ap040_cache is the only cache in
+    the system.
+
+The cost is real and was measured, not assumed.  Dropping the controller
+cache costs about 2x on the regression programs, which run through the
+real controllers in the new run_tests.sh _nx legs:
+
+  t_mmu   tb_sdram_turbo    1,827,231 -> 3,627,135 cycles  (1.99x)
+  t_fpu   tb_sdram_turbo      759,551 -> 1,697,151 cycles  (2.23x)
+  t_fpu   tb_dualram_turbo    739,199 -> 1,624,127 cycles  (2.20x)
+
+Read those as the WORST case, not a forecast: they are straight-line
+miss-heavy programs, the exact profile that flatters an external cache
+and defeats an internal one, and the same profile behind the 2026-08-16
+"internal cache measured slower" result.  Per X2.8, hardware outranks
+this; the boot-and-benchmark on silicon is what settles whether the
+freed area is worth the loss.  The lever to reverse it is one parameter
+per controller.
+
+Verification added with the change (the configuration had NO coverage
+before -- every bench instantiated CPU_CACHE=1):
+
+  * tb_cpu_cache_new gains a CACHE_ENABLE(0) instance driven through its
+    ports alone (it has no storage to poke).  It holds the pass-through
+    contract: every read reaches memory, no read is answered from a tag,
+    a re-read after memory changes returns the NEW value, the write
+    buffer still fires, and the maintenance sweep still completes.
+    Confirmed to FAIL as a negative control when the instance is given
+    CACHE_ENABLE(1) -- 5 errors, the stale-hit ones included.
+  * tb_sdram_turbo and tb_dualram_turbo take a CPU_CACHE parameter, and
+    run_tests.sh runs t_mmu and t_fpu through both at CPU_CACHE=0.  The
+    walker's cache-snoop residency checks moved into a generate pair,
+    since the g_storage hierarchy they poke does not exist at 0.
+  * MAX_CYCLES is now a bench parameter.  The _nx legs need 6M: the
+    default 2M was already 91% consumed by t_mmu at CPU_CACHE=1, and the
+    first _nx run failed on exactly that budget, not on a result.
+
+NOTE, now on the critical path: cpu_cache_new.v's stranded-beat hazard
+(the "NOTE, unresolved" comment at the top of that file) applied to
+cache-inhibited accesses and disabled banks only.  At CPU_CACHE=0 EVERY
+access is a no-allocate miss, so that path is now the only path.  The
+_nx legs exercise it against the real controllers and pass, which is the
+best evidence available, but the note should be closed properly rather
+than left standing under a configuration that runs it exclusively.
+
+STATUS 2026-08-18 (third state, ENABLED -- superseded above for the
+external-cache half; the internal-cache reasoning and area numbers below
+remain the record).  AP040_ENABLE_CACHE(1) ships
 (cpu_wrapper.v), timing-clean, with the external cpu_cache_new
 instances ALSO keeping their storage (CPU_CACHE 1) -- the two are
 complementary, not alternatives: the internal cache eats the external

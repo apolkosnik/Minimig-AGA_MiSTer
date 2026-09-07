@@ -15,9 +15,10 @@
 // 68040): self-modifying code must execute CINV, which invalidates the     //
 // whole selected cache (over-invalidation is architecturally safe).        //
 //                                                                          //
-// Storage: line data in one synchronous RAM (2 banks x 1024 longwords),    //
-// tags in one wide synchronous RAM row per {bank, set} (4 ways of 22       //
-// bits), valid bits in flip-flops for single-cycle invalidation.           //
+// Storage is block RAM throughout, instantiated rather than inferred       //
+// (rtl/bram.vhd dpram -> altsyncram): one 512x32 row RAM per way for the   //
+// line data, and one wide row per {bank, set} carrying all four tags,      //
+// their valid bits and the round-robin victim pointer together.            //
 //--------------------------------------------------------------------------//
 
 `include "ap040_defs.svh"
@@ -93,23 +94,27 @@ localparam ROWW = 2 + 4 + 4*TAGW;
 // lets the hit be served in the same cycle the tag compare resolves, so a
 // hit costs two cycles instead of three.  Same total bits as the single
 // {bank, set, way, word} array it replaces.
-(* ramstyle = "no_rw_check" *) reg [31:0] cdata0 [0:511];
-(* ramstyle = "no_rw_check" *) reg [31:0] cdata1 [0:511];
-(* ramstyle = "no_rw_check" *) reg [31:0] cdata2 [0:511];
-(* ramstyle = "no_rw_check" *) reg [31:0] cdata3 [0:511];
-
+//
+// These are the same instantiated dpram as the tag row above, not
+// inferred arrays.  Inference did reach M10K here, but only as a
+// synthesis judgement renewed on every recompile, and the failure mode
+// is silent: 16K bits of cache line data landing in LABs is ~2000 ALMs
+// and a fit that no longer closes, reported as nothing louder than a
+// changed resource count.  Instantiating altsyncram puts the block RAM
+// in the source instead.  Port A reads, port B fills; the two never
+// share a cycle (rd_accept is C_IDLE-only, cd_we is C_FILL-only), so
+// the mixed-port read-during-write case cannot arise.
 wire [ROWW-1:0] tag_q;
-reg  [31:0] data_q0, data_q1, data_q2, data_q3;
+wire [31:0] data_q0, data_q1, data_q2, data_q3;
 
-// RAM control (driven combinationally from the FSM state so the arrays
-// infer as block RAM: no resets, enable-gated synchronous reads)
+// RAM control, driven combinationally from the FSM state: the RAMs take
+// no resets and their writes are the only ce-gated inputs
 wire        tag_we;
 wire  [6:0] tag_ridx, tag_widx;
 wire [ROWW-1:0] tag_wdat;
 wire        inv_we;              // port B: store invalidation
 wire        inv_wren;            // port B write strobe (snoops free-run)
 wire  [6:0] inv_idx;
-wire        cd_rd_en;
 wire  [8:0] cd_ridx, cd_widx;
 wire  [3:0] cd_we;               // one per way
 wire [31:0] cd_wdat;
@@ -129,18 +134,61 @@ dpram #(7, ROWW) ctag_ram
 	.q_b       ()
 );
 
-always @(posedge clk) begin
-	if (ce & cd_we[0]) cdata0[cd_widx] <= cd_wdat;
-	if (ce & cd_we[1]) cdata1[cd_widx] <= cd_wdat;
-	if (ce & cd_we[2]) cdata2[cd_widx] <= cd_wdat;
-	if (ce & cd_we[3]) cdata3[cd_widx] <= cd_wdat;
-	if (ce & cd_rd_en) begin
-		data_q0 <= cdata0[cd_ridx];
-		data_q1 <= cdata1[cd_ridx];
-		data_q2 <= cdata2[cd_ridx];
-		data_q3 <= cdata3[cd_ridx];
-	end
-end
+// The read address is held for the whole request (the MMU may not move
+// c_addr before c_ack, which is what the tag row above already relies
+// on), so letting port A free-run reproduces the held read register the
+// inferred array had: a stalled ce simply re-reads the same word.
+dpram #(9, 32) cdata_way0
+(
+	.clock     (clk),
+	.address_a (cd_ridx),
+	.data_a    (32'd0),
+	.wren_a    (1'b0),
+	.q_a       (data_q0),
+	.address_b (cd_widx),
+	.data_b    (cd_wdat),
+	.wren_b    (ce & cd_we[0]),
+	.q_b       ()
+);
+
+dpram #(9, 32) cdata_way1
+(
+	.clock     (clk),
+	.address_a (cd_ridx),
+	.data_a    (32'd0),
+	.wren_a    (1'b0),
+	.q_a       (data_q1),
+	.address_b (cd_widx),
+	.data_b    (cd_wdat),
+	.wren_b    (ce & cd_we[1]),
+	.q_b       ()
+);
+
+dpram #(9, 32) cdata_way2
+(
+	.clock     (clk),
+	.address_a (cd_ridx),
+	.data_a    (32'd0),
+	.wren_a    (1'b0),
+	.q_a       (data_q2),
+	.address_b (cd_widx),
+	.data_b    (cd_wdat),
+	.wren_b    (ce & cd_we[2]),
+	.q_b       ()
+);
+
+dpram #(9, 32) cdata_way3
+(
+	.clock     (clk),
+	.address_a (cd_ridx),
+	.data_a    (32'd0),
+	.wren_a    (1'b0),
+	.q_a       (data_q3),
+	.address_b (cd_widx),
+	.data_b    (cd_wdat),
+	.wren_b    (ce & cd_we[3]),
+	.q_b       ()
+);
 
 //---------------------------------------------------------------------------
 // request classification
@@ -368,7 +416,6 @@ assign inv_idx  = snoop_wr        ? {1'b0, s_addr[9:4]} :
                   ci_inv          ? ci_inv_row :
                   store_inv_lost ? {1'b0, store_inv_set} :
                   (cst == C_IDLE) ? {1'b0, c_addr[9:4]} : {1'b0, winv_set2};
-assign cd_rd_en  = rd_accept;                       // issued with the tag read
 assign cd_ridx   = {c_instr, a_set, c_addr[3:2]};
 assign cd_we     = ((cst == C_FILL) && r_issued && m_ack)
                    ? (4'd1 << r_way) : 4'd0;
@@ -431,10 +478,10 @@ always @(posedge clk) begin
 					cst <= C_SWEEP;
 				end
 				// A cache-inhibited hit owes a row invalidate.  Accept
-				// NOTHING until it lands.  rd_accept alone gated only the
-				// data-RAM read enable, so on paper the FSM could still
-				// enter C_LOOK and compare against the not-yet-invalidated
-				// tag row using stale data_q.
+				// NOTHING until it lands.  The data RAMs read every
+				// cycle, so on paper the FSM could still enter C_LOOK
+				// and compare against the not-yet-invalidated tag row
+				// using stale data_q.
 				//
 				// WRITES ARE EXEMPT, and must be.  store_inv asserts
 				// combinationally while a store waits in C_IDLE and it

@@ -32,6 +32,19 @@ wire clk28 = (div[1:0] == CPU_PHASE[1:0]) | (div[1:0] == ((CPU_PHASE[1:0] + 2'd1
 // 7MHz square for the SDRAM slot engine (16 clk113 per CCK)
 wire c_7m = div[3];
 
+// CPU_CACHE selects the controller's cpu_cache_new storage.  The shipping
+// Minimig build sets 0 -- ap040_cache is the only cache and this module is
+// pure pass-through there -- so both values are run as separate legs: the
+// same programs must produce the same result whether the controller caches
+// or misses every time.
+parameter CPU_CACHE = 1;
+
+// Cycle budget for the program run.  The default holds the CPU_CACHE=1
+// legs, where t_mmu already spends ~1.83M of it.  With CPU_CACHE=0 every
+// access misses in the controller and goes to SDRAM, so the same program
+// needs materially more cycles -- a bigger budget, not a different result.
+parameter MAX_CYCLES = 2000000;
+
 reg ph1 = 0, ph2 = 0;
 always @(posedge clk113) begin
 	ph1 <= 0;
@@ -295,7 +308,7 @@ ap040_walker_cdc walker_cdc
 );
 
 
-sdram_ctrl ram
+sdram_ctrl #(.CPU_CACHE(CPU_CACHE)) ram
 (
 	.sysclk(clk113),
 	.c_7m(c_7m),
@@ -361,7 +374,7 @@ wire [63:0] DDRAM_DIN;
 wire  [7:0] DDRAM_BE;
 wire        DDRAM_WE;
 
-ddram_ctrl ram2
+ddram_ctrl #(.CPU_CACHE(CPU_CACHE)) ram2
 (
 	.sysclk(clk113),
 	.reset_n(reset),
@@ -697,6 +710,75 @@ endtask
 integer wk_errors;
 reg [31:0] wk_got;
 
+// The walker's cache-snoop obligation only exists when the controller HAS
+// a cache.  CPU_CACHE=0 -- the shipping Minimig configuration, where
+// ap040_cache is the only cache -- removes cpu_cache_new's storage, so the
+// g_storage hierarchy is never elaborated and these references cannot sit
+// as plain statements inside walker_selftest: iverilog resolves
+// hierarchical names whether or not the branch holding them can run.  A
+// generate pair keeps both configurations compiling and leaves the
+// CPU_CACHE=1 checks exactly as they were.
+generate if (CPU_CACHE) begin : g_wksnoop
+	task seed_cache_line;
+		begin
+			// Install the same descriptor in way 0 of both cache views.  The
+			// walker bypasses cpu_cache_new, so its writeback snoops must update
+			// both 16-bit halves in both I and D caches.
+			ram.cpu_cache.g_storage.itram.mem[8'h80] = (40'h1 << 38) | 18'h00003;
+			ram.cpu_cache.g_storage.dtram.mem[8'h80] = (40'h1 << 38) | 18'h00003;
+			ram.cpu_cache.g_storage.idram0.ram_u.mem[10'h200] = 8'h00;
+			ram.cpu_cache.g_storage.idram0.ram_l.mem[10'h200] = 8'h00;
+			ram.cpu_cache.g_storage.idram0.ram_u.mem[10'h201] = 8'h00;
+			ram.cpu_cache.g_storage.idram0.ram_l.mem[10'h201] = 8'h01;
+			ram.cpu_cache.g_storage.ddram0.ram_u.mem[10'h200] = 8'h00;
+			ram.cpu_cache.g_storage.ddram0.ram_l.mem[10'h200] = 8'h00;
+			ram.cpu_cache.g_storage.ddram0.ram_u.mem[10'h201] = 8'h00;
+			ram.cpu_cache.g_storage.ddram0.ram_l.mem[10'h201] = 8'h01;
+		end
+	endtask
+
+	task check_cache_snoop;
+		begin
+			if ({ram.cpu_cache.g_storage.idram0.ram_u.mem[10'h200],
+			     ram.cpu_cache.g_storage.idram0.ram_l.mem[10'h200],
+			     ram.cpu_cache.g_storage.idram0.ram_u.mem[10'h201],
+			     ram.cpu_cache.g_storage.idram0.ram_l.mem[10'h201]} !== 32'h12340019) begin
+				$display("FAIL: SDRAM walker I-cache snoop: %h%h%h%h",
+				         ram.cpu_cache.g_storage.idram0.ram_u.mem[10'h200],
+				         ram.cpu_cache.g_storage.idram0.ram_l.mem[10'h200],
+				         ram.cpu_cache.g_storage.idram0.ram_u.mem[10'h201],
+				         ram.cpu_cache.g_storage.idram0.ram_l.mem[10'h201]);
+				wk_errors = wk_errors + 1;
+			end
+			if ({ram.cpu_cache.g_storage.ddram0.ram_u.mem[10'h200],
+			     ram.cpu_cache.g_storage.ddram0.ram_l.mem[10'h200],
+			     ram.cpu_cache.g_storage.ddram0.ram_u.mem[10'h201],
+			     ram.cpu_cache.g_storage.ddram0.ram_l.mem[10'h201]} !== 32'h12340019) begin
+				$display("FAIL: SDRAM walker D-cache snoop: %h%h%h%h",
+				         ram.cpu_cache.g_storage.ddram0.ram_u.mem[10'h200],
+				         ram.cpu_cache.g_storage.ddram0.ram_l.mem[10'h200],
+				         ram.cpu_cache.g_storage.ddram0.ram_u.mem[10'h201],
+				         ram.cpu_cache.g_storage.ddram0.ram_l.mem[10'h201]);
+				wk_errors = wk_errors + 1;
+			end
+		end
+	endtask
+end else begin : g_wksnoop
+	// No controller cache, so nothing to seed and no snoop to check.  The
+	// memory-side assertions in walker_selftest still run, and they are
+	// what proves the walker's write actually reached SDRAM.
+	task seed_cache_line;
+		begin
+		end
+	endtask
+
+	task check_cache_snoop;
+		begin
+		end
+	endtask
+end
+endgenerate
+
 task walker_selftest;
 	begin
 		wk_errors = 0;
@@ -706,19 +788,7 @@ task walker_selftest;
 		cinv_cnt = 15'd1;
 		repeat (8) @(posedge clk113);
 
-		// Install the same descriptor in way 0 of both cache views.  The
-		// walker bypasses cpu_cache_new, so its writeback snoops must update
-		// both 16-bit halves in both I and D caches.
-		ram.cpu_cache.g_storage.itram.mem[8'h80] = (40'h1 << 38) | 18'h00003;
-		ram.cpu_cache.g_storage.dtram.mem[8'h80] = (40'h1 << 38) | 18'h00003;
-		ram.cpu_cache.g_storage.idram0.ram_u.mem[10'h200] = 8'h00;
-		ram.cpu_cache.g_storage.idram0.ram_l.mem[10'h200] = 8'h00;
-		ram.cpu_cache.g_storage.idram0.ram_u.mem[10'h201] = 8'h00;
-		ram.cpu_cache.g_storage.idram0.ram_l.mem[10'h201] = 8'h01;
-		ram.cpu_cache.g_storage.ddram0.ram_u.mem[10'h200] = 8'h00;
-		ram.cpu_cache.g_storage.ddram0.ram_l.mem[10'h200] = 8'h00;
-		ram.cpu_cache.g_storage.ddram0.ram_u.mem[10'h201] = 8'h00;
-		ram.cpu_cache.g_storage.ddram0.ram_l.mem[10'h201] = 8'h01;
+		g_wksnoop.seed_cache_line;
 
 		// 32-bit write: BOTH halves must land (the SDRAM mode word sets
 		// write-burst-single, so the low word needs its own CAS command),
@@ -733,28 +803,7 @@ task walker_selftest;
 			$display("FAIL: walker write low word: %h", mem[15'h0E01]);
 			wk_errors = wk_errors + 1;
 		end
-		if ({ram.cpu_cache.g_storage.idram0.ram_u.mem[10'h200],
-		     ram.cpu_cache.g_storage.idram0.ram_l.mem[10'h200],
-		     ram.cpu_cache.g_storage.idram0.ram_u.mem[10'h201],
-		     ram.cpu_cache.g_storage.idram0.ram_l.mem[10'h201]} !== 32'h12340019) begin
-			$display("FAIL: SDRAM walker I-cache snoop: %h%h%h%h",
-			         ram.cpu_cache.g_storage.idram0.ram_u.mem[10'h200],
-			         ram.cpu_cache.g_storage.idram0.ram_l.mem[10'h200],
-			         ram.cpu_cache.g_storage.idram0.ram_u.mem[10'h201],
-			         ram.cpu_cache.g_storage.idram0.ram_l.mem[10'h201]);
-			wk_errors = wk_errors + 1;
-		end
-		if ({ram.cpu_cache.g_storage.ddram0.ram_u.mem[10'h200],
-		     ram.cpu_cache.g_storage.ddram0.ram_l.mem[10'h200],
-		     ram.cpu_cache.g_storage.ddram0.ram_u.mem[10'h201],
-		     ram.cpu_cache.g_storage.ddram0.ram_l.mem[10'h201]} !== 32'h12340019) begin
-			$display("FAIL: SDRAM walker D-cache snoop: %h%h%h%h",
-			         ram.cpu_cache.g_storage.ddram0.ram_u.mem[10'h200],
-			         ram.cpu_cache.g_storage.ddram0.ram_l.mem[10'h200],
-			         ram.cpu_cache.g_storage.ddram0.ram_u.mem[10'h201],
-			         ram.cpu_cache.g_storage.ddram0.ram_l.mem[10'h201]);
-			wk_errors = wk_errors + 1;
-		end
+		g_wksnoop.check_cache_snoop;
 
 		// 32-bit read of known memory
 		mem[15'h0F00] = 16'hDEAD;
@@ -923,7 +972,7 @@ initial begin
 	reset = 1;
 
 	timeout = 0;
-	while (result == 0 && timeout < 2000000) begin
+	while (result == 0 && timeout < MAX_CYCLES) begin
 		@(posedge clk113);
 		timeout = timeout + 1;
 		if (timeout % 500000 == 0)
