@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+// The LCELL instances below supply physical hold margin.
+(* altera_attribute = "-name REMOVE_REDUNDANT_LOGIC_CELLS OFF" *)
 module chipdma_arb
 (
 	input             clk,
