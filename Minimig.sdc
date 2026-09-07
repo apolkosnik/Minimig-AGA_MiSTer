@@ -1,18 +1,6 @@
 derive_pll_clocks
 derive_clock_uncertainty
 
-# Give placement/routing extra margin on the congested HDMI domain.
-# This is a fitter-only optimization target, not a change to the HDMI clock
-# requirement: final TimeQuest analysis retains the derived device/PLL
-# uncertainty and checks all four timing corners at the actual clock rate.
-if {[info exists ::TimeQuestInfo(nameofexecutable)] &&
-    $::TimeQuestInfo(nameofexecutable) eq "quartus_fit"} {
-    set ap040_hdmi_fit_clk [get_clocks {*pll_hdmi*counter*divclk}]
-    set_clock_uncertainty -setup 0.350 \
-        -from $ap040_hdmi_fit_clk -to $ap040_hdmi_fit_clk
-    post_message -type info "AP040 HDMI fitter setup uncertainty: 0.350 ns"
-}
-
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -setup 2
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -hold 1
 

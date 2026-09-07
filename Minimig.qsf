@@ -55,11 +55,7 @@ set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 set_global_assignment -name FITTER_EFFORT "STANDARD FIT"
 set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
 set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM
-set_global_assignment -name SEED 3
-# The polyphase clamp's late sum/sign must reach D, not a slower synchronous
-# clear input (cold-corner DSP-to-SCLR path). Keep pixel timing unchanged.
-set_instance_assignment -name ALLOW_SYNCH_CTRL_USAGE OFF -to "ascal|o_v_poly_pix*"
-set_instance_assignment -name ALLOW_SYNCH_CTRL_USAGE OFF -to "ascal|o_h_poly_pix*"
+set_global_assignment -name SEED 1
 set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_FB_PALETTE=1"
 

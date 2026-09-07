@@ -1,6 +1,3 @@
-// Keep the short video/sync pipelines in flip-flops. Replacing the sync
-// delay with block RAM makes its clock-to-output path to the OSD critical.
-(* altera_attribute = "-name AUTO_SHIFT_REGISTER_RECOGNITION OFF" *)
 module shadowmask
 (
 	input             clk,
