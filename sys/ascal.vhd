@@ -1070,6 +1070,8 @@ ARCHITECTURE rtl OF ascal IS
 		RETURN t;
 	END FUNCTION;
 
+	-- Minimig.qsf disables synchronous clear/load mapping on the polyphase
+	-- output registers: a late clamp sign must use the faster data input.
 	FUNCTION poly_final(t : type_poly_t) RETURN type_pix IS
 		VARIABLE p : type_pix;
 	BEGIN
