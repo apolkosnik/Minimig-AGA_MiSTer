@@ -22,9 +22,10 @@ set_multicycle_path -from {emu|chipdma_arb|*}    -to {emu|ram1|*} -hold 1
 
 # The retained CD DMA write word can have an exceptionally short route to
 # SDRAM's datawr register (seed 1: -0.149 ns hold in the fast timing model).
-# Require routing delay on this path; this tightens its minimum arrival
-# requirement; the setup multicycles remain unchanged.
-set_min_delay 1.0 -from [get_registers {*chipdma_arb*ak_wr_data*}] \
+# The arbiter supplies explicit buffer cells; require 0.25 ns extra hold
+# margin as well. This tightens the minimum arrival requirement while
+# leaving the setup multicycles unchanged.
+set_min_delay 0.25 -from [get_registers {*chipdma_arb*ak_wr_data*}] \
                   -to [get_registers {*ram1*datawr*}]
 
 # amiga_clk c1/c3 are the 7 MHz-rate phase regs in the 28 MHz (clk_28) domain

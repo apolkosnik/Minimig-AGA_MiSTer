@@ -75,6 +75,17 @@ reg        ak_l;
 reg        ak_u;
 reg        ak_rw;
 reg [15:0] ak_wr_data;
+// Keep physical buffer cells between the retained DMA word and SDRAM's
+// input register. A direct intra-LAB route can be shorter than the skew
+// between clk_sys and clk_114; routing-only hold repair left one bit short.
+// These cells add propagation delay only, with no protocol-cycle latency.
+wire [15:0] ak_wr_buffered;
+genvar wr_bit;
+generate for (wr_bit = 0; wr_bit < 16; wr_bit = wr_bit + 1) begin : g_wr_hold
+	wire intermediate;
+	lcell hold_a (.in(ak_wr_data[wr_bit]), .out(intermediate));
+	lcell hold_b (.in(intermediate), .out(ak_wr_buffered[wr_bit]));
+end endgenerate
 reg        ak_we;
 reg        ak_baddr0;
 
@@ -139,7 +150,7 @@ wire [24:1] ak_addr_w    = select_live ? {1'b0, live_baddr[23:1]} : ak_addr;
 wire        ak_l_w       = select_live ? ~live_baddr[0]           : ak_l;
 wire        ak_u_w       = select_live ?  live_baddr[0]           : ak_u;
 wire        ak_rw_w      = select_live ? ~live_we                 : ak_rw;
-wire [15:0] ak_wr_data_w = select_live ? {live_wbyte, live_wbyte} : ak_wr_data;
+wire [15:0] ak_wr_data_w = select_live ? {live_wbyte, live_wbyte} : ak_wr_buffered;
 
 wire [28:1] router_ramaddr;
 wire        router_zram_sel = |router_ramaddr[28:26];
