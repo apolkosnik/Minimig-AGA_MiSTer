@@ -26,7 +26,7 @@
 // request begins).                                                         //
 //--------------------------------------------------------------------------//
 
-module ram_cs_guard
+module ram_cs_guard #(parameter SAME_CLOCK = 0)
 (
 	input  clk,
 	input  nreset,
@@ -45,6 +45,17 @@ reg       ram_killed;
 wire strobe   = consumed_q && !consumed_qq;
 wire kill_now = strobe && ram_ready && (ready_age >= 3'd4) && cpu_type;
 
+generate if (SAME_CLOCK) begin : g_sync
+    // Consumption is visible on this edge. Hold CS low until the controller
+    // drops its acknowledgement; the CPU may already have its next word ready.
+    always @* ram_cs = ram_sel && !ram_killed;
+    always @(posedge clk) begin
+        if (!nreset) ram_killed <= 0;
+        else if (ram_consumed) ram_killed <= 1;
+        // Requiring ram_sel low as well deadlocks at CORE_DIV=1.
+        else if (!ram_ready) ram_killed <= 0;
+    end
+end else begin : g_async
 always @(posedge clk) begin
 	if (!nreset) begin
 		consumed_q  <= 0;
@@ -71,4 +82,5 @@ always @(posedge clk) begin
 	end
 end
 
+end endgenerate
 endmodule

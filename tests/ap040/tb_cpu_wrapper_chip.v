@@ -17,7 +17,9 @@ module tb_cpu_wrapper_chip #(
 	// leave the chip bus for the accelerated RAM port.  That is how an
 	// accelerated board actually runs, and it means EVERY fastchip access is
 	// preceded by a RAM access rather than a chip-bus one.
-	parameter TURBO_CHIP = 0
+	parameter TURBO_CHIP = 0,
+	parameter FAST_CLOCK = 0,
+	parameter CORE_DIV = 4
 );
 
 reg reset = 0;
@@ -34,6 +36,7 @@ reg [3:0] div = 0;
 wire clk = (div[1:0] == CPU_PHASE[1:0]) |
 	       (div[1:0] == ((CPU_PHASE[1:0] + 2'd1) & 2'd3));
 reg ph1 = 0, ph2 = 0;
+wire cpu_clk = FAST_CLOCK ? clk_114 : clk;
 always @(posedge clk_114) begin
 	div <= div + 1'd1;
 	if (div[1] & ~div[0]) begin
@@ -84,15 +87,47 @@ wire [31:0] walker_wdat;
 reg         walker_ack   = 0;
 reg         walker_berr  = 0;
 reg  [31:0] walker_rdata = 0;
+wire cpu_walk_req, cpu_walk_we, cpu_walk_ddr, cpu_walk_bad;
+wire [28:2] cpu_walk_addr;
+wire [31:0] cpu_walk_wdat, cpu_walk_rdata;
+wire cpu_walk_ack, cpu_walk_berr;
 
-cpu_wrapper dut
+// The fast CPU's request-low interval can be one clk_114 cycle. The
+// peripheral-clock memory model cannot sample that directly; use the same
+// retained request/response bridge as the hardware's physical walker port.
+generate if (FAST_CLOCK) begin : g_walker_cdc
+    ap040_walker_cdc bridge (
+        .s_clk(cpu_clk), .s_reset_n(reset), .s_req(cpu_walk_req),
+        .s_we(cpu_walk_we), .s_addr(cpu_walk_addr), .s_wdata(cpu_walk_wdat),
+        .s_ddr(cpu_walk_ddr), .s_bad(cpu_walk_bad), .s_ack(cpu_walk_ack),
+        .s_rdata(cpu_walk_rdata), .s_berr(cpu_walk_berr),
+        .m_clk(clk), .m_reset_n(reset), .m_req(walker_req),
+        .m_we(walker_we), .m_addr(walker_addr), .m_wdata(walker_wdat),
+        .m_ddr(walker_ddr), .m_ack(walker_ack),
+        .m_rdata(walker_rdata), .m_berr(walker_berr)
+    );
+    assign walker_bad = 1'b0;
+end else begin : g_walker_direct
+    assign walker_req = cpu_walk_req;
+    assign walker_we = cpu_walk_we;
+    assign walker_addr = cpu_walk_addr;
+    assign walker_wdat = cpu_walk_wdat;
+    assign walker_ddr = cpu_walk_ddr;
+    assign walker_bad = cpu_walk_bad;
+    assign cpu_walk_ack = walker_ack;
+    assign cpu_walk_rdata = walker_rdata;
+    assign cpu_walk_berr = walker_berr;
+end endgenerate
+
+cpu_wrapper #(.FAST_CLOCK(FAST_CLOCK), .CORE_DIV(CORE_DIV)) dut
 (
 	.snoop_tgl(1'b0),
 	.snoop_adr(24'd0),
 	.reset(reset),
 	.reset_out(cpu_nrst_out),
 
-	.clk(clk),
+	.clk(cpu_clk),
+	.clk_peripheral(clk),
 	.ph1(ph1),
 	.ph2(ph2),
 
@@ -133,15 +168,15 @@ cpu_wrapper dut
 	.ramuds(ramuds),
 	.ramshared(),
 
-	.walker_mem_req(walker_req),
-	.walker_mem_we(walker_we),
-	.walker_mem_addr(walker_addr),
-	.walker_mem_wdat(walker_wdat),
-	.walker_mem_ddr(walker_ddr),
-	.walker_mem_bad(walker_bad),
-	.walker_mem_ack(walker_ack),
-	.walker_mem_rdata(walker_rdata),
-	.walker_mem_berr(walker_berr),
+	.walker_mem_req(cpu_walk_req),
+	.walker_mem_we(cpu_walk_we),
+	.walker_mem_addr(cpu_walk_addr),
+	.walker_mem_wdat(cpu_walk_wdat),
+	.walker_mem_ddr(cpu_walk_ddr),
+	.walker_mem_bad(cpu_walk_bad),
+	.walker_mem_ack(cpu_walk_ack),
+	.walker_mem_rdata(cpu_walk_rdata),
+	.walker_mem_berr(cpu_walk_berr),
 
 	.toccata_ena(),
 	.toccata_base(),
@@ -214,7 +249,7 @@ fastchip fastchip
 // the next access's is latency dependent, so one value proves nothing
 
 wire ram_cs;
-ram_cs_guard ram_guard
+ram_cs_guard #(.SAME_CLOCK(FAST_CLOCK)) ram_guard
 (
 	.clk(clk_114),
 	.nreset(reset),

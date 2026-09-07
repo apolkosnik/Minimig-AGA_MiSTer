@@ -1,4 +1,6 @@
-module dpram #(parameter AW = 8, parameter DW = 8) (
+// INIT_FILE matches the hardware primitive's interface. CPU regressions do
+// not access Akiko's battery-backed NVRAM; its MIF contents are not modeled.
+module dpram #(parameter AW = 8, parameter DW = 8, parameter INIT_FILE = "") (
 	input clock,
 	input [AW-1:0] address_a,
 	input [DW-1:0] data_a,

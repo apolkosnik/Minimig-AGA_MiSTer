@@ -316,6 +316,60 @@ module tb_cpu_cache_new;
 		end
 	endtask
 
+	// Release the early acknowledgement and immediately request another word
+	// while the old controller burst still has three beats to deliver. A fast
+	// CPU must receive a new transaction's first beat, never the old tail.
+	task nx_early_restart;
+		integer beat;
+		begin
+			@(negedge clk);
+			nx_cpu_ir = 0; nx_cpu_dr = 1; nx_cpu_cs = 1;
+			nx_cpu_adr = 28'h0010000;
+			nx_timeout = 0;
+			while (!nx_sdr_read_req && nx_timeout < 30) begin
+				@(negedge clk); nx_timeout = nx_timeout + 1;
+			end
+			if (!nx_sdr_read_req) begin
+				$display("FAIL: early-restart first request missing"); errors = errors + 1;
+			end
+			nx_sdr_dat_r = 16'h1357; nx_sdr_read_ack = 1;
+			@(negedge clk);
+			nx_sdr_read_ack = 0;
+			if (!nx_cpu_ack || nx_cpu_dat_r !== 16'h1357) begin
+				$display("FAIL: early-restart first response"); errors = errors + 1;
+			end
+			nx_cpu_cs = 0;
+			@(negedge clk);
+			nx_cpu_adr = 28'h0010001; nx_cpu_cs = 1;
+			for (beat = 0; beat < 3; beat = beat + 1) begin
+				repeat (8) begin
+					@(negedge clk);
+					if (nx_cpu_ack || nx_sdr_read_req) begin
+						$display("FAIL: new read accepted an unfinished burst"); errors = errors + 1;
+					end
+				end
+				nx_sdr_dat_r = 16'hBAD0 + beat; nx_sdr_read_ack = 1;
+				@(negedge clk); nx_sdr_read_ack = 0;
+			end
+			nx_timeout = 0;
+			while (!nx_sdr_read_req && nx_timeout < 30) begin
+				@(negedge clk); nx_timeout = nx_timeout + 1;
+			end
+			if (!nx_sdr_read_req || nx_cpu_ack) begin
+				$display("FAIL: early-restart second request missing or stale ack"); errors = errors + 1;
+			end
+			nx_sdr_dat_r = 16'h2468; nx_sdr_read_ack = 1;
+			@(negedge clk);
+			if (!nx_cpu_ack || nx_cpu_dat_r !== 16'h2468) begin
+				$display("FAIL: early-restart second response"); errors = errors + 1;
+			end
+			nx_sdr_dat_r = 16'hBADF;
+			repeat (3) @(negedge clk);
+			nx_sdr_read_ack = 0; nx_cpu_cs = 0; nx_cpu_dr = 0;
+			repeat (5) @(negedge clk);
+		end
+	endtask
+
 	task nx_write;
 		input [15:0] value;
 		begin
@@ -566,6 +620,7 @@ module tb_cpu_cache_new;
 		end
 		nx_read(1'b0, 16'h6666);
 
+		nx_early_restart;
 		if (errors == 0) $display("ALL TESTS PASSED");
 		else             $display("TEST FAILED with %0d errors", errors);
 		$finish;

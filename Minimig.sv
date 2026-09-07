@@ -400,6 +400,7 @@ cpu_wrapper cpu_wrapper
 	.reset_out    (cpu_nrst_out    ),
 
 	.clk          (clk_sys         ),
+	.clk_peripheral(clk_sys        ),
 	.ph1          (cpu_ph1         ),
 	.ph2          (cpu_ph2         ),
 

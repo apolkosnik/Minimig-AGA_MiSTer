@@ -42,6 +42,10 @@ parameter CPU_CACHE = 1;
 // needs materially more cycles -- a bigger budget, not a different result.
 parameter MAX_CYCLES = 2000000;
 
+parameter FAST_CLOCK = 0;
+parameter CORE_DIV = 4;
+wire cpu_clk = FAST_CLOCK ? clk113 : clk28;
+
 reg ph1 = 0, ph2 = 0;
 always @(posedge clk113) begin
 	ph1 <= 0;
@@ -157,14 +161,15 @@ reg        ipl_set_w = 0, ipl_arm_w = 0;
 reg  [2:0] ipl_set_v = 0;
 reg [15:0] ipl_arm_v = 0;
 
-cpu_wrapper cpu
+cpu_wrapper #(.FAST_CLOCK(FAST_CLOCK), .CORE_DIV(CORE_DIV)) cpu
 (
 	.snoop_tgl(1'b0),
 	.snoop_adr(24'd0),
 	.reset(reset),
 	.reset_out(cpu_nrst_out),
 
-	.clk(clk28),
+	.clk(cpu_clk),
+	.clk_peripheral(clk28),
 	.ph1(ph1),
 	.ph2(ph2),
 
@@ -279,7 +284,7 @@ end
 
 ap040_walker_cdc walker_cdc
 (
-	.s_clk     (clk28),
+	.s_clk     (cpu_clk),
 	.s_reset_n (reset),
 	.s_req     (cw_req),
 	.s_we      (cw_we),
@@ -364,7 +369,7 @@ always @(posedge clk113)
 
 // Instantiate the same guard used by Minimig.sv.  CYC=1/CPU=0 is one of
 // the valid relative phases that deadlocks with the old one-cycle CS kill.
-ram_cs_guard ram_guard (
+ram_cs_guard #(.SAME_CLOCK(FAST_CLOCK)) ram_guard (
 	.clk(clk113), .nreset(reset), .cpu_type(1'b1),
 	.ram_consumed(ram_consumed),
 	.ram_sel(ramsel), .ram_ready(ramready_mux), .ram_cs(ram_cs)
@@ -771,7 +776,7 @@ initial begin
 	// interrupt delivery needs the chip stage machine to see the ph2
 	// pulse: only the real-hardware alignment (CPU_PHASE 3) does; at
 	// other phases the capability word stays 0 and t_fpu skips its soak
-	mem[16'hF160 >> 1] = (CPU_PHASE[1:0] == 2'd3) ? 16'h0001 : 16'h0000;
+	mem[16'hF160 >> 1] = (FAST_CLOCK || CPU_PHASE[1:0] == 2'd3) ? 16'h0001 : 16'h0000;
 	for (i = 0; i < 16; i = i + 1) begin
 		rd_pipe_dat[i] = 0;
 		rd_pipe_en[i] = 0;

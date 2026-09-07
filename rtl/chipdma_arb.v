@@ -130,17 +130,16 @@ wire  [7:0] live_wbyte  = arming_is_cdtv ? cdtv_dma_wbyte : akiko_dma_wbyte;
 
 wire arm_now = (state == S_IDLE) & c_7m_rise & minimig_idle & any_req;
 
-wire arb_request = arm_now | (state == S_DRIVE);
-
 assign akiko_arm = arm_now & ~arming_is_cdtv;
 
-wire arb_drive = arb_request & minimig_idle;
-
-wire [24:1] ak_addr_w    = arm_now ? {1'b0, live_baddr[23:1]} : ak_addr;
-wire        ak_l_w       = arm_now ? ~live_baddr[0]           : ak_l;
-wire        ak_u_w       = arm_now ?  live_baddr[0]           : ak_u;
-wire        ak_rw_w      = arm_now ? ~live_we                 : ak_rw;
-wire [15:0] ak_wr_data_w = arm_now ? {live_wbyte, live_wbyte} : ak_wr_data;
+// The payload is used only while arming in IDLE or holding in DRIVE.
+// Select it from state, before the late chipset-idle arbitration arrives.
+wire select_live = (state == S_IDLE);
+wire [24:1] ak_addr_w    = select_live ? {1'b0, live_baddr[23:1]} : ak_addr;
+wire        ak_l_w       = select_live ? ~live_baddr[0]           : ak_l;
+wire        ak_u_w       = select_live ?  live_baddr[0]           : ak_u;
+wire        ak_rw_w      = select_live ? ~live_we                 : ak_rw;
+wire [15:0] ak_wr_data_w = select_live ? {live_wbyte, live_wbyte} : ak_wr_data;
 
 wire [28:1] router_ramaddr;
 wire        router_zram_sel = |router_ramaddr[28:26];
@@ -161,13 +160,16 @@ memory_router u_router
 	.ramaddr       (router_ramaddr)
 );
 
-wire    is_ddr_now   = arm_now ? router_zram_sel : ak_is_ddr;
-
 wire        addr_unmapped   = |live_baddr[31:24] & ~router_zram_sel;
 reg         ak_unmapped;
-wire        is_unmapped_now = arm_now ? addr_unmapped : ak_unmapped;
 
-wire arb_drive_chip  = arb_drive & ~is_ddr_now & ~is_unmapped_now;
+// Factor minimig_idle out of the address-class muxes. It is the late input
+// from Agnus arbitration; feeding it through arm_now, two class muxes and
+// then another select had put four logic stages in the SDRAM address path.
+wire arm_chip = select_live && c_7m_rise && any_req &&
+                !router_zram_sel && !(|live_baddr[31:24]);
+wire hold_chip = (state == S_DRIVE) && !ak_is_ddr && !ak_unmapped;
+wire arb_drive_chip = minimig_idle && (arm_chip || hold_chip);
 
 assign chip_out_addr = arb_drive_chip ? ak_addr_w    : chip_in_addr;
 assign chip_out_l    = arb_drive_chip ? ak_l_w       : chip_in_l;

@@ -30,13 +30,19 @@ module cpu_wrapper
 	// RAM can legitimately wait thousands of clk_sys cycles for a DMA slot.
 	// cpu_wrapper.clk is clk_sys (28.6875 MHz), so 2^20 clocks is about 36.6 ms
 	// and comfortably separates the two.
-	parameter BUS_TIMEOUT_BITS = 20
+	parameter BUS_TIMEOUT_BITS = 20,
+	// Experimental synchronous memory interface. The hardware top still
+	// uses the legacy clock until clk_114 timing is closed for the core.
+	parameter FAST_CLOCK = 0,
+	parameter CORE_DIV = 4
 )
 (
 	input             reset,
 	output reg        reset_out,
 
 	input             clk,
+	// Required only by FAST_CLOCK: the existing 28 MHz peripheral clock.
+	input             clk_peripheral,
 	input             ph1,
 	input             ph2,
 
@@ -178,7 +184,8 @@ assign fastchip_rnw = wr;
 
 reg  [31:0] cpu_addr;
 reg  [15:0] cpu_dout;
-wire [15:0] cpu_din = ramsel ? ramdat :
+wire [15:0] cpu_din = (FAST_CLOCK && fastchip_pending) ? fastchip_data_l :
+                      ramsel ? ramdat :
                       fastchip_selack ? fastchip_dout :
                       cdtv_selack ? cdtv_din :
                       {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
@@ -209,7 +216,8 @@ always @* begin
 	chip_addr    = cpu_addr_p[23:1];
 	chip_din     = cpu_dout_p;
 	chip_data    = chipdout_i;
-	fastchip_sel = cpu_req & !cpu_addr_p[31:24];
+	fastchip_sel = cpu_req & !cpu_addr_p[31:24] &
+	               !(FAST_CLOCK && fastchip_served);
 	fastchip_lw  = longword;
 end
 
@@ -229,14 +237,71 @@ wire        cache_maint_p;
 reg         cache_maint_d;
 reg         cache_clear_toggle;
 wire        bus_berr;
-wire        bus_complete = chipready | ramready | fastchip_ready;
+wire        fastchip_served, fastchip_pending;
+wire [15:0] fastchip_data_l;
+wire        bus_complete = FAST_CLOCK
+                         ? ((chipready && !ramsel && !fastchip_selack && !fastchip_served) |
+                            (ramready && ramsel) |
+                            fastchip_pending)
+                         : (chipready | ramready | fastchip_ready);
 
-// Level-acknowledge consumption strobe for ram_cs_guard: exactly the edge
-// where the qualified clock advances a waiting RAM transaction.
+// FAST_CLOCK keeps CPU and RAM on the same clock. Only the architectural
+// core advances at CORE_DIV; bus completions remain held until that edge.
+reg [1:0] core_phase;
 always @(posedge clk) begin
-	if (~reset) ramconsumed <= 0;
-	else        ramconsumed <= cpu_req & ramsel & ramready;
+    if (!reset) core_phase <= 0;
+    else if (core_phase == CORE_DIV-1) core_phase <= 0;
+    else core_phase <= core_phase + 1'b1;
 end
+wire core_tick = !FAST_CLOCK || (core_phase == 0);
+wire core_enable = core_tick && (~cpu_req | bus_complete | bus_berr);
+// RTG/IDE/Akiko still run at 28 MHz. A combinational write-ready means
+// "accepted on the next peripheral edge", not on the next fast CPU edge.
+// Capture the result on that edge and cross a retained acknowledgement.
+// Select drops immediately after acceptance, so side-effecting writes land
+// exactly once. The return toggle permits the next request even if its
+// one-fast-clock idle gap was too short for the peripheral domain to see.
+generate if (FAST_CLOCK) begin : g_fastchip_cdc
+    reg served, ack_toggle, consumed;
+    reg [1:0] consumed_s, ack_s;
+    reg [15:0] data_l;
+    always @(posedge clk_peripheral) begin
+        if (!reset) begin
+            served <= 0; ack_toggle <= 0; consumed_s <= 0; data_l <= 0;
+        end else begin
+            consumed_s <= {consumed_s[0], consumed};
+            if (served) begin
+                if (consumed_s[1] == ack_toggle) served <= 0;
+            end else if (fastchip_selack && fastchip_ready) begin
+                data_l <= fastchip_dout;
+                ack_toggle <= ~ack_toggle;
+                served <= 1;
+            end
+        end
+    end
+    always @(posedge clk) begin
+        if (!reset) begin ack_s <= 0; consumed <= 0; end
+        else begin
+            ack_s <= {ack_s[0], ack_toggle};
+            if (core_enable && cpu_req && fastchip_pending) consumed <= ack_s[1];
+        end
+    end
+    assign fastchip_pending = ack_s[1] != consumed;
+    assign fastchip_served = served;
+    assign fastchip_data_l = data_l;
+end else begin : g_fastchip_legacy
+    assign fastchip_pending = 1'b0;
+    assign fastchip_served = 1'b0;
+    assign fastchip_data_l = 16'd0;
+end endgenerate
+generate if (FAST_CLOCK) begin : g_sync_consumed
+    always @* ramconsumed = core_enable && cpu_req && ramsel && ramready;
+end else begin : g_async_consumed
+    always @(posedge clk) begin
+        if (!reset) ramconsumed <= 0;
+        else ramconsumed <= cpu_req && ramsel && ramready;
+    end
+end endgenerate
 
 // Snoop CDC.  A chipset write happens at most once per CCK, i.e. every
 // four CPU clocks, so a two-flop synchroniser on the toggle plus one
@@ -278,7 +343,7 @@ ap040_tg68k_compat #(
 (
 	.clk(clk),
 	.nreset(reset),
-	.clkena_in(~cpu_req | bus_complete | bus_berr),
+	.clkena_in(core_enable),
 	.cache_allow_all(1'b0),
 	.cache_snoop_stb(snoop_stb_r),
 	.cache_snoop_addr(snoop_addr_r),
@@ -522,7 +587,8 @@ end
 reg       chipreq;
 reg [2:0] cpu_ipl;
 always @(posedge clk) begin
-	chipreq <= cpu_req & ~ramsel & ~fastchip_selack;
+	chipreq <= cpu_req & ~ramsel & ~fastchip_selack &
+	           !(FAST_CLOCK && fastchip_served);
 	cpu_ipl <= ipl_i;
 end
 
@@ -536,6 +602,45 @@ reg        chipready;
 reg [15:0] chipdout_i;
 reg  [2:0] ipl_i;
 reg        c_as,c_rw,c_uds,c_lds;
+generate if (FAST_CLOCK) begin : g_sync_chip
+// The chipset phases are events in the fast domain, not clock enables
+// stretched over four fast cycles. Acknowledge/data persist until consumed.
+always @(posedge clk or negedge reset) begin
+    reg [1:0] stage;
+    reg waitm;
+    if (!reset) begin
+        stage <= 0; waitm <= 1; chipready <= 0; chipdout_i <= 0;
+        c_as <= 1; c_rw <= 1; c_uds <= 1; c_lds <= 1;
+        ipl_i <= 3'b111;
+    end else if (bus_berr) begin
+        stage <= 0; chipready <= 0;
+        c_as <= 1; c_rw <= 1; c_uds <= 1; c_lds <= 1;
+    end else begin
+        if (chipready && core_enable && cpu_req && !ramsel && !fastchip_selack)
+            chipready <= 0;
+        if (ph2 && !ph2n) begin
+            waitm <= chip_dtack;
+            if (!stage[0]) ipl_i <= chip_ipl;
+        end
+        if (ph1 && !ph1n) begin
+            case (stage)
+                0: if (chipreq && !chipready) begin
+                    c_as <= 0; c_rw <= wr; c_uds <= uds_in; c_lds <= lds_in;
+                    stage <= 1;
+                end
+                1: stage <= 2;
+                2: if (!waitm) begin
+                    chipdout_i <= chip_dout;
+                    c_as <= 1; c_rw <= 1; c_uds <= 1; c_lds <= 1;
+                    chipready <= 1;
+                    stage <= 3;
+                end
+                3: if (!chipready) stage <= 0;
+            endcase
+        end
+    end
+end
+end else begin : g_async_chip
 always @(negedge clk, negedge reset) begin
 	reg [1:0] stage;
 	reg waitm;
@@ -599,6 +704,7 @@ always @(negedge clk, negedge reset) begin
 		end
 	end
 end
+end endgenerate
 
 ///////////////////// AUTOCONFIG ////////////////////////////
 

@@ -35,7 +35,8 @@ module ap040_core
 	parameter AP040_HAS_MMU      = 1,
 	parameter AP040_HAS_FPU      = 0,
 	parameter AP040_ENABLE_CACHE = 0,
-	parameter AP040_FAST_SIM     = 0
+	parameter AP040_FAST_SIM     = 0,
+	parameter AP040_FAST_OPERANDS = 1
 )
 (
 	input             clk,
@@ -265,8 +266,8 @@ ap040_regfile regfile
 	.clk(clk), .ce(ce), .nreset(nreset),
 	.sr_s(sr_s), .sr_m(sr_m),
 	.we(rf_we), .waddr(rf_waddr), .wdata(rf_wdata),
-	.raddr_a(rr_a), .rdata_a(rf_rdata_a),
-	.raddr_b(rr_b), .rdata_b(rf_rdata_b),
+	.raddr_a(rf_addr_a), .rdata_a(rf_rdata_a),
+	.raddr_b(rf_addr_b), .rdata_b(rf_rdata_b),
 	.aux_we(aux_we), .aux_sel(aux_sel), .aux_wdata(aux_wdata),
 	.usp_q(usp_q), .isp_q(isp_q), .msp_q(msp_q),
 	.dbg_d0(dbg_d0), .dbg_d1(dbg_d1), .dbg_d2(dbg_d2),
@@ -623,6 +624,15 @@ reg        p_rmw, p_wbsup, p_flags;
 reg  [3:0] exec_kind;
 reg  [2:0] src_mode_r, src_rn_r, dst_mode_r, dst_rn_r;
 reg [31:0] dst_addr;
+
+// Decode already registered the operand indices. Read them directly during
+// setup, instead of copying them into rr_a/rr_b and waiting another cycle.
+// The ordinary ports still serve effective-address and complex instructions.
+wire [3:0] rf_addr_a = (AP040_FAST_OPERANDS && state == S_PIPE_START)
+                       ? p_sreg : rr_a;
+wire [3:0] rf_addr_b = (AP040_FAST_OPERANDS &&
+                       (state == S_PIPE_START || state == S_PIPE_DST))
+                       ? p_dreg : rr_b;
 
 reg        sh_vacc;
 reg        sh_rox;
@@ -1481,6 +1491,11 @@ task ea_start;
 		ea_mode <= mode; ea_rn <= rn; ea_size <= size;
 		ea_pcmode <= 0; ea_pcb <= pc;
 		r_ea_ret <= ret; state <= S_EA_DISP;
+		if (AP040_FAST_OPERANDS &&
+		    (mode == 3'b010 || mode == 3'b011 || mode == 3'b100)) begin
+			rr_a <= {1'b1, rn};
+			state <= S_EA_BASE;
+		end
 	end
 endtask
 
@@ -1629,6 +1644,29 @@ function [15:0] aerr_word;
 	end
 endfunction
 
+// Enter decode with an already resident opcode. This is shared by demand
+// fetch and the simple-instruction completion path so trace/default state
+// cannot drift between them.
+task dispatch_word;
+	input [15:0] fw;
+	begin
+		in_exc <= 0;
+		epf_pop = 2'd1;
+		ir <= fw;
+		pc <= pc + 32'd2;
+		tr_t1 <= sr[15];
+		tr_t0 <= sr[14];
+		flow_t0_pend <= 0;
+		t0_force <= t0_special(fw);
+		p_src <= SK_NONE; p_dst <= DK_NONE;
+		p_rmw <= 0; p_wbsup <= 0; p_flags <= 1; p_sextw <= 0;
+		p_dst_mem_bit <= 0;
+		exec_kind <= EK_ALU;
+		fc_ovr_v <= 0;
+		state <= S_DECODE;
+	end
+endtask
+
 task fetch_next;
 	begin
 		fc_ovr_v <= 0;
@@ -1665,6 +1703,17 @@ task fetch_next;
 			// Instruction writeback is registered separately.  Do not let
 			// S_EXC0 sample Dn/An/A7 on the same edge that commits it.
 			state <= S_POST_EXC;
+		end
+		else if (AP040_FAST_OPERANDS && epf_ready_pc && !epf_flushed &&
+		         !in_exc && !flow_t0_pend &&
+		         ((state == S_EXEC && exec_kind == EK_ALU &&
+		           p_dst == DK_REG && p_dreg != 4'd15) ||
+		          (state == S_DECODE && ir[15:12] == 4'h7 && !ir[8]))) begin
+			// Dn/A0-A6 writeback commits alongside the next decode, before
+			// it reads operands. A7/SR and complex completions retain the
+			// fetch barrier: the decoder can use the stack pointer directly.
+			pc_i <= pc;
+			dispatch_word(epf_data[epf_head]);
 		end
 		else begin
 			issue_ifetch(pc, sr_s);
@@ -2047,21 +2096,7 @@ always @(posedge clk) begin
 				else begin
 					// All four exception-prefetch longwords are now resident; the
 					// first buffered handler instruction begins normal execution.
-					in_exc <= 0;
-					epf_pop = 2'd1;
-					ir <= fw;
-					pc <= pc + 32'd2;
-					// per-instruction defaults
-					tr_t1 <= sr[15];
-					tr_t0 <= sr[14];
-					flow_t0_pend <= 0;
-					t0_force <= t0_special(fw);
-					p_src <= SK_NONE; p_dst <= DK_NONE;
-					p_rmw <= 0; p_wbsup <= 0; p_flags <= 1; p_sextw <= 0;
-					p_dst_mem_bit <= 0;
-					exec_kind <= EK_ALU;
-					fc_ovr_v <= 0;
-					state <= S_DECODE;
+					dispatch_word(fw);
 				end
 			end
 			// The queue does not run this stream -- a redirect that could not
@@ -2364,7 +2399,16 @@ always @(posedge clk) begin
 				// A register destination needs no EA, so its operand can be
 				// read on port B in the SAME cycle the source is read on
 				// port A (X2.3).  The old path spent one state per port.
-				case (p_src)
+				if (AP040_FAST_OPERANDS && p_src != SK_MEM) begin
+					if (p_src == SK_REG) src_val <= rf_rdata_a;
+					else if (p_src == SK_IMM) src_val <= imm;
+					if (p_dst == DK_REG) begin
+						dst_val <= rf_rdata_b;
+						state <= S_EXEC;
+					end
+					else state <= S_PIPE_DST;
+				end
+				else case (p_src)
 					SK_MEM: ea_start(src_mode_r, src_rn_r, p_ssize, S_PIPE_SRD);
 					SK_REG:
 						if (p_dst == DK_REG) begin
@@ -2407,7 +2451,13 @@ always @(posedge clk) begin
 			S_PIPE_DST: begin
 				case (p_dst)
 					DK_MEM: ea_start(dst_mode_r, dst_rn_r, p_dsize, S_PIPE_DEA);
-					DK_REG: begin rr_b <= p_dreg; state <= S_PIPE_DREG; end
+					DK_REG: begin
+						if (AP040_FAST_OPERANDS) begin
+							dst_val <= rf_rdata_b;
+							state <= S_EXEC;
+						end
+						else begin rr_b <= p_dreg; state <= S_PIPE_DREG; end
+					end
 					default: state <= S_EXEC;
 				endcase
 			end

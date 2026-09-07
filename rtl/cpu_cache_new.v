@@ -115,6 +115,9 @@ reg         fill_active;
 reg   [7:0] fill_idx;
 reg  [17:0] fill_tag;
 reg         fill_snooped;
+// Even an uncached read starts a four-word SDRAM burst. Its early CPU ack
+// must not let the next request consume a trailing word of that burst.
+reg  [1:0] fill_discard;
 reg         inv_sel;
 reg   [9:0] sdr_sm_adr;
 reg         sdr_sm_itag_we;
@@ -356,6 +359,7 @@ always @ (posedge clk) begin
     cpu_sm_bs         <= 2'b11;
     fill_active       <= 1'b0;
     fill_snooped      <= 1'b0;
+    fill_discard      <= 2'd0;
     inv_sel           <= 1'b0;
   end else begin
     // default values
@@ -467,6 +471,7 @@ always @ (posedge clk) begin
           // stop a CI access being ANSWERED from the cache.
           if (cache_inhibit || (cpu_ir ? !cc_en : !cc_en_d)) begin
             fill_active <= 1'b0;
+            fill_discard <= 2'd3;
             // don't update cache if caching is inhibited
             cpu_sm_state <= CPU_SM_FILLW;
           end else begin
@@ -539,7 +544,9 @@ always @ (posedge clk) begin
         end
       end
       CPU_SM_FILLW : begin
-        if (!cpu_ack) begin
+        if (fill_discard != 0) begin
+          if (sdr_read_ack) fill_discard <= fill_discard - 2'd1;
+        end else if (!cpu_ack) begin
           if (fill_active && fill_snooped) begin
             inv_sel          <= 1'b1;
             cpu_sm_tag_dat_w <= 40'd0;
