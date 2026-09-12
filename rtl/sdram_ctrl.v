@@ -34,7 +34,9 @@ module sdram_ctrl
 	// own ap040_cache becomes the only cache, and this instance keeps just
 	// the fill/pass protocol.  Left at 1 by default so the existing
 	// controller benches still exercise the cached path.
-	parameter CPU_CACHE = 1
+	parameter CPU_CACHE = 1,
+	// cpu_cache_new READ_PIPE: 1 only when the CPU shares this clock (P2).
+	parameter CACHE_READ_PIPE = 0
 )
 (
 	// system
@@ -176,7 +178,7 @@ end
 assign snoop_tgl  = snoop_tgl_r;
 assign snoop_addr = snoop_addr_r;
 
-cpu_cache_new #(.CACHE_ENABLE(CPU_CACHE)) cpu_cache
+cpu_cache_new #(.CACHE_ENABLE(CPU_CACHE), .READ_PIPE(CACHE_READ_PIPE)) cpu_cache
 (
 	.clk              (sysclk),                // clock
 	.rst              (!reset || !cache_rst),  // cache reset

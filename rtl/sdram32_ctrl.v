@@ -122,6 +122,8 @@ module sdram32_ctrl
 	// the fill/pass protocol.  Left at 1 by default so the existing
 	// controller benches still exercise the cached path.
 	parameter CPU_CACHE = 1,
+	// cpu_cache_new READ_PIPE: 1 only when the CPU shares this clock (P2).
+	parameter CACHE_READ_PIPE = 0,
 	// DUAL_SDRAM 1 drives the io-board's second SDRAM as the upper half of a
 	// 32-bit bus.  0 builds the plain 16-bit controller (boards without the
 	// second module), at half the line-fill rate.
@@ -405,7 +407,7 @@ wire [15:0] fsel3 = (j3 == 2'd0) ? fw0 : (j3 == 2'd1) ? fw1 : (j3 == 2'd2) ? fw2
 reg [15:0] cfill_dat;
 wire [15:0] cache_dat_r = DUAL_SDRAM ? cfill_dat : sdata_reg_q;
 
-cpu_cache_new #(.CACHE_ENABLE(CPU_CACHE)) cpu_cache
+cpu_cache_new #(.CACHE_ENABLE(CPU_CACHE), .READ_PIPE(CACHE_READ_PIPE)) cpu_cache
 (
 	.clk              (sysclk),                // clock
 	.rst              (!reset || !cache_rst),  // cache reset

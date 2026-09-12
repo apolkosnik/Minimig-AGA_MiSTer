@@ -309,7 +309,7 @@ ap040_walker_cdc walker_cdc
 );
 
 
-sdram_ctrl #(.CPU_CACHE(CPU_CACHE)) ram
+sdram_ctrl #(.CPU_CACHE(CPU_CACHE), .CACHE_READ_PIPE(FAST_CLOCK)) ram
 (
 	.sysclk(clk113),
 	.c_7m(c_7m),

@@ -54,6 +54,10 @@ compile bus16_gap iverilog -g2012 -I "$RTL" -o "$WORK/tb_bus16_gap.vvp" \
 compile cpu_cache_new iverilog -g2012 -s tb_cpu_cache_new \
 	-o "$WORK/tb_cpu_cache_new.vvp" \
 	tb_cpu_cache_new.v ../../rtl/cpu_cache_new.v &
+# the same bench at READ_PIPE 0: the legacy single-cycle hit decision
+compile cpu_cache_new_rp0 iverilog -g2012 -s tb_cpu_cache_new -P tb_cpu_cache_new.READ_PIPE=0 \
+	-o "$WORK/tb_cpu_cache_new_rp0.vvp" \
+	tb_cpu_cache_new.v ../../rtl/cpu_cache_new.v &
 compile ddram_walker_snoop iverilog -g2012 -s tb_ddram_walker_snoop \
 	-o "$WORK/tb_ddram_walker_snoop.vvp" \
 	tb_ddram_walker_snoop.v ../../rtl/ddram_ctrl.v \
@@ -193,6 +197,11 @@ compile sdram32 iverilog -g2012 -s tb_sdram32 \
 	-o "$WORK/tb_sdram32.vvp" tb_sdram32.v \
 	../../rtl/sdram32_ctrl.v "$WORK/sdram_ctrl_sim.v" \
 	../../rtl/cpu_cache_new.v sim_dpram.v &
+# the P2 controllers: cpu_cache_new READ_PIPE 1 in all three
+compile sdram32_rp1 iverilog -g2012 -s tb_sdram32 -P tb_sdram32.READ_PIPE=1 \
+	-o "$WORK/tb_sdram32_rp1.vvp" tb_sdram32.v \
+	../../rtl/sdram32_ctrl.v "$WORK/sdram_ctrl_sim.v" \
+	../../rtl/cpu_cache_new.v sim_dpram.v &
 wait
 
 if ls "$WORK"/.status.compile_* >/dev/null 2>&1; then
@@ -230,11 +239,13 @@ leg double_fault       "$WORK/tb_double_fault.vvp" &
 leg walker_cdc         "$WORK/tb_walker_cdc.vvp" &
 leg bus16_gap          "$WORK/tb_bus16_gap.vvp" &
 leg cpu_cache_new      "$WORK/tb_cpu_cache_new.vvp" &
+leg cpu_cache_new_rp0  "$WORK/tb_cpu_cache_new_rp0.vvp" &
 leg ddram_walker_snoop "$WORK/tb_ddram_walker_snoop.vvp" &
 leg ddram_walker_read  "$WORK/tb_ddram_walker_read.vvp" &
 leg bus_timeout        "$WORK/tb_bus_timeout.vvp" &
 leg cart_hrtmon        "$WORK/tb_cart_hrtmon.vvp" &
 leg sdram32            "$WORK/tb_sdram32.vvp" &
+leg sdram32_rp1        "$WORK/tb_sdram32_rp1.vvp" &
 leg cache_snoop        "$WORK/tb_cache_snoop.vvp" &
 leg    cache_snoop_x          "$WORK/tb_cache_snoop_x.vvp" &
 leg    cache_snoop_ce4        "$WORK/tb_cache_snoop_ce4.vvp" &

@@ -18,7 +18,16 @@ module cpu_cache_new #(
   // CACHE_ENABLE 0 leaves only the fill/pass machinery: every access misses
   // and goes straight to memory, and the tag/data RAMs are not built at all.
   // Used when the CPU's own internal cache is the only cache in the system.
-  parameter CACHE_ENABLE = 1
+  parameter CACHE_ENABLE = 1,
+  // READ_PIPE 1 registers the CPU-side tag compare and lets CPU_SM_READ
+  // decide one cycle later (see rd_hit_* below): one fast cycle more per
+  // read that reaches this cache, in exchange for the hit cone no longer
+  // being the design's worst path when the CPU shares this clock (P2).
+  // 0 is the legacy 28 MHz clocking, where the two-cycle hit is part of
+  // ram_cs_guard's phase contract: with the acknowledge one clk113 later,
+  // tb_sdram_turbo at CPU_PHASE=3 -- the real-hardware alignment -- falls
+  // into the guard's serve/kill loop and t_mmu's interrupt storm crawls.
+  parameter READ_PIPE = 0
 )
 (
   // system
@@ -260,7 +269,8 @@ localparam [3:0]
 	CPU_SM_FILL3 = 4'd8,
 	CPU_SM_FILL4 = 4'd9,
 	CPU_SM_FILLW = 4'd10,
-	CPU_SM_INVAL = 4'd11;
+	CPU_SM_INVAL = 4'd11,
+	CPU_SM_RDTAG = 4'd12;   // tag compare registered; READ decides the cycle after
 
 // sdram-side state machine
 localparam [3:0]
@@ -340,6 +350,34 @@ always @ (posedge clk) begin
   dtram_cpu_q <= dtram_cpu_dat_r;
 end
 
+// The READ decision is taken from these, not from the live compare.  With
+// the CPU on the same 114 MHz clock the hit cone -- M10K output, 18-bit
+// tag compare, the state machine's way priority, then the load enable of
+// tagupd_* and cpu_dat_r -- was the design's worst path (itram -> tagupd_tram
+// 9.7 ns for an 8.8 ns period, -1.3 ns at a6144508) and READ decided in the
+// very cycle the tag row first appeared.  CPU_SM_RDTAG now spends that
+// cycle registering the four hit terms; READ acts on them one cycle later,
+// takes the data from the data RAMs (their address is cpu_adr throughout a
+// read) and the tag word from the itram_cpu_q/dtram_cpu_q shadows, which
+// hold exactly the row the registered compare saw.  One fast cycle more on
+// a read that reaches this cache; writes already register their compare
+// into cpu_sm_*ram*_we and are unchanged.  READ_PIPE 0 keeps the original
+// single-cycle decision (hit_* are the live terms, the tag word the live
+// RAM output) -- the legacy clocking needs it, see the parameter.
+reg rd_hit_i0, rd_hit_i1, rd_hit_d0, rd_hit_d1;
+always @ (posedge clk) begin
+  rd_hit_i0 <= cpu_ir && cc_en   && itag0_match && itag0_valid;
+  rd_hit_i1 <= cpu_ir && cc_en   && itag1_match && itag1_valid;
+  rd_hit_d0 <= cpu_dr && cc_en_d && dtag0_match && dtag0_valid;
+  rd_hit_d1 <= cpu_dr && cc_en_d && dtag1_match && dtag1_valid;
+end
+wire        hit_i0  = READ_PIPE ? rd_hit_i0 : (cpu_ir && cc_en   && itag0_match && itag0_valid);
+wire        hit_i1  = READ_PIPE ? rd_hit_i1 : (cpu_ir && cc_en   && itag1_match && itag1_valid);
+wire        hit_d0  = READ_PIPE ? rd_hit_d0 : (cpu_dr && cc_en_d && dtag0_match && dtag0_valid);
+wire        hit_d1  = READ_PIPE ? rd_hit_d1 : (cpu_dr && cc_en_d && dtag1_match && dtag1_valid);
+wire [39:0] rd_itag = READ_PIPE ? itram_cpu_q : itram_cpu_dat_r;
+wire [39:0] rd_dtag = READ_PIPE ? dtram_cpu_q : dtram_cpu_dat_r;
+
 // cpu side state machine
 always @ (posedge clk) begin
   if (rst) begin
@@ -391,7 +429,7 @@ always @ (posedge clk) begin
           if (cpu_we) begin
             cpu_sm_state <= CPU_SM_WRITE;
           end else begin
-            cpu_sm_state <= CPU_SM_READ;
+            cpu_sm_state <= READ_PIPE ? CPU_SM_RDTAG : CPU_SM_READ;
           end
         end else begin
 		  cpu_sm_state <= CPU_SM_IDLE;
@@ -414,35 +452,41 @@ always @ (posedge clk) begin
         if (!cpu_cs) cpu_sm_state <= CPU_SM_IDLE;
         else wb_en <= 1'b1;
       end
+      CPU_SM_RDTAG : begin
+        // the tag row for cpu_adr is on the RAM outputs during this
+        // cycle; rd_hit_* register the compare on its edge
+        if (!cpu_cs) cpu_sm_state <= CPU_SM_IDLE;
+        else cpu_sm_state <= CPU_SM_READ;
+      end
       CPU_SM_READ : begin
         // on hit update LRU flag in tag memory
-        if (cpu_ir && cc_en && itag0_match && itag0_valid) begin
+        if (hit_i0) begin
           // data is already in instruction cache way 0
           cpu_dat_r <= idram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b0;
-          tagupd_idx <= cpu_adr_idx; tagupd_tram <= itram_cpu_dat_r;
+          tagupd_idx <= cpu_adr_idx; tagupd_tram <= rd_itag;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_ir && cc_en && itag1_match && itag1_valid) begin
+        end else if (hit_i1) begin
           // data is already in instruction cache way 1
           cpu_dat_r <= idram1_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b1;
-          tagupd_idx <= cpu_adr_idx; tagupd_tram <= itram_cpu_dat_r;
+          tagupd_idx <= cpu_adr_idx; tagupd_tram <= rd_itag;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_dr && cc_en_d && dtag0_match && dtag0_valid) begin
+        end else if (hit_d0) begin
           // data is already in data cache way 0
           cpu_dat_r <= ddram0_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b0; tagupd_lru <= 1'b0;
-          tagupd_idx <= cpu_adr_idx; tagupd_tram <= dtram_cpu_dat_r;
+          tagupd_idx <= cpu_adr_idx; tagupd_tram <= rd_dtag;
           cpu_sm_state <= CPU_SM_WAIT;
-        end else if (cpu_dr && cc_en_d && dtag1_match && dtag1_valid) begin
+        end else if (hit_d1) begin
           // data is already in data cache way 1
           cpu_dat_r <= ddram1_cpu_dat_r;
           cpu_ack <= 1'b1;
           tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b0; tagupd_lru <= 1'b1;
-          tagupd_idx <= cpu_adr_idx; tagupd_tram <= dtram_cpu_dat_r;
+          tagupd_idx <= cpu_adr_idx; tagupd_tram <= rd_dtag;
           cpu_sm_state <= CPU_SM_WAIT;
         end else begin
           // on miss fetch data from SDRAM
@@ -701,7 +745,8 @@ generate if (CACHE_ENABLE) begin : g_storage
 // Neither tag RAM ever reads what it writes on port A: a tag write
 // (cpu_sm_*tag_we) is asserted the cycle AFTER tagupd_*_v, in CPU_SM_WAIT
 // or FILL2, and an invalidate (inv_sel) only in CPU_SM_FILLW, while the
-// compare is consumed only in CPU_SM_READ.  So the bypass is dead logic
+// compare is consumed only in CPU_SM_READ (READ_PIPE 0) or registered only
+// in CPU_SM_RDTAG (READ_PIPE 1).  So the bypass is dead logic
 // here and DONT_CARE deletes it without changing behaviour.  The ap040 and
 // ModelSim dpram models return X on exactly that collision for a DONT_CARE
 // instance, so the regression would show it if this reasoning were wrong.

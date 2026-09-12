@@ -178,6 +178,8 @@ endmodule
 // bench
 //---------------------------------------------------------------------------
 module tb_sdram32;
+// READ_PIPE follows the controllers' CACHE_READ_PIPE (run_tests.sh runs both).
+parameter READ_PIPE = 0;
 
 reg clk113 = 0;
 always #44 clk113 = ~clk113;
@@ -268,7 +270,7 @@ wire [24:1] r_snoop_addr;
 wire        r_wk_ack;
 wire [31:0] r_wk_rdata;
 
-sdram_ctrl #(.CPU_CACHE(1)) ctl_ref
+sdram_ctrl #(.CPU_CACHE(1), .CACHE_READ_PIPE(READ_PIPE)) ctl_ref
 (
 	.sysclk(clk113), .c_7m(c_7m), .reset_n(reset), .cache_rst(reset),
 	.cache_inhibit(1'b0), .cpu_cache_ctrl(4'b0011),
@@ -323,7 +325,7 @@ wire        d_fill_ack;
 
 wire d_dual_ok, z_dual_ok;
 
-sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ctl_d
+sdram32_ctrl #(.CPU_CACHE(1), .CACHE_READ_PIPE(READ_PIPE), .DUAL_SDRAM(1)) ctl_d
 (
 	.sysclk(clk113), .c_7m(c_7m), .reset_n(reset), .cache_rst(reset),
 	.cache_inhibit(1'b0), .cpu_cache_ctrl(4'b0011),
@@ -399,7 +401,7 @@ wire [31:0] z_fill_dat;
 wire        z_fill_strb;
 wire        z_fill_ack;
 
-sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(0)) ctl_z
+sdram32_ctrl #(.CPU_CACHE(1), .CACHE_READ_PIPE(READ_PIPE), .DUAL_SDRAM(0)) ctl_z
 (
 	.sysclk(clk113), .c_7m(c_7m), .reset_n(reset), .cache_rst(reset),
 	.cache_inhibit(1'b0), .cpu_cache_ctrl(4'b0011),
