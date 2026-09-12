@@ -184,11 +184,7 @@ assign fastchip_rnw = wr;
 
 reg  [31:0] cpu_addr;
 reg  [15:0] cpu_dout;
-wire [15:0] cpu_din = (FAST_CLOCK && fastchip_pending) ? fastchip_data_l :
-                      ramsel_i ? ramdat :
-                      fastchip_selack ? fastchip_dout :
-                      cdtv_selack ? cdtv_din :
-                      {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
+wire [15:0] cpu_din;   // read mux; defined with the FAST_CLOCK boundary registers below
 reg         wr;
 reg         uds_in;
 reg         lds_in;
@@ -302,6 +298,29 @@ assign ramuds        = FAST_CLOCK ? ramuds_r        : ramuds_i;
 assign cache_inhibit = FAST_CLOCK ? cache_inhibit_r : cache_inhibit_i;
 assign ramaddr       = FAST_CLOCK ? ramaddr_r       : ramaddr_i;
 assign ramdin        = FAST_CLOCK ? ramdin_r        : ramdin_i;
+
+// The RESPONSE DATA, registered once under FAST_CLOCK to match the
+// registered acknowledge above.  The adapter samples data_in in the cycle
+// it sees the acknowledge, and with bus_complete_r that cycle is one after
+// the raw ready -- so the data takes the same flop and the pair arrive
+// together, sampled in the ready cycle exactly as the legacy path samples
+// them.  The mux select is the whole address decode, including the 30-bit
+// NMI-vector compare, and it ran from nmi_addr through this mux into
+// bus16|mem_rdata at -2.95 ns (round 6, 2fe902ca).  Under FAST_CLOCK the
+// mux selects on ramsel_r, the select the RAM controller actually
+// answered, so the compare leaves the data cone altogether: the address is
+// stable from request to acknowledge, and the acknowledge follows the
+// registered request, so the two selects agree in every cycle whose data
+// is consumed.  The legacy path is untouched.
+wire        din_ramsel = FAST_CLOCK ? ramsel_r : ramsel_i;
+wire [15:0] cpu_din_c  = (FAST_CLOCK && fastchip_pending) ? fastchip_data_l :
+                         din_ramsel ? ramdat :
+                         fastchip_selack ? fastchip_dout :
+                         cdtv_selack ? cdtv_din :
+                         {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
+reg  [15:0] cpu_din_r;
+always @(posedge clk) cpu_din_r <= cpu_din_c;
+assign      cpu_din    = FAST_CLOCK ? cpu_din_r : cpu_din_c;
 
 // FAST_CLOCK keeps CPU and RAM on the same clock. Only the architectural
 // core advances at CORE_DIV; bus completions remain held until that edge.
