@@ -392,7 +392,7 @@ wire [31:0] cdtv_dma_baddr;
 wire  [7:0] cdtv_dma_wbyte;
 wire        cdtv_dma_ack;
 
-// P2 / FAST_CLOCK (2026-09-12): the CPU moves onto clk_114 with a 2:1 core
+// P2 / FAST_CLOCK (2026-09-12): the CPU moves onto clk_114 with a 4:1 core
 // enable.  The wrapper and core have carried this mode since the 40MHz work
 // (cpu_wrapper.v FAST_CLOCK/CORE_DIV, bench-verified at divide 4, 2 and 1 in
 // tb_cpu_wrapper_chip); only this instantiation kept it off, because the
@@ -400,8 +400,18 @@ wire        cdtv_dma_ack;
 // that: the 61-level ir->exc_fmt cone (74b01775) and the tag-RAM bypass
 // mux (6ea3997d) are gone, and the measured bottleneck is the dispatch
 // floor -- 3 core cycles per register instruction, fetch fully hidden --
-// which only a faster core clock or a deeper pipeline can move.  CORE_DIV
-// 2 is 2x on every one of those cycles.
+// which only a faster core clock or a deeper pipeline can move.
+//
+// CORE_DIV 4, not 2 -- measured.  The first fit at divide 2 (fd9a8220)
+// missed by -16.247 ns on core|state[6] -> core|mem_addr[*], the address
+// generation cone: core-internal, so it HAD the 2-cycle 17.5 ns budget and
+// still needed ~34 ns.  The core's long cones were designed to 35 ns; a
+// 2:1 enable halves that budget for all of them at once, and removing the
+// exc_fmt cone bought 0.2 ns against a 16 ns deficit.  Divide 2 is the
+// X2 pipeline's reward, not a constraint problem.  Divide 4 is P2 as the
+// plan defines it: no speed change, the same 35 ns via multicycle 4,
+// the CDC/phase-contract class eliminated, and the platform divide 2
+// needs.  Tighten to 2 only when the core's cones have been cut to fit.
 //
 // What moves with it: ram_cs_guard goes SAME_CLOCK (its level-ack
 // consumption contract is same-domain now), the walker bridge keeps both
@@ -416,7 +426,7 @@ wire        cdtv_dma_ack;
 // plain same-domain events, which is what g_sync_chip expects.
 cpu_wrapper #(
 	.FAST_CLOCK(1),
-	.CORE_DIV(2),
+	.CORE_DIV(4),
 	.BUS_TIMEOUT_BITS(22)
 ) cpu_wrapper
 (

@@ -1,8 +1,9 @@
 derive_pll_clocks
 derive_clock_uncertainty
 
-# P2 / FAST_CLOCK: the CPU is on clk_114 with a 2:1 core enable (Minimig.sv,
-# cpu_wrapper CORE_DIV=2).  The cpu_inst* -> ram* relaxation that stood here
+# P2 / FAST_CLOCK: the CPU is on clk_114 with a 4:1 core enable (Minimig.sv,
+# cpu_wrapper CORE_DIV=4; the first fit at 2 missed by -16.2 ns on the
+# address cone, see the Minimig.sv comment).  The cpu_inst* -> ram* relaxation that stood here
 # was a clk_sys->clk_114 CROSSING exception; both ends are clk_114 now and a
 # same-domain setup-2 on that path would be a false relaxation -- the RAM
 # controllers sample cpuCS and the address on every fast cycle, tick-aligned
@@ -10,22 +11,43 @@ derive_clock_uncertainty
 #
 # What IS legitimately multicycle is the core_tick-gated hierarchy talking
 # to itself: every register in ap040_core (and its regfile/alu/muldiv/fpu
-# children) and in ap040_mmu advances only on core_tick, i.e. every second
-# clk_114 edge, so a path between two of them has two cycles.  Scope is
+# children) and in ap040_mmu advances only on core_tick, i.e. every fourth
+# clk_114 edge, so a path between two of them has four cycles -- the same
+# 35 ns the core was designed to at 28 MHz single-cycle.  Scope is
 # deliberately narrow.  NOT the cache: ap040_cache's tag and data RAMs read
 # every cycle and its compare consumes those outputs (PERFORMANCE.md: "a
 # blanket four-cycle exception would incorrectly relax those paths").  NOT
 # the wrapper: g_sync_chip runs every fast cycle.  NOT bus16: unproven,
 # left single-cycle until report_timing says otherwise.  Derive any further
 # relaxation from report_timing on a real fit -- do not widen this by hand.
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 2
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 1
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -setup 2
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -hold 1
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -setup 2
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -hold 1
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 2
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 1
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 3
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -hold 3
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -hold 3
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 3
+
+# Two crossings INTO the tick-gated hierarchy from sources that are held
+# levels, both taken from report_timing on the first FAST_CLOCK fit
+# (fd9a8220, divide 2) and unchanged by the divide:
+#
+#   cpu_wrapper|bus_timeout|berr -> core|epf_*   -13.1 ns single-cycle.  cpu_wrapper's
+#     ap040_bus_timeout HOLDS berr until the bus adapter has sampled it on a
+#     qualified edge and released cpu_req (its own header); the core only
+#     samples it on core_tick.  A level that persists across ticks into a
+#     register that only updates on ticks has four cycles.
+#   core|mem_addr -> cache|r_*        -7.0 ns single-cycle.  mem_addr is
+#     core-driven and holds for the whole request; the cache's r_row/r_tag/
+#     r_word/r_way/r_bank/r_beat/r_addr/r_size/r_off are its ce-gated capture
+#     registers (ap040_cache.v: written only under ce on acceptance).  The
+#     pattern is r_* ON PURPOSE: it must not reach the tag/data RAM ports,
+#     which sample every fast cycle and were left single-cycle above.
+set_multicycle_path -from {emu|cpu_wrapper|bus_timeout|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|bus_timeout|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 3
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|r_*} -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|r_*} -hold 3
 
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -setup 2
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -hold 1
