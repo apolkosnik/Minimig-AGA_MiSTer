@@ -133,8 +133,8 @@ module cpu_wrapper
 // AP040 software data-cache enable is CACR[31].
 assign dcache_sw_en = cacr_p[31];
 
-assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
-assign ramshared    = sel_dd;
+assign ramsel_i     = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
+assign ramshared_i  = sel_dd;
 
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
@@ -163,7 +163,7 @@ memory_router u_memory_router
 	.sel_zram      (sel_zram      ),
 	.sel_dd        (sel_dd        ),
 	.sel_rtg       (sel_rtg       ),
-	.ramaddr       (ramaddr       )
+	.ramaddr       (ramaddr_i     )
 );
 
 
@@ -173,9 +173,9 @@ wire sel_nmi_vector = (cpu_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
 
 wire [15:0] ramdat;
 
-assign ramlds = sel_rtg ? uds_in : lds_in;
-assign ramuds = sel_rtg ? lds_in : uds_in;
-assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
+assign ramlds_i = sel_rtg ? uds_in : lds_in;
+assign ramuds_i = sel_rtg ? lds_in : uds_in;
+assign ramdin_i = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
 assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
 
 assign fastchip_lds = lds_in;
@@ -185,7 +185,7 @@ assign fastchip_rnw = wr;
 reg  [31:0] cpu_addr;
 reg  [15:0] cpu_dout;
 wire [15:0] cpu_din = (FAST_CLOCK && fastchip_pending) ? fastchip_data_l :
-                      ramsel ? ramdat :
+                      ramsel_i ? ramdat :
                       fastchip_selack ? fastchip_dout :
                       cdtv_selack ? cdtv_din :
                       {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
@@ -253,8 +253,8 @@ wire [15:0] fastchip_data_l;
 // per transaction, when the acknowledge lands exactly on one.  ramconsumed,
 // the chip stage machine and the fastchip crossing all derive from the one
 // core_enable, so they move together.  The legacy path is untouched.
-wire        bus_complete_fast = (chipready && !ramsel && !fastchip_selack && !fastchip_served) |
-                                (ramready && ramsel) |
+wire        bus_complete_fast = (chipready && !ramsel_i && !fastchip_selack && !fastchip_served) |
+                                (ramready && ramsel_i) |
                                 fastchip_pending;
 reg         bus_complete_r;
 always @(posedge clk) begin
@@ -263,6 +263,45 @@ always @(posedge clk) begin
 end
 wire        bus_complete = FAST_CLOCK ? bus_complete_r
                                       : (chipready | ramready | fastchip_ready);
+
+// The REQUEST side of the same boundary, registered once under FAST_CLOCK.
+// The adapter's address and the MMU's cache-mode bit reached the RAM
+// controllers' caches combinationally -- bus16|addr_out -> tagupd_idx at
+// -3.3 ns and atc_ram -> cache_inhibit -> fill_discard at -3.0 (round 5,
+// 3151ed33) -- and a controller cache samples the address on the first
+// fast cycle it sees chip-select, so a late address there is a possible
+// false hit, not a lost cycle: single-cycle by nature, closable only by a
+// flop.  All seven signals move together so the attribute bits stay
+// aligned with the address they describe.  Only the PORTS are registered:
+// the internal decode (ramsel_i and friends) stays combinational, because
+// it is paired with the tick-gated cpu_req -- chipreq in particular would
+// raise a spurious one-cycle chip request on a RAM access that follows a
+// chip access if it saw a lagging select.  ramready answers the registered
+// request; ramconsumed and bus_complete pair it with the internal select,
+// and both selects are high for the whole request, differing only at its
+// edges, where ~cpu_req already governs.  The legacy path is untouched.
+wire        ramsel_i, ramshared_i, ramlds_i, ramuds_i, cache_inhibit_i;
+wire [28:1] ramaddr_i;
+wire [15:0] ramdin_i;
+reg         ramsel_r, ramshared_r, ramlds_r, ramuds_r, cache_inhibit_r;
+reg  [28:1] ramaddr_r;
+reg  [15:0] ramdin_r;
+always @(posedge clk) begin
+    if (!reset) begin
+        ramsel_r <= 1'b0; ramshared_r <= 1'b0; ramlds_r <= 1'b0; ramuds_r <= 1'b0;
+        cache_inhibit_r <= 1'b0; ramaddr_r <= 28'd0; ramdin_r <= 16'd0;
+    end else begin
+        ramsel_r <= ramsel_i; ramshared_r <= ramshared_i; ramlds_r <= ramlds_i; ramuds_r <= ramuds_i;
+        cache_inhibit_r <= cache_inhibit_i; ramaddr_r <= ramaddr_i; ramdin_r <= ramdin_i;
+    end
+end
+assign ramsel        = FAST_CLOCK ? ramsel_r        : ramsel_i;
+assign ramshared     = FAST_CLOCK ? ramshared_r     : ramshared_i;
+assign ramlds        = FAST_CLOCK ? ramlds_r        : ramlds_i;
+assign ramuds        = FAST_CLOCK ? ramuds_r        : ramuds_i;
+assign cache_inhibit = FAST_CLOCK ? cache_inhibit_r : cache_inhibit_i;
+assign ramaddr       = FAST_CLOCK ? ramaddr_r       : ramaddr_i;
+assign ramdin        = FAST_CLOCK ? ramdin_r        : ramdin_i;
 
 // FAST_CLOCK keeps CPU and RAM on the same clock. Only the architectural
 // core advances at CORE_DIV; bus completions remain held until that edge.
@@ -314,11 +353,11 @@ end else begin : g_fastchip_legacy
     assign fastchip_data_l = 16'd0;
 end endgenerate
 generate if (FAST_CLOCK) begin : g_sync_consumed
-    always @* ramconsumed = core_enable && cpu_req && ramsel && ramready;
+    always @* ramconsumed = core_enable && cpu_req && ramsel_i && ramready;
 end else begin : g_async_consumed
     always @(posedge clk) begin
         if (!reset) ramconsumed <= 0;
-        else ramconsumed <= cpu_req && ramsel && ramready;
+        else ramconsumed <= cpu_req && ramsel_i && ramready;
     end
 end endgenerate
 
@@ -393,7 +432,7 @@ ap040_tg68k_compat #(
 	// MMU and dedicated physical table-walker sideband
 	.mmu_addr_log(),
 	.mmu_addr_phys(),
-	.mmu_cache_inhibit(cache_inhibit),
+	.mmu_cache_inhibit(cache_inhibit_i),
 	.walker_req(walker_req_p),
 	.walker_we(walker_we_p),
 	.walker_addr(walker_addr_p),
@@ -606,7 +645,7 @@ end
 reg       chipreq;
 reg [2:0] cpu_ipl;
 always @(posedge clk) begin
-	chipreq <= cpu_req & ~ramsel & ~fastchip_selack &
+	chipreq <= cpu_req & ~ramsel_i & ~fastchip_selack &
 	           !(FAST_CLOCK && fastchip_served);
 	cpu_ipl <= ipl_i;
 end
@@ -635,7 +674,7 @@ always @(posedge clk or negedge reset) begin
         stage <= 0; chipready <= 0;
         c_as <= 1; c_rw <= 1; c_uds <= 1; c_lds <= 1;
     end else begin
-        if (chipready && core_enable && cpu_req && !ramsel && !fastchip_selack)
+        if (chipready && core_enable && cpu_req && !ramsel_i && !fastchip_selack)
             chipready <= 0;
         if (ph2 && !ph2n) begin
             waitm <= chip_dtack;
