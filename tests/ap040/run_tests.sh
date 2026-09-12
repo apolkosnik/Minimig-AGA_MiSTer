@@ -101,6 +101,28 @@ compile wrapchip_turbo iverilog -g2012 -I "$RTL" \
 	../../rtl/akiko_hps_bridge.v ../../rtl/akiko_nvram.v \
 	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
 	sim_dpram.v $SRC &
+# FAST_CLOCK: the CPU on the memory clock with a core enable -- the shipping
+# configuration since Minimig.sv moved cpu_wrapper onto clk_114 at CORE_DIV 2.
+# PERFORMANCE.md's "passes at divide four, two and one" was Verilator only;
+# the iverilog regression had no leg for it.  divide 2 across the four
+# program classes, divide 4 on integer.  g_walker_cdc instantiates
+# ap040_walker_cdc, which the chip compile never needed before.
+compile wrapchip_fast2 iverilog -g2012 -I "$RTL" \
+	-P tb_cpu_wrapper_chip.FAST_CLOCK=1 -P tb_cpu_wrapper_chip.CORE_DIV=2 \
+	-o "$WORK/tb_wrapchip_fast2.vvp" \
+	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+	../../rtl/akiko_hps_bridge.v ../../rtl/akiko_nvram.v \
+	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
+	sim_dpram.v $RTL/ap040_walker_cdc.v $SRC &
+compile wrapchip_fast4 iverilog -g2012 -I "$RTL" \
+	-P tb_cpu_wrapper_chip.FAST_CLOCK=1 -P tb_cpu_wrapper_chip.CORE_DIV=4 \
+	-o "$WORK/tb_wrapchip_fast4.vvp" \
+	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
+	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
+	../../rtl/akiko_hps_bridge.v ../../rtl/akiko_nvram.v \
+	"$WORK/gayle_sim.v" "$WORK/ide_sim.v" ../../rtl/ram_cs_guard.v \
+	sim_dpram.v $RTL/ap040_walker_cdc.v $SRC &
 compile sdram_turbo iverilog -g2012 -I "$RTL" -s tb_sdram_turbo \
 	-P tb_sdram_turbo.CYC_PHASE=1 -P tb_sdram_turbo.CPU_PHASE=0 \
 	-o "$WORK/tb_sdram_turbo.vvp" tb_sdram_turbo.v \
@@ -220,6 +242,11 @@ leg exceptions_chip_l7 "$WORK/tb_wrapchip_l7.vvp" +prog=build/t_exceptions.hex &
 # belongs to tb_prog, which runs everything-cacheable.
 leg exceptions_turbo   "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_exceptions.hex &
 leg mmu_chip_turbo     "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_mmu.hex &
+leg integer_fast2      "$WORK/tb_wrapchip_fast2.vvp" +prog=build/t_integer.hex &
+leg exceptions_fast2   "$WORK/tb_wrapchip_fast2.vvp" +prog=build/t_exceptions.hex &
+leg mmu_fast2          "$WORK/tb_wrapchip_fast2.vvp" +prog=build/t_mmu.hex &
+leg fpu_fast2          "$WORK/tb_wrapchip_fast2.vvp" +prog=build/t_fpu.hex &
+leg integer_fast4      "$WORK/tb_wrapchip_fast4.vvp" +prog=build/t_integer.hex &
 leg fpu_chip_turbo     "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_fpu.hex &
 leg integer_turbo      "$WORK/tb_wrapchip_turbo.vvp" +prog=build/t_integer.hex &
 leg mmu_chip           "$WORK/tb_wrapchip.vvp" +prog=build/t_mmu.hex &

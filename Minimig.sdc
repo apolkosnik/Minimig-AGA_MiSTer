@@ -1,8 +1,31 @@
 derive_pll_clocks
 derive_clock_uncertainty
 
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -setup 2
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -hold 1
+# P2 / FAST_CLOCK: the CPU is on clk_114 with a 2:1 core enable (Minimig.sv,
+# cpu_wrapper CORE_DIV=2).  The cpu_inst* -> ram* relaxation that stood here
+# was a clk_sys->clk_114 CROSSING exception; both ends are clk_114 now and a
+# same-domain setup-2 on that path would be a false relaxation -- the RAM
+# controllers sample cpuCS and the address on every fast cycle, tick-aligned
+# or not.  It is removed, not rewritten.
+#
+# What IS legitimately multicycle is the core_tick-gated hierarchy talking
+# to itself: every register in ap040_core (and its regfile/alu/muldiv/fpu
+# children) and in ap040_mmu advances only on core_tick, i.e. every second
+# clk_114 edge, so a path between two of them has two cycles.  Scope is
+# deliberately narrow.  NOT the cache: ap040_cache's tag and data RAMs read
+# every cycle and its compare consumes those outputs (PERFORMANCE.md: "a
+# blanket four-cycle exception would incorrectly relax those paths").  NOT
+# the wrapper: g_sync_chip runs every fast cycle.  NOT bus16: unproven,
+# left single-cycle until report_timing says otherwise.  Derive any further
+# relaxation from report_timing on a real fit -- do not widen this by hand.
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 2
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 1
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -setup 2
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -hold 1
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -setup 2
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -hold 1
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 2
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 1
 
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -setup 2
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -hold 1

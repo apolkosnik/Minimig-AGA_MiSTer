@@ -297,7 +297,7 @@ end
 
 wire ram_consumed;
 
-ram_cs_guard ram_guard
+ram_cs_guard #(.SAME_CLOCK(1)) ram_guard
 (
 	.clk         (clk_114),
 	.nreset      (cpu_rst),
@@ -392,14 +392,40 @@ wire [31:0] cdtv_dma_baddr;
 wire  [7:0] cdtv_dma_wbyte;
 wire        cdtv_dma_ack;
 
-cpu_wrapper cpu_wrapper
+// P2 / FAST_CLOCK (2026-09-12): the CPU moves onto clk_114 with a 2:1 core
+// enable.  The wrapper and core have carried this mode since the 40MHz work
+// (cpu_wrapper.v FAST_CLOCK/CORE_DIV, bench-verified at divide 4, 2 and 1 in
+// tb_cpu_wrapper_chip); only this instantiation kept it off, because the
+// core had not closed timing in the 114 MHz domain.  Two things changed
+// that: the 61-level ir->exc_fmt cone (74b01775) and the tag-RAM bypass
+// mux (6ea3997d) are gone, and the measured bottleneck is the dispatch
+// floor -- 3 core cycles per register instruction, fetch fully hidden --
+// which only a faster core clock or a deeper pipeline can move.  CORE_DIV
+// 2 is 2x on every one of those cycles.
+//
+// What moves with it: ram_cs_guard goes SAME_CLOCK (its level-ack
+// consumption contract is same-domain now), the walker bridge keeps both
+// its clocks on clk_114 (a toggle handshake between identical clocks is
+// correct and only costs its synchroniser latency; bypassing it is a later
+// optimisation, not a first-integration risk), and Minimig.sdc replaces the
+// clk_sys->clk_114 crossing relaxation on cpu_inst* with a 2-cycle
+// multicycle on the core_tick-gated hierarchy ONLY -- never the cache,
+// whose RAM ports free-run, nor the wrapper's chip stage machine.
+// BUS_TIMEOUT_BITS 22 keeps the timeout's documented ~36 ms at the faster
+// clock.  cpu_ph1/cpu_ph2 were already generated on clk_114 and become
+// plain same-domain events, which is what g_sync_chip expects.
+cpu_wrapper #(
+	.FAST_CLOCK(1),
+	.CORE_DIV(2),
+	.BUS_TIMEOUT_BITS(22)
+) cpu_wrapper
 (
 	.snoop_tgl    (chip_snoop_tgl  ),
 	.snoop_adr    (chip_snoop_adr  ),
 	.reset        (cpu_rst         ),
 	.reset_out    (cpu_nrst_out    ),
 
-	.clk          (clk_sys         ),
+	.clk          (clk_114         ),
 	.clk_peripheral(clk_sys        ),
 	.ph1          (cpu_ph1         ),
 	.ph2          (cpu_ph2         ),
@@ -474,7 +500,7 @@ cpu_wrapper cpu_wrapper
 
 ap040_walker_cdc walker_cdc
 (
-	.s_clk     (clk_sys),
+	.s_clk     (clk_114),
 	.s_reset_n (cpu_rst),
 	.s_req     (walker_req_cpu),
 	.s_we      (walker_we_cpu),
