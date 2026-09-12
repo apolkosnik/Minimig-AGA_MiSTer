@@ -33,7 +33,8 @@ set C0 {emu|pll|pll_inst|altera_pll_i|cyclonev_pll|counter[0].output_counter|div
 set NOLOOK [remove_from_collection $ASYN $LOOKS]
 foreach {name from to} [list tick_tick $TICK $TICK  fr1_tick $FR1 $TICK  tick_ctagb $TICK $CTAGB  fr1_ctagb $FR1 $CTAGB \
         tick_atcb $TICK $ATCB  fr1_atcb $FR1 $ATCB  fr1mmu_looks $FR1_MMU $LOOKS  tickcm_looks $TICK_CM $LOOKS \
-        tick_pipe $TICK $PIPE  tick_rdports $TICK $RDPORTS  asyn_tick $ASYN $TICK  tick_asyn $TICK $NOLOOK  asyn_asyn $ASYN $ASYN] {
+        tick_pipe $TICK $PIPE  tick_rdports $TICK $RDPORTS  asyn_tick $ASYN $TICK  tick_asyn $TICK $NOLOOK  asyn_asyn $ASYN $ASYN \
+        cpu_ci $ALL [get_registers {emu|cpu_wrapper|cache_inhibit_r}]  cpu_req $ALL [remove_from_collection [get_registers {emu|cpu_wrapper|ram*_r*}] [get_registers {emu|cpu_wrapper|cache_inhibit_r}]]] {
     report_timing -setup -npaths 4 -detail summary -from $from -to $to -file $::env(SPDIR)/pc_$name.rpt
 }
 report_timing -setup -npaths 4 -detail summary -from $SRC -to [get_pins -compatibility_mode "$P|*|ena"] -file $::env(SPDIR)/pc_ena_worst.rpt

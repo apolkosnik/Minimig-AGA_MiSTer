@@ -20,7 +20,7 @@ fr=[r for r in allr if r not in anyr]
 # register it absorbed; a6144508: core_phase -> b_m|ena at 5.8 ns), and the
 # set-once *_reset_seen flags written in the reset branch.  Anything else
 # free-running inside TICK is a real finding -- a retimed copy in particular.
-def whitelisted(r): return bool(re.search(r"g_fpu\.fpu\|b_m\[\d+\](~_?[Dd]uplicate_?\d*|~DUPLICATE(_\d+)?)?$", r)) or r.endswith("_reset_seen")
+def whitelisted(r): return bool(re.search(r"g_fpu\.fpu\|b_m\[\d+\](~_?[Dd]uplicate_?\d*|~DUPLICATE(_\d+)?)?$", r)) or bool(re.search(r"_reset_seen(~_?[Dd]uplicate_?\d*|~DUPLICATE(_\d+)?)?$", r))
 bad=[r for r in fr if r in tick and not whitelisted(r)]
 wl=[r for r in fr if r in tick and whitelisted(r)]
 if wl: print(f"note: {len(wl)} whitelisted free-running registers in TICK (DSP-packed b_m, *_reset_seen)")
@@ -44,7 +44,7 @@ if b: ok=False; print(f"FAIL: {cnt[0]} RAM-to-RAM chain paths outside the write 
 else: print("OK: no FR1 -> RAM read-port chains")
 def sh3(n): n=short(n); return "|".join(x.split(":")[-1] for x in n.split("|")[-3:])
 print("class table (worst slack / relationship / data delay):")
-for f in ["tick_tick","fr1_tick","tick_ctagb","fr1_ctagb","tick_atcb","fr1_atcb","fr1mmu_looks","tickcm_looks","tick_pipe","tick_rdports","asyn_tick","tick_asyn","asyn_asyn","ena_worst"]:
+for f in ["tick_tick","fr1_tick","tick_ctagb","fr1_ctagb","tick_atcb","fr1_atcb","fr1mmu_looks","tickcm_looks","tick_pipe","tick_rdports","asyn_tick","tick_asyn","asyn_asyn","cpu_ci","cpu_req","ena_worst"]:
     cnt,b=paths("pc_"+f)
     if not b: print(f"   {f:14s} (no paths)"); continue
     s,fr_,to,r,k,d=b[0]; flag="  <-- NEGATIVE" if float(s)<0 else ""

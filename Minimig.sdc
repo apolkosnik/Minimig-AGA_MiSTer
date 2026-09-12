@@ -82,6 +82,21 @@ foreach {from to s h} [list \
     set_multicycle_path -from [set $from] -to [set $to] -hold  $h
 }
 
+# cpu_wrapper|cache_inhibit_r: the request-side copy of the MMU's cache-mode
+# bit, single-cycle like its siblings -- but its cone is the whole ATC lookup
+# (mem_addr -> lk_fresh -> hit -> atc_fault -> cache_inhibit, 7.9 ns) and it
+# missed by 12 ps on the 3edd9a98 fit while ramaddr_r/ramsel_r keep +1.9 ns.
+# Its ONE consumer is cpu_cache_new's FILL1 allocation decision (all three
+# controllers; ddram_ctrl ORs ramshared in), reached only through RDTAG and
+# READ: with chip-select asserted from the request registers at T+1, the
+# controller first reads cache_inhibit at T+5 (T+4 with READ_PIPE 0).  Two
+# cycles from every CPU register -- tick-gated (launch T, right by T+2) or
+# RAM port / MMU pipe (launch T+1, right by T+3) -- leaves that untouched.
+# tests/ap040/sta reports the class as cpu_ci.
+set CI [get_registers {emu|cpu_wrapper|cache_inhibit_r}]
+set_multicycle_path -from $ALL -to $CI -setup 2
+set_multicycle_path -from $ALL -to $CI -hold  1
+
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -setup 2
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -hold 1
 set_multicycle_path -from {emu|minimig|*} -to {emu|ram1|*} -setup 2
