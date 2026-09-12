@@ -148,6 +148,7 @@ ap040_tg68k_compat #(.AP040_ENABLE_CACHE(`AP040_TB_CACHE)) dut
 	.cache_z3_base1(4'd0),
 	.cache_z3_ena1(1'b0),
 	.clkena_in(clkena_in),
+	.tick_in(1'b1),
 	.data_in(data_in),
 	.ipl(~ipl_lvl),
 	.ipl_autovector(1'b1),

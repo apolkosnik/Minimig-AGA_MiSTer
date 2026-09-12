@@ -421,6 +421,7 @@ ap040_tg68k_compat #(
 	.clk(clk),
 	.nreset(reset),
 	.clkena_in(core_enable),
+	.tick_in(core_tick),
 	.cache_allow_all(1'b0),
 	.cache_snoop_stb(snoop_stb_r),
 	.cache_snoop_addr(snoop_addr_r),

@@ -42,6 +42,7 @@ module ap040_core
 	input             clk,
 	input             nreset,
 	input             ce,
+	input             tick,   // the P2 tick grid: 1 without FAST_CLOCK; the IRQ chain samples on it
 
 	// internal memory transaction to ap040_bus16_adapter
 	output reg        mem_req,
@@ -159,7 +160,16 @@ always @(posedge clk) begin
 		nmi_arm <= 1'b0;
 		nmi_ack_d <= 1'b0;
 	end
-	else begin
+	// On the TICK grid, not under ce: with the divided enable (P2) the
+	// core consumes this chain only on ticks, and a chain moving between
+	// ticks can be read torn -- a tick deciding on a half-changed
+	// irq_hold_lvl takes a spurious vector (ipl_s2 -> exc_addr is a
+	// 29.5 ns cone at 114 MHz).  Sampling on every tick keeps ipl watched
+	// through bus waits exactly as before (ce drops during a wait in both
+	// clockings; t_exceptions 136 catches a request lost that way), and
+	// every path between this chain and a ce-gated register spans whole
+	// ticks.  Without FAST_CLOCK tick is constant 1 and nothing changes.
+	else if (tick) begin
 		ipl_s1 <= ipl;
 		ipl_s2 <= ipl_s1;
 		if (ipl_s1 == ipl_s2) begin

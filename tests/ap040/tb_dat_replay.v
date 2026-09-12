@@ -71,6 +71,7 @@ ap040_tg68k_compat dut
 	.cache_z3_base1(4'd0),
 	.cache_z3_ena1(1'b0),
 	.clkena_in(clkena_in),
+	.tick_in(1'b1),
 	.data_in(data_in), .ipl(ipl), .ipl_autovector(1'b1), .berr(1'b0),
 	.addr_out(addr_out), .data_write(data_write),
 	.nwr(nwr), .nuds(nuds), .nlds(nlds),
