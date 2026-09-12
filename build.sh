@@ -49,18 +49,23 @@ echo "Building $branch ($sha) -> $log"
 rc=$?
 
 # Slack by clock, from the tables Quartus prints under each headline.
-# Prints every domain; sets bad if an emu|pll domain is negative.
+# Sets bad if an emu|pll domain is negative anywhere.
 #
-# Scans EVERY table -- setup, hold, minimum, recovery, removal, in every
+# SCANS EVERY TABLE -- setup, hold, minimum, recovery, removal, in every
 # corner.  The original of this function counted rows and stopped after 8,
 # without resetting the count per table, so it read the first corner and
-# then at most one row of each table after it: a CPU violation that shows up
+# then at most one row of each table after it: a CPU violation showing up
 # only in a later corner passed the gate.  Verified against a real log with
 # -1.762 injected into a late-corner emu row -- the counting version reported
 # "timing OK", this one blocks.  A row is "Info (332119): <slack> <tns>
 # <clock>" and anything else ends the table, so no counting is needed.
 #
-# pll_hdmi is REPORTED AND IGNORED, deliberately: it is the video scaler, a
+# It scans everything but REPORTS a summary: the tightest emu figure per
+# analysis, plus every negative row whatever the domain.  Printing all ~160
+# rows buried the two numbers anyone reads.  Nothing about what is CHECKED
+# changed with that -- only what is echoed.
+#
+# pll_hdmi is reported and ignored, deliberately: it is the video scaler, a
 # display artefact at worst, and it is not what this gate is for.  Only emu
 # domains -- the CPU -- decide whether the bitstream may be published.
 timing_report() {
@@ -72,10 +77,20 @@ timing_report() {
 	         if (clk == "") { inblk=0; next }
 	         short=clk
 	         sub(/\|.*/, "", short)
-	         printf "    %-9s %-13s %8s\n", kind, short, slack
-	         if (short == "emu" && slack ~ /^-/) bad=1
+	         if (short == "emu") {
+	             if (!(kind in emumin) || slack+0 < emumin[kind]+0) {
+	                 emumin[kind]=slack
+	                 if (!(kind in seen)) { order[++nk]=kind; seen[kind]=1 }
+	             }
+	             if (slack ~ /^-/) bad=1
+	         }
+	         if (slack ~ /^-/) neg[++nn]=sprintf("    %-9s %-13s %8s   <-- negative", kind, short, slack)
 	     }
-	     END { exit (bad ? 1 : 0) }' "$1"
+	     END {
+	         for (i=1; i<=nk; i++) printf "    %-9s %-13s %8s\n", order[i], "emu (CPU)", emumin[order[i]]
+	         for (i=1; i<=nn; i++) print neg[i]
+	         exit (bad ? 1 : 0)
+	     }' "$1"
 }
 
 if grep -q "Full Compilation was successful" "$log"; then
