@@ -38,7 +38,67 @@ always #5 clk = ~clk;
 
 reg nreset = 0;
 reg ce_run = 1;          // when 0, ce is forced low (frozen window)
-wire ce = ce_run;
+// CE_DIV > 1 runs the cache the way P2 runs it on silicon: on the fast
+// clock with a divided enable (Minimig.sv: clk_114, CORE_DIV 4).  Every
+// bench task already waits on (c_ack && ce), so the sweeps below, which
+// step snoops by FAST cycles, then cover every phase of the enable.
+parameter CE_DIV = 1;
+reg [1:0] ce_ph = 0;
+always @(posedge clk) ce_ph <= (ce_ph == CE_DIV - 1) ? 2'd0 : ce_ph + 2'd1;
+wire ce = ce_run && (CE_DIV == 1 || ce_ph == 2'd0);
+
+// Fault injection on the lookup guard.  Plusargs are matched by PREFIX, so
+// the names must not be prefixes of each other.  Meaningful only with
+// CE_DIV > 1 (at 1 every cycle is "right after a tick").
+//
+//   +inj_acc_settle   the acceptance-cycle term forced blind in the fast
+//                     cycle right after each tick -- the cycle in which the
+//                     live address translation has not settled at 114 MHz.
+//                     Must PASS: this is the multicycle argument in
+//                     Minimig.sdc, and if it is wrong T3 fails here.
+//   +inj_acc_whole    the same term blind for the WHOLE acceptance wait.
+//   +inj_look_whole   the compare-cycle term blind for the WHOLE C_LOOK
+//                     window.
+//
+// Measured under -DSNOOP_MIXED_X (the silicon-faithful tag-row model; with
+// the default old-data answer a snoop's invalidate is simply read back a
+// cycle later and neither guard is ever load-bearing):
+//
+//                        CE_DIV 1        CE_DIV 4
+//   guard intact         PASS            PASS
+//   +inj_acc_whole       FAIL            PASS
+//   +inj_look_whole      PASS            FAIL
+//   +inj_acc_settle      FAIL (=whole)   PASS
+//
+// Each term is load-bearing in one regime and redundant in the other, and
+// the reasons are the cycle counts.  At divide 1 the compare is the cycle
+// after the read is issued, so a snoop in the acceptance cycle collides
+// with that read and the compare sees garbage: the ACCEPTANCE term is what
+// forces the miss.  At divide 4 the compare is four cycles later and the
+// tag row is re-read every cycle, so that collision is cleaned before it
+// is looked at -- the acceptance term can be arbitrarily late, which is
+// what Minimig.sdc's relaxation of core|mem_addr -> look_snooped needs --
+// while a snoop inside the four-cycle C_LOOK window can still land after
+// the last re-read the compare will see: the COMPARE term is what forces
+// the miss there, and blinding it lets a garbage victim way through to
+// C_TAGW (the +inj_look_whole failure is that chain).  So the split is
+// not just safe but required, and the relaxation is proven by a control
+// that fails where the regime is different.  The suite carries the two
+// failing controls as neglegs, one per divide.
+reg inj_acc_settle = 0, inj_acc_whole = 0, inj_look_whole = 0;
+initial begin
+	inj_acc_settle = $test$plusargs("inj_acc_settle");
+	inj_acc_whole  = $test$plusargs("inj_acc_whole");
+	inj_look_whole = $test$plusargs("inj_look_whole");
+end
+reg ce_d = 0;
+always @(posedge clk) ce_d <= ce;
+always @(ce_d)
+	if (inj_acc_settle) begin if (ce_d) force dut.snoop_look_row_acc = 1'b0; else release dut.snoop_look_row_acc; end
+always @(dut.rd_accept)
+	if (inj_acc_whole) begin if (dut.rd_accept) force dut.snoop_look_row_acc = 1'b0; else release dut.snoop_look_row_acc; end
+always @(dut.cst)
+	if (inj_look_whole) begin if (dut.cst == 3'd1) force dut.snoop_look_row_look = 1'b0; else release dut.snoop_look_row_look; end
 
 reg         cinv_req = 0;
 reg         cinv_ic = 0, cinv_dc = 0;
@@ -110,28 +170,41 @@ wire        err_hit = err_arm && m_req &&
                       (m_addr[31:4] == err_addr[31:4]) &&
                       (m_addr[3:2] == err_beat);
 
+// The acknowledge (and the error) is a LEVEL held until the cache samples
+// it on an enable edge, then dropped -- the real adapter's contract ("a
+// level acknowledge ... until chip-select drops", ap040_bus16_adapter.v).
+// It used to be a one-cycle pulse in the fast cycle after the latency
+// count completed; the count advances only on enable cycles, so at CE_DIV
+// 4 that pulse always landed in a non-enable cycle, the cache (sampling
+// under ce) never saw it, and every read timed out.  At CE_DIV 1 the
+// level is consumed on the very next edge, so it is the same one-cycle
+// pulse the existing tests were written against.
 always @(posedge clk) begin
-	m_ack <= 0;
-	m_err <= 0;
-	if (m_req && ce) begin
-		if (mlat != mem_lat) mlat <= mlat + 1'd1;
-		else begin
-			mlat <= 0;
-			if (err_hit) begin
-				m_err <= 1;
-				err_count = err_count + 1;
-			end
+	if ((m_ack || m_err) && ce) begin
+		m_ack <= 0;                       // consumed on a qualified edge
+		m_err <= 0;
+	end
+	else if (m_req && !m_ack && !m_err) begin
+		if (ce) begin
+			if (mlat != mem_lat) mlat <= mlat + 1'd1;
 			else begin
-				m_ack <= 1;
-				if (m_write) begin
-					// longword stores only in this bench
-					mem[m_addr[15:2]] <= m_wdata;
+				mlat <= 0;
+				if (err_hit) begin
+					m_err <= 1;
+					err_count = err_count + 1;
 				end
-				else m_rdata <= mem[m_addr[15:2]];
+				else begin
+					m_ack <= 1;
+					if (m_write) begin
+						// longword stores only in this bench
+						mem[m_addr[15:2]] <= m_wdata;
+					end
+					else m_rdata <= mem[m_addr[15:2]];
+				end
 			end
 		end
 	end
-	else mlat <= 0;
+	else if (!m_req) mlat <= 0;
 end
 
 //---------------------------------------------------------------------------
@@ -156,6 +229,12 @@ task cpu_read;
 		d = c_rdata;
 		@(negedge clk);
 		c_req = 0;
+		// hold the withdrawal until an ENABLE edge has sampled it: the core's
+		// mem_req is a ce-gated register, so on silicon a request can never
+		// drop for less than one enable period; a one-fast-cycle gap here is
+		// something the real core cannot produce, and at CE_DIV 4 it left the
+		// cache's err_hold set forever (no tick ever saw c_req low)
+		while (!ce) @(posedge clk);
 		@(posedge clk);
 	end
 endtask
@@ -198,6 +277,12 @@ task cpu_read_btb;
 		o2 = c_rdata;
 		@(negedge clk);
 		c_req = 0;
+		// hold the withdrawal until an ENABLE edge has sampled it: the core's
+		// mem_req is a ce-gated register, so on silicon a request can never
+		// drop for less than one enable period; a one-fast-cycle gap here is
+		// something the real core cannot produce, and at CE_DIV 4 it left the
+		// cache's err_hold set forever (no tick ever saw c_req low)
+		while (!ce) @(posedge clk);
 		@(posedge clk);
 	end
 endtask
@@ -234,7 +319,7 @@ task cpu_ci_read_then_write;
 		end
 		@(negedge clk);
 		c_req = 0; c_write = 0;
-		repeat (3) @(posedge clk);
+		repeat (3 * CE_DIV) @(posedge clk);
 	end
 endtask
 
@@ -256,6 +341,12 @@ task cpu_write;
 		end
 		@(negedge clk);
 		c_req = 0; c_write = 0;
+		// hold the withdrawal until an ENABLE edge has sampled it: the core's
+		// mem_req is a ce-gated register, so on silicon a request can never
+		// drop for less than one enable period; a one-fast-cycle gap here is
+		// something the real core cannot produce, and at CE_DIV 4 it left the
+		// cache's err_hold set forever (no tick ever saw c_req low)
+		while (!ce) @(posedge clk);
 		@(posedge clk);
 	end
 endtask
@@ -283,6 +374,12 @@ task cpu_access_berr;
 		end
 		@(negedge clk);
 		c_req = 0; c_write = 0;
+		// hold the withdrawal until an ENABLE edge has sampled it: the core's
+		// mem_req is a ce-gated register, so on silicon a request can never
+		// drop for less than one enable period; a one-fast-cycle gap here is
+		// something the real core cannot produce, and at CE_DIV 4 it left the
+		// cache's err_hold set forever (no tick ever saw c_req low)
+		while (!ce) @(posedge clk);
 		@(posedge clk);
 	end
 endtask
@@ -316,6 +413,14 @@ task snoop;   // one free-running clk pulse, regardless of ce
 	end
 endtask
 
+// -DSNOOP_MIXED_X: give the tag row silicon's mixed-port read-during-write
+// (DONT_CARE -> X in the sim model) so the collision the lookup guard
+// exists for is OBSERVABLE.  Under the model's default old-data answer a
+// snoop's invalidate is simply read back a cycle later and the guard is
+// never load-bearing -- which is why an injection on it could not fail.
+`ifdef SNOOP_MIXED_X
+defparam dut.ctag_ram.rdw_mixed = "DONT_CARE";
+`endif
 task expect_read;
 	input [31:0] a;
 	input [31:0] v;
@@ -340,8 +445,13 @@ initial begin
 	for (i = 0; i < 16384; i = i + 1) mem[i] = 32'h1111_0000 + i;
 	repeat (4) @(negedge clk);
 	nreset = 1;
-	// let the reset sweep finish
-	repeat (200) @(posedge clk);
+	// let the reset sweep finish.  It walks 128 rows at one per ENABLE
+	// cycle (ap040_cache.v C_SWEEP exits to C_IDLE at sweep_cnt == 127),
+	// so a fixed count of fast clocks is only right at CE_DIV 1 -- at 4 it
+	// left the first read mid-sweep.  Wait on the state instead.
+	@(posedge clk);
+	while (dut.cst == 3'd7) @(posedge clk);
+	repeat (4) @(posedge clk);
 
 	//------------------------------------------------------------------
 	// T1 (5.1): snoop during a frozen ce window
@@ -392,7 +502,7 @@ initial begin
 	// under iverilog's deterministic old-data model; the force-miss fix
 	// covers it by construction.)
 	//------------------------------------------------------------------
-	for (off = 0; off < 6; off = off + 1) begin
+	for (off = 0; off < 6 * CE_DIV; off = off + 1) begin
 		expect_read(32'h0000_4000, mem[32'h4000>>2], 3);  // warm
 		mem[32'h4000>>2] = 32'hCCCC_0000 + off;
 		fork
@@ -421,6 +531,12 @@ initial begin
 				while (!(c_ack && ce)) @(posedge clk);
 				@(negedge clk);
 				c_req = 0; c_write = 0;
+				// hold the withdrawal until an ENABLE edge has sampled it: the core's
+				// mem_req is a ce-gated register, so on silicon a request can never
+				// drop for less than one enable period; a one-fast-cycle gap here is
+				// something the real core cannot produce, and at CE_DIV 4 it left the
+				// cache's err_hold set forever (no tick ever saw c_req low)
+				while (!ce) @(posedge clk);
 				@(posedge clk);
 			end
 			begin
@@ -459,7 +575,9 @@ initial begin
 			errors = errors + 1;
 			off = 4;   // no point sweeping a wedged cache
 		end
-		repeat (200) @(posedge clk);
+		@(posedge clk);
+		while (dut.cst == 3'd7) @(posedge clk);   // sweep runs at one row per ENABLE cycle
+		repeat (4) @(posedge clk);
 
 		err_arm = 1;
 		err_addr = 32'h0000_6000;
@@ -573,7 +691,7 @@ initial begin
 			@(posedge clk); guard5 = guard5 + 1;
 		end
 		cinv_req = 0;
-		repeat (20) @(posedge clk);
+		repeat (20 * CE_DIV) @(posedge clk);
 
 		mem[32'hB000>>2] = 32'hB77B_0000 + off;
 		expect_read(32'h0000_B000, mem[32'hB000>>2], 8);   // prime
@@ -614,7 +732,7 @@ initial begin
 	snoop_storm = 1;
 	cpu_ci_read_then_write(32'h0000_D000, 32'h0000_D400);
 	snoop_storm = 0;
-	repeat (6) @(posedge clk);
+	repeat (6 * CE_DIV) @(posedge clk);
 
 	mem_lat = 2'd0;                                    // controller-cache hit
 	expect_read(32'h0000_D800, mem[32'hD800>>2], 9);   // prime
@@ -622,7 +740,7 @@ initial begin
 	cpu_ci_read_then_write(32'h0000_D800, 32'h0000_DC00);
 	snoop_storm = 0;
 	mem_lat = 2'd2;
-	repeat (6) @(posedge clk);
+	repeat (6 * CE_DIV) @(posedge clk);
 
 	//------------------------------------------------------------------
 	// T10: consecutive snoops defer a store's first-row invalidate past
@@ -668,7 +786,7 @@ initial begin
 					s_stb = 0;
 				end
 			join
-			repeat (6) @(posedge clk);
+			repeat (6 * CE_DIV) @(posedge clk);
 		end
 	end
 	mem_lat = 2'd2;

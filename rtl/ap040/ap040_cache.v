@@ -239,6 +239,7 @@ reg   [6:0] r_row;
 reg  [21:0] r_tag;
 reg   [3:0] r_word;              // {word[1:0]} of the request, plus bank/way
 reg   [1:0] r_way;
+reg   [1:0] way_fallback;        // victim when the snoop guard forced the miss
 reg         r_bank;
 reg   [1:0] r_beat;
 reg         r_issued;
@@ -296,7 +297,25 @@ endfunction
 // and the refill is always safe.  Both flags are set free-running --
 // the snoop is -- and consumed/cleared in the ce domain.
 wire snoop_fill_row = s_stb && !r_bank && (s_addr[9:4] == r_row[5:0]);
-wire snoop_look_row = s_stb && !c_instr && (s_addr[9:4] == a_set);
+// The lookup guard has two windows with two different address sources.
+// In the ACCEPTANCE cycle only the live address exists, so that compare
+// runs on a_set: the MMU's combinational translation of the core's
+// request, a long cone (core|mem_addr -> look_snooped, -5.9 ns at
+// 114 MHz).  From the tick after acceptance the cache holds r_row,
+// captured under ce, and r_row[5:0] IS a_set for the rest of the
+// lookup -- so the COMPARE-cycle window uses that, exactly as
+// snoop_fill_row already does.  The split moves the window that matters
+// (a snoop landing after the tag read is issued but before the compare)
+// onto a cache-local, tick-gated register.  The acceptance term keeps
+// the long cone, and under a divided clock enable its only exposure is
+// the fast cycle in which translation is still settling: a snoop there
+// lands its port-B invalidate before the lookup's tag read is issued
+// (that happens on the tick), so the read sees the cleared row and
+// misses by itself.  tb_ap040_cache_snoop at CE_DIV 4 with +inject_acc
+// forces this term blind in exactly that cycle and must still pass;
+// +inject_look does the same to the compare-cycle term and must fail.
+wire snoop_look_row_acc  = s_stb && !c_instr && (s_addr[9:4] == a_set);
+wire snoop_look_row_look = s_stb && !r_bank  && (s_addr[9:4] == r_row[5:0]);
 reg  fill_snooped, look_snooped;
 always @(posedge clk) begin
 	if (!nreset) begin
@@ -308,7 +327,8 @@ always @(posedge clk) begin
 		if ((cst == C_FILL || cst == C_TAGW) && snoop_fill_row)
 			fill_snooped <= 1;
 		if (ce && rd_accept) look_snooped <= 0;
-		if ((rd_accept || cst == C_LOOK) && snoop_look_row)
+		if ((rd_accept && snoop_look_row_acc) ||
+		    (cst == C_LOOK && snoop_look_row_look))
 			look_snooped <= 1;
 	end
 end
@@ -445,7 +465,7 @@ always @(posedge clk) begin
 		store_inv_lost <= 0;
 		store_inv_set <= 0;
 		cinv_done <= 0;
-		r_row <= 0; r_tag <= 0; r_word <= 0; r_way <= 0; r_bank <= 0;
+		r_row <= 0; r_tag <= 0; r_word <= 0; r_way <= 0; r_bank <= 0; way_fallback <= 0;
 		r_beat <= 0; r_issued <= 0; r_addr <= 0; r_size <= 0; r_off <= 0;
 		fill_hold <= 0; ack_r <= 0; rdata_r <= 0;
 	end
@@ -606,7 +626,7 @@ always @(posedge clk) begin
 			end
 
 			C_LOOK: begin
-				if (look_hit && !look_snooped && !snoop_look_row) begin
+				if (look_hit && !look_snooped && !snoop_look_row_look) begin
 					// all four ways were read alongside the tags, so the
 					// hit completes here: two cycles request-to-ack
 					rdata_r <= lw_extract(data_hit, r_size, r_off);
@@ -614,7 +634,19 @@ always @(posedge clk) begin
 					cst <= C_IDLE;
 				end
 				else begin
-					r_way <= tag_q[93:92];   // round-robin victim
+					// Round-robin victim -- unless the guard is what forced
+					// this miss.  Then the row image under the compare is
+					// the one a snoop is concurrently rewriting (mixed-port
+					// read-during-write, DONT_CARE on silicon), and its rr
+					// bits are as unreliable as its tags: on silicon that
+					// picked SOME way, which is legal, so nothing was ever
+					// corrupted; in a faithful sim it picked X, and C_TAGW
+					// then composed an X row.  A rotating fallback keeps
+					// fairness and removes the dependence on garbage.
+					r_way <= (look_snooped || snoop_look_row_look)
+					         ? way_fallback : tag_q[93:92];
+					if (look_snooped || snoop_look_row_look)
+						way_fallback <= way_fallback + 2'd1;
 					r_beat <= 0;
 					r_issued <= 0;
 					cst <= C_FILL;

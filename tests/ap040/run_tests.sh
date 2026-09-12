@@ -176,6 +176,19 @@ compile dualram_turbo_nx iverilog -g2012 -I "$RTL" -s tb_dualram_turbo \
 compile cache_snoop iverilog -g2012 -I "$RTL" -s tb_ap040_cache_snoop \
 	-o "$WORK/tb_cache_snoop.vvp" tb_ap040_cache_snoop.v \
 	sim_dpram.v $RTL/ap040_cache.v &
+# the cache under a 4:1 clock enable, as P2 runs it (Minimig.sv CORE_DIV 4),
+# with the silicon-faithful mixed-port tag-row model (-DSNOOP_MIXED_X): a
+# port-A read of the row port B is invalidating returns X, as altsyncram's
+# READ_DURING_WRITE_MODE_MIXED_PORTS="DONT_CARE" returns garbage.  The
+# model's default old-data answer hid a real dependence on that garbage
+# (the victim way read from the row under invalidation) until this leg.
+compile cache_snoop_ce4 iverilog -g2012 -I "$RTL" -s tb_ap040_cache_snoop -P tb_ap040_cache_snoop.CE_DIV=4 -DSNOOP_MIXED_X \
+	-o "$WORK/tb_cache_snoop_ce4.vvp" tb_ap040_cache_snoop.v \
+	sim_dpram.v $RTL/ap040_cache.v &
+# and at divide 1 under the same model, for the control that fails THERE
+compile cache_snoop_x iverilog -g2012 -I "$RTL" -s tb_ap040_cache_snoop -DSNOOP_MIXED_X \
+	-o "$WORK/tb_cache_snoop_x.vvp" tb_ap040_cache_snoop.v \
+	sim_dpram.v $RTL/ap040_cache.v &
 compile sdram32 iverilog -g2012 -s tb_sdram32 \
 	-o "$WORK/tb_sdram32.vvp" tb_sdram32.v \
 	../../rtl/sdram32_ctrl.v "$WORK/sdram_ctrl_sim.v" \
@@ -223,6 +236,18 @@ leg bus_timeout        "$WORK/tb_bus_timeout.vvp" &
 leg cart_hrtmon        "$WORK/tb_cart_hrtmon.vvp" &
 leg sdram32            "$WORK/tb_sdram32.vvp" &
 leg cache_snoop        "$WORK/tb_cache_snoop.vvp" &
+leg    cache_snoop_x          "$WORK/tb_cache_snoop_x.vvp" &
+leg    cache_snoop_ce4        "$WORK/tb_cache_snoop_ce4.vvp" &
+# The lookup guard's two terms, each load-bearing in one divide regime and
+# redundant in the other (tb_ap040_cache_snoop header has the measured
+# table).  Positive: the acceptance term blind for its whole window at
+# divide 4 must pass -- that is Minimig.sdc's core->look_snooped relaxation,
+# proven.  Negatives: the same blind at divide 1 must fail, and the compare
+# term blind at divide 4 must fail; a control never seen to fail proves
+# nothing about the positive next to it.
+leg    cache_snoop_ce4_accw    "$WORK/tb_cache_snoop_ce4.vvp" +inj_acc_whole &
+negleg cache_snoop_x_neg_accw  "$WORK/tb_cache_snoop_x.vvp"   +inj_acc_whole &
+negleg cache_snoop_ce4_neg_lkw "$WORK/tb_cache_snoop_ce4.vvp" +inj_look_whole &
 negleg sdram32_brk_lock "$WORK/tb_sdram32.vvp" +break_lockstep &
 negleg sdram32_brk_lane "$WORK/tb_sdram32.vvp" +break_laneswap &
 negleg sdram32_brk_wr   "$WORK/tb_sdram32.vvp" +break_chipwr &

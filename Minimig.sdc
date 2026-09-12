@@ -74,12 +74,26 @@ set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core_stall_watchdog|*} -to
 #     registers (look_snooped, fill_snooped: set on any clock so a snoop
 #     cannot be missed while ce is low) and no exception may reach those.
 #
-# NOT relaxed, and not relaxable: core|mem_addr -> cache|look_snooped,
-# -5.9 ns.  look_snooped is set free-running from the live address compare
-# (ap040_cache.v ~311) -- that is what makes the snoop guard correct while
-# the CPU is stalled -- so the path is genuinely single-cycle.  It closes
-# only by RTL: an RTL item for the 114 MHz campaign, recorded here so the
-# next reader does not "fix" it in this file.
+# core|mem_addr -> cache|look_snooped, -5.9 ns: relaxed AFTER an RTL change,
+# and with its standing stated exactly.  The lookup guard is now two terms
+# (ap040_cache.v): the compare-cycle term reads the CAPTURED row (r_row,
+# ce-gated), so the window that matters no longer touches this path at
+# all; only the acceptance-cycle term still reads the live translation.
+# Under a divided enable that term's exposure is the one fast cycle after
+# a tick while the cone settles -- and a snoop landing there writes the tag
+# row before the lookup's read is issued on the tick, so the read misses
+# by itself.  PROVEN, by a control that fails in the other regime:
+# tb_ap040_cache_snoop under the silicon-faithful tag-row model
+# (-DSNOOP_MIXED_X) with +inj_acc_whole -- the acceptance term blind for
+# the WHOLE acceptance wait, not just the settle cycle -- FAILS at CE_DIV 1
+# (the compare is the next cycle and sees the collision's garbage) and
+# PASSES at CE_DIV 4 (the row is re-read every cycle and cleaned before the
+# compare four cycles on).  The term may be arbitrarily late under the
+# divided enable; four cycles is well inside "arbitrarily".  The compare
+# term, which this path does not reach, is the one that is load-bearing at
+# divide 4, and its own control (+inj_look_whole) fails there.
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|look_snooped*} -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|look_snooped*} -hold 3
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|bus16|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*}  -setup 4
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|bus16|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*}  -hold 3
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*}  -to {emu|cpu_wrapper|cpu_inst_p|bus16|*} -setup 4
@@ -88,6 +102,14 @@ set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ack_r*} -to 
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ack_r*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 3
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ctag_ram|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ci_inv_row*} -setup 4
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ctag_ram|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ci_inv_row*} -hold 3
+
+# Round 3 (80c30bef) residual, -7.0 ns: mmu|atc_ram -> cache|r_tag/r_row/
+# r_addr.  The ATC's registered output feeds the translation mux and lands
+# on the cache's ce-gated capture registers; its address comes from the
+# tick-gated core, so the output moves only after a tick.  Same derivation
+# as core -> cache|r_* above, same scope: the r_* captures only.
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|r_*} -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|r_*} -hold 3
 
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -setup 2
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -hold 1
@@ -153,6 +175,15 @@ set_false_path -from {*ddram_ctrl*dmaACK_r*}        -to {*chipdma_arb*ddr_in_ack
 
 set_false_path -from {emu|cpu_wrapper|z3ram_*}
 set_false_path -from {emu|cpu_wrapper|z2ram_*}
+
+# Framework: emu|hps_io|status (the HPS-written OSD status word) -> ary (the
+# aspect-ratio config register in sys_top).  Both quasi-static: written when
+# the user changes a setting, read continuously.  Round 3 (80c30bef) showed
+# -0.058 ns HOLD in the fast/-40C corner -- placement variance on a path with
+# no margin to begin with, and the same class sys_top.sdc already false-paths
+# in the other direction (from {arx* ary*}).  Blocked the gate as an emu-domain
+# negative; a one-frame glitch on an aspect change is the worst case.
+set_false_path -from {emu|hps_io|status*} -to {ary*}
 
 set_false_path -from {emu|minimig|USERIO1|cpu_config*}
 set_false_path -from {emu|minimig|USERIO1|ide_config*}
