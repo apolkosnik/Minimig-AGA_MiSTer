@@ -323,7 +323,13 @@ always @(posedge clk) begin
 		look_snooped <= 0;
 	end
 	else begin
-		if (ce && cst == C_LOOK && !look_hit) fill_snooped <= 0;
+		// Cleared on every lookup tick, hit or miss: the flag is consumed
+		// only by tag_we at C_TAGW, which only a miss reaches, so the hit
+		// case is a no-op -- and without look_hit the clear is cst alone,
+		// keeping the tag compare (r_tag -> fill_snooped, -1.7 ns at
+		// 114 MHz) out of an endpoint whose SET term must stay
+		// single-cycle for a snoop on any fast edge.
+		if (ce && cst == C_LOOK) fill_snooped <= 0;
 		if ((cst == C_FILL || cst == C_TAGW) && snoop_fill_row)
 			fill_snooped <= 1;
 		if (ce && rd_accept) look_snooped <= 0;
@@ -411,8 +417,36 @@ wire store_inv = ((cst == C_IDLE) && c_req && c_write && !ack_r &&
 // ce domain with the FSM that generates them.  The only suppression is
 // a sweep zeroing the same row in the same cycle (both write zero; the
 // double write is avoided, the effect is identical).
-wire snoop_wr  = s_stb && !((cst == C_SWEEP) && sweep_hit &&
-                            (sweep_cnt == {1'b0, s_addr[9:4]}));
+// Port B is the one write port a snoop reaches on ANY fast edge, and the
+// sweep suppression below is the only tick-gated state in its select:
+// under a divided enable the live term may still be settling in the fast
+// cycle after a tick.  A port-A/port-B collision is only possible on a
+// tick edge (port A writes under ce), so the LIVE term is used exactly
+// there and a registered copy of the same state everywhere else.  Between
+// ticks the tick-gated state is constant, so the copy is exact from the
+// second fast cycle on; in the first it still shows the row the sweep
+// cleared on the tick, and a snoop dropped on a row that has just been
+// cleared changes nothing.  With ce high every cycle (the legacy clocking)
+// the live term is always selected and behaviour is identical.  This is
+// what lets Minimig.sdc give port B's tick-gated sources their four
+// cycles (atc_ram/l_row/mem_addr -> ctag_ram~portb_*, -2.5 ns, 60a42def).
+reg        snoop_sweep_on_r;
+reg  [6:0] snoop_sweep_row_r;
+always @(posedge clk) begin
+	if (!nreset) begin
+		snoop_sweep_on_r  <= 1'b0;
+		snoop_sweep_row_r <= 7'd0;
+	end
+	else begin
+		snoop_sweep_on_r  <= (cst == C_SWEEP) && sweep_hit;
+		snoop_sweep_row_r <= sweep_cnt;
+	end
+end
+wire snoop_sweep_live = (cst == C_SWEEP) && sweep_hit &&
+                        (sweep_cnt == {1'b0, s_addr[9:4]});
+wire snoop_sweep_held = snoop_sweep_on_r &&
+                        (snoop_sweep_row_r == {1'b0, s_addr[9:4]});
+wire snoop_wr  = s_stb && !(ce ? snoop_sweep_live : snoop_sweep_held);
 // An aborted refill has already written its beats into the victim way's
 // data RAM while that way still carries its PREVIOUS tag and valid bit.
 // Only C_TAGW validates a line, so the incoming line stays unreachable --
