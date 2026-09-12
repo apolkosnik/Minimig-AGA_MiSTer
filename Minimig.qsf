@@ -36,6 +36,14 @@ set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_EFFORT EXTRA
 set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON
+# Not inside the CPU: Minimig.sdc relaxes the CPU's tick-gated registers by
+# NAME (four cycles between core_enable-gated registers, three from RAM
+# ports and the MMU pipe), and a register the fitter retimes across logic
+# is re-clocked every cycle -- it launches the cycle after the tick, yet
+# inherits the hierarchy's four-cycle grant.  The a6144508 fit had 47 such
+# _OTERM/NEW_REG copies of epf_count/epf_fill/epf_head (tests/ap040/sta
+# census).  Duplication is fine: an exact copy keeps its enable.
+set_instance_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING OFF -to emu|cpu_wrapper
 set_global_assignment -name OPTIMIZATION_TECHNIQUE SPEED
 set_global_assignment -name MUX_RESTRUCTURE ON
 set_global_assignment -name REMOVE_REDUNDANT_LOGIC_CELLS ON

@@ -13,12 +13,22 @@ def short(n):
     n=n.replace("emu:emu|cpu_wrapper:cpu_wrapper|ap040_tg68k_compat:cpu_inst_p|",""); n=re.sub(r"\[\d+\]","[]",n); n=re.sub(r"~DUPLICATE(_\d+)?|~_Duplicate_\d+","",n)
     return re.sub(r"altsyncram.*?~(port\w+?)_(\w+?)(\d*)$",r"~\1_\2",n)
 fr=[r for r in allr if r not in anyr]
-bad=[r for r in fr if r in tick]
+# Registers core_phase provably cannot reach yet which do change only on a
+# tick: the FPU's multiplier operands packed into DSP blocks (their enable
+# arrives through the block's ENA_DFF cell, which TimeQuest models as a
+# register that sources no path -- the block loads on the tick like the RTL
+# register it absorbed; a6144508: core_phase -> b_m|ena at 5.8 ns), and the
+# set-once *_reset_seen flags written in the reset branch.  Anything else
+# free-running inside TICK is a real finding -- a retimed copy in particular.
+def whitelisted(r): return bool(re.search(r"g_fpu\.fpu\|b_m\[\d+\](~_?[Dd]uplicate_?\d*|~DUPLICATE(_\d+)?)?$", r)) or r.endswith("_reset_seen")
+bad=[r for r in fr if r in tick and not whitelisted(r)]
+wl=[r for r in fr if r in tick and whitelisted(r)]
+if wl: print(f"note: {len(wl)} whitelisted free-running registers in TICK (DSP-packed b_m, *_reset_seen)")
 ok=True
 print(f"census: all={len(allr)} ena-from-core_phase={len([r for r in allr if r in ena])} free-running={len(fr)} | sets TICK={len(tick)} FR1={len(fr1)} ASYN={len(asyn)}")
 if bad:
     ok=False; c=collections.Counter(short(r) for r in bad)
-    print(f"FAIL: {len(bad)} free-running registers inside TICK:"); [print(f"   x{v:<4d} {k}") for k,v in sorted(c.items())]
+    print(f"FAIL: {len(bad)} free-running registers inside TICK" + (" (retimed copies among them -- is PHYSICAL_SYNTHESIS_REGISTER_RETIMING off for emu|cpu_wrapper?)" if any("_OTERM" in r or "NEW_REG" in r for r in bad) else "") + ":"); [print(f"   x{v:<4d} {k}") for k,v in sorted(c.items())]
 else: print("OK: every free-running register is in FR1 or ASYN")
 tg_in_asyn=[r for r in asyn|fr1 if r in ena]
 if tg_in_asyn:
