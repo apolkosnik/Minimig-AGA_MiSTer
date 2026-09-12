@@ -2,73 +2,84 @@ derive_pll_clocks
 derive_clock_uncertainty
 
 # P2 / FAST_CLOCK: the CPU is on clk_114 with a 4:1 core enable (Minimig.sv,
-# cpu_wrapper CORE_DIV=4; the first fit at 2 missed by -16.2 ns on the
-# address cone).  The cpu_inst* -> ram* relaxation that once stood here was
-# a clk_sys->clk_114 CROSSING exception; both ends are clk_114 now and the
-# RAM controllers sample every fast cycle, so it would be a false relaxation
-# and is gone.
+# cpu_wrapper CORE_DIV=4).  The exceptions below are written per REGISTER
+# CLASS, not per module: a netlist census on the 60a42def fit (report_timing
+# from core_phase to every ena pin under cpu_inst_p) found 8022 registers
+# whose enable is core_enable, 203 whose enable is folded into D (one-hot
+# FSMs, ce-gated RAM write strobes) -- both change only at a tick -- and
+# 1321 that core_enable never reaches: every RAM port register, the MMU's
+# one-clock lookup pipe, the cache snoop flags, the core's IPL/IRQ chain
+# (since put under ce -- ipl_s2 -> exc_addr was a 29.5 ns cone read at
+# ticks), the walker-write snoop pipe and the watchdog.  Module-wide sets
+# had put most of those on both sides of a four-cycle exception.  The
+# census is re-run on every fit by scratchpad sta_precheck.tcl: a
+# free-running register inside TICK, or a RAM-to-RAM chain outside the
+# write ports below, fails the check before the gate is trusted.
 #
-# What IS legitimately four cycles: a register that changes only on
-# core_tick, driving a register that captures only on core_tick.  Every
-# register in ap040_core, ap040_mmu, ap040_cache's FSM and ap040_bus16_adapter
-# is one ("all outputs are registered and change only on clkena_in edges",
-# the adapter's header; the cache and MMU FSMs run under ce).  cpu_wrapper's
-# bus_timeout and the tg68k_compat core_stall_watchdog hold berr as a level
-# until it is sampled on a qualified edge.  A RAM's write-enable and address
-# input registers move only when their tick-gated drivers do, so RAMs are
-# fine as SOURCES.
+# Let T be a tick edge.  A tick-gated register (TICK) launches at T and its
+# tick-gated consumer captures at T+4: four cycles.  A free-running register
+# whose input is tick-launched (RAMP: RAM port registers; PIPE: the MMU
+# lookup pipe) re-samples every edge and holds the new value from T+1; its
+# input path is single-cycle (no exception: it must be right by T+1) and it
+# launches at T+1, so it gets THREE cycles to a tick-gated consumer, not
+# four.  A register that can change at ANY edge (ASYN: snoop flags, IPL
+# synchronisers and the IRQ-hold state, the walker-write snoop pipe) gets
+# no exception in either direction -- an IRQ level torn at a tick is a
+# spurious interrupt, and the flags' compare-cycle terms carry the snoop
+# proof (ap040_cache.v).  Free-running chains (FR1 -> FR1) would shorten
+# the budget again; the census script asserts there are none except the
+# port-B case below.
 #
-# RAM ports are EXCLUDED as DESTINATIONS, on purpose and by arithmetic.  A
-# free-running read port re-samples its address every fast cycle, and the
-# tick-gated consumer of its output reads what the port sampled one cycle
-# before the tick.  An address that changed at tick T must therefore be
-# right by the T+3 sample: three cycles, not four.  A four-cycle exception
-# there would let the T+3 sample be garbage and hand the tick a wrong tag or
-# a wrong translation.  The ATC's write port is the same shape (address,
-# data and enable from the walker, sampled T+1).  So every destination set
-# below is "block minus *ram_block*"; if a RAM-port path ever fails, it gets
-# a multicycle of THREE with this derivation, not a widening of these.
+# ctag_ram port B is the cache's write-only invalidation port: q_b is
+# unconnected, and its strobe is snoop_wr | (ce & ...) (ap040_cache.v,
+# inv_wren).  Between ticks ce is 0, so the only write there is a snoop's,
+# whose address arm and select are single-cycle by construction --
+# snoop_wr's tick-gated suppression term is the LIVE term only under ce and
+# a registered copy otherwise (snoop_sweep_*_r).  Everything else that
+# reaches port B is consumed at a tick edge: four cycles from TICK, three
+# from FR1.  That is the class the round-8 gate stopped on (atc_ram and
+# l_row -> ctag_ram~portb_address at -2.5 ns, core|mem_addr at -2.35).
 #
 # What no exception may touch: the RAM controllers' acknowledge into
-# core_enable -- the clock enable of every tick-gated register (cpu_wrapper
-# bus_complete).  A late enable at a tick is torn state, not a late value.
-# Measured at -2.4 ns (report_timing, 00db688b); it closes by registering
-# bus_complete once in the wrapper, an RTL change against ram_cs_guard's
-# age contract, taken separately.  Likewise core|state -> core|epf_* at
-# -3.6 inside its 35 ns: already relaxed, an RTL cone if it persists.
-#
-# The one free-running endpoint reached from outside the cache is
-# look_snooped, via its acceptance-cycle term (ap040_cache.v).  It is in the
-# cache set below on PROOF: tb_ap040_cache_snoop under the silicon-faithful
-# tag-row model with +inj_acc_whole -- that term blind for its entire window
-# -- FAILS at CE_DIV 1 and PASSES at CE_DIV 4, because at divide 4 the row is
-# re-read every cycle and any collision is cleaned before the compare four
-# cycles on.  The term may be arbitrarily late under this enable; the
-# compare-cycle term, which carries the load at divide 4, reads only the
-# captured row.  Both flags have zero paths into the core (checked).
-#
-# Sources and sinks, every pair below read off one report_timing pass over
-# the block matrix on the 00db688b fit (scratchpad sta_matrix.tcl), each
-# negative there and each with the reason above.  Collections are checked
-# non-empty by the pre-build STA script; an unmatched filter is a silent
-# no-op, which is how two of these were first written one level short.
+# core_enable, the enable net itself (core_phase -> ena, single-cycle) and
+# anything into a RAM read port.  The acceptance-cycle term into
+# look_snooped from the core and MMU is relaxed on the proof recorded in
+# ap040_cache.v (tb_ap040_cache_snoop +inj_acc_whole passes at CE_DIV 4);
+# the cache's own terms into it are not.
 set P {emu|cpu_wrapper|cpu_inst_p}
-set CORE      [get_registers "$P|core|*"]
-set MMU_ALL   [get_registers "$P|mmu|*"]
-set MMU_R     [remove_from_collection $MMU_ALL   [get_registers "$P|mmu|*ram_block*"]]
-set CACHE_ALL [get_registers "$P|g_cache.cache|*"]
-set CACHE_R   [remove_from_collection $CACHE_ALL [get_registers "$P|g_cache.cache|*ram_block*"]]
-set BUS16     [get_registers "$P|bus16|*"]
-set WDOG      [get_registers "$P|core_stall_watchdog|*"]
-set WTMO      [get_registers {emu|cpu_wrapper|bus_timeout|*}]
-foreach {from to} [list \
-    CORE CORE   CORE MMU_R   CORE CACHE_R   CORE BUS16 \
-    MMU_ALL CORE   MMU_ALL MMU_R   MMU_ALL CACHE_R   MMU_ALL BUS16 \
-    CACHE_ALL CORE   CACHE_ALL CACHE_R   CACHE_ALL BUS16 \
-    BUS16 CORE   BUS16 MMU_R   BUS16 CACHE_R   BUS16 BUS16 \
-    WDOG CORE   WTMO CORE ] {
-    set_multicycle_path -from [set $from] -to [set $to] -setup 4
-    set_multicycle_path -from [set $from] -to [set $to] -hold 3
+set ALL   [get_registers "$P|*"]
+set RAMP  [get_registers "$P|*ram_block*"]
+set PIPE  [get_registers "$P|mmu|l_row*"]
+foreach pat {mmu|l_tag* mmu|l_ld mmu|sweep_row_q* mmu|sweep_valid_q} {
+    set PIPE [add_to_collection $PIPE [get_registers "$P|$pat"]]
+}
+set ASYN  [get_registers "$P|g_cache.cache|look_snooped"]
+foreach pat {g_cache.cache|fill_snooped g_cache.cache|snoop_sweep_on_r g_cache.cache|snoop_sweep_row_r* \
+             wsnp_addr* wsnp_pend walker_wr_d core_stall_watchdog|*} {
+    set ASYN [add_to_collection $ASYN [get_registers "$P|$pat"]]
+}
+set FR1   [add_to_collection $RAMP $PIPE]
+set TICK  [remove_from_collection $ALL [add_to_collection $FR1 $ASYN]]
+set CTAGB [get_registers "$P|g_cache.cache|ctag_ram|*~portb_*"]
+set ATCB  [get_registers "$P|mmu|atc_ram|*~portb_*"]
+set FR1_MMU [add_to_collection [get_registers "$P|mmu|*ram_block*"] $PIPE]
+set LOOKS [get_registers "$P|g_cache.cache|look_snooped"]
+set TICK_CM [remove_from_collection [add_to_collection [get_registers "$P|core|*"] [get_registers "$P|mmu|*"]] [add_to_collection $FR1 $ASYN]]
+set WDOG  [get_registers "$P|core_stall_watchdog|*"]
+set WTMO  [get_registers {emu|cpu_wrapper|bus_timeout|*}]
+foreach {from to s h} [list \
+    TICK    TICK  4 3 \
+    FR1     TICK  3 2 \
+    TICK    CTAGB 4 3 \
+    FR1     CTAGB 3 2 \
+    TICK    ATCB  4 3 \
+    FR1     ATCB  3 2 \
+    FR1_MMU LOOKS 3 2 \
+    TICK_CM LOOKS 4 3 \
+    WDOG    TICK  4 3 \
+    WTMO    TICK  4 3 ] {
+    set_multicycle_path -from [set $from] -to [set $to] -setup $s
+    set_multicycle_path -from [set $from] -to [set $to] -hold  $h
 }
 
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -setup 2
