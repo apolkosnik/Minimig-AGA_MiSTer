@@ -167,14 +167,12 @@ set_false_path -from {emu|minimig|CPU1|halt}
 # fitter reports real violations across that boundary, add a targeted
 # set_false_path/set_max_delay derived from report_timing — do not guess.
 
-# yc_out chroma LUT: multicycle retained from the old bridge, where boardram BRAM
-# placement congestion pushed this path to -0.471ns. The flat-DDR3 design removes
-# that BRAM, so this exception may now be UNNECESSARY. Re-validate against the
-# merged fitter run (R3); keep only if report_timing still shows the path marginal.
-set_multicycle_path -from {yc_out|chroma_LUT_BURST[*]} \
-                    -to   {yc_out|phase[*].u[*]} -setup 2
-set_multicycle_path -from {yc_out|chroma_LUT_BURST[*]} \
-                    -to   {yc_out|phase[*].u[*]} -hold 1
+# yc_out: no exception.  The chroma sine lookups are registered a stage ahead
+# of the DSP multiply in sys/yc_out.sv (chroma_sin_r/cos_r/burst_r); the old
+# chroma_LUT_BURST -> phase[*].u multicycle covered a DDS reference that
+# advances every clk_114 cycle and would have been false -- its sources no
+# longer exist.  On the 0db34c9c fit the SIN/COS paths were the whole clk_114
+# residue at -1.0 ns; a register, not an exception, is what closes them.
 
 # emu PLL cross-clock: counter[1]→counter[0] marginal path
 set_multicycle_path -setup 2 -from [get_clocks "emu|pll|pll_inst|altera_pll_i|cyclonev_pll|counter\[1\].output_counter|divclk"] -to [get_clocks "emu|pll|pll_inst|altera_pll_i|cyclonev_pll|counter\[0\].output_counter|divclk"]
