@@ -8,10 +8,14 @@ cd "$(dirname "$0")"
 VASM=${VASM:-/opt/amiga-cc/vbcc/bin/vasmm68k_mot}
 mkdir -p build
 
-# bench_loop is a measurement program, not a regression leg: it is built
-# here so it cannot rot, and run by hand under +prof to compare cache
-# configurations (see AUDIT_20260816.md, cache re-enable trial).
-for t in t_integer t_exceptions t_mmu t_cache t_fpu bench_loop; do
+# bench_loop and bench_alu are measurement programs, not regression legs:
+# they are built here so they cannot rot, and run by hand under +prof to
+# compare cache and dispatch configurations (see AUDIT_20260816.md and
+# PERFORMANCE.md).  bench_alu was previously built only by run_verilator.py;
+# under iverilog its image was simply absent, and a +prog pointing at the
+# missing file produced a full, plausible profile of the core executing
+# zeros -- see the $fopen guard in tb_ap040_program.v.
+for t in t_integer t_exceptions t_mmu t_cache t_fpu bench_loop bench_alu; do
 	$VASM -Fbin -m68040 -no-opt -o build/$t.bin asm/$t.s
 	python3 bin2hex.py build/$t.bin build/$t.hex
 	echo "built build/$t.hex"
