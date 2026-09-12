@@ -261,6 +261,14 @@ reg  [31:0] aux_wdata;
 wire [31:0] usp_q, isp_q, msp_q;
 wire [31:0] dbg_d0, dbg_d1, dbg_d2, dbg_a0, dbg_a7;
 
+// Declared here, driven further down next to the decode registers they
+// select from.  The regfile instance below reads them, and iverilog binds
+// hierarchical port expressions in source order: a wire first declared at
+// its assignment site is not visible here, which broke every bench in
+// tests/ap040 even though Quartus accepted it.
+wire  [3:0] rf_addr_a;
+wire  [3:0] rf_addr_b;
+
 ap040_regfile regfile
 (
 	.clk(clk), .ce(ce), .nreset(nreset),
@@ -628,11 +636,11 @@ reg [31:0] dst_addr;
 // Decode already registered the operand indices. Read them directly during
 // setup, instead of copying them into rr_a/rr_b and waiting another cycle.
 // The ordinary ports still serve effective-address and complex instructions.
-wire [3:0] rf_addr_a = (AP040_FAST_OPERANDS && state == S_PIPE_START)
-                       ? p_sreg : rr_a;
-wire [3:0] rf_addr_b = (AP040_FAST_OPERANDS &&
-                       (state == S_PIPE_START || state == S_PIPE_DST))
-                       ? p_dreg : rr_b;
+assign rf_addr_a = (AP040_FAST_OPERANDS && state == S_PIPE_START)
+                   ? p_sreg : rr_a;
+assign rf_addr_b = (AP040_FAST_OPERANDS &&
+                   (state == S_PIPE_START || state == S_PIPE_DST))
+                   ? p_dreg : rr_b;
 
 reg        sh_vacc;
 reg        sh_rox;
