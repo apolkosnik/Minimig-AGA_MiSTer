@@ -530,30 +530,44 @@ wire        ram_ready1;
 // a latent one, and it makes the CPU nearly immune to bus latency
 // (bench_loop.s under +prof).
 //
-// CPU_CACHE(0) removes cpu_cache_new's storage from all three
-// controllers, leaving only its pass-through: every access misses and
-// goes straight to the SDRAM/DDR burst engine, over an unchanged
-// handshake, write buffer and snoop port.  That path is not new -- it is
-// the one a cache-inhibited access or a disabled bank already took --
-// but it is now the ONLY one, so the no-allocate fill noted in
-// cpu_cache_new.v runs on every access rather than a minority of them.
-// tests/ap040/run_tests.sh covers the configuration directly: the _nx
-// legs run t_mmu and t_fpu through the real controllers with CPU_CACHE=0.
+// CPU_CACHE(1) -- RESTORED 2026-09-12 BY HARDWARE MEASUREMENT.  Read this
+// before turning it off again, because the simulation case for doing so is
+// persuasive and wrong.
 //
-// IT IS NOT FREE.  Measured on those legs, dropping the controller cache
-// costs about 2x on the regression programs:
+// It was set to 0 on 2026-09-01: ap040_cache had just moved to instantiated
+// block RAM, and dropping cpu_cache_new's storage looked like a clean way to
+// recover area.  The regression legs added with it (run_tests.sh _nx, which
+// still run and still cover CPU_CACHE=0) priced the loss at about 2x:
 //
 //   t_mmu   tb_sdram_turbo    1,827,231 -> 3,627,135 cycles  (1.99x)
 //   t_fpu   tb_sdram_turbo      759,551 -> 1,697,151 cycles  (2.23x)
 //   t_fpu   tb_dualram_turbo    739,199 -> 1,624,127 cycles  (2.20x)
 //
-// Those are straight-line miss-heavy programs -- precisely the profile
-// that flatters an external cache and defeats an internal one, and the
-// same profile behind the 2026-08-16 "internal cache measured slower"
-// result.  They are the worst case for this change, not a forecast of
-// it; loop-heavy code is where ap040_cache earns the 1.41x/2.27x above.
-// Hardware outranks all of it (X2.8), so the boot-and-benchmark on real
-// silicon is what settles whether the area is worth the loss.
+// That was called the worst case.  It was not.  XSysInfo on the real machine:
+//
+//   Dhrystones  3540        -- 0.10x an A4000/040 25MHz, 0.03x an 060/50
+//   CPU/MHz     8.20        -- against a nominal ~28MHz: a ~3.4x stall factor
+//   CHIP 4.91   FAST 3.68   ROM 4.90  MB/s
+//
+// FAST slower than CHIP is the tell, and it is backwards on any real 040.
+// With no controller cache every fast-RAM access is a full-latency SDRAM
+// round trip on the 16-bit bus with no line reuse, while chip RAM keeps its
+// turbo path.  4KB of on-die cache does not cover a Dhrystone working set,
+// so ap040_cache cannot rescue it.  The benches understated this because
+// their bus model is kinder than the real one.
+//
+// The area it was bought with never justified that: ~400 ALMs measured, at a
+// fit sitting on 3,116 free ALMs (38,834/41,910, 93%) with M10K half empty
+// (269/553).  An entire cache level for 1% of the device, and the device had
+// the room.
+//
+// So the two caches are complementary after all, exactly as the 2026-08-18
+// note said: ap040_cache eats the external round trip, cpu_cache_new eats
+// the SDRAM latency behind it.  Neither substitutes for the other.
+//
+// X2.8 earned again: hardware outranks every simulation and every test I
+// wrote.  Both configurations stay covered -- the _nx legs keep CPU_CACHE=0
+// honest -- but 0 is a diagnostic, not a shipping configuration.
 `ifdef MISTER_DUAL_SDRAM
 // X2.1b: the io-board's second SDRAM in lockstep with the primary makes
 // the pair one 32-bit bus (sdram32_ctrl; 16-bit-facing contract proven
@@ -580,7 +594,7 @@ assign SDRAM2_nRAS = SDRAM2_EN ? sd2_ras : 1'bZ;
 assign SDRAM2_nCAS = SDRAM2_EN ? sd2_cas : 1'bZ;
 assign SDRAM2_CLK  = SDRAM2_EN ? sd2_clk : 1'bZ;
 
-sdram32_ctrl #(.CPU_CACHE(0), .DUAL_SDRAM(1)) ram1
+sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ram1
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
@@ -620,7 +634,7 @@ sdram32_ctrl #(.CPU_CACHE(0), .DUAL_SDRAM(1)) ram1
 `else
 wire dual_fault = 1'b0;
 
-sdram_ctrl #(.CPU_CACHE(0)) ram1
+sdram_ctrl #(.CPU_CACHE(1)) ram1
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
@@ -726,7 +740,7 @@ chipdma_arb chipdma_arb
 wire [15:0] ram_dout2;
 wire        ram_ready2;
 
-ddram_ctrl #(.CPU_CACHE(0)) ram2
+ddram_ctrl #(.CPU_CACHE(1)) ram2
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
