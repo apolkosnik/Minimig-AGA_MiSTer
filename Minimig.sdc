@@ -49,6 +49,46 @@ set_multicycle_path -from {emu|cpu_wrapper|bus_timeout|*} -to {emu|cpu_wrapper|c
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|r_*} -setup 4
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|r_*} -hold 3
 
+# The divide-4 fit (4910e5c8) closed the address cone and left one class in
+# its worst 60: cpu_inst_p|core_stall_watchdog|berr -> core|epf_*, -12.3 ns.
+# A SECOND ap040_bus_timeout instance -- the core-stall watchdog inside
+# ap040_tg68k_compat -- with the same held berr into the same tick-gated
+# fetch-queue registers as the wrapper's bus_timeout above.  Same
+# derivation, same four cycles.
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core_stall_watchdog|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core_stall_watchdog|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 3
+
+# Below the watchdog, the divide-4 fit's remaining crossings (report_timing,
+# 4910e5c8), each with the reason it has four cycles:
+#
+#   bus16 <-> core   -9.1 / -5.5 ns.  ap040_bus16_adapter's contract (its
+#     header): "all outputs are registered and change only on clkena_in
+#     edges" -- the adapter is tick-gated like the core.  Both ends update
+#     only on core_tick, in both directions.
+#   cache|ack_r -> core   -8.9 ns.  ack_r is written only inside the cache
+#     FSM, which runs under ce (.ce(clkena_in)); tick-to-tick.
+#   cache|ctag_ram -> cache|ci_inv_row   -3.8 ns.  The tag row's port-A
+#     write enable is ce & tag_we, so the RAM's we_reg and its address only
+#     move on ticks; the endpoint is written under ce.  Scoped to the one
+#     reported endpoint on purpose -- the cache also holds FREE-RUNNING
+#     registers (look_snooped, fill_snooped: set on any clock so a snoop
+#     cannot be missed while ce is low) and no exception may reach those.
+#
+# NOT relaxed, and not relaxable: core|mem_addr -> cache|look_snooped,
+# -5.9 ns.  look_snooped is set free-running from the live address compare
+# (ap040_cache.v ~311) -- that is what makes the snoop guard correct while
+# the CPU is stalled -- so the path is genuinely single-cycle.  It closes
+# only by RTL: an RTL item for the 114 MHz campaign, recorded here so the
+# next reader does not "fix" it in this file.
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|bus16|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*}  -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|bus16|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*}  -hold 3
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*}  -to {emu|cpu_wrapper|cpu_inst_p|bus16|*} -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*}  -to {emu|cpu_wrapper|cpu_inst_p|bus16|*} -hold 3
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ack_r*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ack_r*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 3
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ctag_ram|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ci_inv_row*} -setup 4
+set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ctag_ram|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ci_inv_row*} -hold 3
+
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -setup 2
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -hold 1
 set_multicycle_path -from {emu|minimig|*} -to {emu|ram1|*} -setup 2

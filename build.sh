@@ -101,9 +101,16 @@ if grep -q "Full Compilation was successful" "$log"; then
 		timing_ok=1
 	else
 		timing_ok=0
+		# The verdict goes INTO THE FILENAME.  Two gate-blocked bitstreams
+		# were picked up from output_files and flashed on 2026-09-12; neither
+		# booted DiagROM, exactly as this message had said.  A message is read
+		# once; a filename is read every time the file is chosen.
+		blocked="${named%.rbf}-TIMING-FAIL-DO-NOT-FLASH.rbf"
+		mv "$named" "$blocked" && named="$blocked"
 		echo "TIMING: a CPU clock domain does NOT meet setup."
-		echo "        This bitstream will not run reliably; $named is kept"
-		echo "        for analysis but must not be flashed."
+		echo "        This bitstream will not run reliably; it is kept for"
+		echo "        analysis as $named"
+		echo "        and must not be flashed."
 	fi
 	if [ -n "$keep" ]; then
 		cp "$keep" "$shared"
