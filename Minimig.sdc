@@ -12,7 +12,7 @@ derive_clock_uncertainty
 # (since put under ce -- ipl_s2 -> exc_addr was a 29.5 ns cone read at
 # ticks), the walker-write snoop pipe and the watchdog.  Module-wide sets
 # had put most of those on both sides of a four-cycle exception.  The
-# census is re-run on every fit by scratchpad sta_precheck.tcl: a
+# census is re-run on every fit by tests/ap040/sta/sta_precheck.tcl: a
 # free-running register inside TICK, or a RAM-to-RAM chain outside the
 # write ports below, fails the check before the gate is trusted.
 #
