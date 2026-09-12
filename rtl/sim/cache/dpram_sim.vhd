@@ -11,7 +11,8 @@ entity dpram_dif is
 		data_width_a  : integer := 8;
 		addr_width_b  : integer := 8;
 		data_width_b  : integer := 8;
-		mem_init_file : string := " "
+		mem_init_file : string := " ";
+		rdw_mode_a    : string := "NEW_DATA_NO_NBE_READ"
 	);
 	PORT
 	(
@@ -61,7 +62,7 @@ BEGIN
 		outdata_reg_a => "UNREGISTERED",
 		outdata_reg_b => "UNREGISTERED",
 		power_up_uninitialized => "FALSE",
-		read_during_write_mode_port_a => "NEW_DATA_NO_NBE_READ",
+		read_during_write_mode_port_a => rdw_mode_a,
 		read_during_write_mode_port_b => "NEW_DATA_NO_NBE_READ",
 		init_file => mem_init_file,
 		widthad_a => addr_width_a,
@@ -100,7 +101,8 @@ entity dpram is
 	generic (
 		addr_width    : integer := 8;
 		data_width    : integer := 8;
-		mem_init_file : string := " "
+		mem_init_file : string := " ";
+		rdw_mode_a    : string := "NEW_DATA_NO_NBE_READ"
 	);
 	PORT
 	(
@@ -125,6 +127,6 @@ end entity;
 
 ARCHITECTURE SYN OF dpram IS
 BEGIN
-	ram : entity work.dpram_dif generic map(addr_width,data_width,addr_width,data_width,mem_init_file)
+	ram : entity work.dpram_dif generic map(addr_width,data_width,addr_width,data_width,mem_init_file,rdw_mode_a)
 	port map(clock,address_a,data_a,enable_a,wren_a,q_a,cs_a,address_b,data_b,enable_b,wren_b,q_b,cs_b);
 END SYN;

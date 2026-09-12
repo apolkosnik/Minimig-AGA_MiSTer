@@ -41,3 +41,12 @@ c5_pin_model_dump.txt
 # cputest corpora: multi-hundred-MB extracted data, fetched not versioned
 tests/ap040/build/cputest/
 __pycache__/
+
+# ModelSim flows under rtl/sim: run artefacts, and the one generated source
+# (make_sim_sdram.py rewrites sdram_ctrl.v for declaration-before-use).
+# *_sim above matches names ENDING in _sim, so sdram_ctrl_sim.v needs its own.
+rtl/sim/**/work/
+rtl/sim/**/transcript
+rtl/sim/**/modelsim.ini
+rtl/sim/**/vsim.wlf
+rtl/sim/sdram/sdram_ctrl_sim.v

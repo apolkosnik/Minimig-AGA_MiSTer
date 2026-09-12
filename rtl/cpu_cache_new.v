@@ -693,7 +693,21 @@ assign sdr_itag1_valid  = itram_sdr_dat_r[37];
 
 generate if (CACHE_ENABLE) begin : g_storage
 
-dpram #(8,40) itram (
+// Both tag RAMs bind rdw_mode_a BY NAME to DONT_CARE.  The default,
+// NEW_DATA_NO_NBE_READ, makes altsyncram build a bypass mux so a port-A
+// read of the address being written returns the new data -- and that mux's
+// write-enable register was the STARTPOINT of the CPU's worst setup path
+// (we_reg -> tag compare -> way select -> cpu_dat_r, -0.144 ns at seed 1).
+// Neither tag RAM ever reads what it writes on port A: a tag write
+// (cpu_sm_*tag_we) is asserted the cycle AFTER tagupd_*_v, in CPU_SM_WAIT
+// or FILL2, and an invalidate (inv_sel) only in CPU_SM_FILLW, while the
+// compare is consumed only in CPU_SM_READ.  So the bypass is dead logic
+// here and DONT_CARE deletes it without changing behaviour.  The ap040 and
+// ModelSim dpram models return X on exactly that collision for a DONT_CARE
+// instance, so the regression would show it if this reasoning were wrong.
+// Named binding matters: mem_init_file is the third positional generic and
+// is also a string, so a positional "DONT_CARE" would land there silently.
+dpram #(.addr_width(8), .data_width(40), .rdw_mode_a("DONT_CARE")) itram (
   .clock      (clk              ),
   .address_a  (itram_cpu_adr    ),
   .wren_a     (itram_cpu_we     ),
@@ -773,7 +787,8 @@ assign sdr_dtag1_match  = (snoop_adr[28:11] == dtram_sdr_dat_r[35:18]);
 assign sdr_dtag0_valid  = dtram_sdr_dat_r[38];
 assign sdr_dtag1_valid  = dtram_sdr_dat_r[37];
 
-dpram #(8,40) dtram (
+// DONT_CARE for the same reason as itram above.
+dpram #(.addr_width(8), .data_width(40), .rdw_mode_a("DONT_CARE")) dtram (
   .clock      (clk              ),
   .address_a  (dtram_cpu_adr    ),
   .wren_a     (dtram_cpu_we     ),
