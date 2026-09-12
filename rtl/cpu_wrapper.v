@@ -239,11 +239,30 @@ reg         cache_clear_toggle;
 wire        bus_berr;
 wire        fastchip_served, fastchip_pending;
 wire [15:0] fastchip_data_l;
-wire        bus_complete = FAST_CLOCK
-                         ? ((chipready && !ramsel && !fastchip_selack && !fastchip_served) |
-                            (ramready && ramsel) |
-                            fastchip_pending)
-                         : (chipready | ramready | fastchip_ready);
+// Under FAST_CLOCK the completion is REGISTERED once before it reaches
+// core_enable.  The RAM controllers' acknowledge is a level from the
+// controller cache's FSM; combinationally it ran through the guard and this
+// mux straight into core_enable -- the clock enable of every tick-gated
+// register in the core, six thousand pins -- and missed by -2.4 ns at
+// 114 MHz (report_timing, 00db688b).  No exception may cover that path: a
+// late clock enable at a tick is torn state, not a late value.  A flop here
+// splits it into "acknowledge -> flop" and "flop -> enable fan-out", each
+// its own cycle.  Every acknowledge is a level held until it is consumed,
+// and the read data is held with it, so seeing them one fast cycle later
+// changes nothing but the tick that consumes them: at worst one extra tick
+// per transaction, when the acknowledge lands exactly on one.  ramconsumed,
+// the chip stage machine and the fastchip crossing all derive from the one
+// core_enable, so they move together.  The legacy path is untouched.
+wire        bus_complete_fast = (chipready && !ramsel && !fastchip_selack && !fastchip_served) |
+                                (ramready && ramsel) |
+                                fastchip_pending;
+reg         bus_complete_r;
+always @(posedge clk) begin
+    if (!reset) bus_complete_r <= 1'b0;
+    else        bus_complete_r <= bus_complete_fast;
+end
+wire        bus_complete = FAST_CLOCK ? bus_complete_r
+                                      : (chipready | ramready | fastchip_ready);
 
 // FAST_CLOCK keeps CPU and RAM on the same clock. Only the architectural
 // core advances at CORE_DIV; bus completions remain held until that edge.
