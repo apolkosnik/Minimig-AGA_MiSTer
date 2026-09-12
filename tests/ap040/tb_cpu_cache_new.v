@@ -16,6 +16,8 @@
 `timescale 1ns/1ps
 
 module tb_cpu_cache_new;
+	// READ_PIPE of both instances; run_tests.sh runs the bench at 1 (P2) and 0 (legacy).
+	parameter READ_PIPE = 1;
 	reg clk = 0;
 	reg rst = 1;
 	always #5 clk = ~clk;
@@ -49,7 +51,7 @@ module tb_cpu_cache_new;
 	reg  [1:0] block;
 	reg        saw_req;
 
-	cpu_cache_new dut (
+	cpu_cache_new #(.READ_PIPE(READ_PIPE)) dut (
 		.clk(clk), .rst(rst), .cpu_cache_ctrl(cpu_cache_ctrl),
 		.cache_inhibit(cache_inhibit), .cpu_cs(cpu_cs), .cpu_adr(cpu_adr),
 		.cpu_bs(cpu_bs), .cpu_we(cpu_we), .cpu_ir(cpu_ir), .cpu_dr(cpu_dr),
@@ -76,7 +78,7 @@ module tb_cpu_cache_new;
 	wire        nx_sdr_read_req;
 	reg         nx_sdr_read_ack = 0;
 
-	cpu_cache_new #(.CACHE_ENABLE(0)) dut_nx (
+	cpu_cache_new #(.CACHE_ENABLE(0), .READ_PIPE(READ_PIPE)) dut_nx (
 		.clk(clk), .rst(rst), .cpu_cache_ctrl(nx_cache_ctrl),
 		.cache_inhibit(1'b0), .cpu_cs(nx_cpu_cs), .cpu_adr(nx_cpu_adr),
 		.cpu_bs(2'b11), .cpu_we(nx_cpu_we), .cpu_ir(nx_cpu_ir),
@@ -132,9 +134,9 @@ module tb_cpu_cache_new;
 		input instr;
 		input [15:0] expected;
 		begin
-			cpu_ir = instr;
-			cpu_dr = !instr;
-			cpu_cs = 1;
+			cpu_ir <= instr;
+			cpu_dr <= !instr;
+			cpu_cs <= 1;
 			saw_req = 0;
 			timeout = 0;
 			while (!cpu_ack && timeout < 20) begin
@@ -148,9 +150,9 @@ module tb_cpu_cache_new;
 				         cpu_dat_r, expected);
 				errors = errors + 1;
 			end
-			cpu_cs = 0;
-			cpu_ir = 0;
-			cpu_dr = 0;
+			cpu_cs <= 0;
+			cpu_ir <= 0;
+			cpu_dr <= 0;
 			repeat (3) @(posedge clk);
 		end
 	endtask
@@ -167,10 +169,10 @@ module tb_cpu_cache_new;
 			while ((dut.cpu_sm_state != 4'd1 || dut.sdr_sm_state != 4'd2) &&
 			       timeout < 500) begin
 				@(posedge clk);
-				sdr_read_ack = 1;
+				sdr_read_ack <= 1;
 				timeout = timeout + 1;
 			end
-			sdr_read_ack = 0;
+			sdr_read_ack <= 0;
 			repeat (3) @(posedge clk);
 		end
 	endtask
@@ -181,9 +183,9 @@ module tb_cpu_cache_new;
 		input instr;
 		input [15:0] fresh;
 		begin
-			cpu_ir = instr;
-			cpu_dr = !instr;
-			cpu_cs = 1;
+			cpu_ir <= instr;
+			cpu_dr <= !instr;
+			cpu_cs <= 1;
 			timeout = 0;
 			while (!sdr_read_req && timeout < 20) begin
 				@(posedge clk);
@@ -194,17 +196,17 @@ module tb_cpu_cache_new;
 				         instr ? "instruction" : "data");
 				errors = errors + 1;
 			end
-			sdr_dat_r = fresh;
+			sdr_dat_r <= fresh;
 			// BOTH shipped controllers answer a cache_req with a WHOLE
 			// LINE -- ddram_ctrl states 1..4, sdram_ctrl slots
 			// 8/10/12/14 -- whether or not the cache allocates it.
 			// Driving a single beat modelled hardware that does not
 			// exist, and hid the stranded-beat corruption below.
 			repeat (4) begin
-				sdr_read_ack = 1;
+				sdr_read_ack <= 1;
 				@(posedge clk);
 			end
-			sdr_read_ack = 0;
+			sdr_read_ack <= 0;
 			timeout = 0;
 			while (!cpu_ack && timeout < 20) begin
 				@(posedge clk);
@@ -215,9 +217,9 @@ module tb_cpu_cache_new;
 				         instr ? "instruction" : "data", cpu_dat_r, fresh);
 				errors = errors + 1;
 			end
-			cpu_cs = 0;
-			cpu_ir = 0;
-			cpu_dr = 0;
+			cpu_cs <= 0;
+			cpu_ir <= 0;
+			cpu_dr <= 0;
 			repeat (3) @(posedge clk);
 		end
 	endtask
@@ -225,9 +227,9 @@ module tb_cpu_cache_new;
 	task uncached_read;
 		input instr;
 		begin
-			cpu_ir = instr;
-			cpu_dr = !instr;
-			cpu_cs = 1;
+			cpu_ir <= instr;
+			cpu_dr <= !instr;
+			cpu_cs <= 1;
 			timeout = 0;
 			while (!sdr_read_req && timeout < 20) begin
 				@(posedge clk);
@@ -246,13 +248,13 @@ module tb_cpu_cache_new;
 			// Driving a single beat modelled hardware that does not
 			// exist, and hid the stranded-beat corruption below.
 			repeat (4) begin
-				sdr_read_ack = 1;
+				sdr_read_ack <= 1;
 				@(posedge clk);
 			end
-			sdr_read_ack = 0;
-			cpu_cs = 0;
-			cpu_ir = 0;
-			cpu_dr = 0;
+			sdr_read_ack <= 0;
+			cpu_cs <= 0;
+			cpu_ir <= 0;
+			cpu_dr <= 0;
 			repeat (3) @(posedge clk);
 		end
 	endtask
@@ -272,10 +274,10 @@ module tb_cpu_cache_new;
 		input instr;
 		input [15:0] expected;
 		begin
-			nx_cpu_ir = instr;
-			nx_cpu_dr = !instr;
-			nx_sdr_dat_r = expected;
-			nx_cpu_cs = 1;
+			nx_cpu_ir <= instr;
+			nx_cpu_dr <= !instr;
+			nx_sdr_dat_r <= expected;
+			nx_cpu_cs <= 1;
 			nx_saw_req = 0;
 			nx_timeout = 0;
 			while (!nx_sdr_read_req && nx_timeout < 20) begin
@@ -289,11 +291,11 @@ module tb_cpu_cache_new;
 			end
 			else nx_saw_req = 1;
 			// beat 1 carries the answer; the rest of the line is poison
-			nx_sdr_read_ack = 1;
+			nx_sdr_read_ack <= 1;
 			@(posedge clk);
-			nx_sdr_dat_r = 16'hBAD0;
+			nx_sdr_dat_r <= 16'hBAD0;
 			repeat (3) @(posedge clk);
-			nx_sdr_read_ack = 0;
+			nx_sdr_read_ack <= 0;
 			nx_timeout = 0;
 			while (!nx_cpu_ack && nx_timeout < 20) begin
 				@(posedge clk);
@@ -309,9 +311,9 @@ module tb_cpu_cache_new;
 				         instr ? "instruction" : "data", nx_cpu_dat_r, expected);
 				errors = errors + 1;
 			end
-			nx_cpu_cs = 0;
-			nx_cpu_ir = 0;
-			nx_cpu_dr = 0;
+			nx_cpu_cs <= 0;
+			nx_cpu_ir <= 0;
+			nx_cpu_dr <= 0;
 			repeat (4) @(posedge clk);
 		end
 	endtask
@@ -323,8 +325,8 @@ module tb_cpu_cache_new;
 		integer beat;
 		begin
 			@(negedge clk);
-			nx_cpu_ir = 0; nx_cpu_dr = 1; nx_cpu_cs = 1;
-			nx_cpu_adr = 28'h0010000;
+			nx_cpu_ir <= 0; nx_cpu_dr <= 1; nx_cpu_cs <= 1;
+			nx_cpu_adr <= 28'h0010000;
 			nx_timeout = 0;
 			while (!nx_sdr_read_req && nx_timeout < 30) begin
 				@(negedge clk); nx_timeout = nx_timeout + 1;
@@ -332,15 +334,15 @@ module tb_cpu_cache_new;
 			if (!nx_sdr_read_req) begin
 				$display("FAIL: early-restart first request missing"); errors = errors + 1;
 			end
-			nx_sdr_dat_r = 16'h1357; nx_sdr_read_ack = 1;
+			nx_sdr_dat_r <= 16'h1357; nx_sdr_read_ack <= 1;
 			@(negedge clk);
-			nx_sdr_read_ack = 0;
+			nx_sdr_read_ack <= 0;
 			if (!nx_cpu_ack || nx_cpu_dat_r !== 16'h1357) begin
 				$display("FAIL: early-restart first response"); errors = errors + 1;
 			end
-			nx_cpu_cs = 0;
+			nx_cpu_cs <= 0;
 			@(negedge clk);
-			nx_cpu_adr = 28'h0010001; nx_cpu_cs = 1;
+			nx_cpu_adr <= 28'h0010001; nx_cpu_cs <= 1;
 			for (beat = 0; beat < 3; beat = beat + 1) begin
 				repeat (8) begin
 					@(negedge clk);
@@ -348,8 +350,8 @@ module tb_cpu_cache_new;
 						$display("FAIL: new read accepted an unfinished burst"); errors = errors + 1;
 					end
 				end
-				nx_sdr_dat_r = 16'hBAD0 + beat; nx_sdr_read_ack = 1;
-				@(negedge clk); nx_sdr_read_ack = 0;
+				nx_sdr_dat_r <= 16'hBAD0 + beat; nx_sdr_read_ack <= 1;
+				@(negedge clk); nx_sdr_read_ack <= 0;
 			end
 			nx_timeout = 0;
 			while (!nx_sdr_read_req && nx_timeout < 30) begin
@@ -358,14 +360,14 @@ module tb_cpu_cache_new;
 			if (!nx_sdr_read_req || nx_cpu_ack) begin
 				$display("FAIL: early-restart second request missing or stale ack"); errors = errors + 1;
 			end
-			nx_sdr_dat_r = 16'h2468; nx_sdr_read_ack = 1;
+			nx_sdr_dat_r <= 16'h2468; nx_sdr_read_ack <= 1;
 			@(negedge clk);
 			if (!nx_cpu_ack || nx_cpu_dat_r !== 16'h2468) begin
 				$display("FAIL: early-restart second response"); errors = errors + 1;
 			end
-			nx_sdr_dat_r = 16'hBADF;
+			nx_sdr_dat_r <= 16'hBADF;
 			repeat (3) @(negedge clk);
-			nx_sdr_read_ack = 0; nx_cpu_cs = 0; nx_cpu_dr = 0;
+			nx_sdr_read_ack <= 0; nx_cpu_cs <= 0; nx_cpu_dr <= 0;
 			repeat (5) @(negedge clk);
 		end
 	endtask
@@ -373,9 +375,9 @@ module tb_cpu_cache_new;
 	task nx_write;
 		input [15:0] value;
 		begin
-			nx_cpu_dat_w = value;
-			nx_cpu_we = 1;
-			nx_cpu_cs = 1;
+			nx_cpu_dat_w <= value;
+			nx_cpu_we <= 1;
+			nx_cpu_cs <= 1;
 			nx_timeout = 0;
 			while (!nx_wb_en && nx_timeout < 20) begin
 				@(posedge clk);
@@ -385,8 +387,8 @@ module tb_cpu_cache_new;
 				$display("FAIL: pass-through write did not enable the write buffer");
 				errors = errors + 1;
 			end
-			nx_cpu_cs = 0;
-			nx_cpu_we = 0;
+			nx_cpu_cs <= 0;
+			nx_cpu_we <= 0;
 			repeat (4) @(posedge clk);
 			if (dut_nx.cpu_sm_state !== 4'd1) begin
 				$display("FAIL: pass-through write left the CPU state machine at %0d",
@@ -401,10 +403,10 @@ module tb_cpu_cache_new;
 		rst = 0;
 		wait_idle;
 
-		cpu_adr = 28'h0012340;
+		cpu_adr <= 28'h0012340;
 
 		// I enabled, D disabled: only the instruction view may hit.
-		cpu_cache_ctrl = 4'b0001;
+		cpu_cache_ctrl <= 4'b0001;
 		repeat (3) @(posedge clk);
 		install_i_line(16'h1234);
 		repeat (2) @(posedge clk);
@@ -416,7 +418,7 @@ module tb_cpu_cache_new;
 		end
 
 		// D enabled, I disabled: the mirror-image case.
-		cpu_cache_ctrl = 4'b0010;
+		cpu_cache_ctrl <= 4'b0010;
 		repeat (3) @(posedge clk);
 		install_d_line(16'h5678);
 		repeat (2) @(posedge clk);
@@ -463,7 +465,7 @@ module tb_cpu_cache_new;
 		// writeback purely from the tag-row read under test.
 		cpu_cache_ctrl[1:0] = 2'b11;
 		repeat (3) @(posedge clk);
-		cpu_adr = 28'h0012340;
+		cpu_adr <= 28'h0012340;
 		tag   = cpu_adr[28:11];
 		index = cpu_adr[10:3];
 		block = cpu_adr[2:1];
@@ -476,10 +478,10 @@ module tb_cpu_cache_new;
 		dut.g_storage.ddram1.ram_u.mem[mem_index] = 8'hD0;
 		cached_read(0, 16'hD00D);	// sanity: way1 hits before the clear
 
-		cpu_adr = 28'h1012340;	// same index, different tag: must miss
-		cpu_ir = 0;
-		cpu_dr = 1;
-		cpu_cs = 1;
+		cpu_adr <= 28'h1012340;	// same index, different tag: must miss
+		cpu_ir <= 0;
+		cpu_dr <= 1;
+		cpu_cs <= 1;
 		timeout = 0;
 		while (!sdr_read_req && timeout < 20) begin
 			@(posedge clk);
@@ -520,17 +522,17 @@ module tb_cpu_cache_new;
 			@(posedge clk);
 			timeout = timeout + 1;
 		end
-		sdr_dat_r = 16'hF111;
-		sdr_read_ack = 1;
+		sdr_dat_r <= 16'hF111;
+		sdr_read_ack <= 1;
 		timeout = 0;
 		while (!cpu_ack && timeout < 20) begin
 			@(posedge clk);
 			timeout = timeout + 1;
 		end
 		repeat (4) @(posedge clk);
-		sdr_read_ack = 0;
-		cpu_cs = 0;
-		cpu_dr = 0;
+		sdr_read_ack <= 0;
+		cpu_cs <= 0;
+		cpu_dr <= 0;
 		repeat (2) @(posedge clk);
 		wait_idle;
 		// the swept victim must not be valid in EITHER way: the fill may
@@ -543,24 +545,24 @@ module tb_cpu_cache_new;
 			errors = errors + 1;
 		end
 		// and the architectural consequence: the old address must miss
-		cpu_adr = 28'h0012340;
-		cpu_ir = 0;
-		cpu_dr = 1;
-		cpu_cs = 1;
+		cpu_adr <= 28'h0012340;
+		cpu_ir <= 0;
+		cpu_dr <= 1;
+		cpu_cs <= 1;
 		saw_req = 0;
 		timeout = 0;
 		while (!cpu_ack && timeout < 30) begin
 			@(posedge clk);
 			if (sdr_read_req) begin
 				saw_req = 1;
-				sdr_dat_r = 16'hF222;
-				sdr_read_ack = 1;
+				sdr_dat_r <= 16'hF222;
+				sdr_read_ack <= 1;
 			end
 			timeout = timeout + 1;
 		end
-		sdr_read_ack = 0;
-		cpu_cs = 0;
-		cpu_dr = 0;
+		sdr_read_ack <= 0;
+		cpu_cs <= 0;
+		cpu_dr <= 0;
 		if (!saw_req) begin
 			$display("FAIL: stale line survived the clear (read hit, data=%h)",
 			         cpu_dat_r);
@@ -579,7 +581,7 @@ module tb_cpu_cache_new;
 			errors = errors + 1;
 		end
 
-		nx_cpu_adr = 28'h0012340;
+		nx_cpu_adr <= 28'h0012340;
 		// Same address twice with memory changed underneath.  With storage
 		// the second read would hit and return the first value; without it,
 		// every read must reach memory and see the new one.  Instruction and
