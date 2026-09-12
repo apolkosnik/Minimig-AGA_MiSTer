@@ -3,113 +3,73 @@ derive_clock_uncertainty
 
 # P2 / FAST_CLOCK: the CPU is on clk_114 with a 4:1 core enable (Minimig.sv,
 # cpu_wrapper CORE_DIV=4; the first fit at 2 missed by -16.2 ns on the
-# address cone, see the Minimig.sv comment).  The cpu_inst* -> ram* relaxation that stood here
-# was a clk_sys->clk_114 CROSSING exception; both ends are clk_114 now and a
-# same-domain setup-2 on that path would be a false relaxation -- the RAM
-# controllers sample cpuCS and the address on every fast cycle, tick-aligned
-# or not.  It is removed, not rewritten.
+# address cone).  The cpu_inst* -> ram* relaxation that once stood here was
+# a clk_sys->clk_114 CROSSING exception; both ends are clk_114 now and the
+# RAM controllers sample every fast cycle, so it would be a false relaxation
+# and is gone.
 #
-# What IS legitimately multicycle is the core_tick-gated hierarchy talking
-# to itself: every register in ap040_core (and its regfile/alu/muldiv/fpu
-# children) and in ap040_mmu advances only on core_tick, i.e. every fourth
-# clk_114 edge, so a path between two of them has four cycles -- the same
-# 35 ns the core was designed to at 28 MHz single-cycle.  Scope is
-# deliberately narrow.  NOT the cache: ap040_cache's tag and data RAMs read
-# every cycle and its compare consumes those outputs (PERFORMANCE.md: "a
-# blanket four-cycle exception would incorrectly relax those paths").  NOT
-# the wrapper: g_sync_chip runs every fast cycle.  NOT bus16: unproven,
-# left single-cycle until report_timing says otherwise.  Derive any further
-# relaxation from report_timing on a real fit -- do not widen this by hand.
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 3
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -hold 3
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -hold 3
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*}  -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 3
-
-# Two crossings INTO the tick-gated hierarchy from sources that are held
-# levels, both taken from report_timing on the first FAST_CLOCK fit
-# (fd9a8220, divide 2) and unchanged by the divide:
+# What IS legitimately four cycles: a register that changes only on
+# core_tick, driving a register that captures only on core_tick.  Every
+# register in ap040_core, ap040_mmu, ap040_cache's FSM and ap040_bus16_adapter
+# is one ("all outputs are registered and change only on clkena_in edges",
+# the adapter's header; the cache and MMU FSMs run under ce).  cpu_wrapper's
+# bus_timeout and the tg68k_compat core_stall_watchdog hold berr as a level
+# until it is sampled on a qualified edge.  A RAM's write-enable and address
+# input registers move only when their tick-gated drivers do, so RAMs are
+# fine as SOURCES.
 #
-#   cpu_wrapper|bus_timeout|berr -> core|epf_*   -13.1 ns single-cycle.  cpu_wrapper's
-#     ap040_bus_timeout HOLDS berr until the bus adapter has sampled it on a
-#     qualified edge and released cpu_req (its own header); the core only
-#     samples it on core_tick.  A level that persists across ticks into a
-#     register that only updates on ticks has four cycles.
-#   core|mem_addr -> cache|r_*        -7.0 ns single-cycle.  mem_addr is
-#     core-driven and holds for the whole request; the cache's r_row/r_tag/
-#     r_word/r_way/r_bank/r_beat/r_addr/r_size/r_off are its ce-gated capture
-#     registers (ap040_cache.v: written only under ce on acceptance).  The
-#     pattern is r_* ON PURPOSE: it must not reach the tag/data RAM ports,
-#     which sample every fast cycle and were left single-cycle above.
-set_multicycle_path -from {emu|cpu_wrapper|bus_timeout|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|bus_timeout|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 3
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|r_*} -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|r_*} -hold 3
-
-# The divide-4 fit (4910e5c8) closed the address cone and left one class in
-# its worst 60: cpu_inst_p|core_stall_watchdog|berr -> core|epf_*, -12.3 ns.
-# A SECOND ap040_bus_timeout instance -- the core-stall watchdog inside
-# ap040_tg68k_compat -- with the same held berr into the same tick-gated
-# fetch-queue registers as the wrapper's bus_timeout above.  Same
-# derivation, same four cycles.
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core_stall_watchdog|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core_stall_watchdog|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 3
-
-# Below the watchdog, the divide-4 fit's remaining crossings (report_timing,
-# 4910e5c8), each with the reason it has four cycles:
+# RAM ports are EXCLUDED as DESTINATIONS, on purpose and by arithmetic.  A
+# free-running read port re-samples its address every fast cycle, and the
+# tick-gated consumer of its output reads what the port sampled one cycle
+# before the tick.  An address that changed at tick T must therefore be
+# right by the T+3 sample: three cycles, not four.  A four-cycle exception
+# there would let the T+3 sample be garbage and hand the tick a wrong tag or
+# a wrong translation.  The ATC's write port is the same shape (address,
+# data and enable from the walker, sampled T+1).  So every destination set
+# below is "block minus *ram_block*"; if a RAM-port path ever fails, it gets
+# a multicycle of THREE with this derivation, not a widening of these.
 #
-#   bus16 <-> core   -9.1 / -5.5 ns.  ap040_bus16_adapter's contract (its
-#     header): "all outputs are registered and change only on clkena_in
-#     edges" -- the adapter is tick-gated like the core.  Both ends update
-#     only on core_tick, in both directions.
-#   cache|ack_r -> core   -8.9 ns.  ack_r is written only inside the cache
-#     FSM, which runs under ce (.ce(clkena_in)); tick-to-tick.
-#   cache|ctag_ram -> cache|ci_inv_row   -3.8 ns.  The tag row's port-A
-#     write enable is ce & tag_we, so the RAM's we_reg and its address only
-#     move on ticks; the endpoint is written under ce.  Scoped to the one
-#     reported endpoint on purpose -- the cache also holds FREE-RUNNING
-#     registers (look_snooped, fill_snooped: set on any clock so a snoop
-#     cannot be missed while ce is low) and no exception may reach those.
+# What no exception may touch: the RAM controllers' acknowledge into
+# core_enable -- the clock enable of every tick-gated register (cpu_wrapper
+# bus_complete).  A late enable at a tick is torn state, not a late value.
+# Measured at -2.4 ns (report_timing, 00db688b); it closes by registering
+# bus_complete once in the wrapper, an RTL change against ram_cs_guard's
+# age contract, taken separately.  Likewise core|state -> core|epf_* at
+# -3.6 inside its 35 ns: already relaxed, an RTL cone if it persists.
 #
-# core|mem_addr -> cache|look_snooped, -5.9 ns: relaxed AFTER an RTL change,
-# and with its standing stated exactly.  The lookup guard is now two terms
-# (ap040_cache.v): the compare-cycle term reads the CAPTURED row (r_row,
-# ce-gated), so the window that matters no longer touches this path at
-# all; only the acceptance-cycle term still reads the live translation.
-# Under a divided enable that term's exposure is the one fast cycle after
-# a tick while the cone settles -- and a snoop landing there writes the tag
-# row before the lookup's read is issued on the tick, so the read misses
-# by itself.  PROVEN, by a control that fails in the other regime:
-# tb_ap040_cache_snoop under the silicon-faithful tag-row model
-# (-DSNOOP_MIXED_X) with +inj_acc_whole -- the acceptance term blind for
-# the WHOLE acceptance wait, not just the settle cycle -- FAILS at CE_DIV 1
-# (the compare is the next cycle and sees the collision's garbage) and
-# PASSES at CE_DIV 4 (the row is re-read every cycle and cleaned before the
-# compare four cycles on).  The term may be arbitrarily late under the
-# divided enable; four cycles is well inside "arbitrarily".  The compare
-# term, which this path does not reach, is the one that is load-bearing at
-# divide 4, and its own control (+inj_look_whole) fails there.
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|look_snooped*} -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|look_snooped*} -hold 3
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|bus16|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*}  -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|bus16|*} -to {emu|cpu_wrapper|cpu_inst_p|core|*}  -hold 3
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*}  -to {emu|cpu_wrapper|cpu_inst_p|bus16|*} -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|core|*}  -to {emu|cpu_wrapper|cpu_inst_p|bus16|*} -hold 3
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ack_r*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ack_r*} -to {emu|cpu_wrapper|cpu_inst_p|core|*} -hold 3
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ctag_ram|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ci_inv_row*} -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ctag_ram|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|ci_inv_row*} -hold 3
-
-# Round 3 (80c30bef) residual, -7.0 ns: mmu|atc_ram -> cache|r_tag/r_row/
-# r_addr.  The ATC's registered output feeds the translation mux and lands
-# on the cache's ce-gated capture registers; its address comes from the
-# tick-gated core, so the output moves only after a tick.  Same derivation
-# as core -> cache|r_* above, same scope: the r_* captures only.
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|r_*} -setup 4
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst_p|mmu|*} -to {emu|cpu_wrapper|cpu_inst_p|g_cache.cache|r_*} -hold 3
+# The one free-running endpoint reached from outside the cache is
+# look_snooped, via its acceptance-cycle term (ap040_cache.v).  It is in the
+# cache set below on PROOF: tb_ap040_cache_snoop under the silicon-faithful
+# tag-row model with +inj_acc_whole -- that term blind for its entire window
+# -- FAILS at CE_DIV 1 and PASSES at CE_DIV 4, because at divide 4 the row is
+# re-read every cycle and any collision is cleaned before the compare four
+# cycles on.  The term may be arbitrarily late under this enable; the
+# compare-cycle term, which carries the load at divide 4, reads only the
+# captured row.  Both flags have zero paths into the core (checked).
+#
+# Sources and sinks, every pair below read off one report_timing pass over
+# the block matrix on the 00db688b fit (scratchpad sta_matrix.tcl), each
+# negative there and each with the reason above.  Collections are checked
+# non-empty by the pre-build STA script; an unmatched filter is a silent
+# no-op, which is how two of these were first written one level short.
+set P {emu|cpu_wrapper|cpu_inst_p}
+set CORE      [get_registers "$P|core|*"]
+set MMU_ALL   [get_registers "$P|mmu|*"]
+set MMU_R     [remove_from_collection $MMU_ALL   [get_registers "$P|mmu|*ram_block*"]]
+set CACHE_ALL [get_registers "$P|g_cache.cache|*"]
+set CACHE_R   [remove_from_collection $CACHE_ALL [get_registers "$P|g_cache.cache|*ram_block*"]]
+set BUS16     [get_registers "$P|bus16|*"]
+set WDOG      [get_registers "$P|core_stall_watchdog|*"]
+set WTMO      [get_registers {emu|cpu_wrapper|bus_timeout|*}]
+foreach {from to} [list \
+    CORE CORE   CORE MMU_R   CORE CACHE_R   CORE BUS16 \
+    MMU_ALL CORE   MMU_ALL MMU_R   MMU_ALL CACHE_R   MMU_ALL BUS16 \
+    CACHE_ALL CORE   CACHE_ALL CACHE_R   CACHE_ALL BUS16 \
+    BUS16 CORE   BUS16 MMU_R   BUS16 CACHE_R   BUS16 BUS16 \
+    WDOG CORE   WTMO CORE ] {
+    set_multicycle_path -from [set $from] -to [set $to] -setup 4
+    set_multicycle_path -from [set $from] -to [set $to] -hold 3
+}
 
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -setup 2
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -hold 1
