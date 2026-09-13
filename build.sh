@@ -89,6 +89,14 @@ timing_report() {
 	     END {
 	         for (i=1; i<=nk; i++) printf "    %-9s %-13s %8s\n", order[i], "emu (CPU)", emumin[order[i]]
 	         for (i=1; i<=nn; i++) print neg[i]
+	         # No emu row at all is NOT a pass.  A compilation can finish
+	         # without the timing analyzer having run -- a smart recompile
+	         # that reuses everything, an edition that dropped an assignment
+	         # and changed nothing -- and the scan then sees no rows, reports
+	         # an empty table and, before this, exited 0.  That published a
+	         # bitstream whose timing was never analysed under a name that
+	         # promised it had been.  Silence is a failure.
+	         if (nk == 0) { print "    NO TIMING DATA: the analyzer produced no emu rows"; exit 1 }
 	         exit (bad ? 1 : 0)
 	     }' "$1"
 }
@@ -107,7 +115,7 @@ if grep -q "Full Compilation was successful" "$log"; then
 		# once; a filename is read every time the file is chosen.
 		blocked="${named%.rbf}-TIMING-FAIL-DO-NOT-FLASH.rbf"
 		mv "$named" "$blocked" && named="$blocked"
-		echo "TIMING: a CPU clock domain does NOT meet setup."
+		echo "TIMING: a CPU clock domain does NOT meet setup, or was never analysed."
 		echo "        This bitstream will not run reliably; it is kept for"
 		echo "        analysis as $named"
 		echo "        and must not be flashed."
