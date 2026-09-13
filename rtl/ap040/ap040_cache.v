@@ -239,10 +239,16 @@ reg         r_issued;
 reg  [31:0] r_addr;
 reg   [1:0] r_size;
 reg   [1:0] r_off;
-reg  [31:0] fill_line [0:3];     // the four beats of the fill in flight
+reg  [31:0] fill_hold;           // requested longword captured during fill
 reg         ack_r;
 reg  [31:0] rdata_r;
-reg [127:0] rline_r;             // the line behind rdata_r
+// The line behind rdata_r is not registered: in the acknowledge cycle the
+// RAMs still show the request's row (the request is level-held until the
+// core sees the ack, and after a fill the beats were written before
+// C_TAGW), so c_rline is the way recorded here, read live.  Keeping the
+// select in a register rather than in the tag compare also keeps a snoop
+// invalidating the row in that very cycle out of the line's way select.
+reg   [1:0] way_r;
 reg         rline_v_r;
 
 wire [21:0] t_w0 = tag_q[21:0];
@@ -406,8 +412,6 @@ assign m_fc    = c_fc;
 
 assign c_ack   = pass_active ? m_ack : ack_r;
 assign c_rdata = pass_active ? m_rdata : rdata_r;
-assign c_rline   = rline_r;
-assign c_rline_v = !pass_active && ack_r && rline_v_r;
 
 assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
                    c_req && !ack_r && !c_write && !bypass &&
@@ -501,10 +505,16 @@ assign inv_idx  = snoop_wr        ? {1'b0, s_addr[9:4]} :
                   store_inv_lost ? {1'b0, store_inv_set} :
                   (cst == C_IDLE) ? {1'b0, c_addr[9:4]} : {1'b0, winv_set2};
 assign cd_ridx   = {c_instr, a_set};
-// the four ways' lines arrive together; the tag compare picks one, and
-// the requested longword is that line's word
-wire [127:0] line_hit = {dq[hit_way][0], dq[hit_way][1], dq[hit_way][2], dq[hit_way][3]};
-wire  [31:0] data_hit = dq[hit_way][r_word[1:0]];
+// the four ways' lines arrive together; one mux picks a way -- the tag
+// compare's during a lookup or a store's pass, the recorded one in the
+// acknowledge cycle (C_IDLE) -- and the requested longword is that
+// line's word
+wire   [1:0] line_sel = (cst == C_IDLE) ? way_r : hit_way;
+wire [127:0] line_hit = {dq[line_sel][0], dq[line_sel][1], dq[line_sel][2], dq[line_sel][3]};
+wire   [6:0] data_sel = {~r_word[1:0], 5'd0};          // word w sits at bit (3 - w) * 32
+wire  [31:0] data_hit = line_hit[data_sel +: 32];
+assign c_rline   = line_hit;
+assign c_rline_v = !pass_active && ack_r && rline_v_r;
 // Update-on-hit: a fitting store's tag row and data words were read at
 // acceptance and are still on the RAM outputs (the request is level-held
 // through C_PASS), so on the memory acknowledge the hit way's word is
@@ -543,8 +553,7 @@ always @(posedge clk) begin
 		cinv_done <= 0;
 		r_row <= 0; r_tag <= 0; r_word <= 0; r_way <= 0; r_bank <= 0; way_fallback <= 0;
 		r_beat <= 0; r_issued <= 0; r_addr <= 0; r_size <= 0; r_off <= 0;
-		fill_line[0] <= 0; fill_line[1] <= 0; fill_line[2] <= 0; fill_line[3] <= 0;
-		ack_r <= 0; rdata_r <= 0; rline_r <= 0; rline_v_r <= 0;
+		fill_hold <= 0; ack_r <= 0; rdata_r <= 0; way_r <= 0; rline_v_r <= 0;
 	end
 	else if (ce) begin
 		ack_r <= 0;
@@ -724,7 +733,7 @@ always @(posedge clk) begin
 					// all four ways were read alongside the tags, so the
 					// hit completes here: two cycles request-to-ack
 					rdata_r <= lw_extract(data_hit, r_size, r_off);
-					rline_r <= line_hit;
+					way_r <= hit_way;
 					rline_v_r <= 1;
 					ack_r <= 1;
 					cst <= C_IDLE;
@@ -767,7 +776,7 @@ always @(posedge clk) begin
 				else if (!r_issued) r_issued <= 1;
 				else if (m_ack) begin
 					// the data RAM write runs in parallel (cd_we_*)
-					fill_line[r_beat] <= m_rdata;
+					if (r_beat == r_addr[3:2]) fill_hold <= m_rdata;
 					r_issued <= 0;
 					if (r_beat == 2'd3) cst <= C_TAGW;
 					else r_beat <= r_beat + 2'd1;
@@ -777,8 +786,8 @@ always @(posedge clk) begin
 			C_TAGW: begin
 				// the tag row write runs in parallel (tag_we): new tag,
 				// its valid bit, and the advanced round robin
-				rdata_r <= lw_extract(fill_line[r_addr[3:2]], r_size, r_off);
-				rline_r <= {fill_line[0], fill_line[1], fill_line[2], fill_line[3]};
+				rdata_r <= lw_extract(fill_hold, r_size, r_off);
+				way_r <= r_way;
 				rline_v_r <= 1;
 				ack_r <= 1;
 				cst <= C_IDLE;

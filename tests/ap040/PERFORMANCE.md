@@ -99,6 +99,7 @@ the fill engine waiting for four words of room before a speculative fetch
 | + early issue, returns on the ack | 1,093,219 | 8.4 | 261,111 |
 | + line-wide fetch, room for four | 1,047,235 | 8.1 | 248,909 |
 | + direct dispatch from every safe completion | 989,635 | 7.6 | 248,378 |
+| + operands read in the execute state | 952,927 | 7.3 | 234,978 |
 
 On the SDRAM bench (the board's 28/114 MHz phase relation, real
 controller and cache) the same runs went 6,794,495 -> 6,453,151 clk_114
@@ -113,11 +114,40 @@ writeback is visible to the operand read two cycles on), and a store that
 ends its instruction dispatches from its acknowledge instead of S_NEXT.
 This used to be limited to register-destination ALU results and MOVEQ.
 
+The fourth step removes the operand state entirely.  S_EXEC is entered
+straight from decode and reads the register file itself at the decoded
+operand indices; only a memory operand or a non-register destination takes
+the operand states, which return to S_EXEC with the values captured.  A
+dependent ALU operation went from three clocks to two (`bench_alu`
+200,102 -> 134,722).
+
+## Area
+
+The device is full, and two of these steps had to be reshaped to fit it.
+The fit of the second step needed 4,199 of the 4,191 LABs available.  Two
+synthesis variants located the cost: the line-wide fetch accounted for 27
+ALMs, and issuing data transfers from the calling state for 986.  The
+transfer issue was inlined at all 73 call sites of the read and write
+tasks, each with its own copy of the port guard, the page-crossing compare,
+the function code and the address and data path.  Recording the request in
+one-cycle carriers and issuing it from a single block below the state
+machine is cycle-for-cycle identical and costs nothing:
+
+| Tree | ALMs (synthesis estimate) |
+|---|---:|
+| issue inlined at 73 sites | 41,144 |
+| early issue removed altogether | 40,158 |
+| issue from one block (now) | 40,152 |
+
+The line-wide fetch is cheap for the same reason: the queue's ring index is
+the word's offset within its line, so a line lands word k in entry k with
+enables only, and the cache hands the line over live from its RAM outputs
+in the acknowledge cycle rather than registering a copy.
+
 The next targets, by weight: stores (S_MWR is still a fifth of the time:
 posting the write and letting the successor run needs the access-error
 frame to describe a completed instruction, as the 68040's format $7 does),
-and the operand state (S_PIPE_START, 9%: decode with the register read in
-the same cycle).
+and S_FETCH after taken branches (the redirect's two-cycle fetch).
 
 ## Experimental clock interface (parked)
 
