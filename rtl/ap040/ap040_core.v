@@ -609,6 +609,14 @@ reg        epf_err;              // the fill engine faulted: re-issue on demand
 // case so that a state claiming the port this cycle always wins it.
 reg        epf_issue;            // the port was claimed by a state this cycle
 reg        epf_flushed;          // the queue was flushed this cycle
+// The completing instruction writes A7 (rfw) or the USP shadow (aux_we)
+// THIS cycle.  The register file commits a write on the edge after rf_we
+// rises and its reads are combinational, so every other writeback is
+// visible to the next instruction's operand read in S_PIPE_START -- but
+// the decoder itself reads dbg_a7 (BSR.B's push) and usp_q (MOVE USP,An)
+// one cycle earlier, before that commit.  Such a completion keeps the
+// S_FETCH barrier; every other one dispatches its successor directly.
+reg        wb_bar;
 reg  [1:0] epf_pop;              // words consumed this cycle
 reg  [3:0] epf_fillw;            // words appended this cycle (up to a line)
 
@@ -1468,6 +1476,7 @@ task rfw;
 	input [31:0] d;
 	begin
 		rf_we <= 1; rf_waddr <= a; rf_wdata <= d;
+		if (a == 4'd15) wb_bar = 1;
 	end
 endtask
 
@@ -1783,13 +1792,16 @@ task fetch_next;
 			state <= S_POST_EXC;
 		end
 		else if (AP040_FAST_OPERANDS && epf_ready_pc && !epf_flushed &&
-		         !in_exc && !flow_t0_pend &&
-		         ((state == S_EXEC && exec_kind == EK_ALU &&
-		           p_dst == DK_REG && p_dreg != 4'd15) ||
-		          (state == S_DECODE && ir[15:12] == 4'h7 && !ir[8]))) begin
-			// Dn/A0-A6 writeback commits alongside the next decode, before
-			// it reads operands. A7/SR and complex completions retain the
-			// fetch barrier: the decoder can use the stack pointer directly.
+		         !in_exc && !flow_t0_pend && !wb_bar) begin
+			// The successor is dispatched from the completing cycle itself
+			// whenever its opcode word is resident.  A Dn/An writeback
+			// commits on the edge after this one and the register file
+			// reads combinationally, so S_PIPE_START two cycles on sees
+			// it; only an A7 or USP write this cycle (wb_bar: the decoder
+			// reads those a cycle earlier) and an SR write (which goes
+			// through S_NEXT, one cycle later, so the new S bit selects the
+			// fetch stream) keep the S_FETCH barrier.  This used to be
+			// limited to register-destination ALU results and MOVEQ.
 			pc_i <= pc;
 			dispatch_word(epf_data[epf_head]);
 		end
@@ -1926,6 +1938,7 @@ always @(posedge clk) begin
 	epf_flushed = 0;
 	epf_pop     = 2'd0;
 	epf_fillw   = 4'd0;
+	wb_bar      = 0;
 
 	if (!nreset) begin
 		state <= S_START;
@@ -2361,7 +2374,10 @@ always @(posedge clk) begin
 					else aerr_start;
 				end
 				else if (d_ack) begin
-					state <= r_m_ret;
+					// a store that ends its instruction dispatches the
+					// successor from here rather than through S_NEXT
+					if (r_m_ret == S_NEXT) fetch_next;
+					else state <= r_m_ret;
 				end
 			end
 
@@ -3450,6 +3466,7 @@ always @(posedge clk) begin
 
 			S_USP1: begin
 				aux_we <= 1; aux_sel <= 2'd0; aux_wdata <= rf_rdata_a;
+				wb_bar = 1;   // the decoder reads usp_q (MOVE USP,An)
 				fetch_next;
 			end
 

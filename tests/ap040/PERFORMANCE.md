@@ -98,16 +98,26 @@ the fill engine waiting for four words of room before a speculative fetch
 | cache update-on-hit | 1,185,604 | 9.1 | 262,367 |
 | + early issue, returns on the ack | 1,093,219 | 8.4 | 261,111 |
 | + line-wide fetch, room for four | 1,047,235 | 8.1 | 248,909 |
+| + direct dispatch from every safe completion | 989,635 | 7.6 | 248,378 |
 
 On the SDRAM bench (the board's 28/114 MHz phase relation, real
 controller and cache) the same runs went 6,794,495 -> 6,453,151 clk_114
 for the early-issue step.  The corpus (run_cputest.py, v20 data040) stays at
 1,265/1,911 with the identical fail set through these steps.
 
-The next targets, by weight: a posted write buffer for stores (S_MWR is
-still a fifth of the time), the front-end states (dispatch of the next
-instruction straight from every completion that leaves no A7 or SR write
-pending, and decode with the operand read in the same state).
+The third step is the instruction end: the successor is dispatched from
+the completing cycle itself whenever its opcode is resident, for every
+completion that does not write A7 or the USP shadow in that cycle (the
+decoder reads those a cycle before the register file commits; every other
+writeback is visible to the operand read two cycles on), and a store that
+ends its instruction dispatches from its acknowledge instead of S_NEXT.
+This used to be limited to register-destination ALU results and MOVEQ.
+
+The next targets, by weight: stores (S_MWR is still a fifth of the time:
+posting the write and letting the successor run needs the access-error
+frame to describe a completed instruction, as the 68040's format $7 does),
+and the operand state (S_PIPE_START, 9%: decode with the register read in
+the same cycle).
 
 ## Experimental clock interface (parked)
 
