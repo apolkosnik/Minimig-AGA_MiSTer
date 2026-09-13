@@ -46,6 +46,9 @@ parameter CPU_CACHE = 1;
 parameter MAX_CYCLES = 2000000;
 
 parameter FAST_CLOCK = 0;
+// cpu_cache_new's registered hit decision; keyed from FAST_CLOCK as
+// Minimig.sv did, overridable to run the legacy clocking with it
+parameter READ_PIPE = FAST_CLOCK;
 parameter CORE_DIV = 4;
 wire cpu_clk = FAST_CLOCK ? clk113 : clk28;
 
@@ -313,7 +316,7 @@ ap040_walker_cdc walker_cdc
 );
 
 
-sdram_ctrl #(.CPU_CACHE(CPU_CACHE), .CACHE_READ_PIPE(FAST_CLOCK)) ram
+sdram_ctrl #(.CPU_CACHE(CPU_CACHE), .CACHE_READ_PIPE(READ_PIPE)) ram
 (
 	.sysclk(clk113),
 	.c_7m(c_7m),
@@ -379,7 +382,7 @@ wire [63:0] DDRAM_DIN;
 wire  [7:0] DDRAM_BE;
 wire        DDRAM_WE;
 
-ddram_ctrl #(.CPU_CACHE(CPU_CACHE), .CACHE_READ_PIPE(FAST_CLOCK)) ram2
+ddram_ctrl #(.CPU_CACHE(CPU_CACHE), .CACHE_READ_PIPE(READ_PIPE)) ram2
 (
 	.sysclk(clk113),
 	.reset_n(reset),

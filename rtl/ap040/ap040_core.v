@@ -54,6 +54,11 @@ module ap040_core
 	output      [2:0] mem_fc,
 	input             mem_ack,
 	input      [31:0] mem_rdata,
+	// The cache line behind a fetch (word 0 in [127:96]), valid with the
+	// acknowledge of a cacheable hit or fill: the queue takes up to eight
+	// words of it per port transaction.
+	input     [127:0] mem_rline,
+	input             mem_rline_v,
 	input             mem_flt,     // access error pulse from the MMU
 
 	// MMU control register values and PTEST/PFLUSH sideband
@@ -605,7 +610,7 @@ reg        epf_err;              // the fill engine faulted: re-issue on demand
 reg        epf_issue;            // the port was claimed by a state this cycle
 reg        epf_flushed;          // the queue was flushed this cycle
 reg  [1:0] epf_pop;              // words consumed this cycle
-reg  [1:0] epf_fillw;            // words appended this cycle
+reg  [3:0] epf_fillw;            // words appended this cycle (up to a line)
 
 // A resident word needs no bus cycle at all, so a fetch consumes it in the
 // very cycle it would otherwise have spent issuing a request.
@@ -1488,13 +1493,42 @@ wire        m_cross  = tc[15] &&
                        (((m_addr_r & m_pgmask) + {29'd0, m_nbytes}) >
                         (m_pgmask + 32'd1));
 
+// m_cross for an address that is not yet in m_addr_r: the calling state
+// decides on it whether the transfer can be issued at once.
+function cross_of;
+	input [31:0] a;
+	input  [1:0] size;
+	reg    [2:0] nb;
+	begin
+		nb = (size == `AP040_SZ_B) ? 3'd1 : (size == `AP040_SZ_W) ? 3'd2 : 3'd4;
+		cross_of = tc[15] && (((a & m_pgmask) + {29'd0, nb}) > (m_pgmask + 32'd1));
+	end
+endfunction
+
+// The transfer is issued from the CALLING state whenever the port is
+// free: no queue fetch outstanding, no state claimed the port this cycle,
+// no request or acknowledge on the wires (the adapter's ack is a one-cycle
+// pulse, so the cycle after any completion still shows it), and the access
+// stays inside one page.  S_MRD/S_MWR then only wait for the acknowledge.
+// Otherwise they issue it themselves as before.  This is one clock off
+// every data access: a cached load went from six states to four between
+// the operand-read state and execute (tests/ap040/PERFORMANCE.md).
 task mrd;
 	input [31:0] a;
 	input [1:0] size;
 	input [7:0] ret;
 	begin
-		m_addr_r <= a; m_size <= size; m_wr <= 0; m_issued <= 0;
+		m_addr_r <= a; m_size <= size; m_wr <= 0;
 		r_m_ret <= ret; state <= S_MRD;
+		if (!epf_pend && !epf_issue && !mem_req && !mem_ack && !cross_of(a, size)) begin
+			mem_req <= 1; mem_write <= 0; mem_instr <= 0;
+			mem_size <= size; mem_addr <= a;
+			fc_r <= fc_ovr_v ? fc_ovr :
+			        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
+			m_issued <= 1;
+			epf_issue = 1;
+		end
+		else m_issued <= 0;
 	end
 endtask
 
@@ -1504,8 +1538,17 @@ task mwr;
 	input [31:0] d;
 	input [7:0] ret;
 	begin
-		m_addr_r <= a; m_size <= size; m_wdat <= d; m_wr <= 1; m_issued <= 0;
+		m_addr_r <= a; m_size <= size; m_wdat <= d; m_wr <= 1;
 		r_m_ret <= ret; state <= S_MWR;
+		if (!epf_pend && !epf_issue && !mem_req && !mem_ack && !cross_of(a, size)) begin
+			mem_req <= 1; mem_write <= 1; mem_instr <= 0;
+			mem_size <= size; mem_addr <= a; mem_wdata <= d;
+			fc_r <= fc_ovr_v ? fc_ovr :
+			        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
+			m_issued <= 1;
+			epf_issue = 1;
+		end
+		else m_issued <= 0;
 	end
 endtask
 
@@ -1882,7 +1925,7 @@ always @(posedge clk) begin
 	epf_issue   = 0;
 	epf_flushed = 0;
 	epf_pop     = 2'd0;
-	epf_fillw   = 2'd0;
+	epf_fillw   = 4'd0;
 
 	if (!nreset) begin
 		state <= S_START;
@@ -2274,7 +2317,23 @@ always @(posedge clk) begin
 				end
 				else if (d_ack) begin
 					m_val <= mem_rdata;
-					state <= r_m_ret;
+					// The two operand returns finish here instead of
+					// spending a state on copying m_val: the value goes
+					// to the operand register and the state after
+					// S_PIPE_SDONE / S_PIPE_DDONE is entered directly.
+					if (r_m_ret == S_PIPE_SDONE) begin
+						src_val <= mem_rdata;
+						if (p_dst == DK_REG) begin
+							dst_val <= rf_rdata_b;   // port B was set at S_PIPE_SRD
+							state <= S_EXEC;
+						end
+						else state <= S_PIPE_DST;
+					end
+					else if (r_m_ret == S_PIPE_DDONE) begin
+						dst_val <= mem_rdata;
+						state <= S_EXEC;
+					end
+					else state <= r_m_ret;
 				end
 			end
 
@@ -6089,21 +6148,43 @@ always @(posedge clk) begin
 		// executes.  This runs after the case statement so that any state
 		// which claimed the port this cycle keeps it; epf_issue/epf_flushed
 		// carry that decision here combinationally.
-		if (epf_pend && i_ack) begin
+		if (epf_pend && i_ack) begin : epf_take
 			// A longword request returns the word at the fetch address in
 			// [31:16] and its successor in [15:0]; a word request returns
-			// one word in [15:0].
+			// one word in [15:0].  When the cache also hands over the
+			// whole line (mem_rline_v), a longword request takes every
+			// word from the fetch address to the end of the line that the
+			// queue has room for: one port transaction feeds up to eight
+			// words instead of two, which is what stops the single port
+			// from being saturated by fetches (tests/ap040/PERFORMANCE.md).
+			// The count is only ever what was appended, so epf_ftail stays
+			// the address of the next word to fetch and a partial take
+			// simply refetches the rest later.
+			reg [3:0] avail, room, take, idx;
+			integer   k;
 			epf_pend <= 0;
 			epf_kill <= 0;
 			if (!epf_kill && !epf_flushed) begin
-				if (epf_pend_lw) begin
+				if (epf_pend_lw && mem_rline_v) begin
+					avail = 4'd8 - {1'b0, mem_addr[3:1]};
+					room  = 4'd8 - epf_count;
+					take  = (avail < room) ? avail : room;
+					if (take < 4'd2) take = 4'd2;   // the two words asked for always fit
+					for (k = 0; k < 8; k = k + 1) begin
+						idx = {1'b0, mem_addr[3:1]} + k[3:0];   // word of the line
+						if (k < take)
+							epf_data[epf_fill + k[2:0]] <= mem_rline[(4'd7 - idx) * 16 +: 16];
+					end
+					epf_fillw = take;
+				end
+				else if (epf_pend_lw) begin
 					epf_data[epf_fill]        <= mem_rdata[31:16];
 					epf_data[epf_fill + 3'd1] <= mem_rdata[15:0];
-					epf_fillw = 2'd2;
+					epf_fillw = 4'd2;
 				end
 				else begin
 					epf_data[epf_fill] <= mem_rdata[15:0];
-					epf_fillw = 2'd1;
+					epf_fillw = 4'd1;
 				end
 			end
 		end
@@ -6163,7 +6244,15 @@ always @(posedge clk) begin
 		         // worth 12% on loop code (bench_loop).  Demand fetches are
 		         // untouched -- S_FETCH and S_IMMF are not EA states.
 		         !ea_state &&
-		         (epf_ftail[1] ? (epf_count <= 4'd7) : (epf_count <= 4'd6)))
+		         // Room for half a line, not just for the two words the
+		         // request names: with the cache handing over the line, a
+		         // fetch issued the moment two words were free took two or
+		         // three words and the port still saw a request every one
+		         // or two instructions.  Waiting for four words of room
+		         // makes most takes four to eight words; the queue never
+		         // runs dry meanwhile, since a hit answers in two cycles
+		         // and the core consumes at most one word per cycle.
+		         (epf_count <= 4'd4))
 		begin
 			mem_req <= 1; mem_write <= 0; mem_instr <= 1;
 			mem_size <= epf_ftail[1] ? `AP040_SZ_W : `AP040_SZ_L;
@@ -6177,15 +6266,15 @@ always @(posedge clk) begin
 		// Queue bookkeeping in one place, so that a pop and an append in the
 		// same cycle cannot lose each other's update.  A flush has already
 		// written the whole set and wins.
-		if (!epf_flushed && (epf_pop != 2'd0 || epf_fillw != 2'd0)) begin
-			epf_count <= epf_count + {2'd0, epf_fillw} - {2'd0, epf_pop};
+		if (!epf_flushed && (epf_pop != 2'd0 || epf_fillw != 4'd0)) begin
+			epf_count <= epf_count + epf_fillw - {2'd0, epf_pop};
 			if (epf_pop != 2'd0) begin
 				epf_head <= epf_head + {1'b0, epf_pop};
 				epf_next <= epf_next + {29'd0, epf_pop, 1'b0};
 			end
-			if (epf_fillw != 2'd0) begin
-				epf_fill  <= epf_fill + {1'b0, epf_fillw};
-				epf_ftail <= epf_ftail + {29'd0, epf_fillw, 1'b0};
+			if (epf_fillw != 4'd0) begin
+				epf_fill  <= epf_fill + epf_fillw[2:0];
+				epf_ftail <= epf_ftail + {27'd0, epf_fillw, 1'b0};
 			end
 		end
 	end

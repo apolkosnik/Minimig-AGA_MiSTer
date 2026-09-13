@@ -43,6 +43,9 @@ parameter CPU_CACHE = 1;
 parameter MAX_CYCLES = 2000000;
 
 parameter FAST_CLOCK = 0;
+// cpu_cache_new's registered hit decision; keyed from FAST_CLOCK as
+// Minimig.sv did, overridable to run the legacy clocking with it
+parameter READ_PIPE = FAST_CLOCK;
 parameter CORE_DIV = 4;
 wire cpu_clk = FAST_CLOCK ? clk113 : clk28;
 
@@ -309,7 +312,7 @@ ap040_walker_cdc walker_cdc
 );
 
 
-sdram_ctrl #(.CPU_CACHE(CPU_CACHE), .CACHE_READ_PIPE(FAST_CLOCK)) ram
+sdram_ctrl #(.CPU_CACHE(CPU_CACHE), .CACHE_READ_PIPE(READ_PIPE)) ram
 (
 	.sysclk(clk113),
 	.c_7m(c_7m),
@@ -537,6 +540,13 @@ reg [31:0] wk_got;
 generate if (CPU_CACHE) begin : g_wksnoop
 	task seed_cache_line;
 		begin
+			// The bench clears the controller cache every 32K cycles (cinv_tgl)
+			// and the program may end inside that 256-cycle sweep, which
+			// ignores snoops and would wipe the row seeded below: wait for
+			// the sweep to finish first.  READ_PIPE 1 at CPU_PHASE 0/1 landed
+			// the walker write inside it and reported a missed snoop.
+			while (!ram.cpu_cache.cache_init_done) @(posedge clk113);
+			repeat (4) @(posedge clk113);
 			// Install the same descriptor in way 0 of both cache views.  The
 			// walker bypasses cpu_cache_new, so its writeback snoops must update
 			// both 16-bit halves in both I and D caches.
@@ -595,6 +605,23 @@ end else begin : g_wksnoop
 end
 endgenerate
 
+// +trace_snoop: per-clk113 view of cpu_cache_new's snoop machine and the
+// CPU-side machine while the walker self-test runs, for a snoop that does
+// not land (READ_PIPE 1 under the legacy clocking at CPU_PHASE 0/1).
+reg trace_snoop = 0;
+reg trace_snoop_on = 0;
+initial trace_snoop = $test$plusargs("trace_snoop");
+generate if (CPU_CACHE) begin : g_snoop_trace
+	always @(posedge clk113) if (trace_snoop && trace_snoop_on &&
+	    (ram.cpu_cache.snoop_act || ram.cpu_cache.sdr_sm_state != 4'd2 ||
+	     ram.cpu_cache.cpu_cs || ram.cpu_cache.cpu_sm_state != 4'd1))
+		$display("SNP t=%0t snoop_act=%b adr=%h sdr_sm=%0d sdr_adr=%h itag_r=%h m0=%b v0=%b iram0_we=%b | cpu_cs=%b we=%b cpu_sm=%0d cpu_adr=%h itag_cpu_r=%h tag_we=%b inv=%b",
+		         $time, ram.cpu_cache.snoop_act, ram.cpu_cache.snoop_adr, ram.cpu_cache.sdr_sm_state,
+		         ram.cpu_cache.sdr_sm_adr, ram.cpu_cache.itram_sdr_dat_r, ram.cpu_cache.sdr_itag0_match,
+		         ram.cpu_cache.sdr_itag0_valid, ram.cpu_cache.sdr_sm_iram0_we,
+		         ram.cpu_cache.cpu_cs, ram.cpu_cache.cpu_we, ram.cpu_cache.cpu_sm_state, ram.cpu_cache.cpu_adr,
+		         ram.cpu_cache.itram_cpu_dat_r, ram.cpu_cache.cpu_sm_itag_we, ram.cpu_cache.inv_sel);
+end endgenerate
 task walker_selftest;
 	begin
 		wk_errors = 0;
@@ -604,6 +631,7 @@ task walker_selftest;
 		cinv_cnt = 15'd1;
 		repeat (8) @(posedge clk113);
 
+		trace_snoop_on = 1;
 		g_wksnoop.seed_cache_line;
 
 		// 32-bit write: BOTH halves must land (the SDRAM mode word sets
@@ -620,6 +648,7 @@ task walker_selftest;
 			wk_errors = wk_errors + 1;
 		end
 		g_wksnoop.check_cache_snoop;
+		trace_snoop_on = 0;
 
 		// 32-bit read of known memory
 		mem[15'h0F00] = 16'hDEAD;

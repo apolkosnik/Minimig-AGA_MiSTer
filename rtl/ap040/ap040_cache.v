@@ -54,6 +54,12 @@ module ap040_cache
 	input             c_nocache,
 	output            c_ack,
 	output     [31:0] c_rdata,
+	// The whole line the access hit or filled, word 0 in [127:96], valid
+	// with c_ack for a cacheable hit or fill (never for a passed access).
+	// The core's fetch queue takes up to eight words of it per port
+	// transaction instead of the two in c_rdata (ap040_core epf).
+	output    [127:0] c_rline,
+	output            c_rline_v,
 
 	// master side (to the bus adapter)
 	output            m_req,
@@ -110,9 +116,24 @@ localparam ROWW = 2 + 4 + 4*TAGW;
 // in the source instead.  Port A reads, port B fills; the two never
 // share a cycle (rd_accept is C_IDLE-only, cd_we is C_FILL-only), so
 // the mixed-port read-during-write case cannot arise.
+// One data RAM per {way, word}, 128 rows of {bank, set}: reading all
+// sixteen at once puts the hit way's whole line on the RAM outputs in
+// the compare cycle -- the requested longword is served from it as
+// before (a hit still costs two cycles), and an instruction fetch takes
+// the line (c_rline).  Same total bits as the four {bank, set, word}
+// RAMs this replaces; a fill beat or a merged store writes one of them.
+//
+// These are the same instantiated dpram as the tag row above, not
+// inferred arrays.  Inference did reach M10K here, but only as a
+// synthesis judgement renewed on every recompile, and the failure mode
+// is silent: 16K bits of cache line data landing in LABs is ~2000 ALMs
+// and a fit that no longer closes, reported as nothing louder than a
+// changed resource count.  Instantiating altsyncram puts the block RAM
+// in the source instead.  Port A reads, port B fills or merges a store;
+// a read never coincides with a write to the same row within one port,
+// so the mixed-port read-during-write case cannot arise.
 wire [ROWW-1:0] tag_q;
-wire [31:0] data_q0, data_q1, data_q2, data_q3;
-
+wire [31:0] dq [0:3][0:3];       // [way][word] of the addressed {bank, set}
 // RAM control, driven combinationally from the FSM state: the RAMs take
 // no resets and their writes are the only ce-gated inputs
 wire        tag_we;
@@ -121,10 +142,10 @@ wire [ROWW-1:0] tag_wdat;
 wire        inv_we;              // port B: store invalidation
 wire        inv_wren;            // port B write strobe (snoops free-run)
 wire  [6:0] inv_idx;
-wire  [8:0] cd_ridx, cd_widx;
-wire  [3:0] cd_we;               // one per way
+wire  [6:0] cd_ridx, cd_widx;
+wire  [3:0] cd_we_way;           // one per way
+wire  [3:0] cd_we_word;          // one per word of that way
 wire [31:0] cd_wdat;
-
 // Reads free-run: the address is held for the whole request, so a stalled
 // ce simply re-reads the same row.  Only the writes are ce-gated.
 dpram #(7, ROWW) ctag_ram
@@ -139,63 +160,25 @@ dpram #(7, ROWW) ctag_ram
 	.wren_b    (inv_wren),
 	.q_b       ()
 );
-
-// The read address is held for the whole request (the MMU may not move
-// c_addr before c_ack, which is what the tag row above already relies
-// on), so letting port A free-run reproduces the held read register the
-// inferred array had: a stalled ce simply re-reads the same word.
-dpram #(9, 32) cdata_way0
-(
-	.clock     (clk),
-	.address_a (cd_ridx),
-	.data_a    (32'd0),
-	.wren_a    (1'b0),
-	.q_a       (data_q0),
-	.address_b (cd_widx),
-	.data_b    (cd_wdat),
-	.wren_b    (ce & cd_we[0]),
-	.q_b       ()
-);
-
-dpram #(9, 32) cdata_way1
-(
-	.clock     (clk),
-	.address_a (cd_ridx),
-	.data_a    (32'd0),
-	.wren_a    (1'b0),
-	.q_a       (data_q1),
-	.address_b (cd_widx),
-	.data_b    (cd_wdat),
-	.wren_b    (ce & cd_we[1]),
-	.q_b       ()
-);
-
-dpram #(9, 32) cdata_way2
-(
-	.clock     (clk),
-	.address_a (cd_ridx),
-	.data_a    (32'd0),
-	.wren_a    (1'b0),
-	.q_a       (data_q2),
-	.address_b (cd_widx),
-	.data_b    (cd_wdat),
-	.wren_b    (ce & cd_we[2]),
-	.q_b       ()
-);
-
-dpram #(9, 32) cdata_way3
-(
-	.clock     (clk),
-	.address_a (cd_ridx),
-	.data_a    (32'd0),
-	.wren_a    (1'b0),
-	.q_a       (data_q3),
-	.address_b (cd_widx),
-	.data_b    (cd_wdat),
-	.wren_b    (ce & cd_we[3]),
-	.q_b       ()
-);
-
+genvar gw, gk;
+generate
+	for (gw = 0; gw < 4; gw = gw + 1) begin : g_way
+		for (gk = 0; gk < 4; gk = gk + 1) begin : g_word
+			dpram #(7, 32) cdata
+			(
+				.clock     (clk),
+				.address_a (cd_ridx),
+				.data_a    (32'd0),
+				.wren_a    (1'b0),
+				.q_a       (dq[gw][gk]),
+				.address_b (cd_widx),
+				.data_b    (cd_wdat),
+				.wren_b    (ce & cd_we_way[gw] & cd_we_word[gk]),
+				.q_b       ()
+			);
+		end
+	end
+endgenerate
 //---------------------------------------------------------------------------
 // request classification
 //---------------------------------------------------------------------------
@@ -256,9 +239,11 @@ reg         r_issued;
 reg  [31:0] r_addr;
 reg   [1:0] r_size;
 reg   [1:0] r_off;
-reg  [31:0] fill_hold;           // requested longword captured during fill
+reg  [31:0] fill_line [0:3];     // the four beats of the fill in flight
 reg         ack_r;
 reg  [31:0] rdata_r;
+reg [127:0] rline_r;             // the line behind rdata_r
+reg         rline_v_r;
 
 wire [21:0] t_w0 = tag_q[21:0];
 wire [21:0] t_w1 = tag_q[43:22];
@@ -421,6 +406,8 @@ assign m_fc    = c_fc;
 
 assign c_ack   = pass_active ? m_ack : ack_r;
 assign c_rdata = pass_active ? m_rdata : rdata_r;
+assign c_rline   = rline_r;
+assign c_rline_v = !pass_active && ack_r && rline_v_r;
 
 assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
                    c_req && !ack_r && !c_write && !bypass &&
@@ -513,11 +500,11 @@ assign inv_idx  = snoop_wr        ? {1'b0, s_addr[9:4]} :
                   ci_inv          ? ci_inv_row :
                   store_inv_lost ? {1'b0, store_inv_set} :
                   (cst == C_IDLE) ? {1'b0, c_addr[9:4]} : {1'b0, winv_set2};
-assign cd_ridx   = {c_instr, a_set, c_addr[3:2]};
-// the four ways arrive together; the tag compare picks one
-wire [31:0] data_hit = (hit_way == 2'd0) ? data_q0 :
-                       (hit_way == 2'd1) ? data_q1 :
-                       (hit_way == 2'd2) ? data_q2 : data_q3;
+assign cd_ridx   = {c_instr, a_set};
+// the four ways' lines arrive together; the tag compare picks one, and
+// the requested longword is that line's word
+wire [127:0] line_hit = {dq[hit_way][0], dq[hit_way][1], dq[hit_way][2], dq[hit_way][3]};
+wire  [31:0] data_hit = dq[hit_way][r_word[1:0]];
 // Update-on-hit: a fitting store's tag row and data words were read at
 // acceptance and are still on the RAM outputs (the request is level-held
 // through C_PASS), so on the memory acknowledge the hit way's word is
@@ -529,11 +516,11 @@ wire [31:0] data_hit = (hit_way == 2'd0) ? data_q0 :
 // during the pass forces the update off, and that snoop cleared the row.
 wire st_upd = (cst == C_PASS) && st_chk && m_ack && !m_err &&
               look_hit && !look_snooped && !snoop_look_row_look;
-assign cd_we     = st_upd ? (4'd1 << hit_way) :
-                   ((cst == C_FILL) && r_issued && m_ack) ? (4'd1 << r_way) : 4'd0;
-assign cd_widx   = st_upd ? {r_bank, r_row[5:0], r_word[1:0]}
-                          : {r_bank, r_row[5:0], r_beat};
-assign cd_wdat   = st_upd ? lw_merge(data_hit, c_wdata, r_size, r_off) : m_rdata;
+assign cd_we_way  = st_upd ? (4'd1 << hit_way) :
+                    ((cst == C_FILL) && r_issued && m_ack) ? (4'd1 << r_way) : 4'd0;
+assign cd_we_word = st_upd ? (4'd1 << r_word[1:0]) : (4'd1 << r_beat);
+assign cd_widx    = {r_bank, r_row[5:0]};
+assign cd_wdat    = st_upd ? lw_merge(data_hit, c_wdata, r_size, r_off) : m_rdata;
 
 
 
@@ -556,10 +543,12 @@ always @(posedge clk) begin
 		cinv_done <= 0;
 		r_row <= 0; r_tag <= 0; r_word <= 0; r_way <= 0; r_bank <= 0; way_fallback <= 0;
 		r_beat <= 0; r_issued <= 0; r_addr <= 0; r_size <= 0; r_off <= 0;
-		fill_hold <= 0; ack_r <= 0; rdata_r <= 0;
+		fill_line[0] <= 0; fill_line[1] <= 0; fill_line[2] <= 0; fill_line[3] <= 0;
+		ack_r <= 0; rdata_r <= 0; rline_r <= 0; rline_v_r <= 0;
 	end
 	else if (ce) begin
 		ack_r <= 0;
+		rline_v_r <= 0;
 		cinv_done <= 0;
 		if (ci_inv) ci_inv_pend <= 0;
 
@@ -735,6 +724,8 @@ always @(posedge clk) begin
 					// all four ways were read alongside the tags, so the
 					// hit completes here: two cycles request-to-ack
 					rdata_r <= lw_extract(data_hit, r_size, r_off);
+					rline_r <= line_hit;
+					rline_v_r <= 1;
 					ack_r <= 1;
 					cst <= C_IDLE;
 				end
@@ -775,8 +766,8 @@ always @(posedge clk) begin
 				end
 				else if (!r_issued) r_issued <= 1;
 				else if (m_ack) begin
-					// the data RAM write runs in parallel (cd_we)
-					if (r_beat == r_addr[3:2]) fill_hold <= m_rdata;
+					// the data RAM write runs in parallel (cd_we_*)
+					fill_line[r_beat] <= m_rdata;
 					r_issued <= 0;
 					if (r_beat == 2'd3) cst <= C_TAGW;
 					else r_beat <= r_beat + 2'd1;
@@ -786,7 +777,9 @@ always @(posedge clk) begin
 			C_TAGW: begin
 				// the tag row write runs in parallel (tag_we): new tag,
 				// its valid bit, and the advanced round robin
-				rdata_r <= lw_extract(fill_hold, r_size, r_off);
+				rdata_r <= lw_extract(fill_line[r_addr[3:2]], r_size, r_off);
+				rline_r <= {fill_line[0], fill_line[1], fill_line[2], fill_line[3]};
+				rline_v_r <= 1;
 				ack_r <= 1;
 				cst <= C_IDLE;
 			end

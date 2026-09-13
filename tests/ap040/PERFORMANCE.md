@@ -82,10 +82,32 @@ six, twenty-one clocks for three instructions.
 The first change, write-through with update-on-hit instead of
 invalidate-on-write, removed a fifth of the Dhrystone cycles: every store
 used to clear its whole 4-way set, so the loads after a struct assignment,
-a string copy or a stack push missed again at 31 clocks each.  The next
-targets, by weight: a posted write buffer for stores, the front-end states
-(decode and operand read in one state, dispatch without S_FETCH), and the
-load handshake (issue from S_PIPE_SRD, finish on the acknowledge).
+a string copy or a stack push missed again at 31 clocks each.
+
+The second set is the memory port.  Data transfers are issued from the
+calling state when the port is free and the two operand returns finish on
+the acknowledge (a cached load went from six states to four between the
+operand-read state and execute); the cache hands the whole line over with
+every instruction fetch and the queue takes up to eight words of it, with
+the fill engine waiting for four words of room before a speculative fetch
+(fetch requests per 200 Dhrystone runs: 146,424 -> 65,771).
+
+| Step | Dhrystone cycles | CPI | bench_loop |
+|---|---:|---:|---:|
+| baseline (invalidate-on-write) | 1,481,317 | 11.4 | 262,367 |
+| cache update-on-hit | 1,185,604 | 9.1 | 262,367 |
+| + early issue, returns on the ack | 1,093,219 | 8.4 | 261,111 |
+| + line-wide fetch, room for four | 1,047,235 | 8.1 | 248,909 |
+
+On the SDRAM bench (the board's 28/114 MHz phase relation, real
+controller and cache) the same runs went 6,794,495 -> 6,453,151 clk_114
+for the early-issue step.  The corpus (run_cputest.py, v20 data040) stays at
+1,265/1,911 with the identical fail set through these steps.
+
+The next targets, by weight: a posted write buffer for stores (S_MWR is
+still a fifth of the time), the front-end states (dispatch of the next
+instruction straight from every completion that leaves no A7 or SR write
+pending, and decode with the operand read in the same state).
 
 ## Experimental clock interface (parked)
 
