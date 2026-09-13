@@ -21,11 +21,19 @@ fr=[r for r in allr if r not in anyr]
 # set-once *_reset_seen flags written in the reset branch.  Anything else
 # free-running inside TICK is a real finding -- a retimed copy in particular.
 def whitelisted(r): return bool(re.search(r"g_fpu\.fpu\|b_m\[\d+\](~_?[Dd]uplicate_?\d*|~DUPLICATE(_\d+)?)?$", r)) or bool(re.search(r"_reset_seen(~_?[Dd]uplicate_?\d*|~DUPLICATE(_\d+)?)?$", r))
+# A register in two sets gets both classes' exceptions, and the last one the
+# SDC applies wins: a TimeQuest quirk left wsnp_pend~DUPLICATE in ASYN and
+# TICK on the 35c0650a fit (exact-name queries return a fitter duplicate, but
+# remove_from_collection drops only the original).
+dbl=[r for r in allr if (r in tick)+(r in fr1)+(r in asyn)>1]
 bad=[r for r in fr if r in tick and not whitelisted(r)]
 wl=[r for r in fr if r in tick and whitelisted(r)]
 if wl: print(f"note: {len(wl)} whitelisted free-running registers in TICK (DSP-packed b_m, *_reset_seen)")
 ok=True
 print(f"census: all={len(allr)} ena-from-core_phase={len([r for r in allr if r in ena])} free-running={len(fr)} | sets TICK={len(tick)} FR1={len(fr1)} ASYN={len(asyn)}")
+if dbl:
+    ok=False; c=collections.Counter(short(r) for r in dbl)
+    print(f"FAIL: {len(dbl)} registers in more than one of TICK/FR1/ASYN (SDC member patterns must end in a wildcard):"); [print(f"   x{v:<4d} {k}") for k,v in sorted(c.items())]
 if bad:
     ok=False; c=collections.Counter(short(r) for r in bad)
     print(f"FAIL: {len(bad)} free-running registers inside TICK" + (" (retimed copies among them -- is PHYSICAL_SYNTHESIS_REGISTER_RETIMING off for emu|cpu_wrapper?)" if any("_OTERM" in r or "NEW_REG" in r for r in bad) else "") + ":"); [print(f"   x{v:<4d} {k}") for k,v in sorted(c.items())]

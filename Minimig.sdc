@@ -50,12 +50,19 @@ set P {emu|cpu_wrapper|cpu_inst_p}
 set ALL   [get_registers "$P|*"]
 set RAMP  [get_registers "$P|*ram_block*"]
 set PIPE  [get_registers "$P|mmu|l_row*"]
-foreach pat {mmu|l_tag* mmu|l_ld mmu|sweep_row_q* mmu|sweep_valid_q} {
+foreach pat {mmu|l_tag* mmu|l_ld* mmu|sweep_row_q* mmu|sweep_valid_q*} {
     set PIPE [add_to_collection $PIPE [get_registers "$P|$pat"]]
 }
-set ASYN  [get_registers "$P|g_cache.cache|look_snooped"]
-foreach pat {g_cache.cache|fill_snooped g_cache.cache|snoop_sweep_on_r g_cache.cache|snoop_sweep_row_r* \
-             wsnp_addr* wsnp_pend walker_wr_d core_stall_watchdog|*} {
+# Every member pattern ends in a wildcard on purpose: the fitter may keep a
+# duplicate of any of these (wsnp_pend~DUPLICATE on the 35c0650a fit), an
+# exact-name query returns both copies, but remove_from_collection with that
+# collection drops only the original -- the copy stayed in TICK and its
+# fanout got the four-cycle relaxation while it changes every cycle.  A
+# wildcard query removes both (tests/ap040/sta/precheck.py now fails on any
+# register that sits in two sets).
+set ASYN  [get_registers "$P|g_cache.cache|look_snooped*"]
+foreach pat {g_cache.cache|fill_snooped* g_cache.cache|snoop_sweep_on_r* g_cache.cache|snoop_sweep_row_r* \
+             wsnp_addr* wsnp_pend* walker_wr_d* core_stall_watchdog|*} {
     set ASYN [add_to_collection $ASYN [get_registers "$P|$pat"]]
 }
 set FR1   [add_to_collection $RAMP $PIPE]
@@ -63,7 +70,7 @@ set TICK  [remove_from_collection $ALL [add_to_collection $FR1 $ASYN]]
 set CTAGB [get_registers "$P|g_cache.cache|ctag_ram|*~portb_*"]
 set ATCB  [get_registers "$P|mmu|atc_ram|*~portb_*"]
 set FR1_MMU [add_to_collection [get_registers "$P|mmu|*ram_block*"] $PIPE]
-set LOOKS [get_registers "$P|g_cache.cache|look_snooped"]
+set LOOKS [get_registers "$P|g_cache.cache|look_snooped*"]
 set TICK_CM [remove_from_collection [add_to_collection [get_registers "$P|core|*"] [get_registers "$P|mmu|*"]] [add_to_collection $FR1 $ASYN]]
 set WDOG  [get_registers "$P|core_stall_watchdog|*"]
 set WTMO  [get_registers {emu|cpu_wrapper|bus_timeout|*}]
