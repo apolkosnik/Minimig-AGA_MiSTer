@@ -182,7 +182,12 @@ reg         ak_unmapped;
 wire arm_chip = select_live && c_7m_rise && any_req &&
                 !router_zram_sel && !(|live_baddr[31:24]);
 wire hold_chip = (state == S_DRIVE) && !ak_is_ddr && !ak_unmapped;
-wire arb_drive_chip = minimig_idle && (arm_chip || hold_chip);
+// Kept as its own node: the chip address mux below is the last fabric stage
+// of the Agnus-to-SDRAM address path, and with this select flattened into it
+// the mux was two LUT levels per bit instead of one.  As a single node the
+// whole mux -- this select, the two address sources and the bridge's bank
+// remap feeding chip_in_addr -- fits in one six-input LUT.
+wire arb_drive_chip /* synthesis keep */ = minimig_idle && (arm_chip || hold_chip);
 
 assign chip_out_addr = arb_drive_chip ? ak_addr_w    : chip_in_addr;
 assign chip_out_l    = arb_drive_chip ? ak_l_w       : chip_in_l;

@@ -771,10 +771,17 @@ minimig_m68k_bridge CPU1
 	.host_ack (host_ack)
 );
 
+// The CPU-side qualifier on the first chip block, kept out of the address
+// cone.  Flattened, bank[5] is an eight-input function of sel_chip[3:0] and
+// these four, so it took two LUT levels and put one of them on the Agnus
+// address path to the SDRAM row register.  As its own node bank[5] is five
+// inputs and one level.
+wire chip0_cpu_ok /* synthesis keep */ = ~ovr | ~cpu_rd | dbr | cpuhlt;
+
 //instantiate RAM banks mapper
 minimig_bankmapper BMAP1
 (
-	.chip0((~ovr|~cpu_rd|dbr|cpuhlt) & sel_chip[0]),
+	.chip0(chip0_cpu_ok & sel_chip[0]),
 	.chip1(sel_chip[1]),
 	.chip2(sel_chip[2]),
 	.chip3(sel_chip[3]),	
