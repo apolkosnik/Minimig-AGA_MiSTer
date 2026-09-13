@@ -101,10 +101,11 @@ the fill engine waiting for four words of room before a speculative fetch
 | + direct dispatch from every safe completion | 989,635 | 7.6 | 248,378 |
 | + operands read in the execute state | 952,927 | 7.3 | 234,978 |
 
-On the SDRAM bench (the board's 28/114 MHz phase relation, real
-controller and cache) the same runs went 6,794,495 -> 6,453,151 clk_114
-for the early-issue step.  The corpus (run_cputest.py, v20 data040) stays at
-1,265/1,911 with the identical fail set through these steps.
+With the real controllers and their phase relation to the CPU the same
+runs went 6,794,495 -> 6,140,447 clk_114 on the SDRAM bench and
+6,087,359 -> 5,942,175 on the dual-RAM bench, measured from the cache
+step onward.  The corpus (run_cputest.py, v20 data040) stays at 1,265/1,911
+with the identical fail set through every step.
 
 The third step is the instruction end: the successor is dispatched from
 the completing cycle itself whenever its opcode is resident, for every
