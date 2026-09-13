@@ -99,8 +99,6 @@ wire [31:0] mem_wdata;
 wire  [2:0] mem_fc;
 wire        mem_ack;
 wire [31:0] mem_rdata;
-wire [127:0] mem_rline;      // the cache line behind a fetch, for the core's queue
-wire        mem_rline_v;
 wire        mem_flt_mmu;
 // Core-side stall watchdog.  Every prior watchdog counts a DOWNSTREAM
 // request (CPU port, walker port), so a transaction lost between the
@@ -134,8 +132,6 @@ wire [31:0] mm_addr, mm_wdata;
 wire  [2:0] mm_fc;
 wire        mm_ack, mm_nocache;
 wire [31:0] mm_rdata;
-wire [127:0] mm_rline;
-wire        mm_rline_v;
 
 // cache to bus adapter
 wire        b_req, b_write, b_instr;
@@ -178,8 +174,6 @@ ap040_core #(
 	.mem_fc(mem_fc),
 	.mem_ack(mem_ack),
 	.mem_rdata(mem_rdata),
-	.mem_rline(mem_rline),
-	.mem_rline_v(mem_rline_v),
 	.mem_flt(mem_flt),
 
 	.tc_out(w_tc),
@@ -243,8 +237,6 @@ ap040_mmu mmu (
 	.c_fc(mem_fc),
 	.c_ack(mem_ack),
 	.c_rdata(mem_rdata),
-	.c_rline(mem_rline),
-	.c_rline_v(mem_rline_v),
 	.c_flt(mem_flt_mmu),
 
 	.pt_req(pt_req),
@@ -269,8 +261,6 @@ ap040_mmu mmu (
 	.m_fc(mm_fc),
 	.m_ack(mm_ack),
 	.m_rdata(mm_rdata),
-	.m_rline(mm_rline),
-	.m_rline_v(mm_rline_v),
 
 	.walker_req(walker_req),
 	.walker_we(walker_we),
@@ -377,8 +367,6 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.s_addr(snp_addr),
 		.c_ack(mm_ack),
 		.c_rdata(mm_rdata),
-		.c_rline(mm_rline),
-		.c_rline_v(mm_rline_v),
 
 		.m_req(b_req),
 		.m_write(b_write),
@@ -406,8 +394,6 @@ else begin : g_nocache
 	assign b_fc     = mm_fc;
 	assign mm_ack   = b_ack;
 	assign mm_rdata = b_rdata;
-	assign mm_rline   = 128'd0;
-	assign mm_rline_v = 1'b0;
 	assign cinv_done = 1'b1;
 	wire unused_nc = mm_nocache | cinv_req | cinv_ic | cinv_dc |
 	                 (|cacr_out);

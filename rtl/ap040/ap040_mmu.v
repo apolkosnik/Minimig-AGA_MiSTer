@@ -48,9 +48,6 @@ module ap040_mmu
 	input       [2:0] c_fc,
 	output            c_ack,
 	output     [31:0] c_rdata,
-	// the line behind c_rdata, straight from the cache (ap040_cache c_rline)
-	output    [127:0] c_rline,
-	output            c_rline_v,
 	output reg        c_flt,       // one ce cycle; request is consumed
 
 	// PTEST/PFLUSH sideband
@@ -77,8 +74,6 @@ module ap040_mmu
 	output      [2:0] m_fc,
 	input             m_ack,
 	input      [31:0] m_rdata,
-	input     [127:0] m_rline,
-	input             m_rline_v,
 
 	// Dedicated physical longword port used only for table searches.  Keeping
 	// descriptor traffic off m_* avoids serialising every descriptor through
@@ -367,8 +362,6 @@ assign walker_wdat = w_req_wdat;
 // core holds the request stable until ack.
 assign c_ack   = m_ack;
 assign c_rdata = m_rdata;
-assign c_rline   = m_rline;
-assign c_rline_v = m_rline_v;
 
 assign phys_addr     = pa_out;
 assign cache_inhibit = ttr_hit ? ttr_cm[1]

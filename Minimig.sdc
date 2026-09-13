@@ -139,6 +139,21 @@ set_multicycle_path -from {emu|chipdma_arb|*}    -to {emu|ram1|*} -hold 1
 set_min_delay 0.25 -from [get_registers {*chipdma_arb*ak_wr_data*}] \
                   -to [get_registers {*ram1*datawr*}]
 
+# The beam counter's display-geometry registers -- BEAMCON0, HTOTAL, HSSTRT,
+# HSSTOP, HCENTER, HBSTRT, HBSTOP, VTOTAL, VSSTRT, VSSTOP, VBSTOP -- are
+# CONFIGURATION, not counters: agnus_beamcounter writes every one of them
+# only at reset or when the CPU writes the matching custom register (the
+# `case (reg_address_in[8:1])` under clk7_en), so each holds its value for
+# at least a CPU register-write interval, hundreds of clk_114 cycles.  The
+# chip DMA address they reach through the beam counter's wrap logic
+# therefore does not have to settle in the two clk_114 cycles the per-tick
+# counters need, and four is safe by the same argument as the Akiko PBX
+# relaxation above.  Without this, beamcon0_reg and htotal_reg -> ram1|
+# sd_addr are 86 of the design's 100 worst paths (-2.06 ns at 98% device
+# occupancy); hpos, which does count per beam tick, keeps two cycles.
+set_multicycle_path -from {emu|minimig|AGNUS1|bc1|*_reg*} -to {emu|ram1|*} -setup 4
+set_multicycle_path -from {emu|minimig|AGNUS1|bc1|*_reg*} -to {emu|ram1|*} -hold 3
+
 # amiga_clk c1/c3 are the 7 MHz-rate phase regs in the 28 MHz (clk_28) domain
 # (c1 <= ~c3). The chip-arming address path launches from c1, passes through
 # chipdma_arb combinational logic, and lands on sdram_ctrl.sd_addr captured by

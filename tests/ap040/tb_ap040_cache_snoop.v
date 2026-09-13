@@ -24,11 +24,6 @@
 //             must not validate the partly-filled line, and must leave
 //             the cache able to serve the exception handler's own
 //             accesses.  The error is swept across all four beats.
-//   T12       the line behind a fetch: a missing instruction fetch fills
-//             and hands the four words of the line over with c_rline_v,
-//             a hit hands the same line over without a memory read, a
-//             passed (cache-inhibited) fetch hands nothing over, and a
-//             store merged into a resident line shows in that line.
 //   T11       write-through with update-on-hit: a store that fits in a
 //             longword and hits leaves the line valid with the store
 //             merged in, at every size and lane; a missing store does
@@ -121,8 +116,6 @@ reg  [1:0]  c_size = 0;
 reg  [31:0] c_addr = 0, c_wdata = 0;
 wire        c_ack;
 wire [31:0] c_rdata;
-wire [127:0] c_rline;
-wire        c_rline_v;
 
 wire        m_req, m_write, m_instr;
 wire  [1:0] m_size;
@@ -157,7 +150,6 @@ ap040_cache dut
 	.c_size(c_size), .c_addr(c_addr), .c_wdata(c_wdata),
 	.c_fc(3'd5), .c_nocache(c_nocache),
 	.c_ack(c_ack), .c_rdata(c_rdata),
-	.c_rline(c_rline), .c_rline_v(c_rline_v),
 	.m_req(m_req), .m_write(m_write), .m_instr(m_instr),
 	.m_size(m_size), .m_addr(m_addr), .m_wdata(m_wdata),
 	.m_fc(), .m_ack(m_ack), .m_rdata(m_rdata), .m_err(m_err),
@@ -353,33 +345,6 @@ endtask
 // access proves that access was served from a line
 integer mreads = 0;
 always @(posedge clk) if (m_ack && ce && !m_write) mreads = mreads + 1;
-// a longword read on the given side, returning the line handed over with it
-task cpu_read_line;
-	input  [31:0] a;
-	input         instr;
-	output [31:0] d;
-	output [127:0] line;
-	output        lv;
-	integer guard;
-	begin
-		@(negedge clk);
-		c_req = 1; c_write = 0; c_size = 2'b10; c_addr = a; c_instr = instr;
-		guard = 0;
-		while (!(c_ack && ce) && guard < 200) begin
-			@(posedge clk);
-			guard = guard + 1;
-		end
-		if (guard >= 200) begin
-			$display("FAIL: read timeout at %h", a);
-			errors = errors + 1;
-		end
-		d = c_rdata; line = c_rline; lv = c_rline_v;
-		@(negedge clk);
-		c_req = 0; c_instr = 0;
-		while (!ce) @(posedge clk);
-		@(posedge clk);
-	end
-endtask
 task cpu_write_sz;
 	input [31:0] a;
 	input  [1:0] sz;
@@ -522,8 +487,6 @@ integer mr0;
 reg [31:0] d;
 reg [31:0] d2;
 reg [31:0] model;
-reg [127:0] line;
-reg         lv;
 
 initial begin
 	for (i = 0; i < 16384; i = i + 1) mem[i] = 32'h1111_0000 + i;
@@ -968,55 +931,6 @@ initial begin
 				$display("FAIL test 11e (latency %0d, snoop at %0d): an unrelated snoop stopped the merge", i, off);
 				errors = errors + 1;
 			end
-		end
-	end
-	mem_lat = 2'd2;
-
-	//------------------------------------------------------------------
-	// T12: the line behind a fetch (see the header), at every memory
-	// latency.  $8000-$800F is one line; $8100 is fetched cache-inhibited.
-	//------------------------------------------------------------------
-	for (i = 0; i < 4; i = i + 1) begin
-		mem_lat = i;
-		mr0 = mreads;
-		cpu_read_line(32'h0000_8004 + (i << 4), 1'b1, d, line, lv);   // miss: fill
-		if (mreads == mr0) begin
-			$display("FAIL test 12 (latency %0d): the first fetch of a line did not fill", i);
-			errors = errors + 1;
-		end
-		if (!lv || line !== {mem[(32'h8000 + (i << 4)) >> 2], mem[(32'h8004 + (i << 4)) >> 2],
-		                     mem[(32'h8008 + (i << 4)) >> 2], mem[(32'h800C + (i << 4)) >> 2]} ||
-		    d !== mem[(32'h8004 + (i << 4)) >> 2]) begin
-			$display("FAIL test 12 (latency %0d): fill handed over valid=%0d line %h word %h", i, lv, line, d);
-			errors = errors + 1;
-		end
-		mr0 = mreads;
-		cpu_read_line(32'h0000_800C + (i << 4), 1'b1, d, line, lv);   // hit, another word
-		if (mreads != mr0) begin
-			$display("FAIL test 12 (latency %0d): a fetch that should hit went to memory", i);
-			errors = errors + 1;
-		end
-		if (!lv || line !== {mem[(32'h8000 + (i << 4)) >> 2], mem[(32'h8004 + (i << 4)) >> 2],
-		                     mem[(32'h8008 + (i << 4)) >> 2], mem[(32'h800C + (i << 4)) >> 2]} ||
-		    d !== mem[(32'h800C + (i << 4)) >> 2]) begin
-			$display("FAIL test 12 (latency %0d): hit handed over valid=%0d line %h word %h", i, lv, line, d);
-			errors = errors + 1;
-		end
-		c_nocache = 1;
-		cpu_read_line(32'h0000_8100 + (i << 4), 1'b1, d, line, lv);   // passed
-		c_nocache = 0;
-		if (lv || d !== mem[(32'h8100 + (i << 4)) >> 2]) begin
-			$display("FAIL test 12 (latency %0d): a passed fetch handed over a line (valid=%0d) or bad data %h", i, lv, d);
-			errors = errors + 1;
-		end
-		// data side: a store merged into a resident line shows in that line
-		expect_read(32'h0000_8200 + (i << 4), mem[(32'h8200 + (i << 4)) >> 2], 12);
-		cpu_write(32'h0000_8208 + (i << 4), 32'h1234_5670 + i);
-		mr0 = mreads;
-		cpu_read_line(32'h0000_8200 + (i << 4), 1'b0, d, line, lv);
-		if (mreads != mr0 || !lv || line[63:32] !== 32'h1234_5670 + i) begin
-			$display("FAIL test 12 (latency %0d): merged store missing from the line (valid=%0d, word 2 = %h)", i, lv, line[63:32]);
-			errors = errors + 1;
 		end
 	end
 	mem_lat = 2'd2;
