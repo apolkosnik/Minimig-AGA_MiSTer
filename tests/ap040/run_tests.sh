@@ -71,6 +71,22 @@ compile bus_timeout iverilog -g2012 -o "$WORK/tb_bus_timeout.vvp" \
 	tb_ap040_bus_timeout.v $RTL/ap040_bus_timeout.v &
 compile cart_hrtmon iverilog -g2012 -o "$WORK/tb_cart_hrtmon.vvp" \
 	tb_cart_hrtmon.v ../../rtl/cart.v &
+# The production bridge latches read data AFTER DTACK. The flat chip
+# model below cannot detect an early CPU sample that corrupts reset vectors.
+for mode in legacy fast1 fast2 fast4; do
+	case "$mode" in
+		legacy) fast=0; div=4 ;;
+		fast1) fast=1; div=1 ;;
+		fast2) fast=1; div=2 ;;
+		fast4) fast=1; div=4 ;;
+	esac
+	compile boot_bridge_$mode iverilog -g2012 -I "$RTL" -s tb_cpu_wrapper_boot_bridge \
+		-P tb_cpu_wrapper_boot_bridge.FAST_CLOCK=$fast \
+		-P tb_cpu_wrapper_boot_bridge.CORE_DIV=$div \
+		-o "$WORK/tb_boot_bridge_$mode.vvp" tb_cpu_wrapper_boot_bridge.v \
+		"$WORK/cpu_wrapper_sim.v" ../../rtl/amiga_clk.v ../../rtl/minimig_m68k_bridge.v ../../rtl/ciaa.v ../../rtl/cia_*.v \
+		sim_dpram.v $SRC &
+done
 compile wrapchip iverilog -g2012 -I "$RTL" -o "$WORK/tb_wrapchip.vvp" \
 	tb_cpu_wrapper_chip.v "$WORK/cpu_wrapper_sim.v" \
 	"$WORK/fastchip_sim.v" "$WORK/rtg_sim.v" "$WORK/akiko_sim.v" \
@@ -244,6 +260,14 @@ leg ddram_walker_snoop "$WORK/tb_ddram_walker_snoop.vvp" &
 leg ddram_walker_read  "$WORK/tb_ddram_walker_read.vvp" &
 leg bus_timeout        "$WORK/tb_bus_timeout.vvp" &
 leg cart_hrtmon        "$WORK/tb_cart_hrtmon.vvp" &
+for mode in legacy fast1 fast2 fast4; do
+	for phase in 0 3 7 9; do
+		for dbr in 0 1; do
+			leg boot_bridge_${mode}_p${phase}_d${dbr} \
+				"$WORK/tb_boot_bridge_$mode.vvp" +phase=$phase +dbr=$dbr &
+		done
+	done
+done
 leg sdram32            "$WORK/tb_sdram32.vvp" &
 leg sdram32_rp1        "$WORK/tb_sdram32_rp1.vvp" &
 leg cache_snoop        "$WORK/tb_cache_snoop.vvp" &

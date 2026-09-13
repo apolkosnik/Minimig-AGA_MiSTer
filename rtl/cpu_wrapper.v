@@ -686,12 +686,16 @@ generate if (FAST_CLOCK) begin : g_sync_chip
 always @(posedge clk or negedge reset) begin
     reg [1:0] stage;
     reg waitm;
+    reg sample_pending;
+    reg [2:0] release_dly;   // fast clocks left until the strobes are released
     if (!reset) begin
         stage <= 0; waitm <= 1; chipready <= 0; chipdout_i <= 0;
+        sample_pending <= 0; release_dly <= 0;
         c_as <= 1; c_rw <= 1; c_uds <= 1; c_lds <= 1;
         ipl_i <= 3'b111;
     end else if (bus_berr) begin
         stage <= 0; chipready <= 0;
+        sample_pending <= 0; release_dly <= 0;
         c_as <= 1; c_rw <= 1; c_uds <= 1; c_lds <= 1;
     end else begin
         if (chipready && core_enable && cpu_req && !ramsel_i && !fastchip_selack)
@@ -699,6 +703,36 @@ always @(posedge clk or negedge reset) begin
         if (ph2 && !ph2n) begin
             waitm <= chip_dtack;
             if (!stage[0]) ipl_i <= chip_ipl;
+            // DTACK precedes minimig_m68k_bridge's read-data latch (!c1 && c3):
+            // sampling at the ph1 that releases the strobes returned the
+            // PREVIOUS word, including the reset PC.  The data is taken here,
+            // at the ph2 after the release, once that latch has settled.
+            if (sample_pending) begin
+                chipdout_i <= chip_dout;
+                chipready <= 1;
+                sample_pending <= 0;
+            end
+        end
+        // The strobes are released FOUR fast clocks after the ph1 that saw
+        // DTACK, not at that ph1.  The bridge drives its write strobes from
+        // l_as/l_dtack (registered on clk_sys) and the CIA and custom chips
+        // latch a write on the clk7_en-qualified clk_sys edge after l_dtack
+        // falls, sampling l_as as registered one edge before -- so AS must
+        // still be low at THAT edge, which sits about two fast clocks after
+        // the ph1 pulse.  Releasing at ph1 dropped AS ~20 ns too early
+        // (tb_cpu_wrapper_boot_bridge +trace_cia: release 19525, edge 19545,
+        // latch edge 19585): every write was acknowledged and lost --
+        // DiagROM's power LED never lit, COLOR00 never took, no serial --
+        // while reads worked (reset vectors and first fetches were seen
+        // correct on the board).  The legacy machine releases on the edge
+        // itself.  Four clocks lands ~2 clocks past it in every phase of the
+        // bench's sweep and costs ~2 clocks more than the legacy release.
+        if (release_dly != 3'd0) begin
+            release_dly <= release_dly - 1'b1;
+            if (release_dly == 3'd1) begin
+                c_as <= 1; c_rw <= 1; c_uds <= 1; c_lds <= 1;
+                sample_pending <= 1;
+            end
         end
         if (ph1 && !ph1n) begin
             case (stage)
@@ -708,12 +742,10 @@ always @(posedge clk or negedge reset) begin
                 end
                 1: stage <= 2;
                 2: if (!waitm) begin
-                    chipdout_i <= chip_dout;
-                    c_as <= 1; c_rw <= 1; c_uds <= 1; c_lds <= 1;
-                    chipready <= 1;
+                    release_dly <= 3'd4;
                     stage <= 3;
                 end
-                3: if (!chipready) stage <= 0;
+                3: if (!chipready && release_dly == 3'd0 && !sample_pending) stage <= 0;
             endcase
         end
     end

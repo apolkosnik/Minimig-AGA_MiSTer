@@ -22,6 +22,13 @@ Testbenches (Icarus Verilog -g2012 and ModelSim, see run_tests.sh):
                         BCD, EXT/EXTB/SWAP/EXG, LINK/UNLK (.W/.L), JSR/BSR/
                         RTS/RTD, DBcc/Scc, CMPM, TAS, MOVEM, MOVEP, PACK/UNPK,
                         MOVE16, MOVE from/to CCR
+  tb_cpu_wrapper_boot_bridge.v  reset-to-CIA/SERDAT startup through the real
+                        amiga_clk and minimig_m68k_bridge, in legacy mode and
+                        FAST_CLOCK dividers 1/2/4 with phase/arbitration sweeps.
+                        Checks reset-vector words before execution and actual
+                        downstream writes. Catches sampling chip_dout before
+                        the bridge's post-DTACK data latch (silent DiagROM
+                        failure from a corrupted reset PC).
   tb_ap040_diagrom.v  boots a real ROM image against a minimal Amiga model
                         (chip RAM, CIA overlay, custom register stubs) and
                         captures serial output. DiagROM V2.0 completes its

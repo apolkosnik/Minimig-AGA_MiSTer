@@ -37,7 +37,7 @@ def execute(command, log, timeout):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bench", choices=["core", "chip", "sdram", "dualram", "cache-unit", "yc-equiv"], default="core")
+    parser.add_argument("--bench", choices=["core", "chip", "sdram", "dualram", "cache-unit", "yc-equiv", "boot-bridge"], default="core")
     parser.add_argument("--program", default="all", help="all or comma-separated assembly names")
     parser.add_argument("--work", type=Path, default=Path("/tmp/ap040-verilator"))
     parser.add_argument("--param", action="append", default=[], help="top-level PARAM=VALUE")
@@ -55,12 +55,21 @@ def main():
         programs = ["t_integer", "t_mmu", "t_fpu"]
     tops = {"core": "tb_ap040_program", "chip": "tb_cpu_wrapper_chip",
             "sdram": "tb_sdram_turbo", "dualram": "tb_dualram_turbo",
-            "cache-unit": "tb_cpu_cache_new", "yc-equiv": "tb_yc_out_equiv"}
+            "cache-unit": "tb_cpu_cache_new", "yc-equiv": "tb_yc_out_equiv",
+            "boot-bridge": "tb_cpu_wrapper_boot_bridge"}
     top = tops[args.bench]
     sources = [HERE / (top + ".v"), HERE / "sim_dpram.v", *CORE, RTL / "memory_router.v"]
     if args.bench == "cache-unit":
         sources = [HERE / (top + ".v"), RTL / "cpu_cache_new.v"]
         programs = ["unit"]
+    elif args.bench == "boot-bridge":
+        # reset-to-CIA/SERDAT startup through the production amiga_clk and
+        # minimig_m68k_bridge; the "programs" are the clk_114-vs-clk_sys phase
+        # and chipset-arbitration sweep the iverilog legs run (run_tests.sh)
+        sources = [HERE / (top + ".v"), HERE / "sim_dpram.v", *CORE, RTL / "memory_router.v",
+                   RTL / "cpu_wrapper.v", RTL / "amiga_clk.v", RTL / "minimig_m68k_bridge.v", RTL / "ciaa.v",
+                   *sorted(RTL.glob("cia_*.v"))]
+        programs = [f"p{ph}_d{d}" for ph in (0, 3, 7, 9) for d in (0, 1)]
     elif args.bench == "yc-equiv":
         # sys/yc_out.sv against its frozen pre-change copy, output for output
         sources = [HERE / (top + ".sv"), ROOT / "sys" / "yc_out.sv", HERE / "ref" / "yc_out_ref.sv"]
@@ -84,7 +93,10 @@ def main():
     results = []
     for name in programs:
         command = [work / "obj" / ("V" + top)]
-        if args.bench not in ("cache-unit", "yc-equiv"):
+        if args.bench == "boot-bridge":
+            ph, d = re.match(r"p(\d+)_d(\d+)", name).groups()
+            command += ["+phase=" + ph, "+dbr=" + d]
+        elif args.bench not in ("cache-unit", "yc-equiv"):
             image = work / (name + ".bin")
             hexf = image.with_suffix(".hex")
             execute([os.environ.get("VASM", "/opt/amiga-cc/vbcc/bin/vasmm68k_mot"),
