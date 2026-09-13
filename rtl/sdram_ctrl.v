@@ -451,6 +451,9 @@ reg  [1:0] pre_sel;
 // written only by the command block below.
 reg  [3:0] rcnt;
 reg        ras_local;   // the next state 0 issues a RAS-class command, chipset aside
+reg        ras_refresh; // ... and specifically that it is the refresh slot
+reg        init_cas;    // the next state 0 is an init command that drives CAS low
+reg        init_we;     // ... and one that drives WE low
 // At module scope for the same reason as rcnt: row_col has to be written from
 // one block, and its CAS-time values are built from these.  Still written only
 // by the command block.
@@ -483,6 +486,18 @@ always @(posedge sysclk) begin
 		              (cache_req && cache_req_q2) || (&rcnt))
 		           : ((initstate == 4'd3)  || (initstate == 4'd7) ||
 		              (initstate == 4'd9)  || (initstate == 4'd12));
+		// The refresh slot on its own: it is the last arm in the priority
+		// chain, so it also needs the chipset to have passed, which is the
+		// only late term left in the command pins' cones.
+		ras_refresh <= init_done && (&rcnt) &&
+		               !(write_req || (!walker_busy && walker_req_q) ||
+		                 (cache_req && cache_req_q2));
+		// AUTOREFRESH (init 8 and 10) and LOAD MODE REGISTER (13) drive CAS
+		// low; PRECHARGE (4) and LOAD MODE REGISTER drive WE low.  initstate
+		// advances on this edge, so these name the next slot's command.
+		init_cas  <= !init_done && ((initstate == 4'd7) || (initstate == 4'd9) ||
+		                            (initstate == 4'd12));
+		init_we   <= !init_done && ((initstate == 4'd3) || (initstate == 4'd12));
 		if (!init_done) begin
 			pre_sel <= PRE_NONE;
 			// initstate increments on this same edge, so the row loaded here
@@ -578,10 +593,31 @@ always @ (posedge sysclk) begin
 	
 	sd_clk <= sdram_state[0];
 
+	// The three command pins, each written from exactly one place.
+	//
+	// Every condition that drives one of them low -- the init commands at
+	// state 0, the slot arbiter's RAS at state 0, the CAS at state 2, the
+	// walker write's second CAS at state 4 -- falls on an even state, so the
+	// enable for all three is simply ~sdram_state[0].  Written as scattered
+	// overrides the synthesiser could not see that, so it implemented the odd
+	// states as a hold, which needs the register's own output back at its
+	// input; it then duplicated sd_cas and put the two copies far apart, and
+	// ram1|sd_cas~_Duplicate_1 -> ram1|sd_cas was the worst path in the
+	// design at -2.314 ns.  One assignment each, no feedback.
+	//
+	// Every term is a registered flag except the chipset's ownership of the
+	// slot, which cannot be registered earlier: Agnus drives it on the edge
+	// that starts the slot.  The CAS qualifiers are gated by init_done because
+	// nothing writes them until the init sequence is over, and before the fold
+	// they were unreachable during it rather than merely unused.
 	if(~sdram_state[0]) begin
-		sd_ras                <= 1;
-		sd_cas                <= 1;
-		sd_we                 <= 1;
+		sd_ras  <= !(ras_go && ((init_done && ((~chipDMA) | (~chipRW))) ||
+		                        ras_local));
+		sd_cas  <= !((ras_go && (init_cas ||
+		                         (ras_refresh && !((~chipDMA) | (~chipRW))))) ||
+		             walker_cas2_go || (init_done && cas_go && !cas_sd_cas));
+		sd_we   <= !((ras_go && init_we) ||
+		             walker_cas2_go || (init_done && cas_go && !cas_sd_we));
 		sd_data               <= 16'hZZZZ;
 		chipWE                <= 0;
 	end
@@ -594,38 +630,12 @@ always @ (posedge sysclk) begin
 		sd_addr <= row_col;
 	// otherwise hold
 
-	// sd_ras's input cone, one LUT deep.  It used to be written from eight
-	// places -- three init commands and five slot kinds -- so its pin register
-	// saw the init counter, the slot arbiter's whole priority chain and the
-	// refresh counter at once: five levels, and ram1|init_done -> ram1|sd_ras
-	// was the second worst path in the design at -0.704 ns.  The union of
-	// those eight conditions is ras_go & (chipset-owns-slot | ras_local), five
-	// inputs, and the same ones each sd_addr bit already folds in.  Same
-	// edges, same values.
-	if (ras_go && ((init_done && ((~chipDMA) | (~chipRW))) || ras_local)) sd_ras <= 0;
-
 	if(!init_done) begin
 		slot_type             <= IDLE;
 		casaddr               <= 0;
 		rcnt                  <= 0;
 		sd_dqm                <= 3;
 		sd_ba                 <= 0;
-		if(sdram_state == 0) begin
-			case(initstate)
-				4 : begin // PRECHARGE
-					sd_cas       <= 1;
-					sd_we        <= 0;
-				end
-				8,10 : begin // AUTOREFRESH
-					sd_cas       <= 0;
-					sd_we        <= 1;
-				end
-				13 : begin // LOAD MODE REGISTER
-					sd_cas       <= 0;
-					sd_we        <= 0;
-				end
-			endcase
-		end
 	end else begin
 
 		case(sdram_state)
@@ -690,7 +700,6 @@ always @ (posedge sysclk) begin
 				end
 				else if(&rcnt) begin
 					// REFRESH
-					sd_cas       <= 0;
 					rcnt         <= 0;
 				end
 		end
@@ -701,8 +710,6 @@ always @ (posedge sysclk) begin
 		// the low word of every 32-bit walker write is lost (tCCD=1 on SDR
 		// makes back-to-back writes two states apart legal).
 		if (walker_cas2_go) begin
-				sd_cas       <= 0;
-				sd_we        <= 0;
 				sd_data      <= walker_wdata_latch[15:0];
 				sd_dqm       <= 0;
 		end
@@ -718,13 +725,11 @@ always @ (posedge sysclk) begin
 			// later; auto-precharging on the FIRST command would put the
 			// bank into precharge under that second command (undefined on
 			// real silicon).  Hold the row open here and let the second
-			// command carry A10 instead.
-			sd_cas          <= cas_sd_cas;
+			// command carry A10 instead -- cas_sd_cas above carries that.
 			sd_dqm          <= 0;
 			if(!cas_sd_we) begin
 				sd_data      <= datawr;
 				sd_dqm       <= cas_dqm;
-				sd_we        <= 0;
 			end
 		end
 	end
