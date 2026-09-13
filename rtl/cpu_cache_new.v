@@ -459,34 +459,31 @@ always @ (posedge clk) begin
         else cpu_sm_state <= CPU_SM_READ;
       end
       CPU_SM_READ : begin
-        // on hit update LRU flag in tag memory
-        if (hit_i0) begin
-          // data is already in instruction cache way 0
-          cpu_dat_r <= idram0_cpu_dat_r;
+        // The tag row, index, way and the fill's index/tag are loaded on
+        // EVERY pass through this state, whichever way hits or none: their
+        // only consumers are qualified by tagupd_hit_v / tagupd_fill_v /
+        // cpu_sm_*tag_we / fill_active, so nothing changes functionally,
+        // and the hit compare leaves the load enables of these sixty-odd
+        // registers.  That enable cone -- M10K tag output, 18-bit compare,
+        // the way priority, then one enable net into all of them -- was
+        // the worst setup path at READ_PIPE 0 (9.3 ns for 8.8, -0.685 on
+        // the ebdc9ffc fit, the ena arrival alone 1.3 ns of routing).
+        // The compare now reaches only D inputs: the data mux below, the
+        // ack, the two flags and the state.  On a miss cpu_dat_r holds a
+        // meaningless word until FILL1 overwrites it before cpu_ack.
+        tagupd_idx  <= cpu_adr_idx;
+        tagupd_tram <= cpu_ir ? rd_itag : rd_dtag;
+        tagupd_is_i <= cpu_ir;
+        tagupd_lru  <= cpu_ir ? hit_i1 : hit_d1;
+        fill_idx    <= cpu_adr_idx;
+        fill_tag    <= cpu_adr_tag;
+        cpu_dat_r   <= hit_i0 ? idram0_cpu_dat_r :
+                       hit_i1 ? idram1_cpu_dat_r :
+                       hit_d0 ? ddram0_cpu_dat_r : ddram1_cpu_dat_r;
+        if (hit_i0 || hit_i1 || hit_d0 || hit_d1) begin
+          // data is already in the cache: LRU flag update in tag memory
           cpu_ack <= 1'b1;
-          tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b0;
-          tagupd_idx <= cpu_adr_idx; tagupd_tram <= rd_itag;
-          cpu_sm_state <= CPU_SM_WAIT;
-        end else if (hit_i1) begin
-          // data is already in instruction cache way 1
-          cpu_dat_r <= idram1_cpu_dat_r;
-          cpu_ack <= 1'b1;
-          tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b1; tagupd_lru <= 1'b1;
-          tagupd_idx <= cpu_adr_idx; tagupd_tram <= rd_itag;
-          cpu_sm_state <= CPU_SM_WAIT;
-        end else if (hit_d0) begin
-          // data is already in data cache way 0
-          cpu_dat_r <= ddram0_cpu_dat_r;
-          cpu_ack <= 1'b1;
-          tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b0; tagupd_lru <= 1'b0;
-          tagupd_idx <= cpu_adr_idx; tagupd_tram <= rd_dtag;
-          cpu_sm_state <= CPU_SM_WAIT;
-        end else if (hit_d1) begin
-          // data is already in data cache way 1
-          cpu_dat_r <= ddram1_cpu_dat_r;
-          cpu_ack <= 1'b1;
-          tagupd_hit_v <= 1'b1; tagupd_is_i <= 1'b0; tagupd_lru <= 1'b1;
-          tagupd_idx <= cpu_adr_idx; tagupd_tram <= rd_dtag;
+          tagupd_hit_v <= 1'b1;
           cpu_sm_state <= CPU_SM_WAIT;
         end else begin
           // on miss fetch data from SDRAM
@@ -494,8 +491,6 @@ always @ (posedge clk) begin
           cpu_sm_state <= CPU_SM_FILL1;
           fill_active  <= 1'b1;
           fill_snooped <= 1'b0;
-          fill_idx     <= cpu_adr_idx;
-          fill_tag     <= cpu_adr_tag;
         end
       end
       CPU_SM_WAIT : begin
