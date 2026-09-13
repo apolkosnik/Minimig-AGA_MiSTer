@@ -2,6 +2,11 @@
 # Build and run all AP040 tests with Icarus Verilog.
 # Usage: run_tests.sh [workdir]
 #
+# The default regression is run_verilator_suite.py (Verilator, two-state);
+# it covers every leg below except the snoop bench's X-poison family
+# (cache_snoop_x / cache_snoop_ce4, -DSNOOP_MIXED_X), which needs four-state
+# simulation and therefore lives only here.
+#
 # Both phases run concurrently: the bench compiles are independent of each
 # other once the two generated sources exist, and every simulation leg is
 # independent of every other.  Each leg writes its own log and its own

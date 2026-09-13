@@ -813,9 +813,14 @@ task fill_line;
 		fill_addr <= a;
 		fill_req  <= 1'b1;
 		fill_to = 0;
+		// The beat counters belong to the posedge monitor, which clears them
+		// on the edge that sees fill_req rise.  Sample them on the opposite
+		// edge so this wait never races the monitor's clear (a second fill
+		// would otherwise see the previous fill's count of 4 and stop early).
 		@(posedge clk113);
+		@(negedge clk113);
 		while (!(d_beats >= 4 && z_beats >= 4) && fill_to < 4000) begin
-			@(posedge clk113);
+			@(negedge clk113);
 			fill_to = fill_to + 1;
 		end
 		if (fill_to >= 4000) begin
@@ -909,13 +914,217 @@ task verify_memory;
 	end
 endtask
 
-//---------------------------------------------------------------------------
-// driver
-//---------------------------------------------------------------------------
 integer init_to;
 integer err_mark;
 integer lat_grant, lat_core, lat_req;
 integer zlat_grant;
+
+// The functional battery: everything after the init probe's verdict.
+// A task, so the +no_module run (probe check only) skips it without
+// relying on $finish stopping the process at once -- Verilator keeps
+// executing the caller until it next blocks.
+task functional_battery;
+	begin
+		if (d_dual_ok !== 1'b1) begin
+			$display("FAIL: DUAL probe missed the present module (dual_ok=%b)",
+			         d_dual_ok);
+			errors = errors + 1;
+		end
+		if (z_dual_ok !== 1'b1) begin
+			$display("FAIL: DUAL=0 build must tie dual_ok on (got %b)", z_dual_ok);
+			errors = errors + 1;
+		end
+		// the probe wrote its patterns through unit 0: restore the image
+		poke_word(24'h0, pat(24'h0));
+		poke_word(24'h1, pat(24'h1));
+
+		mon_en = 1;
+		$display("init complete at cycle %0d, equivalence monitor armed", cyc);
+
+		//----------------------------------------------------------------
+		// chipset reads: all four rotations inside an aligned block, so the
+		// dual build's partner-unit read and the wrapped chip48 order are
+		// both exercised
+		//----------------------------------------------------------------
+		err_mark = errors;
+		chip_read_check(24'h000100);   // block word 0
+		chip_read_check(24'h000101);   // block word 1
+		chip_read_check(24'h000102);   // block word 2
+		chip_read_check(24'h000103);   // block word 3
+		chip_read_check(24'h000287);
+		chip_read_check(24'h0003AA);
+		if (errors == err_mark)
+			$display("chipset reads: chipRD and chip48 match the reference in all rotations");
+
+		//----------------------------------------------------------------
+		// chipset writes: one lane only, byte enables, partner word intact
+		//----------------------------------------------------------------
+		err_mark = errors;
+		chip_write(24'h000200, 1'b0, 1'b0, 16'h1234);   // even word -> secondary
+		chip_write(24'h000201, 1'b0, 1'b0, 16'h5678);   // odd  word -> primary
+		chip_write(24'h000202, 1'b0, 1'b1, 16'hAB00);   // upper byte only
+		chip_write(24'h000203, 1'b1, 1'b0, 16'h00CD);   // lower byte only
+		chip_read_check(24'h000200);
+		chip_read_check(24'h000202);
+		// the partner words of the block must be untouched
+		chip_read_check(24'h000204);
+		if (errors == err_mark)
+			$display("chipset writes: byte-masked single-lane writes verified");
+
+		//----------------------------------------------------------------
+		// CPU port through cpu_cache_new (16-bit): fill order and write path
+		//----------------------------------------------------------------
+		err_mark = errors;
+		cpu_read (24'h000400, shadow[15'h0400]);
+		cpu_read (24'h000401, shadow[15'h0401]);
+		cpu_read (24'h000403, shadow[15'h0403]);   // fill starting at block word 3
+		cpu_read (24'h000502, shadow[15'h0502]);   // fill starting at block word 2
+		cpu_write(24'h000600, 16'hCAFE);
+		cpu_write(24'h000601, 16'hBABE);
+		cpu_read (24'h000600, 16'hCAFE);
+		cpu_read (24'h000601, 16'hBABE);
+		if (errors == err_mark)
+			$display("cpu port: cached fills and write buffer match the reference");
+
+		//----------------------------------------------------------------
+		// walker port: 32-bit read and 32-bit write
+		//----------------------------------------------------------------
+		err_mark = errors;
+		walker_xfer(1'b1, 23'h000180, 32'h12345678);   // byte $600
+		walker_xfer(1'b0, 23'h000180, 32'h0);
+		if (r_wk_rdata !== 32'h12345678) begin
+			$display("FAIL: reference walker read = %h", r_wk_rdata);
+			errors = errors + 1;
+		end
+		if (d_wk_rdata !== 32'h12345678) begin
+			$display("FAIL: DUAL walker read = %h", d_wk_rdata);
+			errors = errors + 1;
+		end
+		if (z_wk_rdata !== 32'h12345678) begin
+			$display("FAIL: DUAL=0 walker read = %h", z_wk_rdata);
+			errors = errors + 1;
+		end
+		walker_xfer(1'b0, 23'h000100, 32'h0);          // byte $400 = words $200/$201
+		if (d_wk_rdata !== {shadow[15'h0200], shadow[15'h0201]}) begin
+			$display("FAIL: DUAL walker image read = %h, expected %h%h",
+			         d_wk_rdata, shadow[15'h0200], shadow[15'h0201]);
+			errors = errors + 1;
+		end
+		if (errors == err_mark)
+			$display("walker port: 32-bit read/write identical to the reference");
+
+		//----------------------------------------------------------------
+		// 3. line fill latency, quiet bus
+		//----------------------------------------------------------------
+		fill_line(21'h00080);            // byte $800
+		fill_check(21'h00080);
+		if (d_grant_cyc < 0) begin
+			$display("FAIL: DUAL fill was never granted a slot");
+			errors = errors + 1;
+		end
+		else begin
+			lat_grant = d_last_cyc - d_grant_cyc;
+			lat_req   = d_last_cyc - d_req_cyc;
+			lat_core  = (lat_grant + 3) / 4;     // core cycle = 4 clk_114 at ce=4
+			zlat_grant = z_last_cyc - z_grant_cyc;
+			$display("FILL LATENCY (DUAL=1): slot grant -> 4th beat = %0d clk_114 cycles = %0d core cycles at ce=4",
+			         lat_grant, lat_core);
+			$display("FILL LATENCY (DUAL=1): request -> 4th beat = %0d clk_114 cycles (includes the wait for the CCK slot)",
+			         lat_req);
+			$display("FILL LATENCY (DUAL=0): slot grant -> 4th beat = %0d clk_114 cycles (two slots, two beats per longword)",
+			         zlat_grant);
+			// gate: one ACTIVE + one burst, inside a single 16-cycle slot
+			if (lat_grant > 16) begin
+				$display("FAIL: DUAL fill needed more than one slot (%0d cycles)", lat_grant);
+				errors = errors + 1;
+			end
+			// gate T2 of the plan: a cache line fill in <= 8 core cycles.
+			// (8 clk_114 is not reachable by any command engine: tRCD=2 plus
+			// CL2=4 plus 3 burst beats plus the capture register is 15.)
+			if (lat_core > 8) begin
+				$display("FAIL: DUAL fill took %0d core cycles, gate is 8", lat_core);
+				errors = errors + 1;
+			end
+			if (zlat_grant <= lat_grant) begin
+				$display("FAIL: the 16-bit fallback (%0d) is not slower than the 32-bit fill (%0d) -- the dual path is not doing what it claims",
+				         zlat_grant, lat_grant);
+				errors = errors + 1;
+			end
+		end
+
+		//----------------------------------------------------------------
+		// line fill under chipset traffic (the arbiter must still let the
+		// chipset take its slot, and the fill must not lose beats)
+		//----------------------------------------------------------------
+		err_mark = errors;
+		fork
+			begin
+				fill_line(21'h00090);
+				fill_check(21'h00090);
+			end
+			begin
+				chip_cycle(24'h000300, 1'b1, 1'b0, 1'b0, 16'h0000);
+				chip_cycle(24'h000302, 1'b1, 1'b0, 1'b0, 16'h0000);
+				chip_cycle(24'h000304, 1'b1, 1'b0, 1'b0, 16'h0000);
+			end
+		join
+		if (errors == err_mark)
+			$display("line fill under chipset traffic: 4 beats delivered, data correct");
+
+		//----------------------------------------------------------------
+		// 5. coherence: what Agnus writes, the 32-bit fill port must read.
+		// This is the check that fails if chipset traffic is confined to one
+		// chip of the pair.
+		//----------------------------------------------------------------
+		chip_write(24'h000A00, 1'b0, 1'b0, 16'hDEAD);   // even word (secondary)
+		chip_write(24'h000A01, 1'b0, 1'b0, 16'hBEEF);   // odd word  (primary)
+		chip_write(24'h000A02, 1'b0, 1'b0, 16'hFEED);
+		chip_write(24'h000A03, 1'b0, 1'b0, 16'hFACE);
+		fill_line(21'h00140);                            // byte $1400
+		fill_check(21'h00140);
+		if (d_beat[0] !== 32'hDEADBEEF || d_beat[1] !== 32'hFEEDFACE) begin
+			$display("FAIL: chipset writes not coherent with the 32-bit fill port: beats %h %h",
+			         d_beat[0], d_beat[1]);
+			errors = errors + 1;
+		end
+		else
+			$display("coherence: chipset writes are visible to the 32-bit fill port");
+
+		//----------------------------------------------------------------
+		verify_memory();
+
+		repeat (64) @(posedge clk113);
+		mon_en = 0;
+
+		//----------------------------------------------------------------
+		if (ram_ref.ap_viol || ram_d1.ap_viol || ram_d2.ap_viol || ram_z.ap_viol) begin
+			$display("FAIL: %0d auto-precharge protocol violations (ref %0d, pri %0d, sec %0d, 16b %0d)",
+			         ram_ref.ap_viol + ram_d1.ap_viol + ram_d2.ap_viol + ram_z.ap_viol,
+			         ram_ref.ap_viol, ram_d1.ap_viol, ram_d2.ap_viol, ram_z.ap_viol);
+			errors = errors + ram_ref.ap_viol + ram_d1.ap_viol + ram_d2.ap_viol + ram_z.ap_viol;
+		end
+		if (ram_ref.open_viol || ram_d1.open_viol || ram_d2.open_viol || ram_z.open_viol) begin
+			$display("FAIL: %0d ACTIVE-into-open-bank violations (ref %0d, pri %0d, sec %0d, 16b %0d)",
+			         ram_ref.open_viol + ram_d1.open_viol + ram_d2.open_viol + ram_z.open_viol,
+			         ram_ref.open_viol, ram_d1.open_viol, ram_d2.open_viol, ram_z.open_viol);
+			errors = errors + ram_ref.open_viol + ram_d1.open_viol + ram_d2.open_viol + ram_z.open_viol;
+		end
+		if (ram_ref.ref_viol || ram_d1.ref_viol || ram_d2.ref_viol || ram_z.ref_viol) begin
+			$display("FAIL: %0d refresh-with-open-bank violations",
+			         ram_ref.ref_viol + ram_d1.ref_viol + ram_d2.ref_viol + ram_z.ref_viol);
+			errors = errors + ram_ref.ref_viol + ram_d1.ref_viol + ram_d2.ref_viol + ram_z.ref_viol;
+		end
+
+		if (lockerr == 0)
+			$display("lockstep: chip 2 saw the same command as chip 1 on all %0d cycles", cyc);
+		else
+			$display("lockstep: %0d mismatching cycles", lockerr);
+	end
+endtask
+
+//---------------------------------------------------------------------------
+// driver
+//---------------------------------------------------------------------------
 
 initial begin
 	$display("tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)");
@@ -949,204 +1158,9 @@ initial begin
 			errors = errors + 1;
 		end
 		$display("no-module probe check only; functional battery skipped");
-		if (errors == 0) $display("ALL TESTS PASSED");
-		else $display("TEST FAILED with %0d errors", errors);
-		$finish;
-	end
-	if (d_dual_ok !== 1'b1) begin
-		$display("FAIL: DUAL probe missed the present module (dual_ok=%b)",
-		         d_dual_ok);
-		errors = errors + 1;
-	end
-	if (z_dual_ok !== 1'b1) begin
-		$display("FAIL: DUAL=0 build must tie dual_ok on (got %b)", z_dual_ok);
-		errors = errors + 1;
-	end
-	// the probe wrote its patterns through unit 0: restore the image
-	poke_word(24'h0, pat(24'h0));
-	poke_word(24'h1, pat(24'h1));
-
-	mon_en = 1;
-	$display("init complete at cycle %0d, equivalence monitor armed", cyc);
-
-	//----------------------------------------------------------------
-	// chipset reads: all four rotations inside an aligned block, so the
-	// dual build's partner-unit read and the wrapped chip48 order are
-	// both exercised
-	//----------------------------------------------------------------
-	err_mark = errors;
-	chip_read_check(24'h000100);   // block word 0
-	chip_read_check(24'h000101);   // block word 1
-	chip_read_check(24'h000102);   // block word 2
-	chip_read_check(24'h000103);   // block word 3
-	chip_read_check(24'h000287);
-	chip_read_check(24'h0003AA);
-	if (errors == err_mark)
-		$display("chipset reads: chipRD and chip48 match the reference in all rotations");
-
-	//----------------------------------------------------------------
-	// chipset writes: one lane only, byte enables, partner word intact
-	//----------------------------------------------------------------
-	err_mark = errors;
-	chip_write(24'h000200, 1'b0, 1'b0, 16'h1234);   // even word -> secondary
-	chip_write(24'h000201, 1'b0, 1'b0, 16'h5678);   // odd  word -> primary
-	chip_write(24'h000202, 1'b0, 1'b1, 16'hAB00);   // upper byte only
-	chip_write(24'h000203, 1'b1, 1'b0, 16'h00CD);   // lower byte only
-	chip_read_check(24'h000200);
-	chip_read_check(24'h000202);
-	// the partner words of the block must be untouched
-	chip_read_check(24'h000204);
-	if (errors == err_mark)
-		$display("chipset writes: byte-masked single-lane writes verified");
-
-	//----------------------------------------------------------------
-	// CPU port through cpu_cache_new (16-bit): fill order and write path
-	//----------------------------------------------------------------
-	err_mark = errors;
-	cpu_read (24'h000400, shadow[15'h0400]);
-	cpu_read (24'h000401, shadow[15'h0401]);
-	cpu_read (24'h000403, shadow[15'h0403]);   // fill starting at block word 3
-	cpu_read (24'h000502, shadow[15'h0502]);   // fill starting at block word 2
-	cpu_write(24'h000600, 16'hCAFE);
-	cpu_write(24'h000601, 16'hBABE);
-	cpu_read (24'h000600, 16'hCAFE);
-	cpu_read (24'h000601, 16'hBABE);
-	if (errors == err_mark)
-		$display("cpu port: cached fills and write buffer match the reference");
-
-	//----------------------------------------------------------------
-	// walker port: 32-bit read and 32-bit write
-	//----------------------------------------------------------------
-	err_mark = errors;
-	walker_xfer(1'b1, 23'h000180, 32'h12345678);   // byte $600
-	walker_xfer(1'b0, 23'h000180, 32'h0);
-	if (r_wk_rdata !== 32'h12345678) begin
-		$display("FAIL: reference walker read = %h", r_wk_rdata);
-		errors = errors + 1;
-	end
-	if (d_wk_rdata !== 32'h12345678) begin
-		$display("FAIL: DUAL walker read = %h", d_wk_rdata);
-		errors = errors + 1;
-	end
-	if (z_wk_rdata !== 32'h12345678) begin
-		$display("FAIL: DUAL=0 walker read = %h", z_wk_rdata);
-		errors = errors + 1;
-	end
-	walker_xfer(1'b0, 23'h000100, 32'h0);          // byte $400 = words $200/$201
-	if (d_wk_rdata !== {shadow[15'h0200], shadow[15'h0201]}) begin
-		$display("FAIL: DUAL walker image read = %h, expected %h%h",
-		         d_wk_rdata, shadow[15'h0200], shadow[15'h0201]);
-		errors = errors + 1;
-	end
-	if (errors == err_mark)
-		$display("walker port: 32-bit read/write identical to the reference");
-
-	//----------------------------------------------------------------
-	// 3. line fill latency, quiet bus
-	//----------------------------------------------------------------
-	fill_line(21'h00080);            // byte $800
-	fill_check(21'h00080);
-	if (d_grant_cyc < 0) begin
-		$display("FAIL: DUAL fill was never granted a slot");
-		errors = errors + 1;
-	end
-	else begin
-		lat_grant = d_last_cyc - d_grant_cyc;
-		lat_req   = d_last_cyc - d_req_cyc;
-		lat_core  = (lat_grant + 3) / 4;     // core cycle = 4 clk_114 at ce=4
-		zlat_grant = z_last_cyc - z_grant_cyc;
-		$display("FILL LATENCY (DUAL=1): slot grant -> 4th beat = %0d clk_114 cycles = %0d core cycles at ce=4",
-		         lat_grant, lat_core);
-		$display("FILL LATENCY (DUAL=1): request -> 4th beat = %0d clk_114 cycles (includes the wait for the CCK slot)",
-		         lat_req);
-		$display("FILL LATENCY (DUAL=0): slot grant -> 4th beat = %0d clk_114 cycles (two slots, two beats per longword)",
-		         zlat_grant);
-		// gate: one ACTIVE + one burst, inside a single 16-cycle slot
-		if (lat_grant > 16) begin
-			$display("FAIL: DUAL fill needed more than one slot (%0d cycles)", lat_grant);
-			errors = errors + 1;
-		end
-		// gate T2 of the plan: a cache line fill in <= 8 core cycles.
-		// (8 clk_114 is not reachable by any command engine: tRCD=2 plus
-		// CL2=4 plus 3 burst beats plus the capture register is 15.)
-		if (lat_core > 8) begin
-			$display("FAIL: DUAL fill took %0d core cycles, gate is 8", lat_core);
-			errors = errors + 1;
-		end
-		if (zlat_grant <= lat_grant) begin
-			$display("FAIL: the 16-bit fallback (%0d) is not slower than the 32-bit fill (%0d) -- the dual path is not doing what it claims",
-			         zlat_grant, lat_grant);
-			errors = errors + 1;
-		end
-	end
-
-	//----------------------------------------------------------------
-	// line fill under chipset traffic (the arbiter must still let the
-	// chipset take its slot, and the fill must not lose beats)
-	//----------------------------------------------------------------
-	err_mark = errors;
-	fork
-		begin
-			fill_line(21'h00090);
-			fill_check(21'h00090);
-		end
-		begin
-			chip_cycle(24'h000300, 1'b1, 1'b0, 1'b0, 16'h0000);
-			chip_cycle(24'h000302, 1'b1, 1'b0, 1'b0, 16'h0000);
-			chip_cycle(24'h000304, 1'b1, 1'b0, 1'b0, 16'h0000);
-		end
-	join
-	if (errors == err_mark)
-		$display("line fill under chipset traffic: 4 beats delivered, data correct");
-
-	//----------------------------------------------------------------
-	// 5. coherence: what Agnus writes, the 32-bit fill port must read.
-	// This is the check that fails if chipset traffic is confined to one
-	// chip of the pair.
-	//----------------------------------------------------------------
-	chip_write(24'h000A00, 1'b0, 1'b0, 16'hDEAD);   // even word (secondary)
-	chip_write(24'h000A01, 1'b0, 1'b0, 16'hBEEF);   // odd word  (primary)
-	chip_write(24'h000A02, 1'b0, 1'b0, 16'hFEED);
-	chip_write(24'h000A03, 1'b0, 1'b0, 16'hFACE);
-	fill_line(21'h00140);                            // byte $1400
-	fill_check(21'h00140);
-	if (d_beat[0] !== 32'hDEADBEEF || d_beat[1] !== 32'hFEEDFACE) begin
-		$display("FAIL: chipset writes not coherent with the 32-bit fill port: beats %h %h",
-		         d_beat[0], d_beat[1]);
-		errors = errors + 1;
 	end
 	else
-		$display("coherence: chipset writes are visible to the 32-bit fill port");
-
-	//----------------------------------------------------------------
-	verify_memory();
-
-	repeat (64) @(posedge clk113);
-	mon_en = 0;
-
-	//----------------------------------------------------------------
-	if (ram_ref.ap_viol || ram_d1.ap_viol || ram_d2.ap_viol || ram_z.ap_viol) begin
-		$display("FAIL: %0d auto-precharge protocol violations (ref %0d, pri %0d, sec %0d, 16b %0d)",
-		         ram_ref.ap_viol + ram_d1.ap_viol + ram_d2.ap_viol + ram_z.ap_viol,
-		         ram_ref.ap_viol, ram_d1.ap_viol, ram_d2.ap_viol, ram_z.ap_viol);
-		errors = errors + ram_ref.ap_viol + ram_d1.ap_viol + ram_d2.ap_viol + ram_z.ap_viol;
-	end
-	if (ram_ref.open_viol || ram_d1.open_viol || ram_d2.open_viol || ram_z.open_viol) begin
-		$display("FAIL: %0d ACTIVE-into-open-bank violations (ref %0d, pri %0d, sec %0d, 16b %0d)",
-		         ram_ref.open_viol + ram_d1.open_viol + ram_d2.open_viol + ram_z.open_viol,
-		         ram_ref.open_viol, ram_d1.open_viol, ram_d2.open_viol, ram_z.open_viol);
-		errors = errors + ram_ref.open_viol + ram_d1.open_viol + ram_d2.open_viol + ram_z.open_viol;
-	end
-	if (ram_ref.ref_viol || ram_d1.ref_viol || ram_d2.ref_viol || ram_z.ref_viol) begin
-		$display("FAIL: %0d refresh-with-open-bank violations",
-		         ram_ref.ref_viol + ram_d1.ref_viol + ram_d2.ref_viol + ram_z.ref_viol);
-		errors = errors + ram_ref.ref_viol + ram_d1.ref_viol + ram_d2.ref_viol + ram_z.ref_viol;
-	end
-
-	if (lockerr == 0)
-		$display("lockstep: chip 2 saw the same command as chip 1 on all %0d cycles", cyc);
-	else
-		$display("lockstep: %0d mismatching cycles", lockerr);
+		functional_battery();
 
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else             $display("TEST FAILED with %0d errors", errors);

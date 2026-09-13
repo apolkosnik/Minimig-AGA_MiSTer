@@ -1,6 +1,15 @@
 AP040 test suite
 ================
 
+Run everything under Verilator (two-state) with
+
+  python3 tests/ap040/run_verilator_suite.py --work /tmp/ap040-suite
+
+which drives every run_verilator.py preset (core, chip, sdram, dualram,
+cache-unit, yc-equiv, boot-bridge) and every self-checking unit bench below,
+with the negative controls required to fail.  run_tests.sh (Icarus) is kept
+for the snoop bench's X-poison legs only; they need four-state simulation.
+
 Testbenches (Icarus Verilog -g2012 and ModelSim, see run_tests.sh):
 
   tb_ap040_reset.v      milestone B: reset vector fetch, 16-bit bus adapter

@@ -96,6 +96,16 @@ interrupt-injection interface. Run `t_exceptions` in the core/chip benches.
 Use Verilator; the legacy `run_tests.sh` invokes Icarus and is not used here.
 All generated files and bounded subprocess logs go under `--work`.
 
+The whole regression in one command (every program bench preset and every
+self-checking unit bench, negative controls inverted; only the snoop bench's
+X-poison legs stay with Icarus because they need four-state simulation):
+
+```sh
+python3 tests/ap040/run_verilator_suite.py --work /tmp/ap040-suite
+```
+
+Individual benches:
+
 ```sh
 python3 tests/ap040/run_verilator.py --work /tmp/ap040-core
 python3 tests/ap040/run_verilator.py --bench cache-unit --work /tmp/ap040-cache
