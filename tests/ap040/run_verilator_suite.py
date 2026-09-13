@@ -54,7 +54,9 @@ UNIT_RUNS = {
     "cart_hrtmon":        U("tb_cart_hrtmon", [HERE / "tb_cart_hrtmon.v", RTL / "cart.v"], [("cart_hrtmon", [], False)]),
     "sdram32":            U("tb_sdram32", [HERE / "tb_sdram32.v", RTL / "sdram32_ctrl.v", "SDRAM_SIM", RTL / "cpu_cache_new.v", HERE / "sim_dpram.v"],
                            [("sdram32", [], False), ("sdram32_nomod", ["+no_module"], False),
-                            ("sdram32_brk_lock", ["+break_lockstep"], True), ("sdram32_brk_lane", ["+break_laneswap"], True), ("sdram32_brk_wr", ["+break_chipwr"], True)]),
+                            ("sdram32_brk_lock", ["+break_lockstep"], True), ("sdram32_brk_lane", ["+break_laneswap"], True), ("sdram32_brk_wr", ["+break_chipwr"], True),
+                            ("sdram32_brk_rowshare", ["+break_rowshare"], True),
+                            ("sdram32_brk_slotphase", ["+break_slotphase"], True)]),
     "sdram32_rp1":        U("tb_sdram32", [HERE / "tb_sdram32.v", RTL / "sdram32_ctrl.v", "SDRAM_SIM", RTL / "cpu_cache_new.v", HERE / "sim_dpram.v"], [("sdram32_rp1", [], False)]),
     "cache_snoop":        U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"], [("cache_snoop", [], False)]),
     # CE_DIV 4 is how P2 runs the cache on silicon; the two-state geometry check

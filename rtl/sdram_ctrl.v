@@ -300,13 +300,24 @@ assign chip48 = {chip48_1, chip48_2, chip48_3};
 ////////////////////////////////////////
 
 
+// The edge that starts a new slot.  sdram_state goes to 0 either by wrapping
+// from 15 or because the 7MHz rise pulled it back, and everything that has to
+// be ready for state 0 -- the init counter, pre_sel, the RAS row -- is loaded
+// here rather than at state 15, so a slot cut short by the resynchronisation
+// still gets a row instead of leaving the previous slot's CAS column in place
+// (tb_sdram32 +break_slotphase).  In steady state the two are the same edge.
+reg        old_7m_q;
+always @ (posedge sysclk) old_7m_q <= c_7m;
+wire [3:0] next_sdram_state = (~old_7m_q & c_7m) ? 4'd0 : (sdram_state + 4'd1);
+wire       slot_start       = (next_sdram_state == 4'd0);
+
 //// init counter ////
 always @ (posedge sysclk) begin
 	if(!reset) begin
 		initstate <= 0;
 		init_done <= 0;
 	end else begin
-		if (sdram_state == 15) begin
+		if (slot_start) begin
 			if(~&initstate) initstate <= initstate + 1'd1;
 			else init_done <= 1;
 		end
@@ -350,7 +361,6 @@ end
 // registers and the cache snoop cone.  next_sdram_state mirrors the
 // counter including the 7MHz resync, so every flag is exact even on the
 // cycle the counter is yanked back to zero.
-reg        old_7m_q;
 reg        ras_go;          // high during state 0
 // sd_addr's input cone, one LUT deep.
 //
@@ -381,8 +391,6 @@ reg        ras_go;          // high during state 0
 reg        sel_ras;      // the next edge loads the RAS row
 reg        sel_cas;      // the next edge loads a CAS word
 reg        walker_cas2_go;  // high during state 4 of a walker write slot
-always @ (posedge sysclk) old_7m_q <= c_7m;
-wire [3:0] next_sdram_state = (~old_7m_q & c_7m) ? 4'd0 : (sdram_state + 4'd1);
 always @ (posedge sysclk) begin
 	ras_go         <= (next_sdram_state == 4'd0);
 	sel_ras        <= (next_sdram_state == 4'd0);
@@ -465,7 +473,7 @@ always @(posedge sysclk) begin
 		row_col   <= (13'd1 << 10);
 		ras_local <= 1'b0;
 	end
-	else if (sdram_state == 4'd15) begin
+	else if (slot_start) begin
 		// Everything but the chipset that can make state 0 issue a RAS-class
 		// command, decided on the same edge that decides pre_sel and from the
 		// same expressions.  rcnt only moves at state 0 and initstate only at

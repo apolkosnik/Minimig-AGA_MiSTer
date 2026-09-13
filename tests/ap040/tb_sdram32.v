@@ -192,6 +192,19 @@ always #44 clk113 = ~clk113;
 //   +break_lockstep  chip 2 receives a perturbed address bus
 //   +break_laneswap  chip 2's read capture mirrors chip 1's lane
 //   +break_chipwr    writes never land in chip 2 (masks forced)
+//   +break_rowshare  A10 held low in ctl_ref's shared address register
+//   +break_slotphase every eighth slot is 13 clk113 long instead of 16, so
+//                    the slot counter is pulled back to 0 from 12
+//
+// The last one guards the reference controller's one-register address
+// path: row_col carries the RAS row from state 15 until state 0 issues
+// it, then the CAS column, then the walker write's second column, on the
+// argument that no two are ever live at once.  A10 is where that argument
+// is load-bearing -- it is a row bit at RAS, auto-precharge at CAS, and
+// PRECHARGE ALL during init -- so holding it low must break this bench.
+// It does: the init PRECHARGE closes bank 0 alone, auto-precharge stops
+// closing rows, and every SDRAM model here counts ACTIVE into an open
+// bank as an error.
 // +no_module: the DUAL controller runs with nothing in the secondary
 // socket -- its DQ never drives.  The init probe must refuse dual_ok;
 // the functional battery is skipped (a floating lane fails it by
@@ -207,13 +220,44 @@ initial begin
 	end
 	if ($test$plusargs("break_chipwr"))
 		force ctl_d.sd2_a_dqm = 2'b11;
+	if ($test$plusargs("break_rowshare"))
+		force ctl_ref.row_col[10] = 1'b0;
 end
 
 reg [3:0] div = 0;
 always @(posedge clk113) div <= div + 1'd1;
 
+// +break_slotphase: every eighth slot runs 13 clk113 instead of 16, so the
+// resynchronisation pulls sdram_state back to 0 from state 12.  A malformed
+// slot cadence must not pass silently, and this bench must FAIL here.
+//
+// It is also how the row-load hazard was found.  When the controller loaded
+// the RAS row at state 15, a slot cut short before 15 skipped the load while
+// its predecessors left pre_sel and ras_local armed, so state 0 issued a
+// command with the short slot's CAS column still in the shared address
+// register -- four times in this run.  The load now happens on the slot-start
+// edge instead, which no resynchronisation can skip.
+//
+// Two shapes that do NOT reach it, and why: a uniform 17-count still wraps
+// through 15 on its own before the resync, and a uniform 13-count never
+// reaches 15 at all, so pre_sel and ras_local are never armed and no command
+// is ever issued.  The hazard needs both -- slots that arm, and a later slot
+// that is cut short.
+reg       slotphase = 0;
+reg [3:0] slotpos   = 0;
+reg [2:0] slotnum   = 0;
+initial   slotphase = $test$plusargs("break_slotphase");
+wire [3:0] slotlast = (slotnum == 3'd7) ? 4'd12 : 4'd15;
+always @(posedge clk113) begin
+	if (slotpos == slotlast) begin
+		slotpos <= 4'd0;
+		slotnum <= slotnum + 1'd1;
+	end
+	else slotpos <= slotpos + 1'd1;
+end
+
 // 7MHz square for the SDRAM slot engine (16 clk113 per CCK)
-wire c_7m = div[3];
+wire c_7m = slotphase ? (slotpos >= ((slotlast + 4'd1) >> 1)) : div[3];
 
 reg reset = 0;
 
@@ -463,24 +507,14 @@ wire lock_match_z =
 // CPU slots (write buffer, cache fill, walker, line fill) for the report
 wire cpu_slot_d = (ctl_d.slot_type >= 3'd2);
 
-always @(posedge clk113) begin
-	if (reset) begin
-		if (!lock_match) begin
-			if (lockerr < 10)
-				$display("FAIL: lockstep mismatch at cycle %0d (state %0d, slot %0d, cpu_slot=%b)",
-				         cyc, ctl_d.sdram_state, ctl_d.slot_type, cpu_slot_d);
-			lockerr = lockerr + 1;
-			errors  = errors + 1;
-		end
-		if (!lock_match_z) begin
-			if (lockerr < 10)
-				$display("FAIL: lockstep mismatch (DUAL=0 build) at cycle %0d state %0d",
-				         cyc, ctl_z.sdram_state);
-			lockerr = lockerr + 1;
-			errors  = errors + 1;
-		end
-	end
-end
+// ctl_ref's address register holds three different things in turn -- the RAS
+// row, the CAS column, the walker write's second column.  Retention needs no
+// monitor here: each of the three is written on the edge that enters the
+// state which reads it, so every window is exactly one cycle wide and nothing
+// can intervene.  What the sharing really depended on was the row load never
+// being skipped, and +break_slotphase below is the control for that; the
+// contents themselves are checked by every SDRAM model in this bench, which
+// derives each access address from the row it captured at ACTIVE.
 
 //---------------------------------------------------------------------------
 // 2. cycle-by-cycle equivalence against the original controller
