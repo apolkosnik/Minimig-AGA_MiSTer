@@ -364,75 +364,6 @@ always @ (posedge sysclk) begin
 	                   (next_sdram_state >= 4'd6) && (next_sdram_state <= 4'd9);
 end
 
-// CAS-time address sources at module scope: the sd_addr register below is
-// clocked on the opposite edge of sysclk and has to read them.
-reg        cas_sd_we;
-reg  [1:0] cas_dqm;
-reg  [9:0] casaddr;
-reg [12:0] ras_row_pre;   // the CPU-side row, latched when the slot is granted
-
-// The address register, half a cycle later than the other SDRAM outputs.
-//
-// Everything the chipset drives reaches sd_addr through agnus -> gary ->
-// the bank mapper -> minimig_sram_bridge -> chipdma_arb, all of it
-// combinational, and it may only start when Agnus's clk7_en registers
-// change -- which is the same clk_28 edge on which c1 rises.  sdram_ctrl
-// detects that rise one cycle later and the RAS state captures one cycle
-// after that, so the whole chain had exactly two clk_114 cycles
-// (17.616 ns).  It does not fit: the last hop alone, from this module's
-// logic to the two address pins on the far side of the die (A[11] at
-// PIN_AD17, A[12] at PIN_D12), is 4.089 ns, and that class is the worst
-// path in the design -- in the last build that met timing too, where it
-// cleared by 0.091 ns.
-//
-// Clocking sd_addr on the FALLING edge, with every enable delayed one
-// state to compensate, moves each capture half a cycle later and gives
-// the chain 22.02 ns instead of 17.616.  What it spends is pin-level
-// margin, and there is room: sd_clk is forwarded from sdram_state[0], so
-// the SDRAM samples at the boundary into the even state, and the address
-// now changes in the middle of the odd state -- 4.4 ns of setup where an
-// SDRAM asks about 1.5, and hold grows by the same amount.  The command
-// pins keep their full 8.8 ns; only the address moves.
-// tests/ap040/sta/sdram_io.tcl measures both.
-//
-// The sources are chosen so nothing but the chipset address gains a late
-// path: slot_type and ras_row_pre are latched at the original instant by
-// the block above, and casaddr/cas_dqm/cas_sd_we are registers settled
-// long before.  chipAddr itself is stable for the whole 7 MHz tick, so
-// reading it later is free.
-reg ras_go_d, cas_go_d, walker_cas2_go_d, init_go_d;
-reg [3:0] initstate_d;
-always @ (posedge sysclk) begin
-	ras_go_d         <= ras_go;
-	cas_go_d         <= cas_go;
-	walker_cas2_go_d <= walker_cas2_go;
-	init_go_d        <= !init_done && (sdram_state == 0);
-	initstate_d      <= initstate;
-end
-always @ (negedge sysclk) begin
-	if (init_go_d) begin
-		case (initstate_d)
-			4  : sd_addr[10] <= 1;                  // PRECHARGE all banks
-			13 : sd_addr <= 13'b0001000100010;      // CL=2, BURST=4
-			default: ;
-		endcase
-	end
-	else begin
-		// RAS: the row, chosen by the slot the block above just granted
-		if (ras_go_d) begin
-			if (slot_type == CHIP)      sd_addr <= chipAddr[22:10];
-			else if (slot_type != IDLE) sd_addr <= ras_row_pre;
-		end
-		// walker write's second CAS: column+1 with A10 precharge
-		if (walker_cas2_go_d) sd_addr <= {1'b1, casaddr[9:1], 1'b1};
-		// CAS: the column, A10 carrying auto-precharge
-		if (cas_go_d) begin
-			sd_addr <= {!walker_wr_slot, casaddr};
-			if (!cas_sd_we) sd_addr[12:11] <= cas_dqm;
-		end
-	end
-end
-
 //// sdram control ////
 
 // The walker request is registered before it reaches the slot arbiter.  It
@@ -554,7 +485,10 @@ end
 
 always @ (posedge sysclk) begin
 	reg        cas_sd_cas;
+	reg        cas_sd_we;
+	reg  [1:0] cas_dqm;
 	reg [15:0] datawr;
+	reg  [9:0] casaddr;
 	reg  [3:0] rcnt;
 	
 	sd_clk <= sdram_state[0];
@@ -578,6 +512,7 @@ always @ (posedge sysclk) begin
 		if(sdram_state == 0) begin
 			case(initstate)
 				4 : begin // PRECHARGE
+					sd_addr[10]  <= 1; // all banks
 					sd_ras       <= 0;
 					sd_cas       <= 1;
 					sd_we        <= 0;
@@ -591,6 +526,7 @@ always @ (posedge sysclk) begin
 					sd_ras       <= 0;
 					sd_cas       <= 0;
 					sd_we        <= 0;
+					sd_addr      <= 13'b0001000100010; // CL=2, BURST=4
 				end
 			endcase
 		end
@@ -607,7 +543,6 @@ always @ (posedge sysclk) begin
 
 		// RAS slot arbitration (state 0)
 		if (ras_go) begin
-				ras_row_pre     <= pre_row;   // for the late sd_addr register
 				cas_sd_cas      <= 1;
 				cas_sd_we       <= 1;
 				cas_dqm         <= 0;
@@ -621,7 +556,7 @@ always @ (posedge sysclk) begin
 				// (this includes anything on the "motherboard" - chip RAM, slow RAM and Kickstart, turbo modes notwithstanding)
 				if(~chipDMA | ~chipRW) begin
 					slot_type    <= CHIP;
-					{sd_ba,casaddr[8:0]} <= {chipAddr[24:23], chipAddr[9:1]};
+					{sd_ba,sd_addr,casaddr[8:0]} <= chipAddr;
 					sd_ras       <= 0;
 					cas_dqm      <= {chipU,chipL};
 					cas_sd_cas   <= 0;
@@ -637,7 +572,7 @@ always @ (posedge sysclk) begin
 				end
 				else if(pre_sel == PRE_WRITE) begin
 					slot_type    <= CPU_WRITECACHE;
-					{sd_ba,casaddr[8:0]} <= {pre_ba, pre_col[8:0]};
+					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
 					sd_ras       <= 0;
 					cas_dqm      <= write_dqm;
 					cas_sd_we    <= 0;
@@ -647,7 +582,7 @@ always @ (posedge sysclk) begin
 				end
 				else if(pre_sel == PRE_WALKER) begin
 					slot_type    <= walker_we ? WALKER_WRITE : WALKER_READ;
-					{sd_ba,casaddr[8:0]} <= {pre_ba, pre_col[8:0]};
+					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
 					sd_ras       <= 0;
 					cas_dqm      <= 0;
 					cas_sd_cas   <= 0;
@@ -657,7 +592,7 @@ always @ (posedge sysclk) begin
 				// request from read cache
 				else if(pre_sel == PRE_CACHE) begin
 					slot_type    <= CPU_READCACHE;
-					{sd_ba,casaddr[8:0]} <= {pre_ba, pre_col[8:0]};
+					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
 					sd_ras       <= 0;
 					cas_sd_cas   <= 0;
 				end
@@ -675,6 +610,7 @@ always @ (posedge sysclk) begin
 		// the low word of every 32-bit walker write is lost (tCCD=1 on SDR
 		// makes back-to-back writes two states apart legal).
 		if (walker_cas2_go) begin
+				sd_addr      <= {1'b1, casaddr[9:1], 1'b1}; // col+1, A10 precharge
 				sd_cas       <= 0;
 				sd_we        <= 0;
 				sd_data      <= walker_wdata_latch[15:0];
@@ -693,10 +629,12 @@ always @ (posedge sysclk) begin
 			// bank into precharge under that second command (undefined on
 			// real silicon).  Hold the row open here and let the second
 			// command carry A10 instead.
+			sd_addr         <= {!walker_wr_slot, casaddr}; // A10: AUTO PRECHARGE
 			sd_cas          <= cas_sd_cas;
 			sd_dqm          <= 0;
 			if(!cas_sd_we) begin
 				sd_data      <= datawr;
+				sd_addr[12:11]<= cas_dqm;
 				sd_dqm       <= cas_dqm;
 				sd_we        <= 0;
 			end
