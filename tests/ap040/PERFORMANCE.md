@@ -97,9 +97,8 @@ the fill engine waiting for four words of room before a speculative fetch
 | baseline (invalidate-on-write) | 1,481,317 | 11.4 | 262,367 |
 | cache update-on-hit | 1,185,604 | 9.1 | 262,367 |
 | + early issue, returns on the ack | 1,093,219 | 8.4 | 261,111 |
-| + line-wide fetch, room for four | 1,047,235 | 8.1 | 248,909 |
-| + direct dispatch from every safe completion | 989,635 | 7.6 | 248,378 |
-| + operands read in the execute state | 952,927 | 7.3 | 234,978 |
+| + direct dispatch from every safe completion | 1,047,235 | 8.1 | 260,855 |
+| + operands read in the execute state | 1,005,444 | 7.7 | 260,855 |
 
 With the real controllers and their phase relation to the CPU the same
 runs went 6,794,495 -> 6,140,447 clk_114 on the SDRAM bench and
@@ -126,9 +125,9 @@ dependent ALU operation went from three clocks to two (`bench_alu`
 
 The device is full, and two of these steps had to be reshaped to fit it.
 The fit of the second step needed 4,199 of the 4,191 LABs available.  Two
-synthesis variants located the cost: the line-wide fetch accounted for 27
-ALMs, and issuing data transfers from the calling state for 986.  The
-transfer issue was inlined at all 73 call sites of the read and write
+synthesis variants located the cost: issuing data transfers from the
+calling state accounted for 986 ALMs and the line-wide fetch's consumer
+for 27, though removing the feature outright gives back 506.  The
 tasks, each with its own copy of the port guard, the page-crossing compare,
 the function code and the address and data path.  Recording the request in
 one-cycle carriers and issuing it from a single block below the state
@@ -138,12 +137,40 @@ machine is cycle-for-cycle identical and costs nothing:
 |---|---:|
 | issue inlined at 73 sites | 41,144 |
 | early issue removed altogether | 40,158 |
-| issue from one block (now) | 40,152 |
+| issue from one block | 40,152 |
+| line-wide fetch also removed (now) | 39,646 |
 
-The line-wide fetch is cheap for the same reason: the queue's ring index is
-the word's offset within its line, so a line lands word k in entry k with
-enables only, and the cache hands the line over live from its RAM outputs
-in the acknowledge cycle rather than registering a copy.
+Synthesising every committed step gives the whole picture.  The baseline is
+the last bitstream that met timing, and it had 0.091 ns of slack:
+
+| Step | ALMs | Dhrystone clocks |
+|---|---:|---:|
+| baseline (last flashable) | 38,649 | 1,481,317 |
+| cache update-on-hit | 38,635 | 1,185,604 |
+| port work, issue inlined at 73 sites | 40,875 | 1,047,235 |
+| controller cache READ restructure | 40,838 | 1,047,235 |
+| direct dispatch | 41,392 | 989,635 |
+| operand read + one issue block | 40,152 | 952,927 |
+| line-wide fetch removed | 39,646 | 1,005,444 |
+
+The cache step, the largest single win, is free.  A build of the
+40,152-ALM tree fits at 98% of the device and then misses setup by
+2.058 ns -- not on the CPU, but on the chipset's Agnus-to-SDRAM address
+path, which the router cannot keep short at that occupancy.  Minimig.sdc
+now also gives the beam counter's display-configuration registers the
+budget they actually have: agnus_beamcounter writes them only when
+software writes the matching custom register, never per beam tick, and
+they were 86 of the design's 100 worst paths.
+
+A line-wide instruction fetch was tried alongside these steps and then
+removed.  The cache held its data in sixteen {way, word} RAMs so the hit
+way's whole line sat on the RAM outputs, handed it over with every
+acknowledge, and the queue took up to eight words per port transaction:
+fetch requests per run fell from 146,424 to 65,771 and the program from
+1,093,219 to 1,047,235 clocks.  It cost 506 ALMs for 5.5% of the cycles,
+the worst ratio of the set, on a device with no room to spare.  The
+READ_PIPE parameter it gave tb_sdram_turbo and tb_dualram_turbo stays
+(default FAST_CLOCK, as Minimig.sv keyed it).
 
 The next targets, by weight: stores (S_MWR is still a fifth of the time:
 posting the write and letting the successor run needs the access-error
