@@ -379,20 +379,47 @@ margin: the absolute figures it prints, around -5.3 to -6.1 ns, are the
 unpinned parity, not a violation.  The comparison that matters is with the
 reverted unpacking, which put two bits 3.9 ns and 12.7 ns behind the rest.
 
-### Margin, and what it costs the next change
+### Margin
 
-`74317588` passes by 0.097 ns in the worst corner, and the emu paths behind
-it are several unrelated families rather than one: the HPS bridge into
-`ddram_ctrl`'s state machine at +0.261, the controller cache's tag RAM into
-`cpu_ack` at +0.295, `sdata_reg -> walker_sdata_pipe` at +0.300, and
-`sd_addr[12]` still appearing three times in the tightest thirty.  The
-chipset address path is no longer among them.  Every path tighter than those
-is in `ascal`, the video scaler, which the gate tolerates by design.
+`d41be2fd` passes by 0.423 ns at 96% of the device, from `74317588`'s
+0.097 ns at 98%.
 
-So there is no headroom.  Anything added from here should expect to land
-negative on first fit, and the lever with evidence behind it is the one
-above: find a pin or boundary register that is written from several places
-and held in between, and give it one assignment and an explicit enable.
+What bought it was one parameter.  `74317588` bound in the Slow -40C corner
+on `ram1|cpu_cache|cpu_ack`, with four of the tightest twelve emu paths
+ending there: the controller cache deciding a hit combinationally from the
+tag RAM's output, three LUT levels and then 2.012 ns of route.
+`cpu_cache_new` has had the registered form behind `CACHE_READ_PIPE` all
+along; the shipping build simply had it off, and the benches default it to
+`FAST_CLOCK`, so the tested core and the built core disagreed about it.
+Turning it on removed `cpu_ack` from the tightest paths entirely and gave
+back 823 ALMs.
+
+It had been marked P2-only because dualram's `t_mmu` leg failed with it under
+the legacy clocking.  That was mis-attributed: the leg fails with the
+parameter off, and fails on `6ea3997d`, before any of this work.  See the
+open item below.
+
+The binding corner moved with it, from Slow -40C to Slow 100C, which is its
+own evidence that the cold-corner bottleneck is gone.  What binds now is the
+chipset address path again -- `bc1|hpos[6] -> ram1|sd_addr[12]`, +0.423, with
+`sd_addr[11]` and `[12]` taking most of the tightest ten -- so the next
+margin, if it is wanted, comes from the same place the first two nanoseconds
+did.
+
+`sdram_rp1` and `dualram_rp1` now cover the shipping configuration, because
+nothing did before.
+
+### Open: a pre-existing failure the regression does not run
+
+`dualram` + `t_mmu` at CPU_PHASE 3 fails, and has failed since at least
+`6ea3997d`.  `run_tests.sh` runs that bench with `t_fpu` only, so nothing
+catches it.  The bench's own STALE-I monitor fires first: an instruction
+fetch acknowledged by `ddram_ctrl` returns `0000` where the program image
+holds real opcodes, twice, and the run ends in an F-line exception on
+garbage at `pc=00008002`.  That is the shipping topology -- `ram1` is
+`sdram_ctrl` and `ram2` is `ddram_ctrl` -- so it deserves chasing on its own
+account.  It is unrelated to `CACHE_READ_PIPE`, which is only how it was
+found.
 
 ### Still unverified
 
