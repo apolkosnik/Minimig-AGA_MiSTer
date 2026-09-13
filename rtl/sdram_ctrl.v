@@ -360,22 +360,26 @@ reg        ras_go;          // high during state 0
 // two LUT levels.  The route from this module to the address pins is
 // 5.447 ns of the budget, so every level here is expensive.
 //
-// What is left is one 2:1 mux per bit: select sel_ras, sources ras_val and
-// cas_word, with sel_ras|sel_cas as the pin register's clock enable.  That is
-// five inputs, one level.  Getting there needs two things of the sources:
+// What is left is, per bit, one six-input LUT and nothing else:
 //
-//   - the two CAS words share one register.  cas_word is consumed at the end
-//     of state 2 and the walker's second CAS overwrites it at the end of
-//     state 3, so they are never live at the same time.
-//   - the init sequence's rows ride in pre_row rather than being a fourth
-//     source (see the pre_sel block).
+//     sd_addr[i] <= (sel_ras & init_done & (~chipDMA | ~chipRW))
+//                 ? chipAddr[i+10] : row_col[i]
+//
+// enabled by sel_ras|sel_cas.  Only two of those six inputs come from outside
+// this module, and no shared node stands between them and the pin, so the
+// synthesiser can duplicate the whole cone per bit and the fitter can put
+// each copy next to the pin it drives.  177d4cd7 is the measurement behind
+// that: a shared select node for this mux cost 1.40 ns on the worst path.
+//
+// One register holds every source, because no two of them are ever live at
+// once.  Slot order is RAS at state 0, CAS at state 2, the walker's second
+// CAS at state 4, and the next slot's row loaded at state 15 -- so the row is
+// read before the column overwrites it, and the column before the row does.
 //
 // The capture schedule is untouched -- same edges, same values, so the SDRAM
 // sees exactly what it saw before.
 reg        sel_ras;      // the next edge loads the RAS row
 reg        sel_cas;      // the next edge loads a CAS word
-reg [12:0] cas_word;     // column, A10 auto-precharge, write DQM on [12:11];
-                         // reloaded in state 3 for the walker write's second CAS
 reg        walker_cas2_go;  // high during state 4 of a walker write slot
 always @ (posedge sysclk) old_7m_q <= c_7m;
 wire [3:0] next_sdram_state = (~old_7m_q & c_7m) ? 4'd0 : (sdram_state + 4'd1);
@@ -439,22 +443,26 @@ reg  [1:0] pre_sel;
 // written only by the command block below.
 reg  [3:0] rcnt;
 reg        ras_local;   // the next state 0 issues a RAS-class command, chipset aside
+// At module scope for the same reason as rcnt: row_col has to be written from
+// one block, and its CAS-time values are built from these.  Still written only
+// by the command block.
+reg        cas_sd_we;
+reg  [1:0] cas_dqm;
+reg  [9:0] casaddr;
 reg  [1:0] pre_ba;
-reg [12:0] pre_row;
 reg  [9:0] pre_col;
+// The one register behind sd_addr: the RAS row from state 15 until state 0
+// has issued it, then the CAS column, then the walker write's second column.
+reg [12:0] row_col;
 
-// The RAS-time row.  chipAddr arrives from Agnus through gary, the bank
-// mapper, the sram bridge and the chip arbiter, and is the longest path in
-// the design, so it reaches sd_addr through exactly one LUT: a 2:1 mux whose
-// select is this one shared node.  Everything else the row can be -- the init
-// sequence's PRECHARGE ALL and LOAD MODE REGISTER constants, and the local
-// requesters' rows -- is already sitting in pre_row.
-wire        chip_row = init_done & ((~chipDMA) | (~chipRW));
-wire [12:0] ras_val  = chip_row ? chipAddr[22:10] : pre_row;
+// Everything sd_addr can load, in one register and one block: the next slot's
+// RAS row at state 15, the CAS column at state 1, the walker write's second
+// column at state 3.  The row is read at state 0 before state 1 overwrites it,
+// and each column is read before the next row load, so nothing is ever lost.
 always @(posedge sysclk) begin
 	if (!reset_n) begin
 		pre_sel   <= PRE_NONE;
-		pre_row   <= (13'd1 << 10);
+		row_col   <= (13'd1 << 10);
 		ras_local <= 1'b0;
 	end
 	else if (sdram_state == 4'd15) begin
@@ -474,24 +482,35 @@ always @(posedge sysclk) begin
 			// MODE REGISTER; state 4 is PRECHARGE ALL and wants A10; every
 			// other init state issues no command and its address is a
 			// don't-care.
-			pre_row <= (initstate == 4'd12) ? 13'b0001000100010
+			row_col <= (initstate == 4'd12) ? 13'b0001000100010
 			                                : (13'd1 << 10);
 		end
 		else if (write_req) begin
 			pre_sel <= PRE_WRITE;
-			{pre_ba, pre_row, pre_col[8:0]} <= writeAddr;
+			{pre_ba, row_col, pre_col[8:0]} <= writeAddr;
 		end
 		else if (!walker_busy && walker_req_q) begin
 			pre_sel <= PRE_WALKER;
-			{pre_ba, pre_row, pre_col[8:0]} <= {walker_addr, 1'b0};
+			{pre_ba, row_col, pre_col[8:0]} <= {walker_addr, 1'b0};
 		end
 		else if (cache_req && cache_req_q2) begin
 			pre_sel <= PRE_CACHE;
-			{pre_ba, pre_row, pre_col[8:0]} <= cache_addr_lat;
+			{pre_ba, row_col, pre_col[8:0]} <= cache_addr_lat;
 		end
 		else
 			pre_sel <= PRE_NONE;
 	end
+
+	// The CAS-time values, built a cycle before the state that uses them so
+	// the pin register selects between settled words.  slot_type is read
+	// directly rather than through walker_wr_slot, which is a cycle behind it
+	// and would still name the previous slot here.  States 1, 3 and 15 are
+	// disjoint, so these and the row load above never race.
+	if (reset_n && (sdram_state == 4'd1))
+		row_col <= {(!cas_sd_we ? cas_dqm : 2'b00),
+		            !(slot_type == WALKER_WRITE), casaddr};
+	if (reset_n && (sdram_state == 4'd3))
+		row_col <= {2'b00, 1'b1, casaddr[9:1], 1'b1};
 end
 
 wire walker_grant = (sdram_state == 4'd0) && (pre_sel == PRE_WALKER) &&
@@ -547,10 +566,7 @@ end
 
 always @ (posedge sysclk) begin
 	reg        cas_sd_cas;
-	reg        cas_sd_we;
-	reg  [1:0] cas_dqm;
 	reg [15:0] datawr;
-	reg  [9:0] casaddr;
 	
 	sd_clk <= sdram_state[0];
 
@@ -564,17 +580,10 @@ always @ (posedge sysclk) begin
 
 	if(sdram_state[0]) sdata_reg <= sd_data;
 
-	// The CAS-time values, built a cycle before the state that uses them so
-	// the register above selects between settled words.  slot_type is read
-	// directly rather than through walker_wr_slot, which is a cycle behind
-	// it and would still name the previous slot here.
-	if (sdram_state == 4'd1)
-		cas_word <= {(!cas_sd_we ? cas_dqm : 2'b00),
-		             !(slot_type == WALKER_WRITE), casaddr};
-	if (sdram_state == 4'd3)
-		cas_word <= {2'b00, 1'b1, casaddr[9:1], 1'b1};
-	if      (sel_ras) sd_addr <= ras_val;
-	else if (sel_cas) sd_addr <= cas_word;
+	if (sel_ras && init_done && ((~chipDMA) | (~chipRW)))
+		sd_addr <= chipAddr[22:10];
+	else if (sel_ras || sel_cas)
+		sd_addr <= row_col;
 	// otherwise hold
 
 	// sd_ras's input cone, one LUT deep.  It used to be written from eight
@@ -582,10 +591,10 @@ always @ (posedge sysclk) begin
 	// saw the init counter, the slot arbiter's whole priority chain and the
 	// refresh counter at once: five levels, and ram1|init_done -> ram1|sd_ras
 	// was the second worst path in the design at -0.704 ns.  The union of
-	// those eight conditions is ras_go & (chip_row | ras_local), four inputs,
-	// and every one of them is a register or a node the address path already
-	// needs.  Same edges, same values.
-	if (ras_go && (chip_row || ras_local)) sd_ras <= 0;
+	// those eight conditions is ras_go & (chipset-owns-slot | ras_local), five
+	// inputs, and the same ones each sd_addr bit already folds in.  Same
+	// edges, same values.
+	if (ras_go && ((init_done && ((~chipDMA) | (~chipRW))) || ras_local)) sd_ras <= 0;
 
 	if(!init_done) begin
 		slot_type             <= IDLE;

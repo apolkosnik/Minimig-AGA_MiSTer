@@ -182,12 +182,13 @@ reg         ak_unmapped;
 wire arm_chip = select_live && c_7m_rise && any_req &&
                 !router_zram_sel && !(|live_baddr[31:24]);
 wire hold_chip = (state == S_DRIVE) && !ak_is_ddr && !ak_unmapped;
-// Kept as its own node: the chip address mux below is the last fabric stage
-// of the Agnus-to-SDRAM address path, and with this select flattened into it
-// the mux was two LUT levels per bit instead of one.  As a single node the
-// whole mux -- this select, the two address sources and the bridge's bank
-// remap feeding chip_in_addr -- fits in one six-input LUT.
-wire arb_drive_chip /* synthesis keep */ = minimig_idle && (arm_chip || hold_chip);
+// Deliberately NOT kept as its own node.  minimig_idle is a bank decode, so
+// the Agnus address reaches the SDRAM row select through this expression; as
+// a preserved node that was one more serial level, with a fanout of 111, on
+// the design's worst path (177d4cd7 measured 0.767 ns for it).  Flattened,
+// the synthesiser folds it into chip_out_dma/chip_out_rw's consumers and the
+// algebra collapses -- chipDMA & chipRW is false whenever this is true.
+wire arb_drive_chip = minimig_idle && (arm_chip || hold_chip);
 
 assign chip_out_addr = arb_drive_chip ? ak_addr_w    : chip_in_addr;
 assign chip_out_l    = arb_drive_chip ? ak_l_w       : chip_in_l;
