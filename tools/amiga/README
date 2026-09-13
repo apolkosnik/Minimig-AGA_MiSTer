@@ -1,0 +1,13 @@
+ioprobe -- capture the I/O probes behind XSysInfo's "Clock" and "Gary rev"
+lines, with addresses and returned values, so two cores can be compared
+directly instead of comparing two summary panels.
+
+  vc +aos68k -O1 -cpu=68040 -o ioprobe ioprobe.c     (vbcc, /opt/amiga-cc)
+
+Run it from a CLI on each core with the same ROM, the same OSD settings and
+the same Workbench, and diff the output.  It prints every individual read,
+not just the conclusion, because GAYLEID is a sequence: a write resets its
+counter and each read shifts out one bit, so a change in the shape of the
+read strobes -- not only in the data -- changes the identity a probe
+computes.  A summary panel cannot distinguish that from a settings
+difference; the per-read values can.
