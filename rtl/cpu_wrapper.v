@@ -765,6 +765,14 @@ always @(negedge clk, negedge reset) begin
 		c_lds <= 1;
 		ready <= 0;
 		chipready <= 0;
+		// No interrupt until the first chipset phase samples the pins.
+		// Left unreset this register powers up at 0 -- level 7 on the
+		// active-low IPL lines -- and the core, whose synchroniser arms
+		// the edge-triggered NMI from its own reset value, takes vector
+		// 31 after the first instruction of a cold boot when that phase
+		// lands more than two core clocks after reset release.  The
+		// FAST_CLOCK machine above already resets it the same way.
+		ipl_i <= 3'b111;
 	end
 	else if (bus_berr) begin
 		// The bus16 adapter aborts on the next positive edge.  Release
