@@ -294,8 +294,10 @@ Cycle counts and the full corpus comparison are also recorded in
 
 ## Timing, and what is not closed
 
-The CPU work above is validated in simulation and is **not** on hardware.
-No bitstream of it meets the build gate.
+The CPU work above is **simulation-validated only**.  It has never been
+shown to work on hardware: no bitstream of it meets the build gate, and the
+one build that did meet it (by a change since reverted) did not boot.  Read
+every cycle figure above as a simulation result.
 
 The design's limiting path is not in the CPU: it is the chipset's
 `AGNUS1|bc1|hpos -> ram1|sd_addr`, the Amiga's DMA address reaching the
@@ -312,8 +314,8 @@ Two attempts to buy margin, both reverted:
 * Unpacking SDRAM_A[11] and A[12] from their pin registers passed the gate
   at +0.188 ns and did not boot.  `sta/sdram_io.tcl`, written for this,
   showed those two bits arriving 3.9 ns and 12.7 ns later than the eleven
-  that stayed packed, which sit within 0.5 ns of each other -- latched
-  stale on a 17.6 ns memory cycle.  Internal timing had said nothing about
+  that stayed packed, whose arrivals span under 0.5 ns -- latched stale on
+  a 17.6 ns memory cycle.  Internal timing had said nothing about
   it: the project has no `set_output_delay` on the SDRAM at all.
 * Clocking `sd_addr` on the falling edge, with the enables delayed a state,
   to give the chipset 2.5 cycles.  A multicycle counts capture edges, and
@@ -328,8 +330,10 @@ Two attempts to buy margin, both reverted:
   not a constraint one, and the chipset exception must not be extended to
   cover them.
 
-`sta/sdram_io.tcl` measures the spread across the address pins, which is
-what catches a bit arriving out of step.  It does not establish absolute
-setup and hold against the forwarded clock: its generated clock's parity
-is not pinned, so calibrate it against the command pins, whose centring is
-known, before trusting any absolute figure from it.
+`sta/sdram_io.tcl` bounds the spread of arrivals across the address pins,
+which is what catches a bit stepping out of line with the rest.  A small
+spread is bounded relative skew and nothing more: it is not proof of
+absence of skew, and it says nothing about absolute setup and hold against
+the forwarded clock, because the generated clock's parity is not pinned.
+Calibrate it against the command pins, whose centring is known, before
+trusting any absolute figure from it.
