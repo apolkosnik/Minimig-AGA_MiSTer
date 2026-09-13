@@ -46,63 +46,74 @@ derive_clock_uncertainty
 # look_snooped from the core and MMU is relaxed on the proof recorded in
 # ap040_cache.v (tb_ap040_cache_snoop +inj_acc_whole passes at CE_DIV 4);
 # the cache's own terms into it are not.
-set P {emu|cpu_wrapper|cpu_inst_p}
-set ALL   [get_registers "$P|*"]
-set RAMP  [get_registers "$P|*ram_block*"]
-set PIPE  [get_registers "$P|mmu|l_row*"]
-foreach pat {mmu|l_tag* mmu|l_ld* mmu|sweep_row_q* mmu|sweep_valid_q*} {
-    set PIPE [add_to_collection $PIPE [get_registers "$P|$pat"]]
-}
-# Every member pattern ends in a wildcard on purpose: the fitter may keep a
-# duplicate of any of these (wsnp_pend~DUPLICATE on the 35c0650a fit), an
-# exact-name query returns both copies, but remove_from_collection with that
-# collection drops only the original -- the copy stayed in TICK and its
-# fanout got the four-cycle relaxation while it changes every cycle.  A
-# wildcard query removes both (tests/ap040/sta/precheck.py now fails on any
-# register that sits in two sets).
-set ASYN  [get_registers "$P|g_cache.cache|look_snooped*"]
-foreach pat {g_cache.cache|fill_snooped* g_cache.cache|snoop_sweep_on_r* g_cache.cache|snoop_sweep_row_r* \
-             wsnp_addr* wsnp_pend* walker_wr_d* core_stall_watchdog|*} {
-    set ASYN [add_to_collection $ASYN [get_registers "$P|$pat"]]
-}
-set FR1   [add_to_collection $RAMP $PIPE]
-set TICK  [remove_from_collection $ALL [add_to_collection $FR1 $ASYN]]
-set CTAGB [get_registers "$P|g_cache.cache|ctag_ram|*~portb_*"]
-set ATCB  [get_registers "$P|mmu|atc_ram|*~portb_*"]
-set FR1_MMU [add_to_collection [get_registers "$P|mmu|*ram_block*"] $PIPE]
-set LOOKS [get_registers "$P|g_cache.cache|look_snooped*"]
-set TICK_CM [remove_from_collection [add_to_collection [get_registers "$P|core|*"] [get_registers "$P|mmu|*"]] [add_to_collection $FR1 $ASYN]]
-set WDOG  [get_registers "$P|core_stall_watchdog|*"]
-set WTMO  [get_registers {emu|cpu_wrapper|bus_timeout|*}]
-foreach {from to s h} [list \
-    TICK    TICK  4 3 \
-    FR1     TICK  3 2 \
-    TICK    CTAGB 4 3 \
-    FR1     CTAGB 3 2 \
-    TICK    ATCB  4 3 \
-    FR1     ATCB  3 2 \
-    FR1_MMU LOOKS 3 2 \
-    TICK_CM LOOKS 4 3 \
-    WDOG    TICK  4 3 \
-    WTMO    TICK  4 3 ] {
-    set_multicycle_path -from [set $from] -to [set $to] -setup $s
-    set_multicycle_path -from [set $from] -to [set $to] -hold  $h
-}
+# The block applies only to a P2 netlist: cpu_wrapper's FAST_CLOCK chip
+# machine (g_sync_chip) exists in no other configuration, and its register
+# classes would relax 35 ns single-cycle paths to four cycles on the 28 MHz
+# CPU.  The else branch is the 28 MHz configuration's own CPU constraint:
+# the core's registers launch at 28 MHz into the 114 MHz RAM controllers,
+# whose chip-select handoff (ram_cs_guard) gives them two of those cycles.
+if {[get_collection_size [get_registers -nowarn {emu|cpu_wrapper|g_sync_chip.*}]] > 0} {
+    set P {emu|cpu_wrapper|cpu_inst_p}
+    set ALL   [get_registers "$P|*"]
+    set RAMP  [get_registers "$P|*ram_block*"]
+    set PIPE  [get_registers "$P|mmu|l_row*"]
+    foreach pat {mmu|l_tag* mmu|l_ld* mmu|sweep_row_q* mmu|sweep_valid_q*} {
+        set PIPE [add_to_collection $PIPE [get_registers "$P|$pat"]]
+    }
+    # Every member pattern ends in a wildcard on purpose: the fitter may keep a
+    # duplicate of any of these (wsnp_pend~DUPLICATE on the 35c0650a fit), an
+    # exact-name query returns both copies, but remove_from_collection with that
+    # collection drops only the original -- the copy stayed in TICK and its
+    # fanout got the four-cycle relaxation while it changes every cycle.  A
+    # wildcard query removes both (tests/ap040/sta/precheck.py now fails on any
+    # register that sits in two sets).
+    set ASYN  [get_registers "$P|g_cache.cache|look_snooped*"]
+    foreach pat {g_cache.cache|fill_snooped* g_cache.cache|snoop_sweep_on_r* g_cache.cache|snoop_sweep_row_r* \
+                 wsnp_addr* wsnp_pend* walker_wr_d* core_stall_watchdog|*} {
+        set ASYN [add_to_collection $ASYN [get_registers "$P|$pat"]]
+    }
+    set FR1   [add_to_collection $RAMP $PIPE]
+    set TICK  [remove_from_collection $ALL [add_to_collection $FR1 $ASYN]]
+    set CTAGB [get_registers "$P|g_cache.cache|ctag_ram|*~portb_*"]
+    set ATCB  [get_registers "$P|mmu|atc_ram|*~portb_*"]
+    set FR1_MMU [add_to_collection [get_registers "$P|mmu|*ram_block*"] $PIPE]
+    set LOOKS [get_registers "$P|g_cache.cache|look_snooped*"]
+    set TICK_CM [remove_from_collection [add_to_collection [get_registers "$P|core|*"] [get_registers "$P|mmu|*"]] [add_to_collection $FR1 $ASYN]]
+    set WDOG  [get_registers "$P|core_stall_watchdog|*"]
+    set WTMO  [get_registers {emu|cpu_wrapper|bus_timeout|*}]
+    foreach {from to s h} [list \
+        TICK    TICK  4 3 \
+        FR1     TICK  3 2 \
+        TICK    CTAGB 4 3 \
+        FR1     CTAGB 3 2 \
+        TICK    ATCB  4 3 \
+        FR1     ATCB  3 2 \
+        FR1_MMU LOOKS 3 2 \
+        TICK_CM LOOKS 4 3 \
+        WDOG    TICK  4 3 \
+        WTMO    TICK  4 3 ] {
+        set_multicycle_path -from [set $from] -to [set $to] -setup $s
+        set_multicycle_path -from [set $from] -to [set $to] -hold  $h
+    }
 
-# cpu_wrapper|cache_inhibit_r: the request-side copy of the MMU's cache-mode
-# bit, single-cycle like its siblings -- but its cone is the whole ATC lookup
-# (mem_addr -> lk_fresh -> hit -> atc_fault -> cache_inhibit, 7.9 ns) and it
-# missed by 12 ps on the 3edd9a98 fit while ramaddr_r/ramsel_r keep +1.9 ns.
-# Its ONE consumer is cpu_cache_new's FILL1 allocation decision (all three
-# controllers; ddram_ctrl ORs ramshared in), reached only through RDTAG and
-# READ: with chip-select asserted from the request registers at T+1, the
-# controller first reads cache_inhibit at T+5 (T+4 with READ_PIPE 0).  Two
-# cycles from every CPU register -- tick-gated (launch T, right by T+2) or
-# RAM port / MMU pipe (launch T+1, right by T+3) -- leaves that untouched.
-# tests/ap040/sta reports the class as cpu_ci.
-set CI [get_registers {emu|cpu_wrapper|cache_inhibit_r}]
-set_multicycle_path -from $ALL -to $CI -setup 2
-set_multicycle_path -from $ALL -to $CI -hold  1
+    # cpu_wrapper|cache_inhibit_r: the request-side copy of the MMU's cache-mode
+    # bit, single-cycle like its siblings -- but its cone is the whole ATC lookup
+    # (mem_addr -> lk_fresh -> hit -> atc_fault -> cache_inhibit, 7.9 ns) and it
+    # missed by 12 ps on the 3edd9a98 fit while ramaddr_r/ramsel_r keep +1.9 ns.
+    # Its ONE consumer is cpu_cache_new's FILL1 allocation decision (all three
+    # controllers; ddram_ctrl ORs ramshared in), reached only through RDTAG and
+    # READ: with chip-select asserted from the request registers at T+1, the
+    # controller first reads cache_inhibit at T+5 (T+4 with READ_PIPE 0).  Two
+    # cycles from every CPU register -- tick-gated (launch T, right by T+2) or
+    # RAM port / MMU pipe (launch T+1, right by T+3) -- leaves that untouched.
+    # tests/ap040/sta reports the class as cpu_ci.
+    set CI [get_registers {emu|cpu_wrapper|cache_inhibit_r}]
+    set_multicycle_path -from $ALL -to $CI -setup 2
+    set_multicycle_path -from $ALL -to $CI -hold  1
+} else {
+    set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -setup 2
+    set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -hold 1
+}
 
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -setup 2
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -hold 1

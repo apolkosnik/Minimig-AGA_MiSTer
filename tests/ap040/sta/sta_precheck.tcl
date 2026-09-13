@@ -14,6 +14,11 @@ project_open Minimig
 create_timing_netlist
 read_sdc
 update_timing_netlist
+if {![info exists ALL]} {
+    puts "PRECHECK: not a P2 fit (Minimig.sdc's FAST_CLOCK block did not run) -- nothing to census"
+    project_close
+    exit 0
+}
 set P {emu|cpu_wrapper|cpu_inst_p}
 set SRC [get_registers {emu|cpu_wrapper|core_phase*}]
 set fh [open $::env(SPDIR)/pc_all.txt w]

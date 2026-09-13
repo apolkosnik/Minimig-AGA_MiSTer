@@ -297,7 +297,7 @@ end
 
 wire ram_consumed;
 
-ram_cs_guard #(.SAME_CLOCK(1)) ram_guard
+ram_cs_guard ram_guard
 (
 	.clk         (clk_114),
 	.nreset      (cpu_rst),
@@ -392,6 +392,18 @@ wire [31:0] cdtv_dma_baddr;
 wire  [7:0] cdtv_dma_wbyte;
 wire        cdtv_dma_ack;
 
+// PARKED (2026-09-12 evening): the P2 experiment below is documented for the
+// record but not instantiated -- the CPU is back on clk_sys (28 MHz, the
+// configuration that boots and measures 5350 Dhrystones).  At CORE_DIV 4 the
+// core ticks at the same 28.5 MHz, so P2 only ever bought memory latency, and
+// its fits sit on a zero-margin chipset path (AGNUS1|bc1 -> ram1|sd_addr, a
+// true 2 x clk_114 budget).  The measured problem is cycles per instruction
+// (about nine on Dhrystone), which is where the work goes now.  To revive P2:
+// cpu_wrapper #(.FAST_CLOCK(1), .CORE_DIV(4), .BUS_TIMEOUT_BITS(22)) on
+// clk_114, ram_cs_guard #(.SAME_CLOCK(1)), the walker CDC's s_clk on clk_114,
+// CACHE_READ_PIPE(1) on the three RAM controllers, and Minimig.sdc's P2 block
+// keys itself on the g_sync_chip registers.
+//
 // P2 / FAST_CLOCK (2026-09-12): the CPU moves onto clk_114 with a 4:1 core
 // enable.  The wrapper and core have carried this mode since the 40MHz work
 // (cpu_wrapper.v FAST_CLOCK/CORE_DIV, bench-verified at divide 4, 2 and 1 in
@@ -424,18 +436,14 @@ wire        cdtv_dma_ack;
 // BUS_TIMEOUT_BITS 22 keeps the timeout's documented ~36 ms at the faster
 // clock.  cpu_ph1/cpu_ph2 were already generated on clk_114 and become
 // plain same-domain events, which is what g_sync_chip expects.
-cpu_wrapper #(
-	.FAST_CLOCK(1),
-	.CORE_DIV(4),
-	.BUS_TIMEOUT_BITS(22)
-) cpu_wrapper
+cpu_wrapper cpu_wrapper
 (
 	.snoop_tgl    (chip_snoop_tgl  ),
 	.snoop_adr    (chip_snoop_adr  ),
 	.reset        (cpu_rst         ),
 	.reset_out    (cpu_nrst_out    ),
 
-	.clk          (clk_114         ),
+	.clk          (clk_sys         ),
 	.clk_peripheral(clk_sys        ),
 	.ph1          (cpu_ph1         ),
 	.ph2          (cpu_ph2         ),
@@ -510,7 +518,7 @@ cpu_wrapper #(
 
 ap040_walker_cdc walker_cdc
 (
-	.s_clk     (clk_114),
+	.s_clk     (clk_sys),
 	.s_reset_n (cpu_rst),
 	.s_req     (walker_req_cpu),
 	.s_we      (walker_we_cpu),
@@ -630,7 +638,7 @@ assign SDRAM2_nRAS = SDRAM2_EN ? sd2_ras : 1'bZ;
 assign SDRAM2_nCAS = SDRAM2_EN ? sd2_cas : 1'bZ;
 assign SDRAM2_CLK  = SDRAM2_EN ? sd2_clk : 1'bZ;
 
-sdram32_ctrl #(.CPU_CACHE(1), .CACHE_READ_PIPE(1), .DUAL_SDRAM(1)) ram1
+sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ram1
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
@@ -670,7 +678,7 @@ sdram32_ctrl #(.CPU_CACHE(1), .CACHE_READ_PIPE(1), .DUAL_SDRAM(1)) ram1
 `else
 wire dual_fault = 1'b0;
 
-sdram_ctrl #(.CPU_CACHE(1), .CACHE_READ_PIPE(1)) ram1
+sdram_ctrl #(.CPU_CACHE(1)) ram1
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
@@ -776,7 +784,7 @@ chipdma_arb chipdma_arb
 wire [15:0] ram_dout2;
 wire        ram_ready2;
 
-ddram_ctrl #(.CPU_CACHE(1), .CACHE_READ_PIPE(1)) ram2
+ddram_ctrl #(.CPU_CACHE(1)) ram2
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
