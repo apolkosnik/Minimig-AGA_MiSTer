@@ -70,14 +70,12 @@ Core bench, phase 0, 200 Dhrystone runs (129,778 instructions):
 | invalidate-on-write (before) | 1,481,317 | 11.4 | 76% | 8.9 clocks |
 | update-on-hit (ap040_cache, now) | 1,185,604 | 9.1 | 99.9% | 2.0 clocks |
 
-Where the remaining 1,185,604 clocks go (state, share): S_MWR 22% (28,100
-stores at 6.2 clocks each: the write-through crosses the 16-bit bus before the
-core is acknowledged), S_MRD 16% (42,690 loads at about 4.3: a 2-clock hit
-plus the issue and completion states), S_DECODE 11%, S_FETCH 10%,
-S_PIPE_START and S_EXEC 8% each, the EA and operand states about 15%.  The
-`bench_loop` inner loop shows the same shape without any misses: a cached
-`move.l (a0)+,d0` costs eleven states, `add.l d0,d2` four and a taken `dbra`
-six, twenty-one clocks for three instructions.
+Where those 1,185,604 clocks went, before the steps below (state, share):
+S_MWR 22% (28,100 stores at 6.2 clocks each: the write-through crosses the
+16-bit bus before the core is acknowledged), S_MRD 16% (42,690 loads at about
+4.3: a 2-clock hit plus the issue and completion states), S_DECODE 11%,
+S_FETCH 10%, S_PIPE_START and S_EXEC 8% each, the EA and operand states about
+15%.  S_PIPE_START is gone in the current core; the rest still holds.
 
 The first change, write-through with update-on-hit instead of
 invalidate-on-write, removed a fifth of the Dhrystone cycles: every store
@@ -119,7 +117,7 @@ straight from decode and reads the register file itself at the decoded
 operand indices; only a memory operand or a non-register destination takes
 the operand states, which return to S_EXEC with the values captured.  A
 dependent ALU operation went from three clocks to two (`bench_alu`
-200,102 -> 134,722).
+200,102 -> 134,412).
 
 ## Area
 
@@ -284,7 +282,54 @@ been performed.
 * RBF: `output_files/Minimig.rbf` (3,939,728 bytes).
 * SHA-256: `f9baef0447a212403e50f349d36e01f51fccf2f80fd44f9aa59d1549a68528f6`.
 * Build log: `build_20260907_184915.log`.
-* Timing summary: `output_files/Minimig.sta.summary`.
+
+That section is a record of the 2026-09-07 build and nothing in it tracks
+the current tree: `output_files/` is overwritten by every build, so the
+timing summary there belongs to whatever was built last, not to the RBF
+named above.  For where the branch stands now see "Timing, and what is not
+closed" below.
 
 Cycle counts and the full corpus comparison are also recorded in
 [`performance_40mhz.json`](performance_40mhz.json).
+
+## Timing, and what is not closed
+
+The CPU work above is validated in simulation and is **not** on hardware.
+No bitstream of it meets the build gate.
+
+The design's limiting path is not in the CPU: it is the chipset's
+`AGNUS1|bc1|hpos -> ram1|sd_addr`, the Amiga's DMA address reaching the
+SDRAM controller through agnus, gary, the bank mapper, the SRAM bridge and
+the DMA arbiter, all of it combinational.  Its budget is a true two
+clk_114 cycles, 17.616 ns, because Agnus's clk7_en registers change on the
+same clk_28 edge on which c1 rises, the controller detects that rise one
+cycle later and the RAS state captures one cycle after that.  The last
+build that met timing cleared this path by 0.091 ns, so it has always
+decided rebuilds by placement rather than by design.
+
+Two attempts to buy margin, both reverted:
+
+* Unpacking SDRAM_A[11] and A[12] from their pin registers passed the gate
+  at +0.188 ns and did not boot.  `sta/sdram_io.tcl`, written for this,
+  showed those two bits arriving 3.9 ns and 12.7 ns later than the eleven
+  that stayed packed, which sit within 0.5 ns of each other -- latched
+  stale on a 17.6 ns memory cycle.  Internal timing had said nothing about
+  it: the project has no `set_output_delay` on the SDRAM at all.
+* Clocking `sd_addr` on the falling edge, with the enables delayed a state,
+  to give the chipset 2.5 cycles.  A multicycle counts capture edges, and
+  for a falling-edge destination those are the falling edges, so the
+  `setup 2` covering the rest of ram1 meant 1.5 cycles; `setup 3` is the
+  2.5 the hardware provides, and with it the chipset path reaches
+  +3.946 ns at a 22.020 ns relationship.  But the binding constraint then
+  moves inside the controller: its own delayed enables are written on the
+  rising edge and consumed on the immediately following falling edge, so
+  `walker_cas2_go_d`, `init_go_d` and the slot-type select really do have
+  half a cycle (4.404 ns) and miss by about 2.8.  Those are an RTL problem,
+  not a constraint one, and the chipset exception must not be extended to
+  cover them.
+
+`sta/sdram_io.tcl` measures the spread across the address pins, which is
+what catches a bit arriving out of step.  It does not establish absolute
+setup and hold against the forwarded clock: its generated clock's parity
+is not pinned, so calibrate it against the command pins, whose centring is
+known, before trusting any absolute figure from it.
