@@ -352,11 +352,30 @@ end
 // cycle the counter is yanked back to zero.
 reg        old_7m_q;
 reg        ras_go;          // high during state 0
+// sd_addr's input cone, one LUT deep.
+//
+// The pin register's D input was a mux over four sources picked by four
+// separate one-hot conditions -- the RAS state, the CAS state, the walker's
+// second CAS and the init sequence -- which is eight inputs per bit and so
+// two LUT levels.  The route from this module to the address pins is
+// 5.303 ns of the 8.808 ns budget, and that second level is what made
+// ram1|cas_go -> ram1|sd_addr[7] the worst path in the design at -0.613 ns.
+// A registered two-bit select over four registered sources is six inputs:
+// one level, and the capture schedule is untouched -- same edges, same
+// values, so the SDRAM sees exactly what it saw before.
+localparam ADDR_HOLD = 2'd0, ADDR_RAS = 2'd1, ADDR_CAS = 2'd2, ADDR_CAS2 = 2'd3;
+reg  [1:0] addr_sel;
+reg [12:0] cas_val;      // column, A10 auto-precharge, write DQM on [12:11]
+reg [12:0] cas2_val;     // walker write's second CAS: column+1, A10 precharge
 reg        walker_cas2_go;  // high during state 4 of a walker write slot
 always @ (posedge sysclk) old_7m_q <= c_7m;
 wire [3:0] next_sdram_state = (~old_7m_q & c_7m) ? 4'd0 : (sdram_state + 4'd1);
 always @ (posedge sysclk) begin
 	ras_go         <= (next_sdram_state == 4'd0);
+	addr_sel       <= (next_sdram_state == 4'd0) ? ADDR_RAS :
+	                  (sdram_state == 4'd1)      ? ADDR_CAS :
+	                  ((slot_type == WALKER_WRITE) &&
+	                   (next_sdram_state == 4'd4)) ? ADDR_CAS2 : ADDR_HOLD;
 	walker_cas2_go <= (slot_type == WALKER_WRITE) && (next_sdram_state == 4'd4);
 	walker_snoop_hi <= (slot_type == WALKER_WRITE) &&
 	                   (next_sdram_state >= 4'd2) && (next_sdram_state <= 4'd5);
@@ -408,6 +427,15 @@ reg  [1:0] pre_sel;
 reg  [1:0] pre_ba;
 reg [12:0] pre_row;
 reg  [9:0] pre_col;
+
+// The RAS-time row.  Its own cone sits on the chipset's two-cycle path, so
+// depth here is free; the init constants ride along rather than adding a
+// fifth source to the register above (their slots issue PRECHARGE ALL and
+// LOAD MODE REGISTER, and every other init state leaves the address a
+// don't-care, as do refresh and idle slots).
+wire [12:0] ras_val = !init_done
+                    ? ((initstate == 4'd13) ? 13'b0001000100010 : (13'd1 << 10))
+                    : ((~chipDMA | ~chipRW) ? chipAddr[22:10] : pre_row);
 always @(posedge sysclk) begin
 	if (!reset_n) begin
 		pre_sel <= PRE_NONE;
@@ -503,6 +531,22 @@ always @ (posedge sysclk) begin
 
 	if(sdram_state[0]) sdata_reg <= sd_data;
 
+	// The CAS-time values, built a cycle before the state that uses them so
+	// the register above selects between settled words.  slot_type is read
+	// directly rather than through walker_wr_slot, which is a cycle behind
+	// it and would still name the previous slot here.
+	if (sdram_state == 4'd1)
+		cas_val  <= {(!cas_sd_we ? cas_dqm : 2'b00),
+		             !(slot_type == WALKER_WRITE), casaddr};
+	if (sdram_state == 4'd3)
+		cas2_val <= {2'b00, 1'b1, casaddr[9:1], 1'b1};
+	case (addr_sel)
+		ADDR_RAS  : sd_addr <= ras_val;
+		ADDR_CAS  : sd_addr <= cas_val;
+		ADDR_CAS2 : sd_addr <= cas2_val;
+		default   : ;   // hold
+	endcase
+
 	if(!init_done) begin
 		slot_type             <= IDLE;
 		casaddr               <= 0;
@@ -512,7 +556,6 @@ always @ (posedge sysclk) begin
 		if(sdram_state == 0) begin
 			case(initstate)
 				4 : begin // PRECHARGE
-					sd_addr[10]  <= 1; // all banks
 					sd_ras       <= 0;
 					sd_cas       <= 1;
 					sd_we        <= 0;
@@ -526,7 +569,6 @@ always @ (posedge sysclk) begin
 					sd_ras       <= 0;
 					sd_cas       <= 0;
 					sd_we        <= 0;
-					sd_addr      <= 13'b0001000100010; // CL=2, BURST=4
 				end
 			endcase
 		end
@@ -556,7 +598,7 @@ always @ (posedge sysclk) begin
 				// (this includes anything on the "motherboard" - chip RAM, slow RAM and Kickstart, turbo modes notwithstanding)
 				if(~chipDMA | ~chipRW) begin
 					slot_type    <= CHIP;
-					{sd_ba,sd_addr,casaddr[8:0]} <= chipAddr;
+					{sd_ba,casaddr[8:0]} <= {chipAddr[24:23], chipAddr[9:1]};
 					sd_ras       <= 0;
 					cas_dqm      <= {chipU,chipL};
 					cas_sd_cas   <= 0;
@@ -572,7 +614,7 @@ always @ (posedge sysclk) begin
 				end
 				else if(pre_sel == PRE_WRITE) begin
 					slot_type    <= CPU_WRITECACHE;
-					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
+					{sd_ba,casaddr[8:0]} <= {pre_ba, pre_col[8:0]};
 					sd_ras       <= 0;
 					cas_dqm      <= write_dqm;
 					cas_sd_we    <= 0;
@@ -582,7 +624,7 @@ always @ (posedge sysclk) begin
 				end
 				else if(pre_sel == PRE_WALKER) begin
 					slot_type    <= walker_we ? WALKER_WRITE : WALKER_READ;
-					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
+					{sd_ba,casaddr[8:0]} <= {pre_ba, pre_col[8:0]};
 					sd_ras       <= 0;
 					cas_dqm      <= 0;
 					cas_sd_cas   <= 0;
@@ -592,7 +634,7 @@ always @ (posedge sysclk) begin
 				// request from read cache
 				else if(pre_sel == PRE_CACHE) begin
 					slot_type    <= CPU_READCACHE;
-					{sd_ba,sd_addr,casaddr[8:0]} <= {pre_ba, pre_row, pre_col[8:0]};
+					{sd_ba,casaddr[8:0]} <= {pre_ba, pre_col[8:0]};
 					sd_ras       <= 0;
 					cas_sd_cas   <= 0;
 				end
@@ -610,7 +652,6 @@ always @ (posedge sysclk) begin
 		// the low word of every 32-bit walker write is lost (tCCD=1 on SDR
 		// makes back-to-back writes two states apart legal).
 		if (walker_cas2_go) begin
-				sd_addr      <= {1'b1, casaddr[9:1], 1'b1}; // col+1, A10 precharge
 				sd_cas       <= 0;
 				sd_we        <= 0;
 				sd_data      <= walker_wdata_latch[15:0];
@@ -629,12 +670,10 @@ always @ (posedge sysclk) begin
 			// bank into precharge under that second command (undefined on
 			// real silicon).  Hold the row open here and let the second
 			// command carry A10 instead.
-			sd_addr         <= {!walker_wr_slot, casaddr}; // A10: AUTO PRECHARGE
 			sd_cas          <= cas_sd_cas;
 			sd_dqm          <= 0;
 			if(!cas_sd_we) begin
 				sd_data      <= datawr;
-				sd_addr[12:11]<= cas_dqm;
 				sd_dqm       <= cas_dqm;
 				sd_we        <= 0;
 			end
