@@ -13,14 +13,14 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 RTL = ROOT / "rtl"
 CORE = sorted((RTL / "ap040").glob("*.v"))
-PROGRAMS = ["t_integer", "t_exceptions", "t_mmu", "t_cache", "t_fpu", "bench_loop", "bench_alu"]
+PROGRAMS = ["t_integer", "t_exceptions", "t_mmu", "t_cache", "t_fpu", "bench_loop", "bench_alu", "dhry"]
 
 
-def execute(command, log, timeout):
+def execute(command, log, timeout, env=None):
     with log.open("w") as stream:
         process = subprocess.Popen([str(x) for x in command], cwd=HERE,
                                    stdout=stream, stderr=subprocess.STDOUT,
-                                   start_new_session=True)
+                                   start_new_session=True, env=env)
         try:
             code = process.wait(timeout=timeout)
         except (subprocess.TimeoutExpired, KeyboardInterrupt):
@@ -99,9 +99,20 @@ def main():
         elif args.bench not in ("cache-unit", "yc-equiv"):
             image = work / (name + ".bin")
             hexf = image.with_suffix(".hex")
-            execute([os.environ.get("VASM", "/opt/amiga-cc/vbcc/bin/vasmm68k_mot"),
-                     "-Fbin", "-m68040", "-no-opt", "-o", image, HERE / "asm" / (name + ".s")],
-                    work / (name + ".assemble.log"), 30)
+            vasm = os.environ.get("VASM", "/opt/amiga-cc/vbcc/bin/vasmm68k_mot")
+            if (HERE / "c" / (name + ".c")).exists():
+                # a compiled C program: vbcc, linked flat behind c/start.s
+                env = dict(os.environ, VBCC=os.environ.get("VBCC", "/opt/amiga-cc/vbcc"))
+                execute([vasm, "-quiet", "-Fhunk", "-m68040", "-o", work / "start.o", HERE / "c" / "start.s"],
+                        work / (name + ".assemble.log"), 30)
+                execute([os.environ.get("VC", "/opt/amiga-cc/vbcc/bin/vc"), "+aos68k", "-c", "-O2", "-speed",
+                         "-cpu=68040", "-fpu=68040", "-c99", "-o", work / (name + ".o"), HERE / "c" / (name + ".c")],
+                        work / (name + ".compile.log"), 60, env)
+                execute([os.environ.get("VLINK", "/opt/amiga-cc/vbcc/bin/vlink"), "-brawbin1", "-o", image,
+                         work / "start.o", work / (name + ".o")], work / (name + ".link.log"), 30)
+            else:
+                execute([vasm, "-Fbin", "-m68040", "-no-opt", "-o", image, HERE / "asm" / (name + ".s")],
+                        work / (name + ".assemble.log"), 30)
             execute([sys.executable, HERE / "bin2hex.py", image, hexf], work / (name + ".hex.log"), 30)
             command += ["+prog=" + str(hexf), "+prof", "+memlat"]
         log = work / (name + ".log")

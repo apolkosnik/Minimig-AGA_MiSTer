@@ -46,7 +46,48 @@ from 331,608 to 200,952 cycles; the load/branch benchmark changes from 326,673
 to 263,145. The ALU workload includes a Python-checkable recurrence and checks
 both final registers, so reading stale operands cannot produce a false win.
 
-## Experimental clock interface
+## Cycles per instruction (2026-09-12)
+
+The board runs XSysInfo's Dhrystone at 5,350 with 3.04 MIPS on a 28 MHz
+core clock: about nine clocks per instruction, where a real 68040 spends
+about one.  That, not the clock, is the gap (0.64x an A3000/030 at 25 MHz,
+0.16x an A4000/040 at 25 MHz), so the work moved from the clock to the
+cycle count.  Two measurement tools exist for it:
+
+* `tb_ap040_program.v +prof` prints a per-state cycle histogram of the core
+  (the S_DECODE count is the instruction count) and the cache hit rates;
+  `+memlat` adds latency histograms per access class.  `run_verilator.py`
+  passes both for every program.
+* `c/dhry.c` is Dhrystone 2.1 compiled with vbcc (`-O2 -speed -cpu=68040`),
+  linked flat behind `c/start.s`, self-checking against the published final
+  values, 200 runs.  `build_tests.sh` and `run_verilator.py` build it like
+  the assembled programs (`--program dhry`).
+
+Core bench, phase 0, 200 Dhrystone runs (129,778 instructions):
+
+| Cache store policy | Cycles | CPI | D-cache hits | Data read avg |
+|---|---:|---:|---:|---:|
+| invalidate-on-write (before) | 1,481,317 | 11.4 | 76% | 8.9 clocks |
+| update-on-hit (ap040_cache, now) | 1,185,604 | 9.1 | 99.9% | 2.0 clocks |
+
+Where the remaining 1,185,604 clocks go (state, share): S_MWR 22% (28,100
+stores at 6.2 clocks each: the write-through crosses the 16-bit bus before the
+core is acknowledged), S_MRD 16% (42,690 loads at about 4.3: a 2-clock hit
+plus the issue and completion states), S_DECODE 11%, S_FETCH 10%,
+S_PIPE_START and S_EXEC 8% each, the EA and operand states about 15%.  The
+`bench_loop` inner loop shows the same shape without any misses: a cached
+`move.l (a0)+,d0` costs eleven states, `add.l d0,d2` four and a taken `dbra`
+six, twenty-one clocks for three instructions.
+
+The first change, write-through with update-on-hit instead of
+invalidate-on-write, removed a fifth of the Dhrystone cycles: every store
+used to clear its whole 4-way set, so the loads after a struct assignment,
+a string copy or a stack push missed again at 31 clocks each.  The next
+targets, by weight: a posted write buffer for stores, the front-end states
+(decode and operand read in one state, dispatch without S_FETCH), and the
+load handshake (issue from S_PIPE_SRD, finish on the acknowledge).
+
+## Experimental clock interface (parked)
 
 `cpu_wrapper.FAST_CLOCK=1` accepts the memory clock, with `CORE_DIV=4`, `2`
 or `1`. `clk_peripheral` remains the original 28 MHz clock. The chip-bus FSM

@@ -5,11 +5,17 @@
 //                                                                          //
 // 4KB per side: 64 sets x 4 ways x 16 byte lines, physically tagged        //
 // (sits between the MMU and the 16-bit bus adapter). Write-through with    //
-// invalidate-on-write: writes always go to memory and clear any matching   //
-// data cache set, so no dirty state ever exists and CPUSH degenerates to   //
-// CINV. Cacheable reads must fit inside one aligned longword; misaligned   //
-// and line-crossing accesses, walker cycles and cache-inhibited pages      //
-// bypass the cache entirely.                                               //
+// update-on-hit: writes always go to memory, and a store that fits inside  //
+// one aligned longword is merged into the resident line (no allocation on  //
+// a miss), so no dirty state ever exists and CPUSH degenerates to CINV.    //
+// A store that crosses a line clears both data sets it touches instead.    //
+// Cacheable reads must fit inside one aligned longword; misaligned and     //
+// line-crossing accesses, walker cycles and cache-inhibited pages bypass   //
+// the cache entirely.                                                      //
+//                                                                          //
+// Invalidate-on-write was the first policy here, and it cost a fifth of   //
+// Dhrystone: every store cleared its whole set, so the loads that follow   //
+// a struct assignment, a string copy or a stack push all missed again.     //
 //                                                                          //
 // The instruction cache is not snooped by CPU writes (as on the real       //
 // 68040): self-modifying code must execute CINV, which invalidates the     //
@@ -214,6 +220,9 @@ wire  [6:0] a_row  = {c_instr, a_set};
 
 // cacheable read acceptance out of idle (shared with the tag RAM read)
 wire rd_accept;
+// acceptance of a store that fits in one aligned longword: its lookup
+// shares the same tag row and data reads
+wire st_accept;
 
 //---------------------------------------------------------------------------
 // FSM
@@ -235,6 +244,7 @@ reg         winv_pend;   // a store still owes its second-line invalidate
 reg   [5:0] winv_set2;
 reg         store_inv_lost;  // a store invalidate that a snoop displaced
 reg   [5:0] store_inv_set;
+reg         st_chk;          // a fitting store's update-on-hit lookup is live in C_PASS
 reg   [6:0] r_row;
 reg  [21:0] r_tag;
 reg   [3:0] r_word;              // {word[1:0]} of the request, plus bank/way
@@ -285,6 +295,28 @@ function [31:0] lw_extract;
 		endcase
 	end
 endfunction
+// a store's bytes merged into the cached longword (big endian lanes; the
+// data is right-aligned by size, as the bus adapter takes it)
+function [31:0] lw_merge;
+	input [31:0] lw;
+	input [31:0] nw;
+	input [1:0] size;
+	input [1:0] off;
+	begin
+		case (size)
+			`AP040_SZ_B:
+				case (off)
+					2'd0: lw_merge = {nw[7:0], lw[23:0]};
+					2'd1: lw_merge = {lw[31:24], nw[7:0], lw[15:0]};
+					2'd2: lw_merge = {lw[31:16], nw[7:0], lw[7:0]};
+					default: lw_merge = {lw[31:8], nw[7:0]};
+				endcase
+			`AP040_SZ_W:
+				lw_merge = off[1] ? {lw[31:16], nw[15:0]} : {nw[15:0], lw[15:0]};
+			default: lw_merge = nw;
+		endcase
+	end
+endfunction
 
 // Snoop-vs-fill and snoop-vs-lookup collisions (5.2).  A snoop hitting
 // the row of an in-flight fill poisons it: the fill's data may predate
@@ -332,9 +364,15 @@ always @(posedge clk) begin
 		if (ce && cst == C_LOOK) fill_snooped <= 0;
 		if ((cst == C_FILL || cst == C_TAGW) && snoop_fill_row)
 			fill_snooped <= 1;
-		if (ce && rd_accept) look_snooped <= 0;
-		if ((rd_accept && snoop_look_row_acc) ||
-		    (cst == C_LOOK && snoop_look_row_look))
+		// A fitting store's lookup runs through the same two windows: its
+		// acceptance cycle and then the whole of C_PASS, since the merge
+		// waits for the memory acknowledge.  A snoop on the set anywhere
+		// in there suppresses the update; that snoop cleared the row, so
+		// nothing stale can remain.
+		if (ce && (rd_accept || st_accept)) look_snooped <= 0;
+		if (((rd_accept || st_accept) && snoop_look_row_acc) ||
+		    (cst == C_LOOK && snoop_look_row_look) ||
+		    (cst == C_PASS && st_chk && snoop_look_row_look))
 			look_snooped <= 1;
 	end
 end
@@ -387,6 +425,9 @@ assign c_rdata = pass_active ? m_rdata : rdata_r;
 assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
                    c_req && !ack_r && !c_write && !bypass &&
                    !ci_inv_pend && !store_inv_lost;
+assign st_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
+                   c_req && !ack_r && !err_hold && c_write && fits_long &&
+                   !store_inv_lost;
 
 assign tag_ridx  = a_row;
 wire [87:0] tags_next = (r_way == 2'd0) ? {tag_q[87:22], r_tag} :
@@ -408,8 +449,10 @@ assign tag_wdat  = (cst == C_SWEEP) ? {ROWW{1'b0}}
 // Port B invalidates: a snoop takes priority over a store's own
 // invalidate, because a missed snoop leaves stale data while a delayed
 // store invalidate is picked up again from snoop_pend below.
+// Only a store that does not fit in one longword clears rows; a fitting
+// one is merged into its line on a hit instead (st_upd below).
 wire store_inv = ((cst == C_IDLE) && c_req && c_write && !ack_r &&
-                  !store_inv_lost) ||
+                  !store_inv_lost && !fits_long) ||
                  ((cst == C_PASS) && winv_pend) ||
                  (cst == C_WINV);
 // Snoop invalidates are FREE-RUNNING (5.1): a chipset write must land
@@ -471,15 +514,26 @@ assign inv_idx  = snoop_wr        ? {1'b0, s_addr[9:4]} :
                   store_inv_lost ? {1'b0, store_inv_set} :
                   (cst == C_IDLE) ? {1'b0, c_addr[9:4]} : {1'b0, winv_set2};
 assign cd_ridx   = {c_instr, a_set, c_addr[3:2]};
-assign cd_we     = ((cst == C_FILL) && r_issued && m_ack)
-                   ? (4'd1 << r_way) : 4'd0;
-assign cd_widx   = {r_bank, r_row[5:0], r_beat};
-assign cd_wdat   = m_rdata;
-
 // the four ways arrive together; the tag compare picks one
 wire [31:0] data_hit = (hit_way == 2'd0) ? data_q0 :
                        (hit_way == 2'd1) ? data_q1 :
                        (hit_way == 2'd2) ? data_q2 : data_q3;
+// Update-on-hit: a fitting store's tag row and data words were read at
+// acceptance and are still on the RAM outputs (the request is level-held
+// through C_PASS), so on the memory acknowledge the hit way's word is
+// rewritten with the store merged in.  The merge waits for the ack so a
+// write that bus-errors leaves the line as it was: memory was not
+// written either.  Data port B is the fill's write port; a store never
+// runs during a fill, so the two select cleanly.  The guard terms are
+// the lookup's own: a snoop on this set in the acceptance cycle or
+// during the pass forces the update off, and that snoop cleared the row.
+wire st_upd = (cst == C_PASS) && st_chk && m_ack && !m_err &&
+              look_hit && !look_snooped && !snoop_look_row_look;
+assign cd_we     = st_upd ? (4'd1 << hit_way) :
+                   ((cst == C_FILL) && r_issued && m_ack) ? (4'd1 << r_way) : 4'd0;
+assign cd_widx   = st_upd ? {r_bank, r_row[5:0], r_word[1:0]}
+                          : {r_bank, r_row[5:0], r_beat};
+assign cd_wdat   = st_upd ? lw_merge(data_hit, c_wdata, r_size, r_off) : m_rdata;
 
 
 
@@ -498,6 +552,7 @@ always @(posedge clk) begin
 		ci_inv_row <= 0;
 		store_inv_lost <= 0;
 		store_inv_set <= 0;
+		st_chk <= 0;
 		cinv_done <= 0;
 		r_row <= 0; r_tag <= 0; r_word <= 0; r_way <= 0; r_bank <= 0; way_fallback <= 0;
 		r_beat <= 0; r_issued <= 0; r_addr <= 0; r_size <= 0; r_off <= 0;
@@ -516,7 +571,7 @@ always @(posedge clk) begin
 		// (store_inv's !store_inv_lost term), so the single slot cannot
 		// be overwritten.
 		if (snoop_wr && (cst == C_IDLE) && c_req && c_write && !ack_r &&
-		    !store_inv_lost) begin
+		    !store_inv_lost && !fits_long) begin
 			store_inv_lost <= 1;
 			store_inv_set  <= c_addr[9:4];
 		end
@@ -579,6 +634,20 @@ always @(posedge clk) begin
 						// wait or in C_WINV.  The transfer itself is issued
 						// from C_PASS (see pass_active), so no ack can land
 						// in this cycle.
+						// A store that fits in one longword takes the
+						// update-on-hit path: the tag row and data words
+						// of its set are read in this cycle (the RAM
+						// addresses follow the live request) and compared
+						// in C_PASS, where the merge lands on the ack.
+						// Only a store that does not fit clears its set
+						// through port B here (store_inv).
+						st_chk <= fits_long;
+						r_row  <= a_row;
+						r_tag  <= a_tag;
+						r_bank <= c_instr;
+						r_word <= {2'd0, c_addr[3:2]};
+						r_size <= c_size;
+						r_off  <= c_addr[1:0];
 						winv_set2 <= c_addr[9:4] + 6'd1;
 						winv_pend <= write_cross_line;
 						cst <= C_PASS;
@@ -619,6 +688,8 @@ always @(posedge clk) begin
 						ci_inv_row  <= r_row;
 					end
 				end
+				// the store lookup is over with the pass, merged or not
+				if (m_err || m_ack) st_chk <= 0;
 				if (m_err) begin
 					// a passed access faulted: release the bus, but a
 					// still-owed invalidate is honoured (invalidating

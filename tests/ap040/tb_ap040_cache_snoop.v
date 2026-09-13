@@ -24,6 +24,13 @@
 //             must not validate the partly-filled line, and must leave
 //             the cache able to serve the exception handler's own
 //             accesses.  The error is swept across all four beats.
+//   T11       write-through with update-on-hit: a store that fits in a
+//             longword and hits leaves the line valid with the store
+//             merged in, at every size and lane; a missing store does
+//             not allocate; a snoop on the store's set anywhere between
+//             acceptance and the ack leaves the line dead, a snoop on
+//             another set in that window does not stop the merge.
+//             Swept at every memory latency.
 //
 // Every test reprograms memory behind the cache and requires the next
 // read to return the NEW value: a stale cached longword is the failure
@@ -196,8 +203,19 @@ always @(posedge clk) begin
 				else begin
 					m_ack <= 1;
 					if (m_write) begin
-						// longword stores only in this bench
-						mem[m_addr[15:2]] <= m_wdata;
+						// lanes as the bus adapter places them: the
+						// data is right-aligned by size
+						case (m_size)
+							2'b00: case (m_addr[1:0])
+								2'd0: mem[m_addr[15:2]][31:24] <= m_wdata[7:0];
+								2'd1: mem[m_addr[15:2]][23:16] <= m_wdata[7:0];
+								2'd2: mem[m_addr[15:2]][15:8]  <= m_wdata[7:0];
+								default: mem[m_addr[15:2]][7:0] <= m_wdata[7:0];
+							endcase
+							2'b01: if (m_addr[1]) mem[m_addr[15:2]][15:0]  <= m_wdata[15:0];
+							       else           mem[m_addr[15:2]][31:16] <= m_wdata[15:0];
+							default: mem[m_addr[15:2]] <= m_wdata;
+						endcase
 					end
 					else m_rdata <= mem[m_addr[15:2]];
 				end
@@ -323,6 +341,33 @@ task cpu_ci_read_then_write;
 	end
 endtask
 
+// memory READ acknowledges consumed by the cache: unchanged across an
+// access proves that access was served from a line
+integer mreads = 0;
+always @(posedge clk) if (m_ack && ce && !m_write) mreads = mreads + 1;
+task cpu_write_sz;
+	input [31:0] a;
+	input  [1:0] sz;
+	input [31:0] d;
+	integer guard;
+	begin
+		@(negedge clk);
+		c_req = 1; c_write = 1; c_size = sz; c_addr = a; c_wdata = d;
+		guard = 0;
+		while (!(c_ack && ce) && guard < 200) begin
+			@(posedge clk);
+			guard = guard + 1;
+		end
+		if (guard >= 200) begin
+			$display("FAIL: write timeout at %h", a);
+			errors = errors + 1;
+		end
+		@(negedge clk);
+		c_req = 0; c_write = 0; c_size = 2'b10;
+		while (!ce) @(posedge clk);
+		@(posedge clk);
+	end
+endtask
 task cpu_write;
 	input [31:0] a;
 	input [31:0] d;
@@ -438,8 +483,10 @@ endtask
 
 integer i, off;
 integer guard5;
+integer mr0;
 reg [31:0] d;
 reg [31:0] d2;
+reg [31:0] model;
 
 initial begin
 	for (i = 0; i < 16384; i = i + 1) mem[i] = 32'h1111_0000 + i;
@@ -787,6 +834,103 @@ initial begin
 				end
 			join
 			repeat (6 * CE_DIV) @(posedge clk);
+		end
+	end
+	mem_lat = 2'd2;
+
+	//------------------------------------------------------------------
+	// T11: write-through with update-on-hit (see the header).  Sets are
+	// address bits 9:4: $F200 shares set $20 with $7200 on another line,
+	// $F310 (set $31) is unrelated to $7300 (set $30).
+	//------------------------------------------------------------------
+	for (i = 0; i < 4; i = i + 1) begin
+		mem_lat = i;
+		// (a) a longword store that hits: the next read is a hit and
+		// returns the stored value, memory was written through
+		expect_read(32'h0000_7000, mem[32'h7000>>2], 11);
+		mr0 = mreads;
+		cpu_write(32'h0000_7004, 32'hA5A5_0000 + i);
+		expect_read(32'h0000_7004, 32'hA5A5_0000 + i, 11);
+		if (mreads != mr0) begin
+			$display("FAIL test 11a (latency %0d): read after a hitting store went to memory", i);
+			errors = errors + 1;
+		end
+		if (mem[32'h7004>>2] !== 32'hA5A5_0000 + i) begin
+			$display("FAIL test 11a (latency %0d): memory not written through", i);
+			errors = errors + 1;
+		end
+		// (b) byte and word stores merge into the line, checked against
+		// a software model of the longword; every read must hit
+		model = mem[32'h7008>>2];
+		for (off = 0; off < 4; off = off + 1) begin
+			cpu_write_sz(32'h0000_7008 + off, 2'b00, 32'h0000_0080 + (i << 4) + off);
+			case (off)
+				0: model[31:24] = 8'h80 + (i << 4) + off;
+				1: model[23:16] = 8'h80 + (i << 4) + off;
+				2: model[15:8]  = 8'h80 + (i << 4) + off;
+				default: model[7:0] = 8'h80 + (i << 4) + off;
+			endcase
+			mr0 = mreads;
+			expect_read(32'h0000_7008, model, 11);
+			if (mreads != mr0) begin
+				$display("FAIL test 11b (latency %0d): read after a byte store at lane %0d went to memory", i, off);
+				errors = errors + 1;
+			end
+		end
+		cpu_write_sz(32'h0000_7008, 2'b01, 32'h0000_C000 + i);
+		model[31:16] = 16'hC000 + i;
+		cpu_write_sz(32'h0000_700A, 2'b01, 32'h0000_D000 + i);
+		model[15:0] = 16'hD000 + i;
+		mr0 = mreads;
+		expect_read(32'h0000_7008, model, 11);
+		if (mreads != mr0) begin
+			$display("FAIL test 11b (latency %0d): read after word stores went to memory", i);
+			errors = errors + 1;
+		end
+		if (mem[32'h7008>>2] !== model) begin
+			$display("FAIL test 11b (latency %0d): memory %h, model %h", i, mem[32'h7008>>2], model);
+			errors = errors + 1;
+		end
+		// (c) a store that misses must not allocate: the read fetches
+		mr0 = mreads;
+		cpu_write(32'h0000_7100 + (i << 4), 32'h3C3C_0000 + i);
+		expect_read(32'h0000_7100 + (i << 4), 32'h3C3C_0000 + i, 11);
+		if (mreads == mr0) begin
+			$display("FAIL test 11c (latency %0d): a missing store allocated a line", i);
+			errors = errors + 1;
+		end
+		// (d) a snoop on the store's set, swept from acceptance past the
+		// ack: the line must be dead afterwards, whether the merge was
+		// suppressed or the snoop cleared the row after it
+		for (off = 0; off < 8; off = off + 1) begin
+			expect_read(32'h0000_7200, mem[32'h7200>>2], 11);
+			fork
+				cpu_write(32'h0000_7204, 32'h5E5E_0000 + (i << 8) + off);
+				begin
+					repeat (off) @(negedge clk);
+					snoop(32'h0000_F200);
+				end
+			join
+			mem[32'h7204>>2] = 32'h6F6F_0000 + (i << 8) + off;
+			expect_read(32'h0000_7204, 32'h6F6F_0000 + (i << 8) + off, 11);
+		end
+		// (e) a snoop on another set in the same window must not stop
+		// the merge: the read after it hits with the stored value
+		for (off = 0; off < 8; off = off + 1) begin
+			expect_read(32'h0000_7300, mem[32'h7300>>2], 11);
+			fork
+				cpu_write(32'h0000_7304, 32'h7A7A_0000 + (i << 8) + off);
+				begin
+					repeat (off) @(negedge clk);
+					snoop(32'h0000_F310);
+				end
+			join
+			mr0 = mreads;
+			expect_read(32'h0000_7304, 32'h7A7A_0000 + (i << 8) + off, 11);
+			if (mreads != mr0) begin
+				$display("FAIL test 11e (latency %0d, snoop at %0d): an unrelated snoop stopped the merge", i, off);
+				errors = errors + 1;
+			end
 		end
 	end
 	mem_lat = 2'd2;

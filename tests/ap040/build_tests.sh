@@ -20,3 +20,16 @@ for t in t_integer t_exceptions t_mmu t_cache t_fpu bench_loop bench_alu; do
 	python3 bin2hex.py build/$t.bin build/$t.hex
 	echo "built build/$t.hex"
 done
+# Compiled C measurement programs (c/*.c): vbcc for the 68040, linked flat
+# behind c/start.s (vectors at 0, code from $400) by vlink.  dhry is
+# Dhrystone 2.1, self-checking against the published final values.
+VC=${VC:-/opt/amiga-cc/vbcc/bin/vc}
+VLINK=${VLINK:-/opt/amiga-cc/vbcc/bin/vlink}
+export VBCC=${VBCC:-/opt/amiga-cc/vbcc}
+$VASM -quiet -Fhunk -m68040 -o build/start.o c/start.s
+for t in dhry; do
+	$VC +aos68k -c -O2 -speed -cpu=68040 -fpu=68040 -c99 -o build/$t.o c/$t.c
+	$VLINK -brawbin1 -o build/$t.bin build/start.o build/$t.o
+	python3 bin2hex.py build/$t.bin build/$t.hex
+	echo "built build/$t.hex"
+done
