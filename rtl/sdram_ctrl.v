@@ -618,8 +618,13 @@ always @ (posedge sysclk) begin
 		             walker_cas2_go || (init_done && cas_go && !cas_sd_cas));
 		sd_we   <= !((ras_go && init_we) ||
 		             walker_cas2_go || (init_done && cas_go && !cas_sd_we));
-		sd_data               <= 16'hZZZZ;
-		chipWE                <= 0;
+		// Same argument, same enable: the data bus is driven only by the two
+		// CAS states and released everywhere else, and chipWE is raised only
+		// by the chipset's own RAS.
+		sd_data <= walker_cas2_go            ? walker_wdata_latch[15:0] :
+		           (init_done && cas_go && !cas_sd_we) ? datawr
+		                                              : 16'hZZZZ;
+		chipWE  <= ras_go && init_done && ((~chipDMA) | (~chipRW)) && !chipRW;
 	end
 
 	if(sdram_state[0]) sdata_reg <= sd_data;
@@ -630,12 +635,25 @@ always @ (posedge sysclk) begin
 		sd_addr <= row_col;
 	// otherwise hold
 
+	// The mask and the bank hold across the whole burst rather than across the
+	// odd states, so their enable is not ~sdram_state[0] -- but it is still a
+	// short list of registered flags, and writing them once each keeps their
+	// own outputs out of their own cones.  The bank is loaded at every RAS,
+	// taking pre_ba on the slots that do not belong to the chipset; on a slot
+	// that issues no command at all it is a don't-care, exactly as the row in
+	// row_col is.
+	if (!init_done || ras_go || walker_cas2_go || cas_go)
+		sd_dqm <= (!init_done || ras_go)  ? 2'd3 :
+		          walker_cas2_go          ? 2'd0 :
+		          (!cas_sd_we)            ? cas_dqm : 2'd0;
+	if (!init_done || ras_go)
+		sd_ba  <= !init_done ? 2'd0 :
+		          ((~chipDMA) | (~chipRW)) ? chipAddr[24:23] : pre_ba;
+
 	if(!init_done) begin
 		slot_type             <= IDLE;
 		casaddr               <= 0;
 		rcnt                  <= 0;
-		sd_dqm                <= 3;
-		sd_ba                 <= 0;
 	end else begin
 
 		case(sdram_state)
@@ -652,7 +670,6 @@ always @ (posedge sysclk) begin
 				cas_sd_cas      <= 1;
 				cas_sd_we       <= 1;
 				cas_dqm         <= 0;
-				sd_dqm          <= 3;
 				slot_type       <= IDLE;
 				fwd_en          <= 0;
 
@@ -662,12 +679,11 @@ always @ (posedge sysclk) begin
 				// (this includes anything on the "motherboard" - chip RAM, slow RAM and Kickstart, turbo modes notwithstanding)
 				if(~chipDMA | ~chipRW) begin
 					slot_type    <= CHIP;
-					{sd_ba,casaddr[8:0]} <= {chipAddr[24:23], chipAddr[9:1]};
+					casaddr[8:0] <= chipAddr[9:1];
 					cas_dqm      <= {chipU,chipL};
 					cas_sd_cas   <= 0;
 					cas_sd_we    <= chipRW;
 					datawr       <= chipWR;
-					chipWE       <= !chipRW;
 					if(chipRW & write_req & (writeAddr[24:3] == chipAddr[24:3])) begin
 						fwd_en  <= 1'b1;
 						fwd_pos <= writeAddr[2:1] - chipAddr[2:1];
@@ -677,7 +693,7 @@ always @ (posedge sysclk) begin
 				end
 				else if(pre_sel == PRE_WRITE) begin
 					slot_type    <= CPU_WRITECACHE;
-					{sd_ba,casaddr[8:0]} <= {pre_ba, pre_col[8:0]};
+					casaddr[8:0] <= pre_col[8:0];
 					cas_dqm      <= write_dqm;
 					cas_sd_we    <= 0;
 					cas_sd_cas   <= 0;
@@ -686,7 +702,7 @@ always @ (posedge sysclk) begin
 				end
 				else if(pre_sel == PRE_WALKER) begin
 					slot_type    <= walker_we ? WALKER_WRITE : WALKER_READ;
-					{sd_ba,casaddr[8:0]} <= {pre_ba, pre_col[8:0]};
+					casaddr[8:0] <= pre_col[8:0];
 					cas_dqm      <= 0;
 					cas_sd_cas   <= 0;
 					cas_sd_we    <= ~walker_we;
@@ -695,7 +711,7 @@ always @ (posedge sysclk) begin
 				// request from read cache
 				else if(pre_sel == PRE_CACHE) begin
 					slot_type    <= CPU_READCACHE;
-					{sd_ba,casaddr[8:0]} <= {pre_ba, pre_col[8:0]};
+					casaddr[8:0] <= pre_col[8:0];
 					cas_sd_cas   <= 0;
 				end
 				else if(&rcnt) begin
@@ -704,34 +720,19 @@ always @ (posedge sysclk) begin
 				end
 		end
 
-		// walker write: second single-write CAS to column+1 (state 4).
-		// The mode word sets A9 (write burst = single location), so a data
-		// beat after the CAS cycle is IGNORED by the chip -- without this
-		// the low word of every 32-bit walker write is lost (tCCD=1 on SDR
-		// makes back-to-back writes two states apart legal).
-		if (walker_cas2_go) begin
-				sd_data      <= walker_wdata_latch[15:0];
-				sd_dqm       <= 0;
-		end
-
-
-		// CAS: all qualifiers (cas_sd_cas/cas_sd_we/cas_dqm/casaddr/
-		// datawr) are registers latched at the RAS state, so with the
-		// pre-decoded flag every sd_* pin-register input cone is one
-		// LUT deep.  Placed after the case: overrides the even-state
-		// deasserts exactly like the original arm did.
-		if (cas_go) begin
-			// A walker write issues a second single-write CAS two cycles
-			// later; auto-precharging on the FIRST command would put the
-			// bank into precharge under that second command (undefined on
-			// real silicon).  Hold the row open here and let the second
-			// command carry A10 instead -- cas_sd_cas above carries that.
-			sd_dqm          <= 0;
-			if(!cas_sd_we) begin
-				sd_data      <= datawr;
-				sd_dqm       <= cas_dqm;
-			end
-		end
+		// The CAS states no longer appear here at all.  Every pin they drive
+		// -- address, command, data, mask, bank -- is written once, at the top
+		// of this block, from cas_go and walker_cas2_go and the registered
+		// qualifiers latched at the RAS state.  Two notes that lived here and
+		// still matter:
+		//
+		// A walker write issues a second single-write CAS to column+1 two
+		// cycles later (the mode word sets A9, single-location write burst, so
+		// a data beat after the CAS cycle is ignored by the chip; tCCD=1 on
+		// SDR makes back-to-back writes two states apart legal).  The first of
+		// the two must not auto-precharge, or the bank would be precharging
+		// under the second command -- cas_sd_cas carries that, and the second
+		// command carries A10 instead.
 	end
 end
 
