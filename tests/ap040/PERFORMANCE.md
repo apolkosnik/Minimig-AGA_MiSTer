@@ -292,22 +292,54 @@ closed" below.
 Cycle counts and the full corpus comparison are also recorded in
 [`performance_40mhz.json`](performance_40mhz.json).
 
-## Timing, and what is not closed
+## Timing
 
-The CPU work above is **simulation-validated only**.  It has never been
-shown to work on hardware: no bitstream of it meets the build gate, and the
-one build that did meet it (by a change since reverted) did not boot.  Read
-every cycle figure above as a simulation result.
+`74317588` meets the build gate: `setup emu (CPU) +0.097`, no negative emu
+row in any corner, and it is the first bitstream of this CPU work to do so.
+The cycle figures above remain **simulation results** -- the gate is a
+timing result, not a hardware one, and nothing below has been run on a
+board.
 
-The design's limiting path is not in the CPU: it is the chipset's
-`AGNUS1|bc1|hpos -> ram1|sd_addr`, the Amiga's DMA address reaching the
-SDRAM controller through agnus, gary, the bank mapper, the SRAM bridge and
-the DMA arbiter, all of it combinational.  Its budget is a true two
-clk_114 cycles, 17.616 ns, because Agnus's clk7_en registers change on the
-same clk_28 edge on which c1 rises, the controller detects that rise one
-cycle later and the RAS state captures one cycle after that.  The last
-build that met timing cleared this path by 0.091 ns, so it has always
-decided rebuilds by placement rather than by design.
+The design's limiting path was never in the CPU: it is the chipset's DMA
+address reaching the SDRAM controller through agnus, gary, the bank mapper,
+the SRAM bridge and the DMA arbiter, all of it combinational.  Its budget is
+a true two clk_114 cycles, 17.616 ns, because Agnus's clk7_en registers
+change on the same clk_28 edge on which c1 rises, the controller detects
+that rise one cycle later and the RAS state captures one cycle after that.
+At -0.796 ns it was 38 of the 40 worst paths in the design.
+
+What closed it, in the order the fits said to do it, with each figure the
+one that fit measured:
+
+* **The bank mapper's chip select, two LUT levels to one** (`177d4cd7`):
+  `bank[5]` is `chip3|chip2|chip1|chip0` and `chip0` carries a four-term CPU
+  qualifier, so flattened it is eight inputs.  Keeping the qualifier as its
+  own node makes it five.  Worth 2.14 ns on the worst path.
+* **Not keeping anything else** (`dd699822`): the same commit preserved two
+  more nodes to reach the pins and gave all of it back -- `arb_drive_chip`
+  cost 0.767 ns as a serial stage with a fanout of 111, `ram1|chip_row`
+  another 1.398.  A shared node between the chipset and an I/O register has
+  its inputs in the controller's cluster and its output at the pin, so the
+  fitter places it with its inputs and the address pays for the trip twice.
+  Removing both, and folding sd_addr's whole select into one LUT per bit,
+  took this family to +0.280 and out of the sixty worst paths.
+* **The pin registers' feedback holds** (`9eb85051`, `74317588`): every
+  SDRAM pin register was written from several places and held in between,
+  and a hold needs the register's own output back at its input.  The fitter
+  duplicated `sd_cas` and placed the copies far apart:
+  `sd_cas~_Duplicate_1 -> sd_cas` was the worst path in the design at
+  -2.314 ns.  Every condition that drives the command pins falls on an even
+  slot state, so the enable is exactly `~sdram_state[0]` -- literal once
+  each pin is written from one place.  -2.314 to -0.496 and 873 ALMs, then
+  the rest of the pin group to +0.097.
+
+Fit-to-fit variance is large here and worth knowing about before reading
+any single build: -0.796, -1.653, -0.230, -2.314, -0.496, +0.097 across six
+fits of nearly identical logic.  Several families sit within about two
+nanoseconds of each other, so which one surfaces as worst moves with
+placement.  A few hundred picoseconds of claimed improvement cannot be
+established from one build; a change of worst-path *identity*, or of ALM
+count, can.
 
 Two attempts to buy margin, both reverted:
 
@@ -337,3 +369,18 @@ absence of skew, and it says nothing about absolute setup and hold against
 the forwarded clock, because the generated clock's parity is not pinned.
 Calibrate it against the command pins, whose centring is known, before
 trusting any absolute figure from it.
+
+On `74317588` all twenty pins of the interface -- thirteen address, two
+bank, three command, two mask -- arrive within 0.773 ns of each other, the
+address bits alone within 0.525 ns.  Read that as the check passing, not as
+margin: the absolute figures it prints, around -5.3 to -6.1 ns, are the
+unpinned parity, not a violation.  The comparison that matters is with the
+reverted unpacking, which put two bits 3.9 ns and 12.7 ns behind the rest.
+
+### Still unverified
+
+Meeting the gate is not booting.  On hardware, none of this has been shown:
+repeated cold boots, display-DMA stress, the I/O identities `tools/amiga`
+probes, or that the speed survives any of it.  The last measured hardware
+figure remains 6,615 Dhrystones from `d079808a`, a build that did **not**
+meet timing.
