@@ -333,13 +333,15 @@ one that fit measured:
   each pin is written from one place.  -2.314 to -0.496 and 873 ALMs, then
   the rest of the pin group to +0.097.
 
-Fit-to-fit variance is large here and worth knowing about before reading
-any single build: -0.796, -1.653, -0.230, -2.314, -0.496, +0.097 across six
-fits of nearly identical logic.  Several families sit within about two
-nanoseconds of each other, so which one surfaces as worst moves with
-placement.  A few hundred picoseconds of claimed improvement cannot be
-established from one build; a change of worst-path *identity*, or of ALM
-count, can.
+Slack moves by about two nanoseconds between fits of nearly identical logic:
+-0.796, -1.653, -0.230, -2.314, -0.496, +0.097 across the six above.  Say
+what that is and is not.  Each figure is a *different* source state, so it
+measures the fitter's sensitivity to change, not run-to-run noise -- the same
+source was never built twice, so nothing here measures reproducibility.
+Several families sit within about two nanoseconds of each other and which one
+surfaces as worst moves with placement, so a claimed gain of a few hundred
+picoseconds cannot be established from one build.  A change of worst-path
+*identity*, or of ALM count, can.
 
 Two attempts to buy margin, both reverted:
 
@@ -376,6 +378,21 @@ address bits alone within 0.525 ns.  Read that as the check passing, not as
 margin: the absolute figures it prints, around -5.3 to -6.1 ns, are the
 unpinned parity, not a violation.  The comparison that matters is with the
 reverted unpacking, which put two bits 3.9 ns and 12.7 ns behind the rest.
+
+### Margin, and what it costs the next change
+
+`74317588` passes by 0.097 ns in the worst corner, and the emu paths behind
+it are several unrelated families rather than one: the HPS bridge into
+`ddram_ctrl`'s state machine at +0.261, the controller cache's tag RAM into
+`cpu_ack` at +0.295, `sdata_reg -> walker_sdata_pipe` at +0.300, and
+`sd_addr[12]` still appearing three times in the tightest thirty.  The
+chipset address path is no longer among them.  Every path tighter than those
+is in `ascal`, the video scaler, which the gate tolerates by design.
+
+So there is no headroom.  Anything added from here should expect to land
+negative on first fit, and the lever with evidence behind it is the one
+above: find a pin or boundary register that is written from several places
+and held in between, and give it one assignment and an explicit enable.
 
 ### Still unverified
 
