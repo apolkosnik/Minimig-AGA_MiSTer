@@ -136,6 +136,12 @@ always @(posedge clk113) begin
 end
 wire        is_fetch;
 wire        sel_ddr;
+// Declared here, not beside their assignments further down: the STALE-I
+// monitor's FIRSTBAD dump reads them, and iverilog rejects a reference to a
+// wire declared later in the file where Verilator accepts it.
+wire        want_ddr;
+wire        fetch_chip;
+wire        data_chip;
 wire        ctrl_cs;
 wire [15:0] ctrl_rd;
 wire        ctrl_ready;
@@ -603,7 +609,7 @@ assign is_fetch   = (cpu_state == 2'b00);
 // harness-replica register images -- crosses to the DDR side.
 reg datasplit = 0;
 initial if ($test$plusargs("datasplit")) datasplit = 1;
-wire data_chip = (ramaddr[15:1] < (16'h0400 >> 1)) ||
+assign data_chip = (ramaddr[15:1] < (16'h0400 >> 1)) ||
                  ((ramaddr[15:1] >= (16'h3600 >> 1)) &&
                   (ramaddr[15:1] <  (16'h3800 >> 1))) ||
                  (ramaddr[15:1] >= (16'hF000 >> 1)); // TB control ports
@@ -615,8 +621,8 @@ wire data_chip = (ramaddr[15:1] < (16'h0400 >> 1)) ||
 // both by address and has no such window, so this was the harness asking for
 // something no configuration does -- see the FIRSTBAD dump below, which was
 // written to establish that and prints the write's provenance.
-wire fetch_chip = (ramaddr[15:1] >= (16'hF000 >> 1));
-wire want_ddr = (is_fetch && !fetch_chip) || (datasplit && !data_chip);
+assign fetch_chip = (ramaddr[15:1] >= (16'hF000 >> 1));
+assign want_ddr = (is_fetch && !fetch_chip) || (datasplit && !data_chip);
 
 // zram_sel analogue: flips with the request, holds its last value while
 // the bus is idle (Minimig.sv's zram_sel follows the registered address,

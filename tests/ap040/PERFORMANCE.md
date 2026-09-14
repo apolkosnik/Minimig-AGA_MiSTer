@@ -409,17 +409,44 @@ did.
 `sdram_rp1` and `dualram_rp1` now cover the shipping configuration, because
 nothing did before.
 
-### Open: a pre-existing failure the regression does not run
+Three things this result is not.  The registered hit compare changes when a
+read completes, so it can change execution time with identical CPU RTL:
+re-measured, `dhry` on the sdram bench is 6,169,503 clk_114 cycles with the
+pipe off and 6,169,503 with it on, bit-identical, while `t_mmu` moves by 256
+cycles, which is how the parameter is shown to be taking effect at all.  So
+the 6,615 Dhrystones should hold, but that is a simulation argument and the
+hardware figure is unverified.  The corner moving from Slow -40C to Slow
+100C is consistent with a changed bottleneck, not proof of one; the evidence
+for why is the acknowledge-path reports, where `cpu_ack` goes from four of
+the tightest twelve emu paths to absent.  And four times the slack is four
+times the headroom, not four times the reliability.
 
-`dualram` + `t_mmu` at CPU_PHASE 3 fails, and has failed since at least
-`6ea3997d`.  `run_tests.sh` runs that bench with `t_fpu` only, so nothing
-catches it.  The bench's own STALE-I monitor fires first: an instruction
-fetch acknowledged by `ddram_ctrl` returns `0000` where the program image
-holds real opcodes, twice, and the run ends in an F-line exception on
-garbage at `pc=00008002`.  That is the shipping topology -- `ram1` is
-`sdram_ctrl` and `ram2` is `ddram_ctrl` -- so it deserves chasing on its own
-account.  It is unrelated to `CACHE_READ_PIPE`, which is only how it was
-found.
+### Closed: dualram + t_mmu, and what it was
+
+It was the bench, and the first bad transaction says so rather than the fix
+passing saying so.  At t=7073660 the CPU requested $00F004 as an instruction
+fetch; `want_ddr` and `sel_ddr` were both 1, so `ddram_ctrl` owned it; it
+acknowledged (`ack_ddr=1`, `ack_chip=0`) and returned `0000` while the shared
+image held `702b`.  The word's last write was by the **chip** model at
+t=6936996, taking it from `0000` to `702b` -- 137 us earlier, through a
+controller the fetch never consulted.
+
+The cause is the bench routing data by address and fetches by cycle type.
+Those agree everywhere except its own port window at $F000 and up, which
+`data_chip` sends to the chip side; a word written there as data and then
+executed reads back pre-write.  A real machine routes both by address and
+has no such window.  Neither controller misbehaved and the MMU is not
+implicated.
+
+Pre-existing: `6ea3997d`, before any of this work, reproduces the same first
+transaction -- same address, routing, acknowledgement ownership, returned
+word and chip-side provenance -- differing only in timestamps.
+
+The write-provenance arrays stay in the bench.  STALE-I alone says a fetch
+disagreed with the image; it does not say which of the controller, the
+routing or the image is at fault.  `t_mmu` now runs on both dualram legs of
+the suite and `run_tests.sh` has `mmu_dualram`, because the reason this sat
+undetected is that nothing ran it.
 
 ### Still unverified
 
