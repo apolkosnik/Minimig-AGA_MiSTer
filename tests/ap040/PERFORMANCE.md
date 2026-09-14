@@ -514,6 +514,39 @@ divide 1, and the assertion failed there.  Narrowing it to "the compare used
 a collided row" converges on the RTL's own expression and proves nothing.
 The end-to-end data check is the contract test.
 
+### What the cputest corpus does not cover
+
+`tb_dat_replay` forces `cacr = 0` and `tc = 0` -- and the TTRs, both root
+pointers and MMUSR with them -- before every slice.  So the corpus runs with
+**both caches disabled and the MMU off**.
+
+That matters because "the corpus fail set is identical" has been the main
+evidence behind every step of this work, and for two subsystems it is
+vacuous:
+
+* **The cache rewrite.**  Write-through update-on-hit is the single largest
+  behavioural change here and worth a fifth of Dhrystone.  The corpus cannot
+  see it at all.  Its coverage is `t_cache.s`, which runs untranslated, and
+  `tb_ap040_cache_snoop`.
+* **Anything translated.**  Page faults, restart under paging, the format `$7`
+  frame in anger.  The corpus's own access-error group passes 32/32, but with
+  `tc = 0` those are bus errors, not page faults.
+
+This is not hypothetical.  It hid a real regression: sizing the bitfield
+memory read by its span (`8e73b9b74`) changed which reads the cache serves,
+because `ap040_cache` accepts only an access inside one aligned longword and
+a longword at an arbitrary address is refused three times in four.  The
+corpus was clean, the 46-leg suite was clean, the directed page-boundary test
+passed, and NetBSD's `rcorder` died on SIGABRT.  `e6c584e67` restricts the
+narrowing to the page-crossing case, which is measured byte-identical to the
+known-good core: every program on the core bench retires in the same cycle
+count as `74317588`, `t_mmu` included.
+
+What would close the gap is a directed test that runs cached **and**
+translated -- a cached access through a mapped page, a remap or protection
+change, a flush, then the access again -- plus a corpus mode that leaves the
+caches on.  Neither exists.
+
 ### Still unverified: the hardware release checks
 
 Everything above is simulation and timing.  The image to test is
