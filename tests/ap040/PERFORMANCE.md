@@ -514,10 +514,31 @@ divide 1, and the assertion failed there.  Narrowing it to "the compare used
 a collided row" converges on the RTL's own expression and proves nothing.
 The end-to-end data check is the contract test.
 
-### Still unverified
+### Still unverified: the hardware release checks
 
-Meeting the gate is not booting.  On hardware, none of this has been shown:
-repeated cold boots, display-DMA stress, the I/O identities `tools/amiga`
-probes, or that the speed survives any of it.  The last measured hardware
-figure remains 6,615 Dhrystones from `d079808a`, a build that did **not**
-meet timing.
+Everything above is simulation and timing.  The image to test is
+`Minimig-ap040-40mhz-d41be2fd-20260913_192514.rbf`, md5
+`54c7182391fa7436d1f2bda7e93c6d16`.  The RTL has not moved since it was
+built -- the only changes to `rtl/` and the project files since that commit
+are four comment lines -- so the tree and the image still agree.
+
+1. **Repeated cold boots.**  Power-cycle, not core reload, several times.
+   One boot is what `d079808a` had, and an earlier fit of the same RTL at
+   the same slack showed corrupted display DMA instead.
+2. **Display and DMA activity.**  Something that moves bitplane and sprite
+   DMA for a while; the failure mode this design has shown is the chipset's
+   address to the SDRAM, which appears as corrupted display rather than a
+   hang.
+3. **Both I/O identifications.**  `tools/amiga/ioprobe.c` (build line in its
+   README) prints every individual read behind XSysInfo's Clock and Gary
+   lines.  Run it on this image and on a known-good core with the same ROM,
+   OSD settings and Workbench, and diff.  The two lines differ from the
+   5350-Dhrystone baseline and nothing in the RTL diff explains it: the
+   modules that serve those probes -- `gayle.v`, `fastchip.v`, `gary.v`,
+   `minimig_m68k_bridge.v` -- are untouched since then, and the legacy chip
+   machine differs only in an interrupt reset value.
+4. **Dhrystone on this exact image.**  6,615 is `74317588`'s measurement.
+   Simulation says the read pipe costs nothing (`dhry` is 6,169,503 clk_114
+   either way, bit-identical), so the expectation is unchanged -- but an
+   expectation is not a measurement.
+
