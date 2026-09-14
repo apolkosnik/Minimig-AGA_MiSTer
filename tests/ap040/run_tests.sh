@@ -2,10 +2,17 @@
 # Build and run all AP040 tests with Icarus Verilog.
 # Usage: run_tests.sh [workdir]
 #
-# The default regression is run_verilator_suite.py (Verilator, two-state);
-# it covers every leg below except the snoop bench's X-poison family
-# (cache_snoop_x / cache_snoop_ce4, -DSNOOP_MIXED_X), which needs four-state
-# simulation and therefore lives only here.
+# NOT the default regression.  run_verilator_suite.py is -- Verilator is the
+# expected simulator here, and iverilog is for where four-state X is genuinely
+# needed.  That is the snoop bench's X-poison family (cache_snoop_x /
+# cache_snoop_ce4, -DSNOOP_MIXED_X), five legs, and nothing else below.
+#
+# The other 45 legs duplicate the Verilator suite.  They are kept for the
+# second opinion four-state simulation gives, not because anything requires
+# them, and they are why a bench edit can pass the Verilator suite and fail
+# here: iverilog rejects a reference to a wire declared later in the file
+# where Verilator accepts it (three times on this branch; tb_dualram_turbo.v
+# carries a comment where its routing wires are declared because of it).
 #
 # Both phases run concurrently: the bench compiles are independent of each
 # other once the two generated sources exist, and every simulation leg is

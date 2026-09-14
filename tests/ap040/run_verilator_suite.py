@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
-"""The AP040 regression under Verilator: every leg of run_tests.sh except the
-snoop bench's X-poison family, which needs 4-state simulation and stays with
-iverilog (cache_snoop_x / cache_snoop_ce4 and their +inj_* controls; see
-tb_ap040_cache_snoop.v).  Program benches go through run_verilator.py with the
-same parameter presets run_tests.sh compiles; self-checking unit benches are
-built here and run with their plusargs, negative controls inverted.
+"""The AP040 regression.  Verilator is the expected simulator: run this, and
+reach for iverilog only where four-state X is genuinely needed.
+
+Coverage here is every leg of run_tests.sh except the snoop bench's X-poison
+family -- cache_snoop_x / cache_snoop_ce4 and their +inj_* controls, which
+need four-state simulation; see tb_ap040_cache_snoop.v.  Program benches go
+through run_verilator.py with the same parameter presets run_tests.sh
+compiles; self-checking unit benches are built here and run with their
+plusargs, negative controls inverted.
+
+What run_tests.sh actually does is wider than that, and this file used to
+imply otherwise: it compiles and runs all 50 of its legs under iverilog, so
+45 of them duplicate legs above.  Only the 5 X-poison legs need it.  The
+duplication is why a bench can pass here and still fail there -- iverilog
+rejects a reference to a wire declared later in the file where Verilator
+accepts it, which has bitten three times on this branch.
 
     python3 run_verilator_suite.py [--work DIR] [--jobs N] [--only NAME,...]
 """
@@ -117,7 +127,8 @@ def main():
             results.append((leg, ok, "must fail" if must_fail else "")); print(f"{'ok  ' if ok else 'FAIL'} {leg:20s} {'(control: must fail)' if must_fail else ''}", flush=True)
     bad = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(bad)}/{len(results)} legs passed under Verilator" + ("" if not bad else "; FAILED: " + ", ".join(r[0] for r in bad)))
-    print("iverilog remains only for tb_ap040_cache_snoop's X-poison family (cache_snoop_x, cache_snoop_ce4, +inj_* controls).")
+    print("Verilator is the expected simulator; of run_tests.sh's 50 iverilog legs only the 5 X-poison ones")
+    print("(cache_snoop_x, cache_snoop_ce4, +inj_* controls) need four-state simulation -- the rest duplicate the above.")
     sys.exit(1 if bad else 0)
 
 
