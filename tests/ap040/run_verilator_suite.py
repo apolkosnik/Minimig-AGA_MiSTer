@@ -30,13 +30,13 @@ PROGRAM_RUNS = [
     ("sdram",           ["--bench", "sdram", "--program", "t_fpu,t_mmu", "--param", "CYC_PHASE=1", "--param", "CPU_PHASE=0"]),
     ("sdram_ph3",       ["--bench", "sdram", "--program", "t_mmu,t_fpu", "--param", "CYC_PHASE=1", "--param", "CPU_PHASE=3"]),
     ("sdram_nx",        ["--bench", "sdram", "--program", "t_mmu,t_fpu", "--param", "CYC_PHASE=1", "--param", "CPU_PHASE=3", "--param", "CPU_CACHE=0", "--param", "MAX_CYCLES=6000000"]),
-    ("dualram",         ["--bench", "dualram", "--program", "t_fpu", "--param", "CYC_PHASE=1", "--param", "CPU_PHASE=3"]),
+    ("dualram",         ["--bench", "dualram", "--program", "t_fpu,t_mmu", "--param", "CYC_PHASE=1", "--param", "CPU_PHASE=3"]),
     # Minimig.sv builds its controllers with CACHE_READ_PIPE(1) under the
     # legacy clocking, so the registered hit decision is what ships and these
     # two legs are the shipping configuration.  The benches default READ_PIPE
     # to FAST_CLOCK, which is 0 here, so it has to be asked for.
     ("sdram_rp1",       ["--bench", "sdram", "--program", "t_mmu,t_fpu", "--param", "CYC_PHASE=1", "--param", "CPU_PHASE=3", "--param", "READ_PIPE=1"]),
-    ("dualram_rp1",     ["--bench", "dualram", "--program", "t_fpu", "--param", "CYC_PHASE=1", "--param", "CPU_PHASE=3", "--param", "READ_PIPE=1"]),
+    ("dualram_rp1",     ["--bench", "dualram", "--program", "t_fpu,t_mmu", "--param", "CYC_PHASE=1", "--param", "CPU_PHASE=3", "--param", "READ_PIPE=1"]),
     ("dualram_nx",      ["--bench", "dualram", "--program", "t_fpu", "--param", "CYC_PHASE=1", "--param", "CPU_PHASE=3", "--param", "CPU_CACHE=0", "--param", "MAX_CYCLES=6000000"]),
     ("cache_unit",      ["--bench", "cache-unit"]),
     ("cache_unit_rp0",  ["--bench", "cache-unit", "--param", "READ_PIPE=0"]),

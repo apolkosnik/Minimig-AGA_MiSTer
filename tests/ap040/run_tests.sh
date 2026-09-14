@@ -321,6 +321,7 @@ leg fpu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_fpu.hex &
 leg mmu_turbo          "$WORK/tb_sdram_turbo.vvp" +prog=build/t_mmu.hex &
 leg mmu_turbo_ph3      "$WORK/tb_sdram_turbo_ph3.vvp" +prog=build/t_mmu.hex &
 leg fpu_dualram        "$WORK/tb_dualram_turbo.vvp" +prog=build/t_fpu.hex &
+leg mmu_dualram        "$WORK/tb_dualram_turbo.vvp" +prog=build/t_mmu.hex &
 leg fpu_dualram_nx     "$WORK/tb_dualram_turbo_nx.vvp" +prog=build/t_fpu.hex &
 leg mmu_turbo_nx       "$WORK/tb_sdram_turbo_nx.vvp" +prog=build/t_mmu.hex &
 leg fpu_turbo_nx       "$WORK/tb_sdram_turbo_nx.vvp" +prog=build/t_fpu.hex &

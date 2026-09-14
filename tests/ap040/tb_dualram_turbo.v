@@ -464,6 +464,15 @@ reg [15:0] failcode = 0;
 
 
 reg [15:0] mem [0:32767];
+// Who last wrote each word, and through which model.  STALE-I on its own
+// says a fetch disagreed with the image; it does not say whether the fault
+// is the controller, the routing or the image.  The provenance turns the
+// first occurrence into an answer: on the t_mmu image at $F004 it named the
+// chip model as the writer 137us earlier, with the DDR side still holding
+// the pre-write word -- the routing, not either controller.
+reg [31:0] wr_t   [0:32767];
+reg  [1:0] wr_src [0:32767];   // 0 none, 1 chip/sdram model, 2 DDR model
+reg [15:0] wr_old [0:32767];
 
 //---------------------------------------------------------------------------
 // Behavioral DDR3/HPS Avalon slave: single-beat bursts (ddram_ctrl issues
@@ -504,6 +513,8 @@ always @(posedge clk113) begin
 		else if (DDRAM_DOUT_READY) dpend <= 0;
 	end
 	if (DDRAM_WE && !DDRAM_BUSY) begin
+		wr_t[{DDRAM_ADDR[12:0], 2'd0}]   <= $time;
+		wr_src[{DDRAM_ADDR[12:0], 2'd0}] <= 2'd2;
 		if (DDRAM_BE[1]) mem[{DDRAM_ADDR[12:0], 2'd0}][15:8] <= DDRAM_DIN[15:8];
 		if (DDRAM_BE[0]) mem[{DDRAM_ADDR[12:0], 2'd0}][7:0]  <= DDRAM_DIN[7:0];
 		if (DDRAM_BE[3]) mem[{DDRAM_ADDR[12:0], 2'd1}][15:8] <= DDRAM_DIN[31:24];
@@ -566,6 +577,15 @@ always @(posedge clk113) begin
 		if (ram2.cpuRD !== mem[ramaddr[15:1]]) begin
 			$display("STALE-I t=%0t adr=%h ddr=%h mem=%h", $time,
 			         {ramaddr, 1'b0}, ram2.cpuRD, mem[ramaddr[15:1]]);
+			if (idbg == 0) begin
+				$display("FIRSTBAD t=%0t requested=%h is_fetch=%b want_ddr=%b sel_ddr=%b",
+				         $time, {ramaddr, 1'b0}, is_fetch, want_ddr, sel_ddr);
+				$display("FIRSTBAD ack_chip=%b ack_ddr=%b ddr_data=%h chip_data=%h mem=%h",
+				         ram.cpu_cache.cpu_ack, ram2.cpu_cache.cpu_ack,
+				         ram2.cpuRD, ram.cpuRD, mem[ramaddr[15:1]]);
+				$display("FIRSTBAD last write to this word: src=%0d t=%0t was=%h",
+				         wr_src[ramaddr[15:1]], wr_t[ramaddr[15:1]], wr_old[ramaddr[15:1]]);
+			end
 			idbg = idbg + 1;
 			errors = errors + 1;
 		end
@@ -587,7 +607,16 @@ wire data_chip = (ramaddr[15:1] < (16'h0400 >> 1)) ||
                  ((ramaddr[15:1] >= (16'h3600 >> 1)) &&
                   (ramaddr[15:1] <  (16'h3800 >> 1))) ||
                  (ramaddr[15:1] >= (16'hF000 >> 1)); // TB control ports
-wire want_ddr = is_fetch || (datasplit && !data_chip);
+// Fetches go to the DDR side, EXCEPT from the bench's own port window.
+// Routing fetches by cycle type and data by address is fine everywhere the
+// two agree, and $F000 and up is the one place they do not: data_chip sends
+// writes there to the chip side, so a word written as data and then executed
+// came back from the DDR side at its pre-write value.  A real machine routes
+// both by address and has no such window, so this was the harness asking for
+// something no configuration does -- see the FIRSTBAD dump below, which was
+// written to establish that and prints the write's provenance.
+wire fetch_chip = (ramaddr[15:1] >= (16'hF000 >> 1));
+wire want_ddr = (is_fetch && !fetch_chip) || (datasplit && !data_chip);
 
 // zram_sel analogue: flips with the request, holds its last value while
 // the bus is idle (Minimig.sv's zram_sel follows the registered address,
@@ -921,6 +950,11 @@ always @(posedge clk113) begin
 			disable do_write;
 		end
 		if (sd_addr[10]) pre_busy[sd_ba] <= 3'd4; // auto-precharge after tWR
+		if (!sd_dqm[1] || !sd_dqm[0]) begin
+			wr_old[lin[15:1]] <= mem[lin[15:1]];
+			wr_t[lin[15:1]]   <= $time;
+			wr_src[lin[15:1]] <= 2'd1;
+		end
 		if (!sd_dqm[1]) mem[lin[15:1]][15:8] <= sd_data[15:8];
 		if (!sd_dqm[0]) mem[lin[15:1]][7:0]  <= sd_data[7:0];
 
@@ -962,7 +996,9 @@ initial begin
 	end
 	$display("tb_dualram_turbo: running %0s through sdram_ctrl + ddram_ctrl", prog_file);
 
-	for (i = 0; i < 32768; i = i + 1) mem[i] = 16'h0000;
+	for (i = 0; i < 32768; i = i + 1) begin
+		mem[i] = 16'h0000; wr_t[i] = 0; wr_src[i] = 0; wr_old[i] = 0;
+	end
 	$readmemh(prog_file, mem);
 	// interrupt delivery needs the chip stage machine to see the ph2
 	// pulse: only the real-hardware alignment (CPU_PHASE 3) does; at
