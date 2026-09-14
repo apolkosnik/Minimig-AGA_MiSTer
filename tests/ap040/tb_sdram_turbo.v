@@ -533,7 +533,7 @@ reg [31:0] wk_got;
 // a cache.  CPU_CACHE=0 -- the shipping Minimig configuration, where
 // ap040_cache is the only cache -- removes cpu_cache_new's storage, so the
 // g_storage hierarchy is never elaborated and these references cannot sit
-// as plain statements inside walker_selftest: iverilog resolves
+// as plain statements inside walker_selftest: the tools resolve
 // hierarchical names whether or not the branch holding them can run.  A
 // generate pair keeps both configurations compiling and leaves the
 // CPU_CACHE=1 checks exactly as they were.

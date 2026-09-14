@@ -546,7 +546,7 @@ initial begin
 	// invalidate survives the collision: the NEXT read must refetch.
 	// (The silicon-only half of 5.2c -- mixed-port DONT_CARE producing
 	// garbage tags and a false hit on a wrong way -- is not observable
-	// under iverilog's deterministic old-data model; the force-miss fix
+	// under the deterministic old-data model; the force-miss fix
 	// covers it by construction.)
 	//------------------------------------------------------------------
 	for (off = 0; off < 6 * CE_DIV; off = off + 1) begin

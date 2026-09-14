@@ -12,7 +12,7 @@ mkdir -p build
 # they are built here so they cannot rot, and run by hand under +prof to
 # compare cache and dispatch configurations (see AUDIT_20260816.md and
 # PERFORMANCE.md).  bench_alu was previously built only by run_verilator.py;
-# under iverilog its image was simply absent, and a +prog pointing at the
+# its image was simply absent, and a +prog pointing at the
 # missing file produced a full, plausible profile of the core executing
 # zeros -- see the $fopen guard in tb_ap040_program.v.
 for t in t_integer t_exceptions t_mmu t_cache t_fpu bench_loop bench_alu; do

@@ -2,7 +2,7 @@
 """Make sdram_ctrl's synthesizable inout-reg idiom legal for simulation.
 
 The original writes 16'hZZZZ into the sd_data register to release the
-bus.  Icarus (4-state) honours that; Verilator (2-state) cannot -- the
+bus.  A 4-state simulator honours that; Verilator (2-state) cannot -- the
 register silently keeps its last value and ORs stale write data onto
 every read burst, which once manufactured a convincing but entirely
 fictional data-corruption bug.  Emit the canonical enable idiom

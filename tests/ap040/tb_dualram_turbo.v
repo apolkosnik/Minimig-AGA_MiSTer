@@ -137,7 +137,7 @@ end
 wire        is_fetch;
 wire        sel_ddr;
 // Declared here, not beside their assignments further down: the STALE-I
-// monitor's FIRSTBAD dump reads them, and iverilog rejects a reference to a
+// monitor's FIRSTBAD dump reads them, and a reference to a
 // wire declared later in the file where Verilator accepts it.
 wire        want_ddr;
 wire        fetch_chip;
@@ -757,7 +757,7 @@ reg [31:0] wk_got;
 // a cache.  CPU_CACHE=0 -- the shipping Minimig configuration, where
 // ap040_cache is the only cache -- removes cpu_cache_new's storage, so the
 // g_storage hierarchy is never elaborated and these references cannot sit
-// as plain statements inside walker_selftest: iverilog resolves
+// as plain statements inside walker_selftest: the tools resolve
 // hierarchical names whether or not the branch holding them can run.  A
 // generate pair keeps both configurations compiling and leaves the
 // CPU_CACHE=1 checks exactly as they were.

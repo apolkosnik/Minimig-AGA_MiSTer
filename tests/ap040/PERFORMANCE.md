@@ -222,12 +222,12 @@ interrupt-injection interface. Run `t_exceptions` in the core/chip benches.
 
 ## Reproduce
 
-Use Verilator; the legacy `run_tests.sh` invokes Icarus and is not used here.
-All generated files and bounded subprocess logs go under `--work`.
+Verilator, and nothing else -- the project no longer carries a second
+simulator.  All generated files and bounded subprocess logs go under
+`--work`.
 
 The whole regression in one command (every program bench preset and every
-self-checking unit bench, negative controls inverted; only the snoop bench's
-X-poison legs stay with Icarus because they need four-state simulation):
+self-checking unit bench, negative controls inverted):
 
 ```sh
 python3 tests/ap040/run_verilator_suite.py --work /tmp/ap040-suite
@@ -447,6 +447,29 @@ disagreed with the image; it does not say which of the controller, the
 routing or the image is at fault.  `t_mmu` now runs on both dualram legs of
 the suite and `run_tests.sh` has `mmu_dualram`, because the reason this sat
 undetected is that nothing ran it.
+
+### Lost with the second simulator
+
+Two negative controls did not survive: `cache_snoop_x_neg_accw` and
+`cache_snoop_x_ce4_neg_lkw`, the pair that proved each lookup-guard term is
+load-bearing in its own divide.  They worked by giving the tag row silicon's
+mixed-port read-during-write and blinding one guard term; under four states
+the compare then yields X and the wrong way reaches C_TAGW.
+
+Two state cannot reproduce that, and it is the property rather than the
+tooling.  A negative control needs the blinded guard to let a WRONG WAY
+through, which needs the don't-care row's tag to match the lookup's; TAGW is
+22, so a don't-care word misses instead, and a miss is safe.  Two poisons
+were tried and measured -- the bitwise inverse of the row, and a
+deterministic LFSR mixed with the address -- and both left the two controls
+passing, which is worse than not having them.
+
+What did survive is the four legs of the matrix that pass, now under
+Verilator with the pseudo-random don't-care word: the cache is shown to
+tolerate an arbitrary collided row at both divides.  Rebuilding the two
+controls as a direct check on the guard -- assert the blinded term actually
+lets a same-cycle row reach the compare -- would restore the property in two
+state, and is not done.
 
 ### Still unverified
 

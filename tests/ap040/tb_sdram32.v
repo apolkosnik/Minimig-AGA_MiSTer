@@ -25,16 +25,12 @@
 //   5. COHERENCE: a chipset write is visible to the 32-bit fill port (the
 //      check that fails if chipset traffic is confined to one chip).
 //
-// Build/run:
-//   python3 prepare_sdram_sim.py ../../rtl/sdram_ctrl.v build/sdram_ctrl_sim.v
-//   iverilog -g2012 -s tb_sdram32 -o /tmp/tb_sdram32.vvp tb_sdram32.v \
-//       ../../rtl/sdram32_ctrl.v build/sdram_ctrl_sim.v \
-//       ../../rtl/cpu_cache_new.v sim_dpram.v
-//   vvp /tmp/tb_sdram32.vvp
+// Build/run: python3 run_verilator_suite.py --only sdram32
 //
-// (sdram_ctrl.v needs prepare_sdram_sim.py's inout-reg rewrite for Icarus;
-// sdram32_ctrl.v drives its buses with an explicit output enable and needs
-// no rewrite.)
+// (sdram_ctrl.v needs prepare_sdram_sim.py's inout-reg rewrite, which the
+// suite applies: a two-state simulator keeps the last value written into an
+// inout reg instead of releasing the bus.  sdram32_ctrl.v drives its buses
+// with an explicit output enable and needs no rewrite.)
 
 `timescale 100ps/100ps
 

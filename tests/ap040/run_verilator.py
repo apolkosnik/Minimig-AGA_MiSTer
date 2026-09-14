@@ -65,7 +65,7 @@ def main():
     elif args.bench == "boot-bridge":
         # reset-to-CIA/SERDAT startup through the production amiga_clk and
         # minimig_m68k_bridge; the "programs" are the clk_114-vs-clk_sys phase
-        # and chipset-arbitration sweep the iverilog legs run (run_tests.sh)
+        # and chipset-arbitration sweep the suite runs
         sources = [HERE / (top + ".v"), HERE / "sim_dpram.v", *CORE, RTL / "memory_router.v",
                    RTL / "cpu_wrapper.v", RTL / "amiga_clk.v", RTL / "minimig_m68k_bridge.v", RTL / "ciaa.v",
                    *sorted(RTL.glob("cia_*.v"))]

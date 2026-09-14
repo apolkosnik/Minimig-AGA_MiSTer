@@ -656,7 +656,7 @@ initial begin prof_look[0] = 0; prof_look[1] = 0; prof_hit[0] = 0; prof_hit[1] =
 // needs a reason, not an inference.
 integer prof_ireq, prof_ibyp, prof_ib_nocache, prof_ib_ena, prof_ib_fits, prof_ib_busy;
 integer prof_cst [0:7];
-// (pi is declared further down; iverilog binds in source order, so no loop here)
+// (pi is declared further down; binding is in source order, so no loop here)
 initial begin
 	prof_ireq = 0; prof_ibyp = 0; prof_ib_nocache = 0; prof_ib_ena = 0; prof_ib_fits = 0; prof_ib_busy = 0;
 	prof_cst[0] = 0; prof_cst[1] = 0; prof_cst[2] = 0; prof_cst[3] = 0;

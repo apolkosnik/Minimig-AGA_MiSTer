@@ -272,7 +272,7 @@ reg [15:0]  sdata2_reg;
 reg         chipWE;
 
 // data bus drivers.  The synthesizable inout-reg idiom of sdram_ctrl needs
-// a source rewrite for Icarus (tests/ap040/prepare_sdram_sim.py); an
+// a source rewrite to simulate (tests/ap040/prepare_sdram_sim.py); an
 // explicit output enable is legal for both tools and needs no rewrite.
 reg [15:0]  sd_dout;
 reg         sd_doe;

@@ -8,9 +8,9 @@ Examples:
   # Every one of the 1,911 data slices; split safely across four machines
   ./run_cputest.py /path/to/data040.zip --full --shard 0/4 --jobs 2
 
-  # Cross-check a result under Icarus (the default backend is Verilator,
+  # (the backend is Verilator,
   # which is ~26x faster over the full corpus for identical results)
-  ./run_cputest.py /path/to/data040.zip --simulator iverilog
+  ./run_cputest.py /path/to/data040.zip
 
   # Codec/envelope audit only (no RTL simulation)
   ./run_cputest.py /path/to/data040.zip --audit
@@ -231,20 +231,14 @@ def discover(root: Path, args) -> list[dict]:
 
 def compile_rtl(work: Path, simulator: str, force=False, build_jobs=None) -> Path:
     sources = [HERE / "tb_dat_replay.v", *RTL_SOURCES]
-    if simulator == "iverilog":
-        sim = work / "tb_dat_replay.vvp"
-    elif simulator == "verilator":
-        sim = work / "obj_dir" / "tb_dat_replay"
-    else:  # argparse prevents this, but keep the API defensive.
+    if simulator != "verilator":
         raise ValueError("unknown simulator %s" % simulator)
+    sim = work / "obj_dir" / "tb_dat_replay"
     if (not force and sim.exists() and
             sim.stat().st_mtime >= max(p.stat().st_mtime for p in sources)):
         return sim
     sim.parent.mkdir(parents=True, exist_ok=True)
-    if simulator == "iverilog":
-        cmd = ["iverilog", "-g2012", "-I", str(RTL), "-o", str(sim)]
-        cmd += [str(p) for p in sources]
-    else:
+    if True:
         jobs = build_jobs or min(os.cpu_count() or 1, 16)
         cmd = [
             "verilator", "--binary", "--timing",
@@ -392,7 +386,7 @@ def run_slice(item: dict, args, sim: Path, work: Path) -> dict:
         meta = generate(str(item["header"]), str(item["data"]), str(job), limit)
         lmem = inflate_image(item["group_dir"], "lmem.dat", work / "images")
         tmem = inflate_image(item["group_dir"], "tmem.dat", work / "images")
-        cmd = (["vvp", str(sim)] if args.simulator == "iverilog" else [str(sim)])
+        cmd = [str(sim)]
         cmd += ["+job=" + str(job), "+lmem=" + str(lmem),
                 "+tmem=" + str(tmem)]
         proc = subprocess.run(cmd, cwd=REPO, text=True,
@@ -484,9 +478,9 @@ def parser():
                     help="parallel RTL processes (default: cores, capped at 16)")
     # Verilator compiles the design to native code: measured 26x faster over
     # the full 1911-slice corpus (7m09s vs 3h07m) for identical results --
-    # same 1875/1911, same 36 failing slices.  Icarus stays available for
+    # same 1875/1911, same 36 failing slices.  Recorded for
     # cross-checking a suspicious result against a second simulator.
-    ap.add_argument("--simulator", choices=("iverilog", "verilator"),
+    ap.add_argument("--simulator", choices=("verilator",),
                     default="verilator", help="RTL simulation backend")
     ap.add_argument("--build-jobs", type=int,
                     help="parallel C++ compiler jobs for a Verilator build")
@@ -525,11 +519,9 @@ def main(argv=None):
                           (i, len(selected), result["status"], item["group"],
                            item["instruction"], item["slice"]))
         else:
-            # Keep native-code artifacts, logs and reports independent from
-            # Icarus.  A passing vvp log must never make --resume skip a
-            # Verilator execution (or vice versa).
-            run_work = (args.work if args.simulator == "iverilog"
-                        else args.work / "verilator")
+            # Native-code artifacts, logs and reports live under their own
+            # subdirectory, which is where --resume looks for them.
+            run_work = args.work / "verilator"
             run_work.mkdir(parents=True, exist_ok=True)
             sim = compile_rtl(run_work, args.simulator, force=args.rebuild,
                               build_jobs=args.build_jobs)

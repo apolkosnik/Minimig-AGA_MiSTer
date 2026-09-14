@@ -272,7 +272,7 @@ wire [31:0] usp_q, isp_q, msp_q;
 wire [31:0] dbg_d0, dbg_d1, dbg_d2, dbg_a0, dbg_a7;
 
 // Declared here, driven further down next to the decode registers they
-// select from.  The regfile instance below reads them, and iverilog binds
+// select from.  The regfile instance below reads them, and binding is
 // hierarchical port expressions in source order: a wire first declared at
 // its assignment site is not visible here, which broke every bench in
 // tests/ap040 even though Quartus accepted it.

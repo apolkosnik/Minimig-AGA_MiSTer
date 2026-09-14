@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The AP040 regression.  Verilator is the expected simulator: run this, and
-reach for iverilog only where four-state X is genuinely needed.
+and the only one: nothing in this project runs a second simulator.
 
 Coverage here is every leg of run_tests.sh except the snoop bench's X-poison
 family -- cache_snoop_x / cache_snoop_ce4 and their +inj_* controls, which
@@ -9,12 +9,12 @@ through run_verilator.py with the same parameter presets run_tests.sh
 compiles; self-checking unit benches are built here and run with their
 plusargs, negative controls inverted.
 
-What run_tests.sh actually does is wider than that, and this file used to
-imply otherwise: it compiles and runs all 50 of its legs under iverilog, so
-45 of them duplicate legs above.  Only the 5 X-poison legs need it.  The
-duplication is why a bench can pass here and still fail there -- iverilog
-rejects a reference to a wire declared later in the file where Verilator
-accepts it, which has bitten three times on this branch.
+The tag-row don't-care family now runs here too: sim_dpram answers a
+DONT_CARE read-during-write with a deterministic pseudo-random word rather
+than X, which is the honest two-state reading of "not specified" and proves
+the cache tolerates any such word.  What does NOT survive the move is the two
+negative controls -- see the comment on cache_snoop_x below.  Until those are
+rebuilt as a direct check on the guard, that property is untested.
 
     python3 run_verilator_suite.py [--work DIR] [--jobs N] [--only NAME,...]
 """
@@ -75,11 +75,33 @@ UNIT_RUNS = {
                             ("sdram32_brk_slotphase", ["+break_slotphase"], True)]),
     "sdram32_rp1":        U("tb_sdram32", [HERE / "tb_sdram32.v", RTL / "sdram32_ctrl.v", "SDRAM_SIM", RTL / "cpu_cache_new.v", HERE / "sim_dpram.v"], [("sdram32_rp1", [], False)]),
     "cache_snoop":        U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"], [("cache_snoop", [], False)]),
-    # CE_DIV 4 is how P2 runs the cache on silicon; the two-state geometry check
-    # runs here, the -DSNOOP_MIXED_X tag-row X-poison variant of it stays with iverilog
+    # CE_DIV 4 is how P2 runs the cache on silicon.
     "cache_snoop_ce4":    U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"], [("cache_snoop_ce4", [], False)]),
+    # SNOOP_MIXED_X gives the tag row silicon's mixed-port read-during-write, so
+    # the collision the lookup guard exists for is observable.  Each guard term
+    # is load-bearing in one divide and redundant in the other, which is why the
+    # controls are one per divide: see the matrix in tb_ap040_cache_snoop.v.
+    # The four legs of the matrix that PASS are here.  The two that must FAIL
+    # are NOT, and cannot be until the check is rebuilt: a negative control
+    # needs the blinded guard to let a WRONG WAY through, and in two state
+    # that needs the poisoned row's tag to match the lookup's.  TAGW is 22, so
+    # a don't-care word misses instead -- which is safe, so the control passes
+    # and proves nothing.  Two poisons were tried and measured, the bitwise
+    # inverse and a deterministic LFSR mixed with the address; both left
+    # cache_snoop_x_neg_accw and cache_snoop_x_ce4_neg_lkw passing.  Under
+    # four state the tag compare yields X rather than a miss, which is the
+    # property those two actually test, and no poison VALUE reproduces it.
+    "cache_snoop_x":      U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"],
+                            [("cache_snoop_x", [], False),
+                             ("cache_snoop_x_lkw", ["+inj_look_whole"], False)]),
+    "cache_snoop_x_ce4":  U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"],
+                            [("cache_snoop_x_ce4", [], False),
+                             ("cache_snoop_x_ce4_accw", ["+inj_acc_whole"], False),
+                             ("cache_snoop_x_ce4_accs", ["+inj_acc_settle"], False)]),
 }
-UNIT_PARAMS = {"sdram32_rp1": ["-GREAD_PIPE=1"], "cache_snoop_ce4": ["-GCE_DIV=4"]}
+UNIT_PARAMS = {"sdram32_rp1": ["-GREAD_PIPE=1"], "cache_snoop_ce4": ["-GCE_DIV=4"],
+               "cache_snoop_x": ["+define+SNOOP_MIXED_X"],
+               "cache_snoop_x_ce4": ["+define+SNOOP_MIXED_X", "-GCE_DIV=4"]}
 
 
 def run(cmd, log, cwd=HERE, timeout=900):
@@ -127,8 +149,8 @@ def main():
             results.append((leg, ok, "must fail" if must_fail else "")); print(f"{'ok  ' if ok else 'FAIL'} {leg:20s} {'(control: must fail)' if must_fail else ''}", flush=True)
     bad = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(bad)}/{len(results)} legs passed under Verilator" + ("" if not bad else "; FAILED: " + ", ".join(r[0] for r in bad)))
-    print("Verilator is the expected simulator; of run_tests.sh's 50 iverilog legs only the 5 X-poison ones")
-    print("(cache_snoop_x, cache_snoop_ce4, +inj_* controls) need four-state simulation -- the rest duplicate the above.")
+    print("NOT covered here: the two must-fail snoop controls (cache_snoop_x_neg_accw, cache_snoop_x_ce4_neg_lkw).")
+    print("They need a four-state tag compare; no two-state poison reproduces them.  See UNIT_RUNS for the measurement.")
     sys.exit(1 if bad else 0)
 
 

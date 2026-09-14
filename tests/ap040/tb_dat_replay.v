@@ -177,7 +177,7 @@ assign data_in = {rd8({addr_out[31:1], 1'b0}),
 	              rd8({addr_out[31:1], 1'b1})};
 
 // declared before first use: the write monitor below references them, the
-// driver blocks assign them (iverilog requires declaration before use)
+// driver blocks assign them (declaration must precede use)
 reg [31:0] patch_addr;
 integer jf, jn, jr;
 reg [31:0] flags, test_idx, round_idx;
