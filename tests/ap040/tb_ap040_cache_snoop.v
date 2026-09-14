@@ -92,11 +92,24 @@ wire ce = ce_run && (CE_DIV == 1 || ce_ph == 2'd0);
 // not just safe but required, and the relaxation is proven by a control
 // that fails where the regime is different.  The suite carries the two
 // failing controls as neglegs, one per divide.
-reg inj_acc_settle = 0, inj_acc_whole = 0, inj_look_whole = 0;
+//   +inj_fillguard    blind the WRITEBACK protection as well -- tag_we's
+//                     !fill_snooped && !snoop_fill_row (ap040_cache.v:439),
+//                     which is a separate guard from the lookup terms above.
+//                     For diagnosis only: it exists to tell overlapping
+//                     protection apart from a redundant term.  Corruption
+//                     that appears only when this AND a lookup term are
+//                     blinded shows the two overlap on that sequence; it does
+//                     not show the lookup term independently necessary.
+reg inj_acc_settle = 0, inj_acc_whole = 0, inj_look_whole = 0, inj_fillguard = 0;
 initial begin
 	inj_acc_settle = $test$plusargs("inj_acc_settle");
 	inj_acc_whole  = $test$plusargs("inj_acc_whole");
 	inj_look_whole = $test$plusargs("inj_look_whole");
+	inj_fillguard  = $test$plusargs("inj_fillguard");
+end
+initial if ($test$plusargs("inj_fillguard")) begin
+	force dut.fill_snooped   = 1'b0;
+	force dut.snoop_fill_row = 1'b0;
 end
 reg ce_d = 0;
 always @(posedge clk) ce_d <= ce;
@@ -494,6 +507,17 @@ function [1:0] wrong_way;
 	end
 endfunction
 wire [93:0] real_row = dut.ctag_ram.mem[dut.a_row];
+// +trace_wb: every writeback attempt while the permuted row is armed, with
+// what allowed or blocked it.  The claim that the writeback protection is
+// what saves T12 needs this, not an inference from the source.
+integer wb_n = 0;
+always @(posedge clk) if (nreset && perm_en && dut.cst == 3'd5 &&
+                          $test$plusargs("trace_wb") && wb_n < 40) begin
+	wb_n = wb_n + 1;
+	$display("WB t=%0t C_TAGW tag_we=%b fill_snooped=%b snoop_fill_row=%b -> %s",
+	         $time, dut.tag_we, dut.fill_snooped, dut.snoop_fill_row,
+	         dut.tag_we ? "WROTE" : "blocked");
+end
 wire  [1:0] pway     = wrong_way(real_row, dut.a_tag);
 // T12 drives the collided row itself; see that test for why.
 reg        perm_en  = 1'b0;
@@ -1019,16 +1043,21 @@ initial begin
 	// blinded acceptance term lets that row reach the fill's writeback, each
 	// of the four now answers from the way holding its neighbour's data.
 	//
-	// RESULT: no counterexample.  The experiment fires -- 8 collisions with
-	// the permuted row, one of them on an acceptance cycle -- and the four
-	// lines still read back correctly with +inj_acc_whole, identically to the
-	// intact run.  A candidate explanation is in ap040_cache.v line 439:
-	// tag_we is gated by !fill_snooped && !snoop_fill_row, so the writeback
-	// is protected independently of the lookup guard, and a collided row
-	// cannot reach the tag RAM by this route whether or not the acceptance
-	// term is blinded.  That does not prove the term redundant -- the
-	// original four-state failure may exercise a path this does not reach,
-	// or may have been simulation pessimism.  The control stays unresolved.
+	// RESULT: no counterexample, and it is not the acceptance term that
+	// saves it.  The experiment fires -- 8 collisions with the permuted row,
+	// one on an acceptance cycle -- and the four lines read back correctly
+	// with +inj_acc_whole, +inj_look_whole and +inj_fillguard blinded in
+	// every combination.  Two observations from +trace_wb: of the 8 writeback
+	// attempts while the row was armed, 6 were blocked by fill_snooped and 2
+	// wrote, so the writeback guard is real and does act here; and blinding
+	// it as well still produces nothing, so it is not the whole story either.
+	// The rest is that the permuted row does not carry the REQUESTING line's
+	// tag, so the lookup misses and refills from a row that has since been
+	// re-read clean.  This route is doubly protected and hard to reach.
+	//
+	// The divide-1 acceptance term is load-bearing on the LOOKUP route
+	// instead, which T13 below demonstrates.  T12 stays as a positive
+	// regression over the writeback route.
 	//------------------------------------------------------------------
 	for (off = 0; off < 8 * CE_DIV; off = off + 1) begin
 		// 1. populate: four tags, one set (addr[9:4] = 6'h15), four ways
@@ -1058,6 +1087,41 @@ initial begin
 		for (i = 0; i < 4; i = i + 1)
 			expect_read(32'h0000_8150 + (i << 10),
 			            mem[(32'h8150 + (i << 10)) >> 2], 12);
+	end
+`endif
+
+`ifdef SNOOP_MIXED_X
+	//------------------------------------------------------------------
+	// T13: the acceptance-cycle collision, on a read whose value is CHECKED.
+	//
+	// T3 sweeps a snoop across the acceptance window already, but its
+	// concurrent read is deliberately unchecked -- the snoop is unordered
+	// against it, so either value is legal there.  That is why the directed
+	// row was delivered on acceptance cycles and nothing was ever observed:
+	// the one read that could have shown it is the one the bench ignores.
+	//
+	// Either value is still legal here.  What is NOT legal is a third one.
+	// With the row directed to hit a way that does not hold this line, a
+	// lookup that acts on it returns that way's word -- the seeded marker,
+	// or a neighbour's data -- and neither is the old or the new value.
+	//------------------------------------------------------------------
+	for (off = 0; off < 8 * CE_DIV; off = off + 1) begin
+		expect_read(32'h0000_A150, mem[32'hA150>>2], 13);   // warm
+		d2 = mem[32'hA150>>2];                              // the old value
+		mem[32'hA150>>2] = 32'h1313_0000 + off;             // the new one
+		fork
+			cpu_read(32'h0000_A150, d);
+			begin
+				repeat (off) @(negedge clk);
+				snoop(32'h0000_A150);
+			end
+		join
+		if (d !== d2 && d !== mem[32'hA150>>2]) begin
+			$display("FAIL test 13 (off %0d): read %h, neither the old value %h nor the new %h",
+			         off, d, d2, mem[32'hA150>>2]);
+			errors = errors + 1;
+		end
+		expect_read(32'h0000_A150, mem[32'hA150>>2], 13);   // and it refetches
 	end
 `endif
 

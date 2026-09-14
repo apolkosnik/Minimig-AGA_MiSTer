@@ -463,28 +463,41 @@ the line, with a marker word behind every way.  Acting on a collided row then
 hits the wrong way and returns its word, which `expect_read` catches.  That
 reproduces `cache_snoop_x_ce4_neg_lkw` exactly.
 
-**One is unresolved**, and absent rather than passing:
-`cache_snoop_x_neg_accw`, the divide-1 acceptance control.  T12 in the bench
-is the directed attempt on it, and it is a legitimate one: a don't-care word
-may be any bit pattern, including tags that later requests match, so building
-the row out of them tests whether corruption can become observable rather
-than restricting the model.  Four lines are populated in one set with
-distinct data, a collided row carrying their four tags with the way
-associations rotated is injected, the suspect fill is triggered, and the four
-are reread.
+**The other came back too**, and it took two steps.  `cache_snoop_x_neg_accw`
+is the divide-1 acceptance control.  The first attempt (T12) populates four
+lines in one set, injects a collided row carrying their four tags with the way
+associations rotated, triggers the suspect fill and rereads them -- attacking
+the writeback route, since `tags_next` and `val_next` are built from `tag_q`.
+That found nothing, in every combination of the three guards, and a trace
+(`+trace_wb`) says why only in part: of 8 writeback attempts while the row was
+armed, 6 were blocked by `fill_snooped` and 2 wrote, so that guard is real and
+does act -- but blinding it as well still produces nothing, because the
+permuted row does not carry the requesting line's tag, so the lookup misses
+and refills from a row since re-read clean.  T12 stays as a positive
+regression over that route.
 
-It finds nothing.  The experiment demonstrably fires -- 8 collisions with the
-permuted row, one of them on an acceptance cycle -- and the four lines read
-back correctly with the term blinded, identically to the intact run.  A
-candidate explanation is in `ap040_cache.v` line 439: `tag_we` is gated by
-`!fill_snooped && !snoop_fill_row`, so the writeback is protected
-independently of the lookup guard, and a collided row cannot reach the tag
-RAM by this route whether or not the acceptance term is blinded.
+The term is load-bearing on the **lookup** route, and the reason nothing had
+shown it is stimulus, not mechanism.  T3 already sweeps a snoop across the
+acceptance window, but its concurrent read is deliberately unchecked -- the
+snoop is unordered against it, so either value is legal there -- so the one
+read that could expose the collision was the one the bench ignored.  T13
+checks it: either value is legal, a **third** is not.  With the term blinded
+it returns `1111_2154`, a neighbouring line's word, against an old value of
+`1111_2854` and a new one of `1313_0000`.  Concrete wrong data, not X.
 
-That leaves the term **neither proven necessary nor proven redundant**.  The
-other candidates are stimulus this experiment does not reach, or the original
-four-state failure having been simulation pessimism -- an X-induced failure
-is conservative, not by itself a concrete hardware failure.
+The full documented matrix now reproduces in two state:
+
+| | divide 1 | divide 4 |
+|---|---|---|
+| guard intact | pass | pass |
+| `+inj_acc_whole` | **fail** | pass |
+| `+inj_look_whole` | pass | **fail** |
+| `+inj_acc_settle` | n/a | pass |
+
+`+inj_fillguard` is retained as a diagnostic: it blinds the writeback guard
+(`tag_we`'s `!fill_snooped && !snoop_fill_row`) so overlapping protection can
+be told apart from a redundant term.  It is simulation-only and no production
+guard changed.
 
 Two weaker poisons were tried first and are recorded because they show what
 does not work: the bitwise inverse of the row, and a deterministic LFSR mixed

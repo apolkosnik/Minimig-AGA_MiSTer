@@ -86,17 +86,16 @@ UNIT_RUNS = {
     # a collided row hits the wrong way and returns its word, which expect_read
     # catches.  That restores cache_snoop_x_ce4_neg_lkw, the divide-4 control.
     #
-    # cache_snoop_x_neg_accw, the divide-1 acceptance control, is UNRESOLVED
-    # and absent rather than passing.  T12 in the bench is the directed attempt
-    # on it: four lines in one set, then a collided row carrying their tags
-    # with the way associations rotated, then the suspect fill, then a reread.
-    # The experiment fires and finds nothing.  A candidate explanation is
-    # ap040_cache.v:439 -- tag_we is gated by !fill_snooped && !snoop_fill_row,
-    # so the writeback is protected independently of this term.  That leaves
-    # the term neither proven necessary nor proven redundant.
+    # Both controls are restored, and both now fail on concrete wrong data
+    # rather than on X propagation.  The divide-1 one needed T13: T3 already
+    # sweeps a snoop across the acceptance window, but its concurrent read is
+    # deliberately unchecked (either value is legal against an unordered
+    # snoop), so the one read that could show the collision was the one the
+    # bench ignored.  T13 checks it -- either value is legal, a THIRD is not.
     "cache_snoop_x":      U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"],
                             [("cache_snoop_x", [], False),
-                             ("cache_snoop_x_lkw", ["+inj_look_whole"], False)]),
+                             ("cache_snoop_x_lkw", ["+inj_look_whole"], False),
+                             ("cache_snoop_x_neg_accw", ["+inj_acc_whole"], True)]),
     "cache_snoop_x_ce4":  U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"],
                             [("cache_snoop_x_ce4", [], False),
                              ("cache_snoop_x_ce4_accw", ["+inj_acc_whole"], False),
@@ -153,8 +152,7 @@ def main():
             results.append((leg, ok, "must fail" if must_fail else "")); print(f"{'ok  ' if ok else 'FAIL'} {leg:20s} {'(control: must fail)' if must_fail else ''}", flush=True)
     bad = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(bad)}/{len(results)} legs passed under Verilator" + ("" if not bad else "; FAILED: " + ", ".join(r[0] for r in bad)))
-    print("UNRESOLVED: cache_snoop_x_neg_accw, the divide-1 acceptance control -- neither proven necessary nor")
-    print("redundant.  T12 in tb_ap040_cache_snoop.v is the directed attempt on it; see UNIT_RUNS for what it found.")
+    print("Both snoop guard terms are covered by must-fail controls again, on concrete wrong data rather than X.")
     sys.exit(1 if bad else 0)
 
 
