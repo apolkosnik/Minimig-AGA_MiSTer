@@ -25,6 +25,13 @@ module dpram #(parameter addr_width = 8, parameter data_width = 8,
 	output reg [data_width-1:0] q_b
 );
 	reg [data_width-1:0] mem [0:(1<<addr_width)-1];
+	// A bench that knows what the lookup is asking for can supply the
+	// don't-care word directly.  Left off, the model walks its LFSR, which
+	// is honest but weak: a random word MISSES, and a miss is safe, so a
+	// control built on it cannot fail.  A directed word that HITS the wrong
+	// way is what makes an unsafe lookup observable.
+	reg                  poison_en  = 1'b0;
+	reg [data_width-1:0] poison_row = {data_width{1'b0}};
 	reg [15:0] poison = 16'hACE1;
 	function [data_width-1:0] rot;
 		input [addr_width-1:0] a;
@@ -42,25 +49,21 @@ module dpram #(parameter addr_width = 8, parameter data_width = 8,
 		// is writing, so a collision the RTL claims cannot happen must
 		// not quietly return a plausible word.
 		//
-		// The poison is a deterministic pseudo-random word, not X.
-		// This project simulates two-state, where X reads back as 0 --
-		// a word a tag row can legitimately hold, so an X poison would
-		// be invisible exactly where it matters.  A constant is no better: the bitwise inverse was
-		// tried and both negative controls stopped failing, because
-		// inverting a row's tags AND its valid bits turns a matching way
-		// into a clean miss, which is safe.  DONT_CARE does not promise
-		// a safe word, so the model must not supply one -- it walks an
-		// LFSR instead, mixing the address in, so a guard that is
-		// missing meets valid bits set and tags that sometimes match
-		// rather than one shape it can be accidentally immune to.
-		// Deterministic from reset, so a failing run reproduces.
+		// Two-state DONT_CARE.  X is not available here -- it reads back
+		// as 0, a word a tag row can legitimately hold -- and no single
+		// word is a substitute for "unspecified": the LFSR below SAMPLES
+		// particular collision values, it does not demonstrate tolerance
+		// of every row.  Deterministic from reset so a failing run
+		// reproduces.  For a control that must FAIL, drive poison_row
+		// instead; see tb_ap040_cache_snoop.v.
 		poison <= {poison[14:0], poison[15] ^ poison[13] ^ poison[12] ^ poison[10]};
-		if (wren_a && rdw_mode_a == "DONT_CARE") q_a <= rot(address_a);
+		if (wren_a && rdw_mode_a == "DONT_CARE")
+			q_a <= poison_en ? poison_row : rot(address_a);
 		else if (wren_b && address_b == address_a && rdw_mixed == "DONT_CARE")
-		                                         q_a <= rot(address_a);
+			q_a <= poison_en ? poison_row : rot(address_a);
 		else                                     q_a <= mem[address_a];
 		if (wren_a && address_a == address_b && rdw_mixed == "DONT_CARE")
-		                                         q_b <= rot(address_b);
+			q_b <= poison_en ? poison_row : rot(address_b);
 		else                                     q_b <= mem[address_b];
 	end
 endmodule

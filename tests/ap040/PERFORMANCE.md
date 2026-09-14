@@ -448,28 +448,47 @@ routing or the image is at fault.  `t_mmu` now runs on both dualram legs of
 the suite and `run_tests.sh` has `mmu_dualram`, because the reason this sat
 undetected is that nothing ran it.
 
-### Lost with the second simulator
+### Coverage after removing the second simulator
 
-Two negative controls did not survive: `cache_snoop_x_neg_accw` and
-`cache_snoop_x_ce4_neg_lkw`, the pair that proved each lookup-guard term is
-load-bearing in its own divide.  They worked by giving the tag row silicon's
-mixed-port read-during-write and blinding one guard term; under four states
-the compare then yields X and the wrong way reaches C_TAGW.
+The don't-care family was **five legs across two builds**: three positive
+(`cache_snoop_x`, `cache_snoop_ce4`, `cache_snoop_ce4_accw`) and two negative
+controls (`cache_snoop_x_neg_accw`, `cache_snoop_ce4_neg_lkw`).  A sixth
+snoop leg, `cache_snoop`, was built without the define and was already
+duplicated under Verilator.  All three positives ported, and the suite adds
+two more positive variants of its own.
 
-Two state cannot reproduce that, and it is the property rather than the
-tooling.  A negative control needs the blinded guard to let a WRONG WAY
-through, which needs the don't-care row's tag to match the lookup's; TAGW is
-22, so a don't-care word misses instead, and a miss is safe.  Two poisons
-were tried and measured -- the bitwise inverse of the row, and a
-deterministic LFSR mixed with the address -- and both left the two controls
-passing, which is worse than not having them.
+**One control is restored.**  `sim_dpram` now takes a directed row from the
+bench: the tag the lookup is asking for, valid, in a way that does not hold
+the line, with a marker word behind every way.  Acting on a collided row then
+hits the wrong way and returns its word, which `expect_read` catches.  That
+reproduces `cache_snoop_x_ce4_neg_lkw` exactly.
 
-What did survive is the four legs of the matrix that pass, now under
-Verilator with the pseudo-random don't-care word: the cache is shown to
-tolerate an arbitrary collided row at both divides.  Rebuilding the two
-controls as a direct check on the guard -- assert the blinded term actually
-lets a same-cycle row reach the compare -- would restore the property in two
-state, and is not done.
+**One is not**, and is absent rather than passing: `cache_snoop_x_neg_accw`,
+the divide-1 acceptance control.  Measured -- the directed row is delivered
+87 times at divide 1, 6 of them on an acceptance cycle, and the bench still
+passes with the term blinded.  The two controls fail by different mechanisms.
+Divide 4 fails by a wrong-way hit, which a concrete row reproduces.  Divide 1
+fails by the collided row being written **back** on the fill, since
+`tags_next` and `val_next` are built from `tag_q`; any well-formed row
+written back degrades to safe misses, and only an unknown value corrupts the
+set.  A row crafted to corrupt it would have to carry the tags of lines the
+test reads later, which is fabricating the answer rather than modelling
+"unspecified".
+
+Two weaker poisons were tried first and are recorded because they show what
+does not work: the bitwise inverse of the row, and a deterministic LFSR mixed
+with the address.  Both left **both** controls passing -- a random word
+misses, and a miss is safe.  The LFSR remains the default for instances the
+bench does not direct; it samples particular collision values and does not
+demonstrate tolerance of every row.
+
+A separate guard assertion was written and removed.  It flagged any request
+whose row a snoop touched anywhere in the window, which is not the contract:
+the row is re-read every cycle, so a snoop landing before the last re-read
+the compare sees is harmless -- which is why `+inj_look_whole` is safe at
+divide 1, and the assertion failed there.  Narrowing it to "the compare used
+a collided row" converges on the RTL's own expression and proves nothing.
+The end-to-end data check is the contract test.
 
 ### Still unverified
 

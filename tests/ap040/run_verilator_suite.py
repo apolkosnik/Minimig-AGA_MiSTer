@@ -81,23 +81,30 @@ UNIT_RUNS = {
     # the collision the lookup guard exists for is observable.  Each guard term
     # is load-bearing in one divide and redundant in the other, which is why the
     # controls are one per divide: see the matrix in tb_ap040_cache_snoop.v.
-    # The four legs of the matrix that PASS are here.  The two that must FAIL
-    # are NOT, and cannot be until the check is rebuilt: a negative control
-    # needs the blinded guard to let a WRONG WAY through, and in two state
-    # that needs the poisoned row's tag to match the lookup's.  TAGW is 22, so
-    # a don't-care word misses instead -- which is safe, so the control passes
-    # and proves nothing.  Two poisons were tried and measured, the bitwise
-    # inverse and a deterministic LFSR mixed with the address; both left
-    # cache_snoop_x_neg_accw and cache_snoop_x_ce4_neg_lkw passing.  Under
-    # four state the tag compare yields X rather than a miss, which is the
-    # property those two actually test, and no poison VALUE reproduces it.
+    # The don't-care family.  The bench builds a DIRECTED row -- the tag the
+    # lookup wants, valid, in a way that does not hold the line -- so acting on
+    # a collided row hits the wrong way and returns its word, which expect_read
+    # catches.  That restores cache_snoop_x_ce4_neg_lkw, the divide-4 control.
+    #
+    # cache_snoop_x_neg_accw, the divide-1 acceptance control, is NOT restored
+    # and is absent rather than passing.  Measured, not assumed: the directed
+    # row is delivered 87 times at divide 1, 6 of them on an acceptance cycle,
+    # and the bench still passes with the term blinded.  The reason is that the
+    # two failures are different mechanisms.  Divide 4 fails by a wrong-way
+    # HIT, which a concrete row reproduces.  Divide 1 fails by the collided row
+    # being written BACK on the fill (tags_next/val_next are built from tag_q),
+    # and any well-formed row written back degrades to safe misses -- only an
+    # unknown value corrupts the set.  A row crafted to corrupt it would have
+    # to carry tags of lines the test reads later, which is fabricating the
+    # answer rather than modelling "unspecified".
     "cache_snoop_x":      U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"],
                             [("cache_snoop_x", [], False),
                              ("cache_snoop_x_lkw", ["+inj_look_whole"], False)]),
     "cache_snoop_x_ce4":  U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"],
                             [("cache_snoop_x_ce4", [], False),
                              ("cache_snoop_x_ce4_accw", ["+inj_acc_whole"], False),
-                             ("cache_snoop_x_ce4_accs", ["+inj_acc_settle"], False)]),
+                             ("cache_snoop_x_ce4_accs", ["+inj_acc_settle"], False),
+                             ("cache_snoop_x_ce4_neg_lkw", ["+inj_look_whole"], True)]),
 }
 UNIT_PARAMS = {"sdram32_rp1": ["-GREAD_PIPE=1"], "cache_snoop_ce4": ["-GCE_DIV=4"],
                "cache_snoop_x": ["+define+SNOOP_MIXED_X"],
@@ -149,8 +156,8 @@ def main():
             results.append((leg, ok, "must fail" if must_fail else "")); print(f"{'ok  ' if ok else 'FAIL'} {leg:20s} {'(control: must fail)' if must_fail else ''}", flush=True)
     bad = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(bad)}/{len(results)} legs passed under Verilator" + ("" if not bad else "; FAILED: " + ", ".join(r[0] for r in bad)))
-    print("NOT covered here: the two must-fail snoop controls (cache_snoop_x_neg_accw, cache_snoop_x_ce4_neg_lkw).")
-    print("They need a four-state tag compare; no two-state poison reproduces them.  See UNIT_RUNS for the measurement.")
+    print("NOT covered here: cache_snoop_x_neg_accw, the divide-1 acceptance control.  Its four-state failure is the")
+    print("collided row written BACK on the fill; a well-formed row degrades to safe misses.  See UNIT_RUNS.")
     sys.exit(1 if bad else 0)
 
 

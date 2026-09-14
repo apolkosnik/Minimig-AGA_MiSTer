@@ -465,6 +465,56 @@ endtask
 // never load-bearing -- which is why an injection on it could not fail.
 `ifdef SNOOP_MIXED_X
 defparam dut.ctag_ram.rdw_mixed = "DONT_CARE";
+
+// Directed adversarial don't-care row.
+//
+// A don't-care word only matters if acting on it is UNSAFE, and a random
+// word is safe: with TAGW 22 it misses, the lookup refills, and the answer
+// is right.  That is why an LFSR poison leaves the negative controls
+// passing.  This builds the unsafe row on purpose -- the tag the lookup is
+// asking for, valid, in a way that does not hold this line -- so a lookup
+// that acts on it HITS, takes the wrong way, and returns that way's word.
+//
+// row = { rr[1:0], valid[3:0], tag3, tag2, tag1, tag0 }, TAGW 22.
+// The way is chosen as the lowest that is not the legitimate holder of
+// a_tag in the row actually stored, so hit_way is unambiguous and the data
+// behind it is never this line's.  Every data way is seeded with a marker
+// at reset, so an unsafe lookup that reaches a way this line never filled
+// returns POISON_DAT rather than a plausible word; a way filled for some
+// OTHER line returns that line's data, which expect_read also catches.
+localparam [31:0] POISON_DAT = 32'hBADD_0BAD;
+function [1:0] wrong_way;
+	input [93:0] row;
+	input [21:0] tg;
+	begin
+		if      (!(row[88] && row[21:0]  == tg)) wrong_way = 2'd0;
+		else if (!(row[89] && row[43:22] == tg)) wrong_way = 2'd1;
+		else if (!(row[90] && row[65:44] == tg)) wrong_way = 2'd2;
+		else                                     wrong_way = 2'd3;
+	end
+endfunction
+wire [93:0] real_row = dut.ctag_ram.mem[dut.a_row];
+wire  [1:0] pway     = wrong_way(real_row, dut.a_tag);
+always @(*) begin
+	dut.ctag_ram.poison_en  = 1'b1;
+	dut.ctag_ram.poison_row =
+		{2'b00, (4'd1 << pway),
+		 (pway == 2'd3) ? dut.a_tag : 22'h3F_FFFC,
+		 (pway == 2'd2) ? dut.a_tag : 22'h3F_FFFD,
+		 (pway == 2'd1) ? dut.a_tag : 22'h3F_FFFE,
+		 (pway == 2'd0) ? dut.a_tag : 22'h3F_FFFF};
+end
+
+// No separate guard assertion.  One was written and removed: it flagged any
+// request whose row a snoop touched anywhere in the window, and that is not
+// the contract -- the row is re-read every cycle, so a snoop landing before
+// the last re-read the compare sees is harmless, which is exactly why
+// +inj_look_whole is safe at divide 1.  Narrowing it to "the compare used a
+// collided row" converges on the RTL's own expression, which proves nothing.
+//
+// The end-to-end check is the contract: with the directed row above, a
+// lookup that acts on a don't-care row returns the wrong way's word, and
+// expect_read catches it.  That tests the protection, not its spelling.
 `endif
 task expect_read;
 	input [31:0] a;
@@ -490,6 +540,19 @@ reg [31:0] model;
 
 initial begin
 	for (i = 0; i < 16384; i = i + 1) mem[i] = 32'h1111_0000 + i;
+`ifdef SNOOP_MIXED_X
+	// Marker behind every way, so an unsafe lookup that reaches a way this
+	// line never filled returns something unmistakable rather than a zero
+	// that could be mistaken for ordinary uninitialised memory.  Legitimate
+	// fills overwrite the entries they use, so this does not disturb a
+	// correct run.
+	for (i = 0; i < 512; i = i + 1) begin
+		dut.cdata_way0.mem[i] = POISON_DAT;
+		dut.cdata_way1.mem[i] = POISON_DAT;
+		dut.cdata_way2.mem[i] = POISON_DAT;
+		dut.cdata_way3.mem[i] = POISON_DAT;
+	end
+`endif
 	repeat (4) @(negedge clk);
 	nreset = 1;
 	// let the reset sweep finish.  It walks 128 rows at one per ENABLE
