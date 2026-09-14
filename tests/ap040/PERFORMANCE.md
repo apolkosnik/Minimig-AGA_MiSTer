@@ -463,17 +463,28 @@ the line, with a marker word behind every way.  Acting on a collided row then
 hits the wrong way and returns its word, which `expect_read` catches.  That
 reproduces `cache_snoop_x_ce4_neg_lkw` exactly.
 
-**One is not**, and is absent rather than passing: `cache_snoop_x_neg_accw`,
-the divide-1 acceptance control.  Measured -- the directed row is delivered
-87 times at divide 1, 6 of them on an acceptance cycle, and the bench still
-passes with the term blinded.  The two controls fail by different mechanisms.
-Divide 4 fails by a wrong-way hit, which a concrete row reproduces.  Divide 1
-fails by the collided row being written **back** on the fill, since
-`tags_next` and `val_next` are built from `tag_q`; any well-formed row
-written back degrades to safe misses, and only an unknown value corrupts the
-set.  A row crafted to corrupt it would have to carry the tags of lines the
-test reads later, which is fabricating the answer rather than modelling
-"unspecified".
+**One is unresolved**, and absent rather than passing:
+`cache_snoop_x_neg_accw`, the divide-1 acceptance control.  T12 in the bench
+is the directed attempt on it, and it is a legitimate one: a don't-care word
+may be any bit pattern, including tags that later requests match, so building
+the row out of them tests whether corruption can become observable rather
+than restricting the model.  Four lines are populated in one set with
+distinct data, a collided row carrying their four tags with the way
+associations rotated is injected, the suspect fill is triggered, and the four
+are reread.
+
+It finds nothing.  The experiment demonstrably fires -- 8 collisions with the
+permuted row, one of them on an acceptance cycle -- and the four lines read
+back correctly with the term blinded, identically to the intact run.  A
+candidate explanation is in `ap040_cache.v` line 439: `tag_we` is gated by
+`!fill_snooped && !snoop_fill_row`, so the writeback is protected
+independently of the lookup guard, and a collided row cannot reach the tag
+RAM by this route whether or not the acceptance term is blinded.
+
+That leaves the term **neither proven necessary nor proven redundant**.  The
+other candidates are stimulus this experiment does not reach, or the original
+four-state failure having been simulation pessimism -- an X-induced failure
+is conservative, not by itself a concrete hardware failure.
 
 Two weaker poisons were tried first and are recorded because they show what
 does not work: the bitwise inverse of the row, and a deterministic LFSR mixed

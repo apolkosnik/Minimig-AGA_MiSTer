@@ -495,9 +495,12 @@ function [1:0] wrong_way;
 endfunction
 wire [93:0] real_row = dut.ctag_ram.mem[dut.a_row];
 wire  [1:0] pway     = wrong_way(real_row, dut.a_tag);
+// T12 drives the collided row itself; see that test for why.
+reg        perm_en  = 1'b0;
+reg [93:0] perm_row = 94'd0;
 always @(*) begin
 	dut.ctag_ram.poison_en  = 1'b1;
-	dut.ctag_ram.poison_row =
+	dut.ctag_ram.poison_row = perm_en ? perm_row :
 		{2'b00, (4'd1 << pway),
 		 (pway == 2'd3) ? dut.a_tag : 22'h3F_FFFC,
 		 (pway == 2'd2) ? dut.a_tag : 22'h3F_FFFD,
@@ -997,6 +1000,66 @@ initial begin
 		end
 	end
 	mem_lat = 2'd2;
+
+`ifdef SNOOP_MIXED_X
+	//------------------------------------------------------------------
+	// T12: can a collided row become OBSERVABLE corruption of a whole set?
+	//
+	// The divide-4 control fails by a wrong-way hit on the request that
+	// collided.  Divide 1 is supposed to fail differently: the collided row
+	// is written BACK on the fill, because tags_next and val_next are built
+	// from tag_q, so the damage lands on OTHER lines in the set and shows up
+	// on a later read.  A row whose ways carry tags the test will ask for
+	// later is a legal don't-care value -- the memory promises nothing about
+	// the word, so any bit pattern is allowed -- and refusing to use one
+	// would restrict the model rather than the design.
+	//
+	// Four lines in one set, distinct data, then a collided row carrying
+	// their four tags with the way associations rotated by one.  If the
+	// blinded acceptance term lets that row reach the fill's writeback, each
+	// of the four now answers from the way holding its neighbour's data.
+	//
+	// RESULT: no counterexample.  The experiment fires -- 8 collisions with
+	// the permuted row, one of them on an acceptance cycle -- and the four
+	// lines still read back correctly with +inj_acc_whole, identically to the
+	// intact run.  A candidate explanation is in ap040_cache.v line 439:
+	// tag_we is gated by !fill_snooped && !snoop_fill_row, so the writeback
+	// is protected independently of the lookup guard, and a collided row
+	// cannot reach the tag RAM by this route whether or not the acceptance
+	// term is blinded.  That does not prove the term redundant -- the
+	// original four-state failure may exercise a path this does not reach,
+	// or may have been simulation pessimism.  The control stays unresolved.
+	//------------------------------------------------------------------
+	for (off = 0; off < 8 * CE_DIV; off = off + 1) begin
+		// 1. populate: four tags, one set (addr[9:4] = 6'h15), four ways
+		for (i = 0; i < 4; i = i + 1)
+			expect_read(32'h0000_8150 + (i << 10),
+			            mem[(32'h8150 + (i << 10)) >> 2], 12);
+		// 2. the collided row: same four tags, rotated one way to the left,
+		//    every way valid.  row = {rr, valid[3:0], tag3, tag2, tag1, tag0}
+		perm_row = {2'b00, 4'b1111,
+		            22'h0000_20 + 22'd2,   // way3 <- tag of line 2
+		            22'h0000_20 + 22'd1,   // way2 <- tag of line 1
+		            22'h0000_20 + 22'd0,   // way1 <- tag of line 0
+		            22'h0000_20 + 22'd3};  // way0 <- tag of line 3
+		perm_en = 1'b1;
+		// 3. a miss into the same set, with a snoop swept across its
+		//    acceptance window so the collision lands on the read whose row
+		//    the fill writes back
+		fork
+			cpu_read(32'h0000_9150, d);
+			begin
+				repeat (off) @(negedge clk);
+				snoop(32'h0000_8150);
+			end
+		join
+		perm_en = 1'b0;
+		// 4. every populated line must still answer with its own data
+		for (i = 0; i < 4; i = i + 1)
+			expect_read(32'h0000_8150 + (i << 10),
+			            mem[(32'h8150 + (i << 10)) >> 2], 12);
+	end
+`endif
 
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else $display("TEST FAILED with %0d errors", errors);
