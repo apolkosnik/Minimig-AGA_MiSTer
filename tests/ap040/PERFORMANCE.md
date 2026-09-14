@@ -517,10 +517,13 @@ The end-to-end data check is the contract test.
 ### Still unverified: the hardware release checks
 
 Everything above is simulation and timing.  The image to test is
-`Minimig-ap040-40mhz-d41be2fd-20260913_192514.rbf`, md5
-`54c7182391fa7436d1f2bda7e93c6d16`.  The RTL has not moved since it was
-built -- the only changes to `rtl/` and the project files since that commit
-are four comment lines -- so the tree and the image still agree.
+`Minimig-ap040-40mhz-8e73b9b74-20260913_221853.rbf`, md5
+`f388f6c9fbebdacb329b64e10a828bfe`, built from the commit that sizes the
+bitfield read.  It meets the gate at +0.445 ns worst emu setup in any
+corner, at 96% of the device -- 0.022 ns better than `d41be2fd` and 82 ALMs
+larger, which is what the read sizing costs.  It is the first image whose
+tree and bitstream agree since that fix landed; `d41be2fd` and everything
+before it read a longword for every memory bitfield.
 
 1. **Repeated cold boots.**  Power-cycle, not core reload, several times.
    One boot is what `d079808a` had, and an earlier fit of the same RTL at
