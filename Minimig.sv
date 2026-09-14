@@ -638,22 +638,24 @@ assign SDRAM2_nRAS = SDRAM2_EN ? sd2_ras : 1'bZ;
 assign SDRAM2_nCAS = SDRAM2_EN ? sd2_cas : 1'bZ;
 assign SDRAM2_CLK  = SDRAM2_EN ? sd2_clk : 1'bZ;
 
-// CACHE_READ_PIPE(1): the controller cache registers its hit decision instead
-// of deciding it combinationally from the tag RAM's output.  At READ_PIPE 0
-// that compare -- M10K output, 18-bit tag compare, way priority -- is three
-// LUT levels into cpu_ack, and on 74317588's fit it was the binding path of
-// the whole design: ram1|cpu_cache|cpu_ack at +0.097 ns in the Slow -40C
-// corner, four of the tightest twelve emu paths ending there.  The registered
-// form costs one fast cycle on a read that hits this cache.
+// CACHE_READ_PIPE is NOT set here, and the reason is a hardware result.
 //
-// It was held back as P2-only on the grounds that dualram's t_mmu leg failed
-// with it under the legacy clocking.  That was mis-attributed: the same leg
-// fails with READ_PIPE 0, and on 6ea3997d, the last build before any of this
-// work -- it is a pre-existing failure in a combination run_tests.sh does not
-// run (dualram is run with t_fpu only).  With it on, sdram t_mmu and t_fpu
-// pass at all four CPU phases and dualram t_fpu passes; the suite now carries
-// those legs.
-sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1), .CACHE_READ_PIPE(1)) ram1
+// It was enabled on d41be2fd for the margin it buys -- the combinational hit
+// compare was the binding path at +0.097 ns, and registering it took the
+// design to +0.423 at 96% of the device.  Every simulation leg passed,
+// including sdram t_mmu and t_fpu at all four CPU phases under the legacy
+// clocking and dualram t_fpu, and the historical objection to it turned out
+// to be a pre-existing bench failure unrelated to the parameter.
+//
+// Then 8e73b9b74, which carries it, did not boot.  Two changes separate that
+// image from 74317588, which did boot and measured 6615 Dhrystones: this
+// parameter and the bitfield read sizing.  The bitfield fix is exonerated at
+// instruction level -- every BF* slice of the cputest corpus fails in exactly
+// the same 16 places with and without it, byte-identical sets -- which leaves
+// this.  The margin is not worth a core that does not start, and the
+// simulation evidence for it is real but evidently not system-level.
+//
+sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ram1
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
@@ -693,7 +695,7 @@ sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1), .CACHE_READ_PIPE(1)) ram1
 `else
 wire dual_fault = 1'b0;
 
-sdram_ctrl #(.CPU_CACHE(1), .CACHE_READ_PIPE(1)) ram1
+sdram_ctrl #(.CPU_CACHE(1)) ram1
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
@@ -799,7 +801,7 @@ chipdma_arb chipdma_arb
 wire [15:0] ram_dout2;
 wire        ram_ready2;
 
-ddram_ctrl #(.CPU_CACHE(1), .CACHE_READ_PIPE(1)) ram2
+ddram_ctrl #(.CPU_CACHE(1)) ram2
 (
 	.sysclk       (clk_114         ),
 	.reset_n      (~reset_d        ),
