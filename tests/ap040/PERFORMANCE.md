@@ -550,13 +550,20 @@ caches on.  Neither exists.
 ### Still unverified: the hardware release checks
 
 Everything above is simulation and timing.  The image to test is
-`Minimig-ap040-40mhz-8e73b9b74-20260913_221853.rbf`, md5
-`f388f6c9fbebdacb329b64e10a828bfe`, built from the commit that sizes the
-bitfield read.  It meets the gate at +0.445 ns worst emu setup in any
-corner, at 96% of the device -- 0.022 ns better than `d41be2fd` and 82 ALMs
-larger, which is what the read sizing costs.  It is the first image whose
-tree and bitstream agree since that fix landed; `d41be2fd` and everything
-before it read a longword for every memory bitfield.
+`Minimig-ap040-40mhz-e6c584e67-20260914_001715.rbf`, md5
+`62308e019bbf5ff351ad842421ce6fd0`.  It meets the gate at +0.247 ns worst emu
+setup in any corner, at 96% of the device, and its design is identical to
+HEAD -- the commits after it touch only notes and tests.
+
+It is the bitfield read narrowed to the page-crossing case, on top of the
+reverted `CACHE_READ_PIPE`.  Outside a page end it is byte-identical to
+`74317588`, which runs NetBSD: every program on the core bench retires in
+exactly that core's cycle count, `t_mmu` included.
+
+Two images before it are worth keeping straight.  `8e73b9b74` sized every
+bitfield read and met the gate at +0.445, and NetBSD's `rcorder` died on it.
+`d41be2fd` carried `CACHE_READ_PIPE` and did not boot at all.  Neither should
+be flashed again.
 
 1. **Repeated cold boots.**  Power-cycle, not core reload, several times.
    One boot is what `d079808a` had, and an earlier fit of the same RTL at
