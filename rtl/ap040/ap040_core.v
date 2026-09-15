@@ -4537,6 +4537,13 @@ always @(posedge clk) begin
 				else begin
 					fp_list <= fp_list & ~(8'd1 << b);
 					fpu_fmsel <= (!fp_st || fp_mode[1]) ? (3'd7 - b) : b;
+					// FMOVEM stores share the FPU's ordinary source-register
+					// read port, because the register file is now a memory
+					// with two read ports rather than flip-flops with three
+					// muxes.  S_FPU_MVM2 gives it a full setup cycle before
+					// fm_rdata is consumed; loads still write through fm_sel.
+					if (fp_st)
+						fpu_srcr <= (!fp_st || fp_mode[1]) ? (3'd7 - b) : b;
 					if (fp_ea_pd) t_a <= t_a;   // base already lowered
 					fp_n <= 0;
 					state <= S_FPU_MVM2;
