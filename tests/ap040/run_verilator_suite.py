@@ -35,7 +35,7 @@ PROGRAM_RUNS = [
     ("chip_l0",         ["--bench", "chip", "--program", "t_exceptions", "--param", "RAM_LAT=0"]),
     ("chip_l7",         ["--bench", "chip", "--program", "t_exceptions", "--param", "RAM_LAT=7"]),
     ("chip_turbo",      ["--bench", "chip", "--program", "t_exceptions,t_mmu,t_fpu,t_integer", "--param", "TURBO_CHIP=1"]),
-    ("chip_fast4",      ["--bench", "chip", "--program", "t_integer,t_exceptions,t_mmu,t_fpu,t_moves_fc", "--param", "FAST_CLOCK=1", "--param", "CORE_DIV=4"]),
+    ("chip_fast4",      ["--bench", "chip", "--program", "t_integer,t_exceptions,t_mmu,t_fpu,t_moves_fc,t_movem_restart,t_atcprobe", "--param", "FAST_CLOCK=1", "--param", "CORE_DIV=4"]),
     ("chip_fast2",      ["--bench", "chip", "--program", "t_integer,t_moves_fc", "--param", "FAST_CLOCK=1", "--param", "CORE_DIV=2"]),
     ("sdram",           ["--bench", "sdram", "--program", "t_fpu,t_mmu", "--param", "CYC_PHASE=1", "--param", "CPU_PHASE=0"]),
     ("sdram_ph3",       ["--bench", "sdram", "--program", "t_mmu,t_fpu", "--param", "CYC_PHASE=1", "--param", "CPU_PHASE=3"]),

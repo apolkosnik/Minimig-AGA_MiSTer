@@ -101,6 +101,10 @@ module ap040_fpu
 	input             pend_capture,
 	output      [7:0] cur_vec,
 	output            frestore_e1_pend,
+	// FPSP requests execution of the normalized BUSY command with CU_SAVEPC=fe.
+	input       [7:0] frestore_cusavepc,
+	input             frestore_et15, frestore_fpt15,
+	output            frestore_resume,
 	output reg  [2:0] fstate_grs,
 	output reg        fstate_wbte15,
 	output reg        fstate_busy,      // the pending frame is $41/$60 BUSY
@@ -262,6 +266,9 @@ localparam F_ROUND = 4'd14;  // precision rounding and range checks
 localparam F_PACKS = 4'd15;  // denormal single/double store packing
 localparam F_UNFL  = 5'd16;  // gradual underflow at single/double precision
 localparam F_STDONE = 5'd17; // store completion: settled-status trap check
+localparam F_RESTORE_A = 5'd18; // finish ET15 denormalization, shift FPTEMP
+localparam F_RESTORE_B = 5'd19; // finish FPTE15 denormalization
+localparam F_RESTORE_N = 5'd20; // normalize the prepared destination
 
 reg  [4:0] fst;
 // unimp/unsupp decisions are made in the dispatch cycle (register
@@ -276,6 +283,7 @@ assign accepted = (fst == F_ADDX) || (fst == F_MULT) ||
 reg  [2:0] r_fmt, r_dst;
 reg        r_ae7;           // accrued-IOP before this instruction (fault backout)
 reg        r_unimp;         // memory-source software op using normal converter
+reg        r_resume;        // normalized BUSY operands bypass datatype retraps
 reg  [2:0] r_stag;          // source tag retained while that conversion runs
 reg  [6:0] r_op;
 reg [95:0] r_din;
@@ -486,6 +494,28 @@ endfunction
 
 wire [6:0] fr_cmd_op = (frestore_cmd1[6:0] == 7'h05) ? 7'h04
                                                      : frestore_cmd1[6:0];
+assign frestore_resume = frestore_busy && frestore_cusavepc == 8'hfe &&
+                         (frestore_cmd1[15:13] == 3'd0 ||
+                          frestore_cmd1[15:13] == 3'd2) && op_in_hw(fr_cmd_op);
+
+// FPSP get_op (mk_norm/fix_stag) and bugfix set ETE15/FPTE15 for normal
+// operands whose exponent is below $4000 too: e.g. 0.1 has e=$3ffb,
+// ETE15=1. The extension flag alone does NOT mean a wrapped negative
+// biased exponent. Only a set flag together with e[14] requires a shift.
+// For that negative range, shift by 0x8000-e, truncating (not rounding);
+// counts above 63 produce signed zero. WinUAE's unconditional esign test
+// also loses ordinary FPSP operands; do not reproduce that behavior here.
+// Reuse F_SHR for both operands instead of adding two 64-bit barrel shifters.
+wire restore_et_negative = frestore_et15 && frestore_et[94];
+wire restore_fpt_negative = frestore_fpt15 && frestore_fpt[94];
+function [6:0] restore_shift;
+	input esign;
+	input [14:0] e;
+	begin
+		restore_shift = !(esign && e[14]) ? 7'd0 :
+		                (e < 15'h7fc1) ? 7'd64 : (7'd0 - e[6:0]);
+	end
+endfunction
 assign frestore_e1_pend = (frestore_flags[2] || frestore_flags[1]) &&
                           op_in_hw(fr_cmd_op) &&
                           (|(fpsr[15:8] & fpcr[15:8]));
@@ -608,7 +638,7 @@ always @(posedge clk) begin
 		dout <= 0;
 		r_fmt <= 0; r_dst <= 0; r_op <= 0; r_din <= 0;
 		r_ae7 <= 0;
-		r_unimp <= 0; r_stag <= 0;
+		r_unimp <= 0; r_stag <= 0; r_resume <= 0;
 		a_s <= 0; a_e <= 0; a_m <= 0; a_t <= 0;
 		sh_v <= 0; sh_cnt <= 0;
 		pk_neg <= 0; pk_isz <= 0;
@@ -762,7 +792,33 @@ always @(posedge clk) begin
 		end
 
 		case (fst)
-			F_IDLE: if (req) begin
+			F_IDLE: if (frestore_unimp && frestore_resume) begin
+				// The frame, not the current register bank, supplies BOTH operands.
+				// FPIAR/FPCR are separately restored by software; do not replace
+				// FPIAR with the FRESTORE instruction address or frame FPIARCU.
+				fpsr[15:8] <= 0;
+				fstate_unimp <= 0;
+				fstate_resig <= 0;
+				fstate_e1 <= 0;
+				fstate_busy <= 0;
+				r_resume <= 1;
+				r_unimp <= 0;
+				r_ae7 <= fpsr[7];
+				r_op <= fr_cmd_op;
+				r_fmt <= 3'd2; // already converted to extended, even opclass 0
+				r_dst <= frestore_cmd1[9:7];
+				sh_cmd <= frestore_cmd1;
+				{a_s, a_e, a_m, a_t} <= unpack_x(frestore_et[95],
+				    restore_et_negative ? 15'd0 : frestore_et[94:80], frestore_et[63:0]);
+				{b_s, b_e, b_m, b_t} <= unpack_x(frestore_fpt[95],
+				    restore_fpt_negative ? 15'd0 : frestore_fpt[94:80], frestore_fpt[63:0]);
+				sh_v <= {frestore_et[63:0], 3'd0};
+				sh_cnt <= restore_shift(frestore_et15, frestore_et[94:80]);
+				loop_n <= restore_shift(frestore_fpt15, frestore_fpt[94:80]);
+				sh_ret <= F_RESTORE_A;
+				fst <= F_SHR;
+			end
+			else if (req) begin
 				if (fstate_unimp && !fstate_e1 && fstate_resig) begin
 					// A restored exception frame remains pending until FSAVE.
 					// Re-enter the software package without destroying its state.
@@ -791,6 +847,7 @@ always @(posedge clk) begin
 				r_op <= opmode;
 				r_din <= din;
 				r_unimp <= 0;
+				r_resume <= 0;
 				// Retain the destination operand once at dispatch.  Later FPU
 				// states use this existing exception shadow instead of building
 				// another 80-bit asynchronous FP-register read port around r_dst.
@@ -932,7 +989,7 @@ always @(posedge clk) begin
 								fpu_used <= 1; fst <= F_STDONE;
 							end
 							else begin
-								sE = $signed({1'b0, a_e}) - 18'sd16383;
+								sE = $signed({a_e[16], a_e}) - 18'sd16383;
 								if (sE < -18'sd126) begin
 									// Shift into the IEEE single denormal range, retaining
 									// G/R/S for the selected rounding mode.
@@ -986,7 +1043,7 @@ always @(posedge clk) begin
 								fpu_used <= 1; fst <= F_STDONE;
 							end
 							else begin
-								sE = $signed({1'b0, a_e}) - 18'sd16383;
+								sE = $signed({a_e[16], a_e}) - 18'sd16383;
 								if (sE < -18'sd1022) begin
 									den_sh = -18'sd1022 - sE;
 									sh_v <= {a_m, 3'd0};
@@ -1029,7 +1086,7 @@ always @(posedge clk) begin
 							pk_isz <= (r_fmt == 3'd0) ? 2'd2 :
 							          (r_fmt == 3'd4) ? 2'd1 : 2'd0;
 							pk_neg <= a_s;
-							sE = $signed({1'b0, a_e}) - 18'sd16383;
+								sE = $signed({a_e[16], a_e}) - 18'sd16383;
 							qm = a_m | 64'h4000_0000_0000_0000;
 							if (a_t == T_ZERO) begin
 								sh_v <= 0; sh_cnt <= 0; fst <= F_PACKI;
@@ -1230,6 +1287,40 @@ always @(posedge clk) begin
 				end
 			end
 
+			F_RESTORE_A: begin
+				// Ignore discarded GRS: exponent extension is a truncating
+				// format conversion, not an arithmetic rounding operation.
+				a_m <= sh_v[66:3];
+				if (a_t == T_NUM && sh_v[66:3] == 0) a_t <= T_ZERO;
+				sh_src <= {a_s, a_e[14:0], 16'd0, sh_v[66:3]};
+				r_stag <= frame_tag_x(a_e[14:0], sh_v[66:3]);
+				sh_stag <= frame_tag_x(a_e[14:0], sh_v[66:3]);
+				sh_v <= {b_m, 3'd0};
+				sh_cnt <= loop_n;
+				sh_ret <= F_RESTORE_B;
+				fst <= F_SHR;
+			end
+
+			F_RESTORE_B: begin
+				b_m <= sh_v[66:3];
+				if (b_t == T_NUM && sh_v[66:3] == 0) b_t <= T_ZERO;
+				sh_dst <= {b_s, b_e[14:0], 16'd0, sh_v[66:3]};
+				sh_dtag <= frame_tag_x(b_e[14:0], sh_v[66:3]);
+				fst <= F_RESTORE_N;
+			end
+
+			F_RESTORE_N: begin : restore_norm
+				reg [6:0] lz;
+				// Use signed working exponents for true extended denormals.
+				// The normal instruction path still traps on these operands.
+				lz = clz64(b_m);
+				if (b_t == T_NUM) begin
+					b_m <= b_m << lz;
+					b_e <= b_e - {10'd0, lz};
+				end
+				fst <= F_NORM;
+			end
+
 			F_NORM: begin : f_norm
 				reg [6:0] lz;
 				lz = clz64(a_m);
@@ -1247,9 +1338,11 @@ always @(posedge clk) begin
 
 			F_EXEC: begin
 				// operand shadow for a possible deferred-exception frame
-				sh_cmd  <= {3'b010, r_fmt, r_dst, r_op};
-				sh_src  <= {a_s, a_e[14:0], 16'd0, a_m};
-				sh_stag <= r_stag;
+				if (!r_resume) begin
+					sh_cmd  <= {3'b010, r_fmt, r_dst, r_op};
+					sh_src  <= {a_s, a_e[14:0], 16'd0, a_m};
+					sh_stag <= r_stag;
+				end
 				if (r_unimp) begin
 					capture_unimp({3'b010, r_fmt, r_dst, r_op},
 					               {a_s, a_e[14:0], 16'd0, a_m}, r_stag,
@@ -1262,7 +1355,7 @@ always @(posedge clk) begin
 				// it must precede the SNaN bookkeeping: the datatype fault
 				// is taken before the arithmetic ever inspects a NaN, so the
 				// status byte stays clean.
-				else if (r_op == 7'h38 &&
+				else if (!r_resume && r_op == 7'h38 &&
 				    unsupported_x(b_e[14:0], b_m)) begin
 					unsupp <= 1;
 					capture_datatype({3'b010, r_fmt, r_dst, r_op},
@@ -1280,8 +1373,7 @@ always @(posedge clk) begin
 					fpsr[14] <= 1;
 					fpsr[7] <= 1;
 				end
-				if (r_op == 7'h38 &&
-				    is_snan_x(b_e[14:0], b_m)) begin
+				if (r_op == 7'h38 && b_t == T_NAN && !b_m[62]) begin
 					fpsr[14] <= 1;
 					fpsr[7] <= 1;
 				end
@@ -1293,7 +1385,7 @@ always @(posedge clk) begin
 					default: ;
 				endcase
 				grs <= 3'd0;
-				e_w <= $signed({1'b0, a_e});
+				e_w <= $signed({a_e[16], a_e});
 				case (r_op)
 					7'h38, 7'h3A: fst <= F_WB;               // FCMP/FTST
 					7'h00, 7'h40, 7'h44,
@@ -1316,14 +1408,16 @@ always @(posedge clk) begin
 
 			F_BIN: begin : f_bin
 				reg        s_a;
-				sh_cmd  <= {3'b010, r_fmt, r_dst, r_op};
-				sh_src  <= {a_s, a_e[14:0], 16'd0, a_m};
-				sh_stag <= r_stag;
+				if (!r_resume) begin
+					sh_cmd  <= {3'b010, r_fmt, r_dst, r_op};
+					sh_src  <= {a_s, a_e[14:0], 16'd0, a_m};
+					sh_stag <= r_stag;
+				end
 				// FSUB family: fold the source sign
 				s_a = (op_kind == 4'd1 &&
 				       (r_op == 7'h28 || r_op == 7'h68 || r_op == 7'h6C))
 				      ? ~a_s : a_s;
-				if (op_kind != 4'd4 &&
+				if (!r_resume && op_kind != 4'd4 &&
 				    unsupported_x(b_e[14:0], b_m)) begin
 					// The destination datatype fault is taken with a clean
 					// status byte: undo the source-SNaN record F_EXEC made a
@@ -1372,7 +1466,7 @@ always @(posedge clk) begin
 						else if (a_t == T_INF) fst <= F_WB;
 						else begin : sq_go
 							reg signed [17:0] sE;
-							sE = $signed({1'b0, a_e}) - 18'sd16383;
+							sE = $signed({a_e[16], a_e}) - 18'sd16383;
 							e_w <= (sE >>> 1) + 18'sd16383;
 							if (a_m == 64'h8000_0000_0000_0000 && !sE[0]) begin
 								// Exact square root of an even power of two.
@@ -1420,30 +1514,30 @@ always @(posedge clk) begin
 							a_e <= b_e;
 							a_m <= b_m;
 							a_t <= T_NUM;
-							e_w <= $signed({1'b0, b_e});
+							e_w <= $signed({b_e[16], b_e});
 							fst <= F_ROUND;
 						end
 						else if (b_t == T_ZERO) begin
 							a_s <= s_a;
-							e_w <= $signed({1'b0, a_e});
+							e_w <= $signed({a_e[16], a_e});
 							fst <= F_ROUND;
 						end
 						else begin : bin_addnum
 							reg        aswap;
 							reg [16:0] d;
-							aswap = (a_e > b_e) ||
+							aswap = ($signed(a_e) > $signed(b_e)) ||
 							        (a_e == b_e && a_m > b_m);
 							eff_sub <= (s_a != b_s);
 							if (aswap) begin
 								b_s <= s_a; b_e <= a_e; b_m <= a_m;
 								a_s <= b_s; a_e <= b_e; a_m <= b_m;
 								d = a_e - b_e;
-								e_w <= $signed({1'b0, a_e});
+								e_w <= $signed({a_e[16], a_e});
 							end
 							else begin
 								a_s <= s_a;
 								d = b_e - a_e;
-								e_w <= $signed({1'b0, b_e});
+								e_w <= $signed({b_e[16], b_e});
 							end
 							sh_v <= {aswap ? b_m : a_m, 3'd0};
 							sh_cnt <= (d > 17'd66) ? 7'd67 : d[6:0];
@@ -1490,8 +1584,8 @@ always @(posedge clk) begin
 						end
 						else begin
 							a_s <= a_s ^ b_s;
-							e_w <= $signed({1'b0, a_e}) +
-							       $signed({1'b0, b_e}) - 18'sd16383;
+							e_w <= $signed({a_e[16], a_e}) +
+							       $signed({b_e[16], b_e}) - 18'sd16383;
 							if (am_eff == 64'h8000_0000_0000_0000 ||
 							    bm_eff == 64'h8000_0000_0000_0000) begin
 								// Multiplication by an exact power of two only changes
@@ -1566,8 +1660,8 @@ always @(posedge clk) begin
 						end
 						else begin
 							a_s <= a_s ^ b_s;
-							e_w <= $signed({1'b0, b_e}) -
-							       $signed({1'b0, a_e}) + 18'sd16383;
+							e_w <= $signed({b_e[16], b_e}) -
+							       $signed({a_e[16], a_e}) + 18'sd16383;
 							if (am_eff == 64'h8000_0000_0000_0000 || bm_eff == am_eff) begin
 								// Division by a power of two, or equal normalized
 								// significands, is exact after exponent adjustment.
@@ -1978,7 +2072,8 @@ always @(posedge clk) begin
 							else begin
 								if (du[1:0] == T_INF)     dbig = 1;
 								else if (a_t == T_INF)    dbig = 0;
-								else dbig = ({du[82:66], du[65:2]} > {a_e, a_m});
+								else dbig = ($signed(du[82:66]) > $signed(a_e)) ||
+								            (du[82:66] == a_e && du[65:2] > a_m);
 								gt = ds ? !dbig : dbig;
 							end
 							n = !gt;
