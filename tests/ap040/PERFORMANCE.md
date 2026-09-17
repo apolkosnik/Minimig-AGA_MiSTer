@@ -381,10 +381,32 @@ models the array exactly.
 The fix is not to drop the attribute.  Without it Quartus will not infer an
 MLAB at all: the fit reported `ALMs used for memory 0.0`, both mirrored banks
 in flip-flops, 1,172 registers and 673 ALMs against the plain array's 576 and
-459 -- worse than doing nothing.  The fix is to hold the write one enabled
-cycle and answer a read of the pending address from the held data, so the
-undefined datum is discarded and the attribute becomes honest.  Verified by
-counting: coincidences 1329, uncovered 0.
+459 -- worse than doing nothing.  The fix is a bypass that keeps the RAM's
+output away from an address whose word the MLAB is committing.
+
+Which cycle that is matters, and the first bypass (78e7281e4, in the
+f53c044b0 image) got it wrong.  An MLAB registers its write port on the
+clock edge and commits the cells with an internal pulse during the cycle
+that FOLLOWS, so the undefined read is the one in cycle N+1 relative to the
+RTL write edge -- the same cycle in which flip-flops returned the new word,
+and the cycle eb158fb71 left open.  78e7281e4 held the write itself back by
+a cycle and bypassed the cycle before the RAM was written: that cycle's RAM
+output was the untouched old word, harmless, and the commit happened in the
+next cycle, unmasked.  The hazard moved from N+1 to N+2; it did not go away.
+Counted with a second shadow in `t_integer`: 567 reads sit at N+1 and 738 at
+N+2.  The corpus and suite passed either way because Verilator updates the
+array on the edge; the board ran Workbench, Dhrystone and most of cputest on
+it, and locked once in `4_IRQ` at DBcc.W -- whose slices each read a
+register at N+2 about thirty times, where the Bcc.W slices that passed do it
+zero times -- and passed the re-run.  An intermittent failure on a
+half-cycle path that no STA table covers cannot be pinned to this from
+here, so it is not claimed; the 738 open reads are claimed.
+
+The bypass now covers the commit cycle: the word goes to the RAM on its
+issue edge, as before 78e7281e4, and a copy in `pend_*` answers reads of
+that address through the following enabled cycle.  In simulation the bypass
+is invisible -- the array already holds the word -- which is the point.
+Same shape in `ap040_fp_regfile`.
 
 ## Experimental clock interface (parked)
 
@@ -412,6 +434,16 @@ Functional runs pass at divide four, two and one. Coverage includes:
 
 The SDRAM/dual-memory benches do not implement the exception suite's full
 interrupt-injection interface. Run `t_exceptions` in the core/chip benches.
+
+Re-tried on 2026-09-17 at 92 % (f174b930f with the six P2 changes: the
+wrapper on clk_114 with `FAST_CLOCK(1)`, `CORE_DIV(4)`,
+`BUS_TIMEOUT_BITS(22)`; `ram_cs_guard` `SAME_CLOCK(1)`; the walker CDC's
+`s_clk` on clk_114; `CACHE_READ_PIPE(1)` on the three controllers): 39,594
+ALMs (94 %), emu setup **-0.851**, hold +0.064, recovery +2.140.  The area
+freed since the last attempt (98 % -> 92 %) bought nothing here; the failing
+paths are the core's own dispatch cones at 8.8 ns, not congestion.  P2 stays
+parked; the change set is logic-identical to the last live P2 top
+(ebdc9ffc6^) and reapplies mechanically.
 
 ## Regression evidence
 

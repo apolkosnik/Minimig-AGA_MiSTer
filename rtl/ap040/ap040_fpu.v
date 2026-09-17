@@ -2334,11 +2334,14 @@ module ap040_fp_regfile
 // t_fpu alone, 57 in t_fpu_resume, 6 in t_fpu_frames, the very first being a
 // write to FP0 with both read ports on FP0.
 //
-// The integer register file had the same shape and did not boot.  So the same
-// remedy: hold the write one enabled cycle and answer a read of the pending
-// address from pend_wdata, which discards exactly the datum the attribute
-// leaves undefined.  Reads are otherwise unchanged, and an MLAB is still
-// inferred because the attribute stays.
+// Same remedy as ap040_regfile, and the timing argument is there: the MLAB
+// commits a word during the cycle AFTER the edge that registered the write,
+// so the write goes to the RAM on its edge and a copy in pend_* answers reads
+// of that address through the following enabled cycle.  The RAM's output is
+// never used for an address the MLAB is committing.  The earlier form held
+// the write itself back a cycle, which moved the undefined read to the cycle
+// after the bypass instead of covering it.  An MLAB is still inferred because
+// the attribute stays.
 (* ramstyle = "MLAB, no_rw_check" *) reg [79:0] bank_a [0:7];
 (* ramstyle = "MLAB, no_rw_check" *) reg [79:0] bank_b [0:7];
 
@@ -2353,10 +2356,9 @@ assign rdata_b = hit_b ? pend_wdata : bank_b[raddr_b];
 
 always @(posedge clk) begin
 	if (ce) begin
-		// the write held from the previous enabled cycle
-		if (pend_we) begin
-			bank_a[pend_waddr] <= pend_wdata;
-			bank_b[pend_waddr] <= pend_wdata;
+		if (we) begin
+			bank_a[waddr] <= wdata;
+			bank_b[waddr] <= wdata;
 		end
 		pend_we    <= we;
 		pend_waddr <= waddr;
