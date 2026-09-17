@@ -666,3 +666,35 @@ be flashed again.
    either way, bit-identical), so the expectation is unchanged -- but an
    expectation is not a measurement.
 
+### Measured on f53c044b0 (2026-09-17)
+
+XSysInfo 0.10.0 on OS 3.2.3 / ROM 47.115 / Workbench 47.5 / SetPatch 47.10,
+Picasso96, 2 MB chip and 256 MB fast:
+
+| | |
+|---|---:|
+| Dhrystones | **6,531** |
+| MIPS / MFLOPS | 3.71 / 2.83 |
+| CHIP / FAST / ROM | 5.00 / 7.06 / 8.40 MB/s |
+
+and the identification lines that were the open question read **Clock OKI
+MSM6242B** and **Gary rev GAYLE 80** -- neither is the `Clock NOT FOUND` /
+`Gary rev A1000` pair that check was written for, so the anomaly is not
+present on this image.  `ioprobe` is still the rigorous form of that check.
+
+Dhrystone is 6,531 against 74317588's 6,615, and the two are NOT comparable:
+this run has **MMU 68040 (IN USE)**, because GuardianAngel is loaded, so every
+access is translated.  The 6,615 figure was taken with translation off.  A
+clean comparison needs Dhrystone run twice on this image, with and without
+GuardianAngel; -1.3 % WITH the MMU active is consistent with no CPU
+regression at all.
+
+There is also no reason to expect a gain.  Everything this branch did to the
+core after 880b81c was cycle-for-cycle identical -- the exception carriers,
+the FPU normalize sharing, both register-file MLABs -- and was spent on area,
+not cycles: 41,080 ALMs to 38,750, 98 % to 92 %, with setup going -0.627 to
++0.460.  The one change that could move Dhrystone either way is the bitfield
+read sized by span, which alters what the data cache accepts: `fits_long`
+takes any byte, a word only when even and a longword only when aligned, so
+sizing the read turned most bitfield accesses from bypassing into cacheable.
+
