@@ -144,10 +144,10 @@ wire cache_req;
 reg         walker_busy;
 reg [24:2]  walker_addr_latch;
 reg [31:0]  walker_wdata_latch;
+(* preserve *) reg [15:0] walker_sdata_pipe0;
 (* preserve *) reg [15:0] walker_sdata_pipe;
 reg [15:0] walker_sdata_pipe2;
 reg [15:0]  walker_read_hi;
-reg [15:0]  walker_read_lo;
 // cpu_cache_new has no snoop-ready output.  Its synchronous tag lookup and
 // data-RAM write take four sampled edges (IDLE, WAIT, SNOOP, write), so each
 // address/data half must remain selected throughout that window.  Starting
@@ -546,9 +546,9 @@ always @(posedge sysclk) begin
 		walker_busy        <= 0;
 		walker_addr_latch  <= 0;
 		walker_wdata_latch <= 0;
+		walker_sdata_pipe0 <= 0;
 		walker_sdata_pipe  <= 0;
 		walker_read_hi     <= 0;
-		walker_read_lo     <= 0;
 		walker_ack         <= 0;
 		walker_rdata       <= 0;
 	end
@@ -556,9 +556,14 @@ always @(posedge sysclk) begin
 		// Keep the SDRAM input register's new fanout to one simple local
 		// register.  Besides easing the 114 MHz path, the extra stages make
 		// the longword assembly independent of the controller's burst timing.
-		// Two stages: sdata_reg -> pipe -> pipe2 gives the router a full
-		// spare cycle on the sdata_reg hop (it was a -0.39ns violator).
-		walker_sdata_pipe  <= sdata_reg;
+		// THREE stages now.  Two left the FIRST hop, sdata_reg -> pipe,
+		// still the one that fails: sdata_reg sits with the SDRAM data pins
+		// and the walker logic does not, so that hop is route length, not
+		// logic, and stages placed after it do nothing for it (it came back
+		// at -0.105ns).  pipe0 gives the router a register it can place in
+		// between.
+		walker_sdata_pipe0 <= sdata_reg;
+		walker_sdata_pipe  <= walker_sdata_pipe0;
 		walker_sdata_pipe2 <= walker_sdata_pipe;
 		walker_ack <= 0;
 		if (!walker_req) walker_busy <= 0;
@@ -569,14 +574,15 @@ always @(posedge sysclk) begin
 		end
 
 		if (slot_type == WALKER_READ) begin
-			// one state later than before: the data now arrives through
-			// pipe2 (same burst words, one extra register of margin)
-			if (sdram_state == 4'd10)
+			// One state later again for the third stage.  The low half is
+			// taken straight off pipe2 in the acknowledge state instead of
+			// through a register of its own, which keeps the ack at state 13
+			// -- the slot has states 0..15 and moving the ack to 14 would
+			// leave a one-cycle pulse in the last state before the wrap.
+			if (sdram_state == 4'd11)
 				walker_read_hi <= walker_sdata_pipe2;
-			if (sdram_state == 4'd12)
-				walker_read_lo <= walker_sdata_pipe2;
 			if (sdram_state == 4'd13) begin
-				walker_rdata <= {walker_read_hi, walker_read_lo};
+				walker_rdata <= {walker_read_hi, walker_sdata_pipe2};
 				walker_ack   <= 1;
 			end
 		end
