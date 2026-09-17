@@ -254,10 +254,12 @@ are raised above the cache and stay precise.  `tb_ap040_double_fault`'s
 on the frame push is reported after the core has moved on, which is why that
 bench keeps the CPU's default.
 
-Correct under every check: suite green with six posted snoop legs added, the
+Correct under every check: suite 53/53 with six posted snoop legs added, the
 guard matrix under posting identical to the unposted one (acc_whole and
 acc_settle fail at divide 1, look_whole at divide 4), and the full corpus
-posted (see below).  Two harness assumptions had to be corrected, both the
+posted: 3776/3801, the same 25 pre-existing slices and none new.  The
+shipping configuration (posting off) is 53/53 and cycle-identical to the
+tree before the buffer existed.  Two harness assumptions had to be corrected, both the
 bench assuming program order between a posted store and something after it:
 `tb_ap040_program`'s FC monitor treated every data cycle during `in_exc` as
 an exception cycle, and a user-mode store draining as FC 1 while the frame
@@ -293,6 +295,15 @@ so that is a restructure of the FSM rather than an extra state, and the
 snoop guard is written against the windows it would move.  Until it lands,
 `POST_STORES` stays off in `cpu_wrapper`: a semantic change to exception
 precision is not worth 0.1 %, however unreachable the fault is here.
+
+Built as `8593a1243`: **38,713 ALMs (92 %), setup +0.564, hold +0.093**, no
+negative `emu` row in any corner -- the widest margin of the campaign, with
+the buffer present and inert.  Image
+`Minimig-ap040-40mhz-8593a1243-20260917_164848.rbf`, md5
+`5b73387c4242817d4a207d70236633e6`.  Its RTL differs from `f53c044b0`, the
+image that runs, only by logic that trims away at `POST_STORES 0`, so it
+should behave identically on the board; that is an expectation, not a
+measurement, until it is booted.
 
 ## The boot that was never a boot (2026-09-17)
 
