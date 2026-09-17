@@ -371,6 +371,7 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.c_fc(mm_fc),
 		.c_nocache(mm_nocache | ~cache_allow |
 		           (mm_instr & cache_chip & ~cache_allow_all)),
+		.c_post_ok(1'b0),   // posting disabled until the decode drives it
 		.s_stb(snp_stb),
 		.s_addr(snp_addr),
 		.c_ack(mm_ack),

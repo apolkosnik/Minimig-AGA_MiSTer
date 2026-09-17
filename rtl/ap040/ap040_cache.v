@@ -52,6 +52,11 @@ module ap040_cache
 	input      [31:0] c_wdata,
 	input       [2:0] c_fc,
 	input             c_nocache,
+	// The platform accepts a write to this address into a store queue and
+	// will never report a bus error for it, so the store may be acknowledged
+	// as soon as it is captured and drained afterwards.  Tie low to disable
+	// posting entirely, which is the behaviour without it.
+	input             c_post_ok,
 	output            c_ack,
 	output     [31:0] c_rdata,
 
@@ -397,6 +402,16 @@ wire fill_active = (cst == C_FILL);
 // the core withdraws the faulted request.  Without it the level-held
 // request would be re-accepted on the very next cycle and re-issued to
 // the address that just faulted.
+// Posted store buffer.  A passed access otherwise forwards c_addr/c_wdata
+// LIVE to the master side, and the core withdraws them the cycle it is
+// acknowledged -- so posting needs the request CAPTURED, not just an earlier
+// ack.  sb_v also steers the update-on-hit merge, which lands on the memory
+// acknowledge and would otherwise merge a c_wdata the core has dropped.
+reg         sb_v;
+reg  [31:0] sb_addr, sb_wdata;
+reg   [1:0] sb_size;
+reg   [2:0] sb_fc;
+
 reg  err_hold;
 // A cache-inhibited READ that hits a resident line must invalidate it
 // while it bypasses (WinUAE dcache040: a hit under CACHE_DISABLE_MMU is
@@ -411,15 +426,18 @@ reg        pass_ci_chk;   // first C_PASS cycle of a CI read: tags valid
 reg        ci_inv_pend;   // a CI hit awaits its row invalidate
 reg  [6:0] ci_inv_row;
 
-assign m_req   = fill_active ? 1'b1 : (pass_active ? c_req : 1'b0);
-assign m_write = fill_active ? 1'b0 : c_write;
-assign m_instr = c_instr;
-assign m_size  = fill_active ? `AP040_SZ_L : c_size;
-assign m_addr  = fill_active ? {r_addr[31:4], r_beat, 2'b00} : c_addr;
-assign m_wdata = c_wdata;
-assign m_fc    = c_fc;
+assign m_req   = fill_active ? 1'b1 : (pass_active ? (sb_v | c_req) : 1'b0);
+assign m_write = fill_active ? 1'b0 : (sb_v ? 1'b1 : c_write);
+assign m_instr = sb_v ? 1'b0 : c_instr;
+assign m_size  = fill_active ? `AP040_SZ_L : (sb_v ? sb_size : c_size);
+assign m_addr  = fill_active ? {r_addr[31:4], r_beat, 2'b00}
+                             : (sb_v ? sb_addr : c_addr);
+assign m_wdata = sb_v ? sb_wdata : c_wdata;
+assign m_fc    = sb_v ? sb_fc : c_fc;
 
-assign c_ack   = pass_active ? m_ack : ack_r;
+// A posted store was acknowledged when it was captured, so C_PASS must not
+// hand the core the drain's acknowledge as well.
+assign c_ack   = pass_active ? (sb_v ? ack_r : m_ack) : ack_r;
 assign c_rdata = pass_active ? m_rdata : rdata_r;
 
 assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
@@ -533,7 +551,8 @@ assign cd_we     = st_upd ? (4'd1 << hit_way) :
                    ((cst == C_FILL) && r_issued && m_ack) ? (4'd1 << r_way) : 4'd0;
 assign cd_widx   = st_upd ? {r_bank, r_row[5:0], r_word[1:0]}
                           : {r_bank, r_row[5:0], r_beat};
-assign cd_wdat   = st_upd ? lw_merge(data_hit, c_wdata, r_size, r_off) : m_rdata;
+assign cd_wdat   = st_upd ? lw_merge(data_hit, sb_v ? sb_wdata : c_wdata,
+                                     r_size, r_off) : m_rdata;
 
 
 
@@ -557,6 +576,7 @@ always @(posedge clk) begin
 		r_row <= 0; r_tag <= 0; r_word <= 0; r_way <= 0; r_bank <= 0; way_fallback <= 0;
 		r_beat <= 0; r_issued <= 0; r_addr <= 0; r_size <= 0; r_off <= 0;
 		fill_hold <= 0; ack_r <= 0; rdata_r <= 0;
+		sb_v <= 0; sb_addr <= 0; sb_wdata <= 0; sb_size <= 0; sb_fc <= 0;
 	end
 	else if (ce) begin
 		ack_r <= 0;
@@ -650,6 +670,17 @@ always @(posedge clk) begin
 						r_off  <= c_addr[1:0];
 						winv_set2 <= c_addr[9:4] + 6'd1;
 						winv_pend <= write_cross_line;
+						// Post it when the platform guarantees the write
+						// cannot fault: capture the request and release the
+						// core now, and drain from the buffer in C_PASS.
+						if (c_post_ok) begin
+							sb_v     <= 1;
+							sb_addr  <= c_addr;
+							sb_wdata <= c_wdata;
+							sb_size  <= c_size;
+							sb_fc    <= c_fc;
+							ack_r    <= 1;
+						end
 						cst <= C_PASS;
 						end
 					end
@@ -690,10 +721,14 @@ always @(posedge clk) begin
 				end
 				// the store lookup is over with the pass, merged or not
 				if (m_err || m_ack) st_chk <= 0;
+				if (m_ack || m_err) sb_v <= 0;
 				if (m_err) begin
 					// a passed access faulted: release the bus, but a
 					// still-owed invalidate is honoured (invalidating
-					// more is always safe under write-through)
+					// more is always safe under write-through).  A POSTED
+					// store that faults here is reported after the core has
+					// moved on, which is why c_post_ok must only be asserted
+					// where the platform cannot fault a write.
 					err_hold <= 1;
 					cst <= (winv_pend && (s_stb || store_inv_lost))
 					       ? C_WINV : C_IDLE;
