@@ -4986,25 +4986,31 @@ always @(posedge clk) begin
 				bf_bib <= bf_off[2:0];
 				bf_span <= span;
 				if (ir[10:8] == 3'd7) rr_b <= {1'b0, x_ext[14:12]};
-				// DIAGNOSTIC: back to the unconditional longword read that
-				// 74317588 -- the last image known to boot -- performed.  The
-				// span sizing exists so a short field at a page end cannot
-				// fault on the following page; this cut asks whether it is
-				// what stops AmigaOS reaching Workbench.
+				// Only read bytes containing the field.  A short field at a
+				// page end must not fault on an unmapped following page.
 				mrd(ea_addr + {{3{bf_off[31]}}, bf_off[31:3]},
-				    `AP040_SZ_L, S_BF_MEM1);
+				    (span == 3'd1) ? `AP040_SZ_B :
+				    (span <= 3'd3) ? `AP040_SZ_W : `AP040_SZ_L, S_BF_MEM1);
 			end
 
 			S_BF_MEM1: begin
-				bf_w1 <= m_val;
+				// m_val is right aligned for byte/word reads; the bitfield
+				// datapath consumes a left-aligned 40-bit memory window.
+				case (bf_span)
+					3'd1: bf_w1 <= {m_val[7:0], 24'd0};
+					3'd2, 3'd3: bf_w1 <= {m_val[15:0], 16'd0};
+					default: bf_w1 <= m_val;
+				endcase
 				bf_w2 <= 8'd0;
 				bf_du <= rf_rdata_b;
-				if (bf_span == 3'd5) mrd(bf_addr + 32'd4, `AP040_SZ_B, S_BF_MEM2);
+				if (bf_span == 3'd3) mrd(bf_addr + 32'd2, `AP040_SZ_B, S_BF_MEM2);
+				else if (bf_span == 3'd5) mrd(bf_addr + 32'd4, `AP040_SZ_B, S_BF_MEM2);
 				else state <= S_BF_EXECM;
 			end
 
 			S_BF_MEM2: begin
-				bf_w2 <= m_val[7:0];
+				if (bf_span == 3'd3) bf_w1[15:8] <= m_val[7:0];
+				else bf_w2 <= m_val[7:0];
 				state <= S_BF_EXECM;
 			end
 
