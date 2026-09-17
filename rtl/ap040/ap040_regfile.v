@@ -59,9 +59,32 @@ module ap040_regfile
 // MLAB contents cannot be reset, and this core resets the integer registers
 // to zero, so a 15-bit "written" vector carries that instead: an entry reads
 // as zero until it has been written once.
-(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] bank_a [0:15];
-(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] bank_b [0:15];
+//
+// READ DURING WRITE.  The first version of this carried "no_rw_check" from
+// the FP file, which asserts the design never reads and writes one address in
+// the same cycle.  That is true of FP0-FP7 and emphatically false here: an
+// instruction writing Dn while the next reads Dn is ordinary, and counting it
+// found 612 such cycles in t_integer alone.  With flip-flops that read
+// returns the OLD value; an MLAB writes with an internal pulse, so an
+// asynchronous read of the written address can return the NEW one part way
+// through the cycle.  Simulation cannot show the difference -- it models the
+// array exactly -- and the core did not boot.
+//
+// So the write is held one cycle and the read bypasses it.  The RAM is never
+// consulted for an address whose write is still pending, which makes the
+// result independent of what the primitive does with a simultaneous access:
+//
+//   cycle N    write issued, held in pend_*; RAM untouched; a read of that
+//              address returns the RAM's old word, as flip-flops would
+//   cycle N+1  pend_* is applied to the RAM, and a read of that address is
+//              answered from pend_wdata, not the RAM being written
+//   cycle N+2  the RAM holds it
+(* ramstyle = "MLAB" *) reg [31:0] bank_a [0:15];
+(* ramstyle = "MLAB" *) reg [31:0] bank_b [0:15];
 reg [14:0] rf_written;
+reg        pend_we;
+reg  [3:0] pend_waddr;
+reg [31:0] pend_wdata;
 reg [31:0] usp;
 reg [31:0] isp;
 reg [31:0] msp;
@@ -73,8 +96,12 @@ wire [31:0] sp_active = (sp_sel == 2'd0) ? usp : (sp_sel == 2'd1) ? isp : msp;
 
 // direct expressions, not a function: a function referencing the register
 // arrays breaks continuous-assign sensitivity on some simulators
-wire [31:0] q_a = rf_written[raddr_a[3:0]] ? bank_a[raddr_a[3:0]] : 32'd0;
-wire [31:0] q_b = rf_written[raddr_b[3:0]] ? bank_b[raddr_b[3:0]] : 32'd0;
+wire hit_a = pend_we && (pend_waddr == raddr_a[3:0]);
+wire hit_b = pend_we && (pend_waddr == raddr_b[3:0]);
+wire [31:0] q_a = hit_a ? pend_wdata
+                        : (rf_written[raddr_a[3:0]] ? bank_a[raddr_a[3:0]] : 32'd0);
+wire [31:0] q_b = hit_b ? pend_wdata
+                        : (rf_written[raddr_b[3:0]] ? bank_b[raddr_b[3:0]] : 32'd0);
 assign rdata_a = (raddr_a == 4'd15) ? sp_active : q_a;
 assign rdata_b = (raddr_b == 4'd15) ? sp_active : q_b;
 
@@ -82,6 +109,7 @@ integer i;
 always @(posedge clk) begin
 	if (!nreset) begin
 		rf_written <= 0;
+		pend_we <= 0; pend_waddr <= 0; pend_wdata <= 0;
 		dbg_shadow[0] <= 0; dbg_shadow[1] <= 0;
 		dbg_shadow[2] <= 0; dbg_shadow[3] <= 0;
 		usp <= 0;
@@ -89,11 +117,18 @@ always @(posedge clk) begin
 		msp <= 0;
 	end
 	else if (ce) begin
+		// apply the write held from the previous enabled cycle
+		if (pend_we) begin
+			bank_a[pend_waddr] <= pend_wdata;
+			bank_b[pend_waddr] <= pend_wdata;
+			rf_written[pend_waddr] <= 1'b1;
+		end
+		pend_we <= 0;
 		if (we) begin
 			if (waddr != 4'd15) begin
-				bank_a[waddr] <= wdata;
-				bank_b[waddr] <= wdata;
-				rf_written[waddr] <= 1'b1;
+				pend_we <= 1;
+				pend_waddr <= waddr;
+				pend_wdata <= wdata;
 				// the halt beacon's fixed taps would each need their own
 				// mirrored bank; four shadow words are cheaper
 				if (waddr == 4'd0) dbg_shadow[0] <= wdata;
