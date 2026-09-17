@@ -34,7 +34,22 @@ module cpu_wrapper
 	// Experimental synchronous memory interface. The hardware top still
 	// uses the legacy clock until clk_114 timing is closed for the core.
 	parameter FAST_CLOCK = 0,
-	parameter CORE_DIV = 4
+	parameter CORE_DIV = 4,
+	// Posted stores.  The guarantee this needs -- that a write cannot fault
+	// BELOW the MMU -- holds on Minimig and nowhere else in particular, which
+	// is why it is this wrapper's parameter and not the CPU's: the core's
+	// berr is driven by ap040_bus_timeout alone (below), no bus module asserts
+	// it for a CPU access, and a timeout on a write is a controller that has
+	// stopped answering, fatal in any case.  MMU faults, write-protect
+	// included, are raised above the cache and stay precise.
+	//
+	// OFF, measured: the buffer alone is worth 0.1 % on the real memory path
+	// (chip bench dhry 5,441,636 -> 5,435,232), because the cache accepts
+	// nothing while a store drains and every instruction fetch waits behind
+	// it.  A change to exception precision is not traded for that.  Set to 1
+	// once the drain no longer blocks hits -- everything else is in place and
+	// validated under posting (53/53, six posted snoop legs, full corpus).
+	parameter POST_STORES = 0
 )
 (
 	input             reset,
@@ -415,7 +430,8 @@ ap040_tg68k_compat #(
 	// FPU hardware subset (milestone H): FMOVE all formats, FMOVEM,
 	// FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FTST with IEEE rounding;
 	// unimplemented ops trap to the FPSP route like real 040 silicon
-	.AP040_HAS_FPU(1)
+	.AP040_HAS_FPU(1),
+	.AP040_POST_STORES(POST_STORES)
 ) cpu_inst_p
 (
 	.clk(clk),

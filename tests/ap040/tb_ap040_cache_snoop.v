@@ -50,6 +50,12 @@ reg ce_run = 1;          // when 0, ce is forced low (frozen window)
 // bench task already waits on (c_ack && ce), so the sweeps below, which
 // step snoops by FAST cycles, then cover every phase of the enable.
 parameter CE_DIV = 1;
+// POST_OK 1 posts every store: the core is acknowledged on capture and the
+// write drains behind it.  Every bench task waits on (c_ack && ce), so with
+// posting the task returns while the drain is still on the bus; the tests
+// that look at memory afterwards (expect_read, the write-through checks)
+// therefore exercise exactly the ordering the drain has to keep.
+parameter POST_OK = 0;
 reg [1:0] ce_ph = 0;
 always @(posedge clk) ce_ph <= (ce_ph == CE_DIV - 1) ? 2'd0 : ce_ph + 2'd1;
 wire ce = ce_run && (CE_DIV == 1 || ce_ph == 2'd0);
@@ -162,7 +168,7 @@ ap040_cache dut
 	.c_req(c_req), .c_write(c_write), .c_instr(c_instr),
 	.c_size(c_size), .c_addr(c_addr), .c_wdata(c_wdata),
 	.c_fc(3'd5), .c_nocache(c_nocache),
-	.c_post_ok(1'b0),
+	.c_post_ok(POST_OK[0]),
 	.c_ack(c_ack), .c_rdata(c_rdata),
 	.m_req(m_req), .m_write(m_write), .m_instr(m_instr),
 	.m_size(m_size), .m_addr(m_addr), .m_wdata(m_wdata),
@@ -544,6 +550,25 @@ end
 // lookup that acts on a don't-care row returns the wrong way's word, and
 // expect_read catches it.  That tests the protection, not its spelling.
 `endif
+// A posted store is acknowledged before it reaches memory.  A test that
+// then changes memory "behind the cache" means AFTER the store is visible
+// there, so it waits for the drain first -- otherwise the store drains over
+// the change and the cache correctly returns the store, failing the test's
+// own assumption rather than the cache.
+task wait_drain;
+	integer guard;
+	begin
+		guard = 0;
+		while (dut.sb_v && guard < 400) begin
+			@(posedge clk);
+			guard = guard + 1;
+		end
+		if (guard >= 400) begin
+			$display("FAIL: posted store never drained");
+			errors = errors + 1;
+		end
+	end
+endtask
 task expect_read;
 	input [31:0] a;
 	input [31:0] v;
@@ -1002,6 +1027,7 @@ initial begin
 					snoop(32'h0000_F200);
 				end
 			join
+			wait_drain;
 			mem[32'h7204>>2] = 32'h6F6F_0000 + (i << 8) + off;
 			expect_read(32'h0000_7204, 32'h6F6F_0000 + (i << 8) + off, 11);
 		end

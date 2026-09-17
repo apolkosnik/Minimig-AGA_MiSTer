@@ -231,6 +231,69 @@ Area is no longer the constraint X2.7 assumed: 38,750 ALMs (92 %) with
 +0.460 setup leaves ~3,160 free, so this fits without the `cpu_cache_new`
 and `bus16` removals that budget was funded by.
 
+## Posted stores, built and measured (2026-09-17)
+
+The store buffer exists: a passed write is captured (`sb_addr`/`sb_wdata`/
+`sb_size`/`sb_fc`), the core is acknowledged on capture, and the master side
+is driven from the buffer while the write drains.  Two couplings had to move
+with it, both of the same kind -- the cache read the LIVE request where the
+core used to hold it steady until acknowledged: the update-on-hit merge now
+happens in the first `C_PASS` cycle (the RAM output still belongs to the
+acceptance-cycle address there; `data_hit` at the memory ack would belong to
+the core's next access), and it merges the captured `sb_wdata` rather than
+`c_wdata`.  Area is free: 38,286 ALMs estimated against 38,379 before.
+
+Safety is a platform property, so it is a parameter and not a wire.
+`ap040_tg68k_compat` defaults `AP040_POST_STORES` to 0 -- the CPU assumes
+nothing -- and `cpu_wrapper` carries `POST_STORES` with the argument that
+makes it true on Minimig: the core's `berr` is driven by `ap040_bus_timeout`
+alone, no bus module asserts it for a CPU access, and a timeout on a write is
+a controller that has stopped answering.  MMU faults, write-protect included,
+are raised above the cache and stay precise.  `tb_ap040_double_fault`'s
+"exception stack-write fault" case shows exactly what changes: a bus error
+on the frame push is reported after the core has moved on, which is why that
+bench keeps the CPU's default.
+
+Correct under every check: suite green with six posted snoop legs added, the
+guard matrix under posting identical to the unposted one (acc_whole and
+acc_settle fail at divide 1, look_whole at divide 4), and the full corpus
+posted (see below).  Two harness assumptions had to be corrected, both the
+bench assuming program order between a posted store and something after it:
+`tb_ap040_program`'s FC monitor treated every data cycle during `in_exc` as
+an exception cycle, and a user-mode store draining as FC 1 while the frame
+push queues behind it tripped it -- it now checks that a drain carries its
+captured FC; and snoop test 11(d) poked memory "after" a store that had not
+yet drained, so the store drained over the poke.
+
+### What it is worth, and why that is not what the core bench said
+
+| configuration | unposted | posted | |
+|---|---:|---:|---:|
+| core bench (instant memory), dhry | 1,005,444 | 955,357 | **-5.0 %** |
+| chip bench, legacy clocking, dhry | 5,441,636 | 5,435,232 | -0.1 % |
+| chip bench, `FAST_CLOCK=1 CORE_DIV=4`, dhry | 4,878,224 | 4,867,800 | -0.2 % |
+
+On the real memory path it is worth almost nothing, and the core bench
+already showed the mechanism before the chip bench confirmed the size: the
+store's own cost fell from 6.2 cycles to 1.1, but 78,700 of the 128,789
+cycles saved in `S_MWR` reappeared in `S_DECODE` (+23,082, all stalled) and
+`S_FETCH` (+23,956), with port wait doubling and ifetch going 2.0 -> 2.6.
+The cache sits in `C_PASS` for the whole drain and accepts nothing, so every
+instruction fetch during it waits -- even though 99 % of them would hit and
+need nothing the drain is using.  With instant memory the drain is seven
+cycles and the loss is partial; with real memory it is long enough to
+swallow the gain entirely.
+
+So the buffer is a prerequisite, not a result.  The win is in serving hits
+-- instruction and data -- while a store drains, which needs the drain
+decoupled from `cst`: `sb_v` owning the master side on its own, `C_IDLE`
+free to accept and complete hits meanwhile, and only a miss, a new store or a
+bypassed access waiting for `!sb_v`.  All eight `cst` encodings are in use,
+so that is a restructure of the FSM rather than an extra state, and the
+snoop guard is written against the windows it would move.  Until it lands,
+`POST_STORES` stays off in `cpu_wrapper`: a semantic change to exception
+precision is not worth 0.1 %, however unreachable the fault is here.
+
 ## The boot that was never a boot (2026-09-17)
 
 `f53c044b0` runs, and GuardianAngel does not lock the machine up, which puts

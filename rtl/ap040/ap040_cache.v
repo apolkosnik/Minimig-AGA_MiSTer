@@ -250,6 +250,8 @@ reg   [5:0] winv_set2;
 reg         store_inv_lost;  // a store invalidate that a snoop displaced
 reg   [5:0] store_inv_set;
 reg         st_chk;          // a fitting store's update-on-hit lookup is live in C_PASS
+reg         pass_first;      // the first cycle of C_PASS: the RAM output still
+                             // belongs to the acceptance-cycle address
 reg   [6:0] r_row;
 reg  [21:0] r_tag;
 reg   [3:0] r_word;              // {word[1:0]} of the request, plus bank/way
@@ -545,8 +547,15 @@ wire [31:0] data_hit = (hit_way == 2'd0) ? data_q0 :
 // runs during a fill, so the two select cleanly.  The guard terms are
 // the lookup's own: a snoop on this set in the acceptance cycle or
 // during the pass forces the update off, and that snoop cleared the row.
-wire st_upd = (cst == C_PASS) && st_chk && m_ack && !m_err &&
-              look_hit && !look_snooped && !snoop_look_row_look;
+// A POSTED store merges in the first C_PASS cycle.  The core has been
+// released, its next request will move the RAM read address, and only in
+// this cycle do tag_q/data_q still belong to the store's own set -- so the
+// merge cannot wait for the memory acknowledge the way an unposted one does.
+// It also does not need to: c_post_ok says the write cannot fault, which is
+// the only reason the unposted merge waits.
+wire st_upd = (cst == C_PASS) && st_chk &&
+              look_hit && !look_snooped && !snoop_look_row_look &&
+              (sb_v ? pass_first : (m_ack && !m_err));
 assign cd_we     = st_upd ? (4'd1 << hit_way) :
                    ((cst == C_FILL) && r_issued && m_ack) ? (4'd1 << r_way) : 4'd0;
 assign cd_widx   = st_upd ? {r_bank, r_row[5:0], r_word[1:0]}
@@ -577,9 +586,11 @@ always @(posedge clk) begin
 		r_beat <= 0; r_issued <= 0; r_addr <= 0; r_size <= 0; r_off <= 0;
 		fill_hold <= 0; ack_r <= 0; rdata_r <= 0;
 		sb_v <= 0; sb_addr <= 0; sb_wdata <= 0; sb_size <= 0; sb_fc <= 0;
+		pass_first <= 0;
 	end
 	else if (ce) begin
 		ack_r <= 0;
+		pass_first <= 0;
 		cinv_done <= 0;
 		if (ci_inv) ci_inv_pend <= 0;
 
@@ -673,6 +684,7 @@ always @(posedge clk) begin
 						// Post it when the platform guarantees the write
 						// cannot fault: capture the request and release the
 						// core now, and drain from the buffer in C_PASS.
+						pass_first <= 1;
 						if (c_post_ok) begin
 							sb_v     <= 1;
 							sb_addr  <= c_addr;
@@ -720,7 +732,7 @@ always @(posedge clk) begin
 					end
 				end
 				// the store lookup is over with the pass, merged or not
-				if (m_err || m_ack) st_chk <= 0;
+				if (m_err || m_ack || (sb_v && pass_first)) st_chk <= 0;
 				if (m_ack || m_err) sb_v <= 0;
 				if (m_err) begin
 					// a passed access faulted: release the bus, but a

@@ -31,6 +31,7 @@ SRC = CORE + [RTL / "memory_router.v"]
 # --- program benches: (label, run_verilator.py arguments) ------------------
 PROGRAM_RUNS = [
     ("core",            ["--bench", "core"]),
+    ("core_post",       ["--bench", "core", "--param", "POST_STORES=1"]),
     ("chip",            ["--bench", "chip", "--program", "t_fpu,t_exceptions,t_mmu"]),
     ("chip_l0",         ["--bench", "chip", "--program", "t_exceptions", "--param", "RAM_LAT=0"]),
     ("chip_l7",         ["--bench", "chip", "--program", "t_exceptions", "--param", "RAM_LAT=7"]),
@@ -101,10 +102,28 @@ UNIT_RUNS = {
                              ("cache_snoop_x_ce4_accw", ["+inj_acc_whole"], False),
                              ("cache_snoop_x_ce4_accs", ["+inj_acc_settle"], False),
                              ("cache_snoop_x_ce4_neg_lkw", ["+inj_look_whole"], True)]),
+    # The same bench with every store POSTED (the shipping configuration:
+    # ap040_tg68k_compat ties c_post_ok high).  The core is released on
+    # capture and the write drains behind it; the guard matrix measured
+    # under posting is identical to the unposted one -- acc_whole and
+    # acc_settle fail at divide 1, look_whole at divide 4 -- so the two
+    # must-fail controls are carried here as well.
+    "cache_snoop_post":     U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"], [("cache_snoop_post", [], False)]),
+    "cache_snoop_post_ce4": U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"], [("cache_snoop_post_ce4", [], False)]),
+    "cache_snoop_post_x":   U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"],
+                              [("cache_snoop_post_x", [], False),
+                               ("cache_snoop_post_x_neg_accw", ["+inj_acc_whole"], True)]),
+    "cache_snoop_post_x_ce4": U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"],
+                              [("cache_snoop_post_x_ce4", [], False),
+                               ("cache_snoop_post_x_ce4_neg_lkw", ["+inj_look_whole"], True)]),
 }
 UNIT_PARAMS = {"sdram32_rp1": ["-GREAD_PIPE=1"], "cache_snoop_ce4": ["-GCE_DIV=4"],
                "cache_snoop_x": ["+define+SNOOP_MIXED_X"],
-               "cache_snoop_x_ce4": ["+define+SNOOP_MIXED_X", "-GCE_DIV=4"]}
+               "cache_snoop_x_ce4": ["+define+SNOOP_MIXED_X", "-GCE_DIV=4"],
+               "cache_snoop_post": ["-GPOST_OK=1"],
+               "cache_snoop_post_ce4": ["-GPOST_OK=1", "-GCE_DIV=4"],
+               "cache_snoop_post_x": ["+define+SNOOP_MIXED_X", "-GPOST_OK=1"],
+               "cache_snoop_post_x_ce4": ["+define+SNOOP_MIXED_X", "-GPOST_OK=1", "-GCE_DIV=4"]}
 
 
 def run(cmd, log, cwd=HERE, timeout=900):

@@ -19,7 +19,9 @@ module tb_cpu_wrapper_chip #(
 	// preceded by a RAM access rather than a chip-bus one.
 	parameter TURBO_CHIP = 0,
 	parameter FAST_CLOCK = 0,
-	parameter CORE_DIV = 4
+	parameter CORE_DIV = 4,
+	// 0 leaves stores unposted (the CPU's own default); cpu_wrapper posts
+	parameter POST_STORES = 1
 );
 
 reg reset = 0;
@@ -119,7 +121,8 @@ end else begin : g_walker_direct
     assign cpu_walk_berr = walker_berr;
 end endgenerate
 
-cpu_wrapper #(.FAST_CLOCK(FAST_CLOCK), .CORE_DIV(CORE_DIV)) dut
+cpu_wrapper #(.FAST_CLOCK(FAST_CLOCK), .CORE_DIV(CORE_DIV),
+              .POST_STORES(POST_STORES)) dut
 (
 	.snoop_tgl(1'b0),
 	.snoop_adr(24'd0),

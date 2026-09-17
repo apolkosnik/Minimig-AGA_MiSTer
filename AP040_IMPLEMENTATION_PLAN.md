@@ -1418,11 +1418,24 @@ costs.  The cause is structural -- write-through crossing the 16-bit adapter,
 two bus transactions for a longword, with the core waiting for completion --
 while a read at 99% hit never reaches the bus.
 
-NEXT: post the store.  Cheap route is a c_post_ok-style guarantee per region
-(sdram_ctrl already has the write buffer to drain into); complete route is the
-WB1/WB2/WB3 frame.  ~118,000 cycles, CPI 7.75 -> ~6.8.  Then the dispatch
-floor (S_DECODE one cycle per instruction, S_EXEC 13.4%), which is this
-section's forwarding/scoreboard work.
+NEXT (revised the same day, after building it): the store BUFFER is done --
+capture on acceptance, ack the core, drain from the buffer, merge in the
+first C_PASS cycle, POST_STORES parameter on cpu_wrapper, six posted snoop
+legs and the guard matrix unchanged under posting -- and it is worth 0.1%
+on the real memory path (chip bench dhry 5,441,636 -> 5,435,232), against
+5.0% on the core bench's instant memory.  The store's own cost drops 6.2 ->
+1.1 cycles, but the cache sits in C_PASS for the whole drain and accepts
+nothing, so every instruction fetch during it waits although 99% would hit;
+with real memory the drain is long enough to swallow the gain.  So the
+actual item is the NON-BLOCKING drain: sb_v owning the master side on its
+own, C_IDLE free to serve hits meanwhile, only a miss / new store / bypass
+waiting for !sb_v.  All eight cst encodings are in use, so it is an FSM
+restructure, and the snoop guard is written against the windows it moves.
+The ~118,000-cycle bound stands; the buffer alone reaches none of it.
+POST_STORES stays off in cpu_wrapper until then -- exception precision is
+not traded for 0.1%.  After that, the dispatch floor (S_DECODE one cycle per
+instruction, S_EXEC 13.4%), which is this section's forwarding/scoreboard
+work.
 
 Area: 38,750 ALMs (92%), +0.460 setup, ~3,160 free -- X2.7's "does NOT fit"
 was written at 94% and no longer binds.

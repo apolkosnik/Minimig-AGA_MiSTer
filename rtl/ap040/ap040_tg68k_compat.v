@@ -19,7 +19,12 @@ module ap040_tg68k_compat
 	parameter AP040_ENABLE_CACHE = 1,
 	parameter AP040_FAST_SIM     = 0,
 	parameter AP040_DEBUG_EXCEPTIONS = 0,
-	parameter [7:0] AP040_FPU_REVISION = 8'h41
+	parameter [7:0] AP040_FPU_REVISION = 8'h41,
+	// Post stores: acknowledge the core when a store is captured and drain it
+	// behind the core.  A posted store that bus-errors is reported after the
+	// core has moved on, so only a platform on which a write cannot fault
+	// below the MMU may set this.  The CPU itself assumes nothing: off.
+	parameter       AP040_POST_STORES  = 0
 )
 (
 	input         clk,
@@ -371,7 +376,7 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.c_fc(mm_fc),
 		.c_nocache(mm_nocache | ~cache_allow |
 		           (mm_instr & cache_chip & ~cache_allow_all)),
-		.c_post_ok(1'b0),   // posting disabled until the decode drives it
+		.c_post_ok(AP040_POST_STORES != 0),
 		.s_stb(snp_stb),
 		.s_addr(snp_addr),
 		.c_ack(mm_ack),

@@ -18,6 +18,8 @@
 `timescale 1ns/1ps
 
 module tb_ap040_program;
+// --param POST_STORES=1 posts every store; 0 is the CPU's own default
+parameter POST_STORES = 0;
 
 reg clk = 0;
 reg nreset = 0;
@@ -136,7 +138,8 @@ end
 `define AP040_TB_CACHE 1
 `endif
 
-ap040_tg68k_compat #(.AP040_ENABLE_CACHE(`AP040_TB_CACHE)) dut
+ap040_tg68k_compat #(.AP040_ENABLE_CACHE(`AP040_TB_CACHE),
+                     .AP040_POST_STORES(POST_STORES)) dut
 (
 	.clk(clk),
 	.nreset(nreset),
@@ -509,6 +512,20 @@ always @(posedge clk) begin
 				errors = errors + 1;
 				$display("FAIL: exception handler fetch used FC=%0d, expected 6", fc);
 				result = 2;
+			end
+			// A write on the bus while the cache holds a posted store is
+			// that store DRAINING -- the cache issues nothing else on the
+			// master side meanwhile -- and it must carry the function code it
+			// was issued with, not the exception's: a user-mode store
+			// acknowledged just before a TRAP drains as FC 1 while the core is
+			// already pushing the frame (which queues behind it, in order).
+			else if (busstate == 2'b11 && dut.g_cache.cache.sb_v) begin
+				if (fc !== dut.g_cache.cache.sb_fc) begin
+					errors = errors + 1;
+					$display("FAIL: posted store drained with FC=%0d, was issued with %0d",
+					         fc, dut.g_cache.cache.sb_fc);
+					result = 2;
+				end
 			end
 			else if ((busstate == 2'b10 || busstate == 2'b11) && fc !== 3'd5) begin
 				errors = errors + 1;
