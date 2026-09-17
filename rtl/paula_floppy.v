@@ -63,6 +63,7 @@
 // 2009-12-26 - step enable
 // 2010-04-12 - implemented work-around for dsksync interrupt request
 // 2010-08-14 - set BYTEREADY of DSKBYTR (required by Kick Off 2 loader)
+// 2023-2026 - added support for external floppy drives with copy protection (improved DSKBYTR register)
 
 module paula_floppy
 (
@@ -106,13 +107,26 @@ module paula_floppy
 
 	output        fdd_led,			//disk activity LED, active when DMA is on
 	input	[1:0]   floppy_drives,	//floppy drive number
-
+	input [11:0]  floppy_ext_drive,   // external drive number to use AAABBBCCCDDD
+	input floppy_speed_allowed,
+	output floppy_speed,
+	input enable_mister_floppy,
+	
 	// fifo / track display
 	output  [7:0] trackdisp,
 	output [13:0] secdisp,
 	output        floppy_fwr,
-	output        floppy_frd
+	output        floppy_frd,
+	
+	input   [1:0] precomp,
+
+	input   [6:0] USER_IN,
+	output  [6:0] USER_OUT,
+	
+	output	[2:0]  mister_floppy_status  // bit 0=Detected, Bit1= running in IBM Drive mode (compared to Shuggart), Bit2=Swapped Cable
 );
+
+
 
 //register names and addresses
 parameter DSKBYTR = 9'h01a;
@@ -137,9 +151,11 @@ wire        dsktrack79;    //disk heads are over track 0
 
 wire [15:0] fifo_in;			//fifo data in
 wire [15:0] fifo_out; 		//fifo data out
-wire        fifo_wr;			//fifo write enable
+wire [15:0] flux_fifo_in; //fifo data in
+wire [15:0] flux_fifo_out; //fifo data out
+
+wire 			output_fifo_write;  // Combined special version when virtual floppy is enabled
 reg         fifo_wr_del;	//fifo write enable delayed
-wire        fifo_rd;			//fifo read enable
 wire        fifo_empty;		//fifo is empty
 wire        fifo_full;		//fifo is full
 wire [11:0] fifo_cnt;
@@ -154,6 +170,8 @@ reg  [15:0] wr_fifo_status;
 
 reg   [3:0] disk_present;	//disk present status
 reg   [3:0] disk_writable;	//disk write access status
+reg   [3:0] disk_fluxmode; // disk data isn't MFM, its raw flux, encoded at 50ns resolution. 0=INDEX, 255=12.7uS/254, 2 Flux per WORD. 
+reg   [3:0] disk_fluxdensitymode; // disk data is MFM + speed for those 8 bits (similar to IPF format and a bit like how Winuae works)
 
 wire        _selx;			//active whenever any drive is selected
 wire  [1:0] sel;				//selected drive number
@@ -169,14 +187,172 @@ wire        step_ena;
 reg  [3:0] _sel_del;       // deleyed drive select signals for edge detection
 reg  [3:0] motor_on;       // drive motor on
 
+wire _ready_ext;				// RDY signal from external drive
+wire _track0_ext;				// TRK0 signal from external drive
+wire _wprot_ext;				// WRPROT signal from external drive
+wire _change_ext;				// DSKCHG signal from external drive
+wire _index_ext;				// raw INDEX from external drive (needs processing)
+
+wire [15:0] ext_floppy_rx;				// Receive WORD FROM floppy drive
+wire        ext_floppy_wr;				// When set to 1 indicates a valid WORD is available at ext_floppy_rx
+wire        ext_floppy_rd;				// Set to 1 to indicate a WORD was READ from the fifo
+wire			ext_floppy_rd_del;      // Delay of the above to ensure last WORD is written
+wire        ext_floppy_sync;			// If daya should be sync'ed to the current word sync
+wire [15:0] ext_floppy_syncword;		// The Word Match Sync currently active (eg: 4489)
+
+
+//active drive number (priority encoder)
+assign sel = !_sel[0] ? 2'd0 : !_sel[1] ? 2'd1 : !_sel[2] ? 2'd2 : !_sel[3] ? 2'd3 : 2'd0;
+
+// floppy_ext_drive
+wire [3:0] _exsel;								// Selection status of external drives only (low is selected)
+wire     virtualFloppyMode;			 // Set to 1 means we're emulating a floppy drive at flux level
+wire     sel_external;			    // Set to 1 if a real drive is selected
+wire     flux_inuse;				    // Means the PLL is in use (real drive or flux data)
+
+assign _exsel[0] = (floppy_ext_drive[2:0]  == 3'd1) ? _sel[0] :
+                   (floppy_ext_drive[5:3]  == 3'd1) ? _sel[1] :
+                   (floppy_ext_drive[8:6]  == 3'd1) ? _sel[2] :
+                   (floppy_ext_drive[11:9] == 3'd1) ? _sel[3] : 1'b1;
+
+assign _exsel[1] = (floppy_ext_drive[2:0]  == 3'd2) ? _sel[0] :
+                   (floppy_ext_drive[5:3]  == 3'd2) ? _sel[1] :
+                   (floppy_ext_drive[8:6]  == 3'd2) ? _sel[2] :
+                   (floppy_ext_drive[11:9] == 3'd2) ? _sel[3] : 1'b1;
+
+assign _exsel[2] = (floppy_ext_drive[2:0]  == 3'd3) ? _sel[0] :
+                   (floppy_ext_drive[5:3]  == 3'd3) ? _sel[1] :
+                   (floppy_ext_drive[8:6]  == 3'd3) ? _sel[2] :
+                   (floppy_ext_drive[11:9] == 3'd3) ? _sel[3] : 1'b1;
+
+assign _exsel[3] = (floppy_ext_drive[2:0]  == 3'd4) ? _sel[0] :
+                   (floppy_ext_drive[5:3]  == 3'd4) ? _sel[1] :
+                   (floppy_ext_drive[8:6]  == 3'd4) ? _sel[2] :
+                   (floppy_ext_drive[11:9] == 3'd4) ? _sel[3] : 1'b1;
+
+assign sel_external    = ((~_exsel[0]) | (~_exsel[1]) | (~_exsel[2]) | (~_exsel[3])) & enable_mister_floppy;
+assign flux_inuse      = sel_external | ((disk_fluxmode[sel]|disk_fluxdensitymode[sel]) & ~_selx);
+assign virtualFloppyMode = (disk_fluxmode[sel]|disk_fluxdensitymode[sel]) & ~sel_external & ~_selx;
+assign floppy_speed   = (reset | ~flux_inuse) ? floppy_speed_allowed : 1'b0;
+
+wire _virtReadData;
+wire virtualFluxDataRead;
+wire _virtualFluxIndex;
+wire _virtualFluxDataReady;
+wire virtualFloppyRequestsData;
+
+// A virtual floppy drive, used for FLUX data, NOT mfm. The large FIFO buffer is used to store flux instead
+MiSTerFloppyVirtualFluxDrive virtualFloppy (
+	.clk(clk),
+	.clk7_en(clk7_en),
+	.reset(reset),
+	
+	.enabled(virtualFloppyMode),
+	.drivesSelect( disk_fluxmode & ~_sel),   // note its NOT inverted
+	.densityMode(disk_fluxdensitymode),
+	.driveSelected( sel),							// Index of selected drive
+	.nMotorEnabled(_motor),
+	.o_nReady(_virtualFluxDataReady),
+	.floppyBit(_virtReadData),
+	.oRequestData(virtualFloppyRequestsData),
+	
+	.fifo_empty(fifo_empty),
+	.fifo_reset(paula_fifo_reset),
+	.fluxDataIn(fifo_out[15:0]),             // Flux data received from the core FIFO
+	.fluxDataRead(virtualFluxDataRead),
+	._Index(_virtualFluxIndex)
+);
+
+
+// Special signals used by the DSKBYTR register
+wire diskByteReady;						// A signal (1) that a new BYTE is available at diskByte
+wire[7:0] diskByte;						// The last BYTE read in from the disk
+reg resetDiskByteReady = 1'b0;		// Set to 1 to reset the diskByteReady status
+wire syncWordNOW;						   // Set to 1 if the DISKSYNC is actually valid literally right now!
+wire bitdetected;							//
+wire _dskrd;								// Flux data OUT from real floppy drive
+wire interfaceBusy;
+wire _dkwd;
+wire _dkwe;
+
+
+MiSTerFloppyPLL PaulaFloppyPLL (
+	.clk(clk),
+	.clk7_en(clk7_en),
+	.reset(reset),
+	.trackrd(trackrd | _virtualFluxDataReady),
+	.selected(flux_inuse & ~trackwr),
+	.trackwr(trackwr & flux_inuse & ~virtualFloppyMode),
+	.precomp(precomp),	
+	.fifo_empty(flux_fifo_empty),
+	
+	.ext_floppy_rx(ext_floppy_rx),              // Received FROM disk
+	.ext_floppy_wr(ext_floppy_wr),				  // 1 when above WORD is valid
+	
+	.ext_floppy_tx(flux_fifo_out),              // to be written TO disk
+	.ext_floppy_rd(ext_floppy_rd),				  // Signals the above word was written
+	.ext_floppy_rd_del(ext_floppy_rd_del),		  // Delay version of the above
+	
+	.ext_floppy_sync(ext_floppy_sync),
+	.ext_floppy_syncword(dsksync),
+	
+	.wordsyncEnabled(wordsync),
+	.syncWordNOW(syncWordNOW),
+	
+	.bitdetected(bitdetected),
+	
+	.diskByte(diskByte),
+	.diskByteReady(diskByteReady),
+	.resetDiskByteReady(resetDiskByteReady),	
+	
+	._dskrd(virtualFloppyMode ? _virtReadData : _dskrd), // Actual status of "live" MFM bitstream 
+	.pause(interfaceBusy & ~virtualFloppyMode),									// Set to 1 to 'pause' any actions. 
+	._writeData(_dkwd),										// Output MFM writing (WRITE_DATA)
+	._writeGate(_dkwe) 			// Output ENABLE (WRITE_GATE)
+);
+
+// NTSC Amigas had 28.63636 clock whereas PAL Amigas had 28.37516Mhz clocks
+// The Minimig core is actually set to 28.687500MHz - not sure why!
+MiSTerFloppySHUGART #(28687500, 1) db(
+	.i_core_cpu_clk(clk),
+	.USER_IN(USER_IN),
+	.USER_OUT(USER_OUT),	
+	
+	.o_queueBusy(interfaceBusy),
+	
+	.i_nWriteData(_dkwd),
+	.i_nWriteGate(_dkwe),
+	.i_nHeadSelect(side),
+	
+	.o_nReadData(_dskrd),
+	.o_nIndex(_index_ext),
+	.o_nTrk00(_track0_ext),
+	.o_nWriteProtected(_wprot_ext),
+	.o_nDiskChange(_change_ext),
+	.o_nReady(_ready_ext),	
+	
+	.i_nDriveSelect0(_exsel[0]),
+	.i_nDriveSelect1(_exsel[1]),
+	.i_nDriveSelect2(_exsel[2]),
+	.i_nDriveSelect3(_exsel[3]),
+	.i_nMotorEnable(_motor),	
+	.i_nDir(direc),
+	.i_nStep(_step),	
+	.i_reset(reset | ~enable_mister_floppy),
+	.o_detected(mister_floppy_status[0]),
+	.o_PinIBMDrive(mister_floppy_status[1]),
+	.o_nSwappedCable(mister_floppy_status[2])
+);
+
+
 //decoded commands
 reg        cmd_fdd;			//HPS accesses floppy drive buffer
 
 assign     trackdisp = track;
 assign     secdisp = dsklen[13:0];
 
-assign     floppy_fwr = fifo_wr;
-assign     floppy_frd = fifo_rd;
+assign     floppy_fwr = paula_fifo_wr;
+assign     floppy_frd = paula_fifo_rd;
 
 reg  [1:0] cmd_cnt;
 
@@ -219,12 +395,28 @@ always @(posedge clk) begin
 end
 
 
+
+// Virtual floppy head settling timer (~12ms at clk7_en rate)
+// When the head moves, according to Commodore spec, upto 15ms of head settling time is allowed. We use this to prevent the core streaming data to us when not needed during step operations
+reg [16:0] vfloppy_settle_cnt;
+wire vfloppy_settling = virtualFloppyMode & (vfloppy_settle_cnt != 17'd0);
+always @(posedge clk) begin
+    if (clk7_en) begin
+        if (virtualFloppyMode && _step && !_step_del)
+            vfloppy_settle_cnt <= 17'd107550;     // 15ms
+        else if (vfloppy_settle_cnt != 15'd0)
+            vfloppy_settle_cnt <= vfloppy_settle_cnt - 17'd1;
+    end
+end
+
+wire hostRead = sel_external ? 1'b0 : (((trackrd | virtualFloppyRequestsData) & ~vfloppy_settling) & ~fifo_cnt[10]);
+
 //transmit data multiplexer
 always @(*) begin
-	casex ({cmd_cnt, cmd_fdd, trackrd, trackwr})
+	casex ({cmd_cnt, cmd_fdd, hostRead,  sel_external ? 1'b0 : trackwr })
 		
-		// fdd request status
-		'b00xxx: tx_data = {sel[1:0],drives[1:0],2'b00,trackwr,trackrd&~fifo_cnt[10],track[7:0]};
+		// fdd request status - To simulate a virtual drive properly, while its 'READY' it needs to be constantly outputting data, it just doesnt get written
+		'b00xxx: tx_data = {sel[1:0], drives[1:0], 2'b00, sel_external ? 1'b0 : trackwr, hostRead, track[7:0]};
 
 		// fdd data
 		'b01xxx: tx_data = dsksync[15:0];
@@ -257,10 +449,21 @@ always @(posedge clk) begin
 end
 
 //-----------------------------------------------------------------------------------------------//
+
+// External index needs converting to a single pulse, not the long pulse from the drive
+reg last_ext_index;
+reg index_ext_pulse;
+wire _externalIndex;
+assign _externalIndex = virtualFloppyMode ? _virtualFluxIndex : _index_ext;
+
 // 300 RPM floppy disk rotation signal
 reg [3:0] rpm_pulse_cnt;
 always @(posedge clk) begin
   if (clk7_en) begin
+	 // Looking for falling edge 
+	 last_ext_index <= _externalIndex;
+	 index_ext_pulse <= ~_externalIndex && last_ext_index;  
+
     if (sof) begin
       if (rpm_pulse_cnt==11 || !ntsc && rpm_pulse_cnt==9)
         rpm_pulse_cnt <= 0;
@@ -269,10 +472,13 @@ always @(posedge clk) begin
     end
   end
 end
+
     
 // disk index pulses output
-assign index = |(~_sel & motor_on) & ~|rpm_pulse_cnt & sof;
-	
+wire index_adf;
+assign index_adf = |(~_sel & motor_on) & ~|rpm_pulse_cnt & sof;
+assign index = flux_inuse ? index_ext_pulse : index_adf;
+
 //--------------------------------------------------------------------------------------
 //data out multiplexer
 assign data_out = dskbytr | dskdatr;
@@ -285,7 +491,7 @@ assign _selx = &_sel[3:0];
 // delayed step signal for detection of its rising edge 
 always @(posedge clk) begin
   if (clk7_en) begin
-    _step_del <= _step;
+    _step_del <= _step;	 
   end
 end
 
@@ -309,9 +515,6 @@ always @(posedge clk) begin
   end
 end
  
-//active drive number (priority encoder)
-assign sel = !_sel[0] ? 2'd0 : !_sel[1] ? 2'd1 : !_sel[2] ? 2'd2 : !_sel[3] ? 2'd3 : 2'd0;
-
 //delayed drive select signals
 always @(posedge clk) begin
   if (clk7_en) begin
@@ -356,12 +559,15 @@ always @(posedge clk) begin
   end
 end
 
+wire _change_adf, _wprot_adf, _track0_adf; //original ADF emulation signals
 //_ready,_track0 and _change signals
-assign _change = &(_sel | _disk_change);
+assign _change_adf = &(_sel | _disk_change);
+assign _wprot_adf = &(_sel | disk_writable);
+assign  _track0_adf =&(_selx | _dsktrack0);
 
-assign _wprot = &(_sel | disk_writable);
-
-assign  _track0 =&(_selx | _dsktrack0);
+assign _change = (flux_inuse & ~virtualFloppyMode) ? _change_ext : _change_adf;
+assign _wprot =  virtualFloppyMode ? 1'b0 : (flux_inuse ? _wprot_ext : _wprot_adf);   // Virtual floppy is read only
+assign _track0 = (flux_inuse & ~virtualFloppyMode) ? _track0_ext : _track0_adf;
 
 //track control
 assign track = {dsktrack[sel],~side};
@@ -386,15 +592,31 @@ assign dsktrack79 = dsktrack[sel]==82;
 // drive _ready signal control
 // Amiga DD drive activates _ready whenever _sel is active and motor is off
 // or whenever _sel is active, motor is on and there is a disk inserted (not implemented - _ready is active when _sel is active)
-assign _ready   = (_sel[3] | ~(drives[1] & drives[0])) 
-        & (_sel[2] | ~drives[1]) 
-        & (_sel[1] | ~(drives[1] | drives[0])) 
-        & (_sel[0]);
+wire _ready_adf;
+assign _ready_adf   = (_sel[3] | ~(drives[1] & drives[0])) 
+         & (_sel[2] | ~drives[1]) 
+         & (_sel[1] | ~(drives[1] | drives[0])) 
+         & (_sel[0]);
+assign _ready = flux_inuse ? (virtualFloppyMode ? _virtualFluxDataReady : _ready_ext) : _ready_adf;
 
 //--------------------------------------------------------------------------------------
 
+// For real disks this register is now more accurate, supports DSKBYT and associated bit properly
+assign dskbytr = (reg_address_in[8:1]==DSKBYTR[8:1]) ? {flux_inuse ? diskByteReady : 1'b1, (trackrd|trackwr),dsklen[14],syncWordNOW,4'b0000,diskByte} : 16'h00_00;
+
 //disk data byte and status read
-assign dskbytr = reg_address_in[8:1]==DSKBYTR[8:1] ? {1'b1,(trackrd|trackwr),dsklen[14],5'b1_0000,8'h00} : 16'h00_00;
+always @(posedge clk) begin
+    if (clk7_en) begin	  
+		if (reg_address_in[8:1]==DSKBYTR[8:1]) begin			
+			if (diskByteReady) begin
+				resetDiskByteReady <= 1;				
+			end
+		end else
+		begin
+			resetDiskByteReady <= 0;	
+		end
+  end
+end
 
 //disk sync register
 always @(posedge clk) begin
@@ -413,7 +635,7 @@ always @(posedge clk) begin
   		dsklen[14:0] <= 0;
   	else if (reg_address_in[8:1]==DSKLEN[8:1])
   		dsklen[14:0] <= data_in[14:0];
-  	else if (fifo_wr)//decrement length register
+  	else if (output_fifo_write) //decrement length register
   		dsklen[13:0] <= dsklen[13:0] - 14'd1;
   end
 end
@@ -445,11 +667,30 @@ end
 //dsklen zero detect
 assign lenzero = (dsklen[13:0]==0);
 
+
+// This generates fake data when no disk is selected to ensure DMA completes when NO drive is selected
+reg [7:0] no_sel_ctr;
+wire no_sel_word_clk = (no_sel_ctr == 8'd223);
+always @(posedge clk) begin
+    if (clk7_en) begin
+        if (_selx & trackrd & dmaon) begin
+            if (no_sel_word_clk)
+                no_sel_ctr <= 8'd0;
+            else
+                no_sel_ctr <= no_sel_ctr + 8'd1;
+        end else
+            no_sel_ctr <= 8'd0;
+    end
+end
+
+
+
 //--------------------------------------------------------------------------------------
 //disk data read path
 wire	busrd;				//bus read
 wire	buswr;				//bus write
-reg		trackrdok;			//track read enable
+reg	trackrdok;			//track read enable
+
 
 //disk buffer bus read address decode
 assign busrd = (reg_address_in[8:1]==DSKDATR[8:1]);
@@ -457,68 +698,129 @@ assign busrd = (reg_address_in[8:1]==DSKDATR[8:1]);
 //disk buffer bus write address decode
 assign buswr = (reg_address_in[8:1]==DSKDAT[8:1]);
 
-//fifo data input multiplexer
-assign fifo_in[15:0] = trackrd ? rx_data[15:0] : data_in[15:0];
-
 //data word transfer strobe
 wire stbdat = cmd_fdd && stb7 && &cmd_cnt;
 
-//fifo write control
-assign fifo_wr = (trackrdok & stbdat & ~lenzero) | (buswr & dmaon);
 
-//delayed version to allow writing of the last word to empty fifo
+// fifo data input multiplexer  (rx_data=from mister, data_in=from bus)
+assign fifo_in[15:0] = _selx ? 16'h0000 : ((trackrd|virtualFloppyMode) ? rx_data[15:0] : data_in[15:0]);
+assign flux_fifo_in[15:0] = trackrd ? ext_floppy_rx[15:0] : data_in[15:0];
+
+wire paula_fifo_wr;
+assign paula_fifo_wr = virtualFloppyMode ? stbdat : 
+                       (flux_inuse ? 1'b0 :
+                       (_selx & trackrdok & no_sel_word_clk & ~lenzero) |   // this makes DMA complete properly if it was triggered and nothing is selected
+                       (trackrdok & stbdat & ~lenzero) | 
+                       (buswr & dmaon));
+
+//fifo read control (read a WORD FROM the FIFO)
+wire paula_fifo_rd;
+assign paula_fifo_rd = virtualFloppyMode ? virtualFluxDataRead : (flux_inuse ? 1'b0 : (busrd & dmaon) | (trackwr & stbdat));								 
+
+// FLUX - the small fifo is only used for reading, not writing
+wire flux_fifo_wr   = flux_inuse ? (trackrdok & ext_floppy_wr & ~lenzero) | (buswr & dmaon) : 1'b0;   // write into
+wire flux_fifo_rd   = flux_inuse ? (busrd & dmaon) | ext_floppy_rd : 1'b0;             					// read back out
+
+
+// This is used to decrement the dma length left
+wire selected_fifo_empty;
+wire selected_fifo_full;
+assign selected_fifo_empty = flux_inuse ? flux_fifo_empty : fifo_empty;
+assign selected_fifo_full =  flux_inuse ? flux_fifo_full : fifo_full;
+assign output_fifo_write = flux_inuse ? flux_fifo_wr : paula_fifo_wr;
+
+// OK: disk data read output gate
+assign dskdatr[15:0] = busrd ? (flux_inuse ? flux_fifo_out[15:0] : fifo_out[15:0]) : 16'h00_00;		
+		
+reg virtualFloppyFifoReset;
+reg [3:0] _virtualFloppyFifoResetLastSel;
+reg lastVirtualFloppyMode;
+		
+always @(posedge clk) begin
+	if (clk7_en) begin
+		_virtualFloppyFifoResetLastSel <= _sel;
+		lastVirtualFloppyMode <= virtualFloppyMode;		
+		virtualFloppyFifoReset = (((_virtualFloppyFifoResetLastSel != _sel) && (virtualFloppyMode | lastVirtualFloppyMode))) | (_step && !_step_del);
+	end
+end
+		
+
+wire flux_fifo_reset;
+assign flux_fifo_reset = reset | ~dmaen;
+wire paula_fifo_reset;
+assign paula_fifo_reset = reset | (~dmaen & ~virtualFloppyMode) | virtualFloppyFifoReset;
+	
+
+// delayed version to allow writing of the last word to empty fifo (While true holds back DMA blckint)
 always @(posedge clk) begin
   if (clk7_en) begin
-  	fifo_wr_del <= fifo_wr;
+  	fifo_wr_del <= output_fifo_write;
   end
 end
 
-//fifo read control
-assign fifo_rd = (busrd & dmaon) | (trackwr & stbdat);
+
 
 //DSKSYNC interrupt
 wire sync_match;
 assign sync_match = dsksync[15:0]==rx_data[15:0] && stbdat && trackrd;
 
-assign syncint = sync_match | ~dmaen & |(~_sel & motor_on & disk_present) & sof;
+wire syncint_adf;
+assign syncint_adf = sync_match | ~dmaen & |(~_sel & motor_on & disk_present) & sof;
+assign syncint = flux_inuse ? (~dmaen & ext_floppy_sync) : syncint_adf;
 
 //track read enable / wait for syncword logic
 always @(posedge clk) begin
   if (clk7_en) begin
   	if (!trackrd)//reset
   		trackrdok <= 0;
-  	else//wordsync is enabled, wait with reading untill syncword is found
-  		trackrdok <= ~wordsync | sync_match | trackrdok;
+  	else//wordsync is enabled, wait with reading until syncword is found
+  		trackrdok <= ~wordsync | (flux_inuse ? ext_floppy_sync : sync_match) | trackrdok;
   end
 end
 
-assign fifo_reset = reset | ~dmaen;
-		
+
 //disk fifo / trackbuffer
 paula_floppy_fifo db1
 (
 	.clk(clk),
 	.clk7_en(clk7_en),
-	.reset(fifo_reset),
+	.reset(paula_fifo_reset),
 	.in(fifo_in),
-	.out(fifo_out),
-	.rd(fifo_rd & ~fifo_empty),
-	.wr(fifo_wr & ~fifo_full),
+	.out(fifo_out),	
+	.rd(paula_fifo_rd & ~fifo_empty),
+	.wr(paula_fifo_wr & ~fifo_full),
 	.empty(fifo_empty),
 	.full(fifo_full),
 	.cnt(fifo_cnt)
 );
 
 
-//disk data read output gate
-assign dskdatr[15:0] = busrd ? fifo_out[15:0] : 16'h00_00;
+wire flux_fifo_full;
+wire flux_fifo_empty;
+
+// Small fifo for the flux based stuff
+MiSTerFloppyFifo fluxfifo 
+(
+	.clk(clk),
+	.clk7_en(clk7_en),
+	.reset(flux_fifo_reset),
+	.in(flux_fifo_in[15:0]),   
+	.out(flux_fifo_out),	
+	.rd(flux_fifo_rd & ~flux_fifo_empty),
+	.wr(flux_fifo_wr & ~flux_fifo_full),
+	.empty(flux_fifo_empty),
+	.full(flux_fifo_full)
+);
+
 
 //--------------------------------------------------------------------------------------
+
+
 //dma request logic
-assign dmal = dmaon & (~dsklen[14] & ~fifo_empty | dsklen[14] & ~fifo_full);
+assign dmal = dmaon & (~dsklen[14] & ~selected_fifo_empty | dsklen[14] & ~selected_fifo_full);
 
 //dmas is active during writes
-assign dmas = dmaon & dsklen[14] & ~fifo_full;
+assign dmas = dmaon & dsklen[14] & ~selected_fifo_full;
 
 //--------------------------------------------------------------------------------------
 //main disk controller
@@ -534,15 +836,16 @@ parameter DISKDMA_INT    = 2'b11;
 always @(posedge clk) begin
   if (clk7_en) begin
   	if(reset)
-  		{disk_writable[3:0],disk_present[3:0]} <= 8'b0000_0000;
+  		{disk_fluxdensitymode[3:0], disk_fluxmode[3:0], disk_writable[3:0],disk_present[3:0]} <= 16'b0000_0000_0000_0000;
   	else if (rx_data[15:12]==4'b0001 && stb7 && !cmd_cnt)
-  		{disk_writable[3:0],disk_present[3:0]} <= rx_data[7:0];
+		{disk_fluxmode[3:0], disk_writable[3:0],disk_present[3:0]} <= rx_data[11:0];		
+	else if (rx_data[15:12]==4'b0010 && stb7 && !cmd_cnt)
+		{disk_fluxdensitymode[3:0]} <= rx_data[3:0];		
   end
 end
 
 //disk activity LED
-assign fdd_led = (dskstate!=DISKDMA_IDLE);
-//assign disk_led = |motor_on;
+assign fdd_led =  (dskstate!=DISKDMA_IDLE);
 
 //main disk state machine
 always @(posedge clk) begin
@@ -554,6 +857,12 @@ always @(posedge clk) begin
   end
 end
 
+
+
+
+wire fifo_wr_delay;
+assign fifo_wr_delay = flux_inuse ? ext_floppy_rd_del : fifo_wr_del;
+
 always @(*) begin
 	case(dskstate)
 		DISKDMA_IDLE://disk is present in flash drive
@@ -562,20 +871,22 @@ always @(*) begin
 			trackwr = 0;
 			dmaon = 0;
 			blckint = 0;
-			if (cmd_fdd && stb7 && cmd_cnt==1 && dmaen && !lenzero && enable)//dsklen>0 and dma enabled, do disk dma operation
+			// This shouldnt check lenzero. Its valid to start DMA with lenzero, and is done with some variants of Rob Northen Copylock. Without this, the check fails.
+			if (((cmd_fdd && stb7 && cmd_cnt==1) || (flux_inuse)) && dmaen && enable)			
+			//if (((cmd_fdd && stb7 && cmd_cnt==1) || (flux_inuse)) && dmaen && (!lenzero || flux_inuse) && enable)
 				nextstate = DISKDMA_ACTIVE; 
 			else
 				nextstate = DISKDMA_IDLE;			
 		end
 		DISKDMA_ACTIVE://do disk dma operation
 		begin
-      trackrd = ~lenzero & ~dsklen[14]; // track read (disk->ram)
-      trackwr = dsklen[14]; // track write (ram->disk)
-      dmaon = ~lenzero | ~dsklen[14];
+			trackrd = ~lenzero & ~dsklen[14]; // track read (disk->ram)
+			trackwr = dsklen[14]; // track write (ram->disk)
+			dmaon = ~lenzero | ~dsklen[14];
 			blckint=0;
 			if (!dmaen || !enable)
 				nextstate = DISKDMA_IDLE;
-			else if (lenzero && fifo_empty && !fifo_wr_del)//complete dma cycle done
+			else if (lenzero && selected_fifo_empty && !fifo_wr_delay) //complete dma cycle done
 				nextstate = DISKDMA_INT;
 			else
 				nextstate = DISKDMA_ACTIVE;			
