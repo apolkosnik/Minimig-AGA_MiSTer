@@ -254,11 +254,22 @@ always @(posedge clk) begin
 		else if (cap_pend2 && clkena_in) begin
 			cap_pend2 <= 0;
 			for (ci = 0; ci < 8; ci = ci + 1) begin
-				cap_regs[ci] <= dut.core.regfile.rf_written[ci]
-				                ? dut.core.regfile.bank_a[ci] : 32'd0;
+				// The register file holds a write one cycle in pend_* and
+				// answers reads of that entry from there; a backdoor that
+				// looks straight at the bank misses the newest write, which
+				// is exactly the last write an instruction makes -- the (An)+
+				// update, say.  Capture through the same bypass the core uses.
+				cap_regs[ci] <= (dut.core.regfile.pend_we &&
+				                 dut.core.regfile.pend_waddr == ci[3:0])
+				                ? dut.core.regfile.pend_wdata
+				                : (dut.core.regfile.rf_written[ci]
+				                   ? dut.core.regfile.bank_a[ci] : 32'd0);
 				cap_regs[8+ci] <= (ci == 7) ? dut.core.regfile.usp
-				                                : (dut.core.regfile.rf_written[8+ci]
-				                                   ? dut.core.regfile.bank_a[8+ci] : 32'd0);
+				                                : ((dut.core.regfile.pend_we &&
+				                                    dut.core.regfile.pend_waddr == (8+ci))
+				                                   ? dut.core.regfile.pend_wdata
+				                                   : (dut.core.regfile.rf_written[8+ci]
+				                                      ? dut.core.regfile.bank_a[8+ci] : 32'd0));
 			end
 		end
 		if (dut.core.state != S_EXC0)
