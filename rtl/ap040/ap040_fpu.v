@@ -2339,8 +2339,8 @@ module ap040_fp_regfile
 // address from pend_wdata, which discards exactly the datum the attribute
 // leaves undefined.  Reads are otherwise unchanged, and an MLAB is still
 // inferred because the attribute stays.
-reg [79:0] bank_a [0:7];
-reg [79:0] bank_b [0:7];
+(* ramstyle = "MLAB, no_rw_check" *) reg [79:0] bank_a [0:7];
+(* ramstyle = "MLAB, no_rw_check" *) reg [79:0] bank_b [0:7];
 
 reg        pend_we;
 reg  [2:0] pend_waddr;

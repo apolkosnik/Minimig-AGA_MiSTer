@@ -91,8 +91,8 @@ module ap040_regfile
 // 459 -- so the file cost 214 ALMs and still had no memory in it.  The defect
 // was never the attribute on its own; it was the attribute with nothing
 // masking the datum it leaves undefined.
-reg [31:0] bank_a [0:15];
-reg [31:0] bank_b [0:15];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] bank_a [0:15];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] bank_b [0:15];
 reg [14:0] rf_written;
 reg        pend_we;
 reg  [3:0] pend_waddr;
