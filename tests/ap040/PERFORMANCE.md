@@ -175,6 +175,62 @@ posting the write and letting the successor run needs the access-error
 frame to describe a completed instruction, as the 68040's format $7 does),
 and S_FETCH after taken branches (the redirect's two-cycle fetch).
 
+### Re-measured on f53c044b0 (2026-09-17): stores are the whole story
+
+Core bench, Dhrystone phase 0, `+prof +memlat`: **1,005,444 cycles for
+129,779 instructions, CPI 7.75** (9.1 when the CPI section above was
+written).  Where it goes now:
+
+| state | cycles | share | of which stalled |
+|---|---:|---:|---:|
+| `S_MWR` | 221,414 | **22.0 %** | 22 % |
+| `S_MRD` | 163,255 | 16.2 % | 0 % |
+| `S_EXEC` | 134,489 | 13.4 % | 0 % |
+| `S_DECODE` | 129,766 | 12.9 % | 0 % |
+| `S_FETCH` | 100,137 | 10.0 % | 0 % |
+
+and the access histograms say why:
+
+    ifetch     n=133,340  avg 2.0   (133,227 of them exactly 2)
+    dataread   n= 42,690  avg 2.0   ( 42,652 exactly 2)
+    datawrite  n= 28,100  avg 6.2   ( 21,438 at 7, 6,662 at 4)
+
+Caches are 99 % on both sides.  Reads and fetches have reached the floor the
+cache can give -- 2 cycles, every time.  **Writes cost three times a read**,
+28,100 of them, about 174,000 of the 221,414 cycles in `S_MWR`, which is
+17 % of the whole program.  Nothing else is close.
+
+The cause is structural rather than a stall: the cache is write-through, so
+every store crosses the 16-bit bus adapter -- a longword is two bus
+transactions -- and the core waits for completion before it is acknowledged.
+A read at 99 % hit rate never reaches the bus at all, which is the entire
+difference between 2.0 and 6.2.
+
+Two numbers from the plan are now stale and should not be used to choose the
+next step.  `X2.3` says 44 % of `S_MRD`/`S_MWR` cycles wait behind an
+outstanding instruction fetch; measured here it is **5 %** (21,957 of
+384,669), so the shared-port problem it names is solved.  `X2.1` (32-bit
+DUAL_SDRAM) is marked FIRST on the strength of a fetch path that was 9.2
+cycles and is now 2.0.
+
+So the next step is posting the store, and the cost of doing it is the
+exception model: a posted store that faults is imprecise, and this core's
+format $7 deliberately keeps WB3S clear because it restarts rather than
+completes.  The cheap route is to post only where the platform guarantees no
+bus error -- the `c_post_ok` input Alan's cache carries, driven from the
+address decode, with `sdram_ctrl`'s existing write buffer to drain into.  The
+complete route is the WB1/WB2/WB3 frame, which `880b81c` moved toward by
+stacking the MOVEM EA.
+
+Expected: 6.2 -> ~2 cycles on 28,100 stores is ~118,000 cycles, 11.7 % of
+Dhrystone, CPI 7.75 -> ~6.8.  After that the profile points at the dispatch
+floor -- `S_DECODE` is one cycle per instruction and `S_EXEC` 13.4 % -- which
+is X2.3's forwarding and scoreboard work, not memory.
+
+Area is no longer the constraint X2.7 assumed: 38,750 ALMs (92 %) with
++0.460 setup leaves ~3,160 free, so this fits without the `cpu_cache_new`
+and `bus16` removals that budget was funded by.
+
 ## The boot that was never a boot (2026-09-17)
 
 `f53c044b0` runs, and GuardianAngel does not lock the machine up, which puts

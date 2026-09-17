@@ -1395,7 +1395,39 @@ S_PIPE_DST -> S_PIPE_DREG becomes S_PIPE_SDONE -> S_EXEC.
   Gated: suite green, corpus 3776/3801 failing set unchanged, integer
   15/15, FP 8/8, MMU 8/8.
 
-### X2.3 NEXT TARGET, measured: S_MRD is 37.7% of a load
+### X2.3 RE-MEASURED 2026-09-17 on f53c044b0: the target has moved
+
+The two numbers this section and X2.1 are built on no longer hold.  Dhrystone
+phase 0 with +prof +memlat, 1,005,444 cycles for 129,779 instructions (CPI
+7.75, from 9.1):
+
+    ifetch     n=133,340  avg 2.0    (was 9.2, with 133 in the 31+ bucket)
+    dataread   n= 42,690  avg 2.0    (was 2.2)
+    datawrite  n= 28,100  avg 6.2    <- the only outlier left
+    caches     I 99% hit, D 99% hit
+    S_MRD/S_MWR waiting for the fetch queue to release the port: 5%
+                                     (X2.3 below says 44%)
+
+So the shared-port contention this section names as the target is solved, and
+X2.1's "FIRST -- everything else keys on it" rested on a fetch path that was
+9.2 cycles and is now 2.0.  Neither should drive the next choice.
+
+What is left is stores: 28,100 of them at 6.2 cycles is about 174,000 of the
+221,414 cycles in S_MWR, 17% of the program, and three times what a read
+costs.  The cause is structural -- write-through crossing the 16-bit adapter,
+two bus transactions for a longword, with the core waiting for completion --
+while a read at 99% hit never reaches the bus.
+
+NEXT: post the store.  Cheap route is a c_post_ok-style guarantee per region
+(sdram_ctrl already has the write buffer to drain into); complete route is the
+WB1/WB2/WB3 frame.  ~118,000 cycles, CPI 7.75 -> ~6.8.  Then the dispatch
+floor (S_DECODE one cycle per instruction, S_EXEC 13.4%), which is this
+section's forwarding/scoreboard work.
+
+Area: 38,750 ALMs (92%), +0.460 setup, ~3,160 free -- X2.7's "does NOT fit"
+was written at 94% and no longer binds.
+
+### X2.3 target as it stood in August (superseded above): S_MRD is 37.7% of a load
 
 Profiled with +prof over 768 cached longword loads (20.1 cyc/load before
 step 2):
