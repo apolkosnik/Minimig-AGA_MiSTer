@@ -175,6 +175,87 @@ posting the write and letting the successor run needs the access-error
 frame to describe a completed instruction, as the 68040's format $7 does),
 and S_FETCH after taken branches (the redirect's two-cycle fetch).
 
+## The boot that was never a boot (2026-09-17)
+
+`f53c044b0` runs, and GuardianAngel does not lock the machine up, which puts
+real MMU work through the `880b81c` conformance changes.
+
+Two days of hardware results before it were void, and the reason is worth
+writing down because no amount of RTL work would have found it.  Four images
+failed to reach Workbench with four different symptoms -- no boot, stuck in
+the startup-sequence, Exec's idle loop, a yellow screen after reset -- and
+each was bisected against RTL.  The baseline the whole bisect rested on,
+`74317588` "boots and runs NetBSD at 6,615 Dhrystones", was a measurement
+from 13 September that nobody had re-run.  When it was finally re-flashed it
+did not reach Workbench either.
+
+The machine's Minimig config had been changed at 22:42 that evening, after
+`74317588` was built at 17:29:
+
+| | ROM | HDF0 |
+|---|---|---|
+| `Minimig.cfg.bak-ap040`, 14:01 | `A1200.47.115.rom` | `A4000_CF_20221112.img` |
+| `Minimig.cfg`, 22:42 onward | `DiagROMFPU.ROM` | `netbsdamiga92.hdf` |
+
+A diagnostic ROM and a NetBSD filesystem.  Nothing reaches Workbench from
+there, on any core, which is also why the symptoms wandered: they were never
+core failures.  Exec idling with no task ready is exactly what a ROM that is
+not booting a Workbench volume looks like from HRTmon.
+
+**Re-run the known-good image before bisecting a hardware symptom.**  It
+costs one flash and it is the only thing that distinguishes "this change
+broke it" from "the bench changed".
+
+### What survived the void
+
+The simulation work stands on its own, because none of it depended on a boot:
+
+* Instruction semantics are IDENTICAL across `74317588`, `0ba8f7c0e` and
+  HEAD -- the WinUAE 68040 corpus, 3,801 slices, the same 25 pre-existing
+  failures on all three, byte-identical sets.  Whatever the images were
+  doing, they were not decoding differently.
+* The corpus forces `cacr = 0` and `tc = 0` (`tb_dat_replay.v`), so it is
+  blind to caching and translation.  That is its standing limitation and it
+  is why the 46-leg suite and the corpus can both be green while a cached
+  path is wrong.
+
+### Three harness defects the corpus found
+
+All three were in `tb_dat_replay.v`, all invisible to the suite, and all of
+the same shape -- a backdoor reaching at storage rather than through the path
+the core uses:
+
+* It preloaded `fr_s/fr_e/fr_m`, which became simulation mirrors when the FP
+  register file moved into MLABs.  Every FPU slice had been running with its
+  operands left at the reset NaN and comparing against the same, since that
+  register file landed.  `FABS.X` wanted 1.0 and got the default NaN.
+* It captured the integer registers from the bank, past the one-cycle
+  hold-and-bypass, so it missed whichever write was still in flight -- which
+  is reliably an instruction's LAST write.  36 PackedFPU slices failed with
+  `A register: expected 438fff0c got 438fff00`, the `(A6)+` update on
+  `FABS.P` simply not visible yet.  Bisected to the commit that added the
+  bypass, with its parent clean: the RTL was right, the observer was not.
+* It referenced `regfile.dreg/areg` after those became banks, which at least
+  failed to compile and said so.
+
+### no_rw_check, in both register files
+
+`ramstyle = "MLAB, no_rw_check"` does not promise the accesses never
+coincide.  It says the read data is UNDEFINED when they do, and asks the
+fitter not to spend logic defending against it.  Both register files
+violated that constantly -- 612 cycles in `t_integer` for the integer file,
+1,329 in `t_fpu` for the FP one, the first of those a write to FP0 with both
+read ports on FP0 -- and no simulation here can see it, because Verilator
+models the array exactly.
+
+The fix is not to drop the attribute.  Without it Quartus will not infer an
+MLAB at all: the fit reported `ALMs used for memory 0.0`, both mirrored banks
+in flip-flops, 1,172 registers and 673 ALMs against the plain array's 576 and
+459 -- worse than doing nothing.  The fix is to hold the write one enabled
+cycle and answer a read of the pending address from the held data, so the
+undefined datum is discarded and the attribute becomes honest.  Verified by
+counting: coincidences 1329, uncovered 0.
+
 ## Experimental clock interface (parked)
 
 `cpu_wrapper.FAST_CLOCK=1` accepts the memory clock, with `CORE_DIV=4`, `2`
