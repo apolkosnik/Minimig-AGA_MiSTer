@@ -276,9 +276,12 @@ always @(posedge clk) begin
 			if (dut.core.exc_vec != 9 || expected_exc_live == 9 || e_trace == 2) begin
 				cap_vec <= dut.core.exc_vec;
 				for (ci = 0; ci < 8; ci = ci + 1) begin
-					cap_fe[ci] <= {dut.core.g_fpu.fpu.fr_s[ci],
-					               dut.core.g_fpu.fpu.fr_e[ci]};
-					cap_fm[ci] <= dut.core.g_fpu.fpu.fr_m[ci];
+					cap_fe[ci] <= dut.core.g_fpu.fpu.fr_valid[ci]
+					              ? dut.core.g_fpu.fpu.fpregs.bank_a[ci][79:64]
+					              : {1'b0, 15'h7FFF};
+					cap_fm[ci] <= dut.core.g_fpu.fpu.fr_valid[ci]
+					              ? dut.core.g_fpu.fpu.fpregs.bank_a[ci][63:0]
+					              : 64'hFFFF_FFFF_FFFF_FFFF;
 				end
 				cap_sr <= dut.core.sr;
 				cap_fpcr <= dut.core.g_fpu.fpu.fpcr;
@@ -667,9 +670,18 @@ task inject_state;
 				dut.core.regfile.bank_b[8+ii] = i_regs[8+ii];
 				dut.core.regfile.rf_written[8+ii] = 1'b1;
 			end
+			// FP0-FP7 live in the mirrored MLAB banks with fr_valid saying
+			// which entries have been written; fr_s/fr_e/fr_m survive only as
+			// simulation mirrors that nothing in the datapath reads, so
+			// preloading them alone left every operand at the reset NaN.
 			dut.core.g_fpu.fpu.fr_s[ii] = i_fe[ii][15];
 			dut.core.g_fpu.fpu.fr_e[ii] = i_fe[ii][14:0];
 			dut.core.g_fpu.fpu.fr_m[ii] = i_fm[ii];
+			dut.core.g_fpu.fpu.fpregs.bank_a[ii] =
+				{i_fe[ii][15], i_fe[ii][14:0], i_fm[ii]};
+			dut.core.g_fpu.fpu.fpregs.bank_b[ii] =
+				{i_fe[ii][15], i_fe[ii][14:0], i_fm[ii]};
+			dut.core.g_fpu.fpu.fr_valid[ii] = 1'b1;
 		end
 		dut.core.regfile.usp = i_regs[15];
 		dut.core.regfile.isp = i_ssp;
