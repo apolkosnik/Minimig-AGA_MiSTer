@@ -1309,8 +1309,10 @@ Gate, as specified -- nothing changes:
   * directed suite: all 51 leg logs BIT-IDENTICAL to the pre-change
     baseline, cycle counts included.  Timing identity, not just pass/fail.
   * v24 corpus AE: 38/38, RTE/RTR odd-PC address errors included.
-  * v24 corpus ODD_EXC: exactly 13 failures, the documented generator
-    artifacts -- the instruction-channel fault path is untouched.
+  * v24 corpus ODD_EXC: 33/33, with the stored-trace rounds reported as
+    generator artifacts by the harness (2026-09-17: they were the "13
+    failures"; see PERFORMANCE.md "The 25, examined") -- the
+    instruction-channel fault path is untouched.
 
 Stage 2 (a data HIT proceeds while an instruction fill is in flight) is now
 a change to the ISSUE rule alone; the acknowledge side is already correct.

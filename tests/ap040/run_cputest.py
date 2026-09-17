@@ -397,9 +397,12 @@ def run_slice(item: dict, args, sim: Path, work: Path) -> dict:
         resume_file.write_text(json.dumps(identity, indent=2, sort_keys=True))
         passed = proc.returncode == 0 and "ALL TESTS PASSED" in output
         status = "pass" if passed else "fail"
+        m = re.search(r"(\d+) generator-artifact rounds skipped", output)
+        artifact = int(m.group(1)) if m else 0
         tail = "\n".join(output.rstrip().splitlines()[-12:])
         result = {**item, **meta, "simulator": args.simulator,
                   "status": status, "message": tail,
+                  "artifact_rounds": artifact,
                   "seconds": time.monotonic() - started, "log": str(log),
                   **first_mismatch_context(output)}
     except subprocess.TimeoutExpired as exc:
@@ -440,6 +443,7 @@ def write_reports(results: list[dict], work: Path, elapsed: float):
         "fail": sum(r["status"] == "fail" for r in results),
         "timeout": sum(r["status"] == "timeout" for r in results),
         "error": sum(r["status"] == "error" for r in results),
+        "artifact_rounds": sum(r.get("artifact_rounds", 0) or 0 for r in results),
         "results": [serializable(r) for r in results],
     }
     (work / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))

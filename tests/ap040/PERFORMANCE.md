@@ -408,6 +408,57 @@ that address through the following enabled cycle.  In simulation the bypass
 is invisible -- the array already holds the word -- which is the point.
 Same shape in `ap040_fp_regfile`.
 
+### The 25, examined (2026-09-17)
+
+"The same 25 pre-existing failures" had stood as a number since 74317588.
+Read one by one they are the two generator defects that
+`CPUTEST_UPSTREAM_REPORT.md` reported on 2026-08-20, and nothing else.  The
+work here was to confirm that from the shipped bytes and stop 21 of them
+being reported as RTL failures.
+
+**21 ODD_EXC/ODD_IRQ slices = the report's Issue 2.**  Every failing round
+is `missing trace: expected 9` with an address-error frame whose PC is $10
+where the core stacks $24.  Parsing the replay records directly (actual
+exception, group2, trace mode, frame PC) separates the two shapes the
+generator emits for the same situation.  In `ODD_EXC/DIVU.W/0001`: 6,116
+rounds `(3, 9, 0, $24)` -- the pending trace was VECTORED, its odd vector 9
+faulted, the frame PC is the vector-9 slot -- and the core passes every one;
+6,116 rounds `(3, 4, 2, $10)` -- the trace was STORED, execution ran on to
+the terminal ILLEGAL, and that vector faulted -- and those are exactly the
+failures.  cputest.cpp stores when the test carries a NOP before its ILLEGAL
+("trace after NOP": `trace_store_pc = regs.pc; flag_SPCFLAG_DOTRACE = 0`),
+modelling a transparent vector-9 handler the runtime does not install: its
+table has vector 9 odd for the whole group (`main.c`, `vbr[i] =
+exception_vectors` for every `i >= 4`; `set_error_vectors()` touches only 2
+and 3).  No 68040 under that table reaches the ILLEGAL.
+
+`tb_dat_replay` now classifies those rounds -- trace mode 2 under an odd
+vector, group2 not 9 -- skips them, and reports the count in its summary
+line and in `summary.json` (`artifact_rounds`).  IRQ + ODD_EXC/IRQ/STK go to
+162/162 with 36,816 rounds named as artifacts.  The negative control is
+exact: per slice, the rounds skipped are two-for-one the mismatches that
+slice used to report (DIVU.W/0001: 6,116 skipped, 12,232 mismatches), and
+every slice that passed before skips nothing and runs the same round count.
+The classifier selects the failing rounds and only those.
+
+**4 BasicFPU slices = the report's Issue 1**, re-derived independently here
+and matching it exactly: the operand is planted at
+`An + (int16)((Xn.W * scale) & 0xFFFF) + d8` while the instruction's EA is
+`An + (int32)(int16)Xn.W * scale + d8`, so placement and EA differ by
+0x10000 once the scaled index crosses bit 15 (`FADD.L/0001` t114,
+`FSNEG.S/0002` t83, `FSNEG.X/0007` t9), and `FNEG.B/0002` t65 plants a
+`-(A7)` byte one address high.  The core reads the architectural EA, finds
+the restored image, and computes the right result for what is there --
+`FADD.L` adds the zero that is at `43907F48` and leaves FP5 unchanged, where
+the corpus expects the `D8AFAE1E` its own image still held from test 93.
+These stay reported as failures: they are corpus data no 68040 can satisfy,
+the fix belongs in the generator, and `diff/README` is explicit that they
+must not drive an EA change here.
+
+The earlier note in this file -- that "which vectors are odd varies per
+ROUND" and the overlay could not express it -- was wrong.  The overlay
+matches the runtime; the variation was the generator's stored trace.
+
 ## Experimental clock interface (parked)
 
 `cpu_wrapper.FAST_CLOCK=1` accepts the memory clock, with `CORE_DIV=4`, `2`
