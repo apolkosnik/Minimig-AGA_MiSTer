@@ -833,7 +833,8 @@ initial begin
 		$display("FAIL: timeout after %0d cycles", timeout);
 		$display("  final: state=%0d pc=%08x sr=%04x d7=%04x", cpu.cpu_inst_p.core.state,
 			cpu.cpu_inst_p.core.pc, cpu.cpu_inst_p.core.sr,
-			cpu.cpu_inst_p.core.regfile.dreg[7][15:0]);
+			(cpu.cpu_inst_p.core.regfile.rf_written[7]
+			 ? cpu.cpu_inst_p.core.regfile.bank_a[7][15:0] : 16'd0));
 		for (kk = 0; kk < 64; kk = kk + 1)
 			$display("  ring[%0d] t=%0d pc=%08x", kk,
 				pc_time[(pc_rp + kk) & 63], pc_ring[(pc_rp + kk) & 63]);

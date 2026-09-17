@@ -50,11 +50,22 @@ module ap040_regfile
 	output     [31:0] dbg_a7
 );
 
-reg [31:0] dreg [0:7];
-reg [31:0] areg [0:6];
+// D0-D7 and A0-A6 in two mirrored MLAB banks rather than flip-flops, the
+// same trade the FP register file makes: an MLAB gives one write and one
+// read port, so two asynchronous reads need two copies of the data.  A7 is
+// not in the array -- it resolves to one of the three stack pointers below,
+// which stay in flops because several consumers read them directly.
+//
+// MLAB contents cannot be reset, and this core resets the integer registers
+// to zero, so a 15-bit "written" vector carries that instead: an entry reads
+// as zero until it has been written once.
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] bank_a [0:15];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] bank_b [0:15];
+reg [14:0] rf_written;
 reg [31:0] usp;
 reg [31:0] isp;
 reg [31:0] msp;
+reg [31:0] dbg_shadow [0:3];
 
 // A7 resolves to the active stack pointer
 wire [1:0] sp_sel = !sr_s ? 2'd0 : (sr_m ? 2'd2 : 2'd1); // 0=USP 1=ISP 2=MSP
@@ -62,24 +73,34 @@ wire [31:0] sp_active = (sp_sel == 2'd0) ? usp : (sp_sel == 2'd1) ? isp : msp;
 
 // direct expressions, not a function: a function referencing the register
 // arrays breaks continuous-assign sensitivity on some simulators
-assign rdata_a = !raddr_a[3]            ? dreg[raddr_a[2:0]] :
-                 (raddr_a[2:0] == 3'd7) ? sp_active : areg[raddr_a[2:0]];
-assign rdata_b = !raddr_b[3]            ? dreg[raddr_b[2:0]] :
-                 (raddr_b[2:0] == 3'd7) ? sp_active : areg[raddr_b[2:0]];
+wire [31:0] q_a = rf_written[raddr_a[3:0]] ? bank_a[raddr_a[3:0]] : 32'd0;
+wire [31:0] q_b = rf_written[raddr_b[3:0]] ? bank_b[raddr_b[3:0]] : 32'd0;
+assign rdata_a = (raddr_a == 4'd15) ? sp_active : q_a;
+assign rdata_b = (raddr_b == 4'd15) ? sp_active : q_b;
 
 integer i;
 always @(posedge clk) begin
 	if (!nreset) begin
-		for (i = 0; i < 8; i = i + 1) dreg[i] <= 0;
-		for (i = 0; i < 7; i = i + 1) areg[i] <= 0;
+		rf_written <= 0;
+		dbg_shadow[0] <= 0; dbg_shadow[1] <= 0;
+		dbg_shadow[2] <= 0; dbg_shadow[3] <= 0;
 		usp <= 0;
 		isp <= 0;
 		msp <= 0;
 	end
 	else if (ce) begin
 		if (we) begin
-			if (!waddr[3])            dreg[waddr[2:0]] <= wdata;
-			else if (waddr[2:0] != 7) areg[waddr[2:0]] <= wdata;
+			if (waddr != 4'd15) begin
+				bank_a[waddr] <= wdata;
+				bank_b[waddr] <= wdata;
+				rf_written[waddr] <= 1'b1;
+				// the halt beacon's fixed taps would each need their own
+				// mirrored bank; four shadow words are cheaper
+				if (waddr == 4'd0) dbg_shadow[0] <= wdata;
+				if (waddr == 4'd1) dbg_shadow[1] <= wdata;
+				if (waddr == 4'd2) dbg_shadow[2] <= wdata;
+				if (waddr == 4'd8) dbg_shadow[3] <= wdata;
+			end
 			else begin
 				case (sp_sel)
 					2'd0:    usp <= wdata;
@@ -102,10 +123,10 @@ assign usp_q = usp;
 assign isp_q = isp;
 assign msp_q = msp;
 
-assign dbg_d0 = dreg[0];
-assign dbg_d1 = dreg[1];
-assign dbg_d2 = dreg[2];
-assign dbg_a0 = areg[0];
+assign dbg_d0 = dbg_shadow[0];
+assign dbg_d1 = dbg_shadow[1];
+assign dbg_d2 = dbg_shadow[2];
+assign dbg_a0 = dbg_shadow[3];
 assign dbg_a7 = sp_active;
 
 endmodule

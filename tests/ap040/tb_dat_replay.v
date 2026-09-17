@@ -254,9 +254,11 @@ always @(posedge clk) begin
 		else if (cap_pend2 && clkena_in) begin
 			cap_pend2 <= 0;
 			for (ci = 0; ci < 8; ci = ci + 1) begin
-				cap_regs[ci] <= dut.core.regfile.dreg[ci];
+				cap_regs[ci] <= dut.core.regfile.rf_written[ci]
+				                ? dut.core.regfile.bank_a[ci] : 32'd0;
 				cap_regs[8+ci] <= (ci == 7) ? dut.core.regfile.usp
-				                                : dut.core.regfile.areg[ci];
+				                                : (dut.core.regfile.rf_written[8+ci]
+				                                   ? dut.core.regfile.bank_a[8+ci] : 32'd0);
 			end
 		end
 		if (dut.core.state != S_EXC0)
@@ -655,8 +657,16 @@ task inject_state;
 				write_byte(i_ssp + ii, rd8(i_regs[15] + ii));
 		end
 		for (ii = 0; ii < 8; ii = ii + 1) begin
-			dut.core.regfile.dreg[ii] = i_regs[ii];
-			if (ii < 7) dut.core.regfile.areg[ii] = i_regs[8+ii];
+			// the register file is a memory now: both mirrored banks, and
+			// the written vector that stands in for its reset
+			dut.core.regfile.bank_a[ii] = i_regs[ii];
+			dut.core.regfile.bank_b[ii] = i_regs[ii];
+			dut.core.regfile.rf_written[ii] = 1'b1;
+			if (ii < 7) begin
+				dut.core.regfile.bank_a[8+ii] = i_regs[8+ii];
+				dut.core.regfile.bank_b[8+ii] = i_regs[8+ii];
+				dut.core.regfile.rf_written[8+ii] = 1'b1;
+			end
 			dut.core.g_fpu.fpu.fr_s[ii] = i_fe[ii][15];
 			dut.core.g_fpu.fpu.fr_e[ii] = i_fe[ii][14:0];
 			dut.core.g_fpu.fpu.fr_m[ii] = i_fm[ii];
