@@ -367,38 +367,53 @@ the queue and the bus adapter, and that is the piece worth keeping: on
 this design, anything inserted into the master-side address/data path is
 worth about 1.1 ns, and a queue's head belongs in flops.
 
-It is still not shipped, for two independent reasons:
+It is not shipped, on a judgement rather than a disqualification:
 
-- the board says the queue is worth nothing (above, 8,492 vs 8,553), so
-  there is nothing to buy;
-- it costs margin and area for that nothing: +0.095 against `33e173e22`'s
-  +0.476 is 0.38 ns of headroom given up, and 39,022 ALMs against 38,846.
+- the board gives +0.7 % (8,613 vs 8,553), which is real but an order of
+  magnitude under the bench and not separable from run-to-run noise
+  without repeats;
+- it costs 0.38 ns of margin (+0.095 against `33e173e22`'s +0.476) and
+  176 ALMs (39,022 against 38,846) to buy that.
+
+That trade is available to revisit -- it is a live option, not a dead
+end.  Repeat XSysInfo runs on both images would settle whether the
++0.7 % is real; if it is, the question becomes whether 0.38 ns of
+headroom is worth less than 0.7 %.
 
 Sim-complete and timing-clean, and parked deliberately: `queue-outreg`
 (`529e07918`, md5 921e6701b85be987b916733b5b403f58).  If the store path is
 ever revisited -- a wider bus, a different controller -- this is the
 structure to start from, not the plain FIFO.
 
-### The queue on the board: no benefit, and the bench said otherwise (2026-09-18)
+### The queue on the board: +0.7 %, against a predicted +8.8 % (2026-09-18)
 
-The plain-FIFO image was flashed deliberately despite failing setup by
-1.015 ns, to find out what the queue is worth before spending more on
-making it fit.  Same XSysInfo, same OS, GuardianAngel loaded:
+Measured twice, and the first measurement was taken on a platform that
+could not support it.  The plain-FIFO image was flashed despite failing
+setup by 1.015 ns, to price the queue before spending more on making it
+fit; the output-registered build then gave a timing-clean image and the
+same measurement again.  Same XSysInfo, same OS, GuardianAngel loaded:
 
-| | `33e173e22` (timing-clean) | queue `6483ba7a7` (setup -1.015) |
-|---|---:|---:|
-| Dhrystones | 8,553 | **8,492** |
-| MIPS | 4.86 | 4.83 |
-| MFLOPS | 2.94 | 2.94 |
-| CHIP / FAST / ROM MB/s | 5.04 / 7.45 / 8.53 | 5.06 / 7.41 / 8.54 |
+| | `33e173e22` (clean) | queue-outreg `529e07918` (clean) | plain FIFO `6483ba7a7` (setup -1.015) |
+|---|---:|---:|---:|
+| Dhrystones | 8,553 | **8,613** | 8,492 |
+| MIPS | 4.86 | 4.90 | 4.83 |
+| MFLOPS | 2.94 | 2.94 | 2.94 |
+| CHIP / FAST / ROM MB/s | 5.04 / 7.45 / 8.53 | 5.04 / 7.44 / 8.54 | 5.06 / 7.41 / 8.54 |
 
-Every row is inside ~1 %.  The queue is worth NOTHING on this machine,
-against the SDRAM bench's -8.1 % cycles (which would be +8.8 % on a rate).
-The -0.7 % is not a regression: there is no repeat-run variance figure for
-XSysInfo, so "no change" is the reading.  A bitstream that misses setup is
-not a platform to measure on in principle -- but a setup violation
-corrupts data rather than slowing execution, and the machine ran clean, so
-the figure is what the design does and it is certainly not +8 %.
+**On the trustworthy image the queue is worth +0.7 %**, not the -0.7 %
+the failing one showed and not the +8.8 % the bench implied.  The reading
+taken here first -- "the queue is worth nothing" -- was wrong in sign, and
+wrong because it came from a bitstream that misses setup.  The reasoning
+that excused it (a setup violation corrupts rather than slows) does not
+survive contact with the data: the two queue images differ by 1.4 % in the
+same direction as their timing, so the failing one was degraded, slowed,
+or both.  A bitstream that does not close is not a measurement platform
+for anything, including the question of what it costs to close it.
+
+The size of the gain is still the story.  +0.7 % against a predicted
++8.8 % is an order of magnitude, and without a repeat-run variance figure
+for XSysInfo the gain is not cleanly separable from noise -- the two queue
+images alone span 1.4 %.
 
 Why: the real memory path already buffers writes.  The RAM controllers'
 own write path and `cpu_cache_new` absorb stores at a rate a CPU-side
@@ -414,9 +429,10 @@ serving:
 |---|---:|---:|
 | non-blocking drain | -2.0 % | **+15.6 %** |
 | hit in the compare cycle | -11.2 % | **+13.3 %** |
-| four-entry store queue | -8.1 % | **~0 %** |
+| four-entry store queue | -8.1 % | **+0.7 %** |
 
-It underpredicted twice and overpredicted once.  A bench number is a
+It underpredicted twice and overpredicted once, the last by an order of
+magnitude.  A bench number is a
 reason to build, never a reason to believe; only the board closes a
 measurement.  That is what the store-buffer line cost to establish, and it
 is why this line stops here rather than at another revision of the FIFO.
