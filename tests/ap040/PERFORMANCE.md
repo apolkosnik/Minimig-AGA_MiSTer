@@ -357,6 +357,21 @@ the one already described under "Posted stores": a write that bus-errors
 below the MMU is reported after the core has moved on, which on Minimig is
 only a timeout on a controller that has stopped answering.
 
+**A deeper queue, tried and dropped (2026-09-18).**  The chip-bench profile
+suggested it: the next store already waiting in 91 % of drain cycles.  A
+four-entry FIFO in place of the single register (same hold rules: a store
+waits only for a free slot, everything else for an empty queue) measured
+core bench 908,828 -> 906,420 (-0.3 %), SDRAM bench 6,045,023 -> 6,045,023
+(identical to the cycle: through the controller's write path a drain is
+over before the next store arrives, so one entry is never full), chip-RAM
+bench 5,427,232 -> 5,420,816 (-0.1 %: 1,604 stores were captured into a
+non-empty queue, but the bus they are waiting for is saturated either way,
+so capturing early only moves the wait to whatever comes next).  The
+profile's 91 % was true and was not a lever: on chip RAM the bus is the
+bottleneck, on Fast RAM the queue never fills.  Not kept.  If the board
+disagrees with the SDRAM bench here, this is the experiment to repeat with
+its own numbers.
+
 ## The boot that was never a boot (2026-09-17)
 
 `f53c044b0` runs, and GuardianAngel does not lock the machine up, which puts
