@@ -147,6 +147,16 @@ reg [31:0] itt0, itt1, dtt0, dtt1;
 reg [31:0] mmusr;
 reg [31:0] urp, srp;
 reg [15:0] ir;
+// CCR computed by an instruction whose destination is MEMORY, held until
+// that write is acknowledged.  Committing it at S_EXEC and then issuing the
+// write meant a write fault stacked an SR the instruction had already
+// modified: RTE restored it and the retry re-read its own output.  NEGX and
+// ROXL consume X, so they came back $FFFFFFFE and $0001 instead of
+// $FFFFFFFF and $0000.  Whole-instruction retry needs the pre-instruction
+// CCR to still be there, so the commit waits for the write, and exception
+// entry discards it.
+reg        fl_pend;
+reg  [4:0] fl_pend_v;
 // FPGA power-up distinguishes the first (cold) reset from later RSTI
 // assertions.  The 68040 preserves MMU register contents on reset except for
 // the E bits in TC and the four TTRs.
@@ -2094,6 +2104,7 @@ always @(posedge clk) begin
 		t_a <= 0; t_b <= 0; srop_kind <= 0; srop_sr <= 0;
 		mvc_dir <= 0; fc_ovr_v <= 0; fc_ovr <= 0;
 		lk_cyc <= 0; aer_lk <= 0; aer_m16 <= 0; aer_tt <= 0; aer_wd <= 0;
+		fl_pend <= 0; fl_pend_v <= 0;
 		m16_form <= 0; m16_dst_rn <= 0; m16_src <= 0; m16_dst <= 0;
 		m16_an <= 0; m16_idx <= 0; m16_rd_done <= 0;
 		for (li = 0; li < 4; li = li + 1) m16buf[li] <= 0;
@@ -2444,6 +2455,11 @@ always @(posedge clk) begin
 					else aerr_start;
 				end
 				else if (d_ack) begin
+					// The write landed, so the flags it computed are safe to
+					// commit now (fl_pend).  Before fetch_next, so a trace or
+					// interrupt taken at this boundary stacks the completed
+					// instruction's CCR.
+					if (fl_pend) begin sr[4:0] <= fl_pend_v; fl_pend <= 0; end
 					// a store that ends its instruction dispatches the
 					// successor from here rather than through S_NEXT
 					if (r_m_ret == S_NEXT) fetch_next;
@@ -2750,7 +2766,15 @@ always @(posedge clk) begin
 					end
 
 					default: begin // EK_ALU
-						if (p_flags) sr[4:0] <= alu_fl;
+						// a memory destination commits its flags when the
+						// write lands (fl_pend), not here
+						if (p_flags) begin
+							if (!p_wbsup && p_dst == DK_MEM) begin
+								fl_pend   <= 1;
+								fl_pend_v <= alu_fl;
+							end
+							else sr[4:0] <= alu_fl;
+						end
 						if (p_wbsup) fetch_next;
 						else case (p_dst)
 							DK_MEM: mwr(dst_addr, p_dsize, alu_res, S_NEXT);
@@ -2775,25 +2799,39 @@ always @(posedge clk) begin
 			//--------------------------------------------------------- shifts
 			S_SHIFT: begin
 				if (sh_cnt == 6'd0) begin
-					sr[4] <= sh_fl[4];
-					sr[3] <= (op_size == `AP040_SZ_B) ? sh_val[7] :
-					         (op_size == `AP040_SZ_W) ? sh_val[15] : sh_val[31];
-					sr[2] <= ((sh_val & ((op_size == `AP040_SZ_B) ? 32'hFF :
-					          (op_size == `AP040_SZ_W) ? 32'hFFFF : 32'hFFFFFFFF)) == 0);
-					sr[1] <= sh_vacc;
-					// zero count: C=0 for shifts/rotates, C=X for ROXx
-					sr[0] <= sh_any ? sh_fl[0] : (sh_rox ? sh_fl[4] : 1'b0);
+					// S_SHIFT_WB writes memory unless the destination is a
+					// register, and ROXL/ROXR consume X: defer as EK_ALU does
+					if (p_dst != DK_REG) begin
+						fl_pend <= 1;
+						fl_pend_v <= {sh_fl[4],
+						              (op_size == `AP040_SZ_B) ? sh_val[7] :
+						              (op_size == `AP040_SZ_W) ? sh_val[15] : sh_val[31],
+						              ((sh_val & ((op_size == `AP040_SZ_B) ? 32'hFF :
+						               (op_size == `AP040_SZ_W) ? 32'hFFFF : 32'hFFFFFFFF)) == 0),
+						              sh_vacc,
+						              sh_any ? sh_fl[0] : (sh_rox ? sh_fl[4] : 1'b0)};
+					end
+					else begin
+						sr[4] <= sh_fl[4];
+						sr[3] <= (op_size == `AP040_SZ_B) ? sh_val[7] :
+						         (op_size == `AP040_SZ_W) ? sh_val[15] : sh_val[31];
+						sr[2] <= ((sh_val & ((op_size == `AP040_SZ_B) ? 32'hFF :
+						          (op_size == `AP040_SZ_W) ? 32'hFFFF : 32'hFFFFFFFF)) == 0);
+						sr[1] <= sh_vacc;
+						// zero count: C=0 for shifts/rotates, C=X for ROXx
+						sr[0] <= sh_any ? sh_fl[0] : (sh_rox ? sh_fl[4] : 1'b0);
+					end
 					state <= S_SHIFT_WB;
 				end
 				else begin
 					// single-cycle barrel: the ALU composed the whole count,
 					// commit value and flags directly
 					sh_val <= alu_res;
-					sr[4] <= alu_fl[4];
-					sr[3] <= alu_fl[3];
-					sr[2] <= alu_fl[2];
-					sr[1] <= alu_fl[1];
-					sr[0] <= alu_fl[0];
+					if (p_dst != DK_REG) begin
+						fl_pend   <= 1;
+						fl_pend_v <= alu_fl[4:0];
+					end
+					else sr[4:0] <= alu_fl[4:0];
 					state <= S_SHIFT_WB;
 				end
 			end
@@ -6350,6 +6388,10 @@ always @(posedge clk) begin
 		if (e_fmt_c == 4'd2) exc_f2 <= 1;
 		if (e_fmt_c == 4'd3) exc_f3 <= 1;
 		exc_is_irq <= 0; exc_pass2 <= 0;
+		// Flags an aborted instruction had computed but not committed are
+		// discarded: the frame must carry the PRE-instruction CCR, because
+		// the instruction is retried whole (fl_pend).
+		fl_pend <= 0;
 		// A T0 trace does NOT survive an exception on the 68040.  This
 		// used to arm one for illegal/privilege/A-line/F-line, reading
 		// WinUAE's Exception_cpu_oldpc as if every exception ran through
