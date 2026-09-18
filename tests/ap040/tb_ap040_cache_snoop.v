@@ -106,8 +106,17 @@ wire ce = ce_run && (CE_DIV == 1 || ce_ph == 2'd0);
 //                     that appears only when this AND a lookup term are
 //                     blinded shows the two overlap on that sequence; it does
 //                     not show the lookup term independently necessary.
+// +inj_dma_snoop: drop the snoop's invalidate for exactly as long as a
+// posted store is pending -- the failure T15 exists to catch, "the chipset
+// wrote memory and the CPU never learned of it because it was busy
+// draining a write of its own".  T15 must FAIL under this; if it does not,
+// it is not testing what it claims to.  The rest of the suite is not
+// disturbed, because outside a pending store sb_v is low and the
+// invalidate is untouched.
+reg inj_dma_snoop = 0;
 reg inj_acc_settle = 0, inj_acc_whole = 0, inj_look_whole = 0, inj_fillguard = 0;
 initial begin
+	inj_dma_snoop  = $test$plusargs("inj_dma_snoop");
 	inj_acc_settle = $test$plusargs("inj_acc_settle");
 	inj_acc_whole  = $test$plusargs("inj_acc_whole");
 	inj_look_whole = $test$plusargs("inj_look_whole");
@@ -121,6 +130,8 @@ reg ce_d = 0;
 always @(posedge clk) ce_d <= ce;
 always @(ce_d)
 	if (inj_acc_settle) begin if (ce_d) force dut.snoop_look_row_acc = 1'b0; else release dut.snoop_look_row_acc; end
+always @(dut.sb_v)
+	if (inj_dma_snoop) begin if (dut.sb_v) force dut.snoop_wr = 1'b0; else release dut.snoop_wr; end
 always @(dut.rd_accept)
 	if (inj_acc_whole) begin if (dut.rd_accept) force dut.snoop_look_row_acc = 1'b0; else release dut.snoop_look_row_acc; end
 always @(dut.cst)
@@ -593,6 +604,30 @@ end
 // there, so it waits for the drain first -- otherwise the store drains over
 // the change and the cache correctly returns the store, failing the test's
 // own assumption rather than the cache.
+// A chipset/DMA write, as one modelled action: the backing memory changes
+// and the snoop follows it.  Every test above instead sets mem[] by hand at
+// a moment of its own choosing and pulses snoop separately -- always with
+// the CPU quiescent -- so a DMA write landing while a POSTED CPU store has
+// not yet reached memory was never exercised.  That window is open in the
+// shipped image (POST_STORES = 1), which is why this is worth testing
+// whatever happens to the store queue.
+//
+// skew delays the snoop behind the memory write the way the real path does:
+// the chipset write lands in the controller, and the wrapper's CDC
+// (chip_snoop_tgl -> two flops -> s_stb) delivers the invalidate a few
+// cycles later.  skew 0 is the simultaneous case.
+task dma_write;
+	input [31:0] a;
+	input [31:0] d;
+	input integer skew;
+	integer k;
+	begin
+		mem[a[15:2]] = d;
+		for (k = 0; k < skew; k = k + 1) @(negedge clk);
+		snoop(a);
+	end
+endtask
+
 task wait_drain;
 	integer guard;
 	begin
@@ -1256,6 +1291,84 @@ initial begin
 		end
 		mem_lat = 2'd2;
 	end
+
+	//------------------------------------------------------------------
+	// T15: a chipset write against a CPU store that has not reached
+	// memory.  The snoop tests above run with the CPU quiescent; this one
+	// opens the window posting creates and drives a DMA write into it,
+	// swept across the whole drain at every memory latency.
+	//
+	// The invariant is NOT who wins.  Two bus masters writing the same
+	// address race by nature and either order is legal, so a test that
+	// demanded one would be asserting a policy the hardware never
+	// promised.  What the machine must never do is end up INCONSISTENT:
+	// whatever the CPU reads afterwards has to be what memory holds.  A
+	// cache that kept the copy it merged at capture while memory held the
+	// DMA's word would serve its own stale value indefinitely, and no
+	// existing test could see it.
+	//------------------------------------------------------------------
+	for (i = 0; i < 4; i = i + 1) begin
+		mem_lat = i;
+		for (off = 0; off < 10; off = off + 1) begin
+			// (a) same address: the CPU's store and the DMA's write
+			// collide.  Afterwards the CPU's view and memory must agree,
+			// and the value must be one of the two that were written --
+			// never a third.
+			expect_read(32'h0000_8000, mem[32'h8000>>2], 15);
+			cpu_write(32'h0000_8000, 32'hC0C0_0000 + (i << 8) + off);
+			dma_write(32'h0000_8000, 32'hD0D0_0000 + (i << 8) + off, off);
+			wait_drain;
+			cpu_read(32'h0000_8000, d);
+			if (d !== mem[32'h8000>>2]) begin
+				$display("FAIL test 15a (latency %0d, skew %0d): CPU reads %h, memory holds %h",
+				         i, off, d, mem[32'h8000>>2]);
+				errors = errors + 1;
+			end
+			if (d !== 32'hC0C0_0000 + (i << 8) + off &&
+			    d !== 32'hD0D0_0000 + (i << 8) + off) begin
+				$display("FAIL test 15a (latency %0d, skew %0d): CPU reads %h, neither the store %h nor the DMA %h",
+				         i, off, d, 32'hC0C0_0000 + (i << 8) + off, 32'hD0D0_0000 + (i << 8) + off);
+				errors = errors + 1;
+			end
+
+			// (b) the same LINE, a different longword: the store merges a
+			// whole longword into the line and the snoop clears the set,
+			// so neither write may take the other's word with it.  Both
+			// must stand, and the CPU must see both.
+			expect_read(32'h0000_8100, mem[32'h8100>>2], 15);
+			cpu_write(32'h0000_8104, 32'hC1C1_0000 + (i << 8) + off);
+			dma_write(32'h0000_8100, 32'hD1D1_0000 + (i << 8) + off, off);
+			wait_drain;
+			if (mem[32'h8100>>2] !== 32'hD1D1_0000 + (i << 8) + off) begin
+				$display("FAIL test 15b (latency %0d, skew %0d): the DMA word was lost, memory holds %h",
+				         i, off, mem[32'h8100>>2]);
+				errors = errors + 1;
+			end
+			if (mem[32'h8104>>2] !== 32'hC1C1_0000 + (i << 8) + off) begin
+				$display("FAIL test 15b (latency %0d, skew %0d): the store was lost, memory holds %h",
+				         i, off, mem[32'h8104>>2]);
+				errors = errors + 1;
+			end
+			expect_read(32'h0000_8100, 32'hD1D1_0000 + (i << 8) + off, 15);
+			expect_read(32'h0000_8104, 32'hC1C1_0000 + (i << 8) + off, 15);
+
+			// (c) a DMA write to ANOTHER line while a store is in flight.
+			// A miss is held behind the drain, so the refill happens after
+			// the store lands: the hold must not let the read be satisfied
+			// from a line the snoop has already killed.
+			expect_read(32'h0000_8200, mem[32'h8200>>2], 15);
+			cpu_write(32'h0000_8300, 32'hC2C2_0000 + (i << 8) + off);
+			dma_write(32'h0000_8200, 32'hD2D2_0000 + (i << 8) + off, off);
+			wait_drain;
+			expect_read(32'h0000_8200, 32'hD2D2_0000 + (i << 8) + off, 15);
+			if (mem[32'h8300>>2] !== 32'hC2C2_0000 + (i << 8) + off) begin
+				$display("FAIL test 15c (latency %0d, skew %0d): the store was lost, memory holds %h",
+				         i, off, mem[32'h8300>>2]);
+				errors = errors + 1;
+			end
+		end
+	end
+	mem_lat = 2'd2;
 
 `ifdef SNOOP_MIXED_X
 	//------------------------------------------------------------------

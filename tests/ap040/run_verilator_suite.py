@@ -108,7 +108,9 @@ UNIT_RUNS = {
     # under posting is identical to the unposted one -- acc_whole and
     # acc_settle fail at divide 1, look_whole at divide 4 -- so the two
     # must-fail controls are carried here as well.
-    "cache_snoop_post":     U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"], [("cache_snoop_post", [], False)]),
+    "cache_snoop_post":     U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"],
+                              [("cache_snoop_post", [], False),
+                               ("cache_snoop_post_neg_dma", ["+inj_dma_snoop"], True)]),
     "cache_snoop_post_ce4": U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"], [("cache_snoop_post_ce4", [], False)]),
     "cache_snoop_post_x":   U("tb_ap040_cache_snoop", [HERE / "tb_ap040_cache_snoop.v", HERE / "sim_dpram.v", AP / "ap040_cache.v"],
                               [("cache_snoop_post_x", [], False),
