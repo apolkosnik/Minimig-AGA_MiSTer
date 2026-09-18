@@ -50,6 +50,9 @@ parameter FAST_CLOCK = 0;
 // Minimig.sv did, overridable to run the legacy clocking with it
 parameter READ_PIPE = FAST_CLOCK;
 parameter CORE_DIV = 4;
+// POST_STORES follows cpu_wrapper's shipping value; 0 runs the same
+// programs with every store blocking, as the CPU's own default does.
+parameter POST_STORES = 1;
 wire cpu_clk = FAST_CLOCK ? clk113 : clk28;
 
 reg ph1 = 0, ph2 = 0;
@@ -174,7 +177,8 @@ reg        ipl_set_w = 0, ipl_arm_w = 0;
 reg  [2:0] ipl_set_v = 0;
 reg [15:0] ipl_arm_v = 0;
 
-cpu_wrapper #(.FAST_CLOCK(FAST_CLOCK), .CORE_DIV(CORE_DIV)) cpu
+cpu_wrapper #(.FAST_CLOCK(FAST_CLOCK), .CORE_DIV(CORE_DIV),
+              .POST_STORES(POST_STORES)) cpu
 (
 	.snoop_tgl(1'b0),
 	.snoop_adr(24'd0),

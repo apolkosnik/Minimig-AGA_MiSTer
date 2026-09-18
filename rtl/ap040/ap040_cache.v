@@ -59,6 +59,11 @@ module ap040_cache
 	input             c_post_ok,
 	output            c_ack,
 	output     [31:0] c_rdata,
+	// A posted store is draining: the master side is its own until the
+	// acknowledge.  The wrapper uses this to keep the core ticking through
+	// the drain (it is waiting on nothing the bus is doing) and to hold the
+	// table walker behind it.
+	output            sb_busy,
 
 	// master side (to the bus adapter)
 	output            m_req,
@@ -409,6 +414,19 @@ wire fill_active = (cst == C_FILL);
 // acknowledged -- so posting needs the request CAPTURED, not just an earlier
 // ack.  sb_v also steers the update-on-hit merge, which lands on the memory
 // acknowledge and would otherwise merge a c_wdata the core has dropped.
+//
+// THE DRAIN IS NOT A STATE.  sb_v owns the master side on its own, from the
+// capture until the memory acknowledge, and the FSM leaves C_PASS the cycle
+// after the merge.  C_IDLE and C_LOOK keep serving cacheable HITS meanwhile
+// -- an instruction fetch or a load that finds its line needs nothing the
+// drain is using -- and only what does need the master side waits for
+// !sb_v: a miss (C_LOOK holds before C_FILL), a bypassed access and the next
+// store (both held in C_IDLE).  That ordering is also what keeps the buffer
+// architecturally invisible: a read that misses the line a store just
+// touched refills only after the store has landed in memory.  The first
+// version kept the FSM in C_PASS for the whole drain, and every fetch during
+// it waited: on real memory that gave back the entire gain (PERFORMANCE.md,
+// "Posted stores, built and measured").
 reg         sb_v;
 reg  [31:0] sb_addr, sb_wdata;
 reg   [1:0] sb_size;
@@ -428,7 +446,7 @@ reg        pass_ci_chk;   // first C_PASS cycle of a CI read: tags valid
 reg        ci_inv_pend;   // a CI hit awaits its row invalidate
 reg  [6:0] ci_inv_row;
 
-assign m_req   = fill_active ? 1'b1 : (pass_active ? (sb_v | c_req) : 1'b0);
+assign m_req   = fill_active ? 1'b1 : sb_v ? 1'b1 : (pass_active ? c_req : 1'b0);
 assign m_write = fill_active ? 1'b0 : (sb_v ? 1'b1 : c_write);
 assign m_instr = sb_v ? 1'b0 : c_instr;
 assign m_size  = fill_active ? `AP040_SZ_L : (sb_v ? sb_size : c_size);
@@ -440,6 +458,7 @@ assign m_fc    = sb_v ? sb_fc : c_fc;
 // A posted store was acknowledged when it was captured, so C_PASS must not
 // hand the core the drain's acknowledge as well.
 assign c_ack   = pass_active ? (sb_v ? ack_r : m_ack) : ack_r;
+assign sb_busy = sb_v;
 assign c_rdata = pass_active ? m_rdata : rdata_r;
 
 assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
@@ -447,7 +466,7 @@ assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
                    !ci_inv_pend && !store_inv_lost;
 assign st_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
                    c_req && !ack_r && !err_hold && c_write && fits_long &&
-                   !store_inv_lost;
+                   !store_inv_lost && !sb_v;
 
 assign tag_ridx  = a_row;
 wire [87:0] tags_next = (r_way == 2'd0) ? {tag_q[87:22], r_tag} :
@@ -472,7 +491,7 @@ assign tag_wdat  = (cst == C_SWEEP) ? {ROWW{1'b0}}
 // Only a store that does not fit in one longword clears rows; a fitting
 // one is merged into its line on a hit instead (st_upd below).
 wire store_inv = ((cst == C_IDLE) && c_req && c_write && !ack_r &&
-                  !store_inv_lost && !fits_long) ||
+                  !store_inv_lost && !sb_v && !fits_long) ||
                  ((cst == C_PASS) && winv_pend) ||
                  (cst == C_WINV);
 // Snoop invalidates are FREE-RUNNING (5.1): a chipset write must land
@@ -593,6 +612,14 @@ always @(posedge clk) begin
 		pass_first <= 0;
 		cinv_done <= 0;
 		if (ci_inv) ci_inv_pend <= 0;
+		// The drain owns the master side while sb_v is set, so this
+		// acknowledge (or error) is its own whatever state the FSM is
+		// in.  A fill or a pass is never issued while it is set, so
+		// nothing else can be on the bus to claim it.  A drain that
+		// bus-errors is dropped here: the core has been released and
+		// samples m_err itself, which is the imprecision c_post_ok
+		// promises the platform cannot produce.
+		if (sb_v && (m_ack || m_err)) sb_v <= 0;
 
 		// A snoop displaced a store's first-set invalidate in its
 		// acceptance cycle: remember it and issue it as soon as port B
@@ -602,7 +629,7 @@ always @(posedge clk) begin
 		// (store_inv's !store_inv_lost term), so the single slot cannot
 		// be overwritten.
 		if (snoop_wr && (cst == C_IDLE) && c_req && c_write && !ack_r &&
-		    !store_inv_lost && !fits_long) begin
+		    !store_inv_lost && !sb_v && !fits_long) begin
 			store_inv_lost <= 1;
 			store_inv_set  <= c_addr[9:4];
 		end
@@ -653,10 +680,13 @@ always @(posedge clk) begin
 				else if (c_req && !ack_r && !err_hold &&
 				         (c_write || (!ci_inv_pend && !store_inv_lost))) begin
 					if (c_write) begin
-						if (store_inv_lost) begin
+						if (store_inv_lost || sb_v) begin
 							// port B owes a recorded invalidate: hold the
 							// store one cycle so its own invalidate cannot
-							// be skipped (the request is level-held)
+							// be skipped (the request is level-held).
+							// Or the single-entry buffer is still
+							// draining: hold until it has landed, which
+							// keeps stores in order on the bus.
 						end
 						else begin
 						// write-through.  Port B clears the set this store
@@ -699,11 +729,15 @@ always @(posedge clk) begin
 					else if (bypass) begin
 						// the tag row read runs in parallel here too, so
 						// a cache-inhibited read can detect and kill a
-						// resident line while it bypasses
-						r_row <= a_row;
-						r_tag <= a_tag;
-						pass_ci_chk <= c_nocache && !c_write;
-						cst <= C_PASS;
+						// resident line while it bypasses.  Held while a
+						// store drains: the pass needs the master side,
+						// and an uncached read must not overtake a write.
+						if (!sb_v) begin
+							r_row <= a_row;
+							r_tag <= a_tag;
+							pass_ci_chk <= c_nocache && !c_write;
+							cst <= C_PASS;
+						end
 					end
 					else begin
 						// cacheable read: the tag row read runs in parallel
@@ -732,9 +766,18 @@ always @(posedge clk) begin
 					end
 				end
 				// the store lookup is over with the pass, merged or not
-				if (m_err || m_ack || (sb_v && pass_first)) st_chk <= 0;
-				if (m_ack || m_err) sb_v <= 0;
-				if (m_err) begin
+				if (m_err || m_ack || sb_v) st_chk <= 0;
+				if (sb_v) begin
+					// A posted store: this is its merge cycle
+					// (pass_first), the core was released at capture,
+					// and the drain now holds the master side by
+					// itself.  Back to C_IDLE so hits can be served
+					// under it; a still-owed second-line invalidate
+					// goes through C_WINV as for any store.
+					cst <= (winv_pend && (s_stb || store_inv_lost))
+					       ? C_WINV : C_IDLE;
+				end
+				else if (m_err) begin
 					// a passed access faulted: release the bus, but a
 					// still-owed invalidate is honoured (invalidating
 					// more is always safe under write-through).  A POSTED
@@ -795,13 +838,22 @@ always @(posedge clk) begin
 					// corrupted; in a faithful sim it picked X, and C_TAGW
 					// then composed an X row.  A rotating fallback keeps
 					// fairness and removes the dependence on garbage.
-					r_way <= (look_snooped || snoop_look_row_look)
-					         ? way_fallback : tag_q[93:92];
-					if (look_snooped || snoop_look_row_look)
-						way_fallback <= way_fallback + 2'd1;
-					r_beat <= 0;
-					r_issued <= 0;
-					cst <= C_FILL;
+					// A miss needs the master side; while a store drains
+					// it holds here.  The row cannot turn into a hit
+					// meanwhile (nothing but a fill validates a line,
+					// and a snoop that lands is latched in look_snooped),
+					// so the decision stands and the refill is issued
+					// the cycle after the drain's acknowledge -- which
+					// also orders it behind the write it may depend on.
+					if (!sb_v) begin
+						r_way <= (look_snooped || snoop_look_row_look)
+						         ? way_fallback : tag_q[93:92];
+						if (look_snooped || snoop_look_row_look)
+							way_fallback <= way_fallback + 2'd1;
+						r_beat <= 0;
+						r_issued <= 0;
+						cst <= C_FILL;
+					end
 				end
 			end
 

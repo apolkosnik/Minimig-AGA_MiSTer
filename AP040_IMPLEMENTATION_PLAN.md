@@ -1439,6 +1439,18 @@ not traded for 0.1%.  After that, the dispatch floor (S_DECODE one cycle per
 instruction, S_EXEC 13.4%), which is this section's forwarding/scoreboard
 work.
 
+LANDED (2026-09-18): the non-blocking drain, and a second lock the plan had
+not seen -- cpu_wrapper's core_enable froze the core for the whole chip-bus
+write, so the cache could not be ASKED for a hit.  The enable is split (bus
+side strict, core side runs through a drain) and the walker is ordered
+behind the buffer.  POST_STORES ships 1.  Measured: core bench -9.6% (the
+118,000 bound was 11.7%), SDRAM bench -2.0%, chip-RAM bench -0.26% -- there
+instruction fetches bypass the internal cache by design and everything
+queues on the 16-bit bus.  The chip bench's +prof shows the next lever:
+in 91% of drain cycles the NEXT store is already waiting behind the
+single-entry buffer.  A deeper buffer is the follow-up, after the board
+number.  See PERFORMANCE.md "The drain is not a state".
+
 Area: 38,750 ALMs (92%), +0.460 setup, ~3,160 free -- X2.7's "does NOT fit"
 was written at 94% and no longer binds.
 

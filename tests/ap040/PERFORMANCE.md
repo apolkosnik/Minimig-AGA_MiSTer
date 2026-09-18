@@ -305,6 +305,58 @@ image that runs, only by logic that trims away at `POST_STORES 0`, so it
 should behave identically on the board; that is an expectation, not a
 measurement, until it is booted.
 
+## The drain is not a state (2026-09-18)
+
+The store buffer from 8593a1243 kept the cache FSM in `C_PASS` for the whole
+drain, so nothing was served under it.  Two things had to move for the win
+the buffer was built for.
+
+**In the cache**, `sb_v` now owns the master side by itself, from capture to
+the memory acknowledge, and the FSM leaves `C_PASS` the cycle after the
+store's merge.  `C_IDLE` accepts cacheable reads meanwhile and `C_LOOK`
+completes their hits; only what needs the master side waits for `!sb_v`: a
+miss holds in `C_LOOK` before `C_FILL` (the decision cannot change -- only
+a fill validates a line, and a snoop that lands is latched in
+`look_snooped`), a bypassed access and the next store hold in `C_IDLE`.
+That ordering is also what keeps the buffer invisible: a read that misses
+the line a store just touched refills only after the store has landed.  The
+drain's acknowledge is consumed wherever the FSM is, because nothing else
+can be on the bus while `sb_v` is set -- the invariant the snoop bench now
+checks on every enable edge, alongside a T14 that sweeps a hit, a miss, a
+second store, a bypass, and snoops into every phase of the drain at every
+memory latency.  All eight `cst` encodings were in use; none was needed.
+
+**In the wrapper**, the core's clock enable was the second lock.
+`core_enable = core_tick && (~cpu_req | bus_complete | bus_berr)` froze the
+core, MMU and cache for the entire chip-bus write -- the cache could have
+served a hit, but no tick arrived to ask for one.  The enable is split:
+the bus side (the 16-bit adapter, `ramconsumed`, the chip stage machine,
+the fastchip crossing) keeps the original, and the core side adds
+`post_drain`, the cache's `sb_v`.  The two agree whenever the bus completes,
+so the adapter's acknowledge is consumed on exactly one tick either way.
+The MMU's table walker, which has its own port to RAM, is held behind the
+drain in the compat wrapper so a walk cannot read a descriptor the buffer
+has not yet written; only its start can be delayed, since a store cannot be
+captured while a walk is in flight.
+
+**Measured.**  Core bench (instant memory): 1,005,444 -> 908,828, **-9.6 %**,
+against -5.0 % for the blocking drain.  SDRAM bench (the controller and its
+cpu_cache_new in the loop, CPU_PHASE 3): 6,169,503 -> 6,045,023, **-2.0 %**.
+Chip bench, dhry from chip RAM: 5,441,636 -> 5,427,232, -0.26 % (fast
+clocking 4,878,224 -> 4,857,400, -0.43 %).  The chip bench's `+prof` (added for this) says why the two
+differ: the core ticks through all 845,792 drain cycles now, but in 773,582
+of them the NEXT store or a bypassed access is already waiting behind the
+single-entry buffer, and the cache sits in `C_PASS` for 76 % of the run with
+42,688 lookups in 5.4 M cycles -- from chip RAM, instruction fetches bypass
+the internal cache by design (`cache_chip`), so every fetch queues on the
+16-bit bus behind the drain.  That is the worst case, not the board's:
+Workbench runs from Fast RAM, which is in the cache window.
+
+`cpu_wrapper` ships `POST_STORES = 1`.  The exception-precision change is
+the one already described under "Posted stores": a write that bus-errors
+below the MMU is reported after the core has moved on, which on Minimig is
+only a timeout on a controller that has stopped answering.
+
 ## The boot that was never a boot (2026-09-17)
 
 `f53c044b0` runs, and GuardianAngel does not lock the machine up, which puts

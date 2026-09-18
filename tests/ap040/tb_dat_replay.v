@@ -61,7 +61,10 @@ reg  [31:0] boot_pc;
 reg  [31:0] odd_vector;
 wire        clkena_in = (busstate == 2'b01) | mem_ready;
 
-ap040_tg68k_compat dut
+// -GPOST_STORES=1 posts every store, as cpu_wrapper ships; the replay then
+// checks the same oracles with the core released at capture.
+parameter POST_STORES = 0;
+ap040_tg68k_compat #(.AP040_POST_STORES(POST_STORES)) dut
 (
 	.clk(clk), .nreset(nreset), .cache_allow_all(1'b1),
 	.cache_snoop_stb(1'b0), .cache_snoop_addr(32'd0),
@@ -70,12 +73,12 @@ ap040_tg68k_compat dut
 	.cache_z3_ena0(1'b0),
 	.cache_z3_base1(4'd0),
 	.cache_z3_ena1(1'b0),
-	.clkena_in(clkena_in),
+	.clkena_in(clkena_in), .bus_clkena_in(clkena_in),
 	.tick_in(1'b1),
 	.data_in(data_in), .ipl(ipl), .ipl_autovector(1'b1), .berr(1'b0),
 	.addr_out(addr_out), .data_write(data_write),
 	.nwr(nwr), .nuds(nuds), .nlds(nlds),
-	.busstate(busstate), .longword(longword), .nresetout(nresetout),
+	.busstate(busstate), .longword(longword), .post_drain(), .nresetout(nresetout),
 	.fc(fc),
 	.mmu_addr_log(), .mmu_addr_phys(), .mmu_cache_inhibit(),
 	.walker_req(), .walker_we(), .walker_addr(), .walker_wdat(),

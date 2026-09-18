@@ -229,8 +229,10 @@ def discover(root: Path, args) -> list[dict]:
     return slices
 
 
-def compile_rtl(work: Path, simulator: str, force=False, build_jobs=None) -> Path:
+def compile_rtl(work: Path, simulator: str, force=False, build_jobs=None, params=()) -> Path:
     sources = [HERE / "tb_dat_replay.v", *RTL_SOURCES]
+    if params:
+        force = True   # a different parameter set is a different simulator
     if simulator != "verilator":
         raise ValueError("unknown simulator %s" % simulator)
     sim = work / "obj_dir" / "tb_dat_replay"
@@ -251,6 +253,7 @@ def compile_rtl(work: Path, simulator: str, force=False, build_jobs=None) -> Pat
             "-Wno-WIDTHEXPAND", "-Wno-WIDTHTRUNC",
             "-I" + str(RTL),
         ]
+        cmd += ["-G" + p for p in params]
         cmd += [str(p) for p in sources]
     print("compile:", " ".join(cmd))
     subprocess.run(cmd, cwd=REPO, check=True)
@@ -496,6 +499,8 @@ def parser():
     ap.add_argument("--resume", action="store_true", help="skip slices whose existing log passed")
     ap.add_argument("--keep-jobs", action="store_true")
     ap.add_argument("--rebuild", action="store_true")
+    ap.add_argument("--param", action="append", default=[],
+                    help="top-level PARAM=VALUE for tb_dat_replay (e.g. POST_STORES=1)")
     return ap
 
 
@@ -528,7 +533,7 @@ def main(argv=None):
             run_work = args.work / "verilator"
             run_work.mkdir(parents=True, exist_ok=True)
             sim = compile_rtl(run_work, args.simulator, force=args.rebuild,
-                              build_jobs=args.build_jobs)
+                              build_jobs=args.build_jobs, params=args.param)
             if args.compile_only:
                 print("simulator:", sim)
                 return 0

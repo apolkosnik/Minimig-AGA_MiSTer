@@ -43,13 +43,16 @@ module cpu_wrapper
 	// stopped answering, fatal in any case.  MMU faults, write-protect
 	// included, are raised above the cache and stay precise.
 	//
-	// OFF, measured: the buffer alone is worth 0.1 % on the real memory path
-	// (chip bench dhry 5,441,636 -> 5,435,232), because the cache accepts
-	// nothing while a store drains and every instruction fetch waits behind
-	// it.  A change to exception precision is not traded for that.  Set to 1
-	// once the drain no longer blocks hits -- everything else is in place and
-	// validated under posting (53/53, six posted snoop legs, full corpus).
-	parameter POST_STORES = 0
+	// ON since the drain stopped blocking: the cache serves hits under it
+	// and the core keeps ticking through it (core_enable below).  What that
+	// is worth depends entirely on where the code runs.  From cacheable RAM
+	// (the core bench) dhry drops 9.6 %; from chip RAM, where instruction
+	// fetches bypass the internal cache and every access queues on the
+	// 16-bit bus behind the drain, 0.26 % (chip bench 5,441,636 ->
+	// 5,427,232, PERFORMANCE.md).  The board runs Workbench from Fast RAM.
+	// The exception-precision change it buys this with is the one described
+	// above, and it is the 68040's own.
+	parameter POST_STORES = 1
 )
 (
 	input             reset,
@@ -346,7 +349,21 @@ always @(posedge clk) begin
     else core_phase <= core_phase + 1'b1;
 end
 wire core_tick = !FAST_CLOCK || (core_phase == 0);
-wire core_enable = core_tick && (~cpu_req | bus_complete | bus_berr);
+// Two enables.  bus_enable is the original: the bus side -- the 16-bit
+// adapter, ramconsumed, the chip stage machine, the fastchip crossing --
+// advances only when the external bus is idle or has answered.  The core,
+// MMU and cache get core_enable, which also runs while a POSTED STORE is
+// draining (post_drain, the cache's store buffer): the core was released
+// at capture and is waiting on nothing the bus is doing, so freezing it for
+// the write's two chip-bus cycles threw away everything posting bought
+// (PERFORMANCE.md: chip bench 5,435,232 cycles, drain blocking or not).
+// The two agree whenever the bus completes, so the adapter's acknowledge is
+// consumed on exactly one tick either way; only a miss, a bypass, the next
+// store or a table walk waits, and those wait inside the cache and the
+// compat wrapper, ordered behind the drain.
+wire post_drain;
+wire bus_enable  = core_tick && (~cpu_req | bus_complete | bus_berr);
+wire core_enable = core_tick && (~cpu_req | bus_complete | bus_berr | post_drain);
 // RTG/IDE/Akiko still run at 28 MHz. A combinational write-ready means
 // "accepted on the next peripheral edge", not on the next fast CPU edge.
 // Capture the result on that edge and cross a retained acknowledgement.
@@ -375,7 +392,7 @@ generate if (FAST_CLOCK) begin : g_fastchip_cdc
         if (!reset) begin ack_s <= 0; consumed <= 0; end
         else begin
             ack_s <= {ack_s[0], ack_toggle};
-            if (core_enable && cpu_req && fastchip_pending) consumed <= ack_s[1];
+            if (bus_enable && cpu_req && fastchip_pending) consumed <= ack_s[1];
         end
     end
     assign fastchip_pending = ack_s[1] != consumed;
@@ -387,7 +404,7 @@ end else begin : g_fastchip_legacy
     assign fastchip_data_l = 16'd0;
 end endgenerate
 generate if (FAST_CLOCK) begin : g_sync_consumed
-    always @* ramconsumed = core_enable && cpu_req && ramsel_i && ramready;
+    always @* ramconsumed = bus_enable && cpu_req && ramsel_i && ramready;
 end else begin : g_async_consumed
     always @(posedge clk) begin
         if (!reset) ramconsumed <= 0;
@@ -437,6 +454,7 @@ ap040_tg68k_compat #(
 	.clk(clk),
 	.nreset(reset),
 	.clkena_in(core_enable),
+	.bus_clkena_in(bus_enable),
 	.tick_in(core_tick),
 	.cache_allow_all(1'b0),
 	.cache_snoop_stb(snoop_stb_r),
@@ -458,6 +476,7 @@ ap040_tg68k_compat #(
 	.nlds(lds_p),
 	.busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
 	.longword(longword),
+	.post_drain(post_drain),
 	.nresetout(reset_out_p),
 	.fc(),
 	.nmi_ack_toggle(nmi_ack_toggle),
@@ -714,7 +733,7 @@ always @(posedge clk or negedge reset) begin
         sample_pending <= 0; release_dly <= 0;
         c_as <= 1; c_rw <= 1; c_uds <= 1; c_lds <= 1;
     end else begin
-        if (chipready && core_enable && cpu_req && !ramsel_i && !fastchip_selack)
+        if (chipready && bus_enable && cpu_req && !ramsel_i && !fastchip_selack)
             chipready <= 0;
         if (ph2 && !ph2n) begin
             waitm <= chip_dtack;

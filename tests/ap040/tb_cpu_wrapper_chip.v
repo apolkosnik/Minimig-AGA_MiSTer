@@ -438,6 +438,59 @@ end
 
 integer errors = 0;
 integer result = 0;      // 0 running, 1 pass, 2 fail
+
+// +prof: where the CORE's cycles go on the real chip bus, by core state,
+// with the subset spent frozen (core_enable low) -- the tb_prof of
+// tb_ap040_program, on this bench's memory path.  Also how much of the
+// run a posted store is draining, how much of that the core actually
+// ticks through (the split enable), and the cache FSM's own histogram.
+integer prof_on = 0;
+integer prof_cnt [0:255];
+integer prof_stall [0:255];
+integer prof_cst [0:7];
+integer prof_drain, prof_drain_tick, prof_stores, prof_sb_hold, prof_look_hold, prof_pi;
+initial begin
+	prof_on = $test$plusargs("prof");
+	for (prof_pi = 0; prof_pi < 256; prof_pi = prof_pi + 1) begin
+		prof_cnt[prof_pi] = 0; prof_stall[prof_pi] = 0;
+	end
+	for (prof_pi = 0; prof_pi < 8; prof_pi = prof_pi + 1) prof_cst[prof_pi] = 0;
+	prof_drain = 0; prof_drain_tick = 0; prof_stores = 0; prof_sb_hold = 0; prof_look_hold = 0;
+end
+always @(posedge cpu_clk) if (prof_on && reset) begin
+	prof_cnt[dut.cpu_inst_p.core.state] = prof_cnt[dut.cpu_inst_p.core.state] + 1;
+	if (!dut.core_enable)
+		prof_stall[dut.cpu_inst_p.core.state] = prof_stall[dut.cpu_inst_p.core.state] + 1;
+	prof_cst[dut.cpu_inst_p.g_cache.cache.cst] = prof_cst[dut.cpu_inst_p.g_cache.cache.cst] + 1;
+	if (dut.post_drain) begin
+		prof_drain = prof_drain + 1;
+		if (dut.core_enable) prof_drain_tick = prof_drain_tick + 1;
+		// a store or a bypass held in C_IDLE, or a miss held in C_LOOK, by the drain
+		if (dut.core_enable && dut.cpu_inst_p.g_cache.cache.cst == 3'd0 &&
+		    dut.cpu_inst_p.g_cache.cache.c_req && !dut.cpu_inst_p.g_cache.cache.ack_r &&
+		    (dut.cpu_inst_p.g_cache.cache.c_write || dut.cpu_inst_p.g_cache.cache.bypass))
+			prof_sb_hold = prof_sb_hold + 1;
+		if (dut.core_enable && dut.cpu_inst_p.g_cache.cache.cst == 3'd1)
+			prof_look_hold = prof_look_hold + 1;
+	end
+	if (dut.core_enable && dut.cpu_inst_p.g_cache.cache.st_accept) prof_stores = prof_stores + 1;
+end
+task prof_dump;
+	integer c, tot;
+	begin
+		tot = 0;
+		for (c = 0; c < 256; c = c + 1) tot = tot + prof_cnt[c];
+		$display("PROF total %0d cycles; posted-store drain %0d cycles (%0d%%), core ticking under it %0d; stores %0d; held by the drain: store/bypass %0d cycles, miss %0d cycles",
+		         tot, prof_drain, (tot == 0) ? 0 : (prof_drain * 100) / tot, prof_drain_tick, prof_stores, prof_sb_hold, prof_look_hold);
+		$display("PROF cache cst: idle %0d look %0d ferr %0d winv %0d fill %0d tagw %0d pass %0d sweep %0d",
+		         prof_cst[0], prof_cst[1], prof_cst[2], prof_cst[3], prof_cst[4], prof_cst[5], prof_cst[6], prof_cst[7]);
+		for (c = 0; c < 256; c = c + 1)
+			if (prof_cnt[c] * 200 >= tot)   // states above 0.5 %
+				$display("PROF state %3d: %9d cycles (%2d%%), %9d frozen (%2d%%)",
+				         c, prof_cnt[c], (prof_cnt[c] * 100) / tot, prof_stall[c],
+				         (prof_cnt[c] == 0) ? 0 : (prof_stall[c] * 100) / prof_cnt[c]);
+	end
+endtask
 reg [15:0] failcode = 0;
 
 // chip RAM writes still land here, on the chip bus, as before
@@ -547,6 +600,7 @@ initial begin
 	end
 	else
 		$display("chip-bus run passed (%0d cycles)", timeout);
+		if (prof_on) prof_dump;
 
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else             $display("TEST FAILED with %0d errors", errors);

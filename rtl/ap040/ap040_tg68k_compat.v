@@ -30,6 +30,11 @@ module ap040_tg68k_compat
 	input         clk,
 	input         nreset,
 	input         clkena_in,
+	// The bus adapter's own enable.  With posted stores the core, MMU and
+	// cache keep ticking while a store drains (cpu_wrapper's core_enable
+	// adds post_drain), but the adapter must still advance only when the
+	// external bus does; tie to clkena_in where the two are not split.
+	input         bus_clkena_in,
 	input         tick_in,     // P2 tick grid (cpu_wrapper core_tick); tie 1 elsewhere
 
 	// Physical cacheability windows for the internal caches when no MMU
@@ -58,6 +63,7 @@ module ap040_tg68k_compat
 	output        nlds,
 	output [1:0]  busstate,
 	output        longword,
+	output        post_drain,   // a posted store owns the external bus
 	output        nresetout,
 	output [2:0]  fc,
 	output        nmi_ack_toggle,
@@ -71,7 +77,7 @@ module ap040_tg68k_compat
 	output [31:0] mmu_addr_phys,
 	output        mmu_cache_inhibit,
 
-	output        walker_req,
+	output        walker_req,   // held behind a draining posted store
 	output        walker_we,
 	output [31:0] walker_addr,
 	output [31:0] walker_wdat,
@@ -275,7 +281,7 @@ ap040_mmu mmu (
 	.m_ack(mm_ack),
 	.m_rdata(mm_rdata),
 
-	.walker_req(walker_req),
+	.walker_req(walker_req_mmu),
 	.walker_we(walker_we),
 	.walker_addr(walker_addr),
 	.walker_wdat(walker_wdat),
@@ -287,6 +293,16 @@ ap040_mmu mmu (
 	.cache_inhibit(mmu_cache_inhibit),
 	.m_nocache(mm_nocache)
 );
+
+// The walker's port to RAM is separate from the cache's master side, so a
+// table walk could read a descriptor the posted store buffer has not yet
+// written.  The 68040 keeps its bus in program order; so does this: the
+// walk is presented only once the drain has landed.  Only the START can
+// be delayed -- a store cannot be captured while a walk is in flight,
+// because the core is stalled on that translation -- so a request the
+// wrapper has begun serving is never withdrawn.
+wire        walker_req_mmu;
+assign      walker_req = walker_req_mmu & ~post_drain;
 
 // The MMU's table walker writes U/M bits into page descriptors over its
 // own port, behind the data cache.  Nothing else invalidates those lines,
@@ -381,6 +397,7 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.s_addr(snp_addr),
 		.c_ack(mm_ack),
 		.c_rdata(mm_rdata),
+		.sb_busy(post_drain),
 
 		.m_req(b_req),
 		.m_write(b_write),
@@ -409,6 +426,7 @@ else begin : g_nocache
 	assign mm_ack   = b_ack;
 	assign mm_rdata = b_rdata;
 	assign cinv_done = 1'b1;
+	assign post_drain = 1'b0;
 	wire unused_nc = mm_nocache | cinv_req | cinv_ic | cinv_dc |
 	                 (|cacr_out);
 end
@@ -417,7 +435,7 @@ endgenerate
 ap040_bus16_adapter bus16 (
 	.clk(clk),
 	.nreset(nreset),
-	.clkena_in(clkena_in),
+	.clkena_in(bus_clkena_in),
 
 	.mem_req(b_req),
 	.mem_berr(berr),
