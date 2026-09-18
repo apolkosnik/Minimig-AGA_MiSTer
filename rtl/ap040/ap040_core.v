@@ -1685,6 +1685,13 @@ endtask
 // access error entry: capture the fault shape from the outstanding request
 task aerr_start;
 	begin
+		// The instruction is ABORTED, so flags it computed but has not
+		// committed must not become architectural.  This path jumps
+		// straight to S_AERR0 and never reaches the e_go carrier, and the
+		// frame's own stack writes go through S_MWR -- whose acknowledge
+		// would otherwise commit them into the handler's live CCR while
+		// the stacked SR correctly holds the pre-instruction value.
+		fl_pend  <= 0;
 		aer_bus  <= berr && !mem_flt;   // physical bus error, not an ATC fault
 		// FA is the initial byte of the original transfer, even when a
 		// page-crossing access has been split and a later byte faults.
@@ -3025,7 +3032,14 @@ always @(posedge clk) begin
 				end
 			end
 
+			// Defence in depth for the same rule: several sites enter
+			// exception processing by assigning state directly rather than
+			// through exc()/e_go (the boundary interrupt and trace paths,
+			// the FPU and RTE entries).  An instruction that completed has
+			// already committed its flags, so this only ever discards those
+			// of one that did not.
 			S_EXC0: begin
+				fl_pend <= 0;
 				if (fpu_bg) state <= S_EXC0;   // FSAVE-quiescent exception
 				// An abandoned queue fetch may still be on the bus under the
 				// pre-exception function code.  Exception processing owns the
