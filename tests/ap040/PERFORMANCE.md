@@ -356,6 +356,47 @@ store-queue question the earlier measurement closed: it was taken with
 fetches bypassing the I-cache, before either acknowledge moved, and the
 core is now fast enough to fill a queue behind a slow write.
 
+### The timing wall: neither store-ack nor the queue fits (2026-09-18)
+
+Both changes are cycle-wins in simulation and neither closes at 40 MHz.
+Built individually and together, against `33e173e22`'s +0.476:
+
+| build | SDRAM dhry | setup | hold |
+|---|---:|---:|---:|
+| `33e173e22` (on the board, 8,553) | 819,995 | **+0.476** | +0.088 |
+| store-ack alone (`afc0adceb`) | -- | **-0.740** | +0.067 |
+| store-ack + queue (`047982d50`) | 736,339 | **-0.169** | -0.686 |
+| queue alone (`6483ba7a7`) | 753,867 | **-1.015** | +0.088 |
+
+Slack is not monotonic in logic here -- the queue alone is worse than the
+queue with store-ack on top -- which looks like fit noise and is not.  The
+queue-alone source was built twice, once in a fresh worktree and once in
+the main checkout whose `db/` carries every prior compile (`SMART_RECOMPILE
+ON`), and the two agree to the digit: setup -1.015, hold +0.088, 38,818
+ALMs, the same secondary rows.  Quartus is deterministic for a given
+netlist; what moves is which path the fitter leaves critical, and that is
+netlist-to-netlist sensitivity, not run-to-run variance.  A single build
+per source is therefore a real measurement -- but only of that source.
+
+Each change has its own reason:
+
+- **store-ack** OR's `st_capture` into `c_ack`, and `st_capture` is rooted
+  at `c_req` -- the MMU's combinational translation.  That is the 5.9 ns
+  path that kept the internal caches off at 114 MHz, noted in the commit
+  itself; at 40 MHz it costs 1.2 ns of setup for 2 points of the 10.
+- **the queue** turned `sb_addr`/`sb_wdata` from plain registers into 4:1
+  array reads indexed by `sb_rd`, and those drive `m_addr`/`m_wdata`
+  straight to the bus adapter and out to the RAM controllers.  A
+  combinational mux inserted into the master-side address and data path
+  costs 1.5 ns there.  The cycle win is real and the structure is wrong:
+  an output-registered FIFO (head in a flop, the mux moved to the fill
+  side) would put the bus path back on a register.  Not attempted yet.
+
+Nothing here is flashable.  `33e173e22` stands: +0.476, 8,553 Dhrystones,
+on the card.  The two commits stay on `ap040-40mhz` and the queue-alone
+rebase on the `queue-alone` branch (`6483ba7a7`), all sim-gated (suite
+53/53, snoop 15/15, corpus 3797/3801) and all timing-failed.
+
 ### The four-entry queue, re-measured where it now matters (2026-09-18)
 
 The same FIFO that measured nothing that morning (below, "tried and
