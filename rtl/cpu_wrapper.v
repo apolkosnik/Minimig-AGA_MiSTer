@@ -52,7 +52,14 @@ module cpu_wrapper
 	// 5,427,232, PERFORMANCE.md).  The board runs Workbench from Fast RAM.
 	// The exception-precision change it buys this with is the one described
 	// above, and it is the 68040's own.
-	parameter POST_STORES = 1
+	parameter POST_STORES = 1,
+	// Bench-only: let the internal caches serve every address, including
+	// instruction fetches from the chip window, which production ties off
+	// (ap040_tg68k_compat: 68040.library marks chip RAM noncacheable, so
+	// the I side never sees it).  A simulation program lives at low
+	// addresses; with this it fetches through the I-cache the way
+	// Workbench does from Fast RAM.  Production leaves it 0.
+	parameter CACHE_ALLOW_ALL = 0
 )
 (
 	input             reset,
@@ -456,7 +463,7 @@ ap040_tg68k_compat #(
 	.clkena_in(core_enable),
 	.bus_clkena_in(bus_enable),
 	.tick_in(core_tick),
-	.cache_allow_all(1'b0),
+	.cache_allow_all(CACHE_ALLOW_ALL != 0),
 	.cache_snoop_stb(snoop_stb_r),
 	.cache_snoop_addr(snoop_addr_r),
 	.cache_z2_ena(z2ram_ena),

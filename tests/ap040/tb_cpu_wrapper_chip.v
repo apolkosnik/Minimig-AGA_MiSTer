@@ -21,7 +21,8 @@ module tb_cpu_wrapper_chip #(
 	parameter FAST_CLOCK = 0,
 	parameter CORE_DIV = 4,
 	// 0 leaves stores unposted (the CPU's own default); cpu_wrapper posts
-	parameter POST_STORES = 1
+	parameter POST_STORES = 1,
+	parameter CACHE_ALLOW_ALL = 0
 );
 
 reg reset = 0;
@@ -122,7 +123,7 @@ end else begin : g_walker_direct
 end endgenerate
 
 cpu_wrapper #(.FAST_CLOCK(FAST_CLOCK), .CORE_DIV(CORE_DIV),
-              .POST_STORES(POST_STORES)) dut
+              .POST_STORES(POST_STORES), .CACHE_ALLOW_ALL(CACHE_ALLOW_ALL)) dut
 (
 	.snoop_tgl(1'b0),
 	.snoop_adr(24'd0),

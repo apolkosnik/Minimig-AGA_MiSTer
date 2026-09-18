@@ -53,6 +53,9 @@ parameter CORE_DIV = 4;
 // POST_STORES follows cpu_wrapper's shipping value; 0 runs the same
 // programs with every store blocking, as the CPU's own default does.
 parameter POST_STORES = 1;
+// CACHE_ALLOW_ALL 1 fetches through the internal I-cache from the chip
+// window, the board's Fast RAM situation; 0 is production's chip-window rule.
+parameter CACHE_ALLOW_ALL = 0;
 wire cpu_clk = FAST_CLOCK ? clk113 : clk28;
 
 reg ph1 = 0, ph2 = 0;
@@ -178,7 +181,7 @@ reg  [2:0] ipl_set_v = 0;
 reg [15:0] ipl_arm_v = 0;
 
 cpu_wrapper #(.FAST_CLOCK(FAST_CLOCK), .CORE_DIV(CORE_DIV),
-              .POST_STORES(POST_STORES)) cpu
+              .POST_STORES(POST_STORES), .CACHE_ALLOW_ALL(CACHE_ALLOW_ALL)) cpu
 (
 	.snoop_tgl(1'b0),
 	.snoop_adr(24'd0),

@@ -50,6 +50,9 @@ parameter CORE_DIV = 4;
 // POST_STORES follows cpu_wrapper's shipping value; 0 runs the same
 // programs with every store blocking, as the CPU's own default does.
 parameter POST_STORES = 1;
+// CACHE_ALLOW_ALL 1 fetches through the internal I-cache from the chip
+// window, the board's Fast RAM situation; 0 is production's chip-window rule.
+parameter CACHE_ALLOW_ALL = 0;
 wire cpu_clk = FAST_CLOCK ? clk113 : clk28;
 
 reg ph1 = 0, ph2 = 0;
@@ -168,7 +171,7 @@ reg  [2:0] ipl_set_v = 0;
 reg [15:0] ipl_arm_v = 0;
 
 cpu_wrapper #(.FAST_CLOCK(FAST_CLOCK), .CORE_DIV(CORE_DIV),
-              .POST_STORES(POST_STORES)) cpu
+              .POST_STORES(POST_STORES), .CACHE_ALLOW_ALL(CACHE_ALLOW_ALL)) cpu
 (
 	.snoop_tgl(1'b0),
 	.snoop_adr(24'd0),
@@ -392,6 +395,65 @@ parameter RD_DELAY = 0;
 
 integer errors = 0;
 integer result = 0;
+
+// +prof: the chip bench's histogram on this memory path -- core cycles by
+// state with the frozen subset, drain occupancy and what waits behind it,
+// the cache FSM's histogram, and the lookup/hit counts per side.
+integer prof_on = 0;
+integer prof_cnt [0:255];
+integer prof_stall [0:255];
+integer prof_cst [0:7];
+integer prof_look [0:1];
+integer prof_hit  [0:1];
+integer prof_drain, prof_drain_tick, prof_stores, prof_sb_hold, prof_look_hold, prof_pi;
+initial begin
+	prof_on = $test$plusargs("prof");
+	for (prof_pi = 0; prof_pi < 256; prof_pi = prof_pi + 1) begin
+		prof_cnt[prof_pi] = 0; prof_stall[prof_pi] = 0;
+	end
+	for (prof_pi = 0; prof_pi < 8; prof_pi = prof_pi + 1) prof_cst[prof_pi] = 0;
+	prof_look[0] = 0; prof_look[1] = 0; prof_hit[0] = 0; prof_hit[1] = 0;
+	prof_drain = 0; prof_drain_tick = 0; prof_stores = 0; prof_sb_hold = 0; prof_look_hold = 0;
+end
+always @(posedge cpu_clk) if (prof_on && reset) begin
+	prof_cnt[cpu.cpu_inst_p.core.state] = prof_cnt[cpu.cpu_inst_p.core.state] + 1;
+	if (!cpu.core_enable)
+		prof_stall[cpu.cpu_inst_p.core.state] = prof_stall[cpu.cpu_inst_p.core.state] + 1;
+	prof_cst[cpu.cpu_inst_p.g_cache.cache.cst] = prof_cst[cpu.cpu_inst_p.g_cache.cache.cst] + 1;
+	if (cpu.core_enable && cpu.cpu_inst_p.g_cache.cache.cst == 3'd1) begin
+		prof_look[cpu.cpu_inst_p.g_cache.cache.c_instr] = prof_look[cpu.cpu_inst_p.g_cache.cache.c_instr] + 1;
+		if (cpu.cpu_inst_p.g_cache.cache.look_hit)
+			prof_hit[cpu.cpu_inst_p.g_cache.cache.c_instr] = prof_hit[cpu.cpu_inst_p.g_cache.cache.c_instr] + 1;
+	end
+	if (cpu.post_drain) begin
+		prof_drain = prof_drain + 1;
+		if (cpu.core_enable) prof_drain_tick = prof_drain_tick + 1;
+		if (cpu.core_enable && cpu.cpu_inst_p.g_cache.cache.cst == 3'd0 &&
+		    cpu.cpu_inst_p.g_cache.cache.c_req && !cpu.cpu_inst_p.g_cache.cache.ack_r &&
+		    (cpu.cpu_inst_p.g_cache.cache.c_write || cpu.cpu_inst_p.g_cache.cache.bypass))
+			prof_sb_hold = prof_sb_hold + 1;
+		if (cpu.core_enable && cpu.cpu_inst_p.g_cache.cache.cst == 3'd1)
+			prof_look_hold = prof_look_hold + 1;
+	end
+	if (cpu.core_enable && cpu.cpu_inst_p.g_cache.cache.st_accept) prof_stores = prof_stores + 1;
+end
+task prof_dump;
+	integer c, tot;
+	begin
+		tot = 0;
+		for (c = 0; c < 256; c = c + 1) tot = tot + prof_cnt[c];
+		$display("PROF total %0d cycles; posted-store drain %0d cycles (%0d%%), core ticking under it %0d; stores %0d; held by the drain: store/bypass %0d cycles, miss %0d cycles",
+		         tot, prof_drain, (tot == 0) ? 0 : (prof_drain * 100) / tot, prof_drain_tick, prof_stores, prof_sb_hold, prof_look_hold);
+		$display("PROF cache cst: idle %0d look %0d ferr %0d winv %0d fill %0d tagw %0d pass %0d sweep %0d | lookups I %0d (hits %0d) D %0d (hits %0d)",
+		         prof_cst[0], prof_cst[1], prof_cst[2], prof_cst[3], prof_cst[4], prof_cst[5], prof_cst[6], prof_cst[7],
+		         prof_look[1], prof_hit[1], prof_look[0], prof_hit[0]);
+		for (c = 0; c < 256; c = c + 1)
+			if (prof_cnt[c] * 200 >= tot)
+				$display("PROF state %3d: %9d cycles (%2d%%), %9d frozen (%2d%%)",
+				         c, prof_cnt[c], (prof_cnt[c] * 100) / tot, prof_stall[c],
+				         (prof_cnt[c] == 0) ? 0 : (prof_stall[c] * 100) / prof_cnt[c]);
+	end
+endtask
 reg [15:0] failcode = 0;
 
 
@@ -847,6 +909,7 @@ initial begin
 		$display("FAIL: program reports failure, test %0d", failcode);
 	else
 		$display("turbo-path run passed (%0d cycles)", timeout);
+		if (prof_on) prof_dump;
 
 	if (ap_viol != 0) begin
 		errors = errors + ap_viol;
