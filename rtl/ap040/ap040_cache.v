@@ -661,10 +661,23 @@ always @(posedge clk) begin
 				// -- and nothing new can enter the buffer meanwhile,
 				// because rd_accept and st_accept are already held off
 				// while cinv_req is up.
-				if (cinv_req && !cinv_done && !sb_v) begin
-					sweep_cnt <= 0;
-					sweep_all <= 0;   // honour the cinv_ic/cinv_dc selects
-					cst <= C_SWEEP;
+				if (cinv_req && !cinv_done) begin
+					// The wait goes INSIDE this branch, not into its
+					// condition.  rd_accept and st_accept are gated on
+					// !(cinv_req && !cinv_done), so "maintenance pending"
+					// must keep the FSM out of the accept branch below as
+					// it always did: a condition that falls through while
+					// the drain finishes lets a lookup start that those
+					// wires say is not happening, and look_snooped -- which
+					// is cleared and set on rd_accept/st_accept -- then
+					// belongs to a different access than the one in flight.
+					// With chipset DMA snooping continuously that desyncs
+					// the guard on cached chip RAM.  Hold here instead.
+					if (!sb_v) begin
+						sweep_cnt <= 0;
+						sweep_all <= 0;   // honour the cinv_ic/cinv_dc selects
+						cst <= C_SWEEP;
+					end
 				end
 				// A cache-inhibited hit owes a row invalidate.  Accept
 				// NOTHING until it lands.  The data RAMs read every

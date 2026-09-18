@@ -98,8 +98,15 @@ else if (phase == 2) begin""")
     defect_core = work / "ap040_core_defect.v"
     defect_core.write_text(core)
     cache = (AP / "ap040_cache.v").read_text()
-    cache = replace_once(cache, "if (cinv_req && !cinv_done && !sb_v) begin",
-                         "if (cinv_req && !cinv_done) begin  // DEFECT CONTROL: interlock removed")
+    cache = replace_once(cache, """					if (!sb_v) begin
+						sweep_cnt <= 0;
+						sweep_all <= 0;   // honour the cinv_ic/cinv_dc selects
+						cst <= C_SWEEP;
+					end""", """					begin   // DEFECT CONTROL: interlock removed
+						sweep_cnt <= 0;
+						sweep_all <= 0;
+						cst <= C_SWEEP;
+					end""")
     defect_cache = work / "ap040_cache_defect.v"
     defect_cache.write_text(cache)
 
