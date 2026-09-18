@@ -37,7 +37,9 @@ def execute(command, log, timeout, env=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bench", choices=["core", "chip", "sdram", "dualram", "cache-unit", "yc-equiv", "boot-bridge"], default="core")
+    parser.add_argument("--bench", choices=["core", "chip", "sdram", "dualram", "cache-unit", "yc-equiv", "boot-bridge", "diagrom"], default="core")
+    parser.add_argument("--rom", type=Path, help="DiagROM image in bin2hex.py word-hex format")
+    parser.add_argument("--cycles", type=int, default=3000000, help="DiagROM simulation clocks")
     parser.add_argument("--program", default="all", help="all or comma-separated assembly names")
     parser.add_argument("--work", type=Path, default=Path("/tmp/ap040-verilator"))
     parser.add_argument("--param", action="append", default=[], help="top-level PARAM=VALUE")
@@ -56,7 +58,7 @@ def main():
     tops = {"core": "tb_ap040_program", "chip": "tb_cpu_wrapper_chip",
             "sdram": "tb_sdram_turbo", "dualram": "tb_dualram_turbo",
             "cache-unit": "tb_cpu_cache_new", "yc-equiv": "tb_yc_out_equiv",
-            "boot-bridge": "tb_cpu_wrapper_boot_bridge"}
+            "boot-bridge": "tb_cpu_wrapper_boot_bridge", "diagrom": "tb_ap040_diagrom"}
     top = tops[args.bench]
     sources = [HERE / (top + ".v"), HERE / "sim_dpram.v", *CORE, RTL / "memory_router.v"]
     if args.bench == "cache-unit":
@@ -74,6 +76,10 @@ def main():
         # sys/yc_out.sv against its frozen pre-change copy, output for output
         sources = [HERE / (top + ".sv"), ROOT / "sys" / "yc_out.sv", HERE / "ref" / "yc_out_ref.sv"]
         programs = ["equiv"]
+    elif args.bench == "diagrom":
+        if args.rom is None or not args.rom.is_file():
+            parser.error("--bench diagrom requires --rom pointing to an existing word-hex ROM")
+        programs = ["diagrom"]
     elif args.bench != "core":
         sources += [RTL / "cpu_wrapper.v", RTL / "ram_cs_guard.v"]
     if args.bench == "chip":
@@ -93,7 +99,9 @@ def main():
     results = []
     for name in programs:
         command = [work / "obj" / ("V" + top)]
-        if args.bench == "boot-bridge":
+        if args.bench == "diagrom":
+            command += ["+prog=" + str(args.rom.resolve()), "+cycles=" + str(args.cycles)]
+        elif args.bench == "boot-bridge":
             ph, d = re.match(r"p(\d+)_d(\d+)", name).groups()
             command += ["+phase=" + ph, "+dbr=" + d]
         elif args.bench not in ("cache-unit", "yc-equiv"):
@@ -118,13 +126,17 @@ def main():
         log = work / (name + ".log")
         execute(command, log, args.timeout)
         output = log.read_text()
-        passed = "ALL TESTS PASSED" in output and not re.search(r"FAIL:|TEST FAILED|%Error", output)
+        success = "DIAGROM SMOKE TEST PASSED" if args.bench == "diagrom" else "ALL TESTS PASSED"
+        passed = success in output and not re.search(r"FAIL:|TEST FAILED|%Error", output)
         result = {"program": name, "passed": passed,
                   "run_cycles": [int(c) for c in re.findall(r"run passed \((\d+) cycles\)", output)],
                   "phases": [{"phase": int(p), "cycles": int(c)} for p, c in
                              re.findall(r"phase (\d+) passed \((\d+) cycles\)", output)],
                   "profile": [line for line in output.splitlines() if line.startswith(("PROF", "MEMLAT", "STAMP"))]}
         results.append(result)
+        if args.bench == "diagrom":
+            result["posted_overlap_cycles"] = [int(n) for n in re.findall(r"posted-store overlap cycles: (\d+)", output)]
+            result["serial"] = [line for line in output.splitlines() if line.startswith("SERIAL:")]
         (work / "results.json").write_text(json.dumps({"bench": args.bench, "parameters": args.param,
                                                      "results": results}, indent=2) + "\n")
         print(f"{args.bench}/{name}: {'PASS' if passed else 'FAIL'} "

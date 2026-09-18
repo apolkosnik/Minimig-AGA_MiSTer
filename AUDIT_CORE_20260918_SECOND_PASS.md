@@ -159,7 +159,10 @@ through the barrel or the multi-cycle loop.
 This audit's matrix goes 20 failing -> 12: all eight X-flag cases pass with
 caches and posting independently enabled. Suite 54/54, corpus 3797/3801.
 
-### Finding 2: NOT fixed; proposed design
+### Finding 2: MMU permission-fault cases fixed in `f86b3980f`
+
+The original proposal below is retained for context. The implemented
+follow-up after it describes the final design and its remaining limits.
 
 The fix does not need writeback frames, and does not need the fault path to
 learn how to raise an error from a probe. The MMU already answers the only

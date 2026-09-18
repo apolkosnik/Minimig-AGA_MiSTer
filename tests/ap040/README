@@ -40,9 +40,21 @@ Testbenches (Icarus Verilog -g2012 and ModelSim, see run_tests.sh):
                         failure from a corrupted reset PC).
   tb_ap040_diagrom.v  boots a real ROM image against a minimal Amiga model
                         (chip RAM, CIA overlay, custom register stubs) and
-                        captures serial output. DiagROM V2.0 completes its
-                        boot, passes its own 2MB memory address test and
-                        detects the core as "CPU: 68LC40 FPU: NONE". Build
+                        captures serial output. Posting is enabled by default,
+                        with independent CPU/bus enables and a required count
+                        of clocks where the CPU runs during a store drain.
+                        POST_STORES=0 is the unposted comparison. Run with:
+                        python3 tests/ap040/run_verilator.py --bench diagrom \
+                          --rom /tmp/diagrom.hex --param POST_STORES=1 \
+                          --cycles 250000000 --timeout 300 \
+                          --work /tmp/ap040-diagrom-post1
+                        DiagROM V1.3 (21-Apr-2023) completes initialization
+                        and reports CHIPMEM OK in both posting modes, with
+                        identical serial output. This is still a minimal
+                        chipset model, not a demo regression. An earlier,
+                        unposted DiagROM V2.0 run completed boot, passed its
+                        own 2MB memory address test and detected the core as
+                        "CPU: 68LC40 FPU: NONE". Build
                         with Verilator (--binary --timing); iverilog is too
                         slow for hundreds of millions of cycles. ROM image:
                         python3 bin2hex.py DiagROM/diagrom.rom build/diagrom.hex
@@ -100,6 +112,16 @@ Testbenches (Icarus Verilog -g2012 and ModelSim, see run_tests.sh):
                         and format $0/$2/$3/$4 frames. Trace handlers execute
                         RTE and the deliberately odd-vector groups retain
                         their nested address-error behavior. See diff/README.
+
+  test_partial_restart.py  MMU write-fault restart gate for CAS2, crossing ADD,
+                        MOVES and two-to-five-byte BFCHG. Checks untouched
+                        operands at fault entry, final memory/CCR, format-7
+                        FA/SSW, and unchanged MMUSR/DFC, with 4K/8K pages,
+                        independent user/supervisor roots, caches and posting.
+                        Also checks CAS2 aliases and TC-disabled TTR protection.
+                        Included as partial_restart in run_verilator_suite.py.
+                        These permission checks do not make physical operand
+                        bus errors after a partial write restartable.
 
 Build requirements: vasmm68k_mot (vbcc toolchain) and python3; see
 build_tests.sh. Test programs communicate over memory-mapped registers

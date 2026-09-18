@@ -19,7 +19,7 @@
 
 `timescale 1ns/1ps
 
-module tb_ap040_diagrom;
+module tb_ap040_diagrom #(parameter POST_STORES = 1);
 
 reg clk = 0;
 reg nreset = 0;
@@ -39,9 +39,11 @@ wire        debug_busy, debug_fault, debug_halted;
 wire [255:0] debug_status;
 
 reg         mem_ready;
-wire        clkena_in = (busstate == 2'b01) | mem_ready;
+wire        post_drain;
+wire        bus_clkena = (busstate == 2'b01) | mem_ready;
+wire        clkena_in = bus_clkena | post_drain;
 
-ap040_tg68k_compat dut
+ap040_tg68k_compat #(.AP040_POST_STORES(POST_STORES)) dut
 (
 	.clk(clk),
 	.nreset(nreset),
@@ -52,7 +54,7 @@ ap040_tg68k_compat dut
 	.cache_z3_ena0(1'b0),
 	.cache_z3_base1(4'd0),
 	.cache_z3_ena1(1'b0),
-	.clkena_in(clkena_in), .bus_clkena_in(clkena_in),
+	.clkena_in(clkena_in), .bus_clkena_in(bus_clkena),
 	.tick_in(1'b1),
 	.data_in(data_in),
 	.ipl(3'b111),
@@ -65,7 +67,7 @@ ap040_tg68k_compat dut
 	.nuds(nuds),
 	.nlds(nlds),
 	.busstate(busstate),
-	.longword(longword), .post_drain(),
+	.longword(longword), .post_drain(post_drain),
 	.nresetout(nresetout),
 	.fc(fc),
 
@@ -145,6 +147,9 @@ end
 
 integer errors;
 integer serial_count;
+integer posted_overlap;
+always @(posedge clk) if (nreset && post_drain && !bus_clkena)
+	posted_overlap <= posted_overlap + 1;
 reg [7:0] line_buf [0:255];
 integer line_len;
 integer i;
@@ -295,6 +300,11 @@ task report_and_finish;
 	begin
 		flush_line;
 		$display("cycles run: %0d, serial writes: %0d", cycles, serial_count);
+		$display("posted-store overlap cycles: %0d", posted_overlap);
+		if (POST_STORES && posted_overlap == 0) begin
+			errors = errors + 1;
+			$display("FAIL: posting enabled but drain overlap was never exercised");
+		end
 		if (errors == 0 && serial_count > 0)
 			$display("DIAGROM SMOKE TEST PASSED");
 		else if (errors == 0)
@@ -308,6 +318,7 @@ endtask
 initial begin
 	errors = 0;
 	serial_count = 0;
+	posted_overlap = 0;
 	line_len = 0;
 	exc_prints = 0;
 	ovl = 1;

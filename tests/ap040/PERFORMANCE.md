@@ -1213,6 +1213,28 @@ be flashed again.
 
 ### Measured on ec25690cd (2026-09-18): the posted-write fixes, on the board
 
+**Follow-up, 2026-09-18:** the ROM-bench configuration gap described below
+is closed in simulation. `tb_ap040_diagrom` now defaults to posting, uses
+independent core/bus enables, and requires observed execution during a
+posted drain. `run_verilator.py --bench diagrom --rom <word-hex image>`
+provides a reproducible runner; `--param POST_STORES=0` is the control.
+
+Using core RTL from `f86b3980f`, DiagROM V1.3 (21-Apr-2023) was run for
+250,000,000 clocks in each mode.
+Both runs passed, produced the same 116 serial records (6,572 character
+writes), detected 2MB chip RAM, printed `CHIPMEM OK`, and completed their
+initialization. Posting exercised 4,116,724 clocks where the core ran
+while the bus waited; the control recorded zero. This remains a minimal
+chipset model and does not reproduce the maintenance/snoop boot failure
+or either demo. The ROM's identification line was `CPU: 68040 FPU: 68060
+MMU: NOT CHECKED`; this run does not validate MMU boot behavior or that FPU
+identification.
+
+Logs: `/tmp/ap040-diagrom-post{0,1}/boot-long.log`. The tested word-hex ROM
+SHA-256 is `a73f0135cfd5ef093454e3ad0ce1773671c870f7cea6a02494c0ce640be9280a`.
+The ROM itself is not added to the repository. No new board Dhrystone
+measurement or demo result is claimed.
+
 The two synchronization fixes -- NOP waiting for the store buffer, cache
 maintenance waiting for the drain -- with the maintenance interlock inside
 its branch rather than in its condition:
@@ -1330,3 +1352,41 @@ read sized by span, which alters what the data cache accepts: `fits_long`
 takes any byte, a word only when even and a longword only when aligned, so
 sizing the read turned most bitfield accesses from bypassing into cacheable.
 
+### Build of `f86b3980f` (2026-09-18): restart fix passes simulation, fails timing
+
+One full compile of the 40MHz configuration completed in 18:04. The
+fitter succeeded after an internal routing retry, using 39,386 / 41,910
+ALMs (94%) and 35,923 registers. CPU-domain setup is **-1.253 ns**;
+hold is **+0.068 ns**. Recovery, removal and minimum pulse width pass.
+The separate HDMI setup result is -0.667 ns. This image is not usable on
+the board and was not flashed or benchmarked.
+
+A TimeQuest report from that completed fit identifies the worst path as
+`emu|ram1|sdata_reg[11]` to `emu|ram1|walker_sdata_pipe0[11]`, in the
+8.808 ns clock domain. Data delay is 8.317 ns (7.225 ns interconnect),
+with -1.414 ns clock skew. Other failing paths include `init_done` to
+SDRAM output enables. The measured failure is in the SDRAM paths; this
+single combined-tip build does not isolate which source change caused
+it. No additional source build was launched to try another placement.
+
+The source adds permission checks before partial writes; see
+`AUDIT_CORE_20260918_SECOND_PASS.md` for the implementation and limits.
+The existing 54 Verilator legs and the new partial-restart leg all pass.
+The new regression passes 688 cases, with 232 failures on the unchanged
+baseline. The DiagROM posting comparison is recorded above. These
+simulation results do not supersede the timing failure or establish a
+fix for Elysium or Deformations.
+
+Artifacts and provenance:
+
+- Build log: `build_ap040-40mhz_20260918_152411.log`.
+- Timing-path report: `/tmp/ap040-f86-setup.rpt` (slow 1100mV, 100C).
+- Rejected image:
+  `output_files/Minimig-ap040-40mhz-f86b3980f-20260918_152411-TIMING-FAIL-DO-NOT-FLASH.rbf`.
+  SHA-256: `d9e2589ffc19cb7845b562d0a8f3c0f3be6cd9c4126ac2a8e7c60c9ce8b7e1ac`.
+- Shared `output_files/Minimig.rbf` restored and verified byte-for-byte
+  against its pre-build hash:
+  `f9baef0447a212403e50f349d36e01f51fccf2f80fd44f9aa59d1549a68528f6`.
+- RTL hashes match the source captured before the build. The card remains
+  at the previously validated `ec25690cd`, 8,559 Dhrystones; no new
+  hardware result is claimed.
