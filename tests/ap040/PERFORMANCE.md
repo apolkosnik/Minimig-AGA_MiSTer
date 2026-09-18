@@ -420,9 +420,13 @@ by-product is the instrument: differences of half a percent are
 measurable here, which is worth knowing before dismissing any future
 change as too small to see.
 
-That repeatability also settles the failing image.  8,492 sits 1.4 % below
-its own timing-clean twin, far outside the noise, so a bitstream that
-misses setup really is degraded rather than merely untrustworthy.
+That repeatability also puts the failing image outside the noise: 8,492
+sits 1.4 % below its own timing-clean twin.  What it does NOT establish is
+why -- no mechanism links the reported setup violations to a slowdown, and
+"a setup violation corrupts rather than slows" was reasoning offered here
+earlier with no more evidence behind it.  The measurement stands, the
+explanation does not, and the operational rule needs neither: compare
+performance only between timing-clean images.
 
 What remains is that +0.7 % is an order of magnitude under the bench's
 +8.8 %.
