@@ -982,6 +982,28 @@ be flashed again.
    either way, bit-identical), so the expectation is unchanged -- but an
    expectation is not a measurement.
 
+### Measured on 33e173e22 (2026-09-18): the hit acknowledge, on the board
+
+Same XSysInfo, same OS, GuardianAngel loaded (**MMU 68040 (IN USE)**):
+
+| | f53c044b0 | e254e8d67 | 33e173e22 | step | cumulative |
+|---|---:|---:|---:|---:|---:|
+| Dhrystones | 6,531 | 7,551 | **8,553** | **+13.3 %** | **+31.0 %** |
+| MIPS | 3.71 | 4.29 | 4.86 | +13.3 % | +31.0 % |
+| MFLOPS | 2.83 | 2.83 | 2.94 | +3.9 % | +3.9 % |
+| CHIP / FAST / ROM MB/s | 5.00 / 7.06 / 8.40 | 5.00 / 7.07 / 8.41 | 5.04 / 7.45 / 8.53 | +0.8 / +5.4 / +1.4 % | |
+
+The SDRAM bench said -11.2 % cycles for this change, which is +12.6 % on
+a rate; the board says +13.3 %.  Two rows moved that the drain left alone,
+and both are the same one-cycle: FAST RAM bandwidth (+5.4 %) and ROM
+(+1.4 %) are load loops whose every hit now returns a cycle earlier, and
+MFLOPS (+3.9 %) is the FPU's operand fetches doing the same.  CHIP RAM is
+bus-bound and stays put, as it should.  XSysInfo's "CPU/MHz" reads 10.53:
+it derives a clock from a Dhrystone-class loop, and the core is at 40 MHz.
+
+Timing closed at +0.476, up from +0.393, with the compare-to-acknowledge
+cone combinational; the worst path moved elsewhere.
+
 ### Measured on e254e8d67 (2026-09-18): the drain, on the board
 
 Same XSysInfo, same OS, GuardianAngel loaded (**MMU 68040 (IN USE)**), so

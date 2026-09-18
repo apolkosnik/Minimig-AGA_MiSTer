@@ -1454,6 +1454,15 @@ controller's write path).  BOARD (2026-09-18): Dhrystone 6,531 -> 7,551,
 +15.6 % with the MMU in use, MB/s rows unchanged.  See PERFORMANCE.md
 "The drain is not a state" and "Measured on e254e8d67".
 
+THEN (2026-09-18, 33e173e22): the cache acknowledges a hit in its compare
+cycle instead of a cycle later -- one cycle off every cached fetch and
+load.  BOARD: 7,551 -> 8,553, +13.3 %; cumulative +31 % since f53c044b0.
+Setup +0.476.  The "X2.3 handshake" question is answered: the round trip
+was the registered acknowledge, a 114 MHz decision.  Next in this line:
+the store acknowledge at acceptance (~3 %, the cone that starts at c_req),
+then folding S_DECODE into the fetch pop (one cycle per instruction, ~14 %,
+the decode cone's timing is the risk).
+
 Area: 38,750 ALMs (92%), +0.460 setup, ~3,160 free -- X2.7's "does NOT fit"
 was written at 94% and no longer binds.
 
