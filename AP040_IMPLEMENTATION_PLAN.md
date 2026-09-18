@@ -1448,8 +1448,11 @@ behind the buffer.  POST_STORES ships 1.  Measured: core bench -9.6% (the
 instruction fetches bypass the internal cache by design and everything
 queues on the 16-bit bus.  The chip bench's +prof shows the next lever:
 in 91% of drain cycles the NEXT store is already waiting behind the
-single-entry buffer.  A deeper buffer is the follow-up, after the board
-number.  See PERFORMANCE.md "The drain is not a state".
+single-entry buffer.  A four-entry queue was then measured and dropped
+(SDRAM bench identical to the cycle; the buffer never fills behind the
+controller's write path).  BOARD (2026-09-18): Dhrystone 6,531 -> 7,551,
++15.6 % with the MMU in use, MB/s rows unchanged.  See PERFORMANCE.md
+"The drain is not a state" and "Measured on e254e8d67".
 
 Area: 38,750 ALMs (92%), +0.460 setup, ~3,160 free -- X2.7's "does NOT fit"
 was written at 94% and no longer binds.

@@ -951,6 +951,35 @@ be flashed again.
    either way, bit-identical), so the expectation is unchanged -- but an
    expectation is not a measurement.
 
+### Measured on e254e8d67 (2026-09-18): the drain, on the board
+
+Same XSysInfo, same OS, GuardianAngel loaded (**MMU 68040 (IN USE)**), so
+directly comparable with the f53c044b0 row below:
+
+| | f53c044b0 | e254e8d67 | |
+|---|---:|---:|---:|
+| Dhrystones | 6,531 | **7,551** | **+15.6 %** |
+| MIPS / MFLOPS | 3.71 / 2.83 | 4.29 / 2.83 | +15.6 % / -- |
+| CHIP / FAST / ROM MB/s | 5.00 / 7.06 / 8.40 | 5.00 / 7.07 / 8.41 | -- |
+
+The only logic between the two images that changes a cycle is the posted
+store with the non-blocking drain and the split core enable (the register
+files and the exception carriers are cycle-identical).  +15.6 % on
+Dhrystone is 13.5 % fewer cycles -- MORE than the core bench's 9.6 %, and
+far more than the SDRAM bench's 2.0 %.  The direction of the discrepancy is
+the one the benches predicted for themselves: the core bench's memory is
+nearly instant, so it has little drain to hide, and the SDRAM bench runs
+its program at chip-window addresses where instruction fetches bypass the
+internal cache by design.  The board runs Workbench from Fast RAM with both
+caches serving, and every one of those fetches now proceeds under a drain
+that, through the 16-bit adapter and the DDR3 path, is long.  The memory
+bandwidth rows are unchanged, as they should be: those loops are bound by
+the bus, not by whether the core waits for its own stores.
+
+The MFLOPS row not moving says the FPU path is untouched by this, which is
+right: an FPU result written to memory is one store like any other, and the
+benchmark is compute-bound.
+
 ### Measured on f53c044b0 (2026-09-17)
 
 XSysInfo 0.10.0 on OS 3.2.3 / ROM 47.115 / Workbench 47.5 / SetPatch 47.10,
