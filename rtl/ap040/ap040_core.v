@@ -2345,7 +2345,16 @@ always @(posedge clk) begin
 				end
 				else if (d_ack) begin
 					m_issued <= 0;
-					if (m_bidx + 3'd1 == m_nbytes) state <= r_m_ret;
+					if (m_bidx + 3'd1 == m_nbytes) begin
+						// the split transfer is complete, so the flags it
+						// computed are now safe -- as in S_MWR.  A crossing
+						// write never reaches that state's acknowledge, so
+						// without this fl_pend outlived the instruction and
+						// anything reading CCR before the next memory write
+						// saw stale flags.
+						if (fl_pend) begin sr[4:0] <= fl_pend_v; fl_pend <= 0; end
+						state <= r_m_ret;
+					end
 					else m_bidx <= m_bidx + 3'd1;
 				end
 			end
