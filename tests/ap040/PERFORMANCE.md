@@ -384,29 +384,34 @@ in flip-flops, 1,172 registers and 673 ALMs against the plain array's 576 and
 459 -- worse than doing nothing.  The fix is a bypass that keeps the RAM's
 output away from an address whose word the MLAB is committing.
 
-Which cycle that is matters, and the first bypass (78e7281e4, in the
-f53c044b0 image) got it wrong.  An MLAB registers its write port on the
-clock edge and commits the cells with an internal pulse during the cycle
-that FOLLOWS, so the undefined read is the one in cycle N+1 relative to the
-RTL write edge -- the same cycle in which flip-flops returned the new word,
-and the cycle eb158fb71 left open.  78e7281e4 held the write itself back by
-a cycle and bypassed the cycle before the RAM was written: that cycle's RAM
-output was the untouched old word, harmless, and the commit happened in the
-next cycle, unmasked.  The hazard moved from N+1 to N+2; it did not go away.
-Counted with a second shadow in `t_integer`: 567 reads sit at N+1 and 738 at
-N+2.  The corpus and suite passed either way because Verilator updates the
-array on the edge; the board ran Workbench, Dhrystone and most of cputest on
-it, and locked once in `4_IRQ` at DBcc.W -- whose slices each read a
-register at N+2 about thirty times, where the Bcc.W slices that passed do it
-zero times -- and passed the re-run.  An intermittent failure on a
-half-cycle path that no STA table covers cannot be pinned to this from
-here, so it is not claimed; the 738 open reads are claimed.
+Which cycle that is matters, and on 2026-09-17 I got it wrong in the
+other direction.  The bypass in 78e7281e4 (the f53c044b0 image) holds the
+write in `pend_*` for a cycle, writes the RAM from `pend_*` the cycle after,
+and answers a read of that address in that cycle from `pend_wdata`.  I
+read that as covering "a cycle in which the RAM is not written" and leaving
+the MLAB's commit cycle open -- counted 738 such reads in `t_integer` --
+and rewrote both files (06d90f6fb) to write the RAM on the issue edge from
+the core's `wdata`, keeping `pend_*` only as the bypass copy.  Simulation is
+identical, the suite and corpus said nothing, the fit closed at +0.149.  The
+board went to a yellow screen before Workbench, power LED blinking, reboot
+loop; the image is byte-identical under two compiles, so it was the logic.
 
-The bypass now covers the commit cycle: the word goes to the RAM on its
-issue edge, as before 78e7281e4, and a copy in `pend_*` answers reads of
-that address through the following enabled cycle.  In simulation the bypass
-is invisible -- the array already holds the word -- which is the point.
-Same shape in `ap040_fp_regfile`.
+The timing report has the reason.  TimeQuest lists the register-file RAM
+cells (`altdpram|dpram_ilo1`) under "non-unate timing edges ... will assume
+pos-unate behavior": the MLAB inverts its clock internally for the write,
+so the data path into the RAM's write registers really has half a cycle,
+and the analyzer times it to the full one.  From `pend_*` that hop is a
+register-to-register nothing; from the ALU cone it is not, and no slack
+number reports it.  eb158fb71 -- the attribute alone, RAM written straight
+from the datapath, no bypass -- did not boot for the same reason, which I
+had read as a read-during-write failure.  The 738 "commit-cycle" reads were
+reads of a settled word.
+
+So the structure is 78e7281e4's, restored in the commit after 06d90f6fb
+with the comments rewritten: the RAM's write inputs stay registered, the
+bypass covers the cycle the RAM is written, and the attribute stays.  Same
+in `ap040_fp_regfile`.  Images: f53c044b0 and 8593a1243 boot; 06d90f6fb
+does not.
 
 ### The 25, examined (2026-09-17)
 
