@@ -68,6 +68,7 @@ module ap040_core
 	output     [31:0] dtt1_out,
 	output reg        pt_req,
 	output reg        pt_write,
+	output reg        pt_access,  // internal write check: obey TC, unlike PTEST
 	output reg [31:0] pt_addr,
 	output      [2:0] pt_fc,
 	input             pt_done,
@@ -174,7 +175,9 @@ assign itt0_out = itt0;
 assign itt1_out = itt1;
 assign dtt0_out = dtt0;
 assign dtt1_out = dtt1;
-assign pt_fc    = dfc;
+// Operand checks use data space in the operand's privilege context. DFC
+// belongs to the PTEST instruction, and may name an unrelated address space.
+assign pt_fc    = pt_access ? {fc_ovr_v ? fc_ovr[2] : sr_s, 2'b01} : dfc;
 assign pf_fc    = dfc;
 
 // interrupt input synchronization (active low pins, must be stable for two
@@ -582,6 +585,12 @@ localparam S_FREST_BD  = 8'd189;
 localparam S_MOVEM_FIN = 8'd191;   // commit a held MOVEM index register
 localparam S_RTE_SSW   = 8'd192;   // format-7 continuation status
 localparam S_RTE_EA    = 8'd193;   // CM's saved MOVEM effective address
+localparam S_WPROBE    = 8'd195;
+localparam S_WPROBE_FAULT = 8'd196;
+localparam S_CAS2_P1   = 8'd197;
+localparam S_CAS2_P2   = 8'd198;
+localparam S_CAS2_RD1  = 8'd199;
+localparam S_BF_WCHECK = 8'd200;
 
 // exec kinds
 localparam EK_ALU     = 4'd0;
@@ -616,6 +625,7 @@ localparam RK_RTD = 2'd2;
 //---------------------------------------------------------------------------
 
 reg  [7:0] r_imm_ret, r_ea_ret, r_m_ret;
+reg  [7:0] wp_ret;
 reg  [2:0] m_bidx;                // byte index of a split transfer
 reg [31:0] m_acc;                 // assembled bytes of a split transfer
 reg  [1:0] imm_n;
@@ -1620,6 +1630,26 @@ function cross_of;
 	end
 endfunction
 
+// Check the whole transfer before any constituent write becomes visible.
+// The MMU's PTEST port supplies permissions without performing an operand
+// access. On failure the saved transfer context builds an ordinary access
+// error; no speculative write or reversed write order is needed.
+task check_write;
+	input [31:0] a;
+	input [1:0] size;
+	input [31:0] d;
+	input [7:0] fault_ret;
+	input [7:0] ret;
+	begin
+		m_addr_r <= a; m_size <= size; m_wdat <= d;
+		r_m_ret <= fault_ret;
+		pt_addr <= a; pt_write <= 1; pt_access <= 1;
+		wp_ret <= ret;
+		epf_issue = 1;
+		state <= S_WPROBE;
+	end
+endtask
+
 // The transfer is issued from the CALLING state whenever the port is
 // free: no queue fetch outstanding, no state claimed the port this cycle,
 // no request or acknowledge on the wires (the adapter's ack is a one-cycle
@@ -2127,7 +2157,7 @@ always @(posedge clk) begin
 		aer_sz <= 0; aer_tm <= 0; aer_idx <= 0; aer_bus <= 0; aer_ma <= 0;
 		u0_v <= 0; u1_v <= 0;
 		u0_reg <= 0; u1_reg <= 0; u0_old <= 0; u1_old <= 0;
-		pt_req <= 0; pt_write <= 0; pt_addr <= 0;
+		pt_req <= 0; pt_write <= 0; pt_addr <= 0; pt_access <= 0; wp_ret <= 0;
 		pf_req <= 0; pf_mode <= 0; pf_addr <= 0;
 		cinv_req <= 0; cinv_ic <= 0; cinv_dc <= 0;
 		tr_t1 <= 0; tr_t0 <= 0; t0_force <= 0;
@@ -2456,7 +2486,7 @@ always @(posedge clk) begin
 				end
 				else if (!m_issued && m_cross) begin
 					m_bidx <= 0;
-					state <= S_MWR_B;
+					check_write(m_addr_r, m_size, m_wdat, r_m_ret, S_MWR_B);
 				end
 				else if (!m_issued) begin
 					mem_req <= 1; mem_write <= 1; mem_instr <= 0;
@@ -3733,8 +3763,56 @@ always @(posedge clk) begin
 			end
 
 			//------------------------------------------------- PTEST / PFLUSH
+			S_WPROBE: begin
+				// Retire any outstanding fetch, then keep the CPU port idle
+				// for the entire probe. The walker also waits for posted
+				// stores in the compatibility wrapper.
+				epf_issue = 1;
+				if (!pt_req) begin
+					if (!epf_pend && !mem_req && !pt_done) pt_req <= 1;
+				end
+				else if (pt_done) begin
+					pt_req <= 0;
+					if (!pt_mmusr[0] || pt_mmusr[11] || pt_mmusr[2] ||
+					    (!pt_fc[2] && pt_mmusr[7])) begin
+						// Set up fault metadata only after the last fetch has
+						// retired; never change its live request underneath it.
+						mem_addr <= pt_addr; mem_size <= m_size;
+						mem_write <= 1; mem_instr <= 0; mem_wdata <= m_wdat;
+						fc_r <= fc_ovr_v ? fc_ovr :
+						        (sr_s ? `AP040_FC_SUPER_DATA : `AP040_FC_USER_DATA);
+						pt_access <= 0;
+						state <= S_WPROBE_FAULT;
+					end
+					else if (m_cross && ((pt_addr & ~m_pgmask) ==
+					                            (m_addr_r & ~m_pgmask))) begin
+						// A split operand can touch two independently protected
+						// pages. Check both, in address order, before byte zero.
+						pt_addr <= m_addr_r + {29'd0, m_nbytes} - 32'd1;
+					end
+					else begin
+						pt_access <= 0;
+						state <= wp_ret;
+					end
+				end
+			end
+
+			S_WPROBE_FAULT: begin
+				if (in_exc) fatal_halt;
+				else begin
+					aerr_start;
+					// A failed translation check is an ATC fault, including
+					// a bus error during its table search. No operand bus
+					// cycle was issued, so mem_flt itself is not asserted.
+					aer_bus <= 0;
+					aer_ma <= m_cross && ((mem_addr & ~m_pgmask) !=
+					                                  (m_addr_r & ~m_pgmask));
+				end
+			end
+
 			S_PTEST1: begin
 				epf_flush;      // PTEST replaces the matching ATC entry
+				pt_access <= 0;
 				pt_addr <= rf_rdata_a;
 				pt_write <= ~ir[5];
 				state <= S_PTEST2;
@@ -3847,8 +3925,17 @@ always @(posedge clk) begin
 			S_CAS2_1: begin
 				t_a <= rf_rdata_a;
 				t_b <= rf_rdata_b;
-				mrd(rf_rdata_a, op_size, S_CAS2_2);
+				// A locked RMW requires write permission on every page,
+				// including when a comparison will fail. Check both operands
+				// before either read or write, preserving the normal order.
+				if (AP040_HAS_MMU && (tc[15] || dtt0[15] || dtt1[15]))
+					state <= S_CAS2_P1;
+				else mrd(rf_rdata_a, op_size, S_CAS2_2);
 			end
+
+			S_CAS2_P1: check_write(t_a, op_size, 32'd0, S_CAS2_2, S_CAS2_P2);
+			S_CAS2_P2: check_write(t_b, op_size, 32'd0, S_CAS2_3, S_CAS2_RD1);
+			S_CAS2_RD1: mrd(t_a, op_size, S_CAS2_2);
 
 			S_CAS2_2: begin
 				bf_w1 <= m_val;                  // first memory operand
@@ -5146,8 +5233,19 @@ always @(posedge clk) begin
 				nw40 = ({bf_w1, bf_w2} & head) | (bf_t40 >> bf_bib);
 				bf_w1 <= nw40[39:8];
 				bf_w2 <= nw40[7:0];
-				state <= S_BF_WR1;
+				// Three/five-byte fields have a separate trailing write.
+				// Checking only a split first transfer would miss a fault
+				// in that final byte and retry BFCHG over changed memory.
+				if (tc[15] && (bf_span == 3'd3 || bf_span == 3'd5) &&
+				    (((bf_addr & m_pgmask) + {29'd0, bf_span}) >
+				     (m_pgmask + 32'd1))) state <= S_BF_WCHECK;
+				else state <= S_BF_WR1;
 			end
+
+			S_BF_WCHECK:
+				check_write(bf_addr + {29'd0, bf_span} - 32'd1, `AP040_SZ_B,
+				            {24'd0, (bf_span == 3'd3) ? bf_w1[15:8] : bf_w2},
+				            S_NEXT, S_BF_WR1);
 
 			S_BF_WR1: begin
 				case (bf_span)

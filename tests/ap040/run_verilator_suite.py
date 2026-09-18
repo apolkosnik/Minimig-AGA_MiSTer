@@ -155,6 +155,13 @@ def main():
         ok = rc == 0 and n_fail == 0 and n_pass > 0
         results.append((label, ok, f"{n_pass} pass, {n_fail} fail"))
         print(f"{'ok  ' if ok else 'FAIL'} {label:20s} {n_pass} pass, {n_fail} fail", flush=True)
+    if not only or "partial_restart" in only:
+        log = a.work / "partial_restart.log"
+        rc = run([sys.executable, HERE / "test_partial_restart.py", "--work",
+                  a.work / "partial_restart", "--jobs", str(a.jobs)], log)
+        ok = rc == 0
+        results.append(("partial_restart", ok, "MMU multi-write restart matrix"))
+        print(f"{'ok  ' if ok else 'FAIL'} {'partial_restart':20s} (see {log})", flush=True)
     for label, u in UNIT_RUNS.items():
         if only and label not in only: continue
         work = a.work / label; work.mkdir(exist_ok=True)

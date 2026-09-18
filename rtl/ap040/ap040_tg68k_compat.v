@@ -161,7 +161,7 @@ wire        cinv_req, cinv_ic, cinv_dc, cinv_done;
 
 // control registers and PTEST/PFLUSH sideband
 wire [31:0] w_tc, w_urp, w_srp, w_itt0, w_itt1, w_dtt0, w_dtt1;
-wire        pt_req, pt_write, pt_done;
+wire        pt_req, pt_write, pt_done, pt_access;
 wire [31:0] pt_addr, pt_mmusr;
 wire  [2:0] pt_fcw;
 wire        pf_req, pf_done;
@@ -202,6 +202,7 @@ ap040_core #(
 	.dtt1_out(w_dtt1),
 	.pt_req(pt_req),
 	.pt_write(pt_write),
+	.pt_access(pt_access),
 	.pt_addr(pt_addr),
 	.pt_fc(pt_fcw),
 	.pt_done(pt_done),
@@ -261,6 +262,7 @@ ap040_mmu mmu (
 
 	.pt_req(pt_req),
 	.pt_write(pt_write),
+	.pt_access(pt_access),
 	.pt_addr(pt_addr),
 	.pt_fc(pt_fcw),
 	.pt_done(pt_done),

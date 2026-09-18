@@ -196,3 +196,47 @@ the path of every write in the core, and the byte-loop reordering needs its
 own tests before it can be trusted. The regressions this audit names --
 MOVEM restart, address-register rollback, no double writeback -- are the
 ones to hold. CAS2 is the safe half and can land first.
+
+### Implemented follow-up: permission checks before partial writes
+
+The RTL now prevents the reproduced MMU permission faults from occurring
+after a committed prefix. CAS2 checks both operands, including both pages
+of a crossing operand, before reading either operand. Split writes check
+both pages before byte zero. Three/five-byte bitfield writes also check
+their independent trailing byte before committing the first transfer.
+
+This refines the proposal above: a failed probe raises a format-7 access
+error directly from the saved transfer context. Writes retain their normal
+order; correctness does not depend on a subsequent reordered write faulting.
+The internal check uses the operand's privilege context (including MOVES),
+preserves architectural MMUSR/DFC, and honors TC-disabled transparent
+translation. Explicit PTEST retains its existing TC-disabled table walk.
+An outstanding instruction fetch retires before the probe takes the port.
+
+The guarantee concerns translation/protection faults in stable mappings.
+It does not solve physical operand bus errors after a partial write, or
+add external bus locking. For a three/five-byte bitfield with both pages
+write protected, the trailing-byte check can report that fault first.
+
+Validation against the implemented source:
+
+- Original restart audit: 48/48 cases pass, three phases each.
+- New `test_partial_restart.py`: 688/688 cases pass, three phases each.
+  The unchanged `b3da46b6a` baseline fails 232 of the same cases, with
+  456 passing controls. Tests check untouched operands at handler entry,
+  final data/CCR, fault count, FA/SSW, MMUSR/DFC, 4K/8K pages, distinct
+  user/supervisor roots, caches/posting, CAS2 aliases and compare failure,
+  MOVES, and TC-disabled transparent protection.
+- Deferred-flag audit: 44/44 cases pass, three phases each.
+- Existing Verilator suite: 54/54 legs pass. The new `partial_restart`
+  suite leg also passes separately, giving 55 passing legs in total.
+- Corpus: all 3,801 slices pass **with a 64-round limit per slice**. This
+  bounded run does not replace the earlier uncapped 3,797/3,801 result or
+  establish that its four failures were fixed.
+
+Logs: `/tmp/ap040-restart-fixed`, `/tmp/ap040-restart-suite`,
+`/tmp/ap040-partial-negative`, `/tmp/ap040-restart-flags`, and
+`/tmp/ap040-restart-corpus/verilator`. The new runner is part of the normal
+suite and records its source hashes; `--rtl-dir` selects a baseline for a
+negative control. No demo recovery or board performance is inferred from
+these simulations. FPGA timing and hardware validation remain separate.
