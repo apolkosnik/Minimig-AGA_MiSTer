@@ -457,9 +457,20 @@ assign m_fc    = sb_v ? sb_fc : c_fc;
 
 // A posted store was acknowledged when it was captured, so C_PASS must not
 // hand the core the drain's acknowledge as well.
-assign c_ack   = pass_active ? (sb_v ? ack_r : m_ack) : ack_r;
+// A hit is acknowledged IN the compare cycle.  The tag row and all four
+// data words are on the RAM outputs in C_LOOK, so the word is ready the
+// same cycle the compare resolves; registering it into ack_r/rdata_r cost
+// every cached load and fetch a third cycle.  The path is RAM output ->
+// compare -> the core's acknowledge, a cone that had to be registered at
+// 114 MHz and fits at 40 (the 5.9 ns c_req->c_ack shortcut that was removed
+// went through the ATC; this one does not touch c_req).  Under a divided
+// enable cst holds C_LOOK until the tick, so the level is stable when the
+// core samples it.  Fills still acknowledge from C_TAGW through ack_r.
+wire look_ack = (cst == C_LOOK) && look_hit && !look_snooped && !snoop_look_row_look;
+assign c_ack   = pass_active ? (sb_v ? ack_r : m_ack) : (ack_r | look_ack);
 assign sb_busy = sb_v;
-assign c_rdata = pass_active ? m_rdata : rdata_r;
+assign c_rdata = pass_active ? m_rdata
+                             : (look_ack ? lw_extract(data_hit, r_size, r_off) : rdata_r);
 
 assign rd_accept = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
                    c_req && !ack_r && !c_write && !bypass &&
@@ -823,9 +834,9 @@ always @(posedge clk) begin
 			C_LOOK: begin
 				if (look_hit && !look_snooped && !snoop_look_row_look) begin
 					// all four ways were read alongside the tags, so the
-					// hit completes here: two cycles request-to-ack
-					rdata_r <= lw_extract(data_hit, r_size, r_off);
-					ack_r <= 1;
+					// hit completes here, acknowledged combinationally
+					// (look_ack above): one cycle request-to-ack after
+					// acceptance
 					cst <= C_IDLE;
 				end
 				else begin

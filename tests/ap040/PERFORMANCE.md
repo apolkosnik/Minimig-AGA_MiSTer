@@ -305,6 +305,37 @@ image that runs, only by logic that trims away at `POST_STORES 0`, so it
 should behave identically on the board; that is an expectation, not a
 measurement, until it is booted.
 
+## A hit is acknowledged in the compare cycle (2026-09-18)
+
+With the drain out of the way the SDRAM-bench profile (I-cache serving,
+`CACHE_ALLOW_ALL=1`) had the core frozen in no state at all and 7.1 cycles
+per instruction, 1.26 of them in `S_MRD` on a 99.9 % data hit rate.  The
+cache's hit took two cycles after acceptance -- the compare in `C_LOOK`,
+then a registered `ack_r`/`rdata_r` the core saw the cycle after -- and
+every instruction fetch paid the same.
+
+The registered acknowledge was a 114 MHz decision.  The tag row and all
+four data words are on the RAM outputs in `C_LOOK`, so `c_ack` is now the
+compare itself (`look_ack`: `C_LOOK && look_hit` under the two snoop-guard
+terms) and `c_rdata` the extracted word, combinationally; `ack_r` stays for
+fills (`C_TAGW`).  Under a divided enable `cst` holds `C_LOOK` until the
+tick, so the level is stable when the core samples it.  This does not
+touch the `c_req -> c_ack` cone that was removed for the ATC path; it starts
+at the RAM output.
+
+| bench | before | after | |
+|---|---:|---:|---:|
+| core, t_integer | 16,093 | 15,126 | -6.0 % |
+| core, dhry | 908,828 | 793,499 | **-12.7 %** |
+| SDRAM, dhry, I-cache serving | 923,619 | 819,995 | **-11.2 %** |
+
+On the SDRAM bench `S_FETCH` drops 100,502 -> 54,277 and `S_MRD` 163,673 ->
+109,780: one cycle off every cached fetch and load, as the arithmetic
+said.  The store side still acknowledges from `ack_r` at capture, one
+cycle after acceptance; acknowledging at acceptance would be the same
+cycle again for 28,101 stores, but that cone does start at `c_req`, and it
+waits for this one's board result.
+
 ## The drain is not a state (2026-09-18)
 
 The store buffer from 8593a1243 kept the cache FSM in `C_PASS` for the whole
