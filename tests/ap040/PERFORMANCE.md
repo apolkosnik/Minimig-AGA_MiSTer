@@ -331,10 +331,30 @@ at the RAM output.
 
 On the SDRAM bench `S_FETCH` drops 100,502 -> 54,277 and `S_MRD` 163,673 ->
 109,780: one cycle off every cached fetch and load, as the arithmetic
-said.  The store side still acknowledges from `ack_r` at capture, one
-cycle after acceptance; acknowledging at acceptance would be the same
-cycle again for 28,101 stores, but that cone does start at `c_req`, and it
-waits for this one's board result.
+said.  Board: 7,551 -> 8,553 Dhrystones (below).
+
+### The store acknowledged at acceptance (2026-09-18)
+
+The same cycle for stores: a posted store was acknowledged from `ack_r`
+one cycle after acceptance, and the capture needs nothing from the RAMs,
+so `c_ack` now includes the capture condition itself (`st_capture`, the
+C_IDLE branch's terms verbatim).  The merge cycle that follows stays; it
+is the cache's business.  This cone does start at `c_req`, i.e. at the
+MMU's translation -- the 5.9 ns path that kept the caches off at 114 MHz.
+
+| bench | before | after | |
+|---|---:|---:|---:|
+| core, dhry | 793,499 | 767,828 | -3.2 % |
+| SDRAM, dhry, I-cache serving | 819,995 | 808,987 | -1.3 % |
+
+Less on the board-like bench than on the core bench, and the profile says
+why: `S_MWR` gives back 11,058 cycles, but the core then reaches the next
+store sooner and waits for the single-entry buffer more -- "held by the
+drain" rises from 77,136 to 94,159 cycles, and misses held behind it from
+36,799 to 50,274.  The drain is active 37 % of the run.  That reopens the
+store-queue question the earlier measurement closed: it was taken with
+fetches bypassing the I-cache, before either acknowledge moved, and the
+core is now fast enough to fill a queue behind a slow write.
 
 ## The drain is not a state (2026-09-18)
 

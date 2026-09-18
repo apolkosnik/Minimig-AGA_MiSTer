@@ -1010,6 +1010,10 @@ initial begin
 			$display("FAIL test 11a (latency %0d): read after a hitting store went to memory", i);
 			errors = errors + 1;
 		end
+		// memory is checked after the store has LANDED: with posting the
+		// core (and this task) returns at capture, and the read above hits
+		// without touching the bus, so the drain can still be in flight
+		wait_drain;
 		if (mem[32'h7004>>2] !== 32'hA5A5_0000 + i) begin
 			$display("FAIL test 11a (latency %0d): memory not written through", i);
 			errors = errors + 1;
@@ -1042,6 +1046,7 @@ initial begin
 			$display("FAIL test 11b (latency %0d): read after word stores went to memory", i);
 			errors = errors + 1;
 		end
+		wait_drain;   // as in (a): the last word store may still be draining
 		if (mem[32'h7008>>2] !== model) begin
 			$display("FAIL test 11b (latency %0d): memory %h, model %h", i, mem[32'h7008>>2], model);
 			errors = errors + 1;

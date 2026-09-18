@@ -467,7 +467,19 @@ assign m_fc    = sb_v ? sb_fc : c_fc;
 // enable cst holds C_LOOK until the tick, so the level is stable when the
 // core samples it.  Fills still acknowledge from C_TAGW through ack_r.
 wire look_ack = (cst == C_LOOK) && look_hit && !look_snooped && !snoop_look_row_look;
-assign c_ack   = pass_active ? (sb_v ? ack_r : m_ack) : (ack_r | look_ack);
+// A posted store is acknowledged in its ACCEPTANCE cycle.  The capture
+// happens on that edge and needs nothing from the RAMs; the merge cycle
+// that follows (C_PASS, pass_first) is the cache's business, not the
+// core's.  st_capture is the C_IDLE branch's capture condition, exactly:
+// the same terms in the same order, so that an acknowledge is never
+// issued for a store the FSM then holds.  This cone starts at c_req, which
+// carries the MMU's translation; at 114 MHz it was the path that kept the
+// caches off (5.9 ns), and it is why acceptance did not acknowledge before.
+wire st_capture = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
+                  c_req && !ack_r && !err_hold && c_write &&
+                  !store_inv_lost && !sb_v && c_post_ok;
+assign c_ack   = pass_active ? (sb_v ? ack_r : m_ack)
+                             : (ack_r | look_ack | st_capture);
 assign sb_busy = sb_v;
 assign c_rdata = pass_active ? m_rdata
                              : (look_ack ? lw_extract(data_hit, r_size, r_off) : rdata_r);
@@ -727,12 +739,13 @@ always @(posedge clk) begin
 						// core now, and drain from the buffer in C_PASS.
 						pass_first <= 1;
 						if (c_post_ok) begin
+							// acknowledged combinationally this cycle
+							// (st_capture); ack_r would repeat it
 							sb_v     <= 1;
 							sb_addr  <= c_addr;
 							sb_wdata <= c_wdata;
 							sb_size  <= c_size;
 							sb_fc    <= c_fc;
-							ack_r    <= 1;
 						end
 						cst <= C_PASS;
 						end
