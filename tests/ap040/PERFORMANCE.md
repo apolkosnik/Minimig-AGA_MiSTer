@@ -356,6 +356,48 @@ store-queue question the earlier measurement closed: it was taken with
 fetches bypassing the I-cache, before either acknowledge moved, and the
 core is now fast enough to fill a queue behind a slow write.
 
+### The queue on the board: no benefit, and the bench said otherwise (2026-09-18)
+
+The plain-FIFO image was flashed deliberately despite failing setup by
+1.015 ns, to find out what the queue is worth before spending more on
+making it fit.  Same XSysInfo, same OS, GuardianAngel loaded:
+
+| | `33e173e22` (timing-clean) | queue `6483ba7a7` (setup -1.015) |
+|---|---:|---:|
+| Dhrystones | 8,553 | **8,492** |
+| MIPS | 4.86 | 4.83 |
+| MFLOPS | 2.94 | 2.94 |
+| CHIP / FAST / ROM MB/s | 5.04 / 7.45 / 8.53 | 5.06 / 7.41 / 8.54 |
+
+Every row is inside ~1 %.  The queue is worth NOTHING on this machine,
+against the SDRAM bench's -8.1 % cycles (which would be +8.8 % on a rate).
+The -0.7 % is not a regression: there is no repeat-run variance figure for
+XSysInfo, so "no change" is the reading.  A bitstream that misses setup is
+not a platform to measure on in principle -- but a setup violation
+corrupts data rather than slowing execution, and the machine ran clean, so
+the figure is what the design does and it is certainly not +8 %.
+
+Why: the real memory path already buffers writes.  The RAM controllers'
+own write path and `cpu_cache_new` absorb stores at a rate a CPU-side
+queue cannot improve on; the SDRAM bench's memory model drains more slowly
+than the controller does, which is what made the queue look valuable
+there.
+
+**The benches do not extrapolate to this board, in either direction.**
+Three data points now, all on the same SDRAM bench with the I-cache
+serving:
+
+| change | SDRAM bench | board |
+|---|---:|---:|
+| non-blocking drain | -2.0 % | **+15.6 %** |
+| hit in the compare cycle | -11.2 % | **+13.3 %** |
+| four-entry store queue | -8.1 % | **~0 %** |
+
+It underpredicted twice and overpredicted once.  A bench number is a
+reason to build, never a reason to believe; only the board closes a
+measurement.  That is what the store-buffer line cost to establish, and it
+is why this line stops here rather than at another revision of the FIFO.
+
 ### The timing wall: neither store-ack nor the queue fits (2026-09-18)
 
 Both changes are cycle-wins in simulation and neither closes at 40 MHz.
