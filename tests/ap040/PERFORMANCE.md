@@ -1211,6 +1211,42 @@ be flashed again.
    either way, bit-identical), so the expectation is unchanged -- but an
    expectation is not a measurement.
 
+### Measured on ec25690cd (2026-09-18): the posted-write fixes, on the board
+
+The two synchronization fixes -- NOP waiting for the store buffer, cache
+maintenance waiting for the drain -- with the maintenance interlock inside
+its branch rather than in its condition:
+
+| | `33e173e22` | `ec25690cd` | |
+|---|---:|---:|---:|
+| Dhrystones | 8,553 | 8,559 | +0.07 % |
+| MIPS | 4.86 | 4.87 | |
+| MFLOPS | 2.94 | 2.94 | -- |
+| CHIP / FAST / ROM MB/s | 5.04 / 7.45 / 8.53 | 5.05 / 7.44 / 8.52 | -- |
+
++0.07 % is inside the 0.06 % repeatability: unchanged, which is what the
+benches said (dhry has neither NOP nor cache maintenance in its loops, so
+the cost falls only where software asks for synchronization).  Two
+architectural defects gone for nothing.
+
+It also settles the boot regression.  `f1f26bef8` -- the same two fixes
+with the maintenance wait written into the CONDITION of C_IDLE's cinv
+branch -- did not boot, and DiagROM flashed red and blue.  The cause was
+that a false condition fell through to the accept branch below, which
+carries no maintenance guard of its own, so the FSM could start a lookup
+that `rd_accept`/`st_accept` say is not happening and `look_snooped` then
+belonged to a different access than the one in flight.  With chipset DMA
+snooping continuously that desyncs the guard on cached chip RAM.  Moving
+the wait inside the branch fixes it, and the board agrees.
+
+The diagnosis was never reproduced in simulation -- DiagROM boots in the
+ROM-boot bench both before and after -- so it stood on the mechanism until
+this image ran.  Worth recording why the bench could not see it: the only
+bench that boots a real ROM, `tb_ap040_diagrom`, instantiates the CPU with
+DEFAULT parameters, so it has never tested the shipping configuration at
+all.  Posting is off there.  That is a gap of the same shape as the one
+the first audit found in `tb_ap040_program`, and it is still open.
+
 ### Measured on 33e173e22 (2026-09-18): the hit acknowledge, on the board
 
 Same XSysInfo, same OS, GuardianAngel loaded (**MMU 68040 (IN USE)**):
