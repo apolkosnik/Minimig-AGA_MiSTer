@@ -215,6 +215,7 @@ ap040_core #(
 	.cinv_ic(cinv_ic),
 	.cinv_dc(cinv_dc),
 	.cinv_done(cinv_done),
+	.store_busy(post_drain),
 
 	.ipl(ipl),
 	.ipl_autovector(ipl_autovector),

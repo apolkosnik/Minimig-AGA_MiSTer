@@ -62,7 +62,19 @@ wire        fberr = fberr_armed && nreset && (busstate == 2'b00) &&
 
 wire        berr = berr_d | fberr;
 
-wire        clkena_in = (busstate == 2'b01) | mem_ready | berr;
+// The BUS side's enable, and the shape this bench always had: advance only
+// when the bus is idle or has answered.
+wire        bus_clkena = (busstate == 2'b01) | mem_ready | berr;
+// The CORE side.  Production splits these (cpu_wrapper: core_enable adds
+// post_drain to bus_enable) so the core keeps running while a posted store
+// drains -- that is the whole point of posting.  Driving both sides from
+// the bus enable, as this bench did, FREEZES the core for the drain and
+// hides every ordering question posting opens: NOP returning before its
+// write lands, cache maintenance completing over a pending store.  Both
+// were real defects in the shipped design and this bench could not see
+// either.  Mirror production instead.
+wire        post_drain;
+wire        clkena_in = bus_clkena | post_drain;
 
 reg   [2:0] ipl_lvl;
 reg  [15:0] ipl_delay = 0;   // $F148: delayed level-2 IPL countdown
@@ -150,7 +162,7 @@ ap040_tg68k_compat #(.AP040_ENABLE_CACHE(`AP040_TB_CACHE),
 	.cache_z3_ena0(1'b0),
 	.cache_z3_base1(4'd0),
 	.cache_z3_ena1(1'b0),
-	.clkena_in(clkena_in), .bus_clkena_in(clkena_in),
+	.clkena_in(clkena_in), .bus_clkena_in(bus_clkena),
 	.tick_in(1'b1),
 	.data_in(data_in),
 	.ipl(~ipl_lvl),
@@ -163,7 +175,7 @@ ap040_tg68k_compat #(.AP040_ENABLE_CACHE(`AP040_TB_CACHE),
 	.nuds(nuds),
 	.nlds(nlds),
 	.busstate(busstate),
-	.longword(longword), .post_drain(),
+	.longword(longword), .post_drain(post_drain),
 	.nresetout(nresetout),
 	.fc(fc),
 

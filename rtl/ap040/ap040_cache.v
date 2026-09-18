@@ -650,7 +650,18 @@ always @(posedge clk) begin
 		case (cst)
 			C_IDLE: begin
 				if (!c_req) err_hold <= 0;
-				if (cinv_req && !cinv_done) begin
+				// Cache maintenance may not report completion while a
+				// store it precedes is still in this buffer: an
+				// acknowledged store that has not reached memory is not
+				// globally complete, and CINV/CPUSH exist to make memory
+				// and the caches agree (M68040UM 10.3).  Software pushes,
+				// then starts a DMA that would read stale memory.  Waiting
+				// for the drain BEFORE the sweep is enough -- the sweep is
+				// 128 cycles, so completion is long after the write lands
+				// -- and nothing new can enter the buffer meanwhile,
+				// because rd_accept and st_accept are already held off
+				// while cinv_req is up.
+				if (cinv_req && !cinv_done && !sb_v) begin
 					sweep_cnt <= 0;
 					sweep_all <= 0;   // honour the cinv_ic/cinv_dc selects
 					cst <= C_SWEEP;

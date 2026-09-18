@@ -81,6 +81,13 @@ module ap040_core
 	output reg        cinv_ic,
 	output reg        cinv_dc,
 	input             cinv_done,
+	// The data cache is still draining a posted store: it has been
+	// acknowledged to this core but has NOT reached memory.  NOP is the
+	// 68040's bus-synchronization instruction (M68040UM 7.7), so it must
+	// not complete while this is high -- software clears a device, NOPs,
+	// and returns expecting the clear to have landed.  Tied low where the
+	// cache is compiled out, and low always without posting.
+	input             store_busy,
 
 	input       [2:0] ipl,
 	input             ipl_autovector,
@@ -505,6 +512,7 @@ localparam S_BF_M2     = 8'd130;
 localparam S_BF_M3     = 8'd131;
 localparam S_BF_M4     = 8'd132;
 localparam S_CINV2     = 8'd133;
+localparam S_NOP_SYNC  = 8'd194;   // NOP waiting for the posted write buffer
 localparam S_CHK2_A    = 8'd134;
 localparam S_CHK2_B    = 8'd135;
 localparam S_CHK2_C    = 8'd136;
@@ -3702,6 +3710,13 @@ always @(posedge clk) begin
 				fetch_next;
 			end
 
+			// NOP holds here until the posted store buffer is empty.  The
+			// fetch queue keeps running underneath, so the wait costs only
+			// the drain itself, and an interrupt is taken at the boundary
+			// AFTER it -- which is the point: the write it was waiting for
+			// has landed by then.
+			S_NOP_SYNC: if (!store_busy) fetch_next;
+
 			//----------------------------------------------------- CHK2/CMP2
 			S_CHK2_A: begin
 				x_ext <= imm; x_set <= 1;
@@ -5663,7 +5678,16 @@ always @(posedge clk) begin
 											if (!sr_s) go_priv;
 											else begin rst_cnt <= 8'd127; state <= S_RESET_HOLD; end
 										end
-										6'b110001: fetch_next;   // NOP
+										// NOP synchronizes the bus (M68040UM 7.7):
+										// it may not finish while a posted store
+										// is still on its way to memory, or the
+										// clear-device/NOP/RTE idiom returns with
+										// the device still asserting and the
+										// interrupt is taken a second time.  Free
+										// when nothing is pending, which is the
+										// usual case.
+										6'b110001: if (store_busy) state <= S_NOP_SYNC;
+										           else fetch_next;   // NOP
 										6'b110010: begin // STOP
 											if (!sr_s) go_priv;
 											else immf(2'd1, S_STOP_LD);
