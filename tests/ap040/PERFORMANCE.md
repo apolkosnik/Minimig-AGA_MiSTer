@@ -369,16 +369,17 @@ worth about 1.1 ns, and a queue's head belongs in flops.
 
 It is not shipped, on a judgement rather than a disqualification:
 
-- the board gives +0.7 % (8,613 vs 8,553), which is real but an order of
-  magnitude under the bench and not separable from run-to-run noise
-  without repeats;
+- the board gives +0.7 % (8,613 and 8,618 vs 8,553), which is real and
+  repeatable but an order of magnitude under the bench;
 - it costs 0.38 ns of margin (+0.095 against `33e173e22`'s +0.476) and
   176 ALMs (39,022 against 38,846) to buy that.
 
-That trade is available to revisit -- it is a live option, not a dead
-end.  Repeat XSysInfo runs on both images would settle whether the
-+0.7 % is real; if it is, the question becomes whether 0.38 ns of
-headroom is worth less than 0.7 %.
+The trade, then, is 0.7 % of speed against 80 % of the remaining setup
+headroom, on a design at 93 % of the device with the decode fold still
+unbuilt and needing margin of its own.  Parked on that basis, and it is a
+live option to revisit -- not a dead end, and not a correctness question:
+the image is timing-clean, passes every gate, and runs the machine
+without artifacts.
 
 Sim-complete and timing-clean, and parked deliberately: `queue-outreg`
 (`529e07918`, md5 921e6701b85be987b916733b5b403f58).  If the store path is
@@ -410,10 +411,31 @@ same direction as their timing, so the failing one was degraded, slowed,
 or both.  A bitstream that does not close is not a measurement platform
 for anything, including the question of what it costs to close it.
 
-The size of the gain is still the story.  +0.7 % against a predicted
-+8.8 % is an order of magnitude, and without a repeat-run variance figure
-for XSysInfo the gain is not cleanly separable from noise -- the two queue
-images alone span 1.4 %.
+The gain is real, and small.  The output-registered image was measured
+twice, the second time after a power cycle: **8,613 and 8,618**, 0.06 %
+apart.  So XSysInfo repeats to about a twentieth of a percent on this
+machine, the +0.7 % over 8,553 is well outside it, and the doubt recorded
+here first -- that the gain might be noise -- was unfounded.  The useful
+by-product is the instrument: differences of half a percent are
+measurable here, which is worth knowing before dismissing any future
+change as too small to see.
+
+That repeatability also settles the failing image.  8,492 sits 1.4 % below
+its own timing-clean twin, far outside the noise, so a bitstream that
+misses setup really is degraded rather than merely untrustworthy.
+
+What remains is that +0.7 % is an order of magnitude under the bench's
++8.8 %.
+
+A first report of rare artifacting on the chip-RAM screen with this image
+came from a soft core reload and did NOT survive a power cycle; the
+machine is clean.  It is recorded because the suspicion was reasonable --
+posted stores merge into the cache line at capture while memory lags, so a
+chipset DMA write in that window is a genuine CPU-vs-chipset ordering
+question, and the queue lengthens the window fourfold -- and because the
+snoop bench cannot see it either way: its model invalidates but does not
+write memory behind the cache the way real DMA does.  Nothing was
+observed; nothing is claimed.
 
 Why: the real memory path already buffers writes.  The RAM controllers'
 own write path and `cpu_cache_new` absorb stores at a rate a CPU-side
