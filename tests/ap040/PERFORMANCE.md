@@ -527,6 +527,44 @@ previous one's drain often enough to fill four entries behind a write the
 correct and its conclusion was scoped to a slower core; this is the same
 experiment with the board reason it asked for.
 
+## The DMA coherency gap, closed (2026-09-18)
+
+Posting has shipped since `e254e8d67` and every snoop test in
+`tb_ap040_cache_snoop` runs with the CPU quiescent: the test sets `mem[]`
+by hand and pulses the snoop separately.  So the window posting actually
+opens -- a chipset write landing while a CPU store has been acknowledged
+but has not reached memory -- had no coverage at all, on a design that
+ships with `POST_STORES = 1`.  It was found by suspecting the store queue
+of causing screen artifacts; the artifacts were a soft core reload and the
+queue is innocent, but the hole in the bench was real and outlives it.
+
+`dma_write` models a chipset write as ONE action -- the backing memory
+changes and the snoop follows, with a skew standing for the real path,
+where the write lands in the controller and the wrapper's CDC delivers the
+invalidate a few cycles later.  T15 drives that into the drain window,
+swept across it at every memory latency:
+
+* **same address.**  The invariant is deliberately not who wins: two bus
+  masters racing for one address is legal in either order, and a test
+  demanding one would be asserting a policy the hardware never made.  What
+  must hold is that the machine ends CONSISTENT -- the CPU's view equals
+  memory -- and that the value is one of the two written, never a third.
+* **same line, different longword.**  The store merges a whole longword
+  into the line while the snoop clears the set; neither write may carry
+  off the other's word.
+* **another line.**  A miss is held behind the drain, and that hold must
+  not let the read be answered from a line the snoop has already killed.
+
+`+inj_dma_snoop` is the must-fail control: the invalidate dropped for
+exactly as long as a store is pending, which is the failure T15 exists to
+catch.  T15 fails under it on the third case -- the CPU serving a stale
+line instead of the DMA's word -- so the test has teeth rather than
+passing by construction.
+
+**The deployed design passes**, 54/54 with the control on `33e173e22` and
+16/16 snoop legs on the development branch with the parked queue.  No
+build or flash was needed for any of it.
+
 ## The drain is not a state (2026-09-18)
 
 The store buffer from 8593a1243 kept the cache FSM in `C_PASS` for the whole
