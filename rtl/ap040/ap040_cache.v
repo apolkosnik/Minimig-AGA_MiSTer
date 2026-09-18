@@ -30,6 +30,11 @@
 `include "ap040_defs.svh"
 
 module ap040_cache
+#(
+	// Posted-store queue depth, a power of two.  The 68040 keeps four
+	// entries in its write buffer.
+	parameter SB_DEPTH = 4
+)
 (
 	input             clk,
 	input             nreset,
@@ -427,10 +432,28 @@ wire fill_active = (cst == C_FILL);
 // version kept the FSM in C_PASS for the whole drain, and every fetch during
 // it waited: on real memory that gave back the entire gain (PERFORMANCE.md,
 // "Posted stores, built and measured").
-reg         sb_v;
-reg  [31:0] sb_addr, sb_wdata;
-reg   [1:0] sb_size;
-reg   [2:0] sb_fc;
+// The queue.  Head drives the master side (sb_addr/sb_wdata/sb_size/sb_fc
+// keep their names as the head's fields, so the drain and every bench that
+// watches it read as before); the tail takes a capture.  Pointers carry a
+// wrap bit: empty is equality, full is equal index with wrap bits
+// differing.  Program order on the bus is FIFO order.
+localparam SB_PW = (SB_DEPTH <= 1) ? 1 : $clog2(SB_DEPTH);
+reg  [31:0] sb_addr_q  [0:SB_DEPTH-1];
+reg  [31:0] sb_wdata_q [0:SB_DEPTH-1];
+reg   [1:0] sb_size_q  [0:SB_DEPTH-1];
+reg   [2:0] sb_fc_q    [0:SB_DEPTH-1];
+reg  [SB_PW:0] sb_rd, sb_wr;
+wire        sb_v    = (sb_rd != sb_wr);
+wire        sb_full = (sb_rd[SB_PW-1:0] == sb_wr[SB_PW-1:0]) && (sb_rd[SB_PW] != sb_wr[SB_PW]);
+wire [31:0] sb_addr  = sb_addr_q [sb_rd[SB_PW-1:0]];
+wire [31:0] sb_wdata = sb_wdata_q[sb_rd[SB_PW-1:0]];
+wire  [1:0] sb_size  = sb_size_q [sb_rd[SB_PW-1:0]];
+wire  [2:0] sb_fc    = sb_fc_q   [sb_rd[SB_PW-1:0]];
+// The store in C_PASS was captured (posted): its merge happens in
+// pass_first from the data it was captured with, not from the head of the
+// queue, and C_PASS releases it after that cycle.
+reg         pass_posted;
+reg  [31:0] cap_wdata;
 
 reg  err_hold;
 // A cache-inhibited READ that hits a resident line must invalidate it
@@ -477,8 +500,8 @@ wire look_ack = (cst == C_LOOK) && look_hit && !look_snooped && !snoop_look_row_
 // caches off (5.9 ns), and it is why acceptance did not acknowledge before.
 wire st_capture = (cst == C_IDLE) && !(cinv_req && !cinv_done) &&
                   c_req && !ack_r && !err_hold && c_write &&
-                  !store_inv_lost && !sb_v && c_post_ok;
-assign c_ack   = pass_active ? (sb_v ? ack_r : m_ack)
+                  !store_inv_lost && !sb_full && c_post_ok;
+assign c_ack   = pass_active ? (pass_posted ? ack_r : m_ack)
                              : (ack_r | look_ack | st_capture);
 assign sb_busy = sb_v;
 assign c_rdata = pass_active ? m_rdata
@@ -597,12 +620,12 @@ wire [31:0] data_hit = (hit_way == 2'd0) ? data_q0 :
 // the only reason the unposted merge waits.
 wire st_upd = (cst == C_PASS) && st_chk &&
               look_hit && !look_snooped && !snoop_look_row_look &&
-              (sb_v ? pass_first : (m_ack && !m_err));
+              (pass_posted ? pass_first : (m_ack && !m_err));
 assign cd_we     = st_upd ? (4'd1 << hit_way) :
                    ((cst == C_FILL) && r_issued && m_ack) ? (4'd1 << r_way) : 4'd0;
 assign cd_widx   = st_upd ? {r_bank, r_row[5:0], r_word[1:0]}
                           : {r_bank, r_row[5:0], r_beat};
-assign cd_wdat   = st_upd ? lw_merge(data_hit, sb_v ? sb_wdata : c_wdata,
+assign cd_wdat   = st_upd ? lw_merge(data_hit, pass_posted ? cap_wdata : c_wdata,
                                      r_size, r_off) : m_rdata;
 
 
@@ -627,7 +650,7 @@ always @(posedge clk) begin
 		r_row <= 0; r_tag <= 0; r_word <= 0; r_way <= 0; r_bank <= 0; way_fallback <= 0;
 		r_beat <= 0; r_issued <= 0; r_addr <= 0; r_size <= 0; r_off <= 0;
 		fill_hold <= 0; ack_r <= 0; rdata_r <= 0;
-		sb_v <= 0; sb_addr <= 0; sb_wdata <= 0; sb_size <= 0; sb_fc <= 0;
+		sb_rd <= 0; sb_wr <= 0; pass_posted <= 0; cap_wdata <= 0;
 		pass_first <= 0;
 	end
 	else if (ce) begin
@@ -642,7 +665,7 @@ always @(posedge clk) begin
 		// bus-errors is dropped here: the core has been released and
 		// samples m_err itself, which is the imprecision c_post_ok
 		// promises the platform cannot produce.
-		if (sb_v && (m_ack || m_err)) sb_v <= 0;
+		if (sb_v && (m_ack || m_err)) sb_rd <= sb_rd + 1'b1;
 
 		// A snoop displaced a store's first-set invalidate in its
 		// acceptance cycle: remember it and issue it as soon as port B
@@ -703,7 +726,7 @@ always @(posedge clk) begin
 				else if (c_req && !ack_r && !err_hold &&
 				         (c_write || (!ci_inv_pend && !store_inv_lost))) begin
 					if (c_write) begin
-						if (store_inv_lost || sb_v) begin
+						if (store_inv_lost || (c_post_ok ? sb_full : sb_v)) begin
 							// port B owes a recorded invalidate: hold the
 							// store one cycle so its own invalidate cannot
 							// be skipped (the request is level-held).
@@ -738,14 +761,16 @@ always @(posedge clk) begin
 						// cannot fault: capture the request and release the
 						// core now, and drain from the buffer in C_PASS.
 						pass_first <= 1;
+						pass_posted <= c_post_ok;
+						cap_wdata   <= c_wdata;
 						if (c_post_ok) begin
 							// acknowledged combinationally this cycle
 							// (st_capture); ack_r would repeat it
-							sb_v     <= 1;
-							sb_addr  <= c_addr;
-							sb_wdata <= c_wdata;
-							sb_size  <= c_size;
-							sb_fc    <= c_fc;
+							sb_addr_q [sb_wr[SB_PW-1:0]] <= c_addr;
+							sb_wdata_q[sb_wr[SB_PW-1:0]] <= c_wdata;
+							sb_size_q [sb_wr[SB_PW-1:0]] <= c_size;
+							sb_fc_q   [sb_wr[SB_PW-1:0]] <= c_fc;
+							sb_wr <= sb_wr + 1'b1;
 						end
 						cst <= C_PASS;
 						end
@@ -790,8 +815,9 @@ always @(posedge clk) begin
 					end
 				end
 				// the store lookup is over with the pass, merged or not
-				if (m_err || m_ack || sb_v) st_chk <= 0;
-				if (sb_v) begin
+				if (m_err || m_ack || pass_posted) st_chk <= 0;
+				if (pass_posted) begin
+					pass_posted <= 0;
 					// A posted store: this is its merge cycle
 					// (pass_first), the core was released at capture,
 					// and the drain now holds the master side by

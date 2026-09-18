@@ -356,6 +356,29 @@ store-queue question the earlier measurement closed: it was taken with
 fetches bypassing the I-cache, before either acknowledge moved, and the
 core is now fast enough to fill a queue behind a slow write.
 
+### The four-entry queue, re-measured where it now matters (2026-09-18)
+
+The same FIFO that measured nothing that morning (below, "tried and
+dropped") -- head drives the master side, tail takes a capture, a store
+waits only for a free slot, everything else for an empty queue -- on the
+tree with both acknowledges moved and the I-cache serving:
+
+| bench | one entry | four | |
+|---|---:|---:|---:|
+| SDRAM, dhry, I-cache serving | 808,987 | 736,339 | **-9.0 %** |
+| core, dhry | 767,828 | 763,018 | -0.6 % |
+
+`S_MWR` 127,247 -> 54,401: a store now costs 1.9 cycles, and "held by the
+drain" for stores falls 94,159 -> 37,026.  The drain is active 45 % of the
+run and misses held behind it rise to 71,788, which is where the next
+cycles are, not in the stores.  The core bench does not move because
+instant memory never fills a queue.  What changed since the morning is
+the core: two acknowledges earlier, it reaches the next store inside the
+previous one's drain often enough to fill four entries behind a write the
+16-bit adapter takes ten cycles to land.  The morning's measurement was
+correct and its conclusion was scoped to a slower core; this is the same
+experiment with the board reason it asked for.
+
 ## The drain is not a state (2026-09-18)
 
 The store buffer from 8593a1243 kept the cache FSM in `C_PASS` for the whole

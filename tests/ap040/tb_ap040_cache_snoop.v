@@ -1172,20 +1172,43 @@ initial begin
 				$display("FAIL test 14b (latency %0d): the second store never landed", i);
 				errors = errors + 1;
 			end
-			// (c) back-to-back stores stay in order and neither is lost: the
-			// second is captured only after the first has drained.
+			// (c) a burst of SB_DEPTH+1 stores into an empty queue: each of
+			// the first SB_DEPTH is captured in the cycles a lone store
+			// takes (measured first), the one after them may wait, and all
+			// reach memory in program order.
+			wait_drain;
+			@(negedge clk);
+			c_req = 1; c_write = 1; c_size = 2'b10; c_addr = 32'h0000_78F0; c_wdata = 32'hC14C_00F0;
+			hit_cycles = 0;
+			while (!(c_ack && ce) && hit_cycles < 200) begin
+				@(posedge clk); hit_cycles = hit_cycles + 1;
+			end
+			@(negedge clk); c_req = 0; c_write = 0;
+			while (!ce) @(posedge clk);
+			@(posedge clk);
+			wait_drain;
 			mr0 = mwrites;
-			cpu_write(32'h0000_7900, 32'hD14D_0000 + i);
-			cpu_write(32'h0000_7904, 32'hE14E_0000 + i);
-			if (mwrites < mr0 + 1) begin
-				$display("FAIL test 14c (latency %0d): the second store was accepted before the first drained", i);
-				errors = errors + 1;
+			for (off = 0; off < dut.SB_DEPTH + 1; off = off + 1) begin
+				@(negedge clk);
+				c_req = 1; c_write = 1; c_size = 2'b10; c_addr = 32'h0000_7900 + (off << 2); c_wdata = 32'hD14D_0000 + (i << 8) + off;
+				guard5 = 0;
+				while (!(c_ack && ce) && guard5 < 200) begin
+					@(posedge clk); guard5 = guard5 + 1;
+				end
+				if (off < dut.SB_DEPTH && guard5 != hit_cycles) begin
+					$display("FAIL test 14c (latency %0d): store %0d of the burst took %0d cycles, a lone store %0d", i, off, guard5, hit_cycles);
+					errors = errors + 1;
+				end
+				@(negedge clk); c_req = 0; c_write = 0;
+				while (!ce) @(posedge clk);
+				@(posedge clk);
 			end
 			wait_drain;
-			if (mem[32'h7900>>2] !== 32'hD14D_0000 + i || mem[32'h7904>>2] !== 32'hE14E_0000 + i) begin
-				$display("FAIL test 14c (latency %0d): stores out of order or lost (%h %h)", i, mem[32'h7900>>2], mem[32'h7904>>2]);
-				errors = errors + 1;
-			end
+			for (off = 0; off < dut.SB_DEPTH + 1; off = off + 1)
+				if (mem[(32'h7900 + (off << 2))>>2] !== 32'hD14D_0000 + (i << 8) + off) begin
+					$display("FAIL test 14c (latency %0d): store %0d lost or out of order (%h)", i, off, mem[(32'h7900 + (off << 2))>>2]);
+					errors = errors + 1;
+				end
 			// (d) a cache-inhibited read under the drain waits for it (the
 			// invariant monitor catches an early one) and returns memory.
 			cpu_write(32'h0000_7A00, 32'hF14F_0000 + i);
