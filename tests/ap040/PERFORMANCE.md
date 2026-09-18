@@ -356,6 +356,29 @@ store-queue question the earlier measurement closed: it was taken with
 fetches bypassing the I-cache, before either acknowledge moved, and the
 core is now fast enough to fill a queue behind a slow write.
 
+### The output-registered FIFO: the diagnosis was right, the change is still not worth it
+
+Built as `529e07918` on `queue-outreg`: **setup +0.095, hold +0.100**,
+39,022 ALMs.  It closes, and it closes by exactly the amount the diagnosis
+predicted -- the plain FIFO's -1.015 recovers 1.11 ns once the head is a
+register again and the SB_DEPTH:1 array read feeds that register instead
+of `m_addr`/`m_wdata`.  So the cost really was a combinational mux between
+the queue and the bus adapter, and that is the piece worth keeping: on
+this design, anything inserted into the master-side address/data path is
+worth about 1.1 ns, and a queue's head belongs in flops.
+
+It is still not shipped, for two independent reasons:
+
+- the board says the queue is worth nothing (above, 8,492 vs 8,553), so
+  there is nothing to buy;
+- it costs margin and area for that nothing: +0.095 against `33e173e22`'s
+  +0.476 is 0.38 ns of headroom given up, and 39,022 ALMs against 38,846.
+
+Sim-complete and timing-clean, and parked deliberately: `queue-outreg`
+(`529e07918`, md5 921e6701b85be987b916733b5b403f58).  If the store path is
+ever revisited -- a wider bus, a different controller -- this is the
+structure to start from, not the plain FIFO.
+
 ### The queue on the board: no benefit, and the bench said otherwise (2026-09-18)
 
 The plain-FIFO image was flashed deliberately despite failing setup by
