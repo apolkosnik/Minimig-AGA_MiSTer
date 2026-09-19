@@ -339,8 +339,35 @@ wire is_move_rr = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
 // not guessed. No other size/direction/EA mode yet.
 // ADD's std_size is ir[7:6] and maps onto AP040_SZ_B/W/L directly (0/1/2);
 // 11 is ADDA, a different instruction, and stays excluded.
-wire is_add_rr = (if_opcode[15:12] == 4'b1101) && (if_opcode[8] == 1'b0) &&
-                  (if_opcode[7:6]  != 2'b11)    && (if_opcode[5:3] == 3'b000);
+// The whole "<ea> op Dn -> Dn" family with a register-direct source. They
+// share ONE encoding shape -- 1ooo RRR 0 SS 000 rrr -- and differ only in
+// the top nibble, so one predicate and one op map reach all of them. The
+// ALU has implemented every one since it was forked from rtl_old; decode
+// reach was the only thing missing, which is why it could emit exactly two
+// of the ALU's thirty-three operations.
+//
+// Excluded deliberately: ir[8]=1 is the other direction (Dn -> <ea>), a
+// memory write this pipeline has no path for yet; ir[7:6]=11 is the
+// ADDA/SUBA/CMPA address-register form, a different instruction; and 1010 /
+// 1110 / 1111 are A-line, the shift group and F-line, none of which is in
+// the enumerated nibble list below.
+wire alu_rr_shape = (if_opcode[15]   == 1'b1)  && (if_opcode[8]   == 1'b0) &&
+                    (if_opcode[7:6]  != 2'b11) && (if_opcode[5:3] == 3'b000);
+wire is_or_rr  = alu_rr_shape && (if_opcode[14:12] == 3'b000);   // 1000
+wire is_sub_rr = alu_rr_shape && (if_opcode[14:12] == 3'b001);   // 1001
+wire is_cmp_rr = alu_rr_shape && (if_opcode[14:12] == 3'b011);   // 1011 (ir[8]=1 would be EOR)
+wire is_and_rr = alu_rr_shape && (if_opcode[14:12] == 3'b100);   // 1100
+wire is_add_rr = alu_rr_shape && (if_opcode[14:12] == 3'b101);   // 1101
+wire is_alu_rr = is_or_rr || is_sub_rr || is_cmp_rr || is_and_rr || is_add_rr;
+
+// SUB and CMP are b - a, and ap040_ea_fetch.v resolves operand_b from
+// eac_dest_reg and operand_a from the source, so `SUB Dn,Dm` computes
+// Dm - Dn as it must. Verified against ap040_pipe_alu.v's sub_full.
+wire [5:0] alu_rr_op = is_or_rr  ? `AP040_ALU_OR  :
+                       is_sub_rr ? `AP040_ALU_SUB :
+                       is_cmp_rr ? `AP040_ALU_CMP :
+                       is_and_rr ? `AP040_ALU_AND :
+                                   `AP040_ALU_ADD;
 
 wire [1:0] add_op_size  = if_opcode[7:6];
 wire [1:0] move_op_size = (if_opcode[13:12] == 2'b01) ? `AP040_SZ_B :
@@ -512,7 +539,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_add_rr &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte;
@@ -787,14 +814,14 @@ always @(posedge clk) begin
 				id_imm          <= (is_move_mem_l || is_jmp_an || is_jsr_an || is_rts || is_rte) ? 32'h0 :
 				                    is_trap ? (32'd32 + {28'd0, if_opcode[3:0]}) :
 				                              {{24{if_opcode[7]}}, if_opcode[7:0]};
-				id_alu_op       <= is_add_rr ? `AP040_ALU_ADD : `AP040_ALU_MOVE;
+				id_alu_op       <= is_alu_rr ? alu_rr_op : `AP040_ALU_MOVE;
 				// Everything else here (MOVEQ, Scc, the memory/branch forms)
 				// is Long or drives its own width, so Long stays the default.
-				id_size         <= is_add_rr  ? add_op_size  :
+				id_size         <= is_alu_rr  ? add_op_size  :
 				                   is_move_rr ? move_op_size : `AP040_SZ_L;
 				id_src_a_is_imm <= if_valid && is_moveq;
-				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || is_add_rr || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
-				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_add_rr || is_move_mem_l);
+				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
+				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_move_mem_l);
 				id_is_branch    <= if_valid && is_branch_byte;
 				id_is_scc       <= if_valid && is_scc_rr;
 				id_is_dbcc      <= 1'b0;
