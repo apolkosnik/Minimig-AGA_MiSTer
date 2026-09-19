@@ -1282,6 +1282,31 @@ real MMU or bus-error path arrives, which is the same boundary
    4. ~~LINK/UNLK~~ **DONE (milestone 49)**, then **MOVEM**, then
       **MULU/DIVU**.
 
+      **MULU.W/MULS.W (milestone 51)** occupy nibble 1100 with
+      `ir[7:6]==11` -- the slot every ALU shape had been excluding, since
+      the 68k gives AND's opmode 011/111 to multiply. A 16x16 multiply is
+      one DSP block and fits a 40 MHz cycle, so it is decode plus two ALU
+      cases with no sequencer.
+
+      The result is 32 bits into the whole of Dn while the source is a word,
+      so `id_size` is Long and `id_sxt_w` forces the memory read and the
+      autoincrement step to Word, as for `ADDA.W`. The sign extension that
+      implies is irrelevant rather than wrong: the ALU reads only bits
+      [15:0] of each operand, so MULU is not made signed by arriving
+      sign-extended. Its flags are read from bit 31 explicitly instead of
+      through `res_msb`, which follows `size`.
+
+      The bench settles signed against unsigned with one pair: identical
+      source bits and the same multiplier, which must give `0005FFFA` one
+      way and `FFFFFFFA` the other. Verified by making MULS unsigned, which
+      collapses the two to the same value.
+
+      **Still to do here: DIVU.W/DIVS.W.** Unlike multiply these cannot be
+      combinational -- a 32/16 divide needs an iterative sequencer of about
+      seventeen cycles -- and they carry two conditions no instruction in
+      this core has yet: a zero-divide EXCEPTION, and an overflow that sets
+      V and leaves the destination UNCHANGED.
+
       **MOVEM.L (milestone 50)** covers the two autoincrement forms, which
       are the prologue/epilogue idiom. One instruction, up to sixteen memory
       accesses, so it is a sequencer in `ap040_ea_fetch.v` alongside the

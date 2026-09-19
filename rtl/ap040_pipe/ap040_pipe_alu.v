@@ -84,6 +84,15 @@ wire addx_r_msb = (size == `AP040_SZ_B) ? addx_full[7] : (size == `AP040_SZ_W) ?
 wire sub_r_msb  = (size == `AP040_SZ_B) ? sub_full[7]  : (size == `AP040_SZ_W) ? sub_full[15]  : sub_full[31];
 wire subx_r_msb = (size == `AP040_SZ_B) ? subx_full[7] : (size == `AP040_SZ_W) ? subx_full[15] : subx_full[31];
 
+// Multiply operands: the low word of each, unsigned for MULU and sign-
+// extended for MULS. Commutative, so which is a and which is b does not
+// matter -- one of the few ALU ops here with no operand-order hazard.
+wire [31:0]        mulu_full = a[15:0] * b[15:0];
+wire signed [15:0] muls_a    = a[15:0];
+wire signed [15:0] muls_b    = b[15:0];
+wire signed [31:0] muls_prod = muls_a * muls_b;
+wire [31:0]        muls_full = muls_prod;
+
 wire add_v  = (a_msb == b_msb) && (add_r_msb  != a_msb);
 wire addx_v = (a_msb == b_msb) && (addx_r_msb != a_msb);
 wire sub_v  = (a_msb != b_msb) && (sub_r_msb  == a_msb);
@@ -172,6 +181,26 @@ always @* begin
 		`AP040_ALU_CMP: begin
 			result = bm;   // destination unchanged
 			flags_out = {f_x, sub_r_msb, res_zero(sub_full[31:0]), sub_v, sub_c};
+		end
+
+		// MULU/MULS take the low words of both operands whatever `size`
+		// says, and always produce 32 bits -- so unlike every other op here
+		// the flags are read from bit 31 explicitly rather than through
+		// res_msb, which would follow `size`. Decode sets size to Long for
+		// these, so the two agree today; spelling it out keeps them agreeing
+		// if that ever changes.
+		//
+		// N and Z come from the full 32-bit product, V and C are cleared,
+		// and X is untouched -- the 68000 through 68040 all define it that
+		// way, and it is why a multiply cannot be used to set up an ADDX.
+		`AP040_ALU_MULU: begin
+			result = mulu_full;
+			flags_out = {f_x, mulu_full[31], (mulu_full == 32'd0), 1'b0, 1'b0};
+		end
+
+		`AP040_ALU_MULS: begin
+			result = muls_full;
+			flags_out = {f_x, muls_full[31], (muls_full == 32'd0), 1'b0, 1'b0};
 		end
 
 		`AP040_ALU_AND: begin

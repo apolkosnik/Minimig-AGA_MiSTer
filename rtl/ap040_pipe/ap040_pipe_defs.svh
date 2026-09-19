@@ -87,5 +87,11 @@
 `define AP040_ALU_BCHG    6'd30
 `define AP040_ALU_BCLR    6'd31
 `define AP040_ALU_BSET    6'd32
+// 16x16 -> 32 multiply (milestone 51). Combinational: one DSP block on
+// Cyclone V, comfortably inside a 40 MHz cycle, so unlike divide it needs no
+// sequencer. The operands are the LOW WORDS of a and b regardless of the
+// `size` port, and the result is always the full 32 bits.
+`define AP040_ALU_MULU    6'd33
+`define AP040_ALU_MULS    6'd34
 
 `endif // AP040_PIPE_DEFS_SVH
