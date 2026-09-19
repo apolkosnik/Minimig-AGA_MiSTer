@@ -664,10 +664,10 @@ wire is_move_mem_l = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) 
 // they reuse its memory-read path unchanged. What is new is that they write
 // a SECOND register: the updated An alongside the data in Dn. See
 // ap040_pipe_regfile.v's second write port and ap040_ea_fetch.v's an_new.
-wire is_move_pi = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b000) &&
-                  (if_opcode[5:3]  == 3'b011);
-wire is_move_pd = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b000) &&
-                  (if_opcode[5:3]  == 3'b100);
+wire is_move_pi = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
+                  (if_opcode[8:6] == 3'b000) && (if_opcode[5:3]  == 3'b011);
+wire is_move_pd = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
+                  (if_opcode[8:6] == 3'b000) && (if_opcode[5:3]  == 3'b100);
 wire is_move_ax = is_move_pi || is_move_pd;
 
 // MOVE.L Dn,(An) (milestone 31): the first STORE. Destination mode 010 with
@@ -1195,7 +1195,7 @@ always @(posedge clk) begin
 				                   is_extswap_rr ? extswap_op  : `AP040_ALU_MOVE;
 				// Everything else here (MOVEQ, Scc, the memory/branch forms)
 				// is Long or drives its own width, so Long stays the default.
-				id_size         <= is_move_mem_l ? move_op_size :
+				id_size         <= (is_move_mem_l || is_move_ax) ? move_op_size :
 				                   quick_shape ? if_opcode[7:6] :
 				                   (is_bcd1_rr || is_bcd2_rr) ? `AP040_SZ_B :
 				                   is_extswap_rr ? extswap_size :

@@ -414,15 +414,23 @@ wire [31:0] operand_a = eac_src_a_is_imm ? eac_imm :
 // the increment logic below from having to care which it is.
 wire [31:0] an_base = eac_is_store ? operand_b : operand_a;
 
-wire [31:0] ea_target = eac_is_abs    ? eac_imm           :
-                        eac_is_predec ? (an_base - 32'd4) :
+// The auto-increment step follows the operand size, with the 68000's stack
+// exception: a BYTE access through A7 steps by two, not one, so the stack
+// pointer stays even. A7 is the address bank's register 7, unified index 15.
+wire        an_is_a7 = (eac_is_store ? eac_dest_reg : eac_src_reg) == 4'd15;
+wire [31:0] an_step  = (eac_size == `AP040_SZ_L) ? 32'd4 :
+                       (eac_size == `AP040_SZ_W) ? 32'd2 :
+                       an_is_a7                  ? 32'd2 : 32'd1;
+
+wire [31:0] ea_target = eac_is_abs    ? eac_imm            :
+                        eac_is_predec ? (an_base - an_step) :
                                         (operand_a + eac_imm);
 
 // The value An takes afterwards. Both modes leave An at the same place --
 // just past the longword for (An)+, at the start of it for -(An) -- which is
 // why one expression covers both.
-wire [31:0] an_new = eac_is_postinc ? (an_base + 32'd4) :
-                                      (an_base - 32'd4);
+wire [31:0] an_new = eac_is_postinc ? (an_base + an_step) :
+                                      (an_base - an_step);
 wire        an_write = eac_valid && (eac_is_postinc || eac_is_predec);
 
 // Address error on an odd JMP/JSR target (milestone 17, new): a SECOND
@@ -647,7 +655,7 @@ wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 // own vector-table READ, or RTE's own pop READ -- mutually exclusive by
 // construction (an instruction is never more than one of these at once).
 wire [31:0] l1_addr_word = eac_is_store ? (eac_is_abs    ? eac_imm :
-                                                       eac_is_predec ? (an_base - 32'd4)
+                                                       eac_is_predec ? (an_base - an_step)
                                                                      : an_base) :
                             eac_is_push  ? push_addr :
                             exc_writing ? exc_beat_addr :
