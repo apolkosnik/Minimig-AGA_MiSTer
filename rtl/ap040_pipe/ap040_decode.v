@@ -383,6 +383,33 @@ wire is_not_rr  = unary_rr_shape && (if_opcode[11:8] == 4'b0110);   // 0x46
 wire is_tst_rr  = unary_rr_shape && (if_opcode[11:8] == 4'b1010);   // 0x4A
 wire is_unary_rr = is_negx_rr || is_clr_rr || is_neg_rr || is_not_rr || is_tst_rr;
 
+// SWAP / EXT.W / EXT.L / EXTB.L: 0100 100x oo 000 rrr. All three read
+// operand b and take their register from ir[2:0], so they ride the unary
+// group's selector arrangement. What they do NOT share is the size field:
+// ir[7:6] here is an OPCODE selector, not std_size -- 01=SWAP, 10=EXT.W,
+// 11=EXT.L with ir[8]=0 or EXTB.L with ir[8]=1 -- so add_op_size would read
+// EXT.W as Long and EXT.L/EXTB.L as the invalid size 3. They get their own
+// mapping instead.
+//
+// ir[7:6]=00 is NBCD and stays out. ir[5:3]!=000 is PEA/MOVEM, which shares
+// this opcode and must not be disturbed.
+wire extswap_shape = (if_opcode[15:12] == 4'b0100) &&
+                     (if_opcode[11:9]  == 3'b100) && (if_opcode[5:3] == 3'b000);
+wire is_swap_rr = extswap_shape && (if_opcode[8] == 1'b0) && (if_opcode[7:6] == 2'b01);
+wire is_extw_rr = extswap_shape && (if_opcode[8] == 1'b0) && (if_opcode[7:6] == 2'b10);
+wire is_extl_rr = extswap_shape && (if_opcode[8] == 1'b0) && (if_opcode[7:6] == 2'b11);
+wire is_extb_rr = extswap_shape && (if_opcode[8] == 1'b1) && (if_opcode[7:6] == 2'b11);
+wire is_extswap_rr = is_swap_rr || is_extw_rr || is_extl_rr || is_extb_rr;
+
+wire [5:0] extswap_op = is_swap_rr ? `AP040_ALU_SWAP :
+                        is_extb_rr ? `AP040_ALU_EXTB : `AP040_ALU_EXT;
+
+// EXT.W is the only member whose result is a WORD spliced into Dn[15:0].
+// SWAP returns {b[15:0],b[31:16]} and EXTB.L returns a sign-extended
+// longword; both must pass through whole, so Long is what stops execute's
+// merge from masking them.
+wire [1:0] extswap_size = is_extw_rr ? `AP040_SZ_W : `AP040_SZ_L;
+
 wire [5:0] unary_rr_op = is_negx_rr ? `AP040_ALU_NEGX :
                          is_clr_rr  ? `AP040_ALU_CLR  :
                          is_neg_rr  ? `AP040_ALU_NEG  :
@@ -565,7 +592,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte;
@@ -803,7 +830,7 @@ always @(posedge clk) begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
 				id_next_pc      <= if_pc + 32'd2;
-				id_dest_reg     <= (is_scc_rr || is_unary_rr) ? {1'b0, d_rn} :
+				id_dest_reg     <= (is_scc_rr || is_unary_rr || is_extswap_rr) ? {1'b0, d_rn} :
 				                    (is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_movesr || is_rts || is_rte) ? 4'd15 : {1'b0, d_reg9};
 				// is_move_mem_l/is_jmp_an/is_jsr_an's src_reg is An, not Dn
 				// -- the unified index's top bit (8+n vs 0+n) is the ONLY
@@ -840,15 +867,17 @@ always @(posedge clk) begin
 				id_imm          <= (is_move_mem_l || is_jmp_an || is_jsr_an || is_rts || is_rte) ? 32'h0 :
 				                    is_trap ? (32'd32 + {28'd0, if_opcode[3:0]}) :
 				                              {{24{if_opcode[7]}}, if_opcode[7:0]};
-				id_alu_op       <= is_alu_rr   ? alu_rr_op   :
-				                   is_unary_rr ? unary_rr_op : `AP040_ALU_MOVE;
+				id_alu_op       <= is_alu_rr     ? alu_rr_op   :
+				                   is_unary_rr   ? unary_rr_op :
+				                   is_extswap_rr ? extswap_op  : `AP040_ALU_MOVE;
 				// Everything else here (MOVEQ, Scc, the memory/branch forms)
 				// is Long or drives its own width, so Long stays the default.
-				id_size         <= (is_alu_rr || is_unary_rr) ? add_op_size :
+				id_size         <= is_extswap_rr ? extswap_size :
+				                   (is_alu_rr || is_unary_rr) ? add_op_size :
 				                   is_move_rr ? move_op_size : `AP040_SZ_L;
 				id_src_a_is_imm <= if_valid && is_moveq;
-				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || (is_unary_rr && !is_tst_rr) || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
-				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_move_mem_l);
+				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
+				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_extswap_rr || is_move_mem_l);
 				id_is_branch    <= if_valid && is_branch_byte;
 				id_is_scc       <= if_valid && is_scc_rr;
 				id_is_dbcc      <= 1'b0;
