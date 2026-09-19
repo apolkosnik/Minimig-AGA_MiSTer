@@ -1324,6 +1324,28 @@ real MMU or bus-error path arrives, which is the same boundary
       destination operand is on port B for everything except a plain load,
       so two genuinely do not reach. It forwards like the other two.
 
+      **Milestone 57 (PC-relative)** added `(d16,PC)` and `(d8,PC,Xn)` for
+      MOVE, the binary ALU family and LEA. Amiga code is position-
+      independent throughout and `LEA msg(pc),A0` is its signature idiom.
+
+      Both modes gather the SAME extension word the register-based modes do
+      -- a displacement for 010, a brief format for 011 -- so they ride the
+      same gather kinds with one more carried property. All that differs is
+      the BASE: the PC of the EXTENSION WORD, which is the opcode's PC plus
+      two. `eac_pc` was already threaded for the exception frames, so
+      nothing new reaches EA-fetch, and `(d8,PC,Xn)` came along for free on
+      top of milestone 56's index arithmetic.
+
+      Keeping the resolution in EA-fetch rather than folding it into
+      `id_imm` at decode -- where the PC is also known -- is what makes that
+      sharing possible. The decode-time shortcut would have forced
+      `(d8,PC,Xn)` to grow its own path.
+
+      The base being PC+2 rather than the opcode's PC is the easy thing to
+      get wrong, so every check in its bench sits two bytes from the wrong
+      answer. Verified by making the base `eac_pc`: all five fail, with A1
+      at `$047E`, A2 at `$03FE` and both loads straddling their longwords.
+
       ### A testability limit worth knowing
 
       **A Word index's sign extension cannot be observed through a LOAD in

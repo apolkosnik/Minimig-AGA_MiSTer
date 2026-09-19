@@ -277,6 +277,7 @@ module ap040_ea_fetch
 	input             eac_is_lea,
 	input             eac_sxt_w,
 	input             eac_ea_indexed,
+	input             eac_ea_pcrel,
 	input             eac_is_rmw,
 	input             eac_is_div,
 	input             eac_div_signed,
@@ -473,10 +474,22 @@ wire [31:0] idx_raw  = eac_imm[11] ? operand_c
 wire [31:0] idx_val  = idx_raw << eac_imm[10:9];
 wire [31:0] idx_disp = {{24{eac_imm[7]}}, eac_imm[7:0]};
 
+// PC-relative addressing (milestone 57) changes only the BASE: the program
+// counter of the EXTENSION WORD, which is the opcode's PC plus two, rather
+// than An. Everything built on top of it -- the displacement add, and
+// milestone 56's index arithmetic -- is unchanged, which is why (d8,PC,Xn)
+// came along for free with (d16,PC).
+//
+// eac_pc is the opcode's own address and was already threaded for the
+// exception frames, so nothing new reaches this stage. operand_a is simply
+// unused for these modes; decode still points eac_src_reg at the register
+// the mode field nominally names, and reading it is harmless.
+wire [31:0] ea_base = eac_ea_pcrel ? (eac_pc + 32'd2) : operand_a;
+
 wire [31:0] ea_target = eac_is_abs     ? eac_imm            :
                         eac_is_predec  ? (an_base - an_step) :
-                        eac_ea_indexed ? (operand_a + idx_val + idx_disp) :
-                                         (operand_a + eac_imm);
+                        eac_ea_indexed ? (ea_base + idx_val + idx_disp) :
+                                         (ea_base + eac_imm);
 
 // The value An takes afterwards. Both modes leave An at the same place --
 // just past the longword for (An)+, at the start of it for -(An) -- which is

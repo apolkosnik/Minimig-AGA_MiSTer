@@ -306,6 +306,7 @@ module ap040_decode
 	output reg        id_is_lea,
 	output reg        id_sxt_w,
 	output reg        id_ea_indexed,
+	output reg        id_ea_pcrel,
 	output reg        id_is_rmw,
 	output reg        id_is_link,
 	output reg        id_is_div,
@@ -692,6 +693,25 @@ wire is_unlk = (if_opcode[15:3] == 13'b0100111001011);
 // two ports genuinely do not reach.
 wire ea_indexed_mode = (if_opcode[5:3] == 3'b110);
 
+// PC-relative addressing (milestone 57): mode 111 reg 010 is (d16,PC) and
+// reg 011 is (d8,PC,Xn). Amiga code is position-independent throughout, and
+// LEA msg(pc),A0 is its signature idiom.
+//
+// Both gather exactly one extension word, and it is the SAME word the
+// register-based modes gather -- a displacement for 010, a brief format for
+// 011 -- so they ride the same gather kinds with one more carried property.
+// All that differs is the BASE: the program counter of the extension word,
+// which is the opcode's PC plus two, instead of An.
+//
+// That base is already available downstream as eac_pc, so nothing new is
+// threaded; ap040_ea_fetch.v just selects it. Note this means the EA is NOT
+// resolved at decode time even though the PC is known then -- keeping it in
+// ap040_ea_fetch.v is what lets (d8,PC,Xn) share the index arithmetic
+// milestone 56 built rather than needing its own.
+wire ea_pcdisp_mode = (if_opcode[5:3] == 3'b111) && (if_opcode[2:0] == 3'b010);
+wire ea_pcidx_mode  = (if_opcode[5:3] == 3'b111) && (if_opcode[2:0] == 3'b011);
+wire ea_pcrel_mode  = ea_pcdisp_mode || ea_pcidx_mode;
+
 wire alu_dst_disp_shape = (if_opcode[15]   == 1'b1)  && (if_opcode[8]   == 1'b1) &&
                           (if_opcode[7:6]  != 2'b11) && (if_opcode[5:3] == 3'b101);
 wire is_alu_dst_disp = alu_dst_disp_shape &&
@@ -966,6 +986,13 @@ wire alu_disp_shape = (if_opcode[15]   == 1'b1)  && (if_opcode[8]   == 1'b0) &&
                       (if_opcode[7:6]  != 2'b11) && (if_opcode[5:3] == 3'b101);
 wire alu_idx_shape = (if_opcode[15]   == 1'b1)  && (if_opcode[8]   == 1'b0) &&
                      (if_opcode[7:6]  != 2'b11) && ea_indexed_mode;
+wire alu_pcrel_shape = (if_opcode[15]   == 1'b1)  && (if_opcode[8]   == 1'b0) &&
+                       (if_opcode[7:6]  != 2'b11) && ea_pcrel_mode;
+wire is_alu_pcrel = alu_pcrel_shape &&
+                    ((if_opcode[14:12] == 3'b000) || (if_opcode[14:12] == 3'b001) ||
+                     (if_opcode[14:12] == 3'b011) || (if_opcode[14:12] == 3'b100) ||
+                     (if_opcode[14:12] == 3'b101));
+wire is_cmp_pcrel = alu_pcrel_shape && (if_opcode[14:12] == 3'b011);
 wire is_alu_idx = alu_idx_shape &&
                   ((if_opcode[14:12] == 3'b000) || (if_opcode[14:12] == 3'b001) ||
                    (if_opcode[14:12] == 3'b011) || (if_opcode[14:12] == 3'b100) ||
@@ -1003,6 +1030,7 @@ wire is_lea_disp = lea_shape && (if_opcode[5:3] == 3'b101);
 // of 8192, so both land on the same word. LEA puts the full 32-bit address
 // in An where it can be read.
 wire is_lea_idx  = lea_shape && ea_indexed_mode;
+wire is_lea_pcrel = lea_shape && ea_pcrel_mode;
 
 // One op map for all three shapes: the nibble alone picks the operation.
 wire [5:0] alu_nib_op = (if_opcode[14:12] == 3'b000) ? `AP040_ALU_OR  :
@@ -1160,6 +1188,8 @@ wire is_movea_imm = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b001) 
 // through the shared gather state machine below, not a parallel one.
 wire is_move_idx = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
                    (if_opcode[8:6] == 3'b000) && ea_indexed_mode;
+wire is_move_pcrel = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
+                     (if_opcode[8:6] == 3'b000) && ea_pcrel_mode;
 wire is_move_disp = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
                      (if_opcode[8:6]  == 3'b000) &&
                      (if_opcode[5:3]  == 3'b101);
@@ -1265,7 +1295,8 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_move_idx && !is_alu_idx && !is_lea_idx && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_move_idx && !is_alu_idx && !is_lea_idx &&
+                   !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an;
@@ -1326,6 +1357,7 @@ reg         held_alu_nowrite;   // CMP: flags only, as held_imm_nowrite is for C
 reg         held_alu_areg;      // destination is An (the ADDA family)
 reg         held_alu_ccr;       // does this form set condition codes?
 reg         held_alu_sxt;       // sign-extend a Word source to 32 bits
+reg         held_ea_pcrel;      // the base is the PC, not An
 reg         held_ea_indexed;    // the gathered word is a brief format, not a displacement
 reg         held_alu_rmw;       // this form reads AND writes memory       // sign-extend a Word source to 32 bits
 reg         held_is_jmp;
@@ -1407,6 +1439,7 @@ always @(posedge clk) begin
 		id_is_lea       <= 1'b0;
 		id_sxt_w        <= 1'b0;
 		id_ea_indexed   <= 1'b0;
+		id_ea_pcrel     <= 1'b0;
 		id_is_rmw       <= 1'b0;
 		id_is_link      <= 1'b0;
 		id_is_div       <= 1'b0;
@@ -1444,6 +1477,7 @@ always @(posedge clk) begin
 		held_alu_sxt      <= 1'b0;
 		held_alu_rmw      <= 1'b0;
 		held_ea_indexed   <= 1'b0;
+		held_ea_pcrel     <= 1'b0;
 		held_is_jmp     <= 1'b0;
 		held_is_lea     <= 1'b0;
 		held_imm_ccr    <= 1'b0;
@@ -1572,6 +1606,7 @@ always @(posedge clk) begin
 					id_sxt_w        <= held_is_alu_disp && held_alu_sxt;
 					id_is_rmw       <= held_is_alu_disp && held_alu_rmw;
 					id_ea_indexed   <= held_ea_indexed;
+					id_ea_pcrel     <= held_ea_pcrel;
 					id_is_link      <= held_is_link;
 					id_is_div       <= held_is_imm && held_imm_div;
 					id_div_signed   <= held_is_imm && held_imm_divs;
@@ -1597,7 +1632,8 @@ always @(posedge clk) begin
 			              is_imm_alu || is_move_imm || is_move_abs || is_movea_imm ||
 			              is_st_abs || is_alu_disp || is_lea_disp || is_adda_imm ||
 			              is_adda_disp || is_link || is_movem || is_muldiv_imm ||
-			              is_alu_dst_disp || is_move_idx || is_alu_idx || is_lea_idx) begin
+			              is_alu_dst_disp || is_move_idx || is_alu_idx || is_lea_idx ||
+			              is_move_pcrel || is_alu_pcrel || is_lea_pcrel) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1631,23 +1667,28 @@ always @(posedge clk) begin
 				// The ALU family takes its size from ir[7:6]; MOVE's lives in
 				// ir[13:12] with a different encoding, hence two wires.
 				held_mv_size     <= is_adda_disp ? `AP040_SZ_L :
-				                    (is_alu_disp || is_alu_dst_disp || is_alu_idx) ? add_op_size :
-				                                                                     move_op_size;
+				                    (is_alu_disp || is_alu_dst_disp || is_alu_idx ||
+				                     is_alu_pcrel) ? add_op_size : move_op_size;
 				held_is_dbcc  <= is_dbcc;
-				held_is_move_disp <= is_move_disp || is_move_idx;
-				held_ea_indexed   <= is_move_idx || is_alu_idx || is_lea_idx;
-				held_is_alu_disp  <= is_alu_disp || is_adda_disp || is_alu_dst_disp || is_alu_idx;
+				held_is_move_disp <= is_move_disp || is_move_idx || is_move_pcrel;
+				held_ea_indexed   <= is_move_idx || is_alu_idx || is_lea_idx ||
+				                     ((is_move_pcrel || is_alu_pcrel || is_lea_pcrel) && ea_pcidx_mode);
+				held_ea_pcrel     <= is_move_pcrel || is_alu_pcrel || is_lea_pcrel;
+				held_is_alu_disp  <= is_alu_disp || is_adda_disp || is_alu_dst_disp || is_alu_idx ||
+				                     is_alu_pcrel;
 				// The ir[8]=1 direction has its own op map: nibble 1011 is
 				// EOR there, not CMP.
 				held_alu_op       <= is_alu_dst_disp ? alu_nib_dst_op : alu_nib_op;
 				// An RMW's destination is memory, so it writes no register.
-				held_alu_nowrite  <= is_cmp_disp || is_cmpa_disp || is_alu_dst_disp || is_cmp_idx;
+				held_alu_nowrite  <= is_cmp_disp || is_cmpa_disp || is_alu_dst_disp || is_cmp_idx ||
+				                     is_cmp_pcrel;
 				held_alu_areg     <= is_adda_disp;
-				held_alu_ccr      <= is_alu_disp || is_cmpa_disp || is_alu_dst_disp || is_alu_idx;
+				held_alu_ccr      <= is_alu_disp || is_cmpa_disp || is_alu_dst_disp || is_alu_idx ||
+				                     is_alu_pcrel;
 				held_alu_sxt      <= is_adda_disp && (if_opcode[8] == 1'b0);
 				held_alu_rmw      <= is_alu_dst_disp;
 				held_is_jmp   <= is_jmp_disp;
-				held_is_lea   <= is_lea_disp || is_lea_idx;
+				held_is_lea   <= is_lea_disp || is_lea_idx || is_lea_pcrel;
 				held_is_link  <= is_link;
 				held_is_movem <= is_movem;
 				held_movem_dir<= is_movem_ld;
@@ -1781,6 +1822,7 @@ always @(posedge clk) begin
 				id_sxt_w        <= if_valid && (is_adda_w || is_mul || is_div);
 				id_is_rmw       <= if_valid && is_alu_dst;
 				id_ea_indexed   <= 1'b0;
+				id_ea_pcrel     <= 1'b0;
 				id_is_link      <= 1'b0;
 				id_is_div       <= if_valid && is_div;
 				id_div_signed   <= if_valid && is_divs;
