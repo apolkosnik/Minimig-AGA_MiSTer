@@ -1054,7 +1054,24 @@ real MMU or bus-error path arrives, which is the same boundary
    **CHK**/**zero-divide** (no such instructions exist yet), **trace**,
    and **bus/access-fault format $7** (needs a real BCU/MMU, explicitly
    deferred with that milestone per section 5's write-buffer note).
-3. **Byte/word-sized ALU ops and MOVE** (current pipeline is Long-only
+3. **DONE (milestones 18, 35-38): byte and word sizes throughout.** The ALU
+   port was already there; decode, a size field across all four stages, a
+   read-side lane select, a size-dependent auto-increment step (with the
+   68000's A7 byte exception), a held size for the gathering modes, and byte
+   enables on the L1's write port. Every load and store mode is now sized.
+
+   One judgement recorded here was wrong and is corrected rather than
+   quietly dropped: milestone 35 deferred sized STORES on the grounds that
+   byte lanes in a placeholder L1 would be throwaway work. They are not. A
+   behavioural array writes a half-word as easily as a whole one, and a real
+   block RAM has byte enables anyway, so the change is both small and
+   representative of whatever replaces the model.
+
+   The subtle part was not the write but the READ-AFTER-WRITE forward, which
+   returned the buffered longword whole -- correct when all four lanes are
+   written, and fabricating three of them when one is. It merges now.
+
+   ORIGINAL TEXT: **Byte/word-sized ALU ops and MOVE** (current pipeline is Long-only
    throughout `ap040_pipe_alu.v`'s size port is already there and unused).
 4. **MMU and cache integration**, once enough of the integer ISA exists that
    testing them against real address translation is meaningful. Reuse the
