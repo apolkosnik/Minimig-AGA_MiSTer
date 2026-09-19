@@ -66,6 +66,16 @@
 // 2023-2026 - added support for external floppy drives with copy protection (improved DSKBYTR register)
 
 module paula_floppy
+#(
+	// Real/flux floppy support, from MiSTer-devel c1134acf8, is compiled OUT
+	// by default on this fork: it costs about 1,800 ALMs and took the fit
+	// from 94% to 98%, which the AP040 core has no room for.  Set to 1 to
+	// restore it exactly as upstream ships it.  With it 0 the mode selectors
+	// below are tied false, so every output mux takes the emulated path the
+	// core used before the merge, and the four MiSTerFloppy* instances are
+	// not elaborated at all.
+	parameter MISTER_FLOPPY = 0
+)
 (
 	// system bus interface
 	input         clk,		    	// bus clock
@@ -230,9 +240,9 @@ assign _exsel[3] = (floppy_ext_drive[2:0]  == 3'd4) ? _sel[0] :
                    (floppy_ext_drive[8:6]  == 3'd4) ? _sel[2] :
                    (floppy_ext_drive[11:9] == 3'd4) ? _sel[3] : 1'b1;
 
-assign sel_external    = ((~_exsel[0]) | (~_exsel[1]) | (~_exsel[2]) | (~_exsel[3])) & enable_mister_floppy;
-assign flux_inuse      = sel_external | ((disk_fluxmode[sel]|disk_fluxdensitymode[sel]) & ~_selx);
-assign virtualFloppyMode = (disk_fluxmode[sel]|disk_fluxdensitymode[sel]) & ~sel_external & ~_selx;
+assign sel_external    = (MISTER_FLOPPY != 0) & ((~_exsel[0]) | (~_exsel[1]) | (~_exsel[2]) | (~_exsel[3])) & enable_mister_floppy;
+assign flux_inuse      = (MISTER_FLOPPY != 0) & (sel_external | ((disk_fluxmode[sel]|disk_fluxdensitymode[sel]) & ~_selx));
+assign virtualFloppyMode = (MISTER_FLOPPY != 0) & ((disk_fluxmode[sel]|disk_fluxdensitymode[sel]) & ~sel_external & ~_selx);
 assign floppy_speed   = (reset | ~flux_inuse) ? floppy_speed_allowed : 1'b0;
 
 wire _virtReadData;
@@ -242,6 +252,7 @@ wire _virtualFluxDataReady;
 wire virtualFloppyRequestsData;
 
 // A virtual floppy drive, used for FLUX data, NOT mfm. The large FIFO buffer is used to store flux instead
+generate if (MISTER_FLOPPY != 0) begin : g_misterfloppyvirtualfluxdrive
 MiSTerFloppyVirtualFluxDrive virtualFloppy (
 	.clk(clk),
 	.clk7_en(clk7_en),
@@ -262,6 +273,13 @@ MiSTerFloppyVirtualFluxDrive virtualFloppy (
 	.fluxDataRead(virtualFluxDataRead),
 	._Index(_virtualFluxIndex)
 );
+end else begin : g_misterfloppyvirtualfluxdrive_off
+	assign _virtualFluxDataReady    = 1'b1;
+	assign _virtReadData            = 1'b1;
+	assign virtualFloppyRequestsData= 1'b0;
+	assign virtualFluxDataRead      = 1'b0;
+	assign _virtualFluxIndex        = 1'b1;
+end endgenerate
 
 
 // Special signals used by the DSKBYTR register
@@ -276,6 +294,7 @@ wire _dkwd;
 wire _dkwe;
 
 
+generate if (MISTER_FLOPPY != 0) begin : g_misterfloppypll
 MiSTerFloppyPLL PaulaFloppyPLL (
 	.clk(clk),
 	.clk7_en(clk7_en),
@@ -310,9 +329,23 @@ MiSTerFloppyPLL PaulaFloppyPLL (
 	._writeData(_dkwd),										// Output MFM writing (WRITE_DATA)
 	._writeGate(_dkwe) 			// Output ENABLE (WRITE_GATE)
 );
+end else begin : g_misterfloppypll_off
+	assign ext_floppy_rx     = 16'd0;
+	assign ext_floppy_wr     = 1'b0;
+	assign ext_floppy_rd     = 1'b0;
+	assign ext_floppy_rd_del = 1'b0;
+	assign ext_floppy_sync   = 1'b0;
+	assign syncWordNOW       = 1'b0;
+	assign bitdetected       = 1'b0;
+	assign diskByte          = 8'd0;
+	assign diskByteReady     = 1'b0;
+	assign _dkwd             = 1'b1;
+	assign _dkwe             = 1'b1;
+end endgenerate
 
 // NTSC Amigas had 28.63636 clock whereas PAL Amigas had 28.37516Mhz clocks
 // The Minimig core is actually set to 28.687500MHz - not sure why!
+generate if (MISTER_FLOPPY != 0) begin : g_misterfloppyshugart
 MiSTerFloppySHUGART #(28687500, 1) db(
 	.i_core_cpu_clk(clk),
 	.USER_IN(USER_IN),
@@ -343,6 +376,17 @@ MiSTerFloppySHUGART #(28687500, 1) db(
 	.o_PinIBMDrive(mister_floppy_status[1]),
 	.o_nSwappedCable(mister_floppy_status[2])
 );
+end else begin : g_misterfloppyshugart_off
+	assign USER_OUT              = 7'b1111111;
+	assign interfaceBusy         = 1'b0;
+	assign _dskrd                = 1'b1;
+	assign _index_ext            = 1'b1;
+	assign _track0_ext           = 1'b1;
+	assign _wprot_ext            = 1'b1;
+	assign _change_ext           = 1'b1;
+	assign _ready_ext            = 1'b1;
+	assign mister_floppy_status  = 3'b000;
+end endgenerate
 
 
 //decoded commands
@@ -799,6 +843,7 @@ wire flux_fifo_full;
 wire flux_fifo_empty;
 
 // Small fifo for the flux based stuff
+generate if (MISTER_FLOPPY != 0) begin : g_misterfloppyfifo
 MiSTerFloppyFifo fluxfifo 
 (
 	.clk(clk),
@@ -811,6 +856,11 @@ MiSTerFloppyFifo fluxfifo
 	.empty(flux_fifo_empty),
 	.full(flux_fifo_full)
 );
+end else begin : g_misterfloppyfifo_off
+	assign flux_fifo_out   = 16'd0;
+	assign flux_fifo_empty = 1'b1;
+	assign flux_fifo_full  = 1'b0;
+end endgenerate
 
 
 //--------------------------------------------------------------------------------------
