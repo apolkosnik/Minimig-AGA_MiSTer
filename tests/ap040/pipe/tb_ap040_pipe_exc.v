@@ -103,7 +103,14 @@ integer errors = 0;
 initial begin
 	#1;
 	// Mainline
-	dut.u_l1.mem[1] = 16'h0000;   // illegal (matches nothing)
+	// 4AFC is the architecturally defined ILLEGAL opcode. This was 0000
+	// ("matches nothing") until milestone 26, which is a fair description of
+	// an incomplete decoder but not of a 68040: 0000 is ORI.B #imm,D0, a
+	// perfectly real instruction, and it started decoding as one. 4AFC is
+	// illegal by definition rather than by omission, so it cannot be
+	// reclaimed by a later milestone. Still one word, so every stacked PC
+	// and frame value below is unchanged.
+	dut.u_l1.mem[1] = 16'h4AFC;   // ILLEGAL
 	dut.u_l1.mem[2] = 16'h7263;   // MOVEQ #99,D1 (poison A, must not run)
 	dut.u_l1.mem[3] = 16'h4E45;   // TRAP #5 (vector 37)
 	dut.u_l1.mem[4] = 16'h7658;   // MOVEQ #88,D3 (poison B, must not run)

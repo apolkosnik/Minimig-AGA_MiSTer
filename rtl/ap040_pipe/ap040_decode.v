@@ -453,6 +453,37 @@ wire [5:0] unary_rr_op = is_negx_rr ? `AP040_ALU_NEGX :
 // byte-wide form belongs to a memory target and has no path yet; ir[8]=0 is
 // the static form, whose bit number is an extension word; ir[5:3]=001 with
 // this shape is MOVEP. All three stay out.
+// Immediate source: ORI/ANDI/SUBI/ADDI/EORI/CMPI, 0000 ooo 0 SS 000 rrr.
+// The first instruction class here whose SOURCE is an extension word rather
+// than a register, so it is also the first new class the gather machinery
+// has had to carry since MOVEC.
+//
+// ir[8]=0 separates these from the dynamic bit group above, which shares the
+// 0000 nibble. ir[11:9]=100 is the STATIC bit group (BTST #n and friends),
+// whose extension word is a bit number rather than an operand, so it is not
+// enumerated. ir[5:3]!=000 is a memory destination, still with no path.
+//
+// Byte and word immediates occupy one extension word, longs two, which is
+// exactly the distinction held_is_long already draws for the long branches.
+// gather_disp sign-extends the single-word form, harmless here because the
+// ALU masks by size.
+wire immop_shape = (if_opcode[15:12] == 4'b0000) && (if_opcode[8] == 1'b0) &&
+                   (if_opcode[7:6] != 2'b11) && (if_opcode[5:3] == 3'b000);
+wire is_ori_i  = immop_shape && (if_opcode[11:9] == 3'b000);
+wire is_andi_i = immop_shape && (if_opcode[11:9] == 3'b001);
+wire is_subi_i = immop_shape && (if_opcode[11:9] == 3'b010);
+wire is_addi_i = immop_shape && (if_opcode[11:9] == 3'b011);
+wire is_eori_i = immop_shape && (if_opcode[11:9] == 3'b101);
+wire is_cmpi_i = immop_shape && (if_opcode[11:9] == 3'b110);
+wire is_imm_alu = is_ori_i || is_andi_i || is_subi_i || is_addi_i ||
+                  is_eori_i || is_cmpi_i;
+
+wire [5:0] imm_alu_op = is_ori_i  ? `AP040_ALU_OR  :
+                        is_andi_i ? `AP040_ALU_AND :
+                        is_subi_i ? `AP040_ALU_SUB :
+                        is_addi_i ? `AP040_ALU_ADD :
+                        is_eori_i ? `AP040_ALU_EOR : `AP040_ALU_CMP;
+
 wire bitop_shape = (if_opcode[15:12] == 4'b0000) && (if_opcode[8] == 1'b1) &&
                    (if_opcode[5:3] == 3'b000);
 wire is_btst_rr  = bitop_shape && (if_opcode[7:6] == 2'b00);
@@ -685,7 +716,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte;
@@ -716,6 +747,10 @@ wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary
 // the extension word -- captured into held_movec_dir at gather START,
 // before if_opcode stops meaning the opcode at all.
 reg  [1:0]  ext_pending;
+reg         held_is_imm;
+reg  [5:0]  held_imm_op;
+reg  [1:0]  held_imm_size;
+reg         held_imm_nowrite;
 reg         held_is_long;
 reg         held_is_dbcc;
 reg         held_is_move_disp;
@@ -750,8 +785,13 @@ wire [31:0] gather_disp = held_is_long ? {disp_acc[15:0], if_opcode}
 // excluded here -- unconditionally taken, same as BRA, so the "assume
 // taken" guess is always correct -- see this file's header.
 wire redirect_from_byte   = if_valid && (is_branch_byte || is_bsr_byte) && (ext_pending == 2'd0);
+// ... and NOT an immediate-source ALU op (milestone 26): its gathered words
+// are an operand, not a displacement, so there is no target to speculate
+// with. Without this exclusion the completing gather redirects to
+// held_pc + 2 + the immediate, which for ADDI.L #$12345678 is a wild jump
+// and the rest of the program never runs.
 wire redirect_from_gather = completing_gather && !held_is_move_disp && !held_is_jmp &&
-                             !held_is_jsr && !held_is_movec;
+                             !held_is_jsr && !held_is_movec && !held_is_imm;
 
 // MOVEC gather-completion helper: an otherwise-recognized MOVEC whose
 // extension-word selector names something this core doesn't model (the MMU
@@ -794,6 +834,10 @@ always @(posedge clk) begin
 		id_is_rte       <= 1'b0;
 		id_cond         <= 4'h0;
 		ext_pending     <= 2'd0;
+		held_is_imm      <= 1'b0;
+		held_imm_op      <= 6'd0;
+		held_imm_size    <= `AP040_SZ_L;
+		held_imm_nowrite <= 1'b0;
 		held_is_long    <= 1'b0;
 		held_is_dbcc    <= 1'b0;
 		held_is_move_disp <= 1'b0;
@@ -827,7 +871,8 @@ always @(posedge clk) begin
 					// id_pc (held_pc, already set above), not id_next_pc, for
 					// its stacked PC -- see ap040_ea_fetch.v's header.
 					id_next_pc      <= held_pc + 32'd2 + (held_is_long ? 32'd4 : 32'd2);
-					id_dest_reg     <= held_is_dbcc ? {1'b0, held_reg} :
+					id_dest_reg     <= held_is_imm  ? {1'b0, held_reg} :
+					                    held_is_dbcc ? {1'b0, held_reg} :
 					                    held_is_move_disp ? {1'b0, held_dest_reg} :
 					                    (held_is_bsr || held_is_jsr) ? 4'd15 :
 					                    held_is_movec ? (held_movec_dir ? 4'd15 : movec_gpr) : 4'h0;
@@ -860,12 +905,15 @@ always @(posedge clk) begin
 					// ap040_execute.v extract both from eac_imm[3:0] rather
 					// than needing two more dedicated ports threaded through
 					// every stage.
-					id_imm          <= (held_is_move_disp || held_is_jmp || held_is_jsr) ? gather_disp :
+					id_imm          <= (held_is_move_disp || held_is_jmp || held_is_jsr || held_is_imm) ? gather_disp :
 					                    held_is_movec ? {28'd0, held_movec_dir, movec_sel_code} : 32'h0;
-					id_alu_op       <= `AP040_ALU_MOVE;
-					id_size         <= `AP040_SZ_L;
+					id_alu_op       <= held_is_imm ? held_imm_op   : `AP040_ALU_MOVE;
+					id_size         <= held_is_imm ? held_imm_size : `AP040_SZ_L;
 					id_shcnt        <= 6'd1;
-					id_src_a_is_imm <= 1'b0;
+					// The gathered word IS the source: ap040_ea_fetch.v's
+					// operand_a mux already takes eac_imm on this flag, the
+					// path MOVEQ has used since milestone 2.
+					id_src_a_is_imm <= held_is_imm;
 					// DBcc's write is dynamic (see header); BSR/JSR's is
 					// static -- both always decrement A7 when they execute
 					// at all. MOVEC's read direction writes a real GPR
@@ -876,10 +924,12 @@ always @(posedge clk) begin
 					// writes nothing either, having already become illegal
 					// above.
 					id_writes_reg   <= held_is_move_disp || held_is_bsr || held_is_jsr ||
+					                    (held_is_imm && !held_imm_nowrite) ||
 					                    (held_is_movec && !held_movec_dir && !movec_illegal_gather);
-					id_writes_ccr   <= held_is_move_disp;
+					id_writes_ccr   <= held_is_move_disp || held_is_imm;
 					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_jmp &&
-					                    !held_is_bsr && !held_is_jsr && !held_is_movec;
+					                    !held_is_bsr && !held_is_jsr && !held_is_movec &&
+					                    !held_is_imm;
 					id_is_scc       <= 1'b0;
 					id_is_dbcc      <= held_is_dbcc;
 					id_is_mem_src   <= held_is_move_disp;
@@ -899,7 +949,8 @@ always @(posedge clk) begin
 					ext_pending <= ext_pending - 2'd1;
 				end
 			end else if (is_branch_word || is_branch_long || is_dbcc || is_move_disp || is_jmp_disp ||
-			              is_bsr_word || is_bsr_long || is_jsr_disp || is_movec_opcode) begin
+			              is_bsr_word || is_bsr_long || is_jsr_disp || is_movec_opcode ||
+			              is_imm_alu) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -908,7 +959,12 @@ always @(posedge clk) begin
 				id_valid      <= 1'b0;
 				held_pc       <= if_pc;
 				held_cond     <= if_opcode[11:8];
-				held_is_long  <= is_branch_long || is_bsr_long;
+				held_is_long  <= is_branch_long || is_bsr_long ||
+				                 (is_imm_alu && if_opcode[7:6] == 2'b10);
+				held_is_imm      <= is_imm_alu;
+				held_imm_op      <= imm_alu_op;
+				held_imm_size    <= if_opcode[7:6];
+				held_imm_nowrite <= is_cmpi_i;
 				held_is_dbcc  <= is_dbcc;
 				held_is_move_disp <= is_move_disp;
 				held_is_jmp   <= is_jmp_disp;
@@ -920,7 +976,8 @@ always @(posedge clk) begin
 				                                  // extension word -- see header.
 				held_reg      <= if_opcode[2:0];
 				held_dest_reg <= if_opcode[11:9];
-				ext_pending   <= (is_branch_long || is_bsr_long) ? 2'd2 : 2'd1;
+				ext_pending   <= (is_branch_long || is_bsr_long ||
+				                  (is_imm_alu && if_opcode[7:6] == 2'b10)) ? 2'd2 : 2'd1;
 			end else begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
