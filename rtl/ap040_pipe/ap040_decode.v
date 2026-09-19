@@ -298,6 +298,7 @@ module ap040_decode
 	output reg        id_is_scc,
 	output reg        id_is_dbcc,
 	output reg        id_is_mem_src,
+	output reg        id_is_abs,
 	output reg        id_is_jmp,
 	output reg        id_is_bsr,
 	output reg        id_is_jsr,
@@ -468,6 +469,23 @@ wire [5:0] unary_rr_op = is_negx_rr ? `AP040_ALU_NEGX :
 // differences from the ORI family. Its size lives in ir[13:12] with MOVE's
 // own mapping rather than ir[7:6], and its destination is ir[11:9] rather
 // than ir[2:0], which is what held_imm_dest9 selects at the completing end.
+// MOVE.L (xxx).W,Dn and MOVE.L (xxx).L,Dn: source mode 111 with reg 000 or
+// 001, the absolute addressing modes. These reuse BOTH the gather (one word
+// sign-extended for .W, two for .L) and the memory-read path milestone 9b
+// built for MOVE.L (An),Dn -- the only genuinely new thing is that the
+// address has no register term at all.
+//
+// ap040_ea_fetch.v computes ea_target as operand_a + eac_imm for every
+// memory access so far, which is right for (An) and (d16,An) and wrong here:
+// there is no An to add. eac_is_abs drops the register term rather than
+// trying to find a register that reads zero.
+//
+// Long only, matching the memory-source support that already exists; a
+// sized memory read is a separate question this does not open.
+wire is_move_abs = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b000) &&
+                   (if_opcode[5:3] == 3'b111) && (if_opcode[2:1] == 2'b00);
+wire is_move_abs_l = is_move_abs && if_opcode[0];
+
 wire is_move_imm = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
                    (if_opcode[8:6] == 3'b000) && (if_opcode[5:0] == 6'b111100);
 
@@ -740,7 +758,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !quick_shape &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte;
@@ -776,6 +794,7 @@ reg  [5:0]  held_imm_op;
 reg  [1:0]  held_imm_size;
 reg         held_imm_nowrite;
 reg         held_imm_dest9;
+reg         held_is_abs;
 reg         held_is_long;
 reg         held_is_dbcc;
 reg         held_is_move_disp;
@@ -816,7 +835,8 @@ wire redirect_from_byte   = if_valid && (is_branch_byte || is_bsr_byte) && (ext_
 // held_pc + 2 + the immediate, which for ADDI.L #$12345678 is a wild jump
 // and the rest of the program never runs.
 wire redirect_from_gather = completing_gather && !held_is_move_disp && !held_is_jmp &&
-                             !held_is_jsr && !held_is_movec && !held_is_imm;
+                             !held_is_jsr && !held_is_movec && !held_is_imm &&
+                             !held_is_abs;
 
 // MOVEC gather-completion helper: an otherwise-recognized MOVEC whose
 // extension-word selector names something this core doesn't model (the MMU
@@ -848,6 +868,7 @@ always @(posedge clk) begin
 		id_is_scc       <= 1'b0;
 		id_is_dbcc      <= 1'b0;
 		id_is_mem_src   <= 1'b0;
+		id_is_abs       <= 1'b0;
 		id_is_jmp       <= 1'b0;
 		id_is_bsr       <= 1'b0;
 		id_is_jsr       <= 1'b0;
@@ -864,6 +885,7 @@ always @(posedge clk) begin
 		held_imm_size    <= `AP040_SZ_L;
 		held_imm_nowrite <= 1'b0;
 		held_imm_dest9   <= 1'b0;
+		held_is_abs      <= 1'b0;
 		held_is_long    <= 1'b0;
 		held_is_dbcc    <= 1'b0;
 		held_is_move_disp <= 1'b0;
@@ -897,7 +919,8 @@ always @(posedge clk) begin
 					// id_pc (held_pc, already set above), not id_next_pc, for
 					// its stacked PC -- see ap040_ea_fetch.v's header.
 					id_next_pc      <= held_pc + 32'd2 + (held_is_long ? 32'd4 : 32'd2);
-					id_dest_reg     <= held_is_imm  ? (held_imm_dest9 ? {1'b0, held_dest_reg}
+					id_dest_reg     <= held_is_abs  ? {1'b0, held_dest_reg} :
+					                    held_is_imm  ? (held_imm_dest9 ? {1'b0, held_dest_reg}
 					                                                     : {1'b0, held_reg}) :
 					                    held_is_dbcc ? {1'b0, held_reg} :
 					                    held_is_move_disp ? {1'b0, held_dest_reg} :
@@ -932,7 +955,8 @@ always @(posedge clk) begin
 					// ap040_execute.v extract both from eac_imm[3:0] rather
 					// than needing two more dedicated ports threaded through
 					// every stage.
-					id_imm          <= (held_is_move_disp || held_is_jmp || held_is_jsr || held_is_imm) ? gather_disp :
+					id_imm          <= (held_is_move_disp || held_is_jmp || held_is_jsr ||
+					                    held_is_imm || held_is_abs) ? gather_disp :
 					                    held_is_movec ? {28'd0, held_movec_dir, movec_sel_code} : 32'h0;
 					id_alu_op       <= held_is_imm ? held_imm_op   : `AP040_ALU_MOVE;
 					id_size         <= held_is_imm ? held_imm_size : `AP040_SZ_L;
@@ -951,15 +975,17 @@ always @(posedge clk) begin
 					// writes nothing either, having already become illegal
 					// above.
 					id_writes_reg   <= held_is_move_disp || held_is_bsr || held_is_jsr ||
+					                    held_is_abs ||
 					                    (held_is_imm && !held_imm_nowrite) ||
 					                    (held_is_movec && !held_movec_dir && !movec_illegal_gather);
-					id_writes_ccr   <= held_is_move_disp || held_is_imm;
+					id_writes_ccr   <= held_is_move_disp || held_is_imm || held_is_abs;
 					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_jmp &&
 					                    !held_is_bsr && !held_is_jsr && !held_is_movec &&
-					                    !held_is_imm;
+					                    !held_is_imm && !held_is_abs;
 					id_is_scc       <= 1'b0;
 					id_is_dbcc      <= held_is_dbcc;
-					id_is_mem_src   <= held_is_move_disp;
+					id_is_mem_src   <= held_is_move_disp || held_is_abs;
+					id_is_abs       <= held_is_abs;
 					id_is_jmp       <= held_is_jmp;
 					id_is_bsr       <= held_is_bsr;
 					id_is_jsr       <= held_is_jsr;
@@ -977,7 +1003,7 @@ always @(posedge clk) begin
 				end
 			end else if (is_branch_word || is_branch_long || is_dbcc || is_move_disp || is_jmp_disp ||
 			              is_bsr_word || is_bsr_long || is_jsr_disp || is_movec_opcode ||
-			              is_imm_alu || is_move_imm) begin
+			              is_imm_alu || is_move_imm || is_move_abs) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -988,12 +1014,14 @@ always @(posedge clk) begin
 				held_cond     <= if_opcode[11:8];
 				held_is_long  <= is_branch_long || is_bsr_long ||
 				                 (is_imm_alu && if_opcode[7:6] == 2'b10) ||
-				                 (is_move_imm && if_opcode[13:12] == 2'b10);
+				                 (is_move_imm && if_opcode[13:12] == 2'b10) ||
+				                 is_move_abs_l;
 				held_is_imm      <= is_imm_alu || is_move_imm;
 				held_imm_op      <= is_move_imm ? `AP040_ALU_MOVE : imm_alu_op;
 				held_imm_size    <= is_move_imm ? move_op_size : if_opcode[7:6];
 				held_imm_nowrite <= is_cmpi_i;
 				held_imm_dest9   <= is_move_imm;
+				held_is_abs      <= is_move_abs;
 				held_is_dbcc  <= is_dbcc;
 				held_is_move_disp <= is_move_disp;
 				held_is_jmp   <= is_jmp_disp;
@@ -1007,7 +1035,8 @@ always @(posedge clk) begin
 				held_dest_reg <= if_opcode[11:9];
 				ext_pending   <= (is_branch_long || is_bsr_long ||
 				                  (is_imm_alu && if_opcode[7:6] == 2'b10) ||
-				                  (is_move_imm && if_opcode[13:12] == 2'b10)) ? 2'd2 : 2'd1;
+				                  (is_move_imm && if_opcode[13:12] == 2'b10) ||
+				                  is_move_abs_l) ? 2'd2 : 2'd1;
 			end else begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
@@ -1084,6 +1113,7 @@ always @(posedge clk) begin
 				// (unlike RTS) a dynamic privilege check that must take
 				// priority over any read at all.
 				id_is_mem_src   <= if_valid && (is_move_mem_l || is_rts);
+				id_is_abs       <= 1'b0;
 				id_is_jmp       <= if_valid && is_jmp_an;
 				id_is_bsr       <= if_valid && is_bsr_byte;
 				id_is_jsr       <= if_valid && is_jsr_an;

@@ -177,6 +177,8 @@ wire [31:0] id_imm;
 wire  [5:0] id_alu_op;
 wire  [1:0] id_size;
 wire  [5:0] id_shcnt;
+wire        id_is_abs;
+wire        eac_is_abs;
 wire        id_src_a_is_imm, id_writes_reg, id_writes_ccr;
 wire        id_is_branch, id_is_scc, id_is_dbcc, id_is_mem_src, id_is_jmp;
 wire        id_is_bsr, id_is_jsr, id_is_trap, id_is_illegal;
@@ -533,6 +535,7 @@ ap040_decode u_id
 	.id_is_scc       (id_is_scc),
 	.id_is_dbcc      (id_is_dbcc),
 	.id_is_mem_src   (id_is_mem_src),
+	.id_is_abs       (id_is_abs),
 	.id_is_jmp       (id_is_jmp),
 	.id_is_bsr       (id_is_bsr),
 	.id_is_jsr       (id_is_jsr),
@@ -569,6 +572,7 @@ ap040_ea_calc u_eac
 	.id_is_scc        (id_is_scc),
 	.id_is_dbcc       (id_is_dbcc),
 	.id_is_mem_src    (id_is_mem_src),
+	.id_is_abs        (id_is_abs),
 	.id_is_jmp        (id_is_jmp),
 	.id_is_bsr        (id_is_bsr),
 	.id_is_jsr        (id_is_jsr),
@@ -598,6 +602,7 @@ ap040_ea_calc u_eac
 	.eac_is_scc       (eac_is_scc),
 	.eac_is_dbcc      (eac_is_dbcc),
 	.eac_is_mem_src   (eac_is_mem_src),
+	.eac_is_abs       (eac_is_abs),
 	.eac_is_jmp       (eac_is_jmp),
 	.eac_is_bsr       (eac_is_bsr),
 	.eac_is_jsr       (eac_is_jsr),
@@ -637,6 +642,7 @@ ap040_ea_fetch #(
 	.eac_is_scc       (eac_is_scc),
 	.eac_is_dbcc      (eac_is_dbcc),
 	.eac_is_mem_src   (eac_is_mem_src),
+	.eac_is_abs       (eac_is_abs),
 	.eac_is_jmp       (eac_is_jmp),
 	.eac_is_bsr       (eac_is_bsr),
 	.eac_is_jsr       (eac_is_jsr),

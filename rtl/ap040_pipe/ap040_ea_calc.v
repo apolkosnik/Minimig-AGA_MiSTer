@@ -88,6 +88,7 @@ module ap040_ea_calc
 	input             id_is_scc,
 	input             id_is_dbcc,
 	input             id_is_mem_src,
+	input             id_is_abs,
 	input             id_is_jmp,
 	input             id_is_bsr,
 	input             id_is_jsr,
@@ -117,6 +118,7 @@ module ap040_ea_calc
 	output reg        eac_is_scc,
 	output reg        eac_is_dbcc,
 	output reg        eac_is_mem_src,
+	output reg        eac_is_abs,
 	output reg        eac_is_jmp,
 	output reg        eac_is_bsr,
 	output reg        eac_is_jsr,
@@ -149,6 +151,7 @@ always @(posedge clk) begin
 		eac_is_scc       <= 1'b0;
 		eac_is_dbcc      <= 1'b0;
 		eac_is_mem_src   <= 1'b0;
+		eac_is_abs       <= 1'b0;
 		eac_is_jmp       <= 1'b0;
 		eac_is_bsr       <= 1'b0;
 		eac_is_jsr       <= 1'b0;
@@ -179,6 +182,7 @@ always @(posedge clk) begin
 			eac_is_scc       <= id_is_scc;
 			eac_is_dbcc      <= id_is_dbcc;
 			eac_is_mem_src   <= id_is_mem_src;
+			eac_is_abs       <= id_is_abs;
 			eac_is_jmp       <= id_is_jmp;
 			eac_is_bsr       <= id_is_bsr;
 			eac_is_jsr       <= id_is_jsr;

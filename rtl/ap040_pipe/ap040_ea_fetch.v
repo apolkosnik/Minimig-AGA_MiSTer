@@ -269,6 +269,7 @@ module ap040_ea_fetch
 	input             eac_is_scc,
 	input             eac_is_dbcc,
 	input             eac_is_mem_src,
+	input             eac_is_abs,
 	input             eac_is_jmp,
 	input             eac_is_bsr,
 	input             eac_is_jsr,
@@ -389,7 +390,10 @@ wire [31:0] operand_a = eac_src_a_is_imm ? eac_imm :
 // directly as its result) -- adding a future EA mode that also produces an
 // address+offset shape (indexed, etc.) needs no new logic here, just
 // decode emitting the right eac_imm.
-wire [31:0] ea_target = operand_a + eac_imm;
+// An absolute address has no register term: eac_imm IS the address. Every
+// other mode here is base + displacement, which is why this is a mux rather
+// than decode arranging for operand_a to read zero -- no register does.
+wire [31:0] ea_target = eac_is_abs ? eac_imm : (operand_a + eac_imm);
 
 // Address error on an odd JMP/JSR target (milestone 17, new): a SECOND
 // dynamic exception trigger, same reasoning as eac_is_priv below -- "this
