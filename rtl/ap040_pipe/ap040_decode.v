@@ -289,6 +289,7 @@ module ap040_decode
 	output reg  [3:0] id_src_reg,
 	output reg [31:0] id_imm,
 	output reg  [5:0] id_alu_op,
+	output reg  [1:0] id_size,
 	output reg        id_src_a_is_imm,
 	output reg        id_writes_reg,
 	output reg        id_writes_ccr,
@@ -324,7 +325,11 @@ wire is_moveq = (if_opcode[15:12] == 4'b0111) && (if_opcode[8] == 1'b0);
 // encoding rather than ap040_core.v's move_size decode (ap040_core.v:673-
 // 674) because byte/word MOVE aren't implemented yet; switch to that
 // convention when they are.
-wire is_move_rr = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] == 2'b10) &&
+// Size is no longer baked into the match: MOVE's ir[13:12] is 01=B, 11=W,
+// 10=L (00 is not a MOVE at all), and the ALU has implemented all three
+// widths since it was forked -- only this decoder and execute's hardwired
+// .size(AP040_SZ_L) kept the pipeline Long-only.
+wire is_move_rr = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
                    (if_opcode[8:6]  == 3'b000) && (if_opcode[5:3]  == 3'b000);
 
 // ADD.L Dn,Dm: 1101 RRR 0 10 000 rrr (RRR = dest Dm, rrr = src Dn; ir[8]=0
@@ -332,8 +337,14 @@ wire is_move_rr = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] == 2'b10) &&
 // = ea is Dn direct). Verified bit-for-bit against ap040_core.v's own
 // SUB/ADD decode (ap040_core.v:4928-4974, d_op8_6/std_size at :668,:675),
 // not guessed. No other size/direction/EA mode yet.
+// ADD's std_size is ir[7:6] and maps onto AP040_SZ_B/W/L directly (0/1/2);
+// 11 is ADDA, a different instruction, and stays excluded.
 wire is_add_rr = (if_opcode[15:12] == 4'b1101) && (if_opcode[8] == 1'b0) &&
-                  (if_opcode[7:6]  == 2'b10)    && (if_opcode[5:3] == 3'b000);
+                  (if_opcode[7:6]  != 2'b11)    && (if_opcode[5:3] == 3'b000);
+
+wire [1:0] add_op_size  = if_opcode[7:6];
+wire [1:0] move_op_size = (if_opcode[13:12] == 2'b01) ? `AP040_SZ_B :
+                          (if_opcode[13:12] == 2'b11) ? `AP040_SZ_W : `AP040_SZ_L;
 
 // Bcc family (BRA included as cc==0000; cc==0001 is BSR, excluded -- needs
 // a stack push, not this milestone). The displacement byte selects which
@@ -590,6 +601,7 @@ always @(posedge clk) begin
 		id_src_reg      <= 4'h0;
 		id_imm          <= 32'h0;
 		id_alu_op       <= 6'h0;
+		id_size         <= `AP040_SZ_L;
 		id_src_a_is_imm <= 1'b0;
 		id_writes_reg   <= 1'b0;
 		id_writes_ccr   <= 1'b0;
@@ -677,6 +689,7 @@ always @(posedge clk) begin
 					id_imm          <= (held_is_move_disp || held_is_jmp || held_is_jsr) ? gather_disp :
 					                    held_is_movec ? {28'd0, held_movec_dir, movec_sel_code} : 32'h0;
 					id_alu_op       <= `AP040_ALU_MOVE;
+					id_size         <= `AP040_SZ_L;
 					id_src_a_is_imm <= 1'b0;
 					// DBcc's write is dynamic (see header); BSR/JSR's is
 					// static -- both always decrement A7 when they execute
@@ -775,6 +788,10 @@ always @(posedge clk) begin
 				                    is_trap ? (32'd32 + {28'd0, if_opcode[3:0]}) :
 				                              {{24{if_opcode[7]}}, if_opcode[7:0]};
 				id_alu_op       <= is_add_rr ? `AP040_ALU_ADD : `AP040_ALU_MOVE;
+				// Everything else here (MOVEQ, Scc, the memory/branch forms)
+				// is Long or drives its own width, so Long stays the default.
+				id_size         <= is_add_rr  ? add_op_size  :
+				                   is_move_rr ? move_op_size : `AP040_SZ_L;
 				id_src_a_is_imm <= if_valid && is_moveq;
 				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || is_add_rr || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
 				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_add_rr || is_move_mem_l);

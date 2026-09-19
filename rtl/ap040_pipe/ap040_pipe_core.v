@@ -175,6 +175,7 @@ wire        id_valid;  wire [31:0] id_pc;  wire [31:0] id_next_pc;
 wire  [3:0] id_dest_reg, id_src_reg;
 wire [31:0] id_imm;
 wire  [5:0] id_alu_op;
+wire  [1:0] id_size;
 wire        id_src_a_is_imm, id_writes_reg, id_writes_ccr;
 wire        id_is_branch, id_is_scc, id_is_dbcc, id_is_mem_src, id_is_jmp;
 wire        id_is_bsr, id_is_jsr, id_is_trap, id_is_illegal;
@@ -186,6 +187,7 @@ wire        eac_valid; wire [31:0] eac_pc; wire [31:0] eac_next_pc;
 wire  [3:0] eac_dest_reg, eac_src_reg;
 wire [31:0] eac_imm;
 wire  [5:0] eac_alu_op;
+wire  [1:0] eac_size;
 wire        eac_src_a_is_imm, eac_writes_reg, eac_writes_ccr;
 wire        eac_is_branch, eac_is_scc, eac_is_dbcc, eac_is_mem_src, eac_is_jmp;
 wire        eac_is_bsr, eac_is_jsr, eac_is_trap, eac_is_illegal;
@@ -197,6 +199,7 @@ wire        eaf_valid; wire [31:0] eaf_pc; wire [31:0] eaf_next_pc;
 wire  [3:0] eaf_dest_reg;
 wire [31:0] eaf_operand_a, eaf_operand_b;
 wire  [5:0] eaf_alu_op;
+wire  [1:0] eaf_size;
 wire        eaf_writes_reg, eaf_writes_ccr;
 wire        eaf_is_branch, eaf_is_scc, eaf_is_dbcc, eaf_is_jmp;
 wire        eaf_is_bsr, eaf_is_jsr, eaf_is_trap, eaf_is_illegal;
@@ -518,6 +521,7 @@ ap040_decode u_id
 	.id_src_reg      (id_src_reg),
 	.id_imm          (id_imm),
 	.id_alu_op       (id_alu_op),
+	.id_size         (id_size),
 	.id_src_a_is_imm (id_src_a_is_imm),
 	.id_writes_reg   (id_writes_reg),
 	.id_writes_ccr   (id_writes_ccr),
@@ -552,6 +556,7 @@ ap040_ea_calc u_eac
 	.id_src_reg       (id_src_reg),
 	.id_imm           (id_imm),
 	.id_alu_op        (id_alu_op),
+	.id_size          (id_size),
 	.id_src_a_is_imm  (id_src_a_is_imm),
 	.id_writes_reg    (id_writes_reg),
 	.id_writes_ccr    (id_writes_ccr),
@@ -579,6 +584,7 @@ ap040_ea_calc u_eac
 	.eac_src_reg      (eac_src_reg),
 	.eac_imm          (eac_imm),
 	.eac_alu_op       (eac_alu_op),
+	.eac_size         (eac_size),
 	.eac_src_a_is_imm (eac_src_a_is_imm),
 	.eac_writes_reg   (eac_writes_reg),
 	.eac_writes_ccr   (eac_writes_ccr),
@@ -616,6 +622,7 @@ ap040_ea_fetch #(
 	.eac_src_reg      (eac_src_reg),
 	.eac_imm          (eac_imm),
 	.eac_alu_op       (eac_alu_op),
+	.eac_size         (eac_size),
 	.eac_src_a_is_imm (eac_src_a_is_imm),
 	.eac_writes_reg   (eac_writes_reg),
 	.eac_writes_ccr   (eac_writes_ccr),
@@ -662,6 +669,7 @@ ap040_ea_fetch #(
 	.eaf_operand_a    (eaf_operand_a),
 	.eaf_operand_b    (eaf_operand_b),
 	.eaf_alu_op       (eaf_alu_op),
+	.eaf_size         (eaf_size),
 	.eaf_writes_reg   (eaf_writes_reg),
 	.eaf_writes_ccr   (eaf_writes_ccr),
 	.eaf_is_branch    (eaf_is_branch),
@@ -699,6 +707,7 @@ ap040_execute u_ex
 	.eaf_operand_a    (eaf_operand_a),
 	.eaf_operand_b    (eaf_operand_b),
 	.eaf_alu_op       (eaf_alu_op),
+	.eaf_size         (eaf_size),
 	.eaf_writes_reg   (eaf_writes_reg),
 	.eaf_writes_ccr   (eaf_writes_ccr),
 	.eaf_is_branch    (eaf_is_branch),

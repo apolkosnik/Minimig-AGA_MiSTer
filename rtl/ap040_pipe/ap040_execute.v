@@ -115,6 +115,7 @@ module ap040_execute
 	input      [31:0] eaf_operand_a,
 	input      [31:0] eaf_operand_b,
 	input       [5:0] eaf_alu_op,
+	input       [1:0] eaf_size,
 	input             eaf_writes_reg,
 	input             eaf_writes_ccr,
 	input             eaf_is_branch,
@@ -213,7 +214,7 @@ wire [4:0]  alu_flags;
 ap040_pipe_alu alu
 (
 	.op        (eaf_alu_op),
-	.size      (`AP040_SZ_L),
+	.size      (eaf_size),
 	.shcnt     (6'd1),
 	.a         (eaf_operand_a),
 	.b         (eaf_operand_b),
@@ -350,12 +351,22 @@ wire [31:0] creg_read_value = (eaf_movec_sel == `AP040_CREG_SFC)  ? sfc_in  :
 // already use. No generic-ALU op is used for this (eaf_operand_a is busy
 // carrying the redirect/handler target and can't also carry a literal
 // increment/decrement operand) -- see ap040_ea_fetch.v's header.
+// A byte or word result keeps the destination register's upper bits, the
+// same shape scc_merged already uses. eaf_operand_b is always the
+// destination's current value (ap040_ea_fetch.v drives raddr_b from
+// eac_dest_reg), and the ALU returns a sized result in the low bits with the
+// upper ones zero, so the merge is a straight splice. Forwarding gets it for
+// free: ex_fwd_data is combined_result, not alu_result.
+wire [31:0] alu_sized = (eaf_size == `AP040_SZ_B) ? {eaf_operand_b[31:8],  alu_result[7:0]}  :
+                        (eaf_size == `AP040_SZ_W) ? {eaf_operand_b[31:16], alu_result[15:0]} :
+                                                      alu_result;
+
 wire [31:0] combined_result = eaf_is_scc  ? scc_merged :
                                eaf_is_dbcc ? dbcc_result :
                                (eaf_is_bsr || eaf_is_jsr || eaf_is_rts || eaf_is_rte || exc_reaching_ex)
                                  ? eaf_operand_b :
                                (eaf_is_movec && !eaf_movec_dir) ? creg_read_value :
-                                                                    alu_result;
+                                                                    alu_sized;
 
 // MOVE to SR (milestone 15, new): writes the WHOLE live SR, not just CCR --
 // a genuinely different commit path from exe_writes_ccr's low-5-bits-only

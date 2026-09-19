@@ -260,6 +260,7 @@ module ap040_ea_fetch
 	input       [3:0] eac_src_reg,
 	input      [31:0] eac_imm,
 	input       [5:0] eac_alu_op,
+	input       [1:0] eac_size,
 	input             eac_src_a_is_imm,
 	input             eac_writes_reg,
 	input             eac_writes_ccr,
@@ -321,6 +322,7 @@ module ap040_ea_fetch
 	output reg [31:0] eaf_operand_a,
 	output reg [31:0] eaf_operand_b,
 	output reg  [5:0] eaf_alu_op,
+	output reg  [1:0] eaf_size,
 	output reg        eaf_writes_reg,
 	output reg        eaf_writes_ccr,
 	output reg        eaf_is_branch,
@@ -609,6 +611,7 @@ always @(posedge clk) begin
 		eaf_operand_a  <= 32'h0;
 		eaf_operand_b  <= 32'h0;
 		eaf_alu_op     <= 6'h0;
+		eaf_size       <= `AP040_SZ_L;
 		eaf_writes_reg <= 1'b0;
 		eaf_writes_ccr <= 1'b0;
 		eaf_is_branch  <= 1'b0;
@@ -669,6 +672,7 @@ always @(posedge clk) begin
 				// header.
 				eaf_operand_b  <= eac_is_rts ? (operand_a + 32'd4) : operand_b;
 				eaf_alu_op     <= eac_alu_op;
+				eaf_size       <= eac_size;
 				eaf_writes_reg <= eac_writes_reg;
 				eaf_writes_ccr <= eac_writes_ccr;
 				eaf_is_branch  <= eac_is_branch;
@@ -749,6 +753,7 @@ always @(posedge clk) begin
 				eaf_operand_a  <= l1_q_b;
 				eaf_operand_b  <= exc_new_sp;
 				eaf_alu_op     <= eac_alu_op;
+				eaf_size       <= eac_size;
 				// UNCONDITIONALLY 1, not forwarded from eac_writes_reg:
 				// every exception entry writes A7 the new SP, full stop --
 				// illegal/TRAP already had eac_writes_reg=1 for this exact
@@ -824,6 +829,7 @@ always @(posedge clk) begin
 				eaf_operand_a   <= {ret_dword0[15:0], l1_q_b[31:16]};   // popped PC -> redirect target
 				eaf_operand_b   <= operand_a + 32'd8;                    // new A7 (format $0, 8-byte frame)
 				eaf_alu_op      <= eac_alu_op;
+				eaf_size       <= eac_size;
 				// NOT 1: RTE's A7 restore does NOT go through the normal
 				// commit_reg/A7-bank path at all -- see ap040_execute.v's
 				// header for the real race that forces this (RTE's own SR
@@ -876,6 +882,7 @@ always @(posedge clk) begin
 				// than being recomputed in ap040_execute.v.
 				eaf_operand_b  <= (eac_is_bsr || eac_is_jsr) ? push_addr : operand_b;
 				eaf_alu_op     <= eac_alu_op;
+				eaf_size       <= eac_size;
 				eaf_writes_reg <= eac_writes_reg;
 				eaf_writes_ccr <= eac_writes_ccr;
 				eaf_is_branch  <= eac_is_branch;

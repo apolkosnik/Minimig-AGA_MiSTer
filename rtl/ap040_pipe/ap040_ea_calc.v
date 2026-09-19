@@ -79,6 +79,7 @@ module ap040_ea_calc
 	input       [3:0] id_src_reg,
 	input      [31:0] id_imm,
 	input       [5:0] id_alu_op,
+	input       [1:0] id_size,
 	input             id_src_a_is_imm,
 	input             id_writes_reg,
 	input             id_writes_ccr,
@@ -106,6 +107,7 @@ module ap040_ea_calc
 	output reg  [3:0] eac_src_reg,
 	output reg [31:0] eac_imm,
 	output reg  [5:0] eac_alu_op,
+	output reg  [1:0] eac_size,
 	output reg        eac_src_a_is_imm,
 	output reg        eac_writes_reg,
 	output reg        eac_writes_ccr,
@@ -136,6 +138,7 @@ always @(posedge clk) begin
 		eac_src_reg      <= 4'h0;
 		eac_imm          <= 32'h0;
 		eac_alu_op       <= 6'h0;
+		eac_size         <= `AP040_SZ_L;
 		eac_src_a_is_imm <= 1'b0;
 		eac_writes_reg   <= 1'b0;
 		eac_writes_ccr   <= 1'b0;
@@ -164,6 +167,7 @@ always @(posedge clk) begin
 			eac_src_reg      <= id_src_reg;
 			eac_imm          <= id_imm;
 			eac_alu_op       <= id_alu_op;
+			eac_size         <= id_size;
 			eac_src_a_is_imm <= id_src_a_is_imm;
 			eac_writes_reg   <= id_writes_reg;
 			eac_writes_ccr   <= id_writes_ccr;
