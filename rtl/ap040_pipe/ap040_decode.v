@@ -299,6 +299,7 @@ module ap040_decode
 	output reg        id_is_dbcc,
 	output reg        id_is_mem_src,
 	output reg        id_is_abs,
+	output reg        id_is_store,
 	output reg        id_is_postinc,
 	output reg        id_is_predec,
 	output reg        id_is_jmp,
@@ -660,6 +661,21 @@ wire is_move_pd = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b000) &&
                   (if_opcode[5:3]  == 3'b100);
 wire is_move_ax = is_move_pi || is_move_pd;
 
+// MOVE.L Dn,(An) (milestone 31): the first STORE. Destination mode 010 with
+// a register-direct source, so the data is Dn at ir[2:0] and the address is
+// An at ir[11:9].
+//
+// dest_reg is {1'b1, ir[11:9]} rather than {1'b0, ...}: it names an ADDRESS
+// register, so operand_b resolves to An and the store takes its address from
+// there. ea_target is operand_a + eac_imm and operand_a is the DATA here,
+// which is why ap040_ea_fetch.v gives the store its own arm in l1_addr_word
+// rather than reusing ea_target.
+//
+// Nothing is written to a register -- id_writes_reg stays 0 -- but MOVE sets
+// N and Z from the data, so id_writes_ccr does not.
+wire is_move_st = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b010) &&
+                  (if_opcode[5:3] == 3'b000);
+
 // MOVE.L (d16,An),Dn: 0010 DDD 000 101 aaa -- same shape as is_move_mem_l
 // above, mode field 101 instead of 010 (verified against the same
 // ap040_core.v:5021-5052 MOVE decode -- d_mode==101 is SK_MEM there too,
@@ -771,7 +787,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !quick_shape &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte;
@@ -882,6 +898,7 @@ always @(posedge clk) begin
 		id_is_dbcc      <= 1'b0;
 		id_is_mem_src   <= 1'b0;
 		id_is_abs       <= 1'b0;
+		id_is_store     <= 1'b0;
 		id_is_postinc   <= 1'b0;
 		id_is_predec    <= 1'b0;
 		id_is_jmp       <= 1'b0;
@@ -1001,6 +1018,7 @@ always @(posedge clk) begin
 					id_is_dbcc      <= held_is_dbcc;
 					id_is_mem_src   <= held_is_move_disp || held_is_abs;
 					id_is_abs       <= held_is_abs;
+					id_is_store     <= 1'b0;
 					id_is_postinc   <= 1'b0;
 					id_is_predec    <= 1'b0;
 					id_is_jmp       <= held_is_jmp;
@@ -1058,7 +1076,8 @@ always @(posedge clk) begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
 				id_next_pc      <= if_pc + 32'd2;
-				id_dest_reg     <= (is_scc_rr || is_unary_rr || is_extswap_rr || shift_shape || bitop_shape || is_bcd1_rr || quick_shape) ? {1'b0, d_rn} :
+				id_dest_reg     <= is_move_st ? {1'b1, d_reg9} :
+				                    (is_scc_rr || is_unary_rr || is_extswap_rr || shift_shape || bitop_shape || is_bcd1_rr || quick_shape) ? {1'b0, d_rn} :
 				                    (is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_movesr || is_rts || is_rte) ? 4'd15 : {1'b0, d_reg9};
 				// is_move_mem_l/is_jmp_an/is_jsr_an's src_reg is An, not Dn
 				// -- the unified index's top bit (8+n vs 0+n) is the ONLY
@@ -1098,7 +1117,7 @@ always @(posedge clk) begin
 				// Left at the default -- the sign-extended low opcode byte,
 				// which MOVEQ needs -- MOVE.L (A0)+,D0 would read A0 + $18.
 				id_imm          <= (is_move_mem_l || is_jmp_an || is_jsr_an || is_rts || is_rte ||
-				                    is_move_ax) ? 32'h0 :
+				                    is_move_ax || is_move_st) ? 32'h0 :
 				                    is_trap ? (32'd32 + {28'd0, if_opcode[3:0]}) :
 				                    quick_shape ? {28'd0, quick_val} :
 				                              {{24{if_opcode[7]}}, if_opcode[7:0]};
@@ -1123,7 +1142,7 @@ always @(posedge clk) begin
 				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || is_x_rr || shift_shape ||
 				                               (bitop_shape && !is_btst_rr) ||
 				                               is_bcd1_rr || is_bcd2_rr || quick_shape || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_move_ax || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
-				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_extswap_rr || is_x_rr || shift_shape || bitop_shape || is_bcd1_rr || is_bcd2_rr || quick_shape || is_move_mem_l || is_move_ax);
+				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_extswap_rr || is_x_rr || shift_shape || bitop_shape || is_bcd1_rr || is_bcd2_rr || quick_shape || is_move_mem_l || is_move_ax || is_move_st);
 				id_is_branch    <= if_valid && is_branch_byte;
 				id_is_scc       <= if_valid && is_scc_rr;
 				id_is_dbcc      <= 1'b0;
@@ -1136,6 +1155,7 @@ always @(posedge clk) begin
 				// priority over any read at all.
 				id_is_mem_src   <= if_valid && (is_move_mem_l || is_rts || is_move_ax);
 				id_is_abs       <= 1'b0;
+				id_is_store     <= if_valid && is_move_st;
 				id_is_postinc   <= if_valid && is_move_pi;
 				id_is_predec    <= if_valid && is_move_pd;
 				id_is_jmp       <= if_valid && is_jmp_an;

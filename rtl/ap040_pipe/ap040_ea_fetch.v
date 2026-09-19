@@ -270,6 +270,7 @@ module ap040_ea_fetch
 	input             eac_is_dbcc,
 	input             eac_is_mem_src,
 	input             eac_is_abs,
+	input             eac_is_store,
 	input             eac_is_postinc,
 	input             eac_is_predec,
 	input             eac_is_jmp,
@@ -442,7 +443,7 @@ wire mem_complete = mem_pending;
 // address-error exception instead (below), the fault taken on the
 // INSTRUCTION FETCH at the odd target, not on the call itself.
 wire eac_is_push  = eac_is_bsr || (eac_is_jsr && !eac_is_jsr_odd);
-wire wr_stall     = eac_valid && eac_is_push && l1_wr_busy;
+wire wr_stall     = eac_valid && (eac_is_push || eac_is_store) && l1_wr_busy;
 
 // TRAP #n / illegal instruction exception entry -- see header. exc_ph
 // sequences the frame's writes and the vector-table read one at a time;
@@ -625,14 +626,16 @@ wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 // the BSR/JSR PUSH address, an exception frame WRITE beat, the exception's
 // own vector-table READ, or RTE's own pop READ -- mutually exclusive by
 // construction (an instruction is never more than one of these at once).
-wire [31:0] l1_addr_word = eac_is_push  ? push_addr :
+wire [31:0] l1_addr_word = eac_is_store ? operand_b :
+                            eac_is_push  ? push_addr :
                             exc_writing ? exc_beat_addr :
                             (exc_vec_issue || exc_vec_pending) ? exc_vec_addr :
                             ret_active  ? ret_addr :
                                                                   ea_target;
 assign l1_addr_b = (l1_addr_word - PC_RESET) >> 1;
-assign l1_wren_b = (eac_valid && eac_is_push) || exc_writing;
-assign l1_data_b = exc_writing ? exc_wdata : eac_next_pc;
+assign l1_wren_b = (eac_valid && (eac_is_push || eac_is_store)) || exc_writing;
+assign l1_data_b = exc_writing  ? exc_wdata :
+                   eac_is_store ? operand_a : eac_next_pc;
 
 always @(posedge clk) begin
 	if (!nreset) begin

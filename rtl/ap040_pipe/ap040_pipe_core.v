@@ -179,6 +179,8 @@ wire  [1:0] id_size;
 wire  [5:0] id_shcnt;
 wire        id_is_abs;
 wire        id_is_postinc, id_is_predec;
+wire        id_is_store;
+wire        eac_is_store;
 wire        eac_is_abs;
 wire        eac_is_postinc, eac_is_predec;
 wire        eaf_writes_an;
@@ -554,6 +556,7 @@ ap040_decode u_id
 	.id_is_dbcc      (id_is_dbcc),
 	.id_is_mem_src   (id_is_mem_src),
 	.id_is_abs       (id_is_abs),
+	.id_is_store     (id_is_store),
 	.id_is_postinc   (id_is_postinc),
 	.id_is_predec    (id_is_predec),
 	.id_is_jmp       (id_is_jmp),
@@ -593,6 +596,7 @@ ap040_ea_calc u_eac
 	.id_is_dbcc       (id_is_dbcc),
 	.id_is_mem_src    (id_is_mem_src),
 	.id_is_abs        (id_is_abs),
+	.id_is_store      (id_is_store),
 	.id_is_postinc    (id_is_postinc),
 	.id_is_predec     (id_is_predec),
 	.id_is_jmp        (id_is_jmp),
@@ -625,6 +629,7 @@ ap040_ea_calc u_eac
 	.eac_is_dbcc      (eac_is_dbcc),
 	.eac_is_mem_src   (eac_is_mem_src),
 	.eac_is_abs       (eac_is_abs),
+	.eac_is_store     (eac_is_store),
 	.eac_is_postinc   (eac_is_postinc),
 	.eac_is_predec    (eac_is_predec),
 	.eac_is_jmp       (eac_is_jmp),
@@ -667,6 +672,7 @@ ap040_ea_fetch #(
 	.eac_is_dbcc      (eac_is_dbcc),
 	.eac_is_mem_src   (eac_is_mem_src),
 	.eac_is_abs       (eac_is_abs),
+	.eac_is_store     (eac_is_store),
 	.eac_is_postinc   (eac_is_postinc),
 	.eac_is_predec    (eac_is_predec),
 	.eac_is_jmp       (eac_is_jmp),
