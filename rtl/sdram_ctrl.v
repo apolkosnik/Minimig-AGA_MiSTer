@@ -144,7 +144,12 @@ wire cache_req;
 reg         walker_busy;
 reg [24:2]  walker_addr_latch;
 reg [31:0]  walker_wdata_latch;
-(* preserve *) reg [15:0] walker_sdata_pipe0;
+// Share the first input capture with the cache and chipset.  A separate
+// resettable copy put a reset mux on the long hop from the SDRAM input I/O
+// register.  Move that reset qualification to the following, internal stage;
+// the valid bit preserves the old pipe0 value on the first edge after reset.
+reg walker_sdata_valid;
+wire [15:0] walker_sdata_pipe0 = walker_sdata_valid ? sdata_reg_q : 16'd0;
 (* preserve *) reg [15:0] walker_sdata_pipe;
 reg [15:0] walker_sdata_pipe2;
 reg [15:0]  walker_read_hi;
@@ -204,13 +209,15 @@ cpu_cache_new #(.CACHE_ENABLE(CPU_CACHE), .READ_PIPE(CACHE_READ_PIPE)) cpu_cache
 	.snoop_bs         (walker_snoop ? 2'b11 : {!chipU, !chipL})
 );
 
-// The cache consumes fill data through a dedicated register: the direct
+// All read consumers share this first capture from the SDRAM input register.
+// The cache consumes fill data through it: the direct
 // sdata_reg hop into cpu_cache_new's line-write port was the other
 // recurring -0.38ns violator.  The strobes move one state later to
 // match; the cache just counts four acknowledges, so the shift is
 // transparent to it (last beat lands during state 15, inside the slot).
 always @ (posedge sysclk) begin
 	sdata_reg_q <= sdata_reg;
+	walker_sdata_valid <= reset_n;
 	cache_fill <= 0;
 
 	if(init_done && slot_type == CPU_READCACHE) begin
@@ -273,21 +280,19 @@ assign ramready = cache_rd_ack || write_ena;
 reg [15:0] chip48_1, chip48_2, chip48_3;
 
 always @ (posedge sysclk) begin
-	reg [15:0] sdata_chip;
 	reg [15:0] m;
 
-	sdata_chip <= sdata_reg;
-	m = sdata_chip;
+	m = sdata_reg_q;
 	if(fwd_en) begin
 		if(!fwd_dqm[1]) m[15:8] = fwd_dat[15:8];
 		if(!fwd_dqm[0]) m[7:0]  = fwd_dat[7:0];
 	end
 	if(slot_type == CHIP) begin
 		case(sdram_state)
-			 9: chipRD   <= (fwd_en && fwd_pos==2'd0) ? m : sdata_chip;
-			11: chip48_1 <= (fwd_en && fwd_pos==2'd1) ? m : sdata_chip;
-			13: chip48_2 <= (fwd_en && fwd_pos==2'd2) ? m : sdata_chip;
-			15: chip48_3 <= (fwd_en && fwd_pos==2'd3) ? m : sdata_chip;
+			 9: chipRD   <= (fwd_en && fwd_pos==2'd0) ? m : sdata_reg_q;
+			11: chip48_1 <= (fwd_en && fwd_pos==2'd1) ? m : sdata_reg_q;
+			13: chip48_2 <= (fwd_en && fwd_pos==2'd2) ? m : sdata_reg_q;
+			15: chip48_3 <= (fwd_en && fwd_pos==2'd3) ? m : sdata_reg_q;
 		endcase
 	end
 end
@@ -458,6 +463,13 @@ reg        init_we;     // ... and one that drives WE low
 // one block, and its CAS-time values are built from these.  Still written only
 // by the command block.
 reg        cas_sd_we;
+// Predecode the complete ordinary-write qualifier, so init_done no longer
+// routes directly into every data-pin OE register.  Use the next init_done
+// value (including reset and a shortened slot) to preserve the old pin timing.
+reg        cas_write_go;
+always @(posedge sysclk)
+	cas_write_go <= reset && (init_done || (slot_start && (&initstate))) &&
+	                (sdram_state == 4'd1) && !cas_sd_we;
 reg  [1:0] cas_dqm;
 reg  [9:0] casaddr;
 reg  [1:0] pre_ba;
@@ -546,23 +558,14 @@ always @(posedge sysclk) begin
 		walker_busy        <= 0;
 		walker_addr_latch  <= 0;
 		walker_wdata_latch <= 0;
-		walker_sdata_pipe0 <= 0;
 		walker_sdata_pipe  <= 0;
 		walker_read_hi     <= 0;
 		walker_ack         <= 0;
 		walker_rdata       <= 0;
 	end
 	else begin
-		// Keep the SDRAM input register's new fanout to one simple local
-		// register.  Besides easing the 114 MHz path, the extra stages make
-		// the longword assembly independent of the controller's burst timing.
-		// THREE stages now.  Two left the FIRST hop, sdata_reg -> pipe,
-		// still the one that fails: sdata_reg sits with the SDRAM data pins
-		// and the walker logic does not, so that hop is route length, not
-		// logic, and stages placed after it do nothing for it (it came back
-		// at -0.105ns).  pipe0 gives the router a register it can place in
-		// between.
-		walker_sdata_pipe0 <= sdata_reg;
+		// Three stages, with the first shared with the other read consumers.
+		// The reset mux is after that capture, away from the SDRAM input pin.
 		walker_sdata_pipe  <= walker_sdata_pipe0;
 		walker_sdata_pipe2 <= walker_sdata_pipe;
 		walker_ack <= 0;
@@ -622,13 +625,12 @@ always @ (posedge sysclk) begin
 		sd_cas  <= !((ras_go && (init_cas ||
 		                         (ras_refresh && !((~chipDMA) | (~chipRW))))) ||
 		             walker_cas2_go || (init_done && cas_go && !cas_sd_cas));
-		sd_we   <= !((ras_go && init_we) ||
-		             walker_cas2_go || (init_done && cas_go && !cas_sd_we));
+		sd_we   <= !((ras_go && init_we) || walker_cas2_go || cas_write_go);
 		// Same argument, same enable: the data bus is driven only by the two
 		// CAS states and released everywhere else, and chipWE is raised only
 		// by the chipset's own RAS.
 		sd_data <= walker_cas2_go            ? walker_wdata_latch[15:0] :
-		           (init_done && cas_go && !cas_sd_we) ? datawr
+		           cas_write_go                    ? datawr
 		                                              : 16'hZZZZ;
 		chipWE  <= ras_go && init_done && ((~chipDMA) | (~chipRW)) && !chipRW;
 	end

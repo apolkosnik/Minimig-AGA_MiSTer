@@ -30,6 +30,17 @@ new_driver = """		begin
 			              (init_done && cas_go && !cas_sd_we);
 			sd_data_r  <= walker_cas2_go ? walker_wdata_latch[15:0] : datawr;
 		end"""
+# Also accept the registered qualifier, retaining the original shape for the
+# before/after controller equivalence check.
+registered_driver = old_driver.replace(
+    "(init_done && cas_go && !cas_sd_we) ? datawr",
+    "cas_write_go                    ? datawr",
+)
+if registered_driver in source:
+    old_driver = registered_driver
+    new_driver = new_driver.replace(
+        "(init_done && cas_go && !cas_sd_we)", "cas_write_go"
+    )
 if old_driver not in source:
     sys.stderr.write("prepare_sdram_sim: sd_data's driver is not the shape "
                      "this script knows how to split; update both together.\n")
