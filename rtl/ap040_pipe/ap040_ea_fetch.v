@@ -595,8 +595,32 @@ wire eac_is_jsr_odd  = eac_is_jsr && ea_target[0];
 // already in hand, and this stage owns the frame push and the vector read.
 // The divider downstream therefore never sees a zero divisor.
 //
-// operand_a is the <ea> side; only its low word is the divisor.
-wire eac_is_divzero  = eac_valid && eac_is_div && (operand_a[15:0] == 16'd0);
+// The divisor is the <ea> side, and WHERE that is depends on the mode.
+// For a register source it is operand_a. For a memory source operand_a is
+// the ADDRESS -- the divisor is the value loaded into mem_lane, which is
+// only meaningful once mem_pending says l1_q_b holds it.
+//
+// Milestone 52 checked operand_a unconditionally, so a memory-source
+// DIVU.W (A1),D0 tested the ADDRESS against zero and never trapped: the
+// divider ran with a zero divisor and the instruction after it executed
+// normally. Found while designing CHK, which has the same operand shape.
+wire [31:0] div_divisor = eac_is_mem_src ? mem_lane : operand_a;
+wire divzero_now = eac_valid && eac_is_div &&
+                   (eac_is_mem_src ? mem_pending : 1'b1) &&
+                   (div_divisor[15:0] == 16'd0);
+
+// ...and it has to be LATCHED, not recomputed. mem_lane is l1_q_b, which
+// lives for exactly one cycle: the frame push this very exception starts
+// drives a new address on port B, so by the next cycle mem_lane is the
+// pushed word and the condition evaporates. Without the latch the
+// exception begins, advances one beat, then unasserts itself -- and
+// mem_complete, freed again, retires the instruction as if nothing had
+// happened.
+//
+// A register-source divide needs no latch, since operand_a is stable, but
+// it costs nothing to hold that case too.
+reg exc_pend_divzero;
+wire eac_is_divzero = divzero_now || exc_pend_divzero;
 
 wire eac_is_addrerr  = eac_is_jmp_odd || eac_is_jsr_odd;
 wire eac_is_fmt2     = eac_is_addrerr;   // the only format-$2 source so far
@@ -628,7 +652,16 @@ endfunction
 wire [31:0] mem_lane = eac_sxt_w ? sxt_w_of(mem_raw) : mem_raw;
 
 wire mem_issue    = eac_valid && eac_is_mem_src && !mem_pending && !port_taken;
-wire mem_complete = mem_pending;
+// ...unless this instruction has just turned out to be an exception. For a
+// memory-source fault the value that CAUSES the fault is the one the load
+// just returned, so both conditions are true in the same cycle -- and the
+// branch chain below reaches mem_complete first, which would retire the
+// instruction normally and never start the frame push. Yielding here is
+// what lets a memory-source exception exist at all.
+//
+// No combinational loop: exc_active depends on mem_pending and mem_lane,
+// neither of which depends on mem_complete.
+wire mem_complete = mem_pending && !exc_active;
 // BSR/JSR's push -- no "pending" latch needed, see header: a write either
 // succeeds immediately (l1_wr_busy low) or must wait for the port, but
 // never needs a separate multi-cycle completion phase the way a read does.
@@ -922,16 +955,23 @@ always @(posedge clk) begin
 		mvm_dir        <= 1'b0;
 		mvm_rd_pend    <= 1'b0;
 		mvm_rd_reg     <= 4'h0;
+		exc_pend_divzero <= 1'b0;
 		exc_ph          <= EXC_BEAT0;
 		exc_vec_pending <= 1'b0;
 		ret_ph          <= RET_BEAT0;
 		ret_pending     <= 1'b0;
 	end else if (ce) begin
+		// Held from the cycle the divisor was seen until the exception has
+		// fetched its vector; see the latch's own comment above.
+		if (exc_vec_done)      exc_pend_divzero <= 1'b0;
+		else if (divzero_now)  exc_pend_divzero <= 1'b1;
+
 		if (flush) begin
 			eaf_valid       <= 1'b0;
 			mem_pending     <= 1'b0;
 			mvm_active      <= 1'b0;
 			mvm_rd_pend     <= 1'b0;
+			exc_pend_divzero <= 1'b0;
 			// Abandon a mid-flight exception sequence the same way an
 			// abandoned mem_pending read is: nothing downstream of a flush
 			// consumes what was in progress, but exc_ph/exc_vec_pending

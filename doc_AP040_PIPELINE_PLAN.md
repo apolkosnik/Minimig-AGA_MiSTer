@@ -1572,6 +1572,40 @@ real MMU or bus-error path arrives, which is the same boundary
    obvious way, which ANDs `$0007` into the whole SR and drops the core out
    of supervisor mode.
 
+   ### Milestone 63: a defect in milestone 52, and what hid it
+
+   **Memory-source divide by zero did not trap.** `eac_is_divzero` tested
+   `operand_a`, which is the divisor only for a REGISTER source; for a
+   memory source `operand_a` is the ADDRESS, so `DIVU.W (A1),D0` with a zero
+   divisor in memory compared the address against zero, never faulted, and
+   ran the divider on a zero divisor -- writing garbage to D0 and executing
+   the following instruction normally.
+
+   It was found while designing CHK, which has the same operand shape, not
+   by a test. `tb_ap040_pipe_divzero.v` covers only the register source and
+   **passes on the defective RTL**, which is exactly why the defect survived
+   eleven milestones.
+
+   Fixing it took three things, and the second two are the interesting ones:
+
+   1. The divisor is `mem_lane` for a memory source, valid only when
+      `mem_pending` says `l1_q_b` holds it.
+   2. `mem_complete` has to YIELD to an active exception. Both are true in
+      the same cycle -- the value that causes the fault is the one the load
+      just returned -- and the branch chain reaches `mem_complete` first,
+      retiring the instruction before the frame push can start. Without
+      this, no memory-source exception can exist at all.
+   3. The fault condition must be LATCHED. `mem_lane` is `l1_q_b`, which
+      lives one cycle: the frame push this exception starts drives a new
+      address on port B, so the condition evaporates, the exception
+      unasserts itself mid-sequence, and `mem_complete` -- freed again --
+      retires the instruction. The first two fixes alone left the bench
+      still failing, with the exception visibly starting and then giving up.
+
+   The general lesson: **a fault derived from loaded data is a one-cycle
+   condition in a multi-cycle sequence.** Any future memory-sourced
+   exception (CHK is next) needs the same latch.
+
    ### Adding a gather kind: the lists it must join
 
    Milestone 62 needed two debug cycles, both from the same cause, and
