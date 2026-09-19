@@ -321,6 +321,7 @@ module ap040_ea_fetch
 	output [L1_AW-1:0] l1_addr_b,
 	input        [31:0] l1_q_b,
 	output              l1_wren_b,
+	output        [3:0] l1_be_b,
 	output       [31:0] l1_data_b,
 	input               l1_wr_busy,
 
@@ -664,8 +665,23 @@ wire [31:0] l1_addr_word = eac_is_store ? (eac_is_abs    ? eac_imm :
                                                                   ea_target;
 assign l1_addr_b = (l1_addr_word - PC_RESET) >> 1;
 assign l1_wren_b = (eac_valid && (eac_is_push || eac_is_store)) || exc_writing;
+// A sized store places its data in the lane the address names and enables
+// only that lane. Lane 3 is the longword's first byte, matching
+// ap040_pipe_l1.v's be_b. Everything that is not a sized store -- pushes,
+// exception frames, Long stores -- asserts all four and is unaffected.
+wire [1:0]  st_off = l1_addr_word[1:0];
+wire [3:0]  st_be  = (!eac_is_store)             ? 4'b1111 :
+                     (eac_size == `AP040_SZ_L)   ? 4'b1111 :
+                     (eac_size == `AP040_SZ_W)   ? 4'b1100 :
+                     st_off[0]                   ? 4'b0100 : 4'b1000;
+wire [31:0] st_dat = (eac_size == `AP040_SZ_L || !eac_is_store) ? operand_a :
+                     (eac_size == `AP040_SZ_W) ? {operand_a[15:0], 16'd0} :
+                     st_off[0] ? {8'd0, operand_a[7:0], 16'd0}
+                               : {operand_a[7:0], 24'd0};
+
+assign l1_be_b   = st_be;
 assign l1_data_b = exc_writing  ? exc_wdata :
-                   eac_is_store ? operand_a : eac_next_pc;
+                   eac_is_store ? st_dat : eac_next_pc;
 
 always @(posedge clk) begin
 	if (!nreset) begin

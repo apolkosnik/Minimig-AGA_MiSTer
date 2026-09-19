@@ -66,6 +66,9 @@ ap040_pipe_l1 #(.AW(AW), .DW(16)) dut
 	.address_b (address_b),
 	.data_b    (data_b),
 	.wren_b    (wren_b),
+	// Byte enables (milestone 38). All four: this bench predates sized
+	// stores and exercises the Long path, which is what 4'b1111 means.
+	.be_b      (4'b1111),
 	.wr_busy   (wr_busy),
 	.q_b       (q_b)
 );

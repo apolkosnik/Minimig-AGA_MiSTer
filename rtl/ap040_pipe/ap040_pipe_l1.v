@@ -182,6 +182,10 @@ module ap040_pipe_l1
 	input      [AW-1:0]  address_b,
 	input       [31:0]   data_b,
 	input                wren_b,
+	// Byte enables for port B, in address order: bit 3 is the longword's
+	// first byte. A Long store asserts all four, so every caller that
+	// predates milestone 38 is unaffected by tying this to 4'b1111.
+	input       [3:0]    be_b,
 	output               wr_busy,   // see header -- hold wren_b/address_b/data_b while high
 	output reg  [31:0]   q_b
 );
@@ -197,6 +201,7 @@ wire [AW-1:0] address_b_lo = address_b + {{(AW-1){1'b0}}, 1'b1};
 reg              wbuf_valid;
 reg [AW-1:0]     wbuf_addr;
 reg [31:0]       wbuf_data;
+reg [3:0]        wbuf_be;
 
 wire [AW-1:0] wbuf_addr_lo = wbuf_addr + {{(AW-1){1'b0}}, 1'b1};
 
@@ -205,6 +210,22 @@ assign wr_busy = wbuf_valid;
 // A read this cycle whose address matches the still-undrained buffered
 // write must see the buffered value, not stale mem[] content -- see header.
 wire wbuf_hits_read = wbuf_valid && (wbuf_addr == address_b);
+
+// Byte enables for a sized store (milestone 38). Lane 3 is mem[addr][15:8],
+// lane 2 mem[addr][7:0], lane 1 mem[addr_lo][15:8], lane 0 mem[addr_lo][7:0]
+// -- the longword's four bytes in address order, since addr names the HIGH
+// word. A Long store asserts all four, which is exactly what every caller
+// before this milestone did, so their behaviour is unchanged.
+//
+// The read-after-write forward has to MERGE now rather than return
+// wbuf_data whole: a buffered byte store leaves the other three lanes in
+// mem[], and handing back the raw buffer would fabricate them.
+wire [31:0] wbuf_merged = {
+    wbuf_be[3] ? wbuf_data[31:24] : mem[address_b][15:8],
+    wbuf_be[2] ? wbuf_data[23:16] : mem[address_b][7:0],
+    wbuf_be[1] ? wbuf_data[15:8]  : mem[address_b_lo][15:8],
+    wbuf_be[0] ? wbuf_data[7:0]   : mem[address_b_lo][7:0]
+};
 
 always @(posedge clock) begin
 	if (en_a) begin
@@ -220,17 +241,20 @@ always @(posedge clock) begin
 		// entry deep -- see header, including the exact worst-case wait
 		// this ordering implies).
 		if (wbuf_valid) begin
-			mem[wbuf_addr]    <= wbuf_data[31:16];
-			mem[wbuf_addr_lo] <= wbuf_data[15:0];
+			if (wbuf_be[3]) mem[wbuf_addr][15:8]    <= wbuf_data[31:24];
+			if (wbuf_be[2]) mem[wbuf_addr][7:0]     <= wbuf_data[23:16];
+			if (wbuf_be[1]) mem[wbuf_addr_lo][15:8] <= wbuf_data[15:8];
+			if (wbuf_be[0]) mem[wbuf_addr_lo][7:0]  <= wbuf_data[7:0];
 			wbuf_valid        <= 1'b0;
 		end else if (wren_b) begin
 			wbuf_valid <= 1'b1;
 			wbuf_addr  <= address_b;
 			wbuf_data  <= data_b;
+			wbuf_be    <= be_b;
 		end
 	end
 
-	q_b <= wbuf_hits_read ? wbuf_data : {mem[address_b], mem[address_b_lo]};
+	q_b <= wbuf_hits_read ? wbuf_merged : {mem[address_b], mem[address_b_lo]};
 end
 
 endmodule

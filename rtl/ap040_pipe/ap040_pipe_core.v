@@ -181,6 +181,7 @@ wire        id_is_abs;
 wire        id_is_postinc, id_is_predec;
 wire        id_is_store;
 wire        eac_is_store;
+wire  [3:0] l1_be_b;
 wire        eac_is_abs;
 wire        eac_is_postinc, eac_is_predec;
 wire        eaf_writes_an;
@@ -496,6 +497,7 @@ ap040_pipe_l1 #(
 	.address_b (l1_addr_b),
 	.data_b    (l1_data_b),
 	.wren_b    (l1_wren_b),
+	.be_b      (l1_be_b),
 	.wr_busy   (l1_wr_busy),
 	.q_b       (l1_q_b)
 );
@@ -705,6 +707,7 @@ ap040_ea_fetch #(
 	.l1_addr_b        (l1_addr_b),
 	.l1_q_b           (l1_q_b),
 	.l1_wren_b        (l1_wren_b),
+	.l1_be_b          (l1_be_b),
 	.l1_data_b        (l1_data_b),
 	.l1_wr_busy       (l1_wr_busy),
 
