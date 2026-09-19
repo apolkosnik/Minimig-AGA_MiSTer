@@ -1229,6 +1229,18 @@ real MMU or bus-error path arrives, which is the same boundary
       word and zero-filling it ($FFFF2020, which is what milestone 44's
       mutation of the extension function itself produces). Two bugs, two
       values.
+   2b. ~~`EOR Dn,Dm`~~ **DONE (milestone 47).** `ap040_decode.v` had
+      carried a comment naming this hole since the binary family was
+      written: `ir[8]=1` is the `Dn -> <ea>` direction, and for nibble 1011
+      that is EOR rather than a second CMP. The ALU has implemented
+      `AP040_ALU_EOR` since the fork; only decode was missing.
+
+      Its operand roles are REVERSED from the `ir[8]=0` family -- `ir[11:9]`
+      is the source and `ir[2:0]` the destination -- and because EOR's
+      result is symmetric, getting that backwards puts the RIGHT VALUE IN
+      THE WRONG REGISTER. Verified by swapping the two fields on purpose.
+      Mode 001 stays out: that is CMPM.
+
    3. **ALU-to-memory** (`ir[8]=1`), the read-modify-write direction. This
       is the first real structural addition since milestone 30: the store
       issues from EA-fetch with register data, but an RMW's store data is

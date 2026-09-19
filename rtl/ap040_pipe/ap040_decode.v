@@ -363,6 +363,25 @@ wire alu_rr_shape = (if_opcode[15]   == 1'b1)  && (if_opcode[8]   == 1'b0) &&
 wire is_or_rr  = alu_rr_shape && (if_opcode[14:12] == 3'b000);   // 1000
 wire is_sub_rr = alu_rr_shape && (if_opcode[14:12] == 3'b001);   // 1001
 wire is_cmp_rr = alu_rr_shape && (if_opcode[14:12] == 3'b011);   // 1011 (ir[8]=1 would be EOR)
+
+// EOR Dn,Dm (milestone 47): 1011 RRR 1 SS 000 rrr. The comment above has
+// named this hole since the binary family was written -- ir[8]=1 is the
+// Dn -> <ea> direction, which for nibble 1011 is EOR rather than a second
+// CMP, and ap040_pipe_alu.v has implemented AP040_ALU_EOR since the fork.
+// Only decode was missing.
+//
+// The operand roles are REVERSED from the ir[8]=0 family: ir[11:9] is the
+// SOURCE here and ir[2:0] the DESTINATION, the same arrangement bitop_shape
+// uses. EOR's result is symmetric, so getting that backwards would be
+// invisible in the result and visible only in which register changed --
+// which is what tb_ap040_pipe_eor.v checks.
+//
+// Mode 001 must stay out: 1011 RRR 1 SS 001 rrr is CMPM, a different
+// instruction entirely. Only mode 000 is reached here; the memory
+// destinations are the read-modify-write direction and need a store path
+// this pipeline does not have yet.
+wire is_eor_rr = (if_opcode[15:12] == 4'b1011) && (if_opcode[8] == 1'b1) &&
+                 (if_opcode[7:6]  != 2'b11)    && (if_opcode[5:3] == 3'b000);
 wire is_and_rr = alu_rr_shape && (if_opcode[14:12] == 3'b100);   // 1100
 wire is_add_rr = alu_rr_shape && (if_opcode[14:12] == 3'b101);   // 1101
 wire is_alu_rr = is_or_rr || is_sub_rr || is_cmp_rr || is_and_rr || is_add_rr;
@@ -1027,7 +1046,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an;
@@ -1380,7 +1399,7 @@ always @(posedge clk) begin
 				id_pc           <= if_pc;
 				id_next_pc      <= if_pc + 32'd2;
 				id_dest_reg     <= (is_move_st || is_movea_rr || is_lea_an || is_adda) ? {1'b1, d_reg9} :
-				                    (is_scc_rr || is_unary_rr || is_extswap_rr || shift_shape || bitop_shape || is_bcd1_rr || quick_shape) ? {1'b0, d_rn} :
+				                    (is_scc_rr || is_unary_rr || is_extswap_rr || shift_shape || bitop_shape || is_bcd1_rr || quick_shape || is_eor_rr) ? {1'b0, d_rn} :
 				                    (is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_movesr || is_rts || is_rte) ? 4'd15 : {1'b0, d_reg9};
 				// is_move_mem_l/is_jmp_an/is_jsr_an's src_reg is An, not Dn
 				// -- the unified index's top bit (8+n vs 0+n) is the ONLY
@@ -1404,7 +1423,7 @@ always @(posedge clk) begin
 				// for why RTS deliberately reuses that exact mem_issue/
 				// mem_complete path (id_is_mem_src below) instead of
 				// getting its own sequencer the way RTE needs.
-				id_src_reg      <= bitop_shape ? {1'b0, d_reg9} :
+				id_src_reg      <= (bitop_shape || is_eor_rr) ? {1'b0, d_reg9} :
 				                    (is_move_mem_l || is_jmp_an || is_jsr_an || is_move_ax || is_alu_mem || is_lea_an || is_an_src || is_adda_areg_src) ? {1'b1, d_rn} :
 				                    (is_rts || is_rte) ? 4'd15 : {1'b0, d_rn};
 				// Zeroed for is_move_mem_l/is_jmp_an/is_jsr_an/is_rts/is_rte
@@ -1439,6 +1458,7 @@ always @(posedge clk) begin
 				                   shift_shape   ? shift_op    :
 				                   is_x_rr       ? x_rr_op     :
 				                   (is_alu_an || is_adda) ? alu_nib_op :
+				                   is_eor_rr     ? `AP040_ALU_EOR :
 				                   is_alu_rr     ? alu_rr_op   :
 				                   is_unary_rr   ? unary_rr_op :
 				                   is_extswap_rr ? extswap_op  : `AP040_ALU_MOVE;
@@ -1448,13 +1468,13 @@ always @(posedge clk) begin
 				                   quick_shape ? if_opcode[7:6] :
 				                   (is_bcd1_rr || is_bcd2_rr) ? `AP040_SZ_B :
 				                   is_extswap_rr ? extswap_size :
-				                   (is_alu_rr || is_unary_rr || is_x_rr || shift_shape || is_alu_mem || is_alu_an) ? add_op_size :
+				                   (is_alu_rr || is_unary_rr || is_x_rr || shift_shape || is_alu_mem || is_alu_an || is_eor_rr) ? add_op_size :
 				                   (is_move_rr || is_move_an) ? move_op_size : `AP040_SZ_L;
 				id_src_a_is_imm <= if_valid && (is_moveq || quick_shape);
-				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || (is_alu_mem && !is_cmp_mem) || (is_alu_an && !is_cmp_an) || is_move_an || is_x_rr || shift_shape ||
+				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || (is_alu_mem && !is_cmp_mem) || (is_alu_an && !is_cmp_an) || is_move_an || is_eor_rr || is_x_rr || shift_shape ||
 				                               (bitop_shape && !is_btst_rr) ||
 				                               is_bcd1_rr || is_bcd2_rr || quick_shape || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_move_ax || is_movea_rr || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte || is_lea_an || (is_adda && !is_cmpa));
-				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_alu_mem || is_alu_an || is_move_an || is_unary_rr || is_extswap_rr || is_x_rr || shift_shape || bitop_shape || is_bcd1_rr || is_bcd2_rr || quick_shape || is_move_mem_l || is_move_ax || is_move_st || is_cmpa);
+				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_alu_mem || is_alu_an || is_move_an || is_eor_rr || is_unary_rr || is_extswap_rr || is_x_rr || shift_shape || bitop_shape || is_bcd1_rr || is_bcd2_rr || quick_shape || is_move_mem_l || is_move_ax || is_move_st || is_cmpa);
 				id_is_branch    <= if_valid && is_branch_byte;
 				id_is_scc       <= if_valid && is_scc_rr;
 				id_is_dbcc      <= 1'b0;
