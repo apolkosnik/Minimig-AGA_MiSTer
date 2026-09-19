@@ -908,6 +908,80 @@ of rewrites; don't relax it for speed:
   error). `-g2012` is already required for this whole suite; `string`
   costs nothing extra.
 
+## 5b. Milestones 18-29 (2026-09-19): decode reach was the whole constraint
+
+Twelve milestones landed in one run on branch `ap040-pipelined`, taking the
+decoder from **2 of `ap040_pipe_alu.v`'s 33 operations to 31**, plus
+immediate operands in two encodings and absolute addressing. 31/31 benches,
+each one failing on the RTL immediately before it.
+
+| ms | opened | cost |
+|---|---|---|
+| 18 | byte and word sizes | a size field through all four stages |
+| 19 | OR, SUB, CMP, AND | predicate + op map |
+| 20 | NEGX, CLR, NEG, NOT, TST | predicate + op map |
+| 21 | SWAP, EXT.W, EXT.L, EXTB.L | predicate + op map |
+| 22 | ADDX, SUBX | predicate + op map |
+| 23 | 8 shifts/rotates, immediate count | a count field |
+| 24 | BTST, BCHG, BCLR, BSET | first `src_reg` override |
+| 25 | ABCD, SBCD, NBCD, TAS | predicate + op map |
+| 26 | ORI, ANDI, SUBI, ADDI, EORI, CMPI | first non-register source |
+| 27 | ADDQ, SUBQ | predicate only |
+| 28 | `MOVE #imm,Dn` | reuses 26's gather |
+| 29 | `MOVE.L (xxx).W/.L,Dn` | first address with no register term |
+
+**The ALU needed nothing.** `ap040_pipe_alu.v` differs from
+`rtl/ap040/ap040_alu.v` only in comments, module name and include path --
+the logic is byte-for-byte identical, and that file passes 3,797/3,801
+cputest slices through the FSM core. So the flag semantics of every
+operation above are already validated upstream; what these milestones
+changed is decode, which is exactly what each bench tests by producing a
+wrong value when the op, size or operand is wrong.
+
+**Area tracks distinct ALU operations reached, not instructions decoded.**
+Standalone Quartus fits with `L1_AW=4` (see the warning in section 7 about
+the L1 model):
+
+| | ms 17 | ms 20 | ms 24 | ms 27 |
+|---|---:|---:|---:|---:|
+| ALMs | 1,940 | 2,366 | 3,404 | 3,391 |
+| ALU ALUTs | 36 | 526 | 2,035 | 2,034 |
+| ops reachable | 2 | 10 | 27 | 31 |
+
+The ALU grew 56x with its RTL unchanged. Milestones 25-27 then added four
+instruction families and the fit went slightly DOWN, because they all map
+onto operations already instantiated. Any area comparison against `rtl_old`
+is meaningless except at equal ISA coverage.
+
+Three traps worth not rediscovering. A completing gather speculatively
+redirects to `held_pc + 2 + gather_disp`, which is right for a branch
+displacement and wrong for an operand -- immediates are the fifth class to
+need excluding there. A new gathering class must be added to the guard that
+STARTS a gather, not only to the branch that completes one. And
+`tb_ap040_pipe_exc.v` used `0000` as its "matches nothing" opcode, which is
+`ORI.B #imm,D0` and started decoding as one at milestone 26; it now uses
+`4AFC`, illegal by definition rather than by omission.
+
+## 6a. THE NEXT DECISION: a second GPR write port
+
+`(An)+` and `-(An)` are where this run stops, and not for decode reasons.
+`MOVE.L (An)+,Dn` writes TWO registers -- the data to Dn and the updated
+address to An -- and the pipeline has exactly one commit path,
+`commit_reg`/`exe_dest_reg`. The regfile's `aux_we`/`aux_sel` port is not a
+way out: it reaches only USP/ISP/MSP, not a GPR.
+
+So the work is a second write port on `ap040_pipe_regfile.v` AND a second
+forwarding path, because `ex_fwd_dest`/`ex_fwd_data` forward one register
+and an instruction immediately after `MOVE.L (A0)+,D0` may read A0.
+
+The fault-ordering question section 6 raises ("when does the An update
+commit relative to a fault") is currently MOOT and should be recorded as
+such: `ap040_pipe_l1.v` is a flat array that cannot fault, so nothing in
+this pipeline can fault a memory access at all. The An update can ride the
+ordinary commit path with no undo log. That stops being true the moment a
+real MMU or bus-error path arrives, which is the same boundary
+`ap040_writeback.v`'s header already names.
+
 ## 6. Remaining scope, roughly in dependency order
 
 1. **DONE (milestones 9b/10): `MOVE.L (An),Dn` and `MOVE.L (d16,An),Dn`** --
