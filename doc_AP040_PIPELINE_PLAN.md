@@ -1042,6 +1042,24 @@ real MMU or bus-error path arrives, which is the same boundary
    round trip (BSR/RTS, then TRAP-from-user-mode/RTE) rather than just
    inspecting pushed frame contents -- see the writeup above section 5,
    including a real same-cycle SR/A7-restore race it caught and fixed.
+   **RESOLVED (milestone 54): RTE now sizes its pop by the format nibble.**
+   It had read that nibble off the stack from the beginning and ignored it.
+   Only the frame SIZE differs between $0 and $2 -- the SR, PC and format
+   word sit at the same offsets, and format $2's extra longword is the
+   faulting address, which this core has no use for on return. So the defect
+   was never a failed return; it was A7 coming back four bytes low, once per
+   return, with the stack walking downward. `tb_ap040_pipe_rte_fmt2.v`
+   therefore checks A7 rather than the resumption, since a bench that only
+   confirmed "we got back" would have passed against this for as long as it
+   existed.
+
+   **FMTERR is still not implemented**, and now it is the only part left: a
+   format nibble that is neither $0 nor $2 is treated as $0. Raising vector
+   14 means starting an exception from a branch that is already mid-pop,
+   which is real work, and nothing in this core pushes any other format.
+
+   The original note, kept for the reasoning:
+
    RTE's own format-$0-only assumption is now a REAL gap, not a moot one:
    since milestone 17, this pipeline CAN push a format-$2 frame (address
    error), but RTE still only knows how to pop format $0 -- an RTE

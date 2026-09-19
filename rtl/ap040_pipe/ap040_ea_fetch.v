@@ -1142,15 +1142,35 @@ always @(posedge clk) begin
 				eaf_valid   <= 1'b0;
 			end else if (ret_done) begin
 				// l1_q_b now holds dword1 ({PC_lo, FmtVec}) -- finalize.
-				// Format $0 assumed unconditionally (see header); the
-				// format word itself (l1_q_b[15:0]) is read off the stack
-				// but deliberately not consulted for behavior yet.
+				//
+				// The format nibble is now CONSULTED (milestone 54). It was
+				// read off the stack from the start and ignored, which was
+				// harmless while nothing could push anything but a format
+				// $0 frame. Milestone 17 made address error push a format
+				// $2 frame, and from then on an RTE returning from an
+				// address-error handler popped eight bytes off a
+				// twelve-byte frame and left A7 four bytes low -- the stack
+				// slowly walking downward, once per such return.
+				//
+				// Only the frame SIZE differs between the two: the SR, PC
+				// and format word sit at the same offsets, and format $2's
+				// extra longword is the faulting address, which this core
+				// has no use for on return.
+				//
+				// Still NOT implemented, and still deliberate: FMTERR.
+				// A format nibble that is neither $0 nor $2 is treated as
+				// $0 rather than raising vector 14. Raising it from inside
+				// this sequencer means starting an exception from a branch
+				// that is already mid-pop, which is a real piece of work
+				// and not one this core can currently provoke -- nothing
+				// here pushes any other format.
 				eaf_valid       <= eac_valid;
 				eaf_pc          <= eac_pc;
 				eaf_next_pc     <= eac_next_pc;
 				eaf_dest_reg    <= eac_dest_reg;   // already A7 -- unused for RTE's OWN write now, see below
 				eaf_operand_a   <= {ret_dword0[15:0], l1_q_b[31:16]};   // popped PC -> redirect target
-				eaf_operand_b   <= operand_a + 32'd8;                    // new A7 (format $0, 8-byte frame)
+				eaf_operand_b   <= operand_a +
+				                    ((l1_q_b[15:12] == 4'h2) ? 32'd12 : 32'd8);  // new A7: frame size by format
 				eaf_alu_op      <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
