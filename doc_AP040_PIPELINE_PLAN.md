@@ -1193,11 +1193,24 @@ real MMU or bus-error path arrives, which is the same boundary
       Verified by mutating the extension to zero-fill, which produces
       exactly the two values the header names.
 
-      **Still missing for this family: the gathering source modes**,
-      `(d16,An)` and above all `#imm` -- `ADDA.L #n,A7` is how a stack frame
-      is opened and closed, so this family is not yet useful for compiled
-      code without it. That is the cheapest remaining item, since
-      `held_alu_op` already exists.
+      **Milestone 45** added the `#imm` source, which is the form that
+      mattered: `ADDA.L #n,A7` opens and closes every compiled frame. It
+      needed no new gather kind and no sign-extension flag -- `held_is_imm`
+      already assembles immediates and routes them through
+      `id_src_a_is_imm`, and `gather_disp` already sign-extends its
+      single-word form, so the Word immediate arrives 32 bits wide and
+      correct without `id_sxt_w` being involved.
+
+      One rule had to stop being inferred. `id_writes_ccr` derived "sets no
+      condition codes" from `held_imm_areg` -- from the destination being an
+      address register -- which held for every immediate form until CMPA,
+      whose destination IS an address register and which DOES set condition
+      codes. `held_imm_ccr` now carries it directly and reproduces the old
+      behaviour exactly for the older forms.
+
+      Still missing for this family: `(d16,An)` as a source. Lower value
+      than the two above and a straightforward extension of milestone 40's
+      gather kind.
    3. **ALU-to-memory** (`ir[8]=1`), the read-modify-write direction. This
       is the first real structural addition since milestone 30: the store
       issues from EA-fetch with register data, but an RMW's store data is

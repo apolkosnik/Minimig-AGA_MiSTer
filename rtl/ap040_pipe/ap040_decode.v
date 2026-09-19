@@ -441,6 +441,27 @@ wire is_adda_pd = is_adda && (if_opcode[5:3] == 3'b100);
 // Dn direct is the one source mode here that is NOT an address register.
 wire is_adda_areg_src = is_adda && (if_opcode[5:3] != 3'b000);
 
+// ADDA/SUBA/CMPA with an IMMEDIATE source (milestone 45), mode 111 reg 100.
+// ADDA.L #n,A7 is how a stack frame is opened and closed, so the family is
+// not useful for compiled code without it.
+//
+// This needs no new gather kind and no sign-extension flag. held_is_imm
+// already assembles immediates, already routes them into operand_a through
+// id_src_a_is_imm, and already writes An without condition codes for
+// MOVEA.L #imm,An. And gather_disp SIGN-EXTENDS its single-word form
+// already -- the Word immediate arrives 32 bits wide and correct, so
+// id_sxt_w is not involved here at all.
+//
+// One thing did have to be separated. id_writes_ccr derived "sets no
+// condition codes" from held_imm_areg, i.e. from the destination being an
+// address register, which held for every immediate form until now. CMPA
+// breaks it: the destination IS an address register and it DOES set
+// condition codes. held_imm_ccr carries that directly instead of inferring
+// it, and reproduces the old behaviour exactly for the older forms.
+wire is_adda_imm  = adda_shape && (if_opcode[5:0] == 6'b111100);
+wire is_cmpa_imm  = is_adda_imm && (if_opcode[15:12] == 4'b1011);
+wire is_adda_imm_l = is_adda_imm && (if_opcode[8] == 1'b1);
+
 // SUB and CMP are b - a, and ap040_ea_fetch.v resolves operand_b from
 // eac_dest_reg and operand_a from the source, so `SUB Dn,Dm` computes
 // Dm - Dn as it must. Verified against ap040_pipe_alu.v's sub_full.
@@ -1038,6 +1059,7 @@ reg         held_is_move_disp;
 // id_alu_op could be chosen from the kind flags alone.
 reg         held_is_alu_disp;
 reg         held_is_lea;        // the ninth kind: LEA (d16,An),Am
+reg         held_imm_ccr;       // does this immediate form set condition codes?
 reg   [5:0] held_alu_op;
 reg         held_alu_nowrite;   // CMP: flags only, as held_imm_nowrite is for CMPI
 reg         held_is_jmp;
@@ -1144,6 +1166,7 @@ always @(posedge clk) begin
 		held_alu_nowrite  <= 1'b0;
 		held_is_jmp     <= 1'b0;
 		held_is_lea     <= 1'b0;
+		held_imm_ccr    <= 1'b0;
 		held_is_bsr     <= 1'b0;
 		held_is_jsr     <= 1'b0;
 		held_is_movec   <= 1'b0;
@@ -1241,7 +1264,7 @@ always @(posedge clk) begin
 					                    (held_is_movec && !held_movec_dir && !movec_illegal_gather);
 					// MOVEA sets no condition codes.
 					id_writes_ccr   <= held_is_move_disp || held_is_alu_disp || held_is_abs || held_is_stabs ||
-					                    (held_is_imm && !held_imm_areg);
+					                    (held_is_imm && held_imm_ccr);
 					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_alu_disp && !held_is_lea && !held_is_jmp &&
 					                    !held_is_bsr && !held_is_jsr && !held_is_movec &&
 					                    !held_is_imm && !held_is_abs && !held_is_stabs;
@@ -1272,7 +1295,7 @@ always @(posedge clk) begin
 			end else if (is_branch_word || is_branch_long || is_dbcc || is_move_disp || is_jmp_disp ||
 			              is_bsr_word || is_bsr_long || is_jsr_disp || is_movec_opcode ||
 			              is_imm_alu || is_move_imm || is_move_abs || is_movea_imm ||
-			              is_st_abs || is_alu_disp || is_lea_disp) begin
+			              is_st_abs || is_alu_disp || is_lea_disp || is_adda_imm) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1284,14 +1307,18 @@ always @(posedge clk) begin
 				held_is_long  <= is_branch_long || is_bsr_long ||
 				                 (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                 (is_move_imm && if_opcode[13:12] == 2'b10) ||
-				                 is_move_abs_l || is_movea_imm || is_st_abs_l;
-				held_is_imm      <= is_imm_alu || is_move_imm || is_movea_imm;
-				held_imm_op      <= (is_move_imm || is_movea_imm) ? `AP040_ALU_MOVE : imm_alu_op;
-				held_imm_size    <= is_movea_imm ? `AP040_SZ_L :
+				                 is_move_abs_l || is_movea_imm || is_st_abs_l || is_adda_imm_l;
+				held_is_imm      <= is_imm_alu || is_move_imm || is_movea_imm || is_adda_imm;
+				held_imm_op      <= is_adda_imm ? alu_nib_op :
+				                    (is_move_imm || is_movea_imm) ? `AP040_ALU_MOVE : imm_alu_op;
+				// ADDA.W operates on the full 32 bits; only its SOURCE is a
+				// word, and gather_disp has already sign-extended that.
+				held_imm_size    <= (is_movea_imm || is_adda_imm) ? `AP040_SZ_L :
 				                    is_move_imm  ? move_op_size : if_opcode[7:6];
-				held_imm_nowrite <= is_cmpi_i;
-				held_imm_dest9   <= is_move_imm || is_movea_imm;
-				held_imm_areg    <= is_movea_imm;
+				held_imm_nowrite <= is_cmpi_i || is_cmpa_imm;
+				held_imm_dest9   <= is_move_imm || is_movea_imm || is_adda_imm;
+				held_imm_areg    <= is_movea_imm || is_adda_imm;
+				held_imm_ccr     <= is_imm_alu || is_move_imm || is_cmpa_imm;
 				held_is_abs      <= is_move_abs;
 				held_is_stabs    <= is_st_abs;
 				// The ALU family takes its size from ir[7:6]; MOVE's lives in
@@ -1315,7 +1342,8 @@ always @(posedge clk) begin
 				ext_pending   <= (is_branch_long || is_bsr_long ||
 				                  (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                  (is_move_imm && if_opcode[13:12] == 2'b10) ||
-				                  is_move_abs_l || is_movea_imm || is_st_abs_l) ? 2'd2 : 2'd1;
+				                  is_move_abs_l || is_movea_imm || is_st_abs_l ||
+				                  is_adda_imm_l) ? 2'd2 : 2'd1;
 			end else begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
