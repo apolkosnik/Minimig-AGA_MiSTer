@@ -596,13 +596,26 @@ wire [5:0] bcd1_op = is_nbcd_rr ? `AP040_ALU_NBCD : `AP040_ALU_TAS;
 // src_reg must name the ADDRESS register (unified index 8+n) so operand_a
 // resolves to the address before the read replaces it, exactly as
 // MOVE.L (An),Dn does.
+//
+// Modes 011 and 100 -- (An)+ and -(An) -- join mode 010 here rather than
+// getting a shape of their own. They differ only in the address-register
+// update, which ap040_ea_fetch.v already performs off eac_is_postinc/
+// eac_is_predec through the second write port milestone 30 added for
+// MOVE.L (An)+,Dn, and its an_write is deliberately independent of
+// writes_reg -- so CMP.L (A0)+,D0, which writes no data register at all,
+// still advances A0. That independence was already there; this is the first
+// instruction that depends on it.
 wire alu_mem_shape = (if_opcode[15]   == 1'b1)  && (if_opcode[8]   == 1'b0) &&
-                     (if_opcode[7:6]  != 2'b11) && (if_opcode[5:3] == 3'b010);
+                     (if_opcode[7:6]  != 2'b11) &&
+                     ((if_opcode[5:3] == 3'b010) || (if_opcode[5:3] == 3'b011) ||
+                      (if_opcode[5:3] == 3'b100));
 wire is_alu_mem = alu_mem_shape &&
                   ((if_opcode[14:12] == 3'b000) || (if_opcode[14:12] == 3'b001) ||
                    (if_opcode[14:12] == 3'b011) || (if_opcode[14:12] == 3'b100) ||
                    (if_opcode[14:12] == 3'b101));
 wire is_cmp_mem = alu_mem_shape && (if_opcode[14:12] == 3'b011);
+wire is_alu_pi  = is_alu_mem && (if_opcode[5:3] == 3'b011);
+wire is_alu_pd  = is_alu_mem && (if_opcode[5:3] == 3'b100);
 
 // And once more with ea mode 101, (d16,An). This one cannot be decoded in a
 // single cycle -- the displacement is an extension word -- so unlike mode 010
@@ -1290,8 +1303,8 @@ always @(posedge clk) begin
 				id_is_mem_src   <= if_valid && (is_move_mem_l || is_rts || is_move_ax || is_alu_mem);
 				id_is_abs       <= 1'b0;
 				id_is_store     <= if_valid && is_move_st;
-				id_is_postinc   <= if_valid && (is_move_pi || is_move_st_pi);
-				id_is_predec    <= if_valid && (is_move_pd || is_move_st_pd);
+				id_is_postinc   <= if_valid && (is_move_pi || is_move_st_pi || is_alu_pi);
+				id_is_predec    <= if_valid && (is_move_pd || is_move_st_pd || is_alu_pd);
 				id_is_jmp       <= if_valid && is_jmp_an;
 				id_is_bsr       <= if_valid && is_bsr_byte;
 				id_is_jsr       <= if_valid && is_jsr_an;

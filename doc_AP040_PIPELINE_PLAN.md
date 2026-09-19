@@ -1114,6 +1114,28 @@ real MMU or bus-error path arrives, which is the same boundary
    branch. That is now five exclusions against three branch kinds, and the
    gate is written as a list of negations -- the next non-branching gather
    kind that forgets to add itself will jump to `held_pc + 2 + disp`.
+
+   **Milestone 41 (autoincrement)** added modes 011 and 100, `(An)+` and
+   `-(An)`, for one shape term and two flags -- the address-register update
+   already existed, driven off `eac_is_postinc`/`eac_is_predec` through
+   milestone 30's second write port. `ADD.L (A0)+,D0` walking an array is
+   what a compiler emits for a summation, and it is one instruction where
+   the FSM core needs several.
+
+   It exposed something that had been true but untested since milestone 30:
+   `ap040_ea_fetch.v`'s `an_write` is independent of `writes_reg`. Every
+   earlier user of it also wrote a data register, so the two were
+   indistinguishable. `CMP.L (A0)+,D0` writes NO data register and must
+   still advance A0 -- an implementation that gated the address update on
+   "does this instruction write a register" would have passed every bench
+   written before this one.
+
+   The register-indirect source modes are now complete for this family:
+   `Dn`, `(An)`, `(An)+`, `-(An)`, `(d16,An)`. Still absent: `An` direct
+   (mode 001), indexed `(d8,An,Xn)` (110, needs a third register read port),
+   the absolute and PC-relative modes (111), and the whole `ir[8]=1`
+   direction -- ALU-to-memory, which is a read-modify-write and the first
+   instruction that would need both a load and a store.
 4. **MMU and cache integration**, once enough of the integer ISA exists that
    testing them against real address translation is meaningful. Reuse the
    architectural requirements from `rtl_old/ap040_mmu.v`/`ap040_cache.v`
