@@ -290,6 +290,7 @@ module ap040_decode
 	output reg [31:0] id_imm,
 	output reg  [5:0] id_alu_op,
 	output reg  [1:0] id_size,
+	output reg  [5:0] id_shcnt,
 	output reg        id_src_a_is_imm,
 	output reg        id_writes_reg,
 	output reg        id_writes_ccr,
@@ -427,6 +428,30 @@ wire [5:0] unary_rr_op = is_negx_rr ? `AP040_ALU_NEGX :
 // Dn,Dn, which IS a real encoding and must not be swallowed here, and 1100
 // with ir[8]=1 is the ABCD group. ir[3]=1 would be the -(Ay),-(Ax) memory
 // form, which has no path yet.
+// Shift/rotate, immediate count, register destination:
+// 1110 ccc d ss 0 tt rrr. ir[4:3] picks the family (00=arithmetic, 01=
+// logical, 10=ROX, 11=RO) and ir[8] the direction, so eight operations come
+// out of one predicate. The destination is ir[2:0] and the barrel reads
+// operand b, so this rides the unary group's selector arrangement.
+//
+// ir[5]=1 puts the count in a second data register, needing a read port
+// this pipeline has no path for; ir[7:6]=11 is the memory form, one bit at
+// a time on an <ea>, and on 68020+ that slot is also the bitfield group.
+// Both stay out.
+wire shift_shape = (if_opcode[15:12] == 4'b1110) &&
+                   (if_opcode[7:6] != 2'b11) && (if_opcode[5] == 1'b0);
+
+wire [5:0] shift_op =
+	(if_opcode[4:3] == 2'b00) ? (if_opcode[8] ? `AP040_ALU_ASL1  : `AP040_ALU_ASR1)  :
+	(if_opcode[4:3] == 2'b01) ? (if_opcode[8] ? `AP040_ALU_LSL1  : `AP040_ALU_LSR1)  :
+	(if_opcode[4:3] == 2'b10) ? (if_opcode[8] ? `AP040_ALU_ROXL1 : `AP040_ALU_ROXR1) :
+	                            (if_opcode[8] ? `AP040_ALU_ROL1  : `AP040_ALU_ROR1);
+
+// The immediate count field is 1..7 literally and 0 means EIGHT, not zero.
+// ap040_pipe_alu.v's barrel takes 1..63 and composes the one-bit steps in a
+// single cycle, so nothing iterates here.
+wire [5:0] shift_cnt = (if_opcode[11:9] == 3'd0) ? 6'd8 : {3'd0, if_opcode[11:9]};
+
 wire addx_shape = (if_opcode[15]   == 1'b1)  && (if_opcode[8]   == 1'b1) &&
                   (if_opcode[7:6]  != 2'b11) && (if_opcode[5:3] == 3'b000);
 wire is_addx_rr = addx_shape && (if_opcode[14:12] == 3'b101);   // 1101
@@ -614,7 +639,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte;
@@ -704,6 +729,7 @@ always @(posedge clk) begin
 		id_imm          <= 32'h0;
 		id_alu_op       <= 6'h0;
 		id_size         <= `AP040_SZ_L;
+		id_shcnt        <= 6'd1;
 		id_src_a_is_imm <= 1'b0;
 		id_writes_reg   <= 1'b0;
 		id_writes_ccr   <= 1'b0;
@@ -792,6 +818,7 @@ always @(posedge clk) begin
 					                    held_is_movec ? {28'd0, held_movec_dir, movec_sel_code} : 32'h0;
 					id_alu_op       <= `AP040_ALU_MOVE;
 					id_size         <= `AP040_SZ_L;
+					id_shcnt        <= 6'd1;
 					id_src_a_is_imm <= 1'b0;
 					// DBcc's write is dynamic (see header); BSR/JSR's is
 					// static -- both always decrement A7 when they execute
@@ -852,7 +879,7 @@ always @(posedge clk) begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
 				id_next_pc      <= if_pc + 32'd2;
-				id_dest_reg     <= (is_scc_rr || is_unary_rr || is_extswap_rr) ? {1'b0, d_rn} :
+				id_dest_reg     <= (is_scc_rr || is_unary_rr || is_extswap_rr || shift_shape) ? {1'b0, d_rn} :
 				                    (is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_movesr || is_rts || is_rte) ? 4'd15 : {1'b0, d_reg9};
 				// is_move_mem_l/is_jmp_an/is_jsr_an's src_reg is An, not Dn
 				// -- the unified index's top bit (8+n vs 0+n) is the ONLY
@@ -889,18 +916,20 @@ always @(posedge clk) begin
 				id_imm          <= (is_move_mem_l || is_jmp_an || is_jsr_an || is_rts || is_rte) ? 32'h0 :
 				                    is_trap ? (32'd32 + {28'd0, if_opcode[3:0]}) :
 				                              {{24{if_opcode[7]}}, if_opcode[7:0]};
-				id_alu_op       <= is_x_rr       ? x_rr_op     :
+				id_shcnt        <= shift_cnt;
+				id_alu_op       <= shift_shape   ? shift_op    :
+				                   is_x_rr       ? x_rr_op     :
 				                   is_alu_rr     ? alu_rr_op   :
 				                   is_unary_rr   ? unary_rr_op :
 				                   is_extswap_rr ? extswap_op  : `AP040_ALU_MOVE;
 				// Everything else here (MOVEQ, Scc, the memory/branch forms)
 				// is Long or drives its own width, so Long stays the default.
 				id_size         <= is_extswap_rr ? extswap_size :
-				                   (is_alu_rr || is_unary_rr || is_x_rr) ? add_op_size :
+				                   (is_alu_rr || is_unary_rr || is_x_rr || shift_shape) ? add_op_size :
 				                   is_move_rr ? move_op_size : `AP040_SZ_L;
 				id_src_a_is_imm <= if_valid && is_moveq;
-				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || is_x_rr || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
-				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_extswap_rr || is_x_rr || is_move_mem_l);
+				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || is_x_rr || shift_shape || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
+				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_extswap_rr || is_x_rr || shift_shape || is_move_mem_l);
 				id_is_branch    <= if_valid && is_branch_byte;
 				id_is_scc       <= if_valid && is_scc_rr;
 				id_is_dbcc      <= 1'b0;

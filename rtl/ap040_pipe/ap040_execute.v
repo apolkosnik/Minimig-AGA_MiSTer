@@ -116,6 +116,7 @@ module ap040_execute
 	input      [31:0] eaf_operand_b,
 	input       [5:0] eaf_alu_op,
 	input       [1:0] eaf_size,
+	input       [5:0] eaf_shcnt,
 	input             eaf_writes_reg,
 	input             eaf_writes_ccr,
 	input             eaf_is_branch,
@@ -215,7 +216,7 @@ ap040_pipe_alu alu
 (
 	.op        (eaf_alu_op),
 	.size      (eaf_size),
-	.shcnt     (6'd1),
+	.shcnt     (eaf_shcnt),
 	.a         (eaf_operand_a),
 	.b         (eaf_operand_b),
 	.flags_in  (ccr_in),
