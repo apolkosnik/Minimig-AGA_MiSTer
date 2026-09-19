@@ -94,6 +94,7 @@ module ap040_ea_calc
 	input             id_is_predec,
 	input             id_is_jmp,
 	input             id_is_lea,
+	input             id_sxt_w,
 	input             id_is_bsr,
 	input             id_is_jsr,
 	input             id_is_trap,
@@ -128,6 +129,7 @@ module ap040_ea_calc
 	output reg        eac_is_predec,
 	output reg        eac_is_jmp,
 	output reg        eac_is_lea,
+	output reg        eac_sxt_w,
 	output reg        eac_is_bsr,
 	output reg        eac_is_jsr,
 	output reg        eac_is_trap,
@@ -165,6 +167,7 @@ always @(posedge clk) begin
 		eac_is_predec    <= 1'b0;
 		eac_is_jmp       <= 1'b0;
 		eac_is_lea       <= 1'b0;
+		eac_sxt_w        <= 1'b0;
 		eac_is_bsr       <= 1'b0;
 		eac_is_jsr       <= 1'b0;
 		eac_is_trap      <= 1'b0;
@@ -200,6 +203,7 @@ always @(posedge clk) begin
 			eac_is_predec    <= id_is_predec;
 			eac_is_jmp       <= id_is_jmp;
 			eac_is_lea       <= id_is_lea;
+			eac_sxt_w        <= id_sxt_w;
 			eac_is_bsr       <= id_is_bsr;
 			eac_is_jsr       <= id_is_jsr;
 			eac_is_trap      <= id_is_trap;

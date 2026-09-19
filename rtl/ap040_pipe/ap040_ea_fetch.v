@@ -275,6 +275,7 @@ module ap040_ea_fetch
 	input             eac_is_predec,
 	input             eac_is_jmp,
 	input             eac_is_lea,
+	input             eac_sxt_w,
 	input             eac_is_bsr,
 	input             eac_is_jsr,
 	input             eac_is_trap,
@@ -420,8 +421,16 @@ wire [31:0] an_base = eac_is_store ? operand_b : operand_a;
 // exception: a BYTE access through A7 steps by two, not one, so the stack
 // pointer stays even. A7 is the address bank's register 7, unified index 15.
 wire        an_is_a7 = (eac_is_store ? eac_dest_reg : eac_src_reg) == 4'd15;
-wire [31:0] an_step  = (eac_size == `AP040_SZ_L) ? 32'd4 :
-                       (eac_size == `AP040_SZ_W) ? 32'd2 :
+//
+// ADDA.W/SUBA.W/CMPA.W (milestone 44) are the first instructions whose
+// memory width and ALU width differ: they read a WORD, sign-extend it and
+// then operate on 32 bits. eac_size stays Long for the ALU, so every
+// size-driven decision on the MEMORY side reads eff_size instead -- both the
+// lane select below and this step, since (A0)+ under ADDA.W must advance by
+// two, not four.
+wire [1:0]  eff_size = eac_sxt_w ? `AP040_SZ_W : eac_size;
+wire [31:0] an_step  = (eff_size == `AP040_SZ_L) ? 32'd4 :
+                       (eff_size == `AP040_SZ_W) ? 32'd2 :
                        an_is_a7                  ? 32'd2 : 32'd1;
 
 wire [31:0] ea_target = eac_is_abs    ? eac_imm            :
@@ -457,11 +466,22 @@ wire eac_is_fmt2     = eac_is_addrerr;   // the only format-$2 source so far
 //
 // A word takes the high half of the pair, which is the word the address
 // names. A byte takes one half of that word, chosen by address bit 0.
-wire [31:0] mem_lane =
-    (eac_size == `AP040_SZ_L) ? l1_q_b :
-    (eac_size == `AP040_SZ_W) ? {16'd0, l1_q_b[31:16]} :
+wire [31:0] mem_raw =
+    (eff_size == `AP040_SZ_L) ? l1_q_b :
+    (eff_size == `AP040_SZ_W) ? {16'd0, l1_q_b[31:16]} :
                                 {24'd0, (ea_target[0] ? l1_q_b[23:16]
                                                       : l1_q_b[31:24])};
+
+// The sign extension itself. Zero-extending a Word source instead is a
+// silently wrong answer for every negative offset -- which is most of what
+// SUBA is used for -- rather than a crash, so it gets its own check in
+// tb_ap040_pipe_adda.v.
+function [31:0] sxt_w_of;
+	input [31:0] v;
+	sxt_w_of = {{16{v[15]}}, v[15:0]};
+endfunction
+
+wire [31:0] mem_lane = eac_sxt_w ? sxt_w_of(mem_raw) : mem_raw;
 
 wire mem_issue    = eac_valid && eac_is_mem_src && !mem_pending;
 wire mem_complete = mem_pending;
@@ -977,7 +997,9 @@ always @(posedge clk) begin
 				// deliver the computed address as the operand, so ALU_MOVE
 				// then writes it to An. This one line is the entire
 				// datapath cost of the instruction.
-				eaf_operand_a  <= (eac_is_jmp || eac_is_jsr || eac_is_lea) ? ea_target : operand_a;
+				eaf_operand_a  <= (eac_is_jmp || eac_is_jsr || eac_is_lea) ? ea_target :
+				                  eac_sxt_w                                ? sxt_w_of(operand_a) :
+				                                                             operand_a;
 				// BSR/JSR: the NEW A7 value (== push_addr, the same
 				// expression already used for the write address) -- see
 				// header for why the decrement happens HERE, once, rather

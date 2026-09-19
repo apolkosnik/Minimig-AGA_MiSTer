@@ -1174,9 +1174,30 @@ real MMU or bus-error path arrives, which is the same boundary
       validated by breaking the decoder on purpose: widening the mode field
       and dropping both restrictions makes it report 0 traps. A restriction
       nobody tests is a comment.
-   2. **ADDA/SUBA/CMPA** (opmode 011/111), pointer arithmetic. Needs one
-      new thing: a Word source sign-extended to 32 bits before a Long
-      operation, which no current instruction does.
+   2. ~~ADDA/SUBA/CMPA~~ **DONE (milestone 44)**, for the five source modes
+      that need no extension word: `Dn`, `An`, `(An)`, `(An)+`, `-(An)`.
+      This is the `ir[7:6]==11` case every ALU shape had been carrying a
+      `!= 2'b11` term to exclude.
+
+      The new thing was the one predicted: `id_size` had always meant ONE
+      width for both the memory access and the ALU, and `ADDA.W` is the
+      first instruction where they differ -- Word read, sign-extended, Long
+      operation, full 32-bit write to An. `id_sxt_w` carries that, and
+      `ap040_ea_fetch.v` grew an `eff_size` that every size-driven decision
+      on the MEMORY side now reads: both the lane select and the
+      auto-increment step, since `(A0)+` under `ADDA.W` must advance by two.
+
+      Its bench uses two Word cases on purpose, because they fail
+      differently: A1 borrows out of its low word, so it catches a 16-bit
+      writeback, and A4 subtracts a negative, so it catches zero extension.
+      Verified by mutating the extension to zero-fill, which produces
+      exactly the two values the header names.
+
+      **Still missing for this family: the gathering source modes**,
+      `(d16,An)` and above all `#imm` -- `ADDA.L #n,A7` is how a stack frame
+      is opened and closed, so this family is not yet useful for compiled
+      code without it. That is the cheapest remaining item, since
+      `held_alu_op` already exists.
    3. **ALU-to-memory** (`ir[8]=1`), the read-modify-write direction. This
       is the first real structural addition since milestone 30: the store
       issues from EA-fetch with register data, but an RMW's store data is

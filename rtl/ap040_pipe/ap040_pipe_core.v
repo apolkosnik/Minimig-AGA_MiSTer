@@ -195,7 +195,7 @@ wire  [3:0] ex_fwd2_dest;
 wire [31:0] ex_fwd2_data;
 wire        id_src_a_is_imm, id_writes_reg, id_writes_ccr;
 wire        id_is_branch, id_is_scc, id_is_dbcc, id_is_mem_src, id_is_jmp;
-wire        id_is_lea;
+wire        id_is_lea, id_sxt_w;
 wire        id_is_bsr, id_is_jsr, id_is_trap, id_is_illegal;
 wire        id_is_movesr, id_is_movec;
 wire        id_is_rts, id_is_rte;
@@ -209,7 +209,7 @@ wire  [1:0] eac_size;
 wire  [5:0] eac_shcnt;
 wire        eac_src_a_is_imm, eac_writes_reg, eac_writes_ccr;
 wire        eac_is_branch, eac_is_scc, eac_is_dbcc, eac_is_mem_src, eac_is_jmp;
-wire        eac_is_lea;
+wire        eac_is_lea, eac_sxt_w;
 wire        eac_is_bsr, eac_is_jsr, eac_is_trap, eac_is_illegal;
 wire        eac_is_movesr, eac_is_movec;
 wire        eac_is_rts, eac_is_rte;
@@ -565,6 +565,7 @@ ap040_decode u_id
 	.id_is_predec    (id_is_predec),
 	.id_is_jmp       (id_is_jmp),
 	.id_is_lea       (id_is_lea),
+	.id_sxt_w        (id_sxt_w),
 	.id_is_bsr       (id_is_bsr),
 	.id_is_jsr       (id_is_jsr),
 	.id_is_trap      (id_is_trap),
@@ -606,6 +607,7 @@ ap040_ea_calc u_eac
 	.id_is_predec     (id_is_predec),
 	.id_is_jmp        (id_is_jmp),
 	.id_is_lea        (id_is_lea),
+	.id_sxt_w         (id_sxt_w),
 	.id_is_bsr        (id_is_bsr),
 	.id_is_jsr        (id_is_jsr),
 	.id_is_trap       (id_is_trap),
@@ -640,6 +642,7 @@ ap040_ea_calc u_eac
 	.eac_is_predec    (eac_is_predec),
 	.eac_is_jmp       (eac_is_jmp),
 	.eac_is_lea       (eac_is_lea),
+	.eac_sxt_w        (eac_sxt_w),
 	.eac_is_bsr       (eac_is_bsr),
 	.eac_is_jsr       (eac_is_jsr),
 	.eac_is_trap      (eac_is_trap),
@@ -684,6 +687,7 @@ ap040_ea_fetch #(
 	.eac_is_predec    (eac_is_predec),
 	.eac_is_jmp       (eac_is_jmp),
 	.eac_is_lea       (eac_is_lea),
+	.eac_sxt_w        (eac_sxt_w),
 	.eac_is_bsr       (eac_is_bsr),
 	.eac_is_jsr       (eac_is_jsr),
 	.eac_is_trap      (eac_is_trap),
