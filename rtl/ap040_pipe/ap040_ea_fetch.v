@@ -438,6 +438,21 @@ wire eac_is_jsr_odd  = eac_is_jsr && ea_target[0];
 wire eac_is_addrerr  = eac_is_jmp_odd || eac_is_jsr_odd;
 wire eac_is_fmt2     = eac_is_addrerr;   // the only format-$2 source so far
 
+// The L1 always returns a full longword on port B (address_b is the HIGH
+// word, the low word implicitly address_b+1), so a sized load is a lane
+// select rather than a narrower access. The value lands in the LOW bits
+// because ap040_pipe_alu.v masks operand a by size (am = a & szmask) and
+// ap040_execute.v splices the result back by size, so everything downstream
+// already does the right thing once the right bits are here.
+//
+// A word takes the high half of the pair, which is the word the address
+// names. A byte takes one half of that word, chosen by address bit 0.
+wire [31:0] mem_lane =
+    (eac_size == `AP040_SZ_L) ? l1_q_b :
+    (eac_size == `AP040_SZ_W) ? {16'd0, l1_q_b[31:16]} :
+                                {24'd0, (ea_target[0] ? l1_q_b[23:16]
+                                                      : l1_q_b[31:24])};
+
 wire mem_issue    = eac_valid && eac_is_mem_src && !mem_pending;
 wire mem_complete = mem_pending;
 // BSR/JSR's push -- no "pending" latch needed, see header: a write either
@@ -708,7 +723,7 @@ always @(posedge clk) begin
 				eaf_pc         <= eac_pc;
 				eaf_next_pc    <= eac_next_pc;
 				eaf_dest_reg   <= eac_dest_reg;
-				eaf_operand_a  <= l1_q_b;
+				eaf_operand_a  <= mem_lane;
 				// RTS: the popped value (l1_q_b, into eaf_operand_a above)
 				// is the redirect target, exactly like JMP/JSR/exceptions
 				// already route through eaf_operand_a -- but this stage
@@ -800,7 +815,7 @@ always @(posedge clk) begin
 				// supervisor SP, see exc_sp_bank above) must commit to A7
 				// in both cases, not whatever eac_dest_reg otherwise says.
 				eaf_dest_reg   <= (eac_is_priv || eac_is_addrerr) ? 4'd15 : eac_dest_reg;
-				eaf_operand_a  <= l1_q_b;
+				eaf_operand_a  <= mem_lane;
 				eaf_operand_b  <= exc_new_sp;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;

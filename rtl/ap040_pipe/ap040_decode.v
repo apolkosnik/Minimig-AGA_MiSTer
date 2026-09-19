@@ -646,7 +646,16 @@ wire is_dbcc = (if_opcode[15:12] == 4'b0101) && (if_opcode[7:6] == 2'b11) &&
 // ap040_pipe_regfile.v already uses for A0-A6) -- see ap040_ea_fetch.v's
 // header for the mechanism that turns that resolved value into an actual
 // memory access rather than an ALU operand.
-wire is_move_mem_l = (if_opcode[15:12] == 4'b0010) &&
+// MOVE.B/.W/.L (An),Dn (milestone 35). Was Long only: ir[15:12]==0010 IS
+// the long size, so widening it to ir[13:12]!=00 is what admits byte and
+// word. Everything else about the instruction is unchanged -- the L1 always
+// returns a full longword on port B, so a sized load is lane selection on
+// the way out, not a different access. See mem_lane in ap040_ea_fetch.v.
+//
+// The other load modes stay Long for now: (An)+ and -(An) would also need
+// their step to follow the size (1/2/4 rather than always 4), which is a
+// separate change from the lane select this proves.
+wire is_move_mem_l = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
                       (if_opcode[8:6]  == 3'b000) &&
                       (if_opcode[5:3]  == 3'b010);
 
@@ -1186,7 +1195,8 @@ always @(posedge clk) begin
 				                   is_extswap_rr ? extswap_op  : `AP040_ALU_MOVE;
 				// Everything else here (MOVEQ, Scc, the memory/branch forms)
 				// is Long or drives its own width, so Long stays the default.
-				id_size         <= quick_shape ? if_opcode[7:6] :
+				id_size         <= is_move_mem_l ? move_op_size :
+				                   quick_shape ? if_opcode[7:6] :
 				                   (is_bcd1_rr || is_bcd2_rr) ? `AP040_SZ_B :
 				                   is_extswap_rr ? extswap_size :
 				                   (is_alu_rr || is_unary_rr || is_x_rr || shift_shape) ? add_op_size :
