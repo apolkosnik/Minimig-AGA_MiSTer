@@ -631,7 +631,9 @@ wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 // the BSR/JSR PUSH address, an exception frame WRITE beat, the exception's
 // own vector-table READ, or RTE's own pop READ -- mutually exclusive by
 // construction (an instruction is never more than one of these at once).
-wire [31:0] l1_addr_word = eac_is_store ? (eac_is_predec ? (an_base - 32'd4) : an_base) :
+wire [31:0] l1_addr_word = eac_is_store ? (eac_is_abs    ? eac_imm :
+                                                       eac_is_predec ? (an_base - 32'd4)
+                                                                     : an_base) :
                             eac_is_push  ? push_addr :
                             exc_writing ? exc_beat_addr :
                             (exc_vec_issue || exc_vec_pending) ? exc_vec_addr :

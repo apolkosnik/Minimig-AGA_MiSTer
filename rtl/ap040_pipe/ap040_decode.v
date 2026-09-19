@@ -698,6 +698,22 @@ wire is_move_st = is_move_st_an || is_move_st_pi || is_move_st_pd;
 // check, so it has its own assertion in the testbench.
 wire is_movea_rr  = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b001) &&
                     (if_opcode[5:3] == 3'b000);
+// MOVE.L Dn,(xxx).W and MOVE.L Dn,(xxx).L (milestone 34): an absolute
+// STORE. Destination mode 111 with reg 000 or 001, register-direct source.
+// This is the first store whose address comes from the gather rather than a
+// register, so it is the first to need held state -- the same shape
+// held_is_imm uses, carrying "this is a store" and the DATA register across
+// the extension words.
+//
+// The data register is ir[2:0], which held_reg already captures.
+// The destination's mode is ir[8:6] and its REGISTER field is ir[11:9], the
+// mirror of a source's ir[5:3]/ir[2:0]. So absolute short is reg 000 and
+// absolute long is reg 001, and ir[9] is what separates them -- not ir[0],
+// which is where the same distinction lives for a source operand.
+wire is_st_abs = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b111) &&
+                 (if_opcode[11:10] == 2'b00)   && (if_opcode[5:3] == 3'b000);
+wire is_st_abs_l = is_st_abs && if_opcode[9];
+
 wire is_movea_imm = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b001) &&
                     (if_opcode[5:0] == 6'b111100);
 
@@ -812,7 +828,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !quick_shape &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte;
@@ -850,6 +866,7 @@ reg         held_imm_nowrite;
 reg         held_imm_dest9;
 reg         held_is_abs;
 reg         held_imm_areg;
+reg         held_is_stabs;
 reg         held_is_long;
 reg         held_is_dbcc;
 reg         held_is_move_disp;
@@ -891,7 +908,7 @@ wire redirect_from_byte   = if_valid && (is_branch_byte || is_bsr_byte) && (ext_
 // and the rest of the program never runs.
 wire redirect_from_gather = completing_gather && !held_is_move_disp && !held_is_jmp &&
                              !held_is_jsr && !held_is_movec && !held_is_imm &&
-                             !held_is_abs;
+                             !held_is_abs && !held_is_stabs;
 
 // MOVEC gather-completion helper: an otherwise-recognized MOVEC whose
 // extension-word selector names something this core doesn't model (the MMU
@@ -945,6 +962,7 @@ always @(posedge clk) begin
 		held_imm_dest9   <= 1'b0;
 		held_is_abs      <= 1'b0;
 		held_imm_areg    <= 1'b0;
+		held_is_stabs    <= 1'b0;
 		held_is_long    <= 1'b0;
 		held_is_dbcc    <= 1'b0;
 		held_is_move_disp <= 1'b0;
@@ -997,7 +1015,8 @@ always @(posedge clk) begin
 					// resolved entirely in ap040_ea_fetch.v/ap040_execute.v
 					// -- see their headers), so movec_gpr only appears here
 					// for the write-direction half.
-					id_src_reg      <= held_is_dbcc ? {1'b0, held_reg} :
+					id_src_reg      <= held_is_stabs ? {1'b0, held_reg} :
+					                    held_is_dbcc ? {1'b0, held_reg} :
 					                    (held_is_move_disp || held_is_jmp || held_is_jsr) ? {1'b1, held_reg} :
 					                    (held_is_movec && held_movec_dir) ? movec_gpr : 4'h0;
 					// gather_disp is already the sign-extended displacement
@@ -1015,7 +1034,7 @@ always @(posedge clk) begin
 					// than needing two more dedicated ports threaded through
 					// every stage.
 					id_imm          <= (held_is_move_disp || held_is_jmp || held_is_jsr ||
-					                    held_is_imm || held_is_abs) ? gather_disp :
+					                    held_is_imm || held_is_abs || held_is_stabs) ? gather_disp :
 					                    held_is_movec ? {28'd0, held_movec_dir, movec_sel_code} : 32'h0;
 					id_alu_op       <= held_is_imm ? held_imm_op   : `AP040_ALU_MOVE;
 					id_size         <= held_is_imm ? held_imm_size : `AP040_SZ_L;
@@ -1033,21 +1052,22 @@ always @(posedge clk) begin
 					// creg path, not commit_reg) -- and an invalid selector
 					// writes nothing either, having already become illegal
 					// above.
+					// An absolute store writes memory, not a register.
 					id_writes_reg   <= held_is_move_disp || held_is_bsr || held_is_jsr ||
 					                    held_is_abs ||
 					                    (held_is_imm && !held_imm_nowrite) ||
 					                    (held_is_movec && !held_movec_dir && !movec_illegal_gather);
 					// MOVEA sets no condition codes.
-					id_writes_ccr   <= held_is_move_disp || held_is_abs ||
+					id_writes_ccr   <= held_is_move_disp || held_is_abs || held_is_stabs ||
 					                    (held_is_imm && !held_imm_areg);
 					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_jmp &&
 					                    !held_is_bsr && !held_is_jsr && !held_is_movec &&
-					                    !held_is_imm && !held_is_abs;
+					                    !held_is_imm && !held_is_abs && !held_is_stabs;
 					id_is_scc       <= 1'b0;
 					id_is_dbcc      <= held_is_dbcc;
 					id_is_mem_src   <= held_is_move_disp || held_is_abs;
-					id_is_abs       <= held_is_abs;
-					id_is_store     <= 1'b0;
+					id_is_abs       <= held_is_abs || held_is_stabs;
+					id_is_store     <= held_is_stabs;
 					id_is_postinc   <= 1'b0;
 					id_is_predec    <= 1'b0;
 					id_is_jmp       <= held_is_jmp;
@@ -1067,7 +1087,8 @@ always @(posedge clk) begin
 				end
 			end else if (is_branch_word || is_branch_long || is_dbcc || is_move_disp || is_jmp_disp ||
 			              is_bsr_word || is_bsr_long || is_jsr_disp || is_movec_opcode ||
-			              is_imm_alu || is_move_imm || is_move_abs || is_movea_imm) begin
+			              is_imm_alu || is_move_imm || is_move_abs || is_movea_imm ||
+			              is_st_abs) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1079,7 +1100,7 @@ always @(posedge clk) begin
 				held_is_long  <= is_branch_long || is_bsr_long ||
 				                 (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                 (is_move_imm && if_opcode[13:12] == 2'b10) ||
-				                 is_move_abs_l || is_movea_imm;
+				                 is_move_abs_l || is_movea_imm || is_st_abs_l;
 				held_is_imm      <= is_imm_alu || is_move_imm || is_movea_imm;
 				held_imm_op      <= (is_move_imm || is_movea_imm) ? `AP040_ALU_MOVE : imm_alu_op;
 				held_imm_size    <= is_movea_imm ? `AP040_SZ_L :
@@ -1088,6 +1109,7 @@ always @(posedge clk) begin
 				held_imm_dest9   <= is_move_imm || is_movea_imm;
 				held_imm_areg    <= is_movea_imm;
 				held_is_abs      <= is_move_abs;
+				held_is_stabs    <= is_st_abs;
 				held_is_dbcc  <= is_dbcc;
 				held_is_move_disp <= is_move_disp;
 				held_is_jmp   <= is_jmp_disp;
@@ -1102,7 +1124,7 @@ always @(posedge clk) begin
 				ext_pending   <= (is_branch_long || is_bsr_long ||
 				                  (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                  (is_move_imm && if_opcode[13:12] == 2'b10) ||
-				                  is_move_abs_l || is_movea_imm) ? 2'd2 : 2'd1;
+				                  is_move_abs_l || is_movea_imm || is_st_abs_l) ? 2'd2 : 2'd1;
 			end else begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
