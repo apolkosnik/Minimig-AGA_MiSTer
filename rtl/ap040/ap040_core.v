@@ -1722,6 +1722,14 @@ task aerr_start;
 		// would otherwise commit them into the handler's live CCR while
 		// the stacked SR correctly holds the pre-instruction value.
 		fl_pend  <= 0;
+		// ... and the OTHER pending event this path can carry.  go_pc parks a
+		// T0 change-of-flow trace in flow_t0_pend for S_FETCH to raise once the
+		// target word lands; e_go clears it for every exception that goes
+		// through the carrier, but this task does not go through the carrier.
+		// Left set, S_FETCH's flow_t0_pend arm (which has no in_exc guard)
+		// raises vector 9 IN PLACE OF the fault handler's first instruction,
+		// and pushes a format-$2 frame on top of the format-$7 one.
+		flow_t0_pend <= 0;
 		aer_bus  <= berr && !mem_flt;   // physical bus error, not an ATC fault
 		// FA is the initial byte of the original transfer, even when a
 		// page-crossing access has been split and a later byte faults.
@@ -1974,12 +1982,35 @@ task go_pc;
 			// ILLEGAL at the target wins and cancels this trace; a normal
 			// target is not executed before vector 9 is taken.
 			tr_t0 <= 0;
-			flow_t0_pend <= 1;
-			flow_t0_oldpc <= pc_i;
 			pc <= t;
-			issue_ifetch(t, sr_s);
-			pc_i <= t;
-			state <= S_FETCH;
+			if (irq_pend) begin
+				// Same rule the tr_t1 branch above and fetch_next follow, and
+				// the one the comment at fetch_next states for "T1/T0" both:
+				// an interrupt sampled at the completing instruction's
+				// boundary wins, and the trace is redelivered at the interrupt
+				// handler's entry through texc.  This branch used not to
+				// sample irq_pend at all, so the trace fired first at the
+				// target and S_EXC_JMP then stacked the interrupt ON TOP of
+				// it -- the opposite nesting from every other trace path here,
+				// with the interrupt frame's PC pointing into the trace
+				// handler instead of the trace frame's PC pointing into the
+				// interrupt handler.
+				texc_pend <= 1;
+				texc_pc <= pc_i;
+				exc_vec <= `AP040_VEC_AUTOVEC + {5'd0, irq_take_lvl};
+				exc_f1 <= 0; exc_f2 <= 0; exc_f3 <= 0; exc_spc <= t; exc_addr <= 0;
+				exc_is_irq <= 1; exc_pass2 <= 0;
+				irq_lvl_l <= irq_take_lvl;
+				epf_flush;
+				state <= S_POST_EXC;
+			end
+			else begin
+				flow_t0_pend <= 1;
+				flow_t0_oldpc <= pc_i;
+				issue_ifetch(t, sr_s);
+				pc_i <= t;
+				state <= S_FETCH;
+			end
 		end
 		else begin
 			pc <= t;
@@ -3925,6 +3956,16 @@ always @(posedge clk) begin
 			S_CAS2_1: begin
 				t_a <= rf_rdata_a;
 				t_b <= rf_rdata_b;
+				// Point the read ports at the UPDATE operands Du1/Du2 for the
+				// probes below.  The addresses have just been captured into
+				// t_a/t_b, and nothing between here and S_CAS2_3 (which sets
+				// Dc1/Dc2 itself) reads these ports, so this costs no cycle.
+				// Without it the probes pass a placeholder and a probe-detected
+				// fault stacks WB3D as zero instead of the data the write
+				// would have stored -- the slot aerr_word documents as kept
+				// for diagnostics.
+				rr_a <= {1'b0, x_ext[24:22]};   // Du1
+				rr_b <= {1'b0, x_ext[8:6]};     // Du2
 				// A locked RMW requires write permission on every page,
 				// including when a comparison will fail. Check both operands
 				// before either read or write, preserving the normal order.
@@ -3933,8 +3974,10 @@ always @(posedge clk) begin
 				else mrd(rf_rdata_a, op_size, S_CAS2_2);
 			end
 
-			S_CAS2_P1: check_write(t_a, op_size, 32'd0, S_CAS2_2, S_CAS2_P2);
-			S_CAS2_P2: check_write(t_b, op_size, 32'd0, S_CAS2_3, S_CAS2_RD1);
+			// rf_rdata_a/b are Du1/Du2 here: the same values S_CAS2_W2/W3
+			// write, so a fault carries the real write data into the frame.
+			S_CAS2_P1: check_write(t_a, op_size, rf_rdata_a, S_CAS2_2, S_CAS2_P2);
+			S_CAS2_P2: check_write(t_b, op_size, rf_rdata_b, S_CAS2_3, S_CAS2_RD1);
 			S_CAS2_RD1: mrd(t_a, op_size, S_CAS2_2);
 
 			S_CAS2_2: begin
@@ -5197,10 +5240,29 @@ always @(posedge clk) begin
 			S_BF_M3: begin : bf_m3
 				reg [31:0] nf;
 				nf = bf_newf(ir[10:8], bf_field, bf_du & bf_ones, bf_ones);
-				sr[3] <= (ir[10:8] == 3'd7) ? nf[bf_w - 6'd1] : bf_field[bf_w - 6'd1];
-				sr[2] <= (ir[10:8] == 3'd7) ? (nf == 32'd0) : (bf_field == 32'd0);
-				sr[1] <= 0;
-				sr[0] <= 0;
+				// The four WRITING forms defer their flags to the write's
+				// acknowledge, exactly as the ALU and shift paths have since
+				// afb93236f: committing here makes them architectural BEFORE
+				// S_BF_WR1 issues, so an aborted BFCHG/BFCLR/BFSET/BFINS stacks
+				// flags it never committed.  X is untouched by a bitfield, so
+				// it carries through from sr[4].  The register path S_BF_X3
+				// still commits immediately -- it has no write to defer to.
+				if (ir[10:8] == 3'd2 || ir[10:8] == 3'd4 ||
+				    ir[10:8] == 3'd6 || ir[10:8] == 3'd7) begin
+					fl_pend   <= 1;
+					fl_pend_v <= {sr[4],
+					              (ir[10:8] == 3'd7) ? nf[bf_w - 6'd1]
+					                                 : bf_field[bf_w - 6'd1],
+					              (ir[10:8] == 3'd7) ? (nf == 32'd0)
+					                                 : (bf_field == 32'd0),
+					              1'b0, 1'b0};
+				end
+				else begin
+					sr[3] <= (ir[10:8] == 3'd7) ? nf[bf_w - 6'd1] : bf_field[bf_w - 6'd1];
+					sr[2] <= (ir[10:8] == 3'd7) ? (nf == 32'd0) : (bf_field == 32'd0);
+					sr[1] <= 0;
+					sr[0] <= 0;
+				end
 				case (ir[10:8])
 					3'd0: fetch_next;
 					3'd1: begin rfw({1'b0, x_ext[14:12]}, bf_field); fetch_next; end

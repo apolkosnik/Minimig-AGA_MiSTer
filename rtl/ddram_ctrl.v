@@ -65,6 +65,16 @@ module ddram_ctrl
 	input             mem2_write,
 	output            mem2_waitrequest,
 
+	// External write visible to the CPU's internal cache.  ddram_ctrl fed its
+	// DMA snoop only to its OWN cpu_cache_new, so a master writing Fast RAM
+	// updated the outer cache and left ap040_cache holding the pre-write line
+	// -- the two levels disagreed and the inner one was the stale one.  Same
+	// contract as sdram_ctrl's: the toggle flips once per write and the
+	// address is held with it.  Only bits [9:4] reach the invalidate, and the
+	// DDR remap preserves those, so the truncation to [24:1] is harmless.
+	output            snoop_tgl,
+	output     [24:1] snoop_addr,
+
 	// cpu
 	input      [28:1] cpuAddr,
 	input             cpuCS,
@@ -117,6 +127,22 @@ reg        snoop_owner_dma;
 reg [28:1] dma_snoop_adr;
 reg [15:0] dma_snoop_dat;
 reg  [1:0] dma_snoop_bs;
+
+// The CPU-visible export.  Only the DMA snoop goes out: the walker's own
+// descriptor writes are the CPU's own, and ap040_tg68k_compat already covers
+// those through wsnp_pend.
+reg        snoop_tgl_r = 0;
+reg [24:1] snoop_addr_r;
+reg        dma_snoop_act_q;
+always @(posedge sysclk) begin
+	dma_snoop_act_q <= dma_snoop_act;
+	if (dma_snoop_act && !dma_snoop_act_q) begin
+		snoop_tgl_r  <= ~snoop_tgl_r;
+		snoop_addr_r <= dma_snoop_adr[24:1];
+	end
+end
+assign snoop_tgl  = snoop_tgl_r;
+assign snoop_addr = snoop_addr_r;
 
 cpu_cache_new #(.CACHE_ENABLE(CPU_CACHE), .READ_PIPE(CACHE_READ_PIPE)) cpu_cache
 (
