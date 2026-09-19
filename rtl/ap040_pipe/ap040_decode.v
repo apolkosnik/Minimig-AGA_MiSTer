@@ -487,6 +487,28 @@ wire is_x_rr    = is_addx_rr || is_subx_rr;
 // this stage beyond reaching them -- ccr_in is already wired to the ALU.
 wire [5:0] x_rr_op = is_addx_rr ? `AP040_ALU_ADDX : `AP040_ALU_SUBX;
 
+// ABCD/SBCD, register form: 1x00 Rx 1 00 00 0 Ry. These are the ir[7:6]=00
+// members of the same ir[8]=1 slot ADDX/SUBX occupy, and like them take the
+// destination from ir[11:9] and the source from ir[2:0]. BCD is byte-only
+// by definition, and the ALU returns {24'd0, result[7:0]}, so Byte is what
+// makes execute's merge preserve the destination's upper bits.
+wire is_abcd_rr = addx_shape && (if_opcode[14:12] == 3'b100) && (if_opcode[7:6] == 2'b00);
+wire is_sbcd_rr = addx_shape && (if_opcode[14:12] == 3'b000) && (if_opcode[7:6] == 2'b00);
+wire is_bcd2_rr = is_abcd_rr || is_sbcd_rr;
+wire [5:0] bcd2_op = is_abcd_rr ? `AP040_ALU_ABCD : `AP040_ALU_SBCD;
+
+// NBCD Dn (0100 1000 00 000 rrr) and TAS Dn (0100 1010 11 000 rrr): the two
+// slots the extswap and unary predicates deliberately left out, named there
+// as NBCD and TAS. Both are single-operand on Dn, both read operand b, and
+// both are Byte -- TAS returns {1'b1, b[6:0]}, so anything wider would let
+// the merge overwrite Dn[31:8] instead of preserving it.
+wire is_nbcd_rr = (if_opcode[15:12] == 4'b0100) && (if_opcode[11:8] == 4'b1000) &&
+                  (if_opcode[7:6] == 2'b00) && (if_opcode[5:3] == 3'b000);
+wire is_tas_rr  = (if_opcode[15:12] == 4'b0100) && (if_opcode[11:8] == 4'b1010) &&
+                  (if_opcode[7:6] == 2'b11) && (if_opcode[5:3] == 3'b000);
+wire is_bcd1_rr = is_nbcd_rr || is_tas_rr;
+wire [5:0] bcd1_op = is_nbcd_rr ? `AP040_ALU_NBCD : `AP040_ALU_TAS;
+
 wire [5:0] alu_rr_op = is_or_rr  ? `AP040_ALU_OR  :
                        is_sub_rr ? `AP040_ALU_SUB :
                        is_cmp_rr ? `AP040_ALU_CMP :
@@ -663,7 +685,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte;
@@ -903,7 +925,7 @@ always @(posedge clk) begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
 				id_next_pc      <= if_pc + 32'd2;
-				id_dest_reg     <= (is_scc_rr || is_unary_rr || is_extswap_rr || shift_shape || bitop_shape) ? {1'b0, d_rn} :
+				id_dest_reg     <= (is_scc_rr || is_unary_rr || is_extswap_rr || shift_shape || bitop_shape || is_bcd1_rr) ? {1'b0, d_rn} :
 				                    (is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_movesr || is_rts || is_rte) ? 4'd15 : {1'b0, d_reg9};
 				// is_move_mem_l/is_jmp_an/is_jsr_an's src_reg is An, not Dn
 				// -- the unified index's top bit (8+n vs 0+n) is the ONLY
@@ -942,7 +964,9 @@ always @(posedge clk) begin
 				                    is_trap ? (32'd32 + {28'd0, if_opcode[3:0]}) :
 				                              {{24{if_opcode[7]}}, if_opcode[7:0]};
 				id_shcnt        <= shift_cnt;
-				id_alu_op       <= bitop_shape   ? bitop_op    :
+				id_alu_op       <= is_bcd1_rr    ? bcd1_op     :
+				                   is_bcd2_rr    ? bcd2_op     :
+				                   bitop_shape   ? bitop_op    :
 				                   shift_shape   ? shift_op    :
 				                   is_x_rr       ? x_rr_op     :
 				                   is_alu_rr     ? alu_rr_op   :
@@ -950,13 +974,15 @@ always @(posedge clk) begin
 				                   is_extswap_rr ? extswap_op  : `AP040_ALU_MOVE;
 				// Everything else here (MOVEQ, Scc, the memory/branch forms)
 				// is Long or drives its own width, so Long stays the default.
-				id_size         <= is_extswap_rr ? extswap_size :
+				id_size         <= (is_bcd1_rr || is_bcd2_rr) ? `AP040_SZ_B :
+				                   is_extswap_rr ? extswap_size :
 				                   (is_alu_rr || is_unary_rr || is_x_rr || shift_shape) ? add_op_size :
 				                   is_move_rr ? move_op_size : `AP040_SZ_L;
 				id_src_a_is_imm <= if_valid && is_moveq;
 				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || is_x_rr || shift_shape ||
-				                               (bitop_shape && !is_btst_rr) || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
-				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_extswap_rr || is_x_rr || shift_shape || bitop_shape || is_move_mem_l);
+				                               (bitop_shape && !is_btst_rr) ||
+				                               is_bcd1_rr || is_bcd2_rr || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
+				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_extswap_rr || is_x_rr || shift_shape || bitop_shape || is_bcd1_rr || is_bcd2_rr || is_move_mem_l);
 				id_is_branch    <= if_valid && is_branch_byte;
 				id_is_scc       <= if_valid && is_scc_rr;
 				id_is_dbcc      <= 1'b0;
