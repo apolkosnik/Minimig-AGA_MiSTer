@@ -586,6 +586,31 @@ wire is_tas_rr  = (if_opcode[15:12] == 4'b0100) && (if_opcode[11:8] == 4'b1010) 
 wire is_bcd1_rr = is_nbcd_rr || is_tas_rr;
 wire [5:0] bcd1_op = is_nbcd_rr ? `AP040_ALU_NBCD : `AP040_ALU_TAS;
 
+// The same family with a MEMORY source: 1ooo RRR 0 SS 010 aaa, i.e. the
+// binary shape above with ea mode 010 instead of register-direct. It reuses
+// the memory-read path milestone 9b built, and needs no new operand
+// arrangement: ap040_ea_fetch.v replaces eaf_operand_a with the loaded data,
+// operand_b is still the destination Dn, and the ALU computes b op a -- so
+// ADD.L (A0),D0 is D0 + memory, the right way round, for free.
+//
+// src_reg must name the ADDRESS register (unified index 8+n) so operand_a
+// resolves to the address before the read replaces it, exactly as
+// MOVE.L (An),Dn does.
+wire alu_mem_shape = (if_opcode[15]   == 1'b1)  && (if_opcode[8]   == 1'b0) &&
+                     (if_opcode[7:6]  != 2'b11) && (if_opcode[5:3] == 3'b010);
+wire is_alu_mem = alu_mem_shape &&
+                  ((if_opcode[14:12] == 3'b000) || (if_opcode[14:12] == 3'b001) ||
+                   (if_opcode[14:12] == 3'b011) || (if_opcode[14:12] == 3'b100) ||
+                   (if_opcode[14:12] == 3'b101));
+wire is_cmp_mem = alu_mem_shape && (if_opcode[14:12] == 3'b011);
+
+// One op map for both shapes: the nibble alone picks the operation.
+wire [5:0] alu_nib_op = (if_opcode[14:12] == 3'b000) ? `AP040_ALU_OR  :
+                        (if_opcode[14:12] == 3'b001) ? `AP040_ALU_SUB :
+                        (if_opcode[14:12] == 3'b011) ? `AP040_ALU_CMP :
+                        (if_opcode[14:12] == 3'b100) ? `AP040_ALU_AND :
+                                                       `AP040_ALU_ADD;
+
 wire [5:0] alu_rr_op = is_or_rr  ? `AP040_ALU_OR  :
                        is_sub_rr ? `AP040_ALU_SUB :
                        is_cmp_rr ? `AP040_ALU_CMP :
@@ -838,7 +863,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte;
@@ -1172,7 +1197,7 @@ always @(posedge clk) begin
 				// mem_complete path (id_is_mem_src below) instead of
 				// getting its own sequencer the way RTE needs.
 				id_src_reg      <= bitop_shape ? {1'b0, d_reg9} :
-				                    (is_move_mem_l || is_jmp_an || is_jsr_an || is_move_ax) ? {1'b1, d_rn} :
+				                    (is_move_mem_l || is_jmp_an || is_jsr_an || is_move_ax || is_alu_mem) ? {1'b1, d_rn} :
 				                    (is_rts || is_rte) ? 4'd15 : {1'b0, d_rn};
 				// Zeroed for is_move_mem_l/is_jmp_an/is_jsr_an/is_rts/is_rte
 				// (was the sign-extended opcode low byte for EVERY
@@ -1186,13 +1211,19 @@ always @(posedge clk) begin
 				// eac_imm, and these two modes have no displacement at all.
 				// Left at the default -- the sign-extended low opcode byte,
 				// which MOVEQ needs -- MOVE.L (A0)+,D0 would read A0 + $18.
+				// is_alu_mem joins the zero list for the same reason: ea mode
+				// 010 has no displacement, and the default here would make
+				// ADD.L (A0),D0 read A0 + $FFFFFF90 -- the sign-extended low
+				// byte of its own opcode, which lands back in the
+				// instruction stream.
 				id_imm          <= (is_move_mem_l || is_jmp_an || is_jsr_an || is_rts || is_rte ||
-				                    is_move_ax || is_move_st) ? 32'h0 :
+				                    is_move_ax || is_move_st || is_alu_mem) ? 32'h0 :
 				                    is_trap ? (32'd32 + {28'd0, if_opcode[3:0]}) :
 				                    quick_shape ? {28'd0, quick_val} :
 				                              {{24{if_opcode[7]}}, if_opcode[7:0]};
 				id_shcnt        <= shift_cnt;
-				id_alu_op       <= quick_shape   ? quick_op    :
+				id_alu_op       <= is_alu_mem    ? alu_nib_op  :
+				                   quick_shape   ? quick_op    :
 				                   is_bcd1_rr    ? bcd1_op     :
 				                   is_bcd2_rr    ? bcd2_op     :
 				                   bitop_shape   ? bitop_op    :
@@ -1207,13 +1238,13 @@ always @(posedge clk) begin
 				                   quick_shape ? if_opcode[7:6] :
 				                   (is_bcd1_rr || is_bcd2_rr) ? `AP040_SZ_B :
 				                   is_extswap_rr ? extswap_size :
-				                   (is_alu_rr || is_unary_rr || is_x_rr || shift_shape) ? add_op_size :
+				                   (is_alu_rr || is_unary_rr || is_x_rr || shift_shape || is_alu_mem) ? add_op_size :
 				                   is_move_rr ? move_op_size : `AP040_SZ_L;
 				id_src_a_is_imm <= if_valid && (is_moveq || quick_shape);
-				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || is_x_rr || shift_shape ||
+				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || (is_alu_mem && !is_cmp_mem) || is_x_rr || shift_shape ||
 				                               (bitop_shape && !is_btst_rr) ||
 				                               is_bcd1_rr || is_bcd2_rr || quick_shape || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_move_ax || is_movea_rr || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
-				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_extswap_rr || is_x_rr || shift_shape || bitop_shape || is_bcd1_rr || is_bcd2_rr || quick_shape || is_move_mem_l || is_move_ax || is_move_st);
+				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_alu_mem || is_unary_rr || is_extswap_rr || is_x_rr || shift_shape || bitop_shape || is_bcd1_rr || is_bcd2_rr || quick_shape || is_move_mem_l || is_move_ax || is_move_st);
 				id_is_branch    <= if_valid && is_branch_byte;
 				id_is_scc       <= if_valid && is_scc_rr;
 				id_is_dbcc      <= 1'b0;
@@ -1224,7 +1255,7 @@ always @(posedge clk) begin
 				// sequencer (SR+PC+format, not a single 32-bit value), and
 				// (unlike RTS) a dynamic privilege check that must take
 				// priority over any read at all.
-				id_is_mem_src   <= if_valid && (is_move_mem_l || is_rts || is_move_ax);
+				id_is_mem_src   <= if_valid && (is_move_mem_l || is_rts || is_move_ax || is_alu_mem);
 				id_is_abs       <= 1'b0;
 				id_is_store     <= if_valid && is_move_st;
 				id_is_postinc   <= if_valid && (is_move_pi || is_move_st_pi);

@@ -1073,6 +1073,24 @@ real MMU or bus-error path arrives, which is the same boundary
 
    ORIGINAL TEXT: **Byte/word-sized ALU ops and MOVE** (current pipeline is Long-only
    throughout `ap040_pipe_alu.v`'s size port is already there and unused).
+
+   **Milestone 39 (memory-source ALU)** finished the other half of that
+   sentence. Sizes were complete, but every binary ALU operation still
+   demanded both operands in registers: `ADD.L (A0),D0` -- the form compiled
+   code actually emits -- did not decode. Extending the family's shape from
+   ea mode `000` to `010` reached OR/SUB/CMP/AND/ADD against memory with no
+   new operand plumbing at all, because `ap040_ea_fetch.v` already replaces
+   `eaf_operand_a` with the loaded word and the ALU computes `b op a`. The
+   only real work was pointing `id_src_reg` at the ADDRESS register.
+
+   It also hit, for the third time, the trap recorded under milestone 9b:
+   `id_imm` defaults to the sign-extended low opcode BYTE (MOVEQ needs
+   that), and `ap040_ea_fetch.v` adds `eac_imm` to every memory address. Any
+   new mode with no displacement must be added to that zero list or it reads
+   its own opcode as an offset -- `ADD.L (A0),D0` went to `A0 + $FFFFFF90`,
+   landing back in the instruction stream, which is why its bench checked a
+   COMPOSITION of two operations rather than one result: a wrong address
+   that still decodes produces a plausible number.
 4. **MMU and cache integration**, once enough of the integer ISA exists that
    testing them against real address translation is meaningful. Reuse the
    architectural requirements from `rtl_old/ap040_mmu.v`/`ap040_cache.v`
