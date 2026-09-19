@@ -363,6 +363,32 @@ wire is_alu_rr = is_or_rr || is_sub_rr || is_cmp_rr || is_and_rr || is_add_rr;
 // SUB and CMP are b - a, and ap040_ea_fetch.v resolves operand_b from
 // eac_dest_reg and operand_a from the source, so `SUB Dn,Dm` computes
 // Dm - Dn as it must. Verified against ap040_pipe_alu.v's sub_full.
+// Single-operand forms on Dn: 0100 oooo SS 000 rrr. The register field is
+// ir[2:0], NOT ir[11:9] like the binary family above, so dest_reg follows
+// Scc's shape rather than ADD's -- and src_reg already defaults to ir[2:0],
+// so operand_a and operand_b both resolve to the same Dn. That matters
+// because the ALU is not consistent about which one a unary op reads: NOT,
+// NEG and NEGX work on b, TST works on a (it shares MOVE's arm), and CLR
+// reads neither. Pointing both at Dn covers all four without special cases.
+//
+// ir[7:6]=11 is excluded: for 0x4A that slot is TAS, a different
+// instruction. 0x48 (SWAP/EXT/PEA/MOVEM) and 0x4E (the NOP/JMP/RTS misc
+// group) are not in the enumerated list, so neither is disturbed.
+wire unary_rr_shape = (if_opcode[15:12] == 4'b0100) &&
+                      (if_opcode[7:6] != 2'b11) && (if_opcode[5:3] == 3'b000);
+wire is_negx_rr = unary_rr_shape && (if_opcode[11:8] == 4'b0000);   // 0x40
+wire is_clr_rr  = unary_rr_shape && (if_opcode[11:8] == 4'b0010);   // 0x42
+wire is_neg_rr  = unary_rr_shape && (if_opcode[11:8] == 4'b0100);   // 0x44
+wire is_not_rr  = unary_rr_shape && (if_opcode[11:8] == 4'b0110);   // 0x46
+wire is_tst_rr  = unary_rr_shape && (if_opcode[11:8] == 4'b1010);   // 0x4A
+wire is_unary_rr = is_negx_rr || is_clr_rr || is_neg_rr || is_not_rr || is_tst_rr;
+
+wire [5:0] unary_rr_op = is_negx_rr ? `AP040_ALU_NEGX :
+                         is_clr_rr  ? `AP040_ALU_CLR  :
+                         is_neg_rr  ? `AP040_ALU_NEG  :
+                         is_not_rr  ? `AP040_ALU_NOT  :
+                                      `AP040_ALU_TST;
+
 wire [5:0] alu_rr_op = is_or_rr  ? `AP040_ALU_OR  :
                        is_sub_rr ? `AP040_ALU_SUB :
                        is_cmp_rr ? `AP040_ALU_CMP :
@@ -539,7 +565,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte;
@@ -777,7 +803,7 @@ always @(posedge clk) begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
 				id_next_pc      <= if_pc + 32'd2;
-				id_dest_reg     <= is_scc_rr ? {1'b0, d_rn} :
+				id_dest_reg     <= (is_scc_rr || is_unary_rr) ? {1'b0, d_rn} :
 				                    (is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_movesr || is_rts || is_rte) ? 4'd15 : {1'b0, d_reg9};
 				// is_move_mem_l/is_jmp_an/is_jsr_an's src_reg is An, not Dn
 				// -- the unified index's top bit (8+n vs 0+n) is the ONLY
@@ -814,14 +840,15 @@ always @(posedge clk) begin
 				id_imm          <= (is_move_mem_l || is_jmp_an || is_jsr_an || is_rts || is_rte) ? 32'h0 :
 				                    is_trap ? (32'd32 + {28'd0, if_opcode[3:0]}) :
 				                              {{24{if_opcode[7]}}, if_opcode[7:0]};
-				id_alu_op       <= is_alu_rr ? alu_rr_op : `AP040_ALU_MOVE;
+				id_alu_op       <= is_alu_rr   ? alu_rr_op   :
+				                   is_unary_rr ? unary_rr_op : `AP040_ALU_MOVE;
 				// Everything else here (MOVEQ, Scc, the memory/branch forms)
 				// is Long or drives its own width, so Long stays the default.
-				id_size         <= is_alu_rr  ? add_op_size  :
+				id_size         <= (is_alu_rr || is_unary_rr) ? add_op_size :
 				                   is_move_rr ? move_op_size : `AP040_SZ_L;
 				id_src_a_is_imm <= if_valid && is_moveq;
-				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
-				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_move_mem_l);
+				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || (is_unary_rr && !is_tst_rr) || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
+				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_move_mem_l);
 				id_is_branch    <= if_valid && is_branch_byte;
 				id_is_scc       <= if_valid && is_scc_rr;
 				id_is_dbcc      <= 1'b0;
