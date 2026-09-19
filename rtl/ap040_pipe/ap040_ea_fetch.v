@@ -276,6 +276,7 @@ module ap040_ea_fetch
 	input             eac_is_jmp,
 	input             eac_is_lea,
 	input             eac_sxt_w,
+	input             eac_ea_indexed,
 	input             eac_is_rmw,
 	input             eac_is_div,
 	input             eac_div_signed,
@@ -317,6 +318,8 @@ module ap040_ea_fetch
 	// ap040_pipe_regfile.v instance)
 	output     [3:0]  raddr_a,
 	input      [31:0] rdata_a,
+	output     [3:0]  raddr_c,
+	input      [31:0] rdata_c,
 	output     [3:0]  raddr_b,
 	input      [31:0] rdata_b,
 
@@ -458,9 +461,22 @@ wire [31:0] an_step  = (eff_size == `AP040_SZ_L) ? 32'd4 :
                        (eff_size == `AP040_SZ_W) ? 32'd2 :
                        an_is_a7                  ? 32'd2 : 32'd1;
 
-wire [31:0] ea_target = eac_is_abs    ? eac_imm            :
-                        eac_is_predec ? (an_base - an_step) :
-                                        (operand_a + eac_imm);
+// Indexed addressing (milestone 56). For mode 110 eac_imm is the brief
+// extension word VERBATIM rather than a displacement, so it is unpacked
+// here: [15] D/A and [14:12] the register number name Xn, [11] its size
+// (a Word index is SIGN-extended, not truncated), [10:9] the scale, and
+// [7:0] a signed BYTE displacement -- not the 16-bit one every other mode
+// uses.
+wire  [3:0] idx_reg  = {eac_imm[15], eac_imm[14:12]};
+wire [31:0] idx_raw  = eac_imm[11] ? operand_c
+                                   : {{16{operand_c[15]}}, operand_c[15:0]};
+wire [31:0] idx_val  = idx_raw << eac_imm[10:9];
+wire [31:0] idx_disp = {{24{eac_imm[7]}}, eac_imm[7:0]};
+
+wire [31:0] ea_target = eac_is_abs     ? eac_imm            :
+                        eac_is_predec  ? (an_base - an_step) :
+                        eac_ea_indexed ? (operand_a + idx_val + idx_disp) :
+                                         (operand_a + eac_imm);
 
 // The value An takes afterwards. Both modes leave An at the same place --
 // just past the longword for (An)+, at the start of it for -(An) -- which is
@@ -679,6 +695,14 @@ assign raddr_a    = mvm_st_want ? mvm_reg : eac_src_reg;
 // read direction doesn't actually need port B for its result either (that
 // comes from creg_read_value in ap040_execute.v, entirely bypassing this
 // port), so there is no live conflict left to resolve here at all.
+// Port C carries the index register, and forwards exactly as A and B do:
+// MOVE.L D1,D3 followed by MOVE.L (0,A0,D3.L),D2 must see the new D3.
+assign raddr_c    = idx_reg;
+wire fwd_c_from_ex  = ex_fwd_valid  && (ex_fwd_dest  == idx_reg);
+wire fwd_c_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == idx_reg);
+wire [31:0] operand_c = fwd_c_from_ex  ? ex_fwd_data  :
+                        fwd_c_from_ex2 ? ex_fwd2_data : rdata_c;
+
 assign raddr_b    = eac_dest_reg;
 
 wire fwd_b_from_ex  = ex_fwd_valid  && (ex_fwd_dest  == eac_dest_reg);

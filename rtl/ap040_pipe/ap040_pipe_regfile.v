@@ -51,6 +51,13 @@ module ap040_pipe_regfile
 	// read ports
 	input       [3:0] raddr_a,
 	output     [31:0] rdata_a,
+	// Third read port (milestone 56). Indexed addressing needs An, the
+	// index register Xn, and -- for anything but a plain load -- the
+	// destination operand as well, which is one more than two ports allow.
+	// Read-only and write-through-bypassed exactly like the other two.
+	input       [3:0] raddr_c,
+	output     [31:0] rdata_c,
+
 	input       [3:0] raddr_b,
 	output     [31:0] rdata_b,
 
@@ -125,6 +132,11 @@ assign rdata_a = (we  && (waddr  == raddr_a)) ? wdata  :
                  (we2 && (waddr2 == raddr_a)) ? wdata2 :
                  !raddr_a[3]            ? dreg[raddr_a[2:0]] :
                  (raddr_a[2:0] == 3'd7) ? sp_active : areg[raddr_a[2:0]];
+assign rdata_c = (we  && (waddr  == raddr_c)) ? wdata  :
+                 (we3 && (waddr3 == raddr_c)) ? wdata3 :
+                 (we2 && (waddr2 == raddr_c)) ? wdata2 :
+                 !raddr_c[3]            ? dreg[raddr_c[2:0]] :
+                 (raddr_c[2:0] == 3'd7) ? sp_active : areg[raddr_c[2:0]];
 assign rdata_b = (we  && (waddr  == raddr_b)) ? wdata  :
                  (we3 && (waddr3 == raddr_b)) ? wdata3 :
                  (we2 && (waddr2 == raddr_b)) ? wdata2 :

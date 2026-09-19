@@ -1311,6 +1311,33 @@ real MMU or bus-error path arrives, which is the same boundary
       nothing.
 
       Still not reached: the absolute modes as RMW destinations.
+
+      **Milestone 56 (indexed addressing, `(d8,An,Xn)`)** closed the largest
+      addressing-mode gap: `MOVE.L (0,A0,D1.L*4),D2` is `a[i]`. It gathers
+      ONE extension word like `(d16,An)`, so it rides the same gather kinds
+      rather than adding more -- what differs is what the word MEANS. For
+      this mode `id_imm` carries the brief format VERBATIM and
+      `ap040_ea_fetch.v` unpacks it, which is why no new per-stage fields
+      were needed: the extension word already IS the packed form.
+
+      It needed a THIRD register READ port. An is on port A and the
+      destination operand is on port B for everything except a plain load,
+      so two genuinely do not reach. It forwards like the other two.
+
+      ### A testability limit worth knowing
+
+      **A Word index's sign extension cannot be observed through a LOAD in
+      this core.** `ap040_pipe_l1.v` is 4096 words, so addresses wrap mod
+      8192, and `65536 * scale` is always a multiple of 8192 -- a
+      zero-extended index therefore lands on exactly the same word as a
+      sign-extended one, for every scale. The first version of
+      `tb_ap040_pipe_index.v` checked it through a load and passed happily
+      against RTL with the sign extension removed.
+
+      The fix was to add `LEA (d8,An,Xn),Am` and check An: LEA puts the full
+      32-bit address in a register, where `$00000484` and `$00040484` are
+      plainly different. Any future address arithmetic whose result exceeds
+      the L1's span needs the same treatment -- a load will not see it.
    4. ~~LINK/UNLK~~ **DONE (milestone 49)**, then **MOVEM**, then
       **MULU/DIVU**.
 
