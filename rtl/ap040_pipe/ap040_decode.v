@@ -485,7 +485,8 @@ wire [5:0] unary_rr_op = is_negx_rr ? `AP040_ALU_NEGX :
 //
 // Long only, matching the memory-source support that already exists; a
 // sized memory read is a separate question this does not open.
-wire is_move_abs = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b000) &&
+wire is_move_abs = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
+                   (if_opcode[8:6] == 3'b000) &&
                    (if_opcode[5:3] == 3'b111) && (if_opcode[2:1] == 2'b00);
 wire is_move_abs_l = is_move_abs && if_opcode[0];
 
@@ -732,7 +733,7 @@ wire is_movea_imm = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b001) 
 // just a different EA mode within the same general machinery). Always
 // carries exactly one 16-bit extension word (the displacement) -- routed
 // through the shared gather state machine below, not a parallel one.
-wire is_move_disp = (if_opcode[15:12] == 4'b0010) &&
+wire is_move_disp = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
                      (if_opcode[8:6]  == 3'b000) &&
                      (if_opcode[5:3]  == 3'b101);
 
@@ -876,6 +877,9 @@ reg         held_imm_dest9;
 reg         held_is_abs;
 reg         held_imm_areg;
 reg         held_is_stabs;
+// (d16,An) and absolute loads gather, so unlike (An)/(An)+/-(An) their size
+// cannot be read off if_opcode at the completing end -- it is held here.
+reg  [1:0]  held_mv_size;
 reg         held_is_long;
 reg         held_is_dbcc;
 reg         held_is_move_disp;
@@ -972,6 +976,7 @@ always @(posedge clk) begin
 		held_is_abs      <= 1'b0;
 		held_imm_areg    <= 1'b0;
 		held_is_stabs    <= 1'b0;
+		held_mv_size     <= `AP040_SZ_L;
 		held_is_long    <= 1'b0;
 		held_is_dbcc    <= 1'b0;
 		held_is_move_disp <= 1'b0;
@@ -1046,7 +1051,9 @@ always @(posedge clk) begin
 					                    held_is_imm || held_is_abs || held_is_stabs) ? gather_disp :
 					                    held_is_movec ? {28'd0, held_movec_dir, movec_sel_code} : 32'h0;
 					id_alu_op       <= held_is_imm ? held_imm_op   : `AP040_ALU_MOVE;
-					id_size         <= held_is_imm ? held_imm_size : `AP040_SZ_L;
+					id_size         <= held_is_imm ? held_imm_size :
+					                   (held_is_move_disp || held_is_abs) ? held_mv_size :
+					                                                        `AP040_SZ_L;
 					id_shcnt        <= 6'd1;
 					// The gathered word IS the source: ap040_ea_fetch.v's
 					// operand_a mux already takes eac_imm on this flag, the
@@ -1119,6 +1126,7 @@ always @(posedge clk) begin
 				held_imm_areg    <= is_movea_imm;
 				held_is_abs      <= is_move_abs;
 				held_is_stabs    <= is_st_abs;
+				held_mv_size     <= move_op_size;
 				held_is_dbcc  <= is_dbcc;
 				held_is_move_disp <= is_move_disp;
 				held_is_jmp   <= is_jmp_disp;
