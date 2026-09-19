@@ -84,7 +84,7 @@ def safe_extract(archive: Path, destination: Path) -> Path:
     if marker.exists():
         try:
             if json.loads(marker.read_text()) == identity:
-                return destination / "data"
+                return destination
         except (OSError, json.JSONDecodeError):
             pass
     if destination.exists():
@@ -98,23 +98,31 @@ def safe_extract(archive: Path, destination: Path) -> Path:
                 raise ValueError("unsafe ZIP member %s" % info.filename)
         zf.extractall(destination)
     marker.write_text(json.dumps(identity, sort_keys=True))
-    return destination / "data"
+    return destination
 
 
 def corpus_root(source: Path, work: Path) -> Path:
+    def has_groups(d):
+        return d.is_dir() and (any(d.glob("68040_*")) or any(d.glob("4_*")))
+
     if source.is_file():
         if not zipfile.is_zipfile(source):
             raise ValueError("corpus file is not a ZIP archive: %s" % source)
-        root = safe_extract(source, work / "corpus-v20")
+        base = safe_extract(source, work / "corpus-v20")
     else:
-        root = source / "data" if (source / "data").is_dir() else source
-    if not any(root.glob("68040_*")) and not any(root.glob("4_*")):
-        # a v24 zip unpacks with its own data040/ wrapper directory
-        nested = root / "data040"
-        if nested.is_dir() and any(nested.glob("4_*")):
-            return nested
-        raise ValueError("no 68040_* or 4_* groups below %s" % root)
-    return root
+        base = source
+    # The wrapper directory inside the archive depends on the generator: v20
+    # ships "data/", v24 ships "data040/".  safe_extract used to assume "data"
+    # unconditionally and hand back a path that does not exist for a v24 zip,
+    # so the newer corpus could not be selected at all -- the error named
+    # <work>/corpus-v20/data while the groups sat in .../corpus-v20/data040.
+    # Search for the level that actually holds the groups instead of guessing.
+    if has_groups(base):
+        return base
+    for candidate in sorted(p for p in base.iterdir() if p.is_dir()):
+        if has_groups(candidate):
+            return candidate
+    raise ValueError("no 68040_* or 4_* groups below %s" % base)
 
 
 # The v24 generator renamed the group directories (4_FBASIC for what v20
