@@ -283,6 +283,7 @@ module ap040_ea_fetch
 	input             eac_div_signed,
 	input             eac_is_movem,
 	input             eac_movem_dir,
+	input             eac_is_pea,
 	input             eac_is_link,
 	input             eac_is_unlk,
 	// The EX stage has taken L1 port B this cycle for a read-modify-write's
@@ -389,6 +390,7 @@ module ap040_ea_fetch
 	output     [31:0] rf3_data,
 	output reg        eaf_is_div,
 	output reg        eaf_div_signed,
+	output reg        eaf_is_pea,
 	output reg        eaf_is_link,
 	output reg [31:0] eaf_ea_target,
 	output reg        eaf_is_rts,
@@ -630,7 +632,7 @@ wire mem_complete = mem_pending;
 // pushes at all, per ap040_core.v's own S_JSR1 -- it goes straight to the
 // address-error exception instead (below), the fault taken on the
 // INSTRUCTION FETCH at the odd target, not on the call itself.
-wire eac_is_push  = eac_is_bsr || (eac_is_jsr && !eac_is_jsr_odd) || eac_is_link;
+wire eac_is_push  = eac_is_bsr || (eac_is_jsr && !eac_is_jsr_odd) || eac_is_link || eac_is_pea;
 wire wr_stall     = eac_valid && (eac_is_push || eac_is_store) && (l1_wr_busy || port_taken);
 
 // TRAP #n / illegal instruction exception entry -- see header. exc_ph
@@ -854,9 +856,12 @@ assign l1_be_b   = mvm_active ? 4'b1111 : st_be;
 // operand_a is port A, which mvm_st_want has pointed at the register this
 // beat stores -- so the same wire that carries a LINK's pushed An carries
 // each MOVEM register in turn.
+// Three different things ride the same push: BSR pushes a return address,
+// LINK pushes the old An, and PEA pushes the effective address itself.
 assign l1_data_b = mvm_st_want  ? operand_a :
                    exc_writing  ? exc_wdata :
                    eac_is_store ? st_dat  :
+                   eac_is_pea   ? ea_target :
                    eac_is_link  ? operand_a : eac_next_pc;
 
 always @(posedge clk) begin
@@ -894,6 +899,7 @@ always @(posedge clk) begin
 		eaf_is_rmw     <= 1'b0;
 		eaf_is_div     <= 1'b0;
 		eaf_div_signed <= 1'b0;
+		eaf_is_pea     <= 1'b0;
 		eaf_is_link    <= 1'b0;
 		eaf_ea_target  <= 32'h0;
 		eaf_is_rts     <= 1'b0;
@@ -1125,6 +1131,7 @@ always @(posedge clk) begin
 				eaf_is_jmp     <= 1'b0;
 				eaf_is_rmw     <= 1'b0;
 				eaf_is_link    <= 1'b0;
+				eaf_is_pea     <= 1'b0;
 				eaf_is_div     <= 1'b0;
 				eaf_div_signed <= 1'b0;
 				eaf_is_bsr     <= 1'b0;
@@ -1231,6 +1238,7 @@ always @(posedge clk) begin
 				eaf_is_jmp      <= 1'b0;
 				eaf_is_rmw      <= 1'b0;
 				eaf_is_link     <= 1'b0;
+				eaf_is_pea      <= 1'b0;
 				eaf_is_div      <= 1'b0;
 				eaf_div_signed  <= 1'b0;
 				eaf_is_bsr      <= 1'b0;
@@ -1280,9 +1288,10 @@ always @(posedge clk) begin
 				// expression already used for the write address) -- see
 				// header for why the decrement happens HERE, once, rather
 				// than being recomputed in ap040_execute.v.
-				eaf_operand_b  <= (eac_is_bsr || eac_is_jsr) ? push_addr :
+				eaf_operand_b  <= (eac_is_bsr || eac_is_jsr || eac_is_pea) ? push_addr :
 				                  eac_is_link                ? (push_addr + eac_imm) : operand_b;
 				eaf_is_link    <= eac_is_link;
+				eaf_is_pea     <= eac_is_pea;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;

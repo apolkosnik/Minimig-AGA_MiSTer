@@ -1374,6 +1374,23 @@ real MMU or bus-error path arrives, which is the same boundary
       Nothing had to learn that an absolute address could also be a
       destination.
 
+      **Milestone 60 (PEA)** is LEA with a different destination: the same
+      effective address, sent to the stack instead of to An. It rides
+      `held_is_lea` with one carried property, and the push is the
+      BSR/JSR/LINK path, whose address is already `operand_b - 4` once
+      `eac_dest_reg` names A7. The only new wiring is the DATA -- BSR pushes
+      a return address, LINK pushes the old An, PEA pushes the EA itself.
+
+      Its bench uses four different modes on purpose, and a mutation showed
+      why: pushing `operand_a` instead of `ea_target` is invisible for
+      `PEA (An)`, where the displacement is zero and the two are the same
+      value. Three of the four modes catch it; the simplest one cannot.
+
+      Absolute is NOT reached. LEA never needed it -- `LEA $xxx.L,An` is
+      `MOVEA.L #imm,An` -- but PEA has no such equivalent, so this is a real
+      gap rather than a redundant one, and it needs a push property on
+      `held_is_abs`.
+
       ### When the right answer and the wrong one look the same
 
       Mutating TST onto the RMW path did NOT fail the first version of its

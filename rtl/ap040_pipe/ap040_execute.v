@@ -128,6 +128,7 @@ module ap040_execute
 	input             eaf_is_jmp,
 	input             eaf_is_div,
 	input             eaf_div_signed,
+	input             eaf_is_pea,
 	input             eaf_is_link,
 	input             eaf_is_bsr,
 	input             eaf_is_jsr,
@@ -524,8 +525,11 @@ wire [31:0] combined_result = eaf_is_scc  ? scc_merged :
                                // LINK joins this bypass (milestone 49): its A7 value was
                                // computed in ap040_ea_fetch.v as push_addr + d16 and has no
                                // business going through the ALU, exactly like BSR/JSR's.
+                               // PEA joins for the same reason LINK did: its A7 value was
+                               // computed in ap040_ea_fetch.v and has no business going
+                               // through the ALU.
                                (eaf_is_bsr || eaf_is_jsr || eaf_is_rts || eaf_is_rte ||
-                                eaf_is_link || exc_reaching_ex)
+                                eaf_is_link || eaf_is_pea || exc_reaching_ex)
                                  ? eaf_operand_b :
                                (eaf_is_movec && !eaf_movec_dir) ? creg_read_value :
                                eaf_is_div ? div_result :
