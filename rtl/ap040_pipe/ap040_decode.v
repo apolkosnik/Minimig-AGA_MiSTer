@@ -604,7 +604,23 @@ wire is_alu_mem = alu_mem_shape &&
                    (if_opcode[14:12] == 3'b101));
 wire is_cmp_mem = alu_mem_shape && (if_opcode[14:12] == 3'b011);
 
-// One op map for both shapes: the nibble alone picks the operation.
+// And once more with ea mode 101, (d16,An). This one cannot be decoded in a
+// single cycle -- the displacement is an extension word -- so unlike mode 010
+// it is not a wire change but a new kind on the shared gather state machine,
+// the eighth. It needs nothing the machine does not already hold: held_reg is
+// An, held_dest_reg is Dn, held_mv_size is the size, and gather_disp is
+// already the sign-extended displacement that MOVE.L (d16,An),Dn feeds into
+// id_imm. Only the operation itself is new state (held_alu_op), because every
+// prior gather kind had a fixed one.
+wire alu_disp_shape = (if_opcode[15]   == 1'b1)  && (if_opcode[8]   == 1'b0) &&
+                      (if_opcode[7:6]  != 2'b11) && (if_opcode[5:3] == 3'b101);
+wire is_alu_disp = alu_disp_shape &&
+                   ((if_opcode[14:12] == 3'b000) || (if_opcode[14:12] == 3'b001) ||
+                    (if_opcode[14:12] == 3'b011) || (if_opcode[14:12] == 3'b100) ||
+                    (if_opcode[14:12] == 3'b101));
+wire is_cmp_disp = alu_disp_shape && (if_opcode[14:12] == 3'b011);
+
+// One op map for all three shapes: the nibble alone picks the operation.
 wire [5:0] alu_nib_op = (if_opcode[14:12] == 3'b000) ? `AP040_ALU_OR  :
                         (if_opcode[14:12] == 3'b001) ? `AP040_ALU_SUB :
                         (if_opcode[14:12] == 3'b011) ? `AP040_ALU_CMP :
@@ -908,6 +924,12 @@ reg  [1:0]  held_mv_size;
 reg         held_is_long;
 reg         held_is_dbcc;
 reg         held_is_move_disp;
+// The eighth gather kind (milestone 40). held_alu_op is the first gather
+// state that carries an OPERATION: every earlier kind had a fixed one, so
+// id_alu_op could be chosen from the kind flags alone.
+reg         held_is_alu_disp;
+reg   [5:0] held_alu_op;
+reg         held_alu_nowrite;   // CMP: flags only, as held_imm_nowrite is for CMPI
 reg         held_is_jmp;
 reg         held_is_bsr;
 reg         held_is_jsr;
@@ -944,7 +966,7 @@ wire redirect_from_byte   = if_valid && (is_branch_byte || is_bsr_byte) && (ext_
 // with. Without this exclusion the completing gather redirects to
 // held_pc + 2 + the immediate, which for ADDI.L #$12345678 is a wild jump
 // and the rest of the program never runs.
-wire redirect_from_gather = completing_gather && !held_is_move_disp && !held_is_jmp &&
+wire redirect_from_gather = completing_gather && !held_is_move_disp && !held_is_alu_disp && !held_is_jmp &&
                              !held_is_jsr && !held_is_movec && !held_is_imm &&
                              !held_is_abs && !held_is_stabs;
 
@@ -1005,6 +1027,9 @@ always @(posedge clk) begin
 		held_is_long    <= 1'b0;
 		held_is_dbcc    <= 1'b0;
 		held_is_move_disp <= 1'b0;
+		held_is_alu_disp  <= 1'b0;
+		held_alu_op       <= `AP040_ALU_MOVE;
+		held_alu_nowrite  <= 1'b0;
 		held_is_jmp     <= 1'b0;
 		held_is_bsr     <= 1'b0;
 		held_is_jsr     <= 1'b0;
@@ -1039,7 +1064,7 @@ always @(posedge clk) begin
 					                    held_is_imm  ? (held_imm_dest9 ? {held_imm_areg, held_dest_reg}
 					                                                     : {1'b0, held_reg}) :
 					                    held_is_dbcc ? {1'b0, held_reg} :
-					                    held_is_move_disp ? {1'b0, held_dest_reg} :
+					                    (held_is_move_disp || held_is_alu_disp) ? {1'b0, held_dest_reg} :
 					                    (held_is_bsr || held_is_jsr) ? 4'd15 :
 					                    held_is_movec ? (held_movec_dir ? 4'd15 : movec_gpr) : 4'h0;
 					// move-disp and JMP/JSR-disp all read An as their EA base
@@ -1056,7 +1081,7 @@ always @(posedge clk) begin
 					// for the write-direction half.
 					id_src_reg      <= held_is_stabs ? {1'b0, held_reg} :
 					                    held_is_dbcc ? {1'b0, held_reg} :
-					                    (held_is_move_disp || held_is_jmp || held_is_jsr) ? {1'b1, held_reg} :
+					                    (held_is_move_disp || held_is_alu_disp || held_is_jmp || held_is_jsr) ? {1'b1, held_reg} :
 					                    (held_is_movec && held_movec_dir) ? movec_gpr : 4'h0;
 					// gather_disp is already the sign-extended displacement
 					// word (same wire Bcc/DBcc use for their target math) --
@@ -1072,12 +1097,13 @@ always @(posedge clk) begin
 					// ap040_execute.v extract both from eac_imm[3:0] rather
 					// than needing two more dedicated ports threaded through
 					// every stage.
-					id_imm          <= (held_is_move_disp || held_is_jmp || held_is_jsr ||
+					id_imm          <= (held_is_move_disp || held_is_alu_disp || held_is_jmp || held_is_jsr ||
 					                    held_is_imm || held_is_abs || held_is_stabs) ? gather_disp :
 					                    held_is_movec ? {28'd0, held_movec_dir, movec_sel_code} : 32'h0;
-					id_alu_op       <= held_is_imm ? held_imm_op   : `AP040_ALU_MOVE;
+					id_alu_op       <= held_is_imm      ? held_imm_op :
+					                   held_is_alu_disp ? held_alu_op : `AP040_ALU_MOVE;
 					id_size         <= held_is_imm ? held_imm_size :
-					                   (held_is_move_disp || held_is_abs) ? held_mv_size :
+					                   (held_is_move_disp || held_is_alu_disp || held_is_abs) ? held_mv_size :
 					                                                        `AP040_SZ_L;
 					id_shcnt        <= 6'd1;
 					// The gathered word IS the source: ap040_ea_fetch.v's
@@ -1097,16 +1123,17 @@ always @(posedge clk) begin
 					id_writes_reg   <= held_is_move_disp || held_is_bsr || held_is_jsr ||
 					                    held_is_abs ||
 					                    (held_is_imm && !held_imm_nowrite) ||
+					                    (held_is_alu_disp && !held_alu_nowrite) ||
 					                    (held_is_movec && !held_movec_dir && !movec_illegal_gather);
 					// MOVEA sets no condition codes.
-					id_writes_ccr   <= held_is_move_disp || held_is_abs || held_is_stabs ||
+					id_writes_ccr   <= held_is_move_disp || held_is_alu_disp || held_is_abs || held_is_stabs ||
 					                    (held_is_imm && !held_imm_areg);
-					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_jmp &&
+					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_alu_disp && !held_is_jmp &&
 					                    !held_is_bsr && !held_is_jsr && !held_is_movec &&
 					                    !held_is_imm && !held_is_abs && !held_is_stabs;
 					id_is_scc       <= 1'b0;
 					id_is_dbcc      <= held_is_dbcc;
-					id_is_mem_src   <= held_is_move_disp || held_is_abs;
+					id_is_mem_src   <= held_is_move_disp || held_is_alu_disp || held_is_abs;
 					id_is_abs       <= held_is_abs || held_is_stabs;
 					id_is_store     <= held_is_stabs;
 					id_is_postinc   <= 1'b0;
@@ -1129,7 +1156,7 @@ always @(posedge clk) begin
 			end else if (is_branch_word || is_branch_long || is_dbcc || is_move_disp || is_jmp_disp ||
 			              is_bsr_word || is_bsr_long || is_jsr_disp || is_movec_opcode ||
 			              is_imm_alu || is_move_imm || is_move_abs || is_movea_imm ||
-			              is_st_abs) begin
+			              is_st_abs || is_alu_disp) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1151,9 +1178,14 @@ always @(posedge clk) begin
 				held_imm_areg    <= is_movea_imm;
 				held_is_abs      <= is_move_abs;
 				held_is_stabs    <= is_st_abs;
-				held_mv_size     <= move_op_size;
+				// The ALU family takes its size from ir[7:6]; MOVE's lives in
+				// ir[13:12] with a different encoding, hence two wires.
+				held_mv_size     <= is_alu_disp ? add_op_size : move_op_size;
 				held_is_dbcc  <= is_dbcc;
 				held_is_move_disp <= is_move_disp;
+				held_is_alu_disp  <= is_alu_disp;
+				held_alu_op       <= alu_nib_op;
+				held_alu_nowrite  <= is_cmp_disp;
 				held_is_jmp   <= is_jmp_disp;
 				held_is_bsr   <= is_bsr_word || is_bsr_long;
 				held_is_jsr   <= is_jsr_disp;

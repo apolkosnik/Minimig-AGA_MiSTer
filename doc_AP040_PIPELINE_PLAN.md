@@ -1091,6 +1091,29 @@ real MMU or bus-error path arrives, which is the same boundary
    landing back in the instruction stream, which is why its bench checked a
    COMPOSITION of two operations rather than one result: a wrong address
    that still decodes produces a plausible number.
+
+   **Milestone 40 (displacement mode)** carried the same family to ea mode
+   101, `(d16,An)` -- the mode compiled code leans on hardest, since every
+   struct field and every stack-frame local is a displacement off a base
+   register. Unlike mode 010 this could not be a wire change, because the
+   displacement is an extension word, so it became the EIGHTH kind on the
+   shared gather state machine rather than a parallel mechanism.
+
+   It cost almost no new state, which is the payoff for having kept that
+   machine shared: `held_reg` is already An, `held_dest_reg` already Dn,
+   `held_mv_size` already the size, and `gather_disp` is already the
+   sign-extended displacement `MOVE.L (d16,An),Dn` has fed into `id_imm`
+   since milestone 10. The one genuinely new field is `held_alu_op` -- every
+   earlier gather kind had a FIXED operation and could pick it from the kind
+   flags alone, and this is the first that cannot. The size wire had to be
+   chosen rather than shared: the ALU family sizes from `ir[7:6]`, MOVE from
+   `ir[13:12]` with a different encoding.
+
+   Like `MOVE.L (d16,An),Dn` it must be excluded from
+   `redirect_from_gather`, which fires for every gather kind that MIGHT
+   branch. That is now five exclusions against three branch kinds, and the
+   gate is written as a list of negations -- the next non-branching gather
+   kind that forgets to add itself will jump to `held_pc + 2 + disp`.
 4. **MMU and cache integration**, once enough of the integer ISA exists that
    testing them against real address translation is meaningful. Reuse the
    architectural requirements from `rtl_old/ap040_mmu.v`/`ap040_cache.v`
