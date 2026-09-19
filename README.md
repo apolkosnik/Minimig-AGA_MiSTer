@@ -8,6 +8,7 @@ This is a port of the minimig core to the [MiSTer board](https://github.com/MiST
 
 The Minimig-MiSTer variant in this repository has been upgraded with [AGA chipset](http://en.wikipedia.org/wiki/Amiga_Advanced_Graphics_Architecture) capabilites, which allows it to emulate the latest Amiga models ([Amiga 1200](http://en.wikipedia.org/wiki/Amiga_1200)) and (partially) [Amiga CD32](http://en.wikipedia.org/wiki/Amiga_CD32)). Of course it also supports previous OCS/ECS Amigas like [Amiga 500](http://en.wikipedia.org/wiki/Amiga_500), [Amiga 600](http://en.wikipedia.org/wiki/Amiga_600) etc.
 
+This version has been modified to add support for MiSTer Floppy, SCP and IPF support - see https://mister.robsmithdev.co.uk
 
 ## Core features supported
 
@@ -31,6 +32,8 @@ The Minimig-MiSTer variant in this repository has been upgraded with [AGA chipse
 * MIDI: both MiSTer internal emulation and external through USER_IO port (MT32-pi and generic MIDI device)
 * Akiko chunk to planar implementation
 * Mouse with wheel.
+* SCP and IPF files
+* MiSTer Floppy Hardware
 
 ## Usage
 

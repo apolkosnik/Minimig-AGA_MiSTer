@@ -108,11 +108,18 @@ module paula
 	output [8:0] rdata_okk, 	//right DAC data (PWM volume)
 	// system configuration
 	input	  [1:0] floppy_drives,	//number of extra floppy drives
+	input [11:0]   floppy_ext_drive, // external floppy drive config
+	input floppy_speed_allowed,
+	output floppy_speed,	// set to 1 if we allow fast speed
+	input    enable_mister_floppy,
 	// fifo / track display
 	output  [7:0] trackdisp,
 	output [13:0] secdisp,
 	output        floppy_fwr,
-	output        floppy_frd
+	output        floppy_frd,
+	input   [6:0] USER_IN,
+	output  [6:0] USER_OUT,
+	output [2:0] mister_floppy_status
 );
 //--------------------------------------------------------------------------------------
 
@@ -138,7 +145,7 @@ wire	[3:0] audint;			//audio channels 0,1,2,3 interrupt request
 wire	[3:0] audpen;			//audio channels 0,1,2,3 interrupt pending
 wire	[3:0] auden;			//audio channels 0,1,2,3 dma enable
 wire	dsken; 					//disk dma enable
-
+wire  [1:0] precomp;       //floppy disk precompensation
 
 //--------------------------------------------------------------------------------------
 //--------------------------------------------------------------------------------------
@@ -191,6 +198,7 @@ end
 
 //ADKCONR register 
 assign adkconr[15:0] = (reg_address_in[8:1]==ADKCONR[8:1]) ? {1'b0,adkcon[14:0]} : 16'h0000;
+assign precomp[1:0] = adkcon[14:13];
 
 //--------------------------------------------------------------------------------------
 
@@ -269,12 +277,21 @@ paula_floppy pf1
 	.IO_DOUT(IO_DOUT),
 	.fdd_led(fdd_led),
 	.floppy_drives(floppy_drives),
+	.floppy_ext_drive(floppy_ext_drive),
+	.floppy_speed_allowed(floppy_speed_allowed),
+	.floppy_speed(floppy_speed),
+	.enable_mister_floppy(enable_mister_floppy),
 
 	// fifo / track display
 	.trackdisp(trackdisp),
 	.secdisp(secdisp),
 	.floppy_fwr (floppy_fwr),
-	.floppy_frd (floppy_frd)
+	.floppy_frd (floppy_frd),
+	.precomp(precomp),
+	
+	.USER_IN(USER_IN),
+	.USER_OUT(USER_OUT),
+	.mister_floppy_status(mister_floppy_status)
 );
 
 //instantiate audio controller

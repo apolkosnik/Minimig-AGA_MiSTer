@@ -6,6 +6,7 @@ set_global_assignment -name QIP_FILE rtl/gayle.qip
 set_global_assignment -name QIP_FILE rtl/paula.qip
 set_global_assignment -name QIP_FILE rtl/denise.qip
 set_global_assignment -name QIP_FILE rtl/fpga-toccata/toccata.qip
+set_global_assignment -name QIP_FILE rtl/misterfloppy.qip
 set_global_assignment -name QIP_FILE rtl/A2065/a2065.qip
 set_global_assignment -name QIP_FILE rtl/akiko.qip
 set_global_assignment -name QIP_FILE rtl/cdtv.qip

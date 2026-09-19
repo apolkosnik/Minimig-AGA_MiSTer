@@ -303,6 +303,11 @@ module minimig
 	input  [15:0] ide_writedata,
 	input         ide_read,
 	output [15:0] ide_readdata,
+	
+	input   [6:0] USER_IN,
+	output  [6:0] USER_OUT,
+	output  user_port_mode,
+	output   [2:0] mister_floppy_status,
 
 	// A2065 register file + doorbell
 	// A2065 memory port — goes to ddram_ctrl alongside the fast RAM
@@ -454,7 +459,8 @@ wire [15:0] cart_data_out;
 wire        usrrst;				//user reset from osd interface
 wire        hires;				//hires signal from Denise for interpolation filter enable in Amber
 wire  [7:0] memory_config;		//memory configuration
-wire  [3:0] floppy_config;		//floppy drives configuration (drive number and speed)
+wire  [3:0] floppy_config;		//floppy drives configuration (external settings, drive number and speed)
+wire  [11:0] floppy_ext_drive; // external floppy drive config
 wire  [5:0] chipset_config;
 assign cdtv_mode = chipset_config[5];
 wire  [5:0] ide_config;			//HDD & HDC config: bit #0 enables Gayle, bit #1 enables Master drive, bit #2 enables Slave drive
@@ -499,6 +505,8 @@ assign ide_ena  = ide_config[0];
 assign ide_fast = ~ide_config[5] & cpucfg[1];
 
 //--------------------------------------------------------------------------------------
+
+wire 			floppy_speed;
 
 //instantiate agnus
 agnus AGNUS1
@@ -545,7 +553,7 @@ agnus AGNUS1
 	.a1k(chipset_config[2]),
 	.ecs(|chipset_config[4:3]),
 	.aga(chipset_config[4]),
-	.floppy_speed(floppy_config[0])
+	.floppy_speed(floppy_speed)
 );
 
 //instantiate paula
@@ -594,7 +602,16 @@ paula PAULA1
 	.ldata_okk(ldata_okk),
 	.rdata_okk(rdata_okk),
 
-	.floppy_drives(floppy_config[3:2])
+	.floppy_drives(floppy_config[3:2]),
+	.floppy_ext_drive(floppy_ext_drive),
+	.floppy_speed_allowed(floppy_config[0]),
+	.floppy_speed(floppy_speed),
+	
+	.enable_mister_floppy(user_port_mode),	
+	.mister_floppy_status(mister_floppy_status),
+
+	.USER_IN(USER_IN),
+	.USER_OUT(USER_OUT)
 );
 
 wire [2:0] cachecfg_pre;
@@ -628,6 +645,8 @@ userio USERIO1
 	.memory_config(memory_config),
 	.chipset_config(chipset_config),
 	.floppy_config(floppy_config),
+	.floppy_ext_drive(floppy_ext_drive),
+	.user_port_mode(user_port_mode),
 	.scanline(scanline),
 	.ar(ar),
 	.blver(blver),
