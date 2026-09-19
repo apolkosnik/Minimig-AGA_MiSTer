@@ -256,6 +256,11 @@ localparam W_DROP = 4'd11;
 reg  [3:0] wst;
 reg        w_issued;
 reg        w_pt;
+// Set with w_pt when the probe is the CORE's internal write-permission check
+// (pt_access) rather than an architectural PTEST.  It only suppresses the M
+// history bit: an internal check must not mark a page modified for a write
+// that may never happen, and a CAS2 whose comparison fails performs none.
+reg        w_acc;
 reg [31:0] w_la;
 reg        w_super, w_write, w_user;
 reg [31:0] w_desc_addr;
@@ -329,7 +334,7 @@ dpram #(5, ROWW) atc_ram
 
 // PTESTW has ordinary table-search history side effects only when the
 // probed write is permitted.  A failed probe still reports W/S in MMUSR.
-wire w_hist_m = w_write &&
+wire w_hist_m = w_write && !w_acc &&
                   (!w_pt || (!(w_wp || w_desc[2]) &&
                              !(w_user && w_desc[7])));
 wire w_denied = !w_pt && ((w_user && w_desc[7]) ||
@@ -406,7 +411,7 @@ integer k;
 always @(posedge clk) begin
 	if (!nreset) begin
 		wst <= W_IDLE;
-		w_issued <= 0; w_pt <= 0;
+		w_issued <= 0; w_pt <= 0; w_acc <= 0;
 		w_la <= 0; w_super <= 0; w_write <= 0; w_user <= 0;
 		w_desc_addr <= 0; w_desc <= 0; w_wp <= 0; w_buserr <= 0;
 		w_req_addr <= 0; w_req_wdat <= 0; w_req_wr <= 0;
@@ -482,6 +487,7 @@ always @(posedge clk) begin
 				end
 				else if (c_req && !c_flt && need_walk) begin
 					w_pt    <= 0;
+					w_acc   <= 0;
 					w_la    <= c_addr;
 					w_super <= a_super;
 					w_user  <= !a_super;
@@ -549,6 +555,7 @@ always @(posedge clk) begin
 					w_super <= pt_fc[2];
 					w_user  <= !pt_fc[2];
 					w_write <= pt_write;
+					w_acc   <= pt_access;
 					w_wp    <= 0;
 					f_bank  <= pt_instr;
 					if (pt_ttr_hit) begin

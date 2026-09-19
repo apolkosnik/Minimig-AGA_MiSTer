@@ -181,7 +181,13 @@ def main():
     # probed CAS2 should look like.
     expect_m = {"cas2_match": (True, True), "cas2_fail": (False, False),
                 "cas1_fail": (False, False), "cas1_match": (True, False),
-                "read_only": (False, False), "cross_fault": (True, False)}
+                "read_only": (False, False), "cross_fault": (False, False)}
+    # cross_fault expected (True, False) while the audit ran, because BOTH
+    # versions reached it the wrong way: b3da46b6a by committing the partial
+    # write the fix exists to prevent, and f86b3980f by letting the probe set
+    # M.  With neither happening, the crossing write that faults on its second
+    # page writes nothing at all, so its first page must be clean too -- the
+    # same principle every other row here tests.
     bad = [f"{r['case']}: M=({int(r['m7'])},{int(r['m8'])}), expected "
            f"({int(expect_m[r['case']][0])},{int(expect_m[r['case']][1])})"
            for r in results if (r["m7"], r["m8"]) != expect_m[r["case"]]]
