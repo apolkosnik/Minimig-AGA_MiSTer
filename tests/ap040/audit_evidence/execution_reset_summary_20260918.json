@@ -1,0 +1,565 @@
+{
+  "source_commit": "28d1101b21f0c274d6ece6482c307eebe25a086e",
+  "execution_cases": 780,
+  "execution_passed": 780,
+  "handshake_phases_per_case": 3,
+  "families": {
+    "bf_reg": {
+      "cases": 192,
+      "passed": 192
+    },
+    "bf_mem": {
+      "cases": 192,
+      "passed": 192
+    },
+    "carry_reg": {
+      "cases": 192,
+      "passed": 192
+    },
+    "carry_mem": {
+      "cases": 192,
+      "passed": 192
+    },
+    "smc": {
+      "cases": 12,
+      "passed": 12
+    }
+  },
+  "execution_input_sha256": {
+    "tests/ap040/tb_ap040_program.v": "fcea98f604815bcc049615bf092c0e0f667a38fdd2135c280d420b015c5cb6de",
+    "tests/ap040/sim_dpram.v": "a8d442dc648e06e680e0cf68f7641b5a272bae4006130e1d68bf139189540917",
+    "rtl/memory_router.v": "162c79f285ba3d03637b71747a4deeefc192dfda937e9b9cdeb7536c77998fcf",
+    "rtl/ap040/ap040_alu.v": "ad9c598e97790dc0eaa4db0908cba81596da1d5d240dd170d4a15e0a94a6dfdb",
+    "rtl/ap040/ap040_bus16_adapter.v": "fc4973774e985720f50ff3e0fff6a69f9fec65323fe00859147ec13f15f052f0",
+    "rtl/ap040/ap040_bus_timeout.v": "30e67ac325c639a797cc971ccb9dc78e931053158704b50a8da2d27ae2d623e5",
+    "rtl/ap040/ap040_cache.v": "38b164a6d9b20b4b5e20e1bff59c235d1ae1b6f13e80e66177265ea42610969c",
+    "rtl/ap040/ap040_core.v": "1f14edfbabdef4f68cabeff2e7df1d7246d4d557bab4a8e9c94a40a3b446a425",
+    "rtl/ap040/ap040_fpu.v": "e680c3b3f6e3f5be1a44b3824d20475070e478149cfd90b4d6d1b069fe1384d5",
+    "rtl/ap040/ap040_mmu.v": "7303827bbb322ec45b5ccc350e1569cf63d8ef2252b635d77a966f63cdf210fe",
+    "rtl/ap040/ap040_muldiv.v": "db6538668622a0e52d75ce848724bcbdd06d7e31e457b5917daa23ee27f69060",
+    "rtl/ap040/ap040_regfile.v": "bd5affed831fdd7825a9d188f62fcb7ab0c4c71270a909c458e9af2ac3609f7d",
+    "rtl/ap040/ap040_tg68k_compat.v": "fad2994f9100565ed7069367a5bc48cf57113630411da6fa46bca14b966bec51",
+    "rtl/ap040/ap040_walker_cdc.v": "3541305117fdf574a93ebb4d810b05e946f7695f9367cea87e909f7f67a3e1ce",
+    "rtl/ap040/ap040_defs.svh": "195c37afb9961a1baf8c6ebbdba8df53da97d93c5cb4924cf673a3e9dc065a81"
+  },
+  "reset_measurements": [
+    {
+      "posted": 0,
+      "program": "reset",
+      "delay": 0,
+      "begins": [
+        [
+          "0",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "1",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "2",
+          "0",
+          "01",
+          "0001"
+        ]
+      ],
+      "ends": [
+        [
+          "0",
+          "128",
+          "128"
+        ],
+        [
+          "1",
+          "128",
+          "128"
+        ],
+        [
+          "2",
+          "128",
+          "128"
+        ]
+      ],
+      "log": "/tmp/ap040-reset-audit/post0-reset-0.log"
+    },
+    {
+      "posted": 0,
+      "program": "reset",
+      "delay": 32,
+      "begins": [
+        [
+          "0",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "1",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "2",
+          "0",
+          "01",
+          "0001"
+        ]
+      ],
+      "ends": [
+        [
+          "0",
+          "128",
+          "128"
+        ],
+        [
+          "1",
+          "128",
+          "128"
+        ],
+        [
+          "2",
+          "128",
+          "128"
+        ]
+      ],
+      "log": "/tmp/ap040-reset-audit/post0-reset-32.log"
+    },
+    {
+      "posted": 0,
+      "program": "reset",
+      "delay": 200,
+      "begins": [
+        [
+          "0",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "1",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "2",
+          "0",
+          "01",
+          "0001"
+        ]
+      ],
+      "ends": [
+        [
+          "0",
+          "128",
+          "128"
+        ],
+        [
+          "1",
+          "128",
+          "128"
+        ],
+        [
+          "2",
+          "128",
+          "128"
+        ]
+      ],
+      "log": "/tmp/ap040-reset-audit/post0-reset-200.log"
+    },
+    {
+      "posted": 0,
+      "program": "nop-reset",
+      "delay": 0,
+      "begins": [
+        [
+          "0",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "1",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "2",
+          "0",
+          "01",
+          "0001"
+        ]
+      ],
+      "ends": [
+        [
+          "0",
+          "128",
+          "128"
+        ],
+        [
+          "1",
+          "128",
+          "128"
+        ],
+        [
+          "2",
+          "128",
+          "128"
+        ]
+      ],
+      "log": "/tmp/ap040-reset-audit/post0-nop-reset-0.log"
+    },
+    {
+      "posted": 0,
+      "program": "nop-reset",
+      "delay": 32,
+      "begins": [
+        [
+          "0",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "1",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "2",
+          "0",
+          "01",
+          "0001"
+        ]
+      ],
+      "ends": [
+        [
+          "0",
+          "128",
+          "128"
+        ],
+        [
+          "1",
+          "128",
+          "128"
+        ],
+        [
+          "2",
+          "128",
+          "128"
+        ]
+      ],
+      "log": "/tmp/ap040-reset-audit/post0-nop-reset-32.log"
+    },
+    {
+      "posted": 0,
+      "program": "nop-reset",
+      "delay": 200,
+      "begins": [
+        [
+          "0",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "1",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "2",
+          "0",
+          "01",
+          "0001"
+        ]
+      ],
+      "ends": [
+        [
+          "0",
+          "128",
+          "128"
+        ],
+        [
+          "1",
+          "128",
+          "128"
+        ],
+        [
+          "2",
+          "128",
+          "128"
+        ]
+      ],
+      "log": "/tmp/ap040-reset-audit/post0-nop-reset-200.log"
+    },
+    {
+      "posted": 1,
+      "program": "reset",
+      "delay": 0,
+      "begins": [
+        [
+          "0",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "1",
+          "1",
+          "01",
+          "0001"
+        ],
+        [
+          "2",
+          "1",
+          "01",
+          "0001"
+        ]
+      ],
+      "ends": [
+        [
+          "0",
+          "128",
+          "128"
+        ],
+        [
+          "1",
+          "128",
+          "128"
+        ],
+        [
+          "2",
+          "128",
+          "128"
+        ]
+      ],
+      "log": "/tmp/ap040-reset-audit/post1-reset-0.log"
+    },
+    {
+      "posted": 1,
+      "program": "reset",
+      "delay": 32,
+      "begins": [
+        [
+          "0",
+          "1",
+          "11",
+          "0000"
+        ],
+        [
+          "1",
+          "1",
+          "11",
+          "0000"
+        ],
+        [
+          "2",
+          "1",
+          "11",
+          "0000"
+        ]
+      ],
+      "ends": [
+        [
+          "0",
+          "128",
+          "128"
+        ],
+        [
+          "1",
+          "128",
+          "128"
+        ],
+        [
+          "2",
+          "128",
+          "128"
+        ]
+      ],
+      "log": "/tmp/ap040-reset-audit/post1-reset-32.log"
+    },
+    {
+      "posted": 1,
+      "program": "reset",
+      "delay": 200,
+      "begins": [
+        [
+          "0",
+          "1",
+          "11",
+          "0000"
+        ],
+        [
+          "1",
+          "1",
+          "11",
+          "0000"
+        ],
+        [
+          "2",
+          "1",
+          "11",
+          "0000"
+        ]
+      ],
+      "ends": [
+        [
+          "0",
+          "128",
+          "128"
+        ],
+        [
+          "1",
+          "128",
+          "128"
+        ],
+        [
+          "2",
+          "128",
+          "128"
+        ]
+      ],
+      "log": "/tmp/ap040-reset-audit/post1-reset-200.log"
+    },
+    {
+      "posted": 1,
+      "program": "nop-reset",
+      "delay": 0,
+      "begins": [
+        [
+          "0",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "1",
+          "0",
+          "01",
+          "0001"
+        ],
+        [
+          "2",
+          "0",
+          "01",
+          "0001"
+        ]
+      ],
+      "ends": [
+        [
+          "0",
+          "128",
+          "128"
+        ],
+        [
+          "1",
+          "128",
+          "158"
+        ],
+        [
+          "2",
+          "128",
+          "158"
+        ]
+      ],
+      "log": "/tmp/ap040-reset-audit/post1-nop-reset-0.log"
+    },
+    {
+      "posted": 1,
+      "program": "nop-reset",
+      "delay": 32,
+      "begins": [
+        [
+          "0",
+          "0",
+          "00",
+          "0001"
+        ],
+        [
+          "1",
+          "0",
+          "00",
+          "0001"
+        ],
+        [
+          "2",
+          "0",
+          "00",
+          "0001"
+        ]
+      ],
+      "ends": [
+        [
+          "0",
+          "128",
+          "136"
+        ],
+        [
+          "1",
+          "128",
+          "158"
+        ],
+        [
+          "2",
+          "128",
+          "158"
+        ]
+      ],
+      "log": "/tmp/ap040-reset-audit/post1-nop-reset-32.log"
+    },
+    {
+      "posted": 1,
+      "program": "nop-reset",
+      "delay": 200,
+      "begins": [
+        [
+          "0",
+          "0",
+          "00",
+          "0001"
+        ],
+        [
+          "1",
+          "0",
+          "00",
+          "0001"
+        ],
+        [
+          "2",
+          "0",
+          "00",
+          "0001"
+        ]
+      ],
+      "ends": [
+        [
+          "0",
+          "128",
+          "136"
+        ],
+        [
+          "1",
+          "128",
+          "158"
+        ],
+        [
+          "2",
+          "128",
+          "158"
+        ]
+      ],
+      "log": "/tmp/ap040-reset-audit/post1-nop-reset-200.log"
+    }
+  ],
+  "cache_dma_suite_log": "ok   cache_snoop_post     \nok   cache_snoop_post_neg_dma (control: must fail)\nok   cache_snoop_post_ce4 \nok   cache_snoop_post_x   \nok   cache_snoop_post_x_neg_accw (control: must fail)\nok   cache_snoop_post_x_ce4 \nok   cache_snoop_post_x_ce4_neg_lkw (control: must fail)\n\n7/7 legs passed under Verilator\nBoth snoop guard terms are covered by must-fail controls again, on concrete wrong data rather than X.\n",
+  "retained_setup_report_sha256": "3e5b7e6cf26fd101d5b667bc1dee206fc0cd740303b3277d9a6068e7fdca7172"
+}

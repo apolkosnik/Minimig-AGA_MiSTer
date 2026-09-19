@@ -1,0 +1,76 @@
+{
+  "source_id": "1b2bd22e31dfe59971c57266e81bced49db47a27278ac25496ebbca27bd1efe0",
+  "head": "28d1101b21f0c274d6ece6482c307eebe25a086e",
+  "log": "build_ap040-40mhz_20260918_185818.log",
+  "artifact": "output_files/Minimig-ap040-sdram-recovery-1b2bd22e31df-20260918_185818-HDMI-TIMING-FAIL-DO-NOT-FLASH.rbf",
+  "rbf_sha256": "4064f59d2b73c420b0eaa95eec0914582b4f259bfeb7627f9ce70d89daf36f67",
+  "shared_rbf_after": "f9baef0447a212403e50f349d36e01f51fccf2f80fd44f9aa59d1549a68528f6",
+  "source_inputs_changed": [],
+  "worst_slacks": {
+    "sdram Setup": {
+      "slack_ns": 0.015,
+      "corner": "Slow 1100mV 100C"
+    },
+    "hdmi Setup": {
+      "slack_ns": -0.093,
+      "corner": "Slow 1100mV -40C"
+    },
+    "cpu Setup": {
+      "slack_ns": 0.322,
+      "corner": "Slow 1100mV 100C"
+    },
+    "cpu Hold": {
+      "slack_ns": 0.09,
+      "corner": "Fast 1100mV -40C"
+    },
+    "sdram Hold": {
+      "slack_ns": 0.071,
+      "corner": "Fast 1100mV -40C"
+    },
+    "hdmi Hold": {
+      "slack_ns": 0.122,
+      "corner": "Fast 1100mV -40C"
+    },
+    "hdmi Recovery": {
+      "slack_ns": 4.182,
+      "corner": "Slow 1100mV 100C"
+    },
+    "sdram Recovery": {
+      "slack_ns": 4.483,
+      "corner": "Slow 1100mV 100C"
+    },
+    "cpu Recovery": {
+      "slack_ns": 12.887,
+      "corner": "Slow 1100mV 100C"
+    },
+    "sdram Removal": {
+      "slack_ns": 0.176,
+      "corner": "Fast 1100mV -40C"
+    },
+    "hdmi Removal": {
+      "slack_ns": 0.565,
+      "corner": "Fast 1100mV -40C"
+    },
+    "cpu Removal": {
+      "slack_ns": 0.761,
+      "corner": "Fast 1100mV -40C"
+    },
+    "cpu Minimum Pulse Width": {
+      "slack_ns": 1.101,
+      "corner": "Slow 1100mV 100C"
+    },
+    "hdmi Minimum Pulse Width": {
+      "slack_ns": 1.122,
+      "corner": "Slow 1100mV 100C"
+    },
+    "sdram Minimum Pulse Width": {
+      "slack_ns": 2.943,
+      "corner": "Slow 1100mV -40C"
+    }
+  },
+  "alm_used": 39342,
+  "registers": 35848,
+  "emu_gate_passed": true,
+  "all_clocks_closed": false,
+  "flashed": false
+}

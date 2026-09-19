@@ -1,0 +1,248 @@
+{
+  "reference": "f86b3980f",
+  "candidate_sha256": "ac34290a2b4f933e4631ff490c4d82e03080fcb4baf3d773cd9f26e0c5ce413a",
+  "results": [
+    {
+      "cache": 1,
+      "pipe": 0,
+      "seed": 1,
+      "result": "ALL TESTS PASSED: 42233 cycles; slots=396/520/526/187/48/514; walker=47/511 chip=289/231; resets=16 phase_jumps=16\n- /home/adam/ap040x2/tests/ap040/tb_sdram_timing_equivalence.v:140: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 422us; walltime 0.020 s; speed 20.646 ms/s\n- Verilator: cpu 0.020 s on 1 threads; allocated 5 MB\n"
+    },
+    {
+      "cache": 1,
+      "pipe": 0,
+      "seed": 271828,
+      "result": "ALL TESTS PASSED: 42233 cycles; slots=333/551/545/229/68/465; walker=66/464 chip=254/297; resets=16 phase_jumps=16\n- /home/adam/ap040x2/tests/ap040/tb_sdram_timing_equivalence.v:140: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 422us; walltime 0.021 s; speed 20.461 ms/s\n- Verilator: cpu 0.021 s on 1 threads; allocated 5 MB\n"
+    },
+    {
+      "cache": 1,
+      "pipe": 0,
+      "seed": 314159,
+      "result": "ALL TESTS PASSED: 42233 cycles; slots=392/559/550/159/72/459; walker=71/453 chip=285/274; resets=16 phase_jumps=16\n- /home/adam/ap040x2/tests/ap040/tb_sdram_timing_equivalence.v:140: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 422us; walltime 0.021 s; speed 20.175 ms/s\n- Verilator: cpu 0.021 s on 1 threads; allocated 5 MB\n"
+    },
+    {
+      "cache": 1,
+      "pipe": 1,
+      "seed": 1,
+      "result": "ALL TESTS PASSED: 42233 cycles; slots=399/520/523/186/47/516; walker=46/512 chip=289/231; resets=16 phase_jumps=16\n- /home/adam/ap040x2/tests/ap040/tb_sdram_timing_equivalence.v:140: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 422us; walltime 0.020 s; speed 21.329 ms/s\n- Verilator: cpu 0.020 s on 1 threads; allocated 5 MB\n"
+    },
+    {
+      "cache": 1,
+      "pipe": 1,
+      "seed": 271828,
+      "result": "ALL TESTS PASSED: 42233 cycles; slots=333/551/546/228/68/465; walker=66/464 chip=254/297; resets=16 phase_jumps=16\n- /home/adam/ap040x2/tests/ap040/tb_sdram_timing_equivalence.v:140: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 422us; walltime 0.019 s; speed 21.664 ms/s\n- Verilator: cpu 0.019 s on 1 threads; allocated 5 MB\n"
+    },
+    {
+      "cache": 1,
+      "pipe": 1,
+      "seed": 314159,
+      "result": "ALL TESTS PASSED: 42233 cycles; slots=392/559/548/160/72/460; walker=71/454 chip=285/274; resets=16 phase_jumps=16\n- /home/adam/ap040x2/tests/ap040/tb_sdram_timing_equivalence.v:140: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 422us; walltime 0.020 s; speed 21.336 ms/s\n- Verilator: cpu 0.020 s on 1 threads; allocated 5 MB\n"
+    },
+    {
+      "cache": 0,
+      "pipe": 0,
+      "seed": 1,
+      "result": "ALL TESTS PASSED: 42233 cycles; slots=397/520/529/180/47/518; walker=46/515 chip=289/231; resets=16 phase_jumps=16\n- /home/adam/ap040x2/tests/ap040/tb_sdram_timing_equivalence.v:140: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 422us; walltime 0.018 s; speed 23.561 ms/s\n- Verilator: cpu 0.018 s on 1 threads; allocated 5 MB\n"
+    },
+    {
+      "cache": 0,
+      "pipe": 0,
+      "seed": 271828,
+      "result": "ALL TESTS PASSED: 42233 cycles; slots=334/551/545/228/70/463; walker=68/461 chip=254/297; resets=16 phase_jumps=16\n- /home/adam/ap040x2/tests/ap040/tb_sdram_timing_equivalence.v:140: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 422us; walltime 0.018 s; speed 23.847 ms/s\n- Verilator: cpu 0.018 s on 1 threads; allocated 5 MB\n"
+    },
+    {
+      "cache": 0,
+      "pipe": 0,
+      "seed": 314159,
+      "result": "ALL TESTS PASSED: 42233 cycles; slots=391/559/549/160/72/460; walker=71/454 chip=285/274; resets=16 phase_jumps=16\n- /home/adam/ap040x2/tests/ap040/tb_sdram_timing_equivalence.v:140: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 422us; walltime 0.018 s; speed 24.007 ms/s\n- Verilator: cpu 0.018 s on 1 threads; allocated 5 MB\n"
+    }
+  ],
+  "programs": [
+    {
+      "label": "sdram",
+      "parameters": [
+        "CYC_PHASE=1",
+        "CPU_PHASE=0"
+      ],
+      "results": [
+        {
+          "program": "t_fpu",
+          "passed": true,
+          "run_cycles": [
+            528863
+          ],
+          "phases": []
+        },
+        {
+          "program": "t_mmu",
+          "passed": true,
+          "run_cycles": [
+            419295
+          ],
+          "phases": []
+        }
+      ]
+    },
+    {
+      "label": "sdram_ph3",
+      "parameters": [
+        "CYC_PHASE=1",
+        "CPU_PHASE=3"
+      ],
+      "results": [
+        {
+          "program": "t_mmu",
+          "passed": true,
+          "run_cycles": [
+            1834687
+          ],
+          "phases": []
+        },
+        {
+          "program": "t_fpu",
+          "passed": true,
+          "run_cycles": [
+            693791
+          ],
+          "phases": []
+        }
+      ]
+    },
+    {
+      "label": "sdram_nx",
+      "parameters": [
+        "CYC_PHASE=1",
+        "CPU_PHASE=3",
+        "CPU_CACHE=0",
+        "MAX_CYCLES=6000000"
+      ],
+      "results": [
+        {
+          "program": "t_mmu",
+          "passed": true,
+          "run_cycles": [
+            3571807
+          ],
+          "phases": []
+        },
+        {
+          "program": "t_fpu",
+          "passed": true,
+          "run_cycles": [
+            1187583
+          ],
+          "phases": []
+        }
+      ]
+    },
+    {
+      "label": "sdram_rp1",
+      "parameters": [
+        "CYC_PHASE=1",
+        "CPU_PHASE=3",
+        "READ_PIPE=1"
+      ],
+      "results": [
+        {
+          "program": "t_mmu",
+          "passed": true,
+          "run_cycles": [
+            1834687
+          ],
+          "phases": []
+        },
+        {
+          "program": "t_fpu",
+          "passed": true,
+          "run_cycles": [
+            693791
+          ],
+          "phases": []
+        }
+      ]
+    },
+    {
+      "label": "dualram",
+      "parameters": [
+        "CYC_PHASE=1",
+        "CPU_PHASE=3"
+      ],
+      "results": [
+        {
+          "program": "t_fpu",
+          "passed": true,
+          "run_cycles": [
+            671519
+          ],
+          "phases": []
+        },
+        {
+          "program": "t_mmu",
+          "passed": true,
+          "run_cycles": [
+            1828767
+          ],
+          "phases": []
+        }
+      ]
+    },
+    {
+      "label": "dualram_rp1",
+      "parameters": [
+        "CYC_PHASE=1",
+        "CPU_PHASE=3",
+        "READ_PIPE=1"
+      ],
+      "results": [
+        {
+          "program": "t_fpu",
+          "passed": true,
+          "run_cycles": [
+            676287
+          ],
+          "phases": [],
+          "profile": []
+        },
+        {
+          "program": "t_mmu",
+          "passed": true,
+          "run_cycles": [
+            1832959
+          ],
+          "phases": [],
+          "profile": []
+        }
+      ]
+    },
+    {
+      "label": "dualram_nx",
+      "parameters": [
+        "CYC_PHASE=1",
+        "CPU_PHASE=3",
+        "CPU_CACHE=0",
+        "MAX_CYCLES=6000000"
+      ],
+      "results": [
+        {
+          "program": "t_fpu",
+          "passed": true,
+          "run_cycles": [
+            1447583
+          ],
+          "phases": [],
+          "profile": []
+        }
+      ]
+    }
+  ],
+  "chipset_logs": {
+    "sdram32": "tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)\ninit complete at cycle 1033, equivalence monitor armed\nchipset reads: chipRD and chip48 match the reference in all rotations\nchipset writes: byte-masked single-lane writes verified\ncpu port: cached fills and write buffer match the reference\nwalker port: 32-bit read/write identical to the reference\nFILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4\nFILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)\nFILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)\nline fill under chipset traffic: 4 beats delivered, data correct\ncoherence: chipset writes are visible to the 32-bit fill port\nmemory image: all three controllers hold the expected 8KB window\nlockstep: chip 2 saw the same command as chip 1 on all 2145 cycles\nALL TESTS PASSED\n- /home/adam/ap040x2/tests/ap040/tb_sdram32.v:1197: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 19us; walltime 0.002 s; speed 7.781 ms/s\n- Verilator: cpu 0.002 s on 1 threads; allocated 5 MB\n",
+    "sdram32_nomod": "tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)\nno-module probe check only; functional battery skipped\nALL TESTS PASSED\n- /home/adam/ap040x2/tests/ap040/tb_sdram32.v:1197: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 9us; walltime 0.001 s; speed 6.217 ms/s\n- Verilator: cpu 0.001 s on 1 threads; allocated 5 MB\n",
+    "sdram32_brk_lock": "tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)\ninit complete at cycle 1033, equivalence monitor armed\nFAIL: chipRD mismatch (DUAL=1) at cycle 1059 state 10: dut=000000000000585f ref=0000000000005a5b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1060 state 11: dut=000000000000585f ref=0000000000005a5b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1061 state 12: dut=000000000000585f ref=0000000000005a5b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1062 state 13: dut=000000000000585f ref=0000000000005a5b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1063 state 14: dut=000000000000585f ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1063 state 14: dut=00005b5b5a5f0000 ref=00005b5b585b0000\nFAIL: chipRD mismatch (DUAL=1) at cycle 1064 state 15: dut=000000000000585f ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1064 state 15: dut=00005b5b5a5f0000 ref=00005b5b585b0000\nFAIL: chipRD mismatch (DUAL=1) at cycle 1065 state 0: dut=000000000000585f ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1065 state 0: dut=00005b5b5a5f595b ref=00005b5b585b595b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1066 state 1: dut=000000000000585f ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1066 state 1: dut=00005b5b5a5f595b ref=00005b5b585b595b\nFAIL: DUAL chipRD @0000200 = 585f, expected 5a5b\nFAIL: DUAL chip48 @0000200 = 5b5b5a5f595b, expected 5b5b585b595b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1067 state 2: dut=000000000000585f ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1067 state 2: dut=00005b5b5a5f595b ref=00005b5b585b595b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1068 state 3: dut=000000000000585f ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1068 state 3: dut=00005b5b5a5f595b ref=00005b5b585b595b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1069 state 4: dut=000000000000585f ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1069 state 4: dut=00005b5b5a5f595b ref=00005b5b585b595b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1070 state 5: dut=000000000000585f ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1070 state 5: dut=00005b5b5a5f595b ref=00005b5b585b595b\nFAIL: DUAL chip48 @0000202 = 5a5f595b585f, expected 585b595b5a5b\nFAIL: DUAL chipRD @0000204 = 5a5f, expected 585b\nFAIL: DUAL chip48 @0000204 = 595b585f5b5b, expected 595b5a5b5b5b\nFAIL: DUAL chip48 @0000206 = 585f5b5b5a5f, expected 5a5b5b5b585b\nFAIL: DUAL chip48 @000050e = dc5cdf58de5c, expected de58df58dc58\nFAIL: DUAL chipRD @0000754 = f25d, expected f059\nFAIL: DUAL chip48 @0000754 = f159f05df359, expected f159f259f359\nFAIL: DUAL chipRD @0000400 = 585c, expected 1234\nFAIL: DUAL chip48 @0000400 = 56785a5c59cd, expected 5678ab5859cd\nFAIL: DUAL chipRD @0000404 = 5a5c, expected ab58\nFAIL: DUAL chip48 @0000404 = 59cd585c5678, expected 59cd12345678\nFAIL: DUAL chipRD @0000408 = 5c5c, expected 5e58\nFAIL: DUAL chip48 @0000408 = 5f585e5c5d58, expected 5f585c585d58\nFAIL: DUAL cpuRD @0000800 = 585a, expected 5a5e\nFAIL: DUAL cpuRD @0000a04 = 5a5b, expected 585f\nFAIL: DUAL cpuRD @0000c00 = 5858, expected cafe\nFAIL: DUAL walker image read = 585c5678, expected 12345678\nFAIL: DUAL fill @0000800 beat 0 = 585a5b5e, expected 5a5e5b5e\nFAIL: DUAL fill @0000800 beat 1 = 5e5a595e, expected 585e595e\nFAIL: DUAL fill @0000800 beat 2 = 5c5a5f5e, expected 5e5e5f5e\nFAIL: DUAL fill @0000800 beat 3 = 5a5a5d5e, expected 5c5e5d5e\nFILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4\nFILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)\nFILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)\nFAIL: DUAL fill @0000900 beat 0 = d85adb5e, expected da5edb5e\nFAIL: DUAL fill @0000900 beat 1 = de5ad95e, expected d85ed95e\nFAIL: DUAL fill @0000900 beat 2 = dc5adf5e, expected de5edf5e\nFAIL: DUAL fill @0000900 beat 3 = da5add5e, expected dc5edd5e\nFAIL: DUAL fill @0001400 beat 0 = 5854beef, expected deadbeef\nFAIL: DUAL fill @0001400 beat 1 = 5e54face, expected feedface\nFAIL: DUAL fill @0001400 beat 2 = 5c545f50, expected 5e505f50\nFAIL: DUAL fill @0001400 beat 3 = 5a545d50, expected 5c505d50\nFAIL: chipset writes not coherent with the 32-bit fill port: beats 5854beef 5e54face\nFAIL: secondary memory word 512 (unit 256) = 5a58, expected 1234\nFAIL: secondary memory word 514 (unit 257) = 5858, expected ab58\nFAIL: secondary memory word 768 (unit 384) = 5a59, expected 1234\nFAIL: secondary memory word 1026 (unit 513) = 3c5a, expected 585e\nFAIL: secondary memory word 1536 (unit 768) = 5a5c, expected cafe\nFAIL: secondary memory word 1794 (unit 897) = 1234, expected 585d\nFAIL: secondary memory word 2560 (unit 1280) = 5a50, expected dead\nFAIL: secondary memory word 2562 (unit 1281) = 5850, expected feed\nlockstep: chip 2 saw the same command as chip 1 on all 2145 cycles\nTEST FAILED with 1871 errors\n- /home/adam/ap040x2/tests/ap040/tb_sdram32.v:1197: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 19us; walltime 0.003 s; speed 7.528 ms/s\n- Verilator: cpu 0.002 s on 1 threads; allocated 5 MB\n",
+    "sdram32_brk_lane": "tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)\ninit complete at cycle 1033, equivalence monitor armed\nFAIL: chipRD mismatch (DUAL=1) at cycle 1059 state 10: dut=0000000000005b5b ref=0000000000005a5b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1060 state 11: dut=0000000000005b5b ref=0000000000005a5b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1061 state 12: dut=0000000000005b5b ref=0000000000005a5b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1062 state 13: dut=0000000000005b5b ref=0000000000005a5b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1063 state 14: dut=0000000000005b5b ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1063 state 14: dut=00005b5b595b0000 ref=00005b5b585b0000\nFAIL: chipRD mismatch (DUAL=1) at cycle 1064 state 15: dut=0000000000005b5b ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1064 state 15: dut=00005b5b595b0000 ref=00005b5b585b0000\nFAIL: chipRD mismatch (DUAL=1) at cycle 1065 state 0: dut=0000000000005b5b ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1065 state 0: dut=00005b5b595b595b ref=00005b5b585b595b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1066 state 1: dut=0000000000005b5b ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1066 state 1: dut=00005b5b595b595b ref=00005b5b585b595b\nFAIL: DUAL chipRD @0000200 = 5b5b, expected 5a5b\nFAIL: DUAL chip48 @0000200 = 5b5b595b595b, expected 5b5b585b595b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1067 state 2: dut=0000000000005b5b ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1067 state 2: dut=00005b5b595b595b ref=00005b5b585b595b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1068 state 3: dut=0000000000005b5b ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1068 state 3: dut=00005b5b595b595b ref=00005b5b585b595b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1069 state 4: dut=0000000000005b5b ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1069 state 4: dut=00005b5b595b595b ref=00005b5b585b595b\nFAIL: chipRD mismatch (DUAL=1) at cycle 1070 state 5: dut=0000000000005b5b ref=0000000000005a5b\nFAIL: chip48 mismatch (DUAL=1) at cycle 1070 state 5: dut=00005b5b595b595b ref=00005b5b585b595b\nFAIL: DUAL chip48 @0000202 = 595b595b5b5b, expected 585b595b5a5b\nFAIL: DUAL chipRD @0000204 = 595b, expected 585b\nFAIL: DUAL chip48 @0000204 = 595b5b5b5b5b, expected 595b5a5b5b5b\nFAIL: DUAL chip48 @0000206 = 5b5b5b5b595b, expected 5a5b5b5b585b\nFAIL: DUAL chip48 @000050e = df58df58dd58, expected de58df58dc58\nFAIL: DUAL chipRD @0000754 = f159, expected f059\nFAIL: DUAL chip48 @0000754 = f159f359f359, expected f159f259f359\nFAIL: DUAL chipRD @0000400 = 5678, expected 1234\nFAIL: DUAL chip48 @0000400 = 567859cd59cd, expected 5678ab5859cd\nFAIL: DUAL chipRD @0000404 = 59cd, expected ab58\nFAIL: DUAL chip48 @0000404 = 59cd56785678, expected 59cd12345678\nFAIL: DUAL chipRD @0000408 = 5f58, expected 5e58\nFAIL: DUAL chip48 @0000408 = 5f585d585d58, expected 5f585c585d58\nFAIL: DUAL cpuRD @0000800 = 5b5e, expected 5a5e\nFAIL: DUAL cpuRD @0000a04 = 595f, expected 585f\nFAIL: DUAL cpuRD @0000c00 = babe, expected cafe\nFAIL: DUAL walker read = 56785678\nFAIL: DUAL walker image read = 56785678, expected 12345678\nFAIL: DUAL fill @0000800 beat 0 = 5b5e5b5e, expected 5a5e5b5e\nFAIL: DUAL fill @0000800 beat 1 = 595e595e, expected 585e595e\nFAIL: DUAL fill @0000800 beat 2 = 5f5e5f5e, expected 5e5e5f5e\nFAIL: DUAL fill @0000800 beat 3 = 5d5e5d5e, expected 5c5e5d5e\nFILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4\nFILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)\nFILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)\nFAIL: DUAL fill @0000900 beat 0 = db5edb5e, expected da5edb5e\nFAIL: DUAL fill @0000900 beat 1 = d95ed95e, expected d85ed95e\nFAIL: DUAL fill @0000900 beat 2 = df5edf5e, expected de5edf5e\nFAIL: DUAL fill @0000900 beat 3 = dd5edd5e, expected dc5edd5e\nFAIL: DUAL fill @0001400 beat 0 = beefbeef, expected deadbeef\nFAIL: DUAL fill @0001400 beat 1 = faceface, expected feedface\nFAIL: DUAL fill @0001400 beat 2 = 5f505f50, expected 5e505f50\nFAIL: DUAL fill @0001400 beat 3 = 5d505d50, expected 5c505d50\nFAIL: chipset writes not coherent with the 32-bit fill port: beats beefbeef faceface\nmemory image: all three controllers hold the expected 8KB window\nlockstep: chip 2 saw the same command as chip 1 on all 2145 cycles\nTEST FAILED with 1960 errors\n- /home/adam/ap040x2/tests/ap040/tb_sdram32.v:1197: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 19us; walltime 0.002 s; speed 7.598 ms/s\n- Verilator: cpu 0.002 s on 1 threads; allocated 5 MB\n",
+    "sdram32_brk_wr": "tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)\ninit complete at cycle 1033, equivalence monitor armed\nchipset reads: chipRD and chip48 match the reference in all rotations\nFAIL: chipRD mismatch (DUAL=1) at cycle 1379 state 10: dut=0000000000005a58 ref=0000000000001234\nFAIL: chipRD mismatch (DUAL=1) at cycle 1380 state 11: dut=0000000000005a58 ref=0000000000001234\nFAIL: chipRD mismatch (DUAL=1) at cycle 1381 state 12: dut=0000000000005a58 ref=0000000000001234\nFAIL: chipRD mismatch (DUAL=1) at cycle 1382 state 13: dut=0000000000005a58 ref=0000000000001234\nFAIL: chipRD mismatch (DUAL=1) at cycle 1383 state 14: dut=0000000000005a58 ref=0000000000001234\nFAIL: chip48 mismatch (DUAL=1) at cycle 1383 state 14: dut=0000567858580000 ref=00005678ab580000\nFAIL: chipRD mismatch (DUAL=1) at cycle 1384 state 15: dut=0000000000005a58 ref=0000000000001234\nFAIL: chip48 mismatch (DUAL=1) at cycle 1384 state 15: dut=0000567858580000 ref=00005678ab580000\nFAIL: chipRD mismatch (DUAL=1) at cycle 1385 state 0: dut=0000000000005a58 ref=0000000000001234\nFAIL: chip48 mismatch (DUAL=1) at cycle 1385 state 0: dut=00005678585859cd ref=00005678ab5859cd\nFAIL: chipRD mismatch (DUAL=1) at cycle 1386 state 1: dut=0000000000005a58 ref=0000000000001234\nFAIL: chip48 mismatch (DUAL=1) at cycle 1386 state 1: dut=00005678585859cd ref=00005678ab5859cd\nFAIL: DUAL chipRD @0000400 = 5a58, expected 1234\nFAIL: DUAL chip48 @0000400 = 5678585859cd, expected 5678ab5859cd\nFAIL: chipRD mismatch (DUAL=1) at cycle 1387 state 2: dut=0000000000005a58 ref=0000000000001234\nFAIL: chip48 mismatch (DUAL=1) at cycle 1387 state 2: dut=00005678585859cd ref=00005678ab5859cd\nFAIL: chipRD mismatch (DUAL=1) at cycle 1388 state 3: dut=0000000000005a58 ref=0000000000001234\nFAIL: chip48 mismatch (DUAL=1) at cycle 1388 state 3: dut=00005678585859cd ref=00005678ab5859cd\nFAIL: chipRD mismatch (DUAL=1) at cycle 1389 state 4: dut=0000000000005a58 ref=0000000000001234\nFAIL: chip48 mismatch (DUAL=1) at cycle 1389 state 4: dut=00005678585859cd ref=00005678ab5859cd\nFAIL: chipRD mismatch (DUAL=1) at cycle 1390 state 5: dut=0000000000005a58 ref=0000000000001234\nFAIL: chip48 mismatch (DUAL=1) at cycle 1390 state 5: dut=00005678585859cd ref=00005678ab5859cd\nFAIL: DUAL chipRD @0000404 = 5858, expected ab58\nFAIL: DUAL chip48 @0000404 = 59cd5a585678, expected 59cd12345678\nFAIL: DUAL cpuRD @0000c00 = 5a5c, expected cafe\nFAIL: DUAL walker read = 5a595678\nFAIL: DUAL walker image read = 5a585678, expected 12345678\nFILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4\nFILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)\nFILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)\nFAIL: DUAL fill @0001400 beat 0 = 5a50beef, expected deadbeef\nFAIL: DUAL fill @0001400 beat 1 = 5850face, expected feedface\nFAIL: chipset writes not coherent with the 32-bit fill port: beats 5a50beef 5850face\nFAIL: secondary memory word 512 (unit 256) = 5a58, expected 1234\nFAIL: secondary memory word 514 (unit 257) = 5858, expected ab58\nFAIL: secondary memory word 768 (unit 384) = 5a59, expected 1234\nFAIL: secondary memory word 1536 (unit 768) = 5a5c, expected cafe\nFAIL: secondary memory word 2560 (unit 1280) = 5a50, expected dead\nFAIL: secondary memory word 2562 (unit 1281) = 5850, expected feed\nlockstep: chip 2 saw the same command as chip 1 on all 2145 cycles\nTEST FAILED with 645 errors\n- /home/adam/ap040x2/tests/ap040/tb_sdram32.v:1197: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 19us; walltime 0.002 s; speed 7.700 ms/s\n- Verilator: cpu 0.002 s on 1 threads; allocated 5 MB\n",
+    "sdram32_brk_rowshare": "tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)\ninit complete at cycle 1033, equivalence monitor armed\nSDRAM MODEL: ACTIVE into open bank 0 at t=95348\nSDRAM MODEL: AUTOREFRESH with an open bank at t=96756\nSDRAM MODEL: ACTIVE into open bank 0 at t=98164\nSDRAM MODEL: ACTIVE into open bank 0 at t=100980\nSDRAM MODEL: ACTIVE into open bank 0 at t=103796\nSDRAM MODEL: ACTIVE into open bank 0 at t=106612\nchipset reads: chipRD and chip48 match the reference in all rotations\nSDRAM MODEL: ACTIVE into open bank 0 at t=109428\nSDRAM MODEL: ACTIVE into open bank 0 at t=112244\nSDRAM MODEL: ACTIVE into open bank 0 at t=115060\nSDRAM MODEL: ACTIVE into open bank 0 at t=117876\nSDRAM MODEL: AUTOREFRESH with an open bank at t=119284\nSDRAM MODEL: ACTIVE into open bank 0 at t=120692\nSDRAM MODEL: ACTIVE into open bank 0 at t=123508\nSDRAM MODEL: ACTIVE into open bank 0 at t=126324\nchipset writes: byte-masked single-lane writes verified\nSDRAM MODEL: ACTIVE into open bank 0 at t=129140\nSDRAM MODEL: ACTIVE into open bank 0 at t=133364\nSDRAM MODEL: ACTIVE into open bank 0 at t=136180\nSDRAM MODEL: ACTIVE into open bank 0 at t=140404\nSDRAM MODEL: AUTOREFRESH with an open bank at t=141812\nSDRAM MODEL: ACTIVE into open bank 0 at t=144628\ncpu port: cached fills and write buffer match the reference\nSDRAM MODEL: ACTIVE into open bank 0 at t=147444\nSDRAM MODEL: ACTIVE into open bank 0 at t=150260\nSDRAM MODEL: ACTIVE into open bank 0 at t=153076\nwalker port: 32-bit read/write identical to the reference\nFILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4\nFILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)\nFILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)\nSDRAM MODEL: ACTIVE into open bank 0 at t=160116\nSDRAM MODEL: ACTIVE into open bank 0 at t=162932\nSDRAM MODEL: AUTOREFRESH with an open bank at t=164340\nSDRAM MODEL: ACTIVE into open bank 0 at t=165748\nline fill under chipset traffic: 4 beats delivered, data correct\nSDRAM MODEL: ACTIVE into open bank 0 at t=168564\nSDRAM MODEL: ACTIVE into open bank 0 at t=171380\nSDRAM MODEL: ACTIVE into open bank 0 at t=174196\nSDRAM MODEL: ACTIVE into open bank 0 at t=177012\ncoherence: chipset writes are visible to the 32-bit fill port\nmemory image: all three controllers hold the expected 8KB window\nSDRAM MODEL: AUTOREFRESH with an open bank at t=186868\nFAIL: 27 ACTIVE-into-open-bank violations (ref 27, pri 0, sec 0, 16b 0)\nFAIL: 5 refresh-with-open-bank violations\nlockstep: chip 2 saw the same command as chip 1 on all 2145 cycles\nTEST FAILED with 32 errors\n- /home/adam/ap040x2/tests/ap040/tb_sdram32.v:1197: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 19us; walltime 0.002 s; speed 7.704 ms/s\n- Verilator: cpu 0.002 s on 1 threads; allocated 5 MB\n",
+    "sdram32_brk_slotphase": "tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)\nSDRAM MODEL: ACTIVE into open bank 0 at t=76692\nSDRAM MODEL: ACTIVE into open bank 0 at t=76692\ninit complete at cycle 1074, equivalence monitor armed\nchipset reads: chipRD and chip48 match the reference in all rotations\nchipset writes: byte-masked single-lane writes verified\nFAIL: ramready mismatch (DUAL=1) at cycle 1633 state 14: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=0) at cycle 1633 state 14: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=1) at cycle 1634 state 15: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=0) at cycle 1634 state 15: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=1) at cycle 1635 state 0: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=0) at cycle 1635 state 0: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=1) at cycle 1636 state 1: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=0) at cycle 1636 state 1: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=1) at cycle 1637 state 2: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=0) at cycle 1637 state 2: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=1) at cycle 1638 state 3: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=0) at cycle 1638 state 3: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=1) at cycle 1639 state 4: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=0) at cycle 1639 state 4: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=1) at cycle 1640 state 5: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=0) at cycle 1640 state 5: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=1) at cycle 1641 state 6: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=0) at cycle 1641 state 6: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=1) at cycle 1642 state 7: dut=0000000000000001 ref=0000000000000000\nFAIL: ramready mismatch (DUAL=0) at cycle 1642 state 7: dut=0000000000000001 ref=0000000000000000\nFAIL: cpu_write @0000c00 timed out\nFAIL: cpu_write @0000c02 timed out\nFAIL: cpu_read @0000c00 timed out (ready r=0 d=1 z=1)\nFAIL: reference cpuRD @0000c00 = 585f, expected cafe\nFAIL: cpu_read @0000c02 timed out (ready r=0 d=1 z=1)\nFAIL: reference cpuRD @0000c02 = 585f, expected babe\nFAIL: walker write @0000600 timed out (r=0 d=1 z=1)\nFAIL: walker read @0000600 timed out (r=0 d=1 z=1)\nFAIL: reference walker read = 00000000\nFAIL: walker read @0000400 timed out (r=0 d=1 z=1)\nFILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4\nFILL LATENCY (DUAL=1): request -> 4th beat = 29 clk_114 cycles (includes the wait for the CCK slot)\nFILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)\ncoherence: chipset writes are visible to the 32-bit fill port\nFAIL: reference memory word 768 = 5a59, expected 1234\nFAIL: reference memory word 769 = 5b59, expected 5678\nFAIL: 2 ACTIVE-into-open-bank violations (ref 0, pri 1, sec 1, 16b 0)\nlockstep: chip 2 saw the same command as chip 1 on all 30178 cycles\nTEST FAILED with 114354 errors\n- /home/adam/ap040x2/tests/ap040/tb_sdram32.v:1197: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 266us; walltime 0.026 s; speed 10.168 ms/s\n- Verilator: cpu 0.026 s on 1 threads; allocated 5 MB\n",
+    "sdram32_rp1": "tb_sdram32: sdram_ctrl vs sdram32_ctrl(DUAL=1) vs sdram32_ctrl(DUAL=0)\ninit complete at cycle 1033, equivalence monitor armed\nchipset reads: chipRD and chip48 match the reference in all rotations\nchipset writes: byte-masked single-lane writes verified\ncpu port: cached fills and write buffer match the reference\nwalker port: 32-bit read/write identical to the reference\nFILL LATENCY (DUAL=1): slot grant -> 4th beat = 15 clk_114 cycles = 4 core cycles at ce=4\nFILL LATENCY (DUAL=1): request -> 4th beat = 21 clk_114 cycles (includes the wait for the CCK slot)\nFILL LATENCY (DUAL=0): slot grant -> 4th beat = 31 clk_114 cycles (two slots, two beats per longword)\nline fill under chipset traffic: 4 beats delivered, data correct\ncoherence: chipset writes are visible to the 32-bit fill port\nmemory image: all three controllers hold the expected 8KB window\nlockstep: chip 2 saw the same command as chip 1 on all 2161 cycles\nALL TESTS PASSED\n- /home/adam/ap040x2/tests/ap040/tb_sdram32.v:1197: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 19us; walltime 0.002 s; speed 7.770 ms/s\n- Verilator: cpu 0.002 s on 1 threads; allocated 5 MB\n"
+  }
+}
