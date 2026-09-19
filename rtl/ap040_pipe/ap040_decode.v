@@ -1130,6 +1130,22 @@ wire is_pea_idx   = pea_shape && ea_indexed_mode;
 wire is_pea_pcrel = pea_shape && ea_pcrel_mode;
 wire is_pea_gather = is_pea_disp || is_pea_idx || is_pea_pcrel;
 
+// LEA and PEA with an ABSOLUTE address (milestone 61). PEA $xxx.L is how a
+// string constant gets pushed, and LEA $xxx.L,An is a real encoding a
+// compiler may emit even though MOVEA.L #imm,An has the same effect --
+// milestone 42 noted the equivalence and then left the opcode itself
+// undecoded, which is a gap rather than a redundancy.
+//
+// Both ride held_is_abs, which already gathers the address and already sets
+// id_is_abs so ea_target is eac_imm. The property they add is that the
+// instruction delivers the ADDRESS rather than the contents: no memory read
+// at all, and no condition codes. That distinction milestone 59 did not
+// need, because every absolute form it reached did read memory.
+wire is_lea_abs = lea_shape && abs_mode;
+wire is_pea_abs = pea_shape && abs_mode;
+wire is_eaonly_abs   = is_lea_abs || is_pea_abs;
+wire is_eaonly_abs_l = is_eaonly_abs && abs_long;
+
 // One op map for all three shapes: the nibble alone picks the operation.
 wire [5:0] alu_nib_op = (if_opcode[14:12] == 3'b000) ? `AP040_ALU_OR  :
                         (if_opcode[14:12] == 3'b001) ? `AP040_ALU_SUB :
@@ -1394,7 +1410,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
 wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_move_idx && !is_alu_idx && !is_lea_idx &&
-                   !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_pea_an && !is_pea_gather && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
+                   !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_pea_an && !is_pea_gather && !is_eaonly_abs && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an;
@@ -1430,6 +1446,8 @@ reg  [5:0]  held_imm_op;
 reg  [1:0]  held_imm_size;
 reg         held_imm_nowrite;
 reg         held_imm_dest9;
+reg         held_abs_lea;       // absolute, delivering the address to An
+reg         held_abs_push;      // absolute, pushing the address
 reg         held_abs_alu;       // this absolute form carries an operation, not just a MOVE
 reg         held_abs_rmw;       // ...and writes its result back to that address
 reg         held_is_abs;
@@ -1564,6 +1582,8 @@ always @(posedge clk) begin
 		held_imm_size    <= `AP040_SZ_L;
 		held_imm_nowrite <= 1'b0;
 		held_imm_dest9   <= 1'b0;
+		held_abs_lea     <= 1'b0;
+		held_abs_push    <= 1'b0;
 		held_abs_alu     <= 1'b0;
 		held_abs_rmw     <= 1'b0;
 		held_is_abs      <= 1'b0;
@@ -1620,7 +1640,9 @@ always @(posedge clk) begin
 					// id_pc (held_pc, already set above), not id_next_pc, for
 					// its stacked PC -- see ap040_ea_fetch.v's header.
 					id_next_pc      <= held_pc + 32'd2 + (held_is_long ? 32'd4 : 32'd2);
-					id_dest_reg     <= held_is_abs  ? {1'b0, held_dest_reg} :
+					id_dest_reg     <= (held_is_abs && held_abs_push) ? 4'd15 :
+					                    (held_is_abs && held_abs_lea)  ? {1'b1, held_dest_reg} :
+					                    held_is_abs  ? {1'b0, held_dest_reg} :
 					                    held_is_imm  ? (held_imm_dest9 ? {held_imm_areg, held_dest_reg}
 					                                                     : {1'b0, held_reg}) :
 					                    held_is_dbcc ? {1'b0, held_reg} :
@@ -1695,7 +1717,7 @@ always @(posedge clk) begin
 					                    (held_is_movec && !held_movec_dir && !movec_illegal_gather);
 					// MOVEA sets no condition codes.
 					id_writes_ccr   <= held_is_move_disp || (held_is_alu_disp && held_alu_ccr) ||
-					                    held_is_abs || held_is_stabs ||
+					                    (held_is_abs && !held_abs_lea && !held_abs_push) || held_is_stabs ||
 					                    (held_is_imm && held_imm_ccr);
 					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
 					                    !held_is_link && !held_is_movem && !held_is_jmp &&
@@ -1703,18 +1725,21 @@ always @(posedge clk) begin
 					                    !held_is_imm && !held_is_abs && !held_is_stabs;
 					id_is_scc       <= 1'b0;
 					id_is_dbcc      <= held_is_dbcc;
-					id_is_mem_src   <= held_is_move_disp || held_is_alu_disp || held_is_abs;
+					// LEA and PEA deliver the address itself, so unlike every
+					// other absolute form they read nothing.
+					id_is_mem_src   <= held_is_move_disp || held_is_alu_disp ||
+					                   (held_is_abs && !held_abs_lea && !held_abs_push);
 					id_is_abs       <= held_is_abs || held_is_stabs;
 					id_is_store     <= held_is_stabs;
 					id_is_postinc   <= 1'b0;
 					id_is_predec    <= 1'b0;
 					id_is_jmp       <= held_is_jmp;
-					id_is_lea       <= held_is_lea && !held_lea_push;
+					id_is_lea       <= (held_is_lea && !held_lea_push) || (held_is_abs && held_abs_lea);
 					id_sxt_w        <= held_is_alu_disp && held_alu_sxt;
 					id_is_rmw       <= (held_is_alu_disp && held_alu_rmw) || held_abs_rmw;
 					id_ea_indexed   <= held_ea_indexed;
 					id_ea_pcrel     <= held_ea_pcrel;
-					id_is_pea       <= held_is_lea && held_lea_push;
+					id_is_pea       <= (held_is_lea && held_lea_push) || (held_is_abs && held_abs_push);
 					id_is_link      <= held_is_link;
 					id_is_div       <= held_is_imm && held_imm_div;
 					id_div_signed   <= held_is_imm && held_imm_divs;
@@ -1742,7 +1767,7 @@ always @(posedge clk) begin
 			              is_adda_disp || is_link || is_movem || is_muldiv_imm ||
 			              is_alu_dst_disp || is_move_idx || is_alu_idx || is_lea_idx ||
 			              is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_abs_alu ||
-			              is_pea_gather) begin
+			              is_pea_gather || is_eaonly_abs) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1755,7 +1780,7 @@ always @(posedge clk) begin
 				                 (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                 (is_move_imm && if_opcode[13:12] == 2'b10) ||
 				                 is_move_abs_l || is_movea_imm || is_st_abs_l || is_adda_imm_l ||
-				                 is_abs_alu_l;
+				                 is_abs_alu_l || is_eaonly_abs_l;
 				held_is_imm      <= is_imm_alu || is_move_imm || is_movea_imm || is_adda_imm ||
 				                    is_muldiv_imm;
 				held_imm_op      <= is_mul_imm  ? (is_muldiv_imm_signed ? `AP040_ALU_MULS : `AP040_ALU_MULU) :
@@ -1772,7 +1797,9 @@ always @(posedge clk) begin
 				held_imm_ccr     <= is_imm_alu || is_move_imm || is_cmpa_imm || is_muldiv_imm;
 				held_imm_div     <= is_div_imm;
 				held_imm_divs    <= is_div_imm && is_muldiv_imm_signed;
-				held_is_abs      <= is_move_abs || is_abs_alu;
+				held_is_abs      <= is_move_abs || is_abs_alu || is_eaonly_abs;
+				held_abs_lea     <= is_lea_abs;
+				held_abs_push    <= is_pea_abs;
 				held_abs_alu     <= is_abs_alu;
 				// TST reads without writing; everything else in the unary
 				// group writes its result back, and the binary family's
@@ -1823,7 +1850,8 @@ always @(posedge clk) begin
 				                  (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                  (is_move_imm && if_opcode[13:12] == 2'b10) ||
 				                  is_move_abs_l || is_movea_imm || is_st_abs_l ||
-				                  is_adda_imm_l || is_abs_alu_l) ? 2'd2 : 2'd1;
+				                  is_adda_imm_l || is_abs_alu_l ||
+				                  is_eaonly_abs_l) ? 2'd2 : 2'd1;
 			end else begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;

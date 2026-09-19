@@ -1386,10 +1386,18 @@ real MMU or bus-error path arrives, which is the same boundary
       `PEA (An)`, where the displacement is zero and the two are the same
       value. Three of the four modes catch it; the simplest one cannot.
 
-      Absolute is NOT reached. LEA never needed it -- `LEA $xxx.L,An` is
-      `MOVEA.L #imm,An` -- but PEA has no such equivalent, so this is a real
-      gap rather than a redundant one, and it needs a push property on
-      `held_is_abs`.
+      **Milestone 61** closed that, and found the same hole in LEA.
+      `LEA $xxx.L,An` is a real encoding a compiler may emit; milestone 42
+      noted that `MOVEA.L #imm,An` has the same EFFECT and then left the
+      opcode undecoded, which is a gap rather than a redundancy. Both ride
+      `held_is_abs` with one property: the instruction delivers the ADDRESS
+      rather than the contents, so it reads no memory and sets no flags --
+      a distinction milestone 59 never needed, because every absolute form
+      it reached did read memory.
+
+      Verified by leaving them reading, as every other absolute form does:
+      A1 comes back `DEADBEEF` and A2 `CAFEBABE`, the seeded contents of the
+      addresses they should merely have named.
 
       ### When the right answer and the wrong one look the same
 
