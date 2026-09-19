@@ -143,6 +143,11 @@ module cpu_wrapper
 	// into the CPU clock so ap040_cache can invalidate the line.
 	input             snoop_tgl,
 	input      [24:1] snoop_adr,
+	// Second, independent producer: the DDR controller, which holds Fast RAM.
+	// It is NOT merged with the pair above before the crossing -- see the
+	// arbiter below for why an OR of two toggles is not safe.
+	input             ddr_snoop_tgl,
+	input      [24:1] ddr_snoop_adr,
 	output            nmi_ack_toggle,
 	output reg [31:0] nmi_addr,
 
@@ -423,19 +428,67 @@ end endgenerate
 // four CPU clocks, so a two-flop synchroniser on the toggle plus one
 // cycle to act keeps up without a queue.  The address is held by the
 // producer until the next write, so it is stable when the toggle arrives.
+// TWO producers now: the SDRAM controller (chip RAM, written by the chipset)
+// and the DDR controller (Fast RAM, written by CD-ROM DMA).  They are
+// captured and arbitrated separately, never ORed.  A toggle signals an event
+// by CHANGING, so two toggles combined through an OR cancel whenever both
+// flip inside one detection window and the receiver sees no edge at all --
+// the event simply disappears.  The held address is per-producer as well, so
+// even a surviving merged edge could not say which address it carried.
+//
+// Each side gets its own synchronizer, its own edge detector and its own
+// one-deep pending slot; the arbiter below presents at most one to the cache
+// per cycle, chip side first.  Nothing can be lost: a producer cannot raise
+// a second event until its toggle flips again, which takes at least two of
+// its own clocks, and a slot is freed every cycle it is serviced.
 reg  [2:0] snoop_tgl_s;
+reg  [2:0] dsnoop_tgl_s;
+reg        snoop_pend;
+reg        dsnoop_pend;
+reg [31:0] snoop_addr_c;
+reg [31:0] dsnoop_addr_c;
 reg        snoop_stb_r;
 reg [31:0] snoop_addr_r;
+
+wire chip_snoop_edge = snoop_tgl_s[2]  ^ snoop_tgl_s[1];
+wire ddr_snoop_edge  = dsnoop_tgl_s[2] ^ dsnoop_tgl_s[1];
+
 always @(posedge clk) begin
 	if (!reset) begin
-		snoop_tgl_s <= 0;
-		snoop_stb_r <= 0;
+		snoop_tgl_s  <= 0;
+		dsnoop_tgl_s <= 0;
+		snoop_pend   <= 0;
+		dsnoop_pend  <= 0;
+		snoop_stb_r  <= 0;
 	end
 	else begin
-		snoop_tgl_s <= {snoop_tgl_s[1:0], snoop_tgl};
-		snoop_stb_r <= snoop_tgl_s[2] ^ snoop_tgl_s[1];
-		if (snoop_tgl_s[2] ^ snoop_tgl_s[1])
-			snoop_addr_r <= {7'd0, snoop_adr, 1'b0};
+		snoop_tgl_s  <= {snoop_tgl_s[1:0],  snoop_tgl};
+		dsnoop_tgl_s <= {dsnoop_tgl_s[1:0], ddr_snoop_tgl};
+
+		if (chip_snoop_edge) begin
+			snoop_pend   <= 1'b1;
+			snoop_addr_c <= {7'd0, snoop_adr, 1'b0};
+		end
+		if (ddr_snoop_edge) begin
+			dsnoop_pend   <= 1'b1;
+			dsnoop_addr_c <= {7'd0, ddr_snoop_adr, 1'b0};
+		end
+
+		// One invalidate per cycle.  The guards keep a slot that is being
+		// armed this cycle from also being cleared this cycle; it is simply
+		// serviced on the next, which the producers are far too slow to
+		// overrun.
+		snoop_stb_r <= 1'b0;
+		if (snoop_pend && !chip_snoop_edge) begin
+			snoop_stb_r  <= 1'b1;
+			snoop_addr_r <= snoop_addr_c;
+			snoop_pend   <= 1'b0;
+		end
+		else if (dsnoop_pend && !ddr_snoop_edge) begin
+			snoop_stb_r  <= 1'b1;
+			snoop_addr_r <= dsnoop_addr_c;
+			dsnoop_pend  <= 1'b0;
+		end
 	end
 end
 

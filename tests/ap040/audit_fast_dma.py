@@ -46,15 +46,22 @@ def main():
         data = (ROOT / relative).read_bytes()
         (snap / Path(relative).name).write_bytes(data)
         hashes[relative] = hashlib.sha256(data).hexdigest()
-    # Refuse to silently call a hard-wired missing-port model the current
-    # design once a production DDR snoop export or CPU input changes.
+    # The export this audit asked for now exists, so the bench drives the cache
+    # from it rather than modelling its absence. Assert it is still there: if
+    # the port goes away the "wired" case would quietly fall back to no
+    # invalidate at all and look like a pass for the wrong reason.
     header = (snap / "ddram_ctrl.v").read_text().split(");", 1)[0]
-    assert "snoop" not in header.lower(), "DDR interface changed: update the integration bench"
+    assert "snoop_tgl" in header, "ddram_ctrl no longer exports a snoop"
     top = (snap / "Minimig.sv").read_text()
     cpu = re.search(r"\bcpu_wrapper\s+cpu_wrapper\s*\((.*?)\n\);", top, re.S)
     assert cpu, "CPU instantiation changed: review the snoop wiring"
     ports = re.sub(r"\s+", "", cpu.group(1))
     assert ".snoop_tgl(chip_snoop_tgl)" in ports and ".snoop_adr(chip_snoop_adr)" in ports
+    # The DDR side must reach the CPU too, or Fast RAM is cached unsnooped.
+    assert ".ddr_snoop_tgl(ddr_snoop_tgl)" in ports and ".ddr_snoop_adr(ddr_snoop_adr)" in ports, \
+        "cpu_wrapper no longer takes the DDR controller's snoop"
+    assert re.search(r"output\s+snoop_tgl", (ROOT / "rtl/ddram_ctrl.v").read_text()), \
+        "ddram_ctrl no longer exports a snoop"
     compat = ROOT / "rtl/ap040/ap040_tg68k_compat.v"
     text = compat.read_text()
     predicate = re.search(r"\twire cache_chip =.*?\n\twire cache_allow =", text, re.S)
@@ -70,7 +77,12 @@ def main():
          "--Mdir", obj, "-j", args.jobs, "-Wno-fatal", "-I" + str(snap),
          *[snap / p.name for p in paths if p.suffix == ".v"]], work / "compile.log")
     results = []
-    for mode, options in (("wired", []), ("bypass", ["+no_inner=1"]),
+    # "wired" now drives the cache from ddram_ctrl's REAL snoop export through
+    # the same edge detection cpu_wrapper does. "unsnooped" is the pre-fix
+    # world -- no invalidate reaches the CPU at all -- and must still go stale,
+    # or this gate has stopped being able to see the defect it exists for.
+    for mode, options in (("wired", ["+snoop=3"]), ("unsnooped", []),
+                          ("bypass", ["+no_inner=1"]),
                           ("snoop", ["+snoop=1"]), ("wrong_set", ["+snoop=2"])):
         for window in range(4):
             for ce in (1, 4):
@@ -91,9 +103,10 @@ def main():
     (work / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     controls_ok = all(r["passed"] for r in results if r["mode"] in ("bypass", "snoop"))
     wrong_set_ok = all(r["stale"] for r in results if r["mode"] == "wrong_set")
+    unsnooped_ok = all(r["stale"] for r in results if r["mode"] == "unsnooped")
     actual_ok = all(r["stale"] if args.expect_defect else r["passed"]
                     for r in results if r["mode"] == "wired")
-    if not (controls_ok and wrong_set_ok and actual_ok):
+    if not (controls_ok and wrong_set_ok and unsnooped_ok and actual_ok):
         raise SystemExit("Fast RAM DMA audit failed: see results.json")
     print("Expected defect matrix verified" if args.expect_defect else "Fast RAM DMA checks passed")
 

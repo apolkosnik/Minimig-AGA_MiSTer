@@ -57,7 +57,9 @@ ap040_cache inner (
  .c_ack(c_ack), .c_rdata(c_rdata), .sb_busy(sb_busy),
  .m_req(m_req), .m_write(m_write), .m_instr(m_instr), .m_size(m_size),
  .m_addr(m_addr), .m_wdata(m_wdata), .m_fc(m_fc),
- .m_ack(m_ack), .m_rdata(m_rdata), .m_err(1'b0), .s_stb(s_stb), .s_addr(s_addr)
+ .m_ack(m_ack), .m_rdata(m_rdata), .m_err(1'b0),
+ .s_stb(snoop_mode == 3 ? real_stb : s_stb),
+ .s_addr(snoop_mode == 3 ? real_addr : s_addr)
 );
 ap040_bus16_adapter adapter (
  .clk(clk), .nreset(reset_n), .clkena_in(bus_ce), .mem_berr(1'b0),
@@ -125,8 +127,24 @@ ddram_ctrl #(.CPU_CACHE(1)) outer (
  .ramshared(1'b0), .ramready(ready), .walker_req(1'b0), .walker_we(1'b0),
  .walker_addr(27'd0), .walker_wdata(32'd0), .walker_ack(), .walker_rdata(),
  .dmaAddr(dma_addr), .dmaCS(dma_cs), .dmaWE(dma_we), .dmaL(dma_l),
- .dmaU(dma_u), .dmaWR(dma_wr), .dmaRD(dma_rd), .dmaACK(dma_ack)
+ .dmaU(dma_u), .dmaWR(dma_wr), .dmaRD(dma_rd), .dmaACK(dma_ack),
+ .snoop_tgl(ddr_snoop_tgl), .snoop_addr(ddr_snoop_adr)
 );
+
+// snoop=3: drive the cache from the controller's REAL export instead of the
+// hand-placed invalidate the other modes use. Same edge detection cpu_wrapper
+// does, on the same signals, so a pass here means the export fires once per
+// DMA write and carries an address whose [9:4] select the right row.
+wire        ddr_snoop_tgl;
+wire [24:1] ddr_snoop_adr;
+reg  [2:0]  real_tgl_s = 0;
+reg         real_stb = 0;
+reg [31:0]  real_addr = 0;
+always @(posedge clk) begin
+ real_tgl_s <= {real_tgl_s[1:0], ddr_snoop_tgl};
+ real_stb   <= real_tgl_s[2] ^ real_tgl_s[1];
+ if (real_tgl_s[2] ^ real_tgl_s[1]) real_addr <= {7'd0, ddr_snoop_adr, 1'b0};
+end
 
 // DDR addresses are 64-bit WORD addresses. This array models the low 4 KB
 // of the selected region; full write addresses are checked separately.
@@ -187,7 +205,7 @@ task write_dma(input [31:0] addr, input [7:0] value);
   if (guard == 2000) $fatal(1, "HARNESS: CD DMA timeout");
   @(negedge chipclk); ak_req = 0; cd_req = 0;
   repeat (12) @(negedge chipclk);
-  if (snoop_mode != 0) begin
+  if (snoop_mode != 0 && snoop_mode != 3) begin
    @(negedge clk); s_addr = addr ^ (snoop_mode == 2 ? 32'h10 : 32'd0); s_stb = 1;
    @(negedge clk); s_stb = 0;
   end

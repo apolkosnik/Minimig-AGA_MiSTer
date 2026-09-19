@@ -442,6 +442,8 @@ cpu_wrapper cpu_wrapper
 (
 	.snoop_tgl    (chip_snoop_tgl  ),
 	.snoop_adr    (chip_snoop_adr  ),
+	.ddr_snoop_tgl(ddr_snoop_tgl   ),
+	.ddr_snoop_adr(ddr_snoop_adr   ),
 	.reset        (cpu_rst         ),
 	.reset_out    (cpu_nrst_out    ),
 
@@ -850,6 +852,9 @@ ddram_ctrl #(.CPU_CACHE(1)) ram2
 	.walker_wdata (walker_wdat_mem),
 	.walker_ack   (walker_ack2),
 	.walker_rdata (walker_rdata2),
+	.snoop_tgl    (ddr_snoop_tgl   ),
+	.snoop_addr   (ddr_snoop_adr   ),
+
 	.dmaAddr      (dma_ddr_addr    ),
 	.dmaCS        (dma_ddr_cs      ),
 	.dmaWE        (dma_ddr_we      ),
@@ -981,6 +986,8 @@ wire  [6:0] memcfg;
 wire        bootrom;   
 wire [15:0] ram_data;      // sram data bus
 wire [15:0] ramdata_in;    // sram data bus in
+wire        ddr_snoop_tgl;
+wire [24:1] ddr_snoop_adr;
 wire        chip_snoop_tgl;
 wire [24:1] chip_snoop_adr;
 wire [47:0] chip48;        // big chip read
