@@ -270,6 +270,8 @@ module ap040_ea_fetch
 	input             eac_is_dbcc,
 	input             eac_is_mem_src,
 	input             eac_is_abs,
+	input             eac_is_postinc,
+	input             eac_is_predec,
 	input             eac_is_jmp,
 	input             eac_is_bsr,
 	input             eac_is_jsr,
@@ -306,6 +308,12 @@ module ap040_ea_fetch
 	input             ex_fwd_valid,
 	input       [3:0] ex_fwd_dest,
 	input      [31:0] ex_fwd_data,
+	// Second EX forward: the (An)+/-(An) address update, which is a real
+	// architectural write and so must be visible to the very next
+	// instruction exactly as the primary result is.
+	input             ex_fwd2_valid,
+	input       [3:0] ex_fwd2_dest,
+	input      [31:0] ex_fwd2_data,
 
 	// ap040_pipe_l1.v port B -- read for a memory-source instruction or
 	// JMP/JSR's redirect target; write for BSR/JSR's push -- see header.
@@ -326,6 +334,9 @@ module ap040_ea_fetch
 	output reg  [5:0] eaf_alu_op,
 	output reg  [1:0] eaf_size,
 	output reg  [5:0] eaf_shcnt,
+	output reg        eaf_writes_an,
+	output reg  [3:0] eaf_an_reg,
+	output reg [31:0] eaf_an_data,
 	output reg        eaf_writes_reg,
 	output reg        eaf_writes_ccr,
 	output reg        eaf_is_branch,
@@ -370,7 +381,8 @@ reg mem_pending;   // an L1 port-B request is in flight for the CURRENT eac_*
 // need ea_target, milestone 17) -- iverilog requires a wire's declaration
 // to textually precede any use of it in another continuous assignment,
 // even though nothing here structurally depends on file order otherwise.
-wire fwd_a_from_ex = ex_fwd_valid && (ex_fwd_dest == eac_src_reg);
+wire fwd_a_from_ex  = ex_fwd_valid  && (ex_fwd_dest  == eac_src_reg);
+wire fwd_a_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == eac_src_reg);
 
 // Flat 3-way select on port A: immediate, else forwarded, else the
 // regfile's own (possibly write-through-bypassed) read. eac_src_a_is_imm
@@ -380,6 +392,7 @@ wire fwd_a_from_ex = ex_fwd_valid && (ex_fwd_dest == eac_src_reg);
 // value, decode having set eac_src_reg to An's unified index) -- see header.
 wire [31:0] operand_a = eac_src_a_is_imm ? eac_imm :
                          fwd_a_from_ex   ? ex_fwd_data :
+                         fwd_a_from_ex2  ? ex_fwd2_data :
                                            rdata_a;
 
 // The effective address: operand_a (An's value, resolved by the mux above)
@@ -393,7 +406,18 @@ wire [31:0] operand_a = eac_src_a_is_imm ? eac_imm :
 // An absolute address has no register term: eac_imm IS the address. Every
 // other mode here is base + displacement, which is why this is a mux rather
 // than decode arranging for operand_a to read zero -- no register does.
-wire [31:0] ea_target = eac_is_abs ? eac_imm : (operand_a + eac_imm);
+// -(An) accesses the DECREMENTED address, (An)+ the original one. Long only,
+// matching the memory-source support, so the step is always 4.
+wire [31:0] ea_target = eac_is_abs    ? eac_imm           :
+                        eac_is_predec ? (operand_a - 32'd4) :
+                                        (operand_a + eac_imm);
+
+// The value An takes afterwards. Both modes leave An at the same place --
+// just past the longword for (An)+, at the start of it for -(An) -- which is
+// why one expression covers both.
+wire [31:0] an_new = eac_is_postinc ? (operand_a + 32'd4) :
+                                      (operand_a - 32'd4);
+wire        an_write = eac_valid && (eac_is_postinc || eac_is_predec);
 
 // Address error on an odd JMP/JSR target (milestone 17, new): a SECOND
 // dynamic exception trigger, same reasoning as eac_is_priv below -- "this
@@ -494,11 +518,13 @@ assign raddr_a    = eac_src_reg;
 // port), so there is no live conflict left to resolve here at all.
 assign raddr_b    = eac_dest_reg;
 
-wire fwd_b_from_ex = ex_fwd_valid && (ex_fwd_dest == eac_dest_reg);
+wire fwd_b_from_ex  = ex_fwd_valid  && (ex_fwd_dest  == eac_dest_reg);
+wire fwd_b_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == eac_dest_reg);
 
 // Port B has no immediate case -- it's always "the destination register's
 // current value" -- so it's a flat 2-way select.
-wire [31:0] operand_b = fwd_b_from_ex ? ex_fwd_data : rdata_b;
+wire [31:0] operand_b = fwd_b_from_ex  ? ex_fwd_data  :
+                       fwd_b_from_ex2 ? ex_fwd2_data : rdata_b;
 
 // BSR/JSR's push address AND the new A7 value to commit are the SAME
 // expression, from operand_b (A7's current value via port B, decode having
@@ -619,6 +645,9 @@ always @(posedge clk) begin
 		eaf_alu_op     <= 6'h0;
 		eaf_size       <= `AP040_SZ_L;
 		eaf_shcnt      <= 6'd1;
+		eaf_writes_an  <= 1'b0;
+		eaf_an_reg     <= 4'd0;
+		eaf_an_data    <= 32'd0;
 		eaf_writes_reg <= 1'b0;
 		eaf_writes_ccr <= 1'b0;
 		eaf_is_branch  <= 1'b0;
@@ -681,6 +710,9 @@ always @(posedge clk) begin
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
+				eaf_writes_an  <= an_write;
+				eaf_an_reg     <= eac_src_reg;
+				eaf_an_data    <= an_new;
 				eaf_writes_reg <= eac_writes_reg;
 				eaf_writes_ccr <= eac_writes_ccr;
 				eaf_is_branch  <= eac_is_branch;
@@ -763,6 +795,9 @@ always @(posedge clk) begin
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
+				eaf_writes_an  <= an_write;
+				eaf_an_reg     <= eac_src_reg;
+				eaf_an_data    <= an_new;
 				// UNCONDITIONALLY 1, not forwarded from eac_writes_reg:
 				// every exception entry writes A7 the new SP, full stop --
 				// illegal/TRAP already had eac_writes_reg=1 for this exact
@@ -840,6 +875,9 @@ always @(posedge clk) begin
 				eaf_alu_op      <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
+				eaf_writes_an  <= an_write;
+				eaf_an_reg     <= eac_src_reg;
+				eaf_an_data    <= an_new;
 				// NOT 1: RTE's A7 restore does NOT go through the normal
 				// commit_reg/A7-bank path at all -- see ap040_execute.v's
 				// header for the real race that forces this (RTE's own SR
@@ -894,6 +932,9 @@ always @(posedge clk) begin
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
+				eaf_writes_an  <= an_write;
+				eaf_an_reg     <= eac_src_reg;
+				eaf_an_data    <= an_new;
 				eaf_writes_reg <= eac_writes_reg;
 				eaf_writes_ccr <= eac_writes_ccr;
 				eaf_is_branch  <= eac_is_branch;

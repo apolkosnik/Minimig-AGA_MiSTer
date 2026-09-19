@@ -56,6 +56,19 @@ module ap040_pipe_regfile
 
 	// direct stack pointer access for MOVEC/MOVE USP, independent of the
 	// currently active bank (never asserted together with the main write)
+	// Second write port (milestone 30). (An)+ and -(An) write TWO registers
+	// in one instruction -- the data to Dn and the updated address to An --
+	// and one commit path cannot do that. The aux port below is not a way
+	// out: it reaches only USP/ISP/MSP, never a GPR.
+	//
+	// Port 1 wins if both name the same register. No implemented instruction
+	// can do that (MOVE.L (An)+,Dn has distinct banks), but the priority is
+	// fixed rather than undefined so a future MOVEA.L (A0)+,A0 fails
+	// predictably instead of racing.
+	input             we2,
+	input       [3:0] waddr2,
+	input      [31:0] wdata2,
+
 	input             aux_we,
 	input       [1:0] aux_sel,     // 0=USP 1=ISP 2=MSP
 	input      [31:0] aux_wdata,
@@ -93,10 +106,12 @@ wire [31:0] sp_active = (sp_sel == 2'd0) ? usp : (sp_sel == 2'd1) ? isp : msp;
 // write and a same-address read of the same register committing in the
 // same cycle -- the WB-forward case -- and needs the read to see it; see
 // ap040_pipe_core.v's header comment for the full picture).
-assign rdata_a = (we && (waddr == raddr_a)) ? wdata :
+assign rdata_a = (we  && (waddr  == raddr_a)) ? wdata  :
+                 (we2 && (waddr2 == raddr_a)) ? wdata2 :
                  !raddr_a[3]            ? dreg[raddr_a[2:0]] :
                  (raddr_a[2:0] == 3'd7) ? sp_active : areg[raddr_a[2:0]];
-assign rdata_b = (we && (waddr == raddr_b)) ? wdata :
+assign rdata_b = (we  && (waddr  == raddr_b)) ? wdata  :
+                 (we2 && (waddr2 == raddr_b)) ? wdata2 :
                  !raddr_b[3]            ? dreg[raddr_b[2:0]] :
                  (raddr_b[2:0] == 3'd7) ? sp_active : areg[raddr_b[2:0]];
 
@@ -118,6 +133,19 @@ always @(posedge clk) begin
 					2'd0:    usp <= wdata;
 					2'd1:    isp <= wdata;
 					default: msp <= wdata;
+				endcase
+			end
+		end
+		// Second port, same shape as the first, applied after it so port 1
+		// wins a same-register collision.
+		if (we2) begin
+			if (!waddr2[3])            dreg[waddr2[2:0]] <= wdata2;
+			else if (waddr2[2:0] != 7) areg[waddr2[2:0]] <= wdata2;
+			else begin
+				case (sp_sel)
+					2'd0:    usp <= wdata2;
+					2'd1:    isp <= wdata2;
+					default: msp <= wdata2;
 				endcase
 			end
 		end

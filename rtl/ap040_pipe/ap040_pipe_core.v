@@ -178,7 +178,18 @@ wire  [5:0] id_alu_op;
 wire  [1:0] id_size;
 wire  [5:0] id_shcnt;
 wire        id_is_abs;
+wire        id_is_postinc, id_is_predec;
 wire        eac_is_abs;
+wire        eac_is_postinc, eac_is_predec;
+wire        eaf_writes_an;
+wire  [3:0] eaf_an_reg;
+wire [31:0] eaf_an_data;
+wire  [3:0] exe_dest_reg2;
+wire [31:0] exe_result_data2;
+wire        exe_writes_reg2;
+wire        ex_fwd2_valid;
+wire  [3:0] ex_fwd2_dest;
+wire [31:0] ex_fwd2_data;
 wire        id_src_a_is_imm, id_writes_reg, id_writes_ccr;
 wire        id_is_branch, id_is_scc, id_is_dbcc, id_is_mem_src, id_is_jmp;
 wire        id_is_bsr, id_is_jsr, id_is_trap, id_is_illegal;
@@ -279,6 +290,9 @@ wire [15:0] ex_sr_fwd_data;
 // see this file's header comment on commit_reg vs commit_ccr, and the new
 // milestone-15 note on commit_sr/commit_creg.
 wire commit_reg  = exe_valid && exe_writes_reg;
+// The second commit: an (An)+/-(An) address update riding alongside the
+// ordinary result, gated by its own exe_writes_reg2.
+wire commit_reg2 = exe_valid && exe_writes_reg2;
 wire commit_ccr  = exe_valid && exe_writes_ccr;
 wire commit_sr   = exe_valid && exe_writes_sr;
 wire commit_creg = exe_valid && exe_writes_creg;
@@ -419,6 +433,10 @@ ap040_pipe_regfile u_regfile
 	.raddr_b  (raddr_b),
 	.rdata_b  (rdata_b),
 
+	.we2      (commit_reg2),
+	.waddr2   (exe_dest_reg2),
+	.wdata2   (exe_result_data2),
+
 	.aux_we   (aux_we),
 	.aux_sel  (aux_sel),
 	.aux_wdata(aux_wdata),
@@ -536,6 +554,8 @@ ap040_decode u_id
 	.id_is_dbcc      (id_is_dbcc),
 	.id_is_mem_src   (id_is_mem_src),
 	.id_is_abs       (id_is_abs),
+	.id_is_postinc   (id_is_postinc),
+	.id_is_predec    (id_is_predec),
 	.id_is_jmp       (id_is_jmp),
 	.id_is_bsr       (id_is_bsr),
 	.id_is_jsr       (id_is_jsr),
@@ -573,6 +593,8 @@ ap040_ea_calc u_eac
 	.id_is_dbcc       (id_is_dbcc),
 	.id_is_mem_src    (id_is_mem_src),
 	.id_is_abs        (id_is_abs),
+	.id_is_postinc    (id_is_postinc),
+	.id_is_predec     (id_is_predec),
 	.id_is_jmp        (id_is_jmp),
 	.id_is_bsr        (id_is_bsr),
 	.id_is_jsr        (id_is_jsr),
@@ -603,6 +625,8 @@ ap040_ea_calc u_eac
 	.eac_is_dbcc      (eac_is_dbcc),
 	.eac_is_mem_src   (eac_is_mem_src),
 	.eac_is_abs       (eac_is_abs),
+	.eac_is_postinc   (eac_is_postinc),
+	.eac_is_predec    (eac_is_predec),
 	.eac_is_jmp       (eac_is_jmp),
 	.eac_is_bsr       (eac_is_bsr),
 	.eac_is_jsr       (eac_is_jsr),
@@ -643,6 +667,8 @@ ap040_ea_fetch #(
 	.eac_is_dbcc      (eac_is_dbcc),
 	.eac_is_mem_src   (eac_is_mem_src),
 	.eac_is_abs       (eac_is_abs),
+	.eac_is_postinc   (eac_is_postinc),
+	.eac_is_predec    (eac_is_predec),
 	.eac_is_jmp       (eac_is_jmp),
 	.eac_is_bsr       (eac_is_bsr),
 	.eac_is_jsr       (eac_is_jsr),
@@ -666,6 +692,9 @@ ap040_ea_fetch #(
 	.ex_fwd_valid     (ex_fwd_valid),
 	.ex_fwd_dest      (ex_fwd_dest),
 	.ex_fwd_data      (ex_fwd_data),
+	.ex_fwd2_valid    (ex_fwd2_valid),
+	.ex_fwd2_dest     (ex_fwd2_dest),
+	.ex_fwd2_data     (ex_fwd2_data),
 
 	.l1_addr_b        (l1_addr_b),
 	.l1_q_b           (l1_q_b),
@@ -684,6 +713,9 @@ ap040_ea_fetch #(
 	.eaf_alu_op       (eaf_alu_op),
 	.eaf_size         (eaf_size),
 	.eaf_shcnt        (eaf_shcnt),
+	.eaf_writes_an    (eaf_writes_an),
+	.eaf_an_reg       (eaf_an_reg),
+	.eaf_an_data      (eaf_an_data),
 	.eaf_writes_reg   (eaf_writes_reg),
 	.eaf_writes_ccr   (eaf_writes_ccr),
 	.eaf_is_branch    (eaf_is_branch),
@@ -723,6 +755,9 @@ ap040_execute u_ex
 	.eaf_alu_op       (eaf_alu_op),
 	.eaf_size         (eaf_size),
 	.eaf_shcnt        (eaf_shcnt),
+	.eaf_writes_an    (eaf_writes_an),
+	.eaf_an_reg       (eaf_an_reg),
+	.eaf_an_data      (eaf_an_data),
 	.eaf_writes_reg   (eaf_writes_reg),
 	.eaf_writes_ccr   (eaf_writes_ccr),
 	.eaf_is_branch    (eaf_is_branch),
@@ -758,6 +793,9 @@ ap040_execute u_ex
 	.ex_stall         (ex_stall),
 
 	.ex_fwd_valid     (ex_fwd_valid),
+	.ex_fwd2_valid    (ex_fwd2_valid),
+	.ex_fwd2_dest     (ex_fwd2_dest),
+	.ex_fwd2_data     (ex_fwd2_data),
 	.ex_fwd_dest      (ex_fwd_dest),
 	.ex_fwd_data      (ex_fwd_data),
 
@@ -772,6 +810,9 @@ ap040_execute u_ex
 	.exe_dest_reg     (exe_dest_reg),
 	.exe_result_data  (exe_result_data),
 	.exe_writes_reg   (exe_writes_reg),
+	.exe_dest_reg2    (exe_dest_reg2),
+	.exe_result_data2 (exe_result_data2),
+	.exe_writes_reg2  (exe_writes_reg2),
 	.exe_writes_ccr   (exe_writes_ccr),
 	.exe_result_flags (exe_result_flags),
 

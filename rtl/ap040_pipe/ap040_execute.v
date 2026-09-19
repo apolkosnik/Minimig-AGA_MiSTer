@@ -117,6 +117,9 @@ module ap040_execute
 	input       [5:0] eaf_alu_op,
 	input       [1:0] eaf_size,
 	input       [5:0] eaf_shcnt,
+	input             eaf_writes_an,
+	input       [3:0] eaf_an_reg,
+	input      [31:0] eaf_an_data,
 	input             eaf_writes_reg,
 	input             eaf_writes_ccr,
 	input             eaf_is_branch,
@@ -167,6 +170,9 @@ module ap040_execute
 
 	// "EX-forward" tap (combinational, live this cycle)
 	output            ex_fwd_valid,
+	output            ex_fwd2_valid,
+	output      [3:0] ex_fwd2_dest,
+	output     [31:0] ex_fwd2_data,
 	output      [3:0] ex_fwd_dest,
 	output     [31:0] ex_fwd_data,
 
@@ -192,6 +198,9 @@ module ap040_execute
 	output reg  [3:0] exe_dest_reg,
 	output reg [31:0] exe_result_data,
 	output reg        exe_writes_reg,
+	output reg  [3:0] exe_dest_reg2,
+	output reg [31:0] exe_result_data2,
+	output reg        exe_writes_reg2,
 	output reg        exe_writes_ccr,
 	output reg  [4:0] exe_result_flags,
 
@@ -436,6 +445,15 @@ assign ex_fwd_valid = eaf_valid && writes_reg_resolved;
 assign ex_fwd_dest  = eaf_dest_reg;
 assign ex_fwd_data  = combined_result;
 
+// The (An)+/-(An) address update forwards from the SAME point as the primary
+// result: the instruction currently IN this stage, not the registered
+// exe_*2 outputs one cycle later. Wiring it to the registered outputs made
+// the very next instruction read the stale An, which is the whole hazard
+// this path exists to close.
+assign ex_fwd2_valid = eaf_valid && eaf_writes_an;
+assign ex_fwd2_dest  = eaf_an_reg;
+assign ex_fwd2_data  = eaf_an_data;
+
 assign ex_sr_fwd_valid = exe_writes_sr_c;
 assign ex_sr_fwd_data  = exe_sr_data_c;
 
@@ -445,6 +463,9 @@ always @(posedge clk) begin
 		exe_pc           <= 32'h0;
 		exe_dest_reg     <= 4'h0;
 		exe_result_data  <= 32'h0;
+		exe_dest_reg2    <= 4'h0;
+		exe_result_data2 <= 32'h0;
+		exe_writes_reg2  <= 1'b0;
 		exe_writes_reg   <= 1'b0;
 		exe_writes_ccr   <= 1'b0;
 		exe_result_flags <= 5'h0;
@@ -458,6 +479,11 @@ always @(posedge clk) begin
 		exe_pc           <= eaf_pc;
 		exe_dest_reg     <= eaf_dest_reg;
 		exe_result_data  <= combined_result;
+		// The address update rides alongside, on its own gate -- see
+		// ap040_pipe_regfile.v's second write port.
+		exe_dest_reg2    <= eaf_an_reg;
+		exe_result_data2 <= eaf_an_data;
+		exe_writes_reg2  <= eaf_writes_an;
 		exe_writes_reg   <= writes_reg_resolved;
 		exe_writes_ccr   <= eaf_writes_ccr;
 		exe_result_flags <= alu_flags;
