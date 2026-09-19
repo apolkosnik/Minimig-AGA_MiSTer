@@ -687,6 +687,20 @@ wire is_move_st_pd = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b100)
                      (if_opcode[5:3] == 3'b000);
 wire is_move_st = is_move_st_an || is_move_st_pi || is_move_st_pd;
 
+// MOVEA.L (milestone 33): destination mode 001, so the destination is an
+// ADDRESS register. Two source forms, the two that matter most here --
+// MOVEA.L Dn,An and MOVEA.L #imm,An. The immediate form is what finally
+// lets a program load an address register, which until now only a
+// testbench poking areg[] directly could do.
+//
+// MOVEA sets NO condition codes, unlike every other MOVE. That is the one
+// thing about it that is easy to get wrong and invisible in a register
+// check, so it has its own assertion in the testbench.
+wire is_movea_rr  = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b001) &&
+                    (if_opcode[5:3] == 3'b000);
+wire is_movea_imm = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b001) &&
+                    (if_opcode[5:0] == 6'b111100);
+
 // MOVE.L (d16,An),Dn: 0010 DDD 000 101 aaa -- same shape as is_move_mem_l
 // above, mode field 101 instead of 010 (verified against the same
 // ap040_core.v:5021-5052 MOVE decode -- d_mode==101 is SK_MEM there too,
@@ -798,7 +812,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !quick_shape &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte;
@@ -835,6 +849,7 @@ reg  [1:0]  held_imm_size;
 reg         held_imm_nowrite;
 reg         held_imm_dest9;
 reg         held_is_abs;
+reg         held_imm_areg;
 reg         held_is_long;
 reg         held_is_dbcc;
 reg         held_is_move_disp;
@@ -929,6 +944,7 @@ always @(posedge clk) begin
 		held_imm_nowrite <= 1'b0;
 		held_imm_dest9   <= 1'b0;
 		held_is_abs      <= 1'b0;
+		held_imm_areg    <= 1'b0;
 		held_is_long    <= 1'b0;
 		held_is_dbcc    <= 1'b0;
 		held_is_move_disp <= 1'b0;
@@ -963,7 +979,7 @@ always @(posedge clk) begin
 					// its stacked PC -- see ap040_ea_fetch.v's header.
 					id_next_pc      <= held_pc + 32'd2 + (held_is_long ? 32'd4 : 32'd2);
 					id_dest_reg     <= held_is_abs  ? {1'b0, held_dest_reg} :
-					                    held_is_imm  ? (held_imm_dest9 ? {1'b0, held_dest_reg}
+					                    held_is_imm  ? (held_imm_dest9 ? {held_imm_areg, held_dest_reg}
 					                                                     : {1'b0, held_reg}) :
 					                    held_is_dbcc ? {1'b0, held_reg} :
 					                    held_is_move_disp ? {1'b0, held_dest_reg} :
@@ -1021,7 +1037,9 @@ always @(posedge clk) begin
 					                    held_is_abs ||
 					                    (held_is_imm && !held_imm_nowrite) ||
 					                    (held_is_movec && !held_movec_dir && !movec_illegal_gather);
-					id_writes_ccr   <= held_is_move_disp || held_is_imm || held_is_abs;
+					// MOVEA sets no condition codes.
+					id_writes_ccr   <= held_is_move_disp || held_is_abs ||
+					                    (held_is_imm && !held_imm_areg);
 					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_jmp &&
 					                    !held_is_bsr && !held_is_jsr && !held_is_movec &&
 					                    !held_is_imm && !held_is_abs;
@@ -1049,7 +1067,7 @@ always @(posedge clk) begin
 				end
 			end else if (is_branch_word || is_branch_long || is_dbcc || is_move_disp || is_jmp_disp ||
 			              is_bsr_word || is_bsr_long || is_jsr_disp || is_movec_opcode ||
-			              is_imm_alu || is_move_imm || is_move_abs) begin
+			              is_imm_alu || is_move_imm || is_move_abs || is_movea_imm) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1061,12 +1079,14 @@ always @(posedge clk) begin
 				held_is_long  <= is_branch_long || is_bsr_long ||
 				                 (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                 (is_move_imm && if_opcode[13:12] == 2'b10) ||
-				                 is_move_abs_l;
-				held_is_imm      <= is_imm_alu || is_move_imm;
-				held_imm_op      <= is_move_imm ? `AP040_ALU_MOVE : imm_alu_op;
-				held_imm_size    <= is_move_imm ? move_op_size : if_opcode[7:6];
+				                 is_move_abs_l || is_movea_imm;
+				held_is_imm      <= is_imm_alu || is_move_imm || is_movea_imm;
+				held_imm_op      <= (is_move_imm || is_movea_imm) ? `AP040_ALU_MOVE : imm_alu_op;
+				held_imm_size    <= is_movea_imm ? `AP040_SZ_L :
+				                    is_move_imm  ? move_op_size : if_opcode[7:6];
 				held_imm_nowrite <= is_cmpi_i;
-				held_imm_dest9   <= is_move_imm;
+				held_imm_dest9   <= is_move_imm || is_movea_imm;
+				held_imm_areg    <= is_movea_imm;
 				held_is_abs      <= is_move_abs;
 				held_is_dbcc  <= is_dbcc;
 				held_is_move_disp <= is_move_disp;
@@ -1082,12 +1102,12 @@ always @(posedge clk) begin
 				ext_pending   <= (is_branch_long || is_bsr_long ||
 				                  (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                  (is_move_imm && if_opcode[13:12] == 2'b10) ||
-				                  is_move_abs_l) ? 2'd2 : 2'd1;
+				                  is_move_abs_l || is_movea_imm) ? 2'd2 : 2'd1;
 			end else begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
 				id_next_pc      <= if_pc + 32'd2;
-				id_dest_reg     <= is_move_st ? {1'b1, d_reg9} :
+				id_dest_reg     <= (is_move_st || is_movea_rr) ? {1'b1, d_reg9} :
 				                    (is_scc_rr || is_unary_rr || is_extswap_rr || shift_shape || bitop_shape || is_bcd1_rr || quick_shape) ? {1'b0, d_rn} :
 				                    (is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_movesr || is_rts || is_rte) ? 4'd15 : {1'b0, d_reg9};
 				// is_move_mem_l/is_jmp_an/is_jsr_an's src_reg is An, not Dn
@@ -1152,7 +1172,7 @@ always @(posedge clk) begin
 				id_src_a_is_imm <= if_valid && (is_moveq || quick_shape);
 				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || is_x_rr || shift_shape ||
 				                               (bitop_shape && !is_btst_rr) ||
-				                               is_bcd1_rr || is_bcd2_rr || quick_shape || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_move_ax || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
+				                               is_bcd1_rr || is_bcd2_rr || quick_shape || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_move_ax || is_movea_rr || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
 				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_extswap_rr || is_x_rr || shift_shape || bitop_shape || is_bcd1_rr || is_bcd2_rr || quick_shape || is_move_mem_l || is_move_ax || is_move_st);
 				id_is_branch    <= if_valid && is_branch_byte;
 				id_is_scc       <= if_valid && is_scc_rr;
