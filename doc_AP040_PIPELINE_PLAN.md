@@ -1158,8 +1158,22 @@ real MMU or bus-error path arrives, which is the same boundary
 
    ### Next, in rough order of value
 
-   1. **Source mode 001**, An as a source operand, for MOVE and for the
-      ADD/SUB/CMP forms that allow it. Pure decode, no datapath.
+   1. ~~Source mode 001~~ **DONE (milestone 43).** Pure decode, as
+      predicted: An lives in the same 4-bit unified register space the
+      decode stage already uses, so naming it in `id_src_reg` was the whole
+      change. The care went into NOT overreaching -- Byte is never allowed
+      with an address register (and the exclusion has to be written twice,
+      since MOVE encodes Byte at `ir[13:12]==01` and the ALU family at
+      `ir[7:6]==00`), and AND and OR take no address register at any size.
+
+      That produced the first bench in this series whose job is to prove
+      instructions are ILLEGAL, `tb_ap040_pipe_ansrc_illegal.v`, running
+      each excluded form for real against the illegal vector and counting
+      traps. It is not a milestone control -- it passes on milestone 42's
+      RTL too, where every An-source form was illegal -- so it was instead
+      validated by breaking the decoder on purpose: widening the mode field
+      and dropping both restrictions makes it report 0 traps. A restriction
+      nobody tests is a comment.
    2. **ADDA/SUBA/CMPA** (opmode 011/111), pointer arithmetic. Needs one
       new thing: a Word source sign-extended to 32 bits before a Long
       operation, which no current instruction does.
