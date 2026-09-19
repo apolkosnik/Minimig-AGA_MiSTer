@@ -51,6 +51,13 @@ bounded port does not bring the local sequencer to performance parity.
 
 ## Regressions
 
+The complete Verilator suite passes **57/57 legs**, including the negative
+controls that must fail. The partial-write restart matrix passes **688/688
+cases** (344 each with posting off/on), each over three bus-latency phases.
+Both final core configurations pass all 16 programs. The ATC clock-enable
+adjustment was followed by fresh core, posted-core and early chip-memory
+builds in `final-core/`; later integration builds already included it.
+
 `asm/t_fastpaths.s` covers sized load writeback, flags, load/use dependencies,
 postincrement aliasing, DBcc register/CCR behavior, a page-crossing immediate,
 the three indirect encodings, branch-buffer invalidation and uncached

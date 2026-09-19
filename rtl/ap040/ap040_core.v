@@ -679,6 +679,13 @@ reg        epf_flushed;          // the queue was flushed this cycle
 // one cycle earlier, before that commit.  Such a completion keeps the
 // S_FETCH barrier; every other one dispatches its successor directly.
 reg        wb_bar;
+// Task arguments for the shared redirect and extension-word blocks. These
+// are combinational carriers, not pipeline registers: expanding either
+// queue-write path at every call site exceeds the FPGA's logic budget.
+reg        ifetch_go, ifetch_super_c, imm_go;
+reg [31:0] ifetch_addr_c;
+reg  [1:0] imm_n_c;
+reg  [7:0] imm_ret_c;
 // A data transfer requested THIS cycle by mrd/mwr, carried to the single
 // issue block below the case statement.  The tasks used to issue it
 // themselves, which inlined the guard, the page-crossing compare, the
@@ -1528,6 +1535,14 @@ endtask
 task issue_ifetch;
 	input [31:0] a;
 	input        s;
+	begin
+		ifetch_go = 1; ifetch_addr_c = a; ifetch_super_c = s;
+	end
+endtask
+
+task issue_ifetch_now;
+	input [31:0] a;
+	input        s;
 	reg refill_hit;
 	begin
 		refill_hit = AP040_FAST_OPERANDS && AP040_ENABLE_CACHE && cacr[15] &&
@@ -1633,6 +1648,14 @@ task rfw;
 endtask
 
 task immf;
+	input [1:0] n;
+	input [7:0] ret;
+	begin
+		imm_go = 1; imm_n_c = n; imm_ret_c = ret;
+	end
+endtask
+
+task immf_now;
 	input [1:0] n;
 	input [7:0] ret;
 	begin
@@ -2141,6 +2164,8 @@ always @(posedge clk) begin
 	epf_fillw   = 2'd0;
 	brf_seed_req = 0;
 	brf_seed_word = 0;
+	ifetch_go = 0; ifetch_addr_c = 0; ifetch_super_c = 0;
+	imm_go = 0; imm_n_c = 0; imm_ret_c = 0;
 	wb_bar      = 0;
 	m_go        = 0;
 	e_go        = 0;
@@ -6642,6 +6667,12 @@ always @(posedge clk) begin
 
 			default: fatal_halt;
 		endcase
+
+		// A caller does not override queue/extension state after requesting
+		// either operation. Resolve them once, before exception priority and
+		// memory-port arbitration, preserving the tasks' same-edge behavior.
+		if (imm_go) immf_now(imm_n_c, imm_ret_c);
+		if (ifetch_go) issue_ifetch_now(ifetch_addr_c, ifetch_super_c);
 
 		//------------------------------------------------------ data transfer
 		// The transfer mrd/mwr recorded this cycle: its registers are

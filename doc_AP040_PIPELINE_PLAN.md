@@ -1279,7 +1279,36 @@ real MMU or bus-error path arrives, which is the same boundary
 
       Not reached: `(d16,An)` and the absolute modes as RMW destinations,
       which need a tenth gather kind carrying the RMW properties.
-   4. **LINK/UNLK**, then **MOVEM**, then **MULU/DIVU**.
+   4. ~~LINK/UNLK~~ **DONE (milestone 49)**, then **MOVEM**, then
+      **MULU/DIVU**.
+
+      LINK and UNLK fit because they write TWO registers and milestone 30's
+      second write port is free for them -- neither autoincrements. LINK's
+      memory write reuses `eac_is_push`, the BSR/JSR path, whose address is
+      already `operand_b - 4`, so pointing `eac_dest_reg` at A7 makes it
+      come out right with no new arithmetic; only the pushed DATA is new.
+      UNLK needed no new memory path at all. LINK is the TENTH gather kind,
+      carrying its own properties as predicted.
+
+      The three `an_write` expressions were hoisted out of the four branches
+      that repeated them into `an_wr_any`/`an_wr_reg`/`an_wr_data`, since
+      the selection now has three cases rather than one.
+
+   ### A hazard worth naming
+
+   `ap040_ea_fetch.v`'s output block is one `always` with several branches,
+   each assigning most of the `eaf_*` set. Adding a flag to it by blanket
+   string-replace -- appending `<flag> <= 1'b0;` next to an existing
+   `<= 1'b0;` line -- silently lands a SECOND assignment inside the branch
+   that also sets the flag for real, and Verilog's last-write-wins makes the
+   flag permanently zero. It cost a debug cycle in milestone 48
+   (`eaf_is_rmw`, no store ever issued) and again in 49 (`eaf_is_link`, A7
+   took `operand_a`), and milestone 34 had the same shape.
+
+   Both times the symptom was a plausible wrong VALUE rather than a crash,
+   because the fallback path is a real one. When adding the next flag here,
+   assign it in each branch explicitly and grep the branch order before
+   running anything.
 4. **MMU and cache integration**, once enough of the integer ISA exists that
    testing them against real address translation is meaningful. Reuse the
    architectural requirements from `rtl_old/ap040_mmu.v`/`ap040_cache.v`

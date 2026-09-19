@@ -277,6 +277,8 @@ module ap040_ea_fetch
 	input             eac_is_lea,
 	input             eac_sxt_w,
 	input             eac_is_rmw,
+	input             eac_is_link,
+	input             eac_is_unlk,
 	// The EX stage has taken L1 port B this cycle for a read-modify-write's
 	// store half. Everything this stage would have done with the port has
 	// to wait, so it behaves exactly as if it had never been fetched: no
@@ -372,6 +374,7 @@ module ap040_ea_fetch
 	// EX-forward output -- see its header.
 	output reg [15:0] eaf_sr_snapshot,
 	output reg        eaf_is_rmw,
+	output reg        eaf_is_link,
 	output reg [31:0] eaf_ea_target,
 	output reg        eaf_is_rts,
 	output reg        eaf_is_rte,
@@ -425,6 +428,8 @@ wire [31:0] operand_a = eac_src_a_is_imm ? eac_imm :
 // DESTINATION (ir[11:9]), which resolves to operand_b. One base wire keeps
 // the increment logic below from having to care which it is.
 wire [31:0] an_base = eac_is_store ? operand_b : operand_a;
+// LINK reuses this as its own write address as well as An's new value.
+wire [31:0] push_addr = operand_b - 32'd4;
 
 // The auto-increment step follows the operand size, with the 68000's stack
 // exception: a BYTE access through A7 steps by two, not one, so the stack
@@ -451,6 +456,19 @@ wire [31:0] ea_target = eac_is_abs    ? eac_imm            :
 // why one expression covers both.
 wire [31:0] an_new = eac_is_postinc ? (an_base + an_step) :
                                       (an_base - an_step);
+
+// Second write port selection (milestone 49). LINK writes An with the new
+// top of stack, UNLK writes A7 with An+4 -- neither is an autoincrement,
+// but both need exactly the port autoincrement already owns, and neither
+// instruction autoincrements, so there is no contention. Hoisted here so
+// every branch below assigns the same three wires instead of repeating a
+// ternary that now has three cases.
+wire        an_wr_any  = an_write || (eac_valid && (eac_is_link || eac_is_unlk));
+wire  [3:0] an_wr_reg  = eac_is_link  ? eac_src_reg :
+                         eac_is_unlk  ? 4'd15       :
+                         eac_is_store ? eac_dest_reg : eac_src_reg;
+wire [31:0] an_wr_data = eac_is_link  ? push_addr            :
+                         eac_is_unlk  ? (operand_a + 32'd4)  : an_new;
 wire        an_write = eac_valid && (eac_is_postinc || eac_is_predec);
 
 // Address error on an odd JMP/JSR target (milestone 17, new): a SECOND
@@ -501,7 +519,7 @@ wire mem_complete = mem_pending;
 // pushes at all, per ap040_core.v's own S_JSR1 -- it goes straight to the
 // address-error exception instead (below), the fault taken on the
 // INSTRUCTION FETCH at the odd target, not on the call itself.
-wire eac_is_push  = eac_is_bsr || (eac_is_jsr && !eac_is_jsr_odd);
+wire eac_is_push  = eac_is_bsr || (eac_is_jsr && !eac_is_jsr_odd) || eac_is_link;
 wire wr_stall     = eac_valid && (eac_is_push || eac_is_store) && (l1_wr_busy || port_taken);
 
 // TRAP #n / illegal instruction exception entry -- see header. exc_ph
@@ -592,7 +610,6 @@ wire [31:0] operand_b = fwd_b_from_ex  ? ex_fwd_data  :
 // BSR/JSR's push address AND the new A7 value to commit are the SAME
 // expression, from operand_b (A7's current value via port B, decode having
 // set eac_dest_reg to A7's unified index for both -- see header).
-wire [31:0] push_addr = operand_b - 32'd4;
 
 // TRAP #n / illegal instruction / privilege violation: A7's NEW value after
 // a format-$0 (8-byte) frame -- but NOT computed from operand_b/port B,
@@ -714,7 +731,8 @@ wire [31:0] st_dat = (eac_size == `AP040_SZ_L || !eac_is_store) ? operand_a :
 
 assign l1_be_b   = st_be;
 assign l1_data_b = exc_writing  ? exc_wdata :
-                   eac_is_store ? st_dat : eac_next_pc;
+                   eac_is_store ? st_dat  :
+                   eac_is_link  ? operand_a : eac_next_pc;
 
 always @(posedge clk) begin
 	if (!nreset) begin
@@ -748,6 +766,7 @@ always @(posedge clk) begin
 		eaf_movec_sel  <= 3'h0;
 		eaf_sr_snapshot<= 16'h0;
 		eaf_is_rmw     <= 1'b0;
+		eaf_is_link    <= 1'b0;
 		eaf_ea_target  <= 32'h0;
 		eaf_is_rts     <= 1'b0;
 		eaf_is_rte     <= 1'b0;
@@ -806,9 +825,9 @@ always @(posedge clk) begin
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
-				eaf_writes_an  <= an_write;
-				eaf_an_reg     <= eac_is_store ? eac_dest_reg : eac_src_reg;
-				eaf_an_data    <= an_new;
+				eaf_writes_an  <= an_wr_any;
+				eaf_an_reg     <= an_wr_reg;
+				eaf_an_data    <= an_wr_data;
 				eaf_writes_reg <= eac_writes_reg;
 				eaf_writes_ccr <= eac_writes_ccr;
 				eaf_is_branch  <= eac_is_branch;
@@ -907,9 +926,9 @@ always @(posedge clk) begin
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
-				eaf_writes_an  <= an_write;
-				eaf_an_reg     <= eac_is_store ? eac_dest_reg : eac_src_reg;
-				eaf_an_data    <= an_new;
+				eaf_writes_an  <= an_wr_any;
+				eaf_an_reg     <= an_wr_reg;
+				eaf_an_data    <= an_wr_data;
 				// UNCONDITIONALLY 1, not forwarded from eac_writes_reg:
 				// every exception entry writes A7 the new SP, full stop --
 				// illegal/TRAP already had eac_writes_reg=1 for this exact
@@ -925,6 +944,7 @@ always @(posedge clk) begin
 				eaf_is_dbcc    <= 1'b0;
 				eaf_is_jmp     <= 1'b0;
 				eaf_is_rmw     <= 1'b0;
+				eaf_is_link    <= 1'b0;
 				eaf_is_bsr     <= 1'b0;
 				eaf_is_jsr     <= 1'b0;
 				eaf_is_trap    <= eac_is_trap;
@@ -988,9 +1008,9 @@ always @(posedge clk) begin
 				eaf_alu_op      <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
-				eaf_writes_an  <= an_write;
-				eaf_an_reg     <= eac_is_store ? eac_dest_reg : eac_src_reg;
-				eaf_an_data    <= an_new;
+				eaf_writes_an  <= an_wr_any;
+				eaf_an_reg     <= an_wr_reg;
+				eaf_an_data    <= an_wr_data;
 				// NOT 1: RTE's A7 restore does NOT go through the normal
 				// commit_reg/A7-bank path at all -- see ap040_execute.v's
 				// header for the real race that forces this (RTE's own SR
@@ -1007,6 +1027,7 @@ always @(posedge clk) begin
 				eaf_is_dbcc     <= 1'b0;
 				eaf_is_jmp      <= 1'b0;
 				eaf_is_rmw      <= 1'b0;
+				eaf_is_link     <= 1'b0;
 				eaf_is_bsr      <= 1'b0;
 				eaf_is_jsr      <= 1'b0;
 				eaf_is_trap     <= 1'b0;
@@ -1048,13 +1069,15 @@ always @(posedge clk) begin
 				// expression already used for the write address) -- see
 				// header for why the decrement happens HERE, once, rather
 				// than being recomputed in ap040_execute.v.
-				eaf_operand_b  <= (eac_is_bsr || eac_is_jsr) ? push_addr : operand_b;
+				eaf_operand_b  <= (eac_is_bsr || eac_is_jsr) ? push_addr :
+				                  eac_is_link                ? (push_addr + eac_imm) : operand_b;
+				eaf_is_link    <= eac_is_link;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
-				eaf_writes_an  <= an_write;
-				eaf_an_reg     <= eac_is_store ? eac_dest_reg : eac_src_reg;
-				eaf_an_data    <= an_new;
+				eaf_writes_an  <= an_wr_any;
+				eaf_an_reg     <= an_wr_reg;
+				eaf_an_data    <= an_wr_data;
 				eaf_writes_reg <= eac_writes_reg;
 				eaf_writes_ccr <= eac_writes_ccr;
 				eaf_is_branch  <= eac_is_branch;

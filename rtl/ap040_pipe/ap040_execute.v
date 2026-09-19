@@ -126,6 +126,7 @@ module ap040_execute
 	input             eaf_is_scc,
 	input             eaf_is_dbcc,
 	input             eaf_is_jmp,
+	input             eaf_is_link,
 	input             eaf_is_bsr,
 	input             eaf_is_jsr,
 	input             eaf_is_trap,
@@ -418,7 +419,11 @@ wire [31:0] alu_sized = (eaf_size == `AP040_SZ_B) ? {eaf_operand_b[31:8],  alu_r
 
 wire [31:0] combined_result = eaf_is_scc  ? scc_merged :
                                eaf_is_dbcc ? dbcc_result :
-                               (eaf_is_bsr || eaf_is_jsr || eaf_is_rts || eaf_is_rte || exc_reaching_ex)
+                               // LINK joins this bypass (milestone 49): its A7 value was
+                               // computed in ap040_ea_fetch.v as push_addr + d16 and has no
+                               // business going through the ALU, exactly like BSR/JSR's.
+                               (eaf_is_bsr || eaf_is_jsr || eaf_is_rts || eaf_is_rte ||
+                                eaf_is_link || exc_reaching_ex)
                                  ? eaf_operand_b :
                                (eaf_is_movec && !eaf_movec_dir) ? creg_read_value :
                                                                     alu_sized;
