@@ -1362,6 +1362,18 @@ real MMU or bus-error path arrives, which is the same boundary
       behaviour; the 68040 suppresses it. Noted rather than silently
       divergent.
 
+      **Milestone 59 (absolute EAs)** reached the ALU family and the unary
+      ops on `$xxx.W` and `$xxx.L`, the last modes whose extension words are
+      the ADDRESS itself. They ride `held_is_abs`, which already gathers one
+      word or two and already sets `id_is_abs`; what it did not carry was an
+      OPERATION, since every absolute form until then was a MOVE.
+
+      The absolute READ-MODIFY-WRITE composed without new datapath:
+      `id_is_abs` makes `ea_target` equal `eac_imm`, and milestone 48's
+      store half writes to `eaf_ea_target`, which is that same value.
+      Nothing had to learn that an absolute address could also be a
+      destination.
+
       ### When the right answer and the wrong one look the same
 
       Mutating TST onto the RMW path did NOT fail the first version of its
@@ -1379,6 +1391,19 @@ real MMU or bus-error path arrives, which is the same boundary
       correct result equals what it read: **when the right answer and the
       wrong answer coincide, the bench has to poison the wrong path**,
       because the right one produces no evidence at all.
+
+      **It happened again in milestone 59, which is why it is a rule and not
+      an anecdote.** Mutating the absolute forms to lose their operation --
+      defaulting to MOVE -- was caught only by the binary ADD. CLR and NOT
+      passed, because a unary form names no source register, so decode
+      leaves the destination field pointing at whatever `ir[11:9]` holds
+      (D1 for that CLR, D3 for that NOT). Both were zero, so the defaulted
+      MOVE stored ZERO -- exactly what CLR should store, and exactly what
+      `NOT.W` of `FFFF` should leave. Two MOVEQs fixed it.
+
+      The pattern to watch for: **an instruction whose unused register
+      fields read as zero will hide a defaulted operation whenever zero is
+      also the right answer.** Set them to something else before testing.
 
       ### A testability limit worth knowing
 

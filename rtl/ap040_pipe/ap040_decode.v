@@ -881,6 +881,48 @@ wire is_move_abs = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
                    (if_opcode[5:3] == 3'b111) && (if_opcode[2:1] == 2'b00);
 wire is_move_abs_l = is_move_abs && if_opcode[0];
 
+// Absolute addressing for the ALU family and the unary ops (milestone 59):
+// ADD.L $1234.L,D0 and CLR.L $1234.L. Mode 111 with reg 000 for the Word
+// form and 001 for the Long one -- the only modes left whose extension
+// words are the ADDRESS itself rather than an offset from something.
+//
+// They ride held_is_abs, which already gathers one word or two and already
+// sets id_is_abs so ea_target is simply eac_imm. What it did not carry is
+// an OPERATION: every absolute form until now was a MOVE. held_alu_op and
+// held_alu_nowrite already exist for the displacement kinds, so this reuses
+// them rather than adding more, and held_abs_rmw says whether the result
+// goes back to that address.
+//
+// The absolute RMW composes without new datapath: id_is_abs makes
+// ea_target eac_imm, and milestone 48's store half writes to
+// eaf_ea_target, which is that same value. Nothing had to learn that an
+// absolute address could also be a destination.
+wire abs_mode   = (if_opcode[5:3] == 3'b111) && (if_opcode[2:1] == 2'b00);
+wire abs_long   = if_opcode[0];
+
+wire alu_abs_shape = (if_opcode[15]  == 1'b1)  && (if_opcode[8]  == 1'b0) &&
+                     (if_opcode[7:6] != 2'b11) && abs_mode;
+wire is_alu_abs = alu_abs_shape &&
+                  ((if_opcode[14:12] == 3'b000) || (if_opcode[14:12] == 3'b001) ||
+                   (if_opcode[14:12] == 3'b011) || (if_opcode[14:12] == 3'b100) ||
+                   (if_opcode[14:12] == 3'b101));
+wire is_cmp_abs = alu_abs_shape && (if_opcode[14:12] == 3'b011);
+
+wire unary_abs_shape = (if_opcode[15:12] == 4'b0100) && (if_opcode[7:6] != 2'b11) && abs_mode;
+wire is_negx_abs = unary_abs_shape && (if_opcode[11:8] == 4'b0000);
+wire is_clr_abs  = unary_abs_shape && (if_opcode[11:8] == 4'b0010);
+wire is_neg_abs  = unary_abs_shape && (if_opcode[11:8] == 4'b0100);
+wire is_not_abs  = unary_abs_shape && (if_opcode[11:8] == 4'b0110);
+wire is_tst_abs  = unary_abs_shape && (if_opcode[11:8] == 4'b1010);
+wire is_unary_abs = is_negx_abs || is_clr_abs || is_neg_abs || is_not_abs || is_tst_abs;
+wire [5:0] unary_abs_op = is_negx_abs ? `AP040_ALU_NEGX :
+                          is_clr_abs  ? `AP040_ALU_CLR  :
+                          is_neg_abs  ? `AP040_ALU_NEG  :
+                          is_not_abs  ? `AP040_ALU_NOT  :
+                                        `AP040_ALU_TST;
+wire is_abs_alu = is_alu_abs || is_unary_abs;
+wire is_abs_alu_l = is_abs_alu && abs_long;
+
 wire is_move_imm = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
                    (if_opcode[8:6] == 3'b000) && (if_opcode[5:0] == 6'b111100);
 
@@ -1330,7 +1372,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
 wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_move_idx && !is_alu_idx && !is_lea_idx &&
-                   !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
+                   !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an;
@@ -1366,6 +1408,8 @@ reg  [5:0]  held_imm_op;
 reg  [1:0]  held_imm_size;
 reg         held_imm_nowrite;
 reg         held_imm_dest9;
+reg         held_abs_alu;       // this absolute form carries an operation, not just a MOVE
+reg         held_abs_rmw;       // ...and writes its result back to that address
 reg         held_is_abs;
 reg         held_imm_areg;
 reg         held_is_stabs;
@@ -1496,6 +1540,8 @@ always @(posedge clk) begin
 		held_imm_size    <= `AP040_SZ_L;
 		held_imm_nowrite <= 1'b0;
 		held_imm_dest9   <= 1'b0;
+		held_abs_alu     <= 1'b0;
+		held_abs_rmw     <= 1'b0;
 		held_is_abs      <= 1'b0;
 		held_imm_areg    <= 1'b0;
 		held_is_stabs    <= 1'b0;
@@ -1596,7 +1642,8 @@ always @(posedge clk) begin
 					                    held_is_imm || held_is_abs || held_is_stabs) ? gather_disp :
 					                    held_is_movec ? {28'd0, held_movec_dir, movec_sel_code} : 32'h0;
 					id_alu_op       <= held_is_imm      ? held_imm_op :
-					                   held_is_alu_disp ? held_alu_op : `AP040_ALU_MOVE;
+					                   (held_is_alu_disp || held_abs_alu) ? held_alu_op :
+					                                                        `AP040_ALU_MOVE;
 					id_size         <= held_is_imm ? held_imm_size :
 					                   (held_is_move_disp || held_is_alu_disp || held_is_abs) ? held_mv_size :
 					                                                        `AP040_SZ_L;
@@ -1616,7 +1663,7 @@ always @(posedge clk) begin
 					// above.
 					// An absolute store writes memory, not a register.
 					id_writes_reg   <= held_is_move_disp || held_is_bsr || held_is_jsr ||
-					                    held_is_abs ||
+					                    (held_is_abs && (!held_abs_alu || !held_alu_nowrite)) ||
 					                    (held_is_imm && !held_imm_nowrite) ||
 					                    (held_is_alu_disp && !held_alu_nowrite) || held_is_lea || held_is_link ||
 					                    (held_is_movec && !held_movec_dir && !movec_illegal_gather);
@@ -1638,7 +1685,7 @@ always @(posedge clk) begin
 					id_is_jmp       <= held_is_jmp;
 					id_is_lea       <= held_is_lea;
 					id_sxt_w        <= held_is_alu_disp && held_alu_sxt;
-					id_is_rmw       <= held_is_alu_disp && held_alu_rmw;
+					id_is_rmw       <= (held_is_alu_disp && held_alu_rmw) || held_abs_rmw;
 					id_ea_indexed   <= held_ea_indexed;
 					id_ea_pcrel     <= held_ea_pcrel;
 					id_is_link      <= held_is_link;
@@ -1667,7 +1714,7 @@ always @(posedge clk) begin
 			              is_st_abs || is_alu_disp || is_lea_disp || is_adda_imm ||
 			              is_adda_disp || is_link || is_movem || is_muldiv_imm ||
 			              is_alu_dst_disp || is_move_idx || is_alu_idx || is_lea_idx ||
-			              is_move_pcrel || is_alu_pcrel || is_lea_pcrel) begin
+			              is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_abs_alu) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1679,7 +1726,8 @@ always @(posedge clk) begin
 				held_is_long  <= is_branch_long || is_bsr_long ||
 				                 (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                 (is_move_imm && if_opcode[13:12] == 2'b10) ||
-				                 is_move_abs_l || is_movea_imm || is_st_abs_l || is_adda_imm_l;
+				                 is_move_abs_l || is_movea_imm || is_st_abs_l || is_adda_imm_l ||
+				                 is_abs_alu_l;
 				held_is_imm      <= is_imm_alu || is_move_imm || is_movea_imm || is_adda_imm ||
 				                    is_muldiv_imm;
 				held_imm_op      <= is_mul_imm  ? (is_muldiv_imm_signed ? `AP040_ALU_MULS : `AP040_ALU_MULU) :
@@ -1696,11 +1744,17 @@ always @(posedge clk) begin
 				held_imm_ccr     <= is_imm_alu || is_move_imm || is_cmpa_imm || is_muldiv_imm;
 				held_imm_div     <= is_div_imm;
 				held_imm_divs    <= is_div_imm && is_muldiv_imm_signed;
-				held_is_abs      <= is_move_abs;
+				held_is_abs      <= is_move_abs || is_abs_alu;
+				held_abs_alu     <= is_abs_alu;
+				// TST reads without writing; everything else in the unary
+				// group writes its result back, and the binary family's
+				// destination is a register, not the address.
+				held_abs_rmw     <= is_unary_abs && !is_tst_abs;
 				held_is_stabs    <= is_st_abs;
 				// The ALU family takes its size from ir[7:6]; MOVE's lives in
 				// ir[13:12] with a different encoding, hence two wires.
-				held_mv_size     <= is_adda_disp ? `AP040_SZ_L :
+				held_mv_size     <= is_abs_alu    ? add_op_size :
+				                    is_adda_disp ? `AP040_SZ_L :
 				                    (is_alu_disp || is_alu_dst_disp || is_alu_idx ||
 				                     is_alu_pcrel) ? add_op_size : move_op_size;
 				held_is_dbcc  <= is_dbcc;
@@ -1712,10 +1766,11 @@ always @(posedge clk) begin
 				                     is_alu_pcrel;
 				// The ir[8]=1 direction has its own op map: nibble 1011 is
 				// EOR there, not CMP.
-				held_alu_op       <= is_alu_dst_disp ? alu_nib_dst_op : alu_nib_op;
+				held_alu_op       <= is_unary_abs    ? unary_abs_op   :
+				                     is_alu_dst_disp ? alu_nib_dst_op : alu_nib_op;
 				// An RMW's destination is memory, so it writes no register.
 				held_alu_nowrite  <= is_cmp_disp || is_cmpa_disp || is_alu_dst_disp || is_cmp_idx ||
-				                     is_cmp_pcrel;
+				                     is_cmp_pcrel || is_cmp_abs || is_unary_abs;
 				held_alu_areg     <= is_adda_disp;
 				held_alu_ccr      <= is_alu_disp || is_cmpa_disp || is_alu_dst_disp || is_alu_idx ||
 				                     is_alu_pcrel;
@@ -1738,7 +1793,7 @@ always @(posedge clk) begin
 				                  (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                  (is_move_imm && if_opcode[13:12] == 2'b10) ||
 				                  is_move_abs_l || is_movea_imm || is_st_abs_l ||
-				                  is_adda_imm_l) ? 2'd2 : 2'd1;
+				                  is_adda_imm_l || is_abs_alu_l) ? 2'd2 : 2'd1;
 			end else begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
