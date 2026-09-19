@@ -1346,6 +1346,40 @@ real MMU or bus-error path arrives, which is the same boundary
       answer. Verified by making the base `eac_pc`: all five fail, with A1
       at `$047E`, A2 at `$03FE` and both loads straddling their longwords.
 
+      **Milestone 58 (unary ops on memory)** reached CLR, NOT, NEG, NEGX
+      and TST against `(An)`, `(An)+` and `-(An)`. CLR and TST especially
+      are everywhere -- zeroing a field, polling a flag -- and until then
+      none of the five could name anything but a data register.
+
+      They split across two paths that already existed, and the split
+      follows from the ALU rather than being chosen: `ap040_pipe_alu.v`
+      computes NOT, NEG, NEGX and CLR from operand B and TST from operand
+      A. Milestone 48's RMW crossover puts the loaded value in B; the
+      ordinary memory-source path puts it in A. So TST is a plain load with
+      no store and the other four are RMWs, with no new datapath either way.
+
+      CLR still performs a read its result does not need -- 68000/68010
+      behaviour; the 68040 suppresses it. Noted rather than silently
+      divergent.
+
+      ### When the right answer and the wrong one look the same
+
+      Mutating TST onto the RMW path did NOT fail the first version of its
+      bench, and the reason generalises. A unary memory op names no data
+      register, so decode leaves `id_dest_reg` at zero; the mis-routed TST
+      therefore computed **D0**, which was also zero, set Z anyway, and
+      stored a zero byte over a byte that was already zero. Every check
+      passed against RTL that was wrong.
+
+      The fix was a `MOVEQ #-1,D0` at the top of the bench, purely to make
+      the wrong path produce something distinctive -- the mis-routing now
+      sets N instead of Z and writes `FF` into the tested byte.
+
+      The general rule, which applies to TST, CLR and anything else whose
+      correct result equals what it read: **when the right answer and the
+      wrong answer coincide, the bench has to poison the wrong path**,
+      because the right one produces no evidence at all.
+
       ### A testability limit worth knowing
 
       **A Word index's sign extension cannot be observed through a LOAD in
