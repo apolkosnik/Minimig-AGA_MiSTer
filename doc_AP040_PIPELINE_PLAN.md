@@ -1301,11 +1301,46 @@ real MMU or bus-error path arrives, which is the same boundary
       way and `FFFFFFFA` the other. Verified by making MULS unsigned, which
       collapses the two to the same value.
 
-      **Still to do here: DIVU.W/DIVS.W.** Unlike multiply these cannot be
-      combinational -- a 32/16 divide needs an iterative sequencer of about
-      seventeen cycles -- and they carry two conditions no instruction in
-      this core has yet: a zero-divide EXCEPTION, and an overflow that sets
-      V and leaves the destination UNCHANGED.
+      **DIVU.W/DIVS.W (milestone 52)** are an iterative restoring divider in
+      `ap040_execute.v` -- thirty-two steps, computing a 32-bit quotient and
+      then checking it fits in 16, which is the same test as the 68k's
+      "upper word of the dividend >= divisor" precondition without needing
+      separate reasoning. It lives in EX rather than the ALU because it has
+      state, and keeping `ap040_pipe_alu.v` purely combinational is worth
+      more than uniformity.
+
+      It reuses milestone 48's local-stall machinery wholesale, including
+      the output-register gate that milestone moved from `stall_in` to
+      `ex_stall`. **That gate was recorded there as unreachable and
+      deliberately untested; every divide exercises it now.** Without it the
+      instruction would retire while the divider was still running.
+
+      Overflow makes DIVU/DIVS the first instructions here that complete,
+      set a flag and write NOTHING, via DBcc's `writes_reg_resolved` hook.
+      Zero divide is a real vector-5 exception, detected in
+      `ap040_ea_fetch.v` where the operand already is, so the divider never
+      sees a zero divisor.
+
+      Two things the exception needed beyond a trigger wire, both found by
+      the bench rather than by reading:
+
+      - `exc_reaching_ex` in `ap040_execute.v` is a list of `eaf_is_*`
+        flags, so a new exception with no flag pushes its frame and reads
+        its vector correctly and then **does not redirect at all**. The
+        file's own comment had predicted that adding to the aggregate was
+        all address error needed; it is all divide by zero needs too, but
+        it is not nothing.
+      - The dynamic-exception destination override listed only priv and
+        address error, so the new supervisor SP committed to the divide's
+        own destination register.
+
+      **And one latent bug of its own.** The exception's VECTOR READ went
+      through `mem_lane`, which selects a lane from `eff_size`. A vector is
+      always a longword, but divide by zero is the first instruction that
+      both sets `eac_sxt_w` and can fault -- so the vector came back
+      sign-extended from a half-word, i.e. `$00000000`, and the redirect
+      went to zero. It now reads `l1_q_b` directly. Any future faulting
+      instruction with a Byte or Word size would have hit this.
 
       **MOVEM.L (milestone 50)** covers the two autoincrement forms, which
       are the prologue/epilogue idiom. One instruction, up to sixteen memory

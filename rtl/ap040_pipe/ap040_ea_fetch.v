@@ -277,6 +277,8 @@ module ap040_ea_fetch
 	input             eac_is_lea,
 	input             eac_sxt_w,
 	input             eac_is_rmw,
+	input             eac_is_div,
+	input             eac_div_signed,
 	input             eac_is_movem,
 	input             eac_movem_dir,
 	input             eac_is_link,
@@ -364,6 +366,7 @@ module ap040_ea_fetch
 	output reg        eaf_is_illegal,
 	output reg        eaf_is_priv,
 	output reg        eaf_is_addrerr,
+	output reg        eaf_is_divzero,
 	output reg        eaf_is_movesr,
 	output reg        eaf_is_movec,
 	output reg        eaf_movec_dir,
@@ -380,6 +383,8 @@ module ap040_ea_fetch
 	output            rf3_we,
 	output      [3:0] rf3_addr,
 	output     [31:0] rf3_data,
+	output reg        eaf_is_div,
+	output reg        eaf_div_signed,
 	output reg        eaf_is_link,
 	output reg [31:0] eaf_ea_target,
 	output reg        eaf_is_rts,
@@ -550,6 +555,14 @@ wire        an_write = eac_valid && (eac_is_postinc || eac_is_predec);
 // against ap040_core.v's own S_JMP1/S_JSR1, not guessed.
 wire eac_is_jmp_odd  = eac_is_jmp && ea_target[0];
 wire eac_is_jsr_odd  = eac_is_jsr && ea_target[0];
+// Division by zero (milestone 52). Detected here rather than in
+// ap040_execute.v for the same reason an odd JMP target is: the operand is
+// already in hand, and this stage owns the frame push and the vector read.
+// The divider downstream therefore never sees a zero divisor.
+//
+// operand_a is the <ea> side; only its low word is the divisor.
+wire eac_is_divzero  = eac_valid && eac_is_div && (operand_a[15:0] == 16'd0);
+
 wire eac_is_addrerr  = eac_is_jmp_odd || eac_is_jsr_odd;
 wire eac_is_fmt2     = eac_is_addrerr;   // the only format-$2 source so far
 
@@ -612,7 +625,7 @@ reg       exc_vec_pending;
 wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || eac_is_rte;
 wire eac_is_priv         = eac_is_priv_capable && !sr_in[13];
 
-wire eac_is_exc    = eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr;
+wire eac_is_exc    = eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr || eac_is_divzero;
 wire exc_active    = eac_valid && eac_is_exc;
 wire exc_writing   = exc_active && !exc_vec_pending &&
                       (exc_ph == EXC_BEAT0 || exc_ph == EXC_BEAT1 ||
@@ -738,7 +751,8 @@ wire [31:0] exc_pc_field   = eac_is_jmp_odd ? (eac_pc + 32'd2) :
                               eac_is_jsr_odd ? ea_target :
                               (eac_is_illegal || eac_is_priv) ? eac_pc : eac_next_pc;
 wire  [7:0] exc_vec_num    = eac_is_illegal ? 8'd4 : eac_is_priv ? 8'd8 :
-                              eac_is_addrerr ? 8'd3 : eac_imm[7:0];
+                              eac_is_addrerr ? 8'd3 :
+                              eac_is_divzero ? 8'd5 : eac_imm[7:0];
 wire [15:0] exc_vecoff_word = {eac_is_fmt2 ? 4'd2 : 4'd0, 2'b00, exc_vec_num, 2'b00};
 // Format $2's own extra "instruction address" longword -- the odd target
 // itself, LSB cleared (ap040_core.v's own convention for this field,
@@ -834,12 +848,15 @@ always @(posedge clk) begin
 		eaf_is_illegal <= 1'b0;
 		eaf_is_priv    <= 1'b0;
 		eaf_is_addrerr <= 1'b0;
+		eaf_is_divzero <= 1'b0;
 		eaf_is_movesr  <= 1'b0;
 		eaf_is_movec   <= 1'b0;
 		eaf_movec_dir  <= 1'b0;
 		eaf_movec_sel  <= 3'h0;
 		eaf_sr_snapshot<= 16'h0;
 		eaf_is_rmw     <= 1'b0;
+		eaf_is_div     <= 1'b0;
+		eaf_div_signed <= 1'b0;
 		eaf_is_link    <= 1'b0;
 		eaf_ea_target  <= 32'h0;
 		eaf_is_rts     <= 1'b0;
@@ -894,6 +911,8 @@ always @(posedge clk) begin
 				// The store half needs the address again a stage later, and
 				// eac_* will have moved on by then.
 				eaf_is_rmw     <= eac_is_rmw;
+				eaf_is_div     <= eac_is_div;
+				eaf_div_signed <= eac_div_signed;
 				eaf_ea_target  <= ea_target;
 				// RTS: the popped value (l1_q_b, into eaf_operand_a above)
 				// is the redirect target, exactly like JMP/JSR/exceptions
@@ -922,6 +941,7 @@ always @(posedge clk) begin
 				eaf_is_illegal <= 1'b0;
 				eaf_is_priv    <= 1'b0;
 				eaf_is_addrerr <= 1'b0;
+				eaf_is_divzero <= 1'b0;
 				eaf_is_movesr  <= 1'b0;
 				eaf_is_movec   <= 1'b0;
 				eaf_is_rts     <= eac_is_rts;
@@ -1029,8 +1049,22 @@ always @(posedge clk) begin
 				// first place): the exception's OWN result (the new
 				// supervisor SP, see exc_sp_bank above) must commit to A7
 				// in both cases, not whatever eac_dest_reg otherwise says.
-				eaf_dest_reg   <= (eac_is_priv || eac_is_addrerr) ? 4'd15 : eac_dest_reg;
-				eaf_operand_a  <= mem_lane;
+				// Divide by zero joins the dynamic exceptions here (milestone
+				// 52) for the same reason priv and address error are in the
+				// list: decode could not know this instruction would fault,
+				// so eac_dest_reg still names the divide's own destination
+				// register, and the exception's result -- the new supervisor
+				// SP -- would commit THERE instead of to A7.
+				eaf_dest_reg   <= (eac_is_priv || eac_is_addrerr || eac_is_divzero) ? 4'd15 : eac_dest_reg;
+				// The vector is a LONGWORD, always. It must not go through
+				// mem_lane, which selects a lane from eff_size and would
+				// hand back a sign-extended half-word for any faulting
+				// instruction that set eac_sxt_w. Divide by zero is the
+				// first instruction that both sets it and can fault, so
+				// this was latent until milestone 52: the frame pushed and
+				// the vector read correctly, and then the redirect went to
+				// $00000000.
+				eaf_operand_a  <= l1_q_b;
 				eaf_operand_b  <= exc_new_sp;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
@@ -1054,12 +1088,15 @@ always @(posedge clk) begin
 				eaf_is_jmp     <= 1'b0;
 				eaf_is_rmw     <= 1'b0;
 				eaf_is_link    <= 1'b0;
+				eaf_is_div     <= 1'b0;
+				eaf_div_signed <= 1'b0;
 				eaf_is_bsr     <= 1'b0;
 				eaf_is_jsr     <= 1'b0;
 				eaf_is_trap    <= eac_is_trap;
 				eaf_is_illegal <= eac_is_illegal;
 				eaf_is_priv    <= eac_is_priv;
 				eaf_is_addrerr <= eac_is_addrerr;
+				eaf_is_divzero <= eac_is_divzero;
 				// The original (now-suppressed) instruction's own semantics
 				// must not reach EX -- a MOVEC/MOVE-to-SR that just faulted
 				// is NOT also still a MOVEC/MOVE-to-SR as far as
@@ -1137,12 +1174,15 @@ always @(posedge clk) begin
 				eaf_is_jmp      <= 1'b0;
 				eaf_is_rmw      <= 1'b0;
 				eaf_is_link     <= 1'b0;
+				eaf_is_div      <= 1'b0;
+				eaf_div_signed  <= 1'b0;
 				eaf_is_bsr      <= 1'b0;
 				eaf_is_jsr      <= 1'b0;
 				eaf_is_trap     <= 1'b0;
 				eaf_is_illegal  <= 1'b0;
 				eaf_is_priv     <= 1'b0;
 				eaf_is_addrerr  <= 1'b0;
+				eaf_is_divzero  <= 1'b0;
 				eaf_is_movesr   <= 1'b0;
 				eaf_is_movec    <= 1'b0;
 				eaf_is_rts      <= 1'b0;
@@ -1199,6 +1239,8 @@ always @(posedge clk) begin
 				eaf_is_dbcc    <= eac_is_dbcc;
 				eaf_is_jmp     <= eac_is_jmp;
 				eaf_is_rmw     <= 1'b0;
+				eaf_is_div     <= eac_is_div;
+				eaf_div_signed <= eac_div_signed;
 				eaf_is_bsr     <= eac_is_bsr;
 				eaf_is_jsr     <= eac_is_jsr;
 				eaf_is_trap    <= eac_is_trap;
@@ -1216,6 +1258,7 @@ always @(posedge clk) begin
 				// path (eac_is_addrerr routes the odd case into
 				// exc_writing/exc_vec_issue/exc_vec_done above instead).
 				eaf_is_addrerr <= 1'b0;
+				eaf_is_divzero <= 1'b0;
 				eaf_is_movesr  <= eac_is_movesr;
 				eaf_is_movec   <= eac_is_movec;
 				eaf_movec_dir  <= eac_imm[3];

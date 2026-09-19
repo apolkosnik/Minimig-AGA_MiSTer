@@ -92,3 +92,40 @@ final posted/unposted programs and integration/restart/unit matrix, and
 Quartus project snapshot for the shared-control implementation. `fit/`
 preserves the initial failed fit (4,246 LABs required, 4,191 available),
 which prompted the control-sharing change.
+
+## FPGA build
+
+Quartus 17.0.2 completed the isolated shared-control build in 16:40.
+The design fits the 5CSEBA6U23I7: **39,616 / 41,910 ALMs (95%)**,
+36,163 registers, 293 RAM blocks and 75 DSP blocks. Sharing the redirect
+and extension-fetch control reduced the synthesis estimate from 41,237
+to 39,224 ALMs; the fitted count above includes physical optimization.
+
+**Timing does not close. This image was not deployed.** The minimum emu
+slacks across all reported corners are setup **-1.002 ns**, hold
+**-0.089 ns**, recovery +4.141 ns, removal +0.503 ns and minimum pulse width
++1.101 ns. HDMI also has -0.419 ns setup slack. A successful Quartus flow
+therefore does not establish a hardware-ready port.
+
+Additional TimeQuest reports identify:
+
+- Setup: DDR `cpu_cache|cpu_ack` through the existing memory-ready/core-enable
+  logic to FPU `acc_hi[8]` enable, -1.002 ns, with an 8.810 ns relationship
+  and 8.554 ns data delay. This is the bus-acknowledgement enable path,
+  not the new branch data selector or ALU result path.
+- Hold: `bus16|addr_out[22]` to DDR `writeAddr[22]`, -0.089 ns. A separate
+  Denise-to-gamma path has -0.061 ns hold slack.
+
+These endpoints and their source logic predate this port. The changed
+placement can affect their delay, so this build alone does not establish
+whether a particular violation is pre-existing or introduced by the port.
+`PERFORMANCE.md` separately records an earlier baseline build that also
+failed timing. No constraints were weakened to accept this result.
+
+Reports are `fit-shared/compile.log`,
+`fit-shared/output_files/Minimig.fit.summary`, `fit-shared/port-setup.rpt`,
+`fit-shared/port-core-setup.rpt` and `fit-shared/port-hold.rpt` under the
+artifact directory above. `fit-shared/source-manifest.json` records the
+exact sequential RTL hashes; they match the final workspace sources.
+Generated RBF/SOF names contain `TIMING-FAIL-DO-NOT-FLASH`; the shared
+project bitstream was not replaced.

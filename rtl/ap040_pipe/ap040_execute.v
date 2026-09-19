@@ -126,6 +126,8 @@ module ap040_execute
 	input             eaf_is_scc,
 	input             eaf_is_dbcc,
 	input             eaf_is_jmp,
+	input             eaf_is_div,
+	input             eaf_div_signed,
 	input             eaf_is_link,
 	input             eaf_is_bsr,
 	input             eaf_is_jsr,
@@ -133,6 +135,7 @@ module ap040_execute
 	input             eaf_is_illegal,
 	input             eaf_is_priv,
 	input             eaf_is_addrerr,
+	input             eaf_is_divzero,
 	input             eaf_is_movesr,
 	input             eaf_is_movec,
 	input             eaf_movec_dir,
@@ -246,7 +249,97 @@ module ap040_execute
 
 assign ex_st_req = eaf_valid && eaf_is_rmw;
 wire   rmw_wait  = ex_st_req && l1_wr_busy;
-assign ex_stall  = stall_in || rmw_wait;
+assign ex_stall  = stall_in || rmw_wait || div_wait;
+
+// ------------------------------------------------------------- divide
+// A 32/16 divide cannot be combinational the way the 16x16 multiply can, so
+// this is an iterative restoring divider that holds the pipeline. It lives
+// here rather than in ap040_pipe_alu.v because it has state; the ALU is
+// purely combinational and staying that way is worth more than uniformity.
+//
+// It reuses milestone 48's local-stall machinery wholesale: div_wait joins
+// rmw_wait in ex_stall, which both freezes ap040_ea_fetch.v and -- through
+// the same gate milestone 48 had to move from stall_in to ex_stall -- holds
+// this stage's own output registers, so the instruction retires exactly
+// once. That gate was unreachable then and is exercised now.
+//
+// Thirty-two steps, not sixteen. A 32-bit quotient is computed and then
+// checked for fitting in 16 bits, which is the same test as the 68k's
+// "upper word of the dividend >= divisor" precondition but does not need to
+// be reasoned about separately.
+//
+// The divisor is never zero here: ap040_ea_fetch.v turns that into a
+// vector-5 exception before the instruction reaches this stage.
+reg        div_busy;
+reg  [5:0] div_cnt;
+reg [31:0] div_dvd;      // shifts left; its low bits collect the quotient
+reg [16:0] div_rem;
+reg [15:0] div_dsr;
+reg        div_qneg, div_rneg;
+
+wire        div_req    = eaf_valid && eaf_is_div;
+wire [16:0] div_rem_sh = {div_rem[15:0], div_dvd[31]};
+wire        div_rem_ge = (div_rem_sh >= {1'b0, div_dsr});
+wire        div_fin    = div_busy && (div_cnt == 6'd0);
+wire        div_wait   = div_req && !div_fin;
+
+// Signed division is done on magnitudes and re-signed afterwards: the
+// quotient takes the XOR of the operand signs, the remainder takes the
+// DIVIDEND's sign. That second rule is the one worth stating -- it is not
+// the sign of the divisor and it is not always the sign of the quotient.
+wire [31:0] div_dividend = eaf_operand_b;
+wire [15:0] div_divisor  = eaf_operand_a[15:0];
+wire        dvd_neg = eaf_div_signed && div_dividend[31];
+wire        dsr_neg = eaf_div_signed && div_divisor[15];
+wire [31:0] dvd_mag = dvd_neg ? (~div_dividend + 32'd1) : div_dividend;
+wire [15:0] dsr_mag = dsr_neg ? (~div_divisor  + 16'd1) : div_divisor;
+
+wire [31:0] q_mag = div_dvd;
+wire [15:0] r_mag = div_rem[15:0];
+wire [15:0] div_q = div_qneg ? (~q_mag[15:0] + 16'd1) : q_mag[15:0];
+wire [15:0] div_r = div_rneg ? (~r_mag       + 16'd1) : r_mag;
+wire [31:0] div_result = {div_r, div_q};
+
+// Overflow. Unsigned: anything above 16 bits. Signed: the magnitude must fit
+// a 16-bit signed value, which allows 32768 only when the quotient is
+// negative. On overflow the destination is left UNCHANGED and V is set --
+// the first instruction in this core that can fail without writing.
+wire div_ovf = eaf_div_signed ? (div_qneg ? (q_mag > 32'd32768) : (q_mag > 32'd32767))
+                              : (|q_mag[31:16]);
+
+// N and Z come from the 16-bit quotient. On overflow the 68k leaves them
+// undefined; this core defines them as cleared rather than leaving X's in
+// simulation. X is passed through, as it is for every non-arithmetic op.
+wire [4:0] div_flags = div_ovf ? {ccr_in[4], 1'b0, 1'b0, 1'b1, 1'b0}
+                               : {ccr_in[4], div_q[15], (div_q == 16'd0), 1'b0, 1'b0};
+
+always @(posedge clk) begin
+	if (!nreset) begin
+		div_busy <= 1'b0;
+		div_cnt  <= 6'd0;
+		div_dvd  <= 32'h0;
+		div_rem  <= 17'h0;
+		div_dsr  <= 16'h0;
+		div_qneg <= 1'b0;
+		div_rneg <= 1'b0;
+	end else if (ce) begin
+		if (div_req && !div_busy) begin
+			div_busy <= 1'b1;
+			div_cnt  <= 6'd32;
+			div_rem  <= 17'd0;
+			div_dvd  <= dvd_mag;
+			div_dsr  <= dsr_mag;
+			div_qneg <= dvd_neg ^ dsr_neg;
+			div_rneg <= dvd_neg;
+		end else if (div_busy && div_cnt != 6'd0) begin
+			div_rem <= div_rem_ge ? (div_rem_sh - {1'b0, div_dsr}) : div_rem_sh;
+			div_dvd <= {div_dvd[30:0], div_rem_ge};
+			div_cnt <= div_cnt - 6'd1;
+		end else if (div_fin) begin
+			div_busy <= 1'b0;
+		end
+	end
+end
 
 wire [31:0] alu_result;
 wire [4:0]  alu_flags;
@@ -309,7 +402,10 @@ wire [31:0] dbcc_result       = {eaf_operand_a[31:16], dbcc_dec};
 // regardless of whether the decremented value then causes a taken branch or
 // a loop-expired fall-through -- see header comment. Every other instruction
 // still uses decode's static eaf_writes_reg unchanged.
-wire writes_reg_resolved = eaf_is_dbcc ? (eaf_valid && !cond_result) : eaf_writes_reg;
+// DIVU/DIVS join DBcc as instructions whose write depends on a RUNTIME
+// value: an overflowing quotient writes nothing at all.
+wire writes_reg_resolved = eaf_is_dbcc ? (eaf_valid && !cond_result) :
+                            eaf_is_div  ? (eaf_writes_reg && !div_ovf) : eaf_writes_reg;
 
 // Both of DBcc's "don't branch" outcomes -- condition true, or the
 // decremented counter expired -- are architecturally identical to Bcc's
@@ -349,7 +445,13 @@ wire writes_reg_resolved = eaf_is_dbcc ? (eaf_valid && !cond_result) : eaf_write
 // ex_mispredict/ex_recovery_pc/combined_result/exe_writes_sr_c/
 // exe_sr_data_c all key off exc_reaching_ex already, not the individual
 // flags.
-wire exc_reaching_ex = eaf_is_trap || eaf_is_illegal || eaf_is_priv || eaf_is_addrerr;
+// Divide by zero (milestone 52) joins the aggregate, which is the whole of
+// what this file needed for it -- exactly as the comment above predicted
+// for address error. Without this the frame is pushed and the vector is
+// read correctly and then nothing redirects, so the instruction after the
+// divide runs as if nothing had happened.
+wire exc_reaching_ex = eaf_is_trap || eaf_is_illegal || eaf_is_priv || eaf_is_addrerr ||
+                        eaf_is_divzero;
 
 // RTS/RTE (milestone 16) join the SAME unconditional-redirect club one
 // more time: RTS's popped PC (routed into eaf_operand_a exactly like
@@ -426,6 +528,7 @@ wire [31:0] combined_result = eaf_is_scc  ? scc_merged :
                                 eaf_is_link || exc_reaching_ex)
                                  ? eaf_operand_b :
                                (eaf_is_movec && !eaf_movec_dir) ? creg_read_value :
+                               eaf_is_div ? div_result :
                                                                     alu_sized;
 
 // MOVE to SR (milestone 15, new): writes the WHOLE live SR, not just CCR --
@@ -536,7 +639,7 @@ always @(posedge clk) begin
 		exe_writes_reg2  <= eaf_writes_an;
 		exe_writes_reg   <= writes_reg_resolved;
 		exe_writes_ccr   <= eaf_writes_ccr;
-		exe_result_flags <= alu_flags;
+		exe_result_flags <= eaf_is_div ? div_flags : alu_flags;
 		exe_writes_sr    <= exe_writes_sr_c;
 		exe_sr_data      <= exe_sr_data_c;
 		exe_writes_creg  <= exe_writes_creg_c;
