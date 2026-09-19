@@ -630,6 +630,26 @@ wire is_mul_mem = is_mul && (if_opcode[5:3] != 3'b000);
 wire is_mul_pi = is_mul && (if_opcode[5:3] == 3'b011);
 wire is_mul_pd = is_mul && (if_opcode[5:3] == 3'b100);
 
+// MULU/MULS/DIVU/DIVS with an IMMEDIATE source (milestone 53), mode 111
+// reg 100. MULU #10,D0 and DIVU #10,D0 are everywhere in compiled code, and
+// they need no new gather kind: held_is_imm already assembles a Word
+// immediate, already routes it into operand_a through id_src_a_is_imm, and
+// already writes a data register with condition codes.
+//
+// Two properties had to be carried rather than inferred, which is the same
+// pattern milestones 40, 45 and 46 each hit: this gather's operation was
+// always an ALU op, and a divide is not one -- it is a sequencer flag that
+// ap040_execute.v keys off. held_imm_div/held_imm_divs carry it.
+//
+// The immediate arrives sign-extended (gather_disp always does), which is
+// right for MULS and DIVS and harmless for MULU and DIVU: the multiplier
+// reads only bits [15:0], and the divider takes its divisor from the same
+// low word.
+wire is_mul_imm = mul_shape && (if_opcode[5:0] == 6'b111100);
+wire is_div_imm = div_shape && (if_opcode[5:0] == 6'b111100);
+wire is_muldiv_imm = is_mul_imm || is_div_imm;
+wire is_muldiv_imm_signed = is_muldiv_imm && (if_opcode[8] == 1'b1);
+
 wire is_movem_st = (if_opcode[15:3] == 13'b0100100011100);
 wire is_movem_ld = (if_opcode[15:3] == 13'b0100110011011);
 wire is_movem    = is_movem_st || is_movem_ld;
@@ -1187,7 +1207,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an;
@@ -1239,6 +1259,8 @@ reg         held_is_alu_disp;
 reg         held_is_lea;        // the ninth kind: LEA (d16,An),Am
 reg         held_is_movem;      // the eleventh kind: MOVEM.L
 reg         held_movem_dir;
+reg         held_imm_div;       // this immediate form is a DIVIDE, not an ALU op
+reg         held_imm_divs;
 reg         held_is_link;       // the tenth kind: LINK An,#d16
 reg         held_imm_ccr;       // does this immediate form set condition codes?
 reg   [5:0] held_alu_op;
@@ -1362,6 +1384,8 @@ always @(posedge clk) begin
 		held_is_jmp     <= 1'b0;
 		held_is_lea     <= 1'b0;
 		held_imm_ccr    <= 1'b0;
+		held_imm_div    <= 1'b0;
+		held_imm_divs   <= 1'b0;
 		held_is_link    <= 1'b0;
 		held_is_movem   <= 1'b0;
 		held_movem_dir  <= 1'b0;
@@ -1484,8 +1508,8 @@ always @(posedge clk) begin
 					id_sxt_w        <= held_is_alu_disp && held_alu_sxt;
 					id_is_rmw       <= 1'b0;   // no gather kind is an RMW yet
 					id_is_link      <= held_is_link;
-					id_is_div       <= 1'b0;
-					id_div_signed   <= 1'b0;
+					id_is_div       <= held_is_imm && held_imm_div;
+					id_div_signed   <= held_is_imm && held_imm_divs;
 					id_is_movem     <= held_is_movem;
 					id_movem_dir    <= held_movem_dir;
 					id_is_unlk      <= 1'b0;
@@ -1507,7 +1531,7 @@ always @(posedge clk) begin
 			              is_bsr_word || is_bsr_long || is_jsr_disp || is_movec_opcode ||
 			              is_imm_alu || is_move_imm || is_move_abs || is_movea_imm ||
 			              is_st_abs || is_alu_disp || is_lea_disp || is_adda_imm ||
-			              is_adda_disp || is_link || is_movem) begin
+			              is_adda_disp || is_link || is_movem || is_muldiv_imm) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1520,17 +1544,22 @@ always @(posedge clk) begin
 				                 (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                 (is_move_imm && if_opcode[13:12] == 2'b10) ||
 				                 is_move_abs_l || is_movea_imm || is_st_abs_l || is_adda_imm_l;
-				held_is_imm      <= is_imm_alu || is_move_imm || is_movea_imm || is_adda_imm;
-				held_imm_op      <= is_adda_imm ? alu_nib_op :
+				held_is_imm      <= is_imm_alu || is_move_imm || is_movea_imm || is_adda_imm ||
+				                    is_muldiv_imm;
+				held_imm_op      <= is_mul_imm  ? (is_muldiv_imm_signed ? `AP040_ALU_MULS : `AP040_ALU_MULU) :
+				                    is_div_imm  ? `AP040_ALU_MOVE :
+				                    is_adda_imm ? alu_nib_op :
 				                    (is_move_imm || is_movea_imm) ? `AP040_ALU_MOVE : imm_alu_op;
 				// ADDA.W operates on the full 32 bits; only its SOURCE is a
 				// word, and gather_disp has already sign-extended that.
-				held_imm_size    <= (is_movea_imm || is_adda_imm) ? `AP040_SZ_L :
+				held_imm_size    <= (is_movea_imm || is_adda_imm || is_muldiv_imm) ? `AP040_SZ_L :
 				                    is_move_imm  ? move_op_size : if_opcode[7:6];
 				held_imm_nowrite <= is_cmpi_i || is_cmpa_imm;
-				held_imm_dest9   <= is_move_imm || is_movea_imm || is_adda_imm;
+				held_imm_dest9   <= is_move_imm || is_movea_imm || is_adda_imm || is_muldiv_imm;
 				held_imm_areg    <= is_movea_imm || is_adda_imm;
-				held_imm_ccr     <= is_imm_alu || is_move_imm || is_cmpa_imm;
+				held_imm_ccr     <= is_imm_alu || is_move_imm || is_cmpa_imm || is_muldiv_imm;
+				held_imm_div     <= is_div_imm;
+				held_imm_divs    <= is_div_imm && is_muldiv_imm_signed;
 				held_is_abs      <= is_move_abs;
 				held_is_stabs    <= is_st_abs;
 				// The ALU family takes its size from ir[7:6]; MOVE's lives in

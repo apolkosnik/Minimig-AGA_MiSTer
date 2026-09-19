@@ -1334,6 +1334,20 @@ real MMU or bus-error path arrives, which is the same boundary
         address error, so the new supervisor SP committed to the divide's
         own destination register.
 
+      **Milestone 53** added the `#imm` source to all four, which is the
+      form compiled code uses most (`MULU #10,D0`, `DIVU #10,D0`). No new
+      gather kind -- `held_is_imm` already assembles a Word immediate and
+      routes it through `id_src_a_is_imm`.
+
+      It hit the carried-property pattern for the fourth time, and this one
+      is qualitatively different from the first three: every earlier
+      instance carried a variant of something the gather already had (an ALU
+      op, a CCR rule, a destination bank). A divide is not an ALU op at all
+      -- it is a sequencer flag `ap040_execute.v` keys off -- so
+      `held_imm_div`/`held_imm_divs` carry a property from a different
+      mechanism entirely. Verified by not carrying it: `DIVU #7,D0` then
+      moves the immediate into D0 and leaves `00000007`.
+
       **And one latent bug of its own.** The exception's VECTOR READ went
       through `mem_lane`, which selects a lane from `eff_size`. A vector is
       always a longword, but divide by zero is the first instruction that
