@@ -274,6 +274,7 @@ module ap040_ea_fetch
 	input             eac_is_postinc,
 	input             eac_is_predec,
 	input             eac_is_jmp,
+	input             eac_is_lea,
 	input             eac_is_bsr,
 	input             eac_is_jsr,
 	input             eac_is_trap,
@@ -972,7 +973,11 @@ always @(posedge clk) begin
 				// (operand_a is simply unused for it), so it falls through
 				// to the same default every register-direct instruction
 				// already used.
-				eaf_operand_a  <= (eac_is_jmp || eac_is_jsr) ? ea_target : operand_a;
+				// LEA joins JMP/JSR here (milestone 42): its whole job is to
+				// deliver the computed address as the operand, so ALU_MOVE
+				// then writes it to An. This one line is the entire
+				// datapath cost of the instruction.
+				eaf_operand_a  <= (eac_is_jmp || eac_is_jsr || eac_is_lea) ? ea_target : operand_a;
 				// BSR/JSR: the NEW A7 value (== push_addr, the same
 				// expression already used for the write address) -- see
 				// header for why the decrement happens HERE, once, rather

@@ -1136,6 +1136,39 @@ real MMU or bus-error path arrives, which is the same boundary
    the absolute and PC-relative modes (111), and the whole `ir[8]=1`
    direction -- ALU-to-memory, which is a read-modify-write and the first
    instruction that would need both a load and a store.
+
+   **Milestone 42 (LEA)** is in every function prologue and every array
+   index, and was the cheapest useful instruction left: it produces an
+   address and writes it to An, reading no memory and setting no condition
+   codes. Its entire datapath cost is one term on one ternary --
+   `ap040_ea_fetch.v` already routes `ea_target` into `eaf_operand_a` for
+   JMP and JSR, and with `id_alu_op = MOVE` the address then lands in An
+   through the ordinary writeback. The rest is decode plus a flag threaded
+   through EA-calc, and mode 101 is the NINTH kind on the shared gather.
+
+   The absolute forms were deliberately not added: `LEA (xxx).L,An` is
+   `MOVEA.L #imm,An`, which `held_is_imm` has assembled since milestone 26.
+
+   Writing its bench turned up a real hole rather than a bug: **`MOVE.L
+   An,Dn` does not decode.** `is_move_rr` requires source mode 000, so
+   source mode 001 -- an address register as the source of anything -- has
+   no entry anywhere in this decoder. That affects the ALU family from
+   milestones 39-41 as well (`ADD.L A0,D0` is legal 68k for .W and .L) and
+   is the smallest remaining gap in the integer core.
+
+   ### Next, in rough order of value
+
+   1. **Source mode 001**, An as a source operand, for MOVE and for the
+      ADD/SUB/CMP forms that allow it. Pure decode, no datapath.
+   2. **ADDA/SUBA/CMPA** (opmode 011/111), pointer arithmetic. Needs one
+      new thing: a Word source sign-extended to 32 bits before a Long
+      operation, which no current instruction does.
+   3. **ALU-to-memory** (`ir[8]=1`), the read-modify-write direction. This
+      is the first real structural addition since milestone 30: the store
+      issues from EA-fetch with register data, but an RMW's store data is
+      the ALU result, one stage later. It needs an EX-stage L1 port
+      arbitrated against EA-fetch's.
+   4. **LINK/UNLK**, then **MOVEM**, then **MULU/DIVU**.
 4. **MMU and cache integration**, once enough of the integer ISA exists that
    testing them against real address translation is meaningful. Reuse the
    architectural requirements from `rtl_old/ap040_mmu.v`/`ap040_cache.v`
