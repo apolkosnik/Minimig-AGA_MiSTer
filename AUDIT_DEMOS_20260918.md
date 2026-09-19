@@ -135,3 +135,99 @@ turn these repros into regression gates using production enable behavior.
 Then validate on the named demos with a timing-clean image, recording the
 exact image, failing part, cache/MMU setup, and cold-boot behavior. No
 timing or performance claim can be made for the temporary controls.
+
+---
+
+## Status (2026-09-18): which of these ever ran on the board
+
+Both defects above were fixed in the previously reported card image.
+The NOP synchronization and maintenance interlock landed in `ec25690cd`,
+which measured 8,559 Dhrystones. The latest user report confirms the card
+now runs the timing-failing `f86b3980f` artifact: Deformations improves,
+with mouse-pointer-related artifacting remaining. Cold-boot behavior is
+awaiting confirmation; no new Elysium result was supplied.
+
+Distinguish when a fix landed from when its defect existed. Two later
+commits repaired bugs introduced by the deferred-flag change; the other
+two repaired defects already present in the flashed source:
+
+| Fix commit | Defect | Fix in `ec25690cd`? | Defect in `ec25690cd`? |
+|---|---|---|---|
+| `ec25690cd` | NOP sync, maintenance interlock | yes | fixed |
+| `afb93236f` | retry consumed its own X flag | no | yes, if a fault/retry exercises it |
+| `8473f4c68` | split write lost its deferred flags | no | no; introduced by `afb93236f` |
+| `b3da46b6a` | aborted deferred flags reached the handler CCR | no | no; introduced by `afb93236f` |
+| `f86b3980f` | partial writes replayed after a permission fault | no | yes, if a fault/retry exercises it |
+
+The two deferred-flag defects were created after the card was flashed and
+fixed before the tip, so they were never in an image where a demo ran. The
+X-flag and partial-write failures reproduced by the audits require a fault
+and retry; the demonstrated cases use recoverable MMU permission faults.
+The `ec25690cd` source commits flags before the store and writes CAS2's
+first operand before attempting its second. The installed memory tools,
+actual page permissions, and presence or absence of faults in the failing
+demos have not been established. Assuming an ordinary unprotected AmigaOS
+configuration can lower their priority, but does not rule them out. Physical
+bus-error restart also remains a separate limit, as the second-pass audit
+now explains.
+
+The earlier recommendation was to run both demos on the then-current
+`ec25690cd` image. The user has since identified a different image on the
+card. Returning to `ec25690cd` for comparison requires loading its existing
+named artifact and a cold boot, but no new build. That image passes the CPU
+timing gate; its HDMI domain does not close (see below).
+If they still fail, the two shipped ordering fixes are insufficient to
+resolve those failures; that does not exclude a contribution from those
+bugs, the unfixed restart paths, or an additional cause. If they pass, a
+repeatable comparison against the earlier image under the same cold-boot
+and machine configuration would strengthen the connection. One successful
+run alone does not identify which change caused recovery.
+
+Recording the image, the failing part, the cache and MMU settings, and
+cold-boot versus reset behavior is what would make either outcome usable.
+
+The later `f86b3980f` image has already been built and fails setup at
+-1.253 ns. It must not be used for the demo comparison. See
+`tests/ap040/PERFORMANCE.md` for the completed build and preserved artifact.
+
+### Board follow-up: Deformations recovered, pointer artifacts remain
+
+The user reports that the Deformations issue is gone and suspects timing
+closure for remaining artifacts associated with the mouse pointer. They
+confirmed the running image as
+`Minimig-ap040-40mhz-f86b3980f-20260918_152411-TIMING-FAIL-DO-NOT-FLASH.rbf`.
+This records an observed improvement without attributing it to a particular
+fix or counting it as validation on a timing-passing image. Power-cycle
+repeatability, video output/mode, and whether the pointer itself or the
+background is corrupted still need confirmation.
+
+The current image fails emu-domain setup at -1.253 ns and HDMI setup at
+-0.667 ns. Its saved TimeQuest report also has a -0.315 ns path from
+`ram1|sdata_reg[11]` to `ram1|sdata_chip[11]`. In `rtl/sdram_ctrl.v`,
+`sdata_chip` feeds `chipRD` and `chip48_*`, so there is a failing chipset
+read-data path upstream of HDMI as well. That makes timing a concrete
+candidate for sprite/display corruption; it does not prove the observed
+pointer artifacts originate on that path.
+
+For comparison, the `ec25690cd` build at `20260918_121123` passes the emu clock-domain gate
+at +0.132 ns setup / +0.090 ns hold, but **fails HDMI setup at -0.345 ns**
+(HDMI hold +0.123 ns). `build.sh` deliberately reports but tolerates
+`pll_hdmi` violations. Earlier references to this image as simply
+"timing-clean" meant only the CPU-domain gate and were too broad for
+diagnosing graphical artifacts. The retained build log establishes the
+HDMI-domain violation, not its exact failing endpoints. The current fit
+database belongs to `f86b3980f`, so its critical paths cannot substitute
+for those of `ec25690cd`.
+
+After returning to a CPU-timing-passing image, the RTL provides a useful
+output comparison without changing the CPU:
+normal scaled HDMI uses `clk_hdmi` for the scaler output, while native
+analog output (VGA scaler/framebuffer disabled) takes the core video path.
+Direct Video also selects the core video clock/path when `vga_fb` is clear
+(`sys/sys_top.v`, `hdmi_clk_sw` and the HDMI output mux). A reproducible
+artifact confined to scaled HDMI would favor that output branch; an
+artifact shared with native output would shift attention toward sprite
+DMA/rendering, memory, or software updates upstream. Neither result alone
+proves which timing or logic defect is responsible.
+
+No build, RTL change, or flash was performed for this follow-up.

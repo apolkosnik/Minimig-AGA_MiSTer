@@ -243,3 +243,88 @@ Logs: `/tmp/ap040-restart-fixed`, `/tmp/ap040-restart-suite`,
 suite and records its source hashes; `--rtl-dir` selects a baseline for a
 negative control. No demo recovery or board performance is inferred from
 these simulations. FPGA timing and hardware validation remain separate.
+
+### Physical bus errors: fault sources and the remaining platform assumption
+
+The probe cannot predict a physical bus error, so the partial-commit
+window it closes for translation and protection faults stays open for one
+below the MMU. Closing that properly needs the writeback frames the
+MC68040 uses (WB1/WB2/WB3 valid, handler completion), which would replace
+whole-instruction retry and the `no double writeback` regression with it.
+That is a much larger change than the probe and is not proposed here.
+
+The direct operand-bus `berr` input has one driver: the wrapper's bus
+watchdog. That is narrower than saying every physical/table-walk fault
+comes from the two watchdogs below. The complete inspected paths include:
+
+| Source | Path into the core | Timeout / trigger |
+|---|---|---:|
+| [cpu_wrapper.v:542](rtl/cpu_wrapper.v#L542) `bus_timeout` | `bus_berr` -> `berr` | 2^20 clk_sys cycles |
+| [ap040_tg68k_compat.v:134](rtl/ap040/ap040_tg68k_compat.v#L134) `core_stall_watchdog` | `core_stall_flt` -> `mem_flt` | 2^21 clk_sys cycles |
+| [Minimig.sv:369](Minimig.sv#L369) `walker_timeout` | walker CDC -> MMU walk error -> `mem_flt` or probe result | 2^16 clk_114 cycles |
+| [ap040_walker_cdc.v:144](rtl/ap040/ap040_walker_cdc.v#L144) rejected descriptor address | `s_bad_hold` -> walker bus error -> MMU fault/probe result | no timeout required |
+
+No target module directly asserts operand `bus_berr`. The comment at
+[cpu_wrapper.v:41](rtl/cpu_wrapper.v#L41) assumes a write timeout is fatal
+when justifying posting. That is an integration assumption, not a property
+enforced by the timeout or exception logic. A timeout says a particular
+request did not complete within the budget; it does not prove the target
+can never answer another request, or that earlier writes did not commit.
+
+The watchdog clears when the request drops
+([ap040_bus_timeout.v:20](rtl/ap040/ap040_bus_timeout.v#L20)); the chip-bus
+state machine releases its transaction on `bus_berr`
+([cpu_wrapper.v:819](rtl/cpu_wrapper.v#L819)); and an ordinary operand fault
+enters `aerr_start`, with `fatal_halt` reserved for a fault during exception
+entry ([ap040_core.v:2499](rtl/ap040/ap040_core.v#L2499)). Consequently the
+RTL does have a handler-entry path. Whether a particular target timeout
+is recoverable on the board needs evidence; these connections alone do
+not rule out partial-write replay. Walker errors above are reported through
+the MMU and are distinct from operand-bus errors after a committed prefix.
+
+One encoding detail follows from the table. `core_stall_flt` joins
+`mem_flt` rather than `berr`, and `aer_bus <= berr && !mem_flt`
+([ap040_core.v:1725](rtl/ap040/ap040_core.v#L1725)) therefore clears
+`aer_bus` for it, so a core-stall timeout stacks with the SSW ATC bit set
+and is reported as an MMU fault. That classification can affect a handler's
+diagnosis; calling it cosmetic depends on the unproven fatality assumption.
+No RTL change is proposed here.
+
+This section is RTL inspection of the fault sources. No board timeout
+recovery test or partial-write timeout injection was performed for this
+review, and it makes no claim about either demo. Physical bus-error restart
+remains an open correctness limit, rather than a proven unreachable case.
+
+### Follow-up review: corpus evidence, CAS2 frame data, and timing
+
+The retained `pw_corpus.log` contains 3,801 distinct slice records:
+3,797 pass, four fail, no timeouts or errors, in 957.27 seconds. Its four
+failures are the documented Issue 1 slices: `BasicFPU/FADD.L/0001`,
+`BasicFPU/FNEG.B/0002`, `BasicFPU/FSNEG.S/0002`, and
+`BasicFPU/FSNEG.X/0007`. Claude reported this as an unbounded run on
+`f86b3980f`. The retained log corroborates the counts and failure set;
+the referenced `/tmp/pw_corpus/verilator` JSON/XML reports are not present
+in this workspace, so source hashes and per-slice round totals were not
+independently checked here. This review did not rerun the corpus.
+
+Retained log:
+`/tmp/claude-1000/-home-adam-ap040x2/a9d14bf8-a66d-4135-b333-55b6c7dd6a8d/scratchpad/pw_corpus.log`.
+SHA-256: `8130c5329e07ec7bf9db549f8b9c8c6f480ab84797dca43e6e6af74d18e96fb5`.
+
+CAS2's pre-read checks pass zero write data to `check_write`; a failed
+probe therefore captures zero in `aer_wd` and stacks it in WB3D. WB3S is
+zero, so this is not an advertised pending writeback. The probes run
+before comparisons and update-register reads. The zero is diagnostic
+placeholder data under the current whole-instruction retry model; it must
+be revisited if valid writeback frames are implemented. Hardware-exact
+contents of an invalid WB3D slot were not established by this review.
+
+The posted-store ordering observation is supported by
+`walker_req = walker_req_mmu & ~post_drain` in the compatibility wrapper.
+
+The timing build already completed. The named `ec25690cd` build from
+12:11:23 has +0.132 ns CPU-domain setup. The `f86b3980f` build from
+15:24:11 completed at 15:42:16 and fails at -1.253 ns setup / +0.068 ns
+hold. The rejected artifact and SDRAM critical path are recorded in
+`tests/ap040/PERFORMANCE.md`. An idle Quartus process list now cannot
+establish that this earlier build never ran. Nothing was flashed.

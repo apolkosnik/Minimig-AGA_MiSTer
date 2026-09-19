@@ -1213,6 +1213,16 @@ be flashed again.
 
 ### Measured on ec25690cd (2026-09-18): the posted-write fixes, on the board
 
+**Timing clarification following the pointer-artifact report:** this image
+passes the CPU-domain gate (+0.132 ns setup, +0.090 ns hold), but its HDMI
+domain fails setup at -0.345 ns (hold +0.123 ns), in
+`build_ap040-40mhz_20260918_121123.log`. `build.sh` tolerates HDMI failures;
+the image is not fully timing-closed. The user's new report of Deformations
+recovered with mouse-pointer-related artifacts remaining is confirmed to
+be on the later, rejected `f86b3980f` image, not this `ec25690cd` build.
+Cold-boot repeatability and output mode await confirmation. See
+`AUDIT_DEMOS_20260918.md` for the observation and output-path comparison.
+
 **Follow-up, 2026-09-18:** the ROM-bench configuration gap described below
 is closed in simulation. `tb_ap040_diagrom` now defaults to posting, uses
 independent core/bus enables, and requires observed execution during a
@@ -1356,7 +1366,7 @@ sizing the read turned most bitfield accesses from bypassing into cacheable.
 
 One full compile of the 40MHz configuration completed in 18:04. The
 fitter succeeded after an internal routing retry, using 39,386 / 41,910
-ALMs (94%) and 35,923 registers. CPU-domain setup is **-1.253 ns**;
+ALMs (94%) and 35,923 registers. Emu-group setup is **-1.253 ns**;
 hold is **+0.068 ns**. Recovery, removal and minimum pulse width pass.
 The separate HDMI setup result is -0.667 ns. This image is not usable on
 the board and was not flashed or benchmarked.
@@ -1390,3 +1400,25 @@ Artifacts and provenance:
 - RTL hashes match the source captured before the build. The card remains
   at the previously validated `ec25690cd`, 8,559 Dhrystones; no new
   hardware result is claimed.
+
+**Subsequent user report:** the user has now loaded the rejected
+`Minimig-ap040-40mhz-f86b3980f-20260918_152411-TIMING-FAIL-DO-NOT-FLASH.rbf`
+and reports the Deformations issue gone, with mouse-pointer-related
+artifacting remaining. This supersedes the card identity at build completion
+above. It is an observation on a timing-failing image, not hardware
+validation. Alongside the -1.253 ns emu and -0.667 ns HDMI setup failures,
+the saved path report contains a -0.315 ns path from `ram1|sdata_reg[11]`
+to `ram1|sdata_chip[11]`, which feeds the chipset read data. Timing is a
+plausible cause of the graphics symptom and needs resolving before this
+image can serve as a correctness comparison. No further build was launched.
+
+**Clock/path clarification:** the build script's "emu (CPU)" label is the
+minimum across multiple emu clocks. In this build, the failing -1.253 ns
+clock is output 0 (`clk_114`, the SDRAM domain); output 1 (`clk_sys`, the
+CPU wrapper's clock) has worst setup +0.460 ns, versus +0.625 ns on
+`ec25690cd`. The worst SDRAM path has one logic level and 7.225 ns of
+interconnect delay. The 1.385 ns emu-minimum regression therefore does not
+by itself prove added write-probe combinational depth. Its source-level
+cause is not isolated. The loaded image is not a measurement platform;
+recover timing before attributing board artifacts or comparing performance.
+See [the retained timing evidence](../../TIMING_F86B3980F_20260918.md).

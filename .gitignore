@@ -50,3 +50,8 @@ rtl/sim/**/transcript
 rtl/sim/**/modelsim.ini
 rtl/sim/**/vsim.wlf
 rtl/sim/sdram/sdram_ctrl_sim.v
+
+# Quartus compile logs written to the repo root by build.sh, and the crash
+# report quartus_sta leaves behind: run artefacts, one per build, not sources.
+build_*.log
+cr_ie_info.json
