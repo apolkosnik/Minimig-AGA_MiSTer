@@ -409,15 +409,20 @@ wire [31:0] operand_a = eac_src_a_is_imm ? eac_imm :
 // than decode arranging for operand_a to read zero -- no register does.
 // -(An) accesses the DECREMENTED address, (An)+ the original one. Long only,
 // matching the memory-source support, so the step is always 4.
+// A load's address register is the SOURCE (ir[2:0]); a store's is the
+// DESTINATION (ir[11:9]), which resolves to operand_b. One base wire keeps
+// the increment logic below from having to care which it is.
+wire [31:0] an_base = eac_is_store ? operand_b : operand_a;
+
 wire [31:0] ea_target = eac_is_abs    ? eac_imm           :
-                        eac_is_predec ? (operand_a - 32'd4) :
+                        eac_is_predec ? (an_base - 32'd4) :
                                         (operand_a + eac_imm);
 
 // The value An takes afterwards. Both modes leave An at the same place --
 // just past the longword for (An)+, at the start of it for -(An) -- which is
 // why one expression covers both.
-wire [31:0] an_new = eac_is_postinc ? (operand_a + 32'd4) :
-                                      (operand_a - 32'd4);
+wire [31:0] an_new = eac_is_postinc ? (an_base + 32'd4) :
+                                      (an_base - 32'd4);
 wire        an_write = eac_valid && (eac_is_postinc || eac_is_predec);
 
 // Address error on an odd JMP/JSR target (milestone 17, new): a SECOND
@@ -626,7 +631,7 @@ wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 // the BSR/JSR PUSH address, an exception frame WRITE beat, the exception's
 // own vector-table READ, or RTE's own pop READ -- mutually exclusive by
 // construction (an instruction is never more than one of these at once).
-wire [31:0] l1_addr_word = eac_is_store ? operand_b :
+wire [31:0] l1_addr_word = eac_is_store ? (eac_is_predec ? (an_base - 32'd4) : an_base) :
                             eac_is_push  ? push_addr :
                             exc_writing ? exc_beat_addr :
                             (exc_vec_issue || exc_vec_pending) ? exc_vec_addr :
@@ -714,7 +719,7 @@ always @(posedge clk) begin
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
 				eaf_writes_an  <= an_write;
-				eaf_an_reg     <= eac_src_reg;
+				eaf_an_reg     <= eac_is_store ? eac_dest_reg : eac_src_reg;
 				eaf_an_data    <= an_new;
 				eaf_writes_reg <= eac_writes_reg;
 				eaf_writes_ccr <= eac_writes_ccr;
@@ -799,7 +804,7 @@ always @(posedge clk) begin
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
 				eaf_writes_an  <= an_write;
-				eaf_an_reg     <= eac_src_reg;
+				eaf_an_reg     <= eac_is_store ? eac_dest_reg : eac_src_reg;
 				eaf_an_data    <= an_new;
 				// UNCONDITIONALLY 1, not forwarded from eac_writes_reg:
 				// every exception entry writes A7 the new SP, full stop --
@@ -879,7 +884,7 @@ always @(posedge clk) begin
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
 				eaf_writes_an  <= an_write;
-				eaf_an_reg     <= eac_src_reg;
+				eaf_an_reg     <= eac_is_store ? eac_dest_reg : eac_src_reg;
 				eaf_an_data    <= an_new;
 				// NOT 1: RTE's A7 restore does NOT go through the normal
 				// commit_reg/A7-bank path at all -- see ap040_execute.v's
@@ -936,7 +941,7 @@ always @(posedge clk) begin
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
 				eaf_writes_an  <= an_write;
-				eaf_an_reg     <= eac_src_reg;
+				eaf_an_reg     <= eac_is_store ? eac_dest_reg : eac_src_reg;
 				eaf_an_data    <= an_new;
 				eaf_writes_reg <= eac_writes_reg;
 				eaf_writes_ccr <= eac_writes_ccr;

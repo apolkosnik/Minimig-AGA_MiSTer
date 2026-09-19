@@ -673,8 +673,19 @@ wire is_move_ax = is_move_pi || is_move_pd;
 //
 // Nothing is written to a register -- id_writes_reg stays 0 -- but MOVE sets
 // N and Z from the data, so id_writes_ccr does not.
-wire is_move_st = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b010) &&
-                  (if_opcode[5:3] == 3'b000);
+wire is_move_st_an = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b010) &&
+                     (if_opcode[5:3] == 3'b000);
+
+// ... and the same store to (An)+ / -(An) (milestone 32). This is where
+// milestone 30's address update meets milestone 31's store path, and the two
+// take their address register from OPPOSITE operands: a load's An is the
+// source at ir[2:0], a store's is the destination at ir[11:9]. See
+// ap040_ea_fetch.v's an_base.
+wire is_move_st_pi = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b011) &&
+                     (if_opcode[5:3] == 3'b000);
+wire is_move_st_pd = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b100) &&
+                     (if_opcode[5:3] == 3'b000);
+wire is_move_st = is_move_st_an || is_move_st_pi || is_move_st_pd;
 
 // MOVE.L (d16,An),Dn: 0010 DDD 000 101 aaa -- same shape as is_move_mem_l
 // above, mode field 101 instead of 010 (verified against the same
@@ -1156,8 +1167,8 @@ always @(posedge clk) begin
 				id_is_mem_src   <= if_valid && (is_move_mem_l || is_rts || is_move_ax);
 				id_is_abs       <= 1'b0;
 				id_is_store     <= if_valid && is_move_st;
-				id_is_postinc   <= if_valid && is_move_pi;
-				id_is_predec    <= if_valid && is_move_pd;
+				id_is_postinc   <= if_valid && (is_move_pi || is_move_st_pi);
+				id_is_predec    <= if_valid && (is_move_pd || is_move_st_pd);
 				id_is_jmp       <= if_valid && is_jmp_an;
 				id_is_bsr       <= if_valid && is_bsr_byte;
 				id_is_jsr       <= if_valid && is_jsr_an;
