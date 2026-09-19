@@ -416,6 +416,28 @@ wire [5:0] unary_rr_op = is_negx_rr ? `AP040_ALU_NEGX :
                          is_not_rr  ? `AP040_ALU_NOT  :
                                       `AP040_ALU_TST;
 
+// ADDX/SUBX, register form: 1ooo Rx 1 SS 00 0 Ry. This is the ir[8]=1 slot
+// the binary family above excludes as "the Dn -> <ea> direction" -- but with
+// a register-direct source that direction is not encodable (ADD Dn,Dn has no
+// encoding), so the slot belongs to ADDX/SUBX instead. Destination is
+// ir[11:9] and source ir[2:0], exactly as the binary family, so the default
+// selectors already apply.
+//
+// Only 1101 and 1001 are enumerated, deliberately. 1011 with ir[8]=1 is EOR
+// Dn,Dn, which IS a real encoding and must not be swallowed here, and 1100
+// with ir[8]=1 is the ABCD group. ir[3]=1 would be the -(Ay),-(Ax) memory
+// form, which has no path yet.
+wire addx_shape = (if_opcode[15]   == 1'b1)  && (if_opcode[8]   == 1'b1) &&
+                  (if_opcode[7:6]  != 2'b11) && (if_opcode[5:3] == 3'b000);
+wire is_addx_rr = addx_shape && (if_opcode[14:12] == 3'b101);   // 1101
+wire is_subx_rr = addx_shape && (if_opcode[14:12] == 3'b001);   // 1001
+wire is_x_rr    = is_addx_rr || is_subx_rr;
+
+// ap040_pipe_alu.v computes b + a + X and b - a - X, and carries the 68000's
+// sticky Z (cleared but never set) through f_z, so these need nothing from
+// this stage beyond reaching them -- ccr_in is already wired to the ALU.
+wire [5:0] x_rr_op = is_addx_rr ? `AP040_ALU_ADDX : `AP040_ALU_SUBX;
+
 wire [5:0] alu_rr_op = is_or_rr  ? `AP040_ALU_OR  :
                        is_sub_rr ? `AP040_ALU_SUB :
                        is_cmp_rr ? `AP040_ALU_CMP :
@@ -592,7 +614,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_unary_rr && !is_extswap_rr && !is_x_rr &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte;
@@ -867,17 +889,18 @@ always @(posedge clk) begin
 				id_imm          <= (is_move_mem_l || is_jmp_an || is_jsr_an || is_rts || is_rte) ? 32'h0 :
 				                    is_trap ? (32'd32 + {28'd0, if_opcode[3:0]}) :
 				                              {{24{if_opcode[7]}}, if_opcode[7:0]};
-				id_alu_op       <= is_alu_rr     ? alu_rr_op   :
+				id_alu_op       <= is_x_rr       ? x_rr_op     :
+				                   is_alu_rr     ? alu_rr_op   :
 				                   is_unary_rr   ? unary_rr_op :
 				                   is_extswap_rr ? extswap_op  : `AP040_ALU_MOVE;
 				// Everything else here (MOVEQ, Scc, the memory/branch forms)
 				// is Long or drives its own width, so Long stays the default.
 				id_size         <= is_extswap_rr ? extswap_size :
-				                   (is_alu_rr || is_unary_rr) ? add_op_size :
+				                   (is_alu_rr || is_unary_rr || is_x_rr) ? add_op_size :
 				                   is_move_rr ? move_op_size : `AP040_SZ_L;
 				id_src_a_is_imm <= if_valid && is_moveq;
-				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
-				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_extswap_rr || is_move_mem_l);
+				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || is_x_rr || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte);
+				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_unary_rr || is_extswap_rr || is_x_rr || is_move_mem_l);
 				id_is_branch    <= if_valid && is_branch_byte;
 				id_is_scc       <= if_valid && is_scc_rr;
 				id_is_dbcc      <= 1'b0;
