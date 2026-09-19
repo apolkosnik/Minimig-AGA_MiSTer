@@ -1282,6 +1282,33 @@ real MMU or bus-error path arrives, which is the same boundary
    4. ~~LINK/UNLK~~ **DONE (milestone 49)**, then **MOVEM**, then
       **MULU/DIVU**.
 
+      **MOVEM.L (milestone 50)** covers the two autoincrement forms, which
+      are the prologue/epilogue idiom. One instruction, up to sixteen memory
+      accesses, so it is a sequencer in `ap040_ea_fetch.v` alongside the
+      exception-frame and RTE ones -- and a THIRD register write port, since
+      one instruction writing sixteen registers cannot use a writeback path
+      that carries one result per instruction. That port needs no
+      arbitration: a MOVEM holds EA-fetch and the pipeline ahead of it has
+      drained, so ports 1 and 2 are idle.
+
+      The mask is numbered differently in the two directions -- bit 0 is A7
+      for the predecrementing store and D0 for the load -- and walking from
+      bit 0 upward is correct for BOTH only because the register index is
+      read as `15 - bit` in one case and `bit` in the other. That symmetry
+      is why one sequencer covers both, and it was verified by mutating the
+      store to use the load's numbering.
+
+      Stores take one cycle per register when the write buffer is free and
+      retry while it is not, as an exception frame beat does. Loads take two
+      -- drive the address, capture `l1_q_b` the cycle after. Pipelining the
+      load beats is left for when MOVEM is on a path that cares.
+
+      `raddr_a` is redirected to the register each store beat reads, and the
+      two forwarding comparators now compare against `raddr_a` rather than
+      `eac_src_reg` -- a no-op when they are equal, and what keeps a
+      register written by the instruction just ahead of the MOVEM correctly
+      forwarded.
+
       LINK and UNLK fit because they write TWO registers and milestone 30's
       second write port is free for them -- neither autoincrements. LINK's
       memory write reuses `eac_is_push`, the BSR/JSR path, whose address is

@@ -277,6 +277,8 @@ module ap040_ea_fetch
 	input             eac_is_lea,
 	input             eac_sxt_w,
 	input             eac_is_rmw,
+	input             eac_is_movem,
+	input             eac_movem_dir,
 	input             eac_is_link,
 	input             eac_is_unlk,
 	// The EX stage has taken L1 port B this cycle for a read-modify-write's
@@ -374,6 +376,10 @@ module ap040_ea_fetch
 	// EX-forward output -- see its header.
 	output reg [15:0] eaf_sr_snapshot,
 	output reg        eaf_is_rmw,
+	// MOVEM's third register write port -- see ap040_pipe_regfile.v.
+	output            rf3_we,
+	output      [3:0] rf3_addr,
+	output     [31:0] rf3_data,
 	output reg        eaf_is_link,
 	output reg [31:0] eaf_ea_target,
 	output reg        eaf_is_rts,
@@ -397,8 +403,8 @@ reg mem_pending;   // an L1 port-B request is in flight for the CURRENT eac_*
 // need ea_target, milestone 17) -- iverilog requires a wire's declaration
 // to textually precede any use of it in another continuous assignment,
 // even though nothing here structurally depends on file order otherwise.
-wire fwd_a_from_ex  = ex_fwd_valid  && (ex_fwd_dest  == eac_src_reg);
-wire fwd_a_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == eac_src_reg);
+wire fwd_a_from_ex  = ex_fwd_valid  && (ex_fwd_dest  == raddr_a);
+wire fwd_a_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == raddr_a);
 
 // Flat 3-way select on port A: immediate, else forwarded, else the
 // regfile's own (possibly write-through-bypassed) read. eac_src_a_is_imm
@@ -463,12 +469,75 @@ wire [31:0] an_new = eac_is_postinc ? (an_base + an_step) :
 // instruction autoincrements, so there is no contention. Hoisted here so
 // every branch below assigns the same three wires instead of repeating a
 // ternary that now has three cases.
-wire        an_wr_any  = an_write || (eac_valid && (eac_is_link || eac_is_unlk));
-wire  [3:0] an_wr_reg  = eac_is_link  ? eac_src_reg :
+wire        an_wr_any  = an_write || (eac_valid && (eac_is_link || eac_is_unlk)) || mvm_fin;
+wire  [3:0] an_wr_reg  = (eac_is_link || eac_is_movem) ? eac_src_reg :
                          eac_is_unlk  ? 4'd15       :
                          eac_is_store ? eac_dest_reg : eac_src_reg;
 wire [31:0] an_wr_data = eac_is_link  ? push_addr            :
-                         eac_is_unlk  ? (operand_a + 32'd4)  : an_new;
+                         eac_is_unlk  ? (operand_a + 32'd4)  :
+                         eac_is_movem ? mvm_addr             : an_new;
+
+// ------------------------------------------------------------------ MOVEM
+// One memory access per set mask bit, up to sixteen, so this is a sequencer
+// like the exception-frame and RTE ones above rather than anything the
+// single-access paths could carry.
+//
+// Walking the mask from bit 0 upward is right for BOTH directions once the
+// register index is read off correctly: the predecrementing store numbers
+// bit 0 as A7, so it stores A7 first at the highest address and the index
+// is 15 - bit; the postincrementing load numbers bit 0 as D0 and the index
+// IS the bit. That symmetry is why one sequencer covers both.
+//
+// Stores take one cycle per register when the write buffer is free and
+// retry while it is not, exactly as an exception frame beat does. Loads
+// take two -- drive the address, then capture l1_q_b the cycle after --
+// because the L1 registers its read data. Pipelining the load beats is
+// left for when MOVEM is on a path that cares.
+reg         mvm_active;
+reg  [15:0] mvm_mask;
+reg  [31:0] mvm_addr;
+reg         mvm_dir;        // 1 = memory -> registers
+reg         mvm_rd_pend;    // an address was driven last cycle; data is here now
+reg   [3:0] mvm_rd_reg;
+
+wire        mvm_any  = |mvm_mask;
+wire  [3:0] mvm_bit  = mvm_mask[0]  ? 4'd0 :
+                     mvm_mask[1]  ? 4'd1 :
+                     mvm_mask[2]  ? 4'd2 :
+                     mvm_mask[3]  ? 4'd3 :
+                     mvm_mask[4]  ? 4'd4 :
+                     mvm_mask[5]  ? 4'd5 :
+                     mvm_mask[6]  ? 4'd6 :
+                     mvm_mask[7]  ? 4'd7 :
+                     mvm_mask[8]  ? 4'd8 :
+                     mvm_mask[9]  ? 4'd9 :
+                     mvm_mask[10]  ? 4'd10 :
+                     mvm_mask[11]  ? 4'd11 :
+                     mvm_mask[12]  ? 4'd12 :
+                     mvm_mask[13]  ? 4'd13 :
+                     mvm_mask[14]  ? 4'd14 :
+                     mvm_mask[15]  ? 4'd15 :
+                                     4'd0;
+wire [15:0] mvm_onehot = (16'd1 << mvm_bit);
+wire  [3:0] mvm_reg  = mvm_dir ? mvm_bit : (4'd15 - mvm_bit);
+wire [31:0] mvm_st_addr = mvm_addr - 32'd4;
+
+// Wanting the port and getting it are separate, the same split exc_writing
+// and exc_beat_ack already use: wren_b is asserted while the request
+// stands, and only a cycle where wr_busy reads low actually advances.
+wire mvm_st_want = mvm_active && !mvm_dir && mvm_any && !port_taken;
+wire mvm_st_go   = mvm_st_want && !l1_wr_busy;
+wire mvm_ld_go   = mvm_active &&  mvm_dir && mvm_any && !mvm_rd_pend && !port_taken;
+
+// Finished: nothing left in the mask and no read still in flight. On that
+// cycle the instruction falls through to the ordinary completion path
+// below, which writes An through the second port via an_wr_*.
+wire mvm_fin   = mvm_active && !mvm_any && !mvm_rd_pend;
+wire mvm_stall = eac_valid && eac_is_movem && !mvm_fin;
+
+assign rf3_we   = mvm_rd_pend;
+assign rf3_addr = mvm_rd_reg;
+assign rf3_data = l1_q_b;
 wire        an_write = eac_valid && (eac_is_postinc || eac_is_predec);
 
 // Address error on an odd JMP/JSR target (milestone 17, new): a SECOND
@@ -586,8 +655,8 @@ wire ret_complete = ret_active && ret_pending;
 wire ret_done     = ret_complete && (ret_ph == RET_BEAT1);
 wire ret_stall    = ret_active && !ret_done;
 
-assign eaf_stall = stall_in || mem_issue || wr_stall || exc_stall || ret_stall || port_taken;
-assign raddr_a    = eac_src_reg;
+assign eaf_stall = stall_in || mem_issue || wr_stall || exc_stall || ret_stall || port_taken || mvm_stall;
+assign raddr_a    = mvm_st_want ? mvm_reg : eac_src_reg;
 // A privilege violation reroutes port B to A7 REGARDLESS of what the
 // faulting instruction's own eac_dest_reg says (MOVEC's read direction
 // points it at the destination GPR, Rn, for its NORMAL case) -- but NOT via
@@ -705,7 +774,8 @@ wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 // the BSR/JSR PUSH address, an exception frame WRITE beat, the exception's
 // own vector-table READ, or RTE's own pop READ -- mutually exclusive by
 // construction (an instruction is never more than one of these at once).
-wire [31:0] l1_addr_word = eac_is_store ? (eac_is_abs    ? eac_imm :
+wire [31:0] l1_addr_word = mvm_active   ? (mvm_dir ? mvm_addr : mvm_st_addr) :
+                            eac_is_store ? (eac_is_abs    ? eac_imm :
                                                        eac_is_predec ? (an_base - an_step)
                                                                      : an_base) :
                             eac_is_push  ? push_addr :
@@ -714,7 +784,7 @@ wire [31:0] l1_addr_word = eac_is_store ? (eac_is_abs    ? eac_imm :
                             ret_active  ? ret_addr :
                                                                   ea_target;
 assign l1_addr_b = (l1_addr_word - PC_RESET) >> 1;
-assign l1_wren_b = (eac_valid && (eac_is_push || eac_is_store)) || exc_writing;
+assign l1_wren_b = (eac_valid && (eac_is_push || eac_is_store)) || exc_writing || mvm_st_want;
 // A sized store places its data in the lane the address names and enables
 // only that lane. Lane 3 is the longword's first byte, matching
 // ap040_pipe_l1.v's be_b. Everything that is not a sized store -- pushes,
@@ -729,8 +799,12 @@ wire [31:0] st_dat = (eac_size == `AP040_SZ_L || !eac_is_store) ? operand_a :
                      st_off[0] ? {8'd0, operand_a[7:0], 16'd0}
                                : {operand_a[7:0], 24'd0};
 
-assign l1_be_b   = st_be;
-assign l1_data_b = exc_writing  ? exc_wdata :
+assign l1_be_b   = mvm_active ? 4'b1111 : st_be;
+// operand_a is port A, which mvm_st_want has pointed at the register this
+// beat stores -- so the same wire that carries a LINK's pushed An carries
+// each MOVEM register in turn.
+assign l1_data_b = mvm_st_want  ? operand_a :
+                   exc_writing  ? exc_wdata :
                    eac_is_store ? st_dat  :
                    eac_is_link  ? operand_a : eac_next_pc;
 
@@ -773,6 +847,12 @@ always @(posedge clk) begin
 		eaf_rte_sr_data<= 16'h0;
 		eaf_cond       <= 4'h0;
 		mem_pending    <= 1'b0;
+		mvm_active     <= 1'b0;
+		mvm_mask       <= 16'h0;
+		mvm_addr       <= 32'h0;
+		mvm_dir        <= 1'b0;
+		mvm_rd_pend    <= 1'b0;
+		mvm_rd_reg     <= 4'h0;
 		exc_ph          <= EXC_BEAT0;
 		exc_vec_pending <= 1'b0;
 		ret_ph          <= RET_BEAT0;
@@ -781,6 +861,8 @@ always @(posedge clk) begin
 		if (flush) begin
 			eaf_valid       <= 1'b0;
 			mem_pending     <= 1'b0;
+			mvm_active      <= 1'b0;
+			mvm_rd_pend     <= 1'b0;
 			// Abandon a mid-flight exception sequence the same way an
 			// abandoned mem_pending read is: nothing downstream of a flush
 			// consumes what was in progress, but exc_ph/exc_vec_pending
@@ -869,6 +951,33 @@ always @(posedge clk) begin
 				// Bubbling ahead of it would drop it on the floor, since
 				// next cycle l1_q_b holds whatever EX's store put there.
 				eaf_valid       <= 1'b0;
+			end else if (eac_valid && eac_is_movem && !mvm_fin) begin
+				// Start, then one beat per cycle. eac_* is frozen by
+				// mvm_stall throughout, so operand_a still reads An on the
+				// starting cycle, and the mask and base are latched once.
+				eaf_valid <= 1'b0;
+				if (!mvm_active) begin
+					mvm_active  <= 1'b1;
+					mvm_dir     <= eac_movem_dir;
+					mvm_mask    <= eac_imm[15:0];
+					mvm_addr    <= operand_a;
+					mvm_rd_pend <= 1'b0;
+					mvm_rd_reg  <= 4'h0;
+				end else if (mvm_ld_go) begin
+					// Address driven this cycle; l1_q_b has it next, and
+					// rf3_we commits it then.
+					mvm_mask    <= mvm_mask & ~mvm_onehot;
+					mvm_addr    <= mvm_addr + 32'd4;
+					mvm_rd_pend <= 1'b1;
+					mvm_rd_reg  <= mvm_reg;
+				end else if (mvm_rd_pend) begin
+					mvm_rd_pend <= 1'b0;
+				end else if (mvm_st_go) begin
+					// Predecrementing: the beat wrote mvm_st_addr, which
+					// becomes the new running address.
+					mvm_mask    <= mvm_mask & ~mvm_onehot;
+					mvm_addr    <= mvm_st_addr;
+				end
 			end else if (exc_writing) begin
 				// Posting one beat of the exception frame -- see header.
 				// exc_beat_ack means l1_wr_busy read low THIS cycle, so the
@@ -1049,6 +1158,11 @@ always @(posedge clk) begin
 				ret_ph          <= RET_BEAT0;
 				ret_pending     <= 1'b0;
 			end else begin
+				// A finishing MOVEM completes through this branch, which is
+				// also where An gets written via an_wr_* -- so the sequencer
+				// is retired here. Unconditional because it is already low
+				// for every other instruction.
+				mvm_active     <= 1'b0;
 				eaf_valid      <= eac_valid;
 				eaf_pc         <= eac_pc;
 				eaf_next_pc    <= eac_next_pc;

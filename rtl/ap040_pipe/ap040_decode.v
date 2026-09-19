@@ -307,6 +307,8 @@ module ap040_decode
 	output reg        id_sxt_w,
 	output reg        id_is_rmw,
 	output reg        id_is_link,
+	output reg        id_is_movem,
+	output reg        id_movem_dir,
 	output reg        id_is_unlk,
 	output reg        id_is_bsr,
 	output reg        id_is_jsr,
@@ -556,6 +558,31 @@ wire [5:0] alu_nib_dst_op = (if_opcode[14:12] == 3'b000) ? `AP040_ALU_OR  :
 //
 // LINK is the TENTH gather kind, and as the plan predicted after milestone
 // 46 it carries its own properties rather than inferring them from shape.
+// MOVEM.L (milestone 50), the two autoincrement forms -- which are the
+// prologue/epilogue idiom and the reason the instruction matters:
+//
+//   MOVEM.L <list>,-(An)   $48E0+n   registers to memory, predecrementing
+//   MOVEM.L (An)+,<list>   $4CD8+n   memory to registers, postincrementing
+//
+// An extension word carries a 16-bit register MASK, and the instruction is
+// genuinely multi-cycle: one memory access per set bit, up to sixteen. It
+// gets a sequencer in ap040_ea_fetch.v alongside the exception-frame and
+// RTE ones, and a THIRD register write port, because one instruction
+// writing sixteen registers cannot use a writeback path that carries one
+// result per instruction.
+//
+// The mask is numbered differently in the two directions, which is the
+// detail worth stating once rather than rediscovering: for the
+// predecrementing store, bit 0 is A7 and bit 15 is D0, so walking the mask
+// from bit 0 upward stores A7 first at the highest address; for every other
+// mode, including the postincrementing load, bit 0 is D0 and bit 15 is A7.
+// Taking lowest-set-bit first in both cases, the register index is
+// 15 - bit for the store and bit itself for the load, which is why they
+// reverse cleanly into one sequencer.
+wire is_movem_st = (if_opcode[15:3] == 13'b0100100011100);
+wire is_movem_ld = (if_opcode[15:3] == 13'b0100110011011);
+wire is_movem    = is_movem_st || is_movem_ld;
+
 wire is_link = (if_opcode[15:3] == 13'b0100111001010);
 wire is_unlk = (if_opcode[15:3] == 13'b0100111001011);
 
@@ -1109,7 +1136,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unlk && !is_link && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unlk && !is_link && !is_movem && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an;
@@ -1159,6 +1186,8 @@ reg         held_is_move_disp;
 // id_alu_op could be chosen from the kind flags alone.
 reg         held_is_alu_disp;
 reg         held_is_lea;        // the ninth kind: LEA (d16,An),Am
+reg         held_is_movem;      // the eleventh kind: MOVEM.L
+reg         held_movem_dir;
 reg         held_is_link;       // the tenth kind: LINK An,#d16
 reg         held_imm_ccr;       // does this immediate form set condition codes?
 reg   [5:0] held_alu_op;
@@ -1203,7 +1232,7 @@ wire redirect_from_byte   = if_valid && (is_branch_byte || is_bsr_byte) && (ext_
 // held_pc + 2 + the immediate, which for ADDI.L #$12345678 is a wild jump
 // and the rest of the program never runs.
 wire redirect_from_gather = completing_gather && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
-                             !held_is_link && !held_is_jmp &&
+                             !held_is_link && !held_is_movem && !held_is_jmp &&
                              !held_is_jsr && !held_is_movec && !held_is_imm &&
                              !held_is_abs && !held_is_stabs;
 
@@ -1246,6 +1275,8 @@ always @(posedge clk) begin
 		id_sxt_w        <= 1'b0;
 		id_is_rmw       <= 1'b0;
 		id_is_link      <= 1'b0;
+		id_is_movem     <= 1'b0;
+		id_movem_dir    <= 1'b0;
 		id_is_unlk      <= 1'b0;
 		id_is_bsr       <= 1'b0;
 		id_is_jsr       <= 1'b0;
@@ -1279,6 +1310,8 @@ always @(posedge clk) begin
 		held_is_lea     <= 1'b0;
 		held_imm_ccr    <= 1'b0;
 		held_is_link    <= 1'b0;
+		held_is_movem   <= 1'b0;
+		held_movem_dir  <= 1'b0;
 		held_is_bsr     <= 1'b0;
 		held_is_jsr     <= 1'b0;
 		held_is_movec   <= 1'b0;
@@ -1333,7 +1366,7 @@ always @(posedge clk) begin
 					id_src_reg      <= held_is_stabs ? {1'b0, held_reg} :
 					                    held_is_dbcc ? {1'b0, held_reg} :
 					                    (held_is_move_disp || held_is_alu_disp || held_is_lea || held_is_link ||
-					                     held_is_jmp || held_is_jsr) ? {1'b1, held_reg} :
+					                     held_is_movem || held_is_jmp || held_is_jsr) ? {1'b1, held_reg} :
 					                    (held_is_movec && held_movec_dir) ? movec_gpr : 4'h0;
 					// gather_disp is already the sign-extended displacement
 					// word (same wire Bcc/DBcc use for their target math) --
@@ -1350,7 +1383,7 @@ always @(posedge clk) begin
 					// than needing two more dedicated ports threaded through
 					// every stage.
 					id_imm          <= (held_is_move_disp || held_is_alu_disp || held_is_lea || held_is_link ||
-					                    held_is_jmp || held_is_jsr ||
+					                    held_is_movem || held_is_jmp || held_is_jsr ||
 					                    held_is_imm || held_is_abs || held_is_stabs) ? gather_disp :
 					                    held_is_movec ? {28'd0, held_movec_dir, movec_sel_code} : 32'h0;
 					id_alu_op       <= held_is_imm      ? held_imm_op :
@@ -1383,7 +1416,7 @@ always @(posedge clk) begin
 					                    held_is_abs || held_is_stabs ||
 					                    (held_is_imm && held_imm_ccr);
 					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
-					                    !held_is_link && !held_is_jmp &&
+					                    !held_is_link && !held_is_movem && !held_is_jmp &&
 					                    !held_is_bsr && !held_is_jsr && !held_is_movec &&
 					                    !held_is_imm && !held_is_abs && !held_is_stabs;
 					id_is_scc       <= 1'b0;
@@ -1398,6 +1431,8 @@ always @(posedge clk) begin
 					id_sxt_w        <= held_is_alu_disp && held_alu_sxt;
 					id_is_rmw       <= 1'b0;   // no gather kind is an RMW yet
 					id_is_link      <= held_is_link;
+					id_is_movem     <= held_is_movem;
+					id_movem_dir    <= held_movem_dir;
 					id_is_unlk      <= 1'b0;
 					id_is_bsr       <= held_is_bsr;
 					id_is_jsr       <= held_is_jsr;
@@ -1417,7 +1452,7 @@ always @(posedge clk) begin
 			              is_bsr_word || is_bsr_long || is_jsr_disp || is_movec_opcode ||
 			              is_imm_alu || is_move_imm || is_move_abs || is_movea_imm ||
 			              is_st_abs || is_alu_disp || is_lea_disp || is_adda_imm ||
-			              is_adda_disp || is_link) begin
+			              is_adda_disp || is_link || is_movem) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1458,6 +1493,8 @@ always @(posedge clk) begin
 				held_is_jmp   <= is_jmp_disp;
 				held_is_lea   <= is_lea_disp;
 				held_is_link  <= is_link;
+				held_is_movem <= is_movem;
+				held_movem_dir<= is_movem_ld;
 				held_is_bsr   <= is_bsr_word || is_bsr_long;
 				held_is_jsr   <= is_jsr_disp;
 				held_is_movec <= is_movec_opcode;
@@ -1583,6 +1620,8 @@ always @(posedge clk) begin
 				id_sxt_w        <= if_valid && is_adda_w;
 				id_is_rmw       <= if_valid && is_alu_dst;
 				id_is_link      <= 1'b0;
+				id_is_movem     <= 1'b0;
+				id_movem_dir    <= 1'b0;
 				id_is_unlk      <= if_valid && is_unlk;
 				id_is_bsr       <= if_valid && is_bsr_byte;
 				id_is_jsr       <= if_valid && is_jsr_an;

@@ -65,6 +65,20 @@ module ap040_pipe_regfile
 	// can do that (MOVE.L (An)+,Dn has distinct banks), but the priority is
 	// fixed rather than undefined so a future MOVEA.L (A0)+,A0 fails
 	// predictably instead of racing.
+	// Third write port (milestone 50). MOVEM's load direction writes up to
+	// sixteen registers from ONE instruction, so it cannot use the normal
+	// writeback path, which carries one result per instruction. This port is
+	// driven straight from ap040_ea_fetch.v's MOVEM sequencer.
+	//
+	// It needs no arbitration against the other two: a MOVEM holds EA-fetch
+	// and stalls everything behind it, and the pipeline ahead of it has
+	// drained by the time any beat writes, so ports 1 and 2 are idle. It is
+	// applied LAST for the same reason port 2 is applied after port 1 --
+	// a defined order beats an undefined one even where it cannot occur.
+	input             we3,
+	input       [3:0] waddr3,
+	input      [31:0] wdata3,
+
 	input             we2,
 	input       [3:0] waddr2,
 	input      [31:0] wdata2,
@@ -107,10 +121,12 @@ wire [31:0] sp_active = (sp_sel == 2'd0) ? usp : (sp_sel == 2'd1) ? isp : msp;
 // same cycle -- the WB-forward case -- and needs the read to see it; see
 // ap040_pipe_core.v's header comment for the full picture).
 assign rdata_a = (we  && (waddr  == raddr_a)) ? wdata  :
+                 (we3 && (waddr3 == raddr_a)) ? wdata3 :
                  (we2 && (waddr2 == raddr_a)) ? wdata2 :
                  !raddr_a[3]            ? dreg[raddr_a[2:0]] :
                  (raddr_a[2:0] == 3'd7) ? sp_active : areg[raddr_a[2:0]];
 assign rdata_b = (we  && (waddr  == raddr_b)) ? wdata  :
+                 (we3 && (waddr3 == raddr_b)) ? wdata3 :
                  (we2 && (waddr2 == raddr_b)) ? wdata2 :
                  !raddr_b[3]            ? dreg[raddr_b[2:0]] :
                  (raddr_b[2:0] == 3'd7) ? sp_active : areg[raddr_b[2:0]];
@@ -146,6 +162,17 @@ always @(posedge clk) begin
 					2'd0:    usp <= wdata2;
 					2'd1:    isp <= wdata2;
 					default: msp <= wdata2;
+				endcase
+			end
+		end
+		if (we3) begin
+			if (!waddr3[3])            dreg[waddr3[2:0]] <= wdata3;
+			else if (waddr3[2:0] != 7) areg[waddr3[2:0]] <= wdata3;
+			else begin
+				case (sp_sel)
+					2'd0:    usp <= wdata3;
+					2'd1:    isp <= wdata3;
+					default: msp <= wdata3;
 				endcase
 			end
 		end

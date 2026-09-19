@@ -208,6 +208,7 @@ wire [31:0] ex_fwd2_data;
 wire        id_src_a_is_imm, id_writes_reg, id_writes_ccr;
 wire        id_is_branch, id_is_scc, id_is_dbcc, id_is_mem_src, id_is_jmp;
 wire        id_is_lea, id_sxt_w, id_is_rmw, id_is_link, id_is_unlk;
+wire        id_is_movem, id_movem_dir;
 wire        id_is_bsr, id_is_jsr, id_is_trap, id_is_illegal;
 wire        id_is_movesr, id_is_movec;
 wire        id_is_rts, id_is_rte;
@@ -222,6 +223,10 @@ wire  [5:0] eac_shcnt;
 wire        eac_src_a_is_imm, eac_writes_reg, eac_writes_ccr;
 wire        eac_is_branch, eac_is_scc, eac_is_dbcc, eac_is_mem_src, eac_is_jmp;
 wire        eac_is_lea, eac_sxt_w, eac_is_rmw, eac_is_link, eac_is_unlk;
+wire        eac_is_movem, eac_movem_dir;
+wire        rf3_we;
+wire  [3:0] rf3_addr;
+wire [31:0] rf3_data;
 wire        eaf_is_rmw, eaf_is_link;
 wire [31:0] eaf_ea_target;
 wire        eac_is_bsr, eac_is_jsr, eac_is_trap, eac_is_illegal;
@@ -452,6 +457,9 @@ ap040_pipe_regfile u_regfile
 	.raddr_b  (raddr_b),
 	.rdata_b  (rdata_b),
 
+	.we3      (rf3_we),
+	.waddr3   (rf3_addr),
+	.wdata3   (rf3_data),
 	.we2      (commit_reg2),
 	.waddr2   (exe_dest_reg2),
 	.wdata2   (exe_result_data2),
@@ -591,6 +599,8 @@ ap040_decode u_id
 	.id_sxt_w        (id_sxt_w),
 	.id_is_rmw       (id_is_rmw),
 	.id_is_link      (id_is_link),
+	.id_is_movem     (id_is_movem),
+	.id_movem_dir    (id_movem_dir),
 	.id_is_unlk      (id_is_unlk),
 	.id_is_bsr       (id_is_bsr),
 	.id_is_jsr       (id_is_jsr),
@@ -636,6 +646,8 @@ ap040_ea_calc u_eac
 	.id_sxt_w         (id_sxt_w),
 	.id_is_rmw        (id_is_rmw),
 	.id_is_link       (id_is_link),
+	.id_is_movem      (id_is_movem),
+	.id_movem_dir     (id_movem_dir),
 	.id_is_unlk       (id_is_unlk),
 	.id_is_bsr        (id_is_bsr),
 	.id_is_jsr        (id_is_jsr),
@@ -675,6 +687,8 @@ ap040_ea_calc u_eac
 	.eac_is_rmw       (eac_is_rmw),
 	.eac_is_link      (eac_is_link),
 	.eac_is_unlk      (eac_is_unlk),
+	.eac_is_movem     (eac_is_movem),
+	.eac_movem_dir    (eac_movem_dir),
 	.eac_is_bsr       (eac_is_bsr),
 	.eac_is_jsr       (eac_is_jsr),
 	.eac_is_trap      (eac_is_trap),
@@ -723,6 +737,11 @@ ap040_ea_fetch #(
 	.eac_is_rmw       (eac_is_rmw),
 	.eac_is_link      (eac_is_link),
 	.eac_is_unlk      (eac_is_unlk),
+	.eac_is_movem     (eac_is_movem),
+	.eac_movem_dir    (eac_movem_dir),
+	.rf3_we           (rf3_we),
+	.rf3_addr         (rf3_addr),
+	.rf3_data         (rf3_data),
 	.eaf_is_link      (eaf_is_link),
 	.port_taken       (ex_st_req),
 	.eaf_is_rmw       (eaf_is_rmw),

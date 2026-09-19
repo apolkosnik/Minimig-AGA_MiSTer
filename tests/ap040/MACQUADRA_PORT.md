@@ -15,6 +15,9 @@ commit `defef04c7273c1b14c7e1536729fbd8055818176`. Implemented and measured
   DBcc in its first completion state; retire eligible memory-source ALU
   operations when the read completes. Existing error priority, sized
   writeback, flags, interrupt/trace entry and A7 barriers still apply.
+  Extension consumption and fetch redirects each use one shared control
+  block, with combinational task arguments, to avoid duplicating their
+  queue and address logic at every instruction's call site.
 - Retain one 32-byte instruction sector and seed four queued words on a
   matching redirect. Only acknowledged **internal I-cache** responses may
   populate it. CACR alone cannot qualify a fetch because chip RAM, I/O and
@@ -54,9 +57,9 @@ bounded port does not bring the local sequencer to performance parity.
 The complete Verilator suite passes **57/57 legs**, including the negative
 controls that must fail. The partial-write restart matrix passes **688/688
 cases** (344 each with posting off/on), each over three bus-latency phases.
-Both final core configurations pass all 16 programs. The ATC clock-enable
-adjustment was followed by fresh core, posted-core and early chip-memory
-builds in `final-core/`; later integration builds already included it.
+Both final core configurations pass all 16 programs. The complete suite was
+rebuilt after sharing the fetch-control blocks; all 16 programs retain their
+exact earlier cycle counts in both posting modes.
 
 `asm/t_fastpaths.s` covers sized load writeback, flags, load/use dependencies,
 postincrement aliasing, DBcc register/CCR behavior, a page-crossing immediate,
@@ -83,7 +86,9 @@ PATH=/opt/amiga-cc/vbcc/bin:$PATH python3 tests/ap040/run_verilator_suite.py \
 ```
 
 Generated measurements and logs are under `output_files/macquadra-port/`:
-`ap040-comparison-bench/` contains the baseline, `final-core/` contains the
-final posted and unposted program runs, `ap040-port-suite/` contains the
-integration/restart/unit matrix, and `controls/` contains the negative
-controls. `fit/` is an isolated Quartus project snapshot.
+`ap040-comparison-bench/` contains the baseline, `shared-suite/` contains the
+final posted/unposted programs and integration/restart/unit matrix, and
+`controls/` contains the negative controls. `fit-shared/` is the isolated
+Quartus project snapshot for the shared-control implementation. `fit/`
+preserves the initial failed fit (4,246 LABs required, 4,191 available),
+which prompted the control-sharing change.

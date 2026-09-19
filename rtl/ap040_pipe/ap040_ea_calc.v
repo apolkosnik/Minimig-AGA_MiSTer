@@ -96,6 +96,8 @@ module ap040_ea_calc
 	input             id_is_lea,
 	input             id_sxt_w,
 	input             id_is_rmw,
+	input             id_is_movem,
+	input             id_movem_dir,
 	input             id_is_link,
 	input             id_is_unlk,
 	input             id_is_bsr,
@@ -134,6 +136,8 @@ module ap040_ea_calc
 	output reg        eac_is_lea,
 	output reg        eac_sxt_w,
 	output reg        eac_is_rmw,
+	output reg        eac_is_movem,
+	output reg        eac_movem_dir,
 	output reg        eac_is_link,
 	output reg        eac_is_unlk,
 	output reg        eac_is_bsr,
@@ -175,6 +179,8 @@ always @(posedge clk) begin
 		eac_is_lea       <= 1'b0;
 		eac_sxt_w        <= 1'b0;
 		eac_is_rmw       <= 1'b0;
+		eac_is_movem     <= 1'b0;
+		eac_movem_dir    <= 1'b0;
 		eac_is_link      <= 1'b0;
 		eac_is_unlk      <= 1'b0;
 		eac_is_bsr       <= 1'b0;
@@ -214,6 +220,8 @@ always @(posedge clk) begin
 			eac_is_lea       <= id_is_lea;
 			eac_sxt_w        <= id_sxt_w;
 			eac_is_rmw       <= id_is_rmw;
+			eac_is_movem     <= id_is_movem;
+			eac_movem_dir    <= id_movem_dir;
 			eac_is_link      <= id_is_link;
 			eac_is_unlk      <= id_is_unlk;
 			eac_is_bsr       <= id_is_bsr;
