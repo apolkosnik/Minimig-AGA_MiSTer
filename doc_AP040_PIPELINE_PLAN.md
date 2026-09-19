@@ -1208,9 +1208,27 @@ real MMU or bus-error path arrives, which is the same boundary
       codes. `held_imm_ccr` now carries it directly and reproduces the old
       behaviour exactly for the older forms.
 
-      Still missing for this family: `(d16,An)` as a source. Lower value
-      than the two above and a straightforward extension of milestone 40's
-      gather kind.
+      **Milestone 46** finished the family with `(d16,An)`. It rides
+      milestone 40's gather kind rather than adding a tenth -- same one
+      extension word, same `held_reg` base, same `gather_disp`. What
+      differs is what the instruction DOES with the loaded value, so the
+      kind grew three properties that used to be constants of it:
+      `held_alu_areg` (destination is An, ALU width Long), `held_alu_ccr`
+      (CMPA sets flags, ADDA/SUBA do not) and `held_alu_sxt`.
+
+      That is the third time a "property of the kind" has had to become a
+      carried bit rather than an inference -- `held_alu_op` in milestone 40,
+      `held_imm_ccr` in 45 -- and the pattern is identical each time: a new
+      instruction shares a gather's SHAPE but not its semantics. Worth
+      expecting rather than rediscovering for the tenth kind.
+
+      Each property was verified by pinning it to a constant and confirming
+      which checks fail. Pinning `sxt` corrected a wrong prediction in the
+      bench header: the flag drives `eff_size` as well as the extension, so
+      losing it reads a whole LONGWORD ($00200EEF) rather than reading a
+      word and zero-filling it ($FFFF2020, which is what milestone 44's
+      mutation of the extension function itself produces). Two bugs, two
+      values.
    3. **ALU-to-memory** (`ir[8]=1`), the read-modify-write direction. This
       is the first real structural addition since milestone 30: the store
       issues from EA-fetch with register data, but an RMW's store data is
