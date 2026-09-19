@@ -657,6 +657,25 @@ wire is_movem    = is_movem_st || is_movem_ld;
 wire is_link = (if_opcode[15:3] == 13'b0100111001010);
 wire is_unlk = (if_opcode[15:3] == 13'b0100111001011);
 
+// Read-modify-write with a (d16,An) destination (milestone 55) --
+// ADD.L D0,(8,A0), the struct-field update, and the most-used RMW mode.
+//
+// The DATAPATH needs nothing: milestone 48's sequencing already loads from
+// ea_target and stores back to eaf_ea_target, and for mode 101 ea_target is
+// already operand_a + the displacement. This is decode alone, riding
+// milestone 40's gather kind with three more carried properties -- the
+// fifth time that pattern has come up.
+//
+// One of those properties is the OP MAP itself, not just a flag. In the
+// ir[8]=1 direction nibble 1011 is EOR, not CMP, so this kind can no longer
+// take held_alu_op from alu_nib_op unconditionally.
+wire alu_dst_disp_shape = (if_opcode[15]   == 1'b1)  && (if_opcode[8]   == 1'b1) &&
+                          (if_opcode[7:6]  != 2'b11) && (if_opcode[5:3] == 3'b101);
+wire is_alu_dst_disp = alu_dst_disp_shape &&
+                       ((if_opcode[14:12] == 3'b000) || (if_opcode[14:12] == 3'b001) ||
+                        (if_opcode[14:12] == 3'b011) || (if_opcode[14:12] == 3'b100) ||
+                        (if_opcode[14:12] == 3'b101));
+
 wire is_adda_disp = adda_shape && (if_opcode[5:3] == 3'b101);
 wire is_cmpa_disp = is_adda_disp && (if_opcode[15:12] == 4'b1011);
 
@@ -1207,7 +1226,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an;
@@ -1268,6 +1287,7 @@ reg         held_alu_nowrite;   // CMP: flags only, as held_imm_nowrite is for C
 reg         held_alu_areg;      // destination is An (the ADDA family)
 reg         held_alu_ccr;       // does this form set condition codes?
 reg         held_alu_sxt;       // sign-extend a Word source to 32 bits
+reg         held_alu_rmw;       // this form reads AND writes memory       // sign-extend a Word source to 32 bits
 reg         held_is_jmp;
 reg         held_is_bsr;
 reg         held_is_jsr;
@@ -1381,6 +1401,7 @@ always @(posedge clk) begin
 		held_alu_areg     <= 1'b0;
 		held_alu_ccr      <= 1'b0;
 		held_alu_sxt      <= 1'b0;
+		held_alu_rmw      <= 1'b0;
 		held_is_jmp     <= 1'b0;
 		held_is_lea     <= 1'b0;
 		held_imm_ccr    <= 1'b0;
@@ -1506,7 +1527,7 @@ always @(posedge clk) begin
 					id_is_jmp       <= held_is_jmp;
 					id_is_lea       <= held_is_lea;
 					id_sxt_w        <= held_is_alu_disp && held_alu_sxt;
-					id_is_rmw       <= 1'b0;   // no gather kind is an RMW yet
+					id_is_rmw       <= held_is_alu_disp && held_alu_rmw;
 					id_is_link      <= held_is_link;
 					id_is_div       <= held_is_imm && held_imm_div;
 					id_div_signed   <= held_is_imm && held_imm_divs;
@@ -1531,7 +1552,8 @@ always @(posedge clk) begin
 			              is_bsr_word || is_bsr_long || is_jsr_disp || is_movec_opcode ||
 			              is_imm_alu || is_move_imm || is_move_abs || is_movea_imm ||
 			              is_st_abs || is_alu_disp || is_lea_disp || is_adda_imm ||
-			              is_adda_disp || is_link || is_movem || is_muldiv_imm) begin
+			              is_adda_disp || is_link || is_movem || is_muldiv_imm ||
+			              is_alu_dst_disp) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1565,15 +1587,19 @@ always @(posedge clk) begin
 				// The ALU family takes its size from ir[7:6]; MOVE's lives in
 				// ir[13:12] with a different encoding, hence two wires.
 				held_mv_size     <= is_adda_disp ? `AP040_SZ_L :
-				                    is_alu_disp  ? add_op_size : move_op_size;
+				                    (is_alu_disp || is_alu_dst_disp) ? add_op_size : move_op_size;
 				held_is_dbcc  <= is_dbcc;
 				held_is_move_disp <= is_move_disp;
-				held_is_alu_disp  <= is_alu_disp || is_adda_disp;
-				held_alu_op       <= alu_nib_op;
-				held_alu_nowrite  <= is_cmp_disp || is_cmpa_disp;
+				held_is_alu_disp  <= is_alu_disp || is_adda_disp || is_alu_dst_disp;
+				// The ir[8]=1 direction has its own op map: nibble 1011 is
+				// EOR there, not CMP.
+				held_alu_op       <= is_alu_dst_disp ? alu_nib_dst_op : alu_nib_op;
+				// An RMW's destination is memory, so it writes no register.
+				held_alu_nowrite  <= is_cmp_disp || is_cmpa_disp || is_alu_dst_disp;
 				held_alu_areg     <= is_adda_disp;
-				held_alu_ccr      <= is_alu_disp || is_cmpa_disp;
+				held_alu_ccr      <= is_alu_disp || is_cmpa_disp || is_alu_dst_disp;
 				held_alu_sxt      <= is_adda_disp && (if_opcode[8] == 1'b0);
+				held_alu_rmw      <= is_alu_dst_disp;
 				held_is_jmp   <= is_jmp_disp;
 				held_is_lea   <= is_lea_disp;
 				held_is_link  <= is_link;

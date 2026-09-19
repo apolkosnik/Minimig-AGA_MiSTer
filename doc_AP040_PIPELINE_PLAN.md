@@ -1295,8 +1295,22 @@ real MMU or bus-error path arrives, which is the same boundary
       for the real cache in item 4, and the bench header says so rather
       than implying it is checked.
 
-      Not reached: `(d16,An)` and the absolute modes as RMW destinations,
-      which need a tenth gather kind carrying the RMW properties.
+      **Milestone 55** added `(d16,An)` as an RMW destination -- the
+      struct-field update, `s->field += x`, and the most-used RMW mode. The
+      DATAPATH needed nothing: milestone 48 already loads from `ea_target`
+      and stores back to `eaf_ea_target`, and for mode 101 `ea_target` is
+      already `operand_a` plus the displacement. It is decode alone, riding
+      milestone 40's gather kind with three more carried properties.
+
+      That is the FIFTH instance of the carried-property pattern, and the
+      first where the carried thing is the OP MAP rather than a flag: in the
+      `ir[8]=1` direction nibble 1011 is EOR, not CMP, so the kind can no
+      longer take `held_alu_op` from `alu_nib_op` unconditionally. Verified
+      by reverting the map, which leaves the EOR's target word untouched and
+      nothing else wrong anywhere -- a silent no-op, since CMP writes
+      nothing.
+
+      Still not reached: the absolute modes as RMW destinations.
    4. ~~LINK/UNLK~~ **DONE (milestone 49)**, then **MOVEM**, then
       **MULU/DIVU**.
 
