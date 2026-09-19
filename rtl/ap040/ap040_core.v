@@ -55,6 +55,7 @@ module ap040_core
 	output reg [31:0] mem_wdata,
 	output      [2:0] mem_fc,
 	input             mem_ack,
+	input             mem_if_cached, // cache qualifies this completed instruction fetch
 	input      [31:0] mem_rdata,
 	input             mem_flt,     // access error pulse from the MMU
 
@@ -652,6 +653,19 @@ reg        epf_pend_lw;          // ... and it returns two words
 reg        epf_kill;             // ... whose data a flush has abandoned
 reg        epf_err;              // the fill engine faulted: re-issue on demand
 
+// MacQuadra800's retained branch-refill sector, limited to a four-word seed
+// here to bound the queue-write mux cost. Only completed I-cache responses
+// enter it: the host can leave chip RAM and I/O uncached even with CACR.IE
+// set. Architectural flushes invalidate it; ordinary redirects retain it.
+reg [31:0] brf_data [0:7];
+reg [26:0] brf_tag;
+reg        brf_super;
+reg [15:0] brf_valid;
+reg        epf_pend_seed, epf_brf;
+// A single shared seed-data block serves every redirect task expansion.
+reg        brf_seed_req;
+reg  [3:0] brf_seed_word;
+
 // Combinational within the state machine's always block: the port claim and
 // the flush both have to be visible to the fill engine, which runs after the
 // case so that a state claiming the port this cycle always wins it.
@@ -737,9 +751,17 @@ reg  [3:0] p_sreg, p_dreg;
 // S_PIPE_START used to take.
 reg        ops_direct;
 reg        x_set;               // a state before S_EXEC saved the immediate in x_ext
-assign src_v = !ops_direct ? src_val :
+// Retire a memory-source ALU operation when its data has completed, using
+// the same ALU/flags/merge as S_EXEC. The S_MRD caller gives errors priority
+// over ack; page-crossing reads reach S_PIPE_SDONE only after EVERY byte.
+wire mem_alu_retire = AP040_FAST_OPERANDS && p_src == SK_MEM &&
+                      p_dst == DK_REG && exec_kind == EK_ALU &&
+                      ((state == S_MRD && r_m_ret == S_PIPE_SDONE) ||
+                       state == S_PIPE_SDONE);
+assign src_v = mem_alu_retire ? ((state == S_MRD) ? mem_rdata : m_val) :
+               !ops_direct ? src_val :
                (p_src == SK_REG) ? rf_rdata_a : (p_src == SK_IMM) ? imm : src_val;
-assign dst_v = !ops_direct ? dst_val : rf_rdata_b;
+assign dst_v = mem_alu_retire ? rf_rdata_b : !ops_direct ? dst_val : rf_rdata_b;
 // x_ext is the decode-time immediate kept through EA fetches; on the direct
 // path imm still holds it -- unless a state on the way here saved it
 // (x_set) and then fetched a further word into imm (MUL.L/DIV.L's
@@ -1492,6 +1514,8 @@ task epf_flush;
 		epf_fill  <= 0;
 		epf_armed <= 0;
 		epf_err   <= 0;
+		epf_brf   <= 0;
+		brf_valid <= 0;
 		if (epf_pend) epf_kill <= 1;
 		epf_flushed = 1;
 	end
@@ -1504,7 +1528,11 @@ endtask
 task issue_ifetch;
 	input [31:0] a;
 	input        s;
+	reg refill_hit;
 	begin
+		refill_hit = AP040_FAST_OPERANDS && AP040_ENABLE_CACHE && cacr[15] &&
+		             brf_tag == a[31:5] && brf_super == s && a[4:1] <= 4'd12 &&
+		             ((brf_valid >> a[4:1]) & 16'h000f) == 16'h000f;
 		if (epf_armed && epf_next == a && epf_super == s) begin
 			// the stream already runs here: nothing to do
 		end
@@ -1517,9 +1545,18 @@ task issue_ifetch;
 			epf_ftail <= a;
 			epf_super <= s;
 			epf_armed <= 1;
+			epf_brf <= refill_hit;
 			epf_flushed = 1;
 			if (epf_pend) epf_kill <= 1;
-			else if (!mem_req && !mem_ack) begin
+			else epf_kill <= 0;
+			if (refill_hit) begin
+				brf_seed_req = 1;
+				brf_seed_word = a[4:1];
+				epf_count <= 4'd4;
+				epf_fill <= 3'd4;
+				epf_ftail <= a + 32'd8;
+			end
+			if (!refill_hit && !epf_pend && !mem_req && !mem_ack) begin
 				// The port is free: issue the redirect now rather than
 				// leaving it to the engine one cycle later.  A longword
 				// aligned fetch takes both words in one request.  Alignment
@@ -1533,6 +1570,7 @@ task issue_ifetch;
 				fc_r <= s ? `AP040_FC_SUPER_PROG : `AP040_FC_USER_PROG;
 				epf_pend <= 1;
 				epf_pend_lw <= ~a[1];
+				epf_pend_seed <= 1;
 				epf_kill <= 0;
 				epf_issue = 1;
 			end
@@ -1601,7 +1639,28 @@ task immf;
 		imm_n <= n; imm <= 0;
 		r_imm_ret <= ret;
 		if (ret == S_EXEC) ops_direct <= 1;   // returns to a direct S_EXEC entry
-		state <= S_IMMF;
+		// Consume resident extensions at decode, as in MacQuadra800's
+		// sequencer. Later-state callers retain their staging boundary.
+		// A pending fetch or same-edge ack keeps bus ownership with the
+		// established path; claiming this edge also inhibits speculation.
+		if (AP040_FAST_OPERANDS && state == S_DECODE && !epf_flushed &&
+		    !epf_pend && !mem_req && !mem_ack && epf_ready_pc) begin
+			epf_issue = 1;
+			if (n == 2'd2 && epf_ready_pc2) begin
+				imm <= {epf_data[epf_head], epf_data[epf_head + 3'd1]};
+				pc <= pc + 32'd4;
+				epf_pop = 2'd2;
+				state <= ret;
+			end
+			else begin
+				imm <= {16'd0, epf_data[epf_head]};
+				pc <= pc + 32'd2;
+				epf_pop = 2'd1;
+				if (n == 2'd1) state <= ret;
+				else begin imm_n <= 2'd1; state <= S_IMMF; end
+			end
+		end
+		else state <= S_IMMF;
 	end
 endtask
 
@@ -1920,6 +1979,17 @@ task fetch_next;
 	end
 endtask
 
+// The ordinary register ALU completion, also used by a completed memory
+// source. Keep fetch_next's interrupt/trace and A7 writeback barriers.
+task retire_reg_alu;
+	begin
+		if (p_flags) sr[4:0] <= alu_fl;
+		if (!p_wbsup)
+			rfw(p_dreg, p_dreg[3] ? alu_res : merge_sz(dst_v, alu_res, op_size));
+		fetch_next;
+	end
+endtask
+
 // True while an effective address is being computed, i.e. while a data
 // access is known to be coming.  Keeps speculative instruction fetches
 // off the shared memory port just ahead of it.
@@ -2069,6 +2139,8 @@ always @(posedge clk) begin
 	epf_flushed = 0;
 	epf_pop     = 2'd0;
 	epf_fillw   = 2'd0;
+	brf_seed_req = 0;
+	brf_seed_word = 0;
 	wb_bar      = 0;
 	m_go        = 0;
 	e_go        = 0;
@@ -2144,6 +2216,8 @@ always @(posedge clk) begin
 		epf_base <= 0; epf_next <= 0; epf_super <= 0;
 		epf_ftail <= 0; epf_armed <= 0; epf_pend <= 0;
 		epf_pend_lw <= 0; epf_kill <= 0; epf_err <= 0;
+		epf_pend_seed <= 0; epf_brf <= 0;
+		brf_tag <= 0; brf_super <= 0; brf_valid <= 0;
 		for (li = 0; li < 8; li = li + 1) epf_data[li] <= 0;
 		m_wr <= 0; m_size <= 0; m_addr_r <= 0; m_wdat <= 0; m_val <= 0;
 		ea_mode <= 0; ea_rn <= 0; ea_size <= 0;
@@ -2492,7 +2566,8 @@ always @(posedge clk) begin
 					// spending a state on copying m_val: the value goes
 					// to the operand register and the state after
 					// S_PIPE_SDONE / S_PIPE_DDONE is entered directly.
-					if (r_m_ret == S_PIPE_SDONE) begin
+					if (mem_alu_retire) retire_reg_alu;
+					else if (r_m_ret == S_PIPE_SDONE) begin
 						src_val <= mem_rdata;
 						if (p_dst == DK_REG) begin
 							dst_val <= rf_rdata_b;   // port B was set at S_PIPE_SRD
@@ -2611,8 +2686,12 @@ always @(posedge clk) begin
 					ea_addr <= ea_base_v + idx + sxb(extw[7:0]);
 					state <= r_ea_ret;
 				end
+				// Quadra 800 silicon executes index-suppressed I/IS=101..111
+				// despite their reserved designation. With a zero index the
+				// existing pre/post-indirect datapath already computes the EA.
+				// See MacQuadra800 docs/ap68040-memind-reserved.md.
 				else if (extw[5:4] == 2'b00 || extw[3] ||
-				         extw[2:0] == 3'b100 || (extw[6] && extw[2])) begin
+				         extw[2:0] == 3'b100) begin
 					go_illegal;
 				end
 				else begin
@@ -2683,12 +2762,15 @@ always @(posedge clk) begin
 				mrd(ea_addr, p_ssize, S_PIPE_SDONE);
 			end
 			S_PIPE_SDONE: begin
-				src_val <= m_val;
-				if (p_dst == DK_REG) begin
-					dst_val <= rf_rdata_b;   // port B was set at S_PIPE_SRD
-					state <= S_EXEC;
+				if (mem_alu_retire) retire_reg_alu;
+				else begin
+					src_val <= m_val;
+					if (p_dst == DK_REG) begin
+						dst_val <= rf_rdata_b;   // port B was set at S_PIPE_SRD
+						state <= S_EXEC;
+					end
+					else state <= S_PIPE_DST;
 				end
-				else state <= S_PIPE_DST;
 			end
 			S_PIPE_SREG:  begin src_val <= rf_rdata_a; state <= S_PIPE_DST; end
 
@@ -3416,9 +3498,19 @@ always @(posedge clk) begin
 				// of cctrue): DBT to an odd label faults even though the
 				// loop exits without branching (cputest 68040_ae DBcc.W).
 				reg [31:0] tgt;
+				reg [15:0] w;
 				tgt = br_base + sxw(imm[15:0]);
 				if (tgt[0]) go_pc(tgt);
 				else if (cond_true(ir[11:8])) fetch_next;
+				else if (AP040_FAST_OPERANDS) begin
+					// Decode selected Dn before fetching the displacement.
+					// Preserve its high half and CCR; go_pc/fetch_next retain
+					// the same-edge writeback barrier for trace and interrupts.
+					w = rf_rdata_a[15:0] - 16'd1;
+					rfw({1'b0, d_rn}, {rf_rdata_a[31:16], w});
+					if (w != 16'hFFFF) go_pc(tgt);
+					else fetch_next;
+				end
 				else begin
 					rr_a <= {1'b0, d_rn};
 					state <= S_DBCC2;
@@ -5954,6 +6046,7 @@ always @(posedge clk) begin
 							if (d_mode == 3'b001) begin
 								// DBcc
 								br_base <= pc;
+								rr_a <= {1'b0, d_rn};
 								immf(2'd1, S_DBCC1);
 							end
 							else if (d_mode == 3'b111 && d_rn >= 3'b010 && d_rn <= 3'b100) begin
@@ -6649,6 +6742,24 @@ always @(posedge clk) begin
 					epf_data[epf_fill] <= mem_rdata[15:0];
 					epf_fillw = 2'd1;
 				end
+				// Speculative fall-through cannot evict a retained loop.
+				// Only a redirect replaces its sector; uncached responses
+				// never acquire valid bits.
+				if (mem_if_cached &&
+				    ((brf_tag == mem_addr[31:5] && brf_super == epf_super) || epf_pend_seed)) begin
+					if (epf_pend_lw) brf_data[mem_addr[4:2]] <= mem_rdata;
+					else if (mem_addr[1]) brf_data[mem_addr[4:2]][15:0] <= mem_rdata[15:0];
+					else brf_data[mem_addr[4:2]][31:16] <= mem_rdata[15:0];
+					if (brf_tag == mem_addr[31:5] && brf_super == epf_super) begin
+						brf_valid[mem_addr[4:1]] <= 1;
+						if (epf_pend_lw) brf_valid[mem_addr[4:1] + 4'd1] <= 1;
+					end
+					else begin
+						brf_tag <= mem_addr[31:5];
+						brf_super <= epf_super;
+						brf_valid <= (epf_pend_lw ? 16'h0003 : 16'h0001) << mem_addr[4:1];
+					end
+				end
 			end
 		end
 		else if (epf_pend && i_err) begin
@@ -6692,6 +6803,7 @@ always @(posedge clk) begin
 		// handler's first instruction.
 		else if (epf_armed && !epf_pend && !epf_err &&
 		         !epf_issue && !epf_flushed &&
+		         (!epf_brf || epf_count == 0) &&
 		         !mem_req && !mem_ack &&
 		         (!lk_cyc || state == S_IMMF) &&
 		         (epf_super == sr_s) &&
@@ -6715,7 +6827,18 @@ always @(posedge clk) begin
 			fc_r <= epf_super ? `AP040_FC_SUPER_PROG : `AP040_FC_USER_PROG;
 			epf_pend <= 1;
 			epf_pend_lw <= ~epf_ftail[1];
+			epf_pend_seed <= (epf_count == 0 && epf_ftail == pc);
+			epf_brf <= 0;
 			epf_kill <= 0;
+		end
+
+		if (brf_seed_req) begin : seed_branch_words
+			reg [3:0] sw;
+			integer si;
+			for (si = 0; si < 4; si = si + 1) begin
+				sw = brf_seed_word + si[3:0];
+				epf_data[si] <= sw[0] ? brf_data[sw[3:1]][15:0] : brf_data[sw[3:1]][31:16];
+			end
 		end
 
 		// Queue bookkeeping in one place, so that a pop and an append in the

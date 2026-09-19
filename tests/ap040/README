@@ -10,6 +10,9 @@ cache-unit, yc-equiv, boot-bridge) and every self-checking unit bench below,
 with the negative controls required to fail.  run_tests.sh (Icarus) is kept
 for the snoop bench's X-poison legs only; they need four-state simulation.
 
+MACQUADRA_PORT.md records the selective sequencer/ATC optimization ports,
+their before/after measurements, and the new t_fastpaths and atc_reuse tests.
+
 Testbenches (Icarus Verilog -g2012 and ModelSim, see run_tests.sh):
 
   tb_ap040_reset.v      milestone B: reset vector fetch, 16-bit bus adapter

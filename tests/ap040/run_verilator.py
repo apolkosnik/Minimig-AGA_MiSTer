@@ -13,7 +13,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 RTL = ROOT / "rtl"
 CORE = sorted((RTL / "ap040").glob("*.v"))
-PROGRAMS = ["t_integer", "t_exceptions", "t_mmu", "t_bitfield_mmu", "t_bitfield_cache", "t_moves_fc", "t_atcprobe", "t_movem_restart", "t_fpu_frames", "t_fpu_resume", "t_cache", "t_fpu", "bench_loop", "bench_alu", "dhry"]
+PROGRAMS = ["t_integer", "t_fastpaths", "t_exceptions", "t_mmu", "t_bitfield_mmu", "t_bitfield_cache", "t_moves_fc", "t_atcprobe", "t_movem_restart", "t_fpu_frames", "t_fpu_resume", "t_cache", "t_fpu", "bench_loop", "bench_alu", "dhry"]
 
 
 def execute(command, log, timeout, env=None):

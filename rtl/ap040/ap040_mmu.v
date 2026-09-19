@@ -17,8 +17,8 @@
 //                                                                          //
 // The whole unit advances only when ce (clkena) is high. Table searches    //
 // are plain read/write cycles (not bus locked): this fabric has a single   //
-// CPU master. Invalid translations are not cached, so a descriptor fixed   //
-// by a handler takes effect even without a PFLUSH.                         //
+// CPU master. Failed searches install nonresident ATC entries; repairing   //
+// a descriptor requires PFLUSH/PTEST before that entry can be used again.  //
 //--------------------------------------------------------------------------//
 
 `include "ap040_defs.svh"
@@ -181,9 +181,47 @@ wire hit0 = lk_fresh && atc_v[{l_row, 2'd0}] && (a_w0[44:28] == l_tag);
 wire hit1 = lk_fresh && atc_v[{l_row, 2'd1}] && (a_w1[44:28] == l_tag);
 wire hit2 = lk_fresh && atc_v[{l_row, 2'd2}] && (a_w2[44:28] == l_tag);
 wire hit3 = lk_fresh && atc_v[{l_row, 2'd3}] && (a_w3[44:28] == l_tag);
-wire atc_hit = hit0 | hit1 | hit2 | hit3;
+wire pipe_hit = hit0 | hit1 | hit2 | hit3;
+wire [EW-1:0] pipe_ent = hit0 ? a_w0 : hit1 ? a_w1 : hit2 ? a_w2 : a_w3;
 
-wire [EW-1:0] h_ent = hit0 ? a_w0 : hit1 ? a_w1 : hit2 ? a_w2 : a_w3;
+// Retain the most recent hit in each address space (MacQuadra800 AP68040).
+// Repeated accesses to a page need not wait for another synchronous RAM
+// lookup. Copy the WHOLE entry: nonresident, protection, cache mode and M
+// still pass through the ordinary fault/walk decision below. These are
+// expendable copies of the ATC, not another independently managed TLB.
+// Capture only at a core tick, when the request can complete. Unlike the
+// RAM lookup pipe these registers belong to the SDC's tick-gated class.
+reg          u_valid [0:1];
+reg    [4:0] u_row   [0:1];
+reg   [16:0] u_tag   [0:1];
+reg [EW-1:0] u_ent   [0:1];
+reg   [31:0] u_tc;
+integer ui;
+wire u_clear = fill_we || sweep_on || pf_req || pt_req || (tc != u_tc);
+always @(posedge clk) begin
+	if (!nreset) begin
+		u_tc <= 0;
+		for (ui = 0; ui < 2; ui = ui + 1) u_valid[ui] <= 0;
+	end
+	else if (ce) begin
+		u_tc <= tc;
+		if (u_clear) begin
+			for (ui = 0; ui < 2; ui = ui + 1) u_valid[ui] <= 0;
+		end
+		else if (pipe_hit) begin
+			u_valid[l_row[4]] <= 1;
+			u_row[l_row[4]] <= l_row;
+			u_tag[l_row[4]] <= l_tag;
+			u_ent[l_row[4]] <= pipe_ent;
+		end
+	end
+end
+// Invalidate combinational use as well as the stored valid bit: a TC or
+// maintenance change must take effect before the next core tick.
+wire u_hit = nreset && !u_clear && u_valid[c_instr] &&
+             (u_row[c_instr] == a_row) && (u_tag[c_instr] == a_tag);
+wire atc_hit = u_hit || pipe_hit;
+wire [EW-1:0] h_ent = u_hit ? u_ent[c_instr] : pipe_ent;
 wire        h_r    = h_ent[45];
 wire [19:0] h_pa   = h_ent[27:8];
 wire  [7:0] h_attr = h_ent[7:0];
@@ -223,9 +261,9 @@ wire atc_fault = tc_e && !ttr_hit && atc_hit &&
 // write to a clean page runs a table search to set the M bit
 wire atc_mmiss = atc_hit && h_r && c_write && !h_m && !h_w;
 
-// lk_fresh gates atc_hit, so a walk is only started once the piped row
-// has been judged against the live request
-wire need_walk = tc_e && !ttr_hit && lk_fresh && (!atc_hit || atc_mmiss) &&
+// A copied hit is already a translation verdict; a miss still waits for
+// the synchronous lookup before starting a table walk.
+wire need_walk = tc_e && !ttr_hit && (lk_fresh || u_hit) && (!atc_hit || atc_mmiss) &&
                  !atc_fault;
 
 wire [31:0] pa_out =
@@ -348,7 +386,7 @@ wire w_denied = !w_pt && ((w_user && w_desc[7]) ||
 // is fresh: with a stale pipe need_walk/atc_fault are still low and the
 // request would otherwise pass untranslated.
 wire pass_ok = c_req && !c_flt && !need_walk && !ttr_fault && !atc_fault &&
-               (!tc_e || ttr_hit || lk_fresh) &&
+               (!tc_e || ttr_hit || lk_fresh || u_hit) &&
                (wst == W_IDLE) && !w_active && !pf_req && !pt_req;
 
 assign m_req   = pass_ok;

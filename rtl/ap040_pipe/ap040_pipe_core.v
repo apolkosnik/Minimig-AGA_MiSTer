@@ -182,6 +182,18 @@ wire        id_is_postinc, id_is_predec;
 wire        id_is_store;
 wire        eac_is_store;
 wire  [3:0] l1_be_b;
+// L1 port B has two producers since milestone 48. ap040_ea_fetch.v drives
+// every read and every store issued from a register; ap040_execute.v drives
+// the store half of a read-modify-write, whose data is the ALU result and
+// therefore does not exist a stage earlier. EX wins -- it is the older
+// instruction -- and port_taken tells EA-fetch to behave as if it had never
+// been fetched that cycle.
+wire        eaf_l1_wren_b;
+wire  [3:0] eaf_l1_be_b;
+wire [31:0] eaf_l1_data_b;
+wire        ex_st_req;
+wire [31:0] ex_st_addr, ex_st_data;
+wire  [3:0] ex_st_be;
 wire        eac_is_abs;
 wire        eac_is_postinc, eac_is_predec;
 wire        eaf_writes_an;
@@ -195,7 +207,7 @@ wire  [3:0] ex_fwd2_dest;
 wire [31:0] ex_fwd2_data;
 wire        id_src_a_is_imm, id_writes_reg, id_writes_ccr;
 wire        id_is_branch, id_is_scc, id_is_dbcc, id_is_mem_src, id_is_jmp;
-wire        id_is_lea, id_sxt_w;
+wire        id_is_lea, id_sxt_w, id_is_rmw;
 wire        id_is_bsr, id_is_jsr, id_is_trap, id_is_illegal;
 wire        id_is_movesr, id_is_movec;
 wire        id_is_rts, id_is_rte;
@@ -209,7 +221,9 @@ wire  [1:0] eac_size;
 wire  [5:0] eac_shcnt;
 wire        eac_src_a_is_imm, eac_writes_reg, eac_writes_ccr;
 wire        eac_is_branch, eac_is_scc, eac_is_dbcc, eac_is_mem_src, eac_is_jmp;
-wire        eac_is_lea, eac_sxt_w;
+wire        eac_is_lea, eac_sxt_w, eac_is_rmw;
+wire        eaf_is_rmw;
+wire [31:0] eaf_ea_target;
 wire        eac_is_bsr, eac_is_jsr, eac_is_trap, eac_is_illegal;
 wire        eac_is_movesr, eac_is_movec;
 wire        eac_is_rts, eac_is_rte;
@@ -473,9 +487,18 @@ ap040_pipe_regfile u_regfile
 wire [L1_AW-1:0] l1_addr_a;
 wire      [15:0] l1_rdata_a;
 wire [L1_AW-1:0] l1_addr_b;
+wire [L1_AW-1:0] eaf_l1_addr_b;
 wire       [31:0] l1_q_b;
 wire              l1_wren_b;
 wire       [31:0] l1_data_b;
+
+// The arbitration itself. EX's byte address is converted here rather than in
+// ap040_execute.v so that PC_RESET stays known to one module per role, the
+// same way ap040_ea_fetch.v converts its own.
+assign l1_addr_b = ex_st_req ? ((ex_st_addr - PC_RESET) >> 1) : eaf_l1_addr_b;
+assign l1_wren_b = ex_st_req ? 1'b1       : eaf_l1_wren_b;
+assign l1_be_b   = ex_st_req ? ex_st_be   : eaf_l1_be_b;
+assign l1_data_b = ex_st_req ? ex_st_data : eaf_l1_data_b;
 wire              l1_wr_busy;
 
 ap040_pipe_l1 #(
@@ -566,6 +589,7 @@ ap040_decode u_id
 	.id_is_jmp       (id_is_jmp),
 	.id_is_lea       (id_is_lea),
 	.id_sxt_w        (id_sxt_w),
+	.id_is_rmw       (id_is_rmw),
 	.id_is_bsr       (id_is_bsr),
 	.id_is_jsr       (id_is_jsr),
 	.id_is_trap      (id_is_trap),
@@ -608,6 +632,7 @@ ap040_ea_calc u_eac
 	.id_is_jmp        (id_is_jmp),
 	.id_is_lea        (id_is_lea),
 	.id_sxt_w         (id_sxt_w),
+	.id_is_rmw        (id_is_rmw),
 	.id_is_bsr        (id_is_bsr),
 	.id_is_jsr        (id_is_jsr),
 	.id_is_trap       (id_is_trap),
@@ -643,6 +668,7 @@ ap040_ea_calc u_eac
 	.eac_is_jmp       (eac_is_jmp),
 	.eac_is_lea       (eac_is_lea),
 	.eac_sxt_w        (eac_sxt_w),
+	.eac_is_rmw       (eac_is_rmw),
 	.eac_is_bsr       (eac_is_bsr),
 	.eac_is_jsr       (eac_is_jsr),
 	.eac_is_trap      (eac_is_trap),
@@ -688,6 +714,10 @@ ap040_ea_fetch #(
 	.eac_is_jmp       (eac_is_jmp),
 	.eac_is_lea       (eac_is_lea),
 	.eac_sxt_w        (eac_sxt_w),
+	.eac_is_rmw       (eac_is_rmw),
+	.port_taken       (ex_st_req),
+	.eaf_is_rmw       (eaf_is_rmw),
+	.eaf_ea_target    (eaf_ea_target),
 	.eac_is_bsr       (eac_is_bsr),
 	.eac_is_jsr       (eac_is_jsr),
 	.eac_is_trap      (eac_is_trap),
@@ -714,11 +744,11 @@ ap040_ea_fetch #(
 	.ex_fwd2_dest     (ex_fwd2_dest),
 	.ex_fwd2_data     (ex_fwd2_data),
 
-	.l1_addr_b        (l1_addr_b),
+	.l1_addr_b        (eaf_l1_addr_b),
 	.l1_q_b           (l1_q_b),
-	.l1_wren_b        (l1_wren_b),
-	.l1_be_b          (l1_be_b),
-	.l1_data_b        (l1_data_b),
+	.l1_wren_b        (eaf_l1_wren_b),
+	.l1_be_b          (eaf_l1_be_b),
+	.l1_data_b        (eaf_l1_data_b),
 	.l1_wr_busy       (l1_wr_busy),
 
 	.eaf_stall        (eaf_stall),
@@ -809,6 +839,13 @@ ap040_execute u_ex
 	.isp_in           (isp_q),
 	.msp_in           (msp_q),
 
+	.eaf_is_rmw       (eaf_is_rmw),
+	.eaf_ea_target    (eaf_ea_target),
+	.l1_wr_busy       (l1_wr_busy),
+	.ex_st_req        (ex_st_req),
+	.ex_st_addr       (ex_st_addr),
+	.ex_st_data       (ex_st_data),
+	.ex_st_be         (ex_st_be),
 	.ex_stall         (ex_stall),
 
 	.ex_fwd_valid     (ex_fwd_valid),

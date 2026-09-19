@@ -276,6 +276,13 @@ module ap040_ea_fetch
 	input             eac_is_jmp,
 	input             eac_is_lea,
 	input             eac_sxt_w,
+	input             eac_is_rmw,
+	// The EX stage has taken L1 port B this cycle for a read-modify-write's
+	// store half. Everything this stage would have done with the port has
+	// to wait, so it behaves exactly as if it had never been fetched: no
+	// read is issued, no output register moves, and the stall propagates
+	// backward as usual. See ap040_execute.v's header for why EX wins.
+	input             port_taken,
 	input             eac_is_bsr,
 	input             eac_is_jsr,
 	input             eac_is_trap,
@@ -364,6 +371,8 @@ module ap040_ea_fetch
 	// cycle later, which would close a combinational loop through its own
 	// EX-forward output -- see its header.
 	output reg [15:0] eaf_sr_snapshot,
+	output reg        eaf_is_rmw,
+	output reg [31:0] eaf_ea_target,
 	output reg        eaf_is_rts,
 	output reg        eaf_is_rte,
 	// RTE's popped SR (masked, format-$0-frame's word0 high half) --
@@ -483,7 +492,7 @@ endfunction
 
 wire [31:0] mem_lane = eac_sxt_w ? sxt_w_of(mem_raw) : mem_raw;
 
-wire mem_issue    = eac_valid && eac_is_mem_src && !mem_pending;
+wire mem_issue    = eac_valid && eac_is_mem_src && !mem_pending && !port_taken;
 wire mem_complete = mem_pending;
 // BSR/JSR's push -- no "pending" latch needed, see header: a write either
 // succeeds immediately (l1_wr_busy low) or must wait for the port, but
@@ -493,7 +502,7 @@ wire mem_complete = mem_pending;
 // address-error exception instead (below), the fault taken on the
 // INSTRUCTION FETCH at the odd target, not on the call itself.
 wire eac_is_push  = eac_is_bsr || (eac_is_jsr && !eac_is_jsr_odd);
-wire wr_stall     = eac_valid && (eac_is_push || eac_is_store) && l1_wr_busy;
+wire wr_stall     = eac_valid && (eac_is_push || eac_is_store) && (l1_wr_busy || port_taken);
 
 // TRAP #n / illegal instruction exception entry -- see header. exc_ph
 // sequences the frame's writes and the vector-table read one at a time;
@@ -521,7 +530,10 @@ wire exc_active    = eac_valid && eac_is_exc;
 wire exc_writing   = exc_active && !exc_vec_pending &&
                       (exc_ph == EXC_BEAT0 || exc_ph == EXC_BEAT1 ||
                        (exc_ph == EXC_BEAT2 && eac_is_fmt2));
-wire exc_beat_ack  = exc_writing && !l1_wr_busy;    // this beat accepted THIS cycle
+// ...and not accepted at all if ap040_execute.v took the port this cycle:
+// the core's mux drops this stage's wren_b, so the beat never reached the
+// L1 and must be retried rather than counted.
+wire exc_beat_ack  = exc_writing && !l1_wr_busy && !port_taken;
 wire exc_vec_issue = exc_active && !exc_vec_pending && (exc_ph == EXC_VECRD);
 wire exc_vec_done  = exc_active && exc_vec_pending;
 wire exc_stall     = exc_active && !exc_vec_done;
@@ -556,7 +568,7 @@ wire ret_complete = ret_active && ret_pending;
 wire ret_done     = ret_complete && (ret_ph == RET_BEAT1);
 wire ret_stall    = ret_active && !ret_done;
 
-assign eaf_stall = stall_in || mem_issue || wr_stall || exc_stall || ret_stall;
+assign eaf_stall = stall_in || mem_issue || wr_stall || exc_stall || ret_stall || port_taken;
 assign raddr_a    = eac_src_reg;
 // A privilege violation reroutes port B to A7 REGARDLESS of what the
 // faulting instruction's own eac_dest_reg says (MOVEC's read direction
@@ -735,6 +747,8 @@ always @(posedge clk) begin
 		eaf_movec_dir  <= 1'b0;
 		eaf_movec_sel  <= 3'h0;
 		eaf_sr_snapshot<= 16'h0;
+		eaf_is_rmw     <= 1'b0;
+		eaf_ea_target  <= 32'h0;
 		eaf_is_rts     <= 1'b0;
 		eaf_is_rte     <= 1'b0;
 		eaf_rte_sr_data<= 16'h0;
@@ -768,7 +782,18 @@ always @(posedge clk) begin
 				eaf_pc         <= eac_pc;
 				eaf_next_pc    <= eac_next_pc;
 				eaf_dest_reg   <= eac_dest_reg;
-				eaf_operand_a  <= mem_lane;
+				// A read-modify-write crosses its operands over here. The
+				// ALU computes b op a, and SUB.L D0,(A0) must be memory
+				// MINUS D0 -- so the loaded value has to be b, not a, which
+				// is the opposite of every other memory-source instruction.
+				// operand_b is the data register Dn (decode pointed
+				// eac_dest_reg at it precisely so this read would be
+				// available), and operand_a was only ever the address base.
+				eaf_operand_a  <= eac_is_rmw ? operand_b : mem_lane;
+				// The store half needs the address again a stage later, and
+				// eac_* will have moved on by then.
+				eaf_is_rmw     <= eac_is_rmw;
+				eaf_ea_target  <= ea_target;
 				// RTS: the popped value (l1_q_b, into eaf_operand_a above)
 				// is the redirect target, exactly like JMP/JSR/exceptions
 				// already route through eaf_operand_a -- but this stage
@@ -776,7 +801,8 @@ always @(posedge clk) begin
 				// what a plain MOVE.L (An),Dn would put in eaf_operand_b
 				// (that instruction's operand_b is simply unused). See
 				// header.
-				eaf_operand_b  <= eac_is_rts ? (operand_a + 32'd4) : operand_b;
+				eaf_operand_b  <= eac_is_rts ? (operand_a + 32'd4) :
+				                  eac_is_rmw ? mem_lane            : operand_b;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
@@ -788,7 +814,7 @@ always @(posedge clk) begin
 				eaf_is_branch  <= eac_is_branch;
 				eaf_is_scc     <= eac_is_scc;
 				eaf_is_dbcc    <= eac_is_dbcc;
-				eaf_is_jmp     <= 1'b0;   // a mem-source instruction is never also a JMP/BSR/JSR/TRAP/illegal/priv/movesr/movec
+				eaf_is_jmp     <= 1'b0;
 				eaf_is_bsr     <= 1'b0;
 				eaf_is_jsr     <= 1'b0;
 				eaf_is_trap    <= 1'b0;
@@ -808,6 +834,22 @@ always @(posedge clk) begin
 				// identically next cycle with the SAME push request still
 				// asserted, until the port is free.
 				eaf_valid <= 1'b0;
+			end else if (port_taken) begin
+				// ap040_execute.v has L1 port B this cycle for a
+				// read-modify-write's store half. This stage emits a BUBBLE
+				// and retries -- the same mechanism mem_issue already uses,
+				// and deliberately not a freeze of the output registers:
+				// eaf_valid is the only thing that can drop ex_st_req, so
+				// holding it would deadlock the pipeline against itself.
+				// eac_* is held by eaf_stall, so nothing is lost.
+				//
+				// This sits AFTER the mem_complete branch on purpose. A
+				// completing read consumes l1_q_b, which the L1 registered
+				// from the address driven LAST cycle -- before EX took the
+				// port -- so that data is still ours and must be taken now.
+				// Bubbling ahead of it would drop it on the floor, since
+				// next cycle l1_q_b holds whatever EX's store put there.
+				eaf_valid       <= 1'b0;
 			end else if (exc_writing) begin
 				// Posting one beat of the exception frame -- see header.
 				// exc_beat_ack means l1_wr_busy read low THIS cycle, so the
@@ -882,6 +924,7 @@ always @(posedge clk) begin
 				eaf_is_scc     <= 1'b0;
 				eaf_is_dbcc    <= 1'b0;
 				eaf_is_jmp     <= 1'b0;
+				eaf_is_rmw     <= 1'b0;
 				eaf_is_bsr     <= 1'b0;
 				eaf_is_jsr     <= 1'b0;
 				eaf_is_trap    <= eac_is_trap;
@@ -963,6 +1006,7 @@ always @(posedge clk) begin
 				eaf_is_scc      <= 1'b0;
 				eaf_is_dbcc     <= 1'b0;
 				eaf_is_jmp      <= 1'b0;
+				eaf_is_rmw      <= 1'b0;
 				eaf_is_bsr      <= 1'b0;
 				eaf_is_jsr      <= 1'b0;
 				eaf_is_trap     <= 1'b0;
@@ -1017,6 +1061,7 @@ always @(posedge clk) begin
 				eaf_is_scc     <= eac_is_scc;
 				eaf_is_dbcc    <= eac_is_dbcc;
 				eaf_is_jmp     <= eac_is_jmp;
+				eaf_is_rmw     <= 1'b0;
 				eaf_is_bsr     <= eac_is_bsr;
 				eaf_is_jsr     <= eac_is_jsr;
 				eaf_is_trap    <= eac_is_trap;

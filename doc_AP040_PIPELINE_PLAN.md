@@ -1241,11 +1241,44 @@ real MMU or bus-error path arrives, which is the same boundary
       THE WRONG REGISTER. Verified by swapping the two fields on purpose.
       Mode 001 stays out: that is CMPM.
 
-   3. **ALU-to-memory** (`ir[8]=1`), the read-modify-write direction. This
-      is the first real structural addition since milestone 30: the store
-      issues from EA-fetch with register data, but an RMW's store data is
-      the ALU result, one stage later. It needs an EX-stage L1 port
-      arbitrated against EA-fetch's.
+   3. ~~ALU-to-memory~~ **DONE (milestone 48)** for `(An)`, `(An)+` and
+      `-(An)`, all sizes, OR/SUB/EOR/AND/ADD. The first real structural
+      addition since milestone 30, and the first instruction here that both
+      loads and stores.
+
+      `ap040_execute.v` is now a second producer on L1 port B, because an
+      RMW's store data is the ALU result and does not exist a stage
+      earlier. EX wins the port unconditionally -- it is the OLDER
+      instruction, so making EA-fetch wait is correct and deadlock-free,
+      where the reverse could starve an RMW behind a run of loads.
+
+      **EA-fetch answers `port_taken` with a BUBBLE, not a freeze**, and
+      getting that wrong deadlocked the pipeline on the first run: freezing
+      EA-fetch holds `eaf_valid`, `eaf_valid` is what holds `ex_st_req`, and
+      `ex_st_req` is what froze EA-fetch. The bubble is the same mechanism
+      `mem_issue` has always used. It sits AFTER the `mem_complete` branch
+      on purpose -- a completing read consumes `l1_q_b`, registered from the
+      address driven before EX took the port, so that data is still ours.
+
+      Operands cross over in EA-fetch: the ALU computes `b op a`, so the
+      LOADED value must be `b`, the opposite of every other memory-source
+      form, or `SUB.L D1,(A1)` computes D1 minus memory. Verified by
+      removing the crossover, which gives `FFFFFFE3` where `0000001D` is
+      right.
+
+      **One guard here is deliberately untested.** EX also gained a local
+      stall for a store the L1 cannot accept, and its output-register gate
+      moved from `stall_in` to `ex_stall` to match. That path is
+      unreachable against the current `ap040_pipe_l1.v`: `wr_busy` is high
+      for exactly one cycle after a write, and EA-fetch bubbles whenever EX
+      holds the port, so nothing lets EX observe a busy port. Confirmed by
+      instrumenting `rmw_wait` and running all 52 benches -- it never fires,
+      and reverting the gate still passes everything. It stays as defence
+      for the real cache in item 4, and the bench header says so rather
+      than implying it is checked.
+
+      Not reached: `(d16,An)` and the absolute modes as RMW destinations,
+      which need a tenth gather kind carrying the RMW properties.
    4. **LINK/UNLK**, then **MOVEM**, then **MULU/DIVU**.
 4. **MMU and cache integration**, once enough of the integer ISA exists that
    testing them against real address translation is meaningful. Reuse the

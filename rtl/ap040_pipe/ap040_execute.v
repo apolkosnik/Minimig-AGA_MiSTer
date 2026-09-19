@@ -166,7 +166,34 @@ module ap040_execute
 	input      [31:0] isp_in,
 	input      [31:0] msp_in,
 
-	output            ex_stall,   // to EA-fetch: no local stall of its own yet
+	// Read-modify-write store half (milestone 48). This stage is the first
+	// in the pipeline to touch memory, and it has to be: an RMW's store data
+	// is the ALU RESULT, which does not exist until here, while
+	// ap040_ea_fetch.v issues every other store a stage earlier from a
+	// register it already holds.
+	//
+	// EX wins the port unconditionally rather than being arbitrated fairly.
+	// It is the OLDER instruction -- ap040_ea_fetch.v is working on the next
+	// one -- so making the younger one wait is both correct and deadlock-
+	// free, while the reverse could starve an RMW behind a run of loads.
+	// port_taken carries that decision backward.
+	//
+	// If the L1 cannot accept the write (l1_wr_busy), this stage stalls and
+	// retries, holding its own output registers as well as EA-fetch's. That
+	// second part matters: ex_stall used to be a pure pass-through of
+	// stall_in, so the update below was gated on stall_in alone, and a local
+	// stall that did not also gate it would retire the instruction
+	// downstream while its store was still pending -- and then store again
+	// on the retry.
+	input             eaf_is_rmw,
+	input      [31:0] eaf_ea_target,
+	input             l1_wr_busy,
+	output            ex_st_req,
+	output     [31:0] ex_st_addr,   // BYTE address; the core converts
+	output     [31:0] ex_st_data,
+	output      [3:0] ex_st_be,
+
+	output            ex_stall,
 
 	// "EX-forward" tap (combinational, live this cycle)
 	output            ex_fwd_valid,
@@ -216,7 +243,9 @@ module ap040_execute
 	output reg [31:0] exe_creg_data
 );
 
-assign ex_stall = stall_in;
+assign ex_st_req = eaf_valid && eaf_is_rmw;
+wire   rmw_wait  = ex_st_req && l1_wr_busy;
+assign ex_stall  = stall_in || rmw_wait;
 
 wire [31:0] alu_result;
 wire [4:0]  alu_flags;
@@ -367,6 +396,22 @@ wire [31:0] creg_read_value = (eaf_movec_sel == `AP040_CREG_SFC)  ? sfc_in  :
 // eac_dest_reg), and the ALU returns a sized result in the low bits with the
 // upper ones zero, so the merge is a straight splice. Forwarding gets it for
 // free: ex_fwd_data is combined_result, not alu_result.
+// The store's lane placement, mirroring ap040_ea_fetch.v's st_be/st_dat
+// exactly -- lane 3 is the longword's first byte, a Word always takes the
+// half the address names, and a Byte is picked by address bit 0. The raw
+// alu_result is used rather than alu_sized: the byte enables already
+// restrict what lands, and alu_sized would splice in eaf_operand_b, which
+// for an RMW is the value just read from that same memory.
+assign ex_st_addr = eaf_ea_target;
+wire [1:0] rmw_off = eaf_ea_target[1:0];
+assign ex_st_be   = (eaf_size == `AP040_SZ_L) ? 4'b1111 :
+                    (eaf_size == `AP040_SZ_W) ? 4'b1100 :
+                    rmw_off[0]                ? 4'b0100 : 4'b1000;
+assign ex_st_data = (eaf_size == `AP040_SZ_L) ? alu_result :
+                    (eaf_size == `AP040_SZ_W) ? {alu_result[15:0], 16'd0} :
+                    rmw_off[0] ? {8'd0, alu_result[7:0], 16'd0}
+                               : {alu_result[7:0], 24'd0};
+
 wire [31:0] alu_sized = (eaf_size == `AP040_SZ_B) ? {eaf_operand_b[31:8],  alu_result[7:0]}  :
                         (eaf_size == `AP040_SZ_W) ? {eaf_operand_b[31:16], alu_result[15:0]} :
                                                       alu_result;
@@ -474,7 +519,7 @@ always @(posedge clk) begin
 		exe_writes_creg  <= 1'b0;
 		exe_creg_sel     <= 3'h0;
 		exe_creg_data    <= 32'h0;
-	end else if (ce && !stall_in) begin
+	end else if (ce && !ex_stall) begin
 		exe_valid        <= eaf_valid;
 		exe_pc           <= eaf_pc;
 		exe_dest_reg     <= eaf_dest_reg;
