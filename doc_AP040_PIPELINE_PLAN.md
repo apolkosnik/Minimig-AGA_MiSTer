@@ -1560,6 +1560,36 @@ real MMU or bus-error path arrives, which is the same boundary
       that repeated them into `an_wr_any`/`an_wr_reg`/`an_wr_data`, since
       the selection now has three cases rather than one.
 
+   **Milestone 62 (ORI/ANDI/EORI to CCR and SR)** is what interrupt masking
+   is made of -- `ORI #$0700,SR` to mask, `ANDI #$F8FF,SR` to restore. They
+   share `immop_shape`'s nibble but not its mode field, so the two families
+   are disjoint by construction, and only ORI, ANDI and EORI are legal.
+
+   The result does not go through the ALU: the operand is the status
+   register, so `ap040_execute.v` computes it from `eaf_sr_snapshot` and
+   commits on the same path MOVE-to-SR and RTE use. The CCR form is computed
+   on EIGHT bits rather than masked afterwards -- verified by doing it the
+   obvious way, which ANDs `$0007` into the whole SR and drops the core out
+   of supervisor mode.
+
+   ### Adding a gather kind: the lists it must join
+
+   Milestone 62 needed two debug cycles, both from the same cause, and
+   between them they enumerate the trap. A new kind on the shared gather
+   must be added to **every list that is written as a set of negations or an
+   enumeration**, not just to the ones its own feature seems to touch:
+
+   - `id_is_branch` -- a list of `!held_is_*`. A kind missing from it is
+     decoded as a BRANCH. The first `ANDI #x,SR` redirected the pipeline.
+   - `redirect_from_gather` -- the same list again, separately maintained.
+   - `id_imm`'s `gather_disp` enumeration. A kind missing from it gets
+     `id_imm = 0`, so `ANDI #$F8FF,SR` computed `SR & 0`, cleared the
+     supervisor bit and took a privilege violation.
+
+   Both symptoms were plausible wrong behaviour rather than crashes, and
+   neither was visible from the feature's own code. Check the three lists
+   when adding the twelfth kind.
+
    ### A hazard worth naming
 
    `ap040_ea_fetch.v`'s output block is one `always` with several branches,

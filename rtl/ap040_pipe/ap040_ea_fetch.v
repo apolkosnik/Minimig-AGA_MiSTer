@@ -283,6 +283,8 @@ module ap040_ea_fetch
 	input             eac_div_signed,
 	input             eac_is_movem,
 	input             eac_movem_dir,
+	input             eac_is_immsr,
+	input             eac_immsr_to_sr,
 	input             eac_is_pea,
 	input             eac_is_link,
 	input             eac_is_unlk,
@@ -390,6 +392,8 @@ module ap040_ea_fetch
 	output     [31:0] rf3_data,
 	output reg        eaf_is_div,
 	output reg        eaf_div_signed,
+	output reg        eaf_is_immsr,
+	output reg        eaf_immsr_to_sr,
 	output reg        eaf_is_pea,
 	output reg        eaf_is_link,
 	output reg [31:0] eaf_ea_target,
@@ -653,7 +657,10 @@ reg       exc_vec_pending;
 // which doesn't exist until here. eac_is_priv_capable is what
 // ap040_decode.v recognized; eac_is_priv is whether it actually fires THIS
 // cycle -- see header for why the check couldn't happen any earlier.
-wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || eac_is_rte;
+// The SR forms of ORI/ANDI/EORI are privileged; the CCR forms are not, and
+// that is the whole difference between them at this level.
+wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || eac_is_rte ||
+                            (eac_is_immsr && eac_immsr_to_sr);
 wire eac_is_priv         = eac_is_priv_capable && !sr_in[13];
 
 wire eac_is_exc    = eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr || eac_is_divzero;
@@ -899,6 +906,8 @@ always @(posedge clk) begin
 		eaf_is_rmw     <= 1'b0;
 		eaf_is_div     <= 1'b0;
 		eaf_div_signed <= 1'b0;
+		eaf_is_immsr   <= 1'b0;
+		eaf_immsr_to_sr<= 1'b0;
 		eaf_is_pea     <= 1'b0;
 		eaf_is_link    <= 1'b0;
 		eaf_ea_target  <= 32'h0;
@@ -1132,6 +1141,7 @@ always @(posedge clk) begin
 				eaf_is_rmw     <= 1'b0;
 				eaf_is_link    <= 1'b0;
 				eaf_is_pea     <= 1'b0;
+				eaf_is_immsr   <= 1'b0;
 				eaf_is_div     <= 1'b0;
 				eaf_div_signed <= 1'b0;
 				eaf_is_bsr     <= 1'b0;
@@ -1239,6 +1249,7 @@ always @(posedge clk) begin
 				eaf_is_rmw      <= 1'b0;
 				eaf_is_link     <= 1'b0;
 				eaf_is_pea      <= 1'b0;
+				eaf_is_immsr    <= 1'b0;
 				eaf_is_div      <= 1'b0;
 				eaf_div_signed  <= 1'b0;
 				eaf_is_bsr      <= 1'b0;
@@ -1292,6 +1303,8 @@ always @(posedge clk) begin
 				                  eac_is_link                ? (push_addr + eac_imm) : operand_b;
 				eaf_is_link    <= eac_is_link;
 				eaf_is_pea     <= eac_is_pea;
+				eaf_is_immsr   <= eac_is_immsr;
+				eaf_immsr_to_sr<= eac_immsr_to_sr;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;

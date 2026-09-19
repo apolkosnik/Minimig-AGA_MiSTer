@@ -308,6 +308,8 @@ module ap040_decode
 	output reg        id_ea_indexed,
 	output reg        id_ea_pcrel,
 	output reg        id_is_rmw,
+	output reg        id_is_immsr,
+	output reg        id_immsr_to_sr,
 	output reg        id_is_pea,
 	output reg        id_is_link,
 	output reg        id_is_div,
@@ -949,6 +951,37 @@ wire [3:0] quick_val = (if_opcode[11:9] == 3'd0) ? 4'd8 : {1'b0, if_opcode[11:9]
 // ALU masks by size.
 wire immop_shape = (if_opcode[15:12] == 4'b0000) && (if_opcode[8] == 1'b0) &&
                    (if_opcode[7:6] != 2'b11) && (if_opcode[5:3] == 3'b000);
+// ORI/ANDI/EORI to CCR and to SR (milestone 62). ORI #$0700,SR is how
+// interrupts get masked and ANDI #$F8FF,SR is how they come back, so these
+// are not optional for code that runs with interrupts at all.
+//
+// They share immop_shape's nibble but not its mode field: 111/100 with size
+// 00 addresses CCR and size 01 addresses SR, where immop_shape requires
+// mode 000. Disjoint by construction, so the two families cannot collide.
+//
+// Only three of the six immediate operations are legal here -- ORI, ANDI
+// and EORI. SUBI, ADDI and CMPI have no CCR or SR form, and admitting them
+// would decode instructions a real 68040 rejects.
+//
+// The result does NOT go through the ALU. The operand is the status
+// register, not a GPR, so ap040_execute.v computes it from eaf_sr_snapshot
+// -- the live, forwarded SR already threaded there -- and commits it on the
+// same exe_writes_sr path MOVE-to-SR and RTE use. The CCR form touches only
+// the low byte, which is why it is computed separately rather than masked
+// afterwards.
+//
+// The SR forms are PRIVILEGED; the CCR forms are not.
+wire immsr_shape = (if_opcode[15:12] == 4'b0000) && (if_opcode[8] == 1'b0) &&
+                   (if_opcode[5:0] == 6'b111100) &&
+                   ((if_opcode[7:6] == 2'b00) || (if_opcode[7:6] == 2'b01)) &&
+                   ((if_opcode[11:9] == 3'b000) || (if_opcode[11:9] == 3'b001) ||
+                    (if_opcode[11:9] == 3'b101));
+wire is_immsr    = immsr_shape;
+wire is_immsr_sr = immsr_shape && (if_opcode[7:6] == 2'b01);
+wire [5:0] immsr_op = (if_opcode[11:9] == 3'b001) ? `AP040_ALU_AND :
+                      (if_opcode[11:9] == 3'b101) ? `AP040_ALU_EOR :
+                                                    `AP040_ALU_OR;
+
 wire is_ori_i  = immop_shape && (if_opcode[11:9] == 3'b000);
 wire is_andi_i = immop_shape && (if_opcode[11:9] == 3'b001);
 wire is_subi_i = immop_shape && (if_opcode[11:9] == 3'b010);
@@ -1413,7 +1446,8 @@ wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_m
                    !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_pea_an && !is_pea_gather && !is_eaonly_abs && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
-                   !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an;
+                   !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an &&
+                   !is_immsr;
 
 // Gather state -- see header comment. 0 = idle/normal decode cycle;
 // 1 = this cycle's if_opcode completes the gather; 2 = one more word
@@ -1470,6 +1504,8 @@ reg         held_imm_div;       // this immediate form is a DIVIDE, not an ALU o
 reg         held_imm_divs;
 reg         held_lea_push;      // this LEA-shaped form pushes instead of writing An
 reg         held_is_link;       // the tenth kind: LINK An,#d16
+reg         held_is_immsr;      // ORI/ANDI/EORI to CCR or SR
+reg         held_immsr_sr;      // ...to SR rather than CCR
 reg         held_imm_ccr;       // does this immediate form set condition codes?
 reg   [5:0] held_alu_op;
 reg         held_alu_nowrite;   // CMP: flags only, as held_imm_nowrite is for CMPI
@@ -1518,7 +1554,7 @@ wire redirect_from_byte   = if_valid && (is_branch_byte || is_bsr_byte) && (ext_
 wire redirect_from_gather = completing_gather && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
                              !held_is_link && !held_is_movem && !held_is_jmp &&
                              !held_is_jsr && !held_is_movec && !held_is_imm &&
-                             !held_is_abs && !held_is_stabs;
+                             !held_is_abs && !held_is_stabs && !held_is_immsr;
 
 // MOVEC gather-completion helper: an otherwise-recognized MOVEC whose
 // extension-word selector names something this core doesn't model (the MMU
@@ -1560,6 +1596,8 @@ always @(posedge clk) begin
 		id_ea_indexed   <= 1'b0;
 		id_ea_pcrel     <= 1'b0;
 		id_is_rmw       <= 1'b0;
+		id_is_immsr     <= 1'b0;
+		id_immsr_to_sr  <= 1'b0;
 		id_is_pea       <= 1'b0;
 		id_is_link      <= 1'b0;
 		id_is_div       <= 1'b0;
@@ -1604,6 +1642,8 @@ always @(posedge clk) begin
 		held_ea_pcrel     <= 1'b0;
 		held_is_jmp     <= 1'b0;
 		held_is_lea     <= 1'b0;
+		held_is_immsr   <= 1'b0;
+		held_immsr_sr   <= 1'b0;
 		held_imm_ccr    <= 1'b0;
 		held_imm_div    <= 1'b0;
 		held_imm_divs   <= 1'b0;
@@ -1687,9 +1727,11 @@ always @(posedge clk) begin
 					id_imm          <= held_ea_indexed ? {16'd0, if_opcode} :
 					                   (held_is_move_disp || held_is_alu_disp || held_is_lea || held_is_link ||
 					                    held_is_movem || held_is_jmp || held_is_jsr ||
-					                    held_is_imm || held_is_abs || held_is_stabs) ? gather_disp :
+					                    held_is_imm || held_is_abs || held_is_stabs ||
+					                    held_is_immsr) ? gather_disp :
 					                    held_is_movec ? {28'd0, held_movec_dir, movec_sel_code} : 32'h0;
-					id_alu_op       <= held_is_imm      ? held_imm_op :
+					id_alu_op       <= held_is_immsr    ? held_imm_op :
+					                   held_is_imm      ? held_imm_op :
 					                   (held_is_alu_disp || held_abs_alu) ? held_alu_op :
 					                                                        `AP040_ALU_MOVE;
 					id_size         <= held_is_imm ? held_imm_size :
@@ -1699,7 +1741,7 @@ always @(posedge clk) begin
 					// The gathered word IS the source: ap040_ea_fetch.v's
 					// operand_a mux already takes eac_imm on this flag, the
 					// path MOVEQ has used since milestone 2.
-					id_src_a_is_imm <= held_is_imm;
+					id_src_a_is_imm <= held_is_imm || held_is_immsr;
 					// DBcc's write is dynamic (see header); BSR/JSR's is
 					// static -- both always decrement A7 when they execute
 					// at all. MOVEC's read direction writes a real GPR
@@ -1722,7 +1764,8 @@ always @(posedge clk) begin
 					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
 					                    !held_is_link && !held_is_movem && !held_is_jmp &&
 					                    !held_is_bsr && !held_is_jsr && !held_is_movec &&
-					                    !held_is_imm && !held_is_abs && !held_is_stabs;
+					                    !held_is_imm && !held_is_abs && !held_is_stabs &&
+					                    !held_is_immsr;
 					id_is_scc       <= 1'b0;
 					id_is_dbcc      <= held_is_dbcc;
 					// LEA and PEA deliver the address itself, so unlike every
@@ -1740,6 +1783,8 @@ always @(posedge clk) begin
 					id_ea_indexed   <= held_ea_indexed;
 					id_ea_pcrel     <= held_ea_pcrel;
 					id_is_pea       <= (held_is_lea && held_lea_push) || (held_is_abs && held_abs_push);
+					id_is_immsr     <= held_is_immsr;
+					id_immsr_to_sr  <= held_immsr_sr;
 					id_is_link      <= held_is_link;
 					id_is_div       <= held_is_imm && held_imm_div;
 					id_div_signed   <= held_is_imm && held_imm_divs;
@@ -1767,7 +1812,7 @@ always @(posedge clk) begin
 			              is_adda_disp || is_link || is_movem || is_muldiv_imm ||
 			              is_alu_dst_disp || is_move_idx || is_alu_idx || is_lea_idx ||
 			              is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_abs_alu ||
-			              is_pea_gather || is_eaonly_abs) begin
+			              is_pea_gather || is_eaonly_abs || is_immsr) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1783,7 +1828,10 @@ always @(posedge clk) begin
 				                 is_abs_alu_l || is_eaonly_abs_l;
 				held_is_imm      <= is_imm_alu || is_move_imm || is_movea_imm || is_adda_imm ||
 				                    is_muldiv_imm;
-				held_imm_op      <= is_mul_imm  ? (is_muldiv_imm_signed ? `AP040_ALU_MULS : `AP040_ALU_MULU) :
+				held_is_immsr    <= is_immsr;
+				held_immsr_sr    <= is_immsr_sr;
+				held_imm_op      <= is_immsr    ? immsr_op :
+				                    is_mul_imm  ? (is_muldiv_imm_signed ? `AP040_ALU_MULS : `AP040_ALU_MULU) :
 				                    is_div_imm  ? `AP040_ALU_MOVE :
 				                    is_adda_imm ? alu_nib_op :
 				                    (is_move_imm || is_movea_imm) ? `AP040_ALU_MOVE : imm_alu_op;
@@ -1966,6 +2014,8 @@ always @(posedge clk) begin
 				// instruction is ea_target landing in An via ALU_MOVE.
 				id_is_lea       <= if_valid && is_lea_an;
 				id_is_pea       <= if_valid && is_pea_an;
+				id_is_immsr     <= 1'b0;
+				id_immsr_to_sr  <= 1'b0;
 				// id_size stays Long for the ALU; this forces the READ (and
 				// the auto-increment step) to Word and sign-extends it.
 				// Long for the ALU and the writeback; Word for the memory read

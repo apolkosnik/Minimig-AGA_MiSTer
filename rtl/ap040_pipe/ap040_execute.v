@@ -128,6 +128,8 @@ module ap040_execute
 	input             eaf_is_jmp,
 	input             eaf_is_div,
 	input             eaf_div_signed,
+	input             eaf_is_immsr,
+	input             eaf_immsr_to_sr,
 	input             eaf_is_pea,
 	input             eaf_is_link,
 	input             eaf_is_bsr,
@@ -560,9 +562,29 @@ wire [31:0] combined_result = eaf_is_scc  ? scc_merged :
 // privilege violation instead has its own eaf_is_movesr/eaf_is_rte cleared
 // by ap040_ea_fetch.v's exc_vec_done branch, so exc_reaching_ex never
 // overlaps with either.
-wire        exe_writes_sr_c = eaf_valid && (eaf_is_movesr || eaf_is_rte || exc_reaching_ex);
+// ORI/ANDI/EORI to CCR and SR (milestone 62). The operand is the status
+// register rather than a GPR, so the result is computed here from
+// eaf_sr_snapshot -- the live, forwarded SR this stage already receives --
+// and commits on the same path MOVE-to-SR and RTE use.
+//
+// The CCR form is computed on eight bits rather than masked afterwards:
+// ANDI #$FE,CCR must leave the upper byte alone, and a 16-bit AND with an
+// immediate whose high byte is zero would clear the whole of it.
+wire [15:0] immsr_imm = eaf_operand_a[15:0];
+wire  [7:0] immsr_ccr = (eaf_alu_op == `AP040_ALU_AND) ? (eaf_sr_snapshot[7:0] & immsr_imm[7:0]) :
+                        (eaf_alu_op == `AP040_ALU_EOR) ? (eaf_sr_snapshot[7:0] ^ immsr_imm[7:0]) :
+                                                         (eaf_sr_snapshot[7:0] | immsr_imm[7:0]);
+wire [15:0] immsr_full = (eaf_alu_op == `AP040_ALU_AND) ? (eaf_sr_snapshot & immsr_imm) :
+                         (eaf_alu_op == `AP040_ALU_EOR) ? (eaf_sr_snapshot ^ immsr_imm) :
+                                                          (eaf_sr_snapshot | immsr_imm);
+wire [15:0] immsr_result = eaf_immsr_to_sr ? immsr_full
+                                           : {eaf_sr_snapshot[15:8], immsr_ccr};
+
+wire        exe_writes_sr_c = eaf_valid && (eaf_is_movesr || eaf_is_rte || eaf_is_immsr ||
+                                            exc_reaching_ex);
 wire [15:0] exe_sr_data_c   = exc_reaching_ex ? ((eaf_sr_snapshot & 16'h1FFF) | 16'h2000) :
                                eaf_is_rte      ? eaf_rte_sr_data :
+                               eaf_is_immsr    ? immsr_result :
                                                   eaf_operand_a[15:0];
 
 // MOVEC's write direction (milestone 15, new): writes ONE of the seven
