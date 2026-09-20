@@ -1688,6 +1688,63 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 82: the 16-bit Minimig bus, with the FSM core's own adapter
+
+   `ap040_pipe_bus16.v` is the third pairing of `ap040_pipe_cpu.v`: CPU ->
+   `ap040_pipe_membus.v` -> `rtl/ap040/ap040_bus16_adapter.v`, the latter
+   instantiated **unmodified**. That was the whole point of milestone 81
+   emitting `rtl/ap040/ap040_core.v`'s external port rather than inventing
+   one: the adapter needed nothing, and the pipelined core now presents the
+   same interface to a host that the FSM core does -- `addr_out`/`data_in`/
+   `data_write`, `nwr`/`nuds`/`nlds`, `busstate`, `longword`, `fc`, and one
+   qualified `clkena_in` pulse per 16-bit sub-cycle.
+
+   **Two enables, and they are not the same thing.** `ce` advances the CPU;
+   `clkena_in` advances the bus. `ap040_tg68k_compat.v` hands the FSM core
+   one enable for both, because that core has nothing to keep doing while a
+   transfer is outstanding. This one does -- five stages of it -- and
+   collapsing the two would throw that away. The port keeps them separate.
+
+   `tb_ap040_pipe_bus16.v` runs tb_ap040_pipe_bus.v's program, so the two
+   benches differ only in what is under the CPU, and drives
+   `tests/ap040/tb_dat_replay.v`'s memory model: `data_in` is the whole word
+   at `addr_out`, the lanes decide which half a write lands in, and the
+   answer takes 1 to 8 cycles. It came up on the first run: **78 sub-cycles
+   -- 64 fetch, 8 read, 6 write** -- which is exactly one Word cycle per
+   fetch and two per Long access, four Long reads (the load, the vector,
+   two RTE pops) and three Long writes (the store and two frame beats).
+
+   What it checks beyond the program's result is the splitting, because
+   that is all this layer does: the Long store must appear as two word
+   sub-cycles, $1234 to $0800 then $5678 to $0802, both with `longword`
+   asserted and both lanes enabled; a fetch must take one sub-cycle; no
+   sub-cycle may select neither lane; function codes must be right. A
+   bridge that emitted the halves in the wrong order leaves memory wrong
+   and the program catches it. One that emitted them as four byte cycles
+   leaves memory RIGHT, and only the sub-cycle counts catch it.
+
+   The adapter itself is shared code with its own bench
+   (`tests/ap040/tb_ap040_bus16_gap.v`, the sampled idle cycle between
+   sub-cycles); nothing here re-tests it, and `pipe_mutate.sh` cannot reach
+   it -- it only edits `rtl/ap040_pipe/`, which is the right boundary.
+
+   | mutation | result |
+   |---|---|
+   | writes issued as Word | FAIL -- one store sub-cycle instead of two, carrying $5678 to $0800: `[$0800] = $5678BEEF`, and D1 reads it back |
+   | fetches not marked as instruction | FAIL -- 0 fetch sub-cycles, 64 with the wrong function code: they went out as data reads |
+   | write no longer beats a waiting read | FAIL -- D1 = $DEADBEF0 again, and the store never reaches the bus before the program derails |
+   | full suite, normal build | 88/88 |
+   | full suite, slow build | 88/88 |
+
+   **No new fit.** This milestone adds a module the synthesised top does
+   not reach -- `tests/ap040/pipe_synth/` fits `ap040_pipe_core`, and
+   nothing in `ap040_pipe_cpu.v` or below changed -- so milestone 81's
+   numbers stand unchanged: 5,250 ALMs, 40.47 MHz, +0.288 ns at 25 ns.
+   Fitting `ap040_pipe_bus16` instead would need `ap040_bus16_adapter.v`
+   added to the project as well, which is why it is not in the file list:
+   the adapter is `rtl/ap040`'s, and this project deliberately builds only
+   `rtl/ap040_pipe`.
+
    ### Milestone 81: the core on a bus
 
    Second step of the bus axis, and the one that makes the CPU a component
